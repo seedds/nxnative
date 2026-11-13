@@ -13,6 +13,10 @@ static int hid_usleep(useconds_t usec);
 #include "../pad_slots.h"
 void dm_oe_execute(int index, const void *param, size_t n) { (void)index; (void)param; (void)n; }   // DM_CTL "program", "webshot": not exercised here
 void front_web_shot(const char *path) { (void)path; }
+static int (*native_vib_handles)(uint32_t *, int, const uint32_t *, uint32_t);
+void *guest_sym(const char *name) {
+    return !strcmp(name, "_ZN2nn3hid25GetVibrationDeviceHandlesEPNS0_21VibrationDeviceHandleEiRKjNS_4util10BitFlagSetILi32ENS0_12NpadStyleTagEEE") ? (void *)native_vib_handles : NULL;
+}
 // The controller applet's prompt (front.h): -1 is no window; a test sets the answer and the players that join while it is up
 static int g_prompt_answer = -1, g_prompt_calls, g_prompt_min, g_prompt_max; static uint32_t g_prompt_join;
 int front_ctrl_support(int min, int max) { g_prompt_calls++; g_prompt_min = min; g_prompt_max = max; if (g_prompt_join) dm_pad_players(g_prompt_join); return g_prompt_answer; }
@@ -296,11 +300,49 @@ static void t_jcms(void) {
 static dm_haptic_state vibration[DM_PLAYERS];
 static int vibration_calls;
 static void vibration_sink(dm_haptic_state s) { vibration[s.player] = s; vibration_calls++; }
+// Allocation must not depend on a physical output, a player joined or the current mode.
+// These are the five SDK forms, including JoyRight's device byte 1.
+static int sdk_handles_calls;
+static int sdk_handles_fixture(uint32_t *h, int n, const uint32_t *id, uint32_t style) {
+    CHECK(n == 2 && *id == 7 && style == (1u << 5), "the SDK receives the original arguments, including its additional styles");
+    sdk_handles_calls++; h[0] = 0x708; return 1;
+}
+static void test_vibration_allocation(void) {
+    uint32_t ids_[] = {0, 1, 2, 3, 4, 5, 6, 7, 0x10, NPAD_HANDHELD};
+    uint32_t styles[] = {STYLE_FULLKEY, STYLE_HANDHELD, STYLE_JOYDUAL, STYLE_JOYLEFT, STYLE_JOYRIGHT};
+    uint32_t first[] = {3, 4, 5, 6, 0x10007};
+    dm_haptics_init(NULL, 0); ids((uint32_t[]){0}, 1); dm_pad_players(0);
+    for (unsigned id = 0; id < sizeof ids_ / sizeof *ids_; id++) for (unsigned k = 0; k < 5; k++) for (int cap = 1; cap <= 3; cap++) {
+        uint32_t h[3] = {0xdeadbeef, 0xdeadbeef, 0xdeadbeef};
+        int count = h_hid_VibHandles(h, cap, &ids_[id], styles[k]);
+        int expected = cap == 1 || k >= 3 ? 1 : 2;
+        CHECK(count == expected && h[0] == (ids_[id] << 8 | first[k]), "all valid npads have SDK handles before controllers/sinks exist");
+        CHECK(h[expected] == 0xdeadbeef, "handle construction respects caller capacity and the form's motor count");
+        if (count == 2) CHECK(h[1] == (h[0] | 0x10000), "paired handles name both actuators");
+    }
+    uint32_t h[2] = {0xdeadbeef, 0xdeadbeef}, id = 0;
+    CHECK(!h_hid_VibHandles(h, 2, &(uint32_t){8}, STYLE_FULLKEY) && !h_hid_VibHandles(h, 2, &(uint32_t){0x120}, STYLE_FULLKEY), "invalid IDs do not alias valid npads");
+    CHECK(!h_hid_VibHandles(NULL, 2, &id, STYLE_FULLKEY) && !h_hid_VibHandles(h, 2, NULL, STYLE_FULLKEY) && !h_hid_VibHandles(h, 0, &id, STYLE_FULLKEY) && !h_hid_VibHandles(h, -1, &id, STYLE_FULLKEY), "invalid pointers/capacity rejected");
+    CHECK(!h_hid_VibHandles(h, 2, &id, 0) && !h_hid_VibHandles(h, 2, &id, STYLE_FULLKEY | STYLE_HANDHELD) && !h_hid_VibHandles(h, 2, &id, 1u << 31) && h[0] == 0xdeadbeef, "invalid or unsupported fallback styles leave output untouched");
+    native_vib_handles = sdk_handles_fixture;
+    id = 7; CHECK(h_hid_VibHandles(h, 2, &id, 1u << 5) == 1 && h[0] == 0x708 && sdk_handles_calls == 1, "a present SDK constructs its own handles without host connection filters");
+    native_vib_handles = NULL;
+    g_mode = 1; ids((uint32_t[]){0, 1, 2, NPAD_HANDHELD}, 4); dm_pad_players(1); id = 2;
+    dm_haptics_init(vibration_sink, 1); h_hid_VibHandles(h, 2, &id, STYLE_JOYDUAL);
+    uint32_t cached[2] = {h[0], h[1]}; dm_vibration v = {0.4f, 160, 0.7f, 320};
+    vibration_calls = 0; h_hid_SendVib(cached, &v); CHECK(!vibration_calls, "an unconnected cached handle drives no output");
+    dm_pad_players(5); dm_haptics_route(2, 1); h_hid_SendVib(cached, &v);
+    CHECK(dm_haptics_actual(2, 0).amplitude_low == v.amplitude_low, "a controller joining later uses the already constructed vibration graph");
+    dm_pad_players(1); dm_haptics_route(2, 0); vibration_calls = 0; h_hid_SendVib(cached, &v);
+    CHECK(!vibration_calls, "a disconnected cached handle again drives no output");
+    dm_haptics_init(NULL, 0);
+}
+
 static void t_vibration(void) {
     uint32_t h[2] = {0}, id = 0, info[2];
     dm_vibration v = {0.25, 160, 0.5, 320}, got;
     g_mode = 1; ids((uint32_t[]){0, 1, NPAD_HANDHELD}, 3); dm_pad_players(3);
-    CHECK(!h_hid_VibPermit() && !h_hid_VibHandles(h, 2, &id, STYLE_FULLKEY), "no sink: no vibration devices");
+    CHECK(!h_hid_VibPermit() && h_hid_VibHandles(h, 2, &id, STYLE_FULLKEY) == 2, "no sink: handles still exist, permission and sending are separate");
     dm_haptics_init(vibration_sink, 1);
     CHECK(!h_hid_VibPermit() && h_hid_VibHandles(h, 2, &id, STYLE_FULLKEY) == 2,
           "startup handles do not wait for a routed haptics output");
@@ -316,9 +358,11 @@ static void t_vibration(void) {
     { int m; CHECK(!vib_targets(h[0], &m), "but a handheld handle does not reach a docked full controller"); }
     CHECK(h_hid_VibHandles(h, 2, &id, STYLE_JOYDUAL) == 2 && h[0] == 0x0005 && h[1] == 0x10005, "JoyDual handles on a full controller's npad (Metroid Prime 4 asks only for these)");
     { int m; CHECK(vib_targets(h[0], &m) == 1 && m == 0 && vib_targets(h[1], &m) == 1 && m == 1, "they reach the full controller's left and right motors"); }
-    CHECK(h_hid_VibHandles(h, 2, &id, STYLE_JOYRIGHT) == 1 && h[0] == 0x0007, "JoyRight on a full controller's npad: one handle");
-    { int m; CHECK(vib_targets(h[0], &m) == 1 && m == 1 && !vib_targets(0x10007, &m), "it reaches the right motor; a second motor of a single Joy-Con handle is invalid"); }
-    CHECK(!h_hid_VibHandles(h, 2, &(uint32_t){2}, STYLE_FULLKEY), "disconnected player gets no motors");
+    CHECK(h_hid_VibHandles(h, 2, &id, STYLE_JOYRIGHT) == 1 && h[0] == 0x10007, "JoyRight on a full controller's npad: device 1");
+    { int m; CHECK(vib_targets(h[0], &m) == 1 && m == 1 && !vib_targets(0x0007, &m), "it reaches the right motor; device 0 is invalid for JoyRight"); }
+    CHECK(h_hid_VibHandles(h, 2, &(uint32_t){2}, STYLE_FULLKEY) == 2 && h[0] == 0x203 && h[1] == 0x10203, "disconnected npad has stable cached handles");
+    { int m; CHECK(!vib_targets(h[0], &m) && !vib_targets(h[1], &m), "disconnected handles reach no output"); }
+    h_hid_VibHandles(h, 2, &id, STYLE_FULLKEY);
     CHECK(h_hid_VibHandles(h, 1, &id, STYLE_FULLKEY) == 1, "handle count respects caller capacity");
     h_hid_SendVib(&h[0], &v); h_hid_VibActual(&got, &h[0]);
     CHECK(!memcmp(&got, &v, sizeof v) && vibration[1].motor[0].amplitude_low == 0, "game value is retained for the addressed player only");
@@ -344,6 +388,9 @@ static void t_vibration(void) {
     CHECK(h_hid_VibHandles(h, 2, &id, STYLE_FULLKEY) == 2, "merged controller supplies rumble when player 1 has no physical output");
     g_mode = 0; id = NPAD_HANDHELD;
     CHECK(h_hid_VibHandles(h, 2, &id, STYLE_HANDHELD) == 2 && h[0] == 0x2004 && h[1] == 0x12004, "handheld SDK vibration handles");
+    h_hid_VibHandles(h, 2, &id, STYLE_JOYDUAL);
+    { int m; CHECK(h[0] == 0x2005 && h[1] == 0x12005 && vib_targets(h[0], &m) && m == 0 && vib_targets(h[1], &m) && m == 1, "JoyDual handles also reach a handheld controller's left/right actuators"); }
+    h_hid_VibHandles(h, 2, &id, STYLE_HANDHELD);
     { int m; CHECK(!vib_targets(3, &m), "old docked handle is not valid in handheld mode"); }
     CHECK(!h_hid_VibMounted(&(uint32_t){3}) && h_hid_VibMounted(&h[0]), "mounted follows the connected controller's style");
     dm_haptics_route(1, 0);
@@ -385,6 +432,8 @@ static void t_rumble_log(void) {
         rewind(capture); char log[1024]; size_t n = fread(log, 1, sizeof log - 1, capture); log[n] = 0;
         CHECK(strstr(log, "2 values sent, 1 with no output, peak amplitude 0.80") != NULL,
               "a mixed batch counts unroutable values individually");
+        CHECK(strstr(log, "nonzero 2, unrouted nonzero 1, nonfinite 0, positive handle 0") != NULL,
+              "nonzero requests distinguish an unconnected target from silent values");
         CHECK(strstr(log, "1999 values sent, 999 with no output, peak amplitude 0.80") != NULL,
               "diagnostic totals reset once per second and retain the interval peak");
     }
@@ -669,6 +718,7 @@ int main(void) {
     t_slots();
     t_npads();
     t_script();
+    test_vibration_allocation();
     t_vibration();
     t_opmode();
     t_joycons();

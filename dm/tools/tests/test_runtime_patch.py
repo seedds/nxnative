@@ -1,6 +1,7 @@
 """Build identity, rewrite-site conflicts, cache lifecycle and the original scene allocation ABI."""
 import importlib.util
 from pathlib import Path
+import re
 import struct
 import sys
 import tempfile
@@ -114,6 +115,85 @@ class SceneStub(unittest.TestCase):
             rows = settings.build('010019A01E2F2000', tmp, 'unused')['settings']
         self.assertNotIn('DM_INTERNAL_RESOLUTION', [r['env'] for r in rows])
         self.assertFalse(any(v[0] == '120' for r in rows if r['env'] == 'DM_FPS_TARGET' for v in r['options']))
+
+
+class ScanSourcePatch(unittest.TestCase):
+    def setUp(self):
+        self.profile = load('mp4_scan_stubs_test', ROOT / 'dm/games/010019A01E2F2000/patches.py')
+        self.runtime = load('mp4_scan_manifest_test', ROOT / 'dm/games/010019A01E2F2000/runtime_patches.py')
+
+    def fixture(self):
+        # Synthetic legal layout; no game bytes besides explicitly checked ISA
+        # instructions. Stub positions come from the production emitter.
+        text, base = 0x138ee20, 0x2000000
+        original = bytearray(0x13c2000)  # include the verified RO format table
+        original[self.profile.scene_site:self.profile.scene_site + 4] = bytes.fromhex('358108aa')
+        for off, hexbytes in self.profile.SCAN_SOURCE_ABI:
+            original[off:off + len(bytes.fromhex(hexbytes))] = bytes.fromhex(hexbytes)
+        patched = bytearray(base + 4096)
+        patched[:len(original)] = original
+        words, checked, exports = [], [], {}
+        context = types.SimpleNamespace(here=lambda: base + 4 * len(words), emit=words.append,
+            site=lambda off, before: checked.append((off, before)), runtime_exports=exports)
+        self.profile.scan_source_stub(context)
+        for n, word in enumerate(words):
+            struct.pack_into('<I', patched, base + n * 4, word)
+        fixups = {'BUILD_ID': self.runtime.BUILD[:32], 'TEXT_END': hex(text), 'PATCH_OFF': hex(base),
+                  **{'RUNTIME_' + name: hex(off) for name, off in exports.items()}}
+        return types.SimpleNamespace(image=original, text_end=text, build_id=bytes.fromhex(self.runtime.BUILD)), patched, fixups
+
+    def test_only_1800p_and_2160p_select_the_scan_adapter(self):
+        module, patched, fixups = self.fixture()
+        rows = self.runtime.generate(module, patched, fixups).splitlines()
+        writes = [row.split('\t') for row in rows if row.startswith('write\t')]
+        self.assertEqual([row[1] for row in writes], ['1440p', '2160p', '1800p', 'diag1792', '1800p', '2160p'])
+        self.assertEqual([row[2] for row in writes if row[1] == '1800p'], ['33170c', '336a8c'])
+        self.assertEqual([row[2] for row in writes if row[1] == '2160p'], ['33170c', '336a8c'])
+        self.assertFalse(any(row[1] == 'default' for row in writes))
+        self.assertTrue(all(row[2] == '33170c' for row in writes if row[1] not in ('1800p', '2160p')))
+
+    def test_missing_corrupt_or_outside_stub_is_rejected(self):
+        module, patched, fixups = self.fixture()
+        for address in ('-1', '0x100', hex(len(patched) - 4)):
+            with self.assertRaisesRegex(ValueError, 'scan-source stub'):
+                self.runtime.generate(module, patched, fixups | {'RUNTIME_SCAN_SOURCE_V1': address})
+        stub = int(fixups['RUNTIME_SCAN_SOURCE_V1'], 0)
+        patched[stub + 20] ^= 1
+        with self.assertRaisesRegex(ValueError, 'scan-source stub'):
+            self.runtime.generate(module, patched, fixups)
+
+    def test_original_abi_and_rewritten_abi_must_both_match(self):
+        module, patched, fixups = self.fixture()
+        for off, _ in self.profile.SCAN_SOURCE_ABI:
+            module.image[off] ^= 1
+            with self.assertRaisesRegex(ValueError, 'ABI mismatch'):
+                self.runtime.generate(module, patched, fixups)
+            module.image[off] ^= 1
+            patched[off] ^= 1
+            with self.assertRaisesRegex(ValueError, 'ABI mismatch'):
+                self.runtime.generate(module, patched, fixups)
+            patched[off] ^= 1
+
+    def test_bridge_spills_and_returns_with_only_x28_and_displaced_w8_changed(self):
+        from capstone import Cs, CS_ARCH_ARM64, CS_MODE_ARM  # pyright: ignore[reportMissingImports]  # binary-analysis test dependency in the tool venv
+        base = 0x2000000
+        code = b''.join(struct.pack('<I', w) for w in self.profile.scan_source_words(base))
+        ins = list(Cs(CS_ARCH_ARM64, CS_MODE_ARM).disasm(code, base))
+        # Independent disassembly verifies register coverage, stack alignment,
+        # branch targets and the private lookup's literal; no game call executes.
+        integer_stores = [i.op_str for i in ins if i.mnemonic == 'stp']
+        integer_loads = [i.op_str for i in ins if i.mnemonic == 'ldp']
+        self.assertEqual(len(integer_stores), 9)
+        self.assertEqual(integer_stores, integer_loads)
+        self.assertEqual([i.op_str for i in ins if i.mnemonic == 'str' and i.op_str.startswith('q')],
+                         [i.op_str for i in ins if i.mnemonic == 'ldr' and i.op_str.startswith('q')])
+        self.assertEqual(sum(i.mnemonic == 'str' and i.op_str.startswith('q') for i in ins), 32)
+        self.assertEqual(ins[0].op_str, 'sp, sp, #0x2a0')
+        self.assertTrue(any(i.mnemonic == 'add' and i.op_str == 'sp, sp, #0x2a0' for i in ins))
+        self.assertTrue(any(i.mnemonic == 'bl' and i.op_str == '#0x138df60' for i in ins))
+        self.assertTrue(any(i.mnemonic == 'b' and i.op_str == '#0x336a90' for i in ins))
+        self.assertFalse(any(i.mnemonic in ('svc', 'msr', 'mrs') or re.search(r'\bx18\b', i.op_str) for i in ins[:100]))
+        self.assertIn(self.profile.SCAN_EXTENSION, code)
 
 
 if __name__ == '__main__':

@@ -195,9 +195,19 @@ def msl_inputs(msl):
     return files if any(p.suffix == '.metallib' for p in files) else []
 
 
+def app_ready_image(msl):
+    """An image containing exactly app payloads needs no filtering/rewrite during repack."""
+    if not is_chain_library(msl) or not str(shader_lib.view(msl)).endswith('.img'): return False
+    files = shader_lib.app_files(msl)
+    return any(n.endswith('.metallib') for n in files) and len(files) == sum(1 for _ in shader_lib.view(msl).iterdir())
+
+
 def copy_msl(msl, msls, dst, clone):
-    """The shader libraries to dst, msl/<their name> in the app: an NVN game's as the one file dst.img, of what the host reads. Writing it costs the space of a copy, not a clone, as it leaves out the Mac build's sources"""
-    if is_chain_library(msl): shader_lib.subset(msl, f'{dst}.img'); return
+    """The shader libraries to dst, msl/<their name> in the app: an NVN game's as the one file dst.img, of what the host reads. An already filtered image can be cloned; other inputs are filtered, excluding the Mac build's sources"""
+    if is_chain_library(msl):
+        if app_ready_image(msl): copy(msls, Path(f'{dst}.img'), clone)
+        else: shader_lib.subset(msl, f'{dst}.img')
+        return
     dst.mkdir(parents=True); copy(msls, dst, clone)
 
 
@@ -309,7 +319,7 @@ def pack(a):
     # each source is probed on its own, as they may lie on different volumes; cp -c copies what it cannot clone, so a probe decides only the free-space check and the step line
     trees, lists = {'romfs': romfs, 'aoc': aoc}, {'mods': mods, 'msl': msls, 'pso': pso}
     clone = {k: bool(d) and can_clone(d, res) for k, d in trees.items()} | {k: bool(ps) and can_clone(ps[0], res) for k, ps in lists.items()}
-    if is_chain_library(msl): clone['msl'] = False   # copy_msl writes it, which the free-space check below counts
+    if is_chain_library(msl) and not app_ready_image(msl): clone['msl'] = False   # copy_msl writes it, which the free-space check below counts
     need = sum(tree_bytes(d) for k, d in trees.items() if d and not clone[k]) + sum(p.stat().st_size for k, ps in lists.items() if not clone[k] for p in ps)
     if need:
         free = shutil.disk_usage(res).free

@@ -36,17 +36,27 @@ if [ "${SCAN_ACQUIRE_PROBE:-}" = 1 ]; then
     [ "${SCAN_STATE_PROBE:-}" != 1 ] || { echo "choose only one scan diagnostic" >&2; exit 2; }
     DIAG_MODE=--acquisition
 fi
-if [ "${SCAN_STATE_PROBE:-}" = 1 ] || [ "${SCAN_ACQUIRE_PROBE:-}" = 1 ]; then
+if [ "${SCAN_QUERY_PROBE:-}" = 1 ]; then
+    [ "${SCAN_STATE_PROBE:-}" != 1 ] && [ "${SCAN_ACQUIRE_PROBE:-}" != 1 ] || { echo "choose only one scan diagnostic" >&2; exit 2; }
+    DIAG_MODE=--query
+fi
+if [ "${SCAN_STATE_PROBE:-}" = 1 ] || [ "${SCAN_ACQUIRE_PROBE:-}" = 1 ] || [ "${SCAN_QUERY_PROBE:-}" = 1 ]; then
     [ -z "${PROBE:-}${VIS_SCALE:-}" ] || { echo "scan diagnostics must run without other probes or VIS_SCALE" >&2; exit 2; }
     ORIGINAL="$WORK/extract/v131072/ExeFS/main"
     "$PY" "$REPO/dm/games/010019A01E2F2000/scan_diag.py" "$DIAG_MODE" env "$ORIGINAL" >> "$OUT/env.txt"
+fi
+# Bounded GPU data for the existing Scan Visor fragment shader, selected by KEYDUMP.
+# Independent from CPU probes; no gameplay replay and no resolution edit.
+if [ "${SCAN_GPU_PROBE:-}" = 1 ]; then
+    mkdir -p "$OUT/gpu"
+    printf 'DM_NVN_KEYDUMP=388419dddeb1baac:96:120\nDM_NVN_KEYREADBACK=1\nDM_NVN_CBDUMP=%s\nDM_NVN_CBDUMP_KEY=388419dddeb1baac_b\n' "$OUT/gpu" >> "$OUT/env.txt"
 fi
 echo "== build (partial shaders; the first time a few thousand shaders compile) -> $OUT/build.log"
 "$PY" "$REPO/scripts/build_ipa_from_nsp.py" "$NSP" -k "$IMG/prod.keys" --package v131072 --platform mac \
     --seen-shaders --work-dir "$WORK" --env-file "$OUT/env.txt" --progress lines 2>&1 | tee "$OUT/build.log"
 CMD=$(grep -E "^cd .*dmhost.* \| tee " "$OUT/build.log" | tail -1)
 [ -n "$CMD" ] || { echo "[RED] the build printed no run command: see $OUT/build.log" >&2; exit 1; }
-if [ "${SCAN_STATE_PROBE:-}" = 1 ] || [ "${SCAN_ACQUIRE_PROBE:-}" = 1 ]; then
+if [ "${SCAN_STATE_PROBE:-}" = 1 ] || [ "${SCAN_ACQUIRE_PROBE:-}" = 1 ] || [ "${SCAN_QUERY_PROBE:-}" = 1 ]; then
     "$PY" "$REPO/dm/games/010019A01E2F2000/scan_diag.py" "$DIAG_MODE" check "$ORIGINAL" "$WORK/patched_v131072/main.patched.bin"
 fi
 echo "== ONE game launch: $MODE. Play this mode, then quit the game window."
@@ -105,11 +115,14 @@ holds = [(a, b) for a, b, _ in spans if b - a >= 30]
 for name, fs in sorted(hits.items()):
     inside = sum(any(a <= f < b for a, b in holds) for f in fs)
     print(f'probe {name}: printed hits {len(fs)}, frames {fs[0]}..{fs[-1]}, {inside} of them inside a ZL hold')
+gpu = re.findall(r'\[kr\] F(\d+) pass=(\d+) key=(\S+) (sbuf\d+|tex\d+)', log)
+print(f'GPU snapshots (separate planes and storage words): {len(gpu)} records; depth/stencil transfer records: {log.count("[kr-transfer]")}')
+for line in re.findall(r'^.*(?:MP4 scan-source|packed D24S8 query readback).*$', log, re.M)[:8]: print(line)
 red = collections.Counter(re.sub(r'[0-9a-f]{8,}|\d+', 'N', l)[:160] for l in re.findall(r'^.*\[RED\].*$', log, re.M) if 'failed to load shader' not in l)
 print('other red lines:'); [print(f'  {n} x {l}') for l, n in red.most_common(8)]
 for l in re.findall(r'^.*(?:SIGSEGV|SIGBUS|fault at|crash handler).*$', log, re.M)[:3]: print('CRASH:', l[:200])
 PYEOF
-if [ "${SCAN_STATE_PROBE:-}" = 1 ] || [ "${SCAN_ACQUIRE_PROBE:-}" = 1 ]; then
+if [ "${SCAN_STATE_PROBE:-}" = 1 ] || [ "${SCAN_ACQUIRE_PROBE:-}" = 1 ] || [ "${SCAN_QUERY_PROBE:-}" = 1 ]; then
     "$PY" "$REPO/dm/games/010019A01E2F2000/scan_diag.py" "$DIAG_MODE" summary "$OUT/host.log" | tee -a "$OUT/summary.txt"
 fi
 echo "== summary: $OUT/summary.txt"

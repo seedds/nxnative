@@ -107,7 +107,19 @@ static void nvn_init_slots(void) {
     g_nsem = hit;
 }
 
+// Optional private entry points of a build-validated profile runtime patch.
+// Normal NVN names still use the driver table and are never overridden here.
+#if TARGET_OS_OSX && __has_include("nvn_runtime.inc")
+#define NVN_PROFILE_RUNTIME 1
+static void *nvn_profile_runtime_lookup(const char *);
+#endif
+
 static void *nvn_lookup(const char *name) {
+    if (!name) return NULL;
+#ifdef NVN_PROFILE_RUNTIME
+    // Reserve a private namespace: profile code cannot replace NVN semantics.
+    if (!strncmp(name, "nxnative", 8)) { void *p = nvn_profile_runtime_lookup(name); if (p) return p; }
+#endif
     nvn_init_slots();
     for (unsigned i = 0; i < NVN_NFUNC; i++)
         if (!strcmp(nvn_names[i], name)) return nvn_counting() ? nvn_thunk[i] : nvn_thunk_fast[i];
@@ -1565,6 +1577,10 @@ NVN(nvnCommandBufferCopyTextureToTexture, void, NVNcommandBuffer *c, const NVNte
     copy_view(&o->sv, &o->has_sv, sv); copy_view(&o->dv, &o->has_dv, dv); o->sr = *sr; o->dr = *dr; o->flags = flags;
     if (o->dst) mtl_tex_gpu_written(o->dst);
 }
+#ifdef NVN_PROFILE_RUNTIME
+#include "nvn_runtime.inc"
+#endif
+
 // A textured rectangle into the bound colour targets, replayed as draw_tex (nvn_mtl.m). The handle's IDs are moved to the pools this command buffer bound, as bind_handles does:
 // Streets of Rage 4 draws its movie frames into its scene target this way, from a second texture pool. Only the handle's lower 32 bits reach the GPU (bind_handles)
 NVN(nvnCommandBufferDrawTexture, void, NVNcommandBuffer *c, NVNtextureHandle h, const NVNdrawTextureRegion *d, const NVNdrawTextureRegion *s) {

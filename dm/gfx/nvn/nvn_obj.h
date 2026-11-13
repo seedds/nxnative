@@ -36,9 +36,9 @@ typedef struct {
 // the former 0x88 wrote past the object's end and corrupted the adjacent heap block's free list. has_layout sits in the alignment gap after d, layout and serial fill up to 0x80.
 typedef struct {
     // set_swz / stencil / swz (as in tex_builder_t) take the alignment gap after d; the size is still 0x80
-    uint32_t magic; nvn_texdesc d; uint8_t has_layout, set_swz : 1, stencil : 1; uint16_t swz; nvn_texlayout L; uint8_t *mem; pool_t *pool; int64_t off; uint8_t layout[8];
+    uint32_t magic; nvn_texdesc d; uint8_t has_layout, set_swz : 1, stencil : 1, readback_proxy : 1; uint16_t swz; nvn_texlayout L; uint8_t *mem; pool_t *pool; int64_t off; uint8_t layout[8];
     uint64_t serial;                     // Initialization serial: the replay layer uses it to find the MTLTexture in the host table (the game may copy the object by value, so object pointers cannot be stored)
-} tex_t;                                                                                     FITS(tex_t, NVNtexture);
+} tex_t; // readback_proxy: host-owned independent GPU source; D24S8 reads request explicit packing; ordinary game textures keep the current path                                                                                     FITS(tex_t, NVNtexture);
 _Static_assert(sizeof(tex_t) <= 0x80, "tex_t exceeds the newer SDKs' NVNtexture (0x80)");
 // The newer SDK's (NVN 55, SMBW) NVNtextureView is only 16 bytes: the game keeps it in a 16-byte stack slot (main +0x5796c), and the former 28-byte record wrote out of bounds over the saved fp / lr,
 //   so the function returned to 0x100000000 and crashed. Packed into 16 bytes: levels / layers / format / target + swizzle and depth-stencil mode (the last two only recorded for now)

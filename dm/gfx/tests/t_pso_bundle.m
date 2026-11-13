@@ -192,6 +192,14 @@ int main(void) { @autoreleasepool {
         EXPECT("archive guard: real serialized archive accepted", 1, arch_file_ok(own));
         EXPECT("probe: another archive opened", 1, g_arch_bundle != nil);
         EXPECT("probe: its bases are not this run's", 0, pso_bundle_covers(pre_parse(txt), pre_stamp(txt, 0), 0, rest));
+        EXPECT("probe: zero hits quarantines bundle", 1, atomic_load(&g_bundle_rejected));
+        EXPECT("probe: compute lookups cannot use rejected bundle", 1, arch_bundle_usable() == nil);
+        NSArray *files = g_arch4p; g_arch4p = @[g_arch_bundle];
+        uint64_t asks = atomic_load(&g_arch_asks);
+        EXPECT("probe: rejected bundle yields no pipeline", 1, arch_lookup(pre_desc(@"v1", @"f1", 0), 0, NULL) == nil);
+        EXPECT("probe: no Metal lookup after quarantine", asks, atomic_load(&g_arch_asks));
+        EXPECT("probe: quarantine persists across repeated coverage checks", 0, pso_bundle_covers(pre_parse(txt), pre_stamp(txt, 0), 0, rest));
+        g_arch4p = files; atomic_store(&g_bundle_rejected, 0);
         g_arch_bundle = real;
         EXPECT("probe: the bundled archive holds them", 1, pso_bundle_covers(pre_parse(txt), pre_stamp(txt, 0), 0, rest));
         EXPECT("probe: not for the other depth mode", 0, pso_bundle_covers(pre_parse(txt), pre_stamp(txt, 1), 1, rest));
@@ -201,6 +209,7 @@ int main(void) { @autoreleasepool {
         [sparse appendString:@"v1\tf1\n"];
         put([bundle stringByAppendingPathComponent:@"prebuilt.tsv"], pre_stamp(sparse, 0));
         EXPECT("probe: no eligible sample cannot establish coverage", 0, pso_bundle_covers(pre_parse(sparse), pre_stamp(sparse, 0), 0, nil));
+        EXPECT("probe: no eligible sample does not reject a valid bundle", 0, atomic_load(&g_bundle_rejected));
         put([bundle stringByAppendingPathComponent:@"prebuilt.tsv"], pre_stamp(txt, 0));
     }
     // a folder without this GPU's archive, and a file that is no archive (Metal crashed on one, and on a bare Mach-O header too): no archive, no crash

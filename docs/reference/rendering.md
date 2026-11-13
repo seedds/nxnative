@@ -1406,6 +1406,16 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Fix:** `gp_begin` records the encoder it stamped, and `gp_end` ignores any other encoder, so the open pass keeps its label until its own end.
 - **Found on:** [The Legend of Zelda: Tears of the Kingdom](../../dm/games/0100F2C0115B6000/README.md) with `DM_NVN_GPUPROF=every:300` on the Mac (issue #531; one run in four, about frame 23,000). `t_gpuprof` ends an upload encoder inside a profiled pass; it runs in CPU CI. Not rerun in the game.
 
+### GPU data for a selected shader draw
+
+- **Symptom:** pass dumps show correct resource bindings but cannot distinguish empty/wrong stencil IDs or storage results from a CPU targeting failure.
+
+- **Cause:** the pass log describes resources, not their GPU contents. Reading the live shared pool in a completion callback can observe a later CPU write or GPU reset, rather than the selected draw's result.
+
+- **Diagnostic:** `DM_NVN_KEYDUMP=<fragment-key-prefix>:<count>:<frame-interval>` already bounds detailed matching draws. Add `DM_NVN_KEYREADBACK=1` to copy their small writable fragment storage slots (at most 4096 bytes per slot) and sampled 2D, single-sample stencil views (at most 4096x4096) after the selected draw. Copies use the existing copy encoder/barriers and resident deferred temporaries. Separate Metal depth and stencil plane copies avoid interpreting D32FS8 storage as packed guest D24S8. Completion reads only these retained snapshots: `[kr]` gives frame/pass/key, storage address/length/indexed words or texture serial/size/depth range/non-finite count/stencil histogram. It also logs the first 64 depth/stencil texture-to-buffer copies and combined-depth/stencil CPU ReadTexels calls as `[kr-transfer]`, outside pass-dump sampling. Existing `DM_NVN_CBDUMP` and `DM_NVN_CBDUMP_KEY` can retain matching uniforms. This is opt-in, reads no more than the bound storage length, and never copies results back to guest memory. Selected render passes end for these copies, so timing changes: do not use it for benchmarks or to rule out races solely because behavior improves. Unsupported stencil view types report a red line instead of fabricating data.
+
+- **Found on:** [Metroid Prime 4: Beyond](../../dm/games/010019A01E2F2000/README.md#scan-gpu-data-investigation-current-p0-not-a-scan-fix). Its 1800p scan failure remains open. `t_key_readback` independently checks physical planes, float-bit stencil IDs, bounded fragment atomics, neighboring live CPU bytes and snapshots before resets at three resolutions; it does not validate gameplay.
+
 ## Conditional rendering and queries
 
 ### Conditional rendering evaluated at replay
@@ -1757,3 +1767,12 @@ Digimon Story Cyber Sleuth: Complete Edition (Media.Vision's MVGL engine, SDK 6.
 - **Fix:** the present reports the shape of the frame it draws ([the layer's](#a-crop-only-picks-texels-the-picture-has-the-layers-shape)) whenever its width / height changes (`nvn_mtl.m` `present_now` → `front.h` `front_picture_shape`; every graphics API presents there). The iOS front end lays the game's view out in that shape (`DmLayout.h` takes it as a parameter: the overlay, the split, Fill and the TV alike), so a 1.43:1 picture fills a 1.43:1 screen in Fit and touches are normalized on the picture as drawn; the Mac maps the mouse on the picture's own rectangle. A 16:9 game reports 16:9 and keeps its layout, and a size change of the same shape (1280x720 handheld, 1920x1080 docked) is not reported.
 - **Check:** the [Duo harness](../../dm/ios/tests/duo/README.md) tests the taller picture in Fit, in Fill and on a wider screen, and the production root view following a reported shape and returning to 16:9. Not yet run on a device.
 - **Found on:** [Breath of the Wild](../../dm/games/01007EF00011E000/README.md#screen-shape-dm_screen_aspect-current) and [Animal Crossing: New Horizons](../../dm/games/01006F8002326000/README.md#screen-shape-dm_screen_aspect-current) with `DM_SCREEN_ASPECT=1.43`.
+
+
+## Packed D24S8 readback from a host-owned proxy
+
+- **Symptom:** a host-owned query proxy needs a four-byte D24S8 texture-to-buffer result, while Metal stores its depth and stencil as D32FS8.
+- **Cause:** a plain Metal texel copy uses a different size and layout. Reading old pool bytes instead also loses the GPU's current object IDs.
+- **Fix:** `tex_t.readback_proxy` gives a host-owned proxy independent Metal storage without entering the guest-storage alias cache, and opts D24S8 into explicit GPU packing in `copy_t2b`. `pack_ds.metal` reads separate current depth/stencil views and writes depth[31:8]/stencil[7:0] into only the requested rows. Integer float32-to-UNORM24 rounding avoids a second floating-point rounding. Existing pool validation, GPU-write tracking and copy-encoder ordering apply; the normal game's fence controls CPU consumption. Unsupported layouts report a red line and never fall through to a mismatched blit. Ordinary game textures do not set the trait: general CPU ReadTexels and packed upload support remain open.
+- **Check:** `t_scan_source` under Metal validation compares every resampled texel,12000 packed ROI words, row padding and unrelated shared CPU bytes against independent literal data. It also proves the3200x1800 source stays unchanged. `t_scan_adapter` checks the private profile entry and command ordering; no gameplay is implied.
+- **Found on:** [Metroid Prime 4: Beyond](../../dm/games/010019A01E2F2000/README.md#1800p-native-size-scan-query-candidate-2026-11-12-awaiting-manual-confirmation); the user confirms1800p scanning;2160p gameplay confirmation remains pending.

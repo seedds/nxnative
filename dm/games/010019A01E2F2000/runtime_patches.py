@@ -2,10 +2,11 @@
 """Experimental 2560x1440, 3840x2160 and 3200x1800 internal scene allocation, not a validated launcher option.
 
 Usage: runtime_patches.py <original main NSO> <rewritten main> <output manifest>
-The game's display and UI remain at their original size; no frame-rate or scan workaround.
+The display/UI and frame rate remain unchanged. 1800p and 2160p also select a native-size scan-query source.
 This experiment forces the scene allocation descriptor, after dynamic resolution has run.
 """
 from pathlib import Path
+import importlib.util
 import struct
 import sys
 
@@ -35,6 +36,23 @@ def generate(module, patched, fixups):
         if patched[stub:stub + 12] != expected_stub:
             raise ValueError(f'mismatched rewritten scene stub for {choice}')
         writes += scene_writes(stub, choice)
+    spec = importlib.util.spec_from_file_location('mp4_scan_patch', Path(__file__).with_name('patches.py'))
+    assert spec is not None and spec.loader is not None
+    profile = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(profile)
+    stub = int(fixups.get('RUNTIME_SCAN_SOURCE_V1', '-1'), 0)
+    expected = b''.join(struct.pack('<I', word) for word in profile.scan_source_words(stub)) if stub >= 0 else b''
+    if stub < max(text, patch_off) or stub + len(expected) > len(patched) or patched[stub:stub + len(expected)] != expected:
+        raise ValueError('missing/out-of-range/mismatched rewritten scan-source stub')
+    for off, original in profile.SCAN_SOURCE_ABI:
+        before = bytes.fromhex(original)
+        if module.image[off:off + len(before)] != before or patched[off:off + len(before)] != before:
+            raise ValueError(f'scan-source ABI mismatch at {off:#x}')
+    # Both high-resolution choices use a native-size scan source. The previously
+    # confirmed 1800p writes are unchanged; default/1440p/old diagnostics stay as before.
+    for choice in ('1800p', '2160p'):
+        writes.append((choice, profile.SCAN_SOURCE_SITE, bytes.fromhex(profile.SCAN_SOURCE_ORIGINAL),
+                       struct.pack('<I', B(profile.SCAN_SOURCE_SITE, stub))))
     return manifest(module, patched, fixups, BUILD, 'DM_INTERNAL_RESOLUTION', writes)
 
 
@@ -47,12 +65,10 @@ CHOICES = (('1440p', 'SCENE_1440', 2560, 1440), ('2160p', 'SCENE_2160', 3840, 21
 
 
 def scene_writes(stub, choice='1440p'):
-    """The writes of a choice (1440p, 2160p, 1800p): only the scene descriptor (0x33170c), the size the game computes from dynamic
-    resolution and its scale requests, which every consumer reads from the target it gets (stock runs draw scenes of
-    1244x700 to 1436x808 and scan at each). The next descriptor (0x3317ec / 0x3317f8, a fixed 1600x900) stays as it is:
-    its target's size is kept at +0x618 of the renderer and compared with the 1600x900 display rectangle (0x3318b8, a
-    flag at +0x620 when they differ). With it raised too, the Scan Visor could not complete a scan; with the scene alone it
-    does, at 1440p (README: Scanning does not complete in the 1440p test)."""
+    """Change the final scene descriptor after dynamic resolution. The fixed
+    1600x900 composition descriptor stays unchanged. generate() adds the separate
+    scan-source bridge for 1800p and 2160p; default/1440p keep their existing paths.
+    """
     return [(choice, 0x33170c, bytes.fromhex('358108aa'), struct.pack('<I', B(0x33170c, stub)))]
 
 
@@ -60,7 +76,7 @@ def main(argv):
     original, rewritten, out = map(Path, argv)
     result = generate(nso.load(original.read_bytes(), original.name), rewritten.read_bytes(), layout(rewritten.with_name('main.fixups.tsv')))
     out.write_text(result)
-    print('Runtime internal resolution: default (no writes), 1440p (validated in play), experimental 2160p and 1800p')
+    print('Runtime internal resolution: default (no writes), 1440p, 1800p (scanning user-confirmed), experimental 2160p (gameplay confirmation pending)')
 
 
 if __name__ == '__main__':

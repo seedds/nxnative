@@ -88,6 +88,45 @@ class Copy(unittest.TestCase):
 
 
 @unittest.skipUnless(sys.platform == 'darwin', 'uses macOS atomic bundle replacement')
+class ReadyShaderImage(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(); self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name); self.lib = self.root / 'b-test'
+        self.files = {'key_b.metallib': b'fixture', 'key_b.json': b'{}', 'inputs.tsv': b'inputs\tI\n'}
+
+    def write(self):
+        pack_app.shader_lib.write(self.files, str(self.lib) + '.img')
+
+    def test_ready_image_clones_without_filtering_and_honors_destination_name(self):
+        self.write(); dst = self.root / 'output' / 'b-renamed'
+        with mock.patch.object(pack_app, 'copy') as copy, mock.patch.object(pack_app.shader_lib, 'subset') as subset:
+            pack_app.copy_msl(self.lib, [Path(str(self.lib) + '.img')], dst, True)
+        subset.assert_not_called()
+        self.assertEqual(copy.call_args.args, ([Path(str(self.lib) + '.img')], Path(str(dst) + '.img'), True))
+
+    def test_ready_image_actual_apfs_clone_is_independent(self):
+        self.write(); image = Path(str(self.lib) + '.img'); dst = self.root / 'cloned'
+        if not pack_app.can_clone(image, self.root): self.skipTest('APFS clones unavailable')
+        pack_app.copy_msl(self.lib, [image], dst, True)
+        out = Path(str(dst) + '.img'); original = image.read_bytes()
+        self.assertEqual(out.read_bytes(), original)
+        with out.open('r+b') as f: f.write(b'changed')
+        self.assertEqual(image.read_bytes(), original)
+
+    def test_sources_or_reports_still_require_filtering(self):
+        for name in ('key_b.metal', '_b_build.json', '.hidden'):
+            self.files[name] = b'not for the app'; self.write()
+            self.assertFalse(pack_app.app_ready_image(self.lib))
+            dst = self.root / 'filtered'; pack_app.copy_msl(self.lib, [Path(str(self.lib) + '.img')], dst, False)
+            self.assertEqual({p.name for p in pack_app.shader_lib.view(dst).iterdir()}, set(self.files) - {name})
+            self.files.pop(name)
+
+    def test_ready_image_copy_preserves_every_byte(self):
+        self.write(); dst = self.root / 'copied'
+        pack_app.copy_msl(self.lib, [Path(str(self.lib) + '.img')], dst, False)
+        self.assertEqual(Path(str(self.lib) + '.img').read_bytes(), Path(str(dst) + '.img').read_bytes())
+
+
 class CloneProbe(unittest.TestCase):
     """can_clone with the real clonefile: a RomFS image is one file (os.walk of a file yields nothing), a folder is probed by its first file."""
     def test_image_and_folder(self):
@@ -860,6 +899,22 @@ class SeenShaders(unittest.TestCase):   # --seen-shaders: the keys, the partial 
         self.assertIsNone(nsp.parse_args([]).seen_shaders); self.assertFalse(nsp.SEEN_SHADERS)   # the default stays the whole map
         with mock.patch.object(nsp, 'PROG', mock.Mock()), mock.patch.object(nsp, 'check_native_python'), self.assertRaisesRegex(nsp.BuildError, 'needs --platform mac or mac-app'):
             nsp.main(nsp.parse_args(['--seen-shaders', str(self.tmp)]))
+
+    def test_strict_shader_option_and_gate(self):
+        self.assertFalse(nsp.parse_args([]).require_complete_shaders)
+        self.assertTrue(nsp.parse_args(['--require-complete-shaders']).require_complete_shaders)
+        for flags in (['--platform', 'ios'], ['--platform', 'mac-app', '--seen-shaders']):
+            with mock.patch.object(nsp, 'PROG', mock.Mock()), mock.patch.object(nsp, 'check_native_python'), self.assertRaisesRegex(nsp.BuildError, 'needs a full Mac build'):
+                nsp.main(nsp.parse_args(['--require-complete-shaders', *flags, str(self.tmp)]))
+        report = self.logs / 'shader_completeness.json'; self.logs.mkdir(exist_ok=True)
+        for complete in (False, True):
+            result = {'expected': 3, 'issues': [] if complete else ['missing shader'], 'complete': complete}
+            with mock.patch.object(nsp.shader_coverage, 'audit', return_value=result), mock.patch.object(nsp, 'say'):
+                if complete: nsp.require_shader_coverage(self.g, self.sh, self.logs)
+                else:
+                    with self.assertRaisesRegex(nsp.BuildError, 'no app packaged'):
+                        nsp.require_shader_coverage(self.g, self.sh, self.logs)
+            self.assertEqual(json.loads(report.read_text()), result)
 
     def test_keys_from_the_list_and_the_logs(self):
         a, b, c, d = self.keys('a', 'b', 'c', 'd')

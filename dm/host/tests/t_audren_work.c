@@ -150,6 +150,7 @@ int main(void) {
         if (route) {
             assert((uint8_t *)sdk_event >= (uint8_t *)g_rev && (uint8_t *)sdk_event < (uint8_t *)(g_rev + 4));
             assert(g_ar[0].handle[1] == (event_in_handle ? sdk_event : (uint8_t *)sdk_work + 0x80));
+            assert(g_ar[0].completion_event == sdk_event); // catch-up wakes use the renderer-owned object too
             memset(event, 0xee, sizeof event);   // the game may reuse its object at once (LEGO Star Wars: on its stack; Little Nightmares): nothing refers to it
         }
         int d = event_destroys;

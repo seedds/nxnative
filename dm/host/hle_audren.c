@@ -93,12 +93,15 @@ typedef struct {
     void *handle[2];                         // AudioRendererHandle (renderer object, client state); handle[0] NULL: a free slot
     uint8_t *sys;                            // its AudioRenderSystem, from its first render or update (ar_of_sys)
     _Atomic int open;
+    void *completion_event; void (*signal_event)(void *);   // the SDK-owned completion event, never the caller's short-lived copy
     void *render_tt;                         // the render thread (ThreadType from dm_guest_thread_spawn): Close joins it before the SDK tears the renderer down
+    int16_t pending[FRAME_MAX * 2];          // consumer-owned merge staging; do not grow the guest render thread's stack
     int16_t frame[FRAME_MAX * 2]; int frame_n;   // the latest frame (stereo int16)
     _Atomic uint64_t frames, nonsilent, updates, renders, catchups;
     uint64_t last_r; int updated;            // the render count at the last update, once there was one
     int16_t cq[CQ][FRAME_MAX * 2]; int cq_n[CQ]; _Atomic uint32_t cq_head, cq_tail;   // output queue of catch-up frames
     pthread_mutex_t cq_mu; pthread_cond_t cq_cv;   // the render thread signals each frame it takes off the queue (catch-up pacing)
+    _Atomic uint64_t frame_seq, cq_seq[CQ];   // generation order: merge a normal frame with catch-up frames produced before it
     int sink_logged;
     int32_t up_buf[2 * (15 + FRAME_MAX)]; uint32_t up_pos;   // up_3_2's last samples and position
     int16_t pcm[NBUF][FRAME_MAX * 2]; gbuf bufs[NBUF];   // the blocks its output plays from: AudioOut queues only the pointer and copies the samples when the sound card asks (issue #1336)
@@ -107,6 +110,113 @@ static ar_t g_ar[AR_MAX];
 static pthread_mutex_t g_ar_mu = PTHREAD_MUTEX_INITIALIZER;   // the slots' handle and sys fields
 static __thread ar_t *t_ar;                  // the renderer this render thread drives
 static int ar_index(const ar_t *a) { return (int)(a - g_ar); }
+// Optional producer-side diagnostics, never called by the real-time device callback.
+// Source and submission hashes distinguish repeated DSP output from copied/reordered blocks.
+// No sample filtering, dropping, gain or pacing change is made by this recorder.
+static FILE *g_ar_trace_file, *g_aux_trace_file;
+static __thread ar_t *g_trace_dsp_ar;
+static _Atomic uint64_t g_aux_trace_call;
+static pthread_once_t g_ar_trace_once = PTHREAD_ONCE_INIT;
+static void ar_trace_init(void) {
+    const char *path = getenv("DM_AUDREN_PCM_TRACE");
+    if (!path || !*path) return;
+    g_ar_trace_file = fopen(path, "w");
+    if (!g_ar_trace_file) { LOG("[RED] audren trace: cannot open %s", path); return; }
+    setvbuf(g_ar_trace_file, NULL, _IOLBF, 0);
+    const char *aux = getenv("DM_AUDREN_AUX_TRACE");
+    char *aux_path = aux && !strcmp(aux, "0") ? NULL : malloc(strlen(path) + 9);
+    if (aux_path) {
+        snprintf(aux_path, strlen(path) + 9, "%s.aux.tsv", path); g_aux_trace_file = fopen(aux_path, "w"); free(aux_path);
+        if (g_aux_trace_file) {
+            setvbuf(g_aux_trace_file, NULL, _IOLBF, 0);
+            fputs("# Aux API provenance; original SDK operations, no ring-state layout assumed\n"
+                  "operation\tcall\trenderer\tsequence\tinfo\tbuffer\tcapacity\trequested\ttransferred\toffset\tadvance\tstart_ns\tend_ns\thash\tnonzero\tblocks\n", g_aux_trace_file);
+        } else LOG("[RED] audren trace: cannot open auxiliary trace beside %s", path);
+    }
+
+    fputs("# audren PCM provenance v1; hashes are FNV-1a of sample bytes, before device output\n"
+          "stage\trenderer\tsequence\tsamples\thash\tnonzero\tupdates\trenders\tcatchups\tqueue_head\tqueue_tail\tcommands\tenabled\tcommand_hash\tprocessed\tremaining\tactive_mask\taccepted\ttime_ns\tcommand_address\tmix_address\tsink_before\tsink_after\n", g_ar_trace_file);
+}
+static int ar_trace_on(void) { pthread_once(&g_ar_trace_once, ar_trace_init); return g_ar_trace_file != NULL; }
+static uint64_t ar_trace_hash(const void *data, size_t size, int *nonzero) {
+    const uint8_t *p = data; uint64_t h = UINT64_C(14695981039346656037); unsigned any = 0;
+    for (size_t i = 0; i < size; i++) { any |= p[i]; h = (h ^ p[i]) * UINT64_C(1099511628211); }
+    if (nonzero) *nonzero = any != 0;
+    return h;
+}
+typedef struct { uint64_t before, after; uintptr_t mix, commands; } ar_trace_inputs;
+static void ar_trace_line(const char *stage, ar_t *a, uint64_t seq, int samples, const int16_t *pcm,
+                          int commands, int enabled, uint64_t command_hash, int processed, int remaining, uint64_t active_mask, int accepted, const ar_trace_inputs *inputs) {
+    if (!g_ar_trace_file) return;
+    int nonzero = 0;
+    uint64_t hash = ar_trace_hash(pcm, (size_t)samples * 4, &nonzero);
+    fprintf(g_ar_trace_file, "%s\t%d\t%llu\t%d\t%016llx\t%d\t%llu\t%llu\t%llu\t%u\t%u\t%d\t%d\t%016llx\t%d\t%d\t%016llx\t%d\t%llu\t%llx\t%llx\t%016llx\t%016llx\n",
+            stage, ar_index(a), (unsigned long long)seq, samples, (unsigned long long)hash, nonzero,
+            (unsigned long long)atomic_load(&a->updates), (unsigned long long)atomic_load(&a->renders),
+            (unsigned long long)atomic_load(&a->catchups), atomic_load(&a->cq_head), atomic_load(&a->cq_tail),
+            commands, enabled, (unsigned long long)command_hash, processed, remaining, (unsigned long long)active_mask, accepted, (unsigned long long)now_ns(),
+            (unsigned long long)(inputs ? inputs->commands : 0), (unsigned long long)(inputs ? inputs->mix : 0),
+            (unsigned long long)(inputs ? inputs->before : 0), (unsigned long long)(inputs ? inputs->after : 0));
+}
+static void ar_trace_capture(ar_t *a, int16_t *dst, int samples, const uint8_t *commands, size_t bytes, int processed, int remaining, uint64_t sink_before);
+// Aux is a CPU<->DSP ring, not AudioOut. These transparent symbol hooks observe
+// which side supplied/read the repeated samples. Never inspect AuxBufferInfo's ABI,
+// suppress an underflow, manufacture an acknowledgement, or change the SDK's counters.
+static void aux_trace_line(const char *op, const void *info, const void *buffer, uint32_t capacity,
+                           uint32_t requested, int64_t transferred, uint32_t offset, uint32_t advance,
+                           const int32_t *data, uint32_t count, uint64_t started) {
+    if (!g_aux_trace_file) return;
+    uint64_t ended = now_ns(), call = atomic_fetch_add(&g_aux_trace_call, 1) + 1;
+    char chunks[17 * 64 + 1] = {0}; size_t used = 0; uint64_t hash = 0; int nonzero = 0;
+    // Bound diagnostic work; an oversized/unknown transfer is recorded without dereferencing it.
+    if (data && count && count <= requested && count <= capacity && count <= 65536) {
+        hash = ar_trace_hash(data, (size_t)count * sizeof *data, &nonzero);
+        for (uint32_t at = 0; at + 240 <= count && used + 17 < sizeof chunks; at += 240)
+            used += (size_t)snprintf(chunks + used, sizeof chunks - used, "%016llx,", (unsigned long long)ar_trace_hash(data + at, 240 * sizeof *data, NULL));
+    }
+    ar_t *a = g_trace_dsp_ar;
+    fprintf(g_aux_trace_file, "%s\t%llu\t%d\t%llu\t%llx\t%llx\t%u\t%u\t%lld\t%u\t%u\t%llu\t%llu\t%016llx\t%d\t%s\n",
+            op, (unsigned long long)call, a ? ar_index(a) : -1, (unsigned long long)(a ? atomic_load(&a->renders) : 0),
+            (unsigned long long)(uintptr_t)info, (unsigned long long)(uintptr_t)buffer, capacity, requested, (long long)transferred, offset, advance,
+            (unsigned long long)started, (unsigned long long)ended, (unsigned long long)hash, nonzero, chunks);
+}
+HLE_FORCE("_ZN2nn5audio13ReadAuxBufferEPNS0_13AuxBufferInfoEPijS3_j", "SDK Aux CPU read, with optional producer provenance",
+          uint32_t, h_aux_Read, void *info, int32_t *ring, uint32_t capacity, int32_t *dst, uint32_t count) {
+    static uint32_t (*orig)(void *, int32_t *, uint32_t, int32_t *, uint32_t);
+    if (!orig) orig = gsym("_ZN2nn5audio13ReadAuxBufferEPNS0_13AuxBufferInfoEPijS3_j");
+    int trace = ar_trace_on(); uint64_t start = trace ? now_ns() : 0;
+    uint32_t got = orig(info, ring, capacity, dst, count);
+    if (trace) aux_trace_line("cpu-read", info, ring, capacity, count, got, 0, 0, dst, got, start);
+    return got;
+}
+HLE_FORCE("_ZN2nn5audio14WriteAuxBufferEPNS0_13AuxBufferInfoEPijPKij", "SDK Aux CPU write, with optional producer provenance",
+          uint32_t, h_aux_Write, void *info, int32_t *ring, uint32_t capacity, const int32_t *src, uint32_t count) {
+    static uint32_t (*orig)(void *, int32_t *, uint32_t, const int32_t *, uint32_t);
+    if (!orig) orig = gsym("_ZN2nn5audio14WriteAuxBufferEPNS0_13AuxBufferInfoEPijPKij");
+    int trace = ar_trace_on(); uint64_t start = trace ? now_ns() : 0;
+    uint32_t got = orig(info, ring, capacity, src, count);
+    if (trace) aux_trace_line("cpu-write", info, ring, capacity, count, got, 0, 0, src, got, start);
+    return got;
+}
+HLE_FORCE("_ZN2nn5audio3dsp16ReadAuxBufferDspEPNS0_13AuxBufferInfoEmjPijjj", "SDK Aux DSP read, with optional consumer provenance",
+          uint32_t, h_aux_DspRead, void *info, uintptr_t ring, uint32_t capacity, int32_t *dst, uint32_t count, uint32_t offset, uint32_t advance) {
+    static uint32_t (*orig)(void *, uintptr_t, uint32_t, int32_t *, uint32_t, uint32_t, uint32_t);
+    if (!orig) orig = gsym("_ZN2nn5audio3dsp16ReadAuxBufferDspEPNS0_13AuxBufferInfoEmjPijjj");
+    int trace = ar_trace_on(); uint64_t start = trace ? now_ns() : 0;
+    uint32_t got = orig(info, ring, capacity, dst, count, offset, advance);
+    if (trace) aux_trace_line("dsp-read", info, (void *)ring, capacity, count, got, offset, advance, dst, got, start);
+    return got;
+}
+HLE_FORCE("_ZN2nn5audio3dsp17WriteAuxBufferDspEPNS0_13AuxBufferInfoEmjPKijjj", "SDK Aux DSP write, with optional consumer provenance",
+          void, h_aux_DspWrite, void *info, uintptr_t ring, uint32_t capacity, const int32_t *src, uint32_t count, uint32_t offset, uint32_t advance) {
+    static void (*orig)(void *, uintptr_t, uint32_t, const int32_t *, uint32_t, uint32_t, uint32_t);
+    if (!orig) orig = gsym("_ZN2nn5audio3dsp17WriteAuxBufferDspEPNS0_13AuxBufferInfoEmjPKijjj");
+    int trace = ar_trace_on(); uint64_t start = trace ? now_ns() : 0;
+    orig(info, ring, capacity, src, count, offset, advance);
+    // This SDK operation returns void: count describes its input, not an acknowledged write.
+    if (trace) aux_trace_line("dsp-write", info, (void *)ring, capacity, count, -1, offset, advance, src, count, start);
+}
+
 static void cq_popped(ar_t *a) { pthread_mutex_lock(&a->cq_mu); pthread_cond_broadcast(&a->cq_cv); pthread_mutex_unlock(&a->cq_mu); }
 // The renderer an AudioRenderSystem belongs to, for the SDK's calls that name only that. A system not seen yet belongs to the one open renderer whose system is not known: the render thread
 // names its system at its first render, right after the open, and a game's first updates can come before that (two updates 0.04 ms apart at start-up, below)
@@ -122,6 +232,16 @@ static ar_t *ar_of_sys(uint8_t *sys) {
     return found;
 }
 
+// The DSP service signals completion for every frame, including one generated by a
+// catch-up update. Omitting these wakes can leave a game's CPU Aux processor asleep
+// while the renderer repeatedly consumes its old two-frame return ring. Signal only
+// after releasing host locks: a kernel-event wake may hand the virtual core to a waiter.
+static void ar_signal_queued(ar_t *a) {
+    if (!a->completion_event) return;
+    if (!a->signal_event) a->signal_event = gsym("_ZN2nn2os17SignalSystemEventEPNS0_15SystemEventTypeE");
+    a->signal_event(a->completion_event);
+}
+
 static void render_main(void *arg) {
     ar_t *a = arg; t_ar = a;
     void (*exec)(void *, void *) = gsym("_ZN2nn5audio29ExecuteAudioRendererRenderingENS0_19AudioRendererHandleE");
@@ -130,23 +250,40 @@ static void render_main(void *arg) {
     for (int i = 0; i < NBUF; i++) { a->bufs[i] = (gbuf){a->pcm[i], sizeof a->pcm[i], 0}; free_list[i] = &a->bufs[i]; }
     dm_pcmout_start(out);
     LOG("audren: render thread %d started (%d buffers in flight, paced by the output)", ar_index(a), NBUF);
+    int16_t *pending = a->pending; int pending_n = 0, have_pending = 0; uint64_t pending_seq = 0;
     while (atomic_load(&a->open)) {
-        while (!nfree) {   // wait for the output to hand a block back (silent sink / sound card, one every 5 ms); it signals each release, so the thread sleeps until then (it used to poll every 1 ms)
+        while (!nfree) {   // output follows the sound card clock; one callback may release several renderer frames
             gbuf *b = dm_pcmout_released(out);
             if (b) { free_list[nfree++] = b; break; }
             dm_pcmout_wait(out, 10);
             if (!atomic_load(&a->open)) break;
         }
         if (!nfree) break;
-        const int16_t *src; int got;
         uint32_t h = atomic_load(&a->cq_head);
-        if (h != atomic_load(&a->cq_tail)) { src = a->cq[h % CQ]; got = a->cq_n[h % CQ]; atomic_store(&a->cq_head, h + 1); cq_popped(a); }   // play queued catch-up output first
-        else { a->frame_n = 0; exec(a->handle[0], a->handle[1]); src = a->frame; got = a->frame_n; }   // SDK: generate commands → CPU processing (output taken in the host takeover) → signal the game's renderer event
-        int n = got ? got : 240;
+        if (!have_pending && h == atomic_load(&a->cq_tail)) {
+            a->frame_n = 0; exec(a->handle[0], a->handle[1]);
+            // A producer can enqueue an older catch-up frame after the empty test
+            // but before exec enters the render lock. Keep this generated frame and
+            // merge by source order, rather than playing it before that older frame.
+            pending_n = a->frame_n ? a->frame_n : 240;
+            pending_seq = atomic_load(&a->frame_seq);
+            if (a->frame_n) memcpy(pending, a->frame, (size_t)pending_n * 4); else memset(pending, 0, (size_t)pending_n * 4);
+            have_pending = 1;
+        }
+        h = atomic_load(&a->cq_head);
+        int queued = h != atomic_load(&a->cq_tail) && (!have_pending || atomic_load(&a->cq_seq[h % CQ]) < pending_seq);
+        int n = queued ? (a->cq_n[h % CQ] ? a->cq_n[h % CQ] : 240) : pending_n;
+        uint64_t seq = queued ? atomic_load(&a->cq_seq[h % CQ]) : pending_seq;
         gbuf *b = free_list[--nfree];
-        if (got) memcpy(b->ptr, src, (size_t)n * 4); else memset(b->ptr, 0, (size_t)n * 4);
+        if (queued) {
+            if (a->cq_n[h % CQ]) memcpy(b->ptr, a->cq[h % CQ], (size_t)n * 4); else memset(b->ptr, 0, (size_t)n * 4);
+        } else { memcpy(b->ptr, pending, (size_t)n * 4); have_pending = 0; }
         b->size = (uint64_t)n * 4;
-        if (!dm_pcmout_append(out, b)) free_list[nfree++] = b;
+        // The producer owns this slot again only after the independent copy is complete.
+        if (queued) { atomic_store(&a->cq_head, h + 1); cq_popped(a); ar_signal_queued(a); }
+        int accepted = dm_pcmout_append(out, b);
+        if (ar_trace_on()) ar_trace_line(queued ? "submit-catchup" : "submit-render", a, seq, n, b->ptr, -1, -1, 0, -1, -1, 0, accepted, NULL);
+        if (!accepted) free_list[nfree++] = b;
     }
     dm_pcmout_close(out);   // the output would otherwise keep its sound card callback or silent sink running and hold one of the AudioOut slots after the renderer closes
     cq_popped(a);   // an update waiting for queue space (catch-up pacing) sees open cleared
@@ -234,7 +371,7 @@ static Result ar_open(void **handle, void *ev, const uint8_t *param, void *work,
     if (a) {   // the slot's old contents are of a closed renderer, whose thread has ended; memset leaves no lock held
         memset(a, 0, sizeof *a);
         pthread_mutex_init(&a->cq_mu, NULL); pthread_cond_init(&a->cq_cv, NULL);
-        a->handle[0] = handle[0]; a->handle[1] = handle[1]; atomic_store(&a->open, 1);
+        a->handle[0] = handle[0]; a->handle[1] = handle[1]; a->completion_event = sev ? sev : ev; atomic_store(&a->open, 1);
     }
     pthread_mutex_unlock(&g_ar_mu);
     LOG("audren: renderer %d opened from %s+%#llx", a ? ar_index(a) : -1, m ? m->name : "host", m ? (unsigned long long)((uint8_t *)ra - m->base) : 0ULL);
@@ -419,6 +556,65 @@ static int capture(ar_t *a, const uint8_t *cl, size_t len, int16_t *dst) {
     }
     return 0;
 }
+// Hash only validated DeviceSink input planes, before/after CPU processing. No extra
+// guest-state ABI or fixed module addresses are assumed; these are capture's own descriptors.
+static uint64_t ar_trace_sink_hash(const uint8_t *cl, size_t bytes, uintptr_t *address) {
+    if (bytes < 0x20) return 0;
+    const int32_t *mix; uint32_t ncmd, buffers, samples;
+    memcpy(&ncmd, cl + 4, 4); memcpy(&mix, cl + 8, sizeof mix);
+    memcpy(&buffers, cl + 0x10, 4); memcpy(&samples, cl + 0x14, 4);
+    if (address) *address = (uintptr_t)mix;
+    if (!mix || !samples || samples > FRAME_MAX || !buffers || buffers > 65536) return 0;
+    const uint8_t *c = cl + 0x20;
+    for (uint32_t i = 0; i < ncmd; i++) {
+        size_t remain = (size_t)(cl + bytes - c);
+        if (remain < (g_hdr6 ? 0x11u : g_hdr21 ? 4u : 8u)) return 0;
+        int size = cmd_size(c);
+        if (size <= 0 || (size_t)size > remain) return 0;
+        if (cmd_id(c) == g_sink_id && cmd_on(c)) {
+            int body = sink_body(), count_off = body + (g_sink4 ? 0x120 : 0x130), index_off = body + (g_sink4 ? 0x124 : 0x134);
+            if (count_off < 0 || index_off < 0 || size < count_off + 4) return 0;
+            uint32_t nin; memcpy(&nin, c + count_off, 4);
+            size_t width = g_sink4 && !g_sink5 ? 1 : 2;
+            if (!nin || nin > 6 || (size_t)size < (size_t)index_off + nin * width) return 0;
+            uint64_t hash = UINT64_C(14695981039346656037);
+            for (uint32_t j = 0; j < nin; j++) {
+                int16_t index;
+                if (width == 1) { index = c[index_off + j]; if (index >= 128) index -= 256; }   // signed 8-bit SDK 4 index
+                else memcpy(&index, c + index_off + j * 2, 2);
+                if (index < 0 || (uint32_t)index >= buffers) return 0;
+                hash = (hash ^ ar_trace_hash(mix + (size_t)index * samples, (size_t)samples * 4, NULL)) * UINT64_C(1099511628211);
+            }
+            return hash;
+        }
+        c += size;
+    }
+    return 0;
+}
+
+static void ar_trace_capture(ar_t *a, int16_t *dst, int samples, const uint8_t *commands, size_t bytes, int processed, int remaining, uint64_t sink_before) {
+    if (!ar_trace_on()) return;
+    const char *stage = "source-discard"; uint64_t seq = atomic_load(&a->renders);
+    if (dst == a->frame) { stage = t_ar == a ? "source-render" : "source-caller"; atomic_store(&a->frame_seq, seq); }
+    else for (int i = 0; i < CQ; i++) if (dst == a->cq[i]) { stage = "source-catchup"; atomic_store(&a->cq_seq[i], seq); break; }
+    uint32_t count = 0; int enabled = 0; uint64_t active_mask = 0;
+    if (bytes >= 0x20) {
+        memcpy(&count, commands + 4, sizeof count);
+        const uint8_t *c = commands + 0x20;
+        for (uint32_t i = 0; i < count; i++) {
+            size_t remain = (size_t)(commands + bytes - c);
+            if (remain < (g_hdr6 ? 0x11u : g_hdr21 ? 4u : 8u)) { enabled = -1; break; }
+            int size = cmd_size(c);
+            if (size <= 0 || (size_t)size > remain) { enabled = -1; break; }
+            if (cmd_on(c)) { enabled++; unsigned id = (unsigned)cmd_id(c); if (id < 64) active_mask |= UINT64_C(1) << id; }
+            c += size;
+        }
+    }
+    ar_trace_inputs input = {.before = sink_before, .commands = (uintptr_t)commands};
+    input.after = ar_trace_sink_hash(commands, bytes, &input.mix);
+    ar_trace_line(stage, a, seq, dst ? samples : 0, dst, (int)count, enabled, ar_trace_hash(commands, bytes, NULL), processed, remaining, active_mask, -1, &input);
+}
+
 // Render one frame (generate commands + CPU processing); dst = output (stereo int16, *nout samples). The two callers (render thread, catch-up) are serialized by a host lock: they share one command buffer.
 // One lock over all renderers: the header layout is worked out once from whichever list comes first, by trying each layout in turn (capture); a frame takes hundredths of a millisecond (0.02 ms mean)
 static pthread_mutex_t g_render_mu = PTHREAD_MUTEX_INITIALIZER;
@@ -466,7 +662,7 @@ static int update_lock(size_t *off, int *os_mutex) {
     LOG("[RED] audren: no update lock read off AudioRenderSystem::Update or UpdateImpl: keeping +%#zx, where command generation may race the game's RequestUpdate", *off);
     return 0;
 }
-static Result render_once(ar_t *a, uint8_t *sys, int16_t *dst, int *nout) {
+static Result render_once(ar_t *a, uint8_t *sys, int16_t *dst, int *nout, int publish_cq) {
     static int (*mode)(void *), (*device)(void *); static uint8_t *(*cbuf)(void *); static size_t (*cbsz)(void *), (*gen)(void *, void *, size_t);
     static span_t (*gen20)(void *, void *, size_t); static size_t mu_off;
     static void (*tmax)(void *, uint32_t), (*setup)(void *, const void *, size_t), (*process)(void *), (*lock)(void *), (*unlock)(void *);
@@ -489,6 +685,13 @@ static Result render_once(ar_t *a, uint8_t *sys, int16_t *dst, int *nout) {
     int md = gen20 ? *(int32_t *)(sys + 0x4c) : mode(sys), dv = gen20 ? *(int32_t *)(sys + 0x48) : device(sys);
     if (md != 1 || dv != 1) return 0x40299;   // same as the original: manual rendering needs CPU + manual mode
     pthread_mutex_lock(&g_render_mu);
+    uint32_t tail = atomic_load(&a->cq_tail);
+    if (publish_cq) {
+        // Choose, render, stamp and publish under the same generation lock. A normal
+        // render cannot overtake a source whose ring tail has not been published yet.
+        int space = tail - atomic_load(&a->cq_head) < CQ;
+        dst = space ? a->cq[tail % CQ] : NULL; nout = space ? &a->cq_n[tail % CQ] : NULL;
+    }
     uint64_t t0 = now_ns();
     // Command generation must exclude the game thread's RequestUpdate (AudioRenderSystem::Update, which holds the mutex at mu_off): the original system thread (SendCommandToDsp) generates under the same lock. Processing (the CPU DSP) stays outside the lock, as in the original.
     uint8_t *cl; size_t n;
@@ -498,8 +701,24 @@ static Result render_once(ar_t *a, uint8_t *sys, int16_t *dst, int *nout) {
     unlock(sys + mu_off);
     atomic_fetch_add(&a->renders, 1);
     uint64_t proc[16] __attribute__((aligned(16))) = {0};   // CommandListProcessor (0x58 bytes; 0x60 in SDK 21, whose Process reads +0x58)
+    uint64_t sink_before = ar_trace_on() ? ar_trace_sink_hash(cl, n, NULL) : 0;
+    ar_t *previous_trace_ar = g_trace_dsp_ar;
+    if (ar_trace_on()) g_trace_dsp_ar = a;
     tmax(proc, 0xffffffffu); setup(proc, cl, n); process(proc);
+    g_trace_dsp_ar = previous_trace_ar;
     if (dst) *nout = capture(a, cl, n, dst);
+    uint64_t seq = atomic_load(&a->renders);
+    if (dst == a->frame) atomic_store(&a->frame_seq, seq);
+    else if (publish_cq && dst) atomic_store(&a->cq_seq[tail % CQ], seq);
+    if (ar_trace_on()) {
+        static int looked; static int (*processed)(const void *), (*remaining)(const void *);
+        if (!looked) {
+            processed = guest_sym("_ZNK2nn5audio3dsp20CommandListProcessor24GetProcessedCommandCountEv");
+            remaining = guest_sym("_ZNK2nn5audio3dsp20CommandListProcessor21GetRemainCommandCountEv"); looked = 1;
+        }
+        ar_trace_capture(a, dst, dst ? *nout : 0, cl, n, processed ? processed(proc) : -1, remaining ? remaining(proc) : -1, sink_before);
+    }
+    if (publish_cq && dst) atomic_store(&a->cq_tail, tail + 1);
     // render time per frame (budget: 5 ms per frame): mean / max every 2000 frames
     static uint64_t sum, mx, cnt; uint64_t d = now_ns() - t0; sum += d; if (d > mx) mx = d;
     if (++cnt == 2000) { LOG("audren: render time mean %.2f ms / max %.2f ms (5 ms budget per frame, last 2000 frames); catch-up renders so far %llu", sum / 2000 / 1e6, mx / 1e6, (unsigned long long)atomic_load(&a->catchups)); sum = mx = cnt = 0; }
@@ -530,7 +749,7 @@ static Result ar_exec(uint8_t *sys) {
     if (a && !a->sys) { pthread_mutex_lock(&g_ar_mu); a->sys = sys; pthread_mutex_unlock(&g_ar_mu); }
     if (!a) a = ar_of_sys(sys);
     if (!a) { LOG("[RED] audren: a render of a renderer the host did not open"); return RES_FAIL; }
-    return render_once(a, sys, a->frame, &a->frame_n);
+    return render_once(a, sys, a->frame, &a->frame_n, 0);
 }
 HLE_FORCE("_ZN2nn5audio6server24AudioRendererManagerImpl17AudioRendererImpl29ExecuteAudioRendererRenderingEv", "render one frame manually: SDK generates commands + CPU processing, the host takes the DeviceSink output",
           Result, h_ar_ImplExec, uint8_t *impl) { return ar_exec(impl + impl_sys_off()); }
@@ -548,8 +767,8 @@ HLE_FORCE("_ZN2nn5audio6server17AudioRenderSystem29ExecuteAudioRendererRendering
 // SQEX::Sd::Driver::Core::CoreAudioOut, main+0x442c5c0) refills its voices in a loop: append a wave buffer, RequestUpdate, take the next released buffer, and it waits on the renderer
 // event only when none is released. Every update there renders a catch-up frame, which releases the buffer just appended, so the loop never waits: discarding catch-up output when the
 // queue was full ran it at 11,000 updates a second on one core, the game's sound about 50 times faster than the output. Waiting keeps the queue full instead: the render thread then
-// only plays queued frames, and the driver's own updates render every frame. A queued frame does not signal the renderer event: the SDK signals it in each render, and a game woken by a
-// queued frame updated with nothing rendered since, which rendered the next catch-up frame, and so on (Big Brain Academy: Brain vs. Brain, one catch-up per update instead of 37 a run)
+// only plays queued frames, and the driver's own updates render every frame. A queued frame signals completion when taken for output, just as an SDK-rendered frame does. An event-driven
+// game may then generate most frames through catch-up: that is not excess audio, since this ring substitutes for the normal renders and its full-queue wait keeps the device rate.
 HLE_FORCE("_ZN2nn5audio6server17AudioRenderSystem6UpdateEPvmS3_mPKvm", "renderer update: if nothing was rendered since the last update, render a catch-up frame first (so effects get initialized), then hand over to the SDK",
           Result, h_ars_Update, uint8_t *sys, void *o, size_t on, void *p, size_t pn, const void *in, size_t inn) {
     static Result (*orig)(void *, void *, size_t, void *, size_t, const void *, size_t); if (!orig) orig = gsym("_ZN2nn5audio6server17AudioRenderSystem6UpdateEPvmS3_mPKvm");
@@ -566,8 +785,7 @@ HLE_FORCE("_ZN2nn5audio6server17AudioRenderSystem6UpdateEPvmS3_mPKvm", "renderer
             while (atomic_load(&a->open) && t - atomic_load(&a->cq_head) >= CQ && !pthread_cond_timedwait(&a->cq_cv, &a->cq_mu, &dl)) {}
             pthread_mutex_unlock(&a->cq_mu);
         }
-        if (t - atomic_load(&a->cq_head) < CQ) { render_once(a, sys, a->cq[t % CQ], &a->cq_n[t % CQ]); atomic_store(&a->cq_tail, t + 1); }
-        else render_once(a, sys, NULL, NULL);   // still full (the output stopped): render anyway, output discarded
+        render_once(a, sys, NULL, NULL, 1);   // space is rechecked and the selected slot published under the generation lock
     }
     static int tr = -1; if (tr < 0) tr = getenv("DM_AUDREN_TRACE") != NULL;
     if (tr && u < 200) LOG("audren update #%llu t=%.3f ms, %llu frames rendered since the last update", (unsigned long long)u, now_ns() / 1e6, (unsigned long long)(atomic_load(&a->renders) - (a->updated ? a->last_r : 0)));

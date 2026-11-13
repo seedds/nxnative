@@ -2507,7 +2507,7 @@ void mtl_drain(void) { present_drop_for_suspend(); mtl_present_flush(); snap_dra
 
 // ================= Render replay =================
 #include "../../host/front.h"
-static int g_red_once[165];   // one past the highest key: a new key raises this, and the macro refuses to compile otherwise
+static int g_red_once[167];   // one past the highest key: a new key raises this, and the macro refuses to compile otherwise
 #define RED_ONCE(k, ...) do { _Static_assert((k) < sizeof g_red_once / sizeof *g_red_once, "a RED_ONCE key past g_red_once: raise its size"); if (!g_red_once[k]++) MLOG("[RED] " __VA_ARGS__); } while (0)
 // NVN vertex streams 0–15 → Metal vertex buffer slots: 0–13 go to 16–29 (30 is the constant fallback buffer), 14 and 15 to 14 and 15. Metal has only the 31 slots 0–30; translated shaders use only buffer(0) (the argument buffer),
 // and the host's own vertex functions read no vertex buffers. 13 Sentinels uses stream 15, and the old 16 + stream went out of range (Metal assertion: buffer index (31) must be < 31)
@@ -4492,6 +4492,16 @@ static id<MTLTexture> tex_mtl_(const tex_t *ct) {
         res_add(mt);
         tex_put(t->serial, mt);
         return mt;
+    }
+    // A host-owned readback proxy has no guest storage to alias. Two such
+    // resources may have identical descriptors and off=0 but independent pixels.
+    // Its serial owns the texture; release uses the normal deferred GPU lifetime.
+    // Ordinary NVN textures retain the storage-sharing path below.
+    if (t->readback_proxy && !t->pool) {
+        MTLTextureDescriptor *desc = tex_desc(t, 0);
+        id<MTLTexture> mt = desc ? [g_dev newTextureWithDescriptor:desc] : nil;
+        if (!mt) { RED_ONCE(166, "cannot allocate independent readback proxy %ux%u format %#x", t->d.width, t->d.height, t->d.format); return nil; }
+        res_add(mt); tex_put(t->serial, mt); return mt;
     }
     alias_key ak = tex_alias_key(t);
     pthread_mutex_lock(&g_smu); __unsafe_unretained id shared = hm_get_id(&g_alias, &ak); if (shared) nvn_hm_put(&g_alias_seen, &ak, (void *)(uintptr_t)(g_fence + 1)); pthread_mutex_unlock(&g_smu);
@@ -8424,11 +8434,19 @@ static NSArray<id<MTL4Archive>> *g_arch_ixf, *g_arch_run;
 static _Atomic uint64_t g_arch_asks;
 // A pipeline from the archive: the file the index names for its key alone, else each file without a complete index (the bundle first among the p files, which plain skips: a base
 // with a vertex layout and a compute pipeline are never in one). *from_run: it came from a run file this compaction takes, so the compacting prewarm captures it again
+// Keep the archive/list objects immutable while render and prewarm workers may read them.
+// A matching full-coverage bundle whose eligible probes all miss is unusable on this device.
+// Metal can crash on later lookups in such an archive; quarantine it for this process instead
+// of repeatedly entering that driver path. Original libraries/local archives remain usable.
+static id<MTL4Archive> g_arch_bundle;
+static _Atomic int g_bundle_rejected;
+static id<MTL4Archive> arch_bundle_usable(void) { return atomic_load(&g_bundle_rejected) ? nil : g_arch_bundle; }
 static int arch_compact_takes(id<MTL4Archive> a);
 static id arch_lookup(MTL4PipelineDescriptor *d, int plain, int *from_run) {
     if (from_run) *from_run = 0;
     int compute = [d isKindOfClass:MTL4ComputePipelineDescriptor.class];
     id (^ask)(id<MTL4Archive>) = ^id(id<MTL4Archive> a) {
+        if (a == g_arch_bundle && !arch_bundle_usable()) return nil;
         atomic_fetch_add_explicit(&g_arch_asks, 1, memory_order_relaxed);
         return compute ? (id)[a newComputePipelineStateWithDescriptor:(MTL4ComputePipelineDescriptor *)d error:nil] : (id)[a newRenderPipelineStateWithDescriptor:d error:nil];
     };
@@ -8469,7 +8487,7 @@ static NSString *pso_user_path(void);
 // what it lacks: a draw, the prewarm and the prebuild compile a base, and the serializer captures it, only after the bundle missed (it holds no base with a vertex layout). A system
 // that cannot open it (one older than the archive's minimum, or an OS update that changed the GPU compiler) or a GPU it was not built for gets an info line, and the device builds
 // the bases itself as before (the on-device prebuild is the fallback)
-static id<MTL4Archive> g_arch_bundle; static NSString *g_bundle_dir;
+static NSString *g_bundle_dir;
 // Metal's loader crashes on malformed containers rather than returning an error. Check the GPU image's load commands and referenced file ranges, including every slice of a
 // universal archive, before giving it to Metal. This checks the container, not the compiler's private payload: Metal still decides whether this system can use its binaries.
 static int arch_macho_ok(int fd, uint64_t off, uint64_t size) {
@@ -8798,7 +8816,7 @@ static id<MTLComputePipelineState> cps_new_b(id<MTLFunction> f, int off, NSError
     MTL4FunctionDescriptor *fd = fn4_of_b(f, off); MTL4ComputePipelineDescriptor *d = nil; id<MTLComputePipelineState> ps = nil; uint64_t t0 = bp_now();
     if ([fd isKindOfClass:MTL4LibraryFunctionDescriptor.class] || fd_border_fc(fd)) {   // a specialized one: fn_spec's or fn_off's, of a function with the border constant
         d = [MTL4ComputePipelineDescriptor new]; d.computeFunctionDescriptor = fd;
-        if (g_arch_bundle && (ps = [g_arch_bundle newComputePipelineStateWithDescriptor:d error:nil])) atomic_fetch_add(&g_cps_arch, 1);
+        if (arch_bundle_usable() && (ps = [arch_bundle_usable() newComputePipelineStateWithDescriptor:d error:nil])) atomic_fetch_add(&g_cps_arch, 1);
         else { int from_run = 0; if ((ps = arch_lookup(d, 1, &from_run))) {   // arch_capture_cs writes them to plain files only
             atomic_fetch_add(&g_cps_run, 1);
             if (from_run && g_compact_enabled && atomic_load(&g_warm_running)) arch_harvest(d, 1);
@@ -9341,6 +9359,7 @@ static const char *stamp_line(NSString *st) {   // a stamp on one line, for the 
     return [[[st stringByTrimmingCharactersInSet:NSCharacterSet.newlineCharacterSet] stringByReplacingOccurrencesOfString:@"\n" withString:@"; "] stringByReplacingOccurrencesOfString:@"\t" withString:@" "].UTF8String;
 }
 static int pso_bundle_covers(NSArray<NSArray<NSString *> *> *pairs, NSString *want, int zero, NSString *rest) {
+    if (!arch_bundle_usable()) return 0;
     NSString *have = [NSString stringWithContentsOfFile:[g_bundle_dir stringByAppendingPathComponent:@"prebuilt.tsv"] encoding:NSUTF8StringEncoding error:nil];
     if (![have isEqualToString:want]) {
         MLOG("pipeline archive bundled with the app: made for %s, this run needs %s: the device builds the bases it does not hold%s", have ? stamp_line(have) : "(no prebuilt.tsv)", stamp_line(want),
@@ -9356,6 +9375,10 @@ static int pso_bundle_covers(NSArray<NSArray<NSString *> *> *pairs, NSString *wa
         MTL4RenderPipelineDescriptor *m = pre_desc(p[0], p[1], zero);
         if (!m) continue;
         probed++; found += [g_arch_bundle newRenderPipelineStateWithDescriptor:m error:nil] != nil;
+    }
+    if (probed > 0 && found == 0) {
+        atomic_store(&g_bundle_rejected, 1);
+        MLOG("pipeline archive bundled with the app: quarantined after every eligible coverage probe missed; no further render/compute lookups in this archive this run");
     }
     int ok = probed > 0 && found == probed;   // skipped samples give no evidence that this system can take a base from the archive
     MLOG("pipeline archive bundled with the app: %s (%d of %d probed bases found, %.1f ms)%s", ok ? "holds the bases of every shader pair" : "this system does not take its bases",
@@ -12710,6 +12733,7 @@ static void kd_floats(const char *what, int reg, uint64_t addr, uint64_t size, u
         fprintf(stderr, "[kd]     +%#06llx%s\n", (unsigned long long)(i * 4), line);
     }
 }
+#include "nvn_key_readback.inc"
 static int kd_draw(NvProg *pr, const p_draw *dw, const p_draw_idx *di) {
     static char key[24]; static int left = -1, every; static uint64_t last = ~0ull;
     if (left < 0) { left = 0; const char *e = getenv("DM_NVN_KEYDUMP");
@@ -12719,6 +12743,7 @@ static int kd_draw(NvProg *pr, const p_draw *dw, const p_draw_idx *di) {
     uint64_t fr = atomic_load(&g_cur_frame);
     if (every > 0 && last != ~0ull && fr < last + (uint64_t)every) return 0;   // at most once every `every` frames: samples spread over the session, no need to guess the frame of the scene
     last = fr; left--;
+    if (kd_gpu_enabled()) g_kd_gpu_pending = pr;
     int count = dw ? dw->count : di->count, inst = dw ? dw->instances : di->instances, first = dw ? dw->first : 0, binst = dw ? dw->base_instance : di->base_instance;
     fprintf(stderr, "[kd] F%llu pass %llu vs=%s fs=%s prim %d vertices %d instances %d first %d base_vertex %d base_instance %d target %s\n", (unsigned long long)atomic_load(&g_cur_frame), g_stat_pass,
             pr->sh[0] ? pr->sh[0]->key : "-", pr->sh[1]->key, dw ? dw->prim : di->prim, count, inst, first, di ? di->base_vertex : 0, binst, R.rt.n && R.rt.color[0] ? "yes" : "no");
@@ -13777,7 +13802,12 @@ static int skip_fs_draw(NvProg *pr) {
     for (int i = 0; i < nsk; i++) if (!strncmp(pr->sh[1]->key, sk[i], strlen(sk[i]))) return 1;
     return 0;
 }
-static void draw(const p_draw *dw, const p_draw_idx *di) { cp_stamp start = cp_begin(); if (dw && dw->prim == DM_PRIM_MESH_TASKS) mesh_tasks_draw(dw); else draw_(dw, di); cp_end(5, start); }
+static void draw(const p_draw *dw, const p_draw_idx *di) {
+    cp_stamp start=cp_begin();
+    if(dw && dw->prim==DM_PRIM_MESH_TASKS) mesh_tasks_draw(dw); else draw_(dw,di);
+    if(g_kd_gpu_pending) { NvProg *p=g_kd_gpu_pending; g_kd_gpu_pending=nil; kd_gpu_readback(p); }
+    cp_end(5,start);
+}
 static void draw_(const p_draw *dw, const p_draw_idx *di) {
     g_draw_binst = (uint32_t)(dw ? dw->base_instance : di ? di->base_instance : 0);   // c0 + 0x644 of the stages that read the driver segment (encode_args)
     if (passdump()) { NvProg *p = g_geo_program ? g_geo_program : S.prog ? prog_get(S.prog) : nil;
@@ -14338,12 +14368,50 @@ static int rb_swap_gpu(uint64_t src, size_t row, size_t img, uint64_t dst, size_
 // Whether a copy into or out of this host texture crosses between the guest's order and Metal's for the RGB565 family: the red bit position (rb_packed_shift), 0 for other formats and for a
 // texture on a pool's buffer, which holds the guest's bits (linear and buffer textures)
 static int rb_copy_shift(const tex_t *t, id<MTLTexture> mt) { return mt.buffer ? 0 : rb_packed_shift(t->d.format); }
+// The explicit format bridge is currently opt-in on host-owned query proxies.
+// Ordinary game textures retain their current rendering/readback path until
+// broader packed-transfer validation (CPU ReadTexels, upload, other titles).
+static int packed_ds_t2b(id<MTLTexture> t, unsigned level, unsigned slice, const NVNcopyRegion *r, uint64_t dst, size_t row) {
+    static id<MTLComputePipelineState> ps; static id<MTL4ArgumentTable> at; static int failed;
+    if (failed || t.pixelFormat != MTLPixelFormatDepth32Float_Stencil8 || t.sampleCount != 1
+        || r->width <= 0 || r->height <= 0 || r->depth != 1 || r->xoffset < 0 || r->yoffset < 0 || r->zoffset
+        || level >= t.mipmapLevelCount || slice >= t.arrayLength
+        || (NSUInteger)r->xoffset + (NSUInteger)r->width > MAX(t.width >> level, 1ul)
+        || (NSUInteger)r->yoffset + (NSUInteger)r->height > MAX(t.height >> level, 1ul)
+        || (dst & 3) || (row & 3) || row < (size_t)r->width * 4 || row > UINT32_MAX) return 0;
+    if (!ps) {
+        NSError *error = nil; id<MTLFunction> fn = [host_lib("pack_ds", &error) newFunctionWithName:@"pack_ds"];
+        ps = fn ? [g_dev newComputePipelineStateWithFunction:fn error:&error] : nil;
+        MTL4ArgumentTableDescriptor *ad = [MTL4ArgumentTableDescriptor new]; ad.maxBufferBindCount = 1; ad.maxTextureBindCount = 2;
+        at = rec_table([g_dev newArgumentTableWithDescriptor:ad error:&error]);
+        if (!ps || !at) { failed = 1; MLOG("[RED] cannot create packed D24S8 readback: %s", error.localizedDescription.UTF8String); return 0; }
+    }
+    id<MTLTexture> z = [t newTextureViewWithPixelFormat:t.pixelFormat textureType:MTLTextureType2D levels:NSMakeRange(level, 1) slices:NSMakeRange(slice, 1)];
+    id<MTLTexture> stencil = [t newTextureViewWithPixelFormat:MTLPixelFormatX32_Stencil8 textureType:MTLTextureType2D levels:NSMakeRange(level, 1) slices:NSMakeRange(slice, 1)];
+    if (!z || !stencil) return 0;
+    id<MTLBuffer> pb; size_t off = arena_alloc(32, &pb);
+    struct { uint64_t dst; uint32_t x, y, width, height, row, level; } *p = (void *)((uint8_t *)pb.contents + off);
+    *p = (typeof(*p)){dst, (uint32_t)r->xoffset, (uint32_t)r->yoffset, (uint32_t)r->width, (uint32_t)r->height, (uint32_t)row, 0};
+    rp_end(); id<MTL4ComputeCommandEncoder> e = dispatch_enc();
+    [e setArgumentTable:at]; g_blit_ct = 0; // restore the regular compute table on its next use
+    [at setAddress:pb.gpuAddress + off atIndex:0]; [at setTexture:z.gpuResourceID atIndex:0]; [at setTexture:stencil.gpuResourceID atIndex:1]; enc_c_pso(e, ps);
+    enc_c_dispatch(e, MTLSizeMake((r->width + 7) / 8, (r->height + 7) / 8, 1), MTLSizeMake(8, 8, 1));
+    defer_obj_unref(z); defer_obj_unref(stencil);
+    static int once; if (!once++) MLOG("packed D24S8 query readback: GPU depth/stencil -> depth[31:8], stencil[7:0]");
+    return 1;
+}
 static void copy_t2b(const p_copy_b2t *c, uint32_t size) {
     rp_flush();   // Materialize pending clears before reading, matching copy_t2t.
     g_wr_epoch++; g_mdx_epoch++;
     if (c->tex) xv_check(c->tex->serial, c->has_view && c->view.set_levels ? c->view.base_level : 0, c->has_view && c->view.set_layers ? c->view.min_layer : 0, "texture-to-buffer copy");
     id<MTLTexture> t = tex_mtl(c->tex);
     if (!t) return;
+    if (kd_gpu_enabled() && mtl_fmt_depth(t.pixelFormat)) {
+        static unsigned logs;
+        if (logs++ < 64) MLOG("[kr-transfer] F%llu texture-to-buffer ser=%llu NVN=%#x Metal=%lu size=%d,%d,%d dst=%#llx",
+            (unsigned long long)atomic_load(&g_cur_frame), (unsigned long long)c->tex->serial, c->tex->d.format,
+            (unsigned long)t.pixelFormat, c->r.width, c->r.height, c->r.depth, (unsigned long long)c->src);
+    }
     int bw, bh, bpb = nvn_fmt_bpb(c->tex->d.format, &bw, &bh);
     unsigned level = c->has_view && c->view.set_levels ? c->view.base_level : 0, layer0 = c->has_view && c->view.set_layers ? c->view.min_layer : 0;
     if (!tex_level_ok(t, level, "texture-to-buffer copy")) return;
@@ -14354,6 +14422,13 @@ static void copy_t2b(const p_copy_b2t *c, uint32_t size) {
     void *mb; uint64_t mo;
     if (!mtl_addr(c->src, img * nz, &mb, &mo)) { RED_ONCE(31, "texture→buffer copy destination is in no memory pool"); return; }
     sbw_note(c->src, img * nz, SBW_GPU);
+    if (c->tex->readback_proxy && c->tex->d.format == NVN_FORMAT_DEPTH24_STENCIL8) {
+        // Destination bounds/pool ownership and GPU-write tracking were checked
+        // above. Pack only the requested rows, preserving neighboring CPU data.
+        if (is3d || nz != 1 || !packed_ds_t2b(t, level, layer0, &c->r, ((__bridge id<MTLBuffer>)mb).gpuAddress + mo, row))
+            RED_ONCE(165, "packed D24S8 query readback rejected unsupported layout");
+        return; // never fall through to an eight-byte Metal / four-byte guest blit
+    }
     id<MTL4ComputeCommandEncoder> b = blit();
     if (is3d)
         enc_b_copy_texture_buffer(b, t, 0, level, MTLOriginMake(c->r.xoffset, c->r.yoffset, c->r.zoffset), MTLSizeMake(c->r.width, c->r.height, nz), (__bridge id<MTLBuffer>)mb, mo, row, img);
@@ -14385,6 +14460,12 @@ void mtl_read_texels(const tex_t *t, unsigned level, unsigned layer0, const NVNc
     // the GPU wrote first) it is read back from that
     int lin_cpu = (linear_gpu_may_write(t) ? tex_cpu_written(t->serial) || (!tex_get(t->serial) && linear_storage_ok(t)) : linear_storage_ok(t))
                   && t->pool && !nvn_sparse_pool(t->pool) && t->d.target == NVN_TEXTURE_TARGET_2D && t->d.levels <= 1 && t->d.samples <= 1 && bw == 1 && bh == 1;
+    if (kd_gpu_enabled() && (t->d.format == NVN_FORMAT_DEPTH24_STENCIL8 || t->d.format == NVN_FORMAT_DEPTH32F_STENCIL8)) {
+        static _Atomic unsigned logs;
+        if (atomic_fetch_add(&logs, 1) < 64) MLOG("[kr-transfer] F%llu ReadTexels ser=%llu NVN=%#x size=%d,%d,%d source=%s",
+            (unsigned long long)atomic_load(&g_cur_frame), (unsigned long long)t->serial, t->d.format,
+            r->width, r->height, r->depth, lin_cpu ? "linear-storage" : tex_from_storage(t) || (DM_GAME_TEX_DIRTY_UPLOAD && t->mem && nvn_ft_written(t)) ? "CPU-storage" : "GPU-blit");
+    }
     if (lin_cpu) {
         size_t srow = t->L.layer_size / (t->d.height ? t->d.height : 1);
         if (level || layer0 + r->zoffset || nz != 1 || x0 + wb > srow || (y0 + hb) * srow > t->L.size) {

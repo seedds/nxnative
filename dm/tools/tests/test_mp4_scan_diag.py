@@ -19,7 +19,7 @@ spec.loader.exec_module(scan)
 class ScanDiagnostics(unittest.TestCase):
     def setUp(self):
         self.build, self.probes = next(iter(scan.BUILDS.items()))
-        all_probes = (*self.probes, *scan.ACQUISITION_BUILDS[self.build])
+        all_probes = (*self.probes, *scan.ACQUISITION_BUILDS[self.build], *scan.QUERY_BUILDS[self.build])
         end = max(p[1] for p in all_probes) + 4
         image = bytearray(end)
         for _, off, original, *_ in all_probes:
@@ -97,6 +97,43 @@ class ScanDiagnostics(unittest.TestCase):
         self.assertIn('flag134=01', out.getvalue())
         self.assertIn('ptr190=1122334455667788', out.getvalue())
         self.assertIn('project-bounds: no printed hit', out.getvalue())
+
+    def test_probe_sites_do_not_overlap_runtime_patch_branches(self):
+        profile = scan.PROFILE
+        probe_sites = {p[1] for table in (profile['SCAN_DIAGNOSTICS'], profile['SCAN_ACQUISITION_DIAGNOSTICS'], profile['SCAN_QUERY_DIAGNOSTICS'])
+                       for probes in table.values() for p in probes}
+        self.assertTrue(probe_sites.isdisjoint({profile['scene_site'], profile['SCAN_SOURCE_SITE']}))
+
+    def test_query_probes_validate_and_decode_source_size(self):
+        env = scan.environment(self.module, query=True)
+        self.assertEqual(len(scan.validate(self.module, self.module.image, self.fixups, query=True)), 16)
+        self.assertIn('main:f74b68@x0+0', env)
+        self.assertIn('DM_PROBE_INTERVAL_FRAMES=31', env)
+        self.assertIn('main:336a6c@x28+14', env)
+        self.assertNotIn('main:336a8c', env)
+        self.assertLess(len(dict(line.split('=', 1) for line in env.splitlines())['DM_PROBE']), 512)
+        bad = bytearray(self.module.image); bad[0x336a6c] ^= 1
+        with self.assertRaisesRegex(ValueError, 'rewritten instruction'):
+            scan.validate(self.module, bad, self.fixups, query=True)
+        with self.assertRaisesRegex(ValueError, 'choose only one'):
+            scan.environment(self.module, acquisition=True, query=True)
+        log = '[dm] PROBE main+0x336a8c #1 [1.0s] F=60 T=1 [x28+0x14]=800c0000080700000000000000000000\n'
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            scan.summarize(log, query=True)
+        self.assertIn('3200x1800', out.getvalue())
+        self.assertIn('Observed source sizes outside the native scan-query bounds before adaptation: 3200x1800', out.getvalue())
+        valid = log.replace('800c000008070000', '00050000d0020000')
+        accepted = io.StringIO()
+        with contextlib.redirect_stdout(accepted):
+            scan.summarize(valid, query=True)
+        self.assertNotIn('Observed source sizes rejected', accepted.getvalue())
+        out = io.StringIO()
+        slot = '[dm] PROBE main+0xd325e8 #1 [1.0s] F=60 T=1 [x8+0x1270]=0200000000000000ffffffff00000000\n'
+        with contextlib.redirect_stdout(out):
+            scan.summarize(slot, query=True)
+        self.assertIn('ring=2, selected=-1', out.getvalue())
+
 
     def test_summary_preserves_unknowns_and_reports_scalar(self):
         log = ('[dm] PROBE main+0xcb2cb8 #1 [1.0s] F=60 T=1 x0=0 [x0+0x2b0]=unreadable\n'

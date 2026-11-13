@@ -12,8 +12,11 @@ SCRIPT = Path(__file__).resolve().parents[3] / 'dm/games/010019A01E2F2000/manual
 
 class ManualWorkflow(unittest.TestCase):
     def test_each_diagnostic_launches_only_one_selected_mode(self):
-        for switch, flag in [('SCAN_STATE_PROBE', '--state'), ('SCAN_ACQUIRE_PROBE', '--acquisition')]:
-            with self.subTest(switch=switch), tempfile.TemporaryDirectory() as tmp:
+        for switches, flag in [({'SCAN_STATE_PROBE': '1'}, '--state'),
+                               ({'SCAN_ACQUIRE_PROBE': '1'}, '--acquisition'),
+                               ({'SCAN_ACQUIRE_PROBE': '1', 'SCAN_GPU_PROBE': '1'}, '--acquisition'),
+                               ({'SCAN_QUERY_PROBE': '1', 'SCAN_GPU_PROBE': '1'}, '--query')]:
+            with self.subTest(switches=switches), tempfile.TemporaryDirectory() as tmp:
                 root = Path(tmp)
                 images = root / 'images'
                 run = images / 'Metroid Prime 4 Beyond [NSZ]/010019A01E2F2000_build/run'
@@ -36,8 +39,8 @@ else:
     print('test-double summary/validation')
 ''')
                 python_stub.chmod(0o755)
-                env = {k: v for k, v in os.environ.items() if k not in ('PROBE', 'SCALE_PROBE', 'SCAN_PROBE', 'RUMBLE_PROBE', 'VIS_SCALE', 'ANISO', 'SCAN_STATE_PROBE', 'SCAN_ACQUIRE_PROBE')}
-                env.update(PY=str(python_stub), MP4_IMAGES=str(images), **{switch: '1'})
+                env = {k: v for k, v in os.environ.items() if k not in ('PROBE', 'SCALE_PROBE', 'SCAN_PROBE', 'RUMBLE_PROBE', 'VIS_SCALE', 'ANISO', 'SCAN_STATE_PROBE', 'SCAN_ACQUIRE_PROBE', 'SCAN_GPU_PROBE', 'SCAN_QUERY_PROBE')}
+                env.update(PY=str(python_stub), MP4_IMAGES=str(images), **switches)
                 result = subprocess.run(['/bin/bash', str(SCRIPT), '1800p'], env=env, text=True, capture_output=True, timeout=10)
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                 self.assertEqual(launches.read_text().splitlines(), ['one fake launch'])
@@ -49,6 +52,15 @@ else:
                 outputs = list(images.glob('*/010019A01E2F2000-work/manual-test/1800p-*'))
                 self.assertEqual(len(outputs), 1)
                 self.assertIn('DM_INTERNAL_RESOLUTION=1800p', (outputs[0] / 'env.txt').read_text())
+                config = (outputs[0] / 'env.txt').read_text()
+                if 'SCAN_GPU_PROBE' in switches:
+                    self.assertIn('DM_NVN_KEYDUMP=388419dddeb1baac:96:120', config)
+                    self.assertIn('DM_NVN_KEYREADBACK=1', config)
+                    self.assertIn('DM_NVN_CBDUMP_KEY=388419dddeb1baac_b', config)
+                    self.assertTrue((outputs[0] / 'gpu').is_dir())
+                else:
+                    self.assertNotIn('DM_NVN_KEYREADBACK', config)
+
 
 
 if __name__ == '__main__':

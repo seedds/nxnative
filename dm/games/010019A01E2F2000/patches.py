@@ -1,9 +1,10 @@
 # Experimental internal-scene resolution, main 1.1.0 only. Derived from this build's instructions:
 # 33170c packs the final scene dimensions into x21 AFTER both dynamic-resolution branches join;
 # 3317e4 passes that size in the descriptor at sp+58 to 134850. Its fallback descriptor at 3317fc
-# is 1600x900. Retain the original display/viewport/HUD sizing, scan code and frame step.
+# is 1600x900. Retain display/viewport/HUD sizing and frame step. The 1800p
+# and 2160p choices opt into the native-size scan-query bridge below.
 # No original instruction changes here: runtime_patches.py can opt into a newly assembled stub.
-from nso_asm import B
+from nso_asm import B, BL, BLR, ADRP, ADDI, SUBI, STP, LDP, STRX, LDRX
 
 build_id = '8275fbe1ec5191c279f3a943ad8524f4'
 scene_site = 0x33170c
@@ -20,9 +21,92 @@ def resolution_stub(c):
         c.runtime_exports[name] = start
 
 
-STUBS = {build_id: resolution_stub}
+# This is a borrowed query view, used only from 336a8c through 336cfc. The
+# original shared-pointer owner remains in x19/sp+c0 and is released normally.
+SCAN_SOURCE_SITE = 0x336a8c
+SCAN_SOURCE_ORIGINAL = '881740b9'
+SCAN_BOOTSTRAP = 0x138df60
+SCAN_EXTENSION = b'nxnativeMp4ScanSourceV1\0'
+# Check every fixed-address ABI assumption against the legal original executable.
+SCAN_SOURCE_ABI = (
+    (SCAN_SOURCE_SITE, SCAN_SOURCE_ORIGINAL),
+    (SCAN_BOOTSTRAP, 'b02400f0115243f910821a9120021fd6'),
+    (0x3369ac, '9ae22591'),  # x26 = renderer+978; [x26]+28 is the NVN command buffer
+    (0x1d6664, '6a544129'),  # view target/format at +8/+c
+    (0x1d6710, '89ab4229'),  # view dimensions at +14/+18
+    (0x1d6780, '991f40f9'),  # pointer to NVNtexture at +38
+    (0x1d678c, '97230191'),  # inline NVNtextureView at +48 (16 bytes)
+    (0x336cfc, '8087422d'),  # last use of the borrowed prefix
+    (0x336d00, 'fce75ef9'),  # x28 replaced; the original owner is still released
+    (0x13c1b88, '35000000'),  # original engine-format table: 0x12 -> NVN D24S8
+    (0x13c1b90, '34000000'),  # 0x13 -> NVN D32F
+    (0x13c1bf0, '0a000000'),  # 0x1f -> NVN R32F
+)
+
+
+def scan_source_words(start):
+    """Preserve live integer/SIMD registers across a private host call. x28 is
+    the sole changed pointer; the displaced LDR still executes before rejoining.
+    No platform register x18, guest TLS, SVC or new shader translation is needed.
+    """
+    words = []
+    def emit(w):
+        words.append(w)
+    def here():
+        return start + 4 * len(words)
+    emit(SUBI(31, 31, 0x2a0))
+    for n in range(0, 18, 2):
+        emit(STP(n, n + 1, 31, n * 8))
+    emit(STRX(30, 31, 18))
+    # Q stores, unsigned immediate scaled by 16. Preserve all 128 bits, including
+    # the upper halves of callee-saved v8-v15 (not preserved by the C ABI).
+    for n in range(32):
+        emit(0x3d800000 | ((10 + n) << 10) | (31 << 5) | n)
+    string_adrp = len(words); emit(0); string_add = len(words); emit(0)
+    emit(BL(here(), SCAN_BOOTSTRAP))
+    no_extension = len(words); emit(0)
+    emit(0xaa0003f0)  # mov x16,x0 (extension function)
+    emit(LDRX(0, 26))
+    emit(ADDI(0, 0, 0x28))
+    emit(0xaa1c03e1)  # mov x1,x28 (engine query view)
+    emit(BLR(16))
+    emit(0xaa0003fc)  # mov x28,x0 (borrowed view, or original on refusal)
+    restore = here()
+    for n in range(32):
+        emit(0x3dc00000 | ((10 + n) << 10) | (31 << 5) | n)
+    emit(LDRX(30, 31, 18))
+    for n in range(0, 18, 2):
+        emit(LDP(n, n + 1, 31, n * 8))
+    emit(ADDI(31, 31, 0x2a0))
+    emit(int.from_bytes(bytes.fromhex(SCAN_SOURCE_ORIGINAL), 'little'))
+    emit(B(here(), SCAN_SOURCE_SITE + 4))
+    string = here()
+    literal = SCAN_EXTENSION + bytes((-len(SCAN_EXTENSION)) % 4)
+    for off in range(0, len(literal), 4):
+        emit(int.from_bytes(literal[off:off + 4], 'little'))
+    words[string_adrp] = ADRP(0, start + 4 * string_adrp, string)
+    words[string_add] = ADDI(0, 0, string & 0xfff)
+    # cbz x0,restore: absent extension retains the original size rejection.
+    words[no_extension] = 0xb4000000 | (((restore - (start + 4 * no_extension)) // 4) << 5)
+    return words
+
+
+def scan_source_stub(c):
+    resolution_stub(c)
+    for off, original in SCAN_SOURCE_ABI:
+        c.site(off, original)
+    start = c.here()
+    for word in scan_source_words(start):
+        c.emit(word)
+    c.runtime_exports['SCAN_SOURCE_V1'] = start
+
+
+STUBS = {build_id: scan_source_stub}
 
 BINDING = [
+    {'what': '1800p/2160p native-size scan-query bridge (inactive by default)', 'now': 'build', 'goal': 'build', 'purpose': 'rendering',
+     'why': 'the borrowed engine-view ABI and call site belong to main 1.1.0; the full original build and every ABI instruction are checked',
+     'checked': 'original v1.1.0, live 3200x1800 size-guard rejection and synthetic GPU resampling/readback; 1800p scanning user-confirmed; 2160p gameplay confirmation pending'},
     {'what': 'experimental 1440p, 2160p and 1800p scene descriptor stubs (inactive by default)', 'now': 'build', 'goal': 'unreviewed', 'purpose': 'rendering',
      'why': 'the final scene allocation descriptor and fallback are immediate code in main 1.1.0; gameplay validation and other builds remain open'},
 ]
@@ -65,5 +149,41 @@ SCAN_ACQUISITION_DIAGNOSTICS = {
         ('raw-candidates', 0x221ed8, '97de43f9', 20, 0x218, None),
         ('filtered-candidates', 0x21ea8c, 'e93340f9', 19, 0x218, None),
         ('selected-candidate', 0x222b2c, 'ff0304d1', 0, 0x120, None),
+    ),
+}
+
+# Renderer query size and CPU counter lifecycle, original v1.1.0 only.
+# x16 is dead at these non-PC-relative sites, between calls/after the ring-copy loop.
+SCAN_QUERY_DIAGNOSTICS = {
+    SCAN_BUILD_ID: (
+        *[p for p in SCAN_ACQUISITION_DIAGNOSTICS[SCAN_BUILD_ID] if p[0] in
+          ('target-handle', 'begin-request', 'progress-call', 'raw-candidates', 'filtered-candidates')],
+        ('counter-binding-slot', 0xd325e8, '097992b9', 8, 0x1270, None),
+        ('counter-binding-resource', 0xd33144, '1f0b0031', 8, 0x0, None),
+        # Before the runtime branch: probes relocate only non-PC-relative instructions.
+        ('query-source-size', 0x336a6c, 'e8e35ef9', 28, 0x14, None),
+        ('query-size-accepted', 0x336ab0, 'e0364bbd', 28, 0x14, None),
+        ('query-copy-request', 0x336c5c, '7f0a00b9', 28, 0x14, None),
+        ('counter-copy-slot0', 0xf747f0, '88be8052', 1, 0x0, None),
+        ('counter-copy-slot1', 0xf748f4, '88be8052', 1, 0x0, None),
+        ('counter-copy-slot2', 0xf749f8, '88be8052', 1, 0x0, None),
+        ('counter-before-clear', 0xf74b68, 'e1031f2a', 0, 0x0, None),
+        ('counter-after-clear', 0xf74b74, 'e81340f9', 0, 0x0, None),
+        ('counter-consumed', 0x11fdd6c, '8c421491', 11, 0x4f0, None),
+    ),
+}
+
+# Read-only vibration observations, independently identified in the legal v1.1.0 main.
+# No guest instruction is changed in the packaged module; the optional Mac probe
+# trampolines validate the full build, rewritten layout and original words first.
+# label, site, original instruction, optional memory-base register, field offset.
+RUMBLE_DIAGNOSTICS = {
+    SCAN_BUILD_ID: (
+        ('graph-handle-count', 0xaab7ac, '1f040071', None, 0),
+        ('source-enable-flags', 0x2815dc, '08ad4f39', 8, 0x3e8),
+        ('source-curve-left', 0x281878, 'e10313aa', 4, 0),
+        ('request-left', 0xa4e00, '3f200071', 2, 0),
+        ('logical-pad-map', 0xa4e08, 'fd7bbea9', 0, 0x28),
+        ('effect-file-request', 0xd350b8, '3f200071', None, 0),
     ),
 }

@@ -39,6 +39,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "dm/tools"))
 import romfs as rfs
 import nso   # the code module loader: nso.Error is a damaged module (its file cut short or not what its header says)
 import tree_tar   # one file in place of a build's folders of many small files
+import shader_coverage
 import shader_lib   # the shader libraries as one file, read in place
 import shader_cache   # the compile cache as one file, read in place
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -2374,6 +2375,16 @@ def ios_wants_pulling(g, gpus, prepare_xcode, env):
     return (env.get('IOS_PULL') or '1') == '1'
 
 
+def require_shader_coverage(g, library, logs):
+    """Run even on a reused shader build; stop before host/app packaging on a gap."""
+    coverage = shader_coverage.audit(g, library)
+    report = logs / 'shader_completeness.json'
+    report.write_text(json.dumps(coverage, indent=2) + '\n')
+    if not coverage['complete']:
+        raise BuildError(f"full shader completeness check failed ({len(coverage['issues'])} issues); no app packaged: {report}")
+    say(f"full shader completeness: {coverage['expected']:,} shader keys, zero issues ({report})")
+
+
 def build_shaders(py, repo, sh, xlate, env, logs, g, pkg_key=None, mac=False, seen=None, pull=None):
     """The iOS shader libraries (dmsh_build.py, which also builds the Mac's into sh/cache when the build wants them), or with mac only the Mac's (a Mac-only build: no IOSOUT). Returns the folder the host takes
     them from. Reused when the shader package (pkg_key, its content; None never reuses) and the chain's tools, translator binaries, profile and compilers are as at the last successful build:
@@ -2813,6 +2824,7 @@ def parse_args(argv):
     ap.add_argument('--gpu', help='NVN games: GPU architectures the app gets its pipeline archive for, made on this Mac with metal-tt, comma-separated: g18p (A19 / A19 Pro), or the name a device\'s log gives when the app has no archive for its GPU; '
                     'none = no archive, the device builds the bases on its first start (default: the PSO_GPUS setting; when that is empty, a profile with pso_mtl4 on uses its pso_gpu key or g18p, and other profiles use none). '
                     'With --platform mac-app: the Mac app\'s archive, by default for this Mac\'s GPU (none: the app builds the bases on its first start)')
+    ap.add_argument('--require-complete-shaders', action='store_true', help='Mac NVN full builds: stop before packaging on any missing/failed shader, required variant or known translation loss; write logs/shader_completeness.json')
     ap.add_argument('--seen-shaders', action=argparse.BooleanOptionalAction, help='--platform mac or mac-app: build only the shaders the profile\'s playtests used (its shader_seen.tsv) and those the last runs\' logs reported missing, not the whole map: '
                     'minutes instead of hours, but areas the list does not cover draw without the rest until this runs again (default: the SEEN_SHADERS setting, off)')
     ap.add_argument('--show-fps', action=argparse.BooleanOptionalAction, help='show the game\'s frame rate on the iPhone, frames on screen per second at the top left (default: the SHOW_FPS setting, on)')
@@ -2937,6 +2949,7 @@ def main(args=None):
     mac = platform in ('mac', 'mac-app')   # the Mac's shaders and host only: no iOS shaders, Xcode project or IPA (mac_run prints the command; mac-app packs a Mac app, mac_app)
     mac_pack = platform == 'mac-app'
     seen_shaders = SEEN_SHADERS if args.seen_shaders is None else args.seen_shaders
+    if getattr(args, 'require_complete_shaders', False) and (seen_shaders or not mac): raise BuildError('--require-complete-shaders needs a full Mac build (--no-seen-shaders)')
     if seen_shaders and not mac: raise BuildError('--seen-shaders / SEEN_SHADERS builds a partial library of Mac shaders: it needs --platform mac or mac-app')
     if args.mac_sign and not mac_pack: raise BuildError('--mac-sign signs the Mac app: it needs --platform mac-app')
     if mac and prepare_xcode: raise BuildError(f'--prepare-xcode makes an iPhone project: it cannot be combined with --platform {platform}')
@@ -3094,6 +3107,7 @@ def main(args=None):
     uedec = gfx == 'nvn' and src['ue_decode'][0]   # Unreal Engine shaders, Oodle-compressed in the paks' shader code archives, decoded in the Mac host (decode_ue_shaders)
     if gfx == 'vulkan': say(f'Vulkan game ({src["graphics"][1]}): vk_shaders.py translates the shaders instead of the NVN shader chain')
     if gfx == 'gl': say(f'OpenGL game ({src["graphics"][1]}): gl_shaders.py translates the shaders instead of the NVN shader chain')
+    if getattr(args, 'require_complete_shaders', False) and gfx != 'nvn': raise BuildError('--require-complete-shaders currently checks NVN libraries only')
     if seen_shaders and gfx != 'nvn': raise BuildError(f'--seen-shaders is for NVN games: this one is {gfx}, whose shaders build whole in minutes')
     if gfx == 'nvn': check_metal(py, repo, env)   # before the captures and the shader split, which take minutes
     for on, k in ((glslc, 'glslc_capture'), (vkcap, 'vk_capture'), (glcap, 'gl_capture'), (uedec, 'ue_decode'), (gfx == 'nvn' and src['oodle_packs'][0], 'oodle_packs'), (gfx == 'nvn' and src['ue_legacy'][0], 'ue_legacy')):
@@ -3166,6 +3180,8 @@ def main(args=None):
         if observed_glslc is not None: check_glslc_coverage(observed_glslc, g)
         seen = seen_keys(g, sh, seen_logs(work, app)) if seen_shaders else None
         ios = build_shaders(py, repo, sh, xlate, env, logs, g, pkey, mac, seen, None if mac else ios_wants_pulling(g, ios_gpus((args.gpu or PSO_GPUS).strip(), g), prepare_xcode, env))
+    if getattr(args, 'require_complete_shaders', False):
+        require_shader_coverage(g, ios / f'b-{chain_of(repo)}', logs)
     motion = MOTION if args.motion is None else args.motion
     jit = uses_jit(game / 'ExeFS')
     if jit and not mac and not mac_pack: capture_jit(py, repo, game, patched, work, env, logs, g)   # the iPhone runs no code made at run time: it serves the plugin's output from an image

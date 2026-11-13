@@ -68,7 +68,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 | [Luigi's Mansion 3](#luigis-mansion-3) | 0 | 0 | 0 | 0 | 1 | `build` → `engine` |
 | [Mario + Rabbids® Sparks of Hope](#mario--rabbids-sparks-of-hope) | 1 | 0 | 0 | 0 | 0 | `build` → `game` |
 | [Mario Kart World](#mario-kart-world) | 0 | 0 | 1 | 0 | 0 | `game` |
-| [Metroid Prime 4: Beyond](#metroid-prime-4-beyond) | 0 | 0 | 0 | 0 | 0 | `build` → unreviewed |
+| [Metroid Prime 4: Beyond](#metroid-prime-4-beyond) | 0 | 0 | 0 | 0 | 0 | `build`, `build` → unreviewed |
 | [Monster Hunter Rise](#monster-hunter-rise) | 0 | 0 | 0 | 0 | 1 | `build` → `engine` |
 | [Need For Speed™ Hot Pursuit Remastered](#need-for-speed-hot-pursuit-remastered) | 1 | 0 | 0 | 0 | 5 | `build` → `game`, `build` → `engine` |
 | [NieR:Automata The End of YoRHa Edition (010056B015FE8000)](#nierautomata-the-end-of-yorha-edition-010056b015fe8000) | 8 | 0 | 0 | 0 | 1 | `build` → `game` ×2 |
@@ -354,9 +354,10 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 
 [Metroid Prime 4: Beyond](../../dm/games/010019A01E2F2000/README.md), `010019A01E2F2000`, [patches.py](../../dm/games/010019A01E2F2000/patches.py).
 
+- **`build`**, rendering, at goal, checked: original v1.1.0, live 3200x1800 size-guard rejection and synthetic GPU resampling/readback; 1800p scanning user-confirmed; 2160p gameplay confirmation pending: 1800p/2160p native-size scan-query bridge (inactive by default). The borrowed engine-view ABI and call site belong to main 1.1.0; the full original build and every ABI instruction are checked
 - **`build` → unreviewed**, rendering, unreviewed, judgement: experimental 1440p, 2160p and 1800p scene descriptor stubs (inactive by default). The final scene allocation descriptor and fallback are immediate code in main 1.1.0; gameplay validation and other builds remain open
 
-- **1.1.0 `main`** `8275fbe1…` ([patches.py:8](../../dm/games/010019A01E2F2000/patches.py#L8))
+- **1.1.0 `main`** `8275fbe1…` ([patches.py:9](../../dm/games/010019A01E2F2000/patches.py#L9))
 
 ### Monster Hunter Rise
 

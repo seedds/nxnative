@@ -11,9 +11,9 @@ GAME_H = ../../host/gen/$(GAME)/game_profile.h
 
 # The host's shaders compiled for the Mac (host_msl_gen.h, made by the host Makefile from dm/gfx/msl; nvn/host_msl.m loads them)
 MSL_H = ../../host/gen/msl-macosx/host_msl_gen.h
-CFLAGS=-O1 -g -Wall -Wno-unused-function -I../nvn/include -I$(dir $(GAME_H)) -I$(dir $(MSL_H))
+CFLAGS=-O1 -g -Wall -Wno-unused-function -I../nvn/include -I$(dir $(GAME_H)) -I$(dir $(MSL_H)) -I$(GAME_DIR)
 GFX=$(filter-out ../nvn/hle_nvn.c,$(sort $(wildcard ../nvn/*.c ../nvn/*.m ../nvn/*.S ../tex/*.c ../tex/*.m)))
-GFX_H=$(wildcard ../nvn/*.h ../nvn/*.inc ../nvn/include/*.h ../tex/*.h) $(GAME_H) $(MSL_H)
+GFX_H=$(wildcard $(GAME_DIR)/*.inc) $(wildcard ../nvn/*.h ../nvn/*.inc ../nvn/include/*.h ../tex/*.h) $(GAME_H) $(MSL_H)
 .DEFAULT_GOAL := t_nvn   # the profile header rule comes first, so keep the default goal as before
 # Regenerated on every make (host_msl_force), by the host Makefile: a header from an older game.py lacks newer defines; game.py writes it only when it changes, so an unchanged header rebuilds no test
 $(GAME_H): host_msl_force
@@ -33,7 +33,7 @@ MTL_T_SRC=../nvn/hle_nvn.c ../../host/crash.c ../../host/hle_bigstack.c t_host_s
 # a fixture test_image_atomic_bounds.py builds itself (t_atomic_return), t_geometry_primitive_id (the GPU half of test_dmsh_geometry.py, which gives it the directory of
 # its translated fixtures), and t_gpuprof, which CI's CPU subset runs (.github/workflows/tests.yml)
 NOT_RUN = t_host_stubs t_present_rescue_focus t_gpu_lost_front t_atomic_return t_geometry_primitive_id t_gpuprof
-RUN_TESTS = $(filter-out $(NOT_RUN),$(basename $(sort $(wildcard t_*.c t_*.m))))
+RUN_TESTS = $(filter-out $(NOT_RUN) $(if $(filter 010019A01E2F2000,$(GAME)),,t_scan_adapter),$(basename $(sort $(wildcard t_*.c t_*.m))))
 check_t_%: t_%
 	$(RUN_ENV) ./$<
 .PHONY: run check_test_dmsh_pull check_test_tbdr_budget
@@ -627,3 +627,15 @@ check_t_pool_standin: t_pool_standin
 	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=0 ./t_pool_standin
 	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=1 ./t_pool_standin
 	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=0 DM_NVN_POOL_STANDIN=0 ./t_pool_standin
+
+t_key_readback: t_key_readback.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_key_readback.m $(MTL_T_SRC) $(FW)
+check_t_key_readback: RUN_ENV = MTL_DEBUG_LAYER=1
+
+t_scan_source: t_scan_source.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_scan_source.m $(MTL_T_SRC) $(FW)
+check_t_scan_source: RUN_ENV = MTL_DEBUG_LAYER=1
+
+# Game-specific runtime bridge: command recording and rejection, no gameplay.
+t_scan_adapter: t_scan_adapter.c ../nvn/hle_nvn.c $(GAME_DIR)/nvn_runtime.inc ../../host/crash.c ../../host/hle_bigstack.c t_host_stubs.c $(GFX) $(GFX_H)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_scan_adapter.c ../../host/crash.c ../../host/hle_bigstack.c t_host_stubs.c $(GFX) $(FW)

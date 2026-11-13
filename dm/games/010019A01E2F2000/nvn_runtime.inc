@@ -135,17 +135,24 @@ static void nvn_profile_set_rt(const NVNcommandBuffer *c, int n, const NVNtextur
     const tex_t *t = n > 0 && ct ? (const tex_t *)ct[0] : NULL; uintptr_t base = mp4_main_base();
     // A pass the game begins on the window itself (the game renders intermediates of its size and format too) through its pass-begin helper, outside the
     // scene step and outside the front end (title movie and its menus, main+0x6c98c / 0x6cba0 / 0x58f520, stretched to 16:10 at the user's choice)
+    static _Atomic int scene_ran;   // a pass of the scene step (under main+0x33194c) since the last decision
+    if (base && mp4_band_k() > 0 && caller && mp4_under(base + 0x33194c)) atomic_store(&scene_ran, 1);
     int band = base && mp4_band_k() > 0 && !strcmp(dm_main_build(),"8275fbe1ec5191c279f3a943ad8524f4") && caller == base + 0x1300b8
         && t && t->magic == MAGIC('T','E','X',0) && nvn_is_window_tex(ct[0]) && !mp4_under(base + 0x33194c) && !mp4_under(base + 0xe2acb8);
     mp4_band_has = 0;
-    // The HUD's first pass of a frame decides it: whether a menu item was drawn in the last frame. (Its pass is begun twice a frame with the menu open and
-    // in the scan visor alike, so the count is only logged; as a menu sign it stretched the scan rings, tenth run.)
+    // The HUD's first pass of a frame decides it. A menu is open when this frame drew no scene (the pause menu's pages stop the scene step: 2.8 ms of GPU
+    // time on the inventory page against 9-11 in play, eleventh run), or a menu item was drawn within the last 30 frames (they are drawn only when a page
+    // changes, and the map page draws its hologram through the scene step). The HUD's pass is begun twice a frame with the menu open and in the scan visor
+    // alike, so that count is only logged; as a menu sign it stretched the scan rings (tenth run).
     static _Atomic uint64_t decided = ~0ull; static _Atomic int passes, last_passes = 1; uint64_t frame = atomic_load(&g_nvn_presents);
     if (band && mp4_under(base + 0x12e0e8)) atomic_fetch_add(&passes, 1);
     if (band && mp4_under(base + 0x12e0e8) && atomic_exchange(&decided, frame) != frame) {
         int np = atomic_exchange(&passes, 1) - 1, lp = atomic_exchange(&last_passes, np);
         if (np != lp) LOG("MP4 16:10: the HUD's pass begun %d time(s) in the last frame", np);
-        int menu = atomic_exchange(&mp4_menu_seen, 0), was = atomic_exchange(&mp4_menu_last, menu);
+        static int hold; int scene = atomic_exchange(&scene_ran, 0);
+        if (atomic_exchange(&mp4_menu_seen, 0)) hold = 30; else if (hold > 0) hold--;
+        static int last_scene = 1; if (scene != last_scene) { last_scene = scene; LOG("MP4 16:10: %s", scene ? "the scene is drawn again" : "no scene drawn in this frame"); }
+        int menu = hold > 0 || !scene, was = atomic_exchange(&mp4_menu_last, menu);
         if (menu != was) LOG("MP4 16:10: %s", menu ? "a menu is open, the HUD is drawn over the whole window" : "no menu, the HUD is back in the 16:9 band");
     }
     // Menu pages bind the window again from inside the HUD's list (main+0x12f0c8): those passes follow the frame's decision too, and their items are still

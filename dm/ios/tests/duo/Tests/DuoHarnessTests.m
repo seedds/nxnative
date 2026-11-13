@@ -112,6 +112,23 @@ static Class DuoHarnessInstallReservedRegionProbe(UIView *view) API_AVAILABLE(io
 @end
 
 @implementation DuoHarnessTests
+// Layout policy permits less than one native pixel of edge rounding, not a
+// fractional-pixel view that Core Animation must stretch to the drawable.
+- (void)assertGameView:(UIView *)game followsRect:(CGRect)expected covering:(BOOL)cover {
+    CGFloat scale = game.window.windowScene.screen.nativeScale;
+    if (scale <= 0) scale = MAX(game.traitCollection.displayScale, 1);
+    CGRect actual = game.frame;
+    CGFloat a[] = {CGRectGetMinX(actual), CGRectGetMinY(actual), CGRectGetMaxX(actual), CGRectGetMaxY(actual)};
+    CGFloat e[] = {CGRectGetMinX(expected), CGRectGetMinY(expected), CGRectGetMaxX(expected), CGRectGetMaxY(expected)};
+    for (int i = 0; i < 4; i++) {
+        CGFloat pixels = a[i] * scale;
+        XCTAssertEqualWithAccuracy(pixels, round(pixels), 1e-6, @"Game edge %d must align to a native pixel", i);
+        CGFloat inset = (i < 2 ? a[i] - e[i] : e[i] - a[i]) * scale;
+        if (cover) inset = -inset;
+        XCTAssertGreaterThanOrEqual(inset, -1e-6, @"Rounding must preserve Fit containment or Fill coverage");
+        XCTAssertLessThan(inset, 1.0 + 1e-6, @"Rounding must not move an edge by more than one native pixel");
+    }
+}
 - (void)setUp {
     [super setUp];
     NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
@@ -704,9 +721,9 @@ static Class DuoHarnessInstallReservedRegionProbe(UIView *view) API_AVAILABLE(io
     BOOL duo = [[root valueForKey:@"hingeStatus"] integerValue] != 0;
     DmLayout fit = dm_layout(b, dm_game_safe_insets(b, root.view.safeAreaInsets, duo), [[root valueForKey:@"partiallyOpen"] boolValue], CGRectNull, DM_PICTURE_16_9);
     dm_setting_live("DM_PICTURE_FIT", "fill"); [root.view layoutIfNeeded];
-    XCTAssertTrue(CGRectEqualToRect(game.frame, dm_layout_picture(fit, b, YES, DM_PICTURE_16_9).game), @"Fill applies at once: %@", NSStringFromCGRect(game.frame));
+    [self assertGameView:game followsRect:dm_layout_picture(fit, b, YES, DM_PICTURE_16_9).game covering:!fit.separated];
     dm_setting_live("DM_PICTURE_FIT", "fit"); [root.view layoutIfNeeded];
-    XCTAssertTrue(CGRectEqualToRect(game.frame, fit.game), @"and Fit brings the bars back: %@", NSStringFromCGRect(game.frame));
+    [self assertGameView:game followsRect:fit.game covering:NO];
 
     dm_setting_live("DM_RUMBLE", "0"); XCTAssertEqual(duo_harness_rumble(), 0);
     dm_setting_live("DM_RUMBLE", "1"); XCTAssertEqual(duo_harness_rumble(), 1);
@@ -788,9 +805,7 @@ static Class DuoHarnessInstallReservedRegionProbe(UIView *view) API_AVAILABLE(io
     BOOL duo = [[root valueForKey:@"hingeStatus"] integerValue] != 0 || !CGRectIsNull(division);
     UIEdgeInsets insets = dm_game_safe_insets(root.view.bounds, root.view.safeAreaInsets, duo);
     DmLayout layout = dm_layout(root.view.bounds, insets, partiallyOpen, division, DM_PICTURE_16_9);
-    XCTAssertTrue(CGRectEqualToRect(game.frame, layout.game),
-                  @"The production game view must use the current scene bounds and native division region: actual %@, expected %@",
-                  NSStringFromCGRect(game.frame), NSStringFromCGRect(layout.game));
+    [self assertGameView:game followsRect:layout.game covering:NO];
     XCTAssertTrue(CGRectEqualToRect(pad.frame, root.view.bounds));
     XCTAssertTrue([game.layer isKindOfClass:CAMetalLayer.class]);
     CAMetalLayer *metal = (CAMetalLayer *)game.layer;
@@ -819,7 +834,10 @@ static Class DuoHarnessInstallReservedRegionProbe(UIView *view) API_AVAILABLE(io
             XCTAssertTrue(CGSizeEqualToSize(root.view.bounds.size, sizes[i]));
             XCTAssertTrue(CGRectEqualToRect(pad.frame, root.view.bounds));
             XCTAssertTrue(CGRectContainsRect(root.view.bounds, game.frame));
-            XCTAssertEqualWithAccuracy(game.bounds.size.width / game.bounds.size.height, 16.0 / 9.0, 0.001);
+            BOOL duo = [[root valueForKey:@"hingeStatus"] integerValue] != 0;
+            DmLayout expected = dm_layout(root.view.bounds, dm_game_safe_insets(root.view.bounds, root.view.safeAreaInsets, duo),
+                                          [[root valueForKey:@"partiallyOpen"] boolValue], CGRectNull, DM_PICTURE_16_9);
+            [self assertGameView:game followsRect:expected.game covering:NO];
             CAMetalLayer *metal = (CAMetalLayer *)game.layer;
             CGFloat scale = root.view.window.windowScene.screen.nativeScale;
             XCTAssertEqualWithAccuracy(metal.drawableSize.width, game.bounds.size.width * scale, 1.0);
@@ -968,8 +986,7 @@ static Class DuoHarnessInstallReservedRegionProbe(UIView *view) API_AVAILABLE(io
                           @"The root must query UIKit's IncludeInactive option for the division boundary");
             XCTAssertFalse(region.isActive, @"This boundary case must use an inactive native division");
             XCTAssertTrue(expected.separated);
-            XCTAssertTrue(CGRectEqualToRect(game.frame, expected.game),
-                          @"An inactive but valid horizontal division should still separate the panels");
+            [self assertGameView:game followsRect:expected.game covering:NO];
 
             hinge.status = UIHingeStatusFullyOpen;
             [(id)root hingeChanged:hinge];
@@ -977,8 +994,7 @@ static Class DuoHarnessInstallReservedRegionProbe(UIView *view) API_AVAILABLE(io
             DmLayout fullyOpen = dm_layout(view.bounds, dm_game_safe_insets(view.bounds, view.safeAreaInsets, YES), NO, region.frame, DM_PICTURE_16_9);
             XCTAssertEqual(fullyOpen.separated, view.bounds.size.height > view.bounds.size.width,
                            @"A fully-open landscape display overlays while portrait remains separated");
-            XCTAssertTrue(CGRectEqualToRect(game.frame, fullyOpen.game),
-                          @"Fully-open layout follows the stable portrait-split, landscape-overlay policy");
+            [self assertGameView:game followsRect:fullyOpen.game covering:NO];
         } @finally {
             object_setClass(view, originalClass);
             gDuoHarnessReservedRegionView = nil;

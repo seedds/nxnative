@@ -143,7 +143,7 @@ enum {
     OPC_DRAW_IDX,          // prim, index type << 8 | count, base vertex, ibuf (u64)     → OP_DRAW_IDX, one instance
     OPC_DRAW_IDX_INST,     // prim, index type << 8 | count, base vertex, base instance, instances, ibuf
     OPC_DRAW_IDX_IND,      // prim, index type << 8 | ibuf, ind (u64)                    → OP_DRAW_IDX, indirect
-    OPC_VIEWPORTS,         // first, n << 8 | n × {x, y, w, h} (f32)                     → OP_VIEWPORTS
+    OPC_VIEWPORTS,         // first | n << 8 | (origin + 1) << 16; n × {x, y, w, h} (f32)                     → OP_VIEWPORTS
     OPC_STENCIL,           // face, which << 2, value << 4 (20 bits) | none              → OP_STENCIL
     OPC_HANDLES,           // op, stage << 6, first << 9, n << 17 | n × handle (u32)     → op (OP_BIND_TEX / _SAMP / _IMG), handles already moved to the bound pools
     OPC_BUFS,              // op, stage << 6, first << 9, n << 17 | n × {addr (u64), size (u32)} → n records of op (OP_BIND_UBO_SMALL / OP_BIND_SSBO)

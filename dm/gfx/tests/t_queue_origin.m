@@ -99,7 +99,7 @@ int main(void) { @autoreleasepool {
         state_reset(); memset(&R,0,sizeof R); used=0;
         p_set_rt rt = {.n=1}; rt.color[0]=&target; emit(OP_SET_RT,&rt,sizeof rt);
         p_clear_color clear = {.rgba={0,0,1,1},.mask=15}; emit(OP_CLEAR_COLOR,&clear,sizeof clear);
-        NVNcommandBuffer cb; size_t viewport_offset=used;
+        NVNcommandBuffer cb; size_t viewport_offset=used, viewport_bytes=0;
         if (recorded >= 0) {
             static uint8_t viewport_commands[2048]; static uint64_t viewport_control[256]; pool_t pool = {.mem=viewport_commands};
             NVNdevice *recorder = recorded == 1 ? &video_device : &device;
@@ -115,7 +115,11 @@ int main(void) { @autoreleasepool {
                 P(nvnCommandBufferSetViewports)(&cb,1,1,viewport);
             }
             NVNcommandHandle viewport = P(nvnCommandBufferEndRecording)(&cb);
-            emit(OP_CALL,&viewport,sizeof viewport);
+            size_t linear_size; uint8_t *linear=nvn_rec_linear(viewport,&linear_size);
+            viewport_bytes=linear_size-sizeof(op_hdr);
+            CHECK(viewport_bytes && used+viewport_bytes <= sizeof commands,"recorded viewport fits in the test command piece");
+            if (!viewport_bytes || used+viewport_bytes > sizeof commands) { free(linear); return 1; }
+            memcpy(commands+used,linear,viewport_bytes); used+=viewport_bytes; free(linear);
             P(nvnDeviceSetWindowOriginMode)(&device,(NVNwindowOriginMode)!current);
         }
         p_bind_program bp = {.prog=&pg,.stages=3}; emit(OP_BIND_PROGRAM,&bp,sizeof bp);
@@ -130,7 +134,7 @@ int main(void) { @autoreleasepool {
         // originating queue must retain its recorded origin with its rectangle.
         for (int repeat=0;repeat<(recorded >= 0 ? 2 : 1);repeat++) {
         if (repeat) {
-            memmove(commands+viewport_offset,commands+viewport_offset+16,used-viewport_offset-16); used-=16;
+            memmove(commands+viewport_offset,commands+viewport_offset+viewport_bytes,used-viewport_offset-viewport_bytes); used-=viewport_bytes;
             uint64_t empty_list = ctl_e(CTL_CHUNK,NULL,0) | CTL_LAST;
             NVNcommandHandle empty=(NVNcommandHandle)&empty_list;
             P(nvnQueueSubmitCommands)(&queues[!queue],1,&empty); P(nvnQueueFinish)(&queues[!queue]);

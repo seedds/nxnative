@@ -158,12 +158,40 @@ static int mp4_under(uintptr_t ra) {   // whether the guest call chain of this d
     }
     return 0;
 }
+// The HUD's render list (main+0x12f0c8 and main+0x12f074 call one item at a time) mixes 2D widgets with items drawn as 3D models through the scene's own
+// model code (main+0xdf304 into 0xe2268, main+0x8e778 into 0x10f38: in the fifth 16:10 run the scan outline of the ship stayed in the band, off the
+// ship): those fill the window, the rest stays in the band. An item is named by the return address inside it just below the list's call
+// (DM_MP4_HUD_FULL=<hex main offsets, comma-separated> or "none" replaces the default list; each item seen is logged once with where it went).
+static uintptr_t mp4_hud_full[16]; static int mp4_hud_nfull = -1;
+static void mp4_hud_full_init(void) {
+    const char *e = getenv("DM_MP4_HUD_FULL"); int n = 0;
+    if (!e) { mp4_hud_full[n++] = 0xdf304; mp4_hud_full[n++] = 0x8e778; }
+    else if (strcmp(e, "none")) for (const char *p = e; *p && n < 16; ) { char *q; unsigned long v = strtoul(p, &q, 16); if (q == p) break; mp4_hud_full[n++] = v; p = *q == ',' ? q + 1 : q; }
+    mp4_hud_nfull = n;
+}
+static int mp4_hud_item_full(uintptr_t base) {   // whether this draw belongs to a HUD item drawn over the whole window
+    uintptr_t fp = (uintptr_t)__builtin_frame_address(0), top = fp + (8u << 20), prev = 0;
+    for (int i = 0; i < 24 && fp && !(fp & 7) && fp < top; i++) {
+        const uintptr_t *f = (const uintptr_t *)fp; uintptr_t ra = f[1];
+        if (ra == base + 0x12e15c || ra == base + 0x12e184) return 1;   // the glow and the scene picture
+        if ((ra == base + 0x12f0cc || ra == base + 0x12f078) && prev) {
+            if (mp4_hud_nfull < 0) mp4_hud_full_init();
+            int full = 0; for (int k = 0; k < mp4_hud_nfull; k++) if (prev - base == mp4_hud_full[k]) full = 1;
+            static uintptr_t seen[64]; static int ns; static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
+            pthread_mutex_lock(&mu); int fresh = ns < 64; for (int k = 0; k < ns && fresh; k++) if (seen[k] == prev) fresh = 0; if (fresh) seen[ns++] = prev; pthread_mutex_unlock(&mu);
+            if (fresh) LOG("MP4 16:10: HUD item main+%#lx (list call main+%#lx): %s", (unsigned long)(prev - base), (unsigned long)(ra - base - 4), full ? "whole window" : "16:9 band");
+            return full;
+        }
+        if (f[0] <= fp) break;
+        prev = ra; fp = f[0];
+    }
+    return 0;
+}
 static int nvn_profile_draw_begin(NVNcommandBuffer *c) {
     if (mp4_band_cb != c || !mp4_band_has) return 0;
     uintptr_t base = mp4_main_base();
-    if (!mp4_under(base + 0x12e15c) && !mp4_under(base + 0x12e184)) return 0;
+    if (!mp4_hud_item_full(base)) return 0;
     mp4_band_bypass = 1; h_nvnCommandBufferSetViewports(c, 0, 1, mp4_full_vp); mp4_band_bypass = 0;
-    static int once; if (!once++) LOG("MP4 16:10: the scene and its glow (under main+0x12e158 / 0x12e180) keep the whole 16:10 window");
     return 1;
 }
 static void nvn_profile_draw_end(NVNcommandBuffer *c) { mp4_band_bypass = 1; h_nvnCommandBufferSetViewports(c, 0, 1, mp4_band_vp); mp4_band_bypass = 0; }

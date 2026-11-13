@@ -440,6 +440,11 @@ t_copy_alias: t_copy_alias.m $(MTL_T_DEP)
 check_t_copy_alias: t_copy_alias
 	DM_NVN_ENC_THREAD=0 MTL_DEBUG_LAYER=1 ./t_copy_alias
 	DM_NVN_ENC_THREAD=1 MTL_DEBUG_LAYER=1 ./t_copy_alias
+t_gpu_only_addr: t_gpu_only_addr.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_gpu_only_addr.m ../../host/crash.c ../../host/hle_bigstack.c t_host_stubs.c $(filter-out ../nvn/nvn_mtl.m,$(GFX)) $(FW)
+.PHONY: check_t_gpu_only_addr
+check_t_gpu_only_addr: t_gpu_only_addr
+	MTL_DEBUG_LAYER=1 ./t_gpu_only_addr
 .PHONY: check_t_linear_readback
 check_t_linear_readback: t_linear_readback
 	MTL_DEBUG_LAYER=1 ./t_linear_readback

@@ -1055,7 +1055,13 @@ static uint64_t rng_overlap(const rng_tab *t, uintptr_t lo, uintptr_t hi) {
     return z;
 }
 static rng_tab g_addr_code;   // shader-code pools whose own address was asked for (kind 4, hle_nvn.c nvnMemoryPoolGetBufferAddress), kept out of the table. Under g_mu
+static rng_tab g_addr_apart;   // texture addresses and virtual mappings in storage the CPU cannot reach, whose textures Metal keeps apart (kind 5, hle_nvn.c tex_bytes_elsewhere), kept out. Under g_mu
 void mtl_pool_addressed_by(const void *mem, uint64_t size, int kind) {
+    if (kind == 5) {
+        pthread_mutex_lock(&g_mu); int first = !g_addr_apart.n; rng_put(&g_addr_apart, (uintptr_t)mem, (uintptr_t)mem + size); pthread_mutex_unlock(&g_mu);
+        if (first) MLOG("raw global memory: texture addresses and virtual mappings in storage the CPU cannot reach stay out of the pool table: those textures' content is in Metal textures of their own (first %p, %llu KB)", mem, (unsigned long long)(size >> 10));
+        return;
+    }
     if (kind == 4) {
         pthread_mutex_lock(&g_mu); int first = !g_addr_code.n; rng_put(&g_addr_code, (uintptr_t)mem, (uintptr_t)mem + size); pthread_mutex_unlock(&g_mu);
         if (first) MLOG("raw global memory: shader-code pools whose address the game asks for stay out of the pool table, so nothing makes them resident for its sake (first %p, %llu KB)", mem, (unsigned long long)(size >> 10));
@@ -1119,11 +1125,12 @@ static void res_top_pools(const char *why) {
             int j = 0; while (j < ntg && tg[j].tag != p->tag) j++; if (j == ntg && ntg < 12) { tg[ntg].tag = p->tag; tg[ntg].n = tg[ntg].b = tg[ntg].ln = tg[ntg].lb = 0; ntg++; } if (j < 12) { tg[j].n++; tg[j].b += z; if (p->n_other) { tg[j].ln++; tg[j].lb += z; } } }
         uint64_t ak[4] = {0}; for (int k = 0; k < 4; k++) for (int i = 0; i < g_addrk[k].n; i++) ak[k] += g_addrk[k].r[i].hi - g_addrk[k].r[i].lo;
         uint64_t code_n = 0, code_b = 0; for (int i = 0; i < g_addr_code.n; i++) if (!addr_meets(g_addr_code.r[i].lo, g_addr_code.r[i].hi)) { code_n++; code_b += g_addr_code.r[i].hi - g_addr_code.r[i].lo; }
+        uint64_t apart_n = 0, apart_b = 0; for (int i = 0; i < g_addr_apart.n; i++) if (!addr_meets(g_addr_apart.r[i].lo, g_addr_apart.r[i].hi)) { apart_n++; apart_b += g_addr_apart.r[i].hi - g_addr_apart.r[i].lo; }
         pthread_mutex_unlock(&g_mu);
-        MLOG("%s: resident memory pools %llu, %llu MB: in the raw pool table and looked up otherwise %llu, %llu MB; in the table only %llu, %llu MB; not in it, looked up %llu, %llu MB; neither %llu, %llu MB; mapped runs of virtual pools %llu, %llu MB; addressed in all (MB): pools %llu, buffers %llu, textures %llu, virtual mappings %llu; shader-code ranges kept out of the table %llu, %llu MB", why,
+        MLOG("%s: resident memory pools %llu, %llu MB: in the raw pool table and looked up otherwise %llu, %llu MB; in the table only %llu, %llu MB; not in it, looked up %llu, %llu MB; neither %llu, %llu MB; mapped runs of virtual pools %llu, %llu MB; addressed in all (MB): pools %llu, buffers %llu, textures %llu, virtual mappings %llu; shader-code ranges kept out of the table %llu, %llu MB; texture addresses and virtual mappings in storage the CPU cannot reach kept out %llu, %llu MB", why,
              (unsigned long long)rn, (unsigned long long)(rb >> 20), (unsigned long long)cn[3], (unsigned long long)(cb[3] >> 20), (unsigned long long)cn[2], (unsigned long long)(cb[2] >> 20), (unsigned long long)cn[1], (unsigned long long)(cb[1] >> 20), (unsigned long long)cn[0], (unsigned long long)(cb[0] >> 20),
              (unsigned long long)vn, (unsigned long long)(vb >> 20), (unsigned long long)(ak[0] >> 20), (unsigned long long)(ak[1] >> 20), (unsigned long long)(ak[2] >> 20), (unsigned long long)(ak[3] >> 20),
-             (unsigned long long)code_n, (unsigned long long)(code_b >> 20));
+             (unsigned long long)code_n, (unsigned long long)(code_b >> 20), (unsigned long long)apart_n, (unsigned long long)(apart_b >> 20));
         char line[1400] = ""; size_t lo = 0;
         for (int m = 0; m < 16 && lo < sizeof line; m++) if (mn[m]) lo += snprintf(line + lo, sizeof line - lo, "%s[%s%s%s%s] %llu, %llu MB (buffers' ranges %llu MB, textures' %llu MB)", lo ? "; " : "", m & 1 ? "P" : "", m & 2 ? "B" : "", m & 4 ? "T" : "", m & 8 ? "V" : "", (unsigned long long)mn[m], (unsigned long long)(mb[m] >> 20), (unsigned long long)(mcov[m][1] >> 20), (unsigned long long)(mcov[m][2] >> 20));
         MLOG("%s: resident memory pools by who gave an address in them (P pool, B buffer, T texture, V virtual mapping): %s", why, line);

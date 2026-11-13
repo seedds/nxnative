@@ -1818,6 +1818,20 @@ The Vulkan layer (`dm/gfx/vk/hle_vk.m`) was written for Hades; Super Mario Galax
 - **Cause:** two geometry shaders (GX points and lines expanded to quads) are not translated (Metal has no geometry stage).
 - **Found on:** [Super Mario Galaxy](../../dm/games/010099C022B96000/README.md).
 
+### Device procs a Vulkan library calls without checking
+
+- **Symptom:** a call to address 0, after "Setting backbuffer" or at boot (`pc=0`, `lr` in `main`; the register dump shows a `blr` on a null slot of the library's proc table).
+- **Cause:** SDL_GPU (the renderer of FNA and newer ports) imports only `vkGetInstanceProcAddr` and resolves every Vulkan function through it and `vkGetDeviceProcAddr`, then calls some without checking the lookup. A name the layer did not list got a null pointer.
+- **Fix:** the layer lists the calls SDL_GPU uses: `vkCmdSetBlendConstants`, `vkCmdSetDepthBias`, `vkCmdSetDepthBounds`, `vkCmdClearAttachments`, `vkCmdResolveImage`, `vkCmdDispatch`, `vkCmdDispatchIndirect`, `vkCmdDrawIndirect`, `vkCmdDrawIndexedIndirect`, `vkCreateComputePipelines` and the `VK_EXT_debug_utils` labels — no-ops until each gets its Metal implementation, logged so a later fidelity problem names its call. Open: `vkCmdSetBlendConstants` (dynamic state 4) still warns; the others are not reached by the games brought up so far.
+- **Found on:** MARVEL Cosmic Invasion (title `010059D020C26000`, FNA/SDL_GPU, provisional bring-up — no profile yet).
+
+### `vkCmdBlitImage` to the swap chain
+
+- **Symptom:** the window stays black while the run log shows real draws, presents and audio at full frame rate.
+- **Cause:** SDL_GPU renders into an `R8G8B8A8_UNORM` image and blits it into the `B8G8R8A8_UNORM` swap chain image. `vkCmdBlitImage` was unrecorded, and a Metal texture copy cannot change the format — the channel swap needs a conversion pass.
+- **Fix:** the command is recorded (`C_BLIT`). An unscaled same-format region replays through the blit encoder, as `vkCmdCopyImage` does; what a copy cannot do (a blit between different formats, scaled or flipped) is drawn with the `draw_tex` builtin: a fullscreen triangle samples the source, and the linear mapping carries a flip on its own. A blit inside a render pass splits the encoder and the pass resumes, as copies do.
+- **Found on:** MARVEL Cosmic Invasion (title `010059D020C26000`): its intro video plays at 60 fps with audio after the fix.
+
 ## OpenGL layer
 
 Digimon Story Cyber Sleuth: Complete Edition (Media.Vision's MVGL engine, SDK 6.4.0) and Balatro (LÖVE 11.4, "love-nx", with SDL and LuaJIT) render with **NVIDIA's desktop OpenGL 4.5 core profile through EGL**, not NVN. The host implements GL itself on Metal (`dm/gfx/gl/hle_gl.m`), as it does Vulkan for Hades; NVIDIA's GL driver (`subsdk0`) is not loaded. Balatro's graphics module is LÖVE's own OpenGL backend, so its choices follow what the context reports.

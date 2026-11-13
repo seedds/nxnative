@@ -392,6 +392,16 @@ class BarrierMoves(Translated):
         self.assertEqual(moved, plain)
 
 
+class Yield(Translated):
+    """YIELD (0x946) in Resident Evil 4's encoding, as its 21 compute shaders with it have it (after MEMBAR; ERRBAR, before a branch): per thread it does nothing"""
+    YIELD = (0x000fde0003800000, 0x0000000000007946)
+
+    def test_no_effect_on_the_shader(self):
+        plain = self.translate(inst(*SUATOM) + inst(*EXIT))
+        yielded = self.translate(inst(*SUATOM) + inst(*self.YIELD) + inst(*EXIT))
+        self.assertEqual(yielded, plain)
+
+
 class LdcIndexedBank(Translated):
     """LDC.64 .IS (address mode 2): the bank is the instruction's plus Ra's upper half, the offset Ra's lower half (Hyrule Warriors: Age of Imprisonment's
     vertex shader cc679c7b4d3e703c reads its c1 quad corners at (vertex index % 5) * 8 + 0x10000 this way). Here LDC.64.IS R12, c[0][R3] feeds the atomic"""

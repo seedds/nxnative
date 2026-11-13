@@ -190,7 +190,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
                         res = context.FPMultiply(res, context.Load(StorageKind.Input, IoVariable.FragmentCoord, null, Const(3)));
                     }
                 }
-                else if (imm10 is AttributeConsts.BaryCoordX or AttributeConsts.BaryCoordX + 4)
+                else if (imm10 is AttributeConsts.BaryCoordX or AttributeConsts.BaryCoordX + 4 or AttributeConsts.BaryCoordX + 8)
                 {
                     // nxnative: the perspective barycentric coordinates are read divided by w, like a perspective attribute
                     res = context.FPMultiply(res, context.Load(StorageKind.Input, IoVariable.FragmentCoord, null, Const(3)));
@@ -354,7 +354,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
         // nxnative: a float attribute the rasterizer interpolates (not the primitive, layer and viewport indices, the viewport mask or the facing)
         private static bool IsInterpolatedFloat(int attr)
         {
-            return attr is >= AttributeConsts.PositionX and < AttributeConsts.ViewportMask or >= 0x3a8 and < AttributeConsts.BaryCoordX + 8;
+            return attr is >= AttributeConsts.PositionX and < AttributeConsts.ViewportMask or >= 0x3a8 and < AttributeConsts.BaryCoordX + 12;
         }
 
         private static bool TryFixedFuncToUserAttributeIpa(EmitterContext context, int attr, out Operand selectedAttr)

@@ -253,7 +253,7 @@ namespace Ryujinx.Graphics.Shader.Translation
                 return (!isOutput && !IaIndexing) || (isOutput && !OaIndexing);
             }
 
-            return ioVariable == IoVariable.FragmentOutputColor;
+            return ioVariable == IoVariable.FragmentOutputColor || (ioVariable == IoVariable.UserDefinedPerVertex && !isOutput);   // nxnative: LDTRAM's inputs
         }
 
         public bool HasPerLocationInputOrOutputComponent(IoVariable ioVariable, int location, int component, bool isOutput)

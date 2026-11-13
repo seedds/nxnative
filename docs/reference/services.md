@@ -788,6 +788,13 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Fix:** `SetLayerCrop` only records the crop for the present ([The NVN present crops by the vi layer crop](rendering.md#the-nvn-present-crops-by-the-vi-layer-crop)); `DestroyLayer`, `CloseDisplay` and `vi::Finalize` are host no-ops. Also hooked: `vi::GetIndirectImageMemoryRequirement` (asked by the inline keyboard's `GetImageMemoryRequirement`, [The inline keyboard as a resident library applet](#the-inline-keyboard-as-a-resident-library-applet)); `vi::ListDisplays` (one display, "Default"; the game lists 10 into a stack buffer and does not read them, `main+0x808f08`), found from the import list before it was met. `vi::OpenDisplay("Default")` returns the same static display as `OpenDefaultDisplay`, so applications can open the name returned by `ListDisplays` without entering the SDK's absent service client.
 - **Found on:** [The Legend of Zelda: Link's Awakening](../../dm/games/01006BB00C6F0000/README.md) (SDK 8.2.0); [Super Mario 3D World + Bowser's Fury](../../dm/games/010028600EBDA000/README.md) (SDK 10: `vi::GetIndirectImageMemoryRequirement`); [The Great Ace Attorney Chronicles](../../dm/games/010036E00FB20000/README.md) (SDK 10.4.1: `vi::ListDisplays`); Alien: Isolation (SDK 8.2.0: `vi::OpenDisplay`).
 
+### `vi::InitializeWithVrrLfcEnabled`
+
+- **Symptom:** SIGSEGV reading address 0 in `SdkMutexType::Lock` (`sdk+0x171ef8`) right after graphics initialize, under `nn::vi2::InitializeWithVrrLfcEnabled`.
+- **Cause:** the Switch 2 SDKs' display initialize with low frame rate compensation for a variable refresh rate display. It does `nn::vi::Initialize`'s work through `vi2`, whose VRR hooks lock the mutex at the start of `nn::gsv::GetUserSession()`'s session, which the host never opens.
+- **Fix:** the host takes it over like `nn::vi::Initialize` (`hle_vi.c`): it has no vi service and no VRR display (`QueryDisplayVrrSupported` says so).
+- **Found on:** [Resident Evil 4](../../dm/games/0400569027BF4000/README.md) (v131072, SDK 21.4.3: `main+0xb180288` → `sdk+0x5d8cf0`).
+
 ### Layer HDR metadata
 
 - **Symptom:** `CRASH sig=11 addr=0 pc=0` with the link register just after a call to a `vi::SetLayerNextHdr…` or `vi::ClearLayerNextHdr…` function.

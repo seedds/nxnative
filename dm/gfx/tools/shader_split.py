@@ -734,9 +734,9 @@ def kpka_jobs(files, parts=64):
     jobs += [(p_, r_, tuple(es)) for (p_, r_), es in cur.items()]
     return jobs, {p for p, _ in paks}
 
-SDF_LAYOUTS = ((0x10, 0x108, 0, 8), (0x18, 0x110, 8, 0x58))   # (first entry, entry length, the stage record's lengths at, its control section at), sdf_shaders
+SDF_LAYOUTS = ((0x10, 0x108, 0, 8), (0x18, 0x110, 8, 0x58), (0x18, 0x110, 8, 0x60))   # (first entry, entry length, the stage record's lengths at, its control section at), sdf_shaders
 def sdf_layout(d, n, label):
-    """The one SDF_LAYOUTS entry under which every stage offset of every entry leads to a control section; both layouts are SDF version 1"""
+    """The one SDF_LAYOUTS entry under which every stage offset of every entry leads to a control section; every layout is SDF version 1"""
     def fits(lay):
         base, size, lens, at = lay
         if base + size * n > len(d): return False
@@ -747,11 +747,12 @@ def sdf_layout(d, n, label):
     return lay[0]
 
 def sdf_shaders(d, label):
-    """RE Engine shader definition ('SDF\\0'): u16 version 1, u16 entry count, then one of two layouts (sdf_layout picks the one the file's offsets fit). Each entry has six u64 offsets at +0x10
+    """RE Engine shader definition ('SDF\\0'): u16 version 1, u16 entry count, then one of three layouts (sdf_layout picks the one the file's offsets fit). Each entry has six u64 offsets at +0x10
     (vertex, hull, domain, geometry, pixel, compute; 0 = no stage), each to a stage record of {u32 control length, u32 code length} followed by the control section and the code area. Compute code has no header.
     · Monster Hunter Rise (2,685 SDF files in its PAKs, SDK 11) and Ghost Trick: a u64, then 0x108-byte entries from +0x10; the record is the two lengths, then the control section.
     · PRAGMATA (759 files, Switch 2, NVN2): two u64s, then 0x110-byte entries from +0x18 (entry +0: the offset of its name); the record is a 0x58-byte header, the lengths at +8 after a u64 hash,
       then the control section.
+    · Resident Evil 4 (Switch 2, NVN2; 23 of its 821 SDF files hold entries, 20,311 stage records): PRAGMATA's entries, with a 0x60-byte record header (the control section at +0x60).
     The stages of one entry form a program, so its vertex / pixel stages are a pair"""
     ver, n = field(d, '<HH', 4, f'{label} SDF header'); out = []
     if not ver and not n: return out   # an empty definition: 16 bytes, version 0, no entries
@@ -786,19 +787,24 @@ def kpka_shaders(path, rel, ents, out):
 OCIO = b'OCIO'
 def ocio_shaders(d, label):
     """RE Engine's OpenColorIO pipelines ('OCIO'): the colour transforms the frame's last passes draw with (PRAGMATA: its tonemap and display transform; the frame's final composite had no shaders
-    without them, so the picture came out cyan-saturated with each new subtitle drawn over the old ones). Their shaders are stage records as in PRAGMATA's SDF files: a 0x58-byte header with the
-    control section's and the code area's lengths at +8, the control section, the code area. Found by scanning for NVN2 control sections whose record header names their length and whose +0x44
-    names the code area's after them, since the file's own tables are not known. Single stages: the program a pipeline pairs them into is in those tables"""
+    without them, so the picture came out cyan-saturated with each new subtitle drawn over the old ones). Their shaders are stage records as in the game's SDF files (SDF_LAYOUTS): a header with the
+    control section's and the code area's lengths at +8 (0x58 bytes in PRAGMATA, 0x60 in Resident Evil 4), the control section, the code area. Found by scanning for NVN2 control sections whose
+    record header names their length and whose +0x44 names the code area's after them, since the file's own tables are not known. The records are packed: to 4 bytes in PRAGMATA's larger files
+    (8ae6c7ee83bc0563: 63 of its 65 records; compute 2ceb3ec288321a37 at 0x3a9f3c), to 1 in Resident Evil 4's (3472b3eda9a8c309: control sections at 0x3712f3, 0x37173b, ...), so any offset is
+    tried. Single stages: the program a pipeline pairs them into is in those tables"""
     out, other = [], 0
     for m in re.finditer(re.escape(CTL_MAGIC), d):
         c = m.start()
-        if c < 0x50 or c & 3: continue   # 4-byte aligned: the larger OCIO files pack their records so (8ae6c7ee83bc0563: 63 of its 65; compute 2ceb3ec288321a37 at 0x3a9f3c)
-        nctl, ncode = struct.unpack_from('<II', d, c - 0x50)
-        ctl, code = d[c:c + nctl], d[c + nctl:c + nctl + ncode]
-        if len(code) != ncode or not nctl or not nvn2_ctl(ctl): other += ctl[:4] == CTL_MAGIC and not nvn2_ctl(ctl); continue
+        for hl in (0x58, 0x60):   # the record header's length: its lengths are at c - hl + 8
+            if c < hl: continue
+            nctl, ncode = struct.unpack_from('<II', d, c - hl + 8)
+            ctl, code = d[c:c + nctl], d[c + nctl:c + nctl + ncode]
+            if len(code) == ncode and nctl and (not nvn2_ctl(ctl) or struct.unpack_from('<I', ctl, 0x44)[0] == ncode): break
+        else: continue
+        if not nvn2_ctl(ctl): other += 1; continue
         st = nvn2_stage(ctl, code)
-        if (why := check(label, st, ctl, code)): red(f'{label} OCIO record @{c - 0x58:#x} {st}: {why}'); continue
-        out.append((f'{label}#OCIO@{c - 0x58:x}', st, ctl, code))
+        if (why := check(label, st, ctl, code)): red(f'{label} OCIO record @{c - hl:#x} {st}: {why}'); continue
+        out.append((f'{label}#OCIO@{c - hl:x}', st, ctl, code))
     if other: print(f'[RED] {label}: {other} control sections of a GPU other than NVN2 in an OCIO file are left out (no such file has been read yet)', file=sys.stderr)
     return out
 

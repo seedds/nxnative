@@ -2144,6 +2144,10 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
                     {
                         varType = context.Definitions.GetUserDefinedType(location, isOutput);
                     }
+                    else if (ioVariable == IoVariable.UserDefinedPerVertex)
+                    {
+                        varType = AggregateType.Vector4 | AggregateType.FP32;   // nxnative: LDTRAM's inputs (Declarations.DeclareInputOrOutput)
+                    }
                     else if (ioVariable == IoVariable.FragmentOutputColor)
                     {
                         varType = context.Definitions.GetFragmentOutputColorType(location);

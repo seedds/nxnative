@@ -19,6 +19,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
 
             x(AmpereOpcodes.Ipa, InstName.Ipa, AIpa, N);
             x(AmpereOpcodes.IpaIdx, InstName.Ipa, AIpa, N);
+            x(0x3ad, InstName.Ipa, ALdTram, N);
             x(AmpereOpcodes.Ald, InstName.Ald, AAld, N);
             x(AmpereOpcodes.Ast, InstName.Ast, AAst, N, writesRd: false);
 
@@ -93,6 +94,37 @@ namespace Ryujinx.Graphics.Shader.Instructions
             IpaOp ipaOp = x.Bits(78, 80) == 1 ? IpaOp.Constant : IpaOp.Pass;
 
             EmitIpa(context, idxAddress, addr, ipaOp, RegisterConsts.RegisterZeroIndex, false, x.Rd, at);
+        }
+
+        // LDTRAM Rd, a[addr] (0x3ad): a user attribute word as the triangle's vertices hold it, not interpolated (Mesa NAK's OpLdTram, which lowers load_input_vertex with it): addr 64..72
+        // in words; with 72 clear (.AB) Rd gets vertex 0's word and Rd + 1 vertex 1's, with it set (.C) Rd gets vertex 2's. The vertices are those the barycentric coordinates
+        // (a[0x3a8] / a[0x3b4], x y z) weigh. Resident Evil 4 (v131072) reads generic attribute 1, 2 or 3 this way in 7,225 of its 18,248 pixel shaders, never one it also interpolates.
+        // Each read is an input of its own (UserDefinedPerVertex, a flat vec4 named dm_pv<location>_<vertex>), which dmsh_rewrite.per_vertex turns into MSL's vertex_value<float4>
+        public static void ALdTram(EmitterContext context)
+        {
+            AmpereOp x = new(context.CurrOp);
+            int addr = x.Bits(64, 72) << 2;
+            bool vertexC = x.Bits(72, 73) != 0;
+
+            if (addr is < AttributeConsts.UserAttributeBase or >= AttributeConsts.UserAttributeEnd)
+            {
+                throw new NotSupportedException($"LDTRAM of a[0x{addr:x}], not a user attribute");
+            }
+
+            int location = (addr - AttributeConsts.UserAttributeBase) >> 4;
+            int component = (addr >> 2) & 3;
+
+            for (int i = 0; i < (vertexC ? 1 : 2); i++)
+            {
+                if (x.Rd + i >= RegisterConsts.RegisterZeroIndex)
+                {
+                    break;
+                }
+
+                Operand value = context.Load(StorageKind.Input, IoVariable.UserDefinedPerVertex, null, Const(location * 3 + (vertexC ? 2 : i)), Const(component));
+
+                context.Copy(Register(x.Rd + i, RegisterType.Gpr), value);
+            }
         }
 
         // Geometry and tessellation stages. OUT (opcode 0x124 in the ALU forms): Rd = the new output handle, Ra the old, the stream in the second source; 78..80 emit (1),

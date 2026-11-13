@@ -24,6 +24,30 @@ def membar_fence(msl):
     msl = re.sub(r'^([ \t]*)' + re.escape(_MEMBAR) + r'\n\1' + re.escape(_MEMBAR) + r'$', lambda m: m[1] + _MEMBAR, msl, flags=re.M)
     return msl.replace(_MEMBAR, fence)
 
+PER_VERTEX_BASE = 64   # the translator's Declarations.PerVertexLocationBase: dm_pv<L>_<v> is at user(locn<64 + 3L + v>), past every attribute's own location
+PER_VERTEX_IN = re.compile(r'\n    float4 dm_pv(\d+)_([012]) \[\[user\(locn(\d+)\)(?:, flat)?\]\];')
+VERTEX_INDEX = ('first', 'second', 'third')
+METAL4 = 'vertex_value<'   # in a source that needs MSL 4.0 (ios_metal.compile)
+def per_vertex(msl):
+    """A user attribute as each vertex of the triangle holds it, which Ampere's LDTRAM reads in a pixel shader (fragment shader barycentrics: Resident Evil 4's shaders weigh
+    the three values with the barycentric coordinates themselves). SPIRV-Cross has no MSL form of SPIR-V's PerVertexKHR, so the translator declares each vertex read as a flat
+    input of its own, dm_pv<L>_<v> at user(locn<64 + 3L + v>) (InstEmitAmpereMem ALdTram). Here the reads of attribute L become one vertex_value<float4> at user(locn<L>), which the
+    vertex shader's output there feeds, and each read that vertex's get(vertex_index::...): the vertices the [[barycentric_coord]] weights refer to, as on NVIDIA.
+    vertex_value is MSL 4.0 (macOS 26, iOS 26): the Mac's deployment target has it, and ios_metal.compile compiles a source using it with -std=metal4.0.
+    Raises ValueError when attribute L is also an ordinary input of the shader, which one location cannot be at once (no game known)"""
+    found = list(PER_VERTEX_IN.finditer(msl))
+    if not found: return msl
+    for m in found:
+        if int(m[3]) != PER_VERTEX_BASE + 3 * int(m[1]) + int(m[2]): raise ValueError(f'per-vertex input dm_pv{m[1]}_{m[2]} at user(locn{m[3]}), not at the translator\'s location')
+    locs = sorted({int(m[1]) for m in found})
+    st = re.search(r'\nstruct main0_in\n\{(\n.*?)\n\};', msl, re.S)
+    if not st or not all(st.start(1) <= m.start() < st.end(1) for m in found): raise ValueError('per-vertex inputs outside main0_in')
+    both = [l for l in locs if re.search(rf'\[\[user\(locn{l}\)', st[1])]
+    if both: raise ValueError(f'attribute {both[0]} read both per vertex and as an ordinary input')
+    decls = ''.join(f'\n    vertex_value<float4> dm_pv{l} [[user(locn{l})]];' for l in locs)
+    out = msl[:found[0].start()] + decls + ''.join(msl[a.end():b.start()] for a, b in zip(found, found[1:])) + msl[found[-1].end():]
+    return re.sub(r'\.dm_pv(\d+)_([012])\b', lambda m: f'.dm_pv{m[1]}.get(vertex_index::{VERTEX_INDEX[int(m[2])]})', out)
+
 BIT0_AND = re.compile(r'^[ \t]*(u?int) (_\d+) = ([^;\n]+) & 1u?;$', re.M)
 BIT0_LOOSER = re.compile(r'\|\||&&|[|^?,]')   # an operator binding looser than &: `a | b & 1` is a | (b & 1), not bit 0
 def bit0_operand(e):   # the left operand outside its parentheses binds at least as tightly as &

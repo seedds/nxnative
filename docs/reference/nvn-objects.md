@@ -359,6 +359,13 @@ A game may tell NVN objects apart by their bytes, without an NVN call. A host re
 - **Fix:** the call exists (`hle_nvn.c`). Metal has no such setting: a blend result above a 16- or 32-bit float target's range is stored as infinity, which is mode 0, so mode 0 is silent and mode 1 logs the red line once. Mode 1 would need every blending pixel shader to read its target and clamp there (a platform limit, left as it is): it differs only where a blend overflows, about 65,504 in a half-float target.
 - **Found on:** [PRAGMATA](../../dm/games/0400C76024710000/README.md), which sets 1; no frame has been seen with an infinity in a float target.
 
+### Representative fragment test (`nvnCommandBufferSetRepresentativeFragmentTest`)
+
+- **Symptom:** `[RED] NVN unimplemented function called: nvnCommandBufferSetRepresentativeFragmentTest`, once.
+- **Cause:** an NVN2 call the host did not have: NVIDIA's representative fragment test (`GL_NV_representative_fragment_test`, `VK_NV_representative_fragment_test`). Enabled, the GPU may skip a primitive's remaining fragments once one has passed, in draws made only for visibility (no colour or depth writes).
+- **Fix:** the call exists (`hle_nvn.c`) and is logged once. Skipping is allowed, never required, so running every fragment, which is what Metal does, is a valid result of either setting.
+- **Found on:** [Resident Evil 4](../../dm/games/0400569027BF4000/README.md).
+
 ### Host-lent command memory segments
 
 - **Symptom:** `FATAL NVN command memory: the game's pool is empty…`.

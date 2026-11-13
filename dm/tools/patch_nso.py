@@ -53,13 +53,16 @@ BIG_TEXT = FAR and MOD.text_end + FRONT > 0x8000000 - 0x10000
 # SPLIT is also no lower than the lowest site the back area reaches with the same margin (BACK_MIN): when ro, data and bss after the text are large (Hello Kitty Party Land: 151.8 MB
 # of text, 98 MB more before BACK_OFF), a 16 MB front area would hand the back area sites more than 128 MB below it, so the front area's first pass takes the gap up to BACK_MIN instead
 TWO = BIG_TEXT and MOD.text_end > 0x8000000 - 0x10000
-BACK_MIN = 0   # TWO: BACK_OFF (set below) less the reach, plus the margin
+# When BACK_MIN is beyond the front area's reach too (GAP: Resident Evil 4 v131072, 185 MB of text and 90 MB of ro, data and bss after it, so BACK_MIN is 148.5 MB), no split puts every site
+# in reach of its area: the front area keeps its 16 MB and its split, and the sites between the split and BACK_MIN take the back area, each branch that does not reach going through a hop
+# (reach_via(): one b in the alignment padding between two functions, within reach of both ends)
+BACK_MIN, GAP = 0, False   # TWO: BACK_OFF (set below) less the reach, plus the margin
 if TWO:
     BACK_MIN = ((((len(MOD.image) + bss + 0x3FFF) & ~0x3FFF) + 0x8000 + 0xFFFF) & ~0xFFFF) - 0x8000000 + 0x100000
-    assert BACK_MIN < 0x8000000 - 0x200000, f'no split reaches: the back patch area reaches no site below {BACK_MIN:#x}, too close to the front area\'s reach'
-    FRONT = int(os.environ.get('DM_PATCH_FRONT', '0'), 0) or min(0x1000000, (0x8000000 - 0x100000 - BACK_MIN) & ~0xFFFF)
+    GAP = BACK_MIN >= 0x8000000 - 0x200000
+    FRONT = int(os.environ.get('DM_PATCH_FRONT', '0'), 0) or (0x1000000 if GAP else min(0x1000000, (0x8000000 - 0x100000 - BACK_MIN) & ~0xFFFF))
 elif BIG_TEXT: FRONT = int(os.environ.get('DM_PATCH_FRONT', '0'), 0) or (0x8000000 - 0x10000 - MOD.text_end) & ~0xFFFF
-SPLIT = max(0x8000000 - FRONT - 0x100000, BACK_MIN) if TWO else None
+SPLIT = (0x8000000 - FRONT - 0x100000 if GAP else max(0x8000000 - FRONT - 0x100000, BACK_MIN)) if TWO else None
 IMG = MOD.image
 ORIG_TEXT = bytes(IMG[:MOD.text_end])   # the text as the file has it, before any cut or site: <name>.changed.tsv compares against it
 if not FAR: IMG.extend(bytes(bss))
@@ -347,7 +350,7 @@ def site_plain(ins):
     emit(STP(S, T, 31, save)); emit(MRS_TPIDRRO(T)); emit_slot_addr(T, S, 'K18'); emit(LDRX(S, T))
     emit(subst(ins, S))
     emit(STRX(S, T))                 # Always write back: capstone can miss reporting a write (the adds w18 instance)
-    emit(LDP(S, T, 31, save - dlt)); emit(B(here(), ins.address + 4))
+    emit(LDP(S, T, 31, save - dlt)); emit(BX(here(), ins.address + 4))
     return start
 
 def site_sp(ins):
@@ -358,7 +361,7 @@ def site_sp(ins):
     emit(STP(S, T, 31, -16)); emit(MRS_TPIDRRO(T)); emit_slot_addr(T, S, 'K18'); emit(LDRX(S, T))
     emit(ADDI(T, 31, 0))             # mov T, sp (in add immediate, 31 is sp)
     emit(subst(ins, S))
-    emit(LDP(S, T, T, -16)); emit(B(here(), ins.address + 4))
+    emit(LDP(S, T, T, -16)); emit(BX(here(), ins.address + 4))
     return start
 
 def casp_pair18(ins):
@@ -388,7 +391,7 @@ def site_casp(ins):
     emit(MRS_TPIDRRO(T)); emit_slot_addr(T, P, 'K18'); emit(LDRX(P, T)); emit(MOVX(P + 1, 19))
     emit(nw)
     if rs == 18: emit(STRX(P, T)); emit(MOVX(19, P + 1))
-    emit(LDUR(T, 31, -24)); emit(LDP(P, P + 1, 31, -16)); emit(B(here(), ins.address + 4))
+    emit(LDUR(T, 31, -24)); emit(LDP(P, P + 1, 31, -16)); emit(BX(here(), ins.address + 4))
     return start
 
 def site_sp_align(ins, n):
@@ -398,7 +401,7 @@ def site_sp_align(ins, n):
     there it changes nothing; of the 22 games' modules on hand only Paper Mario's main has the form"""
     start = here()
     emit(ADDI(n, n, 15)); emit(0x927CEC00 | n << 5 | n)   # add xN, xN, #15; and xN, xN, #~15
-    emit(struct.unpack('<I', ins.bytes)[0]); emit(B(here(), ins.address + 4))
+    emit(struct.unpack('<I', ins.bytes)[0]); emit(BX(here(), ins.address + 4))
     return start
 
 def site_cond(ins):
@@ -413,9 +416,9 @@ def site_cond(ins):
     nw = ((w & 0xFF000000) | ((off & 0x7FFFF) << 5) | S) if m in ('cbz', 'cbnz') else ((w & 0xFFF80000) | ((off & 0x3FFF) << 5) | S)
     pc = here(); emit(nw)
     dd = dis(nw, pc); assert dd.mnemonic == m and dd.operands[-1].imm == taken
-    emit(LDP(S, T, 31, -16)); emit(B(here(), ins.address + 4))
+    emit(LDP(S, T, 31, -16)); emit(BX(here(), ins.address + 4))
     assert here() == taken
-    emit(LDP(S, T, 31, -16)); emit(B(here(), tgt))
+    emit(LDP(S, T, 31, -16)); emit(BX(here(), tgt))
     return start
 
 def site_pcrel(ins):
@@ -426,7 +429,7 @@ def site_pcrel(ins):
     pc = here(); emit(ADRP(S, pc, tgt))
     if ins.mnemonic == 'adr': emit(ADDI(S, S, tgt & 0xFFF))
     emit(STRX(S, T))
-    emit(LDP(S, T, 31, -16)); emit(B(here(), ins.address + 4))
+    emit(LDP(S, T, 31, -16)); emit(BX(here(), ins.address + 4))
     return start
 
 def site_br(ins, base, count):
@@ -445,10 +448,10 @@ def site_br(ins, base, count):
     emit(BR(16))
     while here() < padbase: emit(NOP)
     tails = padbase + 4 * count
-    for i in range(count): emit(B(here(), tails + 8 * i))
+    for i in range(count): emit(BX(here(), tails + 8 * i))
     for i in range(count):
         emit(0xF85F0000 | (31 << 5) | 16)      # ldur x16,[sp,#-16]
-        emit(B(here(), base + 4 * i))
+        emit(BX(here(), base + 4 * i))
     return start
 
 def site_br_tab(ins, targets):
@@ -463,7 +466,7 @@ def site_br_tab(ins, targets):
         emit(ADRP(17, here(), t)); emit(ADDI(17, 17, t & 0xFFF)); emit(CMPR(16, 17)); emit(BEQ(here(), pads + 12 * k))
     emit(BRK(0x18))
     for t in uniq:
-        emit(LDUR(16, 31, -16)); emit(LDUR(17, 31, -24)); emit(B(here(), t))
+        emit(LDUR(16, 31, -16)); emit(LDUR(17, 31, -24)); emit(BX(here(), t))
     return start
 
 def site_blr(ins):
@@ -491,7 +494,7 @@ def site_slot_copy(ins, src, dst):
     else: emit(src)
     emit(MRS_TPIDRRO(16)); emit_slot_addr(16, 17, dst); emit(STRX(15, 16))
     emit(LDUR(15, 31, -24)); emit(LDP(16, 17, 31, -16))
-    emit(B(here(), ins.address + 4))
+    emit(BX(here(), ins.address + 4))
     return start
 
 def site_sysreg_read(ins, kind):
@@ -501,7 +504,7 @@ def site_sysreg_read(ins, kind):
     tmp = 16 if N != 16 else 17
     start = here()
     emit(STUR(tmp, 31, -16)); emit(MRS_TPIDRRO(N)); emit_slot_addr(N, tmp, kind); emit(LDRX(N, N)); emit(LDUR(tmp, 31, -16))   # tmp is saved by borrowing the red zone
-    emit(B(here(), ins.address + 4))
+    emit(BX(here(), ins.address + 4))
     return start
 
 def site_tpidr_write(ins):
@@ -513,7 +516,7 @@ def site_tpidr_write(ins):
     tmp = next(x for x in (16, 17) if x not in (N, T))
     emit(STUR(tmp, 31, -24)); emit(MRS_TPIDRRO(T)); emit_slot_addr(T, tmp, 'KTLS'); emit(STRX(N, T)); emit(LDUR(tmp, 31, -24))
     emit(0xF85F0000 | (31 << 5) | T)           # ldur xT,[sp,#-16]
-    emit(B(here(), ins.address + 4))
+    emit(BX(here(), ins.address + 4))
     return start
 
 def emit_gate_call():
@@ -530,7 +533,7 @@ def site_gate(ins, kind, arg):
     emit(BLR(30))
     ret = here()
     emit(LDP_POST(29, 30, 31, 16))
-    emit(B(here(), ins.address + 4))
+    emit(BX(here(), ins.address + 4))
     gates.append((ret, kind, arg, ins.address))
     return start
 
@@ -548,7 +551,7 @@ def site_obs(off, oid, word):
     ret = here()
     emit(LDP_POST(29, 30, 31, 16))
     emit(word)
-    emit(B(here(), off + 4))
+    emit(BX(here(), off + 4))
     gates.append((ret, 'obs', oid, off))
     return start
 
@@ -632,7 +635,7 @@ def site_window(seg):
         words.append(w)
     for w in words: emit(w)
     for t in [hi] + ex_targets:   # fall-through first
-        emit(STRX(S, T)); emit(LDP(S, T, 31, -16)); emit(B(here(), t)); emit(NOP)
+        emit(STRX(S, T)); emit(LDP(S, T, 31, -16)); emit(BX(here(), t)); emit(NOP)
     return start, lo, hi
 
 def retry_block(insl, k, wseg):
@@ -682,9 +685,9 @@ def site_retry_window(parts):
             else:
                 assert m not in ('adr', 'adrp', 'b', 'bl', 'br', 'blr', 'ret') and not (m == 'ldr' and '[' not in x.op_str), hex(x.address)
             emit(w)
-        emit(STRX(S, T)); emit(LDP(S, T, 31, -16)); emit(B(here(), ft)); emit(NOP)
+        emit(STRX(S, T)); emit(LDP(S, T, 31, -16)); emit(BX(here(), ft)); emit(NOP)
     for t in ex_targets:
-        emit(STRX(S, T)); emit(LDP(S, T, 31, -16)); emit(B(here(), t)); emit(NOP)
+        emit(STRX(S, T)); emit(LDP(S, T, 31, -16)); emit(BX(here(), t)); emit(NOP)
     return start
 
 # ---- Function boundaries (eh_frame_hdr) ----
@@ -715,6 +718,42 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import nso_code
 DATA_BLOCKS = nso_code.data_blocks(IMG, TEXT_END, md)
 CODE_RANGES = list(zip([0] + [e for _, e in DATA_BLOCKS], [s for s, _ in DATA_BLOCKS] + [TEXT_END]))
+
+# ---- Hops: branches beyond a b's reach (GAP above) ----
+# A branch between the code and a patch area that a b does not reach goes through a hop: a b written into a word of the text that no path runs, within reach of both ends, like a
+# linker's range extension thunk. Those words are alignment padding: the nop or zero words right before an unwind entry's start, after an instruction that ends every path through it
+# (b, br, ret, brk), and fewer bytes of them than the start's alignment, so they are only the padding that aligns it. One hop serves every branch to its target that it reaches.
+# Only a module with GAP needs one; any other module's branches all reach, so its output is unchanged
+REACH = (1 << 27) - 4
+_holes, _hops = None, {}
+def hop_holes():
+    """The padding words that may hold a hop, in address order (the text as the file has it)"""
+    out, data = [], [(s, e) for s, e in DATA_BLOCKS]
+    for s in starts:
+        if s < 8 or s & 15: continue
+        align, k = s & -s, s
+        while k - 4 >= 0 and struct.unpack_from('<I', ORIG_TEXT, k - 4)[0] in (0, 0xD503201F): k -= 4
+        if k == s or s - k >= align or k < 4: continue
+        p = struct.unpack_from('<I', ORIG_TEXT, k - 4)[0]
+        if not (p & 0xFC000000 == 0x14000000 or p & 0xFFFFFC1F in (0xD61F0000, 0xD65F0000) or p & 0xFFE0001F == 0xD4200000): continue
+        if any(a < s and k < b for a, b in data): continue
+        out.extend(range(k, s, 4))
+    return out
+def reach_via(frm, to):
+    """to when a b at frm reaches it, else a hop that does (and that reaches to)"""
+    global _holes
+    if -REACH - 4 <= to - frm <= REACH: return to
+    for h in _hops.get(to, ()):
+        if abs(h - frm) <= REACH: return h
+    if _holes is None: _holes = hop_holes()
+    lo, hi = max(frm, to) - REACH, min(frm, to) + REACH
+    i = bisect.bisect_left(_holes, lo)
+    assert i < len(_holes) and _holes[i] <= hi, f'no padding word for a hop from {frm:#x} to {to:#x} (between {lo:#x} and {hi:#x})'
+    h = _holes.pop(i)
+    assert IMG[h:h + 4] == ORIG_TEXT[h:h + 4], f'hop {h:#x} was written by something else'
+    struct.pack_into('<I', IMG, h, B(h, to)); _hops.setdefault(to, []).append(h); stat('hop')
+    return h
+def BX(frm, to): return B(frm, reach_via(frm, to))
 def exclusive_order_sites(img, ranges):
     """Offsets of the exclusive loads and stores without ordering: ldxr / ldxrb / ldxrh / ldxp and stxr / stxrb / stxrh / stxp, any size (each with its fixed fields exact; not CAS or CASP).
     Setting bit 15 makes each the same instruction with ordering: ldaxr* / ldaxp (acquire) and stlxr* / stlxp (release). Armv8 lets the accesses after an exclusive load without acquire
@@ -1552,7 +1591,7 @@ if new_mid:
             dest = at + 4 * d
             if dest in new_mid: assert func_of(at) == func_of(dest), f'branch into window from another function {at:x}'
 
-def put_branch(at, to): struct.pack_into('<I', IMG, at, B(at, to))
+def put_branch(at, to): struct.pack_into('<I', IMG, at, BX(at, to))
 for wseg in windows:
     use_area(wseg[0].address); st, lo, hi = site_window(wseg); stat('window'); put_branch(lo, st)
 for parts in retries:
@@ -1825,7 +1864,7 @@ def spin_store(ins):
 def spin_rebranch(ins, pc, tgt):
     """the direct branch ins re-encoded at pc with target tgt"""
     w = struct.unpack('<I', ins.bytes)[0]; off = tgt - pc
-    if ins.mnemonic == 'b': return B(pc, tgt)
+    if ins.mnemonic == 'b': return BX(pc, tgt)
     if ins.mnemonic in ('tbz', 'tbnz'):
         assert -(1 << 15) <= off < (1 << 15) and off % 4 == 0, f'spin wait tbz out of range {pc:#x}'
         return (w & ~(0x3FFF << 5)) | (((off >> 2) & 0x3FFF) << 5)
@@ -1975,13 +2014,13 @@ def spin_emit(g):
             if not (i + 1 < len(R) and R[i + 1] == ft): fixes.append((len(patch), None, ft)); emit(0)   # the next instruction is not the next one copied
     pause = here()
     emit(STP_PRE(29, 30, 31, -16)); emit_gate_call(); emit(BLR(30)); ret = here(); emit(LDP_POST(29, 30, 31, 16))
-    gates.append((ret, 'spin', 0, T)); emit(B(here(), cpy[T]))
+    gates.append((ret, 'spin', 0, T)); emit(BX(here(), cpy[T]))
     def out(t):   # an exit taken by a conditional branch: through a b next to the copy
-        if t not in tramp: tramp[t] = here(); emit(B(here(), t))
+        if t not in tramp: tramp[t] = here(); emit(BX(here(), t))
         return tramp[t]
     for idx, x, info in fixes:
         pc = PATCH_BASE + idx
-        if x is None: w = B(pc, cpy.get(info, info))
+        if x is None: w = BX(pc, cpy.get(info, info))
         elif isinstance(info, tuple): w = spin_rebranch(x, pc, out(info[1]))
         elif info is not None: w = spin_rebranch(x, pc, cpy[info])
         else:
@@ -1992,7 +2031,7 @@ def spin_emit(g):
     for b in sorted(valid):   # the original back-edges enter the copy
         x = nodes[b]['ins'][0]
         if x.mnemonic == 'b': put_branch(b, cpy[T])
-        else: st = here(); emit(spin_rebranch(x, here(), cpy[T])); emit(B(here(), b + 4)); put_branch(b, st)
+        else: st = here(); emit(spin_rebranch(x, here(), cpy[T])); emit(BX(here(), b + 4)); put_branch(b, st)
     stat('spin')
 spin_heads = sorted(spin_cand)
 

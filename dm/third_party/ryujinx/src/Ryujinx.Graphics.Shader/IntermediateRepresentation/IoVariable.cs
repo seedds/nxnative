@@ -54,5 +54,7 @@ namespace Ryujinx.Graphics.Shader.IntermediateRepresentation
         DirectCbeAddressLow,
         DirectCbeAddressHigh,
         IsbeOutput,
+        // nxnative: a user attribute at one of the triangle's three vertices, as Ampere's LDTRAM reads it (InstEmitAmpereMem ALdTram); the location is the attribute's location × 3 + the vertex
+        UserDefinedPerVertex,
     }
 }

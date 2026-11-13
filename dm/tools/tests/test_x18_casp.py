@@ -27,9 +27,9 @@ PATCH_BASE, KEY_PAGE, TSD, STACK, MEM = 0x10000, 0x20000, 0x30000, 0x40000, 0x50
 KEY_INDEX = {k: i for i, k in enumerate(('K18', 'KTLS', 'KTLR', 'KGATE'))}
 K18 = 0x40                                   # the slot's byte offset from tpidrro_el0, as the key page holds it
 scope = dict(vars(nso_asm), re=re, struct=struct, md=md, patch=bytearray(), PATCH_BASE=PATCH_BASE, KEY_PAGE_OFF=KEY_PAGE, KEY_INDEX=KEY_INDEX, fix=[])
-names = {'here', 'emit', 'emit_key_addr', 'emit_slot_addr', 'dis', 'regset', 'num', 'regs_in', 'casp_pair18', 'site_casp'}
+names = {'here', 'emit', 'emit_key_addr', 'emit_slot_addr', 'dis', 'regset', 'num', 'regs_in', 'casp_pair18', 'site_casp', 'BX', 'reach_via'}   # BX and reach_via (with REACH, _holes and _hops): the site's branches, through a hop where a b does not reach
 tree = ast.parse((TOOLS / 'patch_nso.py').read_text())
-exec(compile(ast.Module(body=[n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in names], type_ignores=[]), str(TOOLS / 'patch_nso.py'), 'exec'), scope)
+exec(compile(ast.Module(body=[n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in names or isinstance(n, ast.Assign) and {getattr(t, 'id', None) for t in ast.walk(n.targets[0])} & {'REACH', '_holes'}], type_ignores=[]), str(TOOLS / 'patch_nso.py'), 'exec'), scope)
 
 SITE = 0x1000                                # the original instruction's address; the block ends with b SITE + 4
 

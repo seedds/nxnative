@@ -1755,13 +1755,26 @@ def bdt_jobs(files, parts=64):
         if cur: jobs.append((p, r, tuple(cur)))
     return jobs, taken
 
+# The Duskbloods' shader archives: romfs/shader/*.shaderbnd.dcx (zlib) and shaderbdle.shaderbdlebnd.dcx (Oodle Kraken, the per-material shader bundles: 492 BND4 archives of CGSB)
+FS_SHADER_DCX = ('.shaderbnd.dcx', '.shaderbdlebnd.dcx')
+def undcx_krak(d, label, n, csz):
+    """Kraken (KRAK) DCX streams go through an external decoder: DM_OOZ names an ooz binary (github.com/powzix/ooz, GPL-3.0: kept out of the repository), run as ooz <in> <size> <out>"""
+    import subprocess, tempfile
+    ooz = os.environ.get('DM_OOZ')
+    if not ooz: red(f'{label}: an Oodle Kraken DCX; set DM_OOZ to an ooz binary to read it')
+    with tempfile.TemporaryDirectory(dir=os.environ.get('DM_OOZ_TMP')) as t:
+        src, dst = os.path.join(t, 'in'), os.path.join(t, 'out')
+        with open(src, 'wb') as f: f.write(d[0x4c:0x4c + csz])
+        r = subprocess.run([ooz, src, str(n), dst], capture_output=True)
+        if r.returncode or not os.path.exists(dst): red(f'{label}: ooz failed ({r.returncode})')
+        with open(dst, 'rb') as f: return f.read()
 def undcx(d, label):
     """FromSoftware's DCX container (big-endian): 'DCX\\0', +0x18 'DCS\\0' u32 length, u32 stored length, +0x24 'DCP\\0' + the method, +0x44 'DCA\\0' u32 8, then the stream. Dark Souls Remastered
     uses only DFLT (a zlib stream) on all 5,184 of its DCX entries"""
     import zlib
     n, csz = struct.unpack_from('>II', d, 0x1c)
-    if d[0x28:0x2c] != b'DFLT' or d[0x44:0x48] != b'DCA\0': red(f'{label}: DCX method {d[0x28:0x2c]}: only DFLT is known')
-    out = zlib.decompress(d[0x4c:0x4c + csz])
+    if d[0x44:0x48] != b'DCA\0' or d[0x28:0x2c] not in (b'DFLT', b'KRAK'): red(f'{label}: DCX method {d[0x28:0x2c]}: only DFLT and KRAK are known')
+    out = zlib.decompress(d[0x4c:0x4c + csz]) if d[0x28:0x2c] == b'DFLT' else undcx_krak(d, label, n, csz)
     if len(out) != n: red(f'{label}: DCX holds {len(out):#x} bytes, its header says {n:#x}')
     return out
 
@@ -3108,7 +3121,7 @@ def scan_blob(d, label, out, depth=0, left=None):
         for i, m in enumerate(cra.narc_members(d, label)): scan_blob(cra.undo(m), f'{label}/{i}', out, depth + 1)
         return
     if d[:4] == DCX:   # FromSoftware's compressed files: the shaderbnd archives are zlib (DFLT); other files that reach here by a chance byte match (The Duskbloods' geometry, Oodle KRAK) hold no shaders
-        if d[0x28:0x2c] != b'DFLT' and not label.endswith('.shaderbnd.dcx'): return
+        if d[0x28:0x2c] != b'DFLT' and not label.endswith(FS_SHADER_DCX): return
         d = undcx(d, label)
     if d[:4] == BND4:
         for nm, m in bnd4_members(d, label): scan_blob(m, f'{label}/{nm}', out, depth + 1, left)
@@ -3460,7 +3473,7 @@ def scan_file_in(args):
         try: pairs = unity_shaders(d, '/' + rel, found, trees if not TREES else dict(TREES))
         except unityfs.NoTree: return rel, {}, set(), 'defer'
         return rel, uniq_keys(found), var_pairs(found) | {(a, b, 'prog') for a, b in pairs}, trees
-    elif b'BNSH\0\0\0\0' not in d and b'BAHS' not in d and d[:4] != b'MSHD' and d[:4] != b'NDSR' and d[:4] != b'NARC' and d[:4] != b'NDVE' and not (d[:4] == b'SARC' and b'Yaz0' in d) and b'\x91\x68\x86\x19' not in d and MGFX not in d and NEEDLE not in d and d[:8] != PACX4 and d[:8] != SUMO_MUX and SUMO_NX not in d and NVNSH not in d and not (d[:4] == DCX and path.endswith('.shaderbnd.dcx')): return rel, {}, set(), {}   # a SARC may hold Yaz0 members, a NARC packed ones (cra.undo)
+    elif b'BNSH\0\0\0\0' not in d and b'BAHS' not in d and d[:4] != b'MSHD' and d[:4] != b'NDSR' and d[:4] != b'NARC' and d[:4] != b'NDVE' and not (d[:4] == b'SARC' and b'Yaz0' in d) and b'\x91\x68\x86\x19' not in d and MGFX not in d and NEEDLE not in d and d[:8] != PACX4 and d[:8] != SUMO_MUX and SUMO_NX not in d and NVNSH not in d and not (d[:4] == DCX and path.endswith(FS_SHADER_DCX)): return rel, {}, set(), {}   # a SARC may hold Yaz0 members, a NARC packed ones (cra.undo)
     else:
         scan_blob(d, '/' + rel, found)
         # whole GLSLC outputs in a file no other reader takes (FINAL FANTASY TACTICS - The Ivalice Chronicles: its engine's technique files, resources_nx/…/shader/*.tec, 261 outputs beside

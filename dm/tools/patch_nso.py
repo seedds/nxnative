@@ -23,7 +23,7 @@ if capstone.cs_version()[0] != 5:   # the rewriter uses Capstone 5's names (CS_A
     sys.exit(f'[RED] Capstone {capstone.__version__} is unsupported; the rewriter requires Capstone 5.x. Run: {shlex.join([sys.executable, "-m", "pip", "install", "capstone>=5,<6"])}')
 from capstone import *
 from capstone.arm64 import ARM64_OP_IMM, ARM64_OP_MEM, ARM64_OP_REG
-import nso, nso_asm
+import nso, nso_asm, rewrite_jobs
 from nso_asm import *   # the instruction encoders (B, ADRP, LDRX, ...), shared with the per-build patch files
 
 # The NSP script terminates a failed or cancelled rewrite with SIGTERM. Exit through the pool's context manager so it reaps the workers too.
@@ -795,7 +795,7 @@ def x18_words(lo, hi):
         a = last + 4 if last + 4 >= end else last + 8   # the chunk is done, or the word after the last decoded one is no instruction
     return out
 # The x18 scan and the spin wait search only read the original image, so they can run in worker processes.
-def in_parallel(fn, jobs):
+def in_parallel(fn, jobs, chunksize=None):
     """Returns [fn(*job) for job in jobs], computed in forked worker processes.
     The workers are forked on each call, so they see the module's state as it is at that point.
     Pool.terminate takes the job queue's lock for good, sends each worker one SIGTERM and joins it with no timeout, so that SIGTERM must end a worker wherever it lands. Python's handler
@@ -803,16 +803,17 @@ def in_parallel(fn, jobs):
     start first). So SIGTERM stays blocked across the fork, which keeps it pending in the kernel, until a worker has the default action back and that action can end it.
     In this process it acts only while waiting for the results: the handler's sys.exit raised during the pool's teardown could stop a terminate halfway and leave workers behind, or be discarded
     in a destructor."""
-    if WORKERS < 2 or len(jobs) < 2:
+    workers = rewrite_jobs.workers(WORKERS)
+    if workers < 2 or len(jobs) < 2:
         return [fn(*job) for job in jobs]
     def worker_signals():
         signal.signal(signal.SIGTERM, signal.SIG_DFL)
         signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGTERM})
     mask = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGTERM})   # the pool's threads inherit it: a worker that replaces a lost one starts the same way
     try:
-        with multiprocessing.get_context('fork').Pool(min(WORKERS, len(jobs)), initializer=worker_signals) as pool:
+        with multiprocessing.get_context('fork').Pool(min(workers, len(jobs)), initializer=worker_signals) as pool:
             signal.pthread_sigmask(signal.SIG_SETMASK, mask)   # a SIGTERM that came meanwhile acts here, inside the with, which reaps the workers
-            try: results = pool.starmap(fn, jobs)
+            try: results = pool.starmap(fn, jobs, chunksize)
             finally: signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGTERM})
             pool.close(); pool.join()   # finished: the workers leave by the pool's own sentinels, so a finished rewrite sends no SIGTERM
             return results
@@ -1440,67 +1441,112 @@ if any(fb - fa > BIG_FN for fa, fb in funcs):
         split += [(p, q) for p, q in ps if bisect.bisect_left(sites18, p) < bisect.bisect_left(sites18, q)]   # the pieces that hold x18 sites
         print(f'function {fa:#x}..{fb:#x} ({(fb - fa) / 2**20:.2f} MB, no unwind entries) analysed in {len(ps)} pieces')
     funcs = split
-for fa, fb in funcs:
-    insl = disasm_fn(fa, fb)
-    ws = find_windows(insl)
-    for wseg in ws:
-        windows.append(wseg); done |= {x.address for x in wseg}
-        if any(x.mnemonic == 'b' for x in wseg): newly_accepted.add(wseg[0].address)
-    for j, ins in enumerate(insl):
-        if ins.mnemonic == 'br' and ins.op_str == 'x18':
-            base = width = None
-            # 16 instructions back, as for the offset-table form: Hades main+0x1135d0 has six vector moves between the add and the br, which put its adr x18 nine back
-            ctx = insl[max(0, j - 16):j]
-            for p in reversed(ctx):
-                if p.mnemonic == 'adr' and p.op_str.startswith('x18,'): base = p.operands[1].imm; break
-            for p in reversed(ctx):
-                if p.mnemonic == 'add' and p.op_str.startswith('x18, x18,') and 'lsl #2' in p.op_str:
-                    # capstone names x30 'lr' (and x29 'fp'): Age of Calamity main+0x1382160 indexes with add x18,x18,x30,lsl #2 after ldrb w30,[x14,x12]
-                    rn = p.reg_name(p.operands[2].reg); idx = {'lr': 30, 'fp': 29}.get(rn, num(rn))
-                    for q in reversed(ctx):
-                        if q.mnemonic in ('ldrb', 'ldrsb') and num(q.reg_name(q.operands[0].reg)) == idx: width = 256
-                        if q.mnemonic in ('ldrh', 'ldrsh') and num(q.reg_name(q.operands[0].reg)) == idx: width = half_count(insl, q, base) or 65536 if base else 65536
-                        if width: break
-                    break
-            if not (base and width):
-                tgt = jump_offsets(insl, j) or jump_adr_offsets(insl, j)
-                if not tgt and tail_call(insl, j): tailcalls.add(ins.address); continue
-                if not tgt and (far := jump_bytes_far(insl, j)): jumps[ins.address] = far; continue
-                if not tgt: tgt = jump_offsets(insl, j, copy_first=True, far_base=True)   # the index copied before the check (check_before_copy) or the base set far back, only where every other form failed
-                if not tgt: tgt = jump_masked_pred(insl, j)   # the check on a masked copy made in the block, the index masked in the block that branches to it
-                if not tgt: tgt = jump_masked_not(insl, j)   # a complemented low-bit index with its zero case branched away: exactly mask entries
-                if not tgt: tgt = jump_offsets(insl, j, copy_first=True, far_base=True, forward_base=True)   # a unique base initialized in a later block that branches backward
-                if not tgt: tgt = jump_zero_extended(insl, j)   # a 32-bit checked value zero-extended into the index, with its full path to the br verified
-                assert tgt, f'jump table {ins.address:x}'
-                tabjumps[ins.address] = tgt; continue
-            jumps[ins.address] = (base, width)
-    # No jump may land in the middle of a window, except a retry block's branch onto the window's store-exclusive (retry_block), which gets a copy of its own
-    inwin = {x.address for wseg in ws for x in wseg}; heads = {wseg[0].address for wseg in ws}
-    rmid = set()
-    for k, x in enumerate(insl):
-        if x.mnemonic in ('b', 'bl', 'cbz', 'cbnz', 'tbz', 'tbnz') or x.mnemonic.startswith('b.'):
-            t = x.operands[-1].imm
-            if t in inwin and t not in heads:
-                wseg = next(w for w in ws if any(y.address == t for y in w))
-                if x.mnemonic != 'bl' and any(y.address == x.address for y in wseg):
-                    newly_accepted.add(wseg[0].address)
-                    continue
-                rb = retry_block(insl, k, wseg) if x.mnemonic not in ('b', 'bl') else None
-                assert rb, f'branch into window {x.address:x}'
-                assert not any(y.address in done for y in rb[0]), f'retry block overlaps a window {rb[0][0].address:x}'
-                tail_addrs = {y.address for y in rb[1]}
-                for y in rb[1]:
-                    if y.mnemonic in ('cbz', 'cbnz', 'tbz', 'tbnz') or y.mnemonic.startswith('b.'):
-                        dest = y.operands[-1].imm
-                        assert dest not in inwin or dest in heads or dest in tail_addrs, f'retry copy branches into window {y.address:x}'
-                retries.append([(rb[0], x.address + 4), (rb[1], wseg[-1].address + 4)])
-                done |= {y.address for y in rb[0]}; rmid |= {y.address for y in rb[0][1:]}
-    for x in insl:
-        if x.mnemonic in ('b', 'bl', 'cbz', 'cbnz', 'tbz', 'tbnz') or x.mnemonic.startswith('b.'):
-            assert x.operands[-1].imm not in rmid, f'branch into retry block {x.address:x}'
-    for a_, tgt in tabjumps.items():
-        if fa <= a_ < fb: assert not any(t in inwin and t not in heads for t in tgt), f'jump table target into window {a_:x}'
-    rmid_all |= rmid
+def analyze_function(fa, fb, known_jumps=None, known_tables=None):
+    """Read-only function analysis. Return instruction addresses, never Capstone objects, across process boundaries."""
+    global jumps, tabjumps
+    previous = jumps, tabjumps
+    jumps, tabjumps = dict(known_jumps or {}), dict(known_tables or {})
+    windows, done, retries, tailcalls = [], set(), [], set()
+    try:
+        newly_accepted = set()
+        insl = disasm_fn(fa, fb)
+        ws = find_windows(insl)
+        for wseg in ws:
+            windows.append(wseg); done |= {x.address for x in wseg}
+            if any(x.mnemonic == 'b' for x in wseg): newly_accepted.add(wseg[0].address)
+        for j, ins in enumerate(insl):
+            if ins.mnemonic == 'br' and ins.op_str == 'x18':
+                base = width = None
+                # 16 instructions back, as for the offset-table form: Hades main+0x1135d0 has six vector moves between the add and the br, which put its adr x18 nine back
+                ctx = insl[max(0, j - 16):j]
+                for p in reversed(ctx):
+                    if p.mnemonic == 'adr' and p.op_str.startswith('x18,'): base = p.operands[1].imm; break
+                for p in reversed(ctx):
+                    if p.mnemonic == 'add' and p.op_str.startswith('x18, x18,') and 'lsl #2' in p.op_str:
+                        # capstone names x30 'lr' (and x29 'fp'): Age of Calamity main+0x1382160 indexes with add x18,x18,x30,lsl #2 after ldrb w30,[x14,x12]
+                        rn = p.reg_name(p.operands[2].reg); idx = {'lr': 30, 'fp': 29}.get(rn, num(rn))
+                        for q in reversed(ctx):
+                            if q.mnemonic in ('ldrb', 'ldrsb') and num(q.reg_name(q.operands[0].reg)) == idx: width = 256
+                            if q.mnemonic in ('ldrh', 'ldrsh') and num(q.reg_name(q.operands[0].reg)) == idx: width = half_count(insl, q, base) or 65536 if base else 65536
+                            if width: break
+                        break
+                if not (base and width):
+                    tgt = jump_offsets(insl, j) or jump_adr_offsets(insl, j)
+                    if not tgt and tail_call(insl, j): tailcalls.add(ins.address); continue
+                    if not tgt and (far := jump_bytes_far(insl, j)): jumps[ins.address] = far; continue
+                    if not tgt: tgt = jump_offsets(insl, j, copy_first=True, far_base=True)   # the index copied before the check (check_before_copy) or the base set far back, only where every other form failed
+                    if not tgt: tgt = jump_masked_pred(insl, j)   # the check on a masked copy made in the block, the index masked in the block that branches to it
+                    if not tgt: tgt = jump_masked_not(insl, j)   # a complemented low-bit index with its zero case branched away: exactly mask entries
+                    if not tgt: tgt = jump_offsets(insl, j, copy_first=True, far_base=True, forward_base=True)   # a unique base initialized in a later block that branches backward
+                    if not tgt: tgt = jump_zero_extended(insl, j)   # a 32-bit checked value zero-extended into the index, with its full path to the br verified
+                    assert tgt, f'jump table {ins.address:x}'
+                    tabjumps[ins.address] = tgt; continue
+                jumps[ins.address] = (base, width)
+        # No jump may land in the middle of a window, except a retry block's branch onto the window's store-exclusive (retry_block), which gets a copy of its own
+        inwin = {x.address for wseg in ws for x in wseg}; heads = {wseg[0].address for wseg in ws}
+        rmid = set()
+        for k, x in enumerate(insl):
+            if x.mnemonic in ('b', 'bl', 'cbz', 'cbnz', 'tbz', 'tbnz') or x.mnemonic.startswith('b.'):
+                t = x.operands[-1].imm
+                if t in inwin and t not in heads:
+                    wseg = next(w for w in ws if any(y.address == t for y in w))
+                    if x.mnemonic != 'bl' and any(y.address == x.address for y in wseg):
+                        newly_accepted.add(wseg[0].address)
+                        continue
+                    rb = retry_block(insl, k, wseg) if x.mnemonic not in ('b', 'bl') else None
+                    assert rb, f'branch into window {x.address:x}'
+                    assert not any(y.address in done for y in rb[0]), f'retry block overlaps a window {rb[0][0].address:x}'
+                    tail_addrs = {y.address for y in rb[1]}
+                    for y in rb[1]:
+                        if y.mnemonic in ('cbz', 'cbnz', 'tbz', 'tbnz') or y.mnemonic.startswith('b.'):
+                            dest = y.operands[-1].imm
+                            assert dest not in inwin or dest in heads or dest in tail_addrs, f'retry copy branches into window {y.address:x}'
+                    retries.append([(rb[0], x.address + 4), (rb[1], wseg[-1].address + 4)])
+                    done |= {y.address for y in rb[0]}; rmid |= {y.address for y in rb[0][1:]}
+        for x in insl:
+            if x.mnemonic in ('b', 'bl', 'cbz', 'cbnz', 'tbz', 'tbnz') or x.mnemonic.startswith('b.'):
+                assert x.operands[-1].imm not in rmid, f'branch into retry block {x.address:x}'
+        for a_, tgt in tabjumps.items():
+            if fa <= a_ < fb: assert not any(t in inwin and t not in heads for t in tgt), f'jump table target into window {a_:x}'
+        return ([[x.address for x in w] for w in windows], done,
+                {a: v for a, v in jumps.items() if fa <= a < fb}, {a: v for a, v in tabjumps.items() if fa <= a < fb}, tailcalls,
+                [[([x.address for x in seg], end) for seg, end in parts] for parts in retries], rmid, newly_accepted)
+    finally:
+        jumps, tabjumps = previous
+
+
+def analyze_function_job(fa, fb):
+    try: return analyze_function(fa, fb)
+    except AssertionError as e: return str(e)   # a prior function's tables may select a different fallback: decide in address order
+
+
+def analyze_functions(funcs):
+    """Parallel independent analysis, merged in address order. Functions reached by earlier tables are rechecked with that context."""
+    import heapq
+    # Unsplit giant functions can consume gigabytes in Capstone: do those alone. Small modules avoid process startup.
+    jobs = sorted((f for f in funcs if f[1] - f[0] <= BIG_FN), key=lambda f: f[0] - f[1])
+    results = dict(zip(jobs, in_parallel(analyze_function_job, jobs, chunksize=1))) if sum(b - a for a, b in jobs) >= 0x10000 else {f: analyze_function_job(*f) for f in jobs}
+    known_jumps, known_tables, incoming, intervals = {}, {}, [], []
+    for fa, fb in funcs:
+        while incoming and incoming[0] < fa: heapq.heappop(incoming)
+        intervals = [(a, b) for a, b in intervals if b > fa]
+        dependent = bool(incoming and incoming[0] < fb) or any(a < fb for a, _ in intervals)
+        result = analyze_function(fa, fb, known_jumps, known_tables) if dependent or (fa, fb) not in results else results.pop((fa, fb))
+        if isinstance(result, str): raise AssertionError(result)
+        new_jumps, new_tables = result[2:4]
+        known_jumps.update(new_jumps); known_tables.update(new_tables)
+        for targets in new_tables.values():
+            for target in targets:
+                if target >= fb: heapq.heappush(incoming, target)
+        intervals += [(base, base + 4 * width) for base, width in new_jumps.values() if base + 4 * width > fb]
+        yield result
+
+
+for win, covered, jmps, tables, tails, retry, rmid, accepted in analyze_functions(funcs):
+    def instructions(addresses): return [dis(struct.unpack_from('<I', IMG, a)[0], a) for a in addresses]
+    windows += [instructions(w) for w in win]; done |= covered
+    jumps.update(jmps); tabjumps.update(tables); tailcalls |= tails
+    retries += [[(instructions(seg), end) for seg, end in parts] for parts in retry]; rmid_all |= rmid; newly_accepted.update(accepted)
 if far_into:   # functions analysed in pieces (pieces above): their far b / bl, and every jump table's targets (a cut may follow a br x18), may not land inside a window or a retry block
     win_mid = {x.address for wseg in windows for x in wseg[1:]}
     for at, to in far_into: assert to not in win_mid and to not in rmid_all, f'far branch into a window or retry block {at:x}'
@@ -2003,7 +2049,7 @@ else:
     open(P('patched.bin'), 'wb').write(IMG + bytearray(PATCH_OFF - len(IMG)) + patch)
 import hashlib
 with open(os.path.join(outdir, 'build_src.sha256'), 'w') as f:   # the same for every module: the rewriter and every patch file, by path from dm/tools
-    for src_ in (os.path.abspath(__file__), nso.__file__, nso_code.__file__, nso_asm.__file__, ue_cvar.__file__, ue_malloc.__file__, fps_target.__file__, ue_fixed_rate.__file__, unity_fps.__file__, unity_bucket.__file__, ue_region.__file__, ue_ring.__file__, snowdrop_pools.__file__, os.path.join(os.path.dirname(ue_malloc.__file__), 'loader_census.py'), *PATCH_FILES): f.write(hashlib.sha256(open(src_, 'rb').read()).hexdigest() + f'  {os.path.relpath(os.path.abspath(src_), os.path.dirname(os.path.abspath(__file__)))}\n')
+    for src_ in (os.path.abspath(__file__), nso.__file__, nso_code.__file__, nso_asm.__file__, rewrite_jobs.__file__, ue_cvar.__file__, ue_malloc.__file__, fps_target.__file__, ue_fixed_rate.__file__, unity_fps.__file__, unity_bucket.__file__, ue_region.__file__, ue_ring.__file__, snowdrop_pools.__file__, os.path.join(os.path.dirname(ue_malloc.__file__), 'loader_census.py'), *PATCH_FILES): f.write(hashlib.sha256(open(src_, 'rb').read()).hexdigest() + f'  {os.path.relpath(os.path.abspath(src_), os.path.dirname(os.path.abspath(__file__)))}\n')
 with open(P('fixups.tsv'), 'w') as f:
     f.write(f'# PATCH_OFF\t{PATCH_OFF:#x}\n# KEY_PAGE_OFF\t{KEY_PAGE_OFF:#x}\n# KEY_PAGE_SIZE\t0x4000\n# TEXT_END\t{TEXT_END:#x}\n# RO_OFF\t{RO_OFF:#x}\n# DATA_OFF\t{DATA_OFF:#x}\n')
     if FAR: f.write(f'# IMAGE_SIZE\t{IMAGE_SIZE:#x}\n# FILE_IMAGE_LEN\t{FILE_IMAGE_LEN:#x}\n')   # patch area before the base (negative PATCH_OFF): whole image size, length of the image part of the file

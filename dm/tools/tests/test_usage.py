@@ -3,6 +3,7 @@
 # function scanner, the rule precedence and the manifests' format
 import fnmatch, subprocess, sys, tempfile, unittest
 from pathlib import Path
+from unittest import mock
 
 REPO = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO / 'dm/tools'))
@@ -51,6 +52,18 @@ class Usage(unittest.TestCase):
         self.assertEqual({r[2] for r in rs}, {'shader:stage:*'})
         rs, mapped = usage.rules_for('dm/games/01007EF00011E000/README.md', {''}, rules)
         self.assertTrue(mapped); self.assertEqual(rs, [])   # documentation reaches no game
+
+    def test_shared_shader_targets_selects_only_its_layer_consumers(self):
+        manifests = {'vk': {('api', 'vulkan'): 1}, 'gl': {('api', 'gl'): 1},
+                     'nvn': {('api', 'nvn'): 1}, 'unknown': None}
+        changes = {'dm/gfx/tools/shader_targets.py': {'arguments', 'destinations'}}
+        with mock.patch.object(usage, 'changed_functions', return_value=changes), \
+                mock.patch.object(usage, 'host_graph', return_value=({}, {}, {})):
+            impact = usage.impact('HEAD..HEAD', manifests)
+        self.assertEqual(impact['unmapped'], [])
+        self.assertEqual({p for p, _ in impact['patterns']}, {'api:vulkan', 'api:gl'})
+        self.assertEqual({g: row['status'] for g, row in impact['games'].items()},
+                         {'vk': 'broad', 'gl': 'broad', 'nvn': 'not affected', 'unknown': 'unknown'})
 
     def test_manifest_roundtrip(self):
         with tempfile.TemporaryDirectory() as d:

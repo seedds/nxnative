@@ -235,7 +235,8 @@ static class P {
 
     // Files whose data failed the hash check: listed at the end; exit code 3 unless --allow-damaged
     static readonly List<string> g_damaged = new List<string>(); static bool g_allow; static Func<IFileSystem> g_lenient; static IFileSystem g_lenientFs;
-    static bool HashError(HorizonResultException e) => e.ResultValue.Module == 2 && e.ResultValue.Description >= 4600 && e.ResultValue.Description < 4700;   // fs: integrity verification failures (2002-46xx)
+    // LibHac can throw the storage result directly or return it through RomFsFile, which translates it to 2002-4144.
+    static bool HashError(HorizonResultException e) => (e.ResultValue.Module == 2 && e.ResultValue.Description >= 4600 && e.ResultValue.Description < 4700) || e.ResultValue == ResultFs.NonRealDataVerificationFailed.Value || e.ResultValue == ResultFs.RomNonRealDataVerificationFailed.Value;
     // Lists a file that failed the hash check and returns a new checked filesystem to read on with. LibHac's CachedStorage takes a block off its list before reading into it and
     // does not put it back when the read fails, so after a few failures its 4 blocks are gone and the next read throws "The LinkedList is empty", which is no hash error.
     static IFileSystem Failed(string path, Func<IFileSystem> open) { g_damaged.Add(path); return open(); }

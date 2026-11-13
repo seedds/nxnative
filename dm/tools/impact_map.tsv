@@ -84,6 +84,7 @@ dm/gfx/tools/dmsh_chain.*	shader:stage:*	the chain version: every NVN game's lib
 dm/gfx/tools/dmsh_abi.py	shader:stage:*	the reader of the shader library ABI: every NVN game's libraries
 dm/gfx/tools/dmsh_ampere.py	shader:stage:*	the Switch 2 (NVN2) control section fields the build reads (code length, c1, early fragment tests): every NVN2 game's libraries
 dm/gfx/tools/dmsh_mtlcache.py	shader:stage:*	the Metal compile cache
+dm/gfx/tools/dmsh_schedule.py	shader:stage:*	translation and dependency-ready compilation scheduling
 dm/gfx/tools/own_compilers.py	shader:stage:*	the tested-compiler build guard
 dm/gfx/tools/tool_lock.py	shader:stage:*	the tool lock check every NVN shader build runs first (not part of the chain version)
 dm/gfx/tools/dmsh_dryrun.py	shader:stage:*	the standalone shader conversion check
@@ -99,12 +100,15 @@ dm/third_party/ryujinx/*/InstEmitMemory.cs	shader:buffer_atomic	global and share
 dm/third_party/ryujinx/*	shader:stage:*	fallback: any other translator change
 dm/gfx/tools/vk_shaders.py	api:vulkan	Vulkan shaders
 dm/gfx/tools/gl_shaders.py	api:gl	OpenGL shaders
+dm/gfx/tools/shader_targets.py	api:vulkan	platform selection for Vulkan shader outputs
+dm/gfx/tools/shader_targets.py	api:gl	platform selection for OpenGL shader outputs
 dm/gfx/tools/pso_offline.py	present:pipeline_prebuild	the offline pipeline archive of the Mac app and the iPhone
 dm/gfx/tools/c1_guard.py	shader:stage:*	the c1 guard table
 dm/gfx/tools/cb_extent.py	shader:stage:*	the uniform read extents
 dm/gfx/tools/shader_split.py	shader:stage:*	the shader tables (after a split)
 dm/gfx/tools/unityfs.py	shader:stage:*	the Unity serialized shader reader (after a split)
 dm/tools/patch_nso.py	*:*	the rewriter: every game's code
+dm/tools/rewrite_jobs.py	*:*	CPU allocation across rewritten code modules
 dm/tools/nso_*.py	*:*	the rewriter: every game's code
 dm/tools/sdk_patches.py	*:*	the SDK modules' patches (by build ID)
 dm/tools/romfs_image.py	*:*	RomFS image packing: every game's files

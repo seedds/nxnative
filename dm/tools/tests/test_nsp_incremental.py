@@ -896,6 +896,8 @@ class RewriteWorkers(Base):
                      mock.patch.object(nsp.subprocess, 'Popen', return_value=mock.Mock(returncode=0, poll=lambda: 0)) as popen:
                     nsp.rewrite(Path(sys.executable), REPO, self.ex / 'ExeFS', out, env, self.tmp / 'logs', g)
                 self.assertEqual(popen.call_args.kwargs['env']['DM_REWRITE_J'], expected)
+                self.assertEqual('DM_REWRITE_BUDGET' in popen.call_args.kwargs['env'], not bool(value))
+                self.assertFalse((out / '.workers').exists())
                 self.assertEqual(env['DM_REWRITE_J'], value)
 
     def test_invalid_workers_fail_before_collecting_modules(self):
@@ -914,7 +916,7 @@ class LayerShaders(Base):
         logs = self.tmp / 'logs'; logs.mkdir(); runs = []
         def translate(cmd, log, **kw):
             api = Path(cmd[1]).stem.split('_')[0]
-            lib = Path(cmd[-1]) / api / f'{api}_shaders.metallib'
+            lib = Path(cmd[cmd.index('--targets') - 1]) / api / f'{api}_shaders.metallib'
             lib.parent.mkdir(parents=True); lib.write_bytes(b'library')
             Path(log).write_text('macosx: 1\n'); runs.append(api)
         with mock.patch.object(nsp, 'run', side_effect=translate), mock.patch.object(nsp, 'toolchain', return_value=()), \

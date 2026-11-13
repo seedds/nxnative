@@ -20,13 +20,13 @@
 # Output: <out>/vk/vk_shaders.metallib and <out>/vk/vk_shaders.tsv; --ios <dir> also writes <dir>/vk/ with an iPhone library (same table)
 # Table rows: key <TAB> stage (vert / frag) <TAB> resources, space-separated kind:set.binding=slot[*count] (count: an array of descriptors in consecutive slots; u uniform buffer, b storage buffer, t image, s sampler, c combined image sampler = texture and sampler slot n,
 #   p push constants)
-# Usage: vk_shaders.py <SPIR-V dir>... <out dir> [--ios <dir>]   (SPIR-V dirs: the RomFS, capture folders)
+# Usage: vk_shaders.py <SPIR-V dir>... <out dir> [--ios <dir>] [--targets mac|ios|mac,ios]   (SPIR-V dirs: the RomFS, capture folders)
 import concurrent.futures as cf, hashlib, json, os, re, struct, subprocess, sys, tempfile
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../tools'))
 from romfs import os, open
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from dmsh_chain import SPIRV_CROSS, MAC_MIN_FLAG   # the in-repo spirv-cross build the NVN chain uses too (spirv_cross_bin)
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '../../ios/tools')); from ios_metal import IOS_FLAGS   # the iPhone's deployment target and math mode
+import shader_targets
+from dmsh_chain import SPIRV_CROSS   # the in-repo spirv-cross build the NVN chain uses too (spirv_cross_bin)
 
 MAGIC = 0x07230203
 OP_DECORATE, OP_MEMBER_DECORATE, OP_TYPE_ARRAY, OP_TYPE_RTARRAY, OP_TYPE_STRUCT = 71, 72, 28, 29, 30
@@ -162,11 +162,8 @@ def metallib(msls, out, sdk, extra):
     return lib
 
 def main():
-    a = sys.argv[1:]
-    ios = None
-    if '--ios' in a: i = a.index('--ios'); ios = a[i + 1]; del a[i:i + 2]
-    if len(a) < 2: sys.exit('usage: vk_shaders.py <SPIR-V dir>... <out dir> [--ios <dir>]')
-    roots, out = a[:-1], a[-1]
+    args = shader_targets.arguments(sys.argv[1:], 'SPIR-V paths')
+    roots = args.roots
     files = [(p, r) for r in roots for p in spirv_files(r)]
     if not files: red(f'no SPIR-V files in {" ".join(roots)}')
     with tempfile.TemporaryDirectory() as tmp:
@@ -182,13 +179,10 @@ def main():
         tsv = ['# Vulkan shaders (dm/gfx/tools/vk_shaders.py): key = sha256(SPIR-V)[:16], Metal function vk_<key>; resources kind:set.binding=slot (u uniform buffer, b storage buffer, t image, s sampler, c combined, p push constants)',
                '# spirv-cross ' + ' '.join((lambda r: r.stdout + r.stderr)(subprocess.run([SPIRV_CROSS, '--revision'], capture_output=True, text=True)).split())]
         tsv += [f'{k}\t{v[0]}\t{" ".join(v[1])}\t{v[3]}' for k, v in sorted(seen.items())]
-        dirs = [(os.path.join(out, 'vk'), 'macosx', [MAC_MIN_FLAG])]   # the Mac host's minimum macOS, as the NVN chain's libraries (dmsh_chain.py MAC_MIN)
-        # The iPhone library is compiled with -fmetal-math-mode=relaxed, as the NVN chain's (dm/ios/tools/ios_metal.py): the default fast mode lets the GPU compiler assume there is
-        # no NaN / Inf, which would let it drop the NaN handling of the precise:: functions above
-        if ios: dirs.append((os.path.join(ios, 'vk'), 'iphoneos', list(IOS_FLAGS)))
+        dirs = shader_targets.destinations(args, 'vk')
         for d, sdk, extra in dirs:
             lib = metallib(msls, d, sdk, extra)
-            open(os.path.join(d, 'vk_shaders.tsv'), 'w').write('\n'.join(tsv) + '\n')
+            with open(os.path.join(d, 'vk_shaders.tsv'), 'w') as table: table.write('\n'.join(tsv) + '\n')
             print(f'{sdk}: {len(seen)} shaders → {lib}')
 
 if __name__ == '__main__': main()

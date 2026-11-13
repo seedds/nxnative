@@ -64,6 +64,33 @@ Each item was found from a red line or a pass dump on the way through the langua
 
 - **Resolved: the Mac app's bundled pipeline archive was built for the wrong depth mode** (GitHub issue #614, MacBook Air M4, Mac app at `38b8907`). The game calls `nvnDeviceSetDepthMode` with near = 0 (`[nvn] depth mode near=0` in the Mac report and in both iPhone logs of issues #149 and #292), and the profile had no `depth_mode`, so the NSP script's prebuild made the bundled archive's 1.2 GB of bases for near = −w (`main0` vertex entries). The host follows the game's mode and found none of them: `pipeline archive bundled with the app: made for … depth near=-w … this run needs … depth near=0 … the device builds the bases it does not hold`. Every base then compiled on the Mac while playing (`archive lookups … found none 6`, `bases compiled 3 / 258.6 ms` up to frame 1200), one cause of the hitches on new moves and effects that the report describes. **Current:** `depth_mode zero`, as Legends: Arceus, Scarlet and Violet set; it changes only the bases made offline (the shader input digest and the libraries are unchanged), so an app or IPA packed again gets an archive the game uses. **Open:** not yet re-measured with a repacked app; shader library loads (`shader libraries 12` in the report's 105 ms frame) are not covered by the archive. The report's other symptom, frame intervals alternating 33 / 50 ms in fullscreen with the GPU at 23–25 ms a frame (`old frames dropped by merging 157` per 300 ticks, gone while macOS screen capture runs), is not explained by this; see [Frame latency 2 for the display link in fullscreen](../../../docs/reference/frame-rate.md#frame-latency-2-for-the-display-link-in-fullscreen).
 
+## First-build stage measurements
+
+**Historical, 2026-10-31:** individual stages on update 2.0.2 / v393216, Apple M2 Max, with warm filesystem caches and fresh outputs. These measurements predate the current integration; they are not cold-disk or complete-build timings.
+
+| Stage | Runs per version | Before median | After median | Reduction |
+|---|---:|---:|---:|---:|
+| Full rewrite of `main` | 3 | 25.498 s | 22.153 s | 13.1% |
+| Full shader split, RomFS + `main` | 5 | 19.338 s | 15.706 s | 18.8% |
+
+Shader timings ranged from 16.395–29.172 s before and 15.310–29.586 s after, with system indexing active. This limits the precision of the estimated improvement.
+
+**Current limitation:** parallel RomFS extraction was withdrawn after a second-machine review found a large-image slowdown on a 16 GB Mac. The serial extractor is retained; no extraction speedup is claimed. The cause of the slowdown remains open.
+
+## First-build scheduling measurements
+
+**Historical, 2026-11-01:** stage measurements on the same game's inputs and an Apple M2 Max, comparing the earlier first-build changes with dependency-based shader scheduling, adaptive rewrite allocation and concurrent PSO input preparation. These stages have different baselines from the table above; their reductions cannot be added.
+
+| Stage | Runs per version | Before median | After median | Reduction |
+|---|---:|---:|---:|---:|
+| Shader sample, 982 shaders with dependencies | 3 | 123.245 s | 116.296 s | 5.6% |
+| Full `main` + `sdk` rewrite stage | 3 | 35.835 s | 23.384 s | 34.7% |
+| PSO preparation, 26,051 pairs / 26,029 bases | 5 | 8.862 s | 6.983 s | 21.2% |
+
+Shader and rewrite estimates are noisy: shader ranges were 113.822–160.096 s before and 113.126–136.036 s after; rewrite ranges were 21.969–37.801 s before and 22.808–48.868 s after. These medians do not establish precise gains, especially for shader scheduling. PSO timing includes input reading, planning, serialization, hashing and writing fresh descriptors/stamps; it excludes `metal-tt` compilation.
+
+**Current limitations:** the shader timing used an unsupported local Metal compiler. Full Mac/iOS shader validation with the pinned compiler, broader game coverage and gameplay validation remain outstanding. The game has no registered smoke route. No complete cold-disk or end-to-end first-build speedup has been measured.
+
 ## Mac routes
 
 - A fresh save reaches play in Lumiose City with `DM_KBD=Taylor DM_KEYS="f450:A,f1200:LRight~1,f1600:A,f1900:Down,f2000:Down,f2100:A,f2400:A*80/90"`.
@@ -102,6 +129,8 @@ General host changes first needed here; each applies to every game:
 
 - **Shader extraction reuse after translation-only updates:** [Shader extraction reruns after translation-only updates](../../../docs/reference/shaders.md#shader-extraction-reruns-after-translation-only-updates).
 - **Offline pipeline archive reuse across chains:** [Offline pipeline archive rebuilt after a chain-only update](../../../docs/reference/shaders.md#offline-pipeline-archive-rebuilt-after-a-chain-only-update).
+- **First-build parallelism:** [function analysis](../../../docs/reference/rewriter.md#function-analysis-runs-on-one-cpu-core) and [shader discovery](../../../docs/reference/shaders.md#main-and-archive-discovery-delay-independent-shader-scans). [Parallel RomFS extraction was withdrawn](../../../docs/reference/packing.md#parallel-romfs-extraction-can-be-slower-than-serial-extraction). Measurements and validation limits are [above](#first-build-stage-measurements).
+- **First-build scheduling:** [shader translation and compilation](../../../docs/reference/shaders.md#translation-batches-delay-shader-compilation), [module CPU allocation](../../../docs/reference/rewriter.md#small-modules-leave-rewrite-workers-idle) and [PSO input preparation](../../../docs/reference/shaders.md#offline-pipeline-input-preparation-rereads-libraries-serially). Measurements and limitations are [above](#first-build-scheduling-measurements).
 - **The pool enforced as on Horizon** (`mem_map_limit`, `hle_svc.c`): [the profile keys](../README.md#keys), [Maps past the application pool fail as on Horizon](../../../docs/reference/memory.md#maps-past-the-application-pool-fail-as-on-horizon).
 - **Trinity packs decoded with the game's own Oodle** (`trpfs_jobs` / `trinity_shaders`, `hle_oodle.c`, `DM_OODLE_HOST` / `DM_OODLE_MODULES`, set by the NSP script for any game with `ONEPACK` files): [BNSH in Trinity packs](../../../docs/reference/shaders.md#bnsh-in-trinity-packs), [01, Compressed RomFS content](../../../docs/agents/01-extract.md#compressed-romfs-content).
 - **SDK 19 calls:** csrng bytes, `GetAudioOutBufferCount` from the host queue, NVN state getters, `WaitForAddress` type 3, `OP_FENCE_SYNC`: [Cryptographically random bytes](../../../docs/reference/services.md#cryptographically-random-bytes), [AudioOut buffer count from the host queue](../../../docs/reference/audio.md#audioout-buffer-count-from-the-host-queue), [State read back through NVN getters](../../../docs/reference/nvn-objects.md#state-read-back-through-nvn-getters), [WaitForAddress type 3](../../../docs/reference/threads.md#waitforaddress-type-3-64-bit-wait-if-equal), [Fence syncs recorded in command buffers](../../../docs/reference/nvn-objects.md#fence-syncs-recorded-in-command-buffers).

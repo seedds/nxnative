@@ -2792,10 +2792,14 @@ def sarc_members(d, label='SARC'):
     for i in range(n):
         h, attr, s, e = struct.unpack_from('<IIII', d, hl + 12 + 16 * i)
         if not s <= e <= len(d) - doff: red(f'{label}: SARC member {i} at {s:#x}..{e:#x} of the data lies outside its {len(d) - doff:#x} bytes')
-        if attr >> 24:   # up to the name's own NUL: splitting the rest of the archive per member was quadratic (Fire Emblem Fortune's Weave's Layout/Common.arc.zst: 6 minutes)
-            o = names + (attr & 0xffffff) * 4; z = d.find(b'\0', o)
-            nm = d[o:z if z >= 0 else len(d)].decode('utf-8', 'replace')
-        else: nm = f'#{i}'
+        nm = f'#{i}'
+        if attr >> 24:
+            start = names + (attr & 0xffffff) * 4
+            if not names <= start < doff: red(f'{label}: SARC member {i} name at {start:#x} lies outside the name table')
+            end = d.find(b'\0', start, doff)
+            if end < 0: red(f'{label}: SARC member {i} name is unterminated before the data at {doff:#x}')
+            # Only copy the name: slicing/splitting the archive tail per member scans its payload over and over.
+            nm = d[start:end].decode('utf-8', 'replace')
         yield nm, d[doff + s:doff + e]
 
 NV_STAGES = ['vs', 'ps', 'gs', 'hs', 'ds', 'cs']   # NVN stage order
@@ -3394,10 +3398,88 @@ def scan_batch(jobs):   # scan_file over a batch of jobs, in a pool worker
     return [scan_file(j) for j in jobs]
 
 
+def scan_mains(mains, first_image):
+    """Scan executable versions serially in one worker, bounding the number of full images in memory."""
+    saved = COMMON, TREES, ZDICTS
+    _pool_init(None, {}, {})   # the original main scan runs before the file workers' Unity/dictionary context
+    results = []
+    try:
+        for i, (romfs, mainnso, tag) in enumerate(mains):
+            img = first_image if i == 0 else nso_image(mainnso)
+            first_image = None
+            assert img is not None   # the caller supplies the first executable image
+            found = []; scan_blob(img, 'main' + ('@' + tag if tag else ''), found)
+            found += glslc_shaders(img, 'main' + ('@' + tag if tag else ''), need=False)
+            found += tfxo_streams(img, 'main' + ('@' + tag if tag else ''))   # YEBIS's effect file, a zlib stream in main (Pokémon Sword)
+            found += retro_main_forms(img, 'main' + ('@' + tag if tag else ''))   # Retro's startup material archive, LZSS in main (Donkey Kong Country: Tropical Freeze)
+            if RGXD in img: found += rgxd_shaders(img, 'main' + ('@' + tag if tag else ''))
+            found += raw_shaders(img, 'main' + ('@' + tag if tag else ''), {c[:struct.unpack_from('<I', c, 0x20)[0]] for _, _, c, _ in found})
+            # NROs the game decodes at run time: only the first version, as in the original serial main scan (Mario Tennis Fever's boot stub loads the code holding its UI and sky shaders).
+            if not i:
+                for n in boot_nros():
+                    scan_blob(open(n, 'rb').read(), f'main/{os.path.basename(n)}', found)
+            # GLSLC outputs the game compiles at run time, captured on the Mac (hle_glslc.c): <version dir>/glslc_capture, or DM_GLSLC_CAPTURE. A game needs them when main holds GLSL sources and
+            # calls glslcCompile in a module it loads (Fire Emblem: Three Houses; profile_guess.py shader_sources). Captain Toad: Treasure Tracker imports it with agl's GLSL sources, but no module defines it
+            cap = os.environ.get('DM_GLSLC_CAPTURE') or os.path.join(os.path.dirname(os.path.abspath(romfs)), 'glslc_capture')
+            names = sorted(f for f in os.listdir(cap) if f.endswith('.glslc') and not f.startswith('._')) if os.path.isdir(cap) else []   # AppleDouble metadata beside captures on external drives
+            if not names and glsl_sources(img) and 'glslcCompile' in main_imports(img) and glslc_module(os.path.dirname(os.path.abspath(mainnso))):
+                print(f'[RED] main holds GLSL sources and imports glslcCompile, but there are no captured GLSLC outputs in {cap}: the shaders the game compiles at run time will have no translation (the NSP script checks an empty capture against the offline split)', flush=True)
+            for nm in names: found += glslc_shaders(open(os.path.join(cap, nm), 'rb').read(), f'/glslc_capture/{nm}')
+            # Unreal Engine shader code archives decoded on the Mac (uepak.py): <version dir>/ue_shaders, or DM_UE_SHADERS; needed when the RomFS has Unreal paks
+            ued = os.environ.get('DM_UE_SHADERS') or os.path.join(os.path.dirname(os.path.abspath(romfs)), 'ue_shaders')
+            names = sorted(f for f in os.listdir(ued) if f.endswith('.ushaderbytecode') and not f.startswith('._')) if os.path.isdir(ued) else []   # AppleDouble metadata, not decoded shader archives
+            if not names and uepak.unreal_paks(romfs, inline=False, mains=[mainnso]): red(f'the RomFS has Unreal paks, but there are no decoded shader code archives in {ued} (the NSP script writes them)')
+            for nm in names: found += ue_shaders(open(os.path.join(ued, nm), 'rb').read(), f'/ue_shaders/{nm}')
+            results.append(('main', {skey(c, k): (w, s, c, k) for w, s, c, k in found}, var_pairs(found), {}))
+        return results
+    finally:
+        _pool_init(*saved)
+
+
+def archive_jobs(files, mains=()):
+    """Prepare archive ranges once, retaining the existing archive and loose-file source order."""
+    linked = [(p, jobs) for p, r in files if (jobs := linkdata_jobs(p, r))]
+    linkpaths = {p for p, _ in linked}
+    big = [j for _, jobs in linked for j in jobs]   # Three Houses' 6.9 GB DATA1.bin: one job per range of entries, not one read of the whole file
+    pak_jobs, paks = kpka_jobs(files)   # Monster Hunter Rise's PAKs: the newest copy of each path, in ranges of entries
+    tr_jobs, trp = trpfs_jobs(files)   # Pokémon Legends: Z-A's Trinity packs (data.trpfs and its index data.trpfd), decoded by the game's own Oodle in the Mac host
+    ue_jobs, uep = ue_legacy_jobs(files, mains=mains)   # Unreal paks with inline shaders: DRAGON QUEST XI S's legacy ones (the game's own LZ5 in the Mac host), OCTOPATH TRAVELER II's (Zlib)
+    bd_jobs, bdts = bdt_jobs(files)   # Dark Souls Remastered's dvdbnd archives: the entries of each .bdt by its .bhd5 index, in ranges
+    arc_jobs, arcs = smash_arc_jobs(files)   # Super Smash Bros. Ultimate's data.arc: its current files, in ranges
+    pz_jobs, pkzs = pkz_jobs(files)   # Bayonetta 3's PKZ archives, Oodle Kraken decoded by the game's own decoder in the Mac host
+    ck_jobs, cpks = cpk_jobs(files)   # Bayonetta 2's CRI CPK archives (CRILAYLA entries)
+    d3_jobs, d3s = d3cpk_jobs(files)
+    ca_jobs, cascs = casc_jobs(files)
+    cr_jobs, cras = cra_jobs(files)   # Mario Tennis Fever's CRA archive, its index in the NRO the game decodes at run time
+    zp_jobs, zips = zip_jobs(files)   # Portal's game.zip (Deflate members)
+    ah_jobs, arhs = arh_jobs(files)   # Monolith's ARH1/ARD archives and embedded XBC1/HCPS programs
+    fb_jobs, fbs = frostbite_jobs(files)   # EA SPORTS FC 27's Frostbite bundles, Oodle Leviathan decoded by the game's own decoder in the Mac host
+    pd_jobs, pdats = pdat_jobs(files)   # Kirby Air Riders' PDAT archive ranges, as in the serial discovery order
+    rp_jobs, rpfs = rpf_jobs(files, mains)
+    big += pak_jobs + tr_jobs + ue_jobs + bd_jobs + arc_jobs + pz_jobs + ck_jobs + d3_jobs + ca_jobs + cr_jobs + zp_jobs + ah_jobs + fb_jobs + pd_jobs + rp_jobs
+    files = [(p, r) for p, r in files if p not in linkpaths and p not in paks and p not in trp and p not in uep and p not in bdts and p not in arcs and p not in pkzs and p not in cpks and p not in d3s and p not in cascs and p not in cras and p not in zips and p not in arhs and p not in fbs and p not in pdats and p not in rpfs]
+    return big, files
+
+
+def scan_inputs(ex, mains, files, first_image):
+    main_result = ex.submit(scan_mains, mains, first_image)
+    discovered = ex.submit(archive_jobs, files, [mainnso for _, mainnso, _ in mains])
+    big, loose = discovered.result()
+    batches = [[j] for j in big] + [loose[i:i + 16] for i in range(0, len(loose), 16)]
+    # Main analysis, archive ranges and loose files can overlap. Results still give main and archives precedence.
+    results = pooled_batches(ex, batches, len(big) + len(loose))
+    return main_result.result() + results
+
+
 def pooled(ex, jobs, total, start=0, chunk=1):
     """scan_file over jobs in the pool, the results in job order, with a 'progress: <done>/<total>' line at most twice a second (the NSP script shows it as
     the stage's count). The count is of the jobs finished in any order: counted in order it would stall behind one slow archive range while the others finish"""
     batches = [jobs[i:i + chunk] for i in range(0, len(jobs), chunk)]
+    return pooled_batches(ex, batches, total, start)
+
+
+def pooled_batches(ex, batches, total, start=0):
+    """One queue for differently sized batches; progress follows completion, results follow submission."""
     futures = {ex.submit(scan_batch, b): len(b) for b in batches}
     done, pending, shown = start, set(futures), 0.0
     while pending:
@@ -3416,38 +3498,15 @@ def main():
     # The first version's source column is unchanged; later versions are prefixed with their workspace directory name (e.g. v327680): /v327680/Shader/…, main@v327680. They sort after the first version, so existing rows keep their package indices.
     romfs_v, main_v = romfs_l.split(','), main_l.split(',')
     if len(romfs_v) != len(main_v): red(f'{len(romfs_v)} RomFS and {len(main_v)} main: they must pair one to one')
-    files, results, common = [], [], None
+    files, mains = [], []
     for i, (romfs, mainnso) in enumerate(zip(romfs_v, main_v)):
         tag = os.path.basename(os.path.dirname(os.path.abspath(romfs))) if i else ''
         files += sorted((os.path.join(dp, f), (tag + '/' if tag else '') + os.path.relpath(os.path.join(dp, f), romfs)) for dp, _, fs in os.walk(romfs) for f in fs)
-        img = nso_image(mainnso)
-        if not i:
-            import unityfs
-            try: common = unityfs.common_strings(img)
-            except ValueError: common = None   # not a Unity game
-        found = []; scan_blob(img, 'main' + ('@' + tag if tag else ''), found)
-        found += glslc_shaders(img, 'main' + ('@' + tag if tag else ''), need=False)
-        found += tfxo_streams(img, 'main' + ('@' + tag if tag else ''))   # YEBIS's effect file, a zlib stream in main (Pokémon Sword)
-        found += retro_main_forms(img, 'main' + ('@' + tag if tag else ''))   # Retro's startup material archive, LZSS in main (Donkey Kong Country: Tropical Freeze)
-        if RGXD in img: found += rgxd_shaders(img, 'main' + ('@' + tag if tag else ''))   # RAGE's built-in effects (Red Dead Redemption: 20 in main's data, 168 shaders that shaders.rpf lacks)
-        found += raw_shaders(img, 'main' + ('@' + tag if tag else ''), {c[:struct.unpack_from('<I', c, 0x20)[0]] for _, _, c, _ in found})   # compared at their own length, as raw_shaders reads them
-        # NROs the game decodes at run time (Mario Tennis Fever: main is a boot stub, and the real code's data holds 11 shaders the game draws its UI and sky with): scanned like main, as no RomFS file holds them
-        if not i:
-            for n in boot_nros():
-                scan_blob(open(n, 'rb').read(), f'main/{os.path.basename(n)}', found)
-        # GLSLC outputs the game compiles at run time, captured on the Mac (hle_glslc.c): <version dir>/glslc_capture, or DM_GLSLC_CAPTURE. A game needs them when main holds GLSL sources and
-        # calls glslcCompile in a module it loads (Fire Emblem: Three Houses; profile_guess.py shader_sources). Captain Toad: Treasure Tracker imports it with agl's GLSL sources, but no module defines it
-        cap = os.environ.get('DM_GLSLC_CAPTURE') or os.path.join(os.path.dirname(os.path.abspath(romfs)), 'glslc_capture')
-        names = sorted(f for f in os.listdir(cap) if f.endswith('.glslc') and not f.startswith('._')) if os.path.isdir(cap) else []   # AppleDouble metadata beside captures on external drives
-        if not names and glsl_sources(img) and 'glslcCompile' in main_imports(img) and glslc_module(os.path.dirname(os.path.abspath(mainnso))):
-            print(f'[RED] main holds GLSL sources and imports glslcCompile, but there are no captured GLSLC outputs in {cap}: the shaders the game compiles at run time will have no translation (the NSP script checks an empty capture against the offline split)', flush=True)
-        for nm in names: found += glslc_shaders(open(os.path.join(cap, nm), 'rb').read(), f'/glslc_capture/{nm}')
-        # Unreal Engine shader code archives decoded on the Mac (uepak.py): <version dir>/ue_shaders, or DM_UE_SHADERS; needed when the RomFS has Unreal paks
-        ued = os.environ.get('DM_UE_SHADERS') or os.path.join(os.path.dirname(os.path.abspath(romfs)), 'ue_shaders')
-        names = sorted(f for f in os.listdir(ued) if f.endswith('.ushaderbytecode') and not f.startswith('._')) if os.path.isdir(ued) else []   # AppleDouble metadata, not decoded shader archives
-        if not names and uepak.unreal_paks(romfs, inline=False, mains=[mainnso]): red(f'the RomFS has Unreal paks, but there are no decoded shader code archives in {ued} (the NSP script writes them)')
-        for nm in names: found += ue_shaders(open(os.path.join(ued, nm), 'rb').read(), f'/ue_shaders/{nm}')
-        results.append(('main', {skey(c, k): (w, s, c, k) for w, s, c, k in found}, var_pairs(found), {}))
+        mains.append((romfs, mainnso, tag))
+    first_image = nso_image(main_v[0])
+    import unityfs
+    try: common = unityfs.common_strings(first_image)
+    except ValueError: common = None   # not a Unity game
     for romfs in dlc_v:
         name = os.path.basename(os.path.normpath(romfs))
         tag = 'aoc/' + (name.removesuffix('.img') if is_image(romfs) else name)
@@ -3455,27 +3514,9 @@ def main():
     zdicts = {k: v for r in romfs_v + dlc_v for k, v in zs_dicts(r).items()}   # Tears of the Kingdom's zstd dictionaries (zs_dicts)
     # First pass: every file; Unity bundles carry type trees, and the Shader trees are collected on the way. Second pass: Unity serialized files without type trees are scanned again with the borrowed trees
     J = int(os.environ.get('J', '8'))
-    big = [j for p, r in files for j in (linkdata_jobs(p, r) or [])]   # Three Houses' 6.9 GB DATA1.bin: one job per range of entries, not one read of the whole file
-    pak_jobs, paks = kpka_jobs(files)   # Monster Hunter Rise's PAKs: the newest copy of each path, in ranges of entries
-    tr_jobs, trp = trpfs_jobs(files)   # Pokémon Legends: Z-A's Trinity packs (data.trpfs and its index data.trpfd), decoded by the game's own Oodle in the Mac host
-    ue_jobs, uep = ue_legacy_jobs(files, mains=main_v)   # Unreal paks with inline shaders: DRAGON QUEST XI S's legacy ones (the game's own LZ5 in the Mac host), OCTOPATH TRAVELER II's (Zlib)
-    bd_jobs, bdts = bdt_jobs(files)   # Dark Souls Remastered's dvdbnd archives: the entries of each .bdt by its .bhd5 index, in ranges
-    arc_jobs, arcs = smash_arc_jobs(files)   # Super Smash Bros. Ultimate's data.arc: its current files, in ranges
-    pz_jobs, pkzs = pkz_jobs(files)   # Bayonetta 3's PKZ archives, Oodle Kraken decoded by the game's own decoder in the Mac host
-    ck_jobs, cpks = cpk_jobs(files)   # Bayonetta 2's CRI CPK archives (CRILAYLA entries)
-    d3_jobs, d3s = d3cpk_jobs(files)   # Diablo III's packages (zlib streams, d3cpk.py)
-    ca_jobs, cascs = casc_jobs(files)   # Diablo II: Resurrected's CASC archives (casc.py)
-    cr_jobs, cras = cra_jobs(files)   # Mario Tennis Fever's CRA archive, its index in the NRO the game decodes at run time
-    zp_jobs, zips = zip_jobs(files)   # Portal's game.zip (Deflate members)
-    ah_jobs, arhs = arh_jobs(files)   # Monolith's ARH1/ARD archives and embedded XBC1/HCPS programs
-    fb_jobs, fbs = frostbite_jobs(files)   # EA SPORTS FC 27's Frostbite bundles, Oodle Leviathan decoded by the game's own decoder in the Mac host
-    pd_jobs, pdats = pdat_jobs(files)   # Kirby Air Riders' PDAT archives: the PMAP records in byte ranges
-    rp_jobs, rpfs = rpf_jobs(files, main_v)   # Red Dead Redemption's RPF6 archives, their tables decrypted with the key in main (rpf6.py)
-    big += pak_jobs + tr_jobs + ue_jobs + bd_jobs + arc_jobs + pz_jobs + ck_jobs + d3_jobs + ca_jobs + cr_jobs + zp_jobs + ah_jobs + fb_jobs + pd_jobs + rp_jobs
-    files = [(p, r) for p, r in files if not linkdata_jobs(p, r) and p not in paks and p not in trp and p not in uep and p not in bdts and p not in arcs and p not in pkzs and p not in cpks and p not in d3s and p not in cascs and p not in cras and p not in zips and p not in arhs and p not in fbs and p not in pdats and p not in rpfs]
     with cf.ProcessPoolExecutor(J, initializer=_pool_init, initargs=(common, {}, zdicts)) as ex:
-        n = len(big) + len(files)
-        results += pooled(ex, big, n) + pooled(ex, files, n, len(big), chunk=16)
+        results = scan_inputs(ex, mains, files, first_image)
+    del first_image
     trees, defer = {}, []
     for rel, uniq, pr, extra in results:
         if extra == 'defer': defer.append(rel)

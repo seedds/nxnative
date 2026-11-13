@@ -3,7 +3,7 @@
 # with no Payload/ copy first. Replaces zip -qry -n with the same entries: folders, Unix modes (the executable's x bit), symlinks as links, DOS times, the UTF-8 flag for non-ASCII names;
 # deflate level 6, a file whose deflate is not smaller is stored (zip's rule), and names ending in a --store suffix are always stored (the profile's zip_store, compared without regard to case).
 # Speed (Info-ZIP managed about 100 MB/s on the T7): files up to BIG are read, and deflated, by a thread pool (zlib releases the GIL) while this thread writes them in order;
-# bigger files are streamed here, their CRC patched into the local header afterwards (no data descriptors). Zip64 fields wherever a size, an offset or the entry count passes its 32 / 16-bit field.
+# bigger files use up to eight Deflate workers with bounded blocks, written in order, their CRC patched into the local header afterwards (no data descriptors). Zip64 fields wherever a size, an offset or the entry count passes its 32 / 16-bit field.
 # Usage: pack_ipa.py <out.ipa> [--store .a:.b] [--skip <archive path>]... <archive path>=<source file or folder>...
 #   Mappings are packed in command-line order; put the files that change least first, and the app last
 #   --skip: an archive path left out of the walk of the folder that holds it (folders a stale app build still has, the signature); a mapping of its own still adds it
@@ -21,11 +21,12 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), '..
 import shader_lib
 
 LEVEL = 6
-IDX_VERSION = 3
+IDX_VERSION = 4
 BIG = 256 << 20      # files above this are streamed by the writer; smaller ones go through the pool
 WINDOW = 2 << 30     # input bytes in the pool at once
 QUEUE = 4096         # entries in the pool at once (folders of tiny files)
 CHUNK = 16 << 20
+BLOCK = 4 << 20      # parallel Deflate blocks; changing this representation requires an IDX_VERSION bump
 L32, L16 = 0xFFFFFFFF, 0xFFFF
 DIR_MODE = stat.S_IFDIR | 0o755   # a parent folder no source folder stands for (Payload/, msl/); its time is 1980-01-01, so it is the same in every pack
 Entry = collections.namedtuple('Entry', 'name path st root')   # st None: a synthetic parent; root: the mapping's source folder
@@ -67,6 +68,30 @@ def load(path, deflate):   # in the pool: (method, CRC, the bytes to write, unco
         c = zlib.compressobj(LEVEL, zlib.DEFLATED, -15); z = c.compress(data) + c.flush()
         if len(z) < len(data): return 8, crc, z, usize
     return 0, crc, data, usize
+
+
+def deflate_block(data, dictionary):
+    # SYNC_FLUSH ends on a byte boundary without ending the stream. The next block's
+    # dictionary is exactly the history a standard ZIP inflater already holds.
+    c = zlib.compressobj(LEVEL, zlib.DEFLATED, -15, zdict=dictionary)
+    return c.compress(data) + c.flush(zlib.Z_SYNC_FLUSH)
+
+
+def deflated(f):
+    """Bounded parallel blocks, yielded in input order as (input, compressed bytes)."""
+    workers = min(8, os.cpu_count() or 1)
+    pending, dictionary = collections.deque(), b''
+    with cf.ThreadPoolExecutor(workers) as pool:
+        while data := f.read(BLOCK):
+            pending.append((data, pool.submit(deflate_block, data, dictionary)))
+            dictionary = (dictionary + data[-32768:])[-32768:]
+            if len(pending) >= workers:
+                raw, future = pending.popleft(); yield raw, future.result()
+        while pending:
+            raw, future = pending.popleft(); yield raw, future.result()
+    # One final empty block terminates the single raw-Deflate stream, including an empty input.
+    c = zlib.compressobj(LEVEL, zlib.DEFLATED, -15)
+    yield b'', c.flush(zlib.Z_FINISH)
 
 
 def dos_time(t):
@@ -146,20 +171,27 @@ class Zip:
     def stream(self, e, deflate):   # a big file: the local header first, its CRC (and a deflated size) patched in afterwards
         usize = e.st.st_size; z64 = usize >= L32   # a deflate that is not smaller is redone stored, so the deflated size stays below usize
         h = self.local(e, 8 if deflate else 0, 0, 0 if deflate else usize, usize, z64)
-        crc, csize, read, c = 0, 0, 0, zlib.compressobj(LEVEL, zlib.DEFLATED, -15) if deflate else None
+        parallel = deflate and usize > BLOCK
+        crc, csize, read = 0, 0, 0
+        c = zlib.compressobj(LEVEL, zlib.DEFLATED, -15) if deflate and not parallel else None
         with open(e.path, 'rb') as f:
-            while b := f.read(CHUNK):
-                read += len(b); crc = zlib.crc32(b, crc)
-                if c: b = c.compress(b)
-                self.w(b); csize += len(b)
-            if c: b = c.flush(); self.w(b); csize += len(b)
+            if parallel:
+                for raw, b in deflated(f):
+                    read += len(raw); crc = zlib.crc32(raw, crc)
+                    self.w(b); csize += len(b)
+            else:
+                while b := f.read(CHUNK):
+                    read += len(b); crc = zlib.crc32(b, crc)
+                    if c: b = c.compress(b)
+                    self.w(b); csize += len(b)
+                if c: b = c.flush(); self.w(b); csize += len(b)
         if read != usize: sys.exit(f'[RED] pack_ipa: {e.path} changed size while it was packed')
-        if c and csize >= usize:   # not smaller: stored instead
+        if deflate and csize >= usize:   # not smaller: stored instead
             self.f.seek(h[0]); self.f.truncate(); self.pos = h[0]; return self.stream(e, False)
         self.patch(h[0] + 14, struct.pack('<I', crc) + (b'' if z64 else struct.pack('<II', csize, usize)))
         if z64: self.patch(h[0] + 30 + len(h[1]) + 4, struct.pack('<QQ', usize, csize))
         self.f.seek(self.pos)
-        self.central(e, h, 8 if c else 0, crc, csize, usize)
+        self.central(e, h, 8 if deflate else 0, crc, csize, usize)
 
     def reuse(self, e, info, h, old):   # copy already compressed bytes, after the checked local header
         method, crc, csize, usize = info.compress_type, info.CRC, info.compress_size, info.file_size

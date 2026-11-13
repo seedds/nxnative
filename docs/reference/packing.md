@@ -97,6 +97,20 @@
 - **Fix:** resolved for good by [native tools](#building-needed-net-and-finding-its-runtime-kept-failing): the translator has no dll, and `test_native_tools.py` checks its two architectures. Before that, `dmsh_xlate.csproj` pinned `<PlatformTarget>AnyCPU</PlatformTarget>`, so a build with any `-r`, or none, gives an AnyCPU dll (`PE32`, machine `0x14C`, IL only). `dm/tools/tests/test_xlate_anycpu.py` reads the PE/CLI headers of every dll in `dmsh_xlate_bin` and the launcher's Mach-O header, and fails when a dll is tied to an architecture or the launcher lacks x86_64 or arm64; it needs no .NET. The rebuilt translator writes the same SPIR-V and reflection files as the arm64-only one (9,556 shaders compared byte for byte).
 - **Found on:** an Intel MacBook Pro building any game ([GitHub issue #803](https://github.com/seedds/nxnative/issues/803), which bisected the flips). Applies to every game.
 
+### An iOS Vulkan or OpenGL build also compiles unused Mac libraries
+
+- **Symptom:** a first iOS build runs Metal compilation and linking for both platforms, although its app uses only iOS libraries.
+- **Cause:** `vk_shaders.py` and `gl_shaders.py` treated `--ios` as an additional destination. The NSP caller always requested it for iOS, deleted both output directories, and allowed an iOS key to authorize reuse of a Mac output.
+- **Fix:** shared `shader_targets.py` parses `--targets mac`, `ios`, or `mac,ios`. The NSP caller requests only its platform, replaces only its output, and checks and writes only its own reuse key. Direct tool calls keep the previous defaults: Mac alone, or both when `--ios` is supplied without `--targets`. Translation and compiler flags remain unchanged.
+- **Found on:** synthetic first-build inputs exercising both graphics APIs; no complete game build is implied.
+
+### SARC filename parsing scans the archive payload for every member
+
+- **Symptom:** shader discovery spends disproportionate time parsing a SARC with many entries or a large payload.
+- **Cause:** `sarc_files` sliced the entire archive after each filename offset and split all those bytes at every NUL. Repeating that work for every member copies and scans the payload repeatedly.
+- **Fix:** find the first NUL between the filename offset and the archive's data offset, then decode only that name. Reject offsets outside the name table and names without a terminator there. Unnamed members keep their generated names. Payload extraction is unchanged.
+- **Found on:** synthetic SARC archives with named, unnamed and malformed entries.
+
 ### The Vulkan shader step fails with `Argument list too long: 'xcrun'`
 
 - **Symptom:** `vk_shaders.py` stops with `OSError: [Errno 7] Argument list too long: 'xcrun'` after the Metal compiles, in the `metallib` link.
@@ -134,7 +148,21 @@
 - **Fix:** count uncompressed bytes as they are read and compare them with the listed size before completing either streamed method. A mismatch stops the pack and removes the partial archive, preserving the previous IPA and its reuse index. Regression tests cover growth and shrinkage with both deflate and store.
 - **Found on:** synthetic IPA inputs while reviewing [PR #279](https://github.com/seedds/nxnative/pull/279); no game files required.
 
+### A large RomFS image compresses on one CPU core
+
+- **Symptom:** the first IPA pack underuses the CPU while compressing a large RomFS image, even though smaller files already compress concurrently.
+- **Cause:** entries above 256 MiB bypassed the file worker pool and ran one streaming zlib compressor on the writer thread.
+- **Fix:** large deflated entries use at most eight workers on 4 MiB blocks. Each worker receives the preceding 32 KiB dictionary and emits raw Deflate with `Z_SYNC_FLUSH`; ordered block writes and a final empty `Z_FINISH` stream form one standard ZIP entry. Level 6, rolling CRC, Zip64, input-size checks, incompressible stored fallback and atomic publication remain intact. The queue bounds memory independently of the file size. The index version increases to 4, so the first pack after updating rebuilds an older index. Compressed bytes and sizes may differ slightly. See [zlib's flush and dictionary semantics](https://zlib.net/manual.html).
+- **Found on:** synthetic first-pack inputs, including compressible, mixed and incompressible images and a Zip64-sized entry.
+
 ## RomFS images
+
+### Parallel RomFS extraction can be slower than serial extraction
+
+- **Symptom:** the parallel extractor proposed in PR #896 takes about twice as long as the serial baseline for a large RomFS on a 16 GB Mac, despite improving a smaller image on the same machine ([reviewer's measurements](https://github.com/seedds/nxnative/pull/896#issuecomment-6565317214)).
+- **Cause:** **open.** Independent LibHac storage stacks and positional package reads remove the shared seek lock, but add read and scheduling overhead. Healthy input does not reopen stacks after startup; reopening after a hash failure alone does not explain the healthy-input regression. The small-machine slowdown has not been reproduced locally, so memory pressure or a specific I/O mechanism is not established as its cause.
+- **Fix:** **parallel extraction withdrawn from PR #896.** Restore the serial `LocalStorage` / `WriteStream` implementation, including #810's reopen-after-damage handling. No extraction speedup is claimed by the remaining change. A future parallel implementation needs measurements on the affected workload before it replaces this path. The integrity filter still recognizes the raw `NonRealDataVerificationFailed` result and its `RomFsFile` translation, `RomNonRealDataVerificationFailed` (`2002-4144`); either form must reach the same damage report and `--allow-damaged` path.
+- **Found on:** the [PR #896 second-machine review](https://github.com/seedds/nxnative/pull/896#issuecomment-6565317214). The earlier improvement and follow-up measurements on [Pokémon Legends: Z-A](../../dm/games/0100F43008C44000/README.md#first-build-stage-measurements) are historical, not a general extraction performance claim.
 
 ### RomFS folder transfers fail or leave stale game files
 

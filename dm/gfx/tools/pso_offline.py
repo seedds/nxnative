@@ -117,6 +117,10 @@ def constants(path):
     """{entry name: the names of the function constants it declares, a tuple, empty for none} of a .metallib, from its header: the function list (NAME tags) and each function's public
     metadata (a CNST tag lists its constants). Raises ValueError on a file it cannot read"""
     with romfs.open(path, 'rb') as f: b = f.read(1 << 20)
+    return function_bytes(b, path)
+
+
+def function_bytes(b, path):
     if b[:4] != b'MTLB' or len(b) < 0x58: raise ValueError(f'{path}: not a Metal library')
     fo, _, po, ps = struct.unpack_from('<QQQQ', b, 0x18)
     def tags(p, end):
@@ -138,19 +142,48 @@ def constants(path):
     return dict(zip(names, consts))
 
 
-def plan(lib_dir, chain, pairs, zero):
+class Inputs:
+    """One read per unique input; retain small metadata/digests, not the library bytes."""
+    def __init__(self, directory, workers=None):
+        self.directory = romfs.Path(directory)
+        self.workers = min(8, os.cpu_count() or 1) if workers is None else workers
+        if self.workers < 1: raise ValueError('PSO preparation workers must be positive')
+        self.reflections, self.libraries = {}, {}
+
+    def reflection(self, key):
+        try: value = json.loads((self.directory / f'{key}_b.json').read_bytes())
+        except (OSError, ValueError): value = None
+        return key, value
+
+    def library(self, name):
+        path = self.directory / f'{name}.metallib'
+        try:
+            data = path.read_bytes()
+            value = (function_bytes(data[:1 << 20], path), hashlib.sha256(data).digest())
+        except (OSError, ValueError): value = (None, None)
+        return name, value
+
+    def prepare(self, pairs, chain):
+        with concurrent.futures.ThreadPoolExecutor(self.workers) as pool:
+            keys = sorted({k for pair in pairs for k in pair} - self.reflections.keys())
+            self.reflections.update(pool.map(self.reflection, keys))
+            names = set()
+            for vk, fk in pairs:
+                vj, fj = self.reflections[vk], self.reflections[fk]
+                if not vj or not fj or vj.get('chain') != chain or fj.get('chain') != chain or vj.get('mesh_stage'): continue
+                pull = isinstance(vj.get('pull'), dict)
+                if not pull and vj.get('vertex_inputs'): continue
+                if vj.get('layer_out') or (fj.get('raster') or {}).get('primitive_id'): continue
+                names.update((vk + ('_bp' if pull else '_b'), fk + '_b'))
+            self.libraries.update(pool.map(self.library, sorted(names - self.libraries.keys())))
+
+
+def plan(lib_dir, chain, pairs, zero, inputs=None):
     """The bases the archive holds: [(vertex library, vertex entry, pixel library, pixel entry)], the pairs left to the device (function constants), and counts of the pairs left out"""
-    lib_dir = romfs.Path(lib_dir); js, fns = {}, {}
-    def refl(key):
-        if key not in js:
-            try: js[key] = json.loads((lib_dir / f'{key}_b.json').read_bytes())
-            except (OSError, ValueError): js[key] = None
-        return js[key]
-    def fn(lib):
-        if lib not in fns:
-            try: fns[lib] = constants(lib_dir / f'{lib}.metallib')
-            except (OSError, ValueError): fns[lib] = None
-        return fns[lib]
+    inputs = inputs or Inputs(lib_dir)
+    pairs = list(pairs); inputs.prepare(pairs, chain)
+    def refl(key): return inputs.reflections[key]
+    def fn(lib): return inputs.libraries[lib][0]
     bases, rest, seen, left = [], [], set(), dict.fromkeys(('reflection', 'mesh', 'stage inputs', 'library', 'layer', 'primitive ID', 'entry'), 0)
     for vk, fk in pairs:
         vj, fj = refl(vk), refl(fk)
@@ -252,11 +285,15 @@ def write_script(path, configuration):
     finally: part.unlink(missing_ok=True)
 
 
-def library_digest(lib_dir, bases, computes=()):
+def library_digest(lib_dir, bases, computes=(), inputs=None):
     """The bytes metal-tt consumes: a profile/chain stamp does not change when the same shaders are rebuilt by another Metal compiler."""
     h = hashlib.sha256()
     for name in sorted({lib for vl, _, fl, _ in bases for lib in (vl, fl)} | {lib for lib, _ in computes}):
         h.update(name.encode() + b'\0')
+        if inputs is not None and name in inputs.libraries:
+            digest = inputs.libraries[name][1]
+            if digest is not None:
+                h.update(digest); continue
         lib = hashlib.sha256()
         with romfs.open(os.path.join(lib_dir, f'{name}.metallib'), 'rb') as f:
             while chunk := f.read(1 << 20): lib.update(chunk)
@@ -408,12 +445,12 @@ def real_libraries(lib_dir, bases, work, computes=()):
 def clear_real_libraries(work): shutil.rmtree(Path(work) / 'libraries', ignore_errors=True)
 
 
-def compile_batch(lib_dir, bases, work, arch, platform, osmin, toolchain, computes=()):
+def compile_batch(lib_dir, bases, work, arch, platform, osmin, toolchain, computes=(), inputs=None):
     """Cache one bounded group by its actual libraries and descriptors; also used for an isolated pilot. The pipelines it left out are in read_failed(work, arch)"""
     work.mkdir(parents=True, exist_ok=True)
     configuration = script(lib_dir, bases, computes)
     js = work / 'bases.mtl4-json'; write_script(js, configuration)
-    key = archive_key(configuration, library_digest(lib_dir, bases, computes), arch, platform, osmin, toolchain)
+    key = archive_key(configuration, library_digest(lib_dir, bases, computes, inputs=inputs), arch, platform, osmin, toolchain)
     del configuration
     dst, kf = work / f'{arch}.mtl4a', work / f'key.{arch}'
     if dst.is_file() and dst.stat().st_size and kf.is_file() and kf.read_text().strip() == key: return dst, True
@@ -436,7 +473,7 @@ def groups_of(bases, computes, batch_size, compute_size=COMPUTE_BATCH):
     return groups
 
 
-def compile_batches(lib_dir, bases, work, part, arch, platform, osmin, toolchain, batch_size, computes=(), jobs=1, compute_size=COMPUTE_BATCH):
+def compile_batches(lib_dir, bases, work, part, arch, platform, osmin, toolchain, batch_size, computes=(), jobs=1, compute_size=COMPUTE_BATCH, inputs=None):
     """Limit compiler input size, then combine every completed group into the usual single archive.
 
     This bounds input count, not memory: a single pipeline can still exceed Apple's compiler resources.
@@ -450,7 +487,7 @@ def compile_batches(lib_dir, bases, work, part, arch, platform, osmin, toolchain
         if old.name not in names: shutil.rmtree(old)
     def one(index, name, group, cgroup):
         print(f'pso_offline: {arch}: batch {index}/{total}: {f"{len(group)} bases" if group else f"{len(cgroup)} compute pipelines"}, compiling or checking cache', flush=True)
-        piece, reused = compile_batch(lib_dir, group, work / f'batches.{arch}' / name, arch, platform, osmin, toolchain, cgroup)
+        piece, reused = compile_batch(lib_dir, group, work / f'batches.{arch}' / name, arch, platform, osmin, toolchain, cgroup, inputs=inputs)
         print(f'pso_offline: {arch}: batch {index}/{total}: ready ({"reused" if reused else "compiled"})', flush=True)
         fb, fc = read_failed(work / f'batches.{arch}' / name, arch); failed[0].extend(fb); failed[1].extend(fc)
         return piece
@@ -484,12 +521,14 @@ def main(argv=None):
     ap.add_argument('--platform', choices=('ios', 'macos'), default='ios')
     ap.add_argument('--os-min', help='minimum OS of the archives (default: iOS, the SDK\'s major version; macOS, this Mac\'s)')
     ap.add_argument('--script-only', action='store_true', help='write the script and the stamp, run no metal-tt')
+    ap.add_argument('--input-jobs', type=int, default=None, help='parallel render input readers (default: up to 8 CPU cores)')
     ap.add_argument('--batch-size', type=int, default=BATCH, help=f'compile sequential groups of at most N bases and merge with metal-pack, when there are more (default {BATCH}; 0: one compiler invocation)')
     ap.add_argument('--shader-map', action='append', help='shader_map.tsv: its compute shaders get pipelines (default: the profile\'s)')
     ap.add_argument('--manifest', action='append', help='pso_manifest.tsv: its C rows first (default: the profile\'s)')
     ap.add_argument('--no-compute', action='store_true', help='no compute pipelines, the bases alone')
     ap.add_argument('--jobs', type=int, default=JOBS, help=f'metal-tt runs at a time for the compute pipelines (default {JOBS}, half the logical CPUs)')
     a = ap.parse_args(argv)
+    if a.input_jobs is not None and a.input_jobs < 1: ap.error('--input-jobs must be positive')
     if a.batch_size < 0: ap.error('--batch-size must be zero or positive')
     if a.game:
         sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'games')); import game
@@ -509,7 +548,8 @@ def main(argv=None):
     zero = a.depth == 'zero'
     t0 = time.time()
     pairs = read_pairs(text)
-    bases, rest, left = plan(lib_dir, chain, pairs, zero)
+    prepared = Inputs(lib_dir, a.input_jobs)
+    bases, rest, left = plan(lib_dir, chain, pairs, zero, inputs=prepared)
     shaders = [] if a.no_compute else read_computes(a.shader_map, a.manifest)
     computes, cleft = plan_compute(lib_dir, chain, shaders)
     work.mkdir(parents=True, exist_ok=True); out.mkdir(parents=True, exist_ok=True)
@@ -526,10 +566,12 @@ def main(argv=None):
     if not pairs: print('pso_offline: no pairs (only a header): nothing to build, no archive')   # a profile whose split found no pair (GitHub issue #338)
     if not bases and not computes: archs = []   # no pair, or every eligible pair needs device specialization, and no compute pipeline; clear old archives and still write the stamp and the remainder list
     osmin = a.os_min or os_min_default(a.platform); tv = tool_version(a.platform) if bases or computes else 'not used (function constants only)'
-    libraries = library_digest(lib_dir, bases, computes)
+    libraries = library_digest(lib_dir, bases, computes, inputs=prepared)
     keys = {arch: archive_key(configuration, libraries, arch, a.platform, osmin, tv) for arch in archs}
-    del configuration   # the compiler reads the script from disk
-    failed_bases, failed_computes = [], []   # what metal-tt could not compile for some architecture (compile_isolating): those pairs go to the device with rest
+    prepared.reflections.clear()
+    batch_inputs = prepared if a.batch_size else None
+    del configuration, prepared   # the compiler reads the script from disk
+    failed_bases, failed_computes = [], []   # compile_isolating leaves these pipelines to the device
     for arch, key in keys.items():
         dst, kf = out / f'{arch}.mtl4a', work / f'key.{arch}'
         if dst.is_file() and kf.is_file() and kf.read_text().strip() == key:
@@ -539,7 +581,7 @@ def main(argv=None):
         part = work / f'{arch}.mtl4a.partial'; part.unlink(missing_ok=True)
         t1 = time.time(); print(f'pso_offline: {arch}: metal-tt, {len(bases)} bases, {len(computes)} compute pipelines (minutes) ...', flush=True)
         if a.batch_size and len(groups_of(bases, computes, a.batch_size)) > 1:
-            fb, fc = compile_batches(lib_dir, bases, work, part, arch, a.platform, osmin, tv, a.batch_size, computes, a.jobs)
+            fb, fc = compile_batches(lib_dir, bases, work, part, arch, a.platform, osmin, tv, a.batch_size, computes, a.jobs, inputs=batch_inputs)
         else:
             fb, fc = compile_isolating(lib_dir, bases, computes, js, part, work, arch, a.platform, osmin)
         write_failed(work, arch, fb, fc); failed_bases += fb; failed_computes += fc

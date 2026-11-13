@@ -105,6 +105,52 @@ class Plan(unittest.TestCase):
             funcs, layer = f if isinstance(f, tuple) else (f, False)
             (self.d / f'{key}{suf}.metallib').write_bytes(metallib(funcs, layer))
 
+    def test_prepared_inputs_share_reads_and_keep_serial_results(self):
+        self.assertTrue(hasattr(po, 'Inputs'), 'concurrent PSO preparation is not implemented')
+        self.shader('v', {}, {'_b': [('main0', False)]})
+        self.shader('f', {}, {'_b': [('main0', False)]})
+        self.shader('primitive', {'raster': {'primitive_id': 1}}, {'_b': [('main0', False)]})
+        self.shader('mesh', {'mesh_stage': {'kind': 'ms'}}, {'_b': [('main0', False)]})
+        self.shader('layered_out', {'layer_out': True}, {'_b': [('main0', False)]})
+        self.shader('compute', {'stage': 'cs'}, {'_b': [('main0', False)]})
+        pairs = [('v', 'f'), ('v', 'f'), ('gone', 'f'), ('v', 'primitive'), ('mesh', 'f'), ('layered_out', 'f')]
+        prepared = po.Inputs(self.d, workers=3)
+        bases, rest, left = po.plan(self.d, CHAIN, pairs, False, inputs=prepared)
+        self.assertNotIn('primitive_b', prepared.libraries)
+        self.assertNotIn('mesh_b', prepared.libraries)
+        self.assertNotIn('layered_out_b', prepared.libraries)
+        computes, _ = po.plan_compute(self.d, CHAIN, ['compute_b'])
+        self.assertEqual(computes, [('compute_b', 'main0')])
+        expected = po.library_digest(self.d, bases, computes)
+        # Prepared render bytes need not be reopened. Compute content still enters the key.
+        for name in ('v_b', 'f_b'): (self.d / f'{name}.metallib').unlink()
+        self.assertEqual(po.library_digest(self.d, bases, computes, inputs=prepared), expected)
+        compute = self.d / 'compute_b.metallib'
+        compute.write_bytes(compute.read_bytes() + b'changed')
+        self.assertNotEqual(po.library_digest(self.d, bases, computes, inputs=prepared), expected)
+        self.assertEqual(bases, [('v_b', 'main0', 'f_b', 'main0')])
+        self.assertEqual(rest, [])
+        self.assertEqual(left, {'reflection': 1, 'mesh': 1, 'stage inputs': 0, 'library': 0, 'layer': 1, 'primitive ID': 1, 'entry': 0})
+
+    def test_preparation_worker_count_does_not_change_plan_or_hash(self):
+        self.assertTrue(hasattr(po, 'Inputs'), 'concurrent PSO preparation is not implemented')
+        self.shader('v', {}, {'_b': [('main0', False)]})
+        self.shader('layer', {'layer_out': True}, {'_b': ([('main0', False)], True)})
+        self.shader('f', {}, {'_b': [('main0', False)]})
+        self.shader('constant', {}, {'_b': [('main0', True)]})
+        self.shader('bad', {}, {'_b': [('main0', False)]})
+        (self.d / 'bad_b.metallib').write_bytes(b'broken')
+        got = []
+        for workers in (1, 4):
+            inputs = po.Inputs(self.d, workers)
+            result = po.plan(self.d, CHAIN, [('v', 'f'), ('layer', 'f'), ('v', 'constant'), ('bad', 'f')], False, inputs=inputs)
+            got.append((result, po.library_digest(self.d, result[0], inputs=inputs)))
+        self.assertEqual(got[0], got[1])
+        self.assertEqual(got[0][0][0], [('v_b', 'main0', 'f_b', 'main0')])
+        self.assertEqual(got[0][0][1], [('v', 'constant')])
+        self.assertEqual(got[0][0][2]['library'], 1)
+        self.assertEqual(got[0][0][2]['layer'], 1)
+
     def test_bases_rest_and_left_out(self):
         vz = [('main0', False), ('main0_z', False)]
         self.shader('pull', {'entry_z': 'main0_z', 'pull': {'entry': 'main0'}, 'vertex_inputs': [{'location': 0}]}, {'_b': vz, '_bp': vz})
@@ -183,6 +229,23 @@ class Plan(unittest.TestCase):
         self.assertTrue((real / 'v_bp.metallib').is_symlink(), 'a library of a folder is linked, not copied')
         po.clear_real_libraries(work)
         self.assertEqual(po.real_libraries(self.d, [('v_bp', 'main0', 'v_bp', 'main0')], work), self.d, 'nothing to cut: the folder as it is')
+
+    def test_prepared_inputs_read_packed_libraries(self):
+        self.shader('v', {'pull': {}}, {'_bp': [('main0', False)]})
+        self.shader('f', {}, {'_b': [('main0', False)]})
+        (self.d / 'inputs.tsv').write_text('game\tX\ninputs\tY\n')
+        pairs = [('v', 'f')]
+        expected = po.plan(self.d, CHAIN, pairs, False)
+        digest = po.library_digest(self.d, expected[0])
+        self.assertTrue(po.shader_lib.pack(self.d, lambda _: None))
+        view = po.shader_lib.view(self.d)
+        prepared = po.Inputs(view, workers=2)
+        with mock.patch.object(prepared, 'library', wraps=prepared.library) as read:
+            self.assertEqual(po.plan(view, CHAIN, pairs, False, inputs=prepared), expected)
+            self.assertEqual(po.library_digest(view, expected[0], inputs=prepared), digest)
+            self.assertEqual(po.plan(view, CHAIN, pairs, False, inputs=prepared), expected)
+        self.assertEqual(read.call_count, 2, 'one metadata/digest read per distinct library')
+        self.assertFalse(self.d.exists(), 'preparation must read the packed image in place')
 
     def test_script(self):
         j = po.script(self.d, [('v_bp', 'main0', 'f_b', 'main0'), ('w_bp', 'main0_z', 'f_b', 'main0')])
@@ -284,6 +347,34 @@ class Build(unittest.TestCase):
         with mock.patch.object(po.subprocess, 'run', self.fake_run), mock.patch.dict(os.environ, DM_GAMES_DIR=str(self.prof.parent)), contextlib.redirect_stdout(io.StringIO()):
             return po.main(args)
 
+    def test_packed_libraries_materialize_only_for_new_compiles(self):
+        (self.lib / 'w_b.json').write_bytes((self.lib / 'v_b.json').read_bytes())
+        (self.lib / 'w_bp.metallib').write_bytes((self.lib / 'v_bp.metallib').read_bytes())
+        (self.prof / 'shader_pairs.tsv').write_text('v\tf\nw\tf\n')
+        expected = {p.name: p.read_bytes() for p in self.lib.glob('*.metallib')}
+        self.assertTrue(po.shader_lib.pack(self.lib, lambda _: None))
+        self.lib = po.shader_lib.view(self.lib)
+        for batch_size in (0, 1):
+            with self.subTest(batch_size=batch_size):
+                self.out, self.work = self.t / f'out-{batch_size}', self.t / f'work-{batch_size}'
+                runner, observed = self.batched_runner()
+                def check_paths(cmd, runner=runner, **kwargs):
+                    if 'metal-tt' in cmd and '-o' in cmd:
+                        script = next(Path(p) for p in cmd if str(p).endswith('.mtl4-json'))
+                        libraries = json.loads(script.read_text())['libraries']
+                        for library in libraries:
+                            path = Path(library['path'])
+                            self.assertEqual(path.parent.name, 'libraries')
+                            self.assertEqual(path.read_bytes(), expected[path.name])
+                    return runner(cmd, **kwargs)
+                with mock.patch.object(self, 'fake_run', check_paths):
+                    self.assertEqual(self.main('--batch-size', str(batch_size)), 0)
+                    before = list(observed)
+                    self.assertEqual(self.main('--batch-size', str(batch_size)), 0)
+                    self.assertEqual(observed, before, 'a reused archive must not compile or materialize libraries')
+                self.assertEqual(sum(kind == 'compile' for kind, _ in observed), 2 if batch_size else 1)
+                self.assertEqual(list(self.work.rglob('libraries')), [], 'temporary compiler inputs are cleared')
+
     def test_large_script_memory_and_compatible_archive_key(self):
         # Share the two synthetic library files but give every base a distinct entry pair.
         bases = [('v_bp', f'vertex{i}', 'f_b', 'main0') for i in range(512)]
@@ -293,7 +384,9 @@ class Build(unittest.TestCase):
             if '-o' in cmd:
                 at_compile.append(tracemalloc.get_traced_memory()[0])
             return compiler(cmd, **kwargs)
-        with mock.patch.object(po, 'plan', return_value=(bases, [], {})), mock.patch.object(self, 'fake_run', measure):
+        # Expand the descriptor set while the real plan prepares and hashes the two libraries.
+        make_script = po.script
+        with mock.patch.object(po, 'script', side_effect=lambda directory, _, computes=(): make_script(directory, bases, computes)), mock.patch.object(self, 'fake_run', measure):
             tracemalloc.start()
             try:
                 self.main('--os-min', '27.0')
@@ -508,10 +601,26 @@ class Build(unittest.TestCase):
             return original(cmd, **kw)
         return run, observed
 
+    def planned_batches(self, bases):
+        # These fixtures vary entry names while keeping the same two physical libraries.
+        # Prepare the real inputs before substituting the synthetic descriptor list.
+        def plan(directory, chain, pairs, zero, inputs):
+            inputs.prepare(pairs, chain)
+            return bases, [], {}
+        return mock.patch.object(po, 'plan', plan)
+
+    def test_batch_keys_reuse_prepared_libraries(self):
+        bases = [('v_bp', name, 'f_b', 'main0') for name in ('main0_z', 'second')]
+        runner, observed = self.batched_runner()
+        with mock.patch.object(self, 'fake_run', runner), self.planned_batches(bases), mock.patch.object(po, 'open', wraps=open, create=True) as reopened:
+            self.main('--jobs', '2', '--input-jobs', '2', '--batch-size', '1', '--os-min', '27.0')
+        self.assertEqual(observed, [('compile', ['main0_z']), ('compile', ['second']), ('merge', 2)])
+        self.assertFalse([call for call in reopened.call_args_list if str(call.args[0]).endswith('.metallib')])
+
     def test_batched_archive_reuses_pilot_and_normal_archive_key(self):
         bases = [('v_bp', f'vertex{i}', 'f_b', 'main0') for i in range(5)]
         runner, observed = self.batched_runner()
-        with mock.patch.object(self, 'fake_run', runner), mock.patch.object(po, 'plan', return_value=(bases, [], {})):
+        with mock.patch.object(self, 'fake_run', runner), self.planned_batches(bases):
             # An isolated pilot is the exact cache entry the complete build will consume.
             with mock.patch.object(po.subprocess, 'run', runner), contextlib.redirect_stdout(io.StringIO()):
                 po.compile_batch(self.lib, bases[:2], self.work/'batches.applegpu_g18p/00001', 'applegpu_g18p', 'ios', '27.0', self.compiler)
@@ -525,7 +634,7 @@ class Build(unittest.TestCase):
     def test_batch_failure_preserves_completed_work_and_publishes_nothing(self):
         bases = [('v_bp', f'vertex{i}', 'f_b', 'main0') for i in range(5)]
         runner, observed = self.batched_runner(fail_compile=('vertex2', 'vertex3'))   # nothing of the group compiles: metal-tt's failure, not one pipeline's
-        with mock.patch.object(self, 'fake_run', runner), mock.patch.object(po, 'plan', return_value=(bases, [], {})), self.assertRaises(SystemExit):
+        with mock.patch.object(self, 'fake_run', runner), self.planned_batches(bases), self.assertRaises(SystemExit):
             self.main('--batch-size','2','--os-min','27.0')
         self.assertEqual(observed[:2], [('compile',['vertex0','vertex1']),('compile',['vertex2','vertex3'])])
         self.assertTrue(all(set(names) <= {'vertex2', 'vertex3'} for _, names in observed[2:]))   # the search for the pipelines it stops on
@@ -536,7 +645,7 @@ class Build(unittest.TestCase):
         first = self.work/'batches.applegpu_g18p/00001/applegpu_g18p.mtl4a'
         self.assertTrue(first.is_file()); identity = first.stat().st_mtime_ns
         runner, observed = self.batched_runner()
-        with mock.patch.object(self, 'fake_run', runner), mock.patch.object(po, 'plan', return_value=(bases, [], {})):
+        with mock.patch.object(self, 'fake_run', runner), self.planned_batches(bases):
             self.main('--batch-size','2','--os-min','27.0')
         self.assertEqual(first.stat().st_mtime_ns, identity)
         self.assertEqual(observed, [('compile',['vertex2','vertex3']),('compile',['vertex4']),('merge',3)])
@@ -587,14 +696,14 @@ class Build(unittest.TestCase):
     def test_merge_failure_never_publishes_partial_archive(self):
         bases = [('v_bp', f'vertex{i}', 'f_b', 'main0') for i in range(3)]
         runner, _ = self.batched_runner(fail_merge=True)
-        with mock.patch.object(self, 'fake_run', runner), mock.patch.object(po, 'plan', return_value=(bases, [], {})), self.assertRaises(SystemExit):
+        with mock.patch.object(self, 'fake_run', runner), self.planned_batches(bases), self.assertRaises(SystemExit):
             self.main('--batch-size','2','--os-min','27.0')
         self.assertFalse(list(self.out.glob('*.mtl4a')))
         self.assertFalse((self.out/'prebuilt.tsv').exists())
         self.assertFalse((self.work/'key.applegpu_g18p').exists())
         self.assertFalse(list(self.work.rglob('*.partial')))
         runner, observed = self.batched_runner()
-        with mock.patch.object(self, 'fake_run', runner), mock.patch.object(po, 'plan', return_value=(bases, [], {})):
+        with mock.patch.object(self, 'fake_run', runner), self.planned_batches(bases):
             self.main('--batch-size','2','--os-min','27.0')
         self.assertEqual(observed, [('merge',2)])
 
@@ -603,24 +712,24 @@ class Build(unittest.TestCase):
         for size, want in ((2, [('merge', 2)]), (3, [])):   # more bases than a group: groups, merged; as many: one compiler run, no merge
             shutil.rmtree(self.work, ignore_errors=True); shutil.rmtree(self.out, ignore_errors=True)
             runner, observed = self.batched_runner()
-            with mock.patch.object(po, 'BATCH', size), mock.patch.object(po, 'plan', return_value=(bases, [], {})), mock.patch.object(self, 'fake_run', runner):
+            with mock.patch.object(po, 'BATCH', size), self.planned_batches(bases), mock.patch.object(self, 'fake_run', runner):
                 self.main('--os-min', '27.0')
             self.assertEqual([x for x in observed if x[0] == 'merge'], want)
             self.assertTrue((self.out / 'applegpu_g18p.mtl4a').is_file())
         shutil.rmtree(self.work); shutil.rmtree(self.out)
         runner, observed = self.batched_runner()
-        with mock.patch.object(po, 'BATCH', 2), mock.patch.object(po, 'plan', return_value=(bases, [], {})), mock.patch.object(self, 'fake_run', runner):
+        with mock.patch.object(po, 'BATCH', 2), self.planned_batches(bases), mock.patch.object(self, 'fake_run', runner):
             self.main('--os-min', '27.0', '--batch-size', '0')   # 0: one compiler run
         self.assertEqual(observed, [('compile', ['vertex0', 'vertex1', 'vertex2'])])
 
     def test_groups_of_a_longer_list_are_removed(self):
         bases = [('v_bp', f'vertex{i}', 'f_b', 'main0') for i in range(4)]
         runner, _ = self.batched_runner()
-        with mock.patch.object(po, 'plan', return_value=(bases, [], {})), mock.patch.object(self, 'fake_run', runner):
+        with self.planned_batches(bases), mock.patch.object(self, 'fake_run', runner):
             self.main('--batch-size', '1', '--os-min', '27.0')
         groups = self.work / 'batches.applegpu_g18p'
         self.assertEqual(sorted(d.name for d in groups.iterdir()), ['00001', '00002', '00003', '00004'])
-        with mock.patch.object(po, 'plan', return_value=(bases[:2], [], {})), mock.patch.object(self, 'fake_run', runner):
+        with self.planned_batches(bases[:2]), mock.patch.object(self, 'fake_run', runner):
             self.main('--batch-size', '1', '--os-min', '27.0')
         self.assertEqual(sorted(d.name for d in groups.iterdir()), ['00001', '00002'])
 
@@ -659,7 +768,7 @@ class Build(unittest.TestCase):
     def test_only_changed_batch_is_recompiled(self):
         bases = [('v_bp', f'vertex{i}', 'f_b', 'main0') for i in range(5)]
         runner, observed = self.batched_runner()
-        with mock.patch.object(self, 'fake_run', runner), mock.patch.object(po, 'plan', return_value=(bases, [], {})):
+        with mock.patch.object(self, 'fake_run', runner), self.planned_batches(bases):
             self.main('--batch-size','2','--os-min','27.0')
             observed.clear(); bases[0] = ('v_bp','changed','f_b','main0')
             self.main('--batch-size','2','--os-min','27.0')

@@ -127,6 +127,7 @@ enum SaveCheck {
 /// are already there, and closing it the window closing over them before they go.
 struct LauncherView: View {
     @ObservedObject var m: LauncherModel
+    var bar: CGFloat = 32   // the title bar's height: a toolbar's in the app's window (Launcher), where the header that has scrolled away is shown again
     let done: (Bool) -> Void
     let fit: (CGFloat) -> Void   // the height the content wants: the header and the settings, Advanced settings included while it is open
     @AppStorage("window.show") private var show = true
@@ -134,25 +135,38 @@ struct LauncherView: View {
     @State private var checking = false
     @State private var checkingShown = false   // the check's status, shown only once it has taken a moment (a check without a cloud folder returns at once, and a status flashed for a frame reads as a glitch)
     @State private var check = 0   // which Play the running check is for: one the player went on from without it is dropped
-    @State private var scrolled = false   // settings scrolled under the header
+    @State private var scroll = Scrolled()   // how far the window is scrolled, for the bar (TitleBar): not this view's state, which would redraw the whole window as the bar comes and goes
     @State private var closing = false   // Advanced settings is closing: its rows stay until the window has closed over them
     @State private var closes = 0   // which close the pending end of `closing` is for
     @State private var heights = Heights()
     @State private var position = ScrollPosition(edge: .top)
 
-    struct Heights: Equatable { var header: CGFloat = 0, basic: CGFloat = 0, advanced: CGFloat = 0 }
+    struct Heights: Equatable { var header: CGFloat = 0, basic: CGFloat = 0, advanced: CGFloat = 0, name: CGFloat = 0 }   // name: the bottom edge of the game's name in the header
 
     /// The game's icon (pack_app.py's AppIcon.icns, from the game's control data or --icon); nil when the app has none (a dump or a NUP without one)
     static let art: NSImage? = info("CFBundleIconFile").flatMap { Bundle.main.image(forResource: $0) }
     private var wanted: CGFloat { heights.header + heights.basic + (advanced ? heights.advanced : 0) }
 
+    /// How far each part of the header has come into the bar (`Scrolled.parts`), from the distance scrolled and where the header's parts end (0 until they are
+    /// measured). A part comes in over the `band` of scroll that follows its going under the bar, so none is in sight twice, and it comes with the scroll: the
+    /// number is its place in that band in eighths, the icon's in the hundreds, the name's in the tens, Play's in the units (888: the whole header is in the bar)
+    static func scrolled(_ y: CGFloat, header: CGFloat, name: CGFloat) -> Int {
+        guard header > 0, name > 0 else { return 0 }
+        func part(_ from: CGFloat) -> Int { Int((max(0, min(1, (y - from) / band)) * 8).rounded()) }
+        return part(iconTop + icon - 34) * 100 + part(name) * 10 + part(header - playBelow)
+    }
+    static let band: CGFloat = 14
+    static let playBelow: CGFloat = 14   // from the header's Play to the header's bottom edge
+    static let iconTop: CGFloat = 34, icon: CGFloat = 96   // the header's icon: 34 pt under the window's top edge, beside the window's buttons and not under them
+
     var body: some View {
+        // The header scrolls with the settings: on a screen too short for the window (a laptop's, with Advanced settings open) it kept a quarter of the window for
+        // itself. Once it is out of sight the title bar names the game and has Play, as a large title goes into its bar
         VStack(spacing: 0) {
-            header
-                .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { heights.header = $0 }
-                .overlay(alignment: .bottom) { Divider().opacity(scrolled ? 1 : 0) }
             ScrollView {
                 VStack(spacing: 0) {
+                    header
+                        .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { heights.header = $0 }
                     basicSettings
                         .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { heights.basic = $0 }
                     advancedSettings
@@ -168,11 +182,12 @@ struct LauncherView: View {
             .scrollPosition($position)
             .scrollDisabled(closing)
             .scrollBounceBehavior(.basedOnSize)
-            .onScrollGeometryChange(for: Bool.self) {
-                $0.contentOffset.y > -$0.contentInsets.top + 1
-            } action: { _, under in
-                scrolled = under
+            .onScrollGeometryChange(for: Int.self) {
+                Self.scrolled($0.contentOffset.y + $0.contentInsets.top, header: heights.header, name: heights.name)
+            } action: { _, now in
+                scroll.parts = now
             }
+            .overlay(alignment: .top) { TitleBar(scroll: scroll, checking: checking, play: start) }
         }
         .frame(minWidth: 520, idealWidth: 560)
         .onChange(of: wanted, initial: true) {
@@ -190,10 +205,14 @@ struct LauncherView: View {
 
     private var header: some View {
         VStack(spacing: 0) {
-            GameIcon(art: Self.art, side: 96)
+            GameIcon(art: Self.art, side: Self.icon)
+                // The icon stands in the bar's height, so the bar's ground cannot come while it is in sight: it fades as its last third goes out under the window's
+                // top edge, and is gone when the ground comes
+                .visualEffect { icon, at in icon.opacity(Double(max(0, min(1, (at.frame(in: .global).maxY - 34) / 26)))) }
             Text(info("CFBundleName") ?? "Game").font(.system(.title, design: .rounded).weight(.bold)).lineLimit(2).multilineTextAlignment(.center)
                 .fixedSize(horizontal: false, vertical: true)
                 .padding(.top, 14)
+                .onGeometryChange(for: CGFloat.self) { $0.frame(in: .named("header")).maxY } action: { heights.name = $0 }
             Group {
                 if checkingShown {
                     HStack(spacing: 6) {
@@ -222,8 +241,10 @@ struct LauncherView: View {
         }
         .animation(.easeOut(duration: 0.15), value: checkingShown)
         .frame(maxWidth: .infinity)
-        .padding(.horizontal, 24).padding(.top, 2).padding(.bottom, 14)
+        .padding(.horizontal, 24).padding(.top, Self.iconTop - bar).padding(.bottom, Self.playBelow)
+        .coordinateSpace(.named("header"))
     }
+
 
     private var basicSettings: some View {
         VStack(spacing: 12) {
@@ -237,11 +258,15 @@ struct LauncherView: View {
                 HStack(spacing: 12) {
                     RowLabel(icon: "arrow.up.forward.app") {
                         Text("Show this window at launch")
-                        Text("With this off, hold Option (⌥) while opening the app to see it.").font(.footnote).foregroundStyle(.secondary)
+                        // How to get the window back, said when it is switched off: that is when it is needed, and the row is one line like the others until then
+                        if !show {
+                            Text("Hold Option (⌥) while opening the app to see it again.").font(.footnote).foregroundStyle(.secondary).transition(.opacity)
+                        }
                     }
                     Spacer(minLength: 8)
                     Toggle("Show this window at launch", isOn: $show).labelsHidden().toggleStyle(.switch).controlSize(.mini)
                 }
+                .animation(.easeOut(duration: 0.15), value: show)
             }
             Box(inset: false) {
                 AdvancedRow(expanded: $advanced, changed: m.settings.filter { !$0.basic && !m.fixed.contains($0.env) && !$0.isDefault(m.values[$0.env] ?? $0.def) }.count)
@@ -282,7 +307,11 @@ struct LauncherView: View {
     private func start() {
         check += 1; checking = true
         let mine = check
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { if checking, check == mine { checkingShown = true } }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+            guard checking, check == mine else { return }
+            checkingShown = true
+            if scroll.parts > 0 { withAnimation(.easeOut(duration: 0.2)) { position.scrollTo(edge: .top) } }   // the status is in the header: Play in the title bar started it with the header out of sight
+        }
         DispatchQueue.global(qos: .userInitiated).async {
             let r = SaveCheck.report()
             DispatchQueue.main.async {
@@ -296,6 +325,78 @@ struct LauncherView: View {
             }
         }
     }
+}
+
+/// How far each part of the header has come into the bar (LauncherView.scrolled). An object the bar alone observes: as the window's state, each change redrew the
+/// whole window, 14 to 17 ms on the main thread in the middle of a scroll (two frames of a 120 Hz screen) every time the bar came or went
+final class Scrolled: ObservableObject {
+    @Published var parts = 0
+}
+
+/// The title bar over scrolled settings. The header goes into it a part at a time: as the icon, then the name, then Play scrolls under the bar, each is shown in the
+/// bar at a toolbar's size, the icon and the name beside the window's buttons and Play at the other end. The bar is a toolbar's height (Launcher gives the window
+/// an empty one), not a title bar's: in a title bar the icon was 16 pt and Play the smallest button in the window.
+/// - A part comes in with the scroll, not in a time of its own: its opacity is its place in the 14 pt of scroll after its large self has gone (Scrolled.parts).
+///   Faded in over 0.18 s instead, each part's animation ran while the settings scrolled, and a SwiftUI animation running during a scroll makes every fifth frame
+///   of a 120 Hz screen late (a small label pulsing over a plain scrolling list does the same: 64 late frames of 312, 1 without it), which is seen as a judder.
+/// - The bar has a ground from the first part on, which covers what passes under it: the header's parts go under an edge, and none is seen through another.
+///   (Under a ground that thinned out the header's Play showed through, pale, beside the bar's.)
+private struct TitleBar: View {
+    @ObservedObject var scroll: Scrolled
+    let checking: Bool
+    let play: () -> Void
+    @Environment(\.accessibilityReduceMotion) private var still
+
+    static let icon: CGFloat = 30
+    static let leading: CGFloat = 92   // clear of the window's buttons
+
+    var body: some View {
+        let parts = scroll.parts, icon = Double(parts / 100) / 8, name = Double(parts / 10 % 10) / 8, button = Double(parts % 10) / 8
+        GeometryReader { g in
+            let height = g.safeAreaInsets.top   // the title bar's own
+            HStack(spacing: 10) {
+                GameIcon(art: LauncherView.art, side: Self.icon)
+                    .modifier(Arriving(by: icon, still: still))
+                Text(info("CFBundleName") ?? "Game").font(.system(.title3, design: .rounded).weight(.semibold)).lineLimit(1).truncationMode(.tail)
+                    .help(info("CFBundleName") ?? "")
+                    .modifier(Arriving(by: name, still: still))
+                Spacer(minLength: 12)
+                Button(action: play) {
+                    Label("Play", systemImage: "play.fill").font(.system(.body, design: .rounded).weight(.semibold)).padding(.horizontal, 8)
+                }
+                .buttonStyle(.borderedProminent).buttonBorderShape(.capsule).controlSize(.large)   // the header's Play, a size down
+                .disabled(checking || button == 0)   // out of the key view loop while it is out of sight; not while it comes, when it would be drawn as a disabled button
+                .fixedSize()
+                .modifier(Arriving(by: button, still: still))
+            }
+            .padding(.leading, Self.leading).padding(.trailing, 16)
+            .accessibilityHidden(button < 1)
+            .frame(maxWidth: .infinity).frame(height: height)
+            .overlay { WindowDrag(on: button < 1) }   // not allowsHitTesting, switched as the bar comes and goes: that cost the main thread 8 to 10 ms each time, a frame dropped in the middle of a scroll
+            // The ground is the window's own colour, there at once. Not a material: in the key window one lets the header's Play show through as a blue smear.
+            // Not faded in: a quick scroll brings the header's Play under the bar within the time of a fade, and it showed through. Nothing is under it when it
+            // comes (the header's icon has faded by then), so nothing is seen to be cut off
+            .background { Color(nsColor: .windowBackgroundColor).opacity(parts > 0 ? 1 : 0) }
+            .overlay(alignment: .bottom) { Divider().opacity(parts > 0 ? 1 : 0) }
+            .offset(y: -height)
+        }
+        .frame(height: 0)
+    }
+
+    /// A part of the header as it comes into the bar: it fades in, coming up the last few points, as its large self went up under the bar
+    private struct Arriving: ViewModifier {
+        let by: Double, still: Bool
+        func body(content: Content) -> some View { content.opacity(by).offset(y: still ? 0 : (1 - by) * 4) }
+    }
+}
+
+/// The bar while what it holds is out of sight: a click there moves the window, as a click on any title bar does, and does not reach the Play that is not shown.
+/// An AppKit view over the bar, hidden once the bar holds something
+private struct WindowDrag: NSViewRepresentable {
+    let on: Bool
+    final class Strip: NSView { override var mouseDownCanMoveWindow: Bool { true } }
+    func makeNSView(context: Context) -> Strip { Strip() }
+    func updateNSView(_ strip: Strip, context: Context) { strip.isHidden = !on }
 }
 
 /// Rows in a rounded box with hairlines between them, drawn as a grouped Form draws a section (measured on macOS 27: the fill is 3 % of the label colour, the corner
@@ -326,7 +427,7 @@ struct RowLabel<Lines: View>: View {
 
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: 10) {
-            Image(systemName: icon).foregroundStyle(changed ? AnyShapeStyle(.tint) : AnyShapeStyle(.secondary)).frame(width: 20)
+            RowSymbol(name: icon).foregroundStyle(changed ? AnyShapeStyle(.tint) : AnyShapeStyle(.secondary)).frame(width: 20)
                 .help(changed ? changedHelp : "")
                 .accessibilityLabel(changed ? changedHelp : "").accessibilityHidden(!changed)
             VStack(alignment: .leading, spacing: 4) { lines }
@@ -435,15 +536,23 @@ private struct SettingLine: View, Equatable {
 struct InfoButton: View {
     let title, text: String
     @State private var shown = false
+    @State private var over = false
+
+    static let reach: CGFloat = 4   // the target round the glyph: 22 pt, not the glyph's 14
 
     var body: some View {
         Button { shown.toggle() } label: {
-            Image(systemName: "info.circle").foregroundStyle(.secondary)
+            Image(systemName: "info.circle").symbolVariant(shown ? .fill : .none)   // filled while its popover is open: the two belong together
+                .foregroundStyle(shown || over ? HierarchicalShapeStyle.primary : .secondary)
+                .padding(Self.reach).contentShape(.rect)
         }
         .buttonStyle(.plain)
+        .background(InfoPopover(text: text, shown: $shown))
+        .padding(-Self.reach)   // the target takes no room in the row
+        .onHover { over = $0 }
+        .animation(.easeOut(duration: 0.1), value: over)
         .help(text)
         .accessibilityLabel("About \(title)")
-        .background(InfoPopover(text: text, shown: $shown))
     }
 }
 
@@ -489,7 +598,7 @@ private struct InfoPopover: NSViewRepresentable {
             popover.behavior = .applicationDefined
             popover.animates = false
             self.popover = popover
-            popover.show(relativeTo: anchor.bounds, of: anchor, preferredEdge: anchor.isFlipped ? .maxY : .minY)   // below the button
+            popover.show(relativeTo: anchor.bounds.insetBy(dx: InfoButton.reach, dy: InfoButton.reach), of: anchor, preferredEdge: anchor.isFlipped ? .maxY : .minY)   // below the glyph
             if let bubble = box.window {
                 bubble.alphaValue = 0
                 NSAnimationContext.runAnimationGroup { $0.duration = 0.15; $0.timingFunction = CAMediaTimingFunction(name: .easeOut); bubble.animator().alphaValue = 1 }
@@ -546,7 +655,7 @@ private struct SlidingChoice: View {
     var body: some View {
         let count = max(options.count, 1), cell = Self.width / CGFloat(count)
         let chosen = options.firstIndex { $0[0] == value } ?? 0, at = held ?? chosen
-        let key = active != .inactive   // a control in a window that is not the key window gives up its colour, as AppKit's do
+        let key = active != .inactive && enabled   // a control in a window that is not the key window gives up its colour, as AppKit's do; so does a disabled one (a white label on the faded accent colour could not be read)
         let thumb = RoundedRectangle(cornerRadius: 5)
             .frame(width: cell - 4, height: Self.height - 4)
             .scaleEffect(held == nil ? 1 : 0.96)
@@ -590,16 +699,47 @@ private struct SlidingChoice: View {
     }
 }
 
-/// The symbol before each setting's row (an SF Symbol's name), by the variable the row sets. A row of dm/games/settings.tsv that a Mac app can show has its
-/// symbol here, and nothing else has: test_launcher_storage.py compares the two, so a new setting is not drawn with the fallback, a gear
+/// The symbol before each setting's row (an SF Symbol's name, or one of `drawn`), by the variable the row sets. A row of dm/games/settings.tsv that a Mac app can
+/// show has its symbol here, and nothing else has: test_launcher_storage.py compares the two, so a new setting is not drawn with the fallback, a gear
 enum Symbols {
     static let rows: [String: String] = [
-        "DM_FPS_TARGET": "speedometer", "DM_DYNAMIC_RESOLUTION": "square.resize", "DM_RENDER_SCALE": "arrow.up.left.and.arrow.down.right", "DM_OPMODE": "tv",
+        "DM_FPS_TARGET": "fps.bitmap", "DM_DYNAMIC_RESOLUTION": "square.resize", "DM_RENDER_SCALE": "arrow.up.left.and.arrow.down.right", "DM_OPMODE": "tv",
         "DM_PRESENT_UPSCALE": "square.arrowtriangle.4.outward", "DM_UPSCALER": "wand.and.sparkles", "DM_LANG": "globe", "DM_FULLSCREEN": "macwindow",
         "DM_SCREEN_ASPECT": "aspectratio", "DM_RUMBLE": "waveform", "DM_RUMBLE_GAIN": "dial.medium",
         "DM_RUMBLE_MIN": "line.3.horizontal.decrease", "DM_PAD_PRESS_TO_JOIN": "person.badge.plus", "DM_SW2": "gamecontroller", "DM_PRESENT_SNAP": "square.3.layers.3d",
         "DM_PSO_MTL4": "bolt", "DM_PSO_PREBUILD": "hourglass", "DM_NVN_ENC_THREAD": "arrow.triangle.branch", "DM_FPS_HOLD": "timer", "DM_METAL_HUD": "chart.xyaxis.line",
     ]
+    /// Symbols drawn here, as rows of squares ("#"): the system has none for a frame rate. FPS in letters three squares wide and five high, as a game's own
+    /// frame counter wrote it
+    static let drawn: [String: [String]] = [
+        "fps.bitmap": ["###.###.###",
+                       "#...#.#.#..",
+                       "##..###.###",
+                       "#...#.....#",
+                       "#...#...###"],
+    ]
+}
+
+/// A row's symbol: an SF Symbol, or one drawn from squares (Symbols.drawn), each 1.5 pt, in the colour the row gives its symbol
+struct RowSymbol: View {
+    let name: String
+
+    var body: some View {
+        if let rows = Symbols.drawn[name] {
+            let unit: CGFloat = 1.5
+            Canvas { canvas, _ in
+                for (y, row) in rows.enumerated() {
+                    for (x, square) in row.enumerated() where square == "#" {
+                        canvas.fill(Path(CGRect(x: CGFloat(x) * unit, y: CGFloat(y) * unit, width: unit, height: unit)), with: .foreground)
+                    }
+                }
+            }
+            .frame(width: CGFloat(rows.first?.count ?? 0) * unit, height: CGFloat(rows.count) * unit)
+            .alignmentGuide(.firstTextBaseline) { $0[.bottom] + 0.75 }   // its middle at the middle of the name's capitals, where an SF Symbol's is
+        } else {
+            Image(systemName: name)
+        }
+    }
 }
 
 /// The game's icon as a rounded tile; a controller glyph when the app has no icon
@@ -679,16 +819,15 @@ struct CloudSavesRow: View {
                     Text("Cloud saves")
                     InfoButton(title: "Cloud saves", text: "Shares this game's save with the iPhone app through a folder in iCloud Drive: choose the folder the iPhone app uses. A save that is replaced is kept in the save's backups folder.")
                 }
+                // No line while it is off: the button says so
                 Group {
                     if let fixed {
-                        Text("\(Self.shown(fixed)) (env.txt)").help(fixed)
-                    } else if folder.isEmpty {
-                        Text("Off")
-                    } else {
-                        Text(Self.shown(folder)).help(folder)
+                        FolderPath(path: fixed, suffix: " (env.txt)")
+                    } else if !folder.isEmpty {
+                        FolderPath(path: folder)
                     }
                 }
-                .font(.footnote).foregroundStyle(.secondary).lineLimit(1).truncationMode(.head)
+                .font(.footnote).foregroundStyle(.secondary)
             }
             Spacer(minLength: 8)
             if fixed == nil {
@@ -709,10 +848,35 @@ struct CloudSavesRow: View {
 
     static let drive = NSHomeDirectory() + "/Library/Mobile Documents/com~apple~CloudDocs"   // iCloud Drive, as the Finder shows it
 
+    /// The path as `shown` writes it, then with its leading folders left out, one more each time: what a row too narrow for the whole path shows
+    static func fitting(_ path: String) -> [String] {
+        let full = shown(path), mark = full.contains(" › ") ? " › " : "/"
+        let parts = full.components(separatedBy: mark).filter { !$0.isEmpty }
+        guard parts.count > 1 else { return [full] }
+        return [full] + (1..<parts.count).map { "…" + mark + parts[$0...].joined(separator: mark) }
+    }
+
     /// A path under iCloud Drive as the Finder and the Files app name it: iCloud Drive › Documents › dev › Zelda; any other path as it is
     static func shown(_ path: String) -> String {
         guard path == drive || path.hasPrefix(drive + "/") else { return path }
         return (["iCloud Drive"] + path.dropFirst(drive.count).split(separator: "/").map(String.init)).joined(separator: " › ")
+    }
+}
+
+/// A folder's path in one line. A row too narrow for it leaves out leading folders, whole ones ("… › Switch Saves › Zelda"): cut by the text itself it began
+/// inside a name ("…ames › Switch Saves › Zelda")
+private struct FolderPath: View {
+    let path: String
+    var suffix = ""
+
+    var body: some View {
+        let fits = CloudSavesRow.fitting(path)
+        ViewThatFits(in: .horizontal) {
+            ForEach(fits, id: \.self) { Text($0 + suffix) }
+            Text((fits.last ?? path) + suffix).truncationMode(.middle)   // the last folder's name alone is too long
+        }
+        .lineLimit(1)
+        .help(path)
     }
 }
 
@@ -721,6 +885,7 @@ private final class Launcher: NSObject, NSApplicationDelegate, NSWindowDelegate 
     var window: NSWindow?
     var host: NSView?   // the settings (an NSHostingView), in the window's content view at its top edge and at its own height (spring)
     var play = false
+    var content: CGFloat = 0   // the height the settings last asked for (fit)
     var placed = false   // the window has its measured height and its place on the screen; until then it is transparent (place)
 
     init(_ model: LauncherModel) { self.model = model }
@@ -728,18 +893,25 @@ private final class Launcher: NSObject, NSApplicationDelegate, NSWindowDelegate 
     func applicationDidFinishLaunching(_ n: Notification) {
         let name = info("CFBundleName") ?? "Game"
         let menu = NSMenu(), item = NSMenuItem(), app = NSMenu()
+        app.addItem(withTitle: "Hide \(name)", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
+        app.addItem(.separator())
+        app.addItem(withTitle: "Minimize", action: #selector(NSWindow.performMiniaturize(_:)), keyEquivalent: "m")
         app.addItem(withTitle: "Close Window", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
+        app.addItem(.separator())
         app.addItem(withTitle: "Quit \(name)", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         item.submenu = app; menu.addItem(item); NSApp.mainMenu = menu
         let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 560, height: 660), styleMask: [.titled, .closable, .miniaturizable, .fullSizeContentView], backing: .buffered, defer: false)   // not resizable: the height follows the settings shown (fit), which a dragged edge only fought
         w.title = name; w.isReleasedWhenClosed = false; w.delegate = self
         w.titleVisibility = .hidden; w.titlebarAppearsTransparent = true   // the header names the game; the title stays for the Window menu, Mission Control and VoiceOver
+        let bar = NSToolbar(identifier: "launcher")   // no items: the window's title bar at a toolbar's height, its buttons centred in it, for the header that goes into it (LauncherView.titleBar)
+        bar.displayMode = .iconOnly; bar.allowsUserCustomization = false; bar.allowsDisplayModeCustomization = false   // icons only: with labels the bar is 14 pt taller, for labels it does not have
+        w.toolbar = bar; w.toolbarStyle = .unified; w.titlebarSeparatorStyle = .none
         w.alphaValue = 0   // until place(): the content reports its height a pass after the window is ordered in, and the window showed at this first size, then jumped
         window = w
         if let screen = w.screen ?? NSScreen.main {
             w.setFrameTopLeftPoint(NSPoint(x: screen.visibleFrame.midX - w.frame.width / 2, y: screen.visibleFrame.maxY))
         }
-        let host = SettingsHost(rootView: LauncherView(m: model, done: { [weak self] in self?.finish($0) }, fit: { [weak self] in self?.fit($0) }))
+        let host = SettingsHost(rootView: LauncherView(m: model, bar: w.frame.height - w.contentLayoutRect.height, done: { [weak self] in self?.finish($0) }, fit: { [weak self] in self?.fit($0) }))
         host.sizingOptions = []   // the window's height is the content's own (fit), not the hosting view's ideal size: the settings scroll when the screen is shorter
         // The settings are not the window's content view but a view in it, held at the top edge: while the window's height moves, theirs is the height it is moving
         // to (or from), so they are laid out once per move and the window only uncovers or covers them. As the content view they were laid out at every step, 35 ms
@@ -761,10 +933,24 @@ private final class Launcher: NSObject, NSApplicationDelegate, NSWindowDelegate 
         return .terminateNow   // not terminateCancel, which a logout or restart takes as a refusal and stops
     }
     func windowWillClose(_ n: Notification) { finish(false) }
+    /// The window on another screen (a window manager moved it there, or the player dragged it): its height is that screen's to limit. After a drag has ended, not
+    /// during it: the window server is moving the window then, and a frame set under it puts the window back where the drag began
+    func windowDidChangeScreen(_ n: Notification) {
+        guard placed, content > 0, let w = window, let screen = w.screen else { return }
+        if NSEvent.pressedMouseButtons != 0 { dragged = true; DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in self?.windowDidChangeScreen(n) }; return }
+        if dragged { dragged = false; fit(content); return }   // the player put it there: its top edge stays, its height follows
+        // Not a drag: a window manager moved the window from the screen it opened on. It is placed again, as it was there: at this screen's height, centred
+        link?.invalidate(); link = nil
+        let chrome = w.frame.height - w.contentLayoutRect.height, room = screen.visibleFrame
+        let h = LauncherWindowLayout.fitted(NSRect(x: w.frame.minX, y: room.maxY - 1, width: w.frame.width, height: 1), height: content + chrome, visible: room).height
+        setHeight(h); layOut(h); w.center()
+    }
+    private var dragged = false
 
     /// The content's height (LauncherView.fit): the window takes it, its top edge where it is. The first time it is set at once and the window shown (place); after
     /// that the window moves to it on a spring
     func fit(_ height: CGFloat) {
+        content = height
         guard let w = window, let screen = w.screen else { return }
         let chrome = w.frame.height - w.contentLayoutRect.height   // the title bar: the content lies under it (fullSizeContentView), and its safe area keeps clear of it
         let wanted = LauncherWindowLayout.fitted(w.frame, height: height + chrome, visible: screen.visibleFrame).height
@@ -844,13 +1030,19 @@ private final class TopDown: NSView {
 }
 
 enum LauncherWindowLayout {
+    /// The room the window keeps to the screen's top and bottom edges: 64 pt on a 14-inch laptop's screen and larger, less on a smaller one (20 pt at 700 pt of
+    /// screen and under, where the basic settings need nearly all of it). A window that reached both edges read as a zoomed one, and the Dock cut off its shadow
+    static func margin(_ visible: NSRect) -> CGFloat { min(64, max(20, 20 + ((visible.height - 700) / 5.5).rounded())) }
+
     /// The window's frame at a height. The top edge never moves: the row that was clicked to open Advanced settings stays under the pointer, so a second click closes it
-    /// again. A window with too little screen below it stops at the screen's bottom edge, and the settings scroll
+    /// again. The window is no taller than the screen less a margin above and below, and it stops a margin short of the screen's bottom edge; the settings scroll then
     static func fitted(_ frame: NSRect, height: CGFloat, visible: NSRect) -> NSRect {
+        let m = margin(visible)
         let top = min(frame.maxY, visible.maxY)
-        let h = min(height, top - visible.minY)
+        let h = max(min(height, top - visible.minY - m, visible.height - 2 * m), min(height, least))
         return NSRect(x: frame.minX, y: top - h, width: frame.width, height: h)
     }
+    static let least: CGFloat = 320   // a window dragged to the screen's bottom edge keeps this much, running under the edge, and is not closed to a strip
 }
 
 // 1: Play (the window's settings are in the environment), 0: the player quit, 2: no window (no launcher.json, or "Show this window at launch" off): launcher.c applies the saved choices

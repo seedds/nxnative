@@ -172,13 +172,17 @@ POOL_MIN = 33   # arrays at least this long are pools: Program.cs sizes Ryujinx'
 # The test is a plain load: an atomic one, even relaxed, goes to the shared cache every time, and the reads of a pass name a few IDs, so its pixels queue on the same word.
 # A 1536x864 pass of 16 marks a pixel over 16 IDs: 2.60 ms atomic, 0.34 plain, 0.18 with no mark (Apple M6). A stale 0 costs an OR that changes nothing; a bit only goes
 # from 0 to 1 while a submission runs, as the host clears one (pool_seen_clear) only for an ID registered anew, which work committed after it reads
-POOL_MARK = """template<typename P> static inline __attribute__((always_inline)) uint dm_pool_mark(constant P* p, uint i)
-{
+# The mark depends on the function constant abi.MARK_FC: the host sets it (true: no mark) for the frames that do not look for first reads (nvn_mtl.m mark_frame), as a shader that stores
+# to memory loses hidden surface removal: 1.4-1.8 ms of Ocarina of Time's 32 ms Kokiri Forest frame on an M1, the cost of the store being there, whether it runs or not. Undefined, every read marks
+POOL_MARK = f"""constant bool dm_mark_off [[function_constant({abi.MARK_FC})]];
+constant bool dm_mark_live = !is_function_constant_defined(dm_mark_off) || !dm_mark_off;
+template<typename P> static inline __attribute__((always_inline)) uint dm_pool_mark(constant P* p, uint i)
+{{
     device uint* w = reinterpret_cast<device uint*>(p->seen) + (i >> 5);
     uint b = 1u << (i & 31u);
-    if (!(*w & b)) atomic_fetch_or_explicit(reinterpret_cast<device atomic_uint*>(w), b, memory_order_relaxed);
+    if (dm_mark_live && !(*w & b)) atomic_fetch_or_explicit(reinterpret_cast<device atomic_uint*>(w), b, memory_order_relaxed);
     return i;
-}
+}}
 
 """
 

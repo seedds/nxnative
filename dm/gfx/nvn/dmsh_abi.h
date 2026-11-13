@@ -136,6 +136,9 @@
 // The corrections' function constant (bool, every stage): true turns them off, for a pipeline whose draw or dispatch binds no sampler with a
 // twin (nvn_mtl.m border_need, fn_off). The twin samples go, and the registers they kept: Ocarina of Time's 1080p material passes spilled 300-400 bytes a thread with them. Undefined, every sample corrects as its bit says
 #define DMSH_BORDER_FC 216
+// The pool read marks' function constant (bool, every stage; dmsh_reflect.py POOL_MARK): true leaves the marks out, for the frames the host does not look for first reads in (nvn_mtl.m mark_frame).
+// A fragment shader that stores to memory loses hidden surface removal: Ocarina of Time's Kokiri Forest spent 1.4-1.8 ms of a 32 ms frame on its marks (M1). Undefined, every read marks
+#define DMSH_MARK_FC 217
 // The logic operation's state (dm/gfx/tools/dmsh_logic.py, the _l entry points of the <key>_bx libraries): uint operation (NVN_LOGIC_OP_*), 12 bytes of padding, a uint4 channel mask per colour target, at this fragment buffer index (nvn_mtl.m lo_bind)
 #define DMSH_LOGIC_BUFFER 29
 // Its function constants: bool, colour target n is attached (the variant reads it only then), at this index + n (nvn_mtl.m lo_fn specializes the entry point per pass's targets)

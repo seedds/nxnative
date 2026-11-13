@@ -5882,6 +5882,7 @@ static void shmap_read(void) {
     uint16_t tf_stride[4]; uint32_t cb_ext[16], sb_ro; nvn_refl rf; id<MTLArgumentEncoder> ae; NSUInteger arg_len; int stage, range_ro, layer_out; const char *builtin; uint64_t logged; char key[24]; id<MTLBuffer> c1buf; uint64_t c1_gpu; size_t c1off;
     uint32_t geo_vertices, geo_invocations, geo_output, geo_stride, geo_index_stride;
     uint8_t mesh_kind, mesh_notask; uint16_t mesh_threads, mesh_payload;   // an NVN2 task (1) or mesh (2) shader, a mesh shader with no task, its workgroup's threads, its payload's bytes (dmsh_meshstage.py)
+    int8_t mark_fc;   // its entry declares the pool marks' constant (DMSH_MARK_FC): 0 not looked up, 1 yes, -1 no (mark_free)
     id<MTLFunction> mesh_obj;   // a mesh shader with no task: the object function that launches its workgroups in blocks of DMSH_MESH_GRID (dmsh_meshstage.py main0_o)
     uint32_t tess_out_cp, tess_in_bytes, tess_md; int tess_ok;   // a hull / domain shader rewritten for replay (dmsh_tess.py, nvn_tess.inc); tess_md: a domain's mode (dmsh_tess.mode_bits)
     id<MTLComputePipelineState> geo_pso; int geo_pso_failed, cps_failed;   // cps_failed: Metal refused this compute shader's pipeline (dispatch): its dispatches are skipped without asking again
@@ -6125,47 +6126,57 @@ static id<MTLFunction> fn_dev(id<MTLFunction> f) {
 // says which one it builds (off: pso_build, cps_new_b, the mesh pipelines, from pso_key.border), and takes the descriptor from fn4_of_b and the device function from fn_dev_b.
 // A descriptor always holds the shader's own function. fn_off keeps every prior constant of f's descriptor (alpha test, logic operation, merged outputs) and adds the border one;
 // cached by that descriptor. nil: f has no variant (no library descriptor, or its entry point does not declare the constant), and off builds what on builds
-@interface FnOff : NSObject { @public MTL4FunctionDescriptor *d4; MTLFunctionConstantValues *cv; id<MTLFunction> dev; int none, dev_failed; } @end
+@interface FnOff : NSObject { @public MTL4FunctionDescriptor *d4; MTLFunctionConstantValues *cv; id<MTLFunction> dev; int dev_failed; } @end
 @implementation FnOff @end
+// off is a mask: 1 without the border corrections, 2 without the pool read marks (dmsh_reflect.py POOL_MARK, DMSH_MARK_FC; pso_key.border_spare). A bit the entry point does not declare is dropped
+@interface FnOffs : NSObject { @public FnOff *v[4]; int has; } @end   // has: the bits the entry point declares, -1 not looked up yet
+@implementation FnOffs @end
 static os_unfair_lock g_fn_off_lock = OS_UNFAIR_LOCK_INIT;
-static NSMapTable *g_fn_off;   // MTL4FunctionDescriptor (fn4_of) → FnOff
-static FnOff *fn_off(id<MTLFunction> f) {
+static NSMapTable *g_fn_off;   // MTL4FunctionDescriptor (fn4_of) → FnOffs
+static FnOff *fn_off(id<MTLFunction> f, int off) {
     MTL4FunctionDescriptor *fd = fn4_of(f);
-    if (!fd) return nil;   // no library to specialize from (diagnostic overrides)
+    if (!fd || !off) return nil;   // no library to specialize from (diagnostic overrides)
     os_unfair_lock_lock(&g_fn_off_lock);
     if (!g_fn_off) g_fn_off = [[NSMapTable alloc] initWithKeyOptions:NSPointerFunctionsStrongMemory | NSPointerFunctionsObjectPointerPersonality valueOptions:NSPointerFunctionsStrongMemory capacity:0];
-    FnOff *o = [g_fn_off objectForKey:fd];
-    if (!o) { o = [FnOff new]; [g_fn_off setObject:o forKey:fd]; }
+    FnOffs *s = [g_fn_off objectForKey:fd];
+    if (!s) { s = [FnOffs new]; s->has = -1; [g_fn_off setObject:s forKey:fd]; }
     os_unfair_lock_unlock(&g_fn_off_lock);
-    @synchronized(o) {
-        if (o->d4 || o->none) return o->none ? nil : o;
+    @synchronized(s) {
         MTLFunctionConstantValues *cv = nil;
         if ([fd isKindOfClass:MTL4SpecializedFunctionDescriptor.class]) {
             MTL4SpecializedFunctionDescriptor *sd = (MTL4SpecializedFunctionDescriptor *)fd;
-            cv = [sd.constantValues copy]; fd = sd.functionDescriptor;
+            cv = sd.constantValues; fd = sd.functionDescriptor;
         }
         MTL4LibraryFunctionDescriptor *ld = [fd isKindOfClass:MTL4LibraryFunctionDescriptor.class] ? (MTL4LibraryFunctionDescriptor *)fd : nil;
-        // NOLINTNEXTLINE(clang-analyzer-nullability.NullablePassedToNonnull): the descriptor's name is set when it is made (fn4_note refuses a nil name, pre_fn takes the name its function was made from) and never changed
-        if (!ld || ![ld.library newFunctionWithName:ld.name].functionConstantsDictionary[@"dm_border_off"]) { o->none = 1; return nil; }   // the entry's, not f's: a specialized f lists no constants
-        if (!cv) cv = [MTLFunctionConstantValues new];
-        BOOL yes = YES; [cv setConstantValue:&yes type:MTLDataTypeBool atIndex:DMSH_BORDER_FC];
+        if (s->has < 0) {   // the entry's constants, not f's: a specialized f lists none
+            // NOLINTNEXTLINE(clang-analyzer-nullability.NullablePassedToNonnull): the descriptor's name is set when it is made (fn4_note refuses a nil name, pre_fn takes the name its function was made from) and never changed
+            NSDictionary *fc = ld ? [ld.library newFunctionWithName:ld.name].functionConstantsDictionary : nil;
+            s->has = (fc[@"dm_border_off"] ? 1 : 0) | (fc[@"dm_mark_off"] ? 2 : 0);
+        }
+        off &= s->has;
+        if (!off) return nil;
+        if (s->v[off]) return s->v[off];
+        cv = cv ? [cv copy] : [MTLFunctionConstantValues new];
+        BOOL yes = YES;
+        if (off & 1) [cv setConstantValue:&yes type:MTLDataTypeBool atIndex:DMSH_BORDER_FC];
+        if (off & 2) [cv setConstantValue:&yes type:MTLDataTypeBool atIndex:DMSH_MARK_FC];
         MTL4SpecializedFunctionDescriptor *sd = [MTL4SpecializedFunctionDescriptor new]; sd.functionDescriptor = ld; sd.constantValues = cv;
-        o->cv = cv; o->d4 = sd;
+        FnOff *o = [FnOff new]; o->cv = cv; o->d4 = sd; s->v[off] = o;
         return o;
     }
 }
-// f's Metal 4 descriptor, without the border corrections when off
-static MTL4FunctionDescriptor *fn4_of_b(id<MTLFunction> f, int off) { FnOff *o = off ? fn_off(f) : nil; return o ? o->d4 : fn4_of(f); }
-// The function an MTLDevice pipeline is built from (fn_dev), without the border corrections when off: specialized through its library, once. A failed specialization keeps the corrections
+// f's Metal 4 descriptor, specialized as off says
+static MTL4FunctionDescriptor *fn4_of_b(id<MTLFunction> f, int off) { FnOff *o = fn_off(f, off); return o ? o->d4 : fn4_of(f); }
+// The function an MTLDevice pipeline is built from (fn_dev), specialized as off says: through its library, once. A failed specialization keeps the corrections and marks
 static id<MTLFunction> fn_dev_b(id<MTLFunction> f, int off) {
-    FnOff *o = off ? fn_off(f) : nil;
+    FnOff *o = fn_off(f, off);
     if (!o) return fn_dev(f);
     @synchronized(o) {
         if (!o->dev && !o->dev_failed) {
             MTL4LibraryFunctionDescriptor *ld = (MTL4LibraryFunctionDescriptor *)((MTL4SpecializedFunctionDescriptor *)o->d4).functionDescriptor;
             // NOLINTNEXTLINE(clang-analyzer-nullability.NullablePassedToNonnull): fn_off made o->d4 from this ld after looking its name up; names are never nil (fn4_note, pre_fn)
             NSError *e = nil; o->dev = [ld.library newFunctionWithName:ld.name constantValues:o->cv error:&e];
-            if (!o->dev) { o->dev_failed = 1; MLOG("[RED] function %s: specializing it without the border corrections failed: %s (its pipelines keep them)", f.name.UTF8String, e.localizedDescription.UTF8String); }
+            if (!o->dev) { o->dev_failed = 1; MLOG("[RED] function %s: specializing it (variant %d) failed: %s (its pipelines keep the corrections and marks)", f.name.UTF8String, off, e.localizedDescription.UTF8String); }
         }
         if (o->dev) return o->dev;
     }
@@ -9362,7 +9373,7 @@ static MTL4RenderPipelineDescriptor *pso_desc4(MTLRenderPipelineDescriptor *d, i
     return m;
 }
 static void pbase_key_of(MTLRenderPipelineDescriptor *d, int off, pbase_key *k) {
-    memset(k, 0, sizeof *k); k->off = off != 0;
+    memset(k, 0, sizeof *k); k->off = (uint32_t)off;
     k->vf = (__bridge const void *)d.vertexFunction; k->ff = (__bridge const void *)d.fragmentFunction;
     k->samples = (uint32_t)d.rasterSampleCount; k->a2c = d.alphaToCoverageEnabled; k->rast = d.rasterizationEnabled; k->topo = (uint32_t)d.inputPrimitiveTopology; k->amp = (uint32_t)d.maxVertexAmplificationCount;
     MTLVertexDescriptor *vd = d.vertexDescriptor;
@@ -9916,6 +9927,43 @@ static __unsafe_unretained id<MTLRenderPipelineState> sm_amp_get(const pso_key *
         os_unfair_lock_lock(&g_sm_amp_lock); g_sm_amp[i].ps = ps; g_sm_amp[i].done = 1; os_unfair_lock_unlock(&g_sm_amp_lock); });
     return nil;
 }
+// Frames without the pool read marks (DMSH_MARK_FC). A read's bit stays set while the ID holds a texture (pool_seen_clear), so a frame marks only an ID no frame read before, and
+// those are what the marks are for: the host makes the textures shaders read (pool_seen_scan). DM_NVN_MARK_SKIP=n (default 8; 0 marks every frame): one frame in n marks, and every frame
+// does for n frames after a scan found a new read, so a new view's textures are found as before and a texture first read in an unmarked frame waits at most n frames on its stand-in.
+// The unmarked pipelines are built in the background (mark_free_get): until one is there its draws mark, as every draw did
+static int g_mark_skip = -1; static _Atomic uint64_t g_mark_until;
+static int mark_skip(void) { if (g_mark_skip < 0) { const char *ev = getenv("DM_NVN_MARK_SKIP"); g_mark_skip = ev ? atoi(ev) : 8; if (g_mark_skip < 0) g_mark_skip = 0; if (ev) MLOG("DM_NVN_MARK_SKIP=%d: one frame in %d marks its pool reads", g_mark_skip, g_mark_skip); } return g_mark_skip; }
+static int mark_frame(void) {   // whether this frame's draws mark their pool reads
+    int n = mark_skip(); if (n <= 1) return 1;
+    uint64_t f = atomic_load(&g_cur_frame);
+    return f % (uint64_t)n == 0 || f < atomic_load_explicit(&g_mark_until, memory_order_relaxed);
+}
+static int mark_free(NvShader *sh) {   // sh declares the marks' constant
+    if (!sh || !sh->fn) return 0;
+    if (!sh->mark_fc) sh->mark_fc = fn_off(sh->fn, 2) ? 1 : -1;
+    return sh->mark_fc > 0;
+}
+@interface MarkPend : NSObject { @public id<MTLRenderPipelineState> ps; _Atomic int done; } @end
+@implementation MarkPend @end
+static nvn_hmap g_mark_pend = {.klen = sizeof(pso_key)};   // pso_key (border_spare 1) → MarkPend
+// k's pipeline without the marks: nil until its background build is done
+static __unsafe_unretained id<MTLRenderPipelineState> mark_free_get(const pso_key *k, NvShader *vs, NvShader *fs) {
+    __unsafe_unretained id<MTLRenderPipelineState> c = hm_get_id(&g_pso, k); if (c) return c;
+    if (hm_get_id(&g_pso_fail, k)) return nil;
+    MarkPend *p = hm_get_id(&g_mark_pend, k);
+    if (p) {
+        if (!atomic_load(&p->done)) return nil;
+        if (p->ps) hm_put_id(&g_pso, k, p->ps); else hm_put_id(&g_pso_fail, k, NSNull.null);
+        hm_rel(nvn_hm_del(&g_mark_pend, k));
+        return hm_get_id(&g_pso, k);
+    }
+    p = [MarkPend new]; hm_put_id(&g_mark_pend, k, p);
+    MTLRenderPipelineDescriptor *d = pso_desc(k, vs, fs, nil, 0); int off = (!k->border) | 2;
+    dispatch_async(pp_bg_queue(), ^{ NSError *e = nil; id<MTLRenderPipelineState> ps = pso_build(d, off, &e);
+        if (!ps) MLOG("[RED] pipeline without the pool marks (vertex %s fragment %s): %s (its draws keep them)", vs->key, fs ? fs->key : "-", e.localizedDescription.UTF8String);
+        p->ps = ps; atomic_store(&p->done, 1); });
+    return nil;
+}
 static __unsafe_unretained id<MTLRenderPipelineState> pso_get_(NvProg *pr, MTLRenderPassDescriptor *unused) {
     (void)unused;
     g_pso_pull = 0;   // set again only where a pulling pipeline is returned: a stale 1 made the next draw, whose pipeline came from the cache, bind the layout block instead of its streams
@@ -9935,7 +9983,12 @@ static __unsafe_unretained id<MTLRenderPipelineState> pso_get_(NvProg *pr, MTLRe
     }
     if (g_pso_lmap) { memcpy(k.lmap, g_pso_lmap, 8); k.fsfn = (__bridge void *)g_pso_fsfn; }
     id<MTLFunction> ms_fn = ms_fs_override(fs); if (ms_fn) k.fsfn = (__bridge void *)ms_fn;   // DM_NVN_MAGSCAN phases 2 / 3
-    if (g_pso_amp) { if (k.fsfn || g_pso_lmap) return nil; k.fsfn = AMP_MARK; return sm_amp_get(&k, vs, fs); }   // a slice-merged pass's pipeline: built in the background, nil until then
+    if (g_pso_amp) { if (k.fsfn || g_pso_lmap) return nil; k.fsfn = AMP_MARK; return sm_amp_get(&k, vs, fs); }
+    if (!g_pso_amp && !g_pso_lmap && !ms_fn && !k.fsfn && mark_free(fs) && !mark_frame()) {   // a frame that does not mark: the unmarked pipeline once it is built
+        k.border_spare = 1; __unsafe_unretained id<MTLRenderPipelineState> mf = mark_free_get(&k, vs, fs); k.border_spare = 0;
+        if (mf) return mf;
+    }
+   // a slice-merged pass's pipeline: built in the background, nil until then
     // DM_PSO_PULL_ALL=1 (diagnostic): every draw that has a pulling pipeline draws with it, never with the pipeline for its layout
     { static int all = -1; if (all < 0) { const char *ev = getenv("DM_PSO_PULL_ALL"); all = ev && !strcmp(ev, "1"); if (all) MLOG("DM_PSO_PULL_ALL=1: every draw with a pulling pipeline draws with it (diagnostic)"); }
       if (all && !g_pso_lmap && !ms_fn && hybrid_on()) { __unsafe_unretained id<MTLRenderPipelineState> h = hybrid_get(&k, vs, fs); if (h) { g_pso_pull = 1; return h; } } }
@@ -10760,6 +10813,7 @@ static void pool_seen_scan(void) {
         }
         g_seen_todo[i] |= typed_new & g_seen_done[i];   // already read through another type: the tables of the new type take it in place
         uint32_t fresh = got & ~g_seen_done[i];
+        if ((fresh | typed_new) && g_mark_skip > 1) atomic_store_explicit(&g_mark_until, f + (uint64_t)g_mark_skip, memory_order_relaxed);   // a new read: mark every frame for a while (mark_frame)
         if (fresh) { g_seen_done[i] |= fresh; g_seen_todo[i] |= fresh; for (uint32_t bits = fresh; bits; bits &= bits - 1) { pool_ds_note((int)i * 32 + __builtin_ctz(bits)); pool_first_read((int)i * 32 + __builtin_ctz(bits), f); } }
         for (uint32_t bits = g_seen_todo[i]; bits; bits &= bits - 1) {
             int b = __builtin_ctz(bits), id_ = (int)i * 32 + b;

@@ -156,18 +156,23 @@ def scan_source_stub(c):
 SHADOW_UV_SITE = 0x137abf4
 
 
-def shadow_uv_words(start):
-    return [0xd2a8b008,   # movz x8,#0x4580,lsl #16  (4096.0f)
+def shadow_uv_words(start, size_hi16=0x4580):
+    """(size, 1.0) in d0: size_hi16 is the float's upper half, 0x4580 for 4096.0, 0x4600 for 8192.0."""
+    return [0xd2a00000 | size_hi16 << 5 | 8,   # movz x8,#size_hi16,lsl #16
             0xf2e7f008,   # movk x8,#0x3f80,lsl #48  (1.0f in the upper half)
             0x9e670100,   # fmov d0,x8
             B(start + 12, SHADOW_UV_SITE + 4)]
 
 
+SHADOW_UV_STUBS = (('SHADOW_UV4096', 0x4580), ('SHADOW_UV8192', 0x4600))   # runtime_patches.py's shadow choices 2x and 4x
+
+
 def shadow_stub(c):
     c.site(SHADOW_UV_SITE, '009942fd')   # ldr d0,[x8,#0x530]
-    start = c.here()
-    for word in shadow_uv_words(start): c.emit(word)
-    c.runtime_exports['SHADOW_UV4096'] = start
+    for name, hi in SHADOW_UV_STUBS:
+        start = c.here()
+        for word in shadow_uv_words(start, hi): c.emit(word)
+        c.runtime_exports[name] = start
 
 
 STUBS = {build_id: scan_source_stub}

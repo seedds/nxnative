@@ -122,35 +122,45 @@ def scene_writes(stub, choice='1440p'):
     return [(choice, 0x33170c, bytes.fromhex('358108aa'), struct.pack('<I', B(0x33170c, stub)))]
 
 
-# DM_SHADOW_RESOLUTION=2x, a second manifest (main.shadow.runtime.tsv): shadow tiles twice their size in a 4096 atlas. (offset, original, replacement)
+# DM_SHADOW_RESOLUTION=2x or 4x, a second manifest (main.shadow.runtime.tsv): shadow tiles 2 or 4 times their size in a 4096 or 8192 atlas.
+# (offset, original, 2x replacement, 4x replacement)
 SHADOW_SITES = (
-    (0x137a6f0, 0x5280003c, 0x5280005c),   # mov w28,#1 -> #2: tile size 2 << floor(log2(requested))
-    (0x137a82c, 0x52810008, 0x52820008),   # packer: mov w8,#0x800 -> #0x1000
-    (0x137a840, 0x5281000d, 0x5282000d),   # packer: mov w13,#0x800 -> #0x1000
-    (0x137a850, 0x712001bf, 0x714005bf),   # packer: cmp w13,#0x800 -> cmp w13,#0x1000 (a tile larger than the atlas is skipped)
-    (0xa1e8b8, 0xb21503e8, 0xb21403e8),    # atlas created: mov x8,#0x80000000800 -> #0x100000001000 (4096x4096)
-    (0xa1e8bc, 0xd281000a, 0xd282000a),    # atlas created: mov x10,#0x800 -> #0x1000
-    (0xa1e8c0, 0xf2c10009, 0xf2c20009),    # atlas created: movk x9,#0x800,lsl #32 -> #0x1000
-    (0xda3a94, 0xb21503e9, 0xb21403e9),    # atlas getter: mov x9,#0x80000000800 -> #0x100000001000
-    (0xda3a98, 0xf2c1000a, 0xf2c2000a),    # atlas getter: movk x10,#0x800,lsl #32 -> #0x1000
-    (0xda3aa0, 0xd2810009, 0xd2820009),    # atlas getter: mov x9,#0x800 -> #0x1000
+    (0x137a6f0, 0x5280003c, 0x5280005c, 0x5280009c),   # mov w28,#1 -> #2 / #4: tile size 2 or 4 << floor(log2(requested))
+    (0x137a82c, 0x52810008, 0x52820008, 0x52840008),   # packer: mov w8,#0x800 -> #0x1000 / #0x2000
+    (0x137a840, 0x5281000d, 0x5282000d, 0x5284000d),   # packer: mov w13,#0x800 -> #0x1000 / #0x2000
+    (0x137a850, 0x712001bf, 0x714005bf, 0x714009bf),   # packer: cmp w13,#0x800 -> #0x1000 / #0x2000 (a tile larger than the atlas is skipped)
+    (0xa1e8b8, 0xb21503e8, 0xb21403e8, 0xb21303e8),    # atlas created: mov x8,#0x80000000800 -> #0x100000001000 / #0x200000002000
+    (0xa1e8bc, 0xd281000a, 0xd282000a, 0xd284000a),    # atlas created: mov x10,#0x800 -> #0x1000 / #0x2000
+    (0xa1e8c0, 0xf2c10009, 0xf2c20009, 0xf2c40009),    # atlas created: movk x9,#0x800,lsl #32 -> #0x1000 / #0x2000
+    (0xda3a94, 0xb21503e9, 0xb21403e9, 0xb21303e9),    # atlas getter: mov x9,#0x80000000800 -> #0x100000001000 / #0x200000002000
+    (0xda3a98, 0xf2c1000a, 0xf2c2000a, 0xf2c4000a),    # atlas getter: movk x10,#0x800,lsl #32 -> #0x1000 / #0x2000
+    (0xda3aa0, 0xd2810009, 0xd2820009, 0xd2840009),    # atlas getter: mov x9,#0x800 -> #0x1000 / #0x2000
 )
+SHADOW_CHOICES = (('2x', 'SHADOW_UV4096', 0x4580), ('4x', 'SHADOW_UV8192', 0x4600))   # patches.py SHADOW_UV_STUBS
 
 
-def shadow_writes(stub):
-    writes = [('2x', off, struct.pack('<I', old), struct.pack('<I', new)) for off, old, new in SHADOW_SITES]
-    return writes + [('2x', 0x137abf4, struct.pack('<I', 0xfd429900), struct.pack('<I', B(0x137abf4, stub)))]   # ldr d0,[x8,#0x530] -> the (4096.0, 1.0) stub
+def shadow_writes(stubs):
+    """stubs: {choice: address of its (size, 1.0) stub}."""
+    writes = []
+    for k, (choice, _, _) in enumerate(SHADOW_CHOICES):
+        if choice not in stubs: continue
+        writes += [(choice, off, struct.pack('<I', old), struct.pack('<I', new[k])) for off, old, *new in SHADOW_SITES]
+        writes.append((choice, 0x137abf4, struct.pack('<I', 0xfd429900), struct.pack('<I', B(0x137abf4, stubs[choice]))))   # ldr d0,[x8,#0x530] -> the stub
+    return writes
 
 
 def generate_shadow(module, patched, fixups):
     if module.build_id.hex() != BUILD:
         raise ValueError('Metroid Prime 4 shadow resolution requires main v1.1.0 build ' + BUILD[:32])
-    stub = int(fixups.get('RUNTIME_SHADOW_UV4096', '-1'), 0)
-    if stub < max(module.text_end, int(fixups['PATCH_OFF'], 0)) or stub + 16 > len(patched):
-        raise ValueError('missing/out-of-range rewritten shadow stub')
-    if patched[stub:stub + 16] != struct.pack('<4I', 0xd2a8b008, 0xf2e7f008, 0x9e670100, B(stub + 12, 0x137abf8)):
-        raise ValueError('mismatched rewritten shadow stub')
-    return manifest(module, patched, fixups, BUILD, 'DM_SHADOW_RESOLUTION', shadow_writes(stub))
+    stubs = {}
+    for choice, export, hi in SHADOW_CHOICES:
+        stub = int(fixups.get('RUNTIME_' + export, '-1'), 0)
+        if stub < max(module.text_end, int(fixups['PATCH_OFF'], 0)) or stub + 16 > len(patched):
+            raise ValueError(f'missing/out-of-range rewritten shadow stub for {choice}')
+        if patched[stub:stub + 16] != struct.pack('<4I', 0xd2a00000 | hi << 5 | 8, 0xf2e7f008, 0x9e670100, B(stub + 12, 0x137abf8)):
+            raise ValueError(f'mismatched rewritten shadow stub for {choice}')
+        stubs[choice] = stub
+    return manifest(module, patched, fixups, BUILD, 'DM_SHADOW_RESOLUTION', shadow_writes(stubs))
 
 
 # DM_MODEL_LOD=high, a third manifest (main.lod.runtime.tsv): every model drawn at its most detailed level. The model item's render method (main+0x6a2f0,
@@ -179,7 +189,7 @@ def main(argv):
     out.write_text(generate(module, image, fixups))
     out.with_name('main.shadow.runtime.tsv').write_text(generate_shadow(module, image, fixups))   # a second variable, loaded beside main.runtime.tsv (loader.c)
     out.with_name('main.lod.runtime.tsv').write_text(generate_lod(module, image, fixups))
-    print('Runtime resolution: default (zero writes); preserved 1440p/1800p/2160p supersampling; experimental full-output 1080p/1440p/2160p/2880p; shadow resolution: default, 2x; model LOD: default, high')
+    print('Runtime resolution: default (zero writes); preserved 1440p/1800p/2160p supersampling; experimental full-output 1080p/1440p/2160p/2880p; shadow resolution: default, 2x, 4x; model LOD: default, high')
 
 
 if __name__ == '__main__':

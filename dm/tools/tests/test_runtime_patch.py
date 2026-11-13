@@ -135,7 +135,7 @@ class ScanSourcePatch(unittest.TestCase):
             original[off:off + len(before)] = before
         for _, off, before, _ in self.runtime.output_writes('2880p_full', 5120, 2880):
             original[off:off + len(before)] = before
-        for off, before, _ in self.runtime.SHADOW_SITES:
+        for off, before, *_ in self.runtime.SHADOW_SITES:
             struct.pack_into('<I', original, off, before)
         original[self.profile.SHADOW_UV_SITE:self.profile.SHADOW_UV_SITE + 4] = bytes.fromhex('009942fd')
         for off, before, _ in self.runtime.LOD_SITES:
@@ -242,34 +242,35 @@ class ScanSourcePatch(unittest.TestCase):
                 patched[0x80be90] ^= 1; image.write_bytes(patched)
                 with self.assertRaisesRegex(ValueError, 'instructions differ'): settings.build('010019A01E2F2000', tmp, 'unused')
 
-    def test_shadow_2x_doubles_tiles_atlas_packer_and_uv_scale_together(self):
+    def test_shadow_2x_and_4x_scale_tiles_atlas_packer_and_uv_together(self):
         module, patched, fixups = self.fixture()
         rows = [r.split('\t') for r in self.runtime.generate_shadow(module, patched, fixups).splitlines()]
         self.assertEqual(rows[0][3], 'DM_SHADOW_RESOLUTION')
-        self.assertEqual([r[1] for r in rows if r[0] == 'choice'], ['default', '2x'])
-        writes = {int(r[2], 16): (int.from_bytes(bytes.fromhex(r[3]), 'little'), int.from_bytes(bytes.fromhex(r[4]), 'little')) for r in rows if r[0] == 'write'}
-        self.assertEqual(len(writes), 11)
+        self.assertEqual([r[1] for r in rows if r[0] == 'choice'], ['default', '2x', '4x'])
         movz_w = lambda w: (w & 0xffe00000 == 0x52800000, (w >> 5) & 0xffff, w & 31)
-        self.assertEqual(movz_w(writes[0x137a6f0][1]), (True, 2, 28))       # tile = 2 << k
-        self.assertEqual(movz_w(writes[0x137a82c][1]), (True, 0x1000, 8))   # packer atlas width
-        self.assertEqual(movz_w(writes[0x137a840][1]), (True, 0x1000, 13))
-        cmp = writes[0x137a850][1]                                          # cmp w13,#1,lsl #12
-        self.assertEqual((cmp & 0xff800000, (cmp >> 22) & 1, (cmp >> 10) & 0xfff, (cmp >> 5) & 31, cmp & 31), (0x71000000, 1, 1, 13, 31))
-        for off in (0xa1e8bc, 0xda3aa0):                                    # movz x,#0x1000
-            w = writes[off][1]; self.assertEqual((w & 0xffe00000, (w >> 5) & 0xffff), (0xd2800000, 0x1000))
-        for off in (0xa1e8c0, 0xda3a98):                                    # movk x,#0x1000,lsl #32
-            w = writes[off][1]; self.assertEqual((w & 0xffe00000, (w >> 5) & 0xffff), (0xf2c00000, 0x1000))
-        for off in (0xa1e8b8, 0xda3a94):                                    # orr x,xzr,#0x0000100000001000: one bit per 32-bit element, at bit 12
-            old, new = writes[off]
-            self.assertEqual(new & ~(0x3f << 16), old & ~(0x3f << 16)); self.assertEqual(((old >> 16) & 0x3f) - ((new >> 16) & 0x3f), 1)
-        stub = int(fixups['RUNTIME_SHADOW_UV4096'], 16)
-        self.assertEqual(writes[0x137abf4], (0xfd429900, B(0x137abf4, stub)))
-        words = struct.unpack_from('<4I', patched, stub)
-        self.assertEqual(words[:3], (0xd2a8b008, 0xf2e7f008, 0x9e670100))  # x8 = 4096.0f | 1.0f << 32; fmov d0,x8
-        self.assertEqual(struct.unpack('<2f', struct.pack('<Q', 0x4580 << 16 | 0x3f80 << 48)), (4096.0, 1.0))
-        self.assertEqual(words[3], B(stub + 12, 0x137abf8))
-        patched[stub + 4] ^= 1
-        with self.assertRaisesRegex(ValueError, 'mismatched rewritten shadow stub'): self.runtime.generate_shadow(module, patched, fixups)
+        for choice, k, atlas, uv, hi in (('2x', 2, 0x1000, 'SHADOW_UV4096', 0x4580), ('4x', 4, 0x2000, 'SHADOW_UV8192', 0x4600)):
+            writes = {int(r[2], 16): (int.from_bytes(bytes.fromhex(r[3]), 'little'), int.from_bytes(bytes.fromhex(r[4]), 'little')) for r in rows if r[0] == 'write' and r[1] == choice}
+            self.assertEqual(len(writes), 11)
+            self.assertEqual(movz_w(writes[0x137a6f0][1]), (True, k, 28))        # tile = k << level
+            self.assertEqual(movz_w(writes[0x137a82c][1]), (True, atlas, 8))     # packer atlas size
+            self.assertEqual(movz_w(writes[0x137a840][1]), (True, atlas, 13))
+            cmp = writes[0x137a850][1]                                           # cmp w13,#atlas (lsl #12)
+            self.assertEqual((cmp & 0xff800000, (cmp >> 22) & 1, ((cmp >> 10) & 0xfff) << 12, (cmp >> 5) & 31, cmp & 31), (0x71000000, 1, atlas, 13, 31))
+            for off in (0xa1e8bc, 0xda3aa0):                                     # movz x,#atlas
+                w = writes[off][1]; self.assertEqual((w & 0xffe00000, (w >> 5) & 0xffff), (0xd2800000, atlas))
+            for off in (0xa1e8c0, 0xda3a98):                                     # movk x,#atlas,lsl #32
+                w = writes[off][1]; self.assertEqual((w & 0xffe00000, (w >> 5) & 0xffff), (0xf2c00000, atlas))
+            for off in (0xa1e8b8, 0xda3a94):                                     # orr x,xzr,#atlas | atlas << 32: the single bit moved up by log2(atlas / 2048)
+                old, new = writes[off]
+                self.assertEqual(new & ~(0x3f << 16), old & ~(0x3f << 16)); self.assertEqual(((old >> 16) & 0x3f) - ((new >> 16) & 0x3f), k // 2 if k == 2 else 2)
+            stub = int(fixups['RUNTIME_' + uv], 16)
+            self.assertEqual(writes[0x137abf4], (0xfd429900, B(0x137abf4, stub)))
+            words = struct.unpack_from('<4I', patched, stub)
+            self.assertEqual(words[1:3], (0xf2e7f008, 0x9e670100)); self.assertEqual((words[0] & 0xffe0001f, (words[0] >> 5) & 0xffff), (0xd2a00008, hi))
+            self.assertEqual(struct.unpack('<2f', struct.pack('<Q', hi << 16 | 0x3f80 << 48)), (float(2048 * k), 1.0))
+            self.assertEqual(words[3], B(stub + 12, 0x137abf8))
+        patched[int(fixups['RUNTIME_SHADOW_UV8192'], 16) + 4] ^= 1
+        with self.assertRaisesRegex(ValueError, 'mismatched rewritten shadow stub for 4x'): self.runtime.generate_shadow(module, patched, fixups)
 
     def test_model_lod_high_reads_level_zero_without_cross_fade(self):
         module, patched, fixups = self.fixture()
@@ -294,13 +295,13 @@ class ScanSourcePatch(unittest.TestCase):
             (folder / 'main.runtime.tsv').write_text(self.runtime.generate(module, patched, fixups))
             self.assertEqual(runtime_patch.choices(folder, 'DM_SHADOW_RESOLUTION'), ())
             (folder / 'main.shadow.runtime.tsv').write_text(self.runtime.generate_shadow(module, patched, fixups))
-            self.assertEqual(runtime_patch.choices(folder, 'DM_SHADOW_RESOLUTION'), ('default', '2x'))
+            self.assertEqual(runtime_patch.choices(folder, 'DM_SHADOW_RESOLUTION'), ('default', '2x', '4x'))
             (folder / 'main.lod.runtime.tsv').write_text(self.runtime.generate_lod(module, patched, fixups))
             self.assertEqual(runtime_patch.choices(folder, 'DM_MODEL_LOD'), ('default', 'high'))
             self.assertIn('1800p', runtime_patch.choices(folder, 'DM_INTERNAL_RESOLUTION'))
             with mock.patch.dict(os.environ, {'SETTINGS_PLATFORM': 'mac'}), mock.patch.object(settings.nacp, 'languages', return_value=['en-US']):
                 row = next(r for r in settings.build('010019A01E2F2000', tmp, 'unused')['settings'] if r['env'] == 'DM_SHADOW_RESOLUTION')
-            self.assertEqual(([o[0] for o in row['options']], row['default']), (['default', '2x'], 'default'))
+            self.assertEqual(([o[0] for o in row['options']], row['default']), (['default', '2x', '4x'], 'default'))
 
     def test_bridge_spills_and_returns_with_only_x28_and_displaced_w8_changed(self):
         from capstone import Cs, CS_ARCH_ARM64, CS_MODE_ARM  # pyright: ignore[reportMissingImports]  # binary-analysis test dependency in the tool venv

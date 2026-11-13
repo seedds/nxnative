@@ -21,7 +21,7 @@ printf 'DM_INTERNAL_RESOLUTION=%s\nDM_PRESENT_UPSCALE=off\nDM_METAL_HUD=1\nDM_NV
 [ "${SHADOW_TRACE:-}" = 1 ] && echo "DM_NVN_SHADOW_TRACE=1" >> "$OUT/env.txt"
 # DRAW_TRACE=1: the call chains of indexed draws into a scene pass, once per chain, up to 24 (DM_NVN_DRAW_TRACE), to find the LOD choice
 [ "${DRAW_TRACE:-}" = 1 ] && echo "DM_NVN_DRAW_TRACE=1" >> "$OUT/env.txt"
-# SHADOWS=2x: shadow tiles twice their size in a 4096 atlas (DM_SHADOW_RESOLUTION, main.shadow.runtime.tsv)
+# SHADOWS=2x or 4x: shadow tiles 2 or 4 times their size in a 4096 or 8192 atlas (DM_SHADOW_RESOLUTION, main.shadow.runtime.tsv)
 [ -n "${SHADOWS:-}" ] && echo "DM_SHADOW_RESOLUTION=$SHADOWS" >> "$OUT/env.txt"
 # LOD=high: every model at its most detailed level (DM_MODEL_LOD, main.lod.runtime.tsv)
 [ -n "${LOD:-}" ] && echo "DM_MODEL_LOD=$LOD" >> "$OUT/env.txt"

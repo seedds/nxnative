@@ -17,6 +17,8 @@ OUT="$NSP/010019A01E2F2000-work/manual-test/$MODE-$(date +%m%d-%H%M%S)"; mkdir -
 # DUMP=every:<n> sets the pass-dump interval (every:150 catches a scan held for a few seconds); input.rec is player 1's input as the game's reads saw it (DM_REC), replayable with DM_KEYS=@<file>
 printf 'DM_INTERNAL_RESOLUTION=%s\nDM_PRESENT_UPSCALE=off\nDM_METAL_HUD=1\nDM_NVN_PASSDUMP=%s\nDM_REC=%s\nDM_RUMBLE_LOG=1\n' "$MODE" "${DUMP:-every:1800}" "$OUT/input.rec" > "$OUT/env.txt"
 [ -n "${ANISO:-}" ] && echo "DM_NVN_ANISO=$ANISO" >> "$OUT/env.txt"   # ANISO=<2..16>: the anisotropy floor of the surface samplers (DM_NVN_ANISO), for an A/B against a run without it
+# SHADOW_TRACE=1: the first 24 viewports set while a Depth16 target (a shadow map) is bound, with the game's caller and backtrace (DM_NVN_SHADOW_TRACE)
+[ "${SHADOW_TRACE:-}" = 1 ] && echo "DM_NVN_SHADOW_TRACE=1" >> "$OUT/env.txt"
 # PROBE=<module:offset,...>: guest probes (DM_PROBE, Mac), the first 3 hits of each printed; RUMBLE_PROBE=1 is the vibration set (README: Vibration with a DualSense):
 # main:936628 the rumble setup runs, main:9366a0 its RumbleCategories lookup found the resource, main:a4e00 / main:d350b8 an amplitude or effect request
 [ "${RUMBLE_PROBE:-}" = 1 ] && PROBE=main:936628,main:9366a0,main:a4e00,main:d350b8
@@ -118,6 +120,8 @@ for name, fs in sorted(hits.items()):
 gpu = re.findall(r'\[kr\] F(\d+) pass=(\d+) key=(\S+) (sbuf\d+|tex\d+)', log)
 print(f'GPU snapshots (separate planes and storage words): {len(gpu)} records; depth/stencil transfer records: {log.count("[kr-transfer]")}')
 for line in re.findall(r'^.*(?:MP4 scan-source|packed D24S8 query readback).*$', log, re.M)[:8]: print(line)
+st = re.findall(r'shadow trace: viewport (\S+) (\S+) into a Depth16 (\S+) target, called from (\S+)', log)
+if st: print('shadow trace:', len(st), 'viewports;', ', '.join(f'{t} {o} {sz} from {c}' for o, sz, t, c in st[:12]))
 red = collections.Counter(re.sub(r'[0-9a-f]{8,}|\d+', 'N', l)[:160] for l in re.findall(r'^.*\[RED\].*$', log, re.M) if 'failed to load shader' not in l)
 print('other red lines:'); [print(f'  {n} x {l}') for l, n in red.most_common(8)]
 for l in re.findall(r'^.*(?:SIGSEGV|SIGBUS|fault at|crash handler).*$', log, re.M)[:3]: print('CRASH:', l[:200])

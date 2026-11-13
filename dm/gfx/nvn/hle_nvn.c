@@ -1351,12 +1351,14 @@ static const tex_t *tex_snap(void *rec_, size_t off, int k, const NVNtexture *t,
     }
     return s;
 }
+static void shadow_trace_rt(const NVNcommandBuffer *c, const NVNtexture *dt);
 NVN(nvnCommandBufferSetRenderTargets, void, NVNcommandBuffer *c, int n, const NVNtexture *const *ct, const NVNtextureView *const *cv,
     const NVNtexture *dt, const NVNtextureView *dv) {
     if (n < 0 || n > 8) { LOG("[RED] SetRenderTargets count %d", n); n = n < 0 ? 0 : 8; }
     p_set_rt *r = REC_SNAP(c, OP_SET_RT, p_set_rt, n + 1); r->n = n;
     for (int i = 0; i < n; i++) { r->color[i] = ct ? tex_snap(r, SNAP_OFF(p_set_rt), i, ct[i], (uint64_t)__builtin_return_address(0)) : NULL; copy_view(&r->cview[i], &r->has_cview[i], cv ? cv[i] : NULL); }
     r->depth = tex_snap(r, SNAP_OFF(p_set_rt), n, dt, (uint64_t)__builtin_return_address(0)); copy_view(&r->dview, &r->has_dview, dv);
+    shadow_trace_rt(c, dt);
     for (int i = 0; i < n; i++) if (r->color[i]) mtl_tex_gpu_written(r->color[i]);
     if (r->depth) mtl_tex_gpu_written(r->depth);
 }
@@ -1374,7 +1376,20 @@ NVN(nvnCommandBufferClearColorui, void, NVNcommandBuffer *c, int index, const ui
 NVN(nvnCommandBufferClearDepthStencil, void, NVNcommandBuffer *c, float depth, uint32_t dmask, int stencil, int smask) {
     p_clear_ds *r = REC(c, OP_CLEAR_DS, p_clear_ds); *r = (p_clear_ds){depth, (int)B(dmask), stencil, smask};
 }
+// DM_NVN_SHADOW_TRACE=1 (diagnostic): while a command buffer's depth target is a Depth16 texture (a shadow map), its first 24 SetViewports print the
+// viewport, the target's size, the game's return address and the guest backtrace, to find the code that lays out a shadow atlas's tiles
+static _Thread_local const NVNcommandBuffer *g_shadow_cb; static _Thread_local unsigned g_shadow_w, g_shadow_h;
+static int shadow_trace_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_SHADOW_TRACE"); v = e && atoi(e) > 0; } return v; }
+static void shadow_trace_rt(const NVNcommandBuffer *c, const NVNtexture *dt) {
+    if (!shadow_trace_on()) return;
+    const tex_t *t = (const tex_t *)dt;
+    if (t && t->magic == MAGIC('T','E','X',0) && t->d.format == NVN_FORMAT_DEPTH16) { g_shadow_cb = c; g_shadow_w = t->d.width; g_shadow_h = t->d.height; }
+    else if (g_shadow_cb == c) g_shadow_cb = NULL;
+}
 NVN(nvnCommandBufferSetViewports, void, NVNcommandBuffer *c, int first, int n, const float *v) {
+    if (shadow_trace_on() && g_shadow_cb == c && n > 0) { static _Atomic int seen;
+        if (atomic_fetch_add(&seen, 1) < 24) { LOG("shadow trace: viewport %g,%g %gx%g into a Depth16 %ux%u target, called from %#llx", v[0], v[1], v[2], v[3], g_shadow_w, g_shadow_h, (unsigned long long)(uintptr_t)__builtin_return_address(0));
+            void dm_backtrace(uint64_t fp); dm_backtrace((uint64_t)__builtin_frame_address(0)); } }
     if (n < 0 || first + n > 16) { LOG("[RED] SetViewports first=%d n=%d", first, n); return; }
     if (g_rec_compact && first >= 0) { uint8_t *q = crec(c, OPC_VIEWPORTS, (uint32_t)first | (uint32_t)n << 8, 16 * (size_t)n); memcpy(q, v, 16 * (size_t)n); return; }
     p_viewports *r = REC(c, OP_VIEWPORTS, p_viewports); r->first = first; r->n = n;

@@ -16,6 +16,18 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
 
             RunOptimizationPasses(context.Blocks, context.ResourceManager);
 
+            // nxnative: a hull shader's stores into the stage's circular buffer become its outputs, once the header words are constants and the addresses are folded
+            if (context.UsedFeatures.HasFlag(FeatureFlags.DirectCbe))
+            {
+                if (DirectCbeWrites.AnswerHeader(context.Blocks, context.Definitions))
+                {
+                    RunOptimizationPasses(context.Blocks, context.ResourceManager);
+                }
+
+                DirectCbeWrites.RunPass(context.Blocks, context.Definitions, context.GpuAccessor);
+                RunOptimizationPasses(context.Blocks, context.ResourceManager);
+            }
+
             // TODO: Some of those are not optimizations and shouldn't be here.
 
             GlobalToStorage.RunPass(context.Hfm, context.Blocks, context.ResourceManager, context.GpuAccessor, context.TargetLanguage);

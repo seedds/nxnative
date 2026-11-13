@@ -131,6 +131,7 @@ class Bit0Mask(unittest.TestCase):
         build = (TOOLS / 'dmsh_build.py').read_text()
         self.assertEqual(build.count('src = dmsh_rewrite.bit0_mask(src)'), 1)
         self.assertLess(build.index('src = dmsh_rewrite.bit0_mask(src)'), build.index('src = dmsh_rewrite.border_emu(src)'))   # before the entry points are added
+        self.assertEqual(build.count('dmsh_rewrite.bit0_mask(dmsh_rewrite.precise('), 2)   # a geometry shader's kernel and its reader (geometry_finish)
 
     @unittest.skipUnless(os.environ.get('DMSH_TEST_METAL') and toolchain(), 'set DMSH_TEST_METAL=1 to compile with the Metal compiler and applegpu-nt')
     def test_the_gpu_compiler_encodes_the_rewritten_shader(self):

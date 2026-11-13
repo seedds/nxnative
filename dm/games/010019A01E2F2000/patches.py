@@ -147,6 +147,7 @@ def scan_source_stub(c):
         c.emit(word)
     c.runtime_exports['SCAN_SOURCE_V1'] = start
     shadow_stub(c)
+    lod_distance_stub(c)
 
 
 # Shadow resolution (runtime_patches.py shadow_writes, DM_SHADOW_RESOLUTION=2x). The frame's shadow code (main+0x137a63c) gives each shadow-casting
@@ -172,6 +173,29 @@ def shadow_stub(c):
     for name, hi in SHADOW_UV_STUBS:
         start = c.here()
         for word in shadow_uv_words(start, hi): c.emit(word)
+        c.runtime_exports[name] = start
+
+
+# LOD distance (runtime_patches.py lod_writes, DM_MODEL_LOD=x2 / x4). The visibility job (main+0x13a24c) scales each instance's offset from the view's camera
+# by the view's factor [view+0x3c8] (loaded at 0x13a268) and compares the result with the model's level thresholds; an offset past all of them takes the
+# far branch (0x13a4d4). These stubs multiply that factor by 0.5 or 0.25, so every threshold lies 2 or 4 times as far away. s2 is free there: every path
+# writes it before reading it (0x13a38c, 0x13a3a8, 0x13a3c4, 0x13a440).
+LOD_DISTANCE_SITE = 0x13a268
+LOD_DISTANCE_STUBS = (('LOD_DISTANCE_X2', 0x1e2c1002), ('LOD_DISTANCE_X4', 0x1e2a1002))   # fmov s2,#0.5 / #0.25
+
+
+def lod_distance_words(start, fmov):
+    return [0xbd43c920,   # ldr s0,[x9,#0x3c8]  (the displaced load)
+            fmov,
+            0x1e220800,   # fmul s0,s0,s2
+            B(start + 12, LOD_DISTANCE_SITE + 4)]
+
+
+def lod_distance_stub(c):
+    c.site(LOD_DISTANCE_SITE, '20c943bd')
+    for name, fmov in LOD_DISTANCE_STUBS:
+        start = c.here()
+        for word in lod_distance_words(start, fmov): c.emit(word)
         c.runtime_exports[name] = start
 
 

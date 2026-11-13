@@ -23,7 +23,7 @@ printf 'DM_INTERNAL_RESOLUTION=%s\nDM_PRESENT_UPSCALE=off\nDM_METAL_HUD=1\nDM_NV
 [ "${DRAW_TRACE:-}" = 1 ] && echo "DM_NVN_DRAW_TRACE=1" >> "$OUT/env.txt"
 # SHADOWS=2x or 4x: shadow tiles 2 or 4 times their size in a 4096 or 8192 atlas (DM_SHADOW_RESOLUTION, main.shadow.runtime.tsv)
 [ -n "${SHADOWS:-}" ] && echo "DM_SHADOW_RESOLUTION=$SHADOWS" >> "$OUT/env.txt"
-# LOD=high: every model at its most detailed level (DM_MODEL_LOD, main.lod.runtime.tsv)
+# LOD=x2, x4 or high: level switches 2 or 4 times as far away, or every model at its most detailed level (DM_MODEL_LOD, main.lod.runtime.tsv)
 [ -n "${LOD:-}" ] && echo "DM_MODEL_LOD=$LOD" >> "$OUT/env.txt"
 # PROBE=<module:offset,...>: guest probes (DM_PROBE, Mac), the first 3 hits of each printed; RUMBLE_PROBE=1 is the vibration set (README: Vibration with a DualSense):
 # main:936628 the rumble setup runs, main:9366a0 its RumbleCategories lookup found the resource, main:a4e00 / main:d350b8 an amplitude or effect request

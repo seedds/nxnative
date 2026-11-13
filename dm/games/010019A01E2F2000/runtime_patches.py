@@ -173,14 +173,30 @@ LOD_SITES = (
 )
 
 
-def lod_writes():
-    return [('high', off, struct.pack('<I', old), struct.pack('<I', new)) for off, old, new in LOD_SITES]
+LOD_DISTANCE = (('x2', 'LOD_DISTANCE_X2', 0x1e2c1002), ('x4', 'LOD_DISTANCE_X4', 0x1e2a1002))   # patches.py LOD_DISTANCE_STUBS: fmov s2,#0.5 / #0.25
+
+
+def lod_writes(stubs=None):
+    """high: level 0 at draw time; x2 / x4: the visibility job's distance factor halved or quartered (stubs: {choice: stub address})."""
+    writes = [('high', off, struct.pack('<I', old), struct.pack('<I', new)) for off, old, new in LOD_SITES]
+    for choice, _, _ in LOD_DISTANCE:
+        if stubs and choice in stubs:
+            writes.append((choice, 0x13a268, struct.pack('<I', 0xbd43c920), struct.pack('<I', B(0x13a268, stubs[choice]))))   # ldr s0,[x9,#0x3c8] -> the stub
+    return writes
 
 
 def generate_lod(module, patched, fixups):
     if module.build_id.hex() != BUILD:
         raise ValueError('Metroid Prime 4 model LOD requires main v1.1.0 build ' + BUILD[:32])
-    return manifest(module, patched, fixups, BUILD, 'DM_MODEL_LOD', lod_writes())
+    stubs = {}
+    for choice, export, fmov in LOD_DISTANCE:
+        stub = int(fixups.get('RUNTIME_' + export, '-1'), 0)
+        if stub < max(module.text_end, int(fixups['PATCH_OFF'], 0)) or stub + 16 > len(patched):
+            raise ValueError(f'missing/out-of-range rewritten LOD distance stub for {choice}')
+        if patched[stub:stub + 16] != struct.pack('<4I', 0xbd43c920, fmov, 0x1e220800, B(stub + 12, 0x13a26c)):
+            raise ValueError(f'mismatched rewritten LOD distance stub for {choice}')
+        stubs[choice] = stub
+    return manifest(module, patched, fixups, BUILD, 'DM_MODEL_LOD', lod_writes(stubs))
 
 
 def main(argv):
@@ -189,7 +205,7 @@ def main(argv):
     out.write_text(generate(module, image, fixups))
     out.with_name('main.shadow.runtime.tsv').write_text(generate_shadow(module, image, fixups))   # a second variable, loaded beside main.runtime.tsv (loader.c)
     out.with_name('main.lod.runtime.tsv').write_text(generate_lod(module, image, fixups))
-    print('Runtime resolution: default (zero writes); preserved 1440p/1800p/2160p supersampling; experimental full-output 1080p/1440p/2160p/2880p; shadow resolution: default, 2x, 4x; model LOD: default, high')
+    print('Runtime resolution: default (zero writes); preserved 1440p/1800p/2160p supersampling; experimental full-output 1080p/1440p/2160p/2880p; shadow resolution: default, 2x, 4x; model LOD: default, x2, x4, high')
 
 
 if __name__ == '__main__':

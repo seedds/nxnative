@@ -472,6 +472,13 @@ Games read this count as a position in their own command memory and size their h
 - **Budget regression:** the `--cpu` path also uses a synthetic event, clock and condition-wait deadline to exercise the actual `mtl_wait_at` function without a Metal device. Run with `DM_NVN_FAST_WAKE=0/1` and `DM_NVN_WAITS=0/1`; no gameplay or FPS improvement is inferred from these timeout cases.
 - **Found on:** [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md): it reads 5 timestamp reports a frame right after the wait (its interval controller and dynamic resolution), which is why the waiter makes them itself. Wake after the GPU end 0.29 → 0.08 ms on an M2 Max, 0.147 ms on an iPhone 17 Pro Max.
 
+### The post-completion ring is smaller than the submissions in flight
+
+- **Symptom:** `[nvn-mtl] FATAL post ring: the writes of fence <N> never ran` at a submission's commit (`mtl_sub_commit`), with the new fence exactly the ring's size past `<N>`, in a game that makes many submissions a frame.
+- **Cause:** every submission keeps a record of its CPU-side writes (events, samples-passed and counter reports) in a ring of `POST_RING` slots, indexed by its fence, until its feedback handler or an early waiter runs them ([The game's SyncWait wakes on the GPU's own signal of its fence](#the-games-syncwait-wakes-on-the-gpus-own-signal-of-its-fence)). The ring held 128, enough while each submission took an allocator of its own (8 in flight). Since the submissions of one frame share an allocator ([PR #2090](https://github.com/seedds/nxnative/pull/2090)), `ALLOC_MAX * ALLOC_SHARE` = 512 can be in flight before `mtl_sub_begin` waits, and the 128th submission after one whose feedback had not come yet found its slot still unrun.
+- **Fix:** the ring is sized from that bound (`POST_RING = ALLOC_MAX * ALLOC_SHARE`): a slot is reused only after the allocator wait has seen its previous submission complete, and completion runs every record up to a fence before it raises the completed fence, so the abort stays only as the check of that invariant ([PR #2469](https://github.com/seedds/nxnative/pull/2469)).
+- **Found on:** Super Mario Party (`010036B0034E4000`, provisional profile, Apple M1 Pro): 70-80 submissions a frame; two crash logs aborted at fences 166777 and 442682 with 166649 and 442554 unrun.
+
 ### `nvnQueueFinish` waits for the GPU, not the display
 
 - **Symptom:** loading screens many times slower on the iPhone than on the Mac (Three Houses' first loading screen 78 s on the iPhone, 5 s on the Mac).

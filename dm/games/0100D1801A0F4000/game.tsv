@@ -1,0 +1,47 @@
+# Game profile of Risk of Rain Returns (Switch, update 1.0.5 v196608 / base 1.0.0 v0). Plays on the Mac from cutscenes, menus, audio and gameplay
+# at 60 fps (see README.md)
+# Format: see dm/games/README.md
+# GameMaker Studio 2: a native runner (main, 26.0 MB text) whose game data is in the RomFS as game.win (FORM/GEN8) beside cutscenes, fonts and
+# localization. It renders with OpenGL through EGL: main imports EGL functions and takes every GL call from eglGetProcAddress, which the host's
+# GL layer answers on Metal (dm/gfx/gl/hle_gl.m, GL 3.2), so NVIDIA's GL driver (subsdk0) is never loaded. SDK 15.3.2
+# The shaders are GLSL ES 1.00 that the runner writes at run time, in no game file: captured on the Mac (gl_capture.tsv lists all 84)
+# and dm/gfx/tools/gl_shaders.py translates them offline; the host finds each by hash
+
+# ---- Identity ----
+title_id	0100D1801A0F4000
+program_id	0100D1801A0F4000
+
+# ---- App ----
+name	Risk of Rain Returns
+ipa	RiskOfRainReturns.ipa
+app_category	public.app-category.games
+
+# ---- Versions ----
+build	v0	1.0.0	main=72cf5f42c35865588db9a8459be89cae	subsdk1=368f01d5cb42f06cd125dc739d036719	sdk=8618895246b420329b77746b960a66ab
+build	v196608	1.0.5	main=f5f6085ecfae3a629313316e4a8571ab	subsdk1=368f01d5cb42f06cd125dc739d036719	sdk=8618895246b420329b77746b960a66ab
+package	v196608
+shader_versions	v196608
+
+# ---- Files ----
+# not loaded, main takes nothing from them the host does not supply: subsdk0 (NintendoSDK_OpenGL)
+modules	main subsdk1 sdk
+romfs_marker	game.win
+zip_store	.mp4:.ogg:.otf:.png:.ttf:.win:.metallib
+
+# ---- Memory ----
+# main sets a heap of at most the pool − 64 MB: a 3328 MB heap region
+mem_reserve	0x100000000
+mem_alias	0x10000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+# the NPDM declares 0 MB of system resource: IsVirtualAddressMemoryEnabled is false, as on Horizon
+sys_resource	0x0
+
+# ---- Shader split ----
+# no NVN shaders: the profile's NVN tables stay empty and the GL library comes from gl_shaders.py (gl_capture.tsv)
+shader_groups	/=romfs
+shader_note	Risk of Rain Returns shaders, all written by GameMaker's runner at run time: captured on the Mac, translated by gl_shaders.py, no NVN tables
+
+# ---- After the rewrite ----
+# used memory for the current rewritten modules, at least the default 64 MB
+mem_used	0x4800000

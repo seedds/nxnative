@@ -52,6 +52,7 @@ def main(argv=None):
         subprocess.run([sys.executable, str(REPO / 'dm/tools/patch_nso.py'), str(original), str(patched), 'main'], env=env, stdout=log, stderr=subprocess.STDOUT, check=True)
     image = patched / 'main.patched.bin'
     (patched / 'main.runtime.tsv').write_text(rt.generate(module, image.read_bytes(), runtime_patch.layout(patched / 'main.fixups.tsv')))
+    (patched / 'main.shadow.runtime.tsv').write_text(rt.generate_shadow(module, image.read_bytes(), runtime_patch.layout(patched / 'main.fixups.tsv')))
     listed = out / 'launcher.json'
     subprocess.run([sys.executable, str(REPO / 'dm/games/settings.py'), g.id, str(patched), str(control), str(listed)], env=env, check=True)
     data = json.loads(listed.read_text())

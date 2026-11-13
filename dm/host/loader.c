@@ -792,6 +792,7 @@ static uint8_t *slurp(const char *path, size_t *n) {
     close(fd); *n = st.st_size; return p;
 }
 
+#include <dirent.h>
 #include "runtime_patch.h"
 static void runtime_patches(module_t *m, const char *dir) {
     char path[1024]; snprintf(path, sizeof path, "%s/%s.runtime.tsv", dir, m->name);
@@ -807,6 +808,25 @@ static void runtime_patches(module_t *m, const char *dir) {
     fclose(f);
     if (rc) die("[RED] %s runtime patches rejected: %s", m->name, error);
     LOG("%s runtime patches: %u writes applied (default applies none)", m->name, applied);
+    // Further manifests, one DM_ variable each: <module>.<name>.runtime.tsv (Metroid Prime 4's main.shadow.runtime.tsv), validated and applied the same way,
+    // in name order; each checks its expected bytes against the image as the ones before it left it
+    DIR *d = opendir(dir); if (!d) return;
+    char names[16][256]; int nn = 0; size_t pl = strlen(m->name); struct dirent *e;
+    while ((e = readdir(d)) && nn < 16) {
+        size_t l = strlen(e->d_name);
+        if (l > pl + 1 + 12 && !strncmp(e->d_name, m->name, pl) && e->d_name[pl] == '.' && !strcmp(e->d_name + l - 12, ".runtime.tsv") && !memchr(e->d_name + pl + 1, '.', l - pl - 13) && l < sizeof names[0])
+            strcpy(names[nn++], e->d_name);
+    }
+    closedir(d);
+    qsort(names, (size_t)nn, sizeof names[0], (int (*)(const void *, const void *))strcmp);
+    for (int i = 0; i < nn; i++) {
+        snprintf(path, sizeof path, "%s/%s", dir, names[i]);
+        if (!(f = fopen(path, "r"))) die("[RED] cannot open runtime patches: %s", path);
+        rc = runtime_patch_apply(f, m->build_id, m->text_end, m->base, m->size, error, sizeof error, &applied);
+        fclose(f);
+        if (rc) die("[RED] %s runtime patches rejected: %s", names[i], error);
+        LOG("%s runtime patches: %u writes applied (default applies none)", names[i], applied);
+    }
 }
 
 // Seal the code area immediately after copying into anonymous pages (16 KB pages): [0, text_end) and the patch area are read-only+execute, and from then on any write to the code area crashes on the spot;

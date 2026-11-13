@@ -48,9 +48,17 @@ def choices(folder, variable):
     Used for launcher availability, not as gameplay validation. The host performs
     its own full validation again before writing any executable page.
     """
-    folder = Path(folder); path = folder / 'main.runtime.tsv'
-    if not path.is_file(): return ()
+    folder = Path(folder)
+    paths = [p for p in [folder / 'main.runtime.tsv', *sorted(folder.glob('main.*.runtime.tsv'))] if p.is_file()]   # one DM_ variable each (loader.c)
+    if not paths: return ()
     fix = layout(folder / 'main.fixups.tsv'); image = (folder / 'main.patched.bin').read_bytes()
+    for path in paths:
+        found = _choices(path, fix, image, variable)
+        if found: return found
+    return ()
+
+
+def _choices(path, fix, image, variable):
     lines = [l.split('\t') for l in path.read_text().splitlines() if l and not l.startswith('#')]
     try:
         header = lines.pop(0)

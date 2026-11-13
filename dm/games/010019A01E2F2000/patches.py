@@ -146,6 +146,28 @@ def scan_source_stub(c):
     for word in scan_source_words(start):
         c.emit(word)
     c.runtime_exports['SCAN_SOURCE_V1'] = start
+    shadow_stub(c)
+
+
+# Shadow resolution (runtime_patches.py shadow_writes, DM_SHADOW_RESOLUTION=2x). The frame's shadow code (main+0x137a63c) gives each shadow-casting
+# light a square tile of 1 << floor(log2(its requested size)) (w28 = 1 at 0x137a6f0, lsl at 0x137a768), packs the tiles into a 2048 atlas (0x137a82c,
+# 0x137a840, 0x137a850), sets each tile as the viewport (0x137ad1c, found with DM_NVN_SHADOW_TRACE) and turns pixel rects into texture coordinates with
+# the reciprocal of a (2048.0, 1.0) pair loaded at 0x137abf4. This stub loads (4096.0, 1.0) instead; x8 is free there (0x137abf8 sets it again).
+SHADOW_UV_SITE = 0x137abf4
+
+
+def shadow_uv_words(start):
+    return [0xd2a8b008,   # movz x8,#0x4580,lsl #16  (4096.0f)
+            0xf2e7f008,   # movk x8,#0x3f80,lsl #48  (1.0f in the upper half)
+            0x9e670100,   # fmov d0,x8
+            B(start + 12, SHADOW_UV_SITE + 4)]
+
+
+def shadow_stub(c):
+    c.site(SHADOW_UV_SITE, '009942fd')   # ldr d0,[x8,#0x530]
+    start = c.here()
+    for word in shadow_uv_words(start): c.emit(word)
+    c.runtime_exports['SHADOW_UV4096'] = start
 
 
 STUBS = {build_id: scan_source_stub}

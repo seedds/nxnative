@@ -228,6 +228,49 @@ int main(void) {
         for (int i = 0; i < 1200; i++) { double gp = i < 600 || m.s.k == 1 ? 0.03 : 0.17, w = i < 600 ? 0.5 : 1.3; m.slow = nvn_fstep_gpu_slowed(&g, gp, m.s.k ? m.s.k : 1, 1, m.s.probe); slowed |= m.slow; run(&m, 1, w, 1, 3, 0); }
         check(m.s.k == 2 && !slowed && m.s.probes == 0, "GPU 0.03 → 0.17 under CPU lag: a GPU at 3 ms is not called slowed, no probe");
     }
+    {   // Ocarina of Time on a Mac: GPU 0.75 at hold 1, an area's load steps to 3, where the clock falls: 1.3 with a frame of 2.0 in every 12 (no 30 frames in a row fit hold 2), and 1.0 at hold 2
+        sim m = {0}; nvn_fgpu g = {0}; int at1 = 0, at3 = 0, at2 = 0;
+        for (int i = 0; i < 3000; i++) {
+            int k = m.s.k ? m.s.k : 1;
+            double w = i < 600 ? 0.75 : i < 603 ? 3.4 : k == 3 ? (i % 12 ? 1.3 : 2.0) : k == 2 ? 1.0 : at1++ < 20 ? 1.0 : 0.75;
+            at3 += i >= 603 && k == 3; at2 += i >= 603 && k == 2;
+            m.slow = nvn_fstep_gpu_slowed(&g, i >= 600 && i < 603 ? 0.75 : w, k, 1, m.s.probe);   // the load's late frames are the CPU's
+            run(&m, 1, w, 1, 3, 0);
+        }
+        snprintf(b, sizeof b, "frames over the fit at hold 3 (OoT): a trial to 2, a probe to 1 (k %d, failed %llu, %d frames at hold 3, %d at hold 2)", m.s.k, (unsigned long long)m.s.failed, at3, at2);
+        check(m.s.k == 1 && m.s.probes == 1 && m.s.failed == 0 && at3 <= 40 && at2 <= 70, b);
+        sim c = {0};   // a mean that does not fit hold 2 keeps hold 3
+        run(&c, 600, 0.75, 1, 3, 0); run(&c, 3, 3.4, 1, 3, 0);
+        for (int i = 0; i < 2400; i++) run(&c, 1, i % 12 ? 1.75 : 2.0, 1, 3, 0);
+        check(c.s.k == 3 && c.s.downs == 0, "  a mean of 1.77 at hold 3 does not fit hold 2: no trial");
+    }
+    {   // a scene at the edge that holds 60 (0.8, one frame in 10 at 1.05, none late at hold 1): a load's ten late frames step to 2 with nothing learned at hold 1 and the GPU as fast as before
+        sim m = {0}; int at2 = 0;
+        for (int i = 0; i < 3000; i++) {
+            double w = i >= 300 && i < 310 ? 1.4 : i % 10 ? 0.8 : 1.05;
+            at2 += i >= 310 && m.s.k == 2;
+            run(&m, 1, w, 1, 3, 0);
+        }
+        snprintf(b, sizeof b, "edge scene after a hitch (OoT): frames of 1.05 among 0.8 do not keep hold 2 (k %d, ups %llu, failed %llu, %d frames at hold 2)", m.s.k, (unsigned long long)m.s.ups, (unsigned long long)m.s.failed, at2);
+        check(m.s.k == 1 && m.s.ups == 1 && m.s.failed == 0 && at2 <= 70, b);
+    }
+    {   // issue #2400 (OoT on an M4): 26 ms frames at hold 3 with every sixth at 30 or 31.7 ms, over the fit of hold 2 (28.3 ms) but all on time there
+        for (int v = 0; v < 2; v++) {
+            sim m = {0}; int at3 = 0; run(&m, 60, 0.5, 1, 3, 0); run(&m, 3, 3.5, 1, 3, 0);
+            for (int i = 0; i < 600; i++) { at3 += m.s.k == 3; run(&m, 1, i % 6 == 5 ? (v ? 1.9 : 1.8) : 1.56, 1, 3, 0); }
+            snprintf(b, sizeof b, "1.56 at hold 3, every sixth %.1f: hold 2 and it holds (k %d, %d frames at hold 3, failed %llu)", v ? 1.9 : 1.8, m.s.k, at3, (unsigned long long)m.s.failed);
+            check(m.s.k == 2 && at3 <= 120 && m.s.failed == 0, b);
+        }
+    }
+    {   // the cost of the mean: a scene at the edge whose mean fits hold 1 (0.7, a quarter of its frames at 1.3, late there) goes back and forth between holds 1 and 2,
+        // its trials held and the hold stepping up again later, about once per FSTEP_HOLD_MAX (the per-frame rule kept hold 2 for good); this pins that rate
+        sim m = {0}; uint32_t r = 1; run(&m, 10, 1.6, 1, 3, 0);
+        double t0 = m.real;
+        for (int i = 0; i < 36000; i++) { r = r * 1664525u + 1013904223u; run(&m, 1, (r >> 8) % 4 ? 0.7 : 1.3, 1, 3, 0); }
+        double cap = (m.real - t0) / FSTEP_HOLD_MAX;
+        snprintf(b, sizeof b, "  edge scene with a heavy tail: steps down at most once per 8 s (downs %llu, at most %.0f, failed %llu)", (unsigned long long)m.s.downs, cap, (unsigned long long)m.s.failed);
+        check(m.s.downs <= cap, b);
+    }
     {   // the GPU stays slow at hold 1 too: each probe fails, the reference stays the hold-1 time from before, and the probes spread out
         sim m = {0}; nvn_fgpu g = {0}; double last = 0, gaps[4]; int ng = 0; uint64_t probes = 0;
         for (int i = 0; i < 6000 && ng < 4; i++) {

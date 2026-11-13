@@ -33,6 +33,8 @@ printf 'DM_INTERNAL_RESOLUTION=%s\nDM_PRESENT_UPSCALE=off\nDM_METAL_HUD=1\nDM_NV
 [ "${RT_TRACE:-}" = 1 ] && echo "DM_NVN_RT_TRACE=3200x2000" >> "$OUT/env.txt"
 # HUD_FULL=<hex,...> or none: in 1610_full, the HUD items drawn over the whole window instead of the 16:9 band (DM_MP4_HUD_FULL; the log names each item)
 [ -n "${HUD_FULL:-}" ] && echo "DM_MP4_HUD_FULL=$HUD_FULL" >> "$OUT/env.txt"
+# HUD_MENU=<hex,...>: the HUD items that mark a pause-menu page (DM_MP4_HUD_MENU)
+[ -n "${HUD_MENU:-}" ] && echo "DM_MP4_HUD_MENU=$HUD_MENU" >> "$OUT/env.txt"
 # FILL=1: the picture cropped to the window's shape instead of fitted with bars (DM_PICTURE_FIT=fill): 16:10 on a 16:10 screen in fullscreen
 [ "${FILL:-}" = 1 ] && echo "DM_PICTURE_FIT=fill" >> "$OUT/env.txt"
 # SHADOWS=2x or 4x: shadow tiles 2 or 4 times their size in a 4096 or 8192 atlas (DM_SHADOW_RESOLUTION, main.shadow.runtime.tsv)

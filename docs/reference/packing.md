@@ -126,6 +126,15 @@
 - **Fix:** general, in the package format. `shader_split.py` writes each record's key (its 8 bytes) at record +0x08, in header bytes that were zero; `dmsh_build.py` `record_index` indexes a package by those keys and `rec_of` finds a row's record by its key, so a row's index no longer matters and a package that does not hold a row's shader stops the build before the first job. The control section is searched from +0x38, after the header. The map keeps its index column, so the profiles' tables did not change. A package from before the change carries no keys: the NSP script splits again by itself (its key covers `shader_split.py`), while a tool that hands `dmsh_build.py` an older package, such as `regress.py`'s use of a game's `<id>_build/shader/pkg`, needs that build run again first. `test_shader_package_keys` covers both sides.
 - **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md) ([issue #1841](https://github.com/seedds/nxnative/issues/1841), diagnosed by its reporter). A build through NX2Apple 1.3.0 kept `ps_lib.bin` from an older split (4,711 records) beside a map from a split after 04df08d4 (4,707 rows), so the present pass's pixel shader `29e3c9dd92b8a571` was translated from a terrain shader's record and drew black.
 
+## Mac apps
+
+### The Mac app drops the FPS setting and Metal HUD menu
+
+- **Symptom:** a Mac app built with `--show-fps` has neither the Metal performance overlay nor its Metal HUD menu.
+- **Cause:** the NSP script returned from its Mac packaging path before applying `SHOW_FPS` / `--show-fps`. The older bundler carried that preference into the app, but the current launcher received no HUD default. The Mac host enables Apple's HUD through `DM_METAL_HUD`, and Apple adds its menu when the HUD is enabled.
+- **Fix:** `scripts/build_ipa_from_nsp.py` passes the resolved choice to `dm/mac/pack_app.py`, which stores `DMShowFPS` in `Info.plist`. `dm/mac/launcher.c` sets `DM_METAL_HUD` from it before spawning the host, after reading environment files and the player's saved or window choices so those retain precedence. The packed `launcher.json` HUD row uses the same build default. `--no-show-fps` disables the bundled default; changing the option invalidates bundle reuse.
+- **Found on:** [Pokémon Legends: Z-A](../../dm/games/0100F43008C44000/README.md); applies to every Mac app. The restored menu still needs a visual check in a running game.
+
 ## IPA archives
 
 ### AltServer cannot install a file of 2 GiB or more

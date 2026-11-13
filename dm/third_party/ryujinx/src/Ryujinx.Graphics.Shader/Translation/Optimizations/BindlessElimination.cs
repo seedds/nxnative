@@ -384,6 +384,14 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
             // nvn_mtl.m pool_gpu), so its arrays take the pool lengths. Buffer textures and images keep arrays of NvnSlotArrayLength, which the replay binds slot by slot (tex_dyn_slots)
             bool pooled = !texOp.Inst.IsImage() && (texOp.Type & SamplerType.Mask) != SamplerType.TextureBuffer;
 
+            // nxnative: an image whose handle the shader loads from memory (a storage buffer or an input, not a constant buffer word) indexes the image pool by the handle's image
+            // ID, as a sampled texture indexes the texture pool (nvn_mtl.m img_pool_gpu). A slot array held the bound slots, which such an ID never names: The Duskbloods' fog
+            // volume (GXFogVolume_*) reads its 3D image's handle from storage buffer 0 and wrote element min(ID, 31), never the image. Images from constant buffers keep their slot arrays
+            if (texOp.Inst.IsImage() && (texOp.Type & SamplerType.Mask) != SamplerType.TextureBuffer && IsMemoryHandle(bindlessHandle))
+            {
+                pooled = true;
+            }
+
             // nxnative: a pooled read takes its handle from any source. Its texture ID indexes the pool as the GPU's does, so where the handle comes from does not matter; a handle the
             // shader computes (RE Engine: a heap index from game memory or a uniform buffer, clamped to its range and ORed with a sampler ID) was deleted and read 0 before.
             // The slot arrays of images and buffer textures keep Ryujinx's limit: the replay binds them only for handles from c2's tables
@@ -444,6 +452,17 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
             }
 
             return true;
+        }
+
+        // nxnative: a handle that is no constant buffer word on any path (see the image pool above)
+        private static bool IsMemoryHandle(Operand handle)
+        {
+            if (handle.Type == OperandType.ConstantBuffer)
+            {
+                return false;
+            }
+
+            return handle.AsgOp is not PhiNode || !PhiLeaves(handle).Exists(leaf => leaf.Type == OperandType.ConstantBuffer);
         }
 
         private static bool IsBindlessHandleAllowed(Operand bindlessHandle)

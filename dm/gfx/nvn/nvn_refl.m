@@ -80,6 +80,7 @@ int nvn_refl_from_json(NSDictionary *j, nvn_refl *o, char *err, int errlen) {
             // The pools, indexed by the handle's IDs (nvn_refl.h TEXP / SAMPP): which texture is read is known only when the GPU runs the draw
             else if ([k isEqualToString:@DMSH_KIND_TEX_POOL]) { r->kind = NVN_RB_TEXP; dummy_kind(b[@"elem"], &r->dtt, &r->dpf); o->bindless = o->pool = 1; }
             else if ([k isEqualToString:@DMSH_KIND_SAMP_POOL]) { r->kind = NVN_RB_SAMPP; o->bindless = o->pool = 1; }
+            else if ([k isEqualToString:@DMSH_KIND_IMG_POOL]) { r->kind = NVN_RB_IMGP; dummy_kind(b[@"elem"], &r->dtt, &r->dpf); r->rw = 1; o->bindless = o->pool = 1; }   // images the shader writes, by the IDs it loads (img_pool_gpu)
             // A table of the handles in a uniform buffer (nvn_refl.h TEXH / SAMPH)
             else if ([k isEqualToString:@DMSH_KIND_TEX_HTAB] || [k isEqualToString:@DMSH_KIND_SAMP_HTAB]) { int samp = [k isEqualToString:@DMSH_KIND_SAMP_HTAB];
                 r->kind = samp ? NVN_RB_SAMPH : NVN_RB_TEXH; if (!samp) dummy_kind(b[@"elem"], &r->dtt, &r->dpf); r->off = (uint16_t)[b[@"off"] intValue]; o->bindless = o->htab = 1;

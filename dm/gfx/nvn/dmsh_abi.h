@@ -104,6 +104,7 @@
 #define DMSH_KIND_SAMP_C2A "samp_c2a"    // the same for samplers
 #define DMSH_KIND_TEX_POOL "tex_pool"    // the game's texture pool, indexed by the handle's texture ID (a handle traced to no slot; dmsh_reflect.py pool_arrays): elem = the element type
 #define DMSH_KIND_SAMP_POOL "samp_pool"  // the sampler pool, indexed by the handle's sampler ID
+#define DMSH_KIND_IMG_POOL "img_pool"    // the image pool, indexed by the handle's image ID (an image handle the shader loads from memory; BindlessElimination): elem = the element type
 #define DMSH_KIND_TEX_HTAB "tex_htab"    // a table the host builds of the handles in uniform slot reg from byte off, element k = the handle at off + 8k (nvn_mtl.m htab_gpu), laid out as a pool: elem = the element type
 #define DMSH_KIND_SAMP_HTAB "samp_htab"  // its samplers; soff and sreg as DMSH_KIND_SAMP_UBO's
 #define DMSH_KIND_BORDER "border"        // the shader's border colour block (dmsh_rewrite.py border_emu): a mask of the samplers to correct, then each one's factors

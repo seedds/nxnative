@@ -43,6 +43,20 @@ class PoolArrays(unittest.TestCase):
         self.assertLess(out.index('dm_pool_mark(constant P* p'), out.index('struct spvPool_'))
         self.assertIn('.sample((&spvDescriptorSet0.fp_s_cb0_40000000->e[0])[min(uint(int(_7)), spvDescriptorSet0.fp_s_cb0_40000000->n)], uv)', out)
 
+    def test_image_pool(self):
+        # an image whose handle the shader loads from memory: BindlessElimination sizes its array to the pool (The Duskbloods' fog volume, cp_i3d_cb0_40000000_ with its format
+        # suffix); it becomes a pointer to the host's image pool (img_pool_gpu), read and written unmarked, and reflects as the image pool kind
+        msl = ('struct spvDescriptorSetBuffer0\n{\n    array<texture3d<float, access::read_write>, 1048576> cp_i3d_cb0_40000000_ [[id(0)]];\n    constant _16* cp_s0 [[id(1048576)]];\n};\n'
+               'kernel void main0(constant spvDescriptorSetBuffer0& d [[buffer(0)]])\n{\n    uint i = min(uint(h & 1048575), 1048575u);\n'
+               '    float v = d.cp_i3d_cb0_40000000_[i].read(uint3(p)).x;\n    d.cp_i3d_cb0_40000000_[int(i)].write(float4(v), uint3(p));\n}\n')
+        out = NS['pool_arrays'](msl)
+        self.assertIn('struct spvPool_cp_i3d_cb0_40000000_\n{\n    uint n;\n    ulong seen;\n    array<texture3d<float, access::read_write>, 1> e;\n};', out)
+        self.assertIn('constant spvPool_cp_i3d_cb0_40000000_* cp_i3d_cb0_40000000_ [[id(0)]];', out)
+        self.assertIn('cp_s0 [[id(1)]]', out)
+        self.assertNotIn('dm_pool_mark', out)   # the host fills the image pool whole: nothing to mark
+        self.assertIn('(&d.cp_i3d_cb0_40000000_->e[0])[min(uint(int(i)), d.cp_i3d_cb0_40000000_->n)].write(', out)
+        self.assertTrue(NS['pool_fallback']('cp_i3d_cb0_40000000_') and NS['pool_fallback']('fp_t2d_cb0_40000000') and not NS['pool_fallback']('fp_t2d_cb14_0'))
+
     def test_mark_tests_with_a_plain_load(self):
         # an atomic load goes to the shared cache every time, and a pass's pixels queue on the few words its IDs share (frame-rate.md); only a clear bit takes the atomic
         mark = NS['POOL_MARK']

@@ -67,7 +67,7 @@ The guest address space, heaps, pools, virtual address memory and the allocators
 - **Symptom:** `[RED] MemoryPoolInitialize: non-virtual pool has no storage` for pools of tens to hundreds of MB, then a crash reading or writing near a small address (`fs ReadFile into 0x12f541 … EFAULT`, `CRASH sig=11 addr=0x12f541`) when a new area loads.
 - **Cause:** the game sized its heap to the Switch's application pool (Metroid Prime 4: 3.16 GB of a 3.25 GB heap region) and allocates its render targets from it; the host's resolution and quality options (5K at 16:10, 4x shadows, maximum model detail, dense fog) need more than that, its allocator returns null, and the game uses offsets from null.
 - **Fix:** `DM_APP_POOL=<size>` (Mac, `hle_svc.c` `pool_extra`; launcher setting Game memory) reports a larger application pool and grows the heap region and the reserved block by the same, as a development unit with more memory; a game that raises its heap until the pool is spent takes the rest. Not on iOS (one reservation of at most 6 GB).
-- **Check:** the host builds; open: a boot and the area load at 5K with `DM_APP_POOL=7G`.
+- **Check:** the host builds; open: a boot and the area load at 5K with `DM_APP_POOL=10G` (Metroid Prime 4's launcher default).
 - **Found on:** [Metroid Prime 4: Beyond](../../dm/games/010019A01E2F2000/README.md).
 
 ### A heap request beyond the heap region returns ResultOutOfMemory

@@ -28,7 +28,7 @@ printf 'DM_INTERNAL_RESOLUTION=%s\nDM_PRESENT_UPSCALE=off\nDM_METAL_HUD=1\nDM_NV
 [ "${AUDIO_CAPTURE:-}" = 1 ] && printf 'DM_AUDIO_DUMP=%s\nDM_AUDREN_PCM_TRACE=%s\n' "$OUT/game-stereo.pcm" "$OUT/frames.tsv" >> "$OUT/env.txt"
 # LIMITER=0: the peak limiter on the stereo downmix off (DM_AUDIO_LIMITER, on by default), to compare clipping in loud fights
 [ "${LIMITER:-}" = 0 ] && echo "DM_AUDIO_LIMITER=0" >> "$OUT/env.txt"
-# MEM=7G: a 7 GB application pool instead of the Switch's 3.2 GB (DM_APP_POOL)
+# MEM=10G (or default): a 10 GB application pool instead of the Switch's 3.2 GB (DM_APP_POOL)
 [ -n "${MEM:-}" ] && echo "DM_APP_POOL=$MEM" >> "$OUT/env.txt"
 # RATIO=1610: a full-output choice at 16:10, the same height (DM_SCREEN_RATIO)
 [ -n "${RATIO:-}" ] && echo "DM_SCREEN_RATIO=$RATIO" >> "$OUT/env.txt"

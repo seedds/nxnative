@@ -14,6 +14,8 @@ The README covers packing and playing. This page is for working on nxnative itse
 | iOS app | One unsigned IPA for iPhone and iPad. The rewritten code is embedded in the executable; the shader libraries, the RomFS and the game icon are inside the app. A settings screen comes before the game (`Launcher.swift`, drawn from `dm/launcher.json`, which `dm/games/settings.py` writes from `dm/games/settings.tsv`); the host's loading starts at app launch meanwhile, and the frame rate and render scale go into the frame step state when the game starts (`loader.c` `dm_fps_state_apply`) |
 | Known gaps | Conditional render is always drawn; [indirect-count multi-draws](reference/rendering.md#indirect-count-multi-draws) can wait for a GPU-written count when the records need conversion, cannot be GPU-masked, or exceed the mask table capacity; geometry shaders do not translate. TBDR optimizations are off by default (they don't understand bindless textures yet). No amiibo. On the Mac, Mario's menu and dialogue text render blank (fine on the iPhone) |
 
+NVN viewport commands keep the origin of the device that recorded them, even when another device's queue submits them or an origin changes before execution. This is separate from the queue's raster origin, which is fixed at queue initialization ([recorded viewport origin](reference/rendering.md#viewport-origin-belongs-to-the-recording-device)).
+
 ## Cheats
 
 How a Switch with Atmosphère runs cheats, and where this host differs, is in [Cheats on a Switch](reference/cheats.md).
@@ -557,7 +559,7 @@ The benchmark gives each frame's GPU time; these switches split it by pass, on t
 
 `DM_NVN_CAPTURE=<frame>:1:<path>` (an NVN game, Mac host) writes one frame to one file, at the boundary between recording and replay: from the frame's first `nvnQueueSubmitCommands` to its present (frames counted as `DM_NVN_SHOT` counts them). `dm/gfx/tests/nvn_replay` replays it against the replay layer of the tree it is built from (`nvn_mtl.m` and everything under it) and compares the presented frame with the live one:
 
-Format 1 supports a single logical NVN queue without event or sync waits. The capture refuses a run that has used multiple queues or either wait operation, with a `[RED]` diagnostic and a failure marker at the requested path: physical replay order cannot represent those dependencies. The standalone replayer rejects failure markers and wait records before starting Metal. Existing captures without waits remain readable; capturing logical queue dependencies is still open.
+Format 1 supports a single logical NVN queue without event or sync waits. The capture refuses a run that has used multiple queues or either wait operation, with a `[RED]` diagnostic and a failure marker at the requested path: physical replay order cannot represent those dependencies. The standalone replayer rejects failure markers and wait records before starting Metal. Existing captures without waits remain readable; capturing logical queue dependencies is still open. New viewport records retain their recording device origin. Older captures keep their previous device-origin interpretation because their reserved origin slot is zero.
 
 ```sh
 DM_NVN_CAPTURE=900:1:<NSP folder>/<id>-work/capture/frame900.nvncap DM_PSO_HYBRID=0 … dm/host/dmhost <modules>

@@ -205,14 +205,17 @@ static void rec_exec(const rec_t *r) {
     }
     for (uint32_t i = 0; i < r->nobj; i++) if (a[i]) CFRelease((CFTypeRef)(uintptr_t)a[i]);
 }
+#include "nvn_rt.h"   // nvn_rt_join / nvn_rt_tick (hle_nvn.c): the encode thread declares the frame's deadline
 static void *rec_thread(void *arg) {
     (void)arg; pthread_setname_np("dm-encode");
     pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
+    void *rt = nvn_rt_join("encode thread");   // it makes the frame's Metal calls: it declares the frame's deadline too (hle_nvn.c rt_tick)
     for (;;) {
         pthread_mutex_lock(&g_rb_mu);
         while (!g_rb_head) { g_rb_sleeping = 1; pthread_cond_wait(&g_rb_work, &g_rb_mu); g_rb_sleeping = 0; }
         rec_blk *b = g_rb_head; g_rb_head = b->next; if (!g_rb_head) g_rb_tail = NULL; g_rb_busy = 1;
         pthread_mutex_unlock(&g_rb_mu);
+        nvn_rt_tick(rt);
         @autoreleasepool { for (int i = 0; i < b->n; i++) rec_exec(&b->r[i]); }
         pthread_mutex_lock(&g_rb_mu);
         b->n = 0; b->next = g_rb_free; g_rb_free = b; g_rb_busy = 0;

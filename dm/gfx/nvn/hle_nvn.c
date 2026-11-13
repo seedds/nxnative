@@ -16,6 +16,7 @@
 #include "nvn_mtl.h"
 #include "nvn_pace.h"
 #include "nvn_fstep.h"
+#include "nvn_rt.h"
 #include "nvn_timestamp.h"
 #include "../../host/front.h"
 #include "nvn_dirty.h"
@@ -992,9 +993,11 @@ static void cmd_new_segment(cmd_t *o, uint8_t *mem, size_t n) {
 // (Do not use the whole game chunk as the range: SMBW sub-allocates many recordings out of one big chunk, and a later grant inside that chunk freed segments still in use.)
 // Reclaim follows the game's command memory chunks, not a frame count: the game caches recorded command handles and CALLs them every frame until it re-records them itself (SMBW's object setup handles);
 // once a handle was recorded into a host segment, the old "reclaim 8 frames after lending" rewrote the segment while the game still CALLed it (with overflow forced on the Mac, the replay read garbage commands: RGBA16F used as a depth format for a pipeline).
-// A segment hangs off the recording that overflowed into it: that recording occupies [its first record, the write position at the overflow) in guest memory, and the game only gives
-// those bytes out again once they are dead (when it re-records that material in place; packing the next recording right behind by used never touches them). So a segment remembers
-// that guest range and is reclaimed when the game gives out memory overlapping it; segments overflowing from a host segment keep the same range.
+// A segment hangs off the recording that overflowed into it: that recording occupies [its first record, the write position at the overflow) in guest memory, and the game only writes
+// those bytes again once they are dead (when it re-records that material in place; packing the next recording right behind by used never touches them). So a segment remembers
+// that guest range and is reclaimed when another recording writes records over it (hostseg_written); segments overflowing from a host segment keep the same range.
+// A grant over the range is not enough: games grant at least 512 bytes for a list measured smaller and write only its records (Tears of the Kingdom's model lists, max(S, 512); the same
+// pattern in Splatoon Raiders' agl), so a grant for one list can cover the next list, still called. Freeing at the grant lent that list's tail to the next overflow
 // The segment pool grows on demand (SMBW opening course: many small command buffers each overflow once per frame, and the old fixed 64 segments × 1 MB ran out within 8 frames); abort only beyond HOSTSEG_CAP in total.
 // A segment is HOSTSEG_SZ, with two exceptions (hostseg_size): an empty pool with a length of at most HOSTSEG_SMALL outside a recording gets that much rounded up to HOSTSEG_SMALL
 // (Super Mario Odyssey hands out many such 512-byte grants before recording; at 256 KB each, and with no recording to reclaim them by, they reached the cap entering the Wooded
@@ -1006,8 +1009,10 @@ static void cmd_new_segment(cmd_t *o, uint8_t *mem, size_t n) {
 #define HOSTSEG_SMALL (4u << 10)
 #define HOSTSEG_CAP (1u << 30)
 uint64_t dm_nvn_frame_count(void);
-typedef struct { uint8_t *mem; size_t n; uint64_t frame; int busy; uintptr_t org_lo, org_hi; } hostseg_t;   // org: the guest range of the recording it hangs off (0 = unknown, never reclaimed)
+typedef struct { uint8_t *mem; size_t n; uint64_t frame; int busy; uintptr_t org_lo, org_hi; uint64_t rec_id; } hostseg_t;   // org: the guest range of the recording it hangs off (0 = unknown, never reclaimed); rec_id: the recording that took it
 static hostseg_t *g_hostseg; static int g_nhostseg, g_caphostseg; static uint64_t g_hostseg_bytes;
+static _Atomic int g_hostseg_held;   // busy segments with a guest range: 0 lets hostseg_written return without the lock (no game seen so far lends one from its own pool)
+static _Atomic uint64_t g_rec_serial;   // BeginRecording's serials (cmd_t rec_id)
 static pthread_mutex_t g_hostseg_mu = PTHREAD_MUTEX_INITIALIZER;
 static size_t hostseg_size(const cmd_t *o, int empty_pool, size_t want) {
     if (empty_pool) return want && want <= HOSTSEG_SMALL && !o->recording ? HOSTSEG_SMALL : HOSTSEG_SZ;
@@ -1015,29 +1020,36 @@ static size_t hostseg_size(const cmd_t *o, int empty_pool, size_t want) {
 }
 // Take a segment of n bytes: origin = the current recording's guest bytes [first record, write position), at least the byte at the write position; if the write pointer is already in
 // a host segment (overflowing again), keep that segment's origin
-static uint8_t *hostseg_take(const cmd_t *o, size_t n) {
+static uint8_t *hostseg_take(cmd_t *o, size_t n) {
     static unsigned total; uint64_t f = dm_nvn_frame_count(); uint8_t *m = NULL;
+    if (o && o->recording) ctl_chunk_close(o);   // the records written so far count as written (hostseg_written) before a free segment is chosen
     uintptr_t lo = 0, hi = 0, cur = o ? (uintptr_t)o->cur : 0;
     pthread_mutex_lock(&g_hostseg_mu);
     int in_seg = 0;   // by the segment's end too: a small segment can end where another one starts
     for (int i = 0; i < g_nhostseg && cur; i++) if (cur >= (uintptr_t)g_hostseg[i].mem && o->end == g_hostseg[i].mem + g_hostseg[i].n) { lo = g_hostseg[i].org_lo; hi = g_hostseg[i].org_hi; in_seg = 1; break; }
     if (!in_seg && o && o->recording && o->cur) { lo = o->recording == 1 && o->begin && (uintptr_t)o->begin <= cur ? (uintptr_t)o->begin : cur; hi = cur > lo ? cur : lo + 1; }
     for (int i = 0; i < g_nhostseg && !m; i++)
-        if (!g_hostseg[i].busy && g_hostseg[i].n == n) { g_hostseg[i] = (hostseg_t){ g_hostseg[i].mem, n, f, 1, lo, hi }; m = g_hostseg[i].mem; }
+        if (!g_hostseg[i].busy && g_hostseg[i].n == n) { g_hostseg[i] = (hostseg_t){ g_hostseg[i].mem, n, f, 1, lo, hi, o ? o->rec_id : 0 }; m = g_hostseg[i].mem; }
     if (!m && g_hostseg_bytes + n <= HOSTSEG_CAP && (m = malloc(n))) {
         if (g_nhostseg == g_caphostseg) { g_caphostseg = g_caphostseg ? g_caphostseg * 2 : 64; g_hostseg = realloc(g_hostseg, sizeof *g_hostseg * (size_t)g_caphostseg); }
-        g_hostseg[g_nhostseg++] = (hostseg_t){ m, n, f, 1, lo, hi }; g_hostseg_bytes += n;
+        g_hostseg[g_nhostseg++] = (hostseg_t){ m, n, f, 1, lo, hi, o ? o->rec_id : 0 }; g_hostseg_bytes += n;
     }
+    if (m && hi > lo) atomic_fetch_add_explicit(&g_hostseg_held, 1, memory_order_relaxed);
     unsigned t = ++total; int ns = g_nhostseg; uint64_t bytes = g_hostseg_bytes;
     pthread_mutex_unlock(&g_hostseg_mu);
     if (!m) die("NVN command memory: the game's pool is empty and host-lent segments reached %u MB without being reclaimed by the game's blocks", HOSTSEG_CAP >> 20);
     if (t == 1 || t % 1024 == 0) LOG("[nvn] the game's command memory ran short, the host lends a segment of %zu KB (%u times so far, frame %llu, segment pool %d segments, %llu KB)", n >> 10, t, (unsigned long long)f, ns, (unsigned long long)(bytes >> 10));
     return m;
 }
-// The game gives out [lo, hi): segments whose recording's guest bytes overlap it are dead, reclaim them
-static void hostseg_release(uintptr_t lo, uintptr_t hi) {
+// Recording o wrote records at [p, p + n) (a piece it closes: ctl_chunk_close, cmd_alloc): segments of other recordings whose guest bytes these overlap are dead, reclaim them
+static void hostseg_written(const cmd_t *o, const uint8_t *p, uint64_t n) {
+    if (!n || !atomic_load_explicit(&g_hostseg_held, memory_order_relaxed)) return;
+    uintptr_t lo = (uintptr_t)p, hi = lo + n;
     pthread_mutex_lock(&g_hostseg_mu);
-    for (int i = 0; i < g_nhostseg; i++) if (g_hostseg[i].busy && g_hostseg[i].org_hi > lo && g_hostseg[i].org_lo < hi) g_hostseg[i].busy = 0;
+    for (int i = 0; i < g_nhostseg; i++) {
+        hostseg_t *s = &g_hostseg[i];
+        if (s->busy && s->org_hi > s->org_lo && s->rec_id != o->rec_id && s->org_hi > lo && s->org_lo < hi) { s->busy = 0; atomic_fetch_sub_explicit(&g_hostseg_held, 1, memory_order_relaxed); }
+    }
     pthread_mutex_unlock(&g_hostseg_mu);
 }
 NVN(nvnCommandBufferAddCommandMemory, void, NVNcommandBuffer *c, const NVNmemoryPool *p, ptrdiff_t off, size_t n) {
@@ -1046,7 +1058,6 @@ NVN(nvnCommandBufferAddCommandMemory, void, NVNcommandBuffer *c, const NVNmemory
     if (!pl || n < 64) { if (cs_on()) { pthread_mutex_lock(&g_cs_mu); g_cs.hostseg++; pthread_mutex_unlock(&g_cs_mu); } size_t sz = hostseg_size(CB(c), !pl, n); cmd_new_segment(CB(c), hostseg_take(CB(c), sz), sz); return; }
     if (!pl->mem) { LOG("[RED] AddCommandMemory: pool has no CPU storage"); return; }
     vpool_taken(pl);
-    hostseg_release((uintptr_t)(pl->mem + off), (uintptr_t)(pl->mem + off + n));
     if (cs_on()) { pthread_mutex_lock(&g_cs_mu); g_cs.grants++; g_cs.grant_bytes += n; if (!g_cs.grant_min || n < g_cs.grant_min) g_cs.grant_min = n; if (n > g_cs.grant_max) g_cs.grant_max = n; pthread_mutex_unlock(&g_cs_mu); }
     { static int cblog = -1; if (cblog < 0) cblog = getenv("DM_NVN_CBLOG") != NULL; static uint64_t ng; if (cblog && (++ng <= 60 || ng % 500 == 0)) LOG("[nvn] AddCommandMemory #%llu cmd=%p pool %p +%#lx length %#zx (recording %d)", (unsigned long long)ng, (void *)c, (const void *)pl, (long)off, n, CB(c)->recording); }
     cmd_new_segment(CB(c), pl->mem + off, n);
@@ -1090,7 +1101,7 @@ static void ctl_push(cmd_t *o, uint64_t e) {
 }
 static void ctl_flush(cmd_t *o) { if (o->ctl_q[1]) { ctl_put(o, o->ctl_q[0]); o->ctl_q[0] = o->ctl_q[1]; o->ctl_q[1] = 0; } }
 static void ctl_chunk_close(cmd_t *o) {
-    if (o->chunk && o->cur > o->chunk) ctl_push(o, ctl_e(CTL_CHUNK, o->chunk, (uint64_t)(o->cur - o->chunk)));
+    if (o->chunk && o->cur > o->chunk) { hostseg_written(o, o->chunk, (uint64_t)(o->cur - o->chunk)); ctl_push(o, ctl_e(CTL_CHUNK, o->chunk, (uint64_t)(o->cur - o->chunk))); }
     o->chunk = NULL;
 }
 NVN(nvnCommandBufferAddControlMemory, void, NVNcommandBuffer *c, void *m, size_t n) { ctl_set(CB(c), m, n); }
@@ -1112,8 +1123,8 @@ static uint8_t *cmd_alloc(cmd_t *o, uint32_t size) {
     uint8_t *p = o->cur; o->cur += size; o->used += size; put_hdr(p, 0, size);
     if (o->recording == 2) { o->begin = p; o->recording = 1; }
     if (o->recording) {
-        if (o->chunk && (uint64_t)(o->cur - o->chunk) > CTL_CHUNK_MAX) { if (p > o->chunk) ctl_push(o, ctl_e(CTL_CHUNK, o->chunk, (uint64_t)(p - o->chunk))); o->chunk = NULL; }
-        if (size > CTL_CHUNK_MAX) ctl_push(o, ctl_e(CTL_CHUNK, p, CTL_ONE));   // a record longer than a piece can say gets an entry of its own
+        if (o->chunk && (uint64_t)(o->cur - o->chunk) > CTL_CHUNK_MAX) { if (p > o->chunk) { hostseg_written(o, o->chunk, (uint64_t)(p - o->chunk)); ctl_push(o, ctl_e(CTL_CHUNK, o->chunk, (uint64_t)(p - o->chunk))); } o->chunk = NULL; }
+        if (size > CTL_CHUNK_MAX) { hostseg_written(o, p, size); ctl_push(o, ctl_e(CTL_CHUNK, p, CTL_ONE)); }   // a record longer than a piece can say gets an entry of its own
         else if (!o->chunk) o->chunk = p;
         ctl_flush(o);
     }
@@ -1126,6 +1137,7 @@ NVN(nvnCommandBufferBeginRecording, void, NVNcommandBuffer *c) {
     cmd_t *o = CB(c);
     if (o->recording) LOG("[RED] BeginRecording re-entered");
     o->recording = 2;   // 2: recording, no command yet (cmd_alloc sets begin)
+    o->rec_id = atomic_fetch_add_explicit(&g_rec_serial, 1, memory_order_relaxed) + 1;
     o->chunk = NULL; o->ctl_list = NULL; o->ctl_q[0] = o->ctl_q[1] = 0;
 }
 // The recording's last entry carries CTL_LAST; an empty recording's list is one empty piece. The handle is the list's first entry
@@ -1850,10 +1862,9 @@ NVN(nvnWindowGetCrop, void, const NVNwindow *w, NVNrectangle *r) {   // Bayonett
     r->x = r->y = 0; r->width = o->ntex && o->tex[0] ? (int)CTX(o->tex[0])->d.width : 0; r->height = o->ntex && o->tex[0] ? (int)CTX(o->tex[0])->d.height : 0;
 }
 static void trow(uint64_t f, const char *name, double v);
-static void set_time_constraint(uint64_t period_ns);
-static void rt_comp_tick(uint64_t period_ns);
-static double g_rt_comp_ms;   // Currently declared real-time computation amount (ms; 0 = not declared)
-static double g_rt_period_ms;
+static void rt_acquire(uint64_t period_ns);
+static void rt_line(char *b, size_t n);
+static double g_rt_comp_ms;   // The computation the acquire thread declares (ms; 0 = not declared)
 static void sleep_until_ns(uint64_t dl);
 static uint64_t present_period(const win_t *o);
 static uint64_t rt_period_ns(const win_t *o, uint64_t period);
@@ -1880,9 +1891,7 @@ NVN(nvnWindowAcquireTexture, NVNwindowAcquireTextureResult, NVNwindow *w, NVNsyn
     // Vsync blocks here (real-device NVN: when all textures in the swapchain are waiting for display, wait for the next one to be released), not in present -- the game often calls present while holding a lock
     uint64_t at = *idx < 4 ? o->avail[*idx] : 0, now = dm_detclock_enabled() ? guest_ns() : now_ns(), wait = at > now ? at - now : 0, pace_ns = 0;
     if (!dm_detclock_enabled()) {   // Register the acquire thread as a time-constraint thread (no longer registered only when it "arrived early": it must also declare itself when it is constantly behind in the hot state)
-        static uint64_t rt_period; uint64_t period = present_period(o), rtp = rt_period_ns(o, period);
-        if (rtp && rt_period != rtp) { rt_period = rtp; set_time_constraint(rtp); }
-        rt_comp_tick(rtp);
+        uint64_t period = present_period(o); rt_acquire(rt_period_ns(o, period));
         uint64_t p0 = now_ns(); int snap = mtl_snap_on();
         if (present_unpaced(o)) {}   // present interval 0: no vsync wait (below); only the free texture the ticket wait below gives
         else if (snap && mtl_link_active() && mtl_link_stalled()) { if (wait) sleep_until_ns(at); }   // present snapshots (nvn_mtl.m) while the display link is silent (the window in the background or covered):
@@ -2091,9 +2100,8 @@ static void tsummary(uint64_t frame) {
           static uint64_t pyn, pyns; uint64_t yn = 0, yns = 0; dm_main_yield_stats(&yn, &yns);
           LOG("[nvn] translation detail up to frame %llu: submit per frame %.2f M cycles (%.2f cycles per instruction), CPU %.3f ms of which kernel %.3f ms, wall clock %.3f ms; mean clock %.2f GHz (cycles / CPU time); this thread's QoS %#x; allocator pools %d, GPU waits so far %llu; real-time declared computation %.2f ms; main thread yields per frame %.0f / %.3f ms", frame,
               cyc / 1e6 / nf, cyc / (double)(ci - pi), cpu / 1e6 / nf, (double)(ck - pk) / 1e6 / nf, (double)(cw - pw) / 1e6 / nf, cpu > 0 ? cyc / cpu : 0, (unsigned)qc, an, (unsigned long long)aw, g_rt_comp_ms, (double)(yn - pyn) / nf, (double)(yns - pyns) / 1e6 / nf); pyn = yn; pyns = yns; }
-        if (frame % 300 == 0) { unsigned wn = 0; uint32_t wq = dm_guest_work_qos(&wn); thread_extended_info_data_t xi; mach_msg_type_number_t xc = THREAD_EXTENDED_INFO_COUNT; int okx = thread_info(pthread_mach_thread_np(pthread_self()), THREAD_EXTENDED_INFO, (thread_info_t)&xi, &xc) == KERN_SUCCESS;
-            thread_time_constraint_policy_data_t tp; mach_msg_type_number_t tc = THREAD_TIME_CONSTRAINT_POLICY_COUNT; boolean_t def = 0; int rt_live = thread_policy_get(pthread_mach_thread_np(pthread_self()), THREAD_TIME_CONSTRAINT_POLICY, (thread_policy_t)&tp, &tc, &def) == KERN_SUCCESS && !def;   // def = 1: the real-time policy is not in effect (never set / revoked)
-            LOG("[nvn] thread policy: main thread real-time computation %.2f ms / period %.2f ms, real-time policy %s, current priority %d (base %d, policy %d); %u worker threads QoS %#x; present QoS %#x", g_rt_comp_ms, g_rt_period_ms, rt_live ? "in effect" : "not in effect", okx ? xi.pth_curpri : -1, okx ? xi.pth_priority : -1, okx ? xi.pth_policy : -1, wn, wq, mtl_present_qos()); }
+        if (frame % 300 == 0) { unsigned wn = 0; uint32_t wq = dm_guest_work_qos(&wn); char rl[1024]; rt_line(rl, sizeof rl);   // the declaring threads themselves, not the thread presenting (the game may present from another)
+            LOG("[nvn] thread policy: %s; %u guest worker threads QoS %#x; present QoS %#x", rl, wn, wq, mtl_present_qos()); }
         py = cy; pk = ck; pw = cw; }
       pi = ci; pc = cc; pd = dr_; pf = frame; }
     uint64_t up, re, es = mtl_pkg_edge_skips(), fa, pr, op, oc; mtl_pkg_stats(&up, &re); nvn_dirty_stats(&fa, &pr); nvn_dirty_open_stats(&op, &oc);
@@ -2133,38 +2141,125 @@ static void slow_emit(uint64_t f) {
     }
     if (f % 300 == 0) fprintf(stderr, "[slowframe]\t#\tup to frame %llu\tjudged=%llu\tslow=%llu\tcriterion=%s\n", f, judged, slow, has ? "on-screen interval" : "present call interval (no window)");
 }
-// Declaration for the time-constraint (real-time) thread: period = present period, constraint = period, computation = the CPU time this thread actually needs per frame.
-// The computation used to be hard-coded at 2 ms, while the game main thread (game logic + recording + submit replay) takes about 10 ms per frame when hot - a 5× gap between declared and actual:
-// a real-time thread that exceeds its declared computation gets demoted by the system, and the performance controller also sets frequency from the declaration (this declaration is how the system learns the frame deadline and the workload).
-// DM_RT_COMP=<ms> fixes the declaration; default auto = every 120 frames take the larger of 1.25 × the p90 and 1.1 × the peak of this thread's per-frame CPU time and re-declare if it differs from the declared value by > 15% (capped at 0.9 × period).
-// DM_RT=0 leaves the acquire thread on the standard policy (its QoS only), for power A/B: the real-time declaration is how the performance controller learns the frame deadline, and it may hold the clock up for it
-static int rt_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_RT"); v = !(e && !strcmp(e, "0")); if (!v) LOG("[nvn] DM_RT=0: the present thread gets no time-constraint policy (QoS only)"); } return v; }
-static void set_time_constraint_comp(uint64_t period_ns, uint64_t comp_ns) {
-    if (!rt_on()) return;
+// Time-constraint (real-time) policies: period = the frame's deadline (rt_period_ns, the present period), constraint = the period, computation = the CPU time the thread needs
+// per frame (nvn_rt.h: the larger of 1.25 x the p90 and 1.1 x the peak of the last 120 frames, re-declared when it moves by more than 15%). The declaration is how the scheduler
+// and the performance controller learn the frame deadline: on an iPhone the controller sets the clock and the core type so that each declared thread fits its period, and a
+// thread with no declaration has no deadline for it. The acquire thread declares it, and so do the host threads that carry the rest of a frame's CPU work, the queue replay
+// (nvn_queue.inc nq_worker) and the encode thread (nvn_rec.h rec_thread), each with its own computation once a first window of frames has measured it (declared too low,
+// a thread is held up every frame it needs more). At Ocarina of Time's 30 fps cap on an iPhone 17 only the acquire thread (the guest's main thread) declared: it fit its
+// 33 ms on the efficiency cores, the replay thread took 23 ms of CPU a frame at 1.55 GHz behind it, and the process ran 1-5% of its CPU time on performance cores at 25 fps.
+// DM_RT=0 leaves every thread on its QoS (for power A/B); DM_RT_FRAME=0 declares on the acquire thread only; DM_RT_COMP=<ms> fixes the acquire thread's computation
+// (default auto). The acquire thread declares 2 ms at its first period, before any window, as it always has.
+static int rt_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_RT"); v = !(e && !strcmp(e, "0")); if (!v) LOG("[nvn] DM_RT=0: no thread gets a time-constraint policy (QoS only)"); } return v; }
+static int rt_frame_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_RT_FRAME"); v = !(e && !strcmp(e, "0")); if (!v && rt_on()) LOG("[nvn] DM_RT_FRAME=0: only the acquire thread declares a time-constraint policy"); } return v; }
+static int rt_comp_fixed_ms(void) { static int v = -2; if (v == -2) { const char *e = getenv("DM_RT_COMP"); v = e && *e && strcmp(e, "auto") ? atoi(e) : -1; } return v; }   // −1 = auto
+#define RT_THREADS 8
+typedef struct {
+    const char *name; mach_port_t port; uint64_t tid; int acq;   // tid: the thread's ID (pthread_threadid_np), which the port is checked against before another thread acts on it; acq: an acquire thread
+    nvn_rt r; uint64_t cyc;   // the thread's cycles at its last sample
+    _Atomic uint64_t period_ns, comp_us;   // the period and computation declared (0: none), read by the thread policy line
+    unsigned ndecl; int retired;   // retired: an acquire thread that stopped acquiring, put back on the standard policy (rt_retire); the slot may go to the next acquire thread
+    _Atomic int ready, pri, base, pol;   // the thread's priority, base priority and policy at its last sample (thread_info)
+    _Atomic uint64_t frames, demoted, cpu_ns, cycles;   // since the last thread policy line: frames sampled, of them declared but below real-time priority (the kernel's fail-safe demotes
+                                                        // a real-time thread that runs about 1.5 s without blocking), and the thread's CPU time and cycles
+} rt_thr;
+static rt_thr g_rtt[RT_THREADS]; static _Atomic int g_rtt_n;
+static _Atomic uint64_t g_rt_frame_ns;   // the period the acquire thread declares; the frame threads follow it
+static pthread_mutex_t g_rt_mu = PTHREAD_MUTEX_INITIALIZER;   // the acquire threads' slots (rt_acquire): several threads may acquire, and one retires another's
+static void rt_init(rt_thr *t, const char *name, int acq, uint64_t tid) {   // on the thread itself
+    t->name = name; t->acq = acq; t->tid = tid; t->port = pthread_mach_thread_np(pthread_self());
+    memset(&t->r, 0, sizeof t->r); t->cyc = 0; t->ndecl = 0; t->retired = 0; atomic_store(&t->period_ns, 0); atomic_store(&t->comp_us, 0);
+    atomic_store(&t->frames, 0); atomic_store(&t->demoted, 0); atomic_store(&t->cpu_ns, 0); atomic_store(&t->cycles, 0); atomic_store(&t->ready, 1);
+}
+static uint64_t rt_self_tid(void) { uint64_t id = 0; pthread_threadid_np(NULL, &id); return id; }
+static rt_thr *rt_register(const char *name, int acq) {   // on the thread itself
+    int i = atomic_fetch_add(&g_rtt_n, 1); if (i >= RT_THREADS) { atomic_fetch_sub(&g_rtt_n, 1); return NULL; }
+    rt_thr *t = &g_rtt[i]; rt_init(t, name, acq, rt_self_tid()); return t;
+}
+static int rt_allowed(const rt_thr *t) { return rt_on() && (t->acq || rt_frame_on()); }
+static void rt_declare(rt_thr *t, uint64_t period_ns, double comp_ms) {
     static mach_timebase_info_data_t tb; if (!tb.denom) mach_timebase_info(&tb);
-    if (comp_ns < 1000000ull) comp_ns = 1000000ull; if (comp_ns > period_ns * 9 / 10) comp_ns = period_ns * 9 / 10;
+    double cap = period_ns * 0.9 / 1e6; if (comp_ms > cap) comp_ms = cap; if (comp_ms < 1) comp_ms = 1;
+    uint64_t comp_ns = (uint64_t)(comp_ms * 1e6);
     thread_time_constraint_policy_data_t p = {
         .period = (uint32_t)(period_ns * tb.denom / tb.numer), .computation = (uint32_t)(comp_ns * tb.denom / tb.numer),
         .constraint = (uint32_t)(period_ns * tb.denom / tb.numer), .preemptible = 1};
-    kern_return_t kr = thread_policy_set(pthread_mach_thread_np(pthread_self()), THREAD_TIME_CONSTRAINT_POLICY, (thread_policy_t)&p, THREAD_TIME_CONSTRAINT_POLICY_COUNT);
-    if (kr == KERN_SUCCESS) { g_rt_comp_ms = comp_ns / 1e6; g_rt_period_ms = period_ns / 1e6; }
-    LOG("[nvn] present thread time-constraint policy (period %.3f ms, computation %.3f ms) %s", period_ns / 1e6, comp_ns / 1e6, kr == KERN_SUCCESS ? "set" : "failed to set");
+    kern_return_t kr = thread_policy_set(t->port, THREAD_TIME_CONSTRAINT_POLICY, (thread_policy_t)&p, THREAD_TIME_CONSTRAINT_POLICY_COUNT);
+    if (kr == KERN_SUCCESS) { t->r.comp_ms = comp_ms; atomic_store(&t->period_ns, period_ns); atomic_store(&t->comp_us, comp_ns / 1000); if (t->acq) g_rt_comp_ms = comp_ms; }
+    if (++t->ndecl <= 20 || kr != KERN_SUCCESS)
+        LOG("[nvn] %s time-constraint policy (period %.3f ms, computation %.3f ms) %s%s", t->name, period_ns / 1e6, comp_ms, kr == KERN_SUCCESS ? "set" : "failed to set", t->ndecl == 20 ? "; further declarations of this thread only in the thread policy line" : "");
 }
-static int rt_comp_fixed_ms(void) { static int v = -2; if (v == -2) { const char *e = getenv("DM_RT_COMP"); v = e && *e && strcmp(e, "auto") ? atoi(e) : -1; } return v; }   // −1 = auto
-// The fixed value, or in auto mode the computation declared so far (auto's starting value of 2 ms only the first time): a reset to 2 ms at each period change under-declared the thread until the next p90
-static void set_time_constraint(uint64_t period_ns) { int f = rt_comp_fixed_ms(); set_time_constraint_comp(period_ns, f > 0 ? (uint64_t)f * 1000000ull : g_rt_comp_ms > 0 ? (uint64_t)(g_rt_comp_ms * 1e6) : 2000000ull); }
-// Called every frame at acquire: records this thread's CPU time since the last call; in auto mode re-declares based on p90
-static void rt_comp_tick(uint64_t period_ns) {
-    if (rt_comp_fixed_ms() > 0 || !period_ns || !g_rt_comp_ms) return;
-    static uint64_t last; static double win[120]; static int n;
-    uint64_t c = clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID); if (!last) { last = c; return; }
-    win[n++] = (double)(c - last) / 1e6; last = c;
-    if (n < 120) return;
-    double v[120]; memcpy(v, win, sizeof v); qsort(v, 120, sizeof *v, dcmp); n = 0;
-    // Also the window's peak: every frame that ran past the declaration stalled the thread for 30–60 ms. Dark Souls Remastered's render thread needs 1.9–2.0 ms a frame with one or
-    // two frames in 120 near 4.4 ms; declared at 2.5 ms (p90 × 1.25) it stalled about once a second, at 30 fps and at 60; declared above the peak it held 60 fps at the same CPU energy
-    double p90 = v[107], comp = fmax(p90 * 1.25, v[119] * 1.1), cap = period_ns * 0.9 / 1e6; if (comp > cap) comp = cap; if (comp < 1) comp = 1;
-    if (comp > g_rt_comp_ms * 1.15 || comp < g_rt_comp_ms * 0.85) set_time_constraint_comp(period_ns, (uint64_t)(comp * 1e6));
+// On the thread itself, before each piece of its work: one sample a presented frame (its CPU and cycles, its priority), and the declaration when the period or the need moved
+static void rt_tick(rt_thr *t, uint64_t period_ns) {
+    uint64_t f = atomic_load_explicit(&g_frame, memory_order_relaxed), declared = atomic_load_explicit(&t->period_ns, memory_order_relaxed);
+    int period_moved = period_ns && period_ns != declared && (t->acq || t->r.comp_ms > 0);
+    if (f == t->r.frame && !period_moved) return;
+    if (f != t->r.frame) {
+        uint64_t cpu = clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID), ins, cyc; thr_counts(&ins, &cyc);
+        if (t->r.frame && f > t->r.frame) {
+            thread_extended_info_data_t xi; mach_msg_type_number_t xc = THREAD_EXTENDED_INFO_COUNT;
+            if (thread_info(t->port, THREAD_EXTENDED_INFO, (thread_info_t)&xi, &xc) == KERN_SUCCESS) {
+                atomic_store(&t->pri, xi.pth_curpri); atomic_store(&t->base, xi.pth_priority); atomic_store(&t->pol, xi.pth_policy);
+                if (declared && xi.pth_curpri < 97) atomic_fetch_add(&t->demoted, 1);   // 97: BASEPRI_RTQUEUES, where a time-constraint thread runs
+            }
+            atomic_fetch_add(&t->frames, 1); atomic_fetch_add(&t->cpu_ns, cpu - t->r.cpu); atomic_fetch_add(&t->cycles, cyc - t->cyc);
+        }
+        t->cyc = cyc;
+        double c = nvn_rt_sample(&t->r, f, cpu, (double)(period_ns ? period_ns : declared) / 1e6);
+        if (c > 0 && period_ns && rt_allowed(t) && !(t->acq && rt_comp_fixed_ms() > 0) && (declared || !t->acq)) { rt_declare(t, period_ns, c); return; }
+    }
+    if (period_moved && rt_allowed(t)) {   // a new period: the acquire thread declares at once (DM_RT_COMP, what it declared so far, or 2 ms the first time), a frame thread with what it measured
+        int fx = t->acq ? rt_comp_fixed_ms() : -1;
+        rt_declare(t, period_ns, fx > 0 ? fx : t->r.comp_ms > 0 ? t->r.comp_ms : 2);
+    }
+}
+// Under g_rt_mu, on the acquire thread `self`: another acquire thread that has not acquired for a whole window of frames goes back to the standard policy. It no longer carries
+// the frame, and a time-constraint policy left on it would keep the deadline and the computation it declared for whatever it runs now. Its port is used only while it still
+// names that thread (a thread that ended leaves its port name free for reuse). The slot is reused for the next new acquire thread, or by its own thread when it acquires again
+static void rt_retire(const rt_thr *self) {
+    uint64_t f = atomic_load_explicit(&g_frame, memory_order_relaxed); int nt = atomic_load(&g_rtt_n); if (nt > RT_THREADS) nt = RT_THREADS;
+    for (int i = 0; i < nt; i++) { rt_thr *o = &g_rtt[i];
+        if (o == self || !o->acq || o->retired || !atomic_load(&o->ready) || f < o->r.frame + RT_WIN) continue;
+        thread_identifier_info_data_t ii; mach_msg_type_number_t ic = THREAD_IDENTIFIER_INFO_COUNT; int same = thread_info(o->port, THREAD_IDENTIFIER_INFO, (thread_info_t)&ii, &ic) == KERN_SUCCESS && ii.thread_id == o->tid;
+        if (same && atomic_load(&o->period_ns)) { thread_standard_policy_data_t st = {0}; thread_policy_set(o->port, THREAD_STANDARD_POLICY, (thread_policy_t)&st, THREAD_STANDARD_POLICY_COUNT); }
+        LOG("[nvn] acquire thread %llu stopped acquiring %llu frames ago%s", (unsigned long long)o->tid, (unsigned long long)(f - o->r.frame), same ? (atomic_load(&o->period_ns) ? ": back to the standard policy" : "") : " and has ended");
+        o->retired = 1; atomic_store(&o->period_ns, 0); atomic_store(&o->comp_us, 0);
+    }
+}
+// The acquire threads, every acquire. Each thread that acquires has its own slot: a thread's CPU clock and its policy are its own, so a game that acquires from a new thread
+// (or from two in turn) gets each thread's computation measured on that thread and declared on it, not one thread's clock subtracted from another's and the policy left on the
+// first (PR #2137). Sampling once per presented frame (rt_tick) covers a frame acquired in several calls with its whole work
+static void rt_acquire(uint64_t period_ns) {
+    static _Thread_local rt_thr *t; static _Thread_local uint64_t tid; static int full;
+    if (!tid) tid = rt_self_tid();
+    atomic_store_explicit(&g_rt_frame_ns, period_ns, memory_order_relaxed);
+    pthread_mutex_lock(&g_rt_mu);
+    if (t && t->tid != tid) t = NULL;   // its slot went to another acquire thread after it stopped acquiring
+    if (!t) {   // this thread's first acquire, or its first since its slot was reused: a retired slot, else a new one
+        int nt = atomic_load(&g_rtt_n); if (nt > RT_THREADS) nt = RT_THREADS;
+        for (int i = 0; i < nt && !t; i++) if (g_rtt[i].acq && g_rtt[i].retired) { t = &g_rtt[i]; rt_init(t, "acquire thread", 1, tid); }
+        if (!t && !(t = rt_register("acquire thread", 1)) && !full) { full = 1; LOG("[nvn] [RED] no time-constraint slot is left for another acquire thread (%d slots)", RT_THREADS); }
+    } else if (t->retired) { double c = t->r.comp_ms; memset(&t->r, 0, sizeof t->r); t->r.comp_ms = c; t->retired = 0; }   // acquiring again: a new window, and the computation it had, declared at once
+    if (t) { rt_tick(t, period_ns); rt_retire(t); }
+    pthread_mutex_unlock(&g_rt_mu);
+}
+void *nvn_rt_join(const char *name) { return rt_register(name, 0); }
+void nvn_rt_tick(void *h) { if (h) rt_tick(h, atomic_load_explicit(&g_rt_frame_ns, memory_order_relaxed)); }
+// The thread policy line: each registered thread's declaration, priority and policy, the frames it was demoted in, and its CPU per frame with its mean clock (cycles per CPU
+// second: an efficiency core runs below about 2.6 GHz on the A19, a performance core up to 4.3)
+static void rt_line(char *b, size_t n) {
+    size_t o = 0; int nt = atomic_load(&g_rtt_n); if (nt > RT_THREADS) nt = RT_THREADS; b[0] = 0;
+    for (int i = 0; i < nt && o < n; i++) { rt_thr *t = &g_rtt[i]; if (!atomic_load(&t->ready)) continue;
+        uint64_t fr = atomic_exchange(&t->frames, 0), de = atomic_exchange(&t->demoted, 0), cn = atomic_exchange(&t->cpu_ns, 0), cy = atomic_exchange(&t->cycles, 0);
+        uint64_t pn = atomic_load(&t->period_ns), cu = atomic_load(&t->comp_us);
+        int w = pn ? snprintf(b + o, n - o, "%s%s time-constraint computation %.2f ms / period %.2f ms", o ? "; " : "", t->name, cu / 1e3, pn / 1e6)
+                             : snprintf(b + o, n - o, "%s%s no time-constraint policy", o ? "; " : "", t->name);
+        if (w > 0) o += (size_t)w; if (o >= n) break;
+        w = snprintf(b + o, n - o, ", priority %d (base %d, policy %d), demoted in %llu of %llu frames, CPU %.2f ms a frame at %.2f GHz", atomic_load(&t->pri), atomic_load(&t->base), atomic_load(&t->pol),
+                     (unsigned long long)de, (unsigned long long)fr, fr ? cn / 1e6 / fr : 0, cn ? (double)cy / cn : 0);
+        if (w > 0) o += (size_t)w;
+    }
+    if (!o) snprintf(b, n, "no thread registered");
 }
 static void sleep_until_ns(uint64_t dl) {   // absolute time on the monotonic clock
     static mach_timebase_info_data_t tb; if (!tb.denom) mach_timebase_info(&tb);
@@ -2346,7 +2441,7 @@ static uint64_t present_period(const win_t *o) {
     int itv = present_itv(o), hz = g_hz;
     return hz > 0 ? (uint64_t)itv * 1000000000ull / (uint64_t)hz : 0;
 }
-// The period the acquire thread declares to the scheduler (set_time_constraint): the present period, except that a hold the frame step raised for late frames keeps the cap's deadline.
+// The period the acquire thread declares to the scheduler (rt_declare), which the frame threads follow: the present period, except that a hold the frame step raised for late frames keeps the cap's deadline.
 // Declaring the longer hold let the performance controller move the game to the efficiency cores at half the clock (TOTK on an iPhone: 3.4 → 1.5 GHz and 65% → 5% on performance
 // cores within 10 frames of a step to 30), where 60 fps no longer fits and every trial back to it fails. A step the game fixes itself (BotW's VFR override) is declared as it is
 static uint64_t rt_period_ns(const win_t *o, uint64_t period) {

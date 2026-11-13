@@ -156,7 +156,7 @@ DM_NVN_DEFER	switch	`0` turns off the deferred pass merging of the TBDR optimiza
 DM_NVN_DEFER_AB	diagnostic	`=1` keeps the deferred pass merging (with `DM_NVN_TBDR=1`) off until the second screenshot has been written, then turns it on, to compare the pictures with and without it
 DM_NVN_DEPTHOVR	diagnostic	`=<fragment shader key prefix>,…`: those draws compare depth with `ALWAYS`; with `DM_NVN_HILITE`, tells "the depth test rejects every fragment" from "nothing rasterizes"
 DM_NVN_DIRECT_UPLOAD	switch	0 disables bounded direct RGBA16F array uploads and keeps staged copies; on by default for supported non-sparse textures.
-DM_NVN_DIRTYCHECK	diagnostic	`=1` fully hashes pool content on every use to find changes the dirty-page tracking missed
+DM_NVN_DIRTYCHECK	diagnostic	`=1` fully hashes pool content on every use to find changes the dirty-page tracking missed; each missed texture (the first 16) gets a `[RED] dirty-page miss` line naming the host pages that changed and, for each, every pool range over it (state, generation, registration) and the kernel's protection of it
 DM_NVN_DISPATCH_BARRIER	diagnostic	`full`: every compute dispatch is ordered after everything before it in its encoder, as before; by default dispatches are ordered by the game's own barriers and by the copies around them (`nvn_mtl.m` `dbar_game`); `ab` alternates the two with the `DM_AB` phases, for measurement
 DM_NVN_DISPATCH_OWN	switch	`=1` gives every compute dispatch a compute encoder of its own with full barriers, as before (by default dispatches share the copy encoder); `DM_NVN_PASSGPU` does the same
 DM_NVN_DLSS_BILINEAR	diagnostic	`=1` draws every DLSS evaluation with the bilinear stand-in, to tell MetalFX's part in a GPU fault or stall
@@ -212,6 +212,7 @@ DM_NVN_PROGTRACE	diagnostic	`=<vertex keys,...>` logs matching ProgramSetShaders
 DM_NVN_REGLUM	diagnostic	`=x0,y0,x1,y1:<file>` (normalized coordinates): on every present records the present number, time, mean luminance and a grayscale thumbnail of that region, to check animation speed against frame rate
 DM_NVN_REPORT_EXACT	switch	`0` refuses a partly covered uniform shadow over the whole 4 KB page of a counter report of a running submission, as before; by default only over the report's own 16 bytes, which the host writes when that submission completes
 DM_NVN_REUPLOADS	diagnostic	`=1` logs the first 400 re-uploads of textures taken from their storage: shape, size, how much was read from guest memory and how many images were copied from the texture it replaces, the frame and the submission, the pages written since the upload and where the first lies, and the GPU copies into it since then
+DM_NVN_ROP_ROUND	switch	`0` leaves float colours going into 8-bit, 16-bit and RGB10A2 normalized targets to Apple's conversion (the exact product rounded to nearest); by default a pixel shader rounds them as NVIDIA's colour unit does (the float32 product rounded to nearest even) where blending is off, MIN or MAX, or a logic operation
 DM_NVN_RP_AREA	switch	`0` makes passes on targets of 16 M pixels or more cover the whole target, as before; by default a draw pass that loads what it keeps stops at the far corner of its scissor when that is at most half the target
 DM_NVN_RT_CONTINUE	switch	`0` ends the pass whenever the game sets render targets, as before; by default SetRenderTargets naming the open pass's targets continues the pass
 DM_NVN_RT_RANGE	switch	`=1` (experimental, off by default; with `DM_NVN_TBDR=1`) keeps the pass open when the game sets the same colour and depth target again with a view that differs only in its level count
@@ -353,8 +354,9 @@ DM_REWRITE_J	switch	`=<positive integer>`: worker processes per module for `patc
 DM_ROMFS	path	The game's RomFS folder, mounted read-only as `rom` (default `$DM_ROOT/romfs`); the Mac launcher, the iOS app and the NSP script set it
 DM_ROMFS_OVERLAY	path	`=<dir>[:<dir>…]`: RomFS reads look in these folders first, in order, and fall back to `DM_ROMFS` (for a modified copy of some files)
 DM_ROOT	path	Workspace root (default `~/dm-work`): the host's and tools' default paths (RomFS, temporary storage, shader libraries under `build/cache/metal_shader_cache`, probe dumps) are under it
-DM_RT	diagnostic	`0` leaves the thread that acquires the window on its QoS only, with no Mach time-constraint policy declaring the frame deadline (on by default; for power A/B)
-DM_RT_COMP	switch	`=<ms>` fixes the computation the present thread's time-constraint policy declares; default `auto` re-declares it every 120 frames from that thread's per-frame CPU time (p90 and peak)
+DM_RT	diagnostic	`0` leaves every host thread on its QoS only, with no Mach time-constraint policy declaring the frame deadline: the thread that acquires the window, the queue replay thread and the encode thread (on by default; for power A/B)
+DM_RT_COMP	switch	`=<ms>` fixes the computation the acquiring thread's time-constraint policy declares; default `auto` re-declares it every 120 frames from that thread's per-frame CPU time (p90 and peak). The replay and encode threads always measure their own
+DM_RT_FRAME	diagnostic	`0` keeps the time-constraint policy on the thread that acquires the window only; the queue replay and encode threads stay on their QoS (on by default; for phone A/B)
 DM_RUMBLE	player	`0` turns game rumble off (on by default); launcher setting
 DM_RUMBLE_GAIN	player	`=0..3` scales the rumble strength (default 1, `0` is silent); launcher setting
 DM_RUMBLE_LOG	diagnostic	`=1` logs the game's vibration handle requests and, once a second, the values it sent, how many had no routed output and the peak amplitude

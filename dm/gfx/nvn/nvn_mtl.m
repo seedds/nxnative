@@ -1353,11 +1353,12 @@ static int pend_room(int nodes) {
 // A GPU write over more than SBW_WPAGES pages is kept as an interval instead (overlapping ones merge): a storage buffer bound with size 0 counts as the rest of its Metal buffer (sbw_len)
 enum { SBW_N = 16384, SBW_WPAGES = 64, SBW_WN = 64 };
 static struct { uint64_t page; uint32_t gen; uint8_t src; } g_sbwp[SBW_N]; static int g_nsbw, g_sbw_over;   // src: SBW_* bits; pages in the set this submission; over: a write could not be kept (set full, size not known)
+static uint16_t g_sbw_list[SBW_N];   // the slots this submission took, in order (g_nsbw of them): the commit reads these instead of all SBW_N slots (gw_commit), about 30 times a frame
 static uint64_t g_sbw_wlo[SBW_WN], g_sbw_whi[SBW_WN]; static int g_nsbw_w;   // the wide writes of this submission
 static int sbw_slot(uint64_t pg, int add) {   // open addressing; −1 = not there (or no room to add)
     unsigned h = (unsigned)((pg * 0x9E3779B97F4A7C15ull) >> 50) & (SBW_N - 1);
     for (int i = 0; i < 64; i++, h = (h + 1) & (SBW_N - 1)) {
-        if (g_sbwp[h].gen != g_pend_gen) { if (!add) return -1; g_sbwp[h].page = pg; g_sbwp[h].gen = g_pend_gen; g_sbwp[h].src = 0; g_nsbw++; return (int)h; }
+        if (g_sbwp[h].gen != g_pend_gen) { if (!add) return -1; g_sbwp[h].page = pg; g_sbwp[h].gen = g_pend_gen; g_sbwp[h].src = 0; g_sbw_list[g_nsbw++] = (uint16_t)h; return (int)h; }
         if (g_sbwp[h].page == pg) return (int)h; }
     return -1;
 }
@@ -2033,7 +2034,7 @@ static void gw_commit(uint64_t fence) {
         gw_put_in(g_gw, g_pend_lo[e], g_pend_hi[e], fence, done);
         if (g_pend_kind[e] == 1 && g_pend_upd[e] && um_on()) { const upd_ent *u = &g_upd[g_pend_upd[e] - 1]; um_put(g_pend_lo[e], g_pend_hi[e], (const uint8_t *)u->buf.contents + u->off + (g_pend_lo[e] - u->lo), fence, done); }
         else gw_put_in(g_gwx, g_pend_lo[e], g_pend_hi[e], fence, done); }
-    if (g_nsbw) for (int i = 0; i < SBW_N; i++) if (g_sbwp[i].gen == g_pend_gen && (g_sbwp[i].src & SBW_GPU)) gw_put(g_sbwp[i].page << 12, (g_sbwp[i].page + 1) << 12, fence, done);   // reports: below
+    for (int i = 0; i < g_nsbw; i++) { unsigned h = g_sbw_list[i]; if (g_sbwp[h].src & SBW_GPU) gw_put(g_sbwp[h].page << 12, (g_sbwp[h].page + 1) << 12, fence, done); }   // reports: below
     for (int i = 0; i < g_nsbw_w; i++) gw_put(g_sbw_wlo[i], g_sbw_whi[i], fence, done);
     int ring = g_nhw_sub <= HW_N && (!g_nhw_sub || g_hwr[(g_nhwr + (uint64_t)g_nhw_sub - 1) % HW_N].fence <= done);   // the slots they take have finished (the farthest is the newest of them)
     for (int i = 0; i < g_nhw_sub; i++) { uint64_t a = g_hw_sub[i];
@@ -2713,7 +2714,7 @@ void mtl_tex_init(const tex_t *t) {
 // Host record of a packaged texture: the current MTLTexture, the upload stamp, and the global write generation at the last check
 // spare: the texture the last re-upload replaced, kept resident and written by the next re-upload once the GPU has passed spare_fence (a texture the CPU rewrites every frame, a movie frame,
 // alternates between two textures instead of allocating one per frame: Link's Awakening's title movie made and freed an 8 MB texture a frame)
-@interface NvPkg : NSObject { @public id<MTLTexture> tex, spare, view; uint64_t stamp, seen, hash, spare_fence, vgen, vseen, sub, own, lost_gen; const void *span; int sparse, vbase, part; uint8_t *edge[2]; uint32_t edge_n[2], stored; id ps; id<MTLBuffer> eb; } @end   // hash: full hash of the uploaded content under DM_NVN_DIRTYCHECK; span: its tracked range (nvn_dirty_span, NULL = untracked);
+@interface NvPkg : NSObject { @public id<MTLTexture> tex, spare, view; uint64_t stamp, seen, hash, spare_fence, vgen, vseen, sub, own, lost_gen; const void *span; int sparse, vbase, part; uint8_t *edge[2]; uint32_t edge_n[2], stored; id ps; id<MTLBuffer> eb; uint64_t *ph, up_frame, up_sub; uint32_t nph, missed; } @end   // hash: full hash of the uploaded content under DM_NVN_DIRTYCHECK; span: its tracked range (nvn_dirty_span, NULL = untracked);
 // sparse: in a sparse virtual pool, read through its page table (hle_nvn.c nvn_sparse_*), vgen the page table's generation at the upload and vseen at the last look; view: what it is bound as (sparse_view)
 // ps: its placement sparse texture (NvSparse, sparse_make), which tex is: mapped and uploaded tile by tile (sparse_sync)
 // edge: the uploaded bytes of the storage's first and last host pages where other data shares them (pkg_edges_take); in eb from the first GPU store into its storage on (pkg_edges_gpu),
@@ -2721,9 +2722,10 @@ void mtl_tex_init(const tex_t *t) {
 // Its release retires its textures (defer_obj_release, not res_remove at once): serials that took its texture over (cpu_unc_drop) keep it resident (defer_drain)
 // stored: GPU writes stored into its storage since its upload (gsb_swz; the DM_NVN_REUPLOADS line), which DM_NVN_DIRTYCHECK does not count as missed CPU writes
 // sub, own: the submission of its last look at its pages and nvn_dirty_own_writes then (a sparse one: sub only, sparse_checked)
+// ph, nph, up_frame, up_sub, missed: under DM_NVN_DIRTYCHECK, the hash of its bytes in each host page, the frame and submission of the upload, and whether a miss was reported (pkg_hash_take)
 // part: tex holds images copied from the texture it replaced (pkg_written), so through it from every upload back to the last whole one, when g_up_lost_gen was lost_gen
 @implementation NvPkg
-- (void)dealloc { defer_obj_release(tex); defer_obj_release(spare); if (eb) defer_obj_release(eb); else { free(edge[0]); free(edge[1]); } }
+- (void)dealloc { defer_obj_release(tex); defer_obj_release(spare); if (eb) defer_obj_release(eb); else { free(edge[0]); free(edge[1]); } free(ph); }
 @end
 // Packaged textures by storage and description. Engines make many texture objects over one texture's bytes, each with a serial of its own: Ocarina of Time's 32,768 registered IDs name 3,607 storages,
 // 2.0 GB, and an upload per serial took 6 GB, past what a 16 GB Mac can keep wired once the pools are added. A new serial with the same storage and description takes the same NvPkg, so its
@@ -2755,6 +2757,44 @@ static uint64_t g_pfv_upgrades;
 // DM_NVN_DIRTYCHECK=1 (diagnostic, compared against ground truth): fully hash the pool content on every use; changed but not detected by dirty-page tracking = a missed detection
 static int dirtycheck(void) { static int v = -1; if (v < 0) v = getenv("DM_NVN_DIRTYCHECK") != NULL; return v; }
 static uint64_t full_hash(const uint8_t *m, uint64_t n) { uint64_t h = 1469598103934665603ull; for (uint64_t i = 0; i < n; i++) h = (h ^ m[i]) * 1099511628211ull; return h; }
+// Under DM_NVN_DIRTYCHECK, at an upload: the hash of the whole content, and of the texture's bytes in each host page, so a miss can name the pages that changed (pkg_miss_report)
+static void pkg_hash_take(NvPkg *pk, const tex_t *t) {
+    if (!dirtycheck() || pk->sparse) return;
+    pk->hash = full_hash(t->mem, t->L.size);
+    uintptr_t pg = (uintptr_t)getpagesize(), a = (uintptr_t)t->mem, e = a + t->L.size, p0 = a & ~(pg - 1);
+    uint32_t n = (uint32_t)((e - p0 + pg - 1) / pg);
+    if (n != pk->nph) { free(pk->ph); pk->ph = malloc(n * sizeof *pk->ph); pk->nph = pk->ph ? n : 0; }
+    for (uint32_t i = 0; i < pk->nph; i++) { uintptr_t lo = MAX(a, p0 + i * pg), hi = MIN(e, p0 + (i + 1) * pg); pk->ph[i] = full_hash((const uint8_t *)lo, hi - lo); }
+    pk->up_frame = atomic_load(&g_cur_frame); pk->up_sub = g_sub_serial; pk->missed = 0;
+}
+// A texture whose content changed with no write the tracker saw (DM_NVN_DIRTYCHECK): the first 16, once each. Which of its host pages changed, where they lie in it, and for the first
+// few what the tracker and the kernel hold for that page (nvn_dirty_describe), which tells a write that never faulted from a page whose protection was lost
+static int g_pkg_miss_reports;
+static void pkg_miss_report(NvPkg *pk, const tex_t *t, uint64_t now) {
+    if (pk->missed || g_pkg_miss_reports >= 16) return;
+    pk->missed = 1; g_pkg_miss_reports++;
+    uintptr_t pg = (uintptr_t)getpagesize(), a = (uintptr_t)t->mem, e = a + t->L.size, p0 = a & ~(pg - 1);
+    uint32_t changed = 0, first = UINT32_MAX, last = 0;
+    for (uint32_t i = 0; i < pk->nph; i++) { uintptr_t lo = MAX(a, p0 + i * pg), hi = MIN(e, p0 + (i + 1) * pg);
+        if (full_hash((const uint8_t *)lo, hi - lo) != pk->ph[i]) { changed++; if (first == UINT32_MAX) first = i; last = i; } }
+    const void *now_span = nvn_dirty_span(t->mem, t->L.size);
+    MLOG("[RED] dirty-page miss: texture ser=%llu %ux%ux%u format %#x target %d levels %u, %llu bytes at %p: its content changed with no write seen; %u of its %u host pages changed (pages %d-%d), "
+         "uploaded at frame %llu submission %llu (now %llu, %llu), stamp %llu, clock %llu, GPU stores into it %u, kept range %p, range now %p",
+         (unsigned long long)t->serial, t->d.width, t->d.height, t->d.depth, t->d.format, t->d.target, t->d.levels, (unsigned long long)t->L.size, (void *)t->mem, changed, pk->nph,
+         first == UINT32_MAX ? -1 : (int)first, first == UINT32_MAX ? -1 : (int)last, (unsigned long long)pk->up_frame, (unsigned long long)pk->up_sub,
+         (unsigned long long)atomic_load(&g_cur_frame), (unsigned long long)g_sub_serial, (unsigned long long)pk->stamp, (unsigned long long)now, pk->stored, pk->span, now_span);
+    int shown = 0;
+    for (uint32_t i = 0; i < pk->nph && shown < 6; i++) {
+        uintptr_t lo = MAX(a, p0 + i * pg), hi = MIN(e, p0 + (i + 1) * pg);
+        if (full_hash((const uint8_t *)lo, hi - lo) == pk->ph[i]) continue;
+        shown++;
+        uint64_t o = lo - a; unsigned layer = t->L.layer_size ? (unsigned)(o / t->L.layer_size) : 0, lv = 0; uint64_t ol = t->L.layer_size ? o % t->L.layer_size : o;
+        while (lv + 1 < t->d.levels && nvn_tex_level_offset(&t->d, lv + 1) <= ol) lv++;
+        char d[512]; nvn_dirty_describe((const void *)lo, pk->span, d, sizeof d);
+        MLOG("[RED] dirty-page miss ser=%llu page %u (%p, its bytes %#llx-%#llx, layer %u level %u): %s", (unsigned long long)t->serial, i, (void *)(p0 + i * pg), (unsigned long long)o,
+             (unsigned long long)(hi - a), layer, lv, d);
+    }
+}
 // Writes beside a texture. The tracker marks whole host pages (16 KB) dirty, and guest memory pools are only 4 KB aligned: the first and last pages of a texture's storage are shared with
 // whatever lies beside it. Pokémon Sword keeps each texture of its GFPAK models in a pool of its own, with the pool's object 4 KB before the storage, in the same host page, and writes there
 // every frame: 73,232 re-uploads in 70 s of play from a save, every one checked of unchanged content, 12 GB of upload staging in 8 minutes. So the bytes of the storage in those edge pages
@@ -4510,8 +4550,7 @@ static id<MTLTexture> tex_mtl_(const tex_t *ct, int *in_storage) {
             if (!clean && atomic_load_explicit(&g_up_lost_n, memory_order_relaxed) && up_lost_take(pk->tex)) whole = 1;
             if (clean && atomic_load_explicit(&g_up_lost_n, memory_order_relaxed) && up_lost_take(pk->tex)) { clean = 0; whole = 1; uint64_t k = atomic_load(&g_up_lost_redo); if (k <= 3 || !atomic_load(&g_up_lost_n)) MLOG("re-uploading a texture whose upload was dropped ser=%llu (%llu in total, %d left in the record)", (unsigned long long)t->serial, (unsigned long long)k, atomic_load(&g_up_lost_n)); }
             if (clean) {
-                if (dirtycheck() && !kept && !pk->sparse && !pk->stored && full_hash(t->mem, t->L.size) != pk->hash && !g_pkg_miss++)
-                    MLOG("[RED] dirty-page miss: texture ser=%llu pool content changed but was not detected", t->serial);
+                if (dirtycheck() && !kept && !pk->sparse && !pk->stored && full_hash(t->mem, t->L.size) != pk->hash) { g_pkg_miss++; pkg_miss_report(pk, t, now); }
                 return pk->view ? pk->view : pk->tex;
             }
             if (!whole && !pk->sparse && pkg_edges_clean(pk, t)) return pk->view ? pk->view : pk->tex;   // only the pages it shares with other data were written
@@ -4527,7 +4566,7 @@ static id<MTLTexture> tex_mtl_(const tex_t *ct, int *in_storage) {
                 if (pk->spare && pk->spare != nt) defer_obj_release(pk->spare);   // still in use, or of another shape: retired as before
                 if (pk->sparse) sparse_view(pk, t);
                 zb_report(t, pk->sparse ? (unsigned)pk->vbase : 0, "re-upload");
-                pk->spare = old; pk->spare_fence = g_fence + 1; own_note(t->serial); pk->stamp = st; pk->vgen = pk->vseen = vg; pk->span = nvn_dirty_span(t->mem, t->L.size); pk->seen = st; g_pkg_reuploads++; if (dirtycheck() && !pk->sparse) pk->hash = full_hash(t->mem, t->L.size); pkg_edges_take(pk, t); }
+                pk->spare = old; pk->spare_fence = g_fence + 1; own_note(t->serial); pk->stamp = st; pk->vgen = pk->vseen = vg; pk->span = nvn_dirty_span(t->mem, t->L.size); pk->seen = st; g_pkg_reuploads++; pkg_hash_take(pk, t); pkg_edges_take(pk, t); }
             return pk->view ? pk->view : pk->tex;
         }
         pk = [NvPkg new];
@@ -4537,7 +4576,7 @@ static id<MTLTexture> tex_mtl_(const tex_t *ct, int *in_storage) {
         pk->tex = pkg_upload(t, &pk->stamp, nil, 0, nil, NULL, 0, NULL);
         if (!pk->tex) return nil;
         pk->span = nvn_dirty_span(t->mem, t->L.size);
-        pk->seen = pk->stamp; g_pkg_uploads++; if (dirtycheck() && !pk->sparse) pk->hash = full_hash(t->mem, t->L.size);   // "nothing written since" starts at the stamp: a write that faulted during the upload moved "now" past it
+        pk->seen = pk->stamp; g_pkg_uploads++; pkg_hash_take(pk, t);   // "nothing written since" starts at the stamp: a write that faulted during the upload moved "now" past it
         pkg_edges_take(pk, t);
         if (pk->sparse) sparse_view(pk, t);
         zb_report(t, pk->sparse ? (unsigned)pk->vbase : 0, "upload");
@@ -8324,14 +8363,47 @@ static uint32_t bz_word(void) {
     }
     return w;
 }
-// The word at fragment buffer DMSH_BLEND_BUFFER, for every draw of a shader that reads it: a copy in the frame arena per value and pass, as at_bind
+// NVIDIA's colour unit converts a float colour into a normalized target by rounding the float32 product x * (2^n - 1) to nearest even; Apple's rounds the exact product to nearest
+// (dm/gfx/tests/t_rop_round.m). They differ where the colour lies within rounding of a half step: Sonic Frontiers' G-buffer flags, the float32 constant 66.5 / 255, are 66 on the Switch
+// and were 67 here, which turned its ambient light off. The pixel shader rounds such outputs itself (dmsh_rewrite.py blend_zero, dm_rop), and which ones and to what width comes from
+// here: DMSH_BLEND_ROUND_BITS bits per colour output, for an 8-bit, 16-bit or RGB10A2 normalized target whose stored value is the conversion of the colour: blending off for it, MIN or
+// MAX on both its colour and alpha (they keep one of two stored values, so a colour rounded first keeps the same one), or a logic operation (which takes the place of blending and
+// rounds the colour as the target stores it; dmsh_logic.py dm_logic_norm then finds it exact). sRGB, signed, float, packed 16-bit formats and blended sums (rounded after the blend,
+// out of a shader's reach) keep Apple's conversion. DM_NVN_ROP_ROUND=0 gives 0 for every draw, for A/B runs
+static int rop_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_ROP_ROUND"); v = !(e && !strcmp(e, "0")); if (!v) MLOG("DM_NVN_ROP_ROUND=0: colours go into normalized targets as Apple's GPU converts them"); } return v; }
+static uint32_t rop_class(MTLPixelFormat f) {
+    switch (f) {
+        case MTLPixelFormatR8Unorm: case MTLPixelFormatRG8Unorm: case MTLPixelFormatRGBA8Unorm: case MTLPixelFormatBGRA8Unorm: return DMSH_ROUND_8;
+        case MTLPixelFormatR16Unorm: case MTLPixelFormatRG16Unorm: case MTLPixelFormatRGBA16Unorm: return DMSH_ROUND_16;
+        case MTLPixelFormatRGB10A2Unorm: case MTLPixelFormatBGR10A2Unorm: return DMSH_ROUND_10_2;
+        default: return 0;
+    }
+}
+static inline int lop_on(void);
+static uint32_t rop_word(void) {
+    if (!rop_on()) return 0;
+    uint32_t w = 0;
+    for (int i = 0; i < 8; i++) {
+        unsigned l = g_pso_lmap ? g_pso_lmap[i] : (unsigned)i;
+        if (l >= 8 || !g_pass.cfmt[i]) continue;
+        uint32_t c = rop_class((MTLPixelFormat)g_pass.cfmt[i]); if (!c) continue;
+        if (!lop_on() && S.color.blend_en >> l & 1) {
+            blend_st b = adv_blend(S.blend[l]);
+            int mm = (b.eq_rgb == NVN_BLEND_EQUATION_MIN || b.eq_rgb == NVN_BLEND_EQUATION_MAX) && (b.eq_a == NVN_BLEND_EQUATION_MIN || b.eq_a == NVN_BLEND_EQUATION_MAX);
+            if (!mm || b.adv) continue;
+        }
+        w |= c << (DMSH_BLEND_ROUND_BITS * l);
+    }
+    return w;
+}
+// The two words at fragment buffer DMSH_BLEND_BUFFER (zero, round), for every draw of a shader that reads them: a copy in the frame arena per value and pass, as at_bind
 static void bz_bind(id<MTLCommandEncoder> en) {
-    static uint64_t gpu, pass; static uint32_t last;
-    uint32_t v = bz_word();
-    if (!gpu || pass != g_pass.serial || v != last) {
-        __strong id<MTLBuffer> b; size_t off = arena_alloc(16, &b); memset((uint8_t *)b.contents + off, 0, 16); memcpy((uint8_t *)b.contents + off, &v, sizeof v);
-        gpu = b.gpuAddress + off; pass = g_pass.serial; last = v;
-        if (v) { static uint64_t n; if (++n <= 3 || !(n & (n - 1))) MLOG("blend: a zero source weight on a floating-point target (outputs %#x): a non-finite colour is blended as 0 there, as NVIDIA's blender does (%llu passes or states so far)", v, (unsigned long long)n); }
+    static uint64_t gpu, pass; static uint32_t last[2];
+    uint32_t v[2] = {bz_word(), rop_word()};
+    if (!gpu || pass != g_pass.serial || memcmp(v, last, sizeof v)) {
+        __strong id<MTLBuffer> b; size_t off = arena_alloc(16, &b); memset((uint8_t *)b.contents + off, 0, 16); memcpy((uint8_t *)b.contents + off, v, sizeof v);
+        gpu = b.gpuAddress + off; pass = g_pass.serial; memcpy(last, v, sizeof v);
+        if (v[0]) { static uint64_t n; if (++n <= 3 || !(n & (n - 1))) MLOG("blend: a zero source weight on a floating-point target (outputs %#x): a non-finite colour is blended as 0 there, as NVIDIA's blender does (%llu passes or states so far)", v[0], (unsigned long long)n); }
     }
     enc_r_args((id<MTL4RenderCommandEncoder>)en, MTLRenderStageFragment, gpu, DMSH_BLEND_BUFFER);
 }
@@ -15636,6 +15708,24 @@ static dlss_scaler *dlss_scaler_for(const p_dlss *c, id<MTLTexture> col, id<MTLT
               (unsigned long)iw, (unsigned long)ih, (unsigned long)out.width, (unsigned long)out.height, (unsigned long)col.pixelFormat, (unsigned long)dep.pixelFormat, (unsigned long)mot.pixelFormat, (unsigned long)out.pixelFormat);
     return e->sc ? e : NULL;
 }
+// MetalFX's Metal 4 scalers open encoders of their own with no barrier, before or after their work. Before them, in cb: an encoder that waits for the queue's earlier work and
+// holds the queue's later work (the scaler's encoders) behind its own, a copy: from src's region at o into dst at the origin when the caller copies (the present's crop), else
+// one word of a scratch buffer. Barriers around no work order nothing (An encoder of barriers alone orders nothing, docs/reference/rendering.md): behind an empty encoder of
+// them a reader read what a slow pass just before was still writing, in most rounds, and behind the word none did. On the replay's command buffer the next draw pass then takes its
+// consumer barrier, which is what orders it after the scaler (a pass after a relaxed end skips it, enc_r_begin_pass: the first draw pass after DLSS read its output early in every
+// round with DM_NVN_BARRIER=game, t_dlss_mfx)
+static void mfx_order(id<MTL4CommandBuffer> cb, id<MTLTexture> src, MTLOrigin o, MTLSize z, id<MTLTexture> dst) {
+    static id<MTLBuffer> word; static dispatch_once_t once;
+    dispatch_once(&once, ^{ word = [g_dev newBufferWithLength:16 options:MTLResourceStorageModePrivate]; word.label = @"MetalFX order word"; res_add(word); res_commit(); });
+    if (cb == g_cb && g_tf_enc) tf_pass_end();   // no other encoder may be open on the replay's command buffer
+    id<MTL4ComputeCommandEncoder> ce = [cb computeCommandEncoder];
+    [ce barrierAfterQueueStages:MTLStageAll beforeStages:MTLStageBlit visibilityOptions:resource_vis()];
+    if (dst) [ce copyFromTexture:src sourceSlice:0 sourceLevel:0 sourceOrigin:o sourceSize:z toTexture:dst destinationSlice:0 destinationLevel:0 destinationOrigin:MTLOriginMake(0, 0, 0)];
+    else [ce copyFromBuffer:word sourceOffset:0 toBuffer:word destinationOffset:8 size:4];
+    [ce barrierAfterStages:MTLStageBlit beforeQueueStages:MTLStageAll visibilityOptions:resource_vis()];
+    [ce endEncoding];
+    if (cb == g_cb) g_last_end_relaxed = 0;
+}
 static void dlss_eval(const p_dlss *c) {
     rp_flush();   // the passes before it land first: they write its inputs
     id<MTLTexture> col = c->tex[DLSS_COLOR] ? tex_mtl(c->tex[DLSS_COLOR]) : nil, dep = c->tex[DLSS_DEPTH] ? tex_mtl(c->tex[DLSS_DEPTH]) : nil, mot = c->tex[DLSS_MOTION] ? tex_mtl(c->tex[DLSS_MOTION]) : nil,
@@ -15661,10 +15751,7 @@ static void dlss_eval(const p_dlss *c) {
     id<MTLTexture> expo = c->tex[DLSS_EXPOSURE] ? tex_mtl(c->tex[DLSS_EXPOSURE]) : nil;
     if (g_blit) { enc_b_end(g_blit); g_blit = nil; }   // a usage upgrade copies through it
     ubd_land_compute();
-    if (g_tf_enc) tf_pass_end(); id<MTL4ComputeCommandEncoder> ce = [g_cb computeCommandEncoder];   // the scaler's encoders come after the frame's work so far: MetalFX opens encoders of its own, which take no barrier
-    [ce barrierAfterQueueStages:MTLStageAll beforeStages:MTLStageBlit visibilityOptions:resource_vis()];
-    [ce barrierAfterStages:MTLStageBlit beforeQueueStages:MTLStageAll visibilityOptions:resource_vis()];
-    [ce endEncoding];
+    mfx_order(g_cb, nil, MTLOriginMake(0, 0, 0), MTLSizeMake(0, 0, 0), nil);   // the scaler after the frame's work so far, and the next pass after the scaler
     if (@available(macOS 27.0, iOS 27.0, *)) {} else if (c->base[DLSS_COLOR][0] || c->base[DLSS_COLOR][1] || c->base[DLSS_DEPTH][0] || c->base[DLSS_DEPTH][1] || c->base[DLSS_MOTION][0] || c->base[DLSS_MOTION][1] || c->base[DLSS_OUTPUT][0] || c->base[DLSS_OUTPUT][1]) {
         static int once; if (!once++) MLOG("[RED] DLSS: rectangles away from the origin need macOS / iOS 27's MetalFX; taken from the origin");
     }
@@ -16623,9 +16710,8 @@ static int present_encode(id<MTLCommandBuffer> cb, id<MTLTexture> src, id<MTLTex
 // format. Each texture of its own is made when a present first needs it. Queue barriers serialize both the frame's rendering and reuse of the scaler's textures across presents.
 // Replacing the scaler waits for earlier presents; throttle replacement during resizing, and keep standard scaling for refused sizes. Offscreen captures own separate state.
 #define FX_REMAKE_PRESENTS 30
-// in, out: the scaler's own input and output (nil until needed); tick: the one texel the in-place read copies (fx_encode); in_place_n, direct_n: presents that read the presented
-// texture, wrote the canvas
-typedef struct { id<MTL4FXSpatialScaler> sc; id<MTLTexture> in, out, tick; uint64_t made_at, in_place_n, direct_n; int made; NSUInteger refused[6]; } fx_state;
+// in, out: the scaler's own input and output (nil until needed); in_place_n, direct_n: presents that read the presented texture, wrote the canvas
+typedef struct { id<MTL4FXSpatialScaler> sc; id<MTLTexture> in, out; uint64_t made_at, in_place_n, direct_n; int made; NSUInteger refused[6]; } fx_state;
 static fx_state g_fx_present;   // only the present thread encodes or replaces the scaler
 static id<MTL4Compiler> g_fx_comp;
 static int g_fx_mode = -1;   // 1 = metalfx, 0 = off
@@ -16667,7 +16753,7 @@ static id<MTLTexture> fx_encode(fx_state *fx, id<MTL4CommandBuffer> cb, id<MTLTe
         if (!memcmp(key, fx->refused, sizeof key)) return nil;
         if (remake_wait && fx->made && g_present_n < fx->made_at + FX_REMAKE_PRESENTS) return nil;
         if (remake_wait) { pthread_mutex_lock(&g_pq_mu); while (g_pq_inflight) pthread_cond_wait(&g_pq_cv, &g_pq_mu); pthread_mutex_unlock(&g_pq_mu); }
-        res_remove(fx->in); res_remove(fx->out); res_remove(fx->tick); fx->sc = nil; fx->in = fx->out = fx->tick = nil;
+        res_remove(fx->in); res_remove(fx->out); fx->sc = nil; fx->in = fx->out = nil;
         uint64_t t0 = now_ns(); NSError *e = nil;
         if (!g_fx_comp) g_fx_comp = [g_dev newCompilerWithDescriptor:[MTL4CompilerDescriptor new] error:&e];
         MTLFXSpatialScalerDescriptor *d = [MTLFXSpatialScalerDescriptor new];
@@ -16687,19 +16773,12 @@ static id<MTLTexture> fx_encode(fx_state *fx, id<MTL4CommandBuffer> cb, id<MTLTe
     int in_place = in_place_ok && !r[0] && !r[1] && raw.width == cw && raw.height == ch && (raw.usage & sc.colorTextureUsage) == sc.colorTextureUsage && raw.storageMode == MTLStorageModePrivate;
     // The canvas has the picture's size and the scaler can write it: the scaler writes it (the present pass would only copy its output 1:1)
     int direct = canvas && canvas.width == ow && canvas.height == oh && canvas.pixelFormat == out_pf && (canvas.usage & sc.outputTextureUsage) == sc.outputTextureUsage;
-    id<MTLTexture> in = in_place ? fx_tex(&fx->tick, raw.pixelFormat, 1, 1, MTLTextureUsageShaderRead, @"present upscale order texel")
-                                 : fx_tex(&fx->in, raw.pixelFormat, cw, ch, sc.colorTextureUsage | MTLTextureUsageShaderRead, @"present upscale input");
+    id<MTLTexture> in = in_place ? raw : fx_tex(&fx->in, raw.pixelFormat, cw, ch, sc.colorTextureUsage | MTLTextureUsageShaderRead, @"present upscale input");
     id<MTLTexture> out = direct ? canvas : fx_tex(&fx->out, out_pf, ow, oh, sc.outputTextureUsage | MTLTextureUsageShaderRead, @"present upscale output");
     if (!in || !out) { memcpy(fx->refused, key, sizeof key); return nil; }
-    // The scaler's own encoders wait for no earlier work: the blit here waits for the queue's (the frame's rendering, the last present's scaler) and they wait for the blit. Reading in
-    // place, the blit is one texel, which carries the barriers: barriers around no work ordered nothing (the scaler read a frame still drawing in every round, t_present_crop)
-    id<MTL4ComputeCommandEncoder> ce = [cb computeCommandEncoder];
-    [ce barrierAfterQueueStages:MTLStageAll beforeStages:MTLStageBlit visibilityOptions:resource_vis()];
-    [ce copyFromTexture:raw sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(r[0], r[1], 0) sourceSize:in_place ? MTLSizeMake(1, 1, 1) : MTLSizeMake(cw, ch, 1)
-              toTexture:in destinationSlice:0 destinationLevel:0 destinationOrigin:MTLOriginMake(0, 0, 0)];
-    [ce barrierAfterStages:MTLStageBlit beforeQueueStages:MTLStageAll visibilityOptions:resource_vis()];
-    [ce endEncoding];
-    sc.colorTexture = in_place ? raw : in; sc.inputContentWidth = cw; sc.inputContentHeight = ch; sc.outputTexture = out;
+    // The scaler after the queue's earlier work (the frame's rendering, the last present's scaler): behind the copy of the crop, or reading in place behind one word (mfx_order)
+    mfx_order(cb, raw, MTLOriginMake(r[0], r[1], 0), MTLSizeMake(cw, ch, 1), in_place ? nil : in);
+    sc.colorTexture = in; sc.inputContentWidth = cw; sc.inputContentHeight = ch; sc.outputTexture = out;
     [sc encodeToCommandBuffer:cb];
     if (in_place && !fx->in_place_n++ && remake_wait) MLOG("present upscaling: MetalFX reads the presented texture itself (%lux%lu), no copy (DM_FX_INPLACE=0 copies it)", (unsigned long)cw, (unsigned long)ch);
     if (direct && !fx->direct_n++ && remake_wait) MLOG("present upscaling: MetalFX writes the drawable itself (%lux%lu), no present pass after it (DM_FX_DIRECT=0 keeps the pass)", (unsigned long)ow, (unsigned long)oh);
@@ -16839,16 +16918,12 @@ static int up_mfx_encode(NvShader *cs) {
     NVNcopyRegion at0 = {0, 0, 0, ir.width, ir.height, 1}, at0o = {0, 0, 0, orr.width, orr.height, 1};
     id<MTLTexture> color = direct ? in : e->in, result = direct ? out : e->out;
     if (!direct && !copy_t2t_draw(in, color, 0, 0, 0, 0, &ir, &at0, 0, 0)) { g_up_mfx_kept++; return 0; }   // into RGBA16F at the origin (a nearest draw: same size)
-    if (g_tf_enc) tf_pass_end(); id<MTL4ComputeCommandEncoder> ce = [g_cb computeCommandEncoder];   // as dlss_eval: MetalFX opens encoders of its own, which take no barrier
-    [ce barrierAfterQueueStages:MTLStageAll beforeStages:MTLStageBlit visibilityOptions:resource_vis()];
-    [ce barrierAfterStages:MTLStageBlit beforeQueueStages:MTLStageAll visibilityOptions:resource_vis()];
-    [ce endEncoding];
+    mfx_order(g_cb, nil, MTLOriginMake(0, 0, 0), MTLSizeMake(0, 0, 0), nil);   // the scaler after the frame's work so far, and the next pass after the scaler
     NSUInteger cw = (NSUInteger)ir.width, ch = (NSUInteger)ir.height;
     rec_cb_block(g_cb, ^(id<MTL4CommandBuffer> cb) {   // the real command buffer, on the encoding thread when it runs (iOS's default)
         sc.colorTexture = color; sc.outputTexture = result; sc.inputContentWidth = cw; sc.inputContentHeight = ch;
         [sc encodeToCommandBuffer:cb];
     });
-    g_last_end_relaxed = 0;   // the next pass waits for the scaler whole (enc_r_begin_pass)
     if (!direct && !copy_t2t_draw(e->read, out, 0, 0, 0, 0, &at0o, &orr, 0, 0)) {
         args_dirty_all(); g_up_mfx_kept++; return 0;   // only the scratch image was scaled; the game's shader can still produce the output
     }
@@ -16909,11 +16984,11 @@ static int present_offscreen_m4(id<MTLTexture> src, const int crop[4], id<MTLTex
     [cb beginCommandBufferWithAllocator:al];
     int kind = present_encode_m4(cb, raw, out, crop, uvb, &fx);
     [cb endCommandBuffer];
-    if (!kind) { res_remove(out); res_remove(uvb); res_remove(fx.in); res_remove(fx.out); res_remove(fx.tick); return 0; }
+    if (!kind) { res_remove(out); res_remove(uvb); res_remove(fx.in); res_remove(fx.out); return 0; }
     MTL4CommitOptions *options = [MTL4CommitOptions new];
     [options addFeedbackHandler:^(id<MTL4CommitFeedback> f) {
         (void)al; (void)cb; (void)raw; (void)fx.sc;   // keep the Metal 4 commands, source view and scaler alive too
-        res_remove(out); res_remove(uvb); res_remove(fx.in); res_remove(fx.out); res_remove(fx.tick);
+        res_remove(out); res_remove(uvb); res_remove(fx.in); res_remove(fx.out);
         if (f.error) { MLOG("[RED] offscreen present: %s", f.error.description.UTF8String); gpu_lost_check(f.error, "offscreen present"); }
         done(f.error ? PRESENT_FAILED : kind);
     }];

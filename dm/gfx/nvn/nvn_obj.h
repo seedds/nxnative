@@ -95,6 +95,7 @@ typedef struct {
                                          // for the next record, so that the game's control-memory callback never runs inside its own command-memory callback (hle_nvn.c ctl_push)
     uint8_t *ctl_list;                   // The recording's first control entry once written: its handle (NULL before)
     uint8_t *chunk;                      // Start of the recording's piece of records in the current segment not yet in a CTL_CHUNK entry (NULL = none open)
+    uint64_t rec_id;                     // The current or last recording's serial (hle_nvn.c BeginRecording): its own host-lent segments are not freed by its own writes (hostseg_written)
 } cmd_t;                                                                                   FITS(cmd_t, NVNcommandBuffer);
 
 // ---------- State objects (defaults follow the NVN / GL defaults) ----------

@@ -655,21 +655,34 @@ def frag_z_snap(msl):
 # The rule belongs to the blender, so it depends on the draw's blend state, which a shader does not know: the host gives it (nvn_mtl.m bz_bind) as a word at fragment buffer
 # DMSH_BLEND_BUFFER, DMSH_BLEND_ZERO_BITS bits per colour output: where the output's source colour weight is zero (dmsh_abi.h has the cases), a non-finite rgb is returned as 0, which is
 # what the zero weight makes of it. With blending off, on a target that is not floating point, or with a weight the alpha does not make zero, the output's bits are 0 and it is returned as
-# it is: NVIDIA stores that NaN or Inf too. A finite colour is never changed, nor the alpha.
+# it is: NVIDIA stores that NaN or Inf too. This part never changes a finite colour, nor the alpha.
 # Not covered, as a shader cannot see it: a NaN or Inf already in the target under a zero destination weight, and a non-finite weight on a colour of 0.
 # The guard goes into main0 before the build makes its other entry points, so each of them has it: they call main0's body (dmsh_side.shared_body: main0_u, main0_d, main0_f and
 # the side library's) and take main0's parameters, the word's among them. It is written as a call, not as stores to out, which dmsh_entry.fs_uint reads to tell what a shader writes
-BLEND_ZERO = '''struct dm_blend_state { uint zero; };   // see dmsh_rewrite.py blend_zero
+# The same call rounds what goes into a normalized target as NVIDIA's colour unit does (the struct's second word, round, DMSH_BLEND_ROUND_BITS a colour output, from nvn_mtl.m rop_word).
+# The two convert a float colour differently where it lies within rounding of a half step: Apple stores the nearest integer to the exact x * (2^n - 1) (dm/gfx/tests/t_rop_round.m
+# measures it, an M6), NVIDIA's rounds the float32 product to nearest even. Sonic Frontiers writes its G-buffer material flags as the constant 66.5 / 255 in float32
+# (0.2607843279838562): exactly 66.5 once multiplied in float32, so 66 on the Switch, but 66.5000036 exactly, so 67 on the Mac, whose bit 0 sends the lighting to an ambient
+# the G-buffer leaves black. Here the colour becomes rint(float32(saturate(c) * scale)) / scale, which Apple's conversion stores as that integer. Only where the stored value is the
+# conversion of the shader's colour: blending off, MIN or MAX (they pick one of two stored values) or a logic operation; a blended sum is rounded after the blend, which a shader cannot reach.
+BLEND_ZERO = '''struct dm_blend_state { uint zero; uint round; };   // see dmsh_rewrite.py blend_zero
 static inline __attribute__((always_inline)) float4 dm_bz(float4 c, uint m)
 {
     m &= %du;
     if (!((m == 1u && c.w == 0.0f) || (m == 2u && c.w == 1.0f))) return c;
     return float4(select(c.xyz, float3(0.0f), (as_type<uint3>(c.xyz) & uint3(0x7f800000u)) == uint3(0x7f800000u)), c.w);   // NaN or Inf by its bits: fast math may assume there is none
 }
+static inline __attribute__((always_inline)) float4 dm_rop(float4 c, uint m)
+{
+    m &= %du;
+    if (m == 0u) return c;
+    float4 s = m == %du ? float4(255.0f) : (m == %du ? float4(65535.0f) : float4(1023.0f, 1023.0f, 1023.0f, 3.0f));
+    return rint(precise::clamp(c, 0.0f, 1.0f) * s) / s;   // precise: NaN goes to 0, as both store it; the product is float32's, rint rounds it to nearest even
+}
 static inline __attribute__((always_inline)) void dm_blend0(thread main0_out& dm_o, constant dm_blend_state& dm_s)
 {
-    uint m = dm_s.zero;
-    if (m == 0u) return;
+    uint m = dm_s.zero, r = dm_s.round;
+    if ((m | r) == 0u) return;
 %s}
 '''
 BLEND_ZERO_PARAM = f'constant dm_blend_state& dm_blend [[buffer({abi.BLEND_BUFFER})]]'
@@ -688,6 +701,7 @@ def blend_zero(msl):
     n = len(re.findall(r'\breturn\b', body))
     body, k = re.subn(r'^([ \t]*)return out;$', lambda m: f'{m.group(1)}dm_blend0(out, dm_blend);\n{m.group(1)}return out;', body, flags=re.M)
     if not k or k != n: return msl, 0
-    bits = abi.BLEND_ZERO_BITS
-    helper = BLEND_ZERO % ((1 << bits) - 1, ''.join(f'    dm_o.{nm} = dm_bz(dm_o.{nm}, m >> {bits * c}u);\n' for nm, c in cols))
+    bits, rb = abi.BLEND_ZERO_BITS, abi.BLEND_ROUND_BITS
+    helper = BLEND_ZERO % ((1 << bits) - 1, (1 << rb) - 1, abi.ROUND_8, abi.ROUND_16,
+                           ''.join(f'    dm_o.{nm} = dm_rop(dm_bz(dm_o.{nm}, m >> {bits * c}u), r >> {rb * c}u);\n' for nm, c in cols))
     return msl[:e['start']] + helper + '\n' + msl[e['start']:e['head'] - 1] + (', ' if e['params'] else '') + BLEND_ZERO_PARAM + ')' + body + msl[e['end']:], k

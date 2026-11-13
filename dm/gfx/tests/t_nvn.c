@@ -707,6 +707,50 @@ int main(void) {
         EXPECT("lists checked", 126, lists);
         P(nvnCommandBufferFinalize)(&c3); P(nvnMemoryPoolFinalize)(&mp);
     }
+    // 5b''. A grant is not a write. Slot A (at 512) overflows its 64 bytes into a host-lent segment; slot B before it is then re-recorded with a grant of 512 bytes that
+    //       reaches over A's bytes but writes only one record (max(S, 512), as above). A is still live: another buffer's overflow must not be handed A's segment
+    {
+        static uint8_t m[8192] __attribute__((aligned(4096))); NVNmemoryPoolBuilder mb; NVNmemoryPool mp; NVNcommandBuffer ca, cb, cx;
+        P(nvnMemoryPoolBuilderSetDefaults)(&mb); P(nvnMemoryPoolBuilderSetStorage)(&mb, m, sizeof m); P(nvnMemoryPoolInitialize)(&mp, &mb);
+        P(nvnCommandBufferInitialize)(&ca, &dev); P(nvnCommandBufferInitialize)(&cb, &dev); P(nvnCommandBufferInitialize)(&cx, &dev);   // no callbacks: an overflow goes to a host segment
+        enum { NB = 40 };
+        P(nvnCommandBufferAddCommandMemory)(&ca, &mp, 512, 64); P(nvnCommandBufferBeginRecording)(&ca);
+        for (int i = 0; i < NB; i++) P(nvnCommandBufferBindUniformBuffer)(&ca, NVN_SHADER_STAGE_FRAGMENT, i & 15, UINT64_C(0x10000) * (uint64_t)(i + 1), 0x100);
+        NVNcommandHandle ha = P(nvnCommandBufferEndRecording)(&ca);
+        P(nvnCommandBufferAddCommandMemory)(&cb, &mp, 0, 1024); P(nvnCommandBufferBeginRecording)(&cb);   // B's grant covers A's slot; B writes 24 bytes at 0
+        P(nvnCommandBufferBindUniformBuffer)(&cb, NVN_SHADER_STAGE_VERTEX, 1, 0x7770000, 0x100); P(nvnCommandBufferEndRecording)(&cb);
+        P(nvnCommandBufferAddCommandMemory)(&cx, &mp, 4096, 64); P(nvnCommandBufferBeginRecording)(&cx);   // another overflow, which takes a free segment of the same size
+        for (int i = 0; i < NB; i++) P(nvnCommandBufferBindUniformBuffer)(&cx, NVN_SHADER_STAGE_COMPUTE, 0, 0xdead0000, 0x40);
+        P(nvnCommandBufferEndRecording)(&cx);
+        int good = 0; size_t ln; uint8_t *L = nvn_rec_linear(ha, &ln);
+        for (const uint8_t *p = L; p < L + ln; ) {
+            op_hdr h; memcpy(&h, p, sizeof h); if (!h.size) break;
+            if (h.op == OP_BIND_UBO || h.op == OP_BIND_UBO_SMALL) {
+                p_bind_buf tmp; const p_bind_buf *b = bind_buf_rec(h.op, p + 8, &tmp);
+                if (b->stage == NVN_SHADER_STAGE_FRAGMENT && b->index == (good & 15) && b->addr == UINT64_C(0x10000) * (uint64_t)(good + 1) && b->size == 0x100) good++;
+                else break;
+            }
+            p += h.size;
+        }
+        free(L);
+        EXPECT("live list keeps its lent segment after a wider grant", NB, good);
+        // A recorded again in place: its old records are overwritten, so its segment is free, and the next overflow of that size takes it instead of a new one
+        uint8_t *a_seg = NULL; pthread_mutex_lock(&g_hostseg_mu);
+        for (int i = 0; i < g_nhostseg; i++) if (g_hostseg[i].busy && g_hostseg[i].org_lo == (uintptr_t)(m + 512)) a_seg = g_hostseg[i].mem;
+        pthread_mutex_unlock(&g_hostseg_mu);
+        EXPECT("the lent segment is A's", 1, a_seg != NULL);
+        P(nvnCommandBufferAddCommandMemory)(&ca, &mp, 512, 64); P(nvnCommandBufferBeginRecording)(&ca);
+        P(nvnCommandBufferBindUniformBuffer)(&ca, NVN_SHADER_STAGE_FRAGMENT, 0, 0x5550000, 0x100); P(nvnCommandBufferEndRecording)(&ca);
+        int a_busy = 1, nseg = g_nhostseg; pthread_mutex_lock(&g_hostseg_mu);
+        for (int i = 0; i < g_nhostseg; i++) if (g_hostseg[i].mem == a_seg) a_busy = g_hostseg[i].busy;
+        pthread_mutex_unlock(&g_hostseg_mu);
+        EXPECT("re-recording A in place frees its segment", 0, a_busy);
+        P(nvnCommandBufferAddCommandMemory)(&cx, &mp, 4096, 64); P(nvnCommandBufferBeginRecording)(&cx);
+        for (int i = 0; i < NB; i++) P(nvnCommandBufferBindUniformBuffer)(&cx, NVN_SHADER_STAGE_COMPUTE, 0, 0xdead0000, 0x40);
+        P(nvnCommandBufferEndRecording)(&cx);
+        EXPECT("the next overflow reuses it: no new segment", nseg, g_nhostseg);
+        P(nvnCommandBufferFinalize)(&ca); P(nvnCommandBufferFinalize)(&cb); P(nvnCommandBufferFinalize)(&cx); P(nvnMemoryPoolFinalize)(&mp);
+    }
     // 5b'''. Calls and copies (NVN): CallCommands copies the called list's pieces into the caller's list, as the driver copies a command set's GPU FIFO entries, so the called
     //        recording's control memory may be given out again once the call is recorded (Donkey Kong Bananza resets its control arena twice per command arena: when a call
     //        pointed at the called list, the caller replayed whatever the next recordings wrote there); CopyCommands copies the records, so its command memory may go too

@@ -74,15 +74,30 @@ HLE_FORCE("_ZN2nn2vi20GetLatestFrameNumberEPmPKNS0_5LayerE", "the layer's latest
 // was presented again. FrameInfo is 40 bytes, as the SDK's ListFrameHistory (sdk 20.5.15, sdk+0x4510a0) fills it from the compositor's records: status (2 shown with a present
 // time, 1 queued and not shown yet), frame number (the numbering of GetLatestFrameNumber), the queue tick and the present tick twice; sorted by frame number, newest first.
 // A frame is shown once the present queue has handed it on (nvn_mtl.m g_pq_done) and the system did not drop it; its present time is the drawable's presented time when Metal
-// reports one, else (headless, or before the handler runs) the time it was first seen handed on
+// reports one. Else (headless, or before the handler runs) it is the vsync a display would show it at: the first tick of the present pacer's grid at or after both its present and
+// the end of its GPU work, and the frame is not shown before that tick. A game that times its frames by these flips (Star Fox's throttle, below) sees a fixed vsync grid, as on the
+// Switch. Before, it was the time the history first saw the frame handed on: a game that reads the history right after sleeping out its own frame took that sleep for slack before
+// the flip and slept longer each frame. Without a pacer grid (DM_DETCLOCK) the first-seen time stays
 #define VFH 8
-typedef struct { uint64_t frame, ticket, queued_ns, seen_ns; } vfh_ent;
+typedef struct { uint64_t frame, ticket, queued_ns, seen_ns, at, grid, tick; } vfh_ent;   // at, grid, tick: the present, its pacer vsync and one vsync (the now_ns clock, ns)
 static vfh_ent g_vfh[VFH]; static pthread_mutex_t g_vfh_mu = PTHREAD_MUTEX_INITIALIZER;
 void mtl_present_progress(uint64_t *queued, uint64_t *done);   // nvn_mtl.m
 double mtl_presented_time(uint64_t n);                         // nvn_mtl.m: CACurrentMediaTime seconds (the now_ns clock), 0 not yet, -1 dropped by the system
-void dm_vi_frame_queued(uint64_t frame) {   // hle_nvn.c, at each present the game queues: frame = GetLatestFrameNumber's count with it
+int mtl_gpu_done(uint64_t f, uint64_t *t1);                    // nvn_mtl.m: 1 the frame's GPU work completed (latest end, now_ns clock), 0 running, -1 no record
+void dm_vi_frame_queued(uint64_t frame, uint64_t at, uint64_t grid, uint64_t tick) {   // hle_nvn.c, at each present the game queues: frame = GetLatestFrameNumber's count with it
     uint64_t q, d; mtl_present_progress(&q, &d);
-    pthread_mutex_lock(&g_vfh_mu); g_vfh[frame % VFH] = (vfh_ent){frame, q, guest_ns(), 0}; pthread_mutex_unlock(&g_vfh_mu);
+    pthread_mutex_lock(&g_vfh_mu); g_vfh[frame % VFH] = (vfh_ent){frame, q, guest_ns(), 0, at, grid, tick}; pthread_mutex_unlock(&g_vfh_mu);
+}
+// The vsync a display would show the frame at (now_ns clock): 1 with it, 0 not yet (its GPU work still running, or that vsync still to come), -1 no pacer grid. The frame's GPU work is
+// tagged with the frame count before its present (nq_job.frame = dm_nvn_frame_count() when queued), one less than its number here
+static int vfh_vsync(const vfh_ent *e, uint64_t hnow, uint64_t *at) {
+    if (!e->grid || !e->tick) return -1;
+    uint64_t ready = e->at, end = 0; int g = mtl_gpu_done(e->frame - 1, &end);
+    if (!g) return 0;
+    if (g > 0 && end > ready) ready = end;
+    uint64_t t = ready <= e->grid ? e->grid : e->grid + (ready - e->grid + e->tick - 1) / e->tick * e->tick;
+    if (t > hnow) return 0;
+    *at = t; return 1;
 }
 static uint64_t vfh_ticks(uint64_t ns) { return dm_sdk_ounce() ? ns / 32 : ns * 12 / 625; }   // as guest_ticks (hle_os.c)
 HLE_FORCE("_ZN2nn2vi16ListFrameHistoryEPNS0_9FrameInfoEiPKNS0_5LayerE", "the layer's frame history: the last 8 presents, newest first, shown once the present queue handed them on", int, h_vi_FrameHist, void *out, int n, const void *layer) {
@@ -97,7 +112,11 @@ HLE_FORCE("_ZN2nn2vi16ListFrameHistoryEPNS0_9FrameInfoEiPKNS0_5LayerE", "the lay
         uint64_t *o = (uint64_t *)out + 5 * k++, shown = 0;
         double pt = e->ticket <= d ? mtl_presented_time(e->ticket) : -1;
         if (pt > 0) { uint64_t ago = hnow > (uint64_t)(pt * 1e9) ? hnow - (uint64_t)(pt * 1e9) : 0; shown = gnow > ago ? gnow - ago : 1; }
-        else if (pt == 0) { if (!e->seen_ns) e->seen_ns = gnow; shown = e->seen_ns; }
+        else if (pt == 0) {
+            uint64_t vs; int v = vfh_vsync(e, hnow, &vs);
+            if (v > 0) shown = gnow > hnow - vs ? gnow - (hnow - vs) : 1;
+            else if (v < 0) { if (!e->seen_ns) e->seen_ns = gnow; shown = e->seen_ns; }
+        }
         o[0] = shown ? 2 : 1; o[1] = f; o[2] = vfh_ticks(e->queued_ns); o[3] = o[4] = shown ? vfh_ticks(shown) : 0;
     }
     pthread_mutex_unlock(&g_vfh_mu);

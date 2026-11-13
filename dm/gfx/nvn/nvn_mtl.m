@@ -2414,6 +2414,14 @@ int mtl_gpu_span(uint64_t f, uint64_t *t0, uint64_t *t1) {
     *t0 = atomic_load(&g_gpu[k].t0); *t1 = atomic_load(&g_gpu[k].t1);
     return *t1 >= *t0 && *t1;
 }
+// For the layer's frame history (hle_vi.c): 1 once all of the frame's command buffers have completed, with their latest GPU end (0 if none had a time), 0 while some are still
+// running, -1 when the ring holds no record of the frame (no GPU work tagged with it, or overwritten)
+int mtl_gpu_done(uint64_t f, uint64_t *t1) {
+    unsigned k = f % GRING;
+    if (atomic_load(&g_gpu[k].frame) != f) return -1;
+    if (atomic_load(&g_gpu[k].pending)) return 0;
+    *t1 = atomic_load(&g_gpu[k].t1); return 1;
+}
 static void rp_flush(void);
 static const char *cctx_snap(void);   // What is in this submission (printed into the failure line on error; defined before mtl_exec)
 typedef struct cbs_list cbs_list;   // The game's shaders one command buffer encoded (defined before encode_args)

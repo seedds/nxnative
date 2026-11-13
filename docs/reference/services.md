@@ -643,6 +643,7 @@ Most service calls can be found before they crash, before the first boot or the 
 
 ### oe calls answered without an applet proxy
 
+- **Symptom:** leaving [Smash](../../dm/games/01006A800016E000/README.md#services)'s Vault > Sounds, or opening My Music, crashes at `sdk+0x32daa0` with `x0=0` in `oe::SwitchLcdBacklightOn`. First referenced in [issue #2224](https://github.com/seedds/nxnative/issues/2224#issuecomment-6782253893).
 - **Symptom:** the first boot crashed in `oe::DisableAlbumImageTakenNotification`: a null read at `sdk+0x338070`, the first call in `nnMain` (`main+0x6b188c`); enabling those notifications also gives a null read at `sdk+0x33b0f0` (Xenoblade Chronicles 3); other `oe` calls that reach am, found in the imports before they were met.
 - **Symptom:** a null read at `sdk+0x36ec60` in `oe::EnableAlbumImageTakenNotification`, called from `nnMain` (`main+0x286268`).
 - **Fix:** `EnableAlbumImageTakenNotification` uses the same host implementation as the disable call: no system-album notifications are produced. Found on [Mario + Rabbids Sparks of Hope](../../dm/games/0100317013770000/README.md) (SDK 13.3.5); the next boot reaches the NVN frame loop.

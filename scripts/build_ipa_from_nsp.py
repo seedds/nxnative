@@ -1108,7 +1108,7 @@ def files_under(d):   # (relative path, stat) of every file under d, sorted; [] 
 
 def fingerprint(*items, env=None):
     """sha256 over a stage's inputs. Items: ('files', paths) = names and content (a missing file counts too); ('tree', folder) = relative path and size of every file under it
-    (a RomFS: check_build pins its version, so names and sizes stand for its content); ('stat', folder) = relative path, size and mtime of every file under it (the translator's binaries);
+    (a RomFS: check_build pins its version, so names and sizes stand for its content); ('stat', folder) = relative path, size and mtime of every file under it (extracted or provisional game files, too large to read for a key);
     ('cmd', argv) = a tool's version output (run with env); anything else = its repr"""
     h = hashlib.sha256()
     for it in items:
@@ -1148,6 +1148,10 @@ def python_tool_files(repo, entry, roots):   # transitive repository imports, in
             mods = [a.name for a in n.names] if isinstance(n, ast.Import) else [n.module] if isinstance(n, ast.ImportFrom) and n.module else []
             todo += [d / f'{m.split(".")[0]}.py' for m in mods for d in dirs]
     return sorted(seen)
+
+
+def translator_files(xlate):   # the translator's folder by content: a checkout that rewrites the same bytes (a branch switched and back) gives them a new mtime, which rebuilt every shader
+    return [Path(xlate).parent / rel for rel, _ in files_under(Path(xlate).parent)]
 
 
 def chain_files(repo):   # what the iOS shaders run: not the split's readers (shader_split.py, unityfs.py, uepak.py)
@@ -2450,7 +2454,7 @@ def build_shaders(py, repo, sh, xlate, env, logs, g, pkg_key=None, mac=False, se
     if not pso_pairs.is_file(): pso_pairs = sh / 'pso_pairs.tsv'   # the split's copy is a shader input too (vs_pad)
     if pkg_key:
         PROG.set(step='checking the inputs')
-        key = fingerprint(pkg_key, ('files', chain_files(repo)), ('stat', xlate.parent), ('files', profile_files(g)), ('files', [pso_pairs]), *toolchain(repo, env), str(xlate),
+        key = fingerprint(pkg_key, ('files', chain_files(repo)), ('files', translator_files(xlate)), ('files', profile_files(g)), ('files', [pso_pairs]), *toolchain(repo, env), str(xlate),
                           {k: env.get(k) for k in ('XLATE_DEBUG', 'XLATE_REDUCED')}, *((seen,) if seen else ()), env=env)
         note = next((n for k in ((kmac,) if seen else (kmac, kf) if mac else (kf,)) if (n := reused(k, key)) is not None), None)
         # the libraries are the last build's, so are tables that name their stamp; a missing or stale one is made from that build's Mac outputs, and without them the step runs again

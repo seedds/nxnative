@@ -11,6 +11,7 @@
 //  C. dm_tess_expand: entry counts, every entry listed once, culling, the budget (whole patches dropped, nothing written past
 //     it), a fixed level for every patch (DM_NVN_TESS_LEVEL)
 //  D. folds for game-like factor patterns (inside = min of the edges is what The Witcher 3's hulls write)
+//  E. dm_tess_geo: a geometry shader's primitive count, group count and dispatches from the list's vertex count
 // Usage: t_tess <tess_test.metal> [seed]   (make check_t_tess writes the fixture and runs it)
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
@@ -31,7 +32,7 @@ static float rndf(void) { return (float)(rnd() % 1000000) / 1000000.0f; }
 #define PICK(a) ((a)[rnd() % (sizeof(a) / sizeof((a)[0]))])
 
 static id<MTLDevice> g_dev; static id<MTLCommandQueue> g_q;
-static id<MTLComputePipelineState> g_tris, g_cull, g_expand;
+static id<MTLComputePipelineState> g_tris, g_cull, g_expand, g_geo;
 static int g_fail;
 static void fail(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 static void fail(const char *fmt, ...) {
@@ -337,7 +338,7 @@ enum { GUARD = 4096 };
 static uint32_t expand(h16 *lev, int np, int cap, int lmax, int md, int fix, id<MTLBuffer> *list, uint32_t st[64], int *guard_ok) {
     id<MTLBuffer> bl = buf(lev, np * 6 * sizeof(h16)), b = buf(NULL, (size_t)(cap + GUARD) * 4);
     uint32_t *lp = b.contents; for (int i = 0; i < cap + GUARD; i++) lp[i] = 0xDEADBEEF;
-    uint32_t ka[12] = {0, 1, 0, 7, 0, (uint32_t)cap, (uint32_t)np, (uint32_t)lmax, (uint32_t)md, (uint32_t)fix};
+    uint32_t ka[12] = {0, 1, 0, 7, 0, (uint32_t)cap, (uint32_t)np, (uint32_t)lmax, (uint32_t)md, (uint32_t)fix, 0};
     id<MTLBuffer> ba = buf(ka, 48), bs = buf(NULL, 256); memset(bs.contents, 0, 256);
     run1(g_expand, @[bl, b, ba, bs], NULL, 0, NULL, 0, MTLSizeMake(np, 1, 1), MTLSizeMake(64, 1, 1), 1);
     memcpy(st, bs.contents, 256); *guard_ok = 1;
@@ -417,6 +418,23 @@ static void part_d(void) {
     printf("D. game-like factors (%s; every domain and spacing, %d patches each): %d patches with folded / overlapping triangles\n", "all equal, inside = max / mean / min of edges, fractional edges", N, bad);
 }
 
+// ---- E: dm_tess_geo, a geometry shader after the domain (nvn_geometry.inc geo_prep_gpu) ----
+static void part_e(void) {
+    static const uint32_t vcounts[] = {0, 3, 6, 96, 192, 6 * 4097, 6 * 64111 * 2}, invs[] = {1, 2, 32};
+    int bad = 0, n = 0;
+    for (size_t v = 0; v < sizeof vcounts / sizeof vcounts[0]; v++) for (size_t k = 0; k < sizeof invs / sizeof invs[0]; k++) {
+        uint32_t ka[12] = {vcounts[v], 1, 0, 0, 0, 0, 0, 64, 0, 0, invs[k]}, info[8] = {0}, job[16], disp[8];
+        for (int i = 0; i < 16; i++) job[i] = 0xDEADBEEF; for (int i = 0; i < 8; i++) disp[i] = 0xDEADBEEF;
+        id<MTLBuffer> ba = buf(ka, 48), bi = buf(info, 32), bj = buf(job, 64), bd = buf(disp, 32);
+        run1(g_geo, @[ba, bi, bj, bd], NULL, 0, NULL, 0, MTLSizeMake(1, 1, 1), MTLSizeMake(1, 1, 1), 1);
+        const uint32_t *I = bi.contents, *J = bj.contents, *D = bd.contents; uint32_t np = vcounts[v] / 3, g = np * invs[k];
+        int ok = I[4] == np && J[6] == g && D[0] == (np + 31) / 32 && D[1] == 1 && D[2] == invs[k] && D[4] == (g + 63) / 64 && D[5] == 1 && D[6] == 1 && J[5] == 0xDEADBEEF && J[7] == 0xDEADBEEF;
+        if (!ok) { bad++; fail("dm_tess_geo vcount %u invocations %u: np %u groups %u dispatch %u %u %u / %u %u %u", vcounts[v], invs[k], I[4], J[6], D[0], D[1], D[2], D[4], D[5], D[6]); }
+        n++;
+    }
+    printf("E. dm_tess_geo: %d cases, %d wrong (primitive count, group count, both dispatches; neighbouring job words untouched)\n", n, bad);
+}
+
 int main(int argc, char **argv) {
     @autoreleasepool {
         if (argc < 2) { fprintf(stderr, "usage: t_tess <tess_test.metal> [seed]\n"); return 2; }
@@ -426,14 +444,14 @@ int main(int argc, char **argv) {
         if (!src) { fprintf(stderr, "t_tess: cannot read %s\n", argv[1]); return 2; }
         id<MTLLibrary> lib = [g_dev newLibraryWithSource:src options:nil error:&e];
         if (!lib) { fprintf(stderr, "t_tess: %s\n", e.localizedDescription.UTF8String); return 1; }
-        id<MTLComputePipelineState> __strong *ps[3] = {&g_tris, &g_cull, &g_expand}; const char *names[3] = {"t_tris", "t_cull", "dm_tess_expand"};
-        for (int i = 0; i < 3; i++) {
+        id<MTLComputePipelineState> __strong *ps[4] = {&g_tris, &g_cull, &g_expand, &g_geo}; const char *names[4] = {"t_tris", "t_cull", "dm_tess_expand", "dm_tess_geo"};
+        for (int i = 0; i < 4; i++) {
             id<MTLFunction> f = [lib newFunctionWithName:@(names[i])];
             if (!f) { fprintf(stderr, "t_tess: %s is not in the fixture\n", names[i]); return 1; }
             *ps[i] = [g_dev newComputePipelineStateWithFunction:f error:&e];
             if (!*ps[i]) { fprintf(stderr, "t_tess: %s: %s\n", names[i], e.localizedDescription.UTF8String); return 1; }
         }
-        part_a(); part_b(); part_c(); part_d();
+        part_a(); part_b(); part_c(); part_d(); part_e();
         if (g_fail) printf("%d FAILURES\n", g_fail); else printf("ALL PASSED\n");
         return g_fail ? 1 : 0;
     }

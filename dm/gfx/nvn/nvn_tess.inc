@@ -18,6 +18,7 @@
 // previous instance's (the hull and domain shaders of this library use gl_PrimitiveID only to address their outputs).
 // An indirect draw's arguments are read on the CPU once the GPU work that writes them is done (geo_indirect_args), as
 // the geometry path reads its draws: the control-point indices are read on the CPU too.
+// A geometry shader after the domain takes the domain's triangles through the geometry path, their count written on the GPU (nvn_geometry.inc geo_prep_gpu).
 // Draws this cannot replay (no translated hull / domain, an isoline domain) stay skipped with a [RED] line.
 static id<MTL4ComputeCommandEncoder> dispatch_enc(void);
 enum { TESS_CP_SLOTS = 33, TESS_PATCH_SLOTS = 32 };   // dmsh_tess.py CP_SLOTS / PATCH_SLOTS
@@ -138,7 +139,7 @@ static const char *k_tess_msl = "#include <metal_stdlib>\n"
 "    return s == 0u ? float3(dm_tpos(1u + idx, nu, lu, sp), dm_tpos(1u, nv, lv, sp), 0.0f) : s == 1u ? float3(dm_tpos(nu - 1u, nu, lu, sp), dm_tpos(1u + idx, nv, lv, sp), 0.0f)\n"
 "         : s == 2u ? float3(dm_tpos(nu - 1u - idx, nu, lu, sp), dm_tpos(nv - 1u, nv, lv, sp), 0.0f) : float3(dm_tpos(1u, nu, lu, sp), dm_tpos(nv - 1u - idx, nv, lv, sp), 0.0f);\n"
 "}\n"
-"struct dm_targs { atomic_uint vcount; uint icount, vstart, binst; atomic_uint cells; uint cap, np, lmax, md, fix; };\n"
+"struct dm_targs { atomic_uint vcount; uint icount, vstart, binst; atomic_uint cells; uint cap, np, lmax, md, fix, ginv; };\n"
 "kernel void dm_tess_expand(device half* lev [[buffer(0)]], device uint* list [[buffer(1)]], device dm_targs& a [[buffer(2)]],\n"
 "    device atomic_uint* st [[buffer(3)]], uint p [[threadgroup_position_in_grid]], uint t [[thread_index_in_threadgroup]], uint tn [[threads_per_threadgroup]])\n"
 "{\n"
@@ -158,6 +159,15 @@ static const char *k_tess_msl = "#include <metal_stdlib>\n"
 "    }\n"
 "    threadgroup_barrier(mem_flags::mem_threadgroup);\n"
 "    for (uint x = t; x < cnt; x += tn) list[base + x] = (p << 12) | x;\n"
+"}\n"
+"// A geometry shader after the domain (nvn_geometry.inc geo_prep_gpu): its primitive count (the info block's GeometryCounts.x), the compaction's group count\n"
+"// (the pack job's groups, word 6) and both dispatches' threadgroup counts, from the list's vertex count: 3 vertices a triangle\n"
+"kernel void dm_tess_geo(device dm_targs& a [[buffer(0)]], device uint* info [[buffer(1)]], device uint* job [[buffer(2)]], device uint* disp [[buffer(3)]])\n"
+"{\n"
+"    uint np = atomic_load_explicit(&a.vcount, memory_order_relaxed) / 3u, groups = np * a.ginv;\n"
+"    info[4] = np; job[6] = groups;\n"
+"    disp[0] = (np + 31u) / 32u; disp[1] = 1u; disp[2] = a.ginv;\n"
+"    disp[4] = (groups + 63u) / 64u; disp[5] = 1u; disp[6] = 1u;\n"
 "}\n";
 static int tess_max(void) {   // DM_NVN_TESS_MAX: highest level used (even, 2..64; default 64, the OpenGL / Maxwell maximum)
     static int n = 0; if (!n) { const char *e = getenv("DM_NVN_TESS_MAX"); n = e ? atoi(e) : 64; n = n < 2 ? 2 : n > 64 ? 64 : n & ~1; } return n;
@@ -165,7 +175,7 @@ static int tess_max(void) {   // DM_NVN_TESS_MAX: highest level used (even, 2..6
 static uint32_t tess_budget(void) {
     static uint32_t n = 0; if (!n) { const char *e = getenv("DM_NVN_TESS_BUDGET"); long v = e ? atol(e) : 2l << 20; n = (uint32_t)(v < 4096 ? 4096 : v > (16l << 20) ? (16l << 20) : v); } return n;
 }
-static id<MTLComputePipelineState> g_tess_kpso; static id<MTLBuffer> g_tess_stats; static int g_tess_kfail;
+static id<MTLComputePipelineState> g_tess_kpso, g_tess_gpso; static id<MTLBuffer> g_tess_stats; static int g_tess_kfail;   // gpso: dm_tess_geo
 static void tess_stats_log(void) {   // the expansion kernel's running totals (read without synchronisation: approximate, diagnostics only)
     if (!g_tess_stats) return;
     const uint32_t *st = (const uint32_t *)g_tess_stats.contents; char h[512]; int o = 0;
@@ -212,13 +222,25 @@ static void tess_draw(NvProg *pr, const p_draw *dw0, const p_draw_idx *di0) {
         NSError *e = nil; id<MTLLibrary> lib = [g_dev newLibraryWithSource:@(k_tess_msl) options:nil error:&e];
         id<MTLFunction> fn = lib ? [lib newFunctionWithName:@"dm_tess_expand"] : nil;
         g_tess_kpso = fn ? [g_dev newComputePipelineStateWithFunction:fn error:&e] : nil;
+        id<MTLFunction> gfn = lib ? [lib newFunctionWithName:@"dm_tess_geo"] : nil;
+        g_tess_gpso = gfn ? [g_dev newComputePipelineStateWithFunction:gfn error:&e] : nil;
         g_tess_stats = [g_dev newBufferWithLength:64 * 4 options:MTLResourceStorageModeShared];
-        if (!g_tess_kpso || !g_tess_stats) { g_tess_kfail = 1; MLOG("[RED] tessellation expansion kernel: %s", e.localizedDescription.UTF8String); }
+        if (!g_tess_kpso || !g_tess_gpso || !g_tess_stats) { g_tess_kfail = 1; MLOG("[RED] tessellation expansion kernel: %s", e.localizedDescription.UTF8String); }
         else { memset(g_tess_stats.contents, 0, 64 * 4); res_add(g_tess_stats); }
     }
     if (g_tess_kfail) { tess_refuse(pr, dw, di, "expansion kernel"); return; }
     if (np >= (1u << 20)) { tess_refuse(pr, dw, di, "too many patches for the cell list"); return; }
     uint64_t mx = (uint64_t)np * 4096u; uint32_t lcap = (uint32_t)(mx < tess_budget() ? mx : tess_budget());   // 4096: the most entries a patch has (TESS_MSL)
+    // A geometry shader after the domain (nvn_geometry.inc geo_prep_gpu): its triangles, two an entry, must fit the geometry path's 256 MiB scratch
+    NvShader *ggs = nil, *greader = nil; id<MTLComputePipelineState> __strong *gpack = NULL;
+    if (pr->sh[2]) {
+        uint64_t per = geo_gpu_kernels(pr, &ggs, &greader);
+        if (!per || !(gpack = geo_pack_psos())) { tess_refuse(pr, dw, di, "geometry shader after the domain: no triangle kernel"); return; }
+        if (!ds->geo_fn) { tess_refuse(pr, dw, di, "geometry shader after the domain: the domain has no capture entry"); return; }
+        uint64_t gcap = ((256ull << 20) - (64u << 10)) / per / 2;
+        if (gcap < lcap) lcap = (uint32_t)gcap;
+        if (!lcap) { tess_refuse(pr, dw, di, "geometry shader after the domain: scratch"); return; }
+    }
     uint32_t binst = (uint32_t)(dw ? dw->base_instance : di->base_instance);
     if (defer_has_active()) defer_fallback();
     lc_land(); rp_flush(); rp_end(); ubd_land();
@@ -247,8 +269,9 @@ static void tess_draw(NvProg *pr, const p_draw *dw0, const p_draw_idx *di0) {
     free(cpi);
     uint32_t par[16] = {(uint32_t)ps, np, 0, 0, 0, K, (uint32_t)patch_off, 0, (uint32_t)lev_off, (uint32_t)list_off, 0, (uint32_t)tess_max()};   // [0..1]: spvIndirectParams; [4..11]: the domain's dm_tinfo[0..1]
     memcpy((uint8_t *)b_par.contents + o_par, par, sizeof par);
-    uint32_t ka[12] = {0, 1, 0, binst, 0, lcap, np, (uint32_t)tess_max(), ds->tess_md, (uint32_t)tess_level()};   // dm_targs: the draw's indirect arguments (vertex count 0, 1 instance), then the expansion's
+    uint32_t ka[12] = {0, 1, 0, binst, 0, lcap, np, (uint32_t)tess_max(), ds->tess_md, (uint32_t)tess_level(), ggs ? MAX(ggs->geo_invocations, 1u) : 0};   // dm_targs: the draw's indirect arguments (vertex count 0, 1 instance), then the expansion's
     memcpy((uint8_t *)b_ka.contents + o_ka, ka, sizeof ka);
+    geo_job gj; if (ggs && !geo_prep_gpu(pr, ds, ggs, greader, lcap * 2, binst, &gj)) { tess_refuse(pr, dw, di, "geometry shader after the domain: its job"); return; }
     nvn_geo_capture gc = {g_cap + 512, 0, {lo, (uint32_t)span, binst, ni}, GEO_CAPTURE_WORDS, {0}};
     for (int k = 0; k < GEO_CAPTURE_WORDS; k++) gc.slot[k] = (int16_t)k;
     memcpy((uint8_t *)b_cap.contents + o_cap, &gc, sizeof gc);
@@ -265,7 +288,7 @@ static void tess_draw(NvProg *pr, const p_draw *dw0, const p_draw_idx *di0) {
     if (tess_stages() < 2) { g_tess_draws++; return; }
     // 2. the hull shader, one threadgroup per patch
     if (!hs->geo_pso && !hs->geo_pso_failed) {
-        NSError *e = nil; hs->geo_pso = [g_dev newComputePipelineStateWithFunction:hs->fn error:&e];
+        NSError *e = nil; hs->geo_pso = [g_dev newComputePipelineStateWithFunction:fn_dev(hs->fn) error:&e];   // fn_dev: a hull that samples has the border corrections' constant (as geometry kernels, nvn_geometry.inc)
         if (!hs->geo_pso) { hs->geo_pso_failed = 1; MLOG("[RED] hull compute %s: %s", hs->key, e.localizedDescription.UTF8String); }
     }
     uint32_t threads = (uint32_t)(ps > (int)K ? ps : (int)K);
@@ -281,10 +304,31 @@ static void tess_draw(NvProg *pr, const p_draw *dw0, const p_draw_idx *di0) {
     enc_c_pso(ce, g_tess_kpso);
     enc_c_args(ce, g_out + lev_off, 0); enc_c_args(ce, g_out + list_off, 1); enc_c_args(ce, g_ka, 2); enc_c_args(ce, g_tess_stats.gpuAddress, 3);
     enc_c_dispatch(ce, MTLSizeMake(np, 1, 1), MTLSizeMake(64, 1, 1));
+    if (ggs) {   // the geometry job's counts and threadgroup counts from the list's vertex count
+        [ce barrierAfterEncoderStages:MTLStageDispatch beforeEncoderStages:MTLStageDispatch visibilityOptions:MTL4VisibilityOptionDevice];
+        enc_c_pso(ce, g_tess_gpso); enc_c_args(ce, g_ka, 0); enc_c_args(ce, gj.info, 1); enc_c_args(ce, gj.job, 2); enc_c_args(ce, gj.gs_dispatch, 3);
+        enc_c_dispatch(ce, MTLSizeMake(1, 1, 1), MTLSizeMake(1, 1, 1));
+    }
     args_dirty_all();
     if (g_blit) { enc_b_end(g_blit); g_blit = nil; }   // the draw's render pass follows; its full barrier orders it after the kernels
     swrite_note(pr); g_wr_epoch++; g_mdx_epoch++;
     if (tess_stages() < 3) { g_tess_draws++; return; }
+    if (ggs) {   // 4. a geometry shader after the domain: the domain's capture of every listed vertex, the geometry kernel and compaction, the geometry path's draw
+        MTL4RenderPassDescriptor *gd = [MTL4RenderPassDescriptor new]; gd.renderTargetWidth = gd.renderTargetHeight = gd.defaultRasterSampleCount = 1;
+        id<MTL4RenderCommandEncoder> ge = enc_r_begin(gd); enc_r_pso(ge, gj.capture);
+        g_draw_binst = binst; args_dirty_all(); encode_args(ge, ds, 4, 1);
+        enc_r_vbuf(ge, 13, gj.capture_info); enc_r_vbuf(ge, 14, g_out); enc_r_vbuf(ge, 15, g_par + 16);
+        enc_r_draw_indirect(ge, MTLPrimitiveTypePoint, g_ka); enc_r_end(ge);
+        id<MTL4ComputeCommandEncoder> gc2 = enc_c_begin(NULL); geo_gs_gpu(gc2, &gj, gpack); enc_c_end(gc2);
+        args_dirty_all(); g_enc_pso = nil; g_enc_dss = nil; g_ed.ok = 0;
+        geo_raster(&gj, 1);
+        g_tess_draws++; g_tess_patches += np;
+        static int gonce; if (gonce++ < 4) MLOG("tessellation (frame %lu) into geometry %s: vertex %s hull %s domain %s fragment %s, %u patches of %d control points, at most %u entries (%u triangles), %s %s%s",
+            (unsigned long)atomic_load(&g_cur_frame), pr->sh[2]->key, vs->key, hs->key, ds->key, pr->sh[1] ? pr->sh[1]->key : "-", np, ps, lcap, lcap * 2, ds->tess_md & 1 ? "triangles" : "quads",
+            (const char *[]){"equal", "fractional_odd", "fractional_even", "?"}[ds->tess_md >> 1 & 3], di ? ", indexed" : "");
+        if (g_tess_draws == 400 || g_tess_draws == 4000 || g_tess_draws % 40000 == 0) tess_stats_log();
+        return;
+    }
     // 4. the domain shader as the vertex stage of an ordinary draw
     NvProg *raster = pr->tess_raster;
     if (!raster || raster->sh[0] != ds || raster->sh[1] != pr->sh[1]) { raster = [NvProg new]; raster->sh[0] = ds; raster->sh[1] = pr->sh[1]; pr->tess_raster = raster; }

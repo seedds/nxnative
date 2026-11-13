@@ -1216,12 +1216,13 @@ static const char *const g_exts[] = {"GL_ARB_ES3_2_compatibility", "GL_ARB_ES3_c
     "GL_EXT_texture_compression_s3tc", "GL_EXT_texture_filter_anisotropic", "GL_ARB_vertex_array_object", "GL_ARB_direct_state_access", "GL_ARB_half_float_vertex",
     "GL_ARB_framebuffer_object", "GL_ARB_texture_float", "GL_EXT_texture_sRGB", "GL_KHR_texture_compression_astc_ldr", "GL_NV_shadow_samplers_cube"};
 #define NEXTS (int)(sizeof g_exts / sizeof *g_exts)
+static struct dm_egl { int init; int surface; int es; uint32_t w, h; } g_egl;   // tentative: defined in full below (eglBindAPI records ES here, glGetString reads it)
 GL(glGetString, const char *, GLenum n) {
     switch (n) {
         case GL_VENDOR: return "NVIDIA Corporation";
         case GL_RENDERER: return "NVIDIA Tegra X1 (nvgpu)/integrated (Metal)";
-        case GL_VERSION: return "4.5.0 NVIDIA 349.00";
-        case GL_SHADING_LANGUAGE_VERSION: return "4.50 NVIDIA";
+        case GL_VERSION: return g_egl.es ? "OpenGL ES 3.2 NVIDIA 349.00" : "4.5.0 NVIDIA 349.00";   // SDL's opengles2 driver looks for "OpenGL ES" here
+        case GL_SHADING_LANGUAGE_VERSION: return g_egl.es ? "3.20 NVIDIA" : "4.50 NVIDIA";
         case GL_EXTENSIONS: {   // the compatibility profile's one string
             static char all[1024]; if (!all[0]) for (int i = 0; i < NEXTS; i++) { strlcat(all, g_exts[i], sizeof all); strlcat(all, " ", sizeof all); }
             return all;
@@ -1698,6 +1699,12 @@ GL(glShaderSource, void, GLuint sh, GLsizei count, const GLchar *const *str, con
     s->len = strnlen(s->src, s->len);   // the source ends at its first NUL (gl_shaders.py hashes the same text)
     s->compiled = 0;
 }
+GL(glShaderBinary, void, GLsizei count, const GLuint *shaders, GLenum binaryformat, const void *binary, GLsizei length) {
+    // SDL 2.24's GLES2 renderer requires this entry point to exist (it loads it
+    // through eglGetProcAddress and fails renderer creation on NULL) but the
+    // game compiles from source, so it is never actually called.
+    RED1("glShaderBinary(%#x, %d bytes) called: not implemented", binaryformat, length);
+}
 GLB(glCompileShader, void, GLuint sh) {
     shader_t *s = shader_of(sh); if (!s || !s->src) return;
     uint8_t h[CC_SHA256_DIGEST_LENGTH]; CC_SHA256(s->src, (CC_LONG)s->len, h);
@@ -1901,7 +1908,6 @@ GL(glGetUniformuiv, void, GLuint pr, GLint loc, GLuint *v) { uni_read(pr, loc, v
 
 // ---------- EGL ----------
 #define EGL_TRUE 1
-static struct { int init; int surface; uint32_t w, h; } g_egl;
 static uint64_t g_frames;
 // Every 300 frames: draws, passes, uploads; every 1800: memory (the process footprint, Metal's allocations, the GL objects alive), as the NVN layer's memory report
 static void frame_end(void) {
@@ -1934,7 +1940,7 @@ EGL(eglInitialize, EGLBoolean, EGLDisplay d, EGLint *major, EGLint *minor) { (vo
 EGL(eglTerminate, EGLBoolean, EGLDisplay d) { (void)d; return EGL_TRUE; }
 EGL(eglReleaseThread, EGLBoolean, void) { return EGL_TRUE; }
 // SDL binds 0 (its API before it has chosen one) when it makes the window again (Balatro's love.window.setMode): nothing to change
-EGL(eglBindAPI, EGLBoolean, EGLenum api) { if (api && api != 0x30a2) RED1("eglBindAPI(%#x): only desktop OpenGL (0x30a2) is implemented", api); return EGL_TRUE; }
+EGL(eglBindAPI, EGLBoolean, EGLenum api) { if (api == 0x30a0) g_egl.es = 1; else if (api && api != 0x30a2) RED1("eglBindAPI(%#x): only desktop OpenGL (0x30a2) and OpenGL ES (0x30a0) are implemented", api); return EGL_TRUE; }
 // One configuration: RGBA8, depth 24 (32F here), stencil 8, a window surface, desktop OpenGL; it matches the game's attributes
 EGL(eglChooseConfig, EGLBoolean, EGLDisplay d, const EGLint *attr, EGLConfig *cfg, EGLint n, EGLint *num) {
     (void)d; (void)attr;
@@ -1954,7 +1960,7 @@ EGL(eglGetConfigAttrib, EGLBoolean, EGLDisplay d, EGLConfig cfg, EGLint attr, EG
         case 0x3031: case 0x3032: *v = 0; break;   // SAMPLES, SAMPLE_BUFFERS
         case 0x302e: *v = 0; break;   // NATIVE_VISUAL_ID
         case 0x3033: *v = 0x5; break;   // SURFACE_TYPE: PBUFFER | WINDOW
-        case 0x3040: case 0x3042: *v = 0x8; break;   // RENDERABLE_TYPE, CONFORMANT: OPENGL_BIT
+        case 0x3040: case 0x3042: *v = 0xc; break;   // RENDERABLE_TYPE, CONFORMANT: OPENGL_BIT | OPENGL_ES_BIT (SDL's opengles2 driver reads RENDERABLE_TYPE back)
         case 0x3027: *v = 0x3038; break;   // CONFIG_CAVEAT: NONE
         default: RED1("eglGetConfigAttrib(%#x) not implemented (0)", attr); *v = 0; break;
     }
@@ -1962,11 +1968,11 @@ EGL(eglGetConfigAttrib, EGLBoolean, EGLDisplay d, EGLConfig cfg, EGLint attr, EG
 }
 EGL(eglQueryString, const char *, EGLDisplay d, EGLint name) {
     (void)d;
-    switch (name) { case 0x3053: return "NVIDIA"; case 0x3054: return "1.5"; case 0x3055: return "EGL_KHR_create_context"; case 0x308d: return "OpenGL"; }   // VENDOR, VERSION, EXTENSIONS, CLIENT_APIS
+    switch (name) { case 0x3053: return "NVIDIA"; case 0x3054: return "1.5"; case 0x3055: return "EGL_KHR_create_context"; case 0x308d: return "OpenGL_ES OpenGL"; }   // VENDOR, VERSION, EXTENSIONS, CLIENT_APIS
     return NULL;
 }
 EGL(eglGetError, EGLint, void) { return 0x3000; }   // SUCCESS
-EGL(eglQueryAPI, EGLenum, void) { return 0x30a2; }   // OPENGL_API
+EGL(eglQueryAPI, EGLenum, void) { return g_egl.es ? 0x30a0 : 0x30a2; }   // OPENGL_ES_API / OPENGL_API
 EGL(eglWaitNative, EGLBoolean, EGLint engine) { (void)engine; return EGL_TRUE; }
 EGL(eglWaitGL, EGLBoolean, void) { return EGL_TRUE; }
 EGL(eglDestroyContext, EGLBoolean, EGLDisplay d, EGLContext c) { (void)d; (void)c; return EGL_TRUE; }

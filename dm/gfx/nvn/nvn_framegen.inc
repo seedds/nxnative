@@ -25,7 +25,7 @@ static float g_fg_soft;   // the real frame's upscale blends this share of a bil
 static _Atomic int g_fg_hooked;   // the hook was reached: an upscale of the game's was drawn by MetalFX (up_mfx_encode_from -> fg_frame)
 static struct {
     id<MTL4FXFrameInterpolator> fi; NSUInteger iw, ih, ow, oh; MTLPixelFormat cvf; int bad;
-    id<MTLTexture> c[2], d[2], mv, gen, gen_up, cv0, cv, depth_last, win[FG_WIN];
+    id<MTLTexture> c[2], d[2], mv, gen, gen_up, cv0, cv, depth_seen[4], win[FG_WIN];
     uint64_t win_serial[FG_WIN], win_ticket[FG_WIN], win_next;
     id<MTL4CommandAllocator> walloc[FG_WIN]; id<MTL4CommandBuffer> wcb[FG_WIN]; id<MTLBuffer> wpar[FG_WIN];
     id<MTL4ArgumentTable> margs, wargs; id<MTLRenderPipelineState> mv_pso, comp_pso; MTLPixelFormat comp_fmt; id<MTLFunction> vf, f_mv, f_comp;
@@ -51,11 +51,15 @@ static int fg_on(void) {
 }
 // The camera block as the game binds it (encode_args_): the scene camera's binding has far plane 25000; the environment probe's (far 10000, one cube face a frame) is not taken
 static void fg_cam_note(const float *c) { if (!fg_on() || !(c[57] > 20000.0f)) return; memcpy(FG.cam, c, sizeof FG.cam); FG.cam_frame = (long)atomic_load(&g_cur_frame); }
-// Each render pass (td_note): the last large D32F depth attachment before the upscaler is the scene depth
+// Each render pass (td_note): the last few D32F depth attachments, newest first. The scene depth is the newest of them that holds the scene being upscaled
+// (fg_frame); with dynamic resolution the scene is narrower than a shadow map, so "the last large one" is not it
 static void fg_depth_note(MTL4RenderPassDescriptor *pd) {
     if (!g_fg_mode || !pd || !fg_on()) return;
     id<MTLTexture> d = pd.depthAttachment.texture;
-    if (d && d.pixelFormat == MTLPixelFormatDepth32Float && d.textureType == MTLTextureType2D && d.width >= 1024) FG.depth_last = d;
+    if (!d || d.pixelFormat != MTLPixelFormatDepth32Float || d.textureType != MTLTextureType2D || d == FG.depth_seen[0]) return;
+    int n = 3; for (int i = 1; i < 4; i++) if (FG.depth_seen[i] == d) { n = i; break; }
+    for (int i = n; i > 0; i--) FG.depth_seen[i] = FG.depth_seen[i - 1];
+    FG.depth_seen[0] = d;
 }
 static int fg_inv4(const double a_[16], double r[16]) {
     double a[16]; memcpy(a, a_, sizeof a); for (int i = 0; i < 16; i++) r[i] = i % 5 == 0;
@@ -165,9 +169,14 @@ static void fg_frame(id<MTL4FXSpatialScaler> sc, id<MTLTexture> color, id<MTLTex
     { static int seen; if (seen < 300) { seen++; return; } }
     if (!fg_pipes() || !fg_setup(cw, ch, ow, oh, out.pixelFormat, sc)) return;
     if (g_fg_upto < 1) return;
-    id<MTLTexture> dep = FG.depth_last;
-    int have_d = dep && dep.width == cw && dep.height == ch, have_cam = FG.cam_frame == f, cur = FG.cur, prev = cur ^ 1;
+    id<MTLTexture> dep = nil;   // the newest recent depth attachment of exactly the scene's size (devMlGUE, seedds/nxnative#2279: with dynamic resolution the scene is 953x536 or 854x480 and the last large one is a shadow map)
+    for (int i = 0; i < 4 && !dep; i++) { id<MTLTexture> d = FG.depth_seen[i]; if (d && d.width == cw && d.height == ch) dep = d; }
+    int have_d = dep != nil, have_cam = FG.cam_frame == f, cur = FG.cur, prev = cur ^ 1;
     if (!have_d) FG.nodepth++; if (!have_cam) FG.nocam++;
+    { static NSUInteger lw, lh, ldw; static int n; NSUInteger dw = dep ? dep.width : 0;
+      if ((lw != cw || lh != ch || ldw != dw) && n < 40) { n++; lw = cw; lh = ch; ldw = dw; char b[96] = ""; int k = 0;
+          for (int i = 0; i < 4; i++) if (FG.depth_seen[i]) k += snprintf(b + k, sizeof b - k, " %lux%lu", (unsigned long)FG.depth_seen[i].width, (unsigned long)FG.depth_seen[i].height);
+          MLOG("frame generation: scene %lux%lu, depth used %lux%lu, recent depth attachments:%s", (unsigned long)cw, (unsigned long)ch, (unsigned long)dw, (unsigned long)(dep ? dep.height : 0), b); } }
     MTLOrigin o0 = MTLOriginMake(0, 0, 0);
     id<MTL4ComputeCommandEncoder> b = blit();
     enc_b_copy_texture(b, color, 0, 0, o0, MTLSizeMake(cw, ch, 1), FG.c[cur], 0, 0, o0);

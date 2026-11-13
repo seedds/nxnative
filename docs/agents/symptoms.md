@@ -918,6 +918,7 @@ One line per symptom in the [subsystem references](../reference/): what you see 
 - `draw outside a render pass`; the rest of the pass was dropped. → [Copies inside a render pass](../reference/rendering.md#copies-inside-a-render-pass)
 - an assert (a stripped trap, `main+0x4d26e0`) when the surface does not list `preTransform` INHERIT. → [Swapchain pre-transform and layer crop](../reference/rendering.md#swapchain-pre-transform-and-layer-crop)
 - a pipeline with no Metal pipeline state, and its draws missing. → [Specialization constants](../reference/rendering.md#specialization-constants)
+- lines a game draws with `SetLineWidth` above 1 are hairlines: Mario Golf: Super Rush's aiming grid at the tee (width 4 and 5) and its putting grid, whose moving dashes show a green's slope, can hardly be seen. The host logged `SetLineWidth 4.00: Metal has only 1-pixel lines`. → [Lines wider than a pixel](../reference/rendering.md#lines-wider-than-a-pixel)
 - a crash in `set_free` from `vkFreeDescriptorSets` as a game leaves. → [What a game tears down that it should not](../reference/rendering.md#what-a-game-tears-down-that-it-should-not)
 - `[RED] occlusion query outside a render pass or past the buffer`; a query's result stays 0. → [Occlusion queries that span render encoders](../reference/rendering.md#occlusion-queries-that-span-render-encoders)
 - a call to address 0 at boot. → [`VK_EXT_debug_report`](../reference/rendering.md#vk_ext_debug_report)

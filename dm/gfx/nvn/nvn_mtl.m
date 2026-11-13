@@ -5883,7 +5883,7 @@ static void shmap_read(void) {
     id<MTLLibrary> bflib; int bflib_state; NSMutableArray *bffn;   // bflib: the readable-tile version <key>_bf (state as afn_state), bffn: its functions specialized by their numbers (NvBfFn, bf_fn)
     uint64_t mis[4];   // mis: texture slots 0-255 already reported for a type mismatch (tex_mis_note)
     NSString *ventry; id<MTLFunction> vfn; int vfn_state;
-    id<MTLFunction> pfn; int pfn_state, has_pull;
+    id<MTLFunction> pfn, wlfn; int pfn_state, has_pull;   // wlfn: the wide-line entry of the pulling library (<ventry>_wl, dmsh_pull.py; nvn_wline.inc), nil when it has none
     id<MTLLibrary> alib; id<MTLFunction> afn[2]; NSMutableDictionary *aufn; int afn_state, has_alpha, has_bz;   // has_bz: its entry points read the blend weight word (bz_bind)
     id<MTLLibrary> llib; NSMutableDictionary<NSNumber *, id<MTLFunction>> *lfn; int lfn_state, has_logic; } @end   // llib: the side library <key>_bx for logic operations, lfn: its fn / fn_u entry points specialized per set of targets (and fn_u's per integer targets; lo_fn; lfn_state as afn_state; has_logic: the reflection names its entry points, dmsh_logic.py)   // afn: the alpha test entry points of fn and fn_d in the side library <key>_bx (alib), aufn: fn_u's specialized per integer targets (at_fn; afn_state 0 untried, 1 loaded, 2 failed; has_alpha: the reflection names them, dmsh_alpha.py)   // pfn: the same entry of the pulling library <key>_bp (pull_fn; has_pull: the reflection names one, dmsh_pull.py)   // vertex: the entry point loaded (by the depth mode); vfn: the same entry of the shadow-input library <key>_bv (vin_fn; state 0 untried, 1 loaded, 2 failed)
 @implementation NvShader
@@ -7222,7 +7222,7 @@ static struct {
     p_bind_buf ubo[6][16], ssbo[6][16];
     uint64_t tex[6][NTEX], samp[6][128], img[6][32];
     uint32_t st_vmask[2], st_wmask[2], st_ref[2];
-    p_poly_offset po; float vp[16][4]; float dr[2]; int has_vp; int depth_clamp; int patch_size; uint8_t vp_sw[16][4];   // vp_sw: viewport swizzles XOR the identity (p_vp_swizzle)
+    p_poly_offset po; float vp[16][4]; float dr[2]; int has_vp; int depth_clamp; int patch_size; float line_width; uint8_t vp_sw[16][4];   // vp_sw: viewport swizzles XOR the identity (p_vp_swizzle)
     float blend_color[4], alpha_ref; int64_t copy_stride, copy_img_stride;   // alpha_ref: SetAlphaRef (at_bind)
     uint8_t push[2][DMSH_PUSH_BLOCKS * DMSH_PUSH_SIZE];   // NVN2 push constants of the graphics stages and of compute, both blocks (p_push_const), bound as c[24]
     p_tf_bind tf[4]; int tf_on, rast_discard;   // capture buffers and enables; byte offsets and captured count stay on the GPU (nvn_feedback.inc)
@@ -7523,6 +7523,7 @@ static void state_reset(void) {
     S.ds = (ds_st){0, 1, NVN_DEPTH_FUNC_LESS, 0, NVN_STENCIL_FUNC_ALWAYS, NVN_STENCIL_FUNC_ALWAYS, 1, 1, 1, 1, 1, 1};
     S.st_vmask[0] = S.st_vmask[1] = S.st_wmask[0] = S.st_wmask[1] = 0xff; S.dr[1] = 1;
     S.patch_size = 3;   // NVN's default control points per patch (SetPatchSize), as OpenGL's
+    S.line_width = 1;
 }
 
 // GPU bindings belong to a queue, including across submissions. FFX/X-2 destroys its launcher's queue before creating a game's: a global S kept freed launcher programs in S.bst,
@@ -7767,7 +7768,10 @@ static void pull_load(NvShader *vs) {
         if (f && f.functionConstantsDictionary.count) f = fn_spec(lib, vs->ventry, [MTLFunctionConstantValues new], &e);
         const char *why = !lib ? "no library" : !f ? "no entry point" : NULL;
         if (f && vs->rf.nb && [f newArgumentEncoderWithBufferIndex:vs->rf.abi].encodedLength != vs->arg_len) { why = "its argument buffer differs from the base library's"; f = nil; }
-        if (f) { vs->pfn = f; vs->pfn_state = 1; }
+        if (f) { vs->pfn = f; vs->pfn_state = 1;
+            NSString *wn = [NSString stringWithFormat:@"%@_wl", vs->ventry]; id<MTLFunction> w = fn4_note([lib newFunctionWithName:wn], lib, wn, nil);
+            if (w && w.functionConstantsDictionary.count) w = fn_spec(lib, wn, [MTLFunctionConstantValues new], &e);
+            vs->wlfn = w; }
         else { static _Atomic int n; if (n++ < 8) MLOG("[RED] pulling library of %s not usable (%s%s%s): its draws wait for their pipelines", vs->key, why, e ? ": " : "", e ? e.localizedDescription.UTF8String : ""); }
     }
 }
@@ -12062,6 +12066,7 @@ static int state_op(uint32_t op, const void *a) {
         case OP_DEPTH_RANGE: { const p_depth_range *b = a; S.dr[0] = b->n; S.dr[1] = b->f; break; }
         case OP_DEPTH_CLAMP: S.depth_clamp = ((const p_depth_clamp *)a)->on; break;
         case OP_PATCH_SIZE: S.patch_size = ((const p_patch_size *)a)->n; break;
+        case OP_LINE_WIDTH: S.line_width = ((const p_line_width *)a)->w; break;
         case OP_VP_SWIZZLE: { const p_vp_swizzle *b = a; memcpy(S.vp_sw[b->first], b->sw, 4 * (size_t)b->n); break; }
         case OP_BLEND_COLOR: memcpy(S.blend_color, ((const p_blend_color *)a)->rgba, 16); break;
         case OP_ALPHA_REF: S.alpha_ref = ((const p_alpha_ref *)a)->ref; break;   // data for at_bind, not part of the pipeline
@@ -12308,7 +12313,7 @@ static int sm_scan(const uint8_t *p, const p_set_rt *rt, int cur, int *lo, int *
             case OP_UPDATE_UB: if (!ubd_on()) return n; break;
             case OP_DRAW: case OP_DRAW_IDX: case OP_VIEWPORTS: case OP_SCISSOR: case OP_DEPTH_RANGE: case OP_BIND_PROGRAM: case OP_BIND_STATE: case OP_BIND_VATTR: case OP_BIND_VSTREAM:
             case OP_BIND_VBUF: case OP_BIND_UBO: case OP_BIND_SSBO: case OP_BIND_TEX: case OP_BIND_TEX1: case OP_BIND_SAMP: case OP_BIND_IMG: case OP_STENCIL: case OP_POLY_OFFSET:
-            case OP_BLEND_COLOR: case OP_ALPHA_REF: case OP_PUSH_CONST: case OP_DEPTH_CLAMP: case OP_PATCH_SIZE: case OP_VP_SWIZZLE: case OP_PRIM_RESTART: case OP_SET_TEX_POOL: case OP_SET_SAMP_POOL: case OP_COPY_STRIDE: break;
+            case OP_BLEND_COLOR: case OP_ALPHA_REF: case OP_PUSH_CONST: case OP_DEPTH_CLAMP: case OP_PATCH_SIZE: case OP_LINE_WIDTH: case OP_VP_SWIZZLE: case OP_PRIM_RESTART: case OP_SET_TEX_POOL: case OP_SET_SAMP_POOL: case OP_COPY_STRIDE: break;
             default: return n;
         }
         p += h.size;
@@ -14066,6 +14071,7 @@ static int skip_fs_draw(NvProg *pr);   // DM_NVN_SKIP_FS (diagnostic), also for 
 #include "nvn_geometry.inc"
 static int geo_drawing(void) { return g_geo_program != nil || g_geo_mesh.on; }
 #include "nvn_tess.inc"   // patches: vertex capture -> hull kernel -> domain as the vertex stage
+#include "nvn_wline.inc"   // lines wider than a pixel: a quad per segment
 
 // Lazy clears. A set of targets that gets only clears before the game sets other targets used to open a pass just to land them (rp_flush), storing the cleared attachments, and the next
 // pass that attached them loaded them back. Breath of the Wild clears its G-buffer one target at a time (depth with the lighting target, then albedo, normals, the fourth), then attaches all
@@ -14145,7 +14151,7 @@ static int lc_keeps(uint32_t op) {
         case OP_SET_RT: case OP_CLEAR_COLOR: case OP_CLEAR_DS: case OP_DRAW: case OP_DRAW_IDX: case OP_BEGIN: case OP_JUMP: case OP_CALL:
         case OP_SCISSOR: case OP_BIND_PROGRAM: case OP_BIND_STATE: case OP_BIND_VATTR: case OP_BIND_VSTREAM: case OP_BIND_VBUF: case OP_BIND_VBUF1:
         case OP_BIND_UBO: case OP_BIND_UBO_SMALL: case OP_BIND_SSBO: case OP_BIND_TEX: case OP_BIND_TEX1: case OP_BIND_SAMP: case OP_BIND_IMG: case OP_STENCIL:
-        case OP_POLY_OFFSET: case OP_VIEWPORTS: case OP_DEPTH_RANGE: case OP_DEPTH_CLAMP: case OP_PATCH_SIZE: case OP_VP_SWIZZLE: case OP_BLEND_COLOR: case OP_ALPHA_REF: case OP_PUSH_CONST: case OP_COPY_STRIDE:
+        case OP_POLY_OFFSET: case OP_VIEWPORTS: case OP_DEPTH_RANGE: case OP_DEPTH_CLAMP: case OP_PATCH_SIZE: case OP_LINE_WIDTH: case OP_VP_SWIZZLE: case OP_BLEND_COLOR: case OP_ALPHA_REF: case OP_PUSH_CONST: case OP_COPY_STRIDE:
         case OP_TF_BIND: case OP_TF_STATE: case OP_RAST_DISCARD: case OP_PRIM_RESTART: case OP_BARRIER: case OP_SET_TEX_POOL: case OP_SET_SAMP_POOL: case OP_RENDER_COND:
         case OP_UPDATE_UB: case OP_COPY_B2B: case OP_CLEAR_BUF: return 1;
         default: return 0;
@@ -14366,6 +14372,7 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) {
                       a[5], a[6], a[7], a[8], a[9], a[10], a[11], a[12], a[13], a[14], a[15]); }]; }
     if (!g_geo_program && S.prog) {
         NvProg *geometry_program = prog_get(S.prog);
+        if (!g_wl.on && wl_wanted(geometry_program, dw, di) && wl_draw(geometry_program, dw, di)) return;   // lines wider than a pixel (nvn_wline.inc)
         if (geometry_program && (dw ? dw->prim : di->prim) == 14 && geometry_program->sh[3] && geometry_program->sh[4]) {   // patches, with or without a geometry shader after the domain: nvn_tess.inc
             if ((dw && dw->mdi_cnt && !mdi_live(dw->mdi_cnt, dw->mdi_i)) || (di && di->mdi_cnt && !mdi_live(di->mdi_cnt, di->mdi_i))) return;
             image_prepare(geometry_program, 0x1f);
@@ -14404,7 +14411,7 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) {
     if (mdx_on) { uint64_t ind = dw ? dw->ind : di->ind, cnt = dw ? dw->mdi_cnt : di->mdi_cnt; int i = dw ? dw->mdi_i : di->mdi_i;
         if (!mdx_find(ind, cnt, &mdx)) { mdx_run(dw, di); if (!mdx_find(ind, cnt, &mdx)) mdx = 0; }
         if (!mdx && !mdi_live(cnt, i)) return; }
-    if (di && wide_wanted(di) && !wide_find(di)) wide_run(di);   // 8-bit indices written earlier in this submission: widened on the GPU before the render pass (see wide_run)
+    if (di && !g_wl.on && wide_wanted(di) && !wide_find(di)) wide_run(di);   // 8-bit indices written earlier in this submission: widened on the GPU before the render pass (see wide_run)
     if (!g_defer_replaying && !g_geo_program) {
         if (g_defer.active && g_defer.in_p && !g_defer.at_q) { if (defer_take(dw, di)) return; }
     }
@@ -14417,7 +14424,7 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) {
     { static int small = -1; if (small < 0) { const char *e = getenv("DM_NVN_SKIP_SMALL"); small = e ? atoi(e) : 0; if (small) MLOG("DM_NVN_SKIP_SMALL: dropping draws whose target width is ≤ %d (diagnostic; the picture is wrong)", small); }
       if (small > 0 && R.has_rt && !g_defer_replaying) { int k = R.rt.n && R.rt.color[0] ? 0 : R.rt.depth ? 8 : -1;
         if (k >= 0) { uint64_t s_; int lv, sl; rt_sub(&R.rt, k, &s_, &lv, &sl); const tex_t *t = k == 8 ? R.rt.depth : R.rt.color[0]; if ((int)MAX(t->d.width >> lv, 1u) <= small) return; } } }
-    if (S.poly.cull == NVN_FACE_FRONT_AND_BACK && !S.rast_discard) { PD("Z %llu draw skipped (before the pass begins): both faces culled", g_stat_pass + !g_enc); return; }
+    if (S.poly.cull == NVN_FACE_FRONT_AND_BACK && !S.rast_discard && !g_wl.on) { PD("Z %llu draw skipped (before the pass begins): both faces culled", g_stat_pass + !g_enc); return; }
     // The continued render pass may have been opened with fewer depth / stencil attachments (open modes 2 / 3 / 4): if the plane this draw needs is not attached, split before it (on reopen, attach per the new lookahead)
     if (g_rt_merged && g_enc_mode != 0 && (((S.ds.dt || S.ds.dw) && !g_pass.hd) || (S.ds.st && !g_pass.hs))) {
         static int once2; if (!once2++) MLOG("same-target continuation: a draw in the continued pass needs a depth / stencil plane that is not attached; split here (first case pass %llu)", g_stat_pass);
@@ -14447,7 +14454,7 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) {
     int defer_q_draw = !g_enc && !g_defer_replaying && g_defer_natq > 0;   // The draw that opens Q's render pass: after the render pass is opened as usual through hoist_try / fuse_try, replay P first and then draw this one
     if (!g_enc && tbdr_on() && !g_geo_program) hoist_try();   // First hoist and execute the pure-clear render passes sandwiched between this render pass and its continuation (before rp_begin_ex, not occupying this render pass)
     // The deferral decision comes after hoist_try: hoisted pure-clear render passes are skipped in the lookahead, and only then can P's same-target continuation segment be recognized
-    if (!g_enc && tbdr_on() && !g_geo_program && !defer_has_in_p() && !g_defer_replaying && !g_fz.active && !g_fz_checking && g_exec_next) { defer_try(dw, di); if (g_defer_cur->active && g_defer_cur->in_p) return; }
+    if (!g_enc && tbdr_on() && !g_geo_program && !defer_has_in_p() && !g_defer_replaying && !g_fz.active && !g_fz_checking && g_exec_next && !g_wl.on) { defer_try(dw, di); if (g_defer_cur->active && g_defer_cur->in_p) return; }
     if (!g_enc && tbdr_on() && !g_fz_checking && !g_geo_program) fuse_try();   // Readable tile render pass merge is on by default; when the structure / same-pixel proof does not hold it still falls back to a normal render pass, and it is not re-entered during the CHECK redraw
     if (!g_enc && !tbdr_on() && !g_geo_program && cshoist_on()) cs_hoist_try(pr, dw, di);   // see DM_NVN_CS_HOIST
     int need = g_enc || !tbdr_on() ? 3 : pass_ds_need(), mode = defer_q_draw ? 0 : need == 0 ? 2 : need == 2 ? 3 : need == 1 ? 4 : 0;   // 2 attach neither, 3 attach stencil only, 4 attach depth only
@@ -14456,7 +14463,8 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) {
     g_rp_layered = pr->sh[0] && pr->sh[0]->layer_out;
     if (g_enc && g_pass.layered != g_rp_layered) rp_end();   // a layered pass only for layer-writing vertex shaders (see rp_begin_ex)
     if (g_enc && g_sm_pass && draw_samples_rt(pr)) { PD("M %llu a draw in the slice-merged pass samples its attachment; split here", g_stat_pass); rp_end(); }
-    if (!g_enc && mode == 0 && !g_rp_layered && !defer_q_draw && g_exec_next && !tbdr_on() && !g_geo_program && sm_on()) sm_plan(pr);
+    if (g_enc && g_sm_pass && g_wl.on) { PD("M %llu a wide line in the slice-merged pass: split here", g_stat_pass); rp_end(); }   // its pipeline is not amplified (wl_pso)
+    if (!g_enc && mode == 0 && !g_rp_layered && !defer_q_draw && g_exec_next && !tbdr_on() && !g_geo_program && !g_wl.on && sm_on()) sm_plan(pr);
     vbuf_prepare(pr->sh[0] ? &pr->sh[0]->rf : NULL, dw, di);   // an unaligned GPU-written stream, or one the draw reads past, needs its ordered copy before the render encoder
     id<MTLRenderCommandEncoder> en = rp_begin_ex(mode);
     g_rp_layered = 0; g_sm_plan.on = 0;
@@ -14480,6 +14488,7 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) {
     else if (g_fb_tseq == g_draw_seq && g_fb_tfn && !g_defer_replaying) { g_pso_lmap = g_fb_tlmap; g_pso_fsfn = g_fb_tfn; g_pso_fz = g_fb_tdesc; g_pso_dirty = 1; }   // same-pass feedback read from the tile (fb_tile_plan)
     if (g_mtk.on) { cur_ps = mtk_pso(pr); cur_pull = 0; cur_pr = nil; if (!cur_ps) { g_mtk.miss = 1; return; } }   // a task / mesh draw (mesh_tasks_draw)
     else if (g_geo_mesh.on) { cur_ps = geo_mesh_pso(pr); cur_pull = 1; cur_pr = nil; if (!cur_ps) { g_geo_mesh.miss = 1; return; } }   // a mesh draw (geo_mesh_draw): pulls its streams; the next draw fetches its own pipeline; none yet: the compute path draws
+    else if (g_wl.on) { cur_ps = wl_pso(pr); cur_pull = 1; cur_pr = nil; if (!cur_ps) { g_wl.miss = 1; return; } }   // a wide line drawn as quads (nvn_wline.inc): pulls its streams; the next draw fetches its own pipeline
     else if (g_pso_dirty || pr != cur_pr || cur_ps_pass != g_pass.serial || border != cur_border) { g_pso_amp = g_sm_pass; cur_ps = pso_get(pr, nil); g_pso_amp = 0; cur_pull = g_pso_pull; cur_pr = pr; cur_ps_pass = g_pass.serial; cur_border = border; g_pso_dirty = !cur_ps || cur_pull; }
     if (!cur_ps && g_sm_pass) {   // a draw whose amplified pipeline is not built yet (sm_amp_get queued it): the slice-merged pass ends and the draw opens a pass of its own
         g_sm_nwait++; PD("M %llu slice-merged pass: no amplified pipeline yet for vertex %s fragment %s; split here", g_stat_pass, pr->sh[0] ? pr->sh[0]->key : "-", pr->sh[1] ? pr->sh[1]->key : "-");
@@ -14523,18 +14532,18 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) {
         sc = (MTLScissorRect){(NSUInteger)x0, (NSUInteger)y0, (NSUInteger)(x1 - x0), (NSUInteger)(y1 - y0)};
     }
     if (!(g_ed.ok & ED_SC) || memcmp(&g_ed.sc, &sc, sizeof sc)) { enc_r_scissor(en, sc); g_ed.sc = sc; g_ed.ok |= ED_SC; }
-    if (S.poly.cull == NVN_FACE_FRONT_AND_BACK && !S.rast_discard) { PD("Z %llu draw skipped: both faces culled", g_stat_pass); return; }
-    { int cu = S.poly.cull == NVN_FACE_FRONT ? MTLCullModeFront : S.poly.cull == NVN_FACE_BACK ? MTLCullModeBack : MTLCullModeNone;
+    if (S.poly.cull == NVN_FACE_FRONT_AND_BACK && !S.rast_discard && !g_wl.on) { PD("Z %llu draw skipped: both faces culled", g_stat_pass); return; }
+    { int cu = g_wl.on ? MTLCullModeNone : S.poly.cull == NVN_FACE_FRONT ? MTLCullModeFront : S.poly.cull == NVN_FACE_BACK ? MTLCullModeBack : MTLCullModeNone;   // a line has no faces: its quads are never culled
       int wi = (S.poly.front == NVN_FRONT_FACE_CCW) != g_queue_origin_ll ? MTLWindingCounterClockwise : MTLWindingClockwise;   // NVN's raster flip is captured when the queue is initialized, rather than when the device origin changes.
-      int fi = S.poly.mode == NVN_POLYGON_MODE_LINE ? MTLTriangleFillModeLines : MTLTriangleFillModeFill, cl = !S.depth_clamp;   // depth clip off = SetDepthClamp
-      float bi[3] = {0, 0, 0}; if (S.poly.offset_en & 4) { bi[0] = S.po.units; bi[1] = S.po.factor; bi[2] = S.po.clamp; }
+      int fi = S.poly.mode == NVN_POLYGON_MODE_LINE && !g_wl.on ? MTLTriangleFillModeLines : MTLTriangleFillModeFill, cl = !S.depth_clamp;   // depth clip off = SetDepthClamp
+      float bi[3] = {0, 0, 0}; if (S.poly.offset_en & (g_wl.on ? NVN_POLYGON_OFFSET_ENABLE_LINE : NVN_POLYGON_OFFSET_ENABLE_FILL)) { bi[0] = S.po.units; bi[1] = S.po.factor; bi[2] = S.po.clamp; }   // a wide line: the enable for lines
       if (!(g_ed.ok & ED_CULL) || g_ed.cull != cu) { enc_r_cull(en, (MTLCullMode)cu); g_ed.cull = cu; g_ed.ok |= ED_CULL; }
       if (!(g_ed.ok & ED_WIND) || g_ed.wind != wi) { enc_r_winding(en, (MTLWinding)wi); g_ed.wind = wi; g_ed.ok |= ED_WIND; }
       if (!(g_ed.ok & ED_FILL) || g_ed.fill != fi) { enc_r_fill(en, (MTLTriangleFillMode)fi); g_ed.fill = fi; g_ed.ok |= ED_FILL; }
       if (!(g_ed.ok & ED_BIAS) || memcmp(g_ed.bias, bi, sizeof bi)) { enc_r_depth_bias(en, bi[0], bi[1], bi[2]); memcpy(g_ed.bias, bi, sizeof bi); g_ed.ok |= ED_BIAS; }
       if (!(g_ed.ok & ED_CLIP) || g_ed.clip != cl) { enc_r_depth_clip(en, cl); g_ed.clip = cl; g_ed.ok |= ED_CLIP; }
       if (!(g_ed.ok & ED_BLEND) || memcmp(g_ed.blend, S.blend_color, sizeof g_ed.blend)) { enc_r_blend_color(en, S.blend_color[0], S.blend_color[1], S.blend_color[2], S.blend_color[3]); memcpy(g_ed.blend, S.blend_color, sizeof g_ed.blend); g_ed.ok |= ED_BLEND; } }
-    if (cur_pull) { pull_bind(en); g_hy_draws += !g_geo_mesh.on; }   // a pulling pipeline reads the streams itself (no conversion either: dm_fetch decodes every format)
+    if (cur_pull) { pull_bind(en); g_hy_draws += !g_geo_mesh.on && !g_wl.on; }   // a pulling pipeline reads the streams itself (no conversion either: dm_fetch decodes every format)
     else {
         int bad = bind_vbufs(en, pr->sh[0] ? &pr->sh[0]->rf : NULL);
         if (bad >= 0) { RED_ONCE(158, "vertex stream %d's buffer %#llx is in no memory pool; draw skipped", bad, (unsigned long long)S.vbuf[bad].address); return; }
@@ -14556,7 +14565,8 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) {
     if (g_rt_range_active && (g_pass.reg_gen != g_reg_gen || g_pass.ser_gen != g_ser_gen || g_pass.range_dirty != nvn_dirty_now())) { rp_end(); draw(dw, di); return; }
     int prim = dw ? dw->prim : di->prim;
     MTLPrimitiveType mp;
-    switch (prim) {
+    if (g_wl.on) mp = MTLPrimitiveTypeTriangle;   // a wide line's quads (nvn_wline.inc)
+    else switch (prim) {
         case 0: mp = MTLPrimitiveTypePoint; break; case 1: mp = MTLPrimitiveTypeLine; break; case 3: mp = MTLPrimitiveTypeLineStrip; break;
         case 4: case 6: case 7: mp = MTLPrimitiveTypeTriangle; break; case 5: mp = MTLPrimitiveTypeTriangleStrip; break;   // 6 triangle fan, 7 quads: Metal has neither, expanded into triangle lists
         default: { static int n; if (n++ < 8) MLOG("[RED] primitive type %d not implemented (vertex %s hull %s domain %s fragment %s; draw skipped)", prim, pr->sh[0] ? pr->sh[0]->key : "-",
@@ -14633,6 +14643,7 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) {
     swrite_note(pr); order_note(pr);
     if (g_mtk.on) { mtk_encode(en); return; }
     if (g_geo_mesh.on) { geo_mesh_encode(en); return; }
+    if (g_wl.on) { wl_encode(en); return; }   // nvn_wline.inc: 6 vertices a segment
     if (g_geo_program) {
         if (g_tess_ind) { enc_r_draw_indirect(en, mp, g_tess_ind); return; }   // nvn_tess.inc: the expansion kernel's vertex count
         if (g_geo_count) enc_r_draw_indexed(en, mp, g_geo_count, MTLIndexTypeUInt32, g_geo_indices, g_geo_index_bytes, 1, 0, (uint32_t)g_draw_binst);   // geo_lean_tri's slots
@@ -15993,7 +16004,7 @@ void mtl_exec(const uint8_t *p) {
                 break; }
             case OP_SCISSOR: case OP_BIND_STATE: case OP_BIND_VATTR: case OP_BIND_VSTREAM: case OP_BIND_VBUF: case OP_BIND_VBUF1:
             case OP_BIND_UBO: case OP_BIND_UBO_SMALL: case OP_BIND_SSBO: case OP_BIND_TEX: case OP_BIND_TEX1: case OP_BIND_SAMP: case OP_BIND_IMG: case OP_STENCIL:
-            case OP_POLY_OFFSET: case OP_DEPTH_RANGE: case OP_DEPTH_CLAMP: case OP_PATCH_SIZE: case OP_VP_SWIZZLE: case OP_BLEND_COLOR: case OP_ALPHA_REF: case OP_PUSH_CONST: case OP_COPY_STRIDE:
+            case OP_POLY_OFFSET: case OP_DEPTH_RANGE: case OP_DEPTH_CLAMP: case OP_PATCH_SIZE: case OP_LINE_WIDTH: case OP_VP_SWIZZLE: case OP_BLEND_COLOR: case OP_ALPHA_REF: case OP_PUSH_CONST: case OP_COPY_STRIDE:
                 state_op(h.op, a); break;
             // PASSDUMP O lines: the viewports the game sets, with the pass they fall in (one set before its pass opens takes that pass's number, as the P lines do). The D line
             // prints the one a draw used, so a viewport the pass set is told from one carried over. Printed here, not in state_op: look-ahead scans replay state_op too

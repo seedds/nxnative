@@ -169,7 +169,7 @@ enum {
     OP_BIND_PROGRAM, OP_BIND_STATE, OP_BIND_VATTR, OP_BIND_VSTREAM, OP_BIND_VBUF,
     OP_BIND_UBO, OP_BIND_SSBO, OP_BIND_TEX, OP_BIND_SAMP,
     OP_STENCIL, OP_POLY_OFFSET, OP_DRAW, OP_DRAW_IDX, OP_DISPATCH, OP_BARRIER,
-    OP_SET_TEX_POOL, OP_SET_SAMP_POOL, OP_COPY_B2T, OP_COPY_STRIDE, OP_BLEND_COLOR, OP_COPY_T2B, OP_BIND_IMG, OP_COPY_T2T, OP_RESET_COUNTER, OP_CLEAR_TEX, OP_CLEAR_BUF, OP_DEPTH_CLAMP, OP_RENDER_COND, OP_FENCE_SYNC, OP_TF_BIND, OP_TF_STATE, OP_RAST_DISCARD, OP_VP_SWIZZLE, OP_BIND_TEX1, OP_PRIM_RESTART, OP_BIND_UBO_SMALL, OP_BIND_VBUF1, OP_DRAW_TEX, OP_ALPHA_REF, OP_PUSH_CONST, OP_DLSS, OP_MULTI_DRAW, OP_WAIT_EVENT, OP_WAIT_SYNC, OP_PATCH_SIZE, OP_COUNT_
+    OP_SET_TEX_POOL, OP_SET_SAMP_POOL, OP_COPY_B2T, OP_COPY_STRIDE, OP_BLEND_COLOR, OP_COPY_T2B, OP_BIND_IMG, OP_COPY_T2T, OP_RESET_COUNTER, OP_CLEAR_TEX, OP_CLEAR_BUF, OP_DEPTH_CLAMP, OP_RENDER_COND, OP_FENCE_SYNC, OP_TF_BIND, OP_TF_STATE, OP_RAST_DISCARD, OP_VP_SWIZZLE, OP_BIND_TEX1, OP_PRIM_RESTART, OP_BIND_UBO_SMALL, OP_BIND_VBUF1, OP_DRAW_TEX, OP_ALPHA_REF, OP_PUSH_CONST, OP_DLSS, OP_MULTI_DRAW, OP_WAIT_EVENT, OP_WAIT_SYNC, OP_PATCH_SIZE, OP_LINE_WIDTH, OP_COUNT_
 };
 // Payload (immediately follows op_hdr)
 typedef struct {
@@ -187,6 +187,7 @@ typedef struct { int32_t x, y, w, h; } p_scissor;
 typedef struct { float n, f; } p_depth_range;
 typedef struct { uint32_t on, index; } p_prim_restart;
 typedef struct { int32_t n; } p_patch_size;   // SetPatchSize: control points per patch of a primitive type 14 draw (nvn_tess.inc)
+typedef struct { float w; } p_line_width;   // SetLineWidth: lines wider than a pixel are drawn as quads (nvn_wline.inc)
 typedef struct { int32_t on; } p_depth_clamp;   // SetDepthClamp: depth outside [near, far] is clamped instead of clipped (Metal's depth clip mode)
 typedef struct { int32_t first, n; uint8_t sw[16][4]; } p_vp_swizzle;   // SetViewportSwizzles: per viewport the source of clip x, y, z, w (NVNviewportSwizzle) XOR the identity (0, 2, 4, 6), so 0 = unchanged
 typedef struct { const prog_t *prog; int32_t stages; } p_bind_program;

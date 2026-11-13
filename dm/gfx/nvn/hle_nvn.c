@@ -3487,7 +3487,7 @@ NVN(nvnCommandBufferSetViewportSwizzles, void, NVNcommandBuffer *c, int first, i
     for (int i = 0; i < n; i++) for (int k = 0; k < 4; k++) r->sw[i][k] = (uint8_t)((s[4 * i + k] ^ 2 * k) & 7);
 }
 NVN(nvnCommandBufferSetAlphaRef, void, NVNcommandBuffer *c, float r) { REC(c, OP_ALPHA_REF, p_alpha_ref)->ref = r; }
-NVN(nvnCommandBufferSetLineWidth, void, NVNcommandBuffer *c, float w) { (void)c; if (w != 1.0f) ONCE_LOG("SetLineWidth %.2f: Metal has only 1-pixel lines", w); }
+NVN(nvnCommandBufferSetLineWidth, void, NVNcommandBuffer *c, float w) { REC(c, OP_LINE_WIDTH, p_line_width)->w = w; }   // replayed by nvn_wline.inc
 NVN(nvnCommandBufferSetPointSize, void, NVNcommandBuffer *c, float s) { (void)c; (void)s; ONCE_LOG("SetPointSize: the point size comes from the shader"); }
 NVN(nvnCommandBufferSetPrimitiveRestart, void, NVNcommandBuffer *c, uint32_t en, int idx) {
     uint32_t on = (en & 0xff) != 0, ix = (uint32_t)idx;

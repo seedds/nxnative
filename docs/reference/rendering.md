@@ -1684,8 +1684,23 @@ The Vulkan layer (`dm/gfx/vk/hle_vk.m`) was written for Hades; Super Mario Galax
 - Dynamic stencil state:
   - the reference is the encoder's;
   - the compare and write masks belong to a Metal depth-stencil state, so the pipeline keeps its depth-stencil description and builds one state per set of masks, cached (`C_STENCIL`).
-- A dynamic line width is ignored: Metal draws 1-pixel lines.
+- A dynamic line width is ignored: Metal draws 1-pixel lines. NVN's is drawn: [Lines wider than a pixel](#lines-wider-than-a-pixel).
 - **Found on:** [Super Mario 64 (Super Mario 3D All-Stars)](../../dm/games/010049900F546001/README.md), [Super Mario Sunshine (Super Mario 3D All-Stars)](../../dm/games/010049900F546002/README.md).
+
+### Lines wider than a pixel
+
+- **Symptom:** lines a game draws with `SetLineWidth` above 1 are hairlines: Mario Golf: Super Rush's aiming grid at the tee (width 4 and 5) and its putting grid, whose moving dashes show a green's slope, can hardly be seen. The host logged `SetLineWidth 4.00: Metal has only 1-pixel lines`.
+- **Cause:** Metal draws lines 1 pixel wide and has no line width; the host dropped the width.
+- **Fix:** `SetLineWidth` is recorded (`OP_LINE_WIDTH`) and kept in the replay's state. A draw of lines, a line loop or a line strip whose width rounds to 2 or more is drawn as a quad per segment (`nvn_wline.inc`), as OpenGL draws a non-antialiased wide line and as Maxwell does: a parallelogram w pixels across the segment's minor axis in window space, its ends on the major axis, so segments meet without gaps or overlap.
+  - It is the game's draw itself, in its own render pass, with the vertex shader's wide-line entry (`dmsh_pull.py`, `<entry>_wl`, in the pulling library) and 6 vertices a segment. Each vertex finds its segment's two endpoints from its vertex ID and a line block: their places by the primitive (lines, strip, loop), their vertex IDs from the first vertex, or from the index buffer, read on the GPU, plus the base vertex.
+  - It runs the shader's body, as a function, for both endpoints, keeps its own endpoint's outputs and moves its position by half the width, scaled by its w, so the width holds wherever the clipper cuts the quad.
+  - With multisampling on (a pass of more than one sample, the multisample state enabling it), a segment is instead the rectangle OpenGL draws then: w pixels across the segment, as long as it.
+  - The segment is clipped first, to w > 0 and to the near plane when depth clipping is on, its outputs interpolated as the clipper would: with a corner behind the eye, the offsets do not combine convexly and the quad spilled past the line (`t_wline.m`).
+  - The fragment shader, blending, depth and stencil are the draw's own; culling is off and the polygon offset is the one enabled for lines. A blended line is as heavy as one stroke.
+  - Indirect arguments are read on the CPU, as the geometry path reads them. A restart index drops the segments it touches: a strip breaks there as OpenGL's does, a line list keeps its pairs (OpenGL starts a new pair after it), and an indexed line loop with restart on stays 1 pixel wide.
+  - Stays 1 pixel wide, with `[RED] wide line … drawn 1 pixel wide: <reason>`: a vertex shader without the entry (no vertex inputs, or a parameter or output the entry cannot pass on). Programs with a geometry or tessellation stage, transform feedback or adjacency keep their own paths, 1 pixel wide. The width is capped at 64. `DM_NVN_LINE_WIDTH=0` draws every line 1 pixel wide.
+  - The body runs twice a corner, 12 times a segment, so a vertex shader with stores would run them that often; no line-drawing shader seen has any.
+- **Found on:** [Mario Golf: Super Rush](../../dm/games/0100C9C00E25C000/README.md): the tee's aiming grid and a green's putting grid, 480 segments a draw (PR #2352 recorded the width and drew the lines as shifted strokes).
 
 ### What a game tears down that it should not
 

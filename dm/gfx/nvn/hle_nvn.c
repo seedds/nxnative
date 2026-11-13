@@ -1994,7 +1994,24 @@ static int dcmp(const void *a, const void *b) { double x = *(const double *)a, y
 // Power over the window since the last summary, for the whole process: CPU energy (task_energy in nJ, Apple silicon), CPU time (100% = one core) and the share of it on performance cores,
 // wakeups per second (interrupt / out of platform idle), GPU time per second (task_gpu_utilisation), thermal state, and the guest threads that yielded most (hle_thread.c);
 // then render-target traffic per frame (attachment load / store bytes, passes that load and store everything, stores saved by DM_NVN_UNWRITTEN_DC) and guest-thread CPU by Switch priority
+// The CPU's core tiers, once: Apple renamed the tiers with the M5 (the old performance cores are "super", a new middle tier is "performance"), and the power line's "on performance
+// cores" share (task_ptime) does not say which tier that is on a given chip. Logs every tier's name and size so a run can be read against the chip it ran on
+static void log_perf_levels(void) {
+    static int done; if (done) return; done = 1;
+    int levels = 0; size_t n = sizeof levels; if (sysctlbyname("hw.nperflevels", &levels, &n, 0, 0)) { LOG("[nvn] cpu tiers: hw.nperflevels unavailable"); return; }
+    for (int i = 0; i < levels && i < 8; i++) {
+        char key[48], name[64] = "?"; int phys = 0, logi = 0; size_t sz = sizeof name; uint64_t l2 = 0, hz = 0;
+        snprintf(key, sizeof key, "hw.perflevel%d.name", i); sysctlbyname(key, name, &sz, 0, 0);
+        snprintf(key, sizeof key, "hw.perflevel%d.physicalcpu", i); sz = sizeof phys; sysctlbyname(key, &phys, &sz, 0, 0);
+        snprintf(key, sizeof key, "hw.perflevel%d.logicalcpu", i); sz = sizeof logi; sysctlbyname(key, &logi, &sz, 0, 0);
+        snprintf(key, sizeof key, "hw.perflevel%d.l2cachesize", i); sz = sizeof l2; sysctlbyname(key, &l2, &sz, 0, 0);
+        LOG("[nvn] cpu tier %d (0 = fastest): '%s', %d physical / %d logical cores, L2 %llu KiB", i, name, phys, logi, (unsigned long long)l2 / 1024); (void)hz;
+    }
+    char brand[96] = "?"; size_t bs = sizeof brand; if (sysctlbyname("hw.machine", brand, &bs, 0, 0)) snprintf(brand, sizeof brand, "?");
+    LOG("[nvn] cpu: %d tier(s) on %s; the power line's 'performance cores' share is task_ptime (Apple's own split, tier not stated)", levels, brand);
+}
 static void power_line(uint64_t frame) {
+    log_perf_levels();
     static uint64_t pt, pe, pcpu, pp, piw, ppw, pg, pf, pld, pst, pfu, pudc; static mach_timebase_info_data_t tb; if (!tb.denom) mach_timebase_info(&tb);
     task_power_info_v2_data_t pw; mach_msg_type_number_t n = TASK_POWER_INFO_V2_COUNT;
     if (task_info(mach_task_self(), TASK_POWER_INFO_V2, (task_info_t)&pw, &n) != KERN_SUCCESS) return;

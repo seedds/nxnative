@@ -66,8 +66,13 @@ class _Files:   # an entry from or to a file, by get and put
         data = self.get(name)
         if data is None: return False
         tmp = f'{path}.tmp-{os.getpid()}-{threading.get_ident()}'
-        with open(tmp, 'wb') as f: f.write(data)
-        os.replace(tmp, path)
+        try:
+            with open(tmp, 'wb') as f: f.write(data)
+            os.replace(tmp, path)
+        except BaseException:
+            try: os.unlink(tmp)
+            except OSError: pass
+            raise
         return True
 
 

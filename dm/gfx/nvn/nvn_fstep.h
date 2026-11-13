@@ -165,15 +165,19 @@ static inline int nvn_fstep_next(nvn_fstep *s, double shown, double cost, int km
 // FSTEP_GPU_SLOW times its time at kmin and it alone does not fit k − 1 (a GPU at 3 ms of 17, 6 times its time on a loading screen, is not what holds a frame back).
 // The reference is not updated during a probe's trial (its frames run while the clock is still rising), so a failed probe leaves it as it was. It is kept for each kmin: one
 // learned at a 30 fps cap is the GPU time at the clock that cap left (lowered for 30 fps, and under the thermal cap for the heat), and taken as hold 1's after the cap rose it
-// made the same work at hold 2 look not slowed
+// made the same work at hold 2 look not slowed.
+// A reference that does not fit kmin itself (a mean above kmin: the GPU's time at kmin, at the clock kmin raised, is more than the hold, which no pacing sustains) rules the probe out:
+// whatever the longer hold added, kmin was not held without it. Ocarina of Time on the Odin 3 (GPU clock at its maximum at every hold) costs 1.2-2.1 vsyncs of GPU time
+// in Kokiri Forest by where the camera looks; with a reference of about 1.3 learned at hold 1, the heavy views were 1.5 times it, and each turn of the camera started another
+// probe: 60-90 late frames at hold 1, then hold 3 (4 probes in 17 s, 358 late frames of 900; t_fstep: the view case)
 #define FSTEP_GPU_SLOW 1.3    // GPU time at the longer hold against its time at kmin
 #define FSTEP_GPU_N 30        // frames at the longer hold before the comparison counts
-typedef struct { double ref, cur; int n, k; double ref_at[FSTEP_MAX + 1]; } nvn_fgpu;   // GPU time at kmin (running mean; of every kmin in ref_at); at the current hold k and its frame count
-static inline int nvn_fgpu_slow(const nvn_fgpu *g) { return g->n >= FSTEP_GPU_N && g->ref > 0 && g->cur >= FSTEP_GPU_SLOW * g->ref && g->cur > FSTEP_FIT * (g->k - 1); }
+typedef struct { double ref, cur; int n, k, kmin; double ref_at[FSTEP_MAX + 1]; } nvn_fgpu;   // GPU time at kmin (running mean; of every kmin in ref_at); at the current hold k and its frame count; the kmin ref belongs to
+static inline int nvn_fgpu_slow(const nvn_fgpu *g) { return g->n >= FSTEP_GPU_N && g->ref > 0 && g->ref <= g->kmin && g->cur >= FSTEP_GPU_SLOW * g->ref && g->cur > FSTEP_FIT * (g->k - 1); }
 // Once per frame, with the frame's GPU time (vsyncs; 0 = none finished yet) and the hold and probe state (nvn_fstep.probe) it ran under
 static inline int nvn_fstep_gpu_slowed(nvn_fgpu *g, double gpu, int k, int kmin, int probe) {
     if (kmin < 1 || kmin > FSTEP_MAX) return 0;   // no reference slot for it (hle_nvn.c passes 1 or 2)
-    g->ref = g->ref_at[kmin];
+    g->ref = g->ref_at[kmin]; g->kmin = kmin;
     if (gpu <= 0) return nvn_fgpu_slow(g);
     if (k <= kmin) { if (probe != 1) g->ref = g->ref_at[kmin] = g->ref > 0 ? g->ref + (gpu - g->ref) / 32 : gpu; g->n = 0; g->k = k; return 0; }
     if (k != g->k) { g->k = k; g->n = 0; }

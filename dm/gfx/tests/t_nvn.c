@@ -751,6 +751,29 @@ int main(void) {
         EXPECT("control used: the entries in the last block", 1, P(nvnCommandBufferGetControlMemoryUsed)(&cl) > 0 && P(nvnCommandBufferGetControlMemoryUsed)(&cl) <= 32);
         memset(dst, 0, DSTN); P(nvnQueueSubmitCommands)(&q, 1, &hl); P(nvnQueueFinish)(&q);
         EXPECT("the linked list replays", 1, !memcmp(dst, d1, 16) && !memcmp(dst + 16, d2, 16) && !memcmp(dst + 32, d2, 16));
+        // A called recording recorded over before the caller is submitted (Advance Wars 1+2's rendering plugin re-adds its block for each event): the piece runs what its
+        // command memory holds then, as the GPU runs a command set's bytes. A record that does not fit in the piece ends it; records that fit run
+        {
+            static uint8_t d3[48]; memset(d3, 0x33, sizeof d3);
+            #define CALLEE_AT0(sz, data) do { P(nvnCommandBufferAddCommandMemory)(&ca, &mp, 0, 1024); P(nvnCommandBufferAddControlMemory)(&ca, ctl_a, sizeof ctl_a); \
+                P(nvnCommandBufferBeginRecording)(&ca); P(nvnCommandBufferUpdateUniformBuffer)(&ca, (uintptr_t)dst, DSTN, 0, (sz), (data)); hc = P(nvnCommandBufferEndRecording)(&ca); } while (0)
+            #define CALLER() do { P(nvnCommandBufferAddCommandMemory)(&cc, &mp, 1024, 1024); P(nvnCommandBufferAddControlMemory)(&cc, ctl_b, sizeof ctl_b); \
+                P(nvnCommandBufferBeginRecording)(&cc); P(nvnCommandBufferCallCommands)(&cc, 1, &hc); P(nvnCommandBufferUpdateUniformBuffer)(&cc, (uintptr_t)dst, DSTN, 48, 16, d2); \
+                hcall = P(nvnCommandBufferEndRecording)(&cc); } while (0)
+            CALLEE_AT0(16, d1); CALLER();
+            CALLEE_AT0(sizeof d3, d3);   // a longer record over the called piece's head
+            size_t ln; free(nvn_rec_linear(hcall, &ln));
+            EXPECT("recorded over by a longer record: the linear copy holds the caller's own record", rec_sz + 8, ln);
+            memset(dst, 0, DSTN); P(nvnQueueSubmitCommands)(&q, 1, &hcall); P(nvnQueueFinish)(&q);
+            static const uint8_t zero[48];
+            EXPECT("recorded over by a longer record: the piece is skipped, the caller's own record runs", 1, !memcmp(dst, zero, 48) && !memcmp(dst + 48, d2, 16));
+            CALLEE_AT0(16, d1); CALLER();
+            CALLEE_AT0(16, d3);   // a record of the same size: it fits, and runs as the GPU would run those bytes
+            memset(dst, 0, DSTN); P(nvnQueueSubmitCommands)(&q, 1, &hcall); P(nvnQueueFinish)(&q);
+            EXPECT("recorded over by a record that fits: it runs", 1, !memcmp(dst, d3, 16) && !memcmp(dst + 48, d2, 16));
+            #undef CALLEE_AT0
+            #undef CALLER
+        }
         P(nvnCommandBufferFinalize)(&ca); P(nvnCommandBufferFinalize)(&cc); P(nvnCommandBufferFinalize)(&cl); P(nvnMemoryPoolFinalize)(&mp); P(nvnMemoryPoolFinalize)(&dp);
     }
     // 5b''''. Compact records (nvn_obj.h OPC_*): each call recorded both ways expands to exactly the canonical records, in no more command memory

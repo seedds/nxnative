@@ -99,6 +99,36 @@ class GlslSources(unittest.TestCase):
             self.assertEqual(pg.romfs_glsl_files(root), 2)
 
 
+class SdlVulkan(unittest.TestCase):
+    """MARVEL Cosmic Invasion (FNA/SDL_GPU): imports only SDL's Vulkan loader and EGL, names glShaderSource and 30 vkCmd* procs."""
+
+    SDL_IMPORTS = {'vkGetInstanceProcAddr', 'eglCreateWindowSurface', 'eglGetProcAddress', 'SDL_malloc'}
+
+    def sources(self, **kw):
+        return pg.shader_sources(set(self.SDL_IMPORTS) | kw.pop('imports', set()), 0, [], 0, 0, **kw)
+
+    def test_loader_alone_with_gl_names_is_opengl(self):   # Balatro's shape: the loader linked for WSI, never used
+        self.assertEqual(self.sources(gl_names=1, gl_src=2)['graphics'][0], 'gl')
+
+    def test_naming_command_procs_is_vulkan(self):   # vkCmd* names in main's strings: SDL_GPU resolves command-recording procs
+        self.assertEqual(self.sources(gl_names=1, vk_names=1)['graphics'][0], 'vulkan')
+
+    def test_sdl_vulkan_without_spirv_captures_at_run_time(self):
+        self.assertTrue(self.sources(vk_names=1)['vk_capture'][0])
+
+    def test_loader_only_and_no_gl_name_is_nvn(self):   # Absolum's shape: same imports, NVN through FNA3D
+        self.assertEqual(self.sources(vk_names=0)['graphics'][0], 'nvn')
+
+    def test_own_nvn_beats_the_sdl_vulkan_signal(self):
+        self.assertEqual(self.sources(imports={'nvnBootstrapLoader'}, vk_names=1)['graphics'][0], 'nvn')
+
+    def test_a_bare_version_header_is_not_embedded_glsl(self):   # MARVEL's main holds four '#version' prefixes with no body
+        import re
+        img = b'\0#version 3\0' + b'\0' * 128 + b'\0#version 450\n' + b'x' * 100 + b'\0'
+        n = sum(1 for m in re.finditer(pg.GL_SRC, img) if (e := img.find(b'\0', m.end())) != -1 and e - m.end() > 64)
+        self.assertEqual(n, 1)
+
+
 class Npdm(unittest.TestCase):
     def npdm(self, flags):
         d = bytearray(0x80); d[:4] = b'META'; d[0xc] = flags

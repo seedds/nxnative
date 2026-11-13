@@ -46,6 +46,13 @@
 - **Fix:** the pattern takes the variant, and an `sdk` built for the Switch 2 (`spec: Ounce`, as `dm_sdk_ounce` reads it) gets the 9 GB pool every Switch 2 profile has. Open: only the pool changes; a game with system resource keeps the 5 GB block (Star Fox's profile has 21 GB with a 16 GB alias region), so a provisional profile may still not fit and needs the bring-up.
 - **Found on:** Star Fox and Kirby Air Riders (`040077201BE50000`; no profile), read from their NUP and extraction; first reported with [Fire Emblem Fortune's Weave](../../dm/games/04007EF01F8AE000/README.md).
 
+### A Vulkan game read as OpenGL through SDL's loader
+
+- **Symptom:** the provisional profile of an SDL_GPU game says `graphics=gl`, the build captures no GL shaders, or it fails in `vk_shaders.py` on the modules the game makes at run time.
+- **Cause:** SDL_GPU imports only `vkGetInstanceProcAddr` — SDL's Vulkan loader, which an SDL game links for window-system integration and may never use to draw (Balatro renders with OpenGL, Absolum with NVN) — so the import count says no Vulkan. EGL imports and the `glShaderSource` name come from SDL's unused GL backend, so the game reads as OpenGL. `vkGetDeviceProcAddr` alone does not tell the renderer either: the WSI path names it to load the swapchain procs. A `vkCmd*` name can only come from a table a renderer resolves command-recording procs through — SDL_GPU names 30 of them.
+- **Fix:** `profile_guess.py` counts `vkCmd` names in `main`'s strings (`vk_names`); the loader import plus any of those is `graphics=vulkan`, with a survey reason naming the SDL_GPU renderer. Bare `#version` strings with no body behind them (`gl_src` now asks for a string longer than 64 bytes to the NUL) no longer count as embedded GLSL — MARVEL's `main` holds four such headers (MojoShader's prefixes for the GLSL it regenerates), which had the build translate four empty shaders and fail in `metallib`.
+- **Found on:** MARVEL Cosmic Invasion (`010059D020C26000`, FNA/SDL_GPU; provisional profile verified to boot and draw after the fix).
+
 ## Build tools
 
 ### Stopping a build left its tools running

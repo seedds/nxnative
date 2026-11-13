@@ -876,7 +876,7 @@ def survey(nsp_dir, app, fam, keys, repo, py, env):
     nros = {p.name: p for p in sorted((ex / 'romfs_nro').rglob('*.nro')) if p.is_file()}   # files only: a RomFS folder may end in .nro (The Binding of Isaac: Afterbirth+). The manifest pass writes the NROs (their imports decide the API and the modules: Portal 2's main is SDL with EGL, its Source engine NROs draw with NVN)
     nro_add = pg.nro_modules(ex / 'ExeFS', nros, keep) if nros else {}
     S = pg.shader_sources(mods['main']['imports'], F['glsl_src'], [m for m in sorted({*keep, *nro_add}, key=pg.load_order) if 'glslcCompile' in mods[m]['exports']], rom['mags']['SPIR-V'],
-                          rom['exts'].get('.pak', 0) if 'Unreal' in F.get('main_markers', set()) else 0, rom['mags']['Trinity pack'], gl_names=F.get('gl_names', 0),
+                          rom['exts'].get('.pak', 0) if 'Unreal' in F.get('main_markers', set()) else 0, rom['mags']['Trinity pack'], gl_names=F.get('gl_names', 0), vk_names=F.get('vk_names', 0),
                           gl_src=F.get('gl_src', 0), gl_files=sum(rom['exts'].get(e, 0) for e in pg.GL_FILES), oodle_pkz=rom['mags']['PlatinumGames PKZ'],   # the manifest has no name tables: every PKZ counts
                           nro_imports=frozenset(pg.romfs_nro_imports(ex / 'romfs_nro')))
     vulkan, gl = S['graphics'][0] == 'vulkan', S['graphics'][0] == 'gl'

@@ -41,6 +41,12 @@ namespace Ryujinx.Graphics.Shader.Translation
             return functionId;
         }
 
+        // nxnative: a function by its id, null for a function of the shader's own that is not translated yet (SharedMemoryFence reads its callees)
+        public Function GetFunction(int functionId)
+        {
+            return functionId >= 0 && functionId < _functionList.Count ? _functionList[functionId] : null;
+        }
+
         public int GetOrCreateFunctionId(HelperFunctionName functionName, int id)
         {
             int key = (int)functionName | (id << 16);
@@ -79,6 +85,7 @@ namespace Ryujinx.Graphics.Shader.Translation
                 HelperFunctionName.ConvertFloatToDouble => GenerateConvertFloatToDoubleFunction(),
                 HelperFunctionName.TexelFetchScale => GenerateTexelFetchScaleFunction(),
                 HelperFunctionName.TextureSizeUnscale => GenerateTextureSizeUnscaleFunction(),
+                HelperFunctionName.SharedFence => GenerateSharedFence(),
                 _ => throw new ArgumentException($"Invalid function name {functionName}"),
             };
         }
@@ -269,6 +276,21 @@ namespace Ryujinx.Graphics.Shader.Translation
             context.Return(d[0]);
 
             return new Function(ControlFlowGraph.Create(context.GetOperations()).Blocks, "dmsh_hmma16816_f16", true, TensorPass.HmmaInArguments, 1);
+        }
+
+        // nxnative: the fence SharedMemoryFence puts between a shared memory store and a later shared memory load. Here a memory barrier at workgroup scope (OpMemoryBarrier: a fence,
+        // not an execution barrier, so it is valid in divergent code); the dmsh_ name keeps the helper's name in the SPIR-V, and the shader build replaces its body in the Metal source
+        // with a simdgroup-scope fence on threadgroup memory (dmsh_rewrite.py tg_fence), which is what a warp's own order needs: the name and the empty parameter list are the contract
+        public const string SharedFenceName = "dmsh_tg_fence";
+
+        private static Function GenerateSharedFence()
+        {
+            EmitterContext context = new();
+
+            context.GroupMemoryBarrier();
+            context.Return();
+
+            return new Function(ControlFlowGraph.Create(context.GetOperations()).Blocks, SharedFenceName, false, 0, 0);
         }
 
         private static Function GenerateSharedStore8(int id)

@@ -374,8 +374,8 @@ static void watch_install(void) {
 #endif
 
 // DM_CTL atrace <hex address> <bytes> (hle_hid.c): the range made inaccessible; the first access to each page after that logs who made it (pc / lr as module offsets, read or write)
-// and opens the page again. Tells which code reads memory the GPU writes (PRAGMATA: the culling chain's results, read back by the game). Up to 64 ranges, 64 lines in all
-#if !TARGET_OS_IPHONE
+// and opens the page again. Tells which code reads memory the GPU writes (PRAGMATA: the culling chain's results, read back by the game). Up to 64 ranges, 64 lines in all.
+// Mac and iOS: only mprotect and the page fault hooks (crash.c), as nvn_dirty.c's write tracking; hle_hid.c's DM_CTL reader calls it on both
 static struct { uint64_t lo, hi; } g_at[64]; static _Atomic int g_atn, g_atlog;
 static int atrace_fault(void *addr, int is_write, void *uc_) {
     uint64_t a = (uint64_t)(uintptr_t)addr; int n = atomic_load(&g_atn);
@@ -398,7 +398,6 @@ void probe_atrace(uint64_t lo, uint64_t n) {
     int r = mprotect((void *)(uintptr_t)lo, n, PROT_NONE);
     LOG("DM_CTL: atrace range %d %#llx + %#llx armed%s", i, (unsigned long long)lo, (unsigned long long)n, r ? " (mprotect failed)" : "");
 }
-#endif
 void probe_install(void) {
 #if !TARGET_OS_IPHONE
     crash_set_trap_hook(probe_hit);

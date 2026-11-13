@@ -52,6 +52,13 @@
 // the current bindings; only a shader with such a read has the table
 #define DMSH_CBSIZE_BANK 25
 #define DMSH_CBSIZE_SLOTS 14             // a u32 for each of uniform slots 0 to 13, as four uint4: 64 bytes
+// Buffer texture offsets: Metal makes a buffer texture only at an aligned offset of its buffer, and an Apple GPU addresses a view below that alignment from the boundary below
+// its offset, so every access landed that many bytes early. The host makes each such texture's view from that boundary, wider by the elements in between, and gives their count
+// in a table in a bank of its own (Ryujinx Constants.NxBufferImageBiasBank), which the shader adds to each coordinate of a buffer image or of a buffer texture read through a
+// texture slot (and takes from its size query), an array of buffer textures one per element, the entry of the element an access indexes; only a shader with one of them has it,
+// as long as its entries (the TBIAS binding's "n")
+#define DMSH_TBIAS_BANK 26
+#define DMSH_TBIAS_SLOTS 512             // the most entries a table holds, a u32 each, as uint4s (a binding's entry: its "tbx"; an array's first element's)
 // The push call's word before the offset names a block of the stage group; c[24] holds block b at b * DMSH_PUSH_SIZE. Block 0 holds the group's constants. Block 1 + i holds
 // stage i's buffer entries: compute has one stage and reads block 1 where its c0 layout counts it (control +0xaa, in words, right after block 0's +0xa9; the translator maps it
 // to c[24] + DMSH_PUSH_SIZE); graphics stage i reads its block through its own bank (DMSH_NVN2_STAGE_BANK + i), up to the pixel stage's block 5. PRAGMATA pushes 16-byte buffer
@@ -68,6 +75,7 @@
 #define DMSH_KIND_C1 "c1"                // the shader's own constant segment c[1] (its bytes are the json's c1)
 #define DMSH_KIND_DRVCB "drvcb"          // a driver segment, c[bank] (bank 0 or 2): NVN_RB_DRV0 / NVN_RB_DRV2
 #define DMSH_KIND_CBSIZE "cbsize"        // the uniform slots' bound sizes, c[DMSH_CBSIZE_BANK]: NVN_RB_CBSIZE
+#define DMSH_KIND_TBIAS "tbias"          // the buffer images' element offsets, c[DMSH_TBIAS_BANK]: NVN_RB_TBIAS
 #define DMSH_KIND_SUPPORT "support"      // the translator's support buffer
 #define DMSH_KIND_GEOMETRY "geometry"    // one of the geometry lowering's helper buffers, reg = its index (dmsh_geometry.py HELPERS)
 #define DMSH_KIND_SBUF "sbuf"            // storage buffer slot reg, its address in the stage's c0 table; rw = the shader writes it
@@ -132,6 +140,9 @@
 #define DMSH_LOGIC_BUFFER 29
 // Its function constants: bool, colour target n is attached (the variant reads it only then), at this index + n (nvn_mtl.m lo_fn specializes the entry point per pass's targets)
 #define DMSH_LOGIC_FC 200
+// The integer-output entry point's function constants (dm/gfx/tools/dmsh_entry.py fs_uint): bool, colour output n goes to an unsigned integer target, at this index + n: main0_u returns that
+// output as the unsigned integer vector of its bits and the others as floats (nvn_mtl.m uint_fn specializes it per pipeline's integer targets)
+#define DMSH_UINT_FC 208
 // Compute shared memory past Metal's limit (dm/gfx/tools/dmsh_rewrite.py tg_spill): a kernel whose threadgroup arrays exceed DMSH_TG_MAX bytes takes them from a device buffer at this compute
 // buffer index, one slice of the reflection's tg_spill bytes per workgroup, at the workgroup's index in the whole grid (nvn_mtl.m dispatch binds a slice for every workgroup of the dispatch)
 #define DMSH_TG_SLOT 30

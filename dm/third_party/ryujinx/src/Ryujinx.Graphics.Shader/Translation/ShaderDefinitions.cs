@@ -32,6 +32,11 @@ namespace Ryujinx.Graphics.Shader.Translation
         public bool GpPassthrough { get; }
         public bool LastInVertexPipeline { get; set; }
 
+        // nxnative: the header's output words (ShaderHeader.OutputWords) and its count of per-patch attribute words, for a hull shader that writes its control points straight into the
+        // stage's circular buffer (DirectCbeWrites)
+        public int[] OutputWords { get; set; } = System.Array.Empty<int>();
+        public int PerPatchAttributeCount { get; set; }
+
         public int ThreadsPerInputPrimitive { get; private set; }
 
         public InputTopology InputTopology => _graphicsState.Topology;

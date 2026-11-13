@@ -47,6 +47,71 @@ class StorageBuffers(unittest.TestCase):
         self.assertIsNone(bindings('hs', [0x410], [1])[0]['reg'])
 
 
+class BufferImageOffsets(unittest.TestCase):
+    # The translator gives each buffer image an index in the offset table (Program.cs "tbx", TranslationFlags.MetalBufferImageBias), and the reflection
+    # gives it to the image's binding, found by the slot and the handle its name carries; the table itself is bank DMSH_TBIAS_BANK
+    def test_offset_table_and_image_indices(self):
+        source = ('struct spvDescriptorSetBuffer0\n{\n'
+                  f'    constant _17* cp_c{dmsh_abi.TBIAS_BANK} [[id(0)]];\n'
+                  '    texture_buffer<uint, access::read_write> cp_i_tcb_48_r32ui [[id(1)]];\n'
+                  '    texture2d<uint, access::write> cp_i_tcb_4A_r32ui [[id(2)]];\n'
+                  '    texture_buffer<uint, access::write> cp_i_cb3_A_r32ui [[id(3)]];\n'
+                  '    texture_buffer<uint, access::write> cp_i_tcb_4C_r32ui [[id(4)]];\n'
+                  '};\n')
+        res = {'sbufs': [], 'images': [
+            {'binding': 1, 'cbuf_slot': -1, 'handle': 0x48, 'tbx': 0},
+            {'binding': 2, 'cbuf_slot': -1, 'handle': 0x4A},
+            {'binding': 3, 'cbuf_slot': 3, 'handle': 0xA, 'tbx': 1},
+            {'binding': 4, 'cbuf_slot': -1, 'handle': 0x4C}]}   # past the table: no index
+        got = REFLECT('synthetic', 'cs', source, res)
+        self.assertEqual([(b['kind'], b.get('tbx')) for b in got],
+                         [(dmsh_abi.KIND_TBIAS, None), (dmsh_abi.KIND_IMG, 0), (dmsh_abi.KIND_IMG, None), (dmsh_abi.KIND_IMG_UBO, 1), (dmsh_abi.KIND_IMG, None)])
+        self.assertEqual([b.get('reg') for b in got[1:]], [0, 1, 0, 2])
+
+    def test_slot_must_match(self):   # the same handle word in another constant buffer is another image
+        res = {'images': [{'binding': 1, 'cbuf_slot': 3, 'handle': 0x48, 'tbx': 0}]}
+        self.assertIsNone(dmsh_reflect.buffer_image_bias('cp_i_tcb_48_r32ui', res))
+        self.assertEqual(dmsh_reflect.buffer_image_bias('cp_i_cb3_48_r32ui', res), 0)
+
+    def test_buffer_texture_indices(self):
+        # A buffer texture read through a texture slot (c2 word 8: slot 0) or through a handle in a uniform buffer gets its index from the translator's textures, never from an
+        # image with the same handle
+        source = ('struct spvDescriptorSetBuffer0\n{\n'
+                  f'    constant _17* cp_c{dmsh_abi.TBIAS_BANK} [[id(0)]];\n'
+                  '    texture_buffer<float> cp_t_tcb_8 [[id(1)]];\n'
+                  '    texture_buffer<uint> cp_t_cb3_A [[id(2)]];\n'
+                  '    texture2d<float> cp_t_tcb_A [[id(3)]];\n'
+                  '};\n')
+        res = {'sbufs': [], 'images': [{'binding': 9, 'cbuf_slot': -1, 'handle': 0x8, 'tbx': 3}], 'textures': [
+            {'binding': 1, 'cbuf_slot': -1, 'handle': 0x8, 'tbx': 0},
+            {'binding': 2, 'cbuf_slot': 3, 'handle': 0xA, 'tbx': 1},
+            {'binding': 3, 'cbuf_slot': -1, 'handle': 0xA}]}
+        got = REFLECT('synthetic', 'cs', source, res)
+        self.assertEqual([(b['kind'], b.get('tbx')) for b in got],
+                         [(dmsh_abi.KIND_TBIAS, None), (dmsh_abi.KIND_TBUF, 0), (dmsh_abi.KIND_TBUF_UBO, 1), (dmsh_abi.KIND_TEX, None)])
+        self.assertIsNone(dmsh_reflect.buffer_image_bias('cp_t_cb4_A', res))   # another uniform slot
+        self.assertEqual(got[0]['n'], 4)   # the table's length: entries 0 to 3 in one uint4 (the image's entry 3 counts)
+
+    def test_buffer_texture_arrays(self):
+        # An array of buffer textures (a dynamic slot array, cb0_40000000; an array of the driver table's handles, cb2) takes an entry per element from its first; an array of
+        # other textures with the same handle takes none, and the table is as long as the entries, in uint4s
+        source = ('struct spvDescriptorSetBuffer0\n{\n'
+                  f'    constant _17* vp_c{dmsh_abi.TBIAS_BANK} [[id(0)]];\n'
+                  '    array<texture_buffer<float>, 32> vp_tb_cb0_40000000 [[id(1)]];\n'
+                  '    array<texture2d<float>, 32> vp_t2d_cb0_40000000 [[id(33)]];\n'
+                  '    array<texture_buffer<uint>, 301> vp_tb_cb2_0 [[id(65)]];\n'
+                  '};\n')
+        res = {'sbufs': [], 'images': [], 'textures': [
+            {'binding': 1, 'cbuf_slot': 0, 'handle': 0x40000000, 'array': 32, 'tbx': 0},
+            {'binding': 2, 'cbuf_slot': 0, 'handle': 0x40000000, 'array': 32},
+            {'binding': 3, 'cbuf_slot': 2, 'handle': 0, 'array': 301, 'tbx': 32}]}
+        got = {b['msl_name']: b for b in REFLECT('synthetic', 'vs', source, res)}
+        self.assertEqual(got[f'vp_c{dmsh_abi.TBIAS_BANK}']['n'], 336)   # 32 + 301 entries, to whole uint4s
+        self.assertEqual(got['vp_tb_cb0_40000000'].get('tbx'), 0)
+        self.assertIsNone(got['vp_t2d_cb0_40000000'].get('tbx'))
+        self.assertEqual((got['vp_tb_cb2_0']['kind'], got['vp_tb_cb2_0'].get('tbx')), (dmsh_abi.KIND_TEX_C2A, 32))
+
+
 class PoolTable(unittest.TestCase):
     # Global memory traced to no storage buffer (Donkey Kong Bananza's gsys vertex shader c9a56f796ea4a4cd): the translator reserves the host's pool table as a storage buffer
     # under the sentinel cb slot; it is not a game buffer, and it writes when one of the notes is a store or an atomic
@@ -102,6 +167,32 @@ class UniformArraysWithDriverSampler(unittest.TestCase):
         tex, samp = REFLECT('synthetic', 'ps', source, {'sbufs': []})
         self.assertEqual((tex['kind'], tex['reg'], tex['off'], tex.get('soff')), ('tex_ubo', 3, 0, None))
         self.assertEqual((samp['kind'], samp['reg'], samp['off'], samp['soff'], samp['sreg']), ('samp_ubo', 3, 0, 0x570, dmsh_abi.SREG_C2))
+
+
+class SeparateSamplerIds(unittest.TestCase):   # handle type 2: the texture word in c2, the sampler a raw SeparateSamplerId in a word of a uniform buffer
+    def reflect(self, name):
+        source = f'struct spvDescriptorSetBuffer0\n{{\n    texture2d<float> {name} [[id(0)]];\n    sampler {name}Smplr [[id(1)]];\n}};\n'
+        return REFLECT('synthetic', 'ps', source, {'sbufs': []})
+
+    def test_texture_in_c2_sampler_id_in_c10(self):   # The Witcher 3 (181 of its shaders): slots 0xb0002 (texture bank 2, sampler bank 10), separate texture word 0x5a, sampler word 0 of c10
+        tex, samp = self.reflect('fp_t_cb720898_2000005A')
+        self.assertEqual(tex['kind'], 'tex')
+        self.assertEqual(tex['reg'], 128)   # c2 byte 0x168: separate texture slot 0 (NVN_SEPTEX_SLOT0)
+        self.assertEqual((samp['kind'], samp['reg'], samp['off'], samp['raw_id']), ('samp_ubo', 7, 0, True))
+
+    def test_sampler_word_offset(self):   # sampler word 1 of c10: byte 4
+        tex, samp = self.reflect('fp_t_cb720898_2000405C')
+        self.assertEqual(tex['reg'], 129)
+        self.assertEqual((samp['reg'], samp['off'], samp['raw_id']), (7, 4, True))
+
+    def test_sampler_word_is_not_taken_as_a_texture_word(self):   # sampler word 0x10 of c10 (byte 0x40) would be combined texture slot 4 if read as a c2 word
+        tex, samp = self.reflect('fp_t_cb720898_2004005A')
+        self.assertEqual(tex['reg'], 128)
+        self.assertEqual((samp['reg'], samp['off']), (7, 0x40))
+
+    def test_other_handle_types_carry_no_raw_id(self):   # type 1 with the same slots stays a separate texture + separate sampler pair
+        _, samp = self.reflect('fp_t_cb720898_1000005A')
+        self.assertNotIn('raw_id', samp)
 
 
 def builder_unfillable():

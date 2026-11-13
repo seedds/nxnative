@@ -149,6 +149,41 @@ class Plan(unittest.TestCase):
         self.shader('plain', {}, {'_b': vz})
         self.assertNotIn('specialized_function_descriptors', po.script(self.d, [('plain_b', 'main0', 'fs_b', 'main0')])['function_descriptors'])   # none: the script as before
 
+    def test_a_specialized_function_after_the_first_has_a_library_of_its_own(self):   # metal-tt fails on it ("cannot find private metadata at offset '8'"): needs_cut
+        both = [('main0', ('dm_border_off',)), ('main0_z', ('dm_border_off',))]
+        self.shader('pull', {'entry_z': 'main0_z', 'pull': {'entry': 'main0'}, 'vertex_inputs': [{'location': 0}]}, {'_b': both, '_bp': both})
+        self.shader('fb', {}, {'_b': [('main0', ('dm_border_off',)), ('main0_u', ('dm_border_off',))]})
+        self.shader('plainz', {'entry_z': 'main0_z', 'pull': {'entry': 'main0'}, 'vertex_inputs': [{'location': 0}]}, {'_b': both, '_bp': [('main0', False), ('main0_z', False)]})
+        bases = [('pull_bp', 'main0_z', 'fb_b', 'main0'), ('pull_bp', 'main0', 'fb_b', 'main0'), ('plainz_bp', 'main0_z', 'fb_b', 'main0')]
+        j = po.script(self.d, bases)
+        d = self.d.resolve()
+        self.assertEqual({l['label']: l['path'] for l in j['libraries']}, {'pull_bp@main0_z': str(d / 'pull_bp@main0_z.metallib'), 'fb_b': str(d / 'fb_b.metallib'),
+                                                                          'pull_bp': str(d / 'pull_bp.metallib'), 'plainz_bp': str(d / 'plainz_bp.metallib')})
+        fns = {f['label']: f['library'] for f in j['function_descriptors']['library_function_descriptors']}
+        self.assertEqual(fns, {'pull_bp.main0_z': 'lib:pull_bp@main0_z', 'fb_b.main0': 'lib:fb_b', 'pull_bp.main0': 'lib:pull_bp', 'plainz_bp.main0_z': 'lib:plainz_bp'})   # the first function, and one unspecialized, stay
+        self.assertEqual([s['label'] for s in j['function_descriptors']['specialized_function_descriptors']], ['pull_bp.main0_z.host', 'fb_b.main0.host', 'pull_bp.main0.host'])
+        self.assertEqual(po.cut_entries(self.d, bases), {('pull_bp', 'main0_z')})
+        self.assertFalse(po.needs_cut({}, 'main0')); self.assertFalse(po.needs_cut({'main0': ('dm_border_off',)}, 'main0'))
+
+    @unittest.skipUnless(shutil.which('xcrun'), 'needs Xcode and Metal')
+    def test_the_cut_library_holds_the_function_alone(self):   # real_libraries writes it, for a library in a folder as for one in an image
+        src = '#include <metal_stdlib>\nusing namespace metal;\nconstant bool dm_border_off [[function_constant(216)]];\nstruct V { float4 p [[position]]; };\n' + ''.join(
+            'vertex V %s(uint id [[vertex_id]]) { V o; o.p = float4(float(id), 0, is_function_constant_defined(dm_border_off) && dm_border_off ? %d.5 : 1, 1); return o; }\n' % (e, n)
+            for n, e in enumerate(('main0', 'main0_z')))
+        (self.d / 'v.metal').write_text(src)
+        r = subprocess.run(['xcrun', '-sdk', 'macosx', 'metal', '-c', str(self.d / 'v.metal'), '-o', str(self.d / 'v.air')], capture_output=True, text=True)
+        if r.returncode: self.skipTest('no Metal compiler: ' + r.stderr[-200:])
+        subprocess.run(['xcrun', '-sdk', 'macosx', 'metallib', str(self.d / 'v.air'), '-o', str(self.d / 'v_bp.metallib')], check=True, capture_output=True)
+        self.assertEqual(po.constants(self.d / 'v_bp.metallib'), {'main0': ('dm_border_off',), 'main0_z': ('dm_border_off',)})
+        work = self.d.parent / 'work'
+        real = po.real_libraries(self.d, [('v_bp', 'main0_z', 'v_bp', 'main0')], work)
+        self.assertEqual(real, work / 'libraries')
+        self.assertEqual(po.constants(real / 'v_bp@main0_z.metallib'), {'main0_z': ('dm_border_off',)})
+        self.assertEqual((real / 'v_bp.metallib').read_bytes(), (self.d / 'v_bp.metallib').read_bytes())
+        self.assertTrue((real / 'v_bp.metallib').is_symlink(), 'a library of a folder is linked, not copied')
+        po.clear_real_libraries(work)
+        self.assertEqual(po.real_libraries(self.d, [('v_bp', 'main0', 'v_bp', 'main0')], work), self.d, 'nothing to cut: the folder as it is')
+
     def test_script(self):
         j = po.script(self.d, [('v_bp', 'main0', 'f_b', 'main0'), ('w_bp', 'main0_z', 'f_b', 'main0')])
         self.assertEqual([l['label'] for l in j['libraries']], ['v_bp', 'f_b', 'w_bp'])
@@ -452,7 +487,7 @@ class Build(unittest.TestCase):
             po.main(['--game', '0100000000001000', '--msl', str(self.lib), '--out', str(self.out), '--work', str(self.work)])
         self.assertEqual(list(self.out.glob('*.mtl4a')), [])
 
-    def batched_runner(self, fail_compile=None, fail_merge=False):
+    def batched_runner(self, fail_compile=(), fail_merge=False):   # fail_compile: the vertex entries whose base metal-tt fails on
         original = self.fake_run
         observed = []
         def run(cmd, **kw):
@@ -467,7 +502,7 @@ class Build(unittest.TestCase):
                 config = json.loads(js.read_text())
                 names = [f['name'] for f in config['function_descriptors']['library_function_descriptors'] if f['library'] == 'lib:v_bp']
                 observed.append(('compile', names))
-                if fail_compile in names:
+                if set(fail_compile) & set(names):
                     Path(cmd[cmd.index('-o') + 1]).write_bytes(b'partial')
                     return subprocess.CompletedProcess(cmd, 1)
             return original(cmd, **kw)
@@ -489,10 +524,11 @@ class Build(unittest.TestCase):
 
     def test_batch_failure_preserves_completed_work_and_publishes_nothing(self):
         bases = [('v_bp', f'vertex{i}', 'f_b', 'main0') for i in range(5)]
-        runner, observed = self.batched_runner(fail_compile='vertex2')
+        runner, observed = self.batched_runner(fail_compile=('vertex2', 'vertex3'))   # nothing of the group compiles: metal-tt's failure, not one pipeline's
         with mock.patch.object(self, 'fake_run', runner), mock.patch.object(po, 'plan', return_value=(bases, [], {})), self.assertRaises(SystemExit):
             self.main('--batch-size','2','--os-min','27.0')
-        self.assertEqual(observed, [('compile',['vertex0','vertex1']),('compile',['vertex2','vertex3'])])
+        self.assertEqual(observed[:2], [('compile',['vertex0','vertex1']),('compile',['vertex2','vertex3'])])
+        self.assertTrue(all(set(names) <= {'vertex2', 'vertex3'} for _, names in observed[2:]))   # the search for the pipelines it stops on
         self.assertFalse((self.out/'prebuilt.tsv').exists())
         self.assertFalse((self.work/'key.applegpu_g18p').exists())
         self.assertFalse(list(self.out.glob('*.mtl4a')))
@@ -504,6 +540,49 @@ class Build(unittest.TestCase):
             self.main('--batch-size','2','--os-min','27.0')
         self.assertEqual(first.stat().st_mtime_ns, identity)
         self.assertEqual(observed, [('compile',['vertex2','vertex3']),('compile',['vertex4']),('merge',3)])
+
+    def test_a_base_metal_tt_cannot_compile_is_left_to_the_device(self):   # PRAGMATA: one pixel shader the GPU compiler stops on cost the whole archive
+        bases = [('v_bp', f'vertex{i}', 'f_b', 'main0') for i in range(5)]
+        runner, observed = self.batched_runner(fail_compile=('vertex2',))
+        out = io.StringIO()
+        with mock.patch.object(po.subprocess, 'run', runner), mock.patch.object(po, 'plan', return_value=(bases, [('v', 'c')], {})), \
+                mock.patch.dict(os.environ, DM_GAMES_DIR=str(self.prof.parent)), contextlib.redirect_stdout(out):
+            po.main(['--game', '0100000000001000', '--msl', str(self.lib), '--out', str(self.out), '--work', str(self.work), '--os-min', '27.0', '--no-compute'])
+        compiles = [names for kind, names in observed if kind == 'compile']
+        self.assertEqual(compiles[0], [f'vertex{i}' for i in range(5)])
+        self.assertEqual(compiles[-1], ['vertex0', 'vertex1', 'vertex3', 'vertex4'])   # the archive: every base but the one that fails
+        self.assertIn(['vertex2'], compiles)                                            # tried alone before it is named
+        self.assertTrue((self.out / 'applegpu_g18p.mtl4a').is_file())
+        self.assertEqual((self.out / 'rest_pairs.tsv').read_text(), 'v\tc\nv\tf\n')   # after the pairs with function constants
+        self.assertIn('failed\t1 bases', (self.out / 'archive.tsv').read_text())
+        self.assertRegex(out.getvalue(), r'\[RED\] pso_offline: applegpu_g18p: metal-tt cannot compile the base of v \+ f \(v_bp\.vertex2, f_b\.main0\)')
+        self.assertEqual(out.getvalue().count('[RED]'), 1)
+        n = len(observed); out = io.StringIO()   # a second run reuses the archive and still names the pair
+        (self.out / 'rest_pairs.tsv').unlink()
+        with mock.patch.object(po.subprocess, 'run', runner), mock.patch.object(po, 'plan', return_value=(bases, [('v', 'c')], {})), \
+                mock.patch.dict(os.environ, DM_GAMES_DIR=str(self.prof.parent)), contextlib.redirect_stdout(out):
+            po.main(['--game', '0100000000001000', '--msl', str(self.lib), '--out', str(self.out), '--work', str(self.work), '--os-min', '27.0', '--no-compute'])
+        self.assertEqual(len(observed), n)
+        self.assertEqual((self.out / 'rest_pairs.tsv').read_text(), 'v\tc\nv\tf\n')
+
+    def test_a_failing_base_in_one_group_keeps_the_other_groups(self):
+        bases = [('v_bp', f'vertex{i}', 'f_b', 'main0') for i in range(5)]
+        runner, observed = self.batched_runner(fail_compile=('vertex3',))
+        with mock.patch.object(self, 'fake_run', runner), mock.patch.object(po, 'plan', return_value=(bases, [], {})):
+            self.main('--batch-size', '2', '--os-min', '27.0', '--no-compute')
+        self.assertEqual(observed[0], ('compile', ['vertex0', 'vertex1']))
+        self.assertEqual(observed[-1], ('merge', 3))
+        self.assertIn(('compile', ['vertex2']), observed)   # the second group's archive, without the base that fails
+        self.assertEqual((self.out / 'rest_pairs.tsv').read_text(), 'v\tf\n')
+        self.assertEqual(po.read_failed(self.work / 'batches.applegpu_g18p/00002', 'applegpu_g18p'), ([('v_bp', 'vertex3', 'f_b', 'main0')], []))
+
+    def test_more_failing_bases_than_the_limit_stop_the_build(self):
+        bases = [('v_bp', f'vertex{i}', 'f_b', 'main0') for i in range(40)]
+        runner, observed = self.batched_runner(fail_compile=[f'vertex{i}' for i in range(0, 40, 2)])
+        with mock.patch.object(self, 'fake_run', runner), mock.patch.object(po, 'plan', return_value=(bases, [], {})), self.assertRaises(SystemExit) as e:
+            self.main('--os-min', '27.0', '--no-compute')
+        self.assertIn(f'more than {po.MAX_FAILED} pipelines', str(e.exception))
+        self.assertFalse(list(self.out.glob('*.mtl4a')))
 
     def test_merge_failure_never_publishes_partial_archive(self):
         bases = [('v_bp', f'vertex{i}', 'f_b', 'main0') for i in range(3)]

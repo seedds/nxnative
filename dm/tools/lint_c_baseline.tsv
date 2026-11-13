@@ -28,14 +28,12 @@ dm/gfx/nvn/nvn_mtl.m	clang-analyzer-core.NullDereference	9
 dm/gfx/nvn/nvn_mtl.m	clang-analyzer-core.uninitialized.Assign	2
 dm/gfx/nvn/nvn_mtl.m	clang-analyzer-nullability.NullableDereferenced	5
 dm/gfx/nvn/nvn_mtl.m	clang-analyzer-nullability.NullablePassedToNonnull	15
-dm/gfx/nvn/nvn_mtl.m	clang-analyzer-osx.cocoa.RetainCount	1
 dm/gfx/nvn/nvn_mtl.m	clang-analyzer-security.ArrayBound	1
 dm/gfx/nvn/nvn_mtl.m	clang-analyzer-unix.cstring.NullArg	4
 dm/gfx/nvn/nvn_mtl.m	clang-analyzer-unix.cstring.UninitializedRead	3
 dm/gfx/nvn/nvn_mtl.m	misc-redundant-expression	2
 dm/gfx/nvn/nvn_rec.h	clang-analyzer-nullability.NullablePassedToNonnull	1
 dm/gfx/tests/t_alpha.m	clang-analyzer-nullability.NullablePassedToNonnull	1
-dm/gfx/tests/t_border.m	clang-analyzer-nullability.NullablePassedToNonnull	1
 dm/gfx/tests/t_border.m	clang-analyzer-security.ArrayBound	2
 dm/gfx/tests/t_capture.c	bugprone-misplaced-pointer-arithmetic-in-alloc	1
 dm/gfx/tests/t_clear_ds.m	clang-analyzer-nullability.NullablePassedToNonnull	1
@@ -43,13 +41,11 @@ dm/gfx/tests/t_defer_chain.m	clang-analyzer-nullability.NullablePassedToNonnull	
 dm/gfx/tests/t_float_pad.m	bugprone-suspicious-memory-comparison	1
 dm/gfx/tests/t_geometry.m	clang-analyzer-nullability.NullablePassedToNonnull	8
 dm/gfx/tests/t_geometry.m	clang-analyzer-security.ArrayBound	1
-dm/gfx/tests/t_geometry.m	clang-analyzer-unix.cstring.UninitializedRead	2
 dm/gfx/tests/t_geometry_feedback.m	clang-analyzer-nullability.NullablePassedToNonnull	1
 dm/gfx/tests/t_geometry_primitive_id.m	clang-analyzer-nullability.NullablePassedToNonnull	1
 dm/gfx/tests/t_image_alias.m	clang-analyzer-nullability.NullablePassedToNonnull	1
 dm/gfx/tests/t_initial_uncached.m	clang-analyzer-nullability.NullablePassedToNonnull	1
 dm/gfx/tests/t_logic.m	clang-analyzer-nullability.NullablePassedToNonnull	1
-dm/gfx/tests/t_mip_extent.m	clang-analyzer-nullability.NullablePassedToNonnull	1
 dm/gfx/tests/t_missing_src1.m	bugprone-suspicious-memory-comparison	2
 dm/gfx/tests/t_perf_order.m	bugprone-unsafe-functions	2
 dm/gfx/tests/t_pfv.m	clang-analyzer-nullability.NullablePassedToNonnull	1
@@ -63,7 +59,6 @@ dm/gfx/tests/t_primitive_restart.m	clang-analyzer-unix.cstring.UninitializedRead
 dm/gfx/tests/t_pso_archive.m	bugprone-suspicious-memory-comparison	1
 dm/gfx/tests/t_pso_archive.m	clang-analyzer-nullability.NullablePassedToNonnull	2
 dm/gfx/tests/t_pso_bundle.m	bugprone-command-processor	1
-dm/gfx/tests/t_pso_skey.m	bugprone-suspicious-memory-comparison	5
 dm/gfx/tests/t_pso_stall.m	bugprone-command-processor	1
 dm/gfx/tests/t_pull.m	bugprone-random-generator-seed	1
 dm/gfx/tests/t_pull_inv.m	bugprone-command-processor	1
@@ -108,7 +103,6 @@ dm/host/tests/t_audio_spsc.c	clang-analyzer-unix.Malloc	4
 dm/host/tests/t_fpslock.c	clang-analyzer-core.NullDereference	1
 dm/host/tests/t_fs.c	bugprone-command-processor	2
 dm/host/tests/t_fs.c	clang-analyzer-unix.Stream	1
-dm/host/tests/t_fs_case.c	clang-analyzer-core.CallAndMessage	2
 dm/host/tests/t_fs_case.c	clang-analyzer-unix.Stream	1
 dm/host/tests/t_hid.c	bugprone-suspicious-memory-comparison	2
 dm/host/tests/t_hid.c	bugprone-unsafe-functions	1

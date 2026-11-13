@@ -103,9 +103,9 @@ pathlib.Path('paths.json').write_text(json.dumps(paths))
             seen = {}
             def popen(cmd, env, **kw): seen.update(env); raise FileNotFoundError(cmd[0])
             route = {'keys': '0:A', 'from': 0, 'secs': 1}
-            with mock.patch.dict(os.environ, DM_SAVE_SYNC=str(root / 'cloud')), mock.patch.object(bench.subprocess, 'Popen', popen):
+            with mock.patch.dict(os.environ, DM_SAVE_SYNC=str(root / 'cloud'), DM_SAVE_SYNC_CHOICE='cloud'), mock.patch.object(bench.subprocess, 'Popen', popen):
                 with self.assertRaises(FileNotFoundError): bench.run_one(a, '01007EF00011E000', build, {'host': str(root / 'host')}, route, root / 'out', None)
-                self.assertEqual(seen['DM_SAVE_SYNC'], '0')
+                self.assertEqual(seen['DM_SAVE_SYNC'], '0'); self.assertNotIn('DM_SAVE_SYNC_CHOICE', seen)
                 with contextlib.redirect_stderr(io.StringIO()):
                     for var, env in (({'host': str(root / 'host'), 'DM_SAVE_SYNC': str(root / 'cloud')}, []), ({'host': str(root / 'host')}, [f'DM_SAVE_SYNC={root}/cloud'])):
                         with self.assertRaises(SystemExit): bench.run_one(argparse.Namespace(**{**vars(a), 'env': env}), '01007EF00011E000', build, var, route, root / 'out', None)

@@ -49,8 +49,19 @@ static int info_string(const char *key, char *out, size_t n) {   // a string key
 
 static void alert(const char *title, const char *msg) {   // a dialog (the app has no window of its own), and the same line on stderr
     fprintf(stderr, "[RED] %s\n", msg);
+    char translated[4096]; const char *display = msg;
+    CFBundleRef bundle = CFBundleGetMainBundle();
+    CFStringRef key = CFStringCreateWithCString(NULL, msg, kCFStringEncodingUTF8);
+    if (bundle && key) {
+        CFStringRef value = CFBundleCopyLocalizedString(bundle, key, key, CFSTR("Launcher"));
+        if (value) {
+            if (CFStringGetCString(value, translated, sizeof translated, kCFStringEncodingUTF8)) display = translated;
+            CFRelease(value);
+        }
+    }
+    if (key) CFRelease(key);
     char *script = "on run argv\ndisplay alert (item 1 of argv) message (item 2 of argv) as critical\nend run";
-    char *argv[] = {"osascript", "-e", script, (char *)title, (char *)msg, NULL}; pid_t pid; int st;
+    char *argv[] = {"osascript", "-e", script, (char *)title, (char *)display, NULL}; pid_t pid; int st;
     if (!posix_spawnp(&pid, "osascript", NULL, NULL, argv, environ)) while (waitpid(pid, &st, 0) < 0 && errno == EINTR) {}
 }
 

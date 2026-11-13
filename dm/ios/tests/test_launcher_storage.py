@@ -10,6 +10,7 @@ import unittest
 from unittest.mock import patch
 
 REPO = Path(__file__).resolve().parents[3]
+TEST_ROOT = Path(os.environ.get('NXNATIVE_TEST_ROOT', tempfile.gettempdir()))
 sys.path.insert(0, str(REPO / 'dm/games'))
 import settings
 
@@ -17,7 +18,8 @@ import settings
 @unittest.skipUnless(sys.platform == 'darwin' and shutil.which('xcrun'), 'needs the macOS Swift toolchain')
 class LauncherStorageTests(unittest.TestCase):
     def test_only_changed_choices_are_stored(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        TEST_ROOT.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
             tmp = Path(tmp)
             (tmp / 'patched').mkdir()
             (tmp / 'patched/main.fixups.tsv').write_text('# RENDER_SCALE\t1\n')   # the render-scale row, a range
@@ -31,7 +33,7 @@ class LauncherStorageTests(unittest.TestCase):
             self.assertEqual(compile_result.returncode, 0, compile_result.stdout + compile_result.stderr)
             compile_result = subprocess.run(['xcrun', '-sdk', 'macosx', 'swiftc', '-swift-version', '5', '-parse-as-library', '-module-cache-path', str(tmp / 'module-cache'),
                             '-o', str(exe), str(REPO / 'dm/ios/Sources/LauncherSettings.swift'), str(REPO / 'dm/ios/Sources/LauncherRow.swift'), str(REPO / 'dm/ios/Sources/SaveSyncReport.swift'),
-                            str(REPO / 'dm/mac/Launcher.swift'), str(Path(__file__).with_name('launcher_layout_check.swift')), str(Path(__file__).with_name('launcher_storage_check.swift')), str(sync)],
+                            str(REPO / 'dm/mac/Launcher.swift'), str(REPO / 'dm/mac/I18n.swift'), str(Path(__file__).with_name('launcher_layout_check.swift')), str(Path(__file__).with_name('launcher_storage_check.swift')), str(sync)],
                             capture_output=True, text=True, timeout=300)
             self.assertEqual(compile_result.returncode, 0, compile_result.stdout + compile_result.stderr)
             r = subprocess.run([str(exe), str(tmp / 'launcher.json'), str(tmp / 'launcher_mac.json')], capture_output=True, text=True, timeout=60)

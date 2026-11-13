@@ -5,6 +5,7 @@
 // app without the game. "Show this window at launch" off: no window unless Option is held at launch, and launcher.c applies the saved choices. The window never takes focus by itself: an app
 // opened in the background (open -g) keeps its window behind until the player switches to it
 import AppKit
+import Combine
 import QuartzCore
 import SwiftUI
 
@@ -43,12 +44,12 @@ enum SaveCheck {
         case .choose:
             guard let r else { return .play(nil) }
             let a = NSAlert()
-            a.messageText = SaveSyncReport.chooseTitle
-            a.informativeText = r.chooseMessage(here: "Mac")
+            a.messageText = MacI18n.text(SaveSyncReport.chooseTitle)
+            a.informativeText = MacI18n.chooseSaveMessage()
             a.alertStyle = .warning
-            a.addButton(withTitle: r.localLabel(here: "Mac"))
-            a.addButton(withTitle: r.cloudLabel)
-            a.addButton(withTitle: cancel)
+            a.addButton(withTitle: MacI18n.localSaveLabel(r))
+            a.addButton(withTitle: MacI18n.cloudSaveLabel(r))
+            a.addButton(withTitle: MacI18n.text(cancel))
             a.buttons[0].keyEquivalent = ""   // no default: Return must not pick a save (the newer is not always the one to keep)
             a.buttons[2].keyEquivalent = "\u{1b}"
             switch a.runModal() {
@@ -58,11 +59,11 @@ enum SaveCheck {
             }
         case .unreadable:
             let a = NSAlert()
-            a.messageText = SaveSyncReport.unreadableTitle
-            a.informativeText = r?.unreadableMessage(here: "Mac") ?? ""
-            a.addButton(withTitle: "Play This Mac's Save")
-            a.addButton(withTitle: "Try Again")
-            a.addButton(withTitle: cancel)
+            a.messageText = MacI18n.text(SaveSyncReport.unreadableTitle)
+            a.informativeText = MacI18n.unreadableSaveMessage()
+            a.addButton(withTitle: MacI18n.text("Play This Mac's Save"))
+            a.addButton(withTitle: MacI18n.text("Try Again"))
+            a.addButton(withTitle: MacI18n.text(cancel))
             a.buttons[2].keyEquivalent = "\u{1b}"
             switch a.runModal() {
             case .alertFirstButtonReturn: return .play("offline")   // the mount does not wait for the cloud again
@@ -94,10 +95,10 @@ enum SaveCheck {
             if sem.wait(timeout: .now() + 0.5) == .timedOut {   // a cloud file to download: say so, and let the player go on without it
                 app.setActivationPolicy(.regular); app.activate(ignoringOtherApps: true)
                 let a = NSAlert()
-                a.messageText = "Checking the cloud save…"
-                a.informativeText = "Waiting for iCloud to deliver this game's save."
-                a.addButton(withTitle: "Play Without It")
-                a.addButton(withTitle: "Quit")
+                a.messageText = MacI18n.text("Checking the cloud save…")
+                a.informativeText = MacI18n.text("Waiting for iCloud to deliver this game's save.")
+                a.addButton(withTitle: MacI18n.text("Play Without It"))
+                a.addButton(withTitle: MacI18n.text("Quit"))
                 box.waiting = true
                 let answer = a.runModal()
                 box.waiting = false
@@ -119,6 +120,7 @@ enum SaveCheck {
 
 struct LauncherView: View {
     @ObservedObject var m: LauncherModel
+    @ObservedObject private var i18n = MacI18n.shared
     let done: (Bool) -> Void
     let fit: (CGFloat) -> Void
     @AppStorage("window.show") private var show = true
@@ -131,25 +133,38 @@ struct LauncherView: View {
             HStack(spacing: 12) {
                 Image(nsImage: NSApp.applicationIconImage).resizable().frame(width: 64, height: 64).accessibilityHidden(true)
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(info("CFBundleName") ?? "Game").font(.title2.weight(.semibold))
-                    Text("Version \(info("CFBundleShortVersionString") ?? "1.0")").foregroundStyle(.secondary)
+                    Text(info("CFBundleName") ?? MacI18n.text("Game")).font(.title2.weight(.semibold))
+                    Text(MacI18n.format("Version %@", info("CFBundleShortVersionString") ?? "1.0")).foregroundStyle(.secondary)
                 }
                 Spacer()
             }
             .padding([.horizontal, .top], 20)
             Form {
+                Section(MacI18n.text("General")) {
+                    Picker(selection: $i18n.language) {
+                        ForEach(MacI18n.Language.allCases, id: \.self) { language in
+                            Text(language.name).tag(language)
+                        }
+                    } label: {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(MacI18n.text("Language"))
+                            Text(MacI18n.text("Applies only to this settings window."))
+                                .font(.footnote).foregroundStyle(.secondary)
+                        }
+                    }
+                }
                 settingSections(basic: true)
                 CloudSavesSection()
                 Section {
-                    DisclosureGroup("Advanced settings", isExpanded: $advanced) {}
+                    DisclosureGroup(MacI18n.text("Advanced settings"), isExpanded: $advanced) {}
                 }
                 if advanced {
                     settingSections(basic: false)
                     Section {
-                        Button("Reset to tested defaults") { m.reset() }
+                        Button(MacI18n.text("Reset to tested defaults")) { m.reset() }
                             .disabled(!m.changed)
                     } footer: {
-                        Text("Brings back all settings this game was tested with.")
+                        Text(MacI18n.text("Brings back all settings this game was tested with."))
                     }
                 }
             }
@@ -160,15 +175,15 @@ struct LauncherView: View {
                 fit(extraHeight)
             }
             HStack {
-                Toggle("Show this window at launch", isOn: $show).toggleStyle(.checkbox)
+                Toggle(MacI18n.text("Show this window at launch"), isOn: $show).toggleStyle(.checkbox)
                 Spacer()
                 if checking {
                     ProgressView().controlSize(.small)
-                    Text("Checking the cloud save…").foregroundStyle(.secondary)
-                    Button("Play Without It") { checking = false; SaveCheck.apply("offline"); done(true) }
+                    Text(MacI18n.text("Checking the cloud save…")).foregroundStyle(.secondary)
+                    Button(MacI18n.text("Play Without It")) { checking = false; SaveCheck.apply("offline"); done(true) }
                 }
-                Button("Quit") { done(false) }
-                Button("Play") { start() }.keyboardShortcut(.defaultAction).disabled(checking)
+                Button(MacI18n.text("Quit")) { done(false) }
+                Button(MacI18n.text("Play")) { start() }.keyboardShortcut(.defaultAction).disabled(checking)
             }
             .padding(20)
         }
@@ -197,8 +212,11 @@ struct LauncherView: View {
         ForEach(m.sections(basic: basic), id: \.self) { section in
             let rows = m.rows(in: section, basic: basic)
             if !rows.isEmpty {
-                Section(section) {
-                    ForEach(rows) { SettingRow(s: $0, m: m) }
+                Section(MacI18n.text(section)) {
+                    ForEach(rows) {
+                        SettingRow(s: $0, m: m, displayText: { MacI18n.text($0) })
+                            .id(i18n.language)   // refresh row text when the lookup changes; keep the shared settings model
+                    }
                 }
             }
         }
@@ -208,6 +226,7 @@ struct LauncherView: View {
 /// Cloud saves: a folder the save is synced through (dm/host/save_sync.h), the one the iPhone app picks in its launcher's Cloud saves section. It is kept in this app's
 /// preferences as cloudSaves.folder, which launcher.c puts into DM_SAVE_SYNC before the host starts; a DM_SAVE_SYNC an env file or the launch environment set wins, and is shown here.
 struct CloudSavesSection: View {
+    @ObservedObject private var i18n = MacI18n.shared
     @AppStorage("cloudSaves.folder") private var folder = ""
     private let fixed: String? = {
         let env = ProcessInfo.processInfo.environment
@@ -217,26 +236,26 @@ struct CloudSavesSection: View {
 
     var body: some View {
         Section {
-            LabeledContent("Cloud saves") {
-                Text(fixed.map { "\(Self.shown($0)) (env.txt)" } ?? (folder.isEmpty ? "Off" : Self.shown(folder)))
+            LabeledContent(MacI18n.text("Cloud saves")) {
+                Text(fixed.map { MacI18n.format("%@ (env.txt)", Self.shown($0)) } ?? (folder.isEmpty ? MacI18n.text("Off") : Self.shown(folder)))
                     .foregroundStyle(.secondary).lineLimit(1).truncationMode(.head)
             }
             if fixed == nil {
                 HStack {
-                    Button(folder.isEmpty ? "Choose a folder…" : "Choose a different folder…", action: choose)
-                    if !folder.isEmpty { Button("Turn off") { folder = "" } }
+                    Button(MacI18n.text(folder.isEmpty ? "Choose a folder…" : "Choose a different folder…"), action: choose)
+                    if !folder.isEmpty { Button(MacI18n.text("Turn off")) { folder = "" } }
                 }
             }
         } footer: {
-            Text("Choose the iCloud Drive folder the iPhone app uses for this game. The save comes in when the game starts and goes out after each save; a save that is replaced is kept in the save's -backups folder.")
+            Text(MacI18n.text("Choose the iCloud Drive folder the iPhone app uses for this game. The save comes in when the game starts and goes out after each save; a save that is replaced is kept in the save's -backups folder."))
         }
     }
 
     private func choose() {
         let panel = NSOpenPanel()
         panel.canChooseDirectories = true; panel.canChooseFiles = false; panel.allowsMultipleSelection = false; panel.canCreateDirectories = true
-        panel.prompt = "Use for Cloud Saves"
-        panel.message = "The folder the iPhone app chose in its launcher's Cloud saves"
+        panel.prompt = MacI18n.text("Use for Cloud Saves")
+        panel.message = MacI18n.text("The folder the iPhone app chose in its launcher's Cloud saves")
         panel.directoryURL = URL(fileURLWithPath: folder.isEmpty ? Self.drive : folder)
         if panel.runModal() == .OK, let url = panel.url { folder = url.path }
     }
@@ -246,7 +265,7 @@ struct CloudSavesSection: View {
     /// A path under iCloud Drive as the Finder and the Files app name it: iCloud Drive › Documents › dev › Zelda; any other path as it is
     static func shown(_ path: String) -> String {
         guard path == drive || path.hasPrefix(drive + "/") else { return path }
-        return (["iCloud Drive"] + path.dropFirst(drive.count).split(separator: "/").map(String.init)).joined(separator: " › ")
+        return ([MacI18n.text("iCloud Drive")] + path.dropFirst(drive.count).split(separator: "/").map(String.init)).joined(separator: " › ")
     }
 }
 
@@ -254,15 +273,22 @@ private final class Launcher: NSObject, NSApplicationDelegate, NSWindowDelegate 
     let model: LauncherModel
     var window: NSWindow?
     var play = false
+    private var languageChange: AnyCancellable?
 
     init(_ model: LauncherModel) { self.model = model }
 
-    func applicationDidFinishLaunching(_ n: Notification) {
-        let name = info("CFBundleName") ?? "Game"
+    private func updateMenu() {
+        let name = info("CFBundleName") ?? MacI18n.text("Game")
         let menu = NSMenu(), item = NSMenuItem(), app = NSMenu()
-        app.addItem(withTitle: "Close Window", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
-        app.addItem(withTitle: "Quit \(name)", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        app.addItem(withTitle: MacI18n.text("Close Window"), action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
+        app.addItem(withTitle: MacI18n.format("Quit %@", name), action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         item.submenu = app; menu.addItem(item); NSApp.mainMenu = menu
+    }
+
+    func applicationDidFinishLaunching(_ n: Notification) {
+        updateMenu()
+        languageChange = MacI18n.shared.$language.dropFirst().receive(on: RunLoop.main).sink { [weak self] _ in self?.updateMenu() }
+        let name = info("CFBundleName") ?? MacI18n.text("Game")
         let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 560, height: 660), styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
         w.title = name; w.isReleasedWhenClosed = false; w.delegate = self
         w.contentMinSize = NSSize(width: 520, height: 0)

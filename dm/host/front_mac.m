@@ -1533,7 +1533,15 @@ void front_run(void (*guest)(void)) {
         // stay unset: mode=default forces this layer's HUD on, so the Metal HUD menu's Hide HUD left it on screen
         if (getenv("DM_METAL_HUD") && atoi(getenv("DM_METAL_HUD"))) LOG("front end: Metal performance HUD on (DM_METAL_HUD)");
         v.layer = g_layer; [(DmGameView *)v fitDrawable];
-        [win center];
+        NSScreen *home = nil; const char *ws = getenv("DM_WINDOW_SCREEN");
+        if (ws && *ws) {
+            NSArray<NSScreen *> *all = NSScreen.screens;
+            if (!strcmp(ws, "builtin")) { for (NSScreen *sc in all) if (CGDisplayIsBuiltin([sc.deviceDescription[@"NSScreenNumber"] unsignedIntValue])) { home = sc; break; } }
+            else if (atoi(ws) >= 0 && (NSUInteger)atoi(ws) < all.count) home = all[atoi(ws)];
+            if (home) LOG("front end: window on screen %s (DM_WINDOW_SCREEN=%s)", home.localizedName.UTF8String, ws); else LOG("[RED] front end: no screen for DM_WINDOW_SCREEN=%s", ws);
+        }
+        if (home) { NSRect vf = home.visibleFrame; [win setFrameOrigin:NSMakePoint(NSMidX(vf) - win.frame.size.width / 2, NSMidY(vf) - win.frame.size.height / 2)]; }
+        else [win center];
         [win makeKeyAndOrderFront:nil];
         screen_refresh(win.screen ?: NSScreen.mainScreen);
         g_win = win;

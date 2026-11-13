@@ -286,8 +286,14 @@ static _Atomic unsigned g_image_heap_n, g_big_n;   // g_big_n: large pools in ch
 // size it draws at between frames (dynamic resolution), not inside one. With the flush on every barrier a Metal System Trace of Ocarina of Time on an M1 (its dynamic-resolution
 // targets are a family from the first frame) showed the GPU's stages never overlapping: vertex work started under a running fragment phase in 0.9 % of kicks, and the GPU was
 // idle a quarter of each frame; flushed this way, 32.8 %, and frames take 1.3 ms less. DM_NVN_VIS_HEAPFRAME=0 flushes on every barrier again (ab for the DM_AB phases)
+// This skips flushes Metal asks for: a draw pass's attachment stores are writes too, and the host places other texture objects over the same bytes. On an M3 Max (macOS 27.2)
+// that left Ocarina of Time's Kokiri Forest bushes and ground ivy out of half to two thirds of frames (#2525); flagging the flush after every draw pass fixes it there, and on an
+// M1 that costs as much as no rule at all (36.4-36.8 ms against 33.3-33.5 ms a frame, the foliage steady in all three, screenshot diffs between frames 5 apart 2-3 %). So the rule
+// is on by default only on Macs without mesh-shading hardware (no MTLGPUFamilyApple9: M1, M2), where no missing draws were seen; elsewhere every barrier flushes as before
 static int sw_mode(const char *name, int dflt); static inline int sw_on(int m);
-static int vis_heapframe(void) { static int m = -1; if (m < 0) { m = sw_mode("DM_NVN_VIS_HEAPFRAME", 1); if (!m) MLOG("DM_NVN_VIS_HEAPFRAME=0: the image-heap alias flush on every barrier"); } return m && sw_on(m); }
+static int vis_heapframe(void) { static int m = -1; if (m < 0 && g_dev) { int old_gpu = ![g_dev supportsFamily:MTLGPUFamilyApple9]; m = sw_mode("DM_NVN_VIS_HEAPFRAME", old_gpu);
+        MLOG("DM_NVN_VIS_HEAPFRAME: the image-heap alias flush %s (%s)", m ? "once a submission and after memory writes" : "on every barrier", getenv("DM_NVN_VIS_HEAPFRAME") ? "DM_NVN_VIS_HEAPFRAME" : old_gpu ? "default on M1 / M2" : "default with MTLGPUFamilyApple9"); }
+    return m > 0 && sw_on(m); }
 static _Atomic int g_alias_pend = 1, g_alias_heap_pend = 1;
 static inline MTL4VisibilityOptions resource_vis(void) {
     if (g_image_heap_n && vis_heapframe()) {

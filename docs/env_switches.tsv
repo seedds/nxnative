@@ -249,7 +249,7 @@ DM_NVN_VSDUMP	path	Output file for post-vertex captures; used with DM_NVN_VSDUMP
 DM_NVN_VSDUMP_FROM	diagnostic	First presented frame eligible for a post-vertex capture (default 0)
 DM_NVN_VSDUMP_KEY	diagnostic	Vertex key to capture, or `*` for all eligible vertex shaders; storage-writing shaders are excluded
 DM_NVN_VSDUMP_MAX	diagnostic	Maximum post-vertex captures (default 1, or 256 for the wildcard key)
-DM_NVN_VIS_HEAPFRAME	switch	`0` puts the image-heap alias flush back on every barrier; on by default it is at each submission's first barrier and after encoders that may have written memory (a resolution family changes size between frames): Ocarina of Time on an M1 -1.3 ms a frame, its GPU stages overlapping again
+DM_NVN_VIS_HEAPFRAME	switch	`0` gives image heaps the alias flush on every barrier; `1` only at each submission's start and after memory writes (it skips flushes Metal asks for after attachment stores); the default is 1 on Macs without MTLGPUFamilyApple9 (M1, M2: Ocarina of Time about -3 ms a frame, no missing draws seen) and 0 elsewhere (an M3 Max lost Ocarina of Time's foliage); ab for the DM_AB phases
 DM_NVN_WAITS	diagnostic	`=1` turns on the wait ledger: every place a host or game thread waits on the CPU for the GPU or the encode thread, counted per frame
 DM_NVN_XV	switch	`0` turns off the cross-submission attachment validity ledger, which skips write-backs of colour attachments cleared before their next use (on by default, only with `DM_NVN_TBDR` on)
 DM_NVN_ZBLOCK	diagnostic	`=1` logs (`[zb]`) the all-zero blocks per level of each ASTC texture uploaded on the CPU (magenta when drawn); `=<folder>` also writes the raw storage of the first one per format and size

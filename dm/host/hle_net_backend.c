@@ -256,7 +256,8 @@ int dm_net_socket(int family, int type, int protocol) {
 // In Nextendo mode a closed UDP port stays open for a moment. A peer-to-peer library that closes a bound UDP socket and binds the same port
 // again (Mush8 handles this for Mario Kart 8 Deluxe's Pia; not yet seen in a log here) would otherwise have datagrams that arrive in between
 // answered with ICMP port unreachable, where Horizon drops them. So closing a bound, unconnected UDP socket keeps its host socket for
-// NET_PARK_MS, and a bind to that port within that time takes it back, with whatever arrived meanwhile.
+// NET_PARK_MS. A bind to that port within that time closes it first, so the game's new socket, with the options the game set on it, gets the
+// port; what arrived in between is dropped, as on Horizon.
 enum { NET_PARK_MAX = 8, NET_PARK_MS = 5000 };
 static struct { int fd; uint16_t port; uint64_t until; } g_parked[NET_PARK_MAX];   // fd 0 = free; under g_net_lock
 static void net_park_expire(uint64_t now) {   // with g_net_lock held
@@ -284,24 +285,13 @@ static int net_park(int fd) {   // 1 when the table took fd (the caller then doe
     pthread_mutex_unlock(&g_net_lock);
     return slot >= 0;
 }
-// A bind to a parked port: the guest's slot gets the parked host socket in place of its new, unbound one. 1 when it did
-static int net_unpark(int guest, uint64_t generation, uint16_t port) {
-    if (!port || !dm_net_nextendo_enabled()) return 0;
+// A bind to a parked port: the parked socket is closed, so the bind that follows finds the port free
+static void net_unpark(uint16_t port) {
+    if (!port || !dm_net_nextendo_enabled()) return;
     pthread_mutex_lock(&g_net_lock);
     net_park_expire(net_ms());
-    int taken = 0;
-    for (int i = 0; i < NET_PARK_MAX && !taken; i++) {
-        if (g_parked[i].fd <= 0 || g_parked[i].port != port) continue;
-        net_slot *s = &g_sockets[guest];
-        if (s->used && s->generation == generation && s->type == 2 && dup2(g_parked[i].fd, s->native) == s->native) {
-            fcntl(s->native, F_SETFD, FD_CLOEXEC);   // dup2 clears it; O_NONBLOCK and SO_NOSIGPIPE belong to the socket and came along
-            taken = 1;
-        }
-        close(g_parked[i].fd); g_parked[i].fd = 0;
-    }
+    for (int i = 0; i < NET_PARK_MAX; i++) if (g_parked[i].fd > 0 && g_parked[i].port == port) { close(g_parked[i].fd); g_parked[i].fd = 0; }
     pthread_mutex_unlock(&g_net_lock);
-    if (taken) fprintf(stderr, "[dm] net: udp/%u bound again; the socket the game just closed there is reused\n", port);
-    return taken;
 }
 static int net_close_owned(int guest, int check_generation, uint64_t generation) {
     pthread_mutex_lock(&g_net_lock);
@@ -387,9 +377,7 @@ int dm_net_bind(int guest, const void *addr, unsigned len) {
     if (!net_gate()) return -1;
     struct sockaddr_in a; if (net_addr_in(addr, len, &a)) return -1;
     net_ref r; if (net_borrow(guest, &r)) return -1;
-    close(r.fd);
-    if (r.type == 2 && net_unpark(guest, r.generation, ntohs(a.sin_port))) { net_trace("bind", guest, 0); return 0; }
-    if (net_borrow(guest, &r)) return -1;
+    if (r.type == 2) net_unpark(ntohs(a.sin_port));
     int result = bind(r.fd, (struct sockaddr *)&a, sizeof a), err = errno; close(r.fd);
     result = net_host_result(result, err); net_trace("bind", guest, result); return result;
 }
@@ -505,10 +493,13 @@ long dm_net_send(int guest, const void *buf, unsigned long len, int flags, const
         }
         a.sin_addr.s_addr = plan.target;
     }
-    uint64_t start = net_ms(); long result;
+    uint64_t start = net_ms(); long result; int reported = 0;
     for (;;) {
         result = addr ? net_discovery_packet(r.fd,buf,len,hostflags,&a) : sendto(r.fd,buf,len,hostflags,NULL,0); int err = errno;
         if (result >= 0) break;
+        // As on a receive (dm_net_recv): the host hands an earlier datagram's ICMP report to the next call on a UDP socket, a send too, and then
+        // does not send this datagram (the report is cleared). In Nextendo mode it is sent again once
+        if (r.type == 2 && !reported && (err == ECONNREFUSED || err == ECONNRESET || err == ENETRESET) && dm_net_nextendo_enabled()) { reported = 1; continue; }
         if (err != EAGAIN || r.nonblock || (flags & 0x80)) { result = net_error(net_errno(err)); break; }
         if (net_wait(&r, POLLOUT, r.send_ms, start)) { result = -1; break; }
     }

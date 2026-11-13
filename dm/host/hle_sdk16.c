@@ -193,6 +193,16 @@ static unsigned pl_builtin_font(pl_builtin_font_t *out, int type) {
 }
 HLE_FORCE("_ZN2nn2pl18GetBuiltInFontDataEPNS0_17BuiltInFontDataNxENS0_17BuiltInFontTypeNxEb", "one built-in font (Switch 1 type): the stand-in TTFs", unsigned, h_pl_BuiltInNx, pl_builtin_font_t *out, int type, unsigned b) { (void)b; return pl_builtin_font(out, type); }
 HLE_FORCE("_ZN2nn2pl18GetBuiltInFontDataEPNS0_20BuiltInFontDataOunceENS0_20BuiltInFontTypeOunceEb", "one built-in font (Switch 2 type): the stand-in TTFs", unsigned, h_pl_BuiltInOunce, pl_builtin_font_t *out, int type, unsigned b) { (void)b; return pl_builtin_font(out, type); }
+// Several built-in fonts by a list of Switch 2 types (Kirby and the Forgotten Land's Nintendo Switch 2 Edition, 04004D300C5AE001, at boot; SDK sdk+0x4fc780 in its v65536): the SDK
+//   takes at most 6 types, sends them to pl:u as one byte each, then fills *count entries of 0x18 bytes in order and returns whether the service answered. Unhooked, it aborts
+//   on pl:u as GetBuiltInFontData does. Each type is filled as GetBuiltInFontData fills it, in the order asked; a type with no stand-in font is left out of the count
+HLE_FORCE("_ZN2nn2pl21GetBuiltInFontDataSetEPiPNS0_20BuiltInFontDataOunceEPKNS0_20BuiltInFontTypeOunceEiNS_8settings12LanguageCodeEb", "built-in fonts by a list of types (Switch 2 types): the stand-in TTFs", unsigned, h_pl_BuiltInSetOunce, int *count, pl_builtin_font_t *out, const uint8_t *types, int n, uint64_t lang, unsigned b) {
+    (void)lang; (void)b;
+    int k = 0;
+    for (int i = 0; i < n && i < 6; i++) k += (int)pl_builtin_font(&out[k], types[i]);
+    *count = k;
+    return k > 0;
+}
 // Whether running on a Switch 2 (codename Ounce) (returns bool): the host reports false, as a Switch 1. Mario 1.2.1 uses it to decide whether to count add-on content (the upgrade pack) and suggest the Switch 2 Edition
 HLE_FORCE("_ZN2nn2pl16IsRunningOnOunceEv", "running on Switch 2: no", unsigned, h_pl_IsOunce, void) { return 0; }
 // The Legend of Zelda: Breath of the Wild (SDK 20): asks for the shared fonts to be loaded before querying their state; the host's stand-in fonts are there on demand. VR mode (the Labo VR goggles): the host never enters VR; the query is always false,

@@ -23,6 +23,7 @@
 #include "hle_movie_yuv.h"
 #include "hle_movie_avc.h"   // H.264 on VideoToolbox
 #include "hle_movie_av1.h"   // AV1 on VideoToolbox
+#include "codec_cadence.h"
 
 #define CV_MAGIC 0x56436d44u        // 'DmCV'
 #define CV_SYNC 0x53436d44u         // 'DmCS': a sync handle the host made (dec id, index, generation)
@@ -49,10 +50,28 @@ typedef struct {
     uint32_t pend[CV_BUFS], phead, pcount;    // released, waiting for a picture
     vpx_image_t *held[CV_HOLD]; int64_t held_ts[CV_HOLD]; uint8_t held_eos[CV_HOLD]; int nheld;
     int eos_pending;
+    codec_cadence cadence;
+    uint64_t timing_start, timing_count; int64_t timing_pts;
 } cv_dec;
 
 static cv_dec *g_cv[16];
 static pthread_mutex_t g_cv_mu = PTHREAD_MUTEX_INITIALIZER;   // lock order: g_cv_mu, then a decoder's mu, then g_spt_mu
+
+// OOT's observed 60-fps title movie takes one picture per game frame. A 30-fps
+// gameplay cap must not halve that movie's speed. Only consumed AV1 pictures
+// with a verified 60-fps timestamp cadence raise the cap; stale streams expire.
+int dm_codec_video_native_fps(void) {
+    if (strcmp(DM_GAME_ID, "0400486024DEC000")) return 0;
+    const char *off = getenv("DM_CODEC_VIDEO_FPS"); if (off && !strcmp(off, "0")) return 0;
+    int fps = 0; uint64_t now = now_ns();
+    pthread_mutex_lock(&g_cv_mu);
+    for (int i = 0; i < 16; i++) if (g_cv[i]) {
+        cv_dec *d = g_cv[i]; pthread_mutex_lock(&d->mu);
+        if (d->codec == CV_AV1 && codec_cadence_60(&d->cadence, now)) fps = 60;
+        pthread_mutex_unlock(&d->mu);
+    }
+    pthread_mutex_unlock(&g_cv_mu); return fps;
+}
 
 static cv_dec *cv_of(void *t) { cv_dec *d = t ? *(cv_dec **)t : NULL; return d && d->magic == CV_MAGIC ? d : NULL; }
 static cv_pool *pool_of(const void *t) { cv_pool *p = t ? *(cv_pool *const *)t : NULL; return p && p->magic == CV_MAGIC ? p : NULL; }
@@ -305,6 +324,7 @@ static Result cv_dec_reset(void *t) {   // Stop / Flush: pictures not yet given 
     pthread_mutex_lock(&d->mu);
     for (int i = 0; i < d->nheld; i++) vpx_img_free(d->held[i]);
     d->nheld = 0; d->eos_pending = 0;
+    d->cadence = (codec_cadence){0};
     cv_open(d);
     if (d->event) hle_signal_system_event(d->event);
     pthread_mutex_unlock(&d->mu);
@@ -395,7 +415,19 @@ static Result cv_dec_props(uint16_t *w, uint16_t *h, uint16_t *cw, uint16_t *ch,
     cv_dec *d = cv_of(t); if (!d || i >= CV_BUFS) return CV_R(2004);
     pthread_mutex_lock(&d->mu);
     int ok = d->buf[i].filled;
-    if (ok) { *w = *cw = d->buf[i].w; *h = *ch = d->buf[i].h; *ts = d->buf[i].ts; *eos = d->buf[i].eos != 0; }
+    if (ok) { *w = *cw = d->buf[i].w; *h = *ch = d->buf[i].h; *ts = d->buf[i].ts; *eos = d->buf[i].eos != 0;
+        unsigned prior_samples = d->cadence.samples; int64_t prior_pts = d->cadence.pts;
+        codec_cadence_note(&d->cadence, *ts, now_ns());
+        if (prior_samples == 2 && d->cadence.samples == 3)
+            LOG("[codec] %s decoder %u: consumed 60-fps timestamps (step %lld ns)", k_cv_name[d->codec], d->id, (long long)(*ts - prior_pts));
+        if (getenv("DM_CODEC_VIDEO_TIMING") && *ts != prior_pts) {
+            uint64_t now = now_ns();
+            if (!d->timing_start) { d->timing_start = now; d->timing_pts = *ts; }
+            if (++d->timing_count % 180 == 0)
+                LOG("[codec] playback timing: media %.3f s, wall %.3f s, pictures %llu", (*ts - d->timing_pts) / 1e9,
+                    (now - d->timing_start) / 1e9, (unsigned long long)d->timing_count);
+        }
+    }
     pthread_mutex_unlock(&d->mu);
     return ok ? 0 : CV_NONE;
 }

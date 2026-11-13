@@ -41,6 +41,7 @@ Measured on the M4 Pro, in a 1920x1080 window: 60 fps at the title, 44 to 52 fps
 - [A sync never fenced since its Initialize is signalled](../../../docs/reference/nvn-objects.md#a-sync-never-fenced-since-its-initialize-is-signalled).
 - [The provoking vertex is the first](../../../docs/reference/rendering.md#the-provoking-vertex-is-the-first): it sets mode 0.
 - [A 1D array texture uploaded as its layer count of rows per layer](../../../docs/reference/rendering.md#a-1d-array-texture-uploaded-as-its-layer-count-of-rows-per-layer): its light-profile lookup table.
+- [A loop exit's subgroup block run by the lanes of every iteration together](../../../docs/reference/shaders.md#a-loop-exits-subgroup-block-run-by-the-lanes-of-every-iteration-together): resolved, found offline: compute shader `607ceeefb9478700`'s warp-aggregated `SURED.MIN` mixed keys, and 11 other compute shaders have the same shape. No picture has been traced to it.
 - [Touch gestures recognized from the touch points](../../../docs/reference/services.md#touch-gestures-recognized-from-the-touch-points).
 - [SDF definitions in RE Engine PAKs](../../../docs/reference/shaders.md#sdf-definitions-in-re-engine-paks).
 - [Pool tables that held only their own texture type](../../../docs/reference/nvn-objects.md#pool-tables-that-held-only-their-own-texture-type): Cabin's monitor face (sprites read as 2D arrays) and every cube map read by handle.

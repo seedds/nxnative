@@ -30,6 +30,7 @@ There is no game-specific patch and no cut: the rewriter needs only [a site for 
 - The rewriter stopped on `caspal x18, x19, x4, x5, [x16]` ([Compare and swap of a register pair that is x18, x19](../../../docs/reference/rewriter.md#compare-and-swap-of-a-register-pair-that-is-x18-x19)).
 - The shader split stopped on `main`'s Needle containers ([Needle containers with NVN2 records](../../../docs/reference/shaders.md#needle-containers-with-nvn2-records)) and could not read `raw/NeedleShader.pac` ([Shaders in Hedgehog Engine 2's PACx 403 archives](../../../docs/reference/shaders.md#shaders-in-hedgehog-engine-2s-pacx-403-archives)).
 - `nvnDeviceGenerateDebugDomainId`, called once at boot, was unimplemented; the host now hands out a new number for each call.
+- 80 of its 352 compute shaders run a block with subgroup operations at a loop exit ([A loop exit's subgroup block run by the lanes of every iteration together](../../../docs/reference/shaders.md#a-loop-exits-subgroup-block-run-by-the-lanes-of-every-iteration-together)): found by a translator A/B, not by a picture; what they compute and whether any frame differed is not known. One of them, `0e6f8156033ae07e`, ends the program in that block, which the first form of the fix broke.
 
 ## Open
 

@@ -41,6 +41,7 @@ Measured on the M6 (16 GB), in a 1280x720 window: 60 fps at the title (frame tim
 - At frame 5 one shader is pushed a buffer address on a page of a sparse pool the game has not mapped yet: it reads 0, as on the console ([A buffer address on an unmapped page of a sparse pool](../../../docs/reference/nvn-objects.md#a-buffer-address-on-an-unmapped-page-of-a-sparse-pool)).
 - It binds compute uniform slot 1 empty (address 0, size 0) before every dispatch of one shader, which read as 0 on the console; the host reported it as unbound, in red ([A uniform slot the game binds empty](../../../docs/reference/rendering.md#a-uniform-slot-the-game-binds-empty)).
 - It sets the float blend clamp to the largest finite value, which Metal cannot do; no colour target held a non-finite pixel over the opening, so nothing drawn differs ([Float blend clamp](../../../docs/reference/nvn-objects.md#float-blend-clamp-nvncommandbuffersetfloatblendclamp)).
+- 6 of its 7,568 compute shaders run a block with subgroup operations at a loop exit ([A loop exit's subgroup block run by the lanes of every iteration together](../../../docs/reference/shaders.md#a-loop-exits-subgroup-block-run-by-the-lanes-of-every-iteration-together)): found by a translator A/B, not by a picture.
 
 ## Open
 

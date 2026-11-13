@@ -31,6 +31,14 @@
 - **Fix:** the NSP script reads the first bytes of every file whose name promises a format (`romfs_image.FORMAT_HEADS`: `.zs` starts with a zstd frame or a skippable frame) once per extracted image (`check_formats`, after extraction; the result is kept in `RomFS.img.formats` beside the image until the image changes: Ocarina of Time 16 s from a USB SSD) and stops naming the damaged files: pack again from a good copy of the game. `--allow-damaged` lists them and packs them as they are. The host serves a game's files as they are: substituting other files for damaged ones would hide the damage and change what the game draws.
 - **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md), a contributor's NUP of v131072.
 
+### A NUP whose folder contains itself
+
+- **Symptom:** `pack_nup.py`, or the NSP script on a NUP, ends in a Python traceback (`RecursionError` in `tree_bytes`) instead of a `[RED]` line.
+- **Cause:** `Nup` checked each folder's child range and each child index against the table sizes, but not that the folders form a tree. A table of contents whose hash matches can still name a folder, or one of its ancestors, as its own child; `scan` sums the base package's size by recursion and never ends, and `entries` (the RomFS image's walk) would loop.
+- **Fix:** `Nup` walks the folder graph once, depth first without recursion, and refuses a folder that contains itself, naming it (`contains itself (damaged file)`), before any other walk sees the container.
+- **Check:** `test_nsp_nup` Read.test_folder_cycle_refused: a folder made its own parent, then a cycle of two folders, each with the TOC hash fixed up, are refused, and the script exits 1 with no traceback. Without the check the container opens.
+- **Found on:** a code audit; no damaged NUP of this kind is known.
+
 ### A provisional profile of a Switch 2 game shows no SDK and a Switch 1 memory pool
 
 - **Symptom:** the survey of a Switch 2 game says `SDK: ?` and `no SDK version string found`, and its provisional profile has `app_pool 0xCD500000`.

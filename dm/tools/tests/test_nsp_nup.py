@@ -156,6 +156,19 @@ class Read(Base):
         self.path.write_bytes(b[:-16])
         with self.assertRaisesRegex(pack_nup.Error, 'header says'): pack_nup.Nup(self.path)
 
+    def test_folder_cycle_refused(self):   # a TOC whose hash matches but whose folder names an ancestor as a child: the tree walks would recurse for ever
+        n = self.open(); ndirs, slots, dirs = n.ndirs, list(n.slots), list(n.dirs)
+        slots_at = 0x80 + 0x30 + len(n.packages) * 0x40 + ndirs * 0x18 + len(n.files) * 0x50; n.close()
+        orig = self.path.read_bytes(); toc_size = struct.unpack_from('<Q', orig, 0x10)[0]
+        def folders(d): _, first, count = dirs[d]; return [first + j for j in range(count) if slots[first + j] < ndirs]   # the slots of d's folder children
+        j = next(j for j in folders(0) if folders(slots[j])); sub = slots[j]   # the base's romfs/, which has a folder
+        for at, to in ((j, 0), (folders(sub)[0], sub)):   # romfs/ made the root itself; then romfs/dir made romfs/ (a cycle of two)
+            b = bytearray(orig); struct.pack_into('<I', b, slots_at + 4 * at, to)
+            b[0x18:0x38] = hashlib.sha256(bytes(b[0x80:0x80 + toc_size])).digest(); self.path.write_bytes(b)
+            with self.assertRaisesRegex(pack_nup.Error, 'contains itself'): pack_nup.Nup(self.path)
+        r = subprocess.run([sys.executable, str(REPO / 'scripts/pack_nup.py'), str(self.path)], capture_output=True, text=True)
+        self.assertEqual(r.returncode, 1); self.assertIn('contains itself', r.stderr); self.assertNotIn('Traceback', r.stderr)
+
     def test_damaged_content_refused(self):
         n = self.open(); app, base, vers, _ = pack_nup.scan(n)
         i = next(i for i, f in enumerate(n.files) if f[5] == 1)

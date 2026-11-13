@@ -194,6 +194,22 @@ A game may tell NVN objects apart by their bytes, without an NVN call. A host re
 - **Fix:** it grows in blocks of 1,024 (`nvn_dirty.c`, up to 262,144).
 - **Found on:** [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md): the phone reached 4,006 pools (found while fixing GitHub issue #9: [Deferred-release drain without an autorelease pool](memory.md#deferred-release-drain-without-an-autorelease-pool)).
 
+### Texture data changed between registrations of the same pool memory
+
+- **Symptom:** a cached address range is reported clean after a pool is destroyed, its memory rewritten while unregistered, and another pool registered over it.
+- **Cause:** new tracking pages start at generation zero. A stamp retained from the previous pool can therefore miss writes that happened without page protection.
+- **Fix:** each registered range publishes an atomic registration epoch. A query with an older stamp treats its span as dirty, including cached handles and page counts that exclude host-owned writes. Ordinary post-registration generation checks remain unchanged. Ported from upstream [b65b9b0](https://github.com/seedds/nxnative/commit/b65b9b0fc75ad151de099cbbf232b29e077acafc).
+- **Check:** `t_dirty_slots` verifies three old-stamp queries against reused memory. All three fail with the original implementation and pass with the fix. Dirty race and retirement-race fixtures also pass on the M4 Pro.
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md). This reproduces the tracking mechanism; it does not attribute a particular observed graphical artifact to it.
+
+### Rebuilding views of finalized textures still used by registered IDs
+
+- **Symptom:** a registered texture ID repeatedly creates Metal views after its texture object was finalized.
+- **Cause:** finalized textures can still resolve through the ghost table, but the view cache accepted live serials only.
+- **Fix:** retain ordinary view sets while their ghost serial remains present. Sweep after ghost retirement once per frame, without touching its LRU; detach under the serial lock and release outside it. Pool retirement and base-texture validation still invalidate views. Texture-buffer row views keep their separate ownership path. `DM_NVN_VC_KEEP=0` disables this retention. Ported from upstream [9339e55](https://github.com/seedds/nxnative/commit/9339e55474e533b60f3a9937a99fc8b00fa76812).
+- **Check:** `check_t_vc_ghost` covers retention, expiry, replacement and pool lifetime with 19 checks enabled and 17 disabled. Targeted texture, alias, pool, readback and queue-lifetime fixtures pass. No M4 Pro FPS gain is claimed.
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md), including a bounded Castle Town SDR MetalFX/interpolation run with both ports enabled. Other games and long sessions remain unchecked on this fork.
+
 ### Dead texture serials kept in a ghost table
 
 - **Symptom:** the live serial table grows by about 10 entries a frame (276,000 after 25,000 frames), or replay repeatedly resolves finalized textures once its active working set exceeds 512 entries.

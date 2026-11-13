@@ -139,6 +139,8 @@ From an empty save: at about 45 s `A` (title), `A` (New Game), then the movie. F
 
 ## Found on this game
 
+- Experimental lifetime backports, 13 November 2026: [pool registration epochs](../../../docs/reference/nvn-objects.md#texture-data-changed-between-registrations-of-the-same-pool-memory) and [cached ghost-texture views](../../../docs/reference/nvn-objects.md#rebuilding-views-of-finalized-textures-still-used-by-registered-ids). Sixteen targeted fixtures compile and pass on M4 Pro, including the original dirty implementation failing the three new regression checks. A private host containing these exact source fixes completed a 131-second Castle Town SDR MetalFX/interpolation diagnostic without GPU errors. The normal installed host is unchanged; other games and long-session validation are pending. No FPS improvement or fix for the reported light-beam/transparency artifacts is established by this test.
+
 - [Residency changes waiting for a slow commit](../../../docs/reference/memory.md#residency-changes-can-wait-for-a-slow-commit): queued allocation changes preserve HDR/FI and the texture-cache lifetime checks. The M4 Pro contention fixture falls from 112.41 to 0.74 ms for 200 operations while a commit lock is held for 100 ms. A copied-save forest/dialogue run passes HDR native-copy fidelity and interpolation; this is not a measured gameplay speedup or sustained-120 result.
 
 - [Private spatial MetalFX output](../../../docs/reference/rendering.md#spatial-metalfx-output-must-use-private-storage): the M4 Pro drawable is managed, so final scaling now uses a legal private output and exact GPU copy. The actual game and 27 validation checks pass; rare presentation gaps, HDR and object-motion validation remain open.

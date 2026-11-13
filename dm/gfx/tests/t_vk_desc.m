@@ -145,6 +145,41 @@ int main(void) {
         h_vkDestroyDescriptorPool(dev, cp, NULL); h_vkDestroyImageView(dev, view, NULL); h_vkDestroyImage(dev, im, NULL);
         h_vkDestroySampler(dev, sa, NULL); h_vkDestroySampler(dev, sb, NULL);
     }
+    // Layouts destroyed while what was made from them lives on (Vulkan allows it): a set and a pipeline keep reading the set layout, the pipeline its push-constant size;
+    // the last of them frees the set layout. A destroyed pipeline releases its dynamic depth-stencil state; a destroyed render pass and pipeline layout are freed (ASan build)
+    __weak id<MTLDepthStencilState> wdss;
+    @autoreleasepool {
+        VkDescriptorSetLayoutBinding b = {3, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL};
+        VkDescriptorSetLayoutCreateInfo lci = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, .bindingCount = 1, .pBindings = &b};
+        VkDescriptorSetLayout L3; h_vkCreateDescriptorSetLayout(dev, &lci, NULL, &L3);
+        VkPushConstantRange pr = {VK_SHADER_STAGE_FRAGMENT_BIT, 32, 64};
+        VkPipelineLayoutCreateInfo plci = {.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, .setLayoutCount = 1, .pSetLayouts = &L3, .pushConstantRangeCount = 1, .pPushConstantRanges = &pr};
+        VkPipelineLayout pl; h_vkCreatePipelineLayout(dev, &plci, NULL, &pl);
+        VkDescriptorPool lp; VkDescriptorPoolCreateInfo pci = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, .maxSets = 1};
+        h_vkCreateDescriptorPool(dev, &pci, NULL, &lp);
+        VkDescriptorSetAllocateInfo ai = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO, .descriptorPool = lp, .descriptorSetCount = 1, .pSetLayouts = &L3};
+        VkDescriptorSet s3; h_vkAllocateDescriptorSets(dev, &ai, &s3);
+        VkGraphicsPipelineCreateInfo gci = {.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO, .layout = pl};   // no stages: made and handed out without a Metal state
+        VkPipeline p; h_vkCreateGraphicsPipelines(dev, NULL, 1, &gci, NULL, &p);
+        CHECK(L3->refs == 3, "the set layout is held by its handle, the set and the pipeline");
+        h_vkDestroyPipelineLayout(dev, pl, NULL); h_vkDestroyDescriptorSetLayout(dev, L3, NULL);
+        CHECK(L3->refs == 2, "destroying the layouts drops only the handle's hold");
+        CHECK(p->pc_size == 96 && p->nset == 1 && p->set[0] == L3, "the pipeline keeps its push-constant size and set layout");
+        CHECK(s3->L == L3 && L3->idx[3] >= 0 && L3->total == 1, "the set still reads its layout");
+        MTLDepthStencilDescriptor *dd = [MTLDepthStencilDescriptor new]; dd.depthCompareFunction = MTLCompareFunctionLess;
+        p->dss_dyn = [g_dev newDepthStencilStateWithDescriptor:dd]; wdss = p->dss_dyn;
+        h_vkFreeDescriptorSets(dev, lp, 1, &s3);
+        CHECK(L3->refs == 1, "freeing the set drops its hold");
+        h_vkDestroyPipeline(dev, p, NULL);   // the last hold: the set layout is freed
+        h_vkDestroyDescriptorPool(dev, lp, NULL);
+        VkAttachmentDescription at = {.format = VK_FORMAT_R8G8B8A8_UNORM, .samples = VK_SAMPLE_COUNT_1_BIT};
+        VkAttachmentReference ar = {0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
+        VkSubpassDescription sp = {.colorAttachmentCount = 1, .pColorAttachments = &ar};
+        VkRenderPassCreateInfo rci = {.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO, .attachmentCount = 1, .pAttachments = &at, .subpassCount = 1, .pSubpasses = &sp};
+        VkRenderPass rp; CHECK(h_vkCreateRenderPass(dev, &rci, NULL, &rp) == VK_SUCCESS, "render pass created");
+        h_vkDestroyRenderPass(dev, rp, NULL);
+    }
+    CHECK(!wdss, "a destroyed pipeline releases its dynamic depth-stencil state");
     printf("Vulkan descriptors: %d checks, %d failed\n", checks, fails);
     return fails != 0;
 }

@@ -341,7 +341,7 @@ int main(int argc, char **argv) { @autoreleasepool {
         printf("setup\tgroups %lux%lux%lu of %lux%lux%lu, %d dispatches a command buffer, %d rounds, %s\n", (unsigned long)grid.width, (unsigned long)grid.height, (unsigned long)grid.depth, (unsigned long)tgs.width, (unsigned long)tgs.height, (unsigned long)tgs.depth, P, R, D.name.UTF8String);
         return 0;
     }
-    if (argc < 5 || strcmp(argv[1], "run")) { fprintf(stderr, "usage: fsbench stats <lib> [fn] [format] | fsbench run <scene.json> <out dir> <lib>...\n"); return 2; }
+    if (argc < 5 || strcmp(argv[1], "run")) { fprintf(stderr, "usage: fsbench stats <lib> [fn] [format] | run <scene.json> <out dir> <lib>... | cstats <lib> [fn] | crun <scene.json> <out dir> <lib>... | mstats <mesh lib> <fragment lib> [object lib]\n"); return 2; }
     NSDictionary *sc = [NSJSONSerialization JSONObjectWithData:[NSData dataWithContentsOfFile:@(argv[2])] options:0 error:nil];
     NSString *out = @(argv[3]); [[NSFileManager defaultManager] createDirectoryAtPath:out withIntermediateDirectories:YES attributes:nil error:nil];
     NSUInteger W = [sc[@"w"] unsignedIntegerValue], H = [sc[@"h"] unsignedIntegerValue];

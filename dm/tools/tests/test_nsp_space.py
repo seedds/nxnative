@@ -3,8 +3,11 @@ with clones the base game counts once, without them once per version. No game fi
 import importlib.util
 from pathlib import Path
 import shutil
+import sys
 import tempfile
+import types
 import unittest
+from unittest import mock
 
 REPO = Path(__file__).resolve().parents[3]
 spec = importlib.util.spec_from_file_location('build_ipa_from_nsp', REPO / 'scripts/build_ipa_from_nsp.py')
@@ -35,6 +38,15 @@ class Space(unittest.TestCase):
     def test_no_clone_source_without_v0(self):   # clones need the base game extracted alone first
         base, u1, u2 = self.nsp('base.nsp', 100), self.nsp('u1.nsp', 5), self.nsp('u2.nsp', 6)
         self.assertEqual(nsp.extract_bytes({'v1': (base, u1), 'v2': (base, u2)}, True), 211)
+
+    def test_free_gb_reports_space(self):
+        self.assertGreater(nsp.free_gb(self.tmp), 0)
+        self.assertGreater(nsp.free_gb(self.tmp / 'missing/child/dir'), 0)
+
+    @unittest.skipUnless(sys.platform == 'darwin', 'CoreFoundation purgeable capacity query is macOS-only')
+    def test_free_gb_includes_darwin_important_usage_capacity(self):
+        with mock.patch.object(nsp.shutil, 'disk_usage', return_value=types.SimpleNamespace(free=1024)):
+            self.assertGreater(nsp.free_gb(self.tmp / 'missing/child/dir'), 1 / 2**10)
 
 
 if __name__ == '__main__':

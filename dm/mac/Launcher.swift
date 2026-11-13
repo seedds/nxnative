@@ -194,6 +194,13 @@ struct LauncherView: View {
         .onChange(of: wanted, initial: true) {
             if heights.header > 0, heights.basic > 0 { fit(wanted) }
         }
+        .onChange(of: show) { _, on in
+            // The line that says how to get the window back comes under the checkbox, at the settings' end: in a window the screen keeps shorter than its
+            // settings (a laptop's, with Advanced settings open) that is below its edge, and the checkbox itself went half out of sight (the line's copy above,
+            // which keeps the room under the Advanced row, grows with it). So the settings scroll to their end, where the line is
+            guard !on else { return }
+            withAnimation(.easeOut(duration: 0.2)) { position.scrollTo(edge: .bottom) }
+        }
         .onChange(of: advanced) { _, open in
             closes += 1
             closing = !open

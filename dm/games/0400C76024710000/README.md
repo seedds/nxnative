@@ -30,6 +30,7 @@ Measured on the M4 Pro, in a 1920x1080 window: 60 fps at the title, 44 to 52 fps
 
 ## Found on this game
 
+- [Compute dispatches past the pipeline's thread limit](../../../docs/reference/shaders.md#compute-dispatches-past-the-pipelines-thread-limit): resolved, found offline (no M1 or M2 run): 73 of its 255 compute shaders above 384 threads (69 of them 1,024 threads) took more registers on `applegpu_g13s` / `applegpu_g14g` than their size allows, so on an M1 or M2 their dispatches ran nothing; with the local size on the kernel all fit, and the M4 Pro's code is unchanged. What each draws is not known.
 - [H.264 parameter sets past the eighth argument](../../../docs/reference/movies.md#h264-parameter-sets-past-the-eighth-argument): its opening movies.
 - [More than 1,024 mapped runs in a sparse pool](../../../docs/reference/nvn-objects.md#more-than-1024-mapped-runs-in-a-sparse-pool): the GPU hang 3 to 4 minutes into the intro.
 - [Pages changed under a buffer the GPU still uses](../../../docs/reference/nvn-objects.md#pages-changed-under-a-buffer-the-gpu-still-uses): absurd indirect dispatches and a hang while it maps and unmaps sparse pages.

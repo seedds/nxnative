@@ -5600,6 +5600,20 @@ static void shmap_read_once(void) { static dispatch_once_t once; dispatch_once(&
 // That, then the prewarm (warm_start) once: the submit thread and the tools only. The flag is set before warm_start runs, so a call from inside it (pso_prebuild) returns at
 // once; inside the dispatch_once that call re-entered it and libdispatch aborted (Tears of the Kingdom and Pokémon Scarlet at boot, chain d0e99bd4b2fe)
 static void shmap_load(void) { shmap_read_once(); static int warmed; if (!warmed) { warmed = 1; warm_start(); } }
+// Shaders whose draws are left out (DM_SKIP_GRASS=1; DM_SKIP_SHADER_MATCH=<text>,<text>,...): the keys of the shader map's rows whose source file name contains one of the texts
+// (case-insensitive). DM_SKIP_GRASS stands for the foliage shaders (the game's Foliage package, FoliageShader.sharcb, and the grass effect Obj_Plant_Grass); it can take other foliage
+// with it (bushes), and a key the map first met in a foliage file that another shader shares goes too. A program with any stage in the set is not drawn (draw_skipped)
+static NSMutableSet *g_skip_keys; static int g_skip_draws;
+static void skip_init(NSMutableArray<NSString *> **pats) {
+    *pats = [NSMutableArray array];
+    const char *g = getenv("DM_SKIP_GRASS"); if (g && !strcmp(g, "1")) { [*pats addObject:@"/Foliage"]; [*pats addObject:@"Obj_Plant_Grass"]; }
+    else if (g && strcmp(g, "0") && *g) MLOG("[RED] DM_SKIP_GRASS=%s: must be 0 or 1; grass drawn", g);
+    const char *w = getenv("DM_SKIP_WATER"); if (w && !strcmp(w, "1")) [*pats addObject:@"Water"];   // the shaders whose source name has Water in it (effects: waterfalls, fountains, water-temple parts); the lake and river surface may be a variant of the Model shader, which this cannot tell apart
+    const char *fx = getenv("DM_SKIP_EFFECTS"); if (fx && !strcmp(fx, "1")) [*pats addObject:@"/Effect/"];   // every particle and effect shader (a test for how much they cost)
+    const char *m = getenv("DM_SKIP_SHADER_MATCH");
+    if (m && *m) for (NSString *t in [@(m) componentsSeparatedByString:@","]) if (t.length) [*pats addObject:t];
+    if ((*pats).count) g_skip_keys = [NSMutableSet set];
+}
 static void shmap_read(void) {
     if (g_shmap) return;
     const char *e = getenv("DM_NVN_SHMAP");
@@ -5607,11 +5621,14 @@ static void shmap_read(void) {
     NSString *txt = [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:nil];
     if (!txt) MDIE("cannot read the shader map %s (DM_NVN_SHMAP can name another)", path.UTF8String);
     g_shmap = [NSMutableDictionary dictionary];
+    NSMutableArray<NSString *> *skip_pats = nil; skip_init(&skip_pats);
     for (NSString *ln in [txt componentsSeparatedByString:@"\n"]) {
         if (!ln.length || [ln hasPrefix:@"#"] || [ln hasPrefix:@"package"]) continue;
         NSArray *c = [ln componentsSeparatedByString:@"\t"];
         if (c.count > 3) g_shmap[c[3]] = c[2];
+        if (skip_pats.count && c.count > 4) for (NSString *t in skip_pats) if ([c[4] rangeOfString:t options:NSCaseInsensitiveSearch].location != NSNotFound) { [g_skip_keys addObject:c[3]]; break; }
     }
+    if (skip_pats.count) { g_skip_draws = 1; MLOG("skip shaders: %lu keys match %s (draws of programs using them are not encoded: DM_SKIP_GRASS, DM_SKIP_SHADER_MATCH)", (unsigned long)g_skip_keys.count, [skip_pats componentsJoinedByString:@","].UTF8String); }
     g_shmap_path = path;
     const char *m = getenv("DM_MSL_DIR");
     // Library directory = <DM_MSL_DIR or default cache>/b-<translation chain version>: the version comes from dm/gfx/nvn/dmsh_chain.h (tools/dmsh_chain.py), one for every game; a host built from an old source tree only accepts libraries of the old version
@@ -5688,7 +5705,7 @@ typedef struct { int8_t fx[32]; uint8_t fbmask, lmap[8]; } bf_key;
 #include "nvn_pso_skey.h"
 #include "nvn_geometry.h"
 #include "nvn_feedback.h"
-@interface NvProg : NSObject { @public NvShader *sh[6]; char gs_miss[17]; NvProg *geo_raster, *geo_lean_raster; int8_t c_sw, c_iw, c_img; } @end   // c_sw / c_iw / c_img: prog_swrites, udc_note_draw's image write, image_prepare's written image slots; + 1 once known (the shaders are fixed once made)   // geo_raster: GS output reader paired with this program's fragment stage; geo_lean_raster: its own vertex and fragment stages (a lean passthrough kernel)
+@interface NvProg : NSObject { @public NvShader *sh[6]; char gs_miss[17]; NvProg *geo_raster, *geo_lean_raster; int8_t c_sw, c_iw, c_img, skip; } @end   // skip: a stage's shader is in the skip set (DM_SKIP_GRASS / DM_SKIP_SHADER_MATCH), the program's draws are not encoded; c_sw / c_iw / c_img: prog_swrites, udc_note_draw's image write, image_prepare's written image slots; + 1 once known (the shaders are fixed once made)   // geo_raster: GS output reader paired with this program's fragment stage; geo_lean_raster: its own vertex and fragment stages (a lean passthrough kernel)
 @implementation NvProg @end
 // Warm-up entry: built in the background, waiting to be taken by the submit thread. vs / fs are strong references (in pso they are only raw pointers, and the background dictionary is released when the task ends)
 @interface WarmItem : NSObject { @public int kind, record; NSString *key, *vs_key, *fs_key, *ts_key; NvShader *shader, *vs, *fs, *ts; pso_key pso; id<MTLFunction> fsfn; id object; } @end   // record: a prefetched library, written to the prewarm lists when claimed (shader_get's lines)
@@ -6116,6 +6133,7 @@ static __unsafe_unretained NvProg *prog_get(const prog_t *cp) {   // Called only
         uint8_t md[8]; if (!prog_key(p, i, md)) MDIE("program stage %u has no shader key", i);
         NSString *k = [NSString stringWithFormat:@"%02x%02x%02x%02x%02x%02x%02x%02x", md[0], md[1], md[2], md[3], md[4], md[5], md[6], md[7]];
         NSString *stage = g_shmap[k];
+        if (g_skip_keys && [g_skip_keys containsObject:k]) o->skip = 1;
         if (!stage) {   // Not in the package: look up the compute kernels embedded in the main body (nvn_builtin.h)
             NvShader *b = builtin_get(k.UTF8String);
             if (b) { o->sh[5] = b; continue; }
@@ -6527,6 +6545,7 @@ static int treg_swizzle(const treg_t *r, MTLPixelFormat base_pf, int in_place, u
     }
     return need_sw;
 }
+static int tex_off_wants(const tex_t *t); static int stand_make(int id_);   // DM_TEXTURES_OFF (defined with the pool stand-ins)
 static id<MTLTexture> tex_by_id(int tid) {   // Caller holds g_rmu
     if (g_tpool_n && tid >= g_tpool_n) { if (!g_stat_tex_oob++) MLOG("texture ID %d outside the pool (capacity %d) treated as an empty slot: reads 0", tid, g_tpool_n); return nil; }
     if (tid < 0 || tid >= g_ntreg || !g_treg[tid].ok) { RED_ONCE(10, "texture ID %d not registered", tid); return nil; }
@@ -6546,6 +6565,11 @@ static id<MTLTexture> tex_by_id(int tid) {   // Caller holds g_rmu
         // its residency: GPU page faults in the shaders that sample it (docs/reference/rendering.md, "A texture ID with no texture kept its cached view")
         if (cur && (cur == v || v.parentTexture == cur)) { rp->view_ser = sg; rp->view_dirty = dg; treg_pkg_stamp(rp, cur); return v; }
         defer_obj_unref(v); CFRelease(rp->view); rp->view = NULL; rp->view_rid = 0; v = nil;
+    }
+    // DM_TEXTURES_OFF: a texture bound directly (not through the pool tables) is not made either: it reads its stand-in (a few KB of coarse levels), made here if it has none
+    if (!rp->view && !rp->gone && !pkg_shared(&rp->t) && !tex_get(rp->t.serial) && tex_off_wants(&rp->t)) {
+        if (!rp->stand && !rp->stand_no) stand_make(tid);
+        if (rp->stand) return (__bridge id<MTLTexture>)rp->stand;
     }
     treg_t r = *rp;
     id<MTLTexture> base = treg_tex(rp);
@@ -9775,6 +9799,12 @@ enum { STAND_LEVEL = 1024, STAND_PICK = 4096, STAND_LAYERS = 8, STAND_HEAP = 4u 
 static __strong id<MTLHeap> g_stand_heap[STAND_HEAPS]; static int g_nstand_heap, g_stand_heap_at;
 static uint32_t g_stand_todo[POOL_SEEN_WORDS]; static unsigned g_stand_todo_n, g_stand_frame_n; static uint64_t g_stand_frame = ~0ull;
 static uint64_t g_stand_made, g_stand_picked, g_stand_full, g_stand_ns, g_first_stand, g_first_dummy, g_first_dummy_big, g_first_stale;   // first reads of a texture not made: those that found a stand-in, the dummy (and of 256 KB or more), a stand-in whose levels the game has written since
+// DM_TEXTURES_OFF=all|big: a diagnostic that makes no block-compressed texture (the game's art: BC1-BC7, the formats of its world and character textures; data textures such as the
+// terrain's R32F and RGBA8 maps are other formats and stay): its pool table entry holds the stand-in (a few KB of its own coarse levels) or the dummy, whatever the budget and
+// whether a shader read it. all: every one; big: those of 512 KB or more, which leaves the UI and small props. To see whether the game runs without them (GPU memory, not looks)
+static int tex_off_mode(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_TEXTURES_OFF"); v = !e || !*e || !strcmp(e, "0") ? 0 : !strcmp(e, "all") ? 1 : !strcmp(e, "big") ? 2 : -1;
+    if (v < 0) { MLOG("[RED] DM_TEXTURES_OFF=%s: must be all, big or 0; textures made", e); v = 0; } else if (v) MLOG("textures off: %s block-compressed textures are not made (DM_TEXTURES_OFF)", v == 1 ? "every" : "the big"); } return v; }
+static int tex_off_wants(const tex_t *t) { int m = tex_off_mode(); if (!m) return 0; int bw, bh, bpb = nvn_fmt_bpb(t->d.format, &bw, &bh); if (!bpb || (bw < 2 && bh < 2)) return 0; return m == 1 || pool_tex_size(t) >= (512u << 10); }
 static int stand_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_POOL_STANDIN"); v = !(e && !strcmp(e, "0")); } return v; }
 static id<MTLTexture> stand_alloc(MTLTextureDescriptor *d) {
     for (int k = 0; k < g_nstand_heap; k++) {   // the heap that last had room first
@@ -9960,6 +9990,7 @@ static uint64_t pool_entry(int samp, int dtt, int id_, uint64_t limit, int *gone
     if (r->gone) { ++*gone; return 0; }
     if (!r->view && !tex_storage_live(&r->t)) { ++*gone; *dead = 1; return 0; }
     if (!r->view && pool_unwritten_target(&r->t)) return 0;   // dummy until a pass writes it (its new texture is noted: ser_note)
+    if (!r->view && !pkg_shared(&r->t) && !tex_get(r->t.serial) && tex_off_wants(&r->t)) return pool_stand(id_, dtt);   // DM_TEXTURES_OFF: not made, read or not; nothing is left for a later walk
     if (!r->view && pool_tex_size(&r->t) > limit && !pkg_shared(&r->t) && !tex_get(r->t.serial) && !(pool_seen(id_) && g_walk_req < POOL_REQ_BYTES)) { ++*left; *left_req += pool_seen(id_); return pool_stand(id_, dtt); }   // a texture a shader read is made whatever the budget, so it reads its stand-in or the dummy for a few frames at most
     if (r->tt1 && r->tt1 - 1 != dtt) return 0;   // an ID of another texture type, seen before (the table holds only its own type): nothing to look up or charge (the idea is from PR 1428)
     if (!r->view && !pkg_shared(&r->t)) { g_walk_spent += pool_tex_size(&r->t); if (pool_seen(id_)) g_walk_req += pool_tex_size(&r->t); }
@@ -13351,6 +13382,7 @@ static void draw_multi(const p_multi_draw *m) {
     g_mdxc.next = NULL;
 }
 static void draw_(const p_draw *dw, const p_draw_idx *di);
+static int draw_skipped(void) { if (!g_skip_draws || !S.prog) return 0; __unsafe_unretained NvProg *p = prog_get(S.prog); return p && p->skip; }   // the bound program has a stage in the skip set (DM_SKIP_GRASS)
 // Diagnostic switch for measuring an upper bound DM_NVN_SKIP_FS=<fragment key>[,<fragment key>...] (none by default): drops all draws of these fragment shaders (the picture will be wrong;
 // only used in real-device ABA to measure "how much GPU time this class of draws is worth in total"), and the same-process alternating measurement's phase (DM_NVN_UB). Task / mesh
 // draws (mesh_tasks_draw) take it too: before, they went past it, so a bisection by fragment key never dropped a mesh draw
@@ -14871,11 +14903,11 @@ void mtl_exec(const uint8_t *p) {
             case OP_MULTI_DRAW:
                 // A lookahead from outside the range stops at its boundary, including scans for inline writes to the arguments.
                 g_mdx_epoch++; g_mdx_stop = NULL;
-                if (!g_rc_skip) draw_multi(a);
+                if (!g_rc_skip && !draw_skipped()) draw_multi(a);
                 g_mdx_epoch++;
                 break;
-            case OP_DRAW: { if (g_rc_skip) break; p_draw t; g_exec_cur = p; g_exec_next = p + h.size; draw(draw_rec(a, h.size, &t), NULL); g_exec_next = NULL; break; }   // Lookahead start point
-            case OP_DRAW_IDX: { if (g_rc_skip) break; p_draw_idx t; g_exec_cur = p; g_exec_next = p + h.size; draw(NULL, draw_idx_rec(a, h.size, &t)); g_exec_next = NULL; break; }
+            case OP_DRAW: { if (g_rc_skip || draw_skipped()) break; p_draw t; g_exec_cur = p; g_exec_next = p + h.size; draw(draw_rec(a, h.size, &t), NULL); g_exec_next = NULL; break; }   // Lookahead start point
+            case OP_DRAW_IDX: { if (g_rc_skip || draw_skipped()) break; p_draw_idx t; g_exec_cur = p; g_exec_next = p + h.size; draw(NULL, draw_idx_rec(a, h.size, &t)); g_exec_next = NULL; break; }
             // Do not mark dirty if the state did not change (the game often re-sends the same program / state block / vertex format before each draw; the dirty flag only decides whether to re-fetch the pipeline / depth-stencil object, and equal values mean the same object)
             case OP_BIND_PROGRAM: { const p_bind_program *b = a; state_op(h.op,a);
                 if (passdump()) { NvProg *pr = S.prog ? prog_get(S.prog) : nil;

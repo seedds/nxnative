@@ -56,8 +56,10 @@ TWO = BIG_TEXT and MOD.text_end > 0x8000000 - 0x10000
 BACK_MIN = 0   # TWO: BACK_OFF (set below) less the reach, plus the margin
 if TWO:
     BACK_MIN = ((((len(MOD.image) + bss + 0x3FFF) & ~0x3FFF) + 0x8000 + 0xFFFF) & ~0xFFFF) - 0x8000000 + 0x100000
-    assert BACK_MIN < 0x8000000 - 0x200000, f'no split reaches: the back patch area reaches no site below {BACK_MIN:#x}, too close to the front area\'s reach'
-    FRONT = int(os.environ.get('DM_PATCH_FRONT', '0'), 0) or min(0x1000000, (0x8000000 - 0x100000 - BACK_MIN) & ~0xFFFF)
+    # The reaches need not overlap: Spelunky 2 embeds hundreds of MB of data between its code islands.
+    # Keep the usual front reservation when no contiguous split fits. Actual sites still pass B()'s
+    # checks in both directions; a required rewrite in the unreachable middle must still fail.
+    FRONT = int(os.environ.get('DM_PATCH_FRONT', '0'), 0) or (0x1000000 if BACK_MIN >= 0x8000000 - 0x200000 else min(0x1000000, (0x8000000 - 0x100000 - BACK_MIN) & ~0xFFFF))
 elif BIG_TEXT: FRONT = int(os.environ.get('DM_PATCH_FRONT', '0'), 0) or (0x8000000 - 0x10000 - MOD.text_end) & ~0xFFFF
 SPLIT = max(0x8000000 - FRONT - 0x100000, BACK_MIN) if TWO else None
 IMG = MOD.image

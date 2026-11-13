@@ -360,8 +360,15 @@ To enroll a cut for any game's own module:
 
 - **Symptom:** a `B()` range assertion in `site_plain` on the branch back to the site, in a module that takes two patch areas.
 - **Cause:** `SPLIT` only kept the front area in reach. The back area sits after ro, data and bss, so when those are large it is more than 128 MB from the sites just above a split set by a 16 MB front area: here `SPLIT` was `0x6f00000` and the back area at `0xfa40000` reaches down to `0x7a40000`.
-- **Fix:** `SPLIT` is also no lower than `BACK_MIN`, `BACK_OFF` less the reach plus the same 1 MB of margin. When that lifts it, the front area's first pass takes the gap up to `BACK_MIN` instead of 16 MB, so the front area still reaches every site below the split; the rerun with exactly the size its sites need works as before, and `B()` checks every branch. A module whose back area already reaches the 16 MB split (EA SPORTS FC 27) is rewritten byte for byte as before; one where no split reaches stops with a message naming `BACK_MIN`.
+- **Fix:** `SPLIT` is also no lower than `BACK_MIN`, `BACK_OFF` less the reach plus the same 1 MB of margin. When that lifts it, the front area's first pass takes the gap up to `BACK_MIN` instead of 16 MB, so the front area still reaches every site below the split; the rerun with exactly the size its sites need works as before, and `B()` checks every branch. A module whose back area already reaches the 16 MB split (EA SPORTS FC 27) is rewritten byte for byte as before; when the reaches do not overlap, sparse code can still use both areas (see below); every actual branch remains range-checked.
 - **Found on:** Hello Kitty Party Land `main` (1.0.2): 151.8 MB of text and 98 MB of ro, data and bss after it; `SPLIT` `0x7b40000`, 1.7 MB of stubs in a 3.75 MB front area (no rerun) and 123 KB at `BACK_OFF` `0xfa40000`.
+
+### Sparse text whose patch areas do not overlap in reach
+
+- **Symptom:** `no split reaches: the back patch area reaches no site below ...`, although all rewrite sites are close to the module's beginning or end.
+- **Cause:** the layout required the front and back patch areas to cover a continuous interval. Large embedded data in the text segment can separate the code into islands; the unused middle needs no patch area.
+- **Fix:** when no continuous split fits, retain the usual 16 MB front reservation and place the split at the back area's minimum reach. Existing overlapping layouts and explicit front reservations are unchanged. The actual entry and return branches still go through `B()` range checks: a required rewrite in the unreachable middle fails rather than being skipped. No middle area is inserted and no module addresses move.
+- **Found on:** [Spelunky 2, issue #1504](https://github.com/seedds/nxnative/issues/1504): the report identifies roughly 337 MB of embedded data between the early and late code. There is no repository profile yet; embedded-shader extraction and large allocator regions remain separate unresolved problems. This layout fix does not establish gameplay support.
 
 ## Cuts and observation gates
 

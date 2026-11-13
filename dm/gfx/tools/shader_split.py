@@ -1814,6 +1814,26 @@ def bnd4_members(d, label):
         name = d[nm:d.index(b'\0\0', nm) + 1].decode('utf-16-le', 'replace') if uni else d[nm:d.index(b'\0', nm)].decode('shift-jis', 'replace')
         yield name.strip('\0').replace('\\', '/'), d[off:off + cs]
 
+def nvn2_embedded(d, label):
+    """NVN2 shaders a game keeps whole in a code module's data, each code area right before or right after its control section (its length at control +0x44, the section's own at +0x30). The Duskbloods'
+    main: RAD's Bink 2, 12 compute shaders that decode a movie and the vertex / pixel pair that draws it; without them the opening movie played black with its sound. A match only counts
+    with a stage and the split's checks, so stray bytes that look like a control section add nothing"""
+    out = []
+    for m in re.finditer(re.escape(CTL_MAGIC + b'\xc9\0\0\0'), d):
+        c = m.start()
+        if c + NVN2_KEY_CTL > len(d): continue
+        n, own = struct.unpack_from('<I', d, c + 0x44)[0], struct.unpack_from('<I', d, c + 0x30)[0]
+        if not 0 < n <= len(d) or n % 0x10: continue
+        clen = own if NVN2_KEY_CTL <= own <= 0x1000 and c + own <= len(d) else NVN2_KEY_CTL; ctl = d[c:c + clen]
+        # two layouts: the code area right before the section (the movie's vertex / pixel pair, as the game asked for them at run time), or right after it (Bink's 12 compute
+        # shaders, a small record of the two lengths and zeros before them). Code is mostly non-zero 16-byte instructions; the denser candidate, if at least half, is the code
+        def dense(code): return sum(any(code[i:i + 16]) for i in range(0, len(code), 16)) / max(1, len(code) // 16)
+        cands = [code for code in (d[c - n:c], d[c + clen:c + clen + n]) if len(code) == n and dense(code) >= 0.5]
+        for code in sorted(cands, key=dense, reverse=True):
+            st = nvn2_stage(ctl, code)
+            if st and not check(label, st, ctl, code): out.append((f'{label}#NVN2@{c:#x}', st, ctl, code)); break
+    return out
+
 def cgsb_shaders(d, label):
     """One shader of The Duskbloods' shaderbnd archives (its extension the stage: .vpo .ppo .cpo .gpo .hpo .dpo .mpo .apo): 'CGSB', u32 0x00112233, +0x10 u64 0x18, then a record
     'NVN ' u32 1, 8 bytes 0, {u64 offset, u64 length} of the code area (Ampere code with its 0x80-byte SPH), of the NVN2 control section, and of two blocks the split does not read"""
@@ -3532,6 +3552,7 @@ def main():
         found += glslc_shaders(img, 'main' + ('@' + tag if tag else ''), need=False)
         found += tfxo_streams(img, 'main' + ('@' + tag if tag else ''))   # YEBIS's effect file, a zlib stream in main (Pokémon Sword)
         found += retro_main_forms(img, 'main' + ('@' + tag if tag else ''))   # Retro's startup material archive, LZSS in main (Donkey Kong Country: Tropical Freeze)
+        found += nvn2_embedded(img, 'main' + ('@' + tag if tag else ''))   # NVN2 shaders kept whole in main's data (The Duskbloods' Bink 2)
         if RGXD in img: found += rgxd_shaders(img, 'main' + ('@' + tag if tag else ''))   # RAGE's built-in effects (Red Dead Redemption: 20 in main's data, 168 shaders that shaders.rpf lacks)
         found += raw_shaders(img, 'main' + ('@' + tag if tag else ''), {c[:struct.unpack_from('<I', c, 0x20)[0]] for _, _, c, _ in found})   # compared at their own length, as raw_shaders reads them
         # NROs the game decodes at run time (Mario Tennis Fever: main is a boot stub, and the real code's data holds 11 shaders the game draws its UI and sky with): scanned like main, as no RomFS file holds them

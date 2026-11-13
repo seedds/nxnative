@@ -381,12 +381,14 @@ static int cloud_path(const char *v, const char *title, char *out, size_t n) {
 }
 static int cloud_file(const char *title, char *out, size_t n) { return cloud_path(getenv("DM_SAVE_SYNC"), title, out, n); }
 
-// The platform's fetch, given at most `ms`: a download iCloud never finishes must not hold the game at its first save mount. One that comes too late is dropped
-typedef struct { pthread_mutex_t mu; pthread_cond_t cv; int done, abandoned, result; char cloud[PATH_MAX], local[PATH_MAX]; } fetch_job;
+// The platform's fetch, given at most `ms`: a download iCloud never finishes must not hold the game at its first save mount. One that comes too late is dropped.
+// Each fetch writes a file of its own (part: <local>.<pid>-<n>.part), renamed to `local` only by the caller that still waits for it: a fetch that came too late
+// removes its own file and nothing else, so it never writes over or removes what a later attempt fetched to the same `local` (the sender's out/cloud.dmsync)
+typedef struct { pthread_mutex_t mu; pthread_cond_t cv; int done, abandoned, result; char cloud[PATH_MAX], part[PATH_MAX + 32]; } fetch_job;
 static void *fetch_thread(void *p) {
-    fetch_job *j = p; int r = front_save_sync_fetch(j->cloud, j->local);
+    fetch_job *j = p; int r = front_save_sync_fetch(j->cloud, j->part);
     pthread_mutex_lock(&j->mu); j->done = 1; j->result = r; int late = j->abandoned; pthread_cond_signal(&j->cv); pthread_mutex_unlock(&j->mu);
-    if (late) { unlink(j->local); pthread_mutex_destroy(&j->mu); pthread_cond_destroy(&j->cv); free(j); }
+    if (late) { unlink(j->part); pthread_mutex_destroy(&j->mu); pthread_cond_destroy(&j->cv); free(j); }
     return NULL;
 }
 static void deadline(int ms, struct timespec *ts) {
@@ -395,10 +397,11 @@ static void deadline(int ms, struct timespec *ts) {
     if (ts->tv_nsec >= 1000000000) { ts->tv_sec++; ts->tv_nsec -= 1000000000; }
 }
 static int fetch_timed(const char *cloud, const char *local, int ms) {   // front_save_sync_fetch's answer, or -1 at the time limit (or with no thread to wait on)
+    static _Atomic unsigned seq;
     fetch_job *j = calloc(1, sizeof *j); pthread_t t;
     if (!j) return -1;
     pthread_mutex_init(&j->mu, NULL); pthread_cond_init(&j->cv, NULL);
-    snprintf(j->cloud, sizeof j->cloud, "%s", cloud); snprintf(j->local, sizeof j->local, "%s", local);
+    snprintf(j->cloud, sizeof j->cloud, "%s", cloud); snprintf(j->part, sizeof j->part, "%s.%d-%u.part", local, (int)getpid(), atomic_fetch_add(&seq, 1));
     int e = pthread_create(&t, NULL, fetch_thread, j);
     if (e) { pthread_mutex_destroy(&j->mu); pthread_cond_destroy(&j->cv); free(j); SRED("no thread to fetch the cloud's save (error %d)", e); return -1; }   // not fetched on this thread: a download that never finishes would hold the game
     pthread_detach(t);
@@ -408,8 +411,11 @@ static int fetch_timed(const char *cloud, const char *local, int ms) {   // fron
     int r = j->done ? j->result : -1, mine = j->done;
     if (!mine) j->abandoned = 1;   // the thread frees it when it ends
     pthread_mutex_unlock(&j->mu);
-    if (mine) { pthread_mutex_destroy(&j->mu); pthread_cond_destroy(&j->cv); free(j); }
-    else SLOG("the cloud's save did not come within %d s", ms / 1000);
+    if (mine) {
+        if (r == 1 && rename(j->part, local)) { SRED("cannot put the cloud's save at %s (errno=%d)", local, errno); r = -1; }
+        if (r != 1) unlink(j->part);   // what a fetch that failed left, if anything
+        pthread_mutex_destroy(&j->mu); pthread_cond_destroy(&j->cv); free(j);
+    } else SLOG("the cloud's save did not come within %d s", ms / 1000);
     return r;
 }
 

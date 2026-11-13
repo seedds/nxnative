@@ -765,6 +765,13 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Fix:** general: `RemoveNode` follows only into producers without side effects (`HasSideEffects`). This follows MacNativeGames' translator patch 0002.
 - **Found on:** no game on hand so far. Rebuilding the chain changed no shader for this reason in Tears of the Kingdom, Breath of the Wild, Wonder, Scarlet or ANIMAL WELL (94,717 shaders); every MSL change was the early fragment tests attribute.
 
+### Shared writes lost during AST optimization
+
+- **Symptom:** With `debug: false`, an 8- or 16-bit shared store fails in SPIR-V call generation, or a shared atomic with destination RZ disappears.
+- **Cause:** The AST optimizer substituted a value for a local whose address the SPIR-V store helper takes. It also removed assignments to unused locals even when evaluating the assigned expression changes memory.
+- **Fix:** Keep the local storage used for SPIR-V call arguments. Keep atomics and function calls at their original execution point even when their return value is unused.
+- **Found on:** Synthetic Ampere compute shaders in [issue #1415](https://github.com/seedds/nxnative/issues/1415).
+
 ### Dead-code removal dropped a coordinate of a multi-output instruction
 
 - **Symptom:** a simulation or filter that reads neighbouring texels misbehaves though every constant is right. In the translated MSL a variable is declared with no value and read at once (`int _139; int _141 = _139;`), used as a coordinate. On Ocarina of Time: grass whose blades shift at 10 Hz, with a 6-frame cycle in the depth buffer and a wind velocity texture of strong stripes.

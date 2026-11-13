@@ -150,6 +150,7 @@ namespace Ryujinx.Graphics.Shader.StructuredIr
                     if (index - 1 < inArgsCount)
                     {
                         AstOperand argTemp = context.NewTemp(FuncParameterType);
+                        argTemp.AddressTaken = true;
                         context.AddNode(new AstAssignment(argTemp, source));
                         sources[index] = argTemp;
                     }

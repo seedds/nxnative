@@ -253,6 +253,56 @@ int dm_net_socket(int family, int type, int protocol) {
     int result = fd < 0 ? net_error(net_errno(err)) : net_register(fd, base, !!flags);
     net_trace("socket", result, result); return result;
 }
+// In Nextendo mode a closed UDP port stays open for a moment. A peer-to-peer library that closes a bound UDP socket and binds the same port
+// again (Mush8 handles this for Mario Kart 8 Deluxe's Pia; not yet seen in a log here) would otherwise have datagrams that arrive in between
+// answered with ICMP port unreachable, where Horizon drops them. So closing a bound, unconnected UDP socket keeps its host socket for
+// NET_PARK_MS, and a bind to that port within that time takes it back, with whatever arrived meanwhile.
+enum { NET_PARK_MAX = 8, NET_PARK_MS = 5000 };
+static struct { int fd; uint16_t port; uint64_t until; } g_parked[NET_PARK_MAX];   // fd 0 = free; under g_net_lock
+static void net_park_expire(uint64_t now) {   // with g_net_lock held
+    for (int i = 0; i < NET_PARK_MAX; i++) if (g_parked[i].fd > 0 && (!now || g_parked[i].until <= now)) { close(g_parked[i].fd); g_parked[i].fd = 0; }
+}
+static uint16_t net_unconnected_udp_port(int fd) {
+    int type = 0; socklen_t size = sizeof type; struct sockaddr_in a; socklen_t n = sizeof a;
+    if (getsockopt(fd, SOL_SOCKET, SO_TYPE, &type, &size) || type != SOCK_DGRAM) return 0;
+    if (!getpeername(fd, (struct sockaddr *)&a, &n)) return 0;
+    n = sizeof a;
+    if (getsockname(fd, (struct sockaddr *)&a, &n) || a.sin_family != AF_INET) return 0;
+    return ntohs(a.sin_port);
+}
+static int net_park(int fd) {   // 1 when the table took fd (the caller then does not close it)
+    uint16_t port = dm_net_nextendo_enabled() ? net_unconnected_udp_port(fd) : 0;
+    if (!port) return 0;
+    pthread_mutex_lock(&g_net_lock);
+    net_park_expire(net_ms());
+    int slot = -1;
+    for (int i = 0; i < NET_PARK_MAX; i++) {
+        if (g_parked[i].fd > 0 && g_parked[i].port == port) { close(g_parked[i].fd); g_parked[i].fd = 0; }
+        if (g_parked[i].fd <= 0 && slot < 0) slot = i;
+    }
+    if (slot >= 0) g_parked[slot] = (__typeof__(g_parked[0])){fd, port, net_ms() + NET_PARK_MS};
+    pthread_mutex_unlock(&g_net_lock);
+    return slot >= 0;
+}
+// A bind to a parked port: the guest's slot gets the parked host socket in place of its new, unbound one. 1 when it did
+static int net_unpark(int guest, uint64_t generation, uint16_t port) {
+    if (!port || !dm_net_nextendo_enabled()) return 0;
+    pthread_mutex_lock(&g_net_lock);
+    net_park_expire(net_ms());
+    int taken = 0;
+    for (int i = 0; i < NET_PARK_MAX && !taken; i++) {
+        if (g_parked[i].fd <= 0 || g_parked[i].port != port) continue;
+        net_slot *s = &g_sockets[guest];
+        if (s->used && s->generation == generation && s->type == 2 && dup2(g_parked[i].fd, s->native) == s->native) {
+            fcntl(s->native, F_SETFD, FD_CLOEXEC);   // dup2 clears it; O_NONBLOCK and SO_NOSIGPIPE belong to the socket and came along
+            taken = 1;
+        }
+        close(g_parked[i].fd); g_parked[i].fd = 0;
+    }
+    pthread_mutex_unlock(&g_net_lock);
+    if (taken) fprintf(stderr, "[dm] net: udp/%u bound again; the socket the game just closed there is reused\n", port);
+    return taken;
+}
 static int net_close_owned(int guest, int check_generation, uint64_t generation) {
     pthread_mutex_lock(&g_net_lock);
     if (guest < 0 || guest >= NET_MAX || !g_sockets[guest].used ||
@@ -263,6 +313,7 @@ static int net_close_owned(int guest, int check_generation, uint64_t generation)
     pthread_mutex_unlock(&g_net_lock);
     net_discovery_cancel(guest, old_generation);
     if (peer >= 0) close(peer);   // an event descriptor's write end
+    if (net_park(fd)) return 0;
     shutdown(fd, SHUT_RDWR); int result = close(fd), err = errno;
     return net_host_result(result, err);
 }
@@ -331,11 +382,14 @@ int dm_net_eventfd_write(int guest, uint64_t value) {
         dm_guest_host_wait_begin(); (void)poll(NULL, 0, NET_SLICE_MS); dm_guest_host_wait_end();   // a full counter waits for a read
     }
 }
-void dm_net_finalize(void) { net_resolver_finalize(); for (int i = 0; i < NET_MAX; i++) { pthread_mutex_lock(&g_net_lock); int used = g_sockets[i].used; pthread_mutex_unlock(&g_net_lock); if (used) net_close_owned(i, 0, 0); } }
+void dm_net_finalize(void) { net_resolver_finalize(); for (int i = 0; i < NET_MAX; i++) { pthread_mutex_lock(&g_net_lock); int used = g_sockets[i].used; pthread_mutex_unlock(&g_net_lock); if (used) net_close_owned(i, 0, 0); } pthread_mutex_lock(&g_net_lock); net_park_expire(0); pthread_mutex_unlock(&g_net_lock); }
 int dm_net_bind(int guest, const void *addr, unsigned len) {
     if (!net_gate()) return -1;
     struct sockaddr_in a; if (net_addr_in(addr, len, &a)) return -1;
     net_ref r; if (net_borrow(guest, &r)) return -1;
+    close(r.fd);
+    if (r.type == 2 && net_unpark(guest, r.generation, ntohs(a.sin_port))) { net_trace("bind", guest, 0); return 0; }
+    if (net_borrow(guest, &r)) return -1;
     int result = bind(r.fd, (struct sockaddr *)&a, sizeof a), err = errno; close(r.fd);
     result = net_host_result(result, err); net_trace("bind", guest, result); return result;
 }
@@ -426,6 +480,9 @@ long dm_net_recv(int guest, void *buf, unsigned long len, int flags, void *addr,
             if (!got || r.type != 1 || !(flags & 0x40) || r.nonblock || (flags & 0x80) || total == len) break;
             continue;
         }
+        // A host report of ICMP unreachable for an earlier send, delivered on the next receive of a UDP socket. In Nextendo mode it counts as
+        // no datagram yet, so a peer that is not listening yet does not end a session (Mush8 does the same for Mario Kart 8 Deluxe)
+        if (r.type == 2 && (err == ECONNREFUSED || err == ECONNRESET || err == ENETRESET) && dm_net_nextendo_enabled()) err = EAGAIN;
         if (err != EAGAIN || r.nonblock || (flags & 0x80)) { if (!total) result = net_error(net_errno(err)); break; }
         if (net_wait(&r, POLLIN, r.recv_ms, start)) { if (!total) result = -1; break; }
     }

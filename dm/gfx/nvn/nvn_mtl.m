@@ -769,6 +769,7 @@ void mtl_init(void) {
     if (!g_nvn_deswz_gpu) MLOG("[RED] GPU deswizzle init failed; swizzled textures fall back to the CPU");
     MLOG("Metal device %s", g_dev.name.UTF8String);
     udc_selftest();
+    nvn_gpu_busy_start((__bridge void *)g_dev);   // DM_NVN_GPU_BUSY (off by default): keep-busy GPU work while the game paces itself at interval 2 or more
 }
 
 void dm_mtl_l3_tick(uint32_t tick) {

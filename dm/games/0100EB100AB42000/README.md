@@ -2,7 +2,7 @@
 
 Update 1.1.0 (`v65536`), `main` build ID `c2932c4d1c84ed7def7ceb1042b78951`, SDK 6.4.0. Square Enix's PhyreEngine port with the PS2 game's VU0 code emulated (`PS2 VU0 Assembly emulation initilization completed!` at boot), NVN. Modules `main`, `subsdk0`, `sdk`.
 
-**Current:** plays on the Mac from the logos through the title, menus, field, dialogue with button icons, battles and cutscenes, at the game's 30 fps (p99 frame interval about 33 ms on an M3 Max). 6,454 shaders, all of them translated. Not run on an iPhone.
+**Current:** plays on the Mac from the logos through the title, menus, field, dialogue with button icons, battles and cutscenes, at the game's 30 fps (p99 frame interval about 33 ms on an M3 Max). 6,454 shaders, all of them translated. Plays the same on an iPhone Duo.
 
 ## What it needs
 
@@ -28,9 +28,10 @@ The other keys are the provisional profile's guesses, which held.
 ## Found on this game
 
 - [LZ4 blocks in FFXII's VBF archives and Phyre programs in main](../../../docs/reference/shaders.md#lz4-blocks-in-ffxiis-vbf-archives-and-phyre-programs-in-main).
+- [Same-pass feedback read through a snapshot](../../../docs/reference/rendering.md#same-pass-feedback-read-through-a-snapshot), uniform-buffer handles: magenta strokes over every limit break, from the echo shader `e40adef79f6f29b7` sampling the overlay layer it blends into.
 
 ## Open
 
 - One texture showed a blue stripe across it, once; not traced.
 - `[RED] BeginRecording re-entered` about once a frame for the whole run (5,009 lines in a session of about 5,000 frames), with no visible effect since the shader fixes; not traced.
-- Not run: the iPhone, `regress.py` (the LZ4 path runs only for blocks that are not one whole zlib stream; `phyre_main` only for games with `.vbf` or `.phyre` files, which includes [FFX/X-2](../0100BC300CB48000/README.md), whose `main` was not checked for such pairs).
+- Not run: `regress.py` (the LZ4 path runs only for blocks that are not one whole zlib stream; `phyre_main` only for games with `.vbf` or `.phyre` files, which includes [FFX/X-2](../0100BC300CB48000/README.md), whose `main` was not checked for such pairs).

@@ -41,5 +41,17 @@ int main(void) {
     run("DMRT2\taaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\t20\tDM_INTERNAL_RESOLUTION\n" WRITE, NULL, 0, 0);
     run(HEAD WRITE "garbage\n", "1440p", 0, 0);
     run(HEAD "choice\tunused\n" WRITE, "1440p", 0, 0);
+    // A variant variable picks <value>_<variant> when declared, else <value>; never on default
+#define VHEAD "DMRT1\taaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\t20\tDM_INTERNAL_RESOLUTION\tDM_SCREEN_RATIO\nchoice\tdefault\nchoice\t1440p\nchoice\t1440p_1610\n"
+#define VWRITES WRITE "write\t1440p_1610\t8\t11111111\t33333333\n"
+    assert(setenv("DM_SCREEN_RATIO", "1610", 1) == 0);
+    {   uint8_t image[64]; memset(image, 0x11, sizeof image); FILE *f = tmpfile(); fputs(VHEAD VWRITES, f); fseek(f, 0, SEEK_SET);
+        setenv("DM_INTERNAL_RESOLUTION", "1440p", 1); char err[256]; unsigned n = 0;
+        assert(!runtime_patch_apply(f, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", 32, image, sizeof image, err, sizeof err, &n)); fclose(f); checks++;
+        assert(n == 1 && image[8] == 0x33 && image[4] == 0x11); }
+    run(VHEAD VWRITES, "default", 1, 0);
+    assert(setenv("DM_SCREEN_RATIO", "169", 1) == 0); run(VHEAD VWRITES, "1440p", 1, 1);   // no 1440p_169: the plain choice
+    assert(unsetenv("DM_SCREEN_RATIO") == 0); run(VHEAD VWRITES, "1440p", 1, 1);
+    run("DMRT1\taaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\t20\tDM_INTERNAL_RESOLUTION\tbad var\nchoice\tdefault\nchoice\t1440p\n" WRITE, "1440p", 0, 0);
     assert(unsetenv("DM_INTERNAL_RESOLUTION") == 0); printf("runtime patch: %u cases passed\n", checks); return 0;
 }

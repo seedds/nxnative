@@ -8,7 +8,7 @@
 # Never prints key material: prod.keys is passed by path only.
 set -euo pipefail
 MODE=${1:-1440p}
-case $MODE in default|1440p|1800p|2160p|diag1792|native_full|1080p_full|1440p_full|2160p_full|2880p_full|1610_full) ;; *) echo "mode: 1440p, 1800p, 2160p, diag1792, default or a full-output choice (1080p_full ... 2880p_full, 1610_full)" >&2; exit 2;; esac
+case $MODE in default|1440p|1800p|2160p|diag1792|native_full|1080p_full|1440p_full|2160p_full|2880p_full) ;; *) echo "mode: 1440p, 1800p, 2160p, diag1792, default or a full-output choice (1080p_full ... 2880p_full)" >&2; exit 2;; esac
 REPO=$(cd "$(dirname "$0")/../../.." && pwd)
 IMG=${MP4_IMAGES:-"$HOME/Downloads/Nintendo Switch 1:2 — images"}
 NSP="$IMG/Metroid Prime 4 Beyond [NSZ]"; WORK="$NSP/010019A01E2F2000_build"
@@ -28,10 +28,12 @@ printf 'DM_INTERNAL_RESOLUTION=%s\nDM_PRESENT_UPSCALE=off\nDM_METAL_HUD=1\nDM_NV
 [ "${AUDIO_CAPTURE:-}" = 1 ] && printf 'DM_AUDIO_DUMP=%s\nDM_AUDREN_PCM_TRACE=%s\n' "$OUT/game-stereo.pcm" "$OUT/frames.tsv" >> "$OUT/env.txt"
 # LIMITER=0: the peak limiter on the stereo downmix off (DM_AUDIO_LIMITER, on by default), to compare clipping in loud fights
 [ "${LIMITER:-}" = 0 ] && echo "DM_AUDIO_LIMITER=0" >> "$OUT/env.txt"
-# RT_TRACE=1: in 1610_full, the code that binds the 3200x2000 output target and sets its viewports and scissors and draws into it, once per site with backtraces
+# RATIO=1610: a full-output choice at 16:10, the same height (DM_SCREEN_RATIO)
+[ -n "${RATIO:-}" ] && echo "DM_SCREEN_RATIO=$RATIO" >> "$OUT/env.txt"
+# RT_TRACE=1: in 16:10, the code that binds the 3200x2000 output target and sets its viewports and scissors and draws into it, once per site with backtraces
 # (DM_NVN_RT_TRACE), to find the HUD's, the menus' and the movies' rectangles
-[ "${RT_TRACE:-}" = 1 ] && echo "DM_NVN_RT_TRACE=3200x2000" >> "$OUT/env.txt"
-# HUD_FULL=<hex,...> or none: in 1610_full, the HUD items drawn over the whole window instead of the 16:9 band (DM_MP4_HUD_FULL; the log names each item)
+[ "${RT_TRACE:-}" = 1 ] && echo "DM_NVN_RT_TRACE=${RT_SIZE:-3456x2160}" >> "$OUT/env.txt"
+# HUD_FULL=<hex,...> or none: in 16:10, the HUD items drawn over the whole window instead of the 16:9 band (DM_MP4_HUD_FULL; the log names each item)
 [ -n "${HUD_FULL:-}" ] && echo "DM_MP4_HUD_FULL=$HUD_FULL" >> "$OUT/env.txt"
 # HUD_MENU=<hex,...>: the HUD items that mark a pause-menu page (DM_MP4_HUD_MENU)
 [ -n "${HUD_MENU:-}" ] && echo "DM_MP4_HUD_MENU=$HUD_MENU" >> "$OUT/env.txt"

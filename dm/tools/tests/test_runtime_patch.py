@@ -142,7 +142,7 @@ class ScanSourcePatch(unittest.TestCase):
             struct.pack_into('<I', original, off, before)
         struct.pack_into('<I', original, self.profile.LOD_DISTANCE_SITE, 0xbd43c920)
         struct.pack_into('<I', original, self.profile.FOG_SCALE_SITE, 0xbd41a280)
-        patched = bytearray(base + 8192)
+        patched = bytearray(base + 16384)
         patched[:len(original)] = original
         words, checked, exports = [], [], {}
         context = types.SimpleNamespace(here=lambda: base + 4 * len(words), emit=words.append,
@@ -158,11 +158,11 @@ class ScanSourcePatch(unittest.TestCase):
         module, patched, fixups = self.fixture()
         rows = self.runtime.generate(module, patched, fixups).splitlines()
         writes = [row.split('\t') for row in rows if row.startswith('write\t')]
-        self.assertEqual([row[1] for row in writes if not row[1].endswith('_full')], ['1440p', '2160p', '1800p', 'diag1792', '1800p', '2160p'])
+        self.assertEqual([row[1] for row in writes if '_full' not in row[1]], ['1440p', '2160p', '1800p', 'diag1792', '1800p', '2160p'])
         self.assertEqual([row[2] for row in writes if row[1] == '1800p'], ['33170c', '336a8c'])
         self.assertEqual([row[2] for row in writes if row[1] == '2160p'], ['33170c', '336a8c'])
         self.assertFalse(any(row[1] == 'default' for row in writes))
-        self.assertTrue(all(row[2] == '33170c' for row in writes if row[1] not in ('1800p', '2160p') and not row[1].endswith('_full')))
+        self.assertTrue(all(row[2] == '33170c' for row in writes if row[1] not in ('1800p', '2160p') and '_full' not in row[1]))
 
     def test_missing_corrupt_or_outside_stub_is_rejected(self):
         module, patched, fixups = self.fixture()
@@ -240,7 +240,7 @@ class ScanSourcePatch(unittest.TestCase):
                 listed = settings.build('010019A01E2F2000', tmp, 'unused')['settings']
                 row = next(r for r in listed if r['env'] == 'DM_INTERNAL_RESOLUTION')
                 self.assertEqual(row['default'], '1800p')
-                self.assertEqual([r[0] for r in row['options']], ['default', 'native_full', '1080p_full', '1440p_full', '1800p', '2160p_full', '2880p_full', '1610_full'])
+                self.assertEqual([r[0] for r in row['options']], ['default', 'native_full', '1080p_full', '1440p_full', '1800p', '2160p_full', '2880p_full'])
                 patched[0x80be90] ^= 1; image.write_bytes(patched)
                 with self.assertRaisesRegex(ValueError, 'instructions differ'): settings.build('010019A01E2F2000', tmp, 'unused')
 
@@ -331,6 +331,8 @@ class ScanSourcePatch(unittest.TestCase):
             (folder / 'main.fog.runtime.tsv').write_text(self.runtime.generate_fog(module, patched, fixups))
             self.assertEqual(runtime_patch.choices(folder, 'DM_FOG_QUALITY'), ('default', 'high'))
             self.assertIn('1800p', runtime_patch.choices(folder, 'DM_INTERNAL_RESOLUTION'))
+            self.assertEqual(runtime_patch.choices(folder, 'DM_SCREEN_RATIO'), ('default', '1610'))   # the variant variable: the 16:10 suffix of the full choices
+            self.assertIn('2160p_full_1610', runtime_patch.choices(folder, 'DM_INTERNAL_RESOLUTION'))
             with mock.patch.dict(os.environ, {'SETTINGS_PLATFORM': 'mac'}), mock.patch.object(settings.nacp, 'languages', return_value=['en-US']):
                 row = next(r for r in settings.build('010019A01E2F2000', tmp, 'unused')['settings'] if r['env'] == 'DM_SHADOW_RESOLUTION')
             self.assertEqual(([o[0] for o in row['options']], row['default']), (['default', '2x', '4x'], 'default'))

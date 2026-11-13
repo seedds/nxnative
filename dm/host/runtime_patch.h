@@ -1,5 +1,7 @@
 // Mac launch-time code choices, applied before sealing text. Validate the entire file before any write.
-// DMRT1<TAB>build ID (16 bytes, hex)<TAB>text end (hex)<TAB>DM_ variable
+// DMRT1<TAB>build ID (16 bytes, hex)<TAB>text end (hex)<TAB>DM_ variable[<TAB>DM_ variant variable]
+// With a variant variable set to a value other than default, the choice <value>_<variant value> is taken when the manifest declares it (Metroid Prime 4:
+// DM_INTERNAL_RESOLUTION=2160p_full with DM_SCREEN_RATIO=1610 applies 2160p_full_1610); otherwise <value>
 // choice<TAB>value; write<TAB>value<TAB>offset (hex)<TAB>expected bytes<TAB>replacement bytes
 #ifndef DM_RUNTIME_PATCH_H
 #define DM_RUNTIME_PATCH_H
@@ -12,7 +14,7 @@
 
 enum { RP_CHOICES = 16, RP_WRITES = 1024, RP_BYTES = 64 };
 typedef struct { size_t off, len; unsigned choice; uint8_t before[RP_BYTES], after[RP_BYTES]; } rp_write;
-typedef struct { char var[64], choices[RP_CHOICES][32]; unsigned nc, nw; rp_write writes[RP_WRITES]; } rp_plan;
+typedef struct { char var[64], variant[64], choices[RP_CHOICES][32]; unsigned nc, nw; rp_write writes[RP_WRITES]; } rp_plan;
 static int rp_error(char *err, size_t n, const char *fmt, ...) {
     va_list ap; va_start(ap, fmt); vsnprintf(err, n, fmt, ap); va_end(ap); return -1;
 }
@@ -59,9 +61,10 @@ static int rp_read(FILE *f, rp_plan *p, const char *build, size_t text_end, cons
         do { if (nc == 6) RP_FAIL("line %u: too many fields", row); c[nc++] = s; s = strchr(s, '\t'); if (s) *s++ = 0; } while (s);
         if (!header) {
             size_t te; uint8_t bid[RP_BYTES]; size_t bn;
-            if (nc != 4 || strcmp(c[0], "DMRT1") || strlen(c[1]) != 32 || rp_hex(c[1], bid, &bn) || strcmp(c[1], build) ||
-                rp_offset(c[2], &te) || te != text_end || te > size || !rp_token(c[3], sizeof p->var, 1)) RP_FAIL("line %u: incompatible runtime patch header/build/layout", row);
-            strcpy(p->var, c[3]); header = 1; continue;
+            if ((nc != 4 && nc != 5) || strcmp(c[0], "DMRT1") || strlen(c[1]) != 32 || rp_hex(c[1], bid, &bn) || strcmp(c[1], build) ||
+                rp_offset(c[2], &te) || te != text_end || te > size || !rp_token(c[3], sizeof p->var, 1) || (nc == 5 && !rp_token(c[4], sizeof p->variant, 1)))
+                RP_FAIL("line %u: incompatible runtime patch header/build/layout", row);
+            strcpy(p->var, c[3]); if (nc == 5) strcpy(p->variant, c[4]); header = 1; continue;
         }
         if (nc == 2 && !strcmp(c[0], "choice")) {
             if (p->nw || p->nc == RP_CHOICES || !rp_token(c[1], sizeof p->choices[0], 0) || rp_choice(p, c[1]) >= 0) RP_FAIL("line %u: invalid/duplicate/late choice", row);
@@ -98,6 +101,11 @@ static int runtime_patch_apply(FILE *f, const char *build, size_t text_end, uint
     if (!rc) {
         const char *v = getenv(p->var); if (!v) v = "default";
         int choice = rp_choice(p, v);
+        const char *w = p->variant[0] ? getenv(p->variant) : NULL;
+        if (choice >= 0 && w && *w && strcmp(w, "default") && strcmp(v, "default")) {
+            char name[96]; snprintf(name, sizeof name, "%s_%s", v, w);
+            int alt = rp_choice(p, name); if (alt >= 0) choice = alt;
+        }
         if (choice < 0) rc = rp_error(err, en, "unsupported %s=%s", p->var, v);
         else for (unsigned i = 0; i < p->nw; i++) if (p->writes[i].choice == (unsigned)choice) {
             memcpy(base + p->writes[i].off, p->writes[i].after, p->writes[i].len); (*applied)++;

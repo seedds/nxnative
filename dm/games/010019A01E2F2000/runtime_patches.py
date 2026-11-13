@@ -37,7 +37,7 @@ def generate(module, patched, fixups):
         if stub < max(text, patch_off) or stub + 12 > len(patched):
             raise ValueError(f'missing/out-of-range rewritten scene stub for {choice}')
         expected_stub = struct.pack('<III', 0xd2800000 | (w << 5) | 21, 0xf2c00000 | (h << 5) | 21, B(stub + 8, 0x331710))
-        if choice.endswith('_full'):
+        if '_full' in choice:   # the full-output choices and their 16:10 variants
             expected_stub = b''.join(struct.pack('<I', word) for word in profile.scene_control_words(stub, w, h))
         if stub + len(expected_stub) > len(patched) or patched[stub:stub + len(expected_stub)] != expected_stub:
             raise ValueError(f'mismatched rewritten scene stub for {choice}')
@@ -60,7 +60,7 @@ def generate(module, patched, fixups):
             raise ValueError(f'output ABI mismatch at {off:#x}')
     for choice, _, w, h in FULL_CHOICES:
         writes += output_writes(choice, w, h)
-    return manifest(module, patched, fixups, BUILD, 'DM_INTERNAL_RESOLUTION', writes)
+    return manifest(module, patched, fixups, BUILD, 'DM_INTERNAL_RESOLUTION', writes, variant='DM_SCREEN_RATIO')
 
 
 # 1800p is twice the 1600x900 output in each direction: the game's composite reads the scene with one bilinear tap per output pixel (pass dumps:
@@ -75,7 +75,9 @@ CHOICES = (('1440p', 'SCENE_1440', 2560, 1440), ('2160p', 'SCENE_2160', 3840, 21
 # Full-output choices are separate from the preserved supersampling modes.
 FULL_CHOICES = (('1080p_full', 'SCENE_F1080', 1920, 1080), ('1440p_full', 'SCENE_F1440', 2560, 1440),
                 ('2160p_full', 'SCENE_F2160', 3840, 2160), ('2880p_full', 'SCENE_F2880', 5120, 2880), ('native_full', 'SCENE_FNATIVE', 1600, 900),
-                ('1610_full', 'SCENE_F1610', 3200, 2000))   # 16:10, experimental: every canvas and display size of the full-output path at 3200x2000
+                # 16:10 at the same height (DM_SCREEN_RATIO=1610, the manifest's variant variable: loader.c applies <choice>_1610 when the player picks 16:10)
+                ('native_full_1610', 'SCENE_FNATIVE_W', 1440, 900), ('1080p_full_1610', 'SCENE_F1080_W', 1728, 1080), ('1440p_full_1610', 'SCENE_F1440_W', 2304, 1440),
+                ('2160p_full_1610', 'SCENE_F2160_W', 3456, 2160), ('2880p_full_1610', 'SCENE_F2880_W', 4608, 2880))
 
 # Canvas allocation descriptors, traced into 134470/134ddc (not global floating
 # point HUD coordinates). Each pair is MOVZ Xr,#1600 / MOVK Xr,#900,LSL#32.

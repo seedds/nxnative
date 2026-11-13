@@ -263,6 +263,56 @@ static void event_queued_write(int mode) {
     CHECK(done && *result==after,"the consumer's copy reads the producer's payload"); if(!done) { P(nvnEventSignal)(&event,NVN_EVENT_SIGNAL_MODE_WRITE,1); _Exit(2); }
     P(nvnSyncFinalize)(&produced); P(nvnSyncFinalize)(&consumed);
 }
+// Sharing command storage must not wait for the held GPU or acquire visibility storage.
+static void frame_shares_allocator(void) {
+    enum { N=160 };   // crosses both the 64-submission allocator boundary and the old 128-entry post ring
+    printf("CASE a frame's submissions share a command allocator\n");
+    *source=before; *result=sentinel;
+    id<MTLSharedEvent> gate=[g_dev newSharedEvent];
+    if (!gate) abort();
+    pthread_mutex_lock(&g_sub_mu); pthread_mutex_lock(&g_res_mu); [g_q4 waitForEvent:gate value:1];
+    uint64_t waits=g_alloc_waits, shares=g_alloc_shares; int pool=g_alloc_n, ring=g_vis_ring_n; pthread_mutex_unlock(&g_res_mu); pthread_mutex_unlock(&g_sub_mu);
+    static NVNsync fences[N]; static job jobs[N]; int submitted=0, encoded=0;
+    for(int i=0;i<N;i++) {
+        P(nvnSyncInitialize)(&fences[i],&device); enqueue(&jobs[i],&queues[0],consumer(0,0,&fences[i],0));
+        if(!returned(&jobs[i],2000000000ull) || !receipt_encoded(&fences[i],2000000000ull)) break;
+        submitted++; encoded++;
+    }
+    if (submitted<N) { gate.signaledValue=1; fprintf(stderr,"a submission waited for the held GPU\n"); _Exit(2); }
+    CHECK(submitted==N && encoded==N,"160 submissions encode while the GPU is held");
+    CHECK(POST_RING>=N,"the post ring covers every held submission");
+    pthread_mutex_lock(&g_sub_mu);
+    CHECK(g_alloc_waits==waits,"none waited for the GPU to free an allocator");
+    CHECK(g_alloc_n<=pool+4 && g_alloc_shares-shares>=N-4,"they share the frame's allocator");
+    CHECK(g_vis_ring_n==ring,"none took a visibility buffer");
+    pthread_mutex_unlock(&g_sub_mu);
+    CHECK(*result==sentinel,"nothing has run while the gate holds the GPU");
+    gate.signaledValue=1;   // always release the GPU before cleanup, including assertion failures
+    int done=1; for(int i=0;i<N;i++) done&=landed(&fences[i],5000000000ull);
+    CHECK(done && *result==before,"all of them complete once the GPU runs"); if(!done) _Exit(2);
+    for(int i=0;i<N;i++) P(nvnSyncFinalize)(&fences[i]);
+}
+// In-flight counting submissions own distinct reusable visibility buffers.
+static void vis_ring_grows(void) {
+    enum { N=24 };
+    printf("CASE counting submissions in flight take buffers of the visibility ring\n");
+    pthread_mutex_lock(&g_sub_mu);
+    const uint64_t far=g_done+(1ull<<40); __strong id<MTLBuffer> taken[N]; int took=0;
+    for(int i=0;i<N;i++) {
+        g_vis_ring_i=-1; g_vis=nil; vis_take(); taken[i]=g_vis;
+        if(g_vis && g_vis_ring_i>=0 && vis_in_ring(g_vis)) { took++; g_vis_ring[g_vis_ring_i].fence=far+(uint64_t)i; }   // in flight: its fence is far ahead of g_done
+    }
+    CHECK(took==N,"24 counting submissions in flight each take a ring buffer");
+    int distinct=1; for(int i=0;i<N;i++) for(int k=0;k<i;k++) if(taken[i]==taken[k]) distinct=0;
+    CHECK(distinct,"no two of them share a buffer");
+    const int grown=g_vis_ring_n;
+    for(int i=0;i<grown;i++) if(g_vis_ring[i].fence>=far) g_vis_ring[i].fence=0;   // their submissions complete
+    g_vis_ring_i=-1; g_vis=nil; vis_take();
+    CHECK(g_vis && g_vis_ring_n==grown && vis_in_ring(g_vis),"once they complete, the next one reuses a ring buffer");
+    if(g_vis_ring_i>=0) g_vis_ring[g_vis_ring_i].fence=0;
+    g_vis_ring_i=-1; g_vis=nil; g_vis_n=0;
+    pthread_mutex_unlock(&g_sub_mu);
+}
 // A wait on a sync no fence has reached when it is submitted is already satisfied: the queue's own later work, its fence included, runs (issue #1808)
 static void receipt_unfenced(int command_wait) {
     printf("CASE %s wait on a never-fenced sync does not park its queue\n",command_wait?"command-buffer":"queue");
@@ -330,6 +380,8 @@ int main(void) { @autoreleasepool {
     event_stale_gpu_reset();
     event_queued_write(NVN_EVENT_SIGNAL_MODE_WRITE);
     event_queued_write(NVN_EVENT_SIGNAL_MODE_ADD);
+    frame_shares_allocator();
+    vis_ring_grows();
     receipt_tests();
     event_mirror_publication();
     pthread_mutex_lock(&jobs_mu); jobs_stop=1; pthread_cond_signal(&jobs_cv); pthread_mutex_unlock(&jobs_mu); pthread_join(worker,NULL);

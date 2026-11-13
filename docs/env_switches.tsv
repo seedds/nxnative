@@ -423,3 +423,4 @@ DM_XCODE_PROJECT_DIR	path	Folder of the per-game Xcode project that `build_ipa.s
 DM_XV_FILE	path	File where the attachment validity ledger keeps the keys it disabled after a violation, read at the next launch
 DM_YIELD_BACKOFF	switch	`0` turns off the yield back-off; `=<cap µs>[:<start µs>]` sets its sleep cap and the run of yields after which it starts (default 250:2000)
 DM_YIELD_CLOCK	diagnostic	Clock-reading yield loops: 0 uses ordinary yield backoff, 1 backs off from the start, 2 also sleeps to the predicted end (default)
+DM_NVN_MFX_DIRECT	switch	`0` copies the game's colour into MetalFX's RGBA16F input and draws its output back unless both are RGBA16F; on by default MetalFX (DM_UPSCALER=metalfx) scales straight between the game's images when both share any format it takes: Ocarina of Time on an M1 (R11G11B10F) -0.6 / -1.0 ms a frame (both A/B polarities)

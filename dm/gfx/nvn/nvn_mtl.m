@@ -16614,6 +16614,27 @@ static up_mfx_scaler *up_mfx_scaler_for(NSUInteger iw, NSUInteger ih, NSUInteger
     e->sc = sc; e->in = in; e->out = out; e->read = read; e->refused = 0;
     return e;
 }
+// DM_NVN_MFX_DIRECT=0|1|ab (on by default): MetalFX scales straight from the game's colour into its output image when both are one format MetalFX takes (not only RGBA16F),
+// with no copy into the scaler's RGBA16F input and no draw from its output. Ocarina of Time's are R11G11B10F (1440x810 -> 1920x1080): the two copies were render passes of their own
+// (on an M1: -0.64 ms a frame with 300-frame A/B phases, -0.97 ms with the polarity swapped and 450-frame phases, runs mfd1 / mfd2; the picture is the same)
+// on an M1. A format MetalFX refuses (no scaler made) keeps the copies
+typedef struct { id<MTL4FXSpatialScaler> sc; NSUInteger key[5]; int refused; } up_mfx_direct;
+enum { UP_MFX_DIRECTS = 4 }; static up_mfx_direct g_up_mfxd[UP_MFX_DIRECTS]; static int g_up_mfxd_next; static uint64_t g_up_mfxd_n;
+static int mfx_direct_on(void) { static int m = -1; if (m < 0) { m = sw_mode("DM_NVN_MFX_DIRECT", 1); if (m != 1) MLOG("DM_NVN_MFX_DIRECT=%d: MetalFX straight from the game's colour only for RGBA16F%s", m, m ? " in the other A/B phases" : ""); } return m && sw_on(m); }
+static id<MTL4FXSpatialScaler> up_mfx_direct_for(NSUInteger iw, NSUInteger ih, NSUInteger ow, NSUInteger oh, MTLPixelFormat f) {
+    NSUInteger key[5] = {iw, ih, ow, oh, (NSUInteger)f};
+    for (int i = 0; i < UP_MFX_DIRECTS; i++) if (!memcmp(g_up_mfxd[i].key, key, sizeof key)) return g_up_mfxd[i].refused ? nil : g_up_mfxd[i].sc;
+    up_mfx_direct *e = &g_up_mfxd[g_up_mfxd_next++ % UP_MFX_DIRECTS]; *e = (up_mfx_direct){.key = {iw, ih, ow, oh, (NSUInteger)f}, .refused = 1};
+    NSError *err = nil;
+    if (!g_fx_comp) g_fx_comp = [g_dev newCompilerWithDescriptor:[MTL4CompilerDescriptor new] error:&err];
+    MTLFXSpatialScalerDescriptor *d = [MTLFXSpatialScalerDescriptor new];
+    d.colorTextureFormat = f; d.outputTextureFormat = f; d.inputWidth = iw; d.inputHeight = ih; d.outputWidth = ow; d.outputHeight = oh; d.colorProcessingMode = MTLFXSpatialScalerColorProcessingModeHDR;
+    id<MTL4FXSpatialScaler> sc = nil;
+    @try { sc = g_fx_comp ? [d newSpatialScalerWithDevice:g_dev compiler:g_fx_comp] : nil; } @catch (NSException *x) { sc = nil; }
+    MLOG("%supscaler: MetalFX spatial scaler (HDR) straight in format %lu, %lux%lu -> %lux%lu%s", sc ? "" : "[RED] ", (unsigned long)f, (unsigned long)iw, (unsigned long)ih, (unsigned long)ow, (unsigned long)oh, sc ? "" : ": none made, the copies stay");
+    if (!sc) return nil;
+    e->sc = sc; e->refused = 0; return sc;
+}
 // A rectangle of the push constants (origin, inclusive last texel relative to it) inside a w x h texture
 static int up_mfx_rect(const uint32_t v[4], NSUInteger w, NSUInteger h, NVNcopyRegion *r) {
     uint64_t rw = (uint64_t)v[2] + 1, rh = (uint64_t)v[3] + 1;
@@ -16649,6 +16670,13 @@ static int up_mfx_encode(NvShader *cs) {
     int direct = !srgb && (NSUInteger)ir.width == in.width && (NSUInteger)ir.height == in.height && out.storageMode == MTLStorageModePrivate &&
                  in.pixelFormat == MTLPixelFormatRGBA16Float && out.pixelFormat == MTLPixelFormatRGBA16Float && !ir.xoffset && !ir.yoffset && !orr.xoffset && !orr.yoffset && (NSUInteger)orr.width == out.width &&
                  (NSUInteger)orr.height == out.height && (in.usage & sc.colorTextureUsage) == sc.colorTextureUsage && (out.usage & sc.outputTextureUsage) == sc.outputTextureUsage;
+    // see mfx_direct_on: the same straight path for another format both share, with a scaler of that format
+    if (!direct && !srgb && mfx_direct_on() && in.pixelFormat == out.pixelFormat && in.pixelFormat != MTLPixelFormatRGBA16Float && (NSUInteger)ir.width == in.width && (NSUInteger)ir.height == in.height &&
+        out.storageMode == MTLStorageModePrivate && !ir.xoffset && !ir.yoffset && !orr.xoffset && !orr.yoffset && (NSUInteger)orr.width == out.width && (NSUInteger)orr.height == out.height) {
+        id<MTL4FXSpatialScaler> sd = up_mfx_direct_for((NSUInteger)ir.width, (NSUInteger)ir.height, (NSUInteger)orr.width, (NSUInteger)orr.height, in.pixelFormat);
+        if (sd && (in.usage & sd.colorTextureUsage) == sd.colorTextureUsage && (out.usage & sd.outputTextureUsage) == sd.outputTextureUsage) { sc = sd; direct = 1; g_up_mfxd_n++; }
+        else if (sd) { static int once; if (!once++) MLOG("upscaler: straight MetalFX in format %lu refused by usage: colour %#lx needs %#lx, output %#lx needs %#lx", (unsigned long)in.pixelFormat,
+                                                          (unsigned long)in.usage, (unsigned long)sd.colorTextureUsage, (unsigned long)out.usage, (unsigned long)sd.outputTextureUsage); } }
     if (!direct && !(out.usage & MTLTextureUsageRenderTarget)) { g_up_mfx_kept++; return 0; }
     zskip_del(dout.serial);
     rp_end(); if (g_blit) { enc_b_end(g_blit); g_blit = nil; }

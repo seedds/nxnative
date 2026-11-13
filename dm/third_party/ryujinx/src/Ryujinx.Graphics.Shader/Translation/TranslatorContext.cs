@@ -321,6 +321,9 @@ namespace Ryujinx.Graphics.Shader.Translation
                 funcs[i] = new Function(cfg.Blocks, $"fun{i}", false, inArgumentsCount, outArgumentsCount);
             }
 
+            // nxnative: after the lowering passes, on the shared memory accesses the code generator will see, with every function translated (a call follows its callee)
+            SharedMemoryFence.RunPass(funcs, functions.Length, hfm, Definitions.Stage, usedFeatures);
+
             resourceManager.UnifyArrayTypes(funcs);   // nxnative
 
             return Generate(

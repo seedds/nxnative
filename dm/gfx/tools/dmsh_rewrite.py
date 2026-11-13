@@ -24,24 +24,19 @@ def membar_fence(msl):
     msl = re.sub(r'^([ \t]*)' + re.escape(_MEMBAR) + r'\n\1' + re.escape(_MEMBAR) + r'$', lambda m: m[1] + _MEMBAR, msl, flags=re.M)
     return msl.replace(_MEMBAR, fence)
 
-TG_FENCE_DECL = re.compile(r'\bthreadgroup\s+(?:spvUnsafeArray<[^;&]*?>|[A-Za-z_][\w<>, ]*?)\s*&?\s*(\w+)\s*(?:\[[^\]]*\])?\s*[;,)]')
 TG_FENCE = 'atomic_thread_fence(mem_flags::mem_threadgroup, memory_order_seq_cst, thread_scope_simdgroup);'
+TG_FENCE_FN = re.compile(r'\bvoid dmsh_tg_fence\(\)\s*\{')
 def tg_fence(src):
-    """A store to threadgroup memory followed by a load of another lane's word, with no barrier between them (Ampere compilers rely on lockstep warps for small
-    scans, e.g. Unreal's GPU radix sort downsweep d032ce5090303e01 at 0x2eb0: STS / LDS [x-4] / STS / LDS [x-8]): for one thread the load and the earlier store do not
-    alias, so Metal moves the load above the store and reads another lane's old value (Orbitals: Niagara's sorted index list wrong every frame, beams and particles broken).
-    A simdgroup-scope memory fence after each threadgroup store keeps the order; it is not an execution barrier, so it is safe in divergent code. Only kernels with a
-    threadgroup array are touched. A plain or compound assignment (SPIRV-Cross folds a load, an operation and a store of the same element into `_46[i] += 1u;`), also to a
-    member or component (`_39[i].x = v;`). From uncraftablexd's Orbitals bring-up (PR #1775)"""
-    names = {m.group(1) for m in TG_FENCE_DECL.finditer(src) if m.group(1) not in ('operator',)}
-    if not names: return src
-    store = re.compile(r'^(\s*)(?:%s)\s*\[[^\n;]*\](?:\.\w+)?\s*(?:[-+*/%%&|^]|<<|>>)?=(?!=)[^\n]*;\s*$' % '|'.join(map(re.escape, sorted(names))))
-    out = []
-    for ln in src.split('\n'):
-        out.append(ln)
-        m = store.match(ln)
-        if m: out.append(m.group(1) + TG_FENCE)
-    return '\n'.join(out)
+    """Warp-synchronous shared memory. Ampere code relies on lockstep warps and leaves the barrier out of small scans (Unreal's GPU radix sort downsweep d032ce5090303e01
+    at 0x2eb0: STS / LDS [x-4] / STS / LDS [x-8]); for one thread the load and the earlier store do not alias, so Metal moves the load above the store and reads another
+    lane's old value (Orbitals: Niagara's sorted index list wrong every frame, PR #1775). The translator calls dmsh_tg_fence() before each shared memory load that some path
+    reaches from a shared memory store with no barrier between (SharedMemoryFence.cs). Its body there is a memory barrier at workgroup scope, which SPIRV-Cross prints as a
+    threadgroup_barrier (and membar_fence as a device fence); here it becomes a simdgroup-scope fence on threadgroup memory, which is the order a warp needs and, not being
+    an execution barrier, safe in divergent code. A kernel whose arrays spill to device memory gets the device scope too (tg_spill, after this). The text rule before it put a
+    fence after every threadgroup store: 25,108 in 699 of Ocarina of Time's shaders, and Apple's compiler crashed on a foliage mesh pipeline on an M2 (GitHub issue #2481)"""
+    m = TG_FENCE_FN.search(src)
+    if not m: return src
+    return src[:m.end()] + '\n    ' + TG_FENCE + '\n' + src[block_end(src, m.end() - 1):]
 
 # spirv-cross writes OpUMulExtended / OpSMulExtended as calls of an optnone template, spvMulExtended, as Metal's compiler may fail on an inlined mulhi (spirv_msl.cpp,
 # SPVFuncImplMulExtended). The barrier keeps every product a call that is never folded: Switch 2 shaders divide by constants through the high word of a product (Ocarina of Time

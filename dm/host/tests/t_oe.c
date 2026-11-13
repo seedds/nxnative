@@ -11,11 +11,15 @@ uint64_t now_ns(void) { return 0; }
 void dm_audio_suspend(int on) { (void)on; }   // stubs for the bg item of DM_OE_SCRIPT (hle_audio.c / hle_os.c / hle_nvn.c)
 void guest_clock_freeze_for(int reason, int on) { (void)reason; (void)on; }
 void dm_gfx_suspend(int on) { (void)on; }
+void dm_host_shutdown_then(const char *why, void (*then)(void *), void *arg) { (void)why; (void)then; (void)arg; }   // oe_start, which never returns: this test checks its plan (oe_plan)
+void dm_host_shutdown(const char *why) { (void)why; }
 // The notification event (hle_thread.c binds a kernel event): the unit test only tracks whether it is signalled
 static int ev_bound, ev_sig;
 void hle_bind_system_event(void *g, int autoclear) { (void)g; (void)autoclear; ev_bound = 1; }
 void hle_signal_system_event(void *g) { (void)g; ev_sig = 1; }
 void hle_clear_system_event(void *g) { (void)g; ev_sig = 0; }
+static int hid_moves;   // hle_hid.c signals the npads' style events there; here only that a mode change reports to it
+void dm_hid_opmode_changed(void) { hid_moves++; }
 static int checks, fails;
 #define CHECK(c, s) do { checks++; int ok = !!(c); fails += !ok; printf("%s %s\n", ok ? "✓" : "✗", s); } while (0)
 static void reset(void) { g_mqh = g_mqn = 0; g_focus = 1; g_seen = 1; g_applets = 0; g_opmode = 1; g_ntf_opmode = g_ntf_perfmode = 0; g_focus_mode = -1; }
@@ -57,6 +61,44 @@ static int child_burst(int kind) {
     int st; if (waitpid(p, &st, 0) != p) return 0;
     return WIFEXITED(st) && WEXITSTATUS(st) == 0;
 }
+// oe::ExecuteProgram and oe::RequestToRelaunchApplication on the Mac: the plan of what starts (oe_plan), not the execve
+static int env_count(char **env, const char *kv, int prefix) { int c = 0; for (; env && *env; env++) c += prefix ? !strncmp(*env, kv, strlen(kv)) : !strcmp(*env, kv); return c; }
+static const char *env_get(char **env, const char *key) { size_t l = strlen(key); for (; env && *env; env++) if (!strncmp(*env, key, l) && (*env)[l] == '=') return *env + l + 1; return NULL; }
+static int file_is(const char *path, const char *want, size_t n) { char b[64] = {0}; FILE *f = fopen(path, "rb"); if (!f) return 0; size_t got = fread(b, 1, sizeof b, f); fclose(f); return got == n && !memcmp(b, want, n); }
+static void plan_checks(void) {
+    char dir[] = "/tmp/t_oe_plan.XXXXXX", old[4096], path[4200], self[4096], tsv[4200]; uint32_t ssz = sizeof self;
+    if (!mkdtemp(dir) || !getcwd(old, sizeof old) || chdir(dir) || _NSGetExecutablePath(self, &ssz)) { CHECK(0, "plan: a scratch folder"); return; }
+    int cur = (int)(DM_GAME_PROGRAM_ID & 0xf); prog_plan P = {0};   // each oe_plan frees the plan before it
+    unsetenv("DM_PROGRAMS"); setenv("DM_LAUNCH_PARAM", "/x/launch_param.bin", 1); setenv("DM_PREV_PROGRAM", "3", 1); setenv("DM_RELAUNCH", "1", 1); setenv("T_OE_KEEP", "yes", 1);
+    // a program run by itself: the relaunch is this host again, same arguments and folder, DM_RELAUNCH=1 once, no parameter or previous program
+    CHECK(oe_plan(0, NULL, 0, 1, &P, "relaunch") && !strcmp(P.exe, self) && P.argv == *_NSGetArgv() && !P.cwd, "relaunch, no table: this host again, its own arguments, this folder");
+    CHECK(env_count(P.env, "DM_RELAUNCH=1", 0) == 1 && !env_count(P.env, "DM_LAUNCH_PARAM=", 1) && !env_count(P.env, "DM_PREV_PROGRAM=", 1) && env_count(P.env, "T_OE_KEEP=yes", 0) == 1,
+          "relaunch, no table: DM_RELAUNCH=1 once, no launch parameter, no previous program, the rest kept");
+    snprintf(path, sizeof path, "%s/launch_param.bin", dir); unlink(path);
+    CHECK(access(path, F_OK) != 0, "relaunch, no table: no launch parameter file");
+    // ExecuteProgram of its own index restarts it with the parameters; another program cannot start
+    CHECK(oe_plan(cur, "ab", 2, 0, &P, "exec self") && !strcmp(P.exe, self) && !env_count(P.env, "DM_RELAUNCH=", 1), "ExecuteProgram(own index), no table: this host again, no DM_RELAUNCH");
+    const char *lp = env_get(P.env, "DM_LAUNCH_PARAM"), *pv = env_get(P.env, "DM_PREV_PROGRAM"); char cv[16]; snprintf(cv, sizeof cv, "%d", cur);
+    CHECK(lp && file_is(lp, "ab", 2) && pv && !strcmp(pv, cv) && env_count(P.env, "DM_LAUNCH_PARAM=", 1) == 1, "ExecuteProgram(own index), no table: the parameters in launch_param.bin, DM_PREV_PROGRAM this program");
+    CHECK(!oe_plan(cur + 1, NULL, 0, 0, &P, "exec other"), "ExecuteProgram(another), no table: nothing starts, this program ends");
+    // a table: the relaunch starts program 0's row with its keys, and drops the keys any row sets
+    snprintf(tsv, sizeof tsv, "%s/programs.tsv", dir); FILE *f = fopen(tsv, "w");
+    if (!f) { CHECK(0, "plan: a program table"); prog_plan_free(&P); return; }
+    fprintf(f, "# programs\n0\texe=/h/p0\targ=/d/p0\tcwd=%s\tT_OE_ROW=zero\n1\texe=/h/p1\targ=/d/p1\tcwd=%s\tT_OE_ROW=one\tT_OE_ONLY1=x\n", dir, dir); fclose(f);
+    setenv("DM_PROGRAMS", tsv, 1); unlink(path); setenv("T_OE_ONLY1", "old", 1); setenv("T_OE_ROW", "old", 1);
+    CHECK(oe_plan(0, NULL, 0, 1, &P, "relaunch") && !strcmp(P.exe, "/h/p0") && P.argv[0] && !strcmp(P.argv[1], "/d/p0") && !P.argv[2] && P.cwd && !strcmp(P.cwd, dir),
+          "relaunch, table: program 0's host, modules and folder");
+    CHECK(env_count(P.env, "T_OE_ROW=zero", 0) == 1 && !env_count(P.env, "T_OE_ROW=old", 0) && !env_count(P.env, "T_OE_ONLY1=", 1) && env_count(P.env, "T_OE_KEEP=yes", 0) == 1
+          && env_count(P.env, "DM_RELAUNCH=1", 0) == 1 && !env_count(P.env, "DM_LAUNCH_PARAM=", 1) && !env_count(P.env, "DM_PREV_PROGRAM=", 1) && access(path, F_OK) != 0,
+          "relaunch, table: row 0's keys, every row's keys dropped, DM_RELAUNCH=1, no parameter or previous program");
+    CHECK(oe_plan(1, "xyz", 3, 0, &P, "exec 1") && !strcmp(P.exe, "/h/p1") && env_count(P.env, "T_OE_ROW=one", 0) == 1 && env_count(P.env, "T_OE_ONLY1=x", 0) == 1
+          && !env_count(P.env, "DM_RELAUNCH=", 1) && (lp = env_get(P.env, "DM_LAUNCH_PARAM")) && file_is(lp, "xyz", 3), "ExecuteProgram(1), table: its row, its keys, the parameters");
+    CHECK(oe_plan(7, "xyz", 3, 0, &P, "exec 7") && !strcmp(P.exe, "/h/p0") && (lp = env_get(P.env, "DM_LAUNCH_PARAM")) && file_is(lp, "", 0), "ExecuteProgram(7), no such row: program 0, no parameters");
+    unsetenv("DM_PROGRAMS"); unsetenv("DM_LAUNCH_PARAM"); unsetenv("DM_PREV_PROGRAM"); unsetenv("DM_RELAUNCH"); unsetenv("T_OE_KEEP"); unsetenv("T_OE_ONLY1"); unsetenv("T_OE_ROW");
+    CHECK(!oe_plan(cur + 1, NULL, 0, 0, &P, "exec other") && !P.env && !P.tsv && !P.own[0], "a plan that cannot be made frees the one before and holds nothing");
+    prog_plan_free(&P);
+    unlink(path); unlink(tsv); if (chdir(old)) {} rmdir(dir);
+}
 int main(void) {
     unsetenv("DM_OE_SCRIPT"); reset();
     CHECK(h_oe_InactivityMode() == 0 && !h_oe_InactivityExtQ(), "inactivity extension starts disabled");
@@ -67,7 +109,9 @@ int main(void) {
     h_oe_InactivityExtSafe(0x100);
     CHECK(h_oe_InactivityMode() == 0 && !h_oe_InactivityExtQ(), "clearing the extension restores mode 0");
     CHECK(empty(), "empty queue at start: returns false and leaves the output alone");
-    dm_focus_set(1); dm_set_opmode(1); CHECK(empty(), "same state sends no notification");
+    dm_focus_set(1); dm_set_opmode(1); CHECK(empty(), "same state sends no notification"); CHECK(hid_moves == 0, "an unchanged mode moves no npad");
+    dm_set_opmode(0); CHECK(hid_moves == 1, "to handheld: hid is told that the npads moved");
+    dm_set_opmode(1); CHECK(hid_moves == 2 && empty(), "and back to console (no notification: the game has not turned it on)");
     dm_focus_set(3); CHECK(h_oe_GetFocus() == 3, "background state 3 can be queried before popping");
     CHECK(pop_is(15) && empty(), "background change notification 15 exactly once");
     dm_focus_set(2); dm_focus_set(1);
@@ -153,5 +197,11 @@ int main(void) {
     h_oe_SetFocusMode(3); dm_applet_enter("test");
     CHECK(empty() && h_oe_GetFocus() == 2, "focus mode 3: an applet changes the state without a notification");
     dm_applet_leave(); CHECK(empty() && h_oe_GetFocus() == 1, "focus mode 3: back to 1 without a notification");
+    // the graphics scale does not follow the operation mode: tier 0 in both modes; DM_GFX_SCALE picks a reduced tier, nonsense keeps 0
+    unsetenv("DM_GFX_SCALE"); dm_set_opmode(1); CHECK(h_oe_GfxScale() == 0, "graphics scale docked: tier 0 (the whole GPU)");
+    dm_set_opmode(0); CHECK(h_oe_GfxScale() == 0, "graphics scale handheld: tier 0");
+    setenv("DM_GFX_SCALE", "2", 1); CHECK(h_oe_GfxScale() == 2, "DM_GFX_SCALE=2: tier 2");
+    setenv("DM_GFX_SCALE", "7", 1); CHECK(h_oe_GfxScale() == 0, "DM_GFX_SCALE=7: no such tier, 0"); unsetenv("DM_GFX_SCALE");
+    plan_checks();
     printf("== oe %d checks, %d failed ==\n", checks, fails); return fails != 0;
 }

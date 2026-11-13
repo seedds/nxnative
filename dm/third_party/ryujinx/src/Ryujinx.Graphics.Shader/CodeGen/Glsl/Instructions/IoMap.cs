@@ -31,6 +31,9 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Glsl.Instructions
                 IoVariable.FrontColorDiffuse => ("gl_FrontColor", AggregateType.Vector4 | AggregateType.FP32), // Deprecated.
                 IoVariable.FrontColorSpecular => ("gl_FrontSecondaryColor", AggregateType.Vector4 | AggregateType.FP32), // Deprecated.
                 IoVariable.FrontFacing => ("gl_FrontFacing", AggregateType.Bool),
+                IoVariable.HelperInvocation => ("gl_HelperInvocation", AggregateType.Bool),
+                IoVariable.BaryCoord => ("gl_BaryCoordEXT", AggregateType.Vector3 | AggregateType.FP32),
+                IoVariable.BaryCoordNoPersp => ("gl_BaryCoordNoPerspEXT", AggregateType.Vector3 | AggregateType.FP32),
                 IoVariable.GlobalId => ("gl_GlobalInvocationID", AggregateType.Vector3 | AggregateType.U32),
                 IoVariable.InstanceId => ("gl_InstanceID", AggregateType.S32),
                 IoVariable.InstanceIndex => ("gl_InstanceIndex", AggregateType.S32),

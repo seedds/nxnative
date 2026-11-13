@@ -50,6 +50,7 @@ No code of the game is cut. The game asks for present interval 1, so it needs no
 
 ## Open
 
+- **Current (2026-11-05):** the translator deletes 490 bindless accesses in 245 shaders (245 pixel; texture2D 490), whose results read 0: each named by its `[RED]` line in the build's log. The cause is not traced, and whether a route reaches them is not known. [Losses a shader build reports](../../../docs/reference/shaders.md#losses-a-shader-build-reports).
 - iOS: no IPA built yet; untested on a device.
 - Not checked: the story's first world, the battle and multiplayer modes, sound on a Mac with audio out.
 - Only update 2.20 is registered. Other versions come from a derived profile.

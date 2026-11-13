@@ -20,6 +20,16 @@ class ResolutionSetting(unittest.TestCase):
                 self.assertEqual(fps['default'],'60')
                 self.assertEqual(fps['options'],[['30','30 fps'],['60','60 fps']])
 
+class FrameRateOption(unittest.TestCase):
+    def test_120_only_on_the_mac_for_a_game_checked_at_that_speed(self):
+        with tempfile.TemporaryDirectory() as tmp,patch.object(settings.nacp,'languages',return_value=['en-US']):
+            (Path(tmp)/'main.fixups.tsv').write_text('')
+            for gid,platform,has in [('04007EF01F8AE000','mac',True),('04007EF01F8AE000','ios',False),('010056B015FE8000','mac',False)]:   # Fortune's Weave (fps_max 120), NieR:Automata (none)
+                with patch.dict(settings.os.environ,{'SETTINGS_PLATFORM':platform}):
+                    fps=next(s for s in settings.build(gid,tmp,'unused')['settings'] if s['env']=='DM_FPS_TARGET')
+                self.assertEqual(fps['default'],'60',gid)
+                self.assertEqual(fps['options'],[['30','30 fps'],['60','60 fps']]+([['120','120 fps']] if has else []),(gid,platform))
+
 class UpscalerSetting(unittest.TestCase):
     def test_only_for_games_naming_their_upscaler(self):
         with tempfile.TemporaryDirectory() as tmp,patch.object(settings.nacp,'languages',return_value=['en-US']):

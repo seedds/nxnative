@@ -1,3 +1,4 @@
+using System.Linq;
 using Ryujinx.Graphics.Shader.Decoders;
 using Ryujinx.Graphics.Shader.IntermediateRepresentation;
 using Ryujinx.Graphics.Shader.Translation;
@@ -255,41 +256,56 @@ namespace Ryujinx.Graphics.Shader.Instructions
             }
 
             Operand addr = context.IAdd(ALocalAddress(context, x, 32, stride: false), Const((int)x.SignedField(40, 64)));
-            Operand lane = ALaneId(context);
-            Operand g = context.ShiftRightU32(lane, Const(2));
-            Operand t = context.BitwiseAnd(lane, Const(3));
             int id = context.ResourceManager.SharedMemoryId;
-            Operand[] results = new Operand[count];
+            bool compute = context.TranslatorContext.Definitions.Stage == ShaderStage.Compute;
+            Operand lane = compute ? null : ALaneId(context);
+            Operand g = compute ? null : context.ShiftRightU32(lane, Const(2));
+            Operand t = compute ? null : context.BitwiseAnd(lane, Const(3));
 
-            for (int m = 0; m < count; m++)
-            {
-                if (mode == 0)
-                {
-                    Operand rowAddr = context.Shuffle(addr, context.IAdd(g, Const(8 * m)));
-                    Operand byteOffset = context.IAdd(rowAddr, context.ShiftLeft(t, Const(2)));
-                    results[m] = context.Load(StorageKind.SharedMemory, id, context.ShiftRightU32(byteOffset, Const(2)));
-                }
-                else
-                {
-                    Operand[] h = new Operand[2];
+            // nxnative: LDSM reads rows that other lanes of the warp stored (STS) just before, often with no BAR between them (Ocarina of Time's NDVE movie networks and its
+            // scene's compute). On the Switch a warp's shared memory accesses are in order; Metal orders another lane's threadgroup store and this lane's load only through a
+            // barrier, and its compiler moves them past each other: dotted rows, every other pixel of a few rows wrong (the high halves of packed pairs), in other places each run.
+            // LDSM is warp-collective (the whole warp runs it), so a subgroup barrier before its reads (the stores have landed) and one after (no lane's next store reaches the
+            // rows before every lane has read them) is safe. In a compute shader the barriers bracket the MatrixLoads, so they bracket the per-lane code TensorPass puts in their
+            // place; TensorPass does not count a subgroup barrier as a shared memory write, so an HMMA still reads its A straight from where the LDSM read it
+            context.SubgroupBarrier();
 
-                    for (int j = 0; j < 2; j++)
-                    {
-                        Operand row = context.IAdd(context.ShiftLeft(t, Const(1)), Const(j));
-                        Operand rowAddr = context.Shuffle(addr, context.IAdd(row, Const(8 * m)));
-                        Operand byteOffset = context.IAdd(rowAddr, context.ShiftLeft(g, Const(1)));
-                        Operand word = context.Load(StorageKind.SharedMemory, id, context.ShiftRightU32(byteOffset, Const(2)));
-                        h[j] = context.BitfieldExtractU32(word, context.ShiftLeft(context.BitwiseAnd(byteOffset, Const(2)), Const(3)), Const(16));
-                    }
-
-                    results[m] = context.BitwiseOr(h[0], context.ShiftLeft(h[1], Const(16)));
-                }
-            }
-
+            // nxnative: in a compute shader, one MatrixLoad a matrix (sources: shared memory id, mode, row address, matrix), which TensorPass lowers to the same per-lane code
+            // (LdsmLane) once it knows whether the HMMAs it feeds read their A straight from where it reads (Ampere HMMA through simdgroup_matrix). One destination each:
+            // the optimizer's dead code removal takes an operation whose destination nothing reads as dead, sources included
             for (int m = 0; m < count && x.Rd + m < RegisterConsts.RegisterZeroIndex; m++)
             {
-                context.Copy(Register(x.Rd + m, RegisterType.Gpr), results[m]);
+                Operand result = compute ? context.Add(Instruction.MatrixLoad, Local(), Const(id), Const(mode), addr, Const(m)) : LdsmLane(context, g, t, addr, id, m, mode);
+
+                context.Copy(Register(x.Rd + m, RegisterType.Gpr), result);
             }
+
+            context.SubgroupBarrier();
+        }
+
+        // LDSM per lane: lane L's register of matrix m (g = L / 4, t = L % 4), from the row addresses (bytes in shared memory `id`) the lanes hold in addr
+        public static Operand LdsmLane(EmitterContext context, Operand g, Operand t, Operand addr, int id, int m, int mode)
+        {
+            if (mode == 0)
+            {
+                Operand rowAddr = context.Shuffle(addr, context.IAdd(g, Const(8 * m)));
+                Operand byteOffset = context.IAdd(rowAddr, context.ShiftLeft(t, Const(2)));
+
+                return context.Load(StorageKind.SharedMemory, id, context.ShiftRightU32(byteOffset, Const(2)));
+            }
+
+            Operand[] h = new Operand[2];
+
+            for (int j = 0; j < 2; j++)
+            {
+                Operand row = context.IAdd(context.ShiftLeft(t, Const(1)), Const(j));
+                Operand rowAddr = context.Shuffle(addr, context.IAdd(row, Const(8 * m)));
+                Operand byteOffset = context.IAdd(rowAddr, context.ShiftLeft(g, Const(1)));
+                Operand word = context.Load(StorageKind.SharedMemory, id, context.ShiftRightU32(byteOffset, Const(2)));
+                h[j] = context.BitfieldExtractU32(word, context.ShiftLeft(context.BitwiseAnd(byteOffset, Const(2)), Const(3)), Const(16));
+            }
+
+            return context.BitwiseOr(h[0], context.ShiftLeft(h[1], Const(16)));
         }
 
         // MOVM.16.MT88 Rd, Ra: the 8 x 8 matrix of halves the warp holds (lane L: row L / 4, columns 2 (L % 4), + 1), transposed into the same layout
@@ -322,12 +338,26 @@ namespace Ryujinx.Graphics.Shader.Instructions
             }
         }
 
+        // .FTZ (80) of HSETP2 / HSET2: a subnormal half compares as zero, as FSETP.FTZ's float does (AFtz). The lanes are unpacked to 32 bits, where a half's subnormals
+        // are normal floats, so FlushDenormal's bound would never flush them: the half's own bound is 2^-14
+        private static (Operand[] A, Operand[] B) AHalfFtz(EmitterContext context, AmpereOp x, (Operand[] A, Operand[] B) src)
+        {
+            if (!x.Bit(80))
+            {
+                return src;
+            }
+
+            Operand[] Flush(Operand[] v) => [.. v.Select(l => context.ConditionalSelect(context.FPCompareLess(context.FPAbsolute(l), ConstF(6.1035156e-05f)), ConstF(0), l))];
+
+            return (Flush(src.A), Flush(src.B));
+        }
+
         // HSETP2 Pd0, Pd1, a, b, P: each half's comparison (76..80) combined with P (87..90) by the operation at 69..71; with .H_AND (71) the two halves' results ANDed
         // into Pd0 and its negation into Pd1
         public static void AHsetp2(EmitterContext context)
         {
             AmpereOp x = new(context.CurrOp);
-            (Operand[] a, Operand[] b) = AHalfSecond(context, x);
+            (Operand[] a, Operand[] b) = AHalfFtz(context, x, AHalfSecond(context, x));
 
             Operand lo = GetFPComparison(context, (FComp)x.Bits(76, 80), a[0], b[0]);
             Operand hi = GetFPComparison(context, (FComp)x.Bits(76, 80), a[1], b[1]);
@@ -349,7 +379,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
         public static void AHset2(EmitterContext context)
         {
             AmpereOp x = new(context.CurrOp);
-            (Operand[] a, Operand[] b) = AHalfSecond(context, x);
+            (Operand[] a, Operand[] b) = AHalfFtz(context, x, AHalfSecond(context, x));
             Operand p = APred(context, x, 87, 90);
             BoolOp bop = (BoolOp)x.Bits(69, 71);
             Operand res = Const(0);

@@ -1,0 +1,11 @@
+# What the repository's tools import beyond the standard library, pinned: the rewriter (capstone, lz4), the shader tools, and the rarer packers (zstandard, zbic, nsz, texture2ddecoder).
+# One environment serves every game: python3 -m venv <drive with the games>/venv && <that>/bin/pip install -r .github/requirements/tools.txt
+capstone==5.0.9
+fonttools==4.68.0
+lz4==4.4.5
+nsz==5.0.0
+numpy==2.5.4
+pillow==13.0.0
+texture2ddecoder==1.0.6
+zbic==1.0.1.post1
+zstandard==0.25.0

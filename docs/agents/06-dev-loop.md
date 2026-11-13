@@ -24,7 +24,7 @@ Start Mac runs with the Metal performance HUD (`DM_METAL_HUD=1`). A new title st
 5. Wrong picture: `DM_NVN_SHOT` screenshots, `DM_NVN_PASSDUMP` (every pass, its attachments, bindings and draw state), `DM_NVN_TEXDUMP` / `DM_NVN_TEXSNAP` (render targets as PNG), `DM_NVN_CBDUMP` (uniform buffers, vertex streams), `DM_NVN_HILITE` / `DM_NVN_DEPTHOVR` / `DM_NVN_SKIP_FS` (isolate a draw), `DM_NVN_KEYDUMP` and `DM_NVN_MAGSCAN` on the phone: [04, Diagnostic switches](04-graphics.md#7-diagnostic-switches-host) and [05, Intermittent rendering glitches](05-debugging.md#intermittent-rendering-glitches).
 6. Slow frames: the `[longframe]` lines and the hitch dump (`DM_HITCH_DUMP`), pipeline compile waits ([05](05-debugging.md#pipeline-compile-waits)), GPU time per pass (`DM_NVN_GPUPROF`, `DM_AB` A/B phases, `DM_GPU_CAPTURE` for Xcode; read with `dm/tools/gpuprof.py`): [05, GPU time on the device](05-debugging.md#gpu-time-on-the-device). Attachment traffic: `dm/gfx/tools/tbdr_*.py` over a pass dump.
 7. Memory: the host's memory line, `footprint`, `vmmap`, `DM_NVN_ALLOCPROF=1`: [05, Memory growth](05-debugging.md#memory-growth).
-8. Shaders: `dm/gfx/tools/shader_regressions.py` (shaders that built in the previous chain and fail now), `DM_NVN_SHDUMP` (programs missing from the map), the offline link check ([05](05-debugging.md#offline-pipeline-link-check)).
+8. Shaders: `dm/gfx/tools/shader_regressions.py` (shaders that built in the previous chain and fail now), the build log's [`[RED] lost without failing`](../reference/shaders.md#losses-a-shader-build-reports) line, `DM_NVN_SHDUMP` (programs missing from the map), the offline link check ([05](05-debugging.md#offline-pipeline-link-check)).
 9. On the iPhone: switches in `Documents/env.txt`, results in `Documents/log.txt` ([05, On-device diagnostics](05-debugging.md#on-device-diagnostics-ios)).
 10. Game updates and fixed addresses: `dm/tools/nso_fnmap.py`, `nso_syms.py`, `insn_census.py`, `sdis.py`, `nso2elf.py` ([Tools](../development.md#tools-dmtools)).
 
@@ -50,7 +50,7 @@ Add `--record` to the check on your games (`check --record`, or `baseline --reco
 
 NVN smoke runs also compare the observed depth mode with the profile's `depth_mode`, even without an archive in quick mode, and detect a bundled archive rejected for a stamp mismatch. See [archive/profile depth mismatches](../reference/shaders.md#offline-pipeline-archive-and-profile-depth-disagree). Missing runtime observations remain unknown.
 
-Reading the report (`report.md` beside `report.json` in `<root>/reports/`): one row per game, then the details. `PASS` and `CHANGED` (MSL or numbers moved, nothing worse) exit 0; `NEW-FAIL` (a shader, the interface check, a crash, a hang or the frame that worked in the baseline fails) and `REGRESSION` (new `[RED]` lines, a screenshot, frame time, memory or prepare time beyond the tolerances) exit 1; `ERROR` (the harness could not check a game) exits 2. Failures the baseline has too are listed as known and do not fail the check. Changed MSL is expected after a chain change: say in the pull request why it changed. A screenshot difference may be a fix: look at the run's screenshots in `<NSP folder>/<id>-work/regress/runs/` before calling it either. The report holds only numbers, hashes, shader keys and normalized `[RED]` texts, so it can be pasted as it is.
+Reading the report (`report.md` beside `report.json` in `<root>/reports/`): one row per game, then the details. `PASS` and `CHANGED` (MSL or numbers moved, nothing worse) exit 0; `NEW-FAIL` (a shader, the interface check, a crash, a hang or the frame that worked in the baseline fails, or a shader [lost more without failing](../reference/shaders.md#losses-a-shader-build-reports)) and `REGRESSION` (new `[RED]` lines, a screenshot, frame time, memory or prepare time beyond the tolerances) exit 1; `ERROR` (the harness could not check a game) exits 2. Failures the baseline has too are listed as known and do not fail the check. Changed MSL is expected after a chain change: say in the pull request why it changed. A screenshot difference may be a fix: look at the run's screenshots in `<NSP folder>/<id>-work/regress/runs/` before calling it either. The report holds only numbers, hashes, shader keys and normalized `[RED]` texts, so it can be pasted as it is.
 
 ## 5. Which games a change can reach: usage manifests and `regress.py impact`
 
@@ -66,7 +66,44 @@ Reading the report (`report.md` beside `report.json` in `<root>/reports/`): one 
 
 By what the change touches (the largest that applies):
 
-- **Docs only:** `python3 -m unittest dm/tools/tests/test_docs.py`; after a change to `docs/reference`, `python3 dm/tools/docs_symptoms.py`; after editing `docs/images/gallery.tsv`, `python3 dm/tools/docs_gallery.py` (also resolves conflicts inside README's generated gallery).
+- **Docs only:** `python3 -m unittest dm/tools/tests/test_docs.py`; after a change to `docs/reference`, `python3 dm/tools/docs_symptoms.py`.
 - **A Python tool or script** (`scripts/`, the tools under `dm/`): the ratchet `lint-python.yml` runs, ruff and pyright with no new finding: `<venv>/bin/python3 dm/tools/lint_python.py`, from a venv with `.github/requirements/lint.txt` installed, kept on the drive of the NSP folders, not in the home folder ([Continuous integration](../development.md#continuous-integration)). The system Python has neither tool, and the check stops at a `[RED]` line there: that is not a pass. A generated page (`docs_*.py`) is compared in CI on a clean checkout, so it must not read untracked or git-ignored files such as `dm/host/gen`.
 - **One game's profile or note** (`dm/games/<id>/`): the Python tool tests; a full shader build of that game after a change to its shader inputs; the game on the Mac (or the iPhone) along its route, with `scripts/bench.py` numbers when the change is about speed; the finding in the game's note ([AGENTS.md](../../AGENTS.md)).
 - **The host, the chain or the tools** (`dm/host`, `dm/gfx`, `dm/tools`, `dm/gfx/tools`, `dm/ios`, `scripts`): everything above, `make -C dm/gfx/tests GAME=<id> run`, `dmsh_chain.py --header` after a chain change, `python3 scripts/regress.py impact main..HEAD` to see which games it reaches, then `python3 scripts/regress.py check --games <ids>` (`--quick` while iterating, the full run before the pull request), and its `report.md` pasted into the pull request with a word on every `CHANGED`, `NEW-FAIL` or `REGRESSION`. Choose the games, not every local one: the five the change is most likely to reach or break (those `impact` names, then games that cover the APIs, engines and paths it touches). Take more than five only when the change truly needs them (a broad chain or host change no five games cover), and fewer when its reach is narrow and clear (a fix on one game's path, a tool only some games use). Name the games the report covers and why you chose them: the others are unchecked. After a change to C or Objective-C in `dm/host` or `dm/gfx`, `dm/tools/lint_c.py compdb` and `tidy` with LLVM's release run what the `lint-c` workflow runs: no new finding (fix it, or `// NOLINT(<check>)` with a reason on a false positive), and `tidy --update` after fixing one ([Continuous integration](../development.md#continuous-integration)).
+
+## 8. Commit messages
+
+A commit on `main` is read as one line in `git log --oneline` and GitHub's commit list, so that line says where the change lands and what it does, in the form most systems projects use (Linux, Git, Go, QEMU, Wine), and the full account goes below it:
+
+```
+host/movie: keep inputs sent after end of stream unread (PR #1938)
+
+A movie decoder keeps input buffers sent after end of stream instead of decoding them, as ACodec does: … (the symptom, the cause, the change, what was checked and what was not)
+
+Co-authored-by: …
+```
+
+- **The first line** is `area/component: summary` (the component is optional), at most 72 characters, without a full stop; the summary starts lowercase unless its first word is a name. A pull request's title takes the same form.
+- **The area** is one name from the table: where the change lands, that is where the cause was fixed. The tests, reference entries and regenerated files that go with it do not count, and a commit that holds two independent changes is two commits. The names are the labels `dm/tools/pr_areas.py` gives pull requests (`COMMIT_AREAS`), so a commit and its pull request share one vocabulary; a new part of nxnative gets its row in `AREAS` and here (`test_pr_areas` compares the two).
+
+  | Area | What changed |
+  |---|---|
+  | `host` | The Horizon host: SVCs, services, threads, memory, input (`dm/host`) |
+  | `nvn` | NVN on Metal and the graphics tests (`dm/gfx/nvn`, `dm/gfx/tests`) |
+  | `vulkan` | Vulkan on Metal (`dm/gfx/vk`) |
+  | `opengl` | NVIDIA's desktop OpenGL on Metal (`dm/gfx/gl`) |
+  | `textures` | Texture layouts and formats (`dm/gfx/tex`) |
+  | `chain` | The shader chain (`DMSH_CHAIN`'s files; the `shader chain` label): every game's shaders are rebuilt |
+  | `rewriter` | The NSO rewriter and per-build patches (`patch_nso.py`, `sdk_patches.py`, a profile's `patches.py`) |
+  | `packing` | The NSP script, extraction, the shader split, the packers |
+  | `ios` | The iPhone and iPad app (`dm/ios`) |
+  | `mac` | The Mac front end and app (`dm/mac`, `front_mac.m`) |
+  | `tools` | Tools and scripts (`dm/tools`, `scripts`) |
+  | `docs` | Documentation, when the commit is nothing else |
+  | `ci` | Continuous integration and repository settings (`.github`) |
+  | `game` | One game's profile or note (`dm/games/<id>/`); the summary opens with the game's name from the [games table](../../dm/games/README.md#games), a long one without its series (`game: Tears of the Kingdom …`) |
+
+- **The component** comes from the code, never from a list: the service's file in the host (`hle_movie.c`: `host/movie`), the tool (`tools/regress`), the NVN object or step (`nvn/present`). When unsure, use what `git log --no-merges -- <files>` already shows.
+- **A general fix found on one game** takes the area where it lands and names the game in the body; `game` is for a change only that game sees.
+- **No kind prefix** (`fix:`, `feat:`, `ADD:`): the summary's verb says what kind of change it is, and the body says whether it fixes the cause or works around it.
+- **The body**, after a blank line, is as long as it needs. Lines of their own at the end: `Front-ends:` ([Following main](../frontends.md#following-main)), `Fixes #N` only when the push should close the issue, `Co-authored-by:`. A pull request taken in is named as `PR #N` in the first line or the body, where `dm/tools/triage_report.py` finds it.

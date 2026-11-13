@@ -16,9 +16,21 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
 
             RunOptimizationPasses(context.Blocks, context.ResourceManager);
 
+            // nxnative: a hull shader's stores into the stage's circular buffer become its outputs, once the header words are constants and the addresses are folded
+            if (context.UsedFeatures.HasFlag(FeatureFlags.DirectCbe))
+            {
+                if (DirectCbeWrites.AnswerHeader(context.Blocks, context.Definitions))
+                {
+                    RunOptimizationPasses(context.Blocks, context.ResourceManager);
+                }
+
+                DirectCbeWrites.RunPass(context.Blocks, context.Definitions, context.GpuAccessor);
+                RunOptimizationPasses(context.Blocks, context.ResourceManager);
+            }
+
             // TODO: Some of those are not optimizations and shouldn't be here.
 
-            GlobalToStorage.RunPass(context.Hfm, context.Blocks, context.ResourceManager, context.GpuAccessor, context.TargetLanguage);
+            GlobalToStorage.RunPass(context.Hfm, context.Blocks, context.ResourceManager, context.GpuAccessor, context.TargetLanguage, context.Ampere);
 
             bool hostSupportsShaderFloat64 = context.GpuAccessor.QueryHostSupportsShaderFloat64();
 
@@ -394,7 +406,9 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
                         // nxnative (from MacNativeGames' translator patch 0002, after Ryujinx_Optime 01a1e37f): follow only into a producer that will be removed
                         // itself. One with side effects (an atomic, a call) stays in the block when its result is unused, so its sources are still live; dropping
                         // their uses here let the next dead-code pass delete the chain that feeds it, and the atomic then read undefined values.
-                        if (!HasSideEffects(src.AsgOp))
+                        // The same holds for a producer with another destination still in use: an image read whose .x is dead but whose .y is not stays, and following it
+                        // lost its coordinate (Ocarina of Time's wind solver read a garbage y, and its velocity field oscillated, which made the grass flicker at 10 Hz).
+                        if (!HasSideEffects(src.AsgOp) && DestHasNoUses(src.AsgOp))
                         {
                             nodes.Enqueue(src.AsgOp);
                         }

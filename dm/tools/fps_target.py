@@ -37,8 +37,9 @@ def relocated(img):
     from loader_census import got_values
     return got_values(img)
 
-def find(img, text_end, ro_off, data_off):
-    """(offset of the global pointer, offset of the field, reason), or (None, None, why not); why starts '[RED] ' when more than one field qualifies"""
+def globals_of(img):
+    """global_of(i, b): the global whose value register xB holds at word offset i (ldr xB, [xA] a few words before, xA the global's address made by adrp + add, or loaded from
+    its GOT slot by adrp + ldr, the module's relative relocations applied), or None. Also used by ue_fixed_rate.py (Unreal's GEngine)"""
     word = lambda a: struct.unpack_from('<I', img, a)[0]
     rel = None
     def page_of(i, a):
@@ -71,6 +72,12 @@ def find(img, text_end, ro_off, data_off):
                 return None
             if writes(u) == b: return None   # xB written by something else
         return None
+    return global_of
+
+def find(img, text_end, ro_off, data_off):
+    """(offset of the global pointer, offset of the field, reason), or (None, None, why not); why starts '[RED] ' when more than one field qualifies"""
+    word = lambda a: struct.unpack_from('<I', img, a)[0]
+    global_of = globals_of(img)
     readers, stores = {}, {}
     for i in range(0, text_end, 4):
         u = word(i)

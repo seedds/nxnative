@@ -9,6 +9,18 @@ namespace Ryujinx.Graphics.Shader.Instructions
 {
     static class InstEmitAluHelper
     {
+        // A float comparison with .FTZ (FSET and FSETP, Maxwell's FCMP): a denormal operand compares as zero, as on NVIDIA; Apple's GPUs keep fp32 denormals. The compilers set the flag on nearly
+        // every comparison, so an immediate or RZ, the usual second operand, is decided here and adds no code
+        public static Operand FlushDenormal(EmitterContext context, Operand v)
+        {
+            if (v.Type == OperandType.Constant)
+            {
+                return float.IsSubnormal(v.AsFloat()) ? ConstF(0) : v;
+            }
+
+            return context.ConditionalSelect(context.FPCompareLess(context.FPAbsolute(v), ConstF(1.17549435e-38f)), ConstF(0), v);
+        }
+
         public static long GetIntMin(IDstFmt type)
         {
             return type switch

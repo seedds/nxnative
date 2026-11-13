@@ -7,8 +7,6 @@
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
-#undef HLE_FORCE
-#define HLE_FORCE HLE_FORCE_BIG
 
 typedef struct { char name[32]; int64_t size; unsigned char digest[16]; } BcatEntry;
 typedef struct { uint64_t lo,hi; } BcatDigest;

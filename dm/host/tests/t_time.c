@@ -15,6 +15,14 @@ static void *hook(const char *name) {
     CHECK(count == 1 && fn, name);
     return count == 1 ? fn : NULL;
 }
+// The SDK's detail:: periodic benefit claim, as guest_sym finds it: records what the host's public entry passed on and answers 7
+static const void *claim_args[5];
+static uint64_t fake_claim(void *ctx, const uint8_t *snap, const int64_t *max_penalty, const int64_t *acceptable, const void *callback) {
+    claim_args[0] = ctx; claim_args[1] = snap; claim_args[2] = max_penalty; claim_args[3] = acceptable; claim_args[4] = callback; return 7;
+}
+void *guest_sym(const char *name) {
+    return !strcmp(name, "_ZN2nn4time6detail39ClaimPeriodicBenefitWithUserSystemClockEPNS0_27PeriodicBenefitClaimContextERKNS0_13ClockSnapshotERKNS_8TimeSpanES9_PKNS0_25CheckCalendarTimeCallbackE") ? (void *)fake_claim : NULL;
+}
 static void put64(uint8_t *s, int off, int64_t v) { memcpy(s + off, &v, 8); }
 static int64_t get64(const uint8_t *s, int off) { int64_t v; memcpy(&v, s + off, 8); return v; }
 int main(void) {
@@ -69,6 +77,20 @@ int main(void) {
     b[0x10] ^= 1; CHECK(udiff(a, b) == 0, "user contexts of different steady sources: 0");
     b[0x10] ^= 1; a[0xcc] = b[0xcc] = 1; CHECK(udiff(a, b) == 0, "automatic correction on in both: 0");
     a[0xcc] = 0; CHECK(udiff(a, b) == 3600 * 1000000000LL, "automatic correction in one only: the difference");
+    // The periodic benefit claim skips the SDK's time service session check and hands every argument to its detail:: implementation, whose answer it returns
+    uint64_t (*claim)(void *, const uint8_t *, const int64_t *, const int64_t *, const void *) =
+        hook("_ZN2nn4time39ClaimPeriodicBenefitWithUserSystemClockEPNS0_27PeriodicBenefitClaimContextERKNS0_13ClockSnapshotERKNS_8TimeSpanES8_PKNS0_25CheckCalendarTimeCallbackE");
+    uint8_t ctx[0x100] = {0}; int64_t pen = 1, acc = 2; int cbk = 0;
+    CHECK(claim && claim(ctx, a, &pen, &acc, &cbk) == 7, "periodic benefit claim returns the SDK implementation's answer");
+    CHECK(claim_args[0] == ctx && claim_args[1] == a && claim_args[2] == &pen && claim_args[3] == &acc && claim_args[4] == &cbk, "periodic benefit claim passes every argument on");
+    // Its two service questions: the location the host's snapshots carry, and time points of no clock (a source ID no snapshot has)
+    Result (*auto_upd)(uint8_t *) = hook("_ZN2nn4time6detail56GetStandardUserSystemClockAutomaticCorrectionUpdatedTimeEPNS0_20SteadyClockTimePointE");
+    Result (*loc_upd)(char *, uint8_t *) = hook("_ZN2nn4time6detail35GetDeviceLocationNameAndUpdatedTimeEPNS0_12LocationNameEPNS0_20SteadyClockTimePointE");
+    uint8_t tp[0x18], none[0x18] = {0}; char loc[0x24];
+    memset(tp, 0xaa, sizeof tp); CHECK(auto_upd && auto_upd(tp) == RES_OK && !memcmp(tp, none, sizeof tp), "automatic correction updated time: a cleared time point");
+    memset(tp, 0xaa, sizeof tp); memset(loc, 0xaa, sizeof loc);
+    CHECK(loc_upd && loc_upd(loc, tp) == RES_OK && !memcmp(loc, a + 0xa8, sizeof loc) && !memcmp(tp, none, sizeof tp), "device location: the snapshot's name, a cleared time point");
+    CHECK(memcmp(tp + 8, a + 0x90 + 8, 16), "the cleared time point's source ID is not the snapshots' steady clock");
     printf("time: %d checks, %d failed\n", checks, fails);
     return fails != 0;
 }

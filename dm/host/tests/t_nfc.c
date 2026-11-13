@@ -41,9 +41,14 @@ int main(void) {
     int (*device_state)(const NfpDeviceHandle *) = forced(&hle_force_h_nfp_State, "_ZN2nn3nfp14GetDeviceStateERKNS0_12DeviceHandleE");
     Result (*tag_info)(void *, const NfpDeviceHandle *) = forced(&hle_force_h_nfp_TagInfo, "_ZN2nn3nfp10GetTagInfoEPNS0_7TagInfoERKNS0_12DeviceHandleE");
     int (*nfp_lib)(void) = forced(&hle_force_h_nfp_LibState, "_ZN2nn3nfp8GetStateEv");
+    void (*nfp_init_ext)(void) = forced(&hle_force_h_nfp_InitExt, "_ZN2nn3nfp37InitializeWithExtendedApplicationAreaEv");
     if (fails) return 1;
     // The amiibo library's own state: Breath of the Wild and Tears of the Kingdom initialize it and attach their availability event only when it is not 1 (#613).
     CHECK(nfp_lib() == 0, "NFP begins uninitialized");
+    nfp_init_ext();
+    CHECK(nfp_lib() == 1, "NFP initialization with the extended application area is observable");
+    nfp_fini();
+    CHECK(nfp_lib() == 0, "NFP finalization ends it");
     CHECK(state() == 0, "NFC begins uninitialized");
     CHECK(enabled() == 0, "NFC has no physical reader before initialization");
     nfp_init();

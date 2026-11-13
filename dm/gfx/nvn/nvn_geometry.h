@@ -89,6 +89,24 @@ typedef struct { uint64_t raw, mask, map, dst, args; uint32_t groups, stride, fi
 // The capture's record description (dmsh_geometry.capture dm_geometry_capture), vertex buffer 13: where the records go,
 // {first vertex, vertices, first instance, instances}, the record's words, and each capture word's slot in it (-1: not stored)
 enum { GEO_CAPTURE_WORDS = 144 };
+// A compact capture: a draw's vertex IDs may be far apart (Kirby Air Riders' ribbons keep a side number in bit 16: 3 vertices, IDs 0..0x10000), and a record per ID in that range took 36 MB for 3 vertices, hundreds of
+// such draws a scene, 15 GB. Records instead go side by side, in the order of the sorted unique IDs: each contiguous run of IDs is captured with a first vertex of its own (its first ID less its position), which is all
+// the capture shader's address needs, and the geometry stage reads through a map of positions. Lean kernels still take the real IDs: they draw the game's vertex shader with them.
+static size_t nvn_geo_capture_runs(const uint32_t *ids, size_t n) {   // contiguous runs in a sorted unique list
+    size_t runs = n ? 1 : 0;
+    for (size_t i = 1; i < n; i++) if (ids[i] != ids[i - 1] + 1) runs++;
+    return runs;
+}
+// map[i] + lo → its position in ids; 0 when a value is not in the list
+static int nvn_geo_compact_map(const uint32_t *map, size_t words, uint32_t lo, const uint32_t *ids, size_t n, uint32_t *out) {
+    for (size_t i = 0; i < words; i++) {
+        uint32_t want = map[i] + lo; size_t a = 0, b = n;
+        while (a < b) { size_t m = a + (b - a) / 2; if (ids[m] < want) a = m + 1; else b = m; }
+        if (a == n || ids[a] != want) return 0;
+        out[i] = (uint32_t)a;
+    }
+    return 1;
+}
 typedef struct { uint64_t dst, pad; uint32_t info[4]; uint32_t stride; int16_t slot[GEO_CAPTURE_WORDS]; } nvn_geo_capture;
 _Static_assert(__builtin_offsetof(nvn_geo_capture, info) == 16 && __builtin_offsetof(nvn_geo_capture, stride) == 32 && __builtin_offsetof(nvn_geo_capture, slot) == 36, "dm_geometry_capture layout");
 // The job record geo_pack reads (host side): the counts / offsets buffer holds a word per group

@@ -54,4 +54,5 @@ General host changes first needed here; each applies to every game:
 
 ## Open
 
+- **Current (2026-11-05):** the translator deletes 1030 bindless accesses in 616 shaders (374 pixel, 209 compute, 32 vertex, 1 geometry; texture2D 211, texture3D 2, textureCube 817), whose results read 0: each named by its `[RED]` line in the build's log. The cause is not traced, and whether a route reaches them is not known. [Losses a shader build reports](../../../docs/reference/shaders.md#losses-a-shader-build-reports).
 - The chapter autosave was not reached in the runs above (the save files kept their first-boot contents through the junkyard tutorial).

@@ -40,6 +40,7 @@ On the Mac: the opening rooms at 60 fps with movement, jumping and audio; item p
 
 - **An empty RomFS for a program without a data section** (`nx_extract`; an empty `romfs_marker` checks the directory itself): [dm/games/README.md](../README.md).
 - **An empty RomFS image:** [RomFS images](../../../docs/reference/packing.md#romfs-folder-transfers-fail-or-leave-stale-game-files).
+- **One file for the compile cache and Xcode's data between builds, tested on this game's build folder (4,019 files to 323):** [Build folders of many small files](../../../docs/reference/packing.md#a-build-folder-holds-hundreds-of-thousands-of-small-files).
 - **Resolved:** `--platform mac-app` stopped at the pipeline archive (`pso_offline: no base to build`) because the profile's `shader_pairs.tsv` holds no pair; a pair list with no pair is now nothing to build and the app is packed without an archive: [Offline pipeline archive reuse and fallback](../../../docs/reference/shaders.md#offline-pipeline-archive-reuse-and-fallback) ([GitHub issue #338](https://github.com/seedds/nxnative/issues/338)).
 
 ## Open

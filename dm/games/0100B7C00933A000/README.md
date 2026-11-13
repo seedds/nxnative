@@ -2,7 +2,7 @@
 
 Update 1.1.1 (v262144) over the base game, SDK 10.4.8 (its own `sdk` build). Nintendo EPD / Eighting, Unreal Engine 4.26.2 (`Carrot4`; `SDK MW+EpicGames+UnrealEngine-4_26_2` in `main`), NVN, PhysX 3.4, Wwise (its own `AudioOut` sink, Opus through the host's software decoder), VP9 movies through Unreal's Switch media player and the SDK's movie module. Modules `main`, `subsdk0` (the movie module: the title and the opening are VP9 movies) and `sdk`. Plays on the iPhone (IPA 10.8 GB); 30 fps, as on the Switch.
 
-Status: on the Mac, the boot, the title (a VP9 movie behind the logo), the main menu, a new game (the auto-save notice, players, creature activity level), the opening (the shadow-play story, the cutscenes with Olimar and Moss) and the Olimar prologue in play, Continue from a save; 30 fps as on the Switch, Wwise sound, about 2.6–2.8 GB resident and 1.7 GB of Metal allocations, no red line. The title is up about 25 s after launch. The prewarm list covers that route (806 lines).
+Status: on the Mac, the boot, the title (a VP9 movie behind the logo), the main menu, a new game (the auto-save notice, players, creature activity level), the opening (the shadow-play story, the cutscenes with Olimar and Moss) and the Olimar prologue in play, Continue from a save; 60 fps (30 on the Switch), 120 on the Mac when chosen, Wwise sound, about 2.6–2.8 GB resident and 1.7 GB of Metal allocations, no red line. The title is up about 25 s after launch. The prewarm list covers that route (806 lines).
 
 ## What it needs
 
@@ -14,10 +14,14 @@ Status: on the Mac, the boot, the title (a VP9 movie behind the logo), the main 
 | Engage's 5 GB block: `mem_reserve 0x140000000`, `mem_alias 0x118000000`, `mem_stack 0x10000000`, `app_pool 0xCD500000` | [`game.tsv`](game.tsv) | 256 MB in front + 4.375 GB alias region + 256 MB stack region + 128 MB heap region, as FINAL FANTASY RESONANCE's |
 | `sys_resource 0x5000000` | `game.tsv` | the NPDM declares 80 MB of system resource |
 | `pad_layout full` | `game.tsv` | a 3D game with a free camera on the right stick; it plays with the controller, so it stays docked (1920x1080) |
+| `fps_target 60` | `game.tsv`, `hle_fpslock.c` | the host writes `rhi.SyncInterval` 1 and the engine's fixed frame rate 60 (`dm/tools/ue_fixed_rate.py`, no build ID); see [Frame rate](#frame-rate) |
+| `fps_max 120` | `game.tsv` | **Frame rate** offers 120 on the Mac: the user found it right; see [Frame rate](#frame-rate) |
 
 ## Frame rate
 
-- **Current:** 30 fps, as on the Switch. The game steps a fixed frame time (`bUseFixedFrameRate=True` in `DefaultEngine.ini`, Unreal's default `FixedFrameRate` of 30) and asks for present interval 2 (`rhi.SyncInterval=2` in `SwitchDeviceProfiles.ini`, `r.VSync=1`), so a faster present rate would speed the game up, not smooth it. No `fps_target`.
+- **Current:** 60 fps (30 on the Switch), 120 on the Mac when chosen (`fps_max 120`). The game steps a fixed frame time (`bUseFixedFrameRate=True` in `DefaultEngine.ini`, Unreal's default `FixedFrameRate` of 30) and asks for present interval 2 (`rhi.SyncInterval=2` in `SwitchDeviceProfiles.ini`, `r.VSync=1`). The host writes `rhi.SyncInterval` 1 and the engine's fixed frame rate: `main: Unreal fixed frame rate (GEngine->FixedFrameRate) 30 → 120 fps`, at 120 following the hold (60 while a movie plays): [Unreal's fixed frame rate, found by its reflection entry](../../../docs/reference/frame-rate.md#unreals-fixed-frame-rate-found-by-its-reflection-entry). With the rate the step shrinks with the frame, so the game's speed holds; a faster present rate alone would have sped it up.
+- `GEngine` is `main+0x9fbf880` (stored where `FEngineLoop::Init` makes the engine, `main+0x9e5f68` and `main+0x9e9224`), `FixedFrameRate` is at `+0x7a8` (its reflection entry at `main+0x90ccc10`) and `bUseFixedFrameRate` is bit 0x40 of `+0x7a4`. Read in a run on 2026-11-08: the flag byte 0x47 and 30.0. The rule's first two versions missed it: a load at the offset through `main+0x9350560` (`main+0x1689a70`) reads another object (-980 there), and no code stores the property through a global.
+- **Checked 2026-11-08:** the user played the prologue in a window at 120 with the Metal HUD and sound and found it right: 119.4 fps in most windows of 300 frames, 60–98 in a few (the hold at 60 for a movie and the fades). Not measured with inputs repeated at 30, 60 and 120.
 
 ## Memory
 
@@ -61,6 +65,7 @@ General host changes first needed here; each applies to every game:
 - **A network request kept on hold before it settles** (`hle_net.c`, `nn::nifm`): [Network requests stay on hold before they settle](../../../docs/reference/services.md#network-requests-stay-on-hold-before-they-settle).
 - **Rewriter:** an `adrp` re-encoded inside a copied exclusive window (`window_adrp`) and gates before a `ret` (`scratch_dead`): [`adrp` inside an exclusive window](../../../docs/reference/rewriter.md#adrp-inside-an-exclusive-window), [Observation gates on any relocatable instruction](../../../docs/reference/rewriter.md#observation-gates-on-any-relocatable-instruction) (the `scratch_dead` rule, removed on 2026-10-31). Spin waits that store (`patch_nso.py` "Spin waits"): [development.md, Power](../../../docs/development.md#power).
 - **An Unreal engine region that `-SwitchVirtualAddressSpaceSize=` cannot size**, given what the alias region has room for at its default path's store (`dm/tools/ue_region.py`; a cut in this build's `patches.py` until 2026-10-31): [Unreal's engine address region and its options](../../../docs/reference/memory.md#unreals-engine-address-region-and-its-options).
+- **GEngine found where the engine is made, and the fixed frame rate written only while its flag is set** (`ue_fixed_rate.py`, `hle_fpslock.c`): [Unreal's fixed frame rate, found by its reflection entry](../../../docs/reference/frame-rate.md#unreals-fixed-frame-rate-found-by-its-reflection-entry).
 
 ## Open
 

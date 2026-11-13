@@ -1,6 +1,7 @@
 # "Readable-tile" version of a fragment shader (merge B step 2): within one pass, when a later draw samples, at its own pixel, a color attachment written by an earlier draw,
 # it is changed to read the color directly from the tile (framebuffer fetch); the two render passes become one, and the intermediate attachment need not be stored to main memory and loaded back just to be sampled.
-# Built offline; at runtime only function-constant specialization is done (no source compilation). Usage: variant(msl, bindings, om_only_ok=False) → (new MSL, metadata) or (None, reason)
+# Built offline, as the entry point main0_f of the shader's own compile (fold); at runtime only function-constant specialization is done (no source compilation).
+# Usage: fold(msl, bindings, om_only_ok=False) → (the source with main0_f, metadata) or (None, reason)
 # Function constant numbering: FX_i (which color index the i-th rewritable sample reads, -1 = sample as usual) = i; FB_k (enable color input k) = 32 + k;
 #               OM_j_k (the j-th output writes to attachment k) = 64 + 8 j + k
 # Rewritable samples: .sample(sampler, select(_N, float2(0.0), isnan(_N))) on a 2D float texture, where _N = float2(in.m_X.x, in.m_X.y) (interpolated output unchanged),
@@ -12,11 +13,19 @@
 import collections
 import re
 import dmsh_abi as abi
+import dmsh_side
 
 NFB = 8
 
 def _once(msl, name):   # name is assigned exactly once in the source (its declaration): spirv-cross also declares variables first and assigns them in branches
-    return len(re.findall(r'(?<![\w.])%s = ' % re.escape(name), msl)) == 1
+    # Found as text, with a look at the character before: a pattern that starts with a lookbehind has no literal prefix to skip to, so re tries every character (4 ms each on Pokopia's 220 KB sources,
+    # and 24 calls a pixel shader made this 38% of the builder's Python, under the GIL, GitHub issue #1036)
+    text, n = name + ' = ', 0
+    i = msl.find(text)
+    while i >= 0:
+        if not i or not (msl[i - 1] in '._' or msl[i - 1].isalnum()): n += 1
+        i = msl.find(text, i + len(text))
+    return n == 1
 
 def _proj(msl, var, comp, locn):
     """var = in.m_X.<comp> / in.m_X.w, written as a product with 1.0 / w or as a quotient (each name assigned once) → m_X, or None"""
@@ -34,11 +43,45 @@ def _proj(msl, var, comp, locn):
     return src(m.group(1), comp) if m and src(m.group(1), comp) == src(m.group(2), 'w') else None
 
 _UNI = re.compile(r'\(\*spvDescriptorSet0\.fp_c(\d+)\)\._m0\[(\d+)\]\.([xyzw])')
+
+# A read of a game uniform slot at a computed offset, as the translator bounds it (TranslationFlags.MetalUniformBounds, GitHub issue #1860): the word when the slot's bound size
+# (the size table, bank DMSH_CBSIZE_BANK) holds its index, else 0, and out of bounds the read's index is row 0, so it stays inside the binding
+# (bool _5 = word < size; _5 ? c[_5 ? _3 : 0][_4] : 0.0). Reads at fixed offsets are not bounded in the shader: the host gives a binding shorter than they reach zeros up to there
+# (the reflection's "fixed", nvn_mtl.m ub_padded; GitHub issue #2066).
+# The translator's bounded read is a load and a choice (OpLoad, then OpSelect: the word is read wherever the size says, and only its value is chosen), but spirv-cross writes OpSelect
+# on a scalar as a conditional expression and forwards the load into it, cond ? read : 0, which reads only when the condition holds: Metal's compiler makes a branch, a load inside it
+# and a phi of every bounded read (seen in its LLVM IR at -O1 and -O2), where select(0, read, cond) is one load and a select. select_guards writes every bounded read as that select,
+# the translator's own meaning.
+# The branches are also what an M1's compiler gets wrong (GitHub PR #2127, macOS 26 on an M1 Pro, when reads at fixed offsets were bounded so too): OCTOPATH TRAVELER's tree material
+# (pixel shader 040208cd98c2ac2f) wrote a wrong volumetric lightmap word to G-buffer target 5 whenever a tree dither-faded, with every guard true; the lighting made NaN of it and
+# depth of field spread that into blue, green and white blocks. Which compiler step fails is not known (the same source was right at -O0, without the guards and with select; not
+# seen on newer Macs or an iPhone).
+# A bounded read select_guards cannot write as a select is an error (ValueError), so a change in what spirv-cross writes cannot bring the branches back unseen
+_GSIZE = r'\(\(\*spvDescriptorSet0\.[a-z]+_c%d\)\._m0\[\d\]\.[xyzw] >> 2u\)' % abi.CBSIZE_BANK   # a slot's size in words
+_GZERO = r'0(?:\.0|u)?'
+def _gchoice(cond, read):   # cond ? read : 0 as spirv-cross writes it, in parentheses (those after a name or > are a call's) or not as the expression around it needs
+    return re.compile('|'.join(form % (n, cond, n, read % n, n, _GZERO) for n, form in
+                               ((1, r'(?<![\w>])\((?P<q%d>%s) \? (?P<r%d>%s) : (?P<z%d>%s)\)'), (2, r'(?P<q%d>%s) \? (?P<r%d>%s) : (?P<z%d>%s)(?![\w.])'))))
+_GBOOL = re.compile(r'\bbool (_\d+) = [^;\n]* < %s;' % _GSIZE)   # the condition, a value of its own: the read's index and its choice both use it
+_GROW = _gchoice(r'_\d+', r'\(\*spvDescriptorSet0\.[a-z]+_c\d+\)\._m0\[(?P<i%s>_\d+) \? [^\]\n]+ : 0\](?:\[[^\]\n]+\]|\.[xyzw])')
+_GLEFT = re.compile(r'%s\) \?' % _GSIZE)
+
+def select_guards(msl):
+    if 'spvDescriptorSet0' not in msl: return msl
+    bools = set(_GBOOL.findall(msl))
+    def select(m):
+        n = '1' if m.group('q1') else '2'; c = m.group('q' + n)
+        if c not in bools or m.group('i' + n) != c: return m.group(0)
+        return 'select(%s, %s, %s)' % (m.group('z' + n), m.group('r' + n), c)
+    if bools: msl = _GROW.sub(select, msl)
+    left = _GLEFT.search(msl) or next((m for m in re.finditer(r'(?<!\[)\b(_\d+) \?', msl) if m.group(1) in bools), None)
+    if left: raise ValueError('a bounded uniform read is not written as a select: ' + msl[msl.rfind('\n', 0, left.start()) + 1:left.end() + 100].split('\n')[0].strip()[:160])
+    return msl
 _SCALE = '(*spvDescriptorSet0.support_buffer)._m5[0].x'   # the support buffer's render scale (Ryujinx's layout), which the host fills with 1 (nvn_mtl.m support buffer)
 
 def _frag_pos(msl, var, comp):
     """var = gl_FragCoord.<comp> [/ render scale] * U (either order), U a fragment uniform component, each name assigned once → [uniform slot, vector, component] (fp_cN is slot N − 3,
-    as dmsh_build.py raster_facts reads vp_cN), or None"""
+    as dmsh_reflect.py raster_facts reads vp_cN), or None"""
     def one(n, pat):
         m = re.search(r'float %s = %s;' % (re.escape(n), pat), msl)
         return m if m and _once(msl, n) else None
@@ -175,63 +218,75 @@ def screen_varyings(msl):
     for e in entries: got &= _entry_screen(e.group(1), locn)
     return sorted(got)
 
-def variant(msl, bindings, om_only_ok=False):
-    # main0_u (dmsh_build.py int_outputs: integer colour targets) is appended to the source after main0; the host takes it from the shader's own library, never from this variant.
-    # Its body reads main0's output struct, whose members the variant renames, and its samples were rewritten to fb0–fb7, which only main0 declares: 483 of Breath of the
-    # Wild's variants failed to compile once their cached copies were gone (use of undeclared identifier 'fb0'). The variant is built from the source without it
-    cut = msl.find('\nstruct main0_out_u\n')
-    if cut >= 0: msl = msl[:cut + 1]
-    tex = {m.group(1) for m in re.finditer(r'texture2d<float> (\w+) \[\[id\(\d+\)\]\];', msl)}
-    locn = {m.group(1): int(m.group(2)) for m in re.finditer(r'float4 (m_\d+) \[\[user\(locn(\d+)\)\]\];', msl.split('struct main0_in', 1)[-1].split('};', 1)[0])}
+def fold(msl, bindings, om_only_ok=False):
+    """The readable-tile version main0_f added to msl (a pixel shader's source, or the compile unit dmsh_side.unit made of it), to be cut from the one compile of the shader's other entry
+    points (dmsh_build.py ps_libraries); it was a source and a compile of its own. main0's body is dm_body_main0 (dmsh_side.shared_body), and each rewritable sample in it becomes
+    (fx_i == k ? fb_k : the sample), fx_i and fb0-fb7 parameters of the body: main0_f passes its function constants FX_i and the tile's colours, every other caller -1 and zeros, which
+    the always-inline body folds back to the plain sample, so main0 and the side entry points stay functions without function constants. main0_f writes each output to the
+    attachments its OM_j_k name. Only the body is read and rewritten: a copy of a sample in another function would have no fb_k (483 of Breath of the Wild's variants once failed to
+    compile on main0_u's copy: use of undeclared identifier 'fb0'). → (the source with main0_f, {'calls', 'mixed_regs', 'outputs'}), or (None, why)"""
+    src = dmsh_side.shared_body(msl)
+    if src is None: return None, 'main function signature not recognized'
+    try: where, e = dmsh_side.body(src), dmsh_side.entry(src, 'main0')
+    except ValueError as x: return None, str(x)
+    if not where or not e: return None, 'main function signature not recognized'
+    start, head, end = where; text = src[head:end]
+    tex = {m.group(1) for m in re.finditer(r'texture2d<float> (\w+) \[\[id\(\d+\)\]\];', src)}
+    locn = {m.group(1): int(m.group(2)) for m in re.finditer(r'float4 (m_\d+) \[\[user\(locn(\d+)\)\]\];', src.split('struct main0_in', 1)[-1].split('};', 1)[0])}
     reg = {b['msl_name']: b['reg'] for b in bindings if b.get('kind') == abi.KIND_TEX and b.get('msl_name') and b.get('reg') is not None}
-    # A sample the border colour correction wrapped (dmsh_build.py border_emu) is taken whole: a tile read replaces the corrected sample, never feeds the correction
+    # A sample the border colour correction wrapped (dmsh_rewrite.py border_emu) is taken whole: a tile read replaces the corrected sample, never feeds the correction
     pat = re.compile(r'(dm_bs\()?spvDescriptorSet0\.(\w+)\.sample\(spvDescriptorSet0\.(\w+)Smplr, select\((_\d+), float2\(0\.0\), isnan\(\4\)\)\)'
                      r'(?(1), spvDescriptorSet0\.%s, \d+u, spvDescriptorSet0\.\2, spvDescriptorSet0\.\3Smplr%s, select\(\4, float2\(0\.0\), isnan\(\4\)\)\))' % (abi.BORDER_MEMBER, abi.BORDER_TWIN))
     calls, out_parts, pos = [], [], 0
-    for m in pat.finditer(msl):
+    for m in pat.finditer(text):
         member, var = m.group(2), m.group(4)
         if member not in tex or member != m.group(3) or member not in reg: continue
-        d = re.search(r'float2 %s = float2\((_\d+), (_\d+)\);' % var, msl)
-        a = d and re.search(r'float %s = in\.(m_\d+)\.x;' % d.group(1), msl); b = d and re.search(r'float %s = in\.(m_\d+)\.y;' % d.group(2), msl)
+        d = re.search(r'float2 %s = float2\((_\d+), (_\d+)\);' % var, text)
+        a = d and re.search(r'float %s = in\.(m_\d+)\.x;' % d.group(1), text); b = d and re.search(r'float %s = in\.(m_\d+)\.y;' % d.group(2), text)
         if a and b and a.group(1) == b.group(1) and a.group(1) in locn: how = {'varying_locn': locn[a.group(1)]}
         else:
-            pa, pb = (_proj(msl, d.group(1), 'x', locn), _proj(msl, d.group(2), 'y', locn)) if d else (None, None)
-            fx, fy = (_frag_pos(msl, d.group(1), 'x'), _frag_pos(msl, d.group(2), 'y')) if d else (None, None)
+            pa, pb = (_proj(text, d.group(1), 'x', locn), _proj(text, d.group(2), 'y', locn)) if d else (None, None)
+            fx, fy = (_frag_pos(text, d.group(1), 'x'), _frag_pos(text, d.group(2), 'y')) if d else (None, None)
             if pa and pa == pb: how = {'varying_locn': locn[pa], 'proj': 1}
             elif fx and fy: how = {'frag_pos': [fx, fy]}
             else: continue
         i = len(calls)
         if i >= 32: break
-        sel = ''.join(f'FX_{i} == {k} ? fb{k} : ' for k in range(NFB))
-        out_parts.append(msl[pos:m.start()]); out_parts.append(f'({sel}{m.group(0)})'); pos = m.end()
+        sel = ''.join(f'fx{i} == {k} ? fb{k} : ' for k in range(NFB))
+        out_parts.append(text[pos:m.start()]); out_parts.append(f'({sel}{m.group(0)})'); pos = m.end()
         calls.append({'fc': i, 'tex_reg': reg[member], **how})
     if not calls and not om_only_ok:
         return None, 'no rewritable sample'
     # Mixed-use slots: the same texture also has other (non-rewritable) uses - at runtime this texture must not be switched to tile reads (the rewritten reads and the unrewritten ones would not see the same data)
-    conv = {}
-    for c in calls: conv[c['tex_reg']] = conv.get(c['tex_reg'], 0) + 1
-    mixed = sorted({reg[mb] for mb in reg if mb in tex and msl.count(f'spvDescriptorSet0.{mb}.') > conv.get(reg[mb], 0)})
-    body = ''.join(out_parts) + msl[pos:]
-    om = re.search(r'struct main0_out\s*\{(.*?)\};', body, re.S)
+    conv = collections.Counter(c['tex_reg'] for c in calls)
+    mixed = sorted({reg[mb] for mb in reg if mb in tex and text.count(f'spvDescriptorSet0.{mb}.') > conv[reg[mb]]})
+    om = re.search(r'struct main0_out\s*\{(.*?)\};', src, re.S)
     if not om: return None, 'no output struct'
     outs = [(t, n, int(c)) for t, n, c in re.findall(r'(\w+) (m_\d+) \[\[color\((\d+)\)\]\];', om.group(1))]
     if not outs or len(outs) > 4 or re.sub(r'\w+ m_\d+ \[\[color\(\d+\)\]\];', '', om.group(1)).strip(): return None, 'the output struct is not plain color outputs (or has more than 4)'
-    members = ''.join(f'    {t} {n}_at{k} [[color({k}), function_constant(OM_{j}_{k})]];\n' for j, (t, n, c) in enumerate(outs) for k in range(NFB))
-    body = body[:om.start(1)] + '\n' + members + body[om.end(1):]
+    rest = src[end:]
+    if calls:   # the body's new parameters, and every call of it (the definition comes first) passing what turns the tile read off
+        params = [f'int fx{i}' for i in range(len(calls))] + [f'float4 fb{k}' for k in range(NFB)]
+        off = ', '.join(['-1'] * len(calls) + ['float4(0.0)'] * NFB)
+        sig = src[start:head - 1]; sig += (', ' if not sig.endswith('(') else '') + ', '.join(params) + ')'
+        parts, at = [], 0
+        for m in re.finditer(r'\bdm_body_main0\(', rest):
+            close = dmsh_side._close(rest, m.end(), '(', ')') - 1
+            parts += [rest[at:close], (', ' if rest[m.end():close].strip() else '') + off]; at = close
+        rest = ''.join(parts) + rest[at:]
+    else: sig = src[start:head]
     consts = ''.join(f'constant int FX_{c["fc"]} [[function_constant({c["fc"]})]];\n' for c in calls) + \
              ''.join(f'constant bool FB_{k} [[function_constant({32 + k})]];\n' for k in range(NFB)) + \
              ''.join(f'constant bool OM_{j}_{k} [[function_constant({64 + 8 * j + k})]];\n' for j in range(len(outs)) for k in range(NFB))
-    body = body.replace('using namespace metal;\n', 'using namespace metal;\n\n' + consts, 1)
-    i0 = body.find('fragment main0_out main0(')
-    i1 = body.find(')\n{', i0) if i0 >= 0 else -1   # end of signature: closing parenthesis immediately followed by a newline and an opening brace (parameter attributes contain brackets such as [[buffer(0)]])
-    if i0 < 0 or i1 < 0: return None, 'main function signature not recognized'
-    fbs = ''.join(f', float4 fb{k} [[color({k}), function_constant(FB_{k})]]' for k in range(NFB))
-    if body[i1 - 1] == '(': fbs = fbs[2:]   # main0() with no parameters at all: no leading comma (30 of Breath of the Wild's output-mapping-only variants)
-    body = body[:i1] + fbs + body[i1:]
-    decl = ''.join(f'    {t} spv_o_{n} = {t}(0);\n' for t, n, c in outs)
-    body = body.replace('    main0_out out = {};\n', '    main0_out out = {};\n' + decl, 1)
-    for t, n, c in outs: body = body.replace(f'out.{n}', f'spv_o_{n}')
-    put = ''.join(f'    if (OM_{j}_{k}) out.{n}_at{k} = spv_o_{n};\n' for j, (t, n, c) in enumerate(outs) for k in range(NFB))
-    if body.count('    return out;\n') < 1: return None, 'return out not found'
-    body = body.replace('    return out;\n', put + '    return out;\n')
-    return body, {'calls': calls, 'mixed_regs': mixed, 'outputs': [{'color': c, 'type': t} for t, n, c in outs]}
+    lead = src[:start]
+    if 'using namespace metal;\n' not in lead: return None, 'no using namespace metal'
+    lead = lead.replace('using namespace metal;\n', 'using namespace metal;\n\n' + consts, 1)
+    # main0_f: main0's parameters and the tile's colours; a colour the pipeline does not read (FB_k false) is not passed to the body
+    members = ''.join(f'    {t} {n}_at{k} [[color({k}), function_constant(OM_{j}_{k})]];\n' for j, (t, n, c) in enumerate(outs) for k in range(NFB))
+    fbs = [f'float4 fb{k} [[color({k}), function_constant(FB_{k})]]' for k in range(NFB)]
+    args = ', '.join(([e['args']] if e['args'] else []) + ([f'FX_{i}' for i in range(len(calls))] + [f'_fb{k}' for k in range(NFB)] if calls else []))
+    load = ''.join(f'    float4 _fb{k} = float4(0.0);\n    if (FB_{k}) _fb{k} = fb{k};\n' for k in range(NFB)) if calls else ''
+    put = ''.join(f'    if (OM_{j}_{k}) out.{n}_at{k} = r.{n};\n' for j, (t, n, c) in enumerate(outs) for k in range(NFB))
+    main0_f = (f'\nstruct main0_out_f\n{{\n{members}}};\n\n{e["attr"]}fragment main0_out_f main0_f({", ".join(e["params"] + fbs)})\n{{\n'
+               f'{load}    main0_out r = dm_body_main0({args});\n    main0_out_f out = {{}};\n{put}    return out;\n}}\n')
+    return lead + sig + ''.join(out_parts) + text[pos:] + rest + main0_f, {'calls': calls, 'mixed_regs': mixed, 'outputs': [{'color': c, 'type': t} for t, n, c in outs]}

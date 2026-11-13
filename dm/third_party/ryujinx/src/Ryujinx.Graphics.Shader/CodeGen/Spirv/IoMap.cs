@@ -14,6 +14,8 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
         {
             return ioVariable switch
             {
+                IoVariable.BaryCoord => (BuiltIn.BaryCoordKHR, AggregateType.Vector3 | AggregateType.FP32),
+                IoVariable.BaryCoordNoPersp => (BuiltIn.BaryCoordNoPerspKHR, AggregateType.Vector3 | AggregateType.FP32),
                 IoVariable.BaseInstance => (BuiltIn.BaseInstance, AggregateType.S32),
                 IoVariable.BaseVertex => (BuiltIn.BaseVertex, AggregateType.S32),
                 IoVariable.ClipDistance => (BuiltIn.ClipDistance, AggregateType.Array | AggregateType.FP32),
@@ -23,6 +25,7 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
                 IoVariable.FragmentOutputDepth => (BuiltIn.FragDepth, AggregateType.FP32),
                 IoVariable.FrontFacing => (BuiltIn.FrontFacing, AggregateType.Bool),
                 IoVariable.GlobalId => (BuiltIn.GlobalInvocationId, AggregateType.Vector3 | AggregateType.U32),
+                IoVariable.HelperInvocation => (BuiltIn.HelperInvocation, AggregateType.Bool),
                 IoVariable.InstanceId => (BuiltIn.InstanceId, AggregateType.S32),
                 IoVariable.InstanceIndex => (BuiltIn.InstanceIndex, AggregateType.S32),
                 IoVariable.InvocationId => (BuiltIn.InvocationId, AggregateType.S32),

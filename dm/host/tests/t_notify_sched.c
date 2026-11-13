@@ -12,6 +12,9 @@ static int observed_wait(pthread_cond_t *, pthread_mutex_t *);
 #define HLE_OE_SOURCE "../hle_oe.c"
 #endif
 #include HLE_OE_SOURCE
+void dm_host_shutdown_then(const char *why, void (*then)(void *), void *arg) { (void)why; (void)then; (void)arg; }   // oe::ExecuteProgram: not exercised here
+void dm_host_shutdown(const char *why) { (void)why; }
+void dm_hid_opmode_changed(void) {}   // hle_hid.c: the npads follow the mode; not exercised here
 #undef pthread_cond_wait
 static _Atomic int waiting, resumed, finish;
 static uint32_t message;

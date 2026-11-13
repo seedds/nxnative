@@ -57,7 +57,7 @@ class ScanFile(unittest.TestCase):
         p = self.tmp / 'a.dict'; p.write_bytes(index(1, 1))
         with mock.patch.object(ss, 'nlg_shaders', side_effect=IndexError('list index out of range')):
             (_, _, _, extra), out = self.scan(p, 'a.dict')
-        self.assertEqual(extra, ('unreadable', 'a.dict: IndexError: list index out of range'))
+        self.assertEqual(extra, ('unreadable', 'a.dict: IndexError: list index out of range', 1))
         self.assertEqual(out, '[RED] a.dict: IndexError: list index out of range (its shaders are left out)\n')
 
     def test_interrupt_is_not_taken(self):

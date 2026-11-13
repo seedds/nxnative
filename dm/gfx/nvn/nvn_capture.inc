@@ -12,6 +12,8 @@
 static int g_cap_frame = -1;            // -1: not parsed yet, 0: off
 static char g_cap_path[1024];
 static int g_cap_active, g_cap_done, g_cap_failed;
+static cap_queue_state g_cap_queues;
+void nvn_cap_queue(uint64_t serial, int waits) { cap_queue_note(&g_cap_queues, serial, waits); }
 static uint32_t g_cap_submit;           // submits captured in the frame so far
 static uint64_t g_cap_presents;         // presents seen (the frame number DM_NVN_SHOT uses)
 static cap_writer g_cap_w;
@@ -44,6 +46,15 @@ static uint64_t cap_hash_block(const uint8_t *p, size_t n) {   // a fast 64-bit 
     return h;
 }
 static void cap_fail(const char *why) { if (!g_cap_failed++) MLOG("[RED] DM_NVN_CAPTURE: %s: the capture is incomplete", why); }
+static int cap_reject_queues(void) {
+    const char *why = cap_queue_unsupported(&g_cap_queues); if (!why) return 0;
+    cap_fail(why);
+    // Replace a previous file at the requested path with an explicit failure too;
+    // otherwise a rejected request could appear to have produced an old capture.
+    if (!g_cap_w.f && !cap_open(&g_cap_w, g_cap_path)) MLOG("[RED] DM_NVN_CAPTURE: cannot write failure marker to %s", g_cap_path);
+    if (g_cap_w.f) { cap_put(&g_cap_w, CAP_FAIL, g_cap_submit, why, strlen(why), 0); cap_close(&g_cap_w); }
+    g_cap_active = 0; g_cap_done = 1; return 1;
+}
 
 // ---------- Regions and the address encoding ----------
 static int cap_reg_find(uint64_t a) {   // the region holding address a (regions are sorted and disjoint)
@@ -101,7 +112,7 @@ static void cap_iface(NvProg *o, uint64_t out[6]) {
         cap_iface_put(&c, 1, (uint64_t)nb + 1); cap_iface_put(&c, 2, (uint64_t)nv + 1);
         for (int i = 0; i < 3; i++) cap_iface_put(&c, 3 + i, r->tg[i]);
         for (int i = 0; i < nb; i++) { const nvn_rbind *b = &r->b[i]; uint32_t t = 1u << 24 | (uint32_t)i << 8;   // binding i, field f: tag t + f
-            const uint64_t f[] = {b->kind, b->rw, b->dtt, b->dpf, b->reg, b->aid, b->off, b->n, b->soff, b->f1d, b->atom};
+            const uint64_t f[] = {b->kind, b->rw, b->dtt, b->dpf, b->reg, b->aid, b->off, b->n, b->soff, b->f1d, b->atom, b->sreg};
             for (uint32_t k = 0; k < sizeof f / sizeof *f; k++) cap_iface_put(&c, t + k, f[k]); }
         for (int i = 0; i < nv; i++) { uint32_t t = 2u << 24 | (uint32_t)i << 8;
             const uint64_t f[] = {r->v[i].loc, r->v[i].ct, r->v[i].nvn, r->v[i].sh[0], r->v[i].sh[1], r->v[i].sh[2]};
@@ -197,6 +208,8 @@ static void cap_seg_write(uint32_t idx) {   // copy the records from the segment
     for (size_t o = 0; o < n;) {
         op_hdr h; memcpy(&h, b + 8 + o, 8);
         g_cap_orig = p + o + 8; CAP_WHERE(b + 8 + o + 8, "op %u (%u bytes) at +%zu of segment %u", h.op, h.size, o, idx);
+        const char *unsupported = cap_record_unsupported(h.op);
+        if (unsupported) { cap_fail(unsupported); cap_put(&g_cap_w, CAP_FAIL, g_cap_cur_submit, unsupported, strlen(unsupported), 0); }
         if (!cap_rec_fields(h.op, b + 8 + o + 8, h.size, &g_cap_enc, NULL)) { cap_fail("a record the capture walk does not know"); MLOG("[RED] DM_NVN_CAPTURE: op %u size %u not walked", h.op, h.size); }
         o += h.size;
     }
@@ -258,12 +271,11 @@ static void cap_tex_read(const tex_t *t, int rec) {   // rec: named by a record 
                 // their content from the frame before was not captured, the replay made them empty, and the G-buffer differed from the live run in about 50 pixels (and
                 // a second replay from the first). Only for textures a record names: through the registry (even only those the GPU writes, or
                 // only those shared within the last 16 submissions) it reached about 19,500 textures (18.5 GB) in Breath of the Wild
-        alias_key ak; memset(&ak, 0, sizeof ak); ak.pool = (uint64_t)(uintptr_t)t->pool; ak.off = t->off; ak.d = t->d; ak.d.flags &= ~NVN_TEXTURE_FLAGS_IMAGE;
-        if (rec) { pthread_mutex_lock(&g_smu); o = hm_get_id(&g_alias, &ak); pthread_mutex_unlock(&g_smu); }
+        if (rec) { alias_key ak = tex_alias_key(t); o = own_alias_peek(&ak); }
     }
     nvn_hm_put(&g_cap_read, &t->serial, (void *)(uintptr_t)(!o && !rec ? 2 : 1));
     if (!seen) {   // how the replay layer holds it
-        pthread_mutex_lock(&g_smu); int live = nvn_hm_get(&g_tex_live, &t->serial) != NULL; pthread_mutex_unlock(&g_smu);
+        int live = own_tex_live(t->serial);
         int cpu = tex_cpu_written(t->serial) || ([o isKindOfClass:[NvPkg class]] && !t->has_layout);
         cap_tknd k = {*t, (live ? CAP_TK_LIVE : 0) | (cpu ? CAP_TK_CPU : 0), 0};
         if (k.kind) { cap_tex_enc(&k.t, "texture kind"); cap_buf_put(&g_cap_kind, &k, sizeof k); }
@@ -335,7 +347,7 @@ static void cap_head(void) {
 #undef KV
     cap_put(&g_cap_w, CAP_HEAD, 0, h.p, h.n, 0); cap_buf_free(&h);
     const char *lay = cap_layout(); cap_put(&g_cap_w, CAP_LAYT, 0, lay, strlen(lay), 0);
-    snprintf(line, sizeof line, "tex_pool_n\t%d\norigin_ll\t%d\nqueue_origin_ll\t%d\ndepth_zero\t%d\n", g_tpool_n, atomic_load(&g_origin_ll), g_queue_origin_ll, atomic_load(&g_depth_zero));
+    snprintf(line, sizeof line, "tex_pool_n\t%d\nsamp_pool_n\t%d\norigin_ll\t%d\nqueue_origin_ll\t%d\ndepth_zero\t%d\n", g_tpool_n, g_spool_n, atomic_load(&g_origin_ll), g_queue_origin_ll, atomic_load(&g_depth_zero));
     cap_put(&g_cap_w, CAP_STAT, 0, line, strlen(line), 0);
 }
 static void cap_pools(uint32_t submit) {   // regions for pools not covered yet (all of them at submit 1), and the replay layer's pool list
@@ -420,7 +432,7 @@ static void cap_submit_step(int n, const uint64_t *h);
 static void cap_present_step(const tex_t *t, const int crop[4]);
 // Hook: nvnQueueSubmitCommands, under the submit lock, before the submission is replayed
 void nvn_cap_submit(int n, const uint64_t *h) {
-    if (!nvn_cap_enabled() || g_cap_presents + 1 != (uint64_t)g_cap_frame) return;
+    if (!nvn_cap_enabled() || cap_reject_queues() || g_cap_presents + 1 != (uint64_t)g_cap_frame) return;
     cap_policy c = cap_policy_standard(); cap_submit_step(n, h); cap_policy_restore(c);
 }
 static void cap_submit_step(int n, const uint64_t *h) {
@@ -469,7 +481,7 @@ static void cap_hex(const uint8_t *md, char out[65]) { for (int i = 0; i < 32; i
 
 // Hook: nvnQueuePresentTexture, before the present is queued
 void nvn_cap_present(const tex_t *t, const int crop[4]) {
-    if (!nvn_cap_enabled()) return;
+    if (!nvn_cap_enabled() || cap_reject_queues()) return;
     g_cap_presents++;
     if (!g_cap_active || g_cap_presents != (uint64_t)g_cap_frame) {
         if (g_cap_presents >= (uint64_t)g_cap_frame && !g_cap_active) { MLOG("[RED] DM_NVN_CAPTURE: frame %d presented without a submit: nothing captured", g_cap_frame); g_cap_done = 1; }

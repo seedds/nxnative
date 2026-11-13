@@ -5,6 +5,7 @@
 #include "hle.h"
 #include "account_local.h"
 #include "nextendo_account.h"
+#include "net_socket.h"
 
 typedef struct { uint64_t v[2]; } Uid;                 // nn::account::Uid, 16 bytes
 typedef struct { uint64_t v[3]; } UserHandle;          // nn::account::UserHandle, 24 bytes
@@ -71,14 +72,23 @@ HLE_FORCE("_ZN2nn7account40ShowLicenseRequirementsForNetworkServiceERKNS0_10User
 HLE_FORCE("_ZN2nn7account29LoadCachedNintendoAccountInfoEPNS0_25CachedNintendoAccountInfoERKNS0_10UserHandleEPvm", "cached Nintendo Account info: none linked, fails", Result, h_acc_LoadNaInfo,
           void *info, const UserHandle *h, void *buf, uint64_t sz) { (void)info; (void)h; (void)buf; (void)sz; return RES_FAIL; }
 
-// AsyncContext / NintendoAccountAuthorizationRequestContext: object contents are read and written only by the interfaces below; construction writes no memory, the completion event fires immediately, and the result is always failure
-HLE_FORCE_WAIT("_ZN2nn7account12AsyncContextC1Ev", "owned account async state", void, h_acc_AcCtor, void *self) { dm_nextendo_async_construct(self); }
-HLE_FORCE_WAIT("_ZN2nn7account44EnsureNetworkServiceAccountIdTokenCacheAsyncEPNS0_12AsyncContextERKNS0_10UserHandleE", "cache the real Nextendo NEX game token and publish its actual completion result", Result, h_acc_EnsureTokAsync, void *ctx, const UserHandle *h) { return online_user(h) ? dm_nextendo_async_ensure(ctx) : RES_FAIL; }
-HLE_FORCE("_ZN2nn7account12AsyncContext14GetSystemEventEPNS_2os11SystemEventE", "account completion event with a checked kernel-event lifetime", Result, h_acc_AcGetEv, void *self, void *ev) {
+// AsyncContext / NintendoAccountAuthorizationRequestContext.
+// AsyncContext is built by the SDK's own constructor, which is not taken over: it writes the class's vtable and nulls the IPC object pointer at +0x18, and sends
+// nothing (SDK 19.3.11: sdk+0x1ad6c8). No interface below sets that pointer, so the SDK's destructor, reached through the vtable, finds no session to close.
+// The object is polymorphic: Pokémon Friends' C# binding deletes it from nn.account.AsyncContext's finalizer through the virtual deleting destructor, inlined
+// in main (main+0x5b64f0), which the D1Ev takeover below never sees. A host constructor that wrote no memory left the allocator's bytes in the vtable word,
+// and that call jumped through them (docs/reference/services.md, "An account AsyncContext needs its SDK constructor").
+// With Nextendo on (dm_net_nextendo_enabled), the request state (hle_nextendo_apple.m) is created when a request starts (dm_nextendo_async_execute). With it off,
+// no request ever starts, and a context answers as the offline host always has: the completion event fires immediately, it is done, and the result is failure.
+// NintendoAccountAuthorizationRequestContext has no vtable: its constructor writes no memory, and its contents are read and written only by the interfaces below.
+HLE_FORCE_WAIT("_ZN2nn7account44EnsureNetworkServiceAccountIdTokenCacheAsyncEPNS0_12AsyncContextERKNS0_10UserHandleE", "cache the real Nextendo NEX game token and publish its actual completion result; offline, cut", Result, h_acc_EnsureTokAsync, void *ctx, const UserHandle *h) { return online_user(h) ? dm_nextendo_async_ensure(ctx) : RES_FAIL; }
+HLE_FORCE("_ZN2nn7account12AsyncContext14GetSystemEventEPNS_2os11SystemEventE", "account completion event with a checked kernel-event lifetime; Nextendo off, it fires immediately", Result, h_acc_AcGetEv, void *self, void *ev) {
+    if (!dm_net_nextendo_enabled()) { hle_signal_system_event(ev); return RES_OK; }
     uint64_t lifetime = dm_nextendo_async_lifetime(self); if (!ev || !lifetime) return RES_FAIL;
     hle_bind_system_event(ev, 0); return dm_nextendo_async_attach(self, lifetime, hle_system_event_binding(ev));
 }
-HLE_FORCE_WAIT("_ZN2nn7account12AsyncContext9GetResultEv", "actual completed account request result", Result, h_acc_AcGetRes, void *self) { return dm_nextendo_async_result(self); }
+// Nextendo off, no request has started, and dm_nextendo_async_result returns DM_ACCOUNT_FAIL, RES_FAIL's value (nextendo_account.h)
+HLE_FORCE_WAIT("_ZN2nn7account12AsyncContext9GetResultEv", "actual completed account request result; Nextendo off, failure", Result, h_acc_AcGetRes, void *self) { return dm_nextendo_async_result(self); }
 HLE_FORCE("_ZN2nn7account42NintendoAccountAuthorizationRequestContextC1Ev", "Nintendo Account authorization, out of scope; the constructor writes no memory", void, h_acc_NaCtor, void *self) { (void)self; }
 HLE_FORCE("_ZN2nn7account42NintendoAccountAuthorizationRequestContextD1Ev", "Nintendo Account authorization, out of scope", void, h_acc_NaDtor, void *self) { (void)self; }
 HLE_FORCE("_ZN2nn7account41CreateNintendoAccountAuthorizationRequestEPNS0_42NintendoAccountAuthorizationRequestContextERKNS0_10UserHandleERKNS0_45NintendoAccountAuthorizationRequestParametersEPvm",
@@ -141,21 +151,28 @@ HLE_FORCE_WAIT("_ZN2nn7account32IsNetworkServiceAccountAvailableEPbRKNS0_10UserH
     return online_user(h) ? dm_nextendo_account_available(out) : RES_FAIL;
 }
 HLE_FORCE("_ZN2nn7account9CloseUserERKNS0_10UserHandleE", "close user; the handle holds no session", void, h_acc_CloseUser, const UserHandle *h) { (void)h; }
-HLE_FORCE_WAIT("_ZN2nn7account12AsyncContext6CancelEv", "cancel an account request without publishing a late success", Result, h_acc_AcCancel, void *self) { return dm_nextendo_async_cancel(self); }
-HLE_FORCE_WAIT("_ZN2nn7account12AsyncContext7HasDoneEPb", "actual account request completion", Result, h_acc_AcHasDone, void *self, uint8_t *done) { return dm_nextendo_async_done(self, done); }
+// Nextendo off (see AsyncContext above), a context has nothing to cancel and is done
+static Result acc_done(void *self, uint8_t *done) { if (dm_net_nextendo_enabled()) return dm_nextendo_async_done(self, done); if (!done) return RES_FAIL; *done = 1; return RES_OK; }
+HLE_FORCE_WAIT("_ZN2nn7account12AsyncContext6CancelEv", "cancel an account request without publishing a late success; Nextendo off, nothing to cancel", Result, h_acc_AcCancel, void *self) { return dm_net_nextendo_enabled() ? dm_nextendo_async_cancel(self) : RES_OK; }
+HLE_FORCE_WAIT("_ZN2nn7account12AsyncContext7HasDoneEPb", "actual account request completion; Nextendo off, done", Result, h_acc_AcHasDone, void *self, uint8_t *done) { return acc_done(self, done); }
 HLE_FORCE_WAIT("_ZN2nn7account12AsyncContextD1Ev", "destroy owned account request state", void, h_acc_AcDtor, void *self) { dm_nextendo_async_destroy(self); }
 HLE_FORCE_WAIT("_ZN2nn7account12AsyncContextaSEOS1_", "move account request state and its event lifetimes", void *, h_acc_AcMove, void *self, void *other) { return dm_nextendo_async_move(self, other); }
 
 // Additional SDK service overloads use the same provider and object lifetime.
-HLE_FORCE_WAIT("_ZN2nn7account12AsyncContextC2Ev", "owned account async state", void, h_acc_AcCtor2, void *self) { dm_nextendo_async_construct(self); }
 HLE_FORCE_WAIT("_ZNK2nn7account12AsyncContext9GetResultEv", "actual completed account request result, SDK 19 const overload", Result, h_acc_AcGetResConst, void *self) { return dm_nextendo_async_result(self); }
-HLE_FORCE_WAIT("_ZNK2nn7account12AsyncContext7HasDoneEPb", "actual account request completion, SDK 19 const overload", Result, h_acc_AcHasDoneConst, void *self, uint8_t *done) { return dm_nextendo_async_done(self, done); }
+HLE_FORCE_WAIT("_ZNK2nn7account12AsyncContext7HasDoneEPb", "actual account request completion, SDK 19 const overload; Nextendo off, done", Result, h_acc_AcHasDoneConst, void *self, uint8_t *done) { return acc_done(self, done); }
 HLE_FORCE_WAIT("_ZN2nn7account12AsyncContextD2Ev", "destroy owned account request state", void, h_acc_AcDtor2, void *self) { dm_nextendo_async_destroy(self); }
 HLE_FORCE("_ZN2nn7account12AsyncContextD0Ev", "destroy account request state and release its guest allocation", void, h_acc_AcDeletingDtor, void *self) {
     dm_nextendo_async_destroy(self); void (*release)(void *) = (void (*)(void *))guest_sym("_ZdlPv");
     if (release) release(self); else LOG("[RED] account: guest operator delete unavailable for AsyncContext");
 }
-HLE_FORCE_WAIT("_ZN2nn7account12AsyncContextC1EOS1_", "move-construct owned account request state", void, h_acc_AcMoveCtor, void *self, void *other) { dm_nextendo_async_move(self, other); }
-HLE_FORCE_WAIT("_ZN2nn7account12AsyncContextC2EOS1_", "move-construct owned account request state", void, h_acc_AcMoveCtor2, void *self, void *other) { dm_nextendo_async_move(self, other); }
+// A move constructor builds a new object, so it writes what the SDK constructor writes (see AsyncContext above): the vtable, taken from the source, which the SDK
+// constructed, and a null IPC object pointer at +0x18 (the source's is null too: no interface here sets it). The request state then moves with the object.
+static void acc_move_construct(void *self, void *other) {
+    if (self && other) { *(void **)self = *(void **)other; *(void **)((char *)self + 0x18) = NULL; }
+    dm_nextendo_async_move(self, other);
+}
+HLE_FORCE_WAIT("_ZN2nn7account12AsyncContextC1EOS1_", "move-construct: the SDK's vtable and request state", void, h_acc_AcMoveCtor, void *self, void *other) { acc_move_construct(self, other); }
+HLE_FORCE_WAIT("_ZN2nn7account12AsyncContextC2EOS1_", "move-construct: the SDK's vtable and request state", void, h_acc_AcMoveCtor2, void *self, void *other) { acc_move_construct(self, other); }
 HLE_FORCE_WAIT("_ZN2nn7account12AsyncContext4SwapERS1_", "swap owned account request state", void, h_acc_AcSwap, void *self, void *other) { dm_nextendo_async_swap(self, other); }
 HLE_FORCE_WAIT("_ZNK2nn7account12AsyncContextcvbEv", "whether an account request owns an actual operation", unsigned, h_acc_AcValid, void *self) { return dm_nextendo_async_valid(self); }

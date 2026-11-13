@@ -10,16 +10,28 @@ import zipfile
 REPO = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO / 'dm/games'))
 import game
+sys.path.insert(0, str(REPO / 'dm/tools'))
+import shader_lib
 
 
 class ProfilePackTests(unittest.TestCase):
-    def test_pulling_libraries_follow_compiled_profile_and_explicit_override(self):
+    def test_an_image_without_pulling_libraries_stops_an_app_that_needs_them(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary); lib = root / 'b-fixture'; lib.mkdir(); (lib / 'k_b.metallib').write_text('lib'); (lib / 'k_bp.metallib').write_text('pull')
+            shader_lib.pack(lib, leave_out=True)
+            def pack(*options): return subprocess.run([sys.executable, str(REPO / 'dm/ios/tools/pack_ipa.py'), str(root / 'x.ipa'), *options, f'Payload/DmIOS.app/msl/b-fixture={lib}'], capture_output=True, text=True)
+            r = pack(); self.assertNotEqual(r.returncode, 0); self.assertIn('no pulling vertex libraries', r.stdout + r.stderr)
+            r = pack('--skip-suffix', '_bp.metallib'); self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            with zipfile.ZipFile(root / 'x.ipa') as archive: self.assertIn('Payload/DmIOS.app/msl/b-fixture.img', archive.namelist())
+            self.assertEqual([n for n in os.listdir(root) if '.msl-' in n], [])
+
+    def test_pulling_libraries_survive_runtime_prebuild_without_an_archive(self):
         # (game, IOS_PULL, with a pipeline archive, _bp libraries packed): an archive's bases are made of the pulling libraries, so an IPA with one carries them whatever IOS_PULL says
-        cases = [('01007EF00011E000', None, False, True), ('010015100B514000', None, False, False),
-                 ('01007EF00011E000', '0', False, False), ('010015100B514000', '1', False, True),
+        cases = [('01007EF00011E000', None, False, True), ('010015100B514000', None, False, True), ('01008CF01BAAC000', None, False, True),
+                 ('01007EF00011E000', '0', False, False), ('01008CF01BAAC000', '0', False, False), ('010015100B514000', '1', False, True),
                  ('010015100B514000', None, True, True), ('01007EF00011E000', '0', True, True)]
-        for gid, override, with_pso, included in cases:
-            with self.subTest(game=gid, IOS_PULL=override, archive=with_pso), tempfile.TemporaryDirectory() as temporary:
+        for gid, override, with_pso, included, packed in [c + (p,) for c in cases for p in (False, True)]:
+            with self.subTest(game=gid, IOS_PULL=override, archive=with_pso, one_file=packed), tempfile.TemporaryDirectory() as temporary:
                 root = Path(temporary)
                 dm = root / 'dm'
                 header = dm / 'host/gen' / gid / 'game_profile.h'
@@ -29,6 +41,7 @@ class ProfilePackTests(unittest.TestCase):
                 for folder in (app, shaders / 'b-fixture', romfs): folder.mkdir(parents=True)
                 for name in ('fixture_b.metallib', 'fixture_bp.metallib', 'fixture_bv.metallib', 'fixture_b.json'):
                     (shaders / 'b-fixture' / name).write_text(name)
+                if packed: self.assertTrue(shader_lib.pack(shaders / 'b-fixture'))
                 (app / 'executable').write_text('app')
                 (romfs / 'marker').write_text('romfs')
                 (root / 'tools').symlink_to(REPO / 'dm/ios/tools', target_is_directory=True)
@@ -50,6 +63,11 @@ class ProfilePackTests(unittest.TestCase):
                 with zipfile.ZipFile(out) as archive:
                     names = set(archive.namelist())
                     prefix = 'Payload/DmIOS.app/msl/b-fixture/'
+                    if packed:
+                        self.assertFalse([n for n in names if n.startswith(prefix)])
+                        (root / 'taken.img').write_bytes(archive.read('Payload/DmIOS.app/msl/b-fixture.img'))
+                        names = {prefix + p.name for p in shader_lib.romfs.Path(root / 'taken.img').iterdir()} | names
+                        self.assertEqual([n for n in os.listdir(root) if '.msl-' in n], [], 'the copy without the pulling libraries is gone')
                     self.assertEqual(prefix + 'fixture_bp.metallib' in names, included)
                     for name in ('fixture_b.metallib', 'fixture_bv.metallib', 'fixture_b.json'):
                         self.assertIn(prefix + name, names)

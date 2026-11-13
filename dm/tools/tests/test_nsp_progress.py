@@ -32,6 +32,13 @@ class Json(unittest.TestCase):
     def events(self, ev=None):
         return [e for e in map(json.loads, self.out.getvalue().splitlines()) if ev in (None, e['ev'])]
 
+    def test_warned_stage_end(self):   # a stage that finished without what it makes (the pipeline archive): ok, with a warn flag the launcher can show
+        self.prog.plan(2)
+        self.prog.stage('Pipeline archive'); self.prog.end('failed, the app is packed without one', warn=True)
+        self.prog.stage('pack'); self.prog.end('done')
+        e = self.events('stage_end')
+        self.assertEqual([(x['ok'], x.get('warn')) for x in e], [(True, True), (True, None)])
+
     def test_events(self):
         self.prog.plan(2)
         self.prog.stage('extract Pokémon', step='reading', done=0, total=10, unit='files', est=True)
@@ -80,6 +87,20 @@ class Json(unittest.TestCase):
         self.assertEqual([e['ev'] for e in es], ['stage', 'progress', 'stage_end', 'say'])
         self.assertFalse(es[2]['ok'])
         self.assertTrue('out' in es[3]['msg'] and 'err' in es[3]['msg'])
+
+    def test_game(self):   # which game the app is (issue #1627): the event, then the message for people
+        app, icon = Path('/b/Zelda.app'), Path('/b/x/extract/v131072/icon.jpg')
+        nsp.say_game(0x0400486024DEC000, 'The Legend of Zelda', '1.0', 'org.nxnative.0400486024dec000', app, icon)
+        nsp.say_game(0x0400486024DEC000, 'Zelda', '1.0', 'b', None, None)   # an Xcode project, a game without an icon
+        es = self.events()
+        self.assertEqual([e['ev'] for e in es], ['game', 'say', 'game', 'say'])
+        self.assertEqual({k: v for k, v in es[0].items() if k != 't'}, {'ev': 'game', 'title_id': '0400486024DEC000', 'name': 'The Legend of Zelda', 'version': '1.0',
+                                                                   'bundle_id': 'org.nxnative.0400486024dec000', 'out': str(app), 'icon': str(icon)})
+        self.assertIn(f'; app: {app}', es[1]['msg'])
+        self.assertEqual((es[2]['out'], es[2]['icon']), (None, None))
+        self.assertNotIn('; app:', es[3]['msg'])
+        self.prog.mode = 'lines'; nsp.say_game(1, 'Zelda', '1.0', 'b', Path('/b/z.ipa'), None)   # the human modes get only the message
+        self.assertNotIn('"ev"', self.out.getvalue().splitlines()[-1])
 
 class ShadersStale(unittest.TestCase):
     """build_shaders tells a front end (event shaders_stale, json mode) that cached libraries cannot be reused, once, before it rebuilds them"""
@@ -209,6 +230,9 @@ class HumanModes(unittest.TestCase):
             text = out.getvalue()
             self.assertIn('message', text)
             self.assertIn('✓ [1/1] compile', text)
+            with contextlib.redirect_stdout(io.StringIO()) as out2:
+                prog = nsp.Progress(mode); prog.plan(1); prog.stage('archive'); prog.end('failed', warn=True); prog.close()
+            self.assertIn('⚠ [1/1] archive', out2.getvalue())
             self.assertEqual('\r' in text, mode == 'bar')
             self.assertEqual(ticker is None, mode == 'off')
 

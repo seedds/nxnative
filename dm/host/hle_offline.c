@@ -9,6 +9,11 @@
 // ---------- prepo: telemetry reports. Saving / submitting all report success; nothing is sent ----------
 HLE_FORCE("_ZN2nn5prepo10PlayReport4SaveERKNS_7account3UidE", "telemetry report save (user); nothing is sent, reports success", Result, h_prepo_SaveU, void *self, const void *uid) { (void)self; (void)uid; return RES_OK; }
 HLE_FORCE("_ZN2nn5prepo10PlayReport4SaveEv", "telemetry report save; nothing is sent, reports success", Result, h_prepo_Save, void *self) { (void)self; return RES_OK; }
+// SDK 22's PlayReport::Send (Ocarina of Time saves one as the first scene starts, main+0x379164c) returns an AsyncContext in x8, which holds a pointer to the service's object. Null is what the SDK's
+// own default context has: GetCompletionEvent makes a signaled event (sdk+0x5a9298), GetResult answers 0 and the destructor does nothing, so only this call is taken over. Naked because x8 is the
+// hidden result pointer, 8 bytes on the caller's stack, which no C return type can name
+__attribute__((naked)) static void h_prepo_Send(void) { __asm__("str xzr, [x8]\n    ret"); }
+__attribute__((used, section("__DATA,swforce"))) static const hle_force_ent hle_force_h_prepo_Send = {"_ZN2nn5prepo10PlayReport4SendERKNS_7account3UidE", (void *)h_prepo_Send, "telemetry report send; nothing is sent, a default context completes at once with success"};
 HLE_FORCE("_ZN2nn5prepo10InitializeEv", "telemetry init: the original connects to the prepo service (through sm), the host has no service process; no-op (Engage calls it explicitly)", Result, h_prepo_Init, void) { return RES_OK; }
 // Add the session ID / connection status to a report: on hardware these first connect to the prepo service for the session (Super Mario 3D World + Bowser's Fury calls them entering the save select); the host adds nothing and reports success
 HLE_FORCE("_ZN2nn5prepo12AddSessionIdEPNS0_10PlayReportEPKc", "telemetry session ID: no service connection, nothing added, reports success", Result, h_prepo_AddSess, void *rep, const char *key) { (void)rep; (void)key; return RES_OK; }
@@ -32,19 +37,22 @@ HLE_FORCE("_ZN2nn9bluetooth16GetBleScanResultEPNS0_13BleScanResultEi", "BLE scan
 HLE_FORCE("_ZN2nn9bluetooth24GetBleConnectionInfoListEPNS0_17BleConnectionInfoEi", "BLE connections (cut): 0", int, h_bt_ConnList, void *out, int max) { (void)out; (void)max; return 0; }
 HLE_FORCE("_ZN2nn9bluetooth19ConnectToGattServerERKNS0_7AddressE", "BLE connect (cut)", Result, h_bt_Connect, const void *a) { (void)a; return RES_FAIL; }
 
-// ---------- socket: offline by default. Explicit Mac LAN uses the translated host transport ----------
-enum { SK_ENETDOWN = 100, SK_EAI_FAIL = 4 };
+// ---------- socket: offline by default. An explicit network mode uses the translated host transport ----------
+#ifndef SK_ENETDOWN
+#define SK_ENETDOWN 100
+#endif
+enum { SK_EAI_FAIL = 4 };
 HLE_FORCE("_ZN2nn6socket10InitializeEPvmmi", "connects to the bsd socket service; offline, creates no session (cut)", Result, h_sk_Init4, void *mem, uint64_t sz, uint64_t alloc, int conc) { (void)mem; (void)sz; (void)alloc; (void)conc; return RES_OK; }
 HLE_FORCE_WAIT("_ZN2nn6socket8FinalizeEv", "release the host's LAN descriptors, if enabled", Result, h_sk_Fini, void) { dm_net_finalize(); return RES_OK; }
 HLE_FORCE("_ZN2nn6socket12GetLastErrnoEv", "the game's errno in a network mode (as detail::GetLastErrno reads it); ENETDOWN otherwise", int, h_sk_Errno, void) { return dm_net_enabled() ? dm_net_guest_errno_get() : SK_ENETDOWN; }
 HLE_FORCE("_ZN2nn6socket6SocketEiii", "socket transport, offline by default", int, h_sk_Socket3i, int a, int b, int c) { return dm_net_guest_errno(dm_net_socket(a, b, c)); }
 HLE_FORCE("_ZN2nn6socket8ShutdownEii", "socket transport, offline by default", int, h_sk_Shutdown, int s, int h) { return dm_net_guest_errno(dm_net_shutdown(s, h)); }
 HLE_FORCE("_ZN2nn6socket4BindEiPK8sockaddrj", "socket transport, offline by default", int, h_sk_Bind, int s, const void *a, unsigned n) { return dm_net_guest_errno(dm_net_bind(s, a, n)); }
-int dm_sk_poll(void *fds, uint64_t n, int ms);   // hle_net.c: nothing to wait on → the timeout passes, 0; else -1
-int dm_sk_select(int nfds, const uint64_t *r, const uint64_t *w, const uint64_t *e, const int64_t *tv);
-HLE_FORCE_WAIT("_ZN2nn6socket4PollEP6pollfdmi", "offline: waits out the timeout when there is nothing to wait on, else fails", int, h_sk_PollPlain, void *p, uint64_t n, int t) { return dm_net_guest_errno(dm_sk_poll(p, n, t)); }
+int dm_sk_poll(void *fds, uint64_t n, int ms);   // hle_net.c: waits on the host's event descriptors; with none the timeout passes, 0
+int dm_sk_select(int nfds, uint64_t *r, uint64_t *w, uint64_t *e, const int64_t *tv);
+HLE_FORCE_WAIT("_ZN2nn6socket4PollEP6pollfdmi", "offline: waits on the host's event descriptors; nothing else is ever ready", int, h_sk_PollPlain, void *p, uint64_t n, int t) { return dm_net_guest_errno(dm_sk_poll(p, n, t)); }
 // SDK 4's Select with plain fd_set / timeval (Dark Souls Remastered)
-HLE_FORCE_WAIT("_ZN2nn6socket6SelectEiP6fd_setS2_S2_P7timeval", "offline: waits out the timeout when there is nothing to wait on, else fails", int, h_sk_Select2, int n, void *r, void *w, void *e, void *t) { return dm_net_guest_errno(dm_sk_select(n, r, w, e, t)); }
+HLE_FORCE_WAIT("_ZN2nn6socket6SelectEiP6fd_setS2_S2_P7timeval", "offline: Poll over its sets (the host's event descriptors; nothing else is ever ready)", int, h_sk_Select2, int n, void *r, void *w, void *e, void *t) { return dm_net_guest_errno(dm_sk_select(n, r, w, e, t)); }
 HLE_FORCE_WAIT("_ZN2nn6socket6SendToEiPKvmiPK8sockaddrj", "socket transport, offline by default", long, h_sk_SendTo, int s, const void *b, unsigned long n, int f, const void *a, unsigned al) { return dm_net_guest_errno(dm_net_send(s, b, n, f, a, al)); }
 HLE_FORCE_WAIT("_ZN2nn6socket6SendToEiPKvmNS0_7MsgFlagEPKNS0_8SockAddrEj", "socket transport, offline by default", long, h_sk_SendTo2, int s, const void *b, unsigned long n, int f, const void *a, unsigned al) { return dm_net_guest_errno(dm_net_send(s, b, n, f, a, al)); }
 HLE_FORCE_WAIT("_ZN2nn6socket8RecvFromEiPvmiP8sockaddrPj", "socket transport, offline by default", long, h_sk_RecvFrom2, int s, void *b, unsigned long n, int f, void *a, unsigned *al) { return dm_net_guest_errno(dm_net_recv(s, b, n, f, a, al)); }
@@ -55,7 +63,7 @@ HLE_FORCE("_ZN2nn6socket11GAIStrErrorENS0_7AiErrnoE", "resolver error text", con
 HLE_FORCE_WAIT("_ZN2nn6socket7ConnectEiPK8sockaddrj", "socket transport, offline by default", int, h_sk_Connect2, int s, const void *a, unsigned n) { return dm_net_guest_errno(dm_net_connect(s, a, n)); }
 HLE_FORCE_WAIT("_ZN2nn6socket6AcceptEiP8sockaddrPj", "socket transport, offline by default", int, h_sk_Accept2, int s, void *a, unsigned *n) { return dm_net_guest_errno(dm_net_accept(s, a, n)); }
 HLE_FORCE("_ZN2nn6socket11GetSockNameEiP8sockaddrPj", "socket transport, offline by default", int, h_sk_GetSockName2, int s, void *a, unsigned *n) { return dm_net_guest_errno(dm_net_name(s, a, n, 0)); }
-HLE_FORCE("_ZN2nn6socket11GetPeerNameEiP8sockaddrPj", "SDK 4 socket transport, offline by default", int, h_sk_GetPeerName4, int s, void *a, unsigned *n) { return dm_net_guest_errno(dm_net_name(s, a, n, 1)); }
+/* GetPeerName registered in hle_net.c to avoid duplicate forced takeover entries */
 HLE_FORCE_WAIT("_ZN2nn6socket13GetHostByNameEPKc", "SDK 4 resolver, offline by default", void *, h_sk_GetHostByName4, const char *name) { return dm_net_gethostbyname(name); }
 HLE_FORCE("_ZN2nn6socket10GetSockOptEiiiPvPj", "socket transport, offline by default", int, h_sk_GetSockOpt2, int s, int l, int o, void *v, unsigned *n) { return dm_net_guest_errno(dm_net_sockopt(s, l, o, v, n, 0)); }
 HLE_FORCE("_ZN2nn6socket10SetSockOptEiiiPKvj", "socket transport, offline by default", int, h_sk_SetSockOpt2, int s, int l, int o, const void *v, unsigned n) { return dm_net_guest_errno(dm_net_sockopt(s, l, o, (void *)v, &n, 1)); }
@@ -102,6 +110,9 @@ HLE_FORCE("_ZN2nn4nifm22GetCurrentIpConfigInfoEPNS_6socket6InAddrES3_S3_S3_S3_",
     return dm_net_ipconfig(a, b, c, d, e) ? RES_FAIL : RES_OK;
 }
 HLE_FORCE("_ZN2nn4nifm26GetCurrentPrimaryIpAddressEP7in_addr", "actual LAN IPv4 address, offline by default", Result, h_nifm_GetIp10, uint32_t *a) { if (!a) return RES_FAIL; *a = 0; return dm_net_ipconfig(a, NULL, NULL, NULL, NULL) ? RES_FAIL : RES_OK; }
+// SDK 21 (Star Fox): the IPv4 and IPv6 configurations at once, with their counts. Failing in every mode: enumerating both configurations needs the guest layout of the structs, which LAN mode does not build
+HLE_FORCE("_ZN2nn4nifm18GetCurrentIpConfigEPNS0_10Ipv4ConfigEPiPNS0_10Ipv6ConfigES3_ii", "offline: no IP configuration (SDK 21 overload)", Result, h_nifm_IpCfg21,
+          void *v4, int *n4, void *v6, int *n6, int c4, int c6) { (void)v4; (void)v6; (void)c4; (void)c6; if (n4) *n4 = 0; if (n6) *n6 = 0; return RES_FAIL; }
 // EnvironmentIdentifier = char[8]: retail environment "lp1"
 HLE_FORCE("_ZN2nn3nsd24GetEnvironmentIdentifierEPNS0_21EnvironmentIdentifierE", "server environment name: retail lp1", void, h_nsd_EnvId, char *out) { memset(out, 0, 8); memcpy(out, "lp1", 3); }
 
@@ -147,9 +158,6 @@ HLE_FORCE("_ZN2nn3web13ShowLobbyPageEPNS0_20LobbyPageReturnValueERKNS0_16ShowLob
 // Tears of the Kingdom imports the general web page applet too (the game constructs the return value itself, so it stays as constructed)
 HLE_FORCE("_ZN2nn3web11ShowWebPageEPNS0_18WebPageReturnValueERKNS0_14ShowWebPageArgE", "web page applet (cut)", Result, h_web_Page, void *rv, const void *arg) { (void)rv; (void)arg; LOG("web::ShowWebPage (cut)"); return RES_FAIL; }
 // Octopath Traveler 0 imports the offline HTML page applet too (pages shipped in the game's HTML document NCA, which the host does not extract)
-HLE_FORCE("_ZN2nn3web19ShowOfflineHtmlPageEPNS0_26OfflineHtmlPageReturnValueERKNS0_22ShowOfflineHtmlPageArgE", "offline HTML page applet (cut)", Result, h_web_Offline, void *rv, const void *arg) {
-    (void)rv; (void)arg; LOG("web::ShowOfflineHtmlPage (cut)"); return RES_FAIL;
-}
 
 // ---------- C socket interface; transport stays offline unless a network mode is selected ----------
 HLE_FORCE_WAIT("nnsocketAccept", "socket transport, offline by default", int, h_c_sk_Accept, int s, void *a, unsigned *n) { return dm_net_guest_errno(dm_net_accept(s, a, n)); }
@@ -196,6 +204,7 @@ static long sk_sendmsg(int s, const sk_msghdr *m, int f) {
     free(buffer); return sent;
 }
 HLE_FORCE_WAIT("nnsocketSendMsg", "gather send through one host buffer; ancillary data is refused", long, h_c_sk_SendMsg, int s, const sk_msghdr *m, int f) { return dm_net_guest_errno(sk_sendmsg(s, m, f)); }
+HLE_FORCE("nnsocketShutdown", "socket transport, offline by default", int, h_c_sk_Shutdown, int s, int h) { return dm_net_guest_errno(dm_net_shutdown(s, h)); }
 // The C resolver takes the C struct addrinfo, the type of the plain-addrinfo C++ overload: in Wonder 1.2.1's SDK nnsocketGetAddrInfo (sdk+0x1481c0) branches straight to
 // GetAddrInfo(const char *, const char *, const addrinfo *, addrinfo **, const ResolverOption *, size_t), and that SDK's decoders put the address at +0x20 for addrinfo
 // (DNSSerializer::FromBufferInternal<addrinfo>, sdk+0x1493f0) and at +0x18 for nn::socket::AddrInfo (sdk+0x148f60). So it gets that overload's layout whenever the SDK has
@@ -209,7 +218,6 @@ HLE_FORCE_WAIT("nnsocketGetAddrInfoWithOptions", "name resolution in the C struc
     (void)o; (void)n; return sk_c_gai(h, s, hint, res);
 }
 HLE_FORCE_WAIT("nnsocketGetAddrInfo", "name resolution in the C struct addrinfo layout", int, h_c_sk_Gai, const char *h, const char *s, const void *hint, void **res) { return sk_c_gai(h, s, hint, res); }
-HLE_FORCE("nnsocketShutdown", "socket transport, offline by default", int, h_c_sk_Shutdown, int s, int h) { return dm_net_guest_errno(dm_net_shutdown(s, h)); }
 HLE_FORCE("nnsocketFreeAddrInfo", "release only resolver allocations owned by the host", void, h_c_sk_FreeAi, void *ai) { dm_net_freeaddrinfo(ai); }
 HLE_FORCE("nnsocketGAIStrError", "resolver error text", const char *, h_c_sk_GaiStr, int e) { (void)e; return "network unavailable"; }
 

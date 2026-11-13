@@ -36,7 +36,7 @@ static uint8_t *gas;
 int dm_guest_as_contains(uintptr_t a) { uintptr_t b = (uintptr_t)gas; return gas && a >= b && a - b < GAS; }
 static int as_ready = 1;   // 0: the block is not reserved yet (a pass before hle_svc.c's mem_init): svc_guest_range answers NULL
 void svc_guest_range(uint8_t **base, size_t *size) { *base = as_ready ? gas : NULL; *size = as_ready ? GAS : 0; }
-// The alias region: before the guest block is reserved none, then one laid out from the test's heap, which is not the block's partition (region 2's refusal)
+// The alias region: before the guest block is reserved none, then one laid out from the test's heap, which is not in the block (region 2's refusal)
 void svc_alias_range(uint8_t **base, size_t *size) { *base = as_ready && heap ? (uint8_t *)(uintptr_t)((uint64_t)(uintptr_t)heap - DM_GAME_MEM_STACK - DM_GAME_MEM_ALIAS) : NULL; *size = as_ready ? DM_GAME_MEM_ALIAS : 0; }
 static uint64_t held;                            // the keys "held" for the key-press conditional (hle_hid.c)
 uint64_t dm_cheats_keys(void) { return held; }
@@ -476,13 +476,13 @@ int main(void) {
     fresh("patcharea", t); load_all(); dm_cheat_toggle(at("Patch", 0)); cheats_pass();
     { uint32_t gd; memcpy(&gd, g_mod[2].base + 0x2000, 4);
       CHECK(entry("Patch")[0].fails == 1 && gd == 5, "a write into another module's patch area is refused (counted), one into its data lands"); }
-    // region 2 (alias) before the guest block is reserved: the cheat waits silently; afterwards a base that is not the block's partition is refused once
+    // region 2 (alias) before the guest block is reserved: the cheat waits silently; afterwards a base outside the block is refused once
     fresh("alias", "[Al]\n04200000 00000010 00000001\n");   // M = 2
     load_all(); dm_cheat_toggle(at("Al", 0));
     as_ready = 0; cheats_pass(); as_ready = 1;
     CHECK(entry("Al")[0].fails == 0 && dm_cheat_kind_at(at("Al", 0)) == 0, "region 2 before mem_init: not ready, nothing counted, nothing logged");
     cheats_pass();   // the test's heap is not the block's partition: a real mismatch, logged once, the cheat stays on
-    CHECK(entry("Al")[0].fails == 0 && dm_cheat_kind_at(at("Al", 0)) == 0, "region 2 with a base off the partition: refused, the cheat stays on");
+    CHECK(entry("Al")[0].fails == 0 && dm_cheat_kind_at(at("Al", 0)) == 0, "region 2 with a base outside the block: refused, the cheat stays on");
     // glued hex words are split as dmnt does; a hex token that is not whole words makes the line malformed
     fresh("glued", "[G]\n0400000000004420 00000003\n04000000 0000442400000004\n[Odd]\n0400000 00004428 00000001\n[Odd2]\n04000000 00004428\n0400000000004428 0000000\n[Prose]\nby dead beef\n04000000 0000442C 00000005\n");
     load_all();

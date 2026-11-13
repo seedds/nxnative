@@ -6,7 +6,7 @@ Update 1.0.30000 (v655360) over the base game, SDK 20.5.8. Unity 6000.0.50f1 IL2
 
 | Setting | Where | Why |
 |---|---|---|
-| Node area cut 1 GB → 62 MB | `dm/tools/sdk_patches.py`, `sdk` build `e01950c5…` (the constructor at `sdk+0x145bec`; the movs at `+0x145bfc` and `+0x145c68`) | Unity 6's address regions start after the node area: +3.00 GB of the alias region in the first room without it, +2.26 GB with it; see [Memory](#memory) |
+| Node area cut 1 GB → 62 MB | the SDK-wide rule in `dm/tools/sdk_patches.py` (the constructor at `sdk+0x145bec`; the movs at `+0x145bfc` and `+0x145c68`) | Unity 6's address regions start after the node area: +3.00 GB of the alias region in the first room without it, +2.26 GB with it; see [Memory](#memory) |
 | `sys_resource 0x1000000` | [`game.tsv`](game.tsv) | the NPDM's 16 MB of system resource: virtual address memory |
 | 5 GB guest layout with the hardware pool: `mem_reserve 0x140000000`, `mem_alias 0x118000000`, `mem_stack 0x10000000`, `app_pool 0xCD500000` | `game.tsv` | the block of the other Unity games with virtual address memory (256 MB in front + 4.375 GB alias region + 256 MB stack region + 128 MB heap region); the pool is the hardware's (3.2 GB): Unity only reads it through `QueryMemoryInfo`, and nothing maps against it |
 | `nn::hid::GetDebugPadStates` | host, `hle_hid.c` (every game) | an `nn::diag` abort in the first frames; see [Services](#services) |
@@ -16,6 +16,7 @@ Update 1.0.30000 (v655360) over the base game, SDK 20.5.8. Unity 6000.0.50f1 IL2
 ## Frame rate
 
 - 60 fps, as on the Switch. While a cinematic plays the game draws 1280x720 with a window crop and asks for present interval 2 (30 fps).
+- **Resolved: an idle job worker kept a performance core awake.** Unity's job workers sleep 25 µs between looks at their queue (`main+0xbd99e0`), about 25,000 host wakeups a second, and on the iPhone the game ran on performance cores and warmed the phone more than heavier games. Those sleeps now back off like other polls: [Short sleeps are polls](../../../docs/reference/threads.md#short-sleeps-are-polls) (iPhone Duo: CPU energy 0.63 → 0.09 W, on efficiency cores). Open: dropped frames went from 0.17% to 0.25% in the comparison (different routes), as short hitches of 2 to 6 frames.
 
 ## Memory
 
@@ -24,6 +25,7 @@ Update 1.0.30000 (v655360) over the base game, SDK 20.5.8. Unity 6000.0.50f1 IL2
 - **Current:** the node area still sits at the start of the alias region, so it takes the cut: without it the high-water mark was +1.00 GB at `nninitStartup` and +3.00 GB in the first room of play; with it +2.26 GB, 1.51 GB mapped.
 - Measured on the Mac: resident about 2.1–2.15 GB and 1.25 GB of GPU memory, flat for 100 s of play.
 - BALL x PIT ([010086A022444000](../010086A022444000/README.md), Unity 6000.0.62f1, SDK 20.5.19) takes its memory the same way and needed only the same cut on its `sdk` build.
+- Since 2026-11-09 the SDK-wide rule gives the node area cut in place of this `sdk` build's row: the rewritten `sdk` is byte-identical (SDK 20's placement aligns to 2 MB itself).
 
 ## Services
 
@@ -50,6 +52,7 @@ General host changes first needed here; each applies to every game:
 - **`hid::GetDebugPadStates`**, the history form (`hle_hid.c`): [History reads fill every requested entry](../../../docs/reference/services.md#history-reads-fill-every-requested-entry).
 - **Unity 6 memory with no StandardAllocator and no heap**, and the NSP script's 5 GB block for every game with an NPDM system resource (`profile_guess.py`): [Unity 6 takes its memory with no StandardAllocator and no heap](../../../docs/reference/memory.md#unity-6-takes-its-memory-with-no-standardallocator-and-no-heap), [dm/games/README.md, Adding a game](../README.md#adding-a-game).
 - **Unity 6 `Shader` objects** read from the bundles' own type trees: [Unity 6 Shader objects](../../../docs/reference/shaders.md#unity-6-shader-objects).
+- **Short sleeps of an idle job worker** (`hle_thread.c`): [Short sleeps are polls](../../../docs/reference/threads.md#short-sleeps-are-polls).
 
 ## Open
 

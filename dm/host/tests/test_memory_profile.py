@@ -22,6 +22,10 @@ class MemoryProfileTests(unittest.TestCase):
         self.assertEqual(signals['mem_alias'][0], '0x118000000')
         self.assertEqual(signals['mem_used'][0], '0xe00000')
 
+    def test_alias_size_override(self):   # the probe asserts the 256 MB alias region and the layout around it
+        subprocess.run([str(HERE / os.environ.get('DM_TEST_BUILD', 'build') / 't_svc_memory'), '--alias-probe'],
+                       env=dict(os.environ, DM_ALIAS_SIZE='0x10000000'), capture_output=True, check=True)
+
 
 if __name__ == '__main__':
     unittest.main()

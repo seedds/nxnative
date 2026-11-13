@@ -1,0 +1,47 @@
+# Sonic Superstars (SEGA / Arzest, update 1.1.8 over the base game), SDK 16.2.0, NVN, Unity 2021.3.25f1 IL2CPP, CRIWARE (ADX2 sound, USM movies), FMOD.
+# Started from the NSP script's provisional profile; brought up on the Mac with its names and stdalloc_cap added (README.md).
+
+# ---- Identity ----
+title_id	01008F701C074000
+program_id	01008F701C074000
+
+# ---- App ----
+name	Sonic Superstars
+ipa	SonicSuperstars.ipa
+app_category	public.app-category.action-games
+
+# ---- Versions ----
+build	v327680	1.1.8	main=f1bb173fc40702f6f911a18f171c3fe9	subsdk0=ff0149d0b5e882b87c2f06a981302b13	sdk=3053b22935e32ddf15ef81997603e5c2
+package	v327680
+shader_versions	v327680
+
+# ---- Files ----
+# every module main imports from
+modules	main subsdk0 sdk
+romfs_marker	Data/StreamingAssets/Bank900.awb
+zip_store	.acb:.assets:.awb:.bundle:.dat:.ress:.usm:.metallib
+
+# ---- Memory ----
+# the NPDM declares 16 MB of system resource (virtual address memory) and main sets a heap: a 5 GB block with a large alias region; the heap check sizes the heap region from the heap the game asks for
+mem_reserve	0x140000000
+mem_alias	0x118000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+# StandardAllocator::Initialize(nullptr, 3.12 GB) from nninitStartup (returning to main+0x1cb71d0) gets 1.5 GB of address space: it maps 0.38 GB of it by the first stage, while
+# Unity's own regions (main+0x4169c) hold 1.34 GB live and reach 2.2 GB past it. With the whole 3.12 GB they ran out of the iPhone's 4.38 GB alias region in the first stage's load
+# (a write at 0xffffe0, main+0x18a2a30); see README.md, Memory
+stdalloc_cap	0x60000000
+# the NPDM declares 16 MB of system resource
+sys_resource	0x1000000
+
+# ---- Shader split ----
+shader_groups	/Data/=data
+shader_note	Sonic Superstars shaders
+
+# ---- Heap check on the Mac ----
+# the game calls nvnDeviceSetDepthMode with near = 0 in the check boot: the pipeline bases made before it runs are made for that mode
+depth_mode	zero
+
+# heap check: 2026-11-07, no heap set; set depth_mode
+
+# address regions: 2026-11-07, in its first 15 s in nnMain the game's regions reach alias +4.07 GB, within the profile's 4.38 GB alias region (what it takes later in play is not measured here) (rewrite 5f7ada8659c9)

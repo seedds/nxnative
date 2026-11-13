@@ -35,7 +35,10 @@ The work folder is `<NSP folder>/01002DA013484000-work`, with `boot.sh`, `ctl.sh
 
 General host changes first needed here; each applies to every game:
 
+- **The compile cache as one file, read in place** (`shader_cache.py`): [The compile cache was unpacked for each build](../../../docs/reference/packing.md#the-compile-cache-was-unpacked-for-each-build).
+- **The shader libraries as one file, read in place** (`shader_lib.py`, `msl_image.h`): [Shader libraries take a file per shader variant](../../../docs/reference/packing.md#shader-libraries-take-a-file-per-shader-variant). Measured here: the route from `save_ref` to the file list, 6,600 frames from the folder and from the image, with no `[RED]` line in either and pictures alike.
 - **Logic operations on normalized targets** (`dmsh_logic.py` `dm_logic_norm`, `nvn_mtl.m` `lop_key`, `unorm_chan_masks`): [Logic operations through a library of its own](../../../docs/reference/rendering.md#logic-operations-through-a-library-of-its-own).
 - **Plain gzip around a shader archive** (`shader_split.py` `ungzip`): [Gzip-wrapped shader archives](../../../docs/reference/shaders.md#gzip-wrapped-shader-archives).
 - **`.vert` and `.frag` files count as run-time GLSL only as text** (`profile_guess.py` `glsl_text`): [Encrypted `.vert` and `.frag` files](../../../docs/reference/shaders.md#encrypted-vert-and-frag-files-are-no-run-time-glsl).
 - **A shader's cache key covers its `dual_want.tsv` row** (`dmsh_build.py` `shader_key`): [A shader added to `dual_want.tsv` keeps its cached build](../../../docs/reference/rendering.md#a-shader-added-to-dual_wanttsv-keeps-its-cached-build).
+- **A pool registered over memory an earlier pool held counts older dirty-page stamps as written** (`nvn_dirty.c` `born`): [A pool registered over memory an earlier pool held counts older stamps as written](../../../docs/reference/nvn-objects.md#a-pool-registered-over-memory-an-earlier-pool-held-counts-older-stamps-as-written). Seen in a fork for Android that shares `nvn_dirty.c` (Skyloft drawn with the opening's meshes after a new game); not seen on the Mac.

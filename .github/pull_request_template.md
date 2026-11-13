@@ -13,6 +13,10 @@
 - For a change to the shader chain, the host or a tool that every game uses: the `scripts/regress.py check --games` report on the games it most likely reaches (`regress.py impact` helps), or why none ([06-dev-loop.md](https://github.com/seedds/nxnative/blob/main/docs/agents/06-dev-loop.md))
 - Measurements before and after, where the change is about speed, memory or power
 
+## Front ends
+
+<!-- Usually delete this. Only for what a front end has to act on and git does not show (docs/frontends.md, Following main): one line each, `Front-ends: break: …`, `Front-ends: interface: …` or `Front-ends: new: …`, kept in the commit message too. -->
+
 ## Docs
 
 - [ ] The finding is in its game note or its `docs/reference/<subsystem>.md` entry, and `python3 dm/tools/docs_symptoms.py` was run (the symptom index)

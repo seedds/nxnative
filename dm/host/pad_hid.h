@@ -23,6 +23,11 @@ typedef struct {
 
 static const char *const pad_hid_names[16] = {"A", "B", "X", "Y", "LS", "RS", "L", "R", "ZL", "ZR", "PLUS", "MINUS", "LEFT", "UP", "RIGHT", "DOWN"};
 
+// Identical pads (front_mac.m, DM_PAD_IDENTICAL): whether every pad of one model is read as a player of its own, instead of through GameController.
+// n: the pads of the model IOKit has; listed: GameController's controllers of it; read: whether they are read that way already; due: a wait after the last change is over.
+// 1 read them, 0 do not, -1 not yet: a pad connected a moment ago may simply not be listed yet, so a model starts only after the wait, and stops at once
+static inline int pad_dupes_want(int n, int listed, int read, int due) { return n < 2 || n <= listed ? 0 : read || due ? 1 : -1; }
+
 // DM_HID_MAP: comma-separated NAME=usage entries over the default map (an unknown name or a usage past 32 is skipped)
 static void pad_hid_init(pad_hid *h, const char *map) {
     static const uint8_t def[16] = {2, 1, 5, 4, 14, 15, 7, 8, 9, 10, 12, 11};

@@ -1,7 +1,10 @@
 """Shader regressions between two builds of a game's shader libraries (dm/gfx/tools/shader_regressions.py) and the NSP script's stop on them (build_ipa_from_nsp.py
 shader_regressions; GitHub issue #272): a shader that translated in the newest other b-*/ of the same game and fails now is listed, new keys and shaders that failed before are not,
-another game's stamped library is never the previous build, and the NSP script stops unless ALLOW_SHADER_REGRESSIONS. Build reports only: no game files, translator or Metal needed."""
+another game's stamped library is never the previous build, and the NSP script stops unless ALLOW_SHADER_REGRESSIONS. Build reports only: no game files, translator or Metal needed.
+Also what a shader that built lost (losses, report_losses), which never stops a build."""
+import contextlib
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -68,6 +71,39 @@ class Compare(Base):
 
     def test_no_report(self):
         self.assertEqual(self.tool('new').returncode, 2)
+
+
+HANDLE = 'translator: Failed to find handle source for bindless access of type "%s".'
+
+
+class Losses(unittest.TestCase):
+    def report(self, refls):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out): sr.report_losses(refls)
+        return out.getvalue().splitlines()
+
+    def test_only_deleted_accesses_count_among_the_notes(self):
+        deleted, lost = sr.losses({'notes': [HANDLE % 'texture2D', HANDLE % 'texture2D', HANDLE % 'imageBuffer', 'translator: Bindless handle taken from the one c[2] handle among its phi inputs.', 'not in the answer table, queries use defaults'],
+                                   'entries_lost': ['layer']})
+        self.assertEqual(deleted, {'texture2D': 2, 'imageBuffer': 1}); self.assertEqual(lost, {'layer': 1})
+        self.assertEqual(sr.losses({'notes': []}), ({}, {}))
+
+    def test_each_shader_has_its_red_line_and_the_summary_counts_per_kind(self):
+        lines = self.report([{'dm_ctl': 'bbbb', 'notes': [HANDLE % 'texture2D'] * 2, 'entries_lost': ['integer output', 'dual source']},
+                             {'dm_ctl': 'cccc', 'notes': []},
+                             {'dm_ctl': 'aaaa', 'notes': [HANDLE % 'textureCube']}])
+        self.assertEqual(lines, ['[RED] aaaa: the translator deleted 1 bindless accesses (textureCube 1): their results read 0',
+                                 '[RED] bbbb: the translator deleted 2 bindless accesses (texture2D 2): their results read 0',
+                                 '[RED] bbbb: its library builds only without its integer output, dual source entry points: the draws that need them fail or go without',
+                                 '[RED] lost without failing: 3 bindless accesses deleted in 2 shaders (texture2D 2, textureCube 1), 1 shaders without extra entry points (dual source 1, integer output 1)'])
+
+    def test_nothing_lost_prints_no_red(self):
+        self.assertEqual(self.report([{'dm_ctl': 'a', 'notes': []}]), ['lost without failing: nothing'])
+
+    def test_the_nsp_script_finds_the_summary(self):   # one line for the player, from the build's log; it stops nothing
+        src = (REPO / 'scripts/build_ipa_from_nsp.py').read_text()
+        self.assertIn(r"re.search(r'^\[RED\] lost without failing: .*$', t, re.M)", src)
+        self.assertRegex(self.report([{'dm_ctl': 'a', 'notes': [HANDLE % 'texture2D']}])[-1], r'^\[RED\] lost without failing: ')
 
 
 class NspScript(Base):

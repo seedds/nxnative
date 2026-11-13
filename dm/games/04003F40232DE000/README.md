@@ -48,6 +48,7 @@ Run headless: `DM_WINDOW` set to anything, `0` too, opens a window, and a covere
 ## Found on this game
 
 - [GameChat at boot](../../../docs/reference/services.md#gamechat-at-boot): boot aborts.
+- [No Game language row in an app packed from a NUP or a dump](../../../docs/reference/packing.md#no-game-language-row-in-an-app-packed-from-a-nup-or-a-dump): its NUP has no NACP. With `DM_LANG` it boots in German, Dutch and Simplified Chinese; Russian and Portuguese, which it lacks, show English.
 - [Whether the language selection is limited](../../../docs/reference/services.md#whether-the-language-selection-is-limited).
 - [The target frame rate (graphics frame length)](../../../docs/reference/services.md#the-target-frame-rate-graphics-frame-length).
 - [Dedicated c1 constants as slices of a bank](../../../docs/reference/frame-rate.md#dedicated-c1-constants-as-slices-of-a-bank): about 10 fps in the first field.

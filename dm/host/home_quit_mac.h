@@ -71,13 +71,14 @@ static NSView *hq_action(NSString *symbol, NSString *fallback, NSString *label, 
 @end
 
 // The prompt over the whole view: a dim scrim, and in its middle the card with the title, the note and the two actions (A quits, B cancels).
-// a_symbol, b_symbol: the controller's own glyphs (GCControllerButtonInput.sfSymbolsName), nil for the plain ones
-static NSView *hq_prompt_view(NSRect bounds, NSString *title, NSString *note, NSString *quit, NSString *cancel, NSString *a_symbol, NSString *b_symbol) {
+// a_symbol, b_symbol: the controller's own glyphs (GCControllerButtonInput.sfSymbolsName), nil for the plain ones. a_on: A's action is the primary one (cream); off, it is drawn
+// as the other, for a prompt where A does nothing yet (the controller applet's, ctrl_prompt.h)
+static NSView *hq_card_view(NSRect bounds, NSString *title, NSString *note, NSString *quit, NSString *cancel, NSString *a_symbol, NSString *b_symbol, int a_on) {
     CGFloat k = hq_scale(bounds.size);
     NSView *scrim = [[HqScrim alloc] initWithFrame:bounds]; scrim.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
     scrim.wantsLayer = YES; scrim.layer.backgroundColor = [NSColor colorWithWhite:0 alpha:0.6].CGColor;
     NSTextField *t = hq_label(title, 34 * k, NSFontWeightBold, NSColor.whiteColor, 1), *n = hq_label(note, 20 * k, NSFontWeightRegular, [NSColor colorWithWhite:1 alpha:0.6], 1);
-    NSStackView *actions = [NSStackView stackViewWithViews:@[hq_action(a_symbol, @"a.circle", quit, 1, k), hq_action(b_symbol, @"b.circle", cancel, 0, k)]];
+    NSStackView *actions = [NSStackView stackViewWithViews:@[hq_action(a_symbol, @"a.circle", quit, a_on, k), hq_action(b_symbol, @"b.circle", cancel, 0, k)]];
     actions.spacing = 16 * k; actions.translatesAutoresizingMaskIntoConstraints = NO;
     NSStackView *card = [NSStackView stackViewWithViews:@[t, n, actions]];
     card.orientation = NSUserInterfaceLayoutOrientationVertical; card.alignment = NSLayoutAttributeCenterX;
@@ -91,6 +92,9 @@ static NSView *hq_prompt_view(NSRect bounds, NSString *title, NSString *note, NS
         [card.widthAnchor constraintEqualToConstant:w], [t.widthAnchor constraintLessThanOrEqualToConstant:w - 96 * k], [n.widthAnchor constraintLessThanOrEqualToConstant:w - 96 * k]]];
     scrim.accessibilityElement = YES; scrim.accessibilityRole = NSAccessibilityGroupRole; scrim.accessibilityLabel = title;
     return scrim;
+}
+static NSView *hq_prompt_view(NSRect bounds, NSString *title, NSString *note, NSString *quit, NSString *cancel, NSString *a_symbol, NSString *b_symbol) {
+    return hq_card_view(bounds, title, note, quit, cancel, a_symbol, b_symbol, 1);
 }
 
 // The hold indicator at the top of the view: a pill with a ring that fills while Home is held, and its label. hq_hold_set moves the ring

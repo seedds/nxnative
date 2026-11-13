@@ -36,6 +36,7 @@ class Header(Base):
         (self.repo / 'dm/gfx/nvn').mkdir(parents=True)
         (self.repo / 'dm/gfx/tools').symlink_to(REPO / 'dm/gfx/tools'); (self.repo / 'dm/ios').symlink_to(REPO / 'dm/ios')
         (self.repo / 'dm/third_party').symlink_to(REPO / 'dm/third_party')
+        (self.repo / 'dm/mac').symlink_to(REPO / 'dm/mac')   # min_os.mk, the Mac libraries' deployment target
         (self.repo / 'dm/gfx/nvn/dmsh_abi.h').symlink_to(REPO / 'dm/gfx/nvn/dmsh_abi.h')   # the shader library ABI, a chain input beside the header
         self.h = self.repo / nsp.CHAIN_H
         shutil.copy(REPO / nsp.CHAIN_H, self.h)
@@ -133,6 +134,24 @@ class TableTools(unittest.TestCase):
                 r = subprocess.run([sys.executable, REPO / 'dm/gfx/tools' / tool, lib, lib.parent / table], capture_output=True, text=True)
                 self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual((lib.parent / 'c1_full.tsv').read_text().splitlines()[1:], [key])   # the shader itself is still checked
+
+
+class TableDifference(unittest.TestCase):   # the row the build error names when a split table differs from the profile's (GitHub issue #1263)
+    HEAD = b'# header\n'
+
+    def test_changed_row(self):
+        got = nsp.table_difference('shader_map.tsv', self.HEAD + b'a\nvs\t1\n', b'# another header\na\nms\t0\n')
+        self.assertEqual(got, 'shader_map.tsv: 1 row(s) only in the profile, 1 only in the split\n  profile: vs\t1\n  split:   ms\t0')
+
+    def test_inserted_row_is_the_only_one_named(self):
+        got = nsp.table_difference('t.tsv', self.HEAD + b'a\nb\nc\n', self.HEAD + b'new\na\nb\nc\n')
+        self.assertEqual(got, 't.tsv: 0 row(s) only in the profile, 1 only in the split\n  split:   new')
+
+    def test_repeated_row_counts(self):
+        self.assertIn('1 row(s) only in the profile', nsp.table_difference('t.tsv', b'a\na\n', b'a\n'))
+
+    def test_order_only(self):
+        self.assertEqual(nsp.table_difference('t.tsv', b'a\nb\n', b'b\na\n'), 't.tsv: the same rows in another order')
 
 
 if __name__ == '__main__':

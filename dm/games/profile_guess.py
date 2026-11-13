@@ -3,9 +3,9 @@
 # facts_of(ExeFS, RomFS) reads the code modules (dynamic symbols, sizes, SDK strings) and the RomFS file headers (a romfs_manifest.tsv from nx_extract --manifest, or a RomFS folder);
 # guess(facts) turns the facts into profile keys, each with the reason written above it in game.tsv. Every rule was checked against the hand-made profiles; --check runs that comparison again.
 # mem_used needs the rewritten modules (mem_used below, after the rewrite). The alias / heap split of a game with virtual address memory that sets a heap needs its heap request:
-# the NSP script's heap check boots it on the Mac until that request (heap_signals below), a few seconds. The keys no short run decides (render_cond, tex_flush_upload,
-# tex_dirty_upload, core_preempt, gpu_timestamps, vconv_range, present_interval) keep their defaults for a developer: a minute's boot without input
-# cannot tell the games that need them (Tears of the Kingdom) from those that only use what they answer (Wonder's conditional clears, Breath of the Wild's flushed textures).
+# the NSP script's heap check boots it on the Mac until that request (heap_signals below), a few seconds. The keys no short run decides (tex_flush_upload,
+# tex_dirty_upload, core_preempt, vconv_range, present_interval) keep their defaults for a developer: a minute's boot without input
+# cannot tell the games that need them (Tears of the Kingdom) from those that only use what they answer (Breath of the Wild's flushed textures).
 # Usage: profile_guess.py <ExeFS dir> <romfs_manifest.tsv | RomFS dir>   the facts and the guessed keys
 #        profile_guess.py --check [<NSP root>]                        every profile in dm/games against its extraction under <NSP root> (default /Volumes/T7/nsp): where the guess differs
 import collections, re, struct, sys
@@ -14,21 +14,27 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent / 'tools')); import nso_syms   # dynamic symbols, the host's hooks
 from romfs import Path, os, open, is_image, source
+from romfs_image import ARTIFACTS   # a dump tool's files in a RomFS folder, not game files
 
 MAGICS = [(b'UnityFS\0', 'UnityFS'), (b'UnityWeb', 'UnityWeb'), (b'UnityRaw', 'UnityRaw'), (b'BNSH', 'BNSH'), (b'BAHS', 'BAHS'), (b'SARC', 'SARC'), (b'Yaz0', 'Yaz0'),
           (bytes.fromhex('28b52ffd'), 'zstd'), (b'FRES', 'bfres'), (b'BNTX', 'BNTX'), (b'BWAV', 'BWAV'), (b'FSAR', 'BFSAR'), (b'CPK ', 'CRI CPK'), (b'CRID', 'CRI USM'),
           (b'@UTF', 'CRI UTF'), (b'AKPK', 'Wwise pck'), (b'BKHD', 'Wwise bnk'), (b'FSB5', 'FMOD'), (b'\x89PNG', 'PNG'), (b'RIFF', 'RIFF'), (b'OggS', 'Ogg'), (b'PK\x03\x04', 'zip'), (b'NSO0', 'NSO'),
-          (bytes.fromhex('03022307'), 'SPIR-V'), (b'ONEPACK\0', 'Trinity pack'), (b'ARC\0', 'MT Framework ARC'), (b'SCNE', 'Bezel Engine archive'), (b'XNB', 'XNB'), (b'pkzl', 'PlatinumGames PKZ')]
-PACKED = {'UnityFS', 'UnityWeb', 'Yaz0', 'zstd', 'BWAV', 'CRI CPK', 'CRI USM', 'Wwise pck', 'FMOD', 'PNG', 'Ogg', 'zip', 'Trinity pack', 'MT Framework ARC', 'Bezel Engine archive', 'PlatinumGames PKZ'}   # file headers of compressed / media formats (zip_store)
+          (bytes.fromhex('03022307'), 'SPIR-V'), (b'ONEPACK\0', 'Trinity pack'), (b'ARC\0', 'MT Framework ARC'), (b'SCNE', 'Bezel Engine archive'), (b'XNB', 'XNB'), (b'pkzl', 'PlatinumGames PKZ'),
+          (b'KPKA', 'RE Engine PAK')]
+PACKED = {'UnityFS', 'UnityWeb', 'Yaz0', 'zstd', 'BWAV', 'CRI CPK', 'CRI USM', 'Wwise pck', 'FMOD', 'PNG', 'Ogg', 'zip', 'Trinity pack', 'MT Framework ARC', 'Bezel Engine archive', 'PlatinumGames PKZ', 'RE Engine PAK'}   # file headers of compressed / media formats (zip_store)
+# Unreal by its name, which every Unreal 4 / 5 main here has; 'UE4' alone is no marker: it is a build path in Octopath Traveler II's main, and four bytes of machine code in Unreal 5 mains and in PRAGMATA's
+# (RE Engine), whose DLSS module also has a 'UE4 generic plugin' string. RE Engine by its via.render.* type names (PRAGMATA's main: 1,925)
 # IL2CPP by the metadata file every IL2CPP player opens: Unity 2022's main (Ace Attorney Investigations Collection) has no il2cpp_ API names, Engage's 2020.3 has both
 MARKERS = [(b'nvnBootstrapLoader', 'NVN'), (b'vkCreateInstance', 'Vulkan'), (b'eglGetProcAddress', 'EGL / OpenGL'), (b'global-metadata.dat', 'Unity IL2CPP'), (b'UnityEngine', 'Unity'),
-           (b'sead::', 'Nintendo sead'), (b'agl::', 'Nintendo agl'), (b'gsys::', 'Nintendo gsys'), (b'Unreal', 'Unreal'), (b'UE4', 'Unreal 4'), (b'Havok', 'Havok'), (b'CRIWARE', 'CRIWARE'), (b'Wwise', 'Wwise'),
+           (b'sead::', 'Nintendo sead'), (b'agl::', 'Nintendo agl'), (b'gsys::', 'Nintendo gsys'), (b'Unreal', 'Unreal'), (b'via.render.', 'RE Engine'), (b'Havok', 'Havok'), (b'CRIWARE', 'CRIWARE'), (b'Wwise', 'Wwise'),
            (b'MonoGame.Framework', 'MonoGame'), (b'FMOD mixer', 'FMOD')]
 GLSLC_MAGIC = b'\x91\x68\x86\x19'   # GLSLC compiler outputs (shader_split.py glslc_shaders)
 GL_SRC = rb'\0#version [0-9]'      # a GLSL source string as dm/gfx/tools/gl_shaders.py takes it from main (Balatro's main has none, only glslang's messages that start with '#version:')
 GL_FILES = ('.mvgl', '.vert', '.frag')   # the RomFS files gl_shaders.py reads GLSL from
 APP_POOL = 0xCD500000               # the application memory pool of a 4 GB Switch (3285 MiB), what every profile but Engage's reports
+OUNCE_POOL = 0x240000000            # a Switch 2 game's (9 GB of 12 GB, not measured; Donkey Kong Bananza's heaps do not fit in a Switch 1 pool)
 MiB = 1 << 20
+SDK_VERSION = re.compile(rb'(?i)NintendoSDK_nnSdk-(?:[a-z]+_)?([0-9_]+)')   # SDK 12 spells it NintendoSdk_, SDK 16 NintendoSDK_; the Switch 2's SDKs name a variant (nnSdk-Generic_22_2_0, loader.c dm_sdk_major)
 
 
 def glsl_sources(img):
@@ -66,6 +72,7 @@ def romfs_files(romfs):   # (path, size, first 32 bytes) of every RomFS file: fr
         return
     for d, _, names in os.walk(romfs):
         for n in names:
+            if os.fsencode(n) in ARTIFACTS: continue
             p = Path(d) / n
             with open(p, 'rb') as f: head = f.read(32)
             yield '/' + str(p.relative_to(romfs)), p.stat().st_size, head
@@ -86,7 +93,7 @@ def aarch64(path):   # main.npdm's flags (META +0xc) bit 0, Is64BitInstruction; 
 def facts_of(exefs, romfs):
     """What the profile rules (and the survey report) need from a game's code modules and RomFS"""
     exefs = Path(exefs)
-    F = {'mods': {}, 'markers': {}, 'sdkver': set(), 'comps': set(), 'unity': set(), 'glslc': 0, 'glsl_src': 0, 'gl_names': 0, 'gl_src': 0, 'sysres': 0, 'program': None}
+    F = {'mods': {}, 'ounce': False, 'markers': {}, 'sdkver': set(), 'comps': set(), 'unity': set(), 'glslc': 0, 'glsl_src': 0, 'gl_names': 0, 'gl_src': 0, 'sysres': 0, 'program': None}
     for p in sorted(exefs.iterdir()):
         with open(p, 'rb') as f:
             if f.read(4) != b'NSO0': continue
@@ -96,7 +103,8 @@ def facts_of(exefs, romfs):
         m = F['mods'][p.name] = {'bid': bid, 'sizes': szs, 'bss': bss, 'far': end > 0x7000000,   # far: the patch area goes before the base (patch_nso.py FAR), the bss counts as used memory (hle_svc.c big_bss_bytes)
                                  'imports': {s for s, defined, _ in syms if not defined}, 'exports': {s for s, defined, bind in syms if defined and bind in (1, 2)},
                                  'comps': {c.decode().rsplit('-', 1)[0] for c in re.findall(rb'NintendoSDK_(?!nnSdk)\w+-[0-9_]+', img)}}
-        F['sdkver'] |= {v.decode() for v in re.findall(rb'(?i)NintendoSDK_nnSdk-([0-9_]+)', img)}   # SDK 12 spells it NintendoSdk_, SDK 16 NintendoSDK_
+        F['sdkver'] |= {v.decode() for v in SDK_VERSION.findall(img)}
+        if p.name == 'sdk': F['ounce'] = b'spec: Ounce' in img   # built for the Switch 2 (loader.c dm_sdk_ounce)
         F['comps'] |= {c.decode() for c in re.findall(rb'SDK MW\+Nintendo\+([\w]+-[0-9_]+)', img)}
         for pat, name in MARKERS:
             if pat in img: F['markers'].setdefault(name, []).append(p.name)
@@ -151,29 +159,32 @@ def guess(F, hooks=None):
     G['modules'] = (' '.join(keep), f'not loaded, main takes nothing from them the host does not supply: {", ".join(drop)}' if drop else 'every module main imports from')
 
 
-    # Memory: the guest block is 256 MB in front + alias region + stack region + heap region (hle_svc.c mem_init)
+    # Memory: the guest block is 256 MB in front + heap region + stack region + alias region (hle_svc.c mem_init)
     giant = sum(m['bss'] for n, m in mods.items() if n in keep and m['far'])
     heap_api = HEAP_API in imp
+    pool = OUNCE_POOL if F.get('ounce') else APP_POOL
     if F['sysres']:   # virtual address memory: Engage's 5 GB block. With a heap, the heap check moves the alias / heap split once it sees the heap the game asks for (Wonder, Tears of the Kingdom);
         # without one the game maps everything in the alias region itself (Hollow Knight: Silksong's Unity 6 through AllocateAddressRegion / AllocateMemoryPages, 1.5 GB in its first room;
         # Absolum's and Pokémon Legends: Z-A's StandardAllocator), which a 256 MB alias region cannot hold
-        mem = (0x140000000, 0x118000000, APP_POOL, f'the NPDM declares {F["sysres"] // MiB} MB of system resource (virtual address memory) and main ' +
+        mem = (0x140000000, 0x118000000, pool, f'the NPDM declares {F["sysres"] // MiB} MB of system resource (virtual address memory) and main ' +
                ('sets a heap: a 5 GB block with a large alias region; the heap check sizes the heap region from the heap the game asks for' if heap_api else
                 'never sets a heap: a 5 GB block with a 4.375 GB alias region, where the game maps its memory itself'))
     else:
-        heap = max(0x10000000, -(-(APP_POOL - 64 * MiB - giant) // 0x10000000) * 0x10000000) if heap_api else 0x10000000
-        mem = (0x30000000 + heap, 0x10000000, APP_POOL,
+        heap = max(0x10000000, -(-(pool - 64 * MiB - giant) // 0x10000000) * 0x10000000) if heap_api else 0x10000000
+        mem = (0x30000000 + heap, 0x10000000, pool,
                ('main sets a heap of at most the pool − 64 MB' + (f' − {giant // MiB} MB of bss (counted as used memory)' if giant else '') + f': a {heap // MiB} MB heap region')
                if heap_api else 'main never sets a heap (its memory is its own bss): a 256 MB heap region')
-    G['mem_reserve'] = (f'{mem[0]:#x}', mem[3]); G['mem_alias'] = (f'{mem[1]:#x}', ''); G['mem_stack'] = ('0x10000000', ''); G['app_pool'] = (f'{mem[2]:#X}'.replace('0X', '0x'), '')
+    G['mem_reserve'] = (f'{mem[0]:#x}', mem[3]); G['mem_alias'] = (f'{mem[1]:#x}', ''); G['mem_stack'] = ('0x10000000', ''); G['app_pool'] = (f'{mem[2]:#X}'.replace('0X', '0x'), 'the sdk is built for the Switch 2 (spec: Ounce): its 9 GB pool' if F.get('ounce') else '')
     G['sys_resource'] = (f'{F["sysres"]:#x}', f'the NPDM declares {F["sysres"] // MiB} MB of system resource' + ('' if F['sysres'] else
                          ': IsVirtualAddressMemoryEnabled is false, as on Horizon (Big Brain Academy: Brain vs. Brain sets a heap only then)'))
 
-    if F.get('main_markers', set()) & {'Unreal', 'Unreal 4'} and R['exts'].get('.pak') and 'nvnBootstrapLoader' in imp:
+    if 'Unreal' in F.get('main_markers', set()) and R['exts'].get('.pak') and 'nvnBootstrapLoader' in imp:
         G['shader_groups'] = ('ShaderArchive-Global-=global ShaderArchive-=game', 'the decoded shader code archives: the engine\'s global shaders and the game\'s material shaders')
+    if 'RE Engine' in F.get('main_markers', set()) and R['mags'].get('RE Engine PAK'):
+        G['shader_groups'] = ('re_chunk=sdf', 'RE Engine: the shaders are SDF definitions inside the KPKA PAKs (shader_split.py kpka_jobs / sdf_shaders), as in Monster Hunter Rise\'s and PRAGMATA\'s profiles')
     # The engine region needs virtual address memory; without it (OCTOPATH TRAVELER 1.0.5, Unreal Engine 4 on SDK 3.5.1, no system resource; Yoshi's Crafted World, SDK 4: 0xc5200000) nninitStartup sets a heap of pool − used instead,
     # which the heap-region layout above holds
-    if F.get('main_markers', set()) & {'Unreal', 'Unreal 4'} and R['exts'].get('.pak') and 'nvnBootstrapLoader' in imp and F['sysres']:
+    if 'Unreal' in F.get('main_markers', set()) and R['exts'].get('.pak') and 'nvnBootstrapLoader' in imp and F['sysres']:
         G['mem_reserve'] =('0x1028000000', 'Unreal: nninitStartup reserves a 62 GB address region and its FMallocBinned3 takes 37 GB of it, so a 64 GB alias region for the bring-up on the Mac. '
                             'The rewriter cuts the allocator in any Unreal 4 / 5 main (dm/tools/ue_malloc.py) and gives the region what the alias region has room for (dm/tools/ue_region.py), so an iPhone '
                             'takes a smaller guest block, as Octopath Traveler 0\'s profile (docs/reference/memory.md)')
@@ -197,23 +208,44 @@ def nro_modules(exefs, nros, modules, hooks=None):
     imports, and the NROs are in the RomFS, which the survey does not extract. Portal (Source engine, 28 NROs) plays its movies in video_nx.nro through NintendoSDK_movie (subsdk2)
     and initializes GLSLC (subsdk0) from materialsystem.nro and video_nx.nro; left out, movie::Extractor's constructor was a stub and the first movie crashed.
     A symbol a loaded module or another NRO defines, or the host supplies, needs nothing; NVIDIA's GPU drivers stay out as in guess()"""
-    exefs, hooks = Path(exefs), host_hooks() if hooks is None else hooks
     want, have = set(), set()
     for p in nros.values():
         for s, defined, bind in nso_syms.dynsyms(Path(p).read_bytes()):
             if not defined: want.add(s)
             elif bind in (1, 2): have.add(s)
-    exp = {}
-    for p in sorted(exefs.iterdir()):
+    return modules_supplying(exefs, want - have, modules, hooks)
+
+
+def main_modules(exefs, modules, hooks=None):
+    """The subsdks a hand-written list leaves out that main imports from, {module: kind}: a module's slot is not fixed across a game's versions. Absolum's movie module is subsdk2 in 1.1.2, where
+    subsdk0 is NVIDIA's Vulkan driver, and subsdk0 in 1.2.1: a profile derived from 1.1.2's list left it out, and movie::Extractor's constructor was a stub (issue #1211). Reads nothing with no other module there"""
+    exefs = Path(exefs)
+    if not nso_files(exefs, skip=modules): return {}
+    want = {s for s, defined, _ in nso_syms.dynsyms(nso(exefs / 'main')[0]) if not defined}
+    return modules_supplying(exefs, want, modules, hooks)
+
+
+def nso_files(exefs, skip=()):   # the code modules in a folder, in name order
+    out = []
+    for p in sorted(Path(exefs).iterdir()):
+        if p.name in skip or p.name == 'rtld' or not p.is_file(): continue
         with open(p, 'rb') as f:
-            if f.read(4) != b'NSO0': continue
+            if f.read(4) == b'NSO0': out.append(p)
+    return out
+
+
+def modules_supplying(exefs, want, modules, hooks=None):   # the modules left out of the list that export a symbol of want which no listed module and no host hook supplies, {module: kind}, in load order; never a GPU driver
+    hooks = host_hooks() if hooks is None else hooks
+    exp = {}
+    for p in nso_files(exefs):
         img = nso(p)[0]
         exp[p.name] = {'exports': {s for s, defined, bind in nso_syms.dynsyms(img) if defined and bind in (1, 2)},
                        'comps': {c.decode().rsplit('-', 1)[0] for c in re.findall(rb'NintendoSDK_(?!nnSdk)\w+-[0-9_]+', img)}}
+    have = set(hooks)
     for m in modules: have |= exp.get(m, {}).get('exports', set())
-    want -= have | hooks
+    want = want - have
     return {m: kind(e) for m, e in sorted(exp.items(), key=lambda x: load_order(x[0]))
-            if m not in modules and m != 'rtld' and want & e['exports'] and kind(e) not in GPU_DRIVERS}
+            if m not in modules and want & e['exports'] and kind(e) not in GPU_DRIVERS}
 
 
 # ---- Shader sources: decided from the game files at every build, not kept in the profile (scripts/build_ipa_from_nsp.py; shader_split.py reads what those steps write) ----
@@ -258,7 +290,7 @@ def shader_sources(imports, glsl_src, glslc_mods, spirv, unreal_paks, trinity_pa
                             f'{oodle_gfpak} Game Freak GFPAK archive(s) with Oodle Kraken entries (Pokémon Legends: Arceus)' if oodle_gfpak else
                             f'{oodle_ue3} Unreal Engine 3 package(s) with Oodle-compressed chunks (Batman: Arkham Knight, its combined shader cache among them)') + ', Oodle-compressed: the shader split decodes them with the game\'s own decoder in the Mac host (dm/host/hle_oodle.c DM_OODLE_SERVE)'),
             'ue_legacy': (not vulkan and not gl and bool(legacy_paks), f'{legacy_paks} Unreal pak(s) with the shaders inline in the cooked packages (legacy, version 4, UE 4.18: DRAGON QUEST XI S, LZ5, decoded by the game\'s own decoder in the Mac host, dm/host/hle_oodle.c DM_OODLE_SERVE; '
-                          'version 11 without shader code archives, UE 4.27: OCTOPATH TRAVELER II, Zlib): the shader split reads them file by file')}
+                          'version 11 without shader code archives, UE 4.27: OCTOPATH TRAVELER II, Zlib, or with the cooked packages in an IoStore container beside it: Mario & Luigi: Brothership, Oodle): the shader split reads them file by file')}
 
 
 def romfs_nro_imports(romfs):   # the names the loose NROs in a RomFS import (the modules a game loads at run time with nn::ro: Portal's 28 Source engine modules in nro/)
@@ -332,7 +364,7 @@ def build_sources(exefs, romfs, modules):
                 nb = (struct.unpack_from('<I', h, i + 12)[0] + max(struct.unpack_from('<I', h, i + 4)[0], 1) - 1) // max(struct.unpack_from('<I', h, i + 4)[0], 1)
                 oodle_ue3 += h[i + 16 + 8 * nb:i + 17 + 8 * nb] == b'\x8c'
     import frostbite   # Frostbite's superbundles (EA SPORTS FC 27): every item of the cas files is Oodle Leviathan, decoded with the game's own decoder
-    return shader_sources(imports, glsl_src, glslc_mods, spirv, len(uepak.unreal_paks(str(romfs), inline=False)), trinity, len(uepak.unreal_paks(str(romfs), inline=True)), gl_names, gl_src, gl_files, oodle_pkz, nro_imp,
+    return shader_sources(imports, glsl_src, glslc_mods, spirv, len(uepak.unreal_paks(str(romfs), inline=False, mains=[exefs / 'main'])), trinity, len(uepak.unreal_paks(str(romfs), inline=True, mains=[exefs / 'main'])), gl_names, gl_src, gl_files, oodle_pkz, nro_imp,
                           oodle_gfpak=oodle_gfpak, oodle_ue3=oodle_ue3, frostbite=frostbite.is_frostbite(str(romfs)), romfs_glsl=romfs_glsl)
 
 
@@ -472,7 +504,11 @@ def heap_signals(log, g):
         heap = -(-max(req) // 0x8000000) * 0x8000000
         alias = reserve - 0x10000000 - stack - heap
         if alias >= 0x40000000: out['mem_alias'] = (f'{alias:#x}', f'the game asked for a {max(req) / 2**30:.2f} GB heap: a {heap / 2**30:.3f} GB heap region')
-        else: out['mem_reserve'] = (f'{0x10000000 + 0x40000000 + stack + heap:#x}', f'the game asked for a {max(req) / 2**30:.2f} GB heap')
+        else:   # not even 1 GB left for the alias region: the block grows around the alias region the profile has (at least 1 GB), which mem_reserve alone leaves as it is, so the heap
+            # region gets the whole request. Sized for a 1 GB alias region, the Switch 2 guess of 4.375 GB left Ocarina of Time 0xb8000000 of the 0x18ce00000 it asked for (issue #1361).
+            # Past the block an iPhone can reserve there is nothing to gain from a smaller alias region, and the Mac's layout is the same either way: its alias region is the Switch's 64 GB
+            keep = max(int(g.get('mem_alias'), 0), 0x40000000)
+            out['mem_reserve'] = (f'{0x10000000 + keep + stack + heap:#x}', f'the game asked for a {max(req) / 2**30:.2f} GB heap')
     top = [float(x) for x in re.findall(r'\[mem\] alias region mapped up to \+([0-9.]+) GB', log)]
     alias = int(g.get('mem_alias'), 0) / 2**30
     if not req and '[mem] heap ' not in log and int(g.get('sys_resource', '0'), 0) and top and max(top) > alias - 0.25 and int(g.get('app_pool'), 0) > 0x40000000:

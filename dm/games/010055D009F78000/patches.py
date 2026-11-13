@@ -15,15 +15,6 @@ CUTS = {
     # and frame +0xc55f / +0xc560 (from the object at app +0x40: the character creation screen after the movie, and so on). In the engine's own 60 fps modes this traded 60 fps for
     # resolution in those scenes (main+0x50f7d0 drops 720p mode 1 to 1080p mode 0); here it would show them at 30 with the render thread's own steps at half speed. Both are ignored
     (0x50fb7c, '2801082a', 'e8031f2a', 'render thread forced interval 2: orr w8,w9,w8 (either flag) → mov w8,wzr (the mode\'s interval, 1)'),
-    # The frame limiter's wait (main+0x5be430: yield, read the tick, until 60/fps ticks of 1/59.94 s have passed since the last frame end; x8 = time passed and x23 = target, in 100 ns)
-    # is a busy loop on the host: the yield back-off spins its first 2 ms on a performance core and then oversleeps by up to 250 µs, so frames took 16.8 ms (59.5 fps, a repeated
-    # display frame every 2 s) and CPU energy went from 0.16 W at 30 fps to 1.5 W on the Mac. The yield becomes nn::os::SleepThread of 96% of the time left, and the loop goes back to
-    # the limiter's own tick read and comparison at main+0x5be44c (the instructions after the b are no longer reached); the host's sleep never oversleeps, so the frames take 16.68 ms
-    (0x5be4c0, '20fa1494', 'e00208cb', 'frame limiter wait: bl YieldThread → sub x0,x23,x8 (time left, 100 ns units)'),
-    (0x5be4c4, 'bbf71494', '01e87bd3', 'frame limiter wait: bl GetSystemTick → lsl x1,x0,#5'),
-    (0x5be4c8, '680240f9', '2018008b', 'frame limiter wait: ldr x8,[x19] → add x0,x1,x0,lsl #6 (96 ns per 100 ns left)'),
-    (0x5be4cc, '080008cb', '8df71494', 'frame limiter wait: sub x8,x0,x8 → bl nn::os::SleepThread (PLT main+0xafc300)'),
-    (0x5be4d0, '087d149b', 'dfffff17', 'frame limiter wait: mul x8,x8,x20 → b main+0x5be44c (read the tick and compare again)'),
     # The render thread waits for the next update with KTGL's event wait (main+0xaa90e0, timeout in µs: × 1000 → nn::os::TimedWaitEvent) and passes 1/fps × 1000 = 16, one frame in ms,
     # so it polls every 16 µs: at 60 fps it draws in about 3 ms and then polled for the rest of the frame (42,000–53,000 wakeups a second on the Mac, against 1,200 at 30 fps, where
     # it waited in the present instead). The other four callers wait without a timeout. The timeout becomes 1000/fps × 1000 = 16,666 µs (s8 = 1000.0, loaded first)
@@ -39,8 +30,4 @@ CUTS = {
 BINDING = [
     {'what': 'render intervals, the forced-interval flag and the render-wait timeout', 'now': 'build', 'goal': 'game', 'purpose': 'frame rate',
      'why': "the game's own tables, flag and timeout"},
-    {'what': 'frame limiter wait: yield → sleep', 'now': 'build', 'goal': 'host', 'purpose': 'power',
-     'checked': 'Mac runs with the cut undone, 2026-10-26 (the game note)',
-     'why': "without it the host's yield back-off (thr_yield) holds 59.7 to 59.8 fps, at 0.9 to 1.2 W of CPU against 0.14 to 0.42 W (2026-10-26): a back-off that reaches a yield-and-"
-            "tick loop's deadline sooner would make the cut unnecessary for every game"},
 ]

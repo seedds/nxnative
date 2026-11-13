@@ -12,6 +12,7 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
 
         // 1 and 0 elements are not considered arrays anymore.
         public const int MinimumArrayLength = 2;
+        private const int NvnSlotArrayLength = 32;      // nxnative: as BindlessElimination's
 
         public static void RunPassOgl(BasicBlock block, ResourceManager resourceManager)
         {
@@ -204,6 +205,12 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
                 }
 
                 int length = Math.Max(MinimumArrayLength, gpuAccessor.QueryTextureArrayLengthFromBuffer(src0CbufSlot));
+
+                // nxnative: the replay binds images and buffer textures element by element, so these stay short; the game's sampled textures take a table the host builds (dmsh_build.py pool_arrays)
+                if (src0CbufSlot != NvnTextureBufferIndex && (texOp.Inst.IsImage() || (texOp.Type & SamplerType.Mask) == SamplerType.TextureBuffer))
+                {
+                    length = Math.Min(length, NvnSlotArrayLength);
+                }
 
                 // nxnative: handles at a computed index past a constant base, the base beyond the array's length: every read would clamp to its last element, which is no handle. Fire Emblem Fortune's
                 // Weave's character shaders read their cube maps as c[14][8 i + 0x340] (LDC after a shift of 3). The array starts at the base instead (the host fills element k from base + 8k), so

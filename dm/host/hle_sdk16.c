@@ -14,10 +14,10 @@
 HLE_FORCE("_ZN2nn2oe15SetCpuBoostModeENS0_12CpuBoostModeE", "CPU boost mode; the host does not scale clocks", void, h_oe_CpuBoost, int m) { (void)m; }
 // DisplayVersion = char[16] (the application's display version): the value from that version's control data (NACP), chosen by main's build ID (the game profile's build rows); unknown builds get 1.0.0
 HLE_FORCE("_ZN2nn2oe17GetDisplayVersionEPNS0_14DisplayVersionE", "display version (by the main build ID)", void, h_oe_DispVer, char *v) {
-    static const struct { const char *build, *ver; } k[] = {DM_GAME_DISPLAY_VERSIONS};
+    const struct { const char *build, *ver; } k[] = {DM_GAME_DISPLAY_VERSIONS};
     const char *ver = "1.0.0";
     for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, "main"))
-        for (unsigned j = 0; j < sizeof k / sizeof *k; j++) if (!strcmp(g_mod[i].build_id, k[j].build)) ver = k[j].ver;
+        for (unsigned j = 0; j < sizeof k / sizeof *k; j++) if (k[j].build && !strcmp(g_mod[i].build_id, k[j].build)) ver = k[j].ver;
     memset(v, 0, 16); strlcpy(v, ver, 16);
 }
 HLE_FORCE("_ZN2nn2oe24GetExpectedVolumeBalanceEPfS1_", "system / application volume balance; the host always reports 1:1", void, h_oe_GetVolBal, float *sys, float *app) { *sys = 1.0f; *app = 1.0f; }
@@ -156,6 +156,8 @@ static size_t font_skip(void) {
 }
 HLE_FORCE("_ZN2nn2pl22GetSharedFontLoadStateENS0_14SharedFontTypeE", "shared font load state: loaded (1)", int, h_pl_LoadState, int type) { return font_get(type).p ? 1 : 0; }
 HLE_FORCE("_ZN2nn2pl20GetSharedFontAddressENS0_14SharedFontTypeE", "shared font address → BFTTF header (archive shared_font ttf: the TTF itself)", const void *, h_pl_Addr, int type) { const uint8_t *p = font_get(type).p; return p ? p + font_skip() : NULL; }
+// SDK 22's request to load the Switch 1 fonts into a buffer of the game's goes through the pl service, which the host does not serve, and any failure aborts (PR 1434): the stand-in fonts come from host memory, so the buffer is left as it is
+HLE_FORCE("_ZN2nn2pl17RequestLoadNxFontEPvm", "load the shared fonts into the game's buffer; the stand-in fonts need none of it", void, h_pl_ReqNxFont, void *buf, size_t size) { (void)buf; (void)size; }
 HLE_FORCE("_ZN2nn2pl17GetSharedFontSizeENS0_14SharedFontTypeE", "shared font size → 8-byte header + stand-in font file size (archive shared_font ttf: without the header)", size_t, h_pl_Size, int type) { font_t f = font_get(type); return f.p ? f.n - font_skip() : 0; }
 // Every shared font at once (Rhythm Heaven Groove, SDK 21): the SDK asks the pl service for GetSharedFontInOrderOfPriority and, when the fonts are loaded, fills min(count, max) SharedFontData {u32 type; const void *address; size_t size}
 //   (0x18 bytes) with the shared memory base + each font's offset (sdk+0x40f270), then returns whether they are loaded; the game retries every 10 ms until they are (main+0x501f04). The service's offsets point past each font's 8-byte
@@ -227,6 +229,8 @@ static Result nfp_no_tag(const char *what) {
     return NFP_RES_TAG_NOT_FOUND;
 }
 HLE_FORCE("_ZN2nn3nfp10InitializeEv", "amiibo library init; the host has one NFC device that never finds a tag", void, h_nfp_Init, void) { atomic_store(&g_nfp_lib, 1); LOG("nfp::Initialize: the host has one NFC device and finds no amiibo tag"); }
+// Kirby Air Riders initializes it with this one instead; on the host the extended application area is no different, as no tag ever has one
+HLE_FORCE("_ZN2nn3nfp37InitializeWithExtendedApplicationAreaEv", "amiibo library init with the extended application area; the same device that never finds a tag", void, h_nfp_InitExt, void) { atomic_store(&g_nfp_lib, 1); LOG("nfp::InitializeWithExtendedApplicationArea: the host has one NFC device that never finds a tag"); }
 HLE_FORCE("_ZN2nn3nfp29AttachAvailabilityChangeEventEPNS_2os15SystemEventTypeE", "NFC availability change event; bound to a kernel event, never signalled", void, h_nfp_AttachAvail, void *ev) { hle_bind_system_event(ev, 0); }
 HLE_FORCE("_ZN2nn3nfp11ListDevicesEPNS0_12DeviceHandleEPii", "NFC device list: one device", Result, h_nfp_List, NfpDeviceHandle *out, int *n, int max) {
     *n = 0; if (max >= 1) { memset(&out[0], 0, sizeof out[0]); out[0].id = NFP_DEVICE_ID; *n = 1; }
@@ -255,13 +259,17 @@ HLE_FORCE("_ZN2nn3nfp18GetApplicationAreaEPvPmRKNS0_12DeviceHandleEm", "read app
 HLE_FORCE("_ZN2nn3nfp18SetApplicationAreaERKNS0_12DeviceHandleEPKvm", "write application area: no tag", Result, h_nfp_SetArea, const NfpDeviceHandle *h, const void *buf, uint64_t sz) { (void)h; (void)buf; (void)sz; return nfp_no_tag("SetApplicationArea"); }
 HLE_FORCE("_ZN2nn3nfp21CreateApplicationAreaERKNS0_12DeviceHandleERKNS0_25ApplicationAreaCreateInfoE", "create application area: no tag", Result, h_nfp_CreateArea, const NfpDeviceHandle *h, const void *info) { (void)h; (void)info; return nfp_no_tag("CreateApplicationArea"); }
 HLE_FORCE("_ZN2nn3nfp23RecreateApplicationAreaERKNS0_12DeviceHandleERKNS0_25ApplicationAreaCreateInfoE", "recreate application area: no tag", Result, h_nfp_RecreateArea, const NfpDeviceHandle *h, const void *info) { (void)h; (void)info; return nfp_no_tag("RecreateApplicationArea"); }
+HLE_FORCE("_ZN2nn3nfp26GetExtendedApplicationAreaEPvPmRKNS0_12DeviceHandleEm", "read extended application area: no tag", Result, h_nfp_GetAreaExt, void *buf, uint64_t *n, const NfpDeviceHandle *h, uint64_t sz) { (void)buf; (void)n; (void)h; (void)sz; return nfp_no_tag("GetExtendedApplicationArea"); }
+HLE_FORCE("_ZN2nn3nfp26SetExtendedApplicationAreaERKNS0_12DeviceHandleEPKvm", "write extended application area: no tag", Result, h_nfp_SetAreaExt, const NfpDeviceHandle *h, const void *buf, uint64_t sz) { (void)h; (void)buf; (void)sz; return nfp_no_tag("SetExtendedApplicationArea"); }
+HLE_FORCE("_ZN2nn3nfp30GetExtendedApplicationAreaInfoEPNS0_27ExtendedApplicationAreaInfoERKNS0_12DeviceHandleE", "extended application area info: no tag", Result, h_nfp_AreaExtInfo, void *out, const NfpDeviceHandle *h) { (void)out; (void)h; return nfp_no_tag("GetExtendedApplicationAreaInfo"); }
+HLE_FORCE("_ZN2nn3nfp7RestoreERKNS0_12DeviceHandleE", "restore tag: no tag", Result, h_nfp_Restore, const NfpDeviceHandle *h) { (void)h; return nfp_no_tag("Restore"); }
 HLE_FORCE("_ZN2nn3nfp13StartRestorerEPNS0_12DeviceHandleERKNS0_24AmiiboSettingsStartParamERKNS0_7TagInfoE", "amiibo restorer applet: no tag", Result, h_nfp_Restorer, NfpDeviceHandle *h, const void *p, const void *tag) { (void)h; (void)p; (void)tag; return nfp_no_tag("StartRestorer"); }
 HLE_FORCE("_ZN2nn3nfp19StartGameDataEraserEPNS0_12DeviceHandleERKNS0_24AmiiboSettingsStartParamERKNS0_7TagInfoE", "amiibo game data eraser applet: no tag", Result, h_nfp_Eraser, NfpDeviceHandle *h, const void *p, const void *tag) { (void)h; (void)p; (void)tag; return nfp_no_tag("StartGameDataEraser"); }
 HLE_FORCE("_ZN2nn3nfp29StartNicknameAndOwnerSettingsEPNS0_12DeviceHandleEPbPNS0_12RegisterInfoERKNS0_24AmiiboSettingsStartParamERKNS0_7TagInfoE", "amiibo nickname and owner settings applet: no tag", Result, h_nfp_Nick, NfpDeviceHandle *h, uint8_t *changed, void *reg, const void *p, const void *tag) { (void)h; (void)reg; (void)p; (void)tag; if (changed) *changed = 0; return nfp_no_tag("StartNicknameAndOwnerSettings"); }
 HLE_FORCE("_ZN2nn3nfp29StartNicknameAndOwnerSettingsEPNS0_12DeviceHandleEPbPNS0_12RegisterInfoERKNS0_24AmiiboSettingsStartParamERKNS0_7TagInfoERKS4_", "amiibo nickname and owner settings applet (with the old register info): no tag", Result, h_nfp_Nick2, NfpDeviceHandle *h, uint8_t *changed, void *reg, const void *p, const void *tag, const void *old) { (void)h; (void)reg; (void)p; (void)tag; (void)old; if (changed) *changed = 0; return nfp_no_tag("StartNicknameAndOwnerSettings"); }
 
 // ---------- vi: vsync event ----------
-// The game passes a SystemEventType; after binding, a host thread fires it at 60 Hz (DM_VSYNC_HZ can change it). While the display link presents, the event follows its ticks, as a
+// The game passes a SystemEventType; after binding, a host thread fires it at 60 Hz, at 120 while 120 fps holds one tick of 1/120 s (nvn_vsync_hz; DM_VSYNC_HZ fixes another rate). While the display link presents, the event follows its ticks, as a
 // Switch's follows its display: Super Mario Galaxy 2 runs the Wii's VI retrace (and with it each emulated frame) on this event, and on a clock of the host's own the frames drifted
 // against the screen's vsyncs, two in some display-link ticks and none in others (iPhone: about one tick in seven, a stutter the frame-rate counter showed as 50 to 60).
 // One thread per binding lifetime: repeated requests must not double its rate.
@@ -281,12 +289,14 @@ static int vsync_tick(vsync_event_t *v) {   // 0: the event is gone and this thr
     return 0;
 }
 __attribute__((weak)) int mtl_link_wait_vsync(uint64_t *seen, uint64_t timeout_ns) { (void)seen; (void)timeout_ns; return 0; }   // nvn_mtl.m
+__attribute__((weak)) int nvn_vsync_hz(void) { return 60; }   // hle_nvn.c: 120 while 120 fps holds one tick of 1/120 s
 static void *vsync_thread(void *arg) {
     vsync_event_t *v = arg;
     dm_host_helper_qos(QOS_CLASS_USER_INTERACTIVE);   // the game paces frames on this event
     const char *e = getenv("DM_VSYNC_HZ"); double hz = e ? atof(e) : 60.0; if (hz <= 0) hz = 60.0;
     uint64_t period = (uint64_t)(1e9 / hz), next = now_ns() + period, seen = 0;
     for (;;) {
+        if (!e) period = nvn_vsync_hz() == 120 ? 1000000000ull / 120 : 1000000000ull / 60;   // follows 120 fps (a game that waits for each vblank is held to its rate)
         if (!e && mtl_link_wait_vsync(&seen, 2 * period)) { if (!vsync_tick(v)) break; next = now_ns() + period; continue; }
         uint64_t t = now_ns(); if (next > t) { struct timespec ts = {(time_t)((next - t) / 1000000000ull), (long)((next - t) % 1000000000ull)}; nanosleep(&ts, NULL); }
         if (!vsync_tick(v)) break;
@@ -324,8 +334,8 @@ static void diag_abort(uint32_t res, void *lr) {
     dm_backtrace((uint64_t)__builtin_frame_address(1));
     die("game aborted");
 }
-HLE_FORCE("_ZN2nn4diag6detail9AbortImplEv", "game aborted", void, h_diag_Abort0, void) { diag_abort(0, __builtin_return_address(0)); }
-HLE_FORCE("_ZN2nn4diag6detail9AbortImplEPKNS_6ResultE", "game aborted (with Result)", void, h_diag_AbortR, const uint32_t *r) { diag_abort(r ? *r : 0, __builtin_return_address(0)); }
+HLE_FORCE("_ZN2nn4diag6detail9AbortImplEv", "game aborted", void, h_diag_Abort0, void) { diag_abort(0, dm_bigstack_caller(__builtin_return_address(0))); }
+HLE_FORCE("_ZN2nn4diag6detail9AbortImplEPKNS_6ResultE", "game aborted (with Result)", void, h_diag_AbortR, const uint32_t *r) { diag_abort(r ? *r : 0, dm_bigstack_caller(__builtin_return_address(0))); }
 HLE_FORCE("_ZN2nn4diag12GetBacktraceEPmi", "backtrace; the host provides none (0 frames)", int, h_diag_Bt, uint64_t *out, int n) { (void)out; (void)n; return 0; }
 // An assert, a C++ exception that nothing caught (std::terminate) or an SDK check reached VAbortImpl: print where it came from and the message's FORMAT, which
 // names the failure on its own ("libc++abi: terminating due to uncaught exception of type ...", Well Dweller's first boot). The arguments the format would fill
@@ -335,7 +345,7 @@ HLE_FORCE("_ZN2nn4diag6detail10VAbortImplEPKcS3_S3_iPKNS_6ResultEPKNS_2os17UserE
           const char *fn, const char *expr, const char *file, int line, const void *res, const void *info, const char *fmt, void *ap) {
     (void)info; (void)ap;
     LOG("[diag] abort at %s: %s (%s:%d) message format %s", fn ? fn : "?", expr ? expr : "?", file ? file : "?", line, fmt ? fmt : "?");
-    diag_abort(res ? *(const uint32_t *)res : 0, __builtin_return_address(0));   // VAbortImpl never returns to its caller
+    diag_abort(res ? *(const uint32_t *)res : 0, dm_bigstack_caller(__builtin_return_address(0)));   // VAbortImpl never returns to its caller
 }
 HLE_FORCE("_ZN2nn4diag13GetSymbolNameEPcmm", "symbol name; the host provides none (empty string)", uint64_t, h_diag_SymName, char *buf, size_t n, uint64_t addr) { (void)addr; if (buf && n) buf[0] = 0; return 0; }
 

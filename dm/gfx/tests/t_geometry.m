@@ -19,6 +19,14 @@ static id<MTLLibrary> library(NSString *source) {
 static void assembly(void) {
     uint32_t a[]={10,11,12,13,UINT32_MAX,20,21,22}, out[32];
     uint32_t want[]={10,11,12,12,11,13,20,21,22};
+    {   // a ribbon's sparse IDs (a side number in bit 16): lo-based map, sorted unique IDs, positions
+        uint32_t ids[]={7,8,9,0x10007,0x10008}, map[]={0,0x10000,1,0x10001,2}, pos[5]={0};
+        EXPECT("capture runs",2,nvn_geo_capture_runs(ids,5));
+        EXPECT("capture runs of nothing",0,nvn_geo_capture_runs(ids,0));
+        EXPECT("compact map",1,nvn_geo_compact_map(map,5,7,ids,5,pos));
+        EXPECT("position of the first",0,pos[0]); EXPECT("position in the second run",3,pos[1]); EXPECT("position back in the first",1,pos[2]); EXPECT("second run's second",4,pos[3]); EXPECT("last",2,pos[4]);
+        uint32_t absent[]={3}; EXPECT("a value not in the list",0,nvn_geo_compact_map(absent,1,7,ids,5,pos));
+    }
     EXPECT("strip count",9,nvn_geo_assemble(5,a,8,1,UINT32_MAX,NULL,0));
     EXPECT("strip write",9,nvn_geo_assemble(5,a,8,1,UINT32_MAX,out,32));
     EXPECT("strip winding and restart",0,memcmp(out,want,sizeof want));
@@ -435,7 +443,7 @@ static void replay(int mode) {
     p_draw d={.prim=0,.first=7,.count=kind==6?9000:3,.instances=2,.base_instance=5};
     if((kind>=1&&kind<=3)||kind==5) {
         int type=kind==5?1:kind-1;uint32_t ix[]={12,10,UINT32_MAX,11};
-        for(int i=0;i<4;i++)memcpy(commands+8192+(i<<type),ix+i,1<<type);
+        for(int i=0;i<4;i++)memcpy(commands+8192+(i<<type),ix+i,1<<type);   // NOLINT(clang-analyzer-unix.cstring.UninitializedRead): 1 << type is 1, 2 or 4 bytes of an initialized uint32_t (type 0 to 2), never 0
         p_prim_restart restart={1,UINT32_MAX};EMIT(OP_PRIM_RESTART,restart);
         p_draw_idx di={.prim=0,.itype=type,.count=4,.instances=2,.base_vertex=-3,.base_instance=5,.ibuf=(uint64_t)(commands+8192)};
         if(kind==5){uint32_t args[]={4,2,mode==17?16:0,(uint32_t)-3,5};memcpy(commands+16384,args,sizeof args);di.ind=(uint64_t)(commands+16384);if(mode==17)di.ibuf-=32;}
@@ -535,7 +543,7 @@ static void replay_local(int mode) {
     if((mode>=1&&mode<=3)||mode==5||mode>=7) {
         int type=mode>=7||mode==5?1:mode-1;uint32_t ix[]={mode==10?80:12,10,UINT32_MAX,11,mode==10?80:12,10};
         int index_count=mode>=9?6:4;
-        for(int i=0;i<index_count;i++)memcpy(commands+8192+(i<<type),ix+i,1<<type);
+        for(int i=0;i<index_count;i++)memcpy(commands+8192+(i<<type),ix+i,1<<type);   // NOLINT(clang-analyzer-unix.cstring.UninitializedRead): 1 << type is 1, 2 or 4 bytes of an initialized uint32_t (type 0 to 2), never 0
         if(mode==7||mode==8) {
             memcpy(commands+32768,commands+8192,8); memset(commands+8192,0,8);
             if(mode==7) { struct {uint64_t src,dst,n;} copy={(uint64_t)(commands+32768),(uint64_t)(commands+8192),8};EMIT(OP_COPY_B2B,copy); }

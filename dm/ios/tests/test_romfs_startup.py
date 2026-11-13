@@ -29,7 +29,7 @@ class Startup(unittest.TestCase):
                           '- (NSString *)resourcePath { return fixture_bundle; }\n@end\n#define NSBundle FixtureBundle\n'
                           '#define NSSearchPathForDirectoriesInDomains(a,b,c) @[fixture_doc]\n#define NSTemporaryDirectory() fixture_tmp\n' + locator +
                           '\nint main(int argc, char **argv) { @autoreleasepool { if (argc < 3) return 2;\n'
-                          'fixture_doc = @(argv[1]); fixture_tmp = @(argv[2]); fixture_bundle = argc > 3 ? @(argv[3]) : @"/nonexistent-fixture"; NSString *p = romfs_locate();\n'
+                          'fixture_doc = @(argv[1]); fixture_tmp = @(argv[2]); fixture_bundle = argc > 3 ? @(argv[3]) : @"/nonexistent-fixture"; NSString *p = romfs_locate(nil);\n'
                           'if (!p) return 1; puts(p.fileSystemRepresentation); return 0; }}\n')
         cls.locator = root / 'locator'
         subprocess.run(['clang', '-fobjc-arc', '-Wall', '-Werror', '-I', str(REPO / 'dm/host'),

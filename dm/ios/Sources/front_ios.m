@@ -3,6 +3,7 @@
 // is on the TV and the phone shows the pad (DmTVSceneDelegate).
 // The host runs on the big-stack thread started by main.m; front_run runs the guest directly on the calling thread.
 #import <UIKit/UIKit.h>
+#import <UserNotifications/UserNotifications.h>
 #import <QuartzCore/CAMetalLayer.h>
 #import <Metal/Metal.h>
 #import <AVFAudio/AVFAudio.h>
@@ -25,6 +26,8 @@ const char *front_ios_device_check(void);   // main.m: why this device cannot ru
 bool dm_show_launcher(void *view_controller, void (*done)(void));   // Launcher.swift: false = no launcher (no dm/launcher.json, or DM_LAUNCHER=0)
 
 static CAMetalLayer *g_layer;
+static void front_ios_notify_setup(void);
+static void front_ios_notify_ask(void);
 static void front_ios_power_watch(void);
 static void front_ios_audio_watch(void);
 static UILabel *front_ios_fps_label(void);
@@ -114,6 +117,7 @@ static void launcher_done(void) { [g_root startGame]; }
     }
 #endif
     front_ios_power_watch();
+    front_ios_notify_setup();
     if (!front_ios_boot_ok()) {   // No game files: show a hint and do not start the host
         const char *why = front_ios_boot_message();
         [self showHint:why ? [NSString stringWithFormat:@"Game files unusable.\n%s", why] : @"Game files not found.\nPut the RomFS folder into this App's Documents as \"romfs\" (Files app), then restart."]; return;
@@ -146,6 +150,16 @@ static void launcher_done(void) { [g_root startGame]; }
     front_hud_env();   // before the process's first Metal device, which reads MTL_HUD_ENABLED (an env file's DM_METAL_HUD sets it in main.m already; GitHub issue #840)
     const char *dev = front_ios_device_check();   // that first device: a GPU without BC textures is refused here, not at launch, so the launcher's HUD switch counts
     if (dev) { [self showHint:[NSString stringWithFormat:@"This device is not supported.\n%s", dev]]; return; }   // the host does not start
+    {   // Picture shape "auto" (the launcher's Match screen): the app window's own shape when it is taller than 16:9 (an iPad's 4:3, an unfolded iPhone Duo's 1.43:1; loader.c
+        // takes 1.3 to 1.77), else 16:9. The window's, not the screen's: on an iPad under Stage Manager or Split View the app does not fill the screen. Resolved here, before the
+        // host writes the state page (main.c dm_fps_state_apply)
+        const char *a = getenv("DM_SCREEN_ASPECT");
+        if (a && !strcmp(a, "auto")) {
+            CGSize sz = self.view.window ? self.view.window.bounds.size : UIScreen.mainScreen.bounds.size; double r = MAX(sz.width, sz.height) / MAX(MIN(sz.width, sz.height), 1);
+            char v[16]; if (r >= 1.3 && r < 1.77) snprintf(v, sizeof v, "%.3f", r); else strcpy(v, "0");
+            setenv("DM_SCREEN_ASPECT", v, 1); LOG("front end: picture shape auto: window %.0fx%.0f points (%.3f:1) → DM_SCREEN_ASPECT=%s", sz.width, sz.height, r, v);
+        }
+    }
     self.fill = dm_picture_fill(getenv("DM_PICTURE_FIT"));
     if (self.fill) LOG("front end: picture Fill (DM_PICTURE_FIT=fill), the 16:9 picture covers the screen in landscape and its edges are cropped");
     self.view.clipsToBounds = YES;   // with Fill the game view is larger than the screen
@@ -210,6 +224,7 @@ static void launcher_done(void) { [g_root startGame]; }
     if (self.launched || !front_ios_boot_ok()) return;
     self.launched = YES; g_root = self;
     if (!dm_show_launcher((__bridge void *)self, launcher_done)) [self startGame];   // the settings screen first (Launcher.swift), when the app has one
+    front_ios_notify_ask();
 }
 - (BOOL)prefersHomeIndicatorAutoHidden { return YES; }
 - (UIRectEdge)preferredScreenEdgesDeferringSystemGestures { return UIRectEdgeAll; }   // Edge gestures need two swipes, to avoid accidental exits
@@ -357,6 +372,79 @@ int front_display_pixels(int *w, int *h) {   // the screen in pixels, landscape 
     CGRect b = UIScreen.mainScreen.nativeBounds; int a = (int)b.size.width, c = (int)b.size.height;
     if (a <= 0 || c <= 0) return 0;
     *w = a > c ? a : c; *h = a > c ? c : a; return 1;
+}
+// Offline HTML pages (web_apple.m): the page's view goes over the game view and under the gamepad, which lets touches on no control through to it while the page is
+// shown (DmGamepad.m hitTest); the page takes them as a click on what they land on, and the gamepad and controllers drive it as on the Switch
+void front_web_attach(UIView *box) {
+    UIView *v = g_root.view; box.frame = v.bounds;
+    if (g_root.game) [v insertSubview:box aboveSubview:g_root.game]; else [v addSubview:box];
+}
+void front_web_detach(UIView *box) { (void)box; }
+// An app of several programs (main.m: dm/programs.txt; DM_EXEC_OUT is set only there). iOS cannot start the app's process again, so oe::ExecuteProgram records the next program and the
+// app ends (hle_oe.c); the next start runs it. To spare the player a silent quit, the app names the program on screen for 1.5 s, then schedules a local notification 1 s ahead that
+// opens the app again ("Tap to start …"), then ends. Notifications are asked for at the first start of such an app; a player who refuses is asked on screen to open the app again.
+// An app of one program that asks to start again (oe::RequestToRelaunchApplication: Super Smash Bros. Ultimate after a language change) cannot either: it asks the player on screen to
+// open it again, for 3 s, then ends. No notification there: such an app never asked for them, and a prompt now would come as the app ends
+static int multi_program(void) { const char *e = getenv("DM_EXEC_OUT"); return e && *e; }
+@interface DmNotifyDelegate : NSObject <UNUserNotificationCenterDelegate>
+@end
+@implementation DmNotifyDelegate
+// The notification can come due before the graceful exit has ended the process: show it anyway, so it waits in the notification centre once the app is gone
+- (void)userNotificationCenter:(UNUserNotificationCenter *)c willPresentNotification:(UNNotification *)n withCompletionHandler:(void (^)(UNNotificationPresentationOptions))done {
+    (void)c; (void)n; done(UNNotificationPresentationOptionBanner | UNNotificationPresentationOptionList);
+}
+@end
+static DmNotifyDelegate *g_notify_delegate;
+static void front_ios_notify_setup(void) {   // at each start: the delegate, and no notification left from an earlier hand-off (the app is open now)
+    if (!multi_program()) return;
+    UNUserNotificationCenter *c = UNUserNotificationCenter.currentNotificationCenter;
+    g_notify_delegate = [DmNotifyDelegate new]; c.delegate = g_notify_delegate;
+    [c removeAllPendingNotificationRequests]; [c removeAllDeliveredNotifications];
+}
+static void front_ios_notify_ask(void) {   // iOS asks the player only while the choice is not made, so this shows a prompt at the first start alone
+    if (!multi_program()) return;
+    [UNUserNotificationCenter.currentNotificationCenter requestAuthorizationWithOptions:UNAuthorizationOptionAlert | UNAuthorizationOptionSound completionHandler:^(BOOL granted, NSError *e) {
+        LOG("front end: notifications %s%s%s", granted ? "allowed" : "not allowed", e ? ": " : "", e ? e.localizedDescription.UTF8String : ""); }];
+}
+static int notify_allowed(void) {
+    __block UNAuthorizationStatus st = UNAuthorizationStatusNotDetermined; dispatch_semaphore_t got = dispatch_semaphore_create(0);
+    [UNUserNotificationCenter.currentNotificationCenter getNotificationSettingsWithCompletionHandler:^(UNNotificationSettings *t) { st = t.authorizationStatus; dispatch_semaphore_signal(got); }];
+    if (dispatch_semaphore_wait(got, dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC))) return 0;
+    return st == UNAuthorizationStatusAuthorized || st == UNAuthorizationStatusProvisional || st == UNAuthorizationStatusEphemeral;
+}
+static void handoff_notice(NSString *text) {   // the game is ending: no sound, and a line on a dark screen in its place
+    dm_audio_suspend(1);
+    dispatch_async(dispatch_get_main_queue(), ^{
+        UIWindow *w = g_root.view.window; if (!w) return;
+        UIView *o = [[UIView alloc] initWithFrame:w.bounds]; o.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+        o.backgroundColor = [UIColor colorWithWhite:0 alpha:0.85];
+        UILabel *lb = [[UILabel alloc] initWithFrame:CGRectInset(o.bounds, 40, 0)]; lb.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+        lb.numberOfLines = 0; lb.textAlignment = NSTextAlignmentCenter; lb.textColor = UIColor.whiteColor;
+        lb.font = [UIFont systemFontOfSize:22 weight:UIFontWeightSemibold]; lb.text = text;
+        [o addSubview:lb]; [w addSubview:o];
+    });
+}
+void front_program_handoff(int index, const char *name) {   // front.h; on the guest thread that called oe::ExecuteProgram or oe::RequestToRelaunchApplication, before the graceful exit
+    if (!multi_program()) {
+        handoff_notice(@"The game restarts.\nOpen the app again to continue.");
+        LOG("front end: the app ends to start again; the player is asked to open it again");
+        usleep(3000 * 1000); return;
+    }
+    NSString *nm = name && *name ? @(name) : [NSString stringWithFormat:@"program %d", index];
+    if (!notify_allowed()) {
+        handoff_notice([NSString stringWithFormat:@"Open the app again to start %@.", nm]);
+        LOG("front end: program %d starts at the next start of the app (notifications not allowed)", index);
+        usleep(3000 * 1000); return;
+    }
+    handoff_notice([NSString stringWithFormat:@"Starting %@\u2026", nm]);
+    usleep(1500 * 1000);
+    UNMutableNotificationContent *c = [UNMutableNotificationContent new]; c.body = [NSString stringWithFormat:@"Tap to start %@", nm];
+    UNNotificationRequest *r = [UNNotificationRequest requestWithIdentifier:@"dm.program" content:c trigger:[UNTimeIntervalNotificationTrigger triggerWithTimeInterval:1.0 repeats:NO]];
+    __block NSError *err = nil; dispatch_semaphore_t added = dispatch_semaphore_create(0);
+    [UNUserNotificationCenter.currentNotificationCenter addNotificationRequest:r withCompletionHandler:^(NSError *e) { err = e; dispatch_semaphore_signal(added); }];
+    if (dispatch_semaphore_wait(added, dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC))) LOG("[RED] front end: the notification for program %d was not scheduled within 2 s", index);
+    else if (err) LOG("[RED] front end: the notification for program %d could not be scheduled: %s", index, err.localizedDescription.UTF8String);
+    else LOG("front end: \"Starting %s\" shown, notification for program %d scheduled", nm.UTF8String, index);
 }
 void front_run(void (*guest)(void)) { guest(); }   // Already on main.m's big-stack thread
 

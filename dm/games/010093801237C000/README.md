@@ -91,6 +91,7 @@ After integration with main's pipeline archive and profiling changes (`7753b7b`)
 
 General host changes first needed here; each applies to every game:
 
+- **Switch 2 controllers over Bluetooth LE:** [Switch 2 controllers over Bluetooth LE](../../../docs/reference/services.md#switch-2-controllers-over-bluetooth-le): a left and a right Joy-Con 2 woke toward the Mac and played as one pair, a Joy-Con held in Sync during the game paired and kept playing, and the Home hold opened the quit prompt.
 - **Synchronization review gameplay validation:** [Final gameplay validation](#final-gameplay-validation-2026-10-26-current) records the #158/#213 comparison and its limits; the general fixes and synthetic regressions are linked under the earlier smoke routes.
 - **Patch areas before the module base** for modules with a giant bss (negative `PATCH_OFF`, `FILE_IMAGE_LEN`, `IMAGE_SIZE`): [Patch area before the module base for a large bss](../../../docs/reference/rewriter.md#patch-area-before-the-module-base-for-a-large-bss).
 - **Used memory counts the bss of front-patch modules** (`big_bss_bytes`): [Heap sized from the application pool less used memory](../../../docs/reference/memory.md#heap-sized-from-the-application-pool-less-used-memory).
@@ -101,6 +102,7 @@ General host changes first needed here; each applies to every game:
 - **Per-stage program binding** (`bind_stages`, composite programs, `Z` lines in pass dumps), **in-place `WriteTexels`** (`write_region_bl`) and the **MSHD reader**: [Programs bound per stage](../../../docs/reference/rendering.md#programs-bound-per-stage), [`WriteTexels` regions written in place by block-linear address](../../../docs/reference/nvn-objects.md#writetexels-regions-written-in-place-by-block-linear-address) and [MSHD in MercurySteam's bshdat files](../../../docs/reference/shaders.md#mshd-in-mercurysteams-bshdat-files).
 - **The submit-thread autorelease leak** (`g_sub_pool`): [05, Memory growth](../../../docs/agents/05-debugging.md#memory-growth).
 - **Inline uniform updates inside a pass** (`DM_NVN_UB_DEFER`): [development.md, Power](../../../docs/development.md#power).
+- **One file for the compile cache and Xcode's data between builds:** [Build folders of many small files](../../../docs/reference/packing.md#a-build-folder-holds-hundreds-of-thousands-of-small-files).
 
 ## Open
 

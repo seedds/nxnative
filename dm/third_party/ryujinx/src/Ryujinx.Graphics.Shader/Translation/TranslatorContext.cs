@@ -37,6 +37,7 @@ namespace Ryujinx.Graphics.Shader.Translation
         private bool IsTransformFeedbackEmulated => !GpuAccessor.QueryHostSupportsTransformFeedback() && GpuAccessor.QueryTransformFeedbackEnabled();
         public bool HasStore => _program.UsedFeatures.HasFlag(FeatureFlags.Store) || (IsTransformFeedbackEmulated && Definitions.LastInVertexPipeline);
         internal bool UsesViewportMask => _program.UsedFeatures.HasFlag(FeatureFlags.ViewportMask);
+        internal bool UsesDirectCbe => _program.UsedFeatures.HasFlag(FeatureFlags.DirectCbe);   // nxnative: DirectCbeWrites
 
         public bool LayerOutputWritten { get; private set; }
         public int LayerOutputAttribute { get; private set; }
@@ -160,8 +161,21 @@ namespace Ryujinx.Graphics.Shader.Translation
 
         internal int GetDepthRegister()
         {
-            // The depth register is always two registers after the last color output.
-            return BitOperations.PopCount((uint)Definitions.OmapTargets) + 1;
+            // nxnative: the colours are read four registers per render target with any component enabled (component c of the n-th
+            // such target in R(4n + c), as PrepareForReturn reads them), then the sample mask register, then the depth. Upstream
+            // counted enabled components, which agrees only when every enabled target has all four: Ocarina of Time's agl_common
+            // depth pass (OmapTargets 0x10f, RT0 RGBA and RT2 R) computes its depth into R9, and R6, which was read, holds a step before it
+            int targets = 0;
+
+            for (int rt = 0; rt < 8; rt++)
+            {
+                if ((Definitions.OmapTargets & (0xf << (rt * 4))) != 0)
+                {
+                    targets++;
+                }
+            }
+
+            return targets * 4 + 1;
         }
 
         public void SetLayerOutputAttribute(int attr)
@@ -298,6 +312,7 @@ namespace Ryujinx.Graphics.Shader.Translation
                         Options.TargetApi,
                         Options.TargetLanguage,
                         Definitions.Stage,
+                        Options.Flags.HasFlag(TranslationFlags.Ampere),
                         ref usedFeatures);
 
                     Optimizer.RunPass(context);
@@ -306,6 +321,11 @@ namespace Ryujinx.Graphics.Shader.Translation
 
                 funcs[i] = new Function(cfg.Blocks, $"fun{i}", false, inArgumentsCount, outArgumentsCount);
             }
+
+            // nxnative: after the lowering passes, on the shared memory accesses the code generator will see, with every function translated (a call follows its callee)
+            SharedMemoryFence.RunPass(funcs, functions.Length, hfm, Definitions.Stage, usedFeatures);
+
+            resourceManager.UnifyArrayTypes(funcs);   // nxnative
 
             return Generate(
                 funcs,
@@ -383,6 +403,9 @@ namespace Ryujinx.Graphics.Shader.Translation
         private ResourceManager CreateResourceManager(bool vertexAsCompute)
         {
             ResourceManager resourceManager = new(Definitions.Stage, GpuAccessor, GetResourceReservations());
+
+            resourceManager.UniformBounds = Options.Flags.HasFlag(TranslationFlags.MetalUniformBounds);   // nxnative: before any uniform slot gets its binding
+            resourceManager.BufferImageBias = Options.Flags.HasFlag(TranslationFlags.MetalBufferImageBias);   // nxnative: see ResourceManager.NoteBufferImage
 
             if (IsTransformFeedbackEmulated)
             {

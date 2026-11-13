@@ -106,6 +106,31 @@ int main(void) { @autoreleasepool {
     pool_gpu(0, MTLTextureType2D, NVN_DPF_FLOAT, 0, &table);
     CHECK(gpu_read(table, 1) == C, "so does the pool table");
 
+    // Views of a sparse texture whose finest level is not mapped. Its host texture is the view of levels [1, 3) (sparse_view), and a texture view's levels count from NVN's level 0:
+    // Resident Evil 4 samples its streamed textures through views of levels 1 + 0 and 2 + 0. The level 2 view started past the host texture's two levels and was left out (the
+    // dummy); the level 1 view read level 2
+    const uint32_t D = 0xff0a0b0c, E = 0xff0d0e0f; const uint64_t VO = 0x100000, PO = 0x80000;
+    NVNtexture tm; h_nvnTextureBuilderSetDefaults(&tb);
+    h_nvnTextureBuilderSetTarget(&tb, NVN_TEXTURE_TARGET_2D); h_nvnTextureBuilderSetWidth(&tb, 256); h_nvnTextureBuilderSetHeight(&tb, 256); h_nvnTextureBuilderSetLevels(&tb, 3);
+    h_nvnTextureBuilderSetFormat(&tb, NVN_FORMAT_RGBA8); h_nvnTextureBuilderSetFlags(&tb, NVN_TEXTURE_FLAGS_SPARSE);
+    h_nvnTextureBuilderSetStorage(&tb, (NVNmemoryPool *)&virt, VO);
+    CHECK(h_nvnTextureInitialize(&tm, &tb), "sparse texture of three levels");
+    const tex_t *mt = (const tex_t *)&tm;
+    uint64_t l1 = nvn_tex_level_offset(&mt->d, 1), l2 = nvn_tex_level_offset(&mt->d, 2), lend = (mt->L.size + 0xFFF) & ~0xFFFull;
+    CHECK(l1 && !(l1 & 0xFFF) && l2 > l1 && PO + lend - l1 <= 0x100000, "level 1 starts on a page, and levels 1 and 2 fit the physical pool");
+    for (uint64_t o = l1; o < lend; o += 4) *(uint32_t *)(mem + PO + o - l1) = o < l2 ? D : E;
+    CHECK(map(&virt, &phys, VO + l1, PO, lend - l1), "levels 1 and 2 mapped, level 0 not");
+    view_t v1 = {.set_levels = 1, .base_level = 1}, v2 = {.set_levels = 1, .base_level = 2}, v0 = {.set_levels = 1, .base_level = 0, .nlevels = 1};
+    mtl_reg_tex(2, mt, &v1); mtl_reg_tex(3, mt, &v2); mtl_reg_tex(4, mt, &v0);
+    g_seen_done[0] |= 0x1c; g_seen_typed[0][0] |= 0x1c;
+    next_sub();
+    pool_gpu(0, MTLTextureType2D, NVN_DPF_FLOAT, 0, &table);
+    CHECK(gpu_read(table, 2) == D, "a view from level 1 reads level 1");
+    CHECK(gpu_read(table, 3) == E, "a view from level 2 reads level 2, not the dummy");
+    CHECK(gpu_read(table, 4) == D, "a view of the unmapped level 0 reads the first mapped level, as the texture's own binding does");
+    mtl_reg_tex(2, NULL, NULL); mtl_reg_tex(3, NULL, NULL); mtl_reg_tex(4, NULL, NULL);
+    h_nvnTextureFinalize(&tm);
+
     h_nvnTextureFinalize(&tx);
     h_nvnMemoryPoolFinalize((NVNmemoryPool *)&virt); h_nvnMemoryPoolFinalize((NVNmemoryPool *)&phys);
     mtl_sub_commit(); mtl_drain(); free(mem);

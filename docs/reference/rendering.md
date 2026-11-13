@@ -287,6 +287,14 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Fix:** a sparse texture is bound as a view starting at its first level whose pages, and those of every smaller level, are all mapped (`sparse_view` in `nvn_mtl.m`). That samples exactly as a minimum LOD would; the view follows each upload.
 - **Found on:** [Monster Hunter Rise](../../dm/games/0100B04011742000/README.md).
 
+### Texture views of a sparse texture bound from a later level
+
+- **Symptom:** `[RED] texture view id … starts at mip 2 beyond 1 levels` (or mip 1), once per run, for a streamed texture; views from level 1 of such a texture read the level after it.
+- **Cause:** a sparse texture is bound as the view of its levels from the first mapped one on ([Sparse textures bound from their first mapped level](#sparse-textures-bound-from-their-first-mapped-level)), so its host texture's level 0 is NVN level `vbase`. A texture view's levels count from NVN's level 0, and `tex_by_id` took them as the host texture's: a view from a level past the host texture's levels was left out (an empty slot), and one from an earlier level read a smaller one. Resident Evil 4 samples its streamed 512x512 and 1024x1024 textures, with only their two or three smallest levels mapped as the title loads, through views of levels 1 + 0 and 2 + 0 (30 such views at frame 1530, all of them sparse).
+- **Fix:** `tex_by_id` counts the view's levels from NVN's level 0 (`tex_level_shift`) and samples levels finer than the first mapped one from it, as the texture's own binding does.
+- **Check:** `make -C dm/gfx/tests GAME=<id> check_t_sparse_pool_cache`: a three-level sparse texture with level 0 unmapped, read on the GPU through views from levels 1, 2 and 0. Without the fix the first two fail (the level 1 view reads level 2, the level 2 view the dummy). Resident Evil 4's opening to the forest path on the Mac (Apple M6, 2026-11-13): no such line.
+- **Found on:** [Resident Evil 4](../../dm/games/0400569027BF4000/README.md).
+
 ### Sampler reduction (min / max)
 
 - **Cause:** a sampler built with `SamplerBuilderSetReductionFilter` (min / max) was averaged by the host. Metal 26 has the same thing (`MTLSamplerDescriptor.reductionMode`), but ignores it with a nearest or no mip filter.
@@ -1437,7 +1445,7 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Symptom:** `stage 0 cb5 has no uniform buffer bound` (or another stage and slot, such as `stage 0 cb0`), once per run.
 - **Cause:** the argument buffer kept a null pointer for the unbound slot. The game draws with nothing bound there; the host misses no bind. What the Switch reads from an unbound slot is not known.
 - **Fix:** the slot now reads the all-zero bank, as an unbound texture slot reads the zero texture.
-- **Found on:** [Paper Mario: The Thousand-Year Door](../../dm/games/0100ECD018EBE000/README.md) (at the title); [Batman: Arkham Knight](../../dm/games/0100ACD0163D0000/README.md#files-and-shaders) (`stage 0 cb0`, at boot: the first command buffer draws before the game has bound any uniform buffer).
+- **Found on:** [Paper Mario: The Thousand-Year Door](../../dm/games/0100ECD018EBE000/README.md) (at the title); [Batman: Arkham Knight](../../dm/games/0100ACD0163D0000/README.md#files-and-shaders) (`stage 0 cb0`, at boot: the first command buffer draws before the game has bound any uniform buffer); [Resident Evil 4](../../dm/games/0400569027BF4000/README.md) (`stage 5 cb1`, frame 0).
 - **Check:** a pass dump of the frame (`DM_NVN_PASSDUMP=<frame>`, frame 0 for the boot) shows the draw (`j` line) and its stage's `K` line with no `B … cb` line, and the frame's `[nvn]` call counts show whether the game called `CommandBufferBindUniformBuffer` at all.
 
 ### Compute dispatches share the copy encoder

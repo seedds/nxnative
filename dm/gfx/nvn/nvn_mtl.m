@@ -4394,6 +4394,13 @@ static id<MTLTexture> tex_made(const tex_t *t) {
     if ([have isKindOfClass:[NvPkg class]]) { NvPkg *pk = have; return pk->view ? pk->view : pk->tex; }
     return have;
 }
+// The NVN level that level 0 of base, the host texture tex_made or tex_mtl gave for t, stands for: a sparse texture whose finer levels are not mapped is bound as the view of its levels
+// from the first mapped one on (sparse_view), so NVN level l is that view's level l - vbase. 0 for every other texture
+static unsigned tex_level_shift(const tex_t *t, id<MTLTexture> base) {
+    id have = tex_get(t->serial);
+    if (![have isKindOfClass:[NvPkg class]]) return 0;
+    NvPkg *pk = have; return pk->view && pk->view == base ? (unsigned)pk->vbase : 0;
+}
 // NVN formats whose Metal format is the other one of an sRGB / linear pair (g_pfv_srgb) of a format's Metal format: up to 4, zero-terminated (an RGBA8 texture has RGBA8_SRGB and RGBX8_SRGB)
 static const uint8_t *srgb_twins(uint32_t f) {
     static uint8_t tw[256][5]; static dispatch_once_t once;
@@ -6701,6 +6708,20 @@ static void pool_seen_clear(int id_) {
         if (g_seen_buf) atomic_fetch_and((_Atomic uint32_t *)g_seen_buf.contents + s_ * POOL_SEEN_WORDS + ((unsigned)id_ >> 5), ~b);
     }
 }
+// The ID now holds a texture of another type: the marks of the types shaders read it through were the old texture's, and kept they made the next walk report the new one as read
+// through them (Resident Evil 4 puts its 1x1 default texture into the IDs of the 256x256 cubes it lets go, and a 3D texture into an ID a 2D one had: "[pool-type] … read through a
+// type 5 texture pool table" the frame after, nine times over the opening). The read mark itself stays (see mtl_reg_tex); a shader that reads the new texture through a type marks it again
+static void pool_seen_retype(int id_) {
+    if (id_ < 0 || id_ >= (int)(POOL_SEEN_WORDS * 32)) return;
+    uint32_t b = 1u << (id_ & 31);
+    for (unsigned s_ = 0; s_ < POOL_SEEN_TYPES; s_++) {
+        g_seen_typed[s_][(unsigned)id_ >> 5] &= ~b;
+        if (g_seen_buf) atomic_fetch_and((_Atomic uint32_t *)g_seen_buf.contents + s_ * POOL_SEEN_WORDS + ((unsigned)id_ >> 5), ~b);
+    }
+}
+// The NVN target a registration is read as: its view's, if the view sets one
+static int tex_reg_target_of(const tex_t *t, const view_t *v) { return v && v->set_target ? (int)v->target : t->d.target; }
+static int tex_reg_target(const treg_t *r) { return tex_reg_target_of(&r->t, r->has_v ? &r->v : NULL); }
 void mtl_reg_tex_gone(int tid) {
     os_unfair_lock_lock(&g_rmu);
     if (tid >= 0 && tid < g_ntreg && g_treg[tid].ok) treg_gone(&g_treg[tid]);
@@ -6721,7 +6742,7 @@ void mtl_reg_tex(int tid, const tex_t *t, const view_t *v) {
         // Ocarina of Time allocates 15-18 GB against a 909 MB budget on a 24 GB Mac, and when its streaming replaced the 17 textures of the castle town wall's material set (3-7 MB each,
         // each step registered twice, 4-5 frames apart), each registration's first read found the dummy, and the wall, the rocks and the trees drew black for one frame, twice (PR #2022).
         // A render target no pass has written stays the dummy all the same (pool_unwritten_target). A texture streamed into an ID no shader has read yet holds its stand-in until its first read (pool_stand, issue #1969)
-        reg_bump(id_, 0); if (!t) pool_seen_clear(id_);
+        reg_bump(id_, 0); if (!t) pool_seen_clear(id_); else if (rr->ok && tex_reg_target(rr) != tex_reg_target_of(t, v)) pool_seen_retype(id_);
         treg_unlink(id_); treg_drop_views(rr); treg_drop_stand(rr);
         rr->tt1 = 0; rr->reg_frame = atomic_load(&g_cur_frame);
         rr->ok = t != NULL; if (t) rr->t = *t; rr->has_v = v != NULL; if (v) rr->v = *v;
@@ -6883,11 +6904,18 @@ static id<MTLTexture> tex_by_id(int tid) {   // Caller holds g_rmu
             base = tex_upgrade_pfv(&rp->t, base, (MTLPixelFormat)pf);
             sg = treg_ep();
         }
-        NSUInteger l0 = r.v.set_levels ? r.v.base_level : 0, nl = r.v.set_levels && r.v.nlevels ? r.v.nlevels : base.mipmapLevelCount - l0;
-        if (l0 >= base.mipmapLevelCount) { RED_ONCE(109, "texture view id %d starts at mip %lu beyond %lu levels", tid, (unsigned long)l0, (unsigned long)base.mipmapLevelCount); return nil; }
+        // The view's levels count from the texture's level 0, which a sparse texture's host texture may start past (tex_level_shift): Resident Evil 4's streamed 512x512 and 1024x1024
+        // textures, with only their two or three smallest levels mapped, are sampled through views of levels 1 + 0 and 2 + 0, which read past the host texture's one level and were left out
+        NSUInteger lb = tex_level_shift(&rp->t, base), n = base.mipmapLevelCount + lb;
+        NSUInteger l0 = r.v.set_levels ? r.v.base_level : 0;
+        if (l0 >= n) { RED_ONCE(109, "texture view id %d starts at mip %lu beyond %lu levels", tid, (unsigned long)l0, (unsigned long)n); return nil; }
+        NSUInteger nl = r.v.set_levels && r.v.nlevels ? r.v.nlevels : n - l0;
         // A level count past the texture's levels is cut to those it has, as deko3d's Tegra descriptor writer clips the maximum level (Echoes of Wisdom: levels 1 + 7 of a seven-level texture,
         // which Metal's validation refuses)
-        if (nl > base.mipmapLevelCount - l0) nl = base.mipmapLevelCount - l0;
+        if (nl > n - l0) nl = n - l0;
+        // Levels finer than the first mapped one are sampled from it, as the texture's own binding is (sparse_view)
+        if (l0 < lb) { NSUInteger end = l0 + nl; l0 = lb; nl = end > lb ? end - lb : 1; }
+        l0 -= lb;
         NSUInteger s0 = r.v.set_layers ? r.v.min_layer : 0;
         NSUInteger ns = base.textureType == MTLTextureType3D ? 1 : (r.v.set_layers && r.v.nlayers ? r.v.nlayers : base.arrayLength * (base.textureType == MTLTextureTypeCube || base.textureType == MTLTextureTypeCubeArray ? 6 : 1) - s0);
         MTLTextureType tt = r.v.set_target ? ttype(r.v.target, base.textureType) : base.textureType;
@@ -11686,7 +11714,12 @@ static int encode_args_(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, i
             void *mb; uint64_t mo, gpu;
             if (addr && mtl_gpu_addr(addr, 1, &mb, &mo, &gpu)) { slots[aid] = gpu; USE((__bridge id<MTLBuffer>)mb, b->rw ? MTLResourceUsageRead | MTLResourceUsageWrite : MTLResourceUsageRead); if (b->rw) sbw_note(addr, sbw_len(0, mb, mo), SBW_GPU); }
             else { slots[aid] = dummy_buf_gpu(); USE(dummy_buf(), MTLResourceUsageRead);
-                   if (!g_red_once[165]) { char note[400]; dm_gfx_addr_note(addr, note, sizeof note);   // what is known of it: a sparse pool's page, a texture's storage
+                   // An unmapped page of a sparse pool's reservation reads 0 on the GPU, as the dummy does: Resident Evil 4's 0ee0c5f004239ce2 at frame 5 is pushed an address 0x4400000 into
+                   // a 1 GB sparse pool, on a page the game has not mapped by then. Noted once, not red; any other address is
+                   static int sp_noted; int nvn_vpool_unmapped(uint64_t); int sp = (!sp_noted || !g_red_once[165]) && nvn_vpool_unmapped(addr);
+                   if (sp && !sp_noted) { sp_noted = 1; MLOG("shader %s: the buffer address the game pushed at c[24] + %#x, %#llx, is an unmapped page of a sparse pool: bound to the zero buffer, as the GPU reads such a page as 0 (frame %llu)",
+                                                             sh->key, b->off, (unsigned long long)addr, (unsigned long long)atomic_load(&g_cur_frame)); }
+                   else if (!sp && !g_red_once[165]) { char note[400]; dm_gfx_addr_note(addr, note, sizeof note);   // what is known of it: a sparse pool's page, a texture's storage
                        RED_ONCE(165,"shader %s: the buffer address the game pushed at c[24] + %#x is %#llx, in no memory pool: bound to a dummy buffer (frame %llu;%s)", sh->key, b->off, (unsigned long long)addr, (unsigned long long)atomic_load(&g_cur_frame), note); } }
             if (bl) PD("B %llu st%d sbufq push+%#x addr=%#llx %s", g_stat_pass, nvn_stage, b->off, (unsigned long long)addr, b->rw ? "rw" : "ro");
         } else if (b->kind == NVN_RB_C1) {      // B: the shader's own constant segment, built when the shader is fetched

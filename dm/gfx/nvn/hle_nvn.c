@@ -2766,6 +2766,14 @@ void nvn_vpool_note(uint64_t a, char *note, size_t n) {
         break; }
     pthread_mutex_unlock(&g_vp_mu);
 }
+// An address in a sparse pool's reservation whose page nothing is mapped to: the GPU reads such a page as 0 and drops stores to it (a buffer bound there is the zero buffer, nvn_mtl.m)
+int nvn_vpool_unmapped(uint64_t a) {
+    int r = 0; pthread_mutex_lock(&g_vp_mu);
+    for (int i = 0; i < g_nvp; i++) { const struct vpool *v = g_vp[i]; uint64_t b = (uint64_t)(uintptr_t)v->base;
+        if (a < b || a - b >= v->size) continue;
+        const vpte *e = vpt_get(v, a - b); r = !e || !e->phys; break; }
+    pthread_mutex_unlock(&g_vp_mu); return r;
+}
 static void vpt_set(struct vpool *v, uint64_t voff, uint64_t size, const uint8_t *phys) {
     uint64_t gen = atomic_fetch_add(&g_vp_gen, 1) + 1;
     g_vnote[gen % VNOTE_N].gen = gen; g_vnote[gen % VNOTE_N].lo = (uint64_t)(uintptr_t)v->base + voff; g_vnote[gen % VNOTE_N].hi = (uint64_t)(uintptr_t)v->base + voff + size;

@@ -104,6 +104,13 @@ A game may tell NVN objects apart by their bytes, without an NVN call. A host re
 - **Fix:** `vrun_set` (`hle_nvn.c`) hands the runs it removes and the runs it adds to `mtl_pool_replace` (`nvn_mtl.m`), which makes the new runs' buffers first and then takes the old ones out and puts the new ones in under one hold of `g_mu`, so every lookup sees the old runs or the new.
 - **Found on:** [PRAGMATA](../../dm/games/0400C76024710000/README.md): its mesh shaders `765e6d9d2588ce70` and `5aab38bb5ba67ef7` read a buffer 0x3000000 into a sparse pool whose one run keeps growing; the miss came at frames 2971 and 4484, the frames the run was replaced in; none in a run with the fix.
 
+### A buffer address on an unmapped page of a sparse pool
+
+- **Symptom:** `[RED] shader <key>: the buffer address the game pushed at c[24] + … is …, in no memory pool: bound to a dummy buffer (…; sparse pool … (+… of … reserved, … runs): page not mapped…, in no run)`.
+- **Cause:** none in the host. The game pushes the address of a page in a sparse pool's reservation that it has not mapped (Resident Evil 4's `0ee0c5f004239ce2` at frame 5, 0x4400000 into a 1 GB pool where nothing is mapped there yet; a diagnostic host logged every mapping request before it). The GPU reads an unmapped sparse page as 0 and drops stores to it, and the host binds the zero buffer.
+- **Fix:** the case is noted once without `[RED]` (`unmapped page of a sparse pool: bound to the zero buffer`, `hle_nvn.c` `nvn_vpool_unmapped`); an address in no pool and no reservation is still red. The zero buffer is shared and 64 KB: a store through it is kept, not dropped (no game is known to store there).
+- **Found on:** [Resident Evil 4](../../dm/games/0400569027BF4000/README.md).
+
 ### Virtual pools of one texture each, mapped before and after the texture
 
 - **Symptom:** `[RED] MapVirtual: non-contiguous mapping (true sparse) not implemented`, on small virtual pools; streamed textures black or missing (OCTOPATH TRAVELER's village ground and plants).
@@ -263,6 +270,14 @@ A game may tell NVN objects apart by their bytes, without an NVN call. A host re
   - The view is cached apart from the slot binds' (`palt`), one per table type, and goes with the ID's views. One per type because a texture read through two other types (a cube as 2D and as a cube, a cube array as a cube and as a cube array) is in tables of both at once, and a table stands over submissions while no registration or storage changes: a single view per ID, replaced when the second table took the ID, left the first naming a released view. What no view serves (a 2D or 3D texture read as a cube, a non-square array as a cube) holds the dummy as before, as `tex_fit` binds a zero texture; GL and Vulkan leave such a read undefined. Each such ID read is reported once (`[RED] [pool-type] … left out`, at most 256 a run).
 - **Check:** `make -C dm/gfx/tests GAME=<id> check_t_pool_typebridge`: each pair, read on the GPU through the table at a given layer or face; an ID read only through its own type gets no view; an ID read later through a second type goes into that table in place; a table's view of an ID stays when a table of a third type takes the ID; the view is kept and goes when the ID is emptied; the unserved reads are reported once. Without the bridge 10 of its 32 checks fail; with one view per ID for every type, 2. In play, PRAGMATA's Shelter on the Mac: Cabin's face and the reflections match the console.
 - **Found on:** [PRAGMATA](../../dm/games/0400C76024710000/README.md).
+
+### Read marks of a texture type kept when an ID changes type
+
+- **Symptom:** `[RED] [pool-type] texture ID … (ser=… 1x1 format 0x25 target 1) is Metal type 2, read through a type 5 texture pool table: left out (dummy), no view serves it`, or a 3D texture `read through a type 2 texture pool table`, in the frame after a scene change, with a different ID each run.
+- **Cause:** the read bitmap's sections (see [Pool tables that held only their own texture type](#pool-tables-that-held-only-their-own-texture-type)) are an ID's, and stayed when the game put a texture of another type into the ID. The marks were the old texture's: the next walk found the new texture marked as read through the old one's type and reported it, though no shader had read it so. Resident Evil 4 puts its 1x1 default 2D texture into the IDs of the 256x256 cubes it lets go, and a 3D texture into an ID a 2D texture had; a diagnostic host showed every report in the frame after such a change, with only the old type's mark set.
+- **Fix:** `mtl_reg_tex` clears an ID's typed marks, on the host and in the GPU's bitmap, when it registers a texture of another NVN target (the view's, if it sets one) there (`pool_seen_retype`). The read mark itself stays, for the read budget (PR #2022), and so do the typed marks when the type is the same, which keeps the bridges of a game that cycles textures of one type through its IDs. A shader that does read the new texture through another type marks it again, and that is reported.
+- **Check:** `make -C dm/gfx/tests GAME=<id> check_t_pool_typebridge`: a cube replaced by a 2D texture loses its typed marks and keeps its read mark; the cube table then holds the dummy and reports nothing; a cube read of it after that is reported; a 2D array replaced by another keeps its 2D mark. Without the fix 2 of its 40 checks fail. Resident Evil 4's opening to the forest path on the Mac (Apple M6, 2026-11-13): nine such lines before, none after.
+- **Found on:** [Resident Evil 4](../../dm/games/0400569027BF4000/README.md).
 
 ### Memory-pool tracking table grows in blocks
 

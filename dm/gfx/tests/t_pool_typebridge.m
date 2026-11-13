@@ -126,6 +126,18 @@ int main(void) { @autoreleasepool {
     uint64_t r1 = pool_fit(10, cur, A); void *v1 = g_treg[10].palt[pool_lk(A)]; uint64_t r2 = pool_fit(10, cur, A);
     os_unfair_lock_unlock(&g_rmu);
     CHECK(r1 && r1 == r2 && g_treg[10].palt[pool_lk(A)] == v1, "the view is cached: no new view for the same texels");
+    // An ID given a texture of another type: the marks of the types shaders read the old one through go, the read mark stays (Resident Evil 4 puts its 1x1 default 2D texture into
+    // the IDs of cubes it lets go). Kept, the next cube table reported the 2D texture as read through it, with no shader reading it. One of the same type keeps them (the bridges stand)
+    mtl_reg_tex(12, &t[5], NULL);
+    CHECK(pool_seen_t(12, D2), "a 2D array replaced by a 2D array: its 2D read mark stays");
+    unsigned logged = g_pool_tlog_n;
+    mtl_reg_tex(14, &t[8], NULL);
+    CHECK(!pool_seen_t(14, C) && !pool_seen_t(14, A) && !pool_seen_t(14, D2) && pool_seen(14), "a cube replaced by a 2D texture: its typed marks go, its read mark stays");
+    id<MTLBuffer> c2 = table(C);
+    CHECK(entry(c2, 14) == dummy(c2) && g_pool_tlog_n == logged, "the cube table holds the dummy for it and reports nothing: no shader read the 2D texture as a cube");
+    read_mark(14, C);
+    id<MTLBuffer> c3 = table(C);
+    CHECK(entry(c3, 14) == dummy(c3) && g_pool_tlog_n == logged + 1 && (g_pool_tlog[0] >> 14 & 1), "a shader that does read it as a cube marks it again, and that is reported");
     // Emptying the ID lets the view go, and its typed marks
     mtl_reg_tex(10, NULL, NULL);
     CHECK(!palt(10, A) && !prid(10, A) && !pool_seen_t(10, A) && !pool_seen_t(10, D2), "an emptied ID drops its view and its read marks");

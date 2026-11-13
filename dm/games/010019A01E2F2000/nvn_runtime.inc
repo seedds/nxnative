@@ -108,6 +108,47 @@ static void *mp4_scan_source_v1(NVNcommandBuffer *commands, const void *view) {
     return s->prefix;
 }
 
+// Full output: the game sizes its window crop and the rectangle it composites the scene and draws the HUD into from oe::GetDefaultDisplayResolution
+// (1920x1080 docked: WindowCrop 0,0 1920x1080 in a 3200x2000 window texture, manual-test/1610_full-1113-172816). A full-output choice reports its own size.
+int dm_profile_display_resolution(int *w, int *h) {
+    if (strcmp(dm_main_build(),"8275fbe1ec5191c279f3a943ad8524f4")) return 0;
+    pthread_once(&mp4_quality_once,mp4_quality_init);
+    if (!mp4_quality_max_width) return 0;
+    *w = (int)mp4_quality_max_width; *h = (int)mp4_quality_max_height; return 1;
+}
+// A 16:10 output (1610_full): the HUD, menus and movies keep 16:9. Every pass the game begins on the window texture (RGBA8_SRGB at the output size)
+// through its pass-begin helper (main+0x13003c, binding at main+0x1300b8; DM_NVN_RT_TRACE: the HUD at main+0x12e0e8, the radar at main+0x60860, the
+// front end and its movie at main+0x6c98c / 0x6cba0, the menus at main+0x58f520) is laid out in 16:9 and drawn into the middle band: viewports and
+// scissors keep their x and width, their y and height are scaled by k = (output ratio) / (16:9) about the centre. The scene's composite into the window
+// binds it elsewhere (main+0x145c8) and keeps the whole 16:10 picture.
+static _Thread_local const NVNcommandBuffer *mp4_band_cb; static _Thread_local float mp4_band_h;
+static float mp4_band_k(void) {
+    pthread_once(&mp4_quality_once,mp4_quality_init);
+    if (!mp4_quality_max_width || mp4_quality_max_width * 9 >= mp4_quality_max_height * 16) return 0;   // 16:9 or wider: nothing to do
+    return (float)mp4_quality_max_width / (float)mp4_quality_max_height / (16.0f / 9.0f);
+}
+static void nvn_profile_set_rt(const NVNcommandBuffer *c, int n, const NVNtexture *const *ct, uint64_t caller) {
+    const tex_t *t = n > 0 && ct ? (const tex_t *)ct[0] : NULL; uintptr_t base = 0;
+    for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, "main")) base = (uintptr_t)g_mod[i].base;
+    int band = base && mp4_band_k() > 0 && !strcmp(dm_main_build(),"8275fbe1ec5191c279f3a943ad8524f4") && caller == base + 0x1300b8
+        && t && t->magic == MAGIC('T','E','X',0) && t->d.format == NVN_FORMAT_RGBA8_SRGB && t->d.width == mp4_quality_max_width && t->d.height == mp4_quality_max_height;
+    if (band) { mp4_band_cb = c; mp4_band_h = (float)t->d.height;
+        static int once; if (!once++) LOG("MP4 16:10: HUD and menu passes drawn into the middle 16:9 band (y and height x %.3f)", mp4_band_k()); }
+    else if (mp4_band_cb == c) mp4_band_cb = NULL;
+}
+static void nvn_profile_viewports(const NVNcommandBuffer *c, int n, float *v) {
+    if (mp4_band_cb != c) return;
+    float k = mp4_band_k(), H = mp4_band_h;
+    for (int i = 0; i < n; i++) { v[4 * i + 1] = H * (1 - k) / 2 + v[4 * i + 1] * k; v[4 * i + 3] *= k; }
+}
+static void nvn_profile_scissor(const NVNcommandBuffer *c, int *x, int *y, int *w, int *h) {
+    (void)x; (void)w;
+    if (mp4_band_cb != c || *h >= 16384) return;   // the game's "no scissor" (16384x16384) stays
+    float k = mp4_band_k(), H = mp4_band_h;
+    int y0 = (int)floorf(H * (1 - k) / 2 + (float)*y * k), y1 = (int)ceilf(H * (1 - k) / 2 + (float)(*y + *h) * k);
+    *y = y0; *h = y1 - y0;
+}
+
 // Profile-provided private entry lookup; no game IDs or engine offsets in the
 // shared NVN implementation. The rewriter emits this name only for main 1.1.0.
 static void *nvn_profile_runtime_lookup(const char *name) {

@@ -112,6 +112,11 @@ static void nvn_init_slots(void) {
 #if TARGET_OS_OSX && __has_include("nvn_runtime.inc")
 #define NVN_PROFILE_RUNTIME 1
 static void *nvn_profile_runtime_lookup(const char *);
+// A profile's hooks on the command stream (nvn_runtime.inc): told every render target binding with its caller, and able to change viewports and
+// scissors set while a target it chose is bound (Metroid Prime 4's HUD drawn into the middle 16:9 band of a 16:10 output)
+static void nvn_profile_set_rt(const NVNcommandBuffer *c, int n, const NVNtexture *const *ct, uint64_t caller);
+static void nvn_profile_viewports(const NVNcommandBuffer *c, int n, float *v);
+static void nvn_profile_scissor(const NVNcommandBuffer *c, int *x, int *y, int *w, int *h);
 #endif
 
 static void *nvn_lookup(const char *name) {
@@ -1382,6 +1387,9 @@ NVN(nvnCommandBufferSetRenderTargets, void, NVNcommandBuffer *c, int n, const NV
     for (int i = 0; i < n; i++) { r->color[i] = ct ? tex_snap(r, SNAP_OFF(p_set_rt), i, ct[i], (uint64_t)__builtin_return_address(0)) : NULL; copy_view(&r->cview[i], &r->has_cview[i], cv ? cv[i] : NULL); }
     r->depth = tex_snap(r, SNAP_OFF(p_set_rt), n, dt, (uint64_t)__builtin_return_address(0)); copy_view(&r->dview, &r->has_dview, dv);
     shadow_trace_rt(c, dt); rt_trace_bind(c, n, ct, (uint64_t)__builtin_return_address(0));
+#ifdef NVN_PROFILE_RUNTIME
+    nvn_profile_set_rt(c, n, ct, (uint64_t)__builtin_return_address(0));
+#endif
     for (int i = 0; i < n; i++) if (r->color[i]) mtl_tex_gpu_written(r->color[i]);
     if (r->depth) mtl_tex_gpu_written(r->depth);
 }
@@ -1463,6 +1471,9 @@ static void shadow_trace_vp(const NVNcommandBuffer *c, const float *v, uint64_t 
     void dm_backtrace(uint64_t fp); dm_backtrace((uint64_t)__builtin_frame_address(0));
 }
 NVN(nvnCommandBufferSetViewports, void, NVNcommandBuffer *c, int first, int n, const float *v) {
+#ifdef NVN_PROFILE_RUNTIME
+    float pv[64]; if (n > 0 && n <= 16) { memcpy(pv, v, 16 * (size_t)n); nvn_profile_viewports(c, n, pv); v = pv; }
+#endif
     if (n > 0 && !g_shadow_skip) { shadow_trace_vp(c, v, (uint64_t)(uintptr_t)__builtin_return_address(0)); if (g_rtt_cb == c) memcpy(g_rtt_vp, v, sizeof g_rtt_vp); rt_trace(c, "viewport", (uint64_t)(uintptr_t)__builtin_return_address(0), v); }
     if (n < 0 || first + n > 16) { LOG("[RED] SetViewports first=%d n=%d", first, n); return; }
     if (g_rec_compact && first >= 0) { uint8_t *q = crec(c, OPC_VIEWPORTS, (uint32_t)first | (uint32_t)n << 8, 16 * (size_t)n); memcpy(q, v, 16 * (size_t)n); return; }
@@ -1470,6 +1481,9 @@ NVN(nvnCommandBufferSetViewports, void, NVNcommandBuffer *c, int first, int n, c
     for (int i = 0; i < n; i++) memcpy(r->v[i], v + 4 * i, 16);
 }
 NVN(nvnCommandBufferSetScissor, void, NVNcommandBuffer *c, int x, int y, int w, int h) {
+#ifdef NVN_PROFILE_RUNTIME
+    nvn_profile_scissor(c, &x, &y, &w, &h);
+#endif
     if (g_rtt_cb == c) { float f[4] = {(float)x, (float)y, (float)w, (float)h}; memcpy(g_rtt_sc, f, sizeof f); rt_trace(c, "scissor", (uint64_t)(uintptr_t)__builtin_return_address(0), f); }
     if (g_rec_compact && (unsigned)x < 0x10000 && (unsigned)y < 0x10000 && (unsigned)w < 0x10000 && (unsigned)h < 0x10000) {
         uint16_t v[4] = {(uint16_t)x, (uint16_t)y, (uint16_t)w, (uint16_t)h}; memcpy(crec(c, OPC_SCISSOR, 0, 8), v, 8); return;

@@ -550,6 +550,13 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Fix:** the flush calls it through the PLT, so an `HLE_FORCE` on that symbol catches it and returns success (`hle_hid.c`).
 - **Found on:** [Metroid Dread](../../dm/games/010093801237C000/README.md).
 
+### Forced vibration sessions
+
+- **Symptom:** at boot, `[RED] sf: the game connects to service hid itself`, then `CRASH sig=11 addr=0` in `hid::detail::EndPermitVibrationSession` (`sdk+0x3526bc` in SDK 9.4), under `hid::EndForcedVibrationSession`.
+- **Cause:** the SDK's own call opens the hid service, which sm refuses, and reads the null service object. A forced session lets an application vibrate while the system's vibration setting is off.
+- **Fix:** `hle_hid.c` answers `BeginForcedVibrationSession` and `EndForcedVibrationSession` with nothing to do. The host has no system vibration setting: its own rumble switch is the player's, and a session does not override it.
+- **Found on:** Super Mario Party (`010036B0034E4000`, no profile yet), [#2513](https://github.com/seedds/nxnative/issues/2513): the crash came before its first frame; with the fix it reaches the opening.
+
 ### Whether a vibration device is mounted
 
 - **Symptom:** with rumble on, `[RED] sf: the game connects to service hid itself`, then `CRASH sig=11 addr=0` in `hid::detail::IsVibrationDeviceMounted` (`sdk+0x24254c` in SDK 7), under `hid::IsVibrationDeviceMounted`. With rumble off in the host's settings the game never asks.

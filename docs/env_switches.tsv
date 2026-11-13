@@ -64,6 +64,7 @@ DM_GL_FBLOG	diagnostic	`=1` logs every framebuffer bind with its size and the dr
 DM_GL_LOG	diagnostic	`=1` makes the GL layer log object creation
 DM_GL_MISSES	diagnostic	`=1` reports each `eglGetProcAddress` name the layer lacks when the game first asks for it
 DM_GL_STUBS	diagnostic	`=1` gives every GL function the layer lacks a stub that reports its first call and returns 0, instead of a null pointer (bring-up)
+DM_GPU_CANARY	diagnostic	`=1` (off by default): once a second, after five seconds, a fixed compute dispatch (about 1 G dependent FMAs, no memory traffic) on the app's own queue, its GPU time logged as `gpu canary #n at s s: GPU x ms, submit to done y ms` (`mtl_gpu_canary_start` in `nvn_mtl.m`). It does not move with the scene, so a step in it when the game's GPU time steps says the GPU clock fell, and a flat canary says the scene got heavier. It shares the GPU with the game: read the smallest of a few samples. A few milliseconds of GPU a second.
 DM_GPU_CAPTURE	diagnostic	`=<frame>[:<frames>]` or `gpu:<ms>[:<after frame>]` writes a Metal GPU trace of those frames for Xcode's Metal debugger; can be set while running through `DM_CTL`
 DM_GPU_CAPTURE_DIR	path	Folder for `DM_GPU_CAPTURE`'s traces (default `gpu_captures/` in the working directory)
 DM_GPU_CAPTURE_KEEP	diagnostic	Before each GPU capture, prunes the capture folder's `dm_*.gputrace` entries so that the newest `KEEP - 1` stay (default 2)

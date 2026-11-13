@@ -682,6 +682,38 @@ static void udc_selftest(void) {
         MLOG("UDC self-check %s %s %lux%lu first value %08x, values differing from it %lu / %lu", g_dev.name.UTF8String, depth ? "Depth32F_S8" : "RGBA8", (unsigned long)w, (unsigned long)h, px[0], (unsigned long)bad, (unsigned long)(w * h));
     }
 }
+// DM_GPU_CANARY=1: once a second, a fixed compute dispatch (about 1 G dependent FMAs, no memory traffic) on the app's own queue, its GPU time logged ("gpu canary"). The game's
+// GPU time per frame moves with its scene and with the GPU clock; this one does not move with the scene, so a step in it at the same moment the game's GPU time steps (Mario Kart World on an
+// iPhone: 9 to 30 ms after 30 to 50 s) says the GPU clock fell, and a flat canary says the scene got heavier. It shares the GPU with the game, so a sample taken during a game pass includes the wait:
+// read the smallest of a few samples. Off by default; a few milliseconds of GPU a second (7.6 ms per sample on an M-series Mac)
+static void mtl_gpu_canary_start(void) {
+    const char *e = getenv("DM_GPU_CANARY"); if (!e || !atoi(e)) return;
+    NSError *err = nil;
+    id<MTLLibrary> lib = [g_dev newLibraryWithSource:@"#include <metal_stdlib>\nusing namespace metal;\nkernel void canary(device float *o [[buffer(0)]], uint t [[thread_position_in_grid]]) { float x = float(t) * 1e-6f + 1.0f; for (uint i = 0; i < 4096; i++) x = fma(x, 0.999999f, 1e-7f); o[t & 1023] = x; }" options:nil error:&err];
+    id<MTLFunction> fn = lib ? [lib newFunctionWithName:@"canary"] : nil;
+    id<MTLComputePipelineState> pso = fn ? [g_dev newComputePipelineStateWithFunction:fn error:&err] : nil;
+    if (!pso) { MLOG("gpu canary: pipeline failed: %s", err.localizedDescription.UTF8String ?: "no error given"); return; }
+    id<MTLBuffer> buf = [g_dev newBufferWithLength:4096 options:MTLResourceStorageModeShared];
+    dispatch_queue_t q = dispatch_queue_create("dm.gpu.canary", DISPATCH_QUEUE_SERIAL);
+    static dispatch_source_t t;   // kept: a timer source that nothing holds is released at the end of this function and never fires
+    t = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, q);
+    dispatch_source_set_timer(t, dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC), NSEC_PER_SEC, NSEC_PER_SEC / 10);
+    static uint64_t n; static CFTimeInterval t0;
+    dispatch_source_set_event_handler(t, ^{
+        id<MTLCommandBuffer> cb = [g_q commandBuffer];
+        id<MTLComputeCommandEncoder> ce = [cb computeCommandEncoder];
+        [ce setComputePipelineState:pso]; [ce setBuffer:buf offset:0 atIndex:0];
+        [ce dispatchThreads:MTLSizeMake(262144, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+        [ce endEncoding];
+        uint64_t k = ++n; CFTimeInterval sub = CACurrentMediaTime(); if (!t0) t0 = sub;
+        [cb addCompletedHandler:^(id<MTLCommandBuffer> c) {
+            MLOG("gpu canary #%llu at %.0f s: GPU %.3f ms, submit to done %.3f ms", (unsigned long long)k, sub - t0 + 5, (c.GPUEndTime - c.GPUStartTime) * 1e3, (CACurrentMediaTime() - sub) * 1e3);
+        }];
+        [cb commit];
+    });
+    dispatch_resume(t);
+    MLOG("DM_GPU_CANARY=1: a fixed compute dispatch every second, its GPU time logged");
+}
 void mtl_init(void) {
     if (g_dev) return;
     const char *vbc = getenv("DM_NVN_VBUF_CACHE"); g_vbuf_cache = !(vbc && !strcmp(vbc, "0"));
@@ -694,6 +726,7 @@ void mtl_init(void) {
     if (!g_dev) MDIE("no Metal device");
     if (!g_dev.hasUnifiedMemory) MDIE("needs a unified-memory device (zero-copy memory pools)");
     g_q = [g_dev newCommandQueue];
+    mtl_gpu_canary_start();
     // A device without Metal 4 (the paravirtualized GPU of a virtual Mac, such as GitHub's macos-26 runner: no residency set, no MTL4CommandQueue) cannot run the NVN layer. The GL and
     // Vulkan layers draw on classic queues of their own and need only the device (mtl_device_classic): there the classic part starts and presents are dropped, which is all a
     // run-time shader capture needs (the NSP script's capture_shaders boots headless; GitHub issue #112: Balatro's capture aborted here)

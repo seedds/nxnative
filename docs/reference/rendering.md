@@ -96,6 +96,15 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Fix:** NVN 1D and 1D-array textures are created as one-row 2D / 2D-array Metal textures.
 - **Found on:** [Super Mario 3D World + Bowser's Fury](../../dm/games/010028600EBDA000/README.md): the material shaders sample 64×1 R32F lookup tables created as NVN 1D textures (and filled with `WriteTexels`).
 
+### A 1D array texture uploaded as its layer count of rows per layer
+
+- **Symptom:** with Metal API validation, an abort at a texture upload: `(destinationOrigin.y + sourceSize.height)(64) must be <= height(1)`. Without it, the upload writes past each layer into the next ones, and the texture holds junk rows: a light that flashes across a surface as the camera crosses a distance band.
+- **Cause:** a 1D array is a one-row 2D array whose layer count is the NVN height ([1D textures as one-row 2D textures](#1d-textures-as-one-row-2d-textures)), and the storage layout (`nvn_tex.c`) and the deswizzler lay it out so, but the upload paths took the NVN height as each layer's row count: every layer went up as that many rows into a one-row slice, and the GPU wrote past each slice.
+- **Fix:** `tex_lsize` (`nvn_mtl.m`) gives a level's size as its Metal texture holds it (width, rows, depth planes; one row for a 1D or 1D array texture). `pkg_upload_` (its byte count, the GPU and CPU deswizzles), the sparse texture's tiles and `scissor_full` take it, so no path keeps a rule of its own.
+- **Open:** region-based operations on a 1D array (`WriteTexels`, `ReadTexels`, texture copies) still take the region's y and height as rows, not layers. No game is known to reach them.
+- **Found on:** [PRAGMATA](../../dm/games/0400C76024710000/README.md): its light-profile lookup table, a 512-wide R16F 1D array of 64 layers read by the deferred lighting, went up as 64 copies of 64 rows.
+- **Check:** `make -C dm/gfx/tests GAME=<id> check_t_partial_upload` (`R16F 1D array` and `RGBA8 1D array with levels`, under Metal API validation; without the fix the first aborts).
+
 ### Cube textures held as 6-layer 2D arrays
 
 - **Symptom:** shaders that sample a cube texture as `texturecube_array` get a type mismatch.

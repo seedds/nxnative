@@ -62,6 +62,7 @@ The game builds Mii heads from the console's MiiModel system data, starting at b
 
 ## Found on this game
 
+- [Offline HTML startup overflows a small guest stack](../../../docs/reference/services.md#offline-html-startup-overflows-a-small-guest-stack): info-screen crash on 4.0.1; the stack regression is covered synthetically, actual page rendering and controls await a game retest.
 - **Display sleep during controller play on the Mac (resolved, player-confirmed):** [Mac display sleep during controller play](../../../docs/reference/services.md#mac-display-sleep-during-controller-play).
 - **Resolved in the sanitizer audit:** [Unaligned command headers during layout probing](../../../docs/reference/audio.md#unaligned-command-headers-during-layout-probing), reproduced with the SDK 4 command-list fixture.
 

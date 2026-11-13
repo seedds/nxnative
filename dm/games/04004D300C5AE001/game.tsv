@@ -1,0 +1,40 @@
+# Kirby and the Forgotten Land – Nintendo Switch 2 Edition + Star-Crossed World: Program 1 (04004D300C5AE001) of the application 01004D300C5AE000, update v65536 (1.1.0),
+# SDK 19.3.7 built for the Switch 2 (Ounce), NVN2 (Ampere shaders), HAL Laboratory's engine on NintendoWare. Its own profile: the Switch 1 program has another executable and
+# other shaders (01004D300C5AE000). Packed from a raw dump's program 1 (PR #1639); the note says what it needs and what was checked
+
+# ---- Identity ----
+title_id	04004D300C5AE001
+program_id	04004D300C5AE001
+
+# ---- App ----
+name	Kirby and the Forgotten Land – Nintendo Switch 2 Edition + Star-Crossed World
+ipa	KirbyAndTheForgottenLandSwitch2Edition.ipa
+app_category	public.app-category.games
+
+# ---- Versions ----
+build	v65536	1.1.0	main=395fc326c2e5b1651d937074f8cfd75d	subsdk0=411c90dfba759498adbff820f33b7a71	sdk=5e81e79381e8be36fe8bcf05ae18d6dd
+package	v65536
+shader_versions	v65536
+
+# ---- Files ----
+# every module main imports from: subsdk0 is NintendoSDK_movie
+modules	main subsdk0 sdk
+romfs_marker	mov/EventMovie/Ending.webm
+zip_store	.bfstm:.cmpbin:.opus:.webm:.metallib
+
+# ---- Memory ----
+# The NPDM declares 16 MB of system resource (virtual address memory) and main never sets a heap: a 5 GB block with a 4.375 GB alias region, where the game maps its memory itself
+mem_reserve	0x140000000
+mem_alias	0x118000000
+mem_stack	0x10000000
+# the sdk is built for the Switch 2 (spec: Ounce): its 9 GB pool
+app_pool	0x240000000
+sys_resource	0x1000000
+
+# ---- Shader split ----
+shader_groups	/gfx/=gfx /ubin/=ubin /lyt/=lyt /msg/=msg /yaml/=yaml /snd/=snd /ptcl/=ptcl /hidvib/=hidvib /font/=font /param/=param /mov/=mov /shader/=shader /basil/=basil /fdg/=fdg
+shader_note	Kirby and the Forgotten Land shaders
+
+# ---- Graphics ----
+# The game calls nvnDeviceSetDepthMode with near = 0 at boot (the NSP script's address-region check run): the pipeline bases made before it runs are made for that mode
+depth_mode	zero

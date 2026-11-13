@@ -111,6 +111,7 @@ One row per profile; the notes are each profile's `README.md`.
 | [Hyrule Warriors: Definitive Edition](0100AE00096EA000/README.md) | `0100AE00096EA000` | 1.0.1 | 3.5.1 | Koei Tecmo's KTGL | NVN |
 | [Kirby Air Riders](040077201BE50000/README.md) | `040077201BE50000` | v458752 (Switch 2) | 20.5.26 (Ounce) | Its own engine (`phx`, `Aurora`) | NVN2 |
 | [Kirby and the Forgotten Land](01004D300C5AE000/README.md) | `01004D300C5AE000` | 1.1.0 | 11.4.0 | HAL Laboratory's engine (NintendoWare) | NVN |
+| [Kirby and the Forgotten Land – Nintendo Switch 2 Edition + Star-Crossed World](04004D300C5AE001/README.md) | `04004D300C5AE001` | 1.1.0 (Edition Program 1, v65536) | 19.3.7 (Ounce) | HAL Laboratory's engine (NintendoWare) | NVN2 |
 | [Kirby Star Allies](01007E3006DDA000/README.md) | `01007E3006DDA000` | 4.0.0a | 4.4.1 | HAL Laboratory's engine (NintendoWare) | NVN |
 | [Luigi's Mansion 3](0100DCA0064A6000/README.md) | `0100DCA0064A6000` | 1.4.0 | 7.3.2 | Next Level Games' engine | NVN |
 | [Mario & Luigi: Brothership](01006D0017F7A000/README.md) | `01006D0017F7A000` | 1.0.0 | 12.3.2 | Unreal Engine 4.27.2, Wwise | NVN |

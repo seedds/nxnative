@@ -731,7 +731,7 @@ int main(int argc, char **argv) { @autoreleasepool {
     ArchEpoch *ep0 = g_ep;
     arch_flush_wait();
     NSString *file = [@(dir) stringByAppendingPathComponent:@"00000-1.mtl4a"];   // <seq>-<pipelines it holds>
-    EXPECT("archive file written", 1, [NSFileManager.defaultManager fileExistsAtPath:file]);
+    EXPECT("archive file written", 1, [NSFileManager.defaultManager fileExistsAtPath:file]);   // NOLINT(clang-analyzer-nullability.NullablePassedToNonnull): dir is mkdtemp's ASCII path, which always boxes, so file is never nil
     EXPECT("the flush began a new period", 1, g_ep != ep0);
     EXPECT("nothing left to write", 0, g_arch_new);
     {   // its index: the one base's key, complete; a key is the descriptor's, the same for the same pipeline and another for another, none without names

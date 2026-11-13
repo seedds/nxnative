@@ -20,6 +20,8 @@ typedef struct fg_ctx {
     id<MTLTexture> full[2];
     id<MTLComputePipelineState> ps_conf, ps_guard, ps_detail, ps_pin;
     id<MTLTexture> mvp;   // the motion with still blocks pinned (DM_FG_STILL)
+    id<MTLComputePipelineState> ps_pick, ps_interp;   // DM_FG_WARP=3: the in-between picture made here for every motion, MetalFX not used
+    id<MTLTexture> msel;   // DM_FG_WARP=3: the motion picked per 2x2 pixels of the generation size
     id<MTLTexture> gfull;   // detail: the generated picture at the picture's own size, with the frame's fine detail moved half the motion (DM_FG_DETAIL)
     id<MTLTexture> conf, gout;   // guard: per motion block, how badly the motion explains the frame; the generated picture with those places taken from the frame   // generation smaller than the picture: the picture's own copy at full size, for the held tick
     id<MTLBuffer> params;
@@ -163,11 +165,116 @@ static float4 warp(texture2d<float> a, texture2d<float> b, texture2d<float> mv, 
     float2 h = 0.5 * c[k];
     return 0.5 * (a.sample(s, uv + h) + b.sample(s, uv - h));
 }
+// Catmull-Rom from 9 bilinear taps: sharper than one bilinear tap at a fractional position
+static float4 samp_cr(texture2d<float> t, float2 uv) {
+    constexpr sampler s(filter::linear, address::clamp_to_edge, coord::normalized);
+    float2 sz = float2(t.get_width(), t.get_height()), p = uv * sz - 0.5, tc = floor(p) + 0.5, f = p - floor(p);
+    float2 w0 = f * (-0.5 + f * (1.0 - 0.5 * f)), w1 = 1.0 + f * f * (-2.5 + 1.5 * f), w2 = f * (0.5 + f * (2.0 - 1.5 * f)), w3 = f * f * (-0.5 + 0.5 * f);
+    float2 w12 = w1 + w2, o12 = w2 / w12, t0 = (tc - 1.0) / sz, t3 = (tc + 2.0) / sz, t12 = (tc + o12) / sz;
+    float4 r = 0;
+    r += t.sample(s, float2(t0.x, t0.y)) * w0.x * w0.y + t.sample(s, float2(t12.x, t0.y)) * w12.x * w0.y + t.sample(s, float2(t3.x, t0.y)) * w3.x * w0.y;
+    r += t.sample(s, float2(t0.x, t12.y)) * w0.x * w12.y + t.sample(s, float2(t12.x, t12.y)) * w12.x * w12.y + t.sample(s, float2(t3.x, t12.y)) * w3.x * w12.y;
+    r += t.sample(s, float2(t0.x, t3.y)) * w0.x * w3.y + t.sample(s, float2(t12.x, t3.y)) * w12.x * w3.y + t.sample(s, float2(t3.x, t3.y)) * w3.x * w3.y;
+    return max(r, 0.0);
+}
+// DM_FG_WARP=2: as warp, with the motions of the 3x3 blocks around as candidates too (a block's motion is off near its edges), a 3x3 cost at 1-pixel
+// steps, and the frames resampled with Catmull-Rom
+static float4 warp2(texture2d<float> a, texture2d<float> b, texture2d<float> mv, constant P &q, uint2 g, float2 dsz) {
+    constexpr sampler s(filter::linear, address::clamp_to_edge, coord::normalized);
+    constexpr sampler sn(filter::nearest, address::clamp_to_edge, coord::normalized);
+    float2 msz = float2(mv.get_width(), mv.get_height()), uv = (float2(g) + 0.5) / dsz, px1 = 1.0 / dsz;
+    float n = msz.x * msz.y;
+    float2 best_v = 0; float best = 1e9;
+    for (int i = 0; i < 11; i++) {
+        float2 v = i == 0 ? float2(0) : i == 1 ? float2(q.gx, q.gy) / 16.0 / n / msz
+                 : mv.sample(sn, uv + float2((i - 2) % 3 - 1, (i - 2) / 3 - 1) / msz).xy / msz;
+        float2 h = 0.5 * v; float e = 0;
+        for (int y = -1; y <= 1; y++) for (int x = -1; x <= 1; x++) {
+            float2 o = float2(x, y) * px1 * 1.5;
+            e += fabs(lum(a.sample(s, uv + h + o)) - lum(b.sample(s, uv - h + o)));
+        }
+        e *= i == 0 ? 0.8 : i == 6 ? 0.95 : 1.0;   // a little in favour of no motion (a still overlay stays put), then of the block's own motion
+        if (e < best) { best = e; best_v = v; }
+    }
+    if (q.patch > 0) {   // DM_FG_W2REF: the chosen motion refined per pixel, steps of DM_FG_W2REF/4 pixel around it (the motion comes from quarter-size pictures)
+        float st = float(q.patch) * 0.25; float2 v0 = best_v;
+        for (int r = 0; r < 2; r++) {
+            float2 c0 = best_v;
+            for (int i = 0; i < 9; i++) { if (i == 4) continue;
+                float2 v = c0 + float2(i % 3 - 1, i / 3 - 1) * st * px1;
+                float2 hh = 0.5 * v; float e = 0;
+                for (int y = -1; y <= 1; y++) for (int x = -1; x <= 1; x++) { float2 o = float2(x, y) * px1 * 1.5;
+                    e += fabs(lum(a.sample(s, uv + hh + o)) - lum(b.sample(s, uv - hh + o))); }
+                if (e < best * 0.98) { best = e; best_v = v; } }
+            st *= 0.5; }
+        if (length((best_v - v0) * dsz) > 3.0) best_v = v0;
+    }
+    float2 h = 0.5 * best_v;
+    float4 ca = samp_cr(a, uv + h), cb = samp_cr(b, uv - h);
+    if (q.coarse == 1) return cb;
+    if (q.coarse == 3) {   // 3: the blend's coarse picture plus the newer frame's fine detail (two frames' grain averaged loses half of it)
+        float2 d1 = px1 * 0.75, d2 = float2(d1.x, -d1.y);
+        float4 la = 0.25 * (a.sample(s, uv + h + d1) + a.sample(s, uv + h - d1) + a.sample(s, uv + h + d2) + a.sample(s, uv + h - d2));
+        float4 lb = 0.25 * (b.sample(s, uv - h + d1) + b.sample(s, uv - h - d1) + b.sample(s, uv - h + d2) + b.sample(s, uv - h - d2));
+        return max(0.5 * (la + lb) + (cb - lb), 0.0); }                                  // DM_FG_W2MODE 1: the newer frame only
+    if (q.coarse == 2) { float d = fabs(lum(ca) - lum(cb)); float w = smoothstep(0.02, 0.10, d); return mix(0.5 * (ca + cb), cb, w); }   // 2: blend where they agree, else the newer
+    return 0.5 * (ca + cb);
+}
+// DM_FG_WARP=3, pass 1: per 2x2 pixels of the generation size, the motion (of none, the picture's mean, and the 3x3 blocks' around) under which the two frames
+// agree best over a 3x3 window; written in uv units
+kernel void pick(texture2d<float> a [[texture(0)]], texture2d<float> b [[texture(1)]], texture2d<float> mv [[texture(2)]], texture2d<float, access::write> dst [[texture(3)]],
+                 constant P &q [[buffer(1)]], uint2 g [[thread_position_in_grid]]) {
+    if (g.x >= dst.get_width() || g.y >= dst.get_height()) return;
+    constexpr sampler s(filter::linear, address::clamp_to_edge, coord::normalized);
+    constexpr sampler sn(filter::nearest, address::clamp_to_edge, coord::normalized);
+    float2 msz = float2(mv.get_width(), mv.get_height()), uv = (float2(g) + 0.5) / float2(dst.get_width(), dst.get_height()), px1 = 1.0 / float2(a.get_width(), a.get_height());
+    float n = msz.x * msz.y;
+    float2 best_v = 0; float best = 1e9;
+    for (int i = 0; i < 11; i++) {
+        float2 v = i == 0 ? float2(0) : i == 1 ? float2(q.gx, q.gy) / 16.0 / n / msz
+                 : mv.sample(sn, uv + float2((i - 2) % 3 - 1, (i - 2) / 3 - 1) / msz).xy / msz;
+        float2 h = 0.5 * v; float e = 0;
+        for (int y = -1; y <= 1; y++) for (int x = -1; x <= 1; x++) {
+            float2 o = float2(x, y) * px1 * 1.5;
+            e += fabs(lum(a.sample(s, uv + h + o)) - lum(b.sample(s, uv - h + o)));
+        }
+        e *= i == 0 ? 0.8 : i == 6 ? 0.95 : 1.0;
+        if (e < best) { best = e; best_v = v; }
+    }
+    dst.write(float4(best_v, best / 9.0, 0), g);
+}
+// DM_FG_WARP=3, pass 2, at the picture's size: both frames moved half the picked motion toward the middle (Catmull-Rom); the coarse picture is their blend and
+// the fine detail the newer frame's (two frames' grain averaged loses half of it, and the picture then looks softer every other tick)
+kernel void interp(texture2d<float> a [[texture(0)]], texture2d<float> b [[texture(1)]], texture2d<float> ms [[texture(2)]], texture2d<float, access::write> dst [[texture(3)]],
+                   constant P &q [[buffer(1)]], uint2 g [[thread_position_in_grid]]) {
+    if (g.x >= dst.get_width() || g.y >= dst.get_height()) return;
+    constexpr sampler s(filter::linear, address::clamp_to_edge, coord::normalized);
+    constexpr sampler sn(filter::nearest, address::clamp_to_edge, coord::normalized);
+    float2 dsz = float2(dst.get_width(), dst.get_height()), uv = (float2(g) + 0.5) / dsz, px1 = 1.0 / dsz;
+    float2 h;
+    if (q.patch == 1) h = 0.5 * ms.sample(s, uv).xy;   // DM_FG_W3SMOOTH 1: the picked motion interpolated between tiles
+    else if (q.patch >= 2) {   // 2: of the 2x2 nearest tiles' motions, the one the two frames agree best under at this pixel (3x3, 1-pixel steps)
+        float2 msz = float2(ms.get_width(), ms.get_height()), p = uv * msz - 0.5, b0 = (floor(p) + 0.5) / msz; float best = 1e9; h = 0;
+        for (int i = 0; i < 4; i++) {
+            float2 hh = 0.5 * ms.sample(sn, b0 + float2(i & 1, i >> 1) / msz).xy; float e = 0;
+            for (int y = -1; y <= 1; y++) for (int x = -1; x <= 1; x++) { if (q.patch == 3 && x != 0 && y != 0) continue;   // 3: a plus of 5 samples, not 3x3
+                float2 o = float2(x, y) * px1;
+                e += fabs(lum(a.sample(s, uv + hh + o)) - lum(b.sample(s, uv - hh + o))); }
+            if (e < best) { best = e; h = hh; } }
+    } else h = 0.5 * ms.sample(sn, uv).xy;
+    float4 ca = samp_cr(a, uv + h), cb = samp_cr(b, uv - h);
+    float k = float(q.coarse) * 0.01;   // DM_FG_DETAIL3: how much of the newer frame's fine detail (percent; 0: the plain blend)
+    if (k <= 0) { dst.write(0.5 * (ca + cb), g); return; }
+    float2 d1 = px1 * 0.75, d2 = float2(d1.x, -d1.y);
+    float4 la = 0.25 * (a.sample(s, uv + h + d1) + a.sample(s, uv + h - d1) + a.sample(s, uv + h + d2) + a.sample(s, uv + h - d2));
+    float4 lb = 0.25 * (b.sample(s, uv - h + d1) + b.sample(s, uv - h - d1) + b.sample(s, uv - h + d2) + b.sample(s, uv - h - d2));
+    dst.write(max(0.5 * (ca + cb) + k * (0.5 * (la + lb) + (cb - lb) - 0.5 * (ca + cb)), 0.0), g);
+}
 // The generated picture, with untrusted places (the worst block within one block around) faded to the frame itself
 kernel void guard(texture2d<float> gen [[texture(0)]], texture2d<float> cur [[texture(1)]], texture2d<float> cf [[texture(2)]], texture2d<float, access::write> dst [[texture(3)]],
                   texture2d<float> prv [[texture(4)]], texture2d<float> mv [[texture(5)]], constant P &q [[buffer(1)]], uint2 g [[thread_position_in_grid]]) {
     if (g.x >= dst.get_width() || g.y >= dst.get_height()) return;
-    if (bail(q, cf) > 0.5) { dst.write(q.R > 0 ? warp(prv, cur, mv, q, g, float2(dst.get_width(), dst.get_height())) : cur.read(g), g); return; }
+    if (bail(q, cf) > 0.5) { dst.write(q.R == 2 ? warp2(prv, cur, mv, q, g, float2(dst.get_width(), dst.get_height())) : q.R > 0 ? warp(prv, cur, mv, q, g, float2(dst.get_width(), dst.get_height())) : cur.read(g), g); return; }
     constexpr sampler s(filter::linear, address::clamp_to_edge, coord::normalized);
     float2 uv = (float2(g) + 0.5) / float2(dst.get_width(), dst.get_height()), o = 1.0 / float2(cf.get_width(), cf.get_height());
     float m = 0;
@@ -181,7 +288,7 @@ kernel void detail(texture2d<float> gen [[texture(0)]], texture2d<float> full [[
                    texture2d<float> cf [[texture(4)]], texture2d<float, access::write> dst [[texture(5)]], texture2d<float> prv [[texture(6)]], constant P &p [[buffer(0)]],
                    constant P &q [[buffer(1)]], uint2 g [[thread_position_in_grid]]) {
     if (g.x >= dst.get_width() || g.y >= dst.get_height()) return;
-    if (bail(q, cf) > 0.5) { dst.write(q.R > 0 ? warp(prv, full, mv, q, g, float2(dst.get_width(), dst.get_height())) : full.read(g), g); return; }
+    if (bail(q, cf) > 0.5) { dst.write(q.R == 2 ? warp2(prv, full, mv, q, g, float2(dst.get_width(), dst.get_height())) : q.R > 0 ? warp(prv, full, mv, q, g, float2(dst.get_width(), dst.get_height())) : full.read(g), g); return; }
     constexpr sampler s(filter::linear, address::clamp_to_edge, coord::normalized);
     float2 uv = (float2(g) + 0.5) / float2(dst.get_width(), dst.get_height());
     float2 msz = float2(mv.get_width(), mv.get_height());
@@ -237,8 +344,8 @@ static fg_ctx *fg_create(id<MTLDevice> dev, NSUInteger w, NSUInteger h, MTLPixel
     if (!lib) { *why = [NSString stringWithFormat:@"shaders: %@", e]; free(c); return NULL; }
     c->ps_luma0 = fg_pso(dev, lib, @"luma0"); c->ps_down = fg_pso(dev, lib, @"down2"); c->ps_search = fg_pso(dev, lib, @"search");
     c->ps_median = fg_pso(dev, lib, @"median3"); c->ps_fill = fg_pso(dev, lib, @"fill"); c->ps_resample = fg_pso(dev, lib, @"resample");
-    c->ps_conf = fg_pso(dev, lib, @"conf"); c->ps_guard = fg_pso(dev, lib, @"guard"); c->ps_detail = fg_pso(dev, lib, @"detail"); c->ps_pin = fg_pso(dev, lib, @"pin");
-    if (!c->ps_pin || !c->ps_detail || !c->ps_conf || !c->ps_guard || !c->ps_luma0 || !c->ps_down || !c->ps_search || !c->ps_median || !c->ps_fill || !c->ps_resample) { *why = @"pipelines"; free(c); return NULL; }
+    c->ps_conf = fg_pso(dev, lib, @"conf"); c->ps_guard = fg_pso(dev, lib, @"guard"); c->ps_detail = fg_pso(dev, lib, @"detail"); c->ps_pin = fg_pso(dev, lib, @"pin"); c->ps_pick = fg_pso(dev, lib, @"pick"); c->ps_interp = fg_pso(dev, lib, @"interp");
+    if (!c->ps_pick || !c->ps_interp || !c->ps_pin || !c->ps_detail || !c->ps_conf || !c->ps_guard || !c->ps_luma0 || !c->ps_down || !c->ps_search || !c->ps_median || !c->ps_fill || !c->ps_resample) { *why = @"pipelines"; free(c); return NULL; }
     MTLResidencySetDescriptor *rd = [MTLResidencySetDescriptor new]; rd.label = @"framegen";
     c->res = [dev newResidencySetWithDescriptor:rd error:&e];
     MTL4ArgumentTableDescriptor *ad = [MTL4ArgumentTableDescriptor new]; ad.maxTextureBindCount = 7; ad.maxBufferBindCount = 2;
@@ -268,11 +375,12 @@ static fg_ctx *fg_create(id<MTLDevice> dev, NSUInteger w, NSUInteger h, MTLPixel
     c->depth = fg_tex(c, df, c->lw[0], c->lh[0], c->fi.depthTextureUsage | (df == MTLPixelFormatR32Float ? MTLTextureUsageShaderWrite : MTLTextureUsageRenderTarget));
     c->out = fg_tex(c, fmt, w, h, c->fi.outputTextureUsage | MTLTextureUsageShaderRead);
     c->conf = fg_tex(c, MTLPixelFormatR16Float, c->lw[0], c->lh[0], ru);
+    c->msel = fg_tex(c, MTLPixelFormatRGBA32Float, (w + 1) / 2, (h + 1) / 2, ru);
     c->gout = fg_tex(c, fmt, w, h, MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite);
     c->params = [dev newBufferWithLength:sizeof(fg_params) * 16 options:MTLResourceStorageModeShared];
     [c->res addAllocation:c->params]; [c->res commit];
     for (int i = 0; i < 2; i++) if (!c->col[i]) { *why = @"textures"; free(c); return NULL; }
-    if (!c->depth || !c->out || !c->mvf || !c->mvp || !c->conf || !c->gout) { *why = @"textures"; free(c); return NULL; }
+    if (!c->depth || !c->out || !c->mvf || !c->mvp || !c->conf || !c->gout || !c->msel) { *why = @"textures"; free(c); return NULL; }
     return c;
 }
 
@@ -319,9 +427,23 @@ static id<MTLTexture> fg_encode(fg_ctx *c, id<MTL4CommandBuffer> cb, id<MTLTextu
     if (c->median && !nosearch) { fg_disp(ce, c, c->ps_median, @[c->mv[0], c->mvf], -1, c->lw[0], c->lh[0]); motion = c->mvf; }
     int guard = fg_env_i("DM_FG_GUARD", 1);
     if (guard && pp[13].mvl > 0 && (double)pp[13].mvs / 16.0 / (double)(c->lw[0] * c->lh[0]) > pp[13].mvl * 0.001 * (double)c->lw[0]) c->bails++;
-    if (guard) { pp[13] = (fg_params){.R = fg_env_i("DM_FG_WARP", 1), .lambda = fg_env_f("DM_FG_GT0", 0.6f), .zbias = fg_env_f("DM_FG_GT1", 1.2f), .pad = {0, fg_env_i("DM_FG_BAIL", 0)}, .sub = fg_env_i("DM_FG_STILL", 30), .mvs = 0, .mvl = fg_env_i("DM_FG_MVBAIL", 12), .gx = 0, .gy = 0};
+    if (guard) { pp[13] = (fg_params){.R = fg_env_i("DM_FG_WARP", 3), .coarse = fg_env_i("DM_FG_WARP", 3) == 3 ? fg_env_i("DM_FG_DETAIL3", 100) : fg_env_i("DM_FG_W2MODE", 0), .patch = fg_env_i("DM_FG_WARP", 3) == 3 ? fg_env_i("DM_FG_W3SMOOTH", 3) : fg_env_i("DM_FG_W2REF", 0), .lambda = fg_env_f("DM_FG_GT0", 0.6f), .zbias = fg_env_f("DM_FG_GT1", 1.2f), .pad = {0, fg_env_i("DM_FG_BAIL", 0)}, .sub = fg_env_i("DM_FG_STILL", 30), .mvs = 0, .mvl = fg_env_i("DM_FG_MVBAIL", 12), .gx = 0, .gy = 0};
         fg_disp(ce, c, c->ps_conf, @[c->pyr[i][0], c->pyr[j][0], motion, c->conf], 13, c->lw[0], c->lh[0]);
         if (pp[13].sub > 0) { fg_disp(ce, c, c->ps_pin, @[motion, c->conf, c->mvp], -1, c->lw[0], c->lh[0]); motion = c->mvp; } }
+    if (guard && pp[13].R == 3) {   // DM_FG_WARP=3: the in-between picture made here at the picture's size, MetalFX not used
+        id<MTLTexture> A = c->col[j], B = c->col[i];
+        if (c->full[i] && c->full[j] && c->full[j].width == c->full[i].width && c->full[j].height == c->full[i].height) { A = c->full[j]; B = c->full[i]; }
+        int full = A != c->col[j]; id<MTLTexture> D = full ? c->gfull : c->gout;
+        if (!D || D.width != B.width || D.height != B.height || D.pixelFormat != B.pixelFormat) {
+            D = fg_tex(c, B.pixelFormat, B.width, B.height, MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite); [c->res commit];
+            if (full) c->gfull = D; else c->gout = D; }
+        [c->at setAddress:c->params.gpuAddress + sizeof(fg_params) * 13 atIndex:1];
+        fg_disp(ce, c, c->ps_pick, @[c->col[j], c->col[i], motion, c->msel], -1, c->msel.width, c->msel.height);
+        fg_disp(ce, c, c->ps_interp, @[A, B, c->msel, D], -1, B.width, B.height);
+        [ce barrierAfterStages:MTLStageDispatch beforeQueueStages:MTLStageAll visibilityOptions:MTL4VisibilityOptionDevice];
+        [ce endEncoding];
+        return D;
+    }
     [ce barrierAfterStages:MTLStageDispatch beforeQueueStages:MTLStageAll visibilityOptions:MTL4VisibilityOptionDevice];
     [ce endEncoding];
     if (fg_env_i("DM_FG_NOFI", 0)) return c->col[i];

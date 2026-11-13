@@ -1376,9 +1376,9 @@ NVN(nvnCommandBufferClearColorui, void, NVNcommandBuffer *c, int index, const ui
 NVN(nvnCommandBufferClearDepthStencil, void, NVNcommandBuffer *c, float depth, uint32_t dmask, int stencil, int smask) {
     p_clear_ds *r = REC(c, OP_CLEAR_DS, p_clear_ds); *r = (p_clear_ds){depth, (int)B(dmask), stencil, smask};
 }
-// DM_NVN_SHADOW_TRACE=1 (diagnostic): while a command buffer's depth target is a Depth16 texture (a shadow map), its first 24 SetViewports print the
-// viewport, the target's size, the game's return address and the guest backtrace, to find the code that lays out a shadow atlas's tiles
-static _Thread_local const NVNcommandBuffer *g_shadow_cb; static _Thread_local unsigned g_shadow_w, g_shadow_h;
+// DM_NVN_SHADOW_TRACE=1 (diagnostic): while a command buffer's depth target is a Depth16 texture (a shadow map), viewports smaller than it print the
+// viewport, the target's size, the game's return address and the guest backtrace, once per calling site (up to 24), to find the code that lays out a shadow atlas's tiles
+static _Thread_local const NVNcommandBuffer *g_shadow_cb; static _Thread_local unsigned g_shadow_w, g_shadow_h; static _Thread_local int g_shadow_skip;
 static int shadow_trace_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_SHADOW_TRACE"); v = e && atoi(e) > 0; } return v; }
 static void shadow_trace_rt(const NVNcommandBuffer *c, const NVNtexture *dt) {
     if (!shadow_trace_on()) return;
@@ -1386,10 +1386,18 @@ static void shadow_trace_rt(const NVNcommandBuffer *c, const NVNtexture *dt) {
     if (t && t->magic == MAGIC('T','E','X',0) && t->d.format == NVN_FORMAT_DEPTH16) { g_shadow_cb = c; g_shadow_w = t->d.width; g_shadow_h = t->d.height; }
     else if (g_shadow_cb == c) g_shadow_cb = NULL;
 }
+// Only viewports smaller than the target (tiles; a full-target viewport is the pass setup) and one per calling site: the full-target ones from the pass
+// setup (main+0x13014c) filled the whole budget in the first run
+static void shadow_trace_vp(const NVNcommandBuffer *c, const float *v, uint64_t caller) {
+    if (!shadow_trace_on() || g_shadow_cb != c || !(v[2] < (float)g_shadow_w || v[3] < (float)g_shadow_h)) return;
+    static uint64_t seen[24]; static int n; static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
+    pthread_mutex_lock(&mu); int fresh = n < 24; for (int i = 0; i < n && fresh; i++) if (seen[i] == caller) fresh = 0; if (fresh) seen[n++] = caller; pthread_mutex_unlock(&mu);
+    if (!fresh) return;
+    LOG("shadow trace: viewport %g,%g %gx%g into a Depth16 %ux%u target, called from %#llx", v[0], v[1], v[2], v[3], g_shadow_w, g_shadow_h, (unsigned long long)caller);
+    void dm_backtrace(uint64_t fp); dm_backtrace((uint64_t)__builtin_frame_address(0));
+}
 NVN(nvnCommandBufferSetViewports, void, NVNcommandBuffer *c, int first, int n, const float *v) {
-    if (shadow_trace_on() && g_shadow_cb == c && n > 0) { static _Atomic int seen;
-        if (atomic_fetch_add(&seen, 1) < 24) { LOG("shadow trace: viewport %g,%g %gx%g into a Depth16 %ux%u target, called from %#llx", v[0], v[1], v[2], v[3], g_shadow_w, g_shadow_h, (unsigned long long)(uintptr_t)__builtin_return_address(0));
-            void dm_backtrace(uint64_t fp); dm_backtrace((uint64_t)__builtin_frame_address(0)); } }
+    if (n > 0 && !g_shadow_skip) shadow_trace_vp(c, v, (uint64_t)(uintptr_t)__builtin_return_address(0));
     if (n < 0 || first + n > 16) { LOG("[RED] SetViewports first=%d n=%d", first, n); return; }
     if (g_rec_compact && first >= 0) { uint8_t *q = crec(c, OPC_VIEWPORTS, (uint32_t)first | (uint32_t)n << 8, 16 * (size_t)n); memcpy(q, v, 16 * (size_t)n); return; }
     p_viewports *r = REC(c, OP_VIEWPORTS, p_viewports); r->first = first; r->n = n;
@@ -3276,7 +3284,7 @@ NVN(nvnCommandBufferDrawElementsIndirect, void, NVNcommandBuffer *c, NVNdrawPrim
 }
 
 // Viewport / scissor / depth range: single and multiple forms
-NVN(nvnCommandBufferSetViewport, void, NVNcommandBuffer *c, int x, int y, int w, int h) { float v[4] = {(float)x, (float)y, (float)w, (float)h}; h_nvnCommandBufferSetViewports(c, 0, 1, v); }
+NVN(nvnCommandBufferSetViewport, void, NVNcommandBuffer *c, int x, int y, int w, int h) { float v[4] = {(float)x, (float)y, (float)w, (float)h}; shadow_trace_vp(c, v, (uint64_t)(uintptr_t)__builtin_return_address(0)); g_shadow_skip = 1; h_nvnCommandBufferSetViewports(c, 0, 1, v); g_shadow_skip = 0; }
 NVN(nvnCommandBufferSetScissors, void, NVNcommandBuffer *c, int first, int n, const int *r) {
     if (first == 0 && n >= 1) h_nvnCommandBufferSetScissor(c, r[0], r[1], r[2], r[3]);
     if (first + n > 1) ONCE_LOG("SetScissors first=%d n=%d: the host uses only index 0", first, n);

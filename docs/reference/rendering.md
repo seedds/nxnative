@@ -1764,6 +1764,14 @@ The Vulkan layer (`dm/gfx/vk/hle_vk.m`) was written for Hades; Super Mario Galax
 - **Fix:** `hle_vk.m` keeps the set of descriptor sets that exist, and a free of one that is gone is ignored; a swap chain's image is marked, and `vkDestroyImage` of it is ignored (the swap chain owns it).
 - **Found on:** [Super Mario 64 (Super Mario 3D All-Stars)](../../dm/games/010049900F546001/README.md), on the way back to the launcher.
 
+### Layouts and render passes freed on destroy
+
+- **Symptom:** host memory that grows with each layout or render pass a game creates and destroys, and a pipeline's dynamic depth-stencil state kept after `vkDestroyPipeline`.
+- **Cause:** `vkDestroyDescriptorSetLayout`, `vkDestroyPipelineLayout` and `vkDestroyRenderPass` did nothing, because sets, pipelines and recorded commands kept pointers to them. `vkDestroyPipeline` freed the struct without clearing `dss_dyn`, and ARC does not release a `malloc`'d struct's strong fields.
+- **Fix:** Vulkan lets sets and pipelines outlive the layouts they were made with, so a set layout counts its holders (its handle, each set, each pipeline made with it) and the last one frees it. A pipeline copies its push-constant size and set layouts from its pipeline layout, which is then freed on destroy (commands ignore the layout argument). Commands are replayed at `vkQueueSubmit` and pipelines copy the attachment formats, so a render pass is freed on destroy, as a framebuffer already was: Vulkan does not let a command buffer that recorded it be submitted again. `vkDestroyPipeline` releases `dss_dyn`.
+- **Check:** `t_vk_desc` destroys a set layout and pipeline layout while a set and a pipeline made with them live, uses them, frees the set and destroys the pipeline (the last holder), with a weak reference on the dynamic depth-stencil state; it passes under ASan and Metal validation.
+- **Found on:** a code audit. [Hades](../../dm/games/0100535012974000/README.md) creates and destroys a render pass per pipeline (1,856 in its first minute, about 0.7 MB kept before); it destroys no layout or pipeline in that minute.
+
 ### Occlusion queries that span render encoders
 
 - **Symptom:** `[RED] occlusion query outside a render pass or past the buffer`; a query's result stays 0.

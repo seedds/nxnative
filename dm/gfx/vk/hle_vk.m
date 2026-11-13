@@ -208,7 +208,8 @@ struct VkFence_T { _Atomic uint64_t val; };   // 0 = signalled; FENCE_NONE = uns
 
 #define MAXB 64
 typedef struct { uint32_t binding, count, base; VkDescriptorType type; int dyn, imm; } lbind;   // base: first element in a set's array; dyn: first dynamic offset in the set (-1 if not dynamic)
-struct VkDescriptorSetLayout_T { uint32_t n, total, ndyn; lbind b[MAXB]; int8_t idx[128]; VkSampler *imm; };
+// refs: the handle and each set allocated from it (dsl_put frees on the last): Vulkan lets sets, and pipelines made with it, outlive vkDestroyDescriptorSetLayout
+struct VkDescriptorSetLayout_T { _Atomic int refs; uint32_t n, total, ndyn; lbind b[MAXB]; int8_t idx[128]; VkSampler *imm; };
 // A descriptor holds the Metal objects it was written with (retained), as a hardware descriptor holds a copy of the object's handle: a set may still name a view, sampler
 // or buffer the game has destroyed (the hardware reads it only when a draw samples it), and the replay binds every element of an array the shader takes. Descriptors
 // used to point at this layer's view / sampler / buffer structs, and Super Mario Galaxy 2 crashed reading a freed view's texture from element 1 of its 8-texture array
@@ -218,14 +219,15 @@ typedef struct { __strong id<MTLBuffer> buf; VkDeviceSize off; __strong id<MTLTe
 struct VkDescriptorPool_T { struct VkDescriptorSet_T *sets; };
 struct VkDescriptorSet_T { VkDescriptorSetLayout L; VkDescriptorPool pool; struct VkDescriptorSet_T *prev, *next; desc_t *d; };   // d: L->total descriptors (ARC objects: no flexible array)
 struct VkDescriptorUpdateTemplate_T { uint32_t n; VkDescriptorUpdateTemplateEntry e[]; };
-struct VkPipelineLayout_T { uint32_t nset, pc_size; VkDescriptorSetLayout set[8]; };   // pc_size: end of the highest push-constant range
+struct VkPipelineLayout_T { uint32_t nset, pc_size; VkDescriptorSetLayout set[8]; };   // pc_size: end of the highest push-constant range; pipelines copy what they use (pipe_make)
 
 typedef struct { VkFormat fmt; VkAttachmentLoadOp load, sload; VkAttachmentStoreOp store, sstore; } ratt;
 struct VkRenderPass_T { uint32_t natt, ncol; ratt att[16]; int col[8], res[8], depth; };
 struct VkFramebuffer_T { uint32_t n, w, h, layers; VkImageView v[16]; };
 struct VkPipeline_T {
     __strong id<MTLRenderPipelineState> pso; __strong id<MTLDepthStencilState> dss;
-    const shinfo *vs, *fs; uint32_t vb_mask; VkPipelineLayout layout;
+    const shinfo *vs, *fs; uint32_t vb_mask;
+    uint32_t pc_size, nset; VkDescriptorSetLayout set[8];   // from its pipeline layout, which may be destroyed first: the push-constant size, and the set layouts (held) for a missing binding's report
     MTLPrimitiveType prim; MTLCullMode cull; MTLWinding wind; MTLTriangleFillMode fill; MTLDepthClipMode clip;
     int bias; float bias_c, bias_s, bias_cl; float blend[4]; uint32_t sref_f, sref_b;
     int dyn_vp, dyn_sc, has_vp, has_sc; MTLViewport vp; VkRect2D sc;
@@ -718,7 +720,7 @@ static int is_dyn(VkDescriptorType t) { return t == VK_DESCRIPTOR_TYPE_UNIFORM_B
 VK(vkCreateDescriptorSetLayout, VkResult, VkDevice d, const VkDescriptorSetLayoutCreateInfo *ci, const VkAllocationCallbacks *a, VkDescriptorSetLayout *out) {
     (void)d; (void)a;
     if (ci->bindingCount > MAXB) { LOG("[vk] [RED] descriptor set layout with %u bindings, over %d", ci->bindingCount, MAXB); return VK_ERROR_OUT_OF_HOST_MEMORY; }
-    VkDescriptorSetLayout L = zalloc(sizeof *L); memset(L->idx, -1, sizeof L->idx);
+    VkDescriptorSetLayout L = zalloc(sizeof *L); memset(L->idx, -1, sizeof L->idx); L->refs = 1;
     const VkDescriptorSetLayoutBinding *src[MAXB];
     for (uint32_t i = 0; i < ci->bindingCount; i++) {   // sorted by binding number: the order dynamic offsets are consumed in
         uint32_t j = i; src[i] = &ci->pBindings[i];
@@ -745,7 +747,8 @@ VK(vkCreateDescriptorSetLayout, VkResult, VkDevice d, const VkDescriptorSetLayou
     if (L->ndyn > 16) LOG("[vk] [RED] %u dynamic offsets in one set, over 16", L->ndyn);
     *out = L; return VK_SUCCESS;
 }
-VK(vkDestroyDescriptorSetLayout, void, VkDevice d, VkDescriptorSetLayout L, const VkAllocationCallbacks *a) { (void)d; (void)L; (void)a; }   // kept: sets allocated from it still read it
+static void dsl_put(VkDescriptorSetLayout L) { if (L && atomic_fetch_sub(&L->refs, 1) == 1) { free(L->imm); free(L); } }
+VK(vkDestroyDescriptorSetLayout, void, VkDevice d, VkDescriptorSetLayout L, const VkAllocationCallbacks *a) { (void)d; (void)a; dsl_put(L); }   // sets allocated from it keep it (refs)
 VK(vkCreateDescriptorPool, VkResult, VkDevice d, const VkDescriptorPoolCreateInfo *ci, const VkAllocationCallbacks *a, VkDescriptorPool *out) {
     (void)d; (void)ci; (void)a; *out = zalloc(sizeof **out); return VK_SUCCESS;
 }
@@ -764,7 +767,7 @@ static void set_free(VkDescriptorSet s) {
     if (s->prev) s->prev->next = s->next; else p->sets = s->next;
     if (s->next) s->next->prev = s->prev;
     for (uint32_t k = 0; k < s->L->total; k++) s->d[k] = (desc_t){0};   // releases what the descriptors hold
-    free(s->d); free(s);
+    dsl_put(s->L); free(s->d); free(s);
 }
 VK(vkResetDescriptorPool, VkResult, VkDevice d, VkDescriptorPool p, VkDescriptorPoolResetFlags f) { (void)d; (void)f; while (p->sets) set_free(p->sets); return VK_SUCCESS; }
 VK(vkDestroyDescriptorPool, void, VkDevice d, VkDescriptorPool p, const VkAllocationCallbacks *a) { (void)a; if (p) { h_vkResetDescriptorPool(d, p, 0); free(p); } }
@@ -773,7 +776,7 @@ VK(vkAllocateDescriptorSets, VkResult, VkDevice d, const VkDescriptorSetAllocate
     for (uint32_t i = 0; i < ai->descriptorSetCount; i++) {
         VkDescriptorSetLayout L = ai->pSetLayouts[i];
         VkDescriptorSet s = zalloc(sizeof *s); s->d = zalloc(umax(1, L->total) * sizeof(desc_t));
-        s->L = L; s->pool = ai->descriptorPool; s->next = s->pool->sets; if (s->next) s->next->prev = s; s->pool->sets = s; set_live(s, 1);
+        atomic_fetch_add(&L->refs, 1); s->L = L; s->pool = ai->descriptorPool; s->next = s->pool->sets; if (s->next) s->next->prev = s; s->pool->sets = s; set_live(s, 1);
         if (L->imm) for (uint32_t k = 0; k < L->total; k++) s->d[k].smp = L->imm[k] ? L->imm[k]->s : nil;
         out[i] = s;
     }
@@ -850,7 +853,7 @@ VK(vkCreatePipelineLayout, VkResult, VkDevice d, const VkPipelineLayoutCreateInf
     if (l->pc_size > 256) { LOG("[vk] [RED] push constant range %u bytes, over 256", l->pc_size); l->pc_size = 256; }
     *out = l; return VK_SUCCESS;
 }
-VK(vkDestroyPipelineLayout, void, VkDevice d, VkPipelineLayout l, const VkAllocationCallbacks *a) { (void)d; (void)l; (void)a; }   // kept: pipelines point at it
+VK(vkDestroyPipelineLayout, void, VkDevice d, VkPipelineLayout l, const VkAllocationCallbacks *a) { (void)d; (void)a; free(l); }   // pipelines copied what they use; commands ignore the layout
 
 // ---------- Render passes, framebuffers ----------
 VK(vkCreateRenderPass, VkResult, VkDevice d, const VkRenderPassCreateInfo *ci, const VkAllocationCallbacks *a, VkRenderPass *out) {
@@ -872,7 +875,8 @@ VK(vkCreateRenderPass, VkResult, VkDevice d, const VkRenderPassCreateInfo *ci, c
     if (sp->inputAttachmentCount) RED1("input attachments not implemented");
     *out = rp; return VK_SUCCESS;
 }
-VK(vkDestroyRenderPass, void, VkDevice d, VkRenderPass rp, const VkAllocationCallbacks *a) { (void)d; (void)rp; (void)a; }   // kept: recorded commands may still name it
+// Commands are replayed at vkQueueSubmit and pipelines copy the formats, so nothing reads a render pass after its destroy: a command buffer that recorded it may not be submitted again (Vulkan), as for framebuffers
+VK(vkDestroyRenderPass, void, VkDevice d, VkRenderPass rp, const VkAllocationCallbacks *a) { (void)d; (void)a; free(rp); }
 VK(vkCreateFramebuffer, VkResult, VkDevice d, const VkFramebufferCreateInfo *ci, const VkAllocationCallbacks *a, VkFramebuffer *out) {
     (void)d; (void)a;
     if (ci->attachmentCount > 16) { LOG("[vk] [RED] framebuffer with %u attachments", ci->attachmentCount); return VK_ERROR_OUT_OF_HOST_MEMORY; }
@@ -964,7 +968,11 @@ static id<MTLFunction> spec_fn(id<MTLFunction> fn, const char *key, int dual, co
     return f;
 }
 static VkPipeline pipe_make(const VkGraphicsPipelineCreateInfo *ci) {
-    VkPipeline p = zalloc(sizeof *p); p->layout = ci->layout;
+    VkPipeline p = zalloc(sizeof *p);
+    if (ci->layout) {
+        p->pc_size = ci->layout->pc_size; p->nset = ci->layout->nset;
+        for (uint32_t i = 0; i < p->nset; i++) if ((p->set[i] = ci->layout->set[i])) atomic_fetch_add(&p->set[i]->refs, 1);
+    }
     @autoreleasepool {
         MTLRenderPipelineDescriptor *pd = [MTLRenderPipelineDescriptor new];
         char keys[64] = ""; int dual = dual_source(ci->pColorBlendState);
@@ -1075,7 +1083,7 @@ VKB(vkCreateGraphicsPipelines, VkResult, VkDevice d, VkPipelineCache c, uint32_t
     for (uint32_t i = 0; i < n; i++) out[i] = pipe_make(&ci[i]);   // a pipeline Metal refuses is still handed out: its draws are skipped
     return VK_SUCCESS;
 }
-VKB(vkDestroyPipeline, void, VkDevice d, VkPipeline p, const VkAllocationCallbacks *a) { (void)d; (void)a; if (p) { p->pso = nil; p->dss = nil; free(p); } }
+VKB(vkDestroyPipeline, void, VkDevice d, VkPipeline p, const VkAllocationCallbacks *a) { (void)d; (void)a; if (p) { p->pso = nil; p->dss = nil; p->dss_dyn = nil; for (uint32_t i = 0; i < p->nset; i++) dsl_put(p->set[i]); free(p); } }   // ARC does not release a malloc'd struct's strong fields
 
 // ---------- Command buffers: recording ----------
 enum { C_BRP = 1, C_ERP, C_PIPE, C_SETS, C_VB, C_IB, C_VP, C_SC, C_DRAWI, C_COPYB, C_COPYB2I, C_DRAW, C_PUSH, C_COPYI, C_COPYI2B, C_QRESET, C_QTS, C_QBEGIN, C_QEND, C_CLEARI, C_STENCIL };
@@ -1315,7 +1323,7 @@ static void bind_res(rs_t *s, const shinfo *si, int frag) {
         if (bi < 0 || !L->b[bi].count) {
             char have[256] = ""; size_t o = 0;
             for (uint32_t k = 0; k < L->n && o + 8 < sizeof have; k++) o += snprintf(have + o, sizeof have - o, " %u", L->b[k].binding);
-            const VkPipelineLayout pl = s->pipe->layout; const VkDescriptorSetLayout PL = pl && r->set < pl->nset ? pl->set[r->set] : NULL;
+            const VkDescriptorSetLayout PL = r->set < s->pipe->nset ? s->pipe->set[r->set] : NULL;
             RED1("shader %s: %u.%u is not in the bound set's layout %p (it has:%s); the pipeline layout's set %u is %p%s", si->key, r->set, r->binding, (void *)L, have, r->set, (void *)PL,
                  PL && r->binding < 128 && PL->idx[r->binding] >= 0 ? ", which has this binding: the set was not rebound with the pipeline" : "");
             continue;
@@ -1348,7 +1356,7 @@ static void bind_push(rs_t *s, const shinfo *si, int frag) {   // the push-const
     if (!si) return;
     for (int i = 0; i < si->nres; i++) {
         if (si->res[i].kind != 'p') continue;
-        const VkPipelineLayout l = s->pipe->layout; uint32_t n = (umax(l ? l->pc_size : 0, 16) + 15) & ~15u;
+        uint32_t n = (umax(s->pipe->pc_size, 16) + 15) & ~15u;
         if (frag) [s->re setFragmentBytes:s->pc length:n atIndex:si->res[i].slot]; else [s->re setVertexBytes:s->pc length:n atIndex:si->res[i].slot];
     }
 }

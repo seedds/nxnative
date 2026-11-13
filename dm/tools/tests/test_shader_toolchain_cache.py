@@ -267,6 +267,21 @@ class ShaderCache(unittest.TestCase):
         self.assertEqual(sorted(p.name for p in img.iterdir()), sorted([a + '_b.metal', a + '_b.metallib', b + '_b.metal', b + '_b.metallib', 'inputs.tsv']))
         self.assertEqual((img / (a + '_b.metallib')).read_bytes(), a.encode())
 
+    def test_first_build_preserves_deduplication_from_staging_to_image(self):
+        out = Path(self.ns['out']); payload = b'compiled library' * 1024
+        names = [f'{i:016x}_b.metallib' for i in range(12)]
+        for name in names:
+            (out / name).write_bytes(payload)
+            self.ns['commit'](name.split('_')[0])
+        self.assertEqual(self.ns['STORE'].db.execute('SELECT count(*) FROM blob').fetchone()[0], 1)
+        self.ns['publish_library']('mac')
+        image = romfs.Image(shader_lib.image_of(str(out)))
+        self.assertEqual(len({image.entry(image.find(n))[:2] for n in names}), 1,
+                         'publishing must not expand one staged blob into a copy per shader key')
+        for name in names: self.assertEqual((shader_lib.view(out) / name).read_bytes(), payload)
+        self.assertFalse(out.exists())
+        self.assertEqual(self.ns['STORE'].names('stage/'), set())
+
     def test_partial_build_keeps_the_image_less_the_keys_it_builds(self):
         out, built, kept = Path(self.ns['out']), '1' * 16, '2' * 16
         shader_lib.write({built + '_b.metal': b'old', built + '_bf.metallib': b'old variant', kept + '_b.metal': b'kept', 'inputs.tsv': b'game\tid\ninputs\told\n'},

@@ -142,8 +142,11 @@ void dm_guest_write_prep_register(void (*fn)(void *addr, size_t len)) {
 void dm_guest_write_prepare(void *addr, size_t len) { for (int i = 0; i < g_nwrite_prep; i++) g_write_prep[i](addr, len); }
 
 // The diagnostics module (the probes in diag.c) and the thread state dump (hle_thread.c) each register themselves here: a unit test that links only this file does not depend on them
-static int (*g_trap_hook)(ucontext_t *uc);
-void crash_set_trap_hook(int (*fn)(ucontext_t *uc)) { g_trap_hook = fn; }
+// A list, not one slot: several parts register themselves (the probes, the thread state dump), and the last one
+// used to overwrite every earlier one -- with two registrants the first one silently stopped working
+static int (*g_trap_hook[4])(ucontext_t *uc);
+static int g_ntrap_hook;
+void crash_set_trap_hook(int (*fn)(ucontext_t *uc)) { if (g_ntrap_hook < (int)(sizeof g_trap_hook / sizeof *g_trap_hook)) g_trap_hook[g_ntrap_hook++] = fn; }
 void crash_set_dump_hook(void (*fn)(void)) { g_dump_hook = fn; }
 void crash_set_wait_dump(void (*fn)(void)) { g_wait_dump = fn; }
 // Dump the current state on demand (without exiting): the iOS app has no no-progress watchdog, so when the smoke test fails it sends dump through DM_LOG_PORT to trigger this -- what each guest thread is waiting on + the graphics-side wait points, the same thing the watchdog prints
@@ -161,7 +164,7 @@ __attribute__((weak)) void dm_gfx_addr_note(uint64_t a, char *note, size_t n) { 
 __attribute__((weak)) void dm_vm_census(FILE *f) { (void)f; }   // memstat.m provides the strong definition (tests that link crash.c alone have none)
 static void on_crash(int sig, siginfo_t *si, void *uc_) {
     ucontext_t *uc = uc_;
-    if (sig == SIGTRAP && g_trap_hook && g_trap_hook(uc)) return;
+    if (sig == SIGTRAP) for (int i = 0; i < g_ntrap_hook; i++) if (g_trap_hook[i](uc)) return;
     if (sig == SIGSEGV || sig == SIGBUS) {
         int is_write = (int)((uc->uc_mcontext->__es.__esr >> 6) & 1);   // The WnR bit of ESR
         for (int i = 0; i < g_nfault_hook; i++) if (g_fault_hook[i](si->si_addr, is_write, uc)) return;

@@ -261,5 +261,30 @@ class AddressRegions(unittest.TestCase):
         self.assertEqual(pg.region_findings('', 0x118000000), [])
 
 
+class StaticNroPayload(unittest.TestCase):
+    """A statically linked payload NRO has no dynamic table: the host API names its bytes reference stand in for its imports,
+    and a runtime that resolves Vulkan with its own loader (this fork's wine-nx ports) is taken for a Vulkan game."""
+    def test_an_nro_without_a_dynamic_table_reports_the_api_names_it_references(self):
+        with tempfile.TemporaryDirectory() as d:
+            b = bytearray(0x40); b[0x10:0x14] = b'NRO0'; b += b'\0heap\0vkCreateInstance\0eglCreateWindowSurface\0'
+            (Path(d) / 'wine-nx-runtime.nro').write_bytes(bytes(b))
+            with mock.patch.object(pg.nso_syms, 'dynsyms', lambda img: []):
+                self.assertEqual(pg.romfs_nro_imports(d), {'vkCreateInstance', 'eglCreateWindowSurface'})
+
+    def test_an_nro_with_imports_uses_those_and_not_its_strings(self):
+        with tempfile.TemporaryDirectory() as d:
+            b = bytearray(0x40); b[0x10:0x14] = b'NRO0'; b += b'\0vkCreateInstance\0'
+            (Path(d) / 'plugin.nro').write_bytes(bytes(b))
+            with mock.patch.object(pg.nso_syms, 'dynsyms', lambda img: [('nvnBootstrapLoader', False, 1)]):
+                self.assertEqual(pg.romfs_nro_imports(d), {'nvnBootstrapLoader'})
+
+    def test_nro_vulkan_names_make_the_game_vulkan(self):
+        self.assertEqual(pg.shader_sources(set(), 0, [], 0, 0, 0, nro_imports=frozenset({'vkCreateInstance'}))['graphics'][0], 'vulkan')
+
+    def test_an_nro_that_imports_nvn_stays_nvn(self):
+        s = pg.shader_sources(set(), 0, [], 0, 0, 0, nro_imports=frozenset({'vkCreateInstance', 'nvnBootstrapLoader'}))
+        self.assertEqual(s['graphics'][0], 'nvn')
+
+
 if __name__ == '__main__':
     unittest.main()

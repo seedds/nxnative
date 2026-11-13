@@ -280,6 +280,7 @@ DM_PRESENT_LATENCY	switch	`=1` or `2`: overrides the display link's preferred fr
 DM_PRESENT_LINK	switch	Present pacing: `0` acquires the drawable itself, `1` (the default) presents on a 60 Hz display link, `2` uses a 120 Hz display link with a frame every other tick. Unset, a 60 fps game in fullscreen on a variable-refresh screen that keeps its variable mode (no fixed-rate mode, or `DM_SCREEN_MATCH=0`) at a multiple of 120 Hz takes the 120 Hz link of `2`; a value set here holds in every window and screen mode
 DM_PRESENT_SNAP	player	`=<n>`: present snapshots, a ring of n host textures (2 to 4; `1` = 2) the presents are copied to so the game's swapchain texture is free at once; `0` off (default: the profile's `present_snap`)
 DM_PRESENT_UPSCALE	player	`metalfx` scales a picture smaller than its rectangle on the screen through MetalFX's spatial scaler; `off` (the default) scales it bilinearly
+DM_PRESENT_UPSCALE_OUT	player	`=1.0`..`4.0` makes `DM_PRESENT_UPSCALE=metalfx` reconstruct at that share of the viewport, which the present then averages back down (supersampling); `1.0` (the default) reconstructs at the viewport
 DM_PREV_PROGRAM	switch	What `oe::GetPreviousProgramIndex` answers (default -1, started from HOME); `oe::ExecuteProgram` sets it for the program it starts; a relaunch removes it
 DM_PROBE	diagnostic	`=module:offset,…` (Mac only): puts a `brk` at each guest address and on every hit prints the thread, registers, strings they point to and a backtrace, then runs the original instruction
 DM_PROBE_ALL	diagnostic	Set: probe hits (`DM_PROBE`) also print x8–x18
@@ -360,6 +361,7 @@ DM_SHADER_FILES	switch	`1` packs an NVN game's shader library into the unsigned 
 DM_SHAKE_G	switch	`=<G>`: on iOS, the acceleration beyond gravity above which a flick of the phone shakes the controller's six-axis sensor (default 1.5)
 DM_SHARED_FONT	path	Font file served for every shared-font type except the Nintendo extension (default `$DM_FONT_DIR/standard.ttf`, then macOS's Arial Unicode)
 DM_SHARED_FONT_EXT	path	Font file served for shared-font type 5, the Nintendo extension with the button icons (default `$DM_FONT_DIR/nintendo_ext.ttf`, made by `make_ext_font.py`)
+DM_SHARPEN	player	`=0`..`1` sharpens the presented picture (contrast adaptive, clamped to the neighbourhood); `0` (the default) is off
 DM_SHOW_FPS	player	`1` shows the frame-rate counter on the iPhone (frames put on screen per second, top left); at IPA build it sets `DMShowFPS` in `Info.plist`, which `Documents/env.txt` overrides
 DM_SIX_DELAY	switch	`=0` (the default), `=auto` or `=<ms>` (up to 40): `DM_IMU_DELAY`'s playout delay for the six-axis states (`GetSixAxisSensorStates`) instead of the IMU samples. None by default: a Switch 1 game reads the newest state each frame (aiming, steering), so a delay only adds latency. Also through `DM_CTL`'s `env`
 DM_SLOWFRAME	diagnostic	`=1` writes the per-frame timing breakdown to the log only for dropped frames (kept in a ring of the last 16 frames, judged 8 frames late)

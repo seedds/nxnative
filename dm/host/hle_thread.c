@@ -95,6 +95,7 @@ typedef struct thr {
     sync_ref_t wobjs[MAX_SYNC_OBJECTS]; int wn, widx;   // WaitSynchronization's retained objects (the first wn) and the index the completing signal recorded, independent of handle reuse and guest memory (Horizon: KThread's sync object buffer)
     int ctx_ok; uint64_t ctx_x[29], ctx_fp, ctx_lr, ctx_sp, ctx_pc; uint32_t ctx_pstate, ctx_fpcr, ctx_fpsr; __uint128_t ctx_v[32];
     pthread_cond_t pcv;
+    _Atomic int sig_pend;   // wakes of this thread signalled after G is let go and not signalled yet (g_unlock): thr_free waits for them
 } thr_t;
 static thr_t *g_all;
 extern __thread _Atomic int dm_host_work;   // declared in hle.h too; defined in hle_nvn.c
@@ -102,11 +103,30 @@ static _Atomic uint64_t g_preempt_n, g_preempt_ns;   // same-core handoffs: coun
 static int g_core_preempt;   // also check already-runnable peers after every thread SVC (profile / DM_PREEMPT)
 
 static pthread_mutex_t G = PTHREAD_MUTEX_INITIALIZER;
+// A wake is signalled after the waker lets G go: signalled while it held G, the woken thread woke into G still held and slept again on it (BotW's main thread on the Mac:
+// _pthread_mutex_firstfit_lock_slow under its cond_wait, about 5% of its busy time). wake() keeps the thread in a short per-thread list and g_unlock signals it after the
+// unlock; a thread that waits on a condition with G first signals its list (wake_flush), and thr_free waits out a signal in flight (sig_pend). DM_WAKE_UNLOCKED=0: as before
+enum { WDEF = 8 };
+static __thread struct thr *t_wdef[WDEF]; static __thread int t_nwdef;
+static int g_wake_unlocked = -1;
+static inline void wake_flush(void);
+static inline void g_unlock(void);
 #define MAX_H 4096
 static struct { int type; void *obj; } g_h[MAX_H];
 static pthread_key_t g_keythr;
 static uint64_t g_next_id = 0x51;
 static thr_t *g_wait;          // All waiting threads (lock / condition / address / synchronization)
+static inline void wake_flush(void) {   // holding G
+    for (int i = 0; i < t_nwdef; i++) { pthread_cond_signal(&t_wdef[i]->cv); atomic_fetch_sub_explicit(&t_wdef[i]->sig_pend, 1, memory_order_release); }
+    t_nwdef = 0;
+}
+static inline void g_unlock(void) {
+    int n = t_nwdef; thr_t *d[WDEF];
+    for (int i = 0; i < n; i++) d[i] = t_wdef[i];
+    t_nwdef = 0;
+    pthread_mutex_unlock(&G);
+    for (int i = 0; i < n; i++) { pthread_cond_signal(&d[i]->cv); atomic_fetch_sub_explicit(&d[i]->sig_pend, 1, memory_order_release); }
+}
 
 static uint32_t h_new(int type, void *obj) {     // Caller holds G
     for (int i = 1; i < MAX_H; i++) if (!g_h[i].type) { g_h[i].type = type; g_h[i].obj = obj; return 0x1000 + i; }
@@ -162,7 +182,7 @@ void dm_thread_service_connect(void) {
         int waiting = 0;
         pthread_mutex_lock(&G);
         for (thr_t *t = g_all; t; t = t->all) if (t->started && !t->entered && !t->exited && !t->host_owned) waiting = 1;
-        pthread_mutex_unlock(&G);
+        g_unlock();
         if (!waiting || now_ns() >= end) break;
         usleep(50);
     }
@@ -174,7 +194,7 @@ void dm_thread_service_request(void) {
     thr_t *me = pthread_getspecific(g_keythr);
     if (!me) return;
     pthread_mutex_lock(&G);
-    if (!me->nhand) { pthread_mutex_unlock(&G); return; }
+    if (!me->nhand) { g_unlock(); return; }
     thr_t *by = me->start_by; uint64_t epoch = me->start_epoch;
     hand_leave(me);
     me->start_by = by;   // thr_free clears it if the starter goes away during the wait
@@ -182,12 +202,12 @@ void dm_thread_service_request(void) {
     uint64_t t0 = by ? now_ns() : 0; int back = 0;
     while (me->start_by && now_ns() - t0 < SERVICE_START_WAIT_NS) {
         if (atomic_load(&me->start_by->hand_epoch) != epoch) { back = 1; break; }
-        pthread_mutex_unlock(&G);
+        g_unlock();
         { struct timespec ts = {0, 50000}; nanosleep(&ts, 0); }
         pthread_mutex_lock(&G);
     }
     me->start_by = NULL; me->native_wait--;
-    pthread_mutex_unlock(&G);
+    g_unlock();
     if (back) { struct timespec ts = {0, SERVICE_ROUND_TRIP_NS}; nanosleep(&ts, 0); }
 }
 // A native HLE condition wait is a guest blocking boundary, like a kernel wait.
@@ -200,7 +220,7 @@ void dm_thread_native_wait(int entering) {
     pthread_mutex_lock(&G);
     if (entering) { t->native_wait++; hand_leave(t); }
     else { if (!t->native_wait) die("unbalanced native HLE wait"); t->native_wait--; }
-    pthread_mutex_unlock(&G);
+    g_unlock();
 }
 
 // The peers a handoff waits for are the ones it made runnable, not every runnable higher-priority thread of the core. The host runs a
@@ -221,7 +241,7 @@ int dm_yield_to_core_peers(int all) {
         pthread_mutex_lock(&G);
         for (thr_t *t = g_all; t && !busy; t = t->all)
             if (t != self && t->started && !t->exited && !t->host_owned && t->mask == bit && t->prio < self->prio && thr_runnable(t) && (all || thr_in_handoff(t, self))) busy = 1;
-        pthread_mutex_unlock(&G);
+        g_unlock();
         if (!busy) return waited;
         { struct timespec ts = {0, 50000}; nanosleep(&ts, 0); } waited = 1;
     }
@@ -266,7 +286,12 @@ static void note_runnable(thr_t *t) {
     if (t->prio < self->prio && t->mask == 1ull << (self->core & 63) && !(self->mask & ~t->mask)) self->yield_pending = 1;   // a waker that can run on another core is not held (dm_yield_to_core_peers)
 }
 static void wake(thr_t *t, int64_t res) {
-    wait_unlink(t); t->wkind = 0; t->woke = 1; t->wres = res; pthread_cond_signal(&t->cv);
+    wait_unlink(t); t->wkind = 0; t->woke = 1; t->wres = res;
+    if (g_wake_unlocked < 0) { const char *e = getenv("DM_WAKE_UNLOCKED"); g_wake_unlocked = !e || atoi(e); }
+    int listed = 0; for (int i = 0; i < t_nwdef; i++) listed |= t_wdef[i] == t;
+    if (listed) ;
+    else if (g_wake_unlocked && t_nwdef < WDEF) { atomic_fetch_add_explicit(&t->sig_pend, 1, memory_order_relaxed); t_wdef[t_nwdef++] = t; }
+    else pthread_cond_signal(&t->cv);
     note_runnable(t);
 }
 // Suspend until woken or timed out (ns<0 infinite, 0 immediate timeout); returns wres or R_TIMEOUT
@@ -279,6 +304,7 @@ static int64_t block(thr_t *t, int kind, int64_t ns) {
     uint64_t guest_deadline = det_wait ? guest_ns() + (uint64_t)ns : 0;
     if (ns > 0 && !det_wait) { clock_gettime(CLOCK_REALTIME, &dl); dl.tv_sec += ns / 1000000000; dl.tv_nsec += ns % 1000000000;
                   if (dl.tv_nsec >= 1000000000) { dl.tv_sec++; dl.tv_nsec -= 1000000000; } }
+    wake_flush();   // the wakes this SVC made before it waits: G is let go inside the wait, not through g_unlock
     while (!t->woke) {
         int rc;
         if (det_wait) {
@@ -354,16 +380,18 @@ static void *thread_main(void *p) {
     qos_class_t qc = QOS_CLASS_UNSPECIFIED; int rp = 0;
     pthread_get_qos_class_np(pthread_self(), &qc, &rp); t->qos = (uint32_t)qc;
     t->mport = pthread_mach_thread_np(pthread_self()); t->host_work = &dm_host_work;
-    pthread_mutex_unlock(&G);
+    g_unlock();
     crash_thread_init();
     guest_thread_init(); guest_thread_set_id(t->id);
     guest_gate_stack(1);   // the guest runs on its own stack from dm_thread_enter on: this pthread's stack below this frame is where its SVCs run
-    pthread_mutex_lock(&G); while (!t->started) pthread_cond_wait(&t->cv, &G); t->entered = 1; pthread_mutex_unlock(&G);
+    pthread_mutex_lock(&G); while (!t->started) pthread_cond_wait(&t->cv, &G); t->entered = 1; g_unlock();
     { char nb[48], hn[64]; snprintf(hn, sizeof hn, "%#x %s", t->handle, thr_name(t, nb, sizeof nb)); pthread_setname_np(hn); }   // the guest's name (set before StartThread) for sample / Instruments
     dm_thread_enter(t->entry, t->arg, t->stack_top);   // Does not return: the guest must exit through ExitThread
     die("guest thread entry returned");
 }
 static void thr_free(thr_t *t) {   // Holding G; unlink from the all-threads chain and free
+    for (int i = 0; i < t_nwdef; ) if (t_wdef[i] == t) { atomic_fetch_sub_explicit(&t->sig_pend, 1, memory_order_relaxed); t_wdef[i] = t_wdef[--t_nwdef]; } else i++;   // its own list: nothing left to wake
+    while (atomic_load_explicit(&t->sig_pend, memory_order_acquire)) sched_yield();   // another waker's signal after its unlock (it needs no G)
     for (thr_t **p = &g_all; *p; p = &(*p)->all) if (*p == t) { *p = t->all; break; }
     for (thr_t *u = g_all; u; u = u->all)   // no handoff entry may point at the freed object (note_runnable reads the waker's epoch)
     {
@@ -381,7 +409,7 @@ static void thread_exit(thr_t *t) {
     wake_sync_waiters(t);   // Complete synchronization waits on this thread
     pthread_setspecific(g_keythr, NULL);
     if (t->closed && !t->sync_refs) thr_free(t);
-    pthread_mutex_unlock(&G);
+    g_unlock();
     pthread_exit(NULL);
 }
 void dm_thread_returned(void) { die("guest thread entry function returned (Horizon requires ExitThread)"); }
@@ -412,27 +440,27 @@ static void on_pause_sig(int sig, siginfo_t *si, void *uc_) {
         t->ctx_sp = __darwin_arm_thread_state64_get_sp(*ss) - 32; t->ctx_pc = __darwin_arm_thread_state64_get_pc(*ss); t->ctx_pstate = ss->__cpsr;
         memcpy(t->ctx_v, uc->uc_mcontext->__ns.__v, sizeof t->ctx_v); t->ctx_fpcr = uc->uc_mcontext->__ns.__fpcr; t->ctx_fpsr = uc->uc_mcontext->__ns.__fpsr;
         t->ctx_ok = 1;
-        while (t->pause_req) { t->paused = 1; pthread_cond_broadcast(&t->pcv); pthread_cond_wait(&t->pcv, &G); }
+        wake_flush(); while (t->pause_req) { t->paused = 1; pthread_cond_broadcast(&t->pcv); pthread_cond_wait(&t->pcv, &G); }
         t->paused = 0; t->ctx_ok = 0;
     }
-    pthread_mutex_unlock(&G);
+    g_unlock();
 }
 // called by the gate on SVC entry / exit (gate_dispatch in hle.c)
 void thr_svc_enter(uint64_t *regs, uint64_t pc) {
     thr_t *t = pthread_getspecific(g_keythr); if (!t) return;
     t->svc_pc = pc; t->svc_x18 = (uint64_t)(uintptr_t)pthread_getspecific(g_key18); atomic_store(&t->svc_regs, regs); atomic_fetch_or(&t->svc_state, 1);
     if (atomic_load_explicit(&t->qos_pending, memory_order_relaxed) && atomic_exchange(&t->qos_pending, 0)) {
-        pthread_mutex_lock(&G); qos_apply(t); pthread_mutex_unlock(&G);
+        pthread_mutex_lock(&G); qos_apply(t); g_unlock();
     }
-    if (atomic_load(&t->pause_req)) { pthread_mutex_lock(&G); if (t->pause_req && !t->paused) { t->paused = 1; pthread_cond_broadcast(&t->pcv); } pthread_mutex_unlock(&G); }
+    if (atomic_load(&t->pause_req)) { pthread_mutex_lock(&G); if (t->pause_req && !t->paused) { t->paused = 1; pthread_cond_broadcast(&t->pcv); } g_unlock(); }
 }
 void thr_svc_leave(void) {
     thr_t *t = pthread_getspecific(g_keythr); if (!t) return;
     int in = 1; if (atomic_compare_exchange_strong(&t->svc_state, &in, 0)) { atomic_store(&t->svc_regs, NULL); return; }   // no pause requested: G is not needed (every other thread's SVC takes it)
     pthread_mutex_lock(&G);
-    while (t->pause_req) { t->paused = 1; pthread_cond_broadcast(&t->pcv); pthread_cond_wait(&t->pcv, &G); }
+    wake_flush(); while (t->pause_req) { t->paused = 1; pthread_cond_broadcast(&t->pcv); pthread_cond_wait(&t->pcv, &G); }
     t->paused = 0; atomic_fetch_and(&t->svc_state, ~1); atomic_store(&t->svc_regs, NULL);
-    pthread_mutex_unlock(&G);
+    g_unlock();
 }
 static void pause_install(void) {
     struct sigaction sa = {.sa_sigaction = on_pause_sig, .sa_flags = SA_SIGINFO | SA_ONSTACK | SA_RESTART};
@@ -524,7 +552,7 @@ static void *hitch_main(void *arg) {
         seen = p; n++;
         LOG("hitch dump %d: no present for %.1f ms", n, (now - p) / 1e6);
         int nt = 0;
-        pthread_mutex_lock(&G); for (thr_t *t = g_all; t && nt < 256; t = t->all) if (t->started && !t->exited) hitch_grab(t, &hs[nt++]); pthread_mutex_unlock(&G);
+        pthread_mutex_lock(&G); for (thr_t *t = g_all; t && nt < 256; t = t->all) if (t->started && !t->exited) hitch_grab(t, &hs[nt++]); g_unlock();
         for (int k = 0; k < nt; k++) hitch_log(&hs[k]);
     }
     return NULL;
@@ -550,7 +578,7 @@ uint32_t svc_thread_main_init(void) {
     qos_apply(t);
     qos_class_t qc = QOS_CLASS_UNSPECIFIED; int rp = 0;
     pthread_get_qos_class_np(pthread_self(), &qc, &rp); t->qos = (uint32_t)qc;
-    pthread_mutex_lock(&G); t->handle = h_new(O_THREAD, t); t->id = g_next_id++; t->all = g_all; g_all = t; pthread_mutex_unlock(&G);
+    pthread_mutex_lock(&G); t->handle = h_new(O_THREAD, t); t->id = g_next_id++; t->all = g_all; g_all = t; g_unlock();
     pthread_setspecific(g_keythr, t);
     guest_thread_set_id(t->id);   // main.c ran guest_thread_init before this, and no guest code has run yet
     pthread_setname_np("0x1001 main thread");
@@ -568,7 +596,7 @@ uint32_t dm_guest_work_qos(unsigned *count) {
         if (!n) qos = t->qos; else if (qos != t->qos) qos = UINT32_MAX;
         n++;
     }
-    pthread_mutex_unlock(&G);
+    g_unlock();
     if (count) *count = n;
     return qos;
 }
@@ -611,7 +639,7 @@ void dm_guest_clock_advanced(void) {
     if (!dm_detclock_enabled()) return;
     pthread_mutex_lock(&G);
     for (thr_t *t = g_wait; t; t = t->next) if (t->wkind) pthread_cond_signal(&t->cv);
-    pthread_mutex_unlock(&G);
+    g_unlock();
 }
 
 // Handle thread / synchronization SVCs; returns 1 = handled
@@ -627,7 +655,7 @@ int thr_list(pthread_t *out, int max) {
     int n = 0;
     pthread_mutex_lock(&G);
     for (thr_t *t = g_all; t && n < max; t = t->all) if (!t->exited && t->started) out[n++] = t->pt;
-    pthread_mutex_unlock(&G);
+    g_unlock();
     return n;
 }
 // Soak readings (DM_SOAK): handle table usage, live guest threads, total thread objects (including exited but not yet freed)
@@ -636,7 +664,7 @@ void thr_counts(int *handles, int *live, int *objs) {
     pthread_mutex_lock(&G);
     for (int i = 1; i < MAX_H; i++) nh += g_h[i].type != O_FREE;
     for (thr_t *t = g_all; t; t = t->all) { no++; nl += t->started && !t->exited; }
-    pthread_mutex_unlock(&G);
+    g_unlock();
     *handles = nh; *live = nl; *objs = no;
 }
 // The game's threads that hold a slot of the process's thread resource limit, as Horizon counts them: created (started or not) and not yet exited (GetInfo FreeThreadCount, hle_svc.c).
@@ -645,7 +673,7 @@ int thr_limit_used(void) {
     int n = 0;
     pthread_mutex_lock(&G);
     for (thr_t *t = g_all; t; t = t->all) n += !t->exited && !t->host_owned;
-    pthread_mutex_unlock(&G);
+    g_unlock();
     return n;
 }
 // Get the guest thread name by pthread (used by per-thread CPU sampling DM_THRCPU, memstat.m): returns 0 if not a guest thread
@@ -653,7 +681,7 @@ int thr_name_of(pthread_t pt, char *out, size_t n) {
     int ok = 0; char nb[64];
     pthread_mutex_lock(&G);
     for (thr_t *t = g_all; t; t = t->all) if (t->pt == pt && !t->exited) { snprintf(out, n, "%#x %s", t->handle, thr_name(t, nb, sizeof nb)); ok = 1; break; }
-    pthread_mutex_unlock(&G);
+    g_unlock();
     return ok;
 }
 uint32_t thr_cur_handle(void) { thr_t *t = pthread_getspecific(g_keythr); return t ? t->handle : 0; }   // Only reads TSD, usable in a signal handler
@@ -662,7 +690,7 @@ int thr_find_by_name(const char *name, pthread_t *out) {
     char nb[32]; int ok = 0;
     pthread_mutex_lock(&G);
     for (thr_t *t = g_all; t; t = t->all) if (!t->exited && !strcmp(thr_name(t, nb, sizeof nb), name)) { *out = t->pt; ok = 1; break; }
-    pthread_mutex_unlock(&G);
+    g_unlock();
     return ok;
 }
 // State dump (called from crash.c on watchdog / crash; read-only, takes no lock): what each guest thread is waiting on and where its most recent SVC was issued from
@@ -971,7 +999,7 @@ void dm_yield_top(char *out, size_t n) {
         if (o < n && s[i]) o += snprintf(out + o, n - o, "; spin passes %llu, last at %s+%#llx", (unsigned long long)s[i], top[i]->spin_mod, (unsigned long long)top[i]->spin_site);
         if (o < n) o += snprintf(out + o, n - o, ")");
     }
-    pthread_mutex_unlock(&G);
+    g_unlock();
     if (!o && n) snprintf(out, n, "none");
 }
 // CPU time of the guest threads since the last call, by Switch priority band (<= 44: the main thread's level and above; 45-59; >= 60) and the three busiest threads with their priority.
@@ -992,7 +1020,7 @@ void dm_thread_cpu(char *out, size_t n, double secs) {
     for (int i = 0; i < 3 && top[i] && o < n; i++)
         o += (size_t)snprintf(out + o, n - o, "%s%#x '%s' priority %d %.0f ms/s%s", i ? ", " : "", top[i]->handle, thr_name(top[i], nb, sizeof nb), top[i]->prio, d[i], top[i]->host_owned ? " (host-created)" : "");
     if (!top[0] && o < n) snprintf(out + o, n - o, "none");
-    pthread_mutex_unlock(&G);
+    g_unlock();
 }
 // Sleep until dl (host monotonic ns) on time: macOS nanosleep / mach_wait_until carry timer slack; measured, 33 ms sleeps take about 36.4 ms, 5 ms take 6.1 ms, 1 ms take 1.26 ms (the same at any QoS).
 // Metroid Dread's sound thread sleeps "33 ms minus this round's work" (main+0xf95b0), and on the host its period became 36.9 ms; cutscenes render a frame whenever the audio play position that thread updates moves, so they ran at about 27 fps (30 on the Switch).
@@ -1049,13 +1077,13 @@ static int svc_thread_impl(int num, uint64_t *regs) {
         //   SMBW's font engine picks its per-core engine slot by the current core number and crashed indexing with -2 (main +0x107dbc0, SequenceBackgroundWorker thread)
         t->prio = (int)regs[4]; t->core = (int)regs[5] >= 0 ? (int)regs[5] : 0; t->mask = 1ull << t->core;
         t->born_ns = now_ns(); t->born_tick = dm_thread_tick_fn ? dm_thread_tick_fn() : 0;
-        pthread_mutex_lock(&G); t->handle = h_new(O_THREAD, t); t->id = g_next_id++; pthread_mutex_unlock(&G);
+        pthread_mutex_lock(&G); t->handle = h_new(O_THREAD, t); t->id = g_next_id++; g_unlock();
         pthread_attr_t a; pthread_attr_init(&a); pthread_attr_setstacksize(&a, 1 << 20);
         pthread_attr_setdetachstate(&a, PTHREAD_CREATE_DETACHED);   // Host resources are reclaimed on exit (the guest waits through the handle, no join)
         pthread_t pt; if (pthread_create(&pt, &a, thread_main, t)) die("pthread_create");
         pthread_attr_destroy(&a);
         // pthread_create writes its output without G; publish that value and the registry link together.
-        pthread_mutex_lock(&G); t->pt = pt; t->all = g_all; g_all = t; pthread_mutex_unlock(&G);
+        pthread_mutex_lock(&G); t->pt = pt; t->all = g_all; g_all = t; g_unlock();
         if (g_flag.thr) LOG("CreateThread h=%#x entry=%#llx arg=%#llx sp=%#llx prio=%d core=%d", t->handle, t->entry, t->arg, t->stack_top, t->prio, t->core);
         regs[0] = 0; regs[1] = t->handle; return 1;
     }
@@ -1067,7 +1095,7 @@ static int svc_thread_impl(int num, uint64_t *regs) {
             thr_t *self = pthread_getspecific(g_keythr);
             if (self && self->yield_pending) { t->start_by = self; t->start_epoch = atomic_load(&self->hand_epoch); }   // this start holds its caller: dm_thread_service_request
         }
-        pthread_mutex_unlock(&G);
+        g_unlock();
         regs[0] = t ? 0 : R_BAD_HANDLE; return 1;
     }
     case 0x0A: thread_exit(cur()); return 1;
@@ -1076,7 +1104,7 @@ static int svc_thread_impl(int num, uint64_t *regs) {
         thr_t *me = pthread_getspecific(g_keythr);
         // A sleep, and YieldToAnyThread (-2), which takes the thread off its core so that lower-priority threads run there, end its part in a handoff;
         // the other yields (0, -1) pass the core only to threads of its own priority or higher
-        if ((ns > 0 || ns == -2) && me && me->nhand) { pthread_mutex_lock(&G); hand_leave(me); pthread_mutex_unlock(&G); }
+        if ((ns > 0 || ns == -2) && me && me->nhand) { pthread_mutex_lock(&G); hand_leave(me); g_unlock(); }
         if (me && ns >= 20000 && (uint64_t)ns < yield_backoff_cap() && !dm_detclock_enabled()) poll_sleep(me, ns);   // a short sleep: a poll
         else if ((ns > 0 && dm_detclock_enabled()) || ns >= 20000) dm_guest_sleep_ns(ns);
         // Yield (0 / -1 / -2), and sleeps shorter than 20 µs, which sleep_precise would return from at once: Super Mario Galaxy's Hagi polls with SleepThread(100 ns) (main+0x517c),
@@ -1086,10 +1114,10 @@ static int svc_thread_impl(int num, uint64_t *regs) {
         return 1;
     }
     case 0x0C: { pthread_mutex_lock(&G); thr_t *t = h_get((uint32_t)regs[1], O_THREAD);
-        regs[0] = t ? 0 : R_BAD_HANDLE; regs[1] = t ? (uint64_t)t->prio : 0; pthread_mutex_unlock(&G); return 1; }
+        regs[0] = t ? 0 : R_BAD_HANDLE; regs[1] = t ? (uint64_t)t->prio : 0; g_unlock(); return 1; }
     case 0x0D: { pthread_mutex_lock(&G); thr_t *t = h_get((uint32_t)regs[0], O_THREAD);   // SetThreadPriority; under DM_QOS_MAP the class follows (now on the calling thread, else at the target's next SVC)
         if (t) { t->prio = (int)regs[1]; if (g_qos_map) { if (t == cur()) qos_apply(t); else atomic_store(&t->qos_pending, 1); } }
-        regs[0] = t ? 0 : R_BAD_HANDLE; pthread_mutex_unlock(&G); return 1; }
+        regs[0] = t ? 0 : R_BAD_HANDLE; g_unlock(); return 1; }
     case 0x0E: { thr_t *t = h_get((uint32_t)regs[2], O_THREAD);
                  regs[0] = t ? 0 : R_BAD_HANDLE; regs[1] = t ? (uint64_t)(uint32_t)t->core : 0; regs[2] = t ? t->mask : 0; return 1; }
     case 0x0F: {  // SetThreadCoreMask(w0, w1 ideal core, x2 mask): -2 = use the process default (ideal core 0, mask of just that core), -1 = don't care, -3 = leave the ideal core unchanged (as in the Horizon kernel); the host only keeps the bookkeeping
@@ -1114,14 +1142,14 @@ static int svc_thread_impl(int num, uint64_t *regs) {
             if (!t->started || t->exited || (st & 1)) t->paused = 1;
             uint64_t t0 = now_ns(); int warned = 0;
             while (!t->paused && !t->exited) {
-                pthread_mutex_unlock(&G); pthread_kill(t->pt, SIGUSR2); pthread_mutex_lock(&G);
+                g_unlock(); pthread_kill(t->pt, SIGUSR2); pthread_mutex_lock(&G);
                 if (t->paused || t->exited) break;
                 struct timespec dl; clock_gettime(CLOCK_REALTIME, &dl); dl.tv_nsec += 100000; if (dl.tv_nsec >= 1000000000) { dl.tv_sec++; dl.tv_nsec -= 1000000000; }
-                pthread_cond_timedwait(&t->pcv, &G, &dl);
+                wake_flush(); pthread_cond_timedwait(&t->pcv, &G, &dl);
                 if (!warned && now_ns() - t0 > 1000000000ull) { warned = 1; LOG("[RED] thread %#x still not suspended after more than 1 second (stuck in host code?)", t->handle); }
             }
         } else { atomic_store(&t->pause_req, 0); atomic_fetch_and(&t->svc_state, ~2); t->paused = 0; pthread_cond_broadcast(&t->pcv); }
-        pthread_mutex_unlock(&G);
+        g_unlock();
         { static int n; if (n++ < 4) LOG("SetThreadActivity %#x → %s (%s)", (uint32_t)regs[0], act ? "pause" : "resume", r ? "failed" : "ok"); }
         regs[0] = (uint64_t)r; return 1;
     }
@@ -1131,7 +1159,7 @@ static int svc_thread_impl(int num, uint64_t *regs) {
         if (!t) r = R_BAD_HANDLE;
         else if (!t->paused) r = R_BAD_STATE;
         else ctx_fill(t, (hz_ctx_t *)regs[0]);
-        pthread_mutex_unlock(&G);
+        g_unlock();
         regs[0] = (uint64_t)r; return 1;
     }
     case 0x25: { thr_t *t = h_get((uint32_t)regs[1], O_THREAD); regs[0] = t ? 0 : R_BAD_HANDLE; regs[1] = t ? t->id : 0; return 1; }
@@ -1147,10 +1175,10 @@ static int svc_thread_impl(int num, uint64_t *regs) {
             pthread_override_t ov = o && o->pt && !o->exited && t->qos > o->qos ? pthread_override_qos_class_start_np(o->pt, (qos_class_t)t->qos, 0) : NULL;
             r = block(t, 1, -1);
             if (ov) pthread_override_qos_class_end_np(ov); }
-        pthread_mutex_unlock(&G);
+        g_unlock();
         regs[0] = (uint64_t)r; return 1;
     }
-    case 0x1B: pthread_mutex_lock(&G); lock_handoff(regs[0]); pthread_mutex_unlock(&G); regs[0] = 0; return 1;
+    case 0x1B: pthread_mutex_lock(&G); lock_handoff(regs[0]); g_unlock(); regs[0] = 0; return 1;
     case 0x1C: {  // WaitProcessWideKeyAtomic(x0 lock address, x1 condition key, w2 tag, x3 timeout)
         thr_t *t = cur(); uint64_t addr = regs[0], key = regs[1];
         pthread_mutex_lock(&G);
@@ -1173,7 +1201,7 @@ static int svc_thread_impl(int num, uint64_t *regs) {
         t->wkey = key; t->waddr = addr; t->wtag = (uint32_t)regs[2];
 #endif
         int64_t r = block(t, 2, poll_wait_begin((int64_t)regs[3]));   // Timeout: the lock is not re-acquired (user mode takes it itself)
-        pthread_mutex_unlock(&G);
+        g_unlock();
         poll_wait_end((int64_t)regs[3], r);
         regs[0] = (uint64_t)r; return 1;
     }
@@ -1183,7 +1211,7 @@ static int svc_thread_impl(int num, uint64_t *regs) {
         for (thr_t *w; (cnt <= 0 || n < cnt) && (w = pick(2, key)); n++) lock_acquire_for(w, w->waddr, w->wtag);   // In kernel order; once turned into a lock wait or woken it is no longer kind 2
         int left = 0; for (thr_t *w = g_wait; w; w = w->next) if (w->wkind == 2 && w->wkey == key) { left = 1; break; }
         if (!left) st32(key, 0);
-        pthread_mutex_unlock(&G);
+        g_unlock();
         regs[0] = 0; return 1;
     }
 
@@ -1196,7 +1224,7 @@ static int svc_thread_impl(int num, uint64_t *regs) {
         if (ok && type == 1) { while (!cas32(addr, &v, v - 1)) if (!((int32_t)v < val)) { ok = 0; break; } }
         if (!ok) r = R_BAD_STATE;
         else { t->waddr = addr; r = block(t, 3, poll_wait_begin((int64_t)regs[3])); }
-        pthread_mutex_unlock(&G);
+        g_unlock();
         if (ok) poll_wait_end((int64_t)regs[3], r);
         regs[0] = (uint64_t)r; return 1;
     }
@@ -1218,13 +1246,13 @@ static int svc_thread_impl(int num, uint64_t *regs) {
         }
         if (!r) { int n = 0;
             for (thr_t *w; (cnt <= 0 || n < cnt) && (w = pick(3, addr)); n++) wake(w, 0); }
-        pthread_mutex_unlock(&G);
+        g_unlock();
         regs[0] = (uint64_t)r; return 1;
     }
 
     case 0x45: {  // CreateEvent(→w1 write end, w2 read end)
         event_t *e = calloc(1, sizeof *e); e->refs = 2;
-        pthread_mutex_lock(&G); uint32_t hw = h_new(O_EVENT_W, e), hr = h_new(O_EVENT_R, e); pthread_mutex_unlock(&G);
+        pthread_mutex_lock(&G); uint32_t hw = h_new(O_EVENT_W, e), hr = h_new(O_EVENT_R, e); g_unlock();
         regs[0] = 0; regs[1] = hw; regs[2] = hr; return 1;
     }
     case 0x11: case 0x12: case 0x17: {  // SignalEvent(write end) / ClearEvent(either end) / ResetSignal(read end, error if not signaled)
@@ -1238,7 +1266,7 @@ static int svc_thread_impl(int num, uint64_t *regs) {
         else if (num == 0x11) { e->signaled = 1; wake_sync_waiters(e); }
         else if (num == 0x17 && !e->signaled) r = R_BAD_STATE;
         else e->signaled = 0;
-        pthread_mutex_unlock(&G);
+        g_unlock();
         regs[0] = (uint64_t)r; return 1;
     }
     case 0x18: {  // WaitSynchronization(→w1 index; x1 handle array, w2 count, x3 timeout)
@@ -1263,7 +1291,7 @@ static int svc_thread_impl(int num, uint64_t *regs) {
             }
         }
         for (int i = 0; i < held; i++) sync_close(objects[i]);
-        pthread_mutex_unlock(&G);
+        g_unlock();
         poll_wait_end(ns, r);
         regs[0] = (uint64_t)r; regs[1] = idx >= 0 ? (uint64_t)idx : 0; return 1;
     }
@@ -1271,7 +1299,7 @@ static int svc_thread_impl(int num, uint64_t *regs) {
         pthread_mutex_lock(&G);
         thr_t *t = h_get((uint32_t)regs[0], O_THREAD);
         if (t) { if (t->wkind == 4) wake(t, R_CANCELLED); else t->cancel = 1; }
-        pthread_mutex_unlock(&G);
+        g_unlock();
         regs[0] = t ? 0 : R_BAD_HANDLE; return 1;
     }
     case 0x16: {  // CloseHandle(w0): recycle the slot; synchronization waits retain their original objects
@@ -1287,7 +1315,7 @@ static int svc_thread_impl(int num, uint64_t *regs) {
             t->closed = 1;
             if (t->exited && !t->sync_refs) thr_free(t);
         }
-        pthread_mutex_unlock(&G);
+        g_unlock();
         regs[0] = 0; return 1;
     }
     }
@@ -1317,13 +1345,13 @@ uint32_t hle_dup_readable_handle(uint32_t h) {   // A second read end of the sam
     pthread_mutex_lock(&G);
     event_t *e = h_get(h, O_EVENT_R); uint32_t r = 0;
     if (e) { e->refs++; r = h_new(O_EVENT_R, e); }
-    pthread_mutex_unlock(&G);
+    g_unlock();
     return r;
 }
 uint32_t hle_new_event(uint32_t *write_end) {   // A new kernel event, as svcCreateEvent makes it, for a host service to copy to its client: its read end; its write end in *write_end, or none when NULL
     event_t *e = calloc(1, sizeof *e); if (!e) die("event calloc");
     e->refs = write_end ? 2 : 1;
-    pthread_mutex_lock(&G); uint32_t r = h_new(O_EVENT_R, e); if (write_end) *write_end = h_new(O_EVENT_W, e); pthread_mutex_unlock(&G);
+    pthread_mutex_lock(&G); uint32_t r = h_new(O_EVENT_R, e); if (write_end) *write_end = h_new(O_EVENT_W, e); g_unlock();
     return r;
 }
 uint64_t hle_system_event_binding(void *ev) {
@@ -1343,7 +1371,7 @@ int hle_signal_system_event_binding(uint64_t binding) {
     pthread_mutex_unlock(&g_se_lock);
     event_t *e = wh ? h_get(wh, O_EVENT_W) : NULL;
     if (e) { e->signaled = 1; wake_sync_waiters(e); }
-    pthread_mutex_unlock(&G);
+    g_unlock();
     return e != NULL;
 }
 void hle_signal_system_event(void *ev) {   // An unbound one is bound on the spot as manual-clear (only on a guest thread: off one it is skipped)
@@ -1355,10 +1383,10 @@ void hle_signal_system_event(void *ev) {   // An unbound one is bound on the spo
             event_t *e = h_get(wh, O_EVENT_W);
             if (!e) die("SystemEvent write-end handle invalid %#x", wh);
             e->signaled = 1; wake_sync_waiters(e);
-            pthread_mutex_unlock(&G);
+            g_unlock();
             return;
         }
-        pthread_mutex_unlock(&G);
+        g_unlock();
         if (bound) die("SystemEvent %p still not found after binding", ev);
         // A host thread (audio, vsync) signalling an event the game has destroyed: binding needs SDK code, which only a guest thread can run, and the event is gone anyway
         // (MacNativeGames dab728a: skipped, not fatal)
@@ -1373,7 +1401,7 @@ int hle_signal_bound_system_event(void *ev) {
     pthread_mutex_lock(&g_se_lock); uint32_t wh = se_find(ev); pthread_mutex_unlock(&g_se_lock);
     event_t *e = wh ? h_get(wh, O_EVENT_W) : NULL;
     if (e) { e->signaled = 1; wake_sync_waiters(e); }
-    pthread_mutex_unlock(&G);
+    g_unlock();
     return e != NULL;
 }
 void hle_clear_system_event(void *ev) {   // Clear a bound service-layer SystemEvent (any thread), as the service does when its condition ends; an unbound one has nothing to clear
@@ -1384,5 +1412,5 @@ void hle_clear_system_event(void *ev) {   // Clear a bound service-layer SystemE
         if (!e) die("SystemEvent write-end handle invalid %#x", wh);
         e->signaled = 0;
     }
-    pthread_mutex_unlock(&G);
+    g_unlock();
 }

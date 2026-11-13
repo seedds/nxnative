@@ -5807,7 +5807,7 @@ static void shmap_read(void) {
     MLOG("shader route B (translated Switch originals): shader map %lu entries (%s), metallib directory %s", (unsigned long)g_shmap.count, path.UTF8String, g_msl_dir.UTF8String);
 }
 
-@interface NvShader : NSObject { @public id<MTLFunction> fn, tf_fn, discard_fn, fn_u, fn_m, fn_d, geo_fn; uint8_t mask_m;   // fn_u: the integer-output entry point (dmsh_entry.py fs_uint), for pipelines whose colour attachments are all unsigned integer (pso_desc); fn_m: the mixed one, its outputs in mask_m unsigned integer; fn_d: the dual-source one (dmsh_entry.py fs_dual)
+@interface NvShader : NSObject { @public id<MTLFunction> fn, tf_fn, discard_fn, fn_u, fn_d, geo_fn; id<MTLLibrary> ulib; NSMutableDictionary *ufn;   // fn_u: the integer-output entry point (dmsh_entry.py fs_uint) as the library holds it, unspecialized: ufn holds it specialized per pipeline's integer targets (uint_fn; ulib: its library); fn_d: the dual-source one (dmsh_entry.py fs_dual)
     uint16_t tf_stride[4]; uint32_t cb_ext[16], sb_ro; nvn_refl rf; id<MTLArgumentEncoder> ae; NSUInteger arg_len; int stage, range_ro, layer_out; const char *builtin; uint64_t logged; char key[24]; id<MTLBuffer> c1buf; uint64_t c1_gpu; size_t c1off;
     uint32_t geo_vertices, geo_invocations, geo_output, geo_stride, geo_index_stride;
     uint8_t mesh_kind, mesh_notask; uint16_t mesh_threads, mesh_payload;   // an NVN2 task (1) or mesh (2) shader, a mesh shader with no task, its workgroup's threads, its payload's bytes (dmsh_meshstage.py)
@@ -5828,8 +5828,8 @@ static void shmap_read(void) {
     uint64_t mis[4];   // mis: texture slots 0-255 already reported for a type mismatch (tex_mis_note)
     NSString *ventry; id<MTLFunction> vfn; int vfn_state;
     id<MTLFunction> pfn; int pfn_state, has_pull;
-    id<MTLFunction> afn[4]; int afn_state, has_alpha, has_bz;   // has_bz: its entry points read the blend weight word (bz_bind)
-    id<MTLLibrary> llib; NSMutableDictionary<NSNumber *, id<MTLFunction>> *lfn; int lfn_state, has_logic; } @end   // llib: the side library <key>_bx for logic operations, lfn: its fn_u / fn_m specialized per set of targets (lo_fn; lfn_state as afn_state; has_logic: the reflection names its entry points, dmsh_logic.py)   // afn: the alpha test entry points of fn, fn_u, fn_m, fn_d in the side library <key>_bx (at_fn; afn_state 0 untried, 1 loaded, 2 failed; has_alpha: the reflection names them, dmsh_alpha.py)   // pfn: the same entry of the pulling library <key>_bp (pull_fn; has_pull: the reflection names one, dmsh_pull.py)   // vertex: the entry point loaded (by the depth mode); vfn: the same entry of the shadow-input library <key>_bv (vin_fn; state 0 untried, 1 loaded, 2 failed)
+    id<MTLLibrary> alib; id<MTLFunction> afn[2]; NSMutableDictionary *aufn; int afn_state, has_alpha, has_bz;   // has_bz: its entry points read the blend weight word (bz_bind)
+    id<MTLLibrary> llib; NSMutableDictionary<NSNumber *, id<MTLFunction>> *lfn; int lfn_state, has_logic; } @end   // llib: the side library <key>_bx for logic operations, lfn: its fn / fn_u entry points specialized per set of targets (and fn_u's per integer targets; lo_fn; lfn_state as afn_state; has_logic: the reflection names its entry points, dmsh_logic.py)   // afn: the alpha test entry points of fn and fn_d in the side library <key>_bx (alib), aufn: fn_u's specialized per integer targets (at_fn; afn_state 0 untried, 1 loaded, 2 failed; has_alpha: the reflection names them, dmsh_alpha.py)   // pfn: the same entry of the pulling library <key>_bp (pull_fn; has_pull: the reflection names one, dmsh_pull.py)   // vertex: the entry point loaded (by the depth mode); vfn: the same entry of the shadow-input library <key>_bv (vin_fn; state 0 untried, 1 loaded, 2 failed)
 @implementation NvShader
 - (void)dealloc { free(rf.c1); free(geo_slot); }
 @end
@@ -6174,16 +6174,12 @@ static NvShader *shader_load(NSString *pc, int stage, int layer) {
         for (NSUInteger b = 0; b < 4 && b < ts.count; b++) o->tf_stride[b] = (uint16_t)[ts[b] unsignedIntValue];
         if (!o->tf_fn) MLOG("[RED] shader %s: no transform feedback entry point %s in its library", pc.UTF8String, [j[@"entry_tf"] UTF8String]);
     }
-    if (stage == 1 && j[@"entry_u"]) { o->fn_u = fn4_note([lib newFunctionWithName:j[@"entry_u"]], lib, j[@"entry_u"], nil); if (!o->fn_u) MLOG("[RED] shader %s: no integer-output entry point %s in its library", pc.UTF8String, [j[@"entry_u"] UTF8String]); }
-    if (stage == 1 && j[@"entry_m"]) { o->fn_m = fn4_note([lib newFunctionWithName:j[@"entry_m"]], lib, j[@"entry_m"], nil); o->mask_m = (uint8_t)[j[@"uint_mask_m"] unsignedIntValue];
-        if (!o->fn_m) MLOG("[RED] shader %s: no mixed integer-output entry point %s in its library", pc.UTF8String, [j[@"entry_m"] UTF8String]); }
+    if (stage == 1 && j[@"entry_u"]) { o->fn_u = [lib newFunctionWithName:j[@"entry_u"]]; o->ulib = lib; if (!o->fn_u) MLOG("[RED] shader %s: no integer-output entry point %s in its library", pc.UTF8String, [j[@"entry_u"] UTF8String]); }
     if (stage == 1 && j[@"entry_d"]) { o->fn_d = fn4_note([lib newFunctionWithName:j[@"entry_d"]], lib, j[@"entry_d"], nil); if (!o->fn_d) MLOG("[RED] shader %s: no dual-source entry point %s in its library", pc.UTF8String, [j[@"entry_d"] UTF8String]); }
     if (o->fn.functionConstantsDictionary.count) {   // a compute shader's pipeline is looked up by this specialized descriptor too (cps_new); the MTLDevice builds it from fn_dev's
         NSError *fe = nil; MTLFunctionConstantValues *cv = [MTLFunctionConstantValues new];
         id<MTLFunction> f = fn_spec(lib, entry, cv, &fe);
         if (f) o->fn = f; else MLOG("[RED] shader %s: specializing its function constants failed: %s", pc.UTF8String, fe.localizedDescription.UTF8String);
-        if (o->fn_u) o->fn_u = fn_spec(lib, j[@"entry_u"], cv, &fe);
-        if (o->fn_m) o->fn_m = fn_spec(lib, j[@"entry_m"], cv, &fe);
         if (o->fn_d) o->fn_d = fn_spec(lib, j[@"entry_d"], cv, &fe);
     }
     if (o->rf.nb) {
@@ -7973,34 +7969,42 @@ static int mtl_fmt_uint(MTLPixelFormat f) {
     switch (f) { case MTLPixelFormatR8Uint: case MTLPixelFormatR16Uint: case MTLPixelFormatR32Uint: case MTLPixelFormatRG8Uint: case MTLPixelFormatRG16Uint: case MTLPixelFormatRG32Uint:
         case MTLPixelFormatRGBA8Uint: case MTLPixelFormatRGB10A2Uint: case MTLPixelFormatRGBA16Uint: case MTLPixelFormatRGBA32Uint: return 1; default: return 0; }
 }
-// Every colour attachment the fragment shader writes is an unsigned integer format (at least one): the pipeline takes its integer-output entry point (fn_u). One that writes a float
-// attachment as well keeps main0, and a mismatch still fails with the red line naming the shader
-static int pso_all_uint(const pso_key *k, NvShader *fs, int merged) {
-    int n = 0;
+// The outputs this pipeline writes into unsigned integer targets (bit n: output n): its fragment takes the integer-output entry point specialized for exactly those (uint_fn).
+// The hardware writes an output's bits to an integer target whatever the shader computed, so the pipeline's formats say which outputs are integers: Luigi's Mansion 3's G-buffer is all
+// integer (R32Uint, RGBA8Uint), Pokémon Sword's has colour 1 RGBA16Uint between two float targets, Trails in the Sky 2nd Chapter's is float at colour 0 and integer at colours 1 to 3
+static uint32_t pso_uint_mask(const pso_key *k, NvShader *fs, int merged) {
+    uint32_t m = 0;
     for (int i = 0; i < 8; i++) {
         if (!k->cfmt[i]) continue;
         int l = merged ? k->lmap[i] : i;
-        if (l == 0xff || (fs->rf.color_known && !(fs->rf.color_mask >> l & 1))) continue;   // an output the shader does not write
-        if (!mtl_fmt_uint((MTLPixelFormat)k->cfmt[i])) return 0;
-        n++;
+        if (l > 7 || (fs->rf.color_known && !(fs->rf.color_mask >> l & 1))) continue;   // an output the shader does not write
+        if (mtl_fmt_uint((MTLPixelFormat)k->cfmt[i])) m |= 1u << l;
     }
-    return n > 0;
+    return m;
 }
 static int pf_int_kind(MTLPixelFormat f);
 static const char *pso_fout_hint(NvShader *fs, const uint32_t cfmt[8], char *b, size_t n);
-// Some written colour attachments are unsigned integer formats and some are not, and the integer ones are exactly the outputs the mixed entry point returns as integers (fn_m, mask_m:
-// Pokémon Sword's G-buffer, colour 1 RGBA16Uint between two float targets)
-static int pso_mixed_uint(const pso_key *k, NvShader *fs, int merged) {
-    int ints = 0, floats = 0;
-    for (int i = 0; i < 8; i++) {
-        if (!k->cfmt[i]) continue;
-        int l = merged ? k->lmap[i] : i;
-        if (l == 0xff || (fs->rf.color_known && !(fs->rf.color_mask >> l & 1))) continue;   // an output the shader does not write
-        int u = mtl_fmt_uint((MTLPixelFormat)k->cfmt[i]);
-        if (u != (l < 8 && (fs->mask_m >> l & 1))) return 0;
-        if (u) ints++; else floats++;
+// name of lib specialized with output n an unsigned integer where bit n of umask is set (DMSH_UINT_FC + n: dmsh_entry.py fs_uint), and, for a logic operation entry point, attachment n read
+// where bit n of targets is set (DMSH_LOGIC_FC + n: dmsh_logic.py); a function object of its own per set, as lo_fn's
+static id<MTLFunction> uint_spec(id<MTLLibrary> lib, NSString *name, uint32_t umask, int logic, uint32_t targets, NSError **e) {
+    MTLFunctionConstantValues *cv = [MTLFunctionConstantValues new];
+    for (int n = 0; n < 8; n++) { bool u = umask >> n & 1; [cv setConstantValue:&u type:MTLDataTypeBool atIndex:DMSH_UINT_FC + n]; }
+    if (logic) for (int n = 0; n < 8; n++) { bool on = targets >> n & 1; [cv setConstantValue:&on type:MTLDataTypeBool atIndex:DMSH_LOGIC_FC + n]; }
+    return fn_lib_spec(lib, name, cv, e);
+}
+static os_unfair_lock g_u_lock = OS_UNFAIR_LOCK_INIT;
+// The integer-output entry point specialized for the pipeline's integer targets (umask, pso_uint_mask), made on first need per set and kept; nil when the shader has none or it failed
+// (once a set, with a red line). The lock covers the cache only: two threads may both specialize a set, and the first one stored is kept
+static id<MTLFunction> uint_fn(NvShader *fs, uint32_t umask) {
+    if (!fs->fn_u || !umask) return nil;
+    NSNumber *key = @(umask);
+    os_unfair_lock_lock(&g_u_lock); id f = fs->ufn[key]; os_unfair_lock_unlock(&g_u_lock);
+    if (!f) {
+        NSError *e = nil; f = uint_spec(fs->ulib, fs->fn_u.name, umask, 0, 0, &e);
+        if (!f) { MLOG("[RED] shader %s: its integer-output entry point did not specialize for integer outputs 0x%x: %s", fs->key, umask, e ? e.localizedDescription.UTF8String : "no function"); f = NSNull.null; }
+        os_unfair_lock_lock(&g_u_lock); if (!fs->ufn) fs->ufn = [NSMutableDictionary dictionary]; if (fs->ufn[key]) f = fs->ufn[key]; else fs->ufn[key] = f; os_unfair_lock_unlock(&g_u_lock);
     }
-    return ints && floats;
+    return f == NSNull.null ? nil : f;
 }
 // NVN's alpha test (ColorStateSetAlphaTest and SetAlphaRef; Maxwell's fixed-function test of the alpha a pixel shader writes to colour 0, before blending): Metal has none.
 // A pipeline drawn with an alpha function other than ALWAYS takes its fragment from the shader's side library <key>_bx (dmsh_alpha.py: <entry>_a runs the body and compares
@@ -8015,16 +8019,19 @@ static uint32_t atest_key(NvShader *fs, const uint32_t cfmt[8], const uint8_t *l
     return 1;
 }
 static os_unfair_lock g_at_lock = OS_UNFAIR_LOCK_INIT;
-static id<MTLFunction> at_fn(NvShader *fs, id<MTLFunction> base) {   // the side library's alpha test entry point of base (one of fs's own), loaded on first need; a failure is final for the shader
-    int w = !base ? -1 : base == fs->fn ? 0 : base == fs->fn_u ? 1 : base == fs->fn_m ? 2 : base == fs->fn_d ? 3 : -1;
+// The side library's alpha test entry point of base: fn's or fn_d's, or with umask (the pipeline's integer outputs, pso_uint_mask) fn_u's specialized for them (base is then uint_fn's).
+// The library is loaded on first need, and a failure there is final for the shader; fn_u's are made per set, as uint_fn's
+static id<MTLFunction> at_fn(NvShader *fs, id<MTLFunction> base, uint32_t umask) {
+    int w = !base ? -1 : umask ? 2 : base == fs->fn ? 0 : base == fs->fn_d ? 1 : -1;
     if (w < 0 || !fs->has_alpha) return nil;
     os_unfair_lock_lock(&g_at_lock);
+    NSError *e = nil;
     if (!fs->afn_state) {
         fs->afn_state = 2;
         size_t kl = strlen(fs->key); NSString *path = [NSString stringWithFormat:@"%@/%.*s_bx.metallib", g_msl_dir, (int)(kl > 2 ? kl - 2 : kl), fs->key];
-        NSError *e = nil; id<MTLLibrary> lib = lib_from_file(path, &e); const char *why = lib ? NULL : "no library";
-        id<MTLFunction> own[4] = {fs->fn, fs->fn_u, fs->fn_m, fs->fn_d};
-        for (int i = 0; i < 4 && !why; i++) {
+        id<MTLLibrary> lib = lib_from_file(path, &e); const char *why = lib ? NULL : "no library";
+        id<MTLFunction> own[2] = {fs->fn, fs->fn_d};
+        for (int i = 0; i < 2 && !why; i++) {
             if (!own[i]) continue;
             NSString *name = [own[i].name stringByAppendingString:@"_a"]; id<MTLFunction> f = fn4_note([lib newFunctionWithName:name], lib, name, nil);
             if (f && f.functionConstantsDictionary.count) f = fn_spec(lib, name, [MTLFunctionConstantValues new], &e);   // as shader_load
@@ -8032,12 +8039,21 @@ static id<MTLFunction> at_fn(NvShader *fs, id<MTLFunction> base) {   // the side
             else if (fs->rf.nb && [f newArgumentEncoderWithBufferIndex:fs->rf.abi].encodedLength != fs->arg_len) why = "its argument buffer differs from the base library's";
             else fs->afn[i] = f;
         }
-        if (!why) { fs->afn_state = 1; static int n; if (++n <= 3 || !(n & (n - 1))) MLOG("alpha test: side library of %s loaded (%d shaders so far)", fs->key, n); }
+        if (!why && fs->fn_u && ![lib newFunctionWithName:[fs->fn_u.name stringByAppendingString:@"_a"]]) why = "no entry point";
+        if (!why) { fs->afn_state = 1; fs->alib = lib; static int n; if (++n <= 3 || !(n & (n - 1))) MLOG("alpha test: side library of %s loaded (%d shaders so far)", fs->key, n); }
         else { static int n; if (n++ < 8) MLOG("[RED] alpha test entry points of %s not usable (%s%s%s): its alpha-tested draws go without the test", fs->key, why, e ? ": " : "", e ? e.localizedDescription.UTF8String : ""); }
     }
-    id<MTLFunction> f = fs->afn_state == 1 ? fs->afn[w] : nil;
+    id f = nil;
+    if (fs->afn_state == 1 && w < 2) f = fs->afn[w];
+    else if (fs->afn_state == 1 && !(f = fs->aufn[@(umask)])) {
+        f = uint_spec(fs->alib, [fs->fn_u.name stringByAppendingString:@"_a"], umask, 0, 0, &e);
+        const char *why = !f ? "it did not specialize" : fs->rf.nb && [f newArgumentEncoderWithBufferIndex:fs->rf.abi].encodedLength != fs->arg_len ? "its argument buffer differs from the base library's" : NULL;
+        if (why) { MLOG("[RED] alpha test entry point of %s for integer outputs 0x%x not usable (%s%s%s): those draws go without the test", fs->key, umask, why, e ? ": " : "", e ? e.localizedDescription.UTF8String : ""); f = NSNull.null; }
+        if (!fs->aufn) fs->aufn = [NSMutableDictionary dictionary];
+        fs->aufn[@(umask)] = f;
+    }
     os_unfair_lock_unlock(&g_at_lock);
-    return f;
+    return f == NSNull.null ? nil : f;
 }
 // The function and reference (dmsh_alpha.py dm_alpha_state) at fragment buffer DMSH_ALPHA_BUFFER: a copy in the frame arena per value and pass, since the pass's earlier draws
 // still read the one before
@@ -8085,7 +8101,7 @@ static void bz_bind(id<MTLCommandEncoder> en) {
     enc_r_args((id<MTL4RenderCommandEncoder>)en, MTLRenderStageFragment, gpu, DMSH_BLEND_BUFFER);
 }
 // NVN's logic operations (ColorStateSetLogicOp: the bits a pixel shader writes combined with the target's, in place of blending; integer and normalized targets, as in OpenGL and Vulkan): Metal has none.
-// A pipeline drawn with an operation other than COPY takes its entry point (for fn, or fn_u / fn_m for unsigned integer targets) from the shader's side library <key>_bx instead
+// A pipeline drawn with an operation other than COPY takes its entry point (for fn, or fn_u's for unsigned integer targets) from the shader's side library <key>_bx instead
 // (dmsh_logic.py: <entry>_l runs the body, reads each output's attachment and combines the two), and its draws bind the operation and the targets' channel masks at fragment buffer
 // DMSH_LOGIC_BUFFER (lo_bind). Xenoblade Chronicles 2 ORs probe indices into its RG32Uint light probe lists; Skyward Sword HD ORs fog into the alpha of its RGBA8Unorm frame. A target
 // with no bits to combine (floating point, sRGB, signed) keeps COPY, with a red line. The operation takes the place of blending (blending stays off in pso_desc), as both APIs define
@@ -8125,17 +8141,18 @@ static uint32_t lop_key(const pso_key *k, NvShader *fs, int merged) {   // pso_k
     }
     if (!any) return 0;   // no colour written (Xenoblade Chronicles 2's probe boxes mark stencil with the operation still set): nothing to combine
     if (merged) { RED_ONCE(134, "logic operation %u in a merged pass (shader %s): drawn with COPY", S.color.logic_op, fs->key); return 0; }
-    int u = fs->fn_u && pso_all_uint(k, fs, 0), m = !u && fs->fn_m && pso_mixed_uint(k, fs, 0);
-    if (!u && !m && (other || !norm)) { RED_ONCE(133, "shader %s draws with logic operation %u into a target with no bits to combine (floating point, sRGB, signed) or an integer target it has no entry point for: drawn with COPY", fs->key, S.color.logic_op); return 0; }
+    int u = fs->fn_u && pso_uint_mask(k, fs, 0);
+    if (!u && (other || !norm)) { RED_ONCE(133, "shader %s draws with logic operation %u into a target with no bits to combine (floating point, sRGB, signed) or an integer target it has no entry point for: drawn with COPY", fs->key, S.color.logic_op); return 0; }
     if (k->atest) { RED_ONCE(142, "shader %s draws with logic operation %u and an alpha test, which no library combines: drawn with COPY", fs->key, S.color.logic_op); return 0; }
     if (!fs->has_logic) { RED_ONCE(135, "shader %s draws with logic operation %u but has no logic operation entry point: drawn with COPY", fs->key, S.color.logic_op); return 0; }
     return 1;
 }
 static os_unfair_lock g_lo_lock = OS_UNFAIR_LOCK_INIT;
-// The side library's logic operation entry point of base (fn, fn_u or fn_m), specialized for the targets the pipeline has (targets: bit n = colour target n attached; dmsh_logic.py reads
-// only those, DMSH_LOGIC_FC + n), loaded on first need; a library that fails is final for the shader
-static id<MTLFunction> lo_fn(NvShader *fs, id<MTLFunction> base, uint32_t targets) {
-    int w = !base ? -1 : base == fs->fn_u ? 0 : base == fs->fn_m ? 1 : base == fs->fn ? 2 : -1;
+// The side library's logic operation entry point of base (fn, or with umask, the pipeline's integer outputs, fn_u's: base is then uint_fn's), specialized for the targets the pipeline has
+// (targets: bit n = colour target n attached; dmsh_logic.py reads only those, DMSH_LOGIC_FC + n) and fn_u's for its integer outputs too (DMSH_UINT_FC + n), loaded on first need; a library
+// that fails is final for the shader
+static id<MTLFunction> lo_fn(NvShader *fs, id<MTLFunction> base, uint32_t targets, uint32_t umask) {
+    int w = !base ? -1 : umask ? 0 : base == fs->fn ? 2 : -1;
     if (w < 0 || !fs->has_logic) return nil;
     os_unfair_lock_lock(&g_lo_lock);
     NSError *e = nil; const char *why = NULL;
@@ -8145,12 +8162,10 @@ static id<MTLFunction> lo_fn(NvShader *fs, id<MTLFunction> base, uint32_t target
         if ((fs->llib = lib_from_file(path, &e))) { fs->lfn_state = 1; fs->lfn = [NSMutableDictionary dictionary]; static int n; if (++n <= 3 || !(n & (n - 1))) MLOG("logic operation: side library of %s loaded (%d shaders so far)", fs->key, n); }
         else why = "no library";
     }
-    id<MTLFunction> f = nil; NSNumber *k = @(w << 8 | (targets & 0xff));
+    id<MTLFunction> f = nil; NSNumber *k = @((umask & 0xff) << 16 | w << 8 | (targets & 0xff));
     if (fs->lfn_state == 1 && !(f = fs->lfn[k])) {
-        MTLFunctionConstantValues *cv = [MTLFunctionConstantValues new];
-        for (int n = 0; n < 8; n++) { bool on = targets >> n & 1; [cv setConstantValue:&on type:MTLDataTypeBool atIndex:DMSH_LOGIC_FC + n]; }
-        NSString *name = [base.name stringByAppendingString:@"_l"];
-        f = fn4_note([fs->llib newFunctionWithName:name constantValues:cv error:&e], fs->llib, name, cv);
+        NSString *name = [(w ? fs->fn : fs->fn_u).name stringByAppendingString:@"_l"];
+        f = uint_spec(fs->llib, name, umask, 1, targets, &e);
         if (!f) why = "no entry point";
         else if (fs->rf.nb && [f newArgumentEncoderWithBufferIndex:fs->rf.abi].encodedLength != fs->arg_len) { why = "its argument buffer differs from the base library's"; f = nil; }
         if (f) fs->lfn[k] = f; else fs->lfn_state = 2;
@@ -8196,15 +8211,17 @@ static MTLRenderPipelineDescriptor *pso_desc(const pso_key *k, NvShader *vs, NvS
         for (int i = 0; i < nk; i++) if (!strncmp(fs->key, keys[i], strlen(keys[i]))) {
             if (hl) d.fragmentFunction = [hl newFunctionWithName:[NSString stringWithFormat:@"hl%d", i]];
             break; } }
-    if (fs && fs->fn_u && !fsfn && d.fragmentFunction == fs->fn && pso_all_uint(k, fs, merged)) d.fragmentFunction = fs->fn_u;   // integer colour targets (dmsh_entry.py fs_uint)
-    else if (fs && fs->fn_m && !fsfn && d.fragmentFunction == fs->fn && pso_mixed_uint(k, fs, merged)) d.fragmentFunction = fs->fn_m;   // integer and float colour targets
+    uint32_t umask = 0;   // integer colour targets (dmsh_entry.py fs_uint): the integer-output entry point specialized for the outputs they take
+    if (fs && fs->fn_u && !fsfn && d.fragmentFunction == fs->fn && (umask = pso_uint_mask(k, fs, merged))) { id<MTLFunction> uf = uint_fn(fs, umask); if (uf) d.fragmentFunction = uf; else umask = 0; }
     // A float output meeting an integer attachment: a pipeline built on its own is refused, one from a Metal 4 base is not, and the target stays zero with no error (Kirby Star Allies' material target,
-    // while its mixed entry point returned the wrong outputs as integers). A shader with no integer entry point at all meets it the same way (its reflection says which outputs main0 declares float,
-    // rf.fcols): DRAGON BALL: Sparking! ZERO's virtual texture page table update wrote a flat input and three zeros into an R16Uint target, the table held 255 everywhere and the landscape was flat green
-    if (fs && (fs->fn_u || fs->fn_m || fs->rf.fcols_known) && !fsfn && d.fragmentFunction == fs->fn) for (int i = 0; i < 8; i++) {
+    // while a mixed entry point chosen by the shader's code returned the wrong outputs as integers). A shader with no integer entry point meets it the same way (its reflection says which outputs
+    // main0 declares float, rf.fcols): DRAGON BALL: Sparking! ZERO's virtual texture page table update wrote a flat input and three zeros into an R16Uint target, the table held 255 everywhere
+    // and the landscape was flat green
+    if (fs && (fs->fn_u || fs->rf.fcols_known) && !fsfn && d.fragmentFunction == fs->fn) for (int i = 0; i < 8; i++) {
         int l = merged ? k->lmap[i] : i;
         if (k->cfmt[i] && l != 0xff && (!fs->rf.color_known || fs->rf.color_mask >> l & 1) && (!fs->rf.fcols_known || fs->rf.fcols >> l & 1) && (k->chmask >> (4 * i) & 0xf) && mtl_fmt_uint((MTLPixelFormat)k->cfmt[i])) {
-            if (fs->fn_u || fs->fn_m) RED_ONCE(152, "shader %s writes colour target %d, an integer format, as a float: its integer entry point returns outputs 0x%x as integers, which is not this pipeline's set", fs->key, i, fs->mask_m);
+            if (fs->fn_u) RED_ONCE(152, "shader %s writes colour target %d, an integer format, as a float: its integer-output entry point did not specialize for this pipeline (the line above): "
+                                  "the target takes undefined values", fs->key, i);
             else { char hint[200]; RED_ONCE(152, "shader %s writes colour target %d, an integer format, as a float, and has no integer entry point (dmsh_entry.py fs_uint): the target takes undefined values%s", fs->key, i, pso_fout_hint(fs, k->cfmt, hint, sizeof hint)); }
             break; } }
     // Dual-source blending: target 0 reads the shader's output 1 as its second source. The dual-source entry point returns that output as [[color(0), index(1)]] (dmsh_entry.py fs_dual),
@@ -8216,13 +8233,13 @@ static MTLRenderPipelineDescriptor *pso_desc(const pso_key *k, NvShader *vs, NvS
         RED_ONCE(121, "shader %s writes output 1 and a pipeline blends with it as the second source, but it has no dual-source entry point: the second source counts as zero "
                  "(add its key to the profile's dual_want.tsv; DM_NVN_DUAL_WANT=<file> lists every such shader)", fs->key); }
     if (k->atest && fs) {   // the alpha test (atest_key): the same entry point's in the side library
-        id<MTLFunction> af = fsfn ? nil : at_fn(fs, d.fragmentFunction);
+        id<MTLFunction> af = fsfn ? nil : at_fn(fs, d.fragmentFunction, umask);
         if (af) d.fragmentFunction = af;
         else if (fsfn) RED_ONCE(129, "alpha test not applied to a specialized fragment (readable-tile merge or diagnostic) of %s", fs->key);
     }
     if (k->logic && fs) {   // the logic operation (lop_key): the same entry point's in the side library; never with the alpha test's, which lop_key leaves out
         uint32_t targets = 0; for (int i = 0; i < 8; i++) if (k->cfmt[i]) targets |= 1u << i;   // not a merged pass (lop_key): target i is output i
-        id<MTLFunction> lf = fsfn ? nil : lo_fn(fs, d.fragmentFunction, targets);
+        id<MTLFunction> lf = fsfn ? nil : lo_fn(fs, d.fragmentFunction, targets, umask);
         if (lf) d.fragmentFunction = lf;
         else if (fsfn) RED_ONCE(136, "logic operation not applied to a specialized fragment (readable-tile merge or diagnostic) of %s", fs->key);
     }

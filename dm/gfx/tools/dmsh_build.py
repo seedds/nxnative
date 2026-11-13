@@ -808,7 +808,7 @@ def finish(key, w, j, c1):
         plain = full
         full, lay = dmsh_entry.vs_layer_entry(full)   # layer entry points for a slice-writing geometry shader (see vs_layer_entry)
         open(msl, 'w').write(full)
-    fu, fmask = dmsh_entry.fs_uint(src) if j['stage'] == 'ps' else (None, 0)   # the integer-output entry points (see fs_uint); the analysis below uses the source with only main0
+    fu = dmsh_entry.fs_uint(src) if j['stage'] == 'ps' else None   # the integer-output entry point (see fs_uint); the analysis below uses the source with only main0
     fd = dmsh_entry.fs_dual(src) if j['stage'] == 'ps' and key in DUAL_WANT else None   # the dual-source entry point (see fs_dual), from the source with only main0
     shared = dmsh_side.shared_body(src) if fu or fd else None   # they call main0's body; fs_uint and fs_dual give none for a main0 whose shape it does not know
     if shared: plain = src; open(msl, 'w').write(shared + (fu or '') + (fd or ''))
@@ -837,7 +837,7 @@ def finish(key, w, j, c1):
             **({'layer_out': True} if j['stage'] == 'vs' and dmsh_entry.layer_out(src) else {}),   # main0 writes the layer (see layer_out)
             **({'entry_discard': 'main0_discard'} if discard else {}),
             **({'entry_tf': 'main0_tf', 'tf_strides': [e['stride'] if e else 0 for e in j['tf']]} if j.get('tf') else {}),
-            **({'entry_layer': 'main0_l', 'entry_layer_z': 'main0_lz', 'layer_from': lay} if lay else {}), **({'entry_u': 'main0_u'} if fu else {}), **({'entry_m': 'main0_m', 'uint_mask_m': fmask} if fu and fmask else {}), **({'entry_d': 'main0_d'} if fd else {}), **({'blend_zero': True} if blend0 else {}), **({'entries_lost': lost} if lost else {}),
+            **({'entry_layer': 'main0_l', 'entry_layer_z': 'main0_lz', 'layer_from': lay} if lay else {}), **({'entry_u': 'main0_u'} if fu else {}), **({'entry_d': 'main0_d'} if fd else {}), **({'blend_zero': True} if blend0 else {}), **({'entries_lost': lost} if lost else {}),
             **({'first_store': [{'reg': next(b['reg'] for b in binds if b['msl_name'] == n), 'word': w, 'value': v} for n, w, v in first]} if first else {}),
             **({'tg_spill': spill} if spill else {}),
             'threadgroup_size': j.get('local'), 'c1': c1.hex(), 'notes': res['notes'] + (['not in the answer table, queries use defaults'] if j.get('no_facts') else []), 'drv_reads': dr, 'drv_unfillable': dmsh_reflect.unfillable(dr, mesh['kind'] if mesh else j['stage']),

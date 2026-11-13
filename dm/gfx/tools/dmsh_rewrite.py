@@ -581,7 +581,7 @@ def frag_z_snap(msl):
 # what the zero weight makes of it. With blending off, on a target that is not floating point, or with a weight the alpha does not make zero, the output's bits are 0 and it is returned as
 # it is: NVIDIA stores that NaN or Inf too. A finite colour is never changed, nor the alpha.
 # Not covered, as a shader cannot see it: a NaN or Inf already in the target under a zero destination weight, and a non-finite weight on a colour of 0.
-# The guard goes into main0 before the build makes its other entry points, so each of them has it: they call main0's body (dmsh_side.shared_body: main0_u / main0_m, main0_d, main0_f and
+# The guard goes into main0 before the build makes its other entry points, so each of them has it: they call main0's body (dmsh_side.shared_body: main0_u, main0_d, main0_f and
 # the side library's) and take main0's parameters, the word's among them. It is written as a call, not as stores to out, which dmsh_entry.fs_uint reads to tell what a shader writes
 BLEND_ZERO = '''struct dm_blend_state { uint zero; };   // see dmsh_rewrite.py blend_zero
 static inline __attribute__((always_inline)) float4 dm_bz(float4 c, uint m)

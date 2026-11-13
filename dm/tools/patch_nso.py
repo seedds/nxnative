@@ -361,6 +361,36 @@ def site_sp(ins):
     emit(LDP(S, T, T, -16)); emit(B(here(), ins.address + 4))
     return start
 
+def casp_pair18(ins):
+    """Whether ins is a compare and swap of a register pair (casp, caspa, caspl, caspal; x or w) whose compare pair (Rs) or new-value pair (Rt) is x18, x19"""
+    w = struct.unpack('<I', ins.bytes)[0]
+    return w & 0xBFA07C00 == 0x08207C00 and 18 in ((w >> 16) & 31, w & 31)
+
+def site_casp(ins):
+    """A compare and swap whose pair is x18, x19. A pair is an even register and the next one, so subst cannot rename x18 alone (xS, x19 is no pair): the pair moves to a free even
+    pair P, P + 1, P loaded from the slot K18 and P + 1 copied from x19. The instruction writes the compare pair with the memory's old value, so after it P goes back to the slot and
+    P + 1 to x19; a new-value pair is only read. The memory access is still the one instruction, so it stays atomic. P, P + 1 and T (the slot's address) are saved below sp as in
+    site_plain (casp has no writeback: sp does not move). Sonic Frontiers Definitive Edition main+0x19ce5c4: caspal x18, x19, x4, x5, [x16]"""
+    w = struct.unpack('<I', ins.bytes)[0]
+    rs, rn, rt = (w >> 16) & 31, (w >> 5) & 31, w & 31
+    assert rn != 18, f'casp with x18 as its base and in a pair {ins.address:x} {ins.op_str}'
+    used = regs_in(ins) | {18, 19}
+    P = next(r for r in range(0, 16, 2) if not {r, r + 1} & used)
+    T = next(r for r in range(16) if r not in used | {P, P + 1})
+    nw = w
+    if rs == 18: nw = (nw & ~(31 << 16)) | (P << 16)
+    if rt == 18: nw = (nw & ~31) | P
+    want = re.sub(r'\b([xw])(18|19)\b', lambda m: f'{m.group(1)}{P + (m.group(2) == "19")}', ins.op_str)
+    dd = dis(nw, ins.address)
+    if (dd.mnemonic, dd.op_str) != (ins.mnemonic, want): raise RuntimeError(f'casp subst fail {ins.address:x} {ins.mnemonic} {ins.op_str}: {dd.mnemonic} {dd.op_str}')
+    start = here()
+    emit(STP(P, P + 1, 31, -16)); emit(STUR(T, 31, -24))
+    emit(MRS_TPIDRRO(T)); emit_slot_addr(T, P, 'K18'); emit(LDRX(P, T)); emit(MOVX(P + 1, 19))
+    emit(nw)
+    if rs == 18: emit(STRX(P, T)); emit(MOVX(19, P + 1))
+    emit(LDUR(T, 31, -24)); emit(LDP(P, P + 1, 31, -16)); emit(B(here(), ins.address + 4))
+    return start
+
 def site_sp_align(ins, n):
     """sub sp, sp, xN (no shift): Horizon leaves stack alignment checking off for user code, Apple's kernel does not, so an sp that is not 16-byte aligned faults (SIGBUS) at the next sp-based access.
     Paper Mario: The Thousand-Year Door's script call bridges (main+0x17c140 and five more beside it, hand-written) reserve the callee's stack arguments as their sizes add up (4 for one int)
@@ -1540,6 +1570,7 @@ for a in sorted(kinds):
         elif m in ('adr', 'adrp'): st = site_pcrel(ins); stat('pcrel')
         elif m == 'blr': st = site_blr(ins); stat('blr')
         elif re.match(r'(sp|wsp),', ins.op_str): st = site_sp(ins); stat('sp')
+        elif casp_pair18(ins): st = site_casp(ins); stat('casp')
         elif m in ('ret', 'b', 'bl') or (m == 'ldr' and '[' not in ins.op_str): raise RuntimeError(f'{a:x} {m} {ins.op_str}')
         else: st = site_plain(ins); stat('plain')
     elif k == 'tpidr_r': st = site_sysreg_read(ins, 'KTLS'); stat(k)

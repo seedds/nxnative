@@ -165,6 +165,7 @@ One row per profile; the notes are each profile's `README.md`.
 | [Sea of Stars](01008C0016544000/README.md) | `01008C0016544000` | 2.0.59001 | 16.2.0 | Unity 2021.3.25f1 IL2CPP | NVN |
 | [SHIN MEGAMI TENSEI V: Vengeance](010069C01AB82000/README.md) | `010069C01AB82000` | 1.0.3 | 15.3.2 | Unreal Engine 4.27 | NVN |
 | [Silver Pines](0100D5B026844000/README.md) | `0100D5B026844000` | 1.0.0 (base) | 21.4.7 | Unity 6000.3.15f1 IL2CPP | NVN |
+| [Sonic Frontiers Definitive Edition](0400921025B32000/README.md) | `0400921025B32000` | v65536 (Switch 2) | 21.4.1 (Ounce) | Hedgehog Engine 2, CRIWARE | NVN2 |
 | [Sonic Superstars](01008F701C074000/README.md) | `01008F701C074000` | 1.1.8 | 16.2.0 | Unity 2021.3.25f1 IL2CPP, CRIWARE, FMOD | NVN |
 | [STEINS;GATE RE:BOOT](01008BC024FDE000/README.md) | `01008BC024FDE000` | 1.0.3 | 20.5.17 | M2's ADV engine | NVN |
 | [Stardew Valley](0100E65002BB8000/README.md) | `0100E65002BB8000` | 1.6.15.13 | 20.5.27 | MonoGame (C# → C++ by BRUTE) | NVN |

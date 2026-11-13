@@ -6721,6 +6721,8 @@ static MTLTextureType ttype(int target, int fallback) {
 // Out-of-pool texture ID = empty slot: the game itself uses GetSeparateTextureHandle(0xFFFFF) to get a handle and bind it to unused slots (measured call site main+0x1746820,
 // texture pool capacity 15256) and never registers that ID. Read 0 per D3D / empty-slot semantics (the same all-zero dummy textures as unbound), no failure; unregistered IDs inside the pool are still reported a failure
 static int g_tpool_n; static uint64_t g_stat_tex_oob;
+// The same for sampler IDs: Super Mario Party binds the combined handle 0xFFFFFFFF (texture ID 0xFFFFF, sampler ID 4095) to unused slots, past its 512-entry sampler pool (issue #2513)
+static int g_spool_n; static uint64_t g_stat_samp_oob;
 // NVN window origin. In lower-left mode (GL convention, NVN's default) NDC y = -1 lands on a render target's first memory row and window y grows with the row; Metal puts NDC y = +1 on the first row.
 // Viewport and scissor rectangles, fragment coordinates, copies and texture coordinates all address the same memory rows in both conventions, so only the direction inside the viewport differs:
 // lower-left draws get a viewport of negative height (and the opposite front-face winding), and the window image, stored bottom-up, is flipped at present (and in raw screenshots).
@@ -6731,6 +6733,7 @@ void mtl_set_origin_lower_left(int on) { if (atomic_exchange(&g_origin_ll, on) !
 static int g_queue_origin_ll;   // SET_WINDOW_ORIGIN's raster flip is queue state, independent of later device-origin changes.
 void mtl_set_queue_origin_lower_left(int on) { g_queue_origin_ll = on != 0; }
 void mtl_set_tex_pool_n(int n) { g_tpool_n = n; }
+void mtl_set_samp_pool_n(int n) { g_spool_n = n; }
 static id<MTLTexture> treg_tex(const treg_t *r) { return r->gone ? tex_made(&r->t) : tex_mtl(&r->t); }   // Caller holds g_rmu
 // The upload stamp of the packaged texture an ID's view was made from (tex_by_id's guest-write shortcut); none for sparse ones (their page table changes too) or another base. Caller holds g_rmu
 static void treg_pkg_stamp(treg_t *rp, id<MTLTexture> base) {
@@ -7027,6 +7030,7 @@ static MTLSamplerAddressMode wrapm(int w) {
     return MTLSamplerAddressModeRepeat;
 }
 static id<MTLSamplerState> samp_by_id(int sid) {   // Caller holds g_rmu
+    if (g_spool_n && sid >= g_spool_n) { if (!g_stat_samp_oob++) MLOG("sampler ID %d outside the pool (capacity %d) treated as an empty slot", sid, g_spool_n); return nil; }
     if (sid < 0 || sid >= g_nsreg || !g_sreg_ok[sid]) { RED_ONCE(12, "sampler ID %d not registered", sid); return nil; }
     if (g_sview[sid]) return (__bridge id<MTLSamplerState>)g_sview[sid];
     samp_par p = g_sreg[sid];

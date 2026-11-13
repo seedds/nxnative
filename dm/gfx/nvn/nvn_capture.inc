@@ -347,7 +347,7 @@ static void cap_head(void) {
 #undef KV
     cap_put(&g_cap_w, CAP_HEAD, 0, h.p, h.n, 0); cap_buf_free(&h);
     const char *lay = cap_layout(); cap_put(&g_cap_w, CAP_LAYT, 0, lay, strlen(lay), 0);
-    snprintf(line, sizeof line, "tex_pool_n\t%d\norigin_ll\t%d\nqueue_origin_ll\t%d\ndepth_zero\t%d\n", g_tpool_n, atomic_load(&g_origin_ll), g_queue_origin_ll, atomic_load(&g_depth_zero));
+    snprintf(line, sizeof line, "tex_pool_n\t%d\nsamp_pool_n\t%d\norigin_ll\t%d\nqueue_origin_ll\t%d\ndepth_zero\t%d\n", g_tpool_n, g_spool_n, atomic_load(&g_origin_ll), g_queue_origin_ll, atomic_load(&g_depth_zero));
     cap_put(&g_cap_w, CAP_STAT, 0, line, strlen(line), 0);
 }
 static void cap_pools(uint32_t submit) {   // regions for pools not covered yet (all of them at submit 1), and the replay layer's pool list

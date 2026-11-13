@@ -255,7 +255,7 @@ NVN(nvnMemoryPoolBuilderSetDefaults, void, NVNmemoryPoolBuilder *b) { memset(b, 
 NVN(nvnMemoryPoolBuilderSetDevice, void, NVNmemoryPoolBuilder *b, NVNdevice *d) { ((pool_builder_t *)b)->dev = d; }
 NVN(nvnMemoryPoolBuilderSetStorage, void, NVNmemoryPoolBuilder *b, void *m, size_t n) { ((pool_builder_t *)b)->mem = m; ((pool_builder_t *)b)->size = n; }
 NVN(nvnMemoryPoolBuilderSetFlags, void, NVNmemoryPoolBuilder *b, int f) { ((pool_builder_t *)b)->flags = f; }
-static uint8_t *vpool_reserve(pool_t *o); static void vpool_release(pool_t *o);   // sparse virtual pools, see MapVirtual
+static uint8_t *vpool_reserve(pool_t *o); static void vpool_release(pool_t *o); static void vpool_taken(const pool_t *o);   // sparse virtual pools, see MapVirtual
 NVN(nvnMemoryPoolInitialize, NVNboolean, NVNmemoryPool *p, const NVNmemoryPoolBuilder *b) {
     const pool_builder_t *s = (const pool_builder_t *)b; pool_t *o = (pool_t *)p;
     o->magic = MAGIC('P', 'O', 'O', 'L'); o->flags = s->flags; o->mem = s->mem; o->size = s->size; o->vp = NULL; o->vmode = 0;
@@ -283,7 +283,7 @@ NVN(nvnMemoryPoolFlushMappedRange, void, const NVNmemoryPool *p, ptrdiff_t off, 
     ft_flush(o->mem + off, n);
 }
 // A GPU address exists only once the driver has given one: here, by a buffer (nvnBufferInitialize) or by a texture (nvnTextureGetTextureAddress). Raw global memory can reach only what these name (mtl_pool_addressed)
-static void pool_mark_addressed(const pool_t *o) { static __thread const uint8_t *last; if (o->mem && o->mem != last) { last = o->mem; mtl_pool_addressed(o->mem, o->size); } }
+static void pool_mark_addressed(const pool_t *o) { vpool_taken(o); static __thread const uint8_t *last; if (o->mem && o->mem != last) { last = o->mem; mtl_pool_addressed(o->mem, o->size); } }
 NVN(nvnMemoryPoolGetBufferAddress, NVNbufferAddress, const NVNmemoryPool *p) { pool_mark_addressed((const pool_t *)p); return (NVNbufferAddress)((const pool_t *)p)->mem; }
 
 // ---------- Descriptor pools ----------
@@ -295,9 +295,9 @@ NVN(nvnMemoryPoolGetBufferAddress, NVNbufferAddress, const NVNmemoryPool *p) { p
 // textures into fresh IDs of a ring in its large pool (8,729 and up a few seconds in); with the table's capacity taken from the last pool alone, those all read as empty slots and the screen was black
 enum { NDPOOL = 16 };
 static struct dpool_base { const void *pool; int base; } g_tpb[NDPOOL], g_spb[NDPOOL];
-static int g_ntpb, g_nspb, g_tnext, g_snext;
+static int g_ntpb, g_nspb, g_tnext, g_snext, g_tend, g_send;   // next: where the next pool's numbering starts (256-aligned); end: one past the last ID of any pool (base + its own size)
 static pthread_mutex_t g_dpool_mu = PTHREAD_MUTEX_INITIALIZER;
-static int dpool_add(struct dpool_base *t, int *nt, int *next, const void *pool, int n, const char *kind) {   // → the pool's base (assigned at its first Initialize)
+static int dpool_add(struct dpool_base *t, int *nt, int *next, int *end, const void *pool, int n, const char *kind) {   // → the pool's base (assigned at its first Initialize)
     pthread_mutex_lock(&g_dpool_mu);
     int i = 0; while (i < *nt && t[i].pool != pool) i++;
     if (i == *nt) {
@@ -305,7 +305,8 @@ static int dpool_add(struct dpool_base *t, int *nt, int *next, const void *pool,
         t[i] = (struct dpool_base){pool, *next}; (*nt)++; *next += (n + 255) & ~255;
         if (i) LOG("[nvn] pool #%d (%s, %d entries): numbered from %d in the host table, separate from the earlier pools", i + 1, kind, n, t[i].base);
     }
-    int b = t[i].base; pthread_mutex_unlock(&g_dpool_mu); return b;
+    int b = t[i].base; if (b + n > *end) *end = b + n;
+    pthread_mutex_unlock(&g_dpool_mu); return b;
 }
 static int dpool_base(const struct dpool_base *t, int nt, const void *pool) { for (int i = 0; i < nt; i++) if (t[i].pool == pool) return t[i].base; return 0; }
 int nvn_dpool_base(const void *pool, int tex) { return tex ? dpool_base(g_tpb, g_ntpb, pool) : dpool_base(g_spb, g_nspb, pool); }   // the replay's bound pools (nvn_mtl.m state_op)
@@ -313,7 +314,8 @@ int nvn_dpool_base(const void *pool, int tex) { return tex ? dpool_base(g_tpb, g
 // Dark Souls Remastered binds one of 12 sampler pools in more than 64 command buffers, and every later one read its samplers through the first pool's numbering
 NVN(nvnTexturePoolInitialize, NVNboolean, NVNtexturePool *tp, const NVNmemoryPool *p, ptrdiff_t off, int n) {
     *(dpool_t *)tp = (dpool_t){(const pool_t *)p, off, n}; OLOG("TexturePool n=%d", n);
-    dpool_add(g_tpb, &g_ntpb, &g_tnext, tp, n, "texture"); mtl_set_tex_pool_n(g_tnext);
+    // IDs past the pools are empty slots (mtl_set_tex_pool_n): the end is the pools' own size, not the 256-aligned start of the next numbering
+    dpool_add(g_tpb, &g_ntpb, &g_tnext, &g_tend, tp, n, "texture"); mtl_set_tex_pool_n(g_tend);
     return 1;
 }
 NVN(nvnTexturePoolFinalize, void, NVNtexturePool *tp) { (void)tp; }
@@ -326,7 +328,7 @@ NVN(nvnTexturePoolRegisterImage, void, const NVNtexturePool *tp, int id, const N
     mtl_reg_image(dpool_base(g_tpb, g_ntpb, tp) + id, (const tex_t *)t, (const view_t *)v);
 }
 NVN(nvnSamplerPoolInitialize, NVNboolean, NVNsamplerPool *sp, const NVNmemoryPool *p, ptrdiff_t off, int n) {
-    *(dpool_t *)sp = (dpool_t){(const pool_t *)p, off, n}; OLOG("SamplerPool n=%d", n); dpool_add(g_spb, &g_nspb, &g_snext, sp, n, "sampler"); return 1;
+    *(dpool_t *)sp = (dpool_t){(const pool_t *)p, off, n}; OLOG("SamplerPool n=%d", n); dpool_add(g_spb, &g_nspb, &g_snext, &g_send, sp, n, "sampler"); mtl_set_samp_pool_n(g_send); return 1;
 }
 NVN(nvnSamplerPoolFinalize, void, NVNsamplerPool *sp) { (void)sp; }
 NVN(nvnSamplerPoolRegisterSampler, void, const NVNsamplerPool *sp, int id, const NVNsampler *s) { mtl_reg_samp(dpool_base(g_spb, g_nspb, sp) + id, &((const samp_t *)s)->p); }
@@ -593,6 +595,7 @@ NVN(nvnTextureInitialize, NVNboolean, NVNtexture *t, const NVNtextureBuilder *b)
     o->magic = MAGIC('T', 'E', 'X', 0); o->d = s->d; o->pool = s->pool; o->off = s->off;
     o->has_layout = s->has_layout; memcpy(o->layout, s->layout, 8); o->set_swz = s->set_swz; o->stencil = s->stencil; o->swz = s->swz;
     nvn_tex_layout(&o->d, &o->L);
+    if (s->pool) vpool_taken(s->pool);
     o->mem = s->pool && s->pool->mem ? s->pool->mem + s->off : NULL;
     o->serial = nvn_new_serial(); mtl_tex_init(o);
     {   // DM_NVN_TEXINFO=WxH also logs every texture of that size as it is initialized (render targets included): which ones share storage, and how their descriptions differ
@@ -626,7 +629,7 @@ NVN(nvnTextureGetSamples, int, const NVNtexture *t) { return CTX(t)->d.samples; 
 NVN(nvnTextureGetMemoryPool, NVNmemoryPool *, const NVNtexture *t) { return (NVNmemoryPool *)CTX(t)->pool; }
 NVN(nvnTextureGetMemoryOffset, ptrdiff_t, const NVNtexture *t) { return (ptrdiff_t)CTX(t)->off; }
 // The GPU address of the texture's storage (DRAGON QUEST XI S, Unreal Engine 4.18, asks for it at start): pool address + offset, the same address space as nvnMemoryPoolGetBufferAddress
-NVN(nvnTextureGetTextureAddress, NVNtextureAddress, const NVNtexture *t) { const tex_t *o = CTX(t); if (o->pool) mtl_pool_addressed(o->pool->mem + o->off, o->L.size ? o->L.size : 1); return o->pool ? (NVNtextureAddress)(o->pool->mem + o->off) : 0; }
+NVN(nvnTextureGetTextureAddress, NVNtextureAddress, const NVNtexture *t) { const tex_t *o = CTX(t); if (o->pool) vpool_taken(o->pool); if (o->pool) mtl_pool_addressed(o->pool->mem + o->off, o->L.size ? o->L.size : 1); return o->pool ? (NVNtextureAddress)(o->pool->mem + o->off) : 0; }
 // The size of a texture's ZCull save area (SaveZCullData / RestoreZCullData). The host does no ZCull and never touches the area, but games allocate it from their own pools, and NVN
 // does not report 0. Cuphead (Unity 2017.4) allocates one per depth target (main+0x1948060) from its pool allocator, which gives a zero-size request the offset of a live block; its
 // map of allocations then loses that block (the zero-size one's size overwrites it, and freeing the zero-size one deletes it), and the block's own free later pushes a garbage-sized
@@ -870,7 +873,7 @@ NVN(nvnEventBuilderSetStorage, void, NVNeventBuilder *b, const NVNmemoryPool *p,
 NVN(nvnEventInitialize, NVNboolean, NVNevent *e, const NVNeventBuilder *b) {
     const ev_builder_t *s = (const ev_builder_t *)b;
     if (!s->pool || !s->pool->mem) { LOG("[RED] EventInitialize has no storage"); return 0; }
-    *(ev_t *)e = (ev_t){MAGIC('E', 'V', 'N', 'T'), (volatile uint32_t *)(s->pool->mem + s->off), s->pool, s->off}; return 1;
+    vpool_taken(s->pool); *(ev_t *)e = (ev_t){MAGIC('E', 'V', 'N', 'T'), (volatile uint32_t *)(s->pool->mem + s->off), s->pool, s->off}; return 1;
 }
 // Assassin's Creed Revelations asks an event for its storage and maps that pool at start-up; a null pool crashed it in MemoryPoolMap
 NVN_NOPROTO(nvnEventGetMemoryPool, NVNmemoryPool *, const NVNevent *e) { return (NVNmemoryPool *)((const ev_t *)e)->pool; }
@@ -1032,6 +1035,7 @@ NVN(nvnCommandBufferAddCommandMemory, void, NVNcommandBuffer *c, const NVNmemory
     if (pl) __atomic_store_n(&CB(c)->cmd_size, n, __ATOMIC_RELAXED);   // GetCommandMemorySize: the memory the game added, whether the host records into it or into a segment it lends
     if (!pl || n < 64) { if (cs_on()) { pthread_mutex_lock(&g_cs_mu); g_cs.hostseg++; pthread_mutex_unlock(&g_cs_mu); } size_t sz = hostseg_size(CB(c), !pl, n); cmd_new_segment(CB(c), hostseg_take(CB(c), sz), sz); return; }
     if (!pl->mem) { LOG("[RED] AddCommandMemory: pool has no CPU storage"); return; }
+    vpool_taken(pl);
     hostseg_release((uintptr_t)(pl->mem + off), (uintptr_t)(pl->mem + off + n));
     if (cs_on()) { pthread_mutex_lock(&g_cs_mu); g_cs.grants++; g_cs.grant_bytes += n; if (!g_cs.grant_min || n < g_cs.grant_min) g_cs.grant_min = n; if (n > g_cs.grant_max) g_cs.grant_max = n; pthread_mutex_unlock(&g_cs_mu); }
     { static int cblog = -1; if (cblog < 0) cblog = getenv("DM_NVN_CBLOG") != NULL; static uint64_t ng; if (cblog && (++ng <= 60 || ng % 500 == 0)) LOG("[nvn] AddCommandMemory #%llu cmd=%p pool %p +%#lx length %#zx (recording %d)", (unsigned long long)ng, (void *)c, (const void *)pl, (long)off, n, CB(c)->recording); }
@@ -2621,11 +2625,11 @@ NVN(nvnBufferInitialize, NVNboolean, NVNbuffer *buf, const NVNbufferBuilder *b) 
 }
 NVN(nvnBufferFinalize, void, NVNbuffer *buf) { ((buf_t *)buf)->magic = 0; }
 NVN(nvnBufferSetDebugLabel, void, NVNbuffer *buf, const char *s) { (void)buf; (void)s; }
-NVN(nvnBufferGetAddress, NVNbufferAddress, const NVNbuffer *buf) { return (NVNbufferAddress)(BF(buf)->pool->mem + BF(buf)->off); }
+NVN(nvnBufferGetAddress, NVNbufferAddress, const NVNbuffer *buf) { vpool_taken(BF(buf)->pool); return (NVNbufferAddress)(BF(buf)->pool->mem + BF(buf)->off); }
 // A buffer or pool the CPU has no access to (NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS) maps to NULL, as in NVN, though the host's storage is CPU memory: EA SPORTS FC 27's Frostbite
 // renderer takes a buffer's GPU address as GetAddress + (its data pointer − Map), with a null data pointer for such a buffer (OpcodeCopySubresource), so a real pointer made the
 // copy's destination address 0 (FATAL buffer copy address is in no memory pool)
-NVN(nvnBufferMap, void *, const NVNbuffer *buf) { return BF(buf)->pool->flags & NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS ? NULL : BF(buf)->pool->mem + BF(buf)->off; }
+NVN(nvnBufferMap, void *, const NVNbuffer *buf) { if (BF(buf)->pool->flags & NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS) return NULL; vpool_taken(BF(buf)->pool); return BF(buf)->pool->mem + BF(buf)->off; }
 NVN(nvnBufferGetSize, size_t, const NVNbuffer *buf) { return (size_t)BF(buf)->size; }
 NVN(nvnBufferGetMemoryPool, NVNmemoryPool *, const NVNbuffer *buf) { return (NVNmemoryPool *)BF(buf)->pool; }
 NVN(nvnBufferGetMemoryOffset, ptrdiff_t, const NVNbuffer *buf) { return (ptrdiff_t)BF(buf)->off; }
@@ -2634,7 +2638,7 @@ NVN(nvnBufferInvalidateMappedRange, void, const NVNbuffer *buf, ptrdiff_t off, s
 
 // Memory pool queries
 NVN(nvnMemoryPoolGetFlags, NVNmemoryPoolFlags, const NVNmemoryPool *p) { return (NVNmemoryPoolFlags)((const pool_t *)p)->flags; }
-NVN(nvnMemoryPoolMap, void *, const NVNmemoryPool *p) { return ((const pool_t *)p)->flags & NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS ? NULL : ((const pool_t *)p)->mem; }   // NULL without CPU access (nvnBufferMap)
+NVN(nvnMemoryPoolMap, void *, const NVNmemoryPool *p) { if (((const pool_t *)p)->flags & NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS) return NULL; vpool_taken((const pool_t *)p); return ((const pool_t *)p)->mem; }   // NULL without CPU access (nvnBufferMap)
 NVN(nvnMemoryPoolGetSize, size_t, const NVNmemoryPool *p) { return (size_t)((const pool_t *)p)->size; }
 NVN(nvnMemoryPoolInvalidateMappedRange, void, const NVNmemoryPool *p, ptrdiff_t off, size_t n) { (void)p; (void)off; (void)n; }
 NVN(nvnMemoryPoolSetDebugLabel, void, NVNmemoryPool *p, const char *s) { (void)p; (void)s; }
@@ -2662,19 +2666,26 @@ _Static_assert(sizeof(map_req) == 0x28, "NVNmappingRequest");
 // and uploaded again only when a mapping in its range changes or the CPU writes a physical page behind it (nvn_sparse_since; the physical pools are dirty-tracked). The game fills
 // its sparse textures (flag 0x20, 32 GB into the pool) that way: it writes the tiles on the CPU into 4 MB physical pools, then maps them; no GPU copy writes them
 // Every virtual pool gets that range at Initialize, since the game may create its textures and buffers before mapping anything; its first mapping request then decides (MapVirtual):
-// one that maps the whole pool from offset 0 keeps the alias above (Mario's pool: the range is given back, and no object of the pool came before it), anything else makes the pool
+// one that maps the whole pool from offset 0 keeps the alias above (Mario's pool: the range is given back), as long as no address of the range has left the host (vpool_taken: a texture,
+// buffer, event or command memory made on it, an address asked for), since the alias moves the pool and those would point into the range given back; anything else makes the pool
 // sparse. OCTOPATH TRAVELER (Unreal Engine 4) gives each streamed texture a virtual pool of its own (0x20000 to 0x560000 bytes, flags 0x2a1), creates the texture in it, maps its mip
 // tail from a 4 MB physical pool and later the higher mips from other pages of it, after writing their texels there on the CPU: aliased, the texture had no storage (created before any
 // mapping) and the later mappings were refused (`[RED] MapVirtual: non-contiguous mapping`). A pool larger than the application pool is sparse from the start
 enum { VPT_LEAF = 512 };   // a page-table leaf covers 2 MB
 typedef struct { const uint8_t *phys; uint64_t gen; uint32_t live; } vpte;   // live: the page has been mapped and may still be under a zero-copy buffer the GPU uses (see vunmap_defer)
-struct vpool { const pool_t *pool; uint8_t *base; uint64_t len, size, top; int nrun; struct vrun { uint64_t lo, hi; } *run; vpte **pt; struct vlog_ent *log; _Atomic uint64_t nlog; };   // len: reserved; size: the pool's; top: highest mapped end so far (logged per 128 MB)
+struct vpool { const pool_t *pool; uint8_t *base; uint64_t len, size, top; int nrun, taken; struct vrun { uint64_t lo, hi; } *run; vpte **pt; struct vlog_ent *log; _Atomic uint64_t nlog; };   // len: reserved; size: the pool's; top: highest mapped end so far (logged per 128 MB)
 struct vlog_ent { uint64_t off, len; };   // a mapping request: the pool's change log (nvn_sparse_log_read), kept once a placement sparse texture asks for it
 enum { VLOG_N = 4096 };
 static struct vpool **g_vp; static int g_nvp, g_cvp;   // the pools with a range of their own, under g_vp_mu
 static pthread_mutex_t g_vp_mu = PTHREAD_MUTEX_INITIALIZER;
 static _Atomic uint64_t g_vp_gen;   // bumped per mapping request
 static struct vpool *vpool_of(const pool_t *o) { return o->vp; }
+// An address in the pool's own range has left the host before its first mapping: an object keeps it (a texture's or event's storage, command memory) or the game was given it (a buffer
+// or texture address, a map). The range then stays, so the first mapping makes the pool sparse rather than giving the range back for an alias (MapVirtual)
+static void vpool_taken(const pool_t *o) {
+    if (!o || !o->vp || o->vmode != 0) return;
+    pthread_mutex_lock(&g_vp_mu); if (o->vp && o->vmode == 0) o->vp->taken = 1; pthread_mutex_unlock(&g_vp_mu);
+}
 static uint8_t *vpool_reserve(pool_t *o) {   // → the reserved range, or NULL
     if (!(o->flags & 0x200)) return NULL;
 #if TARGET_OS_IPHONE   // 1 GB: Monster Hunter Rise's buffers stay under 0x20100000 through its opening, its textures (32 GB in) are read through the page table, and 4 GB guest + 1 GB stays near the 5 GB proven on a phone
@@ -2830,8 +2841,13 @@ NVN(nvnMemoryPoolMapVirtual, NVNboolean, NVNmemoryPool *p, int n, const NVNmappi
     pool_t *o = (pool_t *)p; const map_req *r = (const map_req *)rq;
     pthread_mutex_lock(&g_vp_mu);
     if (o->vp && o->vmode == 0 && n > 0) {   // the first mapping decides (see the sparse pools above)
-        if (r[0].phys && r[0].voff == 0 && r[0].size == o->size) { vpool_drop(o); o->mem = NULL; o->vmode = 1; }
-        else o->vmode = 2;
+        int whole = r[0].phys && r[0].voff == 0 && r[0].size == o->size;
+        if (whole && !o->vp->taken) { vpool_drop(o); o->mem = NULL; o->vmode = 1; }
+        else {
+            o->vmode = 2;
+            if (whole) LOG("[nvn] MapVirtual: virtual pool %p (%#llx bytes) gave out addresses of its own range before this first mapping: sparse, its physical pool %p's pages remapped into that range, not aliased",
+                           (void *)o, (unsigned long long)o->size, (const void *)r[0].phys);
+        }
     }
     struct vpool *v = o->vmode == 2 ? vpool_of(o) : NULL; int ok = 1;
     if (g_nvun) vunmap_run(0);   // pages kept by earlier unmaps whose work has completed

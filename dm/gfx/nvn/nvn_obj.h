@@ -287,6 +287,7 @@ void mtl_present_flush(void);                              // Wait until all enq
 void mtl_present_test_stall(uint64_t ns);                  // Unit test: extra pause in ns before each present on the present thread
 int mtl_display_hz(void);                                   // Maximum refresh rate of the screen (Hz) when there is a window, 0 without a window
 void mtl_set_tex_pool_n(int n);                            // Texture descriptor pool capacity: texture IDs outside the pool are treated as 'empty slots' (read 0)
+void mtl_set_samp_pool_n(int n);                           // Sampler descriptor pool capacity: sampler IDs outside the pool are treated as empty slots too
 // Timing instrumentation (shared by Mac / iOS): submissions are tagged with the frame number; GPU time = sum of GPUEnd−GPUStart over all of that frame's command buffers, readable only after all complete (otherwise −1)
 void mtl_set_frame(uint64_t f);
 void mtl_ub_present(double iv_ms);   // Same-process alternating measurement (DM_NVN_UB): the present thread reports the actual present interval every frame

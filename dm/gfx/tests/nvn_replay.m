@@ -258,6 +258,7 @@ int main(int argc, char **argv) { @autoreleasepool {
     apply_env(head, hn);
     mtl_init();
     if (head_get(stat, sn, "tex_pool_n", v, sizeof v)) mtl_set_tex_pool_n(atoi(v));
+    if (head_get(stat, sn, "samp_pool_n", v, sizeof v)) mtl_set_samp_pool_n(atoi(v));
     if (head_get(stat, sn, "origin_ll", v, sizeof v)) mtl_set_origin_lower_left(atoi(v));
     if (head_get(stat, sn, "depth_zero", v, sizeof v)) mtl_set_depth_zero(atoi(v));
     int qll = head_get(stat, sn, "queue_origin_ll", v, sizeof v) ? atoi(v) : 1;

@@ -112,6 +112,22 @@ A game may tell NVN objects apart by their bytes, without an NVN call. A host re
 - **Found on:** [OCTOPATH TRAVELER](../../dm/games/010057D006492000/README.md): 221 pools by the first village; the same route with the old alias left the ground, plants and props black.
 - **Not checked:** [Super Mario Bros. Wonder](../../dm/games/010015100B514000/README.md) (no game files on hand), whose pool should take the alias branch as before.
 
+### A virtual pool aliased after objects were made on it
+
+- **Symptom:** none seen in a game yet. The failure it prevents is a texture, buffer, event or command memory made on a virtual pool before its first mapping pointing into address space the host has given back (`CRASH sig=10/11` at an address in no pool, or a texture that reads nothing), once a whole-pool mapping aliases the pool.
+- **Cause:** the [alias](#virtual-pools-of-one-texture-each-mapped-before-and-after-the-texture) moves the pool: its storage becomes the physical pool's memory and its reserved range is unmapped. NVN keeps a virtual pool's GPU addresses from creation on, so a game may make objects on it, or take its address, before mapping anything. The objects and addresses made before the mapping kept the old range.
+- **Fix:** general, `vpool_taken` in `hle_nvn.c`. Every place an address of a pool's own range leaves the host notes it: `nvnTextureInitialize`, `nvnTextureGetTextureAddress`, `nvnBufferInitialize` and `nvnMemoryPoolGetBufferAddress` (`pool_mark_addressed`), `nvnBufferGetAddress`, `nvnBufferMap`, `nvnMemoryPoolMap`, `nvnEventInitialize`, `nvnCommandBufferAddCommandMemory`. A whole-pool first mapping of such a pool makes it sparse instead (the physical pages remapped into its range, which keeps every address), with a `[nvn] MapVirtual: virtual pool … gave out addresses of its own range before this first mapping` line. An untouched pool is aliased as before.
+- **Check:** `make -C dm/gfx/tests GAME=<id> check_t_vpool_first_map`: an untouched pool aliased; a pool with an address, a texture or a buffer made first stays sparse, and each reads the physical pages. Without the fix the address case crashes on the range given back. Ocarina of Time (the one local game with an aliased pool, 305 MB, flags `0x2a1` over a physical pool of flags `0x18c`) still aliases at boot.
+- **Found on:** found by reading the code, from [#2513](https://github.com/seedds/nxnative/issues/2513) (Super Mario Party aliases 17 virtual pools) and [PR #2519](https://github.com/seedds/nxnative/pull/2519). Whether any game makes objects before mapping is not known.
+
+### Sampler IDs past the sampler pool
+
+- **Symptom:** `[RED] sampler ID 4095 not registered`, beside `texture ID 1048575 outside the pool … treated as an empty slot: reads 0`.
+- **Cause:** a game binds the combined handle `0xFFFFFFFF` (texture ID `0xFFFFF`, sampler ID 4095) to unused slots. The host bounded texture IDs by the texture pools' capacity but not sampler IDs by the sampler pools'. That capacity was also the 256-aligned start of the next pool's numbering (`dpool_add`), not the pools' own end, so a 4,000-entry pool took IDs up to 4,095 as its own.
+- **Fix:** general, `dpool_add` in `hle_nvn.c` and `samp_by_id` in `nvn_mtl.m`: each kind records one past its pools' last ID, base plus the pool's own size (`mtl_set_tex_pool_n`, `mtl_set_samp_pool_n`, carried in captures as `tex_pool_n` and `samp_pool_n`), and a sampler ID past it is an empty slot, logged once, as a texture ID is. What is bound stays as it was (nothing); only the red line goes. An unregistered ID inside a pool is still reported, and so is one in the gap a 256-aligned numbering leaves between two pools.
+- **Check:** `check_t_vpool_first_map` (a 4,000-entry pool, IDs 4095 and 300). In the game, Super Mario Party's opening, `sampler ID 4095 outside the pool (capacity 4000)`, no red line.
+- **Found on:** Super Mario Party (`010036B0034E4000`, no profile yet), [#2513](https://github.com/seedds/nxnative/issues/2513): one sampler pool of 4,000 entries.
+
 ### The sparse tile layout of a texture
 
 - **Symptom:** `[RED] NVN unimplemented function called: nvnTextureBuilderGetSparseTileLayout`, then an out-of-memory abort in Unreal's allocator (`Failed to allocate 1879113728 bytes from Standard Allocator`, on `DM_DBG=1`).

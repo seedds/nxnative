@@ -666,3 +666,10 @@ check_t_pool_standin: t_pool_standin
 	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=0 ./t_pool_standin
 	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=1 ./t_pool_standin
 	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=0 DM_NVN_POOL_STANDIN=0 ./t_pool_standin
+
+# A virtual pool's first whole mapping aliases it only while no address of its own range has left the host; sampler IDs past the pool are empty slots (issue #2513, PR #2519)
+t_vpool_first_map: t_vpool_first_map.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_vpool_first_map.m ../../host/crash.c ../../host/hle_bigstack.c t_host_stubs.c $(filter-out ../nvn/nvn_mtl.m,$(GFX)) $(FW)
+.PHONY: check_t_vpool_first_map
+check_t_vpool_first_map: t_vpool_first_map
+	MTL_DEBUG_LAYER=1 ./t_vpool_first_map

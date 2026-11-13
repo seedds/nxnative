@@ -409,6 +409,7 @@ static void shape_case(void) {
     for (int frame = 0; frame < 6; frame++) {
         g_fb_bar++;   // the game's barrier before each snapshot draw, as in Tears of the Kingdom's shrines
         for (int k = 0; k < 5; k++, g_fb_bar++) {
+            g_draw_seq++;   // each snapshot a draw of its own: an entry handed to the current draw is not taken for another key
             fb_cache_t *e = fb_snap(1000 + frame * 5 + k, 0, 0, MTLPixelFormatRGBA8Unorm, size[k][0], size[k][1], 0, &fresh);
             bad += !e || !fresh || e->snap.width != size[k][0] || e->snap.height != size[k][1];
             if (e) [made addObject:[NSValue valueWithPointer:(__bridge void *)e->snap]];
@@ -416,10 +417,47 @@ static void shape_case(void) {
     }
     CHECK(!bad, "every new key gets a texture of its size");
     CHECK(made.count == 4, "30 snapshots of 4 sizes over 6 frames make one texture per size, not one each");
-    fb_cache_t *a = fb_snap(1, 0, 0, MTLPixelFormatRGBA8Unorm, 64, 32, 0, &fresh), *b = fb_snap(2, 0, 0, MTLPixelFormatRGBA8Unorm, 64, 32, 0, &fresh);
+    g_draw_seq++; fb_cache_t *a = fb_snap(1, 0, 0, MTLPixelFormatRGBA8Unorm, 64, 32, 0, &fresh);
+    g_draw_seq++; fb_cache_t *b = fb_snap(2, 0, 0, MTLPixelFormatRGBA8Unorm, 64, 32, 0, &fresh);
     CHECK(a != b, "a live snapshot is not taken for another key while a stale entry is free");
     fb_cache_t *a2 = fb_snap(1, 0, 0, MTLPixelFormatRGBA8Unorm, 64, 32, 0, &fresh);
     CHECK(a2 == a && !fresh, "the live snapshot is reused until the next barrier");
+    for (int i = 0; i < 8; i++) { g_fbc[i] = (fb_cache_t){0}; } g_fbc_use = 0;
+}
+// One draw samples two attachments of one format and size while every snapshot entry is live (eight keys since the last barrier, in this submission) and only one entry has that shape:
+// the first attachment's, cached from an earlier draw or copied for this one. Each binding must get a snapshot of its own; the second key took the first one's entry and copied its
+// attachment over it, so both bindings sampled the second attachment (PR #813)
+static void same_draw_case(int cached_first) {
+    int before = failed, tid = 760 + cached_first * 2, fresh;
+    for (int i = 0; i < 8; i++) { g_fbc[i] = (fb_cache_t){0}; } g_fbc_use = 0;
+    NvProg *pr = [NvProg new]; NvShader *fs = [NvShader new]; pr->sh[1] = fs; fs->stage = 1; strcpy(fs->key, "fedcba9876543210");
+    fs->rf.nb = 2; fs->rf.b[0] = (nvn_rbind){.kind=NVN_RB_TEX, .reg=0, .aid=0, .dtt=MTLTextureType2D}; fs->rf.b[1] = (nvn_rbind){.kind=NVN_RB_TEX, .reg=1, .aid=1, .dtt=MTLTextureType2D};
+    tex_t a, b; id<MTLTexture> ta = target(&a, 99850 + cached_first * 2), tb = target(&b, 99851 + cached_first * 2);
+    mtl_reg_tex(tid, &a, NULL); mtl_reg_tex(tid + 1, &b, NULL);
+    id<MTLBuffer> result = [g_dev newBufferWithLength:2048 options:MTLResourceStorageModeShared]; res_add(result);
+    state_reset(); memset(&R, 0, sizeof R); mtl_sub_begin();
+    R.has_rt = 1; R.rt.n = 1;
+    R.rt.color[0] = &a; clear(MTLClearColorMake(1, 0, 0, 1)); rp_end();
+    R.rt.color[0] = &b; clear(MTLClearColorMake(0, 1, 0, 1)); rp_end();
+    for (int i = 0; i < 8; i++) {   // earlier draws of this submission: the first attachment's snapshot (or another key's of its shape), then seven other shapes
+        g_draw_seq++;
+        fb_cache_t *e = fb_snap(i == 0 && cached_first ? a.serial : 5000 + (uint64_t)i, 0, 0, ta.pixelFormat, 4 + (NSUInteger)i, 4, 0, &fresh);
+        CHECK(e && fresh, "an earlier draw takes a snapshot entry");
+        if (e && i == 0 && cached_first) enc_b_copy_texture(blit(), ta, 0, 0, MTLOriginMake(0, 0, 0), MTLSizeMake(4, 4, 1), e->snap, 0, 0, MTLOriginMake(0, 0, 0));
+    }
+    R.rt.n = 2; R.rt.color[0] = &a; R.rt.color[1] = &b; S.tex[1][0] = tid; S.tex[1][1] = tid + 1; S.chmask.mask = 0xffffffffu;
+    uint64_t copies = g_fb_count;
+    fb_prepare(pr);
+    CHECK(g_fb_n == 2 && g_fb_src[0] == ta && g_fb_src[1] == tb, "the draw samples snapshots of both attachments");
+    CHECK(g_fb_count == copies + 2 - (uint64_t)cached_first, cached_first ? "the cached snapshot is reused and the other copied" : "both are copied");
+    CHECK(g_fb_n == 2 && g_fb_use[0] != g_fb_use[1], "each attachment gets a snapshot of its own");
+    if (g_fb_n == 2) { readback(g_fb_use[0], result, 0); readback(g_fb_use[1], result, 1024); }
+    CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull), "GPU submission completed");
+    CHECK(!mtl_last_commit_error(), "GPU submission has no error");
+    pixels(result, 0, (const uint8_t[]){255, 0, 0, 255}, "the first attachment's snapshot holds its red");
+    pixels(result, 1024, (const uint8_t[]){0, 255, 0, 255}, "the second attachment's snapshot holds its green");
+    printf("feedback snapshots of one draw (%s first): %s\n", cached_first ? "cached" : "fresh", before == failed ? "PASS" : "FAIL");
+    mtl_tex_release(&a); mtl_tex_release(&b);
     for (int i = 0; i < 8; i++) { g_fbc[i] = (fb_cache_t){0}; } g_fbc_use = 0;
 }
 // A pool shader may name any registered texture, the depth attachment too, so it counts as reading the attachment (and a later draw writing depth ends the pass) only once a shader has read that
@@ -713,6 +751,7 @@ int main(int argc, char **argv) { @autoreleasepool {
     for (int pending = 0; pending < 2; pending++) for (int stencil = 0; stencil < 2; stencil++) { real_depth_snap_case(pr, 1, stencil, pending); real_depth_snap_case(pr, 0, stencil, pending); }
     pending_clear_case(pr);
     shape_case();
+    same_draw_case(0); same_draw_case(1);
     mip_chain_case(pr);
     fs->fn = [lib newFunctionWithName:@"mask"];
     fs->ae = [fs->fn newArgumentEncoderWithBufferIndex:0]; fs->arg_len = fs->ae.encodedLength;

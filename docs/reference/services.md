@@ -1242,6 +1242,13 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Check:** with `DM_AUDIO=1`, a run to the first room has no `[diag]` line and the frame counter keeps advancing.
 - **Found on:** [Well Dweller](../../dm/games/0100217023F6C000/README.md) (SDK 22.2.0), in `std::chrono::steady_clock::now()` called from GameMaker's frame-timing helper.
 
+### The adjustable network clock aborts in `Adjust`
+
+- **Symptom:** `game called nn::diag abort: Result 0x74, call site sdk+…` within the first frames, the backtrace's first `sdk` frame right past `time::AdjustableNetworkSystemClock::Adjust` (its last instruction is the call of `diag::detail::AbortImpl`, so the return address names the next function, `GetSystemClockContext` of the same class).
+- **Cause:** `AdjustableNetworkSystemClock::Adjust` copies the network clock's context into the SDK's `detail::MonotonicSystemClock` and aborts on any failure of `StandardNetworkSystemClock::GetSystemClockContext`, which asks the time service the host never opens. A Switch answers it offline too: the context of a network clock never calibrated. The adjustable clock's `GetCurrentTime` then reads the time service's shared memory, as [the adjustable user clock](#steady-clock-clock-snapshots-and-user-clocks) does.
+- **Fix:** `hle_time.c` answers `StandardNetworkSystemClock::GetSystemClockContext` with a zero context (0x20 bytes: offset 0 and a steady clock time point whose source ID is no steady clock's, so the time it stands for is unavailable) and `AdjustableNetworkSystemClock::GetCurrentTime` with failure, as `StandardNetworkSystemClock::GetCurrentTime` (`hle_sdk16.c`). `t_time` checks the zero context within its 0x20 bytes, its source ID, and the adjustable clock's failure with its output untouched.
+- **Found on:** METAL GEAR SOLID: Peace Walker - Master Collection Version (`0100C6F01C4F8000`, 1.3.1, SDK 19): program 1, which its launcher starts, aborted in `Adjust` (`sdk+0x42c514` on that build) right after its first frames; with the fix it ran on for 90 seconds (2100 frames) with sound.
+
 ## Modules and symbols
 
 ### Host symbol indexes avoid repeated name scans

@@ -39,11 +39,13 @@ Measured on the M6 (16 GB), in a 1280x720 window: 60 fps at the title (frame tim
 - Its streamed textures are sampled through views from level 1 or 2 while only their smallest levels are mapped; the host counted those levels from the first mapped one, so the views were left out or read a smaller level ([Texture views of a sparse texture bound from a later level](../../../docs/reference/rendering.md#texture-views-of-a-sparse-texture-bound-from-a-later-level)).
 - It puts its 1x1 default texture into the IDs of cubes it lets go, which the host reported as read through a cube table ([Read marks of a texture type kept when an ID changes type](../../../docs/reference/nvn-objects.md#read-marks-of-a-texture-type-kept-when-an-id-changes-type)).
 - At frame 5 one shader is pushed a buffer address on a page of a sparse pool the game has not mapped yet: it reads 0, as on the console ([A buffer address on an unmapped page of a sparse pool](../../../docs/reference/nvn-objects.md#a-buffer-address-on-an-unmapped-page-of-a-sparse-pool)).
-- Its first command buffer draws with constant buffer 1 of a pixel shader not bound (`stage 5 cb1 has no uniform buffer bound`, frame 0): the game's own, read as the zero bank ([An unbound uniform slot reads the zero bank](../../../docs/reference/rendering.md#an-unbound-uniform-slot-reads-the-zero-bank)).
+- It binds compute uniform slot 1 empty (address 0, size 0) before every dispatch of one shader, which read as 0 on the console; the host reported it as unbound, in red ([A uniform slot the game binds empty](../../../docs/reference/rendering.md#a-uniform-slot-the-game-binds-empty)).
+- It sets the float blend clamp to the largest finite value, which Metal cannot do; no colour target held a non-finite pixel over the opening, so nothing drawn differs ([Float blend clamp](../../../docs/reference/nvn-objects.md#float-blend-clamp-nvncommandbuffersetfloatblendclamp)).
 
 ## Open
 
 - Gameplay beyond the first minutes of the forest path: the village, combat, the menus in play, sound by ear.
-- The red lines left in play, each once: `nvnCommandBufferSetFloatBlendClamp 1` (as on [PRAGMATA](../0400C76024710000/README.md)) and the unbound constant buffer 1 at frame 0 (above, the game's own).
+- The red line left in play, once: `nvnCommandBufferSetFloatBlendClamp 1` (as on [PRAGMATA](../0400C76024710000/README.md)), a platform limit that changes nothing drawn over the opening (above); a scene with very bright additive effects could still overflow a half-float target.
+- One run with the build's host froze at frame 5351 (93 s), as New Game loaded, under `DM_NVN_MAGSCAN` and a frame 0 pass dump; the next run with the same scan went through. Not reproduced.
 - The iPhone: no IPA has been built. Its 7,225 LDTRAM pixel shaders compile as MSL 4.0, which needs iOS 26.
 - The prewarm list (`pso_manifest.tsv`) is empty.

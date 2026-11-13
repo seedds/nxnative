@@ -1455,8 +1455,15 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Symptom:** `stage 0 cb5 has no uniform buffer bound` (or another stage and slot, such as `stage 0 cb0`), once per run.
 - **Cause:** the argument buffer kept a null pointer for the unbound slot. The game draws with nothing bound there; the host misses no bind. What the Switch reads from an unbound slot is not known.
 - **Fix:** the slot now reads the all-zero bank, as an unbound texture slot reads the zero texture.
-- **Found on:** [Paper Mario: The Thousand-Year Door](../../dm/games/0100ECD018EBE000/README.md) (at the title); [Batman: Arkham Knight](../../dm/games/0100ACD0163D0000/README.md#files-and-shaders) (`stage 0 cb0`, at boot: the first command buffer draws before the game has bound any uniform buffer); [Resident Evil 4](../../dm/games/0400569027BF4000/README.md) (`stage 5 cb1`, frame 0).
+- **Found on:** [Paper Mario: The Thousand-Year Door](../../dm/games/0100ECD018EBE000/README.md) (at the title); [Batman: Arkham Knight](../../dm/games/0100ACD0163D0000/README.md#files-and-shaders) (`stage 0 cb0`, at boot: the first command buffer draws before the game has bound any uniform buffer).
 - **Check:** a pass dump of the frame (`DM_NVN_PASSDUMP=<frame>`, frame 0 for the boot) shows the draw (`j` line) and its stage's `K` line with no `B … cb` line, and the frame's `[nvn]` call counts show whether the game called `CommandBufferBindUniformBuffer` at all.
+
+### A uniform slot the game binds empty
+
+- **Symptom:** `[RED] stage 5 cb1 has no uniform buffer bound: shader … address 0 size 0 (frame 0)`, once per run; now `stage 5 cb1 is bound empty by the game (address 0, size 0): shader … reads it as 0`, once, not red.
+- **Cause:** none in the host. The game binds the slot itself with address 0 and size 0: Resident Evil 4 binds compute slot 0 and then slot 1 empty before every dispatch of `4e06df4bbdf9b7c9` (a log of each bind's payload at replay, frames 0 to 2), whose cb1 reads it does not use. Every read of a size-0 binding is past its size, which reads 0 on Maxwell as for a binding shorter than the shader's reads (`ub_padded`), so the zero bank the host binds is what the console reads.
+- **Fix:** the replay state keeps which uniform slots a bind has set (`S.ubo_set`), and `cbuf_slot` notes an empty binding the game made once, without `[RED]`. A slot never bound ([An unbound uniform slot reads the zero bank](#an-unbound-uniform-slot-reads-the-zero-bank)) and an address in no pool stay red.
+- **Found on:** [Resident Evil 4](../../dm/games/0400569027BF4000/README.md) (`stage 5 cb1`, frame 0).
 
 ### Compute dispatches share the copy encoder
 

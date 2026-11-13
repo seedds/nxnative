@@ -70,7 +70,8 @@ HLE_FORCE("_ZN2nn7account9GetUserIdEPNS0_3UidERKNS0_10UserHandleE", "gets the Ui
 }
 // nn::account::Nickname = struct { char name[33]; }, UTF-8. DM_NICK first; in Nextendo mode then the signed-in account's username (what other players and the
 // Nextendo site see), read once and kept, as games ask for it often; else Player
-HLE_FORCE("_ZN2nn7account11GetNicknameEPNS0_8NicknameERKNS0_3UidE", "user nickname: DM_NICK, else the Nextendo username in Nextendo mode, else Player", Result, h_acc_GetNick, char *nick, const Uid *uid) {
+// A wait hook: the first call in Nextendo mode may fetch the sign-in over the network (hle_nextendo_login_apple.m)
+HLE_FORCE_WAIT("_ZN2nn7account11GetNicknameEPNS0_8NicknameERKNS0_3UidE", "user nickname: DM_NICK, else the Nextendo username in Nextendo mode, else Player", Result, h_acc_GetNick, char *nick, const Uid *uid) {
     (void)uid;
     static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER; static char account[33];
     const char *e = getenv("DM_NICK");
@@ -80,9 +81,9 @@ HLE_FORCE("_ZN2nn7account11GetNicknameEPNS0_8NicknameERKNS0_3UidE", "user nickna
         memcpy(nick, e, n); return RES_OK;
     }
     if (dm_net_nextendo_enabled()) {
-        pthread_mutex_lock(&lock);
+        dm_guest_host_wait_begin(); pthread_mutex_lock(&lock);   // a caller behind a fetch frees its guest core
         if (!account[0] && !dm_nextendo_account_username(account)) LOG("account: nickname from the Nextendo account");
-        memcpy(nick, account, 33); pthread_mutex_unlock(&lock);
+        memcpy(nick, account, 33); pthread_mutex_unlock(&lock); dm_guest_host_wait_end();
         if (nick[0]) return RES_OK;
     }
     strncpy(nick, "Player", 32);

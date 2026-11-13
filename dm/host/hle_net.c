@@ -33,9 +33,9 @@ HLE_FORCE("_ZN2nn4nifm18IsNetworkAvailableEv", "offline by default; explicit LAN
 HLE_FORCE("_ZN2nn4nifm31HandleNetworkRequestErrorResultEv", "whether the network request was resolved without a system UI", unsigned, h_nifm_HandleErr, void) { return dm_nifm_available() != 0; }
 HLE_FORCE("_ZN2nn4nifm26HandleNetworkRequestResultEv", "SDK 4 network request result without a system UI", Result, h_nifm_HandleResult, void) { return dm_nifm_available() ? RES_OK : RES_FAIL; }
 HLE_FORCE("_ZN2nn4nifm26GetCurrentPrimaryIpAddressEPNS_6socket6InAddrE", "offline by default; explicit LAN returns the actual interface IPv4 address", Result, h_nifm_GetIp, uint32_t *a) { if (!a) return RES_FAIL; *a = 0; return dm_net_ipconfig(a, NULL, NULL, NULL, NULL) ? RES_FAIL : RES_OK; }
-// The proxy setting (nifm::ProxySetting, 0xaa bytes: enabled +0, port +2, server +4, auto-auth +0x68, user +0x69, password +0x89, as Super Mario Bros. Wonder 1.2.1's
-// NPLN code reads it at main+0xf7aa40 after clearing 0xaa bytes). In a network mode the host uses no proxy, so it answers as a console without one: success, every
-// field zero. Wonder's code returns an error when this fails, and gRPC's proxy mapper (main+0xb31804) reads a failure as no proxy. Offline it still fails
+// The proxy setting (nifm::ProxySetting, 0xaa bytes: enabled +0, port +2, server +4, auto-auth +0x68, user +0x69, password +0x89, as Super Mario Bros. Wonder 1.2.1
+// reads it: libcurl's proxy code at main+0xf7aa40 clears 0xaa bytes first, and gRPC's proxy mapper at main+0xb31760 asks too). In a network mode the host uses no
+// proxy, so it answers as a console without one: success, every field zero. Offline it still fails
 HLE_FORCE("_ZN2nn4nifm22GetCurrentProxySettingEPNS0_12ProxySettingE", "network mode: no proxy (every field zero); offline: no proxy setting", Result, h_nifm_GetProxy, void *p) {
     if (!p || !dm_net_enabled()) return RES_FAIL;
     memset(p, 0, 0xaa); static int told; if (!told++) LOG("nifm: proxy setting asked: none (the host uses no proxy)"); return RES_OK;

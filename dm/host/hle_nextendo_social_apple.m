@@ -97,6 +97,7 @@ uint32_t dm_nextendo_social_friends_refresh(dm_social_friend **output,size_t *co
 // Nextendo shows a player online while presence keeps arriving (Mush8 sends it again every 45 seconds). The last presence a game published
 // is sent again on that period until the game publishes status 0 (its online session closed) or a send fails
 enum { PRESENCE_EVERY_S = 45 };
+static pthread_mutex_t g_presence_send = PTHREAD_MUTEX_INITIALIZER;   // one presence request at a time, so a repeat never lands after a newer publish; taken before g_presence_lock
 static pthread_mutex_t g_presence_lock = PTHREAD_MUTEX_INITIALIZER;
 static NSData *g_presence_body;           // the last published body while its status is not 0
 static dispatch_source_t g_presence_timer;
@@ -112,11 +113,13 @@ static void presence_keep(NSData *body) {   // nil stops the repeats
         g_presence_timer=dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER,0,0,dispatch_get_global_queue(QOS_CLASS_UTILITY,0));
         dispatch_source_set_timer(g_presence_timer,dispatch_time(DISPATCH_TIME_NOW,PRESENCE_EVERY_S*NSEC_PER_SEC),PRESENCE_EVERY_S*NSEC_PER_SEC,5*NSEC_PER_SEC);
         dispatch_source_set_event_handler(g_presence_timer,^{ @autoreleasepool {
+            pthread_mutex_lock(&g_presence_send);
             pthread_mutex_lock(&g_presence_lock); NSData *again=g_presence_body; pthread_mutex_unlock(&g_presence_lock);
             NSData *identity=again?dm_nextendo_api_identity():nil;
             if (again && (!identity || presence_post(again,identity))) {
                 pthread_mutex_lock(&g_presence_lock); if (g_presence_body==again) g_presence_body=nil; pthread_mutex_unlock(&g_presence_lock);
             }
+            pthread_mutex_unlock(&g_presence_send);
         } });
         dispatch_resume(g_presence_timer);
     }
@@ -133,7 +136,9 @@ uint32_t dm_nextendo_social_publish(unsigned status,const uint8_t *app_field,siz
         @"plateforme":@"nxnative",@"app_detail":@""};
     NSData *body=[NSJSONSerialization dataWithJSONObject:object options:0 error:nil];
     if(!body)return DM_ACCOUNT_FAIL;
+    pthread_mutex_lock(&g_presence_send);
     uint32_t result=presence_post(body,identity);
     presence_keep(!result&&status?body:nil);
+    pthread_mutex_unlock(&g_presence_send);
     return result;
 } }

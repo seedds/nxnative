@@ -17,6 +17,7 @@
 #include <netinet/in.h>
 #include <poll.h>
 #include <stdatomic.h>
+#include <sys/file.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <time.h>
@@ -238,21 +239,17 @@ __attribute__((unused)) static NSString *nxl_online_refusal(NSString *access) {
     return [@"Nextendo does not allow online play yet: " stringByAppendingString:what];
 }
 
-// From the saved sign-in to a game token's record: refresh grant, then /api/nex-token. nil and the reason when a step fails
-__attribute__((unused)) static NSDictionary *nxl_game_record(NSString **error) {
-    NSString *refresh = nxl_read_refresh();
-    if (!refresh) {
-#if TARGET_OS_IPHONE
-        nxl_fail(error, @"this iPhone is not signed in to Nextendo: sign in on the game's settings screen");
-#else
-        nxl_fail(error, @"this Mac is not signed in to Nextendo: run nextendo_login sign-in");
-#endif
-        return nil;
-    }
-    NSString *client = nxl_client_id();
-    if (!client) { nxl_fail(error, kNxNoClient); return nil; }
-    NSString *access = nxl_token(@{@"grant_type": @"refresh_token", @"refresh_token": refresh, @"client_id": client}, error);
-    if (!access) return nil;
+// Each refresh replaces the token the next one needs, so one runs at a time, across threads and processes (the Mac tool beside dmhost,
+// the iPhone launcher's check beside the game): an exclusive flock on a file in the sign-in's folder. The descriptor (close releases it),
+// or -1 when the folder does not exist, which means no sign-in is saved either
+__attribute__((unused)) static int nxl_lock(void) {
+    int fd = open([nxl_dir() stringByAppendingPathComponent:@".lock"].fileSystemRepresentation, O_RDWR | O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0600);
+    if (fd >= 0 && flock(fd, LOCK_EX) != 0) { close(fd); fd = -1; }
+    return fd;
+}
+
+// From an access token to a game token's record: /api/nex-token, then the account check. nil and the reason when a step fails
+__attribute__((unused)) static NSDictionary *nxl_record_for(NSString *access, NSString **error) {
     NSMutableURLRequest *get = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:kNxGameTokenEndpoint]
                                                        cachePolicy:NSURLRequestReloadIgnoringLocalCacheData timeoutInterval:kNxTimeout];
     [get setValue:[NSString stringWithFormat:@"Bearer %@", access] forHTTPHeaderField:@"Authorization"];
@@ -266,6 +263,25 @@ __attribute__((unused)) static NSDictionary *nxl_game_record(NSString **error) {
     }
     NSDictionary *record = nxl_record(token, NSDate.date.timeIntervalSince1970, error);
     return record && nxl_same_account(access, record, error) ? record : nil;
+}
+
+// From the saved sign-in to a game token's record: refresh grant (under nxl_lock), then nxl_record_for. nil and the reason when a step fails
+__attribute__((unused)) static NSDictionary *nxl_game_record(NSString **error) {
+    NSString *client = nxl_client_id();
+    if (!client) { nxl_fail(error, kNxNoClient); return nil; }
+    int lock = nxl_lock();
+    NSString *refresh = nxl_read_refresh();
+    NSString *access = refresh ? nxl_token(@{@"grant_type": @"refresh_token", @"refresh_token": refresh, @"client_id": client}, error) : nil;
+    if (lock >= 0) close(lock);
+    if (!refresh) {
+#if TARGET_OS_IPHONE
+        nxl_fail(error, @"this iPhone is not signed in to Nextendo: sign in on the game's settings screen");
+#else
+        nxl_fail(error, @"this Mac is not signed in to Nextendo: run nextendo_login sign-in");
+#endif
+        return nil;
+    }
+    return access ? nxl_record_for(access, error) : nil;
 }
 
 // ---- Signing in (the browser part belongs to the caller: the Mac opens the default browser, the iPhone a web authentication session) ----
@@ -309,6 +325,8 @@ __attribute__((unused)) static NSDictionary<NSString *, NSString *> *nxl_wait_ca
         if (poll(&ready, 1, 500) <= 0) continue;
         int client = accept(fd, NULL, NULL);
         if (client < 0) continue;
+        int on = 1;   // a browser's preconnect may close before the answer; a write to it must fail, not raise SIGPIPE
+        setsockopt(client, SOL_SOCKET, SO_NOSIGPIPE, &on, sizeof on);
         struct timeval limit = {.tv_sec = 5};
         setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, &limit, sizeof limit);
         char request[16384]; size_t have = 0;   // only the request line is needed
@@ -358,11 +376,14 @@ __attribute__((unused)) static NSDictionary *nxl_finish_sign_in(NSDictionary<NSS
     if (query[@"error"]) { nxl_fail(error, [NSString stringWithFormat:@"the sign-in page answered with an error: %@", query[@"error"]]); return nil; }
     NSString *code = query[@"code"];
     if (code.length == 0) { nxl_fail(error, @"the sign-in page returned without an authorization code"); return nil; }
-    nxl_write_refresh(nil);
     NSString *client = nxl_client_id();
     if (!client) { nxl_fail(error, kNxNoClient); return nil; }
     NSDictionary *grant = @{@"grant_type": @"authorization_code", @"code": code, @"code_verifier": verifier, @"redirect_uri": redirect, @"client_id": client};
-    if (!nxl_token(grant, error)) return nil;
-    if (!nxl_read_refresh()) { nxl_fail(error, @"the token answer had no refresh_token, so there is nothing to keep for later"); return nil; }
-    return nxl_game_record(error);
+    int lock = nxl_lock();
+    nxl_write_refresh(nil);
+    NSString *access = nxl_token(grant, error), *saved = nxl_read_refresh();
+    if (lock >= 0) close(lock);
+    if (!access) return nil;
+    if (!saved) { nxl_fail(error, @"the token answer had no refresh_token, so there is nothing to keep for later"); return nil; }
+    return nxl_record_for(access, error);   // the code's own access token: no second refresh
 }

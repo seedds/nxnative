@@ -2679,6 +2679,9 @@ enum { VLOG_N = 4096 };
 static struct vpool **g_vp; static int g_nvp, g_cvp;   // the pools with a range of their own, under g_vp_mu
 static pthread_mutex_t g_vp_mu = PTHREAD_MUTEX_INITIALIZER;
 static _Atomic uint64_t g_vp_gen;   // bumped per mapping request
+// Every mapping request's host range [lo, hi), by its generation: the replay turns the requests since its last look into notes for the textures they overlap (nvn_sparse_notes)
+enum { VNOTE_N = 8192 };
+static struct { uint64_t gen, lo, hi; } g_vnote[VNOTE_N];   // under g_vp_mu
 static struct vpool *vpool_of(const pool_t *o) { return o->vp; }
 // An address in the pool's own range has left the host before its first mapping: an object keeps it (a texture's or event's storage, command memory) or the game was given it (a buffer
 // or texture address, a map). The range then stays, so the first mapping makes the pool sparse rather than giving the range back for an alias (MapVirtual)
@@ -2763,6 +2766,7 @@ void nvn_vpool_note(uint64_t a, char *note, size_t n) {
 }
 static void vpt_set(struct vpool *v, uint64_t voff, uint64_t size, const uint8_t *phys) {
     uint64_t gen = atomic_fetch_add(&g_vp_gen, 1) + 1;
+    g_vnote[gen % VNOTE_N].gen = gen; g_vnote[gen % VNOTE_N].lo = (uint64_t)(uintptr_t)v->base + voff; g_vnote[gen % VNOTE_N].hi = (uint64_t)(uintptr_t)v->base + voff + size;
     if (v->log) { v->log[atomic_load_explicit(&v->nlog, memory_order_relaxed) % VLOG_N] = (struct vlog_ent){voff, size}; atomic_fetch_add_explicit(&v->nlog, 1, memory_order_release); }
     for (uint64_t o = 0; o < size; o += 0x1000) {
         vpte **l = &v->pt[(voff + o) >> 21];
@@ -3341,6 +3345,18 @@ static struct vpool *vpool_at(const void *pool, uint64_t a) {   // caller holds 
 }
 int nvn_sparse_pool(const void *pool) { return pool && ((const pool_t *)pool)->vp; }   // no lock: set at Initialize, cleared at the first mapping (an aliased pool) or Finalize; called per texture lookup
 uint64_t nvn_sparse_gen(void) { return atomic_load(&g_vp_gen); }
+// The host ranges of the mapping requests after generation *seen, up to the current one, which *seen moves on to: → their count, or -1 when there are more than max or the record
+// no longer holds them all (the caller then takes every sparse texture as changed). Under g_vp_mu, as a request's generation and range are written together
+int nvn_sparse_notes(uint64_t *seen, uint64_t (*out)[2], int max) {
+    pthread_mutex_lock(&g_vp_mu);
+    uint64_t now = atomic_load(&g_vp_gen); int n = 0;
+    if (now - *seen > (uint64_t)max || now - *seen > VNOTE_N) n = -1;
+    else for (uint64_t g = *seen + 1; g <= now; g++) {
+        if (g_vnote[g % VNOTE_N].gen != g) { n = -1; break; }
+        out[n][0] = g_vnote[g % VNOTE_N].lo; out[n][1] = g_vnote[g % VNOTE_N].hi; n++;
+    }
+    *seen = now; pthread_mutex_unlock(&g_vp_mu); return n;
+}
 uint64_t nvn_sparse_copy(const void *pool, void *dst, uint64_t a, uint64_t n) {
     pthread_mutex_lock(&g_vp_mu); struct vpool *v = vpool_at(pool, a); uint64_t miss = 0;
     if (!v) { pthread_mutex_unlock(&g_vp_mu); memset(dst, 0, n); return n; }

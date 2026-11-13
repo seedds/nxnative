@@ -684,3 +684,8 @@ t_pool_typebridge: t_pool_typebridge.m $(MTL_T_DEP)
 check_t_pool_typebridge: t_pool_typebridge
 	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=0 ./t_pool_typebridge
 	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=1 ./t_pool_typebridge
+
+# Sparse mappings reach texture ID views, pool tables and handle tables as notes of the textures they change (treg_sparse_notes), read back on the GPU
+t_sparse_pool_cache: t_sparse_pool_cache.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_sparse_pool_cache.m $(filter-out ../nvn/hle_nvn.c,$(MTL_T_SRC)) $(FW)
+check_t_sparse_pool_cache: RUN_ENV = MTL_DEBUG_LAYER=1

@@ -1480,8 +1480,10 @@ void mtl_prepare(void) {
 }
 static void sub_cut_begin(void); static void ts_sub_begin(void), ts_boundary(void); static int ts_on(void);
 static void gmem_commit_patch(void);   // the raw pool table words of the arguments encoded so far follow the pools (gmem_slot_note)
+static void treg_sparse_notes(void);
 void mtl_sub_begin(void) {
     mtl_init(); g_sub_serial++; g_seg = 0;
+    treg_sparse_notes();   // the mappings made before this submission
     if (g_pkg_kept) { g_pkg_kept = 0; nvn_dirty_touch(); } seg_clk_put(g_sclk); g_sclk = NULL;
     sub_cut_begin();
     defer_drain();
@@ -3189,7 +3191,7 @@ static id<MTLTexture> pkg_upload_(const tex_t *t, uint64_t *stamp, id<MTLTexture
 static int g_direct_upload_on = -1; static uint64_t g_direct_uploads, g_direct_dispatches;
 static int direct_upload_on(void) { if (g_direct_upload_on < 0) { const char *e=getenv("DM_NVN_DIRECT_UPLOAD"); g_direct_upload_on=!e||atoi(e); } return g_direct_upload_on; }
 int nvn_host_readable(uint64_t a, uint64_t n);   // hle_nvn.c: guest memory and sparse pools
-int nvn_sparse_pool(const void *pool); uint64_t nvn_sparse_gen(void); uint64_t nvn_sparse_copy(const void *pool, void *dst, uint64_t a, uint64_t n);
+int nvn_sparse_pool(const void *pool); uint64_t nvn_sparse_gen(void); uint64_t nvn_sparse_copy(const void *pool, void *dst, uint64_t a, uint64_t n); int nvn_sparse_notes(uint64_t *seen, uint64_t (*out)[2], int max);
 int nvn_sparse_since(const void *pool, uint64_t a, uint64_t n, uint64_t gen, uint64_t stamp); void nvn_sparse_protect(const void *pool, uint64_t a, uint64_t n); int nvn_sparse_mapped(const void *pool, uint64_t a, uint64_t n);
 // reuse: a texture of the same description, idle on the GPU, to upload into instead of a new one; keep: usage the texture it replaces was upgraded to (tex_upgrade), which the new one
 // is made with: a texture drawn into and re-uploaded (a CPU write into one the game renders into) was made without render-target use again and upgraded at its next attachment, a
@@ -6398,23 +6400,60 @@ typedef struct { tex_t t; int ok; view_t v; int has_v; void *view; uint64_t view
                  void *palt[4], *palt_of[4]; uint64_t palt_rid[4];   // palt[k]: the view a texture pool table of layered type k (pool_lk) holds for the ID (pool_fit), apart from alt so slot binds and tables do not take turns
                  void *alt, *alt_of; uint64_t alt_rid; uint8_t alt_type;   // alt: compatible view used when the shader's declared type differs from view (tex_fit), alt_of = the view it was built from
                  void *im, *im_of; uint64_t im_rid;                       // im: the view an image slot reads in the shader's pixel class (img_fit), im_of = the view it was built from
-                 int prev, next, retired, gone; uint64_t transient_sub; uint8_t tt1;   // prev / next: descriptor index + 1, by texture serial; gone: its memory pool was finalized (treg_drop_pool_views)
+                 int prev, next, retired, gone; uint64_t transient_sub; uint8_t tt1, sp;   // prev / next: descriptor index + 1, by texture serial; gone: its memory pool was finalized (treg_drop_pool_views); sp: in g_treg_sp
                  void *stand; uint64_t stand_rid, stand_sum, reg_frame; uint8_t stand_tt1, stand_no; } treg_t;   // stand: what its pool table entries hold while its texture is not made (pool_stand; retained), stand_tt1 its texture type + 1, stand_no: it can have none; reg_frame: the frame of the registration
 static treg_t *g_treg; static int g_ntreg;
 static nvn_hmap g_treg_serial = {.klen = 8};   // serial → first registered descriptor index + 1, under g_rmu
 // Texture ID views are valid for an epoch (view_ser), not for every serial table change: ser_sync takes the notes (own_note) and sends only the IDs registered with a noted serial
 // down the slow path; a change without a note starts a new epoch, which sends them all (what every g_ser_gen bump did before). A battle map in Fire Emblem: Fortune's Weave changes a
 // few serials a frame (the per-stage program ring in bind_stages among them), and each change made the next pool walk (pool_gpu) resolve all ~5,000 IDs again, 2 ms a frame.
-// Once any sparse mapping exists (nvn_sparse_gen) every change starts a new epoch, as before: a sparse texture's page-table changes bump no generation the ID cache follows. Under g_rmu
+// A sparse mapping that changes a texture's pages is a note too (treg_sparse_notes). Under g_rmu
 static uint64_t g_treg_ep = 1, g_ser_synced = 1;
 static void ser_sync(void) {
     uint64_t s[SER_NOTES];
     uint64_t sg; unsigned n = own_notes_take(s, &sg);
-    if (sg - g_ser_synced != n || nvn_sparse_gen()) g_treg_ep++;
+    if (sg - g_ser_synced != n) g_treg_ep++;
     else for (unsigned i = 0; i < n; i++) for (int k = (int)(uintptr_t)nvn_hm_get(&g_treg_serial, &s[i]); k; k = g_treg[k - 1].next) g_treg[k - 1].view_ser = 0;
     g_ser_synced = sg;
 }
 static inline uint64_t treg_ep(void) { if (g_ser_gen != g_ser_synced) ser_sync(); return g_treg_ep; }
+// Sparse mappings as serial notes. A mapping request changes what a texture of a sparse pool reads (its page table, nvn_sparse_copy) with no registration, serial change or CPU
+// write: the ID views, pool tables, handle tables and argument blocks that hold the texture's resource ID kept reading its old pages, as nothing sent its IDs through tex_mtl_
+// again. So at each submission's start the requests since the last (nvn_sparse_notes) note the serial of every registered texture whose storage they overlap (own_note): its IDs
+// resolve again (ser_sync), which uploads it again or follows the mappings (tex_mtl_, sparse_look), and the pool tables patch just those IDs (pool_gpu). A submission sees the
+// mappings made before it (sparse_checked), so those made during its replay are noted at the next one. Before, once any sparse mapping existed, every serial change sent every ID
+// down the slow path and built every texture pool table whole, and a mapping change with no serial change in between was not seen at all (PR #1721, NicholasDominici)
+static int *g_treg_sp; static size_t g_ntreg_sp, g_treg_sp_cap;   // the IDs registered with a texture of a sparse pool (treg_t.sp; one that no longer holds one leaves at the next note), under g_rmu
+static uint64_t g_sp_noted;   // the mapping generation noted so far (the submit thread)
+static void treg_sparse_notes(void) {
+    if (nvn_sparse_gen() == g_sp_noted) return;
+    enum { NOTES = 4096 }; static uint64_t (*r)[2], *ser; static size_t ser_cap;
+    if (!r) r = realloc_or_die(NULL, NOTES * sizeof *r, "the sparse mapping notes");
+    int n = nvn_sparse_notes(&g_sp_noted, r, NOTES), m = 0;   // n < 0: too many to look at, every sparse texture is noted
+    if (n > 0) {   // sorted and joined: disjoint ranges in order, so the first that ends past a texture's start is the only one that can overlap it
+        qsort(r, (size_t)n, sizeof r[0], sp_cmp);
+        for (int k = 1; k < n; k++) { if (r[k][0] <= r[m][1]) { if (r[k][1] > r[m][1]) r[m][1] = r[k][1]; } else { m++; r[m][0] = r[k][0]; r[m][1] = r[k][1]; } }
+        m++;
+    }
+    if (!n) return;
+    size_t ns = 0, w = 0;
+    os_unfair_lock_lock(&g_rmu);
+    for (size_t i = 0; i < g_ntreg_sp; i++) {
+        int id_ = g_treg_sp[i]; treg_t *rp = &g_treg[id_];
+        if (!rp->ok || !rp->t.pool || !nvn_sparse_pool(rp->t.pool)) { rp->sp = 0; continue; }
+        g_treg_sp[w++] = id_;
+        uint64_t lo = (uint64_t)(uintptr_t)rp->t.mem, hi = lo + rp->t.L.size;
+        int hit = n < 0;
+        if (!hit) { int a = 0, b = m; while (a < b) { int c = (a + b) / 2; if (r[c][1] <= lo) a = c + 1; else b = c; } hit = a < m && r[a][0] < hi; }
+        if (!hit || !rp->t.serial) continue;
+        if (ns == ser_cap) { ser_cap = ser_cap ? ser_cap * 2 : 64; ser = realloc_or_die(ser, ser_cap * sizeof *ser, "the sparse mapping notes"); }
+        ser[ns++] = rp->t.serial;
+    }
+    g_ntreg_sp = w;
+    os_unfair_lock_unlock(&g_rmu);
+    if (ns > 1) qsort(ser, ns, sizeof *ser, sp_cmp);
+    for (size_t i = 0; i < ns; i++) if (!i || ser[i] != ser[i - 1]) own_note(ser[i]);
+}
 static int *g_treg_transient; static size_t g_ntreg_transient, g_treg_transient_cap;
 // Lock-free copy of texture ID → serial (the replay hot path only needs the serial: store lookahead index, binding set of the clear-only hoist): texture IDs are 20 bits, fixed 1M entries (BSS, only touched pages are used),
 // release write at registration, relaxed atomic read on the reader side, without entering g_rmu (the former h_ser locked and unlocked on every lookup, thousands of times per frame in the camp)
@@ -6685,6 +6724,10 @@ void mtl_reg_tex(int tid, const tex_t *t, const view_t *v) {
             rr->next = (int)(uintptr_t)nvn_hm_get(&g_treg_serial, &t->serial);
             if (rr->next) g_treg[rr->next - 1].prev = id_ + 1;
             nvn_hm_put(&g_treg_serial, &t->serial, (void *)(uintptr_t)(id_ + 1));
+        }
+        if (t && !rr->sp && t->pool && nvn_sparse_pool(t->pool)) {   // its pages follow the game's mappings (treg_sparse_notes)
+            if (g_ntreg_sp == g_treg_sp_cap) { g_treg_sp_cap = g_treg_sp_cap ? g_treg_sp_cap * 2 : 256; g_treg_sp = realloc_or_die(g_treg_sp, g_treg_sp_cap * sizeof *g_treg_sp, "the sparse texture IDs"); }
+            g_treg_sp[g_ntreg_sp++] = id_; rr->sp = 1;
         }
         if (id_ < (1 << 20)) atomic_store_explicit(&g_tser[id_], t ? t->serial : 0, memory_order_release);
     }
@@ -10681,11 +10724,11 @@ static uint64_t pool_gpu(int samp, int dtt, int dpf, int base, __unsafe_unretain
     if (p && p->reg == rg && p->ser == sg && !stale && !walk_on) { *out = p->buf; return p->gpu; }
     // Only registrations and noted storage changes since the table was built (each generation in its log), the IDs without storage after a pool change and the transient IDs in a
     // new submission: take those IDs again, by the walk's rules and within what this frame may still make. The table is kept when none of them changes an entry; otherwise the old
-    // one is copied and patched, as draws already encoded read the old one. A sparse texture's page table follows no note (ser_sync), so then it is built whole. Ocarina of Time,
+    // one is copied and patched, as draws already encoded read the old one. A sparse mapping comes as notes of the textures it changes (treg_sparse_notes). Ocarina of Time,
     // a seven-minute walk through Kokiri Forest: building the tables whole took about 53 s (61,000 builds)
     int nn = (samp ? g_nsreg : g_ntreg) - base; if (nn < 1) nn = 1;
     if (p && !walk_on) do {
-        if (rg - p->reg >= REG_LOG || sg - p->ser >= SER_LOG || (!samp && p->ser != sg && nvn_sparse_gen())) { g_stat_pool_nopatch[0]++; break; }
+        if (rg - p->reg >= REG_LOG || sg - p->ser >= SER_LOG) { g_stat_pool_nopatch[0]++; break; }
         if (*(const uint32_t *)p->buf.contents != (uint32_t)nn) { g_stat_pool_nopatch[2]++; break; }
         static int *ids; static size_t idcap; size_t nid = 0; int known = 1, pools = 0;
         #define POOL_ID(x) do { if (nid == idcap) { idcap = idcap ? idcap * 2 : 256; ids = realloc_or_die(ids, idcap * sizeof *ids, "the pool table patch"); } ids[nid++] = (x); } while (0)
@@ -10779,7 +10822,7 @@ static uint64_t pool_gpu(int samp, int dtt, int dpf, int base, __unsafe_unretain
     if (g_stat_pool_builds++ < 16 || g_stat_pool_builds % 1000 == 0 || log_gone)
         MLOG("pool for handles traced to no slot: %s pool (texture type %d, class %d) at base %d, %d IDs of which %d hold %s and %d have no storage (memory pool finalized or gone), built in %.2f ms (%llu builds, %.0f ms in all; "
              "built because new %llu, registration %llu, storage %llu, retired IDs %llu, textures left out %llu; taken alone: %llu tables patched, %llu kept (%llu over memory pool changes, %llu over a new submission); "
-             "not: too many or sparse %llu, a pool change over too many IDs without storage %llu, a new submission over too many retired IDs %llu, resized %llu, a change without a note %llu)", samp ? "sampler" : "texture",
+             "not: too many %llu, a pool change over too many IDs without storage %llu, a new submission over too many retired IDs %llu, resized %llu, a change without a note %llu)", samp ? "sampler" : "texture",
              samp ? -1 : dtt, samp ? -1 : dpf, base, n, real, samp ? "samplers" : "textures of the type", gone, ms, (unsigned long long)g_stat_pool_builds, g_stat_pool_ms,
              (unsigned long long)g_stat_pool_why[0], (unsigned long long)g_stat_pool_why[1], (unsigned long long)g_stat_pool_why[2], (unsigned long long)g_stat_pool_why[3], (unsigned long long)g_stat_pool_why[4],
              (unsigned long long)g_stat_pool_patched, (unsigned long long)g_stat_pool_kept, (unsigned long long)g_stat_pool_pchg, (unsigned long long)g_stat_pool_schg,

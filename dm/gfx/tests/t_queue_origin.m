@@ -128,6 +128,11 @@ int main(void) { @autoreleasepool {
     mtl_pool_del(vertices); free(vertices);
     CHECK(serial_get(pg.serial) == program,"the draw program stays registered through the final draw");
     mtl_prog_release(&pg);
-    CHECK(!serial_get(pg.serial),"releasing the draw program removes its serial entry");
+    // Submitted queue bindings retain immutable program descriptors until their queues are finalized (nvn_owner.m's program pins).
+    CHECK(serial_get(pg.serial) == program,"retiring the draw program preserves it while both queues hold bindings");
+    P(nvnQueueFinalize)(&queues[0]);
+    CHECK(serial_get(pg.serial) == program,"the second queue still holds the retired draw program");
+    P(nvnQueueFinalize)(&queues[1]);
+    CHECK(!serial_get(pg.serial),"finalizing the last queue removes the retired draw program's serial entry");
     printf("queue origin: %d checks, %d failed\n",checks,fails); return fails != 0;
 } }

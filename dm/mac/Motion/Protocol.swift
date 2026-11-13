@@ -53,9 +53,54 @@ enum DSU {
         }
         return detail
     }
+    /// Switch button bits (A/B/X/Y, stick clicks, shoulders, +/−, D-pad).
+    /// DSU model identifies a controller family, not left/right handedness.
+    struct Inputs: Equatable {
+        var buttons: UInt32 = 0
+        var leftStick = SIMD2<Int>(repeating: 0)
+        var rightStick = SIMD2<Int>(repeating: 0)
+        static let buttonNames = [(0,"A"),(1,"B"),(2,"X"),(3,"Y"),(4,"L-stick"),(5,"R-stick"),
+                                  (6,"L"),(7,"R"),(8,"ZL"),(9,"ZR"),(10,"+"),(11,"−"),
+                                  (12,"Left"),(13,"Up"),(14,"Right"),(15,"Down")]
+        /// Full-pad preview of a single horizontal half, matching pad_joycon.h.
+        /// Native JoyLeft/JoyRight reports remain upright for the game SDK.
+        func horizontalPreview(role: DSURole, railSL: Int = -1, railSR: Int = -1) -> Inputs {
+            guard role != .full else { return self }
+            let pairs: [(Int,Int)] = role == .left ? [(15,0),(12,1),(14,2),(13,3),(11,11),(4,4),(6,8),(8,9)] : [(2,0),(0,1),(3,2),(1,3),(10,10),(5,4),(7,8),(9,9)]
+            var menu=buttons & ((1 << 10) | (1 << 11))
+            for source in [railSL,railSR] where (0...15).contains(source) { menu &= ~(1 << source) }
+            var result=Inputs(buttons:menu)
+            for (source,target) in pairs where buttons & (1 << source) != 0 { result.buttons |= 1 << target }
+            // Remove selected sources before adding outputs: SR mapped from L must
+            // not erase SL mapped to L in the same packet.
+            for (source,target) in pairs where source==railSL || source==railSR { result.buttons &= ~(1 << target) }
+            if (0...15).contains(railSL),buttons & (1 << railSL) != 0 { result.buttons |= 1 << 6 }
+            if (0...15).contains(railSR),buttons & (1 << railSR) != 0 { result.buttons |= 1 << 7 }
+            let stick = role == .left ? leftStick : rightStick
+            result.leftStick = role == .left ? SIMD2(-stick.y,stick.x) : SIMD2(stick.y,-stick.x)
+            return result
+        }
+        var pressedNames: String {
+            let names = Self.buttonNames.filter { buttons & (UInt32(1) << $0.0) != 0 }.map { $0.1 }
+            return names.isEmpty ? "None" : names.joined(separator:" · ")
+        }
+    }
+    static func inputs(_ b: [UInt8]) -> Inputs {
+        // DSU documentation lists each byte from bit 7 down to bit 0.
+        // Match dm_input.h: Left=12, Up=13, Right=14, Down=15.
+        let order = [11,4,5,10,13,14,15,12,8,9,6,7,2,0,1,3]
+        let wire = UInt16(b[36]) | UInt16(b[37]) << 8
+        var buttons: UInt32 = 0
+        for (bit, target) in order.enumerated() where wire & (UInt16(1) << bit) != 0 {
+            buttons |= UInt32(1) << target
+        }
+        return Inputs(buttons:buttons,leftStick:SIMD2(Int(b[40])-128,Int(b[41])-128),
+                      rightStick:SIMD2(Int(b[42])-128,Int(b[43])-128))
+    }
     struct Sample {
         var slot: UInt8; var server: UInt32; var sequence: UInt32; var timestamp: UInt64
         var acceleration: SIMD3<Double>; var gyro: SIMD3<Double>
+        var inputs = Inputs()
     }
     static func decode(_ data: Data) -> Sample? {
         var b = [UInt8](data)
@@ -67,7 +112,7 @@ enum DSU {
         func f(_ o: Int) -> Double { Double(Float(bitPattern: UInt32(number(b,o,4)))) }
         let a = SIMD3(f(76),f(80),f(84)), g = SIMD3(f(88),f(92),f(96))
         guard [a.x,a.y,a.z,g.x,g.y,g.z].allSatisfy({ $0.isFinite }) else { return nil }
-        return Sample(slot:b[20],server:UInt32(number(b,12,4)),sequence:UInt32(number(b,32,4)),timestamp:number(b,68,8),acceleration:a,gyro:g)
+        return Sample(slot:b[20],server:UInt32(number(b,12,4)),sequence:UInt32(number(b,32,4)),timestamp:number(b,68,8),acceleration:a,gyro:g,inputs:inputs(b))
     }
 }
 

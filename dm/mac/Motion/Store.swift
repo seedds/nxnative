@@ -12,7 +12,7 @@ import Combine
         do {
             let config=try DSUConfiguration.load(from:url)
             for d in config.devices {
-                let s=Sensor(id:d.id);s.buttons=d.buttons ?? false;s.name=d.name;s.player=d.player;s.host=d.host;s.port=String(d.port);s.slot=d.slot
+                let s=Sensor(id:d.id);s.railSL=d.railSL ?? -1;s.railSR=d.railSR ?? -1;s.role=d.role ?? .full;s.buttons=d.buttons ?? false;s.name=d.name;s.player=d.player;s.host=d.host;s.port=String(d.port);s.slot=d.slot
                 // Switch x/right,y/forward,z/up -> preview x/right,y/up,z/back.
                 s.axes=AxisMap(x:d.axes[0],y:d.axes[2],z:-d.axes[1]);s.gyroBias=SIMD3(d.bias[0],d.bias[1],d.bias[2]);s.calibrated=d.calibrated ?? d.enabled
                 if let axes=d.displayAxes,axes.count==3 { s.axes=AxisMap(x:axes[0],y:axes[1],z:axes[2]) }
@@ -29,7 +29,7 @@ import Combine
         for s in sensors {
             let slot=s.slot<0 ? (s.detectedSlot ?? 0) : s.slot
             guard let port=Int(s.port) else { throw DSUConfiguration.Failure.invalid }
-            devices.append(DSUDevice(id:s.id,name:s.name,player:s.player,host:s.host,port:port,slot:slot,axes:[s.axes.x,-s.axes.z,s.axes.y],bias:[s.gyroBias.x,s.gyroBias.y,s.gyroBias.z],enabled:s.calibrated,buttons:s.buttons,calibrated:s.calibrated,displayAxes:[s.axes.x,s.axes.y,s.axes.z]))
+            devices.append(DSUDevice(id:s.id,name:s.name,player:s.player,host:s.host,port:port,slot:slot,axes:[s.axes.x,-s.axes.z,s.axes.y],bias:[s.gyroBias.x,s.gyroBias.y,s.gyroBias.z],enabled:s.calibrated,role:s.role,railSL:s.railSL,railSR:s.railSR,buttons:s.buttons,calibrated:s.calibrated,displayAxes:[s.axes.x,s.axes.y,s.axes.z]))
         }
         let config=DSUConfiguration(devices:devices);_ = try config.environment();return config
     }

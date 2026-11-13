@@ -9,6 +9,9 @@ import simd
     var onEdit: (() -> Void)?
     @Published var axes = AxisMap() { didSet { orientation = Orientation(); onEdit?() } }
     @Published var name = "Phone" { didSet { onEdit?() } }
+    @Published var role: DSURole = .full { didSet { onEdit?() } }
+    @Published var railSL = -1 { didSet { onEdit?() } }
+    @Published var railSR = -1 { didSet { onEdit?() } }
     @Published var buttons = false { didSet { onEdit?() } }
     @Published var player = 1 { didSet { onEdit?() } }
     @Published var host = "192.168.1.100" { didSet { onEdit?() } }
@@ -27,6 +30,7 @@ import simd
     private var lastReply = Date.distantPast
     @Published var acceleration = SIMD3<Double>.zero
     @Published var gyro = SIMD3<Double>.zero
+    @Published var inputs = DSU.Inputs()
     @Published var orientation = Orientation()
     @Published var calibrating = false
     @Published var capture = MotionCapture()
@@ -72,6 +76,7 @@ import simd
         timer = Timer.scheduledTimer(withTimeInterval:1,repeats:true) { [weak self] _ in Task { @MainActor in
             guard let self else { return }; self.subscribe()
             let now = Date()
+            self.expireInputs(now:now)
             if self.received == 0 && now.timeIntervalSince(self.startedAt) >= 6 {
                 self.status = "NO RESPONSE YET — still sending requests. Check IP, port, slot and Local Network permission."
             } else if self.received > 0 && now.timeIntervalSince(self.lastReply) > 3 {
@@ -107,29 +112,34 @@ import simd
                 guard let self, let c, self.connection === c else { return }
                 if let error { self.disconnect(); self.status = error.localizedDescription; return }
                 if let data { self.inspect(data) }
-                if let data, let s = DSU.decode(data), self.slot < 0 || Int(s.slot) == self.slot {
-                    if self.slot < 0 {
-                        if self.detectedSlot == nil || Date().timeIntervalSince(self.lastSeen) > 3 {
-                            self.detectedSlot = Int(s.slot); self.previous = nil; self.orientation.resetClock(); self.onEdit?()
-                        }
-                        // Lock to one live stream: never mix the orientations of different slots.
-                        if self.detectedSlot != Int(s.slot) { self.receive(c); return }
-                    }
-                    let old = self.previous
-                    let delta = old.map { s.sequence &- $0.1 } ?? 1
-                    if old == nil || old!.0 != s.server || (delta > 0 && delta < 0x80000000) || Date().timeIntervalSince(self.lastSeen)>3 {
-                        if old?.0 != s.server { self.orientation.resetClock() }
-                        self.previous = (s.server,s.sequence); self.lastSeen = Date(); self.samples += 1
-                        self.acceleration = s.acceleration; self.gyro = s.gyro; if self.calibrating { self.autoCalibration.add(s) }
-                        var mapped = s; mapped.gyro = self.axes.apply(s.gyro-self.gyroBias)
-                        if self.axes.valid { self.orientation.update(mapped) }; self.confirmed = true; self.status = "CONNECTED — receiving DSU slot " + String(s.slot)
-                    }
-                }
+                if let data, let s = DSU.decode(data) { self.accept(s) }
                 self.receive(c)
             }
         }
     }
-    func disconnect() { timer?.invalidate(); timer=nil; connection?.cancel(); connection=nil; running=false; confirmed=false; status="Disconnected" }
+    func accept(_ s: DSU.Sample) {
+        guard slot < 0 || Int(s.slot) == slot else { return }
+        if slot < 0 {
+            if detectedSlot == nil || Date().timeIntervalSince(lastSeen) > 3 {
+                detectedSlot = Int(s.slot); previous = nil; orientation.resetClock(); onEdit?()
+            }
+            guard detectedSlot == Int(s.slot) else { return }
+        }
+        let old = previous, delta = previous.map { s.sequence &- $0.1 } ?? 1
+        guard old == nil || old!.0 != s.server || (delta > 0 && delta < 0x80000000) || Date().timeIntervalSince(lastSeen)>3 else { return }
+        if old?.0 != s.server { orientation.resetClock() }
+        previous = (s.server,s.sequence); lastSeen = Date(); samples += 1
+        inputs = s.inputs
+        acceleration = s.acceleration; gyro = s.gyro
+        if calibrating { autoCalibration.add(s) }
+        var mapped = s; mapped.gyro = axes.apply(s.gyro-gyroBias)
+        if axes.valid { orientation.update(mapped) }
+        confirmed = true; status = "CONNECTED — receiving DSU slot " + String(s.slot)
+    }
+    func expireInputs(now:Date = Date()) {
+        if now.timeIntervalSince(lastSeen) > 3 { inputs = DSU.Inputs() }
+    }
+    func disconnect() { inputs = DSU.Inputs(); timer?.invalidate(); timer=nil; connection?.cancel(); connection=nil; running=false; confirmed=false; status="Disconnected" }
 }
 
 struct MotionBox: NSViewRepresentable {
@@ -137,27 +147,34 @@ struct MotionBox: NSViewRepresentable {
     var arrowAxis: SIMD3<Double>? = nil
     var arrowDirection: Double = 1
     var obliqueView = false
+    var inputs = DSU.Inputs()
     func makeNSView(context:Context) -> SCNView {
         let v = SCNView(); let scene=SCNScene(); v.scene=scene; v.backgroundColor=NSColor(calibratedWhite:0.07,alpha:1)
         let node=SCNNode();node.name="sensor";scene.rootNode.addChildNode(node)
-        func part(_ geometry:SCNGeometry,_ position:SCNVector3,_ color:NSColor,_ angle:Float=0) {
+        func part(_ geometry:SCNGeometry,_ position:SCNVector3,_ color:NSColor,_ angle:Float=0, bit:Int?=nil) {
             geometry.firstMaterial?.diffuse.contents=color
             geometry.firstMaterial?.roughness.contents=0.65
-            let n=SCNNode(geometry:geometry);n.position=position;n.eulerAngles.y=CGFloat(angle);node.addChildNode(n)
+            let n=SCNNode(geometry:geometry); if let bit { n.name="button-\(bit)"; geometry.name=n.name }; n.position=position;n.eulerAngles.y=CGFloat(angle);node.addChildNode(n)
         }
         part(SCNBox(width:2.8,height:0.32,length:1.15,chamferRadius:0.25),SCNVector3(0,0,-0.1),.lightGray)
         part(SCNBox(width:0.85,height:0.38,length:1.65,chamferRadius:0.32),SCNVector3(-1.03,-0.02,0.48),.lightGray,-0.22)
         part(SCNBox(width:0.85,height:0.38,length:1.65,chamferRadius:0.32),SCNVector3(1.03,-0.02,0.48),.lightGray,0.22)
-        // Four dark direction buttons on the left, four colored action buttons right.
-        for (x,z) in [(-0.98,-0.40),(-0.98,0.06),(-1.21,-0.17),(-0.75,-0.17)] {
-            part(SCNBox(width:0.19,height:0.10,length:0.19,chamferRadius:0.04),SCNVector3(x,0.22,z),.darkGray)
+        // Geometry is named by Switch HID bit, independent of DSU wire order.
+        for (bit,x,z) in [(13,-0.98,-0.40),(15,-0.98,0.06),(12,-1.21,-0.17),(14,-0.75,-0.17)] {
+            part(SCNBox(width:0.19,height:0.10,length:0.19,chamferRadius:0.04),SCNVector3(x,0.22,z),.darkGray,bit:bit)
         }
-        for (i,p) in [(0,SCNVector3(0.98,0.23,-0.40)),(1,SCNVector3(0.98,0.23,0.06)),(2,SCNVector3(0.75,0.23,-0.17)),(3,SCNVector3(1.21,0.23,-0.17))] {
-            part(SCNSphere(radius:0.105),p,[NSColor.systemYellow,.systemBlue,.systemGreen,.systemRed][i])
+        for (bit,p,color) in [(2,SCNVector3(0.98,0.23,-0.40),NSColor.systemYellow),(1,SCNVector3(0.98,0.23,0.06),.systemBlue),(3,SCNVector3(0.75,0.23,-0.17),.systemGreen),(0,SCNVector3(1.21,0.23,-0.17),.systemRed)] {
+            part(SCNSphere(radius:0.105),p,color,bit:bit)
         }
-        for x:Float in [-0.21,0.21] { part(SCNBox(width:0.23,height:0.08,length:0.12,chamferRadius:0.04),SCNVector3(x,0.22,-0.05),.white) }
-        for x:Float in [-0.52,0.52] { part(SCNCylinder(radius:0.17,height:0.12),SCNVector3(x,0.22,0.36),.darkGray) }
-        for x:Float in [-0.9,0.9] { part(SCNBox(width:0.6,height:0.17,length:0.18,chamferRadius:0.07),SCNVector3(x,0.05,-0.72),.darkGray) }
+        for (bit,x) in [(11,Float(-0.21)),(10,Float(0.21))] {
+            part(SCNBox(width:0.23,height:0.08,length:0.12,chamferRadius:0.04),SCNVector3(x,0.22,-0.05),.white,bit:bit)
+        }
+        for (bit,x) in [(4,Float(-0.52)),(5,Float(0.52))] {
+            part(SCNCylinder(radius:0.17,height:0.12),SCNVector3(x,0.22,0.36),.darkGray,bit:bit)
+        }
+        for (bit,x,z) in [(6,-0.9,-0.62),(7,0.9,-0.62),(8,-0.9,-0.85),(9,0.9,-0.85)] {
+            part(SCNBox(width:0.6,height:0.17,length:0.18,chamferRadius:0.07),SCNVector3(x,0.05,z),.darkGray,bit:bit)
+        }
         // Bright shoulder edge and two grips are readable even without text.
         part(SCNBox(width:0.65,height:0.08,length:0.10,chamferRadius:0.03),SCNVector3(0,0.18,-0.66),.white)
         let camera=SCNNode(); camera.name="camera"; camera.camera=SCNCamera(); camera.camera?.usesOrthographicProjection=true; camera.camera?.orthographicScale=2.15; camera.position=SCNVector3(0,3.4,4.8); camera.look(at:SCNVector3Zero); scene.rootNode.addChildNode(camera)
@@ -169,6 +186,18 @@ struct MotionBox: NSViewRepresentable {
             camera.look(at:SCNVector3Zero)
         }
         updateArrow(view)
+        if let sensor=view.scene?.rootNode.childNode(withName:"sensor",recursively:false) {
+            for (bit,_) in DSU.Inputs.buttonNames {
+                guard let button=sensor.childNode(withName:"button-\(bit)",recursively:false) else { continue }
+                let pressed=inputs.buttons & (UInt32(1) << bit) != 0
+                button.geometry?.firstMaterial?.emission.contents=pressed ? NSColor.systemOrange : NSColor.black
+                button.scale=SCNVector3(pressed ? 1.25 : 1,pressed ? 1.25 : 1,pressed ? 1.25 : 1)
+                if bit == 4 || bit == 5 {
+                    let stick=bit == 4 ? inputs.leftStick : inputs.rightStick
+                    button.position=SCNVector3((bit == 4 ? -0.52 : 0.52)+Double(stick.x)/128*0.15,0.22,0.36-Double(stick.y)/128*0.15)
+                }
+            }
+        }
         view.scene?.rootNode.childNode(withName:"sensor",recursively:false)?.simdOrientation = simd_quatf(ix:Float(rotation.imag.x),iy:Float(rotation.imag.y),iz:Float(rotation.imag.z),r:Float(rotation.real))
     }
 }
@@ -214,6 +243,7 @@ struct SensorCard: View {
                 TextField(L("Port"),text:$sensor.port).frame(width:75)
                 Picker(L("DSU slot"),selection:$sensor.slot) { LocalizedText("Auto").tag(-1); ForEach(0..<4) { LocalizedText("\($0)").tag($0) } }.frame(width:125)
             }.disabled(sensor.running)
+            PhoneRolePicker(sensor:sensor)
             Toggle(L("Use phone buttons and sticks"),isOn:$sensor.buttons)
             HStack {
                 Button(L(sensor.running ? "Disconnect":"Connect")) { if sensor.running { sensor.disconnect() } else { sensor.connect() } }
@@ -229,7 +259,8 @@ struct SensorCard: View {
                 if !sensor.axes.valid { LocalizedText("Choose three different input axes.").foregroundStyle(.red) }
                 Button(L("Swap X / Y")) { let a=sensor.axes; sensor.axes=AxisMap(x:a.y,y:a.x,z:a.z) }
             }
-            MotionBox(rotation:sensor.displayRotation).frame(height:210).clipShape(RoundedRectangle(cornerRadius:12))
+            MotionBox(rotation:sensor.displayRotation,inputs:sensor.inputs.horizontalPreview(role:sensor.role,railSL:sensor.railSL,railSR:sensor.railSR)).frame(height:210).clipShape(RoundedRectangle(cornerRadius:12))
+            PhoneInputState(sensor:sensor)
             LocalizedText("Buttons face you · white shoulder edge = top · two grips = bottom").font(.caption)
             HStack { Circle().fill(sensor.confirmed ? Color.green : (sensor.running ? Color.orange : Color.red)).frame(width:10,height:10); LocalizedText(sensor.status).fontWeight(.semibold) }
             LocalizedText("Sent: \(sensor.sent) requests · Received: \(sensor.received) packets").monospacedDigit()

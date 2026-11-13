@@ -1,6 +1,11 @@
 // Shared, per-user motion configuration. Never embed LAN endpoints in game bundles.
 import Foundation
 
+enum DSURole: String, Codable, CaseIterable {
+    case full, left, right
+    var title: String { switch self { case .full: return "Full controller"; case .left: return "Joy-Con Left"; case .right: return "Joy-Con Right" } }
+}
+
 struct DSUDevice: Codable, Equatable, Identifiable {
     var id: UUID
     var name: String
@@ -12,6 +17,9 @@ struct DSUDevice: Codable, Equatable, Identifiable {
     var axes: [Int]
     var bias: [Double]
     var enabled: Bool
+    var role: DSURole? = nil // Missing in v1 documents means full; never inferred from slot/model.
+    var railSL: Int? = nil
+    var railSR: Int? = nil
     var buttons: Bool? = nil
     var calibrated: Bool? = nil
     var displayAxes: [Int]? = nil
@@ -20,6 +28,7 @@ struct DSUDevice: Codable, Equatable, Identifiable {
         return octets.count==4 && octets.allSatisfy { part in
             !part.isEmpty && part.allSatisfy { $0.isASCII && $0.isNumber } && UInt8(part) != nil
         } && (1...8).contains(player) && (1...65535).contains(port) && (0...3).contains(slot)
+            && [railSL ?? -1,railSR ?? -1].allSatisfy { (-1...15).contains($0) }
             && axes.count==3 && axes.allSatisfy { (-3...3).contains($0) && $0 != 0 }
             && Set(axes.map { abs($0) })==Set([1,2,3])
             && (displayAxes == nil || (displayAxes!.count==3 && displayAxes!.allSatisfy { (-3...3).contains($0) && $0 != 0 } && Set(displayAxes!.map { abs($0) })==Set([1,2,3])))
@@ -49,6 +58,8 @@ struct DSUConfiguration: Codable, Equatable {
             let key="DM_DSU_"+String(device.player)
             guard result[key]==nil else { throw Failure.duplicatePlayer }
             result[key]=value
+            result["DM_DSU_RAIL_"+String(device.player)]=String(device.railSL ?? -1)+","+String(device.railSR ?? -1)
+            result["DM_DSU_ROLE_"+String(device.player)]=(device.role ?? .full).rawValue
             result["DM_DSU_BUTTONS_"+String(device.player)]=(device.buttons ?? false) ? "1":"0"
         }
         return result

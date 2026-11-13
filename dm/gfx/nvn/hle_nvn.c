@@ -1374,13 +1374,14 @@ static const tex_t *tex_snap(void *rec_, size_t off, int k, const NVNtexture *t,
     return s;
 }
 static void shadow_trace_rt(const NVNcommandBuffer *c, const NVNtexture *dt);
+static void rt_trace_bind(const NVNcommandBuffer *c, int n, const NVNtexture *const *ct, uint64_t caller);
 NVN(nvnCommandBufferSetRenderTargets, void, NVNcommandBuffer *c, int n, const NVNtexture *const *ct, const NVNtextureView *const *cv,
     const NVNtexture *dt, const NVNtextureView *dv) {
     if (n < 0 || n > 8) { LOG("[RED] SetRenderTargets count %d", n); n = n < 0 ? 0 : 8; }
     p_set_rt *r = REC_SNAP(c, OP_SET_RT, p_set_rt, n + 1); r->n = n;
     for (int i = 0; i < n; i++) { r->color[i] = ct ? tex_snap(r, SNAP_OFF(p_set_rt), i, ct[i], (uint64_t)__builtin_return_address(0)) : NULL; copy_view(&r->cview[i], &r->has_cview[i], cv ? cv[i] : NULL); }
     r->depth = tex_snap(r, SNAP_OFF(p_set_rt), n, dt, (uint64_t)__builtin_return_address(0)); copy_view(&r->dview, &r->has_dview, dv);
-    shadow_trace_rt(c, dt);
+    shadow_trace_rt(c, dt); rt_trace_bind(c, n, ct, (uint64_t)__builtin_return_address(0));
     for (int i = 0; i < n; i++) if (r->color[i]) mtl_tex_gpu_written(r->color[i]);
     if (r->depth) mtl_tex_gpu_written(r->depth);
 }
@@ -1404,6 +1405,28 @@ static _Thread_local const NVNcommandBuffer *g_shadow_cb; static _Thread_local u
 static int shadow_trace_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_SHADOW_TRACE"); v = e && atoi(e) > 0; } return v; }
 static _Thread_local const NVNcommandBuffer *g_scene_cb;
 static int draw_trace_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_DRAW_TRACE"); v = e && atoi(e) > 0; } return v; }
+// DM_NVN_RT_TRACE=<W>x<H> (diagnostic): while a command buffer's first color target is W x H, the binding, every viewport and scissor set and every
+// indexed or array draw print the game's return address and the guest backtrace, once per calling site and kind (up to 32 each), to find which code
+// draws the HUD, menus and movies into an output target and where it sets their rectangle (Metroid Prime 4's 16:10 output)
+static _Thread_local const NVNcommandBuffer *g_rtt_cb;
+static unsigned rt_trace_size(unsigned *h) { static unsigned w = ~0u, hh; if (w == ~0u) { const char *e = getenv("DM_NVN_RT_TRACE"); w = 0; if (e && sscanf(e, "%ux%u", &w, &hh) != 2) w = 0; } *h = hh; return w; }
+static void rt_trace(const NVNcommandBuffer *c, const char *kind, uint64_t caller, const float *v) {
+    unsigned h; if (!rt_trace_size(&h) || g_rtt_cb != c) return;
+    static uint64_t seen[4][32]; static int n[4]; static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
+    int k = kind[0] == 'b' ? 0 : kind[0] == 'v' ? 1 : kind[0] == 's' ? 2 : 3;
+    pthread_mutex_lock(&mu); int fresh = n[k] < 32; for (int i = 0; i < n[k] && fresh; i++) if (seen[k][i] == caller) fresh = 0; if (fresh) seen[k][n[k]++] = caller; pthread_mutex_unlock(&mu);
+    if (!fresh) return;
+    if (v) LOG("rt trace: %s %g,%g %gx%g, called from %#llx", kind, v[0], v[1], v[2], v[3], (unsigned long long)caller);
+    else LOG("rt trace: %s, called from %#llx", kind, (unsigned long long)caller);
+    void dm_backtrace(uint64_t fp); dm_backtrace((uint64_t)__builtin_frame_address(0));
+}
+static void rt_trace_bind(const NVNcommandBuffer *c, int n, const NVNtexture *const *ct, uint64_t caller) {
+    unsigned h, w = rt_trace_size(&h); if (!w) return;
+    const tex_t *t = n > 0 && ct ? (const tex_t *)ct[0] : NULL;
+    if (t && t->magic == MAGIC('T','E','X',0) && t->d.width == w && t->d.height == h) {
+        g_rtt_cb = c; float f[4] = {(float)t->d.format, (float)n, 0, 0}; rt_trace(c, "bind (format, color targets)", caller, f);
+    } else if (g_rtt_cb == c) g_rtt_cb = NULL;
+}
 static void shadow_trace_rt(const NVNcommandBuffer *c, const NVNtexture *dt) {
     const tex_t *t = (const tex_t *)dt;
     if (draw_trace_on()) {   // DM_NVN_DRAW_TRACE: a scene pass is one with a depth target at least 1280 wide that is not Depth16 (not a shadow map)
@@ -1425,13 +1448,14 @@ static void shadow_trace_vp(const NVNcommandBuffer *c, const float *v, uint64_t 
     void dm_backtrace(uint64_t fp); dm_backtrace((uint64_t)__builtin_frame_address(0));
 }
 NVN(nvnCommandBufferSetViewports, void, NVNcommandBuffer *c, int first, int n, const float *v) {
-    if (n > 0 && !g_shadow_skip) shadow_trace_vp(c, v, (uint64_t)(uintptr_t)__builtin_return_address(0));
+    if (n > 0 && !g_shadow_skip) { shadow_trace_vp(c, v, (uint64_t)(uintptr_t)__builtin_return_address(0)); rt_trace(c, "viewport", (uint64_t)(uintptr_t)__builtin_return_address(0), v); }
     if (n < 0 || first + n > 16) { LOG("[RED] SetViewports first=%d n=%d", first, n); return; }
     if (g_rec_compact && first >= 0) { uint8_t *q = crec(c, OPC_VIEWPORTS, (uint32_t)first | (uint32_t)n << 8, 16 * (size_t)n); memcpy(q, v, 16 * (size_t)n); return; }
     p_viewports *r = REC(c, OP_VIEWPORTS, p_viewports); r->first = first; r->n = n;
     for (int i = 0; i < n; i++) memcpy(r->v[i], v + 4 * i, 16);
 }
 NVN(nvnCommandBufferSetScissor, void, NVNcommandBuffer *c, int x, int y, int w, int h) {
+    if (g_rtt_cb == c) { float f[4] = {(float)x, (float)y, (float)w, (float)h}; rt_trace(c, "scissor", (uint64_t)(uintptr_t)__builtin_return_address(0), f); }
     if (g_rec_compact && (unsigned)x < 0x10000 && (unsigned)y < 0x10000 && (unsigned)w < 0x10000 && (unsigned)h < 0x10000) {
         uint16_t v[4] = {(uint16_t)x, (uint16_t)y, (uint16_t)w, (uint16_t)h}; memcpy(crec(c, OPC_SCISSOR, 0, 8), v, 8); return;
     }
@@ -1567,7 +1591,7 @@ NVN(nvnCommandBufferSetStencilRef, void, NVNcommandBuffer *c, NVNface f, int v) 
 NVN(nvnCommandBufferSetPolygonOffsetClamp, void, NVNcommandBuffer *c, float fa, float un, float cl) {
     *REC(c, OP_POLY_OFFSET, p_poly_offset) = (p_poly_offset){fa, un, cl};
 }
-NVN(nvnCommandBufferDrawArrays, void, NVNcommandBuffer *c, NVNdrawPrimitive pr, int first, int n) { rec_draw(c, (p_draw){pr, first, n, 1, 0, 0}); }
+NVN(nvnCommandBufferDrawArrays, void, NVNcommandBuffer *c, NVNdrawPrimitive pr, int first, int n) { if (g_rtt_cb == c) rt_trace(c, "draw", (uint64_t)(uintptr_t)__builtin_return_address(0), NULL); rec_draw(c, (p_draw){pr, first, n, 1, 0, 0}); }
 // Indirect: the {count, instances, first, base instance} record at ind is usually written by the GPU earlier in the frame (Hyrule Warriors: Age of Calamity's first battle), so the replay
 // issues a Metal indirect draw from the pool buffer instead of reading it at record or replay time (nvn_mtl.m draw)
 // NVN2 mesh shading: count task workgroups from first, or mesh workgroups in a program with no task shader (nvn_geometry.inc mesh_tasks_draw)
@@ -1599,7 +1623,7 @@ static void draw_trace(const NVNcommandBuffer *c, int n) {
 }
 NVN(nvnCommandBufferDrawElementsInstanced, void, NVNcommandBuffer *c, NVNdrawPrimitive pr, NVNindexType it, int n, NVNbufferAddress ib,
     int bv, int bi, int inst) {
-    draw_trace(c, n);
+    draw_trace(c, n); if (g_rtt_cb == c) rt_trace(c, "draw", (uint64_t)(uintptr_t)__builtin_return_address(0), NULL);
     rec_draw_idx(c, (p_draw_idx){pr, it, n, bv, bi, inst, ib});
 }
 NVN(nvnCommandBufferDispatchCompute, void, NVNcommandBuffer *c, int x, int y, int z) {
@@ -3194,7 +3218,7 @@ NVN(nvnCommandBufferBindImage, void, NVNcommandBuffer *c, NVNshaderStage st, int
 NVN(nvnCommandBufferBindVertexBuffer, void, NVNcommandBuffer *c, int i, NVNbufferAddress a, size_t n) { NVNbufferRange r = {a, n}; h_nvnCommandBufferBindVertexBuffers(c, i, 1, &r); }
 
 // Draws
-NVN(nvnCommandBufferDrawElements, void, NVNcommandBuffer *c, NVNdrawPrimitive pr, NVNindexType it, int n, NVNbufferAddress ib) { h_nvnCommandBufferDrawElementsInstanced(c, pr, it, n, ib, 0, 0, 1); }
+NVN(nvnCommandBufferDrawElements, void, NVNcommandBuffer *c, NVNdrawPrimitive pr, NVNindexType it, int n, NVNbufferAddress ib) { if (g_rtt_cb == c) rt_trace(c, "draw", (uint64_t)(uintptr_t)__builtin_return_address(0), NULL); h_nvnCommandBufferDrawElementsInstanced(c, pr, it, n, ib, 0, 0, 1); }
 NVN(nvnCommandBufferDrawElementsBaseVertex, void, NVNcommandBuffer *c, NVNdrawPrimitive pr, NVNindexType it, int n, NVNbufferAddress ib, int bv) { h_nvnCommandBufferDrawElementsInstanced(c, pr, it, n, ib, bv, 0, 1); }
 NVN(nvnCommandBufferDrawArraysInstanced, void, NVNcommandBuffer *c, NVNdrawPrimitive pr, int first, int n, int bi, int inst) {
     rec_draw(c, (p_draw){pr, first, n, inst, bi});
@@ -3330,7 +3354,7 @@ NVN(nvnCommandBufferDrawElementsIndirect, void, NVNcommandBuffer *c, NVNdrawPrim
 }
 
 // Viewport / scissor / depth range: single and multiple forms
-NVN(nvnCommandBufferSetViewport, void, NVNcommandBuffer *c, int x, int y, int w, int h) { float v[4] = {(float)x, (float)y, (float)w, (float)h}; shadow_trace_vp(c, v, (uint64_t)(uintptr_t)__builtin_return_address(0)); g_shadow_skip = 1; h_nvnCommandBufferSetViewports(c, 0, 1, v); g_shadow_skip = 0; }
+NVN(nvnCommandBufferSetViewport, void, NVNcommandBuffer *c, int x, int y, int w, int h) { float v[4] = {(float)x, (float)y, (float)w, (float)h}; rt_trace(c, "viewport", (uint64_t)(uintptr_t)__builtin_return_address(0), v); shadow_trace_vp(c, v, (uint64_t)(uintptr_t)__builtin_return_address(0)); g_shadow_skip = 1; h_nvnCommandBufferSetViewports(c, 0, 1, v); g_shadow_skip = 0; }
 NVN(nvnCommandBufferSetScissors, void, NVNcommandBuffer *c, int first, int n, const int *r) {
     if (first == 0 && n >= 1) h_nvnCommandBufferSetScissor(c, r[0], r[1], r[2], r[3]);
     if (first + n > 1) ONCE_LOG("SetScissors first=%d n=%d: the host uses only index 0", first, n);

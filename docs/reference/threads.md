@@ -40,6 +40,14 @@ Guest threads, their synchronization and how the host schedules them. Each entry
 - **Fix:** −2 resolves to the process default core (0), and a negative core is never returned (`hle_thread.c`).
 - **Found on:** [Super Mario Bros. Wonder](../../dm/games/010015100B514000/README.md), in its font engine (`main+0x107dbc0`).
 
+### Thread handle queries hold the scheduler lock
+
+- **Symptom:** ASan reports a heap-use-after-free in `svc_thread_impl` reading `t->id`; TSan reports a race between `GetThreadId` and `CloseHandle`, or between `SetThreadCoreMask` and the target's `GetCurrentProcessorNumber`.
+- **Cause:** `GetThreadId` (0x25), `GetThreadCoreMask` (0x0E) and `SetThreadCoreMask` (0x0F) looked up the handle table without `G`, the only thread SVCs that did. `CloseHandle` frees an exited thread under `G` at once when no wait holds it, so a query racing the close read a freed object. `SetThreadCoreMask` also wrote the ideal core in steps that `GetCurrentProcessorNumber` read without a lock.
+- **Fix:** the three handle SVCs hold `G` across lookup and read, as the priority SVCs do; on Horizon a query racing a close returns either the value or invalid handle. `SetThreadCoreMask` computes the final core and mask first and stores each once with a relaxed atomic. `GetCurrentProcessorNumber` and `dm_yield_to_core_peers` load them the same way without `G`: games call it often (Pokémon Scarlet about 7,400 times a second), and only the thread's own pair is read.
+- **Check:** `t_sync_wait` query-close (a query thread against `CloseHandle` of an exited thread, 200 rounds) and core-mask (`SetThreadCoreMask` against the target's own `GetCurrentProcessorNumber`). Before, ASan found the use-after-free in about one run in three and TSan the race in each; after, ASan and TSan are clean.
+- **Found on:** a code audit, with host unit tests; no game failure is known.
+
 ### Free thread count (`svcGetInfo` type 24)
 
 - **Symptom:** the main thread waits forever on an event right after `nnMain` starts, with only three or four threads created; `DM_THR=1` shows no `CreateThread` for the thread it waits on.
@@ -47,6 +55,14 @@ Guest threads, their synchronization and how the host schedules them. Each entry
 - **Fix:** the host answers 96 less the game's threads that have not exited (`thr_limit_used`; guest threads the host spawns for itself are left out).
 - **Found on:** [Monster Train 2](../../dm/games/010051701FB46000/README.md) (Unity 2022.3.54f1 on SDK 18.3.5: `main+0x3e7288` starts a thread and waits for it to signal `main+0x539cf80`). With the fix the game creates 40 threads and reaches its title.
 - **Note:** of the 20 games extracted on this machine, only this `main` imports the function.
+
+### A thread closed before it starts ends
+
+- **Symptom:** each `CreateThread` whose handle is closed without `StartThread` leaves a host pthread (1 MB stack) waiting for ever and lowers the free thread count for good.
+- **Cause:** `CreateThread` starts the pthread at once, and it waited only for `started`. `CloseHandle` marked the object closed but did not wake it, and the object is reclaimed only once exited, which it never was; [`thr_limit_used`](#free-thread-count-svcgetinfo-type-24) counted it as alive.
+- **Fix:** as on Horizon, where closing the last handle of a thread that never ran destroys it: `CloseHandle` of an unstarted thread wakes its pthread, which leaves through `thread_exit` without entering guest code; the object is freed with its slot. A `StartThread` before the close still runs the thread. A wait that already holds the object completes as for an exit.
+- **Check:** `t_sync_wait` closed-unstarted: 24 real `CreateThread` / `CloseHandle` pairs return the object count and `thr_limit_used` to where they were (under ASan and TSan); before, they stayed 24 higher.
+- **Found on:** a code audit, with host unit tests; no game failure is known.
 
 ### Pausing threads and reading their context for garbage collectors
 
@@ -62,6 +78,14 @@ Guest threads, their synchronization and how the host schedules them. Each entry
 - **Fix:** the resume clears `paused`, and a thread that waits for the resume in the signal handler sets it again on every wakeup, as the SVC exit already did (`hle_thread.c`). Clearing alone is not enough: a new pause can come before the woken thread has retaken `G`, SIGUSR2 is blocked inside the handler, and the requester would wait for ever.
 - **Check:** `t_pause` pauses a thread again after a resume from inside an SVC (entered from guest code and from host code), and resumes and pauses again while the handler is parked; `t_pause_stress` stops four threads that alternate real `SleepThread` SVCs with guest code about 3,700 times a second, marks a word and checks that none ran. Before, the two SVC cases failed in every run and the stress test found a running thread within the first few dozen stops; after, all pass. With the clearing alone, the parked-handler case hangs.
 - **Found on:** Aokana - Four Rhythms Across the Blue (`0100990011866000`, Unity 2018.4.22f1 IL2CPP with FMOD): three of five automated play sessions crashed at `BufferedReadStream.Seek`, each time on FMOD's stream thread, which sleeps in `SleepThread` between buffers and so was mostly paused inside an SVC.
+
+### A pause holds its target until it returns
+
+- **Symptom:** ASan reports a heap-use-after-free in `svc_thread_impl` (`SetThreadActivity`) reading `paused` or waiting on `pcv` of a thread that exited during the pause.
+- **Cause:** a pause of a thread in host code loops: it lets go of `G` to send SIGUSR2 and to wait 100 µs. The target could exit and its handle be closed meanwhile; `thread_exit` then freed the object (closed, exited, no wait reference), and the loop read it again.
+- **Fix:** the pause takes a reference (`thr_t.refs`, the count synchronization waits already take) before the loop and drops it with `thr_put` after; the last holder of a closed, exited thread frees it.
+- **Check:** `t_pause` exit_and_close_during_pause: a pause waits on a thread in host code, its handle is closed and it exits. Before, ASan found the use-after-free; after, the pause returns and the object is freed.
+- **Found on:** a code audit, with host unit tests; no game failure is known.
 
 ### SVCs leave the stack below sp untouched
 

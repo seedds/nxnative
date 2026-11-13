@@ -5,7 +5,11 @@
 // turns into a crash every time: "-[_MTL4MachineLearningPipelineState executable]: message sent to deallocated instance").
 // An input between the network's optimal size and its output (Xenoblade Chronicles 2's Switch 2 program: 1024x576 into its 1536x864 network, inside the range GetOptimalSettings
 // reports) is scaled, and a smaller input in the same textures (a dynamic resolution) goes through the same scaler and fills the output too
+// The scaler comes after the work before it and the next draw pass after the scaler (mfx_order): a slow pass that ends with no barrier writes the colour just before each
+// evaluation, and a draw pass copies the output just after it; the Makefile's DM_NVN_BARRIER=game run makes that pass skip its consumer barrier unless the scaler cleared the
+// relaxed end
 #include "../nvn/nvn_mtl.m"
+#include "t_mfx_passes.h"
 void *front_metal_layer(void) { return NULL; }
 module_t *module_of(const void *p) { (void)p; return NULL; }
 module_t *g_mod; int g_nmod;
@@ -88,6 +92,20 @@ int main(void) { @autoreleasepool {
     }
     CHECK(s4 && sc4 && (__bridge void *)s4->sc == sc4, "a smaller input in the same textures keeps the network's scaler");
     CHECK(flat(tex_mtl(&out4), b), "the 2x evaluation in the same textures fills its output");
+    // The scaler after the work before it, and the next pass after the scaler (mfx_order). Before: a slow pass writes the colour just before each evaluation and ends with no
+    // barrier, as a scaler's own encoders end (the passes the host ends carry barriers of their own); behind an encoder of barriers alone the scaler read the colour before it in
+    // most rounds. After: a draw pass copies the output right after the evaluation; with DM_NVN_BARRIER=game (a run of the Makefile's) it skipped its consumer barrier and read the
+    // output before the scaler wrote it, in every round
+    tex_t cp = texture(104, 1920, 1080, NVN_FORMAT_RGBA16F); mtl_tex_init(&cp);
+    float rc[2][4] = {{a[0], a[1], a[2], 1}, {b[0], b[1], b[2], 1}}; int drawn = 0, stale_in = 0, stale_out = 0;
+    for (int round = 0; round < 8; round++) {
+        mtl_sub_begin(); drawn += slow_draw(tex_mtl(&col), rc[round & 1], 200000, 1); c.reset = 1; dlss_eval(&c); drawn += copy_draw(tex_mtl(&out), tex_mtl(&cp));
+        CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull) && !mtl_last_commit_error(), "the submission with passes around the evaluation completes");
+        stale_in += !flat(tex_mtl(&out), rc[round & 1]); stale_out += !flat(tex_mtl(&cp), rc[round & 1]);
+    }
+    CHECK(drawn == 16, "the passes around the evaluation are drawn");
+    CHECK(!stale_in, "the scaler reads the colour the pass just before it wrote, in every round");
+    CHECK(!stale_out, "the pass after the scaler reads its output, in every round");
     printf("t_dlss_mfx (encoding thread %s): %d checks, %d failed\n", rec_on() ? "on" : "off", checks, failed);
     return failed != 0;
 }}

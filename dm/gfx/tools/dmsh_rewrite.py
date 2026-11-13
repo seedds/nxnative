@@ -2,9 +2,9 @@
 # The rewrites dmsh_build.py makes in a translated shader's MSL before it compiles it, where Metal or the translator falls short of what the Switch code does: precise
 # arithmetic (precise), memory barriers as fences (membar_fence, tg_fence), 64-bit products (mul_extended), uniform words tested against constants, which the front end would
 # fold into switches (uniform_tests), Ampere's HMMA as simdgroup matrices (hmma_msl), first stores and shared-memory stores (first_store, shared_store_msl), threadgroup memory
-# past Metal's limit (tg_spill), texture gathers with offsets (gather_offsets), border colours Metal has no sampler state for (border_emu) and a pixel shader's depth snapped to
-# its position (frag_z_snap). Functions of the MSL text and the library ABI only, with no build state, so tests import them. Part of the translation chain (dmsh_chain.FILES)
-# and of every shader's cache key (dmsh_build.py CODE_FP).
+# past Metal's limit (tg_spill), texture gathers with offsets (gather_offsets), border colours Metal has no sampler state for (border_emu), a pixel shader's depth snapped to
+# its position (frag_z_snap) and the 0 / -1 mask of a tested bit 0 without its compare (bit0_mask). Functions of the MSL text and the library ABI only, with no build state,
+# so tests import them. Part of the translation chain (dmsh_chain.FILES) and of every shader's cache key (dmsh_build.py CODE_FP).
 import bisect, collections, itertools, re
 import dmsh_abi as abi, dmsh_side
 
@@ -23,6 +23,44 @@ def membar_fence(msl):
     fence = 'atomic_thread_fence(mem_flags::mem_device | mem_flags::mem_threadgroup | mem_flags::mem_texture, memory_order_seq_cst, thread_scope_device);   // MEMBAR (membar_fence)'
     msl = re.sub(r'^([ \t]*)' + re.escape(_MEMBAR) + r'\n\1' + re.escape(_MEMBAR) + r'$', lambda m: m[1] + _MEMBAR, msl, flags=re.M)
     return msl.replace(_MEMBAR, fence)
+
+BIT0_AND = re.compile(r'^[ \t]*(u?int) (_\d+) = ([^;\n]+) & 1u?;$', re.M)
+BIT0_LOOSER = re.compile(r'\|\||&&|[|^?,]')   # an operator binding looser than &: `a | b & 1` is a | (b & 1), not bit 0
+def bit0_operand(e):   # the left operand outside its parentheses binds at least as tightly as &
+    while True:
+        f = re.sub(r'\([^()]*\)', '', e)
+        if f == e: return not BIT0_LOOSER.search(e)
+        e = f
+BIT0_TEST = re.compile(r'^[ \t]*bool (_\d+) = (_\d+) != 0u?;$', re.M)
+BIT0_MASK = re.compile(r'= (_\d+) \? \(-1\) : 0;')
+BIT0_WRITE = re.compile(r'\b(_\d+)\b[ \t]*(?:<<|>>|[-+*/%&|^])?=(?!=)')   # an assignment, plain or compound, a declaration's too
+BIT0_OTHER = re.compile(r'(?:\+\+|--)[ \t]*(_\d+)\b|\b(_\d+)[ \t]*(?:\+\+|--)|&(_\d+)\b')   # an increment, or the temporary's address
+BIT0_BODY = re.compile(r'^\{\n.*?^\}$', re.M | re.S)   # a function's body: its braces alone in column 0
+def bit0_mask(msl):
+    """The 0 / -1 mask of a tested bit 0, written from the bit and not from its compare. The translator makes a predicate of `x & 1` twice over: the compare
+    `bool b = (x & 1) != 0`, and where the Switch code keeps the predicate in a register, its integer form `b ? -1 : 0`. Where the shader also branches on b the compare has
+    two users in the AIR, a sign extension and a branch, and Apple's GPU compiler for the M3 and later (applegpu_g15 and up, macOS 26 and 27) can pick a bit-test jump it has
+    no encoding for: `LLVM ERROR: Failed to encode.` under llvm::MCObjectStreamer::emitInstruction, which ends the compiler service while a pipeline with the shader is built
+    (XPC_ERROR_CONNECTION_INTERRUPTED). It needs x in a uniform the compiler's per-draw constant program has loaded and no room left there for the test itself, so one
+    shader in thousands with the idiom meets it: PRAGMATA's pixel shader c4ac3ca598cea32e (`AND` of a constant buffer word with 1, its predicate kept and branched on).
+    With the mask as `-(x & 1)`, the same value, the compare is left with its branch alone. Only a declaration `int a = ... & 1;` with a declaration `bool b = a != 0;`
+    counts, neither assigned again (SPIRV-Cross temporaries); b is in scope where the mask is taken, so a is. Other shaders come back as the same object"""
+    if ' ? (-1) : 0;' not in msl: return msl
+    def body(f):   # one function: SPIRV-Cross numbers its temporaries by function, and the build's extra entry points repeat a body
+        src = f[0]
+        if ' ? (-1) : 0;' not in src: return src
+        bits = {m[2]: m[1] for m in BIT0_AND.finditer(src) if bit0_operand(m[3])}
+        tests = {m[1]: m[2] for m in BIT0_TEST.finditer(src) if m[2] in bits}
+        writes = collections.Counter(m[1] for m in BIT0_WRITE.finditer(src))   # a temporary written once, in its declaration
+        other = {m[1] or m[2] or m[3] for m in BIT0_OTHER.finditer(src)}
+        tests = {b: a for b, a in tests.items() if writes[a] == 1 and writes[b] == 1 and a not in other and b not in other}
+        def mask(m):
+            a = tests.get(m[1])
+            if a is None: return m[0]
+            return '= -%s;   // bit 0 as a mask (bit0_mask)' % (a if bits[a] == 'int' else 'int(%s)' % a)
+        return BIT0_MASK.sub(mask, src) if tests else src
+    out = BIT0_BODY.sub(body, msl)
+    return out if out != msl else msl
 
 TG_FENCE = 'atomic_thread_fence(mem_flags::mem_threadgroup, memory_order_seq_cst, thread_scope_simdgroup);'
 TG_FENCE_FN = re.compile(r'\bvoid dmsh_tg_fence\(\)\s*\{')

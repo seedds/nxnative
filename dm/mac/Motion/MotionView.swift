@@ -132,7 +132,7 @@ import simd
         inputs = s.inputs
         acceleration = s.acceleration; gyro = s.gyro
         if calibrating { autoCalibration.add(s) }
-        var mapped = s; mapped.gyro = axes.apply(s.gyro-gyroBias)
+        var mapped = s; mapped.gyro = AxisMap.gameToDisplay(axes.apply(s.gyro-gyroBias))
         if axes.valid { orientation.update(mapped) }
         confirmed = true; status = "CONNECTED — receiving DSU slot " + String(s.slot)
     }
@@ -252,9 +252,9 @@ struct SensorCard: View {
                 Spacer(); LocalizedText("\(sensor.samples) samples").monospacedDigit()
             }
             DisclosureGroup(L("Axis mapping (saved for this phone)")) {
-                AxisPicker(title:"Display X · tilt toward you",selection:$sensor.axes.x)
-                AxisPicker(title:"Display Y · turn flat on table",selection:$sensor.axes.y)
-                AxisPicker(title:"Display Z · lean left/right",selection:$sensor.axes.z)
+                AxisPicker(title:"Game X · right",selection:$sensor.axes.x)
+                AxisPicker(title:"Game Y · forward",selection:$sensor.axes.y)
+                AxisPicker(title:"Game Z · up",selection:$sensor.axes.z)
                 LocalizedText("Input X = DSU pitch, Y = yaw, Z = roll. Choose each input once. Minus reverses direction. Mapping changes reset orientation.").font(.caption)
                 if !sensor.axes.valid { LocalizedText("Choose three different input axes.").foregroundStyle(.red) }
                 Button(L("Swap X / Y")) { let a=sensor.axes; sensor.axes=AxisMap(x:a.y,y:a.x,z:a.z) }

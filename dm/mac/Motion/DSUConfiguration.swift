@@ -1,5 +1,6 @@
 // Shared, per-user motion configuration. Never embed LAN endpoints in game bundles.
 import Foundation
+import Darwin
 
 enum DSURole: String, Codable, CaseIterable {
     case full, left, right
@@ -71,12 +72,19 @@ struct DSUConfiguration: Codable, Equatable {
         let config=try JSONDecoder().decode(Self.self,from:Data(contentsOf:url))
         _ = try config.environment();return config
     }
-    func save(to url:URL = userURL) throws {
+    func save(to url:URL = userURL, expected:DSUConfiguration? = nil) throws {
         _ = try environment()
         try FileManager.default.createDirectory(at:url.deletingLastPathComponent(),withIntermediateDirectories:true)
+        let lockPath=url.appendingPathExtension("lock").path
+        let fd=open(lockPath,O_CREAT|O_RDWR,0o600)
+        guard fd>=0 else { throw Failure.invalid }
+        defer { close(fd) }
+        guard flock(fd,LOCK_EX)==0 else { throw Failure.invalid }
+        defer { flock(fd,LOCK_UN) }
+        if let expected,try Self.load(from:url) != expected { throw Failure.conflict }
         let data=try JSONEncoder().encode(self)
         try data.write(to:url,options:.atomic)
         try FileManager.default.setAttributes([.posixPermissions:0o600],ofItemAtPath:url.path)
     }
-    enum Failure: Error { case invalid,duplicatePlayer }
+    enum Failure: Error { case invalid,duplicatePlayer,conflict }
 }

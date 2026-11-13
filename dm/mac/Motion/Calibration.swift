@@ -179,7 +179,7 @@ struct CalibrationView: View {
                 Button(L("Start over")) { sensor.autoCalibration=AutoCalibration();started=Date() }
                 Spacer();Button(L("Cancel")) { dismiss() }
 
-                if step==7 { Button(L("OK")) { if let map=sensor.autoCalibration.result { sensor.applyCalibration(map:map,bias:sensor.autoCalibration.bias,gravity:sensor.autoCalibration.flatGravity,preview:sensor.autoCalibration.preview) };dismiss() }.keyboardShortcut(.defaultAction).disabled(!sensor.autoCalibration.previewReady) }
+                if step==7 { Button(L("OK")) { if let map=sensor.autoCalibration.result { sensor.applyCalibration(map:map.fromDisplayToGame,bias:sensor.autoCalibration.bias,gravity:sensor.autoCalibration.flatGravity,preview:sensor.autoCalibration.preview) };dismiss() }.keyboardShortcut(.defaultAction).disabled(!sensor.autoCalibration.previewReady) }
             }
         }.padding(24).frame(width:780)
         .onChange(of:sensor.autoCalibration.phase) { _,_ in started=Date() }

@@ -9,5 +9,8 @@ struct AxisMap: Codable, Equatable {
         func component(_ a: Int) -> Double { guard (1...3).contains(abs(a)) else { return 0 }; return v[abs(a)-1] * (a < 0 ? -1 : 1) }
         return SIMD3(component(x),component(y),component(z))
     }
+    // Renderer-only basis conversion. Saved axes are always the game axes.
+    static func gameToDisplay(_ v:SIMD3<Double>) -> SIMD3<Double> { SIMD3(v.x,v.z,-v.y) }
+    var fromDisplayToGame: AxisMap { AxisMap(x:x,y:-z,z:y) }
     var valid: Bool { Set([abs(x),abs(y),abs(z)]) == Set([1,2,3]) }
 }

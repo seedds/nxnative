@@ -1,6 +1,59 @@
 import XCTest
 @testable import NXMotion
 final class MotionContractTests:XCTestCase {
+    @MainActor func testGameAxisIdentityAndLegacyMappingPreserved() throws {
+        let dir=FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at:dir) }
+        let url=dir.appendingPathComponent("dsu.json")
+        let old=DSUDevice(id:UUID(),name:"Phone",player:1,host:"127.0.0.1",port:26760,slot:1,axes:[1,-3,2],bias:[0,0,0],enabled:true,displayAxes:[1,2,3])
+        try DSUConfiguration(devices:[old]).save(to:url)
+        let store=SensorStore(url:url),sensor=try XCTUnwrap(store.sensors.first)
+        XCTAssertEqual(sensor.axes,AxisMap(x:1,y:-3,z:2))
+        XCTAssertEqual(try store.configuration().devices[0].axes,old.axes)
+        sensor.axes=AxisMap()
+        XCTAssertEqual(try DSUConfiguration.load(from:url).devices[0].axes,[1,2,3])
+        XCTAssertEqual(try store.configuration().environment()["DM_DSU_1"],"127.0.0.1,26760,1,1,2,3,0.0,0.0,0.0")
+    }
+    func testRendererBasisIsOnlyPresentation() {
+        let v=SIMD3<Double>(2,3,5),map=AxisMap(x:2,y:-1,z:3)
+        XCTAssertEqual(AxisMap.gameToDisplay(map.fromDisplayToGame.apply(v)),map.apply(v))
+        for axis in 0..<3 {
+            var unit=SIMD3<Double>.zero;unit[axis]=1
+            let rendered=AxisMap.gameToDisplay(unit)
+            XCTAssertEqual(rendered.x*rendered.x+rendered.y*rendered.y+rendered.z*rendered.z,1)
+        }
+    }
+
+    @MainActor func testTwoAppsShareChangesAndRejectStaleWrites() throws {
+        let dir=FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at:dir) }
+        let url=dir.appendingPathComponent("dsu.json")
+        let first=SensorStore(url:url);first.add()
+        let second=SensorStore(url:url)
+        let a=try XCTUnwrap(first.sensors.first),b=try XCTUnwrap(second.sensors.first)
+        a.name="Newest shared name"
+        b.name="Stale overwrite"
+        XCTAssertEqual(try DSUConfiguration.load(from:url).devices.first?.name,"Newest shared name")
+        XCTAssertNotNil(second.error)
+        XCTAssertEqual(second.sensors.first?.name,"Newest shared name")
+        a.role = .left
+        second.reloadShared()
+        XCTAssertEqual(second.sensors.first?.role,.left)
+        XCTAssertTrue(second.sensors.first === b)
+        first.remove(a);second.reloadShared()
+        XCTAssertTrue(second.sensors.isEmpty)
+    }
+    func testCompareAndSaveRejectsConcurrentSnapshot() throws {
+        let dir=FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at:dir) }
+        let url=dir.appendingPathComponent("dsu.json"),empty=DSUConfiguration()
+        var changed=empty
+        changed.devices=[DSUDevice(id:UUID(),name:"Saved elsewhere",player:1,host:"127.0.0.1",port:26760,slot:0,axes:[1,2,3],bias:[0,0,0],enabled:false)]
+        try changed.save(to:url,expected:empty)
+        XCTAssertThrowsError(try empty.save(to:url,expected:empty))
+        XCTAssertEqual(try DSUConfiguration.load(from:url),changed)
+    }
+
     func testHorizontalHalfPreview() {
         XCTAssertEqual(DSU.Inputs(buttons:1 << 11).horizontalPreview(role:.left).buttons,1 << 11)
         XCTAssertEqual(DSU.Inputs(buttons:1 << 10).horizontalPreview(role:.right).buttons,1 << 10)
@@ -38,8 +91,8 @@ final class MotionContractTests:XCTestCase {
         phone.host="127.0.0.1";phone.port="26760";phone.slot=1
         phone.applyCalibration(map:AxisMap(x:2,y:-1,z:3),bias:SIMD3(0.1,0.2,0.3),gravity:SIMD3(0,-1,0),preview:Orientation())
         let saved=try DSUConfiguration.load(from:url)
-        XCTAssertEqual(saved.devices[0].axes,[2,-3,-1])
-        XCTAssertEqual(try saved.environment()["DM_DSU_1"],"127.0.0.1,26760,1,2,-3,-1,0.1,0.2,0.3")
+        XCTAssertEqual(saved.devices[0].axes,[2,-1,3])
+        XCTAssertEqual(try saved.environment()["DM_DSU_1"],"127.0.0.1,26760,1,2,-1,3,0.1,0.2,0.3")
         let restored=SensorStore(url:url)
         XCTAssertEqual(restored.sensors.first?.id,phone.id)
         XCTAssertEqual(restored.sensors.first?.axes,phone.axes)

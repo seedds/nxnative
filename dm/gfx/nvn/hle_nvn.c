@@ -2153,20 +2153,28 @@ static void slow_emit(uint64_t f) {
 static int rt_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_RT"); v = !(e && !strcmp(e, "0")); if (!v) LOG("[nvn] DM_RT=0: no thread gets a time-constraint policy (QoS only)"); } return v; }
 static int rt_frame_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_RT_FRAME"); v = !(e && !strcmp(e, "0")); if (!v && rt_on()) LOG("[nvn] DM_RT_FRAME=0: only the acquire thread declares a time-constraint policy"); } return v; }
 static int rt_comp_fixed_ms(void) { static int v = -2; if (v == -2) { const char *e = getenv("DM_RT_COMP"); v = e && *e && strcmp(e, "auto") ? atoi(e) : -1; } return v; }   // −1 = auto
-#define RT_THREADS 4
+#define RT_THREADS 8
 typedef struct {
-    const char *name; mach_port_t port; int acq;   // acq: the acquire thread
-    nvn_rt r; uint64_t period_ns, cyc;   // the period declared (0: none) and the thread's cycles at its last sample
-    unsigned ndecl;
+    const char *name; mach_port_t port; uint64_t tid; int acq;   // tid: the thread's ID (pthread_threadid_np), which the port is checked against before another thread acts on it; acq: an acquire thread
+    nvn_rt r; uint64_t cyc;   // the thread's cycles at its last sample
+    _Atomic uint64_t period_ns, comp_us;   // the period and computation declared (0: none), read by the thread policy line
+    unsigned ndecl; int retired;   // retired: an acquire thread that stopped acquiring, put back on the standard policy (rt_retire); the slot may go to the next acquire thread
     _Atomic int ready, pri, base, pol;   // the thread's priority, base priority and policy at its last sample (thread_info)
     _Atomic uint64_t frames, demoted, cpu_ns, cycles;   // since the last thread policy line: frames sampled, of them declared but below real-time priority (the kernel's fail-safe demotes
                                                         // a real-time thread that runs about 1.5 s without blocking), and the thread's CPU time and cycles
 } rt_thr;
 static rt_thr g_rtt[RT_THREADS]; static _Atomic int g_rtt_n;
 static _Atomic uint64_t g_rt_frame_ns;   // the period the acquire thread declares; the frame threads follow it
+static pthread_mutex_t g_rt_mu = PTHREAD_MUTEX_INITIALIZER;   // the acquire threads' slots (rt_acquire): several threads may acquire, and one retires another's
+static void rt_init(rt_thr *t, const char *name, int acq, uint64_t tid) {   // on the thread itself
+    t->name = name; t->acq = acq; t->tid = tid; t->port = pthread_mach_thread_np(pthread_self());
+    memset(&t->r, 0, sizeof t->r); t->cyc = 0; t->ndecl = 0; t->retired = 0; atomic_store(&t->period_ns, 0); atomic_store(&t->comp_us, 0);
+    atomic_store(&t->frames, 0); atomic_store(&t->demoted, 0); atomic_store(&t->cpu_ns, 0); atomic_store(&t->cycles, 0); atomic_store(&t->ready, 1);
+}
+static uint64_t rt_self_tid(void) { uint64_t id = 0; pthread_threadid_np(NULL, &id); return id; }
 static rt_thr *rt_register(const char *name, int acq) {   // on the thread itself
-    int i = atomic_fetch_add(&g_rtt_n, 1); if (i >= RT_THREADS) return NULL;
-    rt_thr *t = &g_rtt[i]; t->name = name; t->acq = acq; t->port = pthread_mach_thread_np(pthread_self()); atomic_store(&t->ready, 1); return t;
+    int i = atomic_fetch_add(&g_rtt_n, 1); if (i >= RT_THREADS) { atomic_fetch_sub(&g_rtt_n, 1); return NULL; }
+    rt_thr *t = &g_rtt[i]; rt_init(t, name, acq, rt_self_tid()); return t;
 }
 static int rt_allowed(const rt_thr *t) { return rt_on() && (t->acq || rt_frame_on()); }
 static void rt_declare(rt_thr *t, uint64_t period_ns, double comp_ms) {
@@ -2177,14 +2185,14 @@ static void rt_declare(rt_thr *t, uint64_t period_ns, double comp_ms) {
         .period = (uint32_t)(period_ns * tb.denom / tb.numer), .computation = (uint32_t)(comp_ns * tb.denom / tb.numer),
         .constraint = (uint32_t)(period_ns * tb.denom / tb.numer), .preemptible = 1};
     kern_return_t kr = thread_policy_set(t->port, THREAD_TIME_CONSTRAINT_POLICY, (thread_policy_t)&p, THREAD_TIME_CONSTRAINT_POLICY_COUNT);
-    if (kr == KERN_SUCCESS) { t->r.comp_ms = comp_ms; t->period_ns = period_ns; if (t->acq) g_rt_comp_ms = comp_ms; }
+    if (kr == KERN_SUCCESS) { t->r.comp_ms = comp_ms; atomic_store(&t->period_ns, period_ns); atomic_store(&t->comp_us, comp_ns / 1000); if (t->acq) g_rt_comp_ms = comp_ms; }
     if (++t->ndecl <= 20 || kr != KERN_SUCCESS)
         LOG("[nvn] %s time-constraint policy (period %.3f ms, computation %.3f ms) %s%s", t->name, period_ns / 1e6, comp_ms, kr == KERN_SUCCESS ? "set" : "failed to set", t->ndecl == 20 ? "; further declarations of this thread only in the thread policy line" : "");
 }
 // On the thread itself, before each piece of its work: one sample a presented frame (its CPU and cycles, its priority), and the declaration when the period or the need moved
 static void rt_tick(rt_thr *t, uint64_t period_ns) {
-    uint64_t f = atomic_load_explicit(&g_frame, memory_order_relaxed);
-    int period_moved = period_ns && period_ns != t->period_ns && (t->acq || t->r.comp_ms > 0);
+    uint64_t f = atomic_load_explicit(&g_frame, memory_order_relaxed), declared = atomic_load_explicit(&t->period_ns, memory_order_relaxed);
+    int period_moved = period_ns && period_ns != declared && (t->acq || t->r.comp_ms > 0);
     if (f == t->r.frame && !period_moved) return;
     if (f != t->r.frame) {
         uint64_t cpu = clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID), ins, cyc; thr_counts(&ins, &cyc);
@@ -2192,23 +2200,48 @@ static void rt_tick(rt_thr *t, uint64_t period_ns) {
             thread_extended_info_data_t xi; mach_msg_type_number_t xc = THREAD_EXTENDED_INFO_COUNT;
             if (thread_info(t->port, THREAD_EXTENDED_INFO, (thread_info_t)&xi, &xc) == KERN_SUCCESS) {
                 atomic_store(&t->pri, xi.pth_curpri); atomic_store(&t->base, xi.pth_priority); atomic_store(&t->pol, xi.pth_policy);
-                if (t->period_ns && xi.pth_curpri < 97) atomic_fetch_add(&t->demoted, 1);   // 97: BASEPRI_RTQUEUES, where a time-constraint thread runs
+                if (declared && xi.pth_curpri < 97) atomic_fetch_add(&t->demoted, 1);   // 97: BASEPRI_RTQUEUES, where a time-constraint thread runs
             }
             atomic_fetch_add(&t->frames, 1); atomic_fetch_add(&t->cpu_ns, cpu - t->r.cpu); atomic_fetch_add(&t->cycles, cyc - t->cyc);
         }
         t->cyc = cyc;
-        double c = nvn_rt_sample(&t->r, f, cpu, (double)(period_ns ? period_ns : t->period_ns) / 1e6);
-        if (c > 0 && period_ns && rt_allowed(t) && !(t->acq && rt_comp_fixed_ms() > 0) && (t->period_ns || !t->acq)) { rt_declare(t, period_ns, c); return; }
+        double c = nvn_rt_sample(&t->r, f, cpu, (double)(period_ns ? period_ns : declared) / 1e6);
+        if (c > 0 && period_ns && rt_allowed(t) && !(t->acq && rt_comp_fixed_ms() > 0) && (declared || !t->acq)) { rt_declare(t, period_ns, c); return; }
     }
     if (period_moved && rt_allowed(t)) {   // a new period: the acquire thread declares at once (DM_RT_COMP, what it declared so far, or 2 ms the first time), a frame thread with what it measured
         int fx = t->acq ? rt_comp_fixed_ms() : -1;
         rt_declare(t, period_ns, fx > 0 ? fx : t->r.comp_ms > 0 ? t->r.comp_ms : 2);
     }
 }
-static void rt_acquire(uint64_t period_ns) {   // the acquire thread, every acquire
-    static rt_thr *t; static int once; if (!once) { once = 1; t = rt_register("acquire thread", 1); }
+// Under g_rt_mu, on the acquire thread `self`: another acquire thread that has not acquired for a whole window of frames goes back to the standard policy. It no longer carries
+// the frame, and a time-constraint policy left on it would keep the deadline and the computation it declared for whatever it runs now. Its port is used only while it still
+// names that thread (a thread that ended leaves its port name free for reuse). The slot is reused for the next new acquire thread, or by its own thread when it acquires again
+static void rt_retire(const rt_thr *self) {
+    uint64_t f = atomic_load_explicit(&g_frame, memory_order_relaxed); int nt = atomic_load(&g_rtt_n); if (nt > RT_THREADS) nt = RT_THREADS;
+    for (int i = 0; i < nt; i++) { rt_thr *o = &g_rtt[i];
+        if (o == self || !o->acq || o->retired || !atomic_load(&o->ready) || f < o->r.frame + RT_WIN) continue;
+        thread_identifier_info_data_t ii; mach_msg_type_number_t ic = THREAD_IDENTIFIER_INFO_COUNT; int same = thread_info(o->port, THREAD_IDENTIFIER_INFO, (thread_info_t)&ii, &ic) == KERN_SUCCESS && ii.thread_id == o->tid;
+        if (same && atomic_load(&o->period_ns)) { thread_standard_policy_data_t st = {0}; thread_policy_set(o->port, THREAD_STANDARD_POLICY, (thread_policy_t)&st, THREAD_STANDARD_POLICY_COUNT); }
+        LOG("[nvn] acquire thread %llu stopped acquiring %llu frames ago%s", (unsigned long long)o->tid, (unsigned long long)(f - o->r.frame), same ? (atomic_load(&o->period_ns) ? ": back to the standard policy" : "") : " and has ended");
+        o->retired = 1; atomic_store(&o->period_ns, 0); atomic_store(&o->comp_us, 0);
+    }
+}
+// The acquire threads, every acquire. Each thread that acquires has its own slot: a thread's CPU clock and its policy are its own, so a game that acquires from a new thread
+// (or from two in turn) gets each thread's computation measured on that thread and declared on it, not one thread's clock subtracted from another's and the policy left on the
+// first (PR #2137). Sampling once per presented frame (rt_tick) covers a frame acquired in several calls with its whole work
+static void rt_acquire(uint64_t period_ns) {
+    static _Thread_local rt_thr *t; static _Thread_local uint64_t tid; static int full;
+    if (!tid) tid = rt_self_tid();
     atomic_store_explicit(&g_rt_frame_ns, period_ns, memory_order_relaxed);
-    if (t) rt_tick(t, period_ns);
+    pthread_mutex_lock(&g_rt_mu);
+    if (t && t->tid != tid) t = NULL;   // its slot went to another acquire thread after it stopped acquiring
+    if (!t) {   // this thread's first acquire, or its first since its slot was reused: a retired slot, else a new one
+        int nt = atomic_load(&g_rtt_n); if (nt > RT_THREADS) nt = RT_THREADS;
+        for (int i = 0; i < nt && !t; i++) if (g_rtt[i].acq && g_rtt[i].retired) { t = &g_rtt[i]; rt_init(t, "acquire thread", 1, tid); }
+        if (!t && !(t = rt_register("acquire thread", 1)) && !full) { full = 1; LOG("[nvn] [RED] no time-constraint slot is left for another acquire thread (%d slots)", RT_THREADS); }
+    } else if (t->retired) { double c = t->r.comp_ms; memset(&t->r, 0, sizeof t->r); t->r.comp_ms = c; t->retired = 0; }   // acquiring again: a new window, and the computation it had, declared at once
+    if (t) { rt_tick(t, period_ns); rt_retire(t); }
+    pthread_mutex_unlock(&g_rt_mu);
 }
 void *nvn_rt_join(const char *name) { return rt_register(name, 0); }
 void nvn_rt_tick(void *h) { if (h) rt_tick(h, atomic_load_explicit(&g_rt_frame_ns, memory_order_relaxed)); }
@@ -2218,7 +2251,8 @@ static void rt_line(char *b, size_t n) {
     size_t o = 0; int nt = atomic_load(&g_rtt_n); if (nt > RT_THREADS) nt = RT_THREADS; b[0] = 0;
     for (int i = 0; i < nt && o < n; i++) { rt_thr *t = &g_rtt[i]; if (!atomic_load(&t->ready)) continue;
         uint64_t fr = atomic_exchange(&t->frames, 0), de = atomic_exchange(&t->demoted, 0), cn = atomic_exchange(&t->cpu_ns, 0), cy = atomic_exchange(&t->cycles, 0);
-        int w = t->period_ns ? snprintf(b + o, n - o, "%s%s time-constraint computation %.2f ms / period %.2f ms", o ? "; " : "", t->name, t->r.comp_ms, t->period_ns / 1e6)
+        uint64_t pn = atomic_load(&t->period_ns), cu = atomic_load(&t->comp_us);
+        int w = pn ? snprintf(b + o, n - o, "%s%s time-constraint computation %.2f ms / period %.2f ms", o ? "; " : "", t->name, cu / 1e3, pn / 1e6)
                              : snprintf(b + o, n - o, "%s%s no time-constraint policy", o ? "; " : "", t->name);
         if (w > 0) o += (size_t)w; if (o >= n) break;
         w = snprintf(b + o, n - o, ", priority %d (base %d, policy %d), demoted in %llu of %llu frames, CPU %.2f ms a frame at %.2f GHz", atomic_load(&t->pri), atomic_load(&t->base), atomic_load(&t->pol),

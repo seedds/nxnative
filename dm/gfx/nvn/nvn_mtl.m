@@ -8858,6 +8858,7 @@ static id arch_lookup(MTL4PipelineDescriptor *d, int plain, int *from_run) {
     return nil;
 }
 static ArchEpoch *g_ep; static os_unfair_lock g_ep_lock = OS_UNFAIR_LOCK_INIT;   // the current period
+static _Atomic uint64_t g_ep_t0;   // when the current period began (bp_now): a prewarm's timer flush hands it over once it is old enough (arch_warm_flush_due)
 static int g_arch_cap;   // compiles are captured (an archive folder, a serializer): immutable after pso4_init
 static dispatch_group_t g_arch_pending;   // periods handed over and not written yet
 static _Atomic uint64_t g_pb_built, g_pb_archived, g_pb_reused, g_pb_spec, g_pb_legacy, g_pb_base_ns;
@@ -9185,6 +9186,10 @@ static void pso4_init(void) {
             });
 #endif
             uint64_t t0 = bp_now(); unsigned long long bytes = 0;
+            // A write a stopped run left (arch_write_file writes <file>.mtl4a.tmp and renames it once its index is written; the graceful exit's hard deadline can end the
+            // process inside the write). Nothing writes the folder yet
+            for (NSString *f in [NSFileManager.defaultManager contentsOfDirectoryAtPath:g_arch_dir error:nil])
+                if ([f hasSuffix:@".mtl4a.tmp"]) { [NSFileManager.defaultManager removeItemAtPath:[g_arch_dir stringByAppendingPathComponent:f] error:nil]; MLOG("pipeline archive: %s removed (a write a stopped run left)", f.UTF8String); }
             NSMutableArray<NSString *> *runf = [NSMutableArray array];
             NSArray<NSString *> *all = [NSFileManager.defaultManager contentsOfDirectoryAtPath:g_arch_dir error:nil]; NSSet<NSString *> *present = [NSSet setWithArray:all ?: @[]];
             NSArray<NSString *> *names = [[all filteredArrayUsingPredicate:[NSPredicate predicateWithFormat:@"self ENDSWITH '.mtl4a'"]] sortedArrayUsingComparator:^NSComparisonResult(NSString *x, NSString *y) {
@@ -9245,7 +9250,7 @@ static void pso4_init(void) {
         NSError *ce = nil; g_comp4 = [g_dev newCompilerWithDescriptor:[MTL4CompilerDescriptor new] error:&ce];
         if (!g_comp4) MLOG("[RED] no Metal 4 compiler (%s): render pipelines are built through the MTLDevice", ce.localizedDescription.UTF8String);
         else if (g_arch_dir) {
-            g_ep = ep_new(); g_arch_cap = g_ep != nil;
+            g_ep = ep_new(); g_arch_cap = g_ep != nil; atomic_store(&g_ep_t0, bp_now());
             if (g_arch_cap) atexit(arch_at_exit);   // what is not written yet, written at quit (mtl_arch_save)
             if (!g_ep) MLOG("[RED] pipeline archive: Metal made no pipeline serializer: nothing is captured into %s", g_arch_dir.UTF8String);
         }
@@ -9367,8 +9372,21 @@ static void arch_write_file(ArchEpoch *ep) {
 // ahead during the prewarm, where the timer's flushes wait so that its bases, compiled or captured again, make as few files as they can: a cold start's timer flushes wrote a
 // file each 10 s (Ocarina of Time: 80 files; GitHub issue #1747's, 43), more than PSO_ARCH_COMPACT, and the next start compacted them all. any_time: hand it over during the
 // prewarm too (going to the background, quitting: mtl_arch_save)
+// A timer flush during a prewarm (DM_PSO_ARCH_WARM_FLUSH_MS, default 60000; 0: none, the prewarm writes full periods alone): the period is handed over once it is that old, and each
+// next one waits twice as long, up to 16 times (60 s, 120 s, ... 16 min), so a long cold start's prewarm adds a file per doubling and not one per 10 s. Without it, a prewarm that
+// outlived the run (Ocarina of Time: 31,663 lines after the first frame on 5 workers, every warm-up run of 2026-11-10) wrote nothing until the exit, and the 1.3 s the SIGTERM exit
+// left could not write the ~425 bases it held (1.8-4 s for 900): every next run compiled them again, 57-167 bases and stalls of more than 20 s at area loads. Not while a
+// compaction runs: its recaptured bases go into as few files as they can
+static int g_warm_flush_ms = -1; static _Atomic int g_warm_flushes;
+static int arch_warm_flush_due(void) {
+    if (g_warm_flush_ms < 0) { const char *e = getenv("DM_PSO_ARCH_WARM_FLUSH_MS"); g_warm_flush_ms = e && *e ? MAX(atoi(e), 0) : 60000; }
+    if (!g_warm_flush_ms || g_compact_enabled) return 0;
+    uint64_t wait_ns = ((uint64_t)g_warm_flush_ms << MIN(atomic_load(&g_warm_flushes), 4)) * NSEC_PER_MSEC;
+    return bp_now() - atomic_load(&g_ep_t0) >= wait_ns;
+}
 static void arch_hand_over(ArchEpoch *only, int any_time) {
-    if (!g_arch_cap || (!only && !any_time && atomic_load(&g_warm_running))) return;
+    int warm_due = 0;
+    if (!g_arch_cap || (!only && !any_time && atomic_load(&g_warm_running) && !(warm_due = arch_warm_flush_due()))) return;
     os_unfair_lock_lock(&g_ep_lock); int any = (!only || g_ep == only) && (atomic_load(&g_ep->n) || atomic_load(&g_ep->active)); os_unfair_lock_unlock(&g_ep_lock);
     // nothing captured or under way: the period goes on. A compaction due to close (the prewarm over, no recapture queued) closes all the same: its recaptures are all in periods
     // handed over, and the last of them to be written finishes it, or this does when they all are (before, it stayed open for the run and the next start compacted again)
@@ -9382,7 +9400,8 @@ static void arch_hand_over(ArchEpoch *only, int any_time) {
     os_unfair_lock_lock(&g_ep_lock);
     ArchEpoch *old = g_ep; any = (!only || old == only) && (atomic_load(&old->n) || atomic_load(&old->active));   // again: another flush may just have handed it over
     if (any) {
-        g_ep = ne;
+        g_ep = ne; atomic_store(&g_ep_t0, bp_now());
+        if (warm_due) atomic_fetch_add(&g_warm_flushes, 1);
         // Every period from the first recaptured base on may hold some (see arch_compact_allowed); the first one handed over after the prewarm is the compaction's last
         if (g_compact_enabled && atomic_load(&g_compacted) && !atomic_load(&g_compact_closed)) {
             old->compacting = 1; atomic_fetch_add(&g_compact_periods, 1);
@@ -9410,17 +9429,19 @@ void mtl_arch_save(int wait_ms, int ending) {
     int n = atomic_load(&g_arch_new);
     arch_hand_over(nil, 1);
     if (!wait_ms && !ending) return;
+    if (n && wait_ms > 0) MLOG("pipeline archive at exit: writing %d pipelines (up to %d ms)", n, wait_ms);
     late = (wait_ms > 0 && dispatch_group_wait(g_arch_pending, until)) || late;
     if (ending) arch_mark(-1);
-    if (n || late) MLOG("pipeline archive at exit: %d pipelines not written yet, %s (%.0f ms)", n,
-                        late ? "not all written in time: those left are built again at the next start" : !wait_ms ? "not waited for" : "written", (bp_now() - t0) / 1e6);
+    if (n || late) MLOG("pipeline archive at exit: %d pipelines not written yet, %s (%d left, %.0f ms)", n,
+                        late ? "not all written in time: those left are built again at the next start" : !wait_ms ? "not waited for" : "written", atomic_load(&g_arch_new), (bp_now() - t0) / 1e6);
 }
 static void arch_at_exit(void) { mtl_arch_save(ARCH_QUIT_WAIT_MS, 1); }
 // What the harvest queue holds captured, then a flush, then every period handed over is written (not on g_arch_q, which writes them, nor on the harvest queue)
 static void arch_flush_wait(void) { arch_harvest_wait(DISPATCH_TIME_FOREVER); arch_flush(); if (g_arch_pending) dispatch_group_wait(g_arch_pending, DISPATCH_TIME_FOREVER); }
 static void arch_note_new(void) {   // a base was compiled: flush 10 s later (one flush for a burst of them)
     if (!g_arch_q || atomic_exchange(&g_arch_sched, 1)) return;
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 10 * (int64_t)NSEC_PER_SEC), g_arch_q, ^{ atomic_store(&g_arch_sched, 0); arch_flush(); });
+    // during a prewarm the flush waits for the period's age (arch_warm_flush_due): look again 10 s later while captures wait, new ones or not
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 10 * (int64_t)NSEC_PER_SEC), g_arch_q, ^{ atomic_store(&g_arch_sched, 0); arch_flush(); if (atomic_load(&g_warm_running) && atomic_load(&g_arch_new) > 0) arch_note_new(); });
 }
 static void arch_compact_finish(void) {   // after every period that may hold recaptured bases is written (arch_write): the old files go once their bases are in the new ones
     if (!g_compact_files || !g_compacted) return;

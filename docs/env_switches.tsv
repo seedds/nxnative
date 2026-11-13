@@ -36,6 +36,7 @@ DM_ENV_FILE	path	`=<file>` makes `build_ipa.sh` bake its `KEY=VALUE` lines into 
 DM_ENV_FILE_KEYS	switch	Set by the iOS app and the Mac launcher at launch to the space-separated names an env file set; the settings screen keeps those values and shows them greyed out
 DM_ENV_LAUNCH_KEYS	switch	Set at launch by the Mac launcher (the launcher settings already in the environment) and the iOS app (every DM_* variable already in it) to the space-separated names; the settings screen keeps those values and shows them greyed out
 DM_EXEC_OUT	path	File `oe::ExecuteProgram` records the next program and its parameters in, then the app ends (the iOS app of a game of several programs sets it to `Documents/program.bin`)
+DM_EXIT_ARCH_MS	switch	`=<ms>`: the time the graceful exit (SIGTERM) gives the pipeline archive's write beyond its 1.5 s (default 8000 on the Mac, 3000 on iOS; `0`: the main path waits for what is left of the 1.5 s, as before, a fallback at 1.5 s hands the archive over without waiting, and the hard deadline is 2.0 s)
 DM_FD_LOG	diagnostic	`=<seconds>` logs, every that many seconds, the number and kinds of file descriptors the process has open
 DM_FIXED_TIME	switch	`=<seconds>`: the user clock always returns that time and the host time zone is pinned to UTC, for deterministic comparison
 DM_FOCUS_KEEP	switch	`1` keeps the game in focus while its Mac window is up, whichever app is active (minimizing still counts); `scripts/regress.py` sets it, so another app taking the key window during a run does not pause a game that stops out of focus
@@ -305,6 +306,7 @@ DM_PROGRAM	switch	`=<index>`: the program of a game of several programs that a h
 DM_PROGRAMS	path	Table of a game's programs on the Mac (`programs.tsv`: index, host, modules, run folder, environment): `oe::ExecuteProgram` starts the named one in this process's place; the NSP script's run command and the Mac app set it
 DM_PROGRAM_ID	switch	`=<hex>`: the program ID the host reports from `svcGetInfo(ProgramId)` (default: the profile's `program_id`)
 DM_PSO_ARCHIVE	path	The folder of the per-game Metal 4 pipeline archive of pipeline bases (default `pso_archive/` beside `pso_user.tsv`); `off` keeps no archive
+DM_PSO_ARCH_WARM_FLUSH_MS	switch	`=<ms>`: during a prewarm that is not compacting, the timer's flush hands the archive's period over once it is that old, then twice as long each time up to 16 times (default 60000; `0`: no flush until the prewarm ends or the period is full)
 DM_PSO_BUNDLE	path	The pipeline archive made offline (`<GPU architecture>.mtl4a`, `prebuilt.tsv`), read only; the iOS app and Mac launcher set it to their `pso/` folder; `off` ignores it
 DM_PSO_GPUS	switch	`build_ipa.sh`: the GPU architectures, comma-separated, to build the offline pipeline archive for (`none` builds none); unset, a profile with `pso_mtl4 on` gets its `pso_gpu` list or `g18p` when absent; profiles with `pso_mtl4 off` get none
 DM_PSO_HYBRID	switch	`0`: a draw whose pipeline is not built yet waits for it instead of drawing with its shader pair's pulling pipeline meanwhile (on by default with the Metal 4 path)
@@ -401,6 +403,7 @@ DM_TEST_LEAK_GPU	diagnostic	`=1` allocates and keeps a 1 MB shared Metal buffer 
 DM_TEST_LINK_STALL	diagnostic	`=<start s>,<duration s>`: counting from the first present, pauses the display link at that point for that long, to check the present fallback
 DM_TEST_NO_METAL4	diagnostic	`=1` treats the GPU as one without Metal 4, as on a virtual Mac: the NVN layer starts only its classic part and drops every present
 DM_TEST_PRESENT_LAG	diagnostic	`=<every n>,<ms>[,<in a row>][;…]` sleeps that long before every nth present (and the ones after it in the run): a slow frame on demand
+DM_TEST_STUCK_DRAW	test	In t_pso_archive's SIGTERM case, holds a draw in the graphics layer (dm_gfx_enter with no leave) so the graceful exit's suspend never returns
 DM_TEST_SWKBD_HOLD_MS	diagnostic	`=<ms>` (with `DM_KBD`) keeps the system keyboard up that long before `DM_KBD`'s text is returned, as a player typing would
 DM_TEST_SWKBD_LAG_MS	diagnostic	`=<ms>` sleeps that long between the keyboard handing back its text and the game's thread getting the result, to check that auto-accept does not act early
 DM_TEST_TESS	test	Path to the native t_tess executable that test_dmsh_tess.py runs the tessellation layout and expansion kernel through on the GPU (`make check_t_tess` sets it)

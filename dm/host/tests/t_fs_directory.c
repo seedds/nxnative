@@ -67,6 +67,10 @@ static int directory_closedir(DIR *d) {
 }
 
 static int checks, fails;
+static void drop_indexes(void) {   // the read-only folders' name indexes, built again at the next lookup
+    for (dir_index **slot = g_dir_index; slot < g_dir_index + DIR_INDEX_SLOTS; slot++)
+        while (*slot) { dir_index *x = *slot; *slot = x->next; free(x->e); free(x->pool); free(x->path); free(x); }
+}
 #define CHECK(c, text) do { checks++; int ok = !!(c); fails += !ok; printf("%s %s\n", ok ? "PASS" : "FAIL", text); } while (0)
 
 int main(void) {
@@ -134,7 +138,7 @@ int main(void) {
             if (h_fs_OpenFile(&fh, path, MODE_READ) == RES_OK) { opened++; h_fs_CloseFile(fh); }
         }
         CHECK(read_failures == before + 1 && opened == 3, after ? "a name index whose folder fails after one entry is not kept: every name still opens" : "a name index whose folder fails at once is not kept: every name still opens");
-        for (dir_index **slot = g_dir_index; slot < g_dir_index + DIR_INDEX_SLOTS; slot++) while (*slot) { dir_index *x = *slot; *slot = x->next; free(x->e); free(x->pool); free(x->path); free(x); }   // the next round builds it again
+        drop_indexes();   // the next round builds it again
     }
 
     uint64_t fh = 0x1234; fail_reading(sub, 1);
@@ -155,6 +159,22 @@ int main(void) {
     dh = 0; count = 0;
     CHECK(h_fs_OpenDirectory(&dh, "ov:/", DIRMODE_FILE) == RES_OK && h_fs_ReadDirectory(&count, ents, dh, 8) == RES_OK && count == 4, "then the overlay lists its three files and the base's one");
     if (dh) h_fs_CloseDirectory(dh);
+
+    // A name in several layers is listed once, as the first layer has it; the layers come in their order (the last overlay folder first), and names differing in case are two
+    char ov2[1100]; snprintf(ov2, sizeof ov2, "%s.ov2", root); mkdir(ov2, 0755);
+    snprintf(q, sizeof q, "%s/entry", ov); FILE *g = fopen(q, "w"); fputs("overlay!", g); fclose(g);
+    snprintf(q, sizeof q, "%s/ENTRY", ov2); fclose(fopen(q, "w"));
+    snprintf(q, sizeof q, "%s/oa", ov2); fclose(fopen(q, "w"));
+    snprintf(g_mnt[g_nmnt - 1].overlay, sizeof g_mnt[0].overlay, "%s:%s", ov, ov2);
+    drop_indexes();   // a read-only folder's index is kept for the run: the folder just changed, which a game's never does
+    dh = 0; count = 0; int once = 0, upper = 0, big = 0;
+    CHECK(h_fs_OpenDirectory(&dh, "ov:/", DIRMODE_FILE) == RES_OK && h_fs_ReadDirectory(&count, ents, dh, 8) == RES_OK && count == 5,
+          "the layers list oa, ob, oc, entry and ENTRY, each once");
+    for (int64_t i = 0; i < count; i++) { once += !strcmp(ents[i].name, "entry"); upper += !strcmp(ents[i].name, "ENTRY"); big += !strcmp(ents[i].name, "entry") && ents[i].size == 8; }
+    CHECK(once == 1 && upper == 1 && big == 1, "entry is the overlay's (8 bytes, not the base's 5), and ENTRY is a name of its own");
+    CHECK(count == 5 && (!strcmp(ents[0].name, "ENTRY") || !strcmp(ents[0].name, "oa")) && (!strcmp(ents[1].name, "ENTRY") || !strcmp(ents[1].name, "oa")), "the last overlay folder's names come first");
+    if (dh) h_fs_CloseDirectory(dh);
+    snprintf(q, sizeof q, "%s/entry", ov); unlink(q); snprintf(q, sizeof q, "%s/ENTRY", ov2); unlink(q); snprintf(q, sizeof q, "%s/oa", ov2); unlink(q); rmdir(ov2);
 
     fail_reading(sub, 1);
     CHECK(h_fs_CleanDirRec("w:/sub") != RES_OK, "a clean whose folder cannot be read fails");

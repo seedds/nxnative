@@ -1188,7 +1188,25 @@ HLE_FORCE("_ZN2nn2fs12GetEntryTypeEPNS0_18DirectoryEntryTypeEPKc", "fsp-srv → 
 }
 
 // ---------- Directories ----------
-typedef struct { DIR *d; char path[1024]; DIR *od; char opath[1024]; DirectoryEntry *snap; int64_t nsnap, psnap; int mode; } dirh_t;
+typedef struct { DIR *d; char path[1024]; DirectoryEntry *snap; int64_t nsnap, psnap; int mode; } dirh_t;
+typedef struct { const char *name; size_t at; } name_at;
+static int name_at_cmp(const void *a, const void *b) {
+    const name_at *x = a, *y = b; int c = strcmp(x->name, y->name);
+    return c ? c : (x->at > y->at) - (x->at < y->at);
+}
+// The first of each name in names[0..n), in the order they came (overlay folders, then the base); returns how many are left. One sort: a scan of the names so far
+// for each name was quadratic, 722 million comparisons and 3.6 s of OpenDirectory under the path lock for a folder of 38,000 entries (synthetic; Engage's voice bank folders are this size), with DM_ROMFS_OVERLAY set
+static size_t names_first(char (*names)[0x301], size_t n) {
+    name_at *by = malloc((n ? n : 1) * sizeof *by); uint8_t *again = calloc(n ? n : 1, 1);
+    if (!by || !again) die("rom overlay directory snapshot allocation failed");
+    for (size_t i = 0; i < n; i++) by[i] = (name_at){names[i], i};
+    qsort(by, n, sizeof *by, name_at_cmp);
+    for (size_t k = 1; k < n; k++) if (!strcmp(by[k].name, by[k - 1].name)) again[by[k].at] = 1;
+    size_t m = 0;
+    for (size_t i = 0; i < n; i++) if (!again[i]) { if (m != i) memcpy(names[m], names[i], sizeof names[0]); m++; }
+    free(again); free(by);
+    return m;
+}
 // 0, or -1 with errno set when a folder of the overlay cannot be read: nothing is kept
 static int dir_snapshot(dirh_t *h, const mount_t *m, const char *rest) {
     char fwd[1024]; rest = fwd_slashes(rest, fwd, sizeof fwd);
@@ -1207,24 +1225,21 @@ static int dir_snapshot(dirh_t *h, const mount_t *m, const char *rest) {
         struct dirent *e;
         while ((e = dir_next(x))) {
             if (!guest_name(parent, e->d_name, guest, 0x301)) continue;
-            int dup = 0; for (size_t j = 0; j < nn; j++) if (!strcmp(names[j], guest)) { dup = 1; break; }
-            if (dup) continue;
             if (nn == cap && !(names = realloc(names, (cap *= 2) * sizeof *names))) die("rom overlay directory snapshot allocation failed");
             strlcpy(names[nn++], guest, sizeof names[0]);
         }
         err = errno; closedir(x);
         if (err) goto done;
     }
-    size_t nov = nn; int64_t dk = m->img ? img_find(m->img, rest) : -1;
-    if (dk >= 0 && !m->img->e[dk].type)   // the image's own entries of this directory, after the overlay folders' (only those can repeat a name)
+    int64_t dk = m->img ? img_find(m->img, rest) : -1;
+    if (dk >= 0 && !m->img->e[dk].type)   // the image's own entries of this directory, after the overlay folders'
         for (uint64_t j = 0; j < m->img->e[dk].b; j++) {
             const img_ent *c = &m->img->e[m->img->e[dk].a + j]; size_t l = c->nlen < 0x300 ? c->nlen : 0x300;
             memcpy(guest, m->img->names + c->name, l); guest[l] = 0;
-            int dup = 0; for (size_t i = 0; i < nov; i++) if (!strcmp(names[i], guest)) { dup = 1; break; }
-            if (dup) continue;
             if (nn == cap && !(names = realloc(names, (cap *= 2) * sizeof *names))) die("rom overlay directory snapshot allocation failed");
             strlcpy(names[nn++], guest, sizeof names[0]);
         }
+    nn = names_first(names, nn);
     h->snap = calloc(nn ? nn : 1, sizeof *h->snap); h->nsnap = (int64_t)nn;
     if (!h->snap) die("rom overlay directory snapshot allocation failed");
     for (size_t j = 0; j < nn; j++) {
@@ -1294,7 +1309,7 @@ HLE_FORCE("_ZN2nn2fs14CloseDirectoryENS0_15DirectoryHandleE", "fsp-srv → close
         return;
     }
     if (!hh) return;   // the game also closes after a failed open (handle 0): nothing to do in the original either
-    dirh_t *h = (dirh_t *)hh; if (h->d) closedir(h->d); if (h->od) closedir(h->od); free(h->snap); free(h);
+    dirh_t *h = (dirh_t *)hh; if (h->d) closedir(h->d); free(h->snap); free(h);
 }
 
 // ---------- Overloads from newer SDKs (SDK 16: MountRom without a cache, ReadFile without the bytes-read output / with read options, directory entry count) ----------

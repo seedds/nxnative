@@ -75,7 +75,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 | [NieR:Automata The End of YoRHa Edition (0100B8E016F76000)](#nierautomata-the-end-of-yorha-edition-0100b8e016f76000) | 8 | 0 | 0 | 0 | 1 | `build` → `game` ×2 |
 | [Ori and the Will of the Wisps](#ori-and-the-will-of-the-wisps) | 0 | 0 | 10 | 0 | 0 | `build` → `engine` |
 | [Paper Mario: The Thousand-Year Door](#paper-mario-the-thousand-year-door) | 1 | 0 | 1 | 0 | 0 | `build` → `game` |
-| [Pokemon Pokopia](#pokemon-pokopia) | 0 | 0 | 57 | 0 | 0 | `build` → `game` |
+| [Pokemon Pokopia](#pokemon-pokopia) | 0 | 0 | 62 | 0 | 0 | `build` → `game` |
 | [Pokémon Legends: Arceus](#pokémon-legends-arceus) | 0 | 0 | 0 | 1 | 0 | `game` |
 | [Super Mario 3D All-Stars: Super Mario Sunshine](#super-mario-3d-all-stars-super-mario-sunshine) | 2 | 0 | 0 | 0 | 0 | `build` → `game` |
 | [Super Smash Bros. Ultimate](#super-smash-bros-ultimate) | 11 | 0 | 0 | 1 | 0 | `game` |
@@ -460,8 +460,8 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 
 - **`build` → `game`**, rendering, blocked: the stubs have no function-matched form yet, judgement: screen shape wider than 16:9: the render sizes, the swap chain, the renderer's 1920.0 constants, the cameras' ratio and the gameplay HUD at the edges (DM_SCREEN_ASPECT). The output size is the host's, but where KTGL takes its sizes and its cameras' ratio is this build's code
 
-- **v327680 `main`** `816c5358…` ([patches.py:270](../../dm/games/0400A3A01EE4C000/patches.py#L270))
-  <details><summary>57 frame-step sites</summary>
+- **v327680 `main`** `816c5358…` ([patches.py:552](../../dm/games/0400A3A01EE4C000/patches.py#L552))
+  <details><summary>62 frame-step sites</summary>
 
   - frame step `+0xd3aac`: screen shape: the renderer's 1920.0 becomes the output width (DM_SCREEN_ASPECT, state +0xa8)
   - frame step `+0x86bf88`: screen shape: the UI's text and map scale takes the 16:9 canvas's width, min(width, height x 16 / 9) (DM_SCREEN_ASPECT)
@@ -519,7 +519,12 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
   - frame step `+0x105c0e0`: screen shape: texture descriptor (the swap chain): a 16:9 size takes the screen's width (DM_SCREEN_ASPECT, state +0xa0 / +0xa4)
   - frame step `+0x16ae7a8`: screen shape: render target descriptor: a 16:9 size takes the screen's width (DM_SCREEN_ASPECT, state +0xa0 / +0xa4)
   - frame step `+0x1e225ec`: screen shape: camera projection: a 16:9 camera takes the screen's ratio (Hor+) (DM_SCREEN_ASPECT, state +0xa0 / +0xa4)
-  - frame step `+0x1e82690`: screen shape: full-screen pictures stretch to the screen's width; the gameplay HUD's listed panes move out by the extra half-width (DM_SCREEN_ASPECT, state +0xa0 / +0xa4)
+  - frame step `+0x1e82690`: screen shape: full-screen pictures stretch to the screen's width; the gameplay HUD's listed panes move out by the extra half-width; the in-world button diamond takes an Xbox controller's layout for other controllers' prompts (DM_SCREEN_ASPECT, state +0xa0 / +0xa4)
+  - frame step `+0x1e82c00`: button layout: the in-world prompt's pill windows are its bubble for an Xbox controller's layout (DM_PAD_MAP=label, state +0xb0)
+  - frame step `+0x1e82dfc`: button layout: the same, on another update path (DM_PAD_MAP=label, state +0xb0)
+  - frame step `+0x1e82eac`: button layout: the same, on another update path (DM_PAD_MAP=label, state +0xb0)
+  - frame step `+0x1e830ac`: button layout: the same, on another update path (DM_PAD_MAP=label, state +0xb0)
+  - frame step `+0x1e905f8`: button layout: the in-world prompt's pill windows are as long as the game's bubble for an Xbox controller's layout (DM_PAD_MAP=label, state +0xb0)
 
   </details>
 

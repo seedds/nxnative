@@ -132,8 +132,112 @@ _stubs = {
         0x1f088c83,   # fmsub s3, s4, s8, s3   width / 2 - 960 x scale
         0x1e232821,   # fadd s1, s1, s3
     ]),
-    'hud': (0x1e82690, 'full-screen pictures stretch to the screen\'s width; the gameplay HUD\'s listed panes move out by the extra half-width', [
+    'hud': (0x1e82690, 'full-screen pictures stretch to the screen\'s width; the gameplay HUD\'s listed panes move out by the extra half-width; the in-world button diamond takes an Xbox controller\'s layout for other controllers\' prompts', [
         'adrp16',
+        # The in-world button diamond (the four face buttons on a cloud beside a prompt such as "A Leave": the button to press pops out of a Switch controller's diamond into the prompt's
+        # bubble), in three versions by the button that pops out (A right, Y left, X top). With an Xbox controller's labels (state +0xb0, DM_PAD_MAP=label) each takes an Xbox
+        # controller's places on its own cloud: A bottom, B right, X left, Y top, the popped button's bubble beside it. Each listed pane's global translation, as just computed, moves by
+        # a fixed step (layout pixels, y up; the diamond's arm is 36), so the game's animations stay; pad_uv points window parts at other places of the UI sheet (their materials'
+        # texture coordinates: top left, top right, bottom left, bottom right at +0x08), so that each cloud is drawn without the bubble or the arm it carries for the Switch's places
+        # and the A and Y prompts' pill windows draw the bubble (the A prompt's bubble's own pixels: its left end on its cloud is lost to the cloud's mirrored lobe, so it is the right
+        # end mirrored). The cloud's mirrored lobe is the Xbox icon sets' (button_icons.tsv). The text and bubble of the X prompt turn to the left by their origin byte (+0x10c, 0x01 left,
+        # 0x21 right, as the Y prompt's), the text also by its lines' origin and alignment (+0x206 0x21, +0x207 3: right): the layout keeps them, so the stub writes them each time.
+        # Only the prompts' own panes (their parent is one of the three roots): the pick-up prompt ("Y Leppa Berries", no cloud) has a text of the same name, which moved up out of its pill
+        0xb940b20a,   # ldr w10, [x16, #0xb0]     1 when the prompts follow an Xbox controller's layout (loader.c)
+        0x34001bea,   # cbz w10, keep
+        0xf9406a6b,   # ldr x11, [x19, #0xd0]     its parent: one of the three prompts (other layouts reuse these names: the pick-up prompt's text is 8e0aa2dc too)
+        0xb4001bab,   # cbz x11, keep
+        0xb940c16b,   # ldr w11, [x11, #0xc0]
+        0x100005f1,   # adr x17, pad_roots
+        0xb840462a,   # 0: ldr w10, [x17], #4
+        0x34001b2a,   # cbz w10, keep
+        0x6b0b015f,   # cmp w10, w11
+        0x54ffffa1,   # b.ne 0b
+        0xb940c26a,   # ldr w10, [x19, #0xc0]     the pane's name hash
+        0x100005b1,   # adr x17, pad_list
+        0xb841062b,   # 1: ldr w11, [x17], #16
+        0x3400026b,   # cbz w11, uv               not listed
+        0x6b0a017f,   # cmp w11, w10
+        0x54ffffa1,   # b.ne 1b
+        0xbc5f4223,   # ldur s3, [x17, #-12]      the pane's move, x (layout pixels)
+        0xbd403126,   # ldr s6, [x9, #0x30]       the global x just computed
+        0x1e262863,   # fadd s3, s3, s6
+        0xbd003123,   # str s3, [x9, #0x30]
+        0xbc5f8223,   # ldur s3, [x17, #-8]       y (up)
+        0xbd403526,   # ldr s6, [x9, #0x34]
+        0x1e262863,   # fadd s3, s3, s6
+        0xbd003523,   # str s3, [x9, #0x34]
+        0xb85fc22b,   # ldur w11, [x17, #-4]      its origin byte (+0x10c), if it changes
+        0x340000eb,   # cbz w11, uv
+        0x3904326b,   # strb w11, [x19, #0x10c]
+        0x53087d6b,   # lsr w11, w11, #8          a text's own: its lines' origin (+0x206) and alignment (+0x207)
+        0x3400008b,   # cbz w11, uv
+        0x39081a6b,   # strb w11, [x19, #0x206]
+        0x53087d6b,   # lsr w11, w11, #8
+        0x39081e6b,   # strb w11, [x19, #0x207]
+        0x10000e31,   # uv: adr x17, pad_uv       window parts drawn from another place of the 4096x2048 UI sheet
+        0xb841862b,   # 2: ldr w11, [x17], #24
+        0x340017cb,   # cbz w11, keep
+        0x6b0a017f,   # cmp w11, w10
+        0x54ffffa1,   # b.ne 2b
+        0xb89ec22b,   # ldursw x11, [x17, #-20]   the part (+0x190 + 8 * i)
+        0xf86b6a6b,   # ldr x11, [x19, x11]
+        0xb4ffff4b,   # cbz x11, 2b
+        0xf940316b,   # ldr x11, [x11, #0x60]     its material
+        0xb4ffff0b,   # cbz x11, 2b
+        0xbc5f0223,   # ldur s3, [x17, #-16]      u0
+        0xbc5f4226,   # ldur s6, [x17, #-12]      v0
+        0x2d011963,   # stp s3, s6, [x11, #0x8]   top left
+        0xbc5f8223,   # ldur s3, [x17, #-8]       u1
+        0x2d021963,   # stp s3, s6, [x11, #0x10]  top right
+        0xbc5fc226,   # ldur s6, [x17, #-4]       v1
+        0x2d041963,   # stp s3, s6, [x11, #0x20]  bottom right
+        0xbc5f0223,   # ldur s3, [x17, #-16]
+        0x2d031963,   # stp s3, s6, [x11, #0x18]  bottom left
+        0x17ffffee,   # b 2b
+        0x0bd9224c, 0x0149e464, 0x6c6531a3, 0x00000000,   # pad_roots: the prompts' roots (A, Y, X), the parents of every pane listed
+        # pad_list: A pops out on the right (root 0bd9224c), the layout of every A prompt: Y top, X left, B right; the popped A, its text and its bubble go to the bottom, 12 lower than the arm so the bubble clears B
+        0x7708cd35, 0xc2100000, 0xc2400000, 0x00000000,   # the bubble (pad_bubble: the root's own pill window, drawn with the bubble's pixels) (-36, -48)
+        0x23d9ab35, 0xc2100000, 0xc2400000, 0x00000000,   # the popped button's ring (-36, -48)
+        0xfb32aa8d, 0xc2100000, 0xc2400000, 0x00000000,   # its icon (-36, -48)
+        0x205d6ff4, 0xc2100000, 0xc2400000, 0x00000000,   # its text (-36, -48)
+        0x8022474d, 0x42100000, 0x42100000, 0x00000000,   # Y left -> top (+36, +36)
+        0x919f40cc, 0xc2100000, 0xc2100000, 0x00000000,   # X top -> left (-36, -36)
+        0x125cb1b6, 0x42100000, 0x42100000, 0x00000000,   # B bottom -> right (+36, +36)
+        # pad_list: Y pops out on the left (root 0149e464): X left, B right, A bottom; the popped Y, its text and its bubble (both left of it) go to the top, 12 higher than the arm so the bubble clears X
+        0xf4e08936, 0x42100000, 0x42400000, 0x00000000,   # the bubble (pad_bubble: the root's pill window, drawn with the bubble's pixels) (+36, +48)
+        0x44b4296c, 0x42100000, 0x42400000, 0x00000000,   # the popped button's ring (+36, +48)
+        0x9b580f75, 0x42100000, 0x42400000, 0x00000000,   # its icon (+36, +48)
+        0x8e0aa2dc, 0x42100000, 0x42400000, 0x00000000,   # its text (+36, +48)
+        0x563122eb, 0xc2100000, 0xc2100000, 0x00000000,   # X top -> left (-36, -36)
+        0xd6ee93d5, 0x42100000, 0x42100000, 0x00000000,   # B bottom -> right (+36, +36)
+        0xe86b8d54, 0xc2100000, 0xc2100000, 0x00000000,   # A right -> bottom (-36, -36)
+        # pad_list: X pops out on top (root 6c6531a3): Y top, B right, A bottom; the popped X goes to the left, its bubble and text turned to its left (origin +0x10c 0x21, as the Y prompt's)
+        0x1ac3050a, 0xc2100000, 0xc2100000, 0x00000000,   # the popped button's ring (-36, -36)
+        0x9f568096, 0xc2100000, 0xc2100000, 0x00000000,   # its icon (-36, -36)
+        0xc978c0bd, 0xc2d80000, 0xc2100000, 0x00032121,   # its text, right-aligned: its right end 36 left of the ring (-108, -36, origin 0x32121)
+        0x043d9bd0, 0x41e00000, 0xc2100000, 0x00000021,   # the bubble: right end 32 right of the ring (+28, -36, origin 0x21)
+        0x72b84537, 0x41a00000, 0xc2100000, 0x00000021,   # its glow: right end 28 right of the ring (+20, -36, origin 0x21)
+        0x09460b8b, 0x42100000, 0x42100000, 0x00000000,   # Y left -> top (+36, +36)
+        0xacfd6f73, 0xc2100000, 0xc2100000, 0x00000000,   # A right -> bottom (-36, -36)
+        0x9b8075f4, 0x42100000, 0x42100000, 0x00000000,   # B bottom -> right (+36, +36)
+        0x00000000,
+        # pad_uv: hash, part offset, u0, v0, u1, v1 (fractions of 4096 and 2048)
+        0x759a506f, 0x000001b0, 0x3f1e2000, 0x3f28c000, 0x3f1e3000, 0x3f28e000,   # A's cloud window: its bubble's middle drawn transparent: 2530,1350 -> 2531,1351
+        0x759a506f, 0x000001c8, 0x3f1e2000, 0x3f28c000, 0x3f1e3000, 0x3f28e000,   # and its right end: 2530,1350 -> 2531,1351
+        0x5b879957, 0x00000198, 0x3f1e2000, 0x3f28c000, 0x3f1e3000, 0x3f28e000,   # Y's cloud window (A's mirrored): its bubble's left end: 2530,1350 -> 2531,1351
+        0x5b879957, 0x000001b0, 0x3f1e2000, 0x3f28c000, 0x3f1e3000, 0x3f28e000,   # and its middle: 2530,1350 -> 2531,1351
+        0xe9819928, 0x00000198, 0x3f1e0000, 0x3f288000, 0x3f26c000, 0x3f3a0000,   # X's cloud (an arm up to the bubble): A's cloud instead: 2528,1348 -> 2668,1488
+        0xe9819928, 0x000001b0, 0x3f1e2000, 0x3f28c000, 0x3f1e3000, 0x3f28e000,   # its arm: 2530,1350 -> 2531,1351
+        0xe9819928, 0x000001c8, 0x3f1e2000, 0x3f28c000, 0x3f1e3000, 0x3f28e000,   # its arm's end: 2530,1350 -> 2531,1351
+        0x7708cd35, 0x00000198, 0x3f294000, 0x3f2d2000, 0x3f273000, 0x3f356000,   # A's pill: left end: the right end mirrored: 2708,1385 -> 2675,1451
+        0x7708cd35, 0x000001b0, 0x3f26d000, 0x3f2d2000, 0x3f26f000, 0x3f356000,   # A's pill: middle: 2669,1385 -> 2671,1451
+        0x7708cd35, 0x000001c8, 0x3f273000, 0x3f2d2000, 0x3f294000, 0x3f356000,   # A's pill: right end: 2675,1385 -> 2708,1451
+        0xf4e08936, 0x00000198, 0x3f294000, 0x3f2d2000, 0x3f273000, 0x3f356000,   # Y's pill: left end: the right end mirrored: 2708,1385 -> 2675,1451
+        0xf4e08936, 0x000001b0, 0x3f26d000, 0x3f2d2000, 0x3f26f000, 0x3f356000,   # Y's pill: middle: 2669,1385 -> 2671,1451
+        0xf4e08936, 0x000001c8, 0x3f273000, 0x3f2d2000, 0x3f294000, 0x3f356000,   # Y's pill: right end: 2675,1385 -> 2708,1451
+        0x00000000,
+        0xd503201f,   # keep: nop
         0xb940a210,   # ldr w16, [x16, #0xa0]   the output width (0 = 16:9)
         0x340004f0,   # cbz w16, orig
         # A picture or window pane (type +0x112 1 or 3) at least 1920 wide whose parent is a null pane (type 0): its x axis widens by the output width / 1920, so
@@ -184,6 +288,183 @@ _stubs = {
         # 31d72b49 512x512, 78801aae 494x356; right f13b1a7c / 0623e2bd / 1b0caafe 540x56). The same rule on every layout pulled the main menu's pieces apart
         0xd81f3cb5, 0xf13b1a7c, 0x0623e2bd, 0x1b0caafe, 0x1569295d, 0x31d72b49, 0xe75fc20a, 0x2074df4f, 0x78801aae, 0,
     ]),
+    # The in-world prompt's pill windows (7708cd35 under the A prompt's root, which the layout keeps transparent; f4e08936 under the Y prompt's, a soft glow behind its bubble): with
+    # an Xbox controller's layout (state +0xb0) each is the bubble beside the popped button (the hud stub moves them and points them at the bubble's pixels), since the bubble the game
+    # draws is one window with the cloud: the A prompt's is drawn with the prompt's alpha, and both get the bubble's height and ends. main+0x1e82c00 stores a pane's alpha with its
+    # parent's (0 skips its matrix and its drawing), and main+0x1e82dfc, main+0x1e82eac and main+0x1e830ac store it again on the other update paths; at each, x10 and x16 are free
+    # (written next or unused)
+    'pad_bubble': (0x1e82c00, 'the in-world prompt\'s pill windows are its bubble for an Xbox controller\'s layout', [
+        'adrp16',
+        0xb940b20a,   # ldr w10, [x16, #0xb0]     1 when the prompts follow an Xbox controller's layout (loader.c)
+        0x340003ca,   # cbz w10, orig
+        0xf9406a6a,   # ldr x10, [x19, #0xd0]     the parent: the A or Y prompt (the pick-up prompt's pill has the same name)
+        0xb400038a,   # cbz x10, orig
+        0xb940c14a,   # ldr w10, [x10, #0xc0]
+        0x52844990,   # mov w16, #0x224c
+        0x72a17b30,   # movk w16, #0x0bd9, lsl #16
+        0x6b10015f,   # cmp w10, w16              the A prompt
+        0x54000121,   # b.ne 1f
+        0xb940c26a,   # ldr w10, [x19, #0xc0]     the pane's name hash
+        0x5299a6b0,   # mov w16, #0xcd35
+        0x72aee110,   # movk w16, #0x7708, lsl #16
+        0x6b10015f,   # cmp w10, w16              its pill
+        0x54000241,   # b.ne orig
+        0xf9406a6a,   # ldr x10, [x19, #0xd0]
+        0x39444d48,   # ldrb w8, [x10, #0x113]    drawn with the prompt's alpha (its own is 0: the layout keeps it transparent)
+        0x1400000a,   # b 2f
+        0x529c8c90,   # 1: mov w16, #0xe464
+        0x72a02930,   # movk w16, #0x0149, lsl #16
+        0x6b10015f,   # cmp w10, w16              the Y prompt
+        0x54000161,   # b.ne orig
+        0xb940c26a,   # ldr w10, [x19, #0xc0]
+        0x529126d0,   # mov w16, #0x8936
+        0x72be9c10,   # movk w16, #0xf4e0, lsl #16
+        0x6b10015f,   # cmp w10, w16              its pill (drawn by the layout: a soft glow)
+        0x540000c1,   # b.ne orig
+        0x5280080a,   # 2: mov w10, #64           the height of the game's bubble (52 is less), the ends 32 wide (read by its next layout)
+        0x7901e66a,   # strh w10, [x19, #0xf2]
+        0x52a8400a,   # mov w10, #0x42000000      32.0
+        0xb901866a,   # str w10, [x19, #0x184]    left frame
+        0xb9018a6a,   # str w10, [x19, #0x188]    right frame
+        0x39044e68,   # orig: strb w8, [x19, #0x113]
+    ]),
+    'pad_bubble2': (0x1e82dfc, 'the same, on another update path', [
+        'adrp16',
+        0xb940b20a,   # ldr w10, [x16, #0xb0]     1 when the prompts follow an Xbox controller's layout (loader.c)
+        0x340003ca,   # cbz w10, orig
+        0xf9406a6a,   # ldr x10, [x19, #0xd0]     the parent: the A or Y prompt (the pick-up prompt's pill has the same name)
+        0xb400038a,   # cbz x10, orig
+        0xb940c14a,   # ldr w10, [x10, #0xc0]
+        0x52844990,   # mov w16, #0x224c
+        0x72a17b30,   # movk w16, #0x0bd9, lsl #16
+        0x6b10015f,   # cmp w10, w16              the A prompt
+        0x54000121,   # b.ne 1f
+        0xb940c26a,   # ldr w10, [x19, #0xc0]     the pane's name hash
+        0x5299a6b0,   # mov w16, #0xcd35
+        0x72aee110,   # movk w16, #0x7708, lsl #16
+        0x6b10015f,   # cmp w10, w16              its pill
+        0x54000241,   # b.ne orig
+        0xf9406a6a,   # ldr x10, [x19, #0xd0]
+        0x39444d48,   # ldrb w8, [x10, #0x113]    drawn with the prompt's alpha (its own is 0: the layout keeps it transparent)
+        0x1400000a,   # b 2f
+        0x529c8c90,   # 1: mov w16, #0xe464
+        0x72a02930,   # movk w16, #0x0149, lsl #16
+        0x6b10015f,   # cmp w10, w16              the Y prompt
+        0x54000161,   # b.ne orig
+        0xb940c26a,   # ldr w10, [x19, #0xc0]
+        0x529126d0,   # mov w16, #0x8936
+        0x72be9c10,   # movk w16, #0xf4e0, lsl #16
+        0x6b10015f,   # cmp w10, w16              its pill (drawn by the layout: a soft glow)
+        0x540000c1,   # b.ne orig
+        0x5280080a,   # 2: mov w10, #64           the height of the game's bubble (52 is less), the ends 32 wide (read by its next layout)
+        0x7901e66a,   # strh w10, [x19, #0xf2]
+        0x52a8400a,   # mov w10, #0x42000000      32.0
+        0xb901866a,   # str w10, [x19, #0x184]    left frame
+        0xb9018a6a,   # str w10, [x19, #0x188]    right frame
+        0x39044e68,   # orig: strb w8, [x19, #0x113]
+    ]),
+    'pad_bubble3': (0x1e82eac, 'the same, on another update path', [
+        'adrp16',
+        0xb940b20a,   # ldr w10, [x16, #0xb0]     1 when the prompts follow an Xbox controller's layout (loader.c)
+        0x340003ca,   # cbz w10, orig
+        0xf9406a6a,   # ldr x10, [x19, #0xd0]     the parent: the A or Y prompt (the pick-up prompt's pill has the same name)
+        0xb400038a,   # cbz x10, orig
+        0xb940c14a,   # ldr w10, [x10, #0xc0]
+        0x52844990,   # mov w16, #0x224c
+        0x72a17b30,   # movk w16, #0x0bd9, lsl #16
+        0x6b10015f,   # cmp w10, w16              the A prompt
+        0x54000121,   # b.ne 1f
+        0xb940c26a,   # ldr w10, [x19, #0xc0]     the pane's name hash
+        0x5299a6b0,   # mov w16, #0xcd35
+        0x72aee110,   # movk w16, #0x7708, lsl #16
+        0x6b10015f,   # cmp w10, w16              its pill
+        0x54000241,   # b.ne orig
+        0xf9406a6a,   # ldr x10, [x19, #0xd0]
+        0x39444d48,   # ldrb w8, [x10, #0x113]    drawn with the prompt's alpha (its own is 0: the layout keeps it transparent)
+        0x1400000a,   # b 2f
+        0x529c8c90,   # 1: mov w16, #0xe464
+        0x72a02930,   # movk w16, #0x0149, lsl #16
+        0x6b10015f,   # cmp w10, w16              the Y prompt
+        0x54000161,   # b.ne orig
+        0xb940c26a,   # ldr w10, [x19, #0xc0]
+        0x529126d0,   # mov w16, #0x8936
+        0x72be9c10,   # movk w16, #0xf4e0, lsl #16
+        0x6b10015f,   # cmp w10, w16              its pill (drawn by the layout: a soft glow)
+        0x540000c1,   # b.ne orig
+        0x5280080a,   # 2: mov w10, #64           the height of the game's bubble (52 is less), the ends 32 wide (read by its next layout)
+        0x7901e66a,   # strh w10, [x19, #0xf2]
+        0x52a8400a,   # mov w10, #0x42000000      32.0
+        0xb901866a,   # str w10, [x19, #0x184]    left frame
+        0xb9018a6a,   # str w10, [x19, #0x188]    right frame
+        0x39044e68,   # orig: strb w8, [x19, #0x113]
+    ]),
+    'pad_bubble4': (0x1e830ac, 'the same, on another update path', [
+        'adrp16',
+        0xb940b20a,   # ldr w10, [x16, #0xb0]     1 when the prompts follow an Xbox controller's layout (loader.c)
+        0x340003ca,   # cbz w10, orig
+        0xf9406a6a,   # ldr x10, [x19, #0xd0]     the parent: the A or Y prompt (the pick-up prompt's pill has the same name)
+        0xb400038a,   # cbz x10, orig
+        0xb940c14a,   # ldr w10, [x10, #0xc0]
+        0x52844990,   # mov w16, #0x224c
+        0x72a17b30,   # movk w16, #0x0bd9, lsl #16
+        0x6b10015f,   # cmp w10, w16              the A prompt
+        0x54000121,   # b.ne 1f
+        0xb940c26a,   # ldr w10, [x19, #0xc0]     the pane's name hash
+        0x5299a6b0,   # mov w16, #0xcd35
+        0x72aee110,   # movk w16, #0x7708, lsl #16
+        0x6b10015f,   # cmp w10, w16              its pill
+        0x54000241,   # b.ne orig
+        0xf9406a6a,   # ldr x10, [x19, #0xd0]
+        0x39444d48,   # ldrb w8, [x10, #0x113]    drawn with the prompt's alpha (its own is 0: the layout keeps it transparent)
+        0x1400000a,   # b 2f
+        0x529c8c90,   # 1: mov w16, #0xe464
+        0x72a02930,   # movk w16, #0x0149, lsl #16
+        0x6b10015f,   # cmp w10, w16              the Y prompt
+        0x54000161,   # b.ne orig
+        0xb940c26a,   # ldr w10, [x19, #0xc0]
+        0x529126d0,   # mov w16, #0x8936
+        0x72be9c10,   # movk w16, #0xf4e0, lsl #16
+        0x6b10015f,   # cmp w10, w16              its pill (drawn by the layout: a soft glow)
+        0x540000c1,   # b.ne orig
+        0x5280080a,   # 2: mov w10, #64           the height of the game's bubble (52 is less), the ends 32 wide (read by its next layout)
+        0x7901e66a,   # strh w10, [x19, #0xf2]
+        0x52a8400a,   # mov w10, #0x42000000      32.0
+        0xb901866a,   # str w10, [x19, #0x184]    left frame
+        0xb9018a6a,   # str w10, [x19, #0x188]    right frame
+        0x39044e68,   # orig: strb w8, [x19, #0x113]
+    ]),
+    # The same pills' width, as their window is laid out (main+0x1e905f8 loads the pane's width, from which the window places its ends and stretches its middle): the game's bubble
+    # is 12 longer than the pill it sizes with it (the A prompt's 180 with the pill's 168), so the width read there grows by 12, which keeps the pill's pop animation (it grows from
+    # less), its centre and its length for every text. The pane's own width is not changed, since what places the pane uses it
+    'pad_width': (0x1e905f8, 'the in-world prompt\'s pill windows are as long as the game\'s bubble for an Xbox controller\'s layout', [
+        'adrp16',
+        0xb940b210,   # ldr w16, [x16, #0xb0]     1 when the prompts follow an Xbox controller's layout (loader.c)
+        0x79c1e00d,   # ldrsh w13, [x0, #0xf0]    the original instruction: the window's width
+        0x34000310,   # cbz w16, back
+        0xf9406810,   # ldr x16, [x0, #0xd0]      the parent: the A or Y prompt
+        0xb40002d0,   # cbz x16, back
+        0xb940c210,   # ldr w16, [x16, #0xc0]
+        0x52844991,   # mov w17, #0x224c
+        0x72a17b31,   # movk w17, #0x0bd9, lsl #16
+        0x6b11021f,   # cmp w16, w17              the A prompt
+        0x540000e1,   # b.ne 1f
+        0xb940c010,   # ldr w16, [x0, #0xc0]      the pane's name hash
+        0x5299a6b1,   # mov w17, #0xcd35
+        0x72aee111,   # movk w17, #0x7708, lsl #16
+        0x6b11021f,   # cmp w16, w17              its pill
+        0x54000160,   # b.eq 3f
+        0x1400000b,   # b back
+        0x529c8c91,   # 1: mov w17, #0xe464
+        0x72a02931,   # movk w17, #0x0149, lsl #16
+        0x6b11021f,   # cmp w16, w17              the Y prompt
+        0x540000e1,   # b.ne back
+        0xb940c010,   # ldr w16, [x0, #0xc0]
+        0x529126d1,   # mov w17, #0x8936
+        0x72be9c11,   # movk w17, #0xf4e0, lsl #16
+        0x6b11021f,   # cmp w16, w17              its pill
+        0x54000041,   # b.ne back
+        0x110031ad,   # 3: add w13, w13, #12      the game's bubble is 12 longer than the pill the game sizes with it (x16 and x17 are written before they are read in this function)
+    ]),
 }
 _get = [   # at a width getter's ret: w0 x the output width / 1920, rounded up to even
     'adrp9',
@@ -233,7 +514,7 @@ def _bl(frm, to):
     off = to - frm; assert -(1 << 27) <= off < (1 << 27) and off % 4 == 0
     return 0x94000000 | ((off >> 2) & 0x3FFFFFF)
 
-_orig = {'anchor': '2108221e', 'rect_w': '4a00381e', 'rect_x': '0109211e', 'rt': '371040b9', 'win': '210040f9', 'cam': '08604539', 'album_on': 'f30300aa', 'album_off': 'e003132a', 'hud': '091940f9'}   # each site's original instruction
+_orig = {'anchor': '2108221e', 'rect_w': '4a00381e', 'rect_x': '0109211e', 'rt': '371040b9', 'win': '210040f9', 'cam': '08604539', 'album_on': 'f30300aa', 'album_off': 'e003132a', 'hud': '091940f9', 'pad_bubble': '684e0439', 'pad_bubble2': '684e0439', 'pad_bubble3': '684e0439', 'pad_bubble4': '684e0439', 'pad_width': '0de0c179'}   # each site's original instruction
 
 def _emit(ctx, words):
     for w in words:
@@ -246,7 +527,8 @@ def screen_shape_v327680(ctx):
     for name, (site, why, words) in _stubs.items():
         ctx.site(site, _orig[name])
         start = ctx.here(); _emit(ctx, words); ctx.emit(B(ctx.here(), site + 4))
-        ctx.put(site, [B(site, start)], 'screen shape: ' + why + f' (DM_SCREEN_ASPECT, state +{_wide_w:#x} / +{_wide_a:#x})')
+        tag = 'button layout: ' if name.startswith('pad_') else 'screen shape: '
+        ctx.put(site, [B(site, start)], tag + why + (' (DM_PAD_MAP=label, state +0xb0)' if name.startswith('pad_') else f' (DM_SCREEN_ASPECT, state +{_wide_w:#x} / +{_wide_a:#x})'))
     for site, n in _float_sites:
         orig = (0xd2800000 if site == 0x1018c08 else 0x52800000) | 0x44f0 << 5 | 1 << 21 | n   # mov wN / xN, #0x44f00000
         ctx.site(site, orig.to_bytes(4, 'little').hex())

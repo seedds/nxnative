@@ -1,0 +1,36 @@
+# Button icon sets for dm/tools/button_icons.py (columns: set, texture, edit, place in level 0, value; the tool's header lists the sets and edits). Found on v327680 (Ver. 1.0.4), the user's
+# dump: the textures are named by the hash of their storage, so another version's may differ (the tool stops and names the missing ones). The UI sheet (1024x1024 BC7) holds every button
+# icon the prompts and the HUD draw; the English title picture holds "PRESS (A) BUTTON" (other languages are other pictures, not edited); a 4096x2048 BC7 UI sheet holds the in-world prompt's cloud with the bubble's left end on it: its right lobe becomes its left one mirrored, so that the Xbox layout (patches.py) draws the cloud and the bubble apart
+pad_label	1024x1024_77_1_5a8d4f2110601c5e	face	249,345,315,411	A
+pad_label	1024x1024_77_1_5a8d4f2110601c5e	face	937,417,1003,483	B
+pad_label	1024x1024_77_1_5a8d4f2110601c5e	face	713,605,779,671	X
+pad_label	1024x1024_77_1_5a8d4f2110601c5e	face	9,609,75,675	Y
+pad_label	1024x1024_77_1_5a8d4f2110601c5e	label	271,520,341,580	LB
+pad_label	1024x1024_77_1_5a8d4f2110601c5e	label	535,524,605,584	RB
+pad_label	1024x1024_77_1_5a8d4f2110601c5e	label	95,612,165,672	LT
+pad_label	1024x1024_77_1_5a8d4f2110601c5e	label	183,612,253,672	RT
+pad_label	1024x1024_77_1_5a8d4f2110601c5e	menu	9,521,75,587
+pad_label	1024x1024_77_1_5a8d4f2110601c5e	view	777,517,843,583
+pad_label	1024x1024_77_1_5a8d4f2110601c5e	transpose	0,426,84,506
+pad_label	1024x1024_77_1_5a8d4f2110601c5e	transpose	88,426,170,506
+pad_label	1024x1024_77_1_5a8d4f2110601c5e	transpose	178,426,260,506
+pad_label	1024x1024_77_1_5a8d4f2110601c5e	transpose	504,420,588,504
+pad_label	1024x1024_77_1_5a8d4f2110601c5e	transpose	594,424,674,506
+pad_label	1024x1024_77_1_5a8d4f2110601c5e	transpose	682,424,762,508
+pad_label	1024x1024_77_1_5a8d4f2110601c5e	transpose	798,422,878,504
+pad_label	1024x1024_77_1_edb701f7471684ec	disc	285.5,654.5,23.5	A
+keyboard	1024x1024_77_1_5a8d4f2110601c5e	key	249,345,315,411	J
+keyboard	1024x1024_77_1_5a8d4f2110601c5e	key	937,417,1003,483	K
+keyboard	1024x1024_77_1_5a8d4f2110601c5e	key	713,605,779,671	U
+keyboard	1024x1024_77_1_5a8d4f2110601c5e	key	9,609,75,675	I
+keyboard	1024x1024_77_1_5a8d4f2110601c5e	label	271,520,341,580	Q
+keyboard	1024x1024_77_1_5a8d4f2110601c5e	label	535,524,605,584	E
+keyboard	1024x1024_77_1_5a8d4f2110601c5e	label	95,612,165,672	Z
+keyboard	1024x1024_77_1_5a8d4f2110601c5e	label	183,612,253,672	C
+keyboard	1024x1024_77_1_5a8d4f2110601c5e	return	9,521,75,587
+keyboard	1024x1024_77_1_5a8d4f2110601c5e	label	777,517,843,583	Tab
+keyboard	1024x1024_77_1_5a8d4f2110601c5e	label	97,513,163,587	F
+keyboard	1024x1024_77_1_5a8d4f2110601c5e	label	185,513,251,587	G
+keyboard	1024x1024_77_1_edb701f7471684ec	disckey	285.5,654.5,23.5	J
+pad_label	4096x2048_77_1_56e870c25aa4e8b0	mirror	2529,1345,2668,1492	2597.5
+keyboard	4096x2048_77_1_56e870c25aa4e8b0	mirror	2529,1345,2668,1492	2597.5

@@ -82,22 +82,6 @@ static int has_entries(const char *dir) {
     free_names(v, n); return k > 0;
 }
 
-typedef int (*visit_fn)(void *ctx, const char *abs, const char *rel, const struct stat *st);
-// Every entry under abs, depth first, a folder before what it holds, names in byte order: the order that gives the same save the same hash on every device.
-// Finder's .DS_Store is left out (a save folder someone opened in Finder is still the same save), and so are links, which the host never makes in a save
-static int walk(const char *abs, const char *rel, visit_fn fn, void *ctx) {
-    char **v; size_t n; if (names_of(abs, &v, &n)) return -1;
-    int r = 0;
-    for (size_t i = 0; i < n && !r; i++) {
-        if (!strcmp(v[i], ".DS_Store")) continue;
-        char a[PATH_MAX], p[PATH_MAX]; struct stat st;
-        if (snprintf(a, sizeof a, "%s/%s", abs, v[i]) >= (int)sizeof a || snprintf(p, sizeof p, "%s/%s", rel, v[i]) >= (int)sizeof p || lstat(a, &st)) r = -1;
-        else if (S_ISDIR(st.st_mode)) { if (!(r = fn(ctx, a, p, &st))) r = walk(a, p, fn, ctx); }
-        else if (S_ISREG(st.st_mode)) r = fn(ctx, a, p, &st);
-    }
-    free_names(v, n); return r;
-}
-
 static int write_all(int fd, const void *b, size_t n) {
     for (const char *p = b; n; ) { ssize_t k = write(fd, p, n); if (k < 0 && errno == EINTR) continue; if (k <= 0) return -1; p += k; n -= (size_t)k; }
     return 0;
@@ -131,8 +115,7 @@ static void upper_title(const char *title, char *out, size_t n) {   // one spell
 // ---------- packing ----------
 typedef struct { CC_SHA256_CTX sha; FILE *out; ss_meta *m; uint32_t entries; uint8_t buf[CHUNK]; } packer;
 
-static int pack_entry(void *c, const char *abs, const char *rel, const struct stat *st) {
-    packer *k = c;
+static int pack_entry(packer *k, const char *abs, const char *rel, const struct stat *st) {
     char guest[1024]; ssize_t gl = getxattr(abs, GUEST_NAME, guest, sizeof guest, 0, XATTR_NOFOLLOW);
     if (gl < 0) gl = 0;   // ENOATTR: the host name is the guest's
     size_t pl = strlen(rel); int file = S_ISREG(st->st_mode);
@@ -159,12 +142,27 @@ static int pack_entry(void *c, const char *abs, const char *rel, const struct st
     return 0;
 }
 
+// Every entry under abs into k, depth first, a folder before what it holds, names in byte order: the order that gives the same save the same hash on every device.
+// Finder's .DS_Store is left out (a save folder someone opened in Finder is still the same save), and so are links, which the host never makes in a save
+static int walk(const char *abs, const char *rel, packer *k) {
+    char **v; size_t n; if (names_of(abs, &v, &n)) return -1;
+    int r = 0;
+    for (size_t i = 0; i < n && !r; i++) {
+        if (!strcmp(v[i], ".DS_Store")) continue;
+        char a[PATH_MAX], p[PATH_MAX]; struct stat st;
+        if (snprintf(a, sizeof a, "%s/%s", abs, v[i]) >= (int)sizeof a || snprintf(p, sizeof p, "%s/%s", rel, v[i]) >= (int)sizeof p || lstat(a, &st)) r = -1;
+        else if (S_ISDIR(st.st_mode)) { if (!(r = pack_entry(k, a, p, &st))) r = walk(a, p, k); }
+        else if (S_ISREG(st.st_mode)) r = pack_entry(k, a, p, &st);
+    }
+    free_names(v, n); return r;
+}
+
 static int pack_save(const char *save, packer *k) {
     CC_SHA256_Init(&k->sha);
     for (int i = 0; i < 2; i++) {
         char dir[PATH_MAX]; folder_path(save, i, dir, sizeof dir);
         int h = has_entries(dir);
-        if (h < 0 || (h && walk(dir, FOLDERS[i], pack_entry, k))) return -1;
+        if (h < 0 || (h && walk(dir, FOLDERS[i], k))) return -1;
     }
     uint8_t d[CC_SHA256_DIGEST_LENGTH]; CC_SHA256_Final(d, &k->sha); hex(d, k->m->hash);
     if (!k->m->files) k->m->hash[0] = 0;   // no save: no hash, so that "nothing here" compares as nothing

@@ -81,11 +81,13 @@ flowchart LR
 
 How sharp a texture stays when you look along it rather than at it: the ground ahead of you, a wall seen edge on, a road running to the horizon. The games were built for a handheld and nearly all ask for none, so those surfaces blur a short way from the camera.
 
-**Off**, the default, keeps what the game asked for. **2x** to **16x** raise every texture to at least that, leaving a game that already asks for more alone.
+**Off**, the default, keeps what the game asked for. **2x** to **16x** raise a texture to at least that, leaving a game that already asks for more alone. It works in all three graphics layers (NVN, Vulkan and OpenGL).
 
 - **When to change it:** any game with ground or walls stretching away from the camera. It works in games that have no render scale.
-- **Cost:** a little more GPU time where it applies. Nothing is allocated and no render target changes, so memory is unaffected.
-- **Note:** only mipmapped colour textures are affected. Shadow maps and the depth pyramids a game uses to decide what is visible keep what the game asked for, because filtering those along an angle changes what they mean rather than how they look. **Trilinear filtering** below turns mip blending on for a texture whose mips the game picked nearest.
+- **Which textures:** a 2D texture, or a 2D array, with more than one mip level, read through a linear sampler with mips and the regular level range, or one the game already gave anisotropy. A one-level texture, or a sampler clamped to the first level, keeps the game's value: raised, a one-level texture turned every silhouette in Breath of the Wild jagged, because its anti-aliasing pass reads one that way. Shadow maps and the depth pyramids a game uses to decide what is visible keep what the game asked for too, because filtering those along an angle changes what they mean rather than how they look (a raised shadow sampler drew a line along a shadow cascade join on open ground, reported in PR #335). **Trilinear filtering** below turns mip blending on for a texture whose mips the game picked nearest.
+- **Note:** the choice is made for each texture bound with its sampler. A game that binds its textures apart from their samplers sees no change from this setting.
+- **Cost:** little on a Mac (M5 Max, GPU p50 off → on: Breath of the Wild 6.60 → 6.59 ms, Ocarina of Time 13.67 → 13.77 ms); an iPhone is not measured. Nothing is allocated and no render target changes, so memory is unaffected.
+- **On the Mac:** choose it under **Anisotropic filtering** in the [settings window](#the-mac-settings-window)'s Advanced settings, or set `DM_ANISO=16` in its `env.txt` (off by default).
 
 ### Trilinear filtering
 

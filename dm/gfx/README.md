@@ -207,6 +207,7 @@ Comparison and testing:
 | `DM_NVN_BARRIER=game`, `DM_NVN_CUT` | Pass ordering and segment commits: see [docs/agents/04-graphics.md](../../docs/agents/04-graphics.md) section 7 |
 | `DM_PRESENT_HZ=N` | The frequency of presentation pacing (default 60); 0 means no frame limit and is for performance profiling only |
 | `DM_PRESENT_UPSCALE=metalfx` or `off` | How the present scales a picture smaller than its rectangle on the screen: `metalfx` through MetalFX's spatial scaler, `off` (the default) bilinearly. An option on both platforms (the iOS launcher's Upscaling; `env.txt` on the Mac); rendering at the screen's resolution stays the reference for sharpness ([reference](../../docs/reference/rendering.md#the-present-upscales-through-metalfx)) |
+| `DM_ANISO=<2..16>` | Raises the anisotropic filtering of the game's linear samplers with mips and the regular LOD range, and of those it gave anisotropy, to at least that many samples where they read a 2D texture with mip levels, in the NVN, Vulkan and GL layers (`sampler_aniso.h`); `0`, the default, keeps the game's own. The launcher's Anisotropic filtering ([reference](../../docs/reference/rendering.md#anisotropic-filtering-raised-for-the-games-samplers)) |
 
 ## Known limitations
 

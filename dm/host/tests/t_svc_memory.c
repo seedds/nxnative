@@ -527,6 +527,37 @@ static void file_sweep(void) {
     assert(!pages(0, a, 8 * pg));
     guest_file_sweep(); guest_file_sweep();
 }
+// Fix B′ (dm_guest_anon / dm_guest_file_back): with the guest in files, the whole host pages of a range become anonymous with the same bytes, the partial first page stays
+// in the file, and Finalize writes the bytes back to the file and maps it again
+static int share_mode(void *a) {
+    mach_vm_address_t addr = (mach_vm_address_t)a; mach_vm_size_t size = 0; vm_region_extended_info_data_t ei; mach_msg_type_number_t cnt = VM_REGION_EXTENDED_INFO_COUNT; mach_port_t obj;
+    if (mach_vm_region(mach_task_self(), &addr, &size, VM_REGION_EXTENDED_INFO, (vm_region_info_t)&ei, &cnt, &obj) != KERN_SUCCESS) return -1;
+    return ei.share_mode;
+}
+static void anon_pools(void) {
+    if (!g_gf_n) { assert(dm_guest_anon((void *)heap, 1 << 20) == 0); return; }   // anonymous guest: nothing to do
+    size_t pg = (size_t)getpagesize(), n = 4u << 20; assert(!resize(n));
+    uint8_t *h = (uint8_t *)heap; for (size_t i = 0; i < n; i++) h[i] = (uint8_t)(i * 7 + 3);
+    assert(!msync(h, n, MS_SYNC));   // the pattern is in the file too
+    size_t b = dm_guest_anon(h + 4096, n - 4096);   // a 4 KB-aligned pool: the first, partial host page stays a file page
+    assert(b == n - pg);
+    for (size_t i = 0; i < n; i++) assert(h[i] == (uint8_t)(i * 7 + 3));
+    assert(share_mode(h + pg) == SM_PRIVATE && share_mode(h) != SM_PRIVATE);
+    uint64_t ab, am, ak, af; dm_guest_anon_stats(&ab, &am, &ak, &af); assert(ab == n - pg && am >= 1);
+    memset(h + pg, 0x5a, n - pg);
+    struct stat st0; size_t off = (size_t)(h + pg - g_as); int k = (int)(off / g_gf_chunk); assert(!fstat(g_gf_tab[k], &st0));
+    assert(!msync(h + pg, n - pg, MS_SYNC));   // anonymous: nothing reaches the file
+    uint8_t c; assert(pread(g_gf_tab[k], &c, 1, (off_t)(off - (size_t)k * g_gf_chunk)) == 1 && c == (uint8_t)(pg * 7 + 3));
+    dm_guest_file_back(h + 4096, n - 4096);
+    for (size_t i = pg; i < n; i++) assert(h[i] == 0x5a);
+    assert(share_mode(h + pg) != SM_PRIVATE);
+    assert(pread(g_gf_tab[k], &c, 1, (off_t)(off - (size_t)k * g_gf_chunk)) == 1 && c == 0x5a);
+    dm_guest_anon_stats(&ab, &am, &ak, &af); assert(ab == 0 && ak >= 1);
+    // freed without Finalize: guest_release maps the file back first
+    assert(dm_guest_anon(h, n) == n);
+    assert(!resize(0));
+    dm_guest_anon_stats(&ab, &am, &ak, &af); assert(ab == 0 && af >= 1);
+}
 static void heap_regrow(void) {
     assert(!resize(4 * 1024 * 1024));
     memset((void *)(heap + 3 * 1024 * 1024), 0x5a, P);
@@ -610,7 +641,7 @@ int main(int argc, char **argv) {
     if (!getenv("DM_ALIAS_SIZE")) assert(info(I_AliasSize) == SWITCH_ALIAS);   // the Mac's alias region is a Switch's, whatever the profile can give an iPhone; DM_ALIAS_SIZE=<mem_alias> runs these tests on an iPhone's
 #endif
     layout_order();
-    lazy_commit(); alias_lifecycle(); device_shared_refused(); ownership(); module_sources(); module_back_patch(); failures(); release_fallback(); file_rule(); file_sweep(); heap_regrow(); concurrency(); fragmented_queries();
+    lazy_commit(); alias_lifecycle(); device_shared_refused(); ownership(); module_sources(); module_back_patch(); failures(); release_fallback(); file_rule(); file_sweep(); heap_regrow(); anon_pools(); concurrency(); fragmented_queries();
     guest_helper();
     if (!DM_GAME_MEM_MAP_LIMIT) metadata_limit();
 #ifdef TEST_REAL_DIRTY

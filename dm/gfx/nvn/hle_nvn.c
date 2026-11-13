@@ -266,7 +266,7 @@ NVN(nvnMemoryPoolBuilderSetDefaults, void, NVNmemoryPoolBuilder *b) { memset(b, 
 NVN(nvnMemoryPoolBuilderSetDevice, void, NVNmemoryPoolBuilder *b, NVNdevice *d) { ((pool_builder_t *)b)->dev = d; }
 NVN(nvnMemoryPoolBuilderSetStorage, void, NVNmemoryPoolBuilder *b, void *m, size_t n) { ((pool_builder_t *)b)->mem = m; ((pool_builder_t *)b)->size = n; }
 NVN(nvnMemoryPoolBuilderSetFlags, void, NVNmemoryPoolBuilder *b, int f) { ((pool_builder_t *)b)->flags = f; }
-// Pool census (Salt 2026-11-11, notes/2026-11-11-salt-hotset-plan.md): live memory pools and bytes by their flags (virtual pools left out: their storage is another pool's).
+// Pool census: live memory pools and bytes by their flags (virtual pools left out: their storage is another pool's).
 // The CPU-written, GPU-read pools (CPU_UNCACHED or CPU_CACHED, with GPU_UNCACHED or GPU_CACHED) are the ones the CPU keeps rewriting for the GPU (command memory,
 // uniforms, staging): with guest files (DM_GUEST_FILE) they are what the periodic flush writes, and what keeping them anonymous would cost. Counters only, logged with the
 // pool tables line when they change: "[nvn] pool census up to frame N"
@@ -282,21 +282,40 @@ void nvn_pool_census(uint64_t *n, uint64_t *b, uint64_t *cw, uint64_t *cw_peak) 
     *n = *b = *cw = 0; for (int i = 0; i < 0x200; i++) { uint64_t bi = atomic_load(&g_cens_b[i]); *n += atomic_load(&g_cens_n[i]); *b += bi; if (cens_cw(i)) *cw += bi; }
     *cw_peak = atomic_load(&g_cens_cw_peak);
 }
+// Fix B′: with the guest in files (DM_GUEST_FILE), DM_GUEST_FILE_POOL_ANON=1 keeps the write-combined pools the GPU reads
+// (CPU_UNCACHED with GPU_UNCACHED or GPU_CACHED; not shader code, not virtual) in anonymous memory, so the system's periodic flush does not write what the CPU rewrites every
+// frame. CPU_CACHED pools are left in the files: Ocarina of Time keeps its assets there (the census: 3.6 GB of 0x24 against 0.24 GB of CPU_UNCACHED pools).
+// DM_GUEST_FILE_POOL_ANON_MAX (default 256M): larger pools stay in the files. 0/1 only: the choice is made at Initialize, per pool. hle_svc.c does the mapping
+__attribute__((weak)) size_t dm_guest_anon(void *p, size_t n) { (void)p; (void)n; return 0; }   // tests that link no host have none
+__attribute__((weak)) void dm_guest_file_back(void *p, size_t n) { (void)p; (void)n; }
+__attribute__((weak)) void dm_guest_anon_stats(uint64_t *b, uint64_t *m, uint64_t *k, uint64_t *f) { *b = *m = *k = *f = 0; }
+static int pool_anon_rule(int f) {
+    return (f & NVN_MEMORY_POOL_FLAGS_CPU_UNCACHED) && (f & (NVN_MEMORY_POOL_FLAGS_GPU_UNCACHED | NVN_MEMORY_POOL_FLAGS_GPU_CACHED)) && !(f & (NVN_MEMORY_POOL_FLAGS_SHADER_CODE | NVN_MEMORY_POOL_FLAGS_VIRTUAL));
+}
+static int pool_anon_on(void) { static int m = -1; if (m < 0) { const char *e = getenv("DM_GUEST_FILE_POOL_ANON"); m = e && atoi(e) > 0; } return m; }
+static uint64_t pool_anon_max(void) { static uint64_t v; if (!v) { const char *e = getenv("DM_GUEST_FILE_POOL_ANON_MAX"); char *end = NULL; uint64_t x = e && *e ? strtoull(e, &end, 10) : 256;
+        if (end && (*end == 'G' || *end == 'g')) x <<= 30; else if (end && (*end == 'K' || *end == 'k')) x <<= 10; else x <<= 20; v = x ? x : 1; } return v; }
+static _Atomic uint64_t g_anon_skipped;
 static void cens_log(unsigned long long frame) {
-    static uint64_t pb, pn; uint64_t n, b, cw, pk; nvn_pool_census(&n, &b, &cw, &pk); if (b == pb && n == pn) return; pb = b; pn = n;
+    static uint64_t pb, pn, pa; uint64_t n, b, cw, pk, a0, a1, a2, a3; nvn_pool_census(&n, &b, &cw, &pk); dm_guest_anon_stats(&a0, &a1, &a2, &a3); if (b == pb && n == pn && a0 == pa) return; pb = b; pn = n; pa = a0;
     char t[1200]; size_t o = 0; int used[10], nu = 0; const double MB = 1048576.0;
     for (int r = 0; r < 10; r++) { int best = -1; for (int i = 0; i < 0x200; i++) { int u = 0; for (int j = 0; j < nu; j++) u |= used[j] == i; uint64_t bi = atomic_load(&g_cens_b[i]);
             if (!u && bi && (best < 0 || bi > atomic_load(&g_cens_b[best]))) best = i; } if (best < 0) break; used[nu++] = best; }
     for (int j = 0; j < nu && o < sizeof t - 80; j++) o += snprintf(t + o, sizeof t - o, " flags %#x%s: %llu pools %.1f MB;", used[j], cens_cw(used[j]) ? " (CPU-written)" : "",
         (unsigned long long)atomic_load(&g_cens_n[used[j]]), atomic_load(&g_cens_b[used[j]]) / MB);
-    LOG("[nvn] pool census up to frame %llu: %llu pools, %.1f MB; CPU-written GPU-read %.1f MB (peak %.1f); largest:%s", frame, (unsigned long long)n, b / MB, cw / MB, pk / MB, t);
+    uint64_t ab, am, ak, af; dm_guest_anon_stats(&ab, &am, &ak, &af); char an[200] = "";
+    if (am || atomic_load(&g_anon_skipped)) snprintf(an, sizeof an, " anonymous (DM_GUEST_FILE_POOL_ANON) %.1f MB now, %llu made, %llu back at Finalize, %llu freed without it, %llu skipped over the cap;", ab / MB, (unsigned long long)am, (unsigned long long)ak, (unsigned long long)af, (unsigned long long)atomic_load(&g_anon_skipped));
+    LOG("[nvn] pool census up to frame %llu: %llu pools, %.1f MB; CPU-written GPU-read %.1f MB (peak %.1f);%s largest:%s", frame, (unsigned long long)n, b / MB, cw / MB, pk / MB, an, t);
 }
 static uint8_t *vpool_reserve(pool_t *o); static void vpool_release(pool_t *o); static void vpool_taken(const pool_t *o);   // sparse virtual pools, see MapVirtual
 NVN(nvnMemoryPoolInitialize, NVNboolean, NVNmemoryPool *p, const NVNmemoryPoolBuilder *b) {
     const pool_builder_t *s = (const pool_builder_t *)b; pool_t *o = (pool_t *)p;
     o->magic = MAGIC('P', 'O', 'O', 'L'); o->flags = s->flags; o->mem = s->mem; o->size = s->size; o->vp = NULL; o->vmode = 0;
     if (!o->mem && (o->flags & 0x200)) { uint8_t *vr = vpool_reserve(o); if (vr) o->mem = vr; }   // a virtual pool's own address range until its first mapping decides (see MapVirtual)
-    else if (o->mem) { mtl_pool_add(o->mem, o->size); nvn_dirty_add_range(o->mem, o->size); }
+    else if (o->mem) {
+        if (pool_anon_on() && pool_anon_rule(o->flags)) { if (o->size <= pool_anon_max()) dm_guest_anon(o->mem, o->size); else atomic_fetch_add(&g_anon_skipped, 1); }   // before the no-copy buffer wraps it
+        mtl_pool_add(o->mem, o->size); nvn_dirty_add_range(o->mem, o->size);
+    }
     if (o->mem) cens_add(o->flags, o->size, 1);
     if (o->mem && !(o->flags & 0x200)) dm_device_share(o->mem, o->size, 1);   // the GPU maps the storage: the host refuses to unmap it until Finalize, as Horizon does (hle_svc.c)
     if (!o->mem && !(o->flags & 0x200)) LOG("[RED] MemoryPoolInitialize: non-virtual pool has no storage flags=%#x size=%#llx", o->flags, o->size);
@@ -312,6 +331,7 @@ NVN(nvnMemoryPoolFinalize, void, NVNmemoryPool *p) {
     if (((pool_t *)p)->flags & 0x200 && ((pool_t *)p)->vp) vpool_release((pool_t *)p);
     if (((pool_t *)p)->mem && !(((pool_t *)p)->flags & 0x200)) {   // A virtual pool's storage is borrowed from a physical pool; do not unregister it
  nvn_dirty_remove_range(((pool_t *)p)->mem); mtl_pool_del(((pool_t *)p)->mem); mtl_sp_phys_gone(((pool_t *)p)->mem, ((pool_t *)p)->size); fl_drop(((pool_t *)p)->mem, ((pool_t *)p)->size);
+ if (pool_anon_on()) dm_guest_file_back(((pool_t *)p)->mem, ((pool_t *)p)->size);   // after mtl_pool_del: the GPU's buffer keeps the old pages until it goes
  dm_device_share(((pool_t *)p)->mem, ((pool_t *)p)->size, 0); } }
 static void ft_flush(const uint8_t *a, uint64_t n);
 NVN(nvnMemoryPoolFlushMappedRange, void, const NVNmemoryPool *p, ptrdiff_t off, size_t n) {   // see ft_add and nvn_flushed

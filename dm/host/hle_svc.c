@@ -13,6 +13,7 @@
 #include <time.h>
 #include <stdatomic.h>
 #include <mach/mach.h>
+#include <mach/mach_vm.h>
 #include <TargetConditionals.h>
 #include <CoreFoundation/CoreFoundation.h>   // the volume's free space with what the system can purge (guest_file_free_important)
 #if TARGET_OS_IPHONE
@@ -503,8 +504,63 @@ static void alias_query(uint64_t addr, uint64_t *base, uint64_t *size, int *mapp
 // bytes, so the call returns 0 and alias_initialize zeroes what does not read 0 when they are mapped again
 // alias: the range lies in the alias region, where the game maps and unmaps the same ranges every frame (Zelda: about 0.5 GB a second): punching those at once would make every page fault
 // in again from a hole; they are only marked (g_alias_rel), and guest_file_sweep punches those still given back after a whole sweep interval. The heap's are punched at once
+// Fix B′ (DM_GUEST_FILE_POOL_ANON, hle_nvn.c): with the guest in files, the memory the CPU rewrites for the GPU every frame (write-combined
+// NVN pools) is written to its file by the system's periodic flush, a stall every ~30 s and steady SSD writes. dm_guest_anon gives the whole host pages of such a range
+// anonymous memory with the same bytes, in one step (copied into a fresh allocation, then mach_vm_remap over the range with VM_FLAGS_OVERWRITE: the range is never unmapped);
+// partial pages at either end stay file pages. MapMemory copies bytes, so no other guest address shares these file pages. dm_guest_file_back writes the bytes back to the
+// file and maps the file over the range again (pool Finalize: memory the game reuses is cold again); guest_release does the same for a range freed without Finalize.
+// A write by another thread between the copy and the remap would be lost: the game hands the storage to MemoryPoolInitialize and does not write it at the same time
+typedef struct { uintptr_t lo, hi; } gf_anon_t;
+enum { GF_ANON_MAX = 8192 };
+static gf_anon_t g_gfa[GF_ANON_MAX]; static int g_gfa_n; static pthread_mutex_t g_gfa_lock = PTHREAD_MUTEX_INITIALIZER;
+static _Atomic uint64_t g_gfa_bytes, g_gfa_made, g_gfa_back, g_gfa_freed;
+void dm_guest_anon_stats(uint64_t *bytes, uint64_t *made, uint64_t *back, uint64_t *freed) { *bytes = g_gfa_bytes; *made = g_gfa_made; *back = g_gfa_back; *freed = g_gfa_freed; }
+size_t dm_guest_anon(void *p, size_t n) {
+    if (!g_gf_n || !n) return 0;
+    uintptr_t pg = (uintptr_t)getpagesize(), lo = ((uintptr_t)p + pg - 1) & ~(pg - 1), hi = ((uintptr_t)p + n) & ~(pg - 1);
+    if (hi <= lo || !dm_guest_as_contains(lo) || !dm_guest_as_contains(hi - 1)) return 0;
+    size_t len = hi - lo; task_t t = mach_task_self(); mach_vm_address_t tmp = 0, dst = lo; vm_prot_t cur, max;
+    pthread_mutex_lock(&g_gfa_lock);
+    if (g_gfa_n == GF_ANON_MAX) { pthread_mutex_unlock(&g_gfa_lock); static _Atomic int nred; if (!atomic_fetch_add(&nred, 1)) LOG("[RED] [mem] guest file: anonymous pool table full (%d), pool left in the file", GF_ANON_MAX); return 0; }
+    if (mach_vm_allocate(t, &tmp, len, VM_FLAGS_ANYWHERE) != KERN_SUCCESS) { pthread_mutex_unlock(&g_gfa_lock); return 0; }
+    memcpy((void *)tmp, (void *)lo, len);
+    kern_return_t kr = mach_vm_remap(t, &dst, len, 0, VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE, t, tmp, FALSE, &cur, &max, VM_INHERIT_COPY);
+    mach_vm_deallocate(t, tmp, len);
+    if (kr != KERN_SUCCESS || dst != lo) {
+        pthread_mutex_unlock(&g_gfa_lock);
+        static _Atomic int nred; if (atomic_fetch_add(&nred, 1) < 4) LOG("[RED] [mem] guest file: pool %#lx+%#zx not made anonymous (mach_vm_remap %d)", (unsigned long)lo, len, kr);
+        return 0;
+    }
+    g_gfa[g_gfa_n++] = (gf_anon_t){lo, hi}; atomic_fetch_add(&g_gfa_bytes, len); atomic_fetch_add(&g_gfa_made, 1);
+    pthread_mutex_unlock(&g_gfa_lock);
+    return len;
+}
+// The file over [lo, hi) again, a file at a time; copy: write the range's bytes to the file first
+static void gfa_put_back(uintptr_t lo, uintptr_t hi, int copy) {
+    for (uintptr_t a = lo; a < hi;) {
+        size_t off = a - (uintptr_t)g_as; int k = (int)(off / g_gf_chunk); if (k >= g_gf_n) k = g_gf_n - 1;
+        size_t foff = off - (size_t)k * g_gf_chunk, fsz = k == g_gf_n - 1 ? g_reserve - (size_t)k * g_gf_chunk : g_gf_chunk, len = hi - a < fsz - foff ? hi - a : fsz - foff;
+        for (size_t d = 0; copy && d < len;) { ssize_t w = pwrite(g_gf_tab[k], (void *)(a + d), len - d, (off_t)(foff + d)); if (w <= 0) { if (errno == EINTR) continue; die("guest file: pool write back %#lx errno=%d", (unsigned long)a, errno); } d += (size_t)w; }
+        if (mmap((void *)a, len, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED, g_gf_tab[k], (off_t)foff) == MAP_FAILED) die("guest file: map file %d over %#lx+%#zx again errno=%d", k, (unsigned long)a, len, errno);
+        a += len;
+    }
+}
+static void gfa_drop(uintptr_t lo, uintptr_t hi, int finalize) {   // every anonymous range overlapping [lo, hi) back to its file
+    if (!g_gfa_n) return;
+    pthread_mutex_lock(&g_gfa_lock);
+    for (int i = 0; i < g_gfa_n;) {
+        gf_anon_t r = g_gfa[i];
+        if (r.hi <= lo || r.lo >= hi) { i++; continue; }
+        gfa_put_back(r.lo, r.hi, 1); atomic_fetch_sub(&g_gfa_bytes, r.hi - r.lo); atomic_fetch_add(finalize ? &g_gfa_back : &g_gfa_freed, 1);
+        if (!finalize) { static _Atomic int nred; if (atomic_fetch_add(&nred, 1) < 4) LOG("[RED] [mem] guest file: anonymous pool %#lx+%#lx freed without MemoryPoolFinalize; mapped to its file again", (unsigned long)r.lo, (unsigned long)(r.hi - r.lo)); }
+        g_gfa[i] = g_gfa[--g_gfa_n];
+    }
+    pthread_mutex_unlock(&g_gfa_lock);
+}
+void dm_guest_file_back(void *p, size_t n) { if (g_gf_n) gfa_drop((uintptr_t)p, (uintptr_t)p + n, 1); }
 static int guest_release(uintptr_t lo, uintptr_t hi, int alias) {
     if (g_gf_n) {
+        gfa_drop(lo, hi, 0);   // an anonymous pool range (DM_GUEST_FILE_POOL_ANON) goes back to its file first, so the release below leaves file pages
         if (mprotect((void *)lo, hi - lo, PROT_NONE)) die("guest_release mprotect %#lx+%#lx errno=%d", (unsigned long)lo, (unsigned long)(hi - lo), errno);
         if (g_gf_punch && !alias) guest_file_punch(lo, hi);
         else if (g_gf_punch) { size_t pg = (size_t)getpagesize(); for (uint64_t h = (lo - (uintptr_t)g_alias) / pg, e = (hi - (uintptr_t)g_alias) / pg; h < e; h++) g_alias_rel[h >> 6] |= UINT64_C(1) << (h & 63); }

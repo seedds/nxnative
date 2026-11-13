@@ -56,21 +56,37 @@ TWO = BIG_TEXT and MOD.text_end > 0x8000000 - 0x10000
 BACK_MIN = 0   # TWO: BACK_OFF (set below) less the reach, plus the margin
 if TWO:
     BACK_MIN = ((((len(MOD.image) + bss + 0x3FFF) & ~0x3FFF) + 0x8000 + 0xFFFF) & ~0xFFFF) - 0x8000000 + 0x100000
-    assert BACK_MIN < 0x8000000 - 0x200000, f'no split reaches: the back patch area reaches no site below {BACK_MIN:#x}, too close to the front area\'s reach'
-    FRONT = int(os.environ.get('DM_PATCH_FRONT', '0'), 0) or min(0x1000000, (0x8000000 - 0x100000 - BACK_MIN) & ~0xFFFF)
+    if BACK_MIN >= 0x8000000 - 0x200000:
+        # No split reaches both areas' sites: the band between the front area's reach and the back area's is served by
+        # 4-byte relays in the inter-segment alignment gaps (put_branch), and the sites no relay slot reaches become far
+        # jumps (S2Arm's brk trick, below). The first pass measures the stubs; DM_PATCH_FRONT reruns with the size, then
+        # SPLIT rises to what the front truly reaches (the band-tightening pass below)
+        print(f'{NAME}: no split reaches (BACK_MIN {BACK_MIN:#x}): band sites go through gap relays', flush=True)
+        FRONT = int(os.environ.get('DM_PATCH_FRONT', '0'), 0) or 0x100000
+        BACK_MIN = 0x8000000 - 0x100000   # sites above this reach the back area directly; below it, through a relay
+    else:
+        FRONT = int(os.environ.get('DM_PATCH_FRONT', '0'), 0) or min(0x1000000, (0x8000000 - 0x100000 - BACK_MIN) & ~0xFFFF)
 elif BIG_TEXT: FRONT = int(os.environ.get('DM_PATCH_FRONT', '0'), 0) or (0x8000000 - 0x10000 - MOD.text_end) & ~0xFFFF
 SPLIT = max(0x8000000 - FRONT - 0x100000, BACK_MIN) if TWO else None
+if TWO and os.environ.get('DM_SPLIT'): SPLIT = int(os.environ['DM_SPLIT'], 0)   # tuning the boundary (the front area's stubs sit just below the base, so its true reach is higher than the formula's)
+if TWO and BACK_MIN >= 0x8000000 - 0x200000 and not os.environ.get('DM_SPLIT') and not os.environ.get('DM_PATCH_FRONT'):
+    # The band between the front area's reach and the back area's is served by gap relays, whose slots are scarce: raise SPLIT to
+    # what the front truly reaches (its stubs in site order end just under the base; the 1 MB margin of the formula gives away
+    # ~150 sites). The DM_PATCH_FRONT rerun sizes FRONT to its stubs first, then this pass runs again with the higher SPLIT
+    FRONT = 0x100000   # the first pass: measure the stubs (the rerun grows FRONT); SPLIT stays low, the run only measures
+    SPLIT = 0x8000000 - 0x200000 - 0x100000   # just below the band, so the measure pass sees every band site
 IMG = MOD.image
 ORIG_TEXT = bytes(IMG[:MOD.text_end])   # the text as the file has it, before any cut or site: <name>.changed.tsv compares against it
 if not FAR: IMG.extend(bytes(bss))
 TEXT_END = MOD.text_end
 RO_OFF, DATA_OFF = MOD.segments[1][0], MOD.segments[2][0]
+if TWO: GAPS = [(TEXT_END, RO_OFF - TEXT_END), (RO_OFF + MOD.segments[1][1], DATA_OFF - (RO_OFF + MOD.segments[1][1]))]   # the alignment gaps between the segments: gap1 is executable (the loader seals [0, align16k(text_end)) RX), gap2 with the loader's GAP2 key
 if FAR:
     FILE_IMAGE_LEN = (len(IMG) + 0x3FFF) & ~0x3FFF
     KEY_PAGE_OFF = (len(IMG) + bss + 0x3FFF) & ~0x3FFF
     IMAGE_SIZE, PATCH_OFF = KEY_PAGE_OFF + 0x4000, -FRONT
     BACK_OFF = (KEY_PAGE_OFF + 0x8000 + 0xFFFF) & ~0xFFFF if TWO else 0   # after the key page and the frame step page FRAME_STEP may take
-    assert not TWO or BACK_OFF - 0x8000000 + 0x100000 == BACK_MIN, 'BACK_MIN and BACK_OFF disagree'
+    # (band mode reassigns BACK_MIN to the relay boundary, so it no longer equals BACK_OFF's reach formula)
 else:
     KEY_PAGE_OFF = (len(IMG) + 0x3FFF) & ~0x3FFF
     IMG.extend(bytes(0x4000))
@@ -264,6 +280,28 @@ def use_area(a):
     global patch, PATCH_BASE
     patch, PATCH_BASE = (patch_back, BACK_OFF) if TWO and a >= SPLIT else (patch_front, PATCH_OFF)
 def stat(k): stats[k] = stats.get(k, 0) + 1
+BAND = {}   # band sites (front and back patch area both out of B reach): site → gap entry address (written after emission)
+GAP_ENT = {}   # gap entry slot → stub address (the site's B points here, the stub is elsewhere)
+KEYREL = []   # (site, stub) pairs whose 4-byte relays go into the frame page at KEY_PAGE_OFF + 0x4000 (beyond the file image: the loader writes them from <name>.relays.tsv)
+PADREL = []   # (site, stub) pairs whose 4-byte relays go into the file image's pad after the data segment (the last partial page, sealed executable through GAP3)
+FARJ = []     # (site, stub) far jumps (S2Arm's trick): the site is brk #0xA000, the loader's SIGTRAP handler jumps to the stub — for sites no relay slot reaches
+FARX = []     # (exit, target) a stub's exit back to a band site: brk #0xA001, the handler jumps — the old ADRP+ADD+BR x16 clobbered x16, which the game can hold live across relocated instructions (Bedrock's stp x18,x17,[x16] stored into text and SIGBUSed at main+0x88ef684)
+# GAPS itself is set at the module layout (after the segment offsets are known)
+def band_relay(off, size):
+    """The next 4-byte relay slot in a segment gap, or None (GAPS filled by the caller from the module layout)"""
+    for i, (o, n) in enumerate(GAPS):
+        if n >= size:
+            GAPS[i] = (o + size, n - size)
+            return o
+    return None
+
+def emit_far(frm, to):
+    """A stub's exit back to code too far away for B (a band site): brk #0xA001 and the loader's SIGTRAP handler jumps to it
+    (a signal return has no ±128 MiB limit and clobbers no register; the old ADRP+ADD+BR x16 left the target in x16,
+    which the game can hold live across relocated instructions)"""
+    FARX.append((here(), to))
+    emit(BRK(0xA001))
+
 def here(): return PATCH_BASE + len(patch)
 def emit(w, kind=None):
     if kind: fix.append((len(patch), kind))
@@ -347,7 +385,7 @@ def site_plain(ins):
     emit(STP(S, T, 31, save)); emit(MRS_TPIDRRO(T)); emit_slot_addr(T, S, 'K18'); emit(LDRX(S, T))
     emit(subst(ins, S))
     emit(STRX(S, T))                 # Always write back: capstone can miss reporting a write (the adds w18 instance)
-    emit(LDP(S, T, 31, save - dlt)); emit(B(here(), ins.address + 4))
+    emit(LDP(S, T, 31, save - dlt)); emit_exit(ins.address + 4)
     return start
 
 def site_sp(ins):
@@ -358,7 +396,7 @@ def site_sp(ins):
     emit(STP(S, T, 31, -16)); emit(MRS_TPIDRRO(T)); emit_slot_addr(T, S, 'K18'); emit(LDRX(S, T))
     emit(ADDI(T, 31, 0))             # mov T, sp (in add immediate, 31 is sp)
     emit(subst(ins, S))
-    emit(LDP(S, T, T, -16)); emit(B(here(), ins.address + 4))
+    emit(LDP(S, T, T, -16)); emit_exit(ins.address + 4)
     return start
 
 def site_sp_align(ins, n):
@@ -368,7 +406,7 @@ def site_sp_align(ins, n):
     there it changes nothing; of the 22 games' modules on hand only Paper Mario's main has the form"""
     start = here()
     emit(ADDI(n, n, 15)); emit(0x927CEC00 | n << 5 | n)   # add xN, xN, #15; and xN, xN, #~15
-    emit(struct.unpack('<I', ins.bytes)[0]); emit(B(here(), ins.address + 4))
+    emit(struct.unpack('<I', ins.bytes)[0]); emit_exit(ins.address + 4)
     return start
 
 def site_cond(ins):
@@ -383,9 +421,13 @@ def site_cond(ins):
     nw = ((w & 0xFF000000) | ((off & 0x7FFFF) << 5) | S) if m in ('cbz', 'cbnz') else ((w & 0xFFF80000) | ((off & 0x3FFF) << 5) | S)
     pc = here(); emit(nw)
     dd = dis(nw, pc); assert dd.mnemonic == m and dd.operands[-1].imm == taken
-    emit(LDP(S, T, 31, -16)); emit(B(here(), ins.address + 4))
+    emit(LDP(S, T, 31, -16))
+    far = not (-(1 << 27) <= ins.address + 4 - here() < (1 << 27))
+    if far: emit(B(here(), here() + 4))    # around the taken path's exit below, to the one-word brk veneer (emit_far; the layout this stub's cbz offset assumes is kept)
+    else: emit_exit(ins.address + 4)
     assert here() == taken
-    emit(LDP(S, T, 31, -16)); emit(B(here(), tgt))
+    emit(LDP(S, T, 31, -16)); emit_exit(tgt)
+    if far: emit_far(here(), ins.address + 4)
     return start
 
 def site_pcrel(ins):
@@ -396,7 +438,7 @@ def site_pcrel(ins):
     pc = here(); emit(ADRP(S, pc, tgt))
     if ins.mnemonic == 'adr': emit(ADDI(S, S, tgt & 0xFFF))
     emit(STRX(S, T))
-    emit(LDP(S, T, 31, -16)); emit(B(here(), ins.address + 4))
+    emit(LDP(S, T, 31, -16)); emit_exit(ins.address + 4)
     return start
 
 def site_br(ins, base, count):
@@ -415,10 +457,10 @@ def site_br(ins, base, count):
     emit(BR(16))
     while here() < padbase: emit(NOP)
     tails = padbase + 4 * count
-    for i in range(count): emit(B(here(), tails + 8 * i))
+    for i in range(count): emit_exit(tails + 8 * i)
     for i in range(count):
         emit(0xF85F0000 | (31 << 5) | 16)      # ldur x16,[sp,#-16]
-        emit(B(here(), base + 4 * i))
+        emit_exit(base + 4 * i)
     return start
 
 def site_br_tab(ins, targets):
@@ -433,7 +475,7 @@ def site_br_tab(ins, targets):
         emit(ADRP(17, here(), t)); emit(ADDI(17, 17, t & 0xFFF)); emit(CMPR(16, 17)); emit(BEQ(here(), pads + 12 * k))
     emit(BRK(0x18))
     for t in uniq:
-        emit(LDUR(16, 31, -16)); emit(LDUR(17, 31, -24)); emit(B(here(), t))
+        emit(LDUR(16, 31, -16)); emit(LDUR(17, 31, -24)); emit_exit(t)
     return start
 
 def site_blr(ins):
@@ -461,7 +503,7 @@ def site_slot_copy(ins, src, dst):
     else: emit(src)
     emit(MRS_TPIDRRO(16)); emit_slot_addr(16, 17, dst); emit(STRX(15, 16))
     emit(LDUR(15, 31, -24)); emit(LDP(16, 17, 31, -16))
-    emit(B(here(), ins.address + 4))
+    emit_exit(ins.address + 4)
     return start
 
 def site_sysreg_read(ins, kind):
@@ -471,7 +513,7 @@ def site_sysreg_read(ins, kind):
     tmp = 16 if N != 16 else 17
     start = here()
     emit(STUR(tmp, 31, -16)); emit(MRS_TPIDRRO(N)); emit_slot_addr(N, tmp, kind); emit(LDRX(N, N)); emit(LDUR(tmp, 31, -16))   # tmp is saved by borrowing the red zone
-    emit(B(here(), ins.address + 4))
+    emit_exit(ins.address + 4)
     return start
 
 def site_tpidr_write(ins):
@@ -483,7 +525,7 @@ def site_tpidr_write(ins):
     tmp = next(x for x in (16, 17) if x not in (N, T))
     emit(STUR(tmp, 31, -24)); emit(MRS_TPIDRRO(T)); emit_slot_addr(T, tmp, 'KTLS'); emit(STRX(N, T)); emit(LDUR(tmp, 31, -24))
     emit(0xF85F0000 | (31 << 5) | T)           # ldur xT,[sp,#-16]
-    emit(B(here(), ins.address + 4))
+    emit_exit(ins.address + 4)
     return start
 
 def emit_gate_call():
@@ -500,7 +542,7 @@ def site_gate(ins, kind, arg):
     emit(BLR(30))
     ret = here()
     emit(LDP_POST(29, 30, 31, 16))
-    emit(B(here(), ins.address + 4))
+    emit_exit(ins.address + 4)
     gates.append((ret, kind, arg, ins.address))
     return start
 
@@ -518,7 +560,7 @@ def site_obs(off, oid, word):
     ret = here()
     emit(LDP_POST(29, 30, 31, 16))
     emit(word)
-    emit(B(here(), off + 4))
+    emit_exit(off + 4)
     gates.append((ret, 'obs', oid, off))
     return start
 
@@ -602,7 +644,7 @@ def site_window(seg):
         words.append(w)
     for w in words: emit(w)
     for t in [hi] + ex_targets:   # fall-through first
-        emit(STRX(S, T)); emit(LDP(S, T, 31, -16)); emit(B(here(), t)); emit(NOP)
+        emit(STRX(S, T)); emit(LDP(S, T, 31, -16)); emit_exit(t); emit(NOP)
     return start, lo, hi
 
 def retry_block(insl, k, wseg):
@@ -652,9 +694,9 @@ def site_retry_window(parts):
             else:
                 assert m not in ('adr', 'adrp', 'b', 'bl', 'br', 'blr', 'ret') and not (m == 'ldr' and '[' not in x.op_str), hex(x.address)
             emit(w)
-        emit(STRX(S, T)); emit(LDP(S, T, 31, -16)); emit(B(here(), ft)); emit(NOP)
+        emit(STRX(S, T)); emit(LDP(S, T, 31, -16)); emit_exit(ft); emit(NOP)
     for t in ex_targets:
-        emit(STRX(S, T)); emit(LDP(S, T, 31, -16)); emit(B(here(), t)); emit(NOP)
+        emit(STRX(S, T)); emit(LDP(S, T, 31, -16)); emit_exit(t); emit(NOP)
     return start
 
 # ---- Function boundaries (eh_frame_hdr) ----
@@ -1522,7 +1564,53 @@ if new_mid:
             dest = at + 4 * d
             if dest in new_mid: assert func_of(at) == func_of(dest), f'branch into window from another function {at:x}'
 
-def put_branch(at, to): struct.pack_into('<I', IMG, at, B(at, to))
+def put_branch(at, to):
+    """The branch at the site to its stub: B when the stub is in reach, else through a 4-byte relay in a segment gap
+    (a band site's back-area stub), and for the highest band sites through the unused frame page's relays instead
+    (applied by the loader from <name>.relays.tsv: the page lies beyond the file image)"""
+    if -(1 << 27) <= to - at < (1 << 27): struct.pack_into('<I', IMG, at, B(at, to)); return
+    if os.environ.get('DM_FAR_ALL'):
+        # iOS / tvOS: relay pages would have to be made executable at load time, which the system forbids without a JIT
+        # entitlement. Every relay-class branch becomes a far jump instead: brk #0xA000 at the site, the loader's SIGTRAP
+        # handler jumps to the stub (a signal return needs no executable relay and no register). These sites are cold code
+        # (Minecraft Bedrock: 3 executions in 10 minutes of play), so the ~µs trap per execution costs nothing
+        FARJ.append((at, to))
+        struct.pack_into('<I', IMG, at, 0xD4200000 | (0xA000 << 5))
+        return
+    rel = None
+    for i, (o, n) in enumerate(GAPS):
+        if n < 4 or not (-(1 << 27) <= o - at < (1 << 27)) or not (-(1 << 27) <= to - o < (1 << 27)): continue
+        rel = o; GAPS[i] = (o + 4, n - 4); break
+    if rel is None and TWO and False \
+       and -(1 << 27) <= len(IMG) - at < (1 << 27) and -(1 << 27) <= to - len(IMG) < (1 << 27):
+        ent = len(IMG) + 4 * len(PADREL); struct.pack_into('<I', IMG, at, B(at, ent)); PADREL.append((ent, to)); return   # DISABLED: the pad after data is the bss's first bytes (Bedrock's C++ constructors write statics there and crashed at DT_INIT); the raised SPLIT and the frame page cover the band without it
+    if rel is None and TWO and globals().get('FS_STATE_OFF', 0) == 0 and len(KEYREL) < 0x4000 // 4 \
+       and -(1 << 27) <= KEY_PAGE_OFF + 0x4000 - at < (1 << 27) and -(1 << 27) <= to - (KEY_PAGE_OFF + 0x4000) < (1 << 27):
+        ent = KEY_PAGE_OFF + 0x4000 + 4 * len(KEYREL); struct.pack_into('<I', IMG, at, B(at, ent)); KEYREL.append((ent, to)); return
+    if rel is None and not os.environ.get('DM_PATCH_FRONT') and TWO:
+        # The measure pass (FRONT minimal, SPLIT low): the relay overflow only says this pass's numbers; the front is fully
+        # emitted by now (the overflow comes at a back site above SPLIT), so its size is known — rerun tight (slack is what
+        # the front's reach, and with it SPLIT, is made of)
+        print(f'{NAME}: gap relays exhausted at {at:#x} on the measure pass; rerunning with FRONT {len(patch_front):#x} + slack', flush=True)
+        os.execve(sys.executable, [sys.executable] + sys.argv, dict(os.environ, DM_PATCH_FRONT=hex((len(patch_front) + 0x40000 + 0xFFFF) & ~0xFFFF)))
+    if rel is None and TWO:
+        # No relay slot left (or none reaches): a far jump (S2Arm's trick, built for Minecraft's [128,144) MiB of x18 sites
+        # no island reaches): the unit's stub is in the island as usual, the site's branch is a brk #0xA000, fixups.tsv # FAR
+        # rows carry (from, to) and the loader's SIGTRAP handler sets pc = to — a signal return has no ±128 MiB limit. Each
+        # execution costs one ~µs trap on entry; the exit is the stub's ADRP + BR (emit_exit)
+        FARJ.append((at, to))
+        struct.pack_into('<I', IMG, at, 0xD4200000 | (0xA000 << 5))
+        return
+    if rel is None: raise AssertionError(f'no gap relay reaches the stub at {to:#x} from the site {at:#x} '
+                                         f'({len(GAP_ENT)} relays used, {len(KEYREL)} frame page relays, gaps {[(hex(o), hex(n)) for o, n in GAPS]}, front {len(patch_front):#x} in {FRONT:#x})')
+    struct.pack_into('<I', IMG, at, B(at, rel)); GAP_ENT[rel] = to
+
+def emit_exit(to):
+    """A stub's branch back to the code: B when in reach, else ADRP + ADD + BR (a band site's stub in the back area)"""
+    h = here()
+    if -(1 << 27) <= to - h < (1 << 27): emit(B(h, to))
+    else: emit_far(h, to)
+
 for wseg in windows:
     use_area(wseg[0].address); st, lo, hi = site_window(wseg); stat('window'); put_branch(lo, st)
 for parts in retries:
@@ -1944,9 +2032,9 @@ def spin_emit(g):
             if not (i + 1 < len(R) and R[i + 1] == ft): fixes.append((len(patch), None, ft)); emit(0)   # the next instruction is not the next one copied
     pause = here()
     emit(STP_PRE(29, 30, 31, -16)); emit_gate_call(); emit(BLR(30)); ret = here(); emit(LDP_POST(29, 30, 31, 16))
-    gates.append((ret, 'spin', 0, T)); emit(B(here(), cpy[T]))
+    gates.append((ret, 'spin', 0, T)); emit_exit(cpy[T])
     def out(t):   # an exit taken by a conditional branch: through a b next to the copy
-        if t not in tramp: tramp[t] = here(); emit(B(here(), t))
+        if t not in tramp: tramp[t] = here(); emit_exit(t)
         return tramp[t]
     for idx, x, info in fixes:
         pc = PATCH_BASE + idx
@@ -1961,7 +2049,7 @@ def spin_emit(g):
     for b in sorted(valid):   # the original back-edges enter the copy
         x = nodes[b]['ins'][0]
         if x.mnemonic == 'b': put_branch(b, cpy[T])
-        else: st = here(); emit(spin_rebranch(x, here(), cpy[T])); emit(B(here(), b + 4)); put_branch(b, st)
+        else: st = here(); emit(spin_rebranch(x, here(), cpy[T])); emit_exit(b + 4); put_branch(b, st)
     stat('spin')
 spin_heads = sorted(spin_cand)
 
@@ -2004,11 +2092,23 @@ else:
 import hashlib
 with open(os.path.join(outdir, 'build_src.sha256'), 'w') as f:   # the same for every module: the rewriter and every patch file, by path from dm/tools
     for src_ in (os.path.abspath(__file__), nso.__file__, nso_code.__file__, nso_asm.__file__, ue_cvar.__file__, ue_malloc.__file__, fps_target.__file__, ue_fixed_rate.__file__, unity_fps.__file__, unity_bucket.__file__, ue_region.__file__, ue_ring.__file__, snowdrop_pools.__file__, os.path.join(os.path.dirname(ue_malloc.__file__), 'loader_census.py'), *PATCH_FILES): f.write(hashlib.sha256(open(src_, 'rb').read()).hexdigest() + f'  {os.path.relpath(os.path.abspath(src_), os.path.dirname(os.path.abspath(__file__)))}\n')
+if GAP_ENT:   # write the gap relays into the segment gaps (both are part of the file image; gap1 RX by the loader's text seal, gap2 by its GAP2 key)
+    for rel, stub in GAP_ENT.items(): struct.pack_into('<I', IMG, rel, B(rel, stub))
+    print(f'{NAME}: {len(GAP_ENT)} gap relays written into the segment gaps', flush=True)
+if KEYREL:   # the frame page's relays lie beyond the file image: <name>.relays.tsv carries (page offset, branch word), the loader writes and seals them
+    assert FS_STATE_OFF == 0, 'the frame page holds the frame step state; no relay space left'
+    with open(P('relays.tsv'), 'w') as f:
+        for ent, to in KEYREL: f.write(f'{ent:#x}\t{B(ent, to):#x}\n')
+    print(f'{NAME}: {len(KEYREL)} frame page relays ({KEY_PAGE_OFF + 0x4000:#x}+), gap relays {len(GAP_ENT)}, pad relays {len(PADREL)}', flush=True)
+
 with open(P('fixups.tsv'), 'w') as f:
     f.write(f'# PATCH_OFF\t{PATCH_OFF:#x}\n# KEY_PAGE_OFF\t{KEY_PAGE_OFF:#x}\n# KEY_PAGE_SIZE\t0x4000\n# TEXT_END\t{TEXT_END:#x}\n# RO_OFF\t{RO_OFF:#x}\n# DATA_OFF\t{DATA_OFF:#x}\n')
     if FAR: f.write(f'# IMAGE_SIZE\t{IMAGE_SIZE:#x}\n# FILE_IMAGE_LEN\t{FILE_IMAGE_LEN:#x}\n')   # patch area before the base (negative PATCH_OFF): whole image size, length of the image part of the file
     if TWO: f.write(f'# BACK_OFF\t{BACK_OFF:#x}\n# BACK_LEN\t{BACK_LEN:#x}\n')   # the back patch area (TWO): its offset in the image, and its length, the last bytes of the file
+    if GAP_ENT: f.write(f'# GAP2_OFF\t{(RO_OFF + MOD.segments[1][1]) & ~0x3FFF:#x}\n# GAP2_LEN\t{((DATA_OFF + 0x3FFF) & ~0x3FFF) - ((RO_OFF + MOD.segments[1][1]) & ~0x3FFF):#x}\n')   # gap relays: the second segment gap holds B entries to back stubs; its page (mprotect needs page alignment) also holds the ro segment's last bytes, which stay readable
     for k in KEY_INDEX: f.write(f'# KEY_{k}_IDX\t{KEY_INDEX[k]}\n')
+    for at, to in FARJ: f.write(f'# FAR\t{at:#x}\t{to:#x}\n')   # far jumps: brk #0xA000 at the site, the SIGTRAP handler sets pc to the stub (no ±128 MiB limit)
+    for at, to in FARX: f.write(f'# FARX\t{at:#x}\t{to:#x}\n')   # far exits: brk #0xA001 at a stub's exit, the handler sets pc to the target (x16 stays untouched)
     if FS_STATE_OFF: f.write(f'# FPS_STATE_OFF\t{FS_STATE_OFF:#x}\n')   # frame step state page (FRAME_STEP): the loader writes the target fps there
     if UE_CALLS: f.write(f'# UE_MALLOC_VT\t{UE_VT:#x}\n# UE_MALLOC_SLOT\t{UE_SLOT:#x}\n')   # Unreal's FMallocBinned3 (ue_malloc.py): its vtable and the slot of its name getter, which names the slot layout
     if FPS_TARGET_PTR is not None: f.write(f'# FPS_TARGET_PTR\t{FPS_TARGET_PTR:#x}\n# FPS_TARGET_FIELD\t{FPS_TARGET_FIELD:#x}\n')   # a target frame rate the game steps by (fps_target.py)

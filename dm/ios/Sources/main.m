@@ -13,6 +13,8 @@
 #include "romfs_image.h"
 #include "romfs_identity.h"
 #include "player_env.h"
+#include "local_users.h"
+#include "LocalSaveFolder.h"
 #ifndef DM_PLAYER_BUILD
 #define DM_PLAYER_BUILD 0
 #endif
@@ -99,7 +101,7 @@ static void aoc_locate(void) {
 }
 
 // Boot prerequisites (done before UIApplicationMain): directories / environment variables / log -- the host's early load reads these
-// Why a slim build found no usable game files: the verdict on Documents/romfs.img (the first of romfs_document_images), in the log and for the screen (front_ios_boot_message). NULL when the build has no romfs.id
+// A launch failure the player can fix, such as an unexpected Documents/romfs.img or an invalid local user roster.
 static char g_boot_message[640];
 const char *front_ios_boot_message(void) { return g_boot_message[0] ? g_boot_message : NULL; }
 // Why this device cannot run the games: its GPU has no BC texture formats, which the games' textures use and the host does not decompress (dm/gfx/tex/README.md; the A16 and older,
@@ -168,6 +170,13 @@ static int boot_env(void) {
     }
     setenv("DM_ENV_FILE_KEYS", [from_file componentsJoinedByString:@" "].UTF8String, 1);   // the launcher keeps what an env file set (LauncherSettings.swift)
     setenv("DM_ENV_LAUNCH_KEYS", [from_launch componentsJoinedByString:@" "].UTF8String, 1);   // and what the launch environment set (docs/frontends.md, Saved choices)
+    const char *users_error = dm_users_prepare_file(doc.fileSystemRepresentation, [doc stringByAppendingPathComponent:@"users.json"].fileSystemRepresentation)
+        ? dm_users_error() : "Could not resolve the local user list.";
+    if (users_error) {
+        snprintf(g_boot_message, sizeof g_boot_message, "%s", users_error);
+        fprintf(stderr, "[RED] boot: %s\n", users_error);
+        return 0;
+    }
     front_hud_env();   // an env file's DM_METAL_HUD; nothing in this process makes a Metal device before startGame (front_ios.m), which applies the launcher's
     // Game language (nn::oe::GetDesiredLanguage, hle_oe.c): the one the IPA was packed with (the NSP script's LANGUAGE / --language → DMLanguage in Info.plist), unless an env file sets DM_LANG
     // (or the launcher, which replaces this default before the game starts)
@@ -176,7 +185,7 @@ static int boot_env(void) {
     fprintf(stderr, "boot: game language %s\n", getenv("DM_LANG") ?: "en-US");
     NSString *dm = program_env();
     if (!dm) { romfs_identity_report(doc); fprintf(stderr, "boot: game files not found (Documents/romfs.img, Documents/romfs or <App>/romfs)\n"); return 0; }
-    setenv("DM_SAVE", [doc stringByAppendingPathComponent:@"save"].fileSystemRepresentation, 0);
+    dm_local_save_configure(DM_GAME_ID, [doc stringByAppendingPathComponent:@"save"].fileSystemRepresentation);
     setenv("DM_TEMP", [doc stringByAppendingPathComponent:@"temp"].fileSystemRepresentation, 0);
     setenv("DM_SYSTEM_DIR", [doc stringByAppendingPathComponent:@"system"].fileSystemRepresentation, 0);
     setenv("DM_GUEST_FILE_DIR", NSTemporaryDirectory().fileSystemRepresentation, 0);   // DM_GUEST_FILE (hle_svc.c) keeps the guest's memory in files there

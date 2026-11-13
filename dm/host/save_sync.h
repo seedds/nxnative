@@ -2,8 +2,8 @@
 // (each app's launcher sets the folder the player chose in its Cloud saves: dm/mac/launcher.c from the Mac settings window, CloudSaves.m on the iPhone; "icloud" is iCloud Drive/nxnative Saves).
 // The folder holds one file per game, <folder>/<title ID>/save.dmsync (a folder named after the title ID is taken as the game's own): the committed save (DM_SAVE and DM_SAVE_device) packed into one file. iCloud replaces a file as a
 // whole but syncs a folder file by file, and a save that is half one device's and half the other's is worse than either.
-// When: the cloud's copy comes in at the game's first save mount (hle_fs.c, before the work directory is cloned from the committed save); the committed save goes out a few
-// seconds after a Commit, on a thread of its own (the game never waits), when the iPhone app goes to the background, and from the Mac launcher once the host has exited.
+// When: the cloud's copy comes in at the first legacy-account or device-save mount (hle_fs.c, before the work directory is cloned from the committed save); the committed save goes out a few
+// seconds after a Commit, on a thread of its own (the game never waits), when the iPhone app goes to the background, and from the Mac launcher after a host that reconciled the cloud save exits.
 // Which way: <DM_SAVE>.sync keeps the hash of the save last known to be the same here and in the cloud. Only the cloud's changed: it comes in; only this one changed: it goes out;
 // both changed (played on both without syncing in between, or the first sync of a device that has a save of its own): the start decides. A front end that asks the
 // player (the Mac and iPhone launchers, from save_sync_report below) sets DM_SAVE_SYNC_CHOICE (save_sync.c, read_choice): with no choice, neither replaces the other, the game plays on with this device's and nothing is sent;
@@ -51,13 +51,17 @@ int save_sync_report(const char *save, const char *title, const char *folder, in
 
 // ---- the host ----
 const char *dm_save_title(void);          // the title ID the cloud file is named after (hle_fs.c, from the game's profile): for a front end in the host's process (the iPhone launcher)
-// The game's first save mount (hle_fs.c): puts back this device's save from a pull of the cloud's that did not finish (<save>.pull, whatever DM_SAVE_SYNC says), then
+// The first legacy-account or shared device-save mount (hle_fs.c): puts back this device's save from a pull of the cloud's that did not finish (<save>.pull, whatever DM_SAVE_SYNC says), then
 // brings the cloud's save in when it is the one to keep, and starts the sender. 0: the save may be mounted (whether or not the cloud's came in); -1: it may not, as this
 // device's save could not be put back whole (the log says where it is; the next start tries again). A second mount gets the first's answer
 int save_sync_mount(const char *save, const char *title);
 void save_sync_committed(void);           // a Commit went through (hle_fs.c, under its locks: it only wakes the sender)
 int save_sync_flush(int timeout_ms);      // sends now what was committed and not sent (the iPhone app going to the background): 1 = in step with the cloud, 0 = not (yet)
-int save_sync_after_exit(const char *save, const char *title);   // the Mac launcher once the host has exited (a crash included): 1 = in step, 0 = not
+// The Mac launcher passes the write end to its child and closes its own copy after spawn.
+// finish consumes the read end and recovers only a save that child reconciled before exiting.
+void save_sync_launch_prepare(int channel[2]);
+int save_sync_launch_finish(int read_fd, const char *save, const char *title);
+int save_sync_after_exit(const char *save, const char *title);   // recover an unsent committed save after reconciliation (a crash included): 1 = in step, 0 = not
 
 // ---- what the platform provides (weak defaults in save_sync.c: plain file copies, which the Mac's iCloud Drive takes) ----
 // Copies the cloud's file to a local one; the iPhone app goes through NSFileCoordinator, which downloads a file iCloud has only listed (SaveSync.m).

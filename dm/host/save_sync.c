@@ -607,10 +607,76 @@ static void *sender(void *arg) {
     return NULL;
 }
 
+// A Mac launcher may recover a pending commit after a crash. The selected account alone
+// cannot tell it which save the game mounted, or whether a cloud pull succeeded.
+#define LAUNCH_MOUNT_FD "NXNATIVE_SAVE_MOUNT_FD"
+void save_sync_launch_prepare(int channel[2]) {
+    channel[0] = channel[1] = -1;
+    unsetenv(LAUNCH_MOUNT_FD);
+    const char *config = getenv("DM_SAVE_SYNC");
+    if (!config || !*config || !strcmp(config, "0")) return;
+    int fd[2]; char number[24];
+    if (!pipe(fd)) {
+        snprintf(number, sizeof number, "%d", fd[1]);
+        if (fd[0] > 2 && fd[1] > 2 && !fcntl(fd[0], F_SETFD, FD_CLOEXEC) &&
+            !fcntl(fd[0], F_SETFL, O_NONBLOCK) && !fcntl(fd[1], F_SETFL, O_NONBLOCK) &&
+            !fcntl(fd[1], F_SETNOSIGPIPE, 1) && !setenv(LAUNCH_MOUNT_FD, number, 1)) {
+            channel[0] = fd[0]; channel[1] = fd[1];
+            return;
+        }
+        close(fd[0]); close(fd[1]);
+    }
+    SRED("could not set up the launcher receipt; exit-time sync is disabled");
+}
+
+static void notify_reconciled_mount(void) {
+    const char *number = getenv(LAUNCH_MOUNT_FD);
+    if (!number || !isdigit((unsigned char)*number)) return;
+    char *end;
+    long fd = strtol(number, &end, 10);
+    struct stat st;
+    if (*end || fd <= 2 || fd > INT_MAX || fstat((int)fd, &st) || !S_ISFIFO(st.st_mode)) return;
+    int flags = fcntl((int)fd, F_GETFL);
+    if (flags < 0 || (flags & (O_ACCMODE | O_NONBLOCK)) != (O_WRONLY | O_NONBLOCK) ||
+        fcntl((int)fd, F_SETNOSIGPIPE, 1)) return;
+    ssize_t sent;
+    do { sent = write((int)fd, "M", 1); } while (sent < 0 && errno == EINTR);
+    close((int)fd);
+}
+
+int save_sync_launch_finish(int read_fd, const char *save, const char *title) {
+    if (read_fd < 0) return 1;
+    char receipt;
+    ssize_t n;
+    do { n = read(read_fd, &receipt, 1); } while (n < 0 && errno == EINTR);
+    close(read_fd);
+    return n != 1 || receipt != 'M' || save_sync_after_exit(save, title);
+}
+
+// The deepest fixed path the sync engine constructs is a numbered backup's device
+// directory. Leave room before creating a snapshot or removing its scratch tree.
+static int sync_root(const char *save, char out[PATH_MAX]) {
+    size_t n = strlen(save);
+    while (n && save[n - 1] == '/') n--;
+    if (!n || n > PATH_MAX - sizeof "-backups/2000-01-01 00.00.00 cloud 2147483647/save_device") {
+        SRED("DM_SAVE needs a directory name with room for its sync and backup paths");
+        return 0;
+    }
+    memcpy(out, save, n); out[n] = 0;
+    const char *leaf = strrchr(out, '/'); leaf = leaf ? leaf + 1 : out;
+    if (!strcmp(leaf, ".") || !strcmp(leaf, "..")) {
+        SRED("DM_SAVE needs a directory name for its sibling sync and backup paths");
+        return 0;
+    }
+    return 1;
+}
 // The first save mount: an interrupted pull put right first, whatever the sync setting (a player may have turned sync off since), before the staging folder is cleared
 // and before a sender can pack what is in place; then, with sync on, the cloud's save and this one compared. 0: this device's save may be mounted; -1: it may not
 // (an interrupted or failed pull could not be put back: what this device's save is made of stays where the journal says, and the next start tries again)
 static int mount_once(const char *save, const char *title) {
+    char root[PATH_MAX];
+    if (!sync_root(save, root)) return -1;
+    save = root;
     char cloud[PATH_MAX], tmp[PATH_MAX], theirs[PATH_MAX], base[SS_HASH + 1], kept[PATH_MAX], t[32], t2[32], chosen[SS_HASH + 1];
     ss_meta mine, other; memset(&other, 0, sizeof other); kept[0] = 0;
     pull_journal j; int jr = journal_read(save, &j);
@@ -672,6 +738,7 @@ static int mount_once(const char *save, const char *title) {
         else if (!got) SLOG("no save here or in the cloud yet");
         break;
     }
+    if (!failed) notify_reconciled_mount();
     rm_tree(tmp);
     snprintf(g_save, sizeof g_save, "%s", save); upper_title(title, g_title, sizeof g_title); snprintf(g_cloud, sizeof g_cloud, "%s", cloud);
     g_failed = failed;
@@ -692,7 +759,7 @@ int save_sync_report(const char *save, const char *title, const char *folder, in
     ss_meta mine, other; int got = -1, both = 0, same = 1, on;
     memset(&other, 0, sizeof other); base[0] = 0;
     if (!save || !*save || !title || !*title || !out || !n) return -1;
-    snprintf(dd, sizeof dd, "%s", save); size_t L = strlen(dd); while (L > 1 && dd[L - 1] == '/') dd[--L] = 0;
+    if (!sync_root(save, dd)) return -1;
     if (ss_scan(dd, &mine)) return -1;
     read_base(dd, base);
     if ((on = cloud_path(folder ? folder : getenv("DM_SAVE_SYNC"), title, cloud, sizeof cloud))) {
@@ -742,7 +809,7 @@ int save_sync_flush(int timeout_ms) {
 int save_sync_after_exit(const char *save, const char *title) {   // save: DM_SAVE, its trailing slashes stripped as h_fs_MountSave strips them (the same <save>.sync and <save>-backups)
     char cloud[PATH_MAX], dd[PATH_MAX];
     if (!save || !*save) return 1;
-    snprintf(dd, sizeof dd, "%s", save); size_t L = strlen(dd); while (L > 1 && dd[L - 1] == '/') dd[--L] = 0;
+    if (!sync_root(save, dd)) return 0;
     pull_journal j;
     if (journal_read(dd, &j)) { SRED("a pull of the cloud's save did not finish: nothing is sent until the next start puts this device's save back"); return 0; }   // what is in place may be half the cloud's
     return !cloud_file(title, cloud, sizeof cloud) || send_save(dd, title, cloud);

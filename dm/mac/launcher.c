@@ -26,9 +26,11 @@
 #include <unistd.h>
 #include "romfs_image.h"
 #include "save_sync.h"
+#include "local_users.h"
+#include "../ios/Sources/LocalSaveFolder.h"
 
 extern char **environ;
-int dm_mac_launcher(void);   // Launcher.swift: 1 = Play (the settings are in the environment), 0 = the player quit, 2 = no window (apply the saved choices here)
+int dm_mac_launcher(void);   // 1 = Play, 0 = Quit, 2 = no window, -1 = failed to apply the selection
 static pid_t g_child;
 static char *g_file_keys, *g_launch_keys;   // the variables the env files set, and the settings the launch environment set (DM_ENV_FILE_KEYS, DM_ENV_LAUNCH_KEYS)
 
@@ -73,7 +75,7 @@ static void mkdirs(const char *path) {   // mkdir -p
     mkdir(p, 0755);
 }
 
-static void env_file(const char *path) {   // KEY=VALUE lines, # starts a comment; a variable already set stays
+static void env_file(const char *path, int quiet) {   // KEY=VALUE lines, # starts a comment; a variable already set stays
     FILE *f = fopen(path, "r"); if (!f) return;
     char ln[4096];
     while (fgets(ln, sizeof ln, f)) {
@@ -82,7 +84,10 @@ static void env_file(const char *path) {   // KEY=VALUE lines, # starts a commen
         char *eq = strchr(s, '=');
         if (*s == '#' || !eq || eq == s) continue;
         *eq = 0; char *k = s; for (char *t = eq - 1; t > k && (*t == ' ' || *t == '\t'); t--) *t = 0;
-        if (!getenv(k)) { setenv(k, eq + 1, 0); add_key(&g_file_keys, k); fprintf(stderr, "launcher: env %s=%s (%s)\n", k, eq + 1, path); }
+        if (!getenv(k)) {
+            setenv(k, eq + 1, 0); add_key(&g_file_keys, k);
+            if (!quiet) fprintf(stderr, "launcher: env %s=%s (%s)\n", k, eq + 1, path);
+        }
     }
     fclose(f);
 }
@@ -160,7 +165,37 @@ static void programs_table(const char *contents, const char *res, const char *su
     fclose(f); fclose(o); setenv("DM_PROGRAMS", out, 0);
 }
 
+// User management and a game launch must resolve the same env files, manifest and selection.
+static const char *load_launch_env(const char *sup, const char *dm, const char *home, int quiet) {
+    char p[PATH_MAX];
+    CFArrayRef rules = setting_rules();
+    for (CFIndex i = 0; rules && i < CFArrayGetCount(rules); i++) { char env[128]; if (rule_env(CFArrayGetValueAtIndex(rules, i), env, sizeof env) && getenv(env)) add_key(&g_launch_keys, env); }
+    snprintf(p, sizeof p, "%s/env.txt", sup); env_file(p, quiet);
+    snprintf(p, sizeof p, "%s/env.txt", dm); env_file(p, quiet);
+    setenv("DM_ENV_FILE_KEYS", g_file_keys ? g_file_keys : "", 1); setenv("DM_ENV_LAUNCH_KEYS", g_launch_keys ? g_launch_keys : "", 1);
+    free(g_file_keys); free(g_launch_keys);
+    snprintf(p, sizeof p, "%s/Library/Application Support/nxnative/users.json", home);
+    return dm_users_prepare_file(sup, p) ? dm_users_error() : "Could not resolve the local user list.";
+}
+
 int main(int argc, char **argv) {
+    int manage_users = 0, no_window = 0, bad_args = 0;
+    const char *rename_id = NULL, *nickname = NULL;
+    for (int i = 1; i < argc; i++) {
+        const char *arg = argv[i];
+        if (!strcmp(arg, "--no-launcher")) { no_window = 1; continue; }
+        int create = !strcmp(arg, "--create-user"), rename = !strcmp(arg, "--rename-user");
+        if (manage_users || (!create && !rename && strcmp(arg, "--list-users"))) { bad_args = 1; continue; }
+        manage_users = 1;
+        if (rename && i + 1 < argc) rename_id = argv[++i];
+        if (create || rename) {
+            if (i + 1 < argc) nickname = argv[++i]; else bad_args = 1;
+        }
+    }
+    if (manage_users && bad_args) {
+        fprintf(stderr, "Usage: nxnative --list-users | --create-user NAME | --rename-user ID NAME\n");
+        return 2;
+    }
     char self[PATH_MAX], exe[PATH_MAX]; uint32_t n = sizeof self;
     if (_NSGetExecutablePath(self, &n) || !realpath(self, exe)) return 1;
     char contents[PATH_MAX], res[PATH_MAX], host[PATH_MAX], dm[PATH_MAX], romfs[PATH_MAX], p[PATH_MAX];
@@ -170,7 +205,26 @@ int main(int argc, char **argv) {
     char name[256] = "nxnative", id[64] = "", marker[512] = "", lang[32] = "";
     if (!info_string("CFBundleName", name, sizeof name)) snprintf(name, sizeof name, "nxnative");
     info_string("DMRomfsMarker", marker, sizeof marker); info_string("DMLanguage", lang, sizeof lang);
-    if (!info_string("DMTitleID", id, sizeof id) || strchr(id, '/')) { alert(name, "This app has no title ID in its Info.plist (DMTitleID): pack it again with build_ipa_from_nsp.py --platform mac-app."); return 1; }
+    if (!info_string("DMTitleID", id, sizeof id) || strchr(id, '/')) {
+        const char *msg = "This app has no title ID in its Info.plist (DMTitleID): pack it again with build_ipa_from_nsp.py --platform mac-app.";
+        if (manage_users) fprintf(stderr, "[RED] launcher: %s\n", msg); else alert(name, msg);
+        return 1;
+    }
+    const char *home = getenv("HOME"); if (!home || !*home) { fprintf(stderr, "[RED] launcher: HOME is unset\n"); return 1; }
+    char sup[PATH_MAX]; snprintf(sup, sizeof sup, "%s/Library/Application Support/nxnative/%s", home, id);
+    if (manage_users) {
+        const char *error = load_launch_env(sup, dm, home, 1);
+        if (!error && nickname) {
+            if (!getenv("DM_USERS_FILE") && dm_users_can_edit()) {   // the first edit, before any game has created Application Support
+                snprintf(p, sizeof p, "%s/Library/Application Support/nxnative", home);
+                mkdirs(p);
+            }
+            error = dm_users_edit(rename_id, nickname);
+        }
+        if (error) { fprintf(stderr, "[RED] launcher: %s\n", error); return 1; }
+        if (!dm_users_write_json(stdout)) { fprintf(stderr, "[RED] launcher: could not write the local user list\n"); return 1; }
+        return 0;
+    }
     struct stat st; snprintf(p, sizeof p, "%s/romfs.img", res);
     int valid_romfs;
     if (!stat(p, &st)) {
@@ -181,9 +235,7 @@ int main(int argc, char **argv) {
         alert(name, "The game data inside this app is missing or incomplete (Contents/Resources/romfs.img, Contents/Resources/dm or Contents/MacOS/dmhost): pack it again with build_ipa_from_nsp.py --platform mac-app.");
         return 1;
     }
-    const char *home = getenv("HOME"); if (!home || !*home) return 1;
-    char sup[PATH_MAX], save[PATH_MAX], temp[PATH_MAX], logs[PATH_MAX], log[PATH_MAX], prev[PATH_MAX];
-    snprintf(sup, sizeof sup, "%s/Library/Application Support/nxnative/%s", home, id);
+    char save[PATH_MAX], temp[PATH_MAX], logs[PATH_MAX], log[PATH_MAX], prev[PATH_MAX];
     snprintf(save, sizeof save, "%s/save", sup); snprintf(temp, sizeof temp, "%s/temp", sup);
     snprintf(logs, sizeof logs, "%s/Library/Logs/nxnative", home);
     snprintf(log, sizeof log, "%s/%s.log", logs, id); snprintf(prev, sizeof prev, "%s/%s.prev.log", logs, id);
@@ -192,19 +244,28 @@ int main(int argc, char **argv) {
     int fd = open(log, O_WRONLY | O_CREAT | O_TRUNC, 0644);
     if (fd >= 0) { dup2(fd, 1); dup2(fd, 2); close(fd); setvbuf(stdout, NULL, _IOLBF, 0); }
     fprintf(stderr, "launcher: %s (%s), host %s\n", name, id, host);
-    CFArrayRef rules = setting_rules();   // the settings the launch environment already set: the window shows them, fixed
-    for (CFIndex i = 0; rules && i < CFArrayGetCount(rules); i++) { char env[128]; if (rule_env(CFArrayGetValueAtIndex(rules, i), env, sizeof env) && getenv(env)) add_key(&g_launch_keys, env); }
-    snprintf(p, sizeof p, "%s/env.txt", sup); env_file(p);
-    snprintf(p, sizeof p, "%s/env.txt", dm); env_file(p);
-    setenv("DM_ENV_FILE_KEYS", g_file_keys ? g_file_keys : "", 1); setenv("DM_ENV_LAUNCH_KEYS", g_launch_keys ? g_launch_keys : "", 1);
-    free(g_file_keys); free(g_launch_keys);
-    setenv("DM_SAVE", save, 0);   // before the window: its cloud-save check compares this save with the cloud's (Launcher.swift SaveCheck)
-    int window = !(getenv("DM_LAUNCHER") && !strcmp(getenv("DM_LAUNCHER"), "0"));
-    for (int i = 1; i < argc; i++) if (!strcmp(argv[i], "--no-launcher")) window = 0;
+    const char *users_error = load_launch_env(sup, dm, home, 0);
+    int window = !no_window && !(getenv("DM_LAUNCHER") && !strcmp(getenv("DM_LAUNCHER"), "0"));
+    if (users_error) {
+        if (window) alert(name, users_error); else fprintf(stderr, "[RED] launcher: %s\n", users_error);
+        return 1;
+    }
     if (!window) fprintf(stderr, "launcher: no settings window (DM_LAUNCHER=0 or --no-launcher)\n");
+    dm_local_save_configure(id, save);
     int shown = window ? dm_mac_launcher() : 2;
     if (!shown) return 0;   // Quit: no game
+    if (shown < 0) return 1;
     if (shown == 2) saved_choices();
+    // Pass an explicit ID even for a no-window start: the same user stays selected if the roster is reordered before the host reads it.
+    if (dm_users()->configured && !dm_users_selection_locked() && !dm_users_select_index(dm_users_selected_index())) {
+        fprintf(stderr, "[RED] launcher: could not pass the selected local user to the host\n"); return 1;
+    }
+    char save_error[1024];
+    if (!dm_local_save_apply(save_error, sizeof save_error)) {
+        if (shown == 1) alert("Unable to open save location", save_error);
+        else fprintf(stderr, "[RED] launcher: %s\n", save_error);
+        return 1;
+    }
     cloud_saves_folder();
     setenv("DM_ROOT", sup, 0); setenv("DM_ROMFS", romfs, 0); setenv("DM_TEMP", temp, 0);
     snprintf(p, sizeof p, "%s/Library/Application Support/nxnative/system", home); setenv("DM_SYSTEM_DIR", p, 0);   // the player's own console files, for every game
@@ -221,13 +282,19 @@ int main(int argc, char **argv) {
     sigemptyset(&sa.sa_mask);
     sigaction(SIGTERM, &sa, NULL); sigaction(SIGINT, &sa, NULL); sigaction(SIGHUP, &sa, NULL);
     char *host_argv[] = {host, dm, NULL};
+    int channel[2];
+    save_sync_launch_prepare(channel);
     int err = posix_spawn(&g_child, host, NULL, NULL, host_argv, environ);
-    if (err) { fprintf(stderr, "[RED] launcher: cannot start %s: %s\n", host, strerror(err)); return 1; }
+    if (channel[1] >= 0) close(channel[1]);
+    if (err) {
+        if (channel[0] >= 0) close(channel[0]);
+        fprintf(stderr, "[RED] launcher: cannot start %s: %s\n", host, strerror(err));
+        return 1;
+    }
     int status;
     while (waitpid(g_child, &status, 0) < 0) if (errno != EINTR) return 1;
-    // Cloud saves (DM_SAVE_SYNC, dm/host/save_sync.h): what the host committed and had not sent yet goes now, after a crash too (the committed save is whole whatever the host was doing)
-    // DM_SAVE as the host had it: an env file or the launch environment may have set another folder than this app's own
-    if (!save_sync_after_exit(getenv("DM_SAVE"), id)) fprintf(stderr, "launcher: the save did not reach the cloud; it goes at the next start\n");
+    // Recover unsent commits after a crash only if this host reconciled the shared cloud archive.
+    if (!save_sync_launch_finish(channel[0], getenv("DM_SAVE"), id)) fprintf(stderr, "launcher: the save did not reach the cloud; it goes at the next start\n");
     if (WIFSIGNALED(status)) { fprintf(stderr, "launcher: the host stopped on signal %d\n", WTERMSIG(status)); return 128 + WTERMSIG(status); }
     fprintf(stderr, "launcher: the host exited with %d\n", WEXITSTATUS(status));
     return WEXITSTATUS(status);

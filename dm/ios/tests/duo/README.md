@@ -1,6 +1,6 @@
 # iOS layout and input harness (Duo harness)
 
-This XCTest app compiles the production iOS gamepad, layout and hosting-controller code with inert host-runtime stubs. Its fixture `game_profile.h` supplies no game data, so the harness does not generate or require a game profile or extracted files.
+This XCTest app compiles the production iOS gamepad, layout and hosting-controller code with inert host-runtime stubs. It links the production local-user registry and save-folder implementation required by the shared settings model and root view controller. Its fixture `game_profile.h` supplies no game data, so the harness does not generate or require a game profile or extracted files.
 
 The Simulator unit tests cover portrait and landscape layout, safe areas, valid and invalid division regions, 16:9 fitting and the Fill picture, touch hit ownership (the menu button against − / +), multitouch and video coordinates, pose-change input release, the in-game menu's layout pick and its live settings (picture, console mode, rumble, frame-rate counter) on the production root view controller, the drawable's pixel cap, controller-to-player slots, stale controller callbacks, and preservation of a seeded controller-motion sample across layout changes. The optional virtual-controller case runs when Simulator exposes one. They use synthetic touches, controller snapshots, hinge statuses and division callbacks; they do not exercise UIKit's own hit-testing of real touches, the menu's presentation or system touch cancellation.
 

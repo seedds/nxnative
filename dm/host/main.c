@@ -1,6 +1,7 @@
 // Bootstrap: after loading the modules, initialize the SDK runtime in the real order of nn::init::Start (sdk+0x2b0470) in the SDK, then enter nnMain.
 #include "dm.h"
 #include "front.h"
+#include "local_users.h"
 #include "../gfx/nvn/dmsh_chain.h"
 #include <CoreFoundation/CoreFoundation.h>
 #include <stdatomic.h>
@@ -167,6 +168,15 @@ void dm_host_preload_start(int argc, char **argv) {
     if (pthread_create(&g_pre.th, &a, preload_thread, NULL)) die("dm_host_preload_start: cannot start the thread");
 }
 int main(int argc, char **argv) {
+    if (argc == 2 && !strcmp(argv[1], "--list-users")) {
+        if (dm_users_write_json(stdout)) return 0;
+        fprintf(stderr, "[RED] Local users: %s\n", dm_users_error() ?: "cannot write the user list");
+        return 1;
+    }
+    if (!dm_users_begin_session()) {
+        fprintf(stderr, "[RED] Local users: %s\n", dm_users_error());
+        return 1;
+    }
     { int mtl_pso_prebuild_tool(void); int r = mtl_pso_prebuild_tool(); if (r) return r == 2; }   // DM_PSO_PREBUILD=tool: what a first start would build, made with no game (nvn_mtl.m)
     if (getenv("DM_PRELOAD")) dm_host_preload_start(argc, argv);   // Exercise the early-start path on Mac (on iOS it is called from the App's main())
     if (atomic_load(&g_pre.started)) {

@@ -62,6 +62,7 @@ The game builds Mii heads from the console's MiiModel system data, starting at b
 
 ## Found on this game
 
+- [Offline HTML startup overflows a small guest stack](../../../docs/reference/services.md#offline-html-startup-overflows-a-small-guest-stack): the Info screen (main menu, bottom row) crashed on 4.0.1. Checked on the Mac with 4.0.0 (2026-11-13): the page (`htmlcontents.htdocs/html/USen/index.html`) shows, B closes it (exit reason 1), it opens again and the menu takes input after. Open: the page does not move between its entries or open one (its buttons are `tabindex` elements moved by the Switch browser's own focus navigation, and their handlers call `window.nx.playSystemSe`, which the host does not define), and the footer's back-button icon draws as an empty square.
 - **Display sleep during controller play on the Mac (resolved, player-confirmed):** [Mac display sleep during controller play](../../../docs/reference/services.md#mac-display-sleep-during-controller-play).
 - **Resolved in the sanitizer audit:** [Unaligned command headers during layout probing](../../../docs/reference/audio.md#unaligned-command-headers-during-layout-probing), reproduced with the SDK 4 command-list fixture.
 

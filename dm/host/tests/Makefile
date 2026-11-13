@@ -192,6 +192,12 @@ $(B)/t_uecvar: t_uecvar.c ../hle_uecvar.c ../hle.h ../dm.h $(GAME_H) | $(B)
 $(B)/t_swkbd: t_swkbd.c ../hle_swkbd.c ../hle.h ../dm.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -Wno-unused-function -I.. $(GINC) -o $@ t_swkbd.c ../hle_swkbd.c
 run: $(B)/t_bigstack
+run: web-stack
+.PHONY: web-stack
+web-stack: $(B)/t_web_stack
+	$(B)/t_web_stack
+$(B)/t_web_stack: t_web_stack.c ../hle_web.c ../hle_bigstack.c ../hle.h ../dm.h ../front.h ../dm_input.h $(GAME_H) | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -I.. $(GINC) -o $@ t_web_stack.c ../hle_bigstack.c
 $(B)/t_bigstack: t_bigstack.c ../hle_bigstack.c ../hle.h ../dm.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -Wall -Wno-unused-function -I.. $(GINC) -o $@ t_bigstack.c ../hle_bigstack.c
 run: watch-sample

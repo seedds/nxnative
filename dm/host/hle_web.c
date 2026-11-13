@@ -110,7 +110,8 @@ void dm_web_failed(const char *why) {   // the page did not load: the stand-in t
     pthread_mutex_unlock(&g_web_mu);
 }
 
-// Start: the page is looked up and opened; hidden until Appear when the argument boots it initially hidden (forced off for the synchronous form)
+// Start: the page is looked up and opened; hidden until Appear when the argument boots it initially hidden (forced off for the synchronous form).
+// Both guest entry points use HLE_FORCE_BIG: these path buffers and web_find's exceed an 8 KB guest stack before the front end opens the page (issue #2541).
 static void web_start(const uint8_t *arg, int sync) {
     char path[0xc00], cb[0x400], dir[1024];
     web_tlv_str(arg, TLV_DOCUMENT_PATH, path, sizeof path); web_tlv_str(arg, TLV_CALLBACK_URL, cb, sizeof cb);
@@ -148,7 +149,7 @@ HLE_FORCE("_ZN2nn3web17OfflineWebSession8FinalizeEv", "offline HTML session: a p
     (void)s; pthread_mutex_lock(&g_web_mu); int open = g_web_state == 1 || g_web_state == 2; pthread_mutex_unlock(&g_web_mu);
     if (open) { dm_web_ended(2, NULL); web_return(NULL); }
 }
-HLE_FORCE("_ZN2nn3web17OfflineWebSession5StartEPPNS_2os15SystemEventTypeERKNS0_22ShowOfflineHtmlPageArgE", "start an offline HTML page in the host's web view (the stand-in without the page)",
+HLE_FORCE_BIG("_ZN2nn3web17OfflineWebSession5StartEPPNS_2os15SystemEventTypeERKNS0_22ShowOfflineHtmlPageArgE", "start an offline HTML page in the host's web view (the stand-in without the page)",
           Result, h_webs_Start, void *s, void **ev, const uint8_t *arg) {
     (void)s;
     hle_bind_system_event(g_ev_web, 0); hle_clear_system_event(g_ev_web);
@@ -199,7 +200,7 @@ HLE_FORCE("_ZN2nn3web17OfflineWebSession11WaitForExitEPNS0_26OfflineHtmlPageRetu
     (void)s; web_wait_end(); web_return(rv); return RES_OK; }
 
 // The page as an applet the calling thread waits for (Octopath Traveler 0 imports it): shown at once; without the page the cut of before (fails)
-HLE_FORCE("_ZN2nn3web19ShowOfflineHtmlPageEPNS0_26OfflineHtmlPageReturnValueERKNS0_22ShowOfflineHtmlPageArgE", "offline HTML page in the host's web view, waited for (fails without the page)",
+HLE_FORCE_BIG("_ZN2nn3web19ShowOfflineHtmlPageEPNS0_26OfflineHtmlPageReturnValueERKNS0_22ShowOfflineHtmlPageArgE", "offline HTML page in the host's web view, waited for (fails without the page)",
           Result, h_web_Offline, void *rv, const uint8_t *arg) {
     hle_bind_system_event(g_ev_web, 0); hle_clear_system_event(g_ev_web);
     web_start(arg, 1);

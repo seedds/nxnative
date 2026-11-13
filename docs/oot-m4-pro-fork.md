@@ -2,7 +2,7 @@
 
 This fork collects the OOT work from November 11–13, 2026. Its engine checkpoint is `09a2572523bea861d0c7c7006826e57801d16de5`; the sharing branch adds a portable preset and documentation without changing that engine code. This is a contribution checkpoint, not a full-game certification or a promise of a fixed frame rate on every Mac.
 
-The latest player-confirmed configuration is **2560×1440 output, a 60-native-FPS cap, MetalFX spatial upscaling, interpolation off and HDR off**. On November 13, Nassim confirmed normal speed and very smooth play on his M4 Pro. He initially thought interpolation was running; the live configuration confirmed it was disabled. This is player evidence, not a controlled frame-time or battery benchmark.
+The latest player-confirmed configuration is **2560×1440 output, a 60-native-FPS cap, MetalFX spatial upscaling, interpolation off and HDR off**. On November 13, Nassim confirmed normal speed and very smooth play on his M4 Pro, then reported that Hyrule Field was still imperfect. He initially thought interpolation was running; the live configuration confirmed it was disabled. This is player evidence, not a controlled frame-time or battery benchmark or a locked-60 claim for every area.
 
 ## Build your own app
 

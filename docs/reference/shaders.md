@@ -35,6 +35,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Found on:** [FINAL FANTASY X/X-2 HD Remaster](../../dm/games/0100BC300CB48000/README.md); base and both supplied DLC packs yield 5,752 unique shaders.
 - **Check:** `test_vbf.py` covers raw and zlib blocks, shared/missing members, truncation, unaligned effects, loose shader keys and inconsistent lengths. All 5,752 programs translate on the Mac.
 
+### Phyre effects in split KIT archives
+
+- **Symptom:** the shader split finds no shaders in `main` or RomFS, which holds a `.kit` index and numbered `.kit.N` parts. Reading the effects alone still misses their compute programs.
+- **Cause:** the `kit!` index names members by hash and places their data in separate parts. Compressed members use 64 KiB LZ4 blocks whose matches can reach the previous block. Their `RYHP` effects contain both ordinary graphics programs and compute programs without the graphics code header that `phyre_shaders` required.
+- **Fix:** `kit_entries` checks the index and part ranges; `kit_read` carries the previous 64 KiB into each block and verifies decoded lengths, complete input consumption and the member's SHA1. Raw members use their decoded length. `kit_jobs` scans members through `scan_blob` and excludes the index's parts from the loose-file scan. `phyre_shaders` uses the existing control/code stage reader; a headerless compute program must be inside a `RYHP` effect, fit its bounds and not overlap a control section. Graphics programs keep their existing acceptance rules. Nonzero high offset words remain unsupported and are rejected.
+- **Found on:** Unravel TWO (`0100E5D00CC0C000`) 1.0.1, with a provisional profile: 22,268 archive members yield 2,629 unique shaders (438 vertex, 1,793 pixel, 398 compute), against zero before. The Mac shader build completes with all 2,629.
+- **Check:** `test_vbf.py` constructs KIT parts and Phyre effects without game data. It covers a block that cannot decode without the preceding dictionary, raw members, missing or truncated parts, invalid lengths and hashes, compute bounds, the parent archive's scan budget, graphics code containing the control magic as a literal, and stable game rows when a DLC repeats a KIT effect. `test_pg_shader.py` checks that a minimal binding-table record still reaches the existing reader. Format reference: Luigi Auriemma's [Unravel KIT reader](https://aluigi.altervista.org/bms/unravel.bms).
+
 ### Diablo III's console packages
 
 - **Symptom:** the split finds no shaders (`[RED] the shader split found no shaders in main or the RomFS`), the RomFS holds only `.cpk` files, and `cpk.py` refuses them (`not a CPK`); the run prints `[RED] shader … is not in the shader map` for every program.

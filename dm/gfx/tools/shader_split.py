@@ -2169,8 +2169,70 @@ def sumo_shaders(d, label):
         out.append(sumo_program(d, h, size, co, ko, cn, kn, f'{label}#NVNSH@{h:#x}', STAGES[stage]))
     return out
 
+KIT = b'kit!'
+KIT_CHUNK = 0x10000
+
+def kit_entries(path):
+    """Unravel's KIT index: a 0x25-byte header and an offset to 56-byte records, naming a .kit.N shard, stored/decoded sizes and the decoded SHA1. Flag 8 means chained LZ4 blocks."""
+    with open(path, 'rb') as f: d = f.read()
+    if len(d) < 0x25 or d[:4] != KIT: red(f'{path}: incomplete KIT header')
+    base = 0x25 + struct.unpack_from('<Q', d, 0x10)[0]
+    count = struct.unpack_from('<I', d, 0x18)[0]
+    if base > len(d) or count > (len(d) - base) // 56: red(f'{path}: KIT directory is outside the index')
+    entries, sizes = [], {}
+    for i in range(count):
+        flags, part, off, high, stored, size, sha, _, _ = struct.unpack_from('<IHIHQQ20sII', d, base + 56 * i)
+        if high: red(f'{path}: KIT entry {i} has an unsupported high offset word')
+        shard = f'{path}.{part}'
+        if part not in sizes:
+            if not os.path.isfile(shard): red(f'{path}: KIT entry {i} has no shard {part}')
+            sizes[part] = os.path.getsize(shard)
+        n = stored if flags & 8 else size
+        if off > sizes[part] or n > sizes[part] - off: red(f'{path}: KIT entry {i} is outside shard {part}')
+        entries.append((i, part, off, n, size, bool(flags & 8), sha))
+    return entries
+
+def kit_read(path, entry):
+    import lz4.block
+    i, part, off, n, size, compressed, sha = entry
+    label = f'{path}#{i}'
+    with open(f'{path}.{part}', 'rb') as f: f.seek(off); d = f.read(n)
+    if len(d) != n: red(f'{label}: truncated KIT member')
+    if compressed:
+        out, pos = bytearray(), 0
+        while pos + 4 <= len(d) and len(out) < size:
+            stored = struct.unpack_from('<I', d, pos)[0]; pos += 4
+            want = min(KIT_CHUNK, size - len(out))
+            if not 0 < stored <= len(d) - pos: red(f'{label}: LZ4 block is outside the KIT member')
+            try: block = lz4.block.decompress(d[pos:pos + stored], uncompressed_size=want, dict=bytes(out[-KIT_CHUNK:]))
+            except lz4.block.LZ4BlockError as e: red(f'{label}: LZ4 block at {pos - 4:#x}: {e}')
+            if len(block) != want: red(f'{label}: LZ4 block makes {len(block)} of {want} bytes')
+            out += block; pos += stored
+        if pos != len(d) or len(out) != size: red(f'{label}: incomplete KIT LZ4 stream ({len(out)} of {size} bytes, {pos} of {len(d)} stored)')
+        d = bytes(out)
+    if hashlib.sha1(d).digest() != sha: red(f'{label}: KIT SHA1 mismatch')
+    return d
+
+def kit_jobs(files, parts=64):
+    """Read KIT shards only through their index, in ranges of members. Hash-only names cannot select shaders, so every member is decoded and scanned."""
+    kits = []
+    for p, r in files:
+        if not p.lower().endswith('.kit'): continue
+        with open(p, 'rb') as f: head = f.read(4)
+        if head == KIT: kits.append((p, r, kit_entries(p)))
+    jobs, paths = [], set()
+    step = sum(e[3] for _, _, es in kits for e in es) / parts
+    for p, r, es in kits:
+        paths.add(p); paths.update(f'{p}.{e[1]}' for e in es)
+        cur, size = [], 0
+        for e in es:
+            cur.append(e); size += e[3]
+            if size >= step: jobs.append((p, r, (KIT, tuple(cur)))); cur, size = [], 0
+        if cur: jobs.append((p, r, (KIT, tuple(cur))))
+    return jobs, paths
+
 def phyre_shaders(d, label):
-    """Phyre's NVN code immediately precedes its control section, unaligned in RYHP effects; loose blobs also prefix their two lengths (FFX/X-2)."""
+    """Phyre's NVN code immediately precedes its control section, unaligned in RYHP effects; loose blobs also prefix their two lengths (FFX/X-2). Unravel TWO also has headerless compute code."""
     out = []
     for m in re.finditer(re.escape(CTL_MAGIC), d):
         c = m.start()
@@ -2178,9 +2240,10 @@ def phyre_shaders(d, label):
         cn = struct.unpack_from('<I', d, c + 0x20)[0]
         kn = struct.unpack_from('<I', d, c + 0x704)[0]
         k = c - kn
-        if k < 0 or kn < 0x80 or cn < 0x760 or c + cn > len(d) or d[k:k + 4] != GFX_MAGIC: continue
+        if k < 0 or kn < 0x80 or cn < 0x760 or c + cn > len(d): continue
         ctl, code = d[c:c + cn], d[k:c]
-        st = sph_stage(code)
+        st = glslc_stage(ctl, code)
+        if st == 'cs' and code[:4] != CS_MAGIC and (d[:4] != b'RYHP' or CTL_MAGIC in code): continue
         if st and not check(label, st, ctl, code): out.append((f'{label}#PHYRE@{k:#x}', st, ctl, code))
     return out
 
@@ -3038,6 +3101,8 @@ def scan_blob(d, label, out, depth=0, left=None):
     if d[:4] in PG_STAGES and len(d) >= 0x18 and d[(o := struct.unpack_from('<I', d, 0xc)[0]):o + 4] == CTL_MAGIC: out.extend(pg_shader(d, label)); return
     if shaders := pg_sized_shader(d, label): out.extend(shaders); return
     if (shaders := viper_shader(d, label)) is not None: out.extend(shaders); return   # Star Fox's shader binaries
+    if d[:4] == b'RYHP' or d[8:12] == GFX_MAGIC:
+        if shaders := phyre_shaders(d, label): out.extend(shaders); return
     if d[:4] == b'VIPR':   # Star Fox's resource containers: two of them wrap the engine's NDSR upscaler networks (ounce-nvn2-upper_left_ndsr.bin), 40 shaders each, as a file inside
         for m in re.finditer(b'NDSR', d):
             if m.start() + 0x20 <= len(d) and d[m.start() + 4:m.start() + 6] == b'\x00\x01': out.extend(ndsr_shaders(d[m.start():], f'{label}#NDSR@{m.start():#x}'))
@@ -3239,6 +3304,9 @@ def scan_file_in(args):
     if ext in ('.data', '.patch', '.debug', '.nxpc') and os.path.exists(stem + '.dict'): return rel, {}, set(), {}   # read through its Next Level Games index (nlg_shaders)
     with open(path, 'rb') as f: head = f.read(16)
     found = []; trees = {}
+    if len(args) > 2 and args[2][0] == KIT:
+        for e in args[2][1]: scan_blob(kit_read(path, e), f'/{rel}#{e[0]}', found)
+        return rel, uniq_keys(found), var_pairs(found), trees
     if len(args) > 2 and args[2][0] == b'ARH1':
         arh_shaders(path, rel, args[2][1], found)
         return rel, uniq_keys(found), var_pairs(found), trees
@@ -3471,8 +3539,9 @@ def main():
     fb_jobs, fbs = frostbite_jobs(files)   # EA SPORTS FC 27's Frostbite bundles, Oodle Leviathan decoded by the game's own decoder in the Mac host
     pd_jobs, pdats = pdat_jobs(files)   # Kirby Air Riders' PDAT archives: the PMAP records in byte ranges
     rp_jobs, rpfs = rpf_jobs(files, main_v)   # Red Dead Redemption's RPF6 archives, their tables decrypted with the key in main (rpf6.py)
-    big += pak_jobs + tr_jobs + ue_jobs + bd_jobs + arc_jobs + pz_jobs + ck_jobs + d3_jobs + ca_jobs + cr_jobs + zp_jobs + ah_jobs + fb_jobs + pd_jobs + rp_jobs
-    files = [(p, r) for p, r in files if not linkdata_jobs(p, r) and p not in paks and p not in trp and p not in uep and p not in bdts and p not in arcs and p not in pkzs and p not in cpks and p not in d3s and p not in cascs and p not in cras and p not in zips and p not in arhs and p not in fbs and p not in pdats and p not in rpfs]
+    kt_jobs, kits = kit_jobs(files)   # Unravel TWO's KIT shards: chained LZ4 resources and Phyre effects
+    big += pak_jobs + tr_jobs + ue_jobs + bd_jobs + arc_jobs + pz_jobs + ck_jobs + d3_jobs + ca_jobs + cr_jobs + zp_jobs + ah_jobs + fb_jobs + pd_jobs + rp_jobs + kt_jobs
+    files = [(p, r) for p, r in files if not linkdata_jobs(p, r) and p not in paks and p not in trp and p not in uep and p not in bdts and p not in arcs and p not in pkzs and p not in cpks and p not in d3s and p not in cascs and p not in cras and p not in zips and p not in arhs and p not in fbs and p not in pdats and p not in rpfs and p not in kits]
     with cf.ProcessPoolExecutor(J, initializer=_pool_init, initargs=(common, {}, zdicts)) as ex:
         n = len(big) + len(files)
         results += pooled(ex, big, n) + pooled(ex, files, n, len(big), chunk=16)

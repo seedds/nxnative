@@ -4,7 +4,7 @@ Play your own Nintendo Switch and Switch 2 games natively on Apple silicon Macs,
 
 It is not an emulator: the game's own code runs directly on the Apple chip, with Switch graphics rebuilt on Metal. Nothing from any game is in this repository, and the project is not affiliated with Nintendo or any game publisher.
 
-[Games](#games) · [Community front ends](#community-front-ends) · [Requirements](#requirements) · [How to play](#how-to-play) · [Discussions](#discussions) · [For developers](#for-developers)
+[Games](#games) · [Community front ends](#community-front-ends) · [Game bring-ups by the community](#game-bring-ups-by-the-community) · [Requirements](#requirements) · [How to play](#how-to-play) · [Discussions](#discussions) · [For developers](#for-developers)
 
 ## Games
 
@@ -35,6 +35,13 @@ Community projects build on nxnative with tools to turn your games into apps for
 - [NxNative Launcher](https://github.com/rennan101/nxnative_Launcher) — Mac launcher with guided builds and controller mapping.
 - [LumaNX](https://github.com/Xc1Ym/LumaNX) — Mac game builder with IPA export.
 - [GameCase](https://github.com/Tiaoge-tou/GameCase) — iOS game library based on LiveContainer.
+
+## Game bring-ups by the community
+
+Projects that carry a Switch 2 game's own work on nxnative's engine, maintained by their authors with their game notes and tutorials. Questions and bugs about them go to their own pages.
+
+- **[kartnative](https://github.com/pahorema/kartnative)**: Mario Kart World's bring-up: its sparse texture checks, first-sample terrain tiles and the `mem_map_limit` memory plan are its work, and the settings the host continues to use carry its numbers.
+- **[plumber-racer-2](https://github.com/cheemu21/plumber-racer-2)**: Mario Kart World 1.0.0 on iPhone and Mac, with an install tutorial, touch racing controls and the file-backed memory recipe; a whole cup on an iPhone 18 Pro in LiveContainer at about 3.9 GB.
 
 ## Requirements
 

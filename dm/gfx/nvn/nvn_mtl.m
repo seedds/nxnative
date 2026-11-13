@@ -335,6 +335,13 @@ static _Atomic uint64_t g_rh_made, g_rh_reused, g_rh_trimmed;   // for the memor
 @end
 static char g_rh_owner_key;
 static int sw_mode(const char *name, int dflt); static inline int sw_on(int m);
+// What each heap is for, to tell the memory breakdown apart (res_top): a heap is tagged where it is made; the table holds no heap alive
+static NSMapTable *g_heap_what; static os_unfair_lock g_heap_what_lk = OS_UNFAIR_LOCK_INIT;
+static id<MTLHeap> heap_tag(id<MTLHeap> h, NSString *what) {
+    if (h) { os_unfair_lock_lock(&g_heap_what_lk); if (!g_heap_what) g_heap_what = [NSMapTable weakToStrongObjectsMapTable]; [g_heap_what setObject:what forKey:h]; os_unfair_lock_unlock(&g_heap_what_lk); }
+    return h;
+}
+static NSString *heap_what(id h) { os_unfair_lock_lock(&g_heap_what_lk); NSString *w = [g_heap_what objectForKey:h]; os_unfair_lock_unlock(&g_heap_what_lk); return w ?: @"other"; }
 static int rh_mode(void) { static int m = -1; if (m < 0) m = sw_mode("DM_NVN_RT_RECYCLE", 1); return m; }
 // A heap for a texture of this descriptor: the smallest waiting one it fits, up to an eighth larger, or a new one of its exact size. nil when the descriptor cannot be placed
 static id<MTLHeap> rh_take(MTLTextureDescriptor *d, int *reused) {
@@ -354,7 +361,7 @@ static id<MTLHeap> rh_take(MTLTextureDescriptor *d, int *reused) {
     if (got) { *reused = 1; return CFBridgingRelease(got); }
     MTLHeapDescriptor *hd = [MTLHeapDescriptor new]; hd.type = MTLHeapTypePlacement; hd.size = need.size;
     hd.storageMode = d.storageMode; hd.cpuCacheMode = d.cpuCacheMode; hd.hazardTrackingMode = d.hazardTrackingMode;
-    *reused = 0; return [g_dev newHeapWithDescriptor:hd];
+    *reused = 0; return heap_tag([g_dev newHeapWithDescriptor:hd], @"render targets and other recycled textures");
 }
 // A shared render target in a GPU-only pool (tex_mtl_), in recycled memory: written by the GPU alone, so its bytes never come from the CPU's view of the pool
 static id<MTLTexture> rh_texture(const tex_t *t, MTLTextureDescriptor *d) {
@@ -424,12 +431,15 @@ static void res_commit(void) {
 // What the residency set holds: totals by kind and the largest objects. At the first GPU out-of-memory error (the error names none of them), and for DM_CTL "restop" (hle_hid.c). The set holds
 // the game's pools (shared buffers over guest memory), textures, heaps and staging alike
 static int g_res_top_show = 24;   // how many of the largest objects res_top lists (the periodic breakdown lists a few)
+static uint32_t pso_count(void);
 static void res_top(const char *why) { @autoreleasepool {
     enum { N = 24 }; id<MTLAllocation> top[N] = {nil}; uint64_t total = 0, n = 0, kind[4] = {0}, count[4] = {0};
+    NSMutableDictionary<NSString *, NSNumber *> *hb = [NSMutableDictionary dictionary], *hn = [NSMutableDictionary dictionary];   // heaps by use: bytes, count
     pthread_mutex_lock(&g_res_mu);
     for (id<MTLAllocation> o in g_res_objects.allObjects) { uint64_t z = o.allocatedSize; total += z; n++;
         int k = [(id)o conformsToProtocol:@protocol(MTLTexture)] ? 0 : [(id)o conformsToProtocol:@protocol(MTLHeap)] ? 1 : ((id<MTLBuffer>)o).storageMode == MTLStorageModeShared ? 2 : 3;
         kind[k] += z; count[k]++;
+        if (k == 1) { NSString *w = heap_what(o); hb[w] = @(hb[w].unsignedLongLongValue + z); hn[w] = @(hn[w].unsignedLongLongValue + 1); }
         for (int q = 0; q < N; q++) if (!top[q] || z > top[q].allocatedSize) { for (int j = N - 1; j > q; j--) top[j] = top[j - 1]; top[q] = o; break; } }
     pthread_mutex_unlock(&g_res_mu);
     MLOG("%s: the residency set holds %llu objects, %llu MB (Metal's recommended working set %llu MB, GPU allocated %llu MB): textures %llu, %llu MB; heaps %llu, %llu MB; shared buffers %llu, %llu MB; private buffers %llu, %llu MB; the largest:", why,
@@ -439,6 +449,9 @@ static void res_top(const char *why) { @autoreleasepool {
         if ([o conformsToProtocol:@protocol(MTLTexture)]) { id<MTLTexture> t = o; MLOG("  texture %lux%lux%lu format %lu levels %lu%s: %llu MB", (unsigned long)t.width, (unsigned long)t.height, (unsigned long)MAX(t.depth, t.arrayLength), (unsigned long)t.pixelFormat, (unsigned long)t.mipmapLevelCount, t.isSparse ? " (sparse)" : "", (unsigned long long)(t.allocatedSize >> 20)); }
         else if ([o conformsToProtocol:@protocol(MTLHeap)]) MLOG("  heap: %llu MB", (unsigned long long)(((id<MTLHeap>)o).size >> 20));
         else { id<MTLBuffer> b = o; int sh = b.storageMode == MTLStorageModeShared; MLOG("  buffer %p+%#lx (%s): %llu MB", sh ? b.contents : NULL, (unsigned long)b.length, sh ? "shared" : "private", (unsigned long long)(b.allocatedSize >> 20)); } }
+    for (NSString *w in [hb.allKeys sortedArrayUsingComparator:^NSComparisonResult(NSString *x, NSString *y) { return [hb[y] compare:hb[x]]; }])
+        MLOG("  heaps for %s: %llu, %llu MB", w.UTF8String, hn[w].unsignedLongLongValue, hb[w].unsignedLongLongValue >> 20);
+    { uint64_t al = g_dev.currentAllocatedSize; MLOG("  allocated to the process but not in the residency set: %lld MB (render pipelines held %u: their compiled code and state, the display buffers, the driver's own)", (long long)((al >> 20) - (total >> 20)), pso_count()); }
 } }
 void mem_census(const char *why);
 void dm_gfx_restop(void) { res_top("DM_CTL restop"); mem_census("DM_CTL restop"); }
@@ -3387,6 +3400,7 @@ static int sp_slot(uint32_t *out) {   // caller holds g_sp_mu
         MTLHeapDescriptor *hd = [MTLHeapDescriptor new];
         hd.type = MTLHeapTypePlacement; hd.storageMode = MTLStorageModePrivate; hd.size = (NSUInteger)SP_HEAP_TILES * SP_TILE; hd.maxCompatiblePlacementSparsePageSize = MTLSparsePageSize64;
         id<MTLHeap> h = [g_dev newHeapWithDescriptor:hd];
+        heap_tag(h, @"sparse texture tiles (256 MB each)");
         if (!h) { RED_ONCE(144, "cannot make a 256 MB placement heap for sparse tiles (%llu tiles mapped)", (unsigned long long)g_sp_live); return 0; }
         if (!g_sp_heaps) g_sp_heaps = [NSMutableArray array];
         uint32_t base = (uint32_t)g_sp_heaps.count * SP_HEAP_TILES; [g_sp_heaps addObject:h]; res_add(h);
@@ -4252,7 +4266,7 @@ static id<MTLTexture> image_texture(const tex_t *t, MTLTextureDescriptor *d0) {
         if (!family) return nil;
         MTLHeapDescriptor *hd = [MTLHeapDescriptor new]; hd.type = MTLHeapTypePlacement; hd.size = capacity;
         hd.storageMode = d.storageMode; hd.cpuCacheMode = d.cpuCacheMode; hd.hazardTrackingMode = d.hazardTrackingMode;
-        id<MTLHeap> heap = [g_dev newHeapWithDescriptor:hd]; if (!heap) return nil;
+        id<MTLHeap> heap = heap_tag([g_dev newHeapWithDescriptor:hd], @"pool textures (placed by the game)"); if (!heap) return nil;
         owner = [NvImageHeap new]; owner->heap = heap; atomic_fetch_add(&g_image_heap_n, 1);
     }
     id<MTLTexture> mt = [owner->heap newTextureWithDescriptor:d offset:0]; if (!mt) return nil;
@@ -7694,6 +7708,7 @@ static MTLBlendOperation bop(int e) { switch (e) { case 2: return MTLBlendOperat
 static const uint8_t *g_pso_lmap; static id<MTLFunction> g_pso_fsfn; static pso_fz_desc g_pso_fz, g_fz_desc;
 static os_unfair_lock g_fz_fn_lock = OS_UNFAIR_LOCK_INIT;   // bf_fn: a shader's bflib and bffn (the submit thread and the warm-up both ask)
 static nvn_hmap g_pso = {.klen = sizeof(pso_key)}, g_dss;
+static uint32_t pso_count(void) { return g_pso.n; }
 static nvn_hmap g_pso_fail = {.klen = sizeof(pso_key)};   // pipelines that failed to build: remembered and never retried (previously every draw recompiled it, over 10,000 times in one iPhone session)
 static const char g_tf_mark, g_amp_mark, g_discard_mark;
 static char g_geo_mark;
@@ -9820,7 +9835,7 @@ static id<MTLTexture> stand_alloc(MTLTextureDescriptor *d) {
     }
     if (g_nstand_heap == STAND_HEAPS) { g_stand_full++; return nil; }
     MTLHeapDescriptor *hd = [MTLHeapDescriptor new]; hd.type = MTLHeapTypeAutomatic; hd.size = STAND_HEAP; hd.storageMode = MTLStorageModeShared;
-    id<MTLHeap> h = [g_dev newHeapWithDescriptor:hd];
+    id<MTLHeap> h = heap_tag([g_dev newHeapWithDescriptor:hd], @"texture stand-ins");
     if (!h) { g_stand_full++; return nil; }
     res_add(h); res_commit();   // before any table names a texture in it
     g_stand_heap_at = g_nstand_heap; g_stand_heap[g_nstand_heap++] = h;

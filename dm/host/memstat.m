@@ -102,7 +102,7 @@ static void *memstat_thread(void *p) {
     return NULL;
 }
 
-__attribute__((constructor)) static void memstat_start(void) {
+void memstat_start(void) {
     const char *p = getenv("DM_MEMSTAT");
     if (!p || !*p) return;
     char *path = strdup(p);
@@ -144,7 +144,7 @@ static void *thrcpu_thread(void *p) {
     }
     return NULL;
 }
-__attribute__((constructor)) static void thrcpu_start(void) {
+void thrcpu_start(void) {
     const char *p = getenv("DM_THRCPU");
     if (!p || !*p) return;
     char *spec = strdup(p);

@@ -941,6 +941,17 @@ static unsigned net_route(unsigned wanted, uint32_t *gateway) {
     (void)wanted; (void)gateway; return 0;
 #endif
 }
+#if TARGET_OS_IOS
+// The IPv4 address the system sends from to the internet: a UDP socket connected to an address beyond the local networks (192.0.2.1, a documentation
+// address, takes the default route; connect sends nothing) has the route's source as its own address. 0 when there is no IPv4 route
+static uint32_t net_route_source(void) {
+    int s = socket(AF_INET, SOCK_DGRAM, 0); if (s < 0) return 0;
+    struct sockaddr_in to = {.sin_len = sizeof to, .sin_family = AF_INET, .sin_port = htons(9)}, me = {0}; socklen_t n = sizeof me; uint32_t a = 0;
+    to.sin_addr.s_addr = htonl(0xc0000201);
+    if (!connect(s, (struct sockaddr *)&to, sizeof to) && !getsockname(s, (struct sockaddr *)&me, &n) && me.sin_family == AF_INET) a = me.sin_addr.s_addr;
+    close(s); return a;
+}
+#endif
 static int net_interface_get(net_interface *out) {
     memset(out, 0, sizeof *out);
 #ifdef DM_NET_TEST
@@ -957,7 +968,11 @@ static int net_interface_get(net_interface *out) {
     // then reject that same entry when preparing local discovery. Preserve a
     // non-local fallback for online use when no eligible LAN is available.
     dm_net_mode_t mode = dm_net_mode();
-    for (int pass = 0; pass < (mode == DM_NET_AUTO ? 2 : 1) && !out->address; pass++) {
+    // Online, iOS has no routing table to read (net_route), and getifaddrs lists cellular before Wi-Fi: the first adapter would tell the game its
+    // cellular address while it plays over Wi-Fi, and Pia offers that address to the other players for a direct link. So the first pass takes
+    // only the adapter the system sends from to the internet (net_route_source); the second, if none matched, any as before
+    uint32_t source = mode == DM_NET_NEXTENDO && !wanted ? net_route_source() : 0;
+    for (int pass = 0; pass < (mode == DM_NET_AUTO || source ? 2 : 1) && !out->address; pass++) {
 #endif
     for (struct ifaddrs *p = list; p; p = p->ifa_next) {
         if (!p->ifa_addr || p->ifa_addr->sa_family != AF_INET || !(p->ifa_flags & IFF_UP) || (!wanted && (p->ifa_flags & IFF_LOOPBACK))) continue;
@@ -971,11 +986,19 @@ static int net_interface_get(net_interface *out) {
         // TN3179: BSD names such as en0 are not API. Ask the functional type.
         if ((mode == DM_NET_LAN || mode == DM_NET_LDN || (mode == DM_NET_AUTO && pass == 0)) &&
             (!local_link || !(p->ifa_flags & IFF_BROADCAST) || (p->ifa_flags & IFF_POINTOPOINT))) continue;
+        if (source && pass == 0 && ((struct sockaddr_in *)p->ifa_addr)->sin_addr.s_addr != source) continue;
 #endif
         out->address = ((struct sockaddr_in *)p->ifa_addr)->sin_addr.s_addr;
         if (p->ifa_netmask && p->ifa_netmask->sa_family == AF_INET)
             out->mask = ((struct sockaddr_in *)p->ifa_netmask)->sin_addr.s_addr;
-        out->index = index; out->flags = p->ifa_flags; out->local_link = local_link; break;
+        out->index = index; out->flags = p->ifa_flags; out->local_link = local_link;
+#if TARGET_OS_IOS
+        static _Atomic unsigned told;   // the adapter the game is told about, logged when it changes (which one, not its address)
+        if (mode == DM_NET_NEXTENDO && atomic_exchange(&told, index) != index)
+            fprintf(stderr, "[dm] net: online adapter %s (%s)%s\n", p->ifa_name, local_link ? "Wi-Fi or wired" : "cellular or other",
+                    !source ? ", no route to the internet found" : pass ? ", none had the internet route's address" : ", the internet route's");
+#endif
+        break;
     }
 #if TARGET_OS_IOS
     }

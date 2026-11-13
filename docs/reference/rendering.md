@@ -179,6 +179,14 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Check:** `make -C dm/gfx/tests GAME=<id> check_t_image_srgb` (Metal validation): RGBA8_SRGB and BGRA8_SRGB textures; the image view is the linear twin over the same writable storage, an image load returns the stored byte (0x80 → 0.502), a sampled read decodes it (0.216), and an image store of 0.5 keeps 0x80 (0xbc before).
 - **Found on:** [Star Fox](../../dm/games/0400E88025B1A000/README.md) (update 131072), measured on a build of our fork: every frame after its DLSS pass; with it fixed, General Pepper's close-up in the intro matches console footage (luminance percentiles 1 / 50 / 90 / 99: 0.024 / 0.174 / 0.529 / 0.851 against 0.012 / 0.158 / 0.513 / 0.861), where before it was 0.175 / 0.456 / 0.747 / 0.933. Its bloom chain (separate textures 384x216 to 12x6, additive upsampling as the game sets it, 1/30 in the composite) and MetalFX's DLSS stand-in were measured unchanged by this.
 
+### 32-bit integer buffer and linear textures re-created every frame
+
+- **Symptom:** `texture upgraded to allow … view format` repeats for new serials all session (Orbitals: about 8,000 upgrades a session, 44,000 in a long play), each a copy into a new texture before the next pass, and until then the draw binds the texture as it was.
+- **Cause:** shaders read and write R32 images in the other signedness ([Integer views for images a shader declares uint or int](#integer-views-for-images-a-shader-declares-uint-or-int)), so a 32-bit integer texture needs the format-view usage. Textures get it only when needed, by an upgrade copy, because it costs lossless compression. Buffer textures (`textureBufferDescriptorWithPixelFormat`) and linear textures lie in their pool's buffer and have no compression to lose, but were made without it too. A game that re-creates such a texture every frame is upgraded every frame.
+- **Fix:** buffer textures and linear textures of `R32Sint` / `R32Uint` get `MTLTextureUsagePixelFormatView` at creation (`nvn_mtl.m`). Other R32 textures (`tex_desc`) still get it by upgrade, keeping their compression.
+- **Check:** `make -C dm/gfx/tests GAME=<id> check_t_tbuf_pfv` (Metal validation: R32I and R32UI buffer and linear textures have the usage, R32F ones do not; 7 checks). On `main` the two integer buffer-texture checks fail, and the test then stops in Metal's texture-view validation at the R32Uint view of the R32I buffer texture.
+- **Found on:** Orbitals (`040004F027560000`, no profile in this repository yet): Niagara's 128-element R32I free-ID buffer (an image buffer texture, NVN format 0xc) is re-created every frame; upgrades went from about 8,000 a session to 0.
+
 ### Buffer textures read by 1D integer fetches (row wrap)
 
 - **Symptom:** `texture type mismatch: shader declares 2, texture is 9`; the slot read 0.

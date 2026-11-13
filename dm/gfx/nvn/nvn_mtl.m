@@ -3935,6 +3935,9 @@ static id<MTLTexture> tex_linear(const tex_t *t) {
     MTLTextureDescriptor *d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:(MTLPixelFormat)pf width:t->d.width ? t->d.width : 1 height:t->d.height ? t->d.height : 1 mipmapped:NO];
     d.resourceOptions = b.resourceOptions;
     d.usage = MTLTextureUsageShaderRead | img_usage(t, (MTLPixelFormat)pf) | (t->d.flags & NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET ? MTLTextureUsageRenderTarget : 0);
+    // A 32-bit integer texture is read and written in the other signedness (img_fit's r32 view). A linear texture lies in its pool's buffer and has no lossless compression
+    // to lose, so it gets the format-view usage at creation instead of by an upgrade copy at every re-creation (other R32 textures still get it by upgrade, tex_desc)
+    if (pf == MTLPixelFormatR32Sint || pf == MTLPixelFormatR32Uint) d.usage |= MTLTextureUsagePixelFormatView;
     return [b newTextureWithDescriptor:d offset:mo bytesPerRow:row];
 }
 // CPU-written block-linear textures (WriteTexels): the game gave no packaged layout and changes the content from the CPU each frame (Engage's movie frames: a Y plane R8 + a UV plane RG8, WriteTexels every frame).
@@ -4561,8 +4564,12 @@ static id<MTLTexture> tex_mtl_(const tex_t *ct, int *in_storage) {
         if (mo - lead + row > b.length) { RED_ONCE(166, "buffer texture at pool offset %#llx, %lu elements of format %#x, ends too near its pool buffer's end for a view from the %lu-byte boundary below: the slot reads 0",
                                                   (unsigned long long)mo, (unsigned long)t->d.width, t->d.format, (unsigned long)al); return nil; }
         if (lead) { static int once; if (!once++) MLOG("buffer texture at pool offset %#llx, below Metal's %lu-byte alignment: viewed from %#llx, its coordinates moved by %lu elements (first case)", (unsigned long long)mo, (unsigned long)al, (unsigned long long)(mo - lead), (unsigned long)(lead / (NSUInteger)bpb)); }
-        MTLTextureDescriptor *d = [MTLTextureDescriptor textureBufferDescriptorWithPixelFormat:(MTLPixelFormat)pf width:w resourceOptions:b.resourceOptions
-                                                                                         usage:MTLTextureUsageShaderRead | img_usage(t, (MTLPixelFormat)pf)];
+        // A 32-bit integer buffer texture gets the format-view usage at creation: shaders read and write it in the other signedness (img_fit's r32 view), and a buffer
+        // texture has no lossless compression to lose (textures from tex_desc keep theirs and still get the usage by upgrade). Made without it, it was upgraded before the
+        // first pass that bound it, and until then img_fit bound it as it was (Orbitals: a 128-element R32I image buffer re-created every frame, upgraded once a frame)
+        MTLTextureUsage tbu = MTLTextureUsageShaderRead | img_usage(t, (MTLPixelFormat)pf);
+        if (pf == MTLPixelFormatR32Sint || pf == MTLPixelFormatR32Uint) tbu |= MTLTextureUsagePixelFormatView;
+        MTLTextureDescriptor *d = [MTLTextureDescriptor textureBufferDescriptorWithPixelFormat:(MTLPixelFormat)pf width:w resourceOptions:b.resourceOptions usage:tbu];
         id<MTLTexture> mt = [b newTextureWithDescriptor:d offset:mo - lead bytesPerRow:row];
         if (!mt) { RED_ONCE(39, "cannot create buffer texture: %u elements format %#x", t->d.width, t->d.format); return nil; }
         res_add(mt);

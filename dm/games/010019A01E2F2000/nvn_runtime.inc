@@ -113,8 +113,10 @@ static void *mp4_scan_source_v1(NVNcommandBuffer *commands, const void *view) {
 // front end and its movie at main+0x6c98c / 0x6cba0, the menus at main+0x58f520) is laid out in 16:9 and drawn into the middle band: viewports and
 // scissors keep their x and width, their y and height are scaled by k = (output ratio) / (16:9) about the centre. The scene's composite into the window
 // binds it elsewhere (main+0x145c8) and keeps the whole 16:10 picture.
-// One draw in the HUD's pass is the finished scene: 0x131d64 draws layer 0x14 with the brightness (s, s, s, 1) right after the pass begins (called at
-// main+0x12e158). Draws under that call keep the viewport the game set, so the scene fills the 16:10 window; everything else in the pass is banded.
+// Two calls right after the HUD's pass begins draw full-screen images, not HUD: 0x131d64 draws layer 0x14 with the brightness (s, s, s, 1) (called at
+// main+0x12e158: a glow over the whole picture, banded in the second 16:10 run it left the scene's glow outside the band), and the virtual call at
+// main+0x12e180 (into main+0xd31fd8, the code that allocates the 1600x900 scene canvas at 0xd315a4) draws the finished scene as a picture. Draws under
+// either keep the viewport the game set, so they fill the 16:10 window; everything else in the pass is banded.
 static _Thread_local const NVNcommandBuffer *mp4_band_cb; static _Thread_local float mp4_band_h, mp4_band_vp[4], mp4_full_vp[4]; static _Thread_local int mp4_band_has, mp4_band_bypass;
 static uintptr_t mp4_main_base(void) { for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, "main")) return (uintptr_t)g_mod[i].base; return 0; }
 static float mp4_band_k(void) {
@@ -150,9 +152,11 @@ static int mp4_under(uintptr_t ra) {   // whether the guest call chain of this d
     return 0;
 }
 static int nvn_profile_draw_begin(NVNcommandBuffer *c) {
-    if (mp4_band_cb != c || !mp4_band_has || !mp4_under(mp4_main_base() + 0x12e15c)) return 0;
+    if (mp4_band_cb != c || !mp4_band_has) return 0;
+    uintptr_t base = mp4_main_base();
+    if (!mp4_under(base + 0x12e15c) && !mp4_under(base + 0x12e184)) return 0;
     mp4_band_bypass = 1; h_nvnCommandBufferSetViewports(c, 0, 1, mp4_full_vp); mp4_band_bypass = 0;
-    static int once; if (!once++) LOG("MP4 16:10: the scene's draw into the window (under main+0x12e158) keeps the whole 16:10 window");
+    static int once; if (!once++) LOG("MP4 16:10: the scene and its glow (under main+0x12e158 / 0x12e180) keep the whole 16:10 window");
     return 1;
 }
 static void nvn_profile_draw_end(NVNcommandBuffer *c) { mp4_band_bypass = 1; h_nvnCommandBufferSetViewports(c, 0, 1, mp4_band_vp); mp4_band_bypass = 0; }

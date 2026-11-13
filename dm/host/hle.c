@@ -17,6 +17,10 @@ uint64_t unimpl_c(unsigned idx, uint64_t *regs) {
         g_stub_seen[idx] = 1;
         LOG("UNIMPL %s (x0=%#llx x1=%#llx x2=%#llx)", g_stub_name[idx], regs[0], regs[1], regs[2]);
     }
+    // An EOS_Platform_Get*Interface stub hands the game an opaque handle it stores and dereferences: a null one
+    // crashes (MARVEL Cosmic Invasion, main+0x956afc). Answer the platform handle it was called on, which is a
+    // mapped pointer the game only ever passes back to the other EOS stubs.
+    if (!strncmp(g_stub_name[idx], "EOS_Platform_Get", 16) && strstr(g_stub_name[idx], "Interface")) return regs[0];
     return 0;
 }
 

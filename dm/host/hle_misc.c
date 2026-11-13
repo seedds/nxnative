@@ -320,3 +320,13 @@ HLE_FORCE("_ZN2nn4chat28RequestNextRemoteCameraImageEPNS_2gs16NativeSyncHandleEP
           Result, h_chat_RemoteNext, void *sync, void *type, int i, void *sync2, const void *id) { (void)sync; (void)type; (void)i; (void)sync2; (void)id; return RES_FAIL; }
 HLE_FORCE("_ZN2nn4chat46BeginFullScreenWithLocalCameraAvailableSectionEb", "GameChat full-screen section begun: no chat to tell", Result, h_chat_FullBegin, unsigned on) { (void)on; return RES_OK; }
 HLE_FORCE("_ZN2nn4chat44EndFullScreenWithLocalCameraAvailableSectionEv", "GameChat full-screen section ended", void, h_chat_FullEnd, void) {}
+
+// An FNA game whose EOS module was refused (hle_ro.c's online SDKs) but that links the EOS client into main: the
+// generic stub's 0 return is a null EOS_HPlatform the game dereferences (MARVEL Cosmic Invasion, main+0x956aac).
+// The platform handle is opaque to the game: the options pointer is a mapped, non-null answer, and the game's later
+// EOS calls land on their own stubs, so it plays offline.
+HLE("EOS_Platform_Create", uint64_t, hle_eos_platform_create, uint64_t options, uint64_t a1, uint64_t out) {
+    (void)a1;
+    if (out) { dm_guest_write_prepare((void *)(uintptr_t)out, 8); *(uint64_t *)(uintptr_t)out = options; }
+    return options;
+}

@@ -1300,6 +1300,13 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Found on:** [Absolum](../../dm/games/0100A83022A22000/README.md) (SDK 18.3.2, one boot each); [Hades](../../dm/games/0100535012974000/README.md): it never asks for the module (checked on 1.0.38233: `refused an NRR that registers only online SDKs (1 hashes)`, no `LoadModule`, its frames as before). Hades' `main` imports only EOS Auth, Connect and PlayerDataStorage, Epic-account cross-save the host cannot serve; the real SDK would at best fail its login and at worst wait on time-outs or contact Epic's servers, with an unknown risk to the player's account.
 - **Note:** open question for the maintainer: always load, refuse online SDKs (as now), or decide per profile.
 
+### `EOS_Platform_Create` called on the refused module's client in `main`
+
+- **Symptom:** a read at the address the generic stub returned (`sig=11` dereferencing a null `EOS_HPlatform`, then a null call through the interfaces table) at boot.
+- **Cause:** the game links the EOS client into `main` and calls `EOS_Platform_Create` and the `EOS_Platform_Get*Interface` functions directly, while its EOS module NRO is refused as an online SDK (the entry above). The generic stubs returned 0: `EOS_Platform_Create` never wrote the output handle, and each interface getter returned null, which the game dereferenced or called through.
+- **Fix:** `EOS_Platform_Create` (`hle_misc.c`) writes the options pointer itself — a mapped, non-null guest address the game treats as an opaque `EOS_HPlatform` — and a stub whose name holds `EOS_Platform_Get` and `Interface` (`hle.c` `unimpl_c`) answers the platform handle it was called with, so the offline path continues. The handle is never a real EOS object; the game ticks it and plays offline.
+- **Found on:** MARVEL Cosmic Invasion (title `010059D020C26000`, FNA/SDL_GPU, provisional bring-up — no profile yet); Hades keeps the earlier behaviour since its EOS calls live inside the refused module.
+
 ### GPU driver modules that are never loaded
 
 - **Symptom:** `main` imports EGL (SDL3's GL support) and `vkGetInstanceProcAddr` (its Vulkan support), but the game renders with NVN (`FNA3D_Driver_NVN.cpp`).

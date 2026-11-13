@@ -46,3 +46,6 @@ draw_barriers	game
 # As Tears of the Kingdom: the terrain's height, blend and hole maps are written by the CPU into textures after they are created. Without these keys they stay zero: holes in the ground and the wrong materials
 tex_flush_upload	on
 tex_dirty_upload	on
+# The game submits a frame's commands behind an event its CPU signals once the frame before has left the GPU, so the GPU starts each frame with nothing queued and waits for the
+# replay: with Metal encoding on its own thread a GPU-bound Hyrule Field scene went 55.3-55.8 -> 56.5-56.9 fps (Apple M4 Pro, three runs a side, interleaved)
+enc_thread	on

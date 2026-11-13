@@ -510,6 +510,9 @@ t_serial_owner: t_serial_owner.m ../nvn/nvn_owner.m ../nvn/nvn_owner.h ../nvn/nv
 t_partial_upload: t_partial_upload.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_partial_upload.m $(MTL_T_SRC) $(FW)
 check_t_partial_upload: RUN_ENV = MTL_DEBUG_LAYER=1
+t_view_cache: t_view_cache.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_view_cache.m $(MTL_T_SRC) $(FW)
+check_t_view_cache: RUN_ENV = MTL_DEBUG_LAYER=1
 t_srgb_alias: t_srgb_alias.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_srgb_alias.m $(MTL_T_SRC) $(FW)
 check_t_srgb_alias: RUN_ENV = MTL_DEBUG_LAYER=1

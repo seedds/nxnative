@@ -37,6 +37,12 @@ _Static_assert(sizeof(NpadState) == 0x28, "NpadState");
 // their own path because a connected controller publishes its whole state on every change (a DualShock 4's sticks change all the time), which overwrote them on the shared one;
 // the separate paths also keep scripted input out of DM_REC, which records the physical ones (rec_read)
 static _Atomic uint64_t g_btn, g_axes, g_latch, g_sc_btn, g_sc_axes, g_sc_latch, g_pad_btn[DM_PLAYERS], g_pad_axes[DM_PLAYERS], g_pad_latch[DM_PLAYERS];
+static _Atomic uint64_t g_dsu_btn[DM_PLAYERS],g_dsu_axes[DM_PLAYERS],g_dsu_latch[DM_PLAYERS],g_dsu_input_time[DM_PLAYERS];
+void dm_dsu_input(int p,uint64_t buttons,int32_t lx,int32_t ly,int32_t rx,int32_t ry,uint64_t t) {
+    if(p<0 || p>=DM_PLAYERS)return;
+    uint64_t old=atomic_exchange(&g_dsu_btn[p],buttons);atomic_fetch_or(&g_dsu_latch[p],buttons&~old);
+    atomic_store(&g_dsu_axes[p],(uint64_t)(uint16_t)lx | (uint64_t)(uint16_t)ly<<16 | (uint64_t)(uint16_t)rx<<32 | (uint64_t)(uint16_t)ry<<48);atomic_store(&g_dsu_input_time[p],t);
+}
 static _Atomic uint64_t g_peek_latch;   // presses since the last dm_input_peek (the applet's reader)
 static _Atomic int g_hold;              // an applet holds the input (dm_input_hold)
 static _Atomic int64_t g_sampling = 1 << 16;   // starts high so the history entries below the newest keep positive sampling numbers
@@ -584,6 +590,12 @@ static void fill(NpadState *s, uint32_t id, uint32_t style) {
         uint64_t k = atomic_load(&g_axes); for (int i = 0; i < 4; i++) a[i] = ax(k, i);
     }
     for (int p = 0; p < DM_PLAYERS; p++) if (src >> p & 1) {
+        uint64_t received=atomic_load(&g_dsu_input_time[p]),host_now=now_ns();
+        uint64_t phone_edges=atomic_exchange(&g_dsu_latch[p],0);
+        if(received && host_now>=received && host_now-received<=300000000ull) {
+            b|=atomic_load(&g_dsu_btn[p])|phone_edges;uint64_t phone_axes=atomic_load(&g_dsu_axes[p]);
+            for(int i=0;i<4;i++)a[i]=pick(a[i],ax(phone_axes,i));
+        }
         b |= atomic_load(&g_pad_btn[p]) | atomic_exchange(&g_pad_latch[p], 0);
         uint64_t v = atomic_load(&g_pad_axes[p]); for (int i = 0; i < 4; i++) a[i] = pick(a[i], ax(v, i));
     }

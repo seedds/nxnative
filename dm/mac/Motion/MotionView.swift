@@ -9,6 +9,7 @@ import simd
     var onEdit: (() -> Void)?
     @Published var axes = AxisMap() { didSet { orientation = Orientation(); onEdit?() } }
     @Published var name = "Phone" { didSet { onEdit?() } }
+    @Published var buttons = false { didSet { onEdit?() } }
     @Published var player = 1 { didSet { onEdit?() } }
     @Published var host = "192.168.1.100" { didSet { onEdit?() } }
     @Published var port = "26760" { didSet { onEdit?() } }
@@ -213,6 +214,7 @@ struct SensorCard: View {
                 TextField(L("Port"),text:$sensor.port).frame(width:75)
                 Picker(L("DSU slot"),selection:$sensor.slot) { LocalizedText("Auto").tag(-1); ForEach(0..<4) { LocalizedText("\($0)").tag($0) } }.frame(width:125)
             }.disabled(sensor.running)
+            Toggle(L("Use phone buttons and sticks"),isOn:$sensor.buttons)
             HStack {
                 Button(L(sensor.running ? "Disconnect":"Connect")) { if sensor.running { sensor.disconnect() } else { sensor.connect() } }
                 Button(L("Calibrate…")) { showCalibration = true }.disabled(!sensor.confirmed)

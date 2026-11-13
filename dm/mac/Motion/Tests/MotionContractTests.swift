@@ -16,6 +16,9 @@ final class MotionContractTests:XCTestCase {
         XCTAssertEqual(restored.sensors.first?.id,phone.id)
         XCTAssertEqual(restored.sensors.first?.axes,phone.axes)
         XCTAssertEqual(restored.sensors.first?.gyroBias,phone.gyroBias)
+        XCTAssertEqual(try saved.environment()["DM_DSU_BUTTONS_1"],"0")
+        phone.buttons=true
+        XCTAssertEqual(try DSUConfiguration.load(from:url).environment()["DM_DSU_BUTTONS_1"],"1")
     }
     @MainActor func testDetectedSlotIsUsedForGameEnvironment() throws {
         let dir=FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)

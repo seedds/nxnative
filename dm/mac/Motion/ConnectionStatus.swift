@@ -27,6 +27,7 @@ private struct PhoneMotionConnectionRow: View {
                 Text(sensor.name); Spacer(); Text(L("Player")+" "+String(sensor.player)).foregroundStyle(.secondary)
             }
             LocalizedText(state).font(.caption).foregroundStyle(.secondary)
+            Toggle(L("Use phone buttons and sticks"),isOn:$sensor.buttons).toggleStyle(.switch).controlSize(.small)
             Text(String(format:"X %+.2f   Y %+.2f   Z %+.2f · %d samples",sensor.gyro.x,sensor.gyro.y,sensor.gyro.z,sensor.samples))
                 .font(.system(.caption2,design:.monospaced)).foregroundStyle(.tertiary).monospacedDigit()
         }.accessibilityElement(children:.combine)

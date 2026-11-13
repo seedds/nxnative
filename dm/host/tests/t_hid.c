@@ -1591,6 +1591,15 @@ static void t_unsupported_style(void) {
 }
 
 int main(void) {
+    NpadState phone_state;
+    dm_pad_set_player(0,DM_BTN_B,0,0,0,0);
+    dm_dsu_input(0,DM_BTN_A,12000,0,0,0,motion_now);
+    fill(&phone_state,0,STYLE_FULLKEY);
+    CHECK((phone_state.buttons&(DM_BTN_A|DM_BTN_B))==(DM_BTN_A|DM_BTN_B),"phone and physical buttons merge independently");
+    motion_now+=300000001ull;fill(&phone_state,0,STYLE_FULLKEY);
+    CHECK(!(phone_state.buttons&DM_BTN_A) && (phone_state.buttons&DM_BTN_B),"stale phone releases without clearing physical controller");
+    dm_pad_set_player(0,0,0,0,0,0);
+    dm_dsu_input(0,0,0,0,0,0,0);   // later tests rewind the host clock; do not revive this sample
     t_motion_dsu();
     CHECK(setenv("DM_RUMBLE_LOG", "1", 1) == 0, "enable rumble diagnostics");
     setenv("DM_IMU_DELAY", "0", 1);   // the tests of the live history read it at the present; t_live_delay checks the playout delay

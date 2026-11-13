@@ -1,6 +1,8 @@
 // Loopback server proves real subscription, decoding, motion callback and shutdown.
 #include "../hle_dsu.c"
 #include <assert.h>
+void dm_dsu_load_configuration(void) {}
+void dm_dsu_input(int p,uint64_t b,int32_t lx,int32_t ly,int32_t rx,int32_t ry,uint64_t t) { (void)p;(void)b;(void)lx;(void)ly;(void)rx;(void)ry;assert(t==0 && "buttons disabled by default, shutdown only clears input"); }
 static _Atomic int callbacks;
 // Deliberately offset the host clock: the receiver must use it, not another epoch.
 uint64_t now_ns(void) { struct timespec t;clock_gettime(CLOCK_MONOTONIC,&t);return (uint64_t)t.tv_sec*1000000000ull+t.tv_nsec+7000000000ull; }

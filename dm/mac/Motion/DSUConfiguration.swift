@@ -12,6 +12,7 @@ struct DSUDevice: Codable, Equatable, Identifiable {
     var axes: [Int]
     var bias: [Double]
     var enabled: Bool
+    var buttons: Bool? = nil
     var calibrated: Bool? = nil
     var displayAxes: [Int]? = nil
     var valid: Bool {
@@ -48,6 +49,7 @@ struct DSUConfiguration: Codable, Equatable {
             let key="DM_DSU_"+String(device.player)
             guard result[key]==nil else { throw Failure.duplicatePlayer }
             result[key]=value
+            result["DM_DSU_BUTTONS_"+String(device.player)]=(device.buttons ?? false) ? "1":"0"
         }
         return result
     }

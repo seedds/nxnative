@@ -383,5 +383,10 @@
     "pt-BR": "Recebendo movimento · precisa calibrar",
     "es": "Recibiendo movimiento · requiere calibración",
     "zh-Hant": "正在接收動作 · 需要校正"
+  },
+  "Use phone buttons and sticks": {
+    "pt-BR": "Usar botões e analógicos do celular",
+    "es": "Usar botones y palancas del teléfono",
+    "zh-Hant": "使用手機按鈕與搖桿"
   }
 }

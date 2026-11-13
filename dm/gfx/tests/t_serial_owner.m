@@ -182,6 +182,28 @@ int main(void) { @autoreleasepool {
         CHECK(ghost_n() == NGHOST && !ghost(BASE) && ghost(BASE + NGHOST + EXTRA - 1), "idle after GHOST_IDLE_SUBS submissions, the frame unchanged: the table is back at NGHOST");
         step("ghost idle by submissions");
     }
+    {   // a finalized serial a registered texture ID still names (a retired registration whose view a pool table holds; Ocarina of Time: about 13,000 in Kokiri Forest) is in use
+        // however long no lookup finds it: idle, it is stamped used again rather than evicted, so no note sends its IDs back through every pool table. Once no ID names it, it
+        // goes as any idle entry
+        enum { BASE = 948000, N = 4 * NGHOST };
+        for (int i = 0; i < N; i++) { own_reg_name(BASE + (uint64_t)i, 1); tex_put(BASE + (uint64_t)i, [NSObject new]); }   // the last case's entries, idle, go as these come
+        own_reg_name(BASE, 1);   // a second ID names the first
+        CHECK(ghost_n() == N, "the named entries, put in this frame, are the table");
+        int notes = g_changed_n; uint64_t puts = ghost_puts();
+        for (int f = 0; f < 4 * GHOST_IDLE; f++) { g_frame++; g_sub += 25; for (int c = 0; c < 25; c++) own_ghost_trim(); }   // no lookup of them for four idle spans
+        CHECK(ghost_n() == N && g_changed_n == notes && ghost_puts() == puts, "named entries stay idle past NGHOST: no eviction, no note, no put");
+        step("ghost entries named by registered IDs");
+        for (int i = 0; i < N / 2; i++) own_reg_name(BASE + (uint64_t)i, -1);   // re-registered or unregistered: the first half no longer named, but for BASE's second name
+        idle(); trim_all();
+        CHECK(ghost(BASE) && !ghost(BASE + 1) && !ghost(BASE + N / 2 - 1) && ghost(BASE + N / 2) && ghost(BASE + N - 1), "once no ID names them, idle entries go; one an ID still names stays");
+        CHECK(ghost_n() == N / 2 + 1 && g_changed_n == notes + N / 2 - 1, "a note for each one that went, none for those kept");
+        step("ghost entries no longer named");
+        own_reg_name(BASE, -1);
+        for (int i = N / 2; i < N; i++) own_reg_name(BASE + (uint64_t)i, -1);
+        idle(); trim_all();
+        CHECK(ghost_n() == NGHOST, "with no names left the table drains back to NGHOST");
+        step("ghost names all gone");
+    }
 
     {   // texture pins
         uint64_t k = (1ull << 62) + 93031; id o = [NSObject new], o2 = [NSObject new];

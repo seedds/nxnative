@@ -7,7 +7,8 @@
 //   ghost   serial → object of a finalized texture serial a replayed record or a retired registration still resolves (tex_put), with its last use (a lookup or a put: frame and
 //           submission) in a list from least to most recently used. Past NGHOST entries, the least recently used goes once it is idle (unused for GHOST_IDLE frames or
 //           GHOST_IDLE_SUBS submissions): on a put, and at each submission's commit (own_ghost_trim); an entry in use stays however many there are. A stale view's entry goes
-//           with its place in the list (own_view_drop_stale)
+//           with its place in the list (own_view_drop_stale). An idle entry whose serial a registered texture ID names is in use (named, below): stamped used again, not evicted
+//   named   serial → how many registered texture IDs name it (own_reg_name, from the replay layer's registrations while their storage is there)
 //   tex live    serial → the texture object it was initialized in (mtl_tex_init until its finalize), which decides between live and ghost
 //   tex pins    serial → a retained object a queued descriptor or saved binding still resolves after the serial's entries go (mtl_tex_pin / mtl_tex_unpin)
 //   prog pins   serial → pins on a program a queued descriptor or saved binding holds: its release waits for the last unpin (under the submission lock, not g_smu)
@@ -76,6 +77,8 @@ void serial_del(uint64_t k);         // a live serial's entry goes (a finalize, 
 id own_ext_take(uint64_t k);         // an external texture's live entry (2^62 and up) goes and its object comes back to the caller, unretired (nil: none)
 void tex_put(uint64_t k, id o);      // a texture serial's object: live table for a live texture object or an external texture, else the ghost table (its use stamped)
 void own_ghost_trim(void);           // a submission's commit: idle ghost entries past NGHOST go, GHOST_TRIM at most
+void own_reg_name(uint64_t k, int d);   // a registered texture ID starts (+1) or stops (-1) naming serial k (the replay layer's registration, its replacement, its pool's Finalize):
+                                        // a ghost entry an ID names is in use (ghost_trim)
 
 // The sharing table. A key's padding is zero (it is hashed): build one with memset or a zeroed initializer, and change a copy's fields
 typedef struct { uint64_t pool; int64_t off; nvn_texdesc d; } alias_key;
@@ -127,7 +130,7 @@ int own_note_at(uint64_t gen, uint64_t *serial);                 // the serial n
                                                                  // change made no note (own_epoch) or the log has been overwritten since: the reader rebuilds whole
 
 // The tables' sizes, and every object they hold (live entries first, then ghost ones). Caller holds g_smu
-typedef struct { uint32_t live, live_cap, ghost, retire_wait; uint64_t ghost_puts; } own_stats;
+typedef struct { uint32_t live, live_cap, ghost, retire_wait, named; uint64_t ghost_puts, ghost_named_kept; } own_stats;   // named: serials registered IDs name; ghost_named_kept: idle entries kept for a name
 own_stats own_stats_locked(void);
 void own_each_locked(void (^fn)(uint64_t serial, id o, int ghost));
 

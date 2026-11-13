@@ -309,12 +309,30 @@ static void ghost_del_locked(uint64_t k) {   // k's ghost entry goes with its pl
     id old = hm_get_id(&g_ghost, &k); if (!old) return;
     ghost_held_add((__bridge void *)old, -1); obj_drop(old); hm_del_id(&g_ghost, &k); own_note(k);
 }
-// Idle entries past NGHOST go, least recently used first, at most `budget` of them; the first entry in use ends the walk (every one after it was used later)
+// Finalized serials a registered texture ID still names: serial → how many IDs (own_reg_name, from the replay layer's registrations). A pool table resolves such an ID through its ghost
+// entry once and then holds the view; the draws read it there and no lookup comes again until the table is taken again. So use by lookups alone made those entries idle together
+// GHOST_IDLE frames after the walk that resolved them: Ocarina of Time names about 13,000 finalized serials from its 33,024-ID texture pool in Kokiri Forest, the commits evicted
+// them past NGHOST, their notes ran past what a pool table patch takes (SER_LOG), so the next table was walked whole, which put them all back, used in one frame: every 16 frames
+// a frame whose replay took 22 ms more (88,000 instructions a draw against 23,000), about 750 puts a frame, and 4.4 % of frames at 25 ms or more at a 120 target on an M3 Max. Named,
+// an entry is in use while the ID names it: idle, it is stamped used again instead of evicted. Under g_smu
+static nvn_hmap g_reg_named = {.klen = 8}; static uint64_t g_ghost_named_kept;
+void own_reg_name(uint64_t k, int d) {
+    if (!k) return;
+    pthread_mutex_lock(&g_smu);
+    uintptr_t n = (uintptr_t)nvn_hm_get(&g_reg_named, &k);
+    if (d > 0) nvn_hm_put(&g_reg_named, &k, (void *)(n + 1));
+    else if (n > 1) nvn_hm_put(&g_reg_named, &k, (void *)(n - 1));
+    else if (n) nvn_hm_del(&g_reg_named, &k);
+    pthread_mutex_unlock(&g_smu);
+}
+// Idle entries past NGHOST go, least recently used first, at most `budget` of them; the first entry in use ends the walk (every one after it was used later). An idle entry a
+// registered ID names is in use: stamped used again, it takes its turn of the budget and goes to the end of the list
 static void ghost_trim(unsigned budget) {
     uint64_t frame = own_hook_frame(), sub = own_hook_submission();
     for (; budget && g_ghost.n > NGHOST && g_ghost_lru; budget--) {
         const ghost_use *u = g_ghost_lru;
         if (frame - u->frame < GHOST_IDLE && sub - u->sub < GHOST_IDLE_SUBS) break;
+        if (g_reg_named.n && nvn_hm_get(&g_reg_named, &u->serial)) { ghost_used(u->serial); g_ghost_named_kept++; continue; }
         ghost_del_locked(u->serial);
     }
 }
@@ -431,7 +449,7 @@ uint32_t own_alias_unref_locked(void) {
     for (uint32_t i = 0; i < g_alias.cap; i++) if (g_alias.vals[i] && !CFSetContainsValue(held, g_alias.vals[i])) n++;
     CFRelease(held); return n;
 }
-own_stats own_stats_locked(void) { return (own_stats){.live = g_by_serial.n, .live_cap = g_by_serial.cap, .ghost = g_ghost.n, .retire_wait = g_retire_wait.n, .ghost_puts = g_ghost_puts}; }
+own_stats own_stats_locked(void) { return (own_stats){.live = g_by_serial.n, .live_cap = g_by_serial.cap, .ghost = g_ghost.n, .retire_wait = g_retire_wait.n, .named = g_reg_named.n, .ghost_puts = g_ghost_puts, .ghost_named_kept = g_ghost_named_kept}; }
 void own_each_locked(void (^fn)(uint64_t serial, id o, int ghost)) {
     const nvn_hmap *tables[] = {&g_by_serial, &g_ghost};
     for (int j = 0; j < 2; j++) for (uint32_t i = 0; i < tables[j]->cap; i++) {

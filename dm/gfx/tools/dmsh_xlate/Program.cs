@@ -11,7 +11,7 @@
 //           "attr": { "location": "float|sint|uint" }, "fout": { "target": "float|sint|uint" }, "local": [x, y, z] }]
 //   Output: <key>.spv and <key>.res.json (offsets of storage buffer slots in c0, etc.; decoding texture handle → slot number is done in the script that builds the metallib;
 //           "fetch1d": the texture slots read by 1D integer fetches translated as wrapped 2D reads, see RecordTexelFetch1D;
-//           an image's "tbx": a buffer image's index in the offset table, TranslationFlags.MetalBufferImageBias)
+//           a texture's or an image's "tbx": a buffer texture's or buffer image's index in the offset table, TranslationFlags.MetalBufferImageBias)
 using Ryujinx.Common.Memory;
 using Ryujinx.Graphics.Shader;
 using Ryujinx.Graphics.Shader.Translation;
@@ -242,7 +242,7 @@ static class SwshXlate
                     foreach (var t in list)
                     {
                         var o = new JsonObject { ["binding"] = t.Binding, ["type"] = (int)t.Type, ["format"] = t.Format.ToString(), ["cbuf_slot"] = t.CbufSlot, ["handle"] = t.HandleIndex, ["array"] = t.ArrayLength, ["separate"] = t.Separate, ["flags"] = (int)t.Flags };
-                        if (t.BufferBias >= 0) o["tbx"] = t.BufferBias;   // a buffer image's index in the offset table (TranslationFlags.MetalBufferImageBias; dmsh_reflect.py gives it to the binding, nvn_mtl.m tbias_view)
+                        if (t.BufferBias >= 0) o["tbx"] = t.BufferBias;   // a buffer image's or buffer texture's index in the offset table (TranslationFlags.MetalBufferImageBias; dmsh_reflect.py gives it to the binding, nvn_mtl.m tbuf_lead)
                         res[name].AsArray().Add((JsonNode)o);
                     }
                 if (acc.Fetch1D.Count > 0) { var f1 = new JsonArray(); foreach (int h in acc.Fetch1D) f1.Add((JsonNode)JsonValue.Create(h)); res["fetch1d"] = f1; }

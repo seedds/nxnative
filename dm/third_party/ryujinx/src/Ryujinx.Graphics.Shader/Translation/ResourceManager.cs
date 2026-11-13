@@ -255,49 +255,70 @@ namespace Ryujinx.Graphics.Shader.Translation
             return setAndBinding.Binding;
         }
 
-        // nxnative: each image operation, as the structured program meets it (TranslationFlags.MetalBufferImageBias). A buffer image gets the next index of the offset
-        // table at its first operation, and the shader declares the table with its first buffer image (CodeGen/Spirv/Instructions.cs BiasBufferImageCoordinate). The
-        // index is the handle's: declarations of one handle in other formats are one texture at one offset, and the build finds an image's index by its slot and handle
-        // (dmsh_reflect.py buffer_image_bias). An array of images keeps its coordinates: the host binds it as it is
-        private readonly Dictionary<(int CbufSlot, int Handle), int> _bufferImageBiasByHandle = new();
+        // nxnative: each operation on a buffer image or a buffer texture, as the structured program meets it (TranslationFlags.MetalBufferImageBias). Each gets the
+        // next entries of the offset table at its first operation, one for a single binding and one per element for an array of buffer textures (an access reads the
+        // entry of the element it indexes), and the shader declares the table, as long as its entries, with the first of them (CodeGen/Spirv/Instructions.cs
+        // BiasBufferImageCoordinate). The index is the handle's: declarations of one handle in other formats are one texture at one offset, and the build finds a
+        // binding's index by its slot and handle (dmsh_reflect.py buffer_image_bias). An image handle and a texture handle name different descriptors, so each kind has
+        // its own. An array of images keeps its coordinates: the host binds an array of images as it is
+        private readonly Dictionary<(bool IsImage, int CbufSlot, int Handle), int> _bufferImageBiasByHandle = new();
+        private int _bufferBiasEntries;
 
-        public void NoteBufferImage(int setIndex, int binding)
+        public void NoteBufferResource(bool isImage, int setIndex, int binding)
         {
-            SetBindingPair image = new(setIndex, binding);
+            SetBindingPair pair = new(setIndex, binding);
+            IReadOnlyDictionary<SetBindingPair, int> noted = isImage ? Properties.BufferImageBiases : Properties.BufferTextureBiases;
 
-            if (!BufferImageBias || Properties.BufferImageBiases.ContainsKey(image) ||
-                !Properties.Images.TryGetValue(image, out TextureDefinition definition) || definition.ArrayLength != 1)
+            if (!BufferImageBias || noted.ContainsKey(pair) ||
+                !(isImage ? Properties.Images : Properties.Textures).TryGetValue(pair, out TextureDefinition definition) || definition.ArrayLength < 1 ||
+                (isImage && definition.ArrayLength != 1))
             {
                 return;
             }
 
-            (int, int) handle = (-1, -1);
+            (bool, int, int)? handle = null;
 
-            foreach ((TextureInfo info, TextureMeta meta) in _usedImages)
+            foreach ((TextureInfo info, TextureMeta meta) in isImage ? _usedImages : _usedTextures)
             {
                 if (meta.Set == setIndex && meta.Binding == binding)
                 {
-                    handle = (info.CbufSlot, info.Handle);
+                    handle = (isImage, info.CbufSlot, info.Handle);
                     break;
                 }
             }
 
-            if (!_bufferImageBiasByHandle.TryGetValue(handle, out int index))
+            // Only a game's texture or image, which the host binds by its handle: the translator's own buffer textures (the geometry topology table, trb_data) are views it
+            // makes at offset 0, and the build would find no binding to give their entries to
+            if (handle == null)
             {
-                if (_bufferImageBiasByHandle.Count >= Constants.NxBufferImageBiases)
+                return;
+            }
+
+            if (!_bufferImageBiasByHandle.TryGetValue(handle.Value, out int index))
+            {
+                if (_bufferBiasEntries + definition.ArrayLength > Constants.NxBufferImageBiases)
                 {
                     return;
                 }
 
-                index = _bufferImageBiasByHandle.Count;
-                _bufferImageBiasByHandle.Add(handle, index);
+                index = _bufferBiasEntries;
+                _bufferBiasEntries += definition.ArrayLength;
+                _bufferImageBiasByHandle.Add(handle.Value, index);
             }
 
-            Properties.AddBufferImageBias(image, index);
+            if (isImage)
+            {
+                Properties.AddBufferImageBias(pair, index);
+            }
+            else
+            {
+                Properties.AddBufferTextureBias(pair, index);
+            }
+
             Properties.BufferImageBiasBinding = GetBufferImageBiasBinding();
         }
 
-        // nxnative: the offset table, bank Constants.NxBufferImageBiasBank: one u32 a buffer image, in uint4 data[4]
+        // nxnative: the offset table, bank Constants.NxBufferImageBiasBank: one u32 an entry, in uint4 data[], declared again as it grows
         private int GetBufferImageBiasBinding()
         {
             int slot = Constants.NxBufferImageBiasBank;
@@ -307,15 +328,15 @@ namespace Ryujinx.Graphics.Shader.Translation
             {
                 setAndBinding = _gpuAccessor.CreateConstantBufferBinding(slot);
                 _cbSlotToBindingMap[slot] = setAndBinding;
-
-                StructureType type = new(new[]
-                {
-                    new StructureField(AggregateType.Array | AggregateType.Vector4 | AggregateType.U32, "data", (Constants.NxBufferImageBiases + 3) / 4),
-                });
-
-                Properties.AddOrUpdateConstantBuffer(new(BufferLayout.Std140, setAndBinding.SetIndex, setAndBinding.Binding, $"{_stagePrefix}_c{slot.ToString(CultureInfo.InvariantCulture)}", type));
                 SetUsedConstantBufferBinding(setAndBinding.Binding);
             }
+
+            StructureType type = new(new[]
+            {
+                new StructureField(AggregateType.Array | AggregateType.Vector4 | AggregateType.U32, "data", (_bufferBiasEntries + 3) / 4),
+            });
+
+            Properties.AddOrUpdateConstantBuffer(new(BufferLayout.Std140, setAndBinding.SetIndex, setAndBinding.Binding, $"{_stagePrefix}_c{slot.ToString(CultureInfo.InvariantCulture)}", type));
 
             return setAndBinding.Binding;
         }
@@ -767,12 +788,13 @@ namespace Ryujinx.Graphics.Shader.Translation
 
         public TextureDescriptor[] GetTextureDescriptors(bool includeArrays = true)
         {
-            return GetDescriptors(_usedTextures, includeArrays);
+            // nxnative: with each buffer texture's index in the offset table (NoteBufferResource)
+            return GetDescriptors(_usedTextures, includeArrays, meta => Properties.BufferTextureBiases.TryGetValue(new(meta.Set, meta.Binding), out int index) ? index : -1);
         }
 
         public TextureDescriptor[] GetImageDescriptors(bool includeArrays = true)
         {
-            // nxnative: with each buffer image's index in the offset table (NoteBufferImage)
+            // nxnative: with each buffer image's index in the offset table (NoteBufferResource)
             return GetDescriptors(_usedImages, includeArrays, meta => Properties.BufferImageBiases.TryGetValue(new(meta.Set, meta.Binding), out int index) ? index : -1);
         }
 
@@ -821,7 +843,8 @@ namespace Ryujinx.Graphics.Shader.Translation
                         info.Handle,
                         info.ArrayLength,
                         info.Separate,
-                        meta.UsageFlags));
+                        meta.UsageFlags,
+                        bufferBias?.Invoke(meta) ?? -1));   // nxnative: an array of buffer textures' first entry in the offset table
                 }
             }
 

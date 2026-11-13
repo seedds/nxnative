@@ -464,6 +464,55 @@ class Compiler(unittest.TestCase):
             self.assertEqual(len(re.findall(r'_c%d\)\._m0\[0\]\.x' % TBIAS_BANK, source)), 4, source)   # entry 0, read in each access's sum and again in its comparison (spirv-cross inlines the load)
             self.compile_metal(msl, work, 'ldst')
 
+    def test_buffer_texture_fetch_and_size_moved(self):
+        # TLD R4, R0 of a buffer texture in texture slot 0 (c2 byte 0x20), TXQ R5 of its size, then SUST.D of each to buffer image slot 0: the fetch's coordinate moves by the
+        # texture's table entry (taken first: 0), the size query gives the view's width less it, and the stores' coordinates move by the image's (1)
+        table = (RYU / 'Decoders/InstTable.cs').read_text()
+        def base(name):
+            m = re.search(r'Add\("([01x]{64})", InstName\.' + name + r'\s*,', table); assert m, name
+            return int(m[1].replace('x', '0'), 2)
+        def mov(reg, value): return base('Mov32i') | ((value & 0xffffffff) << 20) | (7 << 16) | (15 << 12) | reg
+        texture = (0x8 << 36) | (1 << 31) | (7 << 16)   # texture slot 0 (c2 word 8), 1D (TexDim 0), component x
+        surface = (0x48 << 36) | (1 << 33) | (4 << 20) | (7 << 16)   # image slot 0 (c2 byte 0x120), a 1D buffer (SuDim 1), 32 bits
+        program = [mov(0, 5), mov(1, 6), mov(2, 7), base('Tld') | texture | (255 << 20) | (0 << 8) | 4, base('Txq') | texture | (1 << 22) | (255 << 8) | 5,
+                   base('SustD') | surface | (1 << 8) | 4, base('SustD') | surface | (2 << 8) | 5, base('Exit') | (7 << 16) | 15]
+        words = []
+        for i, instruction in enumerate(program):
+            if i % 3 == 0: words.append(0)
+            words.append(instruction)
+        with tempfile.TemporaryDirectory(prefix='dm-buffer-texture-') as temp:
+            work = Path(temp); code = work / 'tbuf.bin'; code.write_bytes(struct.pack('<%dQ' % len(words), *words))
+            jp = work / 'jobs.json'
+            jp.write_text(json.dumps([dict(key='tbuf', stage='cs', code=str(code), tex={'0': 'buffer'}, img={'0': dict(type='buffer', fmt='R32Uint')}, local=[1, 1, 1], debug=True)]))
+            subprocess.run([os.environ['DMSH_TEST_XLATE'], str(jp), str(work)], check=True)
+            spv = work / 'tbuf.spv'
+            subprocess.run(['spirv-val', '--target-env', 'vulkan1.1', str(spv)], check=True)
+            ops = instructions(spv)
+            defs = {args[1]: (op, args) for op, args in ops if op in (43, 61, 65, 95, 104, 124, 128, 130, 169, 176)}
+            fetches = [args for op, args in ops if op == 95]; sizes = [args for op, args in ops if op == 104]; writes = [args for op, args in ops if op == 99]   # OpImageFetch, OpImageQuerySize, OpImageWrite
+            self.assertEqual((len(fetches), len(sizes), len(writes)), (1, 1, 2))
+            self.assertEqual(buffer_image_bias(defs, fetches[0][3]), 5)
+            def entry(load_id):   # the table entry a bias load reads: OpAccessChain table, 0, index / 4, index % 4
+                op, load = defs[load_id]; self.assertEqual(op, 61)
+                op, chain = defs[load[2]]; self.assertEqual(op, 65)
+                return 4 * defs[chain[4]][1][2] + defs[chain[5]][1][2]
+            op, fetch_cast = defs[fetches[0][3]]; op, select = defs[fetch_cast[2]]; op, moved = defs[select[4]]
+            self.assertEqual(entry(moved[3]), 0)
+            less = [args for op, args in ops if op == 130 and args[2] == sizes[0][1]]   # OpISub(size, bitcast(bias))
+            self.assertEqual(len(less), 1)
+            op, bias_cast = defs[less[0][3]]; self.assertEqual(op, 124)
+            self.assertEqual(entry(bias_cast[2]), 0)
+            self.assertEqual(buffer_image_bias(defs, writes[0][1]), 6)
+            op, write_cast = defs[writes[0][1]]; op, select = defs[write_cast[2]]; op, moved = defs[select[4]]
+            self.assertEqual(entry(moved[3]), 1)
+            res = json.loads((work / 'tbuf.res.json').read_text())
+            self.assertEqual([t.get('tbx') for t in res['textures']], [0])   # Program.cs: each one's index in the offset table
+            self.assertEqual([i.get('tbx') for i in res['images']], [1])
+            msl = work / 'tbuf.metal'
+            subprocess.run([str(SPIRV_CROSS), *XC, str(spv), '--output', str(msl)], check=True)
+            self.assertRegex(msl.read_text(), r'_c%d\s*\[\[id\(\d+\)\]\]' % TBIAS_BANK)
+            self.compile_metal(msl, work, 'tbuf')
+
     def test_real_translation_and_cross(self):
         self.assertTrue(os.access(SPIRV_CROSS, os.X_OK), f'{SPIRV_CROSS} required for compiler acceptance')
         self.assertIsNotNone(shutil.which('spirv-val'), 'spirv-val required for compiler acceptance')

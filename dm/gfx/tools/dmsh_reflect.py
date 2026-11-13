@@ -140,12 +140,19 @@ def decode_ubo_img(name):
     return (int(m.group(1)) - 3, int(m.group(2), 16) * 4) if m and 3 <= int(m.group(1)) <= 16 else None
 
 def buffer_image_bias(name, res):
-    """A buffer image's index in the offset table (dmsh_abi.h DMSH_TBIAS_BANK), which the translator gives the image as "tbx" (TranslationFlags.MetalBufferImageBias), found by the
-    constant buffer slot and the handle its name carries (<stage>_i_cb<slots>_<handle>_<format>, or _i_tcb_<handle>_ for a handle in no constant buffer); None for any other image"""
-    m = re.match(r'[a-z]+_i_(?:cb(\d+)|tcb)_([0-9A-F]+)_', name)
+    """A buffer image's or buffer texture's index in the offset table (dmsh_abi.h DMSH_TBIAS_BANK), which the translator gives it as "tbx" (TranslationFlags.MetalBufferImageBias),
+    found by the constant buffer slot and the handle its name carries (<stage>_i_cb<slots>_<handle>_<format> for an image, <stage>_t_cb<slots>_<handle> for a texture, <stage>_tb_...
+    for an array of buffer textures, _tcb_<handle> for a handle in no constant buffer) in the translator's images or textures; None for any other binding. An array's is its first
+    element's, the rest following it"""
+    m = re.match(r'[a-z]+_([ti])[a-z0-9]*_(?:cb(\d+)|tcb)_([0-9A-F]+)(?:_|$)', name)
     if not m: return None
-    slots, h = int(m.group(1)) if m.group(1) else None, int(m.group(2), 16)
-    return next((i['tbx'] for i in res.get('images', ()) if 'tbx' in i and i['handle'] == h and (i['cbuf_slot'] == slots if slots is not None else i['cbuf_slot'] < 0)), None)
+    slots, h = int(m.group(2)) if m.group(2) else None, int(m.group(3), 16)
+    return next((i['tbx'] for i in res.get('images' if m.group(1) == 'i' else 'textures', ()) if 'tbx' in i and i['handle'] == h and (i['cbuf_slot'] == slots if slots is not None else i['cbuf_slot'] < 0)), None)
+
+def buffer_bias_entries(res):
+    """The offset table's length in entries, as the translator declares it (uint4 data[], ResourceManager.GetBufferImageBiasBinding): every entry given out, an array's one per element"""
+    n = max((i['tbx'] + max(i.get('array', 1), 1) for k in ('textures', 'images') for i in res.get(k, ()) if 'tbx' in i), default=0)
+    return (n + 3) // 4 * 4
 
 def c2_array(name, ty):
     """An array of handles in the driver table c2 that the shader indexes at run time (Ryujinx's texture array from a buffer, here bank 2: <stage>_t<type>_cb<slots>_<handle>, declared
@@ -259,7 +266,7 @@ def reflect(key, stage, msl, res):
             if 3 <= n <= 16:   # fixed: the slot's bytes the shader reads at fixed offsets, which the host makes readable (zeros past a shorter binding); the translator's own count (Program.cs)
                 e.update(kind=abi.KIND_CBUF, reg=n - 3, fixed=next((b['fixed'] for b in res['cbufs'] if b['slot'] == n), 0))
             elif n == abi.CBSIZE_BANK: e.update(kind=abi.KIND_CBSIZE)   # the uniform slots' bound sizes, which the translator's reads at computed offsets compare with
-            elif n == abi.TBIAS_BANK: e.update(kind=abi.KIND_TBIAS)   # the buffer images' element offsets, which the translator adds to their coordinates (buffer_image_bias)
+            elif n == abi.TBIAS_BANK: e.update(kind=abi.KIND_TBIAS, n=buffer_bias_entries(res))   # the buffer textures' element offsets, which the translator adds to their coordinates (buffer_image_bias)
             else: e.update(kind=abi.KIND_C1 if n == 1 else abi.KIND_DRVCB, bank=n)
         elif sb := re.fullmatch(r'[a-z]+_s(\d+)', nm):
             e.update(kind=abi.KIND_SBUF, index=int(sb.group(1)))
@@ -270,7 +277,9 @@ def reflect(key, stage, msl, res):
             other = () if us[0] in ('id', 'c2') or us == ut else (ut, us)   # handle type 1: the word of the other half, which the host ORs in (the compiler puts texture and sampler words in either order)
             if nm.endswith('Smplr') and us[0] == 'c2': e.update(kind=abi.KIND_SAMP_UBO, reg=ut[0], off=ut[1], soff=us[1], sreg=abi.SREG_C2)
             elif nm.endswith('Smplr'): e.update(kind=abi.KIND_SAMP_ID, reg=us[1]) if us[0] == 'id' else e.update(kind=abi.KIND_SAMP_UBO, reg=us[0], off=us[1], **({'soff': ut[1], 'sreg': ut[0]} if other else {}))
-            elif 'texture_buffer' in ty: e.update(kind=abi.KIND_TBUF_UBO, reg=ut[0], off=ut[1])
+            elif 'texture_buffer' in ty:
+                e.update(kind=abi.KIND_TBUF_UBO, reg=ut[0], off=ut[1])
+                if not ty.startswith('array<') and (x := buffer_image_bias(nm, res)) is not None: e['tbx'] = x   # a buffer texture: its index in the offset table (the host binds one texture here)
             else: e.update(kind=abi.KIND_TEX_UBO, reg=ut[0], off=ut[1], **({'soff': us[1], 'sreg': us[0]} if other else {}))
         elif decode_ubo_img(nm):
             e.update(kind=abi.KIND_IMG_UBO, reg=decode_ubo_img(nm)[0], off=decode_ubo_img(nm)[1])   # pyright: ignore[reportOptionalSubscript]  (not None: tested above)
@@ -279,6 +288,7 @@ def reflect(key, stage, msl, res):
         elif c2_array(nm, ty) is not None:   # an array of the driver table's handles (c2_array): the replay fills element k from the slot whose c2 word is at off + 8k
             off, soff = c2_array(nm, ty)   # pyright: ignore[reportGeneralTypeIssues]  (not None: tested above)
             e.update(kind=abi.KIND_SAMP_C2A if nm.endswith('Smplr') else abi.KIND_TEX_C2A, off=off, **({'soff': soff} if soff is not None else {}))
+            if not nm.endswith('Smplr') and 'texture_buffer' in ty and (x := buffer_image_bias(nm, res)) is not None: e['tbx'] = x   # an array of buffer textures: its first entry
         elif nm.endswith('Smplr'):   # handle type 0 = texture and sampler combined in one handle: the sampler index is taken from the high bits of that texture slot's handle
             t, s, ty = decode_tex(nm[:-5]); e.update(  # pyright: ignore[reportGeneralTypeIssues]  (a sampler whose name does not decode stops the shader here)
                 kind=abi.KIND_SAMP_ID, reg=const_sampler(nm[:-5])) if ty == 3 else e.update(kind=abi.KIND_SAMP, reg=s) if ty else e.update(kind=abi.KIND_SAMP_TEX, reg=t)
@@ -288,7 +298,7 @@ def reflect(key, stage, msl, res):
             else: e.update(kind=abi.KIND_IMG if re.match(r'[a-z]+_i', nm) else (abi.KIND_TBUF if 'texture_buffer' in ty else abi.KIND_TEX), reg=d[0])
             # native texture atomics (dmsh_atomic.py): Metal allows them only on an R32Uint / R32Sint texture made with the shader-atomic usage, which the host checks for this slot
             if e.get('kind') == abi.KIND_IMG and has_word(msl, nm + '.atomic_'): e['atomic'] = True
-            if e.get('kind') == abi.KIND_IMG and (x := buffer_image_bias(nm, res)) is not None: e['tbx'] = x   # a buffer image: its index in the offset table
+            if e.get('kind') in (abi.KIND_IMG, abi.KIND_TBUF) and (x := buffer_image_bias(nm, res)) is not None: e['tbx'] = x   # a buffer image or texture: its index in the offset table
             # a 1D integer fetch the translator read as 2D rows of 16384 texels (Program.cs RecordTexelFetch1D): the host binds a texture buffer in this slot as such rows (nvn_mtl.m tbuf_as_2d)
             if e.get('kind') == abi.KIND_TEX and e.get('reg') in res.get('fetch1d', ()):
                 e['fetch1d'] = True

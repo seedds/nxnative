@@ -73,6 +73,44 @@ class BufferImageOffsets(unittest.TestCase):
         self.assertIsNone(dmsh_reflect.buffer_image_bias('cp_i_tcb_48_r32ui', res))
         self.assertEqual(dmsh_reflect.buffer_image_bias('cp_i_cb3_48_r32ui', res), 0)
 
+    def test_buffer_texture_indices(self):
+        # A buffer texture read through a texture slot (c2 word 8: slot 0) or through a handle in a uniform buffer gets its index from the translator's textures, never from an
+        # image with the same handle
+        source = ('struct spvDescriptorSetBuffer0\n{\n'
+                  f'    constant _17* cp_c{dmsh_abi.TBIAS_BANK} [[id(0)]];\n'
+                  '    texture_buffer<float> cp_t_tcb_8 [[id(1)]];\n'
+                  '    texture_buffer<uint> cp_t_cb3_A [[id(2)]];\n'
+                  '    texture2d<float> cp_t_tcb_A [[id(3)]];\n'
+                  '};\n')
+        res = {'sbufs': [], 'images': [{'binding': 9, 'cbuf_slot': -1, 'handle': 0x8, 'tbx': 3}], 'textures': [
+            {'binding': 1, 'cbuf_slot': -1, 'handle': 0x8, 'tbx': 0},
+            {'binding': 2, 'cbuf_slot': 3, 'handle': 0xA, 'tbx': 1},
+            {'binding': 3, 'cbuf_slot': -1, 'handle': 0xA}]}
+        got = REFLECT('synthetic', 'cs', source, res)
+        self.assertEqual([(b['kind'], b.get('tbx')) for b in got],
+                         [(dmsh_abi.KIND_TBIAS, None), (dmsh_abi.KIND_TBUF, 0), (dmsh_abi.KIND_TBUF_UBO, 1), (dmsh_abi.KIND_TEX, None)])
+        self.assertIsNone(dmsh_reflect.buffer_image_bias('cp_t_cb4_A', res))   # another uniform slot
+        self.assertEqual(got[0]['n'], 4)   # the table's length: entries 0 to 3 in one uint4 (the image's entry 3 counts)
+
+    def test_buffer_texture_arrays(self):
+        # An array of buffer textures (a dynamic slot array, cb0_40000000; an array of the driver table's handles, cb2) takes an entry per element from its first; an array of
+        # other textures with the same handle takes none, and the table is as long as the entries, in uint4s
+        source = ('struct spvDescriptorSetBuffer0\n{\n'
+                  f'    constant _17* vp_c{dmsh_abi.TBIAS_BANK} [[id(0)]];\n'
+                  '    array<texture_buffer<float>, 32> vp_tb_cb0_40000000 [[id(1)]];\n'
+                  '    array<texture2d<float>, 32> vp_t2d_cb0_40000000 [[id(33)]];\n'
+                  '    array<texture_buffer<uint>, 301> vp_tb_cb2_0 [[id(65)]];\n'
+                  '};\n')
+        res = {'sbufs': [], 'images': [], 'textures': [
+            {'binding': 1, 'cbuf_slot': 0, 'handle': 0x40000000, 'array': 32, 'tbx': 0},
+            {'binding': 2, 'cbuf_slot': 0, 'handle': 0x40000000, 'array': 32},
+            {'binding': 3, 'cbuf_slot': 2, 'handle': 0, 'array': 301, 'tbx': 32}]}
+        got = {b['msl_name']: b for b in REFLECT('synthetic', 'vs', source, res)}
+        self.assertEqual(got[f'vp_c{dmsh_abi.TBIAS_BANK}']['n'], 336)   # 32 + 301 entries, to whole uint4s
+        self.assertEqual(got['vp_tb_cb0_40000000'].get('tbx'), 0)
+        self.assertIsNone(got['vp_t2d_cb0_40000000'].get('tbx'))
+        self.assertEqual((got['vp_tb_cb2_0']['kind'], got['vp_tb_cb2_0'].get('tbx')), (dmsh_abi.KIND_TEX_C2A, 32))
+
 
 class PoolTable(unittest.TestCase):
     # Global memory traced to no storage buffer (Donkey Kong Bananza's gsys vertex shader c9a56f796ea4a4cd): the translator reserves the host's pool table as a storage buffer

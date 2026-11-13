@@ -52,11 +52,13 @@
 // the current bindings; only a shader with such a read has the table
 #define DMSH_CBSIZE_BANK 25
 #define DMSH_CBSIZE_SLOTS 14             // a u32 for each of uniform slots 0 to 13, as four uint4: 64 bytes
-// Buffer image offsets: Metal makes a buffer texture only at an aligned offset of its buffer, and an Apple GPU addresses a view below that alignment from the boundary below
-// its offset, so every access landed that many bytes early. The host binds such an image as a view from that boundary, wider by the elements in between, and gives their count
-// in a table in a bank of its own (Ryujinx Constants.NxBufferImageBiasBank), which the shader adds to each coordinate of the image; only a shader with a buffer image has it
+// Buffer texture offsets: Metal makes a buffer texture only at an aligned offset of its buffer, and an Apple GPU addresses a view below that alignment from the boundary below
+// its offset, so every access landed that many bytes early. The host makes each such texture's view from that boundary, wider by the elements in between, and gives their count
+// in a table in a bank of its own (Ryujinx Constants.NxBufferImageBiasBank), which the shader adds to each coordinate of a buffer image or of a buffer texture read through a
+// texture slot (and takes from its size query), an array of buffer textures one per element, the entry of the element an access indexes; only a shader with one of them has it,
+// as long as its entries (the TBIAS binding's "n")
 #define DMSH_TBIAS_BANK 26
-#define DMSH_TBIAS_SLOTS 16              // a u32 for each of a shader's first 16 buffer images, as four uint4: 64 bytes (the image's index: its binding's "tbx")
+#define DMSH_TBIAS_SLOTS 512             // the most entries a table holds, a u32 each, as uint4s (a binding's entry: its "tbx"; an array's first element's)
 // The push call's word before the offset names a block of the stage group; c[24] holds block b at b * DMSH_PUSH_SIZE. Block 0 holds the group's constants. Block 1 + i holds
 // stage i's buffer entries: compute has one stage and reads block 1 where its c0 layout counts it (control +0xaa, in words, right after block 0's +0xa9; the translator maps it
 // to c[24] + DMSH_PUSH_SIZE); graphics stage i reads its block through its own bank (DMSH_NVN2_STAGE_BANK + i), up to the pixel stage's block 5. PRAGMATA pushes 16-byte buffer

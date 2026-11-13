@@ -1290,7 +1290,11 @@ typedef struct { int n; vis_slot s[]; } vis_list;
 #define VIS_SLOTS 8192
 typedef struct { __strong id<MTLBuffer> buf; uint64_t fence; } vis_buf;
 // One visibility buffer per submission in flight, as many as command allocators: with 4, Age of Calamity (about twelve submissions a frame) waited in mtl_sub_begin for the previous frame's GPU work; its first battle went from 18.0 to 16.9 ms a frame on the Mac
-enum { VIS_RING = ALLOC_MAX };
+// The ring grows on demand (vis_take) up to VIS_RING buffers, each kept resident and reused once its submission's fence passes. Since a frame's submissions share a command
+// allocator, more counting submissions are in flight than allocators: with a ring of 8, a GPU running behind left none free and each such submission made a one-off buffer,
+// added to the residency set and removed after it, two residency commits through the kernel's GPU driver per submission (Ocarina of Time on an iPhone 17: about 9 a frame).
+// At most 128 x 64 KiB = 8 MiB, and only as many as are in flight at once.
+enum { VIS_RING = 128 };
 static vis_buf g_vis_ring[VIS_RING]; static int g_vis_ring_n, g_vis_ring_i = -1;
 static id<MTLBuffer> g_vis; static uint32_t g_vis_n;   // This submission's visibility buffer and number of slots used
 static void vis_take(void);

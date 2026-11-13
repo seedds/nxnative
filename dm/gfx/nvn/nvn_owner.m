@@ -240,6 +240,13 @@ const void *own_live_ref(uint64_t k) { pthread_mutex_lock(&g_smu); const void *o
 void serial_put(uint64_t k, id o) { pthread_mutex_lock(&g_smu); id old = hm_get_id(&g_by_serial, &k); if (old) { held_add((__bridge void *)old, -1); obj_drop(old); } hm_put_id(&g_by_serial, &k, o); held_add((__bridge void *)o, 1); own_note(k); pthread_mutex_unlock(&g_smu); }
 static void live_del_locked(uint64_t k) { id old = hm_get_id(&g_by_serial, &k); if (old) { held_add((__bridge void *)old, -1); obj_drop(old); hm_del_id(&g_by_serial, &k); own_note(k); } }   // nothing to drop: the texture
 void serial_del(uint64_t k) { pthread_mutex_lock(&g_smu); live_del_locked(k); pthread_mutex_unlock(&g_smu); }
+id own_ext_take(uint64_t k) {   // not retired through the deferred-release queue, which only NVN submissions drain: the present path retires it (mtl_ext_tex_release)
+    pthread_mutex_lock(&g_smu);
+    void *v = nvn_hm_del(&g_by_serial, &k); id o = v ? CFBridgingRelease(v) : nil;
+    if (o) { held_add((__bridge void *)o, -1); own_note(k); }
+    pthread_mutex_unlock(&g_smu);
+    return o;
+}
 
 void own_tex_live_put_locked(const tex_t *t) { nvn_hm_put(&g_tex_live, &t->serial, (void *)t); }
 int own_tex_live_locked(uint64_t serial) { return nvn_hm_get(&g_tex_live, &serial) != NULL; }

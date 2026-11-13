@@ -25,6 +25,7 @@
 
 #define RES_PATH_NOT_FOUND 0x202u      // fs module 2, description 1
 #define RES_PATH_EXISTS    0x402u      // fs module 2, description 2
+#define RES_RENAME_OTHER_FS 0x2F2402u  // fs module 2, description 6034: ResultRenameToOtherFileSystem
 enum { MODE_READ = 1, MODE_WRITE = 2, MODE_APPEND = 4 };
 enum { ENT_DIR = 0, ENT_FILE = 1 };
 enum { DIRMODE_DIR = 1, DIRMODE_FILE = 2 };
@@ -596,13 +597,21 @@ HLE_FORCE("_ZN2nn2fs17MountAddOnContentEPKciPvm", "fsp-srv; add-on content → D
     }
     return mount_aoc(name, dir);
 }
-// System data archives are firmware content, which the host does not have. The one a game has needed so far is 0100000000000802, MiiModel (Mario Kart 8 Deluxe mounts it as MiiResource: and
-// builds Mii heads from it at boot, for the title screen's demo race): the host writes a stand-in with every part empty (hle_mii.c dm_mii_standin) into <DM_TEMP>_sysdata/<id> and mounts it
-// read-only. Any other archive answers "target not found", as for a title that is not installed
+// System data archives are firmware content, which the host does not ship. A player can supply their own console's: <DM_SYSTEM_DIR>/sysdata/<id as 16 hex digits>/ holds an archive's
+// RomFS files, mounted read-only (Nintendo Switch Sports Resort's MiiResource, 0400000000000849: the Mii head textures and shapes). Without it, 0100000000000802, MiiModel (Mario Kart 8
+// Deluxe mounts it as MiiResource: and builds Mii heads from it at boot, for the title screen's demo race), is a stand-in with every part empty (hle_mii.c dm_mii_standin), written into
+// <DM_TEMP>_sysdata/<id>; any other archive answers "target not found", as for a title that is not installed
 #define SYSDATA_MIIMODEL 0x0100000000000802ull
 int dm_mii_standin(const char *dir);
+// The player's own console files: $DM_SYSTEM_DIR (default $DM_ROOT/run/platform/system), shared by every game: system data here, the Mii databases in hle_mii.c
+const char *dm_system_dir(char *buf, size_t n) { return envdir("DM_SYSTEM_DIR", "run/platform/system", buf, n); }
+static int sysdata_own(char *dir, size_t n, uint64_t id) {
+    char t[1024]; const char *sys = dm_system_dir(t, sizeof t); struct stat st;
+    return *sys && snprintf(dir, n, "%s/sysdata/%016llx", sys, (unsigned long long)id) < (int)n && !stat(dir, &st) && S_ISDIR(st.st_mode);
+}
 static int sysdata_dir(char *dir, size_t n, uint64_t id) {
     char t[1024];
+    if (sysdata_own(dir, n, id)) return 1;
     if (id != SYSDATA_MIIMODEL || snprintf(dir, n, "%s_sysdata/%016llx", envdir("DM_TEMP", "run/platform/temp", t, sizeof t), (unsigned long long)id) >= (int)n) return 0;
     return dm_mii_standin(dir);
 }
@@ -611,9 +620,10 @@ HLE_FORCE("_ZN2nn2fs29QueryMountSystemDataCacheSizeEPmNS_3ncm12SystemDataIdE", "
     *out = sysdata_dir(dir, sizeof dir, id) ? romfs_work_size(dir) : 0x1000;
     return RES_OK;
 }
-HLE_FORCE("_ZN2nn2fs15MountSystemDataEPKcNS_3ncm12SystemDataIdEPvm", "fsp-srv; system data: the host's MiiModel stand-in, nothing else", Result, h_fs_MountSysData, const char *name, uint64_t id, void *cache, size_t sz) {
+HLE_FORCE("_ZN2nn2fs15MountSystemDataEPKcNS_3ncm12SystemDataIdEPvm", "fsp-srv; system data: the console's own from DM_SYSTEM_DIR, else the host's MiiModel stand-in", Result, h_fs_MountSysData, const char *name, uint64_t id, void *cache, size_t sz) {
     (void)cache; (void)sz; char dir[1024];
-    if (!sysdata_dir(dir, sizeof dir, id)) { LOG("[RED] fs mount system data %s: the host has no %016llx", name, (unsigned long long)id); return RES_TARGET_NOT_FOUND; }
+    if (!sysdata_dir(dir, sizeof dir, id)) { LOG("[RED] fs mount system data %s: the host has no %016llx (a console's own goes in <DM_SYSTEM_DIR>/sysdata/%016llx)", name, (unsigned long long)id, (unsigned long long)id); return RES_TARGET_NOT_FOUND; }
+    char own[1024]; if (sysdata_own(own, sizeof own, id)) LOG("fs mount system data %s: %016llx from %s", name, (unsigned long long)id, dir);
     return mount(name, dir, 1);
 }
 static int host_mounted(const char *name) {
@@ -1150,12 +1160,13 @@ static Result rename_entry(const char *from, const char *to) {
         errno = e; return err_res("rename name", hp2); }
     return RES_OK;
 }
-// A rename on an SDK-held mount is the SDK's when both paths are on one; between the SDK's mount and another it fails, as Horizon refuses a rename across file systems
+// Horizon's RenameFile and RenameDirectory find each path's file system by its mount name and refuse two before touching either (the two accessors must be one, ResultRenameToOtherFileSystem):
+// so a rename never reaches a read-only mount from a writable one, and account and device saves, one folder on the host, are two mounts here as there. On one mount, the SDK's mount is the SDK's
 static Result rename_any(const char *from, const char *to, const char *sym) {
+    char a[0x30], b[0x30];
+    if (path_mount_name(from, a, sizeof a) && path_mount_name(to, b, sizeof b) && strcmp(a, b)) { LOG("fs rename %s → %s: two mounts, refused", from, to); return RES_RENAME_OTHER_FS; }
     Result (*sdk_rename)(const char *, const char *) = sdk_path_call(from, sym);
-    if (sdk_rename && sdk_path_call(to, sym)) return sdk_rename(from, to);
-    if (sdk_rename || sdk_path_call(to, sym)) { LOG("[RED] fs rename %s → %s: between the SDK's own mount and another, refused", from, to); return RES_FAIL; }
-    return rename_entry(from, to);
+    return sdk_rename ? sdk_rename(from, to) : rename_entry(from, to);
 }
 HLE_FORCE("_ZN2nn2fs10RenameFileEPKcS2_", "fsp-srv → rename(2)", Result, h_fs_RenameFile, const char *from, const char *to) { dm_thread_service_request(); return rename_any(from, to, "_ZN2nn2fs10RenameFileEPKcS2_"); }
 // The Great Ace Attorney Chronicles (SDK 10) imports it; a directory carries its guest name the same way as a file

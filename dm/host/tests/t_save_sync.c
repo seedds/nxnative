@@ -214,6 +214,10 @@ int main(void) {
     CHECK(session(B, cloud, "game.dat", "v7b") == 0 && cloud_has(cf, root, "game.dat", "v7b"), "the iPhone saves again");
     CHECK(run(A, cloud, NULL, NULL, old_choice, NULL, READABLE) == NOT_SENT && same(p, "v6") && cloud_has(cf, root, "game.dat", "v7b"),
           "a choice made on the cloud's save before that one replaces nothing");
+    {   ss_meta here; char own[64] = "";   // the token names the cloud's save, not this device's (the launchers sent local:<this device's hash> until this was checked)
+        if (!ss_scan(A, &here)) snprintf(own, sizeof own, "local:%s", here.hash);
+        CHECK(*own && run(A, cloud, NULL, NULL, own, NULL, READABLE) == NOT_SENT && same(p, "v6") && cloud_has(cf, root, "game.dat", "v7b"),
+              "local:<this device's hash> is not a choice for the cloud's save: nothing is replaced"); }
     CHECK(run(A, cloud, NULL, NULL, choice_of("local", cf), NULL, READABLE) == 0 && same(p, "v6") && cloud_has(cf, root, "game.dat", "v6"),
           "the player chooses this one: it goes out");
     backup_of(A, "cloud", back, sizeof back); snprintf(q, sizeof q, "%s/save/game.dat", back);
@@ -375,6 +379,27 @@ int main(void) {
         CHECK(same(A, "mine") && exists(J), "(15) the save and the journal are left as they were");
         unlink(J);
         CHECK(session(S15, NULL, NULL, NULL) == 0 && same(A, "mine"), "(15) with no journal the mount goes on");
+    }
+
+    printf("(16) a save folder that cannot be read is not an empty one\n");
+    {   char U[1200], UD[1300], cloud5[1200], cf5[1400], into[1300];
+        snprintf(U, sizeof U, "%s/mac7/save", root); snprintf(UD, sizeof UD, "%s_device", U);
+        snprintf(cloud5, sizeof cloud5, "%s/iCloud Drive/Fifth Saves", root); snprintf(cf5, sizeof cf5, "%s/%s/save.dmsync", cloud5, id);
+        mkd(U); mkd(UD); mkd(cloud5);
+        snprintf(p, sizeof p, "%s/game.dat", U); put(p, "a1"); snprintf(q, sizeof q, "%s/dev.dat", UD); put(q, "d1");
+        static int peek;   // the cloud's device save, unpacked into a folder of its own
+#define CLOUD_DEVICE(value) (snprintf(into, sizeof into, "%s/peek16-%d", root, peek++), mkd(into), !ss_read(cf5, into, &m) && \
+                             (snprintf(q, sizeof q, "%s/save_device/dev.dat", into), same(q, value)))
+        CHECK(session(U, cloud5, NULL, NULL) == 0 && cloud_has(cf5, root, "game.dat", "a1") && CLOUD_DEVICE("d1"), "the Mac sends both saves, the game's and the device's");
+        put(p, "a2"); chmod(UD, 0);
+        setenv("DM_SAVE_SYNC", cloud5, 1);
+        CHECK(save_sync_after_exit(U, DM_GAME_ID) == 0, "the game's save changed and the device save cannot be read: the launcher does not send");
+        CHECK(cloud_has(cf5, root, "game.dat", "a1") && CLOUD_DEVICE("d1"), "the cloud keeps both, the device save included");
+        CHECK(session(U, cloud5, NULL, NULL) == 0 && cloud_has(cf5, root, "game.dat", "a1") && CLOUD_DEVICE("d1"), "a start does not send either (sync is off for that session)");
+        chmod(UD, 0755);
+        CHECK(save_sync_after_exit(U, DM_GAME_ID) == 1 && cloud_has(cf5, root, "game.dat", "a2") && CLOUD_DEVICE("d1"), "readable again: both go out");
+        unsetenv("DM_SAVE_SYNC");
+#undef CLOUD_DEVICE
     }
     printf("== save sync: %d checks, %d failed ==\n", checks, fails);
     if (!fails) { char c[1200]; snprintf(c, sizeof c, "rm -rf '%s'", root); system(c); }

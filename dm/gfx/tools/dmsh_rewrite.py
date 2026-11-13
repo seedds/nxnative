@@ -2,9 +2,9 @@
 # The rewrites dmsh_build.py makes in a translated shader's MSL before it compiles it, where Metal or the translator falls short of what the Switch code does: precise
 # arithmetic (precise), memory barriers as fences (membar_fence, tg_fence), 64-bit products (mul_extended), uniform words tested against constants, which the front end would
 # fold into switches (uniform_tests), Ampere's HMMA as simdgroup matrices (hmma_msl), first stores and shared-memory stores (first_store, shared_store_msl), threadgroup memory
-# past Metal's limit (tg_spill), texture gathers with offsets (gather_offsets), border colours Metal has no sampler state for (border_emu) and a pixel shader's depth snapped to
-# its position (frag_z_snap). Functions of the MSL text and the library ABI only, with no build state, so tests import them. Part of the translation chain (dmsh_chain.FILES)
-# and of every shader's cache key (dmsh_build.py CODE_FP).
+# past Metal's limit (tg_spill), texture gathers with offsets (gather_offsets), border colours Metal has no sampler state for (border_emu), a pixel shader's depth snapped to
+# its position (frag_z_snap) and the 0 / -1 mask of a tested bit 0 without its compare (bit0_mask). Functions of the MSL text and the library ABI only, with no build state,
+# so tests import them. Part of the translation chain (dmsh_chain.FILES) and of every shader's cache key (dmsh_build.py CODE_FP).
 import bisect, collections, itertools, re
 import dmsh_abi as abi, dmsh_side
 
@@ -24,24 +24,57 @@ def membar_fence(msl):
     msl = re.sub(r'^([ \t]*)' + re.escape(_MEMBAR) + r'\n\1' + re.escape(_MEMBAR) + r'$', lambda m: m[1] + _MEMBAR, msl, flags=re.M)
     return msl.replace(_MEMBAR, fence)
 
-TG_FENCE_DECL = re.compile(r'\bthreadgroup\s+(?:spvUnsafeArray<[^;&]*?>|[A-Za-z_][\w<>, ]*?)\s*&?\s*(\w+)\s*(?:\[[^\]]*\])?\s*[;,)]')
+BIT0_AND = re.compile(r'^[ \t]*(u?int) (_\d+) = ([^;\n]+) & 1u?;$', re.M)
+BIT0_LOOSER = re.compile(r'\|\||&&|[|^?,]')   # an operator binding looser than &: `a | b & 1` is a | (b & 1), not bit 0
+def bit0_operand(e):   # the left operand outside its parentheses binds at least as tightly as &
+    while True:
+        f = re.sub(r'\([^()]*\)', '', e)
+        if f == e: return not BIT0_LOOSER.search(e)
+        e = f
+BIT0_TEST = re.compile(r'^[ \t]*bool (_\d+) = (_\d+) != 0u?;$', re.M)
+BIT0_MASK = re.compile(r'= (_\d+) \? \(-1\) : 0;')
+BIT0_WRITE = re.compile(r'\b(_\d+)\b[ \t]*(?:<<|>>|[-+*/%&|^])?=(?!=)')   # an assignment, plain or compound, a declaration's too
+BIT0_OTHER = re.compile(r'(?:\+\+|--)[ \t]*(_\d+)\b|\b(_\d+)[ \t]*(?:\+\+|--)|&(_\d+)\b')   # an increment, or the temporary's address
+BIT0_BODY = re.compile(r'^\{\n.*?^\}$', re.M | re.S)   # a function's body: its braces alone in column 0
+def bit0_mask(msl):
+    """The 0 / -1 mask of a tested bit 0, written from the bit and not from its compare. The translator makes a predicate of `x & 1` twice over: the compare
+    `bool b = (x & 1) != 0`, and where the Switch code keeps the predicate in a register, its integer form `b ? -1 : 0`. Where the shader also branches on b the compare has
+    two users in the AIR, a sign extension and a branch, and Apple's GPU compiler for the M3 and later (applegpu_g15 and up, macOS 26 and 27) can pick a bit-test jump it has
+    no encoding for: `LLVM ERROR: Failed to encode.` under llvm::MCObjectStreamer::emitInstruction, which ends the compiler service while a pipeline with the shader is built
+    (XPC_ERROR_CONNECTION_INTERRUPTED). It needs x in a uniform the compiler's per-draw constant program has loaded and no room left there for the test itself, so one
+    shader in thousands with the idiom meets it: PRAGMATA's pixel shader c4ac3ca598cea32e (`AND` of a constant buffer word with 1, its predicate kept and branched on).
+    With the mask as `-(x & 1)`, the same value, the compare is left with its branch alone. Only a declaration `int a = ... & 1;` with a declaration `bool b = a != 0;`
+    counts, neither assigned again (SPIRV-Cross temporaries); b is in scope where the mask is taken, so a is. Other shaders come back as the same object"""
+    if ' ? (-1) : 0;' not in msl: return msl
+    def body(f):   # one function: SPIRV-Cross numbers its temporaries by function, and the build's extra entry points repeat a body
+        src = f[0]
+        if ' ? (-1) : 0;' not in src: return src
+        bits = {m[2]: m[1] for m in BIT0_AND.finditer(src) if bit0_operand(m[3])}
+        tests = {m[1]: m[2] for m in BIT0_TEST.finditer(src) if m[2] in bits}
+        writes = collections.Counter(m[1] for m in BIT0_WRITE.finditer(src))   # a temporary written once, in its declaration
+        other = {m[1] or m[2] or m[3] for m in BIT0_OTHER.finditer(src)}
+        tests = {b: a for b, a in tests.items() if writes[a] == 1 and writes[b] == 1 and a not in other and b not in other}
+        def mask(m):
+            a = tests.get(m[1])
+            if a is None: return m[0]
+            return '= -%s;   // bit 0 as a mask (bit0_mask)' % (a if bits[a] == 'int' else 'int(%s)' % a)
+        return BIT0_MASK.sub(mask, src) if tests else src
+    out = BIT0_BODY.sub(body, msl)
+    return out if out != msl else msl
+
 TG_FENCE = 'atomic_thread_fence(mem_flags::mem_threadgroup, memory_order_seq_cst, thread_scope_simdgroup);'
+TG_FENCE_FN = re.compile(r'\bvoid dmsh_tg_fence\(\)\s*\{')
 def tg_fence(src):
-    """A store to threadgroup memory followed by a load of another lane's word, with no barrier between them (Ampere compilers rely on lockstep warps for small
-    scans, e.g. Unreal's GPU radix sort downsweep d032ce5090303e01 at 0x2eb0: STS / LDS [x-4] / STS / LDS [x-8]): for one thread the load and the earlier store do not
-    alias, so Metal moves the load above the store and reads another lane's old value (Orbitals: Niagara's sorted index list wrong every frame, beams and particles broken).
-    A simdgroup-scope memory fence after each threadgroup store keeps the order; it is not an execution barrier, so it is safe in divergent code. Only kernels with a
-    threadgroup array are touched. A plain or compound assignment (SPIRV-Cross folds a load, an operation and a store of the same element into `_46[i] += 1u;`), also to a
-    member or component (`_39[i].x = v;`). From uncraftablexd's Orbitals bring-up (PR #1775)"""
-    names = {m.group(1) for m in TG_FENCE_DECL.finditer(src) if m.group(1) not in ('operator',)}
-    if not names: return src
-    store = re.compile(r'^(\s*)(?:%s)\s*\[[^\n;]*\](?:\.\w+)?\s*(?:[-+*/%%&|^]|<<|>>)?=(?!=)[^\n]*;\s*$' % '|'.join(map(re.escape, sorted(names))))
-    out = []
-    for ln in src.split('\n'):
-        out.append(ln)
-        m = store.match(ln)
-        if m: out.append(m.group(1) + TG_FENCE)
-    return '\n'.join(out)
+    """Warp-synchronous shared memory. Ampere code relies on lockstep warps and leaves the barrier out of small scans (Unreal's GPU radix sort downsweep d032ce5090303e01
+    at 0x2eb0: STS / LDS [x-4] / STS / LDS [x-8]); for one thread the load and the earlier store do not alias, so Metal moves the load above the store and reads another
+    lane's old value (Orbitals: Niagara's sorted index list wrong every frame, PR #1775). The translator calls dmsh_tg_fence() before each shared memory load that some path
+    reaches from a shared memory store with no barrier between (SharedMemoryFence.cs). Its body there is a memory barrier at workgroup scope, which SPIRV-Cross prints as a
+    threadgroup_barrier (and membar_fence as a device fence); here it becomes a simdgroup-scope fence on threadgroup memory, which is the order a warp needs and, not being
+    an execution barrier, safe in divergent code. A kernel whose arrays spill to device memory gets the device scope too (tg_spill, after this). The text rule before it put a
+    fence after every threadgroup store: 25,108 in 699 of Ocarina of Time's shaders, and Apple's compiler crashed on a foliage mesh pipeline on an M2 (GitHub issue #2481)"""
+    m = TG_FENCE_FN.search(src)
+    if not m: return src
+    return src[:m.end()] + '\n    ' + TG_FENCE + '\n' + src[block_end(src, m.end() - 1):]
 
 # spirv-cross writes OpUMulExtended / OpSMulExtended as calls of an optnone template, spvMulExtended, as Metal's compiler may fail on an inlined mulhi (spirv_msl.cpp,
 # SPVFuncImplMulExtended). The barrier keeps every product a call that is never folded: Switch 2 shaders divide by constants through the high word of a product (Ocarina of Time
@@ -356,6 +389,25 @@ def shared_store_msl(msl):
         u += len('using namespace metal;\n'); src = src[:u] + SHARED_ALIAS + src[u:]
     return src
 
+# A compute shader's local size as the kernel's [[max_total_threads_per_threadgroup]]. A Metal compute pipeline's maxTotalThreadsPerThreadgroup is not fixed at 1,024: on GPUs without
+# Dynamic Caching (the M1 and M2, applegpu_g13* / g14*, and the iPhone GPUs of their generation) it falls with the registers the kernel's code takes, 1,024 threads at up to 52 32-bit
+# registers, 512 at up to 104, 384 at 128, and the GPU compiler chooses the registers without knowing the size the host will dispatch. The host dispatches the Switch shader's own local size
+# (nvn_mtl.m), so a kernel compiled past that size's budget gets a dispatch larger than its pipeline allows, which runs no invocation: Ocarina of Time's froxel light injection 9ed48d1011f1b48b
+# (8x8x8) took 128 registers on applegpu_g14g once its 195 uniform reads at computed offsets were bounded as selects (918e9f34) and 104, exactly the 512-thread budget, as plain reads, and its
+# 128x72x96 volumes stayed zero on M2s, so the forest haze was gone (issue #2425); on the M3 and later (g15 / g16) every size up to 1,024 fits and the code is the same with the attribute.
+# With it, the compiler fits the kernel to the size (spilling where it must), as it does for a pipeline descriptor's maxTotalThreadsPerThreadgroup. Only sizes above 384 get it: 128
+# registers, the most a thread has, still allow 384, so no smaller size can be refused, and on g13 / g14 the attribute changes the code of most kernels that already fit (a 64-thread kernel's
+# registers and spill go down a little), which those sizes are left out of. The line goes before the kernel's, which tools match at the start of a line. local: the translator's [x, y, z];
+# a missing or out-of-range size leaves the shader as it is
+MAX_THREADS = 1024   # Metal's limit for a compute threadgroup on every Apple GPU
+ALWAYS_FITS = 384   # threads a pipeline allows at the most registers a thread can take (128) on g13 / g14
+
+def max_threads(msl, local):
+    if not local or len(local) != 3 or any(not isinstance(v, int) or v < 1 for v in local): return msl
+    n = local[0] * local[1] * local[2]
+    if n <= ALWAYS_FITS or n > MAX_THREADS or '[[max_total_threads_per_threadgroup(' in msl: return msl
+    return re.sub(r'^(kernel void main0\()', '[[max_total_threads_per_threadgroup(%d)]]\n\\1' % n, msl, count=1, flags=re.M)
+
 # Compute shared memory past Metal's limit: Apple's GPUs give a kernel 32 KB of threadgroup memory (maxThreadgroupMemoryLength), and Metal refuses a pipeline that declares more, while Ampere
 # gives up to 100 KB. Mario Kart World's DrivePassShaderDefault has 168 compute shaders of 48 KB (spvUnsafeArray<uint, 12288>), seven of them run on the way to the first race; refused, their
 # dispatches were skipped. Such a kernel takes its threadgroup arrays from a device buffer the host binds (abi.TG_SLOT): one slice of the arrays' total per workgroup, at the workgroup's index in
@@ -581,7 +633,7 @@ def frag_z_snap(msl):
 # what the zero weight makes of it. With blending off, on a target that is not floating point, or with a weight the alpha does not make zero, the output's bits are 0 and it is returned as
 # it is: NVIDIA stores that NaN or Inf too. A finite colour is never changed, nor the alpha.
 # Not covered, as a shader cannot see it: a NaN or Inf already in the target under a zero destination weight, and a non-finite weight on a colour of 0.
-# The guard goes into main0 before the build makes its other entry points, so each of them has it: they call main0's body (dmsh_side.shared_body: main0_u / main0_m, main0_d, main0_f and
+# The guard goes into main0 before the build makes its other entry points, so each of them has it: they call main0's body (dmsh_side.shared_body: main0_u, main0_d, main0_f and
 # the side library's) and take main0's parameters, the word's among them. It is written as a call, not as stores to out, which dmsh_entry.fs_uint reads to tell what a shader writes
 BLEND_ZERO = '''struct dm_blend_state { uint zero; };   // see dmsh_rewrite.py blend_zero
 static inline __attribute__((always_inline)) float4 dm_bz(float4 c, uint m)

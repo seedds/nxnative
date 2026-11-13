@@ -115,6 +115,14 @@ namespace Ryujinx.Graphics.Shader.Instructions
                     src = Const(0x00010100);
                     break;
 
+                // nxnative: the address of the stage's circular buffer, which a hull shader writes its control points to (DirectCbeWrites turns those stores into outputs)
+                case SReg.DirectCbeWriteAddressLow:
+                case SReg.DirectCbeWriteAddressHigh:
+                    src = context.TranslatorContext.UsesDirectCbe
+                        ? context.Load(StorageKind.Input, sreg == SReg.DirectCbeWriteAddressLow ? IoVariable.DirectCbeAddressLow : IoVariable.DirectCbeAddressHigh)
+                        : Const(0);
+                    break;
+
                 case SReg.ThreadKill:
                     src = context.TranslatorContext.Definitions.Stage == ShaderStage.Fragment ? context.Load(StorageKind.Input, IoVariable.ThreadKill) : Const(0);
                     break;

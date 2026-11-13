@@ -178,6 +178,11 @@ namespace Ryujinx.Graphics.Shader.StructuredIr
 
             AstTextureOperation GetAstTextureOperation(TextureOperation texOp)
             {
+                if ((texOp.Type & SamplerType.Mask) == SamplerType.TextureBuffer)
+                {
+                    context.ResourceManager.NoteBufferResource(inst.IsImage(), texOp.Set, texOp.Binding);   // nxnative: buffer image and buffer texture offsets
+                }
+
                 return new AstTextureOperation(
                     inst,
                     texOp.Type,

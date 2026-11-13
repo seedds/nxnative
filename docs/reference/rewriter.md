@@ -248,6 +248,14 @@ To enroll a cut for any game's own module:
 - **Found on:** [Ace Attorney Investigations Collection](../../dm/games/010005501E68C000/README.md) (Unity 2022.3 IL2CPP): `main+0x1d271bc` and `+0x204ebec`.
 - **Check:** every module the rewriter accepted before comes out byte-identical.
 
+### Compare and swap of a register pair that is x18, x19
+
+- **Symptom:** `RuntimeError: subst fail <addr> caspal x18, x19, x4, x5, [x16]` in `patch_nso.py` (`subst`, from `site_plain`).
+- **Cause:** `casp`, `caspa`, `caspl` and `caspal` take the compare pair (Rs) and the new-value pair (Rt) as an even register and the next one. `subst` renames `x18` alone, and `xS, x19` is no pair, so no encoding disassembles as the original with `x18` replaced.
+- **Fix:** `site_casp`, chosen by `casp_pair18` (the encoding, either pair at `x18`) before `site_plain`, moves the pair to a free even pair `P, P + 1`: `P` is loaded from the slot K18 and `P + 1` copied from `x19`, and the instruction runs with the pair renamed. The instruction writes the compare pair with the memory's old value, so for a compare pair `P` then goes back to the slot and `P + 1` to `x19`; a new-value pair is only read. The memory access is still the one instruction, so it stays atomic. `P`, `P + 1` and the slot address's register are saved below `sp` and restored. A base register `x18` is a single field, which `subst` renames as before.
+- **Found on:** [Sonic Frontiers Definitive Edition](../../dm/games/0400921025B32000/README.md) `main+0x19ce5c4`, in a 128-bit compare and swap loop: the only one of the 18,315 `x18` sites in `main` that `subst` cannot rename.
+- **Check:** `test_x18_casp.py` checks that no block names `x18` and keeps one `casp`, and runs the blocks with unicorn (optional): a swap that succeeds and one that fails with the compare pair at `x18`, a new-value pair at `x18`, and a 32-bit pair, whose writes clear the upper halves. A module without such an instruction takes no new path: the rewriter stopped on every one before.
+
 ### Unframed pointer tail calls followed by zero trap padding
 
 - **Symptom:** `AssertionError: jump table d29e68` while rewriting Moving Out 2 1.3.315.

@@ -218,16 +218,16 @@ static void nq_record(nq_job *j,const uint8_t *p,op_hdr h) {
     uint8_t x[REC_EXPAND_MAX] __attribute__((aligned(8))); size_t n=rec_expand(p,x);
     for(size_t o=0;o<n;) { op_hdr c; memcpy(&c,x+o,8); nq_record_one(j,x+o,c); o+=c.size; }
 }
-// A handle is the recording's control list (nvn_obj.h ctl_e): its pieces of records, its links to more control memory. Calls were copied in when they were recorded
+// A handle is the recording's control list (nvn_obj.h ctl_e): its pieces of records, its links to more control memory. Calls were copied in when they were recorded.
+// A piece runs what its command memory holds at submit, as the GPU runs a command set's bytes: the records that fit in it (nvn_piece_record). A game may record over a called
+// recording before the list that calls it is submitted (docs/reference/nvn-objects.md, "A called recording recorded over before its caller is submitted")
 static void nq_flatten(nq_job *j,const uint8_t *list) {
     for(const uint8_t *e=list;;e+=8) {
         uint64_t v; memcpy(&v,e,8); unsigned k=ctl_kind(v);
         if(k==CTL_LINK) { e=ctl_addr(v)-8; continue; }
         if(k!=CTL_CHUNK) die("NVN command list %p: corrupt control entry %#llx at %p",(const void *)list,(unsigned long long)v,(const void *)e);
-        const uint8_t *p=ctl_addr(v),*pe=p+ctl_chunk_bytes(v);
-        while(p<pe) { op_hdr h; memcpy(&h,p,8);
-            if(h.size<8 || h.size&7 || h.size>(size_t)(pe-p)) die("NVN command list %p: record {op %u, size %u} at %p, %zu bytes into its piece of %zu at %p",(const void *)list,h.op,h.size,(const void *)p,(size_t)(p-ctl_addr(v)),ctl_chunk_bytes(v),(const void *)ctl_addr(v));
-            nq_record(j,p,h); p+=h.size; }
+        const uint8_t *p=ctl_addr(v),*pe=p+ctl_chunk_bytes(v); op_hdr h;
+        while(nvn_piece_record(list,v,p,pe,&h)) { nq_record(j,p,h); p+=h.size; }
         if(v&CTL_LAST) return;
     }
 }

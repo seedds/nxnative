@@ -183,7 +183,7 @@ def digest(paths, extra=b'', root=None):   # path-independent names and bytes; u
     h = hashlib.sha256(extra)
     for p in paths:
         h.update((Path(p).relative_to(root).as_posix() if root else Path(p).name).encode() + b'\0')
-        if Path(p).is_file(): sha256_file(p, h)
+        if rfs.isfile(p): sha256_file(p, h)   # a file in a folder or inside RomFS.img (a Vulkan game's shaders: vk_shaders.spirv_files walks the image)
         else: h.update(b'missing')
         h.update(b'\0')
     return h.hexdigest()

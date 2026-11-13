@@ -22,7 +22,8 @@ static int fixtures(NSString *msl, NSString *tables) {
     NSString *src = @"#include <metal_stdlib>\nusing namespace metal;\n"
         "struct VIn { float4 p [[attribute(0)]]; };\n"
         "vertex float4 vs(VIn in [[stage_in]]) { return in.p; }\n"
-        "fragment float4 fs() { return float4(0.5, 0.25, 1, 0.5); }\n";
+        "fragment float4 fs() { return float4(0.5, 0.25, 1, 0.5); }\n"
+        "kernel void cs(device uint *o [[buffer(0)]], uint i [[thread_position_in_grid]]) { o[i] = i; }\n";
     put([msl stringByAppendingPathComponent:@"warm-vs.metal"], src);
     NSTask *t = [NSTask new]; t.executableURL = [NSURL fileURLWithPath:@"/usr/bin/xcrun"]; t.currentDirectoryURL = [NSURL fileURLWithPath:msl];
     t.arguments = @[@"-sdk", @"macosx", @"metal", @"warm-vs.metal", @"-o", @"warm-vs.metallib"]; t.standardOutput = NSFileHandle.fileHandleWithNullDevice; t.standardError = NSFileHandle.fileHandleWithNullDevice;
@@ -30,10 +31,12 @@ static int fixtures(NSString *msl, NSString *tables) {
     [t waitUntilExit]; if (t.terminationStatus) return 0;
     NSFileManager *fm = NSFileManager.defaultManager;
     if (![fm copyItemAtPath:[msl stringByAppendingPathComponent:@"warm-vs.metallib"] toPath:[msl stringByAppendingPathComponent:@"warm-fs.metallib"] error:nil]) return 0;
+    if (![fm copyItemAtPath:[msl stringByAppendingPathComponent:@"warm-vs.metallib"] toPath:[msl stringByAppendingPathComponent:@"warm-cs.metallib"] error:nil]) return 0;
     [fm removeItemAtPath:[msl stringByAppendingPathComponent:@"warm-vs.metal"] error:nil];
     put([msl stringByAppendingPathComponent:@"warm-vs.json"], [NSString stringWithFormat:@"{\"chain\": \"%s\", \"route\": \"B\", \"entry\": \"vs\", \"entry_z\": \"vs\", \"bindings\": [], \"vertex_inputs\": [{\"location\": 0, \"msl_type\": \"float4\"}]}", DMSH_CHAIN]);
     put([msl stringByAppendingPathComponent:@"warm-fs.json"], [NSString stringWithFormat:@"{\"chain\": \"%s\", \"route\": \"B\", \"entry\": \"fs\", \"bindings\": [], \"vertex_inputs\": []}", DMSH_CHAIN]);
-    put([tables stringByAppendingPathComponent:@"shader_map.tsv"], @"package\tindex\tstage\tdm_ctl_sha16\tsource\np.bin\t0\tvertex\twarm-vs\tx\np.bin\t1\tpixel\twarm-fs\tx\n");
+    put([msl stringByAppendingPathComponent:@"warm-cs.json"], [NSString stringWithFormat:@"{\"chain\": \"%s\", \"route\": \"B\", \"entry\": \"cs\", \"bindings\": []}", DMSH_CHAIN]);
+    put([tables stringByAppendingPathComponent:@"shader_map.tsv"], @"package\tindex\tstage\tdm_ctl_sha16\tsource\np.bin\t0\tvertex\twarm-vs\tx\np.bin\t1\tpixel\twarm-fs\tx\np.bin\t2\tcompute\twarm-cs\tx\n");
     return 1;
 }
 static int float4_fmt(void) { for (int f = 1; f < 256; f++) if (vfmt(f) == MTLVertexFormatFloat4) return f; return 0; }
@@ -103,6 +106,8 @@ int main(int argc, char **argv) { @autoreleasepool {
     unsetenv("DM_NVN_HILITE"); unsetenv("DM_NVN_MAGSCAN"); unsetenv("DM_PSO_RECORD"); unsetenv("DM_PSO_USER"); unsetenv("DM_SAVE"); setenv("DM_NVN_PREDICT", "0", 1);
     if (argc >= 3 && !strcmp(argv[1], "--tool")) {   // DM_PSO_PREBUILD=tool, the flush period as small as a test can make it
         if (getenv("T_PERIOD")) g_arch_period_max = atoi(getenv("T_PERIOD"));
+        // T_HARVEST_HOLD=<ms>: the harvest queue (arch_harvest) busy that long, as a slow capture of a compute pipeline the MTLDevice built makes it
+        if (getenv("T_HARVEST_HOLD")) { useconds_t us = (useconds_t)atoi(getenv("T_HARVEST_HOLD")) * 1000; dispatch_async(arch_harvest_q(), ^{ usleep(us); }); }
         return mtl_pso_prebuild_tool() == 1 ? 0 : 1;
     }
     if (argc >= 3 && !strcmp(argv[1], "--open")) { mtl_init(); shmap_load(); return open_run(@(argv[2])); }
@@ -193,6 +198,17 @@ int main(int argc, char **argv) { @autoreleasepool {
     NSString *nowarm = [root stringByAppendingPathComponent:@"nowarm"];
     EXPECT("warm 0: exit 0", 0, run_self(@[@"--tool", root], @{@"DM_PSO_PREBUILD": @"tool", @"DM_PSO_PREBUILD_WARM": @"0", @"DM_PSO_ARCHIVE": nowarm, @"DM_PSO_PREBUILD_OUT": @"", @"DM_PSO_MANIFEST": @"", @"DM_PSO_BUNDLE": @"off"}, [root stringByAppendingPathComponent:@"tool5.log"]));
     EXPECT("warm 0: nothing built", 1, ![slurp([root stringByAppendingPathComponent:@"tool5.log"]) containsString:@"prewarm lines"] && mtl4a(nowarm).count == 0);
+    // a compute row: the MTLDevice builds it, the harvest queue captures it in the background; the bundle waits for that capture (a slow one was left out, and written
+    // at exit, where Metal's pipelines-script serializer met a finalized C library and the tool crashed)
+    NSString *out6 = [root stringByAppendingPathComponent:@"out6"], *list6 = [root stringByAppendingPathComponent:@"six.tsv"], *log6p = [root stringByAppendingPathComponent:@"tool6.log"];
+    put(list6, @"C\twarm-cs\n");
+    EXPECT("compute row: exit 0", 0, run_self(@[@"--tool", root], @{@"DM_PSO_PREBUILD": @"tool", @"DM_PSO_ARCHIVE": [root stringByAppendingPathComponent:@"work6"], @"DM_PSO_PREBUILD_OUT": out6,
+                                                                      @"DM_PSO_MANIFEST": list6, @"DM_PSO_BUNDLE": @"off", @"T_HARVEST_HOLD": @"500"}, log6p));
+    NSString *log6 = slurp(log6p); NSRange cap = [log6 rangeOfString:@"and 1 compute pipelines written"], out = [log6 rangeOfString:@"for the app to bundle"];
+    EXPECT("compute row: captured before the bundle is made", 1, cap.location != NSNotFound && out.location != NSNotFound && cap.location < out.location);
+    EXPECT("compute row: its file in the bundle", 1, mtl4a(out6).count);
+    EXPECT("compute row: the stamp counts it", 1, [slurp([out6 stringByAppendingPathComponent:@"prewarm.tsv"]) containsString:@"files\t1\n"]);
+    EXPECT("compute row: nothing written at exit", 0, [log6 containsString:@"pipeline archive at exit"]);
     // the app's side
     NSDictionary *app = @{@"DM_PSO_BUNDLE": bundle, @"DM_PSO_ARCHIVE": dev, @"DM_PSO_MANIFEST": @"off", @"DM_PSO_PREBUILD": @"0", @"MTL_DEBUG_LAYER": @"1"};
     int r = run_self(@[@"--open", root], app, [root stringByAppendingPathComponent:@"open.log"]);

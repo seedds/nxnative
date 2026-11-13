@@ -75,7 +75,8 @@ class Store(_Files):
     def __init__(self, path, say=print, *, readonly=None):
         self.path, self.say = os.fspath(path), say
         self.lock = threading.RLock()   # one connection, for dmsh_build.py's threads: a read or a write of an entry takes microseconds next to a compile
-        self.full = False
+        self.full = False   # set by the first write that fails (a full drive): no later write is tried, and the batch it was part of is rolled back
+        self.outer = False   # inside the outermost batch: SQLite may end the transaction itself on a failed write, so its own flag cannot tell
         source = readonly if readonly is not None else READ_ONLY
         if source and os.path.realpath(source) == os.path.realpath(self.path): raise ValueError('the writable and read-only shader caches must differ')
         self.use_lock = None
@@ -126,7 +127,8 @@ class Store(_Files):
         return local | self.readonly.names(prefix) if self.readonly else local
 
     def put(self, name, data, when=None):
-        """An entry's bytes, replacing what it held. A cache that cannot be written (a full drive) is one [RED] line: the build goes on without it"""
+        """An entry's bytes, replacing what it held. A cache that cannot be written (a full drive) is one [RED] line: the build goes on without it, and the batch this write was part of is rolled back"""
+        if self.full: return   # inside a failed batch, a write would land outside it: SQLite may have rolled the transaction back already
         digest = hashlib.blake2b(data, digest_size=16).digest()
         with self.lock:
             try:
@@ -134,23 +136,36 @@ class Store(_Files):
                     row = self.db.execute('SELECT id FROM blob WHERE hash=?', (digest,)).fetchone()
                     blob = row[0] if row else self.db.execute('INSERT INTO blob(hash, data) VALUES(?, ?)', (digest, data)).lastrowid
                     self.db.execute('INSERT OR REPLACE INTO entry(name, blob, mtime) VALUES(?, ?, ?)', (name, blob, time.time() if when is None else when))
-            except sqlite3.OperationalError as e:
-                if any(w in str(e) for w in _DAMAGED): self._damage(e)
-                elif not self.full: self.full = True; self.say(f'[RED] the shader compile cache {self.path} cannot be written, the build goes on without it: {e}')
+            except sqlite3.OperationalError as e: self._unwritable(e)
             except sqlite3.DatabaseError as e:
                 if not self._damage(e): raise
 
+    def _unwritable(self, e):
+        if any(w in str(e) for w in _DAMAGED): self._damage(e)
+        elif not self.full: self.full = True; self.say(f'[RED] the shader compile cache {self.path} cannot be written, the build goes on without it: {e}')
+
     @contextlib.contextmanager
     def batch(self):
-        """Several entries as one write: a stop leaves all of them or none (a shader's outputs and the index naming them), and thousands take one commit. Nests; the outermost commits"""
+        """Several entries as one write: a stop leaves all of them or none (a shader's outputs and the index naming them), and thousands take one commit. Nests; the outermost commits.
+        A write that fails in it, or its commit, fails all of it: it is rolled back and full is set, which a caller holding files for it checks once the batch is over (dmsh_build.py's commit)"""
         with self.lock:
-            if self.db.in_transaction: yield; return
-            self.db.execute('BEGIN IMMEDIATE')
+            if self.outer or self.db.in_transaction: yield; return
+            was = self.full
+            self.db.execute('BEGIN IMMEDIATE'); self.outer = True
             try: yield
             except BaseException:
                 if self.db.in_transaction: self.db.rollback()
                 raise
-            else: self.db.commit()
+            else:
+                if self.full and not was:
+                    if self.db.in_transaction: self.db.rollback()
+                else:
+                    try: self.db.commit()
+                    except sqlite3.OperationalError as e:
+                        with contextlib.suppress(sqlite3.Error):
+                            if self.db.in_transaction: self.db.rollback()
+                        self._unwritable(e)
+            finally: self.outer = False
 
     def prune_shaders(self, keep, since):
         """Remove the shader/<64 hex digits>/ entries not in keep and all written before since, and the bytes nothing names any more, giving their pages back. Other names stay.

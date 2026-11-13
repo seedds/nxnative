@@ -319,6 +319,21 @@ int main(void) {
         h = 0; CHECK(h_fs_OpenDirectory(&h, "save:\\dir", DIRMODE_FILE) == RES_OK && h_fs_ReadDirectory(&cnt, de, h, 4) == RES_OK && cnt == 1 && !strcmp(de[0].name, "g"), "the directory lists g, not a name with backslashes (%s)", cnt ? de[0].name : "-"); h_fs_CloseDirectory(h);
     }
 
+    printf("⑦b a rename between two mounts is refused before either is touched, as Horizon refuses it (ResultRenameToOtherFileSystem)\n");
+    {   char rod[1100], tmpd[1100], q[1200]; int32_t t = -1;
+        snprintf(rod, sizeof rod, "%s/rodir", root); mkdir(rod, 0755); snprintf(tmpd, sizeof tmpd, "%s/tmpst", root); mkdir(tmpd, 0755);
+        CHECK(mount("rodir", rod, 1) == RES_OK && mount("tmpst", tmpd, 0) == RES_OK && mount_ex("dsave", save, 0, 1) == RES_OK && g_mnt[g_nmnt - 1].txn_root == g_mnt[0].txn_root,
+              "mount a read-only folder, a writable one and a second name for the save (one transaction)");
+        CHECK(h_fs_RenameFile("save:/dir/g", "rodir:/g") == RES_RENAME_OTHER_FS && h_fs_GetEntryType(&t, "save:/dir/g") == RES_OK, "a file into the read-only mount is refused, and stays");
+        snprintf(q, sizeof q, "%s/g", rod); CHECK(access(q, F_OK) != 0, "nothing is written into the read-only folder");
+        CHECK(h_fs_RenameDir("save:/dir", "tmpst:/dir") == RES_RENAME_OTHER_FS && h_fs_GetEntryType(&t, "save:/dir") == RES_OK && h_fs_GetEntryType(&t, "tmpst:/dir") != RES_OK,
+              "a directory into another writable mount is refused, and stays");
+        CHECK(h_fs_RenameFile("dsave:/dir/g", "save:/dir/h") == RES_RENAME_OTHER_FS && h_fs_GetEntryType(&t, "dsave:/dir/g") == RES_OK && h_fs_GetEntryType(&t, "save:/dir/h") != RES_OK,
+              "between two names of one save too: two mounts on Horizon");
+        CHECK(h_fs_RenameFile("dsave:/dir/g", "dsave:/dir/h") == RES_OK && h_fs_GetEntryType(&t, "save:/dir/h") == RES_OK, "on one mount the rename is made");
+        CHECK(h_fs_CreateFile("tmpst:/a", 0) == RES_OK && h_fs_RenameFile("tmpst:/a", "tmpst:/b") == RES_OK && h_fs_GetEntryType(&t, "tmpst:/b") == RES_OK, "and on a plain writable mount");
+    }
+
     printf("⑧ a save folder that cannot clone, and symlinks in recursive deletes\n");
     {   g_nmnt = 0; g_clone_enotsup = 1; int nf1 = g_nfail;
         CHECK(h_fs_MountSave("save", NULL) == RES_OK && g_mnt[0].ro && g_nfail == nf1 + 1, "clonefile ENOTSUP: the committed save mounts read-only and the front end is told once");
@@ -384,7 +399,7 @@ int main(void) {
               && h_fs_DeleteDirRec("vtapi:/VoiceText/vt") == RES_OK && h_fs_CleanDirRec("vtapi:/VoiceText") == RES_OK && h_fs_DeleteDir("vtapi:/VoiceText") == RES_OK && g_vt_calls == calls + 5,
               "RenameFile, DeleteFile and the directory deletes on the RAM disk are the SDK's");
         calls = g_vt_calls;
-        CHECK(h_fs_RenameFile("vtapi:/VoiceText/vt/vtpath.ini", "save:/vtpath.ini") != RES_OK && g_vt_calls == calls, "a rename between the SDK's mount and the host's fails and reaches neither");
+        CHECK(h_fs_RenameFile("vtapi:/VoiceText/vt/vtpath.ini", "save:/vtpath.ini") == RES_RENAME_OTHER_FS && g_vt_calls == calls, "a rename between the SDK's mount and the host's is refused as two mounts and reaches neither");
         calls = g_vt_calls; g_vt_mount_asks = 0;
         CHECK(h_fs_CreateFile("save:/vt", 0) == RES_OK && write_save("save:/vt", "x") == RES_OK && read_fs("save:/vt", b, sizeof b) && h_fs_GetEntryType(&et, "save:/vt") == RES_OK && g_vt_calls == calls && !g_vt_mount_asks,
               "the host's own mounts never ask the SDK");

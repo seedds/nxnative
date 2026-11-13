@@ -67,7 +67,7 @@ def fn_text(msl, name):   # an entry point's whole text found by its name alone 
 
 def built(src):   # the build's order (dmsh_build.py finish): blend_zero, then the integer entry points on the shared body
     out, n = blend_zero(src)
-    fu, _ = dmsh_entry.fs_uint(out)
+    fu = dmsh_entry.fs_uint(out)
     return (dmsh_side.shared_body(out) + fu if fu else out), n, bool(fu)
 
 
@@ -106,9 +106,8 @@ class BlendZero(unittest.TestCase):
         # fs_uint tells an integer writer by its stores to out: the guard is a call, so a shader gets the same entry points with it as without
         for src in (PLAIN, INT_BITS):
             out, _ = blend_zero(src)
-            self.assertEqual(dmsh_entry.fs_uint(out)[1], dmsh_entry.fs_uint(src)[1])
-            self.assertEqual(bool(dmsh_entry.fs_uint(out)[0]), bool(dmsh_entry.fs_uint(src)[0]))
-        self.assertTrue(dmsh_entry.fs_uint(INT_BITS)[0])
+            self.assertEqual(bool(dmsh_entry.fs_uint(out)), bool(dmsh_entry.fs_uint(src)))
+        self.assertTrue(dmsh_entry.fs_uint(INT_BITS))
 
     def test_every_entry_point_carries_the_guard_and_the_word(self):
         for src in (PLAIN, INT_BITS):

@@ -63,7 +63,7 @@ def shader_features(lib):
             f.add('binding:' + str(b.get('kind')))
             if b.get('rw'): f.add('binding_rw:' + str(b.get('kind')))
             if b.get('fetch1d'): f.add('fetch1d')
-        for k, tag in (('entry_tf', 'transform_feedback'), ('entry_layer', 'layer_output'), ('entry_u', 'integer_outputs'), ('entry_m', 'mixed_outputs'), ('vin', 'integer_vertex_inputs'),
+        for k, tag in (('entry_tf', 'transform_feedback'), ('entry_layer', 'layer_output'), ('entry_u', 'integer_outputs'), ('vin', 'integer_vertex_inputs'),
                        ('pull', 'pulling_vertex_inputs'), ('fetch', 'readable_tile'), ('vs_pad', 'vs_pad'), ('gs_slice', 'gs_layer_slice'), ('drv_unfillable', 'driver_read_unfillable')):
             if r.get(k): f.add(tag)
         for seg in r.get('drv_reads') or '': f.add('driver_read_c' + seg)

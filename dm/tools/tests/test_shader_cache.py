@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 # The compile cache as one file (dm/tools/shader_cache.py): entries in and out, bytes stored once, several threads and processes, a damaged file, pruning, and taking in a cache from before it.
-import hashlib, os, subprocess, sys, tarfile, tempfile, threading, time, unittest
+import hashlib, os, sqlite3, subprocess, sys, tarfile, tempfile, threading, time, unittest
 from pathlib import Path
+from unittest import mock
 
 REPO = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO / 'dm/tools'))
@@ -272,6 +273,26 @@ class Writers(Base):
             with self.store.batch(): self.store.put('a', b'1')
             self.store.put('b', b'2')
         self.assertEqual(self.store.names(''), {'a', 'b'})
+
+    def full_after(self, pages):   # the file may grow by this many pages more: SQLite then answers SQLITE_FULL, as on a full drive
+        n = self.store.db.execute('PRAGMA page_count').fetchone()[0]; self.store.db.execute(f'PRAGMA max_page_count={n + pages}')
+
+    def test_a_full_drive_fails_the_whole_batch(self):   # SQLite ends the transaction itself on SQLITE_FULL: an earlier write must not be lost while a later one lands outside the batch
+        self.store.put('before', b'0'); self.full_after(2)
+        with self.store.batch():
+            self.store.put('a', b'small'); self.store.put('b', b'x' * 200000); self.store.put('c', b'small too')
+        self.assertTrue(self.store.full); self.assertEqual(self.store.names(''), {'before'})
+        self.assertEqual(len([m for m in self.said if m.startswith('[RED]')]), 1)
+        self.store.put('d', b'1'); self.assertFalse(self.store.has('d'))   # the build goes on without the cache
+
+    def test_a_failed_commit_fails_the_batch(self):
+        class Db:   # the connection, whose commit finds the drive full
+            def __init__(self, db): self.db = db
+            def __getattr__(self, name): return getattr(self.db, name)
+            def commit(self): raise sqlite3.OperationalError('database or disk is full')
+        real = self.store.db
+        with mock.patch.object(self.store, 'db', Db(real)), self.store.batch(): self.store.put('a', b'1')
+        self.assertTrue(self.store.full); self.assertFalse(real.in_transaction); self.assertEqual(self.store.names(''), set())
 
     def test_processes_share_it(self):   # regress.py's chain builds and the NSP script on one game's file
         code = ("import sys; sys.path.insert(0, sys.argv[1]); import shader_cache\ns = shader_cache.Store(sys.argv[2])\n"

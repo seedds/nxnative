@@ -1723,6 +1723,11 @@ HLE_FORCE("_ZN2nn3hid22GetVibrationDeviceInfoEPNS0_19VibrationDeviceInfoERKNS0_2
 HLE_FORCE("_ZN2nn3hid24IsVibrationDeviceMountedERKNS0_21VibrationDeviceHandleE", "vibration: device mounted when the channel has an output", unsigned, h_hid_VibMounted, const uint32_t *h) {
     int m; return h && vib_targets(*h, &m);
 }
+// A forced vibration session lets the application vibrate while the system's vibration setting is off (hid's Begin/EndPermitVibrationSession). The host has no such system setting: its own
+// rumble switch is the player's and a session does not override it, so there is nothing to begin or end. The SDK's own calls read the null hid service object: Super Mario Party (SDK 9.4)
+// crashed at sdk+0x3526bc in hid::detail::EndPermitVibrationSession while booting (issue #2513)
+HLE_FORCE("_ZN2nn3hid27BeginForcedVibrationSessionEv", "forced vibration session: the host has no system vibration setting for it to override", void, h_hid_VibForceBegin, void) {}
+HLE_FORCE("_ZN2nn3hid25EndForcedVibrationSessionEv", "forced vibration session ends: nothing to restore", void, h_hid_VibForceEnd, void) {}
 // The Switch 2's form of the same question (Kirby Air Riders asks soon after boot in a run with a window, main+0x10709b0; its SDK's call reads the same null service object)
 HLE_FORCE("_ZN2nn3hid29IsOunceVibrationDeviceMountedERKNS0_21VibrationDeviceHandleE", "vibration (Switch 2): device mounted when the channel has an output", unsigned, h_hid_VibMountedOunce, const uint32_t *h) {
     int m; return h && vib_targets(*h, &m);

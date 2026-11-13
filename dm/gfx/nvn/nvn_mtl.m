@@ -2605,7 +2605,7 @@ void mtl_drain(void) { present_drop_for_suspend(); mtl_present_flush(); snap_dra
 
 // ================= Render replay =================
 #include "../../host/front.h"
-static int g_red_once[169];   // one past the highest key: a new key raises this, and the macro refuses to compile otherwise
+static int g_red_once[170];   // one past the highest key: a new key raises this, and the macro refuses to compile otherwise
 #define RED_ONCE(k, ...) do { _Static_assert((k) < sizeof g_red_once / sizeof *g_red_once, "a RED_ONCE key past g_red_once: raise its size"); if (!g_red_once[k]++) MLOG("[RED] " __VA_ARGS__); } while (0)
 // NVN vertex streams 0–15 → Metal vertex buffer slots: 0–13 go to 16–29 (30 is the constant fallback buffer), 14 and 15 to 14 and 15. Metal has only the 31 slots 0–30; translated shaders use only buffer(0) (the argument buffer),
 // and the host's own vertex functions read no vertex buffers. 13 Sentinels uses stream 15, and the old 16 + stream went out of range (Metal assertion: buffer index (31) must be < 31)
@@ -6392,6 +6392,7 @@ void mtl_prog_snapshot(prog_t *copy,const prog_t *source) {
 // ---------- Descriptor pool: texture ID / sampler ID → object ----------
 // At registration the whole texture object is snapshotted (NVN semantics: the descriptor has been written into the pool); view: the MTLTexture for that ID (a view or the base texture, held via CFBridgingRetain) and the serial-table / guest-write generations at the time it was obtained
 typedef struct { tex_t t; int ok; view_t v; int has_v; void *view; uint64_t view_id, view_rid, view_ser, view_dirty, view_stamp; const void *view_span; int view_pkg;   // view_pkg: CPU-written (packaged); only those depend on guest writes (view_dirty)
+                 void *palt[4], *palt_of[4]; uint64_t palt_rid[4];   // palt[k]: the view a texture pool table of layered type k (pool_lk) holds for the ID (pool_fit), apart from alt so slot binds and tables do not take turns
                  void *alt, *alt_of; uint64_t alt_rid; uint8_t alt_type;   // alt: compatible view used when the shader's declared type differs from view (tex_fit), alt_of = the view it was built from
                  void *im, *im_of; uint64_t im_rid;                       // im: the view an image slot reads in the shader's pixel class (img_fit), im_of = the view it was built from
                  int prev, next, retired, gone; uint64_t transient_sub; uint8_t tt1;   // prev / next: descriptor index + 1, by texture serial; gone: its memory pool was finalized (treg_drop_pool_views)
@@ -6425,6 +6426,7 @@ static void treg_drop_im(treg_t *r) { if (r->im) { defer_obj_unref((__bridge id)
 static void treg_drop_views(treg_t *r) {
     if (r->view) { defer_obj_unref((__bridge id)r->view); CFRelease(r->view); r->view = NULL; r->view_id = r->view_rid = 0; }
     if (r->alt) { defer_obj_unref((__bridge id)r->alt); CFRelease(r->alt); r->alt = r->alt_of = NULL; r->alt_rid = 0; }
+    for (int k = 0; k < 4; k++) if (r->palt[k]) { defer_obj_unref((__bridge id)r->palt[k]); CFRelease(r->palt[k]); r->palt[k] = r->palt_of[k] = NULL; r->palt_rid[k] = 0; }
     treg_drop_im(r);
 }
 // The stand-in goes with the registration, or when the ID's texture is made (tex_by_id): tables that still name it are read by submissions up to the open one at most (defer_obj_unref)
@@ -6630,12 +6632,25 @@ static void treg_drop_pool_views(const void *pool) {
 enum { POOL_SEEN_WORDS = (1u << 20) / 32 };
 static __strong id<MTLBuffer> g_seen_buf; static uint32_t g_seen_done[POOL_SEEN_WORDS]; static uint64_t g_seen_sub = ~0ull;
 static inline int pool_seen(int id_) { return id_ >= 0 && (g_seen_done[(unsigned)id_ >> 5] >> (id_ & 31) & 1); }
+// The bitmap has one section per texture type of the table read (a table's head names its own: pool_seen_gpu_t), so the host knows through which type a shader read an ID: a table of
+// another type than the ID's texture holds a view of it (pool_fit) only when a shader read the ID through that type. A shader reads each table through handles of the type of its
+// texture instruction, so a mark in a section is a read of that type, not a probe. 2D tables use section 0, the bitmap's start; pool_seen is any section's mark
+enum { POOL_SEEN_TYPES = 10 };   // MTLTextureType 1D (0) to TextureBuffer (9)
+static inline unsigned seen_sec(int dtt) { return dtt == (int)MTLTextureType2D ? 0u : dtt == 0 ? (unsigned)MTLTextureType2D : (unsigned)dtt; }
+static uint32_t g_seen_typed[POOL_SEEN_TYPES][POOL_SEEN_WORDS];   // the marks by section, folded at each submission as g_seen_done is
+static inline int pool_seen_t(int id_, int dtt) {
+    if (dtt < 0 || dtt >= POOL_SEEN_TYPES) return pool_seen(id_);
+    return id_ >= 0 && id_ < (int)(POOL_SEEN_WORDS * 32) && (g_seen_typed[seen_sec(dtt)][(unsigned)id_ >> 5] >> (id_ & 31) & 1);
+}
 // An emptied ID has not been read: what the game puts into it next is another use (mtl_reg_tex)
 static void pool_seen_clear(int id_) {
     if (id_ < 0 || id_ >= (int)(POOL_SEEN_WORDS * 32)) return;
     uint32_t b = 1u << (id_ & 31);
     g_seen_done[(unsigned)id_ >> 5] &= ~b;
-    if (g_seen_buf) atomic_fetch_and((_Atomic uint32_t *)g_seen_buf.contents + ((unsigned)id_ >> 5), ~b);
+    for (unsigned s_ = 0; s_ < POOL_SEEN_TYPES; s_++) {
+        g_seen_typed[s_][(unsigned)id_ >> 5] &= ~b;
+        if (g_seen_buf) atomic_fetch_and((_Atomic uint32_t *)g_seen_buf.contents + s_ * POOL_SEEN_WORDS + ((unsigned)id_ >> 5), ~b);
+    }
 }
 void mtl_reg_tex_gone(int tid) {
     os_unfair_lock_lock(&g_rmu);
@@ -6915,6 +6930,42 @@ static id<MTLTexture> tex_fit(int tid, id<MTLTexture> t, MTLTextureType want, ui
 static id<MTLTexture> tex_fit_elem(int tid, id<MTLTexture> t, MTLTextureType want, uint64_t *rid) {
     if ((want == MTLTextureTypeCube || want == MTLTextureTypeCubeArray) && (t.textureType == MTLTextureType2D || (t.textureType == MTLTextureType2DArray && t.arrayLength < 6))) return nil;
     return tex_fit(tid, t, want, rid);
+}
+// A texture pool table (pool_gpu) holds textures of its declared type. To Maxwell 2D, 2D-array, cube and cube-array textures are all layers (fit_layers), and the host keeps cubes and
+// cube arrays as 2D arrays, so a type-strict table missed reads the guest makes correctly: a cube read through a cube table (every bindless cube read sampled zero: PRAGMATA's
+// reflections and ambient light), and PRAGMATA's Character_CabinDisplay material (ps ecd01ea9b68f5390), which samples its sprite slots, 2D textures, through a texture2d_array
+// table (Cabin's monitor face was black). A table of another layered type holds the view tex_fit would make for a slot bind, for an ID a shader read through that type
+// (pool_seen_t). What no view serves (a 2D or 3D texture read as a cube, a non-square array as a cube) holds the dummy, as tex_fit binds the zero texture; GL and Vulkan leave
+// such a read undefined. Its own cache (palt), released with the ID's views (treg_drop_views). One view per table type: a texture read through two other types (a cube read as
+// a cube and as a 2D array, a cube array as cubes and as a cube array) is in tables of both at once, and a table stands over submissions while no registration or storage changes
+// (pool_gpu), so the view one type's table holds must not go when another type's table takes the ID. Caller holds g_rmu
+static int pool_lk(int tt) { return tt == MTLTextureType2D ? 0 : tt == MTLTextureType2DArray ? 1 : tt == MTLTextureTypeCube ? 2 : tt == MTLTextureTypeCubeArray ? 3 : -1; }   // a layered type's view slot (palt)
+static int pool_bridge_pair(int have, int want) { return have != want && pool_lk(have) >= 0 && pool_lk(want) >= 0; }   // which of them a view serves: fit_layers
+static uint64_t pool_fit(int id_, id<MTLTexture> t, int dtt) {
+    int k = pool_lk(dtt);
+    if (id_ <= 0 || id_ >= g_ntreg || !t || k < 0) return 0;
+    treg_t *r = &g_treg[id_];
+    id<MTLTexture> base = t; NSUInteger l0 = 0, s0 = 0;   // made from the texture under t, as in tex_fit (residency)
+    while (base.parentTexture) { l0 += base.parentRelativeLevel; s0 += base.parentRelativeSlice; base = base.parentTexture; }
+    // Kept while it covers what t does: the ID's lookup may return the base texture or the cached view of it from one walk to the next (tex_fast_rid)
+    if (r->palt[k] && r->palt_of[k] == (__bridge void *)base) { id<MTLTexture> v = (__bridge id<MTLTexture>)r->palt[k];
+        if (v.parentRelativeLevel == l0 && v.parentRelativeSlice == s0 && v.mipmapLevelCount == t.mipmapLevelCount && v.pixelFormat == t.pixelFormat) return r->palt_rid[k]; }
+    if (r->palt[k]) { defer_obj_unref((__bridge id)r->palt[k]); CFRelease(r->palt[k]); r->palt[k] = r->palt_of[k] = NULL; r->palt_rid[k] = 0; }
+    NSUInteger ns = fit_layers(t, (MTLTextureType)dtt); if (!ns) return 0;
+    if ((dtt == MTLTextureTypeCube || dtt == MTLTextureTypeCubeArray) && t.width != t.height) return 0;   // a cube's faces are square
+    id<MTLTexture> v = [base newTextureViewWithPixelFormat:t.pixelFormat textureType:(MTLTextureType)dtt levels:NSMakeRange(l0, t.mipmapLevelCount) slices:NSMakeRange(s0, ns) swizzle:t.swizzle];
+    if (!v) { RED_ONCE(169, "texture pool table: cannot create a type-compatible texture view: %lu → %d (texture ID %d)", (unsigned long)t.textureType, dtt, id_); return 0; }
+    r->palt[k] = (void *)CFBridgingRetain(v); r->palt_of[k] = (__bridge void *)base; r->palt_rid[k] = v.gpuResourceID._impl;
+    return r->palt_rid[k];
+}
+// A texture a shader read through a table of a type no view of it serves: the table holds the dummy there. Once per ID, at most 256 a run
+static uint32_t g_pool_tlog[(1u << 20) / 32]; static unsigned g_pool_tlog_n;
+static void pool_type_note(int id_, int have, int want) {
+    if (id_ <= 0 || id_ >= (1 << 20) || !pool_seen_t(id_, want) || (g_pool_tlog[id_ >> 5] >> (id_ & 31) & 1) || g_pool_tlog_n >= 256) return;
+    g_pool_tlog[id_ >> 5] |= 1u << (id_ & 31); g_pool_tlog_n++;
+    const tex_t *t = id_ < g_ntreg ? &g_treg[id_].t : NULL;
+    MLOG("[RED] [pool-type] texture ID %d (ser=%llu %ux%u format %#x target %d) is Metal type %d, read through a type %d texture pool table: left out (dummy), no view serves it", id_,
+         t ? (unsigned long long)t->serial : 0ull, t ? t->d.width : 0, t ? t->d.height : 0, t ? t->d.format : 0, t ? t->d.target : -1, have, want);
 }
 // A texture type mismatch no view bridges, reported once per shader and texture slot with what is bound: one report per run used to hide that Hyrule Warriors: Age of Calamity has
 // thousands of shaders reading its light and decal lists, buffer textures, through slots translated as 2D. For a buffer texture: its element count and how far its offset in the
@@ -10363,9 +10414,10 @@ static uint64_t pool_walk_limit(int base, int n) {   // the largest texture this
     return limit;
 }
 static uint64_t pool_seen_gpu(void) {
-    if (!g_seen_buf) { g_seen_buf = [g_dev newBufferWithLength:POOL_SEEN_WORDS * 4 options:MTLResourceStorageModeShared]; res_add(g_seen_buf); res_commit(); }
+    if (!g_seen_buf) { g_seen_buf = [g_dev newBufferWithLength:POOL_SEEN_TYPES * POOL_SEEN_WORDS * 4 options:MTLResourceStorageModeShared]; res_add(g_seen_buf); res_commit(); }
     return g_seen_buf.gpuAddress;
 }
+static uint64_t pool_seen_gpu_t(int dtt) { return pool_seen_gpu() + (uint64_t)(dtt >= 0 && dtt < POOL_SEEN_TYPES ? seen_sec(dtt) : 0) * POOL_SEEN_WORDS * 4; }   // the section of a table of type dtt
 // Newly read IDs also go into the existing tables in place, as past POOL_SUB_MS of walks a submission a table stands: dummy → texture is safe for a draw already encoded, which only reads the right
 // texture sooner. At most POOL_REQ_BYTES of new textures a frame; the rest wait in g_seen_todo. Caller holds g_rmu
 static uint32_t g_seen_todo[POOL_SEEN_WORDS];
@@ -10538,7 +10590,14 @@ static void pool_seen_scan(void) {
                g_first_stale ? [NSString stringWithFormat:@" (%llu written since the stand-in was made)", (unsigned long long)g_first_stale].UTF8String : "", (unsigned long long)g_first_dummy, (unsigned long long)g_first_dummy_big); } }
     const uint32_t *w = (const uint32_t *)g_seen_buf.contents; unsigned words = MIN((unsigned)g_ntreg / 32 + 1, (unsigned)POOL_SEEN_WORDS);
     for (unsigned i = 0; i < words; i++) {
-        uint32_t fresh = w[i] & ~g_seen_done[i];
+        uint32_t got = 0, typed_new = 0;   // every section's marks, and the marks new to their section
+        for (unsigned s_ = 0; s_ < POOL_SEEN_TYPES; s_++) {
+            uint32_t g = w[s_ * POOL_SEEN_WORDS + i];
+            if (!g) continue;
+            typed_new |= g & ~g_seen_typed[s_][i]; g_seen_typed[s_][i] |= g; got |= g;
+        }
+        g_seen_todo[i] |= typed_new & g_seen_done[i];   // already read through another type: the tables of the new type take it in place
+        uint32_t fresh = got & ~g_seen_done[i];
         if (fresh) { g_seen_done[i] |= fresh; g_seen_todo[i] |= fresh; for (uint32_t bits = fresh; bits; bits &= bits - 1) { pool_ds_note((int)i * 32 + __builtin_ctz(bits)); pool_first_read((int)i * 32 + __builtin_ctz(bits), f); } }
         for (uint32_t bits = g_seen_todo[i]; bits; bits &= bits - 1) {
             int b = __builtin_ctz(bits), id_ = (int)i * 32 + b;
@@ -10549,8 +10608,13 @@ static void pool_seen_scan(void) {
             void *tv = NULL; uint64_t tr = tex_fast_rid(id_, &tv); if (!tv || !tr) continue;
             MTLTextureType tt = ((__bridge id<MTLTexture>)tv).textureType; int trans = g_treg[id_].retired && g_treg[id_].transient_sub == g_sub_serial;
             for (int k = 0; k < POOL_SNAPS; k++) { pool_snap *q = &g_psnap[k]; int at = id_ - q->base;
-                if (!q->buf || q->samp || at < 0 || (uint32_t)at >= *(uint32_t *)q->buf.contents || (MTLTextureType)q->dtt != tt) continue;
-                ((uint64_t *)((uint8_t *)q->buf.contents + DMSH_POOL_HEAD))[at] = tr;
+                if (!q->buf || q->samp || at < 0 || (uint32_t)at >= *(uint32_t *)q->buf.contents) continue;
+                uint64_t er = tr;
+                if ((MTLTextureType)q->dtt != tt) {   // a table of another type: a view when a shader read the ID through its type (pool_fit)
+                    if (!pool_seen_t(id_, q->dtt)) continue;
+                    er = pool_bridge_pair((int)tt, q->dtt) ? pool_fit(id_, (__bridge id<MTLTexture>)tv, q->dtt) : 0;
+                    if (!er) { pool_type_note(id_, (int)tt, q->dtt); continue; } }
+                ((uint64_t *)((uint8_t *)q->buf.contents + DMSH_POOL_HEAD))[at] = er;
                 if (trans) { ids_push(&q->trans, id_); if (!q->sub) q->sub = g_sub_serial; } }   // a view of a retired registration goes at this submission's end, so the next one takes it again (pool_gpu)
         }
     }
@@ -10586,12 +10650,16 @@ static uint64_t pool_entry(int samp, int dtt, int id_, uint64_t limit, int *gone
     if (!r->view && !tex_storage_live(&r->t)) { ++*gone; *dead = 1; return 0; }
     if (!r->view && pool_unwritten_target(&r->t)) return 0;   // dummy until a pass writes it (its new texture is noted: own_note)
     if (!r->view && pool_tex_size(&r->t) > limit && !pkg_shared(&r->t) && !tex_get(r->t.serial) && !(pool_seen(id_) && g_walk_req < POOL_REQ_BYTES)) { ++*left; *left_req += pool_seen(id_); return pool_stand(id_, dtt); }   // a texture a shader read is made whatever the budget, so it reads its stand-in or the dummy for a few frames at most
-    if (r->tt1 && r->tt1 - 1 != dtt) return 0;   // an ID of another texture type, seen before (the table holds only its own type): nothing to look up or charge (the idea is from PR 1428)
+    if (r->tt1 && r->tt1 - 1 != dtt && !(pool_bridge_pair(r->tt1 - 1, dtt) && pool_seen_t(id_, dtt))) { pool_type_note(id_, r->tt1 - 1, dtt); return 0; }   // an ID of another texture type, seen before (the table holds only its own type, or a view of an ID read through it: pool_fit): nothing to look up or charge (the idea is from PR 1428)
     if (!r->view && !pkg_shared(&r->t)) { g_walk_spent += pool_tex_size(&r->t); if (pool_seen(id_)) g_walk_req += pool_tex_size(&r->t); }
     void *tv = NULL; uint64_t tr = tex_fast_rid(id_, &tv);
     if (!tv) return 0;
     MTLTextureType got = ((__bridge id<MTLTexture>)tv).textureType; g_treg[id_].tt1 = (uint8_t)got + 1;
-    if (got != (MTLTextureType)dtt) return 0;
+    if (got != (MTLTextureType)dtt) {   // a view when a shader read the ID through this table's type (pool_fit); else the dummy
+        uint64_t b = pool_bridge_pair((int)got, dtt) && pool_seen_t(id_, dtt) ? pool_fit(id_, (__bridge id<MTLTexture>)tv, dtt) : 0;
+        if (!b) { pool_type_note(id_, (int)got, dtt); return 0; }
+        tr = b;
+    }
     // a pool entry carries no offset table entry, so a buffer texture whose view starts before it (tbuf_lead) is read that many elements early through it
     if (got == MTLTextureTypeTextureBuffer && !g_red_once[167]) { uint32_t lead = tbuf_lead(id_, (__bridge id<MTLTexture>)tv);
         if (lead) RED_ONCE(167, "buffer texture (texture ID %d) whose view starts %u elements before it (below Metal's view alignment), read through a texture pool or handle table: read %u elements early", id_, lead, lead); }
@@ -10675,7 +10743,7 @@ static uint64_t pool_gpu(int samp, int dtt, int dpf, int base, __unsafe_unretain
     uint64_t t0 = mach_absolute_time();
     int n = (samp ? g_nsreg : g_ntreg) - base; if (n < 1) n = 1;
     id<MTLBuffer> b = pool_table_take(DMSH_POOL_HEAD + 8 * (size_t)(n + 1));
-    uint8_t *c = b.contents; *(uint32_t *)c = (uint32_t)n; if (!samp) *(uint64_t *)(c + 8) = pool_seen_gpu();
+    uint8_t *c = b.contents; *(uint32_t *)c = (uint32_t)n; if (!samp) *(uint64_t *)(c + 8) = pool_seen_gpu_t(dtt);
     uint64_t *e = (uint64_t *)(c + DMSH_POOL_HEAD), dummy = samp ? dummy_samp_rid() : (dummy_tex(dtt, dpf) ? g_dummy_tex_rid[dtt % DMY_NT][dpf & 3] : 0);
     int real = 0, gone = 0, left = 0, left_req = 0; uint64_t limit = samp ? UINT64_MAX : pool_walk_limit(base, n);
     pool_ids nd = {0}, nt = {0}; ids_begin(0); ids_begin(1);
@@ -17287,8 +17355,8 @@ void mem_census(const char *why) { @autoreleasepool {
     os_unfair_lock_lock(&g_rmu);
     uint64_t nreg = 0, nretired = 0;
     for (int i = 1; i < g_ntreg; i++) { treg_t *r = &g_treg[i]; if (!r->ok) continue; nreg++; nretired += r->retired;
-        void *vs[3] = {r->view, r->alt, r->im};
-        for (int k = 0; k < 3; k++) if (vs[k]) { id<MTLTexture> b = census_base((__bridge id)vs[k]); if (!b) continue; [r->retired ? named_ret : named addObject:(__bridge id)(__bridge void *)b];
+        void *vs[7] = {r->view, r->alt, r->im, r->palt[0], r->palt[1], r->palt[2], r->palt[3]};
+        for (int k = 0; k < 7; k++) if (vs[k]) { id<MTLTexture> b = census_base((__bridge id)vs[k]); if (!b) continue; [r->retired ? named_ret : named addObject:(__bridge id)(__bridge void *)b];
             if (k == 0 && r->t.mem) { const void *key = r->t.mem; NSHashTable *set = [by_mem objectForKey:(__bridge id)key];
                 if (!set) { set = [NSHashTable hashTableWithOptions:NSPointerFunctionsOpaqueMemory | NSPointerFunctionsOpaquePersonality]; [by_mem setObject:set forKey:(__bridge id)key]; }
                 [set addObject:(__bridge id)(__bridge void *)b];

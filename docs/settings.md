@@ -87,7 +87,7 @@ iPhone and iPad. **Fit**, the default, shows the game's picture (16:9, or the ta
 
 ### Picture shape
 
-Games whose profile supports it (Breath of the Wild, Animal Crossing: New Horizons). **iPhone Duo screen (1.43:1)** renders a taller picture of the Duo's own shape: the sides of 16:9 with more above and below, and the HUD at the screen's edges. **16:9** is the Switch's picture. The taller picture has about a quarter more pixels, so it runs a little slower and warmer.
+Games whose profile supports it. Taller (Breath of the Wild, Animal Crossing: New Horizons): **iPhone Duo screen (1.43:1)** renders a taller picture of the Duo's own shape: the sides of 16:9 with more above and below, and the HUD at the screen's edges. The taller picture has about a quarter more pixels, so it runs a little slower and warmer. Wider (Pokémon Pokopia, on the Mac): **Ultrawide 21:9 (2560x1080)**, **Ultrawide 21:9 (3440x1440)** and **Super ultrawide 32:9** render a wider picture, 1080 pixels tall: the height of 16:9 with more at the left and right; the button hints and the tool wheel move out to the screen's edges, the menus stay in the middle 16:9 area. 21:9 has a third more pixels than 16:9, 32:9 twice as many. **16:9** is the Switch's picture.
 
 ### Frame-rate counter
 
@@ -272,7 +272,7 @@ A line like `DM_PRESENT_SNAP=0` in `Documents/env.txt` (in the Files app, under 
 | Display mode (Mac) | `DM_FULLSCREEN` | `1` fullscreen, `0` a window |
 | Cloud saves folder (Mac) | `DM_SAVE_SYNC` | a folder; `icloud`: iCloud Drive › nxnative Saves; `0`: off |
 | Picture (iPhone and iPad) | `DM_PICTURE_FIT` | `fit` 16:9 with black bars, `fill` covers the screen, cropped |
-| Picture shape | `DM_SCREEN_ASPECT` | `auto` the app window's own shape where it is taller than 16:9 (iPad 4:3, iPhone Duo 1.43:1), else 16:9 (iOS only); `1.43` the iPhone Duo's shape, `0` 16:9 |
+| Picture shape | `DM_SCREEN_ASPECT` | `auto` the app window's own shape where it is taller than 16:9 (iPad 4:3, iPhone Duo 1.43:1), else 16:9 (iOS only); `1.43` the iPhone Duo's shape, `2.37` / `2.39` / `3.56` wider shapes (Mac), `0` 16:9 |
 | Frame-rate counter | `DM_SHOW_FPS` | `1`, `0` |
 | Touch feedback | `DM_TOUCH_HAPTICS` | `1`, `0` |
 | Game rumble | `DM_RUMBLE` | `1`, `0` |

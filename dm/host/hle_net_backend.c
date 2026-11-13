@@ -259,6 +259,10 @@ static int net_close_owned(int guest, int check_generation, uint64_t generation)
     return net_host_result(result, err);
 }
 int dm_net_close(int guest) { return net_gate() ? net_close_owned(guest, 0, 0) : -1; }
+int dm_net_socket_type(int guest) {
+    pthread_mutex_lock(&g_net_lock); int type = guest >= 0 && guest < NET_MAX && g_sockets[guest].used ? g_sockets[guest].type : 0; pthread_mutex_unlock(&g_net_lock);
+    return type;
+}
 int dm_net_close_generation(int guest, uint64_t generation) { return net_close_owned(guest, 1, generation); }
 void dm_net_finalize(void) { net_resolver_finalize(); for (int i = 0; i < NET_MAX; i++) { pthread_mutex_lock(&g_net_lock); int used = g_sockets[i].used; pthread_mutex_unlock(&g_net_lock); if (used) net_close_owned(i, 0, 0); } }
 int dm_net_bind(int guest, const void *addr, unsigned len) {

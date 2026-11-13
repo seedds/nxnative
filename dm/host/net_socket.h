@@ -59,8 +59,13 @@ void dm_net_test_set_discovery_sender(dm_net_test_discovery_sender sender);
 #endif
 int dm_net_errno(void);
 void dm_net_set_errno(int e);
+// A failed socket call also sets the game's own errno (hle_net.c): on Horizon nn::socket's errno is the C library's (detail::SetLastErrno writes
+// *__errno_location()), and code such as gRPC's reads errno itself. Called by the hooks only, on the game's thread; returns r
+long dm_net_guest_errno(long r);
+int dm_net_guest_errno_get(void);   // the game's errno, or the host's when the game has no __errno_location
 int dm_net_socket(int family, int type, int protocol);
 int dm_net_close(int fd);
+int dm_net_socket_type(int fd);   // 1 stream, 2 datagram, 0 none the host made; sets no errno
 void dm_net_finalize(void);
 int dm_net_bind(int fd, const void *addr, unsigned len);
 int dm_net_connect(int fd, const void *addr, unsigned len);

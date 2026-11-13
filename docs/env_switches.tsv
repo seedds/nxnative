@@ -9,7 +9,10 @@ DM_APP_DM	path	Set by the iOS app of a game of several programs: the running pro
 DM_APP_VERSION	switch	Overrides the IPA's version in `build_ipa.sh`; by default it is the packed game's display version from its control data (the update's when one is packed)
 DM_AUDIO	switch	`1` plays audio through Core Audio, `0` uses the silent sink; real output is the default on iOS, the silent sink on the Mac (the Mac launcher sets `1`)
 DM_AUDIO_DUMP	diagnostic	`=<file>` writes every PCM block the game appends as is (16-bit, 48 kHz, channel count as in the OpenAudioOut log), to judge whether a sound played
+DM_AUDIO_LIMITER	player	`1` lowers the CPU audio renderer's stereo downmix briefly where it would pass full scale (instant per 5 ms frame, about 150 ms release) instead of clipping it at the 16-bit clamp; off by default (settings: Peak limiter)
 DM_AUDIO_MUTE	switch	`=1` runs the real Core Audio output path (callback pacing, background take-over) with the output silenced, for lifecycle tests on the Mac without noise
+DM_AUDREN_AUX_TRACE	diagnostic	`0` leaves out the auxiliary trace that `DM_AUDREN_PCM_TRACE` otherwise writes beside its file (`<file>.aux.tsv`: every Aux buffer read and write the game makes, with hashes)
+DM_AUDREN_PCM_TRACE	diagnostic	`=<file>` writes one row per CPU audio renderer frame (normal and catch-up, sequence, hash, update and render counts, queue state) before device output; dm/tools/audio_trace.py reads it
 DM_AUDREN_TRACE	diagnostic	When set, the CPU audio renderer logs every update with the number of frames rendered since the previous one
 DM_AV1_DAV1D	switch	`=1` decodes AV1 movies with dav1d even where VideoToolbox decodes AV1 (Apple M3 and A17 Pro on), to compare the two or to check the path older chips take (`hle_movie_av1.c`)
 DM_BOOTPROF	diagnostic	When set, logs boot timing: the loader's breakdown (mapping, relocation, probes), Metal library loading, pipeline creation, texture uploads and the first present
@@ -175,6 +178,7 @@ DM_NVN_HILITE	diagnostic	`=<fragment shader key>,…`: those draws use a solid c
 DM_NVN_INDLOG	diagnostic	`=<n>`: the first n indirect draws (and those of pass-dumped frames) log their arguments at encode and as the GPU left them once the submission completed, with the first indices
 DM_NVN_IXCLOG	diagnostic	`=<n>` logs the first n indirect draw and dispatch conversions (record to arguments) once the GPU has run them
 DM_NVN_KEYDUMP	diagnostic	`=<fs key>[:n[:every]]`: for up to n draws of that fragment shader (default 6), logs the pass dump binding lines plus vertex formats, vertex streams and uniform values; meant for devices
+DM_NVN_KEYREADBACK	diagnostic	`1` reads back the storage and stencil slots the shader keys of `DM_NVN_KEYDUMP` name, after their draw, and logs them
 DM_NVN_LAZY_CLEAR	switch	`0` makes clears with no draw after them open a pass of their own, as before; by default they wait to become the load action of the next pass on that target
 DM_NVN_LOADPROBE	diagnostic	`=1`, `2` or `3`: attachments whose load is skipped are cleared to a sentinel colour (`3` NaN; `1` NaN for float formats) and the sentinel pixels left at pass end are counted (should be 0)
 DM_NVN_LOG	diagnostic	`=1` logs the creation of NVN objects
@@ -237,6 +241,7 @@ DM_NVN_UPLOAD_REUSE	switch	0 keeps the original one-block upload-slot policy; de
 DM_NVN_VBUF_CACHE	switch	`0` turns off the cache of resolved vertex stream addresses and vertex argument table writes across draws (on by default), for A/B runs
 DM_NVN_VCONV_CHECK	diagnostic	`=1` scans the indices again at every reuse of a cached vertex conversion range (`vconv_range`) and reports differences
 DM_NVN_VCONV_CPU	switch	`=1` converts integer vertex inputs fed formats of another class on the CPU, as before, instead of through the shader's shadow inputs (`<key>_bv`)
+DM_NVN_VCONV_KEEP	diagnostic	`=0` makes vertex conversions anew for every draw; `=n` the smallest range in bytes whose conversion is kept between draws (4096 by default)
 DM_NVN_VCONV_RANGE	switch	`0` / `1` overrides the profile's `vconv_range`: CPU vertex conversion only over the vertices each draw reads instead of the whole bound range
 DM_NVN_VIS_LOG	diagnostic	`1`: logs up to 8 samples-passed reports a second, each query report's address, its counted total and the value written (`nvn_vis_scale.h`)
 DM_NVN_VIS_SCALE	diagnostic	`=<f>` (0 < f < 1): the samples-passed totals the game reads are scaled by f, a count above 0 staying at least 1; for a scene rendered larger than the game asked, whose queries pass that many times more samples (`nvn_vis_scale.h`). Off by default
@@ -273,14 +278,17 @@ DM_PRESENT_UPSCALE	player	`metalfx` scales a picture smaller than its rectangle 
 DM_PREV_PROGRAM	switch	What `oe::GetPreviousProgramIndex` answers (default -1, started from HOME); `oe::ExecuteProgram` sets it for the program it starts
 DM_PROBE	diagnostic	`=module:offset,…` (Mac only): puts a `brk` at each guest address and on every hit prints the thread, registers, strings they point to and a backtrace, then runs the original instruction
 DM_PROBE_ALL	diagnostic	Set: probe hits (`DM_PROBE`) also print x8–x18
+DM_PROBE_CHANGES	diagnostic	`=0` off, `=1..16`: an `@` probe prints only when that many bytes at its address, the address or its readability change
 DM_PROBE_DUMP	diagnostic	`=module:offset:length[:file]`: on the first hit of any probe, writes that range of guest memory to a file (default `run/<platform>/probe_dump.bin`)
 DM_PROBE_EVERY	diagnostic	`=N`: every guest probe hit inside `DM_PROBE_FRAMES` counts, every N-th prints (its `#` is then the true hit count, for rates); `DM_PROBE_LIMIT` caps the printed ones
+DM_PROBE_FLOATS	diagnostic	Set: probe hits also print s0-s15 as floats and bits
 DM_PROBE_FRAMES	diagnostic	Presented frame or inclusive `start-end` range in which guest probes print observations
 DM_PROBE_HEAP	diagnostic	`=<name>,<start>,<size>,<free list>,<used list>`: hex offsets of the sead heap layout the probes' `!xN` heap walk uses (default Mario's `0,28,30,b0,c8`)
 DM_PROBE_HEAPFRAME	diagnostic	`=<vtable offset in main>` (hex): the probes' heap walk treats heaps of that class as frame heaps (head +0xe0, tail +0xe8)
 DM_PROBE_HEAPNAME	diagnostic	`=<text>`: the probes' `!xN` heap walk reports only hits on heaps whose name contains the text
 DM_PROBE_HEAPRAW	diagnostic	Set: the probes' heap walk also prints the heap object's first 0x130 bytes
 DM_PROBE_HEAPWORDS	diagnostic	Set: the probes' heap walk also prints each used block's first two words
+DM_PROBE_INTERVAL_FRAMES	diagnostic	`=N`: `@` and `^` poll probes print at most once per N frames; event probes print every call
 DM_PROBE_LIMIT	diagnostic	Maximum printed hits per guest probe; 0 or absent leaves the count unlimited
 DM_PROBE_POLL	diagnostic	`=<address>[+<length>]` (hex, 4 bytes by default, up to 8): a host thread spins on the bytes and on each change snapshots every thread's pc, lr and frames, for writes the watch misses
 DM_PROBE_WATCH	diagnostic	`=<address>[+<length>]` (hex, 8 bytes by default): write-protects that host page and reports who writes these bytes, without a debugger

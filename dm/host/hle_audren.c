@@ -14,6 +14,7 @@
 // Command list format (SDK 16): header +0x04 command count, +0x08 mix buffer address, +0x10 buffer count, +0x14 samples per frame, +0x18 sample rate, commands from +0x20;
 //   each command +0x00 magic 0xcafebabe, +0x04 enabled, +0x05 command ID (DeviceSink = 0x13), +0x06 size; DeviceSink +0x128 upsampler buffer, +0x130 input count, +0x134 input indices (s16).
 #include "hle.h"
+#include "audio_limiter.h"
 #include <math.h>
 #include <stdatomic.h>
 #include <time.h>
@@ -104,6 +105,7 @@ typedef struct {
     _Atomic uint64_t frame_seq, cq_seq[CQ];   // generation order: merge a normal frame with catch-up frames produced before it
     int sink_logged;
     int32_t up_buf[2 * (15 + FRAME_MAX)]; uint32_t up_pos;   // up_3_2's last samples and position
+    float lim_gain;                          // DM_AUDIO_LIMITER's gain carried between frames (0 before the first: gain 1)
     int16_t pcm[NBUF][FRAME_MAX * 2]; gbuf bufs[NBUF];   // the blocks its output plays from: AudioOut queues only the pointer and copies the samples when the sound card asks (issue #1336)
 } ar_t;
 static ar_t g_ar[AR_MAX];
@@ -543,6 +545,8 @@ static int capture(ar_t *a, const uint8_t *cl, size_t len, int16_t *dst) {
                 st[2 * s] = l; st[2 * s + 1] = r;
             }
             uint32_t nout = rate == 48000 ? samples : up_3_2(a, st, samples, st);
+            static int lim = -1; if (lim < 0) { const char *e = getenv("DM_AUDIO_LIMITER"); lim = e && *e == '1'; if (lim) LOG("audren: peak limiter on (DM_AUDIO_LIMITER)"); }
+            if (lim) a->lim_gain = limiter_block(st, 2 * nout, a->lim_gain > 0 ? a->lim_gain : 1.0f);   // peaks past full scale lowered, not cut flat by the clamp below
             uint64_t loud = 0;
             for (uint32_t s = 0; s < 2 * nout; s++) {
                 int32_t v = st[s]; v = v > 32767 ? 32767 : v < -32768 ? -32768 : v;

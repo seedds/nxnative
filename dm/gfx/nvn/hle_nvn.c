@@ -119,6 +119,7 @@ static void nvn_profile_viewports(const NVNcommandBuffer *c, int n, float *v);
 static void nvn_profile_scissor(const NVNcommandBuffer *c, int *x, int *y, int *w, int *h);
 static int nvn_profile_draw_begin(NVNcommandBuffer *c);   // nonzero: the profile changed state for this draw, and nvn_profile_draw_end restores it
 static void nvn_profile_draw_end(NVNcommandBuffer *c);
+static int nvn_is_window_tex(const NVNtexture *t);   // a texture of the window's swap chain
 #endif
 
 static void *nvn_lookup(const char *name) {
@@ -1913,11 +1914,15 @@ NVN(nvnWindowBuilderGetPresentInterval, int, const NVNwindowBuilder *b) { return
 // The swap chain's textures AcquireTexture hands out: the first nactive (SetNumActiveTextures; the rest stay the game's, unused), or all of them. Super Mario Bros. Wonder sets 2 of its 3
 // (reported by the S2Arm project), which keeps one frame fewer queued than rotating through all three
 static int window_active(const win_t *o) { return o->nactive > 0 && o->nactive < o->ntex ? o->nactive : o->ntex; }
+// The window's textures (the swap chain), for a profile's hooks: a game may render intermediates of the same size and format (Metroid Prime 4)
+static const NVNtexture *g_win_tex[8]; static _Atomic int g_nwin_tex;
+static int nvn_is_window_tex(const NVNtexture *t) { int n = atomic_load(&g_nwin_tex); for (int i = 0; i < n; i++) if (g_win_tex[i] == t) return 1; return 0; }
 NVN(nvnWindowInitialize, NVNboolean, NVNwindow *w, const NVNwindowBuilder *b) {
     const win_builder_t *s = (const win_builder_t *)b; win_t *o = (win_t *)w;
     memset(o, 0, sizeof *o); o->magic = MAGIC('W', 'I', 'N', 'D'); o->native = s->native; o->ntex = s->ntex; o->interval = s->interval; o->nactive = s->nactive;
     memcpy(o->tex, s->tex, sizeof o->tex);
     for (int i = 0; i < o->ntex; i++) if (o->tex[i]) mtl_xv_window_tex(CTX(o->tex[i])->serial);
+    { int k = atomic_load(&g_nwin_tex); for (int i = 0; i < o->ntex && k < 8; i++) if (o->tex[i] && !nvn_is_window_tex(o->tex[i])) g_win_tex[k++] = o->tex[i]; atomic_store(&g_nwin_tex, k); }
     LOG("[nvn] WindowInitialize swap chain %d textures (%d active), interval %d, first %dx%d format %#x", o->ntex, window_active(o), o->interval,
         o->ntex && o->tex[0] ? (int)CTX(o->tex[0])->d.width : 0, o->ntex && o->tex[0] ? (int)CTX(o->tex[0])->d.height : 0, o->ntex && o->tex[0] ? CTX(o->tex[0])->d.format : 0);
     return 1;

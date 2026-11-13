@@ -108,7 +108,8 @@ static void *mp4_scan_source_v1(NVNcommandBuffer *commands, const void *view) {
     return s->prefix;
 }
 
-// A 16:10 output (1610_full): the HUD, menus and movies keep 16:9. Every pass the game begins on the window texture (RGBA8_SRGB at the output size)
+// A 16:10 output (1610_full): the HUD, menus and movies keep 16:9. Every pass the game begins on a window texture (the swap chain's; RGBA8_SRGB
+// intermediates of the same size are left alone)
 // through its pass-begin helper (main+0x13003c, binding at main+0x1300b8; DM_NVN_RT_TRACE: the HUD at main+0x12e0e8, the radar at main+0x60860, the
 // front end and its movie at main+0x6c98c / 0x6cba0, the menus at main+0x58f520) is laid out in 16:9 and drawn into the middle band: viewports and
 // scissors keep their x and width, their y and height are scaled by k = (output ratio) / (16:9) about the centre. The scene's composite into the window
@@ -127,8 +128,10 @@ static float mp4_band_k(void) {
 static void nvn_profile_set_rt(const NVNcommandBuffer *c, int n, const NVNtexture *const *ct, uint64_t caller) {
     const tex_t *t = n > 0 && ct ? (const tex_t *)ct[0] : NULL; uintptr_t base = mp4_main_base();
     int band = base && mp4_band_k() > 0 && !strcmp(dm_main_build(),"8275fbe1ec5191c279f3a943ad8524f4") && caller == base + 0x1300b8
-        && t && t->magic == MAGIC('T','E','X',0) && t->d.format == NVN_FORMAT_RGBA8_SRGB && t->d.width == mp4_quality_max_width && t->d.height == mp4_quality_max_height;
+        && t && t->magic == MAGIC('T','E','X',0) && nvn_is_window_tex(ct[0]);   // the window itself: the game renders intermediates of its size and format too
     mp4_band_has = 0;
+    if (!band && base && caller == base + 0x1300b8 && t && t->magic == MAGIC('T','E','X',0) && t->d.format == NVN_FORMAT_RGBA8_SRGB && t->d.width == mp4_quality_max_width
+        && t->d.height == mp4_quality_max_height && mp4_band_k() > 0) { static int once; if (!once++) LOG("MP4 16:10: a pass begins on an output-size RGBA8_SRGB target that is not the window; left whole"); }
     if (band) { mp4_band_cb = c; mp4_band_h = 0;   // the band's frame: the pass's first viewport (the window rectangle: 1920x1080, the window crop)
         static int once; if (!once++) LOG("MP4 16:10: HUD and menu passes drawn into the middle 16:9 band (y and height x %.3f)", mp4_band_k()); }
     else if (mp4_band_cb == c) mp4_band_cb = NULL;

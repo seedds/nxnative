@@ -1369,6 +1369,17 @@ int main(void) {
         P(nvnWindowAcquireTexture)(&w2, NULL, &ix);
         EXPECT("5th acquire returns texture 1", 1, ix);
         nvn_present_config(0, 0);
+        // A game that changes its interval on alternate frames (Mario Kart World below its 60 fps) does not get a log line for each change: the first 8, then each power of two
+        uint64_t n0 = atomic_load(&g_itv_changes); int want = 0; for (uint64_t k = n0 + 1; k <= n0 + 2000; k++) want += itv_log(k);
+        fflush(stderr); int keep = dup(2); char tp[] = "/tmp/t_nvn_itv_XXXXXX"; int fd = mkstemp(tp); dup2(fd, 2);
+        for (int k = 0; k < 2000; k++) P(nvnWindowSetPresentInterval)(&w2, 2 - (k & 1));   // 2, 1, 2, 1, ...: every call a change
+        P(nvnWindowSetPresentInterval)(&w2, 1);   // the same value again: no change, no line
+        fflush(stderr); dup2(keep, 2); close(keep);
+        static char lb[65536]; ssize_t nb = pread(fd, lb, sizeof lb - 1, 0); close(fd); unlink(tp); lb[nb > 0 ? nb : 0] = 0;
+        int lines = 0; for (const char *c = lb; (c = strstr(c, "the game sets present interval")); c++) lines++;
+        EXPECT("2,000 interval changes counted", 2000, atomic_load(&g_itv_changes) - n0);
+        EXPECT("... written for the first 8 and each power of two", want, lines);
+        EXPECT("... which is 20 lines at most", 1, lines <= 20);
     }
 
     // 6f. Present thread: when the drawable stays unavailable for a long time (the present thread stalls 200 ms each time), the present call still returns immediately;

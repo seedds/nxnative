@@ -299,6 +299,14 @@ Frame pacing: the host's frame step, engine frame limiters, present intervals an
 - **Found on:** [Luigi's Mansion 3](../../dm/games/0100DCA0064A6000/README.md) (issue #1705): title screen in a window on an M6, 54.3–58.2 → 60.0 fps, frame time p95 24–25 → 18 ms, max 107 → 22.7 ms, no empty display-link ticks after warm-up.
 - **Check:** `t_nvn` (`display mode: the game reads back the interval the window presents at`).
 
+### A game that changes its present interval every frame filled the log
+
+- **Symptom:** a few minutes of a game's log are megabytes of two lines, `the game sets present interval 1 → 2` (or `2 → 1`) and `present thread time-constraint policy (period … ms, computation … ms) set`, a pair for almost every frame. Mario Kart World 1.8.0 on an iPhone, a 7-minute race: 11,614 changes, and the two lines were 23,307 of the log's 27,529 lines and 1.9 of its 2.8 MB. Nearly all of them came after the frame rate had fallen from 60 to 42 to 48 fps; the first 200 s of the run had 92.
+- **Cause:** the game paces itself by its present interval. Below its 60 fps it sets interval 2 for one frame and 1 for the next, about 30 changes a second. `nvnWindowSetPresentInterval` wrote a line for every change, and every change of the period declares the present thread's time-constraint policy again (`set_time_constraint_comp`), which wrote another.
+- **Fix:** the first 8 changes are written as before, then each whose count is a power of two, with its count (`itv_log` in `hle_nvn.c`), for both lines. The 300-frame summary writes `present interval up to frame N: the game changed it X times (Y since the start)` whenever there was a change, so the rate of the changes over a run is still in the log. The policy is still declared at every change of the period; only the lines are fewer.
+- **Found on:** [Mario Kart World](../../dm/games/0400C3F00006E000/README.md) (1.8.0, iPhone19,4 on an iOS 27.3 beta).
+- **Check:** `t_nvn` (`2,000 interval changes counted`, `... written for the first 8 and each power of two`).
+
 ### Swap chain textures a game leaves inactive
 
 - **Symptom:** a game that asks NVN for fewer active swap chain textures than it gave the window gets one frame more queued between its rendering and the screen than it chose (input latency), with a log line `WindowBuilderSetNumActiveTextures n (the host rotates through the SetTextures count)`.

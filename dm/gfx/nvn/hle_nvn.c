@@ -1834,9 +1834,15 @@ NVN(nvnWindowInitialize, NVNboolean, NVNwindow *w, const NVNwindowBuilder *b) {
 }
 static int window_interval(const win_t *o);
 NVN(nvnWindowGetPresentInterval, int, const NVNwindow *w) { return window_interval((const win_t *)w); }   // Link's Awakening reads it back every frame
+// Changes of the present interval by the game. Not a line for each: Mario Kart World 1.8.0, once it cannot hold 60 fps on an iPhone, sets 1 → 2 → 1 on alternate frames (about 30
+// changes a second, 11,614 in a 7-minute race), and with the policy line each one brings (set_time_constraint_comp) that was 23,307 of the log's 27,529 lines. The first 8
+// changes are written, then each whose count is a power of two, and tsummary writes how many there were in its 300 frames
+static _Atomic uint64_t g_itv_changes;
+static int itv_log(uint64_t n) { return n <= 8 || !(n & (n - 1)); }
 NVN(nvnWindowSetPresentInterval, void, NVNwindow *w, int v) {
-    if (((win_t *)w)->interval != v) { module_t *m = module_of(__builtin_return_address(0));
-        LOG("[nvn] the game sets present interval %d → %d (from %s+%#llx)", ((win_t *)w)->interval, v, m ? m->name : "?", m ? (unsigned long long)((uint64_t)__builtin_return_address(0) - (uint64_t)m->base) : 0ULL); }
+    if (((win_t *)w)->interval != v) { uint64_t n = atomic_fetch_add(&g_itv_changes, 1) + 1;
+        if (itv_log(n)) { module_t *m = module_of(__builtin_return_address(0)); char nth[48] = ""; if (n > 8) snprintf(nth, sizeof nth, ", change %llu", (unsigned long long)n);
+            LOG("[nvn] the game sets present interval %d → %d (from %s+%#llx%s)", ((win_t *)w)->interval, v, m ? m->name : "?", m ? (unsigned long long)((uint64_t)__builtin_return_address(0) - (uint64_t)m->base) : 0ULL, nth); } }
     ((win_t *)w)->interval = v;
 }
 NVN(nvnWindowSetCrop, void, NVNwindow *w, int x, int y, int ww, int hh) {
@@ -2064,6 +2070,8 @@ static void tsummary(uint64_t frame) {
         o += snprintf(line + o, sizeof line - o, " %s p50 %.2f / p95 %.2f / max %.2f ms (%u frames);", g_tname[k], v[n / 2], v[(n * 95) / 100 < n ? (n * 95) / 100 : n - 1], v[n - 1], n);
     }
     LOG("[nvn] timing up to frame %llu:%s", frame, line);
+    { static uint64_t pic; uint64_t ic = atomic_load(&g_itv_changes);   // the game's own pacing at work: a game that drops to its half rate and back does it here
+      if (ic != pic) LOG("[nvn] present interval up to frame %llu: the game changed it %llu times (%llu since the start)", frame, (unsigned long long)(ic - pic), (unsigned long long)ic); pic = ic; }
     { void mtl_pso_line(char *, size_t); char pl[1024]; mtl_pso_line(pl, sizeof pl); LOG("[nvn] pipelines up to frame %llu: %s", frame, pl); }
     double tgt = 1000.0 / mtl_fps_target();   // milliseconds one frame should take: 16.7 at 60 fps, 33.3 when the game itself asks for 30 (the over-time / dropped-frame counts below use it)
     { unsigned n = g_tn[0] < TWIN ? g_tn[0] : TWIN, over = 0; double v[TWIN];   // frame interval gets its own line (M1 baseline): number of frames longer than one frame period in this window and p99
@@ -2148,7 +2156,9 @@ static void set_time_constraint_comp(uint64_t period_ns, uint64_t comp_ns) {
         .constraint = (uint32_t)(period_ns * tb.denom / tb.numer), .preemptible = 1};
     kern_return_t kr = thread_policy_set(pthread_mach_thread_np(pthread_self()), THREAD_TIME_CONSTRAINT_POLICY, (thread_policy_t)&p, THREAD_TIME_CONSTRAINT_POLICY_COUNT);
     if (kr == KERN_SUCCESS) { g_rt_comp_ms = comp_ns / 1e6; g_rt_period_ms = period_ns / 1e6; }
-    LOG("[nvn] present thread time-constraint policy (period %.3f ms, computation %.3f ms) %s", period_ns / 1e6, comp_ns / 1e6, kr == KERN_SUCCESS ? "set" : "failed to set");
+    static uint64_t seen_period, nper; int say = 1;   // a new period follows each change of the game's interval: written as that line is (itv_log); a new computation for the same period always
+    if (period_ns != seen_period) { seen_period = period_ns; say = itv_log(++nper); }
+    if (say) LOG("[nvn] present thread time-constraint policy (period %.3f ms, computation %.3f ms) %s", period_ns / 1e6, comp_ns / 1e6, kr == KERN_SUCCESS ? "set" : "failed to set");
 }
 static int rt_comp_fixed_ms(void) { static int v = -2; if (v == -2) { const char *e = getenv("DM_RT_COMP"); v = e && *e && strcmp(e, "auto") ? atoi(e) : -1; } return v; }   // −1 = auto
 // The fixed value, or in auto mode the computation declared so far (auto's starting value of 2 ms only the first time): a reset to 2 ms at each period change under-declared the thread until the next p90

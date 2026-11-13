@@ -1373,6 +1373,13 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Found on:** Drag x Drive (040041601D83A000, v196608, SDK 20; no profile in the repository yet): 43 s in, as player 1's Joy-Con 2 pair joined (`main+0x2c80c4`). [Nintendo Switch Sports Resort](../../dm/games/04008E001F098000/README.md) (`04008E001F098000`, v65536) asks the question at boot: the SDK's own aborted on its error (`Result 0x58cca` at `sdk+0x6ca40c`).
 - **Check:** `make -C dm/host/tests GAME=<id> run` (`t_hid`).
 
+### A Nintendo application's scene id
+
+- **Symptom:** a null read in the hid client under `nn::hid::SetSceneIdForPrivateApp` as a scene starts.
+- **Cause:** Nintendo's own applications call `SetSceneIdForPrivateApp` at each scene's start, and the SDK's own connects to the hid service, which the host does not have.
+- **Fix:** it is logged, as nothing reads it (`hle_hid.c`).
+- **Found on:** Nintendo Switch 2 Welcome Tour (`040057C02159A000`, no profile yet): its scene modules.
+
 ### GameShare guest displays
 
 - **Symptom:** a crash at boot in `nn::vi` under `nn::streamplay::CreateIndividualDisplays`.
@@ -1421,6 +1428,13 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Cause:** `SetGraphicsTargetFrameRate` maps up to 59 fps to mode 1, up to 119 to mode 2 and above to mode 3 (`SetGraphicsTargetFrameRateAuto` to mode 0) and calls `SetGraphicsFrameLengthMode`, which locks the gs graphics server's context and sends it the mode. The host has no graphics server, so the context is null.
 - **Fix:** `SetGraphicsFrameLengthMode` is hooked and logs the mode once per change; both `oe` paths reach it. The host paces by the window's present interval (`hle_oe.c`).
 - **Found on:** [Hyrule Warriors: Age of Imprisonment](../../dm/games/04003F40232DE000/README.md): 60 / its present interval at boot.
+
+### The application's GPU time span
+
+- **Symptom:** a null read in `nn::os::SdkMutexType` under `nn::gs::sdk::QueryApplicationGpuTimeSpan`, after the first frame.
+- **Cause:** a Switch 2 game can ask each frame for the GPU time it used between two ticks (`nn::oe::QueryApplicationGpuTimeSpan`). The SDK's own locks the gs graphics server's context, as `SetGraphicsFrameLengthMode` does, and the host has no graphics server.
+- **Fix:** hooked: success and a fixed span of 8 ms, logged once (`hle_oe.c`). The host has no GPU time per application; 8 ms is under a 60 fps frame, so a game that sizes its picture by the span stays at full size, and a span that is not 0 takes no divide or "not measured" path. The game reads the span only on success. Welcome Tour runs the same with 0 and with 8 ms (title screen at 60 fps).
+- **Found on:** Nintendo Switch 2 Welcome Tour (`040057C02159A000`, no profile yet; `main+0x30a83c`).
 
 ### The display's largest buffer
 

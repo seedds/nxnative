@@ -1224,6 +1224,9 @@ HLE_FORCE("_ZN2nn3hid41EnableUnintendedHomeButtonInputProtectionERKjb", "Home bu
 // sdk+0x6ca40c). The answer is what the game set, off by default
 HLE_FORCE("_ZN2nn3hid44IsUnintendedHomeButtonInputProtectionEnabledERKj", "Home button protection: what the game set (off by default)", bool, h_hid_HomeProtectOn,
           const uint32_t *id) { return id && (atomic_load(&g_home_protect) & id_bit(*id)); }
+// Nintendo's own applications tell the hid service which scene they show (Nintendo Switch 2 Welcome Tour's scene modules, at each module's start); the host has no hid service and
+// nothing reads it, so it is only logged (the SDK's own connects to hid itself and reads null)
+HLE_FORCE("_ZN2nn3hid23SetSceneIdForPrivateAppEi", "scene id for a Nintendo application: logged, nothing reads it", void, h_hid_SceneId, int id) { LOG("hid: SetSceneIdForPrivateApp %d", id); }
 // The system setting for the mouse pointer's speed (System Settings, Mouse): the default, 1
 HLE_FORCE("_ZN2nn3hid25GetMousePointerSpeedScaleEv", "mouse pointer speed setting: the default, 1.0", float, h_hid_MouseSpeed, void) { return 1.0f; }
 // Npad IMU (Switch 2 SDKs): the six-axis samples the SDK's own sensor fusion reads (Enable/UpdateSensorFusion → GetNpadImuSamples → nn::imu::FullSensorState). EnableNpadImu gives the

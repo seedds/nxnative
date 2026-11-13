@@ -486,6 +486,21 @@ class DlcOnlyShaders(Base):
                 tables.joinpath('shader_facts.tsv').write_text(facts)
                 self.assertEqual(nsp.dlc_only_shader_change(g, tables), want)
 
+    def test_a_shader_the_dlc_shares_with_the_game(self):   # issue #2439: the split gives a shared shader the game's row (merge_keys), so both directions are DLC-only changes
+        tables = self.tmp / 'new-tables'; tables.mkdir()
+        game_rows = 'vs_sdf.bin\t0\tvertex\tbase\t/re_chunk_000.pak#1#SDF#var0\nvs_sdf.bin\t1\tvertex\tshared\t/re_chunk_000.pak#1#SDF#var619\n'
+        dlc_rows = 'vs_other.bin\t0\tvertex\tdlc\t/aoc/1/re_dlc_000.pak#2#SDF#var1\n'
+        facts = 'base\t{}\n'
+        for name, profile, split, want in (
+            ('registered with the DLC, packed without it', game_rows + dlc_rows, game_rows, True),
+            ('registered without the DLC, packed with it', game_rows, game_rows + dlc_rows, True),
+            ('registered under the old crediting (the shared shader as the DLC\'s), packed without it',   # such a profile is split again, not accepted
+             game_rows.splitlines(True)[0] + dlc_rows + 'vs_other.bin\t1\tvertex\tshared\t/aoc/1/re_dlc_000.pak#2#SDF#var619\n', game_rows, False)):
+            with self.subTest(name=name):
+                self.src.joinpath('shader_map.tsv').write_text(profile); self.src.joinpath('shader_facts.tsv').write_text(facts)
+                tables.joinpath('shader_map.tsv').write_text(split); tables.joinpath('shader_facts.tsv').write_text(facts)
+                self.assertEqual(nsp.dlc_only_shader_change(game.Game(self.src), tables), want)
+
 
 class ComputeReaderAdditions(Base):
     V, P, C = 'a' * 16, 'b' * 16, 'c' * 16

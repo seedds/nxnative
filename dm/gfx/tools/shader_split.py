@@ -3050,6 +3050,23 @@ def scan_blob(d, label, out, depth=0, left=None):
     if NEEDLE in d: out.extend(needle_shaders(d, label))
     if SUMO_NX in d or NVNSH in d: out.extend(sumo_shaders(d, label))
 
+def merge_keys(results):
+    """The shaders of every scanned file, one row per key: (where, stage, control, code), the pairs, and the rows per source group. A key found more than once keeps its first copy,
+    except that the game's own copy (base or update) takes the place of an add-on's (/aoc/<index>/): the game's rows are then the same with or without any DLC, so a registered build
+    packed with another DLC set changes only the DLC rows (build_ipa_from_nsp.py dlc_only_shader_change). PRAGMATA's re_dlc_000.pak holds 45 of the game's shaders, and with the DLC
+    installed the path order (aoc/ before re_chunk_000.pak) gave them to the DLC, so a profile split with it did not build without it (issue #2439)"""
+    keys, pairs, per_src = {}, set(), collections.Counter()
+    for rel, uniq, pr, _ in results:
+        pairs |= pr
+        for key, v in uniq.items():
+            if key in keys:
+                old = keys[key]
+                if not same_shader(old[2:4], v[2:4]): red(f'key {key} is the same but the control section or code area differs ({v[0]} / {old[0]})')
+                if old[0].startswith('/aoc/') and not v[0].startswith('/aoc/'): per_src[group(old[0])] -= 1; keys[key] = v; per_src[group(v[0])] += 1
+                continue
+            keys[key] = v; per_src[group(v[0])] += 1
+    return keys, pairs, per_src
+
 def group(label):
     """source group (second half of the package file name)"""
     if label.startswith('main'): return 'main'
@@ -3436,7 +3453,6 @@ def main():
         tag = 'aoc/' + (name.removesuffix('.img') if is_image(romfs) else name)
         files += sorted((os.path.join(dp, f), tag + '/' + os.path.relpath(os.path.join(dp, f), romfs)) for dp, _, fs in os.walk(romfs) for f in fs)
     zdicts = {k: v for r in romfs_v + dlc_v for k, v in zs_dicts(r).items()}   # Tears of the Kingdom's zstd dictionaries (zs_dicts)
-    keys = {}
     # First pass: every file; Unity bundles carry type trees, and the Shader trees are collected on the way. Second pass: Unity serialized files without type trees are scanned again with the borrowed trees
     J = int(os.environ.get('J', '8'))
     big = [j for p, r in files for j in (linkdata_jobs(p, r) or [])]   # Three Houses' 6.9 GB DATA1.bin: one job per range of entries, not one read of the whole file
@@ -3475,14 +3491,7 @@ def main():
         results = [r for r in results if r[3] != 'defer'] + again
     bad = [extra for *_, extra in results if isinstance(extra, tuple)]
     if bad: print(f'[RED] {sum(e[2] for e in bad)} file(s) could not be read, their shaders are left out (first: {bad[0][1]})', flush=True)   # build_ipa_from_nsp.py reads this line
-    per_src = collections.Counter(); pairs = set()
-    for rel, uniq, pr, _ in results:
-        pairs |= pr
-        for key, v in uniq.items():
-            if key in keys:
-                if not same_shader(keys[key][2:4], v[2:4]): red(f'key {key} is the same but the control section or code area differs ({v[0]} / {keys[key][0]})')
-                continue
-            keys[key] = v; per_src[group(v[0])] += 1
+    keys, pairs, per_src = merge_keys(results)
     prog = {(a, b) for a, b, *t in pairs if t} - pairs; pairs = {x for x in pairs if len(x) == 2}
     sp, cover = separable_pairs(keys); pairs |= sp
     if cover: print(f'single-stage programs: {len({v for v, _ in sp}):,} vertex shaders are paired with a cover of {len(cover)} pixel shader(s) ({" ".join(cover)})')
@@ -3514,7 +3523,7 @@ def main():
                                             ('Snowdrop shader objects', any('#SNOWDROP@' in r[4] for r in rows)),
                                             ('Unreal Engine shader code archives', any('#UE' in r[4] for r in rows))) if hit)
         f.write(f'# kind: evidence  {NOTE} ({kinds} in RomFS + main) → control section + code area keys (dm/gfx/tools/shader_split.py)\n')
-        f.write('# column 5 records where each key first appears; no PC shader pairing supplied\n')
+        f.write('# column 5 records where each key first appears, a copy in the game before one in an add-on; no PC shader pairing supplied\n')
         f.write('package\tindex\tstage\tdm_ctl_sha16\tsource\n')
         for r in rows: f.write('\t'.join(map(str, r)) + '\n')
     # Hand-written facts the machine code cannot give (the profile's shader_facts_manual.tsv, same row format) are merged over the generated ones, so the table stays reproducible

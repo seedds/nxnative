@@ -6,7 +6,7 @@
 // Window" (⌘⇧C, or DM_CHEATS_WINDOW=1 at launch) opens a Cheats panel beside the game: sections, search, the master switch,
 // safe mode, values, details and the import of cheat files (see the code below).
 // Key map (Nintendo layout): WASD left stick, arrow keys D-pad (with Shift held: the right stick, for the camera), J=A K=B U=X I=Y, Q=L E=R, Z=ZL C=ZR, F=press left stick G=press right stick, Return=+ Tab=−, Space=shake the controller.
-// Controllers: face buttons as on the iPhone, by position (right A, bottom B, top X, left Y) or on a Nintendo pad by its labels (pad_apple.h), shoulders L R, triggers ZL ZR, Menu + Options −, both sticks and their presses.
+// Controllers: face buttons as on the iPhone, by position (right A, bottom B, top X, left Y; by label with DM_PAD_MAP=label) or on a Nintendo pad by its labels (pad_apple.h), shoulders L R, triggers ZL ZR, Menu + Options −, both sticks and their presses.
 // Each controller is a player of its own (local co-op): the first one connected is player 1, together with the keyboard, the next player 2, and so on up to 8 (pad_slots.h);
 // DM_PAD_MERGE=1 merges every controller into player 1 instead, DM_KBD_PLAYER=own makes the keyboard player 1 on its own, with the controllers from player 2 on.
 #import <Cocoa/Cocoa.h>
@@ -212,7 +212,7 @@ static void pad_read(GCExtendedGamepad *g) {
     hq_poll(); if (hq_blocks_input(g_hq.phase)) return;
     int p = g_merge ? 0 : pad_slot_of(&g_slots, (__bridge const void *)g.controller);
     if (p < 0 && (!g_press_to_join || pad_gc_unread(g.controller))) return;   // a controller read from its HID reports: GameController's controller of it stays unread
-    uint64_t m = dm_pad_face(g);   // by position, a Nintendo pad by its labels
+    uint64_t m = dm_pad_face(g);   // by position (DM_PAD_MAP=label: by label), a Nintendo pad by its labels
     #define K(btn, bit) if (btn.isPressed) m |= bit
     K(g.leftShoulder, DM_BTN_L); K(g.rightShoulder, DM_BTN_R); K(g.leftTrigger, DM_BTN_ZL); K(g.rightTrigger, DM_BTN_ZR);
     K(g.buttonMenu, DM_BTN_PLUS); K(g.buttonOptions, DM_BTN_MINUS); K(g.leftThumbstickButton, DM_BTN_LS); K(g.rightThumbstickButton, DM_BTN_RS);   // nil on pads without them: not pressed
@@ -671,6 +671,7 @@ static void pads_start(void) {
     LOG("front end: %s", g_merge ? "every controller is player 1 (DM_PAD_MERGE)" : g_kbd_own ? "the keyboard is player 1, each controller a player of its own from player 2 on (DM_KBD_PLAYER=own)"
                                                                            : "each controller is a player of its own, the keyboard plays with player 1");
     if (g_press_to_join) LOG("front end: a controller becomes a player at its first button press, the lowest player free (DM_PAD_PRESS_TO_JOIN)");
+    LOG("front end: face buttons of Xbox and PlayStation pads by %s", dm_pad_by_label() ? "label (DM_PAD_MAP=label: Xbox A, the bottom button, is A)" : "position (the right button is A)");
     hq_start();
     pads_changed(nil);
     hq_log_setting();

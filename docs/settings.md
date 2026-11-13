@@ -4,7 +4,7 @@ The screen before the game starts shows the settings the game supports. A settin
 
 - [Tested defaults](#tested-defaults)
 - [Game](#game): [Frame rate](#frame-rate), [Render scale](#render-scale), [Console mode](#console-mode), [Upscaling](#upscaling), [Game's upscaler](#games-upscaler), [Game language](#game-language), [Picture](#picture), [Frame-rate counter](#frame-rate-counter)
-- [Controls](#controls): [Touch feedback](#touch-feedback), [Game rumble](#game-rumble), [Rumble strength](#rumble-strength), [Rumble cutoff](#rumble-cutoff), [Press a button to join](#press-a-button-to-join)
+- [Controls](#controls): [Touch feedback](#touch-feedback), [Game rumble](#game-rumble), [Rumble strength](#rumble-strength), [Rumble cutoff](#rumble-cutoff), [Press a button to join](#press-a-button-to-join), [Face buttons](#face-buttons)
 - [Performance](#performance): [Frame buffering](#frame-buffering), [Metal 4 pipelines](#metal-4-pipelines), [Pipeline prebuild](#pipeline-prebuild), [Encode thread](#encode-thread), [Hold frames when late](#hold-frames-when-late), [Performance HUD](#performance-hud), [Reset to tested defaults](#reset-to-tested-defaults)
 - [The Mac settings window](#the-mac-settings-window): [Display mode](#display-mode)
 - [In-game menu](#in-game-menu)
@@ -114,6 +114,10 @@ A controller's vibration weaker than this stays off, and the rest is spread over
 ### Press a button to join
 
 Off by default: each controller is a player as soon as it connects, in the order the system lists them. On: a controller becomes a player only when you press one of its buttons, as the lowest player free, so the players choose their order and how many play. That press also reaches the game. When a game asks for more players than have joined, a prompt over the game waits for the others to press a button; B closes it.
+
+### Face buttons
+
+How an Xbox or PlayStation controller's A, B, X and Y reach the game. **By position**, the default, keeps the Switch's layout, as Switch emulators do: the game's A is the right-hand button (Xbox B, PlayStation circle), its B the bottom one (Xbox A, PlayStation cross), its X the top one and its Y the left one, so the buttons sit where the game's designers put them, but "Press A" means the button marked B. **By label** works as in PC games: the button marked A (the bottom one; PlayStation cross) is the game's A, B (circle) its B, X (square) its X and Y (triangle) its Y, so the letters the game shows are the ones on the controller, and confirming is on the bottom button. A Nintendo controller (a Pro Controller, Joy-Con) maps by its labels either way, and so does the keyboard. The game's icons keep Nintendo's look: L, R, ZL and ZR are LB, RB, LT and RT, + is Menu and − is View. A Mac app built with a game's Xbox icons (Pokémon Pokopia: [its note](../dm/games/0400A3A01EE4C000/README.md#xbox-and-keyboard-button-icons-current)) shows them By label, and the keyboard's keys while you play with the keyboard.
 
 ## Performance
 
@@ -279,6 +283,7 @@ A line like `DM_PRESENT_SNAP=0` in `Documents/env.txt` (in the Files app, under 
 | Rumble strength | `DM_RUMBLE_GAIN` | `0` to `3` |
 | Rumble cutoff | `DM_RUMBLE_MIN` | `0` to `0.9` |
 | Press a button to join | `DM_PAD_PRESS_TO_JOIN` | `1`, `0` |
+| Face buttons | `DM_PAD_MAP` | `position`, `label` |
 | Upscaling | `DM_PRESENT_UPSCALE` | `off`, `metalfx` |
 | Game's upscaler | `DM_UPSCALER` | `game`, `metalfx` |
 | Frame buffering | `DM_PRESENT_SNAP` | `1`, `0` |

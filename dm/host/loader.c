@@ -338,6 +338,9 @@ void dm_fps_state_apply(void) {
     // Render scale of the 3D views (the stubs at Tears of the Kingdom's main+0xd5cc0, Breath of the Wild's main+0x1266880, Hades II's render size): 1.0 keeps the game's own size
     // and dynamic resolution; another factor fixes the size at that fraction (DM_RENDER_SCALE, 0.5 to the stub's largest scale: 1.0, or above for a stub that also raises it,
     // Hades II's 3.0). Independent of the frame step: written at target 0 too
+    // Button prompts in an Xbox controller's layout (state +0xb0 u32 1): pads mapped by label (DM_PAD_MAP=label, pad_apple.h, with an Xbox controller's icons; the keyboard's set follows
+    // the same layout, nvn_mtl.m DM_TEX_REPLACE_KBD). Pokémon Pokopia's patches.py then puts the in-world button diamond in an Xbox controller's layout
+    { const char *pm = getenv("DM_PAD_MAP"); uint32_t other = pm && !strcmp(pm, "label"); memcpy(dm_fps_state + 0xb0, &other, 4); }
     const char *rs = getenv("DM_RENDER_SCALE"); float sc = 1.0f, hi = g_render_scale_max;
     if (rs) { char *end; sc = strtof(rs, &end); if (end == rs || *end || !(sc >= 0.5f && sc <= hi)) { LOG("[RED] DM_RENDER_SCALE=%s: must be 0.5 to %.1f; keeping the game's size", rs, hi); sc = 1.0f; } else LOG("%s: 3D views rendered at %.2f of the game's size (DM_RENDER_SCALE)", g_fps_mod, sc); }
     memcpy(dm_fps_state + 0x10, &sc, sizeof sc);

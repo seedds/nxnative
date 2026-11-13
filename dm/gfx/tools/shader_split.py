@@ -26,6 +26,7 @@
 #   · BEA (NintendoWare Bezel Engine archives, Big Brain Academy: Brain vs. Brain): BNSH in the .bfsha entries of the archives (zstd entries), see bea_members
 #   · MGFX (MonoGame effects, Celeste, Bastion): the effects in its XNB files and SpriteBatch's in main, each shader a control section and a code area (version 5: a whole GLSLC output), see mgfx_effect
 #   · dvdbnd (FromSoftware, Dark Souls Remastered): GLSLC outputs in the BND3 archives (DCX zlib entries) of the .bdt files, indexed by the .bhd5 beside each, see bhd5_entries and bdt_shaders
+#   · shaderbnd (FromSoftware, The Duskbloods): NVN2 shaders, one CGSB per member of the BND4 archive in each romfs/shader/*.shaderbnd.dcx (DCX zlib), see bnd4_members and cgsb_shaders
 #   · data.arc (Super Smash Bros. Ultimate, smash_arc.py): GLSLC outputs in its SSBH shader databases and BNSH in its effects and UI layouts, each of its current files (zstd) scanned, see smash_arc_jobs
 #   · PKZ (PlatinumGames, Bayonetta 3): shader objects (VSO / PSO / CSO / HSO / DSO, a control section and a code area each) in the DAT archives of the PKZ entries (Oodle Kraken, decoded by the
 #       game's own decoder in the Mac host), see pkz_entries, pgdat_members and pg_shader
@@ -1787,6 +1788,30 @@ def bdt_shaders(path, rel, ents, out):
             for nm, b in bnd3_members(d, label):
                 if b[:4] == b'\x91\x68\x86\x19': out.extend(glslc_shaders(b, f'{label}/{nm}'))
 
+BND4, CGSB, CGSB_NVN = b'BND4', b'CGSB', b'NVN '
+def bnd4_members(d, label):
+    """FromSoftware's BND4 archive: 'BND4', +0xc i32 count, +0x10 u64 header size (0x40), +0x18 8-byte version string, +0x20 u64 entry size, +0x28 u64 data start, +0x30 u8 unicode
+    names, +0x31 u8 format; then count entries of 0x24 bytes {u32 flags, i32 -1, u64 stored length, u64 unpacked length, u32 offset, i32 ID, u32 name offset} (formats 0x74 and 0x54, as The
+    Duskbloods' shaderbnd archives, gameface's 0x54: the same entries; names UTF-16LE when unicode is set, else Shift JIS). → (name, data) of each entry"""
+    n, esz, uni, fmt = struct.unpack_from('<i', d, 0xc)[0], struct.unpack_from('<Q', d, 0x20)[0], d[0x30], d[0x31]
+    if esz != 0x24 or fmt not in (0x54, 0x74): red(f'{label}: BND4 entry size {esz:#x}, format {fmt:#x}: only 0x24-byte entries of formats 0x54 and 0x74 are known')
+    for i in range(n):
+        _, _, cs, us, off, _, nm = struct.unpack_from('<IiQQIiI', d, 0x40 + esz * i)
+        if cs != us: red(f'{label}: BND4 entry {i} is compressed ({cs:#x} of {us:#x} bytes)')
+        name = d[nm:d.index(b'\0\0', nm) + 1].decode('utf-16-le', 'replace') if uni else d[nm:d.index(b'\0', nm)].decode('shift-jis', 'replace')
+        yield name.strip('\0').replace('\\', '/'), d[off:off + cs]
+
+def cgsb_shaders(d, label):
+    """One shader of The Duskbloods' shaderbnd archives (its extension the stage: .vpo .ppo .cpo .gpo .hpo .dpo .mpo .apo): 'CGSB', u32 0x00112233, +0x10 u64 0x18, then a record
+    'NVN ' u32 1, 8 bytes 0, {u64 offset, u64 length} of the code area (Ampere code with its 0x80-byte SPH), of the NVN2 control section, and of two blocks the split does not read"""
+    if d[0x18:0x1c] != CGSB_NVN: red(f'{label}: CGSB record {d[0x18:0x1c]!r}: only NVN is known')
+    co, cn, to, tn = struct.unpack_from('<4Q', d, 0x28)
+    code, ctl = span(d, co, cn, f'{label} code area'), span(d, to, tn, f'{label} control section')
+    if not nvn2_ctl(ctl): red(f'{label}: not an NVN2 control section')
+    st = nvn2_stage(ctl, code); why = 'no stage' if not st else check(label, st, ctl, code)
+    if why: red(f'{label}: {why}')
+    return [(label, st, ctl, code)]
+
 class LzxError(Exception): pass
 
 # MonoGame's compressed XNB (Stardew Valley: 3,535 of its 3,549 .xnb files): ContentManager.cs knows
@@ -3082,6 +3107,13 @@ def scan_blob(d, label, out, depth=0, left=None):
         import cra
         for i, m in enumerate(cra.narc_members(d, label)): scan_blob(cra.undo(m), f'{label}/{i}', out, depth + 1)
         return
+    if d[:4] == DCX:   # FromSoftware's compressed files: the shaderbnd archives are zlib (DFLT); other files that reach here by a chance byte match (The Duskbloods' geometry, Oodle KRAK) hold no shaders
+        if d[0x28:0x2c] != b'DFLT' and not label.endswith('.shaderbnd.dcx'): return
+        d = undcx(d, label)
+    if d[:4] == BND4:
+        for nm, m in bnd4_members(d, label): scan_blob(m, f'{label}/{nm}', out, depth + 1, left)
+        return
+    if d[:4] == CGSB: out.extend(cgsb_shaders(d, label)); return
     if d[:4] == b'BAHS': out.extend(bahs_shaders(d, label)); return
     if d[:4] == RGXD: out.extend(rgxd_shaders(d, label)); return
     if d[:4] == b'NDSR': out.extend(ndsr_shaders(d, label)); return
@@ -3428,7 +3460,7 @@ def scan_file_in(args):
         try: pairs = unity_shaders(d, '/' + rel, found, trees if not TREES else dict(TREES))
         except unityfs.NoTree: return rel, {}, set(), 'defer'
         return rel, uniq_keys(found), var_pairs(found) | {(a, b, 'prog') for a, b in pairs}, trees
-    elif b'BNSH\0\0\0\0' not in d and b'BAHS' not in d and d[:4] != b'MSHD' and d[:4] != b'NDSR' and d[:4] != b'NARC' and d[:4] != b'NDVE' and not (d[:4] == b'SARC' and b'Yaz0' in d) and b'\x91\x68\x86\x19' not in d and MGFX not in d and NEEDLE not in d and d[:8] != PACX4 and d[:8] != SUMO_MUX and SUMO_NX not in d and NVNSH not in d: return rel, {}, set(), {}   # a SARC may hold Yaz0 members, a NARC packed ones (cra.undo)
+    elif b'BNSH\0\0\0\0' not in d and b'BAHS' not in d and d[:4] != b'MSHD' and d[:4] != b'NDSR' and d[:4] != b'NARC' and d[:4] != b'NDVE' and not (d[:4] == b'SARC' and b'Yaz0' in d) and b'\x91\x68\x86\x19' not in d and MGFX not in d and NEEDLE not in d and d[:8] != PACX4 and d[:8] != SUMO_MUX and SUMO_NX not in d and NVNSH not in d and not (d[:4] == DCX and path.endswith('.shaderbnd.dcx')): return rel, {}, set(), {}   # a SARC may hold Yaz0 members, a NARC packed ones (cra.undo)
     else:
         scan_blob(d, '/' + rel, found)
         # whole GLSLC outputs in a file no other reader takes (FINAL FANTASY TACTICS - The Ivalice Chronicles: its engine's technique files, resources_nx/…/shader/*.tec, 261 outputs beside

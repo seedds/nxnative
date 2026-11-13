@@ -23,6 +23,9 @@ printf 'DM_INTERNAL_RESOLUTION=%s\nDM_PRESENT_UPSCALE=off\nDM_METAL_HUD=1\nDM_NV
 [ "${DRAW_TRACE:-}" = 1 ] && echo "DM_NVN_DRAW_TRACE=1" >> "$OUT/env.txt"
 # TEX_TRACE=<W>x<H>[,...]: textures initialized at those sizes print their format and call chain (DM_NVN_TEX_TRACE)
 [ -n "${TEX_TRACE:-}" ] && echo "DM_NVN_TEX_TRACE=$TEX_TRACE" >> "$OUT/env.txt"
+# AUDIO_CAPTURE=1: the game's stereo PCM before output (DM_AUDIO_DUMP) and the renderer's per-frame provenance with catch-up frames (DM_AUDREN_PCM_TRACE),
+# for crackle or echo after cutscenes; dm/tools/audio_trace.py reads frames.tsv
+[ "${AUDIO_CAPTURE:-}" = 1 ] && printf 'DM_AUDIO_DUMP=%s\nDM_AUDREN_PCM_TRACE=%s\n' "$OUT/game-stereo.pcm" "$OUT/frames.tsv" >> "$OUT/env.txt"
 # SHADOWS=2x or 4x: shadow tiles 2 or 4 times their size in a 4096 or 8192 atlas (DM_SHADOW_RESOLUTION, main.shadow.runtime.tsv)
 [ -n "${SHADOWS:-}" ] && echo "DM_SHADOW_RESOLUTION=$SHADOWS" >> "$OUT/env.txt"
 # LOD=x2, x4 or high: level switches 2 or 4 times as far away, or every model at its most detailed level (DM_MODEL_LOD, main.lod.runtime.tsv)

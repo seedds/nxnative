@@ -15335,15 +15335,22 @@ static int fmt_int_or_ds(MTLPixelFormat f) {
         default: return 0;
     }
 }
+// DM_UP_SHARPEN: RCAS sharpening of MetalFX's upscaled picture (DM_UPSCALER=metalfx), 0..1 (0 off); FSR's sharpness exp2(-stops): 1 the strongest, 0.5 one stop softer
+static float up_sharpen(void) {
+    static float v = -1; if (v < 0) { const char *e = getenv("DM_UP_SHARPEN"); v = e && *e ? (float)atof(e) : 0.5f; if (v < 0) v = 0; if (v > 1) v = 1; MLOG("upscaler: RCAS sharpening after MetalFX %.2f (DM_UP_SHARPEN)", v); }
+    return v;
+}
 static int copy_t2t_draw(id<MTLTexture> s, id<MTLTexture> d, unsigned sl, unsigned ss, unsigned dl, unsigned ds, const NVNcopyRegion *sr, const NVNcopyRegion *dr, int linear, int mirror) {
-    static NSMutableDictionary<NSNumber *, id<MTLRenderPipelineState>> *pso; static id<MTLFunction> vf, ff, fd, fds; static id<MTLSamplerState> samp[2]; static id<MTL4ArgumentTable> at; static id<MTLDepthStencilState> dss, dss_s; static int failed;
+    static NSMutableDictionary<NSNumber *, id<MTLRenderPipelineState>> *pso; static id<MTLFunction> vf, ff, fd, fds, fsr; static id<MTLSamplerState> samp[2]; static id<MTL4ArgumentTable> at; static id<MTLDepthStencilState> dss, dss_s; static int failed;
+    int rcas = linear == 2;   // linear 2: a same-size colour copy that sharpens (RCAS, copy.metal fsr; DM_UP_SHARPEN), for MetalFX's scaled picture
+    if (rcas && (sr->width != dr->width || sr->height != dr->height)) rcas = 0;
     if (failed || sr->width <= 0 || sr->height <= 0 || dr->width <= 0 || dr->height <= 0) return 0;
     int depth = (s.pixelFormat == MTLPixelFormatDepth32Float || s.pixelFormat == MTLPixelFormatDepth32Float_Stencil8 || s.pixelFormat == MTLPixelFormatDepth16Unorm) && d.pixelFormat == s.pixelFormat, stencil = depth && d.pixelFormat == MTLPixelFormatDepth32Float_Stencil8;
     if (!depth && (fmt_int_or_ds(s.pixelFormat) || fmt_int_or_ds(d.pixelFormat))) return 0;
     if (mtl_fmt_block(d.pixelFormat) || !(d.usage & MTLTextureUsageRenderTarget) || s.sampleCount > 1 || d.sampleCount > 1) return 0;
     if (!pso) {
         NSError *e = nil; id<MTLLibrary> lib = host_lib("copy", &e);
-        vf = [lib newFunctionWithName:@"vs"]; ff = [lib newFunctionWithName:@"fs"]; fd = [lib newFunctionWithName:@"fsd"]; fds = [lib newFunctionWithName:@"fsds"];
+        vf = [lib newFunctionWithName:@"vs"]; ff = [lib newFunctionWithName:@"fs"]; fd = [lib newFunctionWithName:@"fsd"]; fds = [lib newFunctionWithName:@"fsds"]; fsr = [lib newFunctionWithName:@"fsr"];
         MTLDepthStencilDescriptor *dd = [MTLDepthStencilDescriptor new]; dd.depthCompareFunction = MTLCompareFunctionAlways; dd.depthWriteEnabled = YES; dss = [g_dev newDepthStencilStateWithDescriptor:dd];
         MTLStencilDescriptor *sd_ = [MTLStencilDescriptor new]; sd_.stencilCompareFunction = MTLCompareFunctionAlways; sd_.depthStencilPassOperation = MTLStencilOperationReplace;   // Replace writes the [[stencil]] output
         dd.frontFaceStencil = dd.backFaceStencil = sd_; dss_s = [g_dev newDepthStencilStateWithDescriptor:dd];
@@ -15356,10 +15363,11 @@ static int copy_t2t_draw(id<MTLTexture> s, id<MTLTexture> d, unsigned sl, unsign
     // Stencil: read through a stencil-only view of the source (one per layer below); without one it is cleared to 0
     id<MTLTexture> stv0 = stencil && s.pixelFormat == MTLPixelFormatDepth32Float_Stencil8 ? [s newTextureViewWithPixelFormat:MTLPixelFormatX32_Stencil8 textureType:MTLTextureType2D levels:NSMakeRange(sl, 1) slices:NSMakeRange(ss + sr->zoffset, 1)] : nil;
     int scopy = stv0 != nil;
-    NSNumber *pk = @(d.pixelFormat * 2 + scopy);
+    if (rcas && (depth || !fsr)) rcas = 0;
+    NSNumber *pk = @(d.pixelFormat * 4 + scopy + rcas * 2);
     id<MTLRenderPipelineState> ps = pso[pk];
     if (!ps) {
-        MTLRenderPipelineDescriptor *pd = [MTLRenderPipelineDescriptor new]; pd.vertexFunction = vf; pd.fragmentFunction = depth ? (scopy ? fds : fd) : ff;
+        MTLRenderPipelineDescriptor *pd = [MTLRenderPipelineDescriptor new]; pd.vertexFunction = vf; pd.fragmentFunction = depth ? (scopy ? fds : fd) : rcas ? fsr : ff;
         if (depth) { pd.depthAttachmentPixelFormat = d.pixelFormat; if (stencil) pd.stencilAttachmentPixelFormat = d.pixelFormat; } else pd.colorAttachments[0].pixelFormat = d.pixelFormat;
         NSError *e = nil; ps = [g_dev newRenderPipelineStateWithDescriptor:pd error:&e];
         if (!ps) { RED_ONCE(83, "format-converting / scaling texture copy: cannot create the pipeline for destination format %lu: %s", (unsigned long)d.pixelFormat, e.localizedDescription.UTF8String); return 0; }
@@ -15371,12 +15379,12 @@ static int copy_t2t_draw(id<MTLTexture> s, id<MTLTexture> d, unsigned sl, unsign
     rp_end(); if (g_blit) { enc_b_end(g_blit); g_blit = nil; }
     for (int z = 0; z < nz; z++) {
         id<MTLTexture> sv = [s newTextureViewWithPixelFormat:s.pixelFormat textureType:MTLTextureType2D levels:NSMakeRange(sl, 1) slices:NSMakeRange(ss + sr->zoffset + z, 1)];
-        id<MTLBuffer> pb; size_t po = arena_alloc(32, &pb);   // parameters in the frame arena (resident already): a fresh 32-byte buffer per copy was a residency add, a commit and a release (Link's Awakening, about 11 a frame)
+        id<MTLBuffer> pb; size_t po = arena_alloc(48, &pb);   // parameters in the frame arena (resident already): a fresh 32-byte buffer per copy was a residency add, a commit and a release (Link's Awakening, about 11 a frame)
         if (!sv || !pb) { RED_ONCE(84, "format-converting / scaling texture copy: cannot create the source view / argument block"); return z > 0; }
         float *p = (float *)((uint8_t *)pb.contents + po); p[0] = sr->xoffset; p[1] = sr->yoffset; p[2] = (float)sr->width / dr->width; p[3] = (float)sr->height / dr->height;
         if (mirror & NVN_COPY_FLAGS_MIRROR_X_BIT) { p[0] += sr->width; p[2] = -p[2]; }   // mirrored: walk the source region from its far edge
         if (mirror & NVN_COPY_FLAGS_MIRROR_Y_BIT) { p[1] += sr->height; p[3] = -p[3]; }
-        p[4] = dr->xoffset; p[5] = dr->yoffset; p[6] = sw; p[7] = sh;
+        p[4] = dr->xoffset; p[5] = dr->yoffset; p[6] = sw; p[7] = sh; p[8] = rcas ? up_sharpen() : 0; p[9] = p[10] = p[11] = 0;
         MTL4RenderPassDescriptor *rp = [MTL4RenderPassDescriptor new];
         MTLRenderPassAttachmentDescriptor *a = depth ? (MTLRenderPassAttachmentDescriptor *)rp.depthAttachment : (MTLRenderPassAttachmentDescriptor *)rp.colorAttachments[0];
         int whole = !dr->xoffset && !dr->yoffset && (unsigned)dr->width == dw && (unsigned)dr->height == dh;   // the copy draws every pixel of the level (no blending, no discard): its old content is not loaded (Link's Awakening copies its scene this way every frame)
@@ -15442,7 +15450,7 @@ static void draw_tex(const p_draw_tex *c) {
         x0 = MAX(x0, 0.0); y0 = MAX(y0, 0.0); x1 = MIN(x1, (double)tw); y1 = MIN(y1, (double)th);
         NSUInteger sx = (NSUInteger)ceil(x0 - 0.5), sy = (NSUInteger)ceil(y0 - 0.5), ex = (NSUInteger)ceil(x1 - 0.5), ey = (NSUInteger)ceil(y1 - 0.5);   // pixels whose centres are inside
         if (ex <= sx || ey <= sy) continue;
-        id<MTLBuffer> pb; size_t po = arena_alloc(32, &pb);
+        id<MTLBuffer> pb; size_t po = arena_alloc(48, &pb);
         if (!pb) { RED_ONCE(127, "DrawTexture: no argument block"); return; }
         float *q = (float *)((uint8_t *)pb.contents + po);
         q[0] = c->d.x0; q[1] = c->d.y0; q[2] = (c->s.x1 - c->s.x0) / dw; q[3] = (c->s.y1 - c->s.y0) / dh;
@@ -16890,10 +16898,18 @@ static int up_mfx_encode(NvShader *cs) {
         sc.colorTexture = color; sc.outputTexture = result; sc.inputContentWidth = cw; sc.inputContentHeight = ch;
         [sc encodeToCommandBuffer:cb];
     });
-    if (!direct && !copy_t2t_draw(e->read, out, 0, 0, 0, 0, &at0o, &orr, 0, 0)) {
+    if (!direct && !copy_t2t_draw(e->read, out, 0, 0, 0, 0, &at0o, &orr, up_sharpen() > 0 ? 2 : 0, 0)) {
         args_dirty_all(); g_up_mfx_kept++; return 0;   // only the scratch image was scaled; the game's shader can still produce the output
     }
     args_dirty_all();
+    {   // the game's render size as the upscaler takes it (the dynamic resolution's level): a histogram every 600 upscales
+        static int hw[8], hh[8], hn[8], nb, tot;
+        int b = 0; while (b < nb && (hw[b] != ir.width || hh[b] != ir.height)) b++;
+        if (b == nb && nb < 8) { hw[nb] = ir.width; hh[nb] = ir.height; hn[nb] = 0; nb++; }
+        if (b < nb) hn[b]++;
+        if (++tot >= 600) { char s[400]; int o = 0; for (int i = 0; i < nb; i++) o += snprintf(s + o, sizeof s - o, " %dx%d: %d%%", hw[i], hh[i], hn[i] * 100 / tot);
+            MLOG("upscaler: game render sizes over the last %d frames:%s", tot, s); nb = 0; tot = 0; }
+    }
     if (!g_up_mfx_n++) MLOG("upscaler: first dispatch of %s drawn by MetalFX, %dx%d at %d,%d of %lux%lu (format %lu) → %dx%d at %d,%d of %lux%lu (format %lu)%s", cs->key, ir.width, ir.height, ir.xoffset, ir.yoffset,
                             (unsigned long)in.width, (unsigned long)in.height, (unsigned long)in.pixelFormat, orr.width, orr.height, orr.xoffset, orr.yoffset, (unsigned long)out.width, (unsigned long)out.height,
                             (unsigned long)out.pixelFormat, direct ? ", straight" : srgb ? ", through RGBA16F, decoded from sRGB" : ", through RGBA16F");
@@ -16980,6 +16996,7 @@ static void present_gpu_note(double s, int fx) {
     n[fx] = 0;
 }
 static double g_link_it_tin;   // Enqueue time of the frame the display-link callback is presenting (read and written only on the display-link thread)
+#include "nvn_fg.inc"
 static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t ticket, const int crop[4], id<CAMetalDrawable> supplied, double target_ts) {
     if (g_present_stall_ns) { struct timespec ts = {0, (long)g_present_stall_ns}; nanosleep(&ts, NULL); }
     g_present_n++;
@@ -16992,7 +17009,7 @@ static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t t
              g_up_total_ns / 1e6, g_bp_first_present / 1e9);
     }
     PD("X ser=%llu", t->serial);
-    id<MTLTexture> src = tex_mtl(t);
+    id<MTLTexture> src = g_fg_force_src ? g_fg_force_src : tex_mtl(t);
     if (!src) { RED_ONCE(8, "present texture could not get an MTLTexture"); return 0; }
     // The picture's shape for the front end's layout (front.h front_picture_shape): reported when its width / height changes by more than 0.1 %, not on a size change of the same
     // shape (1280x720 handheld, 1920x1080 docked)
@@ -17049,7 +17066,7 @@ static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t t
     id<CAMetalDrawable> dr = supplied ? supplied : [layer nextDrawable];
     if (!supplied) g_drawable_ns += now_ns() - dt0;
     if (!dr) return 0;
-    int alloc_i = (int)(ticket % 3);
+    int alloc_i = (int)((ticket + (g_fg_force_src ? 1 : 0)) % 3);   // frame generation's held tick: the next slot (its last use, two tickets back, is done), not the generation's own
     if (g_present_alloc_fence[alloc_i]) {
         pthread_mutex_lock(&g_pq_mu);
         while (g_present_alloc_done[alloc_i] < g_present_alloc_fence[alloc_i]) pthread_cond_wait(&g_pq_cv, &g_pq_mu);
@@ -17059,7 +17076,17 @@ static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t t
     [g_q4 waitForDrawable:dr];
     id<MTL4CommandBuffer> cb = g_present_cb[alloc_i];
     [cb beginCommandBufferWithAllocator:g_present_alloc4[alloc_i]];
-    int kind = present_encode_m4(cb, src, dr.texture, crop, g_present_uv[alloc_i], &g_fx_present);
+    id<MTLTexture> psrc = src; int fg_gen = 0;
+    int gcrop[4];
+    if (g_fg_req) { g_fg_req = 0; id<MTLTexture> gen = fg_generate(cb, src, crop, target_ts); if (gen) { psrc = gen; fg_gen = 1; } }
+    if (psrc != src && (psrc.width != src.width || psrc.height != src.height)) {   // a generated picture made smaller than the frame (DM_FG_SCALE): the crop in its pixels
+        double sx = (double)psrc.width / src.width, sy = (double)psrc.height / src.height;
+        gcrop[0] = (int)lround(crop[0] * sx); gcrop[1] = (int)lround(crop[1] * sy); gcrop[2] = (int)lround(crop[2] * sx); gcrop[3] = (int)lround(crop[3] * sy);
+        if (gcrop[0] + gcrop[2] > (int)psrc.width) gcrop[2] = (int)psrc.width - gcrop[0];
+        if (gcrop[1] + gcrop[3] > (int)psrc.height) gcrop[3] = (int)psrc.height - gcrop[1];
+        crop = gcrop;
+    }
+    int kind = present_encode_m4(cb, psrc, dr.texture, crop, g_present_uv[alloc_i], &g_fx_present);
     if (!kind) { [cb endCommandBuffer]; [g_q4 signalDrawable:dr]; return 0; }
     int fx_kind = kind == PRESENT_METALFX;
     [cb endCommandBuffer];
@@ -17070,6 +17097,7 @@ static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t t
         NSArray *retire = nil; if (!g_pq_inflight && g_ext_retire.count) { retire = g_ext_retire; g_ext_retire = nil; }   // every present committed before their release has completed
         present_gpu_note(f.GPUEndTime - f.GPUStartTime, fx_kind); pthread_mutex_unlock(&g_pq_mu);
         if (retire) ext_retire(retire);
+        if (fg_gen) { atomic_fetch_add(&g_fg_gpu_ns, (uint64_t)((f.GPUEndTime - f.GPUStartTime) * 1e9)); atomic_fetch_add(&g_fg_gpu_cnt, 1); }
     }];
     id<MTL4CommandBuffer> buffers[] = {cb};
     pthread_mutex_lock(&g_pq_mu); g_pq_inflight++; pthread_mutex_unlock(&g_pq_mu);
@@ -17095,8 +17123,11 @@ static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t t
     (void)period; [dr present];
 #else
     uint64_t pn = ticket;   // Record the present time by the game's present sequence number (ticket number): hle's present statistics are taken by "the game's nth present"; in the display link path the actual present count != the game's present count (old frames get merged and dropped)
+    int tl_kind = fg_gen ? 1 : g_fg_force_src ? 2 : 0;
     [dr addPresentedHandler:^(id<MTLDrawable> d) {   // Actual presentation time (the time this frame is really put on screen, CACurrentMediaTime base)
         CFTimeInterval tt = d.presentedTime;
+        {   static FILE *tl; static int tl_init; if (!tl_init) { tl_init = 1; const char *e = getenv("DM_PRESENT_TLOG"); if (e && *e) tl = fopen(e, "w"); }   // every picture the screen showed: ticket, kind (0 frame, 1 generated, 2 held frame), presented time
+            if (tl) { fprintf(tl, "%llu\t%d\t%.6f\n", (unsigned long long)pn, tl_kind, tt); fflush(tl); } }
         g_pres[pn % PRING] = (pres_ent){pn, tt > 0 ? tt : -1};
     }];
     // Each frame is displayed for at least one present period: when the GPU completion time jitters around a 120 Hz refresh boundary, the paired "25 ms + 8.33 ms" stutter no longer appears
@@ -17167,10 +17198,25 @@ __attribute__((weak)) uint64_t dm_focus_in_since(void) { return 0; }
     pthread_cond_broadcast(&g_link_cv);
     pthread_mutex_unlock(&g_link_mu);
     pthread_mutex_lock(&g_pq_mu);
-    if (!g_dm_present_link || g_rescue_mode || g_pq_read == g_pq_in) { if (g_dm_present_link && !g_rescue_mode) g_link_empty++; pthread_mutex_unlock(&g_pq_mu); return; }
+    // Frame generation's held tick shows the real frame's copy whether or not the game's next frame is queued yet: a game that enqueues just in time (its frame landing after the held tick)
+    // left every held tick empty before, so only the generated pictures were shown, 30 a second, and the frames themselves never (DM_FG_EMPTYHOLD=0: the old order, for comparison)
+    static int eh = -1; if (eh < 0) { const char *e = getenv("DM_FG_EMPTYHOLD"); eh = !(e && !strcmp(e, "0")); }
+    int empty = g_pq_read == g_pq_in, fg_late = eh && empty && g_fg_pending && g_dm_present_link && !g_rescue_mode && g_pq_read > 0;
+    if (!fg_late && (!g_dm_present_link || g_rescue_mode || empty)) { if (g_dm_present_link && !g_rescue_mode) g_link_empty++; pthread_mutex_unlock(&g_pq_mu); return; }
     // The previous frame's present interval was >= 2 (period > 25 ms): keep it on screen for its whole period before taking the next one, as the Switch flips only every N vertical syncs. This also holds while the link runs at 60 Hz (Mario 1.2.1 sets 2 for single frames, see nvn_game_fps in hle_nvn.c);
     //   before, every tick took the newest frame, so that frame, carrying the extra time step the game advanced for it, was shown for only 16.7 ms and the game looked like it jumped ahead
-    if (g_link_hold_until > 0 && update.targetPresentationTimestamp < g_link_hold_until - tol) { g_link_held++; pthread_mutex_unlock(&g_pq_mu); return; }
+    if (fg_late || (g_link_hold_until > 0 && update.targetPresentationTimestamp < g_link_hold_until - tol)) {
+        if (fg_late) { static uint64_t n; if (!(n++ & 1023)) MLOG("frame generation: held tick shown with no new frame queued (%llu so far)", (unsigned long long)n); }
+        g_link_held++;
+        id<MTLTexture> fgp = g_fg_pending; g_fg_pending = nil; uint64_t fgt = g_pq_read; pq_item fgi = g_pq[(fgt - 1) % PQ];
+        pthread_mutex_unlock(&g_pq_mu);
+        if (fgp) {   // frame generation: the frame itself, after the generated picture shown on the tick before
+            g_fg_force_src = fgp; g_fg_held_n++;
+            @autoreleasepool { present_now(&fgi.t, fgi.period, fgi.frame, fgt, g_fg_pending_crop, update.drawable, update.targetPresentationTimestamp); }
+            g_fg_force_src = nil;
+        }
+        return;
+    }
     uint64_t first = g_pq_read + 1, ticket = g_pq_in;
     // In order, one frame per tick and at most one behind the newest: two waiting, the older now and the newer on the next tick; three or more, the older ones are dropped. Taking the newest
     // dropped the one before whenever two frames landed in the same refresh, as frames of a 60 fps game that take 16-17.5 ms do, and the next frame then stayed up 33 ms
@@ -17186,7 +17232,9 @@ __attribute__((weak)) uint64_t dm_focus_in_since(void) { return 0; }
     pthread_mutex_unlock(&g_pq_mu);
     int submitted;
     ext_wait(it.ev_val); snap_commit_wait(it.snap_v);
+    g_fg_pending = nil; g_fg_req = fg_enabled() && it.period > 0.025;
     @autoreleasepool { submitted = present_now(&it.t, it.period, it.frame, ticket, it.crop, update.drawable, update.targetPresentationTimestamp); mtl_tex_unpin(it.t.serial); }
+    g_fg_req = 0; if (fg_enabled()) fg_stats();
     g_link_hold_until = submitted && it.period > 0.025 ? update.targetPresentationTimestamp + it.period : 0;
     if (!submitted) {
         pthread_mutex_lock(&g_pq_mu);
@@ -17271,9 +17319,9 @@ static void link_sync(void) {   // Called every frame by the game's present thre
     }
     if (g_rescue_mode) want = 0;
     pthread_mutex_unlock(&g_pq_mu);
-    if (want && mtl_fps_target() == 30 && link_30hz()) want = 3;   // Power-saving mode: display link at 30 Hz
+    if (want && mtl_fps_target() == 30 && link_30hz() && !fg_enabled()) want = 3;   // Power-saving mode: display link at 30 Hz (not with frame generation, which needs the 60 Hz ticks)
     if (want) front_screen_match(want == 3 ? 30 : want == 2 ? 120 : 60);   // the game's rate: a variable-refresh screen goes to a fixed-rate mode at a multiple where it has one
-    static int vrr_was; int vrr = want == 1 && link_vrr_120();   // variable-refresh fullscreen that kept its mode: the 120 Hz link paces the 60 (link_vrr_120)
+    static int vrr_was; int vrr = want == 1 && link_vrr_120() && !fg_enabled();   // variable-refresh fullscreen that kept its mode: the 120 Hz link paces the 60 (link_vrr_120)
     if (vrr != vrr_was) { vrr_was = vrr; MLOG("display link: %s (frame %llu)", vrr ? "120 Hz in fullscreen on a variable-refresh screen, a frame every other tick (DM_PRESENT_LINK=1 keeps 60 Hz)" : "60 Hz again (window, fixed-rate screen or another frame rate)", (unsigned long long)atomic_load(&g_cur_frame)); }
     if (vrr) want = 2;
     // The screen's rate changed (switched by front_screen_match, or another screen): the range again, virtual ticks or none. Taken only once the link object exists, so a change

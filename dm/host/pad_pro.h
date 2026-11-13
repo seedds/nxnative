@@ -5,6 +5,7 @@
 // at 0x603D), gives each axis its rest and its reach below and above. Until it answers, or if it never does, each axis measures itself: its rest is the first report's value
 // when that is near the middle (a stick held at that moment is off until the pad is plugged in again), and each reach starts low and grows with what the stick shows.
 #pragma once
+#include <math.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -86,4 +87,33 @@ static inline int pad_pro_decode(pad_pro *s, const uint8_t *r, size_t len, uint6
     *m = pad_pro_buttons(r);
     for (int a = 0; a < 4; a++) st[a] = pad_pro_axis(s, a, raw[a]);
     return 1;
+}
+
+// Rumble: output report 0x10 (no subcommand), the left actuator's four bytes then the right one's, as SDL's hidapi driver sends it (dekuNukem rumble_data_table.md). Each side has a
+// high band and a low band, each a frequency and an amplitude. Frequency codes are logarithmic, 32 steps an octave above 10 Hz: the high band's (code - 0x60) * 4 in 9 bits
+// (81.75..1252 Hz), the low band's code - 0x40 in 7 bits (40.875..626 Hz). The amplitude code (0..100, 100 at full) is logarithmic above 0.12: 32 steps an octave above 0.23,
+// 16 steps from 0.12 to 0.23; below 0.12 it runs linearly to 0 here (the table's own low steps are finer than any motor renders). The high band carries it doubled, the low band
+// as 0x40 + half of it, its odd bit at the top of byte 2. A side at amplitude 0 is the neutral 00 01 40 40 (320 Hz high, 160 Hz low).
+static inline int pad_pro_amp_code(float a) {
+    if (!(a > 0)) return 0;
+    if (a >= 1) return 100;
+    int c = a > 0.23f ? (int)lrintf(log2f(a * 8.7f) * 32) : a > 0.12f ? (int)lrintf(log2f(a * 17) * 16) : (int)lrintf(a / 0.12f * 16);
+    return c < 0 ? 0 : c > 100 ? 100 : c;
+}
+static inline int pad_pro_freq_code(float hz, float lo, float hi) {
+    hz = isfinite(hz) ? fmaxf(lo, fminf(hi, hz)) : 160;
+    return (int)lrintf(log2f(hz / 10) * 32);
+}
+static inline void pad_pro_rumble_side(uint8_t out[4], float amp_low, float freq_low, float amp_high, float freq_high) {
+    int hf = (pad_pro_freq_code(amp_high > 0 ? freq_high : 320, 81.75f, 1252) - 0x60) * 4, lf = pad_pro_freq_code(amp_low > 0 ? freq_low : 160, 40.875f, 626) - 0x40;
+    hf = hf < 0 ? 0 : hf > 0x1fc ? 0x1fc : hf; lf = lf < 1 ? 1 : lf > 0x7f ? 0x7f : lf;
+    int ha = pad_pro_amp_code(amp_high), la = pad_pro_amp_code(amp_low);
+    out[0] = hf & 0xff; out[1] = (uint8_t)(ha * 2) | (hf >> 8 & 1);
+    out[2] = (uint8_t)lf | (la & 1) << 7; out[3] = (uint8_t)(0x40 + la / 2);
+}
+// The report: 0x10, a 4-bit counter, the left side, the right side. Returns its length
+static inline size_t pad_pro_rumble(uint8_t out[10], uint8_t counter, const uint8_t left[4], const uint8_t right[4]) {
+    out[0] = 0x10; out[1] = counter & 0x0f;
+    for (int i = 0; i < 4; i++) { out[2 + i] = left[i]; out[6 + i] = right[i]; }
+    return 10;
 }

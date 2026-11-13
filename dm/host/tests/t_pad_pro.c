@@ -85,6 +85,18 @@ int main(void) {
     CHECK(pad_pro_spi_reply(&z, rep, 30) == 0);
     memset(rep + 20, 0xff, 18); CHECK(pad_pro_spi_reply(&z, rep, sizeof rep) == 0); CHECK(z.cal[0] == 0 && z.seen == 0);
 
+    // Rumble (pad_pro_rumble_side): silence is the neutral side, full amplitude at 320 / 160 Hz the table's strongest, codes clamp to their ranges, the odd amplitude bit
+    uint8_t side[4], rr[10];
+    pad_pro_rumble_side(side, 0, 0, 0, 0); CHECK(!memcmp(side, (uint8_t[]){0x00, 0x01, 0x40, 0x40}, 4));
+    pad_pro_rumble_side(side, 1, 160, 1, 320); CHECK(!memcmp(side, (uint8_t[]){0x00, 0xc9, 0x40, 0x72}, 4));
+    pad_pro_rumble_side(side, 1, 1e6f, 1, 1e6f); CHECK(side[0] == 0xfc && (side[1] & 1) && (side[2] & 0x7f) == 0x7f);
+    pad_pro_rumble_side(side, 1, 1, 1, 1); CHECK(side[0] == 4 && !(side[1] & 1) && (side[2] & 0x7f) == 1);   // 81.75 Hz and 40.875 Hz, the lowest codes
+    pad_pro_rumble_side(side, NAN, NAN, NAN, NAN); CHECK(!memcmp(side, (uint8_t[]){0x00, 0x01, 0x40, 0x40}, 4));
+    CHECK(pad_pro_amp_code(0.23f) == 31 && pad_pro_amp_code(0.231f) == 32 && pad_pro_amp_code(0.12f) == 16 && pad_pro_amp_code(0.121f) == 17 && pad_pro_amp_code(0.06f) == 8);
+    for (int i = 1, last = 0; i <= 100; i++) { int c = pad_pro_amp_code(i / 100.f); CHECK(c >= last); last = c; }   // never falls as the amplitude grows
+    pad_pro_rumble_side(side, 0.5f, 160, 0, 0); CHECK((side[1] & 0xfe) == 0 && side[3] == 0x40 + pad_pro_amp_code(0.5f) / 2 && (side[2] >> 7) == (pad_pro_amp_code(0.5f) & 1));
+    CHECK(pad_pro_rumble(rr, 0x13, (uint8_t[]){1, 2, 3, 4}, (uint8_t[]){5, 6, 7, 8}) == 10 && !memcmp(rr, (uint8_t[]){0x10, 0x03, 1, 2, 3, 4, 5, 6, 7, 8}, 10));
+
     printf("t_pad_pro: %d checks, %d failed\n", checks, fails);
     return fails != 0;
 }

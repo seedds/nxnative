@@ -228,6 +228,50 @@ static int resume_then_pause_while_handler_parked(void) {
     return finish(&c);
 }
 
+// 5. Horizon's KThread::SetActivity answers InvalidState (0xFA01) for a thread that has not started or has exited, for a second pause and for a resume of a thread that is not paused; the host
+// answered success, and a pause before StartThread counted the thread as stopped while it ran once started (issue #1855). Each refused call must leave the thread's state as it was
+static int invalid_states(void) {
+    cs_t c = {.name = "invalid_states"};
+    // A created thread that has not started: registered only, no pthread runs for it
+    thr_t *n = calloc(1, sizeof *n); pthread_cond_init(&n->cv, NULL); pthread_cond_init(&n->pcv, NULL); n->prio = 44; n->core = 1; n->mask = 2;
+    pthread_mutex_lock(&G); n->handle = h_new(O_THREAD, n); n->all = g_all; g_all = n; pthread_mutex_unlock(&G);
+    uint64_t r[32] = {n->handle, 1}; svc_thread(0x32, r);
+    if (r[0] != R_BAD_STATE) fail(&c, "pause before StartThread returned %#llx, want %#x", (unsigned long long)r[0], R_BAD_STATE);
+    if (atomic_load(&n->pause_req) || n->paused || (atomic_load(&n->svc_state) & 2)) fail(&c, "pause before StartThread left a request behind (pause_req %d, paused %d, svc_state %#x)", atomic_load(&n->pause_req), n->paused, atomic_load(&n->svc_state));
+    r[0] = n->handle; r[1] = 0; svc_thread(0x32, r);
+    if (r[0] != R_BAD_STATE) fail(&c, "resume before StartThread returned %#llx, want %#x", (unsigned long long)r[0], R_BAD_STATE);
+    n->started = 1; n->exited = 1;   // started and exited: Terminated
+    r[0] = n->handle; r[1] = 1; svc_thread(0x32, r);
+    if (r[0] != R_BAD_STATE) fail(&c, "pause of an exited thread returned %#llx, want %#x", (unsigned long long)r[0], R_BAD_STATE);
+    if (atomic_load(&n->pause_req) || n->paused) fail(&c, "pause of an exited thread left a request behind");
+    pthread_mutex_lock(&G);
+    for (thr_t **p = &g_all; *p; p = &(*p)->all) if (*p == n) { *p = n->all; break; }
+    g_h[n->handle - 0x1000].type = O_FREE; g_h[n->handle - 0x1000].obj = NULL;
+    pthread_mutex_unlock(&G);
+    pthread_cond_destroy(&n->cv); pthread_cond_destroy(&n->pcv); free(n);
+
+    // A running thread: a resume with no pause pending fails and the thread keeps running; a second pause fails and the thread stays stopped with its context; a second resume fails
+    wk_t *w = worker_start(M_GUEST);
+    if (!advances(w, 2000)) fail(&c, "worker never ran");
+    int64_t rc = activity(w, 0);
+    if (rc != (int64_t)R_BAD_STATE) fail(&c, "resume of a thread that is not paused returned %#llx, want %#x", (unsigned long long)rc, R_BAD_STATE);
+    if (!advances(w, 2000)) fail(&c, "worker stopped after the refused resume");
+    if (pause_sync(&c, w, "pause", 2000)) {
+        check_frozen(&c, w, "pause");
+        rc = activity(w, 1);   // the thread is stopped, so this returns at once whatever it answers
+        if (rc != (int64_t)R_BAD_STATE) fail(&c, "second pause returned %#llx, want %#x", (unsigned long long)rc, R_BAD_STATE);
+        check_frozen(&c, w, "second pause");
+        check_context(&c, w, "second pause", 1);
+        if (activity(w, 0)) fail(&c, "resume failed after the refused second pause");
+        if (!advances(w, 2000)) fail(&c, "progress did not advance after the resume");
+        rc = activity(w, 0);
+        if (rc != (int64_t)R_BAD_STATE) fail(&c, "second resume returned %#llx, want %#x", (unsigned long long)rc, R_BAD_STATE);
+    }
+    activity(w, 0);
+    worker_end(w);
+    return finish(&c);
+}
+
 int main(void) {
     alarm(120);   // a bug in the test must not hang the run
     setenv("DM_PREEMPT", "0", 1);
@@ -239,6 +283,7 @@ int main(void) {
     ok &= stale_after_svc_pause();
     ok &= stale_after_svc_enter_pause();
     ok &= resume_then_pause_while_handler_parked();
+    ok &= invalid_states();
     printf("%s\n", ok ? "all pause tests passed" : "pause tests FAILED");
     return ok ? 0 : 1;
 }

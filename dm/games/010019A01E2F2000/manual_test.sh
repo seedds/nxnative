@@ -1,6 +1,6 @@
 #!/bin/bash
 # Manual test of the experimental internal scene resolution (README: Experimental 1440p internal scene rendering).
-# Usage: manual_test.sh [1440p|1800p|2160p|default]   (default mode applies no runtime write: the comparison baseline)
+# Usage: manual_test.sh [1440p|1800p|2160p|default|<choice>_full]   (default mode applies no runtime write: the comparison baseline)
 # 1. --platform mac --seen-shaders: rewrites if needed (and makes main.runtime.tsv), builds the host from this
 #    worktree and a partial shader library (shader_seen.tsv plus what earlier runs' host.log reported missing),
 #    never the whole 260k-shader map. 2. Runs the game in a window with sound. Its save is the build folder's
@@ -8,7 +8,7 @@
 # Never prints key material: prod.keys is passed by path only.
 set -euo pipefail
 MODE=${1:-1440p}
-case $MODE in default|1440p|1800p|2160p|diag1792) ;; *) echo "mode: 1440p, 1800p, 2160p, diag1792 or default" >&2; exit 2;; esac
+case $MODE in default|1440p|1800p|2160p|diag1792|native_full|1080p_full|1440p_full|2160p_full|2880p_full|1610_full) ;; *) echo "mode: 1440p, 1800p, 2160p, diag1792, default or a full-output choice (1080p_full ... 2880p_full, 1610_full)" >&2; exit 2;; esac
 REPO=$(cd "$(dirname "$0")/../../.." && pwd)
 IMG=${MP4_IMAGES:-"$HOME/Downloads/Nintendo Switch 1:2 — images"}
 NSP="$IMG/Metroid Prime 4 Beyond [NSZ]"; WORK="$NSP/010019A01E2F2000_build"

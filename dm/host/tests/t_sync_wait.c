@@ -223,10 +223,26 @@ static void core_mask(void) {
     pthread_mutex_lock(&G); t->exited = 1; pthread_mutex_unlock(&G);
     close_handle(t->handle);
 }
+// CloseHandle before StartThread: the real CreateThread's pthread waits for the start, and must end
+// without entering guest code (the stub dm_thread_enter aborts), freeing the object and its thread-limit slot.
+static void closed_unstarted(void) {
+    int base = thr_limit_used();
+    for (int i = 0; i < 24; i++) {
+        uint64_t r[32] = {0, 0x1000, 0, 0x2000, 44, 0}; assert(svc_thread(0x08, r) && !r[0]);
+        if (i & 1) sched_yield();   // closes both before and after the pthread reaches its wait
+        close_handle((uint32_t)r[1]);
+    }
+    uint64_t deadline = now_ns() + 2000000000;
+    for (;;) {
+        int handles, live, objects; thr_counts(&handles, &live, &objects);
+        if (objects == 1 && thr_limit_used() == base) break;
+        assert(now_ns() < deadline); usleep(1000);
+    }
+}
 int main(int argc, char **argv) {
     alarm(10); svc_thread_main_init();
-    const char *names[] = {"framing", "endpoints", "signal-clear", "close-reuse", "snapshot", "cancel-release", "thread-close", "query-close", "core-mask"};
-    void (*tests[])(void) = {framing, endpoints, signal_then_clear, close_and_reuse, handle_array_snapshot, cancellation_and_release, closed_thread_wait, query_close, core_mask};
+    const char *names[] = {"framing", "endpoints", "signal-clear", "close-reuse", "snapshot", "cancel-release", "thread-close", "query-close", "core-mask", "closed-unstarted"};
+    void (*tests[])(void) = {framing, endpoints, signal_then_clear, close_and_reuse, handle_array_snapshot, cancellation_and_release, closed_thread_wait, query_close, core_mask, closed_unstarted};
     for (unsigned i = 0; i < sizeof tests / sizeof *tests; i++) {
         if (argc > 1 && strcmp(argv[1], names[i])) continue;
         tests[i](); printf("PASS: %s\n", names[i]);

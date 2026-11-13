@@ -345,6 +345,7 @@ static void qos_apply(thr_t *t) {   // on the thread itself, holding G (prio and
 // A host helper thread (audio notify / silent sink, vsync, movie decode) created from a guest thread inherits that thread's class; under DM_QOS_MAP it sets its own instead
 void dm_host_helper_qos(qos_class_t q) { if (g_qos_map) pthread_set_qos_class_self_np(q, 0); }
 static const char *thr_name(thr_t *t, char *buf, size_t n);
+static void thread_exit(thr_t *t);
 static void *thread_main(void *p) {
     thr_t *t = p;
     pthread_setspecific(g_keythr, t);
@@ -358,7 +359,11 @@ static void *thread_main(void *p) {
     crash_thread_init();
     guest_thread_init(); guest_thread_set_id(t->id);
     guest_gate_stack(1);   // the guest runs on its own stack from dm_thread_enter on: this pthread's stack below this frame is where its SVCs run
-    pthread_mutex_lock(&G); while (!t->started) pthread_cond_wait(&t->cv, &G); t->entered = 1; pthread_mutex_unlock(&G);
+    // CloseHandle before StartThread ends the thread here (closed_unstarted): as on Horizon, closing the last handle of a thread that never ran destroys it.
+    // Without this the pthread and its 1 MB stack waited for ever, and the object kept a slot of the thread limit (thr_limit_used counts it as not exited)
+    pthread_mutex_lock(&G); while (!t->started && !t->closed) pthread_cond_wait(&t->cv, &G);
+    int run = t->started; if (run) t->entered = 1; pthread_mutex_unlock(&G);
+    if (!run) thread_exit(t);   // never reaches guest code; StartThread before the close still runs it
     { char nb[48], hn[64]; snprintf(hn, sizeof hn, "%#x %s", t->handle, thr_name(t, nb, sizeof nb)); pthread_setname_np(hn); }   // the guest's name (set before StartThread) for sample / Instruments
     dm_thread_enter(t->entry, t->arg, t->stack_top);   // Does not return: the guest must exit through ExitThread
     die("guest thread entry returned");
@@ -1296,6 +1301,7 @@ static int svc_thread_impl(int num, uint64_t *regs) {
             thr_t *t = g_h[i].obj;
             g_h[i].type = O_FREE; g_h[i].obj = NULL;
             t->closed = 1;
+            if (!t->started) pthread_cond_broadcast(&t->cv);   // a thread that never started ends now (thread_main)
             if (t->exited && !t->refs) thr_free(t);
         }
         pthread_mutex_unlock(&G);

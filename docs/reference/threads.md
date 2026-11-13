@@ -56,6 +56,14 @@ Guest threads, their synchronization and how the host schedules them. Each entry
 - **Found on:** [Monster Train 2](../../dm/games/010051701FB46000/README.md) (Unity 2022.3.54f1 on SDK 18.3.5: `main+0x3e7288` starts a thread and waits for it to signal `main+0x539cf80`). With the fix the game creates 40 threads and reaches its title.
 - **Note:** of the 20 games extracted on this machine, only this `main` imports the function.
 
+### A thread closed before it starts ends
+
+- **Symptom:** each `CreateThread` whose handle is closed without `StartThread` leaves a host pthread (1 MB stack) waiting for ever and lowers the free thread count for good.
+- **Cause:** `CreateThread` starts the pthread at once, and it waited only for `started`. `CloseHandle` marked the object closed but did not wake it, and the object is reclaimed only once exited, which it never was; [`thr_limit_used`](#free-thread-count-svcgetinfo-type-24) counted it as alive.
+- **Fix:** as on Horizon, where closing the last handle of a thread that never ran destroys it: `CloseHandle` of an unstarted thread wakes its pthread, which leaves through `thread_exit` without entering guest code; the object is freed with its slot. A `StartThread` before the close still runs the thread. A wait that already holds the object completes as for an exit.
+- **Check:** `t_sync_wait` closed-unstarted: 24 real `CreateThread` / `CloseHandle` pairs return the object count and `thr_limit_used` to where they were (under ASan and TSan); before, they stayed 24 higher.
+- **Found on:** a code audit, with host unit tests; no game failure is known.
+
 ### Pausing threads and reading their context for garbage collectors
 
 - **Symptom:** in garbage-collected titles (Unity / IL2CPP), live objects freed, with their finalizers releasing native resources.

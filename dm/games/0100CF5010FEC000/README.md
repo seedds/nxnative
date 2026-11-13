@@ -32,7 +32,7 @@ The base game 1.0.0 (v0), SDK 13.3.2 with the `sdk` build of [Bayonetta 3](../01
 ## Rendering
 
 - The docked picture is 1600x900 (the swap chain's size). In a 2560x1440 window with Upscaling off it is scaled bilinearly and looks soft.
-- **Open: a magenta rectangle on a tutorial card.** The Save card (shown at a lantern) has a solid magenta rectangle over its lower left and a grey one beside it, on the Mac on main `f75ac06e`. PR #2268 (packaged texture width alignment) reports and fixes the same picture on an iPhone; it is not on main and was not tried here.
+- **Fixed on main: a magenta rectangle on a tutorial card.** The Save card (shown at a lantern) had a solid magenta rectangle over its lower left and a grey one beside it, on the Mac on main `f75ac06e`. PR #2268 (packaged texture width alignment) reported and fixed the same picture on an iPhone and landed as 47607fe0; in the windowed run on main `0c078130` the rectangle was not seen again.
 - One red line in 36 minutes, once: `stage 1 cb11 has no uniform buffer bound`.
 
 ## Pipelines
@@ -54,7 +54,6 @@ The base game 1.0.0 (v0), SDK 13.3.2 with the `sdk` build of [Bayonetta 3](../01
 ## Open
 
 - Nothing past the first half hour of play is checked, and what was fought or met in it was not written down.
-- The magenta rectangle on the Save tutorial card (PR #2268), under [Rendering](#rendering).
 - Stutter at first use past the recorded half hour: the draws' pipelines are not among the pair bases, and `pso_manifest.tsv` covers only what one session and two short runs from its save reached.
 - The keyboard was not tried (a DualSense was).
 - iPhone and iPad runtime validation; no IPA has been built here.

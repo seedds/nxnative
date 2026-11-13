@@ -65,3 +65,7 @@ void mtl_present_layer(uint32_t w, uint32_t h);   // a sized vi layer (hle_vi.c)
 void mtl_present_screen(uint32_t w, uint32_t h);   // a screen taller than 16:9 (loader.c, DM_SCREEN_ASPECT): the picture's shape for a texture of that shape
 void mtl_present_wait(uint64_t ticket);   // as in nvn_obj.h: wait until that present has been handed to the GPU
 void mtl_present_wait_texture(uint64_t ticket, uint64_t copy);   // the next acquire of a presented texture, or a queue finish: with a snapshot (copy, from mtl_present) its copy has run on the GPU, else as mtl_present_wait
+
+uint64_t mtl_sync_trace_begin(uint64_t fence, uint64_t timeout, int fenced);
+uint64_t mtl_sync_trace_remaining(uint64_t id, uint64_t timeout);
+void mtl_sync_trace_end(uint64_t id, uint64_t fence, int result);

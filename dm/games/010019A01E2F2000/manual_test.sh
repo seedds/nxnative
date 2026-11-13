@@ -19,6 +19,8 @@ printf 'DM_INTERNAL_RESOLUTION=%s\nDM_PRESENT_UPSCALE=off\nDM_METAL_HUD=1\nDM_NV
 [ -n "${ANISO:-}" ] && echo "DM_NVN_ANISO=$ANISO" >> "$OUT/env.txt"   # ANISO=<2..16>: the anisotropy floor of the surface samplers (DM_NVN_ANISO), for an A/B against a run without it
 # SHADOW_TRACE=1: the first 24 viewports set while a Depth16 target (a shadow map) is bound, with the game's caller and backtrace (DM_NVN_SHADOW_TRACE)
 [ "${SHADOW_TRACE:-}" = 1 ] && echo "DM_NVN_SHADOW_TRACE=1" >> "$OUT/env.txt"
+# DRAW_TRACE=1: the call chains of indexed draws into a scene pass, once per chain, up to 24 (DM_NVN_DRAW_TRACE), to find the LOD choice
+[ "${DRAW_TRACE:-}" = 1 ] && echo "DM_NVN_DRAW_TRACE=1" >> "$OUT/env.txt"
 # SHADOWS=2x: shadow tiles twice their size in a 4096 atlas (DM_SHADOW_RESOLUTION, main.shadow.runtime.tsv)
 [ -n "${SHADOWS:-}" ] && echo "DM_SHADOW_RESOLUTION=$SHADOWS" >> "$OUT/env.txt"
 # PROBE=<module:offset,...>: guest probes (DM_PROBE, Mac), the first 3 hits of each printed; RUMBLE_PROBE=1 is the vibration set (README: Vibration with a DualSense):

@@ -1380,9 +1380,15 @@ NVN(nvnCommandBufferClearDepthStencil, void, NVNcommandBuffer *c, float depth, u
 // viewport, the target's size, the game's return address and the guest backtrace, once per calling site (up to 24), to find the code that lays out a shadow atlas's tiles
 static _Thread_local const NVNcommandBuffer *g_shadow_cb; static _Thread_local unsigned g_shadow_w, g_shadow_h; static _Thread_local int g_shadow_skip;
 static int shadow_trace_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_SHADOW_TRACE"); v = e && atoi(e) > 0; } return v; }
+static _Thread_local const NVNcommandBuffer *g_scene_cb;
+static int draw_trace_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_DRAW_TRACE"); v = e && atoi(e) > 0; } return v; }
 static void shadow_trace_rt(const NVNcommandBuffer *c, const NVNtexture *dt) {
-    if (!shadow_trace_on()) return;
     const tex_t *t = (const tex_t *)dt;
+    if (draw_trace_on()) {   // DM_NVN_DRAW_TRACE: a scene pass is one with a depth target at least 1280 wide that is not Depth16 (not a shadow map)
+        int scene = t && t->magic == MAGIC('T','E','X',0) && t->d.format != NVN_FORMAT_DEPTH16 && t->d.width >= 1280;
+        if (scene) g_scene_cb = c; else if (g_scene_cb == c) g_scene_cb = NULL;
+    }
+    if (!shadow_trace_on()) return;
     if (t && t->magic == MAGIC('T','E','X',0) && t->d.format == NVN_FORMAT_DEPTH16) { g_shadow_cb = c; g_shadow_w = t->d.width; g_shadow_h = t->d.height; }
     else if (g_shadow_cb == c) g_shadow_cb = NULL;
 }
@@ -1552,8 +1558,26 @@ NVN_NOPROTO(nvnCommandBufferBindShadingRateImage, void, NVNcommandBuffer *c, con
 NVN_NOPROTO(nvnCommandBufferShadingRateImagePalette, void, NVNcommandBuffer *c, int first, int n, const void *entries) { (void)c; (void)first; (void)n; (void)entries; }
 NVN_NOPROTO(nvnCommandBufferSetShadingRatePaletteMode, void, NVNcommandBuffer *c, int mode) { (void)c; (void)mode; }
 NVN(nvnCommandBufferDrawArraysIndirect, void, NVNcommandBuffer *c, NVNdrawPrimitive pr, NVNbufferAddress ind) { rec_draw(c, (p_draw){pr, 0, 0, 1, 0, ind}); }
+// DM_NVN_DRAW_TRACE=1 (diagnostic): indexed draws into a scene pass print their guest call chain, once per distinct chain of five return addresses, up to
+// 24 chains, with the index count: a map of the paths that draw models, to find where the game picks a model's level of detail
+static void draw_trace(const NVNcommandBuffer *c, int n) {
+    if (!draw_trace_on() || g_scene_cb != c) return;
+    uint64_t ra[5] = {0}, fp = (uint64_t)__builtin_frame_address(0);
+    for (int i = 0; i < 5 && fp && !(fp & 7); i++) {
+        uint64_t w[2]; vm_size_t got = 0;
+        if (vm_read_overwrite(mach_task_self(), (vm_address_t)fp, sizeof w, (vm_address_t)w, &got) != KERN_SUCCESS || got != sizeof w) break;
+        ra[i] = w[1]; if (w[0] <= fp) break; fp = w[0];
+    }
+    uint64_t key = 0; for (int i = 0; i < 5; i++) key = key * 0x100000001b3ull ^ ra[i];
+    static uint64_t seen[24]; static int ns; static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
+    pthread_mutex_lock(&mu); int fresh = ns < 24; for (int i = 0; i < ns && fresh; i++) if (seen[i] == key) fresh = 0; if (fresh) seen[ns++] = key; pthread_mutex_unlock(&mu);
+    if (!fresh) return;
+    LOG("draw trace: %d indices into a scene pass", n);
+    void dm_backtrace(uint64_t fp); dm_backtrace((uint64_t)__builtin_frame_address(0));
+}
 NVN(nvnCommandBufferDrawElementsInstanced, void, NVNcommandBuffer *c, NVNdrawPrimitive pr, NVNindexType it, int n, NVNbufferAddress ib,
     int bv, int bi, int inst) {
+    draw_trace(c, n);
     rec_draw_idx(c, (p_draw_idx){pr, it, n, bv, bi, inst, ib});
 }
 NVN(nvnCommandBufferDispatchCompute, void, NVNcommandBuffer *c, int x, int y, int z) {

@@ -218,6 +218,7 @@ DM_NVN_TEXDUMP	diagnostic	`=<frame>:<path>`, `size=<W>x<H>:<path>` or `layers=<n
 DM_NVN_TEXINFO	diagnostic	`=<W>x<H>` logs storage and description of every texture of that size on first use, registration and initialization (pool, flags, packaged, non-zero bytes, swizzles)
 DM_NVN_TEXRAW	diagnostic	`=<serial>,…` or `info` (the textures `DM_NVN_TEXINFO` picked out): saves those textures' raw bytes at the `DM_NVN_TEXDUMP` frame, with a text header line
 DM_NVN_TEXSNAP	diagnostic	`=<in-frame pass index>,…`: with `DM_NVN_TEXDUMP`, copies those passes' colour attachments as they end and saves them with the end-of-frame dump
+DM_NVN_TEX_TRACE	diagnostic	`=<W>x<H>[,<W>x<H>...]`: a texture initialized at one of those sizes prints its format and the guest call chain, once per chain of five return addresses, up to 24 (`hle_nvn.c`): the code that sizes a render target
 DM_NVN_TREG_ID	diagnostic	`=<n>` logs every registration of texture ID n: what it holds from then on, and the frame being recorded
 DM_NVN_TSV	diagnostic	`=<path>` writes the per-frame NVN call table and timing rows (frame, metric, value) to a TSV, read by `scripts/bench.py`
 DM_NVN_TSV_CALLS	diagnostic	`0` makes `DM_NVN_TSV` write only the timing rows, without the call counts (about two thirds of the file)

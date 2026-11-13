@@ -588,8 +588,30 @@ int nvn_flushed(const void *p, uint64_t n) {   // whether the CPU flushed any of
     pthread_mutex_unlock(&g_fl_mu);
     return r;
 }
+// DM_NVN_TEX_TRACE=<W>x<H>[,<W>x<H>...] (diagnostic): a texture initialized at one of those sizes prints its format and the guest call chain, once per
+// calling chain (five return addresses), up to 24: the code that sizes a render target, found from the texture it makes
+static void tex_trace(const nvn_texdesc *d) {
+    static int nsz = -1; static unsigned sz[8][2];
+    if (nsz < 0) { nsz = 0; const char *e = getenv("DM_NVN_TEX_TRACE");
+        for (const char *p = e; p && *p && nsz < 8; ) { unsigned w, h; if (sscanf(p, "%ux%u", &w, &h) == 2) { sz[nsz][0] = w; sz[nsz][1] = h; nsz++; } p = strchr(p, ','); if (p) p++; } }
+    int hit = 0; for (int i = 0; i < nsz; i++) hit |= d->width == sz[i][0] && d->height == sz[i][1];
+    if (!hit) return;
+    uint64_t ra[5] = {0}, fp = (uint64_t)__builtin_frame_address(0);
+    for (int i = 0; i < 5 && fp && !(fp & 7); i++) {
+        uint64_t w[2]; vm_size_t got = 0;
+        if (vm_read_overwrite(mach_task_self(), (vm_address_t)fp, sizeof w, (vm_address_t)w, &got) != KERN_SUCCESS || got != sizeof w) break;
+        ra[i] = w[1]; if (w[0] <= fp) break; fp = w[0];
+    }
+    uint64_t key = 0; for (int i = 0; i < 5; i++) key = key * 0x100000001b3ull ^ ra[i];
+    static uint64_t seen[24]; static int ns; static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
+    pthread_mutex_lock(&mu); int fresh = ns < 24; for (int i = 0; i < ns && fresh; i++) if (seen[i] == key) fresh = 0; if (fresh) seen[ns++] = key; pthread_mutex_unlock(&mu);
+    if (!fresh) return;
+    LOG("tex trace: %ux%ux%u format %#x target %d levels %u", d->width, d->height, d->depth, d->format, d->target, d->levels);
+    void dm_backtrace(uint64_t fp); dm_backtrace((uint64_t)__builtin_frame_address(0));
+}
 NVN(nvnTextureInitialize, NVNboolean, NVNtexture *t, const NVNtextureBuilder *b) {
     const tex_builder_t *s = (const tex_builder_t *)b; tex_t *o = TX(t);
+    tex_trace(&s->d);
     // Re-initializing a texture object that is still live (without a Finalize first): release the host texture of the old serial first. SMBW re-initializes its transient render targets on the same object every frame and never Finalizes them;
     //   previously every init created a new private MTLTexture and the old one stayed in the serial table forever, so GPU memory grew about 13 MB per frame (killed by the memory watchdog at 24 GB)
     if (o->magic == MAGIC('T', 'E', 'X', 0) && o->serial) { static uint64_t n; if (!n++) LOG("[nvn] TextureInitialize on a texture object that is still live (no Finalize): releasing the old host texture (first case ser=%llu)", (unsigned long long)o->serial); mtl_tex_release(o); }

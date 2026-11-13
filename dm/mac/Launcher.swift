@@ -248,31 +248,33 @@ struct LauncherView: View {
 
     private var basicSettings: some View {
         VStack(spacing: 12) {
-            // The basic settings in one box, with no headings: a heading over one or two rows that name themselves is noise. The advanced ones keep the list's sections
-            let basic = m.settings.filter { $0.basic && m.visible($0) }
-            if !basic.isEmpty {
-                Box { ForEach(basic) { SettingLine($0, m).equatable() } }
-            }
+            // The basic settings and the cloud's save in one box, with no headings: a heading over one or two rows that name themselves is noise. The advanced ones keep
+            // the list's sections
             Box {
+                ForEach(m.settings.filter { $0.basic && m.visible($0) }) { SettingLine($0, m).equatable() }
                 CloudSavesRow()
-                HStack(spacing: 12) {
-                    RowLabel(icon: "arrow.up.forward.app") {
-                        Text("Show this window at launch")
-                        // How to get the window back, said when it is switched off: that is when it is needed, and the row is one line like the others until then
-                        if !show {
-                            Text("Hold Option (⌥) while opening the app to see it again.").font(.footnote).foregroundStyle(.secondary).transition(.opacity)
-                        }
-                    }
-                    Spacer(minLength: 8)
-                    Toggle("Show this window at launch", isOn: $show).labelsHidden().toggleStyle(.switch).controlSize(.mini)
-                }
-                .animation(.easeOut(duration: 0.15), value: show)
             }
             Box(inset: false) {
                 AdvancedRow(expanded: $advanced, changed: m.settings.filter { !$0.basic && !m.fixed.contains($0.env) && !$0.isDefault(m.values[$0.env] ?? $0.def) }.count)
             }
+            // The window's last line while Advanced settings is closed. Open, the line is at the advanced settings' end, and this is the room between their row and
+            // their first heading, which was there before: nothing moves when the row is clicked, and nothing of the advanced settings is seen under the window's
+            // edge while it closes over them
+            lastLine.opacity(advanced ? 0 : 1).disabled(advanced).accessibilityHidden(advanced)
+                .padding(.top, 2).padding(.bottom, -4)
         }
         .padding(20)
+    }
+
+    /// Whether this window shows at all, as a welcome window asks it: a checkbox on its last line, not a row among the game's settings. How to get the window back
+    /// is said once it is switched off: that is when it is needed
+    private var lastLine: some View {
+        VStack(spacing: 5) {
+            Toggle("Show this window at launch", isOn: $show).toggleStyle(.checkbox)
+            if !show { Text("Hold Option (⌥) while opening the app to see it again.").font(.footnote) }
+        }
+        .foregroundStyle(.secondary)
+        .frame(maxWidth: .infinity)
     }
 
     private var advancedSettings: some View {
@@ -280,27 +282,19 @@ struct LauncherView: View {
             ForEach(Array(m.sections(basic: false).enumerated()), id: \.element) { i, section in
                 let rows = m.rows(in: section, basic: false)
                 if !rows.isEmpty {
-                    // 38 pt from the box above to a heading, as a Form sets a headed section: the first is 18 below the basic settings' own 20
-                    Text(section).font(.headline).padding(.leading, 10).padding(.top, i == 0 ? 18 : 38).padding(.bottom, 10)
+                    // 38 pt from the box above to a heading, as a Form sets a headed section; the first has the window's last line above it (basicSettings), and its room
+                    Text(section).font(.headline).padding(.leading, 10).padding(.top, i == 0 ? 0 : 38).padding(.bottom, 10)
                     Box { ForEach(rows) { SettingLine($0, m).equatable() } }
                 }
             }
-            Box {
-                HStack(spacing: 12) {
-                    RowLabel(icon: "arrow.counterclockwise") {
-                        HStack(spacing: 6) {
-                            Text("Reset to tested defaults")
-                            InfoButton(title: "Reset to tested defaults", text: "Every setting goes back to what this game was tested with. Your choices are forgotten when you press Play.")
-                        }
-                    }
-                    Spacer(minLength: 8)
-                    Button("Reset All") { m.reset() }
-                        .disabled(!m.changed)
-                }
-            }
-            .padding(.top, 12)
+            // Reset is one button, not a row with a name, a symbol and a button that says it again; what it does is its help tag
+            Button("Reset to Tested Defaults") { m.reset() }
+                .controlSize(.small).disabled(!m.changed)
+                .help("Every setting goes back to what this game was tested with. Your choices are forgotten when you press Play.")
+                .frame(maxWidth: .infinity).padding(.top, 18)
+            lastLine.padding(.top, 16)
         }
-        .padding(.horizontal, 20).padding(.bottom, 24)
+        .padding(.horizontal, 20).padding(.bottom, 16)
     }
 
     /// Play, once the cloud's save is compared with this Mac's: a save that changed on both sides is the player's pick, not the newer file's (SaveCheck)
@@ -703,29 +697,35 @@ private struct SlidingChoice: View {
 /// show has its symbol here, and nothing else has: test_launcher_storage.py compares the two, so a new setting is not drawn with the fallback, a gear
 enum Symbols {
     static let rows: [String: String] = [
-        "DM_FPS_TARGET": "fps.bitmap", "DM_DYNAMIC_RESOLUTION": "square.resize", "DM_RENDER_SCALE": "arrow.up.left.and.arrow.down.right", "DM_OPMODE": "tv",
-        "DM_PRESENT_UPSCALE": "square.arrowtriangle.4.outward", "DM_UPSCALER": "wand.and.sparkles", "DM_LANG": "globe", "DM_FULLSCREEN": "macwindow",
-        "DM_SCREEN_ASPECT": "aspectratio", "DM_RUMBLE": "waveform", "DM_RUMBLE_GAIN": "dial.medium",
+        "DM_FPS_TARGET": "fps.bitmap", "DM_DYNAMIC_RESOLUTION": "square.resize", "DM_RENDER_SCALE": "arrow.up.left.and.arrow.down.right", "DM_OPMODE": "console.handheld",
+        "DM_PRESENT_UPSCALE": "square.arrowtriangle.4.outward", "DM_UPSCALER": "sparkles", "DM_LANG": "globe", "DM_FULLSCREEN": "macwindow",
+        "DM_SCREEN_ASPECT": "aspectratio", "DM_RUMBLE": "water.waves", "DM_RUMBLE_GAIN": "dial.medium",
         "DM_RUMBLE_MIN": "line.3.horizontal.decrease", "DM_PAD_PRESS_TO_JOIN": "person.badge.plus", "DM_SW2": "gamecontroller", "DM_PRESENT_SNAP": "square.3.layers.3d",
-        "DM_PSO_MTL4": "bolt", "DM_PSO_PREBUILD": "hourglass", "DM_NVN_ENC_THREAD": "arrow.triangle.branch", "DM_FPS_HOLD": "timer", "DM_METAL_HUD": "chart.xyaxis.line",
+        "DM_PSO_MTL4": "bolt", "DM_PSO_PREBUILD": "hammer", "DM_NVN_ENC_THREAD": "cpu", "DM_FPS_HOLD": "timer", "DM_METAL_HUD": "chart.xyaxis.line",
     ]
-    /// Symbols drawn here, as rows of squares ("#"): the system has none for a frame rate. FPS in letters three squares wide and five high, as a game's own
-    /// frame counter wrote it
-    static let drawn: [String: [String]] = [
-        "fps.bitmap": ["###.###.###",
-                       "#...#.#.#..",
-                       "##..###.###",
-                       "#...#.....#",
-                       "#...#...###"],
+    /// Symbols drawn here: the system has none for a frame rate, and its console symbols are a TV or a controller, not the console
+    enum Drawn {
+        case squares([String])   // rows of squares ("#")
+        case console             // a handheld console: its body, its screen, a stick and a button
+    }
+    static let drawn: [String: Drawn] = [
+        // FPS in letters three squares wide and five high, as a game's own frame counter wrote it
+        "fps.bitmap": .squares(["###.###.###",
+                                "#...#.#.#..",
+                                "##..###.###",
+                                "#...#.....#",
+                                "#...#...###"]),
+        "console.handheld": .console,
     ]
 }
 
-/// A row's symbol: an SF Symbol, or one drawn from squares (Symbols.drawn), each 1.5 pt, in the colour the row gives its symbol
+/// A row's symbol: an SF Symbol, or one drawn here (Symbols.drawn), in the colour the row gives its symbol
 struct RowSymbol: View {
     let name: String
 
     var body: some View {
-        if let rows = Symbols.drawn[name] {
+        switch Symbols.drawn[name] {
+        case .squares(let rows):
             let unit: CGFloat = 1.5
             Canvas { canvas, _ in
                 for (y, row) in rows.enumerated() {
@@ -736,7 +736,17 @@ struct RowSymbol: View {
             }
             .frame(width: CGFloat(rows.first?.count ?? 0) * unit, height: CGFloat(rows.count) * unit)
             .alignmentGuide(.firstTextBaseline) { $0[.bottom] + 0.75 }   // its middle at the middle of the name's capitals, where an SF Symbol's is
-        } else {
+        case .console:
+            // Plain enough for its size: a heavy outline, the screen filled, two dots. With the screen in outline too, the lines ran together at 18 pt
+            Canvas { canvas, _ in
+                canvas.stroke(Path(roundedRect: CGRect(x: 0.7, y: 0.7, width: 18.6, height: 11.1), cornerRadius: 3.4), with: .foreground, style: StrokeStyle(lineWidth: 1.3))
+                canvas.fill(Path(roundedRect: CGRect(x: 5.6, y: 3.2, width: 8.8, height: 6.1), cornerRadius: 1), with: .foreground)
+                canvas.fill(Path(ellipseIn: CGRect(x: 2.3, y: 3.3, width: 2.2, height: 2.2)), with: .foreground)
+                canvas.fill(Path(ellipseIn: CGRect(x: 15.5, y: 7, width: 2.2, height: 2.2)), with: .foreground)
+            }
+            .frame(width: 20, height: 12.5)
+            .alignmentGuide(.firstTextBaseline) { $0[.bottom] - 1.6 }
+        case nil:
             Image(systemName: name)
         }
     }
@@ -831,8 +841,17 @@ struct CloudSavesRow: View {
             }
             Spacer(minLength: 8)
             if fixed == nil {
-                if !folder.isEmpty { Button("Turn Off") { folder = "" } }
-                Button(folder.isEmpty ? "Choose Folder…" : "Change…", action: choose)
+                if folder.isEmpty {
+                    Button("Choose Folder…", action: choose)
+                } else {
+                    Menu("Change…") {   // one button, not two: what can be done with the folder is its menu
+                        Button("Choose Another Folder…", action: choose)
+                        Button("Show in Finder") { NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: folder) }
+                        Divider()
+                        Button("Turn Off Cloud Saves") { folder = "" }
+                    }
+                    .fixedSize()
+                }
             }
         }
     }

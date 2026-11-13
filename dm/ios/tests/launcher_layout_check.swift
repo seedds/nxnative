@@ -47,7 +47,7 @@ func checkLauncherLayout(_ model: LauncherModel, defaults: UserDefaults) -> Int 
         expect(closed > 0 && open > closed, "Advanced settings adds to the reported height")
         basic = closed
     }
-    // Show this window at launch says how to see the window again only while it is switched off: one more line, which the window makes room for
+    // Show this window at launch, the window's last line, says how to see the window again only while it is switched off: one more line, which the window makes room for
     defaults.set(false, forKey: "window.show")
     let hinted = autoreleasepool { measure(false, width: 560) }
     defaults.removeObject(forKey: "window.show")
@@ -62,8 +62,9 @@ func checkLauncherLayout(_ model: LauncherModel, defaults: UserDefaults) -> Int 
     // Every row's symbol is a symbol of this system (a name it lacks draws nothing) or one drawn here, in rows of one length
     let missing = (Array(Symbols.rows.values) + ["gearshape"]).filter { Symbols.drawn[$0] == nil && NSImage(systemSymbolName: $0, accessibilityDescription: nil) == nil }
     expect(missing.isEmpty, "every row's symbol is one this system has, or is drawn (missing: \(missing))")
-    expect(Symbols.drawn.values.allSatisfy { rows in !rows.isEmpty && rows.allSatisfy { $0.count == rows[0].count && $0.allSatisfy { "#.".contains($0) } } } && Symbols.drawn.keys.allSatisfy { Symbols.rows.values.contains($0) },
-           "a drawn symbol is a rectangle of squares, and a row uses it")
+    let squares = Symbols.drawn.values.compactMap { drawn -> [String]? in if case .squares(let rows) = drawn { return rows }; return nil }
+    expect(!squares.isEmpty && squares.allSatisfy { rows in !rows.isEmpty && rows.allSatisfy { $0.count == rows[0].count && $0.allSatisfy { "#.".contains($0) } } } && Symbols.drawn.keys.allSatisfy { Symbols.rows.values.contains($0) },
+           "a symbol drawn from squares is a rectangle of them, and every drawn symbol has a row")
     // The cloud folder's path is shortened by whole folders (CloudSavesRow.fitting), under iCloud Drive and outside it
     expect(CloudSavesRow.fitting(CloudSavesRow.drive + "/Games/Switch Saves/Zelda") == ["iCloud Drive › Games › Switch Saves › Zelda", "… › Games › Switch Saves › Zelda", "… › Switch Saves › Zelda", "… › Zelda"],
            "a cloud folder's path leaves out leading folders, whole ones")

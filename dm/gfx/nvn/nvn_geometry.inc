@@ -168,6 +168,21 @@ static int geo_sync_cpu(int *drained) {
     memset(g_vconv, 0, sizeof g_vconv); *drained = 1;
     return 1;
 }
+// An indirect draw's arguments, read on the CPU once the GPU work that may write them is done (geo_sync_cpu), into the draw's copy: the count, the instances, the
+// first vertex (an indexed draw: its first index, moved into the index address, and its base vertex) and the base instance; the copy is a direct draw afterwards.
+// 1: read; 0: nothing to draw; -1: not readable or out of range (logged, as what). Used by the geometry and tessellation paths, which read their draws' vertices on the CPU
+static int geo_indirect_args(p_draw *dw, p_draw_idx *di, int *drained, const char *what) {
+    uint64_t ind = dw ? dw->ind : di->ind; size_t n = dw ? 16 : 20;
+    if (geo_cpu_hazard(ind, n) && !geo_sync_cpu(drained)) return -1;
+    uint32_t a[5] = {0};
+    if (!nvn_host_readable(ind, n)) { MLOG("[RED] %s indirect arguments are not readable", what); return -1; }
+    memcpy(a, (void *)(uintptr_t)ind, n);
+    if (!a[0] || !a[1]) return 0;
+    if (a[0] > INT32_MAX || a[1] > INT32_MAX) { MLOG("[RED] %s indirect draw exceeds the host count range", what); return -1; }
+    if (dw) { dw->count = (int32_t)a[0]; dw->instances = (int32_t)a[1]; dw->first = (int32_t)a[2]; dw->base_instance = (int32_t)a[3]; dw->ind = 0; dw->mdi_cnt = 0; }
+    else { di->count = (int32_t)a[0]; di->instances = (int32_t)a[1]; di->ibuf += (uint64_t)a[2] << di->itype; di->base_vertex = (int32_t)a[3]; di->base_instance = (int32_t)a[4]; di->ind = 0; di->mdi_cnt = 0; }
+    return 1;
+}
 static int geo_split(NvProg *pr, const p_draw *dw, const p_draw_idx *di, int count, int instances, uint32_t first_instance, uint32_t primitive_base) {
     // geo_prep can pass a record in g_geo_run. Each recursive draw reuses that
     // job, so keep the original range independent of the child draw's record.
@@ -808,19 +823,11 @@ static int geo_prep(NvProg *pr, const p_draw *dw0, const p_draw_idx *di0, geo_jo
         for (int i = 0; i < 16; i++) if (S.vbuf[i].size && (S.vbuf[i].address & 3)) return -1;
     }
     int drained = g_geo_split_depth != 0;
-    if (geo_conversion_hazard(vs) || (ind && geo_cpu_hazard(ind, dw0 ? 16 : 20))) {
+    if (geo_conversion_hazard(vs)) {
         if (!may_wait) return -1;
         if (!geo_sync_cpu(&drained)) return 0;
     }
-    if (ind) {
-        uint32_t a[5] = {0}; size_t n = dw0 ? 16 : 20;
-        if (!nvn_host_readable(ind, n)) { MLOG("[RED] geometry indirect arguments are not readable"); return 0; }
-        memcpy(a, (void *)(uintptr_t)ind, n);
-        if (!a[0] || !a[1]) return 0;
-        if (a[0] > INT32_MAX || a[1] > INT32_MAX) { MLOG("[RED] geometry indirect draw exceeds the host count range"); return 0; }
-        if (dw0) { j->dw.count = a[0]; j->dw.instances = a[1]; j->dw.first = a[2]; j->dw.base_instance = a[3]; j->dw.ind = j->dw.mdi_cnt = 0; }
-        else { j->di.count = a[0]; j->di.instances = a[1]; j->di.ibuf += (uint64_t)a[2] << j->di.itype; j->di.base_vertex = (int32_t)a[3]; j->di.base_instance = a[4]; j->di.ind = j->di.mdi_cnt = 0; }
-    }
+    if (ind && geo_indirect_args(dw0 ? &j->dw : NULL, di0 ? &j->di : NULL, &drained, "geometry") <= 0) return 0;
     int prim = dw0 ? j->dw.prim : j->di.prim, topology = nvn_geo_topology(prim);
     int count = dw0 ? j->dw.count : j->di.count, instances = dw0 ? j->dw.instances : j->di.instances;
     uint32_t first_instance = (uint32_t)(dw0 ? j->dw.base_instance : j->di.base_instance);

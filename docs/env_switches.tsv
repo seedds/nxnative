@@ -219,6 +219,11 @@ DM_NVN_STORAGE_FIRST_USE	switch	`0` keeps a sampled block-compressed texture in 
 DM_NVN_T2T_FROM	diagnostic	`=<frame>`: `DM_NVN_T2T_TRACE` records copies only from that frame on (default 0)
 DM_NVN_T2T_TRACE	diagnostic	`=<W>x<H>:<file>`: after each copy into an RGBA16F texture of that size, copies the result into a trace buffer on the GPU timeline; 240 entries are written to the file
 DM_NVN_TBDR	switch	`=1` turns on the replay's TBDR pass optimizations (store / load elision, pass merging, same-target continuation); off by default since bindless textures defeat their read inference
+DM_NVN_TESS_BUDGET	diagnostic	`=<entries>` the most two-triangle entries one tessellated draw may expand to (4096 to 16M, default 2M); patches past it are dropped whole and counted in the tessellation log line
+DM_NVN_TESS_LEVEL	diagnostic	`=<N>` gives every edge and inside of every tessellated patch level N (1 to 64) instead of its hull's factors, in the domain's own mode and spacing (`nvn_tess.inc`; culled patches stay culled); for A/B comparisons
+DM_NVN_TESS_MAX	diagnostic	`=<level>` the highest tessellation level (even, 2 to 64, default 64; fractional_odd spacing one less); higher hull factors are clamped to it
+DM_NVN_TESS_ONLY	diagnostic	`=<hull key>,...` replays only the tessellated draws of those hull shaders (the first 16 hex digits of a key) and skips the others with a [RED] line; to tell their effects apart
+DM_NVN_TESS_STAGES	diagnostic	`=1` / `=2` stops a tessellated draw after the vertex capture / after the hull (and expansion) kernel, skipping the domain draw; to time the stages (default 3, all)
 DM_NVN_TEXCPU	diagnostic	`=1` logs non-packaged (non-swizzled) textures in CPU-visible pools
 DM_NVN_TEXDUMP	diagnostic	`=<frame>:<path>`, `size=<W>x<H>:<path>` or `layers=<n>:<path>`: saves every colour render target of that frame as PNG (`%d` = serial × 100 + layer × 10 + level)
 DM_NVN_TEXINFO	diagnostic	`=<W>x<H>` logs storage and description of every texture of that size on first use, registration and initialization (pool, flags, packaged, non-zero bytes, swizzles)
@@ -390,6 +395,7 @@ DM_TEST_NO_METAL4	diagnostic	`=1` treats the GPU as one without Metal 4, as on a
 DM_TEST_PRESENT_LAG	diagnostic	`=<every n>,<ms>[,<in a row>][;…]` sleeps that long before every nth present (and the ones after it in the run): a slow frame on demand
 DM_TEST_SWKBD_HOLD_MS	diagnostic	`=<ms>` (with `DM_KBD`) keeps the system keyboard up that long before `DM_KBD`'s text is returned, as a player typing would
 DM_TEST_SWKBD_LAG_MS	diagnostic	`=<ms>` sleeps that long between the keyboard handing back its text and the game's thread getting the result, to check that auto-accept does not act early
+DM_TEST_TESS	test	Path to the native t_tess executable that test_dmsh_tess.py runs the tessellation layout and expansion kernel through on the GPU (`make check_t_tess` sets it)
 DM_TEST_TRANSFORM_FEEDBACK	test	Path to the native t_transform_feedback executable used by the Python feedback tests
 DM_TEST_UP_LEAK	diagnostic	`=1` keeps the old upload staging block instead of retiring it, as before the fix, to measure the leak
 DM_TEST_UP_LOST	diagnostic	`=<batch index>` treats that batch of uploads as dropped, to exercise the re-upload path

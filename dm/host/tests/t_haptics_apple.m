@@ -437,6 +437,47 @@ int main(void) { @autoreleasepool {
     assert(fabsf(cut.haptics.engines.lastObject.testPlayer.levels.lastObject.floatValue - 0.5f) < 1e-6f);
     send_pair(0, 0); drain();
     rumble_min = 0;
+    // DM_RUMBLE_CURVE: a controller level is raised to the power (0.09 ^ 0.5 = 0.3), lifting quiet effects; a level of 0 or 1 stays
+    rumble_curve = 0.5f;
+    TestController *curved = [TestController new]; curved.haptics = [TestHaptics new];
+    dm_haptics_apple_controller(0, (id)curved); drain();
+    send_pair(0.09f, 0); drain();
+    assert(fabsf(curved.haptics.engines.lastObject.testPlayer.levels.lastObject.floatValue - 0.3f) < 1e-5f);
+    send_pair(1, 0); drain();
+    assert(fabsf(curved.haptics.engines.lastObject.testPlayer.levels.lastObject.floatValue - 1) < 1e-6f);
+    send_pair(0, 0); drain();
+    rumble_curve = 1;
+    // DM_RUMBLE_HOLD: a peak is held at least that long (70 ms): a silence or a quieter level inside it keeps the peak, the game's current level follows at its end,
+    // a louder one replaces it and holds from its own start
+    rumble_hold = 0.07;
+    TestController *held = [TestController new]; held.haptics = [TestHaptics new];
+    dm_haptics_apple_controller(0, (id)held); drain();
+    #define HELD_LEVEL (held.haptics.engines.lastObject.testPlayer.levels.lastObject.floatValue)
+    send_pair(0.2f, 0); drain();
+    assert(fabsf(HELD_LEVEL - 0.2f) < 1e-6f);
+    send_pair(0, 0); drain();   // the game's 60 ms effect is over: the motor goes on
+    assert(fabsf(HELD_LEVEL - 0.2f) < 1e-6f);
+    advance(0.05); send_pair(0.1f, 0); drain();   // quieter, still inside the hold
+    assert(fabsf(HELD_LEVEL - 0.2f) < 1e-6f);
+    advance(0.03);   // the hold ends: the game's latest level, 0.1
+    assert(fabsf(HELD_LEVEL - 0.1f) < 1e-6f);
+    send_pair(0, 0); drain();   // no hold left: silence is silence
+    assert(HELD_LEVEL == 0);
+    send_pair(0.2f, 0); drain(); advance(0.05); send_pair(0.4f, 0); drain();   // louder inside the hold: replaces it
+    assert(fabsf(HELD_LEVEL - 0.4f) < 1e-6f);
+    send_pair(0, 0); drain(); advance(0.05);   // 50 ms after the louder peak's start: still held, the first peak's timer (at 70 ms) changes nothing
+    assert(fabsf(HELD_LEVEL - 0.4f) < 1e-6f);
+    advance(0.03);
+    assert(HELD_LEVEL == 0);
+    // An effect that ends for another reason (the engine stopped, a reset) takes its hold with it: the timer must not bring the level back
+    send_pair(0.2f, 0); drain(); send_pair(0, 0); drain();
+    [channels[0].firstObject stop]; drain();
+    NSUInteger sent = held.haptics.engines.lastObject.testPlayer.levels.count;
+    advance(0.1);
+    assert(held.haptics.engines.lastObject.testPlayer.levels.count == sent);
+    send_pair(0, 0); drain();
+    #undef HELD_LEVEL
+    rumble_hold = 0;
     // A DualShock 4 goes through its effects report only while a HID device is free; without one it keeps Core Haptics
     registry = [NSMutableArray new];
     TestController *ds = [TestController new]; ds.haptics = [TestHaptics new]; ds.productCategory = GCProductCategoryDualShock4;

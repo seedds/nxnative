@@ -32,6 +32,8 @@
 @property(nonatomic) id<CHHapticPatternPlayer> previous;   // the pulse before the scheduled one, still playing
 @property(nonatomic) NSTimeInterval pulseEnd;   // engine time at which the last scheduled pulse ends
 @property(nonatomic) dm_haptic_level level;   // the level the next pulse starts at
+@property(nonatomic) dm_haptic_level held, wanted;   // Local (DM_RUMBLE_HOLD): the peak being held and the game's latest level
+@property(nonatomic) NSTimeInterval holdUntil;
 - (void)apply:(dm_haptic_level)level;
 - (void)stop;
 @end
@@ -70,6 +72,11 @@ static CHHapticPattern *simple_pattern(dm_haptic_level level, NSError **error) {
 // low band at 0.1-0.4 all race long: 0.45 leaves crashes and drifts). The mapping stays linear by default: the opposite need, low levels that
 // rotating motors do not render at all (Breath of the Wild's charged attack on an Xbox controller), is open (docs/reference/services.md)
 static float rumble_min;
+// Ocarina of Time writes its rumble for the Switch 2's actuators: levels of 0.02 to 0.07 (0.23 at most) that last about 60 ms, which the motors of a controller
+// without HD rumble do not render (docs/reference/services.md). Three settings for controllers only, all off by default (the phone keeps the game's levels):
+static double rumble_hold;        // DM_RUMBLE_HOLD (ms, 0 to 1000): a peak is held at least this long, then the game's current level follows (stored in seconds)
+static float rumble_sharp = -1;   // DM_RUMBLE_SHARPNESS (0 to 1): this sharpness instead of the one the game's frequencies give; -1 keeps the game's
+static float rumble_curve = 1;    // DM_RUMBLE_CURVE (0.2 to 1): the level (after the gain and the cutoff) raised to this power, which lifts quiet effects
 static float controller_level(float x) {
     x = isfinite(x) ? fmaxf(0, fminf(1, x)) : 0;
     return x <= rumble_min ? 0 : (x - rumble_min) / (1 - rumble_min);
@@ -115,6 +122,7 @@ static void report(NSError *e, NSString *target, const char *stage) {
 // stop's work, for callers already inside guarded:work:
 - (void)halt {
     self.generation++; self.silenceGeneration++;
+    self.held = self.wanted = (dm_haptic_level){0, 0}; self.holdUntil = 0;   // a held peak ends with the effect: its timer finds the hold changed and does nothing
     self.engine.stoppedHandler = ^(CHHapticEngineStoppedReason reason) { (void)reason; }; self.engine.resetHandler = ^{};
     if (self.simple) {
         // Never cut a pulse: silence the playing ones and stop the engine once the last has ended
@@ -189,7 +197,26 @@ static void report(NSError *e, NSString *target, const char *stage) {
 }
 - (void)apply:(dm_haptic_level)level { [self guarded:"apply" work:^{ [self applyLevel:level]; }]; }
 - (void)applyLevel:(dm_haptic_level)level {
-    if ([self.target hasPrefix:@"controller"]) level.intensity = controller_level(level.intensity);
+    if ([self.target hasPrefix:@"controller"]) {
+        level.intensity = powf(controller_level(level.intensity), rumble_curve);
+        if (rumble_sharp >= 0 && level.intensity > 0) level.sharpness = rumble_sharp;
+        if (rumble_hold > 0) {
+            self.wanted = level;
+            NSTimeInterval t = now();
+            if (level.intensity > 0 && (level.intensity >= self.held.intensity || t >= self.holdUntil)) {
+                self.held = level; self.holdUntil = t + rumble_hold;
+                __weak DmRumbleChannel *weak = self; NSTimeInterval until = self.holdUntil;
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(rumble_hold * NSEC_PER_SEC)), queue, ^{
+                    DmRumbleChannel *c = weak; if (!c || c.holdUntil != until) return;   // a newer peak holds
+                    c.held = (dm_haptic_level){0, 0};
+                    [c guarded:"hold" work:^{ [c settle:c.wanted]; }];
+                });
+            } else if (t < self.holdUntil && level.intensity < self.held.intensity) level = self.held;
+        }
+    }
+    [self settle:level];
+}
+- (void)settle:(dm_haptic_level)level {
     uint64_t silence = ++self.silenceGeneration;
     NSError *error = nil;
     self.level = level;
@@ -450,9 +477,18 @@ void dm_haptics_apple_init(void) {
         queue = dispatch_queue_create("dm.rumble", DISPATCH_QUEUE_SERIAL);
         dispatch_queue_set_specific(queue, &queue, &queue, NULL);
         const char *e = getenv("DM_RUMBLE_GAIN");
-        if (e) { float v = strtof(e, NULL); if (isfinite(v)) gain = fmaxf(0, fminf(3, v)); }
+        if (e) { float v = strtof(e, NULL); if (isfinite(v)) gain = fmaxf(0, fminf(25, v)); }   // up to 25x: Ocarina of Time's rumble peaks at 0.07 for most effects
         e = getenv("DM_RUMBLE_MIN");
         if (e) { float v = strtof(e, NULL); if (isfinite(v)) rumble_min = fmaxf(0, fminf(0.9f, v)); }
+        e = getenv("DM_RUMBLE_HOLD");
+        if (e) { float v = strtof(e, NULL); if (isfinite(v)) rumble_hold = fmaxf(0, fminf(1000, v)) / 1000; }
+        e = getenv("DM_RUMBLE_SHARPNESS");
+        if (e) { float v = strtof(e, NULL); if (isfinite(v)) rumble_sharp = fmaxf(0, fminf(1, v)); }
+        e = getenv("DM_RUMBLE_CURVE");
+        if (e) { float v = strtof(e, NULL); if (isfinite(v)) rumble_curve = fmaxf(0.2f, fminf(1, v)); }
+        if (rumble_hold > 0 || rumble_sharp >= 0 || rumble_curve != 1)
+            fprintf(stderr, "haptics: controller rumble tuned: peaks held %.0f ms, sharpness %s, curve %.2f\n", rumble_hold * 1000,
+                    rumble_sharp >= 0 ? [NSString stringWithFormat:@"%.2f", rumble_sharp].UTF8String : "the game's", rumble_curve);
         e = getenv("DM_RUMBLE");
         dm_haptics_init(apply, !e || atoi(e) != 0);
 #if TARGET_OS_IPHONE

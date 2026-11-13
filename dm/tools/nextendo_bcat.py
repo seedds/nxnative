@@ -17,6 +17,8 @@ import warnings
 TITLES = {'0100f8f0000a2000', '01003bc0000a0000', '01003c700009c800'}
 
 
+# The titles hle_bcat_apple.m supports and the one with no DebugUnderPilot files (Splatoon 2's regions): the host takes them from the build, not its source
+TITLE_FLAGS = ('-DDM_BCAT_TITLES=@"0100f8f0000a2000",@"01003bc0000a0000",@"01003c700009c800"', '-DDM_BCAT_PLAIN_TITLE=@"01003c700009c800"')
 def helper(repository):
     repository = Path(repository)
     override = os.environ.get('DM_OPENSSL_ROOT')
@@ -33,7 +35,7 @@ def helper(repository):
     if not executable.is_file() or executable.is_symlink():
         with tempfile.TemporaryDirectory(dir=cache) as temporary:
             output = Path(temporary) / 'bcat'
-            subprocess.run(['xcrun', 'clang', '-O1', '-fobjc-arc', '-Wall', '-Wextra', '-Wno-unused-parameter', '-DDM_OPENSSL_X509',
+            subprocess.run(['xcrun', 'clang', '-O1', '-fobjc-arc', '-Wall', '-Wextra', '-Wno-unused-parameter', '-DDM_OPENSSL_X509', *TITLE_FLAGS,
                             '-I' + str(root / 'include'), str(sources[0]), str(sources[1]), str(root / 'lib/libcrypto.a'),
                             '-lz', '-framework', 'Foundation', '-o', str(output)], check=True, capture_output=True)
             output.chmod(0o700); output.replace(executable)

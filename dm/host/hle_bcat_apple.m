@@ -29,7 +29,16 @@ static NSString *const recipeCommit = @"482c182917228d69ebbbabfea44fffa4a44051be
 static const NSUInteger zipLimit = 8 * 1024 * 1024, expandedLimit = 32 * 1024 * 1024;
 static NSString *const xmlHash = @"8d8d21a93dce2f8eab1659a3bf5cdca10f61df83d50bc0a34784b1629dd215fa";
 static NSString *const dummyHash = @"5feceb66ffc86f38d952786c6d696c79c2dbc239dd4e91b46729d73a27fb57e9";
-static NSArray<NSString *> *titles(void) { return @[@"0100f8f0000a2000", @"01003bc0000a0000", @"01003c700009c800"]; }
+// The titles whose calendar recipe this backend knows, as lowercase program IDs, and the one among them whose delivery has no DebugUnderPilot files. A build passes them as
+// Objective-C string literals (-DDM_BCAT_TITLES=..., -DDM_BCAT_PLAIN_TITLE=...; the BCAT fixtures pass Splatoon 2's), because a game's IDs belong to its profile, not the host
+// (test_architecture), and this tree has no profile of those games. Without them no title is supported and the calendar stays off
+#ifndef DM_BCAT_TITLES
+#define DM_BCAT_TITLES
+#endif
+#ifndef DM_BCAT_PLAIN_TITLE
+#define DM_BCAT_PLAIN_TITLE @""
+#endif
+static NSArray<NSString *> *titles(void) { return @[DM_BCAT_TITLES]; }
 int dm_bcat_supported(const char *title) { if(!title)return 0;NSString *value=[NSString stringWithUTF8String:title];return value&&[titles() containsObject:value.lowercaseString]; }
 static NSString *digest(NSData *data) { uint8_t h[32]; CC_SHA256(data.bytes, (CC_LONG)data.length, h); NSMutableString *s = [NSMutableString new]; for (int i=0;i<32;i++) [s appendFormat:@"%02x",h[i]]; return s; }
 static BOOL fail(NSString **error, NSString *message) { if (error) *error = message; return NO; }
@@ -228,7 +237,7 @@ static NSDictionary *snapshot(NSString *root,NSString *title,NSString *version){
     NSDirectoryEnumerator *it=[NSFileManager.defaultManager enumeratorAtPath:base];for(NSString *rel in it){NSString *path=[base stringByAppendingPathComponent:rel];struct stat st;if(!safePath(rel)||lstat(path.fileSystemRepresentation,&st)||S_ISLNK(st.st_mode))return nil;if(S_ISDIR(st.st_mode))continue;if(!S_ISREG(st.st_mode)||!files[rel])return nil;NSData *data=boundedRead(path,8*1024*1024);if(!data||![digest(data) isEqual:files[rel]])return nil;[found addObject:rel];}
     if(found.count!=files.count)return nil;
     for(NSString *name in @[@"coopdata/CoopSetting.byaml",@"vsdata/VSSetting_0.byaml",@"vsdata/VSSetting_1.byaml",@"fesdata/Festival.byaml",@"fesdata/HapTexture.bfres",@"fesdata/IconTexture.bfres",@"fesdata/PanelTexture.bfres"]){NSString *rel=[@"DebugUnderPilot/bcat" stringByAppendingPathComponent:name];NSData *data=boundedRead([base stringByAppendingPathComponent:rel],8*1024*1024);if(!fileFormat(name,data))return nil;}
-    if(![title isEqual:@"01003c700009c800"]){if(![files[@"System/GameConfigSetting.xml"] isEqual:xmlHash]||![files[@"DebugUnderPilot/bcat/dummy/dummy.txt"] isEqual:dummyHash])return nil;}
+    if(![title isEqual:DM_BCAT_PLAIN_TITLE]){if(![files[@"System/GameConfigSetting.xml"] isEqual:xmlHash]||![files[@"DebugUnderPilot/bcat/dummy/dummy.txt"] isEqual:dummyHash])return nil;}
     return m;
 }
 static NSString *snapshotIdentity(NSDictionary *m){return digest(jsonData(@{@"files":m[@"files"],@"title":m[@"titleID"],@"version":m[@"version"],@"recipe":m[@"recipe"],@"revision":m[@"catalogRevision"],@"catalog":m[@"catalogSHA256"]}));}
@@ -252,7 +261,7 @@ static BOOL publishLocked(NSString *cache,NSString *title,NSString *version,NSDa
         if(!zip||status!=200)return fail(error,status==204?@"No calendar has been published for this title":@"Calendar download unavailable; previous validated snapshot retained");
         NSDictionary *entries=unzip(zip,error);if(!entries)return NO;
         for(NSString *name in entries)contents[[@"DebugUnderPilot/bcat" stringByAppendingPathComponent:name]]=entries[name];
-        if(![title isEqual:@"01003c700009c800"]){
+        if(![title isEqual:DM_BCAT_PLAIN_TITLE]){
             NSDictionary *staticFiles=@{@"System/GameConfigSetting.xml":xmlHash,@"DebugUnderPilot/bcat/dummy/dummy.txt":dummyHash};
             for(NSString *path in staticFiles){NSData *data=nil;NSString *oldPath=[[old stringByAppendingPathComponent:@"files"] stringByAppendingPathComponent:path];if(old)data=boundedRead(oldPath,131072);
                 if(!data||![digest(data) isEqual:staticFiles[path]]){NSString *u=[NSString stringWithFormat:@"https://raw.githubusercontent.com/NextendoNetwork/Prelude-Nextendo/%@/romfs/bcatdata/%@/romfs/%@",recipeCommit,title.uppercaseString,path];data=download(u,131072,nil,&status,NULL);if(status!=200)data=nil;}

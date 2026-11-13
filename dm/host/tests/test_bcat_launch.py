@@ -69,7 +69,7 @@ def run():
             flags = ['-fsanitize=address,undefined', '-fno-omit-frame-pointer']
         print('BCAT launch compiler sanitizer flags:', flags or 'none', flush=True)
         command = ['clang', '-O1', '-g', '-Wall', '-Wextra', '-Werror', '-Wno-unused-function', '-Wno-unused-parameter', '-Wno-deprecated-declarations', '-fobjc-arc', *flags,
-                        '-I' + str(REPO / 'dm/host'), '-I' + str(Path(crypto) / 'include'), '-DDM_OPENSSL_X509', '-DDM_BCAT_RUNTIME_INCLUDE="' + str(runtime) + '"',
+                        '-I' + str(REPO / 'dm/host'), '-I' + str(Path(crypto) / 'include'), '-DDM_OPENSSL_X509', '-DDM_BCAT_RUNTIME_INCLUDE="' + str(runtime) + '"', '-DDM_BCAT_TITLES=@"0100f8f0000a2000",@"01003bc0000a0000",@"01003c700009c800"', '-DDM_BCAT_PLAIN_TITLE=@"01003c700009c800"',
                         str(REPO / 'dm/host/tests/t_bcat_launch.m'), str(Path(crypto) / 'lib/libcrypto.a'), '-lz', '-framework', 'Foundation', '-o', str(binary)]
         subprocess.run(command, check=True)
         cache = root / 'cache'

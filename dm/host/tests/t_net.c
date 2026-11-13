@@ -53,6 +53,10 @@ void dm_guest_host_wait_begin(void) { atomic_fetch_add(&waits, 1); atomic_fetch_
 void dm_guest_host_wait_end(void) { atomic_fetch_sub(&wait_balance, 1); }
 uint64_t now_ns(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return (uint64_t)t.tv_sec * 1000000000 + t.tv_nsec; }
 void dm_guest_sleep_ns(int64_t ns) { struct timespec t = {ns / 1000000000, ns % 1000000000}; dm_guest_host_wait_begin(); nanosleep(&t, NULL); dm_guest_host_wait_end(); }
+// The offline EventFd waits in hle_net.c (hle_thread.c and hle_os.c in the host)
+void dm_guest_cond_wait_ns(pthread_cond_t *c, pthread_mutex_t *m, int64_t ns) { struct timespec t = {ns / 1000000000, ns % 1000000000}; dm_guest_host_wait_begin(); pthread_cond_timedwait_relative_np(c, m, &t); dm_guest_host_wait_end(); }
+uint64_t guest_ns(void) { return now_ns(); }
+int dm_detclock_enabled(void) { return 0; }
 void hle_bind_system_event(void *p, int clear) { (void)p; (void)clear; }
 void hle_signal_system_event(void *p) { (void)p; }
 void dm_applet_enter(const char *name) { (void)name; }

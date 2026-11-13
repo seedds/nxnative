@@ -19,6 +19,7 @@ module_t *module_of(const void *p) { (void)p; return NULL; }
 uint64_t now_ns(void) { static mach_timebase_info_data_t tb; if (!tb.denom) mach_timebase_info(&tb); return mach_absolute_time() * tb.numer / tb.denom; }
 uint64_t guest_ns(void) { return now_ns(); }
 int dm_detclock_enabled(void) { return 0; }
+__thread uint64_t dm_clock_reads;   // guest clock reads per thread (hle_os.c in the host; thr_yield reads it)
 void unimpl_c(void) { abort(); }
 uint64_t gate_dispatch(uint64_t pc, uint64_t *registers) { (void)pc; (void)registers; abort(); }
 

@@ -45,6 +45,15 @@ uint32_t dm_nextendo_presence_commit(const void *object) {
     if(!object||!presence_layout()||!dm_net_nextendo_enabled()||!dm_account_uid_exists(object))return RES_FAIL;
     return dm_nextendo_social_publish(2,(const uint8_t*)object+0x20,DM_SOCIAL_APP_FIELD);
 }
+// SetDescription writes the description into the object's application field under a reserved
+// key (SDK 4.4: Mario Kart 8 Deluxe's sdk+0x122a44, the same helper SetAppValue uses, which refuses
+// keys starting "sys"), no service call. The host takes the symbol over for offline, so with Nextendo
+// on it runs the SDK's own definition, which guest_sym still finds in the module.
+uint32_t dm_nextendo_presence_describe(void *object,const char *description) {
+    if(!object||!description||!presence_layout()||!dm_net_nextendo_enabled())return RES_FAIL;
+    uint32_t (*sdk)(void *,const char *)=(uint32_t (*)(void *,const char *))guest_sym("_ZN2nn7friends12UserPresence14SetDescriptionEPKc");
+    return sdk?sdk(object,description):RES_FAIL;
+}
 static void encode_friend(uint8_t output[0x200],const dm_social_friend *item,const void *uid,bool baas) {
     memset(output,0,0x200); memcpy(output,uid,16);
     uint64_t id=baas&&item->nsa?item->nsa:item->pid;

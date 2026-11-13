@@ -17,6 +17,12 @@ uint32_t dm_nextendo_account_available(uint8_t *out);
 uint32_t dm_nextendo_account_id(uint64_t *out);
 uint32_t dm_nextendo_account_ensure(void);
 uint32_t dm_nextendo_account_load_token(uint64_t *size, char *buffer, uint64_t capacity);
+// The signed-in Nextendo account's country ("FR"), "" when it has none; a network request the first time (hle_nextendo_api_apple.m)
+uint32_t dm_nextendo_account_country(char output[3]);
+// The signed-in Nextendo account's birthday ("1990-05-12"), "" when /api/me gives none; a network request the first time (hle_nextendo_api_apple.m)
+uint32_t dm_nextendo_account_birthday(char output[11]);
+// The signed-in Nextendo account's username, cut to the 32 bytes of an nn::account::Nickname at a UTF-8 character boundary (hle_nextendo_apple.m)
+uint32_t dm_nextendo_account_username(char output[33]);
 // Public PKCS#1 RSA key for verifying this process's local envelope signature.
 // This does not claim registration with Nintendo or a Nextendo JWKS service.
 uint32_t dm_nextendo_copy_public_signing_key(void *buffer, uint64_t capacity, uint64_t *size);

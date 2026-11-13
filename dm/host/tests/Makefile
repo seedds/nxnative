@@ -576,15 +576,18 @@ nsd-sanitize: $(B)/t_nsd_asan
 run: ssl nextendo-routes nextendo-x509 nsd
 
 ACCOUNT_SOURCES = t_nextendo_account.m ../hle_account.c ../hle_nextendo_apple.m ../hle_nextendo_api_apple.m ../hle_bigstack.c ../entry.S
-ACCOUNT_DEPS = t_gate_fixture.h $(ACCOUNT_SOURCES) ../nextendo_account.h ../net_socket.h ../hle.h $(GAME_H)
+ACCOUNT_DEPS = t_gate_fixture.h ../nextendo_login_apple.inc $(ACCOUNT_SOURCES) ../nextendo_account.h ../net_socket.h ../hle.h $(GAME_H)
 $(B)/t_nextendo_account: $(ACCOUNT_DEPS) | $(B)
 	$(CLANG) $(SSL_FLAGS) -o $@ $(ACCOUNT_SOURCES) -framework Foundation -framework Security
 $(B)/t_nextendo_account_asan: $(ACCOUNT_DEPS) | $(B)
 	$(CLANG) $(SSL_FLAGS) -fsanitize=address,undefined -mllvm -asan-globals=0 -fno-omit-frame-pointer -o $@ $(ACCOUNT_SOURCES) -framework Foundation -framework Security
 .PHONY: nextendo-account nextendo-account-sanitize
-nextendo-account: $(B)/t_nextendo_account
+# The Mac sign-in tool (dm/tools/nextendo_login.m) is built with the account fixtures, so CI compiles it; it signs in only when run by hand
+$(B)/nextendo_login: ../../tools/nextendo_login.m ../nextendo_login_apple.inc | $(B)
+	$(CLANG) -O1 -g -fobjc-arc -Wall -Wextra -Werror -o $@ ../../tools/nextendo_login.m -framework Foundation -framework Security -framework AppKit
+nextendo-account: $(B)/t_nextendo_account $(B)/nextendo_login
 	$(B)/t_nextendo_account
-nextendo-account-sanitize: $(B)/t_nextendo_account_asan
+nextendo-account-sanitize: $(B)/t_nextendo_account_asan $(B)/nextendo_login
 	$(B)/t_nextendo_account_asan
 API_SOURCES = t_nextendo_api.m ../hle_nextendo_api_apple.m
 $(B)/t_nextendo_api: $(API_SOURCES) ../nextendo_api_apple.h | $(B)

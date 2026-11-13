@@ -272,18 +272,29 @@ static NSMutableData *store_fixture(uint32_t status) {
     NSMutableData *data = [NSMutableData dataWithLength:24 + caDer.length]; uint32_t header[] = {0x546c7373, 1, 1, status, (uint32_t)caDer.length, 16};
     memcpy(data.mutableBytes, header, sizeof header); memcpy((char *)data.mutableBytes + 24, caDer.bytes, caDer.length); return data;
 }
+static bool stand_in_ca(const uint8_t **der, size_t *size) { *der = caDer.bytes; *size = caDer.length; return true; }
 static void builtin_store(void) {
     typedef uint32_t (*GetSize)(unsigned *, const uint32_t *, unsigned);
     typedef uint32_t (*GetCerts)(void **, uint8_t *, unsigned, const uint32_t *, unsigned);
     GetSize get_size = H(GetSize, "_ZN2nn3ssl14BuiltInManager28GetBuiltInCertificateBufSizeEPjPNS0_15CaCertificateIdEj");
     GetCerts get_certs = H(GetCerts, "_ZN2nn3ssl14BuiltInManager22GetBuiltInCertificatesEPPNS1_22BuiltInCertificateInfoEPhjPNS0_15CaCertificateIdEj");
-    unsetenv("DM_SYSTEM_DATA_DIR"); unsigned size = 99; uint32_t id = 1;
+    unsetenv("DM_SYSTEM_DATA_DIR"); unsetenv("DM_SYSTEM_DIR"); unsigned size = 99; uint32_t id = 1;
     CHECK(dm_ssl_import_server(context_key, NULL, caDer.bytes, (unsigned)caDer.length, 2) == DM_SSL_BAD_POINTER, "server certificate import requires its public output ID pointer");
     CHECK(get_size(&size, &id, 1) != 0 && !size, "missing firmware never fabricates a built-in CA");
+    // A provider's CA stands in for a missing store (Nextendo's, hle_nextendo_routes.c): served under each ID asked for, and not once a store file exists
+    dm_ssl_set_builtin_fallback(stand_in_ca); uint32_t pair[2] = {1, 0x3e8}; unsigned one = 24 + ((caDer.length + 3) & ~(NSUInteger)3);
+    CHECK(get_size(&size, pair, 2) == 0 && size == 2 * one, "no store: the provider's CA stands in under each ID asked for");
+    uint8_t *standIn = malloc(size); void *standOut = NULL; BuiltinInfo second;
+    CHECK(get_certs(&standOut, standIn, size, pair, 2) == 0 && standOut == standIn, "stand-in certificates fit the advertised size");
+    memcpy(&second, standIn + 24, sizeof second);
+    CHECK(second.id == 0x3e8 && second.status == 1 && second.size == caDer.length && !memcmp(second.data, caDer.bytes, caDer.length), "each stand-in entry keeps the ID asked for and the provider's DER");
+    free(standIn);
     [[NSFileManager defaultManager] createDirectoryAtPath:[store_path() stringByDeletingLastPathComponent] withIntermediateDirectories:YES attributes:nil error:nil];
     setenv("DM_SYSTEM_DATA_DIR", systemRoot.fileSystemRepresentation, 1); NSMutableData *fixture = store_fixture(1);
     CHECK([fixture writeToFile:store_path() atomically:YES], "write synthetic public test CA store outside the repository");
     CHECK(get_size(&size, &id, 1) == 0 && size == 24 + ((caDer.length + 3) & ~(NSUInteger)3), "BDF size uses the SDK's 24-byte pointer record and aligned DER");
+    id = 0x3e8; CHECK(get_size(&size, &id, 1) != 0 && !size, "with a store file the stand-in is not used: an ID it lacks fails"); id = 1; dm_ssl_set_builtin_fallback(NULL);
+    CHECK(get_size(&size, &id, 1) == 0, "store size again after the stand-in check");
     uint8_t *buffer = malloc(size + 25); memset(buffer, 0x6b, size + 25); void *output = (void *)1;
     CHECK(get_certs(&output, buffer, size - 1, &id, 1) != 0 && output == NULL && buffer[0] == 0x6b, "undersized certificate output writes no partial metadata");
     CHECK(get_certs(&output, buffer, size, &id, 1) == 0 && output == buffer && buffer[size] == 0x6b, "built-in output respects caller capacity");
@@ -304,7 +315,14 @@ static void builtin_store(void) {
     fixture = store_fixture(1); [fixture writeToFile:store_path() atomically:YES];
     int fd = create(false); hostname("localhost"); CHECK(handshake(false) == 0, "original trusted firmware anchor applies only to the TLS context"); destroy(fd, false);
     rejected(false, "wrong.invalid");
-    free(buffer); [[NSFileManager defaultManager] removeItemAtPath:store_path() error:nil]; unsetenv("DM_SYSTEM_DATA_DIR");
+    // The CertStore archive's file in DM_SYSTEM_DIR's system data layout (hle_fs.c), when DM_SYSTEM_DATA_DIR has none
+    [[NSFileManager defaultManager] removeItemAtPath:store_path() error:nil]; unsetenv("DM_SYSTEM_DATA_DIR");
+    NSString *sysdata = [systemRoot stringByAppendingPathComponent:@"sysdata/0100000000000800/ssl_TrustedCerts.bdf"];
+    [[NSFileManager defaultManager] createDirectoryAtPath:[sysdata stringByDeletingLastPathComponent] withIntermediateDirectories:YES attributes:nil error:nil];
+    CHECK([store_fixture(1) writeToFile:sysdata atomically:YES], "write synthetic public test CA store in the system data layout");
+    setenv("DM_SYSTEM_DIR", systemRoot.fileSystemRepresentation, 1);
+    CHECK(get_size(&size, &id, 1) == 0 && size == 24 + ((caDer.length + 3) & ~(NSUInteger)3), "store read from DM_SYSTEM_DIR/sysdata/0100000000000800");
+    free(buffer); [[NSFileManager defaultManager] removeItemAtPath:sysdata error:nil]; unsetenv("DM_SYSTEM_DIR");
 }
 static int check_real_store(const char *directory) {
     setenv("DM_NETWORK", "lan", 1); setenv("DM_SYSTEM_DATA_DIR", directory, 1); uint32_t all = UINT32_MAX; unsigned size = 0;

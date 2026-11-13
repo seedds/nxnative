@@ -74,7 +74,7 @@ HLE_FORCE_WAIT("_ZN2nn7friends28DeclareOpenOnlinePlaySessionERKNS_7account3UidE"
 HLE_FORCE_WAIT("_ZN2nn7friends29DeclareCloseOnlinePlaySessionERKNS_7account3UidE", "publish closure of this user's online-play session", Result, h_fr_CloseSession, const void *uid) { return dm_net_nextendo_enabled()&&dm_account_uid_exists(uid)?dm_nextendo_social_publish(1,NULL,0):RES_FAIL; }
 // Presence
 HLE_FORCE_WAIT("_ZN2nn7friends12UserPresence10InitializeERKNS_7account3UidE", "initialize the SDK presence object for the selected local user", Result, h_fr_UpInit, void *self, const void *uid) { return dm_nextendo_presence_initialize(self,uid); }
-HLE_FORCE("_ZN2nn7friends12UserPresence14SetDescriptionEPKc", "presence unavailable (cut)", Result, h_fr_UpDesc, void *self, const char *s) { (void)self; (void)s; return RES_FAIL; }
+HLE_FORCE("_ZN2nn7friends12UserPresence14SetDescriptionEPKc", "Nextendo on: the SDK's own setter, which only writes the presence object; otherwise presence unavailable (cut)", Result, h_fr_UpDesc, void *self, const char *s) { return dm_nextendo_presence_describe(self, s); }
 HLE_FORCE_WAIT("_ZN2nn7friends12UserPresence6CommitEv", "publish the actual SDK application-presence field", Result, h_fr_UpCommit, void *self) { return dm_nextendo_presence_commit(self); }
 
 // Additional SDK service overloads use the same provider and object lifetime.

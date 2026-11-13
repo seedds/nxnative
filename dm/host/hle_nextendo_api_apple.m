@@ -53,6 +53,72 @@ uint32_t dm_nextendo_api_baas_id(uint64_t *output) { @autoreleasepool {
     *output=value; return 0;
 } }
 
+// The field names /api/me gives, logged once (names only, never a value; a name that is not plain letters, digits and _ is left out): what else a
+// device log shows the account has, to answer more of the game's account questions from it
+static bool plain_name(id key) {
+    if (![key isKindOfClass:NSString.class] || ![key length] || [key length] > 40) return false;
+    for (NSUInteger i = 0; i < [key length]; i++) { unichar c = [key characterAtIndex:i]; if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_')) return false; }
+    return true;
+}
+static void me_fields(id document) {
+    if (![document isKindOfClass:NSDictionary.class]) return;
+    static dispatch_once_t once; dispatch_once(&once, ^{
+        NSMutableArray *names = [NSMutableArray new];
+        for (id key in [document allKeys]) { if (!plain_name(key)) continue; id value = document[key];
+            if ([value isKindOfClass:NSDictionary.class]) { for (id inner in [value allKeys]) if (plain_name(inner)) [names addObject:[NSString stringWithFormat:@"%@.%@", key, inner]]; }
+            else [names addObject:key]; }
+        [names sortUsingSelector:@selector(compare:)]; NSString *line = [names componentsJoinedByString:@" "]; if (line.length > 800) line = [line substringToIndex:800];
+        fprintf(stderr, "nextendo: account fields: %s\n", line.UTF8String);
+    });
+}
+// The Nextendo account's country, two capital letters from /api/me's account.country (the player picks it at sign-up), else "": never a guessed one.
+// Ryujinx-Nextendo (NextendoCountry.cs) answers CachedNintendoAccountInfo::GetCountry from the same field. Fetched once per signed-in account
+uint32_t dm_nextendo_account_country(char output[3]) { @autoreleasepool {
+    if (!output) return DM_ACCOUNT_FAIL; output[0]=0;
+    NSData *identity = dm_nextendo_api_identity();
+    static pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER; static NSData *cached_identity; static char cached[3];
+    pthread_mutex_lock(&mutex); bool known = identity && [cached_identity isEqual:identity]; if (known) memcpy(output,cached,3); pthread_mutex_unlock(&mutex);
+    if (known) return 0;
+    uint8_t *buffer=malloc(API_MAX); if (!buffer) return DM_ACCOUNT_FAIL; size_t size=0;
+    uint32_t result=dm_nextendo_api_request("me",NULL,0,buffer,API_MAX,&size);
+    NSData *bytes=result?nil:[NSData dataWithBytes:buffer length:size]; free(buffer); if (result) return result;
+    id document=[NSJSONSerialization JSONObjectWithData:bytes options:0 error:nil]; me_fields(document);
+    id account=[document isKindOfClass:NSDictionary.class]?document[@"account"]:nil;
+    id field=[account isKindOfClass:NSDictionary.class]?account[@"country"]:nil;
+    NSString *country=[field isKindOfClass:NSString.class]?[field stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceCharacterSet].uppercaseString:@"";
+    char code[3]={0};
+    if (country.length==2) { unichar a=[country characterAtIndex:0], b=[country characterAtIndex:1]; if (a>='A' && a<='Z' && b>='A' && b<='Z') { code[0]=(char)a; code[1]=(char)b; } }
+    if (identity && [identity isEqual:dm_nextendo_api_identity()]) { pthread_mutex_lock(&mutex); cached_identity=identity; memcpy(cached,code,3); pthread_mutex_unlock(&mutex); }
+    memcpy(output,code,3); return 0;
+} }
+
+// The Nextendo account's birthday as YYYY-MM-DD, else "". Which /api/me field carries it is not confirmed yet (the account fields line above will show it): the
+// usual names are tried, in account and at the top level, and only a value that starts with a plain date is taken (a time after it is dropped). Fetched once per account
+uint32_t dm_nextendo_account_birthday(char output[11]) { @autoreleasepool {
+    if (!output) return DM_ACCOUNT_FAIL; output[0]=0;
+    NSData *identity = dm_nextendo_api_identity();
+    static pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER; static NSData *cached_identity; static char cached[11];
+    pthread_mutex_lock(&mutex); bool known = identity && [cached_identity isEqual:identity]; if (known) memcpy(output,cached,11); pthread_mutex_unlock(&mutex);
+    if (known) return 0;
+    uint8_t *buffer=malloc(API_MAX); if (!buffer) return DM_ACCOUNT_FAIL; size_t size=0;
+    uint32_t result=dm_nextendo_api_request("me",NULL,0,buffer,API_MAX,&size);
+    NSData *bytes=result?nil:[NSData dataWithBytes:buffer length:size]; free(buffer); if (result) return result;
+    id document=[NSJSONSerialization JSONObjectWithData:bytes options:0 error:nil]; me_fields(document);
+    id account=[document isKindOfClass:NSDictionary.class]?document[@"account"]:nil;
+    char date[11]={0};
+    for (id place in @[account ?: NSNull.null, document ?: NSNull.null]) {
+        if (![place isKindOfClass:NSDictionary.class] || date[0]) continue;
+        for (NSString *name in @[@"birthday", @"birth_date", @"birthdate", @"date_of_birth"]) {
+            id field=place[name]; if (![field isKindOfClass:NSString.class] || [field length]<10) continue;
+            const char *text=[[field substringToIndex:10] UTF8String]; bool plain=text && strlen(text)==10 && text[4]=='-' && text[7]=='-';
+            for (int i=0;plain && i<10;i++) if (i!=4 && i!=7 && (text[i]<'0' || text[i]>'9')) plain=false;
+            if (plain && ([field length]==10 || [field characterAtIndex:10]=='T' || [field characterAtIndex:10]==' ')) { memcpy(date,text,11); break; }
+        }
+    }
+    if (identity && [identity isEqual:dm_nextendo_api_identity()]) { pthread_mutex_lock(&mutex); cached_identity=identity; memcpy(cached,date,11); pthread_mutex_unlock(&mutex); }
+    memcpy(output,date,11); return 0;
+} }
+
 @interface DmNextendoApiTransfer : NSObject <NSURLSessionDataDelegate, NSURLSessionTaskDelegate>
 @property(nonatomic) NSLock *lock;
 @property(nonatomic) NSMutableData *data;
@@ -133,6 +199,16 @@ uint32_t dm_nextendo_api_request(const char *resource, const uint8_t *body, size
     [transfer.lock lock];
     BOOL valid = !transfer.failed && transfer.status >= 200 && transfer.status < 300 && transfer.data.length <= capacity;
     if (valid) { memcpy(output,transfer.data.bytes,transfer.data.length); *output_size = transfer.data.length; }
+    NSInteger status = transfer.status;
     [transfer.lock unlock]; [session finishTasksAndInvalidate];
+    // A refused request is logged once per resource and status (no body, no token), so a device log shows whether Nextendo takes this
+    // bearer for the resource: 401 or 403 here would mean it wants another kind of token
+    if (!valid) {
+        static pthread_mutex_t seen_lock = PTHREAD_MUTEX_INITIALIZER; static NSMutableSet<NSString *> *seen;
+        NSString *key = [NSString stringWithFormat:@"%@ %ld", resourceName, (long)status];
+        pthread_mutex_lock(&seen_lock); if (!seen) seen = [NSMutableSet new]; BOOL first = ![seen containsObject:key]; [seen addObject:key]; pthread_mutex_unlock(&seen_lock);
+        NSString *what = status ? [NSString stringWithFormat:@"HTTP %ld", (long)status] : @"nothing (no connection, or an oversized answer)";
+        if (first) fprintf(stderr, "[dm] [RED] nextendo: /api/%s answered %s\n", resource, what.UTF8String);
+    }
     return valid ? 0 : DM_ACCOUNT_FAIL;
 } }

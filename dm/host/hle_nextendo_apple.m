@@ -102,6 +102,12 @@ uint32_t dm_nextendo_account_id(uint64_t *out) { @autoreleasepool {
     *out = c.pid; return 0;
 } }
 uint32_t dm_nextendo_account_ensure(void) { @autoreleasepool { return credential() ? 0 : DM_ACCOUNT_FAIL; } }
+uint32_t dm_nextendo_account_username(char out[33]) { @autoreleasepool {
+    if (!out) return DM_ACCOUNT_FAIL; memset(out, 0, 33); DmNextendoCredential *c = credential(); if (!c) return DM_ACCOUNT_FAIL;
+    const char *name = c.username.UTF8String; size_t n = name ? strlen(name) : 0;
+    if (n > 32) { n = 32; while (n && ((unsigned char)name[n] & 0xc0) == 0x80) n--; }   // whole UTF-8 characters only
+    if (!n) return DM_ACCOUNT_FAIL; memcpy(out, name, n); return 0;
+} }
 // Host-only API authorization. Never serialized into a game bundle or HLE output.
 NSString *dm_nextendo_api_bearer(void) { return credential().token; }
 NSData *dm_nextendo_api_identity(void) {
@@ -124,6 +130,11 @@ uint32_t dm_nextendo_copy_public_signing_key(void *buffer, uint64_t capacity, ui
     if (!publicSigningKey) return DM_ACCOUNT_FAIL; *size = publicSigningKey.length; if (!buffer || capacity < publicSigningKey.length) return DM_ACCOUNT_FAIL;
     memcpy(buffer, publicSigningKey.bytes, publicSigningKey.length); return 0;
 } }
+static NSString *tokenSub, *tokenDevice, *tokenDeviceAccount;   // under accountLock
+static NSString *random_hex(size_t count) {
+    uint8_t bytes[32]; if (count > sizeof bytes || SecRandomCopyBytes(kSecRandomDefault, count, bytes) != errSecSuccess) return nil;
+    NSMutableString *hex = [NSMutableString stringWithCapacity:count * 2]; for (size_t i = 0; i < count; i++) [hex appendFormat:@"%02x", bytes[i]]; return hex;
+}
 static NSData *id_token(DmNextendoCredential *c) {
     NSTimeInterval now = NSDate.date.timeIntervalSince1970; NSData *proof = [c.token dataUsingEncoding:NSASCIIStringEncoding]; unsigned char hash[CC_SHA256_DIGEST_LENGTH]; CC_SHA256(proof.bytes, (CC_LONG)proof.length, hash);
     NSData *fingerprint = [NSData dataWithBytes:hash length:sizeof hash]; pthread_mutex_lock(&accountLock);
@@ -131,12 +142,20 @@ static NSData *id_token(DmNextendoCredential *c) {
     if (![version isKindOfClass:NSString.class] || !version.length || version.length > 64 || ![version canBeConvertedToEncoding:NSASCIIStringEncoding]) { pthread_mutex_unlock(&accountLock); return nil; }
     if (cachedToken && [cachedFingerprint isEqual:fingerprint] && [cachedVersion isEqual:version] && cachedExpiry > now && cachedExpiry <= c.expiry) { NSData *token = cachedToken; pthread_mutex_unlock(&accountLock); return token; }
     pthread_once(&signingOnce, initialize_signing_key); if (!signingKey || !publicSigningKey) { pthread_mutex_unlock(&accountLock); return nil; }
-    uint64_t expiry = (uint64_t)floor(MIN(c.expiry, now + 3600)); if ((double)expiry <= now) { pthread_mutex_unlock(&accountLock); return nil; }
-    unsigned char keyHash[CC_SHA256_DIGEST_LENGTH]; CC_SHA256(publicSigningKey.bytes, (CC_LONG)publicSigningKey.length, keyHash);
-    NSString *kid = [@"nx-port-studio-" stringByAppendingString:base64url([NSData dataWithBytes:keyHash length:16])];
-    NSDictionary *header = @{@"alg":@"RS256", @"typ":@"JWT", @"kid":kid};
-    NSDictionary *claims = @{@"iss":@"nx-port-studio", @"sub":[NSString stringWithFormat:@"%llu", c.pid], @"iat":@((uint64_t)floor(now)), @"exp":@(expiry), @"nnex":c.token, @"tv":version};
-    NSData *headerData = [NSJSONSerialization dataWithJSONObject:header options:NSJSONWritingSortedKeys error:nil], *claimData = [NSJSONSerialization dataWithJSONObject:claims options:NSJSONWritingSortedKeys error:nil];
+    uint64_t expiry = (uint64_t)floor(MIN(c.expiry, now + 3 * 3600)); if ((double)expiry <= now) { pthread_mutex_unlock(&accountLock); return nil; }
+    // The BaaS id_token shape Nextendo's own clients send (Ryujinx-Nextendo ManagerServer.GenerateIdToken, Mush8 nextendo.rs id_token): the
+    // header's kid and typ, Nintendo BaaS's issuer, audience and certificate URL, random user / device / device-account IDs (fixed for the
+    // process) and "hm", the online-membership claim (Ryujinx-Nextendo: Splatoon 2 reads it locally before it goes online). The server authenticates the nnex proof, not
+    // this signature (Mush8 sends random bytes there); Wonder's token has no app_id (Ryujinx sends one only for the NSO Classics, Scarlet and MH Rise JP/HK)
+    if (!tokenSub) { tokenSub = random_hex(16); tokenDevice = random_hex(16); tokenDeviceAccount = random_hex(16); }
+    if (!tokenSub || !tokenDevice || !tokenDeviceAccount) { tokenSub = nil; pthread_mutex_unlock(&accountLock); return nil; }
+    NSString *baas = @"https://e0d67c509fb203858ebcb2fe3f88c2aa.baas.nintendo.com"; NSNumber *issued = @((uint64_t)floor(now));
+    NSDictionary *header = @{@"alg":@"RS256", @"typ":@"id_token", @"kid":@"nextendo-baas-key-1"};
+    NSDictionary *claims = @{@"sub":tokenSub, @"aud":@"ed9e2f05d286f7b8", @"iss":baas, @"iat":issued, @"nbf":issued, @"exp":@(expiry),
+        @"jku":[baas stringByAppendingString:@"/1.0.0/certificates"], @"jti":NSUUID.UUID.UUIDString.lowercaseString, @"di":tokenDevice, @"sn":@"XAW10000000000",
+        @"bs:did":tokenDeviceAccount, @"hm":@YES, @"nnex":c.token, @"tv":version};
+    NSJSONWritingOptions json = NSJSONWritingSortedKeys | NSJSONWritingWithoutEscapingSlashes;
+    NSData *headerData = [NSJSONSerialization dataWithJSONObject:header options:json error:nil], *claimData = [NSJSONSerialization dataWithJSONObject:claims options:json error:nil];
     if (!headerData || !claimData) { pthread_mutex_unlock(&accountLock); return nil; }
     NSString *message = [NSString stringWithFormat:@"%@.%@", base64url(headerData), base64url(claimData)]; NSData *bytes = [message dataUsingEncoding:NSASCIIStringEncoding];
     CFErrorRef error = NULL; dm_guest_host_wait_begin(); NSData *signature = CFBridgingRelease(SecKeyCreateSignature(signingKey, kSecKeyAlgorithmRSASignatureMessagePKCS1v15SHA256, (__bridge CFDataRef)bytes, &error)); dm_guest_host_wait_end(); if (error) CFRelease(error);

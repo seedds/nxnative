@@ -184,9 +184,24 @@ static int boot_env(void) {
     aoc_locate();   // add-on content: Documents/aoc, else <App>/aoc; an empty Documents/aoc explicitly selects no DLC
     NSString *pso = [res stringByAppendingPathComponent:@"pso"];   // the pipeline archive made offline (build_ipa.sh, dm/gfx/tools/pso_offline.py): the shader pairs' bases, which the device then does not build
     if ([fm fileExistsAtPath:pso]) setenv("DM_PSO_BUNDLE", pso.fileSystemRepresentation, 0);
+    // An app built with --nextendo (build_ipa.sh): the public service profile, unless an env file names another. hle_nextendo_routes.c takes only files of this
+    // user's, writable by no one else, and the installer may own the bundle's: a private copy in Library/Application Support each start
+    NSString *bundled = [res stringByAppendingPathComponent:@"dm/nextendo-services"];
+    if (!getenv("DM_NEXTENDO_ROUTES") && [fm fileExistsAtPath:[bundled stringByAppendingPathComponent:@"routes.tsv"]]) {
+        NSString *copy = [NSSearchPathForDirectoriesInDomains(NSApplicationSupportDirectory, NSUserDomainMask, YES)[0] stringByAppendingPathComponent:@"nxnative/nextendo-services"];
+        BOOL ok = [fm createDirectoryAtPath:copy withIntermediateDirectories:YES attributes:@{NSFilePosixPermissions: @0700} error:nil];
+        for (NSString *f in @[@"routes.tsv", @"provider-ca.der", @"manifest.json"]) {
+            NSString *to = [copy stringByAppendingPathComponent:f];
+            ok = ok && [[NSData dataWithContentsOfFile:[bundled stringByAppendingPathComponent:f]] writeToFile:to atomically:YES] && !chmod(to.fileSystemRepresentation, 0600);
+        }
+        if (ok) setenv("DM_NEXTENDO_ROUTES", [copy stringByAppendingPathComponent:@"routes.tsv"].fileSystemRepresentation, 0);
+        else fprintf(stderr, "[RED] boot: the Nextendo service profile could not be copied to %s; Nextendo mode refuses every service\n", copy.fileSystemRepresentation);
+    }
     chdir(doc.fileSystemRepresentation);
     g_argv[0] = strdup("dmhost"); g_argv[1] = strdup(dm.fileSystemRepresentation); g_argc = 2;
-    dm_host_preload_start(g_argc, g_argv);   // Module tables / relocation / takeover run early in the background, in parallel with UIKit startup (and the launcher: the settings it sets are read when the game starts)
+    // Module tables / relocation / takeover run early in the background, in parallel with UIKit startup (and the launcher: the settings it sets are read when the game starts).
+    // Not with Nextendo's patched main (dm/nextendo, loader.c nextendo_main): which main loads follows the launcher's Network choice, so loading waits for Play
+    if (![fm fileExistsAtPath:[dm stringByAppendingPathComponent:@"nextendo/main.fixups.tsv"]]) dm_host_preload_start(g_argc, g_argv);
     return 1;
 }
 

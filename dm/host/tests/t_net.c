@@ -140,6 +140,9 @@ static void nifm(void) {
     CHECK(dm_net_ipconfig(&ip, NULL, NULL, NULL, NULL) < 0 && ip == 0 && !dm_nifm_available(), "missing interface does not claim connectivity");
     setenv("DM_NETWORK_INTERFACE", "lo0", 1);
     GET(fn_vvoid, "_ZN2nn4nifm20CancelNetworkRequestEv")(); CHECK(!dm_nifm_available(), "cancel clears the request state");
+    uint8_t proxy[0xac]; memset(proxy, 0x5a, sizeof proxy);
+    CHECK(GET(uint32_t (*)(void *), "_ZN2nn4nifm22GetCurrentProxySettingEPNS0_12ProxySettingE")(proxy) == 0 && !proxy[0] && !proxy[0xa9] && proxy[0xaa] == 0x5a,
+          "a network mode answers the proxy setting as a console without a proxy: 0xaa zero bytes, nothing past them");
 }
 static void udp(void) {
     int guest = SOCKET(2, 2, 17); address local = addr(htonl(0x7f000001), 0), peer = local;

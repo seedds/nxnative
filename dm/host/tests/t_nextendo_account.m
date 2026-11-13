@@ -11,6 +11,7 @@
 #include <stdatomic.h>
 #include <pthread.h>
 #include <errno.h>
+#import "../nextendo_login_apple.inc"   // the sign-in (hle_nextendo_login_apple.m): its record must pass this decoder
 
 static int checks, failures;
 static _Atomic int entered, left, waits, providerCalls;
@@ -63,6 +64,9 @@ static void set_record(NSDictionary *record) { pthread_mutex_lock(&providerLock)
 static void identity_tests(void) {
     NSMutableDictionary *record = valid_record(); set_record(record); uint64_t pid = 0; uint8_t available = 0;
     CHECK(dm_nextendo_account_available(&available) == 0 && available && dm_nextendo_account_id(&pid) == 0 && pid == 1800000042ull, "real metadata PID is returned without a fabricated fallback");
+    char name[33] = "x", nick[33];
+    CHECK(dm_nextendo_account_username(name) == 0 && !strcmp(name, "synthetic_user"), "the username is the signed-in record's");
+    unsetenv("DM_NICK"); CHECK(H(uint32_t (*)(char *, const void *), "_ZN2nn7account11GetNicknameEPNS0_8NicknameERKNS0_3UidE")(nick, NULL) == 0 && !strcmp(nick, "synthetic_user"), "Nextendo mode: the nickname is the account's username");
     int calls = atomic_load(&providerCalls);
     for (unsigned i = 0; i < 3; i++) { mode = (dm_net_mode_t)i; available = 9; pid = 9; CHECK(dm_nextendo_account_available(&available) == 0 && !available && dm_nextendo_account_id(&pid) != 0 && !pid && dm_nextendo_account_ensure() != 0, "offline/LAN/LDN never load an online credential"); }
     CHECK(atomic_load(&providerCalls) == calls, "disabled modes do not query credentials"); mode = DM_NET_AUTO;
@@ -88,8 +92,10 @@ static void token_tests(void) {
     if (!headerBytes || !claimBytes) return;
     NSDictionary *header = [NSJSONSerialization JSONObjectWithData:headerBytes options:0 error:nil], *claims = [NSJSONSerialization JSONObjectWithData:claimBytes options:0 error:nil];
     NSDictionary *original = [NSJSONSerialization JSONObjectWithData:fixture options:0 error:nil];
-    CHECK([header[@"alg"] isEqual:@"RS256"] && [claims[@"iss"] isEqual:@"nx-port-studio"] && [claims[@"sub"] isEqual:@"1800000042"] && [claims[@"nnex"] isEqual:original[@"token"]] && [claims[@"tv"] isEqual:@"3.0.5"], "own namespace, actual PID, untouched NEX proof and original game version");
-    CHECK(!claims[@"aud"] && !claims[@"jku"] && !claims[@"hm"] && !claims[@"sn"] && !claims[@"country"] && [claims[@"exp"] doubleValue] <= [original[@"expires_at"] doubleValue], "no invented Nintendo identity, membership or country; expiry bounded by the proof");
+    CHECK([header[@"alg"] isEqual:@"RS256"] && [header[@"typ"] isEqual:@"id_token"] && [header[@"kid"] isEqual:@"nextendo-baas-key-1"] && [claims[@"nnex"] isEqual:original[@"token"]] && [claims[@"tv"] isEqual:@"3.0.5"], "Nextendo clients' BaaS header, untouched NEX proof and original game version");
+    CHECK([claims[@"iss"] isEqual:@"https://e0d67c509fb203858ebcb2fe3f88c2aa.baas.nintendo.com"] && [claims[@"aud"] isEqual:@"ed9e2f05d286f7b8"] && [claims[@"hm"] isEqual:@YES] && [claims[@"sub"] length] == 32 && [claims[@"bs:did"] length] == 32 && !claims[@"country"] && !claims[@"app_id"],
+          "the claims Ryujinx-Nextendo and Mush8 send (issuer, audience, membership, random IDs), no country and no app_id for this game");
+    CHECK([claims[@"exp"] doubleValue] <= [original[@"expires_at"] doubleValue] && [claims[@"nbf"] isEqual:claims[@"iat"]], "expiry bounded by the proof");
     uint8_t publicKeyBytes[1024]; uint64_t keySize = 0; CHECK(dm_nextendo_copy_public_signing_key(publicKeyBytes, sizeof publicKeyBytes, &keySize) == 0 && keySize, "only the ephemeral public key is exported for verification");
     NSData *keyData = [NSData dataWithBytes:publicKeyBytes length:(NSUInteger)keySize]; SecKeyRef key = SecKeyCreateWithData((__bridge CFDataRef)keyData, (__bridge CFDictionaryRef)@{(__bridge id)kSecAttrKeyType:(__bridge id)kSecAttrKeyTypeRSA, (__bridge id)kSecAttrKeyClass:(__bridge id)kSecAttrKeyClassPublic}, NULL);
     NSData *signedBytes = [[NSString stringWithFormat:@"%@.%@", segments[0], segments[1]] dataUsingEncoding:NSASCIIStringEncoding];
@@ -119,6 +125,8 @@ static void async_tests(void) {
     Worker work = {contextA, 99}; pthread_t thread = pending(&work);
     CHECK(dm_nextendo_async_done(contextA, &done) == 0 && !done && event(contextA, &completion) == 0 && !completion.signaled, "pending operation exposes an unsignaled real event binding");
     release_provider(thread); CHECK(work.result == 0 && completion.signaled && result(contextA) == 0, "success and completion event publish only after actual token creation");
+    typedef uint32_t (*Kind)(void *); Kind kind = H(Kind, "_ZN2nn7account37AsyncNetworkServiceLicenseInfoContext28GetNetworkServiceLicenseKindEv");
+    CHECK(kind(contextA) == 1 && kind(contextB) == 0, "membership reads subscribed only for a completed successful request");
     CHECK(H(Object, "_ZN2nn7account12AsyncContext6CancelEv")(contextA) == 0 && result(contextA) == 0, "cancel after completion does not rewrite a completed success");
     CHECK(contextA[0] == (char)0xa5 && contextB[0] == 0x5a, "SDK4/19 private object memory remains untouched"); close_event(&completion); dtor(contextA);
     ctor(contextA); work = (Worker){contextA,99}; thread = pending(&work); CHECK(event(contextA, &completion) == 0, "attach cancel completion event");
@@ -157,6 +165,30 @@ static void async_tests(void) {
     CHECK(result(contextA) != 0 && H(Object, "_ZN2nn7account12AsyncContext6CancelEv")(contextA) == 0, "offline: the result is failure and cancel has nothing to cancel");
     close_event(&offline); dtor(contextA); mode=DM_NET_NEXTENDO;
 }
+// The Mac sign-in's pieces that need no network: the record it builds from an nx2 game token passes hle_nextendo_apple.m's own checks, and the stored sign-in
+// is a private file that a loose or linked one cannot stand in for
+static void login_tests(void) {
+    NSString *token = valid_record()[@"token"]; NSString *error = nil; NSTimeInterval now = NSDate.date.timeIntervalSince1970;
+    NSDictionary *record = nxl_record(token, now, &error);
+    CHECK(record && [record[@"identity"][@"pid"] unsignedLongLongValue] == 1800000042ull && [record[@"identity"][@"username"] isEqual:@"synthetic_user"], "the sign-in's record takes its identity from the token's payload");
+    set_record(record); uint8_t available = 0; uint64_t pid = 0;
+    CHECK(dm_nextendo_account_available(&available) == 0 && available && dm_nextendo_account_id(&pid) == 0 && pid == 1800000042ull, "the sign-in's record passes the account decoder");
+    NSString *payload = [NSString stringWithFormat:@"1800000042.synthetic_user.%llu", (unsigned long long)now - 5]; uint8_t mac[32] = {0};
+    NSString *stale = [NSString stringWithFormat:@"nx2.%@.%@", b64([payload dataUsingEncoding:NSUTF8StringEncoding]), b64([NSData dataWithBytes:mac length:32])];
+    CHECK(!nxl_record(stale, now, &error) && error.length, "an expired game token gives no record");
+    CHECK(!nxl_record(@"oauth.abc.def", now, &error) && !nxl_record(@"nx2.bm9uZQ.AA", now, &error), "a token that is not an nx2 one, or names no identity, gives no record");
+    char dir[] = "/tmp/t_nextendo_login.XXXXXX"; CHECK(mkdtemp(dir) != NULL, "temporary sign-in folder");
+    setenv("DM_NEXTENDO_LOGIN_DIR", dir, 1);
+    CHECK(!nxl_read_refresh(), "no stored sign-in at first");
+    CHECK(nxl_write_refresh(@"synthetic-refresh") && [nxl_read_refresh() isEqual:@"synthetic-refresh"], "the stored sign-in reads back");
+    struct stat st; CHECK(!stat(nxl_refresh_path().fileSystemRepresentation, &st) && (st.st_mode & 0777) == 0600, "the stored sign-in is readable by its owner only");
+    chmod(nxl_refresh_path().fileSystemRepresentation, 0644); CHECK(!nxl_read_refresh(), "a stored sign-in others can read is refused");
+    NSString *link = [[NSString stringWithUTF8String:dir] stringByAppendingPathComponent:@"elsewhere"];
+    CHECK(nxl_write_refresh(@"synthetic-refresh") && !rename(nxl_refresh_path().fileSystemRepresentation, link.fileSystemRepresentation) && !symlink(link.fileSystemRepresentation, nxl_refresh_path().fileSystemRepresentation) && !nxl_read_refresh(), "a linked stored sign-in is refused");
+    unlink(nxl_refresh_path().fileSystemRepresentation); unlink(link.fileSystemRepresentation);
+    CHECK(nxl_write_refresh(@"synthetic-refresh") && nxl_write_refresh(nil) && !nxl_read_refresh(), "sign-out removes the stored sign-in");
+    unsetenv("DM_NEXTENDO_LOGIN_DIR"); rmdir(dir); set_record(valid_record());
+}
 int main(void) { @autoreleasepool {
     // No configured provider is a normal unavailable result, not an OS storage
     // read or a spawned helper. Offline never invokes even an installed provider.
@@ -165,7 +197,7 @@ int main(void) { @autoreleasepool {
     dm_nextendo_set_credential_provider(provider); unsetenv("DM_NEXTENDO_ROUTES"); mode=DM_NET_AUTO;
     CHECK(!dm_nextendo_account_available(&absent) && !absent && !atomic_load(&providerCalls), "automatic local mode without a profile never invokes the credential provider");
     setenv("DM_NEXTENDO_ROUTES","/synthetic/public-policy.tsv",1); mode=DM_NET_NEXTENDO;
-    dm_nextendo_set_game_version("3.0.5"); identity_tests(); token_tests(); async_tests();
+    dm_nextendo_set_game_version("3.0.5"); identity_tests(); login_tests(); token_tests(); async_tests();
     CHECK(atomic_load(&entered) > 0 && atomic_load(&entered) == atomic_load(&left) && atomic_load(&waits) > 0, "blocking account hooks publish balanced guest contexts and mark host security waits");
     printf("Nextendo account: %d checks, %d failures; synthetic provider only, no user credentials read\n", checks, failures); return failures ? 1 : 0;
 } }

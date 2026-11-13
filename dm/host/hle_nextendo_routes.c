@@ -167,7 +167,15 @@ static bool copy_peer_policy(const char *host, char *output, size_t capacity, co
 }
 static bool peer_policy(const char *host, char *output, size_t capacity, const uint8_t **ca, size_t *size) { return copy_peer_policy(host, output, capacity, ca, size, false); }
 static bool pinned_peer_policy(const char *host, char *output, size_t capacity, const uint8_t **ca, size_t *size) { return copy_peer_policy(host, output, capacity, ca, size, true); }
-__attribute__((constructor)) static void register_policy(void) { dm_net_set_dns_provider(resolve_host); dm_ssl_set_peer_guard(admit_peer); dm_ssl_set_peer_policy(peer_policy); dm_ssl_set_peer_pin_policy(pinned_peer_policy); }
+// The service's CA for the SSL service's built-in certificates when the player has no firmware store (hle_ssl_apple.m): a game whose own TLS takes its roots
+// from the store (Super Mario Bros. Wonder's gRPC) then needs only the sign-in. The profile's routes share the provider's one CA (dm/net/nextendo-services.json
+// provider.caSHA256, checked when the table loaded); an enrolled leaf of a pinned route is not a CA and is skipped
+static bool provider_ca(const uint8_t **ca, size_t *size) {
+    if (!dm_net_nextendo_enabled() || dm_nextendo_routes_initialize() != DM_NEXTENDO_ROUTES_READY) return false;
+    for (size_t i = 0; i < route_count; i++) if (routes[i].ca_size && !routes[i].pinned) { *ca = routes[i].ca; *size = routes[i].ca_size; return true; }
+    return false;
+}
+__attribute__((constructor)) static void register_policy(void) { dm_net_set_dns_provider(resolve_host); dm_ssl_set_peer_guard(admit_peer); dm_ssl_set_peer_policy(peer_policy); dm_ssl_set_peer_pin_policy(pinned_peer_policy); dm_ssl_set_builtin_fallback(provider_ca); }
 int dm_nextendo_routes_initialize(void) {
     pthread_mutex_lock(&policy_lock); int status = atomic_load(&policy_status);
     if (status == DM_NEXTENDO_ROUTES_UNINITIALIZED) { status = load_policy(getenv("DM_NEXTENDO_ROUTES"), &routes, &route_count); atomic_store(&policy_status, status); }

@@ -1,11 +1,13 @@
 // Canonical API behavior with a synthetic proof and mock transport only.
 #import "../nextendo_api_apple.h"
+#include "../nextendo_account.h"
 #include <stdio.h>
 #include <string.h>
 static int checks, failures, requests;
 static BOOL linked = YES;
 static unsigned response_status = 200;
 static bool oversized, transport_failed;
+static const char *me_reply;
 // Exercise the production streaming delegate directly; no URL connection starts.
 @interface DmNextendoApiTransfer : NSObject <NSURLSessionDataDelegate,NSURLSessionTaskDelegate>
 @property(nonatomic) NSMutableData *data;
@@ -24,8 +26,8 @@ static bool transport(const char *url,const char *method,const char *authorizati
     CHECK(!strcmp(url,"https://nextendo.network/api/friends") || !strcmp(url,"https://nextendo.network/api/me") || !strcmp(url,"https://nextendo.network/api/presence"));
     if (strstr(url,"presence")) { CHECK(!strcmp(method,"POST") && body && body_size); }
     else { CHECK(!strcmp(method,"GET") && !body_size); }
-    const char json[]="{\"friends\":[]}"; CHECK(capacity >= sizeof json);
-    memcpy(output,json,sizeof json-1); *size=oversized?capacity+1:sizeof json-1; *status=response_status;
+    const char *json=me_reply && strstr(url,"/api/me")?me_reply:"{\"friends\":[]}"; size_t length=strlen(json); CHECK(capacity > length);
+    memcpy(output,json,length); *size=oversized?capacity+1:length; *status=response_status;
     return !transport_failed;
 }
 int main(void) { @autoreleasepool {
@@ -33,6 +35,16 @@ int main(void) { @autoreleasepool {
     CHECK(!dm_nextendo_api_request("friends",NULL,0,output,sizeof output,&size) && size==14);
     CHECK(!dm_nextendo_api_request("me",NULL,0,output,sizeof output,&size));
     CHECK(!dm_nextendo_api_request("presence",(const uint8_t*)"{}",2,output,sizeof output,&size));
+    char country[3]="ZZ";
+    me_reply="{\"account\":{\"country\":\"fr \"},\"nsa\":\"abcdef0000001234\"}"; CHECK(!dm_nextendo_account_country(country) && !strcmp(country,"FR"));
+    me_reply="{\"account\":{\"country\":\"France\"}}"; CHECK(!dm_nextendo_account_country(country) && !country[0]);
+    me_reply="{\"account\":{}}"; CHECK(!dm_nextendo_account_country(country) && !country[0]);
+    char birthday[11]="x";
+    me_reply="{\"account\":{\"birthday\":\"1990-05-12\"}}"; CHECK(!dm_nextendo_account_birthday(birthday) && !strcmp(birthday,"1990-05-12"));
+    me_reply="{\"birth_date\":\"1991-02-03T00:00:00Z\"}"; CHECK(!dm_nextendo_account_birthday(birthday) && !strcmp(birthday,"1991-02-03"));
+    me_reply="{\"account\":{\"birthday\":\"12/05/1990\"}}"; CHECK(!dm_nextendo_account_birthday(birthday) && !birthday[0]);
+    me_reply="{\"account\":{}}"; CHECK(!dm_nextendo_account_birthday(birthday) && !birthday[0]);
+    me_reply=NULL;
     for (unsigned status=300;status<=500;status+=100) { response_status=status; CHECK(dm_nextendo_api_request("friends",NULL,0,output,sizeof output,&size)!=0 && !size); }
     response_status=200; oversized=true; CHECK(dm_nextendo_api_request("friends",NULL,0,output,sizeof output,&size)!=0 && !size); oversized=false;
     transport_failed=true; CHECK(dm_nextendo_api_request("friends",NULL,0,output,sizeof output,&size)!=0 && !size); transport_failed=false;

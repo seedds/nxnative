@@ -82,6 +82,10 @@ dmhost: FORCE
 endif
 endif
 .PHONY: FORCE
+# The Mac Nextendo sign-in tool: make -C dm/host nextendo_login, then dm/host/nextendo_login sign-in (status, sign-out). dmhost reads the sign-in it keeps
+# (hle_nextendo_login_apple.m, nextendo_login_apple.inc)
+nextendo_login: ../tools/nextendo_login.m nextendo_login_apple.inc
+	clang -O1 -g -fobjc-arc -Wall -Wextra -mmacosx-version-min=$(MACOS_MIN) -o $@ ../tools/nextendo_login.m -framework Foundation -framework Security -framework AppKit
 FORCE:
 # Makefile: a change to CFLAGS (or the compile line) rebuilds the host
 dmhost: Makefile ../tools/apple_crypto.py $(SRC) $(GFX) ../third_party/stb_vorbis/stb_vorbis.c dm.h hle.h romfs_image.h save_sync.h dm_input.h pad_slots.h hle_haptics.h haptics_apple.h pad_switch2_apple.h switch2_proto.h motion_fusion.h motion_apple.h motion_pro.h motion_pro_mac.h pad_apple.h pad_hid.h pad_hid_mac.h home_quit.h home_quit_mac.h ctrl_prompt.h front.h $(GFX_H) $(GAME_H) $(GAME_STAMP) $(VPX_LIB) $(DAV1D_LIB) $(MSL_H)

@@ -20,4 +20,5 @@ uint32_t dm_nextendo_friends_ensure(const void *uid);
 uint32_t dm_nextendo_friends_available(uint8_t *available,const void *uid);
 uint32_t dm_nextendo_presence_initialize(void *object,const void *uid);
 uint32_t dm_nextendo_presence_commit(const void *object);
+uint32_t dm_nextendo_presence_describe(void *object, const char *description);   // UserPresence::SetDescription: the SDK's own code with Nextendo on, else a failure
 uint32_t dm_nextendo_social_publish(unsigned status,const uint8_t *app_field,size_t size);

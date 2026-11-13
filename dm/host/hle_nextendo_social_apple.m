@@ -94,6 +94,34 @@ static uint32_t friends_snapshot(dm_social_friend **output,size_t *count,bool re
 uint32_t dm_nextendo_social_friends(dm_social_friend **output,size_t *count) { return friends_snapshot(output,count,false); }
 uint32_t dm_nextendo_social_friends_refresh(dm_social_friend **output,size_t *count) { return friends_snapshot(output,count,true); }
 
+// Nextendo shows a player online while presence keeps arriving (Mush8 sends it again every 45 seconds). The last presence a game published
+// is sent again on that period until the game publishes status 0 (its online session closed) or a send fails
+enum { PRESENCE_EVERY_S = 45 };
+static pthread_mutex_t g_presence_lock = PTHREAD_MUTEX_INITIALIZER;
+static NSData *g_presence_body;           // the last published body while its status is not 0
+static dispatch_source_t g_presence_timer;
+static uint32_t presence_post(NSData *body,NSData *identity) {
+    uint8_t response[4096];size_t count=0;
+    uint32_t result=dm_nextendo_api_request("presence",body.bytes,body.length,response,sizeof response,&count);
+    return !result&&[identity isEqual:dm_nextendo_api_identity()]?0:DM_ACCOUNT_FAIL;
+}
+static void presence_keep(NSData *body) {   // nil stops the repeats
+    pthread_mutex_lock(&g_presence_lock);
+    g_presence_body=body;
+    if (body && !g_presence_timer) {
+        g_presence_timer=dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER,0,0,dispatch_get_global_queue(QOS_CLASS_UTILITY,0));
+        dispatch_source_set_timer(g_presence_timer,dispatch_time(DISPATCH_TIME_NOW,PRESENCE_EVERY_S*NSEC_PER_SEC),PRESENCE_EVERY_S*NSEC_PER_SEC,5*NSEC_PER_SEC);
+        dispatch_source_set_event_handler(g_presence_timer,^{ @autoreleasepool {
+            pthread_mutex_lock(&g_presence_lock); NSData *again=g_presence_body; pthread_mutex_unlock(&g_presence_lock);
+            NSData *identity=again?dm_nextendo_api_identity():nil;
+            if (again && (!identity || presence_post(again,identity))) {
+                pthread_mutex_lock(&g_presence_lock); if (g_presence_body==again) g_presence_body=nil; pthread_mutex_unlock(&g_presence_lock);
+            }
+        } });
+        dispatch_resume(g_presence_timer);
+    }
+    pthread_mutex_unlock(&g_presence_lock);
+}
 uint32_t dm_nextendo_social_publish(unsigned status,const uint8_t *app_field,size_t size) { @autoreleasepool {
     if(status>2||size>DM_SOCIAL_APP_FIELD||(size&&!app_field))return DM_ACCOUNT_FAIL;
     NSData *identity=dm_nextendo_api_identity();if(!identity)return DM_ACCOUNT_FAIL;
@@ -105,7 +133,7 @@ uint32_t dm_nextendo_social_publish(unsigned status,const uint8_t *app_field,siz
         @"plateforme":@"nxnative",@"app_detail":@""};
     NSData *body=[NSJSONSerialization dataWithJSONObject:object options:0 error:nil];
     if(!body)return DM_ACCOUNT_FAIL;
-    uint8_t response[4096];size_t count=0;
-    uint32_t result=dm_nextendo_api_request("presence",body.bytes,body.length,response,sizeof response,&count);
-    return !result&&[identity isEqual:dm_nextendo_api_identity()]?0:DM_ACCOUNT_FAIL;
+    uint32_t result=presence_post(body,identity);
+    presence_keep(!result&&status?body:nil);
+    return result;
 } }

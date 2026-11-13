@@ -13418,9 +13418,9 @@ static void fb_prepare(NvProg *pr) {
         int image = b->kind == NVN_RB_IMG && !b->rw && !b->atom && b->reg < 32;
         if (!image && (b->kind != NVN_RB_TEX || b->reg >= NTEX)) continue;
         uint64_t handle = image ? S.img[1][b->reg] : tex_slot_h(S.tex[1], S.img[1], b->reg);
-        int tid = (int)(handle & 0xfffff); if (!tid) continue;
-        os_unfair_lock_lock(&g_rmu); uint64_t ser = tid < g_ntreg && g_treg[tid].ok ? g_treg[tid].t.serial : 0; os_unfair_lock_unlock(&g_rmu);
+        uint64_t ser = h_ser(handle);   // lock-free (g_tser), as the store lookahead reads it: this ran for every texture of every draw's fragment shader, a lock and an unlock each
         if (!ser) continue;
+        int tid = (int)(handle & 0xfffff);
         if (R.rt.depth && R.rt.depth->serial == ser) continue;   // fb_depth_rule
         for (int k = 0; k < R.rt.n && k < 8 && g_fb_n < 4; k++) { if (!R.rt.color[k] || R.rt.color[k]->serial != ser) continue;
             if (!image && (tile[b->reg >> 6] >> (b->reg & 63) & 1)) { PD("N %llu same-pass feedback sampling: slot %d reads attachment %d ser=%llu from the tile", g_stat_pass + !g_enc, b->reg, k, (unsigned long long)ser); continue; }   // fb_tile_plan

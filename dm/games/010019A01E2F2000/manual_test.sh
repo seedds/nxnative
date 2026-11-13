@@ -23,6 +23,8 @@ printf 'DM_INTERNAL_RESOLUTION=%s\nDM_PRESENT_UPSCALE=off\nDM_METAL_HUD=1\nDM_NV
 [ "${DRAW_TRACE:-}" = 1 ] && echo "DM_NVN_DRAW_TRACE=1" >> "$OUT/env.txt"
 # SHADOWS=2x: shadow tiles twice their size in a 4096 atlas (DM_SHADOW_RESOLUTION, main.shadow.runtime.tsv)
 [ -n "${SHADOWS:-}" ] && echo "DM_SHADOW_RESOLUTION=$SHADOWS" >> "$OUT/env.txt"
+# LOD=high: every model at its most detailed level (DM_MODEL_LOD, main.lod.runtime.tsv)
+[ -n "${LOD:-}" ] && echo "DM_MODEL_LOD=$LOD" >> "$OUT/env.txt"
 # PROBE=<module:offset,...>: guest probes (DM_PROBE, Mac), the first 3 hits of each printed; RUMBLE_PROBE=1 is the vibration set (README: Vibration with a DualSense):
 # main:936628 the rumble setup runs, main:9366a0 its RumbleCategories lookup found the resource, main:a4e00 / main:d350b8 an amplitude or effect request
 [ "${RUMBLE_PROBE:-}" = 1 ] && PROBE=main:936628,main:9366a0,main:a4e00,main:d350b8
@@ -82,7 +84,7 @@ for f, keys, n in re.findall(r'f(\d+):([^~]*)~f(\d+)', rec):
     else: spans.append([f, f + n, 0])
 print(f'ZL holds seen by the game: {len(spans)}; longest {max((b - a for a, b, _ in spans), default=0)} frames; holds of 1 s or more: '
       + (', '.join(f'f{a}-f{b} ({(b - a) / 60:.1f} s, {g} short gaps)' for a, b, g in spans if b - a >= 60) or 'none') if rec else 'ZL holds: no input recording')
-for l in re.findall(r'^.*(?:runtime patches|DM_NVN_ANISO:).*$', log, re.M)[:4]: print(l)
+for l in re.findall(r'^.*(?:runtime patches|DM_NVN_ANISO:).*$', log, re.M)[:5]: print(l)
 miss = {a or b for a, b in re.findall(r'\[RED\] (?:shader ([0-9a-f]{16}) \([^)]*\) failed to load:|failed to load shader ([0-9a-f]{16})_b:)', log)}   # the build's SHADER_MISSING: geometry shaders too
 print(f'missing shaders: {len(miss)} distinct (the next run of this script compiles them)')
 att = collections.Counter(re.findall(r'^\[pass\] F\d+ P \d+ (c0|d) ser=\d+ fmt=(\d+) (\d+x\d+)', log, re.M))

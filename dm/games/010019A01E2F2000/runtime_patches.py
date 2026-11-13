@@ -153,12 +153,33 @@ def generate_shadow(module, patched, fixups):
     return manifest(module, patched, fixups, BUILD, 'DM_SHADOW_RESOLUTION', shadow_writes(stub))
 
 
+# DM_MODEL_LOD=high, a third manifest (main.lod.runtime.tsv): every model drawn at its most detailed level. The model item's render method (main+0x6a2f0,
+# found through DM_NVN_DRAW_TRACE) reads its instance's 4-byte visibility record {from LOD, LOD, transition}: the transition byte at 0x6a670 sends a
+# cross-fade between two levels to 0x6b0d8, and the LOD byte at 0x6a678 indexes the model's level table ([model+0x18] + LOD * 0x60, at 0x6aa38).
+# Both reads become 0: level 0, no cross-fade. The visibility job that writes the record is unchanged.
+LOD_SITES = (
+    (0x6a670, 0x39400928, 0x52800008),   # ldrb w8,[x9,#2] -> mov w8,#0: no LOD cross-fade
+    (0x6a678, 0x39400528, 0x52800008),   # ldrb w8,[x9,#1] -> mov w8,#0: level 0
+)
+
+
+def lod_writes():
+    return [('high', off, struct.pack('<I', old), struct.pack('<I', new)) for off, old, new in LOD_SITES]
+
+
+def generate_lod(module, patched, fixups):
+    if module.build_id.hex() != BUILD:
+        raise ValueError('Metroid Prime 4 model LOD requires main v1.1.0 build ' + BUILD[:32])
+    return manifest(module, patched, fixups, BUILD, 'DM_MODEL_LOD', lod_writes())
+
+
 def main(argv):
     original, rewritten, out = map(Path, argv)
     module, image, fixups = nso.load(original.read_bytes(), original.name), rewritten.read_bytes(), layout(rewritten.with_name('main.fixups.tsv'))
     out.write_text(generate(module, image, fixups))
     out.with_name('main.shadow.runtime.tsv').write_text(generate_shadow(module, image, fixups))   # a second variable, loaded beside main.runtime.tsv (loader.c)
-    print('Runtime resolution: default (zero writes); preserved 1440p/1800p/2160p supersampling; experimental full-output 1080p/1440p/2160p/2880p; shadow resolution: default, 2x')
+    out.with_name('main.lod.runtime.tsv').write_text(generate_lod(module, image, fixups))
+    print('Runtime resolution: default (zero writes); preserved 1440p/1800p/2160p supersampling; experimental full-output 1080p/1440p/2160p/2880p; shadow resolution: default, 2x; model LOD: default, high')
 
 
 if __name__ == '__main__':

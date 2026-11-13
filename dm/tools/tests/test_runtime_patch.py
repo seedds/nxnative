@@ -138,6 +138,8 @@ class ScanSourcePatch(unittest.TestCase):
         for off, before, _ in self.runtime.SHADOW_SITES:
             struct.pack_into('<I', original, off, before)
         original[self.profile.SHADOW_UV_SITE:self.profile.SHADOW_UV_SITE + 4] = bytes.fromhex('009942fd')
+        for off, before, _ in self.runtime.LOD_SITES:
+            struct.pack_into('<I', original, off, before)
         patched = bytearray(base + 8192)
         patched[:len(original)] = original
         words, checked, exports = [], [], {}
@@ -269,6 +271,18 @@ class ScanSourcePatch(unittest.TestCase):
         patched[stub + 4] ^= 1
         with self.assertRaisesRegex(ValueError, 'mismatched rewritten shadow stub'): self.runtime.generate_shadow(module, patched, fixups)
 
+    def test_model_lod_high_reads_level_zero_without_cross_fade(self):
+        module, patched, fixups = self.fixture()
+        rows = [r.split('\t') for r in self.runtime.generate_lod(module, patched, fixups).splitlines()]
+        self.assertEqual((rows[0][3], [r[1] for r in rows if r[0] == 'choice']), ('DM_MODEL_LOD', ['default', 'high']))
+        writes = {int(r[2], 16): (int.from_bytes(bytes.fromhex(r[3]), 'little'), int.from_bytes(bytes.fromhex(r[4]), 'little')) for r in rows if r[0] == 'write'}
+        ldrb = lambda w: (w & 0xffc00000 == 0x39400000, (w >> 10) & 0xfff, (w >> 5) & 31, w & 31)   # ldrb wt,[xn,#imm]
+        self.assertEqual(ldrb(writes[0x6a670][0]), (True, 2, 9, 8))   # the transition byte
+        self.assertEqual(ldrb(writes[0x6a678][0]), (True, 1, 9, 8))   # the LOD byte
+        for off in (0x6a670, 0x6a678): self.assertEqual(writes[off][1], 0x52800008)   # mov w8,#0
+        patched[0x6a678] ^= 1
+        with self.assertRaises(ValueError): self.runtime.generate_lod(module, patched, fixups)
+
     def test_launcher_reads_the_shadow_choice_from_its_own_manifest(self):
         sys.path.insert(0, str(ROOT / 'dm/games'))
         import settings
@@ -281,6 +295,8 @@ class ScanSourcePatch(unittest.TestCase):
             self.assertEqual(runtime_patch.choices(folder, 'DM_SHADOW_RESOLUTION'), ())
             (folder / 'main.shadow.runtime.tsv').write_text(self.runtime.generate_shadow(module, patched, fixups))
             self.assertEqual(runtime_patch.choices(folder, 'DM_SHADOW_RESOLUTION'), ('default', '2x'))
+            (folder / 'main.lod.runtime.tsv').write_text(self.runtime.generate_lod(module, patched, fixups))
+            self.assertEqual(runtime_patch.choices(folder, 'DM_MODEL_LOD'), ('default', 'high'))
             self.assertIn('1800p', runtime_patch.choices(folder, 'DM_INTERNAL_RESOLUTION'))
             with mock.patch.dict(os.environ, {'SETTINGS_PLATFORM': 'mac'}), mock.patch.object(settings.nacp, 'languages', return_value=['en-US']):
                 row = next(r for r in settings.build('010019A01E2F2000', tmp, 'unused')['settings'] if r['env'] == 'DM_SHADOW_RESOLUTION')

@@ -125,10 +125,14 @@ static float mp4_band_k(void) {
     if (!mp4_quality_max_width || mp4_quality_max_width * 9 >= mp4_quality_max_height * 16) return 0;   // 16:9 or wider: nothing to do
     return (float)mp4_quality_max_width / (float)mp4_quality_max_height / (16.0f / 9.0f);
 }
+static int mp4_under(uintptr_t ra);
+// The scene's own passes on the window (its final image and post effects: main+0x332fa0 into 0xca8b0, main+0x338d48 into 0x1360c8, DM_NVN_RT_TRACE
+// in the fourth 16:10 run) run under the frame's scene step, which returns to main+0x33194c; they keep the whole window. The HUD (main+0x12e0e8),
+// radar, menus and loading screens begin theirs elsewhere.
 static void nvn_profile_set_rt(const NVNcommandBuffer *c, int n, const NVNtexture *const *ct, uint64_t caller) {
     const tex_t *t = n > 0 && ct ? (const tex_t *)ct[0] : NULL; uintptr_t base = mp4_main_base();
     int band = base && mp4_band_k() > 0 && !strcmp(dm_main_build(),"8275fbe1ec5191c279f3a943ad8524f4") && caller == base + 0x1300b8
-        && t && t->magic == MAGIC('T','E','X',0) && nvn_is_window_tex(ct[0]);   // the window itself: the game renders intermediates of its size and format too
+        && t && t->magic == MAGIC('T','E','X',0) && nvn_is_window_tex(ct[0]) && !mp4_under(base + 0x33194c);   // the window itself: the game renders intermediates of its size and format too
     mp4_band_has = 0;
     if (!band && base && caller == base + 0x1300b8 && t && t->magic == MAGIC('T','E','X',0) && t->d.format == NVN_FORMAT_RGBA8_SRGB && t->d.width == mp4_quality_max_width
         && t->d.height == mp4_quality_max_height && mp4_band_k() > 0) { static int once; if (!once++) LOG("MP4 16:10: a pass begins on an output-size RGBA8_SRGB target that is not the window; left whole"); }

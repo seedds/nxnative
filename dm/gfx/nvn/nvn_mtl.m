@@ -423,6 +423,7 @@ static void res_commit(void) {
 }
 // What the residency set holds: totals by kind and the largest objects. At the first GPU out-of-memory error (the error names none of them), and for DM_CTL "restop" (hle_hid.c). The set holds
 // the game's pools (shared buffers over guest memory), textures, heaps and staging alike
+static int g_res_top_show = 24;   // how many of the largest objects res_top lists (the periodic breakdown lists a few)
 static void res_top(const char *why) { @autoreleasepool {
     enum { N = 24 }; id<MTLAllocation> top[N] = {nil}; uint64_t total = 0, n = 0, kind[4] = {0}, count[4] = {0};
     pthread_mutex_lock(&g_res_mu);
@@ -434,7 +435,7 @@ static void res_top(const char *why) { @autoreleasepool {
     MLOG("%s: the residency set holds %llu objects, %llu MB (Metal's recommended working set %llu MB, GPU allocated %llu MB): textures %llu, %llu MB; heaps %llu, %llu MB; shared buffers %llu, %llu MB; private buffers %llu, %llu MB; the largest:", why,
          (unsigned long long)n, (unsigned long long)(total >> 20), (unsigned long long)(g_dev.recommendedMaxWorkingSetSize >> 20), (unsigned long long)(g_dev.currentAllocatedSize >> 20),
          (unsigned long long)count[0], (unsigned long long)(kind[0] >> 20), (unsigned long long)count[1], (unsigned long long)(kind[1] >> 20), (unsigned long long)count[2], (unsigned long long)(kind[2] >> 20), (unsigned long long)count[3], (unsigned long long)(kind[3] >> 20));
-    for (int k = 0; k < N && top[k]; k++) { id o = top[k];
+    for (int k = 0; k < N && k < g_res_top_show && top[k]; k++) { id o = top[k];
         if ([o conformsToProtocol:@protocol(MTLTexture)]) { id<MTLTexture> t = o; MLOG("  texture %lux%lux%lu format %lu levels %lu%s: %llu MB", (unsigned long)t.width, (unsigned long)t.height, (unsigned long)MAX(t.depth, t.arrayLength), (unsigned long)t.pixelFormat, (unsigned long)t.mipmapLevelCount, t.isSparse ? " (sparse)" : "", (unsigned long long)(t.allocatedSize >> 20)); }
         else if ([o conformsToProtocol:@protocol(MTLHeap)]) MLOG("  heap: %llu MB", (unsigned long long)(((id<MTLHeap>)o).size >> 20));
         else { id<MTLBuffer> b = o; int sh = b.storageMode == MTLStorageModeShared; MLOG("  buffer %p+%#lx (%s): %llu MB", sh ? b.contents : NULL, (unsigned long)b.length, sh ? "shared" : "private", (unsigned long long)(b.allocatedSize >> 20)); } }
@@ -2956,7 +2957,10 @@ static void up_wait_zero(_Atomic int *v, int site) {
     if (ws_on()) ws_put(site, w0, 1);
 }
 static unsigned g_up_seq;
-#define UP_BLOCK_SIZE (32u * 1024u * 1024u)
+// DM_UP_BLOCK_MB (4 to 32, default 32): the size of a texture-upload staging block. Each of the 3 upload slots keeps a block and an overflow block, so 32 MB means up to 192 MB of GPU memory held for staging;
+// 8 MB holds 48 MB. An upload bigger than a block gets a temporary block of its own, so this costs a little speed, not correctness
+static size_t up_block_size(void) { static size_t v; if (!v) { const char *e = getenv("DM_UP_BLOCK_MB"); int mb = e && *e ? atoi(e) : 32; if (mb < 4 || mb > 32) { if (e && *e) MLOG("[RED] DM_UP_BLOCK_MB=%s: must be 4 to 32; 32 used", e); mb = 32; } v = (size_t)mb << 20; if (mb != 32) MLOG("upload staging blocks of %d MB (DM_UP_BLOCK_MB)", mb); } return v; }
+#define UP_BLOCK_SIZE up_block_size()
 // Each upload slot keeps its staging resident until its next batch (up_begin waits for the previous batch). Grow the first block to the slot's previous batch demand, not just its first texture:
 // a small first texture followed by a large one otherwise allocates and retires a fresh 32 MB overflow every frame. Keep one overflow as well, at most 64 MB per slot / 192 MB across all three.
 // Bursts beyond that budget and individual uploads larger than UP_BLOCK_SIZE still use temporary blocks, retired only after their GPU work. DM_NVN_UPLOAD_REUSE=0 keeps the original one-block policy.
@@ -4480,6 +4484,9 @@ void mtl_mem_stat(unsigned long long frame, unsigned long long rss_mb) {
 #endif
     MLOG("memory up to frame %llu: resident %llu MB, GPU allocated %llu MB, deferred-release queue %lu, residency set %lu, serial objects %u, memory pools %d (resident %d; peak %d / tracking table capacity %d; freed but alive %lu, %llu MB), shared textures %u (%u of them unreferenced; evicted with pools %llu, on storage takeover %llu in total), texture re-uploads %llu in total, per-frame arena blocks created %llu in total, finalized textures still referenced %u (small table, %llu put in total), retired but held by a serial %u, recycled render-target heaps made %llu, reused %llu, freed %llu, waiting %u (%llu MB); headroom to the system memory limit %s", frame, rss_mb, gpu, nd, nr, ns, live, pres, peak, cap, dead_n, dead_mb, ashared, aorph, (unsigned long long)g_alias_evicted, (unsigned long long)g_alias_taken, (unsigned long long)g_pkg_reuploads, (unsigned long long)g_arena_made, nghost, (unsigned long long)ghost_puts, nwait,
          (unsigned long long)g_rh_made, (unsigned long long)g_rh_reused, (unsigned long long)g_rh_trimmed, rh_n, (unsigned long long)(rh_bytes >> 20), avail);
+    { static unsigned n; static int every = -1;   // DM_MEM_BREAKDOWN=N: the residency set by kind, with its 6 largest objects, on every Nth of these reports (default 4; 0 = never): what the memory is made of, without waiting for a GPU out-of-memory error
+      if (every < 0) { const char *e = getenv("DM_MEM_BREAKDOWN"); every = e && *e ? atoi(e) : 4; }
+      if (every > 0 && ++n % (unsigned)every == 0) { int was = g_res_top_show; g_res_top_show = 6; res_top("memory breakdown"); g_res_top_show = was; } }
     { void mtl_vc_stats(unsigned *, uint64_t *, uint64_t *), mtl_tb2_stats(uint64_t *, uint64_t *, uint64_t *, uint64_t *, uint64_t *); uint64_t mtl_tex_mis_count(void); unsigned vn; uint64_t vh, vm, tb, tm, tf, tc, tcb;
       mtl_vc_stats(&vn, &vh, &vm); mtl_tb2_stats(&tb, &tm, &tf, &tc, &tcb);
       MLOG("texture views by texture (vc_get): %u textures hold cached views; %llu views reused, %llu made in total; texture buffers bound as 2D rows for wrapped 1D fetches %llu times, %llu made, %llu failed, %llu copied into aligned rows (%llu MB) "

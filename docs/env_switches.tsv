@@ -345,8 +345,9 @@ DM_REWRITE_J	switch	`=<positive integer>`: worker processes per module for `patc
 DM_ROMFS	path	The game's RomFS folder, mounted read-only as `rom` (default `$DM_ROOT/romfs`); the Mac launcher, the iOS app and the NSP script set it
 DM_ROMFS_OVERLAY	path	`=<dir>[:<dir>…]`: RomFS reads look in these folders first, in order, and fall back to `DM_ROMFS` (for a modified copy of some files)
 DM_ROOT	path	Workspace root (default `~/dm-work`): the host's and tools' default paths (RomFS, temporary storage, shader libraries under `build/cache/metal_shader_cache`, probe dumps) are under it
-DM_RT	diagnostic	`0` leaves the thread that acquires the window on its QoS only, with no Mach time-constraint policy declaring the frame deadline (on by default; for power A/B)
-DM_RT_COMP	switch	`=<ms>` fixes the computation the present thread's time-constraint policy declares; default `auto` re-declares it every 120 frames from that thread's per-frame CPU time (p90 and peak)
+DM_RT	diagnostic	`0` leaves every host thread on its QoS only, with no Mach time-constraint policy declaring the frame deadline: the thread that acquires the window, the queue replay thread and the encode thread (on by default; for power A/B)
+DM_RT_COMP	switch	`=<ms>` fixes the computation the acquiring thread's time-constraint policy declares; default `auto` re-declares it every 120 frames from that thread's per-frame CPU time (p90 and peak). The replay and encode threads always measure their own
+DM_RT_FRAME	diagnostic	`0` keeps the time-constraint policy on the thread that acquires the window only; the queue replay and encode threads stay on their QoS (on by default; for phone A/B)
 DM_RUMBLE	player	`0` turns game rumble off (on by default); launcher setting
 DM_RUMBLE_GAIN	player	`=0..3` scales the rumble strength (default 1, `0` is silent); launcher setting
 DM_RUMBLE_LOG	diagnostic	`=1` logs the game's vibration handle requests and, once a second, the values it sent, how many had no routed output and the peak amplitude

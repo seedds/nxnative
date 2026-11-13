@@ -416,7 +416,7 @@ static void cap_flush_objs(uint32_t submit) {
     g_cap_pobj.n = g_cap_tobj.n = g_cap_progb.n = g_cap_dpolb.n = g_cap_kind.n = 0;
 }
 // A capture step takes seconds to minutes on the thread that submits or presents, which may hold a time-constraint (real-time) policy declared for a few milliseconds a frame
-// (hle_nvn.c, set_time_constraint_comp). The kernel then lets it run in short slices only: Pokemon Scarlet's pool bytes took 1,175 s to compress where the same data takes 55 s,
+// (hle_nvn.c rt_declare). The kernel then lets it run in short slices only: Pokemon Scarlet's pool bytes took 1,175 s to compress where the same data takes 55 s,
 // and Breath of the Wild's 118 s where it now takes 29. The step runs under the standard policy, and the thread gets its own back after it
 typedef struct { int rt; thread_time_constraint_policy_data_t p; } cap_policy;
 static cap_policy cap_policy_standard(void) {

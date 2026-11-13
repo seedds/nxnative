@@ -40,18 +40,19 @@ static void folder_path(const char *save, int i, char *out, size_t n) { snprintf
 
 static void free_names(char **v, size_t n) { for (size_t i = 0; i < n; i++) free(v[i]); free(v); }
 static int by_name(const void *a, const void *b) { return strcmp(*(char *const *)a, *(char *const *)b); }
-// A folder's names in byte order, without . and ..; -1 when it cannot be read
+// A folder's names in byte order, without . and ..; -1 (errno set) when it cannot be read, all of it: a readdir that fails partway is a failure, not the folder's end
 static int names_of(const char *dir, char ***out, size_t *count) {
     DIR *d = opendir(dir); if (!d) return -1;
-    char **v = NULL; size_t n = 0, cap = 0; struct dirent *e; int r = 0;
-    while ((e = readdir(d))) {
+    char **v = NULL; size_t n = 0, cap = 0; struct dirent *e; int r = 0, err = 0;
+    while ((errno = 0, e = readdir(d))) {
         if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
-        if (n == cap) { char **w = realloc(v, (cap = cap ? cap * 2 : 16) * sizeof *v); if (!w) { r = -1; break; } v = w; }
-        if (!(v[n] = strdup(e->d_name))) { r = -1; break; }
+        if (n == cap) { char **w = realloc(v, (cap = cap ? cap * 2 : 16) * sizeof *v); if (!w) { r = -1; err = ENOMEM; break; } v = w; }
+        if (!(v[n] = strdup(e->d_name))) { r = -1; err = ENOMEM; break; }
         n++;
     }
+    if (!r && errno) { r = -1; err = errno; }   // readdir's NULL with errno set
     closedir(d);
-    if (r) { free_names(v, n); return -1; }
+    if (r) { free_names(v, n); errno = err; return -1; }
     if (n) qsort(v, n, sizeof *v, by_name);
     *out = v; *count = n; return 0;
 }
@@ -72,9 +73,11 @@ static int rm_tree(const char *p) {   // rm -rf: 0 when nothing is left
     return rmdir(p) ? -1 : r;
 }
 
-// Anything in it but Finder's .DS_Store: an empty folder is no save (the host makes DM_SAVE at every mount, DM_SAVE_device at the device save's)
+// Anything in it but Finder's .DS_Store: an empty folder is no save (the host makes DM_SAVE at every mount, DM_SAVE_device at the device save's).
+// 1: a save; 0: none (no folder, or an empty one); -1 (errno set): a folder that cannot be read, which is not "no save": a pack, a send or a pull that took it
+// for none would leave this device's save out (a send would replace a cloud save that has it with one that does not)
 static int has_entries(const char *dir) {
-    char **v; size_t n, k = 0; if (names_of(dir, &v, &n)) return 0;
+    char **v; size_t n, k = 0; if (names_of(dir, &v, &n)) return errno == ENOENT ? 0 : -1;
     for (size_t i = 0; i < n; i++) k += strcmp(v[i], ".DS_Store") != 0;
     free_names(v, n); return k > 0;
 }
@@ -160,7 +163,8 @@ static int pack_save(const char *save, packer *k) {
     CC_SHA256_Init(&k->sha);
     for (int i = 0; i < 2; i++) {
         char dir[PATH_MAX]; folder_path(save, i, dir, sizeof dir);
-        if (has_entries(dir) && walk(dir, FOLDERS[i], pack_entry, k)) return -1;
+        int h = has_entries(dir);
+        if (h < 0 || (h && walk(dir, FOLDERS[i], pack_entry, k))) return -1;
     }
     uint8_t d[CC_SHA256_DIGEST_LENGTH]; CC_SHA256_Final(d, &k->sha); hex(d, k->m->hash);
     if (!k->m->files) k->m->hash[0] = 0;   // no save: no hash, so that "nothing here" compares as nothing
@@ -495,7 +499,9 @@ static int pull(const char *save, const char *bundle, ss_meta *r, char *kept, si
         struct stat st;
         folder_path(save, i, here[i], sizeof here[i]); snprintf(incoming[i], sizeof incoming[i], "%s/%s", tmp, FOLDERS[i]);
         fresh[i] = !access(incoming[i], F_OK);
-        j.had[i] = lstat(here[i], &st) ? HAD_NONE : has_entries(here[i]) ? HAD_SAVE : HAD_EMPTY;
+        int none = lstat(here[i], &st) != 0, h = none ? 0 : has_entries(here[i]);
+        if (h < 0) { e = errno; rm_tree(tmp); errno = e; return -1; }   // a folder that cannot be read: nothing has moved (taken as empty, it would be swapped into the staging folder and cleared)
+        j.had[i] = none ? HAD_NONE : h ? HAD_SAVE : HAD_EMPTY;
         if (j.had[i] == HAD_SAVE) { j.dev[i] = (uint64_t)st.st_dev; j.ino[i] = (uint64_t)st.st_ino; }
     }
     if ((j.had[0] == HAD_SAVE || j.had[1] == HAD_SAVE) && backup_dir(save, "local", kept, kn, 0)) { e = errno; kept[0] = 0; rm_tree(tmp); errno = e; return -1; }
@@ -535,7 +541,9 @@ static int send_save(const char *save, const char *title, const char *cloud) {
     // A clone of the committed folders, taken while no Commit can swap them: the game may commit again while this packs
     for (int i = 0; i < 2; i++) {
         char from[PATH_MAX], to[PATH_MAX]; folder_path(save, i, from, sizeof from); folder_path(snap, i, to, sizeof to);
-        if (has_entries(from) && dm_fs_clone_committed(from, to)) { SRED("cloning %s failed (errno=%d)", from, errno); goto done; }
+        int h = has_entries(from);
+        if (h < 0) { SRED("%s cannot be read (errno=%d): not sent", from, errno); goto done; }   // not packed as no save: the cloud's copy of it would go
+        if (h && dm_fs_clone_committed(from, to)) { SRED("cloning %s failed (errno=%d)", from, errno); goto done; }
     }
     if (ss_pack(snap, title, packed, &mine)) { SRED("packing %s failed (errno=%d)", save, errno); goto done; }
     read_base(save, base);

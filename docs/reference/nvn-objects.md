@@ -960,7 +960,7 @@ Games read this count as a position in their own command memory and size their h
 
 - **Symptom:** SIGBUS in `AGCDeserializedReply`, address in the guest stack region.
 - **Cause:** the render thread's stack is small, and Metal's driver compiles internal programs (a fast-clear blit) on the calling thread while the host ends a render pass inside `nvnQueueSubmitCommands`, which overflowed the guest stack.
-- **Fix:** all implemented NVN functions except the `nvnCommandBuffer*` recording calls run on the per-thread 512 KB host stack (`nvn_big_entry` in `nvn_entry.S`). The general mechanism (`dm_bigstack_enter`, and `HLE_FORCE_BIG` for the file system hooks): [Host calls on small guest stacks](memory.md#host-calls-on-small-guest-stacks).
+- **Fix:** all implemented NVN functions except the `nvnCommandBuffer*` recording calls run on the per-thread 512 KB host stack (`nvn_big_entry` in `nvn_entry.S`). The general mechanism (`dm_bigstack_enter`, which every `HLE_FORCE` take-over goes through): [Host calls on small guest stacks](memory.md#host-calls-on-small-guest-stacks).
 - **Found on:** [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md).
 
 ### State read back through NVN getters

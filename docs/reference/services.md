@@ -343,7 +343,7 @@ Most service calls can be found before they crash, before the first boot or the 
 
 - **Symptom:** SIGBUS in `__vfprintf` under `aoc_load`, from `h_aoc_Count` (a store to `0x…67ff0`, right below a page of the guest thread's stack).
 - **Cause:** the first add-on content query lists `DM_AOC_DIR` and logs, a few KB of stack, and the game asks from a thread with little left.
-- **Fix:** `aoc::CountAddOnContent` and `ListAddOnContent` run on the big host stack (`HLE_FORCE_BIG`, `hle_misc.c`).
+- **Fix:** `aoc::CountAddOnContent` and `ListAddOnContent` run on the big host stack (`hle_misc.c`; since 2026-11-13 every take-over does: [Host calls on small guest stacks](memory.md#host-calls-on-small-guest-stacks)).
 - **Found on:** [Digimon Story Cyber Sleuth: Complete Edition](../../dm/games/010014E00DB56000/README.md) (SDK 6.4.0; one boot).
 
 ### An add-on content mount name used again after Unmount
@@ -1097,7 +1097,7 @@ Most service calls can be found before they crash, before the first boot or the 
 
 - **Symptom:** opening Mario Kart 8 Deluxe's info screen crashes in `__chkstk_darwin`, called by `web_find` through `web_start` and `h_web_Offline` ([issue #2541](https://github.com/seedds/nxnative/issues/2541)).
 - **Cause:** the offline-page hooks ran on the calling game thread's stack. `web_start` keeps about 5 KB of path buffers and `web_find` needs another 5 KB, before the file-system and front-end calls. A small thread stack sized for Horizon's applet request cannot hold this host implementation.
-- **Fix:** both `ShowOfflineHtmlPage` and `OfflineWebSession::Start` register with `HLE_FORCE_BIG`, the existing guarded host-stack entry. Arguments and results keep their ABI, and the original guest stack is restored when the call returns. Calls already on a host stack use the direct path.
+- **Fix:** both `ShowOfflineHtmlPage` and `OfflineWebSession::Start` were registered with `HLE_FORCE_BIG`, the guarded host-stack entry, which every take-over takes since 2026-11-13 ([Host calls on small guest stacks](memory.md#host-calls-on-small-guest-stacks)). Arguments and results keep their ABI, and the original guest stack is restored when the call returns. Calls already on a host stack use the direct path.
 - **Test:** `t_web_stack` calls both registered entries on an 8 KB guarded guest stack with a fake viewer (session exit, the synchronous callback result, a missing page); before the fix it stops with SIGBUS. Mario Kart 8 Deluxe 4.0.0 on the Mac shows its Info page, closes it with B and opens it again.
 - **Found on:** [Mario Kart 8 Deluxe](../../dm/games/0100152000022000/README.md), 4.0.1 with DLC on the Mac.
 

@@ -142,7 +142,7 @@ def read_manifest(path):
 DEF = re.compile(r'^(?:static\s+|inline\s+|__attribute__\(\([^)]*\)\)\s+)*[A-Za-z_][\w\s\*]*?\b([A-Za-z_]\w*)\s*\(([^;{}]|\n)*?\)\s*\{', re.M)
 NVN_DEF = re.compile(r'^NVN(?:_NOPROTO)?\((nvn\w+)\s*,', re.M)
 HLE_DEF = re.compile(r'^HLE\(\s*"([^"]+)"\s*,\s*[^,]+,\s*(\w+)', re.M)   # HLE("symbol", ret, cname, ...) and HLE_FORCE("symbol", "why", ret, cname, ...) in dm/host/hle.h
-HLE_FORCE_DEF = re.compile(r'^HLE_FORCE(?:_BIG)?\(\s*"([^"]+)"\s*,\s*"(?:[^"\\]|\\.)*"\s*,\s*[^,]+,\s*(\w+)', re.M)
+HLE_FORCE_DEF = re.compile(r'^HLE_FORCE(?:_DIRECT)?\(\s*"([^"]+)"\s*,\s*"(?:[^"\\]|\\.)*"\s*,\s*[^,]+,\s*(\w+)', re.M)
 CALL = re.compile(r'\b([A-Za-z_]\w*)\s*\(')
 TABLE = re.compile(r'\{\s*"([^"]+)"\s*,\s*(?:\(void\s*\*\)\s*)?&?([A-Za-z_]\w*)\s*\}')
 KEYWORDS = {'if', 'for', 'while', 'switch', 'return', 'sizeof', 'do', 'else', 'case', 'defined', 'typeof', '__typeof__', 'alignof'}

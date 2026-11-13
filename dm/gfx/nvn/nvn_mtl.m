@@ -13562,8 +13562,12 @@ static int fb_tile_plan(NvProg *pr, uint32_t wm, uint64_t tile[4]) {
     int fx[32]; for (int i = 0; i < 32; i++) fx[i] = -1; uint8_t fbmask = 0;
     for (int i = 0; i < fs->rf.nb; i++) { const nvn_rbind *b = &fs->rf.b[i]; if (b->kind != NVN_RB_TEX || b->reg >= NTEX) continue;
         int tid = (int)(tex_slot_h(S.tex[1], S.img[1], b->reg) & 0xfffff); if (!tid) continue;
-        os_unfair_lock_lock(&g_rmu); uint64_t ser = tid < g_ntreg && g_treg[tid].ok ? g_treg[tid].t.serial : 0; void *tv = NULL; if (ser) tex_fast_rid(tid, &tv); id<MTLTexture> t = (__bridge id<MTLTexture>)tv; os_unfair_lock_unlock(&g_rmu);
-        if (!ser || !t) continue;
+        os_unfair_lock_lock(&g_rmu); uint64_t ser = tid < g_ntreg && g_treg[tid].ok ? g_treg[tid].t.serial : 0; os_unfair_lock_unlock(&g_rmu);
+        if (!ser) continue;
+        uint32_t att = 0; for (int k = 0; k < R.rt.n && k < 8; k++) if (R.rt.color[k] && R.rt.color[k]->serial == ser && ((wm | g_fb_wmask) >> k & 1)) att |= 1u << k;
+        if (!att) continue;   // not an attachment this pass wrote: nothing to plan, and no texture to look up (most bindings of most draws)
+        void *tv = NULL; os_unfair_lock_lock(&g_rmu); tex_fast_rid(tid, &tv); os_unfair_lock_unlock(&g_rmu); __unsafe_unretained id<MTLTexture> t = (__bridge id<MTLTexture>)tv;
+        if (!t) continue;
         for (int k = 0; k < R.rt.n && k < 8; k++) { if (!R.rt.color[k] || R.rt.color[k]->serial != ser || !((wm | g_fb_wmask) >> k & 1)) continue;   // nothing in this pass wrote it: read directly, as before
             uint64_t aser; int lv, sl; rt_sub(&R.rt, k, &aser, &lv, &sl);
             id<MTLTexture> base = t.parentTexture ? t.parentTexture : t;
@@ -13699,6 +13703,19 @@ static void fb_prepare(NvProg *pr) {
     if (g_enc && dsw && g_fb_dread) { g_fb_split++; g_fb_split_pool += g_fb_dread_pool; g_fb_dread_pool = 0; rp_end(); fb_pass_sync(); }   // the same for its depth and stencil (see rtc_on)
     if (R.rt.depth) fb_depth_rule(fs, dsw);
     if (R.rt.n && R.rt.depth && !g_fb_dread && ((fs->rf.pool && pool_ds_read(R.rt.depth) && (g_fb_dread_pool = 1)) || fs->rf.dyn)) g_fb_dread = 1;   // may read it: pool and dynamic tables, in colour passes as before
+    if (!g_fb_n) {   // Most draws sample no colour attachment of their pass: one look at the serials their fragment textures and images name (under one lock) settles it before the tile plan
+        // and the per-binding work below, which only matter for a binding that names one (Breath of the Wild: about 1 draw in 15). The depth attachment is fb_depth_rule's; a draw it gave a copy takes the long way
+        uint64_t rs[8]; int nr = 0; for (int k = 0; k < R.rt.n && k < 8; k++) if (R.rt.color[k]) rs[nr++] = R.rt.color[k]->serial;
+        int hit = 0;
+        os_unfair_lock_lock(&g_rmu);
+        for (int i = 0; i < fs->rf.nb && !hit; i++) { const nvn_rbind *b = &fs->rf.b[i];
+            int image = b->kind == NVN_RB_IMG && !b->rw && !b->atom && b->reg < 32;
+            if (!image && (b->kind != NVN_RB_TEX || b->reg >= NTEX)) continue;
+            int tid = (int)((image ? S.img[1][b->reg] : tex_slot_h(S.tex[1], S.img[1], b->reg)) & 0xfffff); if (!tid || tid >= g_ntreg || !g_treg[tid].ok) continue;
+            uint64_t ser = g_treg[tid].t.serial; for (int q = 0; q < nr; q++) hit |= rs[q] == ser; }
+        os_unfair_lock_unlock(&g_rmu);
+        if (!hit) { g_fb_wmask |= wm; g_fb_dwrote |= (uint32_t)dsw; return; }
+    }
     uint64_t tile[4]; int ntile = fb_tile_plan(pr, wm, tile);
     for (int i = 0; i < fs->rf.nb && g_fb_n < 4; i++) {
         const nvn_rbind *b = &fs->rf.b[i];

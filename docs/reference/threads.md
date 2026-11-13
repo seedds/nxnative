@@ -40,6 +40,14 @@ Guest threads, their synchronization and how the host schedules them. Each entry
 - **Fix:** −2 resolves to the process default core (0), and a negative core is never returned (`hle_thread.c`).
 - **Found on:** [Super Mario Bros. Wonder](../../dm/games/010015100B514000/README.md), in its font engine (`main+0x107dbc0`).
 
+### Thread handle queries hold the scheduler lock
+
+- **Symptom:** ASan reports a heap-use-after-free in `svc_thread_impl` reading `t->id`; TSan reports a race between `GetThreadId` and `CloseHandle`, or between `SetThreadCoreMask` and the target's `GetCurrentProcessorNumber`.
+- **Cause:** `GetThreadId` (0x25), `GetThreadCoreMask` (0x0E) and `SetThreadCoreMask` (0x0F) looked up the handle table without `G`, the only thread SVCs that did. `CloseHandle` frees an exited thread under `G` at once when no wait holds it, so a query racing the close read a freed object. `SetThreadCoreMask` also wrote the ideal core in steps that `GetCurrentProcessorNumber` read without a lock.
+- **Fix:** the three handle SVCs hold `G` across lookup and read, as the priority SVCs do; on Horizon a query racing a close returns either the value or invalid handle. `SetThreadCoreMask` computes the final core and mask first and stores each once with a relaxed atomic. `GetCurrentProcessorNumber` and `dm_yield_to_core_peers` load them the same way without `G`: games call it often (Pokémon Scarlet about 7,400 times a second), and only the thread's own pair is read.
+- **Check:** `t_sync_wait` query-close (a query thread against `CloseHandle` of an exited thread, 200 rounds) and core-mask (`SetThreadCoreMask` against the target's own `GetCurrentProcessorNumber`). Before, ASan found the use-after-free in about one run in three and TSan the race in each; after, ASan and TSan are clean.
+- **Found on:** a code audit, with host unit tests; no game failure is known.
+
 ### Free thread count (`svcGetInfo` type 24)
 
 - **Symptom:** the main thread waits forever on an event right after `nnMain` starts, with only three or four threads created; `DM_THR=1` shows no `CreateThread` for the thread it waits on.

@@ -279,6 +279,13 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Fix:** a game whose `main` imports `MountSaveData` too gets its device save as `<DM_SAVE>_device`, a transaction of its own (`hle_fs.c`); of the games on hand only this one imports both, so Animal Crossing's islands stay where they are.
 - **Found on:** [Mario Kart 8 Deluxe](../../dm/games/0100152000022000/README.md) (4.0.0, SDK 4.4.0; one boot).
 
+### A rename between two mounts
+
+- **Symptom:** `RenameFile("save:/a", "rom:/a")` succeeded and wrote into the read-only RomFS folder; a rename between two writable mounts, or between two names of one host save, moved the file.
+- **Cause:** `rename_entry` in `hle_fs.c` checked that the source's mount is writable and resolved the destination without looking at its mount. Horizon's `fs::RenameFile` and `fs::RenameDirectory` find each path's file system by its mount name and refuse two before touching either (Atmosphère's `fs_user_filesystem.cpp`: the two accessors must be one, else `ResultRenameToOtherFileSystem`, module 2 description 6034); only a rename between the SDK's own mount and the host's was refused, with `RES_FAIL`.
+- **Fix:** `rename_any` compares the two mount names (the part before `:`, as `FindFileSystem` takes it) and answers `0x2F2402` for two, before the SDK or the host is asked; one mount's rename goes on as before, and a read-only source is refused by its own check. Account and device saves that share a host folder and transaction are two mounts on Horizon too, so a rename between them is refused as well. `make -C dm/host/tests GAME=<id> run` (`t_fs`, ⑦b) renames into a read-only mount, into another writable one and between two names of one save, and checks both paths afterwards.
+- **Found on:** a code audit's reproduction (2026-11-13); no game has been seen to rename between mounts.
+
 ### System data stand-in for the MiiModel archive
 
 - **Symptom:** abort in `fs::detail::GetFileSystemProxyServiceObject` under `fs::QueryMountSystemDataCacheSize` (`main+0x8f23bc`).

@@ -25,6 +25,7 @@
 
 #define RES_PATH_NOT_FOUND 0x202u      // fs module 2, description 1
 #define RES_PATH_EXISTS    0x402u      // fs module 2, description 2
+#define RES_RENAME_OTHER_FS 0x2F2402u  // fs module 2, description 6034: ResultRenameToOtherFileSystem
 enum { MODE_READ = 1, MODE_WRITE = 2, MODE_APPEND = 4 };
 enum { ENT_DIR = 0, ENT_FILE = 1 };
 enum { DIRMODE_DIR = 1, DIRMODE_FILE = 2 };
@@ -1159,12 +1160,13 @@ static Result rename_entry(const char *from, const char *to) {
         errno = e; return err_res("rename name", hp2); }
     return RES_OK;
 }
-// A rename on an SDK-held mount is the SDK's when both paths are on one; between the SDK's mount and another it fails, as Horizon refuses a rename across file systems
+// Horizon's RenameFile and RenameDirectory find each path's file system by its mount name and refuse two before touching either (the two accessors must be one, ResultRenameToOtherFileSystem):
+// so a rename never reaches a read-only mount from a writable one, and account and device saves, one folder on the host, are two mounts here as there. On one mount, the SDK's mount is the SDK's
 static Result rename_any(const char *from, const char *to, const char *sym) {
+    char a[0x30], b[0x30];
+    if (path_mount_name(from, a, sizeof a) && path_mount_name(to, b, sizeof b) && strcmp(a, b)) { LOG("fs rename %s → %s: two mounts, refused", from, to); return RES_RENAME_OTHER_FS; }
     Result (*sdk_rename)(const char *, const char *) = sdk_path_call(from, sym);
-    if (sdk_rename && sdk_path_call(to, sym)) return sdk_rename(from, to);
-    if (sdk_rename || sdk_path_call(to, sym)) { LOG("[RED] fs rename %s → %s: between the SDK's own mount and another, refused", from, to); return RES_FAIL; }
-    return rename_entry(from, to);
+    return sdk_rename ? sdk_rename(from, to) : rename_entry(from, to);
 }
 HLE_FORCE("_ZN2nn2fs10RenameFileEPKcS2_", "fsp-srv → rename(2)", Result, h_fs_RenameFile, const char *from, const char *to) { dm_thread_service_request(); return rename_any(from, to, "_ZN2nn2fs10RenameFileEPKcS2_"); }
 // The Great Ace Attorney Chronicles (SDK 10) imports it; a directory carries its guest name the same way as a file

@@ -1405,18 +1405,33 @@ static _Thread_local const NVNcommandBuffer *g_shadow_cb; static _Thread_local u
 static int shadow_trace_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_SHADOW_TRACE"); v = e && atoi(e) > 0; } return v; }
 static _Thread_local const NVNcommandBuffer *g_scene_cb;
 static int draw_trace_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_DRAW_TRACE"); v = e && atoi(e) > 0; } return v; }
-// DM_NVN_RT_TRACE=<W>x<H> (diagnostic): while a command buffer's first color target is W x H, the binding, every viewport and scissor set and every
-// indexed or array draw print the game's return address and the guest backtrace, once per calling site and kind (up to 32 each), to find which code
-// draws the HUD, menus and movies into an output target and where it sets their rectangle (Metroid Prime 4's 16:10 output)
-static _Thread_local const NVNcommandBuffer *g_rtt_cb;
+// DM_NVN_RT_TRACE=<W>x<H> (diagnostic): while a command buffer's first color target is W x H, its binding, every viewport and scissor set and every
+// indexed or array draw print the game's backtrace, with the viewport and scissor in force for a draw, once per call chain (6 frames) and rectangle (up to
+// 64 of each kind), to find which code draws the HUD, menus and movies into an output target and where their rectangle comes from (Metroid Prime 4's 16:10)
+static _Thread_local const NVNcommandBuffer *g_rtt_cb; static _Thread_local float g_rtt_vp[4], g_rtt_sc[4];
 static unsigned rt_trace_size(unsigned *h) { static unsigned w = ~0u, hh; if (w == ~0u) { const char *e = getenv("DM_NVN_RT_TRACE"); w = 0; if (e && sscanf(e, "%ux%u", &w, &hh) != 2) w = 0; } *h = hh; return w; }
+static uint64_t rt_chain(uint64_t fp) {   // the return addresses of the first 6 frames, hashed (the same walk as crash.c dm_backtrace)
+    uint64_t hsh = 1469598103934665603ull;
+    for (int i = 0; i < 6 && fp && !(fp & 7); i++) {
+        uint64_t w[2]; vm_size_t got = 0;
+        if (vm_read_overwrite(mach_task_self(), (vm_address_t)fp, sizeof w, (vm_address_t)w, &got) != KERN_SUCCESS || got != sizeof w) break;
+        hsh = (hsh ^ w[1]) * 1099511628211ull;
+        if (w[0] <= fp) break;
+        fp = w[0];
+    }
+    return hsh;
+}
 static void rt_trace(const NVNcommandBuffer *c, const char *kind, uint64_t caller, const float *v) {
     unsigned h; if (!rt_trace_size(&h) || g_rtt_cb != c) return;
-    static uint64_t seen[4][32]; static int n[4]; static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
     int k = kind[0] == 'b' ? 0 : kind[0] == 'v' ? 1 : kind[0] == 's' ? 2 : 3;
-    pthread_mutex_lock(&mu); int fresh = n[k] < 32; for (int i = 0; i < n[k] && fresh; i++) if (seen[k][i] == caller) fresh = 0; if (fresh) seen[k][n[k]++] = caller; pthread_mutex_unlock(&mu);
+    const float *r = k == 3 ? g_rtt_vp : v; uint64_t key = rt_chain((uint64_t)__builtin_frame_address(0));
+    for (int i = 0; r && i < 4; i++) key = (key ^ (uint64_t)(int64_t)r[i]) * 1099511628211ull;
+    if (k == 3) for (int i = 0; i < 4; i++) key = (key ^ (uint64_t)(int64_t)g_rtt_sc[i]) * 1099511628211ull;
+    static uint64_t seen[4][64]; static int n[4]; static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
+    pthread_mutex_lock(&mu); int fresh = n[k] < 64; for (int i = 0; i < n[k] && fresh; i++) if (seen[k][i] == key) fresh = 0; if (fresh) seen[k][n[k]++] = key; pthread_mutex_unlock(&mu);
     if (!fresh) return;
-    if (v) LOG("rt trace: %s %g,%g %gx%g, called from %#llx", kind, v[0], v[1], v[2], v[3], (unsigned long long)caller);
+    if (k == 3) LOG("rt trace: draw in viewport %g,%g %gx%g scissor %g,%g %gx%g, called from %#llx", g_rtt_vp[0], g_rtt_vp[1], g_rtt_vp[2], g_rtt_vp[3], g_rtt_sc[0], g_rtt_sc[1], g_rtt_sc[2], g_rtt_sc[3], (unsigned long long)caller);
+    else if (v) LOG("rt trace: %s %g,%g %gx%g, called from %#llx", kind, v[0], v[1], v[2], v[3], (unsigned long long)caller);
     else LOG("rt trace: %s, called from %#llx", kind, (unsigned long long)caller);
     void dm_backtrace(uint64_t fp); dm_backtrace((uint64_t)__builtin_frame_address(0));
 }
@@ -1448,14 +1463,14 @@ static void shadow_trace_vp(const NVNcommandBuffer *c, const float *v, uint64_t 
     void dm_backtrace(uint64_t fp); dm_backtrace((uint64_t)__builtin_frame_address(0));
 }
 NVN(nvnCommandBufferSetViewports, void, NVNcommandBuffer *c, int first, int n, const float *v) {
-    if (n > 0 && !g_shadow_skip) { shadow_trace_vp(c, v, (uint64_t)(uintptr_t)__builtin_return_address(0)); rt_trace(c, "viewport", (uint64_t)(uintptr_t)__builtin_return_address(0), v); }
+    if (n > 0 && !g_shadow_skip) { shadow_trace_vp(c, v, (uint64_t)(uintptr_t)__builtin_return_address(0)); if (g_rtt_cb == c) memcpy(g_rtt_vp, v, sizeof g_rtt_vp); rt_trace(c, "viewport", (uint64_t)(uintptr_t)__builtin_return_address(0), v); }
     if (n < 0 || first + n > 16) { LOG("[RED] SetViewports first=%d n=%d", first, n); return; }
     if (g_rec_compact && first >= 0) { uint8_t *q = crec(c, OPC_VIEWPORTS, (uint32_t)first | (uint32_t)n << 8, 16 * (size_t)n); memcpy(q, v, 16 * (size_t)n); return; }
     p_viewports *r = REC(c, OP_VIEWPORTS, p_viewports); r->first = first; r->n = n;
     for (int i = 0; i < n; i++) memcpy(r->v[i], v + 4 * i, 16);
 }
 NVN(nvnCommandBufferSetScissor, void, NVNcommandBuffer *c, int x, int y, int w, int h) {
-    if (g_rtt_cb == c) { float f[4] = {(float)x, (float)y, (float)w, (float)h}; rt_trace(c, "scissor", (uint64_t)(uintptr_t)__builtin_return_address(0), f); }
+    if (g_rtt_cb == c) { float f[4] = {(float)x, (float)y, (float)w, (float)h}; memcpy(g_rtt_sc, f, sizeof f); rt_trace(c, "scissor", (uint64_t)(uintptr_t)__builtin_return_address(0), f); }
     if (g_rec_compact && (unsigned)x < 0x10000 && (unsigned)y < 0x10000 && (unsigned)w < 0x10000 && (unsigned)h < 0x10000) {
         uint16_t v[4] = {(uint16_t)x, (uint16_t)y, (uint16_t)w, (uint16_t)h}; memcpy(crec(c, OPC_SCISSOR, 0, 8), v, 8); return;
     }
@@ -3354,7 +3369,7 @@ NVN(nvnCommandBufferDrawElementsIndirect, void, NVNcommandBuffer *c, NVNdrawPrim
 }
 
 // Viewport / scissor / depth range: single and multiple forms
-NVN(nvnCommandBufferSetViewport, void, NVNcommandBuffer *c, int x, int y, int w, int h) { float v[4] = {(float)x, (float)y, (float)w, (float)h}; rt_trace(c, "viewport", (uint64_t)(uintptr_t)__builtin_return_address(0), v); shadow_trace_vp(c, v, (uint64_t)(uintptr_t)__builtin_return_address(0)); g_shadow_skip = 1; h_nvnCommandBufferSetViewports(c, 0, 1, v); g_shadow_skip = 0; }
+NVN(nvnCommandBufferSetViewport, void, NVNcommandBuffer *c, int x, int y, int w, int h) { float v[4] = {(float)x, (float)y, (float)w, (float)h}; if (g_rtt_cb == c) memcpy(g_rtt_vp, v, sizeof g_rtt_vp); rt_trace(c, "viewport", (uint64_t)(uintptr_t)__builtin_return_address(0), v); shadow_trace_vp(c, v, (uint64_t)(uintptr_t)__builtin_return_address(0)); g_shadow_skip = 1; h_nvnCommandBufferSetViewports(c, 0, 1, v); g_shadow_skip = 0; }
 NVN(nvnCommandBufferSetScissors, void, NVNcommandBuffer *c, int first, int n, const int *r) {
     if (first == 0 && n >= 1) h_nvnCommandBufferSetScissor(c, r[0], r[1], r[2], r[3]);
     if (first + n > 1) ONCE_LOG("SetScissors first=%d n=%d: the host uses only index 0", first, n);

@@ -1079,7 +1079,7 @@ int mtl_gpu_addr(uint64_t addr, uint64_t len, void **buf, uint64_t *off, uint64_
 static void defer_reset(void); static void defer_fallback(void);
 typedef struct { int kind; volatile uint32_t *val; uint32_t mode, v; uint64_t addr; uint32_t type; void *vis; uint32_t seg; } post_op;   // vis: the visibility slot table for kind 3; seg: the segment it was encoded in (sub_cut)
 static uint32_t g_seg;   // Index of the segment being encoded in this submission (0 until the first sub_cut)
-static uint64_t g_cbgen; static int gsb_held(uint64_t serial);   // main command buffers committed; a texture whose storage the one being encoded writes on the GPU (gsb_store)
+static uint64_t g_cbgen; static int gsb_held(const void *mem, uint64_t size);   // main command buffers committed; whether storage overlaps what the one being encoded writes on the GPU (gsb_store)
 typedef struct seg_clk seg_clk; static seg_clk *g_sclk; static void seg_clk_put(seg_clk *c);   // Counter timestamps by segment (see gpu_ticks)
 // ---------- Conditional rendering ----------
 // SetRenderEnableConditional(mode, rec) enables rendering if the 64-bit counter of the report at rec equals (RENDER_IF_EQUAL) or differs from (RENDER_IF_NOT_EQUAL) the one at
@@ -4480,7 +4480,7 @@ static id<MTLTexture> tex_mtl_(const tex_t *ct, int *in_storage) {
         if (!pk) { id<MTLTexture> made = nil; NvSparse *ps = sparse_make(t, 0, &made);
             if (ps) { pk = [NvPkg new]; pk->ps = ps; pk->tex = made; pk->sparse = 1; sparse_sync(ps, t, 1); tex_put(t->serial, pk); return pk->tex; } }
         if (pk) {   // Already uploaded: check the covered pages only if there has been a guest write since the last check
-            if (gsb_held(t->serial)) return pk->view ? pk->view : pk->tex;   // its storage lacks a GPU write this command buffer stores (gsb_store): uploaded at its next use if the CPU wrote it
+            if (gsb_held(t->mem, t->L.size)) return pk->view ? pk->view : pk->tex;   // its storage lacks a GPU write this command buffer stores through any texture over those bytes (gsb_store): uploaded at its next use if the CPU wrote it
             uint64_t now = nvn_dirty_now(), own = nvn_dirty_own_writes();
             int tracked = pk->span != NULL;   // kept from the upload: a texture's pool stays registered while the texture lives
             // Looked at already in this submission: it keeps that look's texture. The queue's thread replays a submission after the game queued it, so the writes the game made
@@ -5159,7 +5159,9 @@ static int g_nbcrt; static void bcrt_flush(void);   // shadows of block-compress
 // streams GPU copies into textures it uploads from their storage. Block-compressed, 3D and linear storage are stored too; depth and multisample textures are not.
 // The CPU's page tracking does not see a GPU write: the store is no change to upload, and no CPU write of the host's is needed to put it there. An upload of the texture reads its
 // storage in an upload batch, which runs after every command buffer committed before it (its queue barrier) and before the one being encoded (up_flush precedes its commit): while
-// that command buffer holds a store into the texture, the texture keeps its host texture, which already has the write (gsb_held), and is uploaded at its next use if the CPU wrote it.
+// that command buffer holds a store into the texture's storage, the texture keeps its host texture, and is uploaded at its next use if the CPU wrote it (gsb_held). The hold is on the
+// bytes, not on the texture object: serials over the same storage and description share one NvPkg, and other descriptions over the same bytes (an sRGB twin, a view of an array) have
+// packages of their own; an upload through any of them in the batch would read the storage before the store and keep that, as the page tracking does not see the store come in after.
 // DM_NVN_GPU_STORAGE=0 turns the stores off (to measure)
 static struct { tex_t t; void *tex; unsigned level, slice, n; int att; } g_rtm[8]; static int g_nrtm;   // n: the layers the pass draws from slice on; att: the colour slot
 static int tex_storage_dst(const tex_t *t);
@@ -5181,17 +5183,19 @@ static int gsb_host_ok(const tex_t *t, id<MTLTexture> mt) {
     return mt && bpb && mt.sampleCount == 1 && !mtl_fmt_depth(mt.pixelFormat) && mt.pixelFormat != MTLPixelFormatStencil8 && mtl_pf_block_bytes(mt.pixelFormat) == (size_t)bpb
            && !fmt_compressed(t->d.format) == !mtl_fmt_block(mt.pixelFormat) && mt.width == t->d.width && (mt.textureType != MTLTextureType3D || mt.depth == t->d.depth);
 }
-// Textures stored into in the command buffer being encoded (g_cbgen counts the main command buffers committed); a store that finds the set full holds every texture until it is committed
-static uint64_t g_gsbh_gen; static uint64_t g_gsbh_ser[64]; static int g_gsbh_n, g_gsbh_full;
-static void gsb_hold(uint64_t serial) {
+// Storage stored into in the command buffer being encoded, [lo, hi) (g_cbgen counts the main command buffers committed); a store that finds the set full holds all storage until it is committed
+static uint64_t g_gsbh_gen; static uint64_t g_gsbh_lo[64], g_gsbh_hi[64]; static int g_gsbh_n, g_gsbh_full;
+static void gsb_hold(const void *mem, uint64_t size) {
+    uint64_t lo = (uint64_t)(uintptr_t)mem, hi = lo + size;
     if (g_gsbh_gen != g_cbgen + 1) { g_gsbh_gen = g_cbgen + 1; g_gsbh_n = g_gsbh_full = 0; }
-    for (int i = 0; i < g_gsbh_n; i++) if (g_gsbh_ser[i] == serial) return;
-    if (g_gsbh_n == (int)(sizeof g_gsbh_ser / sizeof g_gsbh_ser[0])) g_gsbh_full = 1; else g_gsbh_ser[g_gsbh_n++] = serial;
+    for (int i = 0; i < g_gsbh_n; i++) if (g_gsbh_lo[i] <= lo && hi <= g_gsbh_hi[i]) return;
+    if (g_gsbh_n == (int)(sizeof g_gsbh_lo / sizeof g_gsbh_lo[0])) g_gsbh_full = 1; else { g_gsbh_lo[g_gsbh_n] = lo; g_gsbh_hi[g_gsbh_n++] = hi; }
 }
-static int gsb_held(uint64_t serial) {
+static int gsb_held(const void *mem, uint64_t size) {
     if (g_gsbh_gen != g_cbgen + 1) return 0;
     if (g_gsbh_full) return 1;
-    for (int i = 0; i < g_gsbh_n; i++) if (g_gsbh_ser[i] == serial) return 1;
+    uint64_t lo = (uint64_t)(uintptr_t)mem, hi = lo + size;
+    for (int i = 0; i < g_gsbh_n; i++) if (lo < g_gsbh_hi[i] && g_gsbh_lo[i] < hi) return 1;
     return 0;
 }
 // A store's place in the storage: bytes [xb0, xb1) of block rows [by0, by0 + rows) of level `level`, n images from `slice` (layers, or a 3D level's depth planes); tx..th: the region
@@ -5245,7 +5249,7 @@ static void gsb_swz(const tex_t *t, const gsb_geo *g, unsigned n, uint64_t src, 
     enc_c_args(e, src, 0); enc_c_args(e, pg, 1); enc_c_args(e, qb.gpuAddress + qo, 2); enc_c_args(e, eb ? eb.gpuAddress : pg, 3);
     uint32_t nx = (g->xb1 - (g->xb0 & ~15u) + 15) / 16;
     enc_c_dispatch(e, MTLSizeMake((nx + 31) / 32, g->rows, n), MTLSizeMake(32, 1, 1));
-    gsb_hold(t->serial);
+    gsb_hold(t->mem, t->L.size);
     if (pk) pk->stored++;
     g_gsb_bytes += (uint64_t)(g->xb1 - g->xb0) * g->rows * n;
     if (g_gsb_stores++ < 4) MLOG("texture in storage the CPU can read ser=%llu %ux%ux%u format %#x: what the GPU wrote is written into its storage on the GPU (bytes %u-%u of %u rows from %u, %u images)",

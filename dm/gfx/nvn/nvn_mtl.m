@@ -8765,6 +8765,11 @@ static ArchEpoch *g_ep; static os_unfair_lock g_ep_lock = OS_UNFAIR_LOCK_INIT;  
 static int g_arch_cap;   // compiles are captured (an archive folder, a serializer): immutable after pso4_init
 static dispatch_group_t g_arch_pending;   // periods handed over and not written yet
 static _Atomic uint64_t g_pb_built, g_pb_archived, g_pb_reused, g_pb_spec, g_pb_legacy, g_pb_base_ns;
+// Compilations running now, on any thread (a base, a compute pipeline, a pipeline the MTLDevice builds), for the on-screen counter (mtl_compiling_now). g_comp_peak is the most that ran at once
+// since the last reading, so one that began and ended between two readings still shows once
+static _Atomic int g_comp_now, g_comp_peak;
+static inline void comp_begin(void) { int n = atomic_fetch_add(&g_comp_now, 1) + 1, p = atomic_load(&g_comp_peak); while (n > p && !atomic_compare_exchange_weak(&g_comp_peak, &p, n)) {} }
+static inline void comp_end(void) { atomic_fetch_sub(&g_comp_now, 1); }
 // Time by kind, all threads (the 'pipelines up to frame' line): archive lookups that found the base / found none, specializations, base compiles; predictions (submit thread)
 static _Atomic uint64_t g_pt_hit_n, g_pt_hit_ns, g_pt_miss_n, g_pt_miss_ns, g_pt_spec_ns, g_pt_comp_ns, g_pt_pred_n, g_pt_pred_ns, g_pp_done_n;   // bases compiled / taken from the archive / reused, specializations, MTLDevice builds
 typedef struct { const void *vf, *ff; uint32_t samples, a2c, rast, topo, amp, off; uint32_t va[31][3], vl[31][3]; } pbase_key;   // off: its functions without the border corrections (fn_off);   // what a base depends on: pso_desc's descriptor less the colour attachments
@@ -9229,7 +9234,7 @@ static id<MTLComputePipelineState> cps_new_b(id<MTLFunction> f, int off, NSError
         if (ps) return ps;
     }
     uint64_t t1 = bp_now();
-    ps = [g_dev newComputePipelineStateWithFunction:fn_dev_b(f, off) error:e];
+    comp_begin(); ps = [g_dev newComputePipelineStateWithFunction:fn_dev_b(f, off) error:e]; comp_end();
     if (ps) { atomic_fetch_add(&g_cps_built, 1); atomic_fetch_add(&g_cps_build_ns, bp_now() - t1); arch_harvest(d, 0); }
     return ps;
 }
@@ -9418,7 +9423,7 @@ static id<MTLRenderPipelineState> pso_build_ex(MTLRenderPipelineDescriptor *d, i
         if (whole) { if (!compile) return nil; return [g_comp4 newRenderPipelineStateWithDescriptor:whole compilerTaskOptions:nil error:e]; }
     }
     MTL4RenderPipelineDescriptor *b = g_comp4 ? pso_desc4(d, rast, off) : nil;   // with rasterization off there is no colour state to leave open: the base is the pipeline
-    if (!b) { if (!compile) return nil; g_pb_legacy++; return pso_build_dev(d, off, e); }
+    if (!b) { if (!compile) return nil; g_pb_legacy++; comp_begin(); id<MTLRenderPipelineState> lp = pso_build_dev(d, off, e); comp_end(); return lp; }
     pbase_key bk; pbase_key_of(d, off, &bk);
     id<MTLRenderPipelineState> base = nil; PbaseBuild *job = nil; int owner = 0, known = 0;   // known: the archives have been searched for it and lack it
     for (;;) {
@@ -9448,7 +9453,7 @@ static id<MTLRenderPipelineState> pso_build_ex(MTLRenderPipelineDescriptor *d, i
         if (base && from_run && g_compact_enabled && atomic_load(&g_warm_running)) {
             // Metal can crash in materializeAirNTFromOnlineForSlice when serializing archive imports mixed with fresh bases (#342).
             // Work around that framework bug by capturing the original shader functions, without lookupArchives. The normal compiler cache still applies.
-            int cap = 0; id<MTLRenderPipelineState> cb = arch_capturing() ? arch_capture(b, nil, vd, &cap) : nil;
+            int cap = 0; id<MTLRenderPipelineState> cb = nil; if (arch_capturing()) { comp_begin(); cb = arch_capture(b, nil, vd, &cap); comp_end(); }
             g_compact_ns += bp_now() - t1;
             if (cb) base = cb;
             if (cap) { g_compacted++; g_compact_bases++; } else g_compact_bad = 1;   // not in the new files: the old ones stay
@@ -9456,7 +9461,7 @@ static id<MTLRenderPipelineState> pso_build_ex(MTLRenderPipelineDescriptor *d, i
         if (!base) {
             if (!known && g_arch4.count + g_arch4p.count) { g_pt_miss_n++; g_pt_miss_ns += t1 - t0; }
             if (compile) {
-                NSError *be = nil; base = arch_capture(b, &be, vd, NULL); job->error = be; job->compiled = 1;
+                NSError *be = nil; comp_begin(); base = arch_capture(b, &be, vd, NULL); comp_end(); job->error = be; job->compiled = 1;
                 g_pt_comp_ns += bp_now() - t1;
                 if (base) { g_pb_built++; if (g_arch_cap) arch_note_new(); }
             }
@@ -16123,6 +16128,8 @@ static id<MTLRenderPipelineState> g_blit_pso; static MTLPixelFormat g_blit_fmt;
 static id<MTLSamplerState> g_blit_samp;
 static uint64_t g_present_n;
 uint64_t mtl_present_count(void) { return g_present_n; }   // Actual present count (heat attribution DM_HEAT computes the present frame rate)
+// Compilations running now, for the on-screen counter (front_ios.m): the most at once since the last call, so a short one is seen once; 0 when none runs. Called by one thread (the main thread's timer)
+int mtl_compiling_now(void) { return atomic_exchange(&g_comp_peak, atomic_load(&g_comp_now)); }
 void mtl_res_snapshot(mtl_res_count *out) {
     memset(out, 0, sizeof *out);
     out->pso = g_pso.n;

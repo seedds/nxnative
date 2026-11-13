@@ -91,7 +91,7 @@ Games whose profile supports it (Breath of the Wild, Animal Crossing: New Horizo
 
 ### Frame-rate counter
 
-Shows the frames per second at the top left.
+Shows, at the top left, the frames per second, the number of shaders (pipelines) the device is compiling at that moment, and the time of day in 24 hours: `60 fps | 0 shd | 14:32`, with the chip temperature and the battery on a second line (`soc 41°C | bat 87%`; soc: the hottest of the die sensors, read once a second; the iPad exposes no separate CPU and GPU temperatures; `soc --` when the sensors are not readable) and bat is the battery level (or `bat --` when the system gives no reading; iOS reports it in 5 % steps). The shader number updates four times a second and goes back to 0 when nothing is compiling; it rises when the game meets a pipeline that no archive had (each compile can cost a frame or more: the hitches of a new area). A compile that is over in less than a quarter of a second still shows for one update. Pipelines taken from the app's or the device's archive are not compiled and not counted.
 
 ## Controls
 

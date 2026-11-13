@@ -8,6 +8,7 @@
 #import <Metal/Metal.h>
 #import <AVFAudio/AVFAudio.h>
 #include <errno.h>
+#include <dlfcn.h>
 #include "front.h"
 #include "hle.h"
 #include "dm.h"
@@ -207,7 +208,7 @@ static void launcher_done(void) { [g_root startGame]; }
     if (self.fps) {   // the top row's free stretch: right of DmGamepad.m's L3 key (102 + 17 of its units from the safe edge), level with − / + (22 units down); u is its unit
         CGRect s = CGRectIntersection(layout.controls, UIEdgeInsetsInsetRect(b, gameInsets));
         CGFloat u = layout.separated ? MIN(MIN(s.size.height / 430.0, s.size.width / 700.0), 1.3) : MIN(b.size.height / 430.0, 1.3);
-        self.fps.frame = CGRectMake(floor(CGRectGetMinX(s) + 130 * u), floor(CGRectGetMinY(s) + 22 * u - 11), 64, 22);
+        self.fps.frame = CGRectMake(floor(CGRectGetMinX(s) + 130 * u), floor(CGRectGetMinY(s) + 22 * u - 11), 176, 40);   // two lines: "60 fps | 3 shd | 14:32" and "soc 41°C | bat 87%"
     }
 }
 - (void)showFPS:(BOOL)on {   // the frame-rate counter: DM_SHOW_FPS at Play, then the in-game menu
@@ -319,22 +320,71 @@ static void front_ios_power_watch(void) {
     LOG("front end: thermal state %d, brightness %.2f, Low Power Mode %s", dm_thermal_now(), g_brightness, dm_low_power_now() ? "on" : "off");
 }
 
-// Frame-rate counter: the frames put on screen in the last second (nvn_mtl.m counts them for NVN and for the Vulkan layer alike; frames the display link merged away are not counted).
+// Frame-rate counter: the frames put on screen in the last second (nvn_mtl.m counts them for NVN and for the Vulkan layer alike; frames the display link merged away are not counted),
+// then the shaders being compiled right now (mtl_compiling_now: pipelines the device is compiling, none taken from an archive; 0 when none runs) and the time of day, 24 h (HH:mm,
+// whatever the system's clock setting); a second line, "bat 87%", is the battery level. The text is redrawn four times a second so a compile is seen while it runs.
 // On when the IPA was built with it (the NSP script's SHOW_FPS / --show-fps → DMShowFPS in Info.plist); DM_SHOW_FPS=0 / 1 (the launcher, Documents/env.txt) overrides that without a rebuild,
 // and the in-game menu turns it on and off ([DmRootVC showFPS:])
 uint64_t mtl_present_count(void);
+int mtl_compiling_now(void);
+// SoC temperature in °C: the hottest of the die sensors ("PMU tdie*", "PMU2 tdie*") through the IOHIDEventSystem sensor services (readable by the app on the iPad; verified).
+// The iPad exposes only these per-die sensors for the whole chip: no separate CPU and GPU temperatures. Returns -1 when the sensors are not readable.
+static double front_ios_soc_temp(void) {
+    static void *io; static bool tried; static CFArrayRef svcs;
+    static CFTypeRef (*cprop)(void *, CFStringRef); static void *(*cev)(void *, int64_t, int32_t, int64_t); static double (*fv)(void *, int32_t);
+    if (!tried) {
+        tried = true; io = dlopen("/System/Library/Frameworks/IOKit.framework/IOKit", RTLD_LAZY);
+        void *(*create)(CFAllocatorRef) = io ? dlsym(io, "IOHIDEventSystemClientCreate") : NULL;
+        void (*setm)(void *, CFDictionaryRef) = io ? dlsym(io, "IOHIDEventSystemClientSetMatching") : NULL;
+        CFArrayRef (*copys)(void *) = io ? dlsym(io, "IOHIDEventSystemClientCopyServices") : NULL;
+        cprop = io ? dlsym(io, "IOHIDServiceClientCopyProperty") : NULL; cev = io ? dlsym(io, "IOHIDServiceClientCopyEvent") : NULL; fv = io ? dlsym(io, "IOHIDEventGetFloatValue") : NULL;
+        void *c = (create && setm && copys && cprop && cev && fv) ? create(kCFAllocatorDefault) : NULL;
+        if (c) {
+            setm(c, (__bridge CFDictionaryRef)@{ @"PrimaryUsagePage": @(0xff00), @"PrimaryUsage": @(5) });   // the temperature sensors
+            CFArrayRef all = copys(c); NSMutableArray *die = [NSMutableArray new];
+            for (CFIndex i = 0; all && i < CFArrayGetCount(all); i++) {
+                void *sv = (void *)CFArrayGetValueAtIndex(all, i); NSString *n = CFBridgingRelease(cprop(sv, CFSTR("Product")));
+                if ([n containsString:@"tdie"]) [die addObject:(__bridge id)sv];
+            }
+            svcs = (CFArrayRef)CFBridgingRetain(die); if (all) CFRelease(all);
+            LOG("front end: temperature sensors: %ld die sensors", (long)die.count);
+        }
+    }
+    if (!svcs) return -1;
+    double m = -1;
+    for (CFIndex i = 0; i < CFArrayGetCount(svcs); i++) {
+        void *ev = cev((void *)CFArrayGetValueAtIndex(svcs, i), 15, 0, 0); if (!ev) continue;
+        double t = fv(ev, 15 << 16); CFRelease(ev); if (t > m && t < 150) m = t;
+    }
+    return m;
+}
 static UILabel *front_ios_fps_label(void) {
     UILabel *l = [UILabel new];
-    l.font = [UIFont monospacedDigitSystemFontOfSize:13 weight:UIFontWeightSemibold]; l.textColor = UIColor.whiteColor; l.textAlignment = NSTextAlignmentCenter;
+    l.font = [UIFont monospacedDigitSystemFontOfSize:13 weight:UIFontWeightSemibold]; l.textColor = UIColor.whiteColor; l.textAlignment = NSTextAlignmentCenter; l.numberOfLines = 2;
     l.backgroundColor = [UIColor colorWithWhite:0 alpha:0.45]; l.layer.cornerRadius = 6; l.layer.masksToBounds = YES; l.userInteractionEnabled = NO;
-    l.text = @"-- fps";
+    UIDevice.currentDevice.batteryMonitoringEnabled = YES;   // the battery line
+    NSDateFormatter *clock = [NSDateFormatter new]; clock.locale = [NSLocale localeWithLocaleIdentifier:@"en_US_POSIX"]; clock.dateFormat = @"HH:mm";   // 24 h in any region or setting
+    __block NSString *fps = @"--";
+    void (^draw)(void) = ^{
+        float b = UIDevice.currentDevice.batteryLevel;   // -1 when the system gives no reading; iOS reports it in 5 % steps to apps (the finer gauge is blocked by the sandbox, verified on the iPad)
+        NSString *bat = b < 0 ? @"--" : [NSString stringWithFormat:@"%.0f%%", b * 100];
+        static double temp = -1; static double tt;   // the sensors are read once a second
+        double now = CACurrentMediaTime(); if (now - tt >= 1.0 || tt == 0) { tt = now; temp = front_ios_soc_temp(); }
+        NSString *soc = temp < 0 ? @"--" : [NSString stringWithFormat:@"%.0f°C", temp];
+        l.text = [NSString stringWithFormat:@"%@ fps | %d shd | %@\nsoc %@ | bat %@", fps, mtl_compiling_now(), [clock stringFromDate:NSDate.date], soc, bat];
+    };
+    draw();
     __block uint64_t n0 = mtl_present_count(); __block double t0 = CACurrentMediaTime();
-    [NSTimer scheduledTimerWithTimeInterval:1.0 repeats:YES block:^(NSTimer *t) {
-        (void)t; uint64_t n = mtl_present_count(); double now = CACurrentMediaTime();
-        if (now - t0 < 1.5) l.text = [NSString stringWithFormat:@"%.0f fps", (n - n0) / (now - t0)];   // a longer span is the time in the background: no reading
-        n0 = n; t0 = now;
+    [NSTimer scheduledTimerWithTimeInterval:0.25 repeats:YES block:^(NSTimer *t) {
+        (void)t; double now = CACurrentMediaTime();
+        if (now - t0 >= 0.9) {   // the frame rate over about a second
+            uint64_t n = mtl_present_count();
+            if (now - t0 < 1.5) fps = [NSString stringWithFormat:@"%.0f", (n - n0) / (now - t0)];   // a longer span is the time in the background: no reading, the last one stays
+            n0 = n; t0 = now;
+        }
+        draw();
     }];
-    LOG("front end: frame-rate counter on");
+    LOG("front end: frame-rate counter on (frames, shaders compiling now, clock, battery)");
     return l;
 }
 

@@ -48,7 +48,7 @@ targets:
         LSApplicationCategoryType: ${DM_APP_CATEGORY}   # game profile app_category
         DMShowFPS: ${DM_SHOW_FPS}           # YES = the frame-rate counter is on (front_ios.m; set by build_ipa.sh)
         DMLanguage: ${DM_LANG}              # the game language code (main.m sets DM_LANG from it; set by build_ipa.sh)
-        LSSupportsGameMode: true
+        LSSupportsGameMode: false   # off by default, as in the Mac app: Game Mode can hold the GPU and CPU clocks low after a few minutes (docs/reference/frame-rate.md); build_ipa.sh sets it true with DM_GAME_MODE=1 (the NSP script's --game-mode)
         GCSupportsControllerUserInteraction: true   # Physical controllers (GameController)
         GCSupportedGameControllers:
           - ProfileName: ExtendedGamepad

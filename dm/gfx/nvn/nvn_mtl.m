@@ -4587,11 +4587,11 @@ void mtl_mem_stat(unsigned long long frame, unsigned long long rss_mb) {
 #endif
     MLOG("memory up to frame %llu: resident %llu MB, GPU allocated %llu MB, deferred-release queue %lu, residency set %lu, serial objects %u, memory pools %d (resident %d; peak %d / tracking table capacity %d; freed but alive %lu, %llu MB), shared textures %u (%u of them unreferenced; evicted with pools %llu, on storage takeover %llu in total), texture re-uploads %llu in total, per-frame arena blocks created %llu in total, finalized textures still referenced %u (small table, %llu put in total), retired but held by a serial %u, recycled texture heaps made %llu, reused %llu, freed %llu, waiting %u (%llu MB); headroom to the system memory limit %s", frame, rss_mb, gpu, nd, nr, ns, live, pres, peak, cap, dead_n, dead_mb, ashared, aorph, (unsigned long long)as.evicted, (unsigned long long)as.taken, (unsigned long long)g_pkg_reuploads, (unsigned long long)g_arena_made, nghost, (unsigned long long)ghost_puts, nwait,
          (unsigned long long)g_rh_made, (unsigned long long)g_rh_reused, (unsigned long long)g_rh_trimmed, rh_n, (unsigned long long)(rh_bytes >> 20), avail);
-    { void mtl_vc_stats(unsigned *, uint64_t *, uint64_t *), mtl_tb2_stats(uint64_t *, uint64_t *, uint64_t *, uint64_t *, uint64_t *); uint64_t mtl_tex_mis_count(void); unsigned vn; uint64_t vh, vm, tb, tm, tf, tc, tcb;
-      mtl_vc_stats(&vn, &vh, &vm); mtl_tb2_stats(&tb, &tm, &tf, &tc, &tcb);
-      MLOG("texture views by texture (vc_get): %u textures hold cached views; %llu views reused, %llu made in total; texture buffers bound as 2D rows for wrapped 1D fetches %llu times, %llu made, %llu failed, %llu copied into aligned rows (%llu MB) "
+    { void mtl_vc_stats(unsigned *, uint64_t *, uint64_t *, unsigned *, uint64_t *), mtl_tb2_stats(uint64_t *, uint64_t *, uint64_t *, uint64_t *, uint64_t *); uint64_t mtl_tex_mis_count(void); unsigned vn, vbn; uint64_t vh, vm, vbh, tb, tm, tf, tc, tcb;
+      mtl_vc_stats(&vn, &vh, &vm, &vbn, &vbh); mtl_tb2_stats(&tb, &tm, &tf, &tc, &tcb);
+      MLOG("texture views by texture (vc_get): %u textures hold cached views; %llu views reused, %llu made in total; by shared texture (vcb_get, a serial made again over the same storage): %u textures, %llu reused; texture buffers bound as 2D rows for wrapped 1D fetches %llu times, %llu made, %llu failed, %llu copied into aligned rows (%llu MB) "
            "(tbuf_as_2d); texture type mismatches no view bridges %llu in total (tex_mis_note)",
-           vn, (unsigned long long)vh, (unsigned long long)vm, (unsigned long long)tb, (unsigned long long)tm, (unsigned long long)tf, (unsigned long long)tc, (unsigned long long)(tcb >> 20), (unsigned long long)mtl_tex_mis_count()); }
+           vn, (unsigned long long)vh, (unsigned long long)vm, vbn, (unsigned long long)vbh, (unsigned long long)tb, (unsigned long long)tm, (unsigned long long)tf, (unsigned long long)tc, (unsigned long long)(tcb >> 20), (unsigned long long)mtl_tex_mis_count()); }
     if (g_allocprof > 0) { char ab[256]; int o = 0; for (int i = 0; i < g_alloc_n && o < 200; i++) o += snprintf(ab + o, sizeof ab - o, " #%d %llu MB", i, (unsigned long long)(g_alloc4[i].allocatedSize >> 20));
         for (int i = 0; i < 3 && o < 240; i++) o += snprintf(ab + o, sizeof ab - o, " up%d %llu pres%d %llu", i, (unsigned long long)(g_up_alloc4[i].allocatedSize >> 20), i, (unsigned long long)(g_present_alloc4[i].allocatedSize >> 20));
         MLOG("command allocator usage:%s", ab);
@@ -6465,7 +6465,42 @@ static void vc_put(uint64_t ser, const void *pool, const vc_key *k, id<MTLTextur
     s->k[i] = *k; s->view[i] = (void *)CFBridgingRetain(v); g_vc_new++;
 }
 void mtl_vc_drop(uint64_t ser) { os_unfair_lock_lock(&g_rmu); vc_set *s = nvn_hm_del(&g_vc, &ser); if (s) vc_set_free(s); os_unfair_lock_unlock(&g_rmu); }
-void mtl_vc_stats(unsigned *n, uint64_t *hit, uint64_t *made) { os_unfair_lock_lock(&g_rmu); *n = g_vc.n; *hit = g_vc_hit; *made = g_vc_new; os_unfair_lock_unlock(&g_rmu); }
+// The same views by the shared texture they are views of: a game that initializes its render targets again every frame over the same storage gets a new serial for each (finalized at
+// the end of the frame, which drops its views above), and the sharing table hands each one the texture the last frame's had. Ocarina of Time does that with about 40 targets a frame
+// (its depth's (R, 0, 0, 1) view, RGBX's alpha 1, the sRGB views of its colour targets), and each frame made them all again: a third of the views it bound were new, 8% of the submit
+// thread's time in newTextureView. Only textures in the sharing table are kept here (own_shared_locked when the view is made), so a serial's own texture, which goes with it, is not.
+// A view retains its parent, so a key cannot name another texture while its entry exists, and a hit is a view of this very texture; an entry whose texture left the sharing table
+// (its pool finalized, its storage taken over, an upgrade) goes at the next sweep, once per frame (vcb_sweep), so it keeps that texture alive one frame at most. Under g_rmu
+static nvn_hmap g_vcb = {.klen = 8};   // the shared MTLTexture's address → vc_set (pool NULL)
+static uint64_t g_vcb_hit, g_vcb_frame;
+static id<MTLTexture> vcb_get(id<MTLTexture> base, const vc_key *k) {
+    uint64_t key = (uint64_t)(uintptr_t)(__bridge void *)base; vc_set *s = nvn_hm_get(&g_vcb, &key); if (!s) return nil;
+    for (int i = 0; i < VC_WAYS; i++) if (s->view[i] && !memcmp(&s->k[i], k, sizeof *k)) { g_vcb_hit++; return (__bridge id<MTLTexture>)s->view[i]; }
+    return nil;
+}
+static void vcb_put(id<MTLTexture> base, const vc_key *k, id<MTLTexture> v) {
+    pthread_mutex_lock(&g_smu); int shared = own_shared_locked(base); pthread_mutex_unlock(&g_smu);   // lock order g_rmu, then g_smu (as tex_mtl from tex_by_id)
+    if (!shared) return;
+    uint64_t key = (uint64_t)(uintptr_t)(__bridge void *)base; vc_set *s = nvn_hm_get(&g_vcb, &key);
+    if (!s) { if (g_vcb.n >= VC_MAX) nvn_hm_clear(&g_vcb, vc_set_free); if (!(s = calloc(1, sizeof *s))) return; nvn_hm_put(&g_vcb, &key, s); }
+    unsigned i = s->next++ % VC_WAYS;
+    if (s->view[i]) { defer_obj_unref((__bridge id)s->view[i]); CFRelease(s->view[i]); }
+    s->k[i] = *k; s->view[i] = (void *)CFBridgingRetain(v);
+}
+static void vcb_sweep(int now) {   // the entries of textures no longer in the sharing table go; once per frame unless now. Caller holds g_rmu
+    uint64_t f = atomic_load(&g_cur_frame);
+    if ((!now && f == g_vcb_frame) || !g_vcb.n) { g_vcb_frame = f; return; }
+    g_vcb_frame = f;
+    pthread_mutex_lock(&g_smu);
+    for (uint32_t i = 0; i < g_vcb.cap;) {   // a deletion shifts later entries back into slot i: look at it again
+        vc_set *s = g_vcb.vals[i]; uint64_t key; memcpy(&key, g_vcb.keys + (size_t)i * 8, 8);
+        if (s && !own_shared_locked((__bridge id)(void *)(uintptr_t)key)) { nvn_hm_del(&g_vcb, &key); vc_set_free(s); }
+        else i++;
+    }
+    pthread_mutex_unlock(&g_smu);
+}
+
+void mtl_vc_stats(unsigned *n, uint64_t *hit, uint64_t *made, unsigned *bn, uint64_t *bhit) { os_unfair_lock_lock(&g_rmu); *n = g_vc.n; *hit = g_vc_hit; *made = g_vc_new; *bn = g_vcb.n; *bhit = g_vcb_hit; os_unfair_lock_unlock(&g_rmu); }
 static void tb2_gone_clear(void);
 static void vc_drop_pool(const void *pool) {   // caller holds g_rmu
     tb2_gone_clear();
@@ -6785,11 +6820,12 @@ static id<MTLTexture> tex_by_id(int tid) {   // Caller holds g_rmu
             if (fits) { s0 *= 6; ns *= 6; } else tt = MTLTextureType2DArray;
         }
         vc_key k; memset(&k, 0, sizeof k); k.pf = pf; k.tt = (uint8_t)tt; k.l0 = (uint32_t)l0; k.nl = (uint32_t)nl; k.s0 = (uint32_t)s0; k.ns = (uint32_t)ns; memcpy(k.sw, sw, 4);
-        if (!(v = vc_get(rp->t.serial, &k, base))) {
+        vcb_sweep(0);
+        if (!(v = vc_get(rp->t.serial, &k, base)) && !(v = vcb_get(base, &k))) {
             v = need_sw ? [base newTextureViewWithPixelFormat:(MTLPixelFormat)pf textureType:tt levels:NSMakeRange(l0, nl) slices:NSMakeRange(s0, ns) swizzle:MTLTextureSwizzleChannelsMake(sw[0], sw[1], sw[2], sw[3])]
                         : [base newTextureViewWithPixelFormat:(MTLPixelFormat)pf textureType:tt levels:NSMakeRange(l0, nl) slices:NSMakeRange(s0, ns)];
             if (!v) { RED_ONCE(11, "cannot create texture view id %d", tid); v = base; }
-            else vc_put(rp->t.serial, rp->t.pool, &k, v);
+            else { vc_put(rp->t.serial, rp->t.pool, &k, v); vcb_put(base, &k, v); }
         }
     }
     if (rp->retired && rp->transient_sub != g_sub_serial) {
@@ -6935,7 +6971,12 @@ static id<MTLTexture> img_fit(int tid, id<MTLTexture> t, int dpf, MTLTextureType
     treg_t *r = &g_treg[tid];
     if (r->im && r->im_of == (__bridge void *)t && ((__bridge id<MTLTexture>)r->im).pixelFormat == pf && ((__bridge id<MTLTexture>)r->im).textureType == want) { *rid = r->im_rid; return (__bridge id<MTLTexture>)r->im; }
     if (r->im) { defer_obj_unref((__bridge id)r->im); CFRelease(r->im); r->im = r->im_of = NULL; r->im_rid = 0; }
-    id<MTLTexture> v = [base newTextureViewWithPixelFormat:pf textureType:want levels:NSMakeRange(l0, t.mipmapLevelCount) slices:NSMakeRange(s0, ns)];
+    // The view of a shared texture is kept with it (vcb_get), as tex_by_id's are: a render target initialized again each frame binds a new ID with a new serial over the same texture
+    vc_key k; memset(&k, 0, sizeof k); k.pf = (uint32_t)pf; k.tt = (uint8_t)want; k.l0 = (uint32_t)l0; k.nl = (uint32_t)t.mipmapLevelCount; k.s0 = (uint32_t)s0; k.ns = (uint32_t)ns;
+    k.sw[0] = MTLTextureSwizzleRed; k.sw[1] = MTLTextureSwizzleGreen; k.sw[2] = MTLTextureSwizzleBlue; k.sw[3] = MTLTextureSwizzleAlpha;   // no channel mapping: the same view as tex_by_id's of these parameters
+    vcb_sweep(0);
+    id<MTLTexture> v = vcb_get(base, &k);
+    if (!v && (v = [base newTextureViewWithPixelFormat:pf textureType:want levels:NSMakeRange(l0, t.mipmapLevelCount) slices:NSMakeRange(s0, ns)])) vcb_put(base, &k, v);
     if (!v) { RED_ONCE(107, "cannot create the image view of class %s, Metal type %lu (texture ID %d, Metal format %lu, type %lu)", !cls ? "unchanged" : u ? "uint" : "int", (unsigned long)want, tid, (unsigned long)t.pixelFormat, (unsigned long)t.textureType); return nil; }
     { static int once; if (cls && !once++) MLOG("image read in another class than its texture: first case texture ID %d Metal format %lu → %lu", tid, (unsigned long)t.pixelFormat, (unsigned long)pf); }
     { static int once; if (t.textureType != want && !once++) MLOG("image slot of another type than its texture: first case texture ID %d, Metal type %lu → %lu, %lu layers", tid, (unsigned long)t.textureType, (unsigned long)want, (unsigned long)ns); }

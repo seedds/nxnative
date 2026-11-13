@@ -13,5 +13,14 @@ int main(void) {
     uint8_t packet[100]={0};memcpy(packet,"DSUS",4);packet[4]=0xe9;packet[5]=3;packet[6]=84;dsu_put(packet+16,0x100002);packet[20]=1;packet[21]=2;packet[31]=1;dsu_put(packet+32,1);dsu_put(packet+68,1000000);
     float g=-1,r=90;memcpy(packet+84,&g,4);memcpy(packet+88,&r,4);dsu_put(packet+8,dsu_crc(packet,100));assert(sendto(server,packet,100,0,(struct sockaddr*)&client,cl)==100);
     for(int i=0;i<100 && !atomic_load(&callbacks);i++) { struct timespec pause={0,10000000};nanosleep(&pause,NULL); }
-    assert(atomic_load(&callbacks)==1);dm_dsu_stop();close(server);puts("DSU loopback subscription and radian conversion passed");
+    assert(atomic_load(&callbacks)==1);
+    // Replayed sequence and timestamp must not produce another sensor callback.
+    assert(sendto(server,packet,100,0,(struct sockaddr*)&client,cl)==100);
+    dsu_put(packet+32,2);dsu_put(packet+8,dsu_crc(packet,100));
+    assert(sendto(server,packet,100,0,(struct sockaddr*)&client,cl)==100);
+    // An ordered sample with fresh device time is accepted.
+    dsu_put(packet+32,3);dsu_put(packet+68,1010000);dsu_put(packet+8,dsu_crc(packet,100));
+    assert(sendto(server,packet,100,0,(struct sockaddr*)&client,cl)==100);
+    for(int i=0;i<100 && atomic_load(&callbacks)<2;i++) { struct timespec pause={0,10000000};nanosleep(&pause,NULL); }
+    assert(atomic_load(&callbacks)==2);dm_dsu_stop();close(server);puts("DSU loopback subscription, replay rejection and radian conversion passed");
 }

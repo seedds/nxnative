@@ -302,6 +302,8 @@ static void ghost_used(uint64_t k) {   // a lookup or a put of k's ghost entry: 
     u->frame = own_hook_frame(); u->sub = own_hook_submission();
     if (u != g_ghost_mru) { u->prev = g_ghost_mru; if (g_ghost_mru) g_ghost_mru->next = u; else g_ghost_lru = u; g_ghost_mru = u; }
 }
+int own_ghost_has_locked(uint64_t k) { return g_ghost.n && nvn_hm_get(&g_ghost, &k) != NULL; }   // a look, not a use (no ghost_used)
+int own_ghost_has(uint64_t k) { pthread_mutex_lock(&g_smu); int r = own_ghost_has_locked(k); pthread_mutex_unlock(&g_smu); return r; }
 static void ghost_del_locked(uint64_t k) {   // k's ghost entry goes with its place in the list; the serial resolves anew (a note)
     ghost_use *u = nvn_hm_del(&g_ghost_use, &k); if (u) { use_unlink(u); free(u); }
     id old = hm_get_id(&g_ghost, &k); if (!old) return;

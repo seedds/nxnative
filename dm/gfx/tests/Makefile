@@ -125,6 +125,12 @@ t_cpu_tex: t_cpu_tex.m $(MTL_T_DEP)
 .PHONY: check_t_cpu_tex
 check_t_cpu_tex: t_cpu_tex
 	MTL_DEBUG_LAYER=1 ./t_cpu_tex --metal
+t_vc_ghost: t_vc_ghost.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_vc_ghost.m $(filter-out ../nvn/hle_nvn.c,$(MTL_T_SRC)) $(FW)
+.PHONY: check_t_vc_ghost
+check_t_vc_ghost: t_vc_ghost
+	MTL_DEBUG_LAYER=1 ./t_vc_ghost
+	MTL_DEBUG_LAYER=1 ./t_vc_ghost --off
 t_read_owner: t_read_owner.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_read_owner.m $(filter-out ../nvn/hle_nvn.c,$(MTL_T_SRC)) $(FW)
 check_t_read_owner: RUN_ENV = MTL_DEBUG_LAYER=1

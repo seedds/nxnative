@@ -577,6 +577,13 @@ Frame pacing: the host's frame step, engine frame limiters, present intervals an
 - **Fix:** the declaration also covers 1.1 × the window's peak (`rt_comp_tick` in `hle_nvn.c`): 5.6 ms here, 60.0 fps, 99th percentile 21 ms.
 - **Found on:** [DARK SOULS: REMASTERED](../../dm/games/01004AB00A260000/README.md), in the Asylum cell.
 
+### The frame's threads run on efficiency cores while the device is cool
+
+- **Symptom:** in play, most of the frame's CPU time is on efficiency cores although the device is at thermal state 0; the translation thread runs 60–70 % slower and frames drop.
+- **Cause:** the time-constraint policy covers one thread. The system's performance controller does not know that the encode thread and the threads that record command buffers work to the same deadline, so it treats their load as background work when many threads are busy.
+- **Fix (opt-in):** `DM_FRAME_WG=1`, the launcher's Deadline boost (`hle_nvn.c` `dm_frame_wg_join`, `fwg_frame`): the acquiring thread, the encode thread and every thread that records command buffers join one `os_workgroup` interval made with `AudioWorkIntervalCreate` (looked up at run time), and each frame is an interval whose deadline is the present period. A guest thread leaves it when it exits (`hle_thread.c`). Off by default: on an iPad Pro M4 at thermal state 0 it held the translation thread at 3.8 GHz (3.3 ms a frame against 4.75 ms at 2.6 GHz) for 27 % more CPU power (1.94 against 1.52 W), with no dropped frames either way. Whether it keeps a game off the efficiency cores in play, where the symptom was seen, is the player's test.
+- **Found on:** [Breath of the Wild](../../dm/games/01007EF00011E000/README.md) on an iPad Pro M4 (14–55 % of CPU time on performance cores while playing), by Xipzer; see also [#1573](https://github.com/seedds/nxnative/pull/1573).
+
 ### A shader that writes a whole frame through raw global memory
 
 - **Symptom:** a movie or full-screen compute pass far slower than the same work should be, nearly all of it GPU time: `GPU p50` near the frame time with `submit+present` under 1 ms. `[RED] raw global memory: a write log ran out of slots` on older chains. With `DM_NVN_GPUPROF` a relaxed timestamp can put the time before the compute encoder's reported start, so the encoder itself looks short and the gap before it is what is long.

@@ -32,7 +32,6 @@ Community projects build on nxnative with tools to turn your games into apps for
 
 - [NX2Apple](https://github.com/LNPANDY/NX2Apple) — Mac builder with a shared iPhone/iPad game library.
 - [NX Play](https://github.com/varyform/nx-native-wrapper) — Mac library with device installs and save sync.
-- [NxNative Launcher](https://github.com/rennan101/nxnative_Launcher) — Mac launcher with guided builds and controller mapping.
 - [LumaNX](https://github.com/Xc1Ym/LumaNX) — Mac game builder with IPA export.
 - [GameCase](https://github.com/Tiaoge-tou/GameCase) — iOS game library based on LiveContainer.
 
@@ -52,7 +51,7 @@ Switch 2 games are built from one `.nup` file or a folder of their files, not fr
 
 ### Build from the command line
 
-You need a Mac with macOS 26.6 or later, [Xcode](https://developer.apple.com/download/all/?q=Xcode%2027.2) 27.2, [Homebrew](https://brew.sh) and Python 3.12 or newer (an arm64 one, not an Intel Homebrew's). An iPhone build also needs Xcode's iOS platform (Xcode → Settings → Components).
+You need a Mac with macOS 26.6 or later, [Xcode](https://developer.apple.com/download/all/?q=Xcode%2027.2) 27.2, [Homebrew](https://brew.sh) and Python 3.12 or newer (an arm64 one, not an Intel Homebrew). An iPhone build also needs Xcode's iOS platform (Xcode → Settings → Components).
 
 The shaders are built with Xcode 27.2's Metal compiler. Select it before step 1: `sudo xcode-select -s /Applications/Xcode.app`. With several Xcode versions installed, name this one `Xcode-27.2.app` and select it with `sudo xcode-select -s /Applications/Xcode-27.2.app`.
 
@@ -65,35 +64,26 @@ brew install xcodegen zstd glslang
 python3 -m pip install lz4 "capstone>=5,<6" fonttools nsz zbic "backports.zstd; python_version < '3.14'"
 ```
 
-**2. Put your game in a folder**: the game, plus its update and DLC if you have them (`.nsp`, `.xci`, `.nsz` or `.xcz`):
+**2. Building**:
 
+  #### Switch 1 games:
+Put your game and any updates or DLC you wish to include in a folder. For the switch 1 these file extensions will be `.nsp`, `.xci`, `.nsz`, and `.xcz`. 
 ```
 ~/Games/MarioWonder/
   Super Mario Bros. Wonder [010015100B514000][v0].nsp
   Super Mario Bros. Wonder [010015100B514800][v327680].nsp
 ```
-
-**3. Build**, with your game folder and your `prod.keys`:
-
+Build with your game folder and your `prod.keys`:
 ```
 python3 scripts/build_ipa_from_nsp.py ~/Games/MarioWonder -k ~/keys/prod.keys
 ```
+To compile a mac app, append `--platform mac-app` to your build command. It produces a Mac app build that is directly launchable. 
+The IPA or Mac App will appear in the game's folder. The first build takes 30–60 minutes and needs free disk space of about twice the game's size plus 10 GB; building again is much faster.
 
-The IPA appears in the game's folder. The first build takes 30–60 minutes and needs free disk space of about twice the game's size plus 10 GB; building again is much faster.
+For all other build command options view: [The packing script in detail](docs/development.md#the-packing-script-in-detail).
 
-To play on the Mac instead, add `--platform mac-app`: you get a Mac app of the game to open from Finder. All options: [The packing script in detail](docs/development.md#the-packing-script-in-detail).
-
-### Install
-
-Install the IPA on your iPhone or iPad with a sideloading tool such as AltStore, Sideloadly or LiveContainer. If your tool offers **Increased Memory Limit**, turn it on: the bigger games need it.
-
-Game too big to install? Build again with `--romfs separate`, and run the command the script prints once to copy the game files to your phone ([Quick reinstalls](docs/development.md#quick-reinstalls)). With AltServer, also add `--shader-files`: it cannot install a file of 2 GiB or more.
-
-Controls, saves and settings: [Playing](docs/playing.md).
-
-### Switch 2 games
-
-A Switch 2 game is built from one [NUP](https://github.com/a55uka/nup) container (a `.nup` file) or a folder of its files, not from NSPs. Neither needs `prod.keys`. A game this project has no profile for is surveyed and gets a provisional profile, as NSPs do ([Port another game](docs/development.md#port-another-game)), which may not boot. You get a Mac app; iPhone and iPad are untested.
+#### Switch 2 games:
+Switch 2 games are either built from one [NUP](https://github.com/a55uka/nup) container (a `.nup` file) or a folder with the game's contents, neither of which need `prod.keys`. If a game has no premade profile in this project, it is surveyed and receives a provisional profile as NSPs do ([Port another game](docs/development.md#port-another-game)). Games with provisional profiles may not boot. You get a Mac app; iPhone and iPad are untested.
 
 **From a `.nup` file**, which holds the base game, its updates and DLC in one file. Give the file, or a folder that holds it:
 
@@ -103,16 +93,16 @@ python3 scripts/build_ipa_from_nsp.py ~/Games/DonkeyKongBananza.nup --platform m
 
 [Hyrule Warriors: Age of Imprisonment](dm/games/04003F40232DE000/README.md) is played this way: its 47 GB NUP unpacks in under five minutes. A NUP that carries the game's control data (its NACP) and icon gives the app the game's name and icon; otherwise the name comes from the game's profile and the app has no icon unless you give it one with `--icon <image>` (`ICON` in Spyder; a JPEG or PNG of any size).
 
-A NUP without the base game also works, when its base package is empty or it has none and its updates are marked `standalone_update`: the update is taken as the whole game, and the script says so. If the game then stops on missing files, that update holds only what changed: pack a NUP with the base game. The newest update is selected by default; `--package v<N>` selects another version in the container. Such a container has no `v0` (base game) to select.
+A NUP without the base game also works, when its base package is empty or it has none and its s are marked `standalone_`: the  is taken as the whole game, and the script says so. If the game then stops on missing files, that  holds only what changed: pack a NUP with the base game. The newest  is selected by default; `--package v<N>` selects another version in the container. Such a container has no `v0` (base game) to select.
 
-**From a folder of files**. The script expects this layout (`updates` and `dlc` are optional):
+**From a folder of files**. The script expects the following layout (`s` and `dlc` are optional):
 
 ```
 ~/Games/DonkeyKongBananza/
   base/exefs/                     main, main.npdm, sdk, rtld
   base/romfs/
-  updates/458752/exefs/           the update's version, as a decimal number
-  updates/458752/romfs/           the patched RomFS, not a patch
+  s/458752/exefs/           the 's version, as a decimal number
+  s/458752/romfs/           the patched RomFS, not a patch
   dlc/040074a01bf13001/0/romfs/   the DLC's title ID
 ```
 
@@ -120,11 +110,21 @@ A NUP without the base game also works, when its base package is empty or it has
 python3 scripts/build_ipa_from_nsp.py ~/Games/DonkeyKongBananza --platform mac-app
 ```
 
-An update's folder alone will do (no `base/`), and so will `exefs/` and `romfs/` directly in the folder, as `nup extract` writes them, which count as `base/`. The app has no icon, because the folder holds none; `--icon <image>` (`ICON` in Spyder) gives it one. To turn such a folder into a NUP: `nup pack ~/Games/DonkeyKongBananza game.nup`.
+An `'s` folder alone will do (no `base/`), and so will `exefs/` and `romfs/` directly in the folder, as `nup extract` writes them, which count as `base/`. The app has no icon, because the folder holds none; `--icon <image>` (`ICON` in Spyder) gives it one.
+To turn such a folder into a NUP, use `nup pack ~/Games/DonkeyKongBananza game.nup`.
+For more information and options for packing, see: [The packing script in detail](docs/development.md#the-packing-script-in-detail).
+### Install on IOS
+
+Install the IPA on your iPhone or iPad with a sideloading tool such as AltStore, Sideloadly or LiveContainer. If your tool offers **Increased Memory Limit**, turn it on: the bigger games need it.
+
+Game too big to install? Build again with `--romfs separate`, and run the command the script prints once to copy the game files to your phone ([Quick reinstalls](docs/development.md#quick-reinstalls)). With AltServer, also add `--shader-files`: it cannot install a file of 2 GiB or more.
+
+Controls, saves and settings: [Playing](docs/playing.md).
 
 ## Discussions
 
-Questions, how a game runs on your Mac or iPhone, and ideas go in [Discussions](https://github.com/seedds/nxnative/discussions); [Issues](https://github.com/seedds/nxnative/issues) are for bugs, with the log. Ocarina of Time's performance (frame rate, resolution, which Macs hold 60 fps) is followed in [Ocarina of Time: state on main](https://github.com/seedds/nxnative/discussions/1789).
+[Discussions](https://github.com/seedds/nxnative/discussions); is for questions about nxnative, reports about how a game runs on your Mac or iPhone, and ideas.
+[Issues](https://github.com/seedds/nxnative/issues) is for bug reports, with the exception of Ocarina of Time, its performance (frame rate, resolution, which Macs hold 60 fps) is followed in [Ocarina of Time: state on main](https://github.com/seedds/nxnative/discussions/1789).
 
 ## For developers
 
@@ -132,7 +132,7 @@ Questions, how a game runs on your Mac or iPhone, and ideas go in [Discussions](
 
 ## Acknowledgements
 
-This project is built on other people's work ([licenses](dm/third_party/README.md)):
+This project is built with the help of other people's work ([licenses](dm/third_party/README.md)):
 
 - **[d2r-mobile](https://github.com/jhaizhou-ops/d2r-mobile)** (MIT) developed this native-execution approach, for Diablo II: Resurrected. nxnative started as a copy of its generic parts: the NSO rewriter, the host that stands in for Horizon, the NVN-on-Metal layer and the iOS app shell. Fixes go both ways.
 - **Ryujinx** (MIT): its shader translator (`Ryujinx.Graphics.Shader`, `Ryujinx.Common` and `Spv.Generator` 1.3.2, in `dm/third_party/ryujinx` with a few fixes listed in [its README](dm/third_party/ryujinx/README.md)) turns the games' shaders into SPIR-V. Its emulation of the kernel and system services is also a reference when the host's behaviour is in doubt.

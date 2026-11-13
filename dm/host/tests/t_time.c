@@ -1,6 +1,7 @@
 // Clock snapshot arithmetic (hle_time.c, from PR #36): CalculateSpanBetween and CalculateStandardUserSystemClockDifferenceByUser looked up by their mangled names in the real swforce
 // registrations, run on both host snapshot entries and on edited copies
 #include "../hle_time.c"
+int dm_online(void) { return 0; }   // online mode (hle_online.c) is off: the offline answers under test
 #include <mach-o/getsect.h>
 
 uint64_t guest_ns(void) { return clock_gettime_nsec_np(CLOCK_MONOTONIC); }

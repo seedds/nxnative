@@ -230,6 +230,7 @@ def header_one(g):
          f'#define DM_GAME_MEM_STACK {g.int("mem_stack"):#x}ull',
          f'#define DM_GAME_APP_POOL {g.int("app_pool"):#x}ull',
          f'#define DM_GAME_MEM_USED {int(g.get("mem_used", "0x4000000"), 0):#x}ull',   # used memory reported beside the heap (hle_svc.c GetInfo UsedMemorySize)
+         f'#define DM_GAME_CORE_MASK {int(g.get("core_mask", "0x7"), 0):#x}ull',   # the cores the NPDM's ThreadInfo allows (hle_svc.c GetInfo CoreMask): 0-2 on a Switch, 0-5 for a Switch 2 game that asks for them
          f'#define DM_GAME_SYS_RESOURCE {int(g.get("sys_resource", "0x2000000"), 0):#x}ull',   # the NPDM's system resource size (hle_svc.c GetInfo TotalSystemResourceSize; 0 = no virtual address memory)
          f'#define DM_GAME_ARGS {q(g.get("game_args", ""))}',   # game arguments when the command line gives none (main.c; Octopath Traveler 0: Unreal's -SwitchVirtualAddressSpaceSize=)
          f'#define DM_GAME_ENV {q(g.get("game_env", ""))}',   # KEY=VALUE pairs getenv answers (hle_os.c; Absolum: .NET's DOTNET_GCRegionRange)

@@ -1,6 +1,7 @@
 // Public NFC hooks must stop an older SDK from opening nfc:user, while preserving
 // the existing NFP no-tag path. Exercise the real forced registrations, no guest SDK.
 #include "../hle_sdk16.c"
+int dm_online(void) { return 0; }   // online mode (hle_online.c) is off: the offline answers under test
 
 static int checks, fails, lookups;
 #define CHECK(c, msg) do { checks++; if (!(c)) { fails++; fprintf(stderr, "FAIL: %s\n", msg); } } while (0)

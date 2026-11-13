@@ -104,8 +104,8 @@ $(B)/t_audren_layout: t_audren_layout.c ../hle_audren.c ../hle.h ../dm.h $(GAME_
 .PHONY: audren-layout
 audren-layout: $(B)/t_audren_layout
 	$(B)/t_audren_layout
-$(B)/t_system_event: t_system_event.c ../hle_thread.c ../hle_sdk16.c ../hle_misc.c ../hle_bigstack.c ../hle.h ../dm.h $(GAME_H) | $(B)
-	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -Wno-frame-address -I.. $(GINC) -o $@ t_system_event.c ../hle_misc.c ../hle_bigstack.c
+$(B)/t_system_event: t_system_event.c ../hle_online.c ../hle_thread.c ../hle_sdk16.c ../hle_misc.c ../hle_bigstack.c ../hle.h ../dm.h $(GAME_H) | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -Wno-frame-address -I.. $(GINC) -o $@ t_system_event.c ../hle_misc.c ../hle_bigstack.c ../hle_online.c
 .PHONY: system-event
 system-event: $(B)/t_system_event
 	$(B)/t_system_event
@@ -208,11 +208,11 @@ watch-sample: $(B)/t_watch_sample
 	$(B)/t_watch_sample
 $(B)/t_altstack: t_altstack.c t_altstack_stub.c ../crash.c ../dm.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -Wno-unused-function -I.. $(GINC) -o $@ t_altstack.c t_altstack_stub.c ../crash.c
-$(B)/t_net_eventfd: t_net_eventfd.c ../hle_net.c ../hle.h ../dm.h $(GAME_H) | $(B)
-	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -fsanitize=address,undefined -I.. $(GINC) -o $@ t_net_eventfd.c
+$(B)/t_net_eventfd: t_net_eventfd.c ../hle_net.c ../hle_online.c ../hle.h ../dm.h $(GAME_H) | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -fsanitize=address,undefined -I.. $(GINC) -o $@ t_net_eventfd.c ../hle_online.c
 
-$(B)/t_pctl: t_pctl.c ../hle_misc.c ../hle.h ../dm.h $(GAME_H) | $(B)
-	$(CLANG) -O1 -Wall -Werror -Wno-unused-function -I.. $(GINC) -o $@ t_pctl.c
+$(B)/t_pctl: t_pctl.c ../hle_misc.c ../hle_online.c ../hle.h ../dm.h $(GAME_H) | $(B)
+	$(CLANG) -O1 -Wall -Werror -Wno-unused-function -I.. $(GINC) -o $@ t_pctl.c ../hle_online.c
 $(B)/t_sf: t_sf.c ../hle_sf.c ../hle.h ../dm.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -Wall -Werror -Wno-unused-function -I.. $(GINC) -o $@ t_sf.c
 $(B)/t_shared_font: t_shared_font.c ../hle_sdk16.c ../hle.h ../dm.h $(GAME_H) | $(B)

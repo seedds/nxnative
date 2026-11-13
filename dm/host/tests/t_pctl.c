@@ -3,6 +3,8 @@
 #include "../hle_misc.c"
 void dm_applet_enter(const char *name) { (void)name; }   // hle_oe.c: the shop and error stand-ins hold the game out of focus
 void dm_applet_leave(void) {}
+void dm_thread_native_wait(int entering) { (void)entering; }   // hle_online.c: no guest threads to hand the core to
+void dm_guest_write_prepare(void *addr, size_t len) { (void)addr; (void)len; }   // no tracked guest pages
 #include <mach-o/getsect.h>
 
 static int unexpected, checks, fails;

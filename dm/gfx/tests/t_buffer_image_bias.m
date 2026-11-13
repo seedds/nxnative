@@ -1,7 +1,9 @@
 // A buffer image below Metal's 16-byte view alignment (nvn_mtl.m tbias_view): bound as a view from the aligned boundary below its offset, wider by the elements in between,
 // and the shader moves each coordinate by that count from its offset table (the translator's TranslationFlags.MetalBufferImageBias), so writes land on the image's own bytes.
 // Assassin's Creed II's occlusion culling wrote its visibility marks two R32 elements early into buffers at pool offsets 8 mod 16 (GitHub PR #1399). The kernel below does
-// what a translated shader does (Instructions.cs BiasBufferImageCoordinate: x = c + bias, or c itself when that sum wraps), and the pool's bytes are checked around the image
+// what a translated shader does (Instructions.cs BiasBufferImageCoordinate: x = c + bias, or c itself when that sum wraps), and the pool's bytes are checked around the image.
+// The texture the host keeps for such an image (tex_mtl) is itself made from the boundary Metal allows, its offset kept beside it (tbuf_off): Metal's validation layer, which this
+// test runs under, aborts at a buffer texture made at offset 0x108 on a GPU whose texture-buffer alignment is 16 bytes (an M4 Max)
 #include "../nvn/nvn_mtl.m"
 void *front_metal_layer(void) { return NULL; }
 module_t *module_of(const void *p) { (void)p; return NULL; }
@@ -23,17 +25,24 @@ static tex_t buffer_image(uint8_t *mem, uint64_t off, uint64_t serial) {
     mtl_tex_init(&t);
     return t;
 }
+static id<MTLTexture> at_probe(int tid, const nvn_rbind *b) { uint64_t r = 0; int real = 0; return img_binding(tid, b, &r, &real); }
 int main(void) { @autoreleasepool {
     mtl_init();
     uint8_t *mem; if (posix_memalign((void **)&mem, (size_t)getpagesize(), POOL)) abort();
-    memset(mem, FILL, POOL); mtl_pool_add(mem, POOL);
+    memset(mem, FILL, POOL); for (int i = 0; i < W; i++) ((uint32_t *)(void *)(mem + OFF))[i] = 0xA000u + (uint32_t)i;
+    mtl_pool_add(mem, POOL);
     tex_t img = buffer_image(mem, OFF, 99701), aligned = buffer_image(mem, ALIGNED, 99702);
     mtl_reg_image(701, &img, NULL); mtl_reg_image(702, &aligned, NULL);
     nvn_rbind b = {.kind = NVN_RB_IMG, .dtt = MTLTextureTypeTextureBuffer, .dpf = NVN_DPF_UINT, .rw = 1, .tbx = 1};
     os_unfair_lock_lock(&g_rmu);
     uint64_t rid = 0; int real = 0; uint32_t bias = 99;
     id<MTLTexture> t = img_binding(701, &b, &rid, &real);
-    CHECK(real && t && t.textureType == MTLTextureTypeTextureBuffer && t.bufferOffset == OFF, "the image's own view sits at its pool offset");
+    NSUInteger tal = [g_dev minimumTextureBufferAlignmentForPixelFormat:MTLPixelFormatR32Uint];
+    CHECK(real && t && t.textureType == MTLTextureTypeTextureBuffer && tbuf_off(t) == OFF && t.width == W, "the image's own texture knows its pool offset");
+    CHECK(t.bufferOffset % tal == 0 && t.bufferOffset + tbuf_lead(t) == OFF && tbuf_lead(t) < 16, "it is made at an offset Metal allows, at most to the 16-byte boundary below");
+    CHECK(tbuf_off(at_probe(702, &b)) == ALIGNED && !tbuf_lead(at_probe(702, &b)), "an image at an aligned offset is made there");
+    uint64_t srid = 0; id<MTLTexture> sc = tbuf_shadow(t, &srid);
+    CHECK(sc && sc != t && !(sc.bufferOffset & 15) && sc.width == W && !memcmp((uint8_t *)sc.buffer.contents + sc.bufferOffset, mem + OFF, W * 4), "a texture slot's aligned copy (tbuf_shadow) holds the bytes from the image's offset");
     id<MTLTexture> v = tbias_view(701, t, &rid, &bias);
     CHECK(bias == 2, "8 bytes below the boundary: the shader moves R32 coordinates by 2");
     CHECK(v && v != t && v.buffer == t.buffer && v.bufferOffset == OFF - 8 && v.width == W + 2 && v.pixelFormat == t.pixelFormat, "the bound view starts at the boundary below, 2 elements wider");
@@ -61,7 +70,7 @@ int main(void) { @autoreleasepool {
     [enc dispatchThreads:MTLSizeMake(N, 1, 1) threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
     [enc endEncoding]; [cmd commit]; [cmd waitUntilCompleted];
     CHECK(cmd.status == MTLCommandBufferStatusCompleted, "kernel completed");
-    uint32_t want[W]; memset(want, FILL, sizeof want);
+    uint32_t want[W]; for (int i = 0; i < W; i++) want[i] = 0xA000u + (uint32_t)i;
     for (int i = 0; i < N; i++) if (coords[i] >= 0 && coords[i] < W) want[coords[i]] = 100u + (uint32_t)i;
     CHECK(!memcmp(mem + OFF, want, sizeof want), "every write lands on its own element of the image");
     int before = 1, after = 1;
@@ -70,13 +79,14 @@ int main(void) { @autoreleasepool {
     CHECK(before, "nothing before the image is written: a coordinate before it stays outside the view");
     CHECK(after, "nothing after the image is written");
     for (int i = 0; i < W; i++) if (((uint32_t *)(void *)(mem + OFF))[i] != want[i]) fprintf(stderr, "  element %d: %#x, expected %#x\n", i, ((uint32_t *)(void *)(mem + OFF))[i], want[i]);
-    // For the record, not a check (it is the GPU's behaviour, which Metal does not define): the image's own view, its coordinates unmoved, as before the offset table
+    // For the record, not a check: the image's own texture, its coordinates unmoved, as an image with no offset table entry is bound. Made at the offset itself, as it was, where
+    // Metal allows that (there it is the GPU's behaviour); from the boundary below otherwise, and its writes land that much early
     memset(mem, FILL, POOL); table[0] = 0; memcpy(tb.contents, table, sizeof table);
     cmd = [q commandBuffer]; enc = [cmd computeCommandEncoder];
     [enc setComputePipelineState:pso]; [enc setTexture:t atIndex:0]; [enc setBuffer:tb offset:0 atIndex:0]; [enc setBuffer:cb offset:0 atIndex:1];
     [enc dispatchThreads:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];   // element 0 only
     [enc endEncoding]; [cmd commit]; [cmd waitUntilCompleted];
-    for (int o = 0; o < POOL; o += 4) if (*(uint32_t *)(void *)(mem + o) == 100u) { printf("the view made at pool offset %#x itself writes element 0 at pool offset %#x\n", OFF, o); break; }
+    for (int o = 0; o < POOL; o += 4) if (*(uint32_t *)(void *)(mem + o) == 100u) { printf("the image's own texture (pool offset %#x, made at %#lx) writes element 0 at pool offset %#x\n", OFF, (unsigned long)t.bufferOffset, o); break; }
     mtl_pool_del(mem);
     printf("t_buffer_image_bias: %d checks, %d failed\n", checks, failed);
     return failed != 0;

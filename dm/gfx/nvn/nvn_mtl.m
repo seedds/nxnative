@@ -424,6 +424,11 @@ static void rh_trim(void) {
 - (void)dealloc { res_remove(raw); }
 @end
 static char g_atomic_raw_key;
+// A buffer texture at a pool offset Metal's texture-buffer alignment does not allow (tex_mtl, target BUFFER) is made from the aligned boundary below it, and the bytes in between
+// are kept with it: tbuf_off is the pool offset of its first element, which is what its readers work from (tbuf_shadow, tbias_view, tbuf_as_2d). 0 for every other texture
+static char g_tbuf_lead_key;
+static inline NSUInteger tbuf_lead(id<MTLTexture> t) { id<MTLTexture> root = t; while (root.parentTexture) root = root.parentTexture; NSNumber *n = objc_getAssociatedObject(root, &g_tbuf_lead_key); return n ? n.unsignedIntegerValue : 0; }
+static inline NSUInteger tbuf_off(id<MTLTexture> t) { return t.bufferOffset + tbuf_lead(t); }
 // DM_RES_CHECK=1 (diagnostic): if textures / buffers the shader accesses through the argument block are not in the residency set, print the first 40 (textures are attributed to the actual allocation via parent texture / underlying buffer)
 static int g_res_check_on;
 // It also keeps the submission that last bound each texture or buffer, for defer_drain: an object retired behind an earlier fence than a binding's goes while that binding is on the GPU, which this
@@ -2903,6 +2908,7 @@ static id<MTLTexture> tex_upgrade(const tex_t *t, id<MTLTexture> asked, MTLTextu
         upgraded = raw ? [raw newTextureViewWithPixelFormat:base.pixelFormat] : nil;
         if (upgraded) { res_add(raw); NvAtomicRaw *own = [NvAtomicRaw new]; own->raw = raw; objc_setAssociatedObject(upgraded, &g_atomic_raw_key, own, OBJC_ASSOCIATION_RETAIN_NONATOMIC); }
     } else upgraded = backing ? [backing newTextureWithDescriptor:d offset:base.bufferOffset bytesPerRow:base.bufferBytesPerRow] : [g_dev newTextureWithDescriptor:d];
+    if (upgraded && backing && tbuf_lead(base)) objc_setAssociatedObject(upgraded, &g_tbuf_lead_key, @(tbuf_lead(base)), OBJC_ASSOCIATION_RETAIN_NONATOMIC);   // a buffer texture made below its offset (tex_mtl)
     if (!upgraded) { RED_ONCE(45, "texture upgrade failed ser=%llu format %lu → %lu usage %#lx", t->serial, (unsigned long)base.pixelFormat, (unsigned long)view_pf, (unsigned long)d.usage); return base; }
     if (!reinterpret) res_add(upgraded);
     id<MTLTexture> upgraded_view = nil;
@@ -4502,18 +4508,22 @@ static id<MTLTexture> tex_mtl_(const tex_t *ct) {
         NSUInteger al = [g_dev minimumLinearTextureAlignmentForPixelFormat:(MTLPixelFormat)pf];
         // Metal requires 16-byte alignment for texture buffer views (minimumTextureBufferAlignmentForPixelFormat), and an Apple GPU addresses such a view from the 16-byte boundary below its
         // offset (measured on an M4 Pro: R32Float views at offsets 4, 8 and 12 read elements 0, 0 and 0 instead of 1, 2 and 3, shared and private buffers, bound directly or in an argument
-        // buffer). Unreal puts buffer textures at 4-, 8- and 12-byte offsets in its pools (Octopath Traveler 0: offset 0x168; FINAL FANTASY RESONANCE's particle data), so the view is created
-        // there and shaders read it through an aligned copy (tbuf_shadow); an image slot binds a view from the boundary below and the shader moves its coordinates (tbias_view). Below
-        // the element size the view stays a dummy
+        // buffer). Unreal puts buffer textures at 4-, 8- and 12-byte offsets in its pools (Octopath Traveler 0: offset 0x168; FINAL FANTASY RESONANCE's particle data), so shaders read
+        // it through an aligned copy (tbuf_shadow), and an image slot binds a view from the boundary below and the shader moves its coordinates (tbias_view). The texture kept for it
+        // here is made from the boundary Metal allows below the offset, the bytes in between kept with it (tbuf_off): Metal does not define a view at the offset itself, and its
+        // validation layer aborts at one (an M4 Max, MTL_DEBUG_LAYER=1: "Offset of a buffer-backed texture ... must be aligned to 16 bytes"). Bound as it is (the cases tbuf_shadow
+        // and tbias_view report) it reads from that boundary, as the GPU read the view at the offset. Below the element size the view stays a dummy
         if (mo % al) {
             if (mo % (uint64_t)bpb) { RED_ONCE(38, "buffer texture offset %#llx not aligned to its %d-byte elements", (unsigned long long)mo, bpb); return nil; }
-            static int once; if (!once++) MLOG("buffer texture at pool offset %#llx, below Metal's %lu-byte alignment: created there, read through an aligned copy (tbuf_shadow)", (unsigned long long)mo, (unsigned long)al);
+            static int once; if (!once++) MLOG("buffer texture at pool offset %#llx, below Metal's %lu-byte alignment: read through an aligned copy (tbuf_shadow)", (unsigned long long)mo, (unsigned long)al);
         }
+        NSUInteger tal = [g_dev minimumTextureBufferAlignmentForPixelFormat:(MTLPixelFormat)pf], lead = mo % (tal < 16 ? tal ? tal : 1 : 16);   // at most to the 16-byte boundary tbuf_shadow and tbias_view work from: an offset on it is bound as it is, as before
         MTLTextureDescriptor *d = [MTLTextureDescriptor textureBufferDescriptorWithPixelFormat:(MTLPixelFormat)pf width:t->d.width resourceOptions:b.resourceOptions
                                                                                          usage:MTLTextureUsageShaderRead | img_usage(t, (MTLPixelFormat)pf)];
         size_t row = ((size_t)t->d.width * bpb + al - 1) / al * al;
-        id<MTLTexture> mt = [b newTextureWithDescriptor:d offset:mo bytesPerRow:row];
+        id<MTLTexture> mt = [b newTextureWithDescriptor:d offset:mo - lead bytesPerRow:row];
         if (!mt) { RED_ONCE(39, "cannot create buffer texture: %u elements format %#x", t->d.width, t->d.format); return nil; }
+        if (lead) objc_setAssociatedObject(mt, &g_tbuf_lead_key, @(lead), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         res_add(mt);
         tex_put(t->serial, mt);
         return mt;
@@ -6487,7 +6497,7 @@ static uint64_t g_tb2_binds, g_tb2_made, g_tb2_fail, g_tb2_copy, g_tb2_copy_byte
 enum { TB2_STAGE = 64 };
 static struct { __unsafe_unretained id<MTLTexture> src, view; uint64_t epoch, rid; } g_tb2_stage[TB2_STAGE];   // view: alive until the submission is done (defer_obj_release)
 static id<MTLTexture> tbuf_rows_copy(id<MTLTexture> t, MTLPixelFormat pf, uint32_t w, uint32_t h, uint32_t row, NSUInteger al, uint64_t *rid) {
-    id<MTLBuffer> src = t.buffer; size_t off = t.bufferOffset;
+    id<MTLBuffer> src = t.buffer; size_t off = tbuf_off(t);
     if (!src || off >= src.length) return nil;
     if (!src.contents) { RED_ONCE(137, "texture buffer at pool offset %#zx (not a multiple of the %lu-byte linear-texture alignment) in a pool the CPU cannot access: the slot reads 0", off, (unsigned long)al); return nil; }
     unsigned k = (unsigned)(((uintptr_t)(__bridge void *)t >> 4) % TB2_STAGE);
@@ -6528,30 +6538,30 @@ static void tb2_gone_clear(void) { for (int i = 0; i < TB2_WAYS; i++) if (g_tb2_
 static id<MTLTexture> tbuf_as_2d(int tid, id<MTLTexture> t, int dpf, uint64_t *rid) {
     if (tid <= 0 || tid >= g_ntreg || !g_treg[tid].ok) return nil;
     const tex_t *tt = &g_treg[tid].t; uint64_t ser = tt->serial; MTLPixelFormat vf = tbuf_view_format(t.pixelFormat, dpf);
-    uint64_t goff = t.bufferOffset, gn = t.width, gvf = vf; void *gbuf = (__bridge void *)t.buffer;
+    uint64_t goff = tbuf_off(t), gn = t.width, gvf = vf; void *gbuf = (__bridge void *)t.buffer;
     unsigned gi = (unsigned)((((uintptr_t)gbuf >> 4) ^ goff * 0x9E3779B97F4A7C15ull ^ gn * 31 ^ gvf) >> 7) % TB2_WAYS;
     if (g_tb2_gone[gi].v && g_tb2_gone[gi].buf == gbuf && g_tb2_gone[gi].off == goff && g_tb2_gone[gi].n == gn && g_tb2_gone[gi].vf == gvf) { g_tb2_binds++; *rid = g_tb2_gone[gi].rid; return (__bridge id<MTLTexture>)g_tb2_gone[gi].v; }
     vc_set *s = nvn_hm_get(&g_vc, &ser);
     if (s && s->rows) {   // the rows hold what the buffer they view holds, whichever descriptor asks: Unreal Engine 5.4's vertex factories register new ones over the same memory, and comparing the texture as well made a new view per bind (Yoshi and the Mysterious Book: 14.7 million over 14.8 million binds)
         id<MTLTexture> rv = (__bridge id<MTLTexture>)s->rows;
-        if (rv.buffer == t.buffer && rv.bufferOffset == t.bufferOffset && rv.pixelFormat == vf && s->rows_n == t.width) { g_tb2_binds++; *rid = s->rows_rid; return rv; }
+        if (rv.buffer == t.buffer && rv.bufferOffset == goff && rv.pixelFormat == vf && s->rows_n == t.width) { g_tb2_binds++; *rid = s->rows_rid; return rv; }
     }
     id<MTLBuffer> buf = t.buffer; int bw, bh; uint32_t bpb = (uint32_t)nvn_fmt_bpb(tt->d.format, &bw, &bh), w, h, row;
     NSUInteger al = tbuf_align([g_dev minimumLinearTextureAlignmentForPixelFormat:t.pixelFormat]);
     int rows = buf && bw == 1 && bh == 1 && nvn_tbuf_rows(t.width, bpb, (uint32_t)al, &w, &h, &row);
-    if (rows && t.bufferOffset % al) {   // the rows are fine, the pool offset is not: read them from an aligned copy (tbuf_rows_copy)
+    if (rows && goff % al) {   // the rows are fine, the pool offset is not: read them from an aligned copy (tbuf_rows_copy)
         id<MTLTexture> sv = tbuf_rows_copy(t, vf, w, h, row, al, rid);
         if (sv) { g_tb2_binds++; return sv; }
     }
-    if (!rows || t.bufferOffset % al) {
-        if (!g_tb2_fail++) MLOG("[RED] texture buffer (texture ID %d, %lu elements of format %#x at pool offset %lu) has no 2D-row form for a wrapped 1D fetch: the slot reads 0", tid, (unsigned long)t.width, tt->d.format, (unsigned long)t.bufferOffset);
+    if (!rows || goff % al) {
+        if (!g_tb2_fail++) MLOG("[RED] texture buffer (texture ID %d, %lu elements of format %#x at pool offset %lu) has no 2D-row form for a wrapped 1D fetch: the slot reads 0", tid, (unsigned long)t.width, tt->d.format, (unsigned long)goff);
         return nil;
     }
-    while (h > 1 && t.bufferOffset + (uint64_t)row * h > buf.length) h--;   // a last row running past the pool buffer: reads beyond it are undefined anyway
+    while (h > 1 && goff + (uint64_t)row * h > buf.length) h--;   // a last row running past the pool buffer: reads beyond it are undefined anyway
     MTLTextureDescriptor *d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:vf width:w height:h mipmapped:NO];
     d.resourceOptions = buf.resourceOptions; d.usage = MTLTextureUsageShaderRead;
-    id<MTLTexture> v = [buf newTextureWithDescriptor:d offset:t.bufferOffset bytesPerRow:row];
-    if (!v) { if (!g_tb2_fail++) MLOG("[RED] cannot create the 2D-row form of a texture buffer: %ux%u format %lu row %u bytes at pool offset %lu", w, h, (unsigned long)t.pixelFormat, row, (unsigned long)t.bufferOffset); return nil; }
+    id<MTLTexture> v = [buf newTextureWithDescriptor:d offset:goff bytesPerRow:row];
+    if (!v) { if (!g_tb2_fail++) MLOG("[RED] cannot create the 2D-row form of a texture buffer: %ux%u format %lu row %u bytes at pool offset %lu", w, h, (unsigned long)t.pixelFormat, row, (unsigned long)goff); return nil; }
     if (!g_tb2_made++) MLOG("texture buffer read by wrapped 1D fetches: bound as %ux%u rows of %u bytes (texture ID %d, %lu elements; first case)", w, h, row, tid, (unsigned long)t.width);
     res_add(v);
     *rid = v.gpuResourceID._impl; g_tb2_binds++;
@@ -6879,8 +6889,8 @@ static void tex_mis_note(NvShader *sh, int stage, int slot, int tid, id<MTLTextu
     if (g_tex_mis_shown++ >= 64) return;
     const tex_t *tt = tid > 0 && tid < g_ntreg && g_treg[tid].ok ? &g_treg[tid].t : NULL;
     char bt[96] = "";
-    if (t.textureType == MTLTextureTypeTextureBuffer) snprintf(bt, sizeof bt, ", %lu elements at pool offset %lu, %lu past the linear-texture alignment", (unsigned long)t.width, (unsigned long)t.bufferOffset,
-                                                                (unsigned long)(t.bufferOffset % [g_dev minimumLinearTextureAlignmentForPixelFormat:t.pixelFormat]));
+    if (t.textureType == MTLTextureTypeTextureBuffer) snprintf(bt, sizeof bt, ", %lu elements at pool offset %lu, %lu past the linear-texture alignment", (unsigned long)t.width, (unsigned long)tbuf_off(t),
+                                                                (unsigned long)(tbuf_off(t) % [g_dev minimumLinearTextureAlignmentForPixelFormat:t.pixelFormat]));
     MLOG("[RED] texture type mismatch: shader %s (stage %d) declares slot %d as Metal type %lu, texture ID %d is type %lu (NVN target %d, format %#x, Metal format %lu%s); %s", sh->key, stage, slot,
          (unsigned long)want, tid, (unsigned long)t.textureType, tt ? (int)tt->d.target : -1, tt ? (unsigned)tt->d.format : 0u, (unsigned long)t.pixelFormat, bt, outcome);
 }
@@ -10124,7 +10134,7 @@ static uint64_t g_tbs_copies;
 static id<MTLTexture> tbuf_shadow(id<MTLTexture> t, uint64_t *rid) {
     if (!t || t.textureType != MTLTextureTypeTextureBuffer) return t;
     id<MTLTexture> root = t; while (root.parentTexture) root = root.parentTexture;   // a swizzled view keeps its parent's buffer
-    id<MTLBuffer> src = root.buffer; NSUInteger off = root.bufferOffset, row = root.bufferBytesPerRow;
+    id<MTLBuffer> src = root.buffer; NSUInteger off = tbuf_off(root), row = root.bufferBytesPerRow;
     if (!src || !(off & 15) || off >= src.length) return t;
     if (!src.contents) { RED_ONCE(117, "buffer texture at pool offset %#lx (not 16-byte aligned) in a pool the CPU cannot access: read from the 16-byte boundary below", (unsigned long)off); return t; }
     unsigned k = (unsigned)(((uintptr_t)(__bridge void *)t >> 4) % TBS_CACHE);
@@ -10159,7 +10169,7 @@ static id<MTLTexture> tbias_view(int tid, id<MTLTexture> t, uint64_t *rid, uint3
     *bias = 0;
     if (!t || t.textureType != MTLTextureTypeTextureBuffer || tid <= 0 || tid >= g_ntreg || !g_treg[tid].ok) return t;
     id<MTLTexture> root = t; while (root.parentTexture) root = root.parentTexture;   // a format view (img_fit) keeps its parent's buffer
-    id<MTLBuffer> buf = root.buffer; NSUInteger off = root.bufferOffset;
+    id<MTLBuffer> buf = root.buffer; NSUInteger off = tbuf_off(root);
     NSUInteger al = tbuf_align([g_dev minimumLinearTextureAlignmentForPixelFormat:t.pixelFormat]); if (al < 16) al = 16;   // the GPU's boundary is 16 bytes even where Metal asks less
     int bw, bh, bpb = nvn_fmt_bpb(g_treg[tid].t.d.format, &bw, &bh);
     if (!buf || bpb <= 0 || !(off % al) || off % (NSUInteger)bpb) return t;   // aligned, or below the element size (tex_mtl reported it)
@@ -11331,8 +11341,8 @@ static int encode_args_(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, i
                 uint32_t lead = 0;
                 if (b->tbx) { t = tbias_view(tid, t, &trid, &lead); tbias[b->tbx - 1] = lead; }
                 else { id<MTLTexture> root = t; while (root.parentTexture) root = root.parentTexture;
-                    if (root.bufferOffset & 15) RED_ONCE(119, "buffer image at pool offset %#lx, below the 16-byte alignment, in shader %s (stage %d) with no offset table entry for it (an array of images, or past %d buffer images): its accesses land %lu bytes early",
-                                                         (unsigned long)root.bufferOffset, sh->key, nvn_stage, DMSH_TBIAS_SLOTS, (unsigned long)(root.bufferOffset & 15)); }
+                    if (tbuf_off(root) & 15) RED_ONCE(119, "buffer image at pool offset %#lx, below the 16-byte alignment, in shader %s (stage %d) with no offset table entry for it (an array of images, or past %d buffer images): its accesses land %lu bytes early",
+                                                         (unsigned long)tbuf_off(root), sh->key, nvn_stage, DMSH_TBIAS_SLOTS, (unsigned long)(tbuf_off(root) & 15)); }
             }
             if (b->atom && !img_atomic_ok(t, b)) {   // see dummy_img_atomic; an unbound slot's write sink is not atomic-capable either
                 if (real) { id<MTLTexture> base = t; while (base.parentTexture) base = base.parentTexture;

@@ -1,5 +1,6 @@
 // Real folder-backed OpenDirectory: allocation failure must return an error,
 // leave the output untouched, and close the DIR already opened by the handler.
+// A folder whose reading fails partway (readdir's NULL with EIO) is a failure everywhere, never a short listing taken for the whole.
 #include <dirent.h>
 #include <errno.h>
 #include <stdlib.h>
@@ -7,10 +8,13 @@
 static void *directory_calloc(size_t count, size_t size);
 static DIR *directory_opendir(const char *path);
 static int directory_closedir(DIR *d);
+static struct dirent *directory_readdir(DIR *d);
 #define calloc directory_calloc
 #define opendir directory_opendir
 #define closedir directory_closedir
+#define readdir directory_readdir
 #include "../hle_fs.c"
+#undef readdir
 #undef closedir
 #undef opendir
 #undef calloc
@@ -29,13 +33,33 @@ static void *directory_calloc(size_t count, size_t size) {
     }
     return calloc(count, size);
 }
+// One injected read failure: the next folder opened at fail_dir (trailing slashes aside) gives fail_after entries, then NULL with EIO; then injection is off
+static char fail_dir[1100]; static DIR *fail_d; static int fail_after, read_failures;
+static int same_dir(const char *a, const char *b) {
+    size_t la = strlen(a), lb = strlen(b);
+    while (la > 1 && a[la - 1] == '/') la--;
+    while (lb > 1 && b[lb - 1] == '/') lb--;
+    return la == lb && !strncmp(a, b, la);
+}
+static void fail_reading(const char *dir, int after) { strlcpy(fail_dir, dir, sizeof fail_dir); fail_after = after; fail_d = NULL; }
 static DIR *directory_opendir(const char *path) {
     DIR *d = opendir(path);
     if (d) opened_fd = dirfd(d);
+    if (d && fail_dir[0] && same_dir(path, fail_dir)) fail_d = d;
     return d;
+}
+static struct dirent *directory_readdir(DIR *d) {
+    if (d && d == fail_d) {
+        struct dirent *e;
+        while ((e = readdir(d)) && (!strcmp(e->d_name, ".") || !strcmp(e->d_name, ".."))) {}
+        if (e && fail_after-- > 0) return e;
+        fail_dir[0] = 0; fail_d = NULL; read_failures++; errno = EIO; return NULL;
+    }
+    return readdir(d);
 }
 
 static int directory_closedir(DIR *d) {
+    if (d == fail_d) fail_d = NULL;
     int r = closedir(d);
     // Successful cleanup may change errno; it must not hide the allocation error.
     if (fail_handle) errno = ENOENT;
@@ -89,6 +113,54 @@ int main(void) {
         errno = 0;
         CHECK(fcntl(fd, F_GETFD) == -1 && errno == EBADF, "CloseDirectory releases the successful handle's descriptor");
     }
+
+    // Reading fails partway: three names in a read-only folder (name index), a writable folder with a subfolder (path walk, listing, count, clean) and an overlay over a base
+    char ro[1100], w[1100], sub[1200], ov[1100], q[1300];
+    snprintf(ro, sizeof ro, "%s.ro", root); snprintf(w, sizeof w, "%s.w", root); snprintf(sub, sizeof sub, "%s/sub", w); snprintf(ov, sizeof ov, "%s.ov", root);
+    mkdir(ro, 0755); mkdir(w, 0755); mkdir(sub, 0755); mkdir(ov, 0755);
+    const char *three[] = {"a", "b", "c"};
+    for (int i = 0; i < 3; i++) {
+        snprintf(q, sizeof q, "%s/%s", ro, three[i]); fclose(fopen(q, "w"));
+        snprintf(q, sizeof q, "%s/%s", sub, three[i]); fclose(fopen(q, "w"));
+        snprintf(q, sizeof q, "%s/o%s", ov, three[i]); fclose(fopen(q, "w"));
+    }
+    CHECK(mount("ro", ro, 1) == RES_OK && mount("w", w, 0) == RES_OK && mount("ov", root, 1) == RES_OK, "mount a read-only folder, a writable one and one with an overlay");
+    strlcpy(g_mnt[g_nmnt - 1].overlay, ov, sizeof g_mnt[0].overlay);
+
+    for (int after = 0; after <= 1; after++) {
+        fail_reading(ro, after); int opened = 0, before = read_failures;
+        for (int i = 0; i < 3; i++) {
+            uint64_t fh = 0; char path[16]; snprintf(path, sizeof path, "ro:/%s", three[i]);
+            if (h_fs_OpenFile(&fh, path, MODE_READ) == RES_OK) { opened++; h_fs_CloseFile(fh); }
+        }
+        CHECK(read_failures == before + 1 && opened == 3, after ? "a name index whose folder fails after one entry is not kept: every name still opens" : "a name index whose folder fails at once is not kept: every name still opens");
+        for (dir_index **slot = g_dir_index; slot < g_dir_index + DIR_INDEX_SLOTS; slot++) while (*slot) { dir_index *x = *slot; *slot = x->next; free(x->e); free(x->pool); free(x->path); free(x); }   // the next round builds it again
+    }
+
+    uint64_t fh = 0x1234; fail_reading(sub, 1);
+    Result rr = h_fs_OpenFile(&fh, "w:/sub/zz", MODE_READ);
+    CHECK(read_failures && rr != RES_OK && rr != RES_PATH_NOT_FOUND && fh == 0x1234, "a path walk whose folder cannot be read fails, not with not found");
+
+    fail_reading(sub, 1); int64_t count = -1; DirectoryEntry ents[8];
+    uint64_t dh = 0;
+    CHECK(h_fs_OpenDirectory(&dh, "w:/sub", DIRMODE_FILE) == RES_OK && h_fs_ReadDirectory(&count, ents, dh, 8) != RES_OK, "a listing that fails after one entry fails");
+    if (dh) h_fs_CloseDirectory(dh);
+    dh = 0; CHECK(h_fs_OpenDirectory(&dh, "w:/sub", DIRMODE_FILE) == RES_OK, "open the folder again");
+    fail_reading(sub, 1); CHECK(dh && h_fs_DirCount(&count, dh) != RES_OK, "a count that fails after one entry fails");
+    CHECK(dh && h_fs_DirCount(&count, dh) == RES_OK && count == 3 && h_fs_ReadDirectory(&count, ents, dh, 8) == RES_OK && count == 3, "then the folder counts and lists its three files");
+    if (dh) h_fs_CloseDirectory(dh);
+
+    dh = 0x1234; fail_reading(ov, 1);
+    CHECK(h_fs_OpenDirectory(&dh, "ov:/", DIRMODE_FILE) != RES_OK && dh == 0x1234, "an overlay folder that cannot be read fails the open and leaves the handle");
+    dh = 0; count = 0;
+    CHECK(h_fs_OpenDirectory(&dh, "ov:/", DIRMODE_FILE) == RES_OK && h_fs_ReadDirectory(&count, ents, dh, 8) == RES_OK && count == 4, "then the overlay lists its three files and the base's one");
+    if (dh) h_fs_CloseDirectory(dh);
+
+    fail_reading(sub, 1);
+    CHECK(h_fs_CleanDirRec("w:/sub") != RES_OK, "a clean whose folder cannot be read fails");
+    CHECK(h_fs_CleanDirRec("w:/sub") == RES_OK && rmdir(sub) == 0, "then it empties the folder");
+    for (int i = 0; i < 3; i++) { snprintf(q, sizeof q, "%s/%s", ro, three[i]); unlink(q); snprintf(q, sizeof q, "%s/o%s", ov, three[i]); unlink(q); }
+    CHECK(!rmdir(w) && !rmdir(ro) && !rmdir(ov), "remove the read-only, writable and overlay folders");
     CHECK(!unlink(file) && !rmdir(root), "remove the synthetic fixture");
     printf("== fs directory: %d checks, %d failed ==\n", checks, fails);
     return fails != 0;

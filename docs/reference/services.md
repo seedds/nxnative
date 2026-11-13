@@ -286,6 +286,13 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Fix:** `rename_any` compares the two mount names (the part before `:`, as `FindFileSystem` takes it) and answers `0x2F2402` for two, before the SDK or the host is asked; one mount's rename goes on as before, and a read-only source is refused by its own check. Account and device saves that share a host folder and transaction are two mounts on Horizon too, so a rename between them is refused as well. `make -C dm/host/tests GAME=<id> run` (`t_fs`, ⑦b) renames into a read-only mount, into another writable one and between two names of one save, and checks both paths afterwards.
 - **Found on:** a code audit's reproduction (2026-11-13); no game has been seen to rename between mounts.
 
+### A folder that cannot be read is listed short
+
+- **Symptom:** after a read error on a folder (`EIO`, an external drive going to sleep), files of a read-only mount are not found for the rest of the run; `CleanDirectoryRecursively` succeeds with files left; a listing or count is short with no error.
+- **Cause:** `readdir` returns NULL both at a folder's end and on a failure, and only `errno` tells them apart. Every loop in `hle_fs.c` took NULL for the end: the name index of a read-only folder (`dir_index_get`) was kept for the whole run without the names after the failure, the path walk answered "not found", and the clean, the listing (`ReadDirectory`), the count and the overlay snapshot went on with what they had.
+- **Fix:** `dir_next` in `hle_fs.c` gives the next entry without `.` and `..`, and NULL with `errno` 0 at the end or set on a failure; the name index, the path walk, the recursive delete and clean, `ReadDirectory`, `GetDirectoryEntryCount` and the overlay snapshot (`OpenDirectory`) use it and fail on a failure. A name index that could not be read is not kept, so the next lookup reads the folder again. `make -C dm/host/tests GAME=<id> fs-directory` (`t_fs_directory`) fails a folder's reading at once and after one entry in each of them.
+- **Found on:** a code audit's reproduction with an injected `EIO` (2026-11-13); no game log has shown it.
+
 ### System data stand-in for the MiiModel archive
 
 - **Symptom:** abort in `fs::detail::GetFileSystemProxyServiceObject` under `fs::QueryMountSystemDataCacheSize` (`main+0x8f23bc`).

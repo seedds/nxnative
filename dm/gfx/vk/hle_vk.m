@@ -16,6 +16,7 @@
 #define VK_NO_PROTOTYPES
 #include "../../host/hle.h"
 #include "../nvn/nvn_mtl.h"
+#include "../nvn/sampler_aniso.h"
 #include <vulkan/vulkan_core.h>
 #include <vulkan/vulkan_vi.h>
 #import <Metal/Metal.h>
@@ -196,7 +197,7 @@ struct VkImage_T { __strong id<MTLTexture> tex; const fmt_t *f; VkFormat fmt; Vk
                   VkDeviceMemory cmem; VkDeviceSize coff; uint8_t *shadow;   // a linear image of a converted format (fmt_t.conv): its memory, and the texels last unpacked
                   int swap; };   // one of a swap chain's images: the swap chain owns it
 struct VkImageView_T { __strong id<MTLTexture> tex; VkImage img; };
-struct VkSampler_T { __strong id<MTLSamplerState> s; };
+struct VkSampler_T { __strong id<MTLSamplerState> s, a; };   // a: the variant with the anisotropy DM_ANISO raises it to (nil: none; sampler_aniso.h), for combined image samplers whose image has mips
 struct VkShaderModule_T { const shinfo *si; __strong id<MTLFunction> fn, fn_d; char key[17]; int tried_d; };   // fn_d: the dual-source variant vk_<key>_d, looked up on first use
 struct VkPipelineCache_T { int unused; };
 // Query pool: a result is valid once the submit that wrote it has completed (g_done >= ticket). Timestamps are the completion time of their submit (in ns,
@@ -214,7 +215,7 @@ struct VkDescriptorSetLayout_T { uint32_t n, total, ndyn; lbind b[MAXB]; int8_t 
 // used to point at this layer's view / sampler / buffer structs, and Super Mario Galaxy 2 crashed reading a freed view's texture from element 1 of its 8-texture array
 // when the ship took off after its first galaxy (GitHub issue 68). buf / off: the buffer's memory and its offset there plus the descriptor's; tex: an image view's
 // texture or a texel buffer's
-typedef struct { __strong id<MTLBuffer> buf; VkDeviceSize off; __strong id<MTLTexture> tex; __strong id<MTLSamplerState> smp; } desc_t;
+typedef struct { __strong id<MTLBuffer> buf; VkDeviceSize off; __strong id<MTLTexture> tex; __strong id<MTLSamplerState> smp, smp_a; } desc_t;   // smp_a: the sampler's raised variant (VkSampler_T a)
 struct VkDescriptorPool_T { struct VkDescriptorSet_T *sets; };
 struct VkDescriptorSet_T { VkDescriptorSetLayout L; VkDescriptorPool pool; struct VkDescriptorSet_T *prev, *next; desc_t *d; };   // d: L->total descriptors (ARC objects: no flexible array)
 struct VkDescriptorUpdateTemplate_T { uint32_t n; VkDescriptorUpdateTemplateEntry e[]; };
@@ -698,7 +699,10 @@ VKB(vkCreateSampler, VkResult, VkDevice d, const VkSamplerCreateInfo *ci, const 
         sd.magFilter = ci->magFilter == VK_FILTER_LINEAR ? MTLSamplerMinMagFilterLinear : MTLSamplerMinMagFilterNearest;
         sd.mipFilter = ci->mipmapMode == VK_SAMPLER_MIPMAP_MODE_LINEAR ? MTLSamplerMipFilterLinear : MTLSamplerMipFilterNearest;
         sd.sAddressMode = addr_mode(ci->addressModeU); sd.tAddressMode = addr_mode(ci->addressModeV); sd.rAddressMode = addr_mode(ci->addressModeW);
-        sd.maxAnisotropy = ci->anisotropyEnable ? (NSUInteger)fminf(fmaxf(ci->maxAnisotropy, 1), 16) : 1;
+        sd.maxAnisotropy = aniso_clamp(ci->anisotropyEnable ? ci->maxAnisotropy : 1);
+        unsigned af = aniso_for(ci->anisotropyEnable ? ci->maxAnisotropy : 1, ci->minFilter == VK_FILTER_LINEAR, ci->magFilter == VK_FILTER_LINEAR,   // DM_ANISO (sampler_aniso.h)
+                                ci->mipmapMode == VK_SAMPLER_MIPMAP_MODE_LINEAR ? ANISO_MIP_LINEAR : ANISO_MIP_NEAREST, ci->minLod, ci->maxLod,   // maxLod 0 or 0.25: GL's "no mips" (excluded)
+                                ci->compareEnable || ci->unnormalizedCoordinates);   // Vulkan forbids anisotropy with unnormalized coordinates
         if (ci->compareEnable) sd.compareFunction = (MTLCompareFunction)ci->compareOp;   // VkCompareOp and MTLCompareFunction share their values
         sd.borderColor = ci->borderColor >= VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE ? MTLSamplerBorderColorOpaqueWhite :
                          ci->borderColor >= VK_BORDER_COLOR_FLOAT_OPAQUE_BLACK ? MTLSamplerBorderColorOpaqueBlack : MTLSamplerBorderColorTransparentBlack;
@@ -706,12 +710,13 @@ VKB(vkCreateSampler, VkResult, VkDevice d, const VkSamplerCreateInfo *ci, const 
         sd.normalizedCoordinates = !ci->unnormalizedCoordinates;
         sd.lodBias = fminf(fmaxf(ci->mipLodBias, -15), 15);   // Metal 26's sampler bias; the device reports maxSamplerLodBias 15
         VkSampler s = zalloc(sizeof *s); s->s = [g_dev newSamplerStateWithDescriptor:sd];
+        if (af > sd.maxAnisotropy) { sd.maxAnisotropy = af; s->a = [g_dev newSamplerStateWithDescriptor:sd]; }
         if (!s->s) LOG("[vk] [RED] cannot create the sampler");
         *out = s;
     }
     return VK_SUCCESS;
 }
-VKB(vkDestroySampler, void, VkDevice d, VkSampler s, const VkAllocationCallbacks *a) { (void)d; (void)a; if (s) { s->s = nil; free(s); } }
+VKB(vkDestroySampler, void, VkDevice d, VkSampler s, const VkAllocationCallbacks *a) { (void)d; (void)a; if (s) { s->s = nil; s->a = nil; free(s); } }
 
 // ---------- Descriptor sets ----------
 static int is_dyn(VkDescriptorType t) { return t == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC || t == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC; }
@@ -774,7 +779,7 @@ VK(vkAllocateDescriptorSets, VkResult, VkDevice d, const VkDescriptorSetAllocate
         VkDescriptorSetLayout L = ai->pSetLayouts[i];
         VkDescriptorSet s = zalloc(sizeof *s); s->d = zalloc(umax(1, L->total) * sizeof(desc_t));
         s->L = L; s->pool = ai->descriptorPool; s->next = s->pool->sets; if (s->next) s->next->prev = s; s->pool->sets = s; set_live(s, 1);
-        if (L->imm) for (uint32_t k = 0; k < L->total; k++) s->d[k].smp = L->imm[k] ? L->imm[k]->s : nil;
+        if (L->imm) for (uint32_t k = 0; k < L->total; k++) { s->d[k].smp = L->imm[k] ? L->imm[k]->s : nil; s->d[k].smp_a = L->imm[k] ? L->imm[k]->a : nil; }
         out[i] = s;
     }
     return VK_SUCCESS;
@@ -792,8 +797,8 @@ static desc_t *set_elem(VkDescriptorSet s, uint32_t binding, uint32_t elem, cons
 }
 static void desc_write(desc_t *e, const lbind *lb, VkDescriptorType t, const VkDescriptorImageInfo *ii, const VkDescriptorBufferInfo *bi, const VkBufferView *bv) {
     switch (t) {
-        case VK_DESCRIPTOR_TYPE_SAMPLER: if (!lb->imm) e->smp = ii->sampler ? ii->sampler->s : nil; break;
-        case VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER: e->tex = ii->imageView ? ii->imageView->tex : nil; if (!lb->imm) e->smp = ii->sampler ? ii->sampler->s : nil; break;
+        case VK_DESCRIPTOR_TYPE_SAMPLER: if (!lb->imm) { e->smp = ii->sampler ? ii->sampler->s : nil; e->smp_a = ii->sampler ? ii->sampler->a : nil; } break;
+        case VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER: e->tex = ii->imageView ? ii->imageView->tex : nil; if (!lb->imm) { e->smp = ii->sampler ? ii->sampler->s : nil; e->smp_a = ii->sampler ? ii->sampler->a : nil; } break;
         case VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE: case VK_DESCRIPTOR_TYPE_STORAGE_IMAGE: case VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT: e->tex = ii->imageView ? ii->imageView->tex : nil; break;
         case VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER: case VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER: e->tex = *bv ? bview_tex(*bv) : nil; break;
         case VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER: case VK_DESCRIPTOR_TYPE_STORAGE_BUFFER: case VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC: case VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC: {
@@ -1333,7 +1338,10 @@ static void bind_res(rs_t *s, const shinfo *si, int frag) {
                 case 't': case 'c': {
                     if (!e->tex) { RED1("shader %s: texture %u.%u[%u] is empty", si->key, r->set, r->binding, k); break; }
                     if (frag) [re setFragmentTexture:e->tex atIndex:slot]; else [re setVertexTexture:e->tex atIndex:slot];
-                    if (r->kind == 'c' && e->smp) { if (frag) [re setFragmentSamplerState:e->smp atIndex:slot]; else [re setVertexSamplerState:e->smp atIndex:slot]; }
+                    // DM_ANISO's variant only where the image has mips and is 2D or a 2D array: a one-level image sampled through it spreads its extra samples across
+                    // level 0 wherever coordinates jump within a pixel quad (sampler_aniso.h); a separate sampler ('s') has no image of its own and keeps the game's value
+                    id<MTLSamplerState> smp = e->smp_a && aniso_tex_ok(e->tex.textureType == MTLTextureType2D || e->tex.textureType == MTLTextureType2DArray, (unsigned)e->tex.mipmapLevelCount) ? e->smp_a : e->smp;
+                    if (r->kind == 'c' && smp) { if (frag) [re setFragmentSamplerState:smp atIndex:slot]; else [re setVertexSamplerState:smp atIndex:slot]; }
                     break;
                 }
                 case 's':

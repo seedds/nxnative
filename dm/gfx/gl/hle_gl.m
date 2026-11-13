@@ -19,6 +19,7 @@
 // Environment: DM_GL_LOG=1 logs object creation and the deletion of shaders and programs; DM_GL_CAPTURE=<dir> writes every shader source the game compiles (<key>.vert / <key>.frag, read by gl_shaders.py).
 #include "../../host/hle.h"
 #include "../nvn/nvn_mtl.h"
+#include "../nvn/sampler_aniso.h"
 #include "../nvn/host_msl.h"
 #import <Metal/Metal.h>
 #include <CommonCrypto/CommonDigest.h>
@@ -563,11 +564,16 @@ static MTLTextureSwizzleChannels tex_swz(const tex_t *t) {
 static id<MTLSamplerState> tex_sampler(tex_t *t) {
     if (!t->smp_dirty && t->smp) return t->smp;
     // sampler states are shared: one per distinct parameter set
-    typedef struct { GLint minf, magf, ws, wt, wr, lv, cmp; float aniso, b; } skey;
+    typedef struct { GLint minf, magf, ws, wt, wr, lv, cmp; float aniso, b; unsigned af; } skey;   // af: the anisotropy given to Metal (DM_ANISO, below)
     static struct { skey k; __strong id<MTLSamplerState> s; } cache[256]; static int n;
     int mips = t->levels > 1;
     skey k = {t->minf, t->magf, t->ws, t->wt, t->target == GL_TEXTURE_CUBE_MAP ? GL_CLAMP_TO_EDGE : t->wr, mips ? (GLint)umin((uint32_t)t->maxlv, (uint32_t)t->levels - 1) : 0, t->cmp, t->aniso,
              t->border[3] > 0.5f ? (t->border[0] > 0.5f ? 2.f : 1.f) : 0.f};
+    // DM_ANISO (sampler_aniso.h): raised only for a 2D or 2D-array texture sampled at more than one level (its levels and GL_TEXTURE_MAX_LEVEL), as in the NVN and Vulkan
+    // layers; otherwise the game's value. One state per texture's parameters: the raised value is in the cache key
+    int mip = !mips || k.minf == GL_NEAREST || k.minf == GL_LINEAR ? ANISO_MIP_NONE : k.minf == GL_NEAREST_MIPMAP_NEAREST || k.minf == GL_LINEAR_MIPMAP_NEAREST ? ANISO_MIP_NEAREST : ANISO_MIP_LINEAR;
+    int min_linear = !(k.minf == GL_NEAREST || k.minf == GL_NEAREST_MIPMAP_NEAREST || k.minf == GL_NEAREST_MIPMAP_LINEAR);
+    k.af = aniso_tex_ok(t->target == GL_TEXTURE_2D || t->target == GL_TEXTURE_2D_ARRAY, mips ? (unsigned)k.lv + 1 : 1) ? aniso_for(k.aniso, min_linear, k.magf != GL_NEAREST, mip, 0, (float)k.lv, k.cmp) : aniso_clamp(k.aniso);
     for (int i = 0; i < n; i++) if (!memcmp(&cache[i].k, &k, sizeof k)) { t->smp = cache[i].s; t->smp_dirty = 0; return t->smp; }
     MTLSamplerDescriptor *d = [MTLSamplerDescriptor new];
     d.magFilter = k.magf == GL_NEAREST ? MTLSamplerMinMagFilterNearest : MTLSamplerMinMagFilterLinear;
@@ -578,7 +584,7 @@ static id<MTLSamplerState> tex_sampler(tex_t *t) {
     d.lodMaxClamp = mips ? k.lv : 0;
     d.sAddressMode = wrap_of(k.ws); d.tAddressMode = wrap_of(k.wt); d.rAddressMode = wrap_of(k.wr);
     d.borderColor = k.b == 2.f ? MTLSamplerBorderColorOpaqueWhite : k.b == 1.f ? MTLSamplerBorderColorOpaqueBlack : MTLSamplerBorderColorTransparentBlack;
-    d.maxAnisotropy = (NSUInteger)fmaxf(1, fminf(16, k.aniso));
+    d.maxAnisotropy = k.af;
     if (k.cmp) d.compareFunction = (MTLCompareFunction)(k.cmp - GL_NEVER);
     id<MTLSamplerState> s = [g_dev newSamplerStateWithDescriptor:d];
     if (n < 256) { cache[n].k = k; cache[n].s = s; n++; } else RED1("more than 256 distinct sampler parameter sets");

@@ -32,6 +32,7 @@
 #include "nvn_refl.h"
 #include "nvn_cover.h"
 #include "nvn_border.h"
+#include "sampler_aniso.h"
 #include "nvn_primitive.h"
 #include "nvn_timestamp.h"
 #include "msl_image.h"
@@ -6469,6 +6470,7 @@ static samp_par *g_sreg; static uint8_t *g_sreg_ok; static void **g_sview; stati
 static void **g_sview_w; static uint64_t *g_srid_w; static float (*g_sbk)[4];   // a sampler's twin for a border colour Metal lacks (retained, NULL = none) and the shader's factors k (see nvn_border.h)
 static _Atomic int g_border_any;   // a sampler needing corrections has been registered (sticky). Set before its lazy Metal creation, so its very first draw keeps the corrections
 static int border_need(NvShader *sh, int nvn_stage);
+static void **g_sview_a; static uint64_t *g_srid_a;   // a sampler's variant with the anisotropy DM_ANISO raises it to (retained, NULL = none: off, or the rule keeps the game's; sampler_aniso.h, samp_aniso)
 // Memory pool Finalize: for texture IDs whose registered texture lives on this pool, drop the cached MTLTexture (view or base texture). The cache used to be released only when the ID was registered again,
 // so a linear texture built directly on a pool kept the whole pool buffer alive (6 to 17 finalized 16 MB pool buffers stayed alive in Engage's title demo). If the ID is still used, the next lookup rebuilds it on the slow path
 static void treg_drop_im(treg_t *r) { if (r->im) { defer_obj_unref((__bridge id)r->im); CFRelease(r->im); r->im = r->im_of = NULL; r->im_rid = 0; } }   // the image class view (img_fit)
@@ -6766,10 +6768,13 @@ void mtl_reg_samp(int sid, const samp_par *sp) {
     os_unfair_lock_lock(&g_rmu);
     if (id_ >= g_nsreg) { int n = id_ + 256; g_sreg = realloc_or_die(g_sreg, n * sizeof *g_sreg, "the sampler registrations"); g_sreg_ok = realloc_or_die(g_sreg_ok, n, "the sampler registrations"); g_sview = realloc_or_die(g_sview, n * sizeof *g_sview, "the sampler registrations"); g_srid = realloc_or_die(g_srid, n * sizeof *g_srid, "the sampler registrations");
         g_sview_w = realloc_or_die(g_sview_w, n * sizeof *g_sview_w, "the sampler registrations"); g_srid_w = realloc_or_die(g_srid_w, n * sizeof *g_srid_w, "the sampler registrations"); g_sbk = realloc_or_die(g_sbk, n * sizeof *g_sbk, "the sampler registrations");
+        g_sview_a = realloc_or_die(g_sview_a, n * sizeof *g_sview_a, "the sampler registrations"); g_srid_a = realloc_or_die(g_srid_a, n * sizeof *g_srid_a, "the sampler registrations");
+        memset(g_sview_a + g_nsreg, 0, (n - g_nsreg) * sizeof *g_sview_a); memset(g_srid_a + g_nsreg, 0, (n - g_nsreg) * sizeof *g_srid_a);
         memset(g_sreg_ok + g_nsreg, 0, n - g_nsreg); memset(g_sview + g_nsreg, 0, (n - g_nsreg) * sizeof *g_sview); memset(g_srid + g_nsreg, 0, (n - g_nsreg) * sizeof *g_srid);
         memset(g_sview_w + g_nsreg, 0, (n - g_nsreg) * sizeof *g_sview_w); memset(g_srid_w + g_nsreg, 0, (n - g_nsreg) * sizeof *g_srid_w); g_nsreg = n; }
     if (g_sview[id_]) { CFRelease(g_sview[id_]); g_sview[id_] = NULL; g_srid[id_] = 0; }
     if (g_sview_w[id_]) { CFRelease(g_sview_w[id_]); g_sview_w[id_] = NULL; g_srid_w[id_] = 0; }
+    if (g_sview_a[id_]) { CFRelease(g_sview_a[id_]); g_sview_a[id_] = NULL; g_srid_a[id_] = 0; }
     g_sreg[id_] = *sp; g_sreg_ok[id_] = 1;
     int bn, bw; float k[4]; const uint8_t wrap[3] = {sp->ws, sp->wt, sp->wr};
     if (nvn_border(sp->border, wrap, sp->reduction, &bn, &bw, k)) atomic_store(&g_border_any, 1);
@@ -7135,12 +7140,6 @@ static MTLSamplerAddressMode wrapm(int w) {
 }
 // Filtering the host can raise for any game, because it builds every sampler the game uses: the setting
 // is a floor, never a ceiling, so a game that asks for more keeps what it asked for.
-static float dm_aniso(void) {
-    static float v = -1;
-    if (v < 0) { const char *e = getenv("DM_ANISO"); v = e ? strtof(e, NULL) : 0; if (v < 1) v = 0; if (v > 16) v = 16;
-                 if (v) MLOG("DM_ANISO=%g: every sampler filters at least this anisotropy", v); }
-    return v;
-}
 static int dm_trilinear(void) {
     static int v = -1;
     if (v < 0) { const char *e = getenv("DM_TRILINEAR"); v = e && atoi(e) ? 1 : 0;
@@ -7165,16 +7164,12 @@ static id<MTLSamplerState> samp_by_id(int sid) {   // Caller holds g_rmu
     d.sAddressMode = wrapm(p.ws); d.tAddressMode = wrapm(p.wt); d.rAddressMode = wrapm(p.wr);
     d.lodMinClamp = p.lod_min < 0 ? 0 : p.lod_min; d.lodMaxClamp = p.lod_max;
     d.lodBias = p.lod_bias < -16 ? -16 : p.lod_bias > 15.99f ? 15.99f : p.lod_bias;   // SetLodBias: Maxwell's sampler bias, Metal 26's range [-16, 15.99]
-    // DM_ANISO=2..16 raises the game's own anisotropy to at least that, for every sampler. The games were
-    // built for a handheld and mostly ask for 1, so ground and wall textures blur at a glancing angle.
-    // Sampling only: no render target, no allocation, and a sampler that asks for more keeps what it asked for.
-    // Only a sampler that reads a mipmapped colour texture is raised. A comparison sampler is a shadow map: anisotropy
-    // changes which depth texels the comparison averages, and across a cascade boundary the two sides then disagree,
-    // which draws a line along the join on open ground (seen in Breath of the Wild's fields). A reduction sampler is a
-    // min or max pyramid, whose value has to stay the extreme of the footprint. Without mipmaps there is no second level.
-    { float a = p.aniso;
-      if (!p.cmp_mode && !p.reduction && d.mipFilter != MTLSamplerMipFilterNotMipmapped && dm_aniso() > a) a = dm_aniso();
-      d.maxAnisotropy = a < 1 ? 1 : a > 16 ? 16 : (NSUInteger)a; }
+    // DM_ANISO (sampler_aniso.h) is made below as a variant. A comparison sampler is a shadow map and a reduction sampler a min or max
+    // pyramid, so both keep the game's value (raised, the two sides of a shadow cascade boundary stop agreeing: a line along the join on
+    // open ground, found on Breath of the Wild's fields in PR #335).
+    d.maxAnisotropy = aniso_clamp(p.aniso);
+    unsigned af = aniso_for(p.aniso, d.minFilter == MTLSamplerMinMagFilterLinear, d.magFilter == MTLSamplerMinMagFilterLinear,
+                            d.mipFilter == MTLSamplerMipFilterLinear ? ANISO_MIP_LINEAR : d.mipFilter == MTLSamplerMipFilterNearest ? ANISO_MIP_NEAREST : ANISO_MIP_NONE, p.lod_min, p.lod_max, p.cmp_mode || p.reduction);
     if (p.cmp_mode) d.compareFunction = (MTLCompareFunction)(p.cmp_func - 1);
     // Reduction (NVN 1 min / 2 max): the minimum or maximum of the texels a filtered sample covers, per channel (Metal 26). Pokémon Legends: Z-A builds its depth pyramid with a min sampler
     // (151607c7a92386cc reads the level above at an explicit LOD) and tests occlusion boxes against it; averaged, the pyramid is nearer than the scene at depth edges. Metal ignores the reduction
@@ -7195,7 +7190,24 @@ static id<MTLSamplerState> samp_by_id(int sid) {   // Caller holds g_rmu
         if (t) { g_sview_w[sid] = (void *)CFBridgingRetain(t); g_srid_w[sid] = t.gpuResourceID._impl; memcpy(g_sbk[sid], k, sizeof k); }
         static int nlog; if (nlog++ < 16) MLOG("sampler ID %d: border colour %g,%g,%g,%g, which Metal lacks: Metal colour %d, corrected in the shaders through a twin of colour %d", sid, p.border[0], p.border[1], p.border[2], p.border[3], bn, bw);
     }
+    if (s && af > d.maxAnisotropy) {   // the raised variant, which samp_aniso hands out per binding (the twin keeps the game's value)
+        d.borderColor = (MTLSamplerBorderColor)bn; d.maxAnisotropy = af; id<MTLSamplerState> a = [g_dev newSamplerStateWithDescriptor:d];
+        if (a) { g_sview_a[sid] = (void *)CFBridgingRetain(a); g_srid_a[sid] = a.gpuResourceID._impl; }
+    }
     return s;
+}
+// DM_ANISO: whether sampler sid, sampled together with texture tid (one combined handle), takes its raised variant: only where the texture's view is 2D or a 2D array with
+// more than one level (aniso_tex_ok, sampler_aniso.h; the levels as tex_by_id counts them, at most those a texture of its size has). A texture of one level sampled through a raised
+// state spreads its extra samples across level 0 wherever a shader's coordinates jump within a pixel quad: Breath of the Wild's anti-aliasing pass found its edges wrong and the
+// picture turned jagged. DM_NVN_ANISO=0 binds no raised state, =ab with DM_AB alternates them by phase (cost and picture in one run). Caller holds g_rmu, after samp_fast(sid)
+static inline int samp_aniso(int sid, int tid) {
+    if (sid <= 0 || sid >= g_nsreg || !g_srid_a[sid] || tid <= 0 || tid >= g_ntreg || !g_treg[tid].ok) return 0;
+    static int mode = -1; if (mode < 0) mode = sw_mode("DM_NVN_ANISO", 1);   // g_rmu serializes the first call
+    if (!sw_on(mode)) return 0;
+    const treg_t *r = &g_treg[tid]; int target = r->has_v && r->v.set_target ? r->v.target : r->t.d.target;
+    unsigned tl = r->t.d.levels, cap = aniso_level_cap(r->t.d.width, r->t.d.height); if (tl > cap) tl = cap;
+    unsigned levels = aniso_view_levels(tl, r->has_v && r->v.set_levels, r->has_v ? r->v.base_level : 0, r->has_v ? r->v.nlevels : 0);
+    return aniso_tex_ok(target == NVN_TEXTURE_TARGET_2D || target == NVN_TEXTURE_TARGET_2D_ARRAY, levels);
 }
 static inline __attribute__((always_inline)) void *samp_fast(int sid) {
     if (sid > 0 && sid < g_nsreg && g_sreg_ok[sid] && g_sview[sid]) return g_sview[sid];
@@ -11566,10 +11578,13 @@ static int encode_args_(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, i
         } else if (b->kind == NVN_RB_SAMP || b->kind == NVN_RB_SAMPT || b->kind == NVN_RB_SAMPU || b->kind == NVN_RB_SAMPI) {   // SAMPT: the sampler part of a combined handle (texture ID | sampler ID << 20); SAMPU: the same, with the handle in a uniform buffer
             int sid = bind_sid(nvn_stage, b);
             __unsafe_unretained id<MTLSamplerState> ss = sid ? (__bridge id<MTLSamplerState>)samp_fast(sid) : nil;
+            // the texture of the same handle (SAMPT, SAMPU): DM_ANISO's variant where it has mips; a separate or constant sampler (SAMP, SAMPI) has no texture of its own and keeps the game's value
+            int htid = !(ss && sid < g_nsreg && g_srid_a[sid]) ? 0 : b->kind == NVN_RB_SAMPU ? ubo_tex_id(ubo_bind_handle(nvn_stage, b)) : b->kind == NVN_RB_SAMPT && reg < NTEX ? (int)(S.tex[nvn_stage][reg] & 0xfffff) : 0;
             if (b->bw && ss && g_sview_w[sid]) {   // a twin (dmsh_rewrite.py border_emu) of a sampler whose border colour Metal lacks: the shader corrects its samples
                 ss = (__bridge id<MTLSamplerState>)g_sview_w[sid]; slots[aid] = g_srid_w[sid];
                 bmask |= 1u << (b->bw - 1); memcpy(bk[b->bw - 1], g_sbk[sid], sizeof bk[0]);
-            } else slots[aid] = sid && sid < g_nsreg && g_srid[sid] ? g_srid[sid] : dummy_samp_rid();   // a twin of any other sampler is never sampled
+            } else if (ss && samp_aniso(sid, htid)) { ss = (__bridge id<MTLSamplerState>)g_sview_a[sid]; slots[aid] = g_srid_a[sid]; }
+            else slots[aid] = sid && sid < g_nsreg && g_srid[sid] ? g_srid[sid] : dummy_samp_rid();   // a twin of any other sampler is never sampled
             USE(ss ? ss : dummy_samp(), MTLResourceUsageRead);
             if (bl && sid > 0) { int ok = sid < g_nsreg && g_sreg_ok[sid]; samp_par sp = ok ? g_sreg[sid] : (samp_par){0};   // g_rmu is already held in this section
                 if (ok) PD("B %llu st%d samp reg%d sid=%d mag=%d min=%d (0 nearest / 1 linear; 2–5 with mips) wrap=%d,%d,%d border=%g,%g,%g,%g lod=%g..%g bias=%g aniso=%g cmp=%d/%d %s", g_stat_pass, nvn_stage, reg, sid, (int)sp.magf, (int)sp.minf,

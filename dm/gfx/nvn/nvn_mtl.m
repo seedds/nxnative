@@ -16479,12 +16479,20 @@ static void snap_drain(void) {
     snap_commit_wait(v);
     if (![g_snap_ev waitUntilSignaledValue:v timeoutMS:10000]) MDIE("present snapshots: GPU did not drain within 10 s");
 }
+static void present_wait(uint64_t tk, int taken);
+// Under g_pq_mu: whether a ring slot whose last present has this ticket (present_enqueue) may take a new copy: every present that reads the slot has been committed, and the copy
+// committed after them runs after them on the queue. With frame generation the slot's ticket is the present after its own (tk + 1): its own picture, owed after its generated
+// frame, is committed on the display link thread before that next present is taken (or skipped when it is), and nothing after it reads the slot, so the slot is free once the link
+// (or the present thread) has taken tk + 1. Before, it waited until tk + 1 was done, which is its GPU completion: that present is queued behind the game's next frame, so each
+// acquire waited for the GPU to finish the frame before, and the game lost its frame of overlap with the GPU (Ocarina of Time on an iPhone 17, Hyrule Field: 30 fps -> 4-7 fps,
+// the GPU time per frame 17-21 -> 35-60 ms; on an M1 Pro the snapshot ring blocked 68-89 % of acquires for 8-16 ms a frame)
+static int snap_slot_free(uint64_t ticket) { return ticket <= g_pq_done || (fg_on() && ticket <= g_pq_read); }
 uint64_t mtl_snap_acquire_wait(void) {
     if (!mtl_snap_on() || atomic_load(&g_present_discard)) return 0;
     int k = (int)(atomic_load(&g_snap_next) % (uint64_t)g_snap_n);
     uint64_t ticket = atomic_load(&g_snap[k].ticket), ev = atomic_load(&g_snap[k].ev), w0 = ws_t0();
-    pthread_mutex_lock(&g_pq_mu); int blocked = ticket > g_pq_done; pthread_mutex_unlock(&g_pq_mu);
-    if (ticket) mtl_present_wait(ticket);
+    pthread_mutex_lock(&g_pq_mu); int blocked = !snap_slot_free(ticket); pthread_mutex_unlock(&g_pq_mu);
+    if (ticket) present_wait(ticket, fg_on());
     if (ev && !atomic_load(&g_present_discard) && g_snap_ev.signaledValue < ev) {
         blocked = 1;
         // On timeout present falls back to its original texture; the busy allocator is never reset.
@@ -16497,7 +16505,7 @@ uint64_t mtl_snap_acquire_wait(void) {
 // (seconds), for frame generation, which follows the copy (fg_encode)
 static uint64_t snap_take(const tex_t *t, double period, const int crop[4], int *whole) {
     int k = (int)(atomic_load(&g_snap_next) % (uint64_t)g_snap_n);
-    pthread_mutex_lock(&g_pq_mu); int busy = atomic_load(&g_snap[k].ticket) > g_pq_done; pthread_mutex_unlock(&g_pq_mu);
+    pthread_mutex_lock(&g_pq_mu); int busy = !snap_slot_free(atomic_load(&g_snap[k].ticket)); pthread_mutex_unlock(&g_pq_mu);
     uint64_t ev = atomic_load(&g_snap[k].ev);
     if (busy || (ev && g_snap_ev.signaledValue < ev)) return 0;
     // The texture this slot held before it was last replaced: every present that read it had been committed when the replacing copy was (the busy check then), and the queue
@@ -16617,7 +16625,7 @@ static uint64_t present_enqueue(const tex_t *t, double period, const int crop[4]
     if (ss && g_snap[slot].gen_ok) it->gen = g_snap[slot].gen_serial;
     uint64_t tk = ++g_pq_in;
     // With frame generation a slot's picture is shown again after its generated frame (fg_owe), and that comes before the next present's on the display link: the slot is
-    // reused once the present after its own has been processed
+    // reused once the present after its own has been taken (snap_slot_free)
     if (ss) { g_snap[slot].ticket = tk + (fg_on() ? 1 : 0); atomic_fetch_add(&g_snap_next, 1); }
     pthread_cond_broadcast(&g_pq_cv);
     pthread_mutex_unlock(&g_pq_mu);
@@ -16627,9 +16635,12 @@ static uint64_t present_enqueue(const tex_t *t, double period, const int crop[4]
 void mtl_present_progress(uint64_t *queued, uint64_t *done) { pthread_mutex_lock(&g_pq_mu); *queued = g_pq_in; *done = g_pq_done; pthread_mutex_unlock(&g_pq_mu); }
 // Do not wait during discard: the frame enqueued only after the flag was set (the present thread had just passed the flag check) has nobody to take it, and waiting for it would stall again; it is left for the following mtl_drain to clear
 // Do not wait indefinitely in display-link mode: see the note at STALL_NS. Only frames "not yet taken by the display link" are dropped; the one already on its way to the screen is waited for until handed to the GPU (same dropping as when entering the background)
-void mtl_present_wait(uint64_t tk) {
+void mtl_present_wait(uint64_t tk) { present_wait(tk, 0); }
+// taken: return once the display link (or the present thread) has taken the present, without waiting for it to be handed on (snap_slot_free)
+static void present_wait(uint64_t tk, int taken) {
     pthread_mutex_lock(&g_pq_mu);
     while (g_pq_done < tk && !atomic_load(&g_present_discard)) {
+        if (taken && g_pq_read >= tk) break;
         if (!g_link_owns_layer) { pthread_cond_wait(&g_pq_cv, &g_pq_mu); continue; }
         if (g_pq_read >= tk) { pthread_cond_wait(&g_pq_cv, &g_pq_mu); continue; }   // This one has already been taken by the display link and is being presented: wait for it to be handed to the GPU (the GPU completion callback will wake us)
         struct timespec ts; clock_gettime(CLOCK_REALTIME, &ts); ts.tv_nsec += (long)STALL_NS; if (ts.tv_nsec >= 1000000000L) { ts.tv_sec++; ts.tv_nsec -= 1000000000L; }
@@ -16640,7 +16651,7 @@ void mtl_present_wait(uint64_t tk) {
         if (now - last < STALL_NS) { pthread_cond_timedwait(&g_pq_cv, &g_pq_mu, &ts); continue; }   // The display link is still running, it is just not this one's turn yet: keep waiting (bounded, no busy spinning)
         uint64_t n = tk - g_pq_read;
         for (uint64_t k = g_pq_read + 1; k <= tk; k++) { g_pres[k % PRING] = (pres_ent){k, -1}; mtl_tex_unpin(g_pq[(k-1)%PQ].t.serial); }
-        g_link_dropped += n; g_pq_read = tk;
+        g_link_dropped += n; g_pq_read = tk; g_fg_owed = 0;   // (frame generation: a picture owed before the link fell silent is older than these; its slot is free now)
         while (g_pq_inflight) pthread_cond_wait(&g_pq_cv, &g_pq_mu);
         if (g_pq_done < tk) g_pq_done = tk;
         pthread_cond_broadcast(&g_pq_cv);

@@ -66,7 +66,7 @@ static uint64_t tick(void) {   // one 60 Hz tick of the display link; returns th
 // n presents from frame i0 at 30 fps on the link's 60 Hz ticks (two ticks each)
 static void steady(int i0, int n) { for (int i = 0; i < n; i++) { tex_t t = frame(i0 + i); present_enqueue(&t, 1 / 30.0, NULL, 0); copied(); tick(); tick(); } }
 int main(void) { @autoreleasepool {
-    alarm(30); setbuf(stdout, NULL);
+    alarm(60); setbuf(stdout, NULL);   // (about 30 s: some ticks wait a second for the offscreen layer's drawable)
     setenv("DM_FRAMEGEN", "1", 1); setenv("DM_PRESENT_SNAP", "1", 1); setenv("DM_PRESENT_HZ", "0", 1); setenv("DM_PRESENT_LINK", "0", 1);   // the present thread first; the link's ticks are called below
     mtl_init();
     g_test_layer = [CAMetalLayer layer]; g_test_layer.device = g_dev; g_test_layer.drawableSize = CGSizeMake(W, H); g_test_layer.pixelFormat = MTLPixelFormatBGRA8Unorm;
@@ -155,6 +155,28 @@ int main(void) { @autoreleasepool {
     gate.signaledValue = 1;
     CHECK("the interpolation's GPU time is measured", g_fg_gpu_last > 2e-5 && g_fg_gpu_last < 1);   // (an empty or early stamp read 0 or 6 µs)
     printf("last interpolation: %.3f ms\n", g_fg_gpu_last * 1e3);
+    // A ring slot is free for the next copy once the link has taken the present after its own (its own picture, owed after its generated frame, committed before), not once
+    // that next present has run on the GPU, which queues it behind the game's next frame: the acquire waited for the GPU to finish that frame, and Ocarina of Time on an iPhone
+    // fell from 30 to 4-7 fps in Hyrule Field. With the GPU held, p1's slot takes p4's copy after p2 was taken
+    for (int i = 0; i < 4; i++) tick();
+    steady(40, 3);
+    tex_t p1 = frame(43); present_enqueue(&p1, 1 / 30.0, NULL, 0); copied(); tick(); tick();
+    tex_t p2 = frame(44); present_enqueue(&p2, 1 / 30.0, NULL, 0); copied();
+    id<MTLSharedEvent> gate2 = [g_dev newSharedEvent]; [g_q4 waitForEvent:gate2 value:1];   // p2's presents and everything after stay on the queue
+    uint64_t q2 = tick(); tick();
+    tex_t p3 = frame(45); present_enqueue(&p3, 1 / 30.0, NULL, 0);
+    uint64_t n4 = g_snap_next; int s4 = (int)(n4 % (uint64_t)g_snap_n);
+    uint64_t tk4 = atomic_load(&g_snap[s4].ticket);
+    dispatch_semaphore_t acq = dispatch_semaphore_create(0);   // the game's acquire, on its own thread: it waited until the gate opened
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{ mtl_snap_acquire_wait(); dispatch_semaphore_signal(acq); });
+    int acquired = !dispatch_semaphore_wait(acq, dispatch_time(DISPATCH_TIME_NOW, 200 * NSEC_PER_MSEC));
+    tex_t p4 = frame(46); present_enqueue(&p4, 1 / 30.0, NULL, 0);
+    int snapped = g_snap_next == n4 + 1;
+    printf("GPU held after p2 was taken (showed %llx): p1's slot %d, its ticket %llu, done %llu, taken %llu; acquire %s, p4 snapshot %d\n", (unsigned long long)q2, s4,
+           (unsigned long long)tk4, (unsigned long long)g_pq_done, (unsigned long long)g_pq_read, acquired ? "returned" : "waits", snapped);
+    CHECK("a ring slot is free once the present after its own is taken, before the GPU has run it", q2 && acquired && snapped);
+    gate2.signaledValue = 1; if (!acquired) dispatch_semaphore_wait(acq, DISPATCH_TIME_FOREVER);
+    copied();
     // A screen smaller than the picture (an iPhone's): the snapshot and the frames generated from it are made at the size the picture is shown at
     for (int i = 0; i < 4; i++) tick();
     g_test_layer.drawableSize = CGSizeMake(W / 2, H / 2);

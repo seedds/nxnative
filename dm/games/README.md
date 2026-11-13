@@ -109,6 +109,7 @@ One row per profile; the notes are each profile's `README.md`.
 | [Hyrule Warriors: Age of Calamity](01002B00111A2000/README.md) | `01002B00111A2000` | 1.3.0 | 9.6.0 | Koei Tecmo's KTGL | NVN |
 | [Hyrule Warriors: Age of Imprisonment](04003F40232DE000/README.md) | `04003F40232DE000` | v196608 (Switch 2) | 20.5.15 (Ounce) | Koei Tecmo's KTGL | NVN2 |
 | [Hyrule Warriors: Definitive Edition](0100AE00096EA000/README.md) | `0100AE00096EA000` | 1.0.1 | 3.5.1 | Koei Tecmo's KTGL | NVN |
+| [INSIDE](0100D2D009028000/README.md) | `0100D2D009028000` | 1.0.0 (base) | 3.5.2 | Unity 5.6.4p2 IL2CPP | NVN |
 | [Kirby Air Riders](040077201BE50000/README.md) | `040077201BE50000` | v458752 (Switch 2) | 20.5.26 (Ounce) | Its own engine (`phx`, `Aurora`) | NVN2 |
 | [Kirby and the Forgotten Land](01004D300C5AE000/README.md) | `01004D300C5AE000` | 1.1.0 | 11.4.0 | HAL Laboratory's engine (NintendoWare) | NVN |
 | [Kirby Star Allies](01007E3006DDA000/README.md) | `01007E3006DDA000` | 4.0.0a | 4.4.1 | HAL Laboratory's engine (NintendoWare) | NVN |

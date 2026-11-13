@@ -336,9 +336,12 @@ DM_ROOT	path	Workspace root (default `~/dm-work`): the host's and tools' default
 DM_RT	diagnostic	`0` leaves the thread that acquires the window on its QoS only, with no Mach time-constraint policy declaring the frame deadline (on by default; for power A/B)
 DM_RT_COMP	switch	`=<ms>` fixes the computation the present thread's time-constraint policy declares; default `auto` re-declares it every 120 frames from that thread's per-frame CPU time (p90 and peak)
 DM_RUMBLE	player	`0` turns game rumble off (on by default); launcher setting
-DM_RUMBLE_GAIN	player	`=0..3` scales the rumble strength (default 1, `0` is silent); launcher setting
+DM_RUMBLE_CURVE	player	`=0.2..1`: controller rumble level (after the gain and the cutoff) raised to this power, which lifts quiet effects (default 1, off); for games written for the Switch 2's actuators (Ocarina of Time)
+DM_RUMBLE_GAIN	player	`=0..25` scales the rumble strength (default 1, `0` is silent); launcher setting (its slider stops at 3)
+DM_RUMBLE_HOLD	player	`=0..1000` ms: a controller rumble peak is held at least this long, then the game's current level follows (default 0, off); a rotating motor does not render effects of 60 ms (Ocarina of Time: 70 to 250 ms)
 DM_RUMBLE_LOG	diagnostic	`=1` logs the game's vibration handle requests and, once a second, the values it sent, how many had no routed output and the peak amplitude
 DM_RUMBLE_MIN	player	`=0..0.9`: controller rumble levels below it stay silent and the rest is stretched over the full range (default 0; the phone is unaffected); for games whose quiet HD rumble texture keeps rotating motors running (Mario Kart 8 Deluxe: 0.45); launcher setting
+DM_RUMBLE_SHARPNESS	player	`=0..1`: a fixed Core Haptics sharpness for controller rumble instead of the one the game's frequencies give (default: the game's)
 DM_SAVE	path	This run's save folder (must be set); the device save is `<DM_SAVE>_device`, and `pso_user.tsv` goes in its parent folder; the Mac launcher, the iOS app and the NSP script set it
 DM_SAVED_CHOICES	switch	`0` ignores the player's saved choices (launcher.<VAR> in the app's preferences) and leaves them saved; the Mac launcher and the iOS settings screen
 DM_SAVE_SYNC	player	Cloud saves: the folder whose `<title ID>/save.dmsync` the save is synced through, `icloud` for iCloud Drive/nxnative Saves (the Mac); `0` or unset, off. The Mac launcher sets the folder chosen in its settings window's Cloud saves, the iPhone app the one picked in its launcher (dm/host/save_sync.h); regress.py, bench.py and the NSP script's own host runs set `0`

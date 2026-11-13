@@ -671,6 +671,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Check:** `python3 dm/gfx/tests/test_dmsh_gather_offsets.py`. Offline, one captured dispatch of `b106afba1a18faa9`: about 40 % of the pixels differed between three runs of the old shader; the rewritten one gave the same bytes each time, equal to a version that reads the texels explicitly, and took 3.85 ms against 4.16 ms.
 - **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md): 28 NDSR compute shaders of its seen shaders. Every game with agl's upscaler builds it the same way. Not yet checked: whether this is the open cause of [Mario Kart World](../../dm/games/0400C3F00006E000/README.md)'s isolated bright dots.
 
+### Ampere TLD4.PTP offsets are signed bytes
+
+- **Symptom:** none seen in a picture. A Switch 2 gather with per-texel offsets (TLD4.PTP) whose offset lies outside [-32, 31] read the texel at another offset: 0x40 read 0, 0x21 read -31.
+- **Cause:** the Ampere front end read 6 bits of each offset byte, as Maxwell's TLD4.PTP does. Native programs pack each of the eight components as a whole signed byte, four a register (mesa NAK's `NAK_NIR_OFFSET_MODE_PER_PX` packs each as a uint8). An offset in [-32, 31] has the same value either way.
+- **Fix:** `InstEmitAmpereMem.cs` `ATex`: 8 bits a component for the per-texel form. The single-offset form (AOFFI) keeps its 6. A chain change. Ported from Orchid f8c227aab (JoaoVSF99's Lichii 38c99e66e).
+- **Check:** `DMSH_TEST_XLATE=<translator> python3 dm/gfx/tests/test_dmsh_ampere_mem.py GatherOffsets`.
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md): 34 of its shaders have TLD4.PTP (218 instructions). In 31 of them the offsets are constants within the 6-bit range, so their MSL is unchanged. In the other 3 they are computed at run time, so the MSL changes. PRAGMATA and Orbitals have no TLD4.PTP.
+
 ### F2IP
 
 - **Symptom:** `Ampere instruction 243 at 0x… is not implemented`, or `ISBERD mode b8 in a task or mesh shader`, in the build.

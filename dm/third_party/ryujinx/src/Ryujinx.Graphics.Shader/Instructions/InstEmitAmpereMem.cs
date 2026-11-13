@@ -1126,11 +1126,14 @@ namespace Ryujinx.Graphics.Shader.Instructions
                 else if (offset)
                 {
                     int texels = ptp ? 4 : 1;
+                    // Per-texel offsets (PTP) are signed bytes, one a component, four a register (mesa NAK nak_nir_lower_tex: NAK_NIR_OFFSET_MODE_PER_PX packs each as a uint8);
+                    // Maxwell's TLD4.PTP reads 6 of each byte's bits, which made an offset past [-32, 31] another one. The single-offset form keeps Maxwell's 6 bits
+                    int bits = ptp ? 8 : 6;
 
                     for (int i = 0; i < coords * texels; i++)
                     {
                         Operand packed = (i >> 2 & 1) == 0 ? off0 : off1;
-                        sources.Add(context.BitfieldExtractS32(packed, Const((i & 3) * 8), Const(6)));
+                        sources.Add(context.BitfieldExtractS32(packed, Const((i & 3) * 8), Const(bits)));
                     }
 
                     flags |= ptp ? TextureFlags.Offsets : TextureFlags.Offset;

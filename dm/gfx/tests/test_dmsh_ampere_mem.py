@@ -132,6 +132,17 @@ class GuardedWrites(Translated):
         self.assertIn('cp_t_cb262147_10068006', msl)
 
 
+class GatherOffsets(Translated):
+    # TLD4.PTP R24, R6, R16 (.SCR: the coordinates in R6, R7, the per-texel offsets in R16, R17) as Ocarina of Time's d17eefaff4f0bc23 encodes it, its handle moved to c0 word 4
+    TLD4_PTP = (0x000f4600001e2f0e, 0x3000041006189b63)
+
+    def test_per_texel_offsets_are_signed_bytes(self):   # mesa NAK packs each as a uint8 (NAK_NIR_OFFSET_MODE_PER_PX); 6 bits of 0x40 read 0, of 0x21 -31
+        mov = lambda r, v: inst(0x000fe20000000f00, v << 32 | r << 16 | 0x7802)   # MOV Rr, v
+        code = mov(16, 0xdf21c040) + mov(17, 0x01ff7f80) + inst(*self.TLD4_PTP) + inst(0x020ea200001ee000, 0x00000c18030c7593) + inst(*EXIT)
+        msl = self.translate(code)
+        self.assertIn('{ int2(64, -64), int2(33, -33), int2(-128, 127), int2(-1, 1) }', msl)   # the constant offsets array of the gather (6 bits: 0, 0 / -31, 31 / 0, -1)
+
+
 class Suatom(Translated):
     def test_handle_in_the_games_uniform_buffer(self):   # Unreal Engine 5.4 on the Switch 2 keeps every image in c[3]: the same word 12, in bank 3
         msl = self.translate(inst(SUATOM[0], SUATOM[1] | 3 << 54) + inst(*EXIT))

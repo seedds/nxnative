@@ -286,6 +286,7 @@ Its 37 kernels that correct samples, NDSR's network among them, gave about 0.25 
 - [A full table of running GPU writes ends passes for nothing](../../../docs/reference/frame-rate.md#a-full-table-of-running-gpu-writes-ends-passes-for-nothing)
 - [Float atomics in storage memory](../../../docs/reference/shaders.md#float-atomics-in-storage-memory)
 - [textureGatherOffsets and a loop over its offsets](../../../docs/reference/shaders.md#texturegatheroffsets-and-a-loop-over-its-offsets)
+- [Ampere TLD4.PTP offsets are signed bytes](../../../docs/reference/shaders.md#ampere-tld4ptp-offsets-are-signed-bytes): 3 of its 34 TLD4.PTP shaders change, their offsets computed at run time
 - [Image atomics on a 32-bit colour texture](../../../docs/reference/shaders.md#image-atomics-on-a-32-bit-colour-texture)
 - [A host's own store in a fragment shader moves its depth test](../../../docs/reference/frame-rate.md#a-hosts-own-store-in-a-fragment-shader-moves-its-depth-test)
 - [Dead-code removal dropped a coordinate of a multi-output instruction](../../../docs/reference/shaders.md#dead-code-removal-dropped-a-coordinate-of-a-multi-output-instruction)

@@ -74,8 +74,7 @@ CHOICES = (('1440p', 'SCENE_1440', 2560, 1440), ('2160p', 'SCENE_2160', 3840, 21
 
 # Full-output choices are separate from the preserved supersampling modes.
 FULL_CHOICES = (('1080p_full', 'SCENE_F1080', 1920, 1080), ('1440p_full', 'SCENE_F1440', 2560, 1440),
-                ('2160p_full', 'SCENE_F2160', 3840, 2160), ('2880p_full', 'SCENE_F2880', 5120, 2880), ('native_full', 'SCENE_FNATIVE', 1600, 900),
-                ('1610_full', 'SCENE_F1610', 3200, 2000))   # 16:10, experimental: every canvas and display size of the full-output path at 3200x2000
+                ('2160p_full', 'SCENE_F2160', 3840, 2160), ('2880p_full', 'SCENE_F2880', 5120, 2880), ('native_full', 'SCENE_FNATIVE', 1600, 900))
 
 # Canvas allocation descriptors, traced into 134470/134ddc (not global floating
 # point HUD coordinates). Each pair is MOVZ Xr,#1600 / MOVK Xr,#900,LSL#32.

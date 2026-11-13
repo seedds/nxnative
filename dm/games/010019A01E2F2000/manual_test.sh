@@ -8,7 +8,7 @@
 # Never prints key material: prod.keys is passed by path only.
 set -euo pipefail
 MODE=${1:-1440p}
-case $MODE in default|1440p|1800p|2160p|diag1792|native_full|1080p_full|1440p_full|2160p_full|2880p_full|1610_full) ;; *) echo "mode: 1440p, 1800p, 2160p, diag1792, default or a full-output choice (1080p_full ... 2880p_full, 1610_full)" >&2; exit 2;; esac
+case $MODE in default|1440p|1800p|2160p|diag1792|native_full|1080p_full|1440p_full|2160p_full|2880p_full) ;; *) echo "mode: 1440p, 1800p, 2160p, diag1792, default or a full-output choice (1080p_full ... 2880p_full)" >&2; exit 2;; esac
 REPO=$(cd "$(dirname "$0")/../../.." && pwd)
 IMG=${MP4_IMAGES:-"$HOME/Downloads/Nintendo Switch 1:2 — images"}
 NSP="$IMG/Metroid Prime 4 Beyond [NSZ]"; WORK="$NSP/010019A01E2F2000_build"
@@ -28,6 +28,8 @@ printf 'DM_INTERNAL_RESOLUTION=%s\nDM_PRESENT_UPSCALE=off\nDM_METAL_HUD=1\nDM_NV
 [ "${AUDIO_CAPTURE:-}" = 1 ] && printf 'DM_AUDIO_DUMP=%s\nDM_AUDREN_PCM_TRACE=%s\n' "$OUT/game-stereo.pcm" "$OUT/frames.tsv" >> "$OUT/env.txt"
 # LIMITER=0: the peak limiter on the stereo downmix off (DM_AUDIO_LIMITER, on by default), to compare clipping in loud fights
 [ "${LIMITER:-}" = 0 ] && echo "DM_AUDIO_LIMITER=0" >> "$OUT/env.txt"
+# FILL=1: the picture cropped to the window's shape instead of fitted with bars (DM_PICTURE_FIT=fill): 16:10 on a 16:10 screen in fullscreen
+[ "${FILL:-}" = 1 ] && echo "DM_PICTURE_FIT=fill" >> "$OUT/env.txt"
 # SHADOWS=2x or 4x: shadow tiles 2 or 4 times their size in a 4096 or 8192 atlas (DM_SHADOW_RESOLUTION, main.shadow.runtime.tsv)
 [ -n "${SHADOWS:-}" ] && echo "DM_SHADOW_RESOLUTION=$SHADOWS" >> "$OUT/env.txt"
 # LOD=x2, x4 or high: level switches 2 or 4 times as far away, or every model at its most detailed level (DM_MODEL_LOD, main.lod.runtime.tsv)

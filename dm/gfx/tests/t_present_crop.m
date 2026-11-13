@@ -273,6 +273,10 @@ int main(void) { @autoreleasepool {
         present_shape(tall,&sa,&sb);EXPECT("a taller texture without DM_SCREEN_ASPECT: 16:9",1080,(int)sb);
         mtl_present_screen(1920,1344);present_shape(tall,&sa,&sb);EXPECT("DM_SCREEN_ASPECT: a texture that follows it keeps the taller shape",1344,(int)sb);
         present_shape(sw,&sa,&sb);EXPECT("DM_SCREEN_ASPECT: a 16:9 texture of a build without stubs stays 16:9",1080,(int)sb);mtl_present_screen(0,0);
+        // Picture Fill on the Mac (present_cover): a 16:9 3840x2160 picture on a 16:10 drawable keeps the middle 3456x2160; on a 21:9 one the middle 3840x1646; equal shapes stay whole
+        { NSUInteger r[4]={0,0,3840,2160}; present_cover(1920,1080,r,3456,2160); EXPECT("Fill 16:10: left edge",192,(int)r[0]); EXPECT("Fill 16:10: width",3456,(int)r[2]); EXPECT("Fill 16:10: full height",2160,(int)r[3]);
+          NSUInteger t[4]={0,0,3840,2160}; present_cover(1920,1080,t,2520,1080); EXPECT("Fill 21:9: height",1646,(int)t[3]); EXPECT("Fill 21:9: top edge",257,(int)t[1]); EXPECT("Fill 21:9: full width",3840,(int)t[2]);
+          NSUInteger q[4]={8,4,1920,1080}; present_cover(1920,1080,q,3840,2160); EXPECT("Fill, same shape: untouched",1920,(int)q[2]); EXPECT("Fill, same shape: crop origin kept",8,(int)q[0]); }
         // The front end's layout and the mouse follow the same shape, not the crop's (front_picture_shape): a real present of the 5:4 crop
         tex_t st={.magic=MAGIC('T', 'E', 'X', 0), .serial =10002};st.d.width=TW;st.d.height=TH;st.d.depth=st.d.levels=1;st.d.format=NVN_FORMAT_RGBA8;st.d.target=NVN_TEXTURE_TARGET_2D;serial_put(st.serial,sw);
         win_t w3={.ntex=1};w3.tex[0]=(NVNtexture *)&st;set((NVNwindow *)&w3,crop54[0],crop54[1],crop54[2],crop54[3]);

@@ -240,7 +240,7 @@ class ScanSourcePatch(unittest.TestCase):
                 listed = settings.build('010019A01E2F2000', tmp, 'unused')['settings']
                 row = next(r for r in listed if r['env'] == 'DM_INTERNAL_RESOLUTION')
                 self.assertEqual(row['default'], '1800p')
-                self.assertEqual([r[0] for r in row['options']], ['default', 'native_full', '1080p_full', '1440p_full', '1800p', '2160p_full', '2880p_full', '1610_full'])
+                self.assertEqual([r[0] for r in row['options']], ['default', 'native_full', '1080p_full', '1440p_full', '1800p', '2160p_full', '2880p_full'])
                 patched[0x80be90] ^= 1; image.write_bytes(patched)
                 with self.assertRaisesRegex(ValueError, 'instructions differ'): settings.build('010019A01E2F2000', tmp, 'unused')
 

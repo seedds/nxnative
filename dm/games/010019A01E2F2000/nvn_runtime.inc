@@ -14,14 +14,9 @@ static void mp4_quality_init(void) {
     mp4_quality_dynamic=d && !strcmp(d,"1");
     const struct { const char *name;unsigned w,h; } sizes[]={
         {"native_full",1600,900},{"1080p_full",1920,1080},{"1440p_full",2560,1440},
-        {"2160p_full",3840,2160},{"2880p_full",5120,2880},{"1610_full",3200,2000}};
+        {"2160p_full",3840,2160},{"2880p_full",5120,2880}};
     for(unsigned i=0;i<sizeof sizes/sizeof *sizes;i++) if(mode && !strcmp(mode,sizes[i].name)) {
         mp4_quality_max_width=sizes[i].w;mp4_quality_max_height=sizes[i].h;
-    }
-    // A canvas of another shape than 16:9 (1610_full) is presented in its own shape, not fitted into the 16:9 layer (nvn_mtl.m present_shape)
-    if(mp4_quality_max_width && mp4_quality_max_width*9!=mp4_quality_max_height*16) {
-        extern void mtl_present_screen(uint32_t w,uint32_t h); mtl_present_screen(mp4_quality_max_width,mp4_quality_max_height);
-        LOG("MP4 output shape %ux%u (%.3f), presented in its own shape",mp4_quality_max_width,mp4_quality_max_height,(double)mp4_quality_max_width/mp4_quality_max_height);
     }
     if(!mp4_quality_max_width) mp4_quality_dynamic=0; // legacy/reference choices retain their confirmed behavior
     LOG("MP4 scene policy: %s; selected maximum %ux%u",mp4_quality_dynamic?"native dynamic controller":"fixed",mp4_quality_max_width,mp4_quality_max_height);
@@ -67,7 +62,7 @@ static void *mp4_scan_source_v1(NVNcommandBuffer *commands, const void *view) {
                    || (engine_format == 0x1f && src->d.format == NVN_FORMAT_R32F));
     pthread_once(&mp4_quality_once,mp4_quality_init);
     int extent_ok = (width == 1920 && height == 1080) || (width == 2560 && height == 1440)
-        || (width == 3200 && height == 1800) || (width == 3840 && height == 2160) || (width == 5120 && height == 2880) || (width == 3200 && height == 2000)
+        || (width == 3200 && height == 1800) || (width == 3840 && height == 2160) || (width == 5120 && height == 2880)
         || mp4_dynamic_extent(width,height,mp4_quality_max_width,mp4_quality_max_height,mp4_quality_dynamic);
     if (!commands || CB(commands)->magic != MAGIC('C','M','D','B') || !CB(commands)->recording
         || !src || src->magic != MAGIC('T','E','X',0) || !format_ok || !extent_ok

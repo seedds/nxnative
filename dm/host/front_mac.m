@@ -628,7 +628,9 @@ void front_picture_shape(int w, int h) { if (w > 0 && h > 0) g_picture_aspect = 
     NSPoint p = [self convertPoint:e.locationInWindow fromView:nil]; NSSize b = self.bounds.size;
     double w = b.width, h = b.height;
     if (w <= 0 || h <= 0) return;
-    double a = g_picture_aspect; if (w / h > a) w = h * a; else h = w / a;   // the centered picture the present fits into the view (16:9, or a taller one under DM_SCREEN_ASPECT)
+    static int fill = -1; if (fill < 0) { const char *e = getenv("DM_PICTURE_FIT"); fill = e && !strcmp(e, "fill"); }
+    double a = g_picture_aspect;   // the centered picture the present fits into the view (16:9, or a taller one under DM_SCREEN_ASPECT); with Fill it covers the view, edges cropped
+    if ((w / h > a) == !fill) w = h * a; else h = w / a;
     double x0 = (b.width - w) / 2, y0 = (b.height - h) / 2;
     dm_touch t = {0, (float)fmin(fmax((p.x - x0) / w, 0), 0.999), (float)fmin(fmax(1 - (p.y - y0) / h, 0), 0.999)};   // The AppKit view origin is at bottom left, the touchscreen origin is at top left
     dm_touch_set(&t, 1); g_mouse_down = 1;

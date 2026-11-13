@@ -43,6 +43,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 | `build` → `engine` | RE Engine's frame limit at a fixed pointer | frame rate | blocked: one RE Engine game here | judgement | 1 | [Monster Hunter Rise](../../dm/games/0100B04011742000/README.md) | engine code other RE Engine games ship |
 | `build` → `engine` | Unity's constant-buffer table locked on the shared device | race | blocked: the stubs have no function-matched form yet, and no other Unity 2018.4 main on the drive shares these functions (Ori and the Blind Forest 1.0.2: no fingerprint match) | checked: probes of both threads inserting the same key and of the table API's callers by thread; Blind Forest main compared with nso_fnmap | 1 | [Ori and the Will of the Wisps](../../dm/games/01008DD013200000/README.md) | Unity 2018.4's threaded GfxDevice: the main thread registers layouts on the real device while the render thread uses the same table; any Unity 2018.4 build with this code has the race |
 | `build` → `game` | 60 fps frame step on 1.3.0 (the same stub at its known addresses) | frame rate | blocked: 1.3.0's main is on neither drive to fingerprint (v458752 is the update on them) | judgement | 1 | [Hyrule Warriors: Age of Calamity](../../dm/games/01002B00111A2000/README.md) | the stub above, placed at 1.3.0's addresses: the matched rule would serve it once its functions are fingerprinted |
+| `build` → `game` | adaptive view: cached projections, scissors, captures, field ranges and UI docking (DM_SCREEN_ASPECT) | rendering | blocked: the stubs have no function-matched form yet | judgement | 1 | [Animal Crossing: New Horizons](../../dm/games/01006F8002326000/README.md) | the state page is the host's, but every adapter site is this build's code |
 | `build` → `game` | screen shape: the sizes, the view, the layouts' projection and their edge widgets (DM_SCREEN_ASPECT) | rendering | blocked: the stubs have no function-matched form yet | judgement | 1 | [Animal Crossing: New Horizons](../../dm/games/01006F8002326000/README.md) | the output size is the host's, but where the game takes its sizes, its cameras and its layouts are this build's code |
 | `build` → `game` | 60 fps intervals and dynamic-resolution constants | frame rate | kept: 1.0.3 (v131072) is the newest update of both releases and likely their last: a function match would serve no other build; the rewriter would also need matched rules that write fixups and declare capabilities, a new mechanism (2026-11-09) | checked: both releases' mains, where the host's rows for them were found; the global main's sites mapped into ASTRAL CHAIN and Bayonetta 1-3 (2026-11-09) | 2 | [NieR:Automata The End of YoRHa Edition (010056B015FE8000)](../../dm/games/010056B015FE8000/README.md); [NieR:Automata The End of YoRHa Edition (0100B8E016F76000)](../../dm/games/0100B8E016F76000/README.md) | the game's own constants; the Asian release's function is the global one's 0x13c0 further on, so one function-matched rule could serve both releases. No PlatinumGames sibling shares the code: none of its sites has an exact match in ASTRAL CHAIN or Bayonetta 1-3 (nso_fnmap, 2026-11-09) |
 | `build` → `game` | NieR's frame interval and dynamic-resolution floor at fixed addresses | frame rate | kept: 1.0.3 (v131072) is the newest update of both releases and likely their last: a function match would serve no other build; the rewriter would also need matched rules that write fixups and declare capabilities, a new mechanism (2026-11-09) | checked: both releases' mains, where these rows were found; the global main's sites mapped into ASTRAL CHAIN and Bayonetta 1-3 (2026-11-09) | 2 | [NieR:Automata The End of YoRHa Edition (010056B015FE8000)](../../dm/games/010056B015FE8000/README.md); [NieR:Automata The End of YoRHa Edition (0100B8E016F76000)](../../dm/games/0100B8E016F76000/README.md) | the game's own display object; the Asian release's function is the global one's 0x13c0 further on, so the rewriter's function match could give the host both releases' addresses. No PlatinumGames sibling shares the code: none of its sites has an exact match in ASTRAL CHAIN or Bayonetta 1-3 (nso_fnmap, 2026-11-09) |
@@ -55,7 +56,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 
 | Game | Cuts | Gates | Frame-step and stub sites | Function-matched rules | Host rows | Binding |
 |---|---|---|---|---|---|---|
-| [Animal Crossing: New Horizons](#animal-crossing-new-horizons) | 0 | 0 | 14 | 0 | 0 | `build` → `game` |
+| [Animal Crossing: New Horizons](#animal-crossing-new-horizons) | 0 | 0 | 64 | 0 | 0 | `build` → `game` ×2 |
 | [ASTRAL CHAIN](#astral-chain) | 0 | 0 | 112 | 0 | 0 | `build` → `game` |
 | [Batman: Arkham Knight](#batman-arkham-knight) | 8 | 0 | 0 | 0 | 1 | `build` → `game` ×2 |
 | [DARK SOULS: REMASTERED](#dark-souls-remastered) | 2 | 0 | 0 | 0 | 0 | `build` → `game` |
@@ -91,24 +92,75 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 [Animal Crossing: New Horizons](../../dm/games/01006F8002326000/README.md), `01006F8002326000`, [patches.py](../../dm/games/01006F8002326000/patches.py).
 
 - **`build` → `game`**, rendering, blocked: the stubs have no function-matched form yet, judgement: screen shape: the sizes, the view, the layouts' projection and their edge widgets (DM_SCREEN_ASPECT). The output size is the host's, but where the game takes its sizes, its cameras and its layouts are this build's code
+- **`build` → `game`**, rendering, blocked: the stubs have no function-matched form yet, judgement: adaptive view: cached projections, scissors, captures, field ranges and UI docking (DM_SCREEN_ASPECT). The state page is the host's, but every adapter site is this build's code
 
-- **3.0.3 `main`** `ff1d1c05…` ([patches.py:228](../../dm/games/01006F8002326000/patches.py#L228))
-  <details><summary>14 frame-step sites</summary>
+- **3.0.3 `main`** `ff1d1c05…` ([patches.py:609](../../dm/games/01006F8002326000/patches.py#L609))
+  <details><summary>64 frame-step sites</summary>
 
-  - frame step `+0x265140`: nn::ui2d::DrawInfo::SetProjectionMtx: the y row divided by the vertical stretch, layouts in their own shape (bit 6)
+  - frame step `+0x15083c`: refresh cached projection after a view target change
+  - frame step `+0x265140`: nn::ui2d::DrawInfo::SetProjectionMtx: y row divided by the stretch, then the keyboard UI dock (bit 6, one chained stub)
+  - frame step `+0x268ee0`: adaptive-view _dm_view_layout
+  - frame step `+0x27d4c0`: adaptive-view _dm_view_footer_recalc
   - frame step `+0x27d570`: nn::ui2d::Pane::Calculate after the global matrix: duo_calc (the HUD at the taller screen's edges, full-screen backgrounds stretched)
+  - frame step `+0x27d7bc`: adaptive-view _dm_view_footer_y
+  - frame step `+0x283e9c`: adaptive-view _dm_view_transition_fast_call
+  - frame step `+0x284048`: adaptive-view _dm_view_backdrop_call
+  - frame step `+0x2840e4`: adaptive-view _dm_view_backdrop_call
+  - frame step `+0x29a188`: adaptive-view _dm_view_keyboard_window_call
+  - frame step `+0x2b8888`: refresh cached projection after a view target change
   - frame step `+0x5c9b80`: graphics create arg +0x60: the display size in the screen's shape (bit 0)
   - frame step `+0x5c9b94`: graphics create arg +0x20: 1280 x the layout height (bit 1)
   - frame step `+0x5cdcc8`: platform config slot 3: the arg's 1920x1080 in the screen's shape (bit 4)
   - frame step `+0x5cdd74`: platform config slot 7: the static display size in the screen's shape (bit 2)
   - frame step `+0x5cddd4`: platform config slot 8: the static layout size 1280.0 x the layout height (bit 3)
+  - frame step `+0x5ce924`: adaptive-view _dm_view_ui_override
+  - frame step `+0x5ce93c`: refresh cached projection after a view target change
   - frame step `+0x7a895c`: field camera: its vertical angle widened so the taller screen keeps 16:9's sides (bit 5)
   - frame step `+0x7a89a8`: field camera: its vertical angle widened so the taller screen keeps 16:9's sides (bit 5)
+  - frame step `+0x1125fe4`: adaptive-view _dm_view_area
+  - frame step `+0x1126144`: adaptive-view _dm_view_area
+  - frame step `+0x13a29a4`: adaptive-view _dm_view_create
+  - frame step `+0x13a37b4`: adaptive-view _dm_view_sphere
+  - frame step `+0x1462bb4`: adaptive-view _dm_view_units
   - frame step `+0x1527f00`: resolution table entry of the frame (crop, render scale): the height of the screen's shape (bit 7)
   - frame step `+0x1527f2c`: resolution table entry of the frame (crop, render scale): the height of the screen's shape (bit 7)
+  - frame step `+0x2af1258`: adaptive-view _dm_view_touch_page
+  - frame step `+0x31c3074`: refresh cached projection after a view target change
   - frame step `+0x31cee60`: layouts' DrawInfo: the framebuffer's size in the screen's shape (bit 8)
   - frame step `+0x31cee9c`: layouts' DrawInfo: the framebuffer's size in the screen's shape (bit 8)
+  - frame step `+0x326817c`: adaptive-view _dm_view_keyboard_frame
+  - frame step `+0x3268228`: refresh cached projection after a view target change
+  - frame step `+0x37b0eec`: refresh cached projection after a view target change
+  - frame step `+0x37c1b0c`: refresh cached projection after a view target change
+  - frame step `+0x37e5654`: refresh cached projection after a view target change
+  - frame step `+0x37e5974`: adaptive-view _dm_view_matrix
+  - frame step `+0x37e5a4c`: adaptive-view _dm_view_near_y
+  - frame step `+0x37e5a7c`: adaptive-view _dm_view_near_xy
+  - frame step `+0x38189d8`: refresh cached projection after a view target change
+  - frame step `+0x3818a34`: refresh cached projection after a view target change
+  - frame step `+0x3818c70`: refresh cached projection after a view target change
+  - frame step `+0x3819a08`: refresh cached projection after a view target change
+  - frame step `+0x384225c`: refresh cached projection after a view target change
+  - frame step `+0x38423d8`: refresh cached projection after a view target change
   - frame step `+0x386a7a0`: game camera: the vertical angle widened so the taller screen keeps 16:9's sides (bit 5)
+  - frame step `+0x386a888`: refresh cached projection after a view target change
+  - frame step `+0x3883a94`: refresh cached projection after a view target change
+  - frame step `+0x389ebc0`: refresh cached projection after a view target change
+  - frame step `+0x3908dc8`: refresh cached projection after a view target change
+  - frame step `+0x39af314`: refresh cached projection after a view target change
+  - frame step `+0x39af334`: refresh cached projection after a view target change
+  - frame step `+0x3a2eabc`: adaptive-view _dm_view_capture
+  - frame step `+0x3a308e8`: adaptive-view _dm_view_scissor
+  - frame step `+0x3a30984`: adaptive-view _dm_view_scissor_origin
+  - frame step `+0x3a77ac4`: refresh cached projection after a view target change
+  - frame step `+0x3a789d4`: refresh cached projection after a view target change
+  - frame step `+0x3ab6100`: refresh cached projection after a view target change
+  - frame step `+0x3ab7190`: refresh cached projection after a view target change
+  - frame step `+0x3abb650`: refresh cached projection after a view target change
+  - frame step `+0x3abc700`: refresh cached projection after a view target change
+  - frame step `+0x3b2235c`: refresh cached projection after a view target change
+  - frame step `+0x3b55694`: refresh cached projection after a view target change
+  - frame step `+0x3db2bf0`: refresh cached projection after a view target change
 
   </details>
 

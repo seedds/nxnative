@@ -188,6 +188,7 @@ struct LauncherView: View {
                 scroll.parts = now
             }
             .overlay(alignment: .top) { TitleBar(scroll: scroll, checking: checking, play: start) }
+            .background(Surface.ground.ignoresSafeArea())
         }
         .frame(minWidth: 520, idealWidth: 560)
         .onChange(of: wanted, initial: true) {
@@ -367,10 +368,10 @@ private struct TitleBar: View {
             .accessibilityHidden(button < 1)
             .frame(maxWidth: .infinity).frame(height: height)
             .overlay { WindowDrag(on: button < 1) }   // not allowsHitTesting, switched as the bar comes and goes: that cost the main thread 8 to 10 ms each time, a frame dropped in the middle of a scroll
-            // The ground is the window's own colour, there at once. Not a material: in the key window one lets the header's Play show through as a blue smear.
+            // The ground is the window's own (Surface), there at once. Not a material: in the key window one lets the header's Play show through as a blue smear.
             // Not faded in: a quick scroll brings the header's Play under the bar within the time of a fade, and it showed through. Nothing is under it when it
             // comes (the header's icon has faded by then), so nothing is seen to be cut off
-            .background { Color(nsColor: .windowBackgroundColor).opacity(parts > 0 ? 1 : 0) }
+            .background { Surface.ground.opacity(parts > 0 ? 1 : 0) }
             .overlay(alignment: .bottom) { Divider().opacity(parts > 0 ? 1 : 0) }
             .offset(y: -height)
         }
@@ -393,8 +394,16 @@ private struct WindowDrag: NSViewRepresentable {
     func updateNSView(_ strip: Strip, context: Context) { strip.isHidden = !on }
 }
 
-/// Rows in a rounded box with hairlines between them, drawn as a grouped Form draws a section (measured on macOS 27: the fill is 3 % of the label colour, the corner
-/// 12 pt, the rows and the hairlines inset 10 pt). `inset: false` for a row that fills the box itself (a row that is one button)
+/// The window's surfaces, as the Switch's home menu has them and an iPhone's grouped list too: boxes raised in white on a light grey ground. In dark mode the ground is
+/// near black and the boxes a dark grey
+enum Surface {
+    static let groundColor = NSColor(name: "launcher.ground") { $0.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? NSColor(white: 0.155, alpha: 1) : NSColor(white: 0.93, alpha: 1) }
+    static let ground = Color(nsColor: groundColor)
+    static let box = Color(nsColor: NSColor(name: "launcher.box") { $0.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? NSColor(white: 0.215, alpha: 1) : .white })
+}
+
+/// Rows in a rounded box with hairlines between them, on the window's ground (Surface), the rows and the hairlines inset 10 pt. `inset: false` for a row that fills
+/// the box itself (a row that is one button)
 private struct Box<Rows: View>: View {
     var inset = true
     @ViewBuilder let rows: Rows
@@ -408,7 +417,7 @@ private struct Box<Rows: View>: View {
                 }
             }
         }
-        .background(Color.primary.opacity(0.03), in: RoundedRectangle(cornerRadius: 12))
+        .background(Surface.box, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
     }
 }
 
@@ -752,13 +761,14 @@ struct RowSymbol: View {
     }
 }
 
-/// The game's icon as a rounded tile; a controller glyph when the app has no icon
+/// The game's icon as a tile, with the small corner of the Switch's home menu: the icon is that menu's own art (the game's control data), made for a square, which an
+/// app icon's corner cut into more. A controller glyph when the app has no icon
 private struct GameIcon: View {
     let art: NSImage?
     let side: CGFloat
 
     var body: some View {
-        let shape = RoundedRectangle(cornerRadius: side * 0.225, style: .continuous)   // the corner of a macOS app icon
+        let shape = RoundedRectangle(cornerRadius: side * 0.075, style: .continuous)
         Group {
             if let art {
                 Image(nsImage: art).resizable().interpolation(.high).scaledToFill()
@@ -771,8 +781,8 @@ private struct GameIcon: View {
         }
         .frame(width: side, height: side)
         .clipShape(shape)
-        .overlay(shape.strokeBorder(.primary.opacity(0.1), lineWidth: 0.5))
-        .shadow(color: .black.opacity(0.22), radius: side / 13, y: side / 40)
+        .overlay(shape.strokeBorder(.primary.opacity(0.08), lineWidth: 0.5))
+        .shadow(color: .black.opacity(0.13), radius: side / 26, y: side / 70)
         .accessibilityHidden(true)
     }
 }
@@ -921,6 +931,7 @@ private final class Launcher: NSObject, NSApplicationDelegate, NSWindowDelegate 
         item.submenu = app; menu.addItem(item); NSApp.mainMenu = menu
         let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 560, height: 660), styleMask: [.titled, .closable, .miniaturizable, .fullSizeContentView], backing: .buffered, defer: false)   // not resizable: the height follows the settings shown (fit), which a dragged edge only fought
         w.title = name; w.isReleasedWhenClosed = false; w.delegate = self
+        w.backgroundColor = Surface.groundColor   // what shows of the window outside the settings, as its height moves
         w.titleVisibility = .hidden; w.titlebarAppearsTransparent = true   // the header names the game; the title stays for the Window menu, Mission Control and VoiceOver
         let bar = NSToolbar(identifier: "launcher")   // no items: the window's title bar at a toolbar's height, its buttons centred in it, for the header that goes into it (LauncherView.titleBar)
         bar.displayMode = .iconOnly; bar.allowsUserCustomization = false; bar.allowsDisplayModeCustomization = false   // icons only: with labels the bar is 14 pt taller, for labels it does not have

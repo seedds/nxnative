@@ -4347,7 +4347,9 @@ static id<MTLTexture> image_texture(const tex_t *t, MTLTextureDescriptor *d0) {
     // Family members are written uncompressed (DM_NVN_FAMILY_NOCOMPRESS, on unless =0). With lossless compression a member read after another resolution wrote the shared bytes
     // decodes the other's compressed blocks as garbage: ASTRAL CHAIN's 1600x900 HDR targets (loaded, never cleared) came back from the 1440x810 pause menu with 1.1M non-finite
     // pixels, which bloom spread into a strobing pink / white glow. Uncompressed, the inherited bytes are only misplaced texels of the same format, as on the console
-    static int nocomp = -1; if (nocomp < 0) { const char *e = getenv("DM_NVN_FAMILY_NOCOMPRESS"); nocomp = !(e && !strcmp(e, "0")); }
+    // A game profile with family_compress on (DM_GAME_FAMILY_COMPRESS) keeps the compression: Ocarina of Time on an M1, whose dynamic-resolution targets are a family, spent about 0.85 ms
+    // a frame more GPU time uncompressed (its passes' attachment stores and loads, about 470 MB a frame), and switching 1440x810 / 1366x768 / 1280x720 mid-game showed no garbage
+    static int nocomp = -1; if (nocomp < 0) { const char *e = getenv("DM_NVN_FAMILY_NOCOMPRESS"); nocomp = e ? strcmp(e, "0") != 0 : !DM_GAME_FAMILY_COMPRESS; if (!nocomp) MLOG("resolution families keep lossless compression (%s)", e ? "DM_NVN_FAMILY_NOCOMPRESS=0" : "game profile family_compress"); }
     MTLTextureDescriptor *d = d0; if (nocomp) { d = [d0 copy]; d.allowGPUOptimizedContents = NO; }
     MTLSizeAndAlign need = [g_dev heapTextureSizeAndAlignWithDescriptor:d];
     if (!need.size) return nil;

@@ -348,5 +348,40 @@
     "pt-BR": "Fique parado e escolha a posição atual. Os eixos e a compensação do giroscópio serão mantidos.",
     "es": "Mantén inmóvil y elige la postura actual. Se mantienen los ejes y la compensación del giroscopio.",
     "zh-Hant": "保持靜止，然後選擇目前姿勢。軸向設定與陀螺儀偏差補償保持不變。"
+  },
+  "Phone Motion Setup": {
+    "pt-BR": "Configurar movimento do celular",
+    "es": "Configurar movimiento del teléfono",
+    "zh-Hant": "手機動作設定"
+  },
+  "Done": {
+    "pt-BR": "Concluir",
+    "es": "Listo",
+    "zh-Hant": "完成"
+  },
+  "Changes saved automatically. Close this window, check the connection indicators, then Play.": {
+    "pt-BR": "Alterações salvas automaticamente. Feche esta janela, confira os indicadores e depois jogue.",
+    "es": "Cambios guardados automáticamente. Cierra esta ventana, comprueba los indicadores y juega.",
+    "zh-Hant": "變更會自動儲存。關閉視窗，確認連線指示後開始遊戲。"
+  },
+  "No saved phone controllers. Open Phone Motion Setup to add one.": {
+    "pt-BR": "Nenhum celular salvo. Abra a configuração de movimento para adicionar um.",
+    "es": "No hay teléfonos guardados. Abre la configuración para añadir uno.",
+    "zh-Hant": "尚未儲存手機控制器。請開啟手機動作設定來新增。"
+  },
+  "Connecting — no recent samples": {
+    "pt-BR": "Conectando — sem amostras recentes",
+    "es": "Conectando — sin muestras recientes",
+    "zh-Hant": "連線中 — 尚無近期樣本"
+  },
+  "Receiving motion · ready": {
+    "pt-BR": "Recebendo movimento · pronto",
+    "es": "Recibiendo movimiento · listo",
+    "zh-Hant": "正在接收動作 · 已就緒"
+  },
+  "Receiving motion · calibration required": {
+    "pt-BR": "Recebendo movimento · precisa calibrar",
+    "es": "Recibiendo movimiento · requiere calibración",
+    "zh-Hant": "正在接收動作 · 需要校正"
   }
 }

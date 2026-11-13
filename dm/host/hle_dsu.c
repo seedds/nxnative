@@ -20,7 +20,9 @@ static pthread_t worker;
 static _Atomic int active;
 static int launched;
 static uint32_t client_id;
-static uint64_t dsu_now(void) { struct timespec t;clock_gettime(CLOCK_MONOTONIC,&t);return (uint64_t)t.tv_sec*1000000000ull+t.tv_nsec; }
+// Match motion_set_to: macOS CLOCK_MONOTONIC and mach_absolute_time are
+// distinct clock domains. Using the former makes fresh packets appear stale.
+static uint64_t dsu_now(void) { return now_ns(); }
 static void *dsu_run(void *unused) {
     (void)unused;uint64_t sent=0;
     while (atomic_load(&active)) {

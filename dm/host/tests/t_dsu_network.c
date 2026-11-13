@@ -2,7 +2,9 @@
 #include "../hle_dsu.c"
 #include <assert.h>
 static _Atomic int callbacks;
-void dm_motion_set_dsu(int p,const float a[3],const float r[3],uint64_t t) { assert(p==0 && t>0);assert(fabsf(a[2]+1)<0.001f);assert(fabsf(r[0]-1.5707963f)<0.001f);atomic_fetch_add(&callbacks,1); }
+// Deliberately offset the host clock: the receiver must use it, not another epoch.
+uint64_t now_ns(void) { struct timespec t;clock_gettime(CLOCK_MONOTONIC,&t);return (uint64_t)t.tv_sec*1000000000ull+t.tv_nsec+7000000000ull; }
+void dm_motion_set_dsu(int p,const float a[3],const float r[3],uint64_t t) { assert(p==0 && t>0);uint64_t now=now_ns();assert(t<=now && now-t<300000000ull);assert(fabsf(a[2]+1)<0.001f);assert(fabsf(r[0]-1.5707963f)<0.001f);atomic_fetch_add(&callbacks,1); }
 int main(void) {
     int server=socket(AF_INET,SOCK_DGRAM,0);assert(server>=0);
     struct sockaddr_in addr={0};addr.sin_family=AF_INET;addr.sin_addr.s_addr=htonl(INADDR_LOOPBACK);

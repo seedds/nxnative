@@ -17,6 +17,16 @@ final class MotionContractTests:XCTestCase {
         XCTAssertEqual(restored.sensors.first?.axes,phone.axes)
         XCTAssertEqual(restored.sensors.first?.gyroBias,phone.gyroBias)
     }
+    @MainActor func testDetectedSlotIsUsedForGameEnvironment() throws {
+        let dir=FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at:dir) }
+        let store=SensorStore(url:dir.appendingPathComponent("dsu.json"));store.add()
+        let sensor=try XCTUnwrap(store.sensors.first)
+        sensor.host="127.0.0.1";sensor.slot = -1;sensor.detectedSlot=2;sensor.calibrated=true;sensor.onEdit?()
+        let saved=try DSUConfiguration.load(from:dir.appendingPathComponent("dsu.json"))
+        XCTAssertEqual(saved.devices.first?.slot,2)
+        XCTAssertNotNil(try saved.environment()["DM_DSU_1"])
+    }
     func testInvalidDisabledRecordRejected() throws {
         var d=DSUDevice(id:UUID(),name:"Bad",player:1,host:"127.0.0.1",port:26760,slot:1,axes:[1,2,3],bias:[0,0,0],enabled:false)
         d.displayAxes=[Int.min,2,3]

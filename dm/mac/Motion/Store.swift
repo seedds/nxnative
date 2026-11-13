@@ -2,6 +2,7 @@ import Foundation
 import Combine
 
 @MainActor final class SensorStore:ObservableObject {
+    static let shared = SensorStore()
     @Published var sensors:[Sensor]=[]
     @Published var error: String?
     private var startupConnected=false

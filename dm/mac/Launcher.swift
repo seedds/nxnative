@@ -141,7 +141,8 @@ struct LauncherView: View {
             Form {
                 settingSections(basic: true)
                 Section("Controls") {
-                    Button("Phone motion…") { motionOpen=true }
+                    PhoneMotionConnections()
+                    Button("Phone Motion Setup…") { motionOpen=true }
                 }
                 CloudSavesSection()
                 Section {

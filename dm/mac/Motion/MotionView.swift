@@ -109,7 +109,7 @@ import simd
                 if let data, let s = DSU.decode(data), self.slot < 0 || Int(s.slot) == self.slot {
                     if self.slot < 0 {
                         if self.detectedSlot == nil || Date().timeIntervalSince(self.lastSeen) > 3 {
-                            self.detectedSlot = Int(s.slot); self.previous = nil; self.orientation.resetClock()
+                            self.detectedSlot = Int(s.slot); self.previous = nil; self.orientation.resetClock(); self.onEdit?()
                         }
                         // Lock to one live stream: never mix the orientations of different slots.
                         if self.detectedSlot != Int(s.slot) { self.receive(c); return }
@@ -249,21 +249,24 @@ struct SensorCard: View {
 @available(macOS 14.0, *)
 public struct DSUMotionView:View {
     public init() {}
-    @StateObject private var store = SensorStore()
+    @ObservedObject private var store = SensorStore.shared
+    @Environment(\.dismiss) private var dismiss
     @ObservedObject private var language = AppLanguage.shared
     @StateObject private var discovery = Discovery()
     public var body:some View {
         VStack(alignment:.leading,spacing:14) {
-            HStack { VStack(alignment:.leading) { LocalizedText("DSU Motion Lab").font(.largeTitle.bold()); LocalizedText("Phone motion over Cemuhook UDP · local network only").foregroundStyle(.secondary) }; Spacer(); Button(L("Add connection")) { store.add() } }
+            HStack { VStack(alignment:.leading) { LocalizedText("Phone Motion Setup").font(.largeTitle.bold()); LocalizedText("Phone motion over Cemuhook UDP · local network only").foregroundStyle(.secondary) }; Spacer(); Button(L("Add connection")) { store.add() } }
             Picker(L("Language"),selection:$language.code) { LocalizedText("Português").tag("pt-BR"); LocalizedText("English").tag("en"); LocalizedText("Español").tag("es"); LocalizedText("繁體中文").tag("zh-Hant") }.frame(width:260)
             HStack { Toggle(L("Automatic discovery"),isOn:$discovery.enabled).onChange(of:discovery.enabled) { _,on in if on { discovery.start() } else { discovery.stop() } }; TextField(L("UDP port"),text:$discovery.port).frame(width:85).disabled(discovery.enabled); LocalizedText(discovery.status).font(.caption) }
             LocalizedText("Open DSUController on your phone. Enter its IP, port and slot. Use Calibrate for three guided movements. Hold the phone horizontally like a controller. Orientation integrates the gyroscope and may drift.").font(.callout).foregroundStyle(.secondary)
             if let error=store.error { LocalizedText(error).foregroundStyle(.red) }
+            else { LocalizedText("Changes saved automatically. Close this window, check the connection indicators, then Play.").font(.caption).foregroundStyle(.secondary) }
             ScrollView { LazyVGrid(columns:[GridItem(.adaptive(minimum:420),spacing:16)],spacing:16) {
                 ForEach(Array(store.sensors.enumerated()),id: \.element.id) { i,s in SensorCard(sensor:s,index:i+1) { s.disconnect(); store.remove(s) } }
             } }
+            HStack { Spacer(); Button(L("Done")) { store.save(); if store.error == nil { discovery.stop(); dismiss() } }.keyboardShortcut(.defaultAction) }
         }.padding(22).frame(minWidth:520,minHeight:580).background(Color(nsColor:.windowBackgroundColor))
         .onAppear { store.connectSavedOnce();discovery.found = { host,slot in store.discovered(host:host,port:discovery.port,slot:slot) } }
-        .onDisappear { discovery.stop();store.sensors.forEach { $0.disconnect() } }
+        .onDisappear { discovery.stop() }
     }
 }

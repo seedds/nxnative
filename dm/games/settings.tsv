@@ -16,12 +16,19 @@
 #             level=basic  a setting a front end shows first;  needs=<VAR>=<value>  a sub-setting, drawn only while the row that sets <VAR> has that value
 DM_FPS_TARGET	choice	30=30 fps,60=60 fps,120=120 fps?DM_GAME_FPS_MAX==120&platform:mac	DM_GAME_FPS_TARGET	DM_GAME_FPS_TARGET!=0	Game	Frame rate		level=basic
 DM_DYNAMIC_RESOLUTION	toggle	-	0	fixups:DYNAMIC_RESOLUTION	Game	Dynamic resolution	Lets the game lower its resolution under load. Turn off to keep full resolution for the selected console mode.
-DM_RENDER_SCALE	range	0.5:1.0:0.05	1.0	fixups:RENDER_SCALE	Game	Render scale		level=basic
+DM_ASPECT	choice	16:9=16:9 (as on the Switch),16:10=16:10 (a MacBook's screen)	DM_GAME_ASPECT	fixups:ASPECT_RATIO	Game	Picture shape	Experimental: 16:10 renders a ninth more rows at the same width; the interface and cut scenes may not fit it.
+DM_UI_SHAPE	choice	16:9=Keep 16:9 (centred),fill=Fill the height (sides cut),screen=Stretch	16:9	fixups:ASPECT_RATIO	Game	Interface	On a taller picture the menus and HUD keep their proportions. Fill the height scales them to the picture and cuts the sides a little; Stretch spreads them.	needs=DM_ASPECT=16:10
+DM_RENDER_SCALE	range	0.5:1.0:0.05	DM_GAME_RENDER_SCALE	fixups:RENDER_SCALE	Game	Render scale		level=basic
 DM_OPMODE	choice	1=Docked,0=Handheld	DM_GAME_OPMODE	always	Game	Console mode		level=basic
 DM_PRESENT_UPSCALE	choice	off=Standard,metalfx=MetalFX	off	always	Game	Upscaling	Uses more GPU time and can increase heat.
 DM_UPSCALER	choice	game=Game's own,metalfx=MetalFX	game	DM_GAME_UPSCALER_N!=0	Game	Game's upscaler
+DM_SHADOW_SCALE	choice	1=Game's own,2=High (4096),4=Ultra (8192)	DM_GAME_SHADOW_SCALE	fixups:SHADOW_SCALE	Game	Shadow quality	Larger shadow maps: sharper shadow edges, more GPU time and memory. Ultra needs about half a gigabyte more memory.
+DM_DRAW_DISTANCE	choice	1=Game's own,1.5=Far,2=Farther,4=Farthest	DM_GAME_DRAW_DISTANCE	fixups:DRAW_DISTANCE	Game	Draw distance	Models keep their detail, and stay drawn, at greater distances. Uses more GPU time.
+DM_MODEL_DETAIL	toggle	-	DM_GAME_MODEL_DETAIL	fixups:MODEL_DETAIL	Game	Highest model detail	Draws models at their finest level at any distance. More GPU time.
+DM_MIP_BIAS	choice	0=Game's own,-0.25=Slightly sharper,-0.5=Sharper,-1=Sharpest	DM_GAME_MIP_BIAS	gfxapi:nvn	Game	Texture sharpness	Picks sharper texture detail on surfaces. The sharpest setting can make fine textures shimmer in motion.
+DM_ANISOTROPY	choice	game=Game's own,2=2x,4=4x,8=8x,16=16x	DM_GAME_ANISOTROPY	gfxapi:nvn	Game	Texture filtering	Anisotropic filtering: sharper textures on surfaces seen at an angle. Uses a little more GPU time.
 DM_LANG	choice	languages	build:DM_LANG	languages>1	Game	Game language		level=basic
-DM_FULLSCREEN	choice	0=Window,1=Fullscreen	0	platform:mac	Game	Display mode		level=basic
+DM_FULLSCREEN	choice	0=Window,1=Fullscreen	DM_GAME_FULLSCREEN	platform:mac	Game	Display mode		level=basic
 DM_PICTURE_FIT	choice	fit=Fit,fill=Fill	fit	platform:ios	Game	Picture	Fill crops the game's 16:9 picture to cover the screen. Health bars, subtitles or maps near the edges can be cut off. A full-screen picture without cropping needs a patch for each game.
 DM_SHOW_FPS	toggle	-	build:DM_SHOW_FPS	platform:ios	Game	Frame-rate counter
 DM_TOUCH_HAPTICS	toggle	-	1	platform:ios	Controls	Touch feedback

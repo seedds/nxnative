@@ -326,5 +326,9 @@ class Emu:
         if m == 'dup':
             arr = ins.op_str.split(',')[0].split('.')[-1]; n, eb = {'2d': (2, 64), '4s': (4, 32), '8h': (8, 16), '16b': (16, 8), '2s': (2, 32)}[arr]
             s = self.get(R(1)) & ((1 << eb) - 1); self.v[self.reg(d)[1]] = sum(s << eb * i for i in range(n)); return
+        if m == 'mov' and isv and ops[1].type == ARM64_OP_REG and '.16b' in ins.op_str and '.16b' in ins.op_str.split(',')[1]:   # mov vD.16b, vN.16b (orr)
+            self.v[self.reg(d)[1]] = self.v[self.reg(R(1))[1]]; return
+        if m == 'fmaxnm':
+            a, b = fget(R(1)), fget(R(2)); fset(d, b if a != a else a if b != b else max(a, b)); return
         if m == 'prfm': return
         raise Unknown(f'{pc:#x}: {m} {ins.op_str}')

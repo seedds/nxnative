@@ -58,7 +58,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 | [Animal Crossing: New Horizons](#animal-crossing-new-horizons) | 0 | 0 | 14 | 0 | 0 | `build` → `game` |
 | [ASTRAL CHAIN](#astral-chain) | 0 | 0 | 112 | 0 | 0 | `build` → `game` |
 | [Batman: Arkham Knight](#batman-arkham-knight) | 8 | 0 | 0 | 0 | 1 | `build` → `game` ×2 |
-| [Bayonetta 3](#bayonetta-3) | 0 | 0 | 52 | 0 | 0 | `build` |
+| [Bayonetta 3](#bayonetta-3) | 0 | 0 | 69 | 0 | 0 | `build` |
 | [DARK SOULS: REMASTERED](#dark-souls-remastered) | 2 | 0 | 0 | 0 | 0 | `build` → `game` |
 | [Diablo II: Resurrected](#diablo-ii-resurrected) | 2 | 0 | 0 | 1 | 0 | `game` |
 | [EA SPORTS FC 27](#ea-sports-fc-27) | 0 | 0 | 0 | 0 | 1 | `build` → `engine` |
@@ -261,11 +261,12 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 
 [Bayonetta 3](../../dm/games/01004A4010FEA000/README.md), `01004A4010FEA000`, [patches.py](../../dm/games/01004A4010FEA000/patches.py).
 
-- **`build`**, rendering, at goal, checked: update 1.2.0 main: every site's instruction, and the set-up functions run in an interpreter with the stubs at scale 1.0, 1.2, 1.6 and 2.0 (2026-11-11): render scale. PlatinumGames' own engine: the sizes are 49 immediates and loads spread over five functions of this main, with no anchor that another build could be searched by, and no other game in the repository runs this engine build
+- **`build`**, rendering, at goal, checked: update 1.2.0 main: every site's instruction, and the set-up functions run in an interpreter with the stubs at scale 1.0, 1.2, 1.6 and 2.0 (2026-11-11): render scale. PlatinumGames' own engine: the sizes are 69 immediates and loads spread over ten functions of this main, with no anchor that another build could be searched by, and no other game in the repository runs this engine build
 
-- **1.2.0 `main`** `b47cc79b…` ([patches.py:49](../../dm/games/01004A4010FEA000/patches.py#L49))
-  <details><summary>52 frame-step sites</summary>
+- **1.2.0 `main`** `b47cc79b…` ([patches.py:74](../../dm/games/01004A4010FEA000/patches.py#L74))
+  <details><summary>69 frame-step sites</summary>
 
+  - frame step `+0x64020c`: interface: its 2D projection keeps the layout's 16:9 in a taller window (state +0xb4; the vertical range widened by the window's extra rows)
   - frame step `+0x69c6cc`: render scale: handheld mode and a scale below 1.0 keep the game's sizes (the scale is set to 1.0 before anything reads it)
   - frame step `+0x69c6d4`: render scale: a width times the host's render scale (state +0x10; 1.0 = the game's value)
   - frame step `+0x69c6e0`: render scale: a scene height times the render scale and 900/896 (896 becomes the window's height)
@@ -275,15 +276,17 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
   - frame step `+0x69c728`: render scale: the window's height times the render scale
   - frame step `+0x69c73c`: render scale: a width times the host's render scale (state +0x10; 1.0 = the game's value)
   - frame step `+0x69c740`: render scale: a scene height times the render scale and 900/896 (896 becomes the window's height)
-  - frame step `+0x69d164`: render scale: the FrameBufferHeap grows with the scaled area
+  - frame step `+0x69d164`: render scale: the FrameBufferHeap grows with the scaled area and with larger shadow maps
   - frame step `+0x69d6d0`: render scale: a width times the host's render scale (state +0x10; 1.0 = the game's value)
   - frame step `+0x69d6dc`: render scale: a scene height times the render scale and 900/896 (896 becomes the window's height)
+  - frame step `+0x69dda0`: shadow scale: a shadow map size times the host's shadow factor (state +0xa0; 1 or none = the game's)
   - frame step `+0x69ddc8`: render scale: a width times the host's render scale (state +0x10; 1.0 = the game's value)
   - frame step `+0x69ddcc`: render scale: a scene height times the render scale and 900/896 (896 becomes the window's height)
   - frame step `+0x69df8c`: render scale: a width times the host's render scale (state +0x10; 1.0 = the game's value)
   - frame step `+0x69df90`: render scale: a scene height times the render scale and 900/896 (896 becomes the window's height)
   - frame step `+0x69dfbc`: render scale: a width times the host's render scale (state +0x10; 1.0 = the game's value)
   - frame step `+0x69dfc0`: render scale: a scene height times the render scale and 900/896 (896 becomes the window's height)
+  - frame step `+0x69e7f4`: shadow scale: a shadow map size times the host's shadow factor (state +0xa0; 1 or none = the game's)
   - frame step `+0x69f0b8`: render scale: a width times the host's render scale (state +0x10; 1.0 = the game's value)
   - frame step `+0x69f0c8`: render scale: a scene height times the render scale and 900/896 (896 becomes the window's height)
   - frame step `+0x69f0f4`: render scale: a scene height times the render scale and 900/896 (896 becomes the window's height)
@@ -310,11 +313,25 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
   - frame step `+0x69f2f8`: render scale: a width times the host's render scale (state +0x10; 1.0 = the game's value)
   - frame step `+0x69f300`: render scale: a scene height times the render scale and 900/896 (896 becomes the window's height)
   - frame step `+0x69f308`: render scale: a scene height times the render scale and 900/896 (896 becomes the window's height)
+  - frame step `+0x69f348`: shadow scale: a shadow map size times the host's shadow factor (state +0xa0; 1 or none = the game's)
+  - frame step `+0x69f34c`: shadow scale: a shadow map size times the host's shadow factor (state +0xa0; 1 or none = the game's)
+  - frame step `+0x69f380`: shadow scale: a shadow map size times the host's shadow factor (state +0xa0; 1 or none = the game's)
+  - frame step `+0x69f384`: shadow scale: a shadow map size times the host's shadow factor (state +0xa0; 1 or none = the game's)
+  - frame step `+0x69f3d0`: shadow scale: a shadow map size times the host's shadow factor (state +0xa0; 1 or none = the game's)
+  - frame step `+0x69f400`: shadow scale: a shadow map size times the host's shadow factor (state +0xa0; 1 or none = the game's)
+  - frame step `+0x69f450`: shadow scale: a shadow map size times the host's shadow factor (state +0xa0; 1 or none = the game's)
+  - frame step `+0x69f454`: shadow scale: a shadow map size times the host's shadow factor (state +0xa0; 1 or none = the game's)
+  - frame step `+0x69f480`: shadow scale: a shadow map size times the host's shadow factor (state +0xa0; 1 or none = the game's)
+  - frame step `+0x69f484`: shadow scale: a shadow map size times the host's shadow factor (state +0xa0; 1 or none = the game's)
   - frame step `+0x69fde8`: render scale: a width times the host's render scale (state +0x10; 1.0 = the game's value)
   - frame step `+0x69fdf8`: render scale: a scene height times the render scale and 900/896 (896 becomes the window's height)
   - frame step `+0x69fe08`: render scale: a scene height times the render scale and 900/896 (896 becomes the window's height)
+  - frame step `+0x6d3cd4`: dynamic resolution: the level the game picks stays at the largest unless DM_DYNAMIC_RESOLUTION is 1 (state +0x40)
   - frame step `+0x70a740`: render scale: a width times the host's render scale (state +0x10; 1.0 = the game's value)
   - frame step `+0x70a748`: render scale: the window's height times the render scale
+  - frame step `+0xbd57c0`: draw distance: the distance a model's level is chosen by times the host's reciprocal draw distance (state +0xa8; 0 = the game's)
+  - frame step `+0xbd5884`: draw distance: the distance a model's level is chosen by times the host's reciprocal draw distance (state +0xa8; 0 = the game's)
+  - frame step `+0xbd5b2c`: model detail: the finest level of a model that is drawn (state +0xa4; 0 = the game's level)
   - frame step `+0xd57964`: render scale: the light grid holds the tiles of the largest level
   - frame step `+0xd57994`: render scale: the light grid's buffers have 4 words for each tile of its capacity
   - frame step `+0xd587b0`: render scale: the exposure's column buffer has an entry for every two columns of the quarter-size scene
@@ -322,6 +339,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
   </details>
 
   - render scale stub (the launcher offers DM_RENDER_SCALE)
+  - launcher capabilities: ASPECT_RATIO, DRAW_DISTANCE, DYNAMIC_RESOLUTION, MODEL_DETAIL, SHADOW_SCALE
 
 ### DARK SOULS: REMASTERED
 

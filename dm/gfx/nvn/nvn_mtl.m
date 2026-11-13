@@ -32,6 +32,7 @@
 #include "nvn_refl.h"
 #include "nvn_cover.h"
 #include "nvn_border.h"
+#include "nvn_aniso.h"
 #include "nvn_primitive.h"
 #include "nvn_timestamp.h"
 #include "msl_image.h"
@@ -7126,6 +7127,26 @@ static MTLSamplerAddressMode wrapm(int w) {
         case 6: return MTLSamplerAddressModeMirrorRepeat; }
     return MTLSamplerAddressModeRepeat;
 }
+// Anisotropic filtering (DM_ANISOTROPY, the launcher's Texture filtering): game (the default) makes every sampler with the anisotropy the game set; 2, 4, 8 or 16 raises it to
+// that for the samplers nvn_aniso.h names, the trilinear ones of mip-mapped colour textures, and leaves shadow, depth-pyramid, lookup and screen-sized samplers as they are.
+// Read once: samplers are cached by ID (g_sview)
+// Mip bias (DM_MIP_BIAS, the launcher's Texture sharpness): 0 (the default) keeps the game's LOD bias; -0.25 to -1 adds that to the same surface samplers as above
+static float mip_bias_forced(void) {
+    static int done; static float v;
+    if (done) return v;
+    const char *e = getenv("DM_MIP_BIAS"); int bad; v = nvn_mip_bias_setting(e, &bad);
+    if (bad) MLOG("[RED] DM_MIP_BIAS=%s: 0, -0.25, -0.5, -0.75 or -1; keeping the game's", e);
+    if (v != 0.0f) MLOG("texture sharpness (DM_MIP_BIAS): LOD bias %+.2f on the samplers of mip-mapped colour textures", v);
+    done = 1; return v;
+}
+static unsigned aniso_forced(void) {
+    static int v = -1;
+    if (v >= 0) return (unsigned)v;
+    const char *e = getenv("DM_ANISOTROPY"); int s = nvn_aniso_setting(e);
+    if (s < 0) { MLOG("[RED] DM_ANISOTROPY=%s: game, 2, 4, 8 or 16; keeping the game's", e); s = 0; }
+    if (s) MLOG("texture filtering (DM_ANISOTROPY): %dx anisotropic on the samplers of mip-mapped colour textures, where the game asks for less", s);
+    return (unsigned)(v = s);
+}
 static id<MTLSamplerState> samp_by_id(int sid) {   // Caller holds g_rmu
     if (g_spool_n && sid >= g_spool_n) { if (!g_stat_samp_oob++) MLOG("sampler ID %d outside the pool (capacity %d) treated as an empty slot", sid, g_spool_n); return nil; }
     if (sid < 0 || sid >= g_nsreg || !g_sreg_ok[sid]) { RED_ONCE(12, "sampler ID %d not registered", sid); return nil; }
@@ -7137,8 +7158,8 @@ static id<MTLSamplerState> samp_by_id(int sid) {   // Caller holds g_rmu
     d.mipFilter = p.minf <= 1 ? MTLSamplerMipFilterNotMipmapped : (p.minf == 2 || p.minf == 3) ? MTLSamplerMipFilterNearest : MTLSamplerMipFilterLinear;
     d.sAddressMode = wrapm(p.ws); d.tAddressMode = wrapm(p.wt); d.rAddressMode = wrapm(p.wr);
     d.lodMinClamp = p.lod_min < 0 ? 0 : p.lod_min; d.lodMaxClamp = p.lod_max;
-    d.lodBias = p.lod_bias < -16 ? -16 : p.lod_bias > 15.99f ? 15.99f : p.lod_bias;   // SetLodBias: Maxwell's sampler bias, Metal 26's range [-16, 15.99]
-    d.maxAnisotropy = p.aniso < 1 ? 1 : p.aniso > 16 ? 16 : (NSUInteger)p.aniso;
+    d.lodBias = nvn_lod_bias(&p, mip_bias_forced());   // SetLodBias: Maxwell's sampler bias, Metal 26's range [-16, 15.99]
+    d.maxAnisotropy = nvn_aniso(&p, aniso_forced());   // the game's own, or the player's level for the samplers of mip-mapped colour textures (nvn_aniso.h)
     if (p.cmp_mode) d.compareFunction = (MTLCompareFunction)(p.cmp_func - 1);
     // Reduction (NVN 1 min / 2 max): the minimum or maximum of the texels a filtered sample covers, per channel (Metal 26). Pokémon Legends: Z-A builds its depth pyramid with a min sampler
     // (151607c7a92386cc reads the level above at an explicit LOD) and tests occlusion boxes against it; averaged, the pyramid is nearer than the scene at depth edges. Metal ignores the reduction

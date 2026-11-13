@@ -34,13 +34,17 @@ zip_store	.avi:.pkz:.webm:.metallib
 # ---- Memory ----
 # The NPDM declares no system resource (META +0x14 = 0): nninitStartup sets a heap of the pool − used memory, which the game maps only as it touches it, and the engine takes
 # its heaps from it as memory blocks of fixed sizes (2.75 GB of the game's own, the 260 MB FrameBufferHeap, the 42 MB ShaderCodeHeap; 96 MB of a Switch's pool stay free).
-# The render scale stubs (patches.py) make the FrameBufferHeap up to 1172 MB at scale 2.0, 912 MB more, so the pool is the Switch's 3285 MB and 925 MB: a heap of 4094 MB,
-# under 4 GB so that no size of the game's needs more than 32 bits. A 5 GB block (256 MB in front + 256 MB alias region + 256 MB stack region + 4.25 GB heap region);
-# at scale 1.0 the game takes what it does on a Switch and the rest of the heap is never touched
-mem_reserve	0x140000000
+# The render scale and shadow stubs (patches.py) make the FrameBufferHeap up to 5690 MB (scale 4.0, 16:10 and 8192 shadow maps; 5168 MB at 16:9; 3482 MB at 3.2, 5120x2880; 2168 MB at 2.4,
+# 3840x2160), 5430 MB more than the game's 260 MB: the pool is 9 GB of heap (9216 MB) and the 116 MB of used memory, 9332 MB, which is more than the Switch's 3285 MB; the game's own blocks
+# take 2810 MB of it and the heap is mapped only as it is touched, so at scale 1.0 nothing more is resident than on a Switch. The heap, over 4 GB, is a size the game's own set-up passes
+# on as 64-bit values (nn::os::SetMemoryHeapSize), and the stub writes the FrameBufferHeap's size as one; no block of the game's own is above 4 GB. A 10.5 GB block (256 MB in front +
+# 256 MB alias region + 256 MB stack region + 9.75 GB heap region)
+mem_reserve	0x2A0000000
 mem_alias	0x10000000
 mem_stack	0x10000000
-app_pool	0x107200000
+app_pool	0x247400000
+# the launcher's Render scale shows its sizes in pixels from the 3D views' base size docked, then handheld (the handheld size is not scaled)
+render_base	1600x900 1280x720
 sys_resource	0x0
 # the rewritten modules are larger than the default 64 MB of used memory (the game's SetHeapSize asks for pool − used)
 mem_used	0x7400000
@@ -48,3 +52,13 @@ mem_used	0x7400000
 # ---- Shader split (shader_split.py; the shader objects in root_000.pkz) ----
 shader_groups	/autoshadereff.dat/=eff /shadereff=eff /shader=core
 shader_note	Bayonetta 3 shaders
+
+# ---- Graphics defaults (the launcher's starting choices; each is a setting the player can change, see settings.tsv) ----
+# The most the patches offer, for a Mac with the GPU time for it (an Apple M4 Max: GPU about 15 ms a frame at scale 2.0): 3200x1800, 16x texture filtering, 8192 shadow maps,
+# models at their finest level, a slightly sharper texture bias, fullscreen
+default_render_scale	2.0
+default_anisotropy	16
+default_shadow_scale	4
+default_model_detail	1
+default_mip_bias	-0.5
+default_fullscreen	1

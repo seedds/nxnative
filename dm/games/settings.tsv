@@ -23,6 +23,7 @@ DM_OPMODE	choice	1=Docked,0=Handheld	DM_GAME_OPMODE	always	Game	Console mode		le
 DM_NVN_ANISO	choice	0=Game default,2=2x,4=4x,8=8x,16=16x	0	platform:mac&gfxapi:nvn	Game	Texture filtering	Sharper ground and walls seen at an angle. 16x costs little on a Mac.	level=basic
 DM_SHADOW_RESOLUTION	choice	default=Original,2x=High (2x),4x=Ultra (4x)	default	platform:mac&runtime:DM_SHADOW_RESOLUTION=2x	Game	Shadow quality	Sharper shadow edges. High uses 24 MB more GPU memory; Ultra 120 MB and more GPU time.
 DM_MODEL_LOD	choice	default=Original,x2=Far (2x),x4=Very far (4x),high=Maximum	default	platform:mac&runtime:DM_MODEL_LOD=high	Game	Model detail	Keeps objects detailed further away. Far and Very far move the switch to simpler models 2 or 4 times further out; Maximum always draws the most detailed model. More GPU time.
+DM_FOG_QUALITY	choice	default=Original,high=High (full resolution)	default	platform:mac&runtime:DM_FOG_QUALITY=high	Game	Fog quality	Fog and light shafts at full resolution: cleaner edges around objects. Uses more GPU time and 100 MB or more GPU memory at 1800p.
 DM_PRESENT_UPSCALE	choice	off=Standard,metalfx=MetalFX	off	always	Game	Upscaling	Uses more GPU time and can increase heat.
 DM_UPSCALER	choice	game=Game's own,metalfx=MetalFX	game	DM_GAME_UPSCALER_N!=0	Game	Game's upscaler
 DM_LANG	choice	languages	build:DM_LANG	languages>1	Game	Game language		level=basic

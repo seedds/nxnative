@@ -148,6 +148,7 @@ def scan_source_stub(c):
     c.runtime_exports['SCAN_SOURCE_V1'] = start
     shadow_stub(c)
     lod_distance_stub(c)
+    fog_scale_stub(c)
 
 
 # Shadow resolution (runtime_patches.py shadow_writes, DM_SHADOW_RESOLUTION=2x). The frame's shadow code (main+0x137a63c) gives each shadow-casting
@@ -196,6 +197,30 @@ def lod_distance_stub(c):
     for name, fmov in LOD_DISTANCE_STUBS:
         start = c.here()
         for word in lod_distance_words(start, fmov): c.emit(word)
+        c.runtime_exports[name] = start
+
+
+# Volumetric fog density (runtime_patches.py fog_writes, DM_FOG_QUALITY=high). The fog effect's node (method at main+0xf54498) passes its grid scale
+# [node+0x1a0] (loaded at 0xf54720) to the sizing function 0x185428: a froxel grid of round(scale * ceil(w / 16)) (aligned to 4) by
+# round(scale * ceil(h / 16)) tiles and 64 * scale depth slices, and a target of 8 pixels per tile (1600x904 at 1800p with scale 1, lsl #3 at 0x185574).
+# This stub doubles the scale: tiles of 8 pixels, 128 slices, the target at the scene's full size. s1 is free there: the call at 0xf5473c takes s0
+# only, and the callee writes s1 before reading it (0x1854ec).
+FOG_SCALE_SITE = 0xf54720
+FOG_SCALE_STUBS = (('FOG_SCALE_X2', 0x1e201001),)   # fmov s1,#2.0
+
+
+def fog_scale_words(start, fmov):
+    return [0xbd41a280,   # ldr s0,[x20,#0x1a0]  (the displaced load)
+            fmov,
+            0x1e210800,   # fmul s0,s0,s1
+            B(start + 12, FOG_SCALE_SITE + 4)]
+
+
+def fog_scale_stub(c):
+    c.site(FOG_SCALE_SITE, '80a241bd')
+    for name, fmov in FOG_SCALE_STUBS:
+        start = c.here()
+        for word in fog_scale_words(start, fmov): c.emit(word)
         c.runtime_exports[name] = start
 
 

@@ -141,6 +141,7 @@ class ScanSourcePatch(unittest.TestCase):
         for off, before, _ in self.runtime.LOD_SITES:
             struct.pack_into('<I', original, off, before)
         struct.pack_into('<I', original, self.profile.LOD_DISTANCE_SITE, 0xbd43c920)
+        struct.pack_into('<I', original, self.profile.FOG_SCALE_SITE, 0xbd41a280)
         patched = bytearray(base + 8192)
         patched[:len(original)] = original
         words, checked, exports = [], [], {}
@@ -297,6 +298,22 @@ class ScanSourcePatch(unittest.TestCase):
         patched[0x6a678] ^= 1
         with self.assertRaises(ValueError): self.runtime.generate_lod(module, patched, fixups)
 
+    def test_fog_high_doubles_the_grid_scale_it_loads(self):
+        module, patched, fixups = self.fixture()
+        rows = [r.split('\t') for r in self.runtime.generate_fog(module, patched, fixups).splitlines()]
+        self.assertEqual(rows[0][3], 'DM_FOG_QUALITY')
+        self.assertEqual([r[1] for r in rows if r[0] == 'choice'], ['default', 'high'])
+        stub = int(fixups['RUNTIME_FOG_SCALE_X2'], 16)
+        (off, old, new), = [(int(r[2], 16), int.from_bytes(bytes.fromhex(r[3]), 'little'), int.from_bytes(bytes.fromhex(r[4]), 'little')) for r in rows if r[0] == 'write']
+        ldr = lambda w: (w & 0xffc00000 == 0xbd400000, ((w >> 10) & 0xfff) * 4, (w >> 5) & 31, w & 31)   # ldr st,[xn,#imm]
+        self.assertEqual((off, ldr(old), new), (0xf54720, (True, 0x1a0, 20, 0), B(0xf54720, stub)))
+        words = struct.unpack_from('<4I', patched, stub)
+        self.assertEqual((words[0], words[3]), (old, B(stub + 12, 0xf54724)))   # the displaced load, then back
+        self.assertEqual((words[1] & 0xffe01fff, (words[1] >> 13) & 0xff), (0x1e201001, 0))   # fmov s1,#imm8 with imm8 0: 2.0
+        self.assertEqual(words[2], 0x1e200800 | 1 << 16)   # fmul s0,s0,s1
+        patched[stub + 8] ^= 1
+        with self.assertRaisesRegex(ValueError, 'mismatched rewritten fog stub'): self.runtime.generate_fog(module, patched, fixups)
+
     def test_launcher_reads_the_shadow_choice_from_its_own_manifest(self):
         sys.path.insert(0, str(ROOT / 'dm/games'))
         import settings
@@ -311,6 +328,8 @@ class ScanSourcePatch(unittest.TestCase):
             self.assertEqual(runtime_patch.choices(folder, 'DM_SHADOW_RESOLUTION'), ('default', '2x', '4x'))
             (folder / 'main.lod.runtime.tsv').write_text(self.runtime.generate_lod(module, patched, fixups))
             self.assertEqual(runtime_patch.choices(folder, 'DM_MODEL_LOD'), ('default', 'high', 'x2', 'x4'))
+            (folder / 'main.fog.runtime.tsv').write_text(self.runtime.generate_fog(module, patched, fixups))
+            self.assertEqual(runtime_patch.choices(folder, 'DM_FOG_QUALITY'), ('default', 'high'))
             self.assertIn('1800p', runtime_patch.choices(folder, 'DM_INTERNAL_RESOLUTION'))
             with mock.patch.dict(os.environ, {'SETTINGS_PLATFORM': 'mac'}), mock.patch.object(settings.nacp, 'languages', return_value=['en-US']):
                 row = next(r for r in settings.build('010019A01E2F2000', tmp, 'unused')['settings'] if r['env'] == 'DM_SHADOW_RESOLUTION')

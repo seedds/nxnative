@@ -199,13 +199,38 @@ def generate_lod(module, patched, fixups):
     return manifest(module, patched, fixups, BUILD, 'DM_MODEL_LOD', lod_writes(stubs))
 
 
+# DM_FOG_QUALITY=high, a fourth manifest (main.fog.runtime.tsv): the volumetric fog's froxel grid twice as dense in each direction, 128 depth slices,
+# its target at full scene resolution (patches.py FOG_SCALE_STUBS). The grid scale is the game's own parameter, so the shaders take the grid size
+# from the game: nothing else changes.
+FOG = (('high', 'FOG_SCALE_X2', 0x1e201001),)
+
+
+def fog_writes(stubs):
+    return [(choice, 0xf54720, struct.pack('<I', 0xbd41a280), struct.pack('<I', B(0xf54720, stubs[choice]))) for choice, _, _ in FOG]   # ldr s0,[x20,#0x1a0] -> stub
+
+
+def generate_fog(module, patched, fixups):
+    if module.build_id.hex() != BUILD:
+        raise ValueError('Metroid Prime 4 fog quality requires main v1.1.0 build ' + BUILD[:32])
+    stubs = {}
+    for choice, export, fmov in FOG:
+        stub = int(fixups.get('RUNTIME_' + export, '-1'), 0)
+        if stub < max(module.text_end, int(fixups['PATCH_OFF'], 0)) or stub + 16 > len(patched):
+            raise ValueError(f'missing/out-of-range rewritten fog stub for {choice}')
+        if patched[stub:stub + 16] != struct.pack('<4I', 0xbd41a280, fmov, 0x1e210800, B(stub + 12, 0xf54724)):
+            raise ValueError(f'mismatched rewritten fog stub for {choice}')
+        stubs[choice] = stub
+    return manifest(module, patched, fixups, BUILD, 'DM_FOG_QUALITY', fog_writes(stubs))
+
+
 def main(argv):
     original, rewritten, out = map(Path, argv)
     module, image, fixups = nso.load(original.read_bytes(), original.name), rewritten.read_bytes(), layout(rewritten.with_name('main.fixups.tsv'))
     out.write_text(generate(module, image, fixups))
     out.with_name('main.shadow.runtime.tsv').write_text(generate_shadow(module, image, fixups))   # a second variable, loaded beside main.runtime.tsv (loader.c)
     out.with_name('main.lod.runtime.tsv').write_text(generate_lod(module, image, fixups))
-    print('Runtime resolution: default (zero writes); preserved 1440p/1800p/2160p supersampling; experimental full-output 1080p/1440p/2160p/2880p; shadow resolution: default, 2x, 4x; model LOD: default, x2, x4, high')
+    out.with_name('main.fog.runtime.tsv').write_text(generate_fog(module, image, fixups))
+    print('Runtime resolution: default (zero writes); preserved 1440p/1800p/2160p supersampling; experimental full-output 1080p/1440p/2160p/2880p; shadow resolution: default, 2x, 4x; model LOD: default, x2, x4, high; fog: default, high')
 
 
 if __name__ == '__main__':

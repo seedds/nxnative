@@ -334,6 +334,22 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Fix:** `shader_split.py` `needle_shaders` uses the container's big-endian whole length at +8, then the little-endian NVN section descriptors: 0x90 bytes immediately before each control section, with control offset, code offset, code length and control length at +0x30. Both regions must fit within that container, and the control/code headers and lengths must agree. Graphics stages come from SPH; headerless compute stages from the control's thread-group dimensions. Each program is paired with the single-stage cover, since its draw-time partner is not recorded by this wrapper. Synthetic fixtures check embedded variants, compute, length mismatches and container boundaries.
 - **Found on:** [Persona 5 Royal](../../dm/games/01005CA01580E000/README.md#shaders), with 0x850-byte control sections. The game note records counts and runtime coverage.
 
+### Needle containers with NVN2 records
+
+- **Symptom:** `[RED] main NEEDLE @<addr>: invalid control offset or control length at <addr>`, and the split stops on `main`.
+- **Cause:** a Switch 2 game's Needle records hold NVN2 control sections (version 0xc9 at +4, their own length, 0xd8, at +0x30). Their descriptor has the same fields at +0x30 (control offset, code offset, code length, control length), but it starts 0x98 bytes before the control section, not 0x90, and the code follows the control section directly. The reader took every record for the 0x90 layout.
+- **Fix:** `needle_shaders` tells a record by its control section (`nvn2_ctl`): an NVN2 one takes its descriptor 0x98 bytes before it, a control length of at least 0x48 and its own length at +0x30; an NVN one is read as before, and a container too small for an NVN payload is still skipped. A small container with an NVN2 record is read.
+- **Found on:** [Sonic Frontiers Definitive Edition](../../dm/games/0400921025B32000/README.md#files-and-shaders) `main`: 1,586 records in 233 containers, all with the 0x98 layout and a code length equal to the control section's +0x44.
+- **Check:** `test_needle.py`: NVN2 records of the three stages, a small container, and a control length that disagrees with the descriptor; the NVN fixtures pass unchanged.
+
+### Shaders in Hedgehog Engine 2's PACx 403 archives
+
+- **Symptom:** `[RED] 1 file(s) could not be read, their shaders are left out (first: /raw/NeedleShader.pac NEEDLE @0x250c: incomplete NVN section at 0x256d)`. In play the stage's geometry draws black, and the log names shaders that are not in the shader map (`[RED] shader <key> is not in the shader map`).
+- **Cause:** a PACx 403 archive is LZ4 chunks: a Needle container's magic stood among the literals of the compressed bytes, and the split read the bytes after it as a container.
+- **Fix:** `pacx4_blocks` reads the archive. The header's +0x10 / +0x14 / +0x18 are the root's offset and compressed and uncompressed lengths, +0x20 the length of the dependency table at +0x30, and +0x24 the length of the root's chunk table after it (a count, then compressed and uncompressed lengths). The root is a PACx 402 archive whose block table, after its node trees (+0x10 of its header), names each block: its name, compressed and uncompressed lengths, offset in the file, and chunks of 64 KB (a chunk whose two lengths are equal is stored). A block, decompressed, is a PACx 402 archive with its resources as they are, and `scan_blob` finds its Needle containers; the root is scanned too. Only an archive whose root names a shader type (`VertexShader`, `PixelShader`, `ComputeShader`) is decompressed. `scan_blob` counts the decoded bytes against its nesting budget, and the pre-filter lets PACx 403 archives through.
+- **Found on:** [Sonic Frontiers Definitive Edition](../../dm/games/0400921025B32000/README.md#files-and-shaders): `raw/NeedleShader.pac` (24 MB) holds two blocks of about 30 MB and 3,626 shaders; its 74 shaders the first stage asked for were all among them. The other 1,434 archives (1,068 of them with a dependency table) name no shader type; all 1,435 are read in 6 s.
+- **Check:** `test_needle.py`: an archive of two chunks, the same with a dependency table, and one whose root names no shader type. The first stage then draws with no shader missing from the map.
+
 ### Shaders in a zlib stream in main (YEBIS .tfxo)
 
 - **Symptom:** shaders the game draws are missing from the map (`DM_NVN_SHDUMP`), in no RomFS file and no module, stored or LZ4, and not compiled at run time.

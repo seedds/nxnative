@@ -470,19 +470,24 @@ def needle_shaders(d, label):
     """Needle shader containers, embedded in main and in GFD's GSC files inside CRI CPKs (Persona 5 Royal). HNSHV002 +8 is the container's whole length, big-endian. Variant and reflection
     metadata varies; each NVN payload has a 0x90-byte little-endian section descriptor immediately before its control section: +0x30 control offset (0x90), +0x34 code offset, +0x38 code
     length, +0x3c control length, all relative to the descriptor. Both regions must fit this container, not merely the enclosing file. The 0x850-byte controls are followed by graphics
-    code or headerless compute code. Each payload is a separate program, including the 121 post-effect variants in one main container; vertex/pixel pairs exist only at draw time."""
+    code or headerless compute code. Each payload is a separate program, including the 121 post-effect variants in one main container; vertex/pixel pairs exist only at draw time.
+    An NVN2 payload (Sonic Frontiers Definitive Edition's main, 0400921025B32000: 1,586 in 233 containers) has the same descriptor fields 0x98 bytes before its 0xd8-byte control
+    section, whose own length is at its +0x30 (nvn2_ctl), and the code follows the control section; its code length is the control's +0x44 as well."""
     out = []
     for m in re.finditer(NEEDLE, d):
         h = m.start()
         if h + 12 > len(d): continue
         size = struct.unpack_from('>I', d, h + 8)[0]
-        if size < 0x90 + 0x760 or size > len(d) - h: continue   # a literal magic string in executable code is not a container
+        if size < 0x98 + NVN2_KEY_CTL or size > len(d) - h: continue   # a literal magic string in executable code is not a container
         end = h + size; c = d.find(CTL_MAGIC, h + 12, end)
         while c >= 0:
-            s = c - 0x90
-            if s < h + 12 or c + 0x760 > end: red(f'{label} NEEDLE @{h:#x}: incomplete NVN section at {c:#x}')
+            v2 = c + NVN2_KEY_CTL <= end and nvn2_ctl(d[c:c + NVN2_KEY_CTL])
+            co0, cmin, own_at = (0x98, NVN2_KEY_CTL, 0x30) if v2 else (0x90, 0x760, 0x20)
+            if not v2 and size < 0x90 + 0x760: break   # too small for an NVN payload, as before NVN2 payloads were read
+            s = c - co0
+            if s < h + 12 or c + cmin > end: red(f'{label} NEEDLE @{h:#x}: incomplete NVN section at {c:#x}')
             co, ko, kn, cn = struct.unpack_from('<4I', d, s + 0x30)
-            if co != 0x90 or cn < 0x760 or cn != struct.unpack_from('<I', d, c + 0x20)[0]:
+            if co != co0 or cn < cmin or cn != struct.unpack_from('<I', d, c + own_at)[0]:
                 red(f'{label} NEEDLE @{h:#x}: invalid control offset or control length at {s:#x}')
             if ko < co + cn or not kn or max(co + cn, ko + kn) > end - s:
                 red(f'{label} NEEDLE @{h:#x}: NVN section at {s:#x} is outside its HNSHV002 container')
@@ -492,6 +497,48 @@ def needle_shaders(d, label):
             if why: red(f'{label} NEEDLE @{h:#x}: NVN section at {s:#x}: {why}')
             out.append((f'{label}#NEEDLE@{s:#x}', st, ctl, code))
             c = d.find(CTL_MAGIC, s + ko + kn, end)
+    return out
+
+PACX4, PACX4_ROOT = b'PACx403L', b'PACx402L'
+PACX4_SHADER_TYPES = (b'VertexShader', b'PixelShader', b'ComputeShader')
+def pacx4_chunks(d, at, chunks, total, where):
+    """The LZ4 chunks of a PACx 403 archive, back to back from at: (compressed, uncompressed) lengths, a chunk whose two lengths are equal stored as it is"""
+    import lz4.block
+    out = bytearray()
+    for c, u in chunks:
+        raw = span(d, at, c, where)
+        out += raw if c == u else lz4.block.decompress(raw, uncompressed_size=u)
+        at += c
+    if len(out) != total: red(f'{where}: {len(out):#x} bytes from its chunks, its header says {total:#x}')
+    return bytes(out)
+
+def pacx4_blocks(d, label):
+    """Hedgehog Engine 2's PACx 403 archives (Sonic Frontiers Definitive Edition: raw/NeedleShader.pac, 24 MB, 3,626 shaders in Needle containers). The header's +0x10 / +0x14 / +0x18 are
+    the root's offset, compressed and uncompressed lengths; +0x20 the length of the dependency table at +0x30 (0 in NeedleShader.pac; CommonObject.pac names one archive it needs) and
+    +0x24 the length of the root's chunk table after it: the chunk count, then each chunk's compressed and uncompressed lengths (u32 pairs). The root is a PACx 402 archive
+    (header 0x30 bytes: +0x10 the node trees' length, the block table right after them): a u64 block count and a pointer to the blocks, each 0x20 bytes: a pointer to its name
+    ('NeedleShader.pac.000'), its compressed and uncompressed lengths, its offset in this file, its chunk count and a pointer to its chunks (u32 pairs, 64 KB each uncompressed).
+    A block holds a PACx 402 archive whose resources lie in it as they are, so its Needle containers are found by scan_blob. Blocks are read only when the root names a shader type:
+    the 1,435 archives of the game hold 11 GB of stages that have none. → (name, data) of each block"""
+    roff, rcs, rus = struct.unpack_from('<III', d, 0x10)
+    deps, ctab = struct.unpack_from('<II', d, 0x20)
+    ct = 0x30 + deps
+    n = struct.unpack_from('<I', span(d, ct, 4, f'{label}: PACx 403 root chunk table'))[0]
+    if not 0 < n or 4 + 8 * n > ctab: red(f'{label}: PACx 403 root chunk count {n} in a table of {ctab:#x} bytes')
+    chunks = [struct.unpack_from('<II', span(d, ct + 4 + 8 * i, 8, f'{label}: PACx 403 root chunk {i}')) for i in range(n)]
+    if sum(c for c, _ in chunks) != rcs or sum(u for _, u in chunks) != rus: red(f'{label}: the PACx 403 root chunks do not add up to its lengths')
+    root = pacx4_chunks(d, roff, chunks, rus, f'{label}: PACx 403 root')
+    if root[:8] != PACX4_ROOT: red(f'{label}: the PACx 403 root is not a PACx 402 archive')
+    if not any(t in root for t in PACX4_SHADER_TYPES): return []
+    s1 = 0x30 + struct.unpack_from('<I', root, 0x10)[0]
+    nb, tab = struct.unpack_from('<QQ', span(root, s1, 16, f'{label}: PACx 403 block table'))
+    out = [('root', root)]   # a small archive keeps its resources in the root
+    for i in range(nb):
+        name, cs, us, off, nch, cptr = struct.unpack_from('<QIIIIQ', span(root, tab + 0x20 * i, 0x20, f'{label}: PACx 403 block {i}'))
+        nm = root[name:root.find(b'\0', name)].decode('utf-8', 'replace') if 0 <= name < len(root) else str(i)
+        cks = [struct.unpack_from('<II', span(root, cptr + 8 * k, 8, f'{label}/{nm}: chunk {k}')) for k in range(nch)]
+        if sum(c for c, _ in cks) != cs: red(f'{label}/{nm}: the chunks do not add up to the block\'s {cs:#x} bytes')
+        out.append((nm, pacx4_chunks(d, off, cks, us, f'{label}/{nm}')))
     return out
 
 IDRK, PDRK = b'IDRK0000', b'PDRK0000'
@@ -3006,6 +3053,11 @@ def scan_blob(d, label, out, depth=0, left=None):
     if d[:4] in (b'HCPS', b'xbc1', b'DRSM') or d[:8] == b'cmp\0zlib':
         monolith_shaders(d, label, out)
         return
+    if d[:8] == PACX4:   # Hedgehog Engine 2: LZ4 blocks; as with Yaz0, the budget counts decoded bytes
+        blocks = pacx4_blocks(d, label)
+        if left is None: left = [NEST * max(len(d), sum(len(b) for _, b in blocks))] * 2
+        for nm, b in blocks: scan_blob(b, f'{label}/{nm}', out, depth + 1, left)
+        return
     for m in re.finditer(b'SLCT\x03\x10\0\0', d): out.extend(slct_shaders(d, m.start(), label))
     stored = len(d)   # what the member takes up in its archive
     if d[:4] == b'Yaz0':
@@ -3353,7 +3405,7 @@ def scan_file_in(args):
         try: pairs = unity_shaders(d, '/' + rel, found, trees if not TREES else dict(TREES))
         except unityfs.NoTree: return rel, {}, set(), 'defer'
         return rel, uniq_keys(found), var_pairs(found) | {(a, b, 'prog') for a, b in pairs}, trees
-    elif b'BNSH\0\0\0\0' not in d and b'BAHS' not in d and d[:4] != b'MSHD' and d[:4] != b'NDSR' and d[:4] != b'NARC' and d[:4] != b'NDVE' and not (d[:4] == b'SARC' and b'Yaz0' in d) and b'\x91\x68\x86\x19' not in d and MGFX not in d and NEEDLE not in d and d[:8] != SUMO_MUX and SUMO_NX not in d and NVNSH not in d: return rel, {}, set(), {}   # a SARC may hold Yaz0 members, a NARC packed ones (cra.undo)
+    elif b'BNSH\0\0\0\0' not in d and b'BAHS' not in d and d[:4] != b'MSHD' and d[:4] != b'NDSR' and d[:4] != b'NARC' and d[:4] != b'NDVE' and not (d[:4] == b'SARC' and b'Yaz0' in d) and b'\x91\x68\x86\x19' not in d and MGFX not in d and NEEDLE not in d and d[:8] != PACX4 and d[:8] != SUMO_MUX and SUMO_NX not in d and NVNSH not in d: return rel, {}, set(), {}   # a SARC may hold Yaz0 members, a NARC packed ones (cra.undo)
     else:
         scan_blob(d, '/' + rel, found)
         # whole GLSLC outputs in a file no other reader takes (FINAL FANTASY TACTICS - The Ivalice Chronicles: its engine's technique files, resources_nx/…/shader/*.tec, 261 outputs beside
@@ -3512,6 +3564,7 @@ def main():
                                             ('MT Framework SPK', any('#MTSPK@' in r[4] for r in rows)), ('MonoGame MGFX', any('#MGFX@' in r[4] for r in rows)),
                                             ('PlatinumGames shader objects', any('#PGSO' in r[4] for r in rows)),
                                             ('Snowdrop shader objects', any('#SNOWDROP@' in r[4] for r in rows)),
+                                            ('Needle', any('#NEEDLE@' in r[4] for r in rows)),
                                             ('Unreal Engine shader code archives', any('#UE' in r[4] for r in rows))) if hit)
         f.write(f'# kind: evidence  {NOTE} ({kinds} in RomFS + main) → control section + code area keys (dm/gfx/tools/shader_split.py)\n')
         f.write('# column 5 records where each key first appears; no PC shader pairing supplied\n')

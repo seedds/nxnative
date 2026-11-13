@@ -2484,7 +2484,9 @@ static void post_complete(uint64_t fence, uint64_t c0, uint64_t c1) {
 static _Atomic int g_seg_inflight;   // main command buffers committed and not reported back yet (sub_cut)
 static void rt_preserve_bound(void);
 static void queue_program_preserve(void);
+static void tcw_land(void);   // see tcw_on
 uint64_t mtl_sub_commit(void) {
+    tcw_land();   // texture clears still waiting (tcw_on)
     lc_land();   // clears still waiting (the command list ends with them)
     defer_fallback();   // Deferred merged pass: at the end of the submission there are still P draws not replayed (the normal path never gets here)
     rp_flush(); ubd_land();
@@ -5497,8 +5499,40 @@ static id<MTL4RenderCommandEncoder> rp_begin(void) { if (g_enc && g_rp_aw) rp_en
 static id<MTL4RenderCommandEncoder> rp_begin_ex_(int clear_only);
 static id<MTL4RenderCommandEncoder> rp_begin_ex(int clear_only) { AP_B; id<MTL4RenderCommandEncoder> e = rp_begin_ex_(clear_only); AP_E(1); return e; }
 static void bare_dims(NSUInteger *w, NSUInteger *h);
+// DM_NVN_TEXCLEAR_WAIT=0|1|ab (on by default): a texture clear (ClearTexture) of a whole colour level / layer in its own format waits, and the next draw pass with that subresource
+// as a colour attachment takes it as its clear load action. Anything else lands the waiting clears first (each a render pass of its own, as before): any command that could read or
+// write the texture (draws are judged at their pass's start: one that opens a pass without it lands them), the submission's end. Ocarina of Time clears about 5 small textures a
+// frame and draws into each right after (a 128x128 and two 192x192 targets among them): each clear was a pass that stored the clear value, then the pass reloaded it. On an M1
+// 4 of the 5 are taken (runs tcw2 / tcw3: -0.09 / -0.02 ms a frame, within the noise; the picture is the same)
+enum { TCW_MAX = 8 };
+static const p_clear_tex *g_tcw[TCW_MAX]; static int g_ntcw; static uint64_t g_tcw_taken, g_tcw_landed;
+static void clear_tex(const p_clear_tex *c); static int fmt_int_or_ds(MTLPixelFormat f); static unsigned mtl_pf_chmask(MTLPixelFormat pf);
+static int tcw_on(void) { static int m = -1; if (m < 0) { m = sw_mode("DM_NVN_TEXCLEAR_WAIT", 1); if (m != 1) MLOG("DM_NVN_TEXCLEAR_WAIT=%d: texture clears %s", m, m ? "alternate with passes of their own" : "are passes of their own"); } return m && sw_on(m); }
+static void tcw_land(void) { int n = g_ntcw; g_ntcw = 0; for (int i = 0; i < n; i++) clear_tex(g_tcw[i]); g_tcw_landed += (uint64_t)n; }
+static void tcw_sub(const p_clear_tex *c, unsigned *lv, unsigned *sl) { *lv = c->has_view && c->view.set_levels ? c->view.base_level : 0; *sl = c->has_view && c->view.set_layers ? c->view.min_layer : 0; }
+static int tcw_simple(const p_clear_tex *c) {   // a clear the pass's load action does the same: whole level / layer, every channel, float or normalized colour, no view in another format, 2D
+    if (!c->tex || c->is_uint || (c->has_view && c->view.set_format && c->view.format != c->tex->d.format) || c->r.xoffset || c->r.yoffset || c->r.zoffset || c->r.depth > 1) return 0;
+    id<MTLTexture> t = tex_mtl(c->tex); if (!t || t.sampleCount != 1 || !(t.usage & MTLTextureUsageRenderTarget) || (t.textureType != MTLTextureType2D && t.textureType != MTLTextureType2DArray)) return 0;
+    MTLPixelFormat pf = t.pixelFormat; if (mtl_fmt_block(pf) || fmt_int_or_ds(pf)) return 0;
+    unsigned lv, sl; tcw_sub(c, &lv, &sl); if (lv >= t.mipmapLevelCount || sl >= t.arrayLength) return 0;
+    if ((NSUInteger)c->r.width != MAX(t.width >> lv, 1u) || (NSUInteger)c->r.height != MAX(t.height >> lv, 1u) || (c->mask & mtl_pf_chmask(pf)) != mtl_pf_chmask(pf)) return 0;
+    return 1; }
+static void tcw_take(int clear_only) {   // the pass about to begin (R.rt) takes the waiting clears of its colour attachments; the rest land before it
+    if (!g_ntcw) return;
+    uint8_t took[TCW_MAX] = {0};
+    if (!clear_only && R.has_rt) for (int j = g_ntcw - 1; j >= 0; j--) { const p_clear_tex *c = g_tcw[j]; unsigned lv, sl; tcw_sub(c, &lv, &sl);
+        for (int i = 0; i < R.rt.n && i < 8; i++) { const tex_t *t = R.rt.color[i]; if (!t || t->serial != c->tex->serial || rt_dup_slot(&R.rt, i)) continue;
+            int hv = R.rt.has_cview[i]; const view_t *v = &R.rt.cview[i];
+            if (hv && v->set_format && v->format != t->d.format) continue;   // a view in the texture's own format is the texture
+            if ((hv && v->set_levels ? v->base_level : 0) != (int)lv || (hv && v->set_layers ? v->min_layer : 0) != (int)sl) continue;
+            if (!R.clear_c[i]) { R.clear_c[i] = 1; R.cc[i] = MTLClearColorMake(c->c.f[0], c->c.f[1], c->c.f[2], c->c.f[3]); PD("C %llu c%d texture clear taken as the load action, %g,%g,%g,%g", g_stat_pass + 1, i, c->c.f[0], c->c.f[1], c->c.f[2], c->c.f[3]); }   // a clear set since is newer
+            zskip_del(c->tex->serial); sparse_gpu_wrote(c->tex); took[j] = 1; g_tcw_taken++; break; } }
+    int n = g_ntcw; g_ntcw = 0;
+    for (int j = 0; j < n; j++) if (!took[j]) { clear_tex(g_tcw[j]); g_tcw_landed++; }
+}
 static id<MTL4RenderCommandEncoder> rp_begin_ex_(int clear_only) {
     if (g_enc) return g_enc;
+    tcw_take(clear_only);   // see tcw_on
     memset(g_zskip_cand_ok, 0, sizeof g_zskip_cand_ok);
     g_enc_mode = clear_only; g_enc_geo_nocolor = g_geo_omit_colors; g_pass_swrite = g_pass_order = g_pass_late_res = 0; g_sm_pass = 0;
     if (!R.has_rt) { RED_ONCE(3, "no render target set before the draw"); return nil; }
@@ -14107,6 +14141,16 @@ static void lc_take(NvProg *pr) {
     lc_land();
 }
 // The operations a waiting clear can wait across: they neither read nor write textures
+// DM_NVN_LC_COUNTERS=0|1|ab (on by default): a waiting clear also waits past an occlusion counter's reset or report and a timestamp. A clear passes no samples and is not timed
+// work, so the counter's value is the same; only where the clear runs changes. Ocarina of Time resets its occlusion counter right after clearing its 1440x810 scene targets and its
+// 1920x1080 target, and reports a timestamp after another clear: each landed in a pass of its own (stored, then loaded again by the pass that draws), about 2 passes a frame
+// (115 -> 113 on an M1, runs lcc1 / lcc2: within the noise of the frame time, about 65 us a pass by DM_NVN_SPLIT_EXTRA's measure)
+static int lc_counter_keeps(uint32_t op, const void *a) {
+    static int m = -1; if (m < 0) { m = sw_mode("DM_NVN_LC_COUNTERS", 1); if (m != 1) MLOG("DM_NVN_LC_COUNTERS=%d: waiting clears %s occlusion counter resets / reports and timestamps", m, m ? "alternate at" : "land at"); }
+    if (!m || !sw_on(m) || (op != OP_RESET_COUNTER && op != OP_REPORT_COUNTER)) return 0;
+    uint64_t t; memcpy(&t, a, 8);
+    return t == NVN_COUNTER_TYPE_SAMPLES_PASSED || t == NVN_COUNTER_TYPE_TIMESTAMP || t == NVN_COUNTER_TYPE_TIMESTAMP_TOP;
+}
 static int lc_keeps(uint32_t op) {
     switch (op) {
         case OP_SET_RT: case OP_CLEAR_COLOR: case OP_CLEAR_DS: case OP_DRAW: case OP_DRAW_IDX: case OP_BEGIN: case OP_JUMP: case OP_CALL:
@@ -15836,7 +15880,8 @@ void mtl_exec(const uint8_t *p) {
         if (g_allocprof) { static uint64_t last; static int prev = -1; uint64_t now = g_dev.currentAllocatedSize; if (prev >= 0 && prev < 64 && now > last) g_ap_bytes[prev] += now - last; last = now; prev = h.op; }
         if (g_hoist_n && hoist_take(p)) { if (g_fz.active && p == g_fz.rt2_op) { g_fz.phase = 2; g_rt_merged = 0; PD("F %llu merged pass enters the later pass's draws", g_stat_pass); } p += h.size; continue; }   // A pure-clear render pass already executed early / the start of a later pass already merged in   // Entering the later pass: the same-target continuation of the earlier pass ends here; the later pass reading the earlier pass's attachment is proven to be same-pixel by fz_p2_draw, and is no longer split by the continuation rule
         const void *a = p + 8;
-        if (g_nlc && !lc_keeps(h.op) && !(h.op == OP_END && g_ret_n)) lc_land();   // see lc_keeps (a sub-list's end returns to its caller)
+        if (g_nlc && !lc_keeps(h.op) && !(h.op == OP_END && g_ret_n) && !lc_counter_keeps(h.op, a)) lc_land();   // see lc_keeps (a sub-list's end returns to its caller), lc_counter_keeps
+        if (g_ntcw && !(lc_keeps(h.op) && h.op != OP_CLEAR_COLOR && h.op != OP_CLEAR_DS && h.op != OP_UPDATE_UB && h.op != OP_COPY_B2B && h.op != OP_CLEAR_BUF) && h.op != OP_CLEAR_TEX && !(h.op == OP_END && g_ret_n) && !lc_counter_keeps(h.op, a)) tcw_land();   // see tcw_on
         if (g_mrun.n && !geo_mesh_keeps(h.op) && !(h.op == OP_END && g_ret_n)) geo_mesh_flush();   // see geo_mesh_keeps
         switch (h.op) {
             case OP_END: g_exec_cur = NULL;
@@ -15977,7 +16022,7 @@ void mtl_exec(const uint8_t *p) {
             case OP_COPY_T2B: copy_t2b(a, h.size); break;
             case OP_COPY_T2T: copy_t2t(a); break;
             case OP_DRAW_TEX: draw_tex(a); break;
-            case OP_CLEAR_TEX: clear_tex(a); break;
+            case OP_CLEAR_TEX: if (tcw_on() && g_ntcw < TCW_MAX && tcw_simple(a)) { rp_end(); if (g_blit) { enc_b_end(g_blit); g_blit = nil; } g_tcw[g_ntcw++] = a; PD("X waiting texture clear ser=%llu", (unsigned long long)((const p_clear_tex *)a)->tex->serial); } else { tcw_land(); clear_tex(a); } break;   // see tcw_on
             case OP_DLSS: dlss_eval(a); break;
             case OP_DISPATCH: if (g_csh_n && csh_take(p)) { PD("H %llu dispatch already run ahead of the pass", g_stat_pass); break; }
                 dispatch(a); break;

@@ -227,4 +227,31 @@ void dm_gfx_enter(void); void dm_gfx_leave(void);   // hle_nvn.c: the gate dm_gf
 void dm_gfx_shot_at(long k, const char *path);
 void dm_shot_written(const char *path, int ok);   // The graphics side finished writing a screenshot to disk (diag.c: DM_TICK_HOLD=E:SHOT unfreezes on this)
 void dm_host_shutdown_then(const char *why, void (*then)(void *), void *arg);   // The same, then(arg) in place of the last _exit(0) (oe::ExecuteProgram: execve of the next program)
+// Online mode (DM_ONLINE; hle_online.c): the hooks of hle_net.c, hle_offline.c, hle_account.c and hle_misc.c hand over to these when it is on
+int dm_online(void); int dm_online_errno(void); void dm_online_set_errno(int e);
+int dm_online_socket(int fam, int type, int proto); int dm_online_close(int s); int dm_online_bind(int s, const void *a, unsigned n); int dm_online_connect(int s, const void *a, unsigned n);
+int dm_online_listen(int s, int n); int dm_online_accept(int s, void *a, unsigned *n); int dm_online_getpeername(int s, void *a, unsigned *n); int dm_online_getsockname(int s, void *a, unsigned *n);
+int dm_online_setsockopt(int s, int level, int opt, const void *v, unsigned n); int dm_online_getsockopt(int s, int level, int opt, void *v, unsigned *n); int dm_online_fcntl(int s, int cmd, int arg);
+int dm_online_shutdown(int s, int how); long dm_online_recv(int s, void *b, unsigned long n, int f); long dm_online_send(int s, const void *b, unsigned long n, int f);
+long dm_online_recvfrom(int s, void *b, unsigned long n, int f, void *a, unsigned *al); long dm_online_sendto(int s, const void *b, unsigned long n, int f, const void *a, unsigned al);
+long dm_online_read(int s, void *b, unsigned long n); long dm_online_write(int s, const void *b, unsigned long n);
+int dm_online_eventfd(uint64_t v, int flags); int dm_online_eventfd_read(int s, uint64_t *out); int dm_online_eventfd_write(int s, uint64_t v);
+int dm_online_poll(void *fds, uint64_t n, int ms); int dm_online_select(int nfds, uint64_t *rs, uint64_t *ws, uint64_t *es, const int64_t *tv);
+int dm_online_getaddrinfo(const char *host, const char *serv, const void *hints, void **res); void dm_online_freeaddrinfo(void *a); int dm_online_getaddrinfo_nn(const char *host, const char *serv, const void *hints, void **res);
+int dm_online_ca_bufsize(uint32_t *out, const uint32_t *ids, unsigned n); int dm_online_ca_certs(void **out, uint8_t *buf, unsigned size, const uint32_t *ids, unsigned n);
+const char *dm_online_token(void); int dm_online_load_token(uint64_t *n, char *buf, uint64_t size); int dm_online_resolve_fqdn(void *out, const void *in);
+int dm_online_dup_host(int s); const uint8_t *dm_online_ca_der(size_t *n); void dm_thread_native_wait(int entering);
+// ssl_online_apple.m: nn::ssl in online mode (the hooks in hle_net.c hand over when dm_online())
+uint32_t dm_ossl_context_create(void *o, unsigned version); uint32_t dm_ossl_context_destroy(void *o); uint32_t dm_ossl_context_id(void *o, uint64_t *out);
+uint32_t dm_ossl_import_server(void *o, uint64_t *id, const void *bytes, unsigned size, int format);
+uint32_t dm_ossl_connection_create(void *o, void *ctx); uint32_t dm_ossl_connection_destroy(void *o); uint32_t dm_ossl_connection_id(void *o, uint64_t *out, _Bool context);
+uint32_t dm_ossl_set_socket(void *o, int guest); uint32_t dm_ossl_set_hostname(void *o, const char *name, unsigned size);
+uint32_t dm_ossl_set_value(void *o, int what, unsigned v); uint32_t dm_ossl_set_option(void *o, int option, unsigned v);
+uint32_t dm_ossl_set_alpn(void *o, const uint8_t *d, unsigned size); uint32_t dm_ossl_get_alpn(void *o, unsigned *state, uint8_t *buf, unsigned *size, unsigned cap);
+uint32_t dm_ossl_handshake_certs(void *o, unsigned *size, unsigned *count); uint32_t dm_ossl_set_cert_buffer(void *o, void *buf, unsigned cap); uint32_t dm_ossl_cert_detail(void *out, const void *buf, unsigned index);
+uint32_t dm_ossl_read(void *o, void *buf, int *out, unsigned cap, _Bool peek); uint32_t dm_ossl_write(void *o, const void *buf, int *out, unsigned size);
+uint32_t dm_ossl_pending(void *o, int *out); uint32_t dm_ossl_last_error(void *o, uint32_t *out, _Bool verify);
+long dm_online_sendmsg(int s, const void *m, int f); long dm_online_recvmsg(int s, void *m, int f);
+int dm_online_bcat_mount(void); int dm_online_bcat_sync(void *p); void dm_online_bcat_progress(void *p, int done, int r); int dm_online_bcat_status(const void *p); int dm_online_bcat_result(const void *p);
+void dm_online_bcat_file_init(void *f); void dm_online_bcat_file_close(void *f); int dm_online_bcat_file_open(void *f, const char *path); int dm_online_bcat_file_read(void *f, uint64_t *out, int64_t off, void *buf, uint64_t n); int64_t dm_online_bcat_file_size(const void *f);
 void dm_host_shutdown(const char *why);   // Graceful exit (crash.c): stop background threads and audio, drain graphics, then _exit(0); used by SIGTERM and the iOS App termination callback   // graphics side: screenshot of the k-th frame after the current presented frame (nvn_mtl.m)

@@ -1,6 +1,7 @@
 // Settings language comparisons through the host hooks. All codes are synthetic;
 // no game module, control data, graphics device or font file is needed.
 #include "../hle_sdk16.c"
+int dm_online(void) { return 0; }   // online mode (hle_online.c) is off: the offline answers under test
 #include <limits.h>
 
 module_t *g_mod;

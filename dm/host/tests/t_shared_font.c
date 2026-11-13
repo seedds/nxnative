@@ -1,5 +1,6 @@
 // Shared-font ownership and LoadFont forwarding through the real forced registration; no game module or font file is needed.
 #include "../hle_sdk16.c"
+int dm_online(void) { return 0; }   // online mode (hle_online.c) is off: the offline answers under test
 void dm_applet_enter(const char *name) { (void)name; }   // hle_oe.c: the shop stand-ins hold the game out of focus
 void dm_applet_leave(void) {}
 #include <mach-o/getsect.h>

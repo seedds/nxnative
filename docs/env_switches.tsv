@@ -266,6 +266,13 @@ DM_NVN_XV	switch	`0` turns off the cross-submission attachment validity ledger, 
 DM_NVN_ZBLOCK	diagnostic	`=1` logs (`[zb]`) the all-zero blocks per level of each ASTC texture uploaded on the CPU (magenta when drawn); `=<folder>` also writes the raw storage of the first one per format and size
 DM_NVN_ZSKIP	switch	`0` turns off the zero-source skip, which drops a draw whose fragment shader is proven to write 0 over targets already 0 (on by default, only with `DM_NVN_TBDR` on)
 DM_OE_SCRIPT	diagnostic	Scripted applet state changes at given seconds, `key=value@seconds,…` with keys `focus`, `opmode` and `bg` (`bg=1` / `bg=0` run the whole background round trip), e.g. `bg=1@20,bg=0@25`
+DM_ONLINE	player	`=1`: online mode (`hle_online.c`): the game's sockets are the Mac's, nifm reports a network, the account has a network service account, the network clock is the Mac's, nn::ssl runs on the Mac (`ssl_online_apple.m`). Only this Mac is reachable unless `DM_ONLINE_PUBLIC`; meant for local stand-in servers (The Duskbloods: playDB-CNT's). Off by default
+DM_ONLINE_BCAT	path	`=<folder>`: online mode's BCAT delivery cache, laid out `<directory>/<file>` (The Duskbloods: `Regulation/regulation_nt_1_0.bin`, the romfs `regulation_nt.bin`); unset, mounting the cache fails
+DM_ONLINE_CA	path	`=<file>`: a CA certificate (DER or PEM) online mode answers nn::ssl's built-in certificate IDs with and trusts for nn::ssl connections: the stand-in servers' CA
+DM_ONLINE_HOSTS	switch	`=<name>,…`: in online mode these names and their subdomains resolve to 127.0.0.1 (default the NPLN, Nintendo service and fromsoftware-game.net names)
+DM_ONLINE_PUBLIC	switch	`=1`: online mode also resolves other names and connects past this Mac
+DM_ONLINE_SERVER	switch	`=<ip>:<port>`: where online mode sends connections to 127.0.0.1:443 (default 127.0.0.1:18443)
+DM_ONLINE_TOKEN	switch	`=<token>`: the network service account ID token online mode hands the game (default `nxnative-online`)
 DM_OODLE_HOST	path	The Mac host binary that `shader_split.py` runs in its Oodle tool mode to decode Trinity packs (`ONEPACK` files); set by the NSP script
 DM_OODLE_JOB	path	`=<job file>`: the host runs the game's own Oodle decoder on every record of the job file right before `nnMain`, writes `<job file>.out` and exits (Unreal shader archives)
 DM_OODLE_MODULES	path	The rewritten modules the Mac host's Oodle tool mode loads when `shader_split.py` decodes Trinity packs; set by the NSP script

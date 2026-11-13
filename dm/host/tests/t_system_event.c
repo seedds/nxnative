@@ -7,6 +7,7 @@
 #include <sys/resource.h>
 #include <sys/wait.h>
 #include <unistd.h>
+void dm_guest_write_prepare(void *addr, size_t len) { (void)addr; (void)len; }   // hle_online.c: no tracked guest pages
 
 static void *(*jobs[32])(void *);
 static void *args[32];

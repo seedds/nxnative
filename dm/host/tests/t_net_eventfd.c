@@ -9,6 +9,30 @@ void dm_guest_sleep_ns(int64_t ns) { struct timespec ts = {ns / 1000000000, ns %
 void dm_guest_cond_wait_ns(pthread_cond_t *c, pthread_mutex_t *m, int64_t ns) { struct timespec ts = {ns / 1000000000, ns % 1000000000}; pthread_cond_timedwait_relative_np(c, m, &ts); }
 uint64_t guest_ns(void) { struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); return (uint64_t)ts.tv_sec * 1000000000u + (uint64_t)ts.tv_nsec; }
 int dm_detclock_enabled(void) { return 0; }
+void *guest_sym(const char *name) { (void)name; return NULL; }   // no game: the online layer keeps only its own errno
+void dm_thread_native_wait(int entering) { (void)entering; }   // no guest threads to hand the core to
+void dm_guest_write_prepare(void *addr, size_t len) { (void)addr; (void)len; }   // no tracked guest pages
+// the TLS service (ssl_online_apple.m) is not linked: online mode is off here
+uint32_t dm_ossl_context_create(void *o, unsigned v) { return 0x2a2; }
+uint32_t dm_ossl_context_destroy(void *o) { return 0x2a2; }
+uint32_t dm_ossl_context_id(void *o, uint64_t *out) { return 0x2a2; }
+uint32_t dm_ossl_import_server(void *o, uint64_t *id, const void *b, unsigned n, int f) { return 0x2a2; }
+uint32_t dm_ossl_connection_create(void *o, void *c) { return 0x2a2; }
+uint32_t dm_ossl_connection_destroy(void *o) { return 0x2a2; }
+uint32_t dm_ossl_connection_id(void *o, uint64_t *out, _Bool c) { return 0x2a2; }
+uint32_t dm_ossl_set_socket(void *o, int g) { return 0x2a2; }
+uint32_t dm_ossl_set_hostname(void *o, const char *n, unsigned s) { return 0x2a2; }
+uint32_t dm_ossl_set_value(void *o, int w, unsigned v) { return 0x2a2; }
+uint32_t dm_ossl_set_option(void *o, int p, unsigned v) { return 0x2a2; }
+uint32_t dm_ossl_set_alpn(void *o, const uint8_t *d, unsigned n) { return 0x2a2; }
+uint32_t dm_ossl_get_alpn(void *o, unsigned *st, uint8_t *b, unsigned *n, unsigned c) { return 0x2a2; }
+uint32_t dm_ossl_handshake_certs(void *o, unsigned *s, unsigned *c) { return 0x2a2; }
+uint32_t dm_ossl_set_cert_buffer(void *o, void *b, unsigned c) { return 0x2a2; }
+uint32_t dm_ossl_cert_detail(void *out, const void *b, unsigned i) { return 0x2a2; }
+uint32_t dm_ossl_read(void *o, void *b, int *out, unsigned c, _Bool p) { return 0x2a2; }
+uint32_t dm_ossl_write(void *o, const void *b, int *out, unsigned n) { return 0x2a2; }
+uint32_t dm_ossl_pending(void *o, int *out) { return 0x2a2; }
+uint32_t dm_ossl_last_error(void *o, uint32_t *out, _Bool v) { return 0x2a2; }
 
 static void *writer(void *fd) { dm_guest_sleep_ns(20000000); assert(h_sk_EventFdWrite((int)(intptr_t)fd, 1) == 0); return NULL; }
 static void *closer(void *fd) { dm_guest_sleep_ns(20000000); assert(h_sk_Close((int)(intptr_t)fd) == 0); return NULL; }

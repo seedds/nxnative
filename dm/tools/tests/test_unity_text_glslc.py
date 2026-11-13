@@ -75,6 +75,23 @@ def serialized_file(assets):
     return head + b'\0\0\0\0' + bytes(meta) + b''.join(blks)
 
 
+
+def glslc_compute_with_gap():
+    """One compute output whose section header places GPU code after 0x180 bytes of constants."""
+    c, reported, actual, ncode = 0x100, 0x850, 0x9d0, 0x80
+    d = bytearray(c + actual + ncode)
+    d[:4] = GLSLC_MAGIC
+    struct.pack_into('<I', d, 0x44, len(d))
+    struct.pack_into('<I', d, 0x4c, 1)
+    struct.pack_into('<III', d, 0x90, actual + ncode, c, 0)
+    struct.pack_into('<4I', d, 0x90 + 0x30, 0, actual, ncode, actual)
+    d[c:c + 4] = ss.CTL_MAGIC
+    struct.pack_into('<I', d, c + 0x20, reported)
+    struct.pack_into('<I', d, c + 0x704, ncode)
+    struct.pack_into('<3I', d, c + 0x748, 8, 8, 1)
+    d[c + actual:c + actual + 4] = ss.CS_MAGIC
+    return bytes(d)
+
 class TextAssets(unittest.TestCase):
     def test_name_and_bytes(self):
         d = serialized_file([('vfxsb', glslc_output()), ('notes', b'hello world')])
@@ -88,6 +105,13 @@ class TextAssets(unittest.TestCase):
         d = serialized_file([struct.pack('<i', 1) + b'ab\0\0\0', b'\0\0', ('vfxsb', glslc_output())])
         got = list(unityfs.text_assets(d, {}))
         self.assertEqual([name for _, name, _ in got], ['vfxsb'])
+
+    def test_compute_code_uses_section_offset_after_constants(self):
+            out = ss.glslc_shaders(glslc_compute_with_gap(), 'main')
+            self.assertEqual(len(out), 1)
+            self.assertEqual(out[0][1], 'cs')
+            self.assertEqual(out[0][3][:4], ss.CS_MAGIC)
+            self.assertEqual(len(out[0][2]), 0x9d0)
 
 
 class UnityTextGlslc(unittest.TestCase):

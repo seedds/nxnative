@@ -54,7 +54,7 @@ int main(void) { @autoreleasepool {
     put([msl stringByAppendingPathComponent:@"v1_b.json"], [NSString stringWithFormat:@"{\"chain\": \"%s\", \"entry\": \"main0\", \"entry_z\": \"main0_z\", \"pull\": {}, \"vertex_inputs\": []}", DMSH_CHAIN]);
     for (NSString *k in @[@"f1", @"f2", @"fc"]) put([msl stringByAppendingFormat:@"/%@_b.json", k], [NSString stringWithFormat:@"{\"chain\": \"%s\", \"entry\": \"main0\"}", DMSH_CHAIN]);
     for (NSString *c in @[@"c1", @"c2", @"c3", @"cc"]) put([msl stringByAppendingFormat:@"/%@_b.json", c], [NSString stringWithFormat:@"{\"chain\": \"%s\", \"route\": \"B\", \"bindings\": [], \"stage\": \"cs\", \"entry\": \"main0\"%@}",
-                                                DMSH_CHAIN, @""]);
+                                                DMSH_CHAIN, [c isEqualToString:@"c1"] ? @", \"threadgroup_size\": [1024, 1, 1]" : @""]);
     put([tables stringByAppendingPathComponent:@"shader_map.tsv"], @"package\tindex\tstage\tdm_ctl_sha16\tsource\ncs.bin\t0\tcompute\tc1\tx\ncs.bin\t1\tcompute\tc2\tx\ncs.bin\t2\tcompute\tcc\tx\n");
     put([tables stringByAppendingPathComponent:@"shader_pairs.tsv"], @"# pairs\nv1\tf1\nv1\tf2\nv1\tfc\n");
     setenv("DM_NVN_SHMAP", [tables stringByAppendingPathComponent:@"shader_map.tsv"].UTF8String, 1);
@@ -112,7 +112,9 @@ int main(void) { @autoreleasepool {
         NvShader *c1 = shader_load(@"c1_b", 5, 0), *c2 = shader_load(@"c2_b", 5, 0), *c3 = shader_load(@"c3_b", 5, 0), *cc = shader_load(@"cc_b", 5, 0); NSError *err = nil;
         EXPECT("compute: shaders loaded", 1, c1 && c2 && c3 && cc);
         uint64_t a0 = g_cps_arch, b0 = g_cps_built; int n0 = g_arch_new;
-        EXPECT("compute: a pipeline", 1, c1 && cps_new(c1->fn, &err) != nil);
+        id<MTLComputePipelineState> fixed = c1 ? cps_new_b(c1->fn, 0, c1->rf.tg, &err) : nil;
+        EXPECT("compute: a fixed-size pipeline", 1, fixed != nil);
+        EXPECT("compute: all fixed-group threads fit", 1, fixed.maxTotalThreadsPerThreadgroup >= 1024);
         EXPECT("compute: a second pipeline", 1, c2 && cps_new(c2->fn, &err) != nil);
         EXPECT("compute: both from the bundle", a0 + 2, g_cps_arch);
         EXPECT("compute: nothing built", b0, g_cps_built);

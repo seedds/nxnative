@@ -14,7 +14,7 @@
 #     game's <key>_bp main0_z, from a library of its own (needs_cut). It cannot lower a function unspecialized ("cannot lower module
 #     with unresolved function constants"), and failed with "cannot find private metadata" on a side library (<key>_bx), which no base uses. A pair whose functions declare any other
 #     constant is left to the device (rest_pairs.tsv), as before (HOST_CONSTANTS)
-# And a compute pipeline per compute shader, which depends on its function alone (the host makes it from the function, cps_new in nvn_mtl.m; the threadgroup size is the dispatch's):
+# And a compute pipeline per compute shader, with its function and fixed group size from reflection (as cps_new_b in nvn_mtl.m):
 # the C rows of the profile's prewarm list (pso_manifest.tsv, recorded, in order), then every compute shader of its shader map (shader_map.tsv, stage compute), so a game whose list
 # names none (a provisional profile) still has them; per shader <key>_b, entry `entry`. Left out as the host would not find them: a reflection of another chain version or none, a
 # missing library or entry point, a function with a function constant other than HOST_CONSTANTS (the host builds that pipeline through the MTLDevice). One with the border corrections'
@@ -214,7 +214,7 @@ def cut_entries(lib_dir, bases, computes=()):
 
 def script(lib_dir, bases, computes=()):
     """A Metal 4 pipelines script (metal4-pipelines-script(5), the .mtl4-json format metal-tt reads) with one render pipeline descriptor per base, and one compute pipeline descriptor per
-    compute pipeline (library, entry) that names the function alone, as the host's lookup does (cps_bundle in nvn_mtl.m: no threadgroup size, no indirect command buffers).
+    compute pipeline (library, entry) with its fixed threadgroup size from reflection, as the host's lookup does (cps_new_b in nvn_mtl.m).
     A function that declares constants is named through its specialization by HOST_CONSTANTS (a pair with other constants is not among the bases: plan), from a library of its
     own when it is not its library's first function (needs_cut)"""
     libs, fns, specs, declared, pipes = {}, {}, {}, {}, []
@@ -237,7 +237,16 @@ def script(lib_dir, bases, computes=()):
         pipes.append({'vertex_function_descriptor': fd(vl, ve), 'fragment_function_descriptor': fd(fl, fe),
                       'color_attachments': [dict.fromkeys(COLOUR, 'Unspecialized') for _ in range(8)]})
     descriptors = {'render_pipeline_descriptors': pipes}
-    if computes: descriptors['compute_pipeline_descriptors'] = [{'compute_function_descriptor': fd(lib, entry)} for lib, entry in computes]   # none: the script of bases alone, as before
+    if computes:
+        compute_descriptors = []
+        for lib, entry in computes:
+            descriptor = {'compute_function_descriptor': fd(lib, entry)}
+            try: size = json.loads((romfs.Path(lib_dir) / f'{lib}.json').read_bytes()).get('threadgroup_size')
+            except (OSError, ValueError): size = None
+            if size and len(size) == 3 and all(isinstance(n, int) and n > 0 for n in size):
+                descriptor['max_total_threads_per_threadgroup'] = size[0] * size[1] * size[2]
+            compute_descriptors.append(descriptor)
+        descriptors['compute_pipeline_descriptors'] = compute_descriptors
     functions_ = {'library_function_descriptors': list(fns.values())}
     if specs: functions_['specialized_function_descriptors'] = list(specs.values())   # none: the script as before, so other games' archive keys hold
     return {'libraries': list(libs.values()), 'function_descriptors': functions_, 'pipeline_descriptors': descriptors}

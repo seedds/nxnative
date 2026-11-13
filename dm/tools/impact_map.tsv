@@ -152,3 +152,5 @@ dm/host/pad_switch2_apple.m	hle:*hid*	Switch 2 controllers over Bluetooth LE (of
 dm/host/front.h	present:*	the front end
 dm/ios/*	*:*	the iOS app
 dm/third_party/ryujinx/src/Ryujinx.Graphics.Shader/Translation/Transforms/GeometryToCompute.cs	shader:stage:gs	geometry compute input and output lowering
+
+dm/gfx/tools/dmsh_private_shared.py	shader:stage:cs	invocation-private compute scratch lowering

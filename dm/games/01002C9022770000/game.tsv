@@ -1,0 +1,39 @@
+# Trails in the Sky 1st Chapter, updates 1.0.4 and 1.0.7, SDK 19.3.13.
+
+# ---- Identity ----
+title_id	01002C9022770000
+program_id	01002C9022770000
+
+# ---- App ----
+name	Trails in the Sky 1st Chapter
+ipa	TrailsInTheSky1stChapter.ipa
+app_category	public.app-category.games
+
+# ---- Versions ----
+build	v196608	1.0.4	main=2ad8cc7892ebf9fab667f6d218366c24	subsdk0=ca7f78a09c547c54beac3a33ed6bf364	sdk=7bba185a35ee9b4d0af66a4df910a823
+build	v393216	1.0.7	main=8963a531fa7f27a52323081ace0f2f6e	subsdk0=fc537f0b21c880e89d6f247d22a150ca	sdk=148394139d9d26ca8afd5c9ba5d30601
+package	v393216
+shader_versions	v393216
+
+# ---- Files ----
+# every module main imports from
+modules	main subsdk0 sdk
+romfs_marker	movie_en/mp4/sora_1st_ed.mp4
+zip_store	.bmp:.mp4:.otf:.png:.metallib
+
+# ---- Memory ----
+# The engine reserves ten times its allocator size in virtual address space on the Mac.
+# It uses a 2.02 GB physical heap; the large alias reservation is virtual, not resident.
+mem_reserve	0x1100000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+sys_resource	0x1000000
+depth_mode	zero
+
+# ---- Shader split ----
+shader_groups	/asset/=asset /voice/=voice /voice_en/=voiceen /se/=se /vfx/=vfx /scene/=scene /script_de/=scriptde /script_en/=scripten /script_es/=scriptes /script_fr/=scriptfr /table_de/=tablede /table_en/=tableen /table_es/=tablees /table_fr/=tablefr /asset_fr/=assetfr /asset_de/=assetde /asset_es/=assetes /layout/=layout /asset_en/=asseten /bgm1/=bgm1 /bgm2/=bgm2 /bgm3/=bgm3 /system/=system /movie_en/=movieen
+shader_note	Trails in the Sky 1st Chapter shaders
+
+# ---- Heap check on the Mac ----
+# the game asked for a 2.02 GB heap: a 2.125 GB heap region
+mem_alias	0x1000000000

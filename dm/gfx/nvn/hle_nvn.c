@@ -120,6 +120,7 @@ static void nvn_profile_scissor(const NVNcommandBuffer *c, int *x, int *y, int *
 static int nvn_profile_draw_begin(NVNcommandBuffer *c);   // nonzero: the profile changed state for this draw, and nvn_profile_draw_end restores it
 static void nvn_profile_draw_end(NVNcommandBuffer *c);
 static int nvn_is_window_tex(const NVNtexture *t);   // a texture of the window's swap chain
+static _Atomic uint64_t g_nvn_presents;   // nvnQueuePresentTexture calls so far: the frame a profile's hook is in
 #endif
 
 static void *nvn_lookup(const char *name) {
@@ -2550,6 +2551,7 @@ static const int *present_crop(const int win[4], int tw, int th, int lc[4]) {
     return lc;
 }
 NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
+    atomic_fetch_add(&g_nvn_presents, 1);
     (void)q; win_t *o = (win_t *)w; o->presents++;
     dm_ue_cvar_tick();
     if (fps_high()) high_cap_tick();

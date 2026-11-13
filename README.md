@@ -1,6 +1,6 @@
 # nxnative
 
-> Development fork: OOT/M4 Pro work is on perf/oot-mbpn. See the [contributor checkpoint](docs/oot-m4-pro-fork.md) for tested changes, experiments and open problems.
+> OOT/M4 Pro fork: `release/oot-metalfx-20261113` shares the player-confirmed 2K60-native MetalFX preset, engine fixes and experimental interpolation work. Start with the [contributor guide](docs/oot-m4-pro-fork.md) and [upstream triage](docs/oot-upstream-triage.md).
 
 Play your own Nintendo Switch and Switch 2 games natively on Apple silicon Macs, iPhone and iPad. One script packs your game into a Mac app or an unsigned IPA that you sideload.
 

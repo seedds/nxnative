@@ -138,14 +138,14 @@ static void nvn_profile_set_rt(const NVNcommandBuffer *c, int n, const NVNtextur
     int band = base && mp4_band_k() > 0 && !strcmp(dm_main_build(),"8275fbe1ec5191c279f3a943ad8524f4") && caller == base + 0x1300b8
         && t && t->magic == MAGIC('T','E','X',0) && nvn_is_window_tex(ct[0]) && !mp4_under(base + 0x33194c) && !mp4_under(base + 0xe2acb8);
     mp4_band_has = 0;
-    // The HUD's first pass of a frame decides it: a menu item drawn in the last frame, or the HUD's pass begun more than once in the last frame (the pause
-    // menu draws a second layer; the count is logged when it changes)
+    // The HUD's first pass of a frame decides it: whether a menu item was drawn in the last frame. (Its pass is begun twice a frame with the menu open and
+    // in the scan visor alike, so the count is only logged; as a menu sign it stretched the scan rings, tenth run.)
     static _Atomic uint64_t decided = ~0ull; static _Atomic int passes, last_passes = 1; uint64_t frame = atomic_load(&g_nvn_presents);
     if (band && mp4_under(base + 0x12e0e8)) atomic_fetch_add(&passes, 1);
     if (band && mp4_under(base + 0x12e0e8) && atomic_exchange(&decided, frame) != frame) {
         int np = atomic_exchange(&passes, 1) - 1, lp = atomic_exchange(&last_passes, np);
         if (np != lp) LOG("MP4 16:10: the HUD's pass begun %d time(s) in the last frame", np);
-        int menu = atomic_exchange(&mp4_menu_seen, 0) || np >= 2, was = atomic_exchange(&mp4_menu_last, menu);
+        int menu = atomic_exchange(&mp4_menu_seen, 0), was = atomic_exchange(&mp4_menu_last, menu);
         if (menu != was) LOG("MP4 16:10: %s", menu ? "a menu is open, the HUD is drawn over the whole window" : "no menu, the HUD is back in the 16:9 band");
     }
     // Menu pages bind the window again from inside the HUD's list (main+0x12f0c8): those passes follow the frame's decision too, and their items are still

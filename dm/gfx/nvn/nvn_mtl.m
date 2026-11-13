@@ -4906,7 +4906,7 @@ static void pg_commit(id<MTLCommandBuffer> cb) {   // Hand this submission's pas
         free(ps);
     }];
 }
-void ts_after(void);
+void ts_after(void); void ts_discard(int idx);
 void ms_after(void);
 // ---------- Store lookahead: at pass end, decide from the later commands of the same submission whether each attachment's write-back is redundant ----------
 // On TBDR every attachment is written back to memory in full when the pass ends; Switch (Maxwell immediate-mode rendering) has no such cost. If an attachment is cleared in full before being read, the write-back is redundant (DontCare).
@@ -11718,6 +11718,7 @@ static void sd_finish(void) {
         int img_dead = t->depth == 0 && t->load && t->img && !t->rast;
         int dead = t->state == 2 || udc_dead || xvdead || img_dead; MTLStoreAction sa = dead ? MTLStoreActionDontCare : MTLStoreActionStore;
         if (xvdead) { xv_set(t->ser, t->lv, t->sl, XV_INVALID, xtag); g_xv_dc++; }
+        if (dead && t->depth == 0) ts_discard(t->idx);
         if (t->depth == 1) [g_enc setDepthStoreAction:sa]; else if (t->depth == 2) [g_enc setStencilStoreAction:sa]; else [g_enc setColorStoreAction:sa atIndex:(NSUInteger)t->idx];
         g_sd_n_all++; if (dead) { g_sd_n_dead++; g_sd_dead_bytes += t->bytes; g_bw_store -= t->bytes; if (udc_dead) g_udc_saved_bytes += t->bytes; }
         if (!t->state) t->why = 5;
@@ -16014,9 +16015,10 @@ void dm_gfx_texdump_next(const char *path) {
     if (g_td_frame == -2) td_note(nil, 0);   // read DM_NVN_TEXDUMP first, so it does not override the request
     g_td_path = strdup(path); g_td_list = [NSMutableArray array]; g_td_done = 0; g_td_frame = (long)atomic_load(&g_cur_frame) + 1;
 }
+static void ts_summary(void);
 static void td_dump(void) {
     g_td_done = 1;
-    rp_end(); if (g_blit) { enc_b_end(g_blit); g_blit = nil; }
+    rp_end(); ts_summary(); if (g_blit) { enc_b_end(g_blit); g_blit = nil; }
     mtl_finish_gpu();
     static id<MTLRenderPipelineState> ps; static id<MTLSamplerState> sp;
     if (!ps) {
@@ -16092,33 +16094,82 @@ static void td_dump(void) {
 }
 // DM_NVN_TEXSNAP=in-frame index,... (together with the frame number and path of DM_NVN_TEXDUMP): as soon as these render passes end, copy their color attachments and save them together with the end-of-frame dump
 // (the same target is often cleared and reused within a frame, so the end-of-frame state cannot reflect the output of intermediate passes); saved as <TEXDUMP path with %d = 0>_s<in-frame index>_<serial>_<level>.png
-static int g_ts_idx[64], g_ts_n = -1, g_ts_on; static uint64_t g_ts_first, g_ts_curf = ~0ull;
-static __strong id<MTLTexture> g_ts_att[8]; static uint64_t g_ts_ser[8]; static NSUInteger g_ts_lv[8]; static int g_ts_na;
+static int g_ts_idx[64], g_ts_n = -1, g_ts_on, g_ts_all; static unsigned g_ts_discard; static uint64_t g_ts_first, g_ts_curf = ~0ull, g_ts_pass, g_ts_frame;
+static __strong id<MTLTexture> g_ts_att[8]; static uint64_t g_ts_ser[8]; static NSUInteger g_ts_lv[8], g_ts_slice[8], g_ts_slot[8]; static int g_ts_na, g_ts_layered;
+static NSUInteger g_ts_count, g_ts_skipped, g_ts_truncated; static uint64_t g_ts_bytes;
+#define TS_MAX_COUNT 256
+#define TS_MAX_BYTES (512ull * 1024 * 1024)
+// The PNG sampler reads float textures. Restrict all-mode to formats also supported by its raw readback.
+static int ts_format(MTLPixelFormat f) {
+    switch (f) {
+    case MTLPixelFormatRGBA8Unorm: case MTLPixelFormatRGBA8Unorm_sRGB:
+    case MTLPixelFormatBGRA8Unorm: case MTLPixelFormatBGRA8Unorm_sRGB:
+    case MTLPixelFormatRGBA16Float: case MTLPixelFormatRGBA32Float:
+    case MTLPixelFormatR16Float: case MTLPixelFormatR16Unorm: case MTLPixelFormatRG11B10Float: return 1;
+    default: return 0;
+    }
+}
+static void ts_summary(void) {
+    if (g_ts_all && (long)g_ts_frame != g_td_frame) {
+        MLOG("[texsnap] frame=%ld final INCOMPLETE: no render pass observed for requested frame", g_td_frame); return;
+    }
+    if (g_ts_all) MLOG("[texsnap] frame=%llu final captured=%lu skipped=%lu truncated=%lu retained_bytes=%llu limits=%u/%llu%s",
+        (unsigned long long)g_ts_frame, (unsigned long)g_ts_count, (unsigned long)g_ts_skipped, (unsigned long)g_ts_truncated,
+        (unsigned long long)g_ts_bytes, TS_MAX_COUNT, (unsigned long long)TS_MAX_BYTES,
+        (g_ts_skipped || g_ts_truncated) ? " INCOMPLETE" : "");
+}
+void ts_discard(int idx) { if (g_ts_on && idx >= 0 && idx < 8) g_ts_discard |= 1u << idx; }
 void ts_note(MTL4RenderPassDescriptor *pd, NSUInteger nc) {
     if (g_ts_n < 0) { g_ts_n = 0; const char *e = getenv("DM_NVN_TEXSNAP");
-        for (const char *q = e; q && *q && g_ts_n < 64; q = strchr(q, ',') ? strchr(q, ',') + 1 : q + strlen(q)) g_ts_idx[g_ts_n++] = atoi(q); }
-    g_ts_on = 0; if (!g_ts_n || g_td_frame < 0 || g_td_done) return;
+        if (e && !strcmp(e, "all")) { const char *td = getenv("DM_NVN_TEXDUMP");
+            if (td && (strncmp(td, "size=", 5) == 0 || strncmp(td, "layers=", 7) == 0)) MLOG("[texsnap] all requires an explicit TEXDUMP frame; content-selected frames are unsupported");
+            else g_ts_all = 1; }
+        else for (const char *q = e; q && *q && g_ts_n < 64; q = strchr(q, ',') ? strchr(q, ',') + 1 : q + strlen(q)) g_ts_idx[g_ts_n++] = atoi(q); }
+    g_ts_on = 0; if ((!g_ts_n && !g_ts_all) || g_td_frame < 0 || g_td_done) return;
     uint64_t f = atomic_load(&g_cur_frame); if (f != g_ts_curf) { g_ts_curf = f; g_ts_first = g_stat_pass; }
     if ((long)f != g_td_frame) return;
-    int idx = (int)(g_stat_pass - g_ts_first); for (int i = 0; i < g_ts_n; i++) if (g_ts_idx[i] == idx) g_ts_on = idx + 1;
-    g_ts_na = 0; if (!g_ts_on) return;
+    if (g_ts_all && g_ts_frame != f) { g_ts_count = g_ts_skipped = g_ts_truncated = 0; g_ts_bytes = 0; }
+    int idx = (int)(g_stat_pass - g_ts_first); if (g_ts_all) g_ts_on = idx + 1;
+    else for (int i = 0; i < g_ts_n; i++) if (g_ts_idx[i] == idx) g_ts_on = idx + 1;
+    g_ts_na = 0; g_ts_discard = 0; if (!g_ts_on) return;
+    g_ts_pass = g_stat_pass + 1; g_ts_frame = f; g_ts_layered = pd.renderTargetArrayLength > 1;
     for (NSUInteger i = 0; i < nc && i < 8; i++) { id<MTLTexture> t = pd.colorAttachments[i].texture; if (!t) continue;
-        g_ts_att[g_ts_na] = t; g_ts_ser[g_ts_na] = R.rt.color[i] ? R.rt.color[i]->serial : 0; g_ts_lv[g_ts_na] = pd.colorAttachments[i].level; g_ts_na++; }
+        g_ts_att[g_ts_na] = t; g_ts_ser[g_ts_na] = R.rt.color[i] ? R.rt.color[i]->serial : 0; g_ts_lv[g_ts_na] = pd.colorAttachments[i].level; g_ts_slice[g_ts_na] = pd.colorAttachments[i].slice; g_ts_slot[g_ts_na] = i; g_ts_na++; }
 }
 void ts_after(void) {
     if (!g_ts_on) return;
-    // The copy goes into the replay stream (Metal 4 copy encoder, after the pass that just ended). A command buffer of the classic queue, committed here, ran before the
-    // Metal 4 command buffer holding the pass was even committed, so every snapshot showed the attachments as they were before the pass (found on Tears of the Kingdom)
+    // blit() can end the render pass recursively. Claim this pass before opening the copy encoder.
+    int idx = g_ts_on - 1; g_ts_on = 0;
     for (int i = 0; i < g_ts_na; i++) {
-        id<MTLTexture> t = g_ts_att[i]; if (t.textureType != MTLTextureType2D && t.textureType != MTLTextureType2DArray) continue;   // 2D arrays take slice 0
+        id<MTLTexture> t = g_ts_att[i]; NSUInteger lv = g_ts_lv[i];
+        if (t.textureType != MTLTextureType2D && t.textureType != MTLTextureType2DArray) {
+            if (g_ts_all) { g_ts_skipped++; MLOG("[texsnap] skip index=%d pass=%llu frame=%llu ser=%llu type=%lu", idx, (unsigned long long)g_ts_pass, (unsigned long long)g_ts_frame, (unsigned long long)g_ts_ser[i], (unsigned long)t.textureType); } continue;
+        }
+        if (g_ts_all && (g_ts_discard & (1u << g_ts_slot[i]))) { g_ts_skipped++; MLOG("[texsnap] skip index=%d pass=%llu frame=%llu ser=%llu: pass store discarded", idx, (unsigned long long)g_ts_pass, (unsigned long long)g_ts_frame, (unsigned long long)g_ts_ser[i]); continue; }
+        if (g_ts_all && (g_ts_layered || g_ts_slice[i] != 0 || !ts_format(t.pixelFormat) || t.sampleCount != 1 || t.storageMode == MTLStorageModeMemoryless || lv >= t.mipmapLevelCount)) {
+            g_ts_skipped++; MLOG("[texsnap] skip index=%d pass=%llu frame=%llu ser=%llu format=%lu level=%lu slice=%lu layered=%d samples=%lu storage=%lu", idx, (unsigned long long)g_ts_pass, (unsigned long long)g_ts_frame, (unsigned long long)g_ts_ser[i], (unsigned long)t.pixelFormat, (unsigned long)lv, (unsigned long)g_ts_slice[i], g_ts_layered, (unsigned long)t.sampleCount, (unsigned long)t.storageMode); continue;
+        }
         MTLTextureDescriptor *d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:t.pixelFormat width:t.width height:t.height mipmapped:t.mipmapLevelCount > 1];
         d.usage = MTLTextureUsageShaderRead; d.storageMode = MTLStorageModePrivate; d.mipmapLevelCount = t.mipmapLevelCount;
-        id<MTLTexture> c = [g_dev newTextureWithDescriptor:d]; res_add(c);
-        NSUInteger lv = g_ts_lv[i], w = MAX((NSUInteger)1, t.width >> lv), h = MAX((NSUInteger)1, t.height >> lv);
+        if (g_ts_all) {
+            MTLSizeAndAlign size = [g_dev heapTextureSizeAndAlignWithDescriptor:d];
+            if (g_ts_count >= TS_MAX_COUNT || !size.size || size.size > TS_MAX_BYTES - g_ts_bytes) {
+                g_ts_truncated++; MLOG("[texsnap] truncation index=%d pass=%llu frame=%llu ser=%llu estimate=%lu count=%lu bytes=%llu", idx, (unsigned long long)g_ts_pass, (unsigned long long)g_ts_frame, (unsigned long long)g_ts_ser[i], (unsigned long)size.size, (unsigned long)g_ts_count, (unsigned long long)g_ts_bytes); continue;
+            }
+        }
+        id<MTLTexture> c = [g_dev newTextureWithDescriptor:d];
+        if (!c || (g_ts_all && (!c.allocatedSize || c.allocatedSize > TS_MAX_BYTES - g_ts_bytes))) {
+            if (g_ts_all) { g_ts_skipped++; MLOG("[texsnap] skip index=%d pass=%llu frame=%llu ser=%llu allocation failed or exceeds budget", idx, (unsigned long long)g_ts_pass, (unsigned long long)g_ts_frame, (unsigned long long)g_ts_ser[i]); } continue;
+        }
+        if (g_ts_all && ![c newTextureViewWithPixelFormat:c.pixelFormat textureType:MTLTextureType2D levels:NSMakeRange(lv, 1) slices:NSMakeRange(0, 1)]) {
+            g_ts_skipped++; MLOG("[texsnap] skip index=%d pass=%llu frame=%llu ser=%llu: output view unavailable", idx, (unsigned long long)g_ts_pass, (unsigned long long)g_ts_frame, (unsigned long long)g_ts_ser[i]); continue;
+        }
+        res_add(c);
+        NSUInteger w = MAX((NSUInteger)1, t.width >> lv), h = MAX((NSUInteger)1, t.height >> lv);
         enc_b_copy_texture(blit(), t, 0, lv, MTLOriginMake(0, 0, 0), MTLSizeMake(w, h, 1), c, 0, lv, MTLOriginMake(0, 0, 0));
-        [g_td_list addObject:@[c, @(g_ts_ser[i]), @(g_ts_lv[i]), @0, @(g_ts_on - 1)]];   // the end-of-frame fields (texture, serial, level, layer) plus the in-frame pass index: saved as <path with %d = 0>_s<index>_<serial>_<level>.png
+        [g_td_list addObject:@[c, @(g_ts_ser[i]), @(lv), @0, @(idx)]];
+        if (g_ts_all) { g_ts_count++; g_ts_bytes += c.allocatedSize; MLOG("[texsnap] captured index=%d pass=%llu frame=%llu ser=%llu level=%lu slice=0 format=%lu size=%lux%lu allocation=%lu", idx, (unsigned long long)g_ts_pass, (unsigned long long)g_ts_frame, (unsigned long long)g_ts_ser[i], (unsigned long)lv, (unsigned long)t.pixelFormat, (unsigned long)w, (unsigned long)h, (unsigned long)c.allocatedSize); }
     }
-    g_ts_on = 0;
 }
 // Ring of actual presentation times: present sequence number -> presentedTime (seconds; -1 = dropped by the system, not presented)
 #define PRING 1024

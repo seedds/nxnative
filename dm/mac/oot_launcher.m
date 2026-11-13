@@ -2,6 +2,8 @@
 // Compile on macOS: clang -fobjc-arc -framework Cocoa -o nxnative oot_launcher.m
 // Does not pack game data, modify saves, or change an already running game.
 #import <Cocoa/Cocoa.h>
+#import <IOKit/graphics/IOGraphicsTypes.h>
+#include "oot_output_size.h"
 #include <mach-o/dyld.h>
 #include <fcntl.h>
 #include <unistd.h>
@@ -53,11 +55,30 @@ static void show_error(NSString *message) {
     [alert runModal];
 }
 
+// Read mode metadata only. Never change the player's display mode here.
+static oot_output_size native_output(CGDirectDisplayID display) {
+    CFArrayRef modes = CGDisplayCopyAllDisplayModes(display,
+        (__bridge CFDictionaryRef)@{(__bridge NSString *)kCGDisplayShowDuplicateLowResolutionModes: @YES});
+    oot_output_size panel = {0, 0};
+    if (!modes) return panel;
+    for (CFIndex i = 0; i < CFArrayGetCount(modes); i++) {
+        CGDisplayModeRef mode = (CGDisplayModeRef)CFArrayGetValueAtIndex(modes, i);
+        if (!(CGDisplayModeGetIOFlags(mode) & kDisplayModeNativeFlag) || !CGDisplayModeIsUsableForDesktopGUI(mode)) continue;
+        oot_output_size size = oot_output_fit((uint32_t)CGDisplayModeGetPixelWidth(mode), (uint32_t)CGDisplayModeGetPixelHeight(mode));
+        if ((uint64_t)size.width * size.height > (uint64_t)panel.width * panel.height) panel = size;
+    }
+    CFRelease(modes);
+    return panel;
+}
+
 @interface OOTSettings : NSObject <NSWindowDelegate>
 @property(strong) NSWindow *window;
 @property(strong) NSButton *upscale;
 @property(strong) NSButton *interpolation;
 @property(strong) NSPopUpButton *fps;
+@property(strong) NSPopUpButton *resolution;
+@property oot_output_size nativeSize;
+@property CGDirectDisplayID outputDisplay;
 @property(strong) NSTextField *summary;
 @property BOOL accepted;
 - (instancetype)initWithSettings:(NSDictionary<NSString *, NSString *> *)settings;
@@ -70,7 +91,7 @@ static void show_error(NSString *message) {
 @implementation OOTSettings
 - (instancetype)initWithSettings:(NSDictionary<NSString *, NSString *> *)settings {
     if (!(self = [super init])) return nil;
-    _window = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 520, 312)
+    _window = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 520, 360)
         styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable
         backing:NSBackingStoreBuffered defer:NO];
     _window.title = @"Ocarina of Time";
@@ -79,12 +100,39 @@ static void show_error(NSString *message) {
     NSView *view = _window.contentView;
     NSTextField *title = [NSTextField labelWithString:@"Réglages du jeu"];
     title.font = [NSFont boldSystemFontOfSize:22];
-    title.frame = NSMakeRect(20, 256, 480, 32);
+    title.frame = NSMakeRect(20, 304, 480, 32);
     [view addSubview:title];
-    NSTextField *resolution = [NSTextField labelWithString:@"Affichage 2560 × 1440"];
-    resolution.textColor = NSColor.secondaryLabelColor;
-    resolution.frame = NSMakeRect(20, 232, 480, 24);
-    [view addSubview:resolution];
+    NSTextField *subtitle = [NSTextField labelWithString:@"Ces réglages s’appliquent au prochain lancement."];
+    subtitle.textColor = NSColor.secondaryLabelColor;
+    subtitle.frame = NSMakeRect(20, 280, 480, 24);
+    [view addSubview:subtitle];
+    NSTextField *resolutionLabel = [NSTextField labelWithString:@"Résolution de sortie"];
+    resolutionLabel.frame = NSMakeRect(20, 236, 172, 24);
+    [view addSubview:resolutionLabel];
+    _resolution = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(196, 236, 304, 28) pullsDown:NO];
+    _resolution.menu.autoenablesItems = NO;
+    [_resolution addItemWithTitle:@"Switch 2 — 2048 × 1152"]; _resolution.lastItem.representedObject = @"switch2";
+    [_resolution addItemWithTitle:@"2K — 2560 × 1440"]; _resolution.lastItem.representedObject = @"2k";
+    NSScreen *screen = NSScreen.mainScreen;
+    NSString *screenChoice = settings[@"DM_WINDOW_SCREEN"];
+    for (NSScreen *candidate in NSScreen.screens) {
+        CGDirectDisplayID display = [candidate.deviceDescription[@"NSScreenNumber"] unsignedIntValue];
+        if (([screenChoice isEqualToString:@"builtin"] && CGDisplayIsBuiltin(display)) ||
+            [screenChoice isEqualToString:[NSString stringWithFormat:@"%u", display]]) { screen = candidate; break; }
+    }
+    _outputDisplay = [screen.deviceDescription[@"NSScreenNumber"] unsignedIntValue];
+    _nativeSize = native_output(_outputDisplay);
+    NSString *nativeTitle = _nativeSize.width ? [NSString stringWithFormat:@"Mac natif — %u × %u", _nativeSize.width, _nativeSize.height] : @"Mac natif — indisponible";
+    [_resolution addItemWithTitle:nativeTitle]; _resolution.lastItem.representedObject = @"native";
+    _resolution.lastItem.enabled = _nativeSize.width > 0;
+    _resolution.lastItem.toolTip = @"Image 16:9 adaptée aux pixels physiques de l’écran, sans changer le mode du bureau.";
+    _resolution.target = self; _resolution.action = @selector(update:);
+    NSString *choice = settings[@"DM_OOT_OUTPUT_RESOLUTION"];
+    if (!choice) choice = [settings[@"DM_DRAWABLE_SIZE"] isEqualToString:@"2048x1152"] ? @"switch2" : @"2k";
+    [_resolution selectItemAtIndex:1];
+    for (NSMenuItem *item in _resolution.itemArray)
+        if (item.enabled && [item.representedObject isEqualToString:choice]) [_resolution selectItem:item];
+    [view addSubview:_resolution];
     _upscale = [NSButton checkboxWithTitle:@"Upscaling MetalFX" target:self action:@selector(update:)];
     _upscale.frame = NSMakeRect(20, 188, 480, 24);
     _upscale.state = [settings[@"DM_UPSCALER"] isEqualToString:@"metalfx"] ? NSControlStateValueOn : NSControlStateValueOff;
@@ -135,13 +183,22 @@ static void show_error(NSString *message) {
 - (NSDictionary<NSString *, NSString *> *)changes {
     BOOL fi = self.interpolation.state == NSControlStateValueOn;
     BOOL upscale = self.upscale.state == NSControlStateValueOn;
-    return @{@"DM_WINDOW":@"1", @"DM_FPS_TARGET":[NSString stringWithFormat:@"%ld", (long)(fi ? self.fps.selectedTag/2 : 60)],
+    NSString *choice = self.resolution.selectedItem.representedObject;
+    NSString *size = [choice isEqualToString:@"native"]
+        ? [NSString stringWithFormat:@"%ux%u", self.nativeSize.width, self.nativeSize.height]
+        : [choice isEqualToString:@"switch2"] ? @"2048x1152" : @"2560x1440";
+    NSMutableDictionary *result = [@{@"DM_WINDOW":@"1", @"DM_FPS_TARGET":[NSString stringWithFormat:@"%ld", (long)(fi ? self.fps.selectedTag/2 : 60)],
         @"DM_PRESENT_HZ":@"60", @"DM_OOT_INTERPOLATION_PREVIEW":fi ? @"3" : @"0",
         @"DM_OOT_FRAMEGEN_ASYNC":fi ? @"1" : @"0", @"DM_PRESENT_UPSCALE":upscale ? @"metalfx" : @"off",
         @"DM_UPSCALER":upscale ? @"metalfx" : @"game", @"DM_UPSCALER_EXPERIMENTAL":upscale ? @"1" : @"0",
-        @"DM_OOT_HDR":@"0", @"DM_OOT_HDR_OUTPUT_ALIAS":@"0", @"DM_DRAWABLE_SIZE":@"2560x1440",
+        @"DM_OOT_HDR":@"0", @"DM_OOT_HDR_OUTPUT_ALIAS":@"0", @"DM_DRAWABLE_SIZE":size,
+        @"DM_OOT_OUTPUT_RESOLUTION":choice,
         @"DM_PRESENT_FIFO":@"1", @"DM_PRESENT_LINK":@"0", @"DM_PRESENT_SNAP":@"2",
-        @"DM_SCREEN_MATCH":@"0", @"DM_SCREEN_NATIVE":@"0", @"DM_FPS_HOLD":@"off"};
+        @"DM_SCREEN_MATCH":@"0", @"DM_SCREEN_NATIVE":@"0", @"DM_FPS_HOLD":@"off"} mutableCopy];
+    // Resolve native size and host placement against the same screen at launch.
+    if ([choice isEqualToString:@"native"])
+        result[@"DM_WINDOW_SCREEN"] = [NSString stringWithFormat:@"%u", self.outputDisplay];
+    return result;
 }
 @end
 
@@ -188,21 +245,36 @@ int main(int argc, char **argv) {
         [appMenu addItemWithTitle:@"Quitter Ocarina of Time" action:@selector(terminate:) keyEquivalent:@"q"];
         appItem.submenu = appMenu; NSApp.mainMenu = menu;
         if (snapshot && strstr(argv[2], "-fi")) { controller.interpolation.state = NSControlStateValueOn; [controller.fps selectItemWithTag:60]; [controller update:nil]; }
+        if (snapshot && strstr(argv[2], "-native") && controller.resolution.lastItem.enabled)
+            [controller.resolution selectItem:controller.resolution.lastItem];
         if (selftest) {
             assert(![controller.fps.menu itemWithTag:90].enabled);
-            for (int up = 0; up < 2; up++) for (int fi = 0; fi < 2; fi++) {
-                controller.upscale.state = up; controller.interpolation.state = fi;
-                [controller.fps selectItemWithTag:120]; [controller update:nil];
-                NSDictionary *c = controller.changes;
-                assert([c[@"DM_FPS_TARGET"] isEqualToString:@"60"]);
-                assert([c[@"DM_UPSCALER"] isEqualToString:up ? @"metalfx" : @"game"]);
-                if (fi) { [controller.fps selectItemWithTag:60]; [controller update:nil]; assert([controller.changes[@"DM_FPS_TARGET"] isEqualToString:@"30"]); }
+            assert([controller.resolution.selectedItem.representedObject isEqualToString:@"2k"]);
+            for (NSMenuItem *resolution in controller.resolution.itemArray) {
+                if (!resolution.enabled) continue;
+                [controller.resolution selectItem:resolution];
+                for (int up = 0; up < 2; up++) for (int fi = 0; fi < 2; fi++) {
+                    controller.upscale.state = up; controller.interpolation.state = fi;
+                    [controller.fps selectItemWithTag:120]; [controller update:nil];
+                    NSDictionary *c = controller.changes;
+                    assert([c[@"DM_FPS_TARGET"] isEqualToString:@"60"]);
+                    assert([c[@"DM_UPSCALER"] isEqualToString:up ? @"metalfx" : @"game"]);
+                    NSString *expectedSize = [resolution.representedObject isEqualToString:@"native"]
+                        ? [NSString stringWithFormat:@"%ux%u", controller.nativeSize.width, controller.nativeSize.height]
+                        : [resolution.representedObject isEqualToString:@"switch2"] ? @"2048x1152" : @"2560x1440";
+                    assert([c[@"DM_DRAWABLE_SIZE"] isEqualToString:expectedSize]);
+                    OOTSettings *restored = [[OOTSettings alloc] initWithSettings:read_settings(merge_settings(@"# keep\nDM_ROOT=/path with spaces\n", c))];
+                    assert([restored.resolution.selectedItem.representedObject isEqualToString:resolution.representedObject]);
+                    assert(restored.upscale.state == up && restored.interpolation.state == fi);
+                    if (fi) { [controller.fps selectItemWithTag:60]; [controller update:nil]; assert([controller.changes[@"DM_FPS_TARGET"] isEqualToString:@"30"]); }
+                }
             }
             for (NSView *v in controller.window.contentView.subviews) {
                 NSRect f = v.frame; assert(NSMinX(f) >= 20 && NSMaxX(f) <= 500);
+                assert(NSMinY(f) >= 20 && NSMaxY(f) <= 340);
                 assert(fmod(f.origin.x, 4) == 0 && fmod(f.origin.y, 4) == 0);
             }
-            puts("selector: combinations, native cap mapping, disabled choices and layout grid pass"); return 0;
+            puts("selector: resolution persistence, combinations, native cap mapping, disabled choices and layout grid pass"); return 0;
         }
         [controller.window makeKeyAndOrderFront:nil]; [NSApp activateIgnoringOtherApps:YES];
         [controller.window makeFirstResponder:nil];

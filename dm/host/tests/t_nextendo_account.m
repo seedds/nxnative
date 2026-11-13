@@ -108,9 +108,11 @@ static pthread_t pending(Worker *worker) {
 }
 static void release_provider(pthread_t thread) { pthread_mutex_lock(&providerLock); blockProvider = false; pthread_cond_broadcast(&providerCondition); pthread_mutex_unlock(&providerLock); CHECK(pthread_join(thread, NULL) == 0, "credential operation returned"); }
 static uint32_t service_operation(const void *value) { return *(const uint32_t *)value; }
+// The SDK's own constructor builds an AsyncContext (hle_account.c leaves it alone): it writes guest memory the host never reads, so here it writes nothing either
+static void sdk_ctor(void *self) { (void)self; }
 static void async_tests(void) {
     typedef void (*Ctor)(void *); typedef uint32_t (*Object)(void *); typedef uint32_t (*Event)(void *, void *);
-    Ctor ctor = H(Ctor, "_ZN2nn7account12AsyncContextC1Ev"), dtor = H(Ctor, "_ZN2nn7account12AsyncContextD1Ev");
+    Ctor ctor = sdk_ctor, dtor = H(Ctor, "_ZN2nn7account12AsyncContextD1Ev");
     Object result = H(Object, "_ZN2nn7account12AsyncContext9GetResultEv"); Event event = H(Event, "_ZN2nn7account12AsyncContext14GetSystemEventEPNS_2os11SystemEventE");
     memset(contextA, 0xa5, sizeof contextA); memset(contextB, 0x5a, sizeof contextB); ctor(contextA); TestEvent completion = {0}; uint8_t done = 9;
     CHECK(result(contextA) != 0 && event(contextA, &completion) != 0 && !completion.id, "empty context has no invented completion request");
@@ -141,6 +143,19 @@ static void async_tests(void) {
     CHECK(dm_nextendo_async_execute(contextA,service_operation,&service_result)==0 && result(contextA)==service_result && !dm_nextendo_async_done(contextA,&done) && done, "service operation preserves its real failure result and completed state");
     service_result=0; CHECK(dm_nextendo_async_execute(contextA,service_operation,&service_result)==0 && !result(contextA), "a later service request has its own real completion");
     mode=DM_NET_LAN; CHECK(dm_nextendo_async_execute(contextA,service_operation,&service_result)!=0, "local modes do not execute a provider service operation"); mode=DM_NET_NEXTENDO; dtor(contextA);
+    // A move constructor builds the object, so it writes the SDK's vtable (taken from the source) and a null IPC pointer at +0x18, and moves the request state
+    ctor(contextA); CHECK(dm_nextendo_async_ensure(contextA) == 0 && result(contextA) == 0, "request before move construction"); lifetime = dm_nextendo_async_lifetime(contextA);
+    memset(contextA, 0x11, 8); memset(contextB, 0x5a, sizeof contextB); H(void (*)(void *, void *), "_ZN2nn7account12AsyncContextC1EOS1_")(contextB, contextA);
+    void *ipc; memcpy(&ipc, contextB + 0x18, sizeof ipc);
+    CHECK(!memcmp(contextB, contextA, 8) && !ipc && contextB[8] == 0x5a, "move construction writes the vtable and IPC pointer, and nothing else");
+    CHECK(dm_nextendo_async_lifetime(contextB) == lifetime && !dm_nextendo_async_valid(contextA) && result(contextB) == 0, "move construction carries the completed request"); dtor(contextA); dtor(contextB);
+    // Nextendo off, a context answers as the offline host always has, whatever was constructed
+    mode=DM_NET_OFFLINE; ctor(contextA); TestEvent offline = {0}; done = 0;
+    CHECK(dm_nextendo_async_ensure(contextA) != 0 && !dm_nextendo_async_valid(contextA), "offline: no request starts");
+    CHECK(event(contextA, &offline) == 0 && offline.signaled, "offline: the completion event fires immediately");
+    CHECK(H(Event, "_ZN2nn7account12AsyncContext7HasDoneEPb")(contextA, &done) == 0 && done, "offline: the context is done");
+    CHECK(result(contextA) != 0 && H(Object, "_ZN2nn7account12AsyncContext6CancelEv")(contextA) == 0, "offline: the result is failure and cancel has nothing to cancel");
+    close_event(&offline); dtor(contextA); mode=DM_NET_NEXTENDO;
 }
 int main(void) { @autoreleasepool {
     // No configured provider is a normal unavailable result, not an OS storage

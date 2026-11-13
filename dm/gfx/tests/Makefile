@@ -397,6 +397,9 @@ t_pso_archive: t_pso_archive.m $(MTL_T_DEP)
 check_t_pso_archive: t_pso_archive
 	MTL_DEBUG_LAYER=1 ./t_pso_archive
 	MTL_DEBUG_LAYER=1 python3 test_pso_archive.py "$(CURDIR)/t_pso_archive"
+t_compute_group: t_compute_group.m ../nvn/nvn_compute.h
+	clang -O1 -g -Wall -fobjc-arc -o $@ t_compute_group.m -framework Metal -framework Foundation
+check_t_compute_group: RUN_ENV = MTL_DEBUG_LAYER=1
 t_pso_bundle: t_pso_bundle.m ../tools/pso_offline.py $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_pso_bundle.m $(MTL_T_SRC) $(FW)
 t_pso_stall: t_pso_stall.m $(MTL_T_DEP)

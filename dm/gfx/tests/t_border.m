@@ -162,7 +162,7 @@ int main(int argc, char **argv) { @autoreleasepool {
         id<MTLLibrary> lib = src ? [g_dev newLibraryWithSource:src options:nil error:&error] : nil;
         // as shader_load and dispatch take a compute shader: specialized with the empty set (the corrections), and without them (cps_new_b), each through cps_new
         NvShader *cs = [NvShader new]; cs->fn = lib ? fn_spec(lib, @"main0", [MTLFunctionConstantValues new], &error) : nil;
-        id<MTLComputePipelineState> p = cs->fn ? cps_new_b(cs->fn, 0, &error) : nil, p_off = cs->fn ? cps_new_b(cs->fn, 1, &error) : nil;
+        id<MTLComputePipelineState> p = cs->fn ? cps_new_b(cs->fn, 0, cs->rf.tg, &error) : nil, p_off = cs->fn ? cps_new_b(cs->fn, 1, cs->rf.tg, &error) : nil;
         CHECK(p != nil && p_off != nil, "the rewritten shader compiles: %s", error.localizedDescription.UTF8String);
         CHECK(p && p_off && p != p_off && fn4_of_b(cs->fn, 1) != fn4_of(cs->fn) && fn_dev_b(cs->fn, 1) == fn_dev_b(cs->fn, 1), "the kernel's border-off pipeline is its own, its functions cached");
         if (p && p_off) {

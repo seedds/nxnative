@@ -401,6 +401,13 @@ def glslc_shaders(d, label, need=True, skip=()):
         nctl, ncode = (struct.unpack_from('<I', d, c + 0x20)[0], struct.unpack_from('<I', d, c + 0x704)[0]) if c + 0x708 <= h + size else (0, 0)   # 0: a control section the output does not hold
         ctl, code = d[c:c + nctl], d[c + nctl:c + nctl + ncode]
         st = glslc_stage(ctl, code) if nctl >= 0x760 and not nctl & 3 and c + nctl + ncode <= h + size else None
+        # A single-stage compute output may keep constants between its control
+        # section and GPU code; prefer its explicit section offsets in that case.
+        if st == 'cs' and code[:4] != CS_MAGIC:
+            sec = glslc_section(d, h, size)
+            if sec and len(sec) == 1 and sec[0][1][:4] == CS_MAGIC:
+                ctl, code = sec[0]
+                st = glslc_stage(ctl, code)
         if not st or check(label, st, ctl, code): continue
         out.append((f'{label}#GLSLC@{h:#x}', st, ctl, code))
     if not out and need: red(f'{label}: no GLSLC output')

@@ -54,7 +54,7 @@ The work folder `04008E001F098000-work` beside the dump has `run/boot.sh <log> <
 
 - A point played on the Mac in this tree (needs a motion controller, or scripted moves that serve).
 - Sports other than tennis.
-- The system data the game mounts as `MiiResource` (`0400000000000849`): `[RED] fs mount system data MiiResource: the host has no 0400000000000849`. FifteenPen's [PR #2274](https://github.com/seedds/nxnative/pull/2274) reads it and the Mii database from the player's own console files.
+- Mii heads need the player's own console files: without the system data the game mounts as `MiiResource` (`0400000000000849`) it logs `[RED] fs mount system data MiiResource: the host has no 0400000000000849` and draws no heads. With that archive and the console's Mii database under `DM_SYSTEM_DIR` ([A console's own Mii database and system data](../../../docs/reference/services.md#a-consoles-own-mii-database-and-system-data)) it lists the player's Miis and draws their heads (FifteenPen, PR #2274, M4 Pro); not run in this tree, which has no console files.
 - The 6 refused mesh shaders, above.
 - iPhone and iPad: no IPA built.
 
@@ -71,3 +71,4 @@ The work folder `04008E001F098000-work` beside the dump has `run/boot.sh <log> <
 - [A render-target view of another class: the texture is upgraded, not drawn in its base format](../../../docs/reference/rendering.md#a-render-target-view-of-another-class-the-texture-is-upgraded-not-drawn-in-its-base-format)
 - [Conditional rendering evaluated at replay](../../../docs/reference/rendering.md#conditional-rendering-evaluated-at-replay)
 - [Tests of one uniform word folded into switches](../../../docs/reference/shaders.md#tests-of-one-uniform-word-folded-into-switches) and [Specialized second functions in the offline pipeline archive](../../../docs/reference/shaders.md#specialized-second-functions-in-the-offline-pipeline-archive)
+- [A console's own Mii database and system data](../../../docs/reference/services.md#a-consoles-own-mii-database-and-system-data): its Mii heads come from the Switch 2's own archive, `0400000000000849`.

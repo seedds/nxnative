@@ -8408,8 +8408,10 @@ static _Atomic int g_compact_bases; static _Atomic uint64_t g_compact_ns;   // r
 static NSArray<NSString *> *g_compact_files; static _Atomic int g_compacted;
 static unsigned char *g_compact_state;   // per run file of g_compact_files (g_arch4's order): 1 when the compaction replaces it; immutable after pso4_init
 // g_compact_periods: periods that may hold recaptured bases, handed over and not written yet; g_compact_closed: the last of them is handed over (the first flush after the prewarm);
-// g_compact_bad: one was not written, or a base the prewarm took from an old file was not captured again: the old files stay (arch_compact_finish)
-static _Atomic int g_compact_periods, g_compact_closed, g_compact_bad;
+// g_compact_bad: one was not written, or a base the prewarm took from an old file was not captured again: the old files stay (arch_compact_finish); g_compact_harvests: recaptures
+// queued on the harvest queue (arch_harvest) and not in a period yet: the compaction closes only once there are none, so a late one is in a compacting period and its failure keeps the
+// old files (before, the flush after the prewarm closed it while some were queued: one that failed then found its old file removed, and was compiled again at the next start)
+static _Atomic int g_compact_periods, g_compact_closed, g_compact_bad, g_compact_harvests;
 // Keep the crash-recovery guard if a compaction still fails in Metal. Markers name the OS build and capture method: a marker from the old archive-import path must not
 // disable the safer original-function capture. A failed flush of this method disables compaction on this OS build until it changes; ordinary archive reads remain available.
 static NSString *arch_compact_marker(void) { return [g_arch_dir stringByAppendingPathComponent:@"compacting"]; }
@@ -8958,6 +8960,7 @@ static dispatch_queue_t arch_harvest_q(void) {   // one capture at a time, at ut
 static void arch_harvest(MTL4PipelineDescriptor *d, int compact) {
     if (!d) return;
     if (!arch_capturing()) { if (compact) g_compact_bad = 1; return; }
+    if (compact) atomic_fetch_add(&g_compact_harvests, 1);
     dispatch_async(arch_harvest_q(), ^{ @autoreleasepool {
         NSError *ce = nil; int cap = 0, compute = [d isKindOfClass:MTL4ComputePipelineDescriptor.class];
         id ps = compute ? (id)arch_capture_cs((MTL4ComputePipelineDescriptor *)d, &ce, &cap) : (id)arch_capture(d, &ce, 0, &cap);
@@ -8969,7 +8972,19 @@ static void arch_harvest(MTL4PipelineDescriptor *d, int compact) {
             MLOG("[RED] %s pipeline %s: the Metal 4 compiler refused it (%s): not kept in the pipeline archive", compute ? "compute" : "task / mesh",
                  [fd isKindOfClass:MTL4LibraryFunctionDescriptor.class] ? ((MTL4LibraryFunctionDescriptor *)fd).name.UTF8String : "(unnamed)", ce ? ce.localizedDescription.UTF8String : "no error given");
         }
+        // the prewarm's last recapture, after the prewarm: the flush that closes the compaction (warm_finish's held back while this was queued)
+        if (compact && atomic_fetch_sub(&g_compact_harvests, 1) == 1 && !atomic_load(&g_warm_running)) arch_flush_from(nil);
     } });
+}
+// Waits until every capture queued on the harvest queue so far has joined its period (a marker behind them on that serial queue: captures queued later are not waited for, so
+// draws that keep building pipelines cannot hold the wait), at most until until. Non-zero when it timed out. A waiting flush (arch_flush_wait, mtl_arch_save) calls it before it
+// hands the period over: a capture still queued then joined the next period, which no one wrote before the process ended. In the prebuild tool's bundle form that left the C and M
+// rows' captures out of the bundle and wrote them at exit, where their pipelines script crashed the tool in Metal's serializer and the NSP script dropped all the tool's files
+// (Ocarina of Time, GitHub issue #2498); a quitting game lost them and compiled them again at the next start
+static long arch_harvest_wait(dispatch_time_t until) {
+    dispatch_block_t mark = dispatch_block_create(0, ^{});
+    dispatch_async(arch_harvest_q(), mark);
+    return dispatch_block_wait(mark, until);
 }
 // A function the border corrections' constant specializes: its compute pipeline is in the bundle and the archive by that descriptor. Any other function with constants is built
 // from fn_dev's specialization and is not looked up or captured
@@ -9037,7 +9052,13 @@ static void arch_write_file(ArchEpoch *ep) {
 static void arch_hand_over(ArchEpoch *only, int any_time) {
     if (!g_arch_cap || (!only && !any_time && atomic_load(&g_warm_running))) return;
     os_unfair_lock_lock(&g_ep_lock); int any = (!only || g_ep == only) && (atomic_load(&g_ep->n) || atomic_load(&g_ep->active)); os_unfair_lock_unlock(&g_ep_lock);
-    if (!any) return;   // nothing captured or under way: the period goes on
+    // nothing captured or under way: the period goes on. A compaction due to close (the prewarm over, no recapture queued) closes all the same: its recaptures are all in periods
+    // handed over, and the last of them to be written finishes it, or this does when they all are (before, it stayed open for the run and the next start compacted again)
+    if (!any) {
+        if (!only && g_compact_enabled && atomic_load(&g_compacted) && !atomic_load(&g_warm_running) && !atomic_load(&g_compact_harvests) && !atomic_exchange(&g_compact_closed, 1))
+            dispatch_async(g_arch_q, ^{ if (!atomic_load(&g_compact_periods)) arch_compact_finish(); });   // on the queue that writes them: after any write under way
+        return;
+    }
     ArchEpoch *ne = ep_new();
     if (!ne) { MLOG("[RED] pipeline archive: Metal made no compiler for a new flush period: the captures go on into the current one"); return; }
     os_unfair_lock_lock(&g_ep_lock);
@@ -9047,7 +9068,7 @@ static void arch_hand_over(ArchEpoch *only, int any_time) {
         // Every period from the first recaptured base on may hold some (see arch_compact_allowed); the first one handed over after the prewarm is the compaction's last
         if (g_compact_enabled && atomic_load(&g_compacted) && !atomic_load(&g_compact_closed)) {
             old->compacting = 1; atomic_fetch_add(&g_compact_periods, 1);
-            if (!atomic_load(&g_warm_running)) atomic_store(&g_compact_closed, 1);
+            if (!atomic_load(&g_warm_running) && !atomic_load(&g_compact_harvests)) atomic_store(&g_compact_closed, 1);
         }
     }
     os_unfair_lock_unlock(&g_ep_lock);
@@ -9061,28 +9082,31 @@ static void arch_flush(void) { arch_flush_from(nil); }
 // bases (Ocarina of Time on an M4: about 2,000 bases, minutes of compiling), built again at the next start. Going to the background (dm_gfx_suspend): wait_ms 0, the write goes
 // on behind (a file is written as .tmp and renamed, so a process killed meanwhile leaves none half-written). Quitting (atexit for ⌘Q, closing the window and exit(); dm_gfx_quit
 // in the graceful exit): ending, waiting up to wait_ms for the compiles under way in the period and the writes (a file of 900 bases took 1.8-4 s on Macs, so a full period some
-// 4-9 s). A write the exit then cuts short is not a compaction that crashed Metal: its marker goes, and none is written from here on (arch_mark)
+// 4-9 s). A write the exit then cuts short is not a compaction that crashed Metal: its marker goes, and none is written from here on (arch_mark). A wait (wait_ms > 0) first lets the
+// harvest queue capture what it holds (arch_harvest_wait), within the same time
 enum { ARCH_QUIT_WAIT_MS = 10000 };
 void mtl_arch_save(int wait_ms, int ending) {
     if (!g_arch_cap) return;
-    int n = atomic_load(&g_arch_new); uint64_t t0 = bp_now();
+    uint64_t t0 = bp_now(); dispatch_time_t until = dispatch_time(DISPATCH_TIME_NOW, (int64_t)wait_ms * NSEC_PER_MSEC);
+    long late = wait_ms > 0 && arch_harvest_wait(until);
+    int n = atomic_load(&g_arch_new);
     arch_hand_over(nil, 1);
     if (!wait_ms && !ending) return;
-    long late = wait_ms > 0 && dispatch_group_wait(g_arch_pending, dispatch_time(DISPATCH_TIME_NOW, (int64_t)wait_ms * NSEC_PER_MSEC));
+    late = (wait_ms > 0 && dispatch_group_wait(g_arch_pending, until)) || late;
     if (ending) arch_mark(-1);
     if (n || late) MLOG("pipeline archive at exit: %d pipelines not written yet, %s (%.0f ms)", n,
                         late ? "not all written in time: those left are built again at the next start" : !wait_ms ? "not waited for" : "written", (bp_now() - t0) / 1e6);
 }
 static void arch_at_exit(void) { mtl_arch_save(ARCH_QUIT_WAIT_MS, 1); }
-// A flush, then every period handed over is written (not on g_arch_q, which writes them)
-static void arch_flush_wait(void) { arch_flush(); if (g_arch_pending) dispatch_group_wait(g_arch_pending, DISPATCH_TIME_FOREVER); }
+// What the harvest queue holds captured, then a flush, then every period handed over is written (not on g_arch_q, which writes them, nor on the harvest queue)
+static void arch_flush_wait(void) { arch_harvest_wait(DISPATCH_TIME_FOREVER); arch_flush(); if (g_arch_pending) dispatch_group_wait(g_arch_pending, DISPATCH_TIME_FOREVER); }
 static void arch_note_new(void) {   // a base was compiled: flush 10 s later (one flush for a burst of them)
     if (!g_arch_q || atomic_exchange(&g_arch_sched, 1)) return;
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 10 * (int64_t)NSEC_PER_SEC), g_arch_q, ^{ atomic_store(&g_arch_sched, 0); arch_flush(); });
 }
 static void arch_compact_finish(void) {   // after every period that may hold recaptured bases is written (arch_write): the old files go once their bases are in the new ones
     if (!g_compact_files || !g_compacted) return;
-    if (g_compact_bad) { MLOG("[RED] pipeline archive: compaction left the old files (a flush failed, or a base was not captured again)"); return; }
+    if (g_compact_bad) { MLOG("[RED] pipeline archive: compaction left the old files (a flush failed, or a base was not captured again)"); g_compact_files = nil; return; }   // once, as below
     int gone = 0; for (NSUInteger i = 0; i < g_compact_files.count; i++) if (!g_compact_state || g_compact_state[i]) { unlink(g_compact_files[i].fileSystemRepresentation); unlink(arch_keys_path(g_compact_files[i]).fileSystemRepresentation); gone++; }
     MLOG("pipeline archive compacted: %d files of bases with a vertex layout gave %d bases to the files just written and were removed", gone, (int)g_compacted);
     g_compact_files = nil;
@@ -9916,7 +9940,7 @@ static void warm_finish(void) {
     // Drop negative results too: demand loading keeps its existing retry behavior, independent of the warm dictionary.
     g_warm_dict = nil; g_warm_loads = nil;
     atomic_store(&g_warm_running, 0);
-    arch_flush();   // the period of the recaptured bases (compaction finishes once it is written), after the prewarm stops recapturing them
+    arch_flush();   // the period of the recaptured bases (compaction finishes once it is written), after the prewarm stops recapturing them; recaptures still queued close it (arch_harvest)
     @autoreleasepool { pso_prebuild_bg(); }   // then, once, the bases every shader pair's hybrid draws need
 }
 // Wait for the background warm-up to finish (at most timeout_ms): returns how many milliseconds were actually waited, 0 if it is not running. On first install the system shader cache is fully cold; if warm-up is slower than the player entering a run,
@@ -10025,7 +10049,7 @@ static long pre_warm_lists(NSArray<NSString *> *paths, int threads) {
              (unsigned long long)(g_pb_archived - arch0), (int)atomic_load(&g_pre_warm_failed), (bp_now() - t0) / 1e9);
         if (atomic_load(&g_arch_new) >= 1000) arch_flush();   // the serializer holds what it captured until written
     }
-    arch_flush_wait();
+    arch_flush_wait();   // with the C and M rows' captures, which the harvest queue makes after g: nothing is left for mtl_arch_save at exit
     g_warm_dict = nil; g_warm_loads = nil;
     MLOG("pipeline prebuild: the prewarm lists' %ld lines in %.1f s: %llu render pipelines (bases %llu compiled, %llu from the archives), %llu compute, %llu mesh, %d failed",
          lines, (bp_now() - t0) / 1e9, (unsigned long long)g_warm_rps, (unsigned long long)(g_pb_built - built0), (unsigned long long)(g_pb_archived - arch0),

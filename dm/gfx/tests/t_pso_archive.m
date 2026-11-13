@@ -162,6 +162,22 @@ static void compute_pipelines(void) {
     EXPECT("compute, compaction: waits for the flush", pending + 1, g_arch_new);
     atomic_store(&g_warm_running, 0); g_compact_enabled = 0; g_compacted = 0;
     arch_flush_wait();
+    // a recapture still queued when the prewarm ends (the harvest queue held 300 ms): the flush after the prewarm leaves the compaction open, and the recapture's own flush closes it
+    g_compact_enabled = 1; g_compacted = 0; g_compact_closed = 0; g_compact_periods = 0; atomic_store(&g_warm_running, 1);
+    dispatch_async(arch_harvest_q(), ^{ usleep(300000); });
+    EXPECT("compute, queued recapture: a pipeline", 1, cps_new(kf, &err) != nil);
+    atomic_store(&g_warm_running, 0); arch_flush();   // as warm_finish
+    EXPECT("compute, queued recapture: the compaction stays open", 0, g_compact_closed);
+    arch_harvest_wait(DISPATCH_TIME_FOREVER);
+    EXPECT("compute, queued recapture: captured again", 1, g_compacted);
+    EXPECT("compute, queued recapture: its flush closes the compaction", 1, g_compact_closed);
+    arch_flush_wait(); dispatch_sync(g_arch_q, ^{});
+    EXPECT("compute, queued recapture: its period written as the compaction's", 0, g_compact_periods + g_arch_new);
+    // a compaction due to close when the current period is empty (its recaptures all handed over): closed all the same
+    g_compact_closed = 0; g_compacted = 1;
+    arch_flush(); dispatch_sync(g_arch_q, ^{});
+    EXPECT("compaction, empty period: closed", 1, g_compact_closed);
+    g_compact_enabled = 0; g_compacted = 0; g_compact_closed = 0; g_compact_periods = 0;
     // no Metal 4 descriptor: built through the MTLDevice, no lookup, nothing captured
     int looked = la->lookups; built = g_cps_built; pending = g_arch_new;
     id<MTLComputePipelineState> up = cps_new(uf, &err);
@@ -171,6 +187,18 @@ static void compute_pipelines(void) {
     dispatch_sync(arch_harvest_q(), ^{});
     EXPECT("compute without a descriptor: not captured", pending, g_arch_new);
     EXPECT("compute without a descriptor: its dispatch writes", 1, run_kernel(up));
+    // a capture still queued behind a slow one (the harvest queue held 300 ms): a waiting flush and the quit's save each take it into the period they write (arch_harvest_wait)
+    for (int quit = 0; quit < 2; quit++) {
+        NSString *kn = quit ? @"kq" : @"kf", *s2 = [src stringByReplacingOccurrencesOfString:@"void k(" withString:[NSString stringWithFormat:@"void %@(", kn]];
+        id<MTLLibrary> l2 = [g_dev newLibraryWithSource:s2 options:nil error:&err];
+        id<MTLFunction> f2 = fn4_note([l2 newFunctionWithName:kn], l2, kn, nil);
+        NSUInteger files = archive_files(@(kdir)).count; built = g_cps_built;
+        dispatch_async(arch_harvest_q(), ^{ usleep(300000); });
+        EXPECT(quit ? "queued capture, quit: a pipeline" : "queued capture, flush: a pipeline", 1, cps_new(f2, &err) != nil && g_cps_built == built + 1);
+        if (quit) mtl_arch_save(ARCH_QUIT_WAIT_MS, 0); else arch_flush_wait();
+        EXPECT(quit ? "queued capture, quit: written" : "queued capture, flush: written", files + 1, archive_files(@(kdir)).count);
+        EXPECT(quit ? "queued capture, quit: nothing left" : "queued capture, flush: nothing left", 0, g_arch_new);
+    }
     [NSFileManager.defaultManager removeItemAtPath:@(kdir) error:nil]; g_arch_dir = saved; g_arch4 = @[];
 }
 // Draws mesh pipeline ps (one triangle over the target) into a 4x4 RGBA8 target cleared to red: 1 when the centre pixel is the fragment's colour, or red with no fragment

@@ -195,6 +195,11 @@ check_t_present_crop: t_present_crop
 	DM_PRESENT_SNAP=0 DM_NVN_ENC_THREAD=1 ./t_present_crop
 	DM_PRESENT_SNAP=1 DM_NVN_ENC_THREAD=0 ./t_present_crop
 	DM_PRESENT_SNAP=1 DM_NVN_ENC_THREAD=1 ./t_present_crop
+
+# Push-constant diagnostic through the production argument encoder.
+t_push_capture: t_push_capture.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_push_capture.m $(MTL_T_SRC) $(FW)
+check_t_push_capture: RUN_ENV = MTL_DEBUG_LAYER=1
 t_present_rescue: t_present_rescue.m t_present_rescue_focus.c $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_present_rescue.m t_present_rescue_focus.c $(MTL_T_SRC) $(FW)
 .PHONY: check_t_present_rescue

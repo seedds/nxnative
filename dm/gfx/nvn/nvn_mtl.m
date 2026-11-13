@@ -11482,6 +11482,20 @@ static int encode_args_(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, i
         } else if (b->kind == NVN_RB_PUSH) {   // NVN2 push constants (c[24]): the stage group's current block
             id<MTLBuffer> db; size_t doff = arena_alloc(sizeof S.push[0], &db);
             memcpy(g_cur_arena->cpu + doff, S.push[nvn_stage == 5 ? 1 : 0], sizeof S.push[0]);
+            if (bl) {
+                const uint8_t *bytes = g_cur_arena->cpu + doff;
+                float first[4]; memcpy(first, bytes, sizeof first);
+                PD("B %llu st%d push c24 size=%zu f=%a,%a,%a,%a", g_stat_pass, nvn_stage, sizeof S.push[0], first[0], first[1], first[2], first[3]);
+                const char *dir = getenv("DM_NVN_CBDUMP"), *key = getenv("DM_NVN_CBDUMP_KEY");
+                if (dir && (!key || !strcmp(sh->key, key))) {
+                    char path[1024]; snprintf(path, sizeof path, "%s/F%llu_p%llu_d%llu_st%d_c24.bin", dir,
+                        (unsigned long long)atomic_load(&g_cur_frame), g_stat_pass, g_stat_draw, nvn_stage);
+                    FILE *file = fopen(path, "wb");
+                    if (file) { size_t written = fwrite(bytes, 1, sizeof S.push[0], file); int closed = fclose(file);
+                        if (written != sizeof S.push[0] || closed) MLOG("[RED] CBDUMP incomplete push constants: %s", path);
+                    } else MLOG("[RED] CBDUMP cannot write push constants: %s", path);
+                }
+            }
             slots[aid] = g_cur_arena->gpu + doff; USE(db, MTLResourceUsageRead);
         } else if (b->kind == NVN_RB_DRV0 || b->kind == NVN_RB_DRV2) {
             // NVN driver constant segments: those proven unread by static analysis at packaging time are supplied as 0; those read are filled on the spot from the current bindings - c0 = storage buffer table (base + 0x10 r: address 64 bits, size 32 bits),

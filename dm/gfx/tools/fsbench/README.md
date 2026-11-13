@@ -14,7 +14,15 @@ python3 dm/gfx/tools/fsbench/fsbench.py variants <base.metal> <dir> nobs nonan n
 python3 dm/gfx/tools/fsbench/fsbench.py compile <in.metal> <out.metallib>  # the chain's Metal flags (dmsh_build.MAC_METAL)
 fsbench stats <lib.metallib> [fn] [colour MTLPixelFormat]                  # registers, spill, instruction mix of the fragment stage
 fsbench run <scene.json> <out dir> <lib.metallib>…                         # time of each library; output of each against the first
+python3 dm/gfx/tools/fsbench/fsbench.py cscene --log game.log --frame F --key K --json K_b.json --msl K_b.metal [--cb DIR] [--draw N] --out scene.json   # a compute dispatch's scene
+fsbench cstats <lib.metallib> [fn]                                         # a compute kernel's statistics, threadgroup memory, threads a threadgroup
+fsbench crun <scene.json> <out dir> <lib.metallib>…                        # a compute kernel: time a dispatch; written resources against the first library
+fsbench mstats <mesh lib> <fragment lib> [object lib]                      # a mesh pipeline's statistics (Metal reports the fragment stage only)
 ```
+
+`stats`, `run`, `mstats` and `cstats` specialize a library's function constants with none set (their defaults): a cut's libraries declare some (`dm_border_off`), and Metal refuses a plain function from such a library.
+
+`crun` compares each written buffer or image in place, and where words differ, also as a multiset of 32-bit words. Some kernels differ from themselves between dispatches (atomic appends in a scheduling order, racing writes), so judge a variant against the first library run against a copy of itself: Ocarina of Time's foliage kernels 510c344f and e855420a differ from themselves in 8–17 words of millions, as many by value as in place.
 
 `run` prints one `output` line for the first library and a `diff` line for each of the others: bit-exact, or the share of pixels that differ and by how much. It ends with a `time` table: the median ms of a pass with its IQR, the net ms after subtracting a null shader, and the change against the first library. The output images and float dumps go to the out dir.
 

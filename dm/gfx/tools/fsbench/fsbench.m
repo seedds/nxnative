@@ -1,6 +1,8 @@
 // fsbench: an offline benchmark of a translated pixel shader and hand-made variants of it.
 //
 //   fsbench stats <lib.metallib> [fn] [colour MTLPixelFormat]         Apple's compiler statistics of the fragment stage (registers, spills, instruction mix)
+//   fsbench cstats <lib.metallib> [fn]                                 a compute kernel's statistics, threadgroup memory and threads a threadgroup
+//   fsbench crun <scene.json> <out dir> <lib>...                       a compute kernel: written resources against the first library (in place, and as a multiset of words for append order), time a dispatch
 //   fsbench run <scene.json> <out dir> <lib>...                        GPU time of each library's fragment function on one full-screen draw, and its output against the first
 //
 // The scene (written by fsbench.py from a pass dump and its uniform dumps) names the target size and formats, the shader's interpolants, and each argument of its
@@ -76,6 +78,24 @@ static NSString *stat_line(NSDictionary *s) {
     return o;
 }
 
+// The statistics dictionary inside a pipeline's performanceStatistics: a render pipeline nests it under the stage's name; a compute pipeline's nesting differs, so search for the
+// dictionary that holds the first statistic. FSBENCH_STATSKEYS=1 prints the top level's shape (for a new layout).
+static NSDictionary *find_stats(id o, int depth) {
+    if (depth == 0 && getenv("FSBENCH_STATSKEYS")) fprintf(stderr, "performanceStatistics: %s\n", [[o description] substringToIndex:MIN((NSUInteger)2000, [[o description] length])].UTF8String);
+    if ([o isKindOfClass:NSDictionary.class]) {
+        if (((NSDictionary *)o)[@(STAT_KEYS[0])]) return o;
+        for (id k in (NSDictionary *)o) { NSDictionary *r = find_stats(((NSDictionary *)o)[k], depth + 1); if (r) return r; }
+    } else if ([o isKindOfClass:NSArray.class]) for (id x in (NSArray *)o) { NSDictionary *r = find_stats(x, depth + 1); if (r) return r; }
+    return nil;
+}
+
+// Every statistics dictionary in a pipeline's performanceStatistics, with the path of keys that leads to it (a mesh pipeline: the object, mesh and fragment stages).
+static void print_stages(const char *lib, id o, NSString *path) {
+    if (![o isKindOfClass:NSDictionary.class]) return;
+    if (((NSDictionary *)o)[@(STAT_KEYS[0])]) { printf("%s\t%s\t%s\n", lib, path.length ? path.UTF8String : "(top)", stat_line(o).UTF8String); return; }
+    for (NSString *k in (NSDictionary *)o) print_stages(lib, ((NSDictionary *)o)[k], path.length ? [NSString stringWithFormat:@"%@/%@", path, k] : k);
+}
+
 // ---------- scene resources ----------
 static NSMutableArray *g_res;   // every resource the argument buffers reach (useResource)
 static uint64_t rng = 0x9E3779B97F4A7C15ull;
@@ -112,7 +132,7 @@ static id<MTLTexture> texture_of(NSDictionary *a) {
     td.arrayLength = td.textureType == MTLTextureType2DArray ? MAX(1u, [a[@"d"] unsignedIntValue]) : 1;
     NSUInteger maxm = (NSUInteger)floor(log2((double)MAX(td.width, td.height))) + 1;
     td.mipmapLevelCount = MIN(MAX(1u, [a[@"mips"] unsignedIntValue]), maxm);
-    td.storageMode = MTLStorageModeShared; td.usage = MTLTextureUsageShaderRead;
+    td.storageMode = MTLStorageModeShared; td.usage = MTLTextureUsageShaderRead | ([a[@"write"] boolValue] ? MTLTextureUsageShaderWrite : 0);   // write: a storage image the kernel writes
     id<MTLTexture> x = [D newTextureWithDescriptor:td];
     if (!x) { fprintf(stderr, "texture %s: format %ld %lux%lu not made\n", [a description].UTF8String, (long)td.pixelFormat, td.width, td.height); exit(1); }
     // random bytes, a block-compressed format's blocks too (the decode cost does not depend on the data); a float format gets finite values in 0..1: random bits in a
@@ -210,18 +230,30 @@ int main(int argc, char **argv) { @autoreleasepool {
     if (argc >= 3 && !strcmp(argv[1], "stats")) {
         NSError *e = nil;
         id<MTLLibrary> L = [D newLibraryWithURL:[NSURL fileURLWithPath:@(argv[2])] error:&e]; if (!L) { fprintf(stderr, "%s\n", e.description.UTF8String); return 1; }
-        id<MTLFunction> F = [L newFunctionWithName:argc > 3 ? @(argv[3]) : @"main0"];
+        id<MTLFunction> F = [L newFunctionWithName:argc > 3 ? @(argv[3]) : @"main0" constantValues:[MTLFunctionConstantValues new] error:nil];   // specialized with none set: a library with function constants (dm_border_off) refuses a plain function
         NSString *msl = [NSString stringWithContentsOfFile:[[@(argv[2]) stringByDeletingPathExtension] stringByAppendingPathExtension:@"metal"] encoding:NSUTF8StringEncoding error:nil] ?: @"";
         NSDictionary *st = nil; pipeline(vertex_fn(msl, @{}), F, @[@(argc > 4 ? atoi(argv[4]) : MTLPixelFormatRG11B10Float)], &st);
         printf("%s\t%s\n", argv[2], stat_line(st).UTF8String);
         if (getenv("FSBENCH_REMARKS")) printf("%s\n", [st[@"Remarks"] UTF8String]);
         return 0;
     }
+    if (argc >= 3 && !strcmp(argv[1], "cstats")) {   // cstats <lib> [fn]: a compute kernel's statistics, its threadgroup memory and the threads Metal allows a threadgroup at that register use
+        NSError *e = nil; id<MTLLibrary> L = [D newLibraryWithURL:[NSURL fileURLWithPath:@(argv[2])] error:&e]; if (!L) { fprintf(stderr, "%s\n", e.description.UTF8String); return 1; }
+        NSString *fn = argc > 3 ? @(argv[3]) : @"main0";
+        id<MTLFunction> F = [L newFunctionWithName:fn constantValues:[MTLFunctionConstantValues new] error:&e]; if (!F) { fprintf(stderr, "%s: %s\n", argv[2], e.description.UTF8String); return 1; }
+        MTLAutoreleasedComputePipelineReflection refl = nil;
+        id<MTLComputePipelineState> p = [D newComputePipelineStateWithFunction:F options:OPT_STATS reflection:&refl error:&e];
+        if (!p) { fprintf(stderr, "%s: %s\n", argv[2], e.description.UTF8String); return 1; }
+        NSDictionary *st = [(id)refl respondsToSelector:@selector(performanceStatistics)] ? find_stats(((id(*)(id, SEL))objc_msgSend)((id)refl, @selector(performanceStatistics)), 0) : nil;
+        printf("%s\t%sthreads=%lu width=%lu tgstatic=%lu\n", argv[2], stat_line(st).UTF8String, (unsigned long)p.maxTotalThreadsPerThreadgroup, (unsigned long)p.threadExecutionWidth, (unsigned long)p.staticThreadgroupMemoryLength);
+        if (getenv("FSBENCH_REMARKS")) printf("%s\n", [st[@"Remarks"] description].UTF8String);
+        return 0;
+    }
     if (argc >= 4 && !strcmp(argv[1], "mstats")) {   // mstats <mesh lib> <fragment lib> [object lib]: the mesh pipeline's statistics, each stage (entry main0 in each)
         NSError *e = nil; id<MTLFunction> f[3] = {nil, nil, nil};
         for (int i = 0; i < 3 && 2 + i < argc; i++) {
             id<MTLLibrary> L = [D newLibraryWithURL:[NSURL fileURLWithPath:@(argv[2 + i])] error:&e]; if (!L) { fprintf(stderr, "%s: %s\n", argv[2 + i], e.description.UTF8String); return 1; }
-            f[i] = [L newFunctionWithName:@"main0"]; if (!f[i]) { fprintf(stderr, "%s: no main0 (%s)\n", argv[2 + i], [L.functionNames componentsJoinedByString:@" "].UTF8String); return 1; }
+            NSError *fe = nil; f[i] = [L newFunctionWithName:@"main0" constantValues:[MTLFunctionConstantValues new] error:&fe]; if (!f[i]) { fprintf(stderr, "%s: no main0 (%s)\n", argv[2 + i], [L.functionNames componentsJoinedByString:@" "].UTF8String); return 1; }
         }
         MTLMeshRenderPipelineDescriptor *md = [MTLMeshRenderPipelineDescriptor new];
         md.meshFunction = f[0]; md.fragmentFunction = f[1]; md.objectFunction = f[2];
@@ -230,7 +262,83 @@ int main(int argc, char **argv) { @autoreleasepool {
         id p = [D newRenderPipelineStateWithMeshDescriptor:md options:OPT_STATS reflection:&refl error:&e];
         if (!p) { fprintf(stderr, "mesh pipeline: %s\n", e.description.UTF8String); return 1; }
         NSDictionary *st = ((id(*)(id, SEL))objc_msgSend)((id)refl, @selector(performanceStatistics));
-        for (NSString *stage in st) if ([st[stage] isKindOfClass:[NSDictionary class]]) printf("%s\t%s\t%s\n", argv[2], stage.UTF8String, stat_line(st[stage]).UTF8String);
+        if (getenv("FSBENCH_STATSKEYS")) fprintf(stderr, "performanceStatistics keys: %s\n", [[st allKeys] componentsJoinedByString:@" | "].UTF8String);
+        print_stages(argv[2], st, @"");
+        return 0;
+    }
+    if (argc >= 5 && !strcmp(argv[1], "crun")) {   // crun <scene.json> <out dir> <lib>...: a compute kernel: outputs against the first library (fresh inputs from one seed each), time a dispatch
+        NSDictionary *sc = [NSJSONSerialization JSONObjectWithData:[NSData dataWithContentsOfFile:@(argv[2])] options:0 error:nil];
+        NSString *fn = sc[@"fn"] ?: @"main0"; NSArray *G = sc[@"groups"], *TG = sc[@"tg"];
+        MTLSize grid = MTLSizeMake([G[0] unsignedIntegerValue], [G[1] unsignedIntegerValue], [G[2] unsignedIntegerValue]), tgs = MTLSizeMake([TG[0] unsignedIntegerValue], [TG[1] unsignedIntegerValue], [TG[2] unsignedIntegerValue]);
+        int P = getenv("FSBENCH_P") ? atoi(getenv("FSBENCH_P")) : 20, R = getenv("FSBENCH_R") ? atoi(getenv("FSBENCH_R")) : 40, NL = argc - 4; NSError *e = nil;
+        NSMutableArray *names = [NSMutableArray array], *pso = [NSMutableArray array], *fns = [NSMutableArray array];
+        for (int i = 0; i < NL; i++) {
+            id<MTLLibrary> L = [D newLibraryWithURL:[NSURL fileURLWithPath:@(argv[4 + i])] error:&e]; if (!L) { fprintf(stderr, "%s: %s\n", argv[4 + i], e.description.UTF8String); return 1; }
+            id<MTLFunction> F = [L newFunctionWithName:fn constantValues:[MTLFunctionConstantValues new] error:&e]; if (!F) { fprintf(stderr, "%s: no %s\n", argv[4 + i], fn.UTF8String); return 1; }
+            MTLAutoreleasedComputePipelineReflection refl = nil; id<MTLComputePipelineState> p = [D newComputePipelineStateWithFunction:F options:OPT_STATS reflection:&refl error:&e];
+            if (!p) { fprintf(stderr, "%s: %s\n", argv[4 + i], e.description.UTF8String); return 1; }
+            NSDictionary *st = find_stats(((id(*)(id, SEL))objc_msgSend)((id)refl, @selector(performanceStatistics)), 0);
+            [names addObject:[[@(argv[4 + i]) lastPathComponent] stringByDeletingPathExtension]]; [pso addObject:p]; [fns addObject:F];
+            printf("stats\t%s\t%sthreads=%lu\n", [names[i] UTF8String], stat_line(st).UTF8String, (unsigned long)p.maxTotalThreadsPerThreadgroup);
+            if (p.maxTotalThreadsPerThreadgroup < tgs.width * tgs.height * tgs.depth) { printf("error\t%s: %lu threads a group allowed, the dispatch needs %lu\n", [names[i] UTF8String], (unsigned long)p.maxTotalThreadsPerThreadgroup, (unsigned long)(tgs.width * tgs.height * tgs.depth)); return 1; }
+        }
+        id<MTLFunction> nf = [[D newLibraryWithSource:@"#include <metal_stdlib>\nkernel void knull() {}\n" options:nil error:&e] newFunctionWithName:@"knull"]; [pso addObject:[D newComputePipelineStateWithFunction:nf error:&e]]; [names addObject:@"(null)"];
+        // the argument buffer and its resources, from one seed: each library's check gets its own copy of the same inputs
+        NSMutableArray *outs = [NSMutableArray array];
+        id<MTLBuffer> (^encode)(void) = ^id<MTLBuffer>(void) {
+            rng = 0x9E3779B97F4A7C15ull; [g_res removeAllObjects]; [outs removeAllObjects];
+            id<MTLArgumentEncoder> enc = [fns[0] newArgumentEncoderWithBufferIndex:0]; id<MTLBuffer> ab = [D newBufferWithLength:MAX(enc.encodedLength, (NSUInteger)16) options:MTLResourceStorageModeShared]; [enc setArgumentBuffer:ab offset:0];
+            for (NSDictionary *a in sc[@"args"]) {
+                NSUInteger id_ = [a[@"id"] unsignedIntegerValue]; NSString *k = a[@"kind"]; id r = nil;
+                if ([k isEqualToString:@"buffer"]) { r = buffer_of(a); [enc setBuffer:r offset:0 atIndex:id_]; }
+                else if ([k isEqualToString:@"tex"]) { r = texture_of(a); [enc setTexture:r atIndex:id_]; }
+                else if ([k isEqualToString:@"samp"]) [enc setSamplerState:sampler_of(a) atIndex:id_];
+                else if ([k isEqualToString:@"texpool"]) [enc setBuffer:pool_of(a, YES) offset:0 atIndex:id_];
+                else if ([k isEqualToString:@"samppool"]) [enc setBuffer:pool_of(a, NO) offset:0 atIndex:id_];
+                if (r && [a[@"out"] boolValue]) [outs addObject:r];
+            }
+            return ab;
+        };
+        id<MTLCommandQueue> q = [D newCommandQueue];
+        void (^disp)(id<MTLCommandBuffer>, id<MTLComputePipelineState>, id<MTLBuffer>) = ^(id<MTLCommandBuffer> cb, id<MTLComputePipelineState> p, id<MTLBuffer> ab) {
+            id<MTLComputeCommandEncoder> ce = [cb computeCommandEncoder]; [ce setComputePipelineState:p]; [ce setBuffer:ab offset:0 atIndex:0];
+            for (id r in g_res) [ce useResource:r usage:MTLResourceUsageRead | MTLResourceUsageWrite];
+            [ce dispatchThreadgroups:grid threadsPerThreadgroup:tgs]; [ce endEncoding];
+        };
+        NSMutableArray *ref = nil;
+        for (int i = 0; i < NL; i++) {
+            id<MTLBuffer> ab = encode(); id<MTLCommandBuffer> cb = [q commandBuffer]; disp(cb, pso[i], ab); [cb commit]; [cb waitUntilCompleted];
+            if (cb.error) { printf("error\t%s: %s\n", [names[i] UTF8String], cb.error.description.UTF8String); return 1; }
+            NSMutableArray *got = [NSMutableArray array];
+            for (id r in outs) {
+                if ([r conformsToProtocol:@protocol(MTLBuffer)]) [got addObject:[NSData dataWithBytes:[(id<MTLBuffer>)r contents] length:[(id<MTLBuffer>)r length]]];
+                else { id<MTLTexture> t = r; NSUInteger bpp = 16; NSMutableData *m = [NSMutableData dataWithLength:t.width * t.height * bpp * MAX(t.depth, t.arrayLength)];
+                    for (NSUInteger s = 0; s < t.arrayLength; s++) [t getBytes:(uint8_t *)m.mutableBytes + s * t.width * t.height * bpp bytesPerRow:t.width * bpp bytesPerImage:t.width * t.height * bpp fromRegion:MTLRegionMake3D(0, 0, 0, t.width, t.height, t.depth) mipmapLevel:0 slice:s];
+                    [got addObject:m]; }
+            }
+            if (!ref) { ref = got; printf("output\t%s\t%lu written resources\n", [names[i] UTF8String], (unsigned long)got.count); continue; }
+            // A kernel can differ from itself between dispatches: records appended through an atomic counter land in an order the GPU's scheduling decides, and racing
+            // writes or atomic accumulation give different values. Ocarina of Time's foliage kernels 510c344f and e855420a differ from copies of themselves in 8-17 words of
+            // millions, as many by value as in place (races, not order; 11-12). So each resource is also compared as a multiset of its 32-bit words (sorted, merge walk):
+            // "same as a multiset" is append order; a multiset count near the in-place one is changed values. Compare a variant's count with the base's against itself
+            NSUInteger words = 0, diff = 0, udiff = 0;
+            for (NSUInteger j = 0; j < got.count; j++) { NSData *a = ref[j], *b = got[j]; const uint32_t *x = a.bytes, *y = b.bytes; NSUInteger n = MIN(a.length, b.length) / 4, d = 0; words += n; for (NSUInteger w = 0; w < n; w++) d += x[w] != y[w];
+                diff += d; if (!d) continue;
+                uint32_t *sx = malloc(n * 4), *sy = malloc(n * 4); memcpy(sx, x, n * 4); memcpy(sy, y, n * 4);
+                int (^cmp)(const void *, const void *) = ^int(const void *p, const void *q) { uint32_t u = *(const uint32_t *)p, v = *(const uint32_t *)q; return u < v ? -1 : u > v; };
+                qsort_b(sx, n, 4, cmp); qsort_b(sy, n, 4, cmp);   // a merge walk: the words of a that b lacks (a value changed in one place shifts every later position, so not a positional compare)
+                NSUInteger p = 0, q = 0, m = 0; while (p < n && q < n) { if (sx[p] == sy[q]) { m++; p++; q++; } else if (sx[p] < sy[q]) p++; else q++; } udiff += n - m; free(sx); free(sy); }
+            printf("diff\t%s\t%s\twords differing %lu of %lu (%.4f%%)%s\n", [names[i] UTF8String], diff ? "not exact" : "bit-exact", (unsigned long)diff, (unsigned long)words, 100.0 * diff / MAX(words, (NSUInteger)1),
+                   !diff ? "" : udiff ? [NSString stringWithFormat:@"; as a multiset of words: %lu differ", (unsigned long)udiff].UTF8String : "; same as a multiset of words (append order)");
+        }
+        id<MTLBuffer> ab = encode();   // timing: one set of resources, rounds rotated over the libraries and a null kernel, P dispatches a command buffer
+        for (int w = 0; w < 3; w++) for (int i = 0; i <= NL; i++) { id<MTLCommandBuffer> cb = [q commandBuffer]; for (int p = 0; p < P; p++) disp(cb, pso[i], ab); [cb commit]; [cb waitUntilCompleted]; }
+        double *t = calloc((NL + 1) * R, sizeof(double));
+        for (int r = 0; r < R; r++) for (int i0 = 0; i0 <= NL; i0++) { int i = (i0 + r) % (NL + 1); id<MTLCommandBuffer> cb = [q commandBuffer]; for (int p = 0; p < P; p++) disp(cb, pso[i], ab); [cb commit]; [cb waitUntilCompleted]; t[i * R + r] = (cb.GPUEndTime - cb.GPUStartTime) * 1e3 / P; }
+        double med[NL + 1]; for (int i = 0; i <= NL; i++) { qsort(t + i * R, R, sizeof(double), cmp_d); med[i] = t[i * R + R / 2]; }
+        printf("time\tlibrary\tms a dispatch (median, IQR)\tnet ms (− null)\tnet vs first\n");
+        for (int i = 0; i <= NL; i++) printf("time\t%s\t%.4f (%.4f–%.4f)\t%.4f\t%+.1f%%\n", [names[i] UTF8String], med[i], t[i * R + R / 4], t[i * R + 3 * R / 4], med[i] - med[NL], 100.0 * ((med[i] - med[NL]) / (med[0] - med[NL]) - 1));
+        printf("setup\tgroups %lux%lux%lu of %lux%lux%lu, %d dispatches a command buffer, %d rounds, %s\n", (unsigned long)grid.width, (unsigned long)grid.height, (unsigned long)grid.depth, (unsigned long)tgs.width, (unsigned long)tgs.height, (unsigned long)tgs.depth, P, R, D.name.UTF8String);
         return 0;
     }
     if (argc < 5 || strcmp(argv[1], "run")) { fprintf(stderr, "usage: fsbench stats <lib> [fn] [format] | fsbench run <scene.json> <out dir> <lib>...\n"); return 2; }
@@ -254,7 +362,7 @@ int main(int argc, char **argv) { @autoreleasepool {
         if (i < NL) {
             id<MTLLibrary> L = [D newLibraryWithURL:[NSURL fileURLWithPath:@(argv[4 + i])] error:&e];
             if (!L) { fprintf(stderr, "%s: %s\n", argv[4 + i], e.description.UTF8String); return 1; }
-            ff = [L newFunctionWithName:fn]; if (!ff) { fprintf(stderr, "%s: no %s\n", argv[4 + i], fn.UTF8String); return 1; }
+            ff = [L newFunctionWithName:fn constantValues:[MTLFunctionConstantValues new] error:nil]; if (!ff) { fprintf(stderr, "%s: no %s\n", argv[4 + i], fn.UTF8String); return 1; }
             [names addObject:[[@(argv[4 + i]) lastPathComponent] stringByDeletingPathExtension]];
             if (!f0) f0 = ff;
         } else { ff = nullf; [names addObject:@"(null)"]; }

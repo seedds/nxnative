@@ -5,6 +5,7 @@
   fsbench.py fetch <img> <key> <dir>               the shader's _b.metal / _b.json / _b.metallib from a build's shader image (shader_lib.py cat)
   fsbench.py compile <in.metal> <out.metallib>     one source through the chain's compile (dmsh_build.MAC_METAL flags, -fbracket-depth=1024)
   fsbench.py scene --log game.log --frame F --pass P --key K --json K_b.json --msl K_b.metal --cb DIR [--draw N] [--fill rich|zero] --out scene.json
+  fsbench.py cscene --log game.log --frame F --key K --json K_b.json --msl K_b.metal [--cb DIR] [--draw N] [--fill rich|zero] --out scene.json   a compute dispatch
   fsbench.py variants <base.metal> <dir> [name...] write the named source variants of a shader (VARIANTS below) beside each other
 
 Game files stay in the game's work folder: the scene, its buffers and every output go where --out / the run's out dir say.
@@ -106,6 +107,54 @@ def scene(a):
           'color': [x[1] for x in att] or [92], 'msl': os.path.abspath(a.msl), 'fn': 'main0', 'args': args}
     json.dump(sc, open(a.out, 'w'), indent=1); print(f'{a.out}: {sc["w"]}x{sc["h"]} colour {sc["color"]}, {len(args)} arguments ({len(tex)} textures, {len(cb)} uniform blocks), fill {a.fill}')
 
+def cscene(a):
+    """A compute dispatch's scene from a pass dump: its K .. X lines (the nth dispatch of the key in the frame). Uniform blocks: the --cb dump when there is one (F<frame>_p<pass>_st5_cb<reg>_<addr>.bin),
+    else zeros with the B line's first four floats (DM_NVN_CBDUMP saves draws' blocks; the note says which). Storage buffers: their size, rich fill random words, read-write ones compared as outputs.
+    Storage images (W lines): written and compared. Textures and samplers as scene()."""
+    j = json.load(open(a.json)); L = [l.rstrip('\n') for l in open(a.log, errors='replace') if l.startswith(f'[pass] F{a.frame} ')]
+    xs = [i for i, l in enumerate(L) if re.match(rf'\[pass\] F{a.frame} X \d+ dispatch {a.key[:16]}', l)]
+    if a.draw >= len(xs): sys.exit(f'{len(xs)} dispatches of {a.key} in frame {a.frame}')
+    x = xs[a.draw]; k = max(i for i in range(x) if re.match(rf'\[pass\] F{a.frame} K \d+ st5 key={a.key[:16]}', L[i])); lines = L[k:x + 1]
+    g = re.search(r'groups (\d+)x(\d+)x(\d+)', L[x]); groups = [int(v) for v in g.groups()]
+    cb, tex, samp, sb, img = {}, {}, {}, {}, {}
+    for l in lines:
+        m = re.search(r' st5 cb reg(\d+) addr=0x([0-9a-f]+) size=(\d+) .*?f=([^ ]+)', l)
+        if m: cb[int(m[1])] = (m[2], int(m[3]), m[4])
+        m = re.search(r' st5 tex reg(\d+) .*fmt=(\d+) (\d+)x(\d+)x(\d+) view_lv=(\d+)\+(\d+) .*array=(\d+) target=(\d+)', l)
+        if m: tex[int(m[1])] = {'fmt': int(m[2]), 'w': int(m[3]), 'h': int(m[4]), 'd': max(int(m[5]), int(m[8])), 'mips': int(m[7]), 'type': TARGET.get(int(m[9]), '2d')}
+        m = re.search(r' st5 samp reg(\d+) sid=\d+ mag=(\d+) min=(\d+) .*wrap=([\d,]+) border=\S+ lod=(\S+) bias=\S+ aniso=(\d+)(?: cmp=(\d+)/(\d+))?', l)
+        if m: samp[int(m[1])] = sampler({'mag': m[2], 'min': m[3], 'wrap': m[4], 'lod': m[5], 'aniso': m[6], 'cmpe': m[7], 'cmpf': m[8]})
+        m = re.search(r' st5 sbufp reg(\d+) \w+ addr=0x[0-9a-f]+ size=(\d+) (r[ow])', l)
+        if m: sb[int(m[1])] = (int(m[2]), m[3])
+        m = re.search(r' W \d+ st5 reg(\d+) .*fmt=(\d+) (\d+)x(\d+) .*array=(\d+) target=(\d+)', l)
+        if m: img[int(m[1])] = {'fmt': int(m[2]), 'w': int(m[3]), 'h': int(m[4]), 'd': int(m[5]), 'mips': 1, 'type': TARGET.get(int(m[6]), '2d')}
+    d = os.path.dirname(os.path.abspath(a.out)); bufs = os.path.join(d, 'buf'); os.makedirs(bufs, exist_ok=True)
+    def wfile(name, data): p = os.path.join(bufs, name); open(p, 'wb').write(data); return p
+    msl_src = open(a.msl).read(); args = []; notes = []
+    for b in j['bindings']:
+        i, kd = b['arg_id'], b['kind']; reg = b.get('reg')
+        if kd == 'support': sbuf = bytearray(4096); [struct.pack_into('<f', sbuf, 192 + 16 * n, 1.0) for n in range(73)]; args.append({'id': i, 'kind': 'buffer', 'file': wfile('support.bin', bytes(sbuf)), 'size': 4096})
+        elif kd == 'cbuf' and reg in cb:
+            addr, size, f4 = cb[reg]; fp = os.path.join(a.cb or '', f'F{a.frame}_p{lines[0].split()[3]}_st5_cb{reg}_{addr}.bin')
+            if a.cb and os.path.exists(fp): args.append({'id': i, 'kind': 'buffer', 'file': fp, 'size': 65536})
+            else:
+                bb = bytearray(max(size, 16)); [struct.pack_into('<f', bb, 4 * n, float(v)) for n, v in enumerate(f4.split(',')[:4]) if v not in ('nan', 'inf', '-inf')]
+                args.append({'id': i, 'kind': 'buffer', 'file': wfile(f'cb{reg}.bin', bytes(bb)), 'size': 65536}); notes.append(f'cb{reg}: not dumped, zeros + its first 4 floats')
+        elif kd == 'cbuf': args.append({'id': i, 'kind': 'buffer', 'size': 65536}); notes.append(f'cb{reg}: not bound in the dump, zeros')
+        elif kd == 'sbuf':
+            size, rw = sb.get(reg, (65536, 'rw')); args.append({'id': i, 'kind': 'buffer', 'size': size, 'fill': 'random' if a.fill == 'rich' else 'zero', **({'out': True} if rw == 'rw' else {})})
+        elif kd == 'tex' and reg in tex:
+            t = dict(tex[reg]); dd = re.search(r'(\w+)<[^>]*> \w+ \[\[id\(%d\)\]\]' % i, msl_src)
+            if dd: t['type'] = {'texture2d': '2d', 'depth2d': '2d', 'texture2d_array': '2da', 'depth2d_array': '2da', 'texturecube': 'cube', 'depthcube': 'cube', 'texture3d': '3d'}.get(dd[1], t['type'])
+            args.append({'id': i, 'kind': 'tex', **t})
+        elif kd == 'img' and reg in img: args.append({'id': i, 'kind': 'tex', **img[reg], 'write': True, 'out': True})
+        elif kd == 'samp_tex': args.append({'id': i, 'kind': 'samp', **samp.get(reg, {'min': 1, 'mag': 1, 'mip': 2, 'wrap': [0, 0, 0], 'aniso': 1})})
+        elif kd == 'border': args.append({'id': i, 'kind': 'buffer', 'file': wfile('border.bin', bytes(16 + 32 * 16)), 'size': 528})
+        else: notes.append(f'binding {b.get("msl_name")} ({kd}, reg {reg}): not in the dump or not handled, left unbound')
+    sc = {'kind': 'compute', 'key': a.key, 'frame': a.frame, 'pass': int(lines[0].split()[3]), 'draw': a.draw, 'fill': a.fill, 'groups': groups, 'tg': j.get('threadgroup_size') or [1, 1, 1],
+          'msl': os.path.abspath(a.msl), 'fn': 'main0', 'args': args, 'notes': notes}
+    json.dump(sc, open(a.out, 'w'), indent=1); print(f'{a.out}: groups {groups} of {sc["tg"]}, {len(args)} arguments; ' + ('; '.join(notes) or 'everything from the dump'))
+
 # ---------- source variants ----------
 def _unwrap(u, head, pick):   # head(...) → pick(its arguments), balanced parentheses
     out, pos = [], 0
@@ -131,6 +180,10 @@ def v_nobs(u):     # border emulation off: no second sample (mask 0 at run time 
     return re.sub(r'(V dm_bs\(V r, constant dm_border_t\* b, uint i, T t, sampler w, A\.\.\. a\)\n\{\n)    if \(b->mask >> i & 1u\) r = dm_bmix\(r, t\.sample\(w, a\.\.\.\), b->k\[i\]\);\n', r'\1', u)
 def v_nonan(u):    # sample coordinates without the NaN → 0 scrub
     return re.sub(r'select\((\w+), (float[234]?)\(0\.0\), isnan\(\1\)\)', r'\1', u)
+def v_nanfmax(u):  # #1230's cheaper guard on 2D coordinates: fmax(c, -FLT_MAX) (NaN -> the most negative float, the same texel as 0 except through clamp-to-border); float3 (cube, 3D, array) keep the select
+    return re.sub(r'select\((\w+), (float2)\(0\.0\), isnan\(\1\)\)', r'fmax(\1, \2(-FLT_MAX))', u)
+def v_nanfmaxall(u):   # the same on every guard, cube directions included (timing only: #1230 found fmax on a cube direction as slow as the select on the M1)
+    return re.sub(r'select\((\w+), (float[234]?)\(0\.0\), isnan\(\1\)\)', r'fmax(\1, \2(-FLT_MAX))', u)
 def v_sconst(u):   # read-only storage buffers through the constant address space (preamble hoisting of uniform-address loads)
     u = re.sub(r'const device (_\w+)\* (fp_s\d+|vp_s\d+) ', r'constant \1* \2 ', u)
     return re.sub(r'\(const device (packed_uint[24])\*\)&\(\*spvDescriptorSet0\.(fp_s\d+)\)', r'(constant \1*)&(*spvDescriptorSet0.\2)', u)
@@ -152,7 +205,7 @@ def v_guard(u):    # PR #2254's loop guard (dmsh_rewrite.loop_guard, copied): ev
 def v_mark1(u):    # the pool read mark kept, but once a SIMD group when every active lane reads the same ID (a material's texture, the usual case), else per lane as before
     return re.sub(r'(uint dm_pool_mark\(constant P\* p, uint i\)\n\{\n)(.*?)(\n    return i;\n\})',
                   lambda m: m[1] + '    uint f = simd_broadcast_first(i);\n    if (simd_all(i == f) && !simd_is_first()) return i;\n' + m[2] + m[3], u, flags=re.S)
-VARIANTS = {'guard': v_guard, 'mark1': v_mark1, 'sconst': v_sconst, 'uidx': v_uidx, 'nomark': v_nomark, 'noclamp': v_noclamp, 'fast': v_fast, 'nobs': v_nobs, 'nonan': v_nonan}
+VARIANTS = {'nanfmax': v_nanfmax, 'nanfmaxall': v_nanfmaxall, 'guard': v_guard, 'mark1': v_mark1, 'sconst': v_sconst, 'uidx': v_uidx, 'nomark': v_nomark, 'noclamp': v_noclamp, 'fast': v_fast, 'nobs': v_nobs, 'nonan': v_nonan}
 
 def main():
     p = argparse.ArgumentParser(); s = p.add_subparsers(dest='cmd', required=True)
@@ -163,6 +216,9 @@ def main():
     for k, ty in (('--log', str), ('--frame', int), ('--key', str), ('--json', str), ('--msl', str), ('--cb', str), ('--out', str)): sc.add_argument(k, type=ty, required=True)
     sc.add_argument('--pass', dest='pas', type=int, required=True); sc.add_argument('--draw', type=int, default=0); sc.add_argument('--fill', default='rich', choices=('rich', 'zero'))
     sc.add_argument('--lights', type=int, default=2)   # lights per cluster cell (OoT's main pass), the loop's trip count
+    cs = s.add_parser('cscene')
+    for k, ty in (('--log', str), ('--frame', int), ('--key', str), ('--json', str), ('--msl', str), ('--out', str)): cs.add_argument(k, type=ty, required=True)
+    cs.add_argument('--cb', default=None); cs.add_argument('--draw', type=int, default=0); cs.add_argument('--fill', default='rich', choices=('rich', 'zero'))
     v = s.add_parser('variants'); v.add_argument('base'); v.add_argument('dir'); v.add_argument('names', nargs='*')
     a = p.parse_args()
     if a.cmd == 'tool':
@@ -175,6 +231,7 @@ def main():
             open(os.path.join(a.dir, a.key + suf), 'wb').write(out)
     elif a.cmd == 'compile': compile_msl(a.src, a.lib, a.extra)
     elif a.cmd == 'scene': scene(a)
+    elif a.cmd == 'cscene': cscene(a)
     elif a.cmd == 'variants':
         src = open(a.base).read(); stem = os.path.basename(a.base).split('.')[0]
         for n in a.names or VARIANTS:

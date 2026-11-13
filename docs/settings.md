@@ -95,7 +95,7 @@ Games whose profile supports it (Breath of the Wild, Animal Crossing: New Horizo
 
 ### Peak limiter
 
-When a game's six-channel mix is folded into stereo, its loudest moments can sum past what the output can play, and they are cut flat: a crackle. **On** turns the sound down for a moment there instead, and back up over about a sixth of a second. Off, the default, plays the mix as the console's stereo output does.
+When a game's six-channel mix is folded into stereo, its loudest moments can sum past what the output can play, and they are cut flat: a crackle. **On** turns the sound down for a moment there instead, and back up over about a sixth of a second. On by default; Off plays the mix clipped at full scale, as before.
 
 ### Frame-rate counter
 

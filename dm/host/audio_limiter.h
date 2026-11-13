@@ -1,6 +1,6 @@
-// DM_AUDIO_LIMITER=1: a peak limiter on the renderer's stereo downmix, before the 16-bit clamp. A game that mixes six channels at full level can
+// DM_AUDIO_LIMITER (on unless =0): a peak limiter on the renderer's stereo downmix, before the 16-bit clamp. A game that mixes six channels at full level can
 // sum above full scale in the 6 -> 2 downmix (front 1.0, center 0.707, LFE 0.251, back 0.707), and the clamp then cuts the peaks flat: clicks in
-// loud fights (Metroid Prime 4). Off by default, as a console's output path is not known to limit the same mix.
+// loud fights (Metroid Prime 4). On by default (the user's choice); =0 plays the clamped mix as before.
 // Per block (one renderer frame, 5 ms, known whole before output): when the block's peak times the current gain would pass the threshold, the gain
 // drops at once to fit it, for the whole block; otherwise it returns towards 1 with a ramp across the block (about 150 ms to recover from a 6 dB cut).
 // Blocks under the threshold at gain 1 are left exactly as they are.

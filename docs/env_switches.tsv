@@ -9,7 +9,7 @@ DM_APP_DM	path	Set by the iOS app of a game of several programs: the running pro
 DM_APP_VERSION	switch	Overrides the IPA's version in `build_ipa.sh`; by default it is the packed game's display version from its control data (the update's when one is packed)
 DM_AUDIO	switch	`1` plays audio through Core Audio, `0` uses the silent sink; real output is the default on iOS, the silent sink on the Mac (the Mac launcher sets `1`)
 DM_AUDIO_DUMP	diagnostic	`=<file>` writes every PCM block the game appends as is (16-bit, 48 kHz, channel count as in the OpenAudioOut log), to judge whether a sound played
-DM_AUDIO_LIMITER	player	`1` lowers the CPU audio renderer's stereo downmix briefly where it would pass full scale (instant per 5 ms frame, about 150 ms release) instead of clipping it at the 16-bit clamp; off by default (settings: Peak limiter)
+DM_AUDIO_LIMITER	player	On unless `0`: lowers the CPU audio renderer's stereo downmix briefly where it would pass full scale (instant per 5 ms frame, about 150 ms release) instead of clipping it at the 16-bit clamp; `0` plays the clamped mix (settings: Peak limiter)
 DM_AUDIO_MUTE	switch	`=1` runs the real Core Audio output path (callback pacing, background take-over) with the output silenced, for lifecycle tests on the Mac without noise
 DM_AUDREN_AUX_TRACE	diagnostic	`0` leaves out the auxiliary trace that `DM_AUDREN_PCM_TRACE` otherwise writes beside its file (`<file>.aux.tsv`: every Aux buffer read and write the game makes, with hashes)
 DM_AUDREN_PCM_TRACE	diagnostic	`=<file>` writes one row per CPU audio renderer frame (normal and catch-up, sequence, hash, update and render counts, queue state) before device output; dm/tools/audio_trace.py reads it

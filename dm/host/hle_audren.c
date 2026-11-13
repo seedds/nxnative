@@ -545,7 +545,7 @@ static int capture(ar_t *a, const uint8_t *cl, size_t len, int16_t *dst) {
                 st[2 * s] = l; st[2 * s + 1] = r;
             }
             uint32_t nout = rate == 48000 ? samples : up_3_2(a, st, samples, st);
-            static int lim = -1; if (lim < 0) { const char *e = getenv("DM_AUDIO_LIMITER"); lim = e && *e == '1'; if (lim) LOG("audren: peak limiter on (DM_AUDIO_LIMITER)"); }
+            static int lim = -1; if (lim < 0) { const char *e = getenv("DM_AUDIO_LIMITER"); lim = !(e && *e == '0'); if (!lim) LOG("audren: peak limiter off (DM_AUDIO_LIMITER=0)"); }
             if (lim) a->lim_gain = limiter_block(st, 2 * nout, a->lim_gain > 0 ? a->lim_gain : 1.0f);   // peaks past full scale lowered, not cut flat by the clamp below
             uint64_t loud = 0;
             for (uint32_t s = 0; s < 2 * nout; s++) {

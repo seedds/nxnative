@@ -173,18 +173,18 @@ def build_rows(gs):   # {build ID: [(game, display version, module)]}
     return out
 
 
-OTHER_BASE = 0x8000000   # where the dry run puts a MATCH_FRAME_STEP rule's other functions, 16 MB apart, so their sites read as offsets in them; its patch area starts at 0x6000000,
-                          # within a b's reach (128 MB) of a main's sites below it and of up to six other functions above
+OTHER_BASE, OTHER_STEP = 0x8000000, 0x800000   # where the dry run puts a MATCH_FRAME_STEP rule's other functions, 8 MB apart, so their sites read as offsets in them; its patch area
+                                               # starts at 0x6000000, within a b's reach (128 MB) of a main's sites below it and of up to twelve other functions above (Ocarina of Time has seven)
 
 
 def frame_step_sites(fn, base=0, others=(), found=None):   # (offset, reason) of each site a FRAME_STEP function (or a MATCH_FRAME_STEP stub, its function at base) writes, whether it marks a
     pos, puts = [0x6000000], []                    # render-scale stub, the sites in each of the rule's other functions ({label: [(offset, reason)]}) and the capabilities it declares
     def emit(w): pos[0] += 4
-    at = {label: OTHER_BASE + i * 0x1000000 for i, label in enumerate(others)}
+    at = {label: OTHER_BASE + i * OTHER_STEP for i, label in enumerate(others)}
     ctx = types.SimpleNamespace(here=lambda: pos[0], emit=emit, site=lambda off, orig: None, put=lambda off, words, why: puts.append((off, why)), state=0x9000000, render_scale=0, step_max=0, base=base,
                                 others=at, found=found, capabilities=set(), address=lambda off: 0)
     fn(ctx)
-    in_others = {label: sorted((off - a, why) for off, why in puts if a <= off < a + 0x1000000) for label, a in at.items()}
+    in_others = {label: sorted((off - a, why) for off, why in puts if a <= off < a + OTHER_STEP) for label, a in at.items()}
     return sorted((off, why) for off, why in puts if off < OTHER_BASE), ctx.render_scale, in_others, sorted(ctx.capabilities)
 
 

@@ -89,6 +89,10 @@ iPhone and iPad. **Fit**, the default, shows the game's picture (16:9, or the ta
 
 Games whose profile supports it (Breath of the Wild, Animal Crossing: New Horizons). **iPhone Duo screen (1.43:1)** renders a taller picture of the Duo's own shape: the sides of 16:9 with more above and below, and the HUD at the screen's edges. **16:9** is the Switch's picture. The taller picture has about a quarter more pixels, so it runs a little slower and warmer.
 
+### Wide screen
+
+Mac, games whose build supports it (Ocarina of Time). **Match screen**, the default, renders a picture of the main screen's own shape when it is wider than 16:9 (an ultrawide monitor, 3440x1440 for one): the same view up and down, more of the scene at the sides, and the HUD at the screen's edges. On a 16:9 or taller screen it is the Switch's 16:9 picture, as **16:9**. The game's window opens in that shape; choose **Fullscreen** in [Display mode](#display-mode) to fill the screen. The wider picture has about a third more pixels, so it runs a little slower. **Handheld** [console mode](#console-mode) keeps 16:9. In an `env.txt`: `DM_SCREEN_WIDE=auto`, `0`, or a size such as `3440x1440`.
+
 ### Frame-rate counter
 
 Shows the frames per second at the top left.
@@ -273,6 +277,7 @@ A line like `DM_PRESENT_SNAP=0` in `Documents/env.txt` (in the Files app, under 
 | Cloud saves folder (Mac) | `DM_SAVE_SYNC` | a folder; `icloud`: iCloud Drive › nxnative Saves; `0`: off |
 | Picture (iPhone and iPad) | `DM_PICTURE_FIT` | `fit` 16:9 with black bars, `fill` covers the screen, cropped |
 | Picture shape | `DM_SCREEN_ASPECT` | `auto` the app window's own shape where it is taller than 16:9 (iPad 4:3, iPhone Duo 1.43:1), else 16:9 (iOS only); `1.43` the iPhone Duo's shape, `0` 16:9 |
+| Wide screen (Mac) | `DM_SCREEN_WIDE` | `auto` the main screen's size when it is wider than 16:9, else 16:9; `<width>x<height>` that shape (`3440x1440`); `0` 16:9 |
 | Frame-rate counter | `DM_SHOW_FPS` | `1`, `0` |
 | Touch feedback | `DM_TOUCH_HAPTICS` | `1`, `0` |
 | Game rumble | `DM_RUMBLE` | `1`, `0` |

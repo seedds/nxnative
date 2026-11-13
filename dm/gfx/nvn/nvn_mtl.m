@@ -12710,8 +12710,37 @@ static int prog_samples_ser(const prog_t *pg, uint64_t tex[6][NTEX], uint64_t im
     return 0;
 }
 static int g_defer_env_ab, g_defer_env_off;   // Environment switches: read once at the start of each submit (defer_reset); the hot path does not call getenv
-static void defer_env(void) { const char *x = getenv("DM_NVN_DEFER_AB"), *e = getenv("DM_NVN_DEFER"); g_defer_env_ab = x && !strcmp(x, "1"); g_defer_env_off = e && !strcmp(e, "0"); }
+// DM_NVN_PASS_DEFER=1|ab (off by default): the deferred pass merge without DM_NVN_TBDR. Ocarina of Time draws its deferred lights as pairs, a shadow map's depth pass and then one
+// draw into the shared 1195x672 light buffer that samples it, eleven times in a row, so the light buffer was loaded and stored eleven times and each light draw was a pass of its own.
+// Deferred, each light draw waits for the next light pass (Q) and the eleven become one, after all the shadow passes. Without TBDR's store index there is no pre-screen (defer_pre),
+// so the scan is cut at PD_SCAN ops, and since bindless reads cannot be listed it adds: no draw of P may be bindless (DM_NVN_PASS_DEFER_BINDLESS=1 allows it) or write memory, and
+// no draw between P and Q may write memory (prog_swrites); dispatches, copies to buffers and uniform updates between them already stop it. A pass that opens Q runs no compute or
+// mesh hoist (cs_hoist_try, mk_hoist_try), since those would move work ahead of the replayed P draws they did not check against
+enum { PD_SCAN = 6000 };
+#if TARGET_OS_IPHONE
+#define PD_DFLT 0   // not measured there
+#else
+#define PD_DFLT (g_dev && ![g_dev supportsFamily:MTLGPUFamilyApple9])   // on by default on a Mac without mesh-shading hardware (M1, M2), where it was measured; =0 turns it off
+#endif
+static int g_defer_env_pd, g_defer_pd_bl; static uint64_t g_pd_rej[32], g_pd_acc, g_pd_draws;
+static void defer_env(void) { const char *x = getenv("DM_NVN_DEFER_AB"), *e = getenv("DM_NVN_DEFER"); g_defer_env_ab = x && !strcmp(x, "1"); g_defer_env_off = e && !strcmp(e, "0");
+    static int pm = -1; if (pm < 0) { pm = tbdr_on() ? 0 : sw_mode("DM_NVN_PASS_DEFER", PD_DFLT); const char *b = getenv("DM_NVN_PASS_DEFER_BINDLESS"); g_defer_pd_bl = b && !strcmp(b, "1");
+        if (pm) MLOG("DM_NVN_PASS_DEFER: deferred pass merge without TBDR (bindless P draws %s)", g_defer_pd_bl ? "allowed" : "not deferred"); }
+    g_defer_env_pd = pm && sw_on(pm);   // latched for the submission
+    static uint64_t lastf; uint64_t f = atomic_load(&g_cur_frame);
+    if (pm && f / 300 != lastf / 300) { lastf = f;
+        MLOG("pass defer: %llu groups accepted (%llu draws) / 300 frames; rejected by reason: 1 end %llu, 2 call %llu, 3 op %llu, 5 %llu, 6 %llu, 7 %llu, 8 depth write %llu, 9 %llu, 12 %llu, 13 %llu, 14 %llu, 16 %llu, 20 %llu, 21 scan cut %llu, 22 bindless %llu, 23 P writes %llu, 24 between writes %llu",
+             g_pd_acc, g_pd_draws, g_pd_rej[1], g_pd_rej[2], g_pd_rej[3], g_pd_rej[5], g_pd_rej[6], g_pd_rej[7], g_pd_rej[8], g_pd_rej[9], g_pd_rej[12], g_pd_rej[13], g_pd_rej[14], g_pd_rej[16], g_pd_rej[20], g_pd_rej[21], g_pd_rej[22], g_pd_rej[23], g_pd_rej[24]);
+        memset(g_pd_rej, 0, sizeof g_pd_rej); g_pd_acc = g_pd_draws = 0; }
+}
+static int pd_prog_bad(const prog_t *pg, int p_draw) {   // DM_NVN_PASS_DEFER's extra rule for one draw: 22 / 23 for a P draw, 24 for a draw between P and Q, 0 fine
+    __unsafe_unretained NvProg *pr = pg ? prog_get(pg) : nil; if (!pr) return p_draw ? 22 : 24;
+    if (prog_swrites(pr)) return p_draw ? 23 : 24;
+    if (p_draw && !g_defer_pd_bl) for (int st = 0; st < 6; st++) { __unsafe_unretained NvShader *sh = pr->sh[st]; if (sh && (sh->rf.bindless || sh->rf.dyn)) return 22; }
+    return 0;
+}
 static int defer_on(void) {
+    if (g_defer_env_pd) return 1;
     if (!g_defer_env_ab) return tbdr_on() && !g_defer_env_off;
     if (g_defer_ab < 0) { g_defer_ab = 0; g_defer_ab_on = 0; }
     return tbdr_on() && (g_defer_ab || g_defer_ab_on); }
@@ -12856,12 +12885,14 @@ static void defer_try(const p_draw *dw, const p_draw_idx *di) {
     g_defer_cur = &g_defer_slots[slot];
     int ncol = 0; for (int i = 0; i < R.rt.n; i++) ncol += R.rt.color[i] != NULL; if (!ncol) return;   // Render passes with only depth-stencil attached (shadow maps etc.): Q is defined as covering P's colors, so a P without color can never be deferred -- previously the pre-screen let it through idly and the full lookahead scanned dozens of draws for nothing
     int has_clear = R.clear_d || R.clear_s; for (int i = 0; i < 8; i++) has_clear |= R.clear_c[i]; if (!has_clear) return;
-    if (!defer_pre()) return;
+    if (!g_defer_env_pd && !defer_pre()) return;
+    if (g_defer_env_pd) { int bad = pd_prog_bad(S.prog, 1); if (bad) { g_pd_rej[bad]++; return; } }
     memset(&g_defer, 0, sizeof g_defer); g_defer.p_rt = R.rt; memcpy(g_defer.clear_c, R.clear_c, 8); memcpy(g_defer.cc, R.cc, sizeof R.cc);
     g_defer.clear_d = R.clear_d; g_defer.clear_s = R.clear_s; g_defer.cd = R.cd; g_defer.cs = R.cs;
     uint64_t tex[6][NTEX], img[6][32]; memcpy(tex, S.tex, sizeof tex); memcpy(img, S.img, sizeof img); const prog_t *pg = S.prog; ds_st ds = S.ds;
     const uint8_t *p = g_exec_next, *p_end = NULL, *qop = NULL; const p_set_rt *q = NULL; p_set_rt scan_rt = R.rt; int srt_hit = -1, ci = 0, draws = 1, p_has_draw = 1; defer_collect_reads(&g_defer, pg, tex, img);   // The current draw is P's first
-    for (int guard = 0; guard < 200000; guard++) {
+    for (int guard = 0; ; guard++) {
+        if (guard >= (g_defer_env_pd ? PD_SCAN : 200000)) { g_defer.reason = 21; goto fail; }
         op_hdr h; memcpy(&h, p, sizeof h); const void *a = p + 8;
         if (g_hoist_n && hoist_skipped(p)) { p += h.size; continue; }
         switch (h.op) {
@@ -12874,6 +12905,7 @@ static void defer_try(const p_draw *dw, const p_draw_idx *di) {
             case OP_BIND_STATE: { const p_bind_state *b = a; if (b->kind == 5) memcpy(&ds, b->bytes, sizeof ds); break; }
             case OP_DRAW: case OP_DRAW_IDX:
                 if (defer_prog_hits(pg, tex, img, &g_defer.p_rt, 1, 1)) { /* Suggestion: here, after identifying that an output mapping is needed but _bf is missing, call bf_want_note. */ g_defer.reason = 7; goto fail; }
+                if (g_defer_env_pd) { int bad = pd_prog_bad(pg, !p_end); if (bad) { g_defer.reason = bad; goto fail; } }   // see DM_NVN_PASS_DEFER
                 if (p_end) {   // Draws in the intermediate range: must not write textures P reads, must not write P's depth-stencil (and must not test stencil when P writes stencil)
                     if (srt_hit < 0) { srt_hit = 0; for (int k = 0; k < scan_rt.n && !srt_hit; k++) if (scan_rt.color[k] && defer_rt_hits_reads(&scan_rt, k)) srt_hit = 1; }   // Attachments change only at SetRenderTargets: computed once per segment
                     if (srt_hit) { g_defer.reason = 12; goto fail; }
@@ -12911,6 +12943,7 @@ static void defer_try(const p_draw *dw, const p_draw_idx *di) {
         p += h.size;
     }
 fail:
+    if (g_defer_env_pd && g_defer.reason > 0 && g_defer.reason < 32) g_pd_rej[g_defer.reason]++;
     if (g_defer.reason && passdump()) PD("G %llu rejected reason=%d op=%d", g_stat_pass + 1, g_defer.reason, g_defer.reason_op); memset(&g_defer, 0, sizeof g_defer); return;
 q_found:
     p = qop; op_hdr qh; memcpy(&qh, p, sizeof qh); p += qh.size; int q_body = 0, q_clears = 0;   // Binding tracking continues from the main scan's state (does not go back to S at the start of P)
@@ -12940,7 +12973,7 @@ q_found:
         for (int i = 0; i < d->n; i++) { defer_snap z = d->snap[i]; uint8_t pm[8]; for (int k = 0; k < 8; k++) pm[k] = d->lmap[k] == 0xff || d->lmap[k] >= 8 ? 0xff : z.pm[d->lmap[k]];
             memcpy(z.pm, pm, 8); g_defer.snap[g_defer.n++] = z; }
         g_defer.reset_between |= d->reset_between; d->n = 0; defer_release_one(d); } if (!defer_take(dw, di)) { defer_release_one(&g_defer); return; }
-    memset(R.clear_c, 0, sizeof R.clear_c); R.clear_d = R.clear_s = 0; PD("G %llu accepted group %d P→Q draws=%d", g_stat_pass + 1, slot, draws);
+    memset(R.clear_c, 0, sizeof R.clear_c); R.clear_d = R.clear_s = 0; PD("G %llu accepted group %d P→Q draws=%d", g_stat_pass + 1, slot, draws); g_pd_acc++; g_pd_draws += (uint64_t)draws;
 }
 // Pre-screen of the necessary condition for merging (binary search on the submit index, zero scanning on failure): merging requires that "the first draw of the later pass (the next SET_RT with a different target that has not been hoisted)
 // samples some color attachment of the earlier pass", i.e. there is an SDX_READ event for that attachment at that draw's sequence number. If not satisfied there is certainly no merge, saving the per-operation scan below;
@@ -14447,9 +14480,9 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) {
     int defer_q_draw = !g_enc && !g_defer_replaying && g_defer_natq > 0;   // The draw that opens Q's render pass: after the render pass is opened as usual through hoist_try / fuse_try, replay P first and then draw this one
     if (!g_enc && tbdr_on() && !g_geo_program) hoist_try();   // First hoist and execute the pure-clear render passes sandwiched between this render pass and its continuation (before rp_begin_ex, not occupying this render pass)
     // The deferral decision comes after hoist_try: hoisted pure-clear render passes are skipped in the lookahead, and only then can P's same-target continuation segment be recognized
-    if (!g_enc && tbdr_on() && !g_geo_program && !defer_has_in_p() && !g_defer_replaying && !g_fz.active && !g_fz_checking && g_exec_next) { defer_try(dw, di); if (g_defer_cur->active && g_defer_cur->in_p) return; }
+    if (!g_enc && (tbdr_on() || g_defer_env_pd) && !g_geo_program && !defer_has_in_p() && !g_defer_replaying && !g_fz.active && !g_fz_checking && g_exec_next) { defer_try(dw, di); if (g_defer_cur->active && g_defer_cur->in_p) return; }
     if (!g_enc && tbdr_on() && !g_fz_checking && !g_geo_program) fuse_try();   // Readable tile render pass merge is on by default; when the structure / same-pixel proof does not hold it still falls back to a normal render pass, and it is not re-entered during the CHECK redraw
-    if (!g_enc && !tbdr_on() && !g_geo_program && cshoist_on()) cs_hoist_try(pr, dw, di);   // see DM_NVN_CS_HOIST
+    if (!g_enc && !tbdr_on() && !g_geo_program && !defer_q_draw && cshoist_on()) cs_hoist_try(pr, dw, di);   // see DM_NVN_CS_HOIST; not in a pass that replays deferred draws (DM_NVN_PASS_DEFER)
     int need = g_enc || !tbdr_on() ? 3 : pass_ds_need(), mode = defer_q_draw ? 0 : need == 0 ? 2 : need == 2 ? 3 : need == 1 ? 4 : 0;   // 2 attach neither, 3 attach stencil only, 4 attach depth only
     int skip_d = mode != 0;
     if (!g_enc) { g_fd_dw = dw; g_fd_di = di; }

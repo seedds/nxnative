@@ -1068,6 +1068,22 @@ void mtl_pool_addressed_by(const void *mem, uint64_t size, int kind) {
 // (they measured on a 17 Pro Max a 512 MB render-target pool addressed 0 times in a run, with about 530 MB more device wired memory; a 4 GB A14 was ended by the system within seconds of launch because of it).
 // So a pool is not put into the residency set when created; it is put in, and the residency set committed on the spot, the first time the GPU gets its address through mtl_addr / mtl_gpu_addr -- these are the only two ways the GPU gets pool addresses,
 // and committing on the spot is earlier than any command buffer commit that uses it. CPU-side reads of pool contents through mtl_addr trigger it too (conservative, never misses). Caller holds g_mu
+// A pool of 32 MB or more made resident: by whom (a lookup's caller as an offset in the host image, for atos; or the raw pool table) and who gave addresses in it, at most 40 lines. Caller holds g_mu
+static void pool_res_note(int i, const void *caller, const char *by) {
+    static int n; const pool_ent *p = &g_pools[i]; uint64_t z = p->hi - p->lo;
+    if (z < (32u << 20) || n >= 40) return;
+    n++; Dl_info di = {0}; char at[32] = "";
+    if (caller && dladdr(caller, &di) && di.dli_fbase) snprintf(at, sizeof at, " from host+%#lx", (unsigned long)((uintptr_t)caller - (uintptr_t)di.dli_fbase));
+    MLOG("[mem] pool %p (%llu MB, flags %#x) made resident by %s%s%s; addresses given in it (MB): pool %llu, buffers %llu, textures %llu, virtual mappings %llu", (void *)p->lo, (unsigned long long)(z >> 20), p->tag, by,
+         at, t_tex_upload_lookup ? " (a texture upload)" : "",
+         (unsigned long long)(rng_overlap(&g_addrk[0], p->lo, p->hi) >> 20), (unsigned long long)(rng_overlap(&g_addrk[1], p->lo, p->hi) >> 20),
+         (unsigned long long)(rng_overlap(&g_addrk[2], p->lo, p->hi) >> 20), (unsigned long long)(rng_overlap(&g_addrk[3], p->lo, p->hi) >> 20));
+}
+static void pool_res_from(int i, const void *caller) {
+    if (g_pools[i].res) return;
+    pool_res_note(i, caller, "a lookup");
+    res_add(g_pools[i].buf); res_commit(); g_pools[i].res = 1; g_pool_res_n++;
+}
 static void pool_res(int i) {
     if (g_pools[i].res) return;
     res_add(g_pools[i].buf); res_commit(); g_pools[i].res = 1; g_pool_res_n++;
@@ -1323,7 +1339,7 @@ int mtl_addr(uint64_t addr, uint64_t len, void **buf, uint64_t *off) {
     pthread_mutex_lock(&g_mu);
     int i = pool_find(addr, len);
     if (i >= 0) { if (t_tex_upload_lookup) g_pools[i].n_tex_reads++; else g_pools[i].n_other++; }
-    if (i >= 0) { pool_res(i); pc_put(i, addr); *buf = (__bridge void *)g_pools[i].buf; *off = addr - g_pools[i].base; ok = 1; }
+    if (i >= 0) { pool_res_from(i, __builtin_return_address(0)); pc_put(i, addr); *buf = (__bridge void *)g_pools[i].buf; *off = addr - g_pools[i].base; ok = 1; }
     pthread_mutex_unlock(&g_mu);
     return ok;
 }
@@ -1334,7 +1350,7 @@ int mtl_gpu_addr(uint64_t addr, uint64_t len, void **buf, uint64_t *off, uint64_
     pthread_mutex_lock(&g_mu);
     int i = pool_find(addr, len);
     if (i >= 0) { if (t_tex_upload_lookup) g_pools[i].n_tex_reads++; else g_pools[i].n_other++; }
-    if (i >= 0) { pool_res(i); pc_put(i, addr); *buf = (__bridge void *)g_pools[i].buf; *off = addr - g_pools[i].base; *gpu = g_pools[i].gpu + *off; ok = 1; }
+    if (i >= 0) { pool_res_from(i, __builtin_return_address(0)); pc_put(i, addr); *buf = (__bridge void *)g_pools[i].buf; *off = addr - g_pools[i].base; *gpu = g_pools[i].gpu + *off; ok = 1; }
     pthread_mutex_unlock(&g_mu);
     return ok;
 }
@@ -11471,7 +11487,7 @@ static id<MTLBuffer> gmem_map(void) {
     for (int k = 0; k < g_npool; k++) {
         pool_ent *p = &g_pools[g_pidx[k]];
         if (!addr_meets(p->lo, p->hi)) continue;
-        if (!p->res) { res_add(p->buf); p->res = 1; g_pool_res_n++; }
+        if (!p->res) { pool_res_note(g_pidx[k], NULL, "the raw pool table"); res_add(p->buf); p->res = 1; g_pool_res_n++; }
         uint64_t lo = MAX((uint64_t)p->lo, end), hi = p->hi;
         if (lo >= hi) continue;
         if (n == DMSH_GMEM_MAP_ENTRIES) { over++; continue; }
@@ -18045,6 +18061,18 @@ void mem_census(const char *why) { @autoreleasepool {
             int j = 0; while (j < nhk && (hk[j].line != ln[i] || strcmp(hk[j].k, ks[i]))) j++;
             if (j == nhk) { if (nhk == NK) continue; hk[nhk].line = ln[i]; memcpy(hk[nhk].k, ks[i], 16); hk[nhk].n = hk[nhk].b = 0; nhk++; }
             hk[j].n++; hk[j].b += t.heap ? 0 : t.allocatedSize; }
+        {   // The largest textures one by one, placed ones too, at their own size and with where their memory is (h own recycled heap, f family heap, w span heap, - own): a scene's
+            // few large targets are most of what its load adds, and the line above leaves placed textures out
+            NSMutableArray<NSNumber *> *big = [NSMutableArray array];
+            for (NSUInteger i = 0; i < nt; i++) if (((id<MTLTexture>)tx[i]).allocatedSize >= (16u << 20)) [big addObject:@(i)];
+            [big sortUsingComparator:^NSComparisonResult(NSNumber *x, NSNumber *y) { NSUInteger a = ((id<MTLTexture>)tx[x.unsignedIntegerValue]).allocatedSize, b = ((id<MTLTexture>)tx[y.unsignedIntegerValue]).allocatedSize; return a > b ? NSOrderedAscending : a < b ? NSOrderedDescending : NSOrderedSame; }];
+            char bl[1600]; size_t bo = 0; NSUInteger nb = MIN(big.count, (NSUInteger)12);
+            for (NSUInteger j = 0; j < nb && bo < sizeof bl; j++) { NSUInteger i = big[j].unsignedIntegerValue; id<MTLTexture> t = tx[i]; NvImageHeap *ih = objc_getAssociatedObject(t, &g_image_heap_owner_key);
+                char m = objc_getAssociatedObject(t, &g_rh_owner_key) ? 'h' : ih ? (ih->window ? 'w' : 'f') : '-';
+                bo += snprintf(bl + bo, sizeof bl - bo, "%s%lux%lux%lu format %lu line %d [%s] %c %llu MB", j ? "; " : "", (unsigned long)t.width, (unsigned long)t.height, (unsigned long)MAX(t.depth, t.arrayLength),
+                               (unsigned long)t.pixelFormat, ln[i], ks[i], m, (unsigned long long)(t.allocatedSize >> 20)); }
+            MLOG("%s census: the largest textures in the set (16 MB and more, %lu of them), with the letters above and their memory (h own recycled heap, f family heap, w span heap, - own): %s", why, (unsigned long)big.count, nb ? bl : "none");
+        }
         free(ks); free(ln);
         for (int i = 0; i < nhk; i++) for (int j = i + 1; j < nhk; j++) if (hk[j].b > hk[i].b) { __typeof__(hk[0]) x = hk[i]; hk[i] = hk[j]; hk[j] = x; }
         char hl[1400]; size_t ho = 0; for (int i = 0; i < nhk && i < 24 && ho < sizeof hl; i++) ho += snprintf(hl + ho, sizeof hl - ho, "%sline %d [%s] %llu, %llu MB", i ? "; " : "", hk[i].line, hk[i].k, (unsigned long long)hk[i].n, (unsigned long long)(hk[i].b >> 20));

@@ -639,3 +639,6 @@ check_t_scan_source: RUN_ENV = MTL_DEBUG_LAYER=1
 # Game-specific runtime bridge: command recording and rejection, no gameplay.
 t_scan_adapter: t_scan_adapter.c ../nvn/hle_nvn.c $(GAME_DIR)/nvn_runtime.inc ../../host/crash.c ../../host/hle_bigstack.c t_host_stubs.c $(GFX) $(GFX_H)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_scan_adapter.c ../../host/crash.c ../../host/hle_bigstack.c t_host_stubs.c $(GFX) $(FW)
+
+t_mp4_quality: t_mp4_quality.c ../../games/010019A01E2F2000/quality_policy.inc
+	clang -O2 -Wall -o $@ t_mp4_quality.c

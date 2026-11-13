@@ -8,7 +8,7 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE)); sys.path.insert(0, str(HERE.parent / 'tools'))
-import game, nacp
+import game, nacp, runtime_patch
 
 SECTIONS = ('Game', 'Controls', 'Performance')   # headings on the single settings screen
 SCHEMA = 1   # launcher.json's version (docs/launcher.schema.json); it grows only by optional fields, so a reader of 1 reads every 1
@@ -72,7 +72,15 @@ def build(gid, patched, control):
         if name not in macros: sys.exit(f'settings.tsv:{n}: no {name} in the game profile header (game.py header)')
         return macros[name].strip('"')
 
+    runtime_choices = {}
     def shown(cond, n):
+        if '|' in cond: return any(shown(c, n) for c in cond.split('|'))
+        if '&' in cond: return all(shown(c, n) for c in cond.split('&'))
+        if cond.startswith('runtime:'):
+            var, sep, choice = cond[8:].partition('=')
+            if not sep: sys.exit(f'settings.tsv:{n}: runtime condition is runtime:DM_VAR=value')
+            if var not in runtime_choices: runtime_choices[var] = runtime_patch.choices(patched, var)
+            return choice in runtime_choices[var]
         if cond == 'always': return True
         if cond == 'languages>1': return len(langs) > 1
         if cond.startswith('fixups:'): return cond[7:] in keys

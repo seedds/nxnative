@@ -1,6 +1,7 @@
 """Build identity, rewrite-site conflicts, cache lifecycle and the original scene allocation ABI."""
 import importlib.util
 from pathlib import Path
+import os
 import re
 import struct
 import sys
@@ -88,7 +89,7 @@ class SceneStub(unittest.TestCase):
             sizes.append((register & 0xffffffff, register >> 32))
             self.assertEqual(words[k + 2], B(base + 4 * k + 8, profile.scene_site + 4))
         self.assertEqual(sizes, [(2560, 1440), (3840, 2160), (3200, 1800), (3200, 1792)])
-        self.assertEqual(exports, {'SCENE_1440': base, 'SCENE_2160': base + 12, 'SCENE_1800': base + 24, 'SCENE_D1792': base + 36})
+        self.assertEqual({k: exports[k] for k in ('SCENE_1440', 'SCENE_2160', 'SCENE_1800', 'SCENE_D1792')}, {'SCENE_1440': base, 'SCENE_2160': base + 12, 'SCENE_1800': base + 24, 'SCENE_D1792': base + 36})
         self.assertEqual(checked, [(profile.scene_site, '358108aa')])
 
     def test_unknown_game_build_cannot_generate_manifest(self):
@@ -128,8 +129,12 @@ class ScanSourcePatch(unittest.TestCase):
         text, base = 0x138ee20, 0x2000000
         original = bytearray(0x13c2000)  # include the verified RO format table
         original[self.profile.scene_site:self.profile.scene_site + 4] = bytes.fromhex('358108aa')
-        for off, hexbytes in self.profile.SCAN_SOURCE_ABI:
+        for off, hexbytes in self.profile.SCAN_SOURCE_ABI + self.profile.SCENE_CONTROL_ABI:
             original[off:off + len(bytes.fromhex(hexbytes))] = bytes.fromhex(hexbytes)
+        for off, before in self.runtime.OUTPUT_ABI:
+            original[off:off + len(before)] = before
+        for _, off, before, _ in self.runtime.output_writes('2880p_full', 5120, 2880):
+            original[off:off + len(before)] = before
         patched = bytearray(base + 4096)
         patched[:len(original)] = original
         words, checked, exports = [], [], {}
@@ -146,11 +151,11 @@ class ScanSourcePatch(unittest.TestCase):
         module, patched, fixups = self.fixture()
         rows = self.runtime.generate(module, patched, fixups).splitlines()
         writes = [row.split('\t') for row in rows if row.startswith('write\t')]
-        self.assertEqual([row[1] for row in writes], ['1440p', '2160p', '1800p', 'diag1792', '1800p', '2160p'])
+        self.assertEqual([row[1] for row in writes if not row[1].endswith('_full')], ['1440p', '2160p', '1800p', 'diag1792', '1800p', '2160p'])
         self.assertEqual([row[2] for row in writes if row[1] == '1800p'], ['33170c', '336a8c'])
         self.assertEqual([row[2] for row in writes if row[1] == '2160p'], ['33170c', '336a8c'])
         self.assertFalse(any(row[1] == 'default' for row in writes))
-        self.assertTrue(all(row[2] == '33170c' for row in writes if row[1] not in ('1800p', '2160p')))
+        self.assertTrue(all(row[2] == '33170c' for row in writes if row[1] not in ('1800p', '2160p') and not row[1].endswith('_full')))
 
     def test_missing_corrupt_or_outside_stub_is_rejected(self):
         module, patched, fixups = self.fixture()
@@ -173,6 +178,64 @@ class ScanSourcePatch(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'ABI mismatch'):
                 self.runtime.generate(module, patched, fixups)
             patched[off] ^= 1
+
+    def test_full_outputs_change_scene_canvas_and_display_together(self):
+        from capstone import Cs, CS_ARCH_ARM64, CS_MODE_ARM  # pyright: ignore[reportMissingImports]
+        md = Cs(CS_ARCH_ARM64, CS_MODE_ARM)
+        module, patched, fixups = self.fixture()
+        rows = [r.split('\t') for r in self.runtime.generate(module, patched, fixups).splitlines() if r.startswith('write\t')]
+        for choice, _, w, h in self.runtime.FULL_CHOICES:
+            writes = {int(r[2], 16): bytes.fromhex(r[4]) for r in rows if r[1] == choice}
+            self.assertEqual(len(writes), 38)  # scene, scan bridge, 30 canvas and six scalar sites
+            self.assertEqual(next(md.disasm(writes[0x80be90], 0)).op_str, f'w0, #{hex(w)}')
+            self.assertEqual(next(md.disasm(writes[0x80be98], 0)).op_str, f'w0, #{hex(h)}')
+            for a, b, r in self.runtime.OUTPUT_PAIRS:
+                self.assertEqual(next(md.disasm(writes[a], 0)).op_str, f'x{r}, #{hex(w)}')
+                self.assertEqual(next(md.disasm(writes[b], 0)).op_str, f'x{r}, #{hex(h)}, lsl #32')
+            self.assertIn(0x33170c, writes); self.assertIn(0x336a8c, writes)
+            self.assertFalse(any(0x336a90 <= off < 0x336ab0 for off in writes), 'native scan size guard remains intact')
+        with self.assertRaises(ValueError): self.runtime.output_writes('2880p_full', 7680, 4320)
+
+    def test_scene_control_preserves_registers_flags_and_uses_original_stack_input(self):
+        from capstone import Cs, CS_ARCH_ARM64, CS_MODE_ARM  # pyright: ignore[reportMissingImports]
+        md = Cs(CS_ARCH_ARM64, CS_MODE_ARM)
+        words = self.profile.scene_control_words(0x2000000, 5120, 2880)
+        code = b''.join(struct.pack('<I', w) for w in words)
+        ins = list(md.disasm(code, 0x2000000))
+        text = [(i.mnemonic, i.op_str) for i in ins]
+        self.assertEqual(text[0], ('orr', 'x21, x9, x8, lsl #32'))
+        self.assertIn(('ldr', 'w2, [sp, #0x2bc]'), text); self.assertIn(('ldr', 'w3, [sp, #0x2b8]'), text)
+        self.assertIn(('mrs', 'x17, nzcv'), text); self.assertIn(('msr', 'nzcv, x17'), text)
+        self.assertEqual([i.op_str for i in ins if i.mnemonic == 'stp'], [i.op_str for i in ins if i.mnemonic == 'ldp'])
+        self.assertEqual([i.op_str for i in ins if i.mnemonic == 'str' and i.op_str.startswith('q')], [i.op_str for i in ins if i.mnemonic == 'ldr' and i.op_str.startswith('q')])
+        self.assertIn(('b', '#0x331710'), text)
+        self.assertIn(self.profile.SCENE_CONTROL_EXTENSION, code)
+
+    def test_output_abi_and_changed_instructions_reject_corruption(self):
+        module, patched, fixups = self.fixture()
+        for off, before in self.runtime.OUTPUT_ABI:
+            patched[off] ^= 1
+            with self.assertRaisesRegex(ValueError, 'output ABI'): self.runtime.generate(module, patched, fixups)
+            patched[off] ^= 1
+        patched[0x80be90] ^= 1
+        with self.assertRaisesRegex(ValueError, 'runtime site was rewritten'): self.runtime.generate(module, patched, fixups)
+
+    def test_launcher_offers_only_matching_full_manifest_and_keeps_stable_default(self):
+        sys.path.insert(0, str(ROOT / 'dm/games'))
+        import settings
+        module, patched, fixups = self.fixture()
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp)
+            (folder / 'main.fixups.tsv').write_text(''.join(f'# {k}\t{v}\n' for k, v in fixups.items()))
+            image = folder / 'main.patched.bin'; image.write_bytes(patched)
+            (folder / 'main.runtime.tsv').write_text(self.runtime.generate(module, patched, fixups))
+            with mock.patch.dict(os.environ, {'SETTINGS_PLATFORM': 'mac'}), mock.patch.object(settings.nacp, 'languages', return_value=['en-US']):
+                listed = settings.build('010019A01E2F2000', tmp, 'unused')['settings']
+                row = next(r for r in listed if r['env'] == 'DM_INTERNAL_RESOLUTION')
+                self.assertEqual(row['default'], '1800p')
+                self.assertEqual([r[0] for r in row['options']], ['default', 'native_full', '1080p_full', '1440p_full', '1800p', '2160p_full', '2880p_full'])
+                patched[0x80be90] ^= 1; image.write_bytes(patched)
+                with self.assertRaisesRegex(ValueError, 'instructions differ'): settings.build('010019A01E2F2000', tmp, 'unused')
 
     def test_bridge_spills_and_returns_with_only_x28_and_displaced_w8_changed(self):
         from capstone import Cs, CS_ARCH_ARM64, CS_MODE_ARM  # pyright: ignore[reportMissingImports]  # binary-analysis test dependency in the tool venv

@@ -179,15 +179,28 @@ class HostMSL(unittest.TestCase):
 
         with patch.object(nsp, 'apple_silicon', return_value=True), patch.object(nsp, 'run', side_effect=run), patch.object(nsp.subprocess, 'run', side_effect=command):
             self.env['TEST_METAL_VERSION'] = ''
-            nsp.build_mac_host(self.root, out, self.env, logs, NS(id=GAME))
-            nsp.build_mac_host(self.root, out, self.env, logs, NS(id=GAME))
+            nsp.build_mac_host(self.root, out, self.env, logs, NS(id=GAME, dir=self.root / f'dm/games/{GAME}'))
+            nsp.build_mac_host(self.root, out, self.env, logs, NS(id=GAME, dir=self.root / f'dm/games/{GAME}'))
             self.assertEqual(len(builds), 1)
             self.env['TEST_METAL_VERSION'] = 'Metal test compiler 1'
-            nsp.build_mac_host(self.root, out, self.env, logs, NS(id=GAME))
+            nsp.build_mac_host(self.root, out, self.env, logs, NS(id=GAME, dir=self.root / f'dm/games/{GAME}'))
             self.assertEqual(len(builds), 2)
             self.source.write_text('kernel void changed() {}\n')
-            nsp.build_mac_host(self.root, out, self.env, logs, NS(id=GAME))
+            nsp.build_mac_host(self.root, out, self.env, logs, NS(id=GAME, dir=self.root / f'dm/games/{GAME}'))
             self.assertEqual(len(builds), 3)
+            # Included profile code is a real host input, not generated header data.
+            # Use an external profile to cover DM_GAMES_DIR/provisional builds too.
+            external = self.root / 'external-profile'; external.mkdir()
+            g = NS(id=GAME, dir=external)
+            def build_profile(): return nsp.build_mac_host(self.root, out, self.env, logs, g)
+            build_profile(); self.assertEqual(len(builds), 3)
+            include = external / 'nvn_runtime.inc'; include.write_text('accept_1800p();\n')
+            build_profile(); self.assertEqual(len(builds), 4)
+            build_profile(); self.assertEqual(len(builds), 4, 'unchanged included code reuses the host')
+            include.write_text('accept_2160p();\n')
+            build_profile(); self.assertEqual(len(builds), 5, 'profile code edit must invalidate the host')
+            include.unlink()
+            build_profile(); self.assertEqual(len(builds), 6, 'removing included code also invalidates the host')
 
     def test_decoder_identity_normalizes_only_chain_and_verifies_executable(self):
         nsp = script('build_ipa_from_nsp')
@@ -204,7 +217,7 @@ class HostMSL(unittest.TestCase):
         def command(cmd, **kw):
             return NS(returncode=0, stdout='clang -o dmhost main.c\n' if cmd[0] == 'make' else toolchain[0], stderr='')
         with patch.object(nsp, 'apple_silicon', return_value=True), patch.object(nsp, 'run', side_effect=run), patch.object(nsp.subprocess, 'run', side_effect=command):
-            def build(): return nsp.build_mac_host(self.root, out, self.env, logs, NS(id=GAME))
+            def build(): return nsp.build_mac_host(self.root, out, self.env, logs, NS(id=GAME, dir=self.root / f'dm/games/{GAME}'))
             build()
             record = out.with_name(out.name + '.decoder.json')
             self.assertTrue(record.is_file(), 'a managed host needs verified decoder provenance')

@@ -68,7 +68,26 @@ int main(void) {
     handle=h_nvnCommandBufferEndRecording(&commands);linear=nvn_rec_linear(handle,&n);memcpy(&h,linear,sizeof h);copy=(const void *)(linear+sizeof h);
     CHECK(h.op==OP_COPY_T2T && copy->src->d.width==3840 && copy->src->d.height==2160
         && copy->sr.width==3840 && copy->sr.height==2160 && copy->dr.width==1600 && copy->dr.height==900 && !copy->flags,"4K query records a nearest 3840x2160 to 1600x900 copy");
-    free(linear);h_nvnCommandBufferFinalize(&commands);
+    free(linear);
+    const unsigned sizes[][2]={{1920,1080},{2560,1440},{5120,2880}};
+    for(unsigned i=0;i<3;i++) {
+        unsigned w=sizes[i][0],hgt=sizes[i][1];
+        source.serial++;source.d.width=w;source.d.height=hgt;
+        scan_put32(original,0x14,w);scan_put32(original,0x18,hgt);
+        h_nvnCommandBufferBeginRecording(&commands);
+        result=mp4_scan_source_v1(&commands,original);
+        CHECK(result!=original && scan_get32(result,0x14)==1600 && scan_get32(result,0x18)==900,"full-output extent has a native-size query source");
+        handle=h_nvnCommandBufferEndRecording(&commands);linear=nvn_rec_linear(handle,&n);memcpy(&h,linear,sizeof h);copy=(const void *)(linear+sizeof h);
+        CHECK(h.op==OP_COPY_T2T && copy->sr.width==(int)w && copy->sr.height==(int)hgt && copy->dr.width==1600 && copy->dr.height==900,"full-output copy keeps full source extent and native query extent");
+        free(linear);
+    }
+    source.d.width=4480;source.d.height=2520;
+    scan_put32(original,0x14,4480);scan_put32(original,0x18,2520);
+    h_nvnCommandBufferBeginRecording(&commands);
+    result=mp4_scan_source_v1(&commands,original);
+    CHECK((result!=original)==!!mp4_quality_dynamic,"variable scene extent is accepted only with controlled dynamic resolution");
+    handle=h_nvnCommandBufferEndRecording(&commands);linear=nvn_rec_linear(handle,&n);free(linear);
+    h_nvnCommandBufferFinalize(&commands);
     mp4_scan_source *state=pthread_getspecific(mp4_scan_key);pthread_setspecific(mp4_scan_key,NULL);mp4_scan_destroy(state);
     printf("SCAN_ADAPTER %d checks, %d failed\n",checks,failures);return failures!=0;
 }

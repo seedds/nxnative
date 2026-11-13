@@ -23,7 +23,7 @@ static id<MTLBuffer> kd_gpu_plane(id<MTLTexture> source, NSUInteger level, NSUIn
     if(!source || !row || source.pixelFormat!=MTLPixelFormatDepth32Float_Stencil8 || source.sampleCount!=1 ||
        level>=source.mipmapLevelCount || source.textureType!=MTLTextureType2D) return nil;
     NSUInteger w=MAX(source.width>>level,1ul),h=MAX(source.height>>level,1ul);
-    if(w>4096 || h>4096 || slice) return nil;
+    if(w>16384 || h>16384 || w*h>4096ul*4096 || slice) return nil; // same pixel budget, including 5120x2880
     *row=(w*(stencil?1:4)+255)&~255ul;
     id<MTLBuffer> out=[g_dev newBufferWithLength:*row*h options:MTLResourceStorageModeShared];
     if(!out) return nil;

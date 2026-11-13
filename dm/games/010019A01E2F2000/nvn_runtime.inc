@@ -4,6 +4,32 @@
 // build ID is required by runtime_patches.py. No third-party patch data.
 // The engine's temporary view stays owned by its original shared_ptr. Only its
 // non-owning prefix is borrowed here, until main+336d00 replaces x28.
+#include "quality_policy.inc"
+static pthread_once_t mp4_quality_once=PTHREAD_ONCE_INIT;
+static int mp4_quality_dynamic;
+static unsigned mp4_quality_max_width,mp4_quality_max_height;
+static void mp4_quality_init(void) {
+    const char *d=getenv("DM_DYNAMIC_RESOLUTION"),*mode=getenv("DM_INTERNAL_RESOLUTION");
+    if(d && strcmp(d,"0") && strcmp(d,"1")) LOG("[RED] MP4 dynamic resolution must be 0 or 1; keeping fixed scene size");
+    mp4_quality_dynamic=d && !strcmp(d,"1");
+    const struct { const char *name;unsigned w,h; } sizes[]={
+        {"native_full",1600,900},{"1080p_full",1920,1080},{"1440p_full",2560,1440},
+        {"2160p_full",3840,2160},{"2880p_full",5120,2880}};
+    for(unsigned i=0;i<sizeof sizes/sizeof *sizes;i++) if(mode && !strcmp(mode,sizes[i].name)) {
+        mp4_quality_max_width=sizes[i].w;mp4_quality_max_height=sizes[i].h;
+    }
+    if(!mp4_quality_max_width) mp4_quality_dynamic=0; // legacy/reference choices retain their confirmed behavior
+    LOG("MP4 scene policy: %s; selected maximum %ux%u",mp4_quality_dynamic?"native dynamic controller":"fixed",mp4_quality_max_width,mp4_quality_max_height);
+}
+static uint64_t mp4_scene_size_v1(uint64_t native,uint64_t selected,uint64_t base) {
+    if(strcmp(dm_main_build(),"8275fbe1ec5191c279f3a943ad8524f4")) return selected;
+    pthread_once(&mp4_quality_once,mp4_quality_init);
+    uint64_t out;
+    if(mp4_scene_policy(native,selected,base,mp4_quality_dynamic,&out)) return out;
+    static _Atomic unsigned rejects;
+    if(atomic_fetch_add(&rejects,1)<4) LOG("[RED] MP4 invalid scene policy extents; keeping selected fixed size");
+    return selected;
+}
 typedef struct {
     _Alignas(16) uint8_t prefix[0x58];
     tex_t texture;
@@ -20,7 +46,7 @@ static void mp4_scan_key_init(void) {
 }
 static void *mp4_scan_source_v1(NVNcommandBuffer *commands, const void *view) {
     // The private entry can only operate on this build. Standard NVN behavior
-    // and all other runtime choices never call it (1800p and 2160p opt in).
+    // and native/legacy1440p never call it; 1800p/2160p and full-output choices opt in.
     if (strcmp(dm_main_build(), "8275fbe1ec5191c279f3a943ad8524f4") || !view) return (void *)view;
     const uint8_t *in = view;
     uint32_t width, height, engine_format; const tex_t *src; view_t sv;
@@ -34,7 +60,10 @@ static void *mp4_scan_source_v1(NVNcommandBuffer *commands, const void *view) {
     int format_ok = src && ((engine_format == 0x12 && src->d.format == NVN_FORMAT_DEPTH24_STENCIL8)
                    || (engine_format == 0x13 && src->d.format == NVN_FORMAT_DEPTH32F)
                    || (engine_format == 0x1f && src->d.format == NVN_FORMAT_R32F));
-    int extent_ok = (width == 3200 && height == 1800) || (width == 3840 && height == 2160);
+    pthread_once(&mp4_quality_once,mp4_quality_init);
+    int extent_ok = (width == 1920 && height == 1080) || (width == 2560 && height == 1440)
+        || (width == 3200 && height == 1800) || (width == 3840 && height == 2160) || (width == 5120 && height == 2880)
+        || mp4_dynamic_extent(width,height,mp4_quality_max_width,mp4_quality_max_height,mp4_quality_dynamic);
     if (!commands || CB(commands)->magic != MAGIC('C','M','D','B') || !CB(commands)->recording
         || !src || src->magic != MAGIC('T','E','X',0) || !format_ok || !extent_ok
         || src->d.width != width || src->d.height != height || src->d.target != NVN_TEXTURE_TARGET_2D
@@ -77,6 +106,8 @@ static void *mp4_scan_source_v1(NVNcommandBuffer *commands, const void *view) {
 // Profile-provided private entry lookup; no game IDs or engine offsets in the
 // shared NVN implementation. The rewriter emits this name only for main 1.1.0.
 static void *nvn_profile_runtime_lookup(const char *name) {
-    return !strcmp(name, "nxnativeMp4ScanSourceV1")
-        && !strcmp(dm_main_build(), "8275fbe1ec5191c279f3a943ad8524f4") ? (void *)mp4_scan_source_v1 : NULL;
+    if(strcmp(dm_main_build(),"8275fbe1ec5191c279f3a943ad8524f4")) return NULL;
+    if(!strcmp(name,"nxnativeMp4ScanSourceV1")) return (void *)mp4_scan_source_v1;
+    if(!strcmp(name,"nxnativeMp4SceneSizeV1")) return (void *)mp4_scene_size_v1;
+    return NULL;
 }

@@ -40,6 +40,14 @@
 
 ## Build tools
 
+### A profile code edit reuses an older Mac host
+
+- **Symptom:** the NSP script reports a reused host after a profile's included runtime code changes; the executable still rejects a graphics mode that the current source and synthetic tests accept.
+- **Cause:** `build_mac_host` fingerprinted the shared `HOST_DIRS` and generated profile header, but omitted the selected profile's `*.inc` files. An included private NVN entry can change without changing that header or compile line. Unlike the direct host Makefile, this separate content cache then reused an old executable. File timestamps alone do not correct its content key.
+- **Fix:** include the selected `g.dir/*.inc` in both host and decoder identities, including external/derived profiles. The short `test_host_msl` packer fixture verifies adding, editing and removing such an include invalidates reuse, while unchanged bytes reuse the host. Restoring the omission makes the new test fail. No renderer behavior, shader chain or game assets change.
+- **Found on:** [Metroid Prime 4: Beyond](../../dm/games/010019A01E2F2000/README.md#4k-reinvestigation-stale-test-host-2026-11-13), whose recorded 2160p checkpoint ran an 1800p-only scan adapter. Gameplay confirmation with the current executable remains open.
+
+
 ### Building needed .NET, and finding its runtime kept failing
 
 - **Symptom:** before running the NSP script, a player had to install the .NET SDK 10, and builds then failed in ways that were about .NET, not the game: a translator that finds no runtime of its architecture ([GitHub issue #54](https://github.com/seedds/nxnative/issues/54), [#248](https://github.com/seedds/nxnative/issues/248)), a Homebrew runtime the apphosts cannot find, a dll tied to one architecture ([#803](https://github.com/seedds/nxnative/issues/803)), the entries below. [GitHub issue #1853](https://github.com/seedds/nxnative/issues/1853) asked for the tools to be rewritten in Python or Objective-C.

@@ -31,6 +31,10 @@ On a Mac, a game checked at that speed (Fire Emblem Fortune's Weave, Mario & Lui
 
 Off, the default, keeps the 3D picture at full size. On lets the game lower its resolution when frames run heavy and raise it again when they fit, as on the Switch: steadier frame rate, at times a softer picture. Only games whose resolution control the app can hold offer it (NieR:Automata, Ocarina of Time).
 
+### Resolution
+
+Some Mac development builds offer a **Resolution** dropdown when their rewritten modules include compatible runtime choices. Metroid Prime 4's experimental full-output choices are1080p (1920x1080),2K (2560x1440),4K (3840x2160) and5K (5120x2880). They change scene and composition allocations, not merely the window. **Native** preserves the game's own resolution policy. The separate1800p choice retains its confirmed supersampling path and is the default for that experimental build. New full-output modes still need gameplay checks; higher resolutions cost more GPU work and memory. Existing presentation MetalFX scales the completed picture separately.
+
 ### Render scale
 
 The size of the 3D picture, from 50 to 100 %. Below 100 % the size is fixed there and the game's own dynamic resolution is off; 100 % keeps the game's own. Lower can be lighter on the GPU but is blurrier; the HUD and text keep their sharpness. Only games the app can scale offer it.

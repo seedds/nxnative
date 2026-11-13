@@ -1,7 +1,8 @@
 # Experimental internal-scene resolution, main 1.1.0 only. Derived from this build's instructions:
 # 33170c packs the final scene dimensions into x21 AFTER both dynamic-resolution branches join;
 # 3317e4 passes that size in the descriptor at sp+58 to 134850. Its fallback descriptor at 3317fc
-# is 1600x900. Retain display/viewport/HUD sizing and frame step. The 1800p
+# is 1600x900. Legacy choices retain display sizing and frame step; full-output
+# choices separately change verified allocation/display constants. The 1800p
 # and 2160p choices opt into the native-size scan-query bridge below.
 # No original instruction changes here: runtime_patches.py can opt into a newly assembled stub.
 from nso_asm import B, BL, BLR, ADRP, ADDI, SUBI, STP, LDP, STRX, LDRX
@@ -9,6 +10,8 @@ from nso_asm import B, BL, BLR, ADRP, ADDI, SUBI, STP, LDP, STRX, LDRX
 build_id = '8275fbe1ec5191c279f3a943ad8524f4'
 scene_site = 0x33170c
 SCENE_SIZES = (('SCENE_1440', 2560, 1440), ('SCENE_2160', 3840, 2160), ('SCENE_1800', 3200, 1800), ('SCENE_D1792', 3200, 1792))   # runtime_patches.py's choices 1440p, 2160p, 1800p and diag1792
+FULL_SCENE_SIZES = (('SCENE_F1080', 1920, 1080), ('SCENE_F1440', 2560, 1440), ('SCENE_F2160', 3840, 2160), ('SCENE_F2880', 5120, 2880), ('SCENE_FNATIVE', 1600, 900))
+
 
 
 def resolution_stub(c):
@@ -91,8 +94,52 @@ def scan_source_words(start):
     return words
 
 
+SCENE_CONTROL_EXTENSION = b'nxnativeMp4SceneSizeV1\0'
+SCENE_CONTROL_ABI = ((0x33147c, 'ed330129'),)  # stp w13,w12,[sp,#8]: input H,W before native DR
+
+
+def scene_control_words(start, width, height):
+    """A scene allocation choice with the native controller independently selectable.
+    Keep every register/flag except the displaced ORR's x21 result. The host
+    receives native dimensions, selected maximum and the native input extent.
+    """
+    words = []
+    def emit(w): words.append(w)
+    def here(): return start + 4 * len(words)
+    emit(0xaa088135)  # original orr x21,x9,x8,lsl#32
+    emit(SUBI(31, 31, 0x2b0))
+    for n in range(0, 18, 2): emit(STP(n, n + 1, 31, n * 8))
+    emit(STRX(30, 31, 18)); emit(STRX(21, 31, 20))
+    emit(0xd53b4211); emit(STRX(17, 31, 19))  # NZCV in spare scalar spill
+    for n in range(32): emit(0x3d800000 | ((11 + n) << 10) | (31 << 5) | n)
+    emit(0xd2800000 | width << 5 | 21); emit(0xf2c00000 | height << 5 | 21)
+    adr = len(words); emit(0); add = len(words); emit(0)
+    emit(BL(here(), SCAN_BOOTSTRAP)); missing = len(words); emit(0)
+    emit(0xaa0003f0)  # mov x16,x0
+    emit(LDRX(0, 31, 20)); emit(0xaa1503e1)  # native packed; selected packed
+    emit(0xb9400000 | ((0x2b0 + 12) // 4) << 10 | 31 << 5 | 2)
+    emit(0xb9400000 | ((0x2b0 + 8) // 4) << 10 | 31 << 5 | 3)
+    emit(0xaa038042)  # orr x2,x2,x3,lsl#32 (native full-resolution input)
+    emit(BLR(16)); emit(0xaa0003f5)  # mov x21,x0
+    restore = here()
+    for n in range(32): emit(0x3dc00000 | ((11 + n) << 10) | (31 << 5) | n)
+    emit(LDRX(30, 31, 18)); emit(LDRX(17, 31, 19)); emit(0xd51b4211)
+    for n in range(0, 18, 2): emit(LDP(n, n + 1, 31, n * 8))
+    emit(ADDI(31, 31, 0x2b0)); emit(B(here(), scene_site + 4))
+    literal = here(); data = SCENE_CONTROL_EXTENSION + bytes((-len(SCENE_CONTROL_EXTENSION)) % 4)
+    for off in range(0, len(data), 4): emit(int.from_bytes(data[off:off+4], 'little'))
+    words[adr] = ADRP(0, start + 4 * adr, literal); words[add] = ADDI(0, 0, literal & 0xfff)
+    words[missing] = 0xb4000000 | (((restore - (start + 4 * missing)) // 4) << 5)
+    return words
+
+
 def scan_source_stub(c):
     resolution_stub(c)
+    for off, original in SCENE_CONTROL_ABI: c.site(off, original)
+    for name, w, h in FULL_SCENE_SIZES:
+        start = c.here()
+        for word in scene_control_words(start, w, h): c.emit(word)
+        c.runtime_exports[name] = start
     for off, original in SCAN_SOURCE_ABI:
         c.site(off, original)
     start = c.here()
@@ -107,8 +154,8 @@ BINDING = [
     {'what': '1800p/2160p native-size scan-query bridge (inactive by default)', 'now': 'build', 'goal': 'build', 'purpose': 'rendering',
      'why': 'the borrowed engine-view ABI and call site belong to main 1.1.0; the full original build and every ABI instruction are checked',
      'checked': 'original v1.1.0, live 3200x1800 size-guard rejection and synthetic GPU resampling/readback; 1800p scanning user-confirmed; 2160p gameplay confirmation pending'},
-    {'what': 'experimental 1440p, 2160p and 1800p scene descriptor stubs (inactive by default)', 'now': 'build', 'goal': 'unreviewed', 'purpose': 'rendering',
-     'why': 'the final scene allocation descriptor and fallback are immediate code in main 1.1.0; gameplay validation and other builds remain open'},
+    {'what': 'scene stubs and experimental 1080p-to-5K full-output choices (inactive by default)', 'now': 'build', 'goal': 'unreviewed', 'purpose': 'rendering',
+     'why': 'main 1.1.0 immediate scene/canvas/display dimensions require validated runtime writes; full-output gameplay and other builds remain open'},
 ]
 
 # Read-only scan diagnostics, independently located through the native script bindings in the original NSO.

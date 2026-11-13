@@ -50,6 +50,21 @@ class Repack(unittest.TestCase):
         self.assertIn('DM_PSO_BUNDLE=off', new)
         self.assertEqual((self.dm / 'env.txt').read_text(), original)
 
+    def test_resolution_menu_unlocks_only_bundled_choices_and_uses_prepared_modules(self):
+        (self.dm / 'env.txt').write_text('DM_INTERNAL_RESOLUTION=1800p\nDM_LAUNCHER=0\nDM_RUMBLE=1\n')
+        env = repack.environment(self.dm, True, True, resolution_menu=True)
+        self.assertNotIn('DM_INTERNAL_RESOLUTION', env); self.assertNotIn('DM_LAUNCHER', env)
+        self.assertIn('DM_RUMBLE=1', env)
+        prepared = self.app.parent / 'prepared'; prepared.mkdir()
+        listed = prepared / 'launcher.json'; listed.write_text('{"settings": []}')
+        cmd = repack.command(repack.inputs(self.app), self.app, self.dm / 'env.txt', prepared, listed)
+        self.assertEqual(cmd[cmd.index('--patched') + 1], str(prepared))
+        self.assertEqual(cmd[cmd.index('--settings') + 1], str(listed))
+        self.assertEqual(cmd[cmd.index('--tables') + 1], str(self.dm))
+        with mock.patch.object(repack.subprocess, 'run') as run:
+            with self.assertRaisesRegex(ValueError, 'requires prepared'): repack.main([str(self.app), '--resolution-menu'])
+            run.assert_not_called()
+
     def test_refuses_incompatible_chain_or_profile(self):
         for info in ({**self.info, 'DMChain': 'old'}, {**self.info, 'DMTitleID': '../invalid'}):
             (self.app / 'Contents/Info.plist').write_bytes(plistlib.dumps(info))

@@ -40,3 +40,38 @@ def manifest(module, patched, fixups, build, variable, writes):
         seen.append((value, off, off + len(before)))
         rows.append(f'write\t{value}\t{off:x}\t{before.hex()}\t{after.hex()}')
     return '\n'.join(rows) + '\n'
+
+
+def choices(folder, variable):
+    """Read choices only from a complete manifest matching the rewritten image.
+
+    Used for launcher availability, not as gameplay validation. The host performs
+    its own full validation again before writing any executable page.
+    """
+    folder = Path(folder); path = folder / 'main.runtime.tsv'
+    if not path.is_file(): return ()
+    fix = layout(folder / 'main.fixups.tsv'); image = (folder / 'main.patched.bin').read_bytes()
+    lines = [l.split('\t') for l in path.read_text().splitlines() if l and not l.startswith('#')]
+    try:
+        header = lines.pop(0)
+        if len(header) != 4 or header[:2] != ['DMRT1', fix['BUILD_ID']] or int(header[2], 16) != int(fix['TEXT_END'], 0):
+            raise ValueError('runtime header/build/layout mismatch')
+        end = int(header[2], 16)
+        if end > len(image) or not re.fullmatch(r'DM_[A-Z0-9_]+', header[3]): raise ValueError('runtime image/header mismatch')
+        names, spans, written = [], [], set()
+        for row in lines:
+            if row[0] == 'choice' and len(row) == 2 and not spans and len(names) < 16:
+                if not re.fullmatch(r'[A-Za-z0-9_]{1,31}', row[1]) or row[1] in names: raise ValueError('runtime choice invalid')
+                names.append(row[1]); continue
+            if len(row) != 5 or row[0] != 'write' or row[1] not in names or row[1] == 'default' or len(spans) >= 1024:
+                raise ValueError('runtime write invalid')
+            off = int(row[2], 16); before = bytes.fromhex(row[3]); after = bytes.fromhex(row[4])
+            if off < 0 or off % 4 or not before or len(before) % 4 or len(before) > 64 or len(before) != len(after) or off + len(before) > end:
+                raise ValueError('runtime offset/length invalid')
+            if image[off:off + len(before)] != before: raise ValueError('runtime instructions differ')
+            if any(c == row[1] and a < off + len(before) and off < b for c, a, b in spans): raise ValueError('runtime writes overlap')
+            spans.append((row[1], off, off + len(before))); written.add(row[1])
+        if 'default' not in names or not spans or set(names) - {'default'} != written: raise ValueError('runtime manifest incomplete')
+        return tuple(names) if header[3] == variable else ()
+    except (KeyError, IndexError) as e:
+        raise ValueError('runtime manifest/fixups incomplete') from e

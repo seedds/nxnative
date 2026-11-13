@@ -1083,12 +1083,15 @@ def derive_profile(g, pdir, ver, d, mods, app=None, shader_only=False):
         if kept == expected: return disp
     rmtree(kf); pdir.mkdir(parents=True, exist_ok=True)
     atomic_text(pdir / 'game.tsv', text)
-    for p in pdir.iterdir():
-        if p.name != 'game.tsv': rmtree(p)
-    for p in src:
-        # Registered cuts stay the same file: patch_nso.py deduplicates real paths, so an external profile must not register copied claims for the same builds.
-        if shader_only and p.name == 'patches.py': (pdir / p.name).symlink_to(p.resolve())
-        else: shutil.copyfile(p, pdir / p.name)
+    # A provisional profile lives where its derived copy goes (<work>/profile/<id>): there the files it keeps are the profile's own, and a copy of a directory onto itself
+    # would delete them first (a provisional Chained Echoes profile with compute kernels to add)
+    if pdir.resolve() != g.dir.resolve():
+        for p in pdir.iterdir():
+            if p.name != 'game.tsv': rmtree(p)
+        for p in src:
+            # Registered cuts stay the same file: patch_nso.py deduplicates real paths, so an external profile must not register copied claims for the same builds.
+            if shader_only and p.name == 'patches.py': (pdir / p.name).symlink_to(p.resolve())
+            else: shutil.copyfile(p, pdir / p.name)
     kf.write_text(f'{key}\n')
     return disp
 

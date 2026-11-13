@@ -118,6 +118,13 @@
 - **Fix:** general, in the package format. `shader_split.py` writes each record's key (its 8 bytes) at record +0x08, in header bytes that were zero; `dmsh_build.py` `record_index` indexes a package by those keys and `rec_of` finds a row's record by its key, so a row's index no longer matters and a package that does not hold a row's shader stops the build before the first job. The control section is searched from +0x38, after the header. The map keeps its index column, so the profiles' tables did not change. A package from before the change carries no keys: the NSP script splits again by itself (its key covers `shader_split.py`), while a tool that hands `dmsh_build.py` an older package, such as `regress.py`'s use of a game's `<id>_build/shader/pkg`, needs that build run again first. `test_shader_package_keys` covers both sides.
 - **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md) ([issue #1841](https://github.com/seedds/nxnative/issues/1841), diagnosed by its reporter). A build through NX2Apple 1.3.0 kept `ps_lib.bin` from an older split (4,711 records) beside a map from a split after 04df08d4 (4,707 rows), so the present pass's pixel shader `29e3c9dd92b8a571` was translated from a terrain shader's record and drew black.
 
+### A provisional profile loses its tables to its own derived copy
+
+- **Symptom:** a shader stage stops with `FileNotFoundError: [Errno 2] No such file or directory: …/profile/<id>/bf_want.tsv` right after `the reader decoded additional compute kernels from this registered build`, and the profile folder is left with `game.tsv` alone: its shader tables, prewarm list and conflict rulings are gone.
+- **Cause:** `derive_profile` (`scripts/build_ipa_from_nsp.py`) copies the profile into a derived folder for a version the profile was not brought up on, deleting everything in that folder first. A provisional profile lives where its derived copy goes (`<work>/profile/<id>`), so the two are the same directory: the delete removed the files the copy then read from itself. Its shader tables are also made again from the build's own split, so the loss shows at the next stage.
+- **Fix:** the delete and the copy are skipped when the derived folder is the profile's own directory; its `game.tsv` is still written for this version.
+- **Found on:** Chained Echoes, whose provisional profile (found through `DM_GAMES_DIR`) decoded additional compute kernels. The tables came back from `shader/pkg.partial/tables`, the prewarm list and the conflict rulings from its empty_table defaults.
+
 ## IPA archives
 
 ### AltServer cannot install a file of 2 GiB or more

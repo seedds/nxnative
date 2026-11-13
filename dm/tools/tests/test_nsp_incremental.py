@@ -130,6 +130,13 @@ class DeriveProfile(Base):
         nsp.derive_profile(game.Game(self.src), self.pdir, 'v65536', self.ex, ['main'], shader_only=True)
         self.assertEqual(game.Game(self.pdir).words('modules'), ['main'])
 
+    def test_a_provisional_profile_keeps_its_files_in_its_own_folder(self):
+        provisional = self.tmp / 'profile' / f'{TID:016X}'; shutil.copytree(self.src, provisional)   # a profile outside the repository: its derived copy goes where it lives
+        nsp.derive_profile(game.Game(provisional), provisional, 'v65536', self.ex, ['main'], shader_only=True)
+        self.assertEqual((provisional / 'pso_manifest.tsv').read_text(), 'S\tk\tvertex\n')   # before: deleted, then copied from itself
+        self.assertTrue((provisional / 'shader_map.tsv').is_file())   # a shader table is not copied, and must not be deleted either
+        self.assertEqual(game.Game(provisional).get('name'), 'Test Game')   # shader_only keeps the profile's rows
+
     def test_the_same_profile_in_another_checkout_keeps_later_stages(self):
         self.derive(); self.later_stages()
         other = self.tmp / 'checkout2' / 'games' / f'{TID:016X}'; shutil.copytree(self.src, other)   # the repository cloned again, or a front end's own copy of it

@@ -348,6 +348,43 @@ static int backup_dir(const char *save, const char *side, char *out, size_t n, i
     return 0;
 }
 
+// ---------- the copy at each start ----------
+#define BLOG(...) do { fprintf(stderr, "[dm] save backup: " __VA_ARGS__); fputc('\n', stderr); } while (0)
+#define BRED(...) do { fprintf(stderr, "[dm] [RED] save backup: " __VA_ARGS__); fputc('\n', stderr); } while (0)
+#define START_SIDE "start"   // its own side, so these copies never push sync's backups (local, cloud) out of the KEEP_BACKUPS a side keeps
+
+// The newest start copy's save folder (<save>-backups/<newest> start/save), "" when there is none
+static void newest_start_copy(const char *save, char *out, size_t n) {
+    char dir[PATH_MAX], **v; size_t count; out[0] = 0;
+    snprintf(dir, sizeof dir, "%s-backups", save);
+    if (names_of(dir, &v, &count)) return;
+    for (size_t i = count; i-- > 0; ) if (is_backup(v[i], START_SIDE)) { snprintf(out, n, "%s/%s/save", dir, v[i]); break; }   // names_of's byte order is date order
+    free_names(v, count);
+}
+
+// The committed save as the game is about to start from it, cloned (APFS: no data copied; it costs space only as the save changes later) into
+// <save>-backups/<date> start, laid out as sync's backups are (save, save_device). Only when it holds a save and differs from the newest start copy (ss_scan's
+// hash: contents and names, not dates), so a game started again and again without saving keeps one copy. The older copies are pruned only once this one is
+// whole, so a failed copy removes none. A failure is logged and the game starts.
+static void keep_start_copy(const char *save) {
+    char newest[PATH_MAX], made[PATH_MAX];
+    ss_meta now, last;
+    if (ss_scan(save, &now)) { BRED("%s cannot be read (errno=%d): no copy of it this start", save, errno); return; }
+    if (!now.files) return;
+    newest_start_copy(save, newest, sizeof newest);
+    if (*newest && !ss_scan(newest, &last) && !strcmp(last.hash, now.hash)) return;
+    if (backup_dir(save, START_SIDE, made, sizeof made, 0)) { BRED("cannot make %s (errno=%d): no copy of the save this start", made, errno); return; }
+    for (int i = 0; i < 2; i++) {
+        char from[PATH_MAX], to[PATH_MAX]; folder_path(save, i, from, sizeof from); snprintf(to, sizeof to, "%s/%s", made, FOLDERS[i]);
+        if (has_entries(from) && clonefile(from, to, 0)) {
+            int e = errno; rm_tree(made);
+            BRED("cloning %s to %s failed (errno=%d): no copy of the save this start", from, to, e); return;
+        }
+    }
+    prune_backups(save, START_SIDE, made);
+    BLOG("the save as the game starts from it (%d files) is kept in %s", now.files, made);
+}
+
 // A DM_SAVE_SYNC value → <folder>/<title ID>/save.dmsync; 0 when sync is off
 static int cloud_path(const char *v, const char *title, char *out, size_t n) {
     char dir[PATH_MAX], id[24];
@@ -700,10 +737,13 @@ int save_sync_report(const char *save, const char *title, const char *folder, in
     return w < 0 || w >= (int)n ? -1 : 0;
 }
 
-int save_sync_mount(const char *save, const char *title) {   // the first mount does it; a second one (the device save) waits for it and gets its answer
+// The first mount does it; a second one (the device save) waits for it and gets its answer. The start copy comes after sync, so it is the save the game plays from
+// (this device's put back from a pull that did not finish, or the cloud's when it came in: this device's old one is then sync's local backup), and before mount_ex
+// clones the work directory, so no Commit can change the save while it is copied. A save that may not be mounted (half the cloud's) is not copied
+int save_sync_mount(const char *save, const char *title) {
     static int unsafe;
     pthread_mutex_lock(&g_mount_mu);
-    if (!g_mounted) { g_mounted = 1; unsafe = mount_once(save, title) != 0; }
+    if (!g_mounted) { g_mounted = 1; unsafe = mount_once(save, title) != 0; if (!unsafe) keep_start_copy(save); }
     int r = unsafe ? -1 : 0;
     pthread_mutex_unlock(&g_mount_mu);
     return r;

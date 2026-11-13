@@ -72,6 +72,13 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Fix:** it reports an empty list with success: the game turns a failure into an error for the error applet (`main+0x8ff9f0`). The overload with a `Uid` keeps reporting a failure, which [DRAGON QUEST XI S](../../dm/games/01006C300E9F0000/README.md) takes as it is ([Account, friends, play data and Nintendo Account calls](#account-friends-play-data-and-nintendo-account-calls)).
 - **Found on:** [DARK SOULS: REMASTERED](../../dm/games/01004AB00A260000/README.md) (SDK 4.5.0, the oldest so far; one boot).
 
+### SDK 20's `friends::GetPlayHistoryRegistrationKey` without a `Uid`
+
+- **Symptom:** an `nn::diag` abort with Result 0xe15 in `friends::detail::ipc::Initialize` (`sdk+0x3b45a8`), first thing in `nnMain`, after `[RED] sf: the game connects to service friend:u itself`.
+- **Cause:** the form without a `Uid` (`GetPlayHistoryRegistrationKey(PlayHistoryRegistrationKey*, bool)`) was not taken over, and the SDK's own opens the friends service.
+- **Fix:** taken over as the `Uid` form is: the key is unavailable (`hle_friends.c`).
+- **Found on:** Super Nintendo Entertainment System – Nintendo Classics (`01008D300C50C000`, 6.0.0, SDK 20.5.21, `main+0xc608`; its profile is not in this repository).
+
 ### SDK 6's `account::OpenPreselectedUser` returns a Result
 
 - **Symptom:** the first loading screen never ends; `DM_FS=1` shows `save:/system` "not found" and no `fs mount save`.

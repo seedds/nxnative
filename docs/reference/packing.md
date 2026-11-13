@@ -274,6 +274,14 @@
 - **Fix:** `build_folder` in `scripts/build_ipa_from_nsp.py` gives a program packed with the first `<work dir>/programs/<id>_build` under `--work-dir`; the first program, a game of one program and `--program N` alone keep the folder as named. Test: `test_nsp_build_folder.py`.
 - **Found on:** [Super Mario 3D All-Stars](../../dm/games/010049900F546000/README.md#found-on-this-game), 1.1.4, built by NX2Apple 1.2.1 as one IPA.
 
+### A program's provisional profile was checked as a registered one on the next build
+
+- **Symptom:** the second build of a multi-program game that has no profiles in `dm/games` stops in a program's shader split with `[RED] the split shader tables differ from game profile <program>'s`, after a change that lets the split read more of that program's files (`0 row(s) only in the profile, 18 only in the split`).
+- **Cause:** the first program's build puts its own provisional profile's folder on `DM_GAMES_DIR`. The programs' provisional profiles are written to the same folder, so on the next build each program's run finds its profile there by title ID (`by_title`) and packs it as a registered profile: the split's tables have to match the profile's instead of replacing them, as a provisional profile's do.
+- **Fix:** `provisional_profile` in `scripts/build_ipa_from_nsp.py`: a profile found outside `dm/games` whose `game.tsv` starts as `write_profile` writes it (`PROVISIONAL_HEAD`) is packed as provisional. A profile in `dm/games`, or one kept elsewhere that the script did not write, is registered as before.
+- **Found on:** LUNAR Remastered Collection (0100DCD01E9EE000; programs …001 and …002), built by NX2Apple with `--work-dir`, after a fix to `cpk.py`'s file offsets (CPKs with the table of contents at the end) let the programs' splits find their shaders.
+- **Check:** `dm/tools/tests/test_nsp_provisional_profiles.py`.
+
 ### A dump tool's `.listing` files in the game's folders
 
 - **Symptom:** a game built from a dump folder crashes in its own code while it loads, where builds from other dumps of the same version play: Nintendo Switch Sports Resort at `main+0x9d7c60`, listing its `Parameter` folders.

@@ -163,7 +163,7 @@ def commit(key='', names=None):
 
 def publish_library(label):
     """The library's image <dir>.img from the staged outputs and the files left on disk (these win), and for a partial build the image it builds on, less the outputs of the keys it built
-    (and its stamp, when the profile's inputs changed). Then the folder and the staged entries go. When the image cannot be written, the staged outputs go back into the folder, which works as it is"""
+    (and its stamp, when the profile's inputs changed). Then the folder and the staged entries go. When the image cannot be written, the staged outputs go back into the folder, which works as it is; a drive that cannot take them either stops the build"""
     d = label_dir(label); image = shader_lib.image_of(d); prefix = f'{STAGE}/{label}/'
     files = {}
     old = OLD_IMAGE.get(label)
@@ -178,7 +178,11 @@ def publish_library(label):
     try: shader_lib.write(files, image)
     except (OSError, ValueError) as e:
         print(f'[RED] could not write {image}, the library stays the folder {d}: {e}', flush=True)
-        for n in STORE.names(prefix): STORE.to_file(n, os.path.join(d, n[len(prefix):]))
+        try:
+            for n in STORE.names(prefix): STORE.to_file(n, os.path.join(d, n[len(prefix):]))
+        except OSError as e2:   # a full drive: the folder cannot take them either. Each shader's outputs are in the cache already (publish_cache), so the next build reuses them
+            sys.exit(f'[RED] could not write the shaders back into {d} either: {e2}. The shaders compiled so far are in the shader cache, and a build again in this work folder '
+                     'takes them from there: free space on the drive and build again')
         return
     STORE.delete_prefix(prefix)
     shutil.rmtree(d, ignore_errors=True)

@@ -342,8 +342,14 @@ int main(void) {
     CHECK(session(R2, NULL, "game.dat", "r2") == 0 && same(p, "r2"), "the iPhone plays with sync off and saves r2");
     set_mtime(p, time(NULL) - 100);
     CHECK(session(R1, cloud4, "game.dat", "r3-more-progress") == 0 && cloud_has(cf4, root, "game.dat", "r3-more-progress"), "then the Mac saves more and sends it");
+    // The cloud's device need not be a physical Mac: CI packs saves as VirtualMac2,1. Use a fixed cloud header field, independent of this host's model.
+    char cloud_device[64] = "VirtualMac2,1";
+    int cloud_fd = open(cf4, O_WRONLY);
+    CHECK(cloud_fd >= 0 && pwrite(cloud_fd, cloud_device, sizeof cloud_device, 80) == (ssize_t)sizeof cloud_device,
+          "the cloud fixture names a virtual Mac in its device field");
+    if (cloud_fd >= 0) close(cloud_fd);
     snprintf(p, sizeof p, "%s/game.dat", R2); put(p, "new"); set_mtime(p, time(NULL) + 45);
-    CHECK(REPORT(R2, cloud4) && strstr(line, "conflict=1") && strstr(line, "cfiles=1 ") && strstr(line, "cdevice=Mac"),
+    CHECK(REPORT(R2, cloud4) && strstr(line, "conflict=1") && strstr(line, "cfiles=1 ") && strstr(line, " cdevice=VirtualMac2,1 "),
           "both changed: the report says conflict, with the cloud's device (%s)", line);
     CHECK(strstr(line, " pull=0") != NULL, "no pull pending (%s)", line);
     {   // a pull that did not finish: what is in place may be half the cloud's, so no comparison is offered; the start's mount puts this device's save back first

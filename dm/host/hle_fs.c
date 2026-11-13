@@ -602,9 +602,11 @@ HLE_FORCE("_ZN2nn2fs17MountAddOnContentEPKciPvm", "fsp-srv; add-on content → D
 // <DM_TEMP>_sysdata/<id>; any other archive answers "target not found", as for a title that is not installed
 #define SYSDATA_MIIMODEL 0x0100000000000802ull
 int dm_mii_standin(const char *dir);
+// The player's own console files: $DM_SYSTEM_DIR (default $DM_ROOT/run/platform/system), shared by every game: system data here, the Mii databases in hle_mii.c
+const char *dm_system_dir(char *buf, size_t n) { return envdir("DM_SYSTEM_DIR", "run/platform/system", buf, n); }
 static int sysdata_own(char *dir, size_t n, uint64_t id) {
-    const char *sys = getenv("DM_SYSTEM_DIR"); struct stat st;
-    return sys && *sys && snprintf(dir, n, "%s/sysdata/%016llx", sys, (unsigned long long)id) < (int)n && !stat(dir, &st) && S_ISDIR(st.st_mode);
+    char t[1024]; const char *sys = dm_system_dir(t, sizeof t); struct stat st;
+    return *sys && snprintf(dir, n, "%s/sysdata/%016llx", sys, (unsigned long long)id) < (int)n && !stat(dir, &st) && S_ISDIR(st.st_mode);
 }
 static int sysdata_dir(char *dir, size_t n, uint64_t id) {
     char t[1024];

@@ -45,7 +45,7 @@ Mii heads and your own Miis come from your console, not from this project. Copy 
 - `sysdata/<system data ID>/`: a system data archive's files, for example `sysdata/0100000000000802/` (the Switch's Mii heads) or `sysdata/0400000000000849/` (a Switch 2 game's);
 - `save/8000000000000030/MiiDatabase.dat`: your console's Miis, listed before the six default ones. The file is only read.
 
-Without them, Miis have no heads, and only the six default Miis are listed ([details](reference/services.md#a-consoles-own-mii-database-and-system-data)).
+Without them, Miis have no heads, and only the six default Miis are listed ([details](reference/services.md#a-consoles-own-mii-database-and-system-data)). When a game asks you to make a Mii, it gets the default Mii, kept in `system/host/` for every game ([details](reference/services.md#a-mii-made-in-the-editors-place)).
 
 ## On the Mac
 

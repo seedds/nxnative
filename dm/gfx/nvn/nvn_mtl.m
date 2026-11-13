@@ -1488,8 +1488,9 @@ void mtl_prepare(void) {
 static void sub_cut_begin(void); static void ts_sub_begin(void), ts_boundary(void); static int ts_on(void);
 static void gmem_commit_patch(void);   // the raw pool table words of the arguments encoded so far follow the pools (gmem_slot_note)
 static void treg_sparse_notes(void);
+static int g_vis_need;
 void mtl_sub_begin(void) {
-    mtl_init(); g_sub_serial++; g_seg = 0;
+    mtl_init(); g_sub_serial++; g_seg = 0; g_vis_need = 1;   // its first samples-passed reset or report decides (vis_need_on)
     treg_sparse_notes();   // the mappings made before this submission
     if (g_pkg_kept) { g_pkg_kept = 0; nvn_dirty_touch(); } seg_clk_put(g_sclk); g_sclk = NULL;
     sub_cut_begin();
@@ -14068,6 +14069,7 @@ static int mdx_next(const p_draw *dw, const p_draw_idx *di) {
 #include "nvn_feedback.inc"
 
 static int skip_fs_draw(NvProg *pr);   // DM_NVN_SKIP_FS (diagnostic), also for task / mesh draws
+static void vis_draw_state(id<MTL4RenderCommandEncoder> en);   // occlusion query counting of a draw (vis_need_on)
 #include "nvn_geometry.inc"
 static int geo_drawing(void) { return g_geo_program != nil || g_geo_mesh.on; }
 #include "nvn_tess.inc"   // patches: vertex capture -> hull kernel -> domain as the vertex stage
@@ -14348,6 +14350,59 @@ static int skip_fs_draw(NvProg *pr) {
     return 0;
 }
 static void draw(const p_draw *dw, const p_draw_idx *di) { cp_stamp start = cp_begin(); if (dw && dw->prim == DM_PRIM_MESH_TASKS) mesh_tasks_draw(dw); else draw_(dw, di); cp_end(5, start); }
+// DM_NVN_VIS_NEED=0|1|ab (on by default): draws count samples for an occlusion query only while a later report can see them. NVN's samples-passed counter is a running total
+// that a reset zeroes, so after a samples-passed reset or report, when the next samples-passed op in replay order is a reset, the draws up to it add to a total nothing reports
+// (zskip_vis_dead reasons the same way for skipped draws); when it is a report, or the scan cannot see one (the submission's end, 20,000 ops), they count as before. The values
+// reported are the same. Ocarina of Time resets and reports around each queried draw (about 1,800 a frame), and its draws between a report and the next reset counted for nothing:
+// on an M1 at Kokiri Forest about -0.2 ms of GPU time a frame (runs vn1 / vn3). Task / mesh draws take the same state as other draws (before, they kept the last draw's)
+static int g_vis_need = 1;
+static int vis_need_on(void) { static int m = -1; if (m < 0) { m = sw_mode("DM_NVN_VIS_NEED", 1); if (m != 1) MLOG("DM_NVN_VIS_NEED=%d: every draw counts for occlusion queries%s", m, m ? " in the A/B phases it is off in" : ""); } return m && sw_on(m); }
+// The next op in replay order as fz_next, except that an indirect multi-draw is stepped over: a scan for counter ops does not move work, so it need not stop there
+static int vis_next(fz_cursor *c, const uint8_t **out, op_hdr *oh, const void **oa) {
+    for (int guard = 0; guard < 1000000; guard++) {
+        if (!c->p) return 0;
+        op_hdr h; memcpy(&h, c->p, sizeof h); const void *a = c->p + 8;
+        switch (h.op) {
+            case OP_END:
+                if (c->ret_n) c->p = c->ret[--c->ret_n];
+                else if (c->rest_i < g_nrest) c->p = (const uint8_t *)g_rest[c->rest_i++];
+                else { c->p = NULL; return 0; }
+                continue;
+            case OP_JUMP: memcpy(&c->p, a, 8); continue;
+            case OP_CALL: { uint64_t t; memcpy(&t, a, 8); if (c->ret_n >= 8) { c->bad = 1; return 0; }
+                c->ret[c->ret_n++] = c->p + h.size; c->p = (const uint8_t *)t; continue; }
+            default: break;
+        }
+        const uint8_t *p = c->p; c->p += h.size;
+        if (out) *out = p; if (oh) *oh = h; if (oa) *oa = a; return 1;
+    }
+    return 0;
+}
+static void vis_need_scan(const uint8_t *next) {   // after a samples-passed reset or report: whether the draws from next on may reach a report
+    g_vis_need = 1; if (!vis_need_on() || !next) return;
+    fz_cursor cur = {.p = next}; for (int k = 0; k < g_ret_n && k < 8; k++) cur.ret[cur.ret_n++] = g_ret[k];
+    for (int guard = 0; guard < 20000; guard++) { const uint8_t *q; op_hdr hq; const void *aq;
+        if (!vis_next(&cur, &q, &hq, &aq)) return;
+        if (hq.op != OP_RESET_COUNTER && hq.op != OP_REPORT_COUNTER) continue;
+        uint64_t t; memcpy(&t, aq, 8); if (t != NVN_COUNTER_TYPE_SAMPLES_PASSED) continue;
+        if (hq.op == OP_RESET_COUNTER) g_vis_need = 0;
+        return; }
+}
+static void vis_draw_state(id<MTL4RenderCommandEncoder> en) {   // the occlusion query counting state of the draw about to be encoded in en (draw_, task / mesh draws)
+    if (g_vis_counting && (g_vis_need || g_defer_replaying)) {   // Occlusion query counting: a new slot for this render pass (also switch to a new slot after a report / reset)
+        if (!g_enc_has_vis) RED_ONCE(34, "occlusion query counting began in a pass without a visibility buffer (the first reset happened mid-pass); that pass's samples are not counted");
+        else {
+            if (g_vis_cur < 0 || g_vis_cur_pass != g_pass.serial) {
+                if (g_vis_n >= VIS_SLOTS) RED_ONCE(35, "visibility slots exhausted");
+                else { g_vis_cur = (int)g_vis_n++; g_vis_cur_pass = g_pass.serial;
+                    if (g_nvs == g_vscap) { g_vscap = g_vscap ? g_vscap * 2 : 64; g_vs = realloc_or_die(g_vs, g_vscap * sizeof *g_vs, "the visibility slots"); }
+                    g_vs[g_nvs++] = (vis_slot){(void *)CFBridgingRetain(g_vis), (uint32_t)g_vis_cur}; }
+            }
+            if (g_vis_cur >= 0 && g_enc_vis != g_vis_cur + 1) { enc_r_visibility(en, MTLVisibilityResultModeCounting, (NSUInteger)g_vis_cur * 8); g_enc_vis = g_vis_cur + 1; }
+        }
+    }
+    else if (g_enc_vis) { enc_r_visibility(en, MTLVisibilityResultModeDisabled, 0); g_enc_vis = 0; }   // see vis_need_on: this draw cannot reach a report
+}
 static void draw_(const p_draw *dw, const p_draw_idx *di) {
     g_draw_binst = (uint32_t)(dw ? dw->base_instance : di ? di->base_instance : 0);   // c0 + 0x644 of the stages that read the driver segment (encode_args)
     if (passdump()) { NvProg *p = g_geo_program ? g_geo_program : S.prog ? prog_get(S.prog) : nil;
@@ -14573,18 +14628,7 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) {
                                                     pr->sh[3] ? pr->sh[3]->key : "-", pr->sh[4] ? pr->sh[4]->key : "-", pr->sh[1] ? pr->sh[1]->key : "-"); }
             PD("Z %llu draw skipped: primitive type %d", g_stat_pass, prim); return;
     }
-    if (g_vis_counting) {   // Occlusion query counting: a new slot for this render pass (also switch to a new slot after a report / reset)
-        if (!g_enc_has_vis) RED_ONCE(34, "occlusion query counting began in a pass without a visibility buffer (the first reset happened mid-pass); that pass's samples are not counted");
-        else {
-            if (g_vis_cur < 0 || g_vis_cur_pass != g_pass.serial) {
-                if (g_vis_n >= VIS_SLOTS) RED_ONCE(35, "visibility slots exhausted");
-                else { g_vis_cur = (int)g_vis_n++; g_vis_cur_pass = g_pass.serial;
-                    if (g_nvs == g_vscap) { g_vscap = g_vscap ? g_vscap * 2 : 64; g_vs = realloc_or_die(g_vs, g_vscap * sizeof *g_vs, "the visibility slots"); }
-                    g_vs[g_nvs++] = (vis_slot){(void *)CFBridgingRetain(g_vis), (uint32_t)g_vis_cur}; }
-            }
-            if (g_vis_cur >= 0 && g_enc_vis != g_vis_cur + 1) { enc_r_visibility(en, MTLVisibilityResultModeCounting, (NSUInteger)g_vis_cur * 8); g_enc_vis = g_vis_cur + 1; }
-        }
-    }
+    vis_draw_state(en);
     g_stat_draw++;
     if (enc_label_on() && !g_el_draws++ && pr->sh[1]) { memcpy(g_el_key, pr->sh[1]->key, 8); g_el_key[8] = 0; }
     if (passdump()) {   // Characteristics of a render pass's first draw (to judge whether the load can be omitted: full screen, no blending, writes all channels, does not depend on depth); with DM_NVN_PASSDUMP_ALL every draw is recorded
@@ -15903,7 +15947,7 @@ void mtl_exec(const uint8_t *p) {
                     if (!g_vis_on) {   // a report with no reset before it: the counter runs from the queue's creation, so counting starts here (Occlusion queries)
                         g_vis_on = 1; g_vis_counting = 1; MLOG("occlusion queries: samples passed reported with no ResetCounter before it: counting from this report");
                         if (g_enc && !g_enc_has_vis) { PD("M %llu occlusion query counting starts at a report: render pass split here", g_stat_pass); rp_end(); } }
-                    hw_note(ad); post((post_op){3, NULL, VIS_REPORT, 0, ad, (uint32_t)t, vis_snapshot()}); vis_clear(); }   // written at completion, as a counter report
+                    hw_note(ad); post((post_op){3, NULL, VIS_REPORT, 0, ad, (uint32_t)t, vis_snapshot()}); vis_clear(); vis_need_scan(p + h.size); }   // written at completion, as a counter report; vis_need_on
                 else mtl_sub_counter(ad, (uint32_t)t);
                 break; }
             case OP_RENDER_COND: { const p_render_cond *rc = a;   // SetRenderEnable / SetRenderEnableConditional (hle_nvn.c)
@@ -15919,7 +15963,7 @@ void mtl_exec(const uint8_t *p) {
 #ifdef NVN_RT_RANGE_TEST
                     rr_reset();
 #endif
-                    g_vis_on = 1; g_vis_counting = 1; vis_clear(); post((post_op){3, NULL, VIS_ZERO, 0, 0, (uint32_t)t, NULL});
+                    g_vis_on = 1; g_vis_counting = 1; vis_clear(); post((post_op){3, NULL, VIS_ZERO, 0, 0, (uint32_t)t, NULL}); vis_need_scan(p + h.size);   // vis_need_on
                     // The first reset can come inside a render pass that was begun without a visibility buffer (Octopath Traveler 0: Unreal's occlusion queries, once at boot): split the pass
                     // here, so the continuation is begun with the buffer and its samples are counted (they used not to be: RED "occlusion query counting began in a pass without a visibility buffer")
                     if (g_enc && !g_enc_has_vis) { PD("M %llu occlusion query counting starts: render pass split here", g_stat_pass); rp_end(); } }

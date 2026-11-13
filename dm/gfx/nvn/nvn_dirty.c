@@ -9,6 +9,7 @@
 #include <sys/mman.h>
 #include <unistd.h>
 #include <mach/mach_time.h>
+#include <mach/mach.h>
 #include <sched.h>
 
 // Order of page state and mprotect: the side changing protection first sets the state to BUSY and sets the final state only after mprotect has landed; other threads wait when they see BUSY.
@@ -342,6 +343,32 @@ size_t nvn_dirty_since_except(const void *span, const void *addr, size_t len, ui
         if (!n++ && first) *first = lo < a ? a : lo;
     }
     return n;
+}
+// Diagnostic (DM_NVN_DIRTYCHECK, a write the tracker missed): what it holds for the host page at addr. Each live range over it: its slot, its pool's start, the page's state and
+// generation, the clock at the range's registration (born), and whether it is the range the caller kept (span). Then the page's protection as the kernel has it: a page held as
+// protected that the kernel has writable lost its protection behind the tracker (a map or protection call over a neighbour's 4 KB page in the same 16 KB host page); one the
+// kernel has read-only with a generation no newer than the stamp was changed by a writer that does not fault (the GPU, or another mapping of the same memory)
+void nvn_dirty_describe(const void *addr, const void *span, char *out, size_t n) {
+    static const char *const st[] = {"none", "prot", "busy", "open"};
+    uintptr_t a = (uintptr_t)addr; int k = atomic_load(&g_nr); size_t o = 0; int found = 0;
+    if (!n) return;
+    out[0] = 0;
+    for (int i = 0; i < k && o < n; i++) {
+        range_t *r = rg(i);
+        if (!live_at(i) || a < r->base || a >= r->end) continue;
+        uintptr_t p = (a - r->base) >> g_shift; uint8_t s = atomic_load(&r->state[p]);
+        int w = snprintf(out + o, n - o, "%sslot %d pool %#lx%s %s gen %llu born %llu", found++ ? "; " : "", i, (unsigned long)r->mem, (const void *)r == span ? " (kept)" : "",
+                         s < 4 ? st[s] : "?", (unsigned long long)atomic_load(&r->gen[p]), (unsigned long long)atomic_load(&r->born));
+        if (w > 0) o += (size_t)w;
+    }
+    if (!found && o < n) { int w = snprintf(out + o, n - o, "no live range"); if (w > 0) o += (size_t)w; }
+    vm_address_t va = a & ~(g_pg - 1); vm_size_t vs = 0; vm_region_basic_info_data_64_t bi; mach_msg_type_number_t cnt = VM_REGION_BASIC_INFO_COUNT_64; mach_port_t obj = MACH_PORT_NULL;
+    kern_return_t kr = vm_region_64(mach_task_self(), &va, &vs, VM_REGION_BASIC_INFO_64, (vm_region_info_t)&bi, &cnt, &obj);
+    if (o < n) {
+        if (kr != KERN_SUCCESS || va > (a & ~(g_pg - 1))) snprintf(out + o, n - o, "; kernel: not mapped");
+        else snprintf(out + o, n - o, "; kernel: %s%s%s%s", bi.protection & VM_PROT_READ ? "r" : "-", bi.protection & VM_PROT_WRITE ? "w" : "-", bi.shared ? " shared" : "",
+                      bi.reserved ? " reserved" : "");
+    }
 }
 void nvn_dirty_slot_stats(int *live, int *used_slots, uint64_t *adds_total) {
     int n = atomic_load(&g_nr), active = 0;

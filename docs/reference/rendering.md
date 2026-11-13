@@ -1912,6 +1912,13 @@ Digimon Story Cyber Sleuth: Complete Edition (Media.Vision's MVGL engine, SDK 6.
 - `glTexStorage2D` makes every level up front (mipmaps filled by `glGenerateMipmap` as a blit), `glTexStorage3D` 3D and 2D array textures; the layer's units hold all four targets (96 of them, as `GL_MAX_COMBINED_TEXTURE_IMAGE_UNITS` says). A `GL_TEXTURE_SWIZZLE_*` is applied when the texture is made (a swizzled texture cannot be a render target).
 - **Found on:** [Digimon Story Cyber Sleuth: Complete Edition](../../dm/games/010014E00DB56000/README.md); [Balatro](../../dm/games/0100CD801CE5E000/README.md): the game's images are mipmapped; LÖVE makes a 1x1 default texture of each type, 3D and 2D array among them; font glyphs are RG8 with a swizzle of R, R, R, G.
 
+### GL uploads with reversed byte order
+
+- **Symptom:** a big-endian RGB565 light map uploads with wrong colours, with `[RED] glPixelStorei(0xcf0, 1) not implemented` in the log.
+- **Cause:** the GL layer ignored `GL_UNPACK_SWAP_BYTES`, interpreting each multibyte element in host byte order. Byte order must be corrected before decoding a packed pixel, not after expanding it to RGBA8.
+- **Fix:** `hle_gl.m` keeps and reports the unpack swap state and reverses each supported 16- or 32-bit element while copying upload data. Rows retain their unpack stride and alignment; only the requested pixels are read, so the final row needs no padding. Component order, byte-sized data, compressed blocks and the caller's memory stay unchanged. The default remains no swapping.
+- **Found on:** the [DOOM 3 bring-up report, part 5](https://github.com/seedds/nxnative/issues/1180). This conversion is covered by synthetic pixels; DOOM 3 has no registered profile here, and its other porting requirements and gameplay validation remain open.
+
 ### GL buffers orphaned, clears as load actions
 
 - `glBufferData` on a buffer the GPU may still read gets a new `MTLBuffer`, as GL drivers orphan it. A whole-framebuffer clear becomes the next pass's load action; a scissored or masked one is a quad.

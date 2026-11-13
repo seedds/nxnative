@@ -32,10 +32,54 @@ static void *import(const char *name) {
     return fn;
 }
 
+static void pixel_bytes(const void *src, unsigned w, unsigned h, GLenum format, GLenum type, int f, int cv, const void *want, size_t bytes) {
+    size_t pitch;
+    void *got = pixels_convert(src, w, h, format, type, f, cv, &pitch);
+    assert(pitch * fmt_rows(f, h) == bytes);
+    assert(!memcmp(got, want, bytes));
+    free(got);
+}
+
+static void unpack_swap_bytes(void) {
+    // DOOM 3 uploads big-endian RGB565 light maps. Padding is not a component, and the last row needs no trailing padding.
+    const uint8_t rgb565[] = {0xf8,0, 7,0xe0, 0,0x1f, 0xaa,0xbb, 0xff,0xff, 0,0, 0xff,0xe0};
+    const uint8_t rgba[] = {255,0,0,255, 0,255,0,255, 0,0,255,255, 255,255,255,255, 0,0,0,255, 255,255,0,255};
+    h_glPixelStorei(0xcf0, 1);   // GL_UNPACK_SWAP_BYTES
+    pixel_bytes(rgb565, 3, 2, GL_RGB, GL_UNSIGNED_SHORT_5_6_5, F_RGBA8, CV_565, rgba, sizeof rgba);
+    const uint8_t packed[] = {0xf0,0x0f}, rgba4[] = {255,0,0,255}, rgb5a1[] = {246,0,57,255};
+    pixel_bytes(packed, 1, 1, GL_RGBA, GL_UNSIGNED_SHORT_4_4_4_4, F_RGBA8, CV_4444, rgba4, sizeof rgba4);
+    pixel_bytes(packed, 1, 1, GL_RGBA, GL_UNSIGNED_SHORT_5_5_5_1, F_RGBA8, CV_5551, rgb5a1, sizeof rgb5a1);
+    const uint8_t half[] = {0x3c,0, 0xc0,0}, half_le[] = {0,0x3c, 0,0xc0};
+    pixel_bytes(half, 1, 1, GL_RG, GL_HALF_FLOAT, F_RG16F, CV_COPY, half_le, sizeof half_le);
+    const uint8_t words[] = {0x12,0x34, 0xab,0xcd}, words_le[] = {0x34,0x12, 0xcd,0xab};
+    pixel_bytes(words, 2, 1, GL_DEPTH_COMPONENT, GL_UNSIGNED_SHORT, F_D16, CV_COPY, words_le, sizeof words_le);
+    const uint8_t floats[] = {0x3f,0x80,0,0, 0,0,0,0, 0xc0,0,0,0}, floats_le[] = {0,0,0x80,0x3f, 0,0,0,0xc0};
+    h_glPixelStorei(GL_UNPACK_ROW_LENGTH, 2);
+    pixel_bytes(floats, 1, 2, GL_RED, GL_FLOAT, F_R32F, CV_COPY, floats_le, sizeof floats_le);
+    h_glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+    // Packed 32-bit pixels are one element, even when format names three or four components.
+    const uint8_t packed32[] = {0x12,0x34,0x56,0x78, 0xaa,0xbb,0xcc,0xdd}, packed32_le[] = {0x78,0x56,0x34,0x12, 0xdd,0xcc,0xbb,0xaa};
+    pixel_bytes(packed32, 1, 2, GL_RGBA, 0x8368, F_RGB10A2, CV_COPY, packed32_le, sizeof packed32_le);   // UNSIGNED_INT_2_10_10_10_REV
+    pixel_bytes(packed32, 1, 2, GL_RGB, 0x8c3b, F_RG11B10F, CV_COPY, packed32_le, sizeof packed32_le);   // UNSIGNED_INT_10F_11F_11F_REV
+    const uint8_t bytes[] = {1,2,3,4};
+    pixel_bytes(bytes, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, F_RGBA8, CV_COPY, bytes, sizeof bytes);
+    const uint8_t block[] = {1,2,3,4,5,6,7,8};
+    pixel_bytes(block, 4, 4, 0, 0, F_BC1, CV_COPY, block, sizeof block);
+    const uint8_t zeros[4] = {0};
+    pixel_bytes(NULL, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, F_RGBA8, CV_COPY, zeros, sizeof zeros);
+    GLint value = -1; h_glGetIntegerv(0xcf0, &value); assert(value == 1);
+    h_glPixelStorei(0xcf0, 0);
+    h_glGetIntegerv(0xcf0, &value); assert(value == 0);
+    pixel_bytes(words, 2, 1, GL_DEPTH_COMPONENT, GL_UNSIGNED_SHORT, F_D16, CV_COPY, words, sizeof words);
+    assert(rgb565[0] == 0xf8 && rgb565[1] == 0);   // caller memory is unchanged
+    puts("GL unpack byte order: packed colours, half/float/depth, row layout and unchanged byte/block inputs: OK");
+}
+
 int main(int argc, char **argv) {
     (void)argv;
     int stubs = argc > 1;
     setenv("DM_GL_STUBS", stubs ? "1" : "0", 1);
+    unpack_swap_bytes();
     // The calls from the issue must bind without using a GL loader first.
     GLuint (*create)(GLenum) = import("glCreateShader");
     assert((void *)create == (void *)h_glCreateShader);

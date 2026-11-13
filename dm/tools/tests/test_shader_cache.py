@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # The compile cache as one file (dm/tools/shader_cache.py): entries in and out, bytes stored once, several threads and processes, a damaged file, pruning, and taking in a cache from before it.
-import hashlib, os, sqlite3, subprocess, sys, tarfile, tempfile, threading, time, unittest
+import contextlib, errno, hashlib, os, sqlite3, subprocess, sys, tarfile, tempfile, threading, time, unittest
 from pathlib import Path
 from unittest import mock
 
@@ -98,6 +98,25 @@ class Entries(Base):
         self.store.put_file('f', src)
         self.assertTrue(self.store.to_file('f', dst)); self.assertEqual(dst.read_bytes(), b'data')
         self.assertFalse(self.store.to_file('absent', self.root / 'none')); self.assertFalse((self.root / 'none').exists())
+
+    def test_to_file_removes_tmp_after_failed_write_or_rename(self):
+        dst = self.root / 'dst'; dst.write_bytes(b'old')
+        self.store.put('f', b'new data')
+        @contextlib.contextmanager
+        def failing_open(path, mode):
+            with open(path, mode) as file:
+                def write(data):
+                    file.write(data[:2])
+                    raise OSError(errno.ENOSPC, 'No space left on device')
+                yield mock.Mock(write=write)
+        for action in ('write', 'rename'):
+            with self.subTest(action=action):
+                patch = mock.patch.object(shader_cache, 'open', failing_open, create=True) if action == 'write' else mock.patch.object(shader_cache.os, 'replace', side_effect=OSError(errno.ENOSPC, 'No space left on device'))
+                with patch:
+                    with self.assertRaises(OSError) as raised: self.store.to_file('f', dst)
+                self.assertEqual(raised.exception.errno, errno.ENOSPC)
+                self.assertEqual(dst.read_bytes(), b'old')
+                self.assertEqual(list(self.root.glob('dst.tmp-*')), [])
 
     def test_one_file_is_left(self):
         self.store.put('x', b'1'); self.store.close()

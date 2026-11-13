@@ -217,7 +217,8 @@ void hid_keys_init(void) {
     pthread_t th; if (g_nsteps && !pthread_create(&th, NULL, keys_main, NULL)) { pthread_detach(th); LOG("DM_KEYS: %d steps", g_nsteps); }
 }
 
-// DM_CTL=<file> (Mac, for driving a game step by step from a shell): the host reads the lines appended to the file (polled every 100 ms) and acts on each at once:
+// DM_CTL=<file> (for driving a game step by step from a shell on the Mac, or on an iPhone by pushing a longer copy over the file in Documents: it is opened again at
+// every poll and read on from the last offset, docs/agents/05-debugging.md): the host reads the lines appended to the file (polled every 100 ms) and acts on each at once:
 //   "key[+key][~hold]" presses as a DM_KEYS step does (hold 0.15 s by default), "shot <path>" saves the next presented frame as a PNG (dm_gfx_shot_at), "passdump <n>" dumps the
 //   render passes of the next n frames as DM_NVN_PASSDUMP does (to stderr, the run's log), "texdump <path with %d>" saves the colour targets of the next frame as DM_NVN_TEXDUMP does,
 //   "env KEY=VALUE" sets a switch read at the time of use (DM_NVN_SNAPRAW for the next texdump), "cvarf <main offset> <value>" sets an Unreal float console variable

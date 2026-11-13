@@ -133,18 +133,19 @@ static _Thread_local const NVNcommandBuffer *mp4_hud_cb;   // the HUD's pass, ba
 // radar, menus and loading screens begin theirs elsewhere.
 static void nvn_profile_set_rt(const NVNcommandBuffer *c, int n, const NVNtexture *const *ct, uint64_t caller) {
     const tex_t *t = n > 0 && ct ? (const tex_t *)ct[0] : NULL; uintptr_t base = mp4_main_base();
+    // A pass the game begins on the window itself (the game renders intermediates of its size and format too) through its pass-begin helper, outside the
+    // scene step and outside the front end (title movie and its menus, main+0x6c98c / 0x6cba0 / 0x58f520, stretched to 16:10 at the user's choice)
     int band = base && mp4_band_k() > 0 && !strcmp(dm_main_build(),"8275fbe1ec5191c279f3a943ad8524f4") && caller == base + 0x1300b8
-        && t && t->magic == MAGIC('T','E','X',0) && nvn_is_window_tex(ct[0]) && !mp4_under(base + 0x33194c)
-        && !mp4_under(base + 0xe2acb8);   // the front end (title movie and its menus, main+0x6c98c / 0x6cba0 / 0x58f520): stretched to 16:10, the user's choice   // the window itself: the game renders intermediates of its size and format too
+        && t && t->magic == MAGIC('T','E','X',0) && nvn_is_window_tex(ct[0]) && !mp4_under(base + 0x33194c) && !mp4_under(base + 0xe2acb8);
     mp4_band_has = 0;
-    if (band && base && mp4_under(base + 0x12e0e8)) {   // the HUD's pass, once a frame: a menu drawn in the last frame turns the band off for this one
+    if (band && mp4_under(base + 0x12e0e8)) {   // the HUD's pass, once a frame: whether a menu item was drawn in the last frame decides this whole frame
         int menu = atomic_exchange(&mp4_menu_seen, 0), was = atomic_exchange(&mp4_menu_last, menu);
         if (menu != was) LOG("MP4 16:10: %s", menu ? "a menu is open, the HUD is drawn over the whole window" : "no menu, the HUD is back in the 16:9 band");
-        if (menu) band = 0;
-        mp4_hud_cb = c;
-    } else if (mp4_hud_cb == c) mp4_hud_cb = NULL;
-    if (!band && !atomic_load(&mp4_menu_last) && base && caller == base + 0x1300b8 && t && t->magic == MAGIC('T','E','X',0) && t->d.format == NVN_FORMAT_RGBA8_SRGB && t->d.width == mp4_quality_max_width
-        && t->d.height == mp4_quality_max_height && mp4_band_k() > 0) { static int once; if (!once++) LOG("MP4 16:10: a pass begins on an output-size RGBA8_SRGB target that is not the window; left whole"); }
+    }
+    // Menu pages bind the window again from inside the HUD's list (main+0x12f0c8): those passes follow the frame's decision too, and their items are still
+    // looked at, so the decision holds while the menu stays open
+    if (band) mp4_hud_cb = c; else if (mp4_hud_cb == c) mp4_hud_cb = NULL;
+    if (band && atomic_load(&mp4_menu_last)) band = 0;
     if (band) { mp4_band_cb = c; mp4_band_h = 0;   // the band's frame: the pass's first viewport (the window rectangle: 1920x1080, the window crop)
         static int once; if (!once++) LOG("MP4 16:10: HUD and menu passes drawn into the middle 16:9 band (y and height x %.3f)", mp4_band_k()); }
     else if (mp4_band_cb == c) mp4_band_cb = NULL;
@@ -172,7 +173,7 @@ static int mp4_under(uintptr_t ra) {   // whether the guest call chain of this d
 // ship): those fill the window, the rest stays in the band. An item is named by the return address inside it just below the list's call
 // (DM_MP4_HUD_FULL=<hex main offsets, comma-separated> or "none" replaces the default list; each item seen is logged once with where it went).
 // The pause menu's pages (map, inventory, ...) mix 3D tab frames with 2D icons, which the band pulled apart; stretched whole they looked right in the first
-// 16:10 run. While a menu item (DM_MP4_HUD_MENU, default the map page's main+0xf75724, seventh run) was drawn in the last frame, the HUD's pass is not banded.
+// 16:10 run. While a menu item (DM_MP4_HUD_MENU, default main+0xf75724 and 0x118fdc, drawn only with the pause menu open in the seventh and eighth runs) was drawn in the last frame, the HUD's pass is not banded.
 static uintptr_t mp4_hud_full[16], mp4_hud_menu[16]; static int mp4_hud_nfull = -1, mp4_hud_nmenu;
 static int mp4_hex_list(const char *e, uintptr_t *out) {
     int n = 0; if (!strcmp(e, "none")) return 0;
@@ -182,7 +183,7 @@ static int mp4_hex_list(const char *e, uintptr_t *out) {
 static void mp4_hud_full_init(void) {
     const char *e = getenv("DM_MP4_HUD_FULL"), *m = getenv("DM_MP4_HUD_MENU");
     if (e) mp4_hud_nfull = mp4_hex_list(e, mp4_hud_full); else { mp4_hud_full[0] = 0xdf304; mp4_hud_full[1] = 0x8e778; mp4_hud_nfull = 2; }
-    if (m) mp4_hud_nmenu = mp4_hex_list(m, mp4_hud_menu); else { mp4_hud_menu[0] = 0xf75724; mp4_hud_nmenu = 1; }
+    if (m) mp4_hud_nmenu = mp4_hex_list(m, mp4_hud_menu); else { mp4_hud_menu[0] = 0xf75724; mp4_hud_menu[1] = 0x118fdc; mp4_hud_nmenu = 2; }
 }
 static int mp4_hud_item_full(uintptr_t base) {   // whether this draw belongs to a HUD item drawn over the whole window
     uintptr_t fp = (uintptr_t)__builtin_frame_address(0), top = fp + (8u << 20), prev = 0;

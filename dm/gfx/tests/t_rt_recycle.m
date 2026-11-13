@@ -1,5 +1,5 @@
-// Recycled texture memory (nvn_mtl.m rh_texture, rh_place, GitHub issues #1831, #1823): a shared texture in a GPU-only pool is made in a placement heap of its own, an eighth larger
-// than the texture; once its texture is freed the heap stays resident, and the smallest waiting heap that fits, up to half as large again, takes the next texture, cleared as a new
+// Recycled texture memory (nvn_mtl.m rh_texture, rh_place, GitHub issues #1831, #1823): a shared texture in a GPU-only pool is made in a placement heap of its own, an eighth larger (at most
+// RH_SLACK more) than the texture; once its texture is freed the heap stays resident, and the smallest waiting heap that fits, up to half as large again, takes the next texture, cleared as a new
 // allocation is: one a step of Metal's sizes larger included, COMPRESSIBLE or not. Same-pass feedback snapshots draw from the same heaps. Heaps that wait too long leave the
 // residency set when a submission begins. CPU-visible pools, block-compressed textures and DM_NVN_RT_RECYCLE=0 keep allocations of their own.
 #include "../nvn/nvn_mtl.m"
@@ -130,6 +130,12 @@ int main(void) { @autoreleasepool {
         if (e) { defer_obj_release(e->snap); e->snap = nil; e->ser = 0; }
         settle();
         CHECK(waiting() == 1, "its heap waits once the snapshot is freed");
+    }
+    {   // a large target: an eighth more would be 6 MB nothing uses
+        tex_t big = target(&pool, 95020, 0, 3072, 2048); mtl_tex_init(&big);
+        id<MTLTexture> tbig = tex_mtl(&big); MTLSizeAndAlign nb = [g_dev heapTextureSizeAndAlignWithDescriptor:tex_desc(&big, 0)];
+        CHECK(tbig && tbig.heap && tbig.heap.size >= nb.size && tbig.heap.size <= nb.size + RH_SLACK + 65536, "a large target's new heap is at most RH_SLACK larger than it");
+        tbig = nil; mtl_tex_release(&big); mtl_alias_drop_pool(&pool); settle();
     }
     mtl_sub_commit(); mtl_drain(); free(mem);
     printf("t_rt_recycle: %d checks, %d failed\n", checks, failed); return failed != 0;

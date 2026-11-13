@@ -32,6 +32,7 @@ static void front_ios_notify_ask(void);
 static void front_ios_power_watch(void);
 static void front_ios_audio_watch(void);
 static UILabel *front_ios_fps_label(void);
+static void front_ios_fps_heat_battery(bool on);
 
 @interface DmGameView : UIView
 @property (nonatomic) CGFloat maxPixelWidth;   // 0: the screen's own pixels; a TV caps the drawable at 1920 across (tv_attach)
@@ -173,7 +174,8 @@ static void launcher_done(void) { [g_root startGame]; }
     self.pad = dm_gamepad_view(self.view.bounds);
     self.pad.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
     [self.view addSubview:self.pad];
-    const char *fps = getenv("DM_SHOW_FPS");
+    const char *fps = getenv("DM_SHOW_FPS"), *heat = getenv("DM_SHOW_HEAT_BATTERY");
+    front_ios_fps_heat_battery(heat && atoi(heat) != 0);
     [self showFPS:fps ? atoi(fps) != 0 : [[NSBundle.mainBundle objectForInfoDictionaryKey:@"DMShowFPS"] boolValue]];
     [self.view setNeedsLayout]; [self.view layoutIfNeeded];
     UIApplication.sharedApplication.idleTimerDisabled = YES;
@@ -289,6 +291,7 @@ bool dm_setting_live(const char *env, const char *value) {
         return true;
     }
     if (!strcmp(env, "DM_SHOW_FPS")) { if (value) [g_root showFPS:atoi(value) != 0]; return true; }
+    if (!strcmp(env, "DM_SHOW_HEAT_BATTERY")) { if (value) front_ios_fps_heat_battery(atoi(value) != 0); return true; }
     if (!strcmp(env, "DM_TOUCH_HAPTICS")) { if (value) dm_gamepad_touch_feedback(atoi(value) != 0); return true; }
     if (!strcmp(env, "DM_RUMBLE")) { if (value) { dm_haptics_set_enabled(atoi(value) != 0); LOG("front end: game rumble %s (in-game menu)", atoi(value) ? "on" : "off"); } return true; }
     return false;
@@ -325,7 +328,8 @@ static void front_ios_power_watch(void) {
 // Frame-rate counter: the frames put on screen in the last second (nvn_mtl.m counts them for NVN and for the Vulkan layer alike; frames the display link merged away are not counted),
 // the device's heat (NSProcessInfo's thermal state: Normal, Busy, Throttling, Overheat) and the battery with the play time it leaves at the rate it has fallen.
 // On when the IPA was built with it (the NSP script's SHOW_FPS / --show-fps → DMShowFPS in Info.plist); DM_SHOW_FPS=0 / 1 (the launcher, Documents/env.txt) overrides that without a rebuild,
-// and the in-game menu turns it on and off ([DmRootVC showFPS:])
+// and the in-game menu turns it on and off ([DmRootVC showFPS:]). The heat and battery line is DM_SHOW_HEAT_BATTERY's (the launcher's row under the counter's, off by default):
+// without it the counter is the frame rate alone
 uint64_t mtl_present_count(void);
 // The battery level in 1 % steps, as the status bar shows it, from IOKit's power sources (in the iOS runtime, not in its SDK, so looked up by name); UIDevice's batteryLevel moves in
 // 5 % steps on current iOS. -1 when they give nothing (the sandbox may refuse them): the caller falls back to UIDevice
@@ -366,28 +370,40 @@ static NSString *battery_line(battery_fall_t *b, double now) {
     int m = (int)(level / ((b->l0 - level) / (now - b->t0)) / 60);
     return [NSString stringWithFormat:@"%d%% · %dh%02d left", pct, m / 60, m % 60];
 }
+static bool g_fps_heat_battery;            // DM_SHOW_HEAT_BATTERY; main thread
+static void (^g_fps_update)(bool restart);   // the counter's update, once it is made; restart begins the battery's measurement again
+static void front_ios_fps_heat_battery(bool on) {   // at Play (before the counter is made) and from the in-game menu
+    if (on == g_fps_heat_battery) return;
+    g_fps_heat_battery = on; LOG("front end: frame-rate counter's heat and battery %s", on ? "on" : "off");
+    if (on) UIDevice.currentDevice.batteryMonitoringEnabled = YES;
+    if (g_fps_update) g_fps_update(true);
+}
 static UILabel *front_ios_fps_label(void) {
     UILabel *l = [UILabel new];
     l.font = [UIFont monospacedDigitSystemFontOfSize:12 weight:UIFontWeightSemibold]; l.textColor = UIColor.whiteColor; l.textAlignment = NSTextAlignmentCenter; l.numberOfLines = 2;
     l.backgroundColor = [UIColor colorWithWhite:0 alpha:0.45]; l.layer.cornerRadius = 6; l.layer.masksToBounds = YES; l.userInteractionEnabled = NO;
-    UIDevice.currentDevice.batteryMonitoringEnabled = YES;
     static NSString *const heat[] = {@"Normal", @"Busy", @"Throttling", @"Overheat"};   // NSProcessInfoThermalState nominal, fair, serious, critical
     __block battery_fall_t bat = {0, -1, -1};
     __block uint64_t n0 = mtl_present_count(); __block double t0 = CACurrentMediaTime(); __block NSString *fps = @"--";
-    void (^update)(void) = ^{
+    void (^update)(bool) = ^(bool restart) {
         uint64_t n = mtl_present_count(); double now = CACurrentMediaTime(); int th = dm_thermal_now();
-        if (now - t0 < 1.5) fps = [NSString stringWithFormat:@"%.0f", (n - n0) / (now - t0)];   // a longer span (a stall, the background): no reading
-        n0 = n; t0 = now;
-        NSString *text = [NSString stringWithFormat:@"%@ fps · %@\n%@", fps, heat[th >= 0 && th <= 3 ? th : 0], battery_line(&bat, now)];
+        if (restart) bat = (battery_fall_t){0, -1, -1};   // a measurement paused while the line was off is not resumed
+        else {
+            if (now - t0 < 1.5) fps = [NSString stringWithFormat:@"%.0f", (n - n0) / (now - t0)];   // a longer span (a stall, the background): no reading
+            n0 = n; t0 = now;
+        }
+        NSString *text = g_fps_heat_battery ? [NSString stringWithFormat:@"%@ fps · %@\n%@", fps, heat[th >= 0 && th <= 3 ? th : 0], battery_line(&bat, now)]
+                                            : [NSString stringWithFormat:@"%@ fps", fps];
         if (text.length != l.text.length) [l.superview setNeedsLayout];
         l.text = text;
     };
-    update();
+    update(false); g_fps_update = update;
     [NSNotificationCenter.defaultCenter addObserverForName:UIApplicationDidEnterBackgroundNotification object:nil queue:NSOperationQueue.mainQueue
                                                 usingBlock:^(NSNotification *note) { (void)note; bat = (battery_fall_t){0, -1, -1}; }];
     // the common modes: a default-mode timer does not fire while UIKit tracks a touch (the touch controls)
-    [NSRunLoop.mainRunLoop addTimer:[NSTimer timerWithTimeInterval:1.0 repeats:YES block:^(NSTimer *t) { (void)t; update(); }] forMode:NSRunLoopCommonModes];
-    LOG("front end: frame-rate counter on (battery in %s steps)", battery_exact() >= 0 ? "1 %" : "UIKit's");
+    [NSRunLoop.mainRunLoop addTimer:[NSTimer timerWithTimeInterval:1.0 repeats:YES block:^(NSTimer *t) { (void)t; update(false); }] forMode:NSRunLoopCommonModes];
+    if (g_fps_heat_battery) LOG("front end: frame-rate counter on, with heat and battery (battery in %s steps)", battery_exact() >= 0 ? "1 %" : "UIKit's");
+    else LOG("front end: frame-rate counter on");
     return l;
 }
 

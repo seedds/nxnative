@@ -16,6 +16,7 @@
 #include "nvn_mtl.h"
 #include "nvn_pace.h"
 #include "nvn_fstep.h"
+#include "nvn_rt.h"
 #include "nvn_timestamp.h"
 #include "../../host/front.h"
 #include "nvn_dirty.h"
@@ -1842,10 +1843,9 @@ NVN(nvnWindowGetCrop, void, const NVNwindow *w, NVNrectangle *r) {   // Bayonett
     r->x = r->y = 0; r->width = o->ntex && o->tex[0] ? (int)CTX(o->tex[0])->d.width : 0; r->height = o->ntex && o->tex[0] ? (int)CTX(o->tex[0])->d.height : 0;
 }
 static void trow(uint64_t f, const char *name, double v);
-static void set_time_constraint(uint64_t period_ns);
-static void rt_comp_tick(uint64_t period_ns);
-static double g_rt_comp_ms;   // Currently declared real-time computation amount (ms; 0 = not declared)
-static double g_rt_period_ms;
+static void rt_acquire(uint64_t period_ns);
+static void rt_line(char *b, size_t n);
+static double g_rt_comp_ms;   // The computation the acquire thread declares (ms; 0 = not declared)
 static void sleep_until_ns(uint64_t dl);
 static uint64_t present_period(const win_t *o);
 static uint64_t rt_period_ns(const win_t *o, uint64_t period);
@@ -1872,9 +1872,7 @@ NVN(nvnWindowAcquireTexture, NVNwindowAcquireTextureResult, NVNwindow *w, NVNsyn
     // Vsync blocks here (real-device NVN: when all textures in the swapchain are waiting for display, wait for the next one to be released), not in present -- the game often calls present while holding a lock
     uint64_t at = *idx < 4 ? o->avail[*idx] : 0, now = dm_detclock_enabled() ? guest_ns() : now_ns(), wait = at > now ? at - now : 0, pace_ns = 0;
     if (!dm_detclock_enabled()) {   // Register the acquire thread as a time-constraint thread (no longer registered only when it "arrived early": it must also declare itself when it is constantly behind in the hot state)
-        static uint64_t rt_period; uint64_t period = present_period(o), rtp = rt_period_ns(o, period);
-        if (rtp && rt_period != rtp) { rt_period = rtp; set_time_constraint(rtp); }
-        rt_comp_tick(rtp);
+        uint64_t period = present_period(o); rt_acquire(rt_period_ns(o, period));
         uint64_t p0 = now_ns(); int snap = mtl_snap_on();
         if (present_unpaced(o)) {}   // present interval 0: no vsync wait (below); only the free texture the ticket wait below gives
         else if (snap && mtl_link_active() && mtl_link_stalled()) { if (wait) sleep_until_ns(at); }   // present snapshots (nvn_mtl.m) while the display link is silent (the window in the background or covered):
@@ -2080,9 +2078,8 @@ static void tsummary(uint64_t frame) {
           static uint64_t pyn, pyns; uint64_t yn = 0, yns = 0; dm_main_yield_stats(&yn, &yns);
           LOG("[nvn] translation detail up to frame %llu: submit per frame %.2f M cycles (%.2f cycles per instruction), CPU %.3f ms of which kernel %.3f ms, wall clock %.3f ms; mean clock %.2f GHz (cycles / CPU time); this thread's QoS %#x; allocator pools %d, GPU waits so far %llu; real-time declared computation %.2f ms; main thread yields per frame %.0f / %.3f ms", frame,
               cyc / 1e6 / nf, cyc / (double)(ci - pi), cpu / 1e6 / nf, (double)(ck - pk) / 1e6 / nf, (double)(cw - pw) / 1e6 / nf, cpu > 0 ? cyc / cpu : 0, (unsigned)qc, an, (unsigned long long)aw, g_rt_comp_ms, (double)(yn - pyn) / nf, (double)(yns - pyns) / 1e6 / nf); pyn = yn; pyns = yns; }
-        if (frame % 300 == 0) { unsigned wn = 0; uint32_t wq = dm_guest_work_qos(&wn); thread_extended_info_data_t xi; mach_msg_type_number_t xc = THREAD_EXTENDED_INFO_COUNT; int okx = thread_info(pthread_mach_thread_np(pthread_self()), THREAD_EXTENDED_INFO, (thread_info_t)&xi, &xc) == KERN_SUCCESS;
-            thread_time_constraint_policy_data_t tp; mach_msg_type_number_t tc = THREAD_TIME_CONSTRAINT_POLICY_COUNT; boolean_t def = 0; int rt_live = thread_policy_get(pthread_mach_thread_np(pthread_self()), THREAD_TIME_CONSTRAINT_POLICY, (thread_policy_t)&tp, &tc, &def) == KERN_SUCCESS && !def;   // def = 1: the real-time policy is not in effect (never set / revoked)
-            LOG("[nvn] thread policy: main thread real-time computation %.2f ms / period %.2f ms, real-time policy %s, current priority %d (base %d, policy %d); %u worker threads QoS %#x; present QoS %#x", g_rt_comp_ms, g_rt_period_ms, rt_live ? "in effect" : "not in effect", okx ? xi.pth_curpri : -1, okx ? xi.pth_priority : -1, okx ? xi.pth_policy : -1, wn, wq, mtl_present_qos()); }
+        if (frame % 300 == 0) { unsigned wn = 0; uint32_t wq = dm_guest_work_qos(&wn); char rl[1024]; rt_line(rl, sizeof rl);   // the declaring threads themselves, not the thread presenting (the game may present from another)
+            LOG("[nvn] thread policy: %s; %u guest worker threads QoS %#x; present QoS %#x", rl, wn, wq, mtl_present_qos()); }
         py = cy; pk = ck; pw = cw; }
       pi = ci; pc = cc; pd = dr_; pf = frame; }
     uint64_t up, re, es = mtl_pkg_edge_skips(), fa, pr, op, oc; mtl_pkg_stats(&up, &re); nvn_dirty_stats(&fa, &pr); nvn_dirty_open_stats(&op, &oc);
@@ -2122,38 +2119,91 @@ static void slow_emit(uint64_t f) {
     }
     if (f % 300 == 0) fprintf(stderr, "[slowframe]\t#\tup to frame %llu\tjudged=%llu\tslow=%llu\tcriterion=%s\n", f, judged, slow, has ? "on-screen interval" : "present call interval (no window)");
 }
-// Declaration for the time-constraint (real-time) thread: period = present period, constraint = period, computation = the CPU time this thread actually needs per frame.
-// The computation used to be hard-coded at 2 ms, while the game main thread (game logic + recording + submit replay) takes about 10 ms per frame when hot - a 5× gap between declared and actual:
-// a real-time thread that exceeds its declared computation gets demoted by the system, and the performance controller also sets frequency from the declaration (this declaration is how the system learns the frame deadline and the workload).
-// DM_RT_COMP=<ms> fixes the declaration; default auto = every 120 frames take the larger of 1.25 × the p90 and 1.1 × the peak of this thread's per-frame CPU time and re-declare if it differs from the declared value by > 15% (capped at 0.9 × period).
-// DM_RT=0 leaves the acquire thread on the standard policy (its QoS only), for power A/B: the real-time declaration is how the performance controller learns the frame deadline, and it may hold the clock up for it
-static int rt_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_RT"); v = !(e && !strcmp(e, "0")); if (!v) LOG("[nvn] DM_RT=0: the present thread gets no time-constraint policy (QoS only)"); } return v; }
-static void set_time_constraint_comp(uint64_t period_ns, uint64_t comp_ns) {
-    if (!rt_on()) return;
+// Time-constraint (real-time) policies: period = the frame's deadline (rt_period_ns, the present period), constraint = the period, computation = the CPU time the thread needs
+// per frame (nvn_rt.h: the larger of 1.25 x the p90 and 1.1 x the peak of the last 120 frames, re-declared when it moves by more than 15%). The declaration is how the scheduler
+// and the performance controller learn the frame deadline: on an iPhone the controller sets the clock and the core type so that each declared thread fits its period, and a
+// thread with no declaration has no deadline for it. The acquire thread declares it, and so do the host threads that carry the rest of a frame's CPU work, the queue replay
+// (nvn_queue.inc nq_worker) and the encode thread (nvn_rec.h rec_thread), each with its own computation once a first window of frames has measured it (declared too low,
+// a thread is held up every frame it needs more). At Ocarina of Time's 30 fps cap on an iPhone 17 only the acquire thread (the guest's main thread) declared: it fit its
+// 33 ms on the efficiency cores, the replay thread took 23 ms of CPU a frame at 1.55 GHz behind it, and the process ran 1-5% of its CPU time on performance cores at 25 fps.
+// DM_RT=0 leaves every thread on its QoS (for power A/B); DM_RT_FRAME=0 declares on the acquire thread only; DM_RT_COMP=<ms> fixes the acquire thread's computation
+// (default auto). The acquire thread declares 2 ms at its first period, before any window, as it always has.
+static int rt_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_RT"); v = !(e && !strcmp(e, "0")); if (!v) LOG("[nvn] DM_RT=0: no thread gets a time-constraint policy (QoS only)"); } return v; }
+static int rt_frame_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_RT_FRAME"); v = !(e && !strcmp(e, "0")); if (!v && rt_on()) LOG("[nvn] DM_RT_FRAME=0: only the acquire thread declares a time-constraint policy"); } return v; }
+static int rt_comp_fixed_ms(void) { static int v = -2; if (v == -2) { const char *e = getenv("DM_RT_COMP"); v = e && *e && strcmp(e, "auto") ? atoi(e) : -1; } return v; }   // −1 = auto
+#define RT_THREADS 4
+typedef struct {
+    const char *name; mach_port_t port; int acq;   // acq: the acquire thread
+    nvn_rt r; uint64_t period_ns, cyc;   // the period declared (0: none) and the thread's cycles at its last sample
+    unsigned ndecl;
+    _Atomic int ready, pri, base, pol;   // the thread's priority, base priority and policy at its last sample (thread_info)
+    _Atomic uint64_t frames, demoted, cpu_ns, cycles;   // since the last thread policy line: frames sampled, of them declared but below real-time priority (the kernel's fail-safe demotes
+                                                        // a real-time thread that runs about 1.5 s without blocking), and the thread's CPU time and cycles
+} rt_thr;
+static rt_thr g_rtt[RT_THREADS]; static _Atomic int g_rtt_n;
+static _Atomic uint64_t g_rt_frame_ns;   // the period the acquire thread declares; the frame threads follow it
+static rt_thr *rt_register(const char *name, int acq) {   // on the thread itself
+    int i = atomic_fetch_add(&g_rtt_n, 1); if (i >= RT_THREADS) return NULL;
+    rt_thr *t = &g_rtt[i]; t->name = name; t->acq = acq; t->port = pthread_mach_thread_np(pthread_self()); atomic_store(&t->ready, 1); return t;
+}
+static int rt_allowed(const rt_thr *t) { return rt_on() && (t->acq || rt_frame_on()); }
+static void rt_declare(rt_thr *t, uint64_t period_ns, double comp_ms) {
     static mach_timebase_info_data_t tb; if (!tb.denom) mach_timebase_info(&tb);
-    if (comp_ns < 1000000ull) comp_ns = 1000000ull; if (comp_ns > period_ns * 9 / 10) comp_ns = period_ns * 9 / 10;
+    double cap = period_ns * 0.9 / 1e6; if (comp_ms > cap) comp_ms = cap; if (comp_ms < 1) comp_ms = 1;
+    uint64_t comp_ns = (uint64_t)(comp_ms * 1e6);
     thread_time_constraint_policy_data_t p = {
         .period = (uint32_t)(period_ns * tb.denom / tb.numer), .computation = (uint32_t)(comp_ns * tb.denom / tb.numer),
         .constraint = (uint32_t)(period_ns * tb.denom / tb.numer), .preemptible = 1};
-    kern_return_t kr = thread_policy_set(pthread_mach_thread_np(pthread_self()), THREAD_TIME_CONSTRAINT_POLICY, (thread_policy_t)&p, THREAD_TIME_CONSTRAINT_POLICY_COUNT);
-    if (kr == KERN_SUCCESS) { g_rt_comp_ms = comp_ns / 1e6; g_rt_period_ms = period_ns / 1e6; }
-    LOG("[nvn] present thread time-constraint policy (period %.3f ms, computation %.3f ms) %s", period_ns / 1e6, comp_ns / 1e6, kr == KERN_SUCCESS ? "set" : "failed to set");
+    kern_return_t kr = thread_policy_set(t->port, THREAD_TIME_CONSTRAINT_POLICY, (thread_policy_t)&p, THREAD_TIME_CONSTRAINT_POLICY_COUNT);
+    if (kr == KERN_SUCCESS) { t->r.comp_ms = comp_ms; t->period_ns = period_ns; if (t->acq) g_rt_comp_ms = comp_ms; }
+    if (++t->ndecl <= 20 || kr != KERN_SUCCESS)
+        LOG("[nvn] %s time-constraint policy (period %.3f ms, computation %.3f ms) %s%s", t->name, period_ns / 1e6, comp_ms, kr == KERN_SUCCESS ? "set" : "failed to set", t->ndecl == 20 ? "; further declarations of this thread only in the thread policy line" : "");
 }
-static int rt_comp_fixed_ms(void) { static int v = -2; if (v == -2) { const char *e = getenv("DM_RT_COMP"); v = e && *e && strcmp(e, "auto") ? atoi(e) : -1; } return v; }   // −1 = auto
-// The fixed value, or in auto mode the computation declared so far (auto's starting value of 2 ms only the first time): a reset to 2 ms at each period change under-declared the thread until the next p90
-static void set_time_constraint(uint64_t period_ns) { int f = rt_comp_fixed_ms(); set_time_constraint_comp(period_ns, f > 0 ? (uint64_t)f * 1000000ull : g_rt_comp_ms > 0 ? (uint64_t)(g_rt_comp_ms * 1e6) : 2000000ull); }
-// Called every frame at acquire: records this thread's CPU time since the last call; in auto mode re-declares based on p90
-static void rt_comp_tick(uint64_t period_ns) {
-    if (rt_comp_fixed_ms() > 0 || !period_ns || !g_rt_comp_ms) return;
-    static uint64_t last; static double win[120]; static int n;
-    uint64_t c = clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID); if (!last) { last = c; return; }
-    win[n++] = (double)(c - last) / 1e6; last = c;
-    if (n < 120) return;
-    double v[120]; memcpy(v, win, sizeof v); qsort(v, 120, sizeof *v, dcmp); n = 0;
-    // Also the window's peak: every frame that ran past the declaration stalled the thread for 30–60 ms. Dark Souls Remastered's render thread needs 1.9–2.0 ms a frame with one or
-    // two frames in 120 near 4.4 ms; declared at 2.5 ms (p90 × 1.25) it stalled about once a second, at 30 fps and at 60; declared above the peak it held 60 fps at the same CPU energy
-    double p90 = v[107], comp = fmax(p90 * 1.25, v[119] * 1.1), cap = period_ns * 0.9 / 1e6; if (comp > cap) comp = cap; if (comp < 1) comp = 1;
-    if (comp > g_rt_comp_ms * 1.15 || comp < g_rt_comp_ms * 0.85) set_time_constraint_comp(period_ns, (uint64_t)(comp * 1e6));
+// On the thread itself, before each piece of its work: one sample a presented frame (its CPU and cycles, its priority), and the declaration when the period or the need moved
+static void rt_tick(rt_thr *t, uint64_t period_ns) {
+    uint64_t f = atomic_load_explicit(&g_frame, memory_order_relaxed);
+    int period_moved = period_ns && period_ns != t->period_ns && (t->acq || t->r.comp_ms > 0);
+    if (f == t->r.frame && !period_moved) return;
+    if (f != t->r.frame) {
+        uint64_t cpu = clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID), ins, cyc; thr_counts(&ins, &cyc);
+        if (t->r.frame && f > t->r.frame) {
+            thread_extended_info_data_t xi; mach_msg_type_number_t xc = THREAD_EXTENDED_INFO_COUNT;
+            if (thread_info(t->port, THREAD_EXTENDED_INFO, (thread_info_t)&xi, &xc) == KERN_SUCCESS) {
+                atomic_store(&t->pri, xi.pth_curpri); atomic_store(&t->base, xi.pth_priority); atomic_store(&t->pol, xi.pth_policy);
+                if (t->period_ns && xi.pth_curpri < 97) atomic_fetch_add(&t->demoted, 1);   // 97: BASEPRI_RTQUEUES, where a time-constraint thread runs
+            }
+            atomic_fetch_add(&t->frames, 1); atomic_fetch_add(&t->cpu_ns, cpu - t->r.cpu); atomic_fetch_add(&t->cycles, cyc - t->cyc);
+        }
+        t->cyc = cyc;
+        double c = nvn_rt_sample(&t->r, f, cpu, (double)(period_ns ? period_ns : t->period_ns) / 1e6);
+        if (c > 0 && period_ns && rt_allowed(t) && !(t->acq && rt_comp_fixed_ms() > 0) && (t->period_ns || !t->acq)) { rt_declare(t, period_ns, c); return; }
+    }
+    if (period_moved && rt_allowed(t)) {   // a new period: the acquire thread declares at once (DM_RT_COMP, what it declared so far, or 2 ms the first time), a frame thread with what it measured
+        int fx = t->acq ? rt_comp_fixed_ms() : -1;
+        rt_declare(t, period_ns, fx > 0 ? fx : t->r.comp_ms > 0 ? t->r.comp_ms : 2);
+    }
+}
+static void rt_acquire(uint64_t period_ns) {   // the acquire thread, every acquire
+    static rt_thr *t; static int once; if (!once) { once = 1; t = rt_register("acquire thread", 1); }
+    atomic_store_explicit(&g_rt_frame_ns, period_ns, memory_order_relaxed);
+    if (t) rt_tick(t, period_ns);
+}
+void *nvn_rt_join(const char *name) { return rt_register(name, 0); }
+void nvn_rt_tick(void *h) { if (h) rt_tick(h, atomic_load_explicit(&g_rt_frame_ns, memory_order_relaxed)); }
+// The thread policy line: each registered thread's declaration, priority and policy, the frames it was demoted in, and its CPU per frame with its mean clock (cycles per CPU
+// second: an efficiency core runs below about 2.6 GHz on the A19, a performance core up to 4.3)
+static void rt_line(char *b, size_t n) {
+    size_t o = 0; int nt = atomic_load(&g_rtt_n); if (nt > RT_THREADS) nt = RT_THREADS; b[0] = 0;
+    for (int i = 0; i < nt && o < n; i++) { rt_thr *t = &g_rtt[i]; if (!atomic_load(&t->ready)) continue;
+        uint64_t fr = atomic_exchange(&t->frames, 0), de = atomic_exchange(&t->demoted, 0), cn = atomic_exchange(&t->cpu_ns, 0), cy = atomic_exchange(&t->cycles, 0);
+        int w = t->period_ns ? snprintf(b + o, n - o, "%s%s time-constraint computation %.2f ms / period %.2f ms", o ? "; " : "", t->name, t->r.comp_ms, t->period_ns / 1e6)
+                             : snprintf(b + o, n - o, "%s%s no time-constraint policy", o ? "; " : "", t->name);
+        if (w > 0) o += (size_t)w; if (o >= n) break;
+        w = snprintf(b + o, n - o, ", priority %d (base %d, policy %d), demoted in %llu of %llu frames, CPU %.2f ms a frame at %.2f GHz", atomic_load(&t->pri), atomic_load(&t->base), atomic_load(&t->pol),
+                     (unsigned long long)de, (unsigned long long)fr, fr ? cn / 1e6 / fr : 0, cn ? (double)cy / cn : 0);
+        if (w > 0) o += (size_t)w;
+    }
+    if (!o) snprintf(b, n, "no thread registered");
 }
 static void sleep_until_ns(uint64_t dl) {   // absolute time on the monotonic clock
     static mach_timebase_info_data_t tb; if (!tb.denom) mach_timebase_info(&tb);
@@ -2335,7 +2385,7 @@ static uint64_t present_period(const win_t *o) {
     int itv = present_itv(o), hz = g_hz;
     return hz > 0 ? (uint64_t)itv * 1000000000ull / (uint64_t)hz : 0;
 }
-// The period the acquire thread declares to the scheduler (set_time_constraint): the present period, except that a hold the frame step raised for late frames keeps the cap's deadline.
+// The period the acquire thread declares to the scheduler (rt_declare), which the frame threads follow: the present period, except that a hold the frame step raised for late frames keeps the cap's deadline.
 // Declaring the longer hold let the performance controller move the game to the efficiency cores at half the clock (TOTK on an iPhone: 3.4 → 1.5 GHz and 65% → 5% on performance
 // cores within 10 frames of a step to 30), where 60 fps no longer fits and every trial back to it fails. A step the game fixes itself (BotW's VFR override) is declared as it is
 static uint64_t rt_period_ns(const win_t *o, uint64_t period) {

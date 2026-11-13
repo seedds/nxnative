@@ -2,7 +2,7 @@
 // 1920x1080 image is replaced by the spatial scaler, which fills the whole image with the texture's colour; equal sizes, another shader, and DM_UPSCALER unset
 // (the last run) leave the dispatch to the shader. Runs under any profile: the named shader is the profile's first upscaler (DM_GAME_UPSCALER_KEYS), and a profile with
 // none swaps no shader; the MetalFX draw itself (up_mfx_encode) does not look at the key. The colour (up_mfx_color) comes from synthetic code holding the curves' constants: a variant with sRGB input
-// comes out decoded to linear, and one whose output stays encoded is left to its shader
+// comes out decoded to linear, one whose output stays encoded is left to its shader, and one with no curve keeps its input's encoding, drawn by MetalFX without a decode (Star Fox's NDSR variant, Splatoon Raiders' other half)
 #include "../nvn/nvn_mtl.m"
 void *front_metal_layer(void) { return NULL; }
 module_t *module_of(const void *p) { (void)p; return NULL; }
@@ -62,10 +62,12 @@ int main(void) { @autoreleasepool {
     CHECK(color_of(both, 4, NULL, 0) == UP_COLOR_LINEAR, "an encode and a decode in floats: linear input and output (Bananza)");
     CHECK(color_of(NULL, 0, dec16, 3) == UP_COLOR_SRGB, "only a decode, in half floats: sRGB input, linear output (Splatoon Raiders)");
     CHECK(color_of(enc, 2, NULL, 0) == UP_COLOR_KEEP, "an encode with no decode: the output stays encoded, the shader runs");
-    CHECK(color_of(NULL, 0, NULL, 0) == UP_COLOR_KEEP, "no curve: the output stays encoded, the shader runs");
+    CHECK(color_of(NULL, 0, NULL, 0) == UP_COLOR_PLAIN, "no curve: the output keeps the input's encoding (Star Fox, Splatoon Raiders' other half): MetalFX in perceptual mode");
+    CHECK(color_of((const float[1]){0.04045f}, 1, NULL, 0) == UP_COLOR_KEEP, "part of a curve is not plain: the shader runs");
+    CHECK(color_of(NULL, 0, (const float[1]){2.3984375f}, 1) == UP_COLOR_KEEP, "part of a curve is not plain, in half floats: the shader runs");
     CHECK(color_of(dec, 2, NULL, 0) == UP_COLOR_KEEP, "a shape no pack has shown (a decode in floats, no encode): the shader runs");
     CHECK(color_of(NULL, 0, (const float[4]){0.040435791015625f, 2.3984375f, 0.07745361328125f, enc16[0]}, 4) == UP_COLOR_KEEP, "a half float encode must not read as encoded input: the shader runs");
-    CHECK(up_mfx_color(rare, sizeof rare) == UP_COLOR_KEEP, "a constant used once is chance, not a curve");
+    CHECK(up_mfx_color(rare, sizeof rare) == UP_COLOR_PLAIN, "a constant used once is chance, not a curve: no curve at all");
     const char *up = getenv("DM_UPSCALER"); int on = up && !strcmp(up, "metalfx");
     tex_t in = texture(77, 960, 540, NVN_FORMAT_RGBA16F), out = texture(78, 1920, 1080, NVN_FORMAT_RGBA16F), same = texture(79, 960, 540, NVN_FORMAT_RGBA16F);
     out.d.flags |= NVN_TEXTURE_FLAGS_IMAGE; same.d.flags |= NVN_TEXTURE_FLAGS_IMAGE;
@@ -129,8 +131,21 @@ int main(void) { @autoreleasepool {
         CHECK(up_mfx_encode(named), "linear input after sRGB at the same sizes");
         CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull) && !mtl_last_commit_error(), "the second linear submission completes");
         CHECK(matches(written, colour, MTLRegionMake2D(0, 0, 1920, 1080), black), "the same sizes in linear colour are not decoded: each colour has its own scaler");
+        named->up_color = UP_COLOR_PLAIN;
+        fill(tex_mtl(&in), MTLClearColorMake(colour[0], colour[1], colour[2], colour[3])); fill(written, MTLClearColorMake(0, 0, 0, 1));
+        { const uint32_t rects[8] = {0, 0, 959, 539, 0, 0, 1919, 1079}; memcpy(S.push[1], rects, sizeof rects); }
+        S.tex[5][0] = 701; S.img[5][1] = 702; mtl_sub_begin();
+        CHECK(up_mfx_encode(named), "MetalFX takes a variant with no curve");
+        CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull) && !mtl_last_commit_error(), "the plain submission completes");
+        CHECK(matches(written, colour, MTLRegionMake2D(0, 0, 1920, 1080), black), "a variant with no curve comes out in its input's encoding, not decoded");
+        fill(tex_mtl(&packed), MTLClearColorMake(colour[0], colour[1], colour[2], colour[3])); fill(written, MTLClearColorMake(0, 0, 0, 1));
+        { const uint32_t r[8] = {7, 3, 959, 539, 13, 9, 1899, 1059}; memcpy(S.push[1], r, sizeof r); } S.tex[5][0] = 704; mtl_sub_begin();
+        CHECK(up_mfx_encode(named), "MetalFX takes a packed subrectangle with no curve");
+        CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull) && !mtl_last_commit_error(), "the packed plain submission completes");
+        CHECK(matches(written, colour, MTLRegionMake2D(13, 9, 1900, 1060), black), "a packed subrectangle with no curve keeps its encoding, in its destination rectangle only");
+        named->up_color = UP_COLOR_LINEAR; S.tex[5][0] = 701;
         NvShader *encoded_out = upscaler(key); encoded_out->up_color = UP_COLOR_KEEP;
-        CHECK(!up_mfx_wanted(encoded_out), "a named shader whose output stays encoded is left to its shader");
+        CHECK(!up_mfx_wanted(encoded_out), "a named shader of a shape MetalFX does not draw is left to its shader");
         S.tex[5][0] = 701;
         S.img[5][1] = 703; { const uint32_t same_r[8] = {0, 0, 959, 539, 0, 0, 959, 539}; memcpy(S.push[1], same_r, sizeof same_r); } mtl_sub_begin(); uint64_t kept = g_up_mfx_kept;
         CHECK(!up_mfx_encode(named) && g_up_mfx_kept == kept + 1, "an image no larger than the texture leaves the dispatch to the shader");

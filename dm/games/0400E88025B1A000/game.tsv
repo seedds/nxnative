@@ -37,3 +37,5 @@ sys_resource	0x1000000
 # every shader is a member of /data.zip
 shader_groups	/data.zip=shader
 shader_note	Star Fox shaders
+# The game selects near=0 with nvnDeviceSetDepthMode (the Mac app's log: "this run needs ... depth near=0"); offline pipeline bases must use main0_z too
+depth_mode	zero

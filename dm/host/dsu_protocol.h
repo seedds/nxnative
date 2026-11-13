@@ -21,7 +21,7 @@ static int dsu_decode(const uint8_t *p, size_t n, dsu_sample *s) {
     if (!s->timestamp_us) return 0;
     // DSU uses DualShock positions: east/south/north/west -> Switch A/B/X/Y.
     static const uint8_t first[8]={11,4,5,10,13,14,15,12};
-    static const uint8_t second[8]={9,8,7,6,2,0,1,3};
+    static const uint8_t second[8]={8,9,6,7,2,0,1,3};
     for(int bit=0;bit<8;bit++) { if(p[36]>>bit&1)s->buttons|=(uint16_t)(1u<<first[bit]);if(p[37]>>bit&1)s->buttons|=(uint16_t)(1u<<second[bit]); }
     for(int a=0;a<4;a++){ int v=(int)p[40+a]-128;s->sticks[a]=(int16_t)(v<0?v*256:v*32767/127); }
     for (int i=0;i<3;i++) {

@@ -71,6 +71,7 @@ static inline id tex_get(uint64_t k) { return (__bridge id)own_resolve_ref(k); }
 // Changes (each takes g_smu)
 void serial_put(uint64_t k, id o);   // a live serial's object; the one it replaces is dropped
 void serial_del(uint64_t k);         // a live serial's entry goes (a finalize, a program's release); a ghost entry of the serial stays, as a replayed record may still resolve it
+id own_ext_take(uint64_t k);         // an external texture's live entry (2^62 and up) goes and its object comes back to the caller, unretired (nil: none)
 void tex_put(uint64_t k, id o);      // a texture serial's object: live table for a live texture object or an external texture, else the ghost table (its use stamped)
 void own_ghost_trim(void);           // a submission's commit: idle ghost entries past NGHOST go, GHOST_TRIM at most
 

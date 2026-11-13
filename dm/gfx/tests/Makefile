@@ -572,6 +572,9 @@ t_vk_dontcare: t_vk_dontcare.m ../vk/hle_vk.m $(MTL_T_DEP)
 # The validation layer fills every DontCare load with a pattern, so a DontCare load fails the check whatever the tile memory happens to hold
 check_t_vk_dontcare: RUN_ENV = MTL_DEBUG_LAYER=1 MTL_DEBUG_LAYER_VALIDATE_LOAD_ACTIONS=1
 # A Vulkan 1D image is a one-row 2D texture: drawn into, mipmapped, layered and depth, under the validation layer that aborts on each with a Metal 1D texture
+# Swap chain images are released once the presents that showed them are done, over more recreations than the window-texture list holds
+t_vk_swapchain_life: t_vk_swapchain_life.m ../vk/hle_vk.m $(MTL_T_DEP)
+	clang $(CFLAGS) -I../../third_party/vulkan-headers/include -fobjc-arc -o $@ t_vk_swapchain_life.m $(MTL_T_SRC) ../nvn/nvn_mtl.m $(FW)
 t_vk_1d: t_vk_1d.m ../vk/hle_vk.m $(MTL_T_DEP)
 	clang $(CFLAGS) -I../../third_party/vulkan-headers/include -fobjc-arc -o $@ t_vk_1d.m $(MTL_T_SRC) ../nvn/nvn_mtl.m $(FW)
 check_t_vk_1d: RUN_ENV = MTL_DEBUG_LAYER=1

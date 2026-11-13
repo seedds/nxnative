@@ -128,6 +128,9 @@ static uint64_t g_link_dropped;
 static uint64_t g_link_empty;   // Under g_pq_mu: ticks that found no new frame queued (counted here, not as ticks minus presents: presents before the link starts and while it is rescued are not on ticks)
 static double g_link_hold_until; static uint64_t g_link_held;   // Changed only on the display-link callback thread: the time the previous frame must stay on screen until by its present interval (0 = no hold), and the ticks that took no new frame because of it
 static int g_pq_inflight;   // Under g_pq_mu: number of presents committed to the GPU whose completion callback has not arrived yet
+static NSMutableArray *g_ext_retire;   // Under g_pq_mu: released external textures (mtl_ext_tex_release) waiting for the presents in flight; retired when g_pq_inflight reaches 0
+static void ext_retire(NSArray *textures);
+#define EXT_SERIAL (1ull << 62)   // mtl_ext_tex's serials: external producers' textures, which the present path owns (never pinned, never on the deferred-release queue)
 int g_dm_present_link;   // Present pacing mode (runtime value of DM_PRESENT_LINK, modified directly during same-process alternating measurement): 0 = acquire the drawable itself; 1 = display link at 60 Hz; 2 = display link at 120 Hz, the game presents a frame every other display-link tick
 static int g_present_latency;   // DM_PRESENT_LATENCY: the display link's frame latency in a window and in fullscreen alike (0 = not set: link_latency picks it)
 static int g_present_link_env;   // DM_PRESENT_LINK was set: its mode holds everywhere, and link_vrr_120 does not move a 60 Hz link to 120 Hz in variable-refresh fullscreen
@@ -16775,7 +16778,9 @@ static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t t
     [o addFeedbackHandler:^(id<MTL4CommitFeedback> f) {
         if (f.error) { MLOG("[RED] display command buffer error: %s", f.error.description.UTF8String); gpu_lost_check(f.error, "display"); }
         pthread_mutex_lock(&g_pq_mu); if (ticket > g_pq_done) g_pq_done = ticket; if (ticket > g_present_alloc_done[alloc_i]) g_present_alloc_done[alloc_i] = ticket; g_pq_inflight--; pthread_cond_broadcast(&g_pq_cv);
+        NSArray *retire = nil; if (!g_pq_inflight && g_ext_retire.count) { retire = g_ext_retire; g_ext_retire = nil; }   // every present committed before their release has completed
         present_gpu_note(f.GPUEndTime - f.GPUStartTime, fx_kind); pthread_mutex_unlock(&g_pq_mu);
+        if (retire) ext_retire(retire);
     }];
     id<MTL4CommandBuffer> buffers[] = {cb};
     pthread_mutex_lock(&g_pq_mu); g_pq_inflight++; pthread_mutex_unlock(&g_pq_mu);
@@ -17055,10 +17060,29 @@ static uint64_t present_enqueue(const tex_t *t, double period, const int crop[4]
 uint64_t mtl_present(const tex_t *t, double period, const int crop[4], uint64_t *copy) { return present_enqueue(t, period, crop, 0, copy); }
 void *mtl_device(void) { mtl_init(); return (__bridge void *)g_dev; }
 void *mtl_device_classic(void) { g_classic_ok = 1; return mtl_device(); }   // the GL and Vulkan layers: a device without Metal 4 is taken too, with presents dropped (mtl_init)
-// An external producer's texture (the Vulkan layer's swapchain images): a serial the present path resolves (serial_put), resident for the Metal 4 queue, never collected by the cross-submit ledger
+// An external producer's texture (the Vulkan layer's swapchain images, the GL layer's window surface): a serial the present path resolves (serial_put), resident for the Metal 4
+// queue, never collected by the cross-submit ledger. The present path owns it until mtl_ext_tex_release: its presents do not pin it, since a pin's release goes to the
+// deferred-release queue, which only NVN submissions drain, and the Vulkan and GL layers make none: one entry per frame stayed there for the whole session, holding the texture
 uint64_t mtl_ext_tex(void *tex) {
-    static _Atomic uint64_t n; id<MTLTexture> t = (__bridge id<MTLTexture>)tex; uint64_t ser = (1ull << 62) + atomic_fetch_add(&n, 1) + 1;
+    static _Atomic uint64_t n; id<MTLTexture> t = (__bridge id<MTLTexture>)tex; uint64_t ser = EXT_SERIAL + atomic_fetch_add(&n, 1) + 1;
     res_add(t); serial_put(ser, t); mtl_xv_window_tex(ser); return ser;
+}
+static void ext_retire(NSArray *textures) { @autoreleasepool {   // no present still reads them: out of the residency set, then released with the array
+    for (id<MTLTexture> t in textures) res_remove(t);
+    res_commit();
+} }
+// Each swap chain recreation (a console mode switch from the iPhone's in-game menu, a TV connected) or window surface of another size left its textures in the serial table and
+// the residency set for good: 64x32 swap chains, 140 recreations, all 420 images alive (t_vk_swapchain_life); about 24 MB a time for three 1920x1080 RGBA8 images
+void mtl_ext_tex_release(uint64_t serial) {
+    if (serial < EXT_SERIAL) return;
+    pthread_mutex_lock(&g_pq_mu); uint64_t tk = g_pq_in; pthread_mutex_unlock(&g_pq_mu);
+    mtl_present_wait(tk);   // every present queued so far is done: dropped, or completed on the GPU (a submitted present's ticket counts once its feedback handler runs)
+    for (int i = 0; i < g_xv_npresent; ) { if (g_xv_present[i] == serial) g_xv_present[i] = g_xv_present[--g_xv_npresent]; else i++; }   // its place in the window-texture list
+    id o = own_ext_take(serial); if (!o) return;
+    pthread_mutex_lock(&g_pq_mu);
+    if (g_pq_inflight) { if (!g_ext_retire) g_ext_retire = [NSMutableArray array]; [g_ext_retire addObject:o]; o = nil; }   // a ticket counts the latest completion: an earlier present still on the GPU may read it, so after the last one completes
+    pthread_mutex_unlock(&g_pq_mu);
+    if (o) ext_retire(@[o]);
 }
 // Present an external texture after the producer's event reaches ev_val (its rendering of the frame is done); returns the ticket for mtl_present_wait
 uint64_t mtl_present_ext(uint64_t serial, double period, void *ev, uint64_t ev_val, const int crop[4]) {
@@ -17199,7 +17223,7 @@ static uint64_t present_enqueue(const tex_t *t, double period, const int crop[4]
         slot = (int)(atomic_load(&g_snap_next) % (uint64_t)g_snap_n);
         if ((ss = snap_take(t))) { memset(&snap, 0, sizeof snap); snap.magic = MAGIC('T', 'E', 'X', 0); snap.serial = ss; t = &snap; }
     }
-    mtl_tex_pin(t->serial);
+    if (t->serial < EXT_SERIAL) mtl_tex_pin(t->serial);   // an external texture is the present path's until mtl_ext_tex_release, which waits for its presents (the unpins find no pin)
     pthread_mutex_lock(&g_pq_mu);
     while (g_pq_in - g_pq_done >= PQ) pthread_cond_wait(&g_pq_cv, &g_pq_mu);   // Wait only when the queue is full; normally AcquireTexture blocks first
     pq_item *it = &g_pq[g_pq_in % PQ]; *it = (pq_item){*t, period, atomic_load(&g_cur_frame), {0}, CACurrentMediaTime(), ev_val, ss ? g_snap[slot].ev : 0};

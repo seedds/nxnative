@@ -1703,7 +1703,9 @@ VKB(vkCreateSwapchainKHR, VkResult, VkDevice d, const VkSwapchainCreateInfoKHR *
 }
 VKB(vkDestroySwapchainKHR, void, VkDevice d, VkSwapchainKHR sc, const VkAllocationCallbacks *a) {
     (void)d; (void)a; if (!sc) return;
-    for (uint32_t i = 0; i < sc->n; i++) { if (sc->ticket[i]) mtl_present_wait(sc->ticket[i]); sc->img[i]->tex = nil; free(sc->img[i]); }   // the present path keeps its own reference to each texture
+    for (uint32_t i = 0; i < sc->n; i++) { if (sc->ticket[i]) mtl_present_wait(sc->ticket[i]); }
+    // The present path keeps each texture until its presents have completed on the GPU, then lets it go (mtl_ext_tex_release); kept for good before, at every recreation
+    for (uint32_t i = 0; i < sc->n; i++) { mtl_ext_tex_release(sc->img[i]->serial); sc->img[i]->tex = nil; free(sc->img[i]); }
     free(sc);
 }
 VK(vkGetSwapchainImagesKHR, VkResult, VkDevice d, VkSwapchainKHR sc, uint32_t *n, VkImage *out) {

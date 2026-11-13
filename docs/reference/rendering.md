@@ -1009,6 +1009,14 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Fix:** the attribute tables hold 32 (`p_bind_vattr`, the replay's state), and so does the answer to the device query. The pipeline key keeps the first 16 where they were and adds `attr_hi` at its end, so a prewarm row written before reads as 0 (`pso_skey_parse`); `dmsh_pull.py` and `dmsh_vin.py` leave out such shaders as they did, and they take the ordinary path. Vertex bindings stay 16.
 - **Found on:** [Yoshi and the Mysterious Book](../../dm/games/0400245021D2C000/README.md): Unreal Engine 5.4's vertex factories use attribute 16 on stream 6.
 
+### GPU fetch for attributes otherwise converted on the CPU
+
+- **Symptom:** match replay spends substantial CPU time widening whole vertex streams, even when their pipelines are already compiled.
+- **Cause:** Metal cannot directly fetch some combinations of NVN vertex format and shader input type. The CPU fallback converts the bound stream when indirect draws do not expose their vertex range. A sparse virtual address has no direct dirty-page handle, so caching a converted whole stream also needs physical-page and alias tracking.
+- **Fix:** prefer the existing pulling pipeline when `vconv_wanted` says an attribute needs conversion. Its vertex entry point decodes only the vertices drawn, using the same Maxwell register bits as the CPU fallback. Matching native layouts keep hardware fetch; missing pulling libraries and unsupported pipeline configurations retain their existing fallback. No conversion buffers or separate cache are needed.
+- **Found on:** [EA SPORTS FC 27](../../dm/games/0100C49025D3E000/README.md).
+- **Check:** `t_pull` checks format decoding on the GPU and selection for integer-to-float, opposite signedness, half-to-integer, native layouts, missing libraries and layer-writing shaders.
+
 ### Vertex formats Metal lacks
 
 - **Symptom:** `vertex attribute format … not mapped` (printed once).

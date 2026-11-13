@@ -127,6 +127,13 @@ int main(void) { @autoreleasepool {
             EXPECT("picture width",sizes[i].w,(int)vp.width);EXPECT("picture height",sizes[i].h,(int)vp.height);
         }
         EXPECT("empty content is not upscaled",0,fx_wanted((MTLViewport){0,0,2868,1320,0,1},0,720));
+        g_fill_mode=1;   // DM_PRESENT_FILL=stretch: 16:9 on a 16:10 MacBook screen fills it, and MetalFX still upscales
+        MTLViewport st=present_viewport(1920,1080,3024,1890);
+        EXPECT("stretch origin",0,(int)(st.originX+st.originY));EXPECT("stretch width",3024,(int)st.width);EXPECT("stretch height",1890,(int)st.height);
+        EXPECT("MetalFX upscales a stretched picture",1,fx_wanted(st,1920,1080));
+        g_fill_mode=0;
+        MTLViewport fit=present_viewport(1920,1080,3024,1890);
+        EXPECT("fit keeps 16:9",1701,(int)fit.height);EXPECT("fit centred",94,(int)fit.originY);
     }
     if([MTLFXSpatialScalerDescriptor supportsMetal4FX:g_dev]) {   // the present pass through MetalFX into an offscreen canvas (present_offscreen_m4, as DM_NVN_SHOT_OUT uses it)
         g_fx_mode=1;

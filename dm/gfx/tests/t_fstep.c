@@ -35,6 +35,17 @@ int main(void) {
         run(&c, 120, 0.7, 1, 2, 0); run(&c, 30, 0.7, 2, 2, 0); check(c.s.k == 2, "120 fps: a cap of 60 (a movie, a 60 Hz screen) holds two ticks");
         run(&c, 120, 0.7, 1, 2, 0); check(c.s.k == 1, "120 fps: the cap's end returns to 120");
     }
+    {
+        sim m = {0}; m.s.per_vsync = 2;
+        run(&m, 120, 0.7, 1, 1, 0);
+        run(&m, 600, 1.4, 1, 1, 0);
+        check(m.s.k == 1 && m.s.ups == 0 && m.s.probes == 0, "120 fps, hold off: sustained 11.7 ms frames do not fall back to 60");
+        check(fabs(m.real - (120 + 600 * 1.4)) < 1e-6, "120 fps, hold off: slower frames run at their measured cost");
+        run(&m, 30, 0.7, 2, 2, 0);
+        check(m.s.k == 2, "120 fps, hold off: a separate cap of 60 still applies");
+        run(&m, 120, 0.7, 1, 1, 0);
+        check(m.s.k == 1, "120 fps, hold off: the end of that cap restores the 120 target");
+    }
     char b[160];
     {   sim m = {0}; run(&m, 600, 0.5, 1, 3, 0);
         check(m.s.k == 1 && m.s.ups == 0 && m.s.paid == 0 && m.game == m.real, "steady 60: hold 1, step 1, game time = real time");

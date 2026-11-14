@@ -26,7 +26,7 @@ A controller that supplies gyro data through Apple's controller support (DualSen
 
 `DM_PHONE_MOTION=0` in `Documents/env.txt` stops the phone's gyro, `DM_MOTION=0` all motion. If motion misbehaves, pack with `--no-motion` (`MOTION = False` in Spyder) for an app without it; `DM_MOTION=1` in `Documents/env.txt` turns it back on.
 
-Joy-Con 2 and Pro Controller 2 gyro come over Bluetooth LE ([Switch 2 controllers](#switch-2-controllers-mac)). Switch Pro Controller gyro on the Mac still needs the HID support being developed in [PR #296](https://github.com/seedds/nxnative/pull/296).
+Joy-Con 2 and Pro Controller 2 gyro come over Bluetooth LE ([Switch 2 controllers](#switch-2-controllers-mac)). A Switch Pro Controller's gyro on the Mac is read from the controller's own reports, since Apple's controller support can pass it as zeroes: with one Pro Controller connected, and with identical Pro Controllers over USB that each play as a player of their own. Two or more over Bluetooth keep what Apple's controller support gives them, as the host cannot tell which reports belong to which player ([details](reference/services.md#switch-pro-controller-advertises-motion-but-sends-zeroes)). `DM_MOTION_HID=0` in the app's `env.txt` (`~/Library/Application Support/nxnative/<title ID>/env.txt`) stops reading the gyro from these reports, in both cases.
 
 **Shaking.** Shake the iPhone to shake the controller, in games that read its motion: Super Mario Odyssey's motion moves (such as the cap throw on a shake) need it, and Odyssey only takes them in its default docked mode. A light bump does not count; a sharp flick of the phone does.
 

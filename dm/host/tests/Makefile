@@ -71,6 +71,7 @@ run: $(B)/t_mii $(B)/t_net_eventfd $(B)/t_language $(B)/t_motion $(B)/t_heap_siz
 	$(B)/t_motion_pro_mac
 	TMPDIR="$(abspath $(B))" $(B)/t_hid
 	$(B)/t_pad_hid
+	$(B)/t_pad_gip
 	$(B)/t_pad_hid_mac
 	$(B)/t_pad_pro
 	$(B)/t_switch2
@@ -410,6 +411,9 @@ tsan-threads-run: $(addprefix $(B)/,$(TSAN_T))
 	DM_QOS_MAP=1 $(B)/t_notify_sched --all-peers
 $(B)/t_pad_hid: t_pad_hid.c ../pad_hid.h ../dm_input.h | $(B)
 	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -fsanitize=address,undefined -I.. -o $@ t_pad_hid.c
+run: $(B)/t_pad_gip
+$(B)/t_pad_gip: t_pad_gip.c ../pad_gip.h ../pad_hid.h ../dm_input.h | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -fsanitize=address,undefined -I.. -o $@ t_pad_gip.c
 run: $(B)/t_pad_pro
 $(B)/t_pad_pro: t_pad_pro.c ../pad_pro.h ../dm_input.h | $(B)
 	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -fsanitize=address,undefined -I.. -o $@ t_pad_pro.c

@@ -94,6 +94,7 @@ void dm_motion_clear(int player) {
 }
 
 uint32_t dm_player_npad(int player) { return player == 0 ? 0x20 : (uint32_t)player; }
+int dm_players_reported(void) { return __builtin_popcount(duo_harness_state().connected_players); }
 
 static int g_opmode;   // handheld, until a test or the in-game menu docks it
 int dm_opmode(void) { return g_opmode; }
@@ -103,6 +104,8 @@ void dm_haptics_set_enabled(int on) { g_rumble = on; }
 int duo_harness_rumble(void) { return g_rumble; }
 void dm_haptics_apple_init(void) {}
 void dm_haptics_apple_controller(int player, GCController *controller) { (void)player; (void)controller; }
+
+int front_web_touch(void) { return 0; }   // no offline web page above the synthetic game
 
 int front_ios_boot_ok(void) { return 1; }
 void front_ios_boot(void) {}

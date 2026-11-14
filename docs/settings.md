@@ -4,7 +4,7 @@ The screen before the game starts shows the settings the game supports. A settin
 
 - [Tested defaults](#tested-defaults)
 - [Game](#game): [Frame rate](#frame-rate), [Render scale](#render-scale), [Console mode](#console-mode), [Upscaling](#upscaling), [Game's upscaler](#games-upscaler), [Game language](#game-language), [Picture](#picture), [Frame-rate counter](#frame-rate-counter)
-- [Controls](#controls): [Touch feedback](#touch-feedback), [Game rumble](#game-rumble), [Rumble strength](#rumble-strength), [Rumble cutoff](#rumble-cutoff), [Press a button to join](#press-a-button-to-join)
+- [Controls](#controls): [Touch feedback](#touch-feedback), [Game rumble](#game-rumble), [Rumble strength](#rumble-strength), [Rumble cutoff](#rumble-cutoff), [Mouse and trackpad](#mouse-and-trackpad), [Mouse sensitivity](#mouse-sensitivity), [Press a button to join](#press-a-button-to-join)
 - [Performance](#performance): [Frame buffering](#frame-buffering), [Metal 4 pipelines](#metal-4-pipelines), [Pipeline prebuild](#pipeline-prebuild), [Encode thread](#encode-thread), [Hold frames when late](#hold-frames-when-late), [Performance HUD](#performance-hud), [Reset to tested defaults](#reset-to-tested-defaults)
 - [The Mac settings window](#the-mac-settings-window): [Display mode](#display-mode)
 - [In-game menu](#in-game-menu)
@@ -110,6 +110,16 @@ How strong the game's vibration is, from 0 to 300 %.
 ### Rumble cutoff
 
 A controller's vibration weaker than this stays off, and the rest is spread over the full range. Off (0 %) by default. A controller with rotating motors can rumble all the time in a game that sends a quiet texture: Mario Kart 8 Deluxe needs about 45 % to rumble only on crashes and drifts. The phone's own vibration is not affected.
+
+### Mouse and trackpad
+
+**Camera** (the default in 3D games): click the picture and the pointer is captured; moving the mouse or the trackpad turns the camera, and the buttons press game buttons (Breath of the Wild and Tears of the Kingdom: left Y, right ZL, middle R3). Esc frees the pointer, and so does opening the in-game menu. On the iPad the pointer is captured only while the app fills the screen. **Touch screen**: the mouse is a finger on the touch screen.
+
+A hardware keyboard plays on the iPad as on the Mac: WASD the left stick, the arrow keys the D-pad (with Shift: the right stick), J K U I = A B X Y, Q E = L R, Z C = ZL ZR, F G = L3 R3, Return = +, Tab = −, Space shakes the controller. The touch controls hide while the keyboard or the mouse is in use and come back at the next touch.
+
+### Mouse sensitivity
+
+How fast the camera turns for a given mouse speed, from 25 to 400 %.
 
 ### Press a button to join
 
@@ -251,7 +261,7 @@ iCloud Drive takes a moment to carry a file from one device to the other. Quit t
 
 ## In-game menu
 
-On the iPhone and iPad the gear at the top centre of the touch controls opens a menu while the game runs; it stays when a controller hides the other controls. It holds **Console mode**, **Picture** and the **Frame-rate counter**, then **Controller layout** (**2D**, **3D**, and **Tap**, no controls and every touch to the game, in handheld mode), **Touch feedback** and **Game rumble**: the settings that take effect at once. A choice opens to show its options, the current one ticked. The menu's text keeps one size whatever the system text size, so it stays short over the game. A change is remembered as on the settings screen, which shows it at the next start; a setting `Documents/env.txt` fixes is shown, not changed. The other settings need the game to start again, so they are only on the settings screen: close the app fully and open it again.
+On the iPhone and iPad the gear at the top centre of the touch controls opens a menu while the game runs; it stays when a controller hides the other controls. It holds **Console mode**, **Picture** and the **Frame-rate counter**, then **Controller layout** (**2D**, **3D**, and **Tap**, no controls and every touch to the game, in handheld mode), **Touch feedback**, **Game rumble** and **Mouse and trackpad**: the settings that take effect at once. A choice opens to show its options, the current one ticked. The menu's text keeps one size whatever the system text size, so it stays short over the game. A change is remembered as on the settings screen, which shows it at the next start; a setting `Documents/env.txt` fixes is shown, not changed. The other settings need the game to start again, so they are only on the settings screen: close the app fully and open it again.
 
 Console mode changes as on a Switch put in or taken out of its dock. While a TV shows the game it stays **Docked**, and the mode you pick applies when the TV is disconnected. **Docked** removes the Tap layout, as a docked Switch reads no touch screen.
 
@@ -278,6 +288,8 @@ A line like `DM_PRESENT_SNAP=0` in `Documents/env.txt` (in the Files app, under 
 | Game rumble | `DM_RUMBLE` | `1`, `0` |
 | Rumble strength | `DM_RUMBLE_GAIN` | `0` to `3` |
 | Rumble cutoff | `DM_RUMBLE_MIN` | `0` to `0.9` |
+| Mouse and trackpad | `DM_MOUSE` | `1` camera, `0` touch screen |
+| Mouse sensitivity | `DM_MOUSE_SENS` | `0.25` to `4` |
 | Press a button to join | `DM_PAD_PRESS_TO_JOIN` | `1`, `0` |
 | Upscaling | `DM_PRESENT_UPSCALE` | `off`, `metalfx` |
 | Game's upscaler | `DM_UPSCALER` | `game`, `metalfx` |

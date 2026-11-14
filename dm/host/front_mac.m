@@ -1,7 +1,8 @@
 // Mac front end: with DM_WINDOW=1 open a window (CAMetalLayer, for the graphics backend to present frames) + keyboard and controllers → dm_input; the guest runs on a large-stack thread instead and the main thread belongs to AppKit.
 // Without DM_WINDOW: the guest runs directly on the current thread, behaving the same as with no front end (windowless tests use this).
 // The window is fullscreen-capable (the green button and ⌃⌘F); DM_FULLSCREEN=1 starts it that way. ⌘Q quits, and so does a controller's Home button held for 2 s and
-// confirmed with A (home_quit.h); the left mouse button is the touchscreen.
+// confirmed with A (home_quit.h); the left mouse button is the touchscreen, or with Mouse: Camera (DM_MOUSE=1, mouse_look.h) a click on the picture captures the pointer,
+// whose movement is then the right stick and its buttons the profile's mouse_buttons, until Esc or the window losing focus frees it.
 // Cheats (hle_cheats.c): the Cheats menu's rows toggle, reload (⌘R) and open the cheats folder; its first item "Show Cheats
 // Window" (⌘⇧C, or DM_CHEATS_WINDOW=1 at launch) opens a Cheats panel beside the game: sections, search, the master switch,
 // safe mode, values, details and the import of cheat files (see the code below).
@@ -22,6 +23,7 @@
 #include "motion_apple.h"
 #include "motion_pro_mac.h"
 #include "pad_apple.h"
+#include "mouse_look.h"
 #include "pad_hid_mac.h"
 #include "pad_switch2_apple.h"
 static int s2pad_player(s2_pad *d);   // the Switch 2 pads' player slots (below, beside the raw HID pads')
@@ -141,10 +143,22 @@ static void cursor_hide_for_input(void) {
     NSView *v = g_win.contentView;
     if (NSPointInRect([v convertPoint:g_win.mouseLocationOutsideOfEventStream fromView:nil], v.bounds)) [NSCursor setHiddenUntilMouseMoves:YES];
 }
+// Mouse: Camera (mouse_look.h): the pointer captured, its movement the right stick (where Shift + an arrow key is not held), its buttons g_mbtn
+static int g_mouse_cam, g_mcap;
+static uint64_t g_mbtn, g_mbits[3];
+static int32_t g_mrx, g_mry;
 static void push(void) {
     int32_t lx = (g_d - g_a) * 32767, ly = (g_w - g_s) * 32767;
     int32_t rx = (g_rr - g_rl) * 32767, ry = (g_ru - g_rd) * 32767;
-    dm_input_set(g_btn, lx, ly, rx, ry);
+    if (!rx && !ry) { rx = g_mrx; ry = g_mry; }
+    dm_input_set(g_btn | g_mbtn, lx, ly, rx, ry);
+}
+static void mouse_stick(int32_t rx, int32_t ry) { g_mrx = rx; g_mry = ry; push(); }
+static void mouse_capture(int on) {
+    if (on == g_mcap) return;
+    g_mcap = on; CGAssociateMouseAndMouseCursorPosition(!on);   // captured: the pointer stays put and only the movement comes through
+    if (on) [NSCursor hide]; else { [NSCursor unhide]; g_mbtn = 0; ml_stop(); push(); }
+    LOG("front end: pointer %s", on ? "captured: the mouse turns the camera (Esc frees it)" : "free");
 }
 static int key_bit(unsigned short code) {
     switch (code) {
@@ -170,6 +184,7 @@ static void on_key(NSEvent *e, int down) {
         if (down && g_cp.phase == CP_OPEN) { if (c == 53 || c == 40) g_cp_cancel = 1; else if (c == 36 || c == 38) g_cp_confirm = 1; cp_poll(); }
         return;
     }
+    if (c == 53) { if (down) mouse_capture(0); return; }   // Esc frees a captured pointer
     switch (c) { case 13: g_w = down; break; case 0: g_a = down; break; case 1: g_s = down; break; case 2: g_d = down; break; }
     // An arrow key pressed with Shift held is the right stick until it is released; without Shift, the D-pad. The keyboard had no right stick: a 3D game's camera
     // could be turned only with a controller (Donkey Kong Bananza)
@@ -338,6 +353,7 @@ static void input_release(void) {
     g_input_on = 0;
     dm_motion_pro_active(0); hidpad_motion_clear();
     dm_switch2_active(0);
+    mouse_capture(0);
     g_btn = 0; g_w = g_a = g_s = g_d = 0; g_rl = g_ru = g_rr = g_rd = 0; push();
     if (g_mouse_down) { g_mouse_down = 0; dm_touch_set(NULL, 0); }
     pads_release();
@@ -586,6 +602,7 @@ int front_ctrl_support(int min, int max) {
     if (!g_layer) return -1;
     dispatch_semaphore_t done = dispatch_semaphore_create(0);
     dispatch_async(dispatch_get_main_queue(), ^{
+        mouse_capture(0);
         g_btn = 0; g_w = g_a = g_s = g_d = 0; g_rl = g_ru = g_rr = g_rd = 0; push();   // nothing the game held stays pressed while the prompt has the input
         if (g_mouse_down) { g_mouse_down = 0; dm_touch_set(NULL, 0); }
         pads_release();
@@ -622,8 +639,20 @@ static _Atomic double g_picture_aspect = 16.0 / 9.0;
 void front_picture_shape(int w, int h) { if (w > 0 && h > 0) g_picture_aspect = (double)w / h; }
 @interface DmGameView : NSView @end
 @implementation DmGameView
-- (void)mouseDown:(NSEvent *)e { [self mouseDragged:e]; }
+// Mouse: Camera. A button press while captured presses its game button, while free the left one captures the pointer (and is not pressed)
+static int mouse_cam_button(int i, int down) {
+    if (!g_mouse_cam || !g_input_on) return 0;
+    if (!g_mcap) { if (down && i == 0) mouse_capture(1); return 1; }
+    g_mbtn = down ? g_mbtn | g_mbits[i] : g_mbtn & ~g_mbits[i]; push();
+    return 1;
+}
+- (void)rightMouseDown:(NSEvent *)e { if (!mouse_cam_button(1, 1)) [super rightMouseDown:e]; }
+- (void)rightMouseUp:(NSEvent *)e { if (!mouse_cam_button(1, 0)) [super rightMouseUp:e]; }
+- (void)otherMouseDown:(NSEvent *)e { if (!mouse_cam_button(2, 1)) [super otherMouseDown:e]; }
+- (void)otherMouseUp:(NSEvent *)e { if (!mouse_cam_button(2, 0)) [super otherMouseUp:e]; }
+- (void)mouseDown:(NSEvent *)e { if (mouse_cam_button(0, 1)) return; [self mouseDragged:e]; }
 - (void)mouseDragged:(NSEvent *)e {
+    if (g_mouse_cam) return;   // the movement monitor has it (mouse_cam_monitor)
     if (!g_input_on) return;
     NSPoint p = [self convertPoint:e.locationInWindow fromView:nil]; NSSize b = self.bounds.size;
     double w = b.width, h = b.height;
@@ -633,7 +662,7 @@ void front_picture_shape(int w, int h) { if (w > 0 && h > 0) g_picture_aspect = 
     dm_touch t = {0, (float)fmin(fmax((p.x - x0) / w, 0), 0.999), (float)fmin(fmax(1 - (p.y - y0) / h, 0), 0.999)};   // The AppKit view origin is at bottom left, the touchscreen origin is at top left
     dm_touch_set(&t, 1); g_mouse_down = 1;
 }
-- (void)mouseUp:(NSEvent *)e { (void)e; if (g_mouse_down) { g_mouse_down = 0; dm_touch_set(NULL, 0); } }
+- (void)mouseUp:(NSEvent *)e { (void)e; if (mouse_cam_button(0, 0)) return; if (g_mouse_down) { g_mouse_down = 0; dm_touch_set(NULL, 0); } }
 // The drawable follows the view in pixels: a layer assigned to a layer-backed view kept the drawable at the first window's 1280x720 in fullscreen too, so the game picture was
 // scaled down to it and up again by the compositor
 - (void)fitDrawable {
@@ -1598,6 +1627,13 @@ void front_run(void (*guest)(void)) {
                 if (conn) hq_log_setting(); }];
         dm_haptics_apple_init();
         pads_start();
+        { const char *m = getenv("DM_MOUSE"); g_mouse_cam = m && *m ? atoi(m) != 0 : DM_GAME_MOUSE; }
+        if (g_mouse_cam) { win.acceptsMouseMovedEvents = YES; ml_buttons(DM_GAME_MOUSE_BUTTONS, g_mbits); ml_init(mouse_stick);
+            // AppKit sends mouse-moved events to the first responder, not the view under the pointer, so the movement is taken here (with and without a button held)
+            [NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskMouseMoved | NSEventMaskLeftMouseDragged | NSEventMaskRightMouseDragged | NSEventMaskOtherMouseDragged handler:^NSEvent *(NSEvent *e) {
+                if (g_mcap && g_input_on && e.window == win) ml_move(e.deltaX, -e.deltaY);   // AppKit's deltaY grows downwards
+                return e; }];
+            LOG("front end: mouse turns the camera once a click on the picture captures it (DM_MOUSE=1; buttons %#llx %#llx %#llx)", g_mbits[0], g_mbits[1], g_mbits[2]); }
         [NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskKeyDown | NSEventMaskKeyUp handler:^NSEvent *(NSEvent *e) {
             if (e.window != win) return e;   // Only swallow keys for the game window; other windows such as the software keyboard input box receive typing as usual
             if (e.type == NSEventTypeKeyDown && (e.modifierFlags & NSEventModifierFlagCommand)) return e;   // ⌘ shortcuts go to the menu; a key released while ⌘ is held still reaches the game, or it would stay pressed

@@ -24,7 +24,9 @@
 //   int_ops with the sampler (DM_AOT_PROFILE, aot_profile.c; design 12's sampled instruction offsets) and int_ops_rounds raised to about a second of CPU time: the child
 //     maps every byte of the pack's compiled code through the pack's positions (aot_arena.c dm_aot_offset_of_code; include/nxaot/aot_module.h nxaot_position_at) and
 //     counts the bytes whose instruction lies outside the function holding them (none may), writes the profile, checks that every function the sampler counted has a
-//     row inside it (its tier: nxaot makes a function with a sample anywhere in it hot) and writes the same samples in the form the sampler wrote before positions
+//     row inside it (its tier: nxaot makes a function with a sample anywhere in it hot) and one function line `# function 0x<entry> <samples> <rows>` (what the packer and the
+//     launcher count functions by): one line per sampled function, its samples the sampler's count for it (its rows' sum plus its samples at no instruction), then as many
+//     rows as it says, each inside that function, no row before the first line; and writes the same samples in the form the sampler wrote before positions
 //     (each function's at its entry). The parent checks the profile: every row `0x<offset> <samples>` under the module's header, the hottest function ref_crc (by
 //     corpus/nro/<name>.syms.tsv), most of its samples inside its loops (the range of its backward branches, read from the NRO's words) and away from its entry, at
 //     several instructions. With nxaot (--nxaot or the environment variable NXAOT; the aot image), the profile round-trips: `nxaot build --profile` weighs functions
@@ -295,17 +297,37 @@ static void positions_check(const run_args *a) {
     if (text) text[len] = 0;
     size_t nrows = 0, cap = 0, sampled = 0, kept = 0;
     prow *rows = NULL;
-    for (char *line = text, *next; line && line < text + len && *line; line = next) {
+    // The function lines (aot_profile.c): `# function 0x<entry> <samples> <rows>` before each sampled function's rows. Each must name a function of the pack's map with the
+    // sampler's count for it as its samples (all of them: its rows' sum plus its samples at no instruction, its host calls and SVCs and its code with no position; for a function
+    // sampled at none of its instructions its one row, at its entry, holds them all) and the number of rows after it, every one inside that function
+    _Atomic uint64_t *c = dm_aot_pack_samples(p);
+    size_t flines = 0, fl_good = 0, rows_in = 0;
+    long cur = -2;   // the function of the last function line (its index), -1 when that line names none, -2 before the first
+    unsigned long long cur_n = 0, cur_decl = 0, cur_seen = 0, cur_sum = 0;
+    for (char *line = text, *next; ; line = next) {
+        const int end = !line || line >= text + len || !*line;
+        unsigned long long off, cnt, decl;
+        const int fline = !end && !strncmp(line, "# function 0x", 13) && sscanf(line, "# function %llx %llu %llu", &off, &cnt, &decl) == 3;
+        if ((end || fline) && cur != -2)   // the function line before closes
+            fl_good += cur >= 0 && c && cur_n == atomic_load(&c[cur]) && cur_seen == cur_decl && cur_sum <= cur_n;
+        if (end) break;
         next = memchr(line, '\n', (size_t)(text + len - line));
         if (next) *next++ = 0;
         else next = text + len;
-        unsigned long long off, cnt;
+        if (fline) {
+            flines++;
+            size_t lo = 0, hi = dm_aot_pack_fn_count(p);   // the function whose entry it names
+            while (lo < hi) { const size_t mid = lo + (hi - lo) / 2; if (dm_aot_pack_fn(p, mid) < off) lo = mid + 1; else hi = mid; }
+            cur = lo < dm_aot_pack_fn_count(p) && dm_aot_pack_fn(p, lo) == off ? (long)lo : -1;
+            cur_n = cnt; cur_decl = decl; cur_seen = cur_sum = 0;
+            continue;
+        }
         if (line[0] == '#' || sscanf(line, "%llx %llu", &off, &cnt) != 2) continue;
         if (nrows == cap && !(rows = realloc(rows, (cap = cap ? 2 * cap : 256) * sizeof *rows))) abort();
         rows[nrows++] = (prow){off, cnt};
+        if (cur >= 0) { cur_seen++; cur_sum += cnt; rows_in += off >= dm_aot_pack_fn(p, (size_t)cur) && off < dm_aot_pack_fn_end(p, (size_t)cur); }
     }
     qsort(rows, nrows, sizeof *rows, prow_cmp);
-    _Atomic uint64_t *c = dm_aot_pack_samples(p);
     snprintf(path, sizeof path, "%s/%s.entries.tsv", dir, name);
     FILE *f = fopen(path, "wb");
     if (f) fprintf(f, "# the samples of %s.tsv per function at its entry, the form the sampler wrote before positions (t_aot_host --positions)\n", name);
@@ -323,6 +345,8 @@ static void positions_check(const run_args *a) {
            "profile: %zu rows, %zu sampled functions, %zu with a row inside them; %s; module %s, profile %s/%s.tsv\n", (unsigned long long)bytes, (unsigned long long)d->fn_count,
            (unsigned long long)placed, (unsigned long long)none, (unsigned long long)crossed, (unsigned long long)mismatched, nrows, sampled, kept,
            t ? "the pack has positions" : "the pack has no positions", a->m->name, dir, name);
+    printf("t_aot_host: function lines: %zu for %zu sampled functions, %zu of %zu rows after one and inside its function, %zu with the sampler's samples and their rows' count\n",
+           flines, sampled, rows_in, nrows, fl_good);
     free(rows);
     free(text);
 }
@@ -394,7 +418,7 @@ static int log_race(unsigned n) {
 typedef struct {
     int status; char *guest; size_t nguest; char red[400]; double secs; unsigned long long stat[12]; int have_stat; unsigned pt[5]; int have_pt;
     unsigned ndm, spliced; char splice[300];   // "[dm] " lines; lines holding a "[guest] " line after their start (the first of them)
-    char pos[700], prof[900];                  // the positions' check of the child (--positions), the sampler's summary line (aot_profile.c)
+    char pos[700], prof[900], fl[300];         // the positions' check of the child (--positions), the sampler's summary line (aot_profile.c), the child's function lines' check
 } result;
 
 static void append(char **buf, size_t *n, size_t *cap, const char *s, size_t len) {
@@ -425,6 +449,8 @@ static int run_cmd(const char *cmd, result *r) {
                                 &r->pt[0], &r->pt[1], &r->pt[2], &r->pt[3], &r->pt[4]) == 5;
         const char *pl = strstr(line, "t_aot_host: positions: "), *sl = strstr(line, "aot: profile: ");
         if (pl && !r->pos[0]) { snprintf(r->pos, sizeof r->pos, "%s", pl); r->pos[strcspn(r->pos, "\n")] = 0; }
+        const char *fll = strstr(line, "t_aot_host: function lines: ");
+        if (fll && !r->fl[0]) { snprintf(r->fl, sizeof r->fl, "%s", fll); r->fl[strcspn(r->fl, "\n")] = 0; }
         if (sl && strstr(sl, " Hz of each guest thread's CPU time") && !r->prof[0]) { snprintf(r->prof, sizeof r->prof, "%s", sl); r->prof[strcspn(r->prof, "\n")] = 0; }
     }
     int st = pclose(f);
@@ -599,6 +625,11 @@ static void positions_rows(const char *self, const char *name, const char *pack,
     const int walked = r.pos[0] && sscanf(r.pos, "t_aot_host: positions: %llu code bytes of %llu functions: %llu at an instruction, %llu at none, %llu at one outside their function, "
                                                  "%llu read otherwise by the host; profile: %zu rows, %zu sampled functions, %zu with a row inside them", &bytes, &nfns, &placed, &none,
                                           &crossed, &mism, &nrows, &sampled, &kept) == 9;
+    // The function lines: one per sampled function, each with the sampler's samples and its rows' count, every row after one and inside its function
+    size_t flines = 0, fl_sampled = 1, rows_in = 0, fl_rows = 1, fl_good = 0;
+    const int lined = r.fl[0] && sscanf(r.fl, "t_aot_host: function lines: %zu for %zu sampled functions, %zu of %zu rows after one and inside its function, %zu with the sampler's "
+                                              "samples and their rows' count", &flines, &fl_sampled, &rows_in, &fl_rows, &fl_good) == 5;
+    const int lines_ok = lined && flines > 0 && flines == fl_sampled && fl_good == flines && rows_in == fl_rows && fl_rows == nrows;
     unsigned long long all = 0, code = 0, at_ins = 0, outside = 1;
     const char *am = strstr(r.prof, "all modules: ");
     const int summed = am && sscanf(am, "all modules: %llu samples, %llu in compiled code (%llu at a guest instruction, %llu at one outside their function", &all, &code, &at_ins,
@@ -640,12 +671,14 @@ static void positions_rows(const char *self, const char *name, const char *pack,
     for (int i = 0; i < nf; i++) if (hottest < 0 || per[i] > per[hottest]) hottest = i;
     const unsigned long long in_fn = crc >= 0 ? per[crc] : 0;
     const int ok = run_ok && walked && summed && crossed == 0 && mism == 0 && placed > 0 && outside == 0 && at_ins > 0 && sampled > 0 && kept == sampled && header == 1 && !bad_lines &&
-                   nrows > 0 && crc >= 0 && hottest == crc && loops && in_loop * 2 > in_fn && (in_fn - at_entry) * 2 > in_fn && offsets_in >= 3;
+                   nrows > 0 && crc >= 0 && hottest == crc && loops && in_loop * 2 > in_fn && (in_fn - at_entry) * 2 > in_fn && offsets_in >= 3 && lines_ok;
     snprintf(note, sizeof note, "%zu rows, %llu samples (%llu of %llu in compiled code at an instruction); ref_crc [%#llx, %#llx) %llu: %llu in its loops [%#llx, %#llx], %llu at its entry, "
              "%d offsets, the hottest of %d functions%s; %llu code bytes of %llu functions: %llu at an instruction, %llu at none, %llu outside their function (%llu read otherwise "
-             "by the host); %zu of %zu sampled functions with a row inside them%s%s", nrows, total, at_ins, code, crc >= 0 ? (unsigned long long)fns[crc].lo : 0ull,
+             "by the host); %zu of %zu sampled functions with a row inside them; function lines: %zu for %zu sampled functions, %zu of %zu rows inside the function of the line "
+             "before them, %zu lines with the sampler's samples and their rows' count%s%s", nrows, total, at_ins, code, crc >= 0 ? (unsigned long long)fns[crc].lo : 0ull,
              crc >= 0 ? (unsigned long long)fns[crc].hi : 0ull, in_fn, in_loop, (unsigned long long)llo, (unsigned long long)lhi, at_entry, offsets_in, nf,
-             hottest == crc ? "" : " (not the hottest)", bytes, nfns, placed, none, crossed, mism, kept, sampled, run_ok ? "" : "; the run's lines or status differ", r.red[0] ? "; " : "");
+             hottest == crc ? "" : " (not the hottest)", bytes, nfns, placed, none, crossed, mism, kept, sampled, flines, fl_sampled, rows_in, fl_rows, fl_good,
+             run_ok ? "" : "; the run's lines or status differ", r.red[0] ? "; " : "");
     if (r.red[0]) strncat(note, r.red, sizeof note - strlen(note) - 1);
     row(name, "positions", ok, &r, note);
     printf("%-14s %-9s      ref_crc's rows with the most samples:", "", "");

@@ -218,6 +218,29 @@ static std::vector<std::pair<uint64_t, uint64_t>> sampled(uint64_t offsets, uint
     return rows;
 }
 
+// The host's file since its function lines (aot_profile.c dm_aot_profile_write): per sampled function its line '# function 0x<entry> <samples> <rows>', then its rows, one per sampled
+// guest instruction. functions(n, rows, per_row): n functions at sampled()'s entries, each with rows instructions of per_row samples and one sample more in a host call (counted in
+// its line, at no row). with_lines false: the same rows without the function lines (the counting of a file without them)
+static void functions_file(const fs::path &dir, const std::string &name, const std::string &sha, uint64_t n, uint64_t rows, uint64_t per_row, bool with_lines = true) {
+    const uint64_t fn_samples = rows * per_row + 1, sum = n * fn_samples;
+    std::string t = "# nxaot profile: guest instructions sampled by the x86-64 engine (dm/host/aot_profile.c, DM_AOT_PROFILE); nxaot build --profile <this file>\n";
+    t += "# module " + name + ", build ID " + std::string(32, 'a') + ", image SHA-256 " + sha + "\n# pack /packs/" + name + kPackSuffix + " (its positions give each sample's instruction)\n";
+    t += "# " + std::to_string(sum) + " samples in " + std::to_string(n) + " of its " + std::to_string(n + 7) + " functions: " + std::to_string(n * rows * per_row) + " at " +
+         std::to_string(n * rows) + " guest instructions, 0 at the entries of the 0 functions with none at an instruction, " + std::to_string(n) + " not written (host calls, SVCs and "
+         "code with no instruction of functions with samples at their instructions); 1000 Hz of each guest thread's CPU time\n";
+    t += "# functions: each sampled function's rows follow its line `# function 0x<entry> <samples> <rows>` (its samples: all of them, at its instructions, in its host calls and SVCs "
+         "and in its code with no instruction; its rows: the lines after it), most samples first; the packer and the launcher count the sampled functions by these lines, nxaot reads "
+         "them as comments\n";
+    t += "# <module offset> <samples>: a guest instruction's, or a function's at its entry when it has none at an instruction\n";
+    for (uint64_t i = 0; i < n; i++) {
+        const uint64_t e = 0x1000 + 0x40 * i;
+        char b[96];
+        if (with_lines) { std::snprintf(b, sizeof b, "# function %#llx %llu %llu\n", (unsigned long long)e, (unsigned long long)fn_samples, (unsigned long long)rows); t += b; }
+        for (uint64_t r = 0; r < rows; r++) { std::snprintf(b, sizeof b, "%#llx %llu\n", (unsigned long long)(e + 4 * r), (unsigned long long)per_row); t += b; }
+    }
+    fake::write(dir / (name + ".tsv"), t);
+}
+
 // The second pack (launcher_model.h): the profile folder, "Record a profile while playing" and DM_AOT_PROFILE in what starts the game, whether a better pack is possible (what the
 // profile folder holds against the launch file's made rows, the files written in the host's exact form), and the packer's command for the repack, run (this program acts as the
 // packer: the launch file's python row names it)
@@ -258,7 +281,7 @@ static void second_pack(const fake::Folder &f) {
     }
     ProfileState sb = profile_state(a, "balanced"), sm = profile_state(a, "max");
     CHECK(sb.files == 2 && !sb.known && sb.better() && sm.better(), "a launch file without made rows: packs made without a profile or misses, so both modes may be better, whatever the times");
-    CHECK_EQ(sb.reason(), std::string("2 new JIT misses; 2 sampled offsets the packs were made without; the packs were made before the launch file recorded what they took"), "... and why");
+    CHECK_EQ(sb.reason(), std::string("2 new JIT misses; 2 sampled functions the packs were made without; the packs were made before the launch file recorded what they took"), "... and why");
     CHECK(sb.samples["main"].count == 2 && sb.samples["main"].samples == 42 && sb.samples["main"].digest == d_offsets, "main.tsv as the packer reads it, with the packer's digest");
     CHECK(sb.misses["main"].count == 2 && sb.misses["main"].digest == d_misses, "main.misses.tsv as the packer reads it, with the packer's digest");
 
@@ -299,20 +322,21 @@ static void second_pack(const fake::Folder &f) {
     CHECK(!s.better() && s.misses.empty(), "misses recorded on another image: the packer would not take them");
     misses_file(prof, "main", "", {{0x300, "host", 1}});
     s = state("");
-    CHECK(s.misses.empty() && s.reason() == "2 sampled offsets the packs were made without; the packs were made before the launch file recorded what they took",
+    CHECK(s.misses.empty() && s.reason() == "2 sampled functions the packs were made without; the packs were made before the launch file recorded what they took",
           "misses that name no image: the packer would not take them (unknown rows: the profile alone)");
     misses_file(prof, "main", main_sha, {{0x100, "nonlocal", 2}, {0x208, "indirect", 1}});
-    // The sample profile: nxaot puts every function holding a sampled offset at tier H, so the offsets are the hot set
+    // The sample profile: nxaot puts every function holding a sampled offset at tier H, so the sampled functions are the hot set; these files are an older host's form (no function
+    // lines, a row per function at its entry), whose rows count as functions
     const std::string hundred = yes + "samples\tmain\t100 10000 0000000000000000\nmisses\tmain\t2 " + d_misses + "\n";
     profile_file(prof, "main", main_sha, sampled(105, 12000));
     s = state(hundred);
     CHECK(s.samples["main"].count == 105 && s.samples["main"].samples == 12000 && !s.better(), "5 % more offsets, 20 % more samples: below the thresholds, nothing better");
     profile_file(prof, "main", main_sha, sampled(110, 11000));
     s = state(hundred);
-    CHECK(s.better() && s.reason() == "10 new sampled offsets", "10 % more offsets: better: " + s.reason());
+    CHECK(s.better() && s.reason() == "10 new sampled functions", "10 % more offsets: better: " + s.reason());
     profile_file(prof, "main", main_sha, sampled(3500, 90000));
     s = state(hundred);
-    CHECK(s.reason() == "3,400 new sampled offsets", "the count written with thousands separators: " + s.reason());
+    CHECK(s.reason() == "3,400 new sampled functions", "the count written with thousands separators: " + s.reason());
     profile_file(prof, "main", main_sha, sampled(100, 12500));
     s = state(hundred);
     CHECK(s.better() && s.reason() == "a longer session's profile (+25 % samples)", "as many offsets, other ones, from a session with 25 % more samples: better: " + s.reason());
@@ -324,14 +348,36 @@ static void second_pack(const fake::Folder &f) {
     CHECK(!state(hundred).better(), "fewer offsets (a shorter session's hot set) even with more samples: never better, a pack from it would put functions back at tier C");
     profile_file(prof, "main", main_sha, sampled(100, 10000));
     s = state("made\tprofile\tno\nmade\tmisses\tyes\nmisses\tmain\t2 " + d_misses + "\n");
-    CHECK(s.better() && s.reason() == "100 sampled offsets the packs were made without", "made profile no (--no-profile; a repack takes it): better: " + s.reason());
+    CHECK(s.better() && s.reason() == "100 sampled functions the packs were made without", "made profile no (--no-profile; a repack takes it): better: " + s.reason());
     CHECK(!state("made\tprofile\tunused\nmade\tmisses\tyes\nmisses\tmain\t2 " + d_misses + "\n").better(), "made profile unused (AOT_PROFILE off or an nxaot without --profile): nothing better");
     s = state(yes + "misses\tmain\t2 " + d_misses + "\n");
-    CHECK(s.better() && s.reason() == "100 sampled offsets the packs were made without", "made profile yes but no samples row of main (no profile of it then): better: " + s.reason());
+    CHECK(s.better() && s.reason() == "100 sampled functions the packs were made without", "made profile yes but no samples row of main (no profile of it then): better: " + s.reason());
     const std::string main_same = yes + "samples\tmain\t100 10000 " + s.samples["main"].digest + "\nmisses\tmain\t2 " + d_misses + "\n";
+    // The host's function lines (aot_profile.c): the rule counts the sampled functions, nxaot's tier H, not the rows of their sampled instructions, which grow with a session's length
+    profile_file(prof, "main", main_sha, sampled(10, 310));   // an older host's file: ten functions at their entries, 31 samples each
+    const std::string no_row = yes + "misses\tmain\t2 " + d_misses + "\n";
+    const Recorded entry_form = state(no_row).samples["main"];
+    functions_file(prof, "main", main_sha, 10, 3, 10);        // the same ten functions: 3 instructions of 10 samples each and a host call's sample, each
+    s = state(no_row);
+    CHECK(s.samples["main"].count == 10 && s.samples["main"].samples == 310 && s.samples["main"].digest == entry_form.digest && entry_form.count == 10 && entry_form.samples == 310,
+          "function lines: 10 functions (not 30 rows), the lines' 310 samples (the rows' 300 and the host calls' 10), the digest of the entries: an older host's file of those functions'");
+    const std::string ten = yes + "samples\tmain\t10 310 " + entry_form.digest + "\nmisses\tmain\t2 " + d_misses + "\n";
+    CHECK(!state(ten).better(), "the packs took those ten functions (a samples row made from either form): nothing better");
+    functions_file(prof, "main", main_sha, 10, 12, 10);       // a session four times as long over the same functions: 120 rows, 1,210 samples
+    s = state(ten);
+    CHECK(s.samples["main"].count == 10 && s.samples["main"].samples == 1210 && !s.better(),
+          "the same functions with four times the instruction rows and samples: nothing better (the next pack's branch weights only) " + s.reason());
+    functions_file(prof, "main", main_sha, 11, 3, 10);        // an eleventh function sampled
+    s = state(ten);
+    CHECK(s.better() && s.reason() == "1 new sampled function", "one new sampled function among ten (10 %): better: " + s.reason());
+    functions_file(prof, "main", main_sha, 10, 12, 10, false);   // the long session's rows without their function lines: each offset counts as a function
+    s = state(ten);
+    CHECK(s.samples["main"].count == 120 && s.samples["main"].samples == 1200 && s.reason() == "110 new sampled functions",
+          "a file without function lines: its rows counted as functions (an older host's meaning): " + s.reason());
+    profile_file(prof, "main", main_sha, sampled(100, 10000));   // main_same's again
     profile_file(prof, "nro0", nro_sha, {{0x10, 5}});
     s = state(main_same);
-    CHECK(s.better() && s.reason() == "1 sampled offset the packs were made without", "an NRO's profile (nro.tsv's image) that its pack did not take: better: " + s.reason());
+    CHECK(s.better() && s.reason() == "1 sampled function the packs were made without", "an NRO's profile (nro.tsv's image) that its pack did not take: better: " + s.reason());
     profile_file(prof, "nro0", other_sha, {{0x10, 5}});
     profile_file(prof, "other", main_sha, {{0x10, 5}});   // no module of the packs
     fake::write(prof / "main.tsv", "0x100 many\n");          // one that does not parse: the packer packs without it

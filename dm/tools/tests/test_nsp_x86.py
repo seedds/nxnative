@@ -356,6 +356,17 @@ class Linux(Pack):
         (prof / 'main.tsv').write_text(head + f'# module main, build ID {BID}, image SHA-256 {sha}\n0x100 40\n0x200 2\n0x100 1\n0x300 0\n')
         self.pack('linux', '--pack-mode', 'max')
         self.assertEqual(made(launch), [('made', 'profile', 'yes'), ('made', 'misses', 'yes'), ('samples', 'main', f'2 43 {DIGEST_OFFSETS}')])
+        # the host's function lines (dm/host/aot_profile.c): a row per sampled instruction under `# function 0x<entry> <samples> <rows>`; the samples row counts the functions
+        # (nxaot's tier H) and their samples (the lines', host calls' too), so a longer session over the same functions gives the same count and digest as the entry form above
+        fhead = head + f'# module main, build ID {BID}, image SHA-256 {sha}\n# functions: each sampled function\'s rows follow its line `# function 0x<entry> <samples> <rows>`\n'
+        (prof / 'main.tsv').write_text(fhead + '# function 0x100 40 2\n0x104 25\n0x108 13\n# function 0x200 3 1\n0x200 3\n')
+        self.pack('linux', '--pack-mode', 'max')
+        self.assertIn(f'main: sample profile {prof / "main.tsv"} (43 samples at 2 functions): those at tier H+, the others at H', self.said)
+        self.assertEqual(made(launch), [('made', 'profile', 'yes'), ('made', 'misses', 'yes'), ('samples', 'main', f'2 43 {DIGEST_OFFSETS}')])
+        (prof / 'main.tsv').write_text(fhead + '# function 0x100 400 5\n' + ''.join(f'0x{o:x} 79\n' for o in range(0x104, 0x118, 4)) + '# function 0x200 30 1\n0x200 30\n')
+        self.pack('linux', '--pack-mode', 'max')
+        self.assertEqual(made(launch), [('made', 'profile', 'yes'), ('made', 'misses', 'yes'), ('samples', 'main', f'2 430 {DIGEST_OFFSETS}')])   # more rows, the same functions
+        self.assertEqual(nsp.profile_summary(['0x104 25', '0x108 13', '0x200 3']), (3, 41, nsp.fnv64('104\n108\n200\n')))   # without function lines: the rows, as before
         with self.assertRaisesRegex(nsp.BuildError, '--no-profile make the packs'):
             nsp.main(nsp.parse_args([str(self.nsp_dir), '-k', str(self.keys), '--platform', 'ios', '--no-profile']))
 

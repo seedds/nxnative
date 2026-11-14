@@ -200,7 +200,7 @@ bool load_launch(const std::string &path, LaunchFile *out, std::string *err) {
             else if (name == "python") out->python = value; else if (name == "keys") out->keys = value; else if (name == "nxaot") out->nxaot = value;
         } else if (kind == "made") {
             if (name == "profile") out->made_profile = value; else if (name == "misses") out->made_misses = value;
-        } else if (kind == "samples" || kind == "misses") {   // '<offsets> <samples> <digest>', '<addresses> <digest>' (build_ipa_from_nsp.py made_rows)
+        } else if (kind == "samples" || kind == "misses") {   // '<functions> <samples> <digest>', '<addresses> <digest>' (build_ipa_from_nsp.py made_rows)
             std::istringstream ss(value); Recorded r;
             if (kind == "samples" ? !(ss >> r.count >> r.samples >> r.digest) : !(ss >> r.count >> r.digest)) continue;
             (kind == "samples" ? out->made_samples : out->made_miss)[name] = r;
@@ -802,20 +802,33 @@ static std::map<std::string, std::string> pack_images(const std::string &folder)
 }
 
 // <module>.tsv as nxaot and the packer read it (aot_profile): '<offset> <count>' lines, '#' to the end of a line a comment; an offset may repeat (the counts add up), a count of 0
-// makes no function hot. Taken when it parses and its image line names sha or no image (the packer's rule); r: the offsets with samples, the samples, their digest
+// makes no function hot. Taken when it parses and its image line names sha or no image (the packer's rule). r, as build_ipa_from_nsp.py profile_summary computes it: the host's
+// writer puts a line '# function 0x<entry> <samples> <rows>' before each sampled function's rows (dm/host/aot_profile.c): the functions are those lines' entries with samples, the
+// samples their sum, the digest over the entries. A file without such lines (an older host's, its rows at functions' entries, or one written by hand) counts its rows: each offset
+// with samples a function, the samples the rows' sum. A row per sampled instruction grows with a session's length; the functions, nxaot's tier H, do not
+static bool function_line(const std::string &line, uint64_t *entry, uint64_t *samples) {   // '# function 0x<entry> <samples> <rows>'
+    const size_t hash = line.find_first_not_of(" \t");
+    if (hash == std::string::npos || line[hash] != '#') return false;
+    auto w = words(line.substr(hash + 1));
+    uint64_t rows;
+    return w.size() == 4 && w[0] == "function" && hex_word(w[1], entry) && dec_word(w[2], samples) && dec_word(w[3], &rows);
+}
+
 static bool read_profile(const std::string &path, const std::string &sha, Recorded *r) {
     std::string text, image;
     if (!read_file(path, &text)) return false;
-    std::map<uint64_t, uint64_t> counts;
+    std::map<uint64_t, uint64_t> rows, fns;
     for (const auto &line : lines_of(text)) {
         if (image.empty()) image = image_of(line);
+        uint64_t off, n;
+        if (function_line(line, &off, &n)) { fns[off] += n; continue; }
         auto w = words(line.substr(0, line.find('#')));
         if (w.empty()) continue;
-        uint64_t off, n;
         if (w.size() != 2 || !hex_word(w[0], &off) || !dec_word(w[1], &n)) return false;   // the packer packs without a file that does not parse
-        counts[off] += n;
+        rows[off] += n;
     }
     if (!image.empty() && !sha.empty() && image != sha) return false;   // recorded on another image
+    const std::map<uint64_t, uint64_t> &counts = fns.empty() ? rows : fns;
     std::string list;
     *r = Recorded();
     for (const auto &c : counts) {
@@ -895,7 +908,7 @@ ProfileState profile_state(const Game &g, const std::string &mode) {
     }
     // Against what the packs took (the made rows); without them, as packs made without either
     s.known = !l.made_profile.empty() || !l.made_misses.empty();
-    uint64_t new_misses = 0, without = 0, new_offsets = 0, longer = 0;
+    uint64_t new_misses = 0, without = 0, new_functions = 0, longer = 0;
     bool other_misses = false;
     if (!s.known || l.made_misses == "yes") {
         for (const auto &m : s.misses) {
@@ -910,15 +923,15 @@ ProfileState profile_state(const Game &g, const std::string &mode) {
             auto it = l.made_samples.find(m.first);
             if (l.made_profile != "yes" || it == l.made_samples.end()) { without += m.second.count; continue; }   // no profile of the module in its packs
             const Recorded &had = it->second, &now = m.second;
-            if (now.count > had.count && now.count * 100 >= had.count * (100 + kMoreOffsetsPercent)) new_offsets += now.count - had.count;
+            if (now.count > had.count && now.count * 100 >= had.count * (100 + kMoreFunctionsPercent)) new_functions += now.count - had.count;
             else if (now.digest != had.digest && now.count >= had.count && now.samples > had.samples && now.samples * 100 >= had.samples * (100 + kMoreSamplesPercent))
                 longer = std::max(longer, had.samples ? (now.samples - had.samples) * 100 / had.samples : 100);
         }
     }
     if (new_misses) s.reasons.push_back(counted(new_misses, "new JIT miss", "new JIT misses"));
     else if (other_misses) s.reasons.push_back("JIT misses the packs did not take");
-    if (new_offsets) s.reasons.push_back(counted(new_offsets, "new sampled offset", "new sampled offsets"));
-    if (without) s.reasons.push_back(counted(without, "sampled offset", "sampled offsets") + " the packs were made without");
+    if (new_functions) s.reasons.push_back(counted(new_functions, "new sampled function", "new sampled functions"));
+    if (without) s.reasons.push_back(counted(without, "sampled function", "sampled functions") + " the packs were made without");
     if (longer) s.reasons.push_back("a longer session's profile (+" + std::to_string(longer) + " % samples)");
     if (!s.known && !s.reasons.empty()) s.reasons.push_back("the packs were made before the launch file recorded what they took");
     return s;

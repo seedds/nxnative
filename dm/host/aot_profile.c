@@ -1,6 +1,7 @@
 // The sampler of the x86-64 execution engine (aot.h, "The sampler"; dm/tools/aot/README.md, "Tiers by profile" and "The sample profile at tier H"): DM_AOT_PROFILE=<folder> samples
 // every thread that runs guest code at DM_AOT_PROFILE_HZ (1000 by default) per second of its own CPU time and writes, at process exit, the profile `nxaot build --profile` reads:
-// <folder>/<module>.tsv per module with samples, one line `<module offset> <samples>` per sampled guest instruction (design 12's sampled instruction offsets). The packer
+// <folder>/<module>.tsv per module with samples, one line `<module offset> <samples>` per sampled guest instruction (design 12's sampled instruction offsets), under a line per
+// sampled function (the file, below). The packer
 // (scripts/build_ipa_from_nsp.py --platform linux / windows) takes <NSP folder>/<id>-work/profile/<module>.tsv for the module's next pack: its functions with samples at tier H, the
 // others at tier C (balanced mode), and the samples' positions inside each function at H weigh its code (branch weights, entry and call counts). Beside each profile the writer puts
 // the JIT fallback's misses, <folder>/<module>.misses.tsv (write_misses; aot.h, "The JIT fallback's misses"), which the packer gives nxaot build --misses.
@@ -19,7 +20,10 @@
 // The file: a row per guest instruction with samples, and a row at its entry for a function with samples at none of its instructions (all of them in host calls and SVCs, in code
 // the positions name none for, or in a pack without positions), the form the sampler wrote before positions: nxaot makes a function with a sample anywhere in it hot (tier H), so
 // such a function keeps its tier, and does not weigh a function sampled only at its entry. A function with samples at its instructions has no other row: the rest of its samples
-// (its host calls, its code with no instruction) would make its entry block look hotter than its loops (the header counts them)
+// (its host calls, its code with no instruction) would make its entry block look hotter than its loops (the header counts them). Each sampled function's rows follow its line
+// `# function 0x<entry> <samples> <rows>`: its samples are all of them (at its instructions, in its host calls and SVCs, in its code with no instruction: the sum the sampler wrote at
+// its entry before positions), its rows the lines after it. nxaot skips the line as a comment; the packer and the launcher count the sampled functions (nxaot's tier H) by these
+// lines, not by the rows, whose number grows with a session's length inside the same functions. Each session writes the file anew (no merge with an earlier session's)
 // Linux: each thread arms a timer on its own CPU-time clock (timer_create with CLOCK_THREAD_CPUTIME_ID, SIGEV_THREAD_ID) when it makes its state block (aot_thread.c thread_make),
 // and disarms it before the block goes. Its SIGPROF runs on the thread's alternate signal stack (aot_fault.c crash_thread_init) and reads the interrupted rip from the signal context.
 // The weight of a sample is 1 + the timer's overrun: the kernel checks CPU-time timers at its ticks (HZ 250 gives 4 expirations a check), so the counts stay in milliseconds of CPU time.
@@ -305,12 +309,20 @@ void dm_aot_profile_thread_end(void) {
 static int replace_file(const char *from, const char *to) { return rename(from, to); }
 #endif
 
-// The writer: one file per module with samples, most samples first
+// The writer: one file per module with samples, the sampled functions by samples (most first), each function's line `# function 0x<entry> <samples> <rows>` before its rows, its
+// rows by samples (most first). The function lines are comments for nxaot (ReadProfile skips '#' to the end of a line); the packer (build_ipa_from_nsp.py profile_summary) and the
+// launcher (launcher_model.cpp read_profile) count the sampled functions by them, since a function's instruction rows grow with a session's length and nxaot's tiers do not
 typedef struct { uint64_t off, n; } row_t;
 static int row_cmp(const void *a, const void *b) {
     const row_t *x = a, *y = b;
     if (x->n != y->n) return x->n > y->n ? -1 : 1;
     return x->off < y->off ? -1 : x->off > y->off;
+}
+typedef struct { uint64_t entry, n; size_t first, rows; } fn_rows_t;   // a sampled function: its entry, its samples, its rows rows[first .. first + rows)
+static int fn_rows_cmp(const void *a, const void *b) {
+    const fn_rows_t *x = a, *y = b;
+    if (x->n != y->n) return x->n > y->n ? -1 : 1;
+    return x->entry < y->entry ? -1 : x->entry > y->entry;
 }
 static int is_sep(char c) {
 #if defined(_WIN32)
@@ -486,49 +498,74 @@ int dm_aot_profile_write(void) {
         if (!c) continue;
         uint64_t words = 0;
         _Atomic uint32_t *at = dm_aot_pack_pos_samples(p, &words);
-        // The rows: each guest instruction with samples, then the entry of each sampled function with none at an instruction (the file's header at the top of this file)
-        size_t fns = 0, k = 0, offsets = 0, entries = 0;
+        // The rows (the file's header at the top of this file), per sampled function in module-offset order: its guest instructions with samples in [entry, end), or its entry when
+        // it has none. The functions' ranges do not overlap (nxaot's limit is at most the next entry; count_at only counts an instruction inside the sample's function); each range
+        // is scanned from where the ranges before it ended, so no row is written twice
+        size_t fns = 0, k = 0, offsets = 0, entries = 0, ng = 0, at_rows = 0;
         for (size_t j = 0; j < n; j++) fns += atomic_load_explicit(&c[j], memory_order_relaxed) != 0;
         if (!fns) continue;
-        for (uint64_t w = 0; at && w < words; w++) offsets += atomic_load_explicit(&at[w], memory_order_relaxed) != 0;
-        const size_t cap = offsets + fns;   // a sample on its way may still add one after the counts above: no row past it
-        row_t *rows = malloc(cap * sizeof *rows);
-        if (!rows) { bad++; continue; }
-        uint64_t sum = 0, sum_at = 0, sum_entries = 0;
-        for (uint64_t w = 0; at && w < words && k < offsets; w++) {
+        uint64_t all_at = 0;
+        for (uint64_t w = 0; at && w < words; w++) {
             const uint32_t v = atomic_load_explicit(&at[w], memory_order_relaxed);
-            if (v) { rows[k++] = (row_t){4 * w, v}; sum_at += v; }
+            offsets += v != 0; all_at += v;
         }
-        for (size_t j = 0; j < n; j++) {
-            const uint64_t v = atomic_load_explicit(&c[j], memory_order_relaxed);
+        const size_t cap = offsets + fns;   // a sample on its way may still add one after the counts above: no row or function past them
+        row_t *rows = malloc(cap * sizeof *rows);
+        fn_rows_t *g = malloc(fns * sizeof *g);
+        if (!rows || !g) { free(rows); free(g); bad++; continue; }
+        uint64_t sum = 0, sum_at = 0, sum_entries = 0, scanned = 0;
+        for (size_t j = 0; j < n && ng < fns; j++) {
+            const uint64_t v = atomic_load_explicit(&c[j], memory_order_relaxed), e = dm_aot_pack_fn(p, j), end = dm_aot_pack_fn_end(p, j);
             if (!v) continue;
-            sum += v;
+            fn_rows_t *fr = &g[ng++];
+            fr->entry = e; fr->first = k;
             uint64_t in = 0;   // its samples at its instructions
-            for (uint64_t o = dm_aot_pack_fn(p, j); at && o < dm_aot_pack_fn_end(p, j) && o / 4 < words && !in; o += 4) in = atomic_load_explicit(&at[o / 4], memory_order_relaxed);
-            if (!in && k < cap) { rows[k++] = (row_t){dm_aot_pack_fn(p, j), v}; sum_entries += v; entries++; }
+            for (uint64_t o = e > scanned ? e : scanned; at && o < end && o / 4 < words && k < cap; o += 4) {
+                const uint32_t s = atomic_load_explicit(&at[o / 4], memory_order_relaxed);
+                if (s) { rows[k++] = (row_t){o, s}; in += s; at_rows++; }
+            }
+            if (end > scanned) scanned = end;
+            if (in) sum_at += in;
+            else if (k < cap) { rows[k++] = (row_t){e, v}; sum_entries += v; entries++; }
+            fr->rows = k - fr->first;
+            fr->n = v > in ? v : in;   // all its samples: at its instructions, in its host calls and SVCs, in its code with no instruction (never fewer than its rows')
+            sum += fr->n;
+            qsort(rows + fr->first, fr->rows, sizeof *rows, row_cmp);
         }
-        qsort(rows, k, sizeof *rows, row_cmp);
+        qsort(g, ng, sizeof *g, fn_rows_cmp);
+        // Samples at instructions in no sampled function's range: none expected (count_pc counts the function before its instruction, and the instruction only inside it)
+        const uint64_t lost = all_at > sum_at ? all_at - sum_at : 0;
+        const size_t lost_rows = offsets > at_rows ? offsets - at_rows : 0;
         const module_t *m = dm_aot_pack_module(p);
+        if (lost_rows)
+            LOG("[RED] aot: profile: %s: %llu samples at %zu guest instructions in no sampled function's range: not written", m->name, (unsigned long long)lost, lost_rows);
         char name[64], path[sizeof g_dir + 96], tmp[sizeof path + 8], sha[65];
         file_name(m, name, sizeof name);
         snprintf(path, sizeof path, "%s/%s.tsv", dir, name);
         snprintf(tmp, sizeof tmp, "%s.tmp", path);
         sha_hex(p, sha);
         FILE *f = fopen(tmp, "wb");   // binary: the same bytes on Windows (no \r before each \n)
-        if (!f) { LOG("[RED] aot: profile: cannot write %s", tmp); free(rows); bad++; continue; }
+        if (!f) { LOG("[RED] aot: profile: cannot write %s", tmp); free(rows); free(g); bad++; continue; }
         fprintf(f, "# nxaot profile: guest instructions sampled by the x86-64 engine (dm/host/aot_profile.c, DM_AOT_PROFILE); nxaot build --profile <this file>\n");
         fprintf(f, "# module %s, build ID %s, image SHA-256 %s\n", m->name, m->build_id[0] ? m->build_id : "none", sha);
         fprintf(f, "# pack %s (%s)\n", dm_aot_pack_path(p), at ? "its positions give each sample's instruction" : "no positions: every function's samples at its entry");
         fprintf(f, "# %llu samples in %zu of its %zu functions: %llu at %zu guest instructions, %llu at the entries of the %zu functions with none at an instruction, %llu not "
-                   "written (host calls, SVCs and code with no instruction of functions with samples at their instructions); %s\n", (unsigned long long)sum, fns, n,
-                (unsigned long long)sum_at, offsets, (unsigned long long)sum_entries, entries,
+                   "written (host calls, SVCs and code with no instruction of functions with samples at their instructions); %s\n", (unsigned long long)sum, ng, n,
+                (unsigned long long)sum_at, at_rows, (unsigned long long)sum_entries, entries,
                 (unsigned long long)(sum > sum_at + sum_entries ? sum - sum_at - sum_entries : 0), summary);
+        fprintf(f, "# functions: each sampled function's rows follow its line `# function 0x<entry> <samples> <rows>` (its samples: all of them, at its instructions, in its host "
+                   "calls and SVCs and in its code with no instruction; its rows: the lines after it), most samples first; the packer and the launcher count the sampled "
+                   "functions by these lines, nxaot reads them as comments\n");
         fprintf(f, "# <module offset> <samples>: a guest instruction's, or a function's at its entry when it has none at an instruction\n");
-        for (size_t j = 0; j < k; j++) fprintf(f, "0x%llx %llu\n", (unsigned long long)rows[j].off, (unsigned long long)rows[j].n);
+        for (size_t j = 0; j < ng; j++) {
+            fprintf(f, "# function 0x%llx %llu %zu\n", (unsigned long long)g[j].entry, (unsigned long long)g[j].n, g[j].rows);
+            for (size_t r = g[j].first; r < g[j].first + g[j].rows; r++) fprintf(f, "0x%llx %llu\n", (unsigned long long)rows[r].off, (unsigned long long)rows[r].n);
+        }
         free(rows);
+        free(g);
         if (fclose(f) || replace_file(tmp, path)) { LOG("[RED] aot: profile: cannot write %s", path); bad++; continue; }
-        LOG("aot: profile: %s: %llu samples in %zu functions: %llu at %zu guest instructions, %llu at %zu entries (%s)", path, (unsigned long long)sum, fns,
-            (unsigned long long)sum_at, offsets, (unsigned long long)sum_entries, entries, m->name);
+        LOG("aot: profile: %s: %llu samples in %zu functions: %llu at %zu guest instructions, %llu at %zu entries (%s)", path, (unsigned long long)sum, ng,
+            (unsigned long long)sum_at, at_rows, (unsigned long long)sum_entries, entries, m->name);
         files++;
     }
     if (!files && !bad) LOG("aot: profile: no samples in any pack's code: nothing written to %s", dir);

@@ -2151,30 +2151,51 @@ def build_gl_vk(py, repo, roots, sh, env, logs, g, reuse=True, provisional=False
 
 
 PROFILE_HEAD = re.compile(r'^# module (\S+), build ID (\S+), image SHA-256 ([0-9a-f]{64})$')   # the header line of the host's sample profile (dm/host/aot_profile.c)
+PROFILE_FUNCTION = re.compile(r'^#[ \t]*function[ \t]+(?:0[xX])?([0-9a-fA-F]+)[ \t]+(\d+)[ \t]+(\d+)[ \t]*$')   # its line before each sampled function's rows
+
+
+def profile_summary(lines):
+    """What a sample profile's lines give nxaot's tier H, as made_rows writes a samples row and the launcher reads the file (dm/launcher/launcher_model.cpp read_profile, the same rule):
+    (sampled functions, samples, digest: fnv64 of the functions' entries in hexadecimal, one per line, ascending). The host writes a line `# function 0x<entry> <samples> <rows>`
+    before each sampled function's rows (dm/host/aot_profile.c; nxaot reads it as a comment): the functions are those lines' entries with samples, the samples their sum (all of a
+    function's, its host calls' too). A file without such lines (an older host's, whose rows were functions' entries, or one written by hand) counts its rows: each offset with
+    samples a function, the samples the rows' sum. A row per sampled instruction grows with a session's length; the functions, nxaot's tiers, do not. ValueError for a row that
+    does not parse as nxaot reads it (`<offset> <count>`, '#' to the end of a line a comment)"""
+    rows, fns = {}, {}
+    for line in lines:
+        f = PROFILE_FUNCTION.match(line.strip())
+        if f:
+            e = int(f.group(1), 16); fns[e] = fns.get(e, 0) + int(f.group(2))
+            continue
+        body = line.split('#', 1)[0].split()
+        if not body: continue
+        if len(body) != 2: raise ValueError(line)
+        o = int(body[0], 16); rows[o] = rows.get(o, 0) + int(body[1])
+    counts = fns or rows
+    hot = sorted(o for o, c in counts.items() if c > 0)   # a count of 0 makes no function hot (dm/tools/aot/README.md, "Tiers by profile")
+    return len(hot), sum(counts.values()), fnv64(''.join('%x\n' % o for o in hot))
 
 
 def aot_profile(profiles, name, sha, quiet=False):
     """The sample profile of module name for its pack (nxaot build --profile): <profiles>/<name>.tsv, which nxhost-run writes with DM_AOT_PROFILE=<profiles> (dm/host/aot_profile.c;
     docs/development.md), when it is there, parses as nxaot reads it (`<offset> <count>` lines, '#' comments) and was recorded on this image (its header's SHA-256 against sha, the
-    manifest's or the NRO row's). Returns (path, samples, offsets) or (None, 0, 0), with a line said for a file that is there and not used (none when quiet)"""
+    manifest's or the NRO row's). Returns (path, samples, sampled functions: profile_summary) or (None, 0, 0), with a line said for a file that is there and not used (none when quiet)"""
     p = profiles / f'{name}.tsv' if profiles else None
     if not p or not p.is_file(): return None, 0, 0
-    samples, offsets, image = 0, set(), None
+    image = None
     try:
-        for line in p.read_text().splitlines():
+        lines = p.read_text().splitlines()
+        for line in lines:
             m = PROFILE_HEAD.match(line)
             if m: image = m.group(3)
-            body = line.split('#', 1)[0].split()
-            if not body: continue
-            if len(body) != 2: raise ValueError(line)
-            offsets.add(int(body[0], 16)); samples += int(body[1])
+        functions, samples, _ = profile_summary(lines)
     except (OSError, UnicodeDecodeError, ValueError) as e:
         if not quiet: say(f'[RED] the sample profile {p} does not parse ({e}): {name} is packed without it')
         return None, 0, 0
     if image and sha and image != sha.lower():
         if not quiet: say(f'the sample profile {p} was recorded on another image of {name} (SHA-256 {image[:12]}..., this one {sha[:12]}...): not used; record it again (DM_AOT_PROFILE)')
         return None, 0, 0
-    return p, samples, len(offsets)
+    return p, samples, functions
 
 
 MISS_ROW = re.compile(r'^(?:0[xX])?([0-9a-fA-F]+)[ \t]+(\S+)[ \t]+(\d+)$')   # a row of the host's JIT misses: <module offset> <reason> <entries>
@@ -2298,8 +2319,9 @@ def made_rows(opts, aot, mods, profiles, misses, no_profile):
       made profile  yes (the sample profiles are taken), no (--no-profile: a repack, which does not pass it, takes them) or unused (the AOT_PROFILE setting is off or this nxaot has
                     no --profile: a repack would not take them either)
       made misses   yes, or unused (this nxaot has no --misses)
-      samples <module>  '<offsets> <samples> <digest>': the sample profile its packs took (aot_profile): the offsets with samples (nxaot's tier rule: a function holding one is at tier H,
-                        whatever its count), their samples, and fnv64 of the offsets in hexadecimal, one per line, ascending
+      samples <module>  '<functions> <samples> <digest>': the sample profile its packs took (aot_profile, profile_summary): its sampled functions (nxaot's tier rule: a function
+                        holding a sample is at tier H, whatever its count), their samples, and fnv64 of their entries in hexadecimal, one per line, ascending (a profile without the
+                        host's function lines: its offsets with samples, as functions)
       misses <module>   '<addresses> <digest>': the JIT misses its packs took (aot_misses): their addresses, and fnv64 of the (address, reason) pairs the pack's key takes ('<hex> <reason>' lines,
                         sorted)
     The same rows hold for every pack row of the file: a mode is offered only while its packs' keys, which take the profile's bytes and the misses' pairs, are those of a pack made now
@@ -2308,14 +2330,9 @@ def made_rows(opts, aot, mods, profiles, misses, no_profile):
     prof, miss = pack_profiles(opts, aot, mods, nro_rows, profiles), pack_misses(opts, aot, mods, nro_rows, misses)
     rows = [('made', 'profile', 'unused' if not AOT_PROFILE or '--profile' not in opts else 'no' if no_profile else 'yes'),
             ('made', 'misses', 'yes' if '--misses' in opts else 'unused')]
-    for n in sorted(prof):
-        counts = {}
-        for line in prof[n].read_text().splitlines():   # aot_profile parsed it: '<offset> <count>' lines, '#' comments; an offset may repeat (nxaot adds the counts up)
-            body = line.split('#', 1)[0].split()
-            if body: counts[int(body[0], 16)] = counts.get(int(body[0], 16), 0) + int(body[1])
-        hot = sorted(o for o, c in counts.items() if c > 0)   # a count of 0 makes no function hot (dm/tools/aot/README.md, "Tiers by profile")
-        digest = fnv64(''.join('%x\n' % o for o in hot))
-        rows.append(('samples', n, f'{len(hot)} {sum(counts.values())} {digest}'))
+    for n in sorted(prof):   # aot_profile parsed it
+        functions, samples, digest = profile_summary(prof[n].read_text().splitlines())
+        rows.append(('samples', n, f'{functions} {samples} {digest}'))
     for n in sorted(miss):
         pairs = miss[n][1]
         digest = fnv64(''.join('%x %s\n' % (o, r) for o, r in pairs))
@@ -2463,7 +2480,7 @@ def port_launch_file(platform, repo, work, wdir, aot, game, msl, aoc, gfx, lang,
             '#         log (the launcher\'s copy of the output), settings (the settings the launcher shows), profile (DM_AOT_PROFILE\'s folder: the sample profiles and JIT misses the next pack takes),',
             '#         package, packer, python, keys, nxaot (what packs the game again: the NSP folder, this script, its Python, the prod.keys file\'s path, the recompiler)',
             '#   made  profile yes|no|unused (the sample profiles taken; no: --no-profile, which a repack takes them without; unused: not taken by AOT_PROFILE or this nxaot), misses yes|unused',
-            '#   samples <module> <offsets with samples> <samples> <digest of the offsets>; misses <module> <addresses> <digest of the address and reason pairs>: what each module\'s packs took',
+            '#   samples <module> <sampled functions> <samples> <digest of their entries>; misses <module> <addresses> <digest of the address and reason pairs>: what each module\'s packs took',
             '#         (every pack row\'s packs took the same; the launcher compares them with the profile folder to say whether a better pack is possible)',
             '#   pack  <mode> <folder>: the folder nxhost-run is given, one row per pack mode with complete packs; the first is the default, NXPACK=<mode> picks another',
             '#   env   <VAR> <value>: set when neither the environment nor the player\'s env.txt sets it, first row first']

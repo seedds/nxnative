@@ -32,7 +32,9 @@
 //   the sampler (Linux; aot_profile.c, DM_AOT_PROFILE): a run of about 0.4 s in synth_hot (aot_synth.py's hot loop) and 0.04 s of guest calls of synth_cut from the host, with
 //     DM_AOT_PROFILE set: the profile the process writes at exit, <folder>/main.tsv, names the module, its build ID and its image's SHA-256, every line of it is
 //     `<offset> <samples>` as nxaot build --profile reads it, and synth_hot has the most samples (more than half of them at its instructions, the row with the most in
-//     its loop, not at its entry: the pack's positions, design 12; all at its entry for a pack without positions); the same run without the switch writes nothing,
+//     its loop, not at its entry: the pack's positions, design 12; all at its entry for a pack without positions), each sampled function's rows after its line
+//     `# function 0x<entry> <samples> <rows>` (as many as it says, none below its entry, its samples at least theirs; synth_hot's line at its entry, its rows in its
+//     code; no row before the first line); the same run without the switch writes nothing,
 //     and the time per pass of synth_hot with and without it is the sampler's overhead on compiled code
 //   the JIT fallback's misses (with the JIT fallback; aot.h, "The JIT fallback's misses"): the run with DM_AOT_PROFILE set writes <folder>/main.misses.tsv beside the profile, whose
 //     one row is the hidden function's (`<offset> indirect 1`: the dispatcher's miss at an address with no compiled entry), under the profile's header; a second run adds its entry
@@ -628,26 +630,51 @@ int main(int argc, char **argv) {
         char *text = (char *)slurp(pfile, &n);
         int rows = 0, bad_lines = 0, shown = 0, header = 0, hot_rows = 0;
         unsigned long long top = 0, top_n = 0, hot_n = 0, total = 0;
+        // The function lines (aot_profile.c): `# function 0x<entry> <samples> <rows>` before each sampled function's rows, its samples at least its rows' sum (the rest at no
+        // instruction), as many rows after it as it says, none before the first line, none below its entry; synth_hot's line names its entry, and its rows lie in its code
+        int flines = 0, fl_good = 0, orphans = 0, hot_line = 0, hot_line_in = 0, cur_hot = 0, under = 0;
+        unsigned long long cur_e = 0, cur_n = 0, cur_decl = 0, cur_seen = 0, cur_sum = 0, cur_low = 0;
         char want_head[160];
         snprintf(want_head, sizeof want_head, "# module main, build ID %s, image SHA-256 ", BUILD_ID);
-        for (char *line = text, *next; line && *line; line = next) {
+        for (char *line = text, *next; ; line = next) {
+            const int end = !line || !*line;
+            unsigned long long fe = 0, fn = 0, fr = 0;
+            const int fline = !end && !strncmp(line, "# function 0x", 13) && sscanf(line, "# function %llx %llu %llu", &fe, &fn, &fr) == 3;
+            if ((end || fline) && under) {   // the function line before closes
+                fl_good += cur_seen == cur_decl && cur_sum <= cur_n && !cur_low;
+                if (cur_hot) hot_line_in = cur_seen > 0 && cur_seen == cur_decl;
+            }
+            if (end) break;
             next = strchr(line, '\n');
             if (next) *next++ = 0;
             if (shown++ < 8) printf("      | %s\n", line);
+            if (fline) {
+                flines++; under = 1;
+                cur_e = fe; cur_n = fn; cur_decl = fr; cur_seen = cur_sum = cur_low = 0;
+                cur_hot = fe == hot; hot_line += cur_hot;
+                continue;
+            }
             if (line[0] == '#') { header += !strncmp(line, want_head, strlen(want_head)) && strlen(line) == strlen(want_head) + 64; continue; }
             unsigned long long off = 0, cnt = 0; char extra = 0;
             if (sscanf(line, "%llx %llu %c", &off, &cnt, &extra) != 2 || strncmp(line, "0x", 2)) { bad_lines++; continue; }
             rows++; total += cnt;
             if (cnt > top_n) { top_n = cnt; top = off; }
             if (off >= hot && off < hot_end) { hot_n += cnt; hot_rows++; }
+            if (!under) { orphans++; continue; }
+            cur_seen++; cur_sum += cnt; cur_low += off < cur_e;
+            if (cur_hot && (off < hot || off >= hot_end)) cur_low++;   // a row of synth_hot's line outside its code
         }
+        const int lines_ok = flines >= 1 && fl_good == flines && !orphans && hot_line == 1 && hot_line_in;
         // With positions (aot.h, "The sampler") synth_hot's samples are at its instructions, the most in its loop after the entry's movz; without, all at its entry
         printf("      %d rows, %llu samples; the most at main+%#llx (%llu), synth_hot [main+%#llx, main+%#llx) %llu at %d rows%s\n", rows, total, top, top_n, hot, hot_end, hot_n,
                hot_rows, positions ? "" : " (the pack has no positions)");
+        printf("      %d function lines, %d with their rows' count, samples at least their rows' and no row below their entry; %d rows before the first; synth_hot's line %d, "
+               "its rows in its code %s\n", flines, fl_good, orphans, hot_line, hot_line_in ? "yes" : "no");
         verdict(r.status == 0 && strstr(r.out, "check ok   synth_hot's sums") && text && header == 1 && !bad_lines && rows >= 1 && hot && hot_lo == hot && hot_end > hot &&
-                    top >= hot && top < hot_end && hot_n * 2 > total && (positions ? top != hot : top == hot) && strstr(r.out, "aot: profile: t_aot_module.tmp/profile/main.tsv: "),
+                    top >= hot && top < hot_end && hot_n * 2 > total && (positions ? top != hot : top == hot) && strstr(r.out, "aot: profile: t_aot_module.tmp/profile/main.tsv: ") &&
+                    lines_ok,
                 "the sampler (DM_AOT_PROFILE): the profile written at exit names the module, its build ID and image, every line is <offset> <samples>, and synth_hot has the most, "
-                "in its loop (the pack's positions)");
+                "in its loop (the pack's positions); each sampled function's rows follow its function line (synth_hot's in its code)");
         free(text);
         free(r.out);
         remove(pfile);

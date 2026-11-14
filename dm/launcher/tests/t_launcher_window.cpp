@@ -1,7 +1,7 @@
 // The launcher program itself (nxlauncher, found beside this test) over the games folder fake_games.h writes, with SDL's dummy video driver: the window draws one frame and exits
 // (--frames 1); "Show this window at launch" off and DM_LAUNCHER=0 start the last game at once (nxhost-run's stand-in is this test, NXL_FAKE_HOST=1), --window shows the window anyway;
 // --command prints what the model composes (launcher_model.cpp compose, in this process, recording the profile as Play does); --list prints the games as TSV; with Alpha's profile
-// holding a sampled offset its packs were made without (launcher_model.h, the second pack) the frame says a better pack is possible, and --repack runs the packer (this test again) and waits. The launcher's own settings go to a folder of the test's
+// holding a sampled function its packs were made without (launcher_model.h, the second pack) the frame says a better pack is possible, and --repack runs the packer (this test again) and waits. The launcher's own settings go to a folder of the test's
 // (XDG_CONFIG_HOME, APPDATA). No screen, GPU or game needed: the dummy driver's window has a software framebuffer, which SDL's 2D renderer draws into.
 #include "launcher_model.h"
 #include "fake_games.h"

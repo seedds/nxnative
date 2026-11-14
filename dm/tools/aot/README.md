@@ -1544,7 +1544,8 @@ every thread that runs guest code about 1,000 times per second of its CPU time (
 thread; the interrupted pc through the pack's function map, a host call or SVC counted for the guest function that made it) and at exit writes
 `<folder>/<module>.tsv` under `#` lines naming the module, its build ID, its image's SHA-256 and the pack: one line per sampled guest
 instruction, the pc mapped through the pack's positions ("The sample profile at tier H", "The sampler's positions"), and one at its entry for
-a function with samples at no instruction (its host calls and SVCs, or a pack without positions: the form it wrote before positions); the NSP
+a function with samples at no instruction (its host calls and SVCs, or a pack without positions: the form it wrote before positions), each
+function's rows after a comment line `# function 0x<entry> <samples> <rows>` ("The sampler's positions", the file); the NSP
 script passes `<NSP folder>/<id>-work/profile/<module>.tsv` to the module's next pack (docs/development.md, the x86 packing section;
 `--no-profile` ignores it); beside it the host writes the JIT fallback's misses, `<module>.misses.tsv`, which `--misses` takes ("JIT
 misses"). Design 12's path (`dm/games/<id>/aot_profile/<build ID>.tsv`) is not where it writes, its rows are design 12's sampled instruction
@@ -2982,11 +2983,18 @@ counts for its function, as before, and at the guest instruction whose code hold
   instructions has no entry row with its total: with one, the entry block weighs as much as the whole function, and int_ops-gcc's ref_crc
   (the fixture plus each function's total at its entry) gets its inner back edge at 70 % instead of 97 % and its outer one at 1.2 % instead of
   46 % (`!prof` of its `b.ne`s in `--ir`). nxaot's tiers need no entry row: `TiersFromProfile` makes a function hot for a sample anywhere in
-  `[entry, limit)` (before 471bf37 too), and the launcher and the packer count offsets and samples as before (more offsets per function). The
-  samples of host calls and SVCs stay at no instruction: their time says nothing of how often their block runs. The header counts what is
-  left out.
+  `[entry, limit)` (before 471bf37 too). The samples of host calls and SVCs stay at no instruction: their time says nothing of how often
+  their block runs. The header counts what is left out. Each sampled function's rows follow its line `# function 0x<entry> <samples> <rows>`
+  (its samples all of them: its rows' sum plus those at no instruction, the total the entry form wrote; its rows the lines after it), the
+  functions by samples and each function's rows by samples, most first; a line `# functions: ...` in the header says so. nxaot skips the
+  lines as comments (`TiersFromProfile` cuts every line at `#`). The launch file's `samples` row and the launcher's "a better pack is
+  possible" (dm/launcher/launcher_model.h, "The second pack") count the sampled functions by these lines, nxaot's tier H: the rows, one per
+  sampled instruction, grow with a session's length inside the same functions and would offer a repack after every longer session; a file
+  without the lines (the entry form, or written by hand) counts its rows, which are then functions' entries. Each session writes the file
+  anew (the misses file alone merges sessions).
 - **Tests.** dm/host's `t_aot_host` (int_ops-gcc and int_ops-clang, `int_ops_rounds = 2000` under `DM_AOT_PROFILE`): every byte of the pack's
-  compiled code through the positions (none outside its function), every sampled function with a row inside it, ref_crc the hottest function
+  compiled code through the positions (none outside its function), every sampled function with a row inside it and one function line (the
+  sampler's count for it, then as many rows as it says, each inside it), ref_crc the hottest function
   with most of its samples inside its loops and away from its entry (int_ops-gcc: `0x2268 107; 0x2258 95; 0x2264 72; 0x2260 50`), and with
   `--nxaot` / `NXAOT` the round trip (`nxaot build --profile` weighs functions, `NXAOT_PROFILE_WEIGHTS=0` gives the pack of the entry form);
   `t_aot_module`: synth_hot's samples in its loop. Windows: the sampler thread's path calls the same lookup on the suspended thread's `Rip`

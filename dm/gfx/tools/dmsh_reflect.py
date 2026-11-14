@@ -167,6 +167,13 @@ def c2_array(name, ty):
     if h >> 28 == 1 and slots & 0xffff == 2 and (slots >> 16) - 1 == 2: return (h & 0x3fff) * 4, ((h >> 14) & 0x3fff) * 4
     return None
 
+def pool_fallback(name):
+    """Ryujinx's array for a handle it traced to no slot: <stage>_<t|s|i…>_cb0_40000000, an image's with a trailing format suffix (cp_i3d_cb0_40000000_)"""
+    return re.fullmatch(r'\w+?_cb0_40000000(?:_\w*)?', name) is not None
+
+def pool_image(element):   # an image pool's element: a texture the shader writes (BindlessElimination pools an image whose handle it loads from memory)
+    return 'access::write' in element or 'access::read_write' in element
+
 POOL_MIN = 33   # arrays at least this long are pools: Program.cs sizes Ryujinx's handle fallback by the pools, the vendored BindlessElimination keeps 32-entry slot arrays (NvnSlotArrayLength)
 
 # The test is a plain load: an atomic one, even relaxed, goes to the shared cache every time, and the reads of a pass name a few IDs, so its pixels queue on the same word.
@@ -190,7 +197,8 @@ def pool_arrays(src):
     of a declared array (AGX IndirectArgumentLayoutGen2::parseArray), and for 2^20 textures that took 57 ms and 66 MB per encoder (9.7 GB in Mario Party Superstars' prewarm);
     the elements are 8-byte resource IDs, so the pointer reaches the rest (checked on the GPU). Mario Party Superstars' characters read their light textures' handles from a
     storage buffer (6,370 pixel shaders). The argument IDs are then renumbered in member order, a pointer taking one and any other array its length, as the host lays the buffer out.
-    Buffer textures and images keep their 32-entry slot arrays (tex_dyn_slots). ValueError on a use of a pool array the rewrite does not cover.
+    Buffer textures, and images whose handle comes from a constant buffer, keep their 32-entry slot arrays (tex_dyn_slots); an image whose handle the shader loads from memory reads the
+    image pool, unmarked (the host fills it with every image-flagged texture). ValueError on a use of a pool array the rewrite does not cover.
     An array of the handles in one of the game's uniform buffers (Ryujinx's texture array from a buffer, as long as a 64 KB buffer's handles, Program.cs QueryTextureArrayLengthFromBuffer) takes
     the same form: the host keeps a table of that buffer's handles, as long as its last handle (nvn_mtl.m htab_gpu), so the element index is unchanged and only the textures the table names are made.
     A table's reads are not marked: its index is an element of the table, not a texture ID, and the host has made every texture the table names already (it leaves seen 0). Marked through that
@@ -199,8 +207,10 @@ def pool_arrays(src):
     if not body: return src
     pools = {}
     def to_pointer(m):
-        if int(m.group(3)) < POOL_MIN or not (m.group(4).endswith('_cb0_40000000') or decode_ubo_tex(m.group(4).removesuffix('Smplr'))): return m.group(0)
-        pools[m.group(4)] = (m.group(2), int(m.group(3)), m.group(2) != 'sampler' and m.group(4).endswith('_cb0_40000000'))   # element, length, marked (a texture pool's reads)
+        if int(m.group(3)) < POOL_MIN or not (pool_fallback(m.group(4)) or decode_ubo_tex(m.group(4).removesuffix('Smplr'))): return m.group(0)
+        if pool_image(m.group(2)) and not pool_fallback(m.group(4)): raise ValueError(f'{m.group(4)}: a table of images from a uniform buffer')
+        # element, length, marked (a texture pool's reads; an image pool's are not: the host fills it with every image-flagged texture, nvn_mtl.m img_pool_gpu)
+        pools[m.group(4)] = (m.group(2), int(m.group(3)), m.group(2) != 'sampler' and not pool_image(m.group(2)) and pool_fallback(m.group(4)))
         return f'{m.group(1)}constant spvPool_{m.group(4)}* {m.group(4)} [[id('
     members = re.sub(r'^(\s*)array<(.+), (\d+)> (\w+) \[\[id\(', to_pointer, body.group(1), flags=re.M)
     if not pools: return src
@@ -256,10 +266,10 @@ def reflect(key, stage, msl, res):
             nm = nm[:-len(abi.BORDER_TWIN)]; e['border_bit'] = sum(1 for b in binds if 'border_bit' in b)
         if nm == abi.BORDER_MEMBER: e.update(kind=abi.KIND_BORDER)
         elif nm in dmsh_geometry.HELPERS: e.update(kind=abi.KIND_GEOMETRY, reg=dmsh_geometry.HELPERS[nm])
-        elif pool and not nm.endswith('_cb0_40000000'):   # a table of a uniform buffer's handles (pool_arrays): reg and off as an array of them, below
+        elif pool and not pool_fallback(nm):   # a table of a uniform buffer's handles (pool_arrays): reg and off as an array of them, below
             ut, us = decode_ubo_tex(nm.removesuffix('Smplr'))   # pyright: ignore[reportGeneralTypeIssues]  (not None: pool_arrays made this pool only for a name it decodes)
             e.update(kind=abi.KIND_SAMP_HTAB if pool.group(1) == 'sampler' else abi.KIND_TEX_HTAB, elem=pool.group(1), reg=ut[0], off=ut[1], **({'soff': us[1], 'sreg': abi.SREG_C2} if us[0] == 'c2' else {}))
-        elif pool: e.update(kind=abi.KIND_SAMP_POOL if pool.group(1) == 'sampler' else abi.KIND_TEX_POOL, elem=pool.group(1))   # see pool_arrays
+        elif pool: e.update(kind=abi.KIND_SAMP_POOL if pool.group(1) == 'sampler' else abi.KIND_IMG_POOL if pool_image(pool.group(1)) else abi.KIND_TEX_POOL, elem=pool.group(1))   # see pool_arrays
         elif nm == 'support_buffer': e.update(kind=abi.KIND_SUPPORT)
         elif c := re.fullmatch(r'[a-z]+_c(\d+)', nm):
             n = int(c.group(1))

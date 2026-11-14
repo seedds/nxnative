@@ -21,8 +21,8 @@
 # Usage: DM_GAME=<id> button_icons.py <folder of .raw> <output folder> [--preview <folder>]; needs numpy and Pillow (the tools venv)
 import sys
 from pathlib import Path
-import numpy as np
-from PIL import Image, ImageDraw, ImageFont
+import numpy as np   # pyright: ignore[reportMissingImports]  # in the tools venv (.github/requirements/tools.txt), not in the lint job's
+from PIL import Image, ImageDraw, ImageFont   # pyright: ignore[reportMissingImports]  # the same
 
 # ---- BC7 (mode 6) encoding
 W = np.array([0, 4, 9, 13, 17, 21, 26, 30, 34, 38, 43, 47, 51, 55, 60, 64])
@@ -66,6 +66,7 @@ def encode_block(px):   # px: (16, 4) uint8 RGBA, row-major 4x4 -> 16 bytes
         if abs(np.linalg.det(A)) < 1e-9: break
         B = np.stack([(a[:, None] * px).sum(0), (wt[:, None] * px).sum(0)])
         sol = np.linalg.solve(A, B); e0 = np.clip(sol[0], 0, 255); e1 = np.clip(sol[1], 0, 255)
+    assert best is not None   # the first try always sets it
     _, v0, p0, v1, p1, idx = best
     if idx[0] >= 8: v0, v1, p0, p1, idx = v1, v0, p1, p0, 15 - idx   # the anchor index's top bit is implied 0
     bits = [(0b1000000, 7)]
@@ -135,7 +136,7 @@ def text_layer(size, text, box, h_px, colour, max_w=None):   # an RGBA layer of 
     if max_w and tw > max_w * SS: f = ImageFont.truetype(FONT, int(100 * h_px * SS / cap * max_w * SS / tw)); bb = d.textbbox((0, 0), text, font=f); tw, th = bb[2] - bb[0], bb[3] - bb[1]
     cx, cy = (box[0] + box[2]) / 2 * SS, (box[1] + box[3]) / 2 * SS
     d.text((cx - tw / 2 - bb[0], cy - th / 2 - bb[1]), text, font=f, fill=colour)
-    return L.resize((W, H), Image.LANCZOS)
+    return L.resize((W, H), Image.Resampling.LANCZOS)
 
 def shapes_layer(size, rects, colour):   # rects in sprite pixels (floats), drawn as rounded bars
     W, H = size; L = Image.new('RGBA', (W * SS, H * SS), (0, 0, 0, 0)); d = ImageDraw.Draw(L)
@@ -144,7 +145,7 @@ def shapes_layer(size, rects, colour):   # rects in sprite pixels (floats), draw
         if kind == 'bar': d.rounded_rectangle(r, radius=min(r[2]-r[0], r[3]-r[1]) / 2, fill=colour)
         elif kind == 'box': d.rounded_rectangle(r, radius=SS * 1.5, outline=colour, width=int(SS * 2.6))
         elif kind == 'boxfill': d.rounded_rectangle(r, radius=SS * 1.5, fill=colour)
-    return L.resize((W, H), Image.LANCZOS)
+    return L.resize((W, H), Image.Resampling.LANCZOS)
 
 def over(sp, layer, mask=None):
     base = Image.fromarray(sp); base.alpha_composite(layer); out = np.array(base)
@@ -206,7 +207,7 @@ def keycap(sp, text, fit=False):   # the sprite redrawn as a keyboard key: a whi
     L = Image.new('RGBA', (w * SS, h * SS), (0, 0, 0, 0)); d = ImageDraw.Draw(L)
     box = [round(m * SS), round(m * SS), round((w - m) * SS), round((h - m) * SS)]
     d.rounded_rectangle(box, radius=(w - 2 * m) * SS * 0.22, fill=WHITE, outline=DARK, width=int((w - 2 * m) * SS * 0.075))
-    L = L.resize((w, h), Image.LANCZOS)
+    L = L.resize((w, h), Image.Resampling.LANCZOS)
     out = np.zeros_like(sp); out = over(out, L)
     inner = ((w - 2 * m) * 0.62)
     scale = (0.46 if fit else 0.42) if len(text) == 1 else 0.3 if len(text) <= 3 else 0.22
@@ -219,7 +220,7 @@ def ret_arrow(sp):   # + as the Return key: the marks erased, a down-and-left ar
     px = lambda x, y: (x * SS, y * SS)
     d.line([px(cx + s * 0.22, cy - s * 0.25), px(cx + s * 0.22, cy + s * 0.08), px(cx - s * 0.2, cy + s * 0.08)], fill=DARK, width=int(t), joint='curve')
     d.polygon([px(cx - s * 0.3, cy + s * 0.08), px(cx - s * 0.12, cy - s * 0.06), px(cx - s * 0.12, cy + s * 0.22)], fill=DARK)
-    return over(sp, W.resize((w, h), Image.LANCZOS), interior)
+    return over(sp, W.resize((w, h), Image.Resampling.LANCZOS), interior)
 
 def disc_key(img, cx, cy, r, text):   # a title's disc as a keyboard key of the same size
     x0, y0, x1, y1 = int(cx - r - 2), int(cy - r - 2), int(cx + r + 3), int(cy + r + 3)
@@ -236,7 +237,7 @@ def transpose_at(img, box):   # transposes the square around a sprite's centre (
 
 
 
-OPS = {'face': lambda s, v: face(s, v), 'label': lambda s, v: relabel(s, v), 'menu': lambda s, v: menu(s), 'view': lambda s, v: view(s), 'return': lambda s, v: ret_arrow(s),
+OPS = {'face': face, 'label': relabel, 'menu': lambda s, v: menu(s), 'view': lambda s, v: view(s), 'return': lambda s, v: ret_arrow(s),
        'key': lambda s, v: keycap(s, v, fit=True)}
 
 def edit(raw, rows, preview=None):   # raw: the texture's content (BC7, level 0 first); rows: (op, numbers, value) -> the replacement's bytes
@@ -244,13 +245,13 @@ def edit(raw, rows, preview=None):   # raw: the texture's content (BC7, level 0 
     data = raw.read_bytes(); level = bytearray(data[:w * h])   # BC7: one byte per texel
     img = np.array(Image.frombytes('RGBA', (w, h), bytes(level), 'bcn', 7)); src = img.copy()
     for op, nums, val in rows:
-        if op == 'disc': disc_letter(img, *nums, XBOX[val]); continue
-        if op == 'disckey': disc_key(img, *nums, val); continue
+        if op == 'disc': cx, cy, r = nums; disc_letter(img, cx, cy, r, XBOX[val]); continue
+        if op == 'disckey': cx, cy, r = nums; disc_key(img, cx, cy, r, val); continue
         if op == 'transpose': transpose_at(img, nums); continue
         if op == 'paste':
             sx0, sy0, sx1, sy1, dx0, dy0, dx1, dy1 = (int(v) for v in nums)
-            part = Image.fromarray(src[sy0:sy1, sx0:sx1]).resize((dx1 - dx0, dy1 - dy0), Image.LANCZOS)
-            if val == 'flip': part = part.transpose(Image.FLIP_LEFT_RIGHT)
+            part = Image.fromarray(src[sy0:sy1, sx0:sx1]).resize((dx1 - dx0, dy1 - dy0), Image.Resampling.LANCZOS)
+            if val == 'flip': part = part.transpose(Image.Transpose.FLIP_LEFT_RIGHT)
             img[dy0:dy1, dx0:dx1] = np.array(part)
             continue
         if op == 'clear':

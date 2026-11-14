@@ -18,7 +18,8 @@ static id<MTLRenderPipelineState> pipeline(NSString *fn) {   // v: the first wor
         "vertex void v(const device uint *a[[buffer(16)]], const device uint *b[[buffer(14)]],"
         "const device uint *c[[buffer(15)]], const device uint *z[[buffer(30)]], device uint4 *o[[buffer(8)]])"
         "{ *o=uint4(*a,*b,*c,*z); }\n"
-        "vertex void w(const device uint *a[[buffer(16)]], device uint4 *o[[buffer(8)]]) { *o=uint4(a[0],a[3],a[6],a[8]); }" options:nil error:&err];
+        "vertex void w(const device uint *a[[buffer(16)]], device uint4 *o[[buffer(8)]]) { *o=uint4(a[0],a[3],a[6],a[8]); }\n"
+        "vertex void i(uint v[[vertex_id]],const device uint *a[[buffer(16)]],device uint *o[[buffer(8)]]) { o[v]=a[10*v]; }" options:nil error:&err];
     if (!lib) { fprintf(stderr, "%s\n", err.localizedDescription.UTF8String); abort(); }
     MTLRenderPipelineDescriptor *d = [MTLRenderPipelineDescriptor new];
     d.vertexFunction = [lib newFunctionWithName:fn]; d.rasterizationEnabled = NO;
@@ -43,8 +44,8 @@ static void finish(void) {
 }
 int main(void) { @autoreleasepool {
     mtl_init(); id<MTLRenderPipelineState> ps = pipeline(@"v"), tail = pipeline(@"w");
-    size_t size = (size_t)getpagesize(); uint32_t *mem;
-    if (posix_memalign((void **)&mem, size, size)) abort();
+    size_t page = (size_t)getpagesize(), size = page * 64; uint32_t *mem;
+    if (posix_memalign((void **)&mem, page, size)) abort();
     memset(mem, 0, size); mem[0] = 11; mem[1] = 22; mem[2] = 33; mem[3] = 99;
     mtl_pool_add(mem, size);
     uint8_t *ub = (uint8_t *)mem + 64; uint32_t want = 0x87654321u; memcpy(ub + 2, &want, 4); ub[0] = 0x11; ub[1] = 0x22; ub[6] = 0x33; ub[7] = 0x44;
@@ -210,6 +211,109 @@ int main(void) { @autoreleasepool {
         enc_r_end(en); finish();
         S.vbuf[5] = (NVNbufferRange){0, 0}; S.attr[0] = (va_st){0}; S.nattr = 0;
     }
+    // MGS4 binds a whole allocation's size at an offset into it; only the fetched bytes must fit its pool.
+    for (int mis = 0; mis < 2; mis++) {
+        uint8_t *end = (uint8_t *)mem + size - 64 + mis;
+        for (int i = 0; i < 9; i++) { uint32_t v = 0x2000u + i; memcpy(end + i * 4, &v, 4); }
+        S.nattr = 1; S.attr[0] = (va_st){.fmt = 0x22, .stream = 0}; S.stream[0].stride = 12; S.stream[0].divisor = 0;
+        S.vbuf[0] = (NVNbufferRange){(uint64_t)end, size}; dw = (p_draw){.prim = 4, .count = 3, .instances = 1};
+        mtl_sub_begin(); vbuf_prepare(&rf, &dw, NULL); en = encoder_prepared(tail);
+        int bad = bind_vbufs(en, &rf);
+        EXPECT("oversized binding with mapped fetched bytes is accepted", (uint64_t)-1, (uint64_t)bad);
+        if (bad < 0) capture(en, out, 25 + mis);
+        pull_layout_fill(&L); EXPECT("pulling layout resolves oversized binding", 1, L.s[0].base != 0);
+        enc_r_end(en); finish();
+        if (bad < 0) {
+            EXPECT("oversized binding reads first vertex", 0x2000, ((const uint32_t *)out.contents)[(25 + mis) * 4]);
+            EXPECT("oversized binding reads last vertex", 0x2008, ((const uint32_t *)out.contents)[(25 + mis) * 4 + 3]);
+        }
+        if (!mis) {
+            dw.count = 8; mtl_sub_begin(); vbuf_prepare(&rf, &dw, NULL); en = encoder_prepared(tail);
+            EXPECT("cached binding cannot hide a longer unmapped fetch", 0, bind_vbufs(en, &rf));
+            enc_r_end(en); finish();
+            dw.ind = (uint64_t)mem; mtl_sub_begin(); vbuf_prepare(&rf, &dw, NULL); en = encoder_prepared(tail);
+            EXPECT("unknown fetch retains the full bound-range check", 0, bind_vbufs(en, &rf));
+            enc_r_end(en); finish();
+        }
+    }
+    // MGS4's explosion quads use the same oversized stream limit through an indexed draw.
+    uint16_t *indices = (uint16_t *)((uint8_t *)mem + 256); indices[0] = 1; indices[1] = 2; indices[2] = 3;
+    uint32_t *vertices = (uint32_t *)((uint8_t *)mem + size - 12 * 65536);
+    for (int i = 0; i < 9; i++) vertices[i] = 0x2000u + i;
+    S.vbuf[0] = (NVNbufferRange){(uint64_t)vertices, size};
+    ix = (p_draw_idx){.prim = 4, .itype = 1, .count = 3, .instances = 1, .ibuf = (uint64_t)indices};
+    mtl_sub_begin(); vbuf_prepare(&rf, NULL, &ix); en = encoder_prepared(tail);
+    int indexed_bad = bind_vbufs(en, &rf);
+    EXPECT("indexed oversized binding uses its index-format bound", (uint64_t)-1, (uint64_t)indexed_bad);
+    if (indexed_bad < 0) capture(en, out, 27);
+    enc_r_end(en); finish();
+    if (indexed_bad < 0) EXPECT("indexed range preserves its last vertex", 0x2008, ((const uint32_t *)out.contents)[27 * 4 + 3]);
+    mtl_sub_begin(); mtl_sub_fill((uint64_t)indices, 8, 0);
+    vbuf_need(&rf, NULL, &ix); EXPECT("16-bit bound holds for pending GPU-written indices", 12 * 65536, vbuf_size(0));
+    finish();
+    ix.base_vertex = 1; vbuf_need(&rf, NULL, &ix); EXPECT("index-format bound includes base vertex", 12 * 65537, vbuf_size(0));
+    ix.base_vertex = -1; vbuf_need(&rf, NULL, &ix); EXPECT("negative base vertex retains full bound check", size, vbuf_size(0));
+    ix.base_vertex = 0; ix.base_instance = -1; S.stream[0].divisor = 1; vbuf_need(&rf, NULL, &ix);
+    EXPECT("index bound cannot replace an unknown instance range", size, vbuf_size(0));
+    ix.base_instance = 0; S.stream[0].divisor = 0;
+    ix.base_vertex = 0; ix.itype = 0; vbuf_need(&rf, NULL, &ix); EXPECT("8-bit index bound", 12 * 256, vbuf_size(0));
+    ix.itype = 2; vbuf_need(&rf, NULL, &ix); EXPECT("32-bit upper bound past the binding does not narrow it", size, vbuf_size(0));
+    EXPECT("index upper bound does not allocate speculative padding", 0, g_vbuf_need[0]);
+    // A character submesh uses only four vertices near the pool's end: even the index-type bound is too large.
+    vertices = (uint32_t *)((uint8_t *)mem + size - 64);
+    for (int i = 0; i < 9; i++) vertices[i] = 0x3000u + i;
+    indices[0] = 1; indices[1] = 2; indices[2] = 3;
+    nvn_dirty_add_range(mem, size);
+    S.vbuf[0] = (NVNbufferRange){(uint64_t)vertices, 96}; ix.itype = 1;
+    mtl_sub_begin(); vbuf_prepare(&rf, NULL, &ix); en = encoder_prepared(tail);
+    EXPECT("small indexed mesh uses its actual range", 48, vbuf_size(0));
+    indexed_bad = bind_vbufs(en, &rf);
+    EXPECT("small indexed mesh is not discarded", (uint64_t)-1, (uint64_t)indexed_bad);
+    if (indexed_bad < 0) capture(en, out, 28);
+    pull_layout_fill(&L); EXPECT("small indexed mesh pulling address is mapped", 1, L.s[0].base != 0);
+    enc_r_end(en); finish();
+    if (indexed_bad < 0) EXPECT("small indexed mesh GPU readback", 0x3008, ((const uint32_t *)out.contents)[28 * 4 + 3]);
+    nvn_dirty_open(indices, 6); indices[2] = 4; nvn_dirty_close();
+    vbuf_need(&rf, NULL, &ix); EXPECT("changed indices invalidate the kept range", 60, vbuf_size(0));
+    ix.base_vertex = 1; vbuf_need(&rf, NULL, &ix); EXPECT("actual range includes base vertex", 72, vbuf_size(0)); ix.base_vertex = 0;
+    mtl_sub_begin(); sbw_note((uint64_t)indices, 6, SBW_GPU);
+    vbuf_need(&rf, NULL, &ix); EXPECT("shader-written indices are not read for a bound", 96, vbuf_size(0)); finish();
+    mtl_sub_begin(); mtl_sub_fill((uint64_t)indices, 8, 0);
+    vbuf_need(&rf, NULL, &ix); EXPECT("pending index writes retain the full bound", 96, vbuf_size(0)); finish();
+    // Grenade particles upload their indices before drawing: the destination still holds an older frame's values.
+    uint16_t *isrc = (uint16_t *)((uint8_t *)mem + 2 * page + 32), *idst = (uint16_t *)((uint8_t *)mem + 3 * page + 32);
+    uint16_t *imid = (uint16_t *)((uint8_t *)mem + 4 * page + 32);
+    isrc[0] = 2; isrc[1] = 0; isrc[2] = 1; idst[0] = idst[1] = idst[2] = 65535;
+    vertices = (uint32_t *)((uint8_t *)mem + size - 160); vertices[0] = 41; vertices[10] = 42; vertices[20] = 43;
+    S.vbuf[0] = (NVNbufferRange){(uint64_t)vertices, 512}; S.stream[0].stride = 40; ix.ibuf = (uint64_t)idst;
+    id<MTLRenderPipelineState> ips = pipeline(@"i");
+    mtl_sub_begin(); mtl_sub_copy((uint64_t)isrc, (uint64_t)idst, 6); vbuf_prepare(&rf, NULL, &ix);
+    EXPECT("uploaded indices bound a 40-byte particle stream", 92, vbuf_size(0));
+    en = encoder_prepared(ips); indexed_bad = bind_vbufs(en, &rf);
+    EXPECT("particle upload draw is not discarded", (uint64_t)-1, (uint64_t)indexed_bad);
+    uint64_t igpu; EXPECT("uploaded index buffer is mapped", 1, mtl_gpu_addr((uint64_t)idst, 6, &mb, &off, &igpu));
+    if (indexed_bad < 0) { enc_r_vbuf(en, TF_SLOT, out.gpuAddress + 29 * 16); enc_r_draw_indexed(en, MTLPrimitiveTypePoint, 3, MTLIndexTypeUInt16, igpu, 6, 1, 0, 0); }
+    enc_r_end(en); finish();
+    if (indexed_bad < 0) for (int i = 0; i < 3; i++) EXPECT("GPU uses the uploaded indices and particle vertices", 41 + i, ((const uint32_t *)out.contents)[29 * 4 + i]);
+    mtl_sub_begin(); mtl_sub_copy((uint64_t)isrc, (uint64_t)imid, 6); mtl_sub_copy((uint64_t)imid, (uint64_t)idst, 6);
+    vbuf_need(&rf, NULL, &ix); EXPECT("ordered upload chains preserve the exact range", 92, vbuf_size(0)); finish();
+    mtl_sub_begin(); mtl_sub_copy((uint64_t)isrc, (uint64_t)idst, 6);
+    nvn_dirty_open(isrc, 6); isrc[0] = 3; nvn_dirty_close();
+    vbuf_need(&rf, NULL, &ix); EXPECT("CPU changes after the copy refuse its source", 512, vbuf_size(0)); finish();
+    mtl_sub_begin(); mtl_sub_copy((uint64_t)isrc, (uint64_t)idst, 6); mtl_sub_fill((uint64_t)isrc, 8, 0);
+    vbuf_need(&rf, NULL, &ix); EXPECT("later GPU source writes cannot be read backward", 512, vbuf_size(0)); finish();
+    mtl_sub_begin(); mtl_sub_copy((uint64_t)isrc, (uint64_t)idst, 4);
+    vbuf_need(&rf, NULL, &ix); EXPECT("partial index uploads do not prove the whole range", 512, vbuf_size(0)); finish();
+    nvn_dirty_remove_range(mem);
+    S.stream[0].stride = 12;
+    S.vbuf[0] = (NVNbufferRange){(uint64_t)vertices, size};
+    rf.nv = 2; rf.v[1].nvn = 1; S.nattr = 2; S.attr[1] = (va_st){.fmt = 0x22, .stream = 0, .offset = 48};
+    vbuf_need(&rf, &dw, NULL); EXPECT("range includes every input on the stream", 84, vbuf_size(0));
+    S.attr[1].fmt = 0xff; vbuf_need(&rf, &dw, NULL);
+    EXPECT("unknown input format retains full bound range", size, vbuf_size(0));
+    S.attr[1].fmt = 0x22; vbuf_need(&rf, &dw, NULL); vbuf_need(NULL, NULL, NULL);
+    EXPECT("geometry capture clears earlier read bounds", size, vbuf_size(0));
+    S.vbuf[0] = (NVNbufferRange){(uint64_t)tri, 8}; S.nattr = 0; vbuf_prepare(NULL, NULL, NULL);
     // CPU-only binding microbenchmark, after GPU validation; reports overhead, not game frame time.
     for (int mode = 0; mode < 2; mode++) {
         g_vbuf_cache = mode; bind_vbufs(nil, NULL); uint64_t start = bp_now(), r = g_vbuf_resolve, w = g_vbuf_set;

@@ -40,3 +40,16 @@ static inline int pro_motion_decode(pro_motion *s, const uint8_t *r, size_t len,
     }
     return 3;
 }
+// DualShock 4 (054c:05c4 and 09cc) over Bluetooth: its GCMotion sends only zeroes, but report 0x11 carries the sensor. int16 from byte 15 (the id is byte 0): rotation x, y, z, then
+// acceleration; 8192 = 1 G, 2000 deg/s over 32767. Axes measured on a real pad (MacNativeGames PR #1306: the raw roll channel reads negative rolling right).
+static inline int ds4_motion_decode(pro_motion *s, const uint8_t *r, size_t len, uint64_t now, pro_motion_sample out[3]) {
+    if (len < 78 || r[0] != 0x11) return 0;
+    int16_t v[6]; int data = 0;
+    for (int i = 0; i < 6; i++) { v[i] = (int16_t)((uint16_t)r[15 + 2 * i] | (uint16_t)r[16 + 2 * i] << 8); data |= v[i] != 0; }
+    s->seen = 1; s->received = now;
+    if (!s->live && !data) return 0;   // an advertised but empty stream is not a motion source
+    s->live = 1;
+    const float g = 1.f / 8192.f, rad = 2000.f / 32767.f * (float)M_PI / 180.f;
+    out[0] = (pro_motion_sample){{-v[3] * g, v[5] * g, -v[4] * g}, {v[0] * rad, -v[2] * rad, v[1] * rad}, now};
+    return 1;
+}

@@ -1019,6 +1019,13 @@ Games read this count as a position in their own command memory and size their h
   - `nvnSamplerBuilderGetLodClamp`.
 - **Found on:** [The Great Ace Attorney Chronicles](../../dm/games/010036E00FB20000/README.md) (SDK 10.4.1: the first two), [Bayonetta 3](../../dm/games/01004A4010FEA000/README.md) (SDK 13.3.2: the two getters).
 
+### An acceleration structure's size query left the game's sums unset
+
+- **Symptom:** a Switch 2 game commits a memory pool of about 4 GB before its first frame, then runs out of memory in its loader a few frames later. The log has the red stub line of `nvnDeviceCalculateAccelerationStructureMemoryRequirements` before the pool.
+- **Cause:** the call writes three sizes through its pointers: the structure's, its build scratch's and its update scratch's. The game sums them into the memory pool it makes for its acceleration structures, and it does not zero them first. The red stub wrote nothing, so the sum was stack garbage: `0xffffffff + 1 + 1`, a 4 GB pool, about half of the Switch 2's application memory.
+- **Fix:** `hle_nvn.c` answers 64 KB for each, with a red line once, since the host builds no acceleration structure and traces no ray. Small sizes in the pool's 4 KB granule keep every later offset the game takes valid.
+- **Found on:** Nintendo Switch 2 Welcome Tour (`040057C02159A000`) in DeathKhan/nx2android on an Ayn Odin 3 (Android; taken into DroidPlay Core as enjoyerofslop/droidplay-core#157): its pool from the sum at `main+0xfc2cc` and `main+0x11bf1c`, the query at `main+0x6130cc`. With the fix it boots to its title screen.
+
 ### `nvnDeviceRegisterFastClearDepth` is a hint
 
 - **Fix:** `nvnDeviceRegisterFastClearDepth`, a hardware hint, returns success instead of reaching the red stub.

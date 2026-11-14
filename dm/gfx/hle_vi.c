@@ -152,6 +152,17 @@ HLE_FORCE("_ZN2nn2vi31QueryDisplayBufferMaxResolutionEPNS0_19BufferMaxResolution
     static atomic_int once; if (!atomic_exchange(&once, 1)) LOG("vi::QueryDisplayBufferMaxResolution: %dx%d (%s, display %dx%d)", k[r][0], k[r][1], dm_opmode() == 1 ? "docked" : "handheld", w, h);
     if (out) *out = r; return RES_OK;
 }
+// Switch 2 refresh rates (Nintendo Switch 2 Welcome Tour asks at start-up). RefreshRate is one 32-bit Hz value: tcn::tdemo::Is60Hz (main+0x307a0) stores 60 into it and compares the word
+// after the call; the bool is "not the display's own rate" (nn::bezel's query at main+0x5fc3ec keeps the rate only when it reads 0). A two-word answer clobbered the caller's saved
+// frame pointer (main+0x5e3e20). AvailableRefreshRate is taken as the same 4-byte Hz value (tcn::tdemo::CalcVrrHzMin reads them)
+HLE_FORCE("_ZN2nn2vi30QueryDisplayCurrentRefreshRateEPNS0_11RefreshRateEPbPKNS0_7DisplayE", "display refresh rate: 60 Hz, the display's own (no VRR on the host)", Result, h_vi_CurRate,
+          int32_t *hz, uint8_t *vrr, const void *disp) {
+    (void)disp; if (hz) *hz = 60; if (vrr) *vrr = 0; return RES_OK; }
+HLE_FORCE("_ZN2nn2vi33QueryDisplayAvailableRefreshRatesEPiPNS0_20AvailableRefreshRateEiPNS0_7DisplayE", "display refresh rates available: 60 Hz alone", Result, h_vi_AvailRates,
+          int32_t *count, int32_t *hz, int cap, void *disp) {
+    (void)disp; if (count) *count = cap > 0 ? 1 : 0; if (hz && cap > 0) hz[0] = 60; return RES_OK; }
+HLE_FORCE("_ZN2nn2vi36SetDisplay120HzRefreshRateCapabilityEPNS0_7DisplayEb", "display 120 Hz capability: the host presents at the device rate; nothing to set", Result, h_vi_Set120, void *disp, unsigned on) {
+    (void)disp; static atomic_int once; if (!atomic_exchange(&once, 1)) LOG("vi::SetDisplay120HzRefreshRateCapability %u: no-op on the host", on); return RES_OK; }
 // The extended swap interval asks for a presentation rate between whole vsync intervals (VRR); without VRR the swap interval NVN sets stays in effect
 HLE_FORCE("_ZN2nn2vi28SetLayerExtendedSwapIntervalEPNS0_5LayerEii", "layer extended swap interval: needs VRR, which the host has not; NVN's swap interval stays", Result, h_vi_ExtSwap,
           void *layer, int a, int b) {

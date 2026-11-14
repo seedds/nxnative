@@ -197,6 +197,9 @@ int main(void) {
     h_oe_SetFocusMode(3); dm_applet_enter("test");
     CHECK(empty() && h_oe_GetFocus() == 2, "focus mode 3: an applet changes the state without a notification");
     dm_applet_leave(); CHECK(empty() && h_oe_GetFocus() == 1, "focus mode 3: back to 1 without a notification");
+    // Switch 2 gs native memory handles the host answers itself: the range's address
+    { static char range[64]; uint64_t h = 0;
+      CHECK(h_gs_NativeMem(&h, range, sizeof range, 3, 0) == 0 && h == (uint64_t)(uintptr_t)range && h_gs_NativeMemFree(h) == 0, "CreateNativeMemory: the handle is the range's address"); }
     // the graphics scale does not follow the operation mode: tier 0 in both modes; DM_GFX_SCALE picks a reduced tier, nonsense keeps 0
     unsetenv("DM_GFX_SCALE"); dm_set_opmode(1); CHECK(h_oe_GfxScale() == 0, "graphics scale docked: tier 0 (the whole GPU)");
     dm_set_opmode(0); CHECK(h_oe_GfxScale() == 0, "graphics scale handheld: tier 0");

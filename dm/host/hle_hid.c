@@ -1241,6 +1241,10 @@ HLE_FORCE("_ZN2nn3hid44IsUnintendedHomeButtonInputProtectionEnabledERKj", "Home 
           const uint32_t *id) { return id && (atomic_load(&g_home_protect) & id_bit(*id)); }
 // The system setting for the mouse pointer's speed (System Settings, Mouse): the default, 1
 HLE_FORCE("_ZN2nn3hid25GetMousePointerSpeedScaleEv", "mouse pointer speed setting: the default, 1.0", float, h_hid_MouseSpeed, void) { return 1.0f; }
+// Switch 2 SDK calls Nintendo Switch 2 Welcome Tour makes that the SDK answers from the hid service, which the host does not serve (sf abort 0xe15 at sdk+0x65cfdc): the GL / GR
+// buttons' configuration (the Switch 2 Pro Controller's back buttons): none assigned
+HLE_FORCE("_ZN2nn3hid24GetGlGrButtonConfigStateEPbS1_j", "GL / GR button configuration (Switch 2 Pro Controller): not assigned", Result, h_hid_GlGr, uint8_t *gl, uint8_t *gr, uint32_t npad) {
+    (void)npad; if (gl) *gl = 0; if (gr) *gr = 0; return RES_OK; }
 // Npad IMU (Switch 2 SDKs): the six-axis samples the SDK's own sensor fusion reads (Enable/UpdateSensorFusion → GetNpadImuSamples → nn::imu::FullSensorState). EnableNpadImu gives the
 // hid service the game's buffer as transfer memory, which the host does not serve: Nintendo Switch Sports Resort aborted in InitializeSensorFusion (Result 0xe15, sdk+0x6d6948). These four
 // calls are the only users of the SDK's IMU state (sdk+0x1056c48), so the host keeps that state here: on with the game's buffer, which no service writes; GetNpadImuSamples writes the

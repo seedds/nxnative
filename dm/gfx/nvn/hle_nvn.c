@@ -1598,6 +1598,18 @@ NVN_NOPROTO(nvnCommandBufferDrawMeshTasksIndirect, void, NVNcommandBuffer *c, NV
 NVN_NOPROTO(nvnCommandBufferBindShadingRateImage, void, NVNcommandBuffer *c, const void *view, const void *tex) { (void)c; (void)view; (void)tex; }
 NVN_NOPROTO(nvnCommandBufferShadingRateImagePalette, void, NVNcommandBuffer *c, int first, int n, const void *entries) { (void)c; (void)first; (void)n; (void)entries; }
 NVN_NOPROTO(nvnCommandBufferSetShadingRatePaletteMode, void, NVNcommandBuffer *c, int mode) { (void)c; (void)mode; }
+// NVN2 ray tracing: the size query of an acceleration structure, (device, const build info, size_t *result, size_t *build scratch, size_t *update scratch): three out words the
+// game sums into the memory pool it makes for its acceleration structures (Welcome Tour: main+0x6130cc, pool from the sum at main+0xfc2cc / +0x11bf1c). The red stub wrote nothing, and
+// the caller does not zero them, so the sum was stack garbage: 0xffffffff + 1 + 1 = 0x100000001, a 4 GB pool committed before the first frame (half of the Switch 2's 9 GB pool), and
+// the game then ran out of memory in its loader 16 frames in. The host builds no acceleration structures (the build commands go to the red stub, and no ray is traced), so small
+// sizes with the pool's 4 KB granule keep every later offset valid
+NVN_NOPROTO(nvnDeviceCalculateAccelerationStructureMemoryRequirements, void, NVNdevice *d, const void *info, uint64_t *result, uint64_t *build, uint64_t *update) {
+    (void)d; (void)info;
+    if (result) *result = 0x10000;
+    if (build) *build = 0x10000;
+    if (update) *update = 0x10000;
+    static int once; if (!once++) LOG("[nvn] [RED] CalculateAccelerationStructureMemoryRequirements: 64 KB each for the structure and its scratch (no acceleration structure is built on the host)");
+}
 NVN(nvnCommandBufferDrawArraysIndirect, void, NVNcommandBuffer *c, NVNdrawPrimitive pr, NVNbufferAddress ind) { rec_draw(c, (p_draw){pr, 0, 0, 1, 0, ind}); }
 NVN(nvnCommandBufferDrawElementsInstanced, void, NVNcommandBuffer *c, NVNdrawPrimitive pr, NVNindexType it, int n, NVNbufferAddress ib,
     int bv, int bi, int inst) {

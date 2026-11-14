@@ -130,31 +130,31 @@ static void rec_note_wait(_Atomic uint64_t *p, uint64_t v) {
 
 // ---------- The encode thread ----------
 static id g_rx_cb, g_rx_enc;   // the encode thread's real command buffer and open encoder
-// ---------- Submissions merged into one command buffer ----------
-// A submission's commit is deferred while the GPU still runs a main command buffer committed earlier: its command buffer stays open, the next submission's commands go on in it,
-// and one commit carries the feedback of all of them. A game that splits its frame at every event signal makes many small submissions (Ocarina of Time 22 to 30 a frame, each cut
-// again at its waits, signals and fences by the queue scheduler), and they all reach the queue within a few milliseconds, behind the frame's first one. Command buffers queued
-// behind running work are the condition for the kernel's stall (docs/reference/frame-rate.md, "The GPU idles with the next command buffer already committed"): on the iPhone 17, with
-// the GPU at a low clock, the second command buffer of a frame started 22 to 37 ms after the first had ended in three frames of four, the GPU then read 55 to 75 % busy and its
-// governor never raised the clock again (5 to 12 fps where the same scene holds 30). What goes to the queue between two submissions keeps its place: the deferred ones are committed
-// before an upload batch, a snapshot copy or a queue operation, when the GPU runs out of work at the end of an encoder, when nothing more is recorded for about half a millisecond,
-// and when the submit thread drains the encode thread. A submission cut in segments, or one that waits for the GPU (mdi_wait), commits as before and takes the deferred ones along.
-// Each deferred submission's feedback gets its own part of the command buffer's GPU time: from the boundary stamp its successor's first encoder writes (ts_sub_begin) where there
-// is one, so a counter report that falls back to its command buffer's times (rep_ticks) reads what it read when the submission had a command buffer of its own.
-// DM_NVN_SUB_MERGE=0 commits every submission on its own again (ab: alternates with the DM_AB phases, for measurement)
+// ---------- Submissions committed together ----------
+// A submission's commit is held while the GPU still runs a main command buffer committed earlier: its command buffer is ended and kept, the next submissions' go into command buffers
+// of their own, and the held ones reach the queue in one commit call, in order. A game that splits its frame at every event signal makes many small submissions (Ocarina of Time 22
+// to 30 a frame, each cut again at its waits, signals and fences by the queue scheduler), and they all reach the queue within a few milliseconds, behind the frame's first one.
+// Command buffers queued behind running work are the condition for the kernel's stall (docs/reference/frame-rate.md, "The GPU idles with the next command buffer already
+// committed"): on the iPhone 17, with the GPU at a low clock, the second command buffer of a frame started 22 to 37 ms after the first had ended in three frames of four, the GPU then
+// read 55 to 75 % busy and its governor never raised the clock again (5 to 12 fps where the same scene holds 30). The held ones are committed when the GPU runs out of work (at the end
+// of an encoder), when nothing more is recorded for about half a millisecond, when the submit thread drains the encode thread, and before anything else goes to the queue (an
+// upload batch, a snapshot copy, a queue operation, a signal of its own): each command buffer keeps its place among those exactly as when it was committed on its own. A first version
+// put the next submissions into the held command buffer itself; an upload batch recorded inside a submission then went to the queue after the draws of that submission recorded
+// before it, which sampled the textures before their upload (pink and dark flashes on the iPhone, and a GPU error and recovery). Each held submission's feedback gets its own part of
+// the commit's GPU time, from the stamp its successor's first encoder writes (ts_sub_begin) where there is one, so a counter report that falls back to its command buffer's times
+// (rep_ticks) reads what it read on its own. DM_NVN_SUB_MERGE=0 commits every submission on its own again (ab: alternates with the DM_AB phases, for measurement)
 enum { RX_PEND_MAX = 48 };
-static DmCommitFB *g_rx_fb[RX_PEND_MAX]; static id g_rx_stamp_heap[RX_PEND_MAX]; static int g_rx_stamp[RX_PEND_MAX], g_rx_npend;   // the deferred submissions, oldest first; stamp: the heap slot of the boundary after it (-1: none)
-static int g_rx_begun, g_rx_endpend, g_rx_insub, g_rx_after, g_rx_want_stamp;   // the real command buffer is begun; its end is recorded and waits for the commit record; a submission is being encoded; the last record was a deferred commit (or its signal or note); the next boundary stamp is the last deferred submission's
-static id g_rx_alloc;   // the allocator of the submission being encoded: its command buffer after an early commit of the deferred ones begins with it
-static uint64_t g_rx_ubc;   // the newest uniform shadow the deferred submissions read (ubc_wait at the commit)
-static struct { uint64_t v; _Atomic uint64_t *p; } g_rx_post[2 * RX_PEND_MAX + 4]; static id g_rx_post_ev[2 * RX_PEND_MAX + 4]; static int g_rx_npost;   // the signals (an event) and notes that followed deferred commits: made after the real one, in order
-static _Atomic int g_rx_fly, g_rx_held, g_rx_drain, g_rx_stuck;   // main command buffers committed and not reported back; deferred commits wait (rec_drain waits for them); rec_drain callers waiting; they cannot go before the open encoder ends
-static uint64_t g_rx_merged, g_rx_cbs;   // submissions committed with a later one's command buffer; main command buffers committed
+static id g_rx_held_cb[RX_PEND_MAX]; static DmCommitFB *g_rx_fb[RX_PEND_MAX]; static id g_rx_stamp_heap[RX_PEND_MAX]; static int g_rx_stamp[RX_PEND_MAX], g_rx_npend;   // the held submissions, oldest first; stamp: the heap slot of the boundary after it (-1: none)
+static int g_rx_after, g_rx_want_stamp;   // the last record was a held commit (or its signal or note); the next boundary stamp is the last held submission's end
+static uint64_t g_rx_ubc;   // the newest uniform shadow the held submissions read (ubc_wait at the commit)
+static struct { uint64_t v; _Atomic uint64_t *p; } g_rx_post[2 * RX_PEND_MAX + 4]; static id g_rx_post_ev[2 * RX_PEND_MAX + 4]; static int g_rx_npost;   // the signals (an event) and notes that followed held commits: made after the real one, in order
+static _Atomic int g_rx_fly, g_rx_held, g_rx_drain;   // main command buffers committed and not reported back; commits are held (rec_drain waits for them); rec_drain callers waiting
+static uint64_t g_rx_merged, g_rx_cbs; static int g_rx_last_nb;   // submissions held and committed with a later one; commit calls of main command buffers; command buffers in the last one
 static int sw_mode(const char *name, int dflt); static inline int sw_on(int m);
 static int rx_merge_on(void) {
     static int v = -1;
     if (v < 0) { const char *e = getenv("DM_NVN_SUB_MERGE"); v = e && !strncmp(e, "ab", 2) ? sw_mode("DM_NVN_SUB_MERGE", 0) : !(e && !strcmp(e, "0"));
-        if (!v) MLOG("DM_NVN_SUB_MERGE=0: every submission is committed in a command buffer of its own"); }
+        if (!v) MLOG("DM_NVN_SUB_MERGE=0: every submission is committed on its own"); }
     return sw_on(v);
 }
 static double rx_stamp_s(id heap, int slot) {   // a boundary stamp in seconds on the Mach clock, as a commit feedback's GPU times are; 0 when it was not written
@@ -166,65 +166,56 @@ static double rx_stamp_s(id heap, int slot) {   // a boundary stamp in seconds o
     double ago = (double)gpu - (double)en->timestamp * scale;
     return cpu && ago >= 0 && ago < 2e9 ? ((double)cpu - ago) / 1e9 : 0;
 }
-// The real commit of the encode thread's command buffer (ended by the caller): the deferred submissions' feedback first, then its own (own: nil for an early commit of the deferred ones alone)
-static void rx_commit(DmCommitFB *own, uint64_t ubc) {
-    int n = g_rx_npend, cnt = n + (own != nil);
-    NSMutableArray *fbs = [NSMutableArray arrayWithCapacity:(NSUInteger)cnt], *heaps = [NSMutableArray arrayWithCapacity:(NSUInteger)n]; NSMutableData *st = [NSMutableData dataWithLength:(NSUInteger)(n ? n : 1) * sizeof(int)]; int *sl = st.mutableBytes;
-    for (int i = 0; i < n; i++) { [fbs addObject:g_rx_fb[i]]; [heaps addObject:g_rx_stamp_heap[i] ?: (id)NSNull.null]; sl[i] = g_rx_stamp[i]; g_rx_fb[i] = nil; g_rx_stamp_heap[i] = nil; }
-    if (own) [fbs addObject:own];
+// One commit call: the held command buffers, then (cur) the encode thread's own, ended by the caller, with its feedback own (nil: none). The held ones' feedback comes first
+static void rx_commit(int cur, DmCommitFB *own, uint64_t ubc) {
+    int n = g_rx_npend, nb = n + (cur != 0), cnt = nb; if (!nb) return;
+    id<MTL4CommandBuffer> buffers[RX_PEND_MAX + 1];
+    NSMutableArray *fbs = [NSMutableArray arrayWithCapacity:(NSUInteger)cnt], *heaps = [NSMutableArray arrayWithCapacity:(NSUInteger)(n ? n : 1)]; NSMutableData *st = [NSMutableData dataWithLength:(NSUInteger)(n ? n : 1) * sizeof(int)]; int *sl = st.mutableBytes;
+    for (int i = 0; i < n; i++) { buffers[i] = g_rx_held_cb[i]; [fbs addObject:g_rx_fb[i]]; [heaps addObject:g_rx_stamp_heap[i] ?: (id)NSNull.null]; sl[i] = g_rx_stamp[i]; g_rx_held_cb[i] = nil; g_rx_fb[i] = nil; g_rx_stamp_heap[i] = nil; }
+    if (cur) { buffers[n] = g_rx_cb; [fbs addObject:own ?: (id)NSNull.null]; }
     if (g_rx_ubc > ubc) ubc = g_rx_ubc;
-    g_rx_ubc = 0; g_rx_npend = 0; g_rx_want_stamp = 0; atomic_store(&g_rx_held, 0); atomic_store(&g_rx_stuck, 0);
-    ubc_wait(ubc);   // the uniform shadows this command buffer reads
+    g_rx_ubc = 0; g_rx_npend = 0; g_rx_want_stamp = 0; atomic_store(&g_rx_held, 0);
+    ubc_wait(ubc);   // the uniform shadows these command buffers read
     MTL4CommitOptions *o = [MTL4CommitOptions new];
     atomic_fetch_add(&g_rx_fly, 1);
     [o addFeedbackHandler:^(id<MTL4CommitFeedback> f) {
         atomic_fetch_sub(&g_rx_fly, 1);
-        if (cnt == 1) { for (void (^b)(id<MTL4CommitFeedback>) in ((DmCommitFB *)fbs[0])->blocks) b(f); return; }
+        if (cnt == 1) { if (fbs[0] != NSNull.null) for (void (^b)(id<MTL4CommitFeedback>) in ((DmCommitFB *)fbs[0])->blocks) b(f); return; }
         double t[RX_PEND_MAX + 2]; const int *ss = st.bytes; t[0] = f.GPUStartTime; t[cnt] = f.GPUEndTime;
         for (int i = 1; i < cnt; i++) { double at = i - 1 < n && heaps[(NSUInteger)(i - 1)] != NSNull.null ? rx_stamp_s(heaps[(NSUInteger)(i - 1)], ss[i - 1]) : 0; t[i] = at > 0 && at >= t[0] && at <= t[cnt] ? at : -1; }
         for (int i = cnt - 1; i >= 1; i--) if (t[i] < 0 || t[i] > t[i + 1]) t[i] = t[i + 1];   // no stamp (an encoder with no work writes none): the submission ends where the next known boundary is
-        for (int i = 0; i < cnt; i++) { DmPartFB *part = [DmPartFB new]; part->t0 = t[i]; part->t1 = t[i + 1]; part->err = f.error;
+        for (int i = 0; i < cnt; i++) { if (fbs[(NSUInteger)i] == NSNull.null) continue; DmPartFB *part = [DmPartFB new]; part->t0 = t[i]; part->t1 = t[i + 1]; part->err = f.error;
             for (void (^b)(id<MTL4CommitFeedback>) in ((DmCommitFB *)fbs[(NSUInteger)i])->blocks) b((id<MTL4CommitFeedback>)part); }
     }];
-    id<MTL4CommandBuffer> buffers[] = {g_rx_cb};
-    pthread_mutex_lock(&g_res_commit_mu);   // apart from the residency set's commit, as the present snapshot's queue commit (nvn_mtl.m res_commit)
-    [g_q4 commit:buffers count:1 options:o];
+    pthread_mutex_lock(&g_res_commit_mu);
+    [g_q4 commit:buffers count:(NSUInteger)nb options:o];
     pthread_mutex_unlock(&g_res_commit_mu);
-    g_rx_cb = nil; g_rx_begun = 0; g_rx_cbs++;
-    for (int i = 0; i < g_rx_npost; i++) {   // what followed the deferred commits
+    if (cur) g_rx_cb = nil;
+    g_rx_cbs++; g_rx_merged += (uint64_t)n; g_rx_last_nb = nb;
+    for (int i = 0; i < g_rx_npost; i++) {   // what followed the held commits
         if (g_rx_post_ev[i]) { [g_q4 signalEvent:g_rx_post_ev[i] value:g_rx_post[i].v]; g_rx_post_ev[i] = nil; }
         else { _Atomic uint64_t *np = g_rx_post[i].p; pthread_mutex_lock(&g_note_mu); if (g_rx_post[i].v > atomic_load(np)) atomic_store(np, g_rx_post[i].v); pthread_cond_broadcast(&g_note_cv); pthread_mutex_unlock(&g_note_mu); }
     }
     g_rx_npost = 0;
-    if (g_rx_cbs % 20000 == 0) MLOG("merged submissions: %llu main command buffers committed so far, %llu submissions rode on a later one's (DM_NVN_SUB_MERGE)", (unsigned long long)g_rx_cbs, (unsigned long long)g_rx_merged);
+    if (g_rx_cbs % 20000 == 0) MLOG("held submissions: %llu commits of main command buffers so far, %llu submissions committed with a later one (DM_NVN_SUB_MERGE)", (unsigned long long)g_rx_cbs, (unsigned long long)g_rx_merged);
 }
-// The deferred submissions go to the queue now: the open command buffer ends here, and the submission being encoded goes on in a new one. Not while an encoder is open
-static void rx_flush(void) {
-    if (!g_rx_npend || !g_rx_begun) return;
-    if (g_rx_enc) { if (atomic_load(&g_rx_drain)) atomic_store(&g_rx_stuck, 1); return; }
-    [(id<MTL4CommandBuffer>)g_rx_cb endCommandBuffer]; g_rx_endpend = 0;
-    rx_commit(nil, 0);
-    if (g_rx_insub) { g_rx_cb = [g_dev newCommandBuffer]; [(id<MTL4CommandBuffer>)g_rx_cb beginCommandBufferWithAllocator:g_rx_alloc]; g_rx_begun = 1; }
-}
+static void rx_flush(void) { if (g_rx_npend) rx_commit(0, nil, 0); }   // the held command buffers go to the queue now
 static void rec_exec(const rec_t *r) {
     const uint64_t *a = r->a; id e = g_rx_enc;
     int after = g_rx_after; if (r->op != RO_SIGNAL && r->op != RO_NOTE) g_rx_after = 0;
-    if (g_rx_endpend && r->op != RO_COMMIT) { [(id<MTL4CommandBuffer>)g_rx_cb endCommandBuffer]; g_rx_endpend = 0; g_rx_begun = 0; }   // (a command buffer's end is always followed by its commit)
     switch (r->op) {
-    case RO_CB_NEW: if (!g_rx_begun) g_rx_cb = [g_dev newCommandBuffer]; g_rx_insub = 1; break;   // begun: the deferred submissions' command buffer goes on
-    case RO_CB_BEGIN: g_rx_alloc = rec_id(a[0]); if (!g_rx_begun) { [(id<MTL4CommandBuffer>)g_rx_cb beginCommandBufferWithAllocator:g_rx_alloc]; g_rx_begun = 1; } break;
-    case RO_CB_END: g_rx_endpend = 1; break;   // ended at its commit record, unless that defers it
+    case RO_CB_NEW: g_rx_cb = [g_dev newCommandBuffer]; break;
+    case RO_CB_BEGIN: [(id<MTL4CommandBuffer>)g_rx_cb beginCommandBufferWithAllocator:rec_id(a[0])]; break;
+    case RO_CB_END: [(id<MTL4CommandBuffer>)g_rx_cb endCommandBuffer]; break;
     case RO_CB_BLOCK: ((void (^)(id<MTL4CommandBuffer>))rec_id(a[0]))(g_rx_cb); break;
-    case RO_COMMIT: {   // a main command buffer: a[0] its feedback, a[2] its uniform shadows, a[3] / a[4] submission and segment, a[5] the submission ends with it
+    case RO_COMMIT: {   // a main command buffer (ended): a[0] its feedback, a[2] its uniform shadows, a[3] / a[4] submission and segment, a[5] the submission ends with it
         uint64_t gt0 = atomic_load_explicit(&g_gt_on, memory_order_relaxed) ? mach_absolute_time() : 0;
         DmCommitFB *fb = rec_id(a[0]);
-        if (a[5] && fb && g_rx_endpend && g_rx_npend < RX_PEND_MAX && atomic_load(&g_rx_fly) > 0 && !atomic_load(&g_rx_drain) && rx_merge_on()) {   // deferred: the GPU has work, and the next submission goes on in this command buffer
-            g_rx_fb[g_rx_npend] = fb; g_rx_stamp[g_rx_npend] = -1; g_rx_stamp_heap[g_rx_npend] = nil; g_rx_npend++; if (a[2] > g_rx_ubc) g_rx_ubc = a[2];
-            g_rx_endpend = 0; g_rx_insub = 0; g_rx_after = 1; g_rx_want_stamp = 1; g_rx_merged++; atomic_store(&g_rx_held, 1);
+        if (a[5] && fb && g_rx_npend < RX_PEND_MAX && atomic_load(&g_rx_fly) > 0 && !atomic_load(&g_rx_drain) && rx_merge_on()) {   // held: the GPU has work
+            g_rx_held_cb[g_rx_npend] = g_rx_cb; g_rx_fb[g_rx_npend] = fb; g_rx_stamp[g_rx_npend] = -1; g_rx_stamp_heap[g_rx_npend] = nil; g_rx_npend++; if (a[2] > g_rx_ubc) g_rx_ubc = a[2];
+            g_rx_cb = nil; g_rx_after = 1; g_rx_want_stamp = 1; atomic_store(&g_rx_held, 1);
             break; }
-        if (g_rx_endpend) { [(id<MTL4CommandBuffer>)g_rx_cb endCommandBuffer]; g_rx_endpend = 0; }
-        rx_commit(fb, a[2]);
-        if (a[5]) g_rx_insub = 0;
+        rx_commit(1, fb, a[2]);
         if (gt0) gt_put(GT_COMMIT, gt0, a[3], a[4]);   // DM_NVN_GPUPROF's timeline: submission, segment
         break; }
     case RO_COMMIT_REAL: {   // an upload batch, a snapshot copy: a whole command buffer, after everything recorded before it
@@ -243,7 +234,7 @@ static void rec_exec(const rec_t *r) {
     case RO_RE_BEGIN: g_rx_enc = [(id<MTL4CommandBuffer>)g_rx_cb renderCommandEncoderWithDescriptor:rec_id(a[0])]; break;
     case RO_CE_BEGIN: g_rx_enc = [(id<MTL4CommandBuffer>)g_rx_cb computeCommandEncoder]; break;
     case RO_END: [(id<MTL4CommandEncoder>)e endEncoding]; g_rx_enc = nil; g_rx_want_stamp = 0;
-        if (g_rx_npend && (!atomic_load(&g_rx_fly) || atomic_load(&g_rx_drain))) rx_flush();   // the GPU has run out of work (or the submit thread waits): what is encoded so far goes to it
+        if (g_rx_npend && (!atomic_load(&g_rx_fly) || atomic_load(&g_rx_drain))) rx_flush();   // the GPU has run out of work (or the submit thread waits): the held ones go to it
         break;
     case RO_BAR_QUEUE: [(id<MTL4CommandEncoder>)e barrierAfterQueueStages:a[0] beforeStages:a[1] visibilityOptions:a[2]]; break;
     case RO_BAR_AFTER_STAGES: [(id<MTL4CommandEncoder>)e barrierAfterStages:a[0] beforeQueueStages:a[1] visibilityOptions:a[2]]; break;
@@ -311,11 +302,11 @@ static void *rec_thread(void *arg) {
     for (;;) {
         pthread_mutex_lock(&g_rb_mu);
         while (!g_rb_head) {
-            if (g_rx_npend && !atomic_load(&g_rx_stuck)) {   // deferred commits and nothing more to encode: a short wait for the next submission while the GPU still has work, then they go
+            if (g_rx_npend) {   // held commits and nothing more to encode: a short wait for the next submission while the GPU still has work, then they go
                 for (int k = 0; k < 3 && !g_rb_head && atomic_load(&g_rx_fly) > 0 && !atomic_load(&g_rx_drain); k++) { struct timespec ts = {0, 150000}; g_rb_sleeping = 1; pthread_cond_timedwait_relative_np(&g_rb_work, &g_rb_mu, &ts); g_rb_sleeping = 0; }
                 if (g_rb_head) break;
                 g_rb_busy = 1; pthread_mutex_unlock(&g_rb_mu);
-                @autoreleasepool { rx_flush(); if (g_rx_npend) atomic_store(&g_rx_stuck, 1); }   // (still there: an encoder is open, and they go when it ends)
+                @autoreleasepool { rx_flush(); }
                 pthread_mutex_lock(&g_rb_mu); g_rb_busy = 0; if (!g_rb_head) pthread_cond_broadcast(&g_rb_idle);
                 continue;
             }
@@ -359,8 +350,8 @@ static void rec_drain(void) {
     rec_publish();
     uint64_t w0 = ws_t0(); int blocked = 0;
     pthread_mutex_lock(&g_rb_mu);
-    atomic_fetch_add(&g_rx_drain, 1); if (g_rb_sleeping) pthread_cond_signal(&g_rb_work);   // deferred commits go now (merged submissions)
-    while (g_rb_head || g_rb_busy || (atomic_load(&g_rx_held) && !atomic_load(&g_rx_stuck))) { blocked = 1; struct timespec ts = {0, 2000000}; pthread_cond_timedwait_relative_np(&g_rb_idle, &g_rb_mu, &ts); if (g_rb_sleeping) pthread_cond_signal(&g_rb_work); }
+    atomic_fetch_add(&g_rx_drain, 1); if (g_rb_sleeping) pthread_cond_signal(&g_rb_work);   // held commits go now (DM_NVN_SUB_MERGE)
+    while (g_rb_head || g_rb_busy || atomic_load(&g_rx_held)) { blocked = 1; struct timespec ts = {0, 2000000}; pthread_cond_timedwait_relative_np(&g_rb_idle, &g_rb_mu, &ts); if (g_rb_sleeping) pthread_cond_signal(&g_rb_work); }
     atomic_fetch_sub(&g_rx_drain, 1);
     pthread_mutex_unlock(&g_rb_mu);
     if (ws_on()) ws_put(WS_DRAIN, w0, blocked);

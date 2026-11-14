@@ -495,9 +495,11 @@ static void cut_boundary_case(void) {
     CHECK(r0[1] && r1[1] > r0[1], "two reports in one command buffer read two times");
 }
 
-// With Metal encoding on its own thread, submissions that reach it while the GPU still runs an earlier command buffer go to the queue in one command buffer (nvn_rec.h, merged
-// submissions): one commit carries the feedback of all of them, their notes and signals follow it, and each one's reports still read its own part of the GPU time. The encode
-// thread is held by a queue block until the three are recorded, and "an earlier command buffer runs" is the counter raised by hand
+// With Metal encoding on its own thread, submissions that reach it while the GPU still runs an earlier command buffer are held and go to the queue in one commit call (nvn_rec.h,
+// held submissions): their notes and signals follow it, and each one's reports still read its own part of the GPU time. Anything else for the queue recorded inside a later
+// submission (an upload batch, here a queue block) goes after the held ones and before that submission's own command buffer, as when each was committed on its own: the first
+// version continued the next submission in the held command buffer, and an upload recorded inside it went to the GPU after the draws recorded before it. The encode thread is held
+// by a queue block until the submissions are recorded, and "an earlier command buffer runs" is the counter raised by hand
 static void merge_case(void) {
     if (!rec_on()) return;
     tex_t colour; target(&colour, 99820);
@@ -521,22 +523,26 @@ static void merge_case(void) {
     CHECK(g_done >= f[2], "three submissions behind running work complete");
     atomic_fetch_sub(&g_rx_fly, 1);
     rec_drain();
-    CHECK(g_rx_merged - merged0 == 3 && g_rx_cbs - cbs0 == 1, "they went to the queue in one command buffer");
+    CHECK(g_rx_merged - merged0 == 3 && g_rx_cbs - cbs0 == 1, "they went to the queue in one commit");
     CHECK(atomic_load(&g_sub_cmt) >= f[2], "their commit notes are passed");
     uint64_t r[3][2]; memcpy(r, rep.contents, sizeof r);
     CHECK(r[0][1] && r[1][1] >= r[0][1] && r[2][1] >= r[1][1] && r[2][1] > r[0][1], "each one's report reads its own end, not the shared command buffer's");
-    // an upload batch, a snapshot copy or a queue operation after them keeps its place: they are committed first
+    // a queue operation recorded inside the next submission, after its first pass: the held submission goes to the queue before it, and that submission's own command buffer,
+    // which holds the pass, after it (an upload batch flushed in the middle of a submission is committed before the draws it serves, wherever in the submission they were recorded)
     rec_drain(); for (int i = 0; i < 20000 && (atomic_load(&g_rx_fly) || atomic_load(&g_seg_inflight)); i++) usleep(100);
-    cbs0 = g_rx_cbs; merged0 = g_rx_merged; __block uint64_t held_at_block = ~0ull; __block int pend_at_block = -1;
+    cbs0 = g_rx_cbs; merged0 = g_rx_merged; __block uint64_t held_at_block = ~0ull; __block int pend_at_block = -1, nb_at_block = -1;
     atomic_fetch_add(&g_rx_fly, 1);
     rec_queue_block(^{ dispatch_semaphore_wait(gate, DISPATCH_TIME_FOREVER); }); rec_publish();
     state_reset(); memset(&R, 0, sizeof R); mtl_sub_begin(); R.has_rt = 1; R.rt.n = 1; R.rt.color[0] = &colour; clear(MTLClearColorMake(1, 1, 0, 1)); rp_end(); uint64_t fa = mtl_sub_commit();
-    rec_queue_block(^{ held_at_block = g_rx_cbs; pend_at_block = g_rx_npend; }); rec_publish();
+    state_reset(); memset(&R, 0, sizeof R); mtl_sub_begin(); R.has_rt = 1; R.rt.n = 1; R.rt.color[0] = &colour; clear(MTLClearColorMake(0, 1, 1, 1)); rp_end();
+    rec_queue_block(^{ held_at_block = g_rx_cbs; pend_at_block = g_rx_npend; nb_at_block = g_rx_last_nb; }); rec_publish();
+    clear(MTLClearColorMake(1, 0, 1, 1)); rp_end(); uint64_t fb2 = mtl_sub_commit();
     dispatch_semaphore_signal(gate);
-    CHECK(mtl_wait(fa, 5000000000ull), "a submission before a queue operation completes");
     atomic_fetch_sub(&g_rx_fly, 1);
+    CHECK(mtl_wait(fb2, 5000000000ull), "the submissions around a queue operation complete");
     rec_drain();
-    CHECK(pend_at_block == 0 && held_at_block == cbs0 + 1 && g_rx_merged - merged0 == 1, "it was committed before the queue operation ran");
+    CHECK(pend_at_block == 0 && held_at_block == cbs0 + 1 && g_rx_merged - merged0 >= 1 && fa < fb2, "the held submission was committed before the queue operation ran");
+    CHECK(nb_at_block == 1, "and alone: the next submission's pass recorded before the queue operation was not in that commit");
 }
 
 // Output-mapping-only fixture (no rewritable sample): main0 writes magenta to color(0); main0_f remaps

@@ -2410,8 +2410,40 @@ def stale_shaders(py, repo, env, lib_dirs, chain, g):
 def pack_libraries(sh, chain, pull=None):
     """Each finished library folder as one file, which the host and the tools read in place (shader_lib.py). pull False: nothing reads the iPhone's pulling libraries (ios_wants_pulling), which stay out of its
     image, so the IPA packs that file as it is and reuses it. A build that wants them again compiles them"""
-    shader_lib.pack(sh / 'cache' / f'b-{chain}', say)
-    shader_lib.pack(sh / 'ios' / f'b-{chain}', say, leave_out=pull is False)
+    mac, ios = sh / 'cache' / f'b-{chain}', sh / 'ios' / f'b-{chain}'
+    PROG.set(step='packing the libraries into one file')
+    PROG.watch(PackWatch([(shader_lib.folder_of(mac), shader_lib.image_of(mac)), (shader_lib.folder_of(ios), shader_lib.image_of(ios))]))
+    try:
+        shader_lib.pack(mac, say)
+        shader_lib.pack(ios, say, leave_out=pull is False)
+    finally: PROG.watch(None)
+
+
+class PackWatch:
+    """Progress of folders being written into one file each (shader_lib.pack's images, tree_tar.pack's tars), which print nothing meanwhile: a large game's libraries are many gigabytes and
+    thousands of files on what is often an external drive, minutes during which the line would otherwise stand still. pairs: [(folder, its file)]. The total is the folders' bytes, from one walk
+    in the poll's own thread (an estimate: alignment and headers add a little); done is each file's <file>.part while it is written, and the file once the folder is gone"""
+    def __init__(self, pairs):
+        self.pairs, self.total = [(str(f), str(o)) for f, o in pairs], None
+
+    def __call__(self):
+        if self.total is None:
+            self.total, self.todo = 0, [(f, o) for f, o in self.pairs if os.path.isdir(f)]
+            for f, _ in self.todo:
+                stack = [f]
+                while stack:
+                    try:
+                        with os.scandir(stack.pop()) as it:
+                            for e in it:
+                                if e.is_dir(follow_symlinks=False): stack.append(e.path)
+                                elif e.is_file(follow_symlinks=False): self.total += e.stat(follow_symlinks=False).st_size
+                    except OSError: pass
+        done = 0
+        for f, o in self.todo:
+            for path in (o + '.part',) if os.path.isdir(f) else (o,):
+                try: done += os.stat(path).st_size
+                except OSError: pass
+        return {'done': done, 'total': self.total or None, 'unit': 'B', 'est': True}
 
 
 def ios_gpus(gpu_option, g):
@@ -2503,19 +2535,22 @@ def build_shaders(py, repo, sh, xlate, env, logs, g, pkg_key=None, mac=False, se
     if own := re.search(r'^note: (built with this Mac\'s compilers.*)$', t, re.M): say(own.group(1))
     if lost := re.search(r'^\[RED\] lost without failing: .*$', t, re.M): say(f'{lost.group(0)}; each is named in {log}, and the build goes on: a shader the game never reaches costs nothing')
     m, c = re.search(r'shaders (\d+): ok (\d+)', t), re.search(r'shader cache: hit (\d+)', t)
-    note = ''
+    note = summary = ''
     if m:
         total, ok = int(m.group(1)), int(m.group(2))
         failed = f'; {total - ok:,} failed, reasons at the end of {log}' if ok < total else ''
         note = f'{ok:,} of {total:,} shaders ready{failed}'
-        PROG.end(f'{ok:,} of {total:,} shaders ready' + (f' ({int(c.group(1)):,} from the cache)' if c else '') + failed)
-    else: PROG.end()
-    if not seen: shader_regressions(py, repo, sh / 'cache', chain, logs)   # before the key: a stopped build is checked again on the next run
+        summary = f'{ok:,} of {total:,} shaders ready' + (f' ({int(c.group(1)):,} from the cache)' if c else '') + failed
+    if not seen:
+        PROG.set(step='checking for regressions')
+        shader_regressions(py, repo, sh / 'cache', chain, logs)   # before the key: a stopped build is checked again on the next run
     if key:
         for k in (kmac,) if mac else (kf, kmac) if keep_mac else (kf,): k.write_text(f'{key}\n{note}\n')
     if not seen:   # last: a build that stopped before here keeps the old libraries and cache entries
+        PROG.set(step='pruning old libraries and cache entries')
         prune_stale_chains(sh, chain); prune_shader_cache(sh, chain); pack_libraries(sh, chain, None if mac else pull)
         if mac: rmtree(sh / 'partial')   # the whole library replaces a partial one; partial-keys.txt stays
+    PROG.end(summary)   # after the packing: it takes minutes for a large game and prints nothing, and a stage already marked done looked stopped
     return out
 
 
@@ -2761,6 +2796,22 @@ def mac_gpu_arch(work, env, logs):
     return arch
 
 
+class PsoLines:
+    """The pipeline archive stage's count, from pso_offline.py's lines: "<arch>: batch i/n: ready (...)" for each group of bases or compute pipelines (compute groups finish in any order, so
+    the ready lines are counted), then "<arch>: merging n batches" (metal-pack). Thirty groups of a thousand bases took about an hour on a Mac (Ocarina of Time, 30,515 bases), with nothing on the line"""
+    BATCH, MERGE = re.compile(r'^pso_offline: (\w+): batch \d+/(\d+): (ready)?'), re.compile(r'^pso_offline: (\w+): merging (\d+) batches')
+
+    def __init__(self): self.ready = collections.Counter()
+
+    def __call__(self, line):
+        if m := self.BATCH.match(line):
+            arch, total = m.group(1), int(m.group(2))
+            if m.group(3): self.ready[arch] += 1
+            PROG.set(step=f'{arch}: compiling', done=self.ready[arch], total=total, unit='batches')
+        elif m := self.MERGE.match(line):
+            PROG.set(step=f'{m.group(1)}: merging {int(m.group(2)):,} batches (metal-pack)')
+
+
 def mac_pso(py, repo, work, lib, g, gpus, env, logs):
     """PLATFORM 'mac-app', an NVN game with shader pairs: its pipeline archive made offline for this Mac's GPU (dm/gfx/tools/pso_offline.py --platform macos, metal-tt), which the app carries as
     Resources/pso and the launcher hands to the host as DM_PSO_BUNDLE, as the iOS app does (docs/development.md, The pipeline archive made offline): the app's first start builds no base,
@@ -2780,7 +2831,7 @@ def mac_pso(py, repo, work, lib, g, gpus, env, logs):
     cmd = [py, repo / 'dm/gfx/tools/pso_offline.py', '--game', g.id, '--msl', lib, '--out', out, '--work', work / 'pso/mac-work', '--gpu', arch, '--platform', 'macos']
     if not g.table('pso_pairs.tsv').is_file() and (work / 'shader/pso_pairs.tsv').is_file():   # the split's copy, as the app gets it (--pso-pairs)
         cmd += ['--pairs', g.table('shader_pairs.tsv'), '--pairs', work / 'shader/pso_pairs.tsv']
-    if run(cmd, logs / 'pso_offline_mac.log', env=env, fatal=False):   # an optimization: the app builds the bases on its first start without it
+    if run(cmd, logs / 'pso_offline_mac.log', env=env, fatal=False, on_line=PsoLines()):   # an optimization: the app builds the bases on its first start without it
         shutil.rmtree(out, ignore_errors=True)
         PROG.end('failed, the app is packed without one', warn=True)
         say(f'[RED] pipeline archive: pso_offline.py failed (see {logs / "pso_offline_mac.log"}); the app is packed without one and builds its pipeline bases on its first start (--gpu none skips this step)')
@@ -3449,6 +3500,7 @@ def main(args=None):
     tree_tar.unpack(xcode_data, say)
     run(['bash', repo / 'dm/ios/tools/build_ipa.sh', out_ipa], logs / 'build_ipa.log', env=ipa_env, on_line=watch.line)
     if not out_ipa.is_file(): raise BuildError(f'no IPA at {out_ipa}')
+    PROG.set(step='packing the Xcode data into one file'); PROG.watch(PackWatch([(xcode_data, tree_tar.tar_of(xcode_data))]))
     tree_tar.pack(xcode_data, say)
     PROG.end(f'{out_ipa.name}, {amount(out_ipa.stat().st_size, "B")}')
     rmtree(work / 'tmp')

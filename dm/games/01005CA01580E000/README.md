@@ -51,3 +51,16 @@ Choose offline mode at the network prompt, then New Game and English voices. Adv
 - Test battles, later story scenes and save/load over a longer playthrough.
 - `SetRenderEnableConditional` still reports that the host draws unconditionally. No visual failure was identified in the tested opening; conditional rendering remains unvalidated.
 - Device validation remains for the user after sideloading.
+
+## Regional resource marker
+
+The Asian title `01004B10157F2000` v65536 (1.0.2) shares main build
+`d4b150b29a931cd381e2a30318fc299f` with this profile but ships
+`CPK/ALL_ASIA.CPK` instead of `CPK/ALL_USEU.CPK`. Inheriting the latter
+caused final Mac packaging to reject an otherwise extracted RomFS.
+Cross-title derived profiles now retain an existing resource marker or,
+when it is absent, select the largest actual file from that version's RomFS.
+The registered profile and same-title builds remain unchanged. Synthetic
+folder and image tests cover both layouts and repeated-build reuse. Asian
+Mac packaging with the corrected marker has passed locally; Asian gameplay
+and iOS execution remain untested.

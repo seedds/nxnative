@@ -15,7 +15,7 @@ settings = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(settings)
 
 BOTW, WONDER = '01007EF00011E000', '010015100B514000'
-PERFORMANCE_NVN = ['DM_PRESENT_SNAP', 'DM_PSO_MTL4', 'DM_PSO_PREBUILD', 'DM_NVN_ENC_THREAD', 'DM_FPS_HOLD', 'DM_METAL_HUD']
+PERFORMANCE_NVN = ['DM_PRESENT_SNAP', 'DM_PSO_MTL4', 'DM_PSO_PREBUILD', 'DM_NVN_ENC_THREAD', 'DM_NVN_PREFETCH', 'DM_FPS_HOLD', 'DM_METAL_HUD']
 
 
 def build(gid, api, platform=None):
@@ -65,6 +65,14 @@ class LauncherSettingsTests(unittest.TestCase):
         self.assertEqual(list(dict.fromkeys(s['section'] for s in botw.values())), ['Game', 'Controls', 'Performance'])
         self.assertNotIn('DM_FPS_HOLD', wonder)   # no frame step, as the Frame rate row
         self.assertIn('first start', botw['DM_PSO_PREBUILD']['note'])   # it runs once in the prepare step, before the first frame
+
+    def test_shader_prefetch_follows_the_profile_and_the_iphone_shows_it(self):
+        for api, gid in [('nvn', BOTW), ('vulkan', '0100535012974000'), ('', BOTW)]:
+            with self.subTest(api=api):
+                self.assertEqual('DM_NVN_PREFETCH' in build(gid, api), api == 'nvn')
+        self.assertEqual(build(BOTW, 'nvn')['DM_NVN_PREFETCH']['default'], '1')          # no key in the profile: on
+        self.assertEqual(build('01005CA01580E000', 'nvn')['DM_NVN_PREFETCH']['default'], '0')   # Persona 5 Royal: nvn_prefetch off
+        self.assertEqual(build(BOTW, 'nvn', 'mac')['DM_NVN_PREFETCH']['default'], '1')   # the Mac keeps the prefetch
 
     def test_hold_frames_takes_on_and_off(self):   # the host reads DM_FPS_HOLD as on / off (hle_nvn.c), not 1 / 0
         s = build(BOTW, 'nvn')['DM_FPS_HOLD']

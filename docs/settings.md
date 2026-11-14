@@ -5,7 +5,7 @@ The screen before the game starts shows the settings the game supports. A settin
 - [Tested defaults](#tested-defaults)
 - [Game](#game): [Frame rate](#frame-rate), [Render scale](#render-scale), [Console mode](#console-mode), [Upscaling](#upscaling), [Game's upscaler](#games-upscaler), [Game language](#game-language), [Picture](#picture), [Frame-rate counter](#frame-rate-counter)
 - [Controls](#controls): [Touch feedback](#touch-feedback), [Game rumble](#game-rumble), [Rumble strength](#rumble-strength), [Rumble cutoff](#rumble-cutoff), [Press a button to join](#press-a-button-to-join)
-- [Performance](#performance): [Frame buffering](#frame-buffering), [Metal 4 pipelines](#metal-4-pipelines), [Pipeline prebuild](#pipeline-prebuild), [Encode thread](#encode-thread), [Hold frames when late](#hold-frames-when-late), [Performance HUD](#performance-hud), [Reset to tested defaults](#reset-to-tested-defaults)
+- [Performance](#performance): [Frame buffering](#frame-buffering), [Metal 4 pipelines](#metal-4-pipelines), [Pipeline prebuild](#pipeline-prebuild), [Encode thread](#encode-thread), [Shader prefetch](#shader-prefetch), [Hold frames when late](#hold-frames-when-late), [Performance HUD](#performance-hud), [Reset to tested defaults](#reset-to-tested-defaults)
 - [The Mac settings window](#the-mac-settings-window): [Display mode](#display-mode)
 - [In-game menu](#in-game-menu)
 - [TV](#tv)
@@ -188,6 +188,14 @@ Built in the background while playing instead, the stand-ins took an iPhone 17 P
 The app turns the game's graphics commands into Metal commands on a thread of its own instead of the game's submitting thread, so the game's thread can go on sooner (in Breath of the Wild about 4 ms per frame instead of 8). Frame buffering needs it for games that present their frames from another thread than the one that draws them. It is on by default on the iPhone; on the Mac it is off, where it lowered the typical frame time but made the slowest frames slower.
 
 - **When to change it:** leave it on unless a game misbehaves with it; turning it off is a diagnostic step.
+
+### Shader prefetch
+
+When the game makes a program, the app loads its shader libraries in the background instead of waiting for the first draw that needs them, so a new scene's first frames do not stall while each library is opened (in Donkey Kong Bananza a level's first frames loaded three to seven libraries on the submitting thread, 20-90 ms each with the drive idle). It is on by default.
+
+- **Cost:** every library of the program is opened whether a draw uses it or not. A game whose shader tree is very large fills the phone's limit on open mappings this way, and iOS ends the app after a few minutes (Persona 5 Royal: 24,826 pipelines, about ten minutes, the crash report says `vnode-limit`).
+- **When to change it:** off for a game that iOS ends after a few minutes of play. Each library is then loaded at its first draw, which costs a short stall there instead.
+- **Tests:** off, Persona 5 Royal held 30 fps for 34 minutes on an iPhone 17 Pro (61,200 frames, no crash, 1,773 MiB), against 5 minutes 33 seconds with it on.
 
 ### Hold frames when late
 

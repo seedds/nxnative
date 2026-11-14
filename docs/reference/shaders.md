@@ -2280,6 +2280,21 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Found on:** [Super Mario Bros. Wonder](../../dm/games/010015100B514000/README.md#offline-pipeline-archive-probe). Its note records the contributor's Mac build probe and the outstanding device checks.
 - **Check:** `dm/tools/tests/test_game_profile.py` validates the key; `dm/tools/tests/test_pso_offline.py` exercises both packers' selection and override precedence with synthetic profiles.
 
+### Cold draws without a prepared pulling base
+
+- **Symptom:** a new pipeline stalls a cold gameplay frame even though the shader libraries and native seed manifest are present; the periodic report attributes the delay to `pulling base not made yet`.
+- **Cause:** a translated library is not a Metal pipeline base. The hybrid stand-in needs the pulling base for that vertex/fragment pair before the native descriptor misses. Native seed preparation and all-pair pulling preparation are different coverage sets.
+- **Fix:** use the existing [pipeline prebuild](#a-compile-that-does-not-return-stalls-every-flush-and-draw) and [offline archive](../development.md#the-pipeline-archive-made-offline) paths rather than add another compiler cache. For a diagnostic route-local tool run, `DM_PSO_PREBUILD=tool` waits for workers and serialization before exiting; require its completion counts and inspect `prebuild_failed.tsv`, since exit zero and `prebuilt.tsv` alone do not establish coverage. `DM_PSO_PAIRS` appends to `shader_pairs.tsv`, rather than replacing it. A completed route-local subset tests those candidates only; general preparation must include both full pair tables and the correct depth, shader chain and device target. Consume the prepared archive with `DM_PSO_PREBUILD=0` to avoid overlapping preparation and measured gameplay.
+- **Found on:** [The Legend of Zelda: Tears of the Kingdom](../../dm/games/0100F2C0115B6000/README.md#files-and-shaders), 1.4.3, opening-cave route on Apple M2 Pro / macOS 27.2.0, chain `b3ca4b7c621f`. Two fresh-application-archive comparisons retained the same seed, save and route, with no captured native user manifest injected. Fourteen captured vertex/fragment pairs built fourteen pulling bases with no failures; the first tool run took 1.11 s elapsed and 50.5 MiB maximum RSS. No engine or shader-chain change was needed.
+- **Measured classified waits over each run:** the table concerns missing-base waits, not frame time or FPS. Every prepared interval's summed wait was below a 60 Hz frame budget; no consistent warm-FPS gain was established. These are route-local Mac results, not whole-game coverage or phone measurements.
+
+  | Fresh-archive comparison | Unprepared waits | Prepared waits |
+  |---|---:|---:|
+  | First | 14 / 402.4 ms | 6 / 0.7 ms |
+  | Repeat | 14 / 411.9 ms | 6 / 0.9 ms |
+
+- **Current-default limits:** these historical comparisons did not test profile-selected iOS archive targets or the offline builder's disk-space guard; see [archive target selection](#offline-pipeline-archive-missing-for-the-device-gpu) and [offline pipeline archive on a full disk](#offline-pipeline-archive-on-a-full-disk). `scripts/bench.py` now defaults `DM_PSO_BUNDLE` to the build's `pso/mac` directory when present, preserving inherited and explicit overrides. For a new unprepared/prepared comparison, control both `DM_PSO_BUNDLE` (the bundled offline archive) and `DM_PSO_ARCHIVE` (the writable application archive); a fresh application archive alone no longer establishes an unprepared run. These newer defaults and the current shader chain have not been remeasured here.
+
 ### Offline pipeline archive reuse and fallback
 
 - **Symptom:** a truncated `.mtl4a` reaches `MTL4ArchiveImpl::loadFromURL`; the bundle reports coverage with `0 of 0 probed bases found`; rebuilt shader libraries reuse an archive of their old binaries; or packing fails with `pso_offline: no base to build` when every eligible pair has function constants, or when the profile's `shader_pairs.tsv` holds only its header (`--platform mac-app`, [GitHub issue #338](https://github.com/seedds/nxnative/issues/338)).

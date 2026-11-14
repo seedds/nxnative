@@ -162,6 +162,21 @@ int main(void) { @autoreleasepool {
         CHECK(pixels(0, 0, 0, 255), "an ordinary upload still reads the live buffer in command order");
     }
 
+    if (mtl_sub_stream_on()) {   // The queue replay thread holds the submission lock for the whole translation of each node: the game's next streamed submit queues its job
+        // and copies its command list without waiting for it (nvn_queue.inc nvn_queue_submit, OoT-30 C-4).
+        puts("CASE a submission while the replay holds the submission lock");
+        NVNcommandHandle h = record(&target, &stable_red, 0, 1, 0); memset(memory + OUTPUT, 0x5a, BYTES);
+        dispatch_semaphore_t s = dispatch_semaphore_create(0);
+        pthread_mutex_lock(&g_sub_mu);
+        dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{ P(nvnQueueSubmitCommands)(&queues[0], 1, &h); dispatch_semaphore_signal(s); });
+        long blocked = dispatch_semaphore_wait(s, dispatch_time(DISPATCH_TIME_NOW, 2000000000ll));
+        pthread_mutex_unlock(&g_sub_mu);
+        if (blocked) dispatch_semaphore_wait(s, DISPATCH_TIME_FOREVER);
+        CHECK(!blocked, "a streamed submission does not wait for the submission lock");
+        P(nvnSyncInitialize)(&sync, &device); P(nvnQueueFenceSync)(&queues[0], &sync, NVN_SYNC_CONDITION_ALL_GPU_COMMANDS_COMPLETE, 0); finish(&sync);
+        CHECK(pixels(0, 255, 0, 0), "and draws with that program once the replay runs it");
+    }
+
     P(nvnQueueFinish)(&queues[0]); P(nvnQueueFinish)(&queues[1]);
     P(nvnProgramFinalize)(&reused); P(nvnProgramFinalize)(&stable_red); P(nvnProgramFinalize)(&stable_green);
     P(nvnTextureFinalize)(&target); P(nvnTextureFinalize)(&replacement); P(nvnCommandBufferFinalize)(&command);

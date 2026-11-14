@@ -1,6 +1,7 @@
 // CPU-only lifecycle regression: the real NVN submit entry and graphics gate, with the prepare step (mtl_prepare) held by semaphores and the Metal replay and drain stubbed.
 // Going to the background while the first submission prepares must not wait for it, and a second submission queued behind it must not hold the suspend either (docs/reference/nvn-objects.md,
-// "Going to the background during the prepare step")
+// "Going to the background during the prepare step"). A streamed submission copies its command list without the submit lock (nvn_queue.inc nvn_queue_submit): both return while the prepare step
+// holds it, and neither is in-flight graphics work until the replay runs them after the resume
 #include <pthread.h>
 #include <stdatomic.h>
 #include <dispatch/dispatch.h>
@@ -116,9 +117,9 @@ int main(void) {
     CHECK("the prepare step runs outside the graphics gate", inflight_in_prepare == 0);
     CHECK("the prepare step is host work for the guest scheduler", host_work_in_prepare > 0);
     pthread_create(&second, NULL, submit, (void *)1);
-    if (!reached(second_waiting, "a second submission waits for the submit lock")) return 1;
-    CHECK("a queued submission is not in-flight graphics work", inflight_at_serial_wait == 0);
-    CHECK("a contended submit lock is host work for the guest scheduler", host_work_at_serial_wait > 0);
+    if (!reached(returned, "a submission returns while the prepare step holds the submit lock") || !reached(returned, "a second submission returns as well")) return 1;
+    CHECK("a queued submission is not in-flight graphics work", g_inflight_api == 0);
+    (void)second_waiting; (void)inflight_at_serial_wait; (void)host_work_at_serial_wait;   // the contended-lock hook (observed_mutex_lock): no submission takes the lock now
     if (failures) return 1;   // the suspend below would wait forever
     pthread_create(&background, NULL, suspend_graphics, NULL);
     if (!reached(suspended, "suspend completes while the prepare step holds the submit lock")) return 1;
@@ -131,7 +132,6 @@ int main(void) {
     CHECK("queued work stays outside the GPU while suspended", dispatch_semaphore_wait(committed, dispatch_time(DISPATCH_TIME_NOW, 200 * NSEC_PER_MSEC)) != 0);
     CHECK("no submission commits while graphics are suspended", atomic_load(&commits) == 0);
     dm_gfx_suspend(0);
-    if (!reached(returned, "a submission returns after resume") || !reached(returned, "both submissions return after resume")) return 1;
     pthread_join(first, NULL); pthread_join(second, NULL);
     if (!reached(committed, "first queued submission commits after resume") || !reached(committed, "second queued submission commits after resume")) return 1;
     CHECK("both submissions commit", atomic_load(&commits) == 2);

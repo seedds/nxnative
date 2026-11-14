@@ -384,6 +384,7 @@ void mtl_prog_unpin(prog_t *p); // submit lock held: release a queued descriptor
 int mtl_sub_stream_on(void);
 void mtl_prog_snapshot_pin(prog_t *copy, const prog_t *source); // retain the serial without resolving the program on the submit thread
 void mtl_prog_snapshot(prog_t *copy, const prog_t *source); // submit lock held: retain compiled shaders behind owned metadata
+int mtl_prepared(void);   // the first submission's prepare step (mtl_prepare) has nothing left to do
 void mtl_prog_prefetch(const prog_t *p);   // loads a new program's shader libraries in the background (nvn_mtl.m)
 void mtl_prog_forget(const prog_t *p);   // program finalize, submit lock held: drop it from every queue's bindings
 // New serial (> 0, globally increasing)

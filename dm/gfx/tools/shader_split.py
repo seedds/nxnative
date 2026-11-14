@@ -231,7 +231,8 @@ def ndsr_shaders(d, label):
     is an NVN2 control section are shaders (types 0 / 3 graphics, 6 compute; a vertex record is followed by its pixel record); the others (type 0xb, 0x50c) hold constant data.
     The control section's stage byte (+0x56) and its code length (+0x44) decide the stage and the code area, as for BNSH.
     The records start at +0x14 in Splatoon Raiders' pack, whose header has another word and other values (+4 0x40100, against 0x300 in Bananza's), so the start is the one whose first
-    records point at control sections. Read from +0x10 the same pack gave no shader, the upscaler's draws were skipped and every 3D frame reached the window black"""
+    records point at control sections. Read from +0x10 the same pack gave no shader, the upscaler's draws were skipped and every 3D frame reached the window black.
+    Monolith's pack in Xenoblade Chronicles 2's Switch 2 program (header +4 0x500, records from +0x10: 40 shaders, 3 of them compute) comes through monolith_shaders"""
     if d[:4] != b'NDSR' or len(d) < 0x20: return []
     def records_from(o):   # how many of the first records point at an NVN2 control section
         count = min(16, (len(d) - o) // 16)
@@ -2737,11 +2738,16 @@ def hcps_shaders(d, base, label):
             # A vertex bundle can include a geometry stage (shd_lgt.wishp:
             # 768-byte vertex + 256-byte geometry, two 0x880 controls). NVSD's
             # vertex size covers both; each NVN control gives its own code size.
+            # NVN2 (Xenoblade Chronicles 2's Switch 2 Edition): 0xd0-byte control sections that name their own length at +0x30 and the code's at +0x44 (nvn2_ctl)
             while c < pend:
-                if c + 0x708 > pend: red(f'{label} HCPS: truncated control')
-                nc = struct.unpack_from('<I', ctls, c + 0x20)[0]
-                nk = struct.unpack_from('<I', ctls, c + 0x704)[0]
-                if nc < 0x760 or c + nc > pend or not nk or k + nk > kend: red(f'{label} HCPS: shader exceeds program range')
+                if c + NVN2_KEY_CTL <= pend and nvn2_ctl(ctls[c:c + NVN2_KEY_CTL]):
+                    nc, nk = struct.unpack_from('<I', ctls, c + 0x30)[0], struct.unpack_from('<I', ctls, c + 0x44)[0]
+                    if nc < NVN2_KEY_CTL or c + nc > pend or not nk or k + nk > kend: red(f'{label} HCPS: shader exceeds program range')
+                else:
+                    if c + 0x708 > pend: red(f'{label} HCPS: truncated control')
+                    nc = struct.unpack_from('<I', ctls, c + 0x20)[0]
+                    nk = struct.unpack_from('<I', ctls, c + 0x704)[0]
+                    if nc < 0x760 or c + nc > pend or not nk or k + nk > kend: red(f'{label} HCPS: shader exceeds program range')
                 ctl, code = ctls[c:c + nc], codes[k:k + nk]; c += (nc + 7) & ~7; k += nk
                 st = glslc_stage(ctl, code)
                 why = check(label, st, ctl, code) if st else 'unknown stage'
@@ -2769,7 +2775,9 @@ def slct_shaders(d, base, label):
 
 def monolith_shaders(d, label, out):
     """Scan decoded archive entries and their XBC1 streams without relying on
-    extensions: model streams and map data embed HCPS alongside other assets."""
+    extensions: model streams and map data embed HCPS alongside other assets.
+    An entry that is an NDSR pack goes to ndsr_shaders: Xenoblade Chronicles 2's Switch 2 program keeps its upscaler in /monolib/shader/ndsr.pck, an XBC1 entry of bf2.ard"""
+    if d[:4] == b'NDSR': out.extend(ndsr_shaders(d, label)); return
     pos = 0; compressed = []
     # Separate literal scans use Python's fast substring search. Alternation's
     # character-set search is costly across the archive's decoded texture data.

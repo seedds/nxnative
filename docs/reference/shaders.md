@@ -328,6 +328,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Found on:** [Xenoblade Chronicles 3](../../dm/games/010074F013262000/README.md#files-and-shaders), whose note records the census and runtime key checks; [Xenoblade Chronicles 2](../../dm/games/0100E95004038000/README.md#files-and-shaders), with the same archive and standalone SLCT layouts on SDK 3.5.0; [Xenoblade Chronicles: Definitive Edition](../../dm/games/0100FF500E34A000/README.md#files-and-shaders), with loose containers.
 - **Format references:** [ARH1 layout](https://github.com/roccodev/ard-tools/blob/master/docs/arh1.md), [xc3_lib shader structures](https://github.com/ScanMountGoat/xc3_lib/blob/main/xc3_lib/src/spch.rs). The reader's lengths and keys were checked against the supplied game files.
 
+### Monolith's Switch 2 shaders: NVN2 controls in HCPS, and the NDSR pack in an archive entry
+
+- **Symptom:** the split stops with `HCPS: truncated control`, or finds the game's shaders but leaves out its upscaler: shaders "not in the shader map", `the dispatched program has no compute shader`, and no 3D picture reaches the window.
+- **Cause:** a Switch 2 build's HCPS programs hold NVN2 control sections (0xd0 bytes, their own length at +0x30, the code's at +0x44), which the reader stepped through by the Switch 1's lengths. Its upscaler is agl's NDSR layout ([The NDSR pack's record start](#the-ndsr-packs-record-start)) in `/monolib/shader/ndsr.pck`, an XBC1 entry of `bf2.ard`; `monolith_shaders` decoded the entry but looked only for HCPS and GLSLC outputs in it.
+- **Fix:** `hcps_shaders` steps through NVN2 controls by their own lengths (`nvn2_ctl`); `monolith_shaders` hands an entry that starts with `NDSR` to `ndsr_shaders` (header +4 0x500, records from +0x10: 40 shaders, 3 of them compute).
+- **Check:** `test_monolith.py` `test_nvn2_controls` and `test_ndsr_pack_in_an_archive_entry` (an XBC1 entry holding an NDSR pack; it fails without the fix).
+- **Found on:** Xenoblade Chronicles 2, Nintendo Switch 2 Edition (`0400E95004038001`): 22,533 shaders without the pack, 22,561 with it; the nine missing keys were all in it.
+
 ### Needle shader containers in main and GFD archives
 
 - **Symptom:** the split finds no shaders, although `main` contains NVN control sections; it reports that no data record or code-address pair identifies their code areas.

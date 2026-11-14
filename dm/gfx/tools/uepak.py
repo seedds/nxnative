@@ -41,6 +41,7 @@
 #        uepak.py job <RomFS> <main NSO> <work dir> [<Mac host> <rewritten modules>]   the shader code archives of every pak, and an Oodle job of their Oodle-compressed shaders (LZ4 ones
 #                                                                       decoded at once); IoStore shader libraries (UE 5.6) decoded at once through the game's Oodle in the host (OodleHost)
 #        uepak.py finish <work dir> <out dir>                           after the host has run the job: the archives with every shader decoded
+from typing import cast
 import ctypes, json, os, re, struct, sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../tools'))
 from romfs import os, open
@@ -306,7 +307,7 @@ class Pak:
         e = self.entry(path)
         if not e['method']:
             head = e['blocks'][0][0] if self.version in LEGACY else 53
-            return self.read_at(e['off'] + head, e['size'], e['encrypted'])
+            return self.read_at(cast(int, e['off']) + cast(int, head), e['size'], e['encrypted'])
         import zlib
         bad = (zlib.error,)   # a block its decoder refuses
         if e['method'] == 'Zlib': decode = zlib_block
@@ -344,9 +345,9 @@ def archive_v1_decoded(b, what):
     import zlib
     r = R(b, what=what)
     if r.take('<I') != 1: raise ValueError(f'{what}: expected a version 1 shader archive')
-    count = r.take('<I')
-    r.raw(37 * count)
-    code = r.o; r.o = 8
+    count, = r.array('I', 1)
+    r.need(37 * count)
+    code = r.o + 37 * count
     hashes, entries, decoded = bytearray(), bytearray(), bytearray()
     for i in range(count):
         hashes.extend(r.raw(20))

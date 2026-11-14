@@ -47,6 +47,15 @@ class BindingTableShaderTests(unittest.TestCase):
                 split.scan_blob(bad, '/unrelated', found)
                 self.assertEqual(found, [])
 
+    def test_minimal_binding_table_is_not_a_phyre_record(self):
+        data, ctl, code = object_data('ps')
+        data = struct.pack('<I', 4) + data[0x88:]
+        found = []
+        split.scan_blob(archive(data), '/minimal.dat', found)
+        self.assertEqual(len(found), 1)
+        self.assertEqual([(s, c, k) for _, s, c, k in found], [('ps', ctl, code)])
+        self.assertIn('#PGSO', found[0][0])
+
     def test_control_and_code_lengths_must_agree(self):
         data = bytearray(object_data('vs')[0])
         struct.pack_into('<I', data, 0x8c + 0x100 + 4 + 0x704, 0x80)

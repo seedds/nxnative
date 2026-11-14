@@ -364,20 +364,21 @@ static inline const int8_t *s2_pad_map(const s2_pad_state *p, const s2_dev *dev)
     return dev == &p->left ? s2_map_left_alone : s2_map_right_alone;
 }
 // Gyro rest offset: a Joy-Con 2 at rest reads about 1.3 degrees per second off. About a second of samples in which the gyro and accelerometer hardly vary is a controller lying or held
-// still; its mean is the offset (blended with the one before). An offset past 4 degrees per second is not taken: that is a slow turn, not rest.
+// still; its mean is the offset (blended with the one before). An offset past 4 degrees per second is not taken: that is a slow turn, not rest. need is the number of samples in
+// that second at the link's report rate (s2_clock_reports; 0: S2_REST_N, a second at 30 ms), read when a window starts.
 #define S2_REST_N 33
-typedef struct { int n, have; int32_t sum[3]; int16_t gmin[3], gmax[3], amin[3], amax[3]; float bias[3]; } s2_rest;
+typedef struct { int n, have, need, want; int32_t sum[3]; int16_t gmin[3], gmax[3], amin[3], amax[3]; float bias[3]; } s2_rest;
 static inline void s2_rest_update(s2_rest *r, const int16_t raw[6]) {
-    if (!r->n) for (int i = 0; i < 3; i++) { r->sum[i] = 0; r->gmin[i] = r->gmax[i] = raw[3 + i]; r->amin[i] = r->amax[i] = raw[i]; }
+    if (!r->n) { r->want = r->need > 0 ? r->need : S2_REST_N; for (int i = 0; i < 3; i++) { r->sum[i] = 0; r->gmin[i] = r->gmax[i] = raw[3 + i]; r->amin[i] = r->amax[i] = raw[i]; } }
     for (int i = 0; i < 3; i++) {
         r->sum[i] += raw[3 + i];
         if (raw[3 + i] < r->gmin[i]) r->gmin[i] = raw[3 + i]; if (raw[3 + i] > r->gmax[i]) r->gmax[i] = raw[3 + i];
         if (raw[i] < r->amin[i]) r->amin[i] = raw[i]; if (raw[i] > r->amax[i]) r->amax[i] = raw[i];
         if (r->gmax[i] - r->gmin[i] > 100 || r->amax[i] - r->amin[i] > 300) { r->n = 0; return; }   // moving: start the second again
     }
-    if (++r->n < S2_REST_N) return;
+    if (++r->n < r->want) return;
     r->n = 0;
-    float m[3]; for (int i = 0; i < 3; i++) { m[i] = (float)r->sum[i] / S2_REST_N; if (fabsf(m[i]) > 60.f) return; }
+    float m[3]; for (int i = 0; i < 3; i++) { m[i] = (float)r->sum[i] / r->want; if (fabsf(m[i]) > 60.f) return; }
     for (int i = 0; i < 3; i++) r->bias[i] = r->have ? 0.5f * r->bias[i] + 0.5f * m[i] : m[i];
     r->have = 1;
 }
@@ -398,20 +399,27 @@ static inline int s2_gyro_cal_parse(const uint8_t *d, size_t n, float off[3]) {
 // Controller 2's is not measured, so those wait for the rest offset (or the one remembered for the controller, pad_switch2_apple.m)
 static inline int s2_gyro_cal_usable(uint16_t pid) { return pid == 0x2066; }
 
-// Sample times from the controller's own clock (the report's first four bytes: milliseconds, +30 a report on a Mac's 30 ms connection interval, +60 or +90 when a report was
-// lost). Arrival times come in bursts (a few reports of a connection event at once), and a lost report leaves a gap that only the clock shows, so a sample's time is its
+// Sample times from the controller's own clock (the report's first four bytes: milliseconds, one connection interval a report: +30 on a Mac's default 30 ms interval, +15 on
+// the 15 ms one a low-latency connection gets, twice or three times that when a report was lost). Arrival times come in bursts (a few reports of a connection event at once),
+// and a lost report leaves a gap that only the clock shows, so a sample's time is its
 // controller time plus an anchor: about the smallest offset (arrival - controller time) seen, the reports that came with the least latency. The anchor rises by S2_CLOCK_DECAY
 // of the time passed, so the two clocks may drift apart (a controller clock running slow would otherwise put its samples ever further behind their arrival), and falls only on
 // S2_CLOCK_LOW_RUN reports in a row that arrived earlier than it predicts, to the later of their offsets: one report with an unusually short latency does not move it (it would
 // have set the anchor for a second per millisecond, the rise being 1 ms a second). A time is never later than the arrival (an early report waiting for its run takes its
 // arrival) nor more than S2_CLOCK_LAG_NS before it, and keeps at least half a report's step after the last where the arrival allows: a fall clamped against the last time would
 // put samples microseconds apart and lose the rotation integrated over them. That still happens to a burst read with a first report's anchor (connecting, the first report
-// late): those samples can only take their arrivals. A long silence or a clock that went back starts over at the arrival. *lost is the number of reports the step skipped
+// late): those samples can only take their arrivals. A long silence or a clock that went back starts over at the arrival. *lost is the number of reports the step skipped,
+// counted in the link's own interval: the smallest step of the last S2_CLOCK_WINDOW reports (S2_CLOCK_REPORT_MS until the first step), so an interval the host changes during
+// the connection is followed within a window. Steps under S2_CLOCK_MIN_MS (shorter than any Bluetooth LE interval this host gets) do not count as one.
 #define S2_CLOCK_LAG_NS 60000000ull
 #define S2_CLOCK_REPORT_MS 30u
+#define S2_CLOCK_MIN_MS 5u
+#define S2_CLOCK_WINDOW 64u
 #define S2_CLOCK_DECAY 0.001   // the anchor rises 1 ms a second: clocks up to 1000 ppm apart
 #define S2_CLOCK_LOW_RUN 2
-typedef struct { int have; uint32_t ms; uint64_t ns, dev; int64_t anchor, low; unsigned low_n; } s2_clock;   // dev: the controller's time unwrapped (ns since the first report); anchor: arrival - dev; low: the run's latest offset
+// dev: the controller's time unwrapped (ns since the first report); anchor: arrival - dev; low: the run's latest offset; iv: the report interval in milliseconds, 0 until the first step
+typedef struct { int have; uint32_t ms; uint64_t ns, dev; int64_t anchor, low; unsigned low_n; uint32_t iv, win_min; unsigned win_n; } s2_clock;
+static inline uint32_t s2_clock_interval(const s2_clock *c) { return c->iv ? c->iv : S2_CLOCK_REPORT_MS; }
 static inline uint64_t s2_clock_sample(s2_clock *c, uint32_t ms, uint64_t arrival, unsigned *lost) {
     uint32_t step = ms - c->ms; uint64_t t;
     if (lost) *lost = 0;
@@ -430,11 +438,19 @@ static inline uint64_t s2_clock_sample(s2_clock *c, uint32_t ms, uint64_t arriva
         uint64_t floor = c->ns + step_ns / 2;   // half a step after the last, where the arrival allows
         if (t < floor) t = floor < arrival ? floor : arrival;
         if (t <= c->ns) t = c->ns + 1000;   // the same millisecond as the last, or a burst: still after it
-        if (lost && step > S2_CLOCK_REPORT_MS + S2_CLOCK_REPORT_MS / 2) *lost = (step + S2_CLOCK_REPORT_MS / 2) / S2_CLOCK_REPORT_MS - 1;
+        if (step >= S2_CLOCK_MIN_MS) {
+            if (!c->iv || step < c->iv) c->iv = step;
+            if (!c->win_min || step < c->win_min) c->win_min = step;
+            if (++c->win_n >= S2_CLOCK_WINDOW) { c->iv = c->win_min; c->win_min = 0; c->win_n = 0; }
+        }
+        uint32_t iv = s2_clock_interval(c);
+        if (lost && step > iv + iv / 2) *lost = (step + iv / 2) / iv - 1;
     }
     c->have = 1; c->ms = ms; c->ns = t;
     return t;
 }
+// The number of reports in a span of ms milliseconds at the link's interval, at least 1
+static inline unsigned s2_clock_reports(const s2_clock *c, uint32_t ms) { uint32_t iv = s2_clock_interval(c); return ms / iv ? ms / iv : 1; }
 // bias: the gyro offset in counts (s2_rest.bias), NULL for none
 static inline void s2_motion(const int16_t raw[6], const int8_t map[6], const float *bias, float gyro_scale, float acc[3], float rot[3]) {
     for (int i = 0; i < 6; i++) {

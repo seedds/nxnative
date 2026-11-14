@@ -22,7 +22,8 @@
 
 typedef struct s2_pad { s2_pad_state st; char name[48]; struct s2_pad *next; } s2_pad;
 
-// The front end's side. All calls come on the main queue.
+// The front end's side. All calls come on the main queue, though the transport runs on a queue of its own: p->st is a copy of the pad's state as it was when the call
+// was made, and stays as it is between calls.
 typedef struct {
     int (*attach)(s2_pad *p);    // a new pad: take it a player slot (player() then names it). 1: kept, with a player or waiting for its first button press (DM_PAD_PRESS_TO_JOIN:
                                  // player() is -1 until read() gives it one); 0: no free player, and the controller is let go

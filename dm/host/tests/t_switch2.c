@@ -49,6 +49,25 @@ int main(void) {
         CHECK(s2_clock_sample(&c, 1210, base + 400 * ms, &lost) == base + 340 * ms);   // arriving late: held to 60 ms behind the arrival
         CHECK(s2_clock_sample(&c, 9000, base + 9000 * ms, &lost) == base + 9000 * ms && lost == 0);   // seconds of silence: starts over at the arrival
         CHECK(s2_clock_sample(&c, 100, base + 9030 * ms, &lost) == base + 9030 * ms);   // the clock went back: starts over too
+        // A low-latency link (15 ms): a 30 ms step is one report lost, 45 ms two. Under the old fixed 30 ms both counted as none or one
+        s2_clock f = {0};
+        CHECK(s2_clock_interval(&f) == 30 && s2_clock_reports(&f, 1000) == 33);   // before the first step: the default interval
+        s2_clock_sample(&f, 2000, base, &lost); s2_clock_sample(&f, 2015, base + 15 * ms, &lost);
+        CHECK(lost == 0 && s2_clock_interval(&f) == 15 && s2_clock_reports(&f, 1000) == 66);
+        s2_clock_sample(&f, 2045, base + 45 * ms, &lost); CHECK(lost == 1);
+        s2_clock_sample(&f, 2090, base + 90 * ms, &lost); CHECK(lost == 2);
+        s2_clock_sample(&f, 2093, base + 93 * ms, &lost); CHECK(lost == 0 && s2_clock_interval(&f) == 15);   // a step under S2_CLOCK_MIN_MS is not an interval
+        // The host moves the link back to 30 ms: within a window the interval follows, and a 30 ms step is no longer a loss
+        for (unsigned i = 1; i <= S2_CLOCK_WINDOW; i++) s2_clock_sample(&f, 2093 + 30 * i, base + (93 + 30 * i) * ms, &lost);
+        CHECK(s2_clock_interval(&f) == 15);   // the window that saw the 15 ms steps ends with them in it
+        for (unsigned i = 1; i <= S2_CLOCK_WINDOW; i++) s2_clock_sample(&f, 2093 + 30 * (S2_CLOCK_WINDOW + i), base + (93 + 30 * (S2_CLOCK_WINDOW + i)) * ms, &lost);
+        CHECK(s2_clock_interval(&f) == 30 && lost == 0);
+        // The controller's clock jitters by a millisecond: the interval is the shortest step, and neither a long step nor a short one is a loss; a doubled step still is
+        s2_clock j = {0}; const uint32_t steps[] = {15, 16, 14, 15, 16, 15};
+        uint32_t at = 3000; s2_clock_sample(&j, at, base, &lost); unsigned jl = 0;
+        for (int i = 0; i < 6; i++) { at += steps[i]; s2_clock_sample(&j, at, base + (at - 3000) * ms, &lost); jl += lost; }
+        CHECK(jl == 0 && s2_clock_interval(&j) == 14);
+        at += 30; s2_clock_sample(&j, at, base + (at - 3000) * ms, &lost); CHECK(lost == 1);
         // steady reports with jittered arrivals integrate a constant rotation exactly: 34 reports of 30 ms at 100 counts
         s2_clock d = {0}; uint64_t prev = 0; double deg = 0;
         for (int i = 0; i < 34; i++) {
@@ -212,6 +231,10 @@ int main(void) {
     s2_rest big; memset(&big, 0, sizeof big); int16_t z[6] = {0, 0, 4096, 200, 0, 0};
     for (int i = 0; i < S2_REST_N; i++) s2_rest_update(&big, z);
     CHECK(!big.have);   // 200 counts (14 degrees per second) is a turn, not rest
+    // At 15 ms a report the second of rest is 66 samples: 33 still ones (half a second) are not rest yet
+    s2_rest fast; memset(&fast, 0, sizeof fast); fast.need = 66; int16_t still[6] = {0, 0, 4096, 18, -20, -4};
+    for (int i = 0; i < 65; i++) s2_rest_update(&fast, still);
+    CHECK(!fast.have); s2_rest_update(&fast, still); CHECK(fast.have && fabsf(fast.bias[0] - 18.f) < 0.01f);
     int8_t mp[6] = {1, 2, 3, 4, 5, 6};
     CHECK(s2_map_parse("3,-2,1,6,-5,4", mp) && mp[0] == 3 && mp[1] == -2 && mp[2] == 1 && mp[3] == 6 && mp[4] == -5 && mp[5] == 4);
     CHECK(!s2_map_parse("1,2,3,4,5", mp) && !s2_map_parse("1,2,3,4,5,7", mp) && !s2_map_parse("1,2,3,4,5,0", mp) && !s2_map_parse("1,2,3,4,5,6,7", mp) && !s2_map_parse("x", mp) && !s2_map_parse(NULL, mp) && mp[0] == 3);

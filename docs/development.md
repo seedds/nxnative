@@ -269,6 +269,7 @@ For a Mac app, it reads the name, title ID and game version from `Info.plist`, l
 supplies, nightly and by hand (never on pull requests): the RomFS image reader
 (`romfs.py`), the control data (`nacp.py`), the NSO loader, the shader
 containers of `shader_split.py` (BNSH, BAHS, MSHD, SARC / Yaz0, GLSLC, SDF,
+[NXSD](reference/shaders.md#nxsd-single-stage-shader-containers),
 ARH1 and the others `scan_blob` recognizes) and the Unreal paks and shader
 archives of `uepak.py`. Each harness, `dm/tools/fuzz/fuzz_<parser>.py`, builds
 its seeds in code and mutates them for 60 s; nothing comes from a game. A

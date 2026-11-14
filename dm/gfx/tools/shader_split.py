@@ -51,6 +51,7 @@
 #   · Unreal Engine 3 (Batman: Arkham Knight): shader records in its global shader cache (BMSG) and in the packages (the combined shader cache), whose compressed chunks are Oodle blocks decoded by the game's own decoder in the Mac host, see ue3_body and ue3_shaders
 #   · CIVBSF (Firaxis, Civilization VI / VII): indexed NVBC / GLSLC or code/control payloads, see civbsf_shaders
 #   · IPK (Ubisoft's UbiArt, Rayman Legends: Definitive Edition v7, Just Dance 2022 v5): whole GLSLC outputs in the .fxb effect files of bundle_*.ipk (zlib entries), see ipk_shaders
+#   · NXSD (TETRIS THE GRAND MASTER 4): descriptor-referenced NVN control sections and code areas, one stage per entry; see nxsd_shaders
 # Code area: 0x30 header + (graphics) 0x50 SPH + instructions; header magic 0x12345678 for graphics, 0x12345679 for compute. The control section starts with 0x98761234, +0x704 = code area length,
 #   +0x700 = start of the c1 constant segment within the code area; for compute +0x748 thread group xyz (u32 ×3), +0x754 shared memory bytes (checked one by one against PC reflection on D2R's 22 compute shaders).
 # Stage: BNSH uses the stage slot; BAHS uses bits 10..13 of SPH word 0 (1 vertex 2 hull 3 domain 4 geometry 5 pixel), and a compute header means compute.
@@ -257,6 +258,40 @@ def shn_shaders(d, label):
                 why = check(label, st, ctl, code) if st else 'unknown shader stage'
                 if why: red(f'{label} SHDROUNC variant {v} slot {slot}: {why}')
                 out.append((f'{label}#SHN@{h:#x}#var{v}', st, ctl, code))
+    return out
+
+def nxsd_shaders(d, label):
+    """NXSD v0x100, from ralph303's reader in issue #743: 24-byte descriptors reference 0x880-byte controls and variable-sized code areas in separate regions."""
+    where = f'{label} NXSD'
+    if len(d) < 0x40: red(f'{where}: truncated header')
+    version, size, code32, _, count, ctl_bytes, code_bytes = field(d, '<7I', 4, where)
+    table, ctl_start, code_start = field(d, '<3Q', 0x28, where)
+    if version != 0x100: red(f'{where}: unsupported version {version:#x}')
+    if size != len(d) or code32 != code_start: red(f'{where}: inconsistent file size or code offsets')
+    if not count or ctl_bytes != count * 0x880: red(f'{where}: invalid control count or stride')
+    if table < 0x40 or table + count * 0x18 != ctl_start: red(f'{where}: invalid descriptor table')
+    if ctl_start + ctl_bytes != code_start or code_start + code_bytes != len(d): red(f'{where}: invalid control or code region')
+    out, controls, ranges = [], set(), []
+    for i in range(count):
+        entry = f'{where} entry {i}'
+        ctl_rel, _, code_rel, _, _, _ = field(d, '<6I', table + i * 0x18, entry)
+        if ctl_rel % 0x880 or ctl_rel + 0x880 > ctl_bytes or ctl_rel in controls: red(f'{entry}: invalid or duplicate control offset')
+        controls.add(ctl_rel)
+        ctl = span(d, ctl_start + ctl_rel, 0x880, entry)
+        ncode = field(ctl, '<I', 0x704, entry)[0]
+        code = span(d, code_start + code_rel, ncode, entry)
+        st = 'cs' if code[:4] == CS_MAGIC else sph_stage(code) if code[:4] == GFX_MAGIC else None
+        if not st: red(f'{entry}: unknown shader stage')
+        if len(code) < (0x30 if st == 'cs' else 0x80): red(f'{entry}: truncated code header or SPH')
+        why = check(entry, st, ctl, code)
+        if why: red(f'{entry}: {why}')
+        out.append((f'{label}#NXSD@{i}', st, ctl, code))
+        ranges.append((code_rel, code_rel + ncode))
+    cursor = 0
+    for start, end in sorted(ranges):
+        if start != cursor: red(f'{where}: code sections overlap or have gaps')
+        cursor = end
+    if cursor != code_bytes: red(f'{where}: code sections do not cover the code region')
     return out
 
 def bahs_shaders(d, label):
@@ -3775,7 +3810,7 @@ def pixel_input_cover(shaders):
         k = min(ins, key=lambda k: (-len(ins[k] & left), k)); cover.append(k); left -= ins[k]
     return cover
 
-SINGLE_STAGE = ('#GLSLC@', '#VIPER', '#CIVBSF@', '#UE', '#MTSPK@', '#MGFX@', '#NLG', '#PGSO', '#RAW@', '#TFXO@', '#NEEDLE@', '#SNOWDROP@', '#PHYRE@', '#SUMO@', '#NVNSH@', '#D3@', '#SHAD@', '#NXSHADER@')   # sources whose every shader is a program of one stage: GLSLC outputs, Unreal's shader records, MT Framework's shader package (BNSH variations, Unity programs, MSHD and SDF pair theirs);
+SINGLE_STAGE = ('#GLSLC@', '#VIPER', '#CIVBSF@', '#UE', '#MTSPK@', '#MGFX@', '#NLG', '#PGSO', '#RAW@', '#TFXO@', '#NEEDLE@', '#SNOWDROP@', '#PHYRE@', '#SUMO@', '#NVNSH@', '#D3@', '#SHAD@', '#NXSHADER@', '#NXSD@')   # sources whose every shader is a program of one stage: GLSLC outputs, Unreal's shader records, MT Framework's shader package (BNSH variations, Unity programs, MSHD and SDF pair theirs);
 # Unreal Engine 3's shader caches (ue3_shaders, '#UE3@'); MonoGame's effects, whose passes may name no vertex shader and keep the one bound (Celeste: 10 of its 13 effects draw through SpriteBatch's vertex shader, which is in main); Next Level Games'
 # archives (Luigi's Mansion 3 makes 5,317 programs of one stage each at boot); PlatinumGames' shader objects (Bayonetta 3: one stage each, pg_shader); control sections loose in main
 # (Advance Wars 1+2: Re-Boot Camp's Bink shaders, raw_shaders), which no file pairs; YEBIS's effect file (tfxo_shaders); and Sumo's Ninty_NX descriptors and NVNsh records, one stage
@@ -4056,6 +4091,9 @@ def scan_file_in(args):
     if len(args) > 2 and args[2][0] == TTDAT:
         if args[2][1] is None: red(args[2][2])
         ttdat_shaders(path, rel, args[2][1], found)
+        return rel, uniq_keys(found), var_pairs(found), trees
+    if head[:4] == b'NXSD':
+        with open(path, 'rb') as f: found = nxsd_shaders(f.read(), '/' + rel)
         return rel, uniq_keys(found), var_pairs(found), trees
     if len(args) > 2 and args[2][0] == LSPK:
         if args[2][1] is None: red(args[2][2])

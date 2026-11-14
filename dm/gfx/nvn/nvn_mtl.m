@@ -1,5 +1,6 @@
 // Metal execution layer of the NVN null device, see nvn_mtl.h.
 #import <Metal/Metal.h>
+#include <malloc/malloc.h>
 #import <QuartzCore/CAMetalLayer.h>
 #import <QuartzCore/CAMetalDisplayLink.h>
 #import <MetalFX/MetalFX.h>
@@ -4478,7 +4479,15 @@ static id<MTLTexture> tex_mtl_(const tex_t *ct) {
 // Memory readout line (always on, low frequency, capped): resident memory, GPU allocated, deferred-release queue, residency set object count, registered memory pools / peak / tracking table capacity, cumulative texture re-uploads.
 // Purpose: pin down "crashes with no log". The system gives no notice before killing a process for memory, so only readouts left beforehand can show which number kept climbing.
 // Called by the frame hook every 300 frames; printed only when resident or GPU allocated changed by ≥ 64 MB since the last line, otherwise one line every 3000 frames; capped at 400 lines per game. All integers (the frame hook runs on the guest thread's small stack, so no floating-point formatting)
+// DM_TRIM_MEM=1: every report (300 frames) the host gives the memory its allocator holds free back to the system (malloc_zone_pressure_relief) and drops the idle upload staging blocks; the game's own memory pools are not touched (the game owns their contents)
+static void mem_trim(unsigned long long frame) {
+    static int on = -1; if (on < 0) { const char *e = getenv("DM_TRIM_MEM"); on = e && atoi(e) > 0; if (on) MLOG("host memory trim on (DM_TRIM_MEM)"); }
+    if (!on) return;
+    size_t freed = malloc_zone_pressure_relief(NULL, 0);
+    static int n; if (n++ < 40) MLOG("memory trim at frame %llu: %zu MB given back to the system", frame, freed >> 20);
+}
 void mtl_mem_stat(unsigned long long frame, unsigned long long rss_mb) {
+    mem_trim(frame);
     static unsigned long long last_rss, last_gpu, last_frame; static int lines; unsigned long long gpu = (unsigned long long)(g_dev.currentAllocatedSize >> 20);
     unsigned long long dr = rss_mb > last_rss ? rss_mb - last_rss : last_rss - rss_mb, dg = gpu > last_gpu ? gpu - last_gpu : last_gpu - gpu;
     if (lines >= 400 || (lines && dr < 64 && dg < 64 && frame - last_frame < 3000)) return; lines++; last_rss = rss_mb; last_gpu = gpu; last_frame = frame;
@@ -9827,6 +9836,10 @@ enum { STAND_LEVEL = 1024, STAND_PICK = 4096, STAND_LAYERS = 8, STAND_HEAP = 4u 
 // DM_STAND_KB (1 to 512, default 1): how big a level of a stand-in may be, in KB. At 1 a stand-in is a few texels (the blocky look); at 64 it keeps the largest mip level under 64 KB, which is a 256x256 ASTC 4x4 or a
 // 512x512 ASTC 8x8: a texture that was megabytes becomes under a hundred KB and keeps its detail. A texture already no bigger than twice that is kept as it is
 static size_t stand_level(void) { static size_t v; if (!v) { const char *e = getenv("DM_STAND_KB"); int kb = e && *e ? atoi(e) : 1; if (kb < 1 || kb > 512) { MLOG("[RED] DM_STAND_KB=%s: must be 1 to 512; 1 used", e ? e : ""); kb = 1; } v = (size_t)kb << 10; if (kb > 1) MLOG("texture stand-ins keep levels up to %d KB (DM_STAND_KB)", kb); } return v; }
+// Dynamic detail: DM_STAND_KB_SMALL (1-512, default: the same as DM_STAND_KB) is the cap for textures that hold less than DM_STAND_BIG_KB (default 512) in storage; DM_STAND_KB is the cap of the bigger ones
+static size_t stand_level_small(void) { static size_t v; if (!v) { const char *e = getenv("DM_STAND_KB_SMALL"); int kb = e && *e ? atoi(e) : 0; if (kb < 1 || kb > 512) { if (e && *e) MLOG("[RED] DM_STAND_KB_SMALL=%s: must be 1 to 512; DM_STAND_KB used", e); v = stand_level(); } else { v = (size_t)kb << 10; MLOG("small textures keep levels up to %d KB (DM_STAND_KB_SMALL)", kb); } } return v; }
+static size_t stand_big_bytes(void) { static size_t v; if (!v) { const char *e = getenv("DM_STAND_BIG_KB"); int kb = e && *e ? atoi(e) : 512; if (kb < 1) kb = 512; v = (size_t)kb << 10; } return v; }
+static size_t stand_cap_of(const tex_t *t) { return pool_tex_size(t) >= stand_big_bytes() ? stand_level() : MIN(stand_level_small(), stand_level()); }
 static size_t stand_pick(void) { return MAX((size_t)STAND_PICK, stand_level()); }
 // DM_TEXTURES_KEEP=WxH,WxH,...: textures of these sizes are never replaced by DM_TEXTURES_OFF (the map's, say); DM_TEXTURES_LOG=1 lists every texture replaced, with its size and the frame, to find them
 static int tex_kept(const tex_t *t) {
@@ -9845,7 +9858,7 @@ static uint64_t g_stand_made, g_stand_picked, g_stand_full, g_stand_ns, g_first_
 // whether a shader read it. all: every one; big: those of 512 KB or more, which leaves the UI and small props. To see whether the game runs without them (GPU memory, not looks)
 static int tex_off_mode(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_TEXTURES_OFF"); v = !e || !*e || !strcmp(e, "0") ? 0 : !strcmp(e, "all") ? 1 : !strcmp(e, "big") ? 2 : -1;
     if (v < 0) { MLOG("[RED] DM_TEXTURES_OFF=%s: must be all, big or 0; textures made", e); v = 0; } else if (v) MLOG("textures off: %s block-compressed textures are not made (DM_TEXTURES_OFF)", v == 1 ? "every" : "the big"); } return v; }
-static int tex_off_wants(const tex_t *t) { int m = tex_off_mode(); if (!m) return 0; int bw, bh, bpb = nvn_fmt_bpb(t->d.format, &bw, &bh); if (!bpb || (bw < 2 && bh < 2) || tex_kept(t)) return 0; if (stand_level() > 1024 && pool_tex_size(t) <= 2 * stand_level()) return 0; return m == 1 || pool_tex_size(t) >= (512u << 10); }
+static int tex_off_wants(const tex_t *t) { int m = tex_off_mode(); if (!m) return 0; int bw, bh, bpb = nvn_fmt_bpb(t->d.format, &bw, &bh); if (!bpb || (bw < 2 && bh < 2) || tex_kept(t)) return 0; if (stand_cap_of(t) > 1024 && pool_tex_size(t) <= 2 * stand_cap_of(t)) return 0; return m == 1 || pool_tex_size(t) >= (512u << 10); }
 static int stand_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_POOL_STANDIN"); v = !(e && !strcmp(e, "0")); } return v; }
 static id<MTLTexture> stand_alloc(MTLTextureDescriptor *d) {
     for (int k = 0; k < g_nstand_heap; k++) {   // the heap that last had room first
@@ -9870,7 +9883,7 @@ static int stand_shape_of(const tex_t *t, stand_shape *s) {
     if (!bpb || levels > fit) return 0;
     memset(s, 0, sizeof *s);
     unsigned l = 0; uint32_t bx = 0, by = 0;
-    for (; l < levels; l++) { bx = (MAX(W >> l, 1u) + bw - 1) / bw; by = (MAX(H >> l, 1u) + bh - 1) / bh; if ((size_t)bx * by * bpb <= stand_level()) break; }
+    for (; l < levels; l++) { bx = (MAX(W >> l, 1u) + bw - 1) / bw; by = (MAX(H >> l, 1u) + bh - 1) / bh; if ((size_t)bx * by * bpb <= stand_cap_of(t)) break; }
     if (l < levels) { s->l0 = l; s->n = levels - l; s->w = MAX(W >> l, 1u); s->h = MAX(H >> l, 1u); return 1; }
     if (bpb > 16 || (bpb & (bpb - 1))) return 0;   // (a block in one 16-byte piece of the storage, nvn_deswizzle_pick)
     uint32_t step = (uint32_t)sqrt((double)bx * by * bpb / stand_pick()); if (step < 2) step = 2;

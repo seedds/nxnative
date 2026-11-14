@@ -3404,6 +3404,9 @@ def main(args=None):
     if mac:   # a Mac-only build ends with the Mac host and the command that runs the game
         first = getattr(args, 'in_programs', None)   # a program packed with the application's first: its host, built over all of them, and its fonts
         host, font = (first['host'], first['font']) if first else mac_host(py, repo, work, env, logs, g)
+        if not first:   # the run command starts the host inside a development app, so the Dock shows the game's name and icon with a DEV ribbon, not "dmhost" (dm/mac/pack_app.py dev_app)
+            sys.path.insert(0, str(repo / 'dm/mac')); import pack_app
+            host = pack_app.dev_app(work / 'run' / f'{mac_app_name(app_name or g.get("name"))}.app', host, app_name or g.get('name'), f'{app:016X}', icon)
         parts = {'font': font}
         cmd = mac_run(work, game, patched, host, font, ios, aoc, gfx, lang, env, logs, g, env_file, partial=seen_shaders, parts=parts, jit=jit)
         rmtree(work / 'tmp')

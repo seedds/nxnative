@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """The player's second pack end to end (CTest t_second_pack; docs/development.md, "The launcher"; dm/launcher/launcher_model.h, "The second pack"), on the synthetic game module
 of dm/tools/tests/aot_synth.py (no game files): the launcher starts the real host on a packed game, the host runs the game's code from its pack and writes the JIT misses at exit, the
-launcher's "a better pack is possible" turns on from them, its repack runs the packer, which runs `nxaot build --misses` and writes the launch file's made rows, the rule turns off,
-and the game runs again from the new pack without the JIT fallback. In a games folder of its own (TMPDIR/t_second_pack):
+launcher's "a better pack is possible" turns on from them and from the sample profile the host writes, its repack runs the packer, which runs `nxaot build --profile --misses` and
+writes the launch file's made rows, the rule turns off, and the game runs again from the new pack without the JIT fallback. In a games folder of its own (TMPDIR/t_second_pack):
   0. the game: <NSP folder>/<id>_build/aot_v0/ with the module's behaviour image and manifest (aot_synth.py's, with synth_hidden set in the image: the entry calls the hidden function,
      which has no symbol and no FDE, so nxaot's discovery does not compile it and only the JIT fallback can run it; t_aot_module sets the same word at run time), the launch file
      (launch-linux.tsv: path host, cwd, choices, log, profile, package, packer, python, nxaot; the pack row; env rows: the save, DM_WINDOW, DM_AOT_RAW=1 since the module has no SDK);
@@ -13,13 +13,18 @@ and the game runs again from the new pack without the JIT fallback. In a games f
      made rows (made profile yes, made misses yes, no module rows); --list: the balanced pack, better_pack -
   2. nxlauncher --play: the host runs the module to ExitProcess with DM_AOT_PROFILE set to the profile row's folder (Play records by default); the hidden function in the JIT
      fallback (its gate unserved by the pack: the loader's [RED] line, "1 not"); at exit <profile>/main.misses.tsv with the hidden function's row `<offset> indirect 1` under the header
-     naming the image. The sample profile main.tsv is written only when a sample fell in compiled code, which the module's microseconds of guest code never give: no main.tsv
-  3. --list: better_pack names 1 new JIT miss
-  4. nxlauncher --repack: the packer again (the launcher's command, its output in repack.txt): `nxaot build --misses` compiles the hidden function (aot: misses: 1 addresses, 1 new
-     entries; gate sites 3; no [RED] line for its gate), a new main.aot.so, the made rows with `misses main 1 <FNV-1a 64 of '<offset> indirect\n'>`
-  5. --list: better_pack - (the packs took the misses)
+     naming the image; and the sample profile <profile>/main.tsv under the header naming the image, most of its samples in synth_hot's loop (add, subs, b.ne: the entry's last
+     call runs aot_synth.py's HOT_PASSES passes of it, tens of milliseconds of compiled code; the loop's range from aot_synth.py's labels)
+  3. --list: better_pack names 1 new JIT miss and the profile's sampled offsets the packs were made without (made profile yes, no samples row)
+  4. nxlauncher --repack: the packer again (the launcher's command, its output in repack.txt): `nxaot build --profile --misses` takes the profile (aot: profile ...: its samples, 0
+     outside every function; aot: profile weights: at least 1 function weighed; aot: tiers with synth_hot at H) and compiles the hidden function (aot: misses: 1 addresses, 1 new
+     entries; gate sites 3; no [RED] line for its gate), a new main.aot.so, the made rows with `samples main <offsets> <samples> <FNV-1a 64 of the offsets>` and
+     `misses main 1 <FNV-1a 64 of '<offset> indirect\n'>`, both computed here from the files
+  5. --list: better_pack - (the packs took the profile and the misses)
   6. nxlauncher --play again: the hidden function runs from the new pack, its gate served by it ("0 not"), 0 JIT addresses (its call through a pointer now binds an inline cache to
-     its standard entry: one dispatcher miss more than the first session's), no misses file written and the old one unchanged; --list: still -
+     its standard entry: one dispatcher miss more than the first session's), no misses file written and the old one unchanged; main.tsv written again with this session's samples,
+     most in the loop; --list: what profile_state's rule says of this profile against the samples row, computed here from the file (the entry runs the same loop, so the offsets
+     are the loop's again and the samples about as many: `-`; a session that sampled 10 % more offsets, or another hot set with 25 % more samples, would show its reason)
 """
 import argparse
 import hashlib
@@ -102,6 +107,28 @@ def misses_rows(path):   # the host's misses file: (header's image SHA-256, [(of
     return sha, rows
 
 
+def profile_rows(path):   # the host's sample profile: (header's image SHA-256, {offset: samples})
+    sha, rows = None, {}
+    for line in path.read_text().splitlines():
+        m = re.match(r'^# module main, build ID \S+, image SHA-256 ([0-9a-f]{64})$', line)
+        if m: sha = m.group(1)
+        body = line.split('#', 1)[0].split()
+        if body: rows[int(body[0], 16)] = rows.get(int(body[0], 16), 0) + int(body[1])
+    return sha, rows
+
+
+def recorded(rows):   # (offsets with samples, samples, digest) as made_rows writes a samples row and profile_state reads the file, computed here on its own
+    hot = sorted(o for o, n in rows.items() if n > 0)
+    return len(hot), sum(rows.values()), fnv64(''.join(f'{o:x}\n' for o in hot))
+
+
+def profile_reason(now, had):   # launcher_model.cpp profile_state's profile branch for a module whose packs took a profile (made profile yes, its samples row): its reason or ''
+    (nc, ns, nd), (hc, hs, hd) = now, had
+    if nc > hc and nc * 100 >= hc * 110: return f'{nc - hc:,} new sampled offset' + ('' if nc - hc == 1 else 's')
+    if nd != hd and nc >= hc and ns > hs and ns * 100 >= hs * 125: return f'a longer session\'s profile (+{(ns - hs) * 100 // hs if hs else 100} % samples)'
+    return ''
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--build', required=True)
@@ -135,6 +162,8 @@ def main():
     t = sm.aot_tables()
     img = bytearray(t['image'])
     hidden = sm.L['f_hidden']
+    global HOT_LOOP
+    HOT_LOOP = (sm.L['f_hot_loop'], sm.L['f_hot_loop'] + 12)   # synth_hot's loop: add, subs, b.ne (aot_synth.py's labels, from which its image is assembled)
     assert struct.unpack_from('<I', img, sm.HIDDEN)[0] == 0
     struct.pack_into('<I', img, sm.HIDDEN, hidden ^ sm.HIDDEN_KEY)   # synth_hidden: the entry calls the hidden function (aot_synth.py HIDDEN)
     t['image'] = bytes(img)
@@ -198,15 +227,26 @@ def main():
     check(msha == sha and mrows == [(hidden, 'indirect', 1)] and f'aot: misses: {mfile}: 1 addresses, 1 entries into the JIT fallback, 1 of the addresses this session (main)' in log,
           f'2. {mfile}: the hidden function\'s row ({hidden:#x} indirect 1) under the header naming this image')
     pfile = prof / 'main.tsv'
-    check(not pfile.is_file() and f'aot: profile: no samples in any pack\'s code: nothing written to {prof}' in log,
-          f'2. no {pfile.name}: no sample in compiled code (aot_profile.c writes a profile only with samples; the module\'s guest code runs for microseconds)')
+    psha, prows = profile_rows(pfile) if pfile.is_file() else (None, {})
+    if pfile.is_file(): print('      main.tsv:\n' + ''.join(f'      | {line}\n' for line in pfile.read_text().splitlines()))
+    total = sum(prows.values())
+    in_loop = sum(n for o, n in prows.items() if HOT_LOOP[0] <= o < HOT_LOOP[1])
+    top = max(prows, key=prows.get) if prows else None
+    check(psha == sha and prows and f'aot: profile: {pfile}: ' in log,
+          f'2. {pfile}: the sample profile written at exit under the header naming this image ({len(prows)} rows, {total} samples)')
+    check(top is not None and HOT_LOOP[0] <= top < HOT_LOOP[1] and in_loop * 2 > total,
+          f'2. its samples in synth_hot\'s loop [main+{HOT_LOOP[0]:#x}, main+{HOT_LOOP[1]:#x}) (add, subs, b.ne: aot_synth.py\'s labels): {in_loop} of {total}, the most at '
+          f'main+{top if top is not None else 0:#x} ({prows.get(top, 0)})')
+    rec1 = recorded(prows)
     misses1 = mfile.read_bytes() if mfile.is_file() else b''
 
     # 3. The rule turns on
     lst = run([launcher, '--list', games], env)
     row = listed(lst)
     print(f'      better_pack: {row.get("better_pack")}')
-    check('1 new JIT miss' in row.get('better_pack', ''), '3. --list: better_pack says 1 new JIT miss (profile_state against the made rows)')
+    without = f'{rec1[0]} sampled offset{"" if rec1[0] == 1 else "s"} the packs were made without'
+    check(row.get('better_pack') == f'1 new JIT miss; {without}',
+          f'3. --list: better_pack says 1 new JIT miss; {without} (profile_state against the made rows: made profile yes, no samples row)')
 
     # 4. The repack, through the launcher
     r = run([launcher, '--games', games, '--repack', ID], env, timeout=300)
@@ -221,13 +261,21 @@ def main():
     show(nxlog, ['gate sites', red_gate, 'aot: misses'])
     check('aot: misses: 1 addresses, 1 new entries, 0 resume points, 0 still unserved (none)' in nxlog and 'gate sites 3 (design 1.1)' in nxlog and red_gate not in nxlog,
           '4. nxaot build --misses: the hidden function compiled (1 new entry), its gate served (gate sites 3), no [RED] line for it')
+    show(nxlog, ['aot: profile', 'aot: tiers'])
+    pw = re.search(r'^aot: profile weights: (\d+) functions, (\d+) branches weighted', nxlog, re.M)
+    tiers = re.search(r'^aot: tiers C (\d+) W (\d+) H (\d+) H\+ (\d+) \(functions\)$', nxlog, re.M)
+    check(f'aot: profile {prof / "main.tsv"}: {rec1[1]} samples at {len(prows)} offsets, 0 outside every function' in nxlog and pw and int(pw.group(1)) >= 1 and
+          tiers and int(tiers.group(3)) >= 1,
+          f'4. nxaot build --profile: the profile\'s {rec1[1]} samples taken, {pw.group(1) if pw else "?"} functions weighed, {tiers.group(3) if tiers else "?"} at tier H')
     pack2 = (aot / 'main.aot.so').read_bytes() if (aot / 'main.aot.so').is_file() else b''
     check(bool(pack2) and pack2 != pack1, '4. a new main.aot.so in the balanced folder')
     made = made_of(launch)
     digest = fnv64(f'{hidden:x} indirect\n')
     print(f'      launch file: {made}')
-    check(made == [('made', 'profile', 'yes'), ('made', 'misses', 'yes'), ('misses', 'main', f'1 {digest}')],
-          f'4. the made rows: made profile yes, made misses yes, misses main 1 {digest} (FNV-1a 64 of "{hidden:x} indirect\\n", computed here)')
+    samples_row = f'{rec1[0]} {rec1[1]} {rec1[2]}'
+    check(made == [('made', 'profile', 'yes'), ('made', 'misses', 'yes'), ('samples', 'main', samples_row), ('misses', 'main', f'1 {digest}')],
+          f'4. the made rows: made profile yes, made misses yes, samples main {samples_row} (offsets, samples, FNV-1a 64 of the offsets, computed here), '
+          f'misses main 1 {digest} (FNV-1a 64 of "{hidden:x} indirect\\n")')
 
     # 5. The rule turns off
     lst = run([launcher, '--list', games], env)
@@ -249,11 +297,19 @@ def main():
           'function\'s call binding its inline cache to its new standard entry (aot.h dm_aot_stats_t misses)')
     check('aot: misses: the JIT fallback ran for no pack this session: no misses file written' in log and mfile.is_file() and mfile.read_bytes() == misses1,
           f'6. no misses file written; {mfile.name} unchanged')
+    psha2, prows2 = profile_rows(pfile) if pfile.is_file() else (None, {})
+    rec2 = recorded(prows2)
+    print(f'      main.tsv: {len(prows2)} rows: ' + ', '.join(f'{o:#x} {n}' for o, n in sorted(prows2.items())))
+    check(psha2 == sha and f'aot: profile: {pfile}: ' in log and sum(n for o, n in prows2.items() if HOT_LOOP[0] <= o < HOT_LOOP[1]) * 2 > rec2[1],
+          f'6. {pfile.name} written again, this session\'s: {rec2[0]} offsets, {rec2[1]} samples, most in synth_hot\'s loop (the first session: {rec1[0]} offsets, {rec1[1]} samples)')
     check('nxhost-run: modules from' in (rd / 'log.prev.txt').read_text(errors='replace') if (rd / 'log.prev.txt').is_file() else False, '6. the first session\'s log kept as log.prev.txt')
     lst = run([launcher, '--list', games], env)
     row = listed(lst)
     print(f'      better_pack: {row.get("better_pack")}')
-    check(lst.returncode == 0 and row.get('better_pack') == '-', '6. --list: still -')
+    want = profile_reason(rec2, rec1) or '-'
+    check(lst.returncode == 0 and row.get('better_pack') == want,
+          f'6. --list: {want} (the rule on this session\'s profile against the samples row: {rec2[0]} offsets vs {rec1[0]}, {rec2[1]} samples vs {rec1[1]}, '
+          f'{"the same" if rec2[2] == rec1[2] else "another"} hot set)')
 
     print(f't_second_pack: {checks} checks, {fails} failed ({time.time() - t_start:.1f} s)')
     if not fails: shutil.rmtree(root, ignore_errors=True)

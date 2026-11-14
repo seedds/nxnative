@@ -13,7 +13,8 @@ the observation gate, a spin wait (ldr; cbz back), the cut and the frame step's 
 rows: an x18 byte jump table (oracle-J), an x18 offset table (oracle-T) and an x18 exclusive window (oracle-W). Its entry, run by t_aot_module, calls a host
 function through its GOT (t_aot_mod_combine, an HLE entry of the test), an import nothing implements (t_aot_mod_missing), SetHeapSize, the functions above
 (the frame step's through its stub in the aux region, which counts its passes at the state page's +0x30 as the games' stubs count vsyncs there), a function
-through a relocated pointer, OutputDebugString, and stores what each returned in `results`, then ExitProcess. Two data words are 0 for a plain run and set by
+through a relocated pointer, the hidden function (below) when synth_hidden is set, and stores what each returned in `results`; then synth_hot, the hot loop, with HOT_PASSES
+passes (its sum is not stored), OutputDebugString and ExitProcess. Two data words are 0 for a plain run and set by
 t_aot_module's child for its checks: synth_flag (the spin wait's flag: 9 in the image, so the loop ends at once; 0 there, so the loop spins until the host sets
 it, its back-edge passing the spin gate) and synth_faultptr (0: a fault probe in the entry is skipped; an address no page backs: the probe's ldr x9, [x9] faults
 there, and the host's fault report must name that instruction).
@@ -64,6 +65,9 @@ HIDDEN_KEY = 0xA5A5
 OBS_HIDDEN = 23 | 6 << 8               # the same observer as OBS_NUMBER, parameter 6
 HIDDEN_X0 = 7
 HIDDEN_WORD = 0x91000800               # add x0, x0, #2: the hidden function's first word, observed; the only such word of the text
+# The entry's last call: synth_hot with HOT_PASSES passes (its loop's three instructions, add, subs and b.ne, each pass), tens of milliseconds of compiled code, the only
+# stretch of the entry long enough for the host's sampler (DM_AOT_PROFILE) to sample: CTest t_second_pack's profile rows are in that loop. A power of two times 2^16 (one movz)
+HOT_PASSES = 1 << 25
 
 
 # ---------- Encoders (A64; each checked against llvm-mc) ----------
@@ -134,7 +138,9 @@ def text_items():
         # the hidden function, when synth_hidden holds its offset ^ HIDDEN_KEY: x16 = module base + offset, called with x0 = HIDDEN_X0, its result in results[13]
         (None, ldr_w(16, 19, HIDDEN - RESULTS)), (None, cbz_w(16, 'no_hidden')), (None, movz_w(17, HIDDEN_KEY)), (None, eor_w(16, 16, 17)), (None, adr(17, 0)),
         (None, add_xr(16, 17, 16)), (None, movz_x(0, HIDDEN_X0)), (None, blr(16)), (None, str_x(0, 19, 104)),
-        ('no_hidden', adrp(0, MSG)), (None, add_x(0, 0, lo(MSG))), (None, movz_x(1, len(MESSAGE))), (None, svc(0x27)),   # OutputDebugString
+        # the hot loop, last: HOT_PASSES passes of synth_hot (no gate, SVC or host call in it), so that a run of the entry gives the host's sampler compiled code to sample
+        ('no_hidden', movz_x(0, HOT_PASSES >> 16, 1)), (None, bl('f_hot')),
+        (None, adrp(0, MSG)), (None, add_x(0, 0, lo(MSG))), (None, movz_x(1, len(MESSAGE))), (None, svc(0x27)),   # OutputDebugString
         (None, svc(0x07)), (None, brk(1)),                                                                     # ExitProcess
         # a byte jump table through x18 (the rewriter's J form): target = base + 4 * entry
         ('f_j', cmp_w(0, 3)), (None, bhi('f_j_def')), (None, adr(16, BTAB)), (None, ldrb_uxtw(9, 16, 0)), (None, adr(18, 'f_j_base')),
@@ -423,7 +429,7 @@ HF_ENCODINGS = [   # (llvm-mc's text, the word above): test_aot_manifest.py's Nx
     ('fmov s0, #1.0', FMOV_S0_1), ('str x19, [sp, #16]', str_x(19, 31, 16)), ('ldr x19, [sp, #16]', ldr_x(19, 31, 16)), ('mov x19, x0', mov_x(19, 0)), ('add x0, x0, x19', add_xr(0, 0, 19)),
     ('mov w4, w5', mov_w(4, 5)), ('add x1, x0, #16', add_x(1, 0, 16)), ('ldr w0, [x0, #16]', ldr_w(0, 0, 16)), ('svc #0x18', svc(0x18)), ('brk #0x2', brk(2)),
     ('ldr x9, [sp]', ldr_x(9, 31, 0)), ('ldr x9, [sp, #8]', ldr_x(9, 31, 8)), ('ldr x0, [x0]', ldr_x(0, 0, 0)), ('add x0, x0, x7', add_xr(0, 0, 7)),
-    ('str w2, [x9, #4]', str_w(2, 9, 4)), ('ldr w0, [x0]', ldr_w(0, 0, 0)), ('mov x9, x0', mov_x(9, 0)), ('svc #0x45', svc(0x45)), ('mov w0, #0', movz_w(0, 0)),
+    ('mov x0, #33554432', movz_x(0, HOT_PASSES >> 16, 1)), ('str w2, [x9, #4]', str_w(2, 9, 4)), ('ldr w0, [x0]', ldr_w(0, 0, 0)), ('mov x9, x0', mov_x(9, 0)), ('svc #0x45', svc(0x45)), ('mov w0, #0', movz_w(0, 0)),
     ('mov x22, #4660', movz_x(22, 0x1234)), ('add x1, x9, #4', add_x(1, 9, 4)), ('mov x3, #0', movz_x(3, 0)), ('add x0, x0, #1', add_x(0, 0, 1)), ('brk #0x3', brk(3)),
     ('ldrb w0, [x20]', ldrb(0, 20, 0)), ('mov x20, x0', mov_x(20, 0)), ('mov x0, x20', mov_x(0, 20)), ('ldr x1, [x0]', ldr_x(1, 0, 0)), ('ldr x2, [x0, #24]', ldr_x(2, 0, 24)),
     ('add x0, x1, x2', add_xr(0, 1, 2)), ('str x0, [x21, #8]', str_x(0, 21, 8)),

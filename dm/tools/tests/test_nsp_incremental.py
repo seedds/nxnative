@@ -45,6 +45,21 @@ class ProvisionalVersionSelection(unittest.TestCase):
         self.assertEqual(nsp.provisional_version({"v0": None, "v9": None, "v10": None}, {"v0": {}, "v9": {}, "v10": {}}, "", Path("cached-profile")), "v10")
 
 
+class HostCompileLine(unittest.TestCase):   # the Mac host's one compile line, compiled one source per core (compile_parallel)
+    def test_the_line_splits_into_flags_sources_and_link_inputs(self):
+        cmd = ['clang', '-O2', '-g', '-Wall', '-mmacosx-version-min=26.6', '-Igen/x/', '-fobjc-arc', '-o', 'dmhost', 'main.c', '../gfx/a.m', 'entry.S',
+               'gen/vpx/libvpx.a', '-framework', 'Cocoa', '-framework', 'Metal']
+        cc, flags, srcs, tail = nsp.split_compile_line(cmd)
+        self.assertEqual(cc, 'clang')
+        self.assertEqual(flags, ['-O2', '-g', '-Wall', '-mmacosx-version-min=26.6', '-Igen/x/', '-fobjc-arc'])
+        self.assertEqual(srcs, ['main.c', '../gfx/a.m', 'entry.S'])
+        self.assertEqual(tail, ['gen/vpx/libvpx.a', '-framework', 'Cocoa', '-framework', 'Metal'])
+
+    def test_a_line_of_another_shape_is_not_split(self):   # run as it is
+        for cmd in (['clang', '-I', 'inc', '-o', 'x', 'a.c'], ['clang', '-o', 'x', 'a.c', 'notes.txt'], ['clang', '-o', 'x', 'lib.a']):
+            with self.subTest(cmd): self.assertIsNone(nsp.split_compile_line(cmd))
+
+
 class Base(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp()).resolve(); self.addCleanup(shutil.rmtree, self.tmp)

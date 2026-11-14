@@ -1630,6 +1630,53 @@ def decoder_host_key(host):
     return None
 
 
+SOURCE_EXTS = ('.c', '.m', '.S')
+
+
+def split_compile_line(cmd):
+    """dm/host's one compile line (clang <flags> -o <out> <sources> <archives> -framework <F> ...) as (compiler, flags, sources, link inputs), or None for a line of another shape (an argument
+    that is no flag, source, archive or framework), which is then run as it is"""
+    flags, srcs, tail, i = [], [], [], 1
+    while i < len(cmd):
+        a = cmd[i]
+        if a == '-o': i += 2; continue
+        if a == '-framework' and i + 1 < len(cmd): tail += [a, cmd[i + 1]]; i += 2; continue
+        if a.endswith(SOURCE_EXTS): srcs.append(a)
+        elif a.endswith('.a'): tail.append(a)
+        elif a.startswith('-') and a not in ('-I', '-D', '-include', '-isysroot', '-arch', '-target', '-x'): flags.append(a)   # flags of one argument (dm/host's -I<dir>, -D<x>)
+        else: return None
+        i += 1
+    return (cmd[0], flags, srcs, tail) if srcs else None
+
+
+def compile_parallel(cmd, out, cwd, env, log):
+    """Run a one-line compile of many sources as one compile per source on every core, then a link: the same flags, the same objects and the same link inputs, so the same program. clang
+    compiles the sources of one command one after another. A line of another shape is run as it is"""
+    parts = split_compile_line(cmd)
+    if not parts: run(cmd, log, env=env, cwd=cwd); return
+    cc, flags, srcs, tail = parts
+    objs_dir = Path(out).with_name(Path(out).name + '.obj'); rmtree(objs_dir); objs_dir.mkdir(parents=True)
+    objs = [objs_dir / f'{i:03d}_{Path(s).stem}.o' for i, s in enumerate(srcs)]   # numbered: two sources of one name in different folders
+    def one(job):   # each compile in a process group of its own, its output in a log of its own (run: an interrupt stops it, a failure prints its last lines)
+        src, obj = job
+        return src, run([cc, *flags, '-c', src, '-o', obj], obj.with_suffix('.log'), env=env, cwd=cwd, fatal=False)
+    import concurrent.futures as cf
+    ex = cf.ThreadPoolExecutor(os.cpu_count() or 4)
+    try: results = list(ex.map(one, zip(srcs, objs)))
+    except BaseException: ex.shutdown(wait=False, cancel_futures=True); raise   # an interrupt: the queued compiles do not start
+    ex.shutdown()
+    with open(log, 'w') as f:
+        for o in objs:
+            if (text := o.with_suffix('.log').read_text(errors='replace') if o.with_suffix('.log').is_file() else ''): f.write(f'== {o.name}\n{text}')
+    if bad := [src for src, rc in results if rc]: raise BuildError(f'the Mac host did not compile: {", ".join(bad[:5])}{" …" if len(bad) > 5 else ""} (full output: {log})')
+    link = [a for a in flags if a.startswith(('-m', '-g', '-O', '-f', '-L', '-l', '-Wl,'))]   # the compile-only ones (-I, -D, -W) are left out of the link
+    run([cc, *link, '-o', out, *objs, *tail], objs_dir / 'link.log', env=env, cwd=cwd)
+    if '-g' in flags:   # the debug info, as clang's one-step compile and link writes it beside the program (<out>.dSYM, which crash reports and lldb read): from the objects, before they go
+        rmtree(Path(str(out) + '.dSYM'))
+        run(['dsymutil', out], objs_dir / 'dsymutil.log', env=env, cwd=cwd)
+    rmtree(objs_dir)
+
+
 def build_mac_host(repo, out, env, logs, g):
     """The Mac host for the profile, built into out: dm/host's own compile line (make -n) with the output moved, since make takes no target path with spaces and dm/host/dmhost may be another build's.
     Reused when the compile line and its inputs (the source files of HOST_DIRS, the chain header dm/gfx/nvn/dmsh_chain.h among them, the profile header make generates, libvpx, dav1d and the third-party headers, the compiler
@@ -1653,7 +1700,7 @@ def build_mac_host(repo, out, env, logs, g):
     decoder = fingerprint('oodle-host-v1', common, ('files', [p for p in srcs if p != chain]), chain_text)
     if out.is_file() and reused(kf, key) is not None and decoder_host_key(out) == decoder: return out
     rmtree(kf); out.parent.mkdir(parents=True, exist_ok=True)
-    run(cmd, logs / 'mac_host_build.log', env=env, cwd=host)
+    compile_parallel(cmd, out, host, env, logs / 'mac_host_build.log')
     record = out.with_name(out.name + '.decoder.json')
     part = record.with_suffix('.json.partial')
     part.write_text(json.dumps({'format': 1, 'binary': fingerprint(('files', [out])), 'inputs': decoder}) + '\n')

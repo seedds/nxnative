@@ -1,0 +1,3259 @@
+{
+ "device": {
+  "gpu": "Orin",
+  "sm": "87",
+  "cuda_driver": "12.6",
+  "nvdisasm": "Build cuda_12.6.r12.6/compiler.34841621_0"
+ },
+ "arch": "sm_87",
+ "ops": [
+  {
+   "name": "fadd_rn",
+   "family": "f32 arith",
+   "ins": "ff",
+   "outs": "f",
+   "cases": 1024,
+   "ptx": "mov.b32 %f0, %i0; mov.b32 %f1, %i1; add.rn.f32 %f2, %f0, %f1; mov.b32 %o0, %f2;",
+   "prog": [
+    0,
+    800
+   ],
+   "rows": [
+    800,
+    12288
+   ]
+  },
+  {
+   "name": "fmul_rn",
+   "family": "f32 arith",
+   "ins": "ff",
+   "outs": "f",
+   "cases": 1024,
+   "ptx": "mov.b32 %f0, %i0; mov.b32 %f1, %i1; mul.rn.f32 %f2, %f0, %f1; mov.b32 %o0, %f2;",
+   "prog": [
+    13088,
+    800
+   ],
+   "rows": [
+    13888,
+    12288
+   ]
+  },
+  {
+   "name": "ffma_rn",
+   "family": "f32 arith",
+   "ins": "fff",
+   "outs": "f",
+   "cases": 1024,
+   "ptx": "mov.b32 %f0, %i0; mov.b32 %f1, %i1; mov.b32 %f3, %i2; fma.rn.f32 %f2, %f0, %f1, %f3; mov.b32 %o0, %f2;",
+   "prog": [
+    26176,
+    800
+   ],
+   "rows": [
+    26976,
+    16384
+   ]
+  },
+  {
+   "name": "fadd_rz",
+   "family": "f32 arith",
+   "ins": "ff",
+   "outs": "f",
+   "cases": 1024,
+   "ptx": "mov.b32 %f0, %i0; mov.b32 %f1, %i1; add.rz.f32 %f2, %f0, %f1; mov.b32 %o0, %f2;",
+   "prog": [
+    43360,
+    800
+   ],
+   "rows": [
+    44160,
+    12288
+   ]
+  },
+  {
+   "name": "fmul_rz",
+   "family": "f32 arith",
+   "ins": "ff",
+   "outs": "f",
+   "cases": 1024,
+   "ptx": "mov.b32 %f0, %i0; mov.b32 %f1, %i1; mul.rz.f32 %f2, %f0, %f1; mov.b32 %o0, %f2;",
+   "prog": [
+    56448,
+    800
+   ],
+   "rows": [
+    57248,
+    12288
+   ]
+  },
+  {
+   "name": "ffma_rz",
+   "family": "f32 arith",
+   "ins": "fff",
+   "outs": "f",
+   "cases": 1024,
+   "ptx": "mov.b32 %f0, %i0; mov.b32 %f1, %i1; mov.b32 %f3, %i2; fma.rz.f32 %f2, %f0, %f1, %f3; mov.b32 %o0, %f2;",
+   "prog": [
+    69536,
+    800
+   ],
+   "rows": [
+    70336,
+    16384
+   ]
+  },
+  {
+   "name": "fadd_rm",
+   "family": "f32 arith",
+   "ins": "ff",
+   "outs": "f",
+   "cases": 1024,
+   "ptx": "mov.b32 %f0, %i0; mov.b32 %f1, %i1; add.rm.f32 %f2, %f0, %f1; mov.b32 %o0, %f2;",
+   "prog": [
+    86720,
+    800
+   ],
+   "rows": [
+    87520,
+    12288
+   ]
+  },
+  {
+   "name": "fmul_rm",
+   "family": "f32 arith",
+   "ins": "ff",
+   "outs": "f",
+   "cases": 1024,
+   "ptx": "mov.b32 %f0, %i0; mov.b32 %f1, %i1; mul.rm.f32 %f2, %f0, %f1; mov.b32 %o0, %f2;",
+   "prog": [
+    99808,
+    800
+   ],
+   "rows": [
+    100608,
+    12288
+   ]
+  },
+  {
+   "name": "ffma_rm",
+   "family": "f32 arith",
+   "ins": "fff",
+   "outs": "f",
+   "cases": 1024,
+   "ptx": "mov.b32 %f0, %i0; mov.b32 %f1, %i1; mov.b32 %f3, %i2; fma.rm.f32 %f2, %f0, %f1, %f3; mov.b32 %o0, %f2;",
+   "prog": [
+    112896,
+    800
+   ],
+   "rows": [
+    113696,
+    16384
+   ]
+  },
+  {
+   "name": "fadd_rp",
+   "family": "f32 arith",
+   "ins": "ff",
+   "outs": "f",
+   "cases": 1024,
+   "ptx": "mov.b32 %f0, %i0; mov.b32 %f1, %i1; add.rp.f32 %f2, %f0, %f1; mov.b32 %o0, %f2;",
+   "prog": [
+    130080,
+    800
+   ],
+   "rows": [
+    130880,
+    12288
+   ]
+  },
+  {
+   "name": "fmul_rp",
+   "family": "f32 arith",
+   "ins": "ff",
+   "outs": "f",
+   "cases": 1024,
+   "ptx": "mov.b32 %f0, %i0; mov.b32 %f1, %i1; mul.rp.f32 %f2, %f0, %f1; mov.b32 %o0, %f2;",
+   "prog": [
+    143168,
+    800
+   ],
+   "rows": [
+    143968,
+    12288
+   ]
+  },
+  {
+   "name": "ffma_rp",
+   "family": "f32 arith",
+   "ins": "fff",
+   "outs": "f",
+   "cases": 1024,
+   "ptx": "mov.b32 %f0, %i0; mov.b32 %f1, %i1; mov.b32 %f3, %i2; fma.rp.f32 %f2, %f0, %f1, %f3; mov.b32 %o0, %f2;",
+   "prog": [
+    156256,
+    800
+   ],
+   "rows": [
+    157056,
+    16384
+   ]
+  },
+  {
+   "name": "fadd_ftz",
+   "family": "f32 arith",
+   "ins": "ff",
+   "outs": "f",
+   "cases": 1024,
+   "ptx": "mov.b32 %f0, %i0; mov.b32 %f1, %i1; add.rn.ftz.f32 %f2, %f0, %f1; mov.b32 %o0, %f2;",
+   "prog": [
+    173440,
+    800
+   ],
+   "rows": [
+    174240,
+    12288
+   ]
+  },
+  {
+   "name": "fadd_sat",
+   "family": "f32 arith",
+   "ins": "ff",
+   "outs": "f",
+   "cases": 1024,
+   "ptx": "mov.b32 %f0, %i0; mov.b32 %f1, %i1; add.rn.sat.f32 %f2, %f0, %f1; mov.b32 %o0, %f2;",
+   "prog": [
+    186528,
+    800
+   ],
+   "rows": [
+    187328,
+    12288
+   ]
+  },
+  {
+   "name": "fsub",
+   "family": "f32 arith",
+   "ins": "ff",
+   "outs": "f",
+   "cases": 1024,
+   "ptx": "mov.b32 %f0, %i0; mov.b32 %f1, %i1; sub.rn.f32 %f2, %f0, %f1; mov.b32 %o0, %f2;",
+   "prog": [
+    199616,
+    800
+   ],
+   "rows": [
+    200416,
+    12288
+   ]
+  },
+  {
+   "name": "fmul_ftz",
+   "family": "f32 arith",
+   "ins": "ff",
+   "outs": "f",
+   "cases": 1024,
+   "ptx": "mov.b32 %f0, %i0; mov.b32 %f1, %i1; mul.rn.ftz.f32 %f2, %f0, %f1; mov.b32 %o0, %f2;",
+   "prog": [
+    212704,
+    800
+   ],
+   "rows": [
+    213504,
+    12288
+   ]
+  },
+  {
+   "name": "fmul_sat",
+   "family": "f32 arith",
+   "ins": "ff",
+   "outs": "f",
+   "cases": 1024,
+   "ptx": "mov.b32 %f0, %i0; mov.b32 %f1, %i1; mul.rn.sat.f32 %f2, %f0, %f1; mov.b32 %o0, %f2;",
+   "prog": [
+    225792,
+    800
+   ],
+   "rows": [
+    226592,
+    12288
+   ]
+  },
+  {
+   "name": "ffma_ftz",
+   "family": "f32 arith",
+   "ins": "fff",
+   "outs": "f",
+   "cases": 1024,
+   "ptx": "mov.b32 %f0, %i0; mov.b32 %f1, %i1; mov.b32 %f3, %i2; fma.rn.ftz.f32 %f2, %f0, %f1, %f3; mov.b32 %o0, %f2;",
+   "prog": [
+    238880,
+    800
+   ],
+   "rows": [
+    239680,
+    16384
+   ]
+  },
+  {
+   "name": "ffma_sat",
+   "family": "f32 arith",
+   "ins": "fff",
+   "outs": "f",
+   "cases": 1024,
+   "ptx": "mov.b32 %f0, %i0; mov.b32 %f1, %i1; mov.b32 %f3, %i2; fma.rn.sat.f32 %f2, %f0, %f1, %f3; mov.b32 %o0, %f2;",
+   "prog": [
+    256064,
+    800
+   ],
+   "rows": [
+    256864,
+    16384
+   ]
+  },
+  {
+   "name": "ffma_ftz_sat",
+   "family": "f32 arith",
+   "ins": "fff",
+   "outs": "f",
+   "cases": 1024,
+   "ptx": "mov.b32 %f0, %i0; mov.b32 %f1, %i1; mov.b32 %f3, %i2; fma.rn.ftz.sat.f32 %f2, %f0, %f1, %f3; mov.b32 %o0, %f2;",
+   "prog": [
+    273248,
+    800
+   ],
+   "rows": [
+    274048,
+    16384
+   ]
+  },
+  {
+   "name": "fadd_abs_neg",
+   "family": "f32 arith",
+   "ins": "ff",
+   "outs": "f",
+   "cases": 1024,
+   "ptx": "mov.b32 %f0, %i0; mov.b32 %f1, %i1; abs.f32 %f2, %f0; neg.f32 %f3, %f1; add.rn.f32 %f4, %f2, %f3; mov.b32 %o0, %f4;",
+   "prog": [
+    290432,
+    800
+   ],
+   "rows": [
+    291232,
+    12288
+   ]
+  },
+  {
+   "name": "fmul_by_imm",
+   "family": "f32 arith",
+   "ins": "f",
+   "outs": "f",
+   "cases": 1024,
+   "ptx": "mov.b32 %f0, %i0; mul.rn.f32 %f2, %f0, 0f3EAAAAAB; mov.b32 %o0, %f2;",
+   "prog": [
+    303520,
+    800
+   ],
+   "rows": [
+    304320,
+    8192
+   ]
+  },
+  {
+   "name": "fmin",
+   "family": "f32 arith",
+   "ins": "ff",
+   "outs": "f",
+   "cases": 1024,
+   "ptx": "mov.b32 %f0, %i0; mov.b32 %f1, %i1; min.f32 %f2, %f0, %f1; mov.b32 %o0, %f2;",
+   "prog": [
+    312512,
+    800
+   ],
+   "rows": [
+    313312,
+    12288
+   ]
+  },
+  {
+   "name": "fmax",
+   "family": "f32 arith",
+   "ins": "ff",
+   "outs": "f",
+   "cases": 1024,
+   "ptx": "mov.b32 %f0, %i0; mov.b32 %f1, %i1; max.f32 %f2, %f0, %f1; mov.b32 %o0, %f2;",
+   "prog": [
+    325600,
+    800
+   ],
+   "rows": [
+    326400,
+    12288
+   ]
+  },
+  {
+   "name": "fmin_ftz",
+   "family": "f32 arith",
+   "ins": "ff",
+   "outs": "f",
+   "cases": 1024,
+   "ptx": "mov.b32 %f0, %i0; mov.b32 %f1, %i1; min.ftz.f32 %f2, %f0, %f1; mov.b32 %o0, %f2;",
+   "prog": [
+    338688,
+    800
+   ],
+   "rows": [
+    339488,
+    12288
+   ]
+  },
+  {
+   "name": "fmax_nan",
+   "family": "f32 arith",
+   "ins": "ff",
+   "outs": "f",
+   "cases": 1024,
+   "ptx": "mov.b32 %f0, %i0; mov.b32 %f1, %i1; max.NaN.f32 %f2, %f0, %f1; mov.b32 %o0, %f2;",
+   "prog": [
+    351776,
+    800
+   ],
+   "rows": [
+    352576,
+    12288
+   ]
+  },
+  {
+   "name": "fmin_nan",
+   "family": "f32 arith",
+   "ins": "ff",
+   "outs": "f",
+   "cases": 1024,
+   "ptx": "mov.b32 %f0, %i0; mov.b32 %f1, %i1; min.NaN.f32 %f2, %f0, %f1; mov.b32 %o0, %f2;",
+   "prog": [
+    364864,
+    800
+   ],
+   "rows": [
+    365664,
+    12288
+   ]
+  },
+  {
+   "name": "fcopysign",
+   "family": "f32 arith",
+   "ins": "ff",
+   "outs": "f",
+   "cases": 1024,
+   "ptx": "mov.b32 %f0, %i0; mov.b32 %f1, %i1; copysign.f32 %f2, %f0, %f1; mov.b32 %o0, %f2;",
+   "prog": [
+    377952,
+    800
+   ],
+   "rows": [
+    378752,
+    12288
+   ]
+  },
+  {
+   "name": "fabs",
+   "family": "f32 arith",
+   "ins": "f",
+   "outs": "f",
+   "cases": 1024,
+   "ptx": "mov.b32 %f0, %i0; abs.f32 %f2, %f0; mov.b32 %o0, %f2;",
+   "prog": [
+    391040,
+    800
+   ],
+   "rows": [
+    391840,
+    8192
+   ]
+  },
+  {
+   "name": "fneg",
+   "family": "f32 arith",
+   "ins": "f",
+   "outs": "f",
+   "cases": 1024,
+   "ptx": "mov.b32 %f0, %i0; neg.f32 %f2, %f0; mov.b32 %o0, %f2;",
+   "prog": [
+    400032,
+    800
+   ],
+   "rows": [
+    400832,
+    8192
+   ]
+  },
+  {
+   "name": "fsetp",
+   "family": "f32 compare",
+   "ins": "ff",
+   "outs": "uuuuuuuuuuuuuu",
+   "cases": 1024,
+   "ptx": "mov.b32 %f0, %i0; mov.b32 %f1, %i1; setp.eq.f32 %p0, %f0, %f1; selp.u32 %o0, 1, 0, %p0; setp.ne.f32 %p0, %f0, %f1; selp.u32 %o1, 1, 0, %p0; setp.lt.f32 %p0, %f0, %f1; selp.u32 %o2, 1, 0, %p0; setp.le.f32 %p0, %f0, %f1; selp.u32 %o3, 1, 0, %p0; setp.gt.f32 %p0, %f0, %f1; selp.u32 %o4, 1, 0, %p0; setp.ge.f32 %p0, %f0, %f1; selp.u32 %o5, 1, 0, %p0; setp.equ.f32 %p0, %f0, %f1; selp.u32 %o6, 1, 0, %p0; setp.neu.f32 %p0, %f0, %f1; selp.u32 %o7, 1, 0, %p0; setp.ltu.f32 %p0, %f0, %f1; selp.u32 %o8, 1, 0, %p0; setp.leu.f32 %p0, %f0, %f1; selp.u32 %o9, 1, 0, %p0; setp.gtu.f32 %p0, %f0, %f1; selp.u32 %o10, 1, 0, %p0; setp.geu.f32 %p0, %f0, %f1; selp.u32 %o11, 1, 0, %p0; setp.num.f32 %p0, %f0, %f1; selp.u32 %o12, 1, 0, %p0; setp.nan.f32 %p0, %f0, %f1; selp.u32 %o13, 1, 0, %p0;",
+   "prog": [
+    409024,
+    1312
+   ],
+   "rows": [
+    410336,
+    65536
+   ]
+  },
+  {
+   "name": "fsetp_ftz",
+   "family": "f32 compare",
+   "ins": "ff",
+   "outs": "uuuu",
+   "cases": 1024,
+   "ptx": "mov.b32 %f0, %i0; mov.b32 %f1, %i1; setp.eq.ftz.f32 %p0, %f0, %f1; selp.u32 %o0, 1, 0, %p0; setp.lt.ftz.f32 %p0, %f0, %f1; selp.u32 %o1, 1, 0, %p0; setp.gtu.ftz.f32 %p0, %f0, %f1; selp.u32 %o2, 1, 0, %p0; setp.ne.ftz.f32 %p0, %f0, %f1; selp.u32 %o3, 1, 0, %p0;",
+   "prog": [
+    475872,
+    928
+   ],
+   "rows": [
+    476800,
+    24576
+   ]
+  },
+  {
+   "name": "fset_bf",
+   "family": "f32 compare",
+   "ins": "ff",
+   "outs": "ff",
+   "cases": 1024,
+   "ptx": "mov.b32 %f0, %i0; mov.b32 %f1, %i1; set.lt.f32.f32 %f2, %f0, %f1; set.neu.f32.f32 %f3, %f0, %f1; mov.b32 %o0, %f2; mov.b32 %o1, %f3;",
+   "prog": [
+    501376,
+    800
+   ],
+   "rows": [
+    502176,
+    16384
+   ]
+  },
+  {
+   "name": "fset_u32",
+   "family": "f32 compare",
+   "ins": "ff",
+   "outs": "uu",
+   "cases": 1024,
+   "ptx": "mov.b32 %f0, %i0; mov.b32 %f1, %i1; set.ge.u32.f32 %o0, %f0, %f1; set.nan.u32.f32 %o1, %f0, %f1;",
+   "prog": [
+    518560,
+    800
+   ],
+   "rows": [
+    519360,
+    16384
+   ]
+  },
+  {
+   "name": "ftestp",
+   "family": "f32 compare",
+   "ins": "f",
+   "outs": "uuuuu",
+   "cases": 1024,
+   "ptx": "mov.b32 %f0, %i0; testp.finite.f32 %p0, %f0; selp.u32 %o0, 1, 0, %p0; testp.infinite.f32 %p0, %f0; selp.u32 %o1, 1, 0, %p0; testp.number.f32 %p0, %f0; selp.u32 %o2, 1, 0, %p0; testp.normal.f32 %p0, %f0; selp.u32 %o3, 1, 0, %p0; testp.subnormal.f32 %p0, %f0; selp.u32 %o4, 1, 0, %p0;",
+   "prog": [
+    535744,
+    1056
+   ],
+   "rows": [
+    536800,
+    24576
+   ]
+  },
+  {
+   "name": "fsel_cmp",
+   "family": "f32 compare",
+   "ins": "fff",
+   "outs": "f",
+   "cases": 1024,
+   "ptx": "mov.b32 %f0, %i0; mov.b32 %f1, %i1; mov.b32 %f3, %i2; setp.gt.f32 %p0, %f0, 0f00000000; selp.f32 %f2, %f1, %f3, %p0; mov.b32 %o0, %f2;",
+   "prog": [
+    561376,
+    800
+   ],
+   "rows": [
+    562176,
+    16384
+   ]
+  },
+  {
+   "name": "mufu_ex2",
+   "family": "mufu",
+   "ins": "f",
+   "outs": "f",
+   "cases": 1024,
+   "ptx": "mov.b32 %f0, %i0; ex2.approx.f32 %f2, %f0; mov.b32 %o0, %f2;",
+   "prog": [
+    578560,
+    800
+   ],
+   "rows": [
+    579360,
+    8192
+   ]
+  },
+  {
+   "name": "mufu_ex2_ftz",
+   "family": "mufu",
+   "ins": "f",
+   "outs": "f",
+   "cases": 1024,
+   "ptx": "mov.b32 %f0, %i0; ex2.approx.ftz.f32 %f2, %f0; mov.b32 %o0, %f2;",
+   "prog": [
+    587552,
+    800
+   ],
+   "rows": [
+    588352,
+    8192
+   ]
+  },
+  {
+   "name": "mufu_lg2",
+   "family": "mufu",
+   "ins": "f",
+   "outs": "f",
+   "cases": 1024,
+   "ptx": "mov.b32 %f0, %i0; lg2.approx.f32 %f2, %f0; mov.b32 %o0, %f2;",
+   "prog": [
+    596544,
+    800
+   ],
+   "rows": [
+    597344,
+    8192
+   ]
+  },
+  {
+   "name": "mufu_lg2_ftz",
+   "family": "mufu",
+   "ins": "f",
+   "outs": "f",
+   "cases": 1024,
+   "ptx": "mov.b32 %f0, %i0; lg2.approx.ftz.f32 %f2, %f0; mov.b32 %o0, %f2;",
+   "prog": [
+    605536,
+    800
+   ],
+   "rows": [
+    606336,
+    8192
+   ]
+  },
+  {
+   "name": "mufu_rcp",
+   "family": "mufu",
+   "ins": "f",
+   "outs": "f",
+   "cases": 1024,
+   "ptx": "mov.b32 %f0, %i0; rcp.approx.f32 %f2, %f0; mov.b32 %o0, %f2;",
+   "prog": [
+    614528,
+    800
+   ],
+   "rows": [
+    615328,
+    8192
+   ]
+  },
+  {
+   "name": "mufu_rcp_ftz",
+   "family": "mufu",
+   "ins": "f",
+   "outs": "f",
+   "cases": 1024,
+   "ptx": "mov.b32 %f0, %i0; rcp.approx.ftz.f32 %f2, %f0; mov.b32 %o0, %f2;",
+   "prog": [
+    623520,
+    800
+   ],
+   "rows": [
+    624320,
+    8192
+   ]
+  },
+  {
+   "name": "mufu_rsqrt",
+   "family": "mufu",
+   "ins": "f",
+   "outs": "f",
+   "cases": 1024,
+   "ptx": "mov.b32 %f0, %i0; rsqrt.approx.f32 %f2, %f0; mov.b32 %o0, %f2;",
+   "prog": [
+    632512,
+    800
+   ],
+   "rows": [
+    633312,
+    8192
+   ]
+  },
+  {
+   "name": "mufu_rsqrt_ftz",
+   "family": "mufu",
+   "ins": "f",
+   "outs": "f",
+   "cases": 1024,
+   "ptx": "mov.b32 %f0, %i0; rsqrt.approx.ftz.f32 %f2, %f0; mov.b32 %o0, %f2;",
+   "prog": [
+    641504,
+    800
+   ],
+   "rows": [
+    642304,
+    8192
+   ]
+  },
+  {
+   "name": "mufu_sqrt",
+   "family": "mufu",
+   "ins": "f",
+   "outs": "f",
+   "cases": 1024,
+   "ptx": "mov.b32 %f0, %i0; sqrt.approx.f32 %f2, %f0; mov.b32 %o0, %f2;",
+   "prog": [
+    650496,
+    800
+   ],
+   "rows": [
+    651296,
+    8192
+   ]
+  },
+  {
+   "name": "mufu_sqrt_ftz",
+   "family": "mufu",
+   "ins": "f",
+   "outs": "f",
+   "cases": 1024,
+   "ptx": "mov.b32 %f0, %i0; sqrt.approx.ftz.f32 %f2, %f0; mov.b32 %o0, %f2;",
+   "prog": [
+    659488,
+    800
+   ],
+   "rows": [
+    660288,
+    8192
+   ]
+  },
+  {
+   "name": "mufu_sin",
+   "family": "mufu",
+   "ins": "f",
+   "outs": "f",
+   "cases": 1024,
+   "ptx": "mov.b32 %f0, %i0; sin.approx.f32 %f2, %f0; mov.b32 %o0, %f2;",
+   "prog": [
+    668480,
+    800
+   ],
+   "rows": [
+    669280,
+    8192
+   ]
+  },
+  {
+   "name": "mufu_cos",
+   "family": "mufu",
+   "ins": "f",
+   "outs": "f",
+   "cases": 1024,
+   "ptx": "mov.b32 %f0, %i0; cos.approx.f32 %f2, %f0; mov.b32 %o0, %f2;",
+   "prog": [
+    677472,
+    800
+   ],
+   "rows": [
+    678272,
+    8192
+   ]
+  },
+  {
+   "name": "mufu_tanh",
+   "family": "mufu",
+   "ins": "f",
+   "outs": "f",
+   "cases": 1024,
+   "ptx": "mov.b32 %f0, %i0; tanh.approx.f32 %f2, %f0; mov.b32 %o0, %f2;",
+   "prog": [
+    686464,
+    800
+   ],
+   "rows": [
+    687264,
+    8192
+   ]
+  },
+  {
+   "name": "mufu_ex2_f16x2",
+   "family": "mufu",
+   "ins": "h",
+   "outs": "h",
+   "cases": 1024,
+   "ptx": "mov.b32 %x0, %i0; ex2.approx.f16x2 %x2, %x0; mov.b32 %o0, %x2;",
+   "prog": [
+    695456,
+    800
+   ],
+   "rows": [
+    696256,
+    8192
+   ]
+  },
+  {
+   "name": "mufu_tanh_f16x2",
+   "family": "mufu",
+   "ins": "h",
+   "outs": "h",
+   "cases": 1024,
+   "ptx": "mov.b32 %x0, %i0; tanh.approx.f16x2 %x2, %x0; mov.b32 %o0, %x2;",
+   "prog": [
+    704448,
+    800
+   ],
+   "rows": [
+    705248,
+    8192
+   ]
+  },
+  {
+   "name": "fdiv_rn",
+   "family": "f32 precise",
+   "ins": "ff",
+   "outs": "f",
+   "cases": 1024,
+   "ptx": "mov.b32 %f0, %i0; mov.b32 %f1, %i1; div.rn.f32 %f2, %f0, %f1; mov.b32 %o0, %f2;",
+   "prog": [
+    713440,
+    928
+   ],
+   "rows": [
+    714368,
+    12288
+   ]
+  },
+  {
+   "name": "fdiv_full",
+   "family": "f32 precise",
+   "ins": "ff",
+   "outs": "f",
+   "cases": 1024,
+   "ptx": "mov.b32 %f0, %i0; mov.b32 %f1, %i1; div.full.f32 %f2, %f0, %f1; mov.b32 %o0, %f2;",
+   "prog": [
+    726656,
+    928
+   ],
+   "rows": [
+    727584,
+    12288
+   ]
+  },
+  {
+   "name": "fdiv_approx",
+   "family": "f32 precise",
+   "ins": "ff",
+   "outs": "f",
+   "cases": 1024,
+   "ptx": "mov.b32 %f0, %i0; mov.b32 %f1, %i1; div.approx.f32 %f2, %f0, %f1; mov.b32 %o0, %f2;",
+   "prog": [
+    739872,
+    800
+   ],
+   "rows": [
+    740672,
+    12288
+   ]
+  },
+  {
+   "name": "frcp_rn",
+   "family": "f32 precise",
+   "ins": "f",
+   "outs": "f",
+   "cases": 1024,
+   "ptx": "mov.b32 %f0, %i0; rcp.rn.f32 %f2, %f0; mov.b32 %o0, %f2;",
+   "prog": [
+    752960,
+    928
+   ],
+   "rows": [
+    753888,
+    8192
+   ]
+  },
+  {
+   "name": "fsqrt_rn",
+   "family": "f32 precise",
+   "ins": "f",
+   "outs": "f",
+   "cases": 1024,
+   "ptx": "mov.b32 %f0, %i0; sqrt.rn.f32 %f2, %f0; mov.b32 %o0, %f2;",
+   "prog": [
+    762080,
+    928
+   ],
+   "rows": [
+    763008,
+    8192
+   ]
+  },
+  {
+   "name": "f2i_s32_rni",
+   "family": "convert",
+   "ins": "f",
+   "outs": "u",
+   "cases": 1024,
+   "ptx": "mov.b32 %f0, %i0; cvt.rni.s32.f32 %o0, %f0;",
+   "prog": [
+    771200,
+    800
+   ],
+   "rows": [
+    772000,
+    8192
+   ]
+  },
+  {
+   "name": "frnd_rni",
+   "family": "convert",
+   "ins": "f",
+   "outs": "f",
+   "cases": 1024,
+   "ptx": "mov.b32 %f0, %i0; cvt.rni.f32.f32 %f2, %f0; mov.b32 %o0, %f2;",
+   "prog": [
+    780192,
+    800
+   ],
+   "rows": [
+    780992,
+    8192
+   ]
+  },
+  {
+   "name": "f2i_s32_rzi",
+   "family": "convert",
+   "ins": "f",
+   "outs": "u",
+   "cases": 1024,
+   "ptx": "mov.b32 %f0, %i0; cvt.rzi.s32.f32 %o0, %f0;",
+   "prog": [
+    789184,
+    800
+   ],
+   "rows": [
+    789984,
+    8192
+   ]
+  },
+  {
+   "name": "frnd_rzi",
+   "family": "convert",
+   "ins": "f",
+   "outs": "f",
+   "cases": 1024,
+   "ptx": "mov.b32 %f0, %i0; cvt.rzi.f32.f32 %f2, %f0; mov.b32 %o0, %f2;",
+   "prog": [
+    798176,
+    800
+   ],
+   "rows": [
+    798976,
+    8192
+   ]
+  },
+  {
+   "name": "f2i_s32_rmi",
+   "family": "convert",
+   "ins": "f",
+   "outs": "u",
+   "cases": 1024,
+   "ptx": "mov.b32 %f0, %i0; cvt.rmi.s32.f32 %o0, %f0;",
+   "prog": [
+    807168,
+    800
+   ],
+   "rows": [
+    807968,
+    8192
+   ]
+  },
+  {
+   "name": "frnd_rmi",
+   "family": "convert",
+   "ins": "f",
+   "outs": "f",
+   "cases": 1024,
+   "ptx": "mov.b32 %f0, %i0; cvt.rmi.f32.f32 %f2, %f0; mov.b32 %o0, %f2;",
+   "prog": [
+    816160,
+    800
+   ],
+   "rows": [
+    816960,
+    8192
+   ]
+  },
+  {
+   "name": "f2i_s32_rpi",
+   "family": "convert",
+   "ins": "f",
+   "outs": "u",
+   "cases": 1024,
+   "ptx": "mov.b32 %f0, %i0; cvt.rpi.s32.f32 %o0, %f0;",
+   "prog": [
+    825152,
+    800
+   ],
+   "rows": [
+    825952,
+    8192
+   ]
+  },
+  {
+   "name": "frnd_rpi",
+   "family": "convert",
+   "ins": "f",
+   "outs": "f",
+   "cases": 1024,
+   "ptx": "mov.b32 %f0, %i0; cvt.rpi.f32.f32 %f2, %f0; mov.b32 %o0, %f2;",
+   "prog": [
+    834144,
+    800
+   ],
+   "rows": [
+    834944,
+    8192
+   ]
+  },
+  {
+   "name": "f2i_u32_rzi",
+   "family": "convert",
+   "ins": "f",
+   "outs": "u",
+   "cases": 1024,
+   "ptx": "mov.b32 %f0, %i0; cvt.rzi.u32.f32 %o0, %f0;",
+   "prog": [
+    843136,
+    800
+   ],
+   "rows": [
+    843936,
+    8192
+   ]
+  },
+  {
+   "name": "f2i_s32_ftz",
+   "family": "convert",
+   "ins": "f",
+   "outs": "u",
+   "cases": 1024,
+   "ptx": "mov.b32 %f0, %i0; cvt.rzi.ftz.s32.f32 %o0, %f0;",
+   "prog": [
+    852128,
+    800
+   ],
+   "rows": [
+    852928,
+    8192
+   ]
+  },
+  {
+   "name": "f2i_s16_sat",
+   "family": "convert",
+   "ins": "f",
+   "outs": "u",
+   "cases": 1024,
+   "ptx": "mov.b32 %f0, %i0; cvt.rzi.sat.s16.f32 %w0, %f0; cvt.s32.s16 %o0, %w0;",
+   "prog": [
+    861120,
+    800
+   ],
+   "rows": [
+    861920,
+    8192
+   ]
+  },
+  {
+   "name": "f2i_u8_sat",
+   "family": "convert",
+   "ins": "f",
+   "outs": "u",
+   "cases": 1024,
+   "ptx": "mov.b32 %f0, %i0; cvt.rni.sat.u8.f32 %w0, %f0; cvt.u32.u8 %o0, %w0;",
+   "prog": [
+    870112,
+    800
+   ],
+   "rows": [
+    870912,
+    8192
+   ]
+  },
+  {
+   "name": "f2i_s64",
+   "family": "convert",
+   "ins": "f",
+   "outs": "uu",
+   "cases": 1024,
+   "ptx": "mov.b32 %f0, %i0; cvt.rzi.s64.f32 %d0, %f0; mov.b64 {%o0, %o1}, %d0;",
+   "prog": [
+    879104,
+    800
+   ],
+   "rows": [
+    879904,
+    12288
+   ]
+  },
+  {
+   "name": "i2f_s32_rn",
+   "family": "convert",
+   "ins": "u",
+   "outs": "f",
+   "cases": 1024,
+   "ptx": "cvt.rn.f32.s32 %f2, %i0; mov.b32 %o0, %f2;",
+   "prog": [
+    892192,
+    800
+   ],
+   "rows": [
+    892992,
+    8192
+   ]
+  },
+  {
+   "name": "i2f_s32_rz",
+   "family": "convert",
+   "ins": "u",
+   "outs": "f",
+   "cases": 1024,
+   "ptx": "cvt.rz.f32.s32 %f2, %i0; mov.b32 %o0, %f2;",
+   "prog": [
+    901184,
+    800
+   ],
+   "rows": [
+    901984,
+    8192
+   ]
+  },
+  {
+   "name": "i2f_s32_rm",
+   "family": "convert",
+   "ins": "u",
+   "outs": "f",
+   "cases": 1024,
+   "ptx": "cvt.rm.f32.s32 %f2, %i0; mov.b32 %o0, %f2;",
+   "prog": [
+    910176,
+    800
+   ],
+   "rows": [
+    910976,
+    8192
+   ]
+  },
+  {
+   "name": "i2f_s32_rp",
+   "family": "convert",
+   "ins": "u",
+   "outs": "f",
+   "cases": 1024,
+   "ptx": "cvt.rp.f32.s32 %f2, %i0; mov.b32 %o0, %f2;",
+   "prog": [
+    919168,
+    800
+   ],
+   "rows": [
+    919968,
+    8192
+   ]
+  },
+  {
+   "name": "i2f_u32_rn",
+   "family": "convert",
+   "ins": "u",
+   "outs": "f",
+   "cases": 1024,
+   "ptx": "cvt.rn.f32.u32 %f2, %i0; mov.b32 %o0, %f2;",
+   "prog": [
+    928160,
+    800
+   ],
+   "rows": [
+    928960,
+    8192
+   ]
+  },
+  {
+   "name": "i2f_s16",
+   "family": "convert",
+   "ins": "u",
+   "outs": "f",
+   "cases": 1024,
+   "ptx": "cvt.u16.u32 %w0, %i0; cvt.rn.f32.s16 %f2, %w0; mov.b32 %o0, %f2;",
+   "prog": [
+    937152,
+    800
+   ],
+   "rows": [
+    937952,
+    8192
+   ]
+  },
+  {
+   "name": "i2f_s64",
+   "family": "convert",
+   "ins": "uu",
+   "outs": "f",
+   "cases": 1024,
+   "ptx": "mov.b64 %d0, {%i0, %i1}; cvt.rn.f32.s64 %f2, %d0; mov.b32 %o0, %f2;",
+   "prog": [
+    946144,
+    800
+   ],
+   "rows": [
+    946944,
+    12288
+   ]
+  },
+  {
+   "name": "f2f_f16_rn",
+   "family": "convert",
+   "ins": "f",
+   "outs": "h",
+   "cases": 1024,
+   "ptx": "mov.b32 %f0, %i0; cvt.rn.f16.f32 %y0, %f0; mov.b16 %w0, %y0; cvt.u32.u16 %o0, %w0;",
+   "prog": [
+    959232,
+    800
+   ],
+   "rows": [
+    960032,
+    8192
+   ]
+  },
+  {
+   "name": "f2f_f16_rz",
+   "family": "convert",
+   "ins": "f",
+   "outs": "h",
+   "cases": 1024,
+   "ptx": "mov.b32 %f0, %i0; cvt.rz.f16.f32 %y0, %f0; mov.b16 %w0, %y0; cvt.u32.u16 %o0, %w0;",
+   "prog": [
+    968224,
+    800
+   ],
+   "rows": [
+    969024,
+    8192
+   ]
+  },
+  {
+   "name": "f2f_f32_from_f16",
+   "family": "convert",
+   "ins": "h",
+   "outs": "ff",
+   "cases": 1024,
+   "ptx": "mov.b32 {%y0, %y1}, %i0; cvt.f32.f16 %f2, %y0; cvt.f32.f16 %f3, %y1; mov.b32 %o0, %f2; mov.b32 %o1, %f3;",
+   "prog": [
+    977216,
+    800
+   ],
+   "rows": [
+    978016,
+    12288
+   ]
+  },
+  {
+   "name": "f2fp_pack_f16x2",
+   "family": "convert",
+   "ins": "ff",
+   "outs": "h",
+   "cases": 1024,
+   "ptx": "mov.b32 %f0, %i0; mov.b32 %f1, %i1; cvt.rn.f16x2.f32 %x2, %f0, %f1; mov.b32 %o0, %x2;",
+   "prog": [
+    990304,
+    800
+   ],
+   "rows": [
+    991104,
+    12288
+   ]
+  },
+  {
+   "name": "f2fp_pack_f16x2_relu",
+   "family": "convert",
+   "ins": "ff",
+   "outs": "h",
+   "cases": 1024,
+   "ptx": "mov.b32 %f0, %i0; mov.b32 %f1, %i1; cvt.rn.relu.f16x2.f32 %x2, %f0, %f1; mov.b32 %o0, %x2;",
+   "prog": [
+    1003392,
+    800
+   ],
+   "rows": [
+    1004192,
+    12288
+   ]
+  },
+  {
+   "name": "f2fp_pack_bf16x2",
+   "family": "convert",
+   "ins": "ff",
+   "outs": "b",
+   "cases": 1024,
+   "ptx": "mov.b32 %f0, %i0; mov.b32 %f1, %i1; cvt.rn.bf16x2.f32 %x2, %f0, %f1; mov.b32 %o0, %x2;",
+   "prog": [
+    1016480,
+    800
+   ],
+   "rows": [
+    1017280,
+    12288
+   ]
+  },
+  {
+   "name": "f2f_tf32",
+   "family": "convert",
+   "ins": "f",
+   "outs": "u",
+   "cases": 1024,
+   "ptx": "mov.b32 %f0, %i0; cvt.rna.tf32.f32 %o0, %f0;",
+   "prog": [
+    1029568,
+    800
+   ],
+   "rows": [
+    1030368,
+    8192
+   ]
+  },
+  {
+   "name": "i2f_f16_rz",
+   "family": "convert",
+   "ins": "u",
+   "outs": "h",
+   "cases": 1024,
+   "ptx": "cvt.rz.f16.s32 %w0, %i0; cvt.u32.u16 %o0, %w0;",
+   "prog": [
+    1038560,
+    800
+   ],
+   "rows": [
+    1039360,
+    8192
+   ]
+  },
+  {
+   "name": "f2f_f16_rzx",
+   "family": "convert",
+   "ins": "f",
+   "outs": "h",
+   "cases": 1024,
+   "ptx": "mov.b32 %f0, %i0; cvt.rz.f16.f32 %w0, %f0; cvt.u32.u16 %o0, %w0;",
+   "prog": [
+    1047552,
+    800
+   ],
+   "rows": [
+    1048352,
+    8192
+   ]
+  },
+  {
+   "name": "i2f_f16_rm",
+   "family": "convert",
+   "ins": "u",
+   "outs": "h",
+   "cases": 1024,
+   "ptx": "cvt.rm.f16.s32 %w0, %i0; cvt.u32.u16 %o0, %w0;",
+   "prog": [
+    1056544,
+    800
+   ],
+   "rows": [
+    1057344,
+    8192
+   ]
+  },
+  {
+   "name": "f2f_f16_rmx",
+   "family": "convert",
+   "ins": "f",
+   "outs": "h",
+   "cases": 1024,
+   "ptx": "mov.b32 %f0, %i0; cvt.rm.f16.f32 %w0, %f0; cvt.u32.u16 %o0, %w0;",
+   "prog": [
+    1065536,
+    800
+   ],
+   "rows": [
+    1066336,
+    8192
+   ]
+  },
+  {
+   "name": "i2f_f16_rp",
+   "family": "convert",
+   "ins": "u",
+   "outs": "h",
+   "cases": 1024,
+   "ptx": "cvt.rp.f16.s32 %w0, %i0; cvt.u32.u16 %o0, %w0;",
+   "prog": [
+    1074528,
+    800
+   ],
+   "rows": [
+    1075328,
+    8192
+   ]
+  },
+  {
+   "name": "f2f_f16_rpx",
+   "family": "convert",
+   "ins": "f",
+   "outs": "h",
+   "cases": 1024,
+   "ptx": "mov.b32 %f0, %i0; cvt.rp.f16.f32 %w0, %f0; cvt.u32.u16 %o0, %w0;",
+   "prog": [
+    1083520,
+    800
+   ],
+   "rows": [
+    1084320,
+    8192
+   ]
+  },
+  {
+   "name": "i2f_f16_u32_rz",
+   "family": "convert",
+   "ins": "u",
+   "outs": "h",
+   "cases": 1024,
+   "ptx": "cvt.rz.f16.u32 %w0, %i0; cvt.u32.u16 %o0, %w0;",
+   "prog": [
+    1092512,
+    800
+   ],
+   "rows": [
+    1093312,
+    8192
+   ]
+  },
+  {
+   "name": "f2fp_pack_f16x2_rz",
+   "family": "convert",
+   "ins": "ff",
+   "outs": "h",
+   "cases": 1024,
+   "ptx": "mov.b32 %f0, %i0; mov.b32 %f1, %i1; cvt.rz.f16x2.f32 %x2, %f0, %f1; mov.b32 %o0, %x2;",
+   "prog": [
+    1101504,
+    800
+   ],
+   "rows": [
+    1102304,
+    12288
+   ]
+  },
+  {
+   "name": "i2i_s8_sat",
+   "family": "convert",
+   "ins": "u",
+   "outs": "u",
+   "cases": 1024,
+   "ptx": "cvt.sat.s8.s32 %w0, %i0; cvt.s32.s8 %o0, %w0;",
+   "prog": [
+    1114592,
+    800
+   ],
+   "rows": [
+    1115392,
+    8192
+   ]
+  },
+  {
+   "name": "i2i_u16_sat",
+   "family": "convert",
+   "ins": "u",
+   "outs": "u",
+   "cases": 1024,
+   "ptx": "cvt.sat.u16.s32 %w0, %i0; cvt.u32.u16 %o0, %w0;",
+   "prog": [
+    1123584,
+    800
+   ],
+   "rows": [
+    1124384,
+    8192
+   ]
+  },
+  {
+   "name": "sext_s8",
+   "family": "convert",
+   "ins": "u",
+   "outs": "u",
+   "cases": 1024,
+   "ptx": "cvt.s32.s8 %o0, %i0;",
+   "prog": [
+    1132576,
+    800
+   ],
+   "rows": [
+    1133376,
+    8192
+   ]
+  },
+  {
+   "name": "hadd2",
+   "family": "f16x2",
+   "ins": "hh",
+   "outs": "h",
+   "cases": 1024,
+   "ptx": "mov.b32 %x0, %i0; mov.b32 %x1, %i1; add.rn.f16x2 %x2, %x0, %x1; mov.b32 %o0, %x2;",
+   "prog": [
+    1141568,
+    800
+   ],
+   "rows": [
+    1142368,
+    12288
+   ]
+  },
+  {
+   "name": "hadd2_ftz",
+   "family": "f16x2",
+   "ins": "hh",
+   "outs": "h",
+   "cases": 1024,
+   "ptx": "mov.b32 %x0, %i0; mov.b32 %x1, %i1; add.rn.ftz.f16x2 %x2, %x0, %x1; mov.b32 %o0, %x2;",
+   "prog": [
+    1154656,
+    800
+   ],
+   "rows": [
+    1155456,
+    12288
+   ]
+  },
+  {
+   "name": "hadd2_sat",
+   "family": "f16x2",
+   "ins": "hh",
+   "outs": "h",
+   "cases": 1024,
+   "ptx": "mov.b32 %x0, %i0; mov.b32 %x1, %i1; add.rn.sat.f16x2 %x2, %x0, %x1; mov.b32 %o0, %x2;",
+   "prog": [
+    1167744,
+    800
+   ],
+   "rows": [
+    1168544,
+    12288
+   ]
+  },
+  {
+   "name": "hsub2",
+   "family": "f16x2",
+   "ins": "hh",
+   "outs": "h",
+   "cases": 1024,
+   "ptx": "mov.b32 %x0, %i0; mov.b32 %x1, %i1; sub.rn.f16x2 %x2, %x0, %x1; mov.b32 %o0, %x2;",
+   "prog": [
+    1180832,
+    800
+   ],
+   "rows": [
+    1181632,
+    12288
+   ]
+  },
+  {
+   "name": "hmul2",
+   "family": "f16x2",
+   "ins": "hh",
+   "outs": "h",
+   "cases": 1024,
+   "ptx": "mov.b32 %x0, %i0; mov.b32 %x1, %i1; mul.rn.f16x2 %x2, %x0, %x1; mov.b32 %o0, %x2;",
+   "prog": [
+    1193920,
+    800
+   ],
+   "rows": [
+    1194720,
+    12288
+   ]
+  },
+  {
+   "name": "hmul2_ftz",
+   "family": "f16x2",
+   "ins": "hh",
+   "outs": "h",
+   "cases": 1024,
+   "ptx": "mov.b32 %x0, %i0; mov.b32 %x1, %i1; mul.rn.ftz.f16x2 %x2, %x0, %x1; mov.b32 %o0, %x2;",
+   "prog": [
+    1207008,
+    800
+   ],
+   "rows": [
+    1207808,
+    12288
+   ]
+  },
+  {
+   "name": "hfma2",
+   "family": "f16x2",
+   "ins": "hhh",
+   "outs": "h",
+   "cases": 1024,
+   "ptx": "mov.b32 %x0, %i0; mov.b32 %x1, %i1; mov.b32 %x3, %i2; fma.rn.f16x2 %x2, %x0, %x1, %x3; mov.b32 %o0, %x2;",
+   "prog": [
+    1220096,
+    800
+   ],
+   "rows": [
+    1220896,
+    16384
+   ]
+  },
+  {
+   "name": "hfma2_ftz",
+   "family": "f16x2",
+   "ins": "hhh",
+   "outs": "h",
+   "cases": 1024,
+   "ptx": "mov.b32 %x0, %i0; mov.b32 %x1, %i1; mov.b32 %x3, %i2; fma.rn.ftz.f16x2 %x2, %x0, %x1, %x3; mov.b32 %o0, %x2;",
+   "prog": [
+    1237280,
+    800
+   ],
+   "rows": [
+    1238080,
+    16384
+   ]
+  },
+  {
+   "name": "hfma2_sat",
+   "family": "f16x2",
+   "ins": "hhh",
+   "outs": "h",
+   "cases": 1024,
+   "ptx": "mov.b32 %x0, %i0; mov.b32 %x1, %i1; mov.b32 %x3, %i2; fma.rn.sat.f16x2 %x2, %x0, %x1, %x3; mov.b32 %o0, %x2;",
+   "prog": [
+    1254464,
+    800
+   ],
+   "rows": [
+    1255264,
+    16384
+   ]
+  },
+  {
+   "name": "hfma2_relu",
+   "family": "f16x2",
+   "ins": "hhh",
+   "outs": "h",
+   "cases": 1024,
+   "ptx": "mov.b32 %x0, %i0; mov.b32 %x1, %i1; mov.b32 %x3, %i2; fma.rn.relu.f16x2 %x2, %x0, %x1, %x3; mov.b32 %o0, %x2;",
+   "prog": [
+    1271648,
+    800
+   ],
+   "rows": [
+    1272448,
+    16384
+   ]
+  },
+  {
+   "name": "hmin2",
+   "family": "f16x2",
+   "ins": "hh",
+   "outs": "h",
+   "cases": 1024,
+   "ptx": "mov.b32 %x0, %i0; mov.b32 %x1, %i1; min.f16x2 %x2, %x0, %x1; mov.b32 %o0, %x2;",
+   "prog": [
+    1288832,
+    800
+   ],
+   "rows": [
+    1289632,
+    12288
+   ]
+  },
+  {
+   "name": "hmax2",
+   "family": "f16x2",
+   "ins": "hh",
+   "outs": "h",
+   "cases": 1024,
+   "ptx": "mov.b32 %x0, %i0; mov.b32 %x1, %i1; max.f16x2 %x2, %x0, %x1; mov.b32 %o0, %x2;",
+   "prog": [
+    1301920,
+    800
+   ],
+   "rows": [
+    1302720,
+    12288
+   ]
+  },
+  {
+   "name": "hmin2_nan",
+   "family": "f16x2",
+   "ins": "hh",
+   "outs": "h",
+   "cases": 1024,
+   "ptx": "mov.b32 %x0, %i0; mov.b32 %x1, %i1; min.NaN.f16x2 %x2, %x0, %x1; mov.b32 %o0, %x2;",
+   "prog": [
+    1315008,
+    800
+   ],
+   "rows": [
+    1315808,
+    12288
+   ]
+  },
+  {
+   "name": "hneg2",
+   "family": "f16x2",
+   "ins": "h",
+   "outs": "h",
+   "cases": 1024,
+   "ptx": "mov.b32 %x0, %i0; neg.f16x2 %x2, %x0; mov.b32 %o0, %x2;",
+   "prog": [
+    1328096,
+    800
+   ],
+   "rows": [
+    1328896,
+    8192
+   ]
+  },
+  {
+   "name": "habs2",
+   "family": "f16x2",
+   "ins": "h",
+   "outs": "h",
+   "cases": 1024,
+   "ptx": "mov.b32 %x0, %i0; abs.f16x2 %x2, %x0; mov.b32 %o0, %x2;",
+   "prog": [
+    1337088,
+    800
+   ],
+   "rows": [
+    1337888,
+    8192
+   ]
+  },
+  {
+   "name": "hadd2_imm",
+   "family": "f16x2",
+   "ins": "h",
+   "outs": "h",
+   "cases": 1024,
+   "ptx": "mov.b32 %x0, %i0; mov.b32 %x1, 0x3C00BC00; add.rn.f16x2 %x2, %x0, %x1; mov.b32 %o0, %x2;",
+   "prog": [
+    1346080,
+    800
+   ],
+   "rows": [
+    1346880,
+    8192
+   ]
+  },
+  {
+   "name": "hadd_f16",
+   "family": "f16x2",
+   "ins": "hh",
+   "outs": "hh",
+   "cases": 1024,
+   "ptx": "mov.b32 {%y0, %y1}, %i0; mov.b32 {%y2, %y3}, %i1; add.rn.f16 %y4, %y0, %y2; mul.rn.f16 %y5, %y1, %y3; mov.b16 %w0, %y4; cvt.u32.u16 %o0, %w0; mov.b16 %w1, %y5; cvt.u32.u16 %o1, %w1;",
+   "prog": [
+    1355072,
+    800
+   ],
+   "rows": [
+    1355872,
+    16384
+   ]
+  },
+  {
+   "name": "hsetp2",
+   "family": "f16x2",
+   "ins": "hh",
+   "outs": "uuuuuuuu",
+   "cases": 1024,
+   "ptx": "mov.b32 %x0, %i0; mov.b32 %x1, %i1; setp.lt.f16x2 %p0|%p1, %x0, %x1; selp.u32 %o0, 1, 0, %p0; selp.u32 %o1, 1, 0, %p1; setp.eq.f16x2 %p0|%p1, %x0, %x1; selp.u32 %o2, 1, 0, %p0; selp.u32 %o3, 1, 0, %p1; setp.gtu.f16x2 %p0|%p1, %x0, %x1; selp.u32 %o4, 1, 0, %p0; selp.u32 %o5, 1, 0, %p1; setp.nan.f16x2 %p0|%p1, %x0, %x1; selp.u32 %o6, 1, 0, %p0; selp.u32 %o7, 1, 0, %p1;",
+   "prog": [
+    1372256,
+    1056
+   ],
+   "rows": [
+    1373312,
+    40960
+   ]
+  },
+  {
+   "name": "hset2",
+   "family": "f16x2",
+   "ins": "hh",
+   "outs": "hu",
+   "cases": 1024,
+   "ptx": "mov.b32 %x0, %i0; mov.b32 %x1, %i1; set.lt.f16x2.f16x2 %x2, %x0, %x1; mov.b32 %o0, %x2; set.geu.u32.f16x2 %o1, %x0, %x1;",
+   "prog": [
+    1414272,
+    800
+   ],
+   "rows": [
+    1415072,
+    16384
+   ]
+  },
+  {
+   "name": "bfma2",
+   "family": "bf16x2",
+   "ins": "bbb",
+   "outs": "b",
+   "cases": 1024,
+   "ptx": "mov.b32 %x0, %i0; mov.b32 %x1, %i1; mov.b32 %x3, %i2; fma.rn.bf16x2 %x2, %x0, %x1, %x3; mov.b32 %o0, %x2;",
+   "prog": [
+    1431456,
+    800
+   ],
+   "rows": [
+    1432256,
+    16384
+   ]
+  },
+  {
+   "name": "bmin2",
+   "family": "bf16x2",
+   "ins": "bb",
+   "outs": "b",
+   "cases": 1024,
+   "ptx": "mov.b32 %x0, %i0; mov.b32 %x1, %i1; min.bf16x2 %x2, %x0, %x1; mov.b32 %o0, %x2;",
+   "prog": [
+    1448640,
+    800
+   ],
+   "rows": [
+    1449440,
+    12288
+   ]
+  },
+  {
+   "name": "bmax2_nan",
+   "family": "bf16x2",
+   "ins": "bb",
+   "outs": "b",
+   "cases": 1024,
+   "ptx": "mov.b32 %x0, %i0; mov.b32 %x1, %i1; max.NaN.bf16x2 %x2, %x0, %x1; mov.b32 %o0, %x2;",
+   "prog": [
+    1461728,
+    800
+   ],
+   "rows": [
+    1462528,
+    12288
+   ]
+  },
+  {
+   "name": "iadd",
+   "family": "int",
+   "ins": "uu",
+   "outs": "u",
+   "cases": 1024,
+   "ptx": "add.u32 %o0, %i0, %i1;",
+   "prog": [
+    1474816,
+    800
+   ],
+   "rows": [
+    1475616,
+    12288
+   ]
+  },
+  {
+   "name": "iadd3",
+   "family": "int",
+   "ins": "uuu",
+   "outs": "u",
+   "cases": 1024,
+   "ptx": "add.u32 %t0, %i0, %i1; sub.u32 %o0, %t0, %i2;",
+   "prog": [
+    1487904,
+    800
+   ],
+   "rows": [
+    1488704,
+    16384
+   ]
+  },
+  {
+   "name": "iadd_sat",
+   "family": "int",
+   "ins": "uu",
+   "outs": "u",
+   "cases": 1024,
+   "ptx": "add.sat.s32 %o0, %i0, %i1;",
+   "prog": [
+    1505088,
+    800
+   ],
+   "rows": [
+    1505888,
+    12288
+   ]
+  },
+  {
+   "name": "isub_sat",
+   "family": "int",
+   "ins": "uu",
+   "outs": "u",
+   "cases": 1024,
+   "ptx": "sub.sat.s32 %o0, %i0, %i1;",
+   "prog": [
+    1518176,
+    800
+   ],
+   "rows": [
+    1518976,
+    12288
+   ]
+  },
+  {
+   "name": "iadd64",
+   "family": "int",
+   "ins": "uuuu",
+   "outs": "uu",
+   "cases": 1024,
+   "ptx": "mov.b64 %d0, {%i0, %i1}; mov.b64 %d1, {%i2, %i3}; add.u64 %d2, %d0, %d1; mov.b64 {%o0, %o1}, %d2;",
+   "prog": [
+    1531264,
+    800
+   ],
+   "rows": [
+    1532064,
+    24576
+   ]
+  },
+  {
+   "name": "isub64",
+   "family": "int",
+   "ins": "uuuu",
+   "outs": "uu",
+   "cases": 1024,
+   "ptx": "mov.b64 %d0, {%i0, %i1}; mov.b64 %d1, {%i2, %i3}; sub.u64 %d2, %d0, %d1; mov.b64 {%o0, %o1}, %d2;",
+   "prog": [
+    1556640,
+    800
+   ],
+   "rows": [
+    1557440,
+    24576
+   ]
+  },
+  {
+   "name": "imul_lo",
+   "family": "int",
+   "ins": "uu",
+   "outs": "u",
+   "cases": 1024,
+   "ptx": "mul.lo.u32 %o0, %i0, %i1;",
+   "prog": [
+    1582016,
+    800
+   ],
+   "rows": [
+    1582816,
+    12288
+   ]
+  },
+  {
+   "name": "imul_hi_u32",
+   "family": "int",
+   "ins": "uu",
+   "outs": "u",
+   "cases": 1024,
+   "ptx": "mul.hi.u32 %o0, %i0, %i1;",
+   "prog": [
+    1595104,
+    800
+   ],
+   "rows": [
+    1595904,
+    12288
+   ]
+  },
+  {
+   "name": "imul_hi_s32",
+   "family": "int",
+   "ins": "uu",
+   "outs": "u",
+   "cases": 1024,
+   "ptx": "mul.hi.s32 %o0, %i0, %i1;",
+   "prog": [
+    1608192,
+    800
+   ],
+   "rows": [
+    1608992,
+    12288
+   ]
+  },
+  {
+   "name": "imul_wide_s32",
+   "family": "int",
+   "ins": "uu",
+   "outs": "uu",
+   "cases": 1024,
+   "ptx": "mul.wide.s32 %d0, %i0, %i1; mov.b64 {%o0, %o1}, %d0;",
+   "prog": [
+    1621280,
+    800
+   ],
+   "rows": [
+    1622080,
+    16384
+   ]
+  },
+  {
+   "name": "imul_wide_u32",
+   "family": "int",
+   "ins": "uu",
+   "outs": "uu",
+   "cases": 1024,
+   "ptx": "mul.wide.u32 %d0, %i0, %i1; mov.b64 {%o0, %o1}, %d0;",
+   "prog": [
+    1638464,
+    800
+   ],
+   "rows": [
+    1639264,
+    16384
+   ]
+  },
+  {
+   "name": "imad_lo",
+   "family": "int",
+   "ins": "uuu",
+   "outs": "u",
+   "cases": 1024,
+   "ptx": "mad.lo.u32 %o0, %i0, %i1, %i2;",
+   "prog": [
+    1655648,
+    800
+   ],
+   "rows": [
+    1656448,
+    16384
+   ]
+  },
+  {
+   "name": "imad_hi_s32",
+   "family": "int",
+   "ins": "uuu",
+   "outs": "u",
+   "cases": 1024,
+   "ptx": "mad.hi.s32 %o0, %i0, %i1, %i2;",
+   "prog": [
+    1672832,
+    800
+   ],
+   "rows": [
+    1673632,
+    16384
+   ]
+  },
+  {
+   "name": "imul64",
+   "family": "int",
+   "ins": "uuuu",
+   "outs": "uu",
+   "cases": 1024,
+   "ptx": "mov.b64 %d0, {%i0, %i1}; mov.b64 %d1, {%i2, %i3}; mul.lo.u64 %d2, %d0, %d1; mov.b64 {%o0, %o1}, %d2;",
+   "prog": [
+    1690016,
+    928
+   ],
+   "rows": [
+    1690944,
+    24576
+   ]
+  },
+  {
+   "name": "imul24",
+   "family": "int",
+   "ins": "uu",
+   "outs": "u",
+   "cases": 1024,
+   "ptx": "mul24.lo.s32 %o0, %i0, %i1;",
+   "prog": [
+    1715520,
+    800
+   ],
+   "rows": [
+    1716320,
+    12288
+   ]
+  },
+  {
+   "name": "imin_s32",
+   "family": "int",
+   "ins": "uu",
+   "outs": "u",
+   "cases": 1024,
+   "ptx": "min.s32 %o0, %i0, %i1;",
+   "prog": [
+    1728608,
+    800
+   ],
+   "rows": [
+    1729408,
+    12288
+   ]
+  },
+  {
+   "name": "imax_u32",
+   "family": "int",
+   "ins": "uu",
+   "outs": "u",
+   "cases": 1024,
+   "ptx": "max.u32 %o0, %i0, %i1;",
+   "prog": [
+    1741696,
+    800
+   ],
+   "rows": [
+    1742496,
+    12288
+   ]
+  },
+  {
+   "name": "imin_s64",
+   "family": "int",
+   "ins": "uuuu",
+   "outs": "uu",
+   "cases": 1024,
+   "ptx": "mov.b64 %d0, {%i0, %i1}; mov.b64 %d1, {%i2, %i3}; min.s64 %d2, %d0, %d1; mov.b64 {%o0, %o1}, %d2;",
+   "prog": [
+    1754784,
+    928
+   ],
+   "rows": [
+    1755712,
+    24576
+   ]
+  },
+  {
+   "name": "iabs",
+   "family": "int",
+   "ins": "u",
+   "outs": "u",
+   "cases": 1024,
+   "ptx": "abs.s32 %o0, %i0;",
+   "prog": [
+    1780288,
+    800
+   ],
+   "rows": [
+    1781088,
+    8192
+   ]
+  },
+  {
+   "name": "ineg",
+   "family": "int",
+   "ins": "u",
+   "outs": "u",
+   "cases": 1024,
+   "ptx": "neg.s32 %o0, %i0;",
+   "prog": [
+    1789280,
+    800
+   ],
+   "rows": [
+    1790080,
+    8192
+   ]
+  },
+  {
+   "name": "isad",
+   "family": "int",
+   "ins": "uuu",
+   "outs": "u",
+   "cases": 1024,
+   "ptx": "sad.u32 %o0, %i0, %i1, %i2;",
+   "prog": [
+    1798272,
+    800
+   ],
+   "rows": [
+    1799072,
+    16384
+   ]
+  },
+  {
+   "name": "idiv_u32",
+   "family": "int div",
+   "ins": "uu",
+   "outs": "u",
+   "cases": 1024,
+   "ptx": "div.u32 %o0, %i0, %i1;",
+   "prog": [
+    1815456,
+    1056
+   ],
+   "rows": [
+    1816512,
+    12288
+   ]
+  },
+  {
+   "name": "irem_u32",
+   "family": "int div",
+   "ins": "uu",
+   "outs": "u",
+   "cases": 1024,
+   "ptx": "rem.u32 %o0, %i0, %i1;",
+   "prog": [
+    1828800,
+    1056
+   ],
+   "rows": [
+    1829856,
+    12288
+   ]
+  },
+  {
+   "name": "idiv_s32",
+   "family": "int div",
+   "ins": "uu",
+   "outs": "u",
+   "cases": 1024,
+   "ptx": "div.s32 %o0, %i0, %i1;",
+   "prog": [
+    1842144,
+    1184
+   ],
+   "rows": [
+    1843328,
+    12288
+   ]
+  },
+  {
+   "name": "irem_s32",
+   "family": "int div",
+   "ins": "uu",
+   "outs": "u",
+   "cases": 1024,
+   "ptx": "rem.s32 %o0, %i0, %i1;",
+   "prog": [
+    1855616,
+    1184
+   ],
+   "rows": [
+    1856800,
+    12288
+   ]
+  },
+  {
+   "name": "idiv_u32_by_7",
+   "family": "int div",
+   "ins": "u",
+   "outs": "u",
+   "cases": 1024,
+   "ptx": "div.u32 %o0, %i0, 7;",
+   "prog": [
+    1869088,
+    928
+   ],
+   "rows": [
+    1870016,
+    8192
+   ]
+  },
+  {
+   "name": "isetp",
+   "family": "int compare",
+   "ins": "uu",
+   "outs": "uuuuuu",
+   "cases": 1024,
+   "ptx": "setp.lt.s32 %p0, %i0, %i1; selp.u32 %o0, 1, 0, %p0; setp.lt.u32 %p0, %i0, %i1; selp.u32 %o1, 1, 0, %p0; setp.ge.s32 %p0, %i0, %i1; selp.u32 %o2, 1, 0, %p0; setp.hi.u32 %p0, %i0, %i1; selp.u32 %o3, 1, 0, %p0; setp.eq.s32 %p0, %i0, %i1; selp.u32 %o4, 1, 0, %p0; setp.ne.u32 %p0, %i0, %i1; selp.u32 %o5, 1, 0, %p0;",
+   "prog": [
+    1878208,
+    1056
+   ],
+   "rows": [
+    1879264,
+    32768
+   ]
+  },
+  {
+   "name": "isetp_and",
+   "family": "int compare",
+   "ins": "uuuu",
+   "outs": "uu",
+   "cases": 1024,
+   "ptx": "setp.lt.s32 %p1, %i2, %i3; setp.lt.and.s32 %p0, %i0, %i1, %p1; selp.u32 %o0, 1, 0, %p0; setp.ge.or.u32 %p2, %i0, %i1, %p1; selp.u32 %o1, 1, 0, %p2;",
+   "prog": [
+    1912032,
+    928
+   ],
+   "rows": [
+    1912960,
+    24576
+   ]
+  },
+  {
+   "name": "isetp64",
+   "family": "int compare",
+   "ins": "uuuu",
+   "outs": "uu",
+   "cases": 1024,
+   "ptx": "mov.b64 %d0, {%i0, %i1}; mov.b64 %d1, {%i2, %i3}; setp.lt.s64 %p0, %d0, %d1; selp.u32 %o0, 1, 0, %p0; setp.lt.u64 %p1, %d0, %d1; selp.u32 %o1, 1, 0, %p1;",
+   "prog": [
+    1937536,
+    928
+   ],
+   "rows": [
+    1938464,
+    24576
+   ]
+  },
+  {
+   "name": "plop3",
+   "family": "int compare",
+   "ins": "uuu",
+   "outs": "u",
+   "cases": 1024,
+   "ptx": "setp.ne.u32 %p0, %i0, 0; setp.ne.u32 %p1, %i1, 0; setp.ne.u32 %p2, %i2, 0; xor.pred %p3, %p0, %p1; or.pred %p3, %p3, %p2; not.pred %p3, %p3; selp.u32 %o0, 1, 0, %p3;",
+   "prog": [
+    1963040,
+    800
+   ],
+   "rows": [
+    1963840,
+    16384
+   ]
+  },
+  {
+   "name": "shl",
+   "family": "bits",
+   "ins": "us",
+   "outs": "u",
+   "cases": 1024,
+   "ptx": "shl.b32 %o0, %i0, %i1;",
+   "prog": [
+    1980224,
+    800
+   ],
+   "rows": [
+    1981024,
+    12288
+   ]
+  },
+  {
+   "name": "shr_u32",
+   "family": "bits",
+   "ins": "us",
+   "outs": "u",
+   "cases": 1024,
+   "ptx": "shr.u32 %o0, %i0, %i1;",
+   "prog": [
+    1993312,
+    800
+   ],
+   "rows": [
+    1994112,
+    12288
+   ]
+  },
+  {
+   "name": "shr_s32",
+   "family": "bits",
+   "ins": "us",
+   "outs": "u",
+   "cases": 1024,
+   "ptx": "shr.s32 %o0, %i0, %i1;",
+   "prog": [
+    2006400,
+    800
+   ],
+   "rows": [
+    2007200,
+    12288
+   ]
+  },
+  {
+   "name": "shl_imm",
+   "family": "bits",
+   "ins": "u",
+   "outs": "uu",
+   "cases": 1024,
+   "ptx": "shl.b32 %o0, %i0, 7; shr.s32 %o1, %i0, 13;",
+   "prog": [
+    2019488,
+    800
+   ],
+   "rows": [
+    2020288,
+    12288
+   ]
+  },
+  {
+   "name": "shf_l_wrap",
+   "family": "bits",
+   "ins": "uus",
+   "outs": "u",
+   "cases": 1024,
+   "ptx": "shf.l.wrap.b32 %o0, %i0, %i1, %i2;",
+   "prog": [
+    2032576,
+    800
+   ],
+   "rows": [
+    2033376,
+    16384
+   ]
+  },
+  {
+   "name": "shf_l_clamp",
+   "family": "bits",
+   "ins": "uus",
+   "outs": "u",
+   "cases": 1024,
+   "ptx": "shf.l.clamp.b32 %o0, %i0, %i1, %i2;",
+   "prog": [
+    2049760,
+    800
+   ],
+   "rows": [
+    2050560,
+    16384
+   ]
+  },
+  {
+   "name": "shf_r_wrap",
+   "family": "bits",
+   "ins": "uus",
+   "outs": "u",
+   "cases": 1024,
+   "ptx": "shf.r.wrap.b32 %o0, %i0, %i1, %i2;",
+   "prog": [
+    2066944,
+    800
+   ],
+   "rows": [
+    2067744,
+    16384
+   ]
+  },
+  {
+   "name": "shf_r_clamp",
+   "family": "bits",
+   "ins": "uus",
+   "outs": "u",
+   "cases": 1024,
+   "ptx": "shf.r.clamp.b32 %o0, %i0, %i1, %i2;",
+   "prog": [
+    2084128,
+    800
+   ],
+   "rows": [
+    2084928,
+    16384
+   ]
+  },
+  {
+   "name": "shl64",
+   "family": "bits",
+   "ins": "uus",
+   "outs": "uu",
+   "cases": 1024,
+   "ptx": "mov.b64 %d0, {%i0, %i1}; shl.b64 %d1, %d0, %i2; mov.b64 {%o0, %o1}, %d1;",
+   "prog": [
+    2101312,
+    800
+   ],
+   "rows": [
+    2102112,
+    20480
+   ]
+  },
+  {
+   "name": "shr64_u",
+   "family": "bits",
+   "ins": "uus",
+   "outs": "uu",
+   "cases": 1024,
+   "ptx": "mov.b64 %d0, {%i0, %i1}; shr.u64 %d1, %d0, %i2; mov.b64 {%o0, %o1}, %d1;",
+   "prog": [
+    2122592,
+    800
+   ],
+   "rows": [
+    2123392,
+    20480
+   ]
+  },
+  {
+   "name": "shr64_s",
+   "family": "bits",
+   "ins": "uus",
+   "outs": "uu",
+   "cases": 1024,
+   "ptx": "mov.b64 %d0, {%i0, %i1}; shr.s64 %d1, %d0, %i2; mov.b64 {%o0, %o1}, %d1;",
+   "prog": [
+    2143872,
+    800
+   ],
+   "rows": [
+    2144672,
+    20480
+   ]
+  },
+  {
+   "name": "lop3",
+   "family": "bits",
+   "ins": "uuu",
+   "outs": "uuuuuuuuuu",
+   "cases": 1024,
+   "ptx": "lop3.b32 %o0, %i0, %i1, %i2, 0x96; lop3.b32 %o1, %i0, %i1, %i2, 0xe8; lop3.b32 %o2, %i0, %i1, %i2, 0xca; lop3.b32 %o3, %i0, %i1, %i2, 0x1; lop3.b32 %o4, %i0, %i1, %i2, 0x80; lop3.b32 %o5, %i0, %i1, %i2, 0x6a; lop3.b32 %o6, %i0, %i1, %i2, 0xf8; lop3.b32 %o7, %i0, %i1, %i2, 0x1e; lop3.b32 %o8, %i0, %i1, %i2, 0xb4; lop3.b32 %o9, %i0, %i1, %i2, 0x3c;",
+   "prog": [
+    2165152,
+    1056
+   ],
+   "rows": [
+    2166208,
+    53248
+   ]
+  },
+  {
+   "name": "logic",
+   "family": "bits",
+   "ins": "uu",
+   "outs": "uuuu",
+   "cases": 1024,
+   "ptx": "and.b32 %o0, %i0, %i1; or.b32 %o1, %i0, %i1; xor.b32 %o2, %i0, %i1; not.b32 %t0, %i0; and.b32 %o3, %t0, %i1;",
+   "prog": [
+    2219456,
+    928
+   ],
+   "rows": [
+    2220384,
+    24576
+   ]
+  },
+  {
+   "name": "prmt",
+   "family": "bits",
+   "ins": "uuu",
+   "outs": "uuuuuuu",
+   "cases": 1024,
+   "ptx": "prmt.b32 %o0, %i0, %i1, %i2; prmt.b32.f4e %o1, %i0, %i1, %i2; prmt.b32.b4e %o2, %i0, %i1, %i2; prmt.b32.rc8 %o3, %i0, %i1, %i2; prmt.b32.ecl %o4, %i0, %i1, %i2; prmt.b32.ecr %o5, %i0, %i1, %i2; prmt.b32.rc16 %o6, %i0, %i1, %i2;",
+   "prog": [
+    2244960,
+    928
+   ],
+   "rows": [
+    2245888,
+    40960
+   ]
+  },
+  {
+   "name": "prmt_imm",
+   "family": "bits",
+   "ins": "uu",
+   "outs": "uuu",
+   "cases": 1024,
+   "ptx": "prmt.b32 %o0, %i0, %i1, 0x3210; prmt.b32 %o1, %i0, %i1, 0x5140; prmt.b32 %o2, %i0, %i1, 0x8880;",
+   "prog": [
+    2286848,
+    800
+   ],
+   "rows": [
+    2287648,
+    20480
+   ]
+  },
+  {
+   "name": "bfe_u32",
+   "family": "bits",
+   "ins": "uss",
+   "outs": "u",
+   "cases": 1024,
+   "ptx": "bfe.u32 %o0, %i0, %i1, %i2;",
+   "prog": [
+    2308128,
+    800
+   ],
+   "rows": [
+    2308928,
+    16384
+   ]
+  },
+  {
+   "name": "bfe_s32",
+   "family": "bits",
+   "ins": "uss",
+   "outs": "u",
+   "cases": 1024,
+   "ptx": "bfe.s32 %o0, %i0, %i1, %i2;",
+   "prog": [
+    2325312,
+    800
+   ],
+   "rows": [
+    2326112,
+    16384
+   ]
+  },
+  {
+   "name": "bfi",
+   "family": "bits",
+   "ins": "uuss",
+   "outs": "u",
+   "cases": 1024,
+   "ptx": "bfi.b32 %o0, %i0, %i1, %i2, %i3;",
+   "prog": [
+    2342496,
+    928
+   ],
+   "rows": [
+    2343424,
+    20480
+   ]
+  },
+  {
+   "name": "bmsk_clamp",
+   "family": "bits",
+   "ins": "ss",
+   "outs": "u",
+   "cases": 1024,
+   "ptx": "bmsk.clamp.b32 %o0, %i0, %i1;",
+   "prog": [
+    2363904,
+    800
+   ],
+   "rows": [
+    2364704,
+    12288
+   ]
+  },
+  {
+   "name": "bmsk_wrap",
+   "family": "bits",
+   "ins": "ss",
+   "outs": "u",
+   "cases": 1024,
+   "ptx": "bmsk.wrap.b32 %o0, %i0, %i1;",
+   "prog": [
+    2376992,
+    800
+   ],
+   "rows": [
+    2377792,
+    12288
+   ]
+  },
+  {
+   "name": "szext_s",
+   "family": "bits",
+   "ins": "us",
+   "outs": "u",
+   "cases": 1024,
+   "ptx": "szext.clamp.s32 %o0, %i0, %i1;",
+   "prog": [
+    2390080,
+    800
+   ],
+   "rows": [
+    2390880,
+    12288
+   ]
+  },
+  {
+   "name": "popc",
+   "family": "bits",
+   "ins": "u",
+   "outs": "u",
+   "cases": 1024,
+   "ptx": "popc.b32 %o0, %i0;",
+   "prog": [
+    2403168,
+    800
+   ],
+   "rows": [
+    2403968,
+    8192
+   ]
+  },
+  {
+   "name": "popc64",
+   "family": "bits",
+   "ins": "uu",
+   "outs": "u",
+   "cases": 1024,
+   "ptx": "mov.b64 %d0, {%i0, %i1}; popc.b64 %o0, %d0;",
+   "prog": [
+    2412160,
+    800
+   ],
+   "rows": [
+    2412960,
+    12288
+   ]
+  },
+  {
+   "name": "clz",
+   "family": "bits",
+   "ins": "u",
+   "outs": "u",
+   "cases": 1024,
+   "ptx": "clz.b32 %o0, %i0;",
+   "prog": [
+    2425248,
+    800
+   ],
+   "rows": [
+    2426048,
+    8192
+   ]
+  },
+  {
+   "name": "clz64",
+   "family": "bits",
+   "ins": "uu",
+   "outs": "u",
+   "cases": 1024,
+   "ptx": "mov.b64 %d0, {%i0, %i1}; clz.b64 %o0, %d0;",
+   "prog": [
+    2434240,
+    800
+   ],
+   "rows": [
+    2435040,
+    12288
+   ]
+  },
+  {
+   "name": "bfind_u32",
+   "family": "bits",
+   "ins": "u",
+   "outs": "u",
+   "cases": 1024,
+   "ptx": "bfind.u32 %o0, %i0;",
+   "prog": [
+    2447328,
+    800
+   ],
+   "rows": [
+    2448128,
+    8192
+   ]
+  },
+  {
+   "name": "bfind_s32",
+   "family": "bits",
+   "ins": "u",
+   "outs": "u",
+   "cases": 1024,
+   "ptx": "bfind.s32 %o0, %i0;",
+   "prog": [
+    2456320,
+    800
+   ],
+   "rows": [
+    2457120,
+    8192
+   ]
+  },
+  {
+   "name": "bfind_shiftamt",
+   "family": "bits",
+   "ins": "u",
+   "outs": "u",
+   "cases": 1024,
+   "ptx": "bfind.shiftamt.u32 %o0, %i0;",
+   "prog": [
+    2465312,
+    800
+   ],
+   "rows": [
+    2466112,
+    8192
+   ]
+  },
+  {
+   "name": "brev",
+   "family": "bits",
+   "ins": "u",
+   "outs": "u",
+   "cases": 1024,
+   "ptx": "brev.b32 %o0, %i0;",
+   "prog": [
+    2474304,
+    800
+   ],
+   "rows": [
+    2475104,
+    8192
+   ]
+  },
+  {
+   "name": "fns",
+   "family": "bits",
+   "ins": "uus",
+   "outs": "u",
+   "cases": 1024,
+   "ptx": "and.b32 %t0, %i2, 31; fns.b32 %o0, %i0, %i1, %t0;",
+   "prog": [
+    2483296,
+    1696
+   ],
+   "rows": [
+    2484992,
+    16384
+   ]
+  },
+  {
+   "name": "dp4a_u32",
+   "family": "bits",
+   "ins": "uuu",
+   "outs": "u",
+   "cases": 1024,
+   "ptx": "dp4a.u32.u32 %o0, %i0, %i1, %i2;",
+   "prog": [
+    2501376,
+    800
+   ],
+   "rows": [
+    2502176,
+    16384
+   ]
+  },
+  {
+   "name": "dp4a_s32",
+   "family": "bits",
+   "ins": "uuu",
+   "outs": "u",
+   "cases": 1024,
+   "ptx": "dp4a.s32.s32 %o0, %i0, %i1, %i2;",
+   "prog": [
+    2518560,
+    800
+   ],
+   "rows": [
+    2519360,
+    16384
+   ]
+  },
+  {
+   "name": "dp4a_su",
+   "family": "bits",
+   "ins": "uuu",
+   "outs": "u",
+   "cases": 1024,
+   "ptx": "dp4a.s32.u32 %o0, %i0, %i1, %i2;",
+   "prog": [
+    2535744,
+    800
+   ],
+   "rows": [
+    2536544,
+    16384
+   ]
+  },
+  {
+   "name": "dp2a_lo",
+   "family": "bits",
+   "ins": "uuu",
+   "outs": "u",
+   "cases": 1024,
+   "ptx": "dp2a.lo.s32.s32 %o0, %i0, %i1, %i2;",
+   "prog": [
+    2552928,
+    800
+   ],
+   "rows": [
+    2553728,
+    16384
+   ]
+  },
+  {
+   "name": "dp2a_hi",
+   "family": "bits",
+   "ins": "uuu",
+   "outs": "u",
+   "cases": 1024,
+   "ptx": "dp2a.hi.u32.u32 %o0, %i0, %i1, %i2;",
+   "prog": [
+    2570112,
+    800
+   ],
+   "rows": [
+    2570912,
+    16384
+   ]
+  },
+  {
+   "name": "shfl_idx",
+   "family": "warp",
+   "ins": "ul",
+   "outs": "u",
+   "cases": 1024,
+   "ptx": "shfl.sync.idx.b32 %o0, %i0, %i1, 0x1f, 0xffffffff;",
+   "prog": [
+    2587296,
+    800
+   ],
+   "rows": [
+    2588096,
+    12288
+   ]
+  },
+  {
+   "name": "shfl_up",
+   "family": "warp",
+   "ins": "us",
+   "outs": "uu",
+   "cases": 1024,
+   "ptx": "and.b32 %t0, %i1, 31; shfl.sync.up.b32 %o0|%p0, %i0, %t0, 0, 0xffffffff; selp.u32 %o1, 1, 0, %p0;",
+   "prog": [
+    2600384,
+    800
+   ],
+   "rows": [
+    2601184,
+    16384
+   ]
+  },
+  {
+   "name": "shfl_down",
+   "family": "warp",
+   "ins": "us",
+   "outs": "uu",
+   "cases": 1024,
+   "ptx": "and.b32 %t0, %i1, 31; shfl.sync.down.b32 %o0|%p0, %i0, %t0, 0x1f, 0xffffffff; selp.u32 %o1, 1, 0, %p0;",
+   "prog": [
+    2617568,
+    800
+   ],
+   "rows": [
+    2618368,
+    16384
+   ]
+  },
+  {
+   "name": "shfl_up_clamp",
+   "family": "warp",
+   "ins": "us",
+   "outs": "uu",
+   "cases": 1024,
+   "ptx": "and.b32 %t0, %i1, 31; shfl.sync.up.b32 %o0|%p0, %i0, %t0, 0x10, 0xffffffff; selp.u32 %o1, 1, 0, %p0;",
+   "prog": [
+    2634752,
+    800
+   ],
+   "rows": [
+    2635552,
+    16384
+   ]
+  },
+  {
+   "name": "shfl_up_seg",
+   "family": "warp",
+   "ins": "us",
+   "outs": "uu",
+   "cases": 1024,
+   "ptx": "and.b32 %t0, %i1, 31; shfl.sync.up.b32 %o0|%p0, %i0, %t0, 0x1808, 0xffffffff; selp.u32 %o1, 1, 0, %p0;",
+   "prog": [
+    2651936,
+    800
+   ],
+   "rows": [
+    2652736,
+    16384
+   ]
+  },
+  {
+   "name": "shfl_bfly",
+   "family": "warp",
+   "ins": "ul",
+   "outs": "u",
+   "cases": 1024,
+   "ptx": "shfl.sync.bfly.b32 %o0, %i0, %i1, 0x1f, 0xffffffff;",
+   "prog": [
+    2669120,
+    800
+   ],
+   "rows": [
+    2669920,
+    12288
+   ]
+  },
+  {
+   "name": "shfl_bfly_imm",
+   "family": "warp",
+   "ins": "u",
+   "outs": "u",
+   "cases": 1024,
+   "ptx": "shfl.sync.bfly.b32 %o0, %i0, 1, 0x1f, 0xffffffff;",
+   "prog": [
+    2682208,
+    800
+   ],
+   "rows": [
+    2683008,
+    8192
+   ]
+  },
+  {
+   "name": "shfl_idx_seg",
+   "family": "warp",
+   "ins": "ul",
+   "outs": "u",
+   "cases": 1024,
+   "ptx": "shfl.sync.idx.b32 %o0, %i0, %i1, 0x1807, 0xffffffff;",
+   "prog": [
+    2691200,
+    800
+   ],
+   "rows": [
+    2692000,
+    12288
+   ]
+  },
+  {
+   "name": "vote",
+   "family": "warp",
+   "ins": "p",
+   "outs": "uuuu",
+   "cases": 1024,
+   "ptx": "and.b32 %t0, %i0, 1; setp.ne.u32 %p0, %t0, 0; vote.sync.ballot.b32 %o0, %p0, 0xffffffff; vote.sync.any.pred %p1, %p0, 0xffffffff; selp.u32 %o1, 1, 0, %p1; vote.sync.all.pred %p2, %p0, 0xffffffff; selp.u32 %o2, 1, 0, %p2; vote.sync.uni.pred %p3, %p0, 0xffffffff; selp.u32 %o3, 1, 0, %p3;",
+   "prog": [
+    2704288,
+    928
+   ],
+   "rows": [
+    2705216,
+    20480
+   ]
+  },
+  {
+   "name": "activemask",
+   "family": "warp",
+   "ins": "p",
+   "outs": "u",
+   "cases": 1024,
+   "ptx": "activemask.b32 %o0;",
+   "prog": [
+    2725696,
+    800
+   ],
+   "rows": [
+    2726496,
+    8192
+   ]
+  },
+  {
+   "name": "match_any",
+   "family": "warp",
+   "ins": "p",
+   "outs": "u",
+   "cases": 1024,
+   "ptx": "and.b32 %t0, %i0, 3; match.any.sync.b32 %o0, %t0, 0xffffffff;",
+   "prog": [
+    2734688,
+    800
+   ],
+   "rows": [
+    2735488,
+    8192
+   ]
+  },
+  {
+   "name": "redux_add",
+   "family": "warp",
+   "ins": "u",
+   "outs": "u",
+   "cases": 1024,
+   "ptx": "redux.sync.add.u32 %o0, %i0, 0xffffffff;",
+   "prog": [
+    2743680,
+    800
+   ],
+   "rows": [
+    2744480,
+    8192
+   ]
+  },
+  {
+   "name": "redux_min_s32",
+   "family": "warp",
+   "ins": "u",
+   "outs": "u",
+   "cases": 1024,
+   "ptx": "redux.sync.min.s32 %o0, %i0, 0xffffffff;",
+   "prog": [
+    2752672,
+    800
+   ],
+   "rows": [
+    2753472,
+    8192
+   ]
+  },
+  {
+   "name": "redux_or",
+   "family": "warp",
+   "ins": "u",
+   "outs": "u",
+   "cases": 1024,
+   "ptx": "redux.sync.or.b32 %o0, %i0, 0xffffffff;",
+   "prog": [
+    2761664,
+    800
+   ],
+   "rows": [
+    2762464,
+    8192
+   ]
+  },
+  {
+   "name": "hmma_16816_f16",
+   "family": "tensor",
+   "ins": "HHHHHHHH",
+   "outs": "hh",
+   "cases": 1024,
+   "ptx": "mma.sync.aligned.m16n8k16.row.col.f16.f16.f16.f16 {%o0, %o1}, {%i0, %i1, %i2, %i3}, {%i4, %i5}, {%i6, %i7};",
+   "prog": [
+    2770656,
+    928
+   ],
+   "rows": [
+    2771584,
+    40960
+   ]
+  },
+  {
+   "name": "hmma_16816_f32",
+   "family": "tensor",
+   "ins": "HHHHHHFFFF",
+   "outs": "ffff",
+   "cases": 1024,
+   "ptx": "mov.b32 %f0, %i6; mov.b32 %f1, %i7; mov.b32 %f2, %i8; mov.b32 %f3, %i9; mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 {%f4, %f5, %f6, %f7}, {%i0, %i1, %i2, %i3}, {%i4, %i5}, {%f0, %f1, %f2, %f3}; mov.b32 %o0, %f4; mov.b32 %o1, %f5; mov.b32 %o2, %f6; mov.b32 %o3, %f7;",
+   "prog": [
+    2812544,
+    928
+   ],
+   "rows": [
+    2813472,
+    57344
+   ]
+  },
+  {
+   "name": "hmma_1688_f16",
+   "family": "tensor",
+   "ins": "HHHHH",
+   "outs": "hh",
+   "cases": 1024,
+   "ptx": "mma.sync.aligned.m16n8k8.row.col.f16.f16.f16.f16 {%o0, %o1}, {%i0, %i1}, {%i2}, {%i3, %i4};",
+   "prog": [
+    2870816,
+    800
+   ],
+   "rows": [
+    2871616,
+    28672
+   ]
+  },
+  {
+   "name": "hmma_16816_bf16",
+   "family": "tensor",
+   "ins": "BBBBBBFFFF",
+   "outs": "ffff",
+   "cases": 1024,
+   "ptx": "mov.b32 %f0, %i6; mov.b32 %f1, %i7; mov.b32 %f2, %i8; mov.b32 %f3, %i9; mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%f4, %f5, %f6, %f7}, {%i0, %i1, %i2, %i3}, {%i4, %i5}, {%f0, %f1, %f2, %f3}; mov.b32 %o0, %f4; mov.b32 %o1, %f5; mov.b32 %o2, %f6; mov.b32 %o3, %f7;",
+   "prog": [
+    2900288,
+    928
+   ],
+   "rows": [
+    2901216,
+    57344
+   ]
+  },
+  {
+   "name": "hmma_1688_tf32",
+   "family": "tensor",
+   "ins": "FFFFFFFFFF",
+   "outs": "ffff",
+   "cases": 1024,
+   "ptx": "mov.b32 %f0, %i6; mov.b32 %f1, %i7; mov.b32 %f2, %i8; mov.b32 %f3, %i9; mma.sync.aligned.m16n8k8.row.col.f32.tf32.tf32.f32 {%f4, %f5, %f6, %f7}, {%i0, %i1, %i2, %i3}, {%i4, %i5}, {%f0, %f1, %f2, %f3}; mov.b32 %o0, %f4; mov.b32 %o1, %f5; mov.b32 %o2, %f6; mov.b32 %o3, %f7;",
+   "prog": [
+    2958560,
+    928
+   ],
+   "rows": [
+    2959488,
+    57344
+   ]
+  },
+  {
+   "name": "imma_16832_s8",
+   "family": "tensor",
+   "ins": "UUUUUUUUUU",
+   "outs": "uuuu",
+   "cases": 1024,
+   "ptx": "mma.sync.aligned.m16n8k32.row.col.s32.s8.s8.s32 {%o0, %o1, %o2, %o3}, {%i0, %i1, %i2, %i3}, {%i4, %i5}, {%i6, %i7, %i8, %i9};",
+   "prog": [
+    3016832,
+    928
+   ],
+   "rows": [
+    3017760,
+    57344
+   ]
+  },
+  {
+   "name": "dadd",
+   "family": "f64",
+   "ins": "uuuu",
+   "outs": "uu",
+   "cases": 1024,
+   "ptx": "mov.b64 %g0, {%i0, %i1}; mov.b64 %g1, {%i2, %i3}; add.rn.f64 %g2, %g0, %g1; mov.b64 {%o0, %o1}, %g2;",
+   "prog": [
+    3075104,
+    800
+   ],
+   "rows": [
+    3075904,
+    24576
+   ]
+  },
+  {
+   "name": "dmul",
+   "family": "f64",
+   "ins": "uuuu",
+   "outs": "uu",
+   "cases": 1024,
+   "ptx": "mov.b64 %g0, {%i0, %i1}; mov.b64 %g1, {%i2, %i3}; mul.rn.f64 %g2, %g0, %g1; mov.b64 {%o0, %o1}, %g2;",
+   "prog": [
+    3100480,
+    800
+   ],
+   "rows": [
+    3101280,
+    24576
+   ]
+  }
+ ]
+}

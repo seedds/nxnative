@@ -18,6 +18,7 @@ A dated record of what is done, what is in progress and what is left on the Wind
 | `8ef8546` | Host tests: the profile half of the second-pack loop (`aot_synth`'s entry runs `synth_hot` for 20 ms; `t_second_pack` 27 checks). Verified in Docker |
 | `8caf012` | Launcher: the better-pack rule counts sampled functions (`# function` lines in the host's profile); `t_launcher_model` 154 checks. Verified in Docker |
 | `da9f34b` | Host tests: the runners run the script tests (`t_vk_spirv`, `t_second_pack`) from `host_scripts.tsv`. Verified in Docker on Linux; the PowerShell runner not run |
+| (this commit's parent) | Port: `nvn_state.c`'s `SLOG` writes a line in one stdio call outside Apple; `port.yml` uploads `host_scripts.tsv` for the Windows job. Verified in Docker (99 of 99 twice) |
 
 Done on the machine, not in the repository: Docker emptied on the owner's request (every image and container, the owner's other projects' included; the data volumes `aitrade_pgdata`, `smilepetstore_pgdata`, `smilepetstore_redisdata` kept).
 
@@ -41,7 +42,7 @@ No Docker image exists (the disk filled while ten worktrees were checked out, 28
 ### Left, not started
 
 - Verify and integrate every row above (Docker; the Apple one on a Mac).
-- `port.yml` uploads only `host_tests.tsv` for the Windows job (`host_scripts.tsv` is new); `t_astc_mesa` is registered outside `host_test` and is in no runner.
+- `t_astc_mesa` is registered outside `host_test` and is in no runner (declared in the manifest as CTest only).
 - The launcher's rule and the packer's `made` rows for the targets file.
 - Converted quads still take another provoking vertex than the Switch's (declared: the fix changes the quad's diagonal).
 - The Metal backend takes the first vertex on every shape where the Switch takes the last (a Mac).

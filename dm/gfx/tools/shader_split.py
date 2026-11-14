@@ -42,6 +42,7 @@
 #       .pak archives and of the startup material archive LZSS-compressed in main, see rfrm_shaders and retro_main_forms
 #   · BERG (Snowdrop, Mario + Rabbids Sparks of Hope): shader objects in the individually zstd-compressed records of its SDF data slices, see snowdrop_shaders
 #   · bnd2 (Criterion's Bundle 2, Need for Speed: Hot Pursuit Remastered): whole GLSLC outputs in the zlib resources of SHADERS.BNDL, see bnd2_resources and bnd2_shaders
+#   · LSPK (Larian's packages, Divinity: Original Sin 2 Definitive Edition): GLSLC outputs in the zlib streams of the .bshd files of its version-13 Data/*.pak, see lspk_shaders
 #   · Heaps (Dead Cells): whole GLSLC outputs in base64 after the GLSL of the engine's shader cache (shaders.cache.nx), inside its PAK archive, see heaps_pak_files and heaps_shaders
 #   · Frostbite (EA SPORTS FC 27): the CompiledBytecode resources of the bundles its superbundle tables (.toc) list, in its cas files (Oodle Leviathan, decoded by the game's own decoder in the
 #       Mac host), each a VNVN record with one code area and control section (frostbite.py), see frostbite_jobs and frostbite_shaders
@@ -3204,6 +3205,42 @@ def bnd2_shaders(d, label):
         if b'\x91\x68\x86\x19' in r: found += glslc_shaders(r, f'{label}/{rid:016x}.{typ:x}.{k}', need=False)
     return found
 
+LSPK = b'LSPK'
+def lspk_tail(path):   # a Larian LSPK package of version 10 or later ends with its header's size and the magic; earlier ones keep the magic at +0
+    with open(path, 'rb') as f:
+        f.seek(0, 2); n = f.tell()
+        if n < 0x30: return False
+        f.seek(n - 4); return f.read(4) == LSPK
+
+def lspk_shaders(path, rel, found):
+    """Larian's LSPK packages of version 13 (Divinity: Original Sin 2 Definitive Edition's Data/*.pak): the header sits at the end, just before its own size (u32, counting itself and
+    the magic) and 'LSPK': u32 version, u32 file list offset, u32 file list size, u16 parts, u8 flags, u8 priority, 16-byte MD5. The file list: u32 count, then the 280-byte entries
+    (256-byte name, u32 offset, stored size, size (0: stored as is), part, flags (low nibble: 0 stored, 1 zlib, 2 LZ4 block), CRC) as one LZ4 block. Only part 0 is in the package
+    itself: Voice_1.pak and the like are the data of other parts, with no header of their own. The NX shaders are the .bshd files (EngineShaders.pak: the engine's passes;
+    Materials.pak and Engine.pak: 5,600 materials; Patch1_Gold.pak: six newer copies), each a 4-byte word and a zlib stream holding the program's GLSLC outputs (glslc_shaders)
+    with their reflection strings. The .shd files beside them are DX11's. Without this the split kept only main's 73 shaders, and every frame stayed black ([RED] shader … is not
+    in the shader map)"""
+    import lz4.block
+    with open(path, 'rb') as f:
+        f.seek(0, 2); end = f.tell(); f.seek(end - 8); hs, _ = struct.unpack('<I4s', f.read(8))
+        if not 0x28 <= hs <= 0x100: red(f'/{rel}: LSPK header size {hs:#x}')
+        f.seek(end - hs); ver, flo, fls, parts = struct.unpack_from('<IIIH', f.read(hs - 8))
+        if ver != 13: red(f'/{rel}: LSPK version {ver} (only version 13, Divinity: Original Sin 2 Definitive Edition, is read)')
+        if not 4 < fls <= end - flo: red(f'/{rel}: LSPK file list at {flo:#x} of {fls:#x} bytes')
+        f.seek(flo); cnt, = struct.unpack('<I', f.read(4))
+        lst = lz4.block.decompress(f.read(fls - 4), uncompressed_size=cnt * 280)
+        for i in range(cnt):
+            name, off, stored, size, part, flags, _ = struct.unpack_from('<256sIIIIII', lst, i * 280)
+            name = name.split(b'\0', 1)[0].decode('utf-8', 'replace')
+            if part or not name.lower().endswith('.bshd'): continue
+            f.seek(off); d = f.read(stored)
+            if flags & 0xf == 1: d = zlib.decompress(d)
+            elif flags & 0xf == 2: d = lz4.block.decompress(d, uncompressed_size=size)
+            elif flags & 0xf: red(f'/{rel}/{name}: LSPK compression {flags & 0xf}')
+            try: d = zlib.decompress(d[4:])
+            except zlib.error as e: red(f'/{rel}/{name}: not a .bshd zlib stream after its first word ({e})')
+            found += glslc_shaders(d, f'/{rel}/{name}', need=False)
+
 HEAPS_CACHE = 'shaders.cache.nx'
 
 def heaps_pak_files(f):
@@ -3356,6 +3393,9 @@ def scan_file_in(args):
         return rel, uniq_keys(found), var_pairs(found), trees
     if len(args) > 2:   # a range of LINKDATA entries (linkdata_jobs)
         linkdata_shaders(path, rel, args[2], found)
+        return rel, uniq_keys(found), var_pairs(found), trees
+    if path.lower().endswith('.pak') and lspk_tail(path):   # a Larian package of version 13 (Divinity: Original Sin 2): GLSLC outputs in its .bshd files (lspk_shaders)
+        lspk_shaders(path, rel, found)
         return rel, uniq_keys(found), var_pairs(found), trees
     if head[:4] == BND2:   # a Criterion Bundle 2 (Need for Speed: Hot Pursuit Remastered's SHADERS.BNDL): GLSLC outputs in its zlib resources (bnd2_shaders)
         found += bnd2_shaders(open(path, 'rb').read(), '/' + rel)

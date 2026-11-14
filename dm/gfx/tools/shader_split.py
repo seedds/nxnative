@@ -47,6 +47,7 @@
 #       Mac host), each a VNVN record with one code area and control section (frostbite.py), see frostbite_jobs and frostbite_shaders
 #   · PDAT (the engine with the namespace phx, Kirby Air Riders): flatbuffer records tagged PMAP, zstd frames in the .dat archives, each holding a program's control sections and code areas, see pdat_jobs and pdat_shaders
 #   · Unreal Engine 3 (Batman: Arkham Knight): shader records in its global shader cache (BMSG) and in the packages (the combined shader cache), whose compressed chunks are Oodle blocks decoded by the game's own decoder in the Mac host, see ue3_body and ue3_shaders
+#   · IPK (Ubisoft's UbiArt, Rayman Legends: Definitive Edition): whole GLSLC outputs in the .fxb effect files of bundle_nn.ipk (zlib entries), see ipk_shaders
 # Code area: 0x30 header + (graphics) 0x50 SPH + instructions; header magic 0x12345678 for graphics, 0x12345679 for compute. The control section starts with 0x98761234, +0x704 = code area length,
 #   +0x700 = start of the c1 constant segment within the code area; for compute +0x748 thread group xyz (u32 ×3), +0x754 shared memory bytes (checked one by one against PC reflection on D2R's 22 compute shaders).
 # Stage: BNSH uses the stage slot; BAHS uses bits 10..13 of SPH word 0 (1 vertex 2 hull 3 domain 4 geometry 5 pixel), and a compute header means compute.
@@ -918,6 +919,40 @@ def d11_pack_shaders(path, label, out):
         found = []; scan_blob(m, lb, found)
         if not found: found = glslc_shaders(m, lb, need=False)
         out.extend(found)
+
+UBIART_IPK = bytes.fromhex('50ec12ba')
+def ipk_shaders(path, rel, out):
+    """A UbiArt IPK archive (Rayman Legends: Definitive Edition, bundle_nn.ipk, version 7, 26,878 files). Big-endian: magic 0x50EC12BA, version, platform, +0xc base offset (the data start),
+    +0x10 file count; entries from +0x38: u32 offset count, u32 size, u32 compressed size (0: stored), u64 time, u64 offset × count (from the base), u32 + directory, u32 + name, u32 CRC, u32 0.
+    Compressed entries are zlib. The shaders are whole GLSLC outputs in the engine's .fxb effect files (enginedata/shaders/compiled/nx: renderpct, afterfx, font, movie; 5,893 programs);
+    shaders_dev/ holds a development build of the same effects with other keys, which the game does not ask for. Only the .fxb entries are read: the 2.6 GB of .ckd cooked assets hold none"""
+    label = f'/{rel}'
+    with open(path, 'rb') as f:
+        h = f.read(0x38)
+        if len(h) < 0x38: red(f'{label}: {len(h)} bytes, shorter than a UbiArt IPK header (0x38)')
+        ver, _plat, base, n = struct.unpack_from('>IIII', h, 4)
+        if ver != 7: red(f'{label}: UbiArt IPK version {ver} (only version 7 is read)')
+        t = f.read(max(base - 0x38, 0))
+        if base < 0x38 or len(t) != base - 0x38: red(f'{label}: the IPK header puts its data at {base:#x}, outside the file')
+        p = 0
+        for i in range(n):
+            try:
+                noff, size, csize = struct.unpack_from('>III', t, p); p += 20
+                off = struct.unpack_from('>Q', t, p)[0] if noff else 0; p += 8 * noff
+                pl = struct.unpack_from('>I', t, p)[0]; d = t[p + 4:p + 4 + pl].decode('latin1'); p += 4 + pl
+                nl = struct.unpack_from('>I', t, p)[0]; name = d + t[p + 4:p + 4 + nl].decode('latin1'); p += 4 + nl + 8
+            except struct.error: red(f'{label}: entry {i} of {n} runs past the IPK table ({len(t) + 0x38:#x} bytes): not the layout of a version 7 archive')
+            if not name.endswith('.fxb') or '/shaders_dev/' in '/' + name: continue
+            f.seek(base + off); b = f.read(csize or size)
+            if len(b) != (csize or size): red(f'{label}/{name}: the entry at {base + off:#x} runs past the end of the archive')
+            if csize:
+                try: b = zlib.decompress(b)
+                except zlib.error as e: red(f'{label}/{name}: invalid zlib stream ({e})')
+            if len(b) != size: red(f'{label}/{name}: {len(b)} bytes decoded, the entry says {size}')
+            found = []
+            scan_blob(b, f'{label}/{name}', found)
+            if not found: found = glslc_shaders(b, f'{label}/{name}', need=False)
+            out += found
 
 CPK = b'CPK '
 def cpk_jobs(files, parts=64):
@@ -3316,6 +3351,9 @@ def scan_file_in(args):
         return rel, uniq_keys(found), var_pairs(found), trees
     if path.endswith('.pkdswitch') and os.path.exists(path[:-len('.pkdswitch')] + '.pkiswitch'):   # Double Eleven's resource pack, read through its index (d11_pack_shaders)
         d11_pack_shaders(path, '/' + rel, found)
+        return rel, uniq_keys(found), var_pairs(found), trees
+    if head[:4] == UBIART_IPK:   # a UbiArt IPK archive (ipk_shaders): its .fxb effect files, without reading the rest
+        ipk_shaders(path, rel, found)
         return rel, uniq_keys(found), var_pairs(found), trees
     if head[:8] in (IDRK, PDRK):
         idrk_shaders(path, '/' + rel, found)

@@ -42,6 +42,7 @@ static size_t ar_align(size_t n, size_t alignment) { return (n + alignment - 1) 
 static size_t ar_service_work_size(const uint8_t *p) {
     uint32_t revision = *(const uint32_t *)(p + 0x34);
     if ((revision & 0xffffff) != 0x564552) revision = *(const uint32_t *)(p + 0x38);
+    if ((revision & 0xffffff) != 0x564552) revision = *(const uint32_t *)(p + 0x30);   // SDK 1: the revision is at +0x30 (issue #960)
     if ((revision & 0xffffff) != 0x564552 || revision < 0x31564552 || revision > 0x3f564552) return 0;
     unsigned r = (revision >> 24) - 0x30;
     size_t n[11];
@@ -75,8 +76,21 @@ static size_t ar_service_work_size(const uint8_t *p) {
     return ar_align(size + commands + 0x7e, WORK_PAGE);
 }
 
+// SDK 1 (nnSdk 1.3.1: Ultra Street Fighter II, Rayman Legends) has no in-process AudioRenderSystem: no ExecuteAudioRendererRendering, and OpenAudioRenderer connects to audren:u.
+// Those SDKs get the host renderer below instead, from the patch in issue #960 (written for Ultra Street Fighter II), which drives the renderer's own ar_t (render thread and output)
+static int ar_has_local_cpu(void) {
+    static int v = -1;
+    if (v < 0) v = guest_sym("_ZN2nn5audio29ExecuteAudioRendererRenderingENS0_19AudioRendererHandleE") != NULL;
+    return v;
+}
 HLE_FORCE("_ZN2nn5audio30GetAudioRendererWorkBufferSizeERKNS0_22AudioRendererParameterE", "renderer work buffer: DSP service budget, with extra local CPU backend storage supplied by the host",
           size_t, h_ar_WorkSize, const uint8_t *param) {
+    if (!ar_has_local_cpu()) {   // SDK 1: the SDK's own size asks the audren:u service, which the host does not serve
+        size_t service = ar_service_work_size(param);
+        size_t guest_n = service ? service : 0x40000;
+        { static int once; if (!once++) LOG("audren: SDK 1 host renderer work buffer %#zx", guest_n); }
+        return guest_n;
+    }
     static size_t (*orig)(const uint8_t *); if (!orig) orig = gsym("_ZN2nn5audio30GetAudioRendererWorkBufferSizeERKNS0_22AudioRendererParameterE");
     uint8_t p[P_SIZE]; cpu_manual(p, param); size_t n = orig(p);
     size_t service = *(int32_t *)(param + P_DEVICE) == 0 ? ar_service_work_size(p) : 0;
@@ -121,10 +135,204 @@ static ar_t *ar_of_sys(uint8_t *sys) {
     pthread_mutex_unlock(&g_ar_mu);
     return found;
 }
+// Render one frame (generate commands + CPU processing); the callers are serialized by this host lock (render_once, sdk1_render_frame and the SDK 1 RequestUpdate)
+static pthread_mutex_t g_render_mu = PTHREAD_MUTEX_INITIALIZER;
+
+// ---------- SDK 1 host renderer ----------
+// The SDK 1 client keeps the game's whole renderer state in its AudioRendererConfig (offsets of nnSdk 1.3.1, from issue #960): +0 VoiceInfoManager (+0 count, +8 voices of 0x210 bytes,
+// +0x50 its mutex), +0x10 EffectManager (+0 count, +8 effects of 0xe0 bytes), +0x28 MemoryPoolManager (+0x20 count, +0x28 pools of 0x18 bytes). The host mixes PCM16 and ADPCM voices to
+// stereo at 48 kHz, answers memory pool attach / detach and Aux effects (send buffer filled with the mix, return buffer added back). No biquad, reverb or delay: a first approximation.
+// One SDK 1 renderer at a time (the state below is shared)
+enum { SDK1_MAX_VOICES = 512 };
+static void *g_sdk1_ev;
+static const uint8_t *g_sdk1_cfg;
+static struct {
+    uint32_t cur_wb;
+    int32_t cur_sample;
+    double frac;
+    int16_t yn1[2], yn2[2], cur_val[2];
+    int adpcm_init;
+} g_sdk1_v[SDK1_MAX_VOICES];
+
+static void sdk1_decode_sample(int idx, uint8_t fmt, int32_t nch, const uint8_t *buf, uint64_t bsz, const int16_t *coeffs, int32_t sm) {
+    if (fmt == 2) {   // PCM16
+        size_t off = (size_t)sm * (size_t)nch * 2;
+        if (off + (size_t)nch * 2 <= bsz) {
+            const int16_t *p = (const int16_t *)(buf + off);
+            g_sdk1_v[idx].cur_val[0] = p[0];
+            g_sdk1_v[idx].cur_val[1] = nch > 1 ? p[1] : p[0];
+        }
+    } else if (fmt == 6 && coeffs) {   // ADPCM: frames of 8 bytes, 14 samples
+        size_t frame = (size_t)sm / 14, sub = (size_t)sm % 14;
+        if (frame * 8 + 1 + sub / 2 < bsz) {
+            uint8_t hdr = buf[frame * 8], b = buf[frame * 8 + 1 + sub / 2];
+            int pred = (hdr >> 4) & 7, scale = 1 << (hdr & 0xf);
+            int16_t c1 = coeffs[pred * 2], c2 = coeffs[pred * 2 + 1];
+            int nib = (sub & 1) ? (b & 0xf) : ((b >> 4) & 0xf);
+            if (nib >= 8) nib -= 16;
+            int32_t val = ((nib * scale) << 11) + 1024 + (int32_t)c1 * g_sdk1_v[idx].yn1[0] + (int32_t)c2 * g_sdk1_v[idx].yn2[0];
+            val >>= 11;
+            val = val > 32767 ? 32767 : val < -32768 ? -32768 : val;
+            g_sdk1_v[idx].yn2[0] = g_sdk1_v[idx].yn1[0];
+            g_sdk1_v[idx].yn1[0] = (int16_t)val;
+            g_sdk1_v[idx].cur_val[0] = g_sdk1_v[idx].cur_val[1] = (int16_t)val;
+        }
+    }
+}
+
+static void sdk1_render_frame(ar_t *a, int16_t *dst, int *nout) {
+    pthread_mutex_lock(&g_render_mu);
+    int32_t mix_l[240] = {0}, mix_r[240] = {0};
+    const uint8_t *cfg = g_sdk1_cfg;
+    if (cfg) {
+        uint8_t *vm = *(uint8_t *const *)cfg;
+        if (vm) {
+            static void (*lock_mu)(void *), (*unlock_mu)(void *);
+            if (!lock_mu) { lock_mu = guest_sym("_ZN2nn2os9LockMutexEPNS0_9MutexTypeE"); unlock_mu = guest_sym("_ZN2nn2os11UnlockMutexEPNS0_9MutexTypeE"); }
+            if (lock_mu) lock_mu(vm + 0x50);
+            int32_t nvoices = *(const int32_t *)vm;
+            uint8_t *voices = *(uint8_t *const *)(vm + 8);
+            if (nvoices > SDK1_MAX_VOICES) nvoices = SDK1_MAX_VOICES;
+            for (int32_t i = 0; i < nvoices && voices; i++) {
+                uint8_t *v = voices + (size_t)i * 0x210;
+                if (!v[0x49]) { memset(&g_sdk1_v[i], 0, sizeof g_sdk1_v[i]); continue; }
+                if (v[0x48]) { memset(&g_sdk1_v[i], 0, sizeof g_sdk1_v[i]); g_sdk1_v[i].cur_sample = -1; v[0x48] = 0; }
+                uint8_t play_state = v[0x4a];
+                uint32_t appended = *(uint32_t *)(v + 0x1c8), played = *(uint32_t *)(v + 0x1b8);
+                if (play_state == 1) {
+                    *(uint32_t *)(v + 0x1b8) = appended;
+                    *(int64_t *)(v + 0x1b0) = 0;
+                    g_sdk1_v[i].cur_wb = appended; g_sdk1_v[i].cur_sample = -1; g_sdk1_v[i].frac = 0.0; g_sdk1_v[i].adpcm_init = 0;
+                    continue;
+                }
+                if (play_state != 0) continue;
+                if (g_sdk1_v[i].cur_wb < played) { g_sdk1_v[i].cur_wb = played; g_sdk1_v[i].cur_sample = -1; }
+                uint8_t fmt = v[0x4b];
+                int32_t vrate = *(int32_t *)(v + 0x4c), nch = *(int32_t *)(v + 0x58);
+                float pitch = *(float *)(v + 0x5c), vvol = *(float *)(v + 0x60);
+                if (vrate <= 0 || nch <= 0 || nch > 6 || !(pitch > 0.0f)) continue;
+                float gL = 0.0f, gR = 0.0f;
+                const uint8_t *cr0 = *(const uint8_t *const *)(v + 0x1d0);
+                const uint8_t *cr1 = nch > 1 ? *(const uint8_t *const *)(v + 0x1d8) : NULL;
+                if (nch == 1 && cr0) {
+                    const float *mv = (const float *)(cr0 + 0x14);
+                    for (int m = 0; m < 24; m += 2) { gL += mv[m]; gR += mv[m + 1]; }
+                } else if (nch >= 2 && cr0 && cr1) {
+                    const float *mv0 = (const float *)(cr0 + 0x14), *mv1 = (const float *)(cr1 + 0x14);
+                    for (int m = 0; m < 24; m++) { gL += mv0[m]; gR += mv1[m]; }
+                }
+                if (gL == 0.0f && gR == 0.0f) gL = gR = 1.0f;
+                gL *= vvol; gR *= vvol;
+                double step = ((double)vrate * (double)pitch) / 48000.0;
+                if (step <= 0.0) step = 1.0; else if (step > 8.0) step = 8.0;
+                const int16_t *coeffs = *(const int16_t *const *)(v + 0x88);
+                for (int s = 0; s < 240 && g_sdk1_v[i].cur_wb < appended; s++) {
+                    uint8_t *wb = v + 0xa0 + (g_sdk1_v[i].cur_wb & 3) * 0x38;
+                    const uint8_t *buf = *(const uint8_t *const *)wb;
+                    uint64_t bsz = *(const uint64_t *)(wb + 8);
+                    int32_t start_sm = *(const int32_t *)(wb + 0x10), end_sm = *(const int32_t *)(wb + 0x14);
+                    uint8_t looping = wb[0x18];
+                    const uint8_t *ctx = *(const uint8_t *const *)(wb + 0x20);
+                    if (!buf || end_sm <= start_sm || start_sm < 0) {
+                        g_sdk1_v[i].cur_wb++; *(uint32_t *)(v + 0x1b8) = g_sdk1_v[i].cur_wb; g_sdk1_v[i].cur_sample = -1; continue;
+                    }
+                    if (g_sdk1_v[i].cur_sample < start_sm) {
+                        if (fmt == 6 && !g_sdk1_v[i].adpcm_init) {
+                            if (ctx) { g_sdk1_v[i].yn1[0] = *(const int16_t *)(ctx + 2); g_sdk1_v[i].yn2[0] = *(const int16_t *)(ctx + 4); }
+                            g_sdk1_v[i].adpcm_init = 1;
+                        }
+                        g_sdk1_v[i].cur_sample = start_sm; g_sdk1_v[i].frac = 0.0;
+                        sdk1_decode_sample(i, fmt, nch, buf, bsz, coeffs, start_sm);
+                    }
+                    mix_l[s] += (int32_t)((float)g_sdk1_v[i].cur_val[0] * gL);
+                    mix_r[s] += (int32_t)((float)g_sdk1_v[i].cur_val[1] * gR);
+                    g_sdk1_v[i].frac += step;
+                    while (g_sdk1_v[i].frac >= 1.0) {
+                        g_sdk1_v[i].frac -= 1.0;
+                        g_sdk1_v[i].cur_sample++;
+                        (*(int64_t *)(v + 0x1b0))++;
+                        if (g_sdk1_v[i].cur_sample >= end_sm) {
+                            if (looping) {
+                                g_sdk1_v[i].cur_sample = start_sm;
+                                if (fmt == 6 && ctx) { g_sdk1_v[i].yn1[0] = *(const int16_t *)(ctx + 8); g_sdk1_v[i].yn2[0] = *(const int16_t *)(ctx + 10); }
+                            } else {
+                                g_sdk1_v[i].cur_wb++;
+                                *(uint32_t *)(v + 0x1b8) = g_sdk1_v[i].cur_wb;
+                                g_sdk1_v[i].cur_sample = -1; g_sdk1_v[i].frac = 0.0;
+                                if (wb[0x19]) { *(int64_t *)(v + 0x1b0) = 0; g_sdk1_v[i].adpcm_init = 0; }
+                                break;
+                            }
+                        }
+                        sdk1_decode_sample(i, fmt, nch, buf, bsz, coeffs, g_sdk1_v[i].cur_sample);
+                    }
+                }
+            }
+            if (unlock_mu) unlock_mu(vm + 0x50);
+        }
+        // Aux effects (type 3): the send buffer gets the frame's mix (240 samples per channel), what the game wrote to the return buffer is added back
+        uint8_t *em = *(uint8_t *const *)(cfg + 0x10);
+        if (em) {
+            int32_t neff = *(const int32_t *)em;
+            uint8_t *effs = *(uint8_t *const *)(em + 8);
+            for (int32_t i = 0; i < neff && effs; i++) {
+                uint8_t *eff = effs + (size_t)i * 0xe0;
+                if (eff[0] != 3 || !eff[2]) continue;
+                int32_t nch = *(const int32_t *)(eff + 0x50);
+                uint32_t cmax = *(const uint32_t *)(eff + 0x58);
+                if (nch <= 0 || nch > 24 || !cmax) continue;
+                uint32_t fsamp = (uint32_t)nch * 240;
+                if (fsamp > cmax) continue;
+                uint8_t *si = *(uint8_t *const *)(eff + 0x60);
+                int32_t *sd = *(int32_t *const *)(eff + 0x68);
+                if (si && sd) {
+                    uint32_t w = *(const uint32_t *)(si + 0x44);
+                    for (uint32_t k = 0; k < fsamp; k++) {
+                        uint32_t idx = (w + k) % cmax;
+                        uint32_t ch = k / 240, s = k % 240;
+                        sd[idx] = ch == 0 ? mix_l[s] : ch == 1 ? mix_r[s] : 0;
+                    }
+                    w = (w + fsamp) % cmax;
+                    *(uint32_t *)(si + 0x04) = w;
+                    *(uint32_t *)(si + 0x44) = w;
+                }
+                uint8_t *ri = *(uint8_t *const *)(eff + 0x70);
+                const int32_t *rd = *(const int32_t *const *)(eff + 0x78);
+                if (ri && rd) {
+                    uint32_t r = *(const uint32_t *)(ri + 0x00), w = *(const uint32_t *)(ri + 0x04);
+                    uint32_t avail = w >= r ? w - r : cmax - r + w;
+                    if (avail >= fsamp) {
+                        for (int s = 0; s < 240; s++) {
+                            int32_t l = rd[(r + (uint32_t)s) % cmax];
+                            int32_t rr = nch > 1 ? rd[(r + 240u + (uint32_t)s) % cmax] : l;
+                            mix_l[s] += l; mix_r[s] += rr;
+                        }
+                        r = (r + fsamp) % cmax;
+                        *(uint32_t *)(ri + 0x00) = r;
+                        *(uint32_t *)(ri + 0x40) = r;
+                    }
+                }
+            }
+        }
+    }
+    uint64_t loud = 0;
+    if (dst) {
+        for (int s = 0; s < 240; s++) {
+            int32_t l = mix_l[s], r = mix_r[s];
+            l = l > 32767 ? 32767 : l < -32768 ? -32768 : l;
+            r = r > 32767 ? 32767 : r < -32768 ? -32768 : r;
+            dst[2 * s] = (int16_t)l; dst[2 * s + 1] = (int16_t)r;
+            loud |= (uint64_t)(l | r);
+        }
+        if (nout) *nout = 240;
+    }
+    atomic_fetch_add(&a->frames, 1); if (loud) atomic_fetch_add(&a->nonsilent, 1);
+    uint64_t f = atomic_load(&a->frames); if (f == 200 || f == 1500 || f % 12000 == 0) LOG("audren: SDK 1 rendered %llu frames, %llu of them not silent", (unsigned long long)f, (unsigned long long)atomic_load(&a->nonsilent));
+    pthread_mutex_unlock(&g_render_mu);
+}
 
 static void render_main(void *arg) {
     ar_t *a = arg; t_ar = a;
-    void (*exec)(void *, void *) = gsym("_ZN2nn5audio29ExecuteAudioRendererRenderingENS0_19AudioRendererHandleE");
+    void (*exec)(void *, void *) = ar_has_local_cpu() ? gsym("_ZN2nn5audio29ExecuteAudioRendererRenderingENS0_19AudioRendererHandleE") : NULL;
     void *out = dm_pcmout_open(2);
     gbuf *free_list[NBUF]; int nfree = NBUF;
     for (int i = 0; i < NBUF; i++) { a->bufs[i] = (gbuf){a->pcm[i], sizeof a->pcm[i], 0}; free_list[i] = &a->bufs[i]; }
@@ -141,7 +349,8 @@ static void render_main(void *arg) {
         const int16_t *src; int got;
         uint32_t h = atomic_load(&a->cq_head);
         if (h != atomic_load(&a->cq_tail)) { src = a->cq[h % CQ]; got = a->cq_n[h % CQ]; atomic_store(&a->cq_head, h + 1); cq_popped(a); }   // play queued catch-up output first
-        else { a->frame_n = 0; exec(a->handle[0], a->handle[1]); src = a->frame; got = a->frame_n; }   // SDK: generate commands → CPU processing (output taken in the host takeover) → signal the game's renderer event
+        else if (exec) { a->frame_n = 0; exec(a->handle[0], a->handle[1]); src = a->frame; got = a->frame_n; }   // SDK: generate commands → CPU processing (output taken in the host takeover) → signal the game's renderer event
+        else { a->frame_n = 0; sdk1_render_frame(a, a->frame, &a->frame_n); if (g_sdk1_ev) hle_signal_system_event(g_sdk1_ev); src = a->frame; got = a->frame_n; }   // SDK 1: the host renderer
         int n = got ? got : 240;
         gbuf *b = free_list[--nfree];
         if (got) memcpy(b->ptr, src, (size_t)n * 4); else memset(b->ptr, 0, (size_t)n * 4);
@@ -182,6 +391,30 @@ static void *rev_find(void *obj) {
     pthread_mutex_unlock(&g_rev_mu); return ev;
 }
 static Result ar_open(void **handle, void *ev, const uint8_t *param, void *work, size_t sz, void *ra) {
+    if (!ar_has_local_cpu()) {   // SDK 1: no SDK renderer to open; the handle is the host's slot, which only the hooks below see
+        LOG("audren: SDK 1 OpenAudioRenderer%s rate %d samples per frame %d mix buffers %d submixes %d voices %d sinks %d effects %d splitters %d work buffer %p+%#zx",
+            ev ? "" : " (no event)", *(int32_t *)param, *(int32_t *)(param + 4), *(int32_t *)(param + 8), *(int32_t *)(param + 0xc), *(int32_t *)(param + 0x10), *(int32_t *)(param + 0x14),
+            *(int32_t *)(param + 0x18), *(int32_t *)(param + 0x24), work, sz);
+        pthread_mutex_lock(&g_ar_mu);
+        ar_t *a = NULL;
+        for (int i = 0; i < AR_MAX && !a; i++) if (!g_ar[i].handle[0]) a = &g_ar[i];
+        if (a) {
+            memset(a, 0, sizeof *a);
+            pthread_mutex_init(&a->cq_mu, NULL); pthread_cond_init(&a->cq_cv, NULL);
+            a->handle[0] = a; atomic_store(&a->open, 1);
+        }
+        pthread_mutex_unlock(&g_ar_mu);
+        if (!a) { LOG("[RED] audren: more than %d renderers", AR_MAX); return RES_FAIL; }
+        if (g_sdk1_ev || g_sdk1_cfg) LOG("[RED] audren: a second SDK 1 renderer: the host renders one");
+        if (ev) hle_bind_system_event(ev, 1);
+        g_sdk1_ev = ev; g_sdk1_cfg = NULL;
+        memset(g_sdk1_v, 0, sizeof g_sdk1_v);
+        handle[0] = a;
+        module_t *m = module_of(ra);
+        LOG("audren: renderer %d (SDK 1 host renderer) opened from %s+%#llx", ar_index(a), m ? m->name : "host", m ? (unsigned long long)((uint8_t *)ra - m->base) : 0ULL);
+        a->render_tt = dm_guest_thread_spawn(render_main, a, 9, 0x10000);
+        return RES_OK;
+    }
     static Result (*orig_ev)(void **, void *, const uint8_t *, void *, size_t), (*orig)(void **, const uint8_t *, void *, size_t);
     if (!orig_ev) orig_ev = gsym("_ZN2nn5audio17OpenAudioRendererEPNS0_19AudioRendererHandleEPNS_2os11SystemEventERKNS0_22AudioRendererParameterEPvm");
     if (!orig) orig = gsym("_ZN2nn5audio17OpenAudioRendererEPNS0_19AudioRendererHandleERKNS0_22AudioRendererParameterEPvm");
@@ -247,12 +480,17 @@ HLE_FORCE("_ZN2nn5audio17OpenAudioRendererEPNS0_19AudioRendererHandleEPNS_2os11S
 HLE_FORCE("_ZN2nn5audio17OpenAudioRendererEPNS0_19AudioRendererHandleERKNS0_22AudioRendererParameterEPvm", "open the renderer (no event): CPU rendering + manual execution, the host starts a render thread",
           Result, h_ar_Open0, void **handle, const uint8_t *param, void *work, size_t sz) { return ar_open(handle, NULL, param, work, sz, dm_bigstack_caller(__builtin_return_address(0))); }
 HLE_FORCE("_ZN2nn5audio18CloseAudioRendererENS0_19AudioRendererHandleE", "close the renderer: stop the host render thread first, then hand over to the SDK", void, h_ar_Close, void *obj, void *state) {
-    static void (*orig)(void *, void *); if (!orig) orig = gsym("_ZN2nn5audio18CloseAudioRendererENS0_19AudioRendererHandleE");
     // Join the render thread first (it checks open every round and at most every 10 ms while waiting for the output): it may be inside exec(), which uses the renderer the SDK is about to free.
     // A fixed 20 ms sleep used to stand in for this, and a renderer reopened inside that window ran a second thread over the first one's blocks
     ar_t *a = NULL;
     for (int i = 0; i < AR_MAX && !a; i++) if (g_ar[i].handle[0] == obj) a = &g_ar[i];
     if (a && a->render_tt) { atomic_store(&a->open, 0); dm_guest_thread_join(a->render_tt); a->render_tt = NULL; }
+    if (!ar_has_local_cpu()) {   // SDK 1: nothing of the SDK's to close
+        pthread_mutex_lock(&g_render_mu); g_sdk1_ev = NULL; g_sdk1_cfg = NULL; pthread_mutex_unlock(&g_render_mu);
+        if (a) { pthread_mutex_lock(&g_ar_mu); a->handle[0] = NULL; pthread_mutex_unlock(&g_ar_mu); }
+        return;
+    }
+    static void (*orig)(void *, void *); if (!orig) orig = gsym("_ZN2nn5audio18CloseAudioRendererENS0_19AudioRendererHandleE");
     void *owned = objmap_del(obj), *sev = rev_find(obj);
     orig(obj, state);
     free(owned);
@@ -261,6 +499,61 @@ HLE_FORCE("_ZN2nn5audio18CloseAudioRendererENS0_19AudioRendererHandleE", "close 
         static void (*destroy)(void *); if (!destroy) destroy = gsym("_ZN2nn2os18DestroySystemEventEPNS0_15SystemEventTypeE");
         destroy(sev); rev_set(sev, NULL);
     }
+}
+// SDK 1: Start, Stop and RequestUpdate would go to the service. Every other SDK gets its own functions (all registers passed on: the handle is one word in SDK 1, two later)
+HLE_FORCE("_ZN2nn5audio18StartAudioRendererENS0_19AudioRendererHandleE", "start the renderer: SDK 1 host renderer, else the SDK", Result, h_ar_Start, void *x0, void *x1) {
+    if (!ar_has_local_cpu()) return RES_OK;
+    static Result (*orig)(void *, void *); if (!orig) orig = gsym("_ZN2nn5audio18StartAudioRendererENS0_19AudioRendererHandleE");
+    return orig(x0, x1);
+}
+HLE_FORCE("_ZN2nn5audio17StopAudioRendererENS0_19AudioRendererHandleE", "stop the renderer: SDK 1 host renderer, else the SDK", void, h_ar_Stop, void *x0, void *x1) {
+    if (!ar_has_local_cpu()) return;
+    static void (*orig)(void *, void *); if (!orig) orig = gsym("_ZN2nn5audio17StopAudioRendererENS0_19AudioRendererHandleE");
+    orig(x0, x1);
+}
+HLE_FORCE("_ZN2nn5audio26RequestUpdateAudioRendererENS0_19AudioRendererHandleEPKNS0_19AudioRendererConfigE", "renderer update: SDK 1 host renderer takes the game's config, else the SDK",
+          Result, h_ar_RequestUpdate, void *x0, const uint8_t *cfg, void *x2) {
+    if (ar_has_local_cpu()) {
+        static Result (*orig)(void *, const uint8_t *, void *); if (!orig) orig = gsym("_ZN2nn5audio26RequestUpdateAudioRendererENS0_19AudioRendererHandleEPKNS0_19AudioRendererConfigE");
+        return orig(x0, cfg, x2);
+    }
+    pthread_mutex_lock(&g_render_mu);
+    g_sdk1_cfg = cfg;
+    if (cfg) {
+        uint8_t *mpm = *(uint8_t *const *)(cfg + 0x28);   // memory pools: requested attach (2) → attached (3), requested detach (4) → detached (5)
+        if (mpm) {
+            int32_t npool = *(const int32_t *)(mpm + 0x20);
+            uint8_t *pools = *(uint8_t *const *)(mpm + 0x28);
+            for (int32_t i = 0; i < npool && pools; i++) {
+                uint32_t *st = (uint32_t *)(pools + (size_t)i * 0x18 + 0x10);
+                if (*st == 4) *st = 5;
+                else if (*st == 2) *st = 3;
+            }
+        }
+        uint8_t *em = *(uint8_t *const *)(cfg + 0x10);   // effects: reported as enabled or disabled
+        if (em) {
+            int32_t neff = *(const int32_t *)em;
+            uint8_t *effs = *(uint8_t *const *)(em + 8);
+            for (int32_t i = 0; i < neff && effs; i++) {
+                uint8_t *e = effs + (size_t)i * 0xe0;
+                if (e[0]) { e[1] = 0; e[0xc0] = e[2] ? 3 : 4; }
+            }
+        }
+        uint8_t *vm = *(uint8_t *const *)cfg;   // voices in use: wave buffers marked sent
+        if (vm) {
+            int32_t nvoices = *(const int32_t *)vm;
+            uint8_t *voices = *(uint8_t *const *)(vm + 8);
+            for (int32_t i = 0; i < nvoices && voices; i++) {
+                uint8_t *v = voices + (size_t)i * 0x210;
+                if (v[0x49]) {
+                    v[0x198] = 0;
+                    v[0xba] = v[0xf2] = v[0x12a] = v[0x162] = 1;
+                }
+            }
+        }
+    }
+    pthread_mutex_unlock(&g_render_mu);
+    return RES_OK;
 }
 
 // DeviceSink input mix buffers → int16 stereo. The command ID is 0x13 in SDK 16; SDK 20 inserted a command before it, making it 0x14 (written at sdk+0x233f44); SDK 8 (Link's Awakening)
@@ -420,8 +713,7 @@ static int capture(ar_t *a, const uint8_t *cl, size_t len, int16_t *dst) {
     return 0;
 }
 // Render one frame (generate commands + CPU processing); dst = output (stereo int16, *nout samples). The two callers (render thread, catch-up) are serialized by a host lock: they share one command buffer.
-// One lock over all renderers: the header layout is worked out once from whichever list comes first, by trying each layout in turn (capture); a frame takes hundredths of a millisecond (0.02 ms mean)
-static pthread_mutex_t g_render_mu = PTHREAD_MUTEX_INITIALIZER;
+// One lock over all renderers (g_render_mu, above): the header layout is worked out once from whichever list comes first, by trying each layout in turn (capture); a frame takes hundredths of a millisecond (0.02 ms mean)
 // SDK 20's AudioRenderSystem (The Legend of Zelda: Breath of the Wild 1.9.0) has another layout: the member functions for mode / device / command buffer are inlined (sdk+0x22a70c ExecuteAudioRendererRendering:
 //   +0x48 rendering device and +0x4c execution mode, both must be 1; +0xf8 / +0x100 command buffer start / length), GenerateCommand takes a Span<std::byte> and returns a Span (x0 start, x1 length: the generated command list),
 //   and the update lock sits further on (update_lock). The layout is recognized by the presence of the Span version of GenerateCommand

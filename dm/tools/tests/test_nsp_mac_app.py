@@ -574,6 +574,7 @@ class App(unittest.TestCase):
         self.assertIs(p['LSSupportsGameMode'], False)   # macOS's Game Mode holds the GPU at its lowest clock (frame-rate.md)
         self.assertEqual(p['DMSettings'], [])   # launcher.json's settings, as the saved choices they accept: none here
         self.assertRegex(p['DMCommit'], r'^[0-9a-f]{12}(\+dirty)?$')   # the packing checkout (scripts/bug_report.py, the host's start line)
+        if 'DMCommitURL' in p: self.assertRegex(p['DMCommitURL'], r'^https://github\.com/[\w.-]+/[\w.-]+/commit/' + p['DMCommit'] + '[0-9a-f]{28}$')   # only a commit GitHub has
         self.assertEqual(p['DMChain'], '0123456789ab')   # the chain of the libraries packed (msl/b-<chain>)
 
     def test_packed_language_is_the_lists(self):   # --lang a game lacks: the Game language row's default (settings.py: the game's first), with or without the window

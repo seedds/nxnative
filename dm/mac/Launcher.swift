@@ -132,7 +132,15 @@ struct LauncherView: View {
                 Image(nsImage: NSApp.applicationIconImage).resizable().frame(width: 44, height: 44).accessibilityHidden(true)
                 VStack(alignment: .leading, spacing: 1) {
                     Text(info("CFBundleName") ?? "Game").font(.headline)
-                    Text(Self.version).font(.callout).foregroundStyle(.secondary)
+                    HStack(spacing: 0) {
+                        Text("Version \(info("CFBundleShortVersionString") ?? "1.0")")
+                        if let c = info("DMCommit"), !c.isEmpty {
+                            Text(" (")
+                            CommitLink(commit: c, url: info("DMCommitURL").flatMap(URL.init(string:)))
+                            Text(")")
+                        }
+                    }
+                    .font(.callout).foregroundStyle(.secondary)
                 }
                 Spacer()
             }
@@ -161,14 +169,6 @@ struct LauncherView: View {
         }
         .frame(minWidth: 520, idealWidth: 560)
     }
-
-    /// "Version 1.6.0 (nxnative d0ab754c)": the game's version and the nxnative commit that packed the app (DMCommit, pack_app.py source_commit)
-    static let version: String = {
-        let v = "Version \(info("CFBundleShortVersionString") ?? "1.0")"
-        guard let c = info("DMCommit"), !c.isEmpty else { return v }
-        let dirty = c.hasSuffix("+dirty")
-        return v + " (nxnative \(c.prefix(8))\(dirty ? "+dirty" : ""))"
-    }()
 
     /// Play, once the cloud's save is compared with this Mac's: a save that changed on both sides is the player's pick, not the newer file's (SaveCheck)
     private func start() {
@@ -227,6 +227,34 @@ struct LauncherView: View {
             }
         }
     }
+}
+
+/// "Version 1.6.0 (d0ab754c)": the commit that packed the app (DMCommit, pack_app.py source_commit) beside the game's version. A link to the commit's page when the packer
+/// found it on GitHub (DMCommitURL; a local commit has no page there): blue under the pointer, a click opens it. Its menu copies the commit ID and the link
+struct CommitLink: View {
+    let commit: String, url: URL?
+    @State private var hover = false
+
+    var body: some View {
+        let id = commit.hasSuffix("+dirty") ? String(commit.dropLast(6)) : commit
+        Button { if let url { NSWorkspace.shared.open(url) } } label: {
+            Text("\(id.prefix(8))\(commit.hasSuffix("+dirty") ? "+dirty" : "")")
+                .foregroundStyle(url != nil && hover ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(.secondary))
+        }
+        .buttonStyle(.plain).focusable(false)
+        .onHover { inside in
+            hover = inside
+            guard url != nil else { return }
+            if inside { NSCursor.pointingHand.push() } else { NSCursor.pop() }
+        }
+        .help(url != nil ? "Open this commit on GitHub" : "This commit is not on GitHub")
+        .contextMenu {
+            Button("Copy Commit ID") { Self.copy(id) }
+            if let url { Button("Copy Link") { Self.copy(url.absoluteString) } }
+        }
+    }
+
+    private static func copy(_ s: String) { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(s, forType: .string) }
 }
 
 /// The Form's scroll bar as an overlay: thin, shown while scrolling or under the pointer, whatever "Show scroll bars" says in System Settings

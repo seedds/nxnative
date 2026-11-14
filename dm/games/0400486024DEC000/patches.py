@@ -61,14 +61,29 @@ drs_controller = (   # drs_stub.s, assembled with clang; x0 the controller, x16 
     0xb9020e1f, 0xbc2258e0, 0xb8225904, 0x34000182, 0x51000449, 0xb869590a, 0x340000ea, 0x4b0a008a,   # fits: record it; at 0 stay; the level above's record
     0x7109615f, 0x54000088, 0xbc6958e2, 0x1e212040, 0x540000aa, 0x2a0903e0, 0xd65f03c0,               # never, stale or fitting: up one
     0x2a1f03e0, 0xd65f03c0, 0x2a0203e0, 0xd65f03c0)                                                   # 0; or stay
+# Render scale: before the controller, the host's render scale (state +0x10, DM_RENDER_SCALE) multiplies the first level's ResolutionReduceScale (the list at +0x190, each node's
+# scale at -8 from its link), a fraction of the game's output (2560x1440 docked at graphics tier 0). The game ships 0.75 there (1920x1080, upscaled to the output by its NDSR
+# network), so 1.0 keeps the game's size and its dynamic resolution, as every render-scale stub does; 0.5 to 2 fix the size at the game's scale x the setting, no higher than the
+# output's own (1.35 on the launcher's 0.05 steps = 2560x1440: nothing in the game sizes its targets past the output), and return level 0 (a fixed size: no dynamic resolution, as the loader's convention says).
+# The game's scale is saved at the first call that applies one (state +0x290, after the controller's memory), so the product does not compound. The update sizes the scene from
+# that node every frame (main+0x805ef8: width = output x scale, aligned to +0x80), so the new size takes hold the frame after the first call. Skipped when the list is empty
+drs_render_scale = (   # assembled with clang from the instructions beside the words; past = the controller below
+    0xf940cc02, 0x91064003, 0xeb03005f, 0x54000240,   # ldr x2,[x0,#0x198]; add x3,x0,#0x190; cmp x2,x3; b.eq past        no levels
+    0xbd401202, 0x1e2e1001, 0x1e212040, 0x540001c0,   # ldr s2,[x16,#0x10]; fmov s1,#1.0; fcmp s2,s1; b.eq past         1.0: the game's own
+    0x1e202048, 0x5400018d,                           # fcmp s2,#0.0; b.le past                                          none written
+    0xbd429200, 0x1e202008, 0x54000061,               # ldr s0,[x16,#0x290]; fcmp s0,#0.0; b.ne have                     the game's scale, saved
+    0xbc5f8040, 0xbd029200,                           # ldur s0,[x2,#-8]; str s0,[x16,#0x290]                            first call: save it
+    0x1e220800, 0x1e212000, 0x1e214c00,               # have: fmul s0,s0,s2; fcmp s0,s1; fcsel s0,s0,s1,mi               x the setting, at most 1.0
+    0xbc1f8040, 0x52800000, 0xd65f03c0)               # stur s0,[x2,#-8]; mov w0,#0; ret                                 level 0
 def dynamic_resolution(ctx):
     here, emit, fs_site, fs_put, FS_STATE_OFF = ctx.here, ctx.emit, ctx.site, ctx.put, ctx.state
     site = ctx.others.get('dynamic resolution')
     if site is None or ctx.others.get('dynamic resolution update') is None: return   # not both found in this build (a red line from the locator): the game's own dynamic resolution
     fs_site(site, '017c40bd')   # ldr s1,[x0,#0x7c]
     start = here(); emit(ADRP(16, here(), FS_STATE_OFF))
-    for w in drs_controller: emit(w)
-    fs_put(site, [B(site, start)], 'dynamic resolution level: 0 (full resolution), or with state +0x40 (DM_DYNAMIC_RESOLUTION) a climb on the load measured at each level')
+    for w in drs_render_scale + drs_controller: emit(w)
+    ctx.render_scale = 2   # the setting's top (the launcher offers 0.5 to 2); the stub stops at the output's size, 1.35
+    fs_put(site, [B(site, start)], 'render scale x the game\'s first level (state +0x10; 1.0 = the game\'s own, at most the output); dynamic resolution level: 0 (full resolution), or with state +0x40 (DM_DYNAMIC_RESOLUTION) a climb on the load measured at each level')
     ctx.capabilities.add('DYNAMIC_RESOLUTION')
 
 MATCH_FRAME_STEP = {'main': [
@@ -81,7 +96,7 @@ BINDING = [
     {'what': 'frame ratio from the host\'s step', 'now': 'game', 'goal': 'game', 'purpose': 'frame rate',
      'why': "the game's own frame-ratio division, found by its function's fingerprint on any build that keeps the function",
      'checked': 'v131072 main: one function with this fingerprint, the site and its free registers read by disassembly (2026-11-08)'},
-    {'what': 'dynamic resolution: full size, or a climb on the load measured at each level', 'now': 'game', 'goal': 'game', 'purpose': 'rendering',
+    {'what': 'dynamic resolution: full size, or a climb on the load measured at each level; the render scale', 'now': 'game', 'goal': 'game', 'purpose': 'rendering',
      'why': "the game's own dynamic-resolution level function and update, found by their functions' fingerprints on any build that keeps both; switchable (DM_DYNAMIC_RESOLUTION)",
-     'checked': 'v131072 main: one function with each fingerprint (the level function a leaf, x2..x11 / x16 / x17 / s0..s2 free), its callers, the update and the controller fields read by disassembly, the fields read in play (2026-11-08); the climb run natively against a model of the update and in play to full size (2026-11-09)'},
+     'checked': 'v131072 main: one function with each fingerprint (the level function a leaf, x2..x11 / x16 / x17 / s0..s2 free), its callers, the update and the controller fields read by disassembly, the fields read in play (2026-11-08); the climb run natively against a model of the update and in play to full size (2026-11-09); the render-scale stub by disassembly of the rewrite, and in play at 1.0 (1920x1080) and 1.33 (2560x1440) in pass dumps (2026-11-12)'},
 ]

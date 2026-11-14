@@ -12,6 +12,7 @@ void dm_audio_suspend(int on) { (void)on; }
 void guest_clock_freeze_for(int reason, int on) { (void)reason; (void)on; }
 void dm_gfx_suspend(int on) { (void)on; }
 void dm_hid_opmode_changed(void) {}   // hle_hid.c: the npads follow the console mode (hle_oe.c dm_set_opmode); not exercised here
+void dm_gfx_quit_begin(void) {}   // nvn_mtl.m: the pipeline archive starts writing as a program ends (hle_oe.c); no graphics here
 void dm_host_shutdown_then(const char *why, void (*then)(void *), void *arg) { (void)why; (void)then; (void)arg; }
 void dm_host_shutdown(const char *why) { (void)why; }
 

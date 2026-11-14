@@ -46,3 +46,5 @@ draw_barriers	game
 # As Tears of the Kingdom: the terrain's height, blend and hole maps are written by the CPU into textures after they are created. Without these keys they stay zero: holes in the ground and the wrong materials
 tex_flush_upload	on
 tex_dirty_upload	on
+# The replay's Metal encoding on a thread of its own, as on iOS: the submit thread no longer waits for each pass's encoding, the GPU of a MacBook Air M4 starves less at segment boundaries (frame p50 24.5 → 23.5 ms at 1920x1080 docked, the Hyrule Field view)
+enc_thread	on

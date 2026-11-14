@@ -1,0 +1,48 @@
+# Game profile of Bayonetta Origins: Cereza and the Lost Demon (Switch, base game v0 = 1.0.0; English, Japanese, French, German, Spanish, Italian, Russian, Korean, Traditional and
+# Simplified Chinese). The NSP script's provisional profile plus depth_mode zero. On the Mac from the boot through the title, a new game, the storybook prologue and the first 3D
+# scene with control, at the game's own 30 fps
+# Format: see dm/games/README.md
+# PlatinumGames' own engine on NVN, SDK 13.3.2 (the sdk build of Bayonetta 3, 01004A4010FEA000). Modules main + sdk; Wwise sound. The movies are Bink 2 files (.bk2), played by
+# code in main: no movie module.
+# RomFS: 52 PKZ archives (2.62 GB), the format Bayonetta 3's profile already reads, beside 179 loose Bink 2 movies (movie/). The shaders are the engine's own shader objects, all in
+# the PKZ archives (shader_split.py pkz_entries, pg_shader).
+
+# ---- Identity ----
+title_id	0100CF5010FEC000
+program_id	0100CF5010FEC000
+
+# ---- App ----
+name	Bayonetta Origins: Cereza and the Lost Demon
+ipa	BayonettaOriginsCerezaAndTheLostDemon.ipa
+app_category	public.app-category.adventure-games
+
+# ---- Versions ----
+build	v0	1.0.0	main=a1ce2940d813acaba84073fdcc103d09	sdk=357efc198e728cb5d55265aff304f03c
+package	v0
+shader_versions	v0
+
+# ---- Files ----
+# every module main imports from
+modules	main sdk
+romfs_marker	movie/event/eve000.bk2
+zip_store	.bk2:.pkz:.metallib
+
+# ---- Memory ----
+# The NPDM declares no system resource: no virtual address memory. The 4 GB block of the other games without it, as Bayonetta 3: main sets a heap of at most the pool − 64 MB
+mem_reserve	0x100000000
+mem_alias	0x10000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+sys_resource	0x0
+# the rewritten modules are larger than the default 64 MB of used memory (the game's SetHeapSize asks for pool − used)
+mem_used	0x6400000
+
+# ---- Shader split ----
+shader_groups	/movie/=movie
+shader_note	Bayonetta Origins: Cereza and the Lost Demon shaders
+
+# ---- Graphics ----
+# the game sets the near = 0 depth mode (nvnDeviceSetDepthMode; "depth mode near=0" in the host log at boot), so the pipeline bases made before it runs (the Mac app's archive, the
+# prebuild) take the main0_z vertex entries. Without it the host found the bundled archive made for the other depth mode and built all 4,772 bases itself on the first start (156 s on an
+# M2 Pro, main 37f076a5); with it the archive's stamp matched and the host ran no prebuild (main 3b6b9803)
+depth_mode	zero

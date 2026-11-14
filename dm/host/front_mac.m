@@ -663,6 +663,17 @@ static void *guest_tramp(void *p) {
 // Metal reads MTL_HUD_ENABLED when the process makes its first device, which can be before the window: set from DM_METAL_HUD before main (set in front_run, the HUD did not show)
 __attribute__((constructor)) static void hud_env(void) { front_hud_env(); }
 
+// The main screen's size in pixels, for the loader's DM_SCREEN_WIDE=auto (loader.c dm_front_screen; the settings window's Match screen): the loader writes the picture's shape
+// into the state page before the window exists (main.c dm_fps_state_apply), so it asks here. The main screen is the one with the menu bar, System Settings' main display
+extern int (*dm_front_screen)(unsigned *w, unsigned *h);
+static int mac_screen(unsigned *w, unsigned *h) {
+    @autoreleasepool {
+        NSScreen *sc = NSScreen.screens.firstObject; if (!sc) return 0;
+        NSSize px = [sc convertRectToBacking:sc.frame].size; *w = (unsigned)px.width; *h = (unsigned)px.height; return *w && *h;
+    }
+}
+__attribute__((constructor)) static void wide_hook(void) { dm_front_screen = mac_screen; }
+
 // ---------- Cheats: the menu and the panel (hle_cheats.c holds every state; these only show it and call it) ----------
 
 // A string of the engine as an NSString that is never nil: cheat names, sections and notes come from the player's files,
@@ -1516,6 +1527,10 @@ void front_run(void (*guest)(void)) {
         [NSApplication sharedApplication];
         [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
         NSRect r = NSMakeRect(0, 0, 1280, 720);
+        {   // A wide picture (DM_SCREEN_WIDE as the loader left it: <width>x<height> or 0, loader.c) gets a window of its shape
+            const char *sw = getenv("DM_SCREEN_WIDE"); unsigned ww = 0, wh = 0;
+            if (sw && sscanf(sw, "%ux%u", &ww, &wh) == 2 && wh && (double)ww / wh > 1.78 && (double)ww / wh <= 3.6) r = NSMakeRect(0, 0, round(720.0 * ww / wh), 720);
+        }
         NSWindow *win = [[NSWindow alloc] initWithContentRect:r
                                                     styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable | NSWindowStyleMaskResizable
                                                       backing:NSBackingStoreBuffered defer:NO];

@@ -267,6 +267,7 @@ static void read_layout(module_t *m, const char *dir) {
         else if (!strcmp(key, "FPS_STATE_OFF")) m->fps_state_off = v;
         else if (!strcmp(key, "RENDER_SCALE")) m->render_scale_max = (uint32_t)v;
         else if (!strcmp(key, "STEP_MAX")) m->step_max = (uint32_t)v;
+        else if (!strcmp(key, "SCREEN_WIDE")) m->screen_wide = (uint32_t)v;
         else if (!strcmp(key, "UE_MALLOC_VT")) m->ue_malloc_vt = v;
         else if (!strcmp(key, "UE_MALLOC_SLOT")) m->ue_malloc_slot = (unsigned)v;
         else if (!strcmp(key, "FPS_TARGET_PTR")) m->fps_target_ptr = v;
@@ -308,11 +309,14 @@ static void read_layout(module_t *m, const char *dir) {
 uint8_t *dm_fps_state;
 int dm_fps_step_max;   // the largest step the stubs give the game (STEP_MAX in its fixups table; 0 = FSTEP_MAX): the frame step holds frames and pays back within it (hle_nvn.c)
 static const char *g_fps_mod;   // the module holding the state page (for the log)
+static int g_screen_wide;   // the build has wide-screen stubs (SCREEN_WIDE in its fixups table)
+int (*dm_front_screen)(unsigned *w, unsigned *h);   // the main screen's size in pixels, set by a front end that has one to match (front_mac.m); DM_SCREEN_WIDE=auto asks it
 static float g_render_scale_max = 1.0f;   // the render-scale stub's largest scale (RENDER_SCALE in its fixups table; 1 for a stub that only lowers the game's size)
 static void install_fps_state(module_t *m) {
     if (m->fps_state_off + 0x40 > m->size || m->fps_state_off < m->key_page_off + m->key_page_size) die("%s: frame step state page out of range", m->name);
     dm_fps_state = m->base + m->fps_state_off; g_fps_mod = m->name; dm_fps_step_max = (int)m->step_max;
     if (m->render_scale_max > 1) g_render_scale_max = (float)m->render_scale_max;
+    g_screen_wide = m->screen_wide != 0;
 }
 // The settings in the state page, written when the game starts (main.c, after host loading): on iOS the loading runs at app launch, before the launcher has set DM_FPS_TARGET and
 // DM_RENDER_SCALE (Launcher.swift), and nothing reads the page before the game runs
@@ -367,6 +371,36 @@ void dm_fps_state_apply(void) {
             LOG("%s: screen shape: HUD moves out by %.0f (edge %.0f, listed widgets %.0f), panes %.0fx%.0f or larger stretched %.3f", g_fps_mod, anc[0], anc[2], anc[3], anc[4], anc[5], anc[1]);
             LOG("%s: screen shape %.3f: output 1920x%u, layout 1280x%u (DM_SCREEN_ASPECT; only builds with screen-shape stubs follow it)", g_fps_mod, a, oh, lh);
         }
+    }
+    // Screen shape, wider than 16:9: DM_SCREEN_WIDE=<width>x<height> (a 21:9 monitor's 3440x1440) makes the builds with wide-screen stubs (the SCREEN_WIDE capability:
+    // Ocarina of Time's patches.py) render that shape: the output keeps the game's own height and takes the width that gives the ratio, and the scene's cameras take the
+    // ratio where they held 16:9. `auto` is the main screen's size when it is wider than 16:9, asked of the front end (dm_front_screen: the Mac's, with a window), else 16:9;
+    // it is the default for a build with the stubs, as the launcher shows (settings.tsv: Match screen), so a build without them is never asked. State +0xa0 u32 the ratio in
+    // 16.16 fixed point (a stub computes width = (height x ratio + 0x8000) >> 16 from the height it has: 1440 → 3440, 1080 → 2580), +0xa4 the ratio as a float; 0 = 16:9.
+    // The variable is left holding what was decided (<width>x<height> or 0), which the Mac front end sizes its window by
+    const char *ws = getenv("DM_SCREEN_WIDE"); int asked = ws && *ws;
+    if (!asked && g_screen_wide) ws = "auto";
+    if (ws && *ws && strcmp(ws, "0")) {
+        unsigned ww = 0, wh = 0; char tail = 0, res[32]; int ok = 0;
+        const char *om = getenv("DM_OPMODE");   // as dm_opmode (hle_oe.c), which is not yet asked here
+        if (!(om ? atoi(om) : DM_GAME_OPMODE)) {
+            if (asked) LOG("%s: DM_SCREEN_WIDE=%s: handheld mode keeps 16:9 (the handheld picture's size is not among the wide-screen stubs: Ocarina of Time crops it to 1920x1080)", g_fps_mod, ws);
+        } else if (!strcmp(ws, "auto")) {
+            if (!getenv("DM_WINDOW") || !dm_front_screen || !dm_front_screen(&ww, &wh)) { if (asked) LOG("%s: DM_SCREEN_WIDE=auto: no screen to match (no window), keeping 16:9", g_fps_mod); }
+            else if ((double)ww / wh > 1.8 && (double)ww / wh <= 3.6) { ok = 1; LOG("%s: DM_SCREEN_WIDE=auto: the main screen is %ux%u (%.3f:1)", g_fps_mod, ww, wh, (double)ww / wh); }
+            else LOG("%s: DM_SCREEN_WIDE=auto: the main screen, %ux%u, is not wider than 16:9; keeping 16:9", g_fps_mod, ww, wh);
+        } else if (sscanf(ws, "%ux%u%c", &ww, &wh, &tail) != 2 || !ww || !wh || (double)ww / wh <= 1.78 || (double)ww / wh > 3.6)
+            LOG("[RED] DM_SCREEN_WIDE=%s: <width>x<height> of a screen wider than 16:9 (up to 32:9), as 3440x1440, or auto; keeping 16:9", ws);
+        else ok = 1;
+        if (ok) {
+            double a = (double)ww / wh; uint32_t q = (uint32_t)(a * 65536.0 + 0.5); float af = (float)a;
+            memcpy(dm_fps_state + 0xa0, &q, 4); memcpy(dm_fps_state + 0xa4, &af, 4);
+            extern void mtl_present_screen(uint32_t w, uint32_t h); mtl_present_screen(ww, wh);   // the picture's shape for a texture that follows it (nvn_mtl.m present_shape)
+            LOG("%s: wide screen %ux%u (%.3f:1): output %u wide at 1440 rows, %u at 1080 (DM_SCREEN_WIDE; only builds with wide-screen stubs follow it)", g_fps_mod, ww, wh, a,
+                (unsigned)((1440ull * q + 0x8000) >> 16), (unsigned)((1080ull * q + 0x8000) >> 16));
+            snprintf(res, sizeof res, "%ux%u", ww, wh);
+        }
+        setenv("DM_SCREEN_WIDE", ok ? res : "0", 1);
     }
     char cap[32]; snprintf(cap, sizeof cap, ", capped at %d fps", t);
     LOG("%s: frame step %s%s (%s)", g_fps_mod, !t ? "as the game sets it" : "in whole vsyncs decided by the host", t ? cap : "", e ? "DM_FPS_TARGET" : "game profile fps_target");

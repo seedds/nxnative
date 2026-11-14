@@ -43,6 +43,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Found on:** [FINAL FANTASY X/X-2 HD Remaster](../../dm/games/0100BC300CB48000/README.md); base and both supplied DLC packs yield 5,752 unique shaders.
 - **Check:** `test_vbf.py` covers raw and zlib blocks, shared/missing members, truncation, unaligned effects, loose shader keys and inconsistent lengths. All 5,752 programs translate on the Mac.
 
+### Loose `.nvn` program files
+
+- **Symptom:** the shader split finds no shaders (`[RED] the shader split found no shaders in main or the RomFS`) though the RomFS holds `*_vs.nvn` and `*_fs.nvn` files a few KB each.
+- **Cause:** a `.nvn` file here is one compiled NVN program behind a 16-byte header {control length, control offset, code length, code offset}: the control section at its offset, the code area at its own. No magic marks the file, and the generic prefilter drops it before `scan_blob` ever sees the control section inside.
+- **Fix:** `scan_file_in` tries `nvn_loose` on every file it loads: the header's two {length, offset} pairs must stay in the file, the control offset must point at a control section, the code offset at a code area whose magic fits its stage, and `check` still verifies the control's own code length. The files are single-stage programs; `'#NVN@'` keys pair through the pixel-input cover like the other single-stage sources.
+- **Found on:** Vengeance Hunters (`01008EF020C98000`, no profile): eight RomFS `.nvn` files, one vertex and seven pixel shaders (the game's textured, coloured and CRT-filter programs), every program the game asked for up to its title among them.
+- **Check:** `dm/tools/tests/test_split_nvn.py`: a synthetic `.nvn` per stage, non-minimal offsets, and the four rejection cases (control or code magic absent, offset out of the file, short file).
+
 ### Diablo III's console packages
 
 - **Symptom:** the split finds no shaders (`[RED] the shader split found no shaders in main or the RomFS`), the RomFS holds only `.cpk` files, and `cpk.py` refuses them (`not a CPK`); the run prints `[RED] shader … is not in the shader map` for every program.

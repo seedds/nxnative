@@ -72,6 +72,19 @@ typedef struct {
     uint64_t late, paid, ups, downs, failed, probes; double dropped;   // statistics for the log
 } nvn_fstep;
 
+// A drain of frames standing in the display link's queue in a frame's time (hle_nvn.c fstep_tick, g_fs_drain; nvn_link_drain.h): the acquire waited extra link ticks while the
+// screen showed every queued frame for its hold, so the part that made the frame longer than its hold is neither a late frame nor time the game owes: it comes out of the
+// frame's time. (The wait for the screen without the link is not one: there a frame longer than its hold is one the screen showed late.) span: time since the previous frame's
+// start; hold: the hold the frame had; first: drain in the acquire that started this frame, part of *pacing (its pacing wait); before: drain in later acquires of the previous
+// frame, in span but not in *pacing. Returns span less the cut; *pacing loses the cut's part in it (the frame's CPU time, span − pacing, keeps what it was, less the later
+// acquires' wait, which was no work either). All in the same unit (ns).
+static inline uint64_t nvn_fstep_drain_cut(uint64_t span, uint64_t hold, uint64_t first, uint64_t before, uint64_t *pacing) {
+    if (first > *pacing) first = *pacing;
+    uint64_t over = span > hold ? span - hold : 0, cut = first + before < over ? first + before : over;
+    *pacing -= cut < first ? cut : first;
+    return span - cut;
+}
+
 // Whether the cost at the longer hold is the cost that held kmin (a probe without a slowed report)
 static inline int nvn_fstep_same(const nvn_fstep *s) { return s->cref > 0 && s->cn >= FSTEP_RUN && s->ccur <= FSTEP_SAME * s->cref; }
 

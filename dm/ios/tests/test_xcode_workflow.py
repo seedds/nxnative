@@ -60,7 +60,7 @@ class XcodePipelineTests(unittest.TestCase):
                 'extract_aoc': None, 'rewrite': profile, 'split_shaders': 'fixture-key',
                 'build_shaders': root / 'shaders', 'build_vk_shaders': root / 'shaders',
                 'build_gl_shaders': root / 'shaders', 'provisional_prep': None, 'chain_header': None,
-                'refine_after_rewrite': profile, 'derive_profile': '1.0.0',
+                'derive_profile': '1.0.0',
             }.items():
                 mocks[name] = stack.enter_context(patch.object(build, name, return_value=value))
             mocks['run'] = stack.enter_context(patch.object(build, 'run', side_effect=fake_run))

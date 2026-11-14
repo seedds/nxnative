@@ -17,7 +17,7 @@ The provisional profile's guesses held.
 |---|---|---|
 | `sys_resource 0x0` | [`game.tsv`](game.tsv) | the NPDM declares no system resource, so `IsVirtualAddressMemoryEnabled` is false, as on Horizon: no virtual address memory. The game sets a 2.96 GB heap (pool − used memory) |
 | 4 GB layout: `mem_reserve 0x100000000`, `mem_alias 0x10000000`, `mem_stack 0x10000000`, `app_pool 0xCD500000` | `game.tsv` | 256 MB in front + 256 MB alias region + 256 MB stack region + 3.25 GB heap region |
-| `mem_used 0xda5c000` (218 MB) | `game.tsv` | the rewritten modules are larger than the default 64 MB of used memory (214 MB without `main`'s 29.6 MB of bss, + 4 MB: `profile_guess.py` `mem_used`), so the heap request plus the modules would exceed the pool |
+| `mem_used 0xda5c000` (218 MB) | `game.tsv` | the rewritten modules are larger than the default 64 MB of used memory (214 MB without `main`'s 29.6 MB of bss, + 4 MB: the NSP script's guess after the rewrite, since removed), so the heap request plus the modules would exceed the pool |
 | `pad_layout full` | `game.tsv` | the 3D layout: the D-pad for menus and the right stick for the cursor |
 | `shader_groups /Content/=content` | `game.tsv` | the MonoGame effects; see [Files and shaders](#files-and-shaders) |
 

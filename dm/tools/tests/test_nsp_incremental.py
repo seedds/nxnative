@@ -72,7 +72,7 @@ class Base(unittest.TestCase):
 
 
 class DeriveProfile(Base):
-    def later_stages(self):   # what refine_after_rewrite and the shader split write into the derived profile
+    def later_stages(self):   # what later stages (a check boot, the shader split) write into the derived profile
         nsp.set_keys(game.Game(self.pdir), {'mem_used': ('0x4800000', 'rewritten modules')}, 'After the rewrite')
         (self.pdir / 'shader_map.tsv').write_text('# split\npkg.bin\t0\tvertex\tderived\tx\n')
 
@@ -229,38 +229,6 @@ class DeriveProfile(Base):
         self.derive()
         self.assertEqual(game.Game(self.pdir).values('extra'), [['one'], ['one']])
 
-    def test_provisional_computed_mem_used_grows_shrinks_and_stays_stable(self):
-        self.derive(); g = game.Game(self.pdir)
-        # These reason comments were written by earlier versions of this script.
-        for reason in ('the rewritten modules are larger than the default 64 MB of used memory (Age of Calamity: 66.6 MB → 72 MB)',
-                       'used memory for the rewritten modules (above the default 64 MB)',
-                       'used memory for the current rewritten modules, at least the default 64 MB'):
-            g = nsp.set_keys(g, {'mem_used': ('0x4800000', reason)}, 'After the rewrite')
-            with mock.patch.object(nsp.pg, 'mem_used') as used:
-                for value in (0x5000000, None, 0x4800000):
-                    used.return_value = value
-                    g = nsp.refine_after_rewrite(g, self.ex, self.tmp / 'patched')
-                    self.assertEqual(int(g.get('mem_used'), 0), value or 0x4000000)
-                    before = g.table('game.tsv').read_bytes()
-                    nsp.refine_after_rewrite(g, self.ex, self.tmp / 'patched')
-                    self.assertEqual(g.table('game.tsv').read_bytes(), before)
-
-    def test_explicit_mem_used_without_registered_profile_is_kept(self):
-        self.derive(); p = self.pdir / 'game.tsv'; p.write_text(p.read_text() + 'mem_used\t0x5800000\n')
-        g = game.Game(self.pdir)
-        with mock.patch.object(nsp.pg, 'mem_used', side_effect=AssertionError('explicit value must win')):
-            self.assertIs(nsp.refine_after_rewrite(g, self.ex, self.tmp / 'patched'), g)
-            self.assertIs(nsp.refine_after_rewrite(g, self.ex, self.tmp / 'patched', game.Game(self.src)), g)
-
-    def test_computed_equal_numeric_value_keeps_bytes(self):
-        self.derive()
-        g = nsp.set_keys(game.Game(self.pdir), {'mem_used': ('75497472', 'used memory for the current rewritten modules, at least the default 64 MB')}, 'After the rewrite')
-        before = g.table('game.tsv').read_bytes()
-        with mock.patch.object(nsp.pg, 'mem_used', return_value=0x4800000) as used:
-            nsp.refine_after_rewrite(g, self.ex, self.tmp / 'patched')
-        used.assert_called_once()
-        self.assertEqual(g.table('game.tsv').read_bytes(), before)
-
     def test_derived_replace_failure_preserves_original(self):
         self.derive(); p = self.pdir / 'game.tsv'; before = p.read_bytes()
         with mock.patch.object(nsp.os, 'replace', side_effect=OSError('interrupted replace')):
@@ -293,16 +261,16 @@ class DeriveProfile(Base):
             nsp.heap_check(REPO, self.ex, self.tmp / 'patched', self.tmp / 'work', {}, logs, g)
         self.assertEqual(seen['DM_ALIAS_SIZE'], '0x80000000')
 
-    def test_heap_check_boots_again_after_it_resizes_the_heap_region(self):   # Pokemon FireRed / LeafGreen: the app pool check behind the heap request sets mem_used on the second boot
+    def test_heap_check_boots_again_after_it_resizes_the_heap_region(self):   # the app pool check behind the heap request runs only on the second boot
         with (self.src / 'game.tsv').open('a') as f: f.write('mem_alias\t0x80000000\nmem_reserve\t0x140000000\nmem_stack\t0x10000000\napp_pool\t0xc8000000\n')
         self.derive(); logs = self.tmp / 'logs'; logs.mkdir(); aliases = []
-        runs = iter(['>>> nnMain\n[dm] SetHeapSize OOM: req 0xc9000000 > cap 0x8000000\n', '>>> nnMain\n[mem] SetHeapSize 0xc9000000 + modules 0x6600000 > app pool 0xc8000000\n'])
+        runs = iter(['>>> nnMain\n[dm] SetHeapSize OOM: req 0xc9000000 > cap 0x8000000\n', '>>> nnMain\n[mem] SetHeapSize 0xc9000000 > app pool 0xc8000000 less used memory 0x4000000\n'])
         def boot(host, patched, henv, *args): aliases.append(henv['DM_ALIAS_SIZE']); (logs / 'heap_check.log').write_text(next(runs)); return 0
         with mock.patch.object(nsp, 'build_mac_host'), mock.patch.object(nsp, 'boot_mac', side_effect=boot):
             g = nsp.heap_check(REPO, self.ex, self.tmp / 'work/patched_v65536', self.tmp / 'work', {}, logs, game.Game(self.pdir))
         self.assertEqual(aliases, ['0x80000000', '0x50000000'])   # the second boot runs on the resized layout, and there is no third
-        self.assertEqual((g.get('mem_alias'), g.get('mem_used')), ('0x50000000', '0x6a00000'))
-        self.assertIn('the heap request did not fit, then the heap and the modules did not fit the app pool; set mem_alias, mem_used', g.table('game.tsv').read_text())
+        self.assertEqual((g.get('mem_alias'), g.values('mem_used')), ('0x50000000', []))   # the host charges the used memory it reports: no module size to make up for
+        self.assertIn('the heap request did not fit, then the heap did not fit the app pool less used memory; set mem_alias', g.table('game.tsv').read_text())
 
     def check_boot(self, name, log):   # a check on the derived profile, whose boot writes this log; the profile after it
         logs = self.tmp / 'logs'; logs.mkdir(exist_ok=True); patched = self.tmp / 'work/patched_v65536'
@@ -381,30 +349,6 @@ class DeriveProfile(Base):
         g = nsp.set_keys(g, {'stdalloc_cap': ('0xa0000000', 'by hand')}, 'Memory')
         g = check(AssertionError('a value set by hand is checked, not worked out again'))
         self.assertEqual(g.get('stdalloc_cap'), '0xa0000000')
-
-    def test_rewrite_changes_update_auto_mem_used(self):
-        self.derive(); g = game.Game(self.pdir); reg = game.Game(self.src)
-        with mock.patch.object(nsp.pg, 'mem_used') as used:
-            for value in (0x4800000, 0x5000000, None):
-                used.return_value = value
-                g = nsp.refine_after_rewrite(g, self.ex, self.tmp / 'patched', reg)
-                self.assertEqual(int(g.get('mem_used'), 0), value or 0x4000000)
-                before = g.table('game.tsv').read_bytes()
-                self.derive(); g = game.Game(self.pdir)
-                g = nsp.refine_after_rewrite(g, self.ex, self.tmp / 'patched', reg)
-                self.assertEqual(g.table('game.tsv').read_bytes(), before)
-
-    def test_explicit_mem_used_is_kept_and_equal_values_do_not_rewrite(self):
-        self.derive(); g = nsp.set_keys(game.Game(self.pdir), {'mem_used': ('75497472', '')}, 'After the rewrite')
-        before = g.table('game.tsv').read_bytes()
-        with mock.patch.object(nsp.pg, 'mem_used', return_value=0x4800000):
-            nsp.refine_after_rewrite(g, self.ex, self.tmp / 'patched', game.Game(self.src))
-        self.assertEqual(g.table('game.tsv').read_bytes(), before)
-        with (self.src / 'game.tsv').open('a') as f: f.write('mem_used\t0x5800000\n')
-        self.derive(); g = game.Game(self.pdir)
-        with mock.patch.object(nsp.pg, 'mem_used', side_effect=AssertionError('explicit value must win')):
-            self.assertIs(nsp.refine_after_rewrite(g, self.ex, self.tmp / 'patched', game.Game(self.src)), g)
-        self.assertEqual(g.get('mem_used'), '0x5800000')
 
     def test_provisional_run_invalidates_derivation(self):
         self.derive()

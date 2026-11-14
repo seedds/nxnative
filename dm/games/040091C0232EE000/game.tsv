@@ -1,0 +1,49 @@
+# Persona 3 Reload (Switch 2): ATLUS's game on Unreal Engine 4.27 (project xrd777; IoStore, MallocBinned3), SDK built for the Switch 2 (Ounce), NVN2; the base game with update v262144.
+# Started from the NSP script's provisional profile (dm/games/profile_guess.py); see README.md
+# Format: see dm/games/README.md
+
+# ---- Identity ----
+title_id	040091C0232EE000
+program_id	040091C0232EE000
+
+# ---- App ----
+name	Persona 3 Reload
+ipa	Persona3Reload.ipa
+app_category	public.app-category.role-playing-games
+
+# ---- Versions ----
+# the NUP has no control data, so the update's display version is not known
+build	v262144	?	main=d6c415c3d1ff71490b10784f46ec5c2a	subsdk0=413fe48b03bf528376347df982f3c7c2	sdk=a8436a172f701924d86a656217651d03
+package	v262144
+shader_versions	v262144
+
+# ---- Files ----
+modules	main subsdk0 sdk
+romfs_marker	xrd777/Content/Paks/pakchunk1-Sage.pak
+zip_store	.pak:.png:.ucas:.utoc:.metallib
+
+# ---- Graphics ----
+# The game sets near = 0 (nvnDeviceSetDepthMode) at boot: the pipeline bases made before it runs are made for that mode
+depth_mode	zero
+
+# ---- Memory ----
+# Unreal: nninitStartup reserves a 62 GB address region and its FMallocBinned3 takes 37 GB of it, so a 64 GB alias region on the Mac. The rewriter cuts the allocator in any Unreal 4 / 5 main
+# (dm/tools/ue_malloc.py) and gives the region what the alias region has room for (dm/tools/ue_region.py). In its first 15 s in nnMain the game's regions reach alias +62.06 GB. Not fitted for an iPhone
+mem_reserve	0x1028000000
+mem_alias	0x1000000000
+mem_stack	0x10000000
+# the sdk is built for the Switch 2 (Ounce): its 9 GB pool
+app_pool	0x240000000
+# the NPDM declares 80 MB of system resource
+sys_resource	0x5000000
+
+# ---- Shaders ----
+# Compute shaders that pick images from c2's image table at run time (cp_i2d_cb0_40000000_, cp_i2da_, cp_i3d_): Ryujinx makes those 32-entry arrays indexed by the handle's texture ID, which
+# the replay fills with the bound image slots while c2 holds slot indices (nvn_refl.m / nvn_mtl.m). Without it 150 of them failed reflection conversion
+tex_dyn_slots	on
+
+# ---- Shader split ----
+# Each material's shaders inline in its cooked package (UE 4.27's SF_GLSL_SAGE: LSLG records with an NVN2 control section), the packages in the IoStore containers (pakchunk*-Sage.utoc), the
+# global shaders in pakchunk0-Sage.pak; pakchunk1, 2 and 4 hold audio and fonts only (shader_split.py ue_legacy_jobs)
+shader_groups	GlobalShaderCache=global #Engine/=engine #xrd777/=game
+shader_note	Persona 3 Reload shaders

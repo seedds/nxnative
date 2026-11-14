@@ -113,6 +113,8 @@ SWITCH_BINDING = [
      'why': 'the replay could find such draws itself, at the cost of a pass split each'}),
     ('enc_thread', '', {'what': 'Metal encoding on its own thread on the Mac', 'now': 'game', 'goal': 'host', 'purpose': 'frame rate',
      'why': f'what iOS does for every game: {DEFAULT_SOON}'}),
+    ('upscaler', '', {'what': "the game's own upscaler drawn by MetalFX", 'now': 'game', 'goal': 'game', 'purpose': 'frame rate',
+     'why': "Apple's scaler's picture rather than the game's network: a choice made per game after comparing the look"}),
     ('present_snap', '', {'what': 'present snapshots', 'now': 'game', 'goal': 'host', 'purpose': 'rendering', 'why': f'a setting the game was tested with: {DEFAULT_SOON}'}),
     ('pso_mtl4', '', {'what': 'MTL4Compiler pipelines on iOS', 'now': 'game', 'goal': 'host', 'purpose': 'rendering', 'why': f'a setting the game was tested with on an iPhone: {DEFAULT_SOON}'}),
     ('screen_aspect', '', {'what': 'a picture of a taller screen\'s own shape (DM_SCREEN_ASPECT)', 'now': 'game', 'goal': 'game', 'purpose': 'rendering',

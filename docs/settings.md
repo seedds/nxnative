@@ -62,7 +62,7 @@ Breath of the Wild renders 1280x720 in handheld mode. Docked it renders its worl
 
 ### Game's upscaler
 
-Shown only for games that upscale their own picture with a network of their own before the app sees it: agl's NDSR network, in Donkey Kong Bananza and Splatoon Raiders. **Game's own**, the default, keeps the game's upscaler. **MetalFX** replaces it with Apple's MetalFX spatial scaler: the same input and output sizes, at a fraction of the GPU time, but Apple's scaler's picture rather than the game's.
+Shown only for games that upscale their own picture with a network of their own before the app sees it: agl's NDSR network, in Donkey Kong Bananza, Splatoon Raiders and Ocarina of Time, among others. **Game's own**, the default for most games, keeps the game's upscaler. A game measured faster with MetalFX starts with **MetalFX** instead (the profile's `upscaler` key): Ocarina of Time, measured on the Mac only; the default applies on iOS too. **MetalFX** replaces it with Apple's MetalFX spatial scaler: the same input and output sizes, at a fraction of the GPU time, but Apple's scaler's picture rather than the game's.
 
 ```mermaid
 flowchart LR

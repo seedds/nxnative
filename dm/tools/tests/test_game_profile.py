@@ -54,22 +54,29 @@ MAP = ('# kind: evidence  Test shaders\n# column 5 records where each key first 
        'cs_other.bin\t10\tcompute\tba079f68ae288dba\t/Movie/Ndve/Ndve-Nvn2-vid_seq5.dat.zs#NDVE@0x1423e8\n')   # that file's own movie network: not the pack's
 
 
-def macros(shader_map):
-    """The upscaler macros of a synthetic profile's header, with this shader map (None: none)"""
+def macros(shader_map, rows=''):
+    """The upscaler macros of a synthetic profile's header, with this shader map (None: none) and extra profile rows; (exit code, its message) when game.py refuses the profile"""
     with tempfile.TemporaryDirectory() as d:
         Path(d, ID).mkdir()
-        (Path(d, ID) / 'game.tsv').write_text(TSV)
+        (Path(d, ID) / 'game.tsv').write_text(TSV + rows)
         if shader_map is not None: (Path(d, ID) / 'shader_map.tsv').write_text(shader_map)
-        subprocess.run([sys.executable, str(GAME), 'header', ID, str(Path(d, ID) / 'game.h')], env={**os.environ, 'DM_GAMES_DIR': d}, check=True, capture_output=True)
+        r = subprocess.run([sys.executable, str(GAME), 'header', ID, str(Path(d, ID) / 'game.h')], env={**os.environ, 'DM_GAMES_DIR': d}, capture_output=True, text=True)
+        if r.returncode: return r.returncode, r.stderr.strip()
         return [l for l in (Path(d, ID) / 'game.h').read_text().splitlines() if 'UPSCALER' in l]
 
 
 class UpscalerKeys(unittest.TestCase):
     def test_from_shader_map(self):
-        none = ['#define DM_GAME_UPSCALER_KEYS ""', '#define DM_GAME_UPSCALER_N 0']   # the launcher hides the setting
+        none = ['#define DM_GAME_UPSCALER_KEYS ""', '#define DM_GAME_UPSCALER_N 0', '#define DM_GAME_UPSCALER "game"']   # the launcher hides the setting
         self.assertEqual(macros(None), none)
         self.assertEqual(macros(MAP.split('cs_other.bin')[0]), none)
-        self.assertEqual(macros(MAP), ['#define DM_GAME_UPSCALER_KEYS "7629d857a0a93833,805f2de96bd6d78d,c2fc2ddd604c25e7,c56db3d5a0f1b5af,ddc729bcdb4c8df9,fa3033d05c0a41d6"', '#define DM_GAME_UPSCALER_N 6'])
+        self.assertEqual(macros(MAP), ['#define DM_GAME_UPSCALER_KEYS "7629d857a0a93833,805f2de96bd6d78d,c2fc2ddd604c25e7,c56db3d5a0f1b5af,ddc729bcdb4c8df9,fa3033d05c0a41d6"', '#define DM_GAME_UPSCALER_N 6', '#define DM_GAME_UPSCALER "game"'])
+
+    def test_profile_default(self):   # the profile's upscaler key: the host's and the launcher's default when DM_UPSCALER is unset (nvn_mtl.m up_mfx_on, settings.tsv)
+        self.assertEqual(macros(MAP, 'upscaler\tmetalfx\n')[-1], '#define DM_GAME_UPSCALER "metalfx"')
+        self.assertEqual(macros(MAP, 'upscaler\tgame\n')[-1], '#define DM_GAME_UPSCALER "game"')
+        code, msg = macros(MAP, 'upscaler\tfsr\n'); self.assertTrue(code and 'upscaler must be game or metalfx' in msg, msg)
+        code, msg = macros(None, 'upscaler\tmetalfx\n'); self.assertTrue(code and "needs the game's own upscaler shaders" in msg, msg)   # nothing for MetalFX to replace
 
 
 if __name__ == '__main__':

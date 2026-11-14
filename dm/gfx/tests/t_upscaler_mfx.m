@@ -1,6 +1,6 @@
 // A game's upscaler drawn by MetalFX (DM_UPSCALER=metalfx; nvn_mtl.m up_mfx_encode): one of the game's upscaler shaders reading a 960x540 texture and writing a
-// 1920x1080 image is replaced by the spatial scaler, which fills the whole image with the texture's colour; equal sizes, another shader, and DM_UPSCALER unset
-// (the last run) leave the dispatch to the shader. Runs under any profile: the named shader is the profile's first upscaler (DM_GAME_UPSCALER_KEYS), and a profile with
+// 1920x1080 image is replaced by the spatial scaler, which fills the whole image with the texture's colour; equal sizes, another shader, and DM_UPSCALER=game
+// (the last run) leave the dispatch to the shader; unset or an unknown value follows the profile (DM_GAME_UPSCALER). Runs under any profile: the named shader is the profile's first upscaler (DM_GAME_UPSCALER_KEYS), and a profile with
 // none swaps no shader; the MetalFX draw itself (up_mfx_encode) does not look at the key. The colour (up_mfx_color) comes from synthetic code holding the curves' constants: a variant with sRGB input
 // comes out decoded to linear, one whose code squares its result keeping the sign (square-rooted input) comes out squared, through the scaler's own input even where the game's texture could
 // go straight, and one whose output stays encoded, or whose code says nothing of its colour, is left to its shader. The scaler comes after the work before it and the next draw pass after the scaler
@@ -119,7 +119,7 @@ int main(void) { @autoreleasepool {
     CHECK(color_of_squares(0x220, 0, 1, 8, 10, 0, NULL, 0, k1292, 1) == UP_COLOR_KEEP, "squares beside a curve's constant alone (12.92 in floats): the shader runs");
     CHECK(color_of_squares(0x220, 0, 1, 8, 10, 0, ex2, 1, enc, 2) == UP_COLOR_KEEP, "squares, then an encode (Ocarina of Time's 12 encoding variants): the output stays encoded, the shader runs");
     CHECK(color_of_squares(0x220, 0, 0, 0, 10, 0, sqrt_, 1, NULL, 0) == UP_COLOR_KEEP, "no curve and no square (a pre-pass that square-roots): nothing says its colour, the shader runs");
-    const char *up = getenv("DM_UPSCALER"); int on = up && !strcmp(up, "metalfx");
+    const char *up = getenv("DM_UPSCALER"); int on = up && !strcmp(up, "metalfx") ? 1 : up && !strcmp(up, "game") ? 0 : !strcmp(DM_GAME_UPSCALER, "metalfx");   // unset or another value: the profile's default as game.py wrote it (Ocarina of Time: metalfx)
     tex_t in = texture(77, 960, 540, NVN_FORMAT_RGBA16F), out = texture(78, 1920, 1080, NVN_FORMAT_RGBA16F), same = texture(79, 960, 540, NVN_FORMAT_RGBA16F);
     out.d.flags |= NVN_TEXTURE_FLAGS_IMAGE; same.d.flags |= NVN_TEXTURE_FLAGS_IMAGE;
     mtl_tex_init(&in); mtl_tex_init(&out); mtl_tex_init(&same);

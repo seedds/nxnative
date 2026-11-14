@@ -4,6 +4,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 
 ## Containers by engine
 
+### SHN resources and embedded shader objects
+
+- **Symptom:** the split finds only a loose upscaler pack, while a game's `.shdr` files and scene resources produce no shaders; the host reports missing vertex and pixel shaders and draws a blank picture.
+- **Cause:** Shin'en's `SHN!` wrapper compresses its metadata, relocations and GPU data independently as LZ4 blocks (equal stored and decoded lengths mean raw data). The metadata holds `SHDROUNC` objects, both in loose shader files and embedded in `SCENOUNC` scene resources. Control offsets are absolute within decoded metadata; code offsets point into the separate GPU-data block. Scanning only the loose shaders misses the materials embedded in scenes.
+- **Fix:** `shader_split.py`'s `shn_shaders` reads the blocks and each object's variant/stage table, validates every range and control/code pair, and preserves program variants for shader pairing. It decodes GPU data only when the metadata holds shader objects: textures and other resources use the same wrapper. Detection uses the file and object signatures, with no title, path or build gate.
+- **Check:** `test_shn.py`: raw and LZ4 blocks, embedded objects, several variants, separate code offsets, shader pairs, compute stages, non-shader resources, damaged lengths and offsets. The startup capture comparison and shader counts are in the game's note.
+- **Found on:** [Fast Fusion](../../dm/games/040041E0212AE000/README.md).
+
 ### One scrambled archive indexed by the NRO
 
 - **Symptom:** the split finds no shaders, and the RomFS is one huge file with a short name (`42`) whose bytes look random past a table at its start (magic `CRA.`). Or the split stops with `[RED] /42: a CRA archive, and no NRO in DM_NRO_DIR (…) holds its file table`: the NRO reads a layout `cra.py` does not know.
@@ -1241,6 +1249,22 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Cause:** ISBERD's mode bits as nvdisasm names them: 0x80 .O (the output area), 0x40 .SKEW, 0x30 .ATTR, 0x08 .32. Modes 0xf8 and 0xb8 read back a word the shader's own ISBEWR of the same mode wrote; the translator took only 0xb8, as a task's payload.
 - **Fix:** `AIsberd` reads both from the stage memory's outputs, 0xb8 through the vertex records (previous entry). From uncraftablexd's PRAGMATA bring-up ([PR #1407](https://github.com/seedds/nxnative/pull/1407)).
 - **Found on:** [PRAGMATA](../../dm/games/0400C76024710000/README.md): `5aab38bb5ba67ef7` and `28ef097c07ceb429`, the title's lunar terrain, read back each triangle's positions to swap two indices of a mirrored instance's triangles.
+
+### Subword task and mesh payload accesses
+
+- **Symptom:** task and mesh shaders fail translation with `ISBERD mode 34 in a task or mesh shader` or `stage output store mode b4 outside a task or mesh shader`; the host cannot load their libraries when the race uses them.
+- **Cause:** the stage-memory emitters accepted only 32-bit attributes and payload words. Bits 74–75 of ISBERD/ISBEWR select unsigned 8-bit, unsigned 16-bit or 32-bit access, independently of the attribute, skew and output bits ([Mesa NAK's encoder](https://raw.githubusercontent.com/chaotic-cx/mesa-mirror/main/src/nouveau/compiler/nak/sm70_encode.rs), `OpIsberd` / `OpIsbewr`). Mode 0x34 reads a 16-bit task-payload entry; 0xb4 writes one. Treating it as a whole word would overwrite the adjacent entry.
+- **Fix:** `AIsberd` and `AStageOut` decode width separately from the stage-memory area and use the existing byte/halfword load and store lowering. Subword vertex-record accesses preserve the byte offset within the remapped SoA word. The existing 32-bit paths are unchanged; there is no shader-key or build gate.
+- **Check:** `test_dmsh_ampere_mem.py` checks unsigned input extraction, the high half of a word, subword vertex records and correctly sized store helpers. `test_dmsh_shared_store.py` follows a translated halfword store through the Metal rewrite and tests neighboring byte/halfword writes on the GPU.
+- **Found on:** [Fast Fusion](../../dm/games/040041E0212AE000/README.md).
+
+### Indexed texture handles in NVN2 compute c0
+
+- **Symptom:** a shader library builds but cannot load: `reflection conversion failed: B binding cp_t2d_cb196608_10568000 has no resolved slot number`, followed by `the dispatched program has no compute shader`. The first race's sky is black.
+- **Cause:** NVN2 compute places texture handles in a per-shader c0 layout. Fixed reads already pass through `AMapC0` into the canonical c2 driver tables, but an indexed LDC keeps its native bank and byte offset. `BindlessToArray` turned that read into an array of a game's uniform-buffer handles instead; native c0 has no such uniform slot.
+- **Fix:** when the texture-array pass finds an indexed native compute c0 sampled-texture handle, it uses the control section's existing `QueryAmpereComputeC0Layout` metadata to map the recovered index into the canonical c2 combined or separate-texture table. A fixed separate sampler keeps its own c2 word. Reflection and replay then use their existing driver-table array path. Storage images, other constant-buffer banks and shaders without an NVN2 compute layout retain their previous lowering.
+- **Check:** `test_dmsh_nvn2_buffers.py` covers indexed combined handles and separate textures ORed with a fixed sampler; both declare c2 resources and retain no c0 read. The before/after shader-source comparison and rendered result are in the game's note.
+- **Found on:** [Fast Fusion](../../dm/games/040041E0212AE000/README.md).
 
 ### Threadgroup stores in warp-synchronous code
 

@@ -587,6 +587,11 @@ static id<MTLFunction> mtk_nop_fragment(void) {
         fn = fn4_note([l newFunctionWithName:@"dm_mesh_nop"], l, @"dm_mesh_nop", nil); if (!fn) MLOG("[RED] the empty fragment function did not compile: %s", e.localizedDescription.UTF8String); });
     return fn;
 }
+// DM_NVN_MESH_TGHINT=0|1 (on by default): task / mesh pipelines declare their threadgroup sizes multiples of the SIMD width when they are (NVN2's task and mesh shaders: 32 threads,
+// one SIMD group), so the compiler may drop the code for partial groups. Ocarina of Time at Kokiri Forest on an M1: about -0.35 ms of GPU time a frame (two pairs of runs,
+// both orders). The pipeline cache key leaves it out, so it is not switchable within a run (ab has no effect after the first pipelines)
+static int mesh_tghint(NvShader *ts, NvShader *ms, int which) { static int m = -1; if (m < 0) { m = sw_mode("DM_NVN_MESH_TGHINT", 1); if (m != 1) MLOG("DM_NVN_MESH_TGHINT=%d: mesh pipelines without threadgroup-size hints", m); }
+    if (!m || !sw_on(m)) return 0; return which ? (ms && ms->mesh_threads && ms->mesh_threads % 32 == 0) : (ts && ts->mesh_threads && ts->mesh_threads % 32 == 0); }
 // The Metal 4 descriptor of a native mesh pipeline, whole: no base with open colour state, as a game has some hundred of them, each with functions of its own. Its depth / stencil
 // formats are not named (Metal 4 pipelines serve any). nil when a function has no Metal 4 descriptor (fn4_of: the diagnostic fragment overrides)
 static MTL4MeshRenderPipelineDescriptor *mtk_desc4(MTLRenderPipelineDescriptor *d, NvShader *ts, NvShader *ms, id<MTLFunction> ff, int border) {
@@ -594,7 +599,7 @@ static MTL4MeshRenderPipelineDescriptor *mtk_desc4(MTLRenderPipelineDescriptor *
     if (!mf || !of || !f4) return nil;
     MTL4MeshRenderPipelineDescriptor *m = [MTL4MeshRenderPipelineDescriptor new];
     m.meshFunctionDescriptor = mf; m.fragmentFunctionDescriptor = f4; m.maxTotalThreadsPerMeshThreadgroup = ms->mesh_threads;
-    m.objectFunctionDescriptor = of; m.payloadMemoryLength = ts ? (ts->mesh_payload + 15u) & ~15u : 16; m.maxTotalThreadsPerObjectThreadgroup = ts ? ts->mesh_threads : 1;   // with no task: a block's first workgroup, one thread a block
+    m.objectFunctionDescriptor = of; m.payloadMemoryLength = ts ? (ts->mesh_payload + 15u) & ~15u : 16; m.maxTotalThreadsPerObjectThreadgroup = ts ? ts->mesh_threads : 1; m.objectThreadgroupSizeIsMultipleOfThreadExecutionWidth = mesh_tghint(ts, ms, 0); m.meshThreadgroupSizeIsMultipleOfThreadExecutionWidth = mesh_tghint(ts, ms, 1);   // with no task: a block's first workgroup, one thread a block
     m.rasterSampleCount = d.rasterSampleCount; m.alphaToCoverageState = d.alphaToCoverageEnabled ? MTL4AlphaToCoverageStateEnabled : MTL4AlphaToCoverageStateDisabled;
     for (int i = 0; i < 8; i++) pso_col4(m.colorAttachments[i], d.colorAttachments[i]);
     return m;
@@ -624,7 +629,7 @@ static id<MTLRenderPipelineState> mtk_build(const pso_key *k, NvShader *ts, NvSh
     }
     MTLMeshRenderPipelineDescriptor *m = [MTLMeshRenderPipelineDescriptor new];
     m.meshFunction = fn_dev_b(ms->fn, !k->border); m.fragmentFunction = fn_dev_b(ff, !k->border); m.maxTotalThreadsPerMeshThreadgroup = ms->mesh_threads;
-    m.objectFunction = ts ? fn_dev_b(ts->fn, !k->border) : fn_dev(ms->mesh_obj); m.payloadMemoryLength = ts ? (ts->mesh_payload + 15u) & ~15u : 16; m.maxTotalThreadsPerObjectThreadgroup = ts ? ts->mesh_threads : 1;
+    m.objectFunction = ts ? fn_dev_b(ts->fn, !k->border) : fn_dev(ms->mesh_obj); m.payloadMemoryLength = ts ? (ts->mesh_payload + 15u) & ~15u : 16; m.maxTotalThreadsPerObjectThreadgroup = ts ? ts->mesh_threads : 1; m.objectThreadgroupSizeIsMultipleOfThreadExecutionWidth = mesh_tghint(ts, ms, 0); m.meshThreadgroupSizeIsMultipleOfThreadExecutionWidth = mesh_tghint(ts, ms, 1);
     m.rasterSampleCount = d.rasterSampleCount; m.alphaToCoverageEnabled = d.alphaToCoverageEnabled;
     for (int i = 0; i < 8; i++) m.colorAttachments[i] = d.colorAttachments[i];
     m.depthAttachmentPixelFormat = d.depthAttachmentPixelFormat; m.stencilAttachmentPixelFormat = d.stencilAttachmentPixelFormat;

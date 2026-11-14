@@ -9,6 +9,7 @@
 #include <stdatomic.h>
 #include <pthread.h>
 #include <math.h>
+#include <string.h>
 
 void dm_guest_host_wait_begin(void);
 void dm_guest_host_wait_end(void);
@@ -110,13 +111,16 @@ uint32_t dm_nextendo_account_username(char out[33]) { @autoreleasepool {
     if (n > 32) { n = 32; while (n && ((unsigned char)name[n] & 0xc0) == 0x80) n--; }   // whole UTF-8 characters only
     if (!n) return DM_ACCOUNT_FAIL; memcpy(out, name, n); return 0;
 } }
-// Host-only API authorization. Never serialized into a game bundle or HLE output. Nextendo's /api/me takes only a session or OAuth access
-// token (friends and presence take the nx2 game token too), so the sign-in's access token goes first and the nx2 token serves without one.
+// Host-only API authorization. Never serialized into a game bundle or HLE output. Nextendo's routes differ in the token they take. /api/me
+// answered 401 to the nx2 game token, and me, friends and presence answer the sign-in's OAuth access token, so those get it first and the
+// nx2 token without one. /api/profile, /api/history and /api/online-status answered 401 to the access token (Super Mario Bros. Wonder on an
+// iPhone, 2026-11-14): Nextendo's account server takes a web session or the nx2 token there (accountFromBearer), so they get the nx2 token.
 // hle_nextendo_login_apple.m has the strong dm_nextendo_login_access; a host without it has no access token
 __attribute__((weak)) NSString *dm_nextendo_login_access(void) { return nil; }
-NSString *dm_nextendo_api_bearer(void) {
+NSString *dm_nextendo_api_bearer(const char *resource) {
     DmNextendoCredential *c = credential(); if (!c) return nil;
-    NSString *access = dm_nextendo_login_access(); return access.length ? access : c.token;
+    bool takes_access = resource && (!strcmp(resource, "me") || !strcmp(resource, "friends") || !strcmp(resource, "presence"));
+    NSString *access = takes_access ? dm_nextendo_login_access() : nil; return access.length ? access : c.token;
 }
 NSData *dm_nextendo_api_identity(void) {
     DmNextendoCredential *c = credential(); if (!c) return nil;

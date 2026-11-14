@@ -17,7 +17,7 @@ static const char *me_reply;
 @property(nonatomic) NSUInteger limit;
 @end
 #define CHECK(x) do { checks++; if (!(x)) { failures++; fprintf(stderr,"API check failed at %d\n",__LINE__); } } while (0)
-NSString *dm_nextendo_api_bearer(void) { return linked ? @"synthetic-proof" : nil; }
+NSString *dm_nextendo_api_bearer(const char *resource) { (void)resource; return linked ? @"synthetic-proof" : nil; }
 NSData *dm_nextendo_api_identity(void) { return nil; }
 void dm_guest_host_wait_begin(void) {}
 void dm_guest_host_wait_end(void) {}

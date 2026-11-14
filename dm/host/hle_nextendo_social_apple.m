@@ -227,7 +227,7 @@ static bool history_base(void) {   // the account's seconds for this game so far
 }
 static bool history_tick(void) { @autoreleasepool {   // false stops the timer
     double now=monotonic_time(); g_history.played+=fmin(now-g_history.last,HISTORY_EVERY_S); g_history.last=now;
-    if(!dm_nextendo_api_bearer()){fprintf(stderr,"[dm] [RED] nextendo: play time is not sent: no Nextendo sign-in\n");return false;}
+    if(!dm_nextendo_api_bearer("history")){fprintf(stderr,"[dm] [RED] nextendo: play time is not sent: no Nextendo sign-in\n");return false;}
     if(!g_history.known&&!history_base()){
         if(!g_history.told)fprintf(stderr,"[dm] [RED] nextendo: the account's play time could not be read: none is sent until it can\n");
         g_history.told=1; return true;

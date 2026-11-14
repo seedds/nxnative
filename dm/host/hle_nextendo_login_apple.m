@@ -5,12 +5,14 @@
 // the next attempt waits 30 seconds; meanwhile the current record serves until its own expiry, and with none the game sees no account
 // rather than a made-up one.
 // The refresh's OAuth access token is kept beside it, in memory only and never logged: /api/me, /api/friends and /api/presence take it
-// (dm_nextendo_login_access; /api/me refuses the nx2 game token), and /api/online-status says with it why Nextendo refuses online play
-// (dm_nextendo_login_online_check), which a game's own login cannot show: the NEX protocol carries no reason.
+// (dm_nextendo_login_access; /api/me refuses the nx2 game token). /api/online-status takes the nx2 game token instead (hle_nextendo_apple.m
+// dm_nextendo_api_bearer) and says why Nextendo refuses online play (dm_nextendo_login_online_check), which a game's own login cannot show:
+// the NEX protocol carries no reason.
 #include <TargetConditionals.h>
 #if TARGET_OS_OSX || TARGET_OS_IOS
 #import "nextendo_login_apple.inc"
 #include "nextendo_account.h"
+#import "nextendo_api_apple.h"
 #include <dispatch/dispatch.h>
 #include <pthread.h>
 #include <stdatomic.h>
@@ -84,13 +86,13 @@ NSString *dm_nextendo_login_access(void) { @autoreleasepool {
 // (the gates Nextendo's game servers apply at a game's login: e-mail, Discord link, another device online, a disabled account), or that it
 // could not be asked. when says what prompted it ("at the start", "after the game's error 2306-0807")
 void dm_nextendo_login_online_check(const char *when) { @autoreleasepool {
-    NSString *access = dm_nextendo_login_access();
+    NSString *token = dm_nextendo_api_bearer("online-status");
     NSString *line;
-    if (!access) line = @"[RED] nextendo: online status not asked: no access token (no sign-in, or its refresh failed)";
+    if (!token) line = @"[RED] nextendo: online status not asked: no game token (no sign-in, or its refresh failed)";
     else {
         NSMutableURLRequest *get = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:kNxOnlineStatusEndpoint]
                                                            cachePolicy:NSURLRequestReloadIgnoringLocalCacheData timeoutInterval:8];
-        [get setValue:[NSString stringWithFormat:@"Bearer %@", access] forHTTPHeaderField:@"Authorization"];
+        [get setValue:[NSString stringWithFormat:@"Bearer %@", token] forHTTPHeaderField:@"Authorization"];
         NSString *why = nil;
         dm_guest_host_wait_begin(); NSDictionary *answer = nxl_send(get, &why); dm_guest_host_wait_end();
         if (!answer) line = [NSString stringWithFormat:@"[RED] nextendo: online status could not be asked: %@", why ?: @"no answer"];

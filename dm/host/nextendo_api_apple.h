@@ -5,8 +5,9 @@
 #include <stdint.h>
 #include <stddef.h>
 
-// In explicit Nextendo mode with a currently valid game credential: the sign-in's OAuth access token, or the nx2 game token without one.
-NSString *dm_nextendo_api_bearer(void);
+// In explicit Nextendo mode with a currently valid game credential, the token resource takes (hle_nextendo_apple.m): for me, friends and presence
+// the sign-in's OAuth access token, or the nx2 game token without one; for profile, history and online-status the nx2 game token.
+NSString *dm_nextendo_api_bearer(const char *resource);
 NSData *dm_nextendo_api_identity(void);
 bool dm_nextendo_api_baas_namespace(const char *kind);
 uint32_t dm_nextendo_api_baas_id(uint64_t *output);

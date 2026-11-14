@@ -123,6 +123,7 @@ struct LauncherView: View {
     let fit: (CGFloat) -> Void
     @AppStorage("window.show") private var show = true
     @AppStorage("window.advanced") private var advanced = false
+    @State private var motionOpen = false
     @State private var checking = false
     @State private var check = 0   // which Play the running check is for: one the player went on from without it is dropped
 
@@ -139,6 +140,10 @@ struct LauncherView: View {
             .padding([.horizontal, .top], 20)
             Form {
                 settingSections(basic: true)
+                Section("Controls") {
+                    PhoneMotionConnections()
+                    Button("Phone Motion Setup…") { motionOpen=true }
+                }
                 CloudSavesSection()
                 Section {
                     DisclosureGroup("Advanced settings", isExpanded: $advanced) {}
@@ -173,6 +178,7 @@ struct LauncherView: View {
             .padding(20)
         }
         .frame(minWidth: 520, idealWidth: 560)
+        .sheet(isPresented:$motionOpen) { DSUMotionView().frame(width:1000,height:760) }
     }
 
     /// Play, once the cloud's save is compared with this Mac's: a save that changed on both sides is the player's pick, not the newer file's (SaveCheck)

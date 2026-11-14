@@ -707,6 +707,35 @@ static void t_touch_sampling(void) {
     g_mode = 1;
 }
 
+static void t_motion_dsu(void) {
+    motion_state out;
+    const float acc[3] = {0, 0, -1}, physical[3] = {0.2f, 0, 0}, remote[3] = {0, 0.4f, 0};
+    uint64_t was = motion_now;
+    motion_now += 1000000000ull;
+    dm_motion_set(1, acc, physical);
+    dm_motion_set_joy(1, 0, acc, physical, motion_now);
+    dm_motion_set_dsu(1, acc, remote, motion_now);
+    CHECK(motion_live(1, &out) && out.gyro[1] > 0, "DSU motion reaches assigned guest sensor");
+    CHECK(!motion_copy(&g_dsu_motion[0], &out), "DSU does not leak to another player");
+    motion_now += SIX_PERIOD_NS;
+    dm_motion_set(1, acc, physical);
+    CHECK(motion_pick(1, &out) == &g_dsu_motion[1] && out.gyro[1] > 0, "newer physical motion does not replace fresh DSU");
+    CHECK(motion_joy_pick(1, 0, &out) == &g_dsu_motion[1], "DSU overrides a fresh per-Joy-Con sensor");
+    CHECK(six_stream(0x103, (npad_ref){.pad = 1}, 1) == &g_dsu_motion[1], "six-axis history selects the separate DSU stream");
+    CHECK(six_stream(0x105, (npad_ref){.kind = KIND_DUAL, .pad = 1}, 1) == &g_dsu_motion[1], "JoyDual history also selects DSU before physical halves");
+    g_motion_off = 1;
+    CHECK(motion_pick(1, NULL) != &g_dsu_motion[1] && motion_joy_pick(1, 0, NULL) != &g_dsu_motion[1], "DM_MOTION=0 suppresses DSU selection");
+    g_motion_off = 0;
+    motion_now += MOTION_STALE_NS + 1;
+    dm_motion_set(1, acc, physical);
+    dm_motion_set_joy(1, 0, acc, physical, motion_now);
+    CHECK(motion_live(1, &out) && out.gyro[0] > 0 && out.gyro[1] == 0, "stale DSU falls back to physical motion");
+    CHECK(motion_joy_pick(1, 0, &out) == &g_joy_motion[1][0], "stale DSU restores per-Joy-Con source precedence");
+    dm_motion_clear(1); dm_motion_clear_joy(1, 0);
+    atomic_store(&g_joy_reported[1], 0);
+    motion_now = was;
+}
+
 // Unintended Home button input protection: one flag per npad, on until the game turns it off (Nintendo Switch Sports Resort asks, then turns it off for each npad)
 
 // Npad IMU (Switch 2): the host serves the layer the SDK's sensor fusion reads from. Enabled with the game's buffer, disabled again; no samples yet (the buffer is never written)
@@ -1572,6 +1601,16 @@ static void t_unsupported_style(void) {
 }
 
 int main(void) {
+    NpadState phone_state;
+    dm_pad_set_player(0,DM_BTN_B,0,0,0,0);
+    dm_dsu_input(0,DM_BTN_A,12000,0,0,0,motion_now);
+    fill(&phone_state,0,STYLE_FULLKEY);
+    CHECK((phone_state.buttons&(DM_BTN_A|DM_BTN_B))==(DM_BTN_A|DM_BTN_B),"phone and physical buttons merge independently");
+    motion_now+=300000001ull;fill(&phone_state,0,STYLE_FULLKEY);
+    CHECK(!(phone_state.buttons&DM_BTN_A) && (phone_state.buttons&DM_BTN_B),"stale phone releases without clearing physical controller");
+    dm_pad_set_player(0,0,0,0,0,0);
+    dm_dsu_input(0,0,0,0,0,0,0);   // later tests rewind the host clock; do not revive this sample
+    t_motion_dsu();
     CHECK(setenv("DM_RUMBLE_LOG", "1", 1) == 0, "enable rumble diagnostics");
     setenv("DM_IMU_DELAY", "0", 1);   // the tests of the live history read it at the present; t_live_delay checks the playout delay
     // The plumbing tests (streams, interpolation, dither, pairs) were written with the samples negated: they keep that (DM_IMU_*_SIGN=-1); t_npad_imu_samples and

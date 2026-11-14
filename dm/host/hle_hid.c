@@ -38,6 +38,12 @@ _Static_assert(sizeof(NpadState) == 0x28, "NpadState");
 // their own path because a connected controller publishes its whole state on every change (a DualShock 4's sticks change all the time), which overwrote them on the shared one;
 // the separate paths also keep scripted input out of DM_REC, which records the physical ones (rec_read)
 static _Atomic uint64_t g_btn, g_axes, g_latch, g_sc_btn, g_sc_axes, g_sc_latch, g_pad_btn[DM_PLAYERS], g_pad_axes[DM_PLAYERS], g_pad_latch[DM_PLAYERS];
+static _Atomic uint64_t g_dsu_btn[DM_PLAYERS],g_dsu_axes[DM_PLAYERS],g_dsu_latch[DM_PLAYERS],g_dsu_input_time[DM_PLAYERS];
+void dm_dsu_input(int p,uint64_t buttons,int32_t lx,int32_t ly,int32_t rx,int32_t ry,uint64_t t) {
+    if(p<0 || p>=DM_PLAYERS)return;
+    uint64_t old=atomic_exchange(&g_dsu_btn[p],buttons);atomic_fetch_or(&g_dsu_latch[p],buttons&~old);
+    atomic_store(&g_dsu_axes[p],(uint64_t)(uint16_t)lx | (uint64_t)(uint16_t)ly<<16 | (uint64_t)(uint16_t)rx<<32 | (uint64_t)(uint16_t)ry<<48);atomic_store(&g_dsu_input_time[p],t);
+}
 static _Atomic uint64_t g_peek_latch;   // presses since the last dm_input_peek (the applet's reader)
 static _Atomic int g_hold;              // an applet holds the input (dm_input_hold)
 static _Atomic int64_t g_sampling = 1 << 16;   // starts high so the history entries below the newest keep positive sampling numbers
@@ -600,6 +606,12 @@ static void fill(NpadState *s, uint32_t id, uint32_t style) {
         uint64_t k = atomic_load(&g_axes); for (int i = 0; i < 4; i++) a[i] = ax(k, i);
     }
     for (int p = 0; p < DM_PLAYERS; p++) if (src >> p & 1) {
+        uint64_t received=atomic_load(&g_dsu_input_time[p]),host_now=now_ns();
+        uint64_t phone_edges=atomic_exchange(&g_dsu_latch[p],0);
+        if(received && host_now>=received && host_now-received<=300000000ull) {
+            b|=atomic_load(&g_dsu_btn[p])|phone_edges;uint64_t phone_axes=atomic_load(&g_dsu_axes[p]);
+            for(int i=0;i<4;i++)a[i]=pick(a[i],ax(phone_axes,i));
+        }
         b |= atomic_load(&g_pad_btn[p]) | atomic_exchange(&g_pad_latch[p], 0);
         uint64_t v = atomic_load(&g_pad_axes[p]); for (int i = 0; i < 4; i++) a[i] = pick(a[i], ax(v, i));
     }
@@ -806,6 +818,7 @@ typedef struct { pthread_mutex_t mu; motion_state st; uint64_t last_ns, received
 static live_motion g_motion[DM_PLAYERS] = {[0 ... DM_PLAYERS - 1] = {.mu = PTHREAD_MUTEX_INITIALIZER}};
 static live_motion g_hid_motion[DM_PLAYERS] = {[0 ... DM_PLAYERS - 1] = {.mu = PTHREAD_MUTEX_INITIALIZER}};
 static live_motion g_joy_motion[DM_PLAYERS][2] = {[0 ... DM_PLAYERS - 1] = {[0 ... 1] = {.mu = PTHREAD_MUTEX_INITIALIZER}}};   // each Joy-Con's own sensor (dm_motion_set_joy)
+static live_motion g_dsu_motion[DM_PLAYERS] = {[0 ... DM_PLAYERS - 1] = {.mu = PTHREAD_MUTEX_INITIALIZER}};
 static live_motion g_phone_motion = {.mu = PTHREAD_MUTEX_INITIALIZER};
 static pthread_once_t g_motion_once = PTHREAD_ONCE_INIT;
 static motion_map g_motion_map; static float g_motion_gain = 0.5f; static int g_motion_off, g_motion_log, g_phone_mode;
@@ -871,6 +884,9 @@ static void motion_set_to(live_motion *m, int p, const float acc[3], const float
     if (m->count < LIVE_RING) m->count++; else m->head = (m->head + 1) % LIVE_RING;
     pthread_mutex_unlock(&m->mu);
 }
+void dm_motion_set_dsu(int p, const float acc[3], const float rot[3], uint64_t t) {
+    if (t && p >= 0 && p < DM_PLAYERS) motion_set_to(&g_dsu_motion[p], p, acc, rot, 3, t);
+}
 void dm_motion_set(int p, const float acc[3], const float rot[3]) { motion_set(p, acc, rot, 0, 0); }
 void dm_motion_set_switch(int p, const float acc[3], const float rot[3]) { motion_set(p, acc, rot, 1, 0); }
 void dm_motion_set_hid(int p, const float acc[3], const float rot[3], uint64_t t) { if (t) motion_set(p, acc, rot, 2, t); }
@@ -902,6 +918,7 @@ static uint64_t motion_copy(live_motion *m, motion_state *out) {   // a source's
 static live_motion *motion_pick(int p, motion_state *out) {
     if (p < 0 || p >= DM_PLAYERS) return NULL;
     pthread_once(&g_motion_once, motion_env);
+    if (!g_motion_off && motion_copy(&g_dsu_motion[p], out)) return &g_dsu_motion[p];
     if (!p && g_phone_mode > 0) return motion_copy(&g_phone_motion, out) ? &g_phone_motion : NULL;
     // Match the button path: in a one-player game, a controller in another slot also drives player 1.
     uint32_t src = p ? 1u << p : 1u | merged_players(); uint64_t newest = 0; live_motion *best = NULL;
@@ -925,6 +942,8 @@ static int joy_own(int p, int side) {   // 1: its own stream is fresh, 0: it wen
 }
 static live_motion *motion_joy_pick(int p, int side, motion_state *out) {
     if (p < 0 || p >= DM_PLAYERS || (side != 0 && side != 1)) return motion_pick(p, out);
+    pthread_once(&g_motion_once, motion_env);
+    if (!g_motion_off && motion_copy(&g_dsu_motion[p], out)) return &g_dsu_motion[p];
     int own = joy_own(p, side);
     if (own > 0 && (!out || motion_copy(&g_joy_motion[p][side], out))) return &g_joy_motion[p][side];
     return own == 0 ? NULL : motion_pick(p, out);
@@ -1082,6 +1101,9 @@ static pthread_once_t g_imu_once; static void imu_env_read(void);   // DM_IMU_DE
 // often as device 1 with a right Joy-Con alone, so a flat device 0 would leave its racket still. A pair that lost a half: the missing half's handle lies flat, as its sensor is
 // gone, rather than taking the other half's stream mid-game (a jump to another controller's frame)
 static live_motion *six_stream(uint32_t h, npad_ref ref, int pl) {
+    // DSU overrides every sensor of its assigned player without replacing any physical stream.
+    pthread_once(&g_motion_once, motion_env);
+    if (!g_motion_off && pl >= 0 && pl < DM_PLAYERS && motion_copy(&g_dsu_motion[pl], NULL)) return &g_dsu_motion[pl];
     int dev = (int)(h >> 16 & 1);
     if (ref.kind >= KIND_DUAL) return motion_joy_pick(ref.pad, ref.kind == KIND_LEFT ? 0 : ref.kind == KIND_RIGHT ? 1 : dev, NULL);
     if (pl >= 0 && pl < DM_PLAYERS && kind_style(ref, h >> 8 & 0xff) == STYLE_JOYDUAL) {

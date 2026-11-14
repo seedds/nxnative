@@ -868,9 +868,12 @@ const char *dm_module_dir(void) { return g_module_dir; }
 // (net_socket.h dm_net_nextendo_enabled), main comes from there; offline, LAN and LDN keep the original. On the iPhone, <dir>/nextendo holds the copy's tables and its
 // code is embedded as module nmain (gen_embed.py; g_nextendo_dir, map_image)
 static const char *module_dir(const module_t *m, const char *dir) { return g_nextendo_dir[0] && !strcmp(m->name, "main") ? g_nextendo_dir : dir; }
+// A Nextendo session starts with the game: the account's Mii and play time (hle_nextendo_social_apple.m has the strong definition; other hosts have none)
+__attribute__((weak)) void dm_nextendo_session_start(void) {}
 static void nextendo_main(const char *dir) {
     g_nextendo_dir[0] = 0;
     if (!dm_net_nextendo_enabled()) return;
+    dm_nextendo_session_start();
     char path[1100]; struct stat st;
     if ((size_t)snprintf(g_nextendo_dir, sizeof g_nextendo_dir, "%s/nextendo", dir) >= sizeof g_nextendo_dir) die("Nextendo: module folder path too long: %s", dir);
     snprintf(path, sizeof path, "%s/main.fixups.tsv", g_nextendo_dir);

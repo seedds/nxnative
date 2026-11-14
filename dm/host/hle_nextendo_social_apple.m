@@ -2,8 +2,11 @@
 #import "nextendo_api_apple.h"
 #include "nextendo_social.h"
 #include "nextendo_account.h"
+#include "net_socket.h"
 #include <CommonCrypto/CommonDigest.h>
+#include <dispatch/dispatch.h>
 #include <pthread.h>
+#include <stdatomic.h>
 #include <math.h>
 #include <time.h>
 #include "game_profile.h"
@@ -125,15 +128,30 @@ static void presence_keep(NSData *body) {   // nil stops the repeats
     }
     pthread_mutex_unlock(&g_presence_lock);
 }
+static NSString *game_title(void) { return [@DM_GAME_ID lowercaseString]; }
+static NSString *game_name(void) {   // the app's name, the game's title ID without one
+    id name=[NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleDisplayName"];
+    return [name isKindOfClass:NSString.class]&&[name length]?name:game_title();
+}
+// The game's own description of what the player does (UserPresence::SetDescription), which Nextendo shows beside the game's name. The SDK keeps
+// it in the application field, a run of NUL-terminated strings, key and value in turn, up to an empty key (nn::friends::detail::PresenceAccessor;
+// Mario Kart 8 Deluxe's SearchKey sdk+0x11c950), under the key sys_description. "" without one or for a field that does not end its strings
+static NSString *presence_description(const uint8_t *field,size_t size) {
+    size_t at=0;
+    while (at<size && field[at]) {
+        const char *key=(const char *)field+at; size_t key_length=strnlen(key,size-at); at+=key_length+1; if (at>=size) return @"";
+        const char *value=(const char *)field+at; size_t value_length=strnlen(value,size-at); if (at+value_length>=size) return @""; at+=value_length+1;
+        if (key_length==15 && !memcmp(key,"sys_description",15))
+            return [[NSString alloc] initWithBytes:value length:value_length encoding:NSUTF8StringEncoding] ?: @"";
+    }
+    return @"";
+}
 uint32_t dm_nextendo_social_publish(unsigned status,const uint8_t *app_field,size_t size) { @autoreleasepool {
     if(status>2||size>DM_SOCIAL_APP_FIELD||(size&&!app_field))return DM_ACCOUNT_FAIL;
     NSData *identity=dm_nextendo_api_identity();if(!identity)return DM_ACCOUNT_FAIL;
-    NSString *title=[@DM_GAME_ID lowercaseString];
-    id name=[NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleDisplayName"];
-    if(![name isKindOfClass:NSString.class]||![name length])name=title;
     NSData *field=[NSData dataWithBytes:app_field length:size];
-    NSDictionary *object=@{@"status":@(status),@"app_id":title,@"jeu":name,@"app_field":[field base64EncodedStringWithOptions:0],
-        @"plateforme":@"nxnative",@"app_detail":@""};
+    NSDictionary *object=@{@"status":@(status),@"app_id":game_title(),@"jeu":game_name(),@"app_field":[field base64EncodedStringWithOptions:0],
+        @"plateforme":@"nxnative",@"app_detail":size?presence_description(app_field,size):@""};
     NSData *body=[NSJSONSerialization dataWithJSONObject:object options:0 error:nil];
     if(!body)return DM_ACCOUNT_FAIL;
     pthread_mutex_lock(&g_presence_send);
@@ -142,3 +160,81 @@ uint32_t dm_nextendo_social_publish(unsigned status,const uint8_t *app_field,siz
     pthread_mutex_unlock(&g_presence_send);
     return result;
 } }
+
+// ---- The account's Mii and play time, from the start of a Nextendo session (loader.c nextendo_main) ----
+void dm_guest_host_wait_begin(void);
+void dm_guest_host_wait_end(void);
+enum { MII_STORE_SIZE=0x44, HISTORY_EVERY_S=60, PROFILE_WAIT_S=5 };
+static dispatch_group_t g_profile_fetch;   // the account's profile, asked for once at the start
+static NSData *g_account_mii;              // its Mii's StoreData, written before g_profile_fetch completes
+
+// /api/profile's Mii: the base64 of a Switch StoreData. nil without one, or for anything else (logged)
+static NSData *account_mii_fetch(void) {
+    size_t capacity=1024*1024,size=0; uint8_t *buffer=malloc(capacity); if(!buffer)return nil;
+    uint32_t result=dm_nextendo_api_request("profile",NULL,0,buffer,capacity,&size);
+    NSDictionary *answer=result?nil:[NSJSONSerialization JSONObjectWithData:[NSData dataWithBytesNoCopy:buffer length:size freeWhenDone:NO] options:0 error:nil];
+    free(buffer);
+    if(result)return nil;   // dm_nextendo_api_request logged the refusal
+    id profile=[answer isKindOfClass:NSDictionary.class]?answer[@"profile"]:nil, mii=[profile isKindOfClass:NSDictionary.class]?profile[@"mii"]:nil;
+    if(![mii isKindOfClass:NSString.class]||![mii length]){fprintf(stderr,"[dm] nextendo: the account has no Mii on Nextendo\n");return nil;}
+    NSData *store=[[NSData alloc] initWithBase64EncodedString:mii options:0];
+    if(store.length!=MII_STORE_SIZE){fprintf(stderr,"[dm] [RED] nextendo: the account's Mii is not a StoreData (%lu bytes): it is not listed\n",(unsigned long)store.length);return nil;}
+    return store;
+}
+// hle_mii.c: the account's Mii for the game's Mii database, waiting a few seconds at most for the profile asked for at the start
+int dm_nextendo_account_mii(uint8_t store[MII_STORE_SIZE]) {
+    if(!store||!g_profile_fetch||!dm_net_nextendo_enabled())return 0;
+    dm_guest_host_wait_begin(); long late=dispatch_group_wait(g_profile_fetch,dispatch_time(DISPATCH_TIME_NOW,PROFILE_WAIT_S*NSEC_PER_SEC)); dm_guest_host_wait_end();
+    if(late){fprintf(stderr,"[dm] [RED] nextendo: the account's profile did not arrive in %d s: its Mii is not listed this run\n",PROFILE_WAIT_S);return 0;}
+    if(g_account_mii.length!=MII_STORE_SIZE)return 0;
+    memcpy(store,g_account_mii.bytes,MII_STORE_SIZE); return 1;
+}
+
+// Play time: Nextendo keeps each game's total seconds per account and keeps the larger of what it has and what it is sent (/api/history), so
+// the host reads the account's total for this game once and then sends it plus this run's time every minute. A minute counts only while the timer
+// runs: a gap longer than that (the app suspended) counts as one period at most
+static struct { bool known; int told; int64_t base; double played, last; } g_history;   // told: 1 the read failure was logged, 2 the first total sent
+static bool history_base(void) {   // the account's seconds for this game so far; false while they cannot be read
+    size_t capacity=8*1024*1024,size=0; uint8_t *buffer=malloc(capacity); if(!buffer)return false;
+    uint32_t result=dm_nextendo_api_request("history",NULL,0,buffer,capacity,&size);
+    NSDictionary *answer=result?nil:[NSJSONSerialization JSONObjectWithData:[NSData dataWithBytesNoCopy:buffer length:size freeWhenDone:NO] options:0 error:nil];
+    free(buffer);
+    id entries=[answer isKindOfClass:NSDictionary.class]?answer[@"history"]:nil;
+    if(![entries isKindOfClass:NSArray.class])return false;
+    int64_t seconds=0;
+    for(id entry in entries){
+        if(![entry isKindOfClass:NSDictionary.class]||![entry[@"title_id"] isKindOfClass:NSString.class])continue;
+        uint64_t value=0;
+        if([entry[@"title_id"] caseInsensitiveCompare:game_title()]==NSOrderedSame&&unsigned_value(entry[@"seconds"],&value)&&value<INT64_MAX/2)seconds=(int64_t)value;
+    }
+    g_history.base=seconds; g_history.known=true; return true;
+}
+static bool history_tick(void) { @autoreleasepool {   // false stops the timer
+    double now=monotonic_time(); g_history.played+=fmin(now-g_history.last,HISTORY_EVERY_S); g_history.last=now;
+    if(!dm_nextendo_api_bearer()){fprintf(stderr,"[dm] [RED] nextendo: play time is not sent: no Nextendo sign-in\n");return false;}
+    if(!g_history.known&&!history_base()){
+        if(!g_history.told)fprintf(stderr,"[dm] [RED] nextendo: the account's play time could not be read: none is sent until it can\n");
+        g_history.told=1; return true;
+    }
+    int64_t seconds=g_history.base+(int64_t)g_history.played;
+    NSISO8601DateFormatter *format=[NSISO8601DateFormatter new]; format.timeZone=[NSTimeZone timeZoneWithAbbreviation:@"UTC"];
+    NSDictionary *object=@{@"history":@[@{@"title_id":game_title(),@"name":game_name(),@"seconds":@(seconds),@"last_played":[format stringFromDate:NSDate.date]}]};
+    NSData *body=[NSJSONSerialization dataWithJSONObject:object options:0 error:nil]; size_t size=0;
+    if(body.length&&!dm_nextendo_api_request("history",body.bytes,body.length,NULL,0,&size)&&g_history.told!=2){
+        fprintf(stderr,"[dm] nextendo: play time on Nextendo: %lld min of this game in all\n",(long long)(seconds/60)); g_history.told=2;
+    }
+    return true;
+} }
+void dm_nextendo_session_start(void) {
+    static atomic_bool started; if(atomic_exchange(&started,true))return;
+    dispatch_queue_t queue=dispatch_get_global_queue(QOS_CLASS_UTILITY,0);
+    g_profile_fetch=dispatch_group_create();
+    dispatch_group_async(g_profile_fetch,queue,^{ @autoreleasepool { g_account_mii=account_mii_fetch(); } });
+    g_history.last=monotonic_time();
+    dispatch_queue_t serial=dispatch_queue_create("nextendo.history",DISPATCH_QUEUE_SERIAL);
+    dispatch_source_t timer=dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER,0,0,serial);
+    dispatch_source_set_timer(timer,dispatch_time(DISPATCH_TIME_NOW,HISTORY_EVERY_S*NSEC_PER_SEC),HISTORY_EVERY_S*NSEC_PER_SEC,5*NSEC_PER_SEC);
+    __block dispatch_source_t keep=timer;
+    dispatch_source_set_event_handler(timer,^{ if(!history_tick()){dispatch_source_cancel(keep);keep=nil;} });
+    dispatch_resume(timer);
+}

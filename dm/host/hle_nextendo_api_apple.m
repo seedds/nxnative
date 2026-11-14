@@ -12,7 +12,8 @@
 
 void dm_guest_host_wait_begin(void);
 void dm_guest_host_wait_end(void);
-enum { API_MAX = 1024 * 1024 };
+// An answer's size cap. /api/history answers with every game the account played, icons included (Nextendo takes up to 32 MiB of it), so it has a larger one
+enum { API_MAX = 1024 * 1024, API_HISTORY_MAX = 8 * 1024 * 1024 };
 
 bool dm_nextendo_api_baas_namespace(const char *kind) { @autoreleasepool {
     if (!kind || (strcmp(kind,"account") && strcmp(kind,"friends"))) return false;
@@ -125,6 +126,7 @@ uint32_t dm_nextendo_account_birthday(char output[11]) { @autoreleasepool {
 @property(nonatomic) dispatch_semaphore_t completed;
 @property(nonatomic) BOOL failed;
 @property(nonatomic) NSInteger status;
+@property(nonatomic) NSUInteger limit;   // the answer's size cap; 0 keeps only the status and drops the answer
 @end
 @implementation DmNextendoApiTransfer
 - (instancetype)init {
@@ -140,14 +142,14 @@ uint32_t dm_nextendo_account_birthday(char output[11]) { @autoreleasepool {
         completionHandler:(void (^)(NSURLSessionResponseDisposition))completion {
     (void)session; (void)task;
     [self.lock lock];
-    self.failed = self.failed || ![response isKindOfClass:NSHTTPURLResponse.class] || response.expectedContentLength > API_MAX;
+    self.failed = self.failed || ![response isKindOfClass:NSHTTPURLResponse.class] || (self.limit && response.expectedContentLength > (long long)self.limit);
     self.status = [response isKindOfClass:NSHTTPURLResponse.class] ? ((NSHTTPURLResponse *)response).statusCode : 0;
     BOOL failed = self.failed; [self.lock unlock]; completion(failed ? NSURLSessionResponseCancel : NSURLSessionResponseAllow);
 }
 - (void)URLSession:(NSURLSession *)session dataTask:(NSURLSessionDataTask *)task didReceiveData:(NSData *)data {
     (void)session; [self.lock lock];
-    if (data.length > API_MAX - self.data.length) self.failed = YES;
-    else if (!self.failed) [self.data appendData:data];
+    if (self.limit && data.length > self.limit - self.data.length) self.failed = YES;
+    else if (self.limit && !self.failed) [self.data appendData:data];
     BOOL failed = self.failed; [self.lock unlock]; if (failed) [task cancel];
 }
 - (void)URLSession:(NSURLSession *)session task:(NSURLSessionTask *)task didCompleteWithError:(NSError *)error {
@@ -164,21 +166,25 @@ void dm_nextendo_api_test_transport(dm_nextendo_api_transport transport) { test_
 uint32_t dm_nextendo_api_request(const char *resource, const uint8_t *body, size_t body_size,
                                uint8_t *output, size_t capacity, size_t *output_size) { @autoreleasepool {
     if (output_size) *output_size = 0;
-    if (!resource || !output || !output_size || !capacity || capacity > API_MAX || body_size > 4096 || (body_size && !body)) return DM_ACCOUNT_FAIL;
-    BOOL presence = !strcmp(resource,"presence");
-    if (!presence && strcmp(resource,"friends") && strcmp(resource,"me")) return DM_ACCOUNT_FAIL;
-    if ((!presence && body_size) || (presence && !body_size)) return DM_ACCOUNT_FAIL;
+    if (!resource || !output_size || body_size > 4096 || (body_size && !body)) return DM_ACCOUNT_FAIL;
+    // presence is posted; history is read, or written (PUT) with a body; friends, me and profile are only read
+    BOOL presence = !strcmp(resource,"presence"), history = !strcmp(resource,"history");
+    if (!presence && !history && strcmp(resource,"friends") && strcmp(resource,"me") && strcmp(resource,"profile")) return DM_ACCOUNT_FAIL;
+    if ((presence && !body_size) || (!presence && !history && body_size)) return DM_ACCOUNT_FAIL;
+    // no output buffer keeps only the status: a history write answers with the whole merged history, which the host does not read
+    if ((!output) != (!capacity) || (!output && !(history && body_size)) || capacity > (history ? API_HISTORY_MAX : API_MAX)) return DM_ACCOUNT_FAIL;
     NSString *proof = dm_nextendo_api_bearer(); if (!proof.length) return DM_ACCOUNT_FAIL;
     NSString *authorization = [@"Bearer " stringByAppendingString:proof];
     NSString *resourceName = [NSString stringWithUTF8String:resource]; if (!resourceName) return DM_ACCOUNT_FAIL;
     NSString *url = [@"https://nextendo.network/api/" stringByAppendingString:resourceName];
-    NSString *method = presence ? @"POST" : @"GET";
+    NSString *method = presence ? @"POST" : history && body_size ? @"PUT" : @"GET";
 #ifdef DM_NEXTENDO_API_TEST
     if (test_transport) {
         size_t size = 0; unsigned status = 0;
-        if (!test_transport(url.UTF8String,method.UTF8String,authorization.UTF8String,body,body_size,output,capacity,&size,&status) ||
-            status < 200 || status >= 300 || size > capacity) return DM_ACCOUNT_FAIL;
-        *output_size = size; return 0;
+        uint8_t none[1];
+        if (!test_transport(url.UTF8String,method.UTF8String,authorization.UTF8String,body,body_size,output ? output : none,output ? capacity : 0,&size,&status) ||
+            status < 200 || status >= 300 || (output && size > capacity)) return DM_ACCOUNT_FAIL;
+        *output_size = output ? size : 0; return 0;
     }
 #endif
     NSURL *endpoint = [NSURL URLWithString:url]; if (!endpoint) return DM_ACCOUNT_FAIL;
@@ -187,18 +193,18 @@ uint32_t dm_nextendo_api_request(const char *resource, const uint8_t *body, size
     [request setValue:authorization forHTTPHeaderField:@"Authorization"];
     [request setValue:@"nxnative" forHTTPHeaderField:@"User-Agent"];
     [request setValue:@"application/json" forHTTPHeaderField:@"Accept"];
-    if (presence) { request.HTTPBody = [NSData dataWithBytes:body length:body_size]; [request setValue:@"application/json" forHTTPHeaderField:@"Content-Type"]; }
+    if (body_size) { request.HTTPBody = [NSData dataWithBytes:body length:body_size]; [request setValue:@"application/json" forHTTPHeaderField:@"Content-Type"]; }
     NSURLSessionConfiguration *configuration = NSURLSessionConfiguration.ephemeralSessionConfiguration;
     configuration.HTTPCookieStorage = nil; configuration.HTTPShouldSetCookies = NO; configuration.URLCredentialStorage = nil;
     configuration.requestCachePolicy = NSURLRequestReloadIgnoringLocalCacheData; configuration.timeoutIntervalForResource = 15;
-    DmNextendoApiTransfer *transfer = [DmNextendoApiTransfer new];
+    DmNextendoApiTransfer *transfer = [DmNextendoApiTransfer new]; transfer.limit = capacity;
     NSURLSession *session = [NSURLSession sessionWithConfiguration:configuration delegate:transfer delegateQueue:nil];
     NSURLSessionDataTask *task = [session dataTaskWithRequest:request]; [task resume];
     dm_guest_host_wait_begin(); long timed_out = dispatch_semaphore_wait(transfer.completed,dispatch_time(DISPATCH_TIME_NOW,15 * NSEC_PER_SEC)); dm_guest_host_wait_end();
     if (timed_out) { [task cancel]; [session invalidateAndCancel]; return DM_ACCOUNT_FAIL; }
     [transfer.lock lock];
     BOOL valid = !transfer.failed && transfer.status >= 200 && transfer.status < 300 && transfer.data.length <= capacity;
-    if (valid) { memcpy(output,transfer.data.bytes,transfer.data.length); *output_size = transfer.data.length; }
+    if (valid && output) { memcpy(output,transfer.data.bytes,transfer.data.length); *output_size = transfer.data.length; }
     NSInteger status = transfer.status;
     [transfer.lock unlock]; [session finishTasksAndInvalidate];
     // A refused request is logged once per resource and status (no body, no token), so a device log shows whether Nextendo takes this

@@ -8,7 +8,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 static int checks,failures,requests; static unsigned generation=1,response_status=200;
-static BOOL linked=YES; static NSString *reply;
+static BOOL linked=YES; static NSString *reply,*posted_detail;
 static dm_net_mode_t mode=DM_NET_AUTO;
 static uint8_t uid[16]={1};
 static uint32_t constructor[]={0x52804002,0x2a1f03e1,0x14000000};
@@ -38,6 +38,7 @@ static bool transport(const char *url,const char *method,const char *auth,const 
         CHECK(!strcmp(method,"POST")&&body&&body_size);
         NSDictionary *posted=[NSJSONSerialization JSONObjectWithData:[NSData dataWithBytes:body length:body_size] options:0 error:nil];
         CHECK([posted[@"app_id"] isEqual:@"0100152000022000"]&&[posted[@"status"] unsignedIntValue]<=2);
+        posted_detail=posted[@"app_detail"];
         memcpy(output,"{}",2);*size=2;*status=response_status;return true;
     }
     CHECK(!strcmp(method,"GET"));
@@ -93,7 +94,12 @@ int main(void){@autoreleasepool{
     uint64_t nsa=0;CHECK(!dm_nextendo_api_baas_id(&nsa)&&nsa==0xabcdef0000001234ull);
     uint8_t own[0xe0+16];memset(own,0,sizeof own);own[0xe0]=0xa5;
     CHECK(!dm_nextendo_presence_initialize(own,uid)&&!memcmp(own,uid,16)&&own[0xe0]==0xa5);
-    own[0x20]=1;own[0x21]=2;CHECK(!dm_nextendo_presence_commit(own));
+    own[0x20]=1;own[0x21]=2;CHECK(!dm_nextendo_presence_commit(own)&&[posted_detail isEqual:@""]);
+    // the game's description: key and value strings in turn, the description under sys_description
+    static const char described[]="mode\0race\0sys_description\0Grand Prix";memset(own+0x20,0,192);memcpy(own+0x20,described,sizeof described);
+    CHECK(!dm_nextendo_presence_commit(own)&&[posted_detail isEqual:@"Grand Prix"]);
+    memset(own+0x20,'x',192);CHECK(!dm_nextendo_presence_commit(own)&&[posted_detail isEqual:@""]);   // a field that never ends its strings
+    memset(own+0x20,0,192);
     response_status=503;CHECK(dm_nextendo_presence_commit(own)!=0);response_status=200;
     presence_constructor[0]=0;CHECK(dm_nextendo_presence_initialize(own,uid)!=0);presence_constructor[0]=0x52801c02;
     mode=DM_NET_OFFLINE;CHECK(dm_nextendo_presence_commit(own)!=0);mode=DM_NET_AUTO;

@@ -1003,6 +1003,14 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Check:** `make -C dm/host/tests GAME=<id> nextendo-account`; the 401 lines go away on a device.
 - **Found on:** Super Mario Bros. Wonder 1.2.1 and Mario Kart 8 Deluxe 4.0.1 on an iPhone, 2026-11-14.
 
+### The Nextendo account's play time, Mii and activity
+
+- **Symptom:** in Nextendo mode, Nextendo's site shows no play time for the game, the game's Mii list has only the six default Miis though the account has a Mii, and friends see the game's name with nothing about what the player is doing.
+- **Cause:** the host sent none of it. Nextendo keeps each game's total seconds per account (`/api/history`, keeping the larger of what it has and what it is sent), the account's Mii as the base64 of a Switch StoreData (`/api/profile`), and a line of activity beside the game's name (presence `app_detail`). The presence went with `app_detail` empty.
+- **Fix:** at the start of a Nextendo session (`loader.c` `nextendo_main`, `dm_nextendo_session_start` in `hle_nextendo_social_apple.m`) the host asks for the account's profile and starts a one-minute timer. The first tick reads the account's total for this game. Every tick then sends that total plus this run's time, counting at most one minute per tick, so time while the app is suspended does not count. A history answer carries every game the account played, icons included, so it has its own 8 MiB cap, and a write keeps only the status. The account's Mii joins the console's Miis in the game's database (`hle_mii.c` `mii_account_add`) when its data CRC holds and no console Mii has its create ID. Nothing is uploaded: Nextendo's site has no Mii maker, and a profile write replaces the whole profile. `app_detail` is the game's own description: `UserPresence::SetDescription` writes it into the presence's application field, NUL-terminated key and value strings in turn, under `sys_description` (Mario Kart 8 Deluxe's `PresenceAccessor::SearchKey`, `sdk+0x11c950`).
+- **Check:** `make -C dm/host/tests GAME=<id> nextendo-api` (history read and write, profile read, the status-only write) and `nextendo-social` (the description from the field, a field that does not end its strings).
+- **Found on:** Mario Kart 8 Deluxe 4.0.1 and Super Mario Bros. Wonder 1.2.1 on an iPhone, 2026-11-14. Not yet seen on a device.
+
 ### `EventFd` in a network mode shares the socket numbering
 
 - **Symptom:** with `DM_NETWORK` set to a network mode, a game that uses gRPC (`nn::npln`) aborts in `grpc_init` as it does offline without event descriptors, or its poller never wakes while it polls its sockets.

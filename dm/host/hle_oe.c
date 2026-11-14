@@ -358,8 +358,11 @@ HLE_FORCE("_ZN2nn2gs3sdk26SetGraphicsFrameLengthModeENS1_23GraphicsFrameLengthMo
           void, h_gs_FrameLength, int mode) {
     static int last = -1; if (mode != last) { LOG("gs: graphics frame length mode %d (0 auto, 1 30 fps, 2 60 fps, 3 120 fps)", mode); last = mode; }
 }
-HLE_FORCE("_ZN2nn2oe27GetDefaultDisplayResolutionEPiS1_", "default display resolution: 1920x1080 docked, 1280x720 handheld", void, h_oe_DefRes, int *w, int *h) {
-    int con = opmode() == 1; if (w) *w = con ? 1920 : 1280; if (h) *h = con ? 1080 : 720;
+__attribute__((weak)) int dm_display_target(int *w, int *h) { (void)w; (void)h; return 0; }   // hle_display.c; host unit tests have none
+HLE_FORCE("_ZN2nn2oe27GetDefaultDisplayResolutionEPiS1_", "default display resolution: 1920x1080 docked, 1280x720 handheld; the display's size with Native resolution on",
+          void, h_oe_DefRes, int *w, int *h) {
+    int con = opmode() == 1, tw = 0, th = 0; if (!dm_display_target(&tw, &th)) { tw = con ? 1920 : 1280; th = con ? 1080 : 720; }
+    if (w) *w = tw; if (h) *h = th;
 }
 HLE_FORCE("_ZN2nn2oe38GetDefaultDisplayResolutionChangeEventEPNS_2os11SystemEventE", "default display resolution change event: bound, never signaled (the operation mode notification carries the change)",
           void, h_oe_DefResEv, void *ev) { hle_bind_system_event(ev, 0); }

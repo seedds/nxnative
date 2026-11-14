@@ -427,6 +427,7 @@ One line per symptom in the [subsystem references](../reference/): what you see 
 - a null read at boot in `nn::oe::IsLanguageSelectionLimited`, right after the game asks for its language. → [Whether the language selection is limited](../reference/services.md#whether-the-language-selection-is-limited)
 - a null read at boot in `nn::os::SdkMutexType` under `nn::gs::sdk::SetGraphicsFrameLengthMode`, called from `nn::oe::SetGraphicsTargetFrameRate`. → [The target frame rate (graphics frame length)](../reference/services.md#the-target-frame-rate-graphics-frame-length)
 - a Switch 2 game presents at 720p, with its upscaler at the matching low size. → [The display's largest buffer](../reference/services.md#the-displays-largest-buffer)
+- text, HUD and 2D look soft on a large screen: the game draws at 1080p (or 720p) and the host enlarges the picture to the window. → [The display's size, with Native resolution](../reference/services.md#the-displays-size-with-native-resolution)
 - `registered NROs not found` from `nro_collect.py` in a game whose RomFS has an NRR, or `[RED] ro::LoadModule: no rewritten NRO with SHA-256 …`. `main` is small (about 600 KB of code) beside a data segment of random-looking bytes. → [A game that decodes its code at run time](../reference/services.md#a-game-that-decodes-its-code-at-run-time)
 - a crash in `ro::RegisterModuleInfo`, or an NRR that seems to register millions of hashes: the words at +0x340 and +0x344 are random. → [NRR version 1](../reference/services.md#nrr-version-1)
 

@@ -878,6 +878,7 @@ void load_modules(const char *dir, const char **names, int n) {
     t = now_ns(); for (int i = 0; i < g_nmod; i++) relocate(&g_mod[i]); tr = now_ns() - t;
     force_check();
     preload_nros(dir, nros);   // mapped now, relocated when the game loads them (hle_ro.c)
+    nro_runtime_patch();   // the rows of hle_nro.c that match an NRO's build ID, on the mapped, not yet relocated image
     { void hlecount_seal(void); hlecount_seal(); }   // DM_HLECOUNT: relocation done, seal the counting stub pages as read-only executable
     if (getenv("DM_SYMCHECK")) LOG("DM_SYMCHECK: %lu symbol lookups at load time, hash and linear disagree %lu", g_symchk_n, g_symchk_bad);
     if (g_flag.bootprof) LOG("① breakdown: mapping (read + copy + seal pages) %.1f ms, dynamic section parsing %.1f ms, gate registration %.1f ms, relocation + forced takeover %.1f ms, total %.1f ms",

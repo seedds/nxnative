@@ -13,7 +13,11 @@ A dated record of what is done, what is in progress and what is left on the Wind
 | `df5c568` | Scripts: `scripts/port_docker.sh` builds the two images when missing with disk checks and runs the whole verification, `--low-disk` one image at a time; its test with a stand-in Docker passes here (13 tests); no real build or verify run yet |
 | `931af1a` | CI: the `chain` job's translator build ran outside its image (a comment line after a backslash): fixed; the `aot` job prints the failed tests' logs and the runner's CPU; the last runs' failures read: the two `tests` jobs were fixed by `fc0a8f1`, the `aot` vector run's mismatch is undetermined (its log expired) |
 | `d47d9b5` | Tests: the Python suites skip with a named reason where this PC lacks a module or a Mac tool (0 failures and 0 errors here now); `scripts/regress.py` loads Apple's libproc at its first use, so `regress.py impact` and `test_regress` run on Linux |
-| (this commit's parent) | Tools: the switch inventory covers the port's non-`DM_` switches (62 rows added); a retired name the docs quote is checked, not listed as a warning |
+| `c9b2d4e` | Tools: the switch inventory covers the port's non-`DM_` switches (62 rows added); a retired name the docs quote is checked, not listed as a warning |
+| `361d769` | Tools: `own_compilers.py` reports a missing Metal compiler when `xcrun` itself is missing |
+| `8ef8546` | Host tests: the profile half of the second-pack loop (`aot_synth`'s entry runs `synth_hot` for 20 ms; `t_second_pack` 27 checks). Verified in Docker |
+| `8caf012` | Launcher: the better-pack rule counts sampled functions (`# function` lines in the host's profile); `t_launcher_model` 154 checks. Verified in Docker |
+| `da9f34b` | Host tests: the runners run the script tests (`t_vk_spirv`, `t_second_pack`) from `host_scripts.tsv`. Verified in Docker on Linux; the PowerShell runner not run |
 
 Done on the machine, not in the repository: Docker emptied on the owner's request (every image and container, the owner's other projects' included; the data volumes `aitrade_pgdata`, `smilepetstore_pgdata`, `smilepetstore_redisdata` kept).
 
@@ -24,22 +28,20 @@ Done on the machine, not in the repository: Docker emptied on the owner's reques
 
 ### In progress: written by agents, NOT built and NOT verified
 
-Verification under way (started 2026-11-14): the branch `verify/wip-1` (worktree `.claude/worktrees/verify`) is the tip plus `wip/second-pack-profile`, `wip/launcher-rule-by-function` and `wip/runner-scripts`; `scripts/port_docker.sh verify --low-disk` runs on it (its first real run). Green: those three commits go onto `multiplataforma` and their `wip/*` branches are deleted. Not in it: `wip/provoking-strips-polygons` (its SPIR-V headers must be regenerated in the build image first).
+Verified and integrated on 2026-11-14 (nxaot CTest 28 of 28; host CTest 99 of 99 with and without `DM_AOT_ARENA_CHECK`, `NXAOT` given): the three rows that were `wip/second-pack-profile`, `wip/launcher-rule-by-function` and `wip/runner-scripts`. Two agents are taking `wip/hot-indirect-targets` and `wip/provoking-strips-polygons` to green in Docker (their worktrees under `.claude/worktrees/`, each the tip plus the branch's commit).
 
 No Docker image exists (the disk filled while ten worktrees were checked out, 280 MB each), so nothing below has been compiled or run. Each item is uncommitted in its worktree under `.claude/worktrees/`; a new session reads the diff there (`git -C <worktree> diff`), verifies it in Docker, and only then cherry-picks it. One build at a time: the two images (`nxnative-build` 1.9 GB, `nxnative-aot` 1.9 GB) do not fit beside the worktrees.
 
 | Worktree | Task | Files it owns |
 |---|---|---|
-| branch `wip/second-pack-profile` (`cfad601`, no worktree) | The profile half of `t_second_pack`: `aot_synth`'s entry runs `synth_hot` for 20 ms. Its agent ran 27 checks and the module's other tests green before the images went; the full suites were not run | `dm/tools/tests/aot_synth.py`, `dm/host/tests/t_second_pack.py` |
-| branch `wip/launcher-rule-by-function` (parked: one commit, no worktree) (on top of `cfad601`) | The launcher's "a better pack is possible" rule counts sampled functions, not instruction rows: the host's profile gets `# function` lines, the packer's `made` rows and the launcher read them | `dm/host/aot_profile.c`, `dm/launcher/launcher_model.*`, `scripts/build_ipa_from_nsp.py` (`made_rows`), their tests |
 | branch `wip/hot-indirect-targets` (parked: one commit, no worktree) | Hot indirect targets (design 12 of the recompiler): the host writes `<module>.targets.tsv`, nxaot guards the dominant target with a direct call at tier H | new `dm/host/aot_targets.c`, new `t_aot_targets.c`, `dm/tools/aot/src/build/pack.cpp`, `src/lift/*`, new `test_profile_targets.py` |
 | branch `wip/provoking-strips-polygons` (parked: one commit, no worktree) | The provoking vertex of converted quad strips and polygons; a flat-varying check through the guest GL layer. The SPIR-V headers under `shaders/gen` must be regenerated in the image | `dm/gfx/hostvk/vk_index.c`, `shaders/index_expand.comp`, `index_restart.comp`, `t_vk_provoking.c`, `t_vk_guest_gl.c` |
-| branch `wip/runner-scripts` (parked: one commit, no worktree) | The host test runners also run the Python-driver tests (`t_second_pack`, `t_vk_spirv`) | `dm/host/CMakeLists.txt` (two registrations), `run_host_tests.sh`, `run_win64_tests.ps1` |
 | branch `wip/apple-log-one-call` (parked: one commit, no worktree) | Apple's log macros write each line in one stdio call, as the port's `LOG` does since `9872bae`. Prepared for a Mac: not to be merged before a Mac or macOS CI run | `dm/host/dm.h` (Apple branches), `docs/reference/threads.md` |
 
 ### Left, not started
 
 - Verify and integrate every row above (Docker; the Apple one on a Mac).
+- `port.yml` uploads only `host_tests.tsv` for the Windows job (`host_scripts.tsv` is new); `t_astc_mesa` is registered outside `host_test` and is in no runner.
 - The launcher's rule and the packer's `made` rows for the targets file.
 - Converted quads still take another provoking vertex than the Switch's (declared: the fix changes the quad's diagonal).
 - The Metal backend takes the first vertex on every shape where the Switch takes the last (a Mac).

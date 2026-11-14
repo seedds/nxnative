@@ -18,6 +18,9 @@ include ../mac/min_os.mk
 # -O2 as the other native code here (libvpx, dav1d, the launcher; the iOS host builds at Xcode Release's -Os). Not -O3 (no measured gain over -O2) and not -flto, which moves
 # hle_bigstack.c's inline-assembly entry apart from its return path (SIGBUS in dm_bigstack_enter on Breath of the Wild, PR #556)
 CFLAGS=-O2 -g -Wall -Wno-unused-function -mmacosx-version-min=$(MACOS_MIN)
+ifeq ($(DM_METAL3),1)
+CFLAGS += -DDM_METAL3=1
+endif
 # Service-layer takeover hle_*.c files are included by wildcard: adding a file does not touch this line (avoids merge conflicts)
 SRC=main.c loader.c hle.c crash.c probe.c thread.c save_sync.c memstat.m haptics_apple.m pad_switch2_apple.m $(sort $(wildcard hle_*.c)) front_mac.m web_apple.m entry.S
 # NVN null device + nn::vi + the Vulkan layer (dm/gfx/)
@@ -51,7 +54,7 @@ $(DAV1D_LIB): $(DAV1D_OBJ)
 # compiles no MSL at run time. The iOS build (dm/ios/tools/gen_build.py) makes it with MSL_SDK=iphoneos, for the app's deployment target (MSL_MIN_iphoneos, as project.yml)
 MSL_SDK ?= macosx
 MSL_MIN_macosx = $(MACOS_MIN)
-MSL_MIN_iphoneos = 26.0
+MSL_MIN_iphoneos = $(if $(filter 1,$(DM_METAL3)),18.0,26.0)
 MSL_SRC = $(sort $(wildcard ../gfx/msl/*.metal))
 MSL_H = gen/msl-$(MSL_SDK)/host_msl_gen.h
 # Recheck the toolchain and target on every build; the generator keeps the header unchanged when its inputs match.

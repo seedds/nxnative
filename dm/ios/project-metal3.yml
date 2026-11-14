@@ -1,0 +1,9 @@
+# Experimental iOS 18 / BC-capable GPU build; base project remains Metal 4.
+include: project.yml
+options:
+  deploymentTarget:
+    iOS: "18.0"
+targets:
+  DmIOS:
+    settings:
+      OTHER_CFLAGS: $(inherited) -mcpu=apple-m1 -DDM_METAL3=1

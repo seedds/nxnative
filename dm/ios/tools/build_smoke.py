@@ -64,7 +64,11 @@ def main():
     config = run(sys.executable, ios / 'tools/gen_build.py', REPO / 'dm/host', gen, capture=True).stdout
     flags = run(sys.executable, ios / 'tools/gen_embed.py', patched, gen / 'embed.S', *modules, capture=True).stdout.strip()
     (gen / 'dm.xcconfig').write_text(config + f'OTHER_LDFLAGS = $(inherited) $(DM_FRAMEWORKS) {flags}\n')
-    run('xcodegen', 'generate')
+    if os.environ.get('DM_METAL3') == '1':
+        shutil.copyfile(ios / 'project-metal3.yml', project / 'project-metal3.yml')
+        run('xcodegen', 'generate', '--spec', 'project-metal3.yml')
+    else:
+        run('xcodegen', 'generate')
 
     # Exercise the real resource-copy phase with tiny, clearly synthetic data.
     romfs = root / 'romfs'

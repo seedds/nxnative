@@ -126,6 +126,7 @@ DM_NICK	switch	The account nickname the game sees (default `Player`)
 DM_NRO	switch	`0` turns off loading of the NRO modules the game's NRR files register (on by default): every `nn::ro::LoadModule` then fails
 DM_NRO_CAPTURE	diagnostic	folder: a `nn::ro::LoadModule` with no rewritten copy writes the image to `<folder>/<SHA-256>.nro` and ends the run (the NSP script's capture of an NRO the game decodes at run time)
 DM_NRO_DIR	path	folder of NROs the shader split reads like `main`, and in which it finds a CRA archive's file table (the NSP script sets it for a captured NRO)
+DM_NVN_A5288_C3	diagnostic	`=1`: for Ocarina of Time's Hi-Z task a5288d0a6c4971fd, logs c3[193].xy (the Hi-Z width and height that bound its scan), its uniform block's address and size and whether the tiles fit it, counts draws whose value changed by their submission's completion, and lists them for a command buffer that hung
 DM_NVN_ALLOCPROF	diagnostic	`=1` charges Metal allocation growth to each replayed op type and function, and logs command allocator sizes and each new texture (serial, size, format, storage); `=2` also gives each main submission a fresh command allocator and reports command memory by operation, by encoder, by submission size and the indirect-count multi-draws encoded
 DM_NVN_API	switch	`=<major>.<minor>` overrides the NVN API version `nvnDeviceGetInteger` reports (by default decided by the SDK version or the profile's `device_api`: 55.15 for SDK 11 and later, 53.313 before)
 DM_NVN_BARRIER	switch	How draw passes are ordered: `full` (default) waits for all earlier GPU work, `game` only for the previous pass's fragment stage unless the game set a barrier, `ab` alternates with the `DM_AB` phases
@@ -234,7 +235,8 @@ DM_NVN_TESS_MAX	diagnostic	`=<level>` the highest tessellation level (even, 2 to
 DM_NVN_TESS_ONLY	diagnostic	`=<hull key>,...` replays only the tessellated draws of those hull shaders (the first 16 hex digits of a key) and skips the others with a [RED] line; to tell their effects apart
 DM_NVN_TESS_STAGES	diagnostic	`=1` / `=2` stops a tessellated draw after the vertex capture / after the hull (and expansion) kernel, skipping the domain draw; to time the stages (default 3, all)
 DM_NVN_TEXCPU	diagnostic	`=1` logs non-packaged (non-swizzled) textures in CPU-visible pools
-DM_NVN_TEXDUMP	diagnostic	`=<frame>:<path>`, `size=<W>x<H>:<path>` or `layers=<n>:<path>`: saves every colour render target of that frame as PNG (`%d` = serial × 100 + layer × 10 + level)
+DM_NVN_TEXDUMP	diagnostic	`=<frame>:<path>`, `<first>-<last>:<path>`, `size=<W>x<H>:<path>` or `layers=<n>:<path>`: saves every colour render target of that frame (or of each frame of the range, with `_F<frame>` before the extension) as PNG (`%d` = serial × 100 + layer × 10 + level)
+DM_NVN_TEXDUMP_DEPTH	diagnostic	`=1` (or `=<W>x<H>` for one size) makes `DM_NVN_TEXDUMP` also save the depth attachments of the dumped frames: the raw depth (`_depth.raw`, a text header line) and an 8-bit PGM stretched over the depths below 1
 DM_NVN_TEXINFO	diagnostic	`=<W>x<H>` logs storage and description of every texture of that size on first use, registration and initialization (pool, flags, packaged, non-zero bytes, swizzles)
 DM_NVN_TEXRAW	diagnostic	`=<serial>,…` or `info` (the textures `DM_NVN_TEXINFO` picked out): saves those textures' raw bytes at the `DM_NVN_TEXDUMP` frame, with a text header line
 DM_NVN_TEXSNAP	diagnostic	`=<in-frame pass index>,…`: with `DM_NVN_TEXDUMP`, copies those passes' colour attachments as they end and saves them with the end-of-frame dump

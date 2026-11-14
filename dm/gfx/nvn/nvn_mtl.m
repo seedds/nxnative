@@ -240,6 +240,51 @@ static void gpu_lost_check(NSError *e, const char *where) {
     gpu_lost_release();
     front_gpu_lost();
 }
+// DM_NVN_A5288_C3=1 (diagnostic, off by default; #1605): Ocarina of Time's Hi-Z task a5288d0a6c4971fd scans a rectangle of its Hi-Z texture per object, clamped to
+// c3[193].xy - 1 (the Hi-Z width and height, ints at byte 3088 of Maxwell constant buffer 3, which is NVN uniform binding 0: c<n> is binding n - 3); its only loop. Each a5288 draw's c3[193].xy is kept with the fence of its command
+// buffer: a change of value is logged, and a GPU hang prints the values of the hung command buffer against those of the last command buffers that completed
+static _Atomic uint64_t g_cur_frame; static uint64_t g_stat_pass;   // tentative, defined below
+enum { A5C_N = 4096 };
+static struct { uint64_t fence, frame, pass, addr, size; int32_t x, y; uint8_t deferred; } g_a5c[A5C_N]; static _Atomic uint32_t g_a5c_i;
+static int a5c_fits(int32_t x, int32_t y, uint64_t size);
+static int a5c_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_A5288_C3"); v = e && *e == '1'; } return v; }
+static void a5c_report(NSError *e, uint64_t fence) {
+    if (!a5c_on() || !e || ![e.description containsString:@"kIOGPUCommandBufferCallbackErrorHang"]) return;
+    uint32_t end = atomic_load(&g_a5c_i); int nh = 0, np = 0; char hv[512] = "", pv[512] = ""; int32_t px[16], py[16]; int pn[16], npv = 0;
+    for (uint32_t k = 0; k < A5C_N && k < end; k++) { uint32_t i = (end - 1 - k) & (A5C_N - 1);
+        if (g_a5c[i].fence == fence) { if (nh++ < 12) { size_t o = strlen(hv); snprintf(hv + o, sizeof hv - o, " F%llu p%llu %d,%d@%#llx/%llu%s%s", (unsigned long long)g_a5c[i].frame, (unsigned long long)g_a5c[i].pass, g_a5c[i].x, g_a5c[i].y, (unsigned long long)g_a5c[i].addr, (unsigned long long)g_a5c[i].size, a5c_fits(g_a5c[i].x, g_a5c[i].y, g_a5c[i].size) ? "" : "(PAST the block)", g_a5c[i].deferred ? "(deferred update)" : ""); } }
+        else if (g_a5c[i].fence < fence && g_a5c[i].fence + 64 >= fence) { np++; int j = 0; while (j < npv && (px[j] != g_a5c[i].x || py[j] != g_a5c[i].y)) j++; if (j == npv && npv < 16) { px[npv] = g_a5c[i].x; py[npv] = g_a5c[i].y; pn[npv++] = 0; } if (j < 16) pn[j]++; } }
+    for (int j = 0; j < npv; j++) { size_t o = strlen(pv); snprintf(pv + o, sizeof pv - o, " %d,%d x%d", px[j], py[j], pn[j]); }
+    MLOG("[RED] a5288 c3[193].xy (Hi-Z size; the scan rectangle is clamped to it - 1): hung command buffer (fence %llu) %d draws:%s; the 64 command buffers before it %d draws, values:%s", (unsigned long long)fence, nh, nh ? hv : " none", np, npv ? pv : " none");
+}
+// The occlusion tiles are floats of the same block from byte 3120 (#1326, the maintainer): W x H tiles must fit in it, or the scan reads past the block (a page fault)
+static int a5c_fits(int32_t x, int32_t y, uint64_t size) { return x > 0 && y > 0 && x <= 65536 && y <= 65536 && 3120 + (uint64_t)x * (uint64_t)y * 4 <= size; }
+static void a5c_note(const char *key, uint64_t addr, uint64_t size, int deferred) {   // at a task-stage binding of c3 (uniform binding 0)
+    if (!a5c_on() || !key || strncmp(key, "a5288d0a6c4971fd", 16)) return;
+    int32_t x = 0, y = 0; if (size >= 194 * 16) { memcpy(&x, (const void *)(addr + 193 * 16), 4); memcpy(&y, (const void *)(addr + 193 * 16 + 4), 4); }
+    uint32_t i = atomic_fetch_add(&g_a5c_i, 1) & (A5C_N - 1);
+    g_a5c[i].fence = atomic_load(&g_fence) + 1; g_a5c[i].frame = atomic_load(&g_cur_frame); g_a5c[i].pass = g_stat_pass; g_a5c[i].x = x; g_a5c[i].y = y; g_a5c[i].deferred = (uint8_t)deferred;
+    g_a5c[i].addr = addr; g_a5c[i].size = size;
+    static int32_t lx = INT32_MIN, ly = INT32_MIN; static uint64_t lf, la, ls; static uint32_t nbad;
+    int fits = a5c_fits(x, y, size); float fx, fy; memcpy(&fx, &x, 4); memcpy(&fy, &y, 4);
+    if (!fits && nbad++ < 64) MLOG("[RED] a5288 c3[193].xy = %d,%d (as floats %g,%g) does not fit its block at %#llx (%llu bytes; %lld tiles from byte 3120) at frame %llu pass %llu%s", x, y, fx, fy, (unsigned long long)addr, (unsigned long long)size, (long long)x * y, (unsigned long long)g_a5c[i].frame, (unsigned long long)g_stat_pass, deferred ? "; an inline update of the block is deferred in this pass" : "");
+    if (x != lx || y != ly || addr != la || size != ls || g_a5c[i].frame >= lf + 900) {
+        MLOG("a5288 c3[193].xy = %d,%d at frame %llu pass %llu, block %#llx %llu bytes (Hi-Z size; worst-case scan rectangle %lld tiles, %s the block)%s", x, y, (unsigned long long)g_a5c[i].frame, (unsigned long long)g_stat_pass, (unsigned long long)addr, (unsigned long long)size, (long long)x * y, fits ? "within" : "PAST",
+             deferred ? ", an inline update of the block is deferred in this pass: memory may not hold the value the GPU reads" : "");
+        lx = x; ly = y; la = addr; ls = size; lf = g_a5c[i].frame; }
+}
+// At each submission's completion (DM_NVN_A5288_C3): its a5288 draws' c3[193].xy read again from memory. A different value means the block was rewritten while the GPU could
+// still read it (the CPU of the next frame, or an update the host applied late): the first hypothesis of #1326 for a garbage size
+static void a5c_complete(uint64_t fence) {
+    if (!a5c_on()) return;
+    static uint64_t ndraw, nchanged, nlog; uint32_t end = atomic_load(&g_a5c_i);
+    for (uint32_t k = 0; k < A5C_N && k < end; k++) { uint32_t i = (end - 1 - k) & (A5C_N - 1); if (g_a5c[i].fence < fence) break; if (g_a5c[i].fence != fence || g_a5c[i].size < 194 * 16) continue;
+        int32_t x, y; memcpy(&x, (const void *)(g_a5c[i].addr + 193 * 16), 4); memcpy(&y, (const void *)(g_a5c[i].addr + 193 * 16 + 4), 4); ndraw++;
+        if (x != g_a5c[i].x || y != g_a5c[i].y) { nchanged++;
+            if (nlog++ < 32 || !(nlog & 255)) MLOG("[RED] a5288 c3[193].xy of a draw at frame %llu pass %llu was %d,%d at encode and is %d,%d when its submission (fence %llu) completed: the block was rewritten while the GPU could read it (%llu of %llu draws so far)",
+                (unsigned long long)g_a5c[i].frame, (unsigned long long)g_a5c[i].pass, g_a5c[i].x, g_a5c[i].y, x, y, (unsigned long long)fence, (unsigned long long)nchanged, (unsigned long long)ndraw); } }
+    static uint64_t lastrep; if (ndraw >= lastrep + 20000) { lastrep = ndraw; MLOG("a5288 c3[193].xy at completion: %llu of %llu draws differ from their encode-time value", (unsigned long long)nchanged, (unsigned long long)ndraw); }
+}
 // DM_TEST_GPU_LOST=n (for testing): from the n-th submission on, imitate the revoked access without faulting the GPU: each submission's feedback reports it, in the shape the #1326
 // logs show, and the GPU's signal of its fence is left out (its work still runs)
 static int gpu_lost_test(void) {
@@ -2542,6 +2587,7 @@ uint64_t mtl_sub_commit(void) {
         uint64_t c0 = 0, c1 = 0; if (seg_ts()) { c0 = gpu_s_guest_ns(cb.GPUStartTime); c1 = gpu_s_guest_ns(cb.GPUEndTime); }
         if (cb.error) { atomic_store(&g_last_commit_error, 1); res_top_once(cb.error); static int n, nv; int victim = [cb.error.description containsString:@"InnocentVictim"]; if (victim ? nv++ < 1 : n++ < 8) MLOG("[RED] command buffer error details fence=%llu: %s | GPU %.3f→%.3f", (unsigned long long)fence, cb.error.description.UTF8String, cb.GPUStartTime, cb.GPUEndTime); if (!victim) MLOG("[RED] state of the failed submission fence=%llu: %s", (unsigned long long)fence, cctx.UTF8String); MLOG("[RED] command buffer execution error: %s", cb.error.localizedDescription.UTF8String); }
         char where[64]; snprintf(where, sizeof where, "fence %llu, its last command buffer", (unsigned long long)fence); cbs_feedback(cbs, cb.error, where);
+        a5c_report(cb.error, fence); a5c_complete(fence);
         gpu_lost_check(lost_test ? gpu_lost_test_error() : cb.error, "submission");
         post_complete(fence, c0, c1);
         if (atomic_load(&g_gpu_lost)) gpu_lost_release();   // the GPU signals none of these fences
@@ -11698,6 +11744,7 @@ static int encode_args_(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, i
             const p_bind_buf *u = reg < 16 ? &S.ubo[nvn_stage][reg] : NULL;
             id<MTLBuffer> use; slots[aid] = cbuf_slot(sh, nvn_stage, b, &use);
             USE(use, MTLResourceUsageRead);
+            if (nvn_stage == 3 && reg == 0 && a5c_on() && u && u->addr) { void *mb5; uint64_t mo5, g5; if (mtl_gpu_addr(u->addr, u->size ? u->size : 1, &mb5, &mo5, &g5)) a5c_note(sh->key, u->addr, u->size, g_nubd && ubd_hits(u->addr, u->addr + cb_len(sh, reg, u->size))); }   // DM_NVN_A5288_C3 (off by default): c3[193].xy of the task a5288d0a6c4971fd's binding 0
             void *mb; uint64_t mo, g_;
             if (bl && u && u->addr && mtl_gpu_addr(u->addr, u->size ? u->size : 1, &mb, &mo, &g_)) {
                 PD("B %llu st%d cb reg%d addr=%#llx size=%llu pool=%#llx+%#llx f=%g,%g,%g,%g", g_stat_pass, nvn_stage, reg, (unsigned long long)u->addr, (unsigned long long)u->size,
@@ -15984,6 +16031,7 @@ static void sub_cut(void) {
         if (sc) { if (k < SEG_CLK_N) { atomic_store(&sc->t[k][0], gpu_s_guest_ns(cb.GPUStartTime)); atomic_store(&sc->t[k][1], gpu_s_guest_ns(cb.GPUEndTime)); } seg_clk_put(sc); }
         if (cb.error) { atomic_store(&g_last_commit_error, 1); static int k; if (k++ < 8) MLOG("[RED] segment command buffer execution error: %s", cb.error.description.UTF8String); res_top_once(cb.error); }
         char where[64]; snprintf(where, sizeof where, "fence %llu, segment %u", (unsigned long long)cbs_fence, k); cbs_feedback(cbs, cb.error, where);
+        a5c_report(cb.error, cbs_fence);
         gpu_lost_check(cb.error, "segment");
     }];
     gmem_commit_patch();
@@ -16474,12 +16522,34 @@ static void td_layer_count(id<MTLTexture> t, NSUInteger lv) { if (t && (t.textur
 static void td_dump(void);
 // DM_NVN_TEXDUMP=size=WxH:path instead picks the frame by content: the first frame that opens a render pass whose first color attachment level is WxH (for one-off work whose frame differs between runs)
 static unsigned g_td_w, g_td_h;
+// DM_NVN_TEXDUMP=first-last:path dumps every frame of that range (inclusive), each file name ending in _F<frame> before its extension (a serial that lives across frames would
+// otherwise be overwritten). DM_NVN_TEXDUMP_DEPTH=1 also saves the depth attachments of the dumped frames (any size, or only WxH with DM_NVN_TEXDUMP_DEPTH=WxH): the raw
+// depth (<name>_depth.raw, header line: width height Metal format bytes per row) and an 8-bit PGM stretched over the depths below 1 (<name>_depth.pgm).
+// For the shadow investigation: a per-actor shadow map is a depth-only pass whose texture is made anew each frame, so neither DM_NVN_TEXRAW (by serial) nor the colour dump reaches it
+static long g_td_last = -1; static int g_td_depth; static unsigned g_td_dw, g_td_dh; static NSMutableArray *g_td_dlist;
+static void td_name(char *path, size_t n, long idx, const char *suffix) {   // the dump path for idx, with _F<frame> (range mode) and then suffix, or else the extension, at the end
+    snprintf(path, n, g_td_path, (int)idx);
+    char *dot = strrchr(path, '.'), *slash = strrchr(path, '/'); char ext[16] = "";
+    if (dot && (!slash || dot > slash)) { strlcpy(ext, dot, sizeof ext); *dot = 0; }
+    if (g_td_last >= 0) { char fr[32]; snprintf(fr, sizeof fr, "_F%ld", g_td_frame); strlcat(path, fr, n); }
+    strlcat(path, suffix ? suffix : ext, n);
+}
+static void td_dump_depth(void);
 void td_note(MTL4RenderPassDescriptor *pd, NSUInteger nc) {
-    if (g_td_frame == -2) { const char *e = getenv("DM_NVN_TEXDUMP"), *c = e ? strchr(e, ':') : NULL; g_td_frame = c ? atol(e) : -1; g_td_path = c ? c + 1 : NULL; g_td_list = [NSMutableArray array];
+    if (g_td_frame == -2) { const char *e = getenv("DM_NVN_TEXDUMP"), *c = e ? strchr(e, ':') : NULL; g_td_frame = c ? atol(e) : -1; g_td_path = c ? c + 1 : NULL; g_td_list = [NSMutableArray array]; g_td_dlist = [NSMutableArray array];
         if (c && !strncmp(e, "size=", 5) && sscanf(e + 5, "%ux%u", &g_td_w, &g_td_h) == 2) g_td_frame = LONG_MAX;
-        if (c && !strncmp(e, "layers=", 7)) { g_td_layers = atoi(e + 7); g_td_frame = (long)atomic_load(&g_cur_frame); } }
+        if (c && !strncmp(e, "layers=", 7)) { g_td_layers = atoi(e + 7); g_td_frame = (long)atomic_load(&g_cur_frame); }
+        if (c && isdigit((unsigned char)*e)) { const char *m = strchr(e, '-'); if (m && m < c) { g_td_last = atol(m + 1); if (g_td_last < g_td_frame) g_td_last = -1; } }
+        const char *d = getenv("DM_NVN_TEXDUMP_DEPTH"); g_td_depth = d && *d && strcmp(d, "0");
+        if (g_td_depth && sscanf(d, "%ux%u", &g_td_dw, &g_td_dh) != 2) g_td_dw = g_td_dh = 0;
+        if (g_td_last >= 0 || g_td_depth) MLOG("[texdump] frames %ld-%ld%s", g_td_frame, g_td_last >= 0 ? g_td_last : g_td_frame, g_td_depth ? ", with depth attachments" : ""); }
     if (g_td_frame < 0 || g_td_done) return;
     long f = (long)atomic_load(&g_cur_frame);
+    if (g_td_last >= 0 && f > g_td_frame) {   // range: dump the frame that ended, then go on with this one while it is in the range
+        td_dump();
+        if (f > g_td_last) return;
+        g_td_frame = f; g_td_done = 0;
+    }
     if (g_td_layers) {
         if (f != g_td_lframe) { if (g_td_lframe >= 0 && g_td_lcount >= g_td_layers) { MLOG("[texdump] frame %ld: %d draws into small array / cube layers", g_td_lframe, g_td_lcount); g_td_frame = g_td_lframe; td_dump(); return; }
             g_td_lframe = f; g_td_frame = f; g_td_lcount = 0; [g_td_list removeAllObjects]; }
@@ -16495,6 +16565,44 @@ void td_note(MTL4RenderPassDescriptor *pd, NSUInteger nc) {
         BOOL seen = NO; for (NSArray *e in g_td_list) if (e.count < 5 && [e[1] unsignedLongLongValue] == ser && [e[2] unsignedIntegerValue] == lv && [e[3] unsignedIntegerValue] == sl) seen = YES;
         if (!seen) [g_td_list addObject:@[t, @(ser), @(lv), @(sl)]];
     }
+    id<MTLTexture> dt = pd ? pd.depthAttachment.texture : nil;
+    if (g_td_depth && dt && dt.textureType == MTLTextureType2D && R.rt.depth) {
+        uint64_t ser = R.rt.depth->serial; NSUInteger lv = pd.depthAttachment.level;
+        if (!g_td_dw || (MAX(dt.width >> lv, 1ul) == g_td_dw && MAX(dt.height >> lv, 1ul) == g_td_dh)) {
+            BOOL seen = NO; for (NSArray *e in g_td_dlist) if ([e[1] unsignedLongLongValue] == ser && [e[2] unsignedIntegerValue] == lv) seen = YES;
+            if (!seen) [g_td_dlist addObject:@[dt, @(ser), @(lv)]];
+        }
+    }
+}
+static void td_dump_depth(void) {   // after mtl_finish_gpu (td_dump): see DM_NVN_TEXDUMP_DEPTH
+    for (NSArray *e in g_td_dlist) {
+        id<MTLTexture> t = e[0]; uint64_t ser = [e[1] unsignedLongLongValue]; NSUInteger lv = [e[2] unsignedIntegerValue];
+        MTLPixelFormat pf = t.pixelFormat; size_t bpp = pf == MTLPixelFormatDepth16Unorm ? 2 : 4;
+        if (pf != MTLPixelFormatDepth16Unorm && pf != MTLPixelFormatDepth32Float && pf != MTLPixelFormatDepth32Float_Stencil8) { MLOG("[texdump] depth ser=%llu format %lu skipped", ser, (unsigned long)pf); continue; }
+        if (t.storageMode == MTLStorageModeMemoryless) continue;
+        NSUInteger w = MAX(t.width >> lv, 1ul), h = MAX(t.height >> lv, 1ul), row = w * bpp;
+        id<MTLBuffer> buf = [g_dev newBufferWithLength:row * h options:MTLResourceStorageModeShared];
+        if (!buf) { MLOG("[texdump] depth ser=%llu: no %lu-byte buffer, skipped", ser, (unsigned long)(row * h)); continue; }
+        id<MTLCommandBuffer> cb = q_cb(); id<MTLBlitCommandEncoder> b = [cb blitCommandEncoder];
+        [b copyFromTexture:t sourceSlice:0 sourceLevel:lv sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(w, h, 1) toBuffer:buf destinationOffset:0 destinationBytesPerRow:row destinationBytesPerImage:row * h
+                   options:pf == MTLPixelFormatDepth32Float_Stencil8 ? MTLBlitOptionDepthFromDepthStencil : MTLBlitOptionNone];
+        [b endEncoding]; [cb commit]; [cb waitUntilCompleted];
+        float *z = malloc(w * h * sizeof *z); uint8_t *g = malloc(w * h);
+        if (!z || !g) { free(z); free(g); continue; }
+        for (size_t i = 0; i < w * h; i++) z[i] = bpp == 2 ? ((const uint16_t *)buf.contents)[i] / 65535.0f : ((const float *)buf.contents)[i];
+        float lo = INFINITY, hi = -INFINITY; size_t n1 = 0;
+        for (size_t i = 0; i < w * h; i++) { if (z[i] >= 1.0f) { n1++; continue; } lo = MIN(lo, z[i]); hi = MAX(hi, z[i]); }
+        for (size_t i = 0; i < w * h; i++) g[i] = z[i] >= 1.0f ? 255 : hi > lo ? (uint8_t)lrintf(254.0f * (z[i] - lo) / (hi - lo)) : 0;
+        char path[1024]; FILE *f;
+        td_name(path, sizeof path, (long)(ser * 100 + lv), "_depth.raw");
+        if ((f = fopen(path, "wb"))) { fprintf(f, "%lu %lu %lu %lu\n", (unsigned long)w, (unsigned long)h, (unsigned long)pf, (unsigned long)row); fwrite(buf.contents, 1, row * h, f); fclose(f); }
+        td_name(path, sizeof path, (long)(ser * 100 + lv), "_depth.pgm");
+        if ((f = fopen(path, "wb"))) { fprintf(f, "P5\n%lu %lu\n255\n", (unsigned long)w, (unsigned long)h); fwrite(g, 1, w * h, f); fclose(f); }
+        MLOG("[texdump] frame %ld depth ser=%llu lv=%lu format %lu %lux%lu: %zu texels at 1 (cleared), the rest %g..%g → %s", g_td_frame, ser, (unsigned long)lv, (unsigned long)pf, (unsigned long)w, (unsigned long)h, n1,
+             lo == INFINITY ? 0.0 : (double)lo, hi == -INFINITY ? 0.0 : (double)hi, path);
+        free(z); free(g);
+    }
+    [g_td_dlist removeAllObjects];
 }
 void td_note_layer(id<MTLTexture> t, uint64_t ser, NSUInteger lv, NSUInteger sl) {   // a slice-merged pass's other layers (see g_sm_plan)
     if (g_td_frame < 0 || g_td_done || g_td_frame == LONG_MAX || (long)atomic_load(&g_cur_frame) != g_td_frame || !t) return;
@@ -16577,7 +16685,8 @@ static void td_dump(void) {
         MTLSamplerDescriptor *sd = [MTLSamplerDescriptor new]; sp = [g_dev newSamplerStateWithDescriptor:sd];
         if (!ps) { MLOG("[RED] TEXDUMP pipeline failed %s", e.localizedDescription.UTF8String); return; }
     }
-    MLOG("[texdump] frame %ld: %lu color targets", g_td_frame, (unsigned long)g_td_list.count);
+    MLOG("[texdump] frame %ld: %lu color targets, %lu depth targets", g_td_frame, (unsigned long)g_td_list.count, (unsigned long)g_td_dlist.count);
+    td_dump_depth();
     // DM_NVN_TEXRAW=index,...: save raw bytes by texture index (including 3D; file: %d in the path is replaced with the index, suffix .raw, first-line text header: width height depth format bytes-per-row)
     for (const char *q = getenv("DM_NVN_TEXRAW"); q && *q; q = strchr(q, ',') ? strchr(q, ',') + 1 : q + strlen(q)) {
         if (!strncmp(q, "info", 4)) {   // DM_NVN_TEXRAW=info: the textures remembered by DM_NVN_TEXINFO
@@ -16626,7 +16735,7 @@ static void td_dump(void) {
         id<MTLRenderCommandEncoder> en = [cb renderCommandEncoderWithDescriptor:rp];
         [en setRenderPipelineState:ps]; [en setFragmentTexture:v atIndex:0]; [en setFragmentSamplerState:sp atIndex:0];
         [en drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3]; [en endEncoding]; [cb commit]; [cb waitUntilCompleted];
-        char path[1024]; snprintf(path, sizeof path, g_td_path, (int)(ser * 100 + sl * 10 + lv));
+        char path[1024]; td_name(path, sizeof path, (long)(ser * 100 + sl * 10 + lv), NULL);
         if (e.count > 4) { snprintf(path, sizeof path, g_td_path, 0); char *dot = strrchr(path, '.'); char ext[16] = ""; if (dot) { strlcpy(ext, dot, sizeof ext); *dot = 0; }
             char tail[64]; snprintf(tail, sizeof tail, "_s%03d_%llu_%lu%s", [e[4] intValue], (unsigned long long)ser, (unsigned long)lv, ext); strlcat(path, tail, sizeof path); }   // TEXSNAP copy
         MLOG("[texdump] ser=%llu lv=%lu layer %lu format %lu %lux%lu", ser, (unsigned long)lv, (unsigned long)sl, (unsigned long)t.pixelFormat, (unsigned long)w, (unsigned long)h);

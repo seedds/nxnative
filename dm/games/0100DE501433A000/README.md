@@ -29,16 +29,20 @@ Status: **plays on the Mac and on the iPhone.** On 2.0.2.2: the boot, the title,
 
 ## Frame rate
 
-- 60 fps on the iPhone. The visible problem there is first-time pipeline hitches: before the prewarm list, 18 of 33 long frames in a session were pipeline creation (about 690 ms in all, 50–150 ms each). With the list, prewarm prepares about 2,000 shaders and 450 pipelines at boot (about 1 s, in the background), but the hitches stayed at about 2 a minute: each loads shader libraries of content neither recording had played.
-- A Metal 4 pipeline archive (`pso_mtl4 on`, `pso_gpu g18p g19p`) did not help: the iPhone opened the `applegpu_g19p` archive and passed its probe, but found none of its 647 lookups. The archive holds bases for the static `shader_pairs.tsv`, while play uses other pairs, and `pso_pairs.tsv` is empty. The profile has neither key.
+- On `main` (below), 60 fps on the iPhone with almost no pipeline hitches. In the first run's play the prewarm list covered all but 6 pipelines, and only one of them stalled a frame (a 56 ms wait). `pso_user.tsv` took the 6, and the next start's prepare step built them before the first frame: the same route had no pipeline wait over 20 ms (`DM_PSO_WAITLOG=1`). The other long frames, 20–24 a run and 23–98 ms, are not pipelines (`[longframe]` lines with no new pipeline: texture uploads, submit, the game thread).
+- The front end's earlier builds hitched about 2 a minute here, each loading shader libraries of content the list had not played; that engine had no `pso_user.tsv`. A Metal 4 pipeline archive (`pso_mtl4 on`, `pso_gpu g18p g19p`) found none of its 647 lookups there. The profile has neither key: the default `MTLDevice` path is enough with the list and `pso_user.tsv`.
 
 ## Checked on main
 
-On `main` at `f63ecbd4` (chain `d6b05d7481e5`), M5 Pro, macOS 27.2, 2026-11-13: the NSP script (`--platform mac`) on the base game and 2.0.2.2 rewrites the three modules (2:28), splits 11,923 shaders whose data rows match this profile's tables (2:08), builds all 11,923 Mac shaders from an empty cache (7:15) and the pipeline prebuild (1:11). A headless boot from a fresh save goes through the logos to the title (`Version 2.0.2`) and the EULA in about 2 minutes, about 60 fps (7,200 frames in 125 s), with no red line and no crash; the log says `refused an NRR that registers only online SDKs`. No IPA was built from `main`.
+On `main` at `f63ecbd4` (chain `d6b05d7481e5`), M5 Pro, macOS 27.2, 2026-11-13: the NSP script (`--platform mac`) on the base game and 2.0.2.2 rewrites the three modules (2:28), splits 11,923 shaders whose data rows match this profile's tables (2:08), builds all 11,923 Mac shaders from an empty cache (7:15) and the pipeline prebuild (1:11). A headless boot from a fresh save goes through the logos to the title (`Version 2.0.2`) and the EULA in about 2 minutes, about 60 fps (7,200 frames in 125 s), with no red line and no crash; the log says `refused an NRR that registers only online SDKs`.
+
+On `main` at `8323300e` (iOS chain `d254f45e8002`), iPhone19,4, iOS 27.2, 2026-11-14: the NSP script (`--platform ios`) builds the IPA (2.6 GB); signed with a free team's profile and installed as its own app. Two runs, the first from a fresh save, each about 6–7 minutes of Journey from Area 1: 60 fps (frame time p50 16.7 ms, p95 about 19 ms), footprint up to 3.8 GB, no crash. The first prepare built 2,304 lines (1,926 shaders, 364 render and 14 compute pipelines) in 9.7 s behind the progress screen; later starts take 0.1 s. Each run has the 2 red lines below.
+
+- An app signed without `com.apple.developer.kernel.increased-memory-limit` gets 3.26 GB of room (`[mem] guest memory: … room to the memory limit`) instead of about 8 GB, and iOS ends the game at that limit about 50 s into Journey, with no line in the log.
 
 ## Open
 
-- First-time pipeline hitches on the iPhone, about 2 a minute (above).
+- Two red lines a run on the iPhone: `texture type mismatch` for shader `0aab7536b2c63605_b`, slots 128 and 129 (declared 2D, bound to buffer textures), which read 0; what those draws should show was not checked.
 - Other Journey areas, Effect modes and Zone Battle were not played on 2.0.2.2.
 - `pad_layout` keeps its default (`simple`); the touch controls were not checked for this game.
 - Online modes (above).

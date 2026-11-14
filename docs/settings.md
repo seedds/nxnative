@@ -41,6 +41,10 @@ Hades II goes up to 300 %: it renders its whole picture, the HUD and text includ
 
 **Docked** renders at the Switch's TV resolution, **Handheld** at its lower handheld resolution, which is lighter on the phone and can give a higher frame rate.
 
+### TV resolution
+
+Switch 2 games, docked. The output resolution the game is told its TV takes, as on a Switch 2 under System Settings > TV Output: **Automatic**, the default, picks the largest of 720p, 1080p, 1440p and 4K that the screen holds (4K on a 4K screen); the others fix it there, all 16:9. On the Mac the app also sends the window a picture of that size, which macOS scales to the screen: on a 4K screen 1080p skips upscaling the picture to 4K (the Metal HUD shows the smaller size), at the cost of a softer picture. A game that asks for its TV's resolution also renders for it: Fire Emblem Fortune's Weave renders less for 1080p than for 1440p and 4K. Ocarina of Time does not ask, so for it only the picture sent to the window changes. Handheld mode keeps the Switch 2's own 1080p screen.
+
 ### Upscaling
 
 A game that renders below the screen's resolution is scaled up to the screen. **Standard**, the default, scales smoothly; **MetalFX** uses Apple's MetalFX upscaler, which sharpens edges and text as it scales.
@@ -268,6 +272,7 @@ A line like `DM_PRESENT_SNAP=0` in `Documents/env.txt` (in the Files app, under 
 | Frame rate | `DM_FPS_TARGET` | `30`, `60`, `120` (Mac, games with `fps_max 120`) |
 | Render scale | `DM_RENDER_SCALE` | `0.5` to `1.0` (Hades II: to `3.0`) |
 | Console mode | `DM_OPMODE` | `1` docked, `0` handheld |
+| TV resolution | `DM_DISPLAY_RES` | `auto`, `720`, `1080`, `1440`, `2160` |
 | Game language | `DM_LANG` | a language code, such as `ja` |
 | Display mode (Mac) | `DM_FULLSCREEN` | `1` fullscreen, `0` a window |
 | Cloud saves folder (Mac) | `DM_SAVE_SYNC` | a folder; `icloud`: iCloud Drive › nxnative Saves; `0`: off |

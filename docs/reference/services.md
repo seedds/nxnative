@@ -1468,7 +1468,7 @@ Most service calls can be found before they crash, before the first boot or the 
 
 - **Symptom:** a Switch 2 game presents at 720p, with its upscaler at the matching low size.
 - **Cause:** the game chooses its output from `nn::vi::QueryDisplayBufferMaxResolution` (its tables: 0 is 720p, 1 is 1080p, 2 is 1440p, 3 is 4K), and what the game got before the hook gave it 720p.
-- **Fix:** `hle_vi.c` answers as a Switch 2 does: in handheld mode its own 1080p screen; in console mode the largest of the four that the display the game is shown on holds, as a docked Switch 2 does with its TV. The display's size comes from the front end (`front_display_pixels`: on the Mac the window's screen in its current mode, an iPhone's or iPad's screen), 1080p when it is not known. The host logs the answer once.
+- **Fix:** `hle_vi.c` answers as a Switch 2 does: in handheld mode its own 1080p screen; in console mode the largest of the four that the display the game is shown on holds, as a docked Switch 2 does with its TV. The display's size comes from the front end (`front_display_pixels`: on the Mac the window's screen in its current mode, an iPhone's or iPad's screen), 1080p when it is not known. The host logs the answer once. `DM_DISPLAY_RES` (the launcher's TV resolution) fixes the docked answer at one of the four, as a Switch 2's TV output setting does.
 - **Found on:** [Fire Emblem Fortune's Weave](../../dm/games/04007EF01F8AE000/README.md): its DLSS output is 2048x1152 for 1440p and for 4K, from 1024x576; for 1080p it renders 960x540 into 1920x1080, a fifth fewer pixels at each stage, and the output matches the screen.
 
 ### A game that decodes its code at run time

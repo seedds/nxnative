@@ -635,11 +635,17 @@ void front_picture_shape(int w, int h) { if (w > 0 && h > 0) g_picture_aspect = 
 }
 - (void)mouseUp:(NSEvent *)e { (void)e; if (g_mouse_down) { g_mouse_down = 0; dm_touch_set(NULL, 0); } }
 // The drawable follows the view in pixels: a layer assigned to a layer-backed view kept the drawable at the first window's 1280x720 in fullscreen too, so the game picture was
-// scaled down to it and up again by the compositor
+// scaled down to it and up again by the compositor. A TV resolution (DM_DISPLAY_RES, docked) caps it instead, as a Switch 2 sends its TV that size: the drawable is scaled so the
+// picture the present fits into it is no wider or taller than that size, and the compositor scales the layer to the window. A 4K screen then presents 1080p, not a 4K upscale
 - (void)fitDrawable {
     CAMetalLayer *l = (CAMetalLayer *)self.layer; if (![l isKindOfClass:CAMetalLayer.class] || !self.window) return;
     l.contentsScale = self.window.backingScaleFactor;
-    NSSize px = [self convertSizeToBacking:self.bounds.size]; if (px.width < 1 || px.height < 1 || CGSizeEqualToSize(l.drawableSize, px)) return;
+    NSSize px = [self convertSizeToBacking:self.bounds.size]; int tw, th;
+    if (px.width >= 1 && px.height >= 1 && dm_tv_size(&tw, &th)) {
+        double a = g_picture_aspect, pw = fmin(px.width, px.height * a), s = fmin(1, fmin(tw / pw, th / (pw / a)));
+        px = NSMakeSize(round(px.width * s), round(px.height * s));
+    }
+    if (px.width < 1 || px.height < 1 || CGSizeEqualToSize(l.drawableSize, px)) return;
     l.drawableSize = px; LOG("front end: drawable %.0fx%.0f", px.width, px.height);
 }
 - (void)setFrameSize:(NSSize)s { [super setFrameSize:s]; [self fitDrawable]; }

@@ -213,7 +213,7 @@ flowchart LR
 
 ### Performance HUD
 
-Apple's performance overlay over the game: frame rate, frame and GPU times, memory. Useful to see what a setting changes; leave it off for play.
+Apple's performance overlay over the game: frame rate, frame and GPU times, memory. Useful to see what a setting changes; leave it off for play. On the iPhone and iPad, Metal needs it at launch: switch it on, press **Play**, then quit and open the app again; from then on the saved choice shows it, and switching it off before **Play** hides it at once.
 
 ### Reset to tested defaults
 

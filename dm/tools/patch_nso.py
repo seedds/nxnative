@@ -937,6 +937,7 @@ def func_of(a):
     if i >= 0: return (starts[i], starts[i + 1] if i + 1 < len(starts) else TEXT_END)
     return (max((e for s, e in DATA_BLOCKS if e <= a), default=0), starts[0]) if starts else (a, a + 4)
 done = set(); windows = []; jumps = {}; tabjumps = {}; tailcalls = set(); retries = []
+bit_test_protected = set()   # accepted bit-test tables: entries here would bypass their base/guard proof; checked again after every table is resolved
 def guarded_count(ctx, kc, kl):
     """How many entries the compare ctx[kc] (cmp index,#N) lets the table load ctx[kl] read, or None when no branch on its flags guards the load. A compare bounds the index only
     through the branch that acts on it: cmp w18,#4; b.hi exit; cmp w18,#1; ldrsw x18,[x4,x18,lsl #2] has a nearer compare that bounds nothing, and taking it read 2 entries of a table of 5
@@ -1064,6 +1065,46 @@ def jump_offsets(insl, j, copy_first=False, far_base=False, forward_base=False):
     if page is None: return None
     tb = page + lo
     return [tb + struct.unpack_from('<i', IMG, tb + 4 * i)[0] for i in range(n)]
+def jump_tbnz_masked(insl, j):
+    """tbnz wS,#B,exit; and xI,xS,#((1<<(B+1))-1); ldrsw xE,[xBase,xI,lsl #2]; add x18,xE,xBase; br x18.
+    Ultra Street Fighter II main+0x590ee8 (PikaMan80, issue #960): on fall-through bit B is zero, so exactly 2^B entries remain after the mask.
+    Require the exact adjacent dispatch, a straight-line full-width adrp/add base, and no entry past its adrp. Return (targets, protected addresses), or None.
+    The driver checks the protected addresses again against later tables and branches from other functions before rewriting anything."""
+    if j < 4: return None
+    guard, mask, ld, add, jump = insl[j - 4:j + 1]
+    if guard.mnemonic != 'tbnz' or mask.mnemonic != 'and' or ld.mnemonic != 'ldrsw' or add.mnemonic != 'add' or jump.mnemonic != 'br' or jump.op_str != 'x18': return None
+    check = re.fullmatch(r'w(\d+), #(0x[0-9a-f]+|\d+), #(?:0x[0-9a-f]+|\d+)', guard.op_str)
+    masked = re.fullmatch(r'x(\d+), x(\d+), #(0x[0-9a-f]+|\d+)', mask.op_str)
+    load = re.fullmatch(r'(x\d+), \[(x\d+), x(\d+), lsl #2\]', ld.op_str)
+    if not check or not masked or not load: return None
+    ent, base, idx = load.groups(); bit = int(check.group(2), 0)
+    if bit > 31 or masked.group(2) != check.group(1) or masked.group(1) != idx or int(masked.group(3), 0) != (1 << (bit + 1)) - 1: return None
+    if base in (ent, 'x' + idx) or add.op_str != f'x18, {ent}, {base}': return None
+    def control(p):
+        return p.mnemonic in ('b', 'bl', 'br', 'blr', 'ret', 'cbz', 'cbnz', 'tbz', 'tbnz', 'svc', 'hvc', 'smc', 'brk', 'hlt', 'eret', 'drps') or p.mnemonic.startswith('b.')
+    lo = None; head = None
+    for k in range(j - 5, -1, -1):
+        p = insl[k]
+        if control(p): return None   # a lexical writer across a branch or call does not prove the reaching value
+        if not writes_reg(p, base): continue
+        low = re.fullmatch(rf'{base}, {base}, #(0x[0-9a-f]+|\d+)', p.op_str) if p.mnemonic == 'add' else None
+        if lo is None and low: lo = int(low.group(1), 0); continue
+        if lo is not None and p.mnemonic == 'adrp' and p.op_str.startswith(base + ','): head = k; break
+        return None   # includes 32-bit writes and copies whose source is not proven here
+    if head is None or lo is None: return None
+    run = insl[head:j + 1]
+    if any(q.address != p.address + 4 for p, q in zip(run, run[1:])): return None
+    protected = {p.address for p in run[1:]}
+    for p in insl:
+        if p.mnemonic in ('b', 'bl', 'cbz', 'cbnz', 'tbz', 'tbnz') or p.mnemonic.startswith('b.'):
+            if p.operands[-1].imm in protected: return None
+    if any(protected.intersection(targets) for targets in tabjumps.values()): return None
+    if any(any(b <= t < b + 4 * width for t in protected) for b, width in jumps.values()): return None
+    tb = insl[head].operands[1].imm + lo; n = 1 << bit
+    if tb < 0 or tb + 4 * n > len(IMG): return None
+    targets = [tb + struct.unpack_from('<i', IMG, tb + 4 * i)[0] for i in range(n)]
+    addresses = {p.address for p in insl}
+    return (targets, protected) if all(t in addresses and t not in protected for t in targets) else None
 def jump_zero_extended(insl, j):
     """cmp wS,#N; b.hi exit; and xI,xS,#0xffffffff; ldrsw xE,[xB,xI,lsl #2]; add x18,xE,xB; br x18.
     Mario Tennis Aces 1.0.0 main+0x35837c zero-extends the checked value rather than checking another masked copy. Require straight-line data flow from the guard to the br,
@@ -1540,6 +1581,8 @@ for fa, fb in funcs:
                 if not tgt: tgt = jump_masked_not(insl, j)   # a complemented low-bit index with its zero case branched away: exactly mask entries
                 if not tgt: tgt = jump_offsets(insl, j, copy_first=True, far_base=True, forward_base=True)   # a unique base initialized in a later block that branches backward
                 if not tgt: tgt = jump_zero_extended(insl, j)   # a 32-bit checked value zero-extended into the index, with its full path to the br verified
+                if not tgt and (bounded := jump_tbnz_masked(insl, j)):
+                    tgt, protected = bounded; bit_test_protected.update(protected)
                 assert tgt, f'jump table {ins.address:x}'
                 tabjumps[ins.address] = tgt; continue
             jumps[ins.address] = (base, width)
@@ -1575,12 +1618,18 @@ if far_into:   # functions analysed in pieces (pieces above): their far b / bl, 
     for at, to in far_into: assert to not in win_mid and to not in rmid_all, f'far branch into a window or retry block {at:x}'
     for at, tgt in tabjumps.items(): assert not any(t in win_mid or t in rmid_all for t in tgt), f'jump table target into a window or retry block {at:x}'
 
+# Later tables and direct branches from other functions were not part of a bit-test table's entry proof above.
+if bit_test_protected:
+    for at, targets in tabjumps.items():
+        assert not bit_test_protected.intersection(targets), f'jump table bypasses bit-test table proof {at:x}'
+    for at, (base, width) in jumps.items():
+        assert not any(base <= t < base + 4 * width for t in bit_test_protected), f'jump table bypasses bit-test table proof {at:x}'
 # Direct branches from other functions were not part of the per-function entry check above.
 for w in windows:
     if w[0].address in newly_accepted:
         assert all(b.address == a.address + 4 for a, b in zip(w, w[1:])), f'noncontiguous window {w[0].address:x}'
 new_mid = {x.address for w in windows if w[0].address in newly_accepted for x in w[1:]}
-if new_mid:
+if new_mid or bit_test_protected:
     for start, end in CODE_RANGES:
         for at in range(start, end - 3, 4):
             w = struct.unpack_from('<I', IMG, at)[0]; t = w >> 24
@@ -1589,6 +1638,7 @@ if new_mid:
             elif t & 0x7C == 0x14: d = w & 0x3FFFFFF; d -= (d & 0x2000000) << 1
             else: continue
             dest = at + 4 * d
+            assert dest not in bit_test_protected, f'branch bypasses bit-test table proof {at:x}'
             if dest in new_mid: assert func_of(at) == func_of(dest), f'branch into window from another function {at:x}'
 
 def put_branch(at, to): struct.pack_into('<I', IMG, at, BX(at, to))

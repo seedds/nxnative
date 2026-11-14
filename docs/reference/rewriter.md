@@ -127,6 +127,14 @@ To enroll a cut for any game's own module:
 - **Check:** this is a separate fallback after every earlier recognizer fails. Adding the rule inside `jump_offsets` before its existing searches could change a previously recognized table's extent by selecting a nearer compare. The fallback preserves those earlier results; synthetic full-rewriter tests cover both the new five-entry form and an existing eight-entry match with a nearer five-entry check.
 - **Found on:** Mario Tennis Aces (0100BDE00862A000) `main+0x35837c` (1.0.0), a five-entry table whose targets all lie in the function ([PR #778](https://github.com/seedds/nxnative/pull/778)). The contributor reported that `main`, `subsdk0` and `sdk` rewrite with zero-extension recognition; gameplay validation remains open.
 
+### Bit-test bounded masked jump-table index
+
+- **Symptom:** `jump table 590ee8` assertion in `patch_nso.py` on Ultra Street Fighter II: The Final Challengers (SDK 1.3.1).
+- **Cause:** `tbnz wS,#B,exit; and xI,xS,#((1<<(B+1))-1); ldrsw xE,[xBase,xI,lsl #2]; add x18,xE,xBase; br x18` bounds the index without a compare. The branch excludes values with bit B set; the mask removes every higher bit, leaving exactly `2^B` table entries. Reading the mask plus one would include unreachable entries.
+- **Fix:** `jump_tbnz_masked` is tried after the existing recognizers. It requires the adjacent dispatch instructions, the same tested and masked source, a full-width table base built by `adrp` / `add` on a straight-line path, and an in-image table whose targets are decoded instructions. Calls, traps, control-flow changes, register clobbers and undecodable gaps break the proof. No branch or table target may bypass the base initialization or guard; the complete module's direct branches and all resolved tables are checked again before rewriting, including tables encountered later.
+- **Limits:** base copies and base initialization across control flow are not proven by this fallback. The separate long-context dispatch at `main+0x7d3000` and the game's SDK 1 audio support are outside this rule; recognizing this form alone does not establish full game compatibility.
+- **Found on:** [PikaMan80's Ultra Street Fighter II report and source patch (#960)](https://github.com/seedds/nxnative/issues/960), `main+0x590ee8`, title ID `01007330027EE000`, update v131072. There is no repository profile for this title.
+
 ### Index masked in the block that branches to the dispatch
 
 - **Symptom:** `jump table <addr>` assertion in a Unity / IL2CPP `main` whose dispatch checks a fresh mask of another register than the one it indexes with.
@@ -140,7 +148,7 @@ To enroll a cut for any game's own module:
 
 - **Symptom:** `jump table 6eea88` or `jump table 6eeac0` assertion in `patch_nso.py` on Return of the Obra Dinn 1.0.1.
 - **Cause:** Unity's IL2CPP output uses `tst w15,#7; b.eq exit; mvn w15,w15; and x15,x15,#7; ldrsw x15,[xB,x15,lsl #2]; add x18,x15,xB; br x18`. The zero test excludes one masked value before complementing it: the reachable indices are 0–6, so the table holds seven entries. Treating the `tst` immediate as a `cmp` bound reads an eighth word from the next table, introducing a target the guest cannot reach through this dispatch.
-- **Fix:** the last fallback, `jump_masked_not`, accepts this contiguous guard / complement / low-bit-mask form, reads exactly the mask's number of entries, follows the table base through `copied_base`, and requires decoded instruction targets in the function. It rejects intervening register writes or control flow, direct branches / calls and already resolved tables entering after the guard, and its own table targets bypassing the guard. Earlier recognizers are unchanged.
+- **Fix:** a fallback, `jump_masked_not`, accepts this contiguous guard / complement / low-bit-mask form, reads exactly the mask's number of entries, follows the table base through `copied_base`, and requires decoded instruction targets in the function. It rejects intervening register writes or control flow, direct branches / calls and already resolved tables entering after the guard, and its own table targets bypassing the guard. Earlier recognizers are unchanged.
 - **Found on:** [Return of the Obra Dinn](../../dm/games/010032E00E6E2000/README.md) 1.0.1 (`main` build `9e93a6566aaa27418dd2435d8d5dffe5`), two dispatches in the function at `main+0x6ee8c0`.
 - **Check:** `dm/tools/tests/test_jump_copies.py` exercises the exact seven-entry extent with an invalid next word, mismatched guards / masks / sources, register clobbers, incoming edges, undecodable words and invalid targets. The extracted update's two sites resolve to seven targets each; this is static verification, with gameplay validation recorded in the game note.
 

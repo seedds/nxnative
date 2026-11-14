@@ -17,6 +17,8 @@ void nvn_dirty_own_thread(void);                                   // The callin
 uint64_t nvn_dirty_own_writes(void);                               // Writes to protected pages by that thread so far (faults and host writes): the ones in order with what it replays
 void nvn_dirty_touch(void);                                        // Moves the generation as a write does, with no page written: whoever remembers "nothing written since" by it asks its pages again
 uint64_t nvn_dirty_now(void);                                      // Current generation: take the content's stamp before nvn_dirty_protect and before reading it
+size_t nvn_dirty_release(const void *addr, size_t len, const void *expect);   // give back whole protected host pages whose bytes (expect) the host keeps elsewhere; → bytes given
+uint64_t nvn_dirty_released(void);                                 // bytes given back so far
 int nvn_dirty_since(const void *addr, size_t len, uint64_t stamp); // Covered pages were written after the stamp -> 1
 const void *nvn_dirty_span(const void *addr, size_t len);          // The tracked range holding the span (a handle to keep; NULL = untracked)
 int nvn_dirty_since_cached(const void **span, const void *addr, size_t len, uint64_t stamp);   // nvn_dirty_since keeping the last range found in *span

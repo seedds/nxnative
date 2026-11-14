@@ -438,6 +438,41 @@ int main(void) {
             check(first_len == want[c] && m.s.k == 2 && m.s.failed == 1, b);
         }
     }
+    {   // the frame time a game steps by (nvn_fdelta_next)
+        nvn_fdelta f = {0}; uint64_t t = 1000; float v = 1;
+        check(nvn_fdelta_next(&f, t) == 0, "frame time: the first present has none");
+        for (int i = 0; i < 20; i++) v = nvn_fdelta_next(&f, t += 16666667);
+        check(v == 0, "frame time: 0 at 60 fps, the game's own step");
+        for (int i = 0; i < 20; i++) v = nvn_fdelta_next(&f, t += 50000000);
+        check(fabsf(v - 0.05f) < 0.0001f, "frame time: 50 ms at 20 fps");
+        v = nvn_fdelta_next(&f, t += 2000000000);
+        check(v > 0.05f && v < 0.0625f, "frame time: a 2 s stall counts 0.1 s in the mean");
+        for (int i = 0; i < 20; i++) v = nvn_fdelta_next(&f, t += 200000000);
+        check(fabsf(v - 4.0f / 60) < 0.0001f, "frame time: stops at 4 frames of 60 fps");
+    }
+    {   // a game that steps by max(step, measured): lost time is made up once (nvn_fstep_measured)
+        static const struct { double shown[20]; int n; uint64_t paid_min, paid_max; const char *name; } c[] = {
+            {{1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 2}, 20, 0, 1, "measured step: one late frame in 20 on a 60 Hz screen is made up by the measured time, no whole vsync"},
+            {{1.005}, 1, 20, 6000, "measured step: under 1.01 frames nothing is measured and whole vsyncs keep game time"},
+            {{1.07}, 1, 0, 1, "measured step: at 56 fps every frame steps 1.07, no whole vsync"},
+            {{1, 1, 1, 1.5}, 4, 0, 1, "measured step: a frame in four shown a 120 Hz refresh longer is spread over the frames around it"},
+            {{0.97, 1.03}, 2, 0, 0, "measured step: 60 fps with uneven intervals keeps the game's own step"},
+            {{1.2}, 1, 0, 1, "measured step: at 50 fps every frame steps 1.2"},
+            {{1, 1, 1, 1, 1, 1, 1, 2, 0.3, 0.7}, 10, 0, 6000, "measured step: a late frame the pacing makes up does not run the game ahead"},
+        };
+        for (unsigned q = 0; q < sizeof c / sizeof *c; q++) {
+            nvn_fstep s = {0}; nvn_fdelta f = {0}; uint64_t t = 1000; double real = 0, game = 0;
+            nvn_fdelta_next(&f, t);
+            for (int i = 0; i < 6000; i++) {
+                double shown = c[q].shown[i % c[q].n];
+                int n = nvn_fstep_next(&s, shown, 1.0, 1, 1, 0, 0);
+                double vs = nvn_fstep_measured(&s, nvn_fdelta_next(&f, t += (uint64_t)(shown * 16666667)) * 60.0);
+                n = s.step; game += vs > n ? vs : n;
+                if (i) real += shown;
+            }
+            check(fabs(game - real) < 2.5 && s.paid >= c[q].paid_min && s.paid <= c[q].paid_max, c[q].name);
+        }
+    }
     printf("== %d checks, %d failed ==\n", checks, fail);
     return fail != 0;
 }

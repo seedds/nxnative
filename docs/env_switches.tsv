@@ -19,6 +19,8 @@ DM_CHEATS_ANY_BUILD	switch	`1` loads a cheat file written for another build of t
 DM_CHEATS_DEBUG	diagnostic	Logs every memory write a cheat makes and the cheat file context the menu's "another version" rows come from
 DM_CHEATS_ON	switch	Comma-separated cheat names turned on at launch, besides the saved per-build enabled states
 DM_CHEATS_WINDOW	switch	`1` opens the Mac Cheats panel beside the game from the start
+DM_CONTROLS_OPACITY	player	`0.3..1` sets how solid the touch controls are on the iPhone and iPad, the menu button included (default 1); launcher and in-game menu setting, applied while the game runs
+DM_CONTROLS_SCALE	player	`0.75..1.35` scales the left stick, the A / B / X / Y keys and the D-pad of the touch controls on the iPhone and iPad (default 1; the keys' touch circles stay at least 44 points across); launcher and in-game menu setting, applied while the game runs
 DM_COPY_GAME_RESOURCES	switch	`NO` skips the Xcode build phase that copies the game's resources into the app (`stage_resources.sh`, on by default); `build_ipa.sh` sets it for its unsigned build, which packs them itself
 DM_COPY_ROMFS	switch	`NO` keeps the game files out of the app, in the Xcode build phase (`stage_resources.sh`) and in the unsigned IPA of `build_ipa.sh` (on by default): `main.m` takes the validated `Documents/romfs.img` copied by `scripts/push_romfs.sh`, then a `Documents/romfs` folder; the build writes the image's identity as `romfs.id` into the app, and `main.m` uses only a matching image (`--romfs separate` of the NSP script sets this)
 DM_CRASH_PEEK	diagnostic	`="sp+0x248*,x22-0x20"` adds 0x100 bytes at each address to the crash report: `sp` or a register plus or minus an offset, a trailing `*` reading the pointer stored there first

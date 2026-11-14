@@ -395,6 +395,85 @@ static Class DuoHarnessInstallReservedRegionProbe(UIView *view) API_AVAILABLE(io
     XCTAssertEqual(input.touch_count, 0);
 }
 
+- (void)testControlsSizeScalesTheBottomControlsAndKeepsTheRestInPlace {
+    CGRect bounds = CGRectMake(0, 0, 844, 390);
+    UIView *pad = [self padForLayout:dm_layout(bounds, UIEdgeInsetsZero, NO, CGRectNull, DM_PICTURE_16_9) bounds:bounds];
+    CGFloat u = MIN(bounds.size.height / 430.0, 1.3);
+    CGPoint zl = [self controlCenterNamed:@"ZL" inPad:pad];
+    for (NSString *size in @[@"1.35", @"0.75", @"1.0"]) {
+        CGFloat bu = u * size.doubleValue;
+        dm_gamepad_scale(size.UTF8String); [pad layoutIfNeeded];
+        CGRect ring = [self largestShapePathBoundsInLayer:pad.layer];
+        XCTAssertEqualWithAccuracy(ring.size.width, 2 * 77 * bu, 0.5, @"%@", size);
+        XCTAssertEqualWithAccuracy(CGRectGetMidX(ring), 81 * bu, 0.5);
+        XCTAssertEqualWithAccuracy(CGRectGetMidY(ring), bounds.size.height - 82 * bu, 0.5);
+        CGPoint faces = [self faceDiamondCenterInPad:pad];
+        XCTAssertEqualWithAccuracy(faces.x, bounds.size.width - 81 * bu, 0.5);
+        XCTAssertEqualWithAccuracy(faces.y, bounds.size.height - 82 * bu, 0.5);
+        XCTAssertEqualWithAccuracy([self controlPathBoundsNamed:@"A" inPad:pad].size.width, 2 * 27 * bu, 0.5);
+        CGPoint dpad = CGPointMake(231 * bu, bounds.size.height - 64 * bu);
+        [self assertButton:DM_BTN_RIGHT at:CGPointMake(dpad.x + 0.6 * 48 * bu, dpad.y) onPad:pad time:1];
+        CGPoint z = [self controlCenterNamed:@"ZL" inPad:pad];
+        XCTAssertTrue(CGPointEqualToPoint(z, zl), @"The shoulder keys keep their size and place");
+    }
+    dm_gamepad_scale("9"); [pad layoutIfNeeded];
+    XCTAssertEqualWithAccuracy([self largestShapePathBoundsInLayer:pad.layer].size.width, 2 * 77 * u * 1.35, 0.5, @"A size above the range stops at 135 %%");
+    dm_gamepad_scale("0"); [pad layoutIfNeeded];
+    XCTAssertEqualWithAccuracy([self largestShapePathBoundsInLayer:pad.layer].size.width, 2 * 77 * u * 0.75, 0.5, @"0 stops at 75 %%");
+    dm_gamepad_scale("0.1"); [pad layoutIfNeeded];
+    XCTAssertEqualWithAccuracy([self largestShapePathBoundsInLayer:pad.layer].size.width, 2 * 77 * u * 0.75, 0.5, @"and one below it at 75 %%");
+    dm_gamepad_scale("none"); [pad layoutIfNeeded];
+    XCTAssertEqualWithAccuracy([self largestShapePathBoundsInLayer:pad.layer].size.width, 2 * 77 * u, 0.5, @"A value that is no number is the default size");
+}
+
+- (void)testSmallestControlsSizeKeepsFaceTouchCirclesAt44Points {
+    // 667 x 375: the smallest phone iOS 26 runs on (iPhone SE, 2nd and 3rd generation), where the circle is 44 points as it stands; 568 x 320: smaller than any such phone, so that the 22 point floor is what decides
+    for (NSValue *v in @[[NSValue valueWithCGRect:CGRectMake(0, 0, 667, 375)], [NSValue valueWithCGRect:CGRectMake(0, 0, 568, 320)]]) {
+        CGRect bounds = v.CGRectValue;
+        UIView *pad = [self padForLayout:dm_layout(bounds, UIEdgeInsetsZero, NO, CGRectNull, DM_PICTURE_16_9) bounds:bounds];
+        dm_gamepad_scale("0.75"); [pad layoutIfNeeded];
+        XCTAssertLessThan([self controlPathBoundsNamed:@"A" inPad:pad].size.width, 44);
+        const uint64_t faceBits[] = {DM_BTN_A, DM_BTN_B, DM_BTN_X, DM_BTN_Y};
+        const CGPoint faceOffsets[] = {{21.5, 0}, {0, 21.5}, {0, -21.5}, {-21.5, 0}};   // outward, clear of the neighbouring keys
+        NSArray<NSString *> *faces = @[@"A", @"B", @"X", @"Y"];
+        for (NSUInteger i = 0; i < faces.count; i++) {
+            CGPoint c = [self controlCenterNamed:faces[i] inPad:pad];
+            [self assertButton:faceBits[i] at:CGPointMake(c.x + faceOffsets[i].x, c.y + faceOffsets[i].y) onPad:pad time:40 + i];
+        }
+    }
+}
+
+- (void)testControlsOpacityDimsEveryControlAndTheMenuButton {
+    CGRect bounds = CGRectMake(0, 0, 844, 390);
+    UIView *pad = [self padForLayout:dm_layout(bounds, UIEdgeInsetsZero, NO, CGRectNull, DM_PICTURE_16_9) bounds:bounds];
+    CALayer *controls = pad.layer.sublayers.firstObject;
+    XCTAssertGreaterThan(controls.sublayers.count, 16u);
+    UIButton *menu = [self menuButtonInPad:pad];
+    for (NSString *value in @[@"0.5", @"0.05", @"0", @"-2", @"7", @"none", @"0.5x"]) {
+        dm_gamepad_opacity(value.UTF8String);
+        float want = [value isEqual:@"0.5"] ? 0.5f : [@[@"0.05", @"0", @"-2"] containsObject:value] ? 0.3f : 1.f;   // any number below the range, 0 and negatives included: 30 %; above it or no number (also "0.5x"): as drawn
+        for (CALayer *l in controls.sublayers) XCTAssertEqualWithAccuracy(l.opacity, want, 1e-6, @"%@", value);
+        XCTAssertEqualWithAccuracy(menu.alpha, want, 1e-6);
+    }
+    dm_gamepad_opacity("0.5");
+    UIView *fresh = [self padForLayout:dm_layout(bounds, UIEdgeInsetsZero, NO, CGRectNull, DM_PICTURE_16_9) bounds:bounds];
+    XCTAssertEqualWithAccuracy(((CALayer *)fresh.layer.sublayers.firstObject).sublayers.firstObject.opacity, 1.f, 1e-6, @"A new pad takes its opacity from the environment, not from the last one");
+}
+
+- (void)testControlsSizeAtItsLargestStaysInsideASeparatedRegion {
+    for (NSValue *v in @[[NSValue valueWithCGRect:CGRectMake(0, 0, 390, 844)], [NSValue valueWithCGRect:CGRectMake(0, 0, 320, 568)]]) {
+        CGRect bounds = v.CGRectValue;
+        DmLayout layout = [self separatedLayout:bounds];
+        XCTAssertTrue(layout.separated);
+        UIView *pad = [self padForLayout:layout bounds:bounds];
+        dm_gamepad_scale("1.35"); [pad layoutIfNeeded];
+        XCTAssertTrue(CGRectContainsRect(layout.controls, [self largestShapePathBoundsInLayer:pad.layer]), @"The left stick stays in the controls' region at %@", NSStringFromCGRect(bounds));
+        for (NSString *name in @[@"A", @"B", @"X", @"Y"]) {
+            XCTAssertTrue(CGRectContainsRect(layout.controls, [self controlPathBoundsNamed:name inPad:pad]), @"%@ stays in the controls' region at %@", name, NSStringFromCGRect(bounds));
+        }
+    }
+}
+
 - (void)testPictureFillCoversTheLandscapeViewWithoutStretching {
     XCTAssertTrue(dm_picture_fill("fill"));
     XCTAssertFalse(dm_picture_fill("fit"));
@@ -696,7 +775,8 @@ static Class DuoHarnessInstallReservedRegionProbe(UIView *view) API_AVAILABLE(io
     [root.view layoutIfNeeded];
     UIView *game = [root valueForKey:@"game"];
     XCTAssertTrue(dm_setting_live("DM_PICTURE_FIT", NULL) && dm_setting_live("DM_OPMODE", NULL) && dm_setting_live("DM_RUMBLE", NULL)
-                  && dm_setting_live("DM_SHOW_FPS", NULL) && dm_setting_live("DM_TOUCH_HAPTICS", NULL));
+                  && dm_setting_live("DM_SHOW_FPS", NULL) && dm_setting_live("DM_TOUCH_HAPTICS", NULL)
+                  && dm_setting_live("DM_CONTROLS_SCALE", NULL) && dm_setting_live("DM_CONTROLS_OPACITY", NULL));
     XCTAssertFalse(dm_setting_live("DM_LANG", NULL), @"A setting the game reads once at start is not offered");
     XCTAssertFalse(dm_setting_live("DM_FPS_TARGET", NULL));
 
@@ -716,6 +796,16 @@ static Class DuoHarnessInstallReservedRegionProbe(UIView *view) API_AVAILABLE(io
     UILabel *fps = [root valueForKey:@"fps"];
     XCTAssertNotNil(fps); XCTAssertFalse(fps.hidden);
     dm_setting_live("DM_SHOW_FPS", "0"); XCTAssertTrue(fps.hidden);
+
+    UIView *pad = [root valueForKey:@"pad"];
+    CGFloat ring = [self largestShapePathBoundsInLayer:pad.layer].size.width;
+    dm_setting_live("DM_CONTROLS_SCALE", "1.2"); [pad layoutIfNeeded];
+    XCTAssertEqualWithAccuracy([self largestShapePathBoundsInLayer:pad.layer].size.width, ring * 1.2, 0.5, @"Controls size applies at once");
+    dm_setting_live("DM_CONTROLS_SCALE", "1.0"); [pad layoutIfNeeded];
+    XCTAssertEqualWithAccuracy([self largestShapePathBoundsInLayer:pad.layer].size.width, ring, 0.5);
+    dm_setting_live("DM_CONTROLS_OPACITY", "0.5");
+    XCTAssertEqualWithAccuracy(((CALayer *)pad.layer.sublayers.firstObject).sublayers.firstObject.opacity, 0.5f, 1e-6, @"and so does Controls opacity");
+    dm_setting_live("DM_CONTROLS_OPACITY", "1.0");
 }
 
 - (void)testGameViewDrawableHonoursAPixelCap {

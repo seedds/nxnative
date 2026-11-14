@@ -660,6 +660,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Fix:** `d11_pack_shaders` in `shader_split.py` reads a `.pkdswitch` through its index and scans each member for shaders.
 - **Found on:** [Red Dead Redemption](../../dm/games/01007820196A6000/README.md): `d11extra/langselect.pkdswitch`, the language selection shown before the game.
 
+### REDengine 3 shader caches
+
+- **Symptom:** the split finds only the 563 shaders in `main` and the loose `.bin` files (vertex 158, pixel 405, no hull, domain, geometry or compute); every material and the lighting and post-processing passes are `[RED] shader … is not in the shader map`.
+- **How it is stored:** two REDengine 3 containers. `shadernx.cache` (in `content/content0`, `content/patch0` and each DLC's `content/`: the material shaders) is a run of records {u64 hash, u8 1, u32 raw length, u32 stored length, one zstd frame}, each frame one whole GLSLC output, then an index of material and technique names; a 16-byte footer {u64 index offset, `RDHS`, u32 version 3} ends the file, and the records end exactly at the index. `staticshadernx.cache` (in `content/content0`: the engine's own shaders, lighting, post-processing and every compute shader) is a header {`FZLC`, u32 chunk count, u32 first chunk's offset}, a table of {u32 stored length, u32 raw length, u32 next chunk's offset}, then the chunks, zstd frames of at most 1 MiB, or stored as they are when the two lengths are equal (the DLCs' 804-byte stubs); the GLSLC outputs run across chunk boundaries.
+- **Reader:** `shader_split.py` `rdhs_shaders` reads the records in order and names, in a red line, a record that is not a zstd frame inside the records, decompresses to another length or holds no whole GLSLC output; `fzlc_shaders` joins the chunks before reading the outputs. A file is taken as a material cache only with a record flag at +8 and the `RDHS` footer, so other files keep their reader.
+- **Found on:** The Witcher 3: Wild Hunt — Complete Edition (0100A0800E9C4000, v458752; profile not upstream yet): 29,673 shaders (vertex 24,617, pixel 4,968, compute 46, geometry 22, domain 13, hull 7; 21,233 from `content`, 7,877 from the DLCs) in 80 s on an M1 Max, against 563 before.
+- **Check:** `dm/tools/tests/test_split_redengine.py`: two records of a material cache, a static cache whose programs are cut across chunks, a DLC stub, a record of the wrong length named, a flag at +8 without the footer left to the plain reader.
+
 ## Control sections and code
 
 ### Code area and control section layout

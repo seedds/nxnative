@@ -1,0 +1,49 @@
+# The Witcher 3: Wild Hunt — Complete Edition (update 4.04b / v458752), checked on the Mac from the title into White Orchard; see README.md
+# Started as the provisional profile scripts/build_ipa_from_nsp.py guessed from the survey (dm/games/profile_guess.py); the memory and module rows are still those guesses.
+
+# ---- Identity ----
+title_id	0100A0800E9C4000
+program_id	0100A0800E9C4000
+
+# ---- App ----
+name	The Witcher 3: Wild Hunt — Complete Edition
+ipa	TheWitcher3WildHuntCompleteEdition.ipa
+app_category	public.app-category.games
+
+# ---- Versions ----
+build	v458752	4.04b	main=d27fd8a515077f340c66cec23b13c0fa	sdk=d5a1029a57d8cd4fdf4eacad87b0cfd0
+package	v458752
+shader_versions	v458752
+
+# ---- Files ----
+# every module main imports from
+modules	main sdk
+romfs_marker	content/patch0/texture.cache
+zip_store	.bundle:.cache:.dds:.png:.redscripts:.snd:.store:.usm:.w3speech:.metallib
+
+# ---- Memory ----
+# A DT_INIT_ARRAY constructor reserves a 48 GiB address region at main+0x89e8 and later allocations use fixed offsets up to alias +48.97 GiB, so the alias region must hold 49 GiB.
+# The Mac gives every game at least the Switch's 64 GiB; iOS takes this row: 50 GiB, the most an iPad (M4, 16 GB) granted with the extended virtual addressing entitlement (64 GiB failed).
+# mem_reserve is the alias region plus the 640 MB the provisional profile had besides it (256 MB in front, a 128 MB heap region, the 256 MB of stacks)
+mem_reserve	0xCA8000000
+mem_alias	0xC80000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+# the NPDM declares 4 MB of system resource
+sys_resource	0x400000
+
+# ---- Frame rate ----
+# 60 fps (30 on the Switch): the game asks for present interval 2 once, at window creation, and has no other limit; its logic runs on real time (60.0 fps at the same game-clock
+# speed as 30, README.md Frame rate). Display mode presents at the cap by the present interval alone; the player's Frame rate picks 30 or 60
+fps_target	60
+present_interval	display
+
+# ---- Shader split ----
+shader_groups	/bin/=bin /dlc/=dlc /content/=content
+shader_note	The Witcher 3: Wild Hunt — Complete Edition shaders (REDengine 3 shader caches in content and the DLCs, main, loose .bin files)
+# the game selects near-zero NVN depth (nvnDeviceSetDepthMode, log: "depth mode near=0"); offline pipeline bases use main0_z
+depth_mode	zero
+
+# heap check: 2026-11-02, heap 0.00 GB
+
+# address regions: 2026-11-02, in its first 15 s in nnMain the game's regions reach alias +48.97 GB: the request returning to main+0x89f0 takes 48.00 GB (rewrite ab4b5e956129)

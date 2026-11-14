@@ -17,6 +17,7 @@ module_t *module_of(const void *p) {
 module_t *g_mod;
 int g_nmod;
 void svc_thread_dump(void) {}
+void crash_install(void);
 uint64_t now_ns(void) { return bp_now(); }
 
 enum { MAXD = 4, STRIDE = 16, PIXELS = 8 };
@@ -76,6 +77,7 @@ static int run(const char *name, uint8_t *pool, prog_t *green, prog_t *red, int 
 }
 int main(void) {
     @autoreleasepool {
+        crash_install();   // CPU writes after uploads use the host dirty-page fault handler
         mtl_init();
         NSError *err = nil;
         id<MTLLibrary> lib = [g_dev newLibraryWithSource:@"#include <metal_stdlib>\nusing namespace metal;\n"

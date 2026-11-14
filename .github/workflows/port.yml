@@ -92,9 +92,8 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
-  # The recompiler for the Linux bundle: nxaot in its image (docker/Dockerfile.aot), linked against that image's shared libLLVM-18 (NXAOT_LLVM_STATIC=ON is not usable
-  # yet: Ubuntu's lld CMake targets link libLLVM too, so that nxaot holds two copies of LLVM and stops at its first start; docs/development.md, "The port's bundles"),
-  # and the licence of the LLVM and lld libraries in it. A job of its own, beside the Linux host job (the image and the build take a few minutes)
+  # The recompiler for the Linux bundle: nxaot built in its image (docker/Dockerfile.aot) with LLVM and lld linked statically (NXAOT_LLVM_STATIC=ON; docs/development.md,
+  # "The port's bundles"), and the licences of what is linked into it. A job of its own, beside the Linux host job (the image and the build take a few minutes)
   nxaot-bundle:
     name: nxaot for the bundle (Docker)
     if: ${{ github.event_name != 'pull_request' }}
@@ -123,8 +122,8 @@ jobs:
           retention-days: 1
 
   # The Linux bundle: scripts/package_port.py over the two jobs' outputs, its archive (the same bytes for the same inputs), and its check on this runner, an Ubuntu like
-  # a player's with what README.txt tells a player to install for packing (LLVM 18's shared library, which nxaot loads): no symbolic link, no path of the build trees,
-  # nxlauncher --list on an empty games folder, nxaot version, the packer's --help through the bundle, the shader chain versions of the bundle's sources
+  # a player's with no LLVM installed (the bundle's nxaot is static): no symbolic link, no path of the build trees, no ELF that needs libLLVM or the libraries whose
+  # sonames change, nxlauncher --list on an empty games folder, nxaot version, the packer's --help through the bundle, the shader chain versions of the bundle's sources
   bundle-linux:
     name: Linux bundle (nxnative-linux-x86_64.tar.gz)
     needs: [linux-host, nxaot-bundle]

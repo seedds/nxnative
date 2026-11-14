@@ -70,12 +70,13 @@ jobs:
           persist-credentials: false
       - name: Build the image
         run: docker build -t nxnative-chain -f docker/Dockerfile.chain docker
-      # The assemblies' fingerprints in the lock hold for this path (build/xlate_vk) in any checkout: dmsh_xlate_vk.csproj maps the repository root out of the compilers' paths
+      # The assemblies' fingerprints in the lock hold for this path (build/xlate_vk) in any checkout: dmsh_xlate_vk.csproj maps the repository root out of the compilers' paths.
+      # -m:1: one MSBuild node; with --artifacts-path, parallel nodes building the Ryujinx projects raced on Spv.Generator.deps.json (run 2). The comment stays out of
+      # the command: a comment line after a backslash ends the command there, so docker ran the image with no command and dotnet ran on the runner instead
       - name: Build the Vulkan translator (build/xlate_vk)
         id: build
         run: |
           docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -v "$(pwd):/src" -w /src nxnative-chain \
-            # -m:1: one MSBuild node; with --artifacts-path, parallel nodes building the Ryujinx projects raced on Spv.Generator.deps.json (run 2)
             dotnet build -c Release -m:1 dm/gfx/tools/dmsh_xlate_vk --artifacts-path build/xlate_vk
       - name: Check the tools against dmsh_chain_vk.lock
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}

@@ -57,11 +57,27 @@ jobs:
         run: |
           docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -v "$(pwd):/src" -w /src nxnative-aot \
             ctest --test-dir build/aot --output-on-failure -E '^vectors$'
+      # The runner prints one line per test and keeps the output in logs/aot/<name>.log, which only the logs-aot artifact carries, and that expires: the full
+      # vector run failed in runs 10 and 11 (exit 1) and its vectors.log could no longer be read. The step after it copies the failed tests' logs into the job
+      # log, with this runner's CPU (nxaot_vec compiles for the host CPU, so a vector that fails on one runner model and passes on another shows there)
       - name: Test runner (logs/aot)
+        id: runner
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         run: |
           docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -v "$(pwd):/src" -w /src nxnative-aot \
             sh dm/tools/aot/tests/run_aot_tests.sh build/aot
+      - name: The failed tests' logs and this runner's CPU
+        if: ${{ !cancelled() && steps.runner.outcome == 'failure' }}
+        run: |
+          grep -m1 '^model name' /proc/cpuinfo || true
+          grep -m1 '^flags' /proc/cpuinfo | tr ' ' '\n' | grep -E '^(avx|avx2|avx512[a-z_0-9]*|fma|f16c|aes|sha_ni|pclmulqdq|bmi2|gfni|vaes|vpclmulqdq)$' | tr '\n' ' ' || true; echo
+          for name in $(sed -n 's/^\(FAIL\|TIMEOUT\) \([^ ]*\) .*/\2/p' logs/aot/summary.txt); do
+            echo "::group::logs/aot/$name.log (first 200 and last 100 lines)"
+            head -n 200 "logs/aot/$name.log"
+            echo '[...]'
+            tail -n 100 "logs/aot/$name.log"
+            echo "::endgroup::"
+          done
       # The host's run time of recompiled code (dm/host/aot_*.c; dm/tools/aot/README.md, "Threads and safepoints", the dm/host list): every corpus NRO
       # packed by nxaot with the default options into build/packs (and the synthetic game module of t_aot_module into build/packs/module, below), then
       # dm/host built with that folder and its test t_aot_host run (CTest): each NRO

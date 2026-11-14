@@ -81,7 +81,7 @@ static int wl_draw(NvProg *pr, const p_draw *dw0, const p_draw_idx *di0) {
 }
 // At the draw's encode, in its pass: with multisampling on (more than one sample, and the multisample state enables it) a segment is a rectangle across it, as OpenGL draws a wide
 // line then, not the parallelogram (dmsh_pull.py dm_wl_offset); then the quads' draw
-static void wl_encode(id<MTLRenderCommandEncoder> en_) {
+static void wl_encode(id<MTL4RenderCommandEncoder> en_) {
     id<MTL4RenderCommandEncoder> en = (id<MTL4RenderCommandEncoder>)en_;
     g_wl.rect = g_pass.samples > 1 && S.ms.enable; g_wl.cpu->rect = (uint32_t)g_wl.rect;
     enc_r_vbuf(en, 15, g_wl.block); enc_r_draw_instanced(en, MTLPrimitiveTypeTriangle, 0, g_wl.count, g_wl.instances, (uint32_t)g_draw_binst);

@@ -357,7 +357,7 @@ HLE_FORCE("_ZN2nn4diag6detail7PutImplERKNS0_11LogMetaDataEPKcm", "game log → h
 static void diag_abort(uint32_t res, void *lr) {
     module_t *m = module_of(lr);
     LOG("game called nn::diag abort: Result %#x, call site %s+%#llx", res, m ? m->name : "?", m ? (unsigned long long)((uint8_t *)lr - m->base) : (unsigned long long)(uintptr_t)lr);
-    dm_backtrace((uint64_t)__builtin_frame_address(1));
+    dm_backtrace(*(uint64_t *)__builtin_frame_address(0));   // the caller's frame: the saved x29 at the start of this frame record (arm64 Apple always keeps frame pointers)
     die("game aborted");
 }
 HLE_FORCE("_ZN2nn4diag6detail9AbortImplEv", "game aborted", void, h_diag_Abort0, void) { diag_abort(0, dm_bigstack_caller(__builtin_return_address(0))); }

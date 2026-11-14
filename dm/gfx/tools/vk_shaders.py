@@ -120,7 +120,7 @@ def one(path, tmp, root):
     open(spv, 'wb').write(struct.pack(f'<{len(words)}I', *words))
     # --msl-texture-1d-as-2d: a 1D image is a one-row 2D texture in the host (hle_vk.m vkCreateImage), since Metal's 1D texture cannot be drawn into, mipmapped or depth; spirv-cross samples it at
     # the row's centre (float2(x, 0.5)) and reads it at (x, 0)
-    cmd = [SPIRV_CROSS, spv, '--msl', '--msl-version', '20300', '--msl-decoration-binding', '--msl-texture-1d-as-2d', '--rename-entry-point', 'main', f'vk_{key}', stage, '--output', msl]
+    cmd = [SPIRV_CROSS, spv, '--msl', '--msl-version', '20300', '--msl-decoration-binding', '--msl-texture-1d-as-2d', '--rename-entry-point', eps[0].get('name', 'main'), f'vk_{key}', stage, '--output', msl]
     if stage == 'vert': cmd.append('--flip-vert-y')
     r = subprocess.run(cmd, capture_output=True, text=True)
     if r.returncode: red(f'{path}: spirv-cross failed: {r.stderr.strip()[:300]}')

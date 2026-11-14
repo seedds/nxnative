@@ -1643,6 +1643,13 @@ The Vulkan layer (`dm/gfx/vk/hle_vk.m`) was written for Hades; Super Mario Galax
 - **Fix:** `DM_VK_CAPTURE=<dir>` writes the modules; `vk_shaders.py` reads capture folders like a RomFS; `fix_strides` copies the stride onto the type before translating.
 - **Found on:** [Super Mario Galaxy](../../dm/games/010099C022B96000/README.md) (3,089 modules, 4,535 pipelines).
 
+### SPIR-V entry points that are not `main`
+
+- **Symptom:** `vk_shaders.py` stops with `spirv-cross failed: Entry point does not exist` on a captured module.
+- **Cause:** SDL_GPU names its SPIR-V entry points `ShaderFunction1`, `ShaderFunction2`, …; the translator's `--rename-entry-point main vk_<key>` assumed `main`.
+- **Fix:** the reflected entry point's name is passed instead (`eps[0]` of the `--reflect` output, `main` as before when the reflection names none).
+- **Found on:** MARVEL Cosmic Invasion (title `010059D020C26000`, FNA/SDL_GPU).
+
 ### Push constants in the next free buffer slot
 
 - **Cause:** SPIRV-Cross binds the push constant block at `buffer(0)`, where the first renumbered uniform buffer goes.

@@ -7265,6 +7265,7 @@ static MTLSamplerAddressMode wrapm(int w) {
         case 6: return MTLSamplerAddressModeMirrorRepeat; }
     return MTLSamplerAddressModeRepeat;
 }
+static int aniso_min(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_ANISO"); v = e ? atoi(e) : 0; v = v < 2 ? 0 : v > 16 ? 16 : v; if (v) MLOG("DM_ANISO=%d: mipmapped linear samplers filter with up to %dx anisotropy", v, v); } return v; }
 static id<MTLSamplerState> samp_by_id(int sid) {   // Caller holds g_rmu
     if (g_spool_n && sid >= g_spool_n) { if (!g_stat_samp_oob++) MLOG("sampler ID %d outside the pool (capacity %d) treated as an empty slot", sid, g_spool_n); return nil; }
     if (sid < 0 || sid >= g_nsreg || !g_sreg_ok[sid]) { RED_ONCE(12, "sampler ID %d not registered", sid); return nil; }
@@ -7277,7 +7278,9 @@ static id<MTLSamplerState> samp_by_id(int sid) {   // Caller holds g_rmu
     d.sAddressMode = wrapm(p.ws); d.tAddressMode = wrapm(p.wt); d.rAddressMode = wrapm(p.wr);
     d.lodMinClamp = p.lod_min < 0 ? 0 : p.lod_min; d.lodMaxClamp = p.lod_max;
     d.lodBias = p.lod_bias < -16 ? -16 : p.lod_bias > 15.99f ? 15.99f : p.lod_bias;   // SetLodBias: Maxwell's sampler bias, Metal 26's range [-16, 15.99]
-    d.maxAnisotropy = p.aniso < 1 ? 1 : p.aniso > 16 ? 16 : (NSUInteger)p.aniso;
+    // DM_ANISO raises the anisotropy of ordinary texture samplers (linear, more than one mip level); fixed-level, comparison and reduction samplers are post-processing or depth reads
+    float aniso = p.aniso; if (aniso_min() > aniso && (p.minf == 3 || p.minf == 5) && !p.cmp_mode && !p.reduction && p.lod_max > (p.lod_min < 0 ? 0 : p.lod_min)) aniso = aniso_min();
+    d.maxAnisotropy = aniso < 1 ? 1 : aniso > 16 ? 16 : (NSUInteger)aniso;
     if (p.cmp_mode) d.compareFunction = (MTLCompareFunction)(p.cmp_func - 1);
     // Reduction (NVN 1 min / 2 max): the minimum or maximum of the texels a filtered sample covers, per channel (Metal 26). Pokémon Legends: Z-A builds its depth pyramid with a min sampler
     // (151607c7a92386cc reads the level above at an explicit LOD) and tests occlusion boxes against it; averaged, the pyramid is nearer than the scene at depth edges. Metal ignores the reduction

@@ -593,6 +593,58 @@ data = [{refs}]
         head = meta[2].split('\t'); row = dict(zip(head, next(l for l in meta if l.startswith('HP never')).split('\t')))
         self.assertEqual((row['action'], row['address'], row['type']), ('never-decrease', '0:0x411C', 's16'))
 
+    def test_code_entry_applied_once(self):
+        """A code entry with once = true gets the meta's once column (the host's one-pass "set", the panel's Apply); once on
+        a data cheat, a master or with a non-boolean value is refused rather than silently ignored."""
+        old = self.build('a', {0x100: reader(0x100, 0x4100)})
+        self.source('''format = 1
+[[cheats]]
+name = "Warp now"
+section = "Warps"
+code = """
+04000000 00004120 00000001
+"""
+builds = ["1111111111111111"]
+once = true
+[[cheats]]
+name = "Always"
+code = """
+04000000 00004124 00000002
+"""
+builds = ["1111111111111111"]
+[[cheats]]
+name = "Data once"
+target = "0x4100"
+type = "u32"
+value = 1
+once = true
+[[cheats]]
+name = "Master once"
+master = true
+code = "04000000 00004128 00000003"
+builds = ["1111111111111111"]
+once = true
+[[cheats]]
+name = "Not a boolean"
+code = "04000000 0000412C 00000004"
+builds = ["1111111111111111"]
+once = "yes"
+''')
+        _, entries, report, skipped = ca.compile_source(self.dir / 's.cheats.toml', old)
+        got = {e[0]: e for e in entries}
+        self.assertEqual(got['Warp now'][2], [0x04000000, 0x4120, 1])   # the program itself is unchanged
+        self.assertEqual((got['Warp now'][3]['kind'], got['Warp now'][3]['once']), ('code', '1'))
+        self.assertNotIn('once', got['Always'][3])
+        self.assertEqual(skipped, 3)
+        self.assertIn('action = "set"', [r for r in report if 'Data once' in r][0])
+        self.assertIn('not masters', [r for r in report if 'Master once' in r][0])
+        self.assertIn("not 'yes'", [r for r in report if 'Not a boolean' in r][0])
+        text = ca.render(entries)
+        meta = ca.meta_text('s.cheats.toml', old, entries, {}, text).split('\n')
+        head = meta[2].split('\t'); rows = {l.split('\t')[0]: dict(zip(head, l.split('\t'))) for l in meta[3:] if l}
+        self.assertEqual((rows['Warp now']['once'], rows['Warp now']['section']), ('1', 'Warps'))
+        self.assertEqual(rows['Always']['once'], '')
+
     def test_instruction_lengths_of_every_form(self):
         """Instruction lengths of the forms the host VM does not run yet: a wrong length would misread every later word of a community file."""
         cases = [([0x94100020], 1), ([0x94100100, 0], 2), ([0x98100100, 0, 0], 3),                  # 9: register / static value

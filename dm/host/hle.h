@@ -93,5 +93,6 @@ int dm_movie_hz(void);   // hle_movie.c: the picture rate of the movie playing (
 void dm_movie_picture(const void *dec, const char *lib, int64_t ts_ns, int unknown_hz);   // hle_movie.c: video decoder dec (nn::movie's or nn::codec's) handed out a picture of this time; unknown_hz: its rate while the times give none
 void dm_movie_stopped(const void *dec);   // hle_movie.c: dec was stopped or destroyed: its movie ends now
 void dm_audio_suspend(int on);
+int dm_frontend_audio_pull(int16_t *dst, uint32_t frames);   // DM_AUDIO_FRONTEND=1: the app that hosts the engine pulls the mixed 48 kHz stereo output (hle_audio.c)
 uint64_t dm_audio_render_calls(void);   // Cumulative sound card callback count (the silent sink is not counted)
 void dm_audio_reset(void);   // iOS media services reset: recreate the AudioUnits (hle_audio.c)

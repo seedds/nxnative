@@ -10,7 +10,7 @@
 #include <unistd.h>
 
 enum { FMT_PCM16 = 2, STATE_STARTED = 0, STATE_STOPPED = 1, RATE = 48000 };
-enum { BK_NONE, BK_AU, BK_NULL };   // what is consuming an output's queue right now (aout.backend)
+enum { BK_NONE, BK_AU, BK_NULL, BK_FE };   // what is consuming an output's queue right now (aout.backend); BK_FE: the app that hosts the engine pulls it (dm_frontend_audio_pull)
 enum { AU_IDLE, AU_STARTING, AU_CANCELED, AU_WAIT_CALLBACK };
 
 typedef struct { void *ptr; uint64_t cap, size; } gbuf;     // The first 24 bytes written into the guest AudioOutBuffer
@@ -29,6 +29,7 @@ typedef struct {
     AudioUnit au;
     int start_phase, reset_pending, mute;   // a reset during start replaces the unit after the call returns
     int closed;                             // Close returned while a start was in flight: that start's worker frees the output
+    int fe;                                 // DM_AUDIO_FRONTEND=1 at open: Start hands the queue to the app's own output (BK_FE), no AudioUnit or silent sink
     _Atomic int hold_device;               // callbacks output silence until the silent sink has joined
     int backend;                       // BK_*: the running consumer. Start, Stop and the background suspend change it only under g_aos_lock and act on it rather than re-deriving it from state and g_suspended
     pthread_t null_th; _Atomic int null_run;
@@ -91,7 +92,8 @@ static void *event_notify(void *p) {
 }
 
 // Take n bytes from the pending queue and hand them to the output side; once a whole block has played, move it to released and notify the ordinary thread.
-static void pull(aout *a, uint8_t *dst, uint64_t n) {
+// Returns the bytes zero-filled because the queue ran dry or the output is not started
+static uint64_t pull(aout *a, uint8_t *dst, uint64_t n) {
     int released = 0;
     int16_t *s16 = (int16_t *)dst; uint64_t ns = n / 2;
     uint32_t qh = atomic_load_explicit(&a->q_head, memory_order_relaxed);
@@ -124,20 +126,23 @@ static void pull(aout *a, uint8_t *dst, uint64_t n) {
         if (a->event) notify_release(a);   // the notify thread only signals the guest's event: outputs without one (the host's renderer output, games that poll) need no wake-up
         if (a->rel_sem) dispatch_semaphore_signal(a->rel_sem);
     }
+    return n;
 }
 
 // A six-channel output (front-left front-right center LFE back-left back-right) goes to the device as stereo, downmixed here with the audio renderer's default Q15 coefficients (hle_audren.c):
 // Core Audio's own 6 → 2 mapping keeps only the front pair, so voices on the center (Luigi's Mansion 3) and the back channels were silent. The queue still takes all six guest channels,
 // in blocks through a stack buffer (no allocation in the real-time callback)
 static int device_channels(const aout *a) { return a->ch == 6 ? 2 : a->ch; }
-static void pull_device(aout *a, uint8_t *dst, uint64_t bytes) {
-    if (a->ch != 6) { pull(a, dst, bytes); return; }
+// Returns the frames that held the game's PCM (the rest is zero-filled)
+static uint64_t pull_device(aout *a, uint8_t *dst, uint64_t bytes) {
+    uint64_t got = 0;
+    if (a->ch != 6) return (bytes - pull(a, dst, bytes)) / (2 * (uint64_t)a->ch);
     enum { BLOCK = 128, CF = 32768, CC = 23167, CL = 8224, CB = 23167 };
     int16_t scratch[BLOCK * 6], *out = (int16_t *)dst;
     uint64_t frames = bytes / (2 * sizeof *out);
     while (frames) {
         uint64_t n = frames < BLOCK ? frames : BLOCK;
-        pull(a, (uint8_t *)scratch, n * 6 * sizeof *scratch);
+        got += (n * 6 * sizeof *scratch - pull(a, (uint8_t *)scratch, n * 6 * sizeof *scratch)) / (6 * sizeof *scratch);
         for (uint64_t i = 0; i < n; i++) {
             const int16_t *p = scratch + 6 * i;
             int64_t c = (int64_t)p[2] * CC + (int64_t)p[3] * CL;
@@ -148,6 +153,7 @@ static void pull_device(aout *a, uint8_t *dst, uint64_t bytes) {
         }
         frames -= n;
     }
+    return got;
 }
 
 static _Atomic uint64_t g_render_calls;   // Cumulative sound card callbacks (lifecycle verification: must keep growing after resume)
@@ -278,6 +284,8 @@ static void au_halt(aout *a) {
     a->stalled = 0; a->retry_ms = 0; a->retry_at = 0;
 }
 static int real_audio(void) { const char *e = getenv("DM_AUDIO"); return e ? atoi(e) != 0 : TARGET_OS_IPHONE; }
+// DM_AUDIO_FRONTEND=1: an app that hosts the engine plays the outputs through its own device and pulls them (dm_frontend_audio_pull); no AudioUnit and no silent sink are made
+static int frontend_audio(void) { const char *e = getenv("DM_AUDIO_FRONTEND"); return e && atoi(e) != 0; }
 static void au_retry(aout *a, uint64_t now) {
     a->stalled = 1;
     a->retry_ms = a->retry_ms ? (a->retry_ms < 8000 ? a->retry_ms * 2 : 8000) : 1000;
@@ -423,8 +431,8 @@ static Result au_open_at(void *g, void *ev, const char *name, const uint8_t *par
     a->notify_sem = dispatch_semaphore_create(0); a->id = atomic_fetch_add(&nopen, 1);
     pthread_create(&a->notify_th, NULL, event_notify, a);
     if (ev) hle_bind_system_event(ev, 1);   // Buffer release event: bind a kernel event on the guest thread (auto-clear), afterwards signaled by the audio thread
-    char sb[64]; int use_au = real_audio();
-    LOG("audio #%d OpenAudioOut %s channels %d %s%s (call site %s)", a->id, name ? name : "(default)", ch, use_au ? "real output" : "silent sink", ev ? "" : ", no release event (the game polls)", site(lr, sb, sizeof sb));
+    char sb[64]; a->fe = frontend_audio(); int use_au = !a->fe && real_audio();
+    LOG("audio #%d OpenAudioOut %s channels %d %s%s (call site %s)", a->id, name ? name : "(default)", ch, a->fe ? "the app's own output" : use_au ? "real output" : "silent sink", ev ? "" : ", no release event (the game polls)", site(lr, sb, sizeof sb));
     // The helper finishes (and is joined) before lifecycle/watchdog readers can find this output.
     // Keep construction outside g_aos_lock: joining the helper can yield the guest core.
     if (use_au) au_open(a);
@@ -454,7 +462,8 @@ static Result au_start_at(void *g, void *lr) {
     int was = atomic_exchange_explicit(&a->state, STATE_STARTED, memory_order_acq_rel);
     au_note(a, was == STATE_STARTED ? "Start (already playing)" : g_suspended ? "Start (app in the background: the silent sink takes over for now)" : "Start", lr);
     if (was != STATE_STARTED) {
-        null_start(a); au_request_start(a);
+        if (a->fe) a->backend = BK_FE;   // the app's next pull consumes it
+        else { null_start(a); au_request_start(a); }
     }
     pthread_mutex_unlock(&g_aos_lock);
     return RES_OK;
@@ -489,6 +498,7 @@ static void au_stop_at(void *g, void *lr) {   // lr NULL: the stop inside Close,
     if (lr) au_note(a, was == STATE_STARTED ? "Stop" : "Stop (already stopped)", lr);
     au_halt(a);
     if (a->backend == BK_NULL) null_stop(a);
+    else if (a->backend == BK_FE) a->backend = BK_NONE;   // the app's pulls hold g_aos_lock too: none is consuming it now
     if (was == STATE_STARTED) au_release_pending(a);
     pthread_mutex_unlock(&g_aos_lock);
 }
@@ -789,4 +799,30 @@ void dm_audio_reset(void) {
     }
     LOG("audio outputs set up again after the media services reset");
     pthread_mutex_unlock(&g_aos_lock);
+}
+
+// The app's own output (DM_AUDIO_FRONTEND=1): its device callback pulls every playing output, mixed into `frames` frames of 48 kHz interleaved stereo PCM16 (six-channel outputs
+// downmixed as for the device, mono ones doubled, each at its volume; DM_AUDIO_MUTE silences them). Returns the most frames any output filled with the game's PCM (fewer than `frames`:
+// an underrun, zero-filled), or -1 when no output is playing (silence, not an underrun). Real-time safe: no allocation and no waiting; while a Start, Stop or Close holds the registry,
+// one callback gets silence (0)
+int dm_frontend_audio_pull(int16_t *dst, uint32_t frames) {
+    enum { BLOCK = 256 };
+    memset(dst, 0, (size_t)frames * 2 * sizeof *dst);
+    if (pthread_mutex_trylock(&g_aos_lock)) return 0;
+    int playing = 0; uint64_t best = 0; int16_t tmp[BLOCK * 2];
+    for (int i = 0; i < AOMAX; i++) {
+        aout *a = g_aos[i]; if (!a || a->backend != BK_FE || (a->ch != 1 && a->ch != 2 && a->ch != 6)) continue;
+        playing = 1; uint64_t got = 0;
+        atomic_fetch_add_explicit(&g_render_calls, 1, memory_order_relaxed); atomic_fetch_add_explicit(&a->cb_n, 1, memory_order_relaxed);
+        for (uint32_t off = 0; off < frames;) {
+            uint32_t n = frames - off < BLOCK ? frames - off : BLOCK;
+            if (a->ch == 1) { got += n - pull(a, (uint8_t *)tmp, n * sizeof *tmp) / sizeof *tmp; for (uint32_t j = n; j--;) tmp[2 * j] = tmp[2 * j + 1] = tmp[j]; }
+            else got += pull_device(a, (uint8_t *)tmp, n * 2 * sizeof *tmp);
+            if (!a->mute) for (uint32_t j = 0; j < 2 * n; j++) { int v = dst[2 * off + j] + tmp[j]; dst[2 * off + j] = (int16_t)(v > 32767 ? 32767 : v < -32768 ? -32768 : v); }
+            off += n;
+        }
+        if (got > best) best = got;
+    }
+    pthread_mutex_unlock(&g_aos_lock);
+    return playing ? (int)best : -1;
 }

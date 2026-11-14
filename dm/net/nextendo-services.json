@@ -45,16 +45,18 @@
       "tls": false
     },
     {
-      "match": "exact",
+      "match": "pinned-exact",
       "host": "g2b309e01-lp1.s.n.srv.nintendo.net",
       "server": "nat",
-      "tls": true
+      "tls": true,
+      "certificateSHA256": "e6d779cb8b5e9c3a41909c6051bc8b3138707857f184e1c6b77688cb65c7a643"
     },
     {
-      "match": "exact",
+      "match": "pinned-exact",
       "host": "g2df33d01-lp1.p.srv.nintendo.net",
       "server": "nat",
-      "tls": true
+      "tls": true,
+      "certificateSHA256": "e6d779cb8b5e9c3a41909c6051bc8b3138707857f184e1c6b77688cb65c7a643"
     }
   ],
   "families": {

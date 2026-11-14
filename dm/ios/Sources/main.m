@@ -190,7 +190,10 @@ static int boot_env(void) {
     if (!getenv("DM_NEXTENDO_ROUTES") && [fm fileExistsAtPath:[bundled stringByAppendingPathComponent:@"routes.tsv"]]) {
         NSString *copy = [NSSearchPathForDirectoriesInDomains(NSApplicationSupportDirectory, NSUserDomainMask, YES)[0] stringByAppendingPathComponent:@"nxnative/nextendo-services"];
         BOOL ok = [fm createDirectoryAtPath:copy withIntermediateDirectories:YES attributes:@{NSFilePosixPermissions: @0700} error:nil];
-        for (NSString *f in @[@"routes.tsv", @"provider-ca.der", @"manifest.json"]) {
+        // every file of the profile: routes.tsv, provider-ca.der, manifest.json and the pinned server certificates (<SHA-256>.der, dm/tools/nextendo_services.py)
+        NSArray<NSString *> *files = [fm contentsOfDirectoryAtPath:bundled error:nil];
+        ok = ok && files.count;
+        for (NSString *f in files) {
             NSString *to = [copy stringByAppendingPathComponent:f];
             ok = ok && [[NSData dataWithContentsOfFile:[bundled stringByAppendingPathComponent:f]] writeToFile:to atomically:YES] && !chmod(to.fileSystemRepresentation, 0600);
         }

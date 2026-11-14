@@ -1,8 +1,9 @@
 """From RobiiAragon/NX-Port-Studio dm/tools/nextendo_services.py @ bd13a49b (MIT): the public Nextendo service profile for one game.
 
-Writes routes.tsv (DM_NEXTENDO_ROUTES, dm/host/hle_nextendo_routes.c), provider-ca.der and manifest.json into a folder.
+Writes routes.tsv (DM_NEXTENDO_ROUTES, dm/host/hle_nextendo_routes.c), provider-ca.der, the pinned server certificates its routes name
+(<SHA-256>.der, from dm/net/nextendo-pins) and manifest.json into a folder.
 
-Only public service facts and the provider's authenticated public CA are used.
+Only public service facts, the provider's authenticated public CA and certificates Nextendo's servers present to any client are used.
 No Nintendo files, account tokens, game patches or system trust changes.
 """
 from pathlib import Path
@@ -51,17 +52,26 @@ def provider_ca(value):
     return der
 
 
+PINS = 'dm/net/nextendo-pins'   # <SHA-256>.der: a server certificate a pinned-exact route accepts, byte for byte (hle_nextendo_x509.c dm_nextendo_x509_verify_pin)
+
+
 def rules(value, title_id, protocol=None):
+    """routes.tsv. A pinned-exact route is for a TLS service whose certificate no CA signs (Nextendo's NEX server for Mario Kart 8 Deluxe
+    serves a self-signed one with no host name): it accepts exactly the certificate named by certificateSHA256, from PINS. Its address
+    also gets a pinned-address route with the same certificate, as a NEX secure server can be handed to the game by address"""
     title_id = title_id.lower()
     if not re.fullmatch('[0-9a-f]{16}', title_id) or int(title_id, 16) == 0: raise ValueError('Invalid game title identity')
     families = value.get('titleFamilies', {})
     family = protocol or families.get(title_id, 'nex')
     items = list(value['base']) + value.get('families', {}).get(family, []) + value.get('titles', {}).get(title_id, [])
-    seen, output = set(), []
+    seen, output, aliases = set(), [], {}
     for item in items:
         kind, host = item['match'], item['host'].lower()
-        if kind not in ('exact', 'suffix', 'label') or len(host) > 253:
+        if kind not in ('exact', 'suffix', 'label', 'pinned-exact') or len(host) > 253:
             raise ValueError('Invalid service route pattern')
+        pin = item.get('certificateSHA256')
+        if (kind == 'pinned-exact') != (pin is not None) or (pin is not None and (not item['tls'] or not re.fullmatch('[0-9a-f]{64}', pin))):
+            raise ValueError('A pinned route needs TLS and exactly one certificate digest')
         pattern = host.replace('*', 'x')
         if not re.fullmatch(r'[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?', pattern) or '..' in pattern:
             raise ValueError('Invalid service route hostname')
@@ -70,8 +80,13 @@ def rules(value, title_id, protocol=None):
         if (kind, host) in seen: continue
         seen.add((kind, host))
         address = value['provider'][item['server']]
+        if pin:   # the routes loader takes a pin only for its own host name
+            output.append('\t'.join([kind, host, address, host, pin + '.der', pin]))
+            if aliases.setdefault(address, (host, pin))[1] != pin: raise ValueError('One address with two pinned certificates')
+            continue
         tail = ['@host', 'provider-ca.der', value['provider']['caSHA256']] if item['tls'] else ['-', '-', '-']
         output.append('\t'.join([kind, host, address] + tail))
+    for address, (host, pin) in aliases.items(): output.append('\t'.join(['pinned-address', address, address, host, pin + '.der', pin]))
     if not 0 < len(output) <= 128: raise ValueError('Invalid service route count')
     return 'NXNEXTENDO_ROUTES_2\n' + '\n'.join(output) + '\n'
 
@@ -81,6 +96,12 @@ def prepare(repository, title_id, destination, protocol=None, ca=None):
     if hashlib.sha256(ca).hexdigest() != value['provider']['caSHA256']: raise ValueError('Invalid provider CA')
     text = rules(value, title_id, protocol)
     files = {'routes.tsv': text.encode(), 'provider-ca.der': ca}
+    for line in text.splitlines()[1:]:
+        fields = line.split('\t')
+        if fields[0] != 'pinned-exact': continue
+        data = (Path(repository) / PINS / fields[4]).read_bytes()
+        if hashlib.sha256(data).hexdigest() != fields[5]: raise ValueError('A pinned server certificate does not match its digest')
+        files[fields[4]] = data
     manifest = {'formatVersion': 1, 'titleID': title_id.lower(), 'protocol': protocol,
                 'identity': value.get('identities', {}).get(title_id.lower(), {'account':'pid','friends':'pid'}),
                 'routeCount': len(text.splitlines()) - 1,

@@ -261,6 +261,9 @@ static void vpn(void) {
     // A ZeroTier tunnel: its /24 is searched, over the tunnel
     dm_net_test_interface z={zt.address,zt.mask,if_nametoindex("lo0"),IFF_UP|IFF_POINTOPOINT,0}; dm_net_test_set_interface(&z);
     CHECK(!dm_net_discovery_prepare(htonl(UINT32_MAX),&plan) && plan.automatic && plan.count==253);
+    // Automatic takes VPN play the same way
+    setenv("DM_NETWORK","auto",1); CHECK(dm_net_vpn() && !dm_net_discovery_prepare(htonl(UINT32_MAX),&plan) && plan.automatic && plan.count==253);
+    setenv("DM_NETWORK","ldn",1);
     // Off a VPN the same tunnel is no local network
     unsetenv("DM_NET_VPN"); dm_net_set_multicast_allowed(0); CHECK(dm_net_discovery_prepare(htonl(UINT32_MAX),&plan)<0 && dm_net_errno()==99);
     setenv("DM_NETWORK","auto",1); dm_net_test_set_interface(NULL);

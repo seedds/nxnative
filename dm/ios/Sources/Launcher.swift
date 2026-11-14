@@ -129,7 +129,7 @@ private struct PlayerNameSection: View {
 
 /// VPN play (DM_NET_VPN and DM_NET_DISCOVERY_PEER; docs/reference/services.md, Local play over a VPN): LAN and Local wireless with friends on other networks, through
 /// a VPN app every player is on. Not rows of the settings list, since an address is none of its kinds (docs/frontends.md): the choices are kept under keys of their own
-/// (vpnPlay.on, vpnPlay.host) and LauncherView puts them in the environment at Play. Shown while Network is LAN or Local wireless.
+/// (vpnPlay.on, vpnPlay.host) and LauncherView puts them in the environment at Play. Shown while Network is LAN, Local wireless or Automatic.
 private func vpnAddressValid(_ s: String) -> Bool { var a = in_addr(); return inet_pton(AF_INET, s, &a) == 1 }
 private struct VpnSection: View {
     @Binding var on: Bool
@@ -199,7 +199,7 @@ private struct LauncherView: View {
     @AppStorage("vpnPlay.host") private var vpnHost = ""
 
     private var vpnFixed: Bool { m.fixed.contains("DM_NET_VPN") || m.fixed.contains("DM_NET_DISCOVERY_PEER") }
-    private var vpnShown: Bool { ["lan", "ldn"].contains(m.values["DM_NETWORK"] ?? "") }
+    private var vpnShown: Bool { ["lan", "ldn", "auto"].contains(m.values["DM_NETWORK"] ?? "") }
     private var vpnTyped: String { vpnHost.trimmingCharacters(in: .whitespaces) }
     // A typo in the host's address would leave joiners searching nobody: Play waits for an address or an empty field
     private var vpnBlocks: Bool { vpnShown && vpnOn && !vpnFixed && !vpnTyped.isEmpty && !vpnAddressValid(vpnTyped) }
@@ -357,7 +357,7 @@ private struct LauncherView: View {
         }
     }
 
-    /// VPN play's two variables, while Network is LAN or Local wireless (VpnSection); what an env file or the launch set stays
+    /// VPN play's two variables, while Network is LAN, Local wireless or Automatic (VpnSection); what an env file or the launch set stays
     private func applyVpn() {
         if vpnFixed { fputs("launcher: VPN play kept as the env file or launch set it\n", stderr); return }
         guard vpnShown && vpnOn else { return }

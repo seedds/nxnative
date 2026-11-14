@@ -24,11 +24,11 @@ static inline int dm_net_ldn_enabled(void) {
     return mode == DM_NET_LDN || mode == DM_NET_AUTO;
 }
 int dm_net_enabled(void);
-// VPN play, DM_NET_VPN=1 in the lan and ldn modes: the adapter is the VPN's (net_vpn.h; hle_net_backend.c net_vpn_interface), never Wi-Fi, and discovery
+// VPN play, DM_NET_VPN=1 in the lan, ldn and auto modes: the adapter is the VPN's (net_vpn.h; hle_net_backend.c net_vpn_interface), never Wi-Fi, and discovery
 // never relies on native broadcast, which a tunnel does not carry
 static inline int dm_net_vpn(void) {
     const char *v = getenv("DM_NET_VPN"); dm_net_mode_t mode = dm_net_mode();
-    return v && !strcmp(v, "1") && (mode == DM_NET_LAN || mode == DM_NET_LDN);
+    return v && !strcmp(v, "1") && (mode == DM_NET_LAN || mode == DM_NET_LDN || mode == DM_NET_AUTO);
 }
 // The LDN room this device is in, as hle_ldn.c publishes it: room 0 when there is none, else the other members' addresses (network order, at most
 // DM_NET_SESSION_MAX, none while the device is alone in it). In a room a game's broadcast goes to each member instead of a native broadcast or a subnet

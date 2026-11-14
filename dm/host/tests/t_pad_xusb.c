@@ -13,7 +13,7 @@ static void report(uint8_t r[XUSB_REPORT_LEN], int b1, int b2, int lt, int rt, i
 }
 
 static void test_parse(void) {
-    uint8_t r[XUSB_REPORT_LEN]; pad_xusb s;
+    uint8_t r[XUSB_REPORT_LEN]; pad_xusb s = {0};
     report(r, 0, 0, 0, 0, 0, 0, 0, 0);
     CHECK(pad_xusb_parse(r, sizeof r, &s));
     CHECK(!pad_xusb_parse(r, XUSB_REPORT_LEN - 1, &s));   // a short report
@@ -29,7 +29,7 @@ static void test_parse(void) {
 }
 
 static void test_buttons(void) {
-    uint8_t r[XUSB_REPORT_LEN]; pad_xusb s;
+    uint8_t r[XUSB_REPORT_LEN]; pad_xusb s = {0};
     static const struct { int b1, b2; uint64_t want; } t[] = {
         {0x01, 0, DM_BTN_UP}, {0x02, 0, DM_BTN_DOWN}, {0x04, 0, DM_BTN_LEFT}, {0x08, 0, DM_BTN_RIGHT}, {0x05, 0, DM_BTN_UP | DM_BTN_LEFT},
         {0x10, 0, DM_BTN_PLUS}, {0x20, 0, DM_BTN_MINUS}, {0x40, 0, DM_BTN_LS}, {0x80, 0, DM_BTN_RS},
@@ -50,7 +50,7 @@ static void test_buttons(void) {
 }
 
 static void test_sticks(void) {
-    uint8_t r[XUSB_REPORT_LEN]; pad_xusb s; int32_t o[4];
+    uint8_t r[XUSB_REPORT_LEN]; pad_xusb s = {0}; int32_t o[4];
     report(r, 0, 0, 0, 0, 32767, 0, -32768, 0);
     CHECK(pad_xusb_parse(r, sizeof r, &s)); pad_xusb_sticks(&s, o);
     CHECK(o[0] == DM_STICK_MAX && o[1] == 0 && o[2] == -DM_STICK_MAX && o[3] == 0);   // full deflection reaches the Switch's range on both sides
@@ -82,7 +82,7 @@ static int gip(const char *hex, pad_xusb *s) {
     return pad_gip_parse(r, n, s);
 }
 static void test_gip(void) {
-    pad_xusb s;
+    pad_xusb s = {0};
     static const char tail[] = " 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00";
     char b[256];
 #define REP(fmt) (snprintf(b, sizeof b, "20 00 07 20 " fmt "%s", tail), gip(b, &s))

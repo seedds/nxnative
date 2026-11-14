@@ -361,6 +361,7 @@ static id<MTLHeap> rh_take(MTLTextureDescriptor *d, int *reused) {
     if (got) { *reused = 1; return CFBridgingRelease(got); }
     MTLHeapDescriptor *hd = [MTLHeapDescriptor new]; hd.type = MTLHeapTypePlacement; hd.size = need.size;
     hd.storageMode = d.storageMode; hd.cpuCacheMode = d.cpuCacheMode; hd.hazardTrackingMode = d.hazardTrackingMode;
+    if (need.size >= (48u << 20)) { static int logged; if (logged++ < 24) MLOG("big render-target heap made: %llu MB for a %lux%lux%lu texture, Metal format %lu, %lu levels, %lu samples (type %lu)", (unsigned long long)(need.size >> 20), (unsigned long)d.width, (unsigned long)d.height, (unsigned long)MAX(d.depth, d.arrayLength), (unsigned long)d.pixelFormat, (unsigned long)d.mipmapLevelCount, (unsigned long)d.sampleCount, (unsigned long)d.textureType); }
     *reused = 0; return heap_tag([g_dev newHeapWithDescriptor:hd], @"render targets and other recycled textures");
 }
 // A shared render target in a GPU-only pool (tex_mtl_), in recycled memory: written by the GPU alone, so its bytes never come from the CPU's view of the pool

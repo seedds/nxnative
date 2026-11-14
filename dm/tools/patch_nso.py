@@ -1766,6 +1766,8 @@ if BUILD_ID in STUBS:
 # same region over the same back-edges or a wider one over more. Breath of the Wild's job queue (main+0xef62dc) is such a poll: the first item of some jobs is for the
 # thread of core 0, and the others wait until it is taken, taking and releasing the queue's lock on every pass; polled at full speed by two workers, the lock went back and
 # forth between their cores, and the main thread, whose item it was, lost nearly every exclusive store to them (CPU frames of 30-200 ms with three cores spinning there).
+# 1.6.0's compiler writes the same lock without clrex, its failed test going straight back to the exclusive load (main+0x12c0e48); spin_lock takes both forms. A lock that
+# heads no poll still has its own retry loop as a spin wait (Mario vs. Donkey Kong's test-and-test-and-set locks, main+0x470fa8).
 # Such a pass leaves memory and registers as it found them (a pass with stores, from its last state change on), so only another thread can end the loop, and a pause
 # there changes only timing. R is copied into the patch area; the original back-edges jump to the copy (no pause on the first pass, so a
 # single retry costs nothing), the copy's back-edges go through a spin gate, which the host takes as a yield with the yield back-off (hle_thread.c dm_spin_wait), and exits
@@ -1828,8 +1830,11 @@ def spin_rmw(a):
 def spin_lock(a):
     """An exclusive spin lock sequence or a test loop entered at a → (kind, xN, its instructions, how many of them come before a, how many from a on, registers read, registers written)
     'acq'  ld(a)xr wA,[xN]; cbz wA,+16; clrex; b <the load>; st(l)xr wS,wK,[xN]; cbnz wS,<the load>    test-and-set, retried until the store succeeds (wK not zero)
+           ld(a)xr wA,[xN]; cbnz wA,<the load>; st(l)xr wS,wK,[xN]; cbnz wS,<the load>                    the same without clrex (Breath of the Wild 1.6.0's compiler)
     'rel'  clrex; ld(a)xr wA,[xN]; cmp wA,#k; b.ne <the clrex>; st(l)xr wS,wzr,[xN]; cbnz wS,<the load>  compare-and-clear, entered at the load; or stlr wzr,[xN]
-    'tst'  ldr|ldrb|ldrh wA,[xN{,#imm}]; cmp wA,#k; b.eq|b.ne <the load>                                 a test loop that only another thread ends"""
+           ld(a)xr wA,[xN]; cmp wA,#k; b.ne <the load>; st(l)xr wS,wzr,[xN]; cbnz wS,<the load>           the same without clrex
+    'tst'  ldr|ldrb|ldrh wA,[xN{,#imm}]; cmp wA,#k; b.eq|b.ne <the load>                                 a test loop that only another thread ends
+    The forms without clrex retry the exclusive load at once: the next exclusive load replaces the reservation the failed test left"""
     l = [spin_ins(a + 4 * i) for i in range(6)]
     if l[0] is None: return None
     r = lambda x, i: x.reg_name(x.operands[i].reg)
@@ -1837,6 +1842,14 @@ def spin_lock(a):
     m0 = l[0].mnemonic
     if m0 in ('ldxr', 'ldaxr') and None not in l and r(l[0], 0).startswith('w') and plain(l[0], 1):
         base = l[0].operands[1].mem.base; bn = spin_norm(l[0].reg_name(base))
+        if (l[1].mnemonic == 'cbnz' and r(l[1], 0) == r(l[0], 0) and l[1].operands[1].imm == a
+                and l[2].mnemonic in ('stxr', 'stlxr') and plain(l[2], 2) and l[2].operands[2].mem.base == base and r(l[2], 1) not in ('wzr', 'xzr')
+                and l[3].mnemonic == 'cbnz' and r(l[3], 0) == r(l[2], 0) and l[3].operands[1].imm == a):
+            return ('acq', bn, l[:4], 0, 4, {bn, spin_norm(r(l[2], 1))}, {spin_norm(r(l[0], 0)), spin_norm(r(l[2], 0))})
+        if (l[1].mnemonic == 'cmp' and r(l[1], 0) == r(l[0], 0) and l[1].operands[1].type == ARM64_OP_IMM
+                and l[2].mnemonic == 'b.ne' and l[2].operands[0].imm == a and l[3].mnemonic in ('stxr', 'stlxr') and r(l[3], 1) == 'wzr'
+                and plain(l[3], 2) and l[3].operands[2].mem.base == base and l[4].mnemonic == 'cbnz' and r(l[4], 0) == r(l[3], 0) and l[4].operands[1].imm == a):
+            return ('rel', bn, l[:5], 0, 5, {bn}, {spin_norm(r(l[0], 0)), spin_norm(r(l[3], 0)), 'nzcv'})
         if (l[1].mnemonic == 'cbz' and r(l[1], 0) == r(l[0], 0) and l[1].operands[1].imm == a + 16 and l[2].mnemonic == 'clrex' and l[3].mnemonic == 'b' and l[3].operands[0].imm == a
                 and l[4].mnemonic in ('stxr', 'stlxr') and plain(l[4], 2) and l[4].operands[2].mem.base == base and r(l[4], 1) not in ('wzr', 'xzr')
                 and l[5].mnemonic == 'cbnz' and r(l[5], 0) == r(l[4], 0) and l[5].operands[1].imm == a):
@@ -1895,15 +1908,21 @@ class SpinNo(Exception): pass
 def spin_region(T, bes):
     """the spin wait region with head T (bes: the backward branches to T found by the scan) → dict, or None. A store whose value or address a pass changes is no part of a region:
     the paths through it are dropped and the region is found again without them (a poll that takes its item once the wait is over stores the new cursor there). When the paths
-    through stores bring in a register that a pass changes, the region is looked for once more with every store ending its path, as before stores could be part of one"""
-    ban = set()
-    for _ in range(8):
-        g = spin_region1(T, bes, ban, True)
-        if not isinstance(g, set): break
-        ban |= g
-    old = spin_region1(T, bes, set(), False)   # the region without stores, which the search took before: the wider one only when it covers its back-edges
-    return g if isinstance(g, dict) and (not old or old['valid'] <= g['valid']) else old
-def spin_region1(T, bes, ban, stores):
+    through stores bring in a register that a pass changes, the region is looked for once more with every store ending its path, as before stores could be part of one.
+    A lock sequence at T is one node of a poll that it heads (its own branches back to T stay inside it); when there is no such poll, T is the head of the sequence's own retry
+    loop (a lock's wait for its holder, ld(a)xr; cbnz <the load>), found as plain instructions as before the lock rules"""
+    lk = spin_lock(T)
+    for head in (True, False) if lk and lk[0] in ('acq', 'rel') else (True,):
+        ban = set()
+        for _ in range(8):
+            g = spin_region1(T, bes, ban, True, head)
+            if not isinstance(g, set): break
+            ban |= g
+        old = spin_region1(T, bes, set(), False, head)   # the region without stores, which the search took before: the wider one only when it covers its back-edges
+        g = g if isinstance(g, dict) and (not old or old['valid'] <= g['valid']) else old
+        if g: break
+    return g
+def spin_region1(T, bes, ban, stores, head):
     hi = max(bes)
     if any(s < hi + 4 and T < e for s, e in DATA_BLOCKS) or not spin_quick(T, hi): return None
     nodes, back, bad, inner = {}, set(), set(), set()
@@ -1914,7 +1933,7 @@ def spin_region1(T, bes, ban, stores):
         if a in ban: bad.add(a); continue
         rmw = spin_rmw(a) if a + 12 <= hi and struct.unpack_from('<I', IMG, a)[0] & 0x3FE00000 == 0x08400000 else None   # ldxr / ldaxr
         lk = None if rmw else spin_lock(a)
-        if lk and lk[0] == 'tst' and a == T: lk = None   # the region's own test loop
+        if lk and a == T and (lk[0] == 'tst' or not head): lk = None   # the region's own test loop, or a lock sequence taken as plain instructions (spin_region)
         if rmw:
             n = {'kind': 'rmw', 'base': rmw[0], 'k': rmw[1], 'ins': rmw[3], 'uses': {rmw[0]}, 'defs': rmw[2], 'succ': [a + 16]}
         elif lk:

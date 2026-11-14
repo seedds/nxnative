@@ -3,12 +3,16 @@ from pathlib import Path
 import contextlib
 import io
 import json
+import os
 import struct
 import sys
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'tools'))
+_had = os.environ.get('DM_GAME'); os.environ.setdefault('DM_GAME', '010015100B514000')   # shader_split loads a profile at import; these tests use no game's data, so any
+# profile does (tests.yml sets one for the CI); without DM_GAME, the CI's profile, set for the import only (other tests expect no default game)
 import shader_split
+if _had is None: del os.environ['DM_GAME']
 import unityfs
 
 

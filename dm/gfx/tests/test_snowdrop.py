@@ -1,5 +1,6 @@
 """Snowdrop's compressed shader records, without game data."""
 from pathlib import Path
+import importlib.util
 import os
 import struct
 import subprocess
@@ -8,7 +9,10 @@ import tempfile
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'tools'))
+_had = os.environ.get('DM_GAME'); os.environ.setdefault('DM_GAME', '010015100B514000')   # shader_split loads a profile at import; these tests use no game's data, so any
+# profile does (tests.yml sets one for the CI); without DM_GAME, the CI's profile, set for the import only (other tests expect no default game)
 import shader_split as split
+if _had is None: del os.environ['DM_GAME']
 
 
 def shader(stage):
@@ -68,6 +72,7 @@ class SnowdropTests(unittest.TestCase):
         with self.assertRaisesRegex(SystemExit, 'expected 1 raw bytes'):
             split.snowdrop_shaders(bytes(bad), '/bad raw size')
 
+    @unittest.skipUnless(importlib.util.find_spec('lz4'), 'the split reads ExeFS main with shader_split.nso_image, which needs the lz4 Python module (pip install lz4), which this Python cannot import')
     def test_dlc_romfs_has_no_main_and_joins_the_shader_union(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

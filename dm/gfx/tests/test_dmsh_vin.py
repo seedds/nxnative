@@ -4,6 +4,7 @@ for macOS and iOS (temporary files only in a temporary folder)."""
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -23,7 +24,8 @@ def shader(types, tf=False):
     return src
 
 class ShadowInputs(unittest.TestCase):
-    def compiles(self, msl):
+    def compiles(self, msl):   # last in each test: the variant's text is checked before; only this step needs the Metal compiler
+        if not shutil.which('xcrun'): self.skipTest('variant text checked; compiling it needs xcrun and the Metal compiler (Xcode), and xcrun is not on PATH')
         with tempfile.TemporaryDirectory(prefix='dmsh_vin_test_') as d:
             p = Path(d) / 'v.metal'; p.write_text(msl)
             for sdk in ('macosx', 'iphoneos'):

@@ -2,6 +2,7 @@
 add the layout block at buffer 16 and the vertex / instance / base instance ids it lacks (keeping the ones the shader declares), fill every input through dm_fetch with as_type to
 its declared type, leave the other entry points out, decline shaders it does not fit, and compile with the Metal compiler for macOS and iOS (temporary files only in a temporary folder)."""
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -24,7 +25,8 @@ def shader(types, extra='', ids='', tf=False, gs=False):
     return src
 
 class PullingInputs(unittest.TestCase):
-    def compiles(self, msl):
+    def compiles(self, msl):   # last in each test: the variant's text is checked before; only this step needs the Metal compiler
+        if not shutil.which('xcrun'): self.skipTest('variant text checked; compiling it needs xcrun and the Metal compiler (Xcode), and xcrun is not on PATH')
         with tempfile.TemporaryDirectory(prefix='dmsh_pull_test_') as d:
             p = Path(d) / 'v.metal'; p.write_text(msl)
             for sdk in ('macosx', 'iphoneos'):

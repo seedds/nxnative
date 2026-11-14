@@ -23,7 +23,11 @@ sys.path.insert(0, str(TOOLS))
 from nso_asm import ADRP, ADDI, B, NOP
 from nso_match import Image, MatchError, resolve, validate
 
-MOV = 0xaa1703e0  # mov x0, x23
+# nso_match.Image and nso_code.out_store decode with Capstone: without the module those tests skip (the CI installs it, tests.yml); the symbol table test needs none
+HAVE_CAPSTONE = importlib.util.find_spec('capstone') is not None
+NO_CAPSTONE = 'needs the capstone Python module (pip install capstone), which this Python cannot import'
+
+MOV =0xaa1703e0  # mov x0, x23
 ADD = 0x914012e0  # add x0, x23, #0x4000
 RET = 0xd65f03c0
 
@@ -65,6 +69,7 @@ def imported(name, plt=0x1800, slot=0x2500):
     return out
 
 
+@unittest.skipUnless(HAVE_CAPSTONE, NO_CAPSTONE)
 class Matching(unittest.TestCase):
     def setUp(self):
         self.original = image({0x100: caller(0x100, 0x500), 0x500: [0xd2800020, RET]})
@@ -261,6 +266,7 @@ class RegionGates(unittest.TestCase):
     """The address region gates' sites (patch_nso.py "Address regions"): the SDK's symbols and the one store through the out pointer"""
     PRO, MOV_OUT, RETW = [0xa9bd7bfd, 0x910003fd], 0xaa0103f4, RET   # stp x29, x30, [sp, #-0x30]!; mov x29, sp; mov x20, x1; ret
 
+    @unittest.skipUnless(HAVE_CAPSTONE, NO_CAPSTONE)
     def test_the_one_store_through_the_out_pointer(self):
         from nso_code import out_store
         from capstone import Cs, CS_ARCH_ARM64, CS_MODE_ARM
@@ -285,6 +291,7 @@ class RegionGates(unittest.TestCase):
         self.assertEqual(defined(bytearray(0x100)), {})   # no MOD0
 
 
+@unittest.skipUnless(HAVE_CAPSTONE, NO_CAPSTONE)
 class Patches(unittest.TestCase):
     """A patch of several functions: one constant whose uses lie in different functions applies whole or not at all"""
     def setUp(self):

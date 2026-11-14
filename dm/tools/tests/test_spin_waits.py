@@ -1,13 +1,18 @@
 """The rewriter's spin wait search (patch_nso.py "Spin waits") on hand-assembled AArch64 loops, without game files."""
 import ast
+import importlib.util
 from pathlib import Path
 import re
 import struct
 import sys
 import unittest
 
-from capstone import Cs, CS_ARCH_ARM64, CS_MODE_ARM
-from capstone.arm64 import ARM64_OP_IMM, ARM64_OP_MEM, ARM64_OP_REG
+# The search decodes with Capstone: without the module the tests skip (the CI installs it, tests.yml), the rest of the file still loads
+HAVE_CAPSTONE = importlib.util.find_spec('capstone') is not None
+NO_CAPSTONE = 'needs the capstone Python module (pip install capstone), which this Python cannot import'
+if HAVE_CAPSTONE:
+    from capstone import Cs, CS_ARCH_ARM64, CS_MODE_ARM
+    from capstone.arm64 import ARM64_OP_IMM, ARM64_OP_MEM, ARM64_OP_REG
 
 TOOLS = Path(__file__).resolve().parents[1]
 # patch_nso.py is a command-line program whose top level loads and rewrites an image: compile only the spin wait search and its constants
@@ -47,6 +52,7 @@ def patched(**at):
     return w
 
 
+@unittest.skipUnless(HAVE_CAPSTONE, NO_CAPSTONE)
 class SpinWaits(unittest.TestCase):
     def test_lock_poll_is_a_wait(self):
         g = region(POLL, 0, [0x80])

@@ -20,6 +20,12 @@ spec.loader.exec_module(pack)
 spec = importlib.util.spec_from_file_location('build_ipa_from_nsp', REPO / 'scripts/build_ipa_from_nsp.py')
 nsp = importlib.util.module_from_spec(spec); spec.loader.exec_module(nsp)
 
+# pack_ipa reuses a file only from a folder on APFS (fs_type, Darwin's statfs64) and keeps the old IPA's prefix through an APFS clone (fclonefileat); the tests below that
+# expect reuse or a kept prefix need the temp folder, where setUp puts the sources and the IPA, on APFS, as pack_ipa itself reads it
+TMP_FS = pack.fs_type(tempfile.gettempdir())
+needs_apfs = unittest.skipUnless(TMP_FS == b'apfs', f'needs the temp folder ({tempfile.gettempdir()}) on APFS, where pack_ipa reuses files and clones the old IPA; '
+                                 f'pack_ipa.fs_type reads {TMP_FS.decode() or "no filesystem type (it reads one on macOS only)"} there')
+
 
 class PackIpa(unittest.TestCase):
     def setUp(self):
@@ -84,6 +90,7 @@ class PackIpa(unittest.TestCase):
     def offset(self, name):
         with zipfile.ZipFile(self.out) as z: return z.getinfo('Payload/DmIOS.app/' + name).header_offset
 
+    @needs_apfs
     def test_unchanged_clone(self):
         self.run_pack()
         with zipfile.ZipFile(self.out) as z: end = z.start_dir
@@ -92,6 +99,7 @@ class PackIpa(unittest.TestCase):
         self.assertEqual(self.reused, 6); self.assertEqual(self.kept, end)
         self.same_as_fresh()
 
+    @needs_apfs
     def test_app_change_keeps_romfs_and_ignores_app_folder_time(self):
         self.run_pack()
         (self.app / 'replacement').write_bytes(b'new!' * 3000)
@@ -101,11 +109,13 @@ class PackIpa(unittest.TestCase):
         self.assertEqual(self.reused, 5); self.assertEqual(self.kept, self.offset('exe'))
         self.assertGreater(self.kept, self.offset('romfs/text.txt')); self.same_as_fresh()
 
+    @needs_apfs
     def test_change_in_first_mapping(self):
         self.run_pack(); (self.rom / 'déjà/empty').write_bytes(b'changed')
         self.run_pack(); self.assertEqual(self.reused, 5)
         self.assertEqual(self.kept, self.offset('romfs/déjà/empty')); self.same_as_fresh()
 
+    @needs_apfs
     def test_changed_added_removed_and_same_size_rewrite(self):
         self.run_pack()
         (self.rom / 'text.txt').write_bytes(b'changed' * 4000); (self.rom / 'gone.dat').unlink(); (self.rom / 'new.bin').write_bytes(b'n' * 9000)
@@ -136,17 +146,20 @@ class PackIpa(unittest.TestCase):
         self.maps.append(self.maps[0])
         with self.assertRaisesRegex(SystemExit, 'twice'): self.run_pack()
 
+    @needs_apfs
     def test_nested_mapping_before_parent(self):
         extra = self.tmp / 'extra'; extra.mkdir(); (extra / 'child').write_bytes(b'child')
         self.maps.insert(0, f'Payload/DmIOS.app/romfs/deep={extra}')
         self.run_pack(); self.run_pack(); self.assertEqual(self.reused, 7); self.same_as_fresh()
 
+    @needs_apfs
     def test_clone_failure_copies_compressed(self):
         self.run_pack()
         with patch.object(pack, 'clone', return_value=False), patch.object(pack, 'load', side_effect=AssertionError('recompressed')):
             self.run_pack()
         self.assertEqual(self.kept, 0); self.assertEqual(self.reused, 6); self.same_as_fresh()
 
+    @needs_apfs
     def test_symlink_and_folder_headers(self):
         self.run_pack(); parent = (self.app / 'sub').stat()
         (self.app / 'sub/link').unlink(); os.symlink('../exe', self.app / 'sub/link')
@@ -158,10 +171,12 @@ class PackIpa(unittest.TestCase):
         os.chmod(self.app / 'sub', 0o700)
         self.run_pack(); self.assertGreater(self.kept, self.offset('sub/link')); self.same_as_fresh()
 
+    @needs_apfs
     def test_store_flag_change(self):
         self.run_pack(); self.run_pack(None, '--store', '.TXT'); self.assertEqual(self.reused, 5)
         self.same_as_fresh('--store', '.txt')
 
+    @needs_apfs
     def test_stale_replaced_and_malformed_index(self):
         self.run_pack(); index = Path(str(self.out) + '.idx')
         original = index.read_text()
@@ -179,6 +194,7 @@ class PackIpa(unittest.TestCase):
         Path(str(self.out) + '.idx').write_text(json.dumps(idx))
         self.run_pack(); self.assertEqual(self.kept, 0); self.assertEqual(self.reused, 0); self.same_as_fresh()
 
+    @needs_apfs
     def test_streamed_reuse_and_fallback_to_stored(self):
         self.run_pack(big=1024); self.run_pack(big=1024); self.assertEqual(self.reused, 6)
         (self.rom / 'random.bin').write_bytes(os.urandom(30000))
@@ -199,12 +215,14 @@ class PackIpa(unittest.TestCase):
         with patch.object(pack, 'load', loaded), patch.object(pack.Zip, 'stream', streamed), patch.object(pack.cf, 'ThreadPoolExecutor', Pool): self.run_pack(big=40000)
         self.same_as_fresh(big=40000)
 
+    @needs_apfs
     def test_local_header_mismatch_recompresses(self):
         self.run_pack(); offset = self.offset('exe')
         with open(self.out, 'r+b') as f: f.seek(offset + 10); f.write(b'\x00\x00')
         idxp = Path(str(self.out) + '.idx'); idx = json.loads(idxp.read_text()); idx['ipa'] = [self.out.stat().st_size, self.out.stat().st_mtime_ns]; idxp.write_text(json.dumps(idx))
         self.run_pack(); self.assertEqual(self.reused, 5); self.same_as_fresh()
 
+    @needs_apfs
     def test_zip64_local_headers(self):
         header = pack.header
         def zip64(e, method, crc, csize, usize, z64=False): return header(e, method, crc, csize, usize, True)
@@ -213,6 +231,7 @@ class PackIpa(unittest.TestCase):
             self.assertGreater(self.kept, self.offset('sub/link')); self.same_as_fresh()
         self.run_pack(); self.assertEqual(self.reused, 0); self.assertEqual(self.kept, 0); self.same_as_fresh()
 
+    @needs_apfs
     def test_clone_uses_checked_inode_after_path_replaced(self):
         self.run_pack(); clone = pack.clone; old_bytes = self.out.read_bytes()
         def checked_clone(old, dst):
@@ -280,6 +299,7 @@ class PackIpa(unittest.TestCase):
                     self.assertEqual(self.out.read_bytes(), before); self.assertEqual(Path(str(self.out) + '.idx').read_bytes(), index)
                     for suffix in ('.partial', '.clone'): self.assertFalse(Path(str(self.out) + suffix).exists())
 
+    @needs_apfs
     def test_non_apfs_mapping_never_reuses_files(self):
         self.assertEqual(pack.fs_type(self.tmp / 'missing'), b'')
         self.run_pack()

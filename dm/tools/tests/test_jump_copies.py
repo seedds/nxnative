@@ -1,13 +1,20 @@
 """Exercise the rewriter's copied-base and masked-predecessor jump table recognition on real AArch64 instructions, without game files."""
 import ast
+import importlib.util
 from pathlib import Path
 import re
 import struct
 import sys
 import unittest
 
-from capstone import Cs, CS_ARCH_ARM64, CS_MODE_ARM
-from capstone.arm64 import ARM64_OP_IMM
+# Every test decodes with Capstone: without the module they skip (the CI installs it, tests.yml), the rest of the file still loads
+HAVE_CAPSTONE = importlib.util.find_spec('capstone') is not None
+NO_CAPSTONE = 'needs the capstone Python module (pip install capstone), which this Python cannot import'
+if HAVE_CAPSTONE:
+    from capstone import Cs, CS_ARCH_ARM64, CS_MODE_ARM
+    from capstone.arm64 import ARM64_OP_IMM
+else:
+    ARM64_OP_IMM = None   # read by the compiled recognizers only, which the skipped tests never call
 
 TOOLS = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(TOOLS))
@@ -24,6 +31,7 @@ exec(compile(ast.Module(body=[n for n in tree.body if isinstance(n, ast.Function
 def mov(dst, src, wide=True): return (0xaa0003e0 if wide else 0x2a0003e0) | src << 16 | dst
 
 
+@unittest.skipUnless(HAVE_CAPSTONE, NO_CAPSTONE)
 class CopiedBase(unittest.TestCase):
     def follow(self, words, reg='x7'):
         md = Cs(CS_ARCH_ARM64, CS_MODE_ARM); md.detail = True
@@ -69,6 +77,7 @@ def cbz_w18(frm, to): return 0x34000000 | (((to - frm) >> 2) & 0x7ffff) << 5 | 1
 def bhi(frm, to): return 0x54000008 | (((to - frm) >> 2) & 0x7ffff) << 5
 
 
+@unittest.skipUnless(HAVE_CAPSTONE, NO_CAPSTONE)
 class ForwardBase(unittest.TestCase):
     """Entry jumps over the dispatch to its sole base initialization, then branches backward."""
     TABLE = 0x4040
@@ -128,6 +137,7 @@ class ForwardBase(unittest.TestCase):
         self.assertIsNone(self.run_site(self.words(w8=ADRP(17, 32, 0x5000))))
 
 
+@unittest.skipUnless(HAVE_CAPSTONE, NO_CAPSTONE)
 class MaskedPredecessor(unittest.TestCase):
     """The block `and w18,w17,#M; cmp w18,#3; b.hi; ldrsw x18,[x27,x6,lsl #2]; add; br x18` whose index x6 was masked from x17 in the block that branches to it.
     Word indices of the synthetic function: 0-1 base (adrp + add), 2-4 the predecessor (and x6, ubfx, cbz), 5 filler, 6 ret, 7-15 the dispatch block (and at 7, slots at 10, 12 and 14),
@@ -230,6 +240,7 @@ class MaskedPredecessor(unittest.TestCase):
         self.assertIsNone(self.run_site(self.words(w0=NOP, w1=NOP)))
 
 
+@unittest.skipUnless(HAVE_CAPSTONE, NO_CAPSTONE)
 class MaskedComplement(unittest.TestCase):
     TABLE = 0x4040
     TARGETS = [0x30 + i * 4 for i in range(7)]

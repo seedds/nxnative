@@ -12,7 +12,11 @@ REPO = Path(__file__).resolve().parents[3]
 spec = importlib.util.spec_from_file_location('build_ipa_from_nsp', REPO / 'scripts/build_ipa_from_nsp.py')
 nsp = importlib.util.module_from_spec(spec); spec.loader.exec_module(nsp)
 
+# rewrite() imports capstone (its version is part of the rewrite's reuse key): without the module the tests skip (the CI installs it, tests.yml)
+HAVE_CAPSTONE = importlib.util.find_spec('capstone') is not None
 
+
+@unittest.skipUnless(HAVE_CAPSTONE, 'the NSP script\'s rewrite() needs the capstone Python module (pip install capstone), which this Python cannot import')
 class NroPack(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp()); self.addCleanup(shutil.rmtree, self.tmp)

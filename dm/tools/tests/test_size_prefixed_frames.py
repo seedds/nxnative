@@ -2,6 +2,7 @@
 is opened only when it decompresses to exactly the size the prefix gives; anything else is returned as it is, so a file that is not such a container is
 scanned as before. No game files needed."""
 import contextlib
+import importlib.util
 import io
 import os
 import struct
@@ -15,6 +16,10 @@ _had = os.environ.get('DM_GAME'); os.environ['DM_GAME'] = '01007BB017812000'   #
 import shader_split as ss
 if _had is None: del os.environ['DM_GAME']
 else: os.environ['DM_GAME'] = _had
+
+# The LZ4 frames are made with the lz4 module (the CI installs it, tests.yml): without it those checks skip, the zstd ones still run
+HAVE_LZ4 = importlib.util.find_spec('lz4') is not None
+NO_LZ4 = 'needs the lz4 Python module (pip install lz4), which this Python cannot import'
 
 BODY = b'BNSH\0\0\0\0' + bytes(range(256)) * 64
 
@@ -31,6 +36,7 @@ class Unsized(unittest.TestCase):
         self.assertEqual(d[4:8], ss.ZSTD_MAGIC)
         self.assertEqual(unsized(d), (BODY, ''))
 
+    @unittest.skipUnless(HAVE_LZ4, NO_LZ4)
     def test_lz4_frame(self):
         import lz4.frame
         d = struct.pack('<I', len(BODY)) + lz4.frame.compress(BODY)
@@ -38,10 +44,11 @@ class Unsized(unittest.TestCase):
         self.assertEqual(unsized(d), (BODY, ''))
 
     def test_frame_size(self):
-        import lz4.frame
         zs = ss.zstd_mod()
         self.assertEqual(ss.frame_size(zs.compress(BODY)), len(BODY))
         self.assertEqual(ss.frame_size(zs.compress(b'x' * 300)), 300)   # the 2-byte field, which counts from 256
+        if not HAVE_LZ4: self.skipTest(f'zstd frames checked; the LZ4 frames {NO_LZ4}')
+        import lz4.frame
         self.assertEqual(ss.frame_size(lz4.frame.compress(BODY, store_size=True)), len(BODY))
         self.assertIsNone(ss.frame_size(lz4.frame.compress(BODY, store_size=False)))
 
@@ -50,6 +57,7 @@ class Unsized(unittest.TestCase):
         d = bytes.fromhex('eb157a51') + ss.zstd_mod().compress(BODY)
         self.assertEqual(unsized(d), (d, ''))
 
+    @unittest.skipUnless(HAVE_LZ4, NO_LZ4)
     def test_frame_longer_than_its_prefix(self):
         # the prefix is the whole length, not a limit: a frame that records no size and holds more is not this container
         import lz4.frame

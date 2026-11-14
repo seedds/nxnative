@@ -1,4 +1,5 @@
 """NRO metadata must survive the real rewriter even when a build ID decodes as x18 instructions."""
+import importlib.util
 import os
 from pathlib import Path
 import struct
@@ -11,7 +12,11 @@ TOOLS = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(TOOLS / 'tests'))   # the CI runs each file by path from the repository root (tests.yml), which does not put this folder on sys.path
 from test_nso_match import image, RET  # noqa: E402
 
+# patch_nso.py, run below with this same Python, imports lz4.block and capstone at its top
+MISSING = [m for m in ('lz4', 'capstone') if importlib.util.find_spec(m) is None]
 
+
+@unittest.skipIf(MISSING, f'patch_nso.py needs the {" and ".join(MISSING)} Python module(s) (pip install {" ".join(MISSING)}), which this Python cannot import')
 class NroHeader(unittest.TestCase):
     def test_header_preserved_and_text_rewritten(self):
         # A real function starts immediately after the NRO header. Both it and the build ID name x18.

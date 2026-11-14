@@ -594,10 +594,12 @@ def run_heavy(cmd, log, cwd, env, a, what):
 
 # ---------------------------------------------------------------- one game run
 
-_libproc = ctypes.CDLL('/usr/lib/libproc.dylib')
+_libproc = None   # Apple's libproc, loaded at the first footprint: only a game run needs it, and `impact` and the tests also run where it does not exist (Linux)
 
 
 def footprint(pid):   # (current, lifetime peak) physical footprint in bytes (proc_pid_rusage, RUSAGE_INFO_V4)
+    global _libproc
+    if _libproc is None: _libproc = ctypes.CDLL('/usr/lib/libproc.dylib')
     buf = ctypes.create_string_buffer(512)
     if _libproc.proc_pid_rusage(pid, 4, buf) != 0: return None
     v = struct.unpack_from('<16x35Q', buf.raw)

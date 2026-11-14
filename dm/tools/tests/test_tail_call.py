@@ -1,12 +1,17 @@
 """Exercise actual AArch64 thunk shapes without any game files."""
 import ast
+import importlib.util
 from pathlib import Path
 import re
 import struct
 import sys
 import unittest
 
-from capstone import Cs, CS_ARCH_ARM64, CS_MODE_ARM
+# The shapes are decoded with Capstone: without the module the tests skip (the CI installs it, tests.yml), the rest of the file still loads
+HAVE_CAPSTONE = importlib.util.find_spec('capstone') is not None
+NO_CAPSTONE = 'needs the capstone Python module (pip install capstone), which this Python cannot import'
+if HAVE_CAPSTONE:
+    from capstone import Cs, CS_ARCH_ARM64, CS_MODE_ARM
 
 TOOLS = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(TOOLS))
@@ -29,6 +34,7 @@ def decode(words):
     return list(md.disasm(struct.pack('<' + 'I' * len(words), *words), 0))
 
 
+@unittest.skipUnless(HAVE_CAPSTONE, NO_CAPSTONE)
 class TailCall(unittest.TestCase):
     def check(self, words, j=6):
         ins = decode(words)

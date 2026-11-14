@@ -1,6 +1,7 @@
 """shader_split: a file no reader can read is left out with a red line, and the split goes on (PR #282: one Next Level Games archive of a revision nlg_dict does not
 know ended a whole split with nothing written). nlg_dict checks its layout before reading it, so such an index is named, not an IndexError. No game files needed."""
 import contextlib
+import importlib.util
 import io
 import os
 import struct
@@ -64,6 +65,7 @@ class ScanFile(unittest.TestCase):
         p = self.tmp / 'a.dict'; p.write_bytes(index(1, 1))
         with mock.patch.object(ss, 'nlg_shaders', side_effect=KeyboardInterrupt), self.assertRaises(KeyboardInterrupt): self.scan(p, 'a.dict')
 
+    @unittest.skipUnless(importlib.util.find_spec('lz4'), 'the split reads ExeFS main with shader_split.nso_image, which needs the lz4 Python module (pip install lz4), which this Python cannot import')
     def test_split_goes_on(self):   # the whole split: the unreadable archive is reported once more at the end, the tables are written and the split exits 0
         rom = self.tmp / 'RomFS'; (rom / 'sub').mkdir(parents=True)
         (rom / 'sub/a.dict').write_bytes(index(5, 2)[:0x28]); (rom / 'sub/a.data').write_bytes(bytes(64)); (rom / 'b.bin').write_bytes(b'no shaders')

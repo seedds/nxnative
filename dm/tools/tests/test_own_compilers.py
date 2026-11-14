@@ -93,6 +93,7 @@ class NspScript(unittest.TestCase):
             nsp.check_metal(sys.executable, REPO, {})
         run.assert_not_called()
 
+    @unittest.skipUnless(shutil.which('xcrun'), 'own_compilers.py --check-metal asks xcrun for the Metal compiler; xcrun (Xcode or its command line tools) is not on PATH')
     def test_check_metal_runs(self):   # the real tool with the real lock: exit 0 or 1 with the message, never a traceback (no Xcode: no compiler, which dmsh_build.py reports)
         r = subprocess.run([sys.executable, str(REPO / 'dm/gfx/tools/own_compilers.py'), '--check-metal'], capture_output=True, text=True,
                            env={k: v for k, v in os.environ.items() if k != own_compilers.ALLOW})

@@ -95,8 +95,27 @@ static int test_output_lifetime(void) {
     printf("AudioOut fields and lifetime (%s): %d guarded open / close / unmap / resume cycles, no consumer left\n", real_audio() ? "real output" : "silent sink", CYCLES);
     return 0;
 }
+// An early-SDK game opens at 44.1 kHz (Mega Man Legacy Collection, SDK 3.7): the open succeeds, the AudioOut reports the rate it was opened with,
+// and the silent sink plays three blocks of 4410 frames (100 ms each at 44.1 kHz) in real time, not at 48 kHz pace (276 ms). Out of range still stops
+static int test_rate_44k(void) {
+    char out[64], ev[64]; uint8_t prm[16]; gbuf b[3]; static int16_t pcm[3][4410 * 2];
+    h_au_InitParam(prm); *(int32_t *)prm = 44100; g_sig = 0;
+    if (h_au_OpenDef(out, ev, prm)) { puts("FAIL 44.1 kHz open"); return 1; }
+    uint32_t *f = (uint32_t *)out;
+    if (f[0] != 44100 || h_au_Rate(out) != 44100 || h_au_Ch(out) != 2) { printf("FAIL 44.1 kHz fields: rate %u / %d\n", f[0], h_au_Rate(out)); return 1; }
+    for (int i = 0; i < 3; i++) { h_au_SetBuf(&b[i], pcm[i], sizeof pcm[i], sizeof pcm[i]); if (!h_au_Append(out, &b[i])) return 1; }
+    uint64_t t0 = now_ns(); h_au_Start(out);
+    int got = 0, seen = 0, ok = 1;
+    while (got < 3 && now_ns() - t0 < 10000000000ull) { ok = drain_signaled(out, b, 3, &got, &seen); if (!ok) break; if (got < 3) usleep(1000); }
+    double ms = (now_ns() - t0) / 1e6;
+    h_au_Close(out);
+    if (f[0] != 44100) { puts("FAIL 44.1 kHz close: rate field changed"); return 1; }
+    int pass = ok && got == 3 && ms > 285 && ms < 400;
+    printf("44.1 kHz output: released %d/3 in order=%d in %.0f ms (300 expected, 276 at 48 kHz pace) %s\n", got, ok, ms, pass ? "✓" : "✗");
+    return !pass;
+}
 int main(void) {
-    if (test_surround_output() || test_output_lifetime()) return 1;
+    if (test_surround_output() || test_output_lifetime() || test_rate_44k()) return 1;
     char out[64], ev[64]; uint8_t prm[16]; gbuf b[3]; static int16_t pcm[3][4800 * 2];
     h_au_InitParam(prm);
     if (h_au_Open(out, ev, NULL, prm)) return 1;

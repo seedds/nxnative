@@ -194,6 +194,14 @@ For a replaced DSP renderer the size query keeps the service's work-buffer contr
 
 ## AudioOut and devices
 
+### An AudioOut opened at 44.1 kHz
+
+- **Symptom:** the game quits before its first frame with `FATAL AudioOut sample rate 44100 not supported (48 kHz only)`, `CRASH sig=6` in `abort` under `au_open_at` / `h_au_OpenDef`, exit 134. Nothing is drawn, so the app seems to do nothing.
+- **Cause:** a game built on an early SDK passes 44100 in `AudioOutParameter.sampleRate` to `OpenDefaultAudioOut` and writes 44.1 kHz PCM. The host took only 0 or 48000 and stopped on anything else.
+- **Fix:** each AudioOut keeps the rate it was opened with (0 is 48 kHz; 8 to 96 kHz accepted). The output unit takes that rate on its input scope and Core Audio converts to the device's rate, the silent sink consumes that many frames a second (220.5 per 5 ms tick at 44.1 kHz, the remainder carried), and the guest AudioOut's first word and `GetAudioOutSampleRate` report it. The open logs `at 44.1 kHz (converted to the device rate)`. OutputStream (SDK 21) still takes 48 kHz only.
+- **Found on:** Mega Man Legacy Collection (`01002D4007AE0000`, SDK 3.7.0, OpenGL 3.2 through EGL).
+- **Check:** `t_audio`'s `test_rate_44k` opens at 44.1 kHz, checks the guest fields and the reported rate across close, and times three 4410-frame blocks on the silent sink (300 ms, against 276 ms at 48 kHz pace).
+
 ### Periodic diagnostics outside the AudioUnit callback
 
 - **Symptom:** RealtimeSanitizer reports stdio locking in `au_render` at its 2,000-callback diagnostic boundary. A busy log writer can block that callback even when its PCM queue is full.

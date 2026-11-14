@@ -5643,7 +5643,8 @@ static NSMutableSet *g_skip_keys; static int g_skip_draws;
 static void skip_init(NSMutableArray<NSString *> **pats) {
     *pats = [NSMutableArray array];
     const char *g = getenv("DM_SKIP_GRASS"); if (g && !strcmp(g, "1")) { [*pats addObject:@"/Foliage"]; [*pats addObject:@"Obj_Plant_Grass"]; }
-    else if (g && strcmp(g, "0") && *g) MLOG("[RED] DM_SKIP_GRASS=%s: must be 0 or 1; grass drawn", g);
+    else if (g && !strcmp(g, "2")) [*pats addObject:@"Obj_Plant_Grass"];   // the grass effect alone: the Foliage package (tree leaves among it) is drawn
+    else if (g && strcmp(g, "0") && *g) MLOG("[RED] DM_SKIP_GRASS=%s: must be 0, 1 or 2; grass drawn", g);
     const char *w = getenv("DM_SKIP_WATER"); if (w && !strcmp(w, "1")) [*pats addObject:@"Water"];   // the shaders whose source name has Water in it (effects: waterfalls, fountains, water-temple parts); the lake and river surface may be a variant of the Model shader, which this cannot tell apart
     const char *fx = getenv("DM_SKIP_EFFECTS"); if (fx && !strcmp(fx, "1")) [*pats addObject:@"/Effect/"];   // every particle and effect shader (a test for how much they cost)
     const char *m = getenv("DM_SKIP_SHADER_MATCH");
@@ -9839,14 +9840,17 @@ static size_t stand_level(void) { static size_t v; if (!v) { const char *e = get
 // Dynamic detail: DM_STAND_KB_SMALL (1-512, default: the same as DM_STAND_KB) is the cap for textures that hold less than DM_STAND_BIG_KB (default 512) in storage; DM_STAND_KB is the cap of the bigger ones
 static size_t stand_level_small(void) { static size_t v; if (!v) { const char *e = getenv("DM_STAND_KB_SMALL"); int kb = e && *e ? atoi(e) : 0; if (kb < 1 || kb > 512) { if (e && *e) MLOG("[RED] DM_STAND_KB_SMALL=%s: must be 1 to 512; DM_STAND_KB used", e); v = stand_level(); } else { v = (size_t)kb << 10; MLOG("small textures keep levels up to %d KB (DM_STAND_KB_SMALL)", kb); } } return v; }
 static size_t stand_big_bytes(void) { static size_t v; if (!v) { const char *e = getenv("DM_STAND_BIG_KB"); int kb = e && *e ? atoi(e) : 512; if (kb < 1) kb = 512; v = (size_t)kb << 10; } return v; }
-static size_t stand_cap_of(const tex_t *t) { return pool_tex_size(t) >= stand_big_bytes() ? stand_level() : MIN(stand_level_small(), stand_level()); }
+// Three sizes: the big ones (DM_STAND_BIG_KB, default 512, and up in storage) keep up to DM_STAND_KB; the medium ones (DM_STAND_MID_KB, default 128, up to the big ones) up to DM_STAND_KB_MID (default: DM_STAND_KB_SMALL); the rest up to DM_STAND_KB_SMALL
+static size_t stand_level_mid(void) { static size_t v; if (!v) { const char *e = getenv("DM_STAND_KB_MID"); int kb = e && *e ? atoi(e) : 0; if (kb < 1 || kb > 512) { if (e && *e) MLOG("[RED] DM_STAND_KB_MID=%s: must be 1 to 512; the small textures' value used", e); v = stand_level_small(); } else { v = (size_t)kb << 10; MLOG("medium textures keep levels up to %d KB (DM_STAND_KB_MID)", kb); } } return v; }
+static size_t stand_mid_bytes(void) { static size_t v; if (!v) { const char *e = getenv("DM_STAND_MID_KB"); int kb = e && *e ? atoi(e) : 128; if (kb < 1) kb = 128; v = (size_t)kb << 10; } return v; }
+static size_t stand_cap_of(const tex_t *t) { uint64_t z = pool_tex_size(t); size_t c = z >= stand_big_bytes() ? stand_level() : z >= stand_mid_bytes() ? stand_level_mid() : stand_level_small(); return MIN(c, stand_level()); }
 static size_t stand_pick(void) { return MAX((size_t)STAND_PICK, stand_level()); }
 // DM_TEXTURES_KEEP=WxH,WxH,...: textures of these sizes are never replaced by DM_TEXTURES_OFF (the map's, say); DM_TEXTURES_LOG=1 lists every texture replaced, with its size and the frame, to find them
 static int tex_kept(const tex_t *t) {
-    static int n = -1, ui; static uint32_t kw[32], kh[32];
-    if (n < 0) { n = 0; const char *e = getenv("DM_TEXTURES_KEEP"); for (const char *q = e; q && *q && n < 32; q = strchr(q, ',') ? strchr(q, ',') + 1 : q + strlen(q)) { unsigned w, h; if (sscanf(q, "%ux%u", &w, &h) == 2) { kw[n] = w; kh[n++] = h; } else if (!strncmp(q, "ui", 2)) ui = 1; }
-        if (n || ui) MLOG("textures kept as they are (DM_TEXTURES_KEEP): %d sizes%s", n, ui ? ", and UI-like textures (one level, a side that is not a power of two, 1 MB or less in storage)" : ""); }
-    if (ui && t->d.levels <= 1 && ((t->d.width & (t->d.width - 1)) || (t->d.height & (t->d.height - 1))) && pool_tex_size(t) <= (1u << 20)) return 1;
+    static int n = -1; static unsigned ui; static uint32_t kw[32], kh[32];
+    if (n < 0) { n = 0; const char *e = getenv("DM_TEXTURES_KEEP"); for (const char *q = e; q && *q && n < 32; q = strchr(q, ',') ? strchr(q, ',') + 1 : q + strlen(q)) { unsigned w, h; if (sscanf(q, "%ux%u", &w, &h) == 2) { kw[n] = w; kh[n++] = h; } else if (!strncmp(q, "ui", 2)) { int kb = atoi(q + 2); ui = kb > 0 ? (unsigned)kb : 1024; } }
+        if (n || ui) MLOG("textures kept as they are (DM_TEXTURES_KEEP): %d sizes%s", n, ui ? ", and UI-like textures (one level, a side that is not a power of two, %u KB or less in storage)" : "", ui); }
+    if (ui && t->d.levels <= 1 && ((t->d.width & (t->d.width - 1)) || (t->d.height & (t->d.height - 1))) && pool_tex_size(t) <= ((uint64_t)ui << 10)) return 1;
     for (int i = 0; i < n; i++) if (t->d.width == kw[i] && t->d.height == kh[i]) return 1;
     return 0;
 }

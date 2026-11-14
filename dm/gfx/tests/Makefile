@@ -635,6 +635,10 @@ check_t_primitive_restart: RUN_ENV = MTL_DEBUG_LAYER=1
 t_depth16_clear: t_depth16_clear.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_depth16_clear.m $(MTL_T_SRC) $(FW)
 check_t_depth16_clear: RUN_ENV = MTL_DEBUG_LAYER=1
+# The stereo tap and the headset's pass (dm/host/immersive_mac.m), drawn without a headset
+t_stereo: t_stereo.m ../../host/immersive_mac.m ../../host/immersive_mac.h ../nvn/mtl_stereo.h $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_stereo.m ../../host/immersive_mac.m $(MTL_T_SRC) $(FW) -framework Cocoa -framework CompositorServices -framework ARKit
+check_t_stereo: RUN_ENV = MTL_DEBUG_LAYER=1
 t_clear_ds: t_clear_ds.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_clear_ds.m $(MTL_T_SRC) $(FW)
 check_t_clear_ds: RUN_ENV = MTL_DEBUG_LAYER=1

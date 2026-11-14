@@ -234,6 +234,12 @@ Turn off **Show this window at launch** to start the game at once with your choi
 
 **Window** or **Fullscreen**: how the game's window opens. ⌃⌘F or the green button changes it while you play. In an `env.txt`: `DM_FULLSCREEN=1` or `0`.
 
+### Apple Vision Pro
+
+Choose **Window › Show on Apple Vision Pro** while the game runs: the game also appears on a large screen in front of you in an Apple Vision Pro near this Mac, in 3D: the Mac draws a picture for each eye from the game's own depth, so the scene opens behind the screen like a window. The Vision Pro asks you to accept the connection. The game's window stays open on the Mac and must stay visible, since it still paces the game; controllers and the keyboard work as before. Hold the Digital Crown to recenter the screen; press it, or choose the menu item again, to close it while the game goes on on the Mac.
+
+The game's HUD floats in front of the scene. A game drawn through Vulkan or OpenGL, or a 2D game, stays flat. `DM_IMMERSIVE=1` in an `env.txt` opens it at launch. It needs macOS 26 and visionOS 26. Tested on a Mac and a physical Apple Vision Pro.
+
 ### Switch 2 controllers
 
 **Off** by default. On, the game takes Joy-Con 2 and Pro Controller 2 over Bluetooth: hold the small Sync button on one during the game, until its player lights sweep, to pair it with this Mac; after that a press of any of its buttons connects it ([Switch 2 controllers](playing.md#switch-2-controllers-mac)). macOS asks for Bluetooth access the first time, and again after the app is packed again. In an `env.txt`: `DM_SW2=1`.

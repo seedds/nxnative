@@ -6,6 +6,7 @@
 #include <AudioToolbox/AudioToolbox.h>
 #include <TargetConditionals.h>
 #include <dispatch/dispatch.h>
+#include <math.h>
 #include <stdatomic.h>
 #include <unistd.h>
 
@@ -23,6 +24,7 @@ typedef struct {
     int ch;
     _Atomic int state;
     _Atomic uint32_t vol;              // SetAudioOutVolume gain as float bits (1.0 at open), applied to the samples as they are pulled
+    int gain_init; int32_t gain_prev;  // the master gain the last device callback ended at (callback thread only): the next block ramps from it
     gbuf *q[QMAX]; _Atomic uint32_t q_head, q_tail;       // Pending: written by the game side, read by the output side
     gbuf *rel[RELMAX]; _Atomic uint32_t rel_head, rel_tail; // Released: written by the output side, read by the game side
     uint64_t pos;                      // Bytes already played of the current block
@@ -150,6 +152,30 @@ static void pull_device(aout *a, uint8_t *dst, uint64_t bytes) {
     }
 }
 
+// Master volume (the player's "Volume" setting, DM_VOLUME 0 to 1): a Q15 gain on everything the sound card plays, after the guest's own volume and the stereo downmix. The callback loads one atomic and
+// multiplies: no lock, no allocation. dm_audio_volume sets it from any thread while the game runs; the environment's value is the start-up one, read by whichever of the two comes first
+#define GAIN_UNITY 32768
+static _Atomic int32_t g_gain = GAIN_UNITY;
+// A volume as a gain: the amplitude follows the square of the slider, a rough loudness curve (half way is -12 dB); out of range clamps, not a number is silence
+static int32_t gain_of(double v) { if (!(v > 0)) return 0; if (v >= 1) return GAIN_UNITY; return (int32_t)lround(v * v * GAIN_UNITY); }
+static dispatch_once_t g_gain_env;
+static void gain_from_env(void) {
+    dispatch_once(&g_gain_env, ^{
+        const char *e = getenv("DM_VOLUME"); char *end;
+        double v = e ? strtod(e, &end) : 0;
+        if (e && end != e && !*end && isfinite(v)) atomic_store_explicit(&g_gain, gain_of(v), memory_order_relaxed);
+    });
+}
+void dm_audio_volume(double v) { gain_from_env(); atomic_store_explicit(&g_gain, gain_of(v), memory_order_relaxed); }
+// Interleaved PCM16, the gain moving linearly from g0 to g1 across the block, so a change does not click; unity at both ends leaves the samples untouched
+static void apply_gain(int16_t *s, uint32_t frames, uint32_t ch, int32_t g0, int32_t g1) {
+    if (g0 == GAIN_UNITY && g1 == GAIN_UNITY) return;
+    for (uint32_t i = 0; i < frames; i++) {
+        int32_t g = g0 + (int32_t)(((int64_t)(g1 - g0) * (int64_t)(i + 1)) / (int64_t)frames);
+        for (uint32_t c = 0; c < ch; c++) { int16_t *p = &s[(size_t)i * ch + c]; *p = (int16_t)(((int32_t)*p * g) >> 15); }
+    }
+}
+
 static _Atomic uint64_t g_render_calls;   // Cumulative sound card callbacks (lifecycle verification: must keep growing after resume)
 uint64_t dm_audio_render_calls(void) { return atomic_load_explicit(&g_render_calls, memory_order_relaxed); }
 static OSStatus au_render(void *ctx, AudioUnitRenderActionFlags *f, const AudioTimeStamp *ts, UInt32 bus, UInt32 frames, AudioBufferList *bl) {
@@ -172,6 +198,10 @@ static OSStatus au_render(void *ctx, AudioUnitRenderActionFlags *f, const AudioT
         memset(bl->mBuffers[0].mData, 0, bl->mBuffers[0].mDataByteSize);
     } else {
         pull_device(a, bl->mBuffers[0].mData, bl->mBuffers[0].mDataByteSize);
+        int32_t g1 = atomic_load_explicit(&g_gain, memory_order_relaxed), g0 = a->gain_init ? a->gain_prev : g1;   // a fresh output starts at the current gain, not from silence
+        a->gain_init = 1; a->gain_prev = g1;
+        uint32_t ch = (uint32_t)device_channels(a);
+        apply_gain(bl->mBuffers[0].mData, bl->mBuffers[0].mDataByteSize / (2u * ch), ch, g0, g1);
         if (a->mute) memset(bl->mBuffers[0].mData, 0, bl->mBuffers[0].mDataByteSize);
     }
     return noErr;
@@ -224,6 +254,7 @@ static OSStatus au_create(aout *a) {
 #endif
                                    .componentManufacturer = kAudioUnitManufacturer_Apple};
     AudioComponent c = AudioComponentFindNext(NULL, &d);
+    gain_from_env();
     a->au = NULL; if (!c || AudioComponentInstanceNew(c, &a->au)) { a->au = NULL; return -1; }
     unsigned ch = (unsigned)device_channels(a);
     AudioStreamBasicDescription f = {.mSampleRate = RATE, .mFormatID = kAudioFormatLinearPCM,

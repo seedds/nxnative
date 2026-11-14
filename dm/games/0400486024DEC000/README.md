@@ -14,8 +14,15 @@ A Switch 2 game: update v131072, SDK 22.2.8 (`Ounce`). Nintendo EPD's engine (se
 | `tex_flush_upload on`, `tex_dirty_upload on` | `game.tsv` | as Tears of the Kingdom: the CPU writes the terrain tiles' height (R32F), blend and hole (RGBA8) maps into textures after creating them. Without the keys those textures stay zero: flat blue holes in the ground around the path with grass floating in them, and grey stone where the console shows dirt |
 | `shader_groups`, `shader_note` | `game.tsv` | shaders grouped as `/Shader/`, `/Effect/`, `/Lib/`, `/UI/` |
 | `pad_layout full` | `game.tsv` | a 3D field and both sticks |
+| `screen_aspect on`, screen-shape stubs | `game.tsv`, [`patches.py`](patches.py) | taller-than-16:9 aspects (`DM_SCREEN_ASPECT`) scale the display/scene heights, base resolution, 3D perspective projection, and `Layout2` ortho and full-screen pane matrices ([Screen shape](#screen-shape-dm_screen_aspect-current)) |
 
 Render conditions, which the host evaluates for every game ([Conditional rendering evaluated at replay](../../../docs/reference/rendering.md#conditional-rendering-evaluated-at-replay); until 2026-11-12 the profile key `render_cond`): agl clears a copy of the prepass depth again under a render condition the console skips. Run unconditionally, the opaque pass's `EQUAL` test fails everywhere ([PR 1299](https://github.com/seedds/nxnative/pull/1299)'s finding).
+
+### Screen shape (`DM_SCREEN_ASPECT`, current)
+
+With `screen_aspect on` and `DM_SCREEN_ASPECT` set (1.3 to 1.77, e.g. `1.6` for 16:10 or `1.333` for 4:3; launcher setting *Picture shape*), `patches.py` places fifteen fingerprint-matched stubs under `MATCH_FRAME_STEP` (`others`, inactive when state `+0x48` is 0): eleven height sites across `graphics init`, `scene app init`, `base scene defaults`, `display mgr defaults`, `base res read`, and `display target a/b/c`, `perspective proj` (`sead::PerspectiveProjection::doUpdateMatrixImpl_` at `0x3485cc0`), the `Layout2` ortho builders `layout ortho` (`main+0x1520c80`) and `layout view ortho` (`main+0x773b90`), and `layout calc matrix` (`main+0x14e9980`). The `Layout2` ortho stubs guard on `oh != 0`, `width >= 1000.0`, and `|width*9 - height*16| < 4.0`, scaling height by `state +0x5c` (`(16/9) / ratio`) so capture textures keep their native sizes and 2D HUD elements keep a 1:1 pixel ratio inside the centred 16:9 band while 3D rendering expands Vert+ (preserving 16:9 horizontal framing with extra vertical view); `layout calc matrix` scales full-screen PicturePanes (`width >= 1000`, `height >= 700`, `|width*9 - height*16| < 200`) so scene faders and wipes cover the expanded canvas without un-faded bands at top and bottom.
+
+Verified on the Mac (v131072, Kokiri/Goron City gameplay): `16:9` (`0`, `2560x1440`), `16:10` (`1.6`, `2560x1600`), and `4:3` (`1.333`, `2560x1920`) all keep `heart1` at `68x33` (`h/w = 0.485`, shifted vertically by half the extra height) with unstretched HUD widgets and Vert+ 3D framing.
 
 ## Files
 

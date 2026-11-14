@@ -9,7 +9,7 @@ Update 1.1.0 (`v65536`), `main` build ID `c2932c4d1c84ed7def7ceb1042b78951`, SDK
 | Setting | Where | Why |
 |---|---|---|
 | `depth_mode zero` | [`game.tsv`](game.tsv) | The game sets `nvnDeviceSetDepthMode` near = 0 (`[nvn] depth mode near=0`); with the default `gl` the bundled pipeline archive was built for near = -w and every base was built again on the device |
-| [`dual_want.tsv`](dual_want.tsv) | profile | 20 pixel shaders blend with their output 1 as the second source. Without the dual-source entry point the second source counts as zero, and the menu cursor's highlight, button icons in dialogue and character icons drew nothing; most cutscene backgrounds and transitions were missing too. Listed with `DM_NVN_DUAL_WANT` over menus, dialogue, a cutscene and a battle |
+| [`dual_want.tsv`](dual_want.tsv) | profile | 27 pixel shaders blend with their output 1 as the second source. Without the dual-source entry point the second source counts as zero, and the menu cursor's highlight, button icons in dialogue and character icons drew nothing; most cutscene backgrounds and transitions were missing too. Listed with `DM_NVN_DUAL_WANT` over menus, dialogue, a cutscene, a battle and limit breaks (7 of them only in limit breaks, which drew too transparent and behind the characters without them) |
 | `.vbf` stored in the bundle | `game.tsv` `zip_store` | `FFXII_TZA.vbf` (12.6 GB) and `FFXII_TZA_PATCH.vbf` are read by offset |
 
 The other keys are the provisional profile's guesses, which held.
@@ -23,6 +23,8 @@ The other keys are the provisional profile's guesses, which held.
 ## Validation
 
 - 2026-11-12, Apple M3 Max, macOS 27.3: logos, title, a new game's opening, menus with the cursor highlight, dialogue with button icons, a battle and cutscenes, about 30 minutes; no `not in the shader map` line, no `no dual-source entry point` line.
+- 2026-11-13, iPhone Duo, iOS 27.3: A new game, gone through intro tutorial, including cutscenes, example limit break from Basch, into early parts of Rabanastre, after ebf75c9; no purple blocks, limit breaks drawn right.
+- 2026-11-14: the split's `raw_shaders` of bee218d on this `main` gives the table's 23 of 23 main#PHYRE keys and labels.
 - Tests: `test_vbf.py` (LZ4 and zlib blocks, Phyre programs in `main`), all `test_split_*`, `test_docs`.
 
 ## Found on this game

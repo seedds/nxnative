@@ -12,6 +12,7 @@ DM_AUDIO_DUMP	diagnostic	`=<file>` writes every PCM block the game appends as is
 DM_AUDIO_MUTE	switch	`=1` runs the real Core Audio output path (callback pacing, background take-over) with the output silenced, for lifecycle tests on the Mac without noise
 DM_AUDREN_TRACE	diagnostic	When set, the CPU audio renderer logs every update with the number of frames rendered since the previous one
 DM_AV1_DAV1D	switch	`=1` decodes AV1 movies with dav1d even where VideoToolbox decodes AV1 (Apple M3 and A17 Pro on), to compare the two or to check the path older chips take (`hle_movie_av1.c`)
+DM_BCAT_TEST_SANITIZE	test	1 builds the synthetic BCAT launch fixture with AddressSanitizer and UndefinedBehaviorSanitizer; not a runtime game switch
 DM_BOOTPROF	diagnostic	When set, logs boot timing: the loader's breakdown (mapping, relocation, probes), Metal library loading, pipeline creation, texture uploads and the first present
 DM_BUNDLE_ID	switch	Overrides the iOS app's bundle ID in `build_ipa.sh` (default `org.nxnative.<title ID in lowercase>`)
 DM_CHEATS	path	Folder of Atmosphère cheat files: `<folder>/<build ID>.txt` or an SD-card layout (`atmosphere/contents/<title ID>/cheats/`) under it (default `<DM_ROOT>/cheats`); the Mac menu lists and toggles them
@@ -104,6 +105,7 @@ DM_KEYS	switch	Scripted input: `<seconds or f<frame>>:<key>[+key][~hold or ~f<fr
 DM_LANG	player	Game language as a language code (default `en-US`; the iOS app sets the one the IPA was packed with)
 DM_LAUNCHER	switch	`0` skips the iOS settings screen or the Mac settings window and starts the game at once, with the saved choices (on the Mac also `--no-launcher`)
 DM_LAUNCH_PARAM	path	File whose bytes `oe::TryPopLaunchParameter` returns once; `oe::ExecuteProgram` sets it for the program it starts; a relaunch removes it
+DM_LDN_TRACE	diagnostic	Log LDN bridge sessions and protocol events
 DM_LINK_VTICK	switch	`0` keeps the system's display-link rate on 144 or 165 Hz Mac screens; by default the link counts only the refreshes nearest a steady 1/60 s clock
 DM_LOADHASH	diagnostic	`=1` logs an address-independent SHA-256 per module after loading
 DM_LONGFRAME	diagnostic	`0` turns off the long-frame log (on by default), a line for a frame over 20 ms or with GPU time over 16.7 ms that is clearly above recent frames
@@ -122,7 +124,18 @@ DM_MOTION_LOG	diagnostic	`=1` logs player 1's mapped motion sample once a second
 DM_MOVIE_TRACE	diagnostic	When set, the movie decoder logs every call with its thread and decoder (by default the first 12 calls, then every 2^k-th)
 DM_MSL_DIR	path	Parent folder of the shader libraries: NVN loads from `b-<chain version>/` or the one file `b-<chain version>.img` beneath it, Vulkan from `vk/`, GL from `gl/`; the app and the Mac launcher set it
 DM_NDVE_ENGINE	switch	`0` runs nn::ndve's movie network (Ocarina of Time's title and opening movies) as the game's 12 translated dispatches after its colour conversion instead of the host's kernels (dm/gfx/msl/ndve_engine.metal, on by default: the same output, about half the frame's GPU time on an M4 Pro); `ab` alternates with DM_AB; `check` runs the game's dispatches and the host's network beside them and logs every 300 frames how many texels of the two differ. The host's kernels take only the model they were written for, bound by its shaders' keys and its weights' layout (docs/reference/shaders.md, The NDVE movie network by the host)
-DM_NICK	switch	The account nickname the game sees (default `Player`)
+DM_NETWORK	player	auto routes LAN, LDN and configured online calls by service; offline, lan, ldn and nextendo are explicit overrides. nextendo enables scoped online services; auto adds them only with an explicit service profile (DM_NEXTENDO_ROUTES)
+DM_NETWORK_INTERFACE	player	IPv4 interface name for local sockets; otherwise use the actual default route
+DM_NET_DISCOVERY_PEER	player	Optional discovery relay IPv4 endpoint; automatic local discovery requires no entered address
+DM_NET_TRACE	diagnostic	Log native socket and local-network translation details
+DM_NEXTENDO_BCAT_DIR	path	Private exact-title/version calendar recipe and optional validated seed; absent or invalid recipes never query the network
+DM_NEXTENDO_BIRTHDAY	player	Birthday a game reads from the Nintendo Account info in Nextendo mode, as YYYY-MM-DD, when the Nextendo account gives none. The launcher sets it from the picker under the Nextendo account; without either the game gets 2000-01-01
+DM_NEXTENDO_CLIENT_ID	switch	The Nextendo application (a public PKCE client registered at nextendo.network/developers) the sign-in uses: read on the Mac, and written into the iPhone app's Info.plist as DMNextendoClientID at build time. Without one nobody can sign in
+DM_NEXTENDO_COUNTRY	player	Two-letter country a game reads from the Nintendo Account info in Nextendo mode when the Nextendo account has none. The launcher sets it from the device region
+DM_NEXTENDO_LOGIN_DIR	path	Folder of the Mac's stored Nextendo sign-in (dm/tools/nextendo_login.m; default ~/Library/Application Support/nxnative/nextendo); tests point it at a temporary folder
+DM_NEXTENDO_ROUTES	path	Explicit local public service policy TSV; AUTO enables online services only when nonempty, and configured invalid policies fail closed.
+DM_NEXTENDO_SERVICES	path	`=<folder>` (the NSP script's `--nextendo`) makes `build_ipa.sh` pack that public Nextendo service profile into the app as `dm/nextendo-services`; `main.m` hands it to the host as `DM_NEXTENDO_ROUTES`
+DM_NICK	switch	The account nickname the game sees, at most 32 bytes (default: the Nextendo username in Nextendo mode, else `Player`). The launcher sets it from its Player name field while Network is not offline
 DM_NRO	switch	`0` turns off loading of the NRO modules the game's NRR files register (on by default): every `nn::ro::LoadModule` then fails
 DM_NRO_CAPTURE	diagnostic	folder: a `nn::ro::LoadModule` with no rewritten copy writes the image to `<folder>/<SHA-256>.nro` and ends the run (the NSP script's capture of an NRO the game decodes at run time)
 DM_NRO_DIR	path	folder of NROs the shader split reads like `main`, and in which it finds a CRA archive's file table (the NSP script sets it for a captured NRO)
@@ -273,6 +286,7 @@ DM_OODLE_HOST	path	The Mac host binary that `shader_split.py` runs in its Oodle 
 DM_OODLE_JOB	path	`=<job file>`: the host runs the game's own Oodle decoder on every record of the job file right before `nnMain`, writes `<job file>.out` and exits (Unreal shader archives)
 DM_OODLE_MODULES	path	The rewritten modules the Mac host's Oodle tool mode loads when `shader_split.py` decodes Trinity packs; set by the NSP script
 DM_OODLE_SERVE	switch	`=1`: the host answers decode requests on stdin / stdout with the game's own Oodle (or LZ5) decoder from the guest main thread before the SDK starts, until stdin ends
+DM_OPENSSL_ROOT	path	Reviewed static OpenSSL prefix for optional online/BCAT helper compilation; no crypto dependency is downloaded by BCAT
 DM_OPMODE	player	The operation mode the game sees: `0` handheld, `1` console (default: the profile's `op_mode`, console unless set); read once at startup
 DM_PAD_IDENTICAL	switch	`0` stops reading identical pads here when GameController lists fewer of their model than IOKit has, such as two Pro Controllers over USB (each a player of its own: a Pro Controller from its report 0x30, another model from its HID elements; `pad_hid_mac.h`, `pad_pro.h`); `DM_HID_PADS=0` stops it too; Mac only
 DM_PAD_MERGE	switch	`=1` merges every controller into player 1, as before, instead of giving each controller a player of its own (Mac and iOS)
@@ -379,6 +393,7 @@ DM_SLOWFRAME	diagnostic	`=1` writes the per-frame timing breakdown to the log on
 DM_SPIN	switch	`0` makes the rewriter's spin gate return at once, so guest poll loops spin with no sleep; the gate stays (on by default)
 DM_SPIN_LIST	diagnostic	`=1` makes `patch_nso.py` print every guest poll loop it found and sends through a spin gate
 DM_SPIN_POLL	switch	`=<µs>`: how long a spin-gate wait polls before it sleeps with the yield back-off (default 2000; `0` yields on every pass)
+DM_SSL_TRACE	diagnostic	1 logs at most 128 numeric TLS state events; no hosts, pointers, credentials or stream data.
 DM_SVC	diagnostic	`=1` logs memory SVCs (`SetHeapSize`, `MapMemory`, `Map`/`UnmapPhysicalMemory`) with their addresses and sizes
 DM_SW2	player	`=1` turns on Switch 2 controllers over Bluetooth LE (Joy-Con 2, Pro Controller 2): the settings window's Switch 2 controllers. Off, no Bluetooth client is created and macOS asks nothing. The host also stays off when the app's Info.plist has no NSBluetoothAlwaysUsageDescription, without which macOS ends the process at the first Bluetooth scan
 DM_SW2_GYRO_DPS	diagnostic	`=<degrees per second per count>` is the Switch 2 controllers' gyro scale (default 0.0607, measured on a left and a right Joy-Con 2; the Switch family's nominal 0.070 turned a 90 degree tilt into 104)
@@ -388,6 +403,7 @@ DM_SW2_MOTION	switch	`=0` leaves out the motion of Switch 2 controllers (buttons
 DM_SW2_MOTION_SIDE	switch	`=L` takes a Joy-Con 2 pair's motion from the left Joy-Con instead of the right one
 DM_SW2_VERBOSE	diagnostic	`=1` logs the first report of each second of every Switch 2 controller: buttons, sticks, raw sensors, battery, and the bytes the parser does not read (0x18..0x2F and past 0x3C, in hex: whether a report carries the sensor's own timestamp or more than one sample is not known)
 DM_SYMCHECK	diagnostic	`=1` checks every hashed module symbol lookup against a linear search and logs a red line for each mismatch
+DM_SYSTEM_DATA_DIR	path	Private imported firmware resources, including the certificate store the online backend reads (`0100000000000800/files/ssl_TrustedCerts.bdf`; else `DM_SYSTEM_DIR`'s `sysdata/0100000000000800/`); never console keys or resources in the public source tree
 DM_SYSTEM_DIR	path	The player's own console files, for every game: `sysdata/<16 hex digits>/` a system data archive's RomFS files, `save/8000000000000030/MiiDatabase.dat` the Mii database (docs/reference/services.md, A console's own Mii database and system data), and the host writes `host/MiiDatabase.dat`, the Miis `AppendMii` made; the Mac launcher sets `~/Library/Application Support/nxnative/system`, the iOS app `Documents/system`; default `$DM_ROOT/run/platform/system`
 DM_TBUF_ALIGN	diagnostic	`=<bytes>` uses that value as the linear-texture alignment when it is larger than the device's `minimumLinearTextureAlignmentForPixelFormat`, for buffer textures and for linear textures on a pool's buffer: a Mac can then reproduce a phone's larger alignment (a 64-byte one fails the buffers and linear textures a device with 64 bytes cannot view), to check `tbuf_as_2d`'s aligned-row copy and the upload of unaligned linear textures (`linear_fit`)
 DM_TEAM_ID	switch	Apple team ID for the per-game Xcode project, used when `--team-id` / `TEAM_ID` is not given; `build_ipa.sh` uses the placeholder `0000000000` (unsigned) when unset

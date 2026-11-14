@@ -19,6 +19,19 @@
 #include "romfs_image.h"
 #include "save_sync.h"
 
+// The data importer is absent in source-only FS fixtures; production links it.
+extern const char *dm_bcat_overlay(void) __attribute__((weak_import));
+extern const char *dm_bcat_delivery(void) __attribute__((weak_import));
+extern int dm_bcat_copy_delivery(char *, size_t) __attribute__((weak_import));
+static _Atomic int bcat_mounted;
+static int mount_visible(const char *name) { return strcmp(name, "bcat") || atomic_load(&bcat_mounted); }
+static void rom_overlays(char *out, size_t size) {
+    const char *custom = getenv("DM_ROMFS_OVERLAY"), *calendar = dm_bcat_overlay ? dm_bcat_overlay() : NULL;
+    out[0] = 0;
+    if (custom && *custom) strlcpy(out, custom, size);
+    if (calendar && *calendar) { if (out[0]) strlcat(out, ":", size); strlcat(out, calendar, size); }
+}
+
 #define RES_PATH_NOT_FOUND 0x202u      // fs module 2, description 1
 #define RES_PATH_EXISTS    0x402u      // fs module 2, description 2
 #define RES_RENAME_OTHER_FS 0x2F2402u  // fs module 2, description 6034: ResultRenameToOtherFileSystem
@@ -177,7 +190,7 @@ static int img_path(const char *p, int *mi, int64_t *k) {
     PATH_LOCK(); char fwd[1024]; p = fwd_slashes(p, fwd, sizeof fwd); const char *c = p ? strchr(p, ':') : NULL; if (!c) return 0;
     size_t ln = c - p;
     for (int i = 0; i < g_nmnt; i++) {
-        if (!mnt_is(&g_mnt[i], p, ln)) continue;
+        if (!mount_visible(g_mnt[i].name) || !mnt_is(&g_mnt[i], p, ln)) continue;
         if (!g_mnt[i].img) return 0;
         char normed[1024]; const char *rest = c + 1; *mi = i;
         if (strstr(rest, "/.")) { if (!norm_rest(rest, normed, sizeof normed)) { *k = -1; return 1; } rest = normed; }
@@ -198,8 +211,8 @@ static Result mount_ex(const char *name, const char *dir, int ro, int txn) {
     g_mnt[g_nmnt].txn_root = -1;
     atomic_store(&g_mnt[g_nmnt].poison, 0);
     atomic_store(&g_mnt[g_nmnt].first_write_ns, 0);
-    const char *overlay = !strcmp(name, "rom") ? getenv("DM_ROMFS_OVERLAY") : NULL;
-    if (overlay) strlcpy(g_mnt[g_nmnt].overlay, overlay, sizeof g_mnt[0].overlay);
+    if (!strcmp(name, "rom"))
+        rom_overlays(g_mnt[g_nmnt].overlay, sizeof g_mnt[0].overlay);
     // The transaction directory cannot be set up (leftovers cannot be cleared / clone failed, which really happens on a full disk): do not exit; mount the committed directory read-only -- saves still read, every write fails, commits are no-ops, the committed version is untouched, and the front end is told
     // (each of these three failures used to call die: with the phone's storage full the game exited as soon as it mounted its saves)
     int txn_err = 0, k = 0;
@@ -436,7 +449,7 @@ static int host_path_ex(const char *p, char *out, size_t n, int *ro, int create)
     if (!c) { errno = ENOENT; return 0; }
     size_t ln = c - p;
     for (int i = 0; i < g_nmnt; i++) {
-        if (!mnt_is(&g_mnt[i], p, ln)) continue;
+        if (!mount_visible(g_mnt[i].name) || !mnt_is(&g_mnt[i], p, ln)) continue;
         if (ro) *ro = g_mnt[i].ro;
         char normed[1024]; const char *rest = c + 1;
         if (strstr(rest, "/.")) { if (!norm_rest(rest, normed, sizeof normed)) return 0; rest = normed; }   // only paths with "." components are normalized; the rest walk component by component as before
@@ -532,14 +545,37 @@ HLE_FORCE("_ZN2nn2fs22QueryMountRomCacheSizeEPm", "fsp-srv; rom reads the host d
 HLE_FORCE("_ZN2nn2fs8MountRomEPKcPvm", "fsp-srv; rom → host RomFS directory", Result, h_fs_MountRom, const char *name, void *cache, size_t sz) { dm_thread_service_request();
     (void)cache; (void)sz; char b[1024];
     Result r = mount(name, envdir("DM_ROMFS", "romfs", b, sizeof b), 1);
-    const char *overlay = getenv("DM_ROMFS_OVERLAY");
-    if (r == RES_OK && overlay) {
+    if (r == RES_OK) {
         PATH_LOCK();
         for (int i = 0; i < g_nmnt; i++) if (mnt_named(&g_mnt[i], name)) {
-            strlcpy(g_mnt[i].overlay, overlay, sizeof g_mnt[i].overlay); break;
+            rom_overlays(g_mnt[i].overlay, sizeof g_mnt[i].overlay); break;
         }
     }
     return r;
+}
+// BCAT's SDK mount is read-only. Missing/unvalidated delivery data remains a
+// real failure; mounting an empty successful stand-in hides synchronization bugs.
+HLE_FORCE("_ZN2nn4bcat25MountDeliveryCacheStorageEv", "mount a validated immutable delivery snapshot as bcat:", Result, h_bcat_Mount, void) { dm_thread_service_request();
+    char selected[1024];
+    const char *root = dm_bcat_copy_delivery && dm_bcat_copy_delivery(selected, sizeof selected) ? selected :
+                       dm_bcat_delivery ? dm_bcat_delivery() : NULL;
+    struct stat st;
+    if (!root || stat(root, &st) || !S_ISDIR(st.st_mode)) return RES_PATH_NOT_FOUND;
+    Result r = mount("bcat", root, 1);
+    if (r == RES_OK) {
+        PATH_LOCK();
+        // A fresh mount may select the new snapshot. Existing file descriptors
+        // continue to reference their original immutable files after unmount.
+        for (int i=0;i<g_nmnt;i++) if (mnt_named(&g_mnt[i],"bcat")) {
+            if (!atomic_load(&bcat_mounted)) strlcpy(g_mnt[i].dir,root,sizeof g_mnt[i].dir);
+            break;
+        }
+        atomic_store(&bcat_mounted, 1);
+    }
+    return r;
+}
+HLE_FORCE("_ZN2nn4bcat27UnmountDeliveryCacheStorageEv", "hide the delivery mount; immutable files and open handles remain valid", void, h_bcat_Unmount, void) {
+    PATH_LOCK(); atomic_store(&bcat_mounted, 0);
 }
 // Add-on content (DLC) RomFS: DM_AOC_DIR/<index>/, extracted from the player's DLC NSPs by the packing script; mounted read-only, using the directory index like rom.
 // The owned index list is reported by the aoc calls in hle_misc.c from the same directory; the game only mounts indices it was given, and a missing directory answers "target not found" (fs 2-1002, as on hardware without that DLC)
@@ -633,7 +669,7 @@ HLE_FORCE("_ZN2nn2fs15MountSystemDataEPKcNS_3ncm12SystemDataIdEPvm", "fsp-srv; s
 }
 static int host_mounted(const char *name) {
     PATH_LOCK();
-    for (int i = 0; name && i < g_nmnt; i++) if (mnt_named(&g_mnt[i], name)) return 1;
+    for (int i = 0; name && i < g_nmnt; i++) if (mount_visible(g_mnt[i].name) && mnt_named(&g_mnt[i], name)) return 1;
     return 0;
 }
 // ---------- Mounts in the SDK's own table ----------
@@ -707,7 +743,7 @@ HLE_FORCE("_ZN2nn2fs9IsMountedEPKc", "fsp-srv; looks up the host mount table, th
 HLE_FORCE("_ZN2nn2fs13IsPathMountedEPKc", "fsp-srv; looks up the host mount table, then the SDK's own (a RAM disk)", int, h_fs_IsPathMounted, const char *path) {   // bool in w0: 1 / 0
     const char *c = path ? strchr(path, ':') : NULL;
     {   PATH_LOCK();
-        for (int i = 0; c && i < g_nmnt; i++) if (mnt_is(&g_mnt[i], path, (size_t)(c - path))) return 1;
+        for (int i = 0; c && i < g_nmnt; i++) if (mount_visible(g_mnt[i].name) && mnt_is(&g_mnt[i], path, (size_t)(c - path))) return 1;
     }
     char name[0x30];   // the SDK is asked with no host lock held
     if (path_mount_name(path, name, sizeof name) && sdk_mounted(name)) return 1;

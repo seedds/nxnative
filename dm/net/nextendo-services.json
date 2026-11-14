@@ -1,0 +1,193 @@
+{
+  "formatVersion": 1,
+  "source": "https://git.nextendo.network/NextendoNetwork",
+  "provider": {
+    "server": "51.178.29.194",
+    "nat": "164.132.111.120",
+    "caURL": "https://git.nextendo.network/NextendoNetwork/Prelude-Nextendo/raw/commit/482c182917228d69ebbbabfea44fffa4a44051be/romfs/sd/rootCA.pem",
+    "caSHA256": "a654c0eff8aa20a72280ea0ef2b5c2a17392922dd78ffbb113862e1ad2c66d49"
+  },
+  "base": [
+    {
+      "match": "label",
+      "host": "nncs2-*.n.n.srv.nintendo.net",
+      "server": "nat",
+      "tls": false
+    },
+    {
+      "match": "suffix",
+      "host": "nintendo.net",
+      "server": "server",
+      "tls": true
+    },
+    {
+      "match": "suffix",
+      "host": "nintendo.com",
+      "server": "server",
+      "tls": true
+    },
+    {
+      "match": "suffix",
+      "host": "nintendowifi.net",
+      "server": "server",
+      "tls": true
+    },
+    {
+      "match": "suffix",
+      "host": "nintendo.co.jp",
+      "server": "server",
+      "tls": true
+    },
+    {
+      "match": "exact",
+      "host": "nncs1-lp1.n.n.srv.nintendo.net",
+      "server": "server",
+      "tls": false
+    },
+    {
+      "match": "pinned-exact",
+      "host": "g2b309e01-lp1.s.n.srv.nintendo.net",
+      "server": "nat",
+      "tls": true,
+      "certificateSHA256": "e6d779cb8b5e9c3a41909c6051bc8b3138707857f184e1c6b77688cb65c7a643"
+    },
+    {
+      "match": "pinned-exact",
+      "host": "g2df33d01-lp1.p.srv.nintendo.net",
+      "server": "nat",
+      "tls": true,
+      "certificateSHA256": "e6d779cb8b5e9c3a41909c6051bc8b3138707857f184e1c6b77688cb65c7a643"
+    }
+  ],
+  "families": {
+    "demonware": [
+      {
+        "match": "suffix",
+        "host": "demonware.net",
+        "server": "server",
+        "tls": true
+      }
+    ],
+    "ubisoft": [
+      {
+        "match": "exact",
+        "host": "public-ubiservices.ubi.com",
+        "server": "server",
+        "tls": true
+      },
+      {
+        "match": "exact",
+        "host": "public-ws-ubiservices.ubi.com",
+        "server": "server",
+        "tls": true
+      },
+      {
+        "match": "exact",
+        "host": "jd.ubisoft.com",
+        "server": "server",
+        "tls": true
+      },
+      {
+        "match": "exact",
+        "host": "phonescoring.jd.ubisoft.com",
+        "server": "server",
+        "tls": true
+      },
+      {
+        "match": "exact",
+        "host": "v2.phonescoring.jd.ubisoft.com",
+        "server": "server",
+        "tls": true
+      }
+    ]
+  },
+  "titles": {
+    "0100fcf002a58000": [
+      {
+        "match": "exact",
+        "host": "api.braincloudservers.com",
+        "server": "server",
+        "tls": true
+      },
+      {
+        "match": "exact",
+        "host": "na.ultimatechickenhorseserver.com",
+        "server": "server",
+        "tls": true
+      },
+      {
+        "match": "exact",
+        "host": "eu.ultimatechickenhorseserver.com",
+        "server": "server",
+        "tls": true
+      },
+      {
+        "match": "exact",
+        "host": "ap.ultimatechickenhorseserver.com",
+        "server": "server",
+        "tls": true
+      }
+    ],
+    "0100ab401f136000": [
+      {
+        "match": "exact",
+        "host": "api.epicgames.dev",
+        "server": "server",
+        "tls": true
+      },
+      {
+        "match": "exact",
+        "host": "switch-ggst-game.guiltygear.com",
+        "server": "server",
+        "tls": true
+      },
+      {
+        "match": "exact",
+        "host": "prod-switch-match-ggst-game.guiltygear.com",
+        "server": "server",
+        "tls": true
+      },
+      {
+        "match": "exact",
+        "host": "prod-to3match-ggst-game.guiltygear.com",
+        "server": "server",
+        "tls": true
+      }
+    ],
+    "0100b6e012ebe000": [
+      {
+        "match": "exact",
+        "host": "public-ubiservices.ubi.com",
+        "server": "server",
+        "tls": true
+      }
+    ],
+    "010092a00c4b6000": [
+      {
+        "match": "exact",
+        "host": "nswitch.f13.illfonic.com",
+        "server": "server",
+        "tls": true
+      }
+    ]
+  },
+  "titleFamilies": {
+    "01001b300b9be000": "demonware",
+    "0100f9f00c696000": "demonware",
+    "0100ea6014bb8000": "ubisoft"
+  },
+  "identities": {
+    "01006f8002326000": {
+      "account": "baas",
+      "friends": "baas"
+    },
+    "0100c2500fc20000": {
+      "account": "pid",
+      "friends": "baas"
+    },
+    "010015100b514000": {
+      "account": "pid",
+      "friends": "baas"
+    }
+  }
+}

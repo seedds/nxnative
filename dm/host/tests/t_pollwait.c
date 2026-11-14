@@ -88,7 +88,10 @@ static void *signaller(void *unused) {
     return NULL;
 }
 int main(void) {
-    alarm(20);
+    setvbuf(stdout, NULL, _IONBF, 0);   // each PASS line reaches the log as it passes, so a SIGALRM names the case that hung
+    // A hang guard, not a timing check (the checks count back-offs on poll_clock). The test makes about 2 s of real short sleeps, and a CI runner under ASan
+    // stretched them about a hundredfold: 200 sleeps of 300 us took 6.4 s and 241 took 9.6 s, and a 20 s alarm went off in the next case (run 42877114434)
+    alarm(60);
     me_handle = svc_thread_main_init();
     poll_run(500, 0, 0);
     puts("PASS: 500 ns condition variable waits back off at 2 ms, not before");

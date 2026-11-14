@@ -2677,6 +2677,43 @@ def mac_host(py, repo, work, env, logs, g):
     return host, font
 
 
+def nextendo_build(py, repo, exe_dir, patched, work, env, logs, g):
+    """--nextendo (an iPhone or Mac-only build): the game's online parts, after NX-Port-Studio's build (MIT). Nextendo's signed patch catalog (dm/tools/nextendo_patches.py, checked offline with
+    dm/tools/nextendo_verify.swift) patches a copy of main when it lists this exact build, and the copy is rewritten into patched/nextendo, which the host maps in place of main when Nextendo
+    is on (loader.c nextendo_main; the iPhone's app embeds it as module nmain, dm/ios/tools/gen_embed.py); the offline and LAN main stays as it was. Then the public service profile
+    (dm/tools/nextendo_services.py) goes into <id>_build/nextendo-services. Returns the profile's routes.tsv (DM_NEXTENDO_ROUTES). No account data is read or written here: the player
+    signs in with dm/host/nextendo_login on the Mac, on the app's settings screen on the iPhone"""
+    import nextendo_patches, nextendo_services
+    PROG.add(2); PROG.stage('Nextendo game patch', step='signed patch catalog and exact main build')
+    destination, source = patched / 'nextendo', work / 'nextendo-source/main'
+    try:
+        catalog = nextendo_patches.verified_catalog(repo, work / 'nextendo-catalog')
+        applied = nextendo_patches.prepare_nso(exe_dir / 'main', source, g.id.lower(), catalog)
+    except (OSError, ValueError, subprocess.CalledProcessError) as error:
+        raise BuildError(f'Nextendo game patch could not be verified, no game code was changed: {error}') from error
+    if not applied:
+        rmtree(destination)
+        PROG.end('Nextendo publishes no patch for this exact build; the host runs the original main online')
+    else:
+        key = fingerprint(('files', [repo / 'dm/tools' / f for f in ('patch_nso.py', 'nso.py', 'nso_code.py', 'nso_asm.py', 'nso_match.py', 'nextendo_patches.py')]
+                           + patch_files(repo, exe_dir, ['main'], env.get('DM_GAME')) + [source]), applied, {k: env.get(k) for k in ('DM_PATCH_FRONT', 'DM_GAME')})
+        kf = destination / 'nextendo.key'
+        if (destination / 'main.patched.bin').is_file() and reused(kf, key) is not None: PROG.end(f'{", ".join(applied)}, reused (inputs unchanged)')
+        else:
+            tmp = patched / '.nextendo-partial'; rmtree(tmp); tmp.mkdir()
+            try:
+                run([py, repo / 'dm/tools/patch_nso.py', source, tmp, 'main'], logs / 'rewrite_nextendo_main.log', env=env)
+                (tmp / 'nextendo.key').write_text(f'{key}\ncatalog revision {catalog["revision"]}: {", ".join(applied)}\n')
+                rmtree(destination); tmp.rename(destination)
+            finally: rmtree(tmp)
+            PROG.end(f'{", ".join(applied)} (catalog revision {catalog["revision"]}) rewritten into {destination}; gameplay with it is unverified')
+    PROG.stage('Nextendo services', step='public service profile')
+    try: services = nextendo_services.prepare(repo, g.id.lower(), work / 'nextendo-services')
+    except (OSError, ValueError) as error: raise BuildError(f'Nextendo service profile could not be prepared: {error}') from error
+    PROG.end(str(services))
+    return services / 'routes.tsv'
+
+
 def mac_run(work, game, patched, host, font, msl, aoc, gfx, lang, env, logs, g, env_file='', partial=False, parts=None, jit=False):
     """The command that runs the game in a window with sound after a Mac-only build (PLATFORM 'mac'; docs/development.md, Build by hand (Mac), step 5): its save and temporary storage in
     <id>_build/run (kept from run to run), the extracted RomFS, the Mac shader libraries (msl), the DLC, the profile's shader map (a host outside dm/host does not find it beside itself;
@@ -3026,6 +3063,9 @@ def parse_args(argv):
     ap.add_argument('--no-heap-check', action='store_true', help='a provisional profile: skip the heap check and the address region check on the Mac (the alias / heap split stays a guess); a derived profile: skip the address region check')
     ap.add_argument('--progress', choices=('auto', 'bar', 'lines', 'json', 'off'), help='stage lines on the console: bar = one line per stage, redrawn in place; lines = a plain line every BEAT seconds; json = newline-delimited JSON events (no prompts); off = only each stage\'s start and end '
                     '(default: the PROGRESS setting; auto = bar in a terminal or Spyder, lines when the output goes to a file or a pipe)')
+    ap.add_argument('--nextendo', action='store_true', help='--platform ios or mac: also build for online play on Nextendo: the game patch Nextendo signs for this exact build (fetched from nextendo.network), '
+                    'and the public service profile. The iPhone app then offers Network: Nextendo (the default) and a sign-in on its settings screen; the Mac run command has DM_NETWORK=nextendo, '
+                    'after dm/host/nextendo_login sign-in (make -C dm/host nextendo_login)')
     return ap.parse_args(argv)
 
 
@@ -3131,6 +3171,7 @@ def main(args=None):
     prepare_xcode = args.prepare_xcode or PREPARE_XCODE
     platform = args.platform or PLATFORM
     if platform not in ('ios', 'mac', 'mac-app'): raise BuildError(f'PLATFORM / --platform must be ios, mac or mac-app: {platform}')
+    if getattr(args, 'nextendo', False) and platform == 'mac-app': raise BuildError('--nextendo is for --platform ios or mac: a Mac app does not carry Nextendo\'s patched main yet')
     mac = platform in ('mac', 'mac-app')   # the Mac's shaders and host only: no iOS shaders, Xcode project or IPA (mac_run prints the command; mac-app packs a Mac app, mac_app)
     mac_pack = platform == 'mac-app'
     seen_shaders = SEEN_SHADERS if args.seen_shaders is None else args.seen_shaders
@@ -3325,6 +3366,7 @@ def main(args=None):
 
     patched = work / f'patched_{pkg_ver}'
     g = rewrite(py, repo, game / 'ExeFS', patched, env, logs, g, provisional)
+    routes = nextendo_build(py, repo, game / 'ExeFS', patched, work, env, logs, g) if getattr(args, 'nextendo', False) else None
     if nd := captured_nros(patched): env = dict(env, DM_NRO_DIR=str(nd))
     chain_header(py, repo, env, logs)   # before any host is built
     if provisional or derived:   # (provisional) the heap check, then the region check (both only change keys the host is built with, not the rewrite or the shader steps)
@@ -3388,6 +3430,9 @@ def main(args=None):
         host, font = (first['host'], first['font']) if first else mac_host(py, repo, work, env, logs, g)
         parts = {'font': font}
         cmd = mac_run(work, game, patched, host, font, ios, aoc, gfx, lang, env, logs, g, env_file, partial=seen_shaders, parts=parts, jit=jit)
+        if routes:   # the Nextendo application the Mac signs in as comes from the build's environment (dm/host/nextendo_login_apple.inc)
+            client = os.environ.get('DM_NEXTENDO_CLIENT_ID', '')
+            cmd = cmd.replace(' && ', f' && DM_NETWORK=nextendo DM_NEXTENDO_ROUTES={shlex.quote(str(routes))} ' + (f'DM_NEXTENDO_CLIENT_ID={shlex.quote(client)} ' if client else ''), 1)
         rmtree(work / 'tmp')
         if getattr(args, 'in_programs', False): return parts
         programs = None if PROGRAM_INDEX else mac_programs(args, g, parts)
@@ -3413,6 +3458,9 @@ def main(args=None):
     if icon: ipa_env['DM_ICON'] = str(icon); say(f'app icon: {icon}')   # app icon (found above)
     else: say(('no game icon: the NUP carries none' if nup else 'no game icon: a dump folder has no control data') + '; the home-screen icon will be blank; --icon / ICON or --fallback-icon / FALLBACK_ICON gives it one' if dump else '[RED] no game icon in the extraction (an older extraction did not save it: delete extract/ and run again); the home-screen icon will be blank')
     if env_file: ipa_env['DM_ENV_FILE'] = str(Path(os.path.expanduser(env_file)).resolve())
+    if routes:   # --nextendo: the profile into the app, and Nextendo as the launcher's Network default (build_ipa.sh, dm/games/settings.tsv)
+        ipa_env.update(DM_NEXTENDO_SERVICES=str(routes.parent), DM_NEXTENDO='1', DM_NETWORK='nextendo')
+        say('Nextendo: online play is the Network default; sign in on the app\'s settings screen (Online)')
     show_fps = SHOW_FPS if args.show_fps is None else args.show_fps
     ipa_env['DM_SHOW_FPS'] = '1' if show_fps else '0'
     gpus = (args.gpu or PSO_GPUS).strip()

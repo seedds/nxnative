@@ -39,10 +39,16 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Prepare pinned Apple cryptography for offline service fixtures
+        run: echo "DM_OPENSSL_ROOT=$(python3 dm/tools/apple_crypto.py macos)" >> "$GITHUB_ENV"
       - name: Host unit tests (dm/host/tests)
         run: |
           mkdir -p logs
           make -C dm/host/tests GAME="$GAME" -j3 run 2>&1 | tee logs/host-tests.log
+      - name: Calendar policy, archive, SDK and startup fixtures
+        run: make -C dm/host/tests GAME="$GAME" bcat 2>&1 | tee logs/bcat.log
+      - name: Native TLS with bounded numeric tracing
+        run: DM_SSL_TRACE=1 make -C dm/host/tests GAME="$GAME" ssl 2>&1 | tee logs/tls-trace.log
       - name: ThreadSanitizer (audio, HID and guest memory)
         run: |
           make -C dm/host/tests GAME="$GAME" -j3 tsan memory-tsan 2>&1 | tee logs/tsan.log
@@ -89,10 +95,17 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Prepare pinned Apple cryptography for offline service fixtures
+        run: echo "DM_OPENSSL_ROOT=$(python3 dm/tools/apple_crypto.py macos)" >> "$GITHUB_ENV"
       - name: ASan and UBSan, every host unit test (dm/host/tests)
         run: |
           mkdir -p logs
           make -C dm/host/tests GAME="$GAME" -j3 asan 2>&1 | tee logs/host-asan.log
+      - name: ASan and UBSan, calendar startup and native service fixtures
+        run: |
+          make -C dm/host/tests GAME="$GAME" B=build/bcat-asan SAN="-fsanitize=address,undefined -fno-omit-frame-pointer" bcat 2>&1 | tee logs/bcat-asan.log
+          make -C dm/host/tests GAME="$GAME" ssl-sanitize nextendo-routes-sanitize nextendo-x509-sanitize nsd-sanitize nextendo-account-sanitize nextendo-api-sanitize nextendo-social-sanitize online-policy-sanitize 2>&1 | tee logs/services-asan.log
+          DM_SSL_TRACE=1 make -C dm/host/tests GAME="$GAME" ssl-sanitize 2>&1 | tee logs/tls-trace-asan.log
       - name: ASan and UBSan, CPU texture layout and deswizzle test (dm/gfx/tex/tests)
         run: make -C dm/gfx/tex/tests asan 2>&1 | tee logs/texture-asan.log
       - name: ThreadSanitizer, the host tests that start threads (dm/host/tests)

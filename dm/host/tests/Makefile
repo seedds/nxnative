@@ -12,6 +12,33 @@ QUIET = $(if $(findstring -fsanitize,$(SAN)),,2>/dev/null)
 GINC = $(if $(strip $(GAME)),-I../gen/$(GAME) -I../../games/$(GAME),$(error GAME is not set: make GAME=<base game title ID>: $(shell python3 ../../games/game.py list | awk -F'\t' '{printf "%s (%s)  ", $$1, $$3}')))
 $(B)/t_fs $(B)/t_fs_case $(B)/t_fs_commit_list $(B)/t_fs_commit_list_tsan: ../romfs_image.h
 GAME_H = ../gen/$(GAME)/game_profile.h
+.PHONY: bcat bcat-sanitize bcat-fixtures bcat-launch bcat-tools
+# The optional static crypto prefix belongs to the online-provider series. A
+# standalone source fixture supplies its reviewed prefix explicitly; this
+# Makefile does not download or build a second cryptography dependency.
+BCAT_CRYPTO_FLAGS = -DDM_OPENSSL_X509 "-I$(DM_OPENSSL_ROOT)/include"
+BCAT_CRYPTO_LIB = "$(DM_OPENSSL_ROOT)/lib/libcrypto.a"
+BCAT_WARN = -O1 -g -Wall -Wextra -Werror -Wno-unused-function -Wno-unused-parameter -Wno-deprecated-declarations
+$(B)/t_bcat_store: t_bcat_store.m ../hle_bcat_apple.m ../nextendo_bcat.h | $(B)
+	test -n "$(DM_OPENSSL_ROOT)"
+	$(CLANG) $(BCAT_WARN) -fobjc-arc $(BCAT_CRYPTO_FLAGS) -o $@ t_bcat_store.m $(BCAT_CRYPTO_LIB) -lz -framework Foundation
+$(B)/t_bcat_sdk: t_bcat_sdk.c t_bcat_guest.S ../hle_bcat.c ../nextendo_bcat.h ../hle_bigstack.c $(GAME_H) | $(B)
+	$(CLANG) $(BCAT_WARN) $(GINC) -o $@ t_bcat_sdk.c t_bcat_guest.S ../hle_bigstack.c
+$(B)/t_bcat_fs: t_bcat_fs.c t_bcat_fs_provider.c t_fs_stub.c ../hle_fs.c ../nextendo_bcat.h ../hle_bigstack.c ../save_sync.c $(GAME_H) | $(B)
+	$(CLANG) $(BCAT_WARN) $(GINC) -o $@ t_bcat_fs.c t_bcat_fs_provider.c t_fs_stub.c ../hle_bigstack.c ../save_sync.c
+$(B)/t_fs $(B)/t_fs_directory $(B)/t_fs_case $(B)/t_fs_commit_list $(B)/t_fs_commit_list_tsan $(B)/t_save_sync $(B)/t_bcat_fs: bcat_absent.h
+bcat-fixtures: $(B)/t_bcat_store $(B)/t_bcat_sdk $(B)/t_bcat_fs
+	$(B)/t_bcat_store
+	$(PYTHON) test_bcat_zip.py $(abspath $(B))/t_bcat_store
+	$(B)/t_bcat_sdk
+	$(B)/t_bcat_fs
+bcat-launch:
+	DM_OPENSSL_ROOT="$(DM_OPENSSL_ROOT)" $(PYTHON) test_bcat_launch.py
+bcat-tools:
+	DM_OPENSSL_ROOT="$(DM_OPENSSL_ROOT)" $(PYTHON) -m unittest discover -s ../../tools/tests -p test_nextendo_bcat.py
+bcat: bcat-fixtures bcat-launch bcat-tools
+bcat-sanitize:
+	$(MAKE) B=build/bcat-asan SAN="-fsanitize=address,undefined -fno-omit-frame-pointer" bcat
 run: $(B)/t_mii $(B)/t_net_eventfd $(B)/t_language $(B)/t_motion $(B)/t_heap_size $(B)/t_touch $(B)/t_gesture $(B)/t_oe $(B)/t_fs $(B)/t_fs_commit_list $(B)/t_thread_leak $(B)/t_fs_case $(B)/t_audio $(B)/t_output_stream $(B)/t_audio_spsc $(B)/t_swkbd $(B)/t_altstack $(B)/t_condvar $(B)/t_condvar_old $(B)/t_pollwait $(B)/t_clockwait $(B)/t_pause $(B)/t_pause_stress $(B)/t_pctl $(B)/t_sf $(B)/t_time $(B)/t_shared_font $(B)/t_vorbis $(B)/t_vorbis_divides $(B)/t_hid $(B)/t_haptics $(B)/t_haptics_apple $(B)/t_cheats $(B)/t_pad_hid $(B)/t_switch2
 	$(B)/t_language
 	$(B)/t_heap_size
@@ -110,6 +137,12 @@ $(B)/t_system_event: t_system_event.c ../hle_thread.c ../hle_sdk16.c ../hle_misc
 .PHONY: system-event
 system-event: $(B)/t_system_event
 	$(B)/t_system_event
+$(B)/t_network_clock: t_network_clock.c ../hle_network_clock.c ../hle_thread.c ../hle.h ../dm.h $(GAME_H) | $(B)
+	$(CLANG) -O1 -g -Wall -Wextra -Werror -Wno-unused-function -Wno-frame-address -I.. $(GINC) -o $@ t_network_clock.c
+.PHONY: network-clock
+network-clock: $(B)/t_network_clock
+	$(B)/t_network_clock
+run: network-clock
 $(B)/t_nro: t_nro.c ../loader.c ../hle_ro.c ../hle.h ../dm.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -g -Wall -Wno-unused-function -Wno-deprecated-declarations -I.. $(GINC) -o $@ t_nro.c
 .PHONY: nro
@@ -212,8 +245,8 @@ watch-sample: $(B)/t_watch_sample
 	$(B)/t_watch_sample
 $(B)/t_altstack: t_altstack.c t_altstack_stub.c ../crash.c ../dm.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -Wno-unused-function -I.. $(GINC) -o $@ t_altstack.c t_altstack_stub.c ../crash.c
-$(B)/t_net_eventfd: t_net_eventfd.c ../hle_net.c ../hle.h ../dm.h $(GAME_H) | $(B)
-	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -fsanitize=address,undefined -I.. $(GINC) -o $@ t_net_eventfd.c
+$(B)/t_net_eventfd: t_net_eventfd.c ../hle_net.c ../hle.h ../dm.h $(NET_SOURCES) $(NET_HEADERS) $(GAME_H) | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -fsanitize=address,undefined -I.. $(GINC) -o $@ t_net_eventfd.c $(NET_SOURCES)
 
 $(B)/t_pctl: t_pctl.c ../hle_misc.c ../hle.h ../dm.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -Wall -Werror -Wno-unused-function -I.. $(GINC) -o $@ t_pctl.c
@@ -425,3 +458,170 @@ coverage:
 	rm -rf $(B)/cov/prof
 	LLVM_PROFILE_FILE="$(call cov_profile,$(B)/cov)" $(MAKE) -i B=$(B)/cov SAN="$(COV_FLAGS)" run
 	@$(call cov_export,$(B)/cov)
+
+# Local transport fixtures use only synthetic packets and loopback peers.
+NET_SOURCES = ../hle_net_backend.c ../hle_nsd_backend.c t_net_write_stub.c
+NET_HEADERS = ../nsd.h ../net_socket.h ../net_discovery.h ../net_discovery_queue.inc ../discovery_protocol.h
+NET_FLAGS = -O1 -g -Wall -Wextra -Werror -Wno-unused-function
+$(B)/t_hle_wait: t_hle_wait.c t_hle_wait.S ../hle.h ../entry.S ../hle_bigstack.c $(GAME_H) | $(B)
+	$(CLANG) $(NET_FLAGS) $(GINC) -o $@ t_hle_wait.c t_hle_wait.S ../entry.S ../hle_bigstack.c
+$(B)/t_net: t_net.c ../hle_net.c ../hle_offline.c ../hle.h ../entry.S ../hle_bigstack.c $(NET_SOURCES) $(NET_HEADERS) $(GAME_H) | $(B)
+	$(CLANG) $(NET_FLAGS) $(GINC) -o $@ t_net.c ../hle_net.c ../hle_offline.c $(NET_SOURCES) ../entry.S ../hle_bigstack.c
+$(B)/t_net_discovery: t_net_discovery.c $(NET_SOURCES) $(NET_HEADERS) | $(B)
+	$(CLANG) $(NET_FLAGS) -DDM_NET_TEST -o $@ t_net_discovery.c $(NET_SOURCES)
+$(B)/t_discovery_protocol: t_discovery_protocol.c ../discovery_protocol.h | $(B)
+	$(CLANG) -std=c11 -O2 -Wall -Wextra -Werror -pedantic -o $@ t_discovery_protocol.c
+LDN_SOURCES = ../hle_ldn.c ../hle_ldn_protocol.c
+LDN_HEADERS = ../hle_ldn.h $(NET_HEADERS)
+$(B)/t_ldn: t_ldn.c $(LDN_SOURCES) $(LDN_HEADERS) $(NET_SOURCES) | $(B)
+	$(CLANG) $(NET_FLAGS) -DDM_NET_TEST -DDM_LDN_TEST -DDM_LDN_NET_TEST -o $@ t_ldn.c $(LDN_SOURCES) $(NET_SOURCES)
+$(B)/t_ldn_events: t_ldn_events.c ../hle_ldn.c ../hle_ldn_protocol.c ../hle_ldn.h $(GAME_H) | $(B)
+	$(CLANG) $(NET_FLAGS) $(GINC) -o $@ t_ldn_events.c ../hle_ldn_protocol.c
+.PHONY: local-network-tests
+local-network-tests: $(B)/t_hle_wait $(B)/t_net $(B)/t_net_discovery $(B)/t_discovery_protocol $(B)/t_ldn $(B)/t_ldn_events
+	$(B)/t_hle_wait
+	$(B)/t_oe_handoff
+	$(B)/t_net --no-broadcast
+	$(B)/t_net_discovery
+	$(B)/t_discovery_protocol
+	$(B)/t_ldn
+	$(B)/t_ldn_events
+	$(B)/t_friends_history
+run: local-network-tests
+
+$(B)/t_friends_history: t_friends_history.c ../hle_friends_history.c ../friends_history.h ../hle_friends.c ../account_local.h memory_profile/game_profile.h | $(B)
+	$(CLANG) $(NET_FLAGS) -DDM_FRIENDS_HISTORY_TEST -Imemory_profile -o $@ t_friends_history.c ../hle_friends_history.c
+local-network-tests: $(B)/t_friends_history
+
+$(B)/t_oe_handoff: t_oe_handoff.c t_condvar_stub.c ../hle_thread.c ../hle_oe.c ../hle.h ../dm.h $(GAME_H) | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -I.. $(GINC) -o $@ t_oe_handoff.c t_condvar_stub.c
+local-network-tests: $(B)/t_oe_handoff
+
+# A kernel socket receive must prepare tracked guest pages, including after waits.
+$(B)/t_net_write_prepare: t_net_write_prepare.c ../hle_net_backend.c ../hle_nsd_backend.c ../nsd.h ../net_socket.h ../net_discovery.h ../net_discovery_queue.inc ../discovery_protocol.h ../../gfx/nvn/nvn_dirty.c ../../gfx/nvn/nvn_dirty.h $(GAME_H) | $(B)
+	$(CLANG) $(NET_FLAGS) $(GINC) -o $@ t_net_write_prepare.c ../hle_nsd_backend.c ../../gfx/nvn/nvn_dirty.c
+.PHONY: net-write net-write-sanitize
+net-write: $(B)/t_net_write_prepare
+	$(B)/t_net_write_prepare
+net-write-sanitize:
+	$(call san_fresh,build/net-write-asan,$(ASAN_FLAGS))
+	$(ASAN_ENV) $(MAKE) B=build/net-write-asan SAN="$(ASAN_FLAGS)" net-write
+run: net-write
+
+# Original synthetic DNSService callbacks exercise ownership/cancellation offline.
+$(B)/t_resolver_cancel: t_resolver_cancel.c t_net_write_stub.c ../hle_net_backend.c ../hle_nsd_backend.c ../net_socket.h ../nsd.h | $(B)
+	$(CLANG) -O1 -g -Wall -Wextra -Werror -Wno-unused-function -o $@ t_resolver_cancel.c t_net_write_stub.c ../hle_nsd_backend.c
+.PHONY: resolver
+resolver: $(B)/t_resolver_cancel
+	$(B)/t_resolver_cancel
+run: resolver
+# Optional system API smoke uses only localhost and is not part of CI.
+$(B)/t_resolver_live: t_resolver_live.c $(NET_SOURCES) $(NET_HEADERS) | $(B)
+	$(CLANG) -O1 -g -Wall -Wextra -Werror -o $@ t_resolver_live.c $(NET_SOURCES)
+.PHONY: resolver-live
+resolver-live: $(B)/t_resolver_live
+	$(B)/t_resolver_live
+# Native TLS and explicit provider policy; all certificates are ephemeral fixtures.
+DM_OPENSSL_ROOT ?= $(shell python3 ../../tools/apple_crypto.py macos)
+PRIVATE_PKI_FLAGS = -DDM_OPENSSL_X509 "-I$(DM_OPENSSL_ROOT)/include"
+PRIVATE_PKI_LIB = "$(DM_OPENSSL_ROOT)/lib/libcrypto.a"
+OPENSSL_TOOL ?= $(shell command -v openssl)
+SSL_SOURCES = t_ssl.m t_net_write_stub.c ../hle_ssl.c ../hle_ssl_apple.m ../hle_nextendo_x509.c ../hle_net_backend.c ../hle_nsd_backend.c ../hle_bigstack.c ../entry.S
+SSL_DEPS = t_gate_fixture.h ../nsd.h $(SSL_SOURCES) ../ssl_backend.h ../net_socket.h ../hle.h $(GAME_H) test_ssl_transport.py
+SSL_FLAGS = -O1 -g -fobjc-arc -mmacosx-version-min=14.0 -Wall -Wextra -Werror -Wno-unused-function $(GINC)
+$(B)/t_ssl $(B)/t_ssl_asan $(B)/t_nextendo_routes $(B)/t_nextendo_routes_asan: ../ssl_trace.h
+$(B)/t_ssl_trace: t_ssl_trace.c ../ssl_trace.h | $(B)
+	$(CLANG) -O1 -g -Wall -Wextra -Werror -o $@ t_ssl_trace.c
+$(B)/t_ssl_trace_asan: t_ssl_trace.c ../ssl_trace.h | $(B)
+	$(CLANG) -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -fno-omit-frame-pointer -o $@ t_ssl_trace.c
+$(B)/t_ssl: $(SSL_DEPS) | $(B)
+	$(CLANG) $(SSL_FLAGS) -o $@ $(SSL_SOURCES) -framework Foundation -framework Security
+$(B)/t_ssl_asan: $(SSL_DEPS) | $(B)
+	$(CLANG) $(SSL_FLAGS) -fsanitize=address,undefined -mllvm -asan-globals=0 -fno-omit-frame-pointer -o $@ $(SSL_SOURCES) -framework Foundation -framework Security
+.PHONY: ssl ssl-sanitize
+ssl: $(B)/t_ssl $(B)/t_ssl_trace
+	$(B)/t_ssl_trace
+	$(PYTHON) test_ssl_transport.py $(B)/t_ssl
+ssl-sanitize: $(B)/t_ssl_asan $(B)/t_ssl_trace_asan
+	$(B)/t_ssl_trace_asan
+	$(PYTHON) test_ssl_transport.py $(B)/t_ssl_asan
+
+ROUTE_SOURCES = t_nextendo_routes.c t_net_write_stub.c ../hle_nextendo_routes.c ../hle_net_backend.c ../hle_nsd_backend.c ../hle_ssl_apple.m ../hle_nextendo_x509.c
+ROUTE_DEPS = ../nsd.h $(ROUTE_SOURCES) ../nextendo_routes.h ../net_socket.h ../ssl_backend.h test_nextendo_routes.py test_ssl_transport.py Makefile
+$(B)/t_nextendo_routes: $(ROUTE_DEPS) | $(B)
+	$(CLANG) -O1 -g -fobjc-arc -mmacosx-version-min=14.0 -Wall -Wextra -Werror $(PRIVATE_PKI_FLAGS) -o $@ $(ROUTE_SOURCES) $(PRIVATE_PKI_LIB) -framework Foundation -framework Security
+$(B)/t_nextendo_routes_asan: $(ROUTE_DEPS) | $(B)
+	$(CLANG) -O1 -g -fobjc-arc -mmacosx-version-min=14.0 -Wall -Wextra -Werror $(PRIVATE_PKI_FLAGS) -fsanitize=address,undefined -fno-omit-frame-pointer -o $@ $(ROUTE_SOURCES) $(PRIVATE_PKI_LIB) -framework Foundation -framework Security
+.PHONY: nextendo-routes nextendo-routes-sanitize
+nextendo-routes: $(B)/t_nextendo_routes
+	$(PYTHON) test_nextendo_routes.py $(B)/t_nextendo_routes
+nextendo-routes-sanitize: $(B)/t_nextendo_routes_asan
+	$(PYTHON) test_nextendo_routes.py $(B)/t_nextendo_routes_asan
+
+$(B)/t_nextendo_x509: t_nextendo_x509.c ../hle_nextendo_x509.c ../nextendo_x509.h | $(B)
+	$(CLANG) -O1 -g -Wall -Wextra -Werror $(PRIVATE_PKI_FLAGS) -o $@ t_nextendo_x509.c ../hle_nextendo_x509.c $(PRIVATE_PKI_LIB)
+$(B)/t_nextendo_x509_asan: t_nextendo_x509.c ../hle_nextendo_x509.c ../nextendo_x509.h | $(B)
+	$(CLANG) -O1 -g -Wall -Wextra -Werror $(PRIVATE_PKI_FLAGS) -fsanitize=address,undefined -fno-omit-frame-pointer -o $@ t_nextendo_x509.c ../hle_nextendo_x509.c $(PRIVATE_PKI_LIB)
+.PHONY: nextendo-x509 nextendo-x509-sanitize
+nextendo-x509: $(B)/t_nextendo_x509
+	$(PYTHON) test_nextendo_x509.py $(B)/t_nextendo_x509 "$(OPENSSL_TOOL)"
+nextendo-x509-sanitize: $(B)/t_nextendo_x509_asan
+	$(PYTHON) test_nextendo_x509.py $(B)/t_nextendo_x509_asan "$(OPENSSL_TOOL)"
+
+$(B)/t_nsd: t_nsd.c ../hle_nsd_backend.c ../nsd.h ../net_socket.h | $(B)
+	$(CLANG) -O1 -g -Wall -Wextra -Werror -o $@ t_nsd.c ../hle_nsd_backend.c
+$(B)/t_nsd_asan: t_nsd.c ../hle_nsd_backend.c ../nsd.h ../net_socket.h | $(B)
+	$(CLANG) -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -fno-omit-frame-pointer -o $@ t_nsd.c ../hle_nsd_backend.c
+.PHONY: nsd nsd-sanitize
+nsd: $(B)/t_nsd
+	$(B)/t_nsd
+nsd-sanitize: $(B)/t_nsd_asan
+	$(B)/t_nsd_asan
+run: ssl nextendo-routes nextendo-x509 nsd
+
+ACCOUNT_SOURCES = t_nextendo_account.m ../hle_account.c ../hle_nextendo_apple.m ../hle_nextendo_api_apple.m ../hle_bigstack.c ../entry.S
+ACCOUNT_DEPS = t_gate_fixture.h ../nextendo_login_apple.inc $(ACCOUNT_SOURCES) ../nextendo_account.h ../net_socket.h ../hle.h $(GAME_H)
+$(B)/t_nextendo_account: $(ACCOUNT_DEPS) | $(B)
+	$(CLANG) $(SSL_FLAGS) -o $@ $(ACCOUNT_SOURCES) -framework Foundation -framework Security
+$(B)/t_nextendo_account_asan: $(ACCOUNT_DEPS) | $(B)
+	$(CLANG) $(SSL_FLAGS) -fsanitize=address,undefined -mllvm -asan-globals=0 -fno-omit-frame-pointer -o $@ $(ACCOUNT_SOURCES) -framework Foundation -framework Security
+.PHONY: nextendo-account nextendo-account-sanitize
+# The Mac sign-in tool (dm/tools/nextendo_login.m) is built with the account fixtures, so CI compiles it; it signs in only when run by hand
+$(B)/nextendo_login: ../../tools/nextendo_login.m ../nextendo_login_apple.inc | $(B)
+	$(CLANG) -O1 -g -fobjc-arc -Wall -Wextra -Werror -o $@ ../../tools/nextendo_login.m -framework Foundation -framework Security -framework AppKit
+nextendo-account: $(B)/t_nextendo_account $(B)/nextendo_login
+	$(B)/t_nextendo_account
+nextendo-account-sanitize: $(B)/t_nextendo_account_asan $(B)/nextendo_login
+	$(B)/t_nextendo_account_asan
+API_SOURCES = t_nextendo_api.m ../hle_nextendo_api_apple.m
+$(B)/t_nextendo_api: $(API_SOURCES) ../nextendo_api_apple.h | $(B)
+	$(CLANG) -O1 -g -fobjc-arc -Wall -Wextra -Werror -DDM_NEXTENDO_API_TEST -o $@ $(API_SOURCES) -framework Foundation
+$(B)/t_nextendo_api_asan: $(API_SOURCES) ../nextendo_api_apple.h | $(B)
+	$(CLANG) -O1 -g -fobjc-arc -Wall -Wextra -Werror -DDM_NEXTENDO_API_TEST -fsanitize=address,undefined -fno-omit-frame-pointer -o $@ $(API_SOURCES) -framework Foundation
+.PHONY: nextendo-api nextendo-api-sanitize
+nextendo-api: $(B)/t_nextendo_api
+	$(B)/t_nextendo_api
+nextendo-api-sanitize: $(B)/t_nextendo_api_asan
+	$(B)/t_nextendo_api_asan
+
+SOCIAL_SOURCES = t_nextendo_social.m ../hle_nextendo_social_apple.m ../hle_nextendo_api_apple.m ../hle_nextendo_friends.c
+$(B)/t_nextendo_social: $(SOCIAL_SOURCES) ../nextendo_social.h ../nextendo_api_apple.h | $(B)
+	$(CLANG) -O1 -g -fobjc-arc -Wall -Wextra -Werror -DDM_NEXTENDO_API_TEST -Isocial_profile -o $@ $(SOCIAL_SOURCES) -framework Foundation
+$(B)/t_nextendo_social_asan: $(SOCIAL_SOURCES) ../nextendo_social.h ../nextendo_api_apple.h | $(B)
+	$(CLANG) -O1 -g -fobjc-arc -Wall -Wextra -Werror -DDM_NEXTENDO_API_TEST -Isocial_profile -fsanitize=address,undefined -fno-omit-frame-pointer -o $@ $(SOCIAL_SOURCES) -framework Foundation
+.PHONY: nextendo-social nextendo-social-sanitize
+nextendo-social: $(B)/t_nextendo_social
+	$(B)/t_nextendo_social
+nextendo-social-sanitize: $(B)/t_nextendo_social_asan
+	$(B)/t_nextendo_social_asan
+run: nextendo-account nextendo-api nextendo-social
+$(B)/t_online_policy: t_online_policy.c t_net_write_stub.c ../hle_net_backend.c ../hle_nsd_backend.c ../net_socket.h ../nsd.h | $(B)
+	$(CLANG) -O1 -g -Wall -Wextra -Werror -o $@ t_online_policy.c t_net_write_stub.c ../hle_net_backend.c ../hle_nsd_backend.c
+$(B)/t_online_policy_asan: t_online_policy.c t_net_write_stub.c ../hle_net_backend.c ../hle_nsd_backend.c ../net_socket.h ../nsd.h | $(B)
+	$(CLANG) -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -fno-omit-frame-pointer -o $@ t_online_policy.c t_net_write_stub.c ../hle_net_backend.c ../hle_nsd_backend.c
+.PHONY: online-policy online-policy-sanitize
+online-policy: $(B)/t_online_policy
+	$(B)/t_online_policy
+online-policy-sanitize: $(B)/t_online_policy_asan
+	$(B)/t_online_policy_asan
+run: online-policy

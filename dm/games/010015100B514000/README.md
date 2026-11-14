@@ -91,6 +91,14 @@ Game-specific findings; the general host changes they led to are listed under [F
 - Focus handling mode 2 (focus notifications are sent). Mario never throws C++ exceptions.
 - Ghidra: `main` (28 MB) took about 35 minutes to analyse, 138k functions.
 
+### Online play (Nextendo), 1.2.1
+
+- Online calls go through `nn::npln` over gRPC (a 1.3x build with xDS, linked into `main` with its own OpenSSL, `nnsdk_LoadBuiltinCerts.cpp`). gRPC does its own TLS over the C socket interface (`RecvMsg` / `SendMsg`); the `nn::ssl` connection calls `main` imports are libcurl's (`main+0xf79a98`..`0xf7a1e4`), so the host's `nn::ssl` peer policy never sees gRPC's connections.
+- gRPC takes its roots from the firmware's certificate store: `ComputePemRootCerts` (`main+0xafa5b4`) reads `GRPC_DEFAULT_SSL_ROOTS_FILE_PATH`, then the store one ID at a time (`main+0xafaf50`: 1, 2, 0x3e8, 0x3f3, 0x3f4, 0x3f5, 0x409, stopping at the first failure), then `/usr/share/grpc/roots.pem`. With no root it builds no TLS factory (`main+0xaf6ca8`, `main+0xaf9010`), so no subchannel and no socket: the call fails as UNAVAILABLE, error 2321-4992. In Nextendo mode the player needs nothing for it: with no store on the device, the host answers each ID with Nextendo's own CA, the one the build's service profile carries and checks by SHA-256 (`hle_nextendo_routes.c` `provider_ca`, `hle_ssl_apple.m` `select_builtin`). A store from the player's own firmware (`ssl_TrustedCerts.bdf` in `<DM_SYSTEM_DIR>/sysdata/0100000000000800/` or `<DM_SYSTEM_DATA_DIR>/0100000000000800/files/`) is used instead when present. The host logs which it used and every built-in request.
+- Nextendo's signed patch (`wonder-npln-ff773e90`, three instructions) makes gRPC install its accept-any verify callback (`main+0xb03528`) and skips two peer-name checks (`main+0xb02aa4`, `main+0xb02bbc`), so gRPC does not check Nextendo's server certificate; the roots are still required to build the factory.
+- gRPC's logging is compiled out (`GRPC_TRACE` and `GRPC_VERBOSITY` print nothing). `patches.py` puts an observation gate on `grpc_error_create` (`main+0xb57b40`), and the host logs each internal error's source file, line and text once (`hle_grpc.c`).
+- Proxy: gRPC's mapper (`main+0xb31760`) and libcurl's (`main+0xf7aa40`) both take a failed `nifm::GetCurrentProxySetting` as no proxy.
+
 ## Mac routes
 
 - `DM_KEYS="12:A,14:A,20:A,26:A,32:A"` reaches the opening course.

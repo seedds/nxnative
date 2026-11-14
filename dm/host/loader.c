@@ -11,6 +11,9 @@
 #include <mach-o/getsect.h>
 #include <mach-o/ldsyms.h>
 #include "hle.h"
+#include "net_socket.h"
+
+static char g_nextendo_dir[1024];   // Nextendo's patched main, when it is the one loaded (nextendo_main)
 #if TARGET_OS_IPHONE
 #include <mach/mach.h>
 #endif
@@ -235,6 +238,14 @@ static void *force_lookup(const char *name) {
         }
     }
     return NULL;
+}
+// Validate the complete linked production table without loading game data,
+// creating a window or reading credentials. Component-only fixtures cannot
+// detect duplicate hooks registered in a different translation unit.
+void dm_validate_hle_registry(void) {
+    if (!g_fmask) force_init();
+    (void)hle_implements("__dm_registry_validation__");
+    LOG("HLE registry validated: %u unique forced takeovers",g_nforce);
 }
 // Generic host: the list serves several games, so entries a game does not reference are only noted; with DM_FORCE_STRICT=1 it still fails loudly (for checking a mistyped list)
 static void force_check(void) {
@@ -754,6 +765,8 @@ void dm_set_game_image_header(const void *mh) { g_game_image = mh; }
 typedef struct { char name[32]; uint64_t off[3][2]; } nro_ent;
 // DM_EMBED_TAG (main.m, an app holding several programs of one game): the running program's sections are tagged (gen_embed.py --tag: __dm<tag><name>x0, …, __dm<tag>_nro_x0)
 static const char *embed_tag(void) { const char *t = getenv("DM_EMBED_TAG"); return t ? t : ""; }
+// The embedded module's name: Nextendo's patched main is nmain (gen_embed.py, nextendo_main)
+static const char *embed_name(const module_t *m) { return g_nextendo_dir[0] && !strcmp(m->name, "main") ? "nmain" : m->name; }
 static int nro_pieces(const char *name, const uint8_t **x0, unsigned long *z0, const uint8_t **w, unsigned long *zw, const uint8_t **x1, unsigned long *z1) {
     unsigned long zt, s0, sw, s1;
     char st[17], s0n[17], swn[17], s1n[17]; const char *g = embed_tag();
@@ -769,8 +782,8 @@ static int nro_pieces(const char *name, const uint8_t **x0, unsigned long *z0, c
 }
 static void map_image(module_t *m, const char *dir) {
     (void)dir;
-    char sx0[17], sx1[17], dm[17]; const char *g = embed_tag();
-    snprintf(sx0, sizeof sx0, "__dm%s%sx0", g, m->name); snprintf(sx1, sizeof sx1, "__dm%s%sx1", g, m->name); snprintf(dm, sizeof dm, "__DM%s%sW", g, m->name);
+    char sx0[17], sx1[17], dm[17]; const char *g = embed_tag(), *nm = embed_name(m);
+    snprintf(sx0, sizeof sx0, "__dm%s%sx0", g, nm); snprintf(sx1, sizeof sx1, "__dm%s%sx1", g, nm); snprintf(dm, sizeof dm, "__DM%s%sW", g, nm);
     unsigned long z0 = 0, zw = 0, z1 = 0;
     const uint8_t *x0 = NULL, *w = NULL, *x1 = NULL;
     if (m->nro) { if (!nro_pieces(m->name, &x0, &z0, &w, &zw, &x1, &z1)) die("NRO %s: not in the embedded NRO table (__DATA,__dm_nro_tab)", m->name); }
@@ -779,7 +792,7 @@ static void map_image(module_t *m, const char *dir) {
     // The back patch area (patch_nso.py TWO) is a fourth section, __dm<name>x2; NROs never have one (nro_pieces holds three pieces)
     unsigned long z2 = 0; const uint8_t *x2 = NULL;
     if (m->back_len) {
-        char sx2[17]; snprintf(sx2, sizeof sx2, "__dm%s%sx2", g, m->name);
+        char sx2[17]; snprintf(sx2, sizeof sx2, "__dm%s%sx2", g, nm);
         if (m->nro || !(x2 = getsectiondata(IMAGE_MH, "__TEXT", sx2, &z2)) || z2 != m->back_len || ((uintptr_t)x2 & 0x3FFF)) die("embedded back patch area %s missing or wrong", sx2);
     }
     // Patch area before the base (patch_off < 0): W ends at the end of data (FILE_IMAGE_LEN); bss and the key page are zero pages from vm_allocate and are not in the executable
@@ -851,8 +864,29 @@ static void map_image(module_t *m, const char *dir) {
 static char g_module_dir[1024];   // the folder the modules were loaded from (dm_module_dir)
 const char *dm_module_dir(void) { return g_module_dir; }
 
+// A --nextendo build (scripts/build_ipa_from_nsp.py nextendo_build) rewrites a copy of main with Nextendo's signed game patch into <dir>/nextendo. With Nextendo on
+// (net_socket.h dm_net_nextendo_enabled), main comes from there; offline, LAN and LDN keep the original. On the iPhone, <dir>/nextendo holds the copy's tables and its
+// code is embedded as module nmain (gen_embed.py; g_nextendo_dir, map_image)
+static const char *module_dir(const module_t *m, const char *dir) { return g_nextendo_dir[0] && !strcmp(m->name, "main") ? g_nextendo_dir : dir; }
+// A Nextendo session starts with the game: the account's Mii and play time (hle_nextendo_social_apple.m has the strong definition; other hosts have none)
+__attribute__((weak)) void dm_nextendo_session_start(void) {}
+static void nextendo_main(const char *dir) {
+    g_nextendo_dir[0] = 0;
+    if (!dm_net_nextendo_enabled()) return;
+    dm_nextendo_session_start();
+    char path[1100]; struct stat st;
+    if ((size_t)snprintf(g_nextendo_dir, sizeof g_nextendo_dir, "%s/nextendo", dir) >= sizeof g_nextendo_dir) die("Nextendo: module folder path too long: %s", dir);
+    snprintf(path, sizeof path, "%s/main.fixups.tsv", g_nextendo_dir);
+    if (lstat(path, &st) || !S_ISREG(st.st_mode)) {
+        LOG("Nextendo: no patched main in %s (the build had no --nextendo, or Nextendo publishes no patch for this build): the original main runs online", g_nextendo_dir);
+        g_nextendo_dir[0] = 0; return;
+    }
+    LOG("Nextendo: main from %s (Nextendo's signed game patch)", g_nextendo_dir);
+}
+
 void load_modules(const char *dir, const char **names, int n) {
     strlcpy(g_module_dir, dir, sizeof g_module_dir);
+    nextendo_main(dir);
     // Map everything and parse the symbol tables first, then relocate all at once (cross-module symbols must all be in place first)
     // DM_BOOTPROF: breakdown of ① host loading (milliseconds), to set the upper bound for ③ pre-relocation / mmap
     uint64_t t0 = now_ns(), tm = 0, tp = 0, tg = 0, tr = 0, t;
@@ -861,16 +895,16 @@ void load_modules(const char *dir, const char **names, int n) {
     for (int i = 0; i < n; i++) {
         module_t *m = &g_mod[i];
         strlcpy(m->name, names[i], sizeof m->name);
-        read_layout(m, dir);
+        read_layout(m, module_dir(m, dir));
     }
     create_keys();
     jit_layout_init();
     for (int i = 0; i < n; i++) {
         module_t *m = &g_mod[i];
-        t = now_ns(); map_image(m, dir); tm += now_ns() - t;   // On return the code area is already read-only+execute; from here on the loader only writes data
+        t = now_ns(); map_image(m, module_dir(m, dir)); tm += now_ns() - t;   // On return the code area is already read-only+execute; from here on the loader only writes data
         if (!i) tsd_check();
         t = now_ns(); parse_dynamic(m); tp += now_ns() - t;
-        t = now_ns(); register_gates(m, dir); tg += now_ns() - t;
+        t = now_ns(); register_gates(m, module_dir(m, dir)); tg += now_ns() - t;
         LOG("%s: base %p size %#zx", names[i], m->base, m->size);
         m->loaded = 1; g_loaded[g_nloaded++] = m; g_nmod++;
     }

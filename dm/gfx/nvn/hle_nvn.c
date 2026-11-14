@@ -3543,6 +3543,14 @@ int nvn_sparse_mapped(const void *pool, uint64_t a, uint64_t n) {   // every pag
     pthread_mutex_unlock(&g_vp_mu); return ok;
 }
 void nvn_sparse_protect(const void *pool, uint64_t a, uint64_t n) { vpt_walk(pool, a, n, ~0ull, run_protect, 0); }
+// The physical memory behind each 4 KB page of [a, a + n) of a sparse pool (a and n multiples of 4 KB): out[i] that of the page at a + i * 4 KB, NULL where nothing is mapped. 0 when a
+// is in no sparse pool, else 1. nvn_mtl.m makes it a table of GPU addresses, through which the GPU gathers such a texture for an upload and stores what it writes into one (sp_pages_gpu)
+int nvn_sparse_pages(const void *pool, uint64_t a, uint64_t n, const uint8_t **out) {
+    pthread_mutex_lock(&g_vp_mu); struct vpool *v = vpool_at(pool, a);
+    if (!v) { pthread_mutex_unlock(&g_vp_mu); return 0; }
+    for (uint64_t i = 0, o = a - (uint64_t)(uintptr_t)v->base; i < n >> 12; i++, o += 0x1000) { const vpte *e = o < v->size ? vpt_get(v, o) : NULL; out[i] = e ? e->phys : NULL; }
+    pthread_mutex_unlock(&g_vp_mu); return 1;
+}
 static int run_protect_tile(const uint8_t *p, uint64_t n, uint64_t unused) { (void)unused; nvn_dirty_protect_sparse(p, n); return 0; }
 void nvn_sparse_protect_tile(const void *pool, uint64_t a, uint64_t n) { vpt_walk(pool, a, n, ~0ull, run_protect_tile, 0); }
 // The physical memory behind the 64 KB tile at a: its first page when all 16 are mapped and consecutive, NULL otherwise (nvn_mtl.m keys shared sparse tiles by it, sp_share)

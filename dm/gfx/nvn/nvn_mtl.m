@@ -2636,7 +2636,7 @@ void mtl_drain(void) { present_drop_for_suspend(); mtl_present_flush(); snap_dra
 
 // ================= Render replay =================
 #include "../../host/front.h"
-static int g_red_once[171];   // one past the highest key: a new key raises this, and the macro refuses to compile otherwise
+static int g_red_once[173];   // one past the highest key: a new key raises this, and the macro refuses to compile otherwise
 #define RED_ONCE(k, ...) do { _Static_assert((k) < sizeof g_red_once / sizeof *g_red_once, "a RED_ONCE key past g_red_once: raise its size"); if (!g_red_once[k]++) MLOG("[RED] " __VA_ARGS__); } while (0)
 // NVN vertex streams 0–15 → Metal vertex buffer slots: 0–13 go to 16–29 (30 is the constant fallback buffer), 14 and 15 to 14 and 15. Metal has only the 31 slots 0–30; translated shaders use only buffer(0) (the argument buffer),
 // and the host's own vertex functions read no vertex buffers. 13 Sentinels uses stream 15, and the old 16 + stream went out of range (Metal assertion: buffer index (31) must be < 31)
@@ -3257,6 +3257,79 @@ static int g_direct_upload_on = -1; static uint64_t g_direct_uploads, g_direct_d
 static int direct_upload_on(void) { if (g_direct_upload_on < 0) { const char *e=getenv("DM_NVN_DIRECT_UPLOAD"); g_direct_upload_on=!e||atoi(e); } return g_direct_upload_on; }
 int nvn_host_readable(uint64_t a, uint64_t n);   // hle_nvn.c: guest memory and sparse pools
 int nvn_sparse_pool(const void *pool); uint64_t nvn_sparse_gen(void); uint64_t nvn_sparse_copy(const void *pool, void *dst, uint64_t a, uint64_t n); int nvn_sparse_notes(uint64_t *seen, uint64_t (*out)[2], int max);
+int nvn_sparse_pages(const void *pool, uint64_t a, uint64_t n, const uint8_t **out);
+// A texture of a sparse pool uploaded whole (pkg_upload_) is its storage as the pool's page table maps it: the physical memory behind each 4 KB page, 0 where nothing is mapped. The GPU
+// reads and writes it there through a table of each page's GPU address, so that both happen in the queue's order. A copy into such a texture, a clear or a render pass writes that
+// memory (gsb_swz), as the hardware's does, and the upload batch gathers it after every command buffer committed before it (the gather kernel). Gathered on the CPU when the upload
+// was encoded, a later upload read the memory before an earlier command buffer's write reached it, and none was stored there at all: Densha de GO!! Hashiro Yamanote Line fills the
+// finer levels of 117 sparse 512x512 ASTC 6x6 textures with buffer-to-texture copies, and each upload after a mapping change put back the zeros of its storage (magenta, GitHub #2350).
+// The table of the pages over [va, va + n), from page va >> 12 on, into pt (sp_pages_n entries): → 1, or 0 when a mapped page lies in memory the GPU cannot address (the caller then
+// keeps the CPU's way). Each run of consecutive physical pages is looked up once (mtl_gpu_addr makes its pool resident)
+static uint64_t sp_pages_n(uint64_t va, uint64_t n) { return ((va + n + 0xFFF) >> 12) - (va >> 12); }
+// The physical memory GPU writes were stored into (gsb_swz), by the main command buffer that stores it (g_fence + 1 when encoded): an upload that gathers a sparse texture on the CPU (a
+// format the GPU deswizzle does not take, DM_NVN_ZBLOCK) reads that memory when it is encoded, not in the queue's order, so it waits for the stores into the memory behind it
+// (sp_store_wait). A ring: a store pushed out while its command buffer may still run leaves its fence for every such upload (g_sps_lost)
+enum { SPS_N = 256 };
+static struct { uint64_t lo, hi, fence; } g_sps[SPS_N]; static unsigned g_nsps; static uint64_t g_sps_lost;
+static void sps_note(uint64_t lo, uint64_t n) {
+    uint64_t f = g_fence + 1, i = g_nsps % SPS_N;
+    if (g_nsps >= SPS_N && g_sps[i].fence > g_done && g_sps[i].fence > g_sps_lost) g_sps_lost = g_sps[i].fence;
+    g_sps[i].lo = lo; g_sps[i].hi = lo + n; g_sps[i].fence = f; g_nsps++;
+}
+static int sp_pages_gpu(const void *pool, uint64_t va, uint64_t n, uint64_t *pt, int wrote) {   // wrote: the GPU writes the pages (sbw_note each run)
+    uint64_t np = sp_pages_n(va, n); const uint8_t **ph = malloc((size_t)np * sizeof *ph);
+    if (!ph) MDIE("sparse page table of %llu pages", (unsigned long long)np);
+    int ok = nvn_sparse_pages(pool, va & ~0xFFFull, np << 12, ph);
+    for (uint64_t i = 0; ok && i < np;) {
+        if (!ph[i]) { pt[i++] = 0; continue; }
+        uint64_t j = i + 1; while (j < np && ph[j] == ph[j - 1] + 0x1000) j++;
+        void *b; uint64_t o, g;
+        if (wrote) { sbw_note((uint64_t)(uintptr_t)ph[i], (j - i) << 12, SBW_GPU); sps_note((uint64_t)(uintptr_t)ph[i], (j - i) << 12); }
+        if (mtl_gpu_addr((uint64_t)(uintptr_t)ph[i], (j - i) << 12, &b, &o, &g)) { for (uint64_t k = i; k < j; k++) pt[k] = g + ((k - i) << 12); i = j; continue; }
+        for (; ok && i < j; i++) { ok = mtl_gpu_addr((uint64_t)(uintptr_t)ph[i], 0x1000, &b, &o, &g); pt[i] = g; }   // a run over two pools
+    }
+    free(ph);
+    if (!ok) RED_ONCE(171, "a page mapped in a sparse pool lies in memory the GPU cannot address: its textures are gathered on the CPU, and GPU writes into them stay out of their storage");
+    return ok;
+}
+// Before a CPU gather of t: the last command buffer that stores into the physical memory behind it, waited for (g_sps)
+static void sp_store_wait(const tex_t *t) {
+    uint64_t done = g_done, f = g_sps_lost > done ? g_sps_lost : 0, n = g_nsps < SPS_N ? g_nsps : SPS_N, live = 0;
+    for (uint64_t i = 0; i < n; i++) live |= g_sps[i].fence > done;
+    if (!live && !f) return;
+    uint64_t va = (uint64_t)(uintptr_t)t->mem, np = sp_pages_n(va, t->L.size); const uint8_t **ph = malloc((size_t)np * sizeof *ph);
+    if (!ph) MDIE("sparse page table of %llu pages", (unsigned long long)np);
+    if (nvn_sparse_pages(t->pool, va & ~0xFFFull, np << 12, ph))
+        for (uint64_t k = 0; k < np; k++) if (ph[k]) { uint64_t a = (uint64_t)(uintptr_t)ph[k];
+            for (uint64_t i = 0; i < n; i++) if (g_sps[i].fence > done && g_sps[i].fence > f && a < g_sps[i].hi && g_sps[i].lo < a + 0x1000) f = g_sps[i].fence; }
+    free(ph);
+    if (f <= done) return;
+    if (f > g_fence) { RED_ONCE(172, "a texture of a sparse pool gathered on the CPU while the command buffer being encoded stores a GPU write into that pool: the upload may lack it"); return; }
+    if (on_sub_thread()) rec_publish();   // a commit may still be a record in the encode thread's block (mtl_finish_gpu_at)
+    mtl_wait_at(f, UINT64_MAX, WS_UPALLOC);
+}
+static id<MTLComputePipelineState> sp_gather_pso(void) {
+    static id<MTLComputePipelineState> ps; static int failed;
+    if (!ps && !failed) {
+        NSError *e = nil; id<MTLLibrary> lib = host_lib("deswz", &e); id<MTLFunction> fn = [lib newFunctionWithName:@"gather"];
+        ps = fn ? [g_dev newComputePipelineStateWithFunction:fn error:&e] : nil;
+        if (!ps) { failed = 1; MLOG("[RED] cannot create the GPU gather of sparse textures: %s (they are gathered on the CPU)", e.localizedDescription.UTF8String); }
+    }
+    return ps;
+}
+// Into dst at off, in the open upload batch, before the deswizzles that read it: the texture's storage, through its page table pt of np pages (sp_pages_gpu), which the batch keeps
+static void sp_gather(const tex_t *t, const uint64_t *pt, uint64_t np, id<MTLBuffer> dst, uint64_t off) {
+    id<MTLBuffer> tb = [g_dev newBufferWithBytes:pt length:(NSUInteger)np * sizeof *pt options:MTLResourceStorageModeShared];
+    if (!tb) MDIE("sparse page table buffer of %llu pages", (unsigned long long)np);
+    res_add(tb); [g_up_keep addObject:tb];
+    size_t poff; id<MTLBuffer> params = up_param_alloc(&poff);
+    uint64_t va = (uint64_t)(uintptr_t)t->mem, n = (t->L.size + 15) & ~15ull;
+    struct { uint64_t va, pt_pg, n; } p = {va, va >> 12, n}; memcpy((uint8_t *)params.contents + poff, &p, sizeof p);
+    [g_up_ce setArgumentTable:g_up_ct]; [g_up_ce setComputePipelineState:sp_gather_pso()];
+    [g_up_ct setAddress:dst.gpuAddress + off atIndex:0]; [g_up_ct setAddress:tb.gpuAddress atIndex:1]; [g_up_ct setAddress:params.gpuAddress + poff atIndex:2];
+    [g_up_ce dispatchThreadgroups:MTLSizeMake((NSUInteger)((n >> 4) + 63) / 64, 1, 1) threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
+    [g_up_ce barrierAfterEncoderStages:MTLStageDispatch beforeEncoderStages:MTLStageDispatch visibilityOptions:MTL4VisibilityOptionDevice];   // the deswizzles read it
+}
 int nvn_sparse_since(const void *pool, uint64_t a, uint64_t n, uint64_t gen, uint64_t stamp); void nvn_sparse_protect(const void *pool, uint64_t a, uint64_t n); int nvn_sparse_mapped(const void *pool, uint64_t a, uint64_t n);
 // reuse: a texture of the same description, idle on the GPU, to upload into instead of a new one; keep: usage the texture it replaces was upgraded to (tex_upgrade), which the new one
 // is made with: a texture drawn into and re-uploaded (a CPU write into one the game renders into) was made without render-target use again and upgraded at its next attachment, a
@@ -3400,8 +3473,15 @@ static id<MTLTexture> pkg_upload_(const tex_t *t, uint64_t *stamp, id<MTLTexture
     // A texture in a large pool (BIG_MIN) or one that holds only textures is read through a buffer of its own, held by the upload batch: a one-time read must not leave that memory wired for good
     id<MTLBuffer> upsrc = nil; unsigned src_batch = 0;   // the upload batch that holds upsrc (g_up_seq)
     if (!linear && !rb_shift && !sparse && g_nvn_deswz_gpu) { up_begin(); src_batch = g_up_seq; upsrc = up_big_src((uint64_t)t->mem, t->L.size, &mo); if (upsrc) mb = (__bridge void *)upsrc; }
+    // A sparse pool's texture is gathered on the GPU through its page table (sp_pages_gpu), but on the CPU for DM_NVN_ZBLOCK, which counts its blocks there
+    uint64_t *spt = NULL, spn = 0;
     t_tex_upload_lookup = 1;
-    int use_gpu = !linear && !rb_shift && !sparse && g_nvn_deswz_gpu && (upsrc || mtl_addr((uint64_t)t->mem, t->L.size, &mb, &mo));   // a sparse pool's texture is gathered through its page table on the CPU
+    if (sparse && !linear && !rb_shift && g_nvn_deswz_gpu && sp_gather_pso() && !((uintptr_t)t->mem & 15) && !(zblock_on() && t->d.format >= 0x79 && t->d.format <= 0x94)) {
+        spn = sp_pages_n((uint64_t)(uintptr_t)t->mem, t->L.size);
+        if (!(spt = malloc((size_t)spn * sizeof *spt))) MDIE("sparse page table of %llu pages", (unsigned long long)spn);
+        if (!sp_pages_gpu(t->pool, (uint64_t)(uintptr_t)t->mem, t->L.size, spt, 0)) { free(spt); spt = NULL; }
+    }
+    int use_gpu = !linear && !rb_shift && g_nvn_deswz_gpu && (sparse ? spt != NULL : upsrc || mtl_addr((uint64_t)t->mem, t->L.size, &mb, &mo));
     t_tex_upload_lookup = 0;
     if (g_nvn_deswz_gpu && !use_gpu && !sparse && !rb_shift && !linear) RED_ONCE(40, "swizzled texture storage is not in a memory pool; falling back to the CPU");
     if (use_gpu) {
@@ -3423,8 +3503,10 @@ static id<MTLTexture> pkg_upload_(const tex_t *t, uint64_t *stamp, id<MTLTexture
                 [g_up_ce barrierAfterEncoderStages:MTLStageDispatch beforeEncoderStages:MTLStageDispatch visibilityOptions:MTL4VisibilityOptionDevice];
             }
         }
-        size_t stg_off;
-        id<MTLBuffer> stg = up_alloc(total ? total : 16, &stg_off);
+        // A sparse pool's texture is gathered into the same staging block, after the deswizzled levels: one allocation, as a second could flush the batch that holds the first
+        size_t stg_off, sto = ((total ? total : 16) + 255) & ~(size_t)255, gsz = spt ? (t->L.size + 255) & ~(size_t)255 : 0;
+        id<MTLBuffer> stg = up_alloc(sto + gsz, &stg_off);
+        if (spt) { mb = (__bridge void *)stg; mo = stg_off + sto; sp_gather(t, spt, spn, stg, mo); free(spt); spt = NULL; }
         // up_alloc may have flushed the batch that held the first source buffer: only then the new batch needs one of its own. Made for every texture, each staged upload from a large pool
         // put its storage twice into the residency set (Switch Sports Resort's first court frame: 855 textures, 1.8 GB of source buffers for 908 MB of storage; t_upload_src)
         if (upsrc && g_up_seq != src_batch) { uint64_t mo2; id<MTLBuffer> u2 = up_big_src((uint64_t)t->mem, t->L.size, &mo2); if (u2) { upsrc = u2; mb = (__bridge void *)u2; mo = mo2; } }
@@ -3452,10 +3534,12 @@ static id<MTLTexture> pkg_upload_(const tex_t *t, uint64_t *stamp, id<MTLTexture
     }
 
     // A sparse pool's texture is read through a copy gathered from its page table, unmapped pages as 0 (a mip tail at a 4 KB offset has no host alias; reading the alias stopped the host with SIGBUS)
+    // (after the GPU writes stored into that memory: sp_store_wait)
     const uint8_t *src = t->mem; uint8_t *part = NULL;
+    free(spt);
     if (sparse) {
         if (!(part = malloc(t->L.size ? t->L.size : 1))) MDIE("sparse texture copy of %llu bytes failed", (unsigned long long)t->L.size);
-        nvn_sparse_copy(t->pool, part, (uint64_t)(uintptr_t)t->mem, t->L.size); src = part;
+        sp_store_wait(t); nvn_sparse_copy(t->pool, part, (uint64_t)(uintptr_t)t->mem, t->L.size); src = part;
     }
     up_begin();
     id<MTLBuffer> stg = [g_dev newBufferWithLength:total ? total : 16 options:MTLResourceStorageModeShared];
@@ -4459,6 +4543,10 @@ static unsigned tex_level_shift(const tex_t *t, id<MTLTexture> base) {
     if (![have isKindOfClass:[NvPkg class]]) return 0;
     NvPkg *pk = have; return pk->view && pk->view == base ? (unsigned)pk->vbase : 0;
 }
+// The host texture for a copy or a clear, which names its levels as NVN does: a sparse texture bound from a coarser level (sparse_view) is copied through the texture its view is of, all
+// of its levels. Through the view, a copy into level 0 of a texture bound from level 1 went to level 1, and gsb_store found a host texture narrower than the texture (Densha de GO!!
+// Hashiro Yamanote Line streams the finer levels of its sparse ASTC textures in by copies, GitHub #2350)
+static id<MTLTexture> tex_mtl_all(const tex_t *t) { id<MTLTexture> mt = tex_mtl(t); return mt && tex_level_shift(t, mt) ? mt.parentTexture : mt; }
 // NVN formats whose Metal format is the other one of an sRGB / linear pair (g_pfv_srgb) of a format's Metal format: up to 4, zero-terminated (an RGBA8 texture has RGBA8_SRGB and RGBX8_SRGB)
 static const uint8_t *srgb_twins(uint32_t f) {
     static uint8_t tw[256][5]; static dispatch_once_t once;
@@ -5274,11 +5362,11 @@ static int gsb_held(const void *mem, uint64_t size) {
 }
 // A store's place in the storage: bytes [xb0, xb1) of block rows [by0, by0 + rows) of level `level`, n images from `slice` (layers, or a 3D level's depth planes); tx..th: the region
 // in texels, widened to whole blocks within the level (what a copy out of the host texture takes)
-typedef struct { uint64_t base, layer_stride; uint32_t xb0, xb1, by0, rows, th, td, gobs_x, blocks_y, d3, z0, lin, bpb; int32_t tx, ty, tw, tth; } gsb_geo;
+typedef struct { uint64_t base, layer_stride; uint32_t xb0, xb1, by0, rows, th, td, gobs_x, blocks_y, d3, z0, lin, bpb, level; int32_t tx, ty, tw, tth; } gsb_geo;
 static int gsb_geom(const tex_t *t, unsigned level, unsigned slice, unsigned n, const NVNcopyRegion *r, gsb_geo *g) {
     int bw, bh, bpb = nvn_fmt_bpb(t->d.format, &bw, &bh);
     if (!n || !bpb || level >= (t->d.levels ? t->d.levels : 1)) return -1;
-    memset(g, 0, sizeof *g); g->bpb = (uint32_t)bpb;
+    memset(g, 0, sizeof *g); g->bpb = (uint32_t)bpb; g->level = level;
     int32_t lw = (int32_t)MAX(t->d.width >> level, 1u), lh = (int32_t)MAX(t->d.height >> level, 1u);
     int32_t x0 = 0, y0 = 0, x1 = lw, y1 = lh;
     if (r) { x0 = MAX(r->xoffset, 0); y0 = MAX(r->yoffset, 0); x1 = MIN(r->xoffset + r->width, lw); y1 = MIN(r->yoffset + r->height, lh); }
@@ -5301,6 +5389,7 @@ static int gsb_geom(const tex_t *t, unsigned level, unsigned slice, unsigned n, 
     g->gobs_x = MAX(nvn_tex_level_gobs(&t->d, level), (row + 63u) >> 6); g->blocks_y = (rows + (8u << th) - 1) >> (3 + th);
     return 0;
 }
+static void gsb_missed(const tex_t *t, unsigned level, const char *why);
 // The swizzle into the storage: src the GPU address of the linear region's first image at column xb0 & ~15 (rows pitch apart, images img apart)
 static void gsb_swz(const tex_t *t, const gsb_geo *g, unsigned n, uint64_t src, size_t pitch, size_t img) {
     static id<MTLComputePipelineState> ps; static int failed;
@@ -5310,15 +5399,24 @@ static void gsb_swz(const tex_t *t, const gsb_geo *g, unsigned n, uint64_t src, 
         ps = fn ? [g_dev newComputePipelineStateWithFunction:fn error:&e] : nil;
         if (!ps) { failed = 1; MLOG("[RED] cannot create the GPU swizzle into texture storage: %s (what the GPU writes into textures stays out of their storage)", e.localizedDescription.UTF8String); return; }
     }
-    void *pb; uint64_t po, pg;
-    if (!mtl_gpu_addr((uint64_t)(uintptr_t)t->mem, t->L.size, &pb, &po, &pg)) return;
-    id<MTLBuffer> qb; size_t qo = arena_alloc(128, &qb);
+    void *pb; uint64_t po, pg, pt = 0, va = (uint64_t)(uintptr_t)t->mem, lo = 0, hi = 0;
+    int sparse = t->pool && nvn_sparse_pool(t->pool);
+    if (sparse) {   // the physical memory mapped behind the pages the store reaches, a table of their GPU addresses in the arena (sp_pages_gpu): the images' spans of the level
+        unsigned level = g->level;
+        uint64_t span = (level + 1 < (t->d.levels ? t->d.levels : 1u) ? nvn_tex_level_offset(&t->d, level + 1) : t->L.layer_size) - nvn_tex_level_offset(&t->d, level);
+        lo = g->base; hi = MIN(g->base + (g->d3 ? 0 : (uint64_t)(n - 1) * g->layer_stride) + span, t->L.size);
+        if ((va & 15) || hi <= lo) { gsb_missed(t, level, "a sparse texture's storage the store cannot address"); return; }
+        uint64_t np = sp_pages_n(va + lo, hi - lo); id<MTLBuffer> tb; size_t to = arena_alloc((size_t)np * 8, &tb);
+        if (!sp_pages_gpu(t->pool, va + lo, hi - lo, (uint64_t *)((uint8_t *)tb.contents + to), 1)) return;
+        pt = tb.gpuAddress + to; pg = pt;
+    } else if (!mtl_gpu_addr(va, t->L.size, &pb, &po, &pg)) return;
+    id<MTLBuffer> qb; size_t qo = arena_alloc(160, &qb);
     __unsafe_unretained id o = tex_get(t->serial); NvPkg *pk = [o isKindOfClass:[NvPkg class]] ? o : nil;
     uint64_t e0n, e1s, e1n; id<MTLBuffer> eb = pkg_edges_gpu(pk, t, &e0n, &e1s, &e1n);
-    struct { uint64_t src_off, dst_off, base, pitch, img, layer_stride, e0n, e1s, e1n; uint32_t x0, x1, y0, rows, th, gobs_x, gob2, td, z0, blocks_y, d3, lin; } *p = (void *)((uint8_t *)qb.contents + qo);
-    _Static_assert(sizeof *p <= 128, "the swz parameters fit their arena slot");
-    *p = (typeof(*p)){0, 0, g->base, pitch, img, g->layer_stride, e0n, e1s, e1n, g->xb0, g->xb1, g->by0, g->rows, g->th, g->gobs_x, (uint32_t)nvn_gob_switch2, g->td, g->z0, g->blocks_y, g->d3, g->lin};
-    g_wr_epoch++; g_mdx_epoch++; sbw_note((uint64_t)(uintptr_t)t->mem, t->L.size, SBW_GPU);
+    struct { uint64_t src_off, dst_off, base, pitch, img, layer_stride, e0n, e1s, e1n, pt, va, pt_pg; uint32_t x0, x1, y0, rows, th, gobs_x, gob2, td, z0, blocks_y, d3, lin; } *p = (void *)((uint8_t *)qb.contents + qo);
+    _Static_assert(sizeof *p <= 160, "the swz parameters fit their arena slot");
+    *p = (typeof(*p)){0, 0, g->base, pitch, img, g->layer_stride, e0n, e1s, e1n, pt, va, (va + lo) >> 12, g->xb0, g->xb1, g->by0, g->rows, g->th, g->gobs_x, (uint32_t)nvn_gob_switch2, g->td, g->z0, g->blocks_y, g->d3, g->lin};
+    g_wr_epoch++; g_mdx_epoch++; sbw_note(va, t->L.size, SBW_GPU);
     id<MTL4ComputeCommandEncoder> e = dispatch_enc(); enc_c_pso(e, ps);
     enc_c_args(e, src, 0); enc_c_args(e, pg, 1); enc_c_args(e, qb.gpuAddress + qo, 2); enc_c_args(e, eb ? eb.gpuAddress : pg, 3);
     uint32_t nx = (g->xb1 - (g->xb0 & ~15u) + 15) / 16;
@@ -15303,7 +15401,7 @@ static void copy_t2b(const p_copy_b2t *c, uint32_t size) {
     rp_flush();   // Materialize pending clears before reading, matching copy_t2t.
     g_wr_epoch++; g_mdx_epoch++;
     if (c->tex) xv_check(c->tex->serial, c->has_view && c->view.set_levels ? c->view.base_level : 0, c->has_view && c->view.set_layers ? c->view.min_layer : 0, "texture-to-buffer copy");
-    id<MTLTexture> t = tex_mtl(c->tex);
+    id<MTLTexture> t = tex_mtl_all(c->tex);
     if (!t) return;
     int bw, bh, bpb = nvn_fmt_bpb(c->tex->d.format, &bw, &bh);
     unsigned level = c->has_view && c->view.set_levels ? c->view.base_level : 0, layer0 = c->has_view && c->view.set_layers ? c->view.min_layer : 0;
@@ -15403,8 +15501,15 @@ void mtl_read_texels(const tex_t *t, unsigned level, unsigned layer0, const NVNc
 // Whether a texture's storage is where the host takes its content from, now or once the CPU writes it: tex_mtl_'s packaged textures (a packaged layout, CPU-written, uploaded) and those
 // tex_flush_upload / tex_dirty_upload registered and has not resolved yet; not one the GPU owns. What the GPU writes into such a texture is stored into its storage as well (gsb_store), as
 // the hardware writes it, so that an upload from the storage carries it. A LINEAR texture counts once it is CPU-written (linear_storage_ok, one no view can take): a view's writes land in
-// the storage it is made on. One the GPU may render or store into does not: a GPU write makes it a GPU texture (cpu_unc_drop)
+// the storage it is made on. One the GPU may render or store into does not: a GPU write makes it a GPU texture (cpu_unc_drop). A texture of a sparse pool that tex_from_storage uploads
+// whole counts too: its storage is the physical memory mapped behind it, which the GPU write is stored into through the page table (gsb_swz), and every later upload gathers from (a
+// virtual pool is CPU_NO_ACCESS: the CPU writes the physical pools). Not a placement sparse texture (sparse_make), whose tiles hold what the GPU wrote (sparse_gpu_wrote)
 static int tex_storage_dst(const tex_t *t) {
+    if (t->mem && t->pool && (t->pool->flags & NVN_MEMORY_POOL_FLAGS_VIRTUAL)) {
+        if (!nvn_sparse_pool(t->pool) || !tex_from_storage(t) || t->d.samples > 1 || mtl_tex_gpu_owned(t->serial)) return 0;
+        __unsafe_unretained id o = tex_get(t->serial);
+        return !([o isKindOfClass:[NvPkg class]] && ((NvPkg *)o)->ps);
+    }
     if (!t->mem || !t->pool || (t->pool->flags & (NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS | NVN_MEMORY_POOL_FLAGS_VIRTUAL)) || t->d.samples > 1 || t->d.target == NVN_TEXTURE_TARGET_BUFFER
         || (t->d.flags & (NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET | NVN_TEXTURE_FLAGS_COMPRESSIBLE | NVN_TEXTURE_FLAGS_IMAGE))
         || ((t->d.flags & NVN_TEXTURE_FLAGS_LINEAR) && !tex_cpu_written(t->serial))) return 0;
@@ -15419,7 +15524,7 @@ static size_t mtl_pf_block_bytes(MTLPixelFormat pf) {   // bytes per texel, or p
 }
 static void copy_b2t(const p_copy_b2t *c, uint32_t size) {
     if (c->tex) zskip_del(c->tex->serial);
-    id<MTLTexture> t = tex_mtl(c->tex); sparse_gpu_wrote(c->tex);
+    id<MTLTexture> t = tex_mtl_all(c->tex); sparse_gpu_wrote(c->tex);
     if (!t) { PD("C ser=%llu (no host texture)", c->tex->serial); return; }
     int bw, bh, bpb = nvn_fmt_bpb(c->tex->d.format, &bw, &bh);
     unsigned level = c->has_view && c->view.set_levels ? c->view.base_level : 0, layer0 = c->has_view && c->view.set_layers ? c->view.min_layer : 0;
@@ -15660,14 +15765,14 @@ static id<MTLTexture> copy_t2t_enc(const p_copy_t2t *c) {
         int ss = c->has_sv && c->sv.set_layers ? c->sv.min_layer : 0, ds = c->has_dv && c->dv.set_layers ? c->dv.min_layer : 0;
         if (zskip_has(c->src->serial, sl, ss)) zskip_add(c->dst->serial, dl, ds);
     }
-    id<MTLTexture> s = tex_mtl(c->src);
+    id<MTLTexture> s = tex_mtl_all(c->src);
     PD("T src=%llu dst=%llu %dx%dx%d→%dx%dx%d flags=%#x", c->src->serial, c->dst->serial, c->sr.width, c->sr.height, c->sr.depth, c->dr.width, c->dr.height, c->dr.depth, c->flags);
     if (!s || !c->dst) return nil;
     unsigned sl = c->has_sv && c->sv.set_levels ? c->sv.base_level : 0, dl = c->has_dv && c->dv.set_levels ? c->dv.base_level : 0;
     unsigned sz0 = c->has_sv && c->sv.set_layers ? c->sv.min_layer : 0, dz0 = c->has_dv && c->dv.set_layers ? c->dv.min_layer : 0;
     if (!tex_level_ok(s, sl, "texture copy source")) return nil;
     if (bc_alias_copy(c, s, sl, sz0, dl, dz0)) return nil;   // the destination aliases a compressed texture: the bytes go there, and the alias's own texture is not made (see bc_alias_copy)
-    id<MTLTexture> d = tex_mtl(c->dst); sparse_gpu_wrote(c->dst);
+    id<MTLTexture> d = tex_mtl_all(c->dst); sparse_gpu_wrote(c->dst);
     if (!d || !tex_level_ok(d, dl, "texture copy destination")) return nil;
     if (c->flags & DM_COPY_RESOLVE) {   // Downsample: multisample resolve into the single-sample destination (depth takes sample 0); with equal sample counts it is a plain whole copy
         if (s.sampleCount == d.sampleCount && s.pixelFormat == d.pixelFormat && s.width == d.width && s.height == d.height) {
@@ -15897,7 +16002,7 @@ static unsigned mtl_pf_chmask(MTLPixelFormat pf) {
 static void clear_tex_tri(id<MTLTexture> t, unsigned lv, unsigned l0, const p_clear_tex *c);
 static void clear_tex(const p_clear_tex *c) {
     if (c->tex) zskip_del(c->tex->serial);
-    id<MTLTexture> t = tex_mtl(c->tex); sparse_gpu_wrote(c->tex);
+    id<MTLTexture> t = tex_mtl_all(c->tex); sparse_gpu_wrote(c->tex);
     PD("X ser=%llu view format %#x region %d,%d,%d %dx%dx%d mask %#x %s %g,%g,%g,%g", c->tex ? c->tex->serial : 0ull, c->has_view && c->view.set_format ? c->view.format : -1, c->r.xoffset, c->r.yoffset, c->r.zoffset, c->r.width, c->r.height, c->r.depth, c->mask,
        c->is_uint ? "ui" : "f", c->is_uint ? (double)c->c.u[0] : c->c.f[0], c->is_uint ? (double)c->c.u[1] : c->c.f[1], c->is_uint ? (double)c->c.u[2] : c->c.f[2], c->is_uint ? (double)c->c.u[3] : c->c.f[3]);
     if (!t) return;

@@ -164,6 +164,13 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Fix:** such an output is read by its section headers (+0x4c section count, section *i*'s header at +0x90 + 0x90 *i*, type 0 = GPU code; `glslc_program`; the same headers SDK 4's outputs are read through, [GLSLC outputs read through their section headers](#glslc-outputs-read-through-their-section-headers)), and its stages are paired with each other, not as single-stage programs. The NSP script now stops at the split when it finds none.
 - **Found on:** [Baba Is You](../../dm/games/01002CD00A51C000/README.md#shaders).
 
+### Game Atelier's .glslcobj programs
+
+- **Symptom:** the NSP script stops at `the shader split found no shaders in main or the RomFS`, on a game whose RomFS has a `glsl/compiled/` folder of `PGRM_*.glslcobj` files and whose files hold no BNSH, BAHS or GLSLC magic.
+- **Cause:** Game Atelier's engine keeps each program in a file of its own, without a GLSLC output around it: u32 stage count, u32 name length (with its NUL), one u64 record offset per stage, the program's name, then per stage a record {u32 stage, u32 code length, u32 control length, u32 control offset} at 8-byte alignment, the code area right after the record and the control section at its offset. A record's control length may include padding after the control section, whose own length (+0x20) is the one to take (`PGRM_OLD_TV`: 0x4440 in the record, 0x43c0 in the section). The control section keeps the NV assembly as text after its 0x880 bytes, which the key leaves out.
+- **Fix:** `shader_split.py` `glslcobj_shaders` recognises the files by that layout, not by their name, and pairs each program's stages with each other (`var_pairs`). Reading the records at 16-byte alignment skipped every program whose name ends elsewhere (98 of 202) and left the logo video white and the intro black.
+- **Found on:** [Monster Boy and the Cursed Kingdom](../../dm/games/01006F7001D10000/README.md): 202 programs, 398 distinct shaders.
+
 ### GLSLC outputs in a zip archive, and those NROs compile at run time
 
 - **Symptom:** an NVN game's split finds none of its shipped shaders, and the ones it compiles at run time were not captured: the game's renderer is in NROs that call `glslcCompile`, and its whole RomFS is one zip.

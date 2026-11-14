@@ -47,6 +47,7 @@
 #       Mac host), each a VNVN record with one code area and control section (frostbite.py), see frostbite_jobs and frostbite_shaders
 #   · PDAT (the engine with the namespace phx, Kirby Air Riders): flatbuffer records tagged PMAP, zstd frames in the .dat archives, each holding a program's control sections and code areas, see pdat_jobs and pdat_shaders
 #   · Unreal Engine 3 (Batman: Arkham Knight): shader records in its global shader cache (BMSG) and in the packages (the combined shader cache), whose compressed chunks are Oodle blocks decoded by the game's own decoder in the Mac host, see ue3_body and ue3_shaders
+#   · Game Atelier (Monster Boy and the Cursed Kingdom): loose glsl/compiled/*.glslcobj files, one program each, a code area and control section per stage, see glslcobj_shaders
 # Code area: 0x30 header + (graphics) 0x50 SPH + instructions; header magic 0x12345678 for graphics, 0x12345679 for compute. The control section starts with 0x98761234, +0x704 = code area length,
 #   +0x700 = start of the c1 constant segment within the code area; for compute +0x748 thread group xyz (u32 ×3), +0x754 shared memory bytes (checked one by one against PC reflection on D2R's 22 compute shaders).
 # Stage: BNSH uses the stage slot; BAHS uses bits 10..13 of SPH word 0 (1 vertex 2 hull 3 domain 4 geometry 5 pixel), and a compute header means compute.
@@ -328,6 +329,31 @@ def mshd_shaders(d, label):
         out.append((f'{label}#MSHD#var{len(out) // 2}', st, ctl, code))
         c = d.find(CTL_MAGIC, g + ncode)
     if len(out) % 2: red(f'{label} MSHD: {len(out)} stages, not in pairs')
+    return out
+
+def glslcobj_shaders(d, label):
+    """Game Atelier's compiled programs (Monster Boy and the Cursed Kingdom: 202 loose glsl/compiled/PGRM_*.glslcobj files, one program each): u32 stage count n, u32 name length (with its NUL),
+    n u64 offsets of the stage records, the name, then per stage a record {u32 stage, u32 code length, u32 control length, u32 control offset} with the code area right after it and the control section
+    at its offset. → [(where, stage, control, code)] whose stages pair with each other (var_pairs), or None when d is not such a file (recognised by its layout, not its name)"""
+    if len(d) < 0x40: return None
+    n, nlen = struct.unpack_from('<2I', d)
+    if not 0 < n <= 6 or not 1 < nlen <= 0x100: return None
+    name_at = 8 + 8 * n
+    offs = struct.unpack_from(f'<{n}Q', d, 8)
+    if name_at + nlen > len(d) or d[name_at + nlen - 1] != 0 or offs[0] != (name_at + nlen + 7) & ~7: return None
+    out = []
+    for i, o in enumerate(offs):
+        if o + 0x14 > len(d): return None
+        _, ncode, nctl, c = struct.unpack_from('<4I', d, o)
+        if d[o + 0x10:o + 0x14] not in (GFX_MAGIC, CS_MAGIC) or d[c:c + 4] != CTL_MAGIC or c + nctl > len(d) or o + 0x10 + ncode > c: return None
+        own = struct.unpack_from('<I', d, c + 0x20)[0]   # the record's length may add padding after the control section (PGRM_OLD_TV: 0x4440 for 0x43c0)
+        if own > nctl or struct.unpack_from('<I', d, c + 0x704)[0] != ncode: red(f'{label} glslcobj stage {i}: control length or code length disagrees with its record')
+        ctl, code = d[c:c + own], d[o + 0x10:o + 0x10 + ncode]
+        st = glslc_stage(ctl, code)
+        why = check(label, st, ctl, code) if st else 'no stage'
+        if why: red(f'{label} glslcobj stage {i} {st}: {why}')
+        out.append((f'{label}#GLSLCOBJ#var', st, ctl, code))
+    if len({st for _, st, _, _ in out}) < len(out): red(f'{label} glslcobj: two stages share a stage type')
     return out
 
 def glslc_stage(ctl, code):
@@ -3410,6 +3436,9 @@ def scan_file_in(args):
     # DRSM model streams contain several embedded XBC1 resources.
     if d[:4] in (b'HCPS', b'xbc1', b'DRSM') or d[:8] == b'cmp\0zlib':
         scan_blob(d, '/' + rel, found)
+        return rel, uniq_keys(found), var_pairs(found), trees
+    if (objs := glslcobj_shaders(d, '/' + rel)) is not None:   # Game Atelier's .glslcobj programs (glslcobj_shaders)
+        found += objs
         return rel, uniq_keys(found), var_pairs(found), trees
     if d[:4] == b'RYHP' or d[8:12] == GFX_MAGIC:
         found += phyre_shaders(d, '/' + rel)

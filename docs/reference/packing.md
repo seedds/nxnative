@@ -17,6 +17,13 @@
 - **Not known from the file:** whether the update is the whole game. The flag does not promise it (the spec says such an update needs a matching base elsewhere), and an update holding only changed files would pack and then fail at boot, after a full shader build. The scripts print that the update is taken as the whole game. Measured: both NUPs at hand have an update RomFS that holds every path of its base (Age of Imprisonment: 2,065 base files, 2,153 in the update, none missing; Yoshi and the Mysterious Book: 147 and 147, none missing).
 - **Found on:** [Mario Kart World](../../dm/games/0400C3F00006E000/README.md). Reproduced with its base dump repackaged by the reference tool as a standalone-update fixture; this checks packaging, not the reported 1.8.0's contents or gameplay. Synthetic tests cover both entry points, both forms of no base, multiple versions, control data, DLC and incomplete updates.
 
+### A registered update packed with its own shader tables is reported as one the profile was not brought up on
+
+- **Symptom:** the build prints `[RED] this Mac app uses v917504 (1.8.0), which game profile 0400C3F00006E000 was not brought up on (v0 1.0.0, v917504 1.8.0): its settings, with this version's own shaders; every module is a registered build`, naming the version among the registered ones.
+- **Cause:** a version whose shader tables are not the profile's (the profile's are the base game's) is packed from a derived profile, which keeps only that version's build row. `report_profile_status` compared the derived profile's whole build table with the registered one, so a game that registers more than one build (an update beside the base game) never matched and always got the red line.
+- **Fix:** it compares the packed version's own row. A registered update reports `uses the registered <version> (<display>) builds and every fix for them, with derived shader tables`; a version with a module the profile does not register is red as before. `dm/tools/tests/test_nsp_registered_update.py` covers both.
+- **Found on:** [Mario Kart World](../../dm/games/0400C3F00006E000/README.md) 1.8.0 (v917504), once its build row was registered.
+
 ### A NUP or a dump of a game with no profile stops before the survey
 
 - **Symptom:** `[RED] a NUP packs only a game with a profile, and <title ID> has none: the survey that makes a provisional profile reads NSPs`, or the same line for a dump folder ([issue #1265](https://github.com/seedds/nxnative/issues/1265)). A folder holding `exefs/` and `romfs/` directly, or only `updates/<version>/`, was not taken for a dump at all: the script asks for `prod.keys`, then stops with `no NSP with a readable title ID`.

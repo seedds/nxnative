@@ -1,7 +1,8 @@
 # Runs the host unit tests of a Windows build folder on this PC and records the run in the repository: one log per test and summary.txt in logs\win64\
 # (logs\README.md). The tree is cross-built in Docker with llvm-mingw (docker\README.md); this script only runs what was built. From the repository root:
 #   powershell -NoProfile -ExecutionPolicy Bypass -File dm\host\tests\run_win64_tests.ps1 [-BuildDir build\win64] [-LogDir logs\win64] [-TimeoutSeconds 120] [-Packs build\packs\win64]
-# The runs come from <BuildDir>\host_tests.tsv (written by dm\host\CMakeLists.txt); the old *.log files and summary.txt in <LogDir> are removed first.
+# The runs come from <BuildDir>\host_tests.tsv (written by dm\host\CMakeLists.txt), then the script tests of <BuildDir>\host_scripts.tsv that run on Windows (none yet:
+# t_second_pack and t_vk_spirv are Linux only, and summary.txt lists them as "not run on Windows" with the reason); the old *.log files and summary.txt in <LogDir> are removed first.
 # The AOT tests (t_aot_host, t_aot_module, t_aot_hostfn, t_host_program) run the recompiled packs of NXAOT_PACKS: -Packs, else the environment's NXAOT_PACKS, else
 # build\packs\win64 when it exists (the Windows packs dm/tools/aot/tests/build_packs.sh writes into <out>\win64: docker\README.md); t_aot_host also gets the corpus of the
 # checkout (--corpus dm\tools\aot\corpus: the one compiled in is the container's path). Without packs those tests pass with a note.
@@ -123,17 +124,134 @@ foreach ($l in $lines) {
     $results.Add($line)
 }
 
+# The script tests (<BuildDir>\host_scripts.tsv, host_script_test() in dm/host/CMakeLists.txt: Python drivers and shell scripts), after the programs, each with its own log in the
+# same form. A Windows tree lists only the scripts that run on Windows; the others are "not run on Windows: <name> (<why>)" lines of host_tests.tsv, which the summary copies.
+# Columns: name, interpreter (python3: $env:PYTHON, else py -3, python3 or python on PATH; sh: sh on PATH, as Git's), script (from the repository root), arguments and
+# environment ({build}, {repo}: this machine's folders; "" an empty argument), the variables it reads from this environment (passed through), the exit code of a skip
+$scriptsFile = Join-Path $BuildDir 'host_scripts.tsv'
+$sTotal = 0; $sPassed = 0; $sFailed = 0; $sSkipped = 0; $sNote = ''
+$sReads = New-Object System.Collections.Generic.List[string]
+function Quote-Arg([string]$a) {   # one argument for the shell line: cmd.exe on Windows, /bin/sh elsewhere
+    if ($onWindows) { return '"' + $a + '"' }
+    return "'" + ($a -replace "'", "'\''") + "'"
+}
+function Find-Interpreter([string]$kind) {   # the program and its leading arguments (none when not found): the caller collects them with @()
+    if ($kind -eq 'python3') {
+        if ($env:PYTHON) { return $env:PYTHON }
+        foreach ($c in @('py', 'python3', 'python')) {
+            $cmd = Get-Command $c -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($cmd) { if ($c -eq 'py') { return @($cmd.Source, '-3') } else { return $cmd.Source } }
+        }
+        return @()
+    }
+    $cmd = Get-Command $kind -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($cmd) { return $cmd.Source }
+    return @()
+}
+if (-not (Test-Path -LiteralPath $scriptsFile -PathType Leaf)) {
+    $sNote = 'script tests: none run (no host_scripts.tsv beside host_tests.tsv: a tree configured before dm/host/CMakeLists.txt wrote it, or a copy of the build without it)'
+    Write-Host $sNote
+} else {
+    foreach ($l in @(Get-Content -LiteralPath $scriptsFile -Encoding UTF8)) {
+        if (-not $l -or $l.StartsWith('#')) { continue }
+        $f = $l.Split("`t")
+        if ($f.Count -lt 7) { continue }
+        $name = $f[0]; $interp = $f[1]; $scriptRel = $f[2]; $sArgs = $f[3]; $sEnv = $f[4]; $reads = $f[5]; $skip = $f[6]
+        $sTotal++
+        $log = Join-Path $LogDir "$name.log"
+        $scriptPath = Join-Path $repo ($scriptRel.Replace('/', [IO.Path]::DirectorySeparatorChar))
+        $argList = @()
+        if ($sArgs -ne '-') {
+            foreach ($a in ($sArgs -split ' ')) {
+                if ($a -eq '') { continue }
+                if ($a -eq '""') { $a = '' }
+                $argList += $a.Replace('{build}', $BuildDir).Replace('{repo}', $repo)
+            }
+        }
+        $envPairs = @()
+        if ($sEnv -ne '-') { foreach ($kv in ($sEnv -split ' ')) { if ($kv -match '^([A-Za-z_][A-Za-z0-9_]*)=(.*)$') { $envPairs += ,@($Matches[1], $Matches[2].Replace('{build}', $BuildDir).Replace('{repo}', $repo)) } } }
+        $missing = @()
+        if ($reads -ne '-') {
+            foreach ($v in ($reads -split ' ')) {
+                if ($v -eq '') { continue }
+                $val = [Environment]::GetEnvironmentVariable($v)
+                if ($val) { $note = "$v=$val" } else { $note = "$v not set"; $missing += $v }
+                if (-not $sReads.Contains($note)) { $sReads.Add($note) }
+            }
+        }
+        $interpreter = @(Find-Interpreter $interp)
+        $quoted = ''
+        foreach ($a in $argList) { $quoted += ' ' + (Quote-Arg $a) }
+        $envText = ''
+        foreach ($pair in $envPairs) { if ($onWindows) { $envText += "set $($pair[0])=$($pair[1])&& " } else { $envText += "$($pair[0])=$($pair[1]) " } }
+        if ($interpreter.Count -eq 0) {
+            [System.IO.File]::WriteAllText($log, "date: $(Now)`ncommit: $commit`ncommand: (none: no $interp interpreter found on PATH)`n`n`nexit: none`n", $utf8)
+            $line = "FAIL $name (no $interp interpreter found on PATH; see $name.log)"; $sFailed++
+            Write-Host $line; $results.Add($line); continue
+        }
+        $progText = (Quote-Arg $interpreter[0])
+        foreach ($a in ($interpreter | Select-Object -Skip 1)) { $progText += ' ' + $a }
+        $progText += ' ' + (Quote-Arg $scriptPath) + $quoted
+        if ($onWindows) {
+            $cmdline = "cd /d `"$BuildDir`" && $envText$progText"
+            $inner = "$progText >> `"$log`" 2>&1"
+        } else {
+            $cmdline = "cd $BuildDir && $envText$progText"
+            $inner = "$progText >> '$log' 2>&1"
+        }
+        [System.IO.File]::WriteAllText($log, "date: $(Now)`ncommit: $commit`ncommand: $cmdline`n`n", $utf8)
+        $psi = New-Object System.Diagnostics.ProcessStartInfo
+        $psi.UseShellExecute = $false
+        $psi.WorkingDirectory = $BuildDir
+        foreach ($pair in $envPairs) {
+            $psi.EnvironmentVariables[$pair[0]] = $pair[1]
+            if ($pair[0] -eq 'TMPDIR') { New-Item -ItemType Directory -Force -Path $pair[1] | Out-Null }
+        }
+        if ($onWindows) { $psi.FileName = $env:ComSpec; $psi.Arguments = "/d /s /c `"$inner`"" }
+        else { $psi.FileName = '/bin/sh'; $psi.ArgumentList.Add('-c'); $psi.ArgumentList.Add($inner) }
+        $watch = [System.Diagnostics.Stopwatch]::StartNew()
+        $p = [System.Diagnostics.Process]::Start($psi)
+        $timedOut = -not $p.WaitForExit($TimeoutSeconds * 1000)
+        if ($timedOut) {
+            if ($onWindows) { Start-Process -FilePath "$env:SystemRoot\System32\taskkill.exe" -ArgumentList '/T', '/F', '/PID', $p.Id -NoNewWindow -Wait }
+            else { $p.Kill($true) }
+            $p.WaitForExit()
+        }
+        $secs = [math]::Round($watch.Elapsed.TotalSeconds, 1)
+        $rc = $p.ExitCode
+        $hex = '0x{0:X8}' -f $rc
+        # The script's own skip line (the last output line that says "skip", else its last line), for the summary
+        $out = @(Get-Content -LiteralPath $log -Encoding UTF8 | Select-Object -Skip 4)
+        $said = @($out | Where-Object { $_ -match 'skip' } | Select-Object -Last 1)
+        if ($said.Count -eq 0) { $said = @($out | Where-Object { $_.Trim() } | Select-Object -Last 1) }
+        $saidText = ''; if ($said.Count -gt 0) { $saidText = [string]$said[0] }
+        [System.IO.File]::AppendAllText($log, "`nexit: $rc ($hex, $secs s)$(if ($timedOut) { ', killed after the time limit' })`n", $utf8)
+        if ($timedOut) { $line = "TIMEOUT $name (killed after $TimeoutSeconds s; see $name.log)"; $sFailed++ }
+        elseif ($rc -eq 0) { $line = "PASS $name ($secs s)"; $sPassed++ }
+        elseif ($skip -ne '-' -and $rc -eq [int]$skip) {
+            $why = ''; foreach ($v in $missing) { $why += "; $v not set" }
+            $line = "SKIP $name (exit $rc, $secs s$why): `"$saidText`""; $sSkipped++
+        }
+        else { $line = "FAIL $name (exit $rc = $hex, $secs s; see $name.log)"; $sFailed++ }
+        Write-Host $line
+        $results.Add($line)
+    }
+}
+
 $totalLine = "$total runs: $passed passed, $failed failed"
+$scriptsLine = "$sTotal script tests: $sPassed passed, $sFailed failed, $sSkipped skipped"
 $os = [Environment]::OSVersion.VersionString
 if ($onWindows) { try { $cv = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion'; $os = "$($cv.ProductName) $($cv.DisplayVersion) build $($cv.CurrentBuild).$($cv.UBR)" } catch { } }
 $sb = New-Object System.Text.StringBuilder
 [void]$sb.Append("date: $started`ncommit: $commit`ncommand: $invoked`ndirectory: $startedIn`nhost: $os`nbuild folder: $BuildDir`n")
 [void]$sb.Append("PowerShell: $($PSVersionTable.PSVersion)`n")
 if ($Packs) { [void]$sb.Append("packs: $Packs`n") } else { [void]$sb.Append("packs: none (the AOT tests ran without packs)`n") }
+if ($sReads.Count -gt 0) { [void]$sb.Append("script tests' environment: $($sReads -join ' ')`n") }
 foreach ($l in ($lines | Select-Object -Skip 1)) { if ($l.StartsWith('# ')) { [void]$sb.Append($l.Substring(2) + "`n") } }
 [void]$sb.Append("`n")
 foreach ($r in $results) { [void]$sb.Append("$r`n") }
-[void]$sb.Append("`n$totalLine`n")
+if ($sNote) { [void]$sb.Append("$sNote`n") }
+[void]$sb.Append("`n$totalLine`n$scriptsLine`n")
 [System.IO.File]::WriteAllText((Join-Path $LogDir 'summary.txt'), $sb.ToString(), $utf8)
-Write-Host "$totalLine (logs in $LogDir)"
-if ($total -gt 0 -and $failed -eq 0) { exit 0 } else { exit 1 }
+Write-Host "$totalLine; $scriptsLine (logs in $LogDir)"
+if ($total -gt 0 -and $failed -eq 0 -and $sFailed -eq 0) { exit 0 } else { exit 1 }

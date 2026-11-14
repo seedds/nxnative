@@ -260,6 +260,12 @@ string(TIMESTAMP configured "%Y-%m-%dT%H:%M:%SZ" UTC)
 set(MANIFEST "# nxnative host unit tests, written by dm/host/CMakeLists.txt: name<TAB>executable<TAB>arguments<TAB>tmpdir\n")
 string(APPEND MANIFEST "# platform: ${LOG_PLATFORM}\n# system: ${CMAKE_SYSTEM_NAME} ${CMAKE_SYSTEM_PROCESSOR}\n# compiler: ${CMAKE_C_COMPILER_ID} ${CMAKE_C_COMPILER_VERSION} (${CMAKE_C_COMPILER})\n")
 string(APPEND MANIFEST "# game: ${GAME}\n# configured: ${configured}\n")
+# The tests that are scripts (a Python driver, a shell script) rather than test programs, for the same runners: host_scripts.tsv, written by host_script_test() below
+# beside host_tests.tsv (whose rows stay as they are). One line per test, tab-separated: name, interpreter (python3 or sh), script (from the repository root), arguments
+# (separated by spaces; "" is an empty argument), environment (VAR=value, separated by spaces), the variables it reads from the runner's environment (separated by
+# spaces), the exit code that means skipped. In arguments and environment, {build} stands for the build folder and {repo} for the repository root. An empty field is "-"
+set(SCRIPTS "# nxnative host script tests, written by dm/host/CMakeLists.txt: name<TAB>interpreter<TAB>script<TAB>arguments<TAB>environment<TAB>reads<TAB>skip code\n")
+string(APPEND SCRIPTS "# platform: ${LOG_PLATFORM}\n")
 function(host_test name)
     cmake_parse_arguments(T "PROFILE;VPX;SDL;POSIX;TMPDIR" "" "SOURCES;DEFS;RUNS;INCLUDES;ENV" ${ARGN})
     if(T_POSIX AND WIN32)
@@ -314,6 +320,77 @@ function(host_test name)
         string(APPEND MANIFEST "${test_name}\t${name}${CMAKE_EXECUTABLE_SUFFIX}\t${argv}\t${tmpdir}\n")
     endforeach()
     set(MANIFEST "${MANIFEST}" PARENT_SCOPE)
+endfunction()
+# host_script_test(<name> INTERPRETER <python3|sh> SCRIPT <absolute path> [ARGS <arguments>] [ENV <VAR=value ...>] [READS <VAR ...>] [WORKING_DIRECTORY <folder>]
+#                  [SKIP_RETURN_CODE <code>] [TIMEOUT <seconds>] [NOT_WINDOWS <why>])
+# registers the script with CTest (python3: the interpreter CMake found) and writes its row into host_scripts.tsv from the same arguments, so the two cannot differ. READS
+# names what the script takes from the environment when it is set (the runners pass their environment through and say in the summary when such a variable was not set).
+# NOT_WINDOWS: the script does not run on Windows; on a Windows tree it is still registered with CTest (as the caller's conditions say) but has no row, and host_tests.tsv
+# lists it as "not run on Windows: <name> (<why>)", which both runners copy into summary.txt. The runners give each test their own time limit, not TIMEOUT
+function(host_script_test name)
+    cmake_parse_arguments(PARSE_ARGV 1 T "" "INTERPRETER;SCRIPT;WORKING_DIRECTORY;SKIP_RETURN_CODE;TIMEOUT;NOT_WINDOWS" "ARGS;ENV;READS")
+    if(T_INTERPRETER STREQUAL "python3")
+        set(interp ${Python3_EXECUTABLE})
+    elseif(T_INTERPRETER STREQUAL "sh")
+        set(interp sh)
+    else()
+        message(FATAL_ERROR "host_script_test(${name}): INTERPRETER is python3 or sh, not '${T_INTERPRETER}'")
+    endif()
+    # add_test through a bracket-quoted call, so an empty argument stays an argument (an unquoted list expansion drops it)
+    set(code "add_test(NAME ${name} COMMAND [==[${interp}]==] [==[${T_SCRIPT}]==]")
+    foreach(a IN LISTS T_ARGS)
+        string(APPEND code " [==[${a}]==]")
+    endforeach()
+    if(T_WORKING_DIRECTORY)
+        string(APPEND code " WORKING_DIRECTORY [==[${T_WORKING_DIRECTORY}]==]")
+    endif()
+    cmake_language(EVAL CODE "${code})")
+    if(NOT T_SKIP_RETURN_CODE STREQUAL "")
+        set_tests_properties(${name} PROPERTIES SKIP_RETURN_CODE ${T_SKIP_RETURN_CODE})
+    endif()
+    if(T_TIMEOUT)
+        set_tests_properties(${name} PROPERTIES TIMEOUT ${T_TIMEOUT})
+    endif()
+    if(T_ENV)
+        set_tests_properties(${name} PROPERTIES ENVIRONMENT "${T_ENV}")
+    endif()
+    if(WIN32 AND T_NOT_WINDOWS)
+        string(APPEND MANIFEST "# not run on Windows: ${name} (${T_NOT_WINDOWS})\n")
+        set(MANIFEST "${MANIFEST}" PARENT_SCOPE)
+        return()
+    endif()
+    # The manifest's form: the build folder and the repository root as {build} and {repo} (the runners' machine has other paths), the script from the repository root
+    file(RELATIVE_PATH script ${REPO} ${T_SCRIPT})
+    set(fields)
+    foreach(kind IN ITEMS ARGS ENV)
+        set(words)
+        foreach(a IN LISTS T_${kind})
+            string(REPLACE "${CMAKE_BINARY_DIR}" "{build}" a "${a}")
+            string(REPLACE "${REPO}" "{repo}/" a "${a}")
+            string(REPLACE "{repo}//" "{repo}/" a "${a}")
+            if(a STREQUAL "")
+                set(a "\"\"")
+            elseif(a MATCHES "[ \t]")
+                message(FATAL_ERROR "host_script_test(${name}): '${a}' holds a space, which host_scripts.tsv cannot carry")
+            endif()
+            list(APPEND words "${a}")
+        endforeach()
+        string(JOIN " " joined ${words})
+        if(joined STREQUAL "")
+            set(joined -)
+        endif()
+        list(APPEND fields "${joined}")
+    endforeach()
+    list(GET fields 0 argv)
+    list(GET fields 1 envv)
+    string(JOIN " " reads ${T_READS})
+    foreach(v IN ITEMS reads T_SKIP_RETURN_CODE)
+        if("${${v}}" STREQUAL "")
+            set(${v} -)
+        endif()
+    endforeach()
+    string(APPEND SCRIPTS "${name}\t${T_INTERPRETER}\t${script}\t${argv}\t${envv}\t${reads}\t${T_SKIP_RETURN_CODE}\n")
+    set(SCRIPTS "${SCRIPTS}" PARENT_SCOPE)
 endfunction()
 
 host_test(t_motion SOURCES t_motion.c)
@@ -457,11 +534,11 @@ endif()
 host_test(t_fmt_vk SOURCES ../../gfx/tex/tests/t_fmt_vk.c ../../gfx/tex/nvn_fmt_vk.c ../../gfx/nvn/nvn_tex.c INCLUDES ${REPO}/dm/gfx/tex ${REPO}/dm/gfx/nvn ${REPO}/dm/gfx/nvn/include ${REPO}/dm/third_party/vulkan-headers/include)
 host_test(t_vk_descbench SOURCES ../../gfx/hostvk/tests/t_vk_descbench.c ${HOSTVK_SRC} PROFILE DEFS VK_NO_PROTOTYPES INCLUDES ${HOSTVK_INC} ENV ${HOSTVK_ENV_BENCH})
 # The committed SPIR-V headers rebuild byte for byte (gen_spirv.sh --check): where glslang and spirv-val are installed, in the version the headers name (the nxnative-build
-# image); skipped elsewhere (exit 77). CTest only: the runners' list has no shell scripts
+# image); skipped elsewhere (exit 77). A shell script: host_scripts.tsv lists it for the runners
 if(NOT WIN32)
-    add_test(NAME t_vk_spirv COMMAND sh ${REPO}/dm/gfx/hostvk/shaders/gen_spirv.sh --check)
-    set_tests_properties(t_vk_spirv PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 120)
-    string(APPEND MANIFEST "# CTest only: t_vk_spirv (dm/gfx/hostvk/shaders/gen_spirv.sh --check)\n")
+    host_script_test(t_vk_spirv INTERPRETER sh SCRIPT ${REPO}/dm/gfx/hostvk/shaders/gen_spirv.sh ARGS --check SKIP_RETURN_CODE 77 TIMEOUT 120)
+else()
+    string(APPEND MANIFEST "# not run on Windows: t_vk_spirv (a POSIX shell script; glslangValidator and spirv-val of the version the headers name are in the nxnative-build image: the Linux tree checks the headers)\n")
 endif()
 # Pipelines without stutter (dm/gfx/hostvk vk_gpl.c, vk_cache.c, vk_prewarm.c, vk_predict.c; docs/design/vulkan-backend.md section 3, step P5), on lavapipe under the validation layer as the
 # GPU tests above, skipped without a Vulkan device: t_vk_gpl_identity (the same draws through fast-linked, optimized, level-B, level-C and level-D pipelines, bit for bit),
@@ -681,12 +758,18 @@ endif()
 # The player's second pack end to end (t_second_pack.py): nxlauncher --play starts this build's nxhost-run on the synthetic module packed by nxaot, the host writes the JIT misses,
 # --list says a better pack is possible, --repack runs a packer (tests/second_pack/packer.py: the real packer's pack stage and made rows) that packs with --misses, --list says it
 # no longer is, and the game runs again without the JIT fallback. It needs nxaot: this option, else NXAOT in the environment; without it CTest reports it skipped (exit 77).
-# A Python driver, so not in host_tests.tsv (the runners run the test executables)
+# A Python driver: host_scripts.tsv lists it for the runners, which pass NXAOT from their environment. Linux only: it runs nxhost-run and nxlauncher without .exe, writes
+# launch-linux.tsv and a /bin/sh host wrapper, packs with --platform linux and expects main.aot.so
 set(NXAOT "" CACHE FILEPATH "nxaot (dm/tools/aot, the nxnative-aot image) for t_second_pack; empty: the environment variable NXAOT")
+set(T_SECOND_PACK_WINDOWS "the driver is Linux only: nxhost-run and nxlauncher without .exe, launch-linux.tsv, a /bin/sh host wrapper, --platform linux, main.aot.so")
 if(NXHOST_PROGRAM AND NXHOST_LAUNCHER AND NXHOST_JIT)
-    add_test(NAME t_second_pack COMMAND ${Python3_EXECUTABLE} ${TESTS}/t_second_pack.py --build ${CMAKE_BINARY_DIR} --nxaot "${NXAOT}" WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
     file(MAKE_DIRECTORY ${CMAKE_BINARY_DIR}/tmp)
-    set_tests_properties(t_second_pack PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 120 ENVIRONMENT "TMPDIR=${CMAKE_BINARY_DIR}/tmp")
+    host_script_test(t_second_pack INTERPRETER python3 SCRIPT ${TESTS}/t_second_pack.py ARGS --build ${CMAKE_BINARY_DIR} --nxaot "${NXAOT}" READS NXAOT
+                     WORKING_DIRECTORY ${CMAKE_BINARY_DIR} SKIP_RETURN_CODE 77 TIMEOUT 120 ENV "TMPDIR=${CMAKE_BINARY_DIR}/tmp" NOT_WINDOWS "${T_SECOND_PACK_WINDOWS}")
+elseif(WIN32)
+    string(APPEND MANIFEST "# not run on Windows: t_second_pack (${T_SECOND_PACK_WINDOWS})\n")
+else()
+    string(APPEND MANIFEST "# not registered: t_second_pack (it needs NXHOST_PROGRAM, NXHOST_LAUNCHER and NXHOST_JIT)\n")
 endif()
 
 # fork() death tests
@@ -705,3 +788,4 @@ host_test(t_svc_memory_16k SOURCES t_svc_memory.c POSIX INCLUDES ${TESTS}/memory
 # Core Haptics; t_front_sdl checks the SDL3 front end here), t_svc_memory_dirty (the dirty-page tracker, dm/gfx/nvn/nvn_dirty.c, under real faults: it needs host pages larger than the guest's 4 KB, as Apple's 16 KB)
 
 file(WRITE ${CMAKE_BINARY_DIR}/host_tests.tsv "${MANIFEST}")
+file(WRITE ${CMAKE_BINARY_DIR}/host_scripts.tsv "${SCRIPTS}")

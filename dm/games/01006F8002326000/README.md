@@ -63,6 +63,16 @@ Checked on a Mac (M1, macOS 27, headless, an island save) against 16:9: the 3D v
 
 - From a fresh save, `DM_KEYS="40:A*51/2,145:B*12/0.4,151:Down,152:Right*4/0.4,154.5:A,155.5:Right*4/0.4,158:A,159:Down*2/0.4,160.5:Left*2/0.4,162:A,163.5:Plus,167:A*4/2,175:Plus,178:A*146/2,179:Plus*30/4"` names the player "tom" on the keyboard, takes the defaults, watches the movie and reaches the dock at about frame 14,100 (470 s).
 
+## Adaptive view consistency (current)
+
+On a taller picture the game caches projections and screen rectangles that a change of shape has to invalidate. The adapter in `view.s` (built to position-independent ARM64 by `gen_view_stubs.py`, licensed MIT-0 in `view.LICENSE`) is registered by `FRAME_STEP` for 3.0.3 `main` only: 21 hooks and 29 caches refresh cached projections, follow the current perspective in scissors and captures, widen field ranges and near-plane unprojection, and dock the inline keyboard and footer. It shares the frame step state page with `screen_shape` and needs no host state of its own.
+
+`main+0x265140` is the single `ret` of `nn::ui2d::DrawInfo::SetProjectionMtx`. One chained stub runs the upstream y-row division first (its 16:9 test reads m0 and m5, which the adapter's `Lscreen_projection` rewrites), then calls the adapter's keyboard dock; the adapter adds its offset to index 6 instead of overwriting it. `main+0x27d4c0` forces the footer subtree dirty at `Pane::Calculate` entry and `main+0x27d570` runs `duo_calc` after `CalculateGlobalMatrix`: the two were disassembled and coexist.
+
+The adapter follows the host's `DM_SCREEN_ASPECT` (1.3 to 1.77) through `dm_fps_state +0x58`; it does not support arbitrary ratios or folding-display rotation. At `+0x58 = 0` (16:9, or `auto` on iOS) every adapter stub runs the original instructions.
+
+Open: the dock offset is divided by the vertical stretch before it is added (option B); option A drops that division. Neither has been checked on a device. Without the host frame-counter pointer, the "inline keyboard rendered in the last two presents" test uses frame stamps in the free part of the state page; keyboard docking needs a device check.
+
 ## Found on this game
 
 General host changes first needed here; each applies to every game:

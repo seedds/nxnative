@@ -15942,7 +15942,15 @@ int mtl_fps_target(void) { static int env = -2; if (env == -2) { const char *e =
 // submit returns, and a game may reuse the copy's source right after. Catherine: Full Body's resource thread writes the next texture into the staging block 64 ms after the main thread
 // recorded a copy from it (main+0x305e64, frame start) and before that frame's submit had even returned: the host was building pipelines inside the submit for 300 ms, and committed the
 // copy only at its end, so the subtitle band's gradient (BC3, 32x512) came out as the next texture's blocks. Committed at the first pass boundary, the copies run while the host encodes the rest
-static int cut_draws(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_CUT"); v = e ? atoi(e) : 64; MLOG("segmented submission: a segment is submitted between passes every %d draws (DM_NVN_CUT, 0 = off)", v); } return v; }
+// iOS: 128. Measured on an iPad Pro M4 (BotW, 120%, Link standing, runs alternated): with 64 the game ran 14-21% on the performance cores (iOS kept it on the efficiency
+// cores at about 0.55 W), with 128 or 256 84-87% (1-1.4 W); translation took 4.7-6.3 ms instead of 7.5-7.8 and fewer frames dropped (140-233 against 255-438 over 4.5 minutes).
+// Each segment is a commit, whose submission costs CPU in Metal's threads (about 18% of the game's CPU at 64) and wakes the device's CPU scheduler
+#if TARGET_OS_IPHONE
+enum { CUT_DEFAULT = 128 };
+#else
+enum { CUT_DEFAULT = 64 };
+#endif
+static int cut_draws(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_CUT"); v = e ? atoi(e) : CUT_DEFAULT; MLOG("segmented submission: a segment is submitted between passes every %d draws (DM_NVN_CUT, 0 = off)", v); } return v; }
 static uint64_t g_cut_draw0, g_cuts, g_copy_cuts;
 // The count starts with the submission (mtl_sub_begin). It used to start at the submission's first sub_cut, which only a render target change reaches (OP_SET_RT): the draws a
 // submission makes into the target it inherited, before its first target change, were never counted, and the first segment came that many draws late

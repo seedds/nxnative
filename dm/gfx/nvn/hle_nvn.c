@@ -2074,6 +2074,13 @@ static void tsummary(uint64_t frame) {
         o += snprintf(line + o, sizeof line - o, " %s p50 %.2f / p95 %.2f / max %.2f ms (%u frames);", g_tname[k], v[n / 2], v[(n * 95) / 100 < n ? (n * 95) / 100 : n - 1], v[n - 1], n);
     }
     LOG("[nvn] timing up to frame %llu:%s", frame, line);
+    if (dm_fps_state && __atomic_load_n((uint32_t *)(dm_fps_state + 0x40), __ATOMIC_RELAXED) && __atomic_load_n((uint32_t *)(dm_fps_state + 0x200), __ATOMIC_RELAXED)) {
+        // the dynamic-resolution stub's memory (Ocarina of Time's patches.py drs_controller: +0x200 calls, +0x204 level, +0x210 the load measured at each level, +0x250 the call)
+        char dl[256] = ""; size_t q = 0; float ld[16]; uint32_t at[16]; memcpy(ld, dm_fps_state + 0x210, sizeof ld); memcpy(at, dm_fps_state + 0x250, sizeof at);
+        uint32_t calls = *(volatile uint32_t *)(dm_fps_state + 0x200);
+        for (int i = 0; i < 16 && q < sizeof dl; i++) if (at[i]) q += (size_t)snprintf(dl + q, sizeof dl - q, " %d: %.0f (%u calls ago)", i, ld[i], calls - at[i]);
+        LOG("[nvn] dynamic resolution up to frame %llu: level %u; last load by level%s", frame, *(volatile uint32_t *)(dm_fps_state + 0x204), dl[0] ? dl : " none yet");
+    }
     { void mtl_pso_line(char *, size_t); char pl[1024]; mtl_pso_line(pl, sizeof pl); LOG("[nvn] pipelines up to frame %llu: %s", frame, pl); }
     double tgt = 1000.0 / mtl_fps_target();   // milliseconds one frame should take: 16.7 at 60 fps, 33.3 when the game itself asks for 30 (the over-time / dropped-frame counts below use it)
     { unsigned n = g_tn[0] < TWIN ? g_tn[0] : TWIN, over = 0; double v[TWIN];   // frame interval gets its own line (M1 baseline): number of frames longer than one frame period in this window and p99

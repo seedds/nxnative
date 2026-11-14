@@ -231,7 +231,7 @@ struct VkPipeline_T {
     uint32_t pc_size, nset; VkDescriptorSetLayout set[8];   // from its pipeline layout, which may be destroyed first: the push-constant size, and the set layouts (held) for a missing binding's report
     MTLPrimitiveType prim; MTLCullMode cull; MTLWinding wind; MTLTriangleFillMode fill; MTLDepthClipMode clip;
     int bias; float bias_c, bias_s, bias_cl; float blend[4]; uint32_t sref_f, sref_b;
-    int dyn_vp, dyn_sc, has_vp, has_sc; MTLViewport vp; VkRect2D sc;
+    int dyn_vp, dyn_sc, has_vp, has_sc, dyn_blend; MTLViewport vp; VkRect2D sc;
     // Dynamic stencil state (Super Mario 3D All-Stars' Super Mario 64): the reference is the encoder's; the masks are part of a Metal depth-stencil state, so the
     // pipeline keeps its depth-stencil description and builds the state for the masks set (one cached)
     VkLogicOp logic;   // not implemented (0 = none: VK_LOGIC_OP_CLEAR is not met)
@@ -1067,6 +1067,7 @@ static VkPipeline pipe_make(const VkGraphicsPipelineCreateInfo *ci) {
             else if (s == VK_DYNAMIC_STATE_STENCIL_REFERENCE) p->dyn_sref = 1;
             else if (s == VK_DYNAMIC_STATE_LINE_WIDTH) continue;   // Metal draws lines one pixel wide whatever the width (Super Mario 64 sets 1)
             else if (s == VK_DYNAMIC_STATE_STENCIL_COMPARE_MASK || s == VK_DYNAMIC_STATE_STENCIL_WRITE_MASK) p->dyn_smask |= s == VK_DYNAMIC_STATE_STENCIL_COMPARE_MASK ? 1 : 2;
+            else if (s == VK_DYNAMIC_STATE_BLEND_CONSTANTS) p->dyn_blend = 1;
             else RED1("dynamic state %d not implemented (the imports have no matching set function)", s);
         }
         const VkPipelineViewportStateCreateInfo *vs = ci->pViewportState;
@@ -1087,7 +1088,7 @@ VKB(vkCreateGraphicsPipelines, VkResult, VkDevice d, VkPipelineCache c, uint32_t
 VKB(vkDestroyPipeline, void, VkDevice d, VkPipeline p, const VkAllocationCallbacks *a) { (void)d; (void)a; if (p) { p->pso = nil; p->dss = nil; p->dss_dyn = nil; for (uint32_t i = 0; i < p->nset; i++) dsl_put(p->set[i]); free(p); } }   // ARC does not release a malloc'd struct's strong fields
 
 // ---------- Command buffers: recording ----------
-enum { C_BRP = 1, C_ERP, C_PIPE, C_SETS, C_VB, C_IB, C_VP, C_SC, C_DRAWI, C_COPYB, C_COPYB2I, C_DRAW, C_PUSH, C_COPYI, C_COPYI2B, C_QRESET, C_QTS, C_QBEGIN, C_QEND, C_CLEARI, C_STENCIL, C_BLIT };
+enum { C_BRP = 1, C_ERP, C_PIPE, C_SETS, C_VB, C_IB, C_VP, C_SC, C_DRAWI, C_COPYB, C_COPYB2I, C_DRAW, C_PUSH, C_COPYI, C_COPYI2B, C_QRESET, C_QTS, C_QBEGIN, C_QEND, C_CLEARI, C_STENCIL, C_BLIT, C_BLEND };
 typedef struct { uint32_t op, size; } chdr;
 typedef struct { VkRenderPass rp; VkFramebuffer fb; VkRect2D area; uint32_t nclear; VkClearValue clear[]; } c_brp;
 typedef struct { VkPipeline p; } c_pipe;
@@ -1107,6 +1108,7 @@ typedef struct { VkQueryPool q; uint32_t first, n; } c_query;
 typedef struct { int what; VkStencilFaceFlags faces; uint32_t v; } c_stencil;   // what: 0 compare mask, 1 write mask, 2 reference
 typedef struct { VkImage im; int ds; VkClearValue v; uint32_t n; VkImageSubresourceRange r[]; } c_cleari;   // vkCmdClearColorImage / vkCmdClearDepthStencilImage
 typedef struct { VkImage src, dst; uint32_t n; VkImageBlit r[]; } c_blit;   // vkCmdBlitImage
+typedef struct { float v[4]; } c_blend;   // vkCmdSetBlendConstants
 static void *rec(VkCommandBuffer cb, uint32_t op, size_t sz) {
     size_t need = (sizeof(chdr) + sz + 7) & ~(size_t)7;
     if (cb->n + need > cb->cap) {
@@ -1213,7 +1215,7 @@ VK(vkCmdPipelineBarrier, void, VkCommandBuffer cb, VkPipelineStageFlags s, VkPip
 // SDL_GPU resolves every entry point and calls some of them without checking the lookup (MARVEL Cosmic Invasion
 // crashed on a null vkCmd* right after "Setting backbuffer"). The ones below are no-ops so the call lands somewhere
 // real; they still need a Metal implementation before the picture is right (clears, blits, resolves, compute, indirect draws).
-VK(vkCmdSetBlendConstants, void, VkCommandBuffer cb, const float *v) { (void)cb; (void)v; }
+VK(vkCmdSetBlendConstants, void, VkCommandBuffer cb, const float *v) { *(c_blend *)rec(cb, C_BLEND, sizeof(c_blend)) = (c_blend){{v[0], v[1], v[2], v[3]}}; }
 VK(vkCmdSetDepthBias, void, VkCommandBuffer cb, float c, float cl, float s) { (void)cb; (void)c; (void)cl; (void)s; }
 VK(vkCmdSetDepthBounds, void, VkCommandBuffer cb, float mn, float mx) { (void)cb; (void)mn; (void)mx; }
 VK(vkCmdClearAttachments, void, VkCommandBuffer cb, uint32_t na, const VkClearAttachment *a, uint32_t nr, const VkClearRect *r) {
@@ -1259,6 +1261,7 @@ typedef struct {
     MTLRenderPassDescriptor *rpd; MTLStoreAction st_col[8], st_d, st_s; int cut;
     VkQueryPool aq; uint32_t aq_first;   // the occlusion query running (occ_start)
     uint32_t sdyn[3][2]; int sdyn_set[3], s_dirty;   // dynamic stencil compare mask / write mask / reference, front and back (C_STENCIL)
+    float blend[4]; int blend_dirty;   // dynamic blend constants, the command buffer's own state rather than the pipeline's (C_BLEND)
 } rs_t;
 #define DONE_RING 1024
 static uint64_t g_done_ns[DONE_RING];   // completion time of submit v at [v % DONE_RING] (timestamp query results)
@@ -1457,7 +1460,7 @@ static int pre_draw(rs_t *s) {
         [re setRenderPipelineState:p->pso]; [re setDepthStencilState:p->dss ? p->dss : g_dss_off];
         [re setCullMode:p->cull]; [re setFrontFacingWinding:p->wind]; [re setTriangleFillMode:p->fill]; [re setDepthClipMode:p->clip];
         [re setDepthBias:p->bias ? p->bias_c : 0 slopeScale:p->bias ? p->bias_s : 0 clamp:p->bias ? p->bias_cl : 0];
-        [re setBlendColorRed:p->blend[0] green:p->blend[1] blue:p->blend[2] alpha:p->blend[3]];
+        { const float *bc = p->dyn_blend ? s->blend : p->blend; [re setBlendColorRed:bc[0] green:bc[1] blue:bc[2] alpha:bc[3]]; }
         [re setStencilFrontReferenceValue:p->sref_f backReferenceValue:p->sref_b];
         s->s_dirty = 1;
         if (p->has_vp && (!s->applied || !s->applied->has_vp || memcmp(&s->applied->vp, &p->vp, sizeof p->vp))) s->vp_dirty = 1;
@@ -1480,6 +1483,7 @@ static int pre_draw(rs_t *s) {
         }
     }
     s->s_dirty = 0;
+    if (s->blend_dirty) { if (p->dyn_blend) [re setBlendColorRed:s->blend[0] green:s->blend[1] blue:s->blend[2] alpha:s->blend[3]]; s->blend_dirty = 0; }
     if (s->vp_dirty) {
         MTLViewport v = p->has_vp ? p->vp : vp_of(&s->vp);
         [re setViewport:v]; s->vp_dirty = 0;
@@ -1644,6 +1648,7 @@ static void replay(rs_t *s, VkCommandBuffer cb) {
             }
             case C_STENCIL: { const c_stencil *x = c; if (x->faces & VK_STENCIL_FACE_FRONT_BIT) s->sdyn[x->what][0] = x->v; if (x->faces & VK_STENCIL_FACE_BACK_BIT) s->sdyn[x->what][1] = x->v;
                               s->sdyn_set[x->what] = 1; s->s_dirty = 1; break; }
+            case C_BLEND: { const c_blend *x = c; memcpy(s->blend, x->v, sizeof s->blend); s->blend_dirty = 1; break; }
             case C_CLEARI: {   // an image cleared outside a render pass (Super Mario 3D All-Stars' Super Mario 64 clears its depth buffer so): a pass per level and layer that only clears
                 const c_cleari *x = c; VkImage im = x->im;
                 if (!im || !im->tex) { RED1("a cleared image was not created"); break; }

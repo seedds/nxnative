@@ -1,7 +1,9 @@
 // Uploads from a large pool (BIG_MIN) read their storage through a zero-copy buffer of the upload batch (up_big_src), which the batch makes resident and retires. One texture
 // needs one such buffer: a second is made only when taking its staging flushed the batch that held the first. Before, every staged upload made two, and a scene load of Switch
 // Sports Resort (855 textures, 908 MB) added twice its storage to the residency set. Checks the count and every texel, for small textures in one batch and for 64 MB ones whose
-// staging splits the batches (UP_BATCH_BYTES)
+// staging splits the batches (UP_BATCH_BYTES).
+// Then the same split with the second buffer refused (t_up_src_refuse): the first buffer is the flushed batch's, which takes it out of the residency set and releases it when it
+// completes, so the new batch must not read it. The upload looks its storage up as for any other pool, or reads it on the CPU, and every texel is still right
 #include "../nvn/nvn_mtl.m"
 void *front_metal_layer(void) { return NULL; }
 module_t *module_of(const void *p) { (void)p; return NULL; }
@@ -71,6 +73,20 @@ int main(void) { @autoreleasepool {
     printf("big: %llu source buffers for 3 textures, %u batches\n", (unsigned long long)made, batches);
     CHECK("staging splits the batches", batches >= 2);
     CHECK("a second source buffer only for a texture whose staging flushed its batch", made == 3 + (batches - 1));
+
+    // The batch split again, with the new batch's source buffer refused: the texture whose staging flushed the batch keeps no buffer of the flushed batch
+    upl again[3];
+    for (int i = 0; i < 3; i++) make(&again[i], mem, &pool, (size_t)(240 + 72 * i) << 20, 4096, 4096, 200 + i);
+    uint64_t stale0 = g_up_src_stale;
+    t_up_src_refuse = 1;
+    upload_all(again, 3, &made, &batches);
+    t_up_src_refuse = 0;
+    uint64_t stale = g_up_src_stale - stale0;
+    printf("refused: %llu source buffers for 3 textures, %u batches, %llu uploads without the flushed batch's buffer\n", (unsigned long long)made, batches, (unsigned long long)stale);
+    CHECK("staging splits the batches with the second buffer refused", batches >= 2);
+    CHECK("a refused second buffer is not made", made == 3);
+    CHECK("each upload whose batch was flushed gives up the flushed batch's buffer", stale == batches - 1);
+    for (int i = 0; i < 3; i++) { mtl_tex_release(&again[i].t); free(again[i].ref); }
 
     for (int i = 0; i < 8; i++) { mtl_tex_release(&small[i].t); free(small[i].ref); }
     for (int i = 0; i < 3; i++) { mtl_tex_release(&big[i].t); free(big[i].ref); }

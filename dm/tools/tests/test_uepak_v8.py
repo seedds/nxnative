@@ -17,29 +17,29 @@ def fstr(s):
     return struct.pack('<i', len(b)) + b
 
 
-def entry(off, size, raw, meth, blocks, bsz):
+def entry(off, size, raw, meth, blocks, bsz, short=False):
     """FPakEntry as the index and the data header write it (version 8: block bounds from the entry's start)"""
-    b = struct.pack('<qqqI', off, size, raw, meth) + bytes(20)
+    b = struct.pack('<qqqB' if short else '<qqqI', off, size, raw, meth) + bytes(20)
     if meth: b += struct.pack('<i', len(blocks)) + b''.join(struct.pack('<qq', s, e) for s, e in blocks)
     return b + struct.pack('<BI', 0, bsz)
 
 
-def pak(path, files):
+def pak(path, files, short=False):
     """files: [(name, data, compress)] → a version 8 pak whose footer names Zlib as method 1"""
     body, index = b'', b''
     for name, data, comp in files:
         off = len(body)
         if comp:
             z = zlib.compress(data)
-            head = len(entry(0, 0, 0, 1, [(0, 0)], 0))
-            e = entry(off, len(z), len(data), 1, [(head, head + len(z))], 0x10000)
+            head = len(entry(0, 0, 0, 1, [(0, 0)], 0, short))
+            e = entry(off, len(z), len(data), 1, [(head, head + len(z))], 0x10000, short)
             body += e + z
         else:
-            e = entry(off, len(data), len(data), 0, [], 0)
+            e = entry(off, len(data), len(data), 0, [], 0, short)
             body += e + data
         index += fstr(name) + e
     index = fstr('../../../') + struct.pack('<i', len(files)) + index
-    names = b'Zlib'.ljust(32, b'\0') + bytes(32 * 4)
+    names = b'Zlib'.ljust(32, b'\0') + bytes(32 * (3 if short else 4))
     foot = bytes(16) + b'\0' + struct.pack('<IIQQ', uepak.PAK_MAGIC, 8, len(body), len(index)) + bytes(20) + names
     path.write_bytes(body + index + foot)
 
@@ -62,6 +62,24 @@ class Version8(unittest.TestCase):
         self.assertEqual(k.entry('AT/Content/M_Test.uexp')['method'], 'Zlib')
         self.assertEqual(k.read('AT/Content/M_Test.uexp'), self.shader)
         self.assertEqual(k.read('Engine/Config/a.ini'), b'[x]\n')
+
+    def test_short_footer_with_shader_archive(self):
+        name = 'Content/Test.ushaderbytecode'
+        compressed = zlib.compress(self.shader)
+        data = (struct.pack('<II', 1, 1) + bytes(20)
+                + struct.pack('<QIIB', 0, len(compressed), len(self.shader), 3) + compressed)
+        pak(self.p, [(name, data, False), ('Content/Test.uexp', self.shader, True)], short=True)
+        self.assertEqual(uepak.unreal_paks(self.tmp.name, inline=False), [str(self.p)])
+        k = uepak.Pak(str(self.p))
+        with k.f:
+            self.assertEqual(k.methods, ['Zlib', '', '', ''])
+            self.assertEqual(k.read('Content/Test.uexp'), self.shader)
+            decoded = uepak.archive_v1_decoded(k.read(name), name)
+        archive = uepak.archive(decoded)
+        self.assertEqual(archive['shaders'], [(0, len(self.shader), len(self.shader), 3)])
+        self.assertEqual(decoded[archive['code']:], self.shader)
+        with self.assertRaises(ValueError):
+            uepak.archive_v1_decoded(data[:-1], name)
 
 
 if __name__ == '__main__':

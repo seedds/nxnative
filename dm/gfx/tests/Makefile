@@ -52,6 +52,8 @@ t_gfx_suspend: t_gfx_suspend.c ../nvn/hle_nvn.c ../../host/crash.c ../../host/hl
 	clang $(CFLAGS) -fobjc-arc -o $@ t_gfx_suspend.c ../../host/crash.c ../../host/hle_bigstack.c t_host_stubs.c $(GFX) $(FW)
 t_nvn: t_nvn.c ../nvn/hle_nvn.c ../../host/crash.c ../../host/hle_bigstack.c t_host_stubs.c $(GFX) $(GFX_H)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_nvn.c ../../host/crash.c ../../host/hle_bigstack.c t_host_stubs.c $(GFX) $(FW)
+t_rt_comp: t_rt_comp.c ../nvn/hle_nvn.c ../nvn/nvn_rt.h ../../host/crash.c ../../host/hle_bigstack.c t_host_stubs.c $(GFX) $(GFX_H)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_rt_comp.c ../../host/crash.c ../../host/hle_bigstack.c t_host_stubs.c $(GFX) $(FW)
 t_dirty_slots: t_dirty_slots.c ../nvn/nvn_dirty.c ../../host/crash.c ../nvn/nvn_dirty.h $(GAME_H)
 	clang $(CFLAGS) -o $@ t_dirty_slots.c ../../host/crash.c ../nvn/nvn_dirty.c
 t_dirty_race: t_dirty_race.c ../nvn/nvn_dirty.c ../../host/crash.c ../nvn/nvn_dirty.h $(GAME_H)
@@ -88,6 +90,10 @@ t_counter_clock: t_counter_clock.m ../../host/hle_os.c ../../host/dm.h $(MTL_T_D
 	clang $(CFLAGS) -fobjc-arc -o $@ t_counter_clock.m ../../host/hle_os.c $(MTL_T_SRC) $(FW)
 t_fstep: t_fstep.c ../nvn/nvn_fstep.h
 	clang -O1 -Wall -o $@ t_fstep.c
+t_thread_rt: t_thread_rt.c ../nvn/nvn_rt.h
+	clang -O1 -Wall -o $@ t_thread_rt.c
+t_link_drain: t_link_drain.c ../nvn/nvn_link_drain.h
+	clang -O1 -Wall -o $@ t_link_drain.c
 t_thermal: t_thermal.c $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_thermal.c $(MTL_T_SRC) ../nvn/nvn_mtl.m $(FW)
 t_thermal_tsan: t_thermal.c $(MTL_T_DEP)
@@ -125,6 +131,12 @@ t_cpu_tex: t_cpu_tex.m $(MTL_T_DEP)
 .PHONY: check_t_cpu_tex
 check_t_cpu_tex: t_cpu_tex
 	MTL_DEBUG_LAYER=1 ./t_cpu_tex --metal
+t_vc_lifetime: t_vc_lifetime.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_vc_lifetime.m $(filter-out ../nvn/hle_nvn.c,$(MTL_T_SRC)) $(FW)
+check_t_vc_lifetime: RUN_ENV = MTL_DEBUG_LAYER=1
+t_read_owner: t_read_owner.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_read_owner.m $(filter-out ../nvn/hle_nvn.c,$(MTL_T_SRC)) $(FW)
+check_t_read_owner: RUN_ENV = MTL_DEBUG_LAYER=1
 # DM_NVN_CAPTURE: the replayer (a tool, not a test: it needs a capture, docs/agents/05-debugging.md) and the CPU-only test of the capture format and record relocation
 nvn_replay: nvn_replay.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ nvn_replay.m $(filter-out ../nvn/hle_nvn.c,$(MTL_T_SRC)) $(FW)
@@ -136,6 +148,8 @@ check_t_capture: t_capture
 # On the GPU: two synthetic frames through the capture hooks, the second one captured, then replayed by nvn_replay (same digest, twice)
 t_large_mdi: t_large_mdi.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_large_mdi.m $(filter-out ../nvn/hle_nvn.c,$(MTL_T_SRC)) $(FW)
+t_mdx_prescan: t_mdx_prescan.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_mdx_prescan.m $(filter-out ../nvn/hle_nvn.c,$(MTL_T_SRC)) $(FW)
 t_capture_live: t_capture_live.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_capture_live.m $(filter-out ../nvn/hle_nvn.c,$(MTL_T_SRC)) $(FW)
 .PHONY: check_t_capture_live
@@ -179,6 +193,9 @@ check_t_gmem_words: t_gmem_words
 t_pool_notes: t_pool_notes.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_pool_notes.m ../../host/crash.c ../../host/hle_bigstack.c t_host_stubs.c $(filter-out ../nvn/nvn_mtl.m,$(GFX)) $(FW)
 check_t_pool_notes: RUN_ENV = MTL_DEBUG_LAYER=1
+t_htab_update: t_htab_update.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_htab_update.m $(MTL_T_SRC) $(FW)
+check_t_htab_update: RUN_ENV = MTL_DEBUG_LAYER=1
 t_sparse_tiles: t_sparse_tiles.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_sparse_tiles.m ../../host/crash.c ../../host/hle_bigstack.c t_host_stubs.c $(filter-out ../nvn/nvn_mtl.m,$(GFX)) $(FW)
 t_readback: t_readback.m $(MTL_T_DEP)
@@ -220,6 +237,8 @@ check_t_present_snap: t_present_snap
 	DM_NVN_ENC_THREAD=1 MTL_DEBUG_LAYER=1 ./t_present_snap resize
 	DM_NVN_ENC_THREAD=0 MTL_DEBUG_LAYER=1 ./t_present_snap resize
 	DM_NVN_ENC_THREAD=0 MTL_DEBUG_LAYER=1 ./t_present_snap queued
+	DM_PRESENT_LINK=0 MTL_DEBUG_LAYER=1 ./t_present_snap screen
+	DM_PRESENT_LINK=0 MTL_DEBUG_LAYER=1 ./t_present_snap screen_snap
 	DM_NVN_ENC_THREAD=1 MTL_DEBUG_LAYER=1 ./t_present_snap queued
 	DM_NVN_ENC_THREAD=0 MTL_DEBUG_LAYER=1 ./t_present_snap ticket
 	DM_NVN_ENC_THREAD=1 MTL_DEBUG_LAYER=1 ./t_present_snap ticket
@@ -370,6 +389,9 @@ check_t_pull: RUN_ENV = MTL_DEBUG_LAYER=1
 t_pull_inv: t_pull_inv.m ../tools/dmsh_pull.py ../tools/dmsh_pull.metal
 	clang -O1 -g -Wall -fobjc-arc -o $@ t_pull_inv.m -framework Metal -framework Foundation
 check_t_pull_inv: RUN_ENV = MTL_DEBUG_LAYER=1
+t_wline: t_wline.m ../tools/dmsh_pull.py ../tools/dmsh_pull.metal
+	clang -O1 -g -Wall -fobjc-arc -o $@ t_wline.m -framework Metal -framework Foundation
+check_t_wline: RUN_ENV = MTL_DEBUG_LAYER=1
 t_pso_archive: t_pso_archive.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_pso_archive.m $(MTL_T_SRC) $(FW)
 .PHONY: check_t_pso_archive
@@ -382,6 +404,11 @@ t_pso_stall: t_pso_stall.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_pso_stall.m $(MTL_T_SRC) $(FW)
 check_t_pso_stall: RUN_ENV = MTL_DEBUG_LAYER=1
 check_t_pso_bundle: RUN_ENV = MTL_DEBUG_LAYER=1
+t_pso_prewarm: t_pso_prewarm.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_pso_prewarm.m $(MTL_T_SRC) $(FW)
+.PHONY: check_t_pso_prewarm
+check_t_pso_prewarm: t_pso_prewarm
+	MTL_DEBUG_LAYER=1 ./t_pso_prewarm
 t_pso_warm: t_pso_warm.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_pso_warm.m $(MTL_T_SRC) $(FW)
 .PHONY: check_t_pso_warm
@@ -393,6 +420,15 @@ t_pso_skey: t_pso_skey.m ../nvn/nvn_pso_skey.h ../nvn/nvn_obj.h
 t_view_swizzle: t_view_swizzle.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_view_swizzle.m $(MTL_T_SRC) $(FW)
 check_t_view_swizzle: RUN_ENV = MTL_DEBUG_LAYER=1
+# Tessellation's layout and expansion kernel on the GPU (nvn_tess.inc, dmsh_tess.py), from the shipped MSL test_dmsh_tess.py writes
+t_tess: t_tess.m
+	clang $(CFLAGS) -fobjc-arc -o $@ t_tess.m -framework Metal -framework Foundation
+.PHONY: check_t_tess
+check_t_tess: t_tess
+	DM_TEST_TESS="$(CURDIR)/t_tess" MTL_DEBUG_LAYER=1 python3 -m unittest test_dmsh_tess.py
+t_view_reuse: t_view_reuse.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_view_reuse.m $(MTL_T_SRC) $(FW)
+check_t_view_reuse: RUN_ENV = MTL_DEBUG_LAYER=1
 t_border: t_border.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_border.m $(MTL_T_SRC) $(FW)
 .PHONY: check_t_border
@@ -402,6 +438,12 @@ check_t_border: t_border
 t_view_levels: t_view_levels.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_view_levels.m $(MTL_T_SRC) $(FW)
 check_t_view_levels: RUN_ENV = MTL_DEBUG_LAYER=1
+t_res_commit: t_res_commit.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_res_commit.m $(MTL_T_SRC) $(FW)
+check_t_res_commit: RUN_ENV = MTL_DEBUG_LAYER=1
+t_upload_src: t_upload_src.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_upload_src.m $(MTL_T_SRC) $(FW)
+check_t_upload_src: RUN_ENV = MTL_DEBUG_LAYER=1
 t_upload_budget: t_upload_budget.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_upload_budget.m $(MTL_T_SRC) $(FW)
 check_t_upload_budget: t_upload_budget
@@ -449,6 +491,9 @@ check_t_depth16_clear: RUN_ENV = MTL_DEBUG_LAYER=1
 t_clear_ds: t_clear_ds.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_clear_ds.m $(MTL_T_SRC) $(FW)
 check_t_clear_ds: RUN_ENV = MTL_DEBUG_LAYER=1
+t_zero_depth: t_zero_depth.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_zero_depth.m $(MTL_T_SRC) $(FW)
+check_t_zero_depth: RUN_ENV = MTL_DEBUG_LAYER=1
 t_clear_layers: t_clear_layers.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_clear_layers.m $(MTL_T_SRC) $(FW)
 check_t_clear_layers: RUN_ENV = MTL_DEBUG_LAYER=1
@@ -501,22 +546,28 @@ check_t_rt_recycle: t_rt_recycle
 	DM_NVN_ENC_THREAD=1 MTL_DEBUG_LAYER=1 ./t_rt_recycle
 	DM_NVN_RT_RECYCLE=0 MTL_DEBUG_LAYER=1 ./t_rt_recycle
 # A game's upscaler drawn by MetalFX (any profile; the profile's upscaler shaders, from its shader map, when it has some); with and without the switch, and on the encoding thread
-t_upscaler_mfx: t_upscaler_mfx.m $(MTL_T_DEP)
+t_upscaler_mfx: t_upscaler_mfx.m t_mfx_passes.h $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_upscaler_mfx.m $(MTL_T_SRC) $(FW)
 .PHONY: check_t_upscaler_mfx
 # (MetalFX's Metal 4 scaler stops under Metal validation on a barrier-stage setting of its own that has no public API, "_outputTextureBarrierStages not set": its run is without it)
 check_t_upscaler_mfx: t_upscaler_mfx
 	DM_NVN_ENC_THREAD=0 DM_UPSCALER=metalfx ./t_upscaler_mfx
 	DM_NVN_ENC_THREAD=1 DM_UPSCALER=metalfx ./t_upscaler_mfx
+	DM_NVN_ENC_THREAD=1 DM_UPSCALER=metalfx DM_NVN_BARRIER=game ./t_upscaler_mfx
+	DM_NVN_ENC_THREAD=1 DM_UPSCALER=metalfx DM_NVN_MFX_DIRECT=0 ./t_upscaler_mfx
 	MTL_DEBUG_LAYER=1 ./t_upscaler_mfx
 # NVN2's DLSS on MetalFX's temporal scaler, with and without the encoding thread (MetalFX encodes into the real command buffer; validation stops its Metal 4 scalers, as above)
-t_dlss_mfx: t_dlss_mfx.m $(MTL_T_DEP)
+t_dlss_mfx: t_dlss_mfx.m t_mfx_passes.h $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_dlss_mfx.m $(MTL_T_SRC) $(FW)
 .PHONY: check_t_dlss_mfx
 # With zombie objects: a scaler released under its encoders is then a message to a deallocated instance at the commit, every time (without them it depends on what took its memory)
 check_t_dlss_mfx: t_dlss_mfx
 	NSZombieEnabled=YES DM_NVN_ENC_THREAD=0 ./t_dlss_mfx
 	NSZombieEnabled=YES DM_NVN_ENC_THREAD=1 ./t_dlss_mfx
+	NSZombieEnabled=YES DM_NVN_ENC_THREAD=1 DM_NVN_BARRIER=game ./t_dlss_mfx
+t_buffer_image_bias: t_buffer_image_bias.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_buffer_image_bias.m $(MTL_T_SRC) $(FW)
+check_t_buffer_image_bias: RUN_ENV = MTL_DEBUG_LAYER=1
 t_image_usage: t_image_usage.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_image_usage.m $(MTL_T_SRC) $(FW)
 check_t_image_usage: RUN_ENV = MTL_DEBUG_LAYER=1
@@ -545,6 +596,13 @@ t_vk_dontcare: t_vk_dontcare.m ../vk/hle_vk.m $(MTL_T_DEP)
 	clang $(CFLAGS) -I../../third_party/vulkan-headers/include -fobjc-arc -o $@ t_vk_dontcare.m $(MTL_T_SRC) ../nvn/nvn_mtl.m $(FW)
 # The validation layer fills every DontCare load with a pattern, so a DontCare load fails the check whatever the tile memory happens to hold
 check_t_vk_dontcare: RUN_ENV = MTL_DEBUG_LAYER=1 MTL_DEBUG_LAYER_VALIDATE_LOAD_ACTIONS=1
+# A Vulkan 1D image is a one-row 2D texture: drawn into, mipmapped, layered and depth, under the validation layer that aborts on each with a Metal 1D texture
+# Swap chain images are released once the presents that showed them are done, over more recreations than the window-texture list holds
+t_vk_swapchain_life: t_vk_swapchain_life.m ../vk/hle_vk.m $(MTL_T_DEP)
+	clang $(CFLAGS) -I../../third_party/vulkan-headers/include -fobjc-arc -o $@ t_vk_swapchain_life.m $(MTL_T_SRC) ../nvn/nvn_mtl.m $(FW)
+t_vk_1d: t_vk_1d.m ../vk/hle_vk.m $(MTL_T_DEP)
+	clang $(CFLAGS) -I../../third_party/vulkan-headers/include -fobjc-arc -o $@ t_vk_1d.m $(MTL_T_SRC) ../nvn/nvn_mtl.m $(FW)
+check_t_vk_1d: RUN_ENV = MTL_DEBUG_LAYER=1
 # Float32 missing components retain float padding through integer shader inputs.
 t_float_pad: t_float_pad.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_float_pad.m $(MTL_T_SRC) $(FW)
@@ -562,6 +620,11 @@ t_blend_zero: t_blend_zero.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_blend_zero.m $(MTL_T_SRC) $(FW)
 check_t_blend_zero: t_blend_zero
 	@set -e; work=$$(mktemp -d); trap 'rm -rf "$$work"' EXIT; python3 test_dmsh_blend_zero.py --fixture "$$work"; MTL_DEBUG_LAYER=1 ./t_blend_zero "$$work"; DM_NVN_BLEND_ZERO=0 MTL_DEBUG_LAYER=1 ./t_blend_zero "$$work"
+# NVIDIA's rounding of a float colour into a normalized target through the replay (t_rop_round.m), with its shader from test_dmsh_blend_zero.py; then Apple's conversion as it is
+t_rop_round: t_rop_round.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_rop_round.m $(MTL_T_SRC) $(FW)
+check_t_rop_round: t_rop_round
+	@set -e; work=$$(mktemp -d); trap 'rm -rf "$$work"' EXIT; python3 test_dmsh_blend_zero.py --fixture-rop "$$work"; MTL_DEBUG_LAYER=1 ./t_rop_round "$$work"; DM_NVN_ROP_ROUND=0 MTL_DEBUG_LAYER=1 ./t_rop_round "$$work"
 # Logic operations through the replay (t_logic.m), with its shaders from test_dmsh_logic.py
 t_logic: t_logic.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_logic.m $(MTL_T_SRC) $(FW)
@@ -636,3 +699,23 @@ check_t_pool_standin: t_pool_standin
 	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=0 ./t_pool_standin
 	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=1 ./t_pool_standin
 	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=0 DM_NVN_POOL_STANDIN=0 ./t_pool_standin
+
+# A virtual pool's first whole mapping aliases it only while no address of its own range has left the host; sampler IDs past the pool are empty slots (issue #2513, PR #2519)
+t_vpool_first_map: t_vpool_first_map.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_vpool_first_map.m ../../host/crash.c ../../host/hle_bigstack.c t_host_stubs.c $(filter-out ../nvn/nvn_mtl.m,$(GFX)) $(FW)
+.PHONY: check_t_vpool_first_map
+check_t_vpool_first_map: t_vpool_first_map
+	MTL_DEBUG_LAYER=1 ./t_vpool_first_map
+
+# A texture pool table of another layered type than the ID's texture holds a view of it when a shader read the ID through that type (pool_fit): a 2D sprite read as a 2D array, a cube read as a cube
+t_pool_typebridge: t_pool_typebridge.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_pool_typebridge.m $(MTL_T_SRC) $(FW)
+.PHONY: check_t_pool_typebridge
+check_t_pool_typebridge: t_pool_typebridge
+	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=0 ./t_pool_typebridge
+	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=1 ./t_pool_typebridge
+
+# Sparse mappings reach texture ID views, pool tables and handle tables as notes of the textures they change (treg_sparse_notes), read back on the GPU
+t_sparse_pool_cache: t_sparse_pool_cache.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_sparse_pool_cache.m $(filter-out ../nvn/hle_nvn.c,$(MTL_T_SRC)) $(FW)
+check_t_sparse_pool_cache: RUN_ENV = MTL_DEBUG_LAYER=1

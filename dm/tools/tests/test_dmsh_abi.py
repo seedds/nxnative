@@ -140,9 +140,11 @@ class Host(unittest.TestCase):
     def test_uniform_bounds_agree(self):   # the translator's size table (Ryujinx Constants.cs) is the bank and the slots the host fills (nvn_mtl.m NVN_RB_CBSIZE)
         src = (REPO / 'dm/third_party/ryujinx/src/Ryujinx.Graphics.Shader/Constants.cs').read_text()
         got = {n: int(v) for n, v in re.findall(r'public const int (Nx\w+) = (\d+);', src)}
-        self.assertEqual(got, {'NxFirstUniformSlot': 3, 'NxUniformSlots': abi.CBSIZE_SLOTS, 'NxUniformSizesBank': abi.CBSIZE_BANK})
+        self.assertEqual(got, {'NxFirstUniformSlot': 3, 'NxUniformSlots': abi.CBSIZE_SLOTS, 'NxUniformSizesBank': abi.CBSIZE_BANK,
+                               'NxBufferImageBiasBank': abi.TBIAS_BANK, 'NxBufferImageBiases': abi.TBIAS_SLOTS})
         self.assertEqual(abi.CBSIZE_SLOTS, 16 - 3 + 1, 'uniform slots c[3] to c[16], as dmsh_build.py reflects them')
         self.assertIn('TranslationFlags.MetalUniformBounds', (REPO / 'dm/gfx/tools/dmsh_xlate/Program.cs').read_text())
+        self.assertIn('TranslationFlags.MetalBufferImageBias', (REPO / 'dm/gfx/tools/dmsh_xlate/Program.cs').read_text())   # the offset table (nvn_mtl.m NVN_RB_TBIAS)
 
 
 class Ratchet(unittest.TestCase):

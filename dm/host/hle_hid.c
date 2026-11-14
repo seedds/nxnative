@@ -271,6 +271,13 @@ static void *ctl_main(void *arg) {
                     dm_touch_script(NULL, 0); continue;
                 }
                 key_step st = {0, 0.15, 0}; char *h = strchr(line, '~'); if (h) { *h = 0; st.hold = atof(h + 1); }
+                if (line[0] == 'P' && line[1] >= '2' && line[1] <= '0' + DM_PLAYERS && line[2] == ' ') {   // P<n> <keys>: player n's controller, for games that need a second player (Orbitals)
+                    void dm_pad_script_player(int p); int p = line[1] - '1'; dm_pad_script_player(p);
+                    parse_keys(line + 3, &st);
+                    LOG("DM_CTL: player %d press %#llx (hold %.2f s)", p + 1, (unsigned long long)st.btn, st.hold);
+                    dm_pad_set_player(p, st.btn, st.lx, st.ly, st.rx, st.ry); usleep((useconds_t)(st.hold * 1e6)); dm_pad_set_player(p, 0, 0, 0, 0, 0);
+                    continue;
+                }
                 parse_keys(line, &st);
                 LOG("DM_CTL: press %#llx (hold %.2f s)", (unsigned long long)st.btn, st.hold);
                 if (st.tap) { dm_touch t = {0, st.tx, st.ty}; dm_touch_script(&t, 1); }
@@ -431,8 +438,16 @@ static void note_merged(void) {   // logs the players the game does not see, whe
         else LOG("hid: player %d's controller is not used: the game supports no npad %d", p + 1, p);
     }
 }
+// Players a DM_CTL "P<n> <keys>" line connected (a scripted controller, kept connected from its first press on): ORed into the front end's mask, so a front end's change does not drop them
+static _Atomic uint32_t g_script_players, g_front_players = 1;
+void dm_pad_script_player(int p) {
+    if (p <= 0 || p >= DM_PLAYERS || atomic_fetch_or(&g_script_players, 1u << p) >> p & 1) return;
+    LOG("DM_CTL: player %d's scripted controller connected", p + 1);
+    void dm_pad_players(uint32_t mask); dm_pad_players(atomic_load(&g_front_players));
+}
 void dm_pad_players(uint32_t mask) {
-    mask = (mask | 1u) & ((1u << DM_PLAYERS) - 1);
+    atomic_store(&g_front_players, mask);
+    mask = (mask | 1u | atomic_load(&g_script_players)) & ((1u << DM_PLAYERS) - 1);
     uint32_t old = atomic_exchange(&g_players, mask);
     atomic_fetch_and(&g_benched, mask);   // a controller that went away is no longer left out: the next one on its slot is a player until the applet says otherwise
     for (int p = 1; p < DM_PLAYERS; p++) if ((old ^ mask) >> p & 1 && !(mask >> p & 1)) dm_pad_set_player(p, 0, 0, 0, 0, 0);   // a controller that went away leaves nothing pressed
@@ -712,7 +727,7 @@ HLE_FORCE("_ZN2nn3hid20StopLrAssignmentModeEv", "L/R assignment mode; ignored by
 // past the maximum, the highest first, are now left out (g_benched) until the applet opens for more players, the game sets its supported npads again or their controller goes
 // away; with a maximum of one their controllers feed player 1, as in a game that supports one npad, so whichever controller the player holds plays. No prompt asks which
 // controller stays: a Switch's does, and with a maximum above one the lowest players stay here
-// Both overloads run on the big host stack (HLE_FORCE_BIG): with too few players the front end's prompt runs on the game's thread, and Drag x Drive opens the applet from a
+// Both overloads run on the big host stack, as every HLE_FORCE take-over: with too few players the front end's prompt runs on the game's thread, and Drag x Drive opens the applet from a
 // thread with less than a log line's worth of stack left (PR #1943; memory.md, Host calls on small guest stacks)
 #define RES_CTRL_CANCELED (202u | 3101u << 9)
 int dm_players_reported(void) {   // a pair of Joy-Cons split into two npads is two players
@@ -754,7 +769,7 @@ static Result ctrl_support(int32_t *info, const int8_t *arg) {
     if (info) { info[0] = count; info[1] = (int32_t)connected_id(); }
     return canceled ? RES_CTRL_CANCELED : RES_OK;
 }
-HLE_FORCE_BIG("_ZN2nn3hid21ShowControllerSupportEPNS0_27ControllerSupportResultInfoERKNS0_20ControllerSupportArgE", "controller applet; the host reports the connected players (fewer than the minimum: the front end's prompt waits for more, canceled without a window; more than the maximum: the highest are left out)",
+HLE_FORCE("_ZN2nn3hid21ShowControllerSupportEPNS0_27ControllerSupportResultInfoERKNS0_20ControllerSupportArgE", "controller applet; the host reports the connected players (fewer than the minimum: the front end's prompt waits for more, canceled without a window; more than the maximum: the highest are left out)",
           Result, h_hid_ShowCtrl, int32_t *info, const int8_t *arg) {
     DM_APPLET("controller support");
     return ctrl_support(info, arg);
@@ -1653,7 +1668,7 @@ HLE_FORCE("_ZN2nn3hid19GetPlayerLedPatternERKj", "player LED: the Switch's patte
 static void ctrl_color(uint32_t *c) { c[0] = 0xff828282u; c[1] = 0xff0f0f0fu; }
 HLE_FORCE("_ZN2nn3hid22GetNpadControllerColorEPNS0_19NpadControllerColorERKj", "controller color", Result, h_hid_Color, uint32_t *c, const uint32_t *id) { (void)id; ctrl_color(c); return RES_OK; }
 HLE_FORCE("_ZN2nn3hid22GetNpadControllerColorEPNS0_19NpadControllerColorES2_RKj", "left and right Joy-Con colors", Result, h_hid_Color2, uint32_t *l, uint32_t *r, const uint32_t *id) { (void)id; ctrl_color(l); ctrl_color(r); return RES_OK; }
-HLE_FORCE_BIG("_ZN2nn3hid21ShowControllerSupportERKNS0_20ControllerSupportArgE", "controller applet (no result wanted); the host answers as the overload above", Result, h_hid_ShowCtrl0, const int8_t *arg) { DM_APPLET("controller support"); return ctrl_support(NULL, arg); }
+HLE_FORCE("_ZN2nn3hid21ShowControllerSupportERKNS0_20ControllerSupportArgE", "controller applet (no result wanted); the host answers as the overload above", Result, h_hid_ShowCtrl0, const int8_t *arg) { DM_APPLET("controller support"); return ctrl_support(NULL, arg); }
 HLE_FORCE("_ZN2nn3hid24ShowControllerStrapGuideEv", "strap guide applet; not shown by the host", Result, h_hid_Strap, void) { DM_APPLET("controller strap guide"); return RES_OK; }
 HLE_FORCE("_ZN2nn3hid24ShowControllerStrapGuideERKNS0_13StrapGuideArgE", "strap guide applet with its argument (SDK 22); not shown by the host", Result, h_hid_StrapArg, const void *arg) { DM_APPLET("controller strap guide"); (void)arg; return RES_OK; }
 HLE_FORCE("_ZN2nn3hid28ShowControllerFirmwareUpdateERKNS0_27ControllerFirmwareUpdateArgE", "controller firmware update applet; not shown by the host", Result, h_hid_FwUpd, const void *arg) { DM_APPLET("controller firmware update"); (void)arg; return RES_OK; }
@@ -1727,6 +1742,11 @@ HLE_FORCE("_ZN2nn3hid22GetVibrationDeviceInfoEPNS0_19VibrationDeviceInfoERKNS0_2
 HLE_FORCE("_ZN2nn3hid24IsVibrationDeviceMountedERKNS0_21VibrationDeviceHandleE", "vibration: device mounted when the channel has an output", unsigned, h_hid_VibMounted, const uint32_t *h) {
     int m; return h && vib_targets(*h, &m);
 }
+// A forced vibration session lets the application vibrate while the system's vibration setting is off (hid's Begin/EndPermitVibrationSession). The host has no such system setting: its own
+// rumble switch is the player's and a session does not override it, so there is nothing to begin or end. The SDK's own calls read the null hid service object: Super Mario Party (SDK 9.4)
+// crashed at sdk+0x3526bc in hid::detail::EndPermitVibrationSession while booting (issue #2513)
+HLE_FORCE("_ZN2nn3hid27BeginForcedVibrationSessionEv", "forced vibration session: the host has no system vibration setting for it to override", void, h_hid_VibForceBegin, void) {}
+HLE_FORCE("_ZN2nn3hid25EndForcedVibrationSessionEv", "forced vibration session ends: nothing to restore", void, h_hid_VibForceEnd, void) {}
 // The Switch 2's form of the same question (Kirby Air Riders asks soon after boot in a run with a window, main+0x10709b0; its SDK's call reads the same null service object)
 HLE_FORCE("_ZN2nn3hid29IsOunceVibrationDeviceMountedERKNS0_21VibrationDeviceHandleE", "vibration (Switch 2): device mounted when the channel has an output", unsigned, h_hid_VibMountedOunce, const uint32_t *h) {
     int m; return h && vib_targets(*h, &m);

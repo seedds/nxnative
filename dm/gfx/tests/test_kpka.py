@@ -1,4 +1,4 @@
-"""RE Engine PAKs (KPKA) and SDF shader definitions, without game data: Monster Hunter Rise's layouts and PRAGMATA's (block table, 0x110-byte SDF entries)."""
+"""RE Engine PAKs (KPKA) and SDF shader definitions, without game data: Monster Hunter Rise's layouts, PRAGMATA's (block table, 0x110-byte SDF entries) and Resident Evil 4's (0x60-byte stage record headers)."""
 from pathlib import Path
 import re
 import struct
@@ -19,7 +19,7 @@ def nvn2(stage_byte, sph_type):
 
 
 def sdf(layout, stages):
-    """One SDF entry with stages {slot: (ctl, code)} in layout 0 (Monster Hunter Rise) or 1 (PRAGMATA)"""
+    """One SDF entry with stages {slot: (ctl, code)} in layout 0 (Monster Hunter Rise), 1 (PRAGMATA) or 2 (Resident Evil 4)"""
     base, size, lens, at = ss.SDF_LAYOUTS[layout]
     head = b'SDF\0' + struct.pack('<HH', 1, 1) + bytes(base - 8)
     body, offs, o = b'', [0] * 6, base + size
@@ -31,9 +31,9 @@ def sdf(layout, stages):
 
 
 class SdfTests(unittest.TestCase):
-    def test_both_layouts(self):
-        vs, ps, ms = nvn2(0, 1), nvn2(0, 5), nvn2(7, 3)
-        for layout in (0, 1):
+    def test_every_layout(self):
+        vs, ps = nvn2(0, 1), nvn2(0, 5)
+        for layout in range(len(ss.SDF_LAYOUTS)):
             with self.subTest(layout=layout):
                 got = ss.sdf_shaders(sdf(layout, {0: vs, 4: ps}), 'x')
                 self.assertEqual([(st, c, k) for _, st, c, k in got], [('vs', *vs), ('ps', *ps)])
@@ -49,11 +49,18 @@ class SdfTests(unittest.TestCase):
 
 
 class OcioTests(unittest.TestCase):
-    def ocio(self, *stages):   # an OCIO file: a header, then stage records (0x58-byte header, lengths at +8) among other data, as PRAGMATA's colour pipelines hold them
+    def ocio(self, *stages, head=0x58):   # an OCIO file: a header, then stage records (a 0x58-byte header, or Resident Evil 4's 0x60, lengths at +8) among other data, as the colour pipelines hold them
         d = bytearray(b'OCIO' + bytes(0xc4) + b'names\0' + bytes(2))
         for ctl, code in stages:
-            d += bytes(8) + struct.pack('<II', len(ctl), len(code)) + bytes(0x48) + ctl + code + bytes(8)
+            d += bytes(8) + struct.pack('<II', len(ctl), len(code)) + bytes(head - 0x10) + ctl + code + bytes(8)
         return bytes(d)
+
+    def test_resident_evil_4_records_packed_to_one_byte(self):   # 3472b3eda9a8c309: 0x60-byte record headers, control sections at odd offsets
+        ps, cs = nvn2(0, 5), nvn2(5, 0)
+        d = self.ocio(ps, head=0x60) + bytes(3) + self.ocio(cs, head=0x60)[0xd0:]
+        self.assertEqual([m.start() & 3 for m in re.finditer(re.escape(ss.CTL_MAGIC), d)][1], 3)
+        got = ss.ocio_shaders(d, 'x')
+        self.assertEqual([(st, c, k) for _, st, c, k in got], [('ps', *ps), ('cs', *cs)])
 
     def test_records_are_read(self):
         ps, cs = nvn2(0, 5), nvn2(5, 0)

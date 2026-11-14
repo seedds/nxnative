@@ -14,3 +14,10 @@ static inline uint64_t nvn_pace(nvn_pacer *p, uint64_t now, uint64_t period) {
     p->target = now - next < period ? next : now;
     return 0;
 }
+
+// A frame that something other than this beat paced (the display link's ticks, or no pacing at all: present interval 0): the beat follows it and restarts at its present.
+// The beat is only a clock while the caller waits for it. Stepped by the period for frames it did not pace, it ran ahead of real time whenever presents came faster than the
+// period, without bound (Ocarina of Time on a 120 Hz variable-refresh link: 27.6 s ahead after 18,000 frames), and the fallback that waits for the beat when the display link
+// goes silent or times out then slept the whole lead in one go. Restarted here, the fallback's first wait is at most one period from the last present, and nvn_pace steps
+// from there; a caller that waits keeps nvn_pace as it is, including a lead of several periods when its swap chain queues frames ahead (three textures: two periods)
+static inline void nvn_pace_follow(nvn_pacer *p, uint64_t now) { p->target = now; }

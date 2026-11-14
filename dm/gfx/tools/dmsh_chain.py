@@ -4,7 +4,7 @@
 # dmsh_geometry.py, dmsh_facts.py, dmsh_rewrite.py, dmsh_reflect.py and dmsh_entry.py (a shader's MSL rewrites, reflection and entry points), the library ABI dm/gfx/nvn/dmsh_abi.h with its reader dmsh_abi.py, the dmsh_xlate sources (Program.cs, csproj), the iOS compile convention ios_metal.py, the Mac host's minimum macOS dm/mac/min_os.mk (MAC_MIN), and the tool lock dmsh_chain.lock (measured fingerprints of the native translator, which holds the Ryujinx shader library / spirv-cross / metal compiler).
 # A game's own inputs are not part of V: its profile's shader tables and nvn_* / shader_* keys are in each shader's cache key (dmsh_build.py shader_key), so a change rebuilds the shaders it affects,
 # and their digest (inputs below) stamps the library: <cache dir>/b-<V>/inputs.tsv says which game and which inputs it was built from. c1_full.tsv / cb_extent.tsv name V and that digest in their
-# header (table_head), and the host takes them only when both match its library; build_ipa.sh packs a library only when its digest is the profile's.
+# header (dm/tools/shader_lib.py table_head), and the host takes them only when both match its library; build_ipa.sh packs a library only when its digest is the profile's.
 # The build (dmsh_build.py) writes into <cache dir>/b-<V>/ and the reflection json records chain = V; at compile time the host takes V from dm/gfx/nvn/dmsh_chain.h, loads only from b-<V>/ and verifies each json.
 # Usage: dmsh_chain.py                 print V (default options)
 #       dmsh_chain.py --header        rewrite dm/gfx/nvn/dmsh_chain.h (run after changing any file listed above, and commit it with the change)
@@ -15,7 +15,7 @@ from typing import Any
 import os, sys, ast, hashlib
 DM_ROOT = os.environ.get('DM_ROOT') or os.path.expanduser('~/dm-work')   # Workspace root (game files, build outputs and run artifacts are all under it)
 HERE = os.path.dirname(os.path.abspath(__file__)); GFX = os.path.dirname(HERE); HOME = os.path.expanduser('~')
-FILES = ['tools/dmsh_chain.py', 'tools/dmsh_build.py', 'tools/dmsh_atomic.py', 'tools/dmsh_wide.py', 'tools/dmsh_fetch.py', 'tools/dmsh_vin.py', 'tools/dmsh_pull.py', 'tools/dmsh_pull.metal', 'tools/dmsh_alpha.py', 'tools/dmsh_logic.py', 'tools/dmsh_side.py', 'tools/dmsh_rewrite.py', 'tools/dmsh_reflect.py', 'tools/dmsh_entry.py', 'tools/dmsh_geometry.py', 'tools/dmsh_mesh.py', 'tools/dmsh_meshstage.py', 'tools/dmsh_facts.py', 'tools/dmsh_ampere.py', 'nvn/dmsh_abi.h', 'tools/dmsh_abi.py', 'tools/dmsh_xlate/Program.cs', 'tools/dmsh_xlate/dmsh_xlate.csproj', '../ios/tools/ios_metal.py', 'tools/dmsh_chain.lock']
+FILES = ['tools/dmsh_chain.py', 'tools/dmsh_build.py', 'tools/dmsh_atomic.py', 'tools/dmsh_wide.py', 'tools/dmsh_fetch.py', 'tools/dmsh_vin.py', 'tools/dmsh_pull.py', 'tools/dmsh_pull.metal', 'tools/dmsh_alpha.py', 'tools/dmsh_logic.py', 'tools/dmsh_side.py', 'tools/dmsh_rewrite.py', 'tools/dmsh_reflect.py', 'tools/dmsh_entry.py', 'tools/dmsh_geometry.py', 'tools/dmsh_tess.py', 'tools/dmsh_mesh.py', 'tools/dmsh_meshstage.py', 'tools/dmsh_facts.py', 'tools/dmsh_ampere.py', 'nvn/dmsh_abi.h', 'tools/dmsh_abi.py', 'tools/dmsh_xlate/Program.cs', 'tools/dmsh_xlate/dmsh_xlate.csproj', '../ios/tools/ios_metal.py', 'tools/dmsh_chain.lock']
 # This target-specific lowering lives in the vendored translator. Include its
 # sources as well as the rebuilt translator's fingerprint; no old shader cache can bypass it.
 FILES += ['../third_party/ryujinx/src/Ryujinx.Graphics.Shader/' + f for f in (
@@ -95,17 +95,10 @@ def inputs(g):
     h.update(profile_rows(g))
     return h.hexdigest()[:12]
 
-def read_stamp(lib):   # {'game': title ID, 'inputs': digest} of a library directory; {} when it has none
-    try: return dict(l.rstrip('\n').split('\t', 1) for l in open(os.path.join(lib, STAMP)) if '\t' in l and not l.startswith('#'))
-    except OSError: return {}
-
-def write_stamp(lib, game_id, digest):
+def write_stamp(lib, game_id, digest):   # read back by shader_lib.read_stamp (a library folder or its image)
     tmp = os.path.join(lib, STAMP + '.tmp')
     with open(tmp, 'w') as f: f.write(f'# the game and the profile inputs this library was built from (dm/gfx/tools/dmsh_chain.py inputs)\ngame\t{game_id}\ninputs\t{digest}\n')
     os.replace(tmp, os.path.join(lib, STAMP))
-
-def table_head(lib):   # the header c1_full.tsv / cb_extent.tsv start with: the library's chain version and its inputs ("none" when it has no stamp, which nothing takes)
-    return f'# chain {os.path.basename(os.path.normpath(lib))} inputs {read_stamp(lib).get("inputs", "none")}'
 
 def xlate_source_sha():   # same convention as dmsh_xlate --source-sha: the embedded Program.cs and csproj concatenated in that order
     return hashlib.sha256(b''.join(open(os.path.join(HERE, 'dmsh_xlate', f), 'rb').read() for f in ('Program.cs', 'dmsh_xlate.csproj'))).hexdigest()[:16]

@@ -3,7 +3,7 @@
 // At a steady rate the step is the time on screen: even motion, and only steps the games' own interval logic uses (60 / 30 / 20 fps). Real time the game falls behind (a late
 // frame, a hitch) is a debt paid back one extra vsync per frame, so over time game time = real time. k follows the frames' cost: three late frames in a row step up to the cost
 // (30 fps when 60 does not hold: no 40 fps steps on 120 Hz screens) when the frames at k also fall short of it on average (FSTEP_LATE over the last FSTEP_RUN frames); 30 frames
-// in a row whose cost would fit k − 1 try it, and a trial that fails waits twice as long before the next (1 s → 8 s), so a device on the edge does not flap.
+// in a row on time whose cost, or the mean cost of the hold's frames, would fit k − 1 try it, and a trial that fails waits twice as long before the next (1 s → 8 s), so a device on the edge does not flap.
 // The average: a frame late by FSTEP_LATE is the rate of a hold that does not hold (53 fps is not 60), but three such frames in a row among frames on time are not. Frames whose
 // cost scatters around k (Mario Kart World on an M4 Max: 20–30% of them 1–5 ms late, 57.5–61 fps and game time 0.99–1.02 of real time with no holds) met three in a row about once
 // a second and spent half the time at 30 or 20, up and down 30 times a session (issue #1823); a short hitch (pipeline compiles) stepped to 30 the same way. The late frames are
@@ -71,6 +71,19 @@ typedef struct {
     int no_payback;           // set by the caller: 1 = the game does not take the step (120 fps: it steps by its target), so three late frames raise the hold whatever the average
     uint64_t late, paid, ups, downs, failed, probes; double dropped;   // statistics for the log
 } nvn_fstep;
+
+// A drain of frames standing in the display link's queue in a frame's time (hle_nvn.c fstep_tick, g_fs_drain; nvn_link_drain.h): the acquire waited extra link ticks while the
+// screen showed every queued frame for its hold, so the part that made the frame longer than its hold is neither a late frame nor time the game owes: it comes out of the
+// frame's time. (The wait for the screen without the link is not one: there a frame longer than its hold is one the screen showed late.) span: time since the previous frame's
+// start; hold: the hold the frame had; first: drain in the acquire that started this frame, part of *pacing (its pacing wait); before: drain in later acquires of the previous
+// frame, in span but not in *pacing. Returns span less the cut; *pacing loses the cut's part in it (the frame's CPU time, span − pacing, keeps what it was, less the later
+// acquires' wait, which was no work either). All in the same unit (ns).
+static inline uint64_t nvn_fstep_drain_cut(uint64_t span, uint64_t hold, uint64_t first, uint64_t before, uint64_t *pacing) {
+    if (first > *pacing) first = *pacing;
+    uint64_t over = span > hold ? span - hold : 0, cut = first + before < over ? first + before : over;
+    *pacing -= cut < first ? cut : first;
+    return span - cut;
+}
 
 // Whether the cost at the longer hold is the cost that held kmin (a probe without a slowed report)
 static inline int nvn_fstep_same(const nvn_fstep *s) { return s->cref > 0 && s->cn >= FSTEP_RUN && s->ccur <= FSTEP_SAME * s->cref; }
@@ -146,7 +159,11 @@ static inline int nvn_fstep_next(nvn_fstep *s, double shown, double cost, int km
         if (held == kmin && s->run >= hold_max) s->cref = s->crun;   // kmin held 8 s at this cost
         s->k = want; s->ups++; s->late_run = s->fit_run = 0; s->since = 0; s->probe = 0;
     } else if (s->trial && !grace && !--s->trial) { if (s->probe) { s->probe = 2; s->since = 0; } else s->hold = hold0; }   // the trial held (a probe's run at kmin is judged at the next step up)
-    if (!late) s->fit_run = s->k > kmin && cost <= FSTEP_FIT * (s->k - 1) ? s->fit_run + 1 : 0;
+    // A frame also fits k − 1 while the running mean of this hold's frames on time does: single frames over the fit among frames under it are
+    // what the shorter hold absorbs, and they kept the trial from ever starting (Ocarina of Time on a Mac after a load's late frames: 13.4 ms of GPU work at hold 2 with one
+    // frame in 20 over 14.2 ms, 30 fps for the rest of the scene where 60 had held; 22 ms at hold 3 under a lowered GPU clock with frames of 29–44 ms, 20 fps for 25 s)
+    double fitc = s->ck == s->k && s->cn && s->ccur < cost ? s->ccur : cost;
+    if (!late) s->fit_run = s->k > kmin && fitc <= FSTEP_FIT * (s->k - 1) ? s->fit_run + 1 : 0;
     if (s->fit_run >= FSTEP_RUN && s->since >= s->hold && !s->trial) { s->k--; s->downs++; s->trial = FSTEP_RUN; s->fit_run = 0; }
     else if ((slow || nvn_fstep_same(s)) && s->k > kmin && s->since >= s->hold && !s->trial) {   // probe: straight to kmin, so the controller sees the whole deadline
         s->k = kmin; s->downs++; s->probes++; s->trial = FSTEP_RUN; s->probe = 1; s->grace = FSTEP_GRACE; s->fit_run = s->late_run = 0; s->pa = s->pb = 0; s->plate = s->ptotal = 0;

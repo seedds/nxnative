@@ -190,7 +190,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
                         res = context.FPMultiply(res, context.Load(StorageKind.Input, IoVariable.FragmentCoord, null, Const(3)));
                     }
                 }
-                else if (imm10 is AttributeConsts.BaryCoordX or AttributeConsts.BaryCoordX + 4)
+                else if (imm10 is AttributeConsts.BaryCoordX or AttributeConsts.BaryCoordX + 4 or AttributeConsts.BaryCoordX + 8)
                 {
                     // nxnative: the perspective barycentric coordinates are read divided by w, like a perspective attribute
                     res = context.FPMultiply(res, context.Load(StorageKind.Input, IoVariable.FragmentCoord, null, Const(3)));
@@ -256,6 +256,15 @@ namespace Ryujinx.Graphics.Shader.Instructions
         public static void Isberd(EmitterContext context)
         {
             InstIsberd op = context.GetOp<InstIsberd>();
+
+            // nxnative: in a hull shader that writes its control points straight into the stage's circular buffer, ISBERD with O reads the shader's own outputs: the two
+            // words at 0x7e and 0x7f (the count of per-patch words and the stride between output words), and the output words it copies into the buffer after its
+            // body. DirectCbeWrites answers the first two and drops those copies
+            if (op.O && context.TranslatorContext.UsesDirectCbe)
+            {
+                context.Copy(GetDest(op.Dest), context.Load(StorageKind.Input, IoVariable.IsbeOutput, GetSrcReg(context, op.SrcA)));
+                return;
+            }
 
             // This instruction performs a load from ISBE (Internal Stage Buffer Entry) memory.
             // Here, we just propagate the offset, as the result from this instruction is usually
@@ -345,7 +354,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
         // nxnative: a float attribute the rasterizer interpolates (not the primitive, layer and viewport indices, the viewport mask or the facing)
         private static bool IsInterpolatedFloat(int attr)
         {
-            return attr is >= AttributeConsts.PositionX and < AttributeConsts.ViewportMask or >= 0x3a8 and < AttributeConsts.BaryCoordX + 8;
+            return attr is >= AttributeConsts.PositionX and < AttributeConsts.ViewportMask or >= 0x3a8 and < AttributeConsts.BaryCoordX + 12;
         }
 
         private static bool TryFixedFuncToUserAttributeIpa(EmitterContext context, int attr, out Operand selectedAttr)

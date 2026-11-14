@@ -15,6 +15,7 @@ SCHEMA = ('CREATE TABLE IF NOT EXISTS blob(id INTEGER PRIMARY KEY, hash BLOB UNI
 SHADER_ENTRY = re.compile(r'shader/([0-9a-f]{64})/')
 WAIT = 600   # seconds another process's write may hold this one up
 _DAMAGED = ('malformed', 'not a database', 'disk image')
+DBMOVED = 1032   # SQLITE_READONLY_DBMOVED, an error's sqlite_errorcode (Python 3.11+)
 READ_ONLY = None   # set only by --run: the harness supplies this module to older SQLite-based builders too
 
 
@@ -75,7 +76,8 @@ class Store(_Files):
     def __init__(self, path, say=print, *, readonly=None):
         self.path, self.say = os.fspath(path), say
         self.lock = threading.RLock()   # one connection, for dmsh_build.py's threads: a read or a write of an entry takes microseconds next to a compile
-        self.full = False
+        self.full = False   # set by the first write that fails (a full drive): no later write is tried, and the batch it was part of is rolled back
+        self.outer = False   # inside the outermost batch: SQLite may end the transaction itself on a failed write, so its own flag cannot tell
         source = readonly if readonly is not None else READ_ONLY
         if source and os.path.realpath(source) == os.path.realpath(self.path): raise ValueError('the writable and read-only shader caches must differ')
         self.use_lock = None
@@ -87,17 +89,29 @@ class Store(_Files):
         self.readonly = _ReadOnly(source, say) if source else None
         self._open()
 
+    def _connect(self): return sqlite3.connect(self.path, timeout=WAIT, check_same_thread=False, isolation_level=None)
+
     def _open(self):
         os.makedirs(os.path.dirname(os.path.abspath(self.path)), exist_ok=True)
-        self.db = sqlite3.connect(self.path, timeout=WAIT, check_same_thread=False, isolation_level=None)
+        self.db = self._connect()
         try:
-            self.db.execute('PRAGMA page_size=16384'); self.db.execute('PRAGMA auto_vacuum=INCREMENTAL')   # both only before the first table
-            # WAL: a reader in another process does not wait for a writer, and a commit needs no fsync. A drive that cannot share its memory file stays on the rollback journal, unsynced: a stop costs the cache at worst
-            if self.db.execute('PRAGMA journal_mode=WAL').fetchone()[0].lower() == 'wal': self.db.execute('PRAGMA synchronous=NORMAL')
-            else: self.db.execute('PRAGMA synchronous=OFF')
-            for s in SCHEMA: self.db.execute(s)
+            try: self._prepare()
+            except sqlite3.OperationalError as e:
+                # SQLite notes the file's inode when it opens it and refuses a write once the path names another (SQLITE_READONLY_DBMOVED, "attempt to write a readonly database").
+                # A new file on an exFAT drive under macOS 26.6.2 took another inode at SQLite's first write, past SQLite's own guard for such drives (a byte written at open; why it missed is open,
+                # docs/reference/packing.md). The file is opened again, once, so that SQLite notes the number it now keeps. A file that moves again fails as before
+                if getattr(e, 'sqlite_errorcode', None) != DBMOVED: raise
+                with contextlib.suppress(sqlite3.Error): self.db.close()
+                self.db = self._connect(); self._prepare()
         except sqlite3.DatabaseError as e:
             if not self._damage(e): raise
+
+    def _prepare(self):   # the file's settings and tables; each step does nothing to a file that has them, so a reopened file takes it again
+        self.db.execute('PRAGMA page_size=16384'); self.db.execute('PRAGMA auto_vacuum=INCREMENTAL')   # both only before the first table
+        # WAL: a reader in another process does not wait for a writer, and a commit needs no fsync. A drive that cannot share its memory file stays on the rollback journal, unsynced: a stop costs the cache at worst
+        if self.db.execute('PRAGMA journal_mode=WAL').fetchone()[0].lower() == 'wal': self.db.execute('PRAGMA synchronous=NORMAL')
+        else: self.db.execute('PRAGMA synchronous=OFF')
+        for s in SCHEMA: self.db.execute(s)
 
     def _damage(self, e):   # True when e says the file is damaged, which is now made anew
         if not any(w in str(e) for w in _DAMAGED): return False
@@ -126,7 +140,8 @@ class Store(_Files):
         return local | self.readonly.names(prefix) if self.readonly else local
 
     def put(self, name, data, when=None):
-        """An entry's bytes, replacing what it held. A cache that cannot be written (a full drive) is one [RED] line: the build goes on without it"""
+        """An entry's bytes, replacing what it held. A cache that cannot be written (a full drive) is one [RED] line: the build goes on without it, and the batch this write was part of is rolled back"""
+        if self.full: return   # inside a failed batch, a write would land outside it: SQLite may have rolled the transaction back already
         digest = hashlib.blake2b(data, digest_size=16).digest()
         with self.lock:
             try:
@@ -134,23 +149,36 @@ class Store(_Files):
                     row = self.db.execute('SELECT id FROM blob WHERE hash=?', (digest,)).fetchone()
                     blob = row[0] if row else self.db.execute('INSERT INTO blob(hash, data) VALUES(?, ?)', (digest, data)).lastrowid
                     self.db.execute('INSERT OR REPLACE INTO entry(name, blob, mtime) VALUES(?, ?, ?)', (name, blob, time.time() if when is None else when))
-            except sqlite3.OperationalError as e:
-                if any(w in str(e) for w in _DAMAGED): self._damage(e)
-                elif not self.full: self.full = True; self.say(f'[RED] the shader compile cache {self.path} cannot be written, the build goes on without it: {e}')
+            except sqlite3.OperationalError as e: self._unwritable(e)
             except sqlite3.DatabaseError as e:
                 if not self._damage(e): raise
 
+    def _unwritable(self, e):
+        if any(w in str(e) for w in _DAMAGED): self._damage(e)
+        elif not self.full: self.full = True; self.say(f'[RED] the shader compile cache {self.path} cannot be written, the build goes on without it: {e}')
+
     @contextlib.contextmanager
     def batch(self):
-        """Several entries as one write: a stop leaves all of them or none (a shader's outputs and the index naming them), and thousands take one commit. Nests; the outermost commits"""
+        """Several entries as one write: a stop leaves all of them or none (a shader's outputs and the index naming them), and thousands take one commit. Nests; the outermost commits.
+        A write that fails in it, or its commit, fails all of it: it is rolled back and full is set, which a caller holding files for it checks once the batch is over (dmsh_build.py's commit)"""
         with self.lock:
-            if self.db.in_transaction: yield; return
-            self.db.execute('BEGIN IMMEDIATE')
+            if self.outer or self.db.in_transaction: yield; return
+            was = self.full
+            self.db.execute('BEGIN IMMEDIATE'); self.outer = True
             try: yield
             except BaseException:
                 if self.db.in_transaction: self.db.rollback()
                 raise
-            else: self.db.commit()
+            else:
+                if self.full and not was:
+                    if self.db.in_transaction: self.db.rollback()
+                else:
+                    try: self.db.commit()
+                    except sqlite3.OperationalError as e:
+                        with contextlib.suppress(sqlite3.Error):
+                            if self.db.in_transaction: self.db.rollback()
+                        self._unwritable(e)
+            finally: self.outer = False
 
     def prune_shaders(self, keep, since):
         """Remove the shader/<64 hex digits>/ entries not in keep and all written before since, and the bytes nothing names any more, giving their pages back. Other names stay.

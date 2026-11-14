@@ -11,9 +11,13 @@ IOS_MIN_FLAG = '-mios-version-min=18.0'
 IOS_FLAGS = [IOS_MIN_FLAG, '-fmetal-math-mode=relaxed']
 METAL = ['xcrun', '-sdk', 'iphoneos', 'metal', '-c', '-O1', *IOS_FLAGS, '-fpreserve-invariance', '-fwrapv']   # -fwrapv: see dmsh_chain.py MAC_METAL
 METALLIB = ['xcrun', '-sdk', 'iphoneos', 'metallib']
-RECORD = ' '.join(METAL) + '; ' + ' '.join(METALLIB)                                # Written into json chain.metal
+# A source that uses MSL 4.0's vertex_value (a pixel shader reading an attribute per vertex, dmsh_rewrite.per_vertex) compiles as MSL 4.0, which only iOS 26 loads; every other source keeps
+# the deployment target's language, so its library loads on every iPhone it did before. The Mac needs no such flag: its deployment target (dm/mac/min_os.mk) is already MSL 4.0
+METAL4, METAL4_FLAG = b'vertex_value<', '-std=metal4.0'
+RECORD = ' '.join(METAL) + f' ({METAL4_FLAG} for a source using vertex_value); ' + ' '.join(METALLIB)   # Written into json chain.metal
 DEPTH = ['-fbracket-depth=1024']   # more nested brackets than the front end's 256 (as dmsh_build.py's METAL_DEPTH): no output changes with it, so RECORD does not name it
 
 def compile(msl, air, lib):
-    dmsh_pch.compile(METAL + DEPTH, msl, air)
+    with open(msl, 'rb') as f: v4 = METAL4 in f.read()
+    dmsh_pch.compile(METAL + ([METAL4_FLAG] if v4 else []) + DEPTH, msl, air)
     subprocess.run([*METALLIB, air, '-o', lib], check=True)

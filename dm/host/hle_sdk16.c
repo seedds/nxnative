@@ -193,6 +193,23 @@ static unsigned pl_builtin_font(pl_builtin_font_t *out, int type) {
 }
 HLE_FORCE("_ZN2nn2pl18GetBuiltInFontDataEPNS0_17BuiltInFontDataNxENS0_17BuiltInFontTypeNxEb", "one built-in font (Switch 1 type): the stand-in TTFs", unsigned, h_pl_BuiltInNx, pl_builtin_font_t *out, int type, unsigned b) { (void)b; return pl_builtin_font(out, type); }
 HLE_FORCE("_ZN2nn2pl18GetBuiltInFontDataEPNS0_20BuiltInFontDataOunceENS0_20BuiltInFontTypeOunceEb", "one built-in font (Switch 2 type): the stand-in TTFs", unsigned, h_pl_BuiltInOunce, pl_builtin_font_t *out, int type, unsigned b) { (void)b; return pl_builtin_font(out, type); }
+// Several built-in fonts by a list of types (SDK 21's pl; Kirby and the Forgotten Land's Nintendo Switch 2 Edition, 04004D300C5AE001, calls the Switch 2 overload at boot, sdk+0x4fc780 in its v65536;
+//   Splatoon Raiders' sdk+0x59a3c0 and, for Switch 1 types, sdk+0x59a720): the SDK takes at most 6 Switch 2 or 7 Switch 1 types, sends them to pl:u as one byte each, fills *count entries of
+//   0x18 bytes in order, each as GetBuiltInFontData fills one, and returns whether the fonts are loaded; a failed request aborts. The Switch 2 overload has the service write *count whatever
+//   the answer, the Switch 1 overload writes it only when the fonts are loaded. Unhooked, both abort on pl:u as GetBuiltInFontData does. Each type is filled as the takeover above fills it,
+//   in the order asked; a type with no stand-in font is left out of the count
+static unsigned pl_builtin_font_set(int *count, pl_builtin_font_t *out, const uint8_t *types, int n, int max, int count_if_unloaded) {
+    int k = 0;
+    for (int i = 0; i < n && i < max; i++) k += (int)pl_builtin_font(&out[k], types[i]);
+    if (k > 0 || count_if_unloaded) *count = k;
+    return k > 0;
+}
+HLE_FORCE("_ZN2nn2pl21GetBuiltInFontDataSetEPiPNS0_20BuiltInFontDataOunceEPKNS0_20BuiltInFontTypeOunceEiNS_8settings12LanguageCodeEb", "built-in fonts by a list of types (Switch 2 types, at most 6): the stand-in TTFs", unsigned, h_pl_BuiltInSetOunce, int *count, pl_builtin_font_t *out, const uint8_t *types, int n, uint64_t lang, unsigned b) {
+    (void)lang; (void)b; return pl_builtin_font_set(count, out, types, n, 6, 1);
+}
+HLE_FORCE("_ZN2nn2pl21GetBuiltInFontDataSetEPiPNS0_17BuiltInFontDataNxEPKNS0_17BuiltInFontTypeNxEiNS_8settings12LanguageCodeEb", "built-in fonts by a list of types (Switch 1 types, at most 7): the stand-in TTFs", unsigned, h_pl_BuiltInSetNx, int *count, pl_builtin_font_t *out, const uint8_t *types, int n, uint64_t lang, unsigned b) {
+    (void)lang; (void)b; return pl_builtin_font_set(count, out, types, n, 7, 0);
+}
 // Whether running on a Switch 2 (codename Ounce) (returns bool): the host reports false, as a Switch 1. Mario 1.2.1 uses it to decide whether to count add-on content (the upgrade pack) and suggest the Switch 2 Edition
 HLE_FORCE("_ZN2nn2pl16IsRunningOnOunceEv", "running on Switch 2: no", unsigned, h_pl_IsOunce, void) { return 0; }
 // The Legend of Zelda: Breath of the Wild (SDK 20): asks for the shared fonts to be loaded before querying their state; the host's stand-in fonts are there on demand. VR mode (the Labo VR goggles): the host never enters VR; the query is always false,
@@ -343,8 +360,8 @@ static void diag_abort(uint32_t res, void *lr) {
     dm_backtrace((uint64_t)__builtin_frame_address(1));
     die("game aborted");
 }
-HLE_FORCE("_ZN2nn4diag6detail9AbortImplEv", "game aborted", void, h_diag_Abort0, void) { diag_abort(0, __builtin_return_address(0)); }
-HLE_FORCE("_ZN2nn4diag6detail9AbortImplEPKNS_6ResultE", "game aborted (with Result)", void, h_diag_AbortR, const uint32_t *r) { diag_abort(r ? *r : 0, __builtin_return_address(0)); }
+HLE_FORCE("_ZN2nn4diag6detail9AbortImplEv", "game aborted", void, h_diag_Abort0, void) { diag_abort(0, dm_bigstack_caller(__builtin_return_address(0))); }
+HLE_FORCE("_ZN2nn4diag6detail9AbortImplEPKNS_6ResultE", "game aborted (with Result)", void, h_diag_AbortR, const uint32_t *r) { diag_abort(r ? *r : 0, dm_bigstack_caller(__builtin_return_address(0))); }
 HLE_FORCE("_ZN2nn4diag12GetBacktraceEPmi", "backtrace; the host provides none (0 frames)", int, h_diag_Bt, uint64_t *out, int n) { (void)out; (void)n; return 0; }
 // An assert, a C++ exception that nothing caught (std::terminate) or an SDK check reached VAbortImpl: print where it came from and the message's FORMAT, which
 // names the failure on its own ("libc++abi: terminating due to uncaught exception of type ...", Well Dweller's first boot). The arguments the format would fill
@@ -354,7 +371,7 @@ HLE_FORCE("_ZN2nn4diag6detail10VAbortImplEPKcS3_S3_iPKNS_6ResultEPKNS_2os17UserE
           const char *fn, const char *expr, const char *file, int line, const void *res, const void *info, const char *fmt, void *ap) {
     (void)info; (void)ap;
     LOG("[diag] abort at %s: %s (%s:%d) message format %s", fn ? fn : "?", expr ? expr : "?", file ? file : "?", line, fmt ? fmt : "?");
-    diag_abort(res ? *(const uint32_t *)res : 0, __builtin_return_address(0));   // VAbortImpl never returns to its caller
+    diag_abort(res ? *(const uint32_t *)res : 0, dm_bigstack_caller(__builtin_return_address(0)));   // VAbortImpl never returns to its caller
 }
 HLE_FORCE("_ZN2nn4diag13GetSymbolNameEPcmm", "symbol name; the host provides none (empty string)", uint64_t, h_diag_SymName, char *buf, size_t n, uint64_t addr) { (void)addr; if (buf && n) buf[0] = 0; return 0; }
 

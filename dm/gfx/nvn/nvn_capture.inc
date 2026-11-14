@@ -347,7 +347,7 @@ static void cap_head(void) {
 #undef KV
     cap_put(&g_cap_w, CAP_HEAD, 0, h.p, h.n, 0); cap_buf_free(&h);
     const char *lay = cap_layout(); cap_put(&g_cap_w, CAP_LAYT, 0, lay, strlen(lay), 0);
-    snprintf(line, sizeof line, "tex_pool_n\t%d\norigin_ll\t%d\nqueue_origin_ll\t%d\ndepth_zero\t%d\n", g_tpool_n, atomic_load(&g_origin_ll), g_queue_origin_ll, atomic_load(&g_depth_zero));
+    snprintf(line, sizeof line, "tex_pool_n\t%d\nsamp_pool_n\t%d\norigin_ll\t%d\nqueue_origin_ll\t%d\ndepth_zero\t%d\n", g_tpool_n, g_spool_n, atomic_load(&g_origin_ll), g_queue_origin_ll, atomic_load(&g_depth_zero));
     cap_put(&g_cap_w, CAP_STAT, 0, line, strlen(line), 0);
 }
 static void cap_pools(uint32_t submit) {   // regions for pools not covered yet (all of them at submit 1), and the replay layer's pool list
@@ -416,7 +416,7 @@ static void cap_flush_objs(uint32_t submit) {
     g_cap_pobj.n = g_cap_tobj.n = g_cap_progb.n = g_cap_dpolb.n = g_cap_kind.n = 0;
 }
 // A capture step takes seconds to minutes on the thread that submits or presents, which may hold a time-constraint (real-time) policy declared for a few milliseconds a frame
-// (hle_nvn.c, set_time_constraint_comp). The kernel then lets it run in short slices only: Pokemon Scarlet's pool bytes took 1,175 s to compress where the same data takes 55 s,
+// (hle_nvn.c rt_declare). The kernel then lets it run in short slices only: Pokemon Scarlet's pool bytes took 1,175 s to compress where the same data takes 55 s,
 // and Breath of the Wild's 118 s where it now takes 29. The step runs under the standard policy, and the thread gets its own back after it
 typedef struct { int rt; thread_time_constraint_policy_data_t p; } cap_policy;
 static cap_policy cap_policy_standard(void) {

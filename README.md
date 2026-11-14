@@ -19,6 +19,7 @@ These Switch 2 games have passed Mac gameplay testing. Build them from a [`.nup`
 - [Mario Kart World](dm/games/0400C3F00006E000/README.md)
 - [Mario Tennis Fever](dm/games/0400D4201C6EA000/README.md)
 - [Nintendo Switch Sports Resort](dm/games/04008E001F098000/README.md)
+- [Orbitals](dm/games/040032B023CA4000/README.md) — two players: a controller for player 2
 - [Pokémon Pokopia](dm/games/0400A3A01EE4C000/README.md)
 - [PRAGMATA](dm/games/0400C76024710000/README.md)
 - [Splatoon Raiders](dm/games/0400380020056000/README.md)

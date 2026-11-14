@@ -100,6 +100,10 @@ void dm_focus_set(int st) {
 }
 static int opmode(void) { return dm_opmode(); }
 
+// The SDK's backlight calls dereference am's absent CommonStateGetter.
+// The host does not control a Switch LCD; leave the host display on.
+HLE_FORCE("_ZN2nn2oe20SwitchLcdBacklightOnEv", "turn the handheld screen on (through am); the host has no Switch LCD", void, h_oe_LcdOn, void) {}
+HLE_FORCE("_ZN2nn2oe21SwitchLcdBacklightOffEv", "turn the handheld screen off (through am); the host has no Switch LCD", void, h_oe_LcdOff, void) {}
 // Screenshot / video recording switches: the host has no system screenshot service, no-op
 // Star Fox (SDK 21): the game marks the sections where it shows the player's own photographs (GameChat's camera pictures on screen); the system keeps those out of captures. No captures here
 HLE_FORCE("_ZN2nn2oe32BeginPresentPhotographedContentsEv", "photographed contents on screen: noted nowhere (no capture service)", void, h_oe_PhotoBegin, void) {}

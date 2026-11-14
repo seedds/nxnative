@@ -1,0 +1,42 @@
+# Game profile of Chained Echoes (Switch, update 1.1.1 = v131072). Plays on the Mac
+# Format: see dm/games/README.md
+# Unity 2020.3.36f1 (IL2CPP), SDK 14.3.0 (its sdk is Batman: Arkham Knight 1.0.5's build, 2aef2cff…), NVN API 55.15; subsdk0 is NintendoSDK_movie.
+# The shaders are Unity shader objects in the player's serialized files and packs under Data/, read by the shader split: 3,832 of them (1,877 vertex, 1,881 pixel, 73 compute, 1 geometry).
+# The game asks for present interval 1 and runs at 60 fps on the Mac, as on the Switch.
+
+# ---- Identity ----
+title_id	0100C510166F0000
+program_id	0100C510166F0000
+
+# ---- App ----
+# Game name: only a label for profile listings and the Mac window title; the iOS app name is the game name in the base NSP, and the bundle ID comes from the base game title ID
+name	Chained Echoes
+ipa	ChainedEchoes.ipa
+app_category	public.app-category.games
+
+# ---- Versions ----
+build	v131072	1.1.1	main=143439c462629f4d0ed2c23d60674bf5	subsdk0=c781dd63daf0ddcdb9975da50a198f93	sdk=2aef2cffb104ee7c9e212fd2f4c731e9
+package	v131072
+shader_versions	v131072
+
+# ---- Files ----
+# load order as on Horizon: main, subsdk*, sdk (subsdk0 = NintendoSDK_movie)
+modules	main subsdk0 sdk
+romfs_marker	Data/resources.resource
+zip_store	.assets:.bundle:.bytes:.dat:.png:.resource:.ress:.metallib
+
+# ---- Memory ----
+# The NPDM declares 16 MB of system resource, so IsVirtualAddressMemoryEnabled is true: the game takes its memory as address regions. The sdk build takes the SDK-wide node area cut
+# (1 GB → 62 MB) and the 2 MB alignment of large regions (dm/tools/sdk_patches.py, implementation 3 of 8 and 3 of 4). The 5 GB block of Ace Attorney Investigations Collection with a
+# 3.2 GB pool: the alias region's high-water mark was +3.5 GB of the 64 GB alias region in a 2-minute play run, 1.95 GB resident and 1.01 GB of Metal allocations.
+# The pool is still the survey's guess: no heap check has run on this build (the profile entered the tools through DM_GAMES_DIR, so the NSP script did not treat it as provisional).
+sys_resource	0x1000000
+mem_reserve	0x140000000
+mem_alias	0x118000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+
+# ---- Shader split (shader_split.py; Unity shader objects) ----
+# everything is under Data/: the player's serialized files and its bundles
+shader_groups	/Data/=data
+shader_note	Chained Echoes shaders

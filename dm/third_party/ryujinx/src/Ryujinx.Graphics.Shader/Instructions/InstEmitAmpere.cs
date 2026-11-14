@@ -65,8 +65,9 @@ namespace Ryujinx.Graphics.Shader.Instructions
             X(AmpereOpcodes.Kill, InstName.Kil, InstEmit.AKill, B, writesRd: false);
             X(AmpereOpcodes.Ret, InstName.Ret, InstEmit.ARet, B, writesRd: false);
             X(AmpereOpcodes.Call, InstName.Cal, InstEmit.ACall, B, writesRd: false);
-            // ERRBAR 0x9ab, which follows a MEMBAR, only orders error reporting.
-            foreach (int op in new[] { 0x918, 0x91a, 0x945, 0x941, 0x942, 0x948, 0x9ab })
+            // ERRBAR 0x9ab, which follows a MEMBAR, only orders error reporting. YIELD 0x946 (CuAssembler's sm_86 records: 0x...7946 is "YIELD ;") only lets the scheduler
+            // run another of the warp's paths: Resident Evil 4's 21 compute shaders with it have it after MEMBAR; ERRBAR, before a branch.
+            foreach (int op in new[] { 0x918, 0x91a, 0x945, 0x941, 0x942, 0x946, 0x948, 0x9ab })
             {
                 X(op, InstName.Nop, InstEmit.ANop, InstProps.None, writesRd: false);
             }

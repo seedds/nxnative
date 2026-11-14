@@ -93,6 +93,11 @@ namespace Ryujinx.Graphics.Shader.Translation
         public bool OmapSampleMask { get; }
         public bool OmapDepth { get; }
 
+        // nxnative: the attribute words a vertex, tessellation or geometry shader writes, in attribute order: the output map (OMAP) of its header, 240 bits at 0x32, one per
+        // attribute word from 0x000 to 0x3bc (system values A and B, the 128 generic words, colours, system values C, the fixed-function texture coordinates). A hull shader that
+        // writes its control points straight into the stage's circular buffer numbers its output words in this order (DirectCbeWrites)
+        public int[] OutputWords { get; }
+
         public ShaderHeader(IGpuAccessor gpuAccessor, ulong address)
         {
             ReadOnlySpan<int> header = MemoryMarshal.Cast<ulong, int>(gpuAccessor.GetCode(address, 0x50));
@@ -165,6 +170,23 @@ namespace Ryujinx.Graphics.Shader.Translation
             OmapTargets = type2OmapTarget;
             OmapSampleMask = type2Omap.Extract(0);
             OmapDepth = type2Omap.Extract(1);
+
+            if (Stage != ShaderStage.Fragment)
+            {
+                ReadOnlySpan<byte> bytes = MemoryMarshal.AsBytes(header);
+                int count = 0;
+                Span<int> words = stackalloc int[240];
+
+                for (int bit = 0; bit < 240; bit++)
+                {
+                    if ((bytes[0x32 + (bit >> 3)] & (1 << (bit & 7))) != 0)
+                    {
+                        words[count++] = bit * 4;
+                    }
+                }
+
+                OutputWords = words[..count].ToArray();
+            }
         }
     }
 }

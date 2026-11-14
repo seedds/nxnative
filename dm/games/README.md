@@ -73,6 +73,7 @@ One row per profile; the notes are each profile's `README.md`.
 | [Castlevania: Belmont's Curse](0100BA4026E94000/README.md) | `0100BA4026E94000` | 1.1.0 | 19.3.16 | Unity 2022.3.62f2 IL2CPP, FMOD | NVN |
 | [Catherine: Full Body](0100BF00112C0000/README.md) | `0100BF00112C0000` | 1.0.1a | 8.2.1 | Atlus GFD (CRI middleware) | NVN |
 | [Celeste](01002B30028F6000/README.md) | `01002B30028F6000` | 1.4.1.1 | 15.3.2 | MonoGame (C# → C++ by BRUTE) | NVN |
+| [Chained Echoes](0100C510166F0000/README.md) | `0100C510166F0000` | 1.1.1 | 14.3.0 | Unity 2020.3.36f1 IL2CPP, NintendoSDK_movie | NVN |
 | [Cult of the Lamb](01002E7016C46000/README.md) | `01002E7016C46000` | 1.5.28 | 19.3.14 | Unity 2022.3.62f3 IL2CPP, FMOD | NVN |
 | [Cuphead](0100A5C00D162000/README.md) | `0100A5C00D162000` | 1.3.7 | 5.5.0 | Unity 2017.4.9f1 IL2CPP | NVN |
 | [DARK SOULS: REMASTERED](01004AB00A260000/README.md) | `01004AB00A260000` | 1.0.3 | 4.5.0 | FromSoftware's engine | NVN |
@@ -114,6 +115,7 @@ One row per profile; the notes are each profile's `README.md`.
 | [Kirby Star Allies](01007E3006DDA000/README.md) | `01007E3006DDA000` | 4.0.0a | 4.4.1 | HAL Laboratory's engine (NintendoWare) | NVN |
 | [Luigi's Mansion 3](0100DCA0064A6000/README.md) | `0100DCA0064A6000` | 1.4.0 | 7.3.2 | Next Level Games' engine | NVN |
 | [Mario & Luigi: Brothership](01006D0017F7A000/README.md) | `01006D0017F7A000` | 1.0.0 | 12.3.2 | Unreal Engine 4.27.2, Wwise | NVN |
+| [Mario Golf: Super Rush](0100C9C00E25C000/README.md) | `0100C9C00E25C000` | 4.0.0 | 11.4.0 | Camelot's engine, NintendoWare | NVN |
 | [Mario Kart World](0400C3F00006E000/README.md) | `0400C3F00006E000` | v0 (Switch 2) | 19.3.3 (Ounce) | Nintendo EPD (sead / agl / gsys, Pia) | NVN2 |
 | [Mario Tennis Fever](0400D4201C6EA000/README.md) | `0400D4201C6EA000` | v327680 (Switch 2) | 20.5.17 (Ounce) | Camelot's engine, NintendoWare | NVN2 |
 | [Mario Kart 8 Deluxe](0100152000022000/README.md) | `0100152000022000` | 4.0.0, 4.0.1 | 4.4.0 | Nintendo (sead / agl / gsys, NintendoWare, Pia) | NVN |
@@ -135,6 +137,7 @@ One row per profile; the notes are each profile's `README.md`.
 | [Octopath Traveler 0](01005270232F2000/README.md) | `01005270232F2000` | 1.0.5 | 19.3.13 | Unreal Engine 5 | NVN |
 | [OCTOPATH TRAVELER II](0100A3501946E000/README.md) | `0100A3501946E000` | 1.1.1 | 12.3.2 | Unreal Engine 4.27 | NVN |
 | [ŌKAMI HD](0100276009872000/README.md) | `0100276009872000` | 1.0.0 (base) | 4.5.0 | Clover Studio's PS2 engine, remastered; CRIWARE | NVN |
+| [Orbitals](040032B023CA4000/README.md) | `040032B023CA4000` | 1.1.2.0 (Switch 2) | 21.4.2 (Ounce) | Unreal Engine 5.6.1, Wwise, Bink 2 | NVN2 |
 | [Ori and the Blind Forest: Definitive Edition](010061D00DB74000/README.md) | `010061D00DB74000` | 1.0.2 | 8.2.0 | Unity 2018.4.1f1 IL2CPP, FMOD | NVN |
 | [Ori and the Will of the Wisps](01008DD013200000/README.md) | `01008DD013200000` | 1.2.1 | 9.4.0 | Unity 2018.4.24f1 IL2CPP, Wwise | NVN |
 | [Paper Mario: The Origami King](0100A3900C3E2000/README.md) | `0100A3900C3E2000` | 1.0.1 | 8.3.1 | Intelligent Systems' engine on NintendoWare | NVN |
@@ -157,6 +160,7 @@ One row per profile; the notes are each profile's `README.md`.
 | [Princess Peach: Showtime!](01007A3009184000/README.md) | `01007A3009184000` | 1.0.0 | 15.3.2 | Unreal Engine 4.27 (Good-Feel), Wwise | NVN |
 | [Raging Loop](010020400E1C2000/README.md) | `010020400E1C2000` | 1.0.0 (base) | 7.3.2 | Unity 2018.3.10f1 IL2CPP | NVN |
 | [Red Dead Redemption](01007820196A6000/README.md) | `01007820196A6000` | 1.0.7 | 15.3.2 | Rockstar's RAGE (Double Eleven port) | NVN |
+| [Resident Evil 4](0400569027BF4000/README.md) | `0400569027BF4000` | v131072 (Switch 2) | 21.4.3 (Ounce) | RE Engine, Havok, Wwise | NVN2 |
 | [Return of the Obra Dinn](010032E00E6E2000/README.md) | `010032E00E6E2000` | 1.0.1 | 8.2.0 | Unity 2017.4.28f1 IL2CPP | NVN |
 | [Rhythm Heaven Groove](0100D9F01D474000/README.md) | `0100D9F01D474000` | 1.0.0 (base) | 21.4.0 | Nintendo's own 2D engine | NVN |
 | [ROMANCE OF THE THREE KINGDOMS 8 REMAKE](0100C2A01A730000/README.md) | `0100C2A01A730000` | 1.1.3 | 17.5.3 | Koei Tecmo's KTGL | NVN |
@@ -164,6 +168,7 @@ One row per profile; the notes are each profile's `README.md`.
 | [Sea of Stars](01008C0016544000/README.md) | `01008C0016544000` | 2.0.59001 | 16.2.0 | Unity 2021.3.25f1 IL2CPP | NVN |
 | [SHIN MEGAMI TENSEI V: Vengeance](010069C01AB82000/README.md) | `010069C01AB82000` | 1.0.3 | 15.3.2 | Unreal Engine 4.27 | NVN |
 | [Silver Pines](0100D5B026844000/README.md) | `0100D5B026844000` | 1.0.0 (base) | 21.4.7 | Unity 6000.3.15f1 IL2CPP | NVN |
+| [Sonic Frontiers Definitive Edition](0400921025B32000/README.md) | `0400921025B32000` | v65536 (Switch 2) | 21.4.1 (Ounce) | Hedgehog Engine 2, CRIWARE | NVN2 |
 | [Sonic Superstars](01008F701C074000/README.md) | `01008F701C074000` | 1.1.8 | 16.2.0 | Unity 2021.3.25f1 IL2CPP, CRIWARE, FMOD | NVN |
 | [STEINS;GATE RE:BOOT](01008BC024FDE000/README.md) | `01008BC024FDE000` | 1.0.3 | 20.5.17 | M2's ADV engine | NVN |
 | [Stardew Valley](0100E65002BB8000/README.md) | `0100E65002BB8000` | 1.6.15.13 | 20.5.27 | MonoGame (C# → C++ by BRUTE) | NVN |
@@ -195,6 +200,7 @@ One row per profile; the notes are each profile's `README.md`.
 | [The Legend of Zelda: Skyward Sword HD](01002DA013484000/README.md) | `01002DA013484000` | 1.0.1 | 11.4.0 | Nintendo's Wii-era engine, ported by Tantalus | NVN |
 | [The Legend of Zelda: Tears of the Kingdom](0100F2C0115B6000/README.md) | `0100F2C0115B6000` | 1.4.3 | 20.5.22 | Nintendo EPD (sead / agl / gsys) | NVN |
 | [The Rogue Prince of Persia](01008D9022462000/README.md) | `01008D9022462000` | 1.1.0 | 20.5.29 | Unity 6000.0.64f1 IL2CPP, FMOD | NVN |
+| [Trails in the Sky 2nd Chapter](01007A2027548000/README.md) | `01007A2027548000` | 1.0.4 | 21.4.4 | Nihon Falcom's engine | NVN |
 | [TRIANGLE STRATEGY](0100CC80140F8000/README.md) | `0100CC80140F8000` | 1.1.1 | 12.3.2 | Unreal Engine 4.27 | NVN |
 | [TUNIC](0100DA801624E000/README.md) | `0100DA801624E000` | 1.0.3 | 14.3.0 | Unity 2020.3.36f1 IL2CPP, FMOD | NVN |
 | [Unicorn Overlord](010069401ADB8000/README.md) | `010069401ADB8000` | 1.05 | 16.2.4 | Vanillaware's engine | NVN |

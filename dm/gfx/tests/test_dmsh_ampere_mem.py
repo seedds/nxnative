@@ -140,6 +140,20 @@ class Suatom(Translated):
         self.assertIn('cp_i_cb3_C_r32ui', msl)
         self.assertIn('atomic_fetch_add', msl)
 
+    # The register forms (0x394, 0x396, 0x3a0; SULD / SUST 0x998..0x99e): the handle in Rc (64..72), read here from c[3][0] by a MOV as Orbitals' (Unreal Engine 5.6) global
+    # compute shaders read their ShaderPrint counter's (45389d82b79dbf0c +0x1850, its handle register R20 there). The handle names the binding as the bound form's word would
+    MOV_R12_C3 = (0x003fde0000000f00, 0x00c00000000c7a02)   # MOV R12, c[3][0]
+
+    def test_handle_in_a_register(self):   # SUATOM.ADD.U32 R12, [R12], R24 on a 1D buffer image, as the game encodes it with its handle in R12
+        msl = self.translate(inst(*self.MOV_R12_C3) + inst(0x00321e00001ee00c, 0x200000180c0c7394) + inst(*EXIT))
+        self.assertIn('atomic_fetch_add', msl)
+        self.assertIn('cp_i_cb3_', msl)   # bank 3, word 0: the binding the bound form names
+
+    def test_reduction_with_its_handle_in_a_register(self):   # SURED.OR.U32 above with its handle in R12 (0x3a0)
+        msl = self.translate(inst(*self.MOV_R12_C3) + inst(0x000fe2000310e00c, 0xa00000010800759f - 0x59f + 0x3a0) + inst(*EXIT))
+        self.assertIn('atomic_fetch_or', msl)
+        self.assertIn('cp_i_cb3_', msl)
+
     def test_sured_takes_its_operation(self):   # SURED.OR.U32 as Yoshi and the Mysterious Book's compute shaders encode it, in bank 3
         self.assertIn('atomic_fetch_or', self.translate(inst(0x000fe2000310e000, 0xa0c002010800759f) + inst(*EXIT)))
 
@@ -390,6 +404,16 @@ class BarrierMoves(Translated):
         plain = self.translate(inst(*SUATOM) + inst(*EXIT))
         moved = self.translate(inst(*self.SAVE) + inst(*self.RESTORE) + inst(*SUATOM) + inst(*self.RESTORE_PLAIN) + inst(*EXIT))
         self.assertEqual(moved, plain)
+
+
+class Yield(Translated):
+    """YIELD (0x946) in Resident Evil 4's encoding, as its 21 compute shaders with it have it (after MEMBAR; ERRBAR, before a branch): per thread it does nothing"""
+    YIELD = (0x000fde0003800000, 0x0000000000007946)
+
+    def test_no_effect_on_the_shader(self):
+        plain = self.translate(inst(*SUATOM) + inst(*EXIT))
+        yielded = self.translate(inst(*SUATOM) + inst(*self.YIELD) + inst(*EXIT))
+        self.assertEqual(yielded, plain)
 
 
 class LdcIndexedBank(Translated):

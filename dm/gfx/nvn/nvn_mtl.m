@@ -11,6 +11,7 @@
 #include <dlfcn.h>
 #include <sys/stat.h>
 #include <sys/mman.h>
+#include <sys/file.h>
 #include <sys/sysctl.h>
 #include <fcntl.h>
 #include <TargetConditionals.h>
@@ -91,6 +92,9 @@ static void shmap_load(void);
 static int prepare_on(void);
 static int g_warm_started;
 static void warm_claim(void);
+#if !TARGET_OS_IPHONE
+static int ga_clean_bundle_cache(void);
+#endif
 
 static id<MTLDevice> g_dev;
 // The shaders the host writes itself (built-in kernels, clears, copies, index conversions, geometry packing, the present: dm/gfx/msl), compiled when the host is built and loaded by
@@ -722,6 +726,9 @@ static void udc_selftest(void) {
 }
 void mtl_init(void) {
     if (g_dev) return;
+#if !TARGET_OS_IPHONE
+    ga_clean_bundle_cache();   // remove the prior run's app-private Metal compiler folders before any pipeline work
+#endif
     const char *vbc = getenv("DM_NVN_VBUF_CACHE"); g_vbuf_cache = !(vbc && !strcmp(vbc, "0"));
     const char *link = getenv("DM_PRESENT_LINK");
     g_dm_present_link = link ? atoi(link) : 1; if (g_dm_present_link < 0 || g_dm_present_link > 2) g_dm_present_link = 1; g_present_link_env = link != NULL;   // Default 1 (real-device same-process alternation: when load exceeds one display-link period, long frames 15% → 0 and frame intervals even out; no difference from 0 at a steady 60); DM_PRESENT_LINK=0 turns it off   // 1 = present on every tick of a 60 Hz display link; 2 = 120 Hz display link, the game presents a frame every other display-link tick (when behind, it can present on the next 8.33 ms display-link tick)
@@ -9223,6 +9230,56 @@ static NSSet<NSString *> *ga_list(void) {
     NSArray<NSString *> *a = ga_dir() ? [NSFileManager.defaultManager contentsOfDirectoryAtPath:ga_dir() error:nil] : nil;
     return [NSSet setWithArray:[a filteredArrayUsingPredicate:[NSPredicate predicateWithFormat:@"self BEGINSWITH 'gpuarchiver-'"]] ?: @[]];
 }
+#if !TARGET_OS_IPHONE
+// The Mac app's bundle ID gives Metal a private cache root. Hold this lock for the host's lifetime:
+// a second copy of the same game must not remove folders its compiler is using.
+static int g_ga_lock_fd = -1;
+static int ga_clean_bundle_cache(void) {
+    NSString *bundle = NSBundle.mainBundle.bundleIdentifier;
+    if (![bundle hasPrefix:@"org.nxnative."]) return 0;   // command-line tools use the shared cache
+    char b[PATH_MAX]; size_t n = confstr(_CS_DARWIN_USER_CACHE_DIR, b, sizeof b); if (!n || n > sizeof b) return 0;
+    NSString *owner = [[@(b) stringByAppendingPathComponent:bundle] stringByStandardizingPath];
+    NSError *e = nil;
+    if (![NSFileManager.defaultManager createDirectoryAtPath:owner withIntermediateDirectories:YES attributes:nil error:&e]) {
+        MLOG("[RED] pipeline archive: cannot prepare the app's Metal cache lock (%s)", e.localizedDescription.UTF8String); return 0;
+    }
+    struct stat st;
+    if (lstat(owner.fileSystemRepresentation, &st) || !S_ISDIR(st.st_mode)) {
+        MLOG("[RED] pipeline archive: app cache path is not a directory; old Metal folders left alone (%s)", owner.UTF8String); return 0;
+    }
+    NSString *lock = [owner stringByAppendingPathComponent:@".nxnative-gpuarchiver.lock"];
+    int fd = open(lock.fileSystemRepresentation, O_CREAT | O_RDWR | O_CLOEXEC | O_NOFOLLOW, 0600);
+    if (fd < 0) { MLOG("[RED] pipeline archive: cannot open the app's Metal cache lock; old folders left alone (%s)", strerror(errno)); return 0; }
+    if (flock(fd, LOCK_EX | LOCK_NB)) {
+        int err = errno; close(fd);
+        if (err == EWOULDBLOCK || err == EAGAIN) MLOG("pipeline archive: another copy holds the app's Metal cache lock; old folders left alone");
+        else MLOG("[RED] pipeline archive: cannot take the app's Metal cache lock; old folders left alone (%s)", strerror(err));
+        return 0;
+    }
+    g_ga_lock_fd = fd;   // keep the exclusive lock until this host exits
+    NSString *dir = [owner stringByAppendingPathComponent:@"com.apple.gpuarchiver"];
+    if (lstat(dir.fileSystemRepresentation, &st) || !S_ISDIR(st.st_mode)) return 1;
+    NSArray<NSString *> *names = [NSFileManager.defaultManager contentsOfDirectoryAtPath:dir error:nil];
+    NSMutableArray<NSString *> *old = [NSMutableArray array];
+    for (NSString *name in names) {
+        if (![name hasPrefix:@"gpuarchiver-"]) continue;
+        NSString *path = [dir stringByAppendingPathComponent:name]; struct stat st;
+        if (lstat(path.fileSystemRepresentation, &st) || !S_ISDIR(st.st_mode)) continue;   // do not follow links
+        [old addObject:path];
+    }
+    if (old.count) dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        int removed = 0, failed = 0;
+        for (NSString *path in old) {
+            struct stat st; if (lstat(path.fileSystemRepresentation, &st) || !S_ISDIR(st.st_mode)) continue;
+            NSError *e = nil;
+            if ([NSFileManager.defaultManager removeItemAtPath:path error:&e]) removed++;
+            else { failed++; MLOG("[RED] pipeline archive: old Metal build folder %s was not removed (%s)", path.UTF8String, e.localizedDescription.UTF8String); }
+        }
+        MLOG("pipeline archive: %d old app Metal build folders removed, %d failed", removed, failed);
+    });
+    return 1;
+}
+#endif
 static ArchEpoch *ep_new(void) {   // a flush period: its compiler and serializer, nil when Metal makes none
     MTL4PipelineDataSetSerializerDescriptor *sd = [MTL4PipelineDataSetSerializerDescriptor new]; sd.configuration = MTL4PipelineDataSetSerializerConfigurationCaptureBinaries;
     ArchEpoch *ep = [ArchEpoch new]; ep->ser = [g_dev newPipelineDataSetSerializerWithDescriptor:sd];

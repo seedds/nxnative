@@ -1,5 +1,6 @@
 # Extracts the shaders of Unrailed 2 (W4 Games Godot PCK) into extract/<version>/glslc_capture/ so the NSP script reuses them.
 # Usage: python3 dm/tools/w4_to_glslc.py <path of the <id>_build folder> [version, default v327680]  (needs: pip install zstandard)
+# It also sets the four memory keys the game needs in <build folder>/profile/01006D00241E6000/game.tsv (the survey values are too small).
 # Run it after a first build has created extract/<version>/RomFS.img.
 import os, sys, mmap, struct, hashlib, shutil, subprocess
 try:
@@ -50,3 +51,23 @@ for e in w4:
         except Exception:
             pos = d.find(ZM, pos + 1)
 print('w4 files %d, unique GLSLC outputs written: %d -> %s' % (len(w4), len(seen), out))
+
+APPLY_MEMORY = True
+ID = '01006D00241E6000'
+prof = os.path.join(B, 'profile', ID, 'game.tsv')
+want = {'mem_reserve': '0x230000000', 'mem_alias': '0x118000000', 'mem_stack': '0x100000000', 'app_pool': '0x180000000'}
+if os.path.exists(prof):
+    out, seen = [], set()
+    for ln in open(prof).read().split('\n'):
+        k = ln.split('\t')[0]
+        if k in want:
+            if k in seen: continue
+            out.append(k + '\t' + want[k]); seen.add(k)
+        else:
+            out.append(ln)
+    for k in want:
+        if k not in seen: out.append(k + '\t' + want[k])
+    open(prof, 'w').write('\n'.join(out))
+    print('memory keys set in', prof)
+else:
+    print('no profile at', prof, '- run one build first so the survey writes it, then run this again')

@@ -1,7 +1,9 @@
-# Unrailed 2: Back on Track (01006D00241E6000)
+# Unrailed 2: Back on Track (01006D00241E6000), notes
 
 Provisional bring-up on one Mac (Apple M3 Max, macOS 26.6.2, Xcode 27.2), update v327680 (v925.eab7b7d5).
-It reaches the title screen in a window with sound. Nothing beyond that was checked. The profile is the survey's provisional one with four memory values changed.
+The game builds, reaches its title screen and runs in a window with sound. Nothing beyond that was checked.
+There is no registered profile: the build uses the survey's provisional profile, with four memory keys changed by `dm/tools/w4_to_glslc.py`.
+(A registered profile folder was tried and fails: the engine then wants a generated `shader_map.tsv`.)
 
 ## Engine
 - Godot 4.4.1 (W4 Games console build, mono), NintendoSDK 20.5.28, NVN "Forward Mobile".
@@ -15,9 +17,9 @@ It reaches the title screen in a window with sound. Nothing beyond that was chec
 - PCK directory entry: u32 path length, path, u64 offset, u64 size, 16-byte MD5, u32 flags. The data base is the position of `GDPC` plus the u64 `file_base` at header offset 24 (confirmed by the first file's MD5).
 
 ## How to build
-1. Run the NSP script once. It extracts the game and stops at the GLSLC capture.
-2. `python3 dm/tools/w4_to_glslc.py <the _build folder> v327680` writes the unique outputs to `extract/v327680/glslc_capture/`.
-3. Run the NSP script again. The capture step says "reused", the split finds 2,884 shaders and all 2,884 Mac shaders compile. No engine patch is needed.
+1. Run the NSP script once. It fails at the address-region check or the GLSLC capture, but it has extracted the game and written the provisional profile.
+2. `pip install zstandard`, then `python3 dm/tools/w4_to_glslc.py <the _build folder> v327680`. This writes the unique shaders to `extract/v327680/glslc_capture/` and sets the memory keys below in the provisional profile.
+3. Run the NSP script again. The capture step says "reused", the split finds 2,884 shaders, all 2,884 Mac shaders compile and the build finishes.
 
 `shader_split.py` does not read `.w4_shader` files itself. A reader there would make step 2 unnecessary.
 

@@ -5930,6 +5930,7 @@ static void shmap_read(void) {
     NSMutableDictionary *geo_mesh;   // a vertex shader's mesh entries by lean kernel key (geo_mesh_fn; NSNull: none)
     uint8_t up_mfx;   // a compute shader that is the game's own upscaler (DM_GAME_UPSCALER_KEYS, from the shader map): 0 not decided, 1 drawn by MetalFX when DM_UPSCALER=metalfx, 2 not one or one its colour keeps (up_mfx_wanted)
     uint8_t up_color;   // such a shader's colour, from its code at load with DM_UPSCALER=metalfx (up_mfx_color; UP_COLOR_UNREAD otherwise)
+    uint8_t mv_net;   // a compute shader of the game's movie enhancement network file (DM_GAME_MOVIE_NET_KEYS): 0 not decided, then one of MVN_* (movie_net_dispatch)
     int gs_loc, lay_loc; char gs_comp, lay_comp;   // a slice-writing geometry shader (no function: the layer comes from input gs_loc.gs_comp) / a vertex shader with layer entry points writing output lay_loc.lay_comp (dmsh_build.py gs_slice, vs_layer_entry); -1 = none
     uint64_t cbs_seen; uint32_t cbs_runs;   // the command buffer that listed this shader last, and how many have (cbs_note)
     // The argument buffer encoded last time
@@ -14343,6 +14344,9 @@ static int lc_keeps(uint32_t op) {
 
 static void dispatch(const p_dispatch *dp);
 static int up_mfx_wanted(NvShader *cs); static int up_mfx_encode(NvShader *cs);   // a game's upscaler through MetalFX (see up_mfx_encode)
+static int movie_net_dispatch(NvShader *cs);   // the movie enhancement network left out (DM_MOVIE_ENHANCE=0, see movie_net_dispatch)
+static int movie_enh_off(void);   // DM_MOVIE_ENHANCE=0 (see movie_net_dispatch)
+static int ndve_resample_alone(NvShader *cs);   // nvn_ndve.inc: the engine's resampler with the movie enhancement off
 static int ndve_engine_dispatch(NvShader *cs, const p_dispatch *dp);   // nn::ndve's movie network as the host's kernels (DM_NDVE_ENGINE=1, nvn_ndve.inc)
 // ---------- Compute dispatches moved ahead of the render pass they would split (DM_NVN_CS_HOIST) ----------
 // Metal cannot run a compute dispatch inside a render pass, so a dispatch between two draws of one pass ends it, and on a tile-based GPU every attachment is stored and loaded again:
@@ -15126,8 +15130,11 @@ static void dispatch(const p_dispatch *dp) {
     if (g_nubd && ubd_conflict_cs(cs, dp->ind)) { g_ubd_conflicts++; ubd_land(); }   // see ubd_conflict_cs
     rp_flush();   // A full clear with no draw after it waits for the next pass on its targets, but it comes before this dispatch, which may read or write them as images: land it first, as copy_t2t does
     image_prepare(prog_get(S.cprog), 0x20);
-    if (ndve_engine_dispatch(cs, dp)) return;   // nn::ndve's movie network as the host's kernels (DM_NDVE_ENGINE=1)
+    // nn::ndve's movie network as the host's kernels (DM_NDVE_ENGINE=1), unless the movie enhancement is off: then the network is left out (movie_net_dispatch), as the player chose.
+    // The engine came first, so with Movie enhancement off Ocarina of Time's opening still ran the whole network: 26 ms of a movie frame on an M1, the movie at half speed
+    if (DM_GAME_MOVIE_NET_N && movie_enh_off() ? ndve_resample_alone(cs) : ndve_engine_dispatch(cs, dp)) return;   // off: the engine's resampler alone, on the decoded picture
     if (up_mfx_wanted(cs) && !dp->ind && up_mfx_encode(cs)) return;   // the game's upscaler, drawn by MetalFX instead (DM_UPSCALER=metalfx)
+    if (DM_GAME_MOVIE_NET_N && !dp->ind && movie_net_dispatch(cs)) return;   // a dispatch of the movie enhancement network, left out or replaced by a copy (DM_MOVIE_ENHANCE=0)
     // Threadgroup memory past Metal's 32 KB, in a device buffer (dmsh_rewrite.py tg_spill): a slice for every workgroup of the grid. An indirect dispatch's grid is in GPU memory, written earlier
     // in the frame: the replay waits for the GPU (as an indirect-count multi-draw does, mdi_wait) and reads it. Mario Kart World's spilled dispatches are all direct, of 1 to 3 workgroups
     uint64_t tg_groups = 0;
@@ -16932,6 +16939,60 @@ static int up_mfx_encode(NvShader *cs) {
                             (unsigned long)in.width, (unsigned long)in.height, (unsigned long)in.pixelFormat, orr.width, orr.height, orr.xoffset, orr.yoffset, (unsigned long)out.width, (unsigned long)out.height,
                             (unsigned long)out.pixelFormat, direct ? ", straight" : srgb ? ", through RGBA16F, decoded from sRGB" : ", through RGBA16F");
     return 1;
+}
+// ---------- The movie enhancement network left out (DM_MOVIE_ENHANCE) ----------
+// nn::movie's NDVE file (Ocarina of Time's Movie/Ndve/Ndve-Nvn2-vid_seq5.dat.zs) holds the compute shaders a movie frame runs between the decoder and the screen: one converts the
+// decoded picture (luma 1920x1080, chroma 960x540) to RGB, eleven dispatches of a network then enhance that picture at the same size, the last of them adding their result to it into
+// an RGB10A2 image, and an NDSR shader scales it to the output. On an M1 (8-core GPU) the network took 60-70 ms a frame, so the title and opening movies (24 fps) played at about 13.
+// With DM_MOVIE_ENHANCE=0 (the launcher's Movie enhancement: off) the network's dispatches (those of the file's shaders that use storage buffers) are left out and its last one (one
+// texture, one image, the same size) becomes a draw of its input into its image: the decoded picture as it is, without the network's clean-up. The other shaders of the file run.
+// The steps before the last are left out only while the previous frame's copy was made, so a copy refused (another size, an image that cannot be drawn into) costs no frame
+enum { MVN_STAGE = 1, MVN_LAST, MVN_NONE };
+static int g_mvn_ok, g_mvn_left;   // the previous last step was replaced by the copy; steps left out since it
+static uint64_t g_mvn_copied;
+static int movie_enh_off(void) {
+    static int v = -1;
+    if (v < 0) { const char *e = getenv("DM_MOVIE_ENHANCE"); v = e && !strcmp(e, "0");
+        if (e && strcmp(e, "0") && strcmp(e, "1")) MLOG("[RED] DM_MOVIE_ENHANCE=%s: 1 or 0; keeping the movie enhancement", e);
+        if (v) MLOG("movie enhancement (DM_MOVIE_ENHANCE): off, the movie network's %d shaders are left out and the decoded picture is drawn as it is", DM_GAME_MOVIE_NET_N); }
+    return v;
+}
+static int movie_net_named(NvShader *cs) {
+    for (const char *k = DM_GAME_MOVIE_NET_KEYS; *k; k += k[16] == ',' ? 17 : 16) if (!strncmp(k, cs->key, 16)) return 1;
+    return 0;
+}
+static int movie_net_dispatch(NvShader *cs) {
+    if (cs->mv_net == MVN_NONE || !movie_enh_off()) return 0;
+    int nt = 0, ni = 0, nsb = 0, ti = -1, oi = -1;
+    for (int i = 0; i < cs->rf.nb; i++) { int k = cs->rf.b[i].kind;
+        if (k == NVN_RB_TEX) { nt++; ti = i; } else if (k == NVN_RB_IMG) { ni++; oi = i; } else if (k == NVN_RB_SBUFP || k == NVN_RB_SBUFU) nsb++; }
+    if (!cs->mv_net) {
+        cs->mv_net = !movie_net_named(cs) || !nsb ? MVN_NONE : nt == 1 && ni == 1 ? MVN_LAST : MVN_STAGE;   // without storage buffers: the colour conversion, which runs
+        if (cs->mv_net != MVN_NONE) MLOG("movie network %s: %s", cs->key, cs->mv_net == MVN_LAST ? "its last step, replaced by a draw of its input" : "a step, left out");
+        if (cs->mv_net == MVN_NONE) return 0;
+    }
+    if (cs->mv_net == MVN_STAGE) { if (!g_mvn_ok) return 0; g_mvn_left++; return 1; }
+    int tin = (int)(tex_slot_h(S.tex[5], S.img[5], cs->rf.b[ti].reg) & 0xfffff), tout = cs->rf.b[oi].reg < 32 ? (int)(S.img[5][cs->rf.b[oi].reg] & 0xfffff) : 0;
+    tex_t dout = {0}; id<MTLTexture> in = nil, out = nil; uint64_t rid = 0; int real = 0;
+    os_unfair_lock_lock(&g_rmu);
+    int ok = tin > 0 && tin < g_ntreg && g_treg[tin].ok && tout > 0 && tout < g_ntreg && g_treg[tout].ok;
+    if (ok) { dout = g_treg[tout].t; in = tex_by_id(tin); out = img_binding(tout, &cs->rf.b[oi], &rid, &real); if (!real) out = nil; }
+    os_unfair_lock_unlock(&g_rmu);
+    ok = in && out && in != out && in.textureType == MTLTextureType2D && out.textureType == MTLTextureType2D && in.width == out.width && in.height == out.height &&
+         !fmt_int_or_ds(in.pixelFormat) && !fmt_int_or_ds(out.pixelFormat) && !mtl_fmt_block(out.pixelFormat) && (out.usage & MTLTextureUsageRenderTarget);
+    if (ok) {
+        zskip_del(dout.serial);
+        rp_end(); if (g_blit) { enc_b_end(g_blit); g_blit = nil; }
+        ubd_land_compute();
+        NVNcopyRegion r = {0, 0, 0, (int)in.width, (int)in.height, 1};
+        ok = copy_t2t_draw(in, out, 0, 0, 0, 0, &r, &r, 0, 0);
+        args_dirty_all();
+    }
+    if (!ok && g_mvn_left) MLOG("[RED] movie network %s: the copy was refused after %d steps were left out: this frame's picture is wrong; the network runs from now on", cs->key, g_mvn_left);
+    if (ok && !g_mvn_copied++) MLOG("movie network: first frame drawn without it, %lux%lu (format %lu) → format %lu; its steps are left out from the next frame", (unsigned long)in.width, (unsigned long)in.height, (unsigned long)in.pixelFormat, (unsigned long)out.pixelFormat);
+    if (!ok) cs->mv_net = MVN_NONE;   // the network runs from now on: its earlier steps are no longer skipped either once g_mvn_ok is 0
+    g_mvn_ok = ok; g_mvn_left = 0;
+    return ok;
 }
 // The present pass: src's valid rectangle drawn into dst (the drawable, or a screenshot's texture) as present_encode draws it, through MetalFX first where fx_encode takes it
 // (fx: the scaler state to use, nil = bilinear). uvb: the pass's crop constants (one buffer per present allocator, written by the CPU)

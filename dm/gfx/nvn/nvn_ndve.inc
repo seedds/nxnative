@@ -203,6 +203,18 @@ static void ndve_compare(id<MTLTexture> a, id<MTLTexture> b, int slot) {
              slot ? "resampler" : "network", (unsigned long long)*n, c[2 * slot], (unsigned long)a.width, (unsigned long)a.height, c[2 * slot + 1]);
     }
 }
+// With the movie enhancement off (DM_MOVIE_ENHANCE=0) the network is left out (nvn_mtl.m movie_net_dispatch), but the resampler 4f41ccf2 still runs, on the picture as decoded:
+// the game's translated one took 24 ms of an M1's movie frame (8-core GPU), so the movie fell to 30 pictures a second, half its speed. The engine's resampler takes it then
+static int ndve_resample_alone(NvShader *cs) {
+    if (!ndve_mode() || ndve_check() || g_nd.off || ndve_index(cs, NDVE_N - 1) != NDVE_N - 1) return 0;
+    if (g_nd.state == 0) ndve_build();
+    if (g_nd.state != 2) return 0;
+    const p_bind_buf *w = &S.ssbo[5][2]; void *wb = NULL; uint64_t wo = 0;
+    if (!w->addr || w->size < 0x3000 || !mtl_gpu_addr(w->addr, 0x3000, &wb, &wo, &g_nd.wrs)) { static int once; if (!once++) MLOG("NDVE engine: the resampler's weights are not bound; the game's resampler runs"); return 0; }
+    if (!ndve_resample(cs, nil)) return 0;
+    if (!g_nd.rs_frames++) MLOG("NDVE engine: first movie frame resampled by the engine (the movie enhancement off)");
+    return 1;
+}
 // 1 when the dispatch was taken (skipped or replaced by the engine), 0 to run it
 static int ndve_engine_dispatch(NvShader *cs, const p_dispatch *dp) {
     const int chk = ndve_check();

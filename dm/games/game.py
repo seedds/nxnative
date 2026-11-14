@@ -105,14 +105,19 @@ def by_build(main_id):   # the profile whose build rows register this main build
 UPSCALER_SOURCE = re.compile(r'/agl_ndsr\.pck#')
 
 
-def upscaler_keys(g):
+# nn::movie's enhancement networks (NDVE files, Movie/Ndve/*.dat.zs): the compute shaders the shader map found in the file's NDVE part (Ocarina of Time's 12: the colour conversion
+# and the network a movie frame runs; the file's NDSR pack, the scaler to the output, is not among them). DM_MOVIE_ENHANCE=0 leaves the network out (nvn_mtl.m movie_net_dispatch)
+MOVIE_NET_SOURCE = re.compile(r'#NDVE@')
+
+
+def upscaler_keys(g, source=UPSCALER_SOURCE):
     """the game's own upscaler shaders, from its shader map (shader_split.py's source column): sorted 16-digit keys, none without a map"""
     p = g.table('shader_map.tsv')
     if not p.exists(): return []
     keys = set()
     for line in p.read_text(encoding='utf-8').splitlines():
         c = line.split('\t')
-        if len(c) >= 5 and c[2] == 'compute' and UPSCALER_SOURCE.search(c[4]) and re.fullmatch(r'[0-9a-f]{16}', c[3]): keys.add(c[3])
+        if len(c) >= 5 and c[2] == 'compute' and source.search(c[4]) and re.fullmatch(r'[0-9a-f]{16}', c[3]): keys.add(c[3])
     return sorted(keys)
 
 
@@ -202,7 +207,7 @@ def header_one(g):
     if vcr not in ('on', 'off'): sys.exit(f'{g.id}: vconv_range must be on or off: {vcr}')
     mml = g.get('mem_map_limit', 'off')   # MapPhysicalMemory refused beyond the application pool, as on Horizon (hle_svc.c): on / off
     if mml not in ('on', 'off'): sys.exit(f'{g.id}: mem_map_limit must be on or off: {mml}')
-    ups = upscaler_keys(g)   # the game's own upscaler shaders, which DM_UPSCALER=metalfx (the launcher's Game's upscaler) replaces with MetalFX's spatial scaler (nvn_mtl.m up_mfx_encode)
+    ups, mvn = upscaler_keys(g), upscaler_keys(g, MOVIE_NET_SOURCE)   # the game's own upscaler shaders, which DM_UPSCALER=metalfx (the launcher's Game's upscaler) replaces with MetalFX's spatial scaler (nvn_mtl.m up_mfx_encode)
     dbr = g.get('draw_barriers', 'full')   # how draw passes are ordered (nvn_mtl.m barrier_game): full = each waits for all earlier GPU work, game = by the game's own barriers, so vertex work overlaps the previous pass's fragments
     if dbr not in ('full', 'game'): sys.exit(f'{g.id}: draw_barriers must be full or game: {dbr}')
     om = g.get('op_mode', 'console')   # the operation mode reported at start (hle_oe.c dm_opmode; DM_OPMODE overrides): console = docked, handheld = touch screen in use (Super Mario Galaxy's pointer)
@@ -259,6 +264,7 @@ def header_one(g):
          f'#define DM_GAME_TEX_DYN_SLOTS {int(tds == "on")}',
          f'#define DM_GAME_DRAW_BARRIERS_GAME {int(dbr == "game")}',
          f'#define DM_GAME_UPSCALER_KEYS {q(",".join(ups))}', f'#define DM_GAME_UPSCALER_N {len(ups)}',
+         f'#define DM_GAME_MOVIE_NET_KEYS {q(",".join(mvn))}', f'#define DM_GAME_MOVIE_NET_N {len(mvn)}',
          f'#define DM_GAME_VCONV_RANGE {int(vcr == "on")}',
          *([f'#define DM_GAME_NVN_API_MAJOR {api.split(".")[0]}', f'#define DM_GAME_NVN_API_MINOR {api.split(".")[1]}'] if g.get('device_api', '') else []),   # without the key: by the SDK version (hle_nvn.c nvn_api)
          '']

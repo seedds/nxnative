@@ -40,6 +40,11 @@ shader_note	Ocarina of Time shaders
 # The game steps its time by a frame ratio, its base rate / its frame rate, whatever the frame took: frames longer than a vsync played in slow motion. The ratio takes the host's
 # frame step instead (MATCH_FRAME_STEP in patches.py, found by its function on any build that keeps it): 1 vsync at 60 fps, 2 when 60 does not hold, so game time = real time
 fps_target	60
+# What a player who changes nothing starts on. Docked at full resolution with the game's own upscaling network is the heaviest choice in GPU time and in render-target memory,
+# on a 16 GB Mac too: handheld (the 720p profile, with less vegetation), the game's dynamic resolution, and MetalFX's spatial scaler for the upscaling pass. The launcher still offers each
+op_mode	handheld
+dynamic_resolution	on
+upscaler	metalfx
 
 # ---- Graphics ----
 draw_barriers	game

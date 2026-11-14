@@ -93,7 +93,16 @@ static NvShader *upscaler(const char *key) {
     return s;
 }
 int main(void) { @autoreleasepool {
-    mtl_init();
+    setenv("DM_NVN_MFX_TRACE", "1", 1); setenv("DM_NVN_PASSDUMP", "0-2", 1);
+    mtl_init(); mtl_set_frame(1);
+    mtl_sub_begin(); mtl_wait(mtl_sub_commit(), 5000000000ull);   // explicit empty-submission summary
+    mtl_sub_begin(); S.cprog = 0; dispatch(&(p_dispatch){.x = 1, .y = 1, .z = 1});
+    mtl_set_frame(2);
+    CHECK(g_mfx_trace_calls == 1 && g_mfx_trace_selected && g_mfx_trace_frame == 1, "a present boundary does not reset submission accounting, including an early rejected dispatch");
+    mtl_wait(mtl_sub_commit(), 5000000000ull);
+    CHECK(!g_mfx_trace_selected, "commit closes the selected submission");
+    mtl_set_frame(1);
+
     const float enc[2] = {0.0031308f, 1 / 2.4f}, dec[2] = {0.04045f, 2.4f}, both[4] = {0.0031308f, 1 / 2.4f, 0.04045f, 2.4f}, dec16[3] = {0.040435791015625f, 2.3984375f, 0.07745361328125f}, enc16[1] = {0.41650390625f};
     float once[1] = {2.4f}; uint8_t rare[256] = {0}; memcpy(rare, once, 4);
     CHECK(color_of(both, 4, NULL, 0) == UP_COLOR_LINEAR, "an encode and a decode in floats: linear input and output (Bananza)");
@@ -119,6 +128,9 @@ int main(void) { @autoreleasepool {
     CHECK(color_of_squares(0x220, 0, 1, 8, 10, 0, NULL, 0, k1292, 1) == UP_COLOR_KEEP, "squares beside a curve's constant alone (12.92 in floats): the shader runs");
     CHECK(color_of_squares(0x220, 0, 1, 8, 10, 0, ex2, 1, enc, 2) == UP_COLOR_KEEP, "squares, then an encode (Ocarina of Time's 12 encoding variants): the output stays encoded, the shader runs");
     CHECK(color_of_squares(0x220, 0, 0, 0, 10, 0, sqrt_, 1, NULL, 0) == UP_COLOR_KEEP, "no curve and no square (a pre-pass that square-roots): nothing says its colour, the shader runs");
+    NvShader *missing = upscaler("0123456789abcdef_b"); missing->rf.nb = 1;
+    const char *missing_reason = NULL;
+    CHECK(!up_mfx_encode(missing, &missing_reason) && missing_reason && !strcmp(missing_reason, "missing_binding"), "a missing image is classified before texture lookup");
     const char *up = getenv("DM_UPSCALER"); int on = up && !strcmp(up, "metalfx");
     tex_t in = texture(77, 960, 540, NVN_FORMAT_RGBA16F), out = texture(78, 1920, 1080, NVN_FORMAT_RGBA16F), same = texture(79, 960, 540, NVN_FORMAT_RGBA16F);
     out.d.flags |= NVN_TEXTURE_FLAGS_IMAGE; same.d.flags |= NVN_TEXTURE_FLAGS_IMAGE;
@@ -132,8 +144,9 @@ int main(void) { @autoreleasepool {
     CHECK(!up_mfx_wanted(other), "a shader the profile does not name is never swapped");
     memset(&S, 0, sizeof S); S.tex[5][0] = 701; S.img[5][1] = 702;
     { const uint32_t rects[8] = {0, 0, 959, 539, 0, 0, 1919, 1079}; memcpy(S.push[1], rects, sizeof rects); }   // c[24]: input and output rectangles (origin, inclusive last texel)
-    mtl_sub_begin(); int drawn = on && up_mfx_encode(named);
+    mtl_sub_begin(); int drawn = on && up_mfx_encode(named, NULL);
     CHECK(drawn == on, "the named shader's dispatch is drawn by MetalFX");
+    if (on) CHECK(g_mfx_trace_binding.resolved && g_mfx_trace_binding.iw == 960 && g_mfx_trace_binding.ih == 540 && g_mfx_trace_binding.ow == 1920 && g_mfx_trace_binding.oh == 1080 && g_mfx_trace_binding.iser == in.serial && g_mfx_trace_binding.oser == out.serial, "trace dimensions and serials come from the exact scaler bindings");
     CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull) && !mtl_last_commit_error(), "the submission completes");
     os_unfair_lock_lock(&g_rmu); id<MTLTexture> written = tex_by_id(702); os_unfair_lock_unlock(&g_rmu);
     CHECK(matches(written, on ? colour : black, MTLRegionMake2D(0, 0, 1920, 1080), black), on ? "MetalFX filled the whole 1920x1080 image with the texture's colour" : "without the switch the image is untouched");
@@ -142,7 +155,7 @@ int main(void) { @autoreleasepool {
         tex_t cp = texture(82, 1920, 1080, NVN_FORMAT_RGBA16F); mtl_tex_init(&cp);
         const float rc[2][4] = {{0.125f, 0.625f, 0.25f, 1.0f}, {colour[0], colour[1], colour[2], colour[3]}}; int drawn = 0, stale_in = 0, stale_out = 0;
         for (int round = 0; round < 8; round++) {
-            mtl_sub_begin(); drawn += slow_draw(tex_mtl(&in), rc[round & 1], 200000, 1); drawn += up_mfx_encode(named); drawn += copy_draw(written, tex_mtl(&cp));
+            mtl_sub_begin(); drawn += slow_draw(tex_mtl(&in), rc[round & 1], 200000, 1); drawn += up_mfx_encode(named, NULL); drawn += copy_draw(written, tex_mtl(&cp));
             CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull) && !mtl_last_commit_error(), "the submission with passes around the scaler completes");
             stale_in += !matches(written, rc[round & 1], MTLRegionMake2D(0, 0, 1920, 1080), black); stale_out += !matches(tex_mtl(&cp), rc[round & 1], MTLRegionMake2D(0, 0, 1920, 1080), black);
         }
@@ -158,7 +171,7 @@ int main(void) { @autoreleasepool {
         memcpy(S.push[1], crop, sizeof crop);
         S.tex[5][0] = 704;
         mtl_sub_begin();
-        CHECK(up_mfx_encode(named), "MetalFX takes the packed HDR subrectangle");
+        CHECK(up_mfx_encode(named, NULL), "MetalFX takes the packed HDR subrectangle");
         CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull) && !mtl_last_commit_error(), "the converted submission completes");
         CHECK(matches(written, hdr, MTLRegionMake2D(13, 9, 1900, 1060), black), "the HDR output fills only its destination rectangle");
         tex_t packed_out = texture(81, 1920, 1080, NVN_FORMAT_R11G11B10F);
@@ -170,7 +183,7 @@ int main(void) { @autoreleasepool {
         uint64_t upgrades = g_pfv_upgrades;
         for (int frame = 0; frame < 32; frame++) {
             mtl_sub_begin();
-            CHECK(up_mfx_encode(named), "MetalFX writes the image behind a swizzled sampled view");
+            CHECK(up_mfx_encode(named, NULL), "MetalFX writes the image behind a swizzled sampled view");
             CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull) && !mtl_last_commit_error(), "packed output submission completes");
         }
         CHECK(tex_mtl(&packed_out) == backing && g_pfv_upgrades == upgrades, "repeated scales reuse the original image backing");
@@ -179,18 +192,18 @@ int main(void) { @autoreleasepool {
         named->up_color = UP_COLOR_SRGB;
         const float decoded[4] = {0.2140f, 0.0509f, 0.5225f, 1.0f};   // sRGB 0.5, 0.25, 0.75
         fill(written, MTLClearColorMake(0, 0, 0, 1)); mtl_sub_begin();
-        CHECK(up_mfx_encode(named), "MetalFX takes sRGB-encoded input");
+        CHECK(up_mfx_encode(named, NULL), "MetalFX takes sRGB-encoded input");
         CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull) && !mtl_last_commit_error(), "the sRGB submission completes");
         CHECK(matches(written, decoded, MTLRegionMake2D(0, 0, 1920, 1080), black), "the sRGB input comes out decoded to linear");
         fill(tex_mtl(&packed), MTLClearColorMake(colour[0], colour[1], colour[2], colour[3])); fill(written, MTLClearColorMake(0, 0, 0, 1));
         { const uint32_t r[8] = {7, 3, 959, 539, 13, 9, 1899, 1059}; memcpy(S.push[1], r, sizeof r); } S.tex[5][0] = 704; mtl_sub_begin();
-        CHECK(up_mfx_encode(named), "MetalFX takes a packed sRGB-encoded subrectangle");
+        CHECK(up_mfx_encode(named, NULL), "MetalFX takes a packed sRGB-encoded subrectangle");
         CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull) && !mtl_last_commit_error(), "the packed sRGB submission completes");
         CHECK(matches(written, decoded, MTLRegionMake2D(13, 9, 1900, 1060), black), "the packed sRGB input comes out decoded, in its destination rectangle only");
         named->up_color = UP_COLOR_LINEAR;
         fill(tex_mtl(&in), MTLClearColorMake(colour[0], colour[1], colour[2], colour[3])); fill(written, MTLClearColorMake(0, 0, 0, 1));
         { const uint32_t rects[8] = {0, 0, 959, 539, 0, 0, 1919, 1079}; memcpy(S.push[1], rects, sizeof rects); } S.tex[5][0] = 701; mtl_sub_begin();
-        CHECK(up_mfx_encode(named), "linear input after sRGB at the same sizes");
+        CHECK(up_mfx_encode(named, NULL), "linear input after sRGB at the same sizes");
         CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull) && !mtl_last_commit_error(), "the second linear submission completes");
         CHECK(matches(written, colour, MTLRegionMake2D(0, 0, 1920, 1080), black), "the same sizes in linear colour are not decoded: each colour has its own scaler");
         // The input the game's own texture in its own format when the rectangle is the whole texture (DM_NVN_MFX_DIRECT, on by default; =0: only RGBA16F), the output only in RGBA16F:
@@ -202,18 +215,18 @@ int main(void) { @autoreleasepool {
         fill(tex_mtl(&r11), MTLClearColorMake(hdr[0], hdr[1], hdr[2], 1)); fill(tex_mtl(&r11_out), MTLClearColorMake(0, 0, 0, 1));
         { const uint32_t r[8] = {0, 0, 959, 539, 0, 0, 1919, 1079}; memcpy(S.push[1], r, sizeof r); } S.tex[5][0] = 706; S.img[5][1] = 707;
         uint64_t s_in = g_up_mfx_straight[0], s_out = g_up_mfx_straight[1]; mtl_sub_begin();
-        CHECK(up_mfx_encode(named), "MetalFX takes R11G11B10F into R11G11B10F");
+        CHECK(up_mfx_encode(named, NULL), "MetalFX takes R11G11B10F into R11G11B10F");
         CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull) && !mtl_last_commit_error(), "the R11G11B10F submission completes");
         CHECK(g_up_mfx_straight[0] == s_in + any && g_up_mfx_straight[1] == s_out, any ? "R11G11B10F whole textures: the input the game's own, the output drawn back" : "DM_NVN_MFX_DIRECT=0: R11G11B10F goes through RGBA16F");
         CHECK(matches_r11(tex_mtl(&r11_out), hdr), "the R11G11B10F image holds the HDR colour everywhere, not darkened");
         fill(written, MTLClearColorMake(0, 0, 0, 1)); S.img[5][1] = 702; s_in = g_up_mfx_straight[0]; s_out = g_up_mfx_straight[1]; mtl_sub_begin();
-        CHECK(up_mfx_encode(named), "MetalFX takes R11G11B10F into RGBA16F");
+        CHECK(up_mfx_encode(named, NULL), "MetalFX takes R11G11B10F into RGBA16F");
         CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull) && !mtl_last_commit_error(), "the mixed-format submission completes");
         CHECK(g_up_mfx_straight[0] == s_in + any && g_up_mfx_straight[1] == s_out + 1, "R11G11B10F into RGBA16F: the output the game's own, the input too with the switch");
         CHECK(matches(written, hdr, MTLRegionMake2D(0, 0, 1920, 1080), black), "the RGBA16F image holds the HDR colour everywhere");
         fill(written, MTLClearColorMake(0, 0, 0, 1)); { const uint32_t r[8] = {0, 0, 959, 539, 13, 9, 1899, 1059}; memcpy(S.push[1], r, sizeof r); }
         s_in = g_up_mfx_straight[0]; s_out = g_up_mfx_straight[1]; mtl_sub_begin();
-        CHECK(up_mfx_encode(named), "MetalFX takes R11G11B10F into an offset rectangle");
+        CHECK(up_mfx_encode(named, NULL), "MetalFX takes R11G11B10F into an offset rectangle");
         CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull) && !mtl_last_commit_error(), "the offset submission completes");
         CHECK(g_up_mfx_straight[0] == s_in + any && g_up_mfx_straight[1] == s_out, "an offset output rectangle is drawn back, the whole input still the game's own");
         CHECK(matches(written, hdr, MTLRegionMake2D(13, 9, 1900, 1060), black), "the offset output fills only its destination rectangle");
@@ -226,12 +239,12 @@ int main(void) { @autoreleasepool {
         const float squared[4] = {0.25f, 0.0625f, 0.5625f, 1.0f}, hdr_squared[3] = {1.0f, 0.25f, 0.0625f};
         fill(tex_mtl(&r11), MTLClearColorMake(1.0, 0.5, 0.25, 1)); fill(tex_mtl(&r11_out), MTLClearColorMake(0, 0, 0, 1));
         S.tex[5][0] = 706; S.img[5][1] = 707; s_in = g_up_mfx_straight[0]; s_out = g_up_mfx_straight[1]; mtl_sub_begin();
-        CHECK(up_mfx_encode(named), "MetalFX takes square-rooted R11G11B10F input");
+        CHECK(up_mfx_encode(named, NULL), "MetalFX takes square-rooted R11G11B10F input");
         CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull) && !mtl_last_commit_error(), "the square-rooted R11G11B10F submission completes");
         CHECK(g_up_mfx_straight[0] == s_in && g_up_mfx_straight[1] == s_out, "a square-rooted whole R11G11B10F input goes through the squaring copy, its output drawn back");
         CHECK(matches_r11(tex_mtl(&r11_out), hdr_squared), "the square-rooted R11G11B10F input comes out squared into linear colour");
         fill(written, MTLClearColorMake(0, 0, 0, 1)); S.tex[5][0] = 701; S.img[5][1] = 702; s_in = g_up_mfx_straight[0]; s_out = g_up_mfx_straight[1]; mtl_sub_begin();
-        CHECK(up_mfx_encode(named), "MetalFX takes square-rooted RGBA16F input");
+        CHECK(up_mfx_encode(named, NULL), "MetalFX takes square-rooted RGBA16F input");
         CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull) && !mtl_last_commit_error(), "the square-rooted RGBA16F submission completes");
         CHECK(g_up_mfx_straight[0] == s_in && g_up_mfx_straight[1] == s_out + 1, "a square-rooted whole RGBA16F input still goes through the squaring copy; the output straight");
         CHECK(matches(written, squared, MTLRegionMake2D(0, 0, 1920, 1080), black), "the square-rooted RGBA16F input comes out squared into linear colour");
@@ -240,7 +253,8 @@ int main(void) { @autoreleasepool {
         CHECK(!up_mfx_wanted(encoded_out), "a named shader whose output stays encoded is left to its shader");
         S.tex[5][0] = 701;
         S.img[5][1] = 703; { const uint32_t same_r[8] = {0, 0, 959, 539, 0, 0, 959, 539}; memcpy(S.push[1], same_r, sizeof same_r); } mtl_sub_begin(); uint64_t kept = g_up_mfx_kept;
-        CHECK(!up_mfx_encode(named) && g_up_mfx_kept == kept + 1, "an image no larger than the texture leaves the dispatch to the shader");
+        const char *reason = NULL;
+        CHECK(!up_mfx_encode(named, &reason) && reason && !strcmp(reason, "not_upscale") && g_up_mfx_kept == kept + 1, "an image no larger than the texture leaves the dispatch to the shader");
         mtl_wait(mtl_sub_commit(), 5000000000ull);
     }
     printf("t_upscaler_mfx (%s): %d checks, %d failed\n", on ? "metalfx" : "game", checks, failed);

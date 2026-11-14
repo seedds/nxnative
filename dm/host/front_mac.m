@@ -699,6 +699,27 @@ static BOOL cheat_has_row(int i) {
     return !(f & (DM_CHEAT_PAIR_OFF | DM_CHEAT_SECTION_START | DM_CHEAT_SECTION_END));
 }
 
+// A section is a folder: the panel folds its rows under its header, the menu lists them in a submenu. Folded by default
+// when it has more rows than this (a map select's 48 locations), open otherwise; the player's own choice wins
+enum { SECTION_FOLD_ROWS = 10 };
+
+// Section s's cheat rows (an on / off pair counts once; labels do not count) and how many of them are on
+static void section_counts(const char *s, int *rows, int *on) {
+    *rows = *on = 0;
+    for (int i = 0, n = dm_cheats_ncheats(); i < n; i++) {
+        if (!cheat_has_row(i) || dm_cheat_kind_at(i) == 3 || strcmp(dm_cheat_section_at(i), s)) continue;
+        ++*rows;
+        *on += dm_cheat_kind_at(i) == 0 && dm_cheat_on_at(i);
+    }
+}
+
+// A section's line of counts, beside its name: "49 cheats, 2 on" (", 2 on" only when some are)
+static NSString *section_counts_text(const char *s) {
+    int rows, on;
+    section_counts(s, &rows, &on);
+    return [NSString stringWithFormat:@"%d cheat%@%@", rows, rows == 1 ? @"" : @"s", on ? [NSString stringWithFormat:@", %d on", on] : @""];
+}
+
 // The row's whole title, the same string the menu's row carries: the name, plus the run-time reason when there is one,
 // "— master code (always on)" for a master code, "(nxnative only)" for a cheat this host runs itself (never-decrease)
 static NSString *cheat_row_title(int i) {
@@ -752,9 +773,10 @@ static void cheats_open_folder(void) {
 // beyond the controls. Top to bottom:
 //   - the header (game build and version, counts) and, when it applies, a line about safe mode with Restore;
 //   - Cheats On (the master switch), Select All / Deselect All and the search field;
-//   - the rows: section headers, labels, one row per cheat (an on / off pair is one row; a "set" cheat has an Apply button
-//     instead of a checkbox; an "ask" cheat a value field; ⓘ shows its details), then the cheats the compiler left out,
-//     the other builds' files, and the anchored sources not compiled for this build;
+//   - the rows: section headers that fold their rows away (sectionRow:), labels, one row per cheat (an on / off pair is
+//     one row; a "set" cheat has an Apply button instead of a checkbox; an "ask" cheat a value field; ⓘ shows its
+//     details), then the cheats the compiler left out, the other builds' files, and the anchored sources not compiled
+//     for this build;
 //   - a details line (a cheat's dry run and note, or the load report);
 //   - Reload, Open folder, Find Cheats… (in Ryujinx, the yuzu family and SD cards) and Report.
 // A .txt or a .cheats.toml dropped on the panel is copied into the cheats folder (import below; the drop works from a
@@ -808,7 +830,8 @@ static DmCheatsPanel *g_cheats_panel;   // created on the first Show Cheats Wind
 // The Cheats menu of the game window (hle_cheats.c's rows, only meaningful with a window): rebuilt on every open, so the
 // loaded file's state, the menu's toggles and the cheats the VM disabled at run time are what the player sees. Rows: Show
 // Cheats Window (⌘⇧C), Cheats On (the master switch) and, in safe mode, Restore Saved Cheats; then the panel's rows in
-// short (section headers, labels, one row per cheat, a pair as one row, "set" cheats applied on click), the other builds'
+// short (each section's rows in a submenu titled with its name, labels, one row per cheat, a pair as one row, "set"
+// cheats applied on click), the other builds'
 // files when none of this build is loaded, and Reload cheats (⌘R) / Open cheats folder. A click here also refreshes the
 // panel when one exists, so the two never disagree
 @interface DmCheatsMenuDelegate : NSObject <NSMenuDelegate>
@@ -825,17 +848,31 @@ static DmCheatsPanel *g_cheats_panel;   // created on the first Show Cheats Wind
     if (dm_cheats_safe()) [menu addItemWithTitle:@"Restore Saved Cheats (safe mode)" action:@selector(restoreSafe:) keyEquivalent:@""].target = self;
     [menu addItem:NSMenuItem.separatorItem];
     const char *sec = "";
+    NSMenu *into = menu;   // the section's submenu while inside one
     for (int i = 0, n = dm_cheats_ncheats(); i < n; i++) {
         if (!cheat_has_row(i)) continue;
         const char *s = dm_cheat_section_at(i);
-        if (strcmp(s, sec)) {   // a section header before its first entry
+        if (strcmp(s, sec)) {   // a section's submenu before its first entry; its rows go there
             sec = s;
-            if (*s) [menu addItemWithTitle:[NSString stringWithFormat:@"— %@ —", engine_str(s)] action:nil keyEquivalent:@""].enabled = NO;
+            into = menu;
+            if (*s) {
+                int rows, on;
+                section_counts(s, &rows, &on);
+                NSString *name = engine_str(s), *shown = name;
+                if (shown.length > 60)   // a long section name (EdiZon's often carry a whole instruction) is cut, whole in the tooltip
+                    shown = [[shown substringWithRange:[shown rangeOfComposedCharacterSequencesForRange:NSMakeRange(0, 59)]] stringByAppendingString:@"…"];
+                if (on) shown = [shown stringByAppendingFormat:@" (%d on)", on];
+                NSMenuItem *head = [menu addItemWithTitle:shown action:nil keyEquivalent:@""];
+                head.toolTip = name;
+                into = [[NSMenu alloc] initWithTitle:name];
+                into.autoenablesItems = NO;   // the rows set enabled themselves, as in the top menu
+                head.submenu = into;
+            }
         }
         int kind = dm_cheat_kind_at(i), f = dm_cheat_flags_at(i);
         NSString *title = cheat_row_title(i);
         if (f & DM_CHEAT_ONCE) title = [title stringByAppendingString:@" (apply once)"];
-        NSMenuItem *it = [menu addItemWithTitle:title action:nil keyEquivalent:@""];
+        NSMenuItem *it = [into addItemWithTitle:title action:nil keyEquivalent:@""];
         if (kind == 0) { it.target = self; it.action = @selector(toggleCheat:); it.tag = i; }
         it.enabled = kind == 0;
         it.state = cheat_row_state(i);
@@ -899,6 +936,8 @@ static DmCheatsMenuDelegate *g_cheats_menu;   // NSMenu keeps its delegate unret
     NSTimer *_refreshTimer;       // ~1 s, scheduled only while the panel is on screen; invalidated when it hides
     BOOL _upOnDeactivate;         // the panel was on screen when the app was deactivated: AppKit brings it back on activation
     BOOL _finding;                // a Find Cheats… scan is running on a background queue: another click does not start a second one
+    NSMutableDictionary<NSString *, NSNumber *> *_folded;   // section name -> folded (YES) or open (NO) as the player left it; absent: the default
+    NSMutableDictionary<NSString *, NSTextField *> *_sectionCounts;   // section name -> its header's counts, to update in place
 }
 
 // A button of the panel's toolbar rows
@@ -1018,6 +1057,7 @@ static NSTextField *panel_note(NSString *text) {
     _checks = [NSMutableDictionary dictionary];
     _values = [NSMutableDictionary dictionary];
     _labels = [NSMutableDictionary dictionary];
+    _sectionCounts = [NSMutableDictionary dictionary];
     _rows_sig = @"";
     if (![_panel setFrameUsingName:@"DmCheatsPanel"] && g_win) {   // first use: beside the game window, not the screen's corner
         NSRect g = g_win.frame, f = _panel.frame;
@@ -1301,11 +1341,68 @@ static NSArray<NSURL *> *found_cheat_files(NSString *build) {
     return panel_hrow(views);
 }
 
-// A section header: the section's name in bold
-- (NSView *)sectionRow:(const char *)name {
-    NSTextField *l = [NSTextField labelWithString:engine_str(name)];
-    l.font = [NSFont boldSystemFontOfSize:NSFont.systemFontSize];
-    return l;
+// The user-defaults key of the folded sections: one dictionary per game build (section name -> folded), so another
+// build's file with the same section names keeps its own choice
+static NSString *folded_key(void) { return [@"DmCheatsPanel.folded." stringByAppendingString:engine_str(dm_cheats_build())]; }
+
+// Is the section folded? The player's last click on its header, else folded when it has more than SECTION_FOLD_ROWS rows
+- (BOOL)sectionFolded:(const char *)s {
+    if (!_folded) _folded = [[NSUserDefaults.standardUserDefaults dictionaryForKey:folded_key()] mutableCopy] ?: [NSMutableDictionary dictionary];
+    NSNumber *v = _folded[engine_str(s)];
+    if (v) return v.boolValue;
+    int rows, on;
+    section_counts(s, &rows, &on);
+    return rows > SECTION_FOLD_ROWS;
+}
+
+// A section header: a chevron and the name in bold, one borderless button that folds or opens the section, then its
+// counts ("49 cheats, 2 on": a folded section still shows what is on in it). While a search is active it shows every
+// match whatever the fold, so the header is then a plain label, without a chevron
+- (NSView *)sectionRow:(const char *)s folded:(BOOL)folded searching:(BOOL)searching {
+    NSString *name = engine_str(s);
+    NSFont *bold = [NSFont boldSystemFontOfSize:NSFont.systemFontSize];
+    NSView *head;
+    if (searching) {
+        NSTextField *l = [NSTextField labelWithString:name];
+        l.font = bold;
+        head = l;
+    } else {
+        NSImage *chev = [NSImage imageWithSystemSymbolName:folded ? @"chevron.right" : @"chevron.down"
+                                  accessibilityDescription:folded ? @"Show" : @"Hide"];   // nil only if the symbol is gone
+        NSButton *b = chev ? [NSButton buttonWithTitle:name image:chev target:self action:@selector(sectionClicked:)]
+                           : [NSButton buttonWithTitle:[(folded ? @"▸ " : @"▾ ") stringByAppendingString:name] target:self action:@selector(sectionClicked:)];
+        b.bordered = NO;
+        b.imagePosition = NSImageLeading;
+        b.font = bold;
+        b.identifier = name;   // the section sectionClicked: folds or opens
+        b.tag = folded;        // and its fold as shown (the name may not be the engine's bytes: Shift-JIS or Latin-1)
+        b.toolTip = [NSString stringWithFormat:@"%@\nClick to %@ its cheats", name, folded ? @"show" : @"hide"];
+        head = b;
+    }
+    ((NSControl *)head).lineBreakMode = NSLineBreakByTruncatingTail;   // a long name never widens the panel
+    [head setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
+    if (searching) head.toolTip = name;
+    NSTextField *counts = panel_note(section_counts_text(s));
+    [counts setContentCompressionResistancePriority:NSLayoutPriorityDefaultHigh forOrientation:NSLayoutConstraintOrientationHorizontal];
+    _sectionCounts[name] = counts;
+    return panel_hrow(@[head, counts]);
+}
+
+// A section header clicked: fold or open the section, remember it in the user defaults, rebuild the rows a main-queue turn
+// later (the rebuild removes this very button, whose mouse tracking is still on the stack)
+- (void)sectionClicked:(NSButton *)b {
+    NSString *name = b.identifier;
+    if (!name || !_folded) return;   // _folded was loaded when the header was built (sectionFolded:)
+    _folded[name] = @(!b.tag);
+    [NSUserDefaults.standardUserDefaults setObject:_folded forKey:folded_key()];
+    dispatch_async(dispatch_get_main_queue(), ^{ [self rebuildRows]; });
+}
+
+// A row inside a section, indented under its header like a folder's contents
+static NSView *section_indent(NSView *v) {
+    NSStackView *s = [v isKindOfClass:NSStackView.class] ? (NSStackView *)v : panel_hrow(@[v]);
+    s.edgeInsets = NSEdgeInsetsMake(0, 20, 0, 0);
+    return s;
 }
 
 // Does entry i pass the search text (its name or its section contains it, any case)?
@@ -1336,14 +1433,21 @@ static NSArray<NSURL *> *found_cheat_files(NSString *build) {
     for (NSTextField *v in _values.allValues) if (v.currentEditor) [v abortEditing];
     for (NSView *v in [_stack.arrangedSubviews copy]) [v removeFromSuperview];
     _rebuilding = NO;
-    [_checks removeAllObjects]; [_values removeAllObjects]; [_labels removeAllObjects];
+    [_checks removeAllObjects]; [_values removeAllObjects]; [_labels removeAllObjects]; [_sectionCounts removeAllObjects];
     const char *sec = "";
+    BOOL searching = _search.stringValue.length > 0, folded = NO;   // a search shows its matches in folded sections too
     for (int i = 0, n = dm_cheats_ncheats(); i < n; i++) {
         if (!cheat_has_row(i) || ![self matches:i]) continue;
         const char *s = dm_cheat_section_at(i);
-        if (strcmp(s, sec)) { sec = s; if (*s) [_stack addArrangedSubview:[self sectionRow:s]]; }
-        if (dm_cheat_kind_at(i) == 3) [_stack addArrangedSubview:panel_note(cheat_display_name(i))];   // a label: credits and the like
-        else [_stack addArrangedSubview:[self cheatRow:i]];
+        if (strcmp(s, sec)) {   // a section's header before its first entry (shown)
+            sec = s;
+            folded = *s && !searching && [self sectionFolded:s];
+            if (*s) [_stack addArrangedSubview:[self sectionRow:s folded:folded searching:searching]];
+        }
+        if (folded) continue;
+        NSView *row = dm_cheat_kind_at(i) == 3 ? panel_note(cheat_display_name(i))   // a label: credits and the like
+                                               : [self cheatRow:i];
+        [_stack addArrangedSubview:*s ? section_indent(row) : row];
     }
     for (int i = 0, n = dm_cheats_nskipped(); i < n; i++)
         [_stack addArrangedSubview:panel_note([NSString stringWithFormat:@"Left out of this build: %@ — %@", engine_str(dm_cheats_skipped_name(i)), engine_str(dm_cheats_skipped_why(i))])];
@@ -1401,6 +1505,18 @@ static NSArray<NSURL *> *found_cheat_files(NSString *build) {
         if (v.currentEditor) return;
         char cur[64]; if (dm_cheat_value_get(k.intValue, cur, sizeof cur) && ![v.stringValue isEqualToString:@(cur)]) v.stringValue = @(cur);
     }];
+    if (!_sectionCounts.count) return;
+    NSMutableSet<NSString *> *seen = [NSMutableSet set];   // each section's counts once (dm_cheat_section_at's string, by name)
+    for (int i = 0, n = dm_cheats_ncheats(); i < n; i++) {
+        const char *s = dm_cheat_section_at(i);
+        if (!*s) continue;
+        NSString *name = engine_str(s);
+        NSTextField *c = _sectionCounts[name];
+        if (!c || [seen containsObject:name]) continue;
+        [seen addObject:name];
+        NSString *t = section_counts_text(s);
+        if (![c.stringValue isEqualToString:t]) c.stringValue = c.toolTip = t;
+    }
 }
 
 // The details line: the shown cheat's dry run and note, or the load report

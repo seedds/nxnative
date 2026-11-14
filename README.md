@@ -113,7 +113,7 @@ python3 scripts/build_ipa_from_nsp.py ~/Games/DonkeyKongBananza --platform mac-a
 An `'s` folder alone will do (no `base/`), and so will `exefs/` and `romfs/` directly in the folder, as `nup extract` writes them, which count as `base/`. The app has no icon, because the folder holds none; `--icon <image>` (`ICON` in Spyder) gives it one.
 To turn such a folder into a NUP, use `nup pack ~/Games/DonkeyKongBananza game.nup`.
 For more information and options for packing, see: [The packing script in detail](docs/development.md#the-packing-script-in-detail).
-### Install on IOS
+### Install on iOS
 
 Install the IPA on your iPhone or iPad with a sideloading tool such as AltStore, Sideloadly or LiveContainer. If your tool offers **Increased Memory Limit**, turn it on: the bigger games need it.
 

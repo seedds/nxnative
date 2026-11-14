@@ -24,6 +24,7 @@ A dated record of what is done, what is in progress and what is left on the Wind
 | `561082f` | Host tests: `t_second_pack` can run on Windows (a platform table, prebuilt packs where there is no nxaot, the engine read from the log). Verified in Docker on Linux, in a tree without the JIT, and by the Windows cross-build; nothing run on Windows |
 | `61e11b3` | Port: the Windows host gets the JIT fallback (a vendored subset of Boost 1.83.0, 869 headers; two missing includes in dynarmic; the Windows fault handler takes a fault inside a JIT callback as a guest fault). The cross-build with `-DNXHOST_JIT=ON` builds and links; Linux CTest 100 of 100 twice; nothing run on Windows |
 | `0ccf7a2` | Launcher and packer: the targets file in the `made` rows, the packs' reuse key (it was missing: a repack reused the old pack) and the better-pack rule ("N known call targets the packs were made without"). Verified in Docker (`t_launcher_model` 174 checks, `t_second_pack` 29 / 29 / 27 by route) |
+| `4cbabbf` | AOT: a `br` after a call was lowered as a tail call with the wrong return address, which stranded the thread in the JIT fallback (the benchmark's 5,124 "nonlocal" misses): the 4,000-function benchmark goes from 1.529 s to 189.8 ms. Verified in Docker (nxaot 29 of 29, host 100 of 100 twice, `t_aot_host` 50 checks, the Windows cross-build) |
 
 Done on the machine, not in the repository: Docker emptied on the owner's request (every image and container, the owner's other projects' included; the data volumes `aitrade_pgdata`, `smilepetstore_pgdata`, `smilepetstore_redisdata` kept).
 
@@ -35,7 +36,7 @@ Done on the machine, not in the repository: Docker emptied on the owner's reques
 
 ### In progress: written by agents, NOT built and NOT verified
 
-Verified and integrated on 2026-11-14 (nxaot CTest 28 of 28; host CTest 99 of 99 with and without `DM_AOT_ARENA_CHECK`, `NXAOT` given): the three rows that were `wip/second-pack-profile`, `wip/launcher-rule-by-function` and `wip/runner-scripts`. Agent at work: why the 4,000-function benchmark stays in the JIT fallback on non-local transfers.
+Verified and integrated on 2026-11-14 (nxaot CTest 28 of 28; host CTest 99 of 99 with and without `DM_AOT_ARENA_CHECK`, `NXAOT` given): the three rows that were `wip/second-pack-profile`, `wip/launcher-rule-by-function` and `wip/runner-scripts`. Agent at work: the jump tables discovery cannot bound (the benchmark's remaining JIT addresses; its worktree is the tip plus the fix above).
 
 No Docker image exists (the disk filled while ten worktrees were checked out, 280 MB each), so nothing below has been compiled or run. Each item is uncommitted in its worktree under `.claude/worktrees/`; a new session reads the diff there (`git -C <worktree> diff`), verifies it in Docker, and only then cherry-picks it. One build at a time: the two images (`nxnative-build` 1.9 GB, `nxnative-aot` 1.9 GB) do not fit beside the worktrees.
 
@@ -58,7 +59,7 @@ What only the owner can do, in the order that unblocks most:
 - Verify and integrate every row above (Docker; the Apple one on a Mac).
 - `t_astc_mesa` is registered outside `host_test` and is in no runner (declared in the manifest as CTest only).
 - Hot indirect targets: once a site is guarded its dominant target never binds again while other targets may, so over sessions a guarded site can lose dominance and its guard (the counts are binds, not calls).
-- The 4,000-function benchmark spends 92 % of its samples in the JIT fallback on non-local transfers, also after a repack with its misses: the cause is to be found (a game that switches stacks would run mostly in the JIT).
+- After the tail-call fix: the JIT calls only functions with a standard entry natively (a JIT-only entry per function would cure it); a misses file written by an older host keeps its bogus `nonlocal` rows until it is removed; the host's first JIT use costs about 200 ms against 60 ms in `nxaot_host`.
 - Converted quads still take another provoking vertex than the Switch's (declared: the fix changes the quad's diagonal).
 - The Metal backend takes the first vertex on every shape where the Switch takes the last (a Mac).
 - On a real GPU: the cost of one dispatch per small index conversion, the 3 MiB arena for indirect draws.

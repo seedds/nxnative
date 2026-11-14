@@ -3768,7 +3768,7 @@ static id<MTLBuffer> tex_rep_buf(tex_rep *r, size_t total) {   // the file's con
     if (r->bad) return nil;
     if (!r->buf) {
         NSData *data = [NSData dataWithContentsOfFile:@(r->path)];
-        if (data.length != total) { RED_ONCE(175, "texture replacement %s: %lu bytes, the upload copies %zu: not used", r->path, (unsigned long)data.length, total); r->bad = 1; return nil; }
+        if (!data || data.length != total) { RED_ONCE(175, "texture replacement %s: %lu bytes, the upload copies %zu: not used", r->path, (unsigned long)data.length, total); r->bad = 1; return nil; }
         id<MTLBuffer> b = [g_dev newBufferWithBytes:data.bytes length:data.length options:MTLResourceStorageModeShared];
         if (!b) { r->bad = 1; return nil; }
         res_add(b); r->buf = (void *)CFBridgingRetain(b);   // kept for the process's life

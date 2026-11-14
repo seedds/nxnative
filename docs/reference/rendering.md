@@ -1900,6 +1900,14 @@ Digimon Story Cyber Sleuth: Complete Edition (Media.Vision's MVGL engine, SDK 6.
 - **Fix:** `GL` and `GLB` register in `swhle`, and `eglGetProcAddress` searches that same table. Both paths retain `GLB`'s big-stack entry; unsupported loader names still return null by default (`DM_GL_STUBS=1` enables diagnostic stubs). `make -C dm/gfx/tests GAME=010014E00DB56000 gl-imports` exercises the real import resolver and GL registrations, shader creation and source queries, wrapper addresses and missing names in both diagnostic modes, without game files.
 - **Found on:** Darkest Dungeon Complete (`01008F1008DA6000`, update v327680, SDK 3.6.0, provisional profile), reported in [issue #228](https://github.com/seedds/nxnative/issues/228). The import failure is reproduced by the regression test; gameplay and run-time shader capture for this title remain unverified.
 
+### GL sampler objects
+
+- **Symptom:** `UNIMPL glGenSamplers`, `glSamplerParameteri`, `glSamplerParameterfv` and `glSamplerParameterf` at boot, the first with a name pointer and the rest on sampler 0. The game's textures then sample with their own parameters, or the game stops on a sampler name of 0.
+- **Cause:** the GL layer had no sampler objects (GL 3.3, also an extension to 3.2 contexts). A game that sets its filtering and wrapping on a sampler object and binds it to a unit got nothing from the four calls.
+- **Fix:** `glGenSamplers`, `glDeleteSamplers`, `glIsSampler`, `glBindSampler` and `glSamplerParameteri` / `f` / `iv` / `fv` in `dm/gfx/gl/hle_gl.m`. Each unit holds a bound sampler beside its textures, and at a draw the bound sampler's filters, wraps, compare mode, anisotropy and border replace those of the texture the unit samples, through the same shared Metal sampler cache; the texture's level count and maximum level still bound the LOD. MIN_LOD / MAX_LOD and a nonzero LOD bias are ignored, as for `glTexParameter`.
+- **Check:** `make -C dm/gfx/tests GAME=010014E00DB56000 gl-imports` makes a sampler object, sets it as the game does, checks that it changes the Metal sampler for its unit only and that unbinding and deleting give the texture's own back.
+- **Found on:** Mega Man Legacy Collection (`01002D4007AE0000`, SDK 3.7.0, OpenGL 3.2 through EGL). Its drawing after this point is unverified.
+
 ### Telling a GL game from an NVN or Vulkan one
 
 - **Symptom:** the NSP script's provisional profile said Vulkan, and the capture boot crashed in the GL layer.

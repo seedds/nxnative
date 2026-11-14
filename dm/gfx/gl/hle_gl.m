@@ -303,6 +303,11 @@ typedef struct {
     GLint minf, magf, ws, wt, wr, maxlv, cmp, swz[4]; float aniso, border[4]; int smp_dirty;
 } tex_t;
 NAMES(tex_t, g_texs, g_ntexs, g_captexs)
+// A sampler object (GL 3.3 sampler objects): bound to a unit, its parameters replace those of the texture the unit samples; the texture keeps its levels and maximum level.
+// Mega Man Legacy Collection (SDK 3.7, GL 3.2 through EGL) makes one at start and sets its wrap, filters, border and minimum LOD
+typedef struct { GLint minf, magf, ws, wt, wr, cmp; float aniso, border[4]; } smpo_t;
+NAMES(smpo_t, g_smpos, g_nsmpos, g_capsmpos)
+static smpo_t *smpo_of(GLuint n) { return n && n < g_nsmpos ? g_smpos[n] : NULL; }
 static tex_t *tex_of(GLuint n) { return n && n < g_ntexs ? g_texs[n] : NULL; }
 
 typedef struct { int fmt; uint32_t w, h; __strong id<MTLTexture> tex; uint64_t gen; } rb_t;
@@ -374,7 +379,7 @@ static int sp_check(GLuint n, int prog, const char *fn) {
 #define NUNITS 96
 static struct {
     GLuint array_buf, uniform_buf, rb, fb, read_fb, prog, vao; int unit;
-    struct { GLuint t2d, tcube, t3d, t2da; } units[NUNITS];
+    struct { GLuint t2d, tcube, t3d, t2da, samp; } units[NUNITS];   // samp: glBindSampler's sampler object (0: the texture's own parameters)
     float clear_c[4]; double clear_d; int clear_s;
     uint8_t cmask, dmask, depth, blend, cull, scissor, stencil, poffset, srgb;
     GLenum dfunc, cull_face, front, bsrc, bdst, bsa, bda, eqc, eqa;
@@ -570,15 +575,18 @@ static MTLTextureSwizzleChannels tex_swz(const tex_t *t) {
     o.red = out[0]; o.green = out[1]; o.blue = out[2]; o.alpha = out[3];
     return o;
 }
-static id<MTLSamplerState> tex_sampler(tex_t *t) {
-    if (!t->smp_dirty && t->smp) return t->smp;
+// o: the sampler object bound to the unit, whose parameters replace the texture's. Only the texture's own state is kept in t->smp
+static id<MTLSamplerState> tex_sampler(tex_t *t, const smpo_t *o) {
+    if (!o && !t->smp_dirty && t->smp) return t->smp;
     // sampler states are shared: one per distinct parameter set
     typedef struct { GLint minf, magf, ws, wt, wr, lv, cmp; float aniso, b; } skey;
     static struct { skey k; __strong id<MTLSamplerState> s; } cache[256]; static int n;
     int mips = t->levels > 1;
-    skey k = {t->minf, t->magf, t->ws, t->wt, t->target == GL_TEXTURE_CUBE_MAP ? GL_CLAMP_TO_EDGE : t->wr, mips ? (GLint)umin((uint32_t)t->maxlv, (uint32_t)t->levels - 1) : 0, t->cmp, t->aniso,
-             t->border[3] > 0.5f ? (t->border[0] > 0.5f ? 2.f : 1.f) : 0.f};
-    for (int i = 0; i < n; i++) if (!memcmp(&cache[i].k, &k, sizeof k)) { t->smp = cache[i].s; t->smp_dirty = 0; return t->smp; }
+    GLint minf = o ? o->minf : t->minf, magf = o ? o->magf : t->magf, ws = o ? o->ws : t->ws, wt = o ? o->wt : t->wt, wr = o ? o->wr : t->wr, cmp = o ? o->cmp : t->cmp;
+    float aniso = o ? o->aniso : t->aniso; const float *border = o ? o->border : t->border;
+    skey k = {minf, magf, ws, wt, t->target == GL_TEXTURE_CUBE_MAP ? GL_CLAMP_TO_EDGE : wr, mips ? (GLint)umin((uint32_t)t->maxlv, (uint32_t)t->levels - 1) : 0, cmp, aniso,
+             border[3] > 0.5f ? (border[0] > 0.5f ? 2.f : 1.f) : 0.f};
+    for (int i = 0; i < n; i++) if (!memcmp(&cache[i].k, &k, sizeof k)) { if (o) return cache[i].s; t->smp = cache[i].s; t->smp_dirty = 0; return t->smp; }
     MTLSamplerDescriptor *d = [MTLSamplerDescriptor new];
     d.magFilter = k.magf == GL_NEAREST ? MTLSamplerMinMagFilterNearest : MTLSamplerMinMagFilterLinear;
     d.minFilter = k.minf == GL_NEAREST || k.minf == GL_NEAREST_MIPMAP_NEAREST || k.minf == GL_NEAREST_MIPMAP_LINEAR ? MTLSamplerMinMagFilterNearest : MTLSamplerMinMagFilterLinear;
@@ -592,6 +600,7 @@ static id<MTLSamplerState> tex_sampler(tex_t *t) {
     if (k.cmp) d.compareFunction = (MTLCompareFunction)(k.cmp - GL_NEVER);
     id<MTLSamplerState> s = [g_dev newSamplerStateWithDescriptor:d];
     if (n < 256) { cache[n].k = k; cache[n].s = s; n++; } else RED1("more than 256 distinct sampler parameter sets");
+    if (o) return s;
     t->smp = s; t->smp_dirty = 0; return s;
 }
 static void lv_free(level_t *l) { free(l->data); memset(l, 0, sizeof *l); }
@@ -932,7 +941,7 @@ static void bind_uniforms_textures(prog_t *p) {
         GLenum target = u->type == T_SAMPCUBE ? GL_TEXTURE_CUBE_MAP : u->type == T_SAMP3D ? GL_TEXTURE_3D : u->type == T_SAMP2DARR ? GL_TEXTURE_2D_ARRAY : GL_TEXTURE_2D;
         tex_t *t = tex_of(*unit_slot(unit, target));
         id<MTLTexture> tx = nil; id<MTLSamplerState> sm = g_samp0;
-        if (t && (t->made || tex_make(t, 0)) && t->tex) { tx = t->tex; sm = tex_sampler(t); t->use = g_serial; }
+        if (t && (t->made || tex_make(t, 0)) && t->tex) { tx = t->tex; sm = tex_sampler(t, smpo_of(S.units[unit].samp)); t->use = g_serial; }
         if (!tx) tx = u->type == T_SAMPCUBE ? g_cube0 : u->type == T_SAMP3D ? g_tex3d0 : u->type == T_SAMP2DARR ? g_arr0 : g_tex0;
         static int dl = -1; if (dl < 0) dl = getenv("DM_GL_DRAWLOG") != NULL;
         if (dl && tx == g_tex0 && t == NULL) {   // a sampler with no texture: the layer draws the 1x1 black placeholder
@@ -1512,6 +1521,49 @@ GL(glTexParameterf, void, GLenum target, GLenum p, GLfloat v) { tex_param(target
 GL(glTexParameterfv, void, GLenum target, GLenum p, const GLfloat *v) {
     if (p == GL_TEXTURE_BORDER_COLOR) { tex_t *t = bound_tex(target); if (t) { memcpy(t->border, v, sizeof t->border); t->smp_dirty = 1; } return; }
     tex_param(target, p, v[0], (GLint)v[0]);
+}
+
+// ---------- Sampler objects ----------
+static void smpo_init(smpo_t *o) { o->minf = GL_NEAREST_MIPMAP_LINEAR; o->magf = GL_LINEAR; o->ws = o->wt = o->wr = GL_REPEAT; o->aniso = 1; o->cmp = 0; memset(o->border, 0, sizeof o->border); }
+GL(glGenSamplers, void, GLsizei n, GLuint *out) {
+    for (GLsizei i = 0; i < n; i++) { out[i] = name_new((void ***)&g_smpos, &g_nsmpos, &g_capsmpos, sizeof(smpo_t)); smpo_init(g_smpos[out[i]]); }
+}
+GL(glDeleteSamplers, void, GLsizei n, const GLuint *s) {
+    for (GLsizei i = 0; i < n; i++) {
+        if (!smpo_of(s[i])) continue;
+        free(g_smpos[s[i]]); g_smpos[s[i]] = NULL;
+        for (int u = 0; u < NUNITS; u++) if (S.units[u].samp == s[i]) S.units[u].samp = 0;
+    }
+}
+GL(glIsSampler, uint32_t, GLuint s) { return smpo_of(s) != NULL; }
+GL(glBindSampler, void, GLuint unit, GLuint s) {   // unit is an index (0, 1, ...), not GL_TEXTURE0 + i
+    if (unit >= NUNITS) { RED1("glBindSampler unit %u: beyond the units this layer has", unit); return; }
+    if (s && !smpo_of(s)) { RED1("glBindSampler of a name glGenSamplers never gave"); return; }
+    S.units[unit].samp = s;
+}
+static void smpo_param(GLuint s, GLenum p, float f, GLint i) {
+    smpo_t *o = smpo_of(s);
+    if (!o) { RED1("glSamplerParameter on a name glGenSamplers never gave"); return; }
+    switch (p) {
+        case GL_TEXTURE_MIN_FILTER: o->minf = i; break; case GL_TEXTURE_MAG_FILTER: o->magf = i; break;
+        case GL_TEXTURE_WRAP_S: o->ws = i; break; case GL_TEXTURE_WRAP_T: o->wt = i; break; case GL_TEXTURE_WRAP_R: o->wr = i; break;
+        case GL_TEXTURE_MAX_ANISOTROPY: o->aniso = f; break;
+        case GL_TEXTURE_COMPARE_MODE: o->cmp = i ? (o->cmp ? o->cmp : 0x203) : 0; break;
+        case GL_TEXTURE_COMPARE_FUNC: if (o->cmp) o->cmp = i; break;
+        case GL_TEXTURE_LOD_BIAS: if (f != 0) RED1("sampler GL_TEXTURE_LOD_BIAS %g: Metal samplers have no bias", f); break;
+        case 0x813a: case 0x813b: break;   // MIN_LOD / MAX_LOD: the texture's levels decide, as for glTexParameter
+        default: RED1("glSamplerParameter(%#x) not implemented", p); break;
+    }
+}
+GL(glSamplerParameteri, void, GLuint s, GLenum p, GLint v) { smpo_param(s, p, (float)v, v); }
+GL(glSamplerParameterf, void, GLuint s, GLenum p, GLfloat v) { smpo_param(s, p, v, (GLint)v); }
+GL(glSamplerParameteriv, void, GLuint s, GLenum p, const GLint *v) {
+    if (p == GL_TEXTURE_BORDER_COLOR) { smpo_t *o = smpo_of(s); if (o) for (int c = 0; c < 4; c++) o->border[c] = v[c] / 2147483647.f; return; }
+    smpo_param(s, p, (float)v[0], v[0]);
+}
+GL(glSamplerParameterfv, void, GLuint s, GLenum p, const GLfloat *v) {
+    if (p == GL_TEXTURE_BORDER_COLOR) { smpo_t *o = smpo_of(s); if (o) memcpy(o->border, v, sizeof o->border); return; }
+    smpo_param(s, p, v[0], (GLint)v[0]);
 }
 // glTexImage2D and glTexSubImage2D take nine arguments, the last on the stack, which the big-stack entry does not carry: they pack them here, on the game's stack, and enter there
 typedef struct { GLenum target; GLint level, ifmt, x, y; GLsizei w, h; GLenum format, type; const void *pixels; GLsizei size; int sub, compressed; } teximg_args;

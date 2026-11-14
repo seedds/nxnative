@@ -256,6 +256,23 @@ int main(int argc, char **argv) {
     [rbe copyFromTexture:dtex->tex sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(4, 4, 1) toBuffer:rb destinationOffset:0 destinationBytesPerRow:16 destinationBytesPerImage:64];
     [rbe endEncoding]; [rcb commit]; [rcb waitUntilCompleted];
     for (int i = 0; i < 16; i++) assert(((const float *)rb.contents)[i] == depth[i]);   // the values as given, each exactly
+    // Sampler objects (Mega Man Legacy Collection): the bound sampler's parameters replace the texture's for that unit only; unbinding or deleting it gives the texture's back
+    void (*gensamp)(GLsizei, GLuint *) = import("glGenSamplers");
+    void (*bindsamp)(GLuint, GLuint) = import("glBindSampler");
+    void (*sampi)(GLuint, GLenum, GLint) = import("glSamplerParameteri");
+    void (*sampf)(GLuint, GLenum, GLfloat) = import("glSamplerParameterf");
+    void (*sampfv)(GLuint, GLenum, const GLfloat *) = import("glSamplerParameterfv");
+    void (*delsamp)(GLsizei, const GLuint *) = import("glDeleteSamplers");
+    GLuint so = 0; gensamp(1, &so); assert(smpo_of(so) && smpo_of(so)->minf == GL_NEAREST_MIPMAP_LINEAR && smpo_of(so)->ws == GL_REPEAT);
+    sampi(so, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE); sampi(so, GL_TEXTURE_MAG_FILTER, GL_NEAREST); sampi(so, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    sampf(so, 0x813a, -1000.f);   // MIN_LOD, as the game sets it
+    const float white[4] = {1, 1, 1, 1}; sampfv(so, GL_TEXTURE_BORDER_COLOR, white);
+    id<MTLSamplerState> own = tex_sampler(dtex, NULL), viaso = tex_sampler(dtex, smpo_of(so));
+    assert(own && viaso && own != viaso && tex_sampler(dtex, smpo_of(so)) == viaso);   // shared per parameter set
+    assert(tex_sampler(dtex, NULL) == own && dtex->smp == own);                         // the texture's own state is untouched
+    bindsamp(0, so); assert(S.units[0].samp == so);
+    bindsamp(NUNITS, so); bindsamp(1, 9999); assert(S.units[1].samp == 0);              // out of range and unknown names change nothing
+    delsamp(1, &so); assert(!smpo_of(so) && S.units[0].samp == 0);
     // A real link: the linked program keeps the stages' code (si, fn) whatever its attachments do afterwards; a relink without a stage fails. The same shader attached twice
     // changes nothing (its count included)
     void (*link)(GLuint) = import("glLinkProgram");
@@ -313,6 +330,6 @@ int main(int argc, char **argv) {
     assert((h_eglGetProcAddress(missing) != NULL) == stubs);
     assert(resolve_import(NULL, missing) == (uint64_t)&unimpl_stubs[0]);
     assert(!strcmp(wrap_kind, "STUB"));
-    printf("GL imports: %u shared entries, shader handle/source, shader and program lifetimes, the error flag, a depth texture's data, vertex formats and bindings, a binding's stride 0 drawn, the uniform buffer target, wrappers and missing names (DM_GL_STUBS=%d): OK\n", count, stubs);
+    printf("GL imports: %u shared entries, shader handle/source, shader and program lifetimes, the error flag, a depth texture's data, sampler objects, vertex formats and bindings, a binding's stride 0 drawn, the uniform buffer target, wrappers and missing names (DM_GL_STUBS=%d): OK\n", count, stubs);
     return 0;
 }

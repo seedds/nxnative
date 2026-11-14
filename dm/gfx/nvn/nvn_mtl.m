@@ -9500,6 +9500,14 @@ static MTL4RenderPipelineDescriptor *spec_desc(id base, _Atomic int *own) {   //
     return s;
 }
 static _Atomic int g_spec_own;
+// The base's sample count and alpha to coverage, again in its specialization descriptor. newRenderPipelineDescriptorForSpecialization hands back the colour state open and
+// those at their defaults (1 sample, alpha to coverage off) whatever the base was built with, and the specialized pipeline is described by that descriptor. Metal's API validation
+// then reads the pipeline as 1-sample and stops at its bind in a multisampled pass: PRAGMATA's 4x depth-only passes ("color/raster sample count (4) does not match the
+// renderPipelineState's (1)", at the first gameplay frame). t_pso_msaa
+static void pso_spec_fixed(MTL4RenderPipelineDescriptor *s, MTLRenderPipelineDescriptor *d) {
+    s.rasterSampleCount = d.rasterSampleCount;
+    s.alphaToCoverageState = d.alphaToCoverageEnabled ? MTL4AlphaToCoverageStateEnabled : MTL4AlphaToCoverageStateDisabled;
+}
 // The pipeline pso_desc describes: its base (built, from the archive or already made), then specialized with its colour state. Called on several threads.
 // compile 0: nil on an archive miss (*e untouched), with no MTLDevice fallback. Prewarm compaction may still refresh a found base for serialization.
 static id<MTLRenderPipelineState> pso_build_ex(MTLRenderPipelineDescriptor *d, int off, NSError **e, int compile) {
@@ -9576,6 +9584,7 @@ static id<MTLRenderPipelineState> pso_build_ex(MTLRenderPipelineDescriptor *d, i
     if (!rast || g_pre_tool) return base;   // the prebuild tool wants the base alone (a specialization is never archived: g_comp4 has no serializer), its colour state is the device's
     uint64_t ts = bp_now();
     MTL4RenderPipelineDescriptor *s = spec_desc(base, &g_spec_own);
+    pso_spec_fixed(s, d);
     for (int i = 0; i < 8; i++) pso_col4(s.colorAttachments[i], d.colorAttachments[i]);
     id<MTLRenderPipelineState> ps = [g_comp4 newRenderPipelineStateBySpecializationWithDescriptor:s pipeline:base error:e];
     if (ps) g_pb_spec++;

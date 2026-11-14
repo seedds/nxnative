@@ -1388,6 +1388,14 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
   - on the Mac, it says `returned retained`.
 - **Found on:** Axiom Verge 1.0.3 (`0100052004384000`, its profile a separate change) with the launcher's **Metal 4 pipelines** on: an iPhone 16 Pro Max (iOS 26.0, LiveContainer) and an iPad Pro 11-inch (M4, iPadOS 26.0, from Xcode and in LiveContainer) crashed the same way.
 
+### A specialized Metal 4 pipeline keeps its base's fixed state in its descriptor
+
+- **Symptom:** with Metal's API validation on (`MTL_DEBUG_LAYER=1`), the game stops at a draw in a multisampled pass: `-[MTL4DebugRenderCommandEncoder setRenderPipelineState:]: failed assertion 'Render Command Encoder Set Render Pipeline State Validation The color sample count (4) does not match the renderPipelineState's color sample count (1) The raster sample count (4) does not match the renderPipelineState's raster sample count (1)'`. With `MTL_DEBUG_LAYER_ERROR_MODE=nslog` the game plays on and logs the pair at every such bind. Without validation nothing is wrong on screen.
+- **Cause:** `pso_build_ex` specializes a base, whose colour state is left open, with the descriptor `newRenderPipelineDescriptorForSpecialization` returns. That descriptor holds the colour state open, but its sample count and alpha to coverage are at their defaults (1 sample, off), whatever the base was built with. The specialized pipeline is described by that descriptor, so the debug layer reads a pipeline of a 4x pass as a 1-sample one. The pipeline key, the pass and the guest's state were right: NVN rasterizes at the target's sample count, as the host's key does (`g_pass.samples` from the attachments).
+- **Fix:** `pso_spec_fixed` (`nvn_mtl.m`) sets the base's sample count and alpha to coverage in the specialization descriptor before the colour state.
+- **Check:** `make -C dm/gfx/tests GAME=0100E95004038000 check_t_pso_msaa`: the production pass setup and pipeline lookup in a 4x depth-only pass, a 4x colour and depth pass (also with alpha to coverage) and a 1x pass, through both pipeline compilers and both encoding modes, each bound and drawn under API validation, with the pipeline archive off (every pipeline compiled in the test). The pipeline reads as the pass's sample count and keeps the draw's alpha to coverage; without the debug layer, which alone reports a pipeline's descriptor, those two checks print a skip line. Without the fix the Metal 4 runs stop at the first bind.
+- **Found on:** PRAGMATA (no profile): three depth-only pipelines of its 4x depth passes (fragments `36a5f8e07d4b90d2`, which writes depth from a texture, `ccfad64e9842a35c` and `f2ff0a146037ecae`) stop validation at the first gameplay frame; 11,067 such binds in a 128 s nslog run.
+
 ### NVN2's DLSS on MetalFX
 
 - **Symptom:** a Switch 2 game calls `nvnCommandBufferEvaluateDlss` and its builder functions, which the host did not have.

@@ -250,7 +250,7 @@ class Survey(Base):
         write_nup(self.path, [(0, NEW, 0, version(main=nso('ab' * 16), tid=NEW), META), (1, NEW, VER, version(main=nso('cd' * 16), tid=NEW), b'')])
         app, fam = nsp.scan_nup(self.path); self.addCleanup(fam['nup'].close)
         seen, prof = [], mock.Mock(id='P', builds=lambda: {'v0': {'main': 'ab' * 16}})
-        games = mock.Mock(by_build=lambda bid: seen.append(bid) or (prof if bid == 'ab' * 16 else None))
+        games = mock.Mock(by_build=lambda bid, skip=(): seen.append(bid) or (prof if bid == 'ab' * 16 else None))
         with mock.patch.dict(sys.modules, {'game': games}), mock.patch.object(nsp, 'PROG', mock.Mock()), \
              mock.patch.object(nsp, 'find_nx_extract', side_effect=AssertionError('built nx_extract')):
             self.assertEqual(nsp.same_build(self.dir, app, fam, None, REPO, {}), (prof, 'v0', 'ab' * 16))

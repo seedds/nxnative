@@ -1421,9 +1421,9 @@ Most service calls can be found before they crash, before the first boot or the 
 ### Built-in fonts and the audio device notification of SDK 21
 
 - **Symptom:** an abort connecting to `pl:u` at boot; a failed `nn::audio` call at boot.
-- **Cause:** SDK 21 has new names: `nn::pl::GetBuiltInFontData` (a Switch 1 and a Switch 2 overload, each filling type, address and size, and returning whether the font is loaded) and `nn::audio::AcquireAudioOutputDeviceNotification`. Unhooked, they reach the services the host does not have.
-- **Fix:** both hooked (`hle_sdk16.c`, `hle_audren.c`), with the same stand-in fonts and the same never-signaled event as their older names.
-- **Found on:** [Splatoon Raiders](../../dm/games/0400380020056000/README.md).
+- **Cause:** SDK 21 has new names: `nn::pl::GetBuiltInFontData` (a Switch 1 and a Switch 2 overload, each filling type, address and size, and returning whether the font is loaded), `nn::pl::GetBuiltInFontDataSet` (the same for a list of types, a Switch 2 and a Switch 1 overload: at most 6 and 7 types, one byte each, `*count` entries of 0x18 bytes in order, returning whether the fonts are loaded; the Switch 1 overload sets `*count` only when they are) and `nn::audio::AcquireAudioOutputDeviceNotification`. Unhooked, they reach the services the host does not have.
+- **Fix:** all hooked (`hle_sdk16.c`, `hle_audren.c`), with the same stand-in fonts and the same never-signaled event as their older names. Both font-set overloads fill each type as `GetBuiltInFontData` does, in the order asked, and leave out a type with no stand-in font (`t_shared_font`).
+- **Found on:** [Splatoon Raiders](../../dm/games/0400380020056000/README.md); `GetBuiltInFontDataSet` on [Kirby and the Forgotten Land](../../dm/games/01004D300C5AE000/README.md)'s Nintendo Switch 2 Edition (program `04004D300C5AE001`, at boot).
 
 ### The Joy-Con mouse pointer
 

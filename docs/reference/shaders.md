@@ -318,6 +318,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Found on:** [Bayonetta 2](../../dm/games/01007960049A0000/README.md): 1,856 distinct keys (1,547 pixel, 309 vertex) in `shader.dat`, `shader2.dat` and `shadereff.dat` of `data000.cpk` (the split about 2.5 minutes); [Bayonetta](../../dm/games/010076F0049A2000/README.md): 458 distinct keys (236 pixel, 222 vertex), the members of `shader.dat` in `data00.cpk` (about 1.7 minutes). All build for both.
 - **Not checked:** 13 Sentinels and Catherine: Full Body's CPKs (no files on the drives).
 
+### CRI CPK archives with the table of contents at the end
+
+- **Symptom:** `[RED] the shader split found no shaders in main or the RomFS` on a game whose RomFS is CRI CPK archives, with many `[RED] /<archive>.cpk/<file>: not CRILAYLA; not scanned` lines; entries the TOC lists as stored start with another file's bytes (`CRILAYLA`, `DXBC`, path or name text).
+- **Cause:** a file's FileOffset counts from the smaller of ContentOffset and TocOffset, with TocOffset counted as at most 0x800 (CRI's rule, as CriPakTools reads it). `cpk.py` took `min(TocOffset, ContentOffset)`, which is the same when the TOC follows the header (TocOffset 0x800) but is ContentOffset when the TOC is at the end of the file, so every file was read that far past its start: compressed entries no longer began with `CRILAYLA` and stored ones were the middles of their neighbours.
+- **Fix:** `cpk.files` caps TocOffset at 0x800 before taking the smaller of the two.
+- **Found on:** LUNAR Remastered Collection (0100DCD01E9EE000, a launcher and two game programs): `data.cpk` (ContentOffset 0x16000, TocOffset 0x42b06800) was read 0x15800 bytes too far in and `movie.cpk` 0x1000; with the fix program 1's split takes 18 shaders and program 2's 20, from the `.bnsh` files under `sysbin/nx/shader/`.
+- **Check:** `dm/tools/tests/test_cpk_offsets.py`: a synthetic CPK with its TOC after the header and one with its TOC at the end give each file its own bytes.
+
 ### Monolith ARH1, XBC1 and HCPS/SLCT shader containers
 
 - **Symptom:** archive or loose asset shaders are absent from the map; only boot shaders in `main` are found, sometimes reported as raw controls with no identified code area.

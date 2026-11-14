@@ -238,3 +238,53 @@ class HumanModes(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class Summary(unittest.TestCase):
+    """The build summary at the end (Progress.report, issue #1181): which stages ran and which were reused, the time of each that ran, and why the shaders were built again"""
+    def run_stages(self, prog, stale=None):
+        clock = [1000.0]
+        def tick(): clock[0] += 10; return clock[0]
+        with mock.patch.object(nsp.time, 'time', side_effect=tick), mock.patch.object(nsp.threading, 'Thread'):
+            prog.plan(5)
+            prog.stage('extract v917504'); prog.end('21.9 GB, reused (inputs unchanged)')
+            prog.stage('DLC'); prog.end('0 converted, 2 reused (nsp)')
+            prog.stage('rewrite'); prog.end('main, sdk, reused (inputs unchanged)')
+            if stale: prog.event('shaders_stale', **stale)
+            prog.stage('shader split'); prog.end('19,592 shaders')
+            prog.stage('iOS shaders'); prog.end('19,592 built')
+            prog.stage('IPA pack'); prog.end('game.ipa, 4.1 GB')
+            prog.report()
+
+    def lines(self, stale=None):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out): self.run_stages(nsp.Progress('lines'), stale)
+        return [l for l in out.getvalue().splitlines() if l.startswith('build summary:')]
+
+    def test_ran_and_reused(self):
+        (line,) = self.lines()
+        self.assertEqual(line, 'build summary: 3 of 6 stages ran (0:30 of 1:00): shader split (0:10), iOS shaders (0:10), IPA pack (0:10); reused: extract v917504, DLC, rewrite')
+
+    def test_why_the_shaders_were_built_again(self):
+        (line,) = self.lines(dict(reason='chain', old='b-475a55e74858', new='b-d5fe9ae8bfba', count=19592))
+        self.assertIn('shader split (0:10, the chain changed: b-475a55e74858 → b-d5fe9ae8bfba), iOS shaders (0:10, the chain changed: b-475a55e74858 → b-d5fe9ae8bfba), IPA pack (0:10)', line)
+        (line,) = self.lines(dict(reason='inputs', old='0123456789abcdef', new='fedcba9876543210', count=1))
+        self.assertIn('iOS shaders (0:10, the profile inputs changed (01234567 → fedcba98))', line)
+
+    def test_every_stage_reused_and_none(self):
+        prog = nsp.Progress('lines'); out = io.StringIO()
+        with contextlib.redirect_stdout(out), mock.patch.object(nsp.threading, 'Thread'):
+            prog.stage('a'); prog.end('reused'); prog.stage('b'); prog.end('x, reused (image checked)'); prog.report()
+        self.assertRegex(out.getvalue(), r'build summary: every stage reused \(\d+:\d\d\)')
+        prog = nsp.Progress('lines'); out = io.StringIO()
+        with contextlib.redirect_stdout(out), mock.patch.object(nsp.threading, 'Thread'):
+            prog.stage('a'); prog.end('3 converted, 0 reused'); prog.stage('b'); prog.end(); prog.report()
+        self.assertRegex(out.getvalue(), r'build summary: all 2 stages ran \(\d+:\d\d\): a \(\d+:\d\d\), b \(\d+:\d\d\)$')
+        self.assertEqual(nsp.Progress('lines').report(), None, 'no stages, no line')
+
+    def test_json_event(self):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out): self.run_stages(nsp.Progress('json'), dict(reason='chain', old='b-old', new='b-new', count=3))
+        (ev,) = [e for e in map(json.loads, out.getvalue().splitlines()) if e['ev'] == 'summary']
+        self.assertEqual([x['name'] for x in ev['ran']], ['shader split', 'iOS shaders', 'IPA pack']); self.assertEqual(ev['reused'], ['extract v917504', 'DLC', 'rewrite'])
+        self.assertEqual(ev['shaders'], {'reason': 'chain', 'why': 'the chain changed: b-old → b-new'}); self.assertGreater(ev['elapsed'], 0)

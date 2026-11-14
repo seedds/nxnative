@@ -9,7 +9,7 @@ Status: on the Mac (2026-11-06, M4 Pro), from a fresh save: the Xbox Game Studio
 | Setting | Where | Why |
 |---|---|---|
 | `tex_dyn_slots on` | [`game.tsv`](game.tsv) | 2 particle vertex shaders pick a buffer texture at run time; see [Shaders](#shaders) |
-| 64 GB alias region: `mem_reserve 0x1028000000`, `mem_alias 0x1000000000`, `mem_stack 0x10000000`, `app_pool 0xCD500000` | `game.tsv` | the provisional Mac layout for Unreal: the rewriter's engine-wide rules cut FMallocBinned3's constructor (`dm/tools/ue_malloc.py`) and give the engine region what the alias region has room for (`dm/tools/ue_region.py`), 62 GB here. An iPhone needs a smaller block, as [Octopath Traveler 0](../01005270232F2000/README.md#memory)'s; not measured yet |
+| 3.75 GB guest block: `mem_reserve 0xF0000000`, `mem_alias 0xC8000000`, `mem_stack 0x10000000`, `app_pool 0xCD500000` | `game.tsv` | [Octopath Traveler 0](../01005270232F2000/README.md#memory)'s layout: the rewriter's engine-wide rules cut FMallocBinned3's constructor (`dm/tools/ue_malloc.py`) and give the engine region what the alias region has room for (`dm/tools/ue_region.py`), 2.81 GB here. The 64 GB block of the bring-up on the Mac stopped the iPhone app at launch: [iPhone](#iphone) |
 | `sys_resource 0x1400000` | `game.tsv` | the NPDM declares 20 MB of system resource |
 | `shader_groups ShaderArchive-Global-=global ShaderArchive-=game`, `depth_mode zero` | `game.tsv` | the two shader code archives; the game sets near = 0 depth |
 
@@ -31,6 +31,11 @@ No host or rewriter rule is specific to this game.
 - After the NSP script's `--platform mac` build, its printed command runs the game; with `DM_FOCUS_KEEP=1 DM_WINDOW_TOP=1` a host started from a background shell keeps presenting.
 - From a fresh save: A at the title, X on the accessibility and brightness screens, X to agree to the terms, Right and A for Play Offline, A on Play, then B held to skip the opening cutscene.
 
+## iPhone
+
+- **Resolved: the app closed as soon as the game was started** (iPhone 15 Pro, the shared app installed with SideStore, the base game v65536 with the update packed): `[dm] FATAL reserve guest AS` at `>>> nnosInitialize`, with `x22=0x1028000000`. The profile's 64 GB guest block, the provisional Mac layout, is more than iOS reserves for an app without the extended virtual addressing entitlement ([Partitioning the guest block](../../../docs/reference/memory.md#partitioning-the-guest-block-between-alias-region-stacks-and-heap)). The profile now has Octopath Traveler 0's 3.75 GB block. Checked on the Mac with `DM_ALIAS_SIZE=0xC8000000` (2026-11-08, base v65536, headless, 90 s): the engine region 2.81 GB at alias +0.06 GB, the alias region mapped up to +1.26 GB of 3.12 GB, the Unreal heap up to 0.50 GB, no `FATAL` or `CRASH` line.
+- Open: not yet played on an iPhone past this. About 2.6 GB is resident on the Mac in play, close to what an 8 GB iPhone gives an app (about 3.4 GB).
+
 ## Found on this game
 
 - [Compute dispatches past the pipeline's thread limit](../../../docs/reference/shaders.md#compute-dispatches-past-the-pipelines-thread-limit): resolved, found offline (no M1 or M2 run): compute shader `ce4e9fdf514d0196` (8x8x8) took 124 registers on `applegpu_g13s` / `applegpu_g14g`, which allows 384 threads, so on an M1 or M2 its dispatches ran nothing; 104 with the local size on the kernel. What it draws is not known.
@@ -43,6 +48,6 @@ No host or rewriter rule is specific to this game.
 
 ## Open
 
-- iPhone: no IPA built; the guest block needs measuring for a phone ([What it needs](#what-it-needs)).
+- iPhone: only the launch is checked ([iPhone](#iphone)).
 - The prewarm list (`pso_manifest.tsv`) is empty.
 - Only the start of the first level was played: later levels, couch co-op (more controllers), saves across boots and the other languages are untested.

@@ -22,9 +22,9 @@ romfs_marker	Dungeons/Content/Paks/Dungeons-Switch.ucas
 zip_store	.cache:.headers:.mp4:.pak:.ttf:.txt:.ucas:.utoc:.metallib
 
 # ---- Memory ----
-# Unreal: nninitStartup reserves a 62 GB address region and its FMallocBinned3 takes 37 GB of it, so a 64 GB alias region for the bring-up on the Mac. The rewriter cuts the allocator in any Unreal 4 / 5 main (dm/tools/ue_malloc.py) and gives the region what the alias region has room for (dm/tools/ue_region.py), so an iPhone takes a smaller guest block, as Octopath Traveler 0's profile (docs/reference/memory.md)
-mem_reserve	0x1028000000
-mem_alias	0x1000000000
+# Unreal: nninitStartup reserves a 62 GB address region and its FMallocBinned3 takes 37 GB of it. The rewriter cuts the allocator in any Unreal 4 / 5 main (dm/tools/ue_malloc.py) and gives the region what the alias region has room for (dm/tools/ue_region.py), so the guest block is Octopath Traveler 0's 3.75 GB (docs/reference/memory.md): the 64 GB block of the bring-up on the Mac stopped the iPhone app at launch (FATAL reserve guest AS). The Mac still reserves a Switch's 64 GB alias region
+mem_reserve	0xF0000000
+mem_alias	0xC8000000
 mem_stack	0x10000000
 app_pool	0xCD500000
 # the NPDM declares 20 MB of system resource
@@ -38,8 +38,6 @@ shader_note	Minecraft Dungeons II shaders
 # ---- Address region check ----
 # the game calls nvnDeviceSetDepthMode with near = 0 in the check boot: the pipeline bases made before it runs are made for that mode
 depth_mode	zero
-
-# address regions: 2026-11-06, in its first 15 s in nnMain the game's regions reach alias +62.06 GB, within the profile's 64.00 GB alias region (what it takes later in play is not measured here) (rewrite 0d61bf36eb4f)
 
 # ---- Shaders ----
 # 2 particle vertex shaders (210d8abb3b9996c5, d1c8e612ec7462b6) pick a buffer texture at run time: their only c2 reads are texture table words 0x170-0x188 and sampler table words 0x568 / 0x578

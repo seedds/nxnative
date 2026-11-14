@@ -621,8 +621,9 @@ static void pads_start(void) {
 static _Atomic double g_picture_aspect = 16.0 / 9.0;
 // Picture "Fill" (DM_PICTURE_FIT=fill, as on iOS: DmLayout.h dm_aspect_fill): the Metal layer is a sublayer of the view's, the smallest centered rectangle of the picture's
 // shape that covers the view, and the view clips it, so the edges past the window are cropped, never stretched. Fit (the default) keeps the layer as the view's own and the
-// present fits the picture into it with black bars
-static int g_fill;
+// present fits the picture into it with black bars. Window › Fill Picture (⌥⌘F, fill_set) switches while the game runs: the first switch to Fill makes the layer a sublayer
+// (g_layer_sub), and Fit after that keeps it one, covering the whole view, where the present fits the picture with black bars as before
+static int g_fill, g_layer_sub;   // main thread
 // The centered rectangle the picture takes in a view of size b: inside it (Fit) or covering it (Fill)
 static NSRect picture_rect(NSSize b) {
     double w = b.width, h = b.height, a = g_picture_aspect;
@@ -648,11 +649,11 @@ static NSRect picture_rect(NSSize b) {
 // The drawable follows the view in pixels: a layer assigned to a layer-backed view kept the drawable at the first window's 1280x720 in fullscreen too, so the game picture was
 // scaled down to it and up again by the compositor. With Fill the drawable follows the layer's rectangle instead, which covers the view
 - (void)fitDrawable {
-    CAMetalLayer *l = g_fill ? g_layer : (CAMetalLayer *)self.layer; if (![l isKindOfClass:CAMetalLayer.class] || !self.window) return;
+    CAMetalLayer *l = g_layer_sub ? g_layer : (CAMetalLayer *)self.layer; if (![l isKindOfClass:CAMetalLayer.class] || !self.window) return;
     l.contentsScale = self.window.backingScaleFactor;
     NSSize size = self.bounds.size;
-    if (g_fill) {
-        NSRect r = picture_rect(size); if (r.size.width <= 0) return;
+    if (g_layer_sub) {   // Fill: the rectangle that covers the view; Fit after a switch: the whole view
+        NSRect r = g_fill ? picture_rect(size) : NSMakeRect(0, 0, size.width, size.height); if (r.size.width <= 0) return;
         [CATransaction begin]; [CATransaction setDisableActions:YES]; l.frame = r; [CATransaction commit];   // no implicit animation on a resize
         size = r.size;
     }
@@ -666,8 +667,28 @@ static NSRect picture_rect(NSSize b) {
 void front_picture_shape(int w, int h) {
     if (w <= 0 || h <= 0) return;
     g_picture_aspect = (double)w / h;
-    if (g_fill) dispatch_async(dispatch_get_main_queue(), ^{ [(DmGameView *)g_win.contentView fitDrawable]; });
+    dispatch_async(dispatch_get_main_queue(), ^{ if (g_layer_sub) [(DmGameView *)g_win.contentView fitDrawable]; });
 }
+// Window › Fill Picture: Fill or Fit while the game runs (main thread). The choice is saved as the settings window saves it (launcher.DM_PICTURE_FIT in the app's preferences,
+// launcher.c), so the next start keeps it; a DM_PICTURE_FIT from an env file still wins there
+static void fill_set(int on) {
+    if (on == g_fill || !g_win) return;
+    DmGameView *v = (DmGameView *)g_win.contentView;
+    if (!g_layer_sub) {   // the Metal layer was the view's own (Fit at launch): from now on a sublayer the view's layer clips
+        CALayer *base = [CALayer layer]; base.backgroundColor = NSColor.blackColor.CGColor; base.masksToBounds = YES;
+        [CATransaction begin]; [CATransaction setDisableActions:YES]; v.layer = base; [base addSublayer:g_layer]; [CATransaction commit];
+        g_layer_sub = 1;
+    }
+    g_fill = on; [v fitDrawable];
+    CFStringRef domain = CFBundleGetIdentifier(CFBundleGetMainBundle());   // the Mac app's bundle ID, as launcher.c reads it; none for a host run outside an app
+    if (domain) { CFPreferencesSetAppValue(CFSTR("launcher.DM_PICTURE_FIT"), on ? CFSTR("fill") : CFSTR("fit"), domain); CFPreferencesAppSynchronize(domain); }
+    LOG("front end: picture %s (Window menu)%s", on ? "Fill: the picture covers the window, its edges cropped" : "Fit", domain ? ", saved for the next start" : "");
+}
+@interface DmFillMenuTarget : NSObject @end
+@implementation DmFillMenuTarget
+- (void)toggleFill:(NSMenuItem *)item { (void)item; fill_set(!g_fill); }
+- (BOOL)validateMenuItem:(NSMenuItem *)item { item.state = g_fill ? NSControlStateValueOn : NSControlStateValueOff; return YES; }
+@end
 
 // AppKit reports a refused fullscreen request only to the window delegate (there is no notification for it)
 static void (^g_fs_failed)(void);
@@ -1558,7 +1579,7 @@ void front_run(void (*guest)(void)) {
         const char *fit = getenv("DM_PICTURE_FIT"); g_fill = fit && !strcmp(fit, "fill");
         if (!g_fill) v.layer = g_layer;
         else {   // Fill: the view's own layer clips the Metal layer, which fitDrawable sizes to cover it
-            v.layer.backgroundColor = NSColor.blackColor.CGColor; v.layer.masksToBounds = YES; [v.layer addSublayer:g_layer];
+            v.layer.backgroundColor = NSColor.blackColor.CGColor; v.layer.masksToBounds = YES; [v.layer addSublayer:g_layer]; g_layer_sub = 1;
             LOG("front end: picture Fill (DM_PICTURE_FIT=fill), the picture covers the window and its edges are cropped");
         }
         [(DmGameView *)v fitDrawable];
@@ -1592,6 +1613,9 @@ void front_run(void (*guest)(void)) {
             dispatch_async(dispatch_get_main_queue(), ^{ [g_cheats_menu showPanel:nil]; });
         [[bar addItemWithTitle:@"Window" action:nil keyEquivalent:@""] setSubmenu:wm];
         [wm addItemWithTitle:@"Enter Full Screen" action:@selector(toggleFullScreen:) keyEquivalent:@"f"].keyEquivalentModifierMask = NSEventModifierFlagControl | NSEventModifierFlagCommand;
+        static DmFillMenuTarget *fill_target; fill_target = [DmFillMenuTarget new];   // Fill or Fit while the game runs (fill_set); checked while Fill is on
+        NSMenuItem *fi = [wm addItemWithTitle:@"Fill Picture" action:@selector(toggleFill:) keyEquivalent:@"f"];
+        fi.keyEquivalentModifierMask = NSEventModifierFlagOption | NSEventModifierFlagCommand; fi.target = fill_target;
         NSApp.mainMenu = bar;
         const char *fs = getenv("DM_FULLSCREEN");   // 1 (or any value but 0): start in fullscreen; 0, the settings window's Window, or unset: a window
         if (fs && strcmp(fs, "0")) {

@@ -24,9 +24,10 @@ Tested on the Mac: the opening, the title, every tile with its movie; A on Super
 
 | Setting | Where | Why |
 |---|---|---|
-| `render_cond on` | [`game.tsv`](game.tsv) | the menu wraps its clears in conditional rendering; without evaluating it every frame is black ([Conditional rendering evaluated at replay](../../../docs/reference/rendering.md#conditional-rendering-evaluated-at-replay)) |
 | 4 GB layout: `mem_reserve 0x100000000`, `mem_alias 0x10000000`, `mem_stack 0x10000000`, `app_pool 0xCD500000`, `sys_resource 0x0` | `game.tsv` | what the survey's rules give for a game with no system resource; `main` sets a heap of the pool − 64 MB |
 | `modules main subsdk0 sdk` | `game.tsv` | `subsdk0` plays the menu's movies |
+
+Render conditions, which the host evaluates for every game ([Conditional rendering evaluated at replay](../../../docs/reference/rendering.md#conditional-rendering-evaluated-at-replay); until 2026-11-12 the profile key `render_cond`): the menu wraps its clears in conditional rendering; without evaluating it every frame is black ([Conditional rendering evaluated at replay](../../../docs/reference/rendering.md#conditional-rendering-evaluated-at-replay)).
 
 No rewriter patch: nothing here depends on a build.
 
@@ -41,6 +42,7 @@ General host changes first needed here; each applies to every game:
 - [Every undrawn extension code point is a ring](../../../docs/reference/services.md#every-undrawn-extension-code-point-is-a-ring): the crash at boot, `main+0x63780` on 1.1.4, U+E06B, which issue #206 reported at `main+0x62d20` on 1.0.0.
 - [Multi-program applications: `oe::ExecuteProgram`](../../../docs/reference/services.md#multi-program-applications-oeexecuteprogram).
 - [Offline HTML pages in a web view](../../../docs/reference/services.md#offline-html-pages-in-a-web-view).
+- [Under `--work-dir` the programs of one game overwrote each other's RomFS](../../../docs/reference/packing.md#under---work-dir-the-programs-of-one-game-overwrote-each-others-romfs): the app build stopped at the launcher's RomFS marker.
 
 Not needed here: the same-pass gamma draw over each movie tile (agl's `021631192bc452b6`) that earlier patches gave a `feedback_snap` for: main's general snapshot of an attachment a draw samples (`fb_prepare`, `nvn_mtl.m`) already handles it.
 

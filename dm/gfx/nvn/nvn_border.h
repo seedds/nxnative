@@ -1,7 +1,7 @@
 // Border colours Metal has no sampler state for (pure function, unit test tests/t_border.m). NVN takes any RGBA colour, Metal has three (MTLSamplerBorderColor 0 transparent black,
 // 1 opaque black, 2 opaque white). The sampler gets the nearest, bn. When the colour B is none of them, a wrap mode reaches the border and the sampler filters linearly (a min / max
 // reduction does not), a twin with another Metal colour bw lets the shader correct its samples, r = s_n + (s_w - s_n) k with k = (B - Bn) / (Bw - Bn) per channel
-// (dmsh_build.py border_emu): exact, since a filtered sample is linear in the border colour. bw must differ from bn in every channel where B does; when no colour does that beside
+// (dmsh_rewrite.py border_emu): exact, since a filtered sample is linear in the border colour. bw must differ from bn in every channel where B does; when no colour does that beside
 // the nearest one, bn becomes transparent black and bw opaque white, which differ in all four. Tears of the Kingdom's grass bend map samples with border (0.5, 0.5, 0.5, 0.5)
 #pragma once
 #include <stdint.h>

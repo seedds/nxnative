@@ -3,7 +3,6 @@
 through an address it cannot trace share one zero-initialized word, the helper tries that entry before the hint and the search and records a new choice; and on this Mac's GPU the translated helper reads
 what the pool table names on a run of addresses that hit, leave and come back to pools: adjacent pools, a gap, an address above 4 GiB, a hinted chunk, one lookup after another in each lane.
 Needs DMSH_TEST_XLATE (the translator) like the other translator tests."""
-import ast
 import os
 from pathlib import Path
 import re
@@ -18,11 +17,8 @@ from test_dmsh_ampere_mem import EXIT, Translated, inst   # noqa: E402
 from test_dmsh_ampere_alu import STORE, waiting, s2r_tid   # noqa: E402
 
 TOOLS = Path(__file__).resolve().parents[1] / 'tools'
-tree = ast.parse((TOOLS / 'dmsh_build.py').read_text())
-scope = {}
-exec(compile(ast.Module(body=[n for n in tree.body if isinstance(n, ast.Assign) and any(getattr(t, 'id', None) == 'MAC_METAL' for t in n.targets)], type_ignores=[]),
-             str(TOOLS / 'dmsh_build.py'), 'exec'), scope)
-MAC_METAL = scope['MAC_METAL']
+sys.path.insert(0, str(TOOLS))
+from dmsh_chain import MAC_METAL   # noqa: E402  (the build's Mac compile)
 
 LDG = (0x000ea200081e890f, 0x0000000405067981)   # LDG.E R6, [R5.64 + UR4]: R5 the thread index, an address the translator traces to no storage buffer
 HELPER = re.compile(r'(?m)^int (_\d+)\(thread const int& _\d+, thread const int& _\d+, const device (_\d+)& \w+, thread uint& (_\d+)\)\n\{\n')
@@ -106,6 +102,99 @@ class RawLast(Translated):
             out = subprocess.run([str(w / 'r'), str(w / 'k.metallib')], capture_output=True, text=True)
             self.assertIn('bad 0 of 1024', out.stdout, out.stdout + out.stderr)
 
+
+LDG128 = ((LDG[0] & ~(7 << 9)) | 6 << 9, (LDG[1] & ~(0xff << 16)) | 12 << 16)   # LDG.E.128 R12, [R5.64 + UR4]: size bits 73..75 = 6 (B128), R12..R15
+def sts(rb, off): return (STORE[0], (STORE[1] & ~(0xffffffff << 32)) | rb << 32 | off << 40)   # STS.U32 [R9 * 16 + off], Rb
+VEC_HELPER = re.compile(r'(?m)^int (_\d+)\(thread const int& _\d+, thread const int& _\d+, const device (_\d+)& \w+, thread uint& (_\d+), thread spvUnsafeArray<uint, 3>& (_\d+)\)\n\{\n')
+
+
+@unittest.skipUnless(os.environ.get('DMSH_TEST_XLATE'), 'set DMSH_TEST_XLATE to the offline translator')
+class RawVector(Translated):
+    """An LDG.128 through an address the translator ties to no storage buffer: one pool table lookup and one 128-bit load (Operation.GlobalVectorCount, GlobalToStorage
+    GenerateRawVectorLoad), not four, the other words passed back in gmem_vec; on the GPU each of the four words is the pool's"""
+    def msl(self):
+        code = (s2r_tid(9), s2r_tid(5), LDG128, sts(12, 0), sts(13, 4), sts(14, 8), sts(15, 12))
+        return self.translate(b''.join(inst(*waiting(i)) for i in code) + inst(*EXIT), shared=0x1000)
+
+    def test_one_vector_load_for_the_four_words(self):
+        msl = self.msl()
+        m = VEC_HELPER.search(msl)
+        self.assertTrue(m, msl[:3000])
+        helper = msl[m.end():msl.index('\n}\n', m.end())]
+        self.assertEqual(len(re.findall(r'uint4 _\d+ = \*\(reinterpret_cast<const device uint4\*>', helper)), 1, helper[-1500:])
+        self.assertNotRegex(helper, r'reinterpret_cast<const device uint\*>')   # no word loads besides it
+        main = msl[msl.index('kernel void main0'):]
+        self.assertEqual(len(re.findall(m.group(1) + r'\(', main)), 1)
+        scalar = HELPER.search(msl)
+        self.assertFalse(scalar and re.search(scalar.group(1) + r'\(', main), 'a word of the 128-bit load went through the scalar helper')
+        for k in range(3): self.assertRegex(main, re.escape(m.group(4)) + rf'\[{k}\]')
+
+    def test_a_miss_zeroes_the_other_words(self):   # gmem_vec has no initial value and the caller reads its words after the call
+        msl = self.msl()
+        m = VEC_HELPER.search(msl)
+        helper = msl[m.end():msl.index('\n}\n', m.end())]
+        miss = helper[helper.rindex('return'):]
+        self.assertTrue(miss.startswith('return 0;'), miss)
+        before = helper[:helper.rindex('return')]
+        before = before[max(before.rindex('}'), before.rindex('{')):]   # the miss path: the straight run of lines that ends in its return
+        for k in range(3): self.assertIn(f'{m.group(4)}[{k}] = 0u;', before, helper[-600:])
+
+    def test_a_64_bit_miss_zeroes_its_other_word(self):
+        ldg64 = ((LDG[0] & ~(7 << 9)) | 5 << 9, (LDG[1] & ~(0xff << 16)) | 12 << 16)   # LDG.E.64 R12, [R5.64 + UR4]: size bits = 5 (B64), R12..R13
+        code = (s2r_tid(9), s2r_tid(5), ldg64, sts(12, 0), sts(13, 4))
+        msl = self.translate(b''.join(inst(*waiting(i)) for i in code) + inst(*EXIT), shared=0x1000)
+        m = VEC_HELPER.search(msl)
+        self.assertTrue(m, msl[:3000])
+        helper = msl[m.end():msl.index('\n}\n', m.end())]
+        self.assertIn('uint2 ', helper)
+        before = helper[:helper.rindex('return')]
+        before = before[max(before.rindex('}'), before.rindex('{')):]
+        self.assertTrue(helper[helper.rindex('return'):].startswith('return 0;'))
+        self.assertIn(f'{m.group(4)}[0] = 0u;', before, helper[-600:])
+        self.assertNotIn(f'{m.group(4)}[1] = 0u;', before)
+
+    @unittest.skipUnless(shutil.which('xcrun') and sys.platform == 'darwin', 'needs Metal')
+    def test_reads_on_gpu(self):
+        msl = self.msl()
+        m = VEC_HELPER.search(msl)
+        # each step's word 0 when words 1..3 are the next three of its pool (value() counts words), 0 where it reads no pool; the runner's addresses keep all four in one pool
+        kernel = (msl[:msl.index('kernel void main0')] +
+                  f'kernel void k(const device {m.group(2)}& map [[buffer(0)]], const device uint2* addr [[buffer(1)]], device int* out [[buffer(2)]], uint id [[thread_position_in_grid]])\n'
+                  '{\n    uint last = 0u;\n    spvUnsafeArray<uint, 3> vec;\n    for (int s = 0; s < 16; s++)\n    {\n        int lo = int(addr[id * 16 + s].x), hi = int(addr[id * 16 + s].y);\n'
+                  f'        vec[0] = vec[1] = vec[2] = 0xdeadu; int w = {m.group(1)}(lo, hi, map, last, vec);\n'   # a miss must not leave them as they were
+                  '        out[id * 16 + s] = (w == 0 && vec[0] == 0u && vec[1] == 0u && vec[2] == 0u) || (vec[0] == uint(w) + 1u && vec[1] == uint(w) + 2u && vec[2] == uint(w) + 3u) ? w : int(0xdead);\n    }\n}\n')
+        with tempfile.TemporaryDirectory() as w:
+            w = Path(w)
+            (w / 'k.metal').write_text(kernel)
+            r = subprocess.run(MAC_METAL + [str(w / 'k.metal'), '-o', str(w / 'k.air')], capture_output=True, text=True)
+            self.assertEqual(r.returncode, 0, r.stderr[-3000:])
+            subprocess.run(['xcrun', '-sdk', 'macosx', 'metallib', str(w / 'k.air'), '-o', str(w / 'k.metallib')], check=True)
+            (w / 'r.m').write_text(RUNNER)
+            subprocess.run(['clang', '-fobjc-arc', '-framework', 'Metal', '-framework', 'Foundation', str(w / 'r.m'), '-o', str(w / 'r')], check=True, capture_output=True)
+            out = subprocess.run([str(w / 'r'), str(w / 'k.metallib')], capture_output=True, text=True)
+            self.assertIn('bad 0 of 1024', out.stdout, out.stdout + out.stderr)
+
+
+
+@unittest.skipUnless(os.environ.get('DMSH_TEST_XLATE'), 'set DMSH_TEST_XLATE to the offline translator')
+class RawVectorPair(Translated):
+    """Two LDG.128 in one block (lunks on PR #1813): the first's words 1..3 unused, the second's word 0 unused and its word 2 used. The first load's follower scan took the
+    second's word 2 as its own (same word count, word > 0), so it read the first load's gmem_vec and the second load's memory was never read. Each LDG's words now carry
+    their own group (Operation.GlobalVectorGroup): the first is one vector call, the second's word a scalar lookup of its own address"""
+    def msl(self):
+        a = (LDG128[0] & ~0xf, LDG128[1])   # predicate PT (64..67 = 0, stored as 7 - P): no branch around the load, so both loads are in one block
+        b = (a[0], (a[1] & ~(0xff << 16) & ~(0xffffff << 40)) | 16 << 16 | 0x40 << 40)   # LDG.E.128 R16, [R5.64 + UR4 + 0x40]
+        code = (s2r_tid(9), s2r_tid(5), a, b, sts(12, 0), sts(18, 4))
+        return self.translate(b''.join(inst(*waiting(i)) for i in code) + inst(*EXIT), shared=0x1000)
+
+    def test_a_word_of_the_next_load_is_not_read_from_this_ones_vector(self):
+        msl = self.msl()
+        vec, scalar = VEC_HELPER.search(msl), HELPER.search(msl)
+        self.assertTrue(vec, msl[:3000])
+        main = msl[msl.index('kernel void main0'):]
+        self.assertEqual(len(re.findall(vec.group(1) + r'\(', main)), 1, main[:3000])
+        self.assertNotRegex(main, re.escape(vec.group(4)) + r'\[\d\]', 'a word was read from the vector call\'s gmem_vec')
+        self.assertTrue(scalar and len(re.findall(scalar.group(1) + r'\(', main)) == 1, 'the second load\'s word 2 has no lookup of its own:\n' + main[:3000])
 
 if __name__ == '__main__':
     unittest.main()

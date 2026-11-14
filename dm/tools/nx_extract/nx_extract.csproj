@@ -1,4 +1,4 @@
-<!-- NSP extraction tool (including update merging): LibHac reads the NCAs and layers the patch NCA over the base NCA to get the merged RomFS. hactool cannot read newer patch NCAs (it reports Invalid BKTR layout!). -->
+<!-- NSP extraction tool (including update merging; built with dm/tools/native_tools.sh): LibHac reads the NCAs and layers the patch NCA over the base NCA to get the merged RomFS. hactool cannot read newer patch NCAs (it reports Invalid BKTR layout!). -->
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <OutputType>Exe</OutputType>
@@ -7,7 +7,14 @@
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <!-- the summary lines ("N files 71.4 MB") are parsed by build_ipa_from_nsp.py; the user's region must not turn the point into a comma (#208) -->
     <InvariantGlobalization>true</InvariantGlobalization>
+    <!-- A native executable (NativeAOT), so running it needs no .NET (GitHub issue #1853): dm/tools/native_tools.sh publishes it for arm64 and x86_64 and joins them into dm/tools/nx_extract_bin/nx_extract -->
+    <PublishAot>true</PublishAot>
   </PropertyGroup>
+  <!-- Embeds its own source: the source-sha argument prints its hash, by which the NSP script checks that the committed executable was built from the in-repo source -->
+  <ItemGroup>
+    <EmbeddedResource Include="Program.cs" LogicalName="src0" />
+    <EmbeddedResource Include="nx_extract.csproj" LogicalName="src1" />
+  </ItemGroup>
   <ItemGroup>
     <PackageReference Include="LibHac" Version="0.19.0" />
   </ItemGroup>

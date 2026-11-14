@@ -3,7 +3,7 @@
 # shader chain, …), each game whose profile it changes (game: <title ID>), and "new game" for a profile main does not have yet. The workflow runs this file from main,
 # never from the pull request, and gives it only the list of paths.
 # Usage: pr_areas.py [--root DIR] < paths   (one path per line; DIR is main's checkout, default this repository)  → one line per label: name, color, description (tab-separated)
-import argparse, os, pathlib, re, runpy, sys
+import argparse, importlib.util, os, pathlib, re, sys
 
 AREAS = [   # label, color, description, paths (regular expression, matched from the start)
     ('host', '1d76db', 'The Horizon host: SVCs, services, threads, memory (dm/host)', r'dm/host/'),
@@ -13,7 +13,7 @@ AREAS = [   # label, color, description, paths (regular expression, matched from
     ('textures', '0e8a16', 'Texture layouts and formats (dm/gfx/tex)', r'dm/gfx/tex/'),
     ('rewriter', 'fbca04', 'The NSO rewriter and per-build patches', r'dm/tools/(patch_nso|sdk_patches|nso_)|dm/games/[^/]+/patches\.py$'),
     ('packing', 'c5def5', 'Building an IPA or a Mac app: the NSP script, extraction, the shader split, the packers',
-     r'scripts/build_ipa_from_nsp\.py$|dm/tools/nx_extract/|dm/ios/tools/build_ipa\.sh$|dm/mac/pack_app\.py$|dm/gfx/tools/shader_split\.py$'),
+     r'scripts/build_ipa_from_nsp\.py$|dm/tools/nx_extract(_bin)?/|dm/tools/native_tools\.sh$|dm/ios/tools/build_ipa\.sh$|dm/mac/pack_app\.py$|dm/gfx/tools/shader_split\.py$'),
     ('ios', 'c5def5', 'The iPhone and iPad app (dm/ios); on an issue, seen on one', r'dm/ios/'),
     ('mac', 'c5def5', 'The Mac front end and app (dm/mac, front_mac.m); on an issue, seen on a Mac', r'dm/mac/|dm/host/front_mac\.m$'),
     ('tools', 'bfdadc', 'Tools and scripts (dm/tools, scripts)', r'dm/tools/|scripts/'),
@@ -22,6 +22,7 @@ AREAS = [   # label, color, description, paths (regular expression, matched from
 ]
 CHAIN = ('shader chain', 'b60205', "The shader translation chain (DMSH_CHAIN): a change rebuilds every game's shaders")   # its files: chain_paths()
 GAME_COLOR, NEW_GAME = 'f9d0c4', ('new game', 'd93f0b', 'A game main has no profile for yet: a pull request adding one, or an issue about one')
+COMMIT_AREAS = [a[0] for a in AREAS] + ['chain', 'game']   # the areas a commit's first line names (docs/agents/06-dev-loop.md, Commit messages): these labels, the shader chain as chain, game for one profile
 KINDS = {'bug': ('d73a4a', "Something isn't working"), 'enhancement': ('a2eeef', 'New feature or request')}   # issue_areas.py only, with NEW_GAME
 
 
@@ -32,7 +33,11 @@ def automatic(name):   # a label this file or issue_areas.py adds, so it says no
 def chain_paths(root):   # the files DMSH_CHAIN hashes (main's dmsh_chain.FILES, so the label cannot drift from the chain) and the header it writes
     src = root / 'dm/gfx/tools/dmsh_chain.py'
     if not src.is_file(): return set()
-    return {os.path.normpath('dm/gfx/' + f) for f in runpy.run_path(str(src))['FILES']} | {'dm/gfx/nvn/dmsh_chain.h'}
+    # An import: dmsh_chain.py reads nothing and builds nothing when imported (its compile flags are read when used), so main's FILES come without its other files
+    spec = importlib.util.spec_from_file_location('dmsh_chain_of_main', src)
+    if spec is None or spec.loader is None: return set()
+    chain = importlib.util.module_from_spec(spec); spec.loader.exec_module(chain)
+    return {os.path.normpath('dm/gfx/' + f) for f in chain.FILES} | {'dm/gfx/nvn/dmsh_chain.h'}
 
 
 def game_names(root):   # title ID → name, from the games table

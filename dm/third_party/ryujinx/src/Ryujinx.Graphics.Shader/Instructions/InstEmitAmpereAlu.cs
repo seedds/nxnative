@@ -83,6 +83,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
             x(0xab9, InstName.Ldc, AUldc, N, uniform: true);
             x(0xabb, InstName.Ldc, AUldc, N, uniform: true);
             x(AmpereOpcodes.Ldc, InstName.Ldc, ALdc, N);
+            x(0x582, InstName.Ldc, ALdcBindless, N);
             x(0x822, InstName.Fswzadd, AFswzadd, N);
             x(0x804, InstName.R2p, AR2p, N, writesRd: false);
             x(0x204, InstName.R2p, AR2p, N, writesRd: false);
@@ -205,8 +206,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
             Operand p = APred(context, x, 87, 90);
             BoolOp bop = (BoolOp)x.Bits(74, 76);
 
-            ASetPred(context, x.Bits(81, 84), GetPredLogicalOp(context, bop, cmp, p));
-            ASetPred(context, x.Bits(84, 87), GetPredLogicalOp(context, bop, context.BitwiseNot(cmp), p));
+            ASetPredPair(context, x, GetPredLogicalOp(context, bop, cmp, p), GetPredLogicalOp(context, bop, context.BitwiseNot(cmp), p));
         }
 
         public static void AFsel(EmitterContext context)
@@ -225,7 +225,8 @@ namespace Ryujinx.Graphics.Shader.Instructions
             // Splatoon Raiders' upscaler network (agl_ndsr.pck) takes powers of its packed halves with LOG2 and EXP2, then joins the results with PRMT 0x5410
             bool half = x.Bit(73);
             ASrc s = AOne(context, x);
-            Operand res = half ? AHalfLanes(context, s, x.Bits(60, 62))[0] : AFloat(context, s);
+            // MUFU.F16's bits 60..61 pick one half (nvdisasm: 0 .H0, 1 .H1), not a pair's swizzle (where 1 is .F32): the odd values read the high half, as they did
+            Operand res = half ? AHalfLanes(context, s, (x.Bits(60, 62) & 1) != 0 ? 3 : 2)[0] : AFloat(context, s);
 
             if (half && x.Bits(74, 80) is 6 or 7)
             {
@@ -234,8 +235,8 @@ namespace Ryujinx.Graphics.Shader.Instructions
 
             res = x.Bits(74, 80) switch
             {
-                0 => context.FPCosine(context.FPMultiply(res, ConstF(2f * MathF.PI))),   // Volta and later: the argument is in turns (the compiler multiplies by 1 / 2pi first,
-                1 => context.FPSine(context.FPMultiply(res, ConstF(2f * MathF.PI))),     // NAK lowers fsin / fcos the same way); Maxwell's came through RRO instead
+                0 => context.FPCosine(ATurnsToRadians(context, res)),   // Volta and later: the argument is in turns (the compiler multiplies by 1 / 2pi first,
+                1 => context.FPSine(ATurnsToRadians(context, res)),     // NAK lowers fsin / fcos the same way); Maxwell's came through RRO instead
                 2 => context.FPExponentB2(res),
                 3 => context.FPLogarithmB2(res),
                 4 => context.FPReciprocal(res),
@@ -247,6 +248,16 @@ namespace Ryujinx.Graphics.Shader.Instructions
             };
 
             ASet(context, x, half ? context.PackHalf2x16(res, ConstF(0f)) : res);
+        }
+
+        // MUFU.SIN / COS take turns and use only their fraction, so a large argument keeps an exact angle. t * 2pi in float rounds away that fraction (at 2^20 turns a step of 0.4 rad), and
+        // Metal's fast sin / cos return 0 from about 2^20 turns on (both, so a rotation (cos, sin) collapses to the origin): Donkey Kong Bananza's SSAO (a6f04605183d9915) rotates its kernel by
+        // 10 (3 (x mod y) + x y) / 2pi turns, past 2^20 where x y > 659,000, which at its full-size effects is a corner of the screen with no ambient occlusion. t - rint(t) is exact for
+        // every float (|t| < 2^23 has the same exponent or a smaller one; at and past 2^23 every float is an integer and the fraction is 0) and lies in [-0.5, 0.5]: the angle is in [-pi, pi],
+        // where fast sin / cos are accurate, and a small t stays itself (sin of a small angle is not moved to near 2pi). Infinity and NaN give NaN, as the hardware
+        private static Operand ATurnsToRadians(EmitterContext context, Operand turns)
+        {
+            return context.FPMultiply(context.FPSubtract(turns, context.FPRound(turns)), ConstF(2f * MathF.PI));
         }
 
         // F2I: destination signed (72) and size (75..77, log2 bytes), rounding (78..80), source size (84..86); a half source is the half 60..62 selects, as F2F's (Pokemon Pokopia: 1,067 shaders)
@@ -301,7 +312,8 @@ namespace Ryujinx.Graphics.Shader.Instructions
                 throw AFail(context, "I2F size");
             }
 
-            int select = x.Bits(60, 62);
+            // An immediate (form 4) fills 32..63, so it has no select: I2F.F16.S32 of -2 read the immediate's top bits as one (PRAGMATA: 3 compute shaders)
+            int select = x.Form == 4 ? 0 : x.Bits(60, 62);
 
             if (select != 0 && srcSize == 2)
             {
@@ -309,8 +321,55 @@ namespace Ryujinx.Graphics.Shader.Instructions
             }
 
             ISrcFmt src = (ISrcFmt)((x.Bit(74) ? 4 : 0) | srcSize);
+            int rnd = x.Bits(78, 80);
+
+            // A 32-bit integer to a float with .RM / .RP / .RZ (78..79): the compiler's 32-bit division starts with I2F.U32.RP, so that its reciprocal estimate stays on
+            // the side its correction step expects. Rounded to nearest, a value above 2^24 came out one ulp off in about half the cases
+            if (srcSize == 2 && dstSize == 2 && rnd != 0)
+            {
+                bool signed = x.Bit(74);
+                Operand v = AGet(context, AOne(context, x, neg: false, abs: false));
+                Operand f = signed ? context.IConvertS32ToFP32(v) : context.IConvertU32ToFP32(v);
+                // f is an integer value, exact back in 32 bits unless it rounded up to 2^31 (signed) or 2^32, where it is above v anyway
+                Operand limit = ConstF(signed ? 2147483648f : 4294967296f);
+                Operand big = context.BitwiseNot(context.FPCompareLess(f, limit));
+                Operand back = signed ? context.FP32ConvertToS32(f) : context.FP32ConvertToU32(f);
+                Operand gt = context.BitwiseOr(big, signed ? context.ICompareGreater(back, v) : context.ICompareGreaterUnsigned(back, v));
+                Operand lt = context.BitwiseAnd(context.BitwiseNot(big), signed ? context.ICompareLess(back, v) : context.ICompareLessUnsigned(back, v));
+                ASet(context, x, ADirected(context, rnd, f, gt, lt, signed ? context.ICompareLess(v, Const(0)) : null));
+                return;
+            }
 
             EmitI2F(context, src, (DstFmt)dstSize, AGet(context, AOne(context, x, neg: false, abs: false)), (ByteSel)(select * (srcSize == 1 ? 2 : 1)), x.Rd, false, false);
+        }
+
+        // A result r rounded to nearest, moved to the directed rounding .RM (1), .RP (2) or .RZ (3) asks for, from how it compares with the exact value: gt (r is above it),
+        // lt (r is below it), neg (the value is negative; null: never). One step of a float's bits moves it to its neighbour of the same sign: + 1 away from zero, - 1 toward it.
+        // An overflow rounded to infinity steps back to the largest finite value (NAK's hardware test: F2F.F16.F32.RZ of 65536 is 0x7bff)
+        private static Operand ADirected(EmitterContext context, int rnd, Operand r, Operand gt, Operand lt, Operand neg)
+        {
+            Operand pos = neg == null ? null : context.BitwiseNot(neg);
+            Operand And(Operand a, Operand b) => a == null || b == null ? null : context.BitwiseAnd(a, b);
+            Operand away, toward;
+
+            switch (rnd)
+            {
+                case 2: away = neg == null ? lt : And(lt, pos); toward = And(lt, neg); break;   // RP: below the value, step up
+                case 1: away = And(gt, neg); toward = neg == null ? gt : And(gt, pos); break;   // RM: above the value, step down
+                default: away = null; toward = neg == null ? gt : context.BitwiseOr(And(gt, pos), And(lt, neg)); break;   // RZ: larger in magnitude, step toward zero
+            }
+
+            if (away != null)
+            {
+                r = context.ConditionalSelect(away, context.IAdd(r, Const(1)), r);
+            }
+
+            if (toward != null)
+            {
+                r = context.ConditionalSelect(toward, context.IAdd(r, Const(-1)), r);
+            }
+
+            return r;
         }
 
         // F2I.U64 Rd:Rd+1, b (F32): the layout of F2I. The compiler's 32-bit division takes its reciprocal this way: I2F, RCP, IADD 0x1ffffffe (2^64 and two ulps down), F2I.U64, then the high word
@@ -368,17 +427,31 @@ namespace Ryujinx.Graphics.Shader.Instructions
             ASet(context, x, x.Bit(74) ? context.IConvertS32ToFP32(src) : context.IConvertU32ToFP32(src));
         }
 
-        // FRND: a float rounded to an integer value (78..80: nearest even, floor, ceiling, truncation)
+        // FRND: a float rounded to an integer value (78..80: nearest even, floor, ceiling, truncation).
+        // FRND.F16 (both sizes 1): the half 60..62 selects, as F2F's, and the result in the low 16 bits. The rounding is done in 32 bits and packed: an integer value of a half's
+        // range is a half (every half from 2^10 up is an integer, and an integer below 2^11 has 11 significant bits), so the pack is exact (PRAGMATA: 65 shaders)
         public static void AFrnd(EmitterContext context)
         {
             AmpereOp x = new(context.CurrOp);
+            int size = x.Bits(84, 86);
 
-            if (x.Bits(84, 86) != 2 || x.Bits(75, 77) != 2)
+            if (size is not (1 or 2) || x.Bits(75, 77) != size)
             {
-                throw AFail(context, "FRND of a float that is not 32-bit");
+                throw AFail(context, "FRND of a float that is neither 16-bit nor 32-bit, or to another size");
             }
 
-            Operand src = AFloat(context, AOne(context, x));
+            ASrc s = AOne(context, x);
+            Operand src;
+
+            if (size == 1)
+            {
+                src = AGet(context, s);
+                src = context.FPAbsNeg(x.Bits(60, 62) is 1 or 3 ? context.UnpackHalf2x16High(src) : context.UnpackHalf2x16Low(src), s.Abs, s.Neg);
+            }
+            else
+            {
+                src = AFloat(context, s);
+            }
 
             Operand res = x.Bits(78, 80) switch
             {
@@ -388,7 +461,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
                 _ => context.FPTruncate(src),
             };
 
-            ASet(context, x, res);
+            ASet(context, x, size == 1 ? context.PackHalf2x16(res, ConstF(0f)) : res);
         }
 
         // F2F: between half, single and double precision (sizes as F2I); a half lands in the low 16 bits
@@ -417,6 +490,19 @@ namespace Ryujinx.Graphics.Shader.Instructions
             }
 
             EmitF2F(context, (DstFmt)srcSize, (DstFmt)dstSize, IntegerRound.Pass, src, x.Rd, s.Abs, s.Neg, false);
+
+            // F2F.F16.F32 .RM / .RP / .RZ (78..79): the pack rounds to nearest; the half read back (exact in 32 bits) tells which side of the float it fell.
+            // The read goes through a mask: the optimizer takes an unpack of a pack for the packed float itself (PropagatePack), which would skip the rounding
+            int rnd = x.Bits(78, 80);
+
+            if (srcSize == 2 && dstSize == 1 && rnd != 0 && x.Rd != RegisterConsts.RegisterZeroIndex)
+            {
+                Operand f = context.FPAbsNeg(src, s.Abs, s.Neg);
+                Operand rd = Register(x.Rd, RegisterType.Gpr);
+                Operand back = context.UnpackHalf2x16Low(context.BitwiseAnd(rd, Const(0xffff)));
+                Operand res = ADirected(context, rnd, rd, context.FPCompareLess(f, back), context.FPCompareLess(back, f), context.FPCompareLess(f, ConstF(0f)));
+                context.Copy(rd, res);
+            }
         }
 
         // F2FP.F16.F32.PACK_AB Rd, a, b: a to the high half, b to the low one.
@@ -478,18 +564,23 @@ namespace Ryujinx.Graphics.Shader.Instructions
 
         // ---- packed halves ----
 
-        // A half-pair operand's two lanes after its swizzle (0 as is, 2 low twice, 3 high twice; 1 the high half of a scalar), abs / neg applied.
+        // A half-pair operand's two lanes after its swizzle (0 as is, 1 .F32: the 32-bit float itself in both lanes, 2 low twice, 3 high twice), abs / neg applied.
+        // A constant has its swizzle too (bits 60..61 in the 32 slot, nvdisasm: c[0x0] [0x168].H0_H0); only an immediate has none (those bits are its own)
         private static Operand[] AHalfLanes(EmitterContext context, ASrc s, int swizzle)
         {
             Operand v = AGet(context, s);
             Operand lo, hi;
 
-            if (s.Kind == AKind.Imm || s.Kind == AKind.Cbuf || swizzle == 0)
+            if (s.Kind == AKind.Imm || swizzle == 0)
             {
                 lo = context.UnpackHalf2x16Low(v);
                 hi = context.UnpackHalf2x16High(v);
             }
-            else if (swizzle is 1 or 3)
+            else if (swizzle == 1)
+            {
+                lo = hi = v;
+            }
+            else if (swizzle == 3)
             {
                 lo = hi = context.UnpackHalf2x16High(v);
             }
@@ -654,17 +745,72 @@ namespace Ryujinx.Graphics.Shader.Instructions
 
             if (x.Opcode == 0xab9 && x.Bit(91))
             {
-                throw AFail(context, "ULDC with its bank in a uniform register");
+                // ULDC URd, cx[URa][offset]: URa (at 24, where the indexed form has its index) holds a bindless constant buffer's handle (ABindlessConstant)
+                int size = x.Bits(73, 76);
+
+                if (size > 5)
+                {
+                    throw AFail(context, $"constant load size {size}");
+                }
+
+                int offset = (int)x.SignedField(38, 54);
+                int rd = ARd(x, uniform: true);
+
+                for (int k = 0; k < (size == 5 ? 2 : 1) && rd + k < RegisterConsts.UniformZeroIndex; k++)
+                {
+                    Operand value = ABindlessConstant(context, x.Bits(24, 30), Const(0), (offset & ~3) + 4 * k);
+
+                    if (size < 4)
+                    {
+                        value = ExtractSmallInt(context, (LsSize)size, Const((offset & 3) * 8), value);
+                    }
+
+                    context.Copy(ADestReg(rd + k, uniform: true), value);
+                }
+
+                return;
             }
 
             if (x.Opcode == 0xabb)
             {
-                ALoadConstant(context, x, x.Bits(54, 59), Register(x.Bits(24, 30), RegisterType.Uniform), (int)x.SignedField(38, 54), uniform: true);
+                (int bank, int offset) = AIndexedBank(context, x.Bits(54, 59), (int)x.SignedField(38, 54));
+                ALoadConstant(context, x, bank, Register(x.Bits(24, 30), RegisterType.Uniform), offset, uniform: true);
             }
             else
             {
                 (int bank, int offset) = AMapC0(context, x.Bits(54, 59), (int)x.SignedField(38, 54));
                 ALoadConstant(context, x, bank, Const(0), offset, uniform: true);
+            }
+        }
+
+        // LDC Rd, cx[URa][Rb + offset] (0x582): URa (at 24, where LDC has Ra) holds a bindless constant buffer's handle, Rb (at 64) the index; a byte, short, word or word
+        // pair (size 73..76) read through ABindlessConstant. PRAGMATA's pixel shaders read a material's parameters so, from a handle they load with LDG.64 (19 of 116 failures
+        // in a sample of its shaders were this instruction)
+        public static void ALdcBindless(EmitterContext context)
+        {
+            AmpereOp x = new(context.CurrOp);
+            int size = x.Bits(73, 76);
+
+            if (!x.Bit(91) || size > 5)
+            {
+                throw AFail(context, $"0x582 form (bindless bit {(x.Bit(91) ? 1 : 0)}, size {size})");
+            }
+
+            int rb = x.Bits(64, 72);
+            Operand index = rb == RegisterConsts.RegisterZeroIndex ? Const(0) : Register(rb, RegisterType.Gpr);
+            Operand addr = context.IAdd(index, Const((int)x.SignedField(38, 54)));
+            Operand word = context.BitwiseAnd(addr, Const(~3));
+
+            for (int k = 0; k < (size == 5 ? 2 : 1) && x.Rd + k < RegisterConsts.RegisterZeroIndex; k++)
+            {
+                Operand value = ABindlessConstant(context, x.Bits(24, 30), context.IAdd(word, Const(4 * k)), 0);
+
+                if (size < 4)
+                {
+                    value = ExtractSmallInt(context, (LsSize)size, GetBitOffset(context, addr), value);
+                }
+
+                context.Copy(Register(x.Rd + k, RegisterType.Gpr), value);
             }
         }
 
@@ -700,8 +846,15 @@ namespace Ryujinx.Graphics.Shader.Instructions
             }
             else
             {
-                ALoadConstant(context, x, x.Bits(54, 59), Register(x.Ra, RegisterType.Gpr), (int)x.SignedField(38, 54), uniform: false);
+                (int bank, int offset) = AIndexedBank(context, x.Bits(54, 59), (int)x.SignedField(38, 54));
+                ALoadConstant(context, x, bank, Register(x.Ra, RegisterType.Gpr), offset, uniform: false);
             }
+        }
+
+        // An indexed constant read's bank and immediate offset: an NVN2 graphics stage's buffer bank moves to c[24] by its push block's base (AMapC0, AStageBlock)
+        private static (int Bank, int Offset) AIndexedBank(EmitterContext context, int bank, int offset)
+        {
+            return bank > 24 ? (24, AStageBlock(context, bank) * 0x100 + offset) : (bank, offset);
         }
 
         private static void ALoadConstant(EmitterContext context, AmpereOp x, int bank, Operand index, int offset, bool uniform)
@@ -810,8 +963,17 @@ namespace Ryujinx.Graphics.Shader.Instructions
             Operand p = APred(context, x, 87, 90, u);
             BoolOp bop = (BoolOp)x.Bits(74, 76);
 
-            ASetPred(context, x.Bits(81, 84), GetPredLogicalOp(context, bop, cmp, p), u);
-            ASetPred(context, x.Bits(84, 87), GetPredLogicalOp(context, bop, context.BitwiseNot(cmp), p), u);
+            ASetPredPair(context, x, GetPredLogicalOp(context, bop, cmp, p), GetPredLogicalOp(context, bop, context.BitwiseNot(cmp), p), u);
+        }
+
+        // The two predicate results of a SETP (FSETP, ISETP and the like): Pd0 (81..84) and Pd1 (84..87), both computed (the callers' arguments) before either is
+        // written. A predicate register is read where an operation uses it, so computing Pd1 after writing Pd0 gave it the new value when Pd0 is the accumulator P
+        // (ISETP.GE.AND P0, P1, R2, R3, P0: Pd1 = !cmp AND the new P0, not the P0 given), as PLOP3 already does. Found by uncraftablexd's offline per-instruction tester
+        // against Mesa NAK's OpISetP::fold (PR #1800): 3 to 69 of 128 cases wrong per such encoding
+        private static void ASetPredPair(EmitterContext context, AmpereOp x, Operand r0, Operand r1, bool uniform = false)
+        {
+            ASetPred(context, x.Bits(81, 84), r0, uniform);
+            ASetPred(context, x.Bits(84, 87), r1, uniform);
         }
 
         // 0x80d: what the compiler puts at the end of a vertex shader's position in Kirby Air Riders (all 6,319 of them, no other game's), its meaning inferred from what surrounds it. Before it, FSETP sets P0..P5 where x, y or z lies
@@ -823,9 +985,15 @@ namespace Ryujinx.Graphics.Shader.Instructions
             AmpereOp x = new(context.CurrOp);
             uint imm = (uint)x.Imm32;
             int pd = x.Bits(81, 84), pd2 = x.Bits(84, 87), ps = x.Bits(87, 90), cmp = x.Bits(76, 79);
-            bool plain = pd2 == RegisterConsts.PredicateTrueIndex && ps == RegisterConsts.PredicateTrueIndex && context.TranslatorContext.Definitions.Stage == ShaderStage.Vertex;
+            bool plain = pd2 == RegisterConsts.PredicateTrueIndex && ps == RegisterConsts.PredicateTrueIndex;
 
-            if (!plain || !(imm == 0xc4321111 && pd == RegisterConsts.PredicateTrueIndex && cmp == 0 || imm == 0x80000000 && cmp == 6))
+            // With no predicate result it writes nothing the shader can read: PRAGMATA's shaders have it with immediate 0x80000007 (8 of 116 failures in a sample of them)
+            if (plain && pd == RegisterConsts.PredicateTrueIndex)
+            {
+                return;
+            }
+
+            if (!plain || context.TranslatorContext.Definitions.Stage != ShaderStage.Vertex || !(imm == 0x80000000 && cmp == 6))
             {
                 throw AFail(context, "a 0x80d not of the guard band cull");
             }
@@ -904,8 +1072,10 @@ namespace Ryujinx.Graphics.Shader.Instructions
 
             if (carries)
             {
-                ASetPred(context, o0, context.ICompareNotEqual(context.BitwiseAnd(carryCount, Const(1)), Const(0)), u);
-                ASetPred(context, o1, context.ICompareNotEqual(context.BitwiseAnd(carryCount, Const(2)), Const(0)), u);
+                // The first predicate is sum >= 2^32, the second sum >= 2 * 2^32 (Mesa NAK's OpIAdd3 fold, checked on hardware): the IADD3.X of the
+                // high word adds both, so a carry of 2 must set both, not only the second
+                ASetPred(context, o0, context.ICompareNotEqual(carryCount, Const(0)), u);
+                ASetPred(context, o1, context.ICompareLessUnsigned(Const(1), carryCount), u);
             }
         }
 
@@ -921,12 +1091,22 @@ namespace Ryujinx.Graphics.Shader.Instructions
             return context.ConditionalSelect(APred(context, x, 87, 90, u), Const(1), Const(0));
         }
 
-        // IMAD Rd, a, b, c: the low word of a * b + c (B and C may be negated)
+        // IMAD's sources: only C has a negation (75 where C is the 64-slot register, forms 1, 4, 5, 6; 63 where it is the immediate, constant or uniform register, forms 2, 3, 7).
+        // The other slot's bit is no modifier of B: nvdisasm prints IMAD R4, R8, R9, R10 with bit 63 set in form 1, and IMAD R4, R8, R9, UR4 with bit 75 set in form 7 (Mesa NAK's OpIMad
+        // takes no source modifiers at all). Negating B there made a * -b (found by uncraftablexd's per-instruction tester, PR #1800)
+        private static (ASrc A, ASrc B, ASrc C) AImadSrcs(EmitterContext context, AmpereOp x, bool u = false)
+        {
+            (ASrc a, ASrc b, ASrc c) = AAluSrcs(context, x, u, abs: false);
+
+            return (a.WithMods(false, false), b.WithMods(false, false), c);
+        }
+
+        // IMAD Rd, a, b, c: the low word of a * b + c (C may be negated)
         public static void AImad(EmitterContext context)
         {
             AmpereOp x = new(context.CurrOp);
             bool u = AUniform(context);
-            (ASrc a, ASrc b, ASrc c) = AAluSrcs(context, x, u, abs: false);
+            (ASrc a, ASrc b, ASrc c) = AImadSrcs(context, x, u);
 
             if (x.Bits(81, 84) != RegisterConsts.PredicateTrueIndex)
             {
@@ -959,9 +1139,9 @@ namespace Ryujinx.Graphics.Shader.Instructions
         {
             AmpereOp x = new(context.CurrOp);
             bool u = AUniform(context);
-            (ASrc a, ASrc b, ASrc c) = AAluSrcs(context, x, u, abs: false);
+            (ASrc a, ASrc b, ASrc c) = AImadSrcs(context, x, u);
 
-            if (b.Neg || c.Neg)
+            if (c.Neg)
             {
                 throw AFail(context, "IMAD.WIDE negation");
             }
@@ -1021,7 +1201,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
         public static void AImadHi(EmitterContext context)
         {
             AmpereOp x = new(context.CurrOp);
-            (ASrc a, ASrc b, ASrc c) = AAluSrcs(context, x, abs: false);
+            (ASrc a, ASrc b, ASrc c) = AImadSrcs(context, x);
 
             if (c.Neg)
             {
@@ -1167,10 +1347,13 @@ namespace Ryujinx.Graphics.Shader.Instructions
             bool negInter = x.Bit(72);
             // B's negation (63) exists where B is a register, uniform register or constant in the 32 slot (forms 1, 5, 6)
             Operand srcB = AGet(context, b);
+            // As the intermediate: with .X the bitwise not, otherwise the two's complement ~B + 1, whose + 1 counts in the carry out (B = 0 carries;
+            // Mesa NAK's OpLea / OpLeaX folds, checked on hardware)
+            bool negB = x.Form is 1 or 5 or 6 && x.Bit(63);
 
-            if (x.Form is 1 or 5 or 6 && x.Bit(63))
+            if (negB)
             {
-                srcB = context.INegate(srcB);
+                srcB = context.BitwiseNot(srcB);
             }
 
             Operand lo = AGet(context, a);
@@ -1180,16 +1363,14 @@ namespace Ryujinx.Graphics.Shader.Instructions
             {
                 t = context.ShiftLeft(lo, Const(shift));
             }
-            else if (shift == 0)
-            {
-                t = AGet(context, c);
-            }
             else
             {
-                t = context.BitwiseOr(context.ShiftLeft(AGet(context, c), Const(shift)), context.ShiftRightU32(lo, Const(32 - shift)));
+                // .SX32 (73): the high word is a's sign extension, not a source (LEA.HI.X.SX32 adds a sign-extended 32-bit index to a 64-bit address)
+                Operand hi = x.Bit(73) ? context.ShiftRightS32(lo, Const(31)) : AGet(context, c);
+                t = shift == 0 ? hi : context.BitwiseOr(context.ShiftLeft(hi, Const(shift)), context.ShiftRightU32(lo, Const(32 - shift)));
             }
 
-            int plusOne = 0;
+            int plusOne = negB && !ex ? 1 : 0;
 
             if (negInter)
             {
@@ -1197,14 +1378,14 @@ namespace Ryujinx.Graphics.Shader.Instructions
 
                 if (!ex)
                 {
-                    plusOne = 1;
+                    plusOne++;
                 }
             }
 
             Operand sum = context.IAdd(t, srcB);
             Operand carry = context.ICompareLessUnsigned(sum, t);
 
-            if (plusOne != 0)
+            for (int k = 0; k < plusOne; k++)
             {
                 Operand next = context.IAdd(sum, Const(1));
                 carry = context.BitwiseOr(carry, context.ICompareLessUnsigned(next, sum));
@@ -1299,7 +1480,8 @@ namespace Ryujinx.Graphics.Shader.Instructions
             bool u = AUniform(context);
             Operand src = AGet(context, AOne(context, x, u, neg: false, abs: false));
 
-            if (x.Bit(63))
+            // Bit 63 is the bitwise not only where B is a register, uniform register or constant (forms 1, 5, 6); in the immediate form it is the immediate's top bit
+            if (x.Bit(63) && x.Form is 1 or 5 or 6)
             {
                 src = context.BitwiseNot(src);
             }
@@ -1320,7 +1502,8 @@ namespace Ryujinx.Graphics.Shader.Instructions
 
             Operand src = AGet(context, AOne(context, x, u, neg: false, abs: false));
 
-            if (x.Bit(63))
+            // As POPC: bit 63 is the bitwise not only in forms 1, 5, 6 (the immediate's top bit in form 4)
+            if (x.Bit(63) && x.Form is 1 or 5 or 6)
             {
                 src = context.BitwiseNot(src);
             }
@@ -1393,14 +1576,23 @@ namespace Ryujinx.Graphics.Shader.Instructions
 
         // 0x925 Rd (78..80 = 1, no predicate result): 1 for a covered pixel, 0 for a helper invocation. No table at hand names it (PIXLD.COVERED, perhaps). What it reads comes from the two shaders
         // that use it, Star Fox's quad efficiency views 46040940ce0fd49b and 826168691af2e211, which add it up over the quad through SHFL and FSWZADD: one takes sum - 1 as the index of a
-        // 4-entry palette, so a shaded pixel's sum is at least 1; the other draws 0.03125 + 0.15625 sum in red. Any other form stays refused
+        // 4-entry palette, so a shaded pixel's sum is at least 1; the other draws 0.03125 + 0.15625 sum in red.
+        // Form 3 is the index of the sample the fragment runs for (Maxwell's PIXLD.MY_INDEX, numbered 5 there): PRAGMATA's pixel shaders (154) read it first and index the driver's sample
+        // position table with it (LDC c[0][R + 0x620], a byte of x and y nibbles), as GLSLC's Maxwell code does with MY_INDEX (InstEmitMove.Pixld). Any other form stays refused
         public static void APixelCovered(EmitterContext context)
         {
             AmpereOp x = new(context.CurrOp);
+            int form = x.Bits(78, 81);
 
-            if (x.Bits(78, 81) != 1 || x.Bits(81, 84) != 7 || x.Bits(24, 32) != 0 || x.Bits(32, 48) != 0 || context.TranslatorContext.Definitions.Stage != ShaderStage.Fragment)
+            if ((form != 1 && form != 3) || x.Bits(81, 84) != 7 || x.Bits(24, 32) != 0 || x.Bits(32, 48) != 0 || context.TranslatorContext.Definitions.Stage != ShaderStage.Fragment)
             {
-                throw AFail(context, $"0x925 form {x.Bits(78, 81)} outside a covered pixel's read in a pixel shader");
+                throw AFail(context, $"0x925 form {form} outside a covered pixel's or sample index read in a pixel shader");
+            }
+
+            if (form == 3)
+            {
+                ASet(context, x, context.Load(StorageKind.Input, IoVariable.SampleId), false);
+                return;
             }
 
             Operand helper = context.Load(StorageKind.Input, IoVariable.HelperInvocation);
@@ -1465,8 +1657,11 @@ namespace Ryujinx.Graphics.Shader.Instructions
             int lut0 = x.Bits(64, 67) | (x.Bits(72, 77) << 3);
             int lut1 = x.Bits(16, 24);
 
-            ASetPred(context, x.Bits(81, 84), APredLut(context, a, b, c, lut0), u);
-            ASetPred(context, x.Bits(84, 87), APredLut(context, a, b, c, lut1), u);
+            // Both results from the sources as they were: the first destination may be one of the sources (PLOP3.LUT P2, P0, P2, P0, P6, ...)
+            Operand r0 = APredLut(context, a, b, c, lut0);
+            Operand r1 = APredLut(context, a, b, c, lut1);
+            ASetPred(context, x.Bits(81, 84), r0, u);
+            ASetPred(context, x.Bits(84, 87), r1, u);
         }
 
         // A three-input boolean function by its truth table (bit (a << 2 | b << 1 | c) ... as LOP3: a = 0xf0, b = 0xcc, c = 0xaa)

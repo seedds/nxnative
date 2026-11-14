@@ -16,6 +16,8 @@ static int observed_mutex_lock(pthread_mutex_t *mutex);
 #define mtl_set_queue_origin_lower_left test_queue_origin
 #define mtl_sub_index test_sub_index
 #define mtl_exec_rest test_exec_rest
+#define mtl_exec test_exec
+#define mtl_set_frame test_set_frame
 #define mtl_drain test_drain
 #include "../nvn/hle_nvn.c"
 #undef pthread_mutex_lock
@@ -26,19 +28,17 @@ static int observed_mutex_lock(pthread_mutex_t *mutex);
 #undef mtl_set_queue_origin_lower_left
 #undef mtl_sub_index
 #undef mtl_exec_rest
+#undef mtl_exec
+#undef mtl_set_frame
 #undef mtl_drain
 
-uint64_t g_t0_ns;
-_Atomic uint64_t dm_present_ns;
 module_t *g_mod; int g_nmod;
 void *front_metal_layer(void) { return NULL; }
 module_t *module_of(const void *p) { (void)p; return NULL; }
 void svc_thread_dump(void) {}
-int dm_guest_as_contains(uintptr_t address) { (void)address; return 0; }
-void dm_vi_layer_crop(int c[4]) { memset(c, 0, 4 * sizeof *c); }
-uint64_t now_ns(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return (uint64_t)t.tv_sec * 1000000000ull + t.tv_nsec; }
+uint64_t now_ns(void) { return clock_gettime_nsec_np(CLOCK_UPTIME_RAW); }   // the host's clock (hle_os.c: Mach absolute time), which Metal's timestamps are on
 
-static dispatch_semaphore_t preparing, second_waiting, finish_prepare, prepared, suspended, returned;
+static dispatch_semaphore_t preparing, second_waiting, finish_prepare, prepared, suspended, returned, committed;
 static __thread int second_submit;
 static _Atomic int prepares, commits, drains;
 static int inflight_in_prepare, host_work_in_prepare, inflight_at_serial_wait, host_work_at_serial_wait;
@@ -61,17 +61,23 @@ void test_prepare(void) {   // the first submission's prepare step
     dispatch_semaphore_signal(prepared);
 }
 void test_sub_begin(void) {}
-uint64_t test_sub_commit(void) { atomic_fetch_add(&commits, 1); return 0; }
+uint64_t test_sub_commit(void) { atomic_fetch_add(&commits, 1); dispatch_semaphore_signal(committed); return 0; }
 void test_queue_activate(uint64_t serial) { (void)serial; }
 void test_queue_origin(int on) { (void)on; }
 void test_sub_index(const uint64_t *handles, int count) { (void)handles; (void)count; }
 void test_exec_rest(const uint64_t *handles, int count) { (void)handles; (void)count; }
+void test_exec(const uint8_t *commands) { (void)commands; }
+void test_set_frame(uint64_t frame) { (void)frame; }
 void test_drain(void) { atomic_fetch_add(&drains, 1); }
 
 static NVNqueue queues[2];
+static const op_hdr work[] __attribute__((aligned(8))) = {{OP_BEGIN, 8}};
+static uint64_t work_list;   // its control list: one piece (nvn_obj.h ctl_e)
 static void *submit(void *which) {
     second_submit = which != NULL;
-    h_nvnQueueSubmitCommands(&queues[second_submit], 0, NULL);
+    work_list = ctl_e(CTL_CHUNK, work, sizeof work) | CTL_LAST;
+    NVNcommandHandle handle = (uintptr_t)&work_list;
+    h_nvnQueueSubmitCommands(&queues[second_submit], 1, &handle);
     dispatch_semaphore_signal(returned);
     return NULL;
 }
@@ -89,6 +95,9 @@ int main(void) {
     preparing = dispatch_semaphore_create(0); second_waiting = dispatch_semaphore_create(0);
     finish_prepare = dispatch_semaphore_create(0); prepared = dispatch_semaphore_create(0);
     suspended = dispatch_semaphore_create(0); returned = dispatch_semaphore_create(0);
+    committed = dispatch_semaphore_create(0);
+    NVNqueueBuilder qb = {0}; h_nvnQueueBuilderSetDefaults(&qb);
+    h_nvnQueueInitialize(&queues[0], &qb); h_nvnQueueInitialize(&queues[1], &qb);
     pthread_t first, second, background;
     pthread_create(&first, NULL, submit, NULL);
     if (!reached(preparing, "the first submission prepares")) return 1;
@@ -105,13 +114,38 @@ int main(void) {
     CHECK("suspend drains graphics once", atomic_load(&drains) == 1);
     dispatch_semaphore_signal(finish_prepare);
     if (!reached(prepared, "the prepare step finishes in the background")) return 1;
-    CHECK("no submission returns while graphics are suspended", dispatch_semaphore_wait(returned, dispatch_time(DISPATCH_TIME_NOW, 200 * NSEC_PER_MSEC)) != 0);
+    // Submit now owns a queued continuation and may return before GPU replay.
+    // Suspension constrains replay, not whether the guest has enqueued work.
+    CHECK("queued work stays outside the GPU while suspended", dispatch_semaphore_wait(committed, dispatch_time(DISPATCH_TIME_NOW, 200 * NSEC_PER_MSEC)) != 0);
     CHECK("no submission commits while graphics are suspended", atomic_load(&commits) == 0);
     dm_gfx_suspend(0);
     if (!reached(returned, "a submission returns after resume") || !reached(returned, "both submissions return after resume")) return 1;
     pthread_join(first, NULL); pthread_join(second, NULL);
+    if (!reached(committed, "first queued submission commits after resume") || !reached(committed, "second queued submission commits after resume")) return 1;
     CHECK("both submissions commit", atomic_load(&commits) == 2);
+    h_nvnQueueFinish(&queues[0]); h_nvnQueueFinish(&queues[1]);
     CHECK("graphics entries are balanced", g_inflight_api == 0);
+
+    // An unencoded wait must not make suspend wait for a future producer.
+    // Releasing that event in the background must still respect the closed gate.
+    _Atomic uint32_t word = 0;
+    struct { op_hdr wait; volatile uint32_t *word; uint32_t mode, value; op_hdr begin; } parked __attribute__((aligned(8))) = {
+        {OP_WAIT_EVENT, 24}, (volatile uint32_t *)&word, 0, 1, {OP_BEGIN, 8}
+    };
+    static uint64_t parked_list; parked_list = ctl_e(CTL_CHUNK, &parked, sizeof parked) | CTL_LAST;
+    NVNcommandHandle parked_handle = (uintptr_t)&parked_list;
+    h_nvnQueueSubmitCommands(&queues[0], 1, &parked_handle);
+    pthread_create(&background, NULL, suspend_graphics, NULL);
+    if (!reached(suspended, "suspend returns with an unresolved queue event")) return 1;
+    pthread_join(background, NULL);
+    nvn_event_publish((volatile uint32_t *)&word, NVN_EVENT_SIGNAL_MODE_WRITE, 1);
+    CHECK("an event release cannot submit GPU work in the background", dispatch_semaphore_wait(committed, dispatch_time(DISPATCH_TIME_NOW, 200 * NSEC_PER_MSEC)) != 0);
+    dm_gfx_suspend(0);
+    if (!reached(committed, "the released continuation commits after resume")) return 1;
+    h_nvnQueueFinish(&queues[0]);
+    CHECK("exactly the three intended command prefixes committed", atomic_load(&commits) == 3);
+    CHECK("resume leaves the graphics gate balanced", g_inflight_api == 0);
+    h_nvnQueueFinalize(&queues[0]); h_nvnQueueFinalize(&queues[1]);
     printf("graphics suspend: %d checks, %d failed\n", checks, failures);
     return failures != 0;
 }

@@ -1,4 +1,4 @@
-// NSP extraction: nx_extract <prod.keys> <base NSP> <update NSP or -> <output dir> [base RomFS dir to compare against] [--manifest] [--romfs-image]
+// NSP extraction (a native executable, dm/tools/nx_extract_bin/nx_extract, built by dm/tools/native_tools.sh): nx_extract <prod.keys> <base NSP> <update NSP or -> <output dir> [base RomFS dir to compare against] [--manifest] [--romfs-image]
 // --romfs-image streams the merged RomFS directly to <output dir>/RomFS.img (the packing script's default); only ExeFS is expanded. Without it, legacy folder extraction remains available.
 // With a base RomFS dir in legacy mode, files whose content matches it become APFS clones (no new space).
 // --manifest: the RomFS is not written, only a list <output dir>/romfs_manifest.tsv (path, size, first 32 bytes), for surveying a new game (a large game's RomFS is well over 10 GB),
@@ -7,8 +7,10 @@
 //   --allow-damaged writes those files as read instead and only lists them (Super Mario Galaxy's base NSP with 147 MB zeroed: its two prologue WebM movies). A RomFS image marks them in its index, and the host names them in its log.
 // A sparse base program (Minecraft Dungeons II: its Program NCA leaves out data that its update carries) can be read only with its update: without one, exit code 4.
 // Add-on content: nx_extract <prod.keys> --aoc <DLC NSP> <output dir> writes the RomFS of the DLC's data NCA to <output dir> (the packing script puts it at aoc/<index>/, the host mounts it through DM_AOC_DIR).
-// Title ID of a package: nx_extract <prod.keys> --title <NSP, NSZ, XCI or XCZ> prints "title <16 hex digits>", the lowest title ID of the package's meta NCAs (the base game's, before its update's or a DLC's),
-//   read from the meta NCA's header with the keys' header_key. For a package without a ticket and without a [title ID] in its name (the NSP script's title_of); exit code 5 when it has no meta NCA.
+// Contents of packages: nx_extract <prod.keys> --contents <NSP, NSZ, XCI or XCZ>... prints, for each package in order, "package <index> <file name>", then one "content <type> <title ID> <version>"
+//   line per content meta it holds (a merged package lists several: base game + update + DLC in one NSP, a cartridge dump with its update). The NSP script takes every package's title ID
+//   and version from these lines, not from its file name. Only the meta NCAs are read (an NSZ keeps them uncompressed). A package that cannot be read, or holds no content meta, gets a
+//   "[RED] <file name>: <why>" line in their place and the others are still listed: exit code 5. Keys that cannot open the meta NCAs stop it first (exit code 6, as for --keys).
 // A multi-program application (Super Mario 3D All-Stars: a launcher and one program per game, title IDs base+0 to base+3) is read one program at a time:
 //   --program=<16 hex digits> picks the program with that title ID (default: the lowest one, the application's own); --list prints every NCA (content type, title ID) and stops.
 // Keys of a package: nx_extract <prod.keys> --keys <NSP, NSZ, XCI or XCZ>... checks that the keys open every NCA (an NCZ by its header, which nsz keeps as it was) without extracting anything.
@@ -40,6 +42,12 @@ static class P {
     [DllImport("libc", SetLastError = true)] static extern int clonefile(string src, string dst, uint flags);
 
     static int Main(string[] a) {
+        if (a.Length == 1 && a[0] == "--source-sha") {   // first 16 digits of the sha256 of the embedded Program.cs + csproj (the NSP script's nx_extract_source_sha)
+            var asm = typeof(P).Assembly; var ms = new MemoryStream();
+            foreach (var n in new[] { "src0", "src1" }) asm.GetManifestResourceStream(n).CopyTo(ms);
+            Console.WriteLine(Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(ms.ToArray()))[..16].ToLowerInvariant());
+            return 0;
+        }
         try { return Run(a); }
         catch (KeysMissing e) { Console.WriteLine($"[RED] {e.Message}"); return 6; }
         // The tables a filesystem opens from fail the hash check (Mario & Luigi: Brothership's update: its Program NCA does not match its content ID): no file can be listed, so no file can be
@@ -62,10 +70,9 @@ static class P {
         // always names the one it packs. Without it every Application content meta's NCAs are kept and the lowest Program NCA is the game
         ulong? app = null; int ai = Array.IndexOf(a, "--app");
         if (ai >= 0 && ai + 1 < a.Length) { app = Convert.ToUInt64(a[ai + 1], 16); var rest = new List<string>(a); rest.RemoveRange(ai, 2); a = rest.ToArray(); }
-        if (a.Length == 3 && a[1] == "--title") return Title(ExternalKeyReader.ReadKeyFile(a[0]), a[2]);
-        if (a.Length == 3 && a[1] == "--contents") return Contents(ExternalKeyReader.ReadKeyFile(a[0]), a[2]);
+        if (a.Length >= 3 && a[1] == "--contents") return Contents(ExternalKeyReader.ReadKeyFile(a[0]), a[2..]);
         if (a.Length >= 3 && a[1] == "--keys") return Keys(ExternalKeyReader.ReadKeyFile(a[0]), a[2..]);
-        if (a.Length < 4) { Console.Error.WriteLine("usage: nx_extract <prod.keys> <base.nsp> <update.nsp|-> <out dir> [base RomFS dir] [--app <title ID>] [--program=<title ID>] [--list] [--html] [--romfs-image|--manifest] [--allow-damaged]\n       nx_extract <prod.keys> --aoc <dlc.nsp> <out dir or image> [<DLC title ID>] [--romfs-image]\n       nx_extract <prod.keys> --title <nsp|nsz|xci|xcz>\n       nx_extract <prod.keys> --contents <nsp|nsz|xci|xcz>\n       nx_extract <prod.keys> --keys <nsp|nsz|xci|xcz>..."); return 2; }
+        if (a.Length < 4) { Console.Error.WriteLine("usage: nx_extract <prod.keys> <base.nsp> <update.nsp|-> <out dir> [base RomFS dir] [--app <title ID>] [--program=<title ID>] [--list] [--html] [--romfs-image|--manifest] [--allow-damaged]\n       nx_extract <prod.keys> --aoc <dlc.nsp> <out dir or image> [<DLC title ID>] [--romfs-image]\n       nx_extract <prod.keys> --contents <nsp|nsz|xci|xcz>...\n       nx_extract <prod.keys> --keys <nsp|nsz|xci|xcz>..."); return 2; }
         KeySet ks = ExternalKeyReader.ReadKeyFile(a[0]);
         if (a[1] == "--aoc") return Aoc(ks, a[2], a[3], image, a.Length > 4 ? Convert.ToUInt64(a[4], 16) : null);
         // each by its own content meta: a merged package (base game + update + DLC in one NSP, a cartridge dump with its update) is given as both the base game and the update,
@@ -150,22 +157,28 @@ static class P {
         return Damaged();
     }
 
-    static int Title(KeySet ks, string path) {
-        ulong? id = null;
-        foreach (Nca n in OpenNsp(ks, path)) if (n.Header.ContentType == NcaContentType.Meta && (id == null || n.Header.TitleId < id)) id = n.Header.TitleId;
-        if (id == null) { Console.WriteLine($"[RED] no meta NCA in {Path.GetFileName(path)}"); return 5; }
-        Console.WriteLine($"title {id:x16}");
-        return 0;
-    }
-
-    // Every content meta of a package, one line each: "content <type> <title ID> <version>". A merged package (base game + update + DLC in one NSP, or a cartridge dump with its
-    // update) lists several; build_ipa_from_nsp.py then takes the one file as the base game, the update and the DLC
-    static int Contents(KeySet ks, string path) {
-        int n = 0; var ncas = OpenNsp(ks, path);
-        Fit(new[] { MissingKey(ks, ncas.FindAll(m => m.Header.ContentType == NcaContentType.Meta), path) });
-        foreach (Cnmt c in Metas(ncas)) { Console.WriteLine($"content {c.Type} {c.TitleId:x16} {c.TitleVersion.Version}"); n++; }
-        if (n == 0) { Console.WriteLine($"[RED] no content meta in {Path.GetFileName(path)}"); return 5; }
-        return 0;
+    // Every content meta of each package (the header says what is printed): the NSP script's scan of an NSP folder, one run for all its packages. Only headers and the meta NCAs are read
+    static int Contents(KeySet ks, string[] paths) {
+        var pkgs = new List<List<Nca>>(); var why = new List<string>();
+        foreach (string p in paths) {
+            try { pkgs.Add(OpenNsp(ks, p)); why.Add(null); }
+            catch (Exception e) when (e is not KeysMissing) { pkgs.Add(null); why.Add(e.Message); }
+        }
+        var found = new List<(int Rev, string Key, string File)?>();
+        for (int i = 0; i < paths.Length; i++) if (pkgs[i] != null) found.Add(MissingKey(ks, pkgs[i].FindAll(m => m.Header.ContentType == NcaContentType.Meta), paths[i]));
+        Fit(found);
+        int bad = 0;
+        for (int i = 0; i < paths.Length; i++) {
+            string name = Path.GetFileName(paths[i]);
+            Console.WriteLine($"package {i} {name}");
+            var lines = new List<string>();
+            if (pkgs[i] != null)
+                try { foreach (Cnmt c in Metas(pkgs[i])) lines.Add($"content {c.Type} {c.TitleId:x16} {c.TitleVersion.Version}"); }
+                catch (Exception e) when (e is not KeysMissing) { why[i] = e.Message; lines.Clear(); }
+            if (lines.Count == 0) { Console.WriteLine($"[RED] {name}: {why[i] ?? "no content meta"}"); bad++; }
+            foreach (string l in lines) Console.WriteLine(l);
+        }
+        return bad > 0 ? 5 : 0;
     }
 
     static int Keys(KeySet ks, string[] paths) {

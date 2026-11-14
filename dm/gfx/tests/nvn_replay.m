@@ -225,6 +225,20 @@ int main(int argc, char **argv) { @autoreleasepool {
     cap_reader rd; int lr = cap_load(&rd, path);
     if (lr <= 0) RFAIL("%s: %s", path, lr < 0 ? "not a capture of format 1" : "cannot read");
     for (;;) { cap_chunk c; uint8_t *d; int r = cap_next(&rd, &c, &d); if (r < 0) RFAIL("%s: corrupt chunk at byte %zu", path, rd.pos); if (!r) break;
+        if (c.tag == CAP_FAIL) RFAIL("%s: capture refused: %.*s", path, (int)MIN(c.raw, 1024), (const char *)d);
+        if (c.tag == CAP_SEGM) {
+            uint32_t idx, len; if (c.raw < 8) RFAIL("%s: short segment chunk", path);
+            memcpy(&idx, d, 4); memcpy(&len, d + 4, 4);
+            if ((uint64_t)len != c.raw - 8) RFAIL("%s: segment %u size mismatch", path, idx);
+            for (uint32_t off = 0; off < len;) {
+                op_hdr h; if (len - off < 8) RFAIL("%s: segment %u has a short record", path, idx);
+                memcpy(&h, d + 8 + off, 8);
+                if (h.size < 8 || (h.size & 7) || h.size > len - off) RFAIL("%s: segment %u has a corrupt record", path, idx);
+                const char *why = cap_record_unsupported(h.op);
+                if (why) RFAIL("%s: submit %u segment %u: %s", path, c.submit, idx, why);
+                off += h.size;
+            }
+        }
         rp_ch = realloc(rp_ch, (rp_nch + 1) * sizeof *rp_ch); rp_ch[rp_nch++] = (chunk){c, d}; }
     cap_unload(&rd);
     // header: game, layout, chain; then the live run's settings
@@ -244,6 +258,7 @@ int main(int argc, char **argv) { @autoreleasepool {
     apply_env(head, hn);
     mtl_init();
     if (head_get(stat, sn, "tex_pool_n", v, sizeof v)) mtl_set_tex_pool_n(atoi(v));
+    if (head_get(stat, sn, "samp_pool_n", v, sizeof v)) mtl_set_samp_pool_n(atoi(v));
     if (head_get(stat, sn, "origin_ll", v, sizeof v)) mtl_set_origin_lower_left(atoi(v));
     if (head_get(stat, sn, "depth_zero", v, sizeof v)) mtl_set_depth_zero(atoi(v));
     int qll = head_get(stat, sn, "queue_origin_ll", v, sizeof v) ? atoi(v) : 1;
@@ -280,7 +295,8 @@ int main(int argc, char **argv) { @autoreleasepool {
     }
     // pointers into the tables are fixed now (no more realloc): decode the texture objects, install the program keys and descriptor-pool bases in hle_nvn.c's side tables
     for (uint32_t i = 0; i < rp_nto; i++) cap_tex_fields(&rp_to[i], &rp_dec, NULL);
-    for (uint32_t i = 0; i < rp_npr; i++) { prog_keys_t *k = pk_get(&rp_pr[i], 1); memcpy(k->key, rp_prc[i].key, sizeof k->key); k->ok = rp_prc[i].ok; }
+    for (uint32_t i = 0; i < rp_npr; i++) if (rp_pr[i].serial) { prog_keys_t *k = pk_get(rp_pr[i].serial);   // keyed by serial, as SetShaders keys them
+        memcpy(k->key, rp_prc[i].key, sizeof k->key); k->ok = rp_prc[i].ok; }
     for (size_t i = 0; i < rp_nch; i++) if (rp_ch[i].c.tag == CAP_DPOL) for (size_t o = 0; o + sizeof(cap_dpol) <= rp_ch[i].c.raw; o += sizeof(cap_dpol)) { cap_dpol p; memcpy(&p, rp_ch[i].d + o, sizeof p);
         if (g_ntpb < NDPOOL) g_tpb[g_ntpb++] = (struct dpool_base){&rp_dp[p.index], p.tex_base}; if (g_nspb < NDPOOL) g_spb[g_nspb++] = (struct dpool_base){&rp_dp[p.index], p.samp_base}; }
     // how the replay layer held each texture: live ones are initialized (kept in the serial table, not the small ghost ring), CPU-written ones uploaded from their pools
@@ -364,12 +380,14 @@ int main(int argc, char **argv) { @autoreleasepool {
         cap_buf_free(&mine);
         if (g_td_frame == (long)frame_no && !g_td_done) td_dump();
         if (rep == 0) {   // textures the GPU writes that the frame made itself (no captured content): a second replay starts from what this one left in them
-            uint64_t n = 0, bytes = 0; nvn_hmap *maps[2] = {&g_by_serial, &g_ghost};
-            for (int m = 0; m < 2; m++) for (uint32_t i = 0; i < maps[m]->cap; i++) { if (!maps[m]->vals[i]) continue; id o = (__bridge id)maps[m]->vals[i];
-                if (![o conformsToProtocol:@protocol(MTLTexture)]) continue; id<MTLTexture> t = o; if (t.parentTexture) t = t.parentTexture;
-                uint64_t k = (uint64_t)(uintptr_t)(__bridge void *)t; if (t.buffer || nvn_hm_get(&g_filled, &k)) continue;
-                uint64_t ser; memcpy(&ser, maps[m]->keys + (size_t)i * 8, 8); n++; bytes += t.allocatedSize;
-                if (opt_made) printf("  made by the frame: ser=%llu %lux%lux%lu format %lu levels %lu%s\n", (unsigned long long)ser, (unsigned long)t.width, (unsigned long)t.height, (unsigned long)t.arrayLength, (unsigned long)t.pixelFormat, (unsigned long)t.mipmapLevelCount, m ? " (ghost)" : ""); }
+            __block uint64_t n = 0, bytes = 0;
+            pthread_mutex_lock(&g_smu);
+            own_each_locked(^(uint64_t ser, id o, int ghost) {
+                if (![o conformsToProtocol:@protocol(MTLTexture)]) return; id<MTLTexture> t = o; if (t.parentTexture) t = t.parentTexture;
+                uint64_t k = (uint64_t)(uintptr_t)(__bridge void *)t; if (t.buffer || nvn_hm_get(&g_filled, &k)) return;
+                n++; bytes += t.allocatedSize;
+                if (opt_made) printf("  made by the frame: ser=%llu %lux%lux%lu format %lu levels %lu%s\n", (unsigned long long)ser, (unsigned long)t.width, (unsigned long)t.height, (unsigned long)t.arrayLength, (unsigned long)t.pixelFormat, (unsigned long)t.mipmapLevelCount, ghost ? " (ghost)" : ""); });
+            pthread_mutex_unlock(&g_smu);
             printf("render targets and images the frame made without captured content: %llu (%.1f MB)\n", (unsigned long long)n, bytes / 1048576.0);
         }
         if (1) {   // pool blocks after the frame against the live run's: written live but not here = the CPU wrote them while the frame ran (or a GPU write the replay missed)

@@ -36,6 +36,7 @@ class Header(Base):
         (self.repo / 'dm/gfx/nvn').mkdir(parents=True)
         (self.repo / 'dm/gfx/tools').symlink_to(REPO / 'dm/gfx/tools'); (self.repo / 'dm/ios').symlink_to(REPO / 'dm/ios')
         (self.repo / 'dm/third_party').symlink_to(REPO / 'dm/third_party')
+        (self.repo / 'dm/mac').symlink_to(REPO / 'dm/mac')   # min_os.mk, the Mac libraries' deployment target
         (self.repo / 'dm/gfx/nvn/dmsh_abi.h').symlink_to(REPO / 'dm/gfx/nvn/dmsh_abi.h')   # the shader library ABI, a chain input beside the header
         self.h = self.repo / nsp.CHAIN_H
         shutil.copy(REPO / nsp.CHAIN_H, self.h)

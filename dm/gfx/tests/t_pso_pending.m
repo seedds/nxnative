@@ -353,6 +353,18 @@ static void test_prediction_restores_scissor(void) {
     g_exec_next = NULL;
 }
 
+// The prediction runs once per submission, at its first new miss: a draw whose own build is already under way drew in an earlier frame and does not start it (issue #2438)
+static void test_prediction_at_first_new_miss(void) {
+    g_sub_serial = 100; g_pp_submit_mark = 0;
+    EXPECT_EQ("a stand-in draw whose build is under way does not start the prediction", 0, pso_predict_due(0));
+    EXPECT_EQ("nor does it use up the submission's prediction", 0, (int)(g_pp_submit_mark == g_sub_serial));
+    EXPECT_EQ("the submission's first new miss starts it", 1, pso_predict_due(1));
+    EXPECT_EQ("a second new miss in the same submission does not", 0, pso_predict_due(1));
+    g_sub_serial++;
+    EXPECT_EQ("the next submission's first new miss starts its own", 1, pso_predict_due(1));
+    g_sub_serial = 0; g_pp_submit_mark = 0;
+}
+
 int main(void) {
     @autoreleasepool {
         setvbuf(stdout, NULL, _IONBF, 0);
@@ -362,6 +374,7 @@ int main(void) {
         test_full_table_reclaims_done_not_running();
         test_nil_prediction_falls_back_then_predicts();
         test_prediction_restores_scissor();
+        test_prediction_at_first_new_miss();
         printf("== %d PSO pending checks, %d failed ==\n", g_checks, g_failed);
         return g_failed != 0;
     }

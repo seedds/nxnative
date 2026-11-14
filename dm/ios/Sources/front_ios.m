@@ -150,6 +150,16 @@ static void launcher_done(void) { [g_root startGame]; }
     front_hud_env();   // before the process's first Metal device, which reads MTL_HUD_ENABLED (an env file's DM_METAL_HUD sets it in main.m already; GitHub issue #840)
     const char *dev = front_ios_device_check();   // that first device: a GPU without BC textures is refused here, not at launch, so the launcher's HUD switch counts
     if (dev) { [self showHint:[NSString stringWithFormat:@"This device is not supported.\n%s", dev]]; return; }   // the host does not start
+    {   // Picture shape "auto" (the launcher's Match screen): the app window's own shape when it is taller than 16:9 (an iPad's 4:3, an unfolded iPhone Duo's 1.43:1; loader.c
+        // takes 1.3 to 1.77), else 16:9. The window's, not the screen's: on an iPad under Stage Manager or Split View the app does not fill the screen. Resolved here, before the
+        // host writes the state page (main.c dm_fps_state_apply)
+        const char *a = getenv("DM_SCREEN_ASPECT");
+        if (a && !strcmp(a, "auto")) {
+            CGSize sz = self.view.window ? self.view.window.bounds.size : UIScreen.mainScreen.bounds.size; double r = MAX(sz.width, sz.height) / MAX(MIN(sz.width, sz.height), 1);
+            char v[16]; if (r >= 1.3 && r < 1.77) snprintf(v, sizeof v, "%.3f", r); else strcpy(v, "0");
+            setenv("DM_SCREEN_ASPECT", v, 1); LOG("front end: picture shape auto: window %.0fx%.0f points (%.3f:1) → DM_SCREEN_ASPECT=%s", sz.width, sz.height, r, v);
+        }
+    }
     self.fill = dm_picture_fill(getenv("DM_PICTURE_FIT"));
     if (self.fill) LOG("front end: picture Fill (DM_PICTURE_FIT=fill), the 16:9 picture covers the screen in landscape and its edges are cropped");
     self.view.clipsToBounds = YES;   // with Fill the game view is larger than the screen
@@ -372,7 +382,9 @@ void front_web_attach(UIView *box) {
 void front_web_detach(UIView *box) { (void)box; }
 // An app of several programs (main.m: dm/programs.txt; DM_EXEC_OUT is set only there). iOS cannot start the app's process again, so oe::ExecuteProgram records the next program and the
 // app ends (hle_oe.c); the next start runs it. To spare the player a silent quit, the app names the program on screen for 1.5 s, then schedules a local notification 1 s ahead that
-// opens the app again ("Tap to start …"), then ends. Notifications are asked for at the first start of such an app; a player who refuses gets the plain quit
+// opens the app again ("Tap to start …"), then ends. Notifications are asked for at the first start of such an app; a player who refuses is asked on screen to open the app again.
+// An app of one program that asks to start again (oe::RequestToRelaunchApplication: Super Smash Bros. Ultimate after a language change) cannot either: it asks the player on screen to
+// open it again, for 3 s, then ends. No notification there: such an app never asked for them, and a prompt now would come as the app ends
 static int multi_program(void) { const char *e = getenv("DM_EXEC_OUT"); return e && *e; }
 @interface DmNotifyDelegate : NSObject <UNUserNotificationCenterDelegate>
 @end
@@ -400,19 +412,31 @@ static int notify_allowed(void) {
     if (dispatch_semaphore_wait(got, dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC))) return 0;
     return st == UNAuthorizationStatusAuthorized || st == UNAuthorizationStatusProvisional || st == UNAuthorizationStatusEphemeral;
 }
-void front_program_handoff(int index, const char *name) {   // front.h; on the guest thread that called oe::ExecuteProgram, before the graceful exit
-    if (!multi_program() || !notify_allowed()) { LOG("front end: program %d starts at the next start of the app (notifications not allowed)", index); return; }
-    NSString *nm = name && *name ? @(name) : [NSString stringWithFormat:@"program %d", index];
-    dm_audio_suspend(1);   // the game is ending: no sound under the notice
+static void handoff_notice(NSString *text) {   // the game is ending: no sound, and a line on a dark screen in its place
+    dm_audio_suspend(1);
     dispatch_async(dispatch_get_main_queue(), ^{
         UIWindow *w = g_root.view.window; if (!w) return;
         UIView *o = [[UIView alloc] initWithFrame:w.bounds]; o.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
         o.backgroundColor = [UIColor colorWithWhite:0 alpha:0.85];
         UILabel *lb = [[UILabel alloc] initWithFrame:CGRectInset(o.bounds, 40, 0)]; lb.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
         lb.numberOfLines = 0; lb.textAlignment = NSTextAlignmentCenter; lb.textColor = UIColor.whiteColor;
-        lb.font = [UIFont systemFontOfSize:22 weight:UIFontWeightSemibold]; lb.text = [NSString stringWithFormat:@"Starting %@\u2026", nm];
+        lb.font = [UIFont systemFontOfSize:22 weight:UIFontWeightSemibold]; lb.text = text;
         [o addSubview:lb]; [w addSubview:o];
     });
+}
+void front_program_handoff(int index, const char *name) {   // front.h; on the guest thread that called oe::ExecuteProgram or oe::RequestToRelaunchApplication, before the graceful exit
+    if (!multi_program()) {
+        handoff_notice(@"The game restarts.\nOpen the app again to continue.");
+        LOG("front end: the app ends to start again; the player is asked to open it again");
+        usleep(3000 * 1000); return;
+    }
+    NSString *nm = name && *name ? @(name) : [NSString stringWithFormat:@"program %d", index];
+    if (!notify_allowed()) {
+        handoff_notice([NSString stringWithFormat:@"Open the app again to start %@.", nm]);
+        LOG("front end: program %d starts at the next start of the app (notifications not allowed)", index);
+        usleep(3000 * 1000); return;
+    }
+    handoff_notice([NSString stringWithFormat:@"Starting %@\u2026", nm]);
     usleep(1500 * 1000);
     UNMutableNotificationContent *c = [UNMutableNotificationContent new]; c.body = [NSString stringWithFormat:@"Tap to start %@", nm];
     UNNotificationRequest *r = [UNNotificationRequest requestWithIdentifier:@"dm.program" content:c trigger:[UNTimeIntervalNotificationTrigger triggerWithTimeInterval:1.0 repeats:NO]];

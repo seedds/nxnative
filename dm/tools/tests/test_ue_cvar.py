@@ -44,6 +44,23 @@ def register_form(at, name, obj, store=True, base_ctor=False):
     return w + [LDRX(8, 0), BLR(8), STRX(0, 19, 2), RET]
 
 
+BASE = 0xa100   # the inlined form's page base (adrp x22 + add x22, x22, #0x100); OBJ is x22 + 0x4c8
+
+
+def inline_form(at, name, obj, vtable=True, clobber=False, far=False):
+    """UE 4.18 inlined (OCTOPATH TRAVELER): x22 = the page base, made once, then an if / else block (a forward b over the else block) and other work, then the name into x1, blr
+    (register), str x0, [x22, #k + 8] (the registered variable), str x8, [x22, #k] (the vtable), blr (the value pointer), str x0, [x22, #k + 0x10]. clobber writes x22 between;
+    far ends the else block with a b past the store"""
+    k = obj - BASE
+    w = [ADRP(22, at, BASE), ADDI(22, 22, BASE & 0xfff), 0, mov(0, 1), mov(2, 3)]
+    w += [mov(22, 0)] if clobber else [mov(4, 5)]
+    w += [LDRX(8, 0), ADRP(1, at + 4 * (len(w) + 1), name), ADDI(1, 1, name & 0xfff), BLR(8), STRX(0, 22, (k + 8) // 8)]
+    if vtable: w += [STRX(8, 22, k // 8)]
+    w += [LDRX(8, 0), BLR(8), STRX(0, 22, (k + 0x10) // 8), RET]
+    w[2] = B(at + 8, at + 4 * (len(w) + 4 if far else 4))   # skips the else block (one word), or jumps past the store
+    return w
+
+
 def image(*seqs, z=2):
     img = bytearray(END)
     put_name(img, NAME, 't.MaxFPS', z); put_name(img, OTHER, 'r.Other', z)
@@ -70,6 +87,18 @@ class FindTest(unittest.TestCase):
         for base_ctor in (False, True):
             o, why = find(image(lambda a: register_form(a, NAME, 0, store=False), lambda a, base_ctor=base_ctor: register_form(a, NAME, OBJ, base_ctor=base_ctor)))
             self.assertEqual(o, OBJ, why)
+
+    def test_inlined_form(self):
+        o, why = find(image(lambda a: inline_form(a, NAME, OBJ), z=4))
+        self.assertEqual(o, OBJ, why)
+
+    def test_inlined_form_needs_one_way_in(self):
+        for kw in ({'clobber': True}, {'vtable': False}, {'far': True}):   # x22 written between; the registered variable's store alone; a b past the store
+            o, why = find(image(lambda a, kw=kw: inline_form(a, NAME, OBJ, **kw)))
+            self.assertIsNone(o, kw)
+        # a branch from elsewhere (at 0x1000) into the span (the second sequence, at 0x1048): a path to the store that skips the adrp
+        o, why = find(image(lambda a: [B(a, 0x1048 + 4 * 6), RET], lambda a: inline_form(a, NAME, OBJ)))
+        self.assertIsNone(o, why)
 
     def test_utf32_name(self):
         o, why = find(image(lambda a: register_form(a, NAME, OBJ), z=4))

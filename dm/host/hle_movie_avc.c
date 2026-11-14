@@ -92,26 +92,27 @@ static void keep_ps(mavc *a, const uint8_t *nal, size_t n) {   // a parameter se
     memcpy(dst, nal, n); *dn = (int)n; a->dirty = 1;
     if (t == 7) a->depth = avc_reorder_depth(nal, n);
 }
-// walk the NAL units of p (Annex B start codes, or else 4-byte lengths); fn gets each unit without its prefix. Zero bytes before a start code (the first byte of a 4-byte
-// start code, trailing_zero_8bits) are not part of the unit
+// walk the NAL units of p, an Annex B byte stream; fn gets each unit without its start code. Zero bytes before a start code (leading_zero_8bits, the first byte of a
+// 4-byte start code, trailing_zero_8bits) are not part of the unit. 0 = p does not begin with a start code, and fn saw nothing.
+// The SDK's demuxer converts the MP4's length-prefixed samples to start codes, also when it hands over the avcC box (hle_movie.c), so packets and csd are Annex B. Length
+// prefixes are not taken as a fallback: a 4-byte length from 256 to 511 begins 00 00 01, so a packet's framing cannot be told from its bytes (issue #629)
 static size_t next_sc(const uint8_t *p, size_t n, size_t i) { for (; i + 3 <= n; i++) if (!p[i] && !p[i + 1] && p[i + 2] == 1) return i; return n; }
-static void each_nal(const uint8_t *p, size_t n, void (*fn)(void *, const uint8_t *, size_t), void *ctx) {
+static int each_nal(const uint8_t *p, size_t n, void (*fn)(void *, const uint8_t *, size_t), void *ctx) {
     size_t s = next_sc(p, n, 0);
-    if (s < n && s <= 1) {
-        while (s < n) {
-            size_t b = s + 3, e = next_sc(p, n, b), end = e;
-            while (end > b && !p[end - 1]) end--;
-            if (end > b) fn(ctx, p + b, end - b);
-            s = e;
-        }
-    } else for (size_t i = 0; i + 4 <= n;) {
-        size_t len = (size_t)p[i] << 24 | (size_t)p[i + 1] << 16 | (size_t)p[i + 2] << 8 | p[i + 3]; i += 4;
-        if (!len || len > n - i) break;
-        fn(ctx, p + i, len); i += len;
+    if (s == n) return 0;
+    for (size_t i = 0; i < s; i++) if (p[i]) return 0;
+    while (s < n) {
+        size_t b = s + 3, e = next_sc(p, n, b), end = e;
+        while (end > b && !p[end - 1]) end--;
+        if (end > b) fn(ctx, p + b, end - b);
+        s = e;
     }
+    return 1;
 }
 static void ps_only(void *ctx, const uint8_t *nal, size_t n) { int t = nal[0] & 31; if (t == 7 || t == 8) keep_ps(ctx, nal, n); }
-void mavc_param_sets(mavc *a, const uint8_t *p, size_t n) { each_nal(p, n, ps_only, a); }
+void mavc_param_sets(mavc *a, const uint8_t *p, size_t n) {
+    if (!each_nal(p, n, ps_only, a) && !a->red++) LOG("[RED] movie: AVC parameter sets without an Annex B start code (%zu bytes), not taken", n);
+}
 // AVCDecoderConfigurationRecord: version, profile, compatibility, level, NAL length size - 1, SPS count (low 5 bits) and 16-bit-length SPS, PPS count and 16-bit-length PPS
 void mavc_avcc(mavc *a, const uint8_t *p, size_t n) {
     if (n < 7 || p[0] != 1) { if (!a->red++) LOG("[RED] movie: unrecognized avcC record (%zu bytes, version %d)", n, n ? p[0] : -1); return; }
@@ -171,7 +172,8 @@ static void avc_picture_sequence(mavc *a, int idr) {
     a->saw_picture = 1;
 }
 int mavc_decode(mavc *a, const uint8_t *p, int n, int64_t pts_us) {
-    au_ctx c = {a, 0}; each_nal(p, (size_t)n, au_add, &c);
+    au_ctx c = {a, 0};
+    if (n > 0 && !each_nal(p, (size_t)n, au_add, &c)) { if (!a->red++) LOG("[RED] movie: AVC packet without an Annex B start code (%d bytes), not decoded", n); return -1; }
     if (!c.len) return 0;
     if ((a->dirty || !a->vs) && !open_session(a)) return -1;
     if (c.picture) avc_picture_sequence(a, c.idr);

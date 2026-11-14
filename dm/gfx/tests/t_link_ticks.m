@@ -98,6 +98,8 @@ int main(int argc, char **argv) { @autoreleasepool {
     acquire_ticks(90, 1, 1, 4. / 3, "display 90 Hz preserves fractional ticks");
     acquire_ticks(75, 1, 1, 1.6, "display 75 Hz preserves fractional ticks");
     acquire_ticks(120, 0, 2, 4, "game mode keeps interval 2 in 60 Hz vsyncs");
+    acquire_ticks(60, 0, 0, 0, "game interval 0 waits for no tick (no vsync on Horizon)");
+    acquire_ticks(60, 1, 0, 2, "display mode paces interval 0 at 60 Hz: two ticks of a 120 Hz link");
     acquire_ticks(60, 1, 2, 2, "display 60 Hz ignores the game's interval");
     acquire_ticks(240, 1, 1, 1, "a rate above the link's waits one tick");
     setenv("DM_FPS_TARGET", "30", 1); g_present_cap = -1;
@@ -109,6 +111,7 @@ int main(int argc, char **argv) { @autoreleasepool {
     setenv("DM_FPS_TARGET", "0", 1); g_present_cap = -1;
     _Alignas(8) float state[10] = {60}; dm_fps_state = (uint8_t *)state;   // include the fixed-step flag at +0x24 read by rt_period_ns
     acquire_ticks(120, 1, 1, 2, "the 60 fps frame step keeps 60 Hz vsyncs");
+    acquire_ticks(60, 0, 0, 2, "the 60 fps frame step paces game interval 0: two 120 Hz ticks");
     state[0] = 30;
     acquire_ticks(120, 1, 1, 4, "the 30 fps frame step keeps two 60 Hz vsyncs");
     dm_fps_state = NULL;
@@ -149,6 +152,19 @@ int main(int argc, char **argv) { @autoreleasepool {
     CHECK(g_link_tick_n == tick && test_now - start == 5000000ull, "timeout reaches its deadline without inventing ticks");
     test_silent = 0;
     CHECK(mtl_link_wait_ticks(2, 10000000ull) && g_link_tick_n - tick == 2, "ticks resume from the last successful wait after timeout");
+    // A drain of standing frames the display-link callback asked for (nvn_link_drain.h): one wait takes the extra ticks, once, and reports them as pacing
+    atomic_store(&g_link_drain_req, 1); tick = g_link_tick_n;
+    CHECK(mtl_link_wait_ticks(1, 100000000ull) && g_link_tick_n - tick == 2, "a drain request makes one wait a tick longer");
+    CHECK(atomic_load(&g_link_drained) == 1 && !atomic_load(&g_link_drain_req), "the drain is counted and its request used up");
+    (void)mtl_link_drain_take_ns();
+    CHECK(mtl_link_drain_take_ns() == 0, "the drain's time is handed out once");
+    tick = g_link_tick_n;
+    CHECK(mtl_link_wait_ticks(1, 100000000ull) && g_link_tick_n - tick == 1, "the wait after a drain is one tick again");
+    atomic_store(&g_link_drain_req, 2); tick = g_link_tick_n;
+    CHECK(mtl_link_wait_ticks(1, 100000000ull) && g_link_tick_n - tick == 3 && atomic_load(&g_link_drained) == 2, "a drain of two ticks");
+    atomic_store(&g_link_drain_req, 1); g_link_tick_n += 4; waits = test_waits;
+    CHECK(mtl_link_wait_ticks(1, 100000000ull) && test_waits == waits, "a game that fell behind does not wait for a drain");
+    CHECK(atomic_load(&g_link_drained) == 2 && !atomic_load(&g_link_drain_req) && atomic_load(&g_link_blocked_ns) == 0, "and the request is dropped, with no acquire wait reported");
     pid_t pid; int st = 1; extern char **environ;   // the snapshot cases in a process of their own (mtl_snap_on is decided once)
     CHECK(!posix_spawn(&pid, argv[0], NULL, NULL, (char *[]){argv[0], "snap", NULL}, environ) && waitpid(pid, &st, 0) == pid && WIFEXITED(st) && !WEXITSTATUS(st), "the snapshot cases pass");
     printf("t_link_ticks: %d checks, %d failed\n", checks, failed); return failed != 0;

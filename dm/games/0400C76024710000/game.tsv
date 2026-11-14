@@ -1,0 +1,47 @@
+# PRAGMATA (Switch 2, update v196608). Plays on the Mac: see README.md
+# RE Engine, SDK 20.5.15 built for the Switch 2 (Ounce), NVN2; Havok, Wwise. Modules main, sdk; subsdk0 and subsdk1 (C / libc) are not loaded.
+# The RomFS is three KPKA PAKs; the shaders are SDF definitions inside them (shader_split.py kpka_jobs / sdf_shaders), as in Monster Hunter Rise.
+# Made by scripts/build_ipa_from_nsp.py from the survey (dm/games/profile_guess.py); the values below are its guesses, kept as the game runs with them.
+
+# ---- Identity ----
+title_id	0400C76024710000
+program_id	0400C76024710000
+
+# ---- App ----
+name	PRAGMATA
+ipa	Pragmata.ipa
+app_category	public.app-category.games
+
+# ---- Versions ----
+build	v196608	v196608	main=b83eeb94da35ff07d0cfa955875e8258	sdk=820cd7d096aac448693f504400cc2375
+package	v196608
+shader_versions	v196608
+
+# ---- Files ----
+# not loaded, main takes nothing from them the host does not supply: subsdk0 (C / libc), subsdk1 (C / libc)
+modules	main sdk
+romfs_marker	re_chunk_000.pak
+zip_store	.pak:.metallib
+
+# ---- Memory ----
+# the NPDM declares 20 MB of system resource (virtual address memory) and main sets a heap: a 5 GB block with a large alias region; the heap check sizes the heap region from the heap the game asks for
+mem_reserve	0x140000000
+mem_alias	0x118000000
+mem_stack	0x10000000
+# the sdk is built for the Switch 2 (spec: Ounce): its 9 GB pool
+app_pool	0x240000000
+# the NPDM declares 20 MB of system resource
+sys_resource	0x1400000
+
+# ---- Shader split ----
+# RE Engine: the shaders are SDF definitions inside the KPKA PAKs (shader_split.py kpka_jobs / sdf_shaders), as in Monster Hunter Rise's and PRAGMATA's profiles
+shader_groups	re_chunk=sdf
+shader_note	PRAGMATA shaders
+
+# heap check: 2026-11-09, heap 0.12 GB
+
+# ---- Address region check ----
+# the game calls nvnDeviceSetDepthMode with near = 0 in the check boot: the pipeline bases made before it runs are made for that mode
+depth_mode	zero
+
+# address regions: 2026-11-10, in its first 15 s in nnMain the game's regions reach alias +38.41 GB, past the profile's 4.38 GB alias region, the iPhone layout: the request returning to main+0x12de5a4 takes 32.00 GB: a smaller one works only if its allocator places nothing by fixed offsets; the request returning to main+0x14cda60 takes 6.27 GB: a smaller one works only if its allocator places nothing by fixed offsets (docs/reference/memory.md, Virtual address memory and the alias region) (rewrite 6d87e4dc95ee)

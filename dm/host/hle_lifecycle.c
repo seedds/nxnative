@@ -17,6 +17,7 @@ void dm_host_shutdown_then(const char *why, void (*then)(void *), void *arg) {
     dm_cheats_exit();                               // a clean exit: no safe mode for the cheats at the next launch (atexit does not run either)
     dm_audio_suspend(1);
     dm_gfx_suspend(1);
+    { int64_t left = 1300 - (int64_t)((now_ns() - t0) / 1000000); dm_gfx_quit(left > 0 ? (int)left : 0); }   // the pipeline archive's unwritten captures, within the 1.5 s
     LOG("graceful exit done (%.3f s)", (now_ns() - t0) / 1e9);
     if (then) then(arg);
     _exit(0);

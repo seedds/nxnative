@@ -89,15 +89,11 @@ fragment float4 pixel() { return float4(1.0, 0.0, 0.0, 1.0); }
 
 
 def depth_entries(src):
-    # Exercise the same post-reader depth conversion as geometry_finish without
-    # importing the builder's command-line and game-profile initialization.
-    builder = Path(dmsh_geometry.__file__).with_name('dmsh_build.py').read_text()
-    node = next(n for n in ast.parse(builder).body if isinstance(n, ast.FunctionDef) and n.name == 'vs_depth')
-    ns = {'re': re, 'sys': sys}
-    exec(ast.get_source_segment(builder, node), ns)
+    # the same post-reader depth conversion as geometry_finish
+    import dmsh_entry
     # The production helper locates the translated vertex entry at file end.
     vertex, pixel = src.split('fragment float4 pixel()', 1)
-    return ns['vs_depth'](vertex)[1] + 'fragment float4 pixel()' + pixel
+    return dmsh_entry.vs_depth(vertex)[1] + 'fragment float4 pixel()' + pixel
 
 
 class GeometryReader(unittest.TestCase):
@@ -204,6 +200,50 @@ class GeometryOutputLayout(unittest.TestCase):
 
 @unittest.skipUnless(os.environ.get('DMSH_TEST_XLATE'), 'set DMSH_TEST_XLATE to the offline translator')
 class PassthroughCompiler(unittest.TestCase):
+    def test_viewport_index_survives_geometry_compute_conversion(self):
+        root = Path(__file__).resolve().parents[3]
+        table = (root / 'dm/third_party/ryujinx/src/Ryujinx.Graphics.Shader/Decoders/InstTable.cs').read_text()
+        def instruction(name):
+            pattern = re.search(r'Add\("([01x]{64})",\s*InstName\.' + name + r'\s*,', table)[1]
+            return int(pattern.replace('x', '0'), 2) | (7 << 16)
+        # Dynamic viewport index from PrimitiveID. The value must travel through
+        # the emitted vertex record and its raster reader, never a kernel output.
+        ops = [instruction('Ald') | (255 << 8) | (255 << 39) | (0x60 << 20),
+               instruction('Ast') | (255 << 8) | (0x68 << 20), instruction('Exit') | 15]
+        with tempfile.TemporaryDirectory(prefix='geometry_viewport_') as directory:
+            work = Path(directory); header = bytearray(0x50)
+            struct.pack_into('<5I', header, 0, (1 << 24) | (4 << 10) | (3 << 5) | 1, 0, 1 << 24, 7 << 24, 1)
+            code = work / 'viewport.bin'; code.write_bytes(header + struct.pack('<4Q', 0, *ops))
+            jobs = [dict(key=f'viewport{t}', stage='gs', code=str(code), geometry_topology=t,
+                         tex={}, img={}, attr={}, fout={}, debug=True, reduced=True) for t in range(5)]
+            (work / 'jobs.json').write_text(json.dumps(jobs))
+            result = subprocess.run([os.environ['DMSH_TEST_XLATE'], str(work / 'jobs.json'), directory], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            cross = str(root / 'dm/gfx/tools/spirv_cross_bin/spirv-cross')
+            for t in range(5):
+                with self.subTest(topology=t):
+                    meta = json.loads((work / f'viewport{t}.res.json').read_text())
+                    self.assertEqual(meta['geometry_stride'], 134)
+                    for suffix in ('', '.reader'):
+                        spv = work / f'viewport{t}{suffix}.spv'; dmsh_geometry.flatten_sets(spv)
+                        result = subprocess.run([cross, '--msl', '--msl-version', '20300', '--msl-argument-buffers',
+                                                 '--msl-texture-buffer-native', str(spv)], capture_output=True, text=True)
+                        self.assertEqual(result.returncode, 0, result.stderr)
+                        src = result.stdout
+                        if suffix:
+                            self.assertIn('[[viewport_array_index]]', src)
+                            value = re.search(r'out\.gl_ViewportIndex\s*=\s*uint\(as_type<int>\((\w+)\)\);', src)
+                            self.assertIsNotNone(value, 'viewport index must retain its buffer-loaded value')
+                            self.assertTrue(re.search(r'float ' + value[1] + r'\s*=.*vb_input', src), 'viewport index value must come from the emitted vertex record')
+                        else:
+                            self.assertTrue('kernel void main0(' in src, 'geometry compute entry must return void')
+                            self.assertFalse('out.gl_ViewportIndex' in src, 'viewport index must go through the emitted vertex record')
+                        metal = work / f'viewport{t}{suffix}.metal'; metal.write_text(src)
+                        for sdk in ('macosx', 'iphoneos'):
+                            result = subprocess.run(['xcrun', '-sdk', sdk, 'metal', '-fmodules-cache-path=' + directory + '/modules',
+                                                     '-c', str(metal), '-o', str(metal) + '.' + sdk + '.air'], capture_output=True, text=True)
+                            self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_passthrough_emits_positions_and_generic_attributes(self):
         sys.path.insert(0, str(Path(__file__).resolve().parent))   # a sibling module: the CI runs each test file from the repository root
         from test_dmsh_reflect import REFLECT
@@ -588,11 +628,8 @@ def mesh_fixture(out):
 
 class PointSize(unittest.TestCase):
     def drop(self, src):
-        builder = Path(dmsh_geometry.__file__).with_name('dmsh_build.py').read_text()
-        node = next(n for n in ast.parse(builder).body if isinstance(n, ast.FunctionDef) and n.name == 'drop_point_size')
-        ns = {'re': re, 'sys': sys}
-        exec(ast.get_source_segment(builder, node), ns)
-        return ns['drop_point_size'](src)
+        import dmsh_entry
+        return dmsh_entry.drop_point_size(src)
 
     def test_a_write_goes(self):
         self.assertNotIn('PointSize', self.drop('vertex main0l_out main0_l(uint i [[vertex_id]])\n{\n    main0l_out out = {};\n    out.gl_PointSize = 1.0;\n    return out;\n}\n'))

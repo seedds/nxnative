@@ -66,6 +66,18 @@ static void poll_run(int64_t wait_ns, int sleep_too, uint32_t event) {
     poll_step(wait_ns, sleep_too, event);   // exactly 2 ms: the wait (and any yield) backs off
     assert(backoffs() == b0 + 1 + sleep_too);
 }
+// A run of SleepThread(ns) with 10 us of guest work between the sleeps, as Unity 6's idle job workers poll their queue: the guest's own sleeps for steps * 10 us, then one more
+static void sleep_run(int64_t ns, int steps, int expect_backoff) {
+    atomic_fetch_add(&poll_clock, 30000);   // guest work ends the previous run
+    uint64_t b0 = backoffs();
+    for (int i = 0; i < steps; i++) {
+        uint64_t r[32] = {(uint64_t)ns}; svc_thread(0x0B, r);
+        assert(backoffs() == b0);
+        atomic_fetch_add(&poll_clock, 10000);
+    }
+    uint64_t r[32] = {(uint64_t)ns}; svc_thread(0x0B, r);   // a short sleep becomes the back-off's
+    assert(backoffs() == b0 + (expect_backoff ? 1 : 0));
+}
 static void *signaller(void *unused) {
     (void)unused;
     pthread_mutex_lock(&G);
@@ -98,6 +110,22 @@ int main(void) {
     r[0] = 0; r[1] = me_handle; svc_thread(0x0C, r); assert(r[0] == 0);
     poll_step(500, 0, 0); assert(backoffs() == b0);
     puts("PASS: an intervening non-poll SVC resets the run");
+
+    sleep_run(25000, 200, 1);
+    puts("PASS: 25 us sleeps back off at 2 ms, not before");
+    sleep_run(300000, 200, 0);
+    puts("PASS: sleeps of 250 us and more keep their own length");
+    g_bo_cap = 500000;   // DM_YIELD_BACKOFF=500: the back-off reaches 300 us at 2.4 ms
+    sleep_run(300000, 241, 1);
+    puts("PASS: with a 500 us cap, 300 us sleeps back off once the back-off is longer");
+    g_bo_cap = 0;   // DM_YIELD_BACKOFF=0
+    sleep_run(25000, 300, 0);
+    puts("PASS: with the back-off off, short sleeps keep their length");
+    g_bo_cap = 250000;
+    b0 = backoffs();
+    for (int i = 0; i < 300; i++) { atomic_fetch_add(&poll_clock, 30000); uint64_t q[32] = {25000}; svc_thread(0x0B, q); }
+    assert(backoffs() == b0);
+    puts("PASS: 25 us sleeps with 30 us of work between them never back off");
 
     poll_run(500, 0, 0);
     b0 = backoffs();

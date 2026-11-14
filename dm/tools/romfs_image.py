@@ -21,6 +21,10 @@ MAGIC = b'DMROMFS1'
 HEAD = struct.Struct('<8sQQQ')
 ENT = struct.Struct('<QQIHBB')
 GUEST_NAME = 'org.d2rmobile.guest-name'
+# Files a dump tool leaves in every folder of the game's tree, which are not game files: an FTP dump keeps the server's listing as .listing (as the NUP spec's §6.3 says a producer
+# may). Packed, a game that lists a folder sees one more entry: Nintendo Switch Sports Resort cuts each name at its first '.', loaded "Parameter/<folder>/" with an empty name, got
+# no resource and crashed at main+0x9d7c60. A folder's artifacts are left out of the image (and out of a NUP's, pack_nup.py), as they are of the survey's file list
+ARTIFACTS = {b'.listing'}
 
 
 def guest(parent, name):
@@ -33,7 +37,8 @@ def children(path):
     out = []
     with os.scandir(path) as it:
         for e in it:
-            out.append((guest(path, e.name).encode(), e.path, e.is_dir(follow_symlinks=True)))
+            name, isdir = guest(path, e.name).encode(), e.is_dir(follow_symlinks=True)
+            if isdir or name not in ARTIFACTS: out.append((name, e.path, isdir))
     out.sort()
     return out
 
@@ -70,6 +75,16 @@ def reusable(dst, digest):   # whether dst is the image the stamp beside it says
     except (OSError, ValueError): return False
 
 
+def layout(ents, end):
+    """The header and the index (entries, then the name pool) of an image of ents whose files' a and b are filled in, the file data ending at end.
+    write() writes these bytes and a check of an existing image compares them, so the two cannot disagree on the format."""
+    pool, idx = bytearray(), bytearray()
+    for name, _, isdir, a, b in ents:
+        idx += ENT.pack(a, b, len(pool), len(name), 0 if isdir else 1, 0); pool += name
+    idx += pool
+    return HEAD.pack(MAGIC, end, len(idx), len(ents)), bytes(idx)
+
+
 def write(ents, dst, copy):
     """ents (entries(): [name, source, is dir, a, b], breadth-first) → dst + '.part'; copy(source, out) writes one file's bytes to out and returns how many. Fills in each file's a and b"""
     part = dst + '.part'
@@ -79,18 +94,20 @@ def write(ents, dst, copy):
         for e in ents:
             if e[2]: continue
             e[3], e[4] = off, copy(e[1], out); off += e[4]
-        pool, idx = bytearray(), bytearray()
-        for name, _, isdir, a, b in ents:
-            idx += ENT.pack(a, b, len(pool), len(name), 0 if isdir else 1, 0); pool += name
-        out.write(idx); out.write(pool)
-        out.seek(0); out.write(HEAD.pack(MAGIC, off, len(idx) + len(pool), len(ents)))
+        head, idx = layout(ents, off)
+        out.write(idx)
+        out.seek(0); out.write(head)
     return part
 
 
-def publish(part, dst, digest):   # the written image in place, with the stamp reusable() checks
-    os.replace(part, dst)
-    Path(dst + '.inputs.json.part').write_text(json.dumps({'source': digest, 'image': file_identity(dst)}))
+def stamp(dst, digest, image):   # the stamp reusable() checks: dst, with identity image, is the image of inputs with this digest
+    Path(dst + '.inputs.json.part').write_text(json.dumps({'source': digest, 'image': image}))
     os.replace(dst + '.inputs.json.part', dst + '.inputs.json')
+
+
+def publish(part, dst, digest):   # the written image in place, with its stamp
+    os.replace(part, dst)
+    stamp(dst, digest, file_identity(dst))
 
 
 def copy_file(path, out):

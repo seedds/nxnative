@@ -45,6 +45,7 @@ General host changes first needed here; each applies to every game:
 - **MGFX version 5** (MonoGame 3.0) effects, whose shaders are whole GLSLC outputs (`mgfx_effect` in `shader_split.py`): [MGFX version 5 effects (MonoGame 3.0)](../../../docs/reference/shaders.md#mgfx-version-5-effects-monogame-30).
 - **A storage texture is resolved where the present is queued** (`present_enqueue` in `nvn_mtl.m`): [A CPU-written window texture resolved where the present is queued](../../../docs/reference/rendering.md#a-cpu-written-window-texture-resolved-where-the-present-is-queued).
 - **SDK 5's audio command list**: a header layout only from a list that walks in exactly one, and the 0x138-byte DeviceSink (`hle_audren.c`): [SDK 5: a startup list that walks in two layouts, and a 0x138-byte DeviceSink](../../../docs/reference/audio.md#sdk-5-a-startup-list-that-walks-in-two-layouts-and-a-0x138-byte-devicesink).
+- [Screenshots of a cropped window held what lay outside the crop](../../../docs/reference/rendering.md#screenshots-of-a-cropped-window-held-what-lay-outside-the-crop) (general, current): the game crops its 1920x1080 window textures to 1600x900, and a strip outside the crop that was black in some runs and purple in others made regression checks flag the 70 and 78 s shots; shots are now the picture as presented.
 
 ## Open
 

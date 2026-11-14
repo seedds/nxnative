@@ -89,6 +89,17 @@ Built-in metrics identify raw-output writing as the restoration bottleneck: 10.9
 
 Compression timings vary with source-read conditions: separate manual runs took 11.1–26.8 s, with batch-boundary reads ranging from 2.6 to 18.4 s. These are individual measurements with uncontrolled filesystem cache residency, not cold-cache, full game-build or gameplay benchmarks. Temporary conversion output requires additional disk space; normal use retains only the installed cache. See the shared reference for conversion, maintenance and recovery policy.
 
+Current validation (2026-11-14): replacing the bundled sqlite-zstd backend with Python Zstd passed a full round trip on the larger current cache: 413,957 unique blobs, 501,915 entries and 26,077,180,528 raw payload bytes. Both implementations used 14 workers on disposable copies of the same source.
+
+| Backend and Python | Compress | Restore raw | Compressed payload bytes |
+|---|---:|---:|---:|
+| sqlite-zstd, Homebrew 3.14.7 | 32.50 s | 31.26 s | 12,595,173,194 |
+| Python Zstd, CI-matching 3.14.10 | 61.95 s | 37.53 s | 12,586,278,477 |
+
+Python preserves the storage benefit (2.072:1, 51.73% fewer payload bytes), with a slightly smaller encoded payload. Allocated database storage falls from 25.32 to 12.72 GiB. **Open: timing regresses against the old backend**; compression takes 1.91 times as long and restoration 1.20 times as long in this pair. The Python distributions link different Zstd libraries despite both reporting 1.5.7; these are operational comparisons of the old setup and CI-matching setup, not an isolated Python callback overhead measurement. Filesystem cache residency was not controlled.
+
+Every decoded payload was checked against its original BLAKE2b hash after each direction, and blob IDs/hashes/lengths and every entry name/reference/timestamp matched the source fingerprint. SQLite quick checks, reference checks and installed WAL mode passed; verification time is excluded from command timing. Python also decoded the existing sqlite-zstd source without migration. The original source's size, inode and modification time remained unchanged, and temporary databases were removed. Detailed metrics and the reproducible local runner are under the build folder's `python-zstd-roundtrip/`. The earlier measurements above remain historical results on their smaller dataset. No shader rebuild, app packaging or gameplay was measured in this round trip.
+
 ## Memory
 
 - Current: on the walk, run from an external drive with a 3.5 GB pipeline archive: resident 10.9-11.4 GB, wired about 9.4 GB, on a 16 GB Mac. `vmmap` and `footprint`: 6.4 GB of guest memory and 3.8 GB of Metal textures and targets, 1 GB of IOAccelerator memory. [Reading the archive into memory](../../../docs/reference/memory.md#a-pipeline-archive-on-an-external-drive-is-read-into-memory) used to add 3.5 GB (footprint 15.0, peak 16.7). `mem_map_limit on`: a map past the application pool fails as on Horizon, and the SDK's allocator then gives back the pages it keeps. Other apps' memory adds to the swap: other games running beside it can push the Mac over.

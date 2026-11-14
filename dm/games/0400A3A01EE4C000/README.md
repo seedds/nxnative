@@ -19,13 +19,24 @@ A Switch 2 game: update v655360 (the title screen says Ver. 2.0.1), SDK 20.5.25 
 
 ## Build cache
 
-Resolved (2026-11-11): the production [compile-cache compression command](../../../docs/reference/packing.md#the-compile-cache-keeps-uncompressed-build-artifacts) converted the full build's `cas.db` from 57,427.0 to 20,681.0 MiB allocated (56.08 → 20.20 GiB, about 64% less) in 66.2 s, using the OS CPU default of 14 workers. The original build cache was converted successfully; no temporary replacement or journal files remained afterward. This measures cache conversion, not rebuilding or running the game. Full-cache decompression and exhaustive payload verification have not been measured for this game.
+Resolved (2026-11-11): the production [compile-cache compression command](../../../docs/reference/packing.md#the-compile-cache-keeps-uncompressed-build-artifacts) converted the full build's `cas.db` from 57,427.0 to 20,681.0 MiB allocated (56.08 → 20.20 GiB, about 64% less) in 66.2 s, using the OS CPU default of 14 workers. The original build cache was converted successfully; no temporary replacement or journal files remained afterward. This measures cache conversion, not rebuilding or running the game. Full-cache decompression and exhaustive payload verification were not measured in that run.
 
 Historical cached-shader build measurements used 8,166 frozen seen-shader keys, chain `0aa68e19c9a7`, inputs `c456869c588b`, Python 3.14.7, 14 workers and Mac shaders only. All selected shaders hit the cache; no translation or Metal compilation ran. The raw shader step took 133.22 s and the compressed-cache comparison took 151.24 s (+18.01 s, 13.5%). Both produced the same 3,020,213,051-byte shader image. These measurements predate the optimized converter and do not establish current full-build timing.
 
 Production Store integration on that selection completed in 156.36 s, including 0.30 s of maintenance, with all 8,166 shader cache hits and 7,423 Metal-cache units reused. The shader image matched the raw baseline byte for byte (SHA-256 `d2741cb70c5ebcc55c386febd78c262c0eb17a39fb8a595280f9b7d7b958d077`). Other checks ran concurrently, so this establishes integration rather than a controlled timing comparison. Full app packaging and gameplay were not part of these cache checks.
 
 The cache serves persistent build reuse and temporary shader staging. The game loads a separate shader-library image; cache compression does not change that image. Conversion, maintenance and recovery behavior are documented in the shared reference.
+
+Current validation (2026-11-14): Python Zstd passed a full round trip on the current cache: 595,705 unique blobs, 794,686 entries and 61,205,074,663 raw payload bytes. The old and new backends used 14 workers on disposable copies of the same source.
+
+| Backend and Python | Compress | Restore raw | Compressed payload bytes |
+|---|---:|---:|---:|
+| sqlite-zstd, Homebrew 3.14.7 | 75.04 s | 92.33 s | 21,538,623,927 |
+| Python Zstd, CI-matching 3.14.10 | 131.81 s | 89.14 s | 21,529,934,829 |
+
+The storage benefit is preserved: 2.843:1, 64.82% fewer payload bytes, with a slightly smaller encoded payload than sqlite-zstd. Allocated database storage falls from 58.40 to 21.05 GiB. **Open: timing regresses against the old backend**; compression takes 1.76 times as long and restoration 0.97 times as long in this pair. The Python distributions link different Zstd builds, both reporting 1.5.7; this compares the old setup with the CI-matching setup. Filesystem cache residency was not controlled.
+
+Every decoded payload in the Python round trip matched its original BLAKE2b hash after compression and restoration. Blob IDs/hashes/lengths and every entry name/reference/timestamp matched the source fingerprint; SQLite quick checks, reference checks and installed WAL mode passed. Verification ran outside command timing. The unchanged sqlite-zstd timing control checked payload totals and entry metadata without repeating exhaustive payload hashing. The original source's size, inode and modification time were unchanged, and temporary databases were removed. Detailed metrics and the local runner are under `python-zstd-roundtrip/` in the build folders. The historical measurements above remain intact; the cached-shader build, app packaging and gameplay were not repeated for this codec change.
 
 ## Shaders
 

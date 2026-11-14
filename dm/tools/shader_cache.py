@@ -15,19 +15,35 @@ SCHEMA = ('CREATE TABLE IF NOT EXISTS blob(id INTEGER PRIMARY KEY, hash BLOB UNI
 SHADER_ENTRY = re.compile(r'shader/([0-9a-f]{64})/')
 WAIT = 600   # seconds another process's write may hold this one up
 _DAMAGED = ('malformed', 'not a database', 'disk image')
-ZSTD_LIBRARY = os.path.join(os.path.dirname(__file__), 'sqlite_zstd_bin/libsqlite_zstd.dylib')
 
 
 def _load_zstd(db):
-    enabled = False
     try:
-        db.enable_load_extension(True)
-        enabled = True
-        db.load_extension(os.fspath(ZSTD_LIBRARY))
-    except (AttributeError, NotImplementedError, OSError, sqlite3.Error) as e:
-        raise RuntimeError(f'sqlite-zstd cannot load {ZSTD_LIBRARY}: {e}; use Python with SQLite extension loading and rebuild with dm/tools/sqlite_zstd_bin/build.sh <scratch-folder>') from e
-    finally:
-        if enabled: db.enable_load_extension(False)
+        try: from compression import zstd
+        except ImportError: from backports import zstd   # pyright: ignore[reportMissingImports]  # optional before Python 3.14
+    except ImportError as e:
+        raise RuntimeError('shader cache compression needs Python 3.14+ or backports.zstd (pip install backports.zstd)') from e
+    options: dict[int, int] = {zstd.CompressionParameter.compression_level: 3, zstd.CompressionParameter.content_size_flag: 0}
+    compressor = zstd.ZstdCompressor(options=options)
+    def compress(data, level, dictionary, compact):
+        if (level, dictionary, compact) != (3, -1, 1): raise ValueError('unsupported shader cache compression parameters')
+        return compressor.compress(data, mode=zstd.ZstdCompressor.FLUSH_FRAME)[4:]
+    def decompress(data, is_text, dictionary, compact):
+        if dictionary is None: return data
+        if (is_text, dictionary, compact) != (0, -1, 1): raise ValueError('unsupported shader cache dictionary or encoding')
+        # Legacy caches store no-dictionary Zstd frames with the four-byte magic omitted.
+        return zstd.decompress(b'\x28\xb5\x2f\xfd' + data)
+    db.create_function('zstd_compress_col', 4, compress, deterministic=True)
+    db.create_function('zstd_decompress_col', 4, decompress, deterministic=True)
+
+
+def _enable_compression(db):
+    db.execute('ALTER TABLE blob RENAME TO _blob_zstd')
+    db.execute('ALTER TABLE _blob_zstd ADD COLUMN _data_dict INTEGER')
+    db.execute('CREATE VIEW blob AS SELECT id,hash,zstd_decompress_col(data,0,_data_dict,1) AS data FROM _blob_zstd')
+    db.execute('CREATE TRIGGER blob_insert_trigger INSTEAD OF INSERT ON blob BEGIN INSERT INTO _blob_zstd(id,hash,data) VALUES(new.id,new.hash,new.data); END')
+    db.execute('CREATE TRIGGER blob_delete_trigger INSTEAD OF DELETE ON blob BEGIN DELETE FROM _blob_zstd WHERE id=old.id; END')
+    db.execute('CREATE TRIGGER blob_update_trigger INSTEAD OF UPDATE ON blob BEGIN UPDATE _blob_zstd SET id=new.id,hash=new.hash,data=new.data,_data_dict=NULL WHERE id=old.id; END')
 
 
 @contextlib.contextmanager
@@ -422,7 +438,7 @@ def _remove_raw_part(path):
 
 
 def _parallel_blobs(db, workers, compress=False):
-    """Bounded batches, native codec on independent memory connections; only the caller touches the cache."""
+    """Bounded batches, Python codec on independent memory connections; only the caller touches the cache."""
     # shortcut: the 8 MiB/256-row limit bounds encoded input, not decoded expansion; budget output bytes before supporting unusually large compressed blobs.
     local, connections = threading.local(), []
     def init():
@@ -441,7 +457,8 @@ def _parallel_blobs(db, workers, compress=False):
             where = 'WHERE _data_dict IS NULL' if compress else 'WHERE 1'
             if last is not None: where += ' AND id>?'
             # Keyset scans avoid keeping a reader snapshot open while the writer commits or vacuum runs.
-            cur = db.execute(f'SELECT id,hash,data,{"NULL" if compress else "_data_dict"} FROM _blob_zstd NOT INDEXED {where} ORDER BY id LIMIT 256', () if last is None else (last,))
+            index = 'INDEXED BY blob_pending' if compress else 'NOT INDEXED'
+            cur = db.execute(f'SELECT id,hash,data,{"NULL" if compress else "_data_dict"} FROM _blob_zstd {index} {where} ORDER BY id LIMIT 256', () if last is None else (last,))
             rows, size = [], 0
             try:
                 for row in cur:
@@ -526,7 +543,7 @@ def _converted_copy(db, path, part, workers, *, compress, metrics=None):
         out.execute('PRAGMA synchronous=NORMAL')
         if compress:
             _load_zstd(out)
-            out.execute('SELECT zstd_enable_transparent(?)', (json.dumps({'table': 'blob', 'column': 'data', 'compression_level': 3, 'dict_chooser': "'[nodict]'"}),)).fetchall()
+            _enable_compression(out)
         insert = 'INSERT INTO _blob_zstd(id,hash,data,_data_dict) VALUES(?,?,?,-1)' if compress else 'INSERT INTO blob VALUES(?,?,?)'
         if metrics is not None: metrics['output_setup_s'] = time.perf_counter() - setup_start
         with cf.ThreadPoolExecutor(workers, initializer=init) as pool:
@@ -605,14 +622,8 @@ def maintain(path, *, compress=False, decompress=False, workers=1, say=print):
                 db.execute('PRAGMA journal_mode=WAL').fetchall()
                 if metrics is not None: metrics['source_checkpoint_and_install_s'] = time.perf_counter() - install_start
             else:
-                # Otherwise the extension's GROUP BY sorts whole uncompressed payloads into temporary files.
-                db.execute('CREATE INDEX IF NOT EXISTS blob_pending_size ON _blob_zstd(_data_dict,length(data)) WHERE _data_dict IS NULL')
-                # v0.3.5 divides by average pending size; use its own compact/nodict encoding for the one deduplicated empty blob first.
-                db.execute('UPDATE _blob_zstd SET data=zstd_compress_col(data,3,-1,1),_data_dict=-1 WHERE _data_dict IS NULL AND length(data)=0')
-                if workers > 1: _compress_parallel(db, workers)
-                else:
-                    while db.execute('SELECT zstd_incremental_maintenance(2,1)').fetchone()[0]:
-                        say(f'compressing shader compile cache: {time.monotonic() - start:.0f} s')
+                db.execute('CREATE INDEX IF NOT EXISTS blob_pending ON _blob_zstd(id) WHERE _data_dict IS NULL')
+                _compress_parallel(db, workers)
                 _reclaim(db)
         finally:
             if db is not None: db.close()

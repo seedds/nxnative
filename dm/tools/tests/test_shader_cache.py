@@ -308,8 +308,8 @@ class Bounded(Base):
 def enable_compression(path):
     db = sqlite3.connect(path, isolation_level=None)
     try:
-        db.enable_load_extension(True); db.load_extension(str(shader_cache.ZSTD_LIBRARY)); db.enable_load_extension(False)
-        db.execute('SELECT zstd_enable_transparent(?)', ('{"table":"blob","column":"data","compression_level":3,"dict_chooser":"\'[nodict]\'"}',)).fetchall()
+        shader_cache._load_zstd(db)
+        shader_cache._enable_compression(db)
     finally: db.close()
 
 
@@ -329,11 +329,11 @@ class CompressedEntries(Entries):
         self.assertEqual([self.store.get(n) for n in ('a', 'b', 'c', 'alias')], [b'A', b'B', b'C', b'B'])
         self.assertEqual(self.blobs(), 3)
 
-    def test_missing_extension_preserves_source(self):
+    def test_missing_codec_preserves_source(self):
         self.store.put('keep', b'precious'); self.store.close()
         before = self.path.read_bytes()
-        with mock.patch.object(shader_cache, 'ZSTD_LIBRARY', self.root / 'absent.dylib'):
-            with self.assertRaisesRegex(RuntimeError, 'sqlite-zstd'): shader_cache.Store(self.path)
+        with mock.patch.object(shader_cache, '_load_zstd', side_effect=RuntimeError('Zstd unavailable')):
+            with self.assertRaisesRegex(RuntimeError, 'Zstd'): shader_cache.Store(self.path)
         self.assertEqual(self.path.read_bytes(), before)
         s = shader_cache.Store(self.path); self.addCleanup(s.close)
         self.assertEqual(s.get('keep'), b'precious')
@@ -396,8 +396,8 @@ class Writers(Base):
         except (OSError, subprocess.TimeoutExpired): libs = ''
         if '/usr/lib/libsqlite3.dylib' not in libs: self.skipTest(f"no {APPLE_PYTHON} with Apple's SQLite")
         if isinstance(self, CompressedWriters):
-            probe = subprocess.run([APPLE_PYTHON, '-c', "import sqlite3; print(hasattr(sqlite3.Connection, 'enable_load_extension'))"], capture_output=True, text=True, timeout=60)
-            if probe.stdout.strip() != 'True': self.skipTest(f'{APPLE_PYTHON} cannot load SQLite extensions')
+            probe = subprocess.run([APPLE_PYTHON, '-c', "try:\n from compression import zstd\nexcept ImportError:\n from backports import zstd"], capture_output=True, text=True, timeout=60)
+            if probe.returncode: self.skipTest(f'{APPLE_PYTHON} has no Zstd codec')
         self.store.close()
         code = "import sys; sys.path.insert(0, sys.argv[1]); import test_shader_cache as t; assert t.forked_stores(sys.argv[2], sys.argv[3]) == t.EXPECT, 'results differ'"
         r = subprocess.run([APPLE_PYTHON, '-c', code, str(Path(__file__).parent), str(self.path), str(self.root)], capture_output=True, text=True, timeout=300)
@@ -736,16 +736,10 @@ class Maintenance(Base):
         self.store.put('empty', b''); self.store.close(); enable_compression(self.path)
         shader_cache.maintain(self.path, say=self.said.append)
         self.assertEqual(self.snapshot()[0][0][2], b'')
-        s = shader_cache.Store(self.path)
-        try:
-            sql = "SELECT '[nodict]',count(*),sum(length(data)) FROM _blob_zstd WHERE _data_dict IS NULL GROUP BY 1"
-            plan = s.db.execute('EXPLAIN QUERY PLAN ' + sql).fetchall()
-            self.assertTrue(any('USING COVERING INDEX blob_pending_size' in row[3] for row in plan), plan)
-            ops = s.db.execute('EXPLAIN ' + sql).fetchall()
-            root = s.db.execute("SELECT rootpage FROM sqlite_master WHERE name='_blob_zstd'").fetchone()[0]
-            table_cursors = {r[2] for r in ops if r[1] == 'OpenRead' and r[3] == root}
-            self.assertFalse(any(r[1] == 'Column' and r[2] in table_cursors and r[3] == 2 for r in ops), 'pending grouping must not read payload bytes')
-        finally: s.close()
+        with contextlib.closing(sqlite3.connect(self.path)) as db:
+            self.assertEqual(db.execute('SELECT count(*) FROM _blob_zstd WHERE _data_dict IS NULL').fetchone()[0], 0)
+            plan = db.execute('EXPLAIN QUERY PLAN SELECT id FROM _blob_zstd WHERE _data_dict IS NULL AND id>0 ORDER BY id LIMIT 256').fetchall()
+            self.assertTrue(any('blob_pending' in row[3] for row in plan), plan)
 
     def test_default_leaves_raw_and_missing_cache_absent(self):
         self.fill(); shader_cache.maintain(self.path, say=self.said.append)
@@ -789,10 +783,29 @@ class Maintenance(Base):
         shader_cache.maintain(self.path, say=self.said.append)
         self.assertEqual(self.snapshot(), before)
 
-    def test_sqlite_without_extension_loading_reports_actionable_error(self):
-        db = mock.Mock()
-        db.enable_load_extension.side_effect = NotImplementedError('disabled in this Python')
-        with self.assertRaisesRegex(RuntimeError, 'sqlite-zstd.*Python'): shader_cache._load_zstd(db)
+    def test_codec_without_sqlite_extension_loading_reads_legacy_frames(self):
+        with contextlib.closing(sqlite3.connect(':memory:')) as db:
+            shader_cache._load_zstd(db)
+            # Produced by the former sqlite-zstd 0.3.5 backend, compact and without a dictionary.
+            encoded = bytes.fromhex('0010f50000b06c656761637920736861646572207061796c6f61640a0100fe90fe6c02')
+            raw = b'legacy shader payload\n' * 100
+            self.assertEqual(db.execute('SELECT zstd_decompress_col(?,0,-1,1)', (encoded,)).fetchone()[0], raw)
+            self.assertEqual(db.execute('SELECT zstd_decompress_col(zstd_compress_col(?,3,-1,1),0,-1,1)', (raw,)).fetchone()[0], raw)
+            self.assertEqual(db.execute('SELECT zstd_decompress_col(?,0,NULL,1)', (raw,)).fetchone()[0], raw)
+            with self.assertRaises(sqlite3.Error): db.execute('SELECT zstd_decompress_col(?,0,7,1)', (encoded,)).fetchone()
+
+    def test_missing_codec_reports_dependency_and_preserves_raw(self):
+        import builtins
+        original = builtins.__import__
+        def without_zstd(name, *args, **kwargs):
+            if name in ('compression', 'backports'): raise ImportError('unavailable')
+            return original(name, *args, **kwargs)
+        self.fill(); before = self.path.read_bytes()
+        with mock.patch('builtins.__import__', side_effect=without_zstd):
+            with self.assertRaisesRegex(RuntimeError, 'Python 3.14.*pip install backports.zstd'):
+                shader_cache.maintain(self.path, compress=True)
+        self.assertEqual(self.path.read_bytes(), before)
+        self.assertFalse(Path(f'{self.path}.compressed.part').exists())
 
     def test_unsupported_locking_does_not_break_raw_but_refuses_conversion(self):
         self.store.close()
@@ -833,9 +846,9 @@ class Maintenance(Base):
         shader_cache.maintain(self.path, decompress=True, say=self.said.append)
         self.assertEqual(self.snapshot()[0][0][2], b'from WAL')
 
-    def test_failed_extension_enablement_preserves_raw(self):
+    def test_failed_codec_enablement_preserves_raw(self):
         self.fill(); before = self.path.read_bytes()
-        with mock.patch.object(shader_cache, '_load_zstd', side_effect=RuntimeError('sqlite-zstd missing')):
+        with mock.patch.object(shader_cache, '_load_zstd', side_effect=RuntimeError('Zstd missing')):
             with self.assertRaisesRegex(RuntimeError, 'missing'): shader_cache.maintain(self.path, compress=True)
         self.assertEqual(self.path.read_bytes(), before)
 

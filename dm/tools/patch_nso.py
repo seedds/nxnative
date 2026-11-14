@@ -4,8 +4,10 @@
 #   x18 read/write      → thread slot K18 (TSD, via tpidrro_el0)
 #   mrs tpidr_el0       → read thread slot KTLS; msr tpidr_el0 → write KTLS
 #   mrs tpidrro_el0     → read thread slot KTLR (Horizon ThreadLocalRegion pointer)
+#   any of these with x18 as its register → a copy between thread slots, K18 among them (site_slot_copy; the host gate writes K18 for mrs x18, cntpct_el0)
 #   svc #n, mrs cntpct_el0 → host gate (gate address taken from thread slot KGATE; once in C, gates.tsv is looked up by return point)
 #   sub sp, sp, xN      → xN rounded up to 16 first (Apple's kernel faults on a misaligned sp, Horizon does not; site_sp_align)
+#   sub sp, sp, #imm … add sp, sp, #imm with imm not a multiple of 16 → both rounded up to 16, when nothing between them reaches past the frame (odd_sp_frames)
 #   ldxr* / ldxp → ldaxr* / ldaxp, stxr* / stxp → stlxr* / stlxp: every exclusive access gets acquire or release ordering (exclusive_order_sites; the games ran on the Switch's Cortex-A57 without it, Apple cores need it)
 #   the completer of Trinity's per-frame rendezvous: dmb ish between its flag store and its load of the state word (trinity_completer_sites; exactly one such function in a module, or no change)
 #   spin wait loops     → a copy whose back-edges pass a spin gate (the host yields there; a busy poll costs nothing on the Switch, see "Spin waits")
@@ -51,13 +53,16 @@ BIG_TEXT = FAR and MOD.text_end + FRONT > 0x8000000 - 0x10000
 # SPLIT is also no lower than the lowest site the back area reaches with the same margin (BACK_MIN): when ro, data and bss after the text are large (Hello Kitty Party Land: 151.8 MB
 # of text, 98 MB more before BACK_OFF), a 16 MB front area would hand the back area sites more than 128 MB below it, so the front area's first pass takes the gap up to BACK_MIN instead
 TWO = BIG_TEXT and MOD.text_end > 0x8000000 - 0x10000
-BACK_MIN = 0   # TWO: BACK_OFF (set below) less the reach, plus the margin
+# When BACK_MIN is beyond the front area's reach too (GAP: Resident Evil 4 v131072, 185 MB of text and 90 MB of ro, data and bss after it, so BACK_MIN is 148.5 MB), no split puts every site
+# in reach of its area: the front area keeps its 16 MB and its split, and the sites between the split and BACK_MIN take the back area, each branch that does not reach going through a hop
+# (reach_via(): one b in the alignment padding between two functions, within reach of both ends)
+BACK_MIN, GAP = 0, False   # TWO: BACK_OFF (set below) less the reach, plus the margin
 if TWO:
     BACK_MIN = ((((len(MOD.image) + bss + 0x3FFF) & ~0x3FFF) + 0x8000 + 0xFFFF) & ~0xFFFF) - 0x8000000 + 0x100000
-    assert BACK_MIN < 0x8000000 - 0x200000, f'no split reaches: the back patch area reaches no site below {BACK_MIN:#x}, too close to the front area\'s reach'
-    FRONT = int(os.environ.get('DM_PATCH_FRONT', '0'), 0) or min(0x1000000, (0x8000000 - 0x100000 - BACK_MIN) & ~0xFFFF)
+    GAP = BACK_MIN >= 0x8000000 - 0x200000
+    FRONT = int(os.environ.get('DM_PATCH_FRONT', '0'), 0) or (0x1000000 if GAP else min(0x1000000, (0x8000000 - 0x100000 - BACK_MIN) & ~0xFFFF))
 elif BIG_TEXT: FRONT = int(os.environ.get('DM_PATCH_FRONT', '0'), 0) or (0x8000000 - 0x10000 - MOD.text_end) & ~0xFFFF
-SPLIT = max(0x8000000 - FRONT - 0x100000, BACK_MIN) if TWO else None
+SPLIT = (0x8000000 - FRONT - 0x100000 if GAP else max(0x8000000 - FRONT - 0x100000, BACK_MIN)) if TWO else None
 IMG = MOD.image
 ORIG_TEXT = bytes(IMG[:MOD.text_end])   # the text as the file has it, before any cut or site: <name>.changed.tsv compares against it
 if not FAR: IMG.extend(bytes(bss))
@@ -82,10 +87,13 @@ else:
 #   OBS = {build ID: [(offset, number, original instruction word, reason)]}: observation gates. Numbers match OBS_* in the host's hle.h; the original instruction must be position
 #     independent (no PC-relative / branch / anything involving x18 or tpidr), asserted offline; when the host has no callback attached the gate block goes in and out once and returns
 #   FRAME_STEP = {build ID: function(ctx)}: the frame step stubs of a main ("Frame step in whole vsyncs" below)
+#   STUBS = {build ID: function(ctx)}: code a fix needs in the patch area, branched to from its sites ("Stubs" below)
 #   MATCH_FRAME_STEP = {'main': [{name, size, fingerprints, stub}, ...]}: the frame step stubs of any main without FRAME_STEP, placed by the function they patch (nso_match.locate_stub:
 #     one complete unwind function of that size and fingerprint, or no stubs and a red line); stub(ctx) writes its sites at ctx.base + offsets inside that function. Rules are
 #     one patch's reviewed implementations (one name). Only the profile selected by DM_GAME participates, as for MATCH_CUTS. A rule's others = {label: {size, fingerprints}}
 #     are more functions its stub patches or depends on, found the same way: ctx.others[label] is the start of each, or None (a red line) when it does not match, and the stub leaves that part out
+#     An anchored rule {name, calls, find, stub, reviewed} is found instead as the one function that calls the imported symbol calls; find(fn) (nso_match.Function) checks the code there
+#     and returns what the stub needs (ctx.found: its sites, registers), or raises MatchError (a red line, no stubs); reviewed lists what find returned on the builds checked by hand. It holds over updates that change the function elsewhere
 #   MATCH_CUTS = {module name: [nso_match rule, ...]}: fallback for modules without registered CUTS. Only the profile selected by DM_GAME participates; a derived profile uses
 #     the repository's rules, an external-only provisional profile its own. Missing or ambiguous matches are reported and skipped; known builds retain their exact CUTS.
 #     A rule of several functions applies whole or not at all. For such a module <name>.match.tsv lists the cuts of the profile's registered builds of it and each patch's result,
@@ -106,7 +114,7 @@ patch_paths = {}
 for path in PATCH_FILES: patch_paths.setdefault(os.path.realpath(path), path)   # repeated roots and symlinks name the same file, not competing build claims
 PATCH_FILES = list(patch_paths.values())
 def load_patches():
-    tables, where = {'CUTS': {}, 'OBS': {}, 'FRAME_STEP': {}, 'MATCH_CUTS': {}, 'MATCH_FRAME_STEP': {}, 'SDK_MATCH_CUTS': {}, 'CAPABILITIES': {}}, {}
+    tables, where = {'CUTS': {}, 'OBS': {}, 'FRAME_STEP': {}, 'STUBS': {}, 'MATCH_CUTS': {}, 'MATCH_FRAME_STEP': {}, 'SDK_MATCH_CUTS': {}, 'CAPABILITIES': {}}, {}
     for n, path in enumerate(PATCH_FILES):
         spec = importlib.util.spec_from_file_location(f'patches_{n}', path); m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
         for kind, table in tables.items():
@@ -159,6 +167,11 @@ FS_MATCH = None
 if NAME == 'main' and BUILD_ID not in PATCHES['FRAME_STEP']:
     from nso_match import locate_stub
     FS_MATCH = locate_stub(IMG, TEXT_END, PATCHES['MATCH_FRAME_STEP'].get(os.path.basename(os.environ.get('DM_GAME', '').rstrip('/')), {}).get(NAME, []))
+# The frame step state page is the page after the key page. An appended patch area starts on the first 64 KB boundary after the key page, which is that page itself when the key
+# page ends on such a boundary (Hades II's v0 main): a main that gets the state page then starts its patch area 64 KB later. Nothing has been written to the patch area yet, and
+# every other module keeps its layout
+if (BUILD_ID in PATCHES['FRAME_STEP'] or FS_MATCH) and NAME == 'main' and not FAR and PATCH_OFF < KEY_PAGE_OFF + 0x4000 + 0x1000:
+    PATCH_OFF += 0x10000
 for off, ob, nb, why in cuts:
     ob, nb = bytes.fromhex(ob), bytes.fromhex(nb)
     assert len(ob) == len(nb) and IMG[off:off + len(ob)] == ob, f'cut original bytes mismatch {off:#x}: {bytes(IMG[off:off + len(ob)]).hex()}'
@@ -337,7 +350,7 @@ def site_plain(ins):
     emit(STP(S, T, 31, save)); emit(MRS_TPIDRRO(T)); emit_slot_addr(T, S, 'K18'); emit(LDRX(S, T))
     emit(subst(ins, S))
     emit(STRX(S, T))                 # Always write back: capstone can miss reporting a write (the adds w18 instance)
-    emit(LDP(S, T, 31, save - dlt)); emit(B(here(), ins.address + 4))
+    emit(LDP(S, T, 31, save - dlt)); emit(BX(here(), ins.address + 4))
     return start
 
 def site_sp(ins):
@@ -348,7 +361,37 @@ def site_sp(ins):
     emit(STP(S, T, 31, -16)); emit(MRS_TPIDRRO(T)); emit_slot_addr(T, S, 'K18'); emit(LDRX(S, T))
     emit(ADDI(T, 31, 0))             # mov T, sp (in add immediate, 31 is sp)
     emit(subst(ins, S))
-    emit(LDP(S, T, T, -16)); emit(B(here(), ins.address + 4))
+    emit(LDP(S, T, T, -16)); emit(BX(here(), ins.address + 4))
+    return start
+
+def casp_pair18(ins):
+    """Whether ins is a compare and swap of a register pair (casp, caspa, caspl, caspal; x or w) whose compare pair (Rs) or new-value pair (Rt) is x18, x19"""
+    w = struct.unpack('<I', ins.bytes)[0]
+    return w & 0xBFA07C00 == 0x08207C00 and 18 in ((w >> 16) & 31, w & 31)
+
+def site_casp(ins):
+    """A compare and swap whose pair is x18, x19. A pair is an even register and the next one, so subst cannot rename x18 alone (xS, x19 is no pair): the pair moves to a free even
+    pair P, P + 1, P loaded from the slot K18 and P + 1 copied from x19. The instruction writes the compare pair with the memory's old value, so after it P goes back to the slot and
+    P + 1 to x19; a new-value pair is only read. The memory access is still the one instruction, so it stays atomic. P, P + 1 and T (the slot's address) are saved below sp as in
+    site_plain (casp has no writeback: sp does not move). Sonic Frontiers Definitive Edition main+0x19ce5c4: caspal x18, x19, x4, x5, [x16]"""
+    w = struct.unpack('<I', ins.bytes)[0]
+    rs, rn, rt = (w >> 16) & 31, (w >> 5) & 31, w & 31
+    assert rn != 18, f'casp with x18 as its base and in a pair {ins.address:x} {ins.op_str}'
+    used = regs_in(ins) | {18, 19}
+    P = next(r for r in range(0, 16, 2) if not {r, r + 1} & used)
+    T = next(r for r in range(16) if r not in used | {P, P + 1})
+    nw = w
+    if rs == 18: nw = (nw & ~(31 << 16)) | (P << 16)
+    if rt == 18: nw = (nw & ~31) | P
+    want = re.sub(r'\b([xw])(18|19)\b', lambda m: f'{m.group(1)}{P + (m.group(2) == "19")}', ins.op_str)
+    dd = dis(nw, ins.address)
+    if (dd.mnemonic, dd.op_str) != (ins.mnemonic, want): raise RuntimeError(f'casp subst fail {ins.address:x} {ins.mnemonic} {ins.op_str}: {dd.mnemonic} {dd.op_str}')
+    start = here()
+    emit(STP(P, P + 1, 31, -16)); emit(STUR(T, 31, -24))
+    emit(MRS_TPIDRRO(T)); emit_slot_addr(T, P, 'K18'); emit(LDRX(P, T)); emit(MOVX(P + 1, 19))
+    emit(nw)
+    if rs == 18: emit(STRX(P, T)); emit(MOVX(19, P + 1))
+    emit(LDUR(T, 31, -24)); emit(LDP(P, P + 1, 31, -16)); emit(BX(here(), ins.address + 4))
     return start
 
 def site_sp_align(ins, n):
@@ -358,7 +401,7 @@ def site_sp_align(ins, n):
     there it changes nothing; of the 22 games' modules on hand only Paper Mario's main has the form"""
     start = here()
     emit(ADDI(n, n, 15)); emit(0x927CEC00 | n << 5 | n)   # add xN, xN, #15; and xN, xN, #~15
-    emit(struct.unpack('<I', ins.bytes)[0]); emit(B(here(), ins.address + 4))
+    emit(struct.unpack('<I', ins.bytes)[0]); emit(BX(here(), ins.address + 4))
     return start
 
 def site_cond(ins):
@@ -373,9 +416,9 @@ def site_cond(ins):
     nw = ((w & 0xFF000000) | ((off & 0x7FFFF) << 5) | S) if m in ('cbz', 'cbnz') else ((w & 0xFFF80000) | ((off & 0x3FFF) << 5) | S)
     pc = here(); emit(nw)
     dd = dis(nw, pc); assert dd.mnemonic == m and dd.operands[-1].imm == taken
-    emit(LDP(S, T, 31, -16)); emit(B(here(), ins.address + 4))
+    emit(LDP(S, T, 31, -16)); emit(BX(here(), ins.address + 4))
     assert here() == taken
-    emit(LDP(S, T, 31, -16)); emit(B(here(), tgt))
+    emit(LDP(S, T, 31, -16)); emit(BX(here(), tgt))
     return start
 
 def site_pcrel(ins):
@@ -386,7 +429,7 @@ def site_pcrel(ins):
     pc = here(); emit(ADRP(S, pc, tgt))
     if ins.mnemonic == 'adr': emit(ADDI(S, S, tgt & 0xFFF))
     emit(STRX(S, T))
-    emit(LDP(S, T, 31, -16)); emit(B(here(), ins.address + 4))
+    emit(LDP(S, T, 31, -16)); emit(BX(here(), ins.address + 4))
     return start
 
 def site_br(ins, base, count):
@@ -405,10 +448,10 @@ def site_br(ins, base, count):
     emit(BR(16))
     while here() < padbase: emit(NOP)
     tails = padbase + 4 * count
-    for i in range(count): emit(B(here(), tails + 8 * i))
+    for i in range(count): emit(BX(here(), tails + 8 * i))
     for i in range(count):
         emit(0xF85F0000 | (31 << 5) | 16)      # ldur x16,[sp,#-16]
-        emit(B(here(), base + 4 * i))
+        emit(BX(here(), base + 4 * i))
     return start
 
 def site_br_tab(ins, targets):
@@ -423,7 +466,7 @@ def site_br_tab(ins, targets):
         emit(ADRP(17, here(), t)); emit(ADDI(17, 17, t & 0xFFF)); emit(CMPR(16, 17)); emit(BEQ(here(), pads + 12 * k))
     emit(BRK(0x18))
     for t in uniq:
-        emit(LDUR(16, 31, -16)); emit(LDUR(17, 31, -24)); emit(B(here(), t))
+        emit(LDUR(16, 31, -16)); emit(LDUR(17, 31, -24)); emit(BX(here(), t))
     return start
 
 def site_blr(ins):
@@ -441,24 +484,39 @@ def site_br_call(ins):
     emit(MRS_TPIDRRO(16)); emit_slot_addr(16, 17, 'K18'); emit(LDRX(16, 16)); emit(BR(16))
     return start
 
+def site_slot_copy(ins, src, dst):
+    """A system register access whose general-purpose register is x18: the guest's x18 is the thread slot K18, so the access becomes a copy from one thread slot to another
+    (mrs x18, tpidr_el0: KTLS → K18; mrs x18, tpidrro_el0: KTLR → K18; msr tpidr_el0, x18: K18 → KTLS), or src is a word that puts the value in x15 (mrs x18, ctr_el0).
+    The Apple kernel may change x18 at any instruction, so the value never passes through it: x15 carries it, and x16 / x17 form the slot addresses, all three saved in the red zone"""
+    start = here()
+    emit(STP(16, 17, 31, -16)); emit(STUR(15, 31, -24))
+    if isinstance(src, str): emit(MRS_TPIDRRO(16)); emit_slot_addr(16, 17, src); emit(LDRX(15, 16))
+    else: emit(src)
+    emit(MRS_TPIDRRO(16)); emit_slot_addr(16, 17, dst); emit(STRX(15, 16))
+    emit(LDUR(15, 31, -24)); emit(LDP(16, 17, 31, -16))
+    emit(BX(here(), ins.address + 4))
+    return start
+
 def site_sysreg_read(ins, kind):
     """mrs xN, tpidr_el0 / tpidrro_el0 → xN = thread slot value."""
     N = ins.bytes[0] & 31
+    if N == 18: return site_slot_copy(ins, kind, 'K18')
     tmp = 16 if N != 16 else 17
     start = here()
     emit(STUR(tmp, 31, -16)); emit(MRS_TPIDRRO(N)); emit_slot_addr(N, tmp, kind); emit(LDRX(N, N)); emit(LDUR(tmp, 31, -16))   # tmp is saved by borrowing the red zone
-    emit(B(here(), ins.address + 4))
+    emit(BX(here(), ins.address + 4))
     return start
 
 def site_tpidr_write(ins):
     N = struct.unpack('<I', ins.bytes)[0] & 31
+    if N == 18: return site_slot_copy(ins, 'K18', 'KTLS')
     (T,) = pick({N}, 1)
     start = here()
     emit(0xF81F0000 | (31 << 5) | T)           # stur xT,[sp,#-16]
     tmp = next(x for x in (16, 17) if x not in (N, T))
     emit(STUR(tmp, 31, -24)); emit(MRS_TPIDRRO(T)); emit_slot_addr(T, tmp, 'KTLS'); emit(STRX(N, T)); emit(LDUR(tmp, 31, -24))
     emit(0xF85F0000 | (31 << 5) | T)           # ldur xT,[sp,#-16]
-    emit(B(here(), ins.address + 4))
+    emit(BX(here(), ins.address + 4))
     return start
 
 def emit_gate_call():
@@ -475,7 +533,7 @@ def site_gate(ins, kind, arg):
     emit(BLR(30))
     ret = here()
     emit(LDP_POST(29, 30, 31, 16))
-    emit(B(here(), ins.address + 4))
+    emit(BX(here(), ins.address + 4))
     gates.append((ret, kind, arg, ins.address))
     return start
 
@@ -493,7 +551,7 @@ def site_obs(off, oid, word):
     ret = here()
     emit(LDP_POST(29, 30, 31, 16))
     emit(word)
-    emit(B(here(), off + 4))
+    emit(BX(here(), off + 4))
     gates.append((ret, 'obs', oid, off))
     return start
 
@@ -577,7 +635,7 @@ def site_window(seg):
         words.append(w)
     for w in words: emit(w)
     for t in [hi] + ex_targets:   # fall-through first
-        emit(STRX(S, T)); emit(LDP(S, T, 31, -16)); emit(B(here(), t)); emit(NOP)
+        emit(STRX(S, T)); emit(LDP(S, T, 31, -16)); emit(BX(here(), t)); emit(NOP)
     return start, lo, hi
 
 def retry_block(insl, k, wseg):
@@ -627,9 +685,9 @@ def site_retry_window(parts):
             else:
                 assert m not in ('adr', 'adrp', 'b', 'bl', 'br', 'blr', 'ret') and not (m == 'ldr' and '[' not in x.op_str), hex(x.address)
             emit(w)
-        emit(STRX(S, T)); emit(LDP(S, T, 31, -16)); emit(B(here(), ft)); emit(NOP)
+        emit(STRX(S, T)); emit(LDP(S, T, 31, -16)); emit(BX(here(), ft)); emit(NOP)
     for t in ex_targets:
-        emit(STRX(S, T)); emit(LDP(S, T, 31, -16)); emit(B(here(), t)); emit(NOP)
+        emit(STRX(S, T)); emit(LDP(S, T, 31, -16)); emit(BX(here(), t)); emit(NOP)
     return start
 
 # ---- Function boundaries (eh_frame_hdr) ----
@@ -660,6 +718,42 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import nso_code
 DATA_BLOCKS = nso_code.data_blocks(IMG, TEXT_END, md)
 CODE_RANGES = list(zip([0] + [e for _, e in DATA_BLOCKS], [s for s, _ in DATA_BLOCKS] + [TEXT_END]))
+
+# ---- Hops: branches beyond a b's reach (GAP above) ----
+# A branch between the code and a patch area that a b does not reach goes through a hop: a b written into a word of the text that no path runs, within reach of both ends, like a
+# linker's range extension thunk. Those words are alignment padding: the nop or zero words right before an unwind entry's start, after an instruction that ends every path through it
+# (b, br, ret, brk), and fewer bytes of them than the start's alignment, so they are only the padding that aligns it. One hop serves every branch to its target that it reaches.
+# Only a module with GAP needs one; any other module's branches all reach, so its output is unchanged
+REACH = (1 << 27) - 4
+_holes, _hops = None, {}
+def hop_holes():
+    """The padding words that may hold a hop, in address order (the text as the file has it)"""
+    out, data = [], [(s, e) for s, e in DATA_BLOCKS]
+    for s in starts:
+        if s < 8 or s & 15: continue
+        align, k = s & -s, s
+        while k - 4 >= 0 and struct.unpack_from('<I', ORIG_TEXT, k - 4)[0] in (0, 0xD503201F): k -= 4
+        if k == s or s - k >= align or k < 4: continue
+        p = struct.unpack_from('<I', ORIG_TEXT, k - 4)[0]
+        if not (p & 0xFC000000 == 0x14000000 or p & 0xFFFFFC1F in (0xD61F0000, 0xD65F0000) or p & 0xFFE0001F == 0xD4200000): continue
+        if any(a < s and k < b for a, b in data): continue
+        out.extend(range(k, s, 4))
+    return out
+def reach_via(frm, to):
+    """to when a b at frm reaches it, else a hop that does (and that reaches to)"""
+    global _holes
+    if -REACH - 4 <= to - frm <= REACH: return to
+    for h in _hops.get(to, ()):
+        if abs(h - frm) <= REACH: return h
+    if _holes is None: _holes = hop_holes()
+    lo, hi = max(frm, to) - REACH, min(frm, to) + REACH
+    i = bisect.bisect_left(_holes, lo)
+    assert i < len(_holes) and _holes[i] <= hi, f'no padding word for a hop from {frm:#x} to {to:#x} (between {lo:#x} and {hi:#x})'
+    h = _holes.pop(i)
+    assert IMG[h:h + 4] == ORIG_TEXT[h:h + 4], f'hop {h:#x} was written by something else'
+    struct.pack_into('<I', IMG, h, B(h, to)); _hops.setdefault(to, []).append(h); stat('hop')
+    return h
+def BX(frm, to): return B(frm, reach_via(frm, to))
 def exclusive_order_sites(img, ranges):
     """Offsets of the exclusive loads and stores without ordering: ldxr / ldxrb / ldxrh / ldxp and stxr / stxrb / stxrh / stxp, any size (each with its fixed fields exact; not CAS or CASP).
     Setting bit 15 makes each the same instruction with ordering: ldaxr* / ldaxp (acquire) and stlxr* / stlxp (release). Armv8 lets the accesses after an exclusive load without acquire
@@ -681,6 +775,53 @@ ORDERED = set(exclusive_order_sites(IMG, CODE_RANGES))   # changed_runs leaves t
 for o in ORDERED:
     struct.pack_into('<I', IMG, o, struct.unpack_from('<I', IMG, o)[0] | 0x8000)   # ldxr → ldaxr, stxr → stlxr, ldxp → ldaxp, stxp → stlxp
 if ORDERED: stats['exclusive_ordered'] = len(ORDERED)
+def odd_sp_frames(img, ranges, md):
+    """(sub offset, add offset, size) of stack frames whose size is not a multiple of 16: sub sp, sp, #imm, then within 64 instructions add sp, sp, #imm with the same imm. Horizon leaves stack
+    alignment checking off for user code, Apple's kernel does not, so the first sp-based access in such a frame faults (SIGBUS, addr=0). Civilization VII's main has four hand-written blocks
+    (main+0x4e8a14, +0x556914, +0x57e914, +0x57ec18) that save x1–x17 in a 0x98-byte frame around an svc GetInfo; the first of them runs on the UI's second screen change. Rounding both
+    immediates up to 16 leaves the code as it was only when nothing between them reaches past the frame, so a frame is taken only when every instruction between is: one that does not use sp,
+    a call or an svc (no other branch: the add must close every path), or a load / store with sp as its only base, no writeback, at an offset whose bytes all lie inside the frame. Any
+    other use of sp (a copy of it, another adjustment) leaves the frame alone. Compiled code keeps frames 16-aligned, so there it finds nothing"""
+    from capstone import CS_GRP_CALL, CS_GRP_INT, CS_GRP_JUMP, CS_GRP_RET
+    from capstone.arm64 import ARM64_OP_MEM, ARM64_OP_REG, ARM64_REG_SP
+    WIN = 64
+    NARROW = {'ldrb': 1, 'strb': 1, 'ldrsb': 1, 'ldurb': 1, 'sturb': 1, 'ldursb': 1, 'ldrh': 2, 'strh': 2, 'ldrsh': 2, 'ldurh': 2, 'sturh': 2, 'ldursh': 2, 'ldrsw': 4, 'ldursw': 4}
+    REG_BYTES = {'x': 8, 'w': 4, 'q': 16, 'd': 8, 's': 4, 'h': 2, 'b': 1}
+    def inside(ins, size):   # True when the instruction leaves sp alone, or reads the frame within its first size bytes
+        if ins.group(CS_GRP_RET) or ins.group(CS_GRP_JUMP) and not ins.group(CS_GRP_CALL): return False
+        if ins.group(CS_GRP_CALL) or ins.group(CS_GRP_INT): return True
+        r, w = ins.regs_access()
+        if ARM64_REG_SP not in r and ARM64_REG_SP not in w: return True
+        mems = [op.mem for op in ins.operands if op.type == ARM64_OP_MEM]
+        regs = [ins.reg_name(op.reg) for op in ins.operands if op.type == ARM64_OP_REG]
+        if ARM64_REG_SP in w or ins.writeback or len(mems) != 1 or mems[0].base != ARM64_REG_SP or mems[0].index or not regs or len(regs) > 2: return False
+        width = NARROW.get(ins.mnemonic) or REG_BYTES.get(regs[0][0])
+        return width is not None and 0 <= mems[0].disp and mems[0].disp + width * len(regs) <= size
+    out = []
+    for s, e in ranges:
+        for m in re.finditer(rb'\xD1', img[s:e]):   # the top byte of sub (immediate, 64-bit): a word-by-word walk took 2.7 s on a 134 MiB main
+            o = s + m.start() - 3
+            if o & 3 or o < s or o + 4 > e: continue
+            w = struct.unpack_from('<I', img, o)[0]
+            if w & 0xFFC003FF != 0xD10003FF or not w >> 10 & 15: continue   # sub sp, sp, #imm (64-bit, no shift), imm not a multiple of 16
+            size = w >> 10 & 0xFFF
+            add = 0x910003FF | size << 10
+            for q in range(o + 4, min(e, o + 4 + 4 * WIN), 4):
+                if struct.unpack_from('<I', img, q)[0] == add:
+                    out.append((o, q, size)); break
+                ins = next(md.disasm(bytes(img[q:q + 4]), q), None)
+                if ins is None or not inside(ins, size): break
+    return out
+def sp_adjust(op, n):
+    """sub (op 0xD10003FF) or add (op 0x910003FF) sp, sp, #n. The immediate is 12 bits, optionally shifted left by 12: a frame of 0xff1–0xfff rounds up to 0x1000, which
+    only the shifted form holds (#1, lsl #12); written unshifted, its bit 12 would land in the shift bit and make the instruction sub sp, sp, #0, lsl #12, a frame of nothing"""
+    if n <= 0xFFF: return op | n << 10
+    assert not n & 0xFFF and n >> 12 <= 0xFFF, hex(n)
+    return op | 1 << 22 | n >> 12 << 10
+for s, a, size in odd_sp_frames(IMG, CODE_RANGES, md):   # both immediates rounded up to 16 (odd_sp_frames)
+    r = (size + 15) & ~15
+    struct.pack_into('<I', IMG, s, sp_adjust(0xD10003FF, r)); struct.pack_into('<I', IMG, a, sp_adjust(0x910003FF, r))
+    stat('sp_frame')
 def trinity_completer_sites(img, ranges):
     """Offsets of the completer of Trinity's per-frame rendezvous (Game Freak; Pokémon Scarlet 1.0.0 main+0x28f872c, 4.0.0 main+0x2d0010c):
       stp x29,x30,[sp,#-0x20]!; stp x20,x19,[sp,#0x10]; mov x29,sp; ldr x8,[x0,#imm]; mov w9,#1; strb w9,[x8,#A]; ldrb w9,[x8,#A+1]; cbz w9,..;
@@ -1450,7 +1591,7 @@ if new_mid:
             dest = at + 4 * d
             if dest in new_mid: assert func_of(at) == func_of(dest), f'branch into window from another function {at:x}'
 
-def put_branch(at, to): struct.pack_into('<I', IMG, at, B(at, to))
+def put_branch(at, to): struct.pack_into('<I', IMG, at, BX(at, to))
 for wseg in windows:
     use_area(wseg[0].address); st, lo, hi = site_window(wseg); stat('window'); put_branch(lo, st)
 for parts in retries:
@@ -1468,6 +1609,7 @@ for a in sorted(kinds):
         elif m in ('adr', 'adrp'): st = site_pcrel(ins); stat('pcrel')
         elif m == 'blr': st = site_blr(ins); stat('blr')
         elif re.match(r'(sp|wsp),', ins.op_str): st = site_sp(ins); stat('sp')
+        elif casp_pair18(ins): st = site_casp(ins); stat('casp')
         elif m in ('ret', 'b', 'bl') or (m == 'ldr' and '[' not in ins.op_str): raise RuntimeError(f'{a:x} {m} {ins.op_str}')
         else: st = site_plain(ins); stat('plain')
     elif k == 'tpidr_r': st = site_sysreg_read(ins, 'KTLS'); stat(k)
@@ -1476,9 +1618,9 @@ for a in sorted(kinds):
     elif k == 'svc': st = site_gate(ins, 'svc', arg); stat(k)
     elif k in ('cntpct', 'cntvct'): st = site_gate(ins, k, arg); stat(k)
     elif k == 'sp_align': st = site_sp_align(ins, arg); stat(k)
-    elif k == 'ctr':   # replaced in place by a constant: DminLine = 4 (64-byte lines); movz xN, #4, lsl #16
-        assert arg != 18, f'{a:x} mrs x18, ctr_el0'
-        struct.pack_into('<I', IMG, a, 0xD2A00080 | arg); stat(k); continue
+    elif k == 'ctr':   # a constant: DminLine = 4 (64-byte lines); movz xN, #4, lsl #16, in place, or into the slot K18 for x18
+        if arg == 18: st = site_slot_copy(ins, 0xD2A00080 | 15, 'K18'); stat(k)
+        else: struct.pack_into('<I', IMG, a, 0xD2A00080 | arg); stat(k); continue
     put_branch(a, st)
 
 obs = list(PATCHES['OBS'].get(BUILD_ID, []))
@@ -1556,13 +1698,15 @@ obs += region_obs
 # its first stub (0 = off), +0x30 u64 vsyncs stepped (the stubs; logged by the host to check the game's speed), +0x40 u32 1 = the game's own dynamic resolution runs, 0 = its
 # stub holds full resolution (DM_DYNAMIC_RESOLUTION, written by the loader; the stub declares the DYNAMIC_RESOLUTION capability). Stub bodies assembled with clang
 # A build's stubs are FRAME_STEP[build ID](ctx) in its patches.py: ctx.here() / ctx.emit(word) assemble into the patch area, ctx.site(offset, original bytes) asserts a site and that it is
-# no rewrite site, ctx.put(offset, words, reason) writes it (listed with the cuts), ctx.state is the state page's offset, ctx.render_scale = 1 marks a render-scale stub,
-# ctx.others the other functions a MATCH_FRAME_STEP rule names, ctx.address(offset) the data address an adrp there and the add / load / store after it make (in the original
+# no rewrite site, ctx.put(offset, words, reason) writes it (listed with the cuts), ctx.state is the state page's offset, ctx.render_scale = n marks a render-scale stub that takes scales up to n (1: it only lowers the game's size),
+# ctx.step_max = n says the stubs hand the game steps of at most n vsyncs (its own interval logic stops there; 0 = FSTEP_MAX, 3), so the host holds frames and pays back at most n,
+# ctx.others the other functions a MATCH_FRAME_STEP rule names, ctx.found what an anchored rule's find returned, ctx.address(offset) the data address an adrp there and the add / load / store after it make (in the original
 # text: the fingerprints mask those pages, so a matched stub reads the globals it needs from its functions), and ctx.capabilities.add(name) declares a launcher capability the
 # stubs provide (written as CAPABILITIES are)
 FRAME_STEP = PATCHES['FRAME_STEP']
 FS_STATE_OFF = 0
-RENDER_SCALE = 0   # 1 = the build has a render-scale stub (state +0x10): the fixups table says so (RENDER_SCALE), and the iOS launcher offers the setting (dm/games/settings.tsv)
+STEP_MAX = 0   # n = the stubs give the game steps of at most n vsyncs (ctx.step_max): the fixups table says so (STEP_MAX n), and the host holds frames at most n vsyncs (nvn_fstep.h smax)
+RENDER_SCALE = 0   # n = the build has a render-scale stub (state +0x10) that takes scales up to n: the fixups table says so (RENDER_SCALE n), the loader holds DM_RENDER_SCALE to it and the launcher offers the setting up to it (dm/games/settings.tsv)
 FS_CAPABILITIES = set()   # capabilities the frame step stubs declare (ctx.capabilities)
 if (BUILD_ID in FRAME_STEP or FS_MATCH) and NAME == 'main':
     FS_STATE_OFF = KEY_PAGE_OFF + 0x4000
@@ -1571,28 +1715,42 @@ if (BUILD_ID in FRAME_STEP or FS_MATCH) and NAME == 'main':
         # Reserve the frame state after the key page there too; stubs reach it by ADRP.
         IMAGE_SIZE = FS_STATE_OFF + 0x4000
     assert FS_STATE_OFF % 0x1000 == 0 and (FAR or FS_STATE_OFF + 0x40 <= PATCH_OFF) and not any(IMG[FS_STATE_OFF:]), 'frame step state page'
-    def fs_site(off, orig):
-        ob = bytes.fromhex(orig)
-        assert IMG[off:off + len(ob)] == ob, f'frame step original bytes mismatch {off:#x}: {bytes(IMG[off:off + len(ob)]).hex()}'
-        for o in range(off, off + len(ob), 4):
-            assert o not in kinds and not any(seg[0].address <= o < seg[-1].address + 4 for seg in windows), f'frame step site is a rewrite site {o:#x}'
-    def fs_put(off, words, why):
-        old = bytes(IMG[off:off + 4 * len(words)])
-        for i, w in enumerate(words): struct.pack_into('<I', IMG, off + 4 * i, w)
-        cuts.append((off, old.hex(), bytes(IMG[off:off + 4 * len(words)]).hex(), why + (' [function match]' if FS_MATCH else ''))); stat('frame_step')
-    def fs_address(off):   # the data address the adrp at off and the add / unsigned-offset load or store right after it (on the adrp's register) make, from the original text
-        a, b = struct.unpack_from('<2I', ORIG_TEXT, off)
-        assert a & 0x9f000000 == 0x90000000, f'frame step: no adrp at {off:#x}'
-        imm = (((a >> 5) & 0x7ffff) << 2 | (a >> 29) & 3) << 12
-        page = (off & ~0xfff) + (imm - (1 << 33) if imm & 1 << 32 else imm)
-        assert (b >> 5) & 31 == a & 31, f'frame step: the instruction after the adrp at {off:#x} does not use its register'
-        if b & 0xffc00000 == 0x91000000: return page + ((b >> 10) & 0xfff)                       # add xD, xN, #imm
-        assert b & 0x3b000000 == 0x39000000, f'frame step: no add, load or store after the adrp at {off:#x}'
-        return page + ((b >> 10) & 0xfff) * (1 << (b >> 30)) * (16 if b & 0x04800000 == 0x04800000 and b >> 30 == 0 else 1)   # scaled by the access size (q: 16)
+# What frame step and stub code (STUBS below) may write: a site whose original bytes match and that holds no rewrite site, the cuts list (<name>.cuts.tsv) that names it, and
+# data addresses read from the original text
+def stub_site(off, orig, what):
+    ob = bytes.fromhex(orig)
+    assert IMG[off:off + len(ob)] == ob, f'{what} original bytes mismatch {off:#x}: {bytes(IMG[off:off + len(ob)]).hex()}'
+    for o in range(off, off + len(ob), 4):
+        assert o not in kinds and not any(seg[0].address <= o < seg[-1].address + 4 for seg in windows), f'{what} site is a rewrite site {o:#x}'
+def stub_put(off, words, why, kind):
+    old = bytes(IMG[off:off + 4 * len(words)])
+    for i, w in enumerate(words): struct.pack_into('<I', IMG, off + 4 * i, w)
+    cuts.append((off, old.hex(), bytes(IMG[off:off + 4 * len(words)]).hex(), why)); stat(kind)
+def stub_address(off, what):   # the data address the adrp at off and the add / unsigned-offset load or store right after it (on the adrp's register) make, from the original text
+    a, b = struct.unpack_from('<2I', ORIG_TEXT, off)
+    assert a & 0x9f000000 == 0x90000000, f'{what}: no adrp at {off:#x}'
+    imm = (((a >> 5) & 0x7ffff) << 2 | (a >> 29) & 3) << 12
+    page = (off & ~0xfff) + (imm - (1 << 33) if imm & 1 << 32 else imm)
+    assert (b >> 5) & 31 == a & 31, f'{what}: the instruction after the adrp at {off:#x} does not use its register'
+    if b & 0xffc00000 == 0x91000000: return page + ((b >> 10) & 0xfff)                       # add xD, xN, #imm
+    assert b & 0x3b000000 == 0x39000000, f'{what}: no add, load or store after the adrp at {off:#x}'
+    return page + ((b >> 10) & 0xfff) * (1 << (b >> 30)) * (16 if b & 0x04800000 == 0x04800000 and b >> 30 == 0 else 1)   # scaled by the access size (q: 16)
 if FS_STATE_OFF:   # the build's stubs (FRAME_STEP of its patches.py), or those placed by their function (MATCH_FRAME_STEP: ctx.base is its start)
-    use_area(0); fs = types.SimpleNamespace(here=here, emit=emit, site=fs_site, put=fs_put, state=FS_STATE_OFF, render_scale=0, base=FS_MATCH[1] if FS_MATCH else 0,
-                                            others=FS_MATCH[2] if FS_MATCH else {}, capabilities=set(), address=fs_address)
-    (FS_MATCH[0]['stub'] if FS_MATCH else FRAME_STEP[BUILD_ID])(fs); RENDER_SCALE = fs.render_scale; FS_CAPABILITIES = fs.capabilities
+    use_area(0); fs = types.SimpleNamespace(here=here, emit=emit, site=lambda off, orig: stub_site(off, orig, 'frame step'),
+                                            put=lambda off, words, why: stub_put(off, words, why + (' [function match]' if FS_MATCH else ''), 'frame_step'),
+                                            state=FS_STATE_OFF, render_scale=0, step_max=0, base=FS_MATCH[1] if FS_MATCH else 0, others=FS_MATCH[2] if FS_MATCH else {},
+                                            found=FS_MATCH[3] if FS_MATCH else None, capabilities=set(), address=lambda off: stub_address(off, 'frame step'))
+    (FS_MATCH[0]['stub'] if FS_MATCH else FRAME_STEP[BUILD_ID])(fs); RENDER_SCALE = fs.render_scale; STEP_MAX = fs.step_max; FS_CAPABILITIES = fs.capabilities
+
+# ---- Stubs (the modules whose patch file has STUBS of their build) ----
+# A fix of the game's own code that needs more instructions than its sites hold: STUBS[build ID](ctx) in its patches.py assembles them into the patch area and branches there from
+# its sites, with the frame step's ctx (here / emit / site / put / address, above) and no state page, so the host's pacing does not change (FRAME_STEP would also make the host take
+# the main for one with a frame step). A stub's code must hold nothing the rewriter would rewrite (x18, svc, tpidr, exclusive pairs), since it is not scanned.
+# Ori and the Will of the Wisps 1.2.1 serializes the users of Unity's shared constant-buffer table this way (its patches.py)
+STUBS = PATCHES['STUBS']
+if BUILD_ID in STUBS:
+    use_area(0); STUBS[BUILD_ID](types.SimpleNamespace(here=here, emit=emit, site=lambda off, orig: stub_site(off, orig, 'stub'),
+                                                       put=lambda off, words, why: stub_put(off, words, why, 'stub'), address=lambda off: stub_address(off, 'stub')))
 
 # ---- Spin waits (every module) ----
 # A guest loop that polls memory until another thread changes it fills only its own core on the Switch, where any higher-priority thread pinned there preempts it, so the
@@ -1706,7 +1864,7 @@ def spin_store(ins):
 def spin_rebranch(ins, pc, tgt):
     """the direct branch ins re-encoded at pc with target tgt"""
     w = struct.unpack('<I', ins.bytes)[0]; off = tgt - pc
-    if ins.mnemonic == 'b': return B(pc, tgt)
+    if ins.mnemonic == 'b': return BX(pc, tgt)
     if ins.mnemonic in ('tbz', 'tbnz'):
         assert -(1 << 15) <= off < (1 << 15) and off % 4 == 0, f'spin wait tbz out of range {pc:#x}'
         return (w & ~(0x3FFF << 5)) | (((off >> 2) & 0x3FFF) << 5)
@@ -1856,13 +2014,13 @@ def spin_emit(g):
             if not (i + 1 < len(R) and R[i + 1] == ft): fixes.append((len(patch), None, ft)); emit(0)   # the next instruction is not the next one copied
     pause = here()
     emit(STP_PRE(29, 30, 31, -16)); emit_gate_call(); emit(BLR(30)); ret = here(); emit(LDP_POST(29, 30, 31, 16))
-    gates.append((ret, 'spin', 0, T)); emit(B(here(), cpy[T]))
+    gates.append((ret, 'spin', 0, T)); emit(BX(here(), cpy[T]))
     def out(t):   # an exit taken by a conditional branch: through a b next to the copy
-        if t not in tramp: tramp[t] = here(); emit(B(here(), t))
+        if t not in tramp: tramp[t] = here(); emit(BX(here(), t))
         return tramp[t]
     for idx, x, info in fixes:
         pc = PATCH_BASE + idx
-        if x is None: w = B(pc, cpy.get(info, info))
+        if x is None: w = BX(pc, cpy.get(info, info))
         elif isinstance(info, tuple): w = spin_rebranch(x, pc, out(info[1]))
         elif info is not None: w = spin_rebranch(x, pc, cpy[info])
         else:
@@ -1873,7 +2031,7 @@ def spin_emit(g):
     for b in sorted(valid):   # the original back-edges enter the copy
         x = nodes[b]['ins'][0]
         if x.mnemonic == 'b': put_branch(b, cpy[T])
-        else: st = here(); emit(spin_rebranch(x, here(), cpy[T])); emit(B(here(), b + 4)); put_branch(b, st)
+        else: st = here(); emit(spin_rebranch(x, here(), cpy[T])); emit(BX(here(), b + 4)); put_branch(b, st)
     stat('spin')
 spin_heads = sorted(spin_cand)
 
@@ -1928,7 +2086,12 @@ with open(P('fixups.tsv'), 'w') as f:
     if 'target' in UNITY_FPS: f.write(f"# UNITY_TARGET_FPS\t{UNITY_FPS['target']:#x}\n")   # Unity's Application.targetFrameRate (unity_fps.py)
     if 'qs' in UNITY_FPS: f.write(''.join(f'# UNITY_QS_{k}\t{v:#x}\n' for k, v in zip(('PTR', 'IDX', 'ARR', 'SIZE', 'VSYNC'), UNITY_FPS['qs'])))   # its QualitySettings' vSyncCount (unity_fps.py)
     for n, o in UE_CVARS.items(): f.write(f'# UE_CVAR:{n}\t{o:#x}\n')   # Unreal console variables (ue_cvar.py): the TAutoConsoleVariable registered under each name
-    if RENDER_SCALE: f.write('# RENDER_SCALE\t1\n')   # a render-scale stub reads state +0x10 (the loader ignores the key; dm/games/settings.py offers the setting by it)
+    if RENDER_SCALE:   # a render-scale stub reads state +0x10, up to this scale (the loader holds DM_RENDER_SCALE to it; dm/games/settings.py offers the setting up to it)
+        assert isinstance(RENDER_SCALE, int) and 1 <= RENDER_SCALE <= 9, f'render scale stub: ctx.render_scale is a whole largest scale, 1 to 9: {RENDER_SCALE!r}'
+        f.write(f'# RENDER_SCALE\t{RENDER_SCALE}\n')
+    if STEP_MAX:   # the largest step the frame step stubs give the game (the host holds frames and pays back within it)
+        assert isinstance(STEP_MAX, int) and 1 <= STEP_MAX <= 3, f'frame step stub: ctx.step_max is a whole step, 1 to 3: {STEP_MAX!r}'
+        f.write(f'# STEP_MAX\t{STEP_MAX}\n')
     if NAME == 'main':
         for capability in sorted(set(PATCHES['CAPABILITIES'].get(BUILD_ID, ())) | FS_CAPABILITIES):
             assert re.fullmatch(r'[A-Z][A-Z0-9_]*', capability), f'invalid capability {capability}'

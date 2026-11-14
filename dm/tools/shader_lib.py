@@ -51,12 +51,12 @@ def view(lib):
 def exists(lib): return os.path.isdir(folder_of(lib)) or os.path.isfile(image_of(lib))
 
 
-def read_stamp(lib):   # dmsh_chain.py read_stamp, on a folder or an image
+def read_stamp(lib):   # {'game': title ID, 'inputs': digest} of a library, a folder or its image (dmsh_chain.py write_stamp writes it); {} when it has none
     try: return dict(l.split('\t', 1) for l in (view(lib) / STAMP).read_text().splitlines() if '\t' in l and not l.startswith('#'))
     except OSError: return {}
 
 
-def table_head(lib):   # dmsh_chain.py table_head, on a folder or an image: the name is the folder's either way
+def table_head(lib):   # the header c1_full.tsv / cb_extent.tsv start with: the library's chain version (the folder's name, for an image too) and its inputs ("none" with no stamp, which nothing takes)
     return f'# chain {name_of(lib)} inputs {read_stamp(lib).get("inputs", "none")}'
 
 

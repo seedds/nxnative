@@ -200,9 +200,10 @@ static void jit_capture(jit_env *e, uint64_t cmd, const void *in, size_t in_size
 HLE_FORCE("_ZN2nn3jit10InitializeEv", "connects to the jit service; the host runs the plugin itself", void, h_jit_Initialize, void) { LOG("init takeover: jit::Initialize (no-op)"); }
 HLE_FORCE("_ZN2nn3jit8FinalizeEv", "Initialize opened no session", void, h_jit_Finalize, void) { }
 
+// Create, Destroy, Control and GenerateCode run the game's JIT plugin, the game's own code: on the caller's stack (hle.h HLE_FORCE_DIRECT)
 // CreateJitEnvironment(&handle, config, plugin, work, work_size): config = {code memory size, data memory size}, plugin = {NRR buffer, NRO buffer, transfer memory size} (sizes 2 MB
 // multiples, as the SDK checks), work = code memory | data memory | transfer memory (2 MB aligned). Aborts as the SDK does on a failure (it has no error return the game checks)
-HLE_FORCE("_ZN2nn3jit20CreateJitEnvironmentEPNS0_9JitHandleERKNS0_27JitEnvironmentConfigurationERKNS0_13JitPluginInfoEPvm",
+HLE_FORCE_DIRECT("_ZN2nn3jit20CreateJitEnvironmentEPNS0_9JitHandleERKNS0_27JitEnvironmentConfigurationERKNS0_13JitPluginInfoEPvm",
           "the jit service: load the plugin NRO into the host and give it code memory the game can run", Result, h_jit_Create,
           void **out, const uint64_t *cfg, const uint64_t *plug, uint8_t *work, uint64_t work_size) {
     uint64_t rx_size = cfg[0], ro_size = cfg[1], tmem_size = plug[4];
@@ -270,13 +271,13 @@ HLE_FORCE("_ZN2nn3jit20CreateJitEnvironmentEPNS0_9JitHandleERKNS0_27JitEnvironme
     return 0;
 }
 
-HLE_FORCE("_ZN2nn3jit21DestroyJitEnvironmentENS0_9JitHandleE", "unload the plugin and free its code memory", void, h_jit_Destroy, jit_env *e) {
+HLE_FORCE_DIRECT("_ZN2nn3jit21DestroyJitEnvironmentENS0_9JitHandleE", "unload the plugin and free its code memory", void, h_jit_Destroy, jit_env *e) {
     if (!e) return;
     LOG("jit::DestroyJitEnvironment: GenerateCode %llu / %llu / %llu / %llu calls (commands 1-4)", (unsigned long long)e->ncalls[1], (unsigned long long)e->ncalls[2],
         (unsigned long long)e->ncalls[3], (unsigned long long)e->ncalls[4]);
     if (e->plugin) {
         if (e->plugin->fini) ((void (*)(void))(e->plugin->base + e->plugin->fini))();
-        e->plugin->loaded = 0;
+        nro_unload_alone(e->plugin);   // the loader's: under its locks, with its check of stacks borrowing the plugin's data
         munmap((void *)e->rx, e->rx_size);
     }   // a served image stays mapped in the layout
     munmap((void *)e->ro, e->ro_size); if (g_jit_env == e) g_jit_env = NULL;
@@ -332,7 +333,7 @@ static int jit_serve(jit_env *e, jit_range *c0_out, jit_range *c1_out, uint64_t 
 }
 
 // Control(handle, command, in, in_size, out, out_size): the plugin's return value (the SDK aborts when the service fails; the plugin's wrapper fails only without a Control)
-HLE_FORCE("_ZN2nn3jit7ControlENS0_9JitHandleEmPKvmPvm", "the plugin's nnjitpluginControl", int, h_jit_Control, jit_env *e, uint64_t cmd, const void *in, size_t in_size, void *out, size_t out_size) {
+HLE_FORCE_DIRECT("_ZN2nn3jit7ControlENS0_9JitHandleEmPKvmPvm", "the plugin's nnjitpluginControl", int, h_jit_Control, jit_env *e, uint64_t cmd, const void *in, size_t in_size, void *out, size_t out_size) {
     if (!e->plugin) { LOG("jit::Control command %llu: served (the plugin does not run; its state is in the image)", (unsigned long long)cmd); (void)in; (void)in_size; (void)out; (void)out_size; return 0; }
     if (!e->ctl) die("jit::Control: the plugin has no nnjitpluginControl");
     int ret = -1;
@@ -347,7 +348,7 @@ HLE_FORCE("_ZN2nn3jit7ControlENS0_9JitHandleEmPKvmPvm", "the plugin's nnjitplugi
 // GenerateCode(&code_out, &data_out, handle, command, in, in_size, code_in, data_in, data, data_size, out, out_size): the ranges are offsets in the code and data memory;
 // data (at most 32 bytes) goes to the plugin zero-padded to 32, as the SDK sends it. After the plugin wrote code, the SDK invalidates the instruction cache over code_out and cleans the
 // data cache over data_out (sdk+0x2e6bcc); here the plugin wrote through the same mapping, so invalidating the code range is all
-HLE_FORCE("_ZN2nn3jit12GenerateCodeEPNS0_9CodeRangeES2_NS0_9JitHandleEmPKvmRKS1_S7_S5_mPvm", "the plugin's nnjitpluginGenerateCode, writing into the MAP_JIT code memory",
+HLE_FORCE_DIRECT("_ZN2nn3jit12GenerateCodeEPNS0_9CodeRangeES2_NS0_9JitHandleEmPKvmRKS1_S7_S5_mPvm", "the plugin's nnjitpluginGenerateCode, writing into the MAP_JIT code memory",
           int, h_jit_Generate, jit_range *c0_out, jit_range *c1_out, jit_env *e, uint64_t cmd, const void *in, size_t in_size, const jit_range *c0_in, const jit_range *c1_in,
           const void *data, size_t data_size, void *out, size_t out_size) {
     uint8_t d32[32] = {0}; memcpy(d32, data, data_size < 32 ? data_size : 32);

@@ -2,7 +2,7 @@
 # blending; as in OpenGL and Vulkan it applies to integer and normalized targets. Metal has none. Xenoblade Chronicles 2 builds its per-pixel light probe lists with OR: each probe's box draws its index
 # into the next free byte of an RG32Uint target and every other fragment writes 0, so without the operation every fragment replaced the list and the lighting showed hard-edged dark boxes.
 # Skyward Sword HD's Dof_FogToAlpha ORs (0, 0, 0, fog) into the frame's RGBA8Unorm target to put fog in its alpha: as a plain write it blacked out the colours, a brown cast over the distance.
-# The entry points main0, main0_u and main0_m (dmsh_build.py fs_uint) each get a thin entry point that runs the shader's body, reads each colour output's attachment (framebuffer fetch, [[color(n)]]) and
+# The entry points main0 and main0_u (dmsh_entry.py fs_uint) each get a thin entry point that runs the shader's body, reads each colour output's attachment (framebuffer fetch, [[color(n)]]) and
 # combines it with the output by the operation and per-target channel masks at fragment buffer DMSH_LOGIC_BUFFER. A float output goes through its target's stored bits:
 # rounded to them as the target would store it, combined, and normalized again; a mask of zero (a floating-point or sRGB target, which the operation does not apply to) passes it through.
 # An output whose target the pass lacks has no attachment to read, and Metal refuses a pipeline that reads one: each read depends on the function constant DMSH_LOGIC_FC + n. The operation
@@ -58,17 +58,21 @@ def constants(targets):
 
 
 def entry(msl, e):
-    if e['name'] not in ('main0', 'main0_u', 'main0_m'): return None
+    if e['name'] not in ('main0', 'main0_u'): return None
     st = re.search(r'struct %s\s*\{(.*?)\};' % e['ret'], msl, re.S)
-    outs = [(ty, nm, int(n)) for ty, nm, n in re.findall(r'^\s*((?:uint|float)[234]?)\s+(\w+)\s*\[\[color\((\d+)\)\]\];', st.group(1), re.M)] if st else []
+    outs = [(ty, nm, int(n), fc) for ty, nm, n, fc in re.findall(r'^\s*((?:uint|float)[234]?)\s+(\w+)\s*\[\[color\((\d+)\)(?:, function_constant\((\w+)\))?\]\];', st.group(1), re.M)] if st else []
     if not outs: return None
+    # main0_u holds a float and an integer member on each colour, each present by its function constant (dmsh_entry.py fs_uint): each reads its attachment as its own type, only when
+    # both the attachment and the member are there
     scalar = lambda ty: 'uint' if ty.startswith('uint') else 'float'
-    fetch = [f'{scalar(ty)}4 dm_fb{n} [[color({n}), function_constant(dm_lfb{n})]]' for ty, _, n in outs]
+    on = lambda n, fc: f'dm_lfb{n}_{fc}' if fc else f'dm_lfb{n}'
+    consts = ''.join(f'constant bool {on(n, fc)} = dm_lfb{n} && {fc};\n' for _, _, n, fc in outs if fc)
+    fetch = [f'{scalar(ty)}4 {on(n, fc).replace("dm_lfb", "dm_fb")} [[color({n}), function_constant({on(n, fc)})]]' for ty, _, n, fc in outs]
     apply = []
-    for ty, nm, n in outs:
+    for ty, nm, n, fc in outs:
         s = scalar(ty); width = int(ty[len(s):] or 1); zero = '0u' if s == 'uint' else '0.0f'
         pad = f', {zero}' * (4 - width); sw = '.' + 'xyzw'[:width] if width < 4 else ''
-        apply.append(f'if (dm_lfb{n}) dm_r.{nm} = {ty}({"dm_logic" if s == "uint" else "dm_logic_norm"}({s}4(dm_r.{nm}{pad}), dm_fb{n}, dm_lop, {n}u){sw});')
+        apply.append(f'if ({on(n, fc)}) dm_r.{nm} = {ty}({"dm_logic" if s == "uint" else "dm_logic_norm"}({s}4(dm_r.{nm}{pad}), {on(n, fc).replace("dm_lfb", "dm_fb")}, dm_lop, {n}u){sw});')
     params = ', '.join(e['params'] + fetch + [f'constant dm_logic_state& dm_lop [[buffer({dmsh_abi.LOGIC_BUFFER})]]'])
-    return (f'{e["attr"]}fragment {e["ret"]} {e["name"]}_l({params})\n{{\n    {e["ret"]} dm_r = dm_body_{e["name"]}({e["args"]});\n    {" ".join(apply)}\n    return dm_r;\n}}\n',
-            {n for _, _, n in outs})
+    return (f'{consts}{e["attr"]}fragment {e["ret"]} {e["name"]}_l({params})\n{{\n    {e["ret"]} dm_r = dm_body_{e["name"]}({e["args"]});\n    {" ".join(apply)}\n    return dm_r;\n}}\n',
+            {n for _, _, n, _ in outs})

@@ -37,6 +37,7 @@ namespace Ryujinx.Graphics.Shader.Translation
         private bool IsTransformFeedbackEmulated => !GpuAccessor.QueryHostSupportsTransformFeedback() && GpuAccessor.QueryTransformFeedbackEnabled();
         public bool HasStore => _program.UsedFeatures.HasFlag(FeatureFlags.Store) || (IsTransformFeedbackEmulated && Definitions.LastInVertexPipeline);
         internal bool UsesViewportMask => _program.UsedFeatures.HasFlag(FeatureFlags.ViewportMask);
+        internal bool UsesDirectCbe => _program.UsedFeatures.HasFlag(FeatureFlags.DirectCbe);   // nxnative: DirectCbeWrites
 
         public bool LayerOutputWritten { get; private set; }
         public int LayerOutputAttribute { get; private set; }
@@ -311,6 +312,7 @@ namespace Ryujinx.Graphics.Shader.Translation
                         Options.TargetApi,
                         Options.TargetLanguage,
                         Definitions.Stage,
+                        Options.Flags.HasFlag(TranslationFlags.Ampere),
                         ref usedFeatures);
 
                     Optimizer.RunPass(context);
@@ -319,6 +321,11 @@ namespace Ryujinx.Graphics.Shader.Translation
 
                 funcs[i] = new Function(cfg.Blocks, $"fun{i}", false, inArgumentsCount, outArgumentsCount);
             }
+
+            // nxnative: after the lowering passes, on the shared memory accesses the code generator will see, with every function translated (a call follows its callee)
+            SharedMemoryFence.RunPass(funcs, functions.Length, hfm, Definitions.Stage, usedFeatures);
+
+            resourceManager.UnifyArrayTypes(funcs);   // nxnative
 
             return Generate(
                 funcs,
@@ -398,6 +405,7 @@ namespace Ryujinx.Graphics.Shader.Translation
             ResourceManager resourceManager = new(Definitions.Stage, GpuAccessor, GetResourceReservations());
 
             resourceManager.UniformBounds = Options.Flags.HasFlag(TranslationFlags.MetalUniformBounds);   // nxnative: before any uniform slot gets its binding
+            resourceManager.BufferImageBias = Options.Flags.HasFlag(TranslationFlags.MetalBufferImageBias);   // nxnative: see ResourceManager.NoteBufferImage
 
             if (IsTransformFeedbackEmulated)
             {

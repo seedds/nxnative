@@ -1,4 +1,4 @@
-"""Compute shared memory past Metal's 32 KB (dmsh_build.py tg_spill): a kernel whose threadgroup arrays exceed abi.TG_MAX takes them from the device buffer at abi.TG_SLOT, one slice per
+"""Compute shared memory past Metal's 32 KB (dmsh_rewrite.py tg_spill): a kernel whose threadgroup arrays exceed abi.TG_MAX takes them from the device buffer at abi.TG_SLOT, one slice per
 workgroup at its index in the whole grid, with barriers that order device memory; a kernel within the limit is left as it is. The shape is Mario Kart World's DrivePassShaderDefault
 compute shaders (spvUnsafeArray<uint, 12288>, 48 KB). When the Metal compiler is installed, the rewritten kernel is compiled too, and with Xcode it runs over 1,024 workgroups on this Mac's
 GPU, more than run at once: no workgroup may see another's data in its shared memory, as with the index modulo 512 they did."""
@@ -14,12 +14,7 @@ import unittest
 TOOLS = Path(__file__).resolve().parents[1] / 'tools'
 sys.path.insert(0, str(TOOLS))
 import dmsh_abi as abi
-tree = ast.parse((TOOLS / 'dmsh_build.py').read_text())
-selected = [n for n in tree.body if (isinstance(n, ast.FunctionDef) and n.name == 'tg_spill')
-            or (isinstance(n, ast.Assign) and any(getattr(t, 'id', None) in ('TG_DECL', 'TG_BYTES') for t in n.targets))]
-scope = {'re': re, 'abi': abi}
-exec(compile(ast.Module(body=selected, type_ignores=[]), str(TOOLS / 'dmsh_build.py'), 'exec'), scope)
-tg_spill = scope['tg_spill']
+from dmsh_rewrite import tg_spill   # noqa: E402
 
 ARRAY = """template<typename T, size_t Num>
 struct spvUnsafeArray

@@ -2060,6 +2060,32 @@ class _Rd:   # a little-endian reader over bytes, with .NET's BinaryReader strin
             if b < 0x80: return s.raw(n)
 
 MGFX = b'MGFX'
+
+def mgfx10_effect(data, effect, label):
+    """Read the framed NVN bytecode in a Switch MGFX 10 effect."""
+    if data[effect:effect + 6] != b'MGFX\x0a\x28':
+        return []
+    footer = data.find(MGFX, effect + 10)
+    if footer < 0:
+        return []
+    found = []
+    control_header = re.compile(re.escape(CTL_MAGIC))
+    for match in control_header.finditer(data, effect + 19, footer):
+        start = match.start()
+        size, ctl_size = struct.unpack_from('<II', data, start - 8)
+        end = start - 4 + size
+        if not 0 < ctl_size <= size - 8 or end > footer:
+            continue
+        ctl_end = start + ctl_size
+        code_size, = struct.unpack_from('<I', data, ctl_end)
+        if 8 + ctl_size + code_size != size:
+            continue
+        stage = {0: 'ps', 1: 'vs'}.get(data[start - 9])
+        ctl, code = data[start:ctl_end], data[ctl_end + 4:end]
+        if stage and code.startswith(GFX_MAGIC) and sph_stage(code) == stage and not check(label, stage, ctl, code):
+            found.append((f'{label}#MGFX@{start:#x}', stage, ctl, code))
+    return found
+
 def mgfx_effect(d, p, label):
     """A MonoGame effect at d[p:] (Celeste: MonoGame for the Switch, its C# compiled to C++ by Sickhead's BRUTE; 13 in Content/Effects/*.xnb, whose XNB 'S' files are read by EffectReader,
     and SpriteBatch's in main): 'MGFX', u8 version 8, u8 profile, u32 effect key; the constant buffers {name, i16 size, u8 count, {u8 parameter, u16 offset} each}; the shaders {u8 vertex (1) or
@@ -2130,8 +2156,12 @@ def mgfx_effect(d, p, label):
 
 def mgfx_shaders(d, label):
     out = []
-    for m in re.finditer(MGFX, d): out += mgfx_effect(d, m.start(), label) or []
-    if label.endswith('.xnb') and b'EffectReader' in d[:0x200] and not out: red(f'{label}: an XNB effect without an MGFX version 5 or 8 effect of NVN shaders')
+    for m in re.finditer(MGFX, d):
+        if d[m.start() + 4:m.start() + 5] == b'\x0a':
+            out.extend(mgfx10_effect(d, m.start(), label))
+        else:
+            out.extend(mgfx_effect(d, m.start(), label) or [])
+    if label.endswith('.xnb') and b'EffectReader' in d[:0x200] and not out: red(f'{label}: an XNB effect without an MGFX version 5, 8 or 10 effect of NVN shaders')
     return out
 
 def rel_targets(img):
@@ -3305,6 +3335,11 @@ def scan_file(args):
 def scan_file_in(args):
     path, rel = args[:2]
     stem, ext = os.path.splitext(path)
+    if ext == '.zxnb':
+        with open(path, 'rb') as f:
+            data = zlib.decompress(f.read(), -zlib.MAX_WBITS)
+        found = mgfx_shaders(data, '/' + rel) if data[:4] == b'XNBS' and b'EffectReader' in data[:0x200] else []
+        return rel, uniq_keys(found), var_pairs(found), {}
     if ext in ('.data', '.patch', '.debug', '.nxpc') and os.path.exists(stem + '.dict'): return rel, {}, set(), {}   # read through its Next Level Games index (nlg_shaders)
     with open(path, 'rb') as f: head = f.read(16)
     found = []; trees = {}

@@ -14345,6 +14345,8 @@ static int lc_keeps(uint32_t op) {
 static void dispatch(const p_dispatch *dp);
 static int up_mfx_wanted(NvShader *cs); static int up_mfx_encode(NvShader *cs);   // a game's upscaler through MetalFX (see up_mfx_encode)
 static int movie_net_dispatch(NvShader *cs);   // the movie enhancement network left out (DM_MOVIE_ENHANCE=0, see movie_net_dispatch)
+static int movie_enh_off(void);   // DM_MOVIE_ENHANCE=0 (see movie_net_dispatch)
+static int ndve_resample_alone(NvShader *cs);   // nvn_ndve.inc: the engine's resampler with the movie enhancement off
 static int ndve_engine_dispatch(NvShader *cs, const p_dispatch *dp);   // nn::ndve's movie network as the host's kernels (DM_NDVE_ENGINE=1, nvn_ndve.inc)
 // ---------- Compute dispatches moved ahead of the render pass they would split (DM_NVN_CS_HOIST) ----------
 // Metal cannot run a compute dispatch inside a render pass, so a dispatch between two draws of one pass ends it, and on a tile-based GPU every attachment is stored and loaded again:
@@ -15128,7 +15130,9 @@ static void dispatch(const p_dispatch *dp) {
     if (g_nubd && ubd_conflict_cs(cs, dp->ind)) { g_ubd_conflicts++; ubd_land(); }   // see ubd_conflict_cs
     rp_flush();   // A full clear with no draw after it waits for the next pass on its targets, but it comes before this dispatch, which may read or write them as images: land it first, as copy_t2t does
     image_prepare(prog_get(S.cprog), 0x20);
-    if (ndve_engine_dispatch(cs, dp)) return;   // nn::ndve's movie network as the host's kernels (DM_NDVE_ENGINE=1)
+    // nn::ndve's movie network as the host's kernels (DM_NDVE_ENGINE=1), unless the movie enhancement is off: then the network is left out (movie_net_dispatch), as the player chose.
+    // The engine came first, so with Movie enhancement off Ocarina of Time's opening still ran the whole network: 26 ms of a movie frame on an M1, the movie at half speed
+    if (DM_GAME_MOVIE_NET_N && movie_enh_off() ? ndve_resample_alone(cs) : ndve_engine_dispatch(cs, dp)) return;   // off: the engine's resampler alone, on the decoded picture
     if (up_mfx_wanted(cs) && !dp->ind && up_mfx_encode(cs)) return;   // the game's upscaler, drawn by MetalFX instead (DM_UPSCALER=metalfx)
     if (DM_GAME_MOVIE_NET_N && !dp->ind && movie_net_dispatch(cs)) return;   // a dispatch of the movie enhancement network, left out or replaced by a copy (DM_MOVIE_ENHANCE=0)
     // Threadgroup memory past Metal's 32 KB, in a device buffer (dmsh_rewrite.py tg_spill): a slice for every workgroup of the grid. An indirect dispatch's grid is in GPU memory, written earlier

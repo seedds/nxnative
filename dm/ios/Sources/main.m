@@ -261,6 +261,8 @@ int front_ios_boot_ok(void) { return g_boot_ok; }
     self.window.rootViewController = front_ios_root();
     [self.window makeKeyAndVisible];
 }
+// The phone launch plist stays landscape; on iOS 27 the scene permits the orientations used by the game and launcher.
+- (UIInterfaceOrientationMask)supportedInterfaceOrientationsForWindowScene:(UIWindowScene *)ws API_AVAILABLE(ios(27.0)) { (void)ws; return UIInterfaceOrientationMaskAll; }
 - (void)sceneWillResignActive:(UIScene *)s { front_ios_focus_event(0); }
 - (void)sceneDidEnterBackground:(UIScene *)s { front_ios_focus_event(1); }
 - (void)sceneWillEnterForeground:(UIScene *)s { front_ios_focus_event(2); }

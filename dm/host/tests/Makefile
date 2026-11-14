@@ -166,24 +166,28 @@ save-sync: $(B)/t_save_sync $(B)/t_save_sync_metadata
 	TMPDIR="$(abspath $(B))" $(B)/t_save_sync $(QUIET)
 	TMPDIR="$(abspath $(B))" $(B)/t_save_sync_metadata $(QUIET)
 $(B)/t_audio: t_audio.c ../hle_audio.c ../hle_bigstack.c ../hle.h ../dm.h $(GAME_H) | $(B)
-	$(CLANG) -O1 -Wno-unused-function -I.. $(GINC) -o $@ t_audio.c ../hle_bigstack.c -framework AudioToolbox
+	$(CLANG) -O1 -Wno-unused-function -I.. $(GINC) -o $@ t_audio.c ../hle_bigstack.c -framework AudioToolbox -framework CoreAudio -framework CoreFoundation
 $(B)/t_mii: t_mii.c ../hle_mii.c ../hle.h ../dm.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -fsanitize=address,undefined -I.. $(GINC) -o $@ t_mii.c
 $(B)/t_output_stream: t_output_stream.c ../hle_audio.c ../hle_bigstack.c ../hle.h ../dm.h $(GAME_H) | $(B)
-	$(CLANG) -O1 -Wall -Wno-unused-function -I.. $(GINC) -o $@ t_output_stream.c ../hle_bigstack.c -framework AudioToolbox
+	$(CLANG) -O1 -Wall -Wno-unused-function -I.. $(GINC) -o $@ t_output_stream.c ../hle_bigstack.c -framework AudioToolbox -framework CoreAudio -framework CoreFoundation
 $(B)/t_audio_spsc: t_audio_spsc.c ../hle_audio.c ../hle_bigstack.c ../hle.h ../dm.h $(GAME_H) | $(B)
-	$(CLANG) -O1 -Wno-unused-function -I.. $(GINC) -o $@ t_audio_spsc.c ../hle_bigstack.c -framework AudioToolbox
+	$(CLANG) -O1 -Wno-unused-function -I.. $(GINC) -o $@ t_audio_spsc.c ../hle_bigstack.c -framework AudioToolbox -framework CoreAudio -framework CoreFoundation
 $(B)/t_audio_stats: t_audio_stats.c ../hle_audio.c ../hle_bigstack.c ../hle.h ../dm.h $(GAME_H) | $(B)
-	$(CLANG) -O1 -Wall -Werror -Wno-unused-function -I.. $(GINC) -o $@ t_audio_stats.c ../hle_bigstack.c -framework AudioToolbox
+	$(CLANG) -O1 -Wall -Werror -Wno-unused-function -I.. $(GINC) -o $@ t_audio_stats.c ../hle_bigstack.c -framework AudioToolbox -framework CoreAudio -framework CoreFoundation
 run: $(B)/t_audio_stats
 $(B)/t_audio_device: t_audio_device.c ../hle_audio.c ../hle_bigstack.c ../hle.h ../dm.h $(GAME_H) | $(B)
-	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -I.. $(GINC) -o $@ t_audio_device.c ../hle_bigstack.c -framework AudioToolbox
+	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -I.. $(GINC) -o $@ t_audio_device.c ../hle_bigstack.c -framework AudioToolbox -framework CoreAudio -framework CoreFoundation
+.PHONY: audio-live
+$(B)/t_audio_live: t_audio_live.c ../hle_audio.c ../hle_bigstack.c ../hle.h ../dm.h $(GAME_H) | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -I.. $(GINC) -o $@ t_audio_live.c ../hle_bigstack.c -framework AudioToolbox -framework CoreAudio -framework CoreFoundation -lm
+audio-live: $(B)/t_audio_live   # real output on DM_AUDIO_DEVICE: not in `run`
 .PHONY: audio-device
 audio-device: $(B)/t_audio_device
 	$(B)/t_audio_device
 run: audio-device
 $(B)/t_audio_spsc_tsan: t_audio_spsc.c ../hle_audio.c ../hle_bigstack.c ../hle.h ../dm.h $(GAME_H) | $(B)
-	$(CLANG) -O1 -g -O1 -fsanitize=thread -Wno-unused-function -I.. $(GINC) -o $@ t_audio_spsc.c ../hle_bigstack.c -framework AudioToolbox
+	$(CLANG) -O1 -g -O1 -fsanitize=thread -Wno-unused-function -I.. $(GINC) -o $@ t_audio_spsc.c ../hle_bigstack.c -framework AudioToolbox -framework CoreAudio -framework CoreFoundation
 run: $(B)/t_fpslock
 $(B)/t_fpslock: t_fpslock.c ../hle_fpslock.c ../hle.h ../dm.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -g -Wno-unused-function $(GINC) -o $@ t_fpslock.c
@@ -307,12 +311,12 @@ run: $(B)/t_codec_video
 run: $(B)/t_movie_avc
 $(B)/t_movie_avc: t_movie_avc.c ../hle_movie.c ../hle_movie_avc.c ../hle_movie_avc.h $(GAME_H) ../gen/vpx/libvpx.a | $(B)
 	$(CLANG) -O1 -g -Wno-unused-function -Wno-tautological-compare $(GINC) -I../../third_party/libvpx -I../../third_party/libvpx/config -I../../third_party/stb_vorbis -Wl,-dead_strip -o $@ t_movie_avc.c ../gen/vpx/libvpx.a \
-		-framework AudioToolbox -framework VideoToolbox -framework CoreMedia -framework CoreVideo -framework CoreFoundation
+		-framework AudioToolbox -framework CoreAudio -framework VideoToolbox -framework CoreMedia -framework CoreVideo -framework CoreFoundation
 $(B)/t_movie_vpx: t_movie_vpx.c ../hle_movie.c $(GAME_H) ../gen/vpx/libvpx.a | $(B)
-	$(CLANG) -O1 -g -Wno-unused-function -Wno-tautological-compare $(GINC) -I../../third_party/libvpx -I../../third_party/libvpx/config -I../../third_party/stb_vorbis -Wl,-dead_strip -o $@ t_movie_vpx.c ../gen/vpx/libvpx.a -framework AudioToolbox
+	$(CLANG) -O1 -g -Wno-unused-function -Wno-tautological-compare $(GINC) -I../../third_party/libvpx -I../../third_party/libvpx/config -I../../third_party/stb_vorbis -Wl,-dead_strip -o $@ t_movie_vpx.c ../gen/vpx/libvpx.a -framework AudioToolbox -framework CoreAudio -framework CoreFoundation
 $(B)/t_codec_video: t_codec_video.c ../hle_codec_video.c ../hle_movie.c ../hle_movie_avc.c ../hle_movie_avc.h ../hle_movie_av1.c ../hle_movie_av1.h ../hle_movie_yuv.h $(GAME_H) ../gen/vpx/libvpx.a ../gen/dav1d/libdav1d.a | $(B)
 	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -Wno-tautological-compare -fsanitize=address,undefined $(GINC) -I../../third_party/libvpx -I../../third_party/libvpx/config -I../../third_party/dav1d/include -I../../third_party/stb_vorbis -o $@ t_codec_video.c ../gen/vpx/libvpx.a ../gen/dav1d/libdav1d.a \
-		-framework AudioToolbox -framework VideoToolbox -framework CoreMedia -framework CoreVideo -framework CoreFoundation
+		-framework AudioToolbox -framework CoreAudio -framework VideoToolbox -framework CoreMedia -framework CoreVideo -framework CoreFoundation
 ../gen/vpx/libvpx.a: FORCE
 	$(MAKE) -C .. GAME=$(GAME) gen/vpx/libvpx.a
 ../gen/dav1d/libdav1d.a: FORCE

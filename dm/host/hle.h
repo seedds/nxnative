@@ -93,3 +93,6 @@ int dm_movie_playing(void);   // hle_movie.c: a video decoder of the SDK's movie
 void dm_audio_suspend(int on);
 uint64_t dm_audio_render_calls(void);   // Cumulative sound card callback count (the silent sink is not counted)
 void dm_audio_reset(void);   // iOS media services reset: recreate the AudioUnits (hle_audio.c)
+void dm_audio_route_changed(void);   // the output route changed: outputs whose unit takes another channel count than the route get a new unit (hle_audio.c)
+int dm_audio_output_channels(void);   // the output route: 6 when the device takes six channels, else 2 (hle_audio.c); reads the device, on a host thread
+int dm_audio_route(void);             // the same for a game thread: the last route read, or one read on a helper thread (hle_audio.c)

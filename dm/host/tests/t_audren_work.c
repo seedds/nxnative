@@ -24,7 +24,7 @@ static void work_free(void *p) {
 #undef free
 
 enum { SDK_WORK = 0x760000, SERVICE_WORK = 0x61d000 };
-static int opens, starts, joins, closes, fail_open, nested;
+static int opens, starts, joins, closes, fail_open, nested, updates;
 static int event_destroys, event_binds, attaches, event_in_handle;
 static void *sdk_event, *game_event;
 static void *sdk_work;
@@ -69,7 +69,13 @@ static void sdk_close(void *obj, void *state) {
     assert(((uint8_t *)obj)[SDK_WORK - 1] == 0x5a);   // storage is alive through SDK teardown
     closes++;
 }
+static Result sdk_update(void *sys, void *o, size_t on, void *p, size_t pn, const void *in, size_t inn) {
+    assert(sys == sdk_work && !o && !on && !p && !pn && !in && !inn);
+    updates++;
+    return 0x499;
+}
 void *guest_sym(const char *name) {
+    if (!strcmp(name, hle_force_h_ars_Update.name)) return sdk_update;
     if (!strcmp(name, hle_force_h_ar_WorkSize.name)) return sdk_size;
     if (!strcmp(name, hle_force_h_ar_Open.name)) return sdk_open_ev;
     if (!strcmp(name, hle_force_h_ar_Open0.name)) return sdk_open;
@@ -150,6 +156,7 @@ int main(void) {
         int a = allocations, s = starts, c = closes;
         Result r = route ? h_ar_Open(handle, event, param, work, SERVICE_WORK) : h_ar_Open0(handle, param, work, SERVICE_WORK);
         assert(!r && allocations == a + 1 && starts == s + 1);
+        assert(g_ar[0].effects == 16);
         assert(handle[0] != work && map_value == backing);
         assert(((uint8_t *)work)[0] == 0xa5 && ((uint8_t *)work)[SERVICE_WORK - 1] == 0xa5);
         assert(!memcmp(param, saved, sizeof param));
@@ -189,6 +196,16 @@ int main(void) {
         assert(handle[0] == work && allocations == a && !map_key);
         h_ar_Close(handle[0], handle[1]);
     }
+    // Bink primes several stopped voices with rapid updates before starting them together.
+    // Without effects, those updates must not consume audio or release their queued buffers.
+    *(int32_t *)(param + P_DEVICE) = 0;
+    *(int32_t *)(param + 0x18) = 0;
+    assert(!h_ar_Open0(handle, param, work, SDK_WORK));
+    assert(g_ar[0].effects == 0);
+    for (int i = 0; i < 20; i++) assert(h_ars_Update(work, NULL, 0, NULL, 0, NULL, 0) == 0x499);
+    assert(updates == 20 && g_ar[0].updates == 20 && g_ar[0].renders == 0 && g_ar[0].catchups == 0);
+    assert(g_ar[0].cq_head == 0 && g_ar[0].cq_tail == 0);
+    h_ar_Close(handle[0], handle[1]);
     free(work);
     // The output device notification: a second acquire is refused until a release, which destroys the event as the SDK's does (Nintendo Switch Sports Resort, main+0x3af119c)
     h_ad_NotifyRelease21(notify_event);   // never acquired: nothing to destroy

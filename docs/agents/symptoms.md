@@ -526,6 +526,7 @@ One line per symptom in the [subsystem references](../reference/): what you see 
 - `game called nn::diag abort: Result 0xe15` under `nn::codec::GetHardwareOpusDecoderManagerWorkBufferSize` (`sdk+0x323180`), the game's sound setup. → [SDK 21's hardware Opus decoder manager](../reference/audio.md#sdk-21s-hardware-opus-decoder-manager)
 - `CRASH sig=11 addr=0` in `h_codec_HwOpusFini`, the first time the game finalizes a decoder. → [One key for the two forms of the Opus decoder](../reference/audio.md#one-key-for-the-two-forms-of-the-opus-decoder)
 - the light limiter crashed on a null state pointer (`ApplyLightLimiterEffect`, `sdk+0x228494`). → [At least one rendered frame between two updates](../reference/audio.md#at-least-one-rendered-frame-between-two-updates)
+- movie video plays, menus and gameplay sound work, but the movie is silent. The decoder and its output copies contain nonzero PCM; only a muted track starts, while the selected track has the correct mix volumes but no queued buffers. → [Silent movie tracks primed across several updates](../reference/audio.md#silent-movie-tracks-primed-across-several-updates)
 - the sound runs about 50 times faster than the output; the loop runs 11,000 updates a second on one core. → [A sound driver that never waits on the renderer event](../reference/audio.md#a-sound-driver-that-never-waits-on-the-renderer-event)
 
 ## Frame rate

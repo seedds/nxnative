@@ -2,7 +2,8 @@
 
 A plain copy (no git submodule) of the part of dynarmic that `nxaot` builds: the A64 frontend and the IR (the source of the recompiler's instruction semantics,
 [aot-recompiler.md](../../../docs/design/aot-recompiler.md) section 9.1) and the x86-64 backend (the reference executor of the vector harness, section 12, and
-the future JIT fallback, section 11), with the externals its CMake build asks for on an x86-64 host with its tests off. Nothing in the copy is changed.
+the JIT fallback, section 11), with the externals its CMake build asks for on an x86-64 host with its tests off. Nothing in the copy is changed but the
+two missing includes of [Local changes](#local-changes).
 
 | | |
 |---|---|
@@ -10,7 +11,7 @@ the future JIT fallback, section 11), with the externals its CMake build asks fo
 | Commit | `a46601580d5512d324104f985b5f0209dc980ddc` ("Delete redundant add_library alias") |
 | Commit date | 2026-09-26 |
 | Licence | 0BSD ([LICENSE.txt](LICENSE.txt)) |
-| Used by | [dm/tools/aot/CMakeLists.txt](../../tools/aot/CMakeLists.txt) (`add_subdirectory`, tests and docs off) |
+| Used by | [dm/tools/aot/CMakeLists.txt](../../tools/aot/CMakeLists.txt) (`add_subdirectory`, tests and docs off) and [dm/host/CMakeLists.txt](../../host/CMakeLists.txt) (`NXHOST_JIT`: the JIT fallback) |
 
 ## What is copied
 
@@ -27,7 +28,23 @@ the future JIT fallback, section 11), with the externals its CMake build asks fo
 
 Not copied: dynarmic's `tests/`, `docs/` and `README.md`; the externals `catch` (Catch2, tests only), `oaknut` (ARM64 hosts and tests only) and `biscuit` (RISC-V
 hosts only); and every test suite, example, documentation and tool folder of the externals above. Boost, which dynarmic also needs (`boost/icl`, `boost/variant`,
-headers only), is not part of this copy: [dm/tools/aot/README.md](../../tools/aot/README.md) says where it comes from.
+headers only), is not part of this copy: the system's where CMake finds it, else the subset in [../boost](../boost/VENDOR.md) (the host's Windows
+cross-build); [dm/tools/aot/README.md](../../tools/aot/README.md#boost) says more.
+
+## Local changes
+
+Two lines are added, each marked in the file with a comment naming this one. Both are includes the upstream file lacks: a compiler with libc++
+(llvm-mingw's clang 23 for the host's Windows cross-build, `x86_64-w64-mingw32`) stops at them, since libc++ includes fewer of its headers from its
+others than libstdc++ does; with libstdc++ (the Linux images) the same declarations came in through other headers already, so a Linux build compiles
+the same code.
+
+| File | Change | Why |
+|---|---|---|
+| `externals/fmt/include/fmt/format.h` | `#include <stdlib.h>` first in its standard headers | `detail::allocator` calls `malloc` and `free`, which nothing it includes declares: format.h defines `_LIBCPP_REMOVE_TRANSITIVE_INCLUDES` for its own includes, so libc++'s headers bring in no `<stdlib.h>`. fmt's `master` has the same line (since after 11.2.0) |
+| `src/dynarmic/ir/ir_emitter.h` | `#include <vector>` | `IREmitter::VectorTable` takes `std::vector`, which none of its includes declares under libc++ (the fork's `master` still lacks it) |
+
+Moving to another upstream commit: run the command below, then add these lines again where the new files still lack them (a build in the
+llvm-mingw image says so).
 
 ## The command that made the copy
 

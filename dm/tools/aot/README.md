@@ -917,6 +917,9 @@ of the shared objects: no `.eh_frame`, dynamic symbol table, PLT or GOT, but `.p
 of `.pdata`); their code is larger by the home areas, the red zones' frames and the thunks (switch-gcc: `.text` 370,886 bytes against 369,308). Nothing here has loaded a DLL: there is no Windows (or Wine) on the development machine. The
 owner's Windows runner (dm/host/tests/run_win64_tests.ps1) runs `t_aot_host`, `t_aot_module`, `t_aot_hostfn` and `t_host_program` on the DLLs
 [tests/build_packs.sh](tests/build_packs.sh) writes into `<out>/win64` ([docker/README.md](../../../docker/README.md#the-recompiled-corpus-in-the-host)).
+The Windows host has the JIT fallback (dynarmic built by llvm-mingw, Boost from [dm/third_party/boost](../../third_party/boost/VENDOR.md)), so there too
+all 18 corpus programs are expected to run to their output, fp, fiber and except-gcc through the JIT; its fault path on Windows (dynarmic's
+frame-based handler behind the host's vectored one, dm/host/aot_fault.c) is written, not run.
 
 ## Floating point and SIMD
 
@@ -3122,14 +3125,14 @@ dynarmic includes `boost/icl/interval_map.hpp`, `interval_set.hpp`, `boost/varia
 header-only subset made with `bcp`. **Temporary deviation, for the lead to record:** the subset `bcp` makes of those four headers from Boost 1.83
 (Ubuntu 24.04's `libboost-tools-dev`) is 21 MB, over the 15 MB allowed (preprocessor 9.6 MB, mpl 4.7 MB, type_traits 1.3 MB, intrusive 0.96 MB,
 icl 0.8 MB, the rest under 0.7 MB each; `bcp` follows every `#include` of every configuration), so the image installs the distribution's Boost headers
-(`libboost-dev`, in a layer of its own) and there is no `dm/third_party/boost/` yet. An option measured for the decision: the headers this build actually
+(`libboost-dev`, in a layer of its own), and nxaot takes those. An option measured for the decision: the headers this build actually
 includes (`clang -M` over every compile command) are 795 files, 4.2 MB (mpl 224, type_traits 157, preprocessor 110, icl 97, variant 31, range 31);
-such a list is specific to the compilers and configurations it was taken with (MSVC or llvm-mingw may need more of `boost/config` and mpl's
-preprocessed headers).
+such a list is specific to the compilers and configurations it was taken with.
 
-dm/host's JIT fallback (`NXHOST_JIT`, the same dynarmic) needs the same headers, which the host's image (docker/Dockerfile.build) does not have: there
-the host builds without it, and CI builds it in this image. Adding `libboost-dev` to Dockerfile.build in a layer of its own is the follow-up (not done:
-the development machine's disk).
+dm/host's JIT fallback (`NXHOST_JIT`, the same dynarmic) needs the same headers: the Linux images' `libboost-dev` (docker/Dockerfile.build has it too),
+and where CMake finds no Boost, [dm/third_party/boost](../../third_party/boost/VENDOR.md), that list made for both compilers the host is built with
+(clang 18 with libstdc++, llvm-mingw's clang 23 with libc++ for Windows: 795 and 794 headers, the same but for `boost/config`'s platform and library files) with all
+of `boost/config`: 869 files, 4.5 MB. The Windows cross-build takes it (the llvm-mingw image has no Boost), so the Windows host has the JIT fallback too.
 
 ## Lifter coverage
 

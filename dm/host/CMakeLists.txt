@@ -193,15 +193,30 @@ target_compile_options(nxhost PRIVATE ${HOST_FLAGS})
 target_include_directories(nxhost PUBLIC ${GEN} ${PROFILE_DIR} ${REPO}/dm/third_party/stb_vorbis ${REPO}/dm/tools/aot/include)
 target_link_libraries(nxhost PUBLIC nxplat vpx SDL3::SDL3-static)
 # The JIT fallback of the engine (design section 11): dynarmic's A64 JIT behind the C interface of dm/tools/aot/src/rt/jit.h, the glue nxaot's own run time uses
-# (jit.cpp, with the decoder glue it calls). dynarmic needs a C++20 compiler and Boost's headers, which both images have (docker/Dockerfile.build since its Boost layer,
-# Dockerfile.aot), so it is on by default where both are found (the engine is part of every tree this file configures: x86-64, not Apple), off with a configure-time
-# message where they are not (the Windows cross-build image has no Boost): without it, guest code with no compiled entry stops the process with a [RED] line and status 3
-# (aot.h DM_AOT_JIT_NEEDED). -DNXHOST_JIT=ON makes it required (the CI's Linux job), -DNXHOST_JIT=OFF leaves it out.
+# (jit.cpp, with the decoder glue it calls). dynarmic needs a C++20 compiler and Boost's headers: the system's where CMake finds them (the Linux images' libboost-dev:
+# docker/Dockerfile.build since its Boost layer, Dockerfile.aot), else the subset of Boost 1.83.0 in dm/third_party/boost (the headers dynarmic includes and every header
+# they include, with all of boost/config: its VENDOR.md), which the Windows cross-build takes (the llvm-mingw image has no Boost). So it is on by default wherever a C++
+# compiler is found (the engine is part of every tree this file configures: x86-64 Linux and Windows, not Apple), off with a configure-time message where none is:
+# without it, guest code with no compiled entry stops the process with a [RED] line and status 3 (aot.h DM_AOT_JIT_NEEDED). -DNXHOST_JIT=ON makes it required (the CI's
+# Linux and Windows jobs), -DNXHOST_JIT=OFF leaves it out. host_tests.tsv's "# engine:" line says which the tree has.
 # The JIT stops at the packs' gate sites (the observation gates and spin-wait back-edges compiled code calls nxaot_rt_gate at) and aot_run.c serves them as compiled code
 # does; its code is every module's text and aux region (the frame-step stubs). DM_AOT_JIT_ALL=1 runs everything in it (t_aot_module's JIT-forced runs)
 include(CheckLanguage)
 check_language(CXX)
+cmake_path(SET NXHOST_BOOST_SUBSET NORMALIZE ${REPO}/dm/third_party/boost)
 find_package(Boost 1.57 QUIET)
+if(NOT Boost_FOUND)
+    # The subset: CMake's FindBoost, which dynarmic's own find_package(Boost) runs too, takes a Boost_INCLUDE_DIR that holds boost/version.hpp as found (Boost::boost then
+    # names it). Kept in the cache, so a reconfigure finds it first; -DBoost_INCLUDE_DIR=<folder> names another Boost
+    set(Boost_INCLUDE_DIR ${NXHOST_BOOST_SUBSET} CACHE PATH "Boost's headers (the subset vendored for dynarmic: dm/third_party/boost/VENDOR.md)" FORCE)
+    find_package(Boost 1.57 QUIET)
+endif()
+cmake_path(SET nxhost_boost_dir NORMALIZE "${Boost_INCLUDE_DIR}")   # FindBoost keeps the folder normalized ("/src/" + "/dm/..." is not)
+if(Boost_FOUND AND nxhost_boost_dir STREQUAL NXHOST_BOOST_SUBSET)
+    set(NXHOST_BOOST_FROM "the subset in dm/third_party/boost")
+else()
+    set(NXHOST_BOOST_FROM "the one find_package found")
+endif()
 if(CMAKE_CXX_COMPILER AND Boost_FOUND)
     set(NXHOST_JIT_DEFAULT ON)
 else()
@@ -210,15 +225,16 @@ endif()
 option(NXHOST_JIT "x86-64 execution engine: build the JIT fallback (dynarmic; needs C++20 and Boost's headers)" ${NXHOST_JIT_DEFAULT})
 if(NOT NXHOST_JIT)
     message(STATUS "NXHOST_JIT off (C++ compiler: '${CMAKE_CXX_COMPILER}', Boost found: ${Boost_FOUND}): no JIT fallback; guest code with no compiled entry stops the "
-                   "process with status 3 (docker/Dockerfile.build has what the JIT needs)")
+                   "process with status 3 (the JIT needs a C++20 compiler; Boost's headers are the system's or dm/third_party/boost)")
 endif()
 if(NXHOST_JIT)
     enable_language(CXX)
     find_package(Boost 1.57)
     if(NOT Boost_FOUND)
-        message(FATAL_ERROR "NXHOST_JIT needs Boost's headers (dynarmic includes boost/icl and boost/variant): build in the nxnative-build or nxnative-aot image (docker/)")
+        message(FATAL_ERROR "NXHOST_JIT needs Boost's headers (dynarmic includes boost/icl and boost/variant): neither the system's nor the subset in dm/third_party/boost "
+                            "(Boost_INCLUDE_DIR: '${Boost_INCLUDE_DIR}') was found")
     endif()
-    message(STATUS "NXHOST_JIT on: the JIT fallback (dynarmic) with Boost ${Boost_VERSION} and ${CMAKE_CXX_COMPILER}")
+    message(STATUS "NXHOST_JIT on: the JIT fallback (dynarmic) with Boost ${Boost_VERSION} (${NXHOST_BOOST_FROM}) and ${CMAKE_CXX_COMPILER}")
     set(DYNARMIC_TESTS OFF CACHE BOOL "" FORCE)
     set(DYNARMIC_WARNINGS_AS_ERRORS OFF CACHE BOOL "" FORCE)
     set(DYNARMIC_USE_PRECOMPILED_HEADERS OFF CACHE BOOL "" FORCE)
@@ -260,6 +276,11 @@ string(TIMESTAMP configured "%Y-%m-%dT%H:%M:%SZ" UTC)
 set(MANIFEST "# nxnative host unit tests, written by dm/host/CMakeLists.txt: name<TAB>executable<TAB>arguments<TAB>tmpdir\n")
 string(APPEND MANIFEST "# platform: ${LOG_PLATFORM}\n# system: ${CMAKE_SYSTEM_NAME} ${CMAKE_SYSTEM_PROCESSOR}\n# compiler: ${CMAKE_C_COMPILER_ID} ${CMAKE_C_COMPILER_VERSION} (${CMAKE_C_COMPILER})\n")
 string(APPEND MANIFEST "# game: ${GAME}\n# configured: ${configured}\n")
+if(NXHOST_JIT)   # the engine the AOT tests run (the runners copy these lines into summary.txt)
+    string(APPEND MANIFEST "# engine: the packs with the JIT fallback (NXHOST_JIT on: dynarmic, Boost ${Boost_VERSION}, ${NXHOST_BOOST_FROM})\n")
+else()
+    string(APPEND MANIFEST "# engine: the packs without the JIT fallback (NXHOST_JIT off): guest code with no compiled entry stops with status 3\n")
+endif()
 # The tests that are scripts (a Python driver, a shell script) rather than test programs, for the same runners: host_scripts.tsv, written by host_script_test() below
 # beside host_tests.tsv (whose rows stay as they are). One line per test, tab-separated: name, interpreter (python3 or sh), script (from the repository root), arguments
 # (separated by spaces; "" is an empty argument), environment (VAR=value, separated by spaces), the variables it reads from the runner's environment (separated by

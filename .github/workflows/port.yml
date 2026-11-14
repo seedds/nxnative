@@ -172,10 +172,11 @@ jobs:
         with:
           persist-credentials: false
       - name: Configure and build (build/win64)
-        # The toolchain file by its absolute path in the container: CMake looks for a relative one in the build folder, then in dm/host
+        # The toolchain file by its absolute path in the container: CMake looks for a relative one in the build folder, then in dm/host. NXHOST_JIT=ON: the JIT fallback
+        # required, as in the Linux job (Boost's headers from dm/third_party/boost: the image has none)
         run: |
           docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -v "$(pwd):/src" -w /src "$MINGW_IMAGE" sh -c \
-            "cmake -S dm/host -B build/win64 -G Ninja -DGAME=$GAME -DNXHOST_PROGRAM=ON -DNXHOST_LAUNCHER=ON -DCMAKE_TOOLCHAIN_FILE=/src/dm/host/cmake/x86_64-w64-mingw32.cmake && cmake --build build/win64 --target all nxhost-run nxlauncher"
+            "cmake -S dm/host -B build/win64 -G Ninja -DGAME=$GAME -DNXHOST_PROGRAM=ON -DNXHOST_LAUNCHER=ON -DNXHOST_JIT=ON -DCMAKE_TOOLCHAIN_FILE=/src/dm/host/cmake/x86_64-w64-mingw32.cmake && cmake --build build/win64 --target all nxhost-run nxlauncher"
       # The .exe files are linked statically: they import only Windows' own DLLs (KERNEL32, bcrypt and the UCRT; with SDL3 also USER32, GDI32 and other system DLLs: docker/README.md), so no DLL goes with them.
       # nxhost-run.exe and nxlauncher.exe go with the tests: t_host_program and t_launcher_window look for them beside themselves
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

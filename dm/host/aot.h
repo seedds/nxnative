@@ -426,6 +426,8 @@ void crash_install(void);                  // the fault handlers (signals on POS
 void crash_thread_init(void);              // the calling thread's alternate signal stack (POSIX) or stack guarantee (Windows)
 void dm_aot_fault_after_jit(void);         // after the first JIT instance, on its thread: the host's handler again in front of dynarmic's (5.4's order), and the thread's
                                            // own alternate stack again in place of the one dynarmic installed and frees at exit (docs/reference/threads.md)
+                                           // (POSIX; on Windows nothing: dynarmic's handler there is frame-based, a function table over its code cache, and it
+                                           // takes no alternate stack: aot_fault.c)
 
 // ---------- The thread layer's side (hle_thread.c, x86-64 only) ----------
 int thr_safepoint(void);                   // a poll found the poll byte set: wait here while SetThreadActivity pauses this thread; 1 when it waited

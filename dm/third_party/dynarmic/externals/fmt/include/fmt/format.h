@@ -41,6 +41,7 @@
 #include "base.h"
 
 #ifndef FMT_MODULE
+#  include <stdlib.h>  // malloc, free (a local change, as fmt's master has it: dm/third_party/dynarmic/VENDOR.md)
 #  include <cmath>    // std::signbit
 #  include <cstddef>  // std::byte
 #  include <cstdint>  // uint32_t

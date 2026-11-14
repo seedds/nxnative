@@ -5,6 +5,8 @@
 
 #pragma once
 
+#include <vector>  // a local change: dm/third_party/dynarmic/VENDOR.md
+
 #include <mcl/stdint.hpp>
 
 #include "dynarmic/ir/acc_type.h"

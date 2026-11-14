@@ -8,7 +8,7 @@
 // as a [RED] line, and the process stops (status DM_AOT_FAULT). Anything else is a host crash, reported and ended with exit status 128 + the signal, as crash.c
 // ends one on Apple.
 // Linux: sigaction on the thread's alternate stack. Windows: a vectored exception handler, which redirects a guest fault to an ordinary frame that leaves; it
-// passes every other exception on (written, not run here: neither a Windows machine nor a Windows pack exists yet)
+// passes every other exception on, dynarmic's fastmem faults included, whose handler is frame-based (below) (written, not run here: no Windows machine)
 #include "aot.h"
 #if defined(_WIN32)
 #include <windows.h>
@@ -254,7 +254,15 @@ static void alt_own(void) {
 
 #else
 // ---------- Windows ----------
-static PVOID g_veh;
+// The order of 5.4 on Windows, with the JIT fallback (NXHOST_JIT). The system's dispatcher (RtlDispatchException) calls every vectored handler before any frame-based
+// one. This vectored handler, registered first (AddVectoredExceptionHandler(1, ...)): the hooks, then a guest fault (a pack's code, or an access a JIT callback makes:
+// dm_jit_access_pc) leaves through fault_leave; anything else goes on. dynarmic's handler is frame-based: each JIT instance registers a function table over its code
+// cache with an exception handler of its own (RtlAddFunctionTable; third_party/dynarmic backend/x64/exception_handler_windows.cpp), which the dispatcher reaches only
+// when this handler passed the fault on and the faulting rip lies in that cache: a fastmem access the arena does not back, which it sends to the JIT's memory
+// callbacks (jit.cpp halts there and steps the instruction again with the access made by a callback: a fault then is this handler's, at dm_jit_access_pc). A write to
+// a page the dirty tracker protects reaches the hooks here first, from JIT code too, as on Linux. The frame-based search walks the thread's own stack within its TEB
+// limits, which the JIT's frames are on (guest threads run on their host thread's native stack, aot_thread.c). Written from the Windows documentation, not run here
+// (no Windows machine): dm/host/tests/run_win64_tests.ps1's AOT tests are the check (t_aot_host's corpus programs that need the JIT, t_aot_module's JIT-forced runs)
 static void fault_leave(void) {   // the context of a guest fault resumes here, an ordinary frame on the thread's stack
     dm_aot_thread *t = dm_aot_self();
     t->left = DM_AOT_LEFT_FAULT;
@@ -270,27 +278,33 @@ static LONG CALLBACK on_exception(EXCEPTION_POINTERS *e) {
     }
     const int sig = code == EXCEPTION_ACCESS_VIOLATION || code == EXCEPTION_IN_PAGE_ERROR || code == EXCEPTION_STACK_OVERFLOW ? 11
                   : code == EXCEPTION_ILLEGAL_INSTRUCTION || code == EXCEPTION_PRIV_INSTRUCTION ? 4 : code == EXCEPTION_INT_DIVIDE_BY_ZERO ? 8 : 0;
+    uint64_t jit_pc = 0;
+#if NXHOST_JIT
+    // Nonzero only while a JIT callback makes a guest access on this thread (jit.cpp Access .. the access): a fastmem fault in dynarmic's code cache comes with 0
+    // and goes on to dynarmic's frame-based handler below (unrun on Windows)
+    jit_pc = dm_jit_access_pc();
+#endif
     dm_aot_thread *t = dm_aot_self();
-    if (sig && t && t->depth && dm_aot_pack_of_code(pc)) {
-        t->fault_signal = sig; t->fault_pc = pc; t->fault_jit_pc = 0;
+    if (sig && t && t->depth && (dm_aot_pack_of_code(pc) || jit_pc)) {
+        t->fault_signal = sig; t->fault_pc = pc; t->fault_jit_pc = jit_pc;
         t->fault_address = code == EXCEPTION_ACCESS_VIOLATION && e->ExceptionRecord->NumberParameters >= 2 ? (uint64_t)e->ExceptionRecord->ExceptionInformation[1] : 0;
         DWORD64 sp = (e->ContextRecord->Rsp - 512) & ~(DWORD64)15;
         e->ContextRecord->Rsp = sp - 8;   // as after a call: fault_leave's frame aligned as the ABI expects
         e->ContextRecord->Rip = (DWORD64)(uintptr_t)fault_leave;
         return EXCEPTION_CONTINUE_EXECUTION;
     }
-    return EXCEPTION_CONTINUE_SEARCH;   // dynarmic's handler for its code cache, a system DLL's own handler, or the process's unhandled-exception path
+    return EXCEPTION_CONTINUE_SEARCH;   // dynarmic's frame-based handler for its code cache, a system DLL's own handler, or the process's unhandled-exception path
 }
-static void install_once(void) { g_veh = AddVectoredExceptionHandler(1, on_exception); watch_install(); }
+static void install_once(void) { AddVectoredExceptionHandler(1, on_exception); watch_install(); }
 void crash_install(void) {
     static pthread_once_t once = PTHREAD_ONCE_INIT;
     pthread_once(&once, install_once);
     crash_thread_init();
 }
-void dm_aot_fault_after_jit(void) {   // vectored handlers registered first run first: this one again in front of dynarmic's
-    if (g_veh) RemoveVectoredExceptionHandler(g_veh);
-    g_veh = AddVectoredExceptionHandler(1, on_exception);
-}
+// Nothing to put back on Windows (unrun there): dynarmic registers no vectored handler and changes nothing of the thread's (no alternate stack), so this handler
+// stays in front of its frame-based one by the dispatcher's order (above). Taking this handler off and adding it again, as the Linux branch reinstalls its
+// sigaction, would leave a moment in which a fault on another thread (a write to a tracked page) found no handler at all
+void dm_aot_fault_after_jit(void) {}
 void crash_thread_init(void) {
     ULONG guarantee = 65536;   // stack kept for the handler when a guest recursion overflows the thread's stack
     SetThreadStackGuarantee(&guarantee);

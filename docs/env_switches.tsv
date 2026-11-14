@@ -201,6 +201,7 @@ DM_NVN_LOADPROBE	diagnostic	`=1`, `2` or `3`: attachments whose load is skipped 
 DM_NVN_LOG	diagnostic	`=1` logs the creation of NVN objects
 DM_NVN_MAGSCAN	diagnostic	`=<fs key>[:every[:phase]]`: device self-check that reads each pass's colour attachments every `every` frames (default 30) and logs `[mag]` lines for solid magenta 16×16 blocks or non-finite pixels
 DM_NVN_MDX_PRESCAN	switch	`0` copies an indirect-count multi-draw's records at its own first draw, which splits a render pass an earlier draw opened; by default the draw that opens a pass copies those of the multi-draws after it first (ab with DM_AB)
+DM_NVN_MFX_DIRECT	switch	`0` copies the game's colour into MetalFX's RGBA16F input (DM_UPSCALER=metalfx) unless it is RGBA16F; by default an input that is the whole rectangle MetalFX reads is taken in its own format (ab with DM_AB)
 DM_NVN_PARTIAL_UPLOAD	switch	`0` reads a texture whole from its storage at every re-upload; by default a re-upload reads only the images (a layer's level) with a page written since the last upload and copies the others from the texture it replaces
 DM_NVN_PASSDUMP	diagnostic	`=<f>`, `<f1>-<f2>` or `every:<n>`: logs every render pass of those frames (attachments, clears, shader keys, bindings, draw state, presents, and the host function and line that ended each pass) for the `tbdr_*.py` tools
 DM_NVN_PASSDUMP_ALL	diagnostic	`=1` makes `DM_NVN_PASSDUMP` record every draw and binding change, not only the first per pass and stage, including copies and inline uniform updates
@@ -268,7 +269,6 @@ DM_NVN_VCONV_CHECK	diagnostic	`=1` scans the indices again at every reuse of a c
 DM_NVN_VCONV_CPU	switch	`=1` converts integer vertex inputs fed formats of another class on the CPU, as before, instead of through the shader's shadow inputs (`<key>_bv`)
 DM_NVN_VCONV_KEEP	switch	`=0` turns off the kept vertex conversions (`vk_get`); `=<n>` sets the smallest range kept, in vertices (default 4096, which `=1` also gives)
 DM_NVN_VCONV_RANGE	switch	`0` / `1` overrides the profile's `vconv_range`: CPU vertex conversion only over the vertices each draw reads instead of the whole bound range
-DM_NVN_VC_KEEP	switch	`1` (default) keeps the texture-view set of a finalized texture that a registered ID still resolves through the ghost table, until the owner lets the serial go (vc_ghost_sweep, at the first commit of each frame); `0` refuses such sets, so each submission that reads the ID makes its view again; `ab` alternates it with the DM_AB phases
 DM_NVN_VLOG	diagnostic	Set: logs each NVN memory pool as it is created (address, memory, size, flags) with a backtrace
 DM_NVN_VSDUMP	path	Output file for post-vertex captures; used with DM_NVN_VSDUMP_KEY and the frame/count bounds
 DM_NVN_VSDUMP_FROM	diagnostic	First presented frame eligible for a post-vertex capture (default 0)

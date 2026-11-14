@@ -68,6 +68,15 @@ namespace Ryujinx.Graphics.Shader.Instructions
             x(0x593, InstName.Suatom, ASuatom, N);
             x(0x595, InstName.Suatom, ASuatomCas, N);
             x(0x59f, InstName.Sured, ASured, N, writesRd: false);
+            // The same seven with the handle in a register (64..72) instead of a constant buffer word: each 0x1ff below its bound form (Mesa NAK encodes only these, its
+            // sm70_encode OpSuLd 0x998 / 0x99a, OpSuSt 0x99c / 0x99e, OpSuAtom 0x394 / 0x396 and 0x3a0), its other fields the bound form's (ASurfaceHandle)
+            x(0x998, InstName.Suld, ASurface, N);
+            x(0x99a, InstName.Suld, ASurface, N);
+            x(0x99c, InstName.Sust, ASurface, N, writesRd: false);
+            x(0x99e, InstName.Sust, ASurface, N, writesRd: false);
+            x(0x394, InstName.Suatom, ASuatom, N);
+            x(0x396, InstName.Suatom, ASuatomCas, N);
+            x(0x3a0, InstName.Sured, ASured, N, writesRd: false);
             x(0xb1d, InstName.Bar, ABar, N, writesRd: false);
         }
 
@@ -627,24 +636,40 @@ namespace Ryujinx.Graphics.Shader.Instructions
 
         // ---- surfaces ----
 
+        // A surface instruction's handle. The bound forms (0xb97..0xb9d, 0x593, 0x595, 0x59f) name its constant buffer word as a texture's (40..59). The register
+        // forms, 0x1ff below them, hold it in the register at 64..72 (Rc), and bindless elimination finds the word the register was loaded from, as for TEX through
+        // a register. Orbitals' (Unreal Engine 5.6) global compute shaders take an Unreal ShaderPrint counter with SUATOM.ADD.U32 on a 1D buffer image whose handle a MOV
+        // read from c[3][0] (45389d82b79dbf0c +0x1850: MOV R12, c[3][0]; MOV R20, R12; SUATOM R12, [R12], R24, R20); 5 shaders stopped at the opcode.
+        private static (int Handle, int CbufSlot, bool Bindless) ASurfaceHandle(EmitterContext context, AmpereOp x)
+        {
+            if (x.Opcode is 0x394 or 0x396 or 0x3a0 or 0x998 or 0x99a or 0x99c or 0x99e)
+            {
+                return (0, TextureOperation.DefaultCbufSlot, true);
+            }
+
+            (int handle, int cbufSlot) = ATexHandle(context, x);
+
+            return (handle, cbufSlot, false);
+        }
+
         // SULD Rd, [Ra] (0xb97 formatted with a channel mask at 72..76, 0xb99 binary with a size at 73..76) and SUST [Ra], Rb (0xb9b, 0xb9d): the handle as
-        // a texture's (40..59), the dimension at 61..64 (1D, 1D buffer, 1D array, 2D, 2D array, 3D: Maxwell's SuDim)
+        // a texture's (40..59), the dimension at 61..64 (1D, 1D buffer, 1D array, 2D, 2D array, 3D: Maxwell's SuDim). 0x998..0x99e: the same with the handle in Rc
         public static void ASurface(EmitterContext context)
         {
             AmpereOp x = new(context.CurrOp);
-            (int handle, int cbufSlot) = ATexHandle(context, x);
-            bool formatted = x.Opcode is 0xb97 or 0xb9b;
+            (int handle, int cbufSlot, bool bindless) = ASurfaceHandle(context, x);
+            bool formatted = x.Opcode is 0xb97 or 0xb9b or 0x998 or 0x99c;
             SuDim dim = (SuDim)x.Bits(61, 64);
             SuSize size = formatted ? 0 : (SuSize)x.Bits(73, 76);
             SuRgba mask = formatted ? (SuRgba)x.Bits(72, 76) : 0;
 
-            if (x.Opcode is 0xb97 or 0xb99)
+            if (x.Opcode is 0xb97 or 0xb99 or 0x998 or 0x99a)
             {
-                EmitSuld(context, CacheOpLd.Ca, dim, size, handle, mask, x.Ra, x.Rd, 0, formatted, false, false, cbufSlot);
+                EmitSuld(context, CacheOpLd.Ca, dim, size, handle, mask, x.Ra, x.Rd, x.Rc, formatted, false, bindless, cbufSlot);
             }
             else
             {
-                EmitSust(context, CacheOpSt.Wb, dim, size, handle, mask, x.Ra, x.Rb, 0, formatted, false, false, cbufSlot);
+                EmitSust(context, CacheOpSt.Wb, dim, size, handle, mask, x.Ra, x.Rb, x.Rc, formatted, false, bindless, cbufSlot);
             }
         }
 
@@ -657,38 +682,41 @@ namespace Ryujinx.Graphics.Shader.Instructions
             AmpereOp x = new(context.CurrOp);
             int size = x.Bits(73, 76);   // 0 U32, 2 U64 (SuatomSize)
 
-            if ((x.Bits(64, 96) & ~(0xf << 23) & ~(0x7 << 9)) != 0x0010e000 || x.Bits(59, 61) != 0 || (size != 0 && size != (int)SuatomSize.U64))
+            int handleReg = x.Opcode == 0x3a0 ? 0xff : 0;   // 64..72: the register form's handle
+
+            if ((x.Bits(64, 96) & ~(0xf << 23) & ~(0x7 << 9) & ~handleReg) != 0x0010e000 || x.Bits(59, 61) != 0 || (size != 0 && size != (int)SuatomSize.U64))
             {
                 throw AFail(context, $"SURED form {x.Bits(64, 96):x8}");
             }
 
-            (int handle, int cbufSlot) = ATexHandle(context, x);
+            (int handle, int cbufSlot, bool bindless) = ASurfaceHandle(context, x);
 
             // U64 (PRAGMATA's visibility buffer, SURED.D.2D.MAX.U64: depth << 32 | primitive id, 336 compute shaders): a 64-bit max / min with no result, which EmitSuatom writes as Metal's
             // 64-bit texture atomics (it refuses every other 64-bit form). The value is the pair Rb (low word), Rb + 1. After uncraftablexd's PRAGMATA bring-up (PR #1801)
             if (size == (int)SuatomSize.U64)
             {
-                EmitSuatom(context, (SuDim)x.Bits(61, 64), 0, (SuatomOp)x.Bits(87, 91), SuatomSize.U64, handle, x.Ra, x.Rb, 0, RegisterConsts.RegisterZeroIndex, false, isBindless: false, compareAndSwap: false, cbufSlot: cbufSlot);
+                EmitSuatom(context, (SuDim)x.Bits(61, 64), 0, (SuatomOp)x.Bits(87, 91), SuatomSize.U64, handle, x.Ra, x.Rb, x.Rc, RegisterConsts.RegisterZeroIndex, false, isBindless: bindless, compareAndSwap: false, cbufSlot: cbufSlot);
                 return;
             }
 
-            EmitSured(context, (SuDim)x.Bits(61, 64), 0, (RedOp)x.Bits(87, 91), SuatomSize.U32, handle, x.Ra, x.Rb, 0, false, isBindless: false, cbufSlot: cbufSlot);
+            EmitSured(context, (SuDim)x.Bits(61, 64), 0, (RedOp)x.Bits(87, 91), SuatomSize.U32, handle, x.Ra, x.Rb, x.Rc, false, isBindless: bindless, cbufSlot: cbufSlot);
         }
 
         // SUATOM Rd, [Ra], Rb (0x593): an atomic on an image through a handle, laid out as SUST's (handle 40..59, dimension 61..64) and as ATOMG's (operation
         // 87..91, size 73..76, Pu 81..83). Donkey Kong Bananza's append compute shaders take a counter with it (SUATOM.ADD.U32 on a 1D image, the old value
         // shuffled to the warp) before their SUST. The handle may be in the game's own uniform buffer, as a texture's. A predicate result is not met in a game: refused.
+        // 0x394: the handle in Rc (ASurfaceHandle)
         public static void ASuatom(EmitterContext context)
         {
             AmpereOp x = new(context.CurrOp);
-            (int handle, int cbufSlot) = ATexHandle(context, x);
+            (int handle, int cbufSlot, bool bindless) = ASurfaceHandle(context, x);
 
             if (x.Bits(81, 84) != 7)
             {
                 throw AFail(context, "SUATOM with a predicate result");
             }
 
-            EmitSuatom(context, (SuDim)x.Bits(61, 64), 0, (SuatomOp)x.Bits(87, 91), (SuatomSize)x.Bits(73, 76), handle, x.Ra, x.Rb, 0, x.Rd, false, isBindless: false, compareAndSwap: false, cbufSlot: cbufSlot);
+            EmitSuatom(context, (SuDim)x.Bits(61, 64), 0, (SuatomOp)x.Bits(87, 91), (SuatomSize)x.Bits(73, 76), handle, x.Ra, x.Rb, x.Rc, x.Rd, false, isBindless: bindless, compareAndSwap: false, cbufSlot: cbufSlot);
         }
 
         // BAR.SYNC: the workgroup barrier
@@ -708,18 +736,18 @@ namespace Ryujinx.Graphics.Shader.Instructions
 
         // SUATOM.CAS Rd, [Ra], Rb (0x595): the compare-and-swap of an image through a handle, 0x593's layout with no operation field. Rb is the value compared with and
         // Rb + 1 the new value (Mesa NAK: opcode 0x396 for AtomOp::CmpExch beside 0x394, as 0x593 is beside 0x394 with the handle bound; its data source is the pair
-        // {compare, new value}), which is the order EmitSuatom reads them in. Rd is the old value (PRAGMATA: compute shader 50fece0d891feba4, Rd = RZ)
+        // {compare, new value}), which is the order EmitSuatom reads them in. Rd is the old value (PRAGMATA: compute shader 50fece0d891feba4, Rd = RZ). 0x396: the handle in Rc
         public static void ASuatomCas(EmitterContext context)
         {
             AmpereOp x = new(context.CurrOp);
-            (int handle, int cbufSlot) = ATexHandle(context, x);
+            (int handle, int cbufSlot, bool bindless) = ASurfaceHandle(context, x);
 
             if (x.Bits(81, 84) != 7)
             {
                 throw AFail(context, "SUATOM.CAS with a predicate result");
             }
 
-            EmitSuatom(context, (SuDim)x.Bits(61, 64), 0, 0, (SuatomSize)x.Bits(73, 76), handle, x.Ra, x.Rb, 0, x.Rd, false, isBindless: false, compareAndSwap: true, cbufSlot: cbufSlot);
+            EmitSuatom(context, (SuDim)x.Bits(61, 64), 0, 0, (SuatomSize)x.Bits(73, 76), handle, x.Ra, x.Rb, x.Rc, x.Rd, false, isBindless: bindless, compareAndSwap: true, cbufSlot: cbufSlot);
         }
 
         // Texture dimension (61..64) → Maxwell's TexDim

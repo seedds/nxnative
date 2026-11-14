@@ -69,6 +69,7 @@ General host changes first needed here; each applies to every game:
 - **Rewriter:** text before the first FDE as one function (`func_of`) and long functions analysed in pieces (`pieces`): [Code before the first unwind entry is one function](../../../docs/reference/rewriter.md#code-before-the-first-unwind-entry-is-one-function), [Long functions analysed in pieces](../../../docs/reference/rewriter.md#long-functions-analysed-in-pieces).
 - **Bindless reads through a phi that also carries non-handle values** (the vendored translator's `TryTableHandle`): [Bindless reads whose handle phi also carries other values](../../../docs/reference/shaders.md#bindless-reads-whose-handle-phi-also-carries-other-values).
 - **Buffer textures below the 16-byte alignment, read in place through an offset table** (`tbuf_lead`; an aligned copy, `tbuf_shadow`, before): [Buffer textures at offsets below 16 bytes](../../../docs/reference/rendering.md#buffer-textures-at-offsets-below-16-bytes).
+- **Buffer textures shared by storage** (`nvn_mtl.m` `tex_buffer`, `tbuf_usage`): on an iPhone 15 Pro Max, about 79,000 buffer-texture views added to and removed from the residency set every 300 frames of play, 235 ms of residency commits per 300 frames (GitHub issue #2423): [Transient buffer textures shared by storage](../../../docs/reference/rendering.md#transient-buffer-textures-shared-by-storage). Not run on this game since.
 
 ## Open
 

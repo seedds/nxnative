@@ -271,6 +271,13 @@ static void *ctl_main(void *arg) {
                     dm_touch_script(NULL, 0); continue;
                 }
                 key_step st = {0, 0.15, 0}; char *h = strchr(line, '~'); if (h) { *h = 0; st.hold = atof(h + 1); }
+                if (line[0] == 'P' && line[1] >= '2' && line[1] <= '0' + DM_PLAYERS && line[2] == ' ') {   // P<n> <keys>: player n's controller, for games that need a second player (Orbitals)
+                    void dm_pad_script_player(int p); int p = line[1] - '1'; dm_pad_script_player(p);
+                    parse_keys(line + 3, &st);
+                    LOG("DM_CTL: player %d press %#llx (hold %.2f s)", p + 1, (unsigned long long)st.btn, st.hold);
+                    dm_pad_set_player(p, st.btn, st.lx, st.ly, st.rx, st.ry); usleep((useconds_t)(st.hold * 1e6)); dm_pad_set_player(p, 0, 0, 0, 0, 0);
+                    continue;
+                }
                 parse_keys(line, &st);
                 LOG("DM_CTL: press %#llx (hold %.2f s)", (unsigned long long)st.btn, st.hold);
                 if (st.tap) { dm_touch t = {0, st.tx, st.ty}; dm_touch_script(&t, 1); }
@@ -431,8 +438,16 @@ static void note_merged(void) {   // logs the players the game does not see, whe
         else LOG("hid: player %d's controller is not used: the game supports no npad %d", p + 1, p);
     }
 }
+// Players a DM_CTL "P<n> <keys>" line connected (a scripted controller, kept connected from its first press on): ORed into the front end's mask, so a front end's change does not drop them
+static _Atomic uint32_t g_script_players, g_front_players = 1;
+void dm_pad_script_player(int p) {
+    if (p <= 0 || p >= DM_PLAYERS || atomic_fetch_or(&g_script_players, 1u << p) >> p & 1) return;
+    LOG("DM_CTL: player %d's scripted controller connected", p + 1);
+    void dm_pad_players(uint32_t mask); dm_pad_players(atomic_load(&g_front_players));
+}
 void dm_pad_players(uint32_t mask) {
-    mask = (mask | 1u) & ((1u << DM_PLAYERS) - 1);
+    atomic_store(&g_front_players, mask);
+    mask = (mask | 1u | atomic_load(&g_script_players)) & ((1u << DM_PLAYERS) - 1);
     uint32_t old = atomic_exchange(&g_players, mask);
     atomic_fetch_and(&g_benched, mask);   // a controller that went away is no longer left out: the next one on its slot is a player until the applet says otherwise
     for (int p = 1; p < DM_PLAYERS; p++) if ((old ^ mask) >> p & 1 && !(mask >> p & 1)) dm_pad_set_player(p, 0, 0, 0, 0, 0);   // a controller that went away leaves nothing pressed

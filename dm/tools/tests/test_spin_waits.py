@@ -48,6 +48,41 @@ def patched(**at):
 
 
 class SpinWaits(unittest.TestCase):
+    def test_lock_poll_without_clrex(self):
+        # The same poll as Breath of the Wild 1.6.0's compiler writes it (main+0x12c0e48): the acquire's failed test and the release's failed compare go straight back to
+        # the exclusive load (0x18 cbnz w14, L1; 0x74 b.ne U), no clrex; two nops keep the branches below in place
+        w = patched(o18=0x35ffffee, o1c=0x880e7d2a, o20=0x35ffffae, o24=0xd503201f, o28=0xd503201f, o74=0x54ffffc1)
+        g = region(w, 0, [0x80])
+        self.assertIsNotNone(g)
+        self.assertEqual(g['valid'], {0x80})
+        self.assertNotIn(0x5c, g['R'])
+        # no release on the path that skips it; a release of another address; a failed store retried somewhere else than its load
+        for off, word in [(0x4c, 0x540001a1), (0x78, 0x880ffd5f), (0x20, 0x35ffff8e)]:
+            broken = list(w); broken[off // 4] = word
+            self.assertIsNone(region(broken, 0, [0x80]))
+
+    def test_lock_wait_without_poll(self):
+        # A lock that heads no poll: its own retry loop waits for the holder, a spin wait as before the lock rules (Mario vs. Donkey Kong's locks, main+0x470fa8)
+        #   0x00 L: ldaxr w8, [x0] / cbnz w8, L / stxr w9, w10, [x0] / cbnz w9, L / ret
+        acq = [0x885ffc08, 0x35ffffe8, 0x88097c0a, 0x35ffffa9, 0xd65f03c0]
+        g = region(acq, 0, [0x4, 0xc])
+        self.assertEqual((g['valid'], g['R']), ({0x4}, [0x0, 0x4]))
+        #   0x00 U: ldxr w8, [x0] / cmp w8, #1 / b.ne U / stlxr w9, wzr, [x0] / cbnz w9, U / ret
+        rel = [0x885f7c08, 0x7100051f, 0x54ffffc1, 0x8809fc1f, 0x35ffff89, 0xd65f03c0]
+        g = region(rel, 0, [0x8, 0x10])
+        self.assertEqual((g['valid'], g['R']), ({0x8}, [0x0, 0x4, 0x8]))
+
+    def test_lock_poll_headed_by_its_acquire(self):
+        # The acquire is the poll's head: the poll is the region, the acquire's own branches back stay inside it
+        #   0x00 T: ldaxr w8, [x0] / cbnz w8, T / stxr w9, w10, [x0] / cbnz w9, T
+        #   0x10    ldr w11, [x1]
+        #   0x14 U: ldxr w8, [x0] / cmp w8, #1 / b.ne U / stlxr w9, wzr, [x0] / cbnz w9, U
+        #   0x28    cbz w11, T / ret
+        w = [0x885ffc08, 0x35ffffe8, 0x88097c0a, 0x35ffffa9, 0xb940002b, 0x885f7c08, 0x7100051f, 0x54ffffc1, 0x8809fc1f, 0x35ffff89, 0x34fffecb, 0xd65f03c0]
+        g = region(w, 0, [0x4, 0xc, 0x28])
+        self.assertEqual(g['valid'], {0x28})
+        self.assertEqual(region(w, 0x14, [0x1c, 0x24])['valid'], {0x1c})   # the release's retry loop is still a spin wait of its own
+
     def test_lock_poll_is_a_wait(self):
         g = region(POLL, 0, [0x80])
         self.assertIsNotNone(g)

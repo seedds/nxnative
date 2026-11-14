@@ -46,6 +46,12 @@ There is no game-specific patch and no rewriter cut. Everything else it needed i
 - The game reads motion through the SDK's sensor fusion (`hid::UpdateSensorFusion` → `GetNpadImuSamples`) and supports Handheld | JoyDual only, so the keyboard, a DualSense or a single Joy-Con is shown to it as a Joy-Con pair ([The Npad IMU sample holds the acceleration first](../../../docs/reference/services.md#the-npad-imu-sample-holds-the-acceleration-first), [A controller in a style the game does not support](../../../docs/reference/services.md#a-controller-in-a-style-the-game-does-not-support)).
 - Without a motion controller a point cannot be played. `Shake` does not serve; nor did any of ten scripted moves of bymaxmarc's [PR #2386](https://github.com/seedds/nxnative/pull/2386) (swings about ±x, ±y, ±z and a lift, in one 60 s and one 90 s run): the racket follows them, and the serve prompt stays.
 
+## Miis
+
+- The game mounts the Switch 2's Mii model data, system data `0400000000000849`, as `MiiResource:`. The host refused it (`[RED] fs mount system data MiiResource: the host has no 0400000000000849`), and bymaxmarc's session of 2026-11-11 ended 3.7 minutes in, in two-player Avioneta (frame 10,065), with a guest crash reading address 0xc at `main+0x1cdcfb4`: the game's Mii code read a part size through the archive's null file pointer. The host now serves its Mii stand-in there ([The Switch 2's Mii model archive](../../../docs/reference/services.md#the-switch-2s-mii-model-archive)); Mii heads build and draw nothing.
+- With every texture part of that stand-in empty (size 0), a two-player skate session of 2026-11-12 ended 193 s in, on leaving the practice zone, with `CRASH sig=11 addr=0xc pc=h_nvnTextureGetFlags+0`, `x0=0`: a renderer of the game's Mii models (`main+0x3fbb420`) registered the model's texture 1, whose part the stand-in had left out, and got a null texture ([A Mii part the stand-in leaves out](../../../docs/reference/services.md#a-mii-part-the-stand-in-leaves-out)). Every texture part of the stand-in is now one blank texture.
+- With both, a player played an 11-minute session on an M2 Max on 2026-11-12, two-player skate (the practice zone, then leaving it) and two-player Avioneta, with no crash. The crashes need a second player, which `DM_KEYS` and `DM_CTL` cannot drive, so no scripted run reproduces them.
+
 ## Driving it on the Mac
 
 The work folder `04008E001F098000-work` beside the dump has `run/boot.sh <log> <secs> [VAR=value…]` (`DMHOST=` for another host), `run/go.sh <shot> <wait> <presses…>` for a run with `DM_CTL`, `run/to_select.sh` and `run/play.sh <prefix> <host> <secs>`: from the save in `run/save`, A presses through the title, Select User, Tennis's match settings and the court into a doubles match at its serve prompt (about 2 minutes), then `Shake` every 2 s with a shot every 30 s.
@@ -54,7 +60,7 @@ The work folder `04008E001F098000-work` beside the dump has `run/boot.sh <log> <
 
 - A point played on the Mac in this tree (needs a motion controller, or scripted moves that serve).
 - Sports other than tennis.
-- Mii heads need the player's own console files: without the system data the game mounts as `MiiResource` (`0400000000000849`) it logs `[RED] fs mount system data MiiResource: the host has no 0400000000000849` and draws no heads. With that archive and the console's Mii database under `DM_SYSTEM_DIR` ([A console's own Mii database and system data](../../../docs/reference/services.md#a-consoles-own-mii-database-and-system-data)) it lists the player's Miis and draws their heads (FifteenPen, PR #2274, M4 Pro); not run in this tree, which has no console files.
+- Mii heads need the player's own console files: without the system data the game mounts as `MiiResource` (`0400000000000849`) the host's stand-in for it draws none ([Miis](#miis)). With that archive and the console's Mii database under `DM_SYSTEM_DIR` ([A console's own Mii database and system data](../../../docs/reference/services.md#a-consoles-own-mii-database-and-system-data)) it lists the player's Miis and draws their heads (FifteenPen, PR #2274, M4 Pro); not run in this tree, which has no console files.
 - The 6 refused mesh shaders, above.
 - iPhone and iPad: no IPA built.
 
@@ -67,6 +73,7 @@ The work folder `04008E001F098000-work` beside the dump has `run/boot.sh <log> <
 - [A controller in a style the game does not support](../../../docs/reference/services.md#a-controller-in-a-style-the-game-does-not-support)
 - [Switch 2 hid calls that open the hid service](../../../docs/reference/services.md#switch-2-hid-calls-that-open-the-hid-service), [The SDK's IMU handles are the console's six-axis handles](../../../docs/reference/services.md#the-sdks-imu-handles-are-the-consoles-six-axis-handles), [The Npad IMU sample holds the acceleration first](../../../docs/reference/services.md#the-npad-imu-sample-holds-the-acceleration-first), [The SDK's sensor fusion needs sensor noise and a stored calibration](../../../docs/reference/services.md#the-sdks-sensor-fusion-needs-sensor-noise-and-a-stored-calibration)
 - [Home button protection on a Switch 2 controller](../../../docs/reference/services.md#home-button-protection-on-a-switch-2-controller)
+- [The Switch 2's Mii model archive](../../../docs/reference/services.md#the-switch-2s-mii-model-archive) and [A Mii part the stand-in leaves out](../../../docs/reference/services.md#a-mii-part-the-stand-in-leaves-out)
 - [The fragment's shading-rate size reads 1 x 1](../../../docs/reference/shaders.md#the-fragments-shading-rate-size-reads-1-x-1)
 - [A render-target view of another class: the texture is upgraded, not drawn in its base format](../../../docs/reference/rendering.md#a-render-target-view-of-another-class-the-texture-is-upgraded-not-drawn-in-its-base-format)
 - [Conditional rendering evaluated at replay](../../../docs/reference/rendering.md#conditional-rendering-evaluated-at-replay)

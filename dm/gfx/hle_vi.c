@@ -73,8 +73,10 @@ HLE_FORCE("_ZN2nn2vi20GetLatestFrameNumberEPmPKNS0_5LayerE", "the layer's latest
 // FlushRenderingCommands, which waits for every fence (FFrameEndSync, main+0x15015f0), waited for ever right after the opening movie: the game thread polled its fence each ms, nothing
 // was presented again. FrameInfo is 40 bytes, as the SDK's ListFrameHistory (sdk 20.5.15, sdk+0x4510a0) fills it from the compositor's records: status (2 shown with a present
 // time, 1 queued and not shown yet), frame number (the numbering of GetLatestFrameNumber), the queue tick and the present tick twice; sorted by frame number, newest first.
-// A frame is shown once the present queue has handed it on (nvn_mtl.m g_pq_done) and the system did not drop it; its present time is the drawable's presented time when Metal
-// reports one, else (headless, or before the handler runs) the time it was first seen handed on
+// A frame is shown once the present queue has handed it on (nvn_mtl.m g_pq_done); its present time is the drawable's presented time when Metal reports one, else (headless, before
+// the handler runs, or a drawable the Mac never put on screen) the time it was first seen handed on. A Switch's compositor shows every frame it is handed, in order, so a frame the
+// Mac dropped (presentedTime 0) still counts as shown: listed as queued, the newest ones stayed so for ever when the game presented nothing more until their flip came (Orbitals,
+// main+0x1540460: right after both players ready up the load stopped presenting, and its FFrameEndSync waited for the flip of a frame Metal had dropped, until Unreal aborted: "GameThread timed out waiting for …")
 #define VFH 8
 typedef struct { uint64_t frame, ticket, queued_ns, seen_ns; } vfh_ent;
 static vfh_ent g_vfh[VFH]; static pthread_mutex_t g_vfh_mu = PTHREAD_MUTEX_INITIALIZER;
@@ -95,9 +97,9 @@ HLE_FORCE("_ZN2nn2vi16ListFrameHistoryEPNS0_9FrameInfoEiPKNS0_5LayerE", "the lay
     for (uint64_t f = latest; f > 0 && latest - f < VFH && k < n; f--) {
         vfh_ent *e = &g_vfh[f % VFH]; if (e->frame != f) continue;
         uint64_t *o = (uint64_t *)out + 5 * k++, shown = 0;
-        double pt = e->ticket <= d ? mtl_presented_time(e->ticket) : -1;
+        double pt = e->ticket <= d ? mtl_presented_time(e->ticket) : 0;
         if (pt > 0) { uint64_t ago = hnow > (uint64_t)(pt * 1e9) ? hnow - (uint64_t)(pt * 1e9) : 0; shown = gnow > ago ? gnow - ago : 1; }
-        else if (pt == 0) { if (!e->seen_ns) e->seen_ns = gnow; shown = e->seen_ns; }
+        else if (e->ticket <= d) { if (!e->seen_ns) e->seen_ns = gnow; shown = e->seen_ns; }
         o[0] = shown ? 2 : 1; o[1] = f; o[2] = vfh_ticks(e->queued_ns); o[3] = o[4] = shown ? vfh_ticks(shown) : 0;
     }
     pthread_mutex_unlock(&g_vfh_mu);

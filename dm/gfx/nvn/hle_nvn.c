@@ -998,6 +998,9 @@ static void cmd_new_segment(cmd_t *o, uint8_t *mem, size_t n) {
 // that guest range and is reclaimed when another recording writes records over it (hostseg_written); segments overflowing from a host segment keep the same range.
 // A grant over the range is not enough: games grant at least 512 bytes for a list measured smaller and write only its records (Tears of the Kingdom's model lists, max(S, 512); the same
 // pattern in Splatoon Raiders' agl), so a grant for one list can cover the next list, still called. Freeing at the grant lent that list's tail to the next overflow
+// Except a segment taken before its recording wrote any record into the game's memory (its range is the one byte at the write position): nothing is ever written over that byte
+// by a recording that runs into the same overflow, so it is freed when the game grants memory over that byte again, as before (hostseg_granted). Pokémon Violet grants each command
+// buffer 1 KB at a time and a 1,400-byte record never fits: two recordings a frame overflow before their first record, and with write-only reclaim the 1 GB cap was reached at frame 1,939
 // The segment pool grows on demand (SMBW opening course: many small command buffers each overflow once per frame, and the old fixed 64 segments × 1 MB ran out within 8 frames); abort only beyond HOSTSEG_CAP in total.
 // A segment is HOSTSEG_SZ, with two exceptions (hostseg_size): an empty pool with a length of at most HOSTSEG_SMALL outside a recording gets that much rounded up to HOSTSEG_SMALL
 // (Super Mario Odyssey hands out many such 512-byte grants before recording; at 256 KB each, and with no recording to reclaim them by, they reached the cap entering the Wooded
@@ -1009,8 +1012,9 @@ static void cmd_new_segment(cmd_t *o, uint8_t *mem, size_t n) {
 #define HOSTSEG_SMALL (4u << 10)
 #define HOSTSEG_CAP (1u << 30)
 uint64_t dm_nvn_frame_count(void);
-typedef struct { uint8_t *mem; size_t n; uint64_t frame; int busy; uintptr_t org_lo, org_hi; uint64_t rec_id; } hostseg_t;   // org: the guest range of the recording it hangs off (0 = unknown, never reclaimed); rec_id: the recording that took it
+typedef struct { uint8_t *mem; size_t n; uint64_t frame; int busy; uintptr_t org_lo, org_hi; uint64_t rec_id; int unwritten; } hostseg_t;   // org: the guest range of the recording it hangs off (0 = unknown, never reclaimed); rec_id: the recording that took it; unwritten: org is the one byte at the write position, the recording had written nothing there (hostseg_granted)
 static hostseg_t *g_hostseg; static int g_nhostseg, g_caphostseg; static uint64_t g_hostseg_bytes;
+static _Atomic int g_hostseg_unwritten;   // busy segments with unwritten set: 0 lets hostseg_granted return without the lock
 static _Atomic int g_hostseg_held;   // busy segments with a guest range: 0 lets hostseg_written return without the lock (no game seen so far lends one from its own pool)
 static _Atomic uint64_t g_rec_serial;   // BeginRecording's serials (cmd_t rec_id)
 static pthread_mutex_t g_hostseg_mu = PTHREAD_MUTEX_INITIALIZER;
@@ -1025,16 +1029,16 @@ static uint8_t *hostseg_take(cmd_t *o, size_t n) {
     if (o && o->recording) ctl_chunk_close(o);   // the records written so far count as written (hostseg_written) before a free segment is chosen
     uintptr_t lo = 0, hi = 0, cur = o ? (uintptr_t)o->cur : 0;
     pthread_mutex_lock(&g_hostseg_mu);
-    int in_seg = 0;   // by the segment's end too: a small segment can end where another one starts
-    for (int i = 0; i < g_nhostseg && cur; i++) if (cur >= (uintptr_t)g_hostseg[i].mem && o->end == g_hostseg[i].mem + g_hostseg[i].n) { lo = g_hostseg[i].org_lo; hi = g_hostseg[i].org_hi; in_seg = 1; break; }
-    if (!in_seg && o && o->recording && o->cur) { lo = o->recording == 1 && o->begin && (uintptr_t)o->begin <= cur ? (uintptr_t)o->begin : cur; hi = cur > lo ? cur : lo + 1; }
+    int in_seg = 0, unw = 0;   // by the segment's end too: a small segment can end where another one starts
+    for (int i = 0; i < g_nhostseg && cur; i++) if (cur >= (uintptr_t)g_hostseg[i].mem && o->end == g_hostseg[i].mem + g_hostseg[i].n) { lo = g_hostseg[i].org_lo; hi = g_hostseg[i].org_hi; unw = g_hostseg[i].unwritten; in_seg = 1; break; }
+    if (!in_seg && o && o->recording && o->cur) { lo = o->recording == 1 && o->begin && (uintptr_t)o->begin <= cur ? (uintptr_t)o->begin : cur; hi = cur > lo ? cur : lo + 1; unw = lo == cur; }
     for (int i = 0; i < g_nhostseg && !m; i++)
-        if (!g_hostseg[i].busy && g_hostseg[i].n == n) { g_hostseg[i] = (hostseg_t){ g_hostseg[i].mem, n, f, 1, lo, hi, o ? o->rec_id : 0 }; m = g_hostseg[i].mem; }
+        if (!g_hostseg[i].busy && g_hostseg[i].n == n) { g_hostseg[i] = (hostseg_t){ g_hostseg[i].mem, n, f, 1, lo, hi, o ? o->rec_id : 0, unw }; m = g_hostseg[i].mem; }
     if (!m && g_hostseg_bytes + n <= HOSTSEG_CAP && (m = malloc(n))) {
         if (g_nhostseg == g_caphostseg) { g_caphostseg = g_caphostseg ? g_caphostseg * 2 : 64; g_hostseg = realloc(g_hostseg, sizeof *g_hostseg * (size_t)g_caphostseg); }
-        g_hostseg[g_nhostseg++] = (hostseg_t){ m, n, f, 1, lo, hi, o ? o->rec_id : 0 }; g_hostseg_bytes += n;
+        g_hostseg[g_nhostseg++] = (hostseg_t){ m, n, f, 1, lo, hi, o ? o->rec_id : 0, unw }; g_hostseg_bytes += n;
     }
-    if (m && hi > lo) atomic_fetch_add_explicit(&g_hostseg_held, 1, memory_order_relaxed);
+    if (m && hi > lo) { atomic_fetch_add_explicit(&g_hostseg_held, 1, memory_order_relaxed); if (unw) atomic_fetch_add_explicit(&g_hostseg_unwritten, 1, memory_order_relaxed); }
     unsigned t = ++total; int ns = g_nhostseg; uint64_t bytes = g_hostseg_bytes;
     pthread_mutex_unlock(&g_hostseg_mu);
     if (!m) die("NVN command memory: the game's pool is empty and host-lent segments reached %u MB without being reclaimed by the game's blocks", HOSTSEG_CAP >> 20);
@@ -1048,7 +1052,20 @@ static void hostseg_written(const cmd_t *o, const uint8_t *p, uint64_t n) {
     pthread_mutex_lock(&g_hostseg_mu);
     for (int i = 0; i < g_nhostseg; i++) {
         hostseg_t *s = &g_hostseg[i];
-        if (s->busy && s->org_hi > s->org_lo && s->rec_id != o->rec_id && s->org_hi > lo && s->org_lo < hi) { s->busy = 0; atomic_fetch_sub_explicit(&g_hostseg_held, 1, memory_order_relaxed); }
+        if (s->busy && s->org_hi > s->org_lo && s->rec_id != o->rec_id && s->org_hi > lo && s->org_lo < hi) { s->busy = 0; atomic_fetch_sub_explicit(&g_hostseg_held, 1, memory_order_relaxed); if (s->unwritten) atomic_fetch_sub_explicit(&g_hostseg_unwritten, 1, memory_order_relaxed); }
+    }
+    pthread_mutex_unlock(&g_hostseg_mu);
+}
+// The game grants [p, p + n) to o: segments taken before their recording wrote anything (unwritten) whose byte this covers are dead, reclaim them (not o's own recording in progress)
+static void hostseg_granted(const cmd_t *o, const uint8_t *p, uint64_t n) {
+    if (!n || !atomic_load_explicit(&g_hostseg_unwritten, memory_order_relaxed)) return;
+    uintptr_t lo = (uintptr_t)p, hi = lo + n;
+    pthread_mutex_lock(&g_hostseg_mu);
+    for (int i = 0; i < g_nhostseg; i++) {
+        hostseg_t *s = &g_hostseg[i];
+        if (s->busy && s->unwritten && !(o->recording && s->rec_id == o->rec_id) && s->org_hi > lo && s->org_lo < hi) {
+            s->busy = 0; atomic_fetch_sub_explicit(&g_hostseg_held, 1, memory_order_relaxed); atomic_fetch_sub_explicit(&g_hostseg_unwritten, 1, memory_order_relaxed);
+        }
     }
     pthread_mutex_unlock(&g_hostseg_mu);
 }
@@ -1058,6 +1075,7 @@ NVN(nvnCommandBufferAddCommandMemory, void, NVNcommandBuffer *c, const NVNmemory
     if (!pl || n < 64) { if (cs_on()) { pthread_mutex_lock(&g_cs_mu); g_cs.hostseg++; pthread_mutex_unlock(&g_cs_mu); } size_t sz = hostseg_size(CB(c), !pl, n); cmd_new_segment(CB(c), hostseg_take(CB(c), sz), sz); return; }
     if (!pl->mem) { LOG("[RED] AddCommandMemory: pool has no CPU storage"); return; }
     vpool_taken(pl);
+    hostseg_granted(CB(c), pl->mem + off, n);
     if (cs_on()) { pthread_mutex_lock(&g_cs_mu); g_cs.grants++; g_cs.grant_bytes += n; if (!g_cs.grant_min || n < g_cs.grant_min) g_cs.grant_min = n; if (n > g_cs.grant_max) g_cs.grant_max = n; pthread_mutex_unlock(&g_cs_mu); }
     { static int cblog = -1; if (cblog < 0) cblog = getenv("DM_NVN_CBLOG") != NULL; static uint64_t ng; if (cblog && (++ng <= 60 || ng % 500 == 0)) LOG("[nvn] AddCommandMemory #%llu cmd=%p pool %p +%#lx length %#zx (recording %d)", (unsigned long long)ng, (void *)c, (const void *)pl, (long)off, n, CB(c)->recording); }
     cmd_new_segment(CB(c), pl->mem + off, n);

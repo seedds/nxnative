@@ -751,6 +751,32 @@ int main(void) {
         EXPECT("the next overflow reuses it: no new segment", nseg, g_nhostseg);
         P(nvnCommandBufferFinalize)(&ca); P(nvnCommandBufferFinalize)(&cb); P(nvnCommandBufferFinalize)(&cx); P(nvnMemoryPoolFinalize)(&mp);
     }
+    // 5b''''. A recording that overflows before its first record (Pokémon Violet: 1 KB grants, a 1,400-byte record) wrote nothing in the game's memory, so no later recording
+    //        writes over its range (the one byte at the write position): its segment is freed when the game grants memory over that byte again, not before
+    {
+        static uint8_t m[8192] __attribute__((aligned(4096))); NVNmemoryPoolBuilder mb; NVNmemoryPool mp; NVNcommandBuffer ca, cb;
+        P(nvnMemoryPoolBuilderSetDefaults)(&mb); P(nvnMemoryPoolBuilderSetStorage)(&mb, m, sizeof m); P(nvnMemoryPoolInitialize)(&mp, &mb);
+        P(nvnCommandBufferInitialize)(&ca, &dev); P(nvnCommandBufferInitialize)(&cb, &dev);   // no callbacks: an overflow goes to a host segment
+        P(nvnCommandBufferAddCommandMemory)(&ca, &mp, 2048, 64); P(nvnCommandBufferBeginRecording)(&ca);
+        uint8_t *c0 = CB(&ca)->cur; P(nvnCommandBufferBindUniformBuffer)(&ca, NVN_SHADER_STAGE_FRAGMENT, 0, 0x10000, 0x100); size_t rs = (size_t)(CB(&ca)->cur - c0);
+        while ((size_t)(CB(&ca)->end - CB(&ca)->cur) >= rs) P(nvnCommandBufferBindUniformBuffer)(&ca, NVN_SHADER_STAGE_FRAGMENT, 0, 0x10000, 0x100);
+        P(nvnCommandBufferEndRecording)(&ca);
+        uint8_t *at = CB(&ca)->cur;
+        P(nvnCommandBufferBeginRecording)(&ca);   // its first record does not fit: a segment is lent before anything is written at `at`
+        P(nvnCommandBufferBindUniformBuffer)(&ca, NVN_SHADER_STAGE_VERTEX, 2, 0x20000, 0x100); NVNcommandHandle hb = P(nvnCommandBufferEndRecording)(&ca); (void)hb;
+        int si = -1; pthread_mutex_lock(&g_hostseg_mu);
+        for (int i = 0; i < g_nhostseg; i++) if (g_hostseg[i].busy && g_hostseg[i].org_lo == (uintptr_t)at) si = i;
+        int unw = si >= 0 && g_hostseg[si].unwritten; pthread_mutex_unlock(&g_hostseg_mu);
+        EXPECT("an overflow before the first record lends a segment", 1, si >= 0);
+        EXPECT("its range is marked unwritten", 1, unw);
+        P(nvnCommandBufferAddCommandMemory)(&cb, &mp, 4096, 1024);   // a grant elsewhere keeps it
+        pthread_mutex_lock(&g_hostseg_mu); int busy1 = g_hostseg[si].busy; pthread_mutex_unlock(&g_hostseg_mu);
+        EXPECT("a grant elsewhere keeps it", 1, busy1);
+        P(nvnCommandBufferAddCommandMemory)(&cb, &mp, 2048, 1024);   // the game gives that memory out again: the list in the segment is dead
+        pthread_mutex_lock(&g_hostseg_mu); int busy2 = g_hostseg[si].busy; pthread_mutex_unlock(&g_hostseg_mu);
+        EXPECT("a grant over its byte frees it", 0, busy2);
+        P(nvnCommandBufferFinalize)(&ca); P(nvnCommandBufferFinalize)(&cb); P(nvnMemoryPoolFinalize)(&mp);
+    }
     // 5b'''. Calls and copies (NVN): CallCommands copies the called list's pieces into the caller's list, as the driver copies a command set's GPU FIFO entries, so the called
     //        recording's control memory may be given out again once the call is recorded (Donkey Kong Bananza resets its control arena twice per command arena: when a call
     //        pointed at the called list, the caller replayed whatever the next recordings wrote there); CopyCommands copies the records, so its command memory may go too

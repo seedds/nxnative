@@ -39,6 +39,17 @@ sys_resource	0x1000000
 # cached pages only after a map fails at the real application-pool limit.
 mem_map_limit	on
 
+# ---- Frame pacing ----
+# The game's swap chain has 2 textures at interval 1, so it gets one back only
+# once the display link has taken the previous present and a frame that misses a
+# tick waits a whole extra one: the render thread parked in
+# nvnWindowAcquireTexture for 50-64 ms on frames whose GPU work was 13-18 ms.
+# Snapshots copy each present at once, so the swapchain texture frees
+# immediately; the wait becomes the ring's own, 2.69 ms per frame (max 3.17).
+# Measured over 143,100 frames on the Mac: every one of 481 windows at 33.33 ms
+# p50, against 30,000-frame blocks of 42.8 dropped per 300 before. README.md.
+present_snap	on
+
 # ---- Shader split ----
 shader_groups	#arc/system_resource=system #arc/ik_effect=effect #arc/ik_pokemon=pokemon #arc/ui=layout /arc/=arc
 shader_note	Pokémon Scarlet shaders

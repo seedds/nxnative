@@ -342,6 +342,13 @@ To enroll a cut for any game's own module:
 - **Fix:** for a front patch area, reserve a zero-filled 16 KB state page immediately after the key page by extending `IMAGE_SIZE`. The existing Mac and iOS loaders map it with the BSS; no padding is added to the game binary. Ordinary modules retain their existing layout.
 - **Found on:** [ASTRAL CHAIN](../../dm/games/01007300020FA000/README.md#frame-rate).
 
+### Frame-step state at a patch alignment boundary
+
+- **Symptom:** `frame step state page` assertion when adding `FRAME_STEP` to a module with an appended patch area.
+- **Cause:** the rewriter assumed the patch area's 64 KB alignment left room for the state page after the key page. When the key page ends on that boundary, the patch code starts at the state address instead.
+- **Fix:** reserve the full 16 KB state page before aligning the patch area and emitting any branches. A main with a registered or function-matched frame step needs the reservation. Layouts that already have room, front patch areas and modules without a frame step keep their existing offsets.
+- **Found on:** [Pokémon Legends: Z-A](../../dm/games/0100F43008C44000/README.md#frame-rate) 2.0.2: key page `0x617c000`, state `0x6180000`, patch area `0x6190000`.
+
 ### Patch area right before the base for a long text
 
 - **Symptom:** `B()` range assertion, then `patch area of … bytes does not fit in the … before the base`.

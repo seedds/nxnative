@@ -9868,7 +9868,8 @@ static int stand_layers(const treg_t *r, unsigned *s0, unsigned *ns, MTLTextureT
     *ns = r->has_v && r->v.set_layers && r->v.nlayers ? r->v.nlayers : depth - *s0;
     MTLTextureType base = arr ? MTLTextureType2DArray : MTLTextureType2D; *tt = r->has_v && r->v.set_target ? ttype(r->v.target, base) : base;
     if (*tt == MTLTextureType2D) *ns = 1; else if (*tt != MTLTextureType2DArray) return 0;
-    return *s0 + *ns <= depth && *ns <= STAND_LAYERS;
+    // with DM_TEXTURES_OFF a layered texture (the 90-layer 1365x1365 arrays are 73 MB each) gets a stand-in too, of up to 128 layers: each layer's is under a kilobyte
+    return *s0 + *ns <= depth && *ns <= (tex_off_mode() ? 128u : (unsigned)STAND_LAYERS);
 }
 // The stand-in's bytes, read from the texture's storage: into the stand-in, and their hash when asked for (pool_first_read). 0 when the storage cannot be read so
 static int stand_fill(const tex_t *t, const stand_shape *s, unsigned s0, unsigned ns, id<MTLTexture> into, uint64_t *sum) {

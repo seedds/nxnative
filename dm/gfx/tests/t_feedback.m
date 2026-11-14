@@ -734,6 +734,20 @@ static void real_depth_snap_case(NvProg *pr, int colour_pass, int stencil, int p
     mtl_tex_release(&depth);
     printf("real depth copy (%s, %s%s): %s\n", stencil ? "Depth32Float_Stencil8" : "Depth32Float", colour_pass ? "colour pass" : "depth-only pass", pending ? ", clear waiting" : "", before == failed ? "PASS" : "FAIL");
 }
+// DM_NVN_LC_REPORTS: counter reports and resets keep waiting clears only when the switch is on (default off: they land them, as before); other ops are unchanged
+static void lc_reports_case(void) {
+    int before = failed;
+    unsetenv("DM_NVN_LC_REPORTS"); g_lc_rep_m = -1;
+    CHECK(!lc_keeps(OP_REPORT_COUNTER) && !lc_keeps(OP_RESET_COUNTER), "by default a counter report or reset lands the waiting clears");
+    CHECK(lc_keeps(OP_DRAW) && lc_keeps(OP_BARRIER) && !lc_keeps(OP_COPY_T2T), "the other ops keep or land them as before");
+    setenv("DM_NVN_LC_REPORTS", "1", 1); g_lc_rep_m = -1;
+    CHECK(lc_keeps(OP_REPORT_COUNTER) && lc_keeps(OP_RESET_COUNTER), "DM_NVN_LC_REPORTS=1: a counter report or reset keeps them");
+    CHECK(lc_keeps(OP_DRAW) && !lc_keeps(OP_COPY_T2T), "the switch changes only the counter ops");
+    setenv("DM_NVN_LC_REPORTS", "0", 1); g_lc_rep_m = -1;
+    CHECK(!lc_keeps(OP_REPORT_COUNTER), "DM_NVN_LC_REPORTS=0 lands them");
+    unsetenv("DM_NVN_LC_REPORTS"); g_lc_rep_m = -1;
+    printf("counter reports and waiting clears: %s\n", before == failed ? "PASS" : "FAIL");
+}
 // A colour snapshot taken while the attachment's clear still waits to be the load action of the pass the draw opens holds the clear: the attachment holds (10, 20, 30, 40) from the CPU,
 // the clear is red, and the draw writes the attachment it samples
 static void pending_clear_case(NvProg *pr) {
@@ -801,6 +815,7 @@ int main(int argc, char **argv) { @autoreleasepool {
     pool_depth_case();
     reuse_tables_case();
     cut_boundary_case();
+    lc_reports_case();
     printf("feedback snapshot: %d checks, %d failed\n", checks, failed);
     return failed != 0;
 } }

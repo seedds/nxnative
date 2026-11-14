@@ -14406,9 +14406,16 @@ static void lc_take(NvProg *pr) {
             g_lc_taken++; } }
     lc_land();
 }
+// DM_NVN_LC_REPORTS (default off; ab with DM_AB): counter reports and resets keep waiting clears too. Neither reads nor writes a texture, and a waiting clear is not a draw, so a
+// samples-passed count is the same; without it each report or reset lands the clears waiting before it in a clear-only pass of its own. Ocarina of Time reports and resets
+// occlusion counters between its passes: in-run A/B on an M2 Air (cut7 host), passes -0.95 to -1.9 a frame and attachment load / store -9 to -13 MB a frame; held still in
+// Castle Town frame p50 -0.115 ms [-0.130, -0.060] and GPU p50 -0.065 ms; no change measurable on a walking route
+static int g_lc_rep_m = -1;   // cached mode (a test resets it to -1 to read the switch again)
+static int lc_reports_mode(void) { if (g_lc_rep_m < 0) { g_lc_rep_m = sw_mode("DM_NVN_LC_REPORTS", 0); if (g_lc_rep_m == 1) MLOG("DM_NVN_LC_REPORTS=1: counter reports and resets keep waiting clears"); } return g_lc_rep_m; }
 // The operations a waiting clear can wait across: they neither read nor write textures
 static int lc_keeps(uint32_t op) {
     switch (op) {
+        case OP_REPORT_COUNTER: case OP_RESET_COUNTER: { int m = lc_reports_mode(); return m && sw_on(m); }
         case OP_SET_RT: case OP_CLEAR_COLOR: case OP_CLEAR_DS: case OP_DRAW: case OP_DRAW_IDX: case OP_BEGIN: case OP_JUMP: case OP_CALL:
         case OP_SCISSOR: case OP_BIND_PROGRAM: case OP_BIND_STATE: case OP_BIND_VATTR: case OP_BIND_VSTREAM: case OP_BIND_VBUF: case OP_BIND_VBUF1:
         case OP_BIND_UBO: case OP_BIND_UBO_SMALL: case OP_BIND_SSBO: case OP_BIND_TEX: case OP_BIND_TEX1: case OP_BIND_SAMP: case OP_BIND_IMG: case OP_STENCIL:

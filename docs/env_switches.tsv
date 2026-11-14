@@ -186,6 +186,7 @@ DM_NVN_INDLOG	diagnostic	`=<n>`: the first n indirect draws (and those of pass-d
 DM_NVN_IXCLOG	diagnostic	`=<n>` logs the first n indirect draw and dispatch conversions (record to arguments) once the GPU has run them
 DM_NVN_KEYDUMP	diagnostic	`=<fs key>[:n[:every]]`: for up to n draws of that fragment shader (default 6), logs the pass dump binding lines plus vertex formats, vertex streams and uniform values; meant for devices
 DM_NVN_LAZY_CLEAR	switch	`0` makes clears with no draw after them open a pass of their own, as before; by default they wait to become the load action of the next pass on that target
+DM_NVN_LC_REPORTS	switch	`1` lets counter reports and resets (occlusion queries) keep waiting clears instead of landing them in a clear-only pass of their own: fewer passes and less attachment traffic (Ocarina of Time: about 1-2 passes and 9-13 MB a frame); `ab` with `DM_AB`; off by default
 DM_NVN_LINE_WIDTH	switch	`0` draws every NVN line 1 pixel wide, as before; by default a line draw wider than a pixel is drawn as a quad per segment (`nvn_wline.inc`)
 DM_NVN_LOADPROBE	diagnostic	`=1`, `2` or `3`: attachments whose load is skipped are cleared to a sentinel colour (`3` NaN; `1` NaN for float formats) and the sentinel pixels left at pass end are counted (should be 0)
 DM_NVN_LOG	diagnostic	`=1` logs the creation of NVN objects

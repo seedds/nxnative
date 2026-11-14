@@ -1,0 +1,11 @@
+# Fixed indoor save in <NSP folder>/smoke-save (a copy, never the player's live save).
+# Loads Continue with the same repeated A presses as the historical indoor check.
+save	smoke-save
+keys	5:A,8:A,11:A,14:A,17:A,20:A,23:A,26:A
+secs	70
+quick	70
+prebuild	off
+hang	30
+reach	1200@65
+window	45	20
+shots	55,65

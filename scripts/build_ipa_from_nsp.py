@@ -3332,6 +3332,10 @@ def main(args=None):
     glslc = gfx == 'nvn' and src['glslc_capture'][0]   # shaders the game compiles at run time, captured in the Mac host (capture_glslc)
     vkcap = gfx == 'vulkan' and src['vk_capture'][0]   # SPIR-V shaders the game generates at run time, captured in the Mac host (capture_shaders)
     glcap = gfx == 'gl' and src['gl_capture'][0]   # GLSL the game puts together at run time (LÖVE), captured in the Mac host (capture_shaders)
+    # A profile can ask for the capture when the files' guess says no: main holds a few GLSL strings, so the guess takes them for all, but the game puts the rest together
+    # at run time from templates (Mega Man Legacy Collection: 3 strings in main, the shaders it draws with made from RomFS shaders/nx/*.glsl; every draw skipped, a magenta window)
+    if gfx == 'gl' and not glcap and g.get('gl_capture') == '1':
+        glcap = True; src['gl_capture'] = (True, 'the profile sets gl_capture 1: the shaders the game puts together at run time are captured by booting it on the Mac')
     uedec = gfx == 'nvn' and src['ue_decode'][0]   # Unreal Engine shaders, Oodle-compressed in the paks' shader code archives, decoded in the Mac host (decode_ue_shaders)
     if gfx == 'vulkan': say(f'Vulkan game ({src["graphics"][1]}): vk_shaders.py translates the shaders instead of the NVN shader chain')
     if gfx == 'gl': say(f'OpenGL game ({src["graphics"][1]}): gl_shaders.py translates the shaders instead of the NVN shader chain')

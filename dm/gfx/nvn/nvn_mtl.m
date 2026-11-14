@@ -9258,7 +9258,24 @@ static NSString *ga_dir(void) {
 static int ga_own(void) { return NSBundle.mainBundle.bundleIdentifier.length > 0 && ga_dir() != nil; }   // the folder is this game's app's, not every program's
 static NSSet<NSString *> *ga_list(NSString *dir) {
     NSArray<NSString *> *a = dir ? [NSFileManager.defaultManager contentsOfDirectoryAtPath:dir error:nil] : nil;
-    return [NSSet setWithArray:[a filteredArrayUsingPredicate:[NSPredicate predicateWithFormat:@"self BEGINSWITH 'gpuarchiver-'"]] ?: @[]];
+    NSMutableSet<NSString *> *old = [NSMutableSet set];
+    for (NSString *name in a) {
+        if (![name hasPrefix:@"gpuarchiver-"]) continue;
+        struct stat st;
+        NSString *path = [dir stringByAppendingPathComponent:name];
+        if (lstat(path.fileSystemRepresentation, &st) || !S_ISDIR(st.st_mode)) continue;   // names can also be files or links; Metal's state is a directory
+        [old addObject:name];
+    }
+    return old;
+}
+static int ga_remove(NSString *dir, NSSet<NSString *> *old) {
+    int removed = 0;
+    for (NSString *name in old) {
+        NSString *path = [dir stringByAppendingPathComponent:name]; struct stat st;
+        if (lstat(path.fileSystemRepresentation, &st) || !S_ISDIR(st.st_mode)) continue;   // recheck after the snapshot before removing
+        if ([NSFileManager.defaultManager removeItemAtPath:path error:nil]) removed++;
+    }
+    return removed;
 }
 // The lock beside dir, held shared from here on through *fd (left open for the run: the lock ends with the process, a forked child sharing it). → the folders of earlier runs
 // to remove, when no other copy holds the lock; nil otherwise. Listed under the exclusive lock, before this process makes a serializer: a copy starting meanwhile waits for the
@@ -9433,7 +9450,7 @@ static void pso4_init(void) {
                 if (lock_fd < 0) MLOG("[RED] pipeline archive: no lock beside %s: Metal's build folders there are left alone this run, and this run's may go with another copy's start", gd.UTF8String);
                 else if (!old) MLOG("pipeline archive: another copy of this app is running: Metal's build folders in %s are left alone", gd.UTF8String);
                 if (old.count) dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
-                    uint64_t t0 = bp_now(); int n = 0; for (NSString *name in old) n += [NSFileManager.defaultManager removeItemAtPath:[gd stringByAppendingPathComponent:name] error:nil];
+                    uint64_t t0 = bp_now(); int n = ga_remove(gd, old);
                     MLOG("pipeline archive: %d of %lu of Metal's build folders left by earlier runs removed from %s in %.1f s", n, (unsigned long)old.count, gd.UTF8String, (bp_now() - t0) / 1e9);
                 });
             }

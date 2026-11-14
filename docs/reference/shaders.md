@@ -2307,6 +2307,13 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Fix:** every SDK's driver runs the code of the GLSLC in the same SDK, so the host now reports at least the version the game's own `glslcGetVersion` returns (`hle_glslc.c` `dm_glslc_gpu_code`, `hle_nvn.c`). The host also advertises the translator's supported range for precompiled shaders ([Newest GPU code version reported by the driver](nvn-objects.md#newest-gpu-code-version-reported-by-the-driver)).
 - **Found on:** [Catherine: Full Body](../../dm/games/0100BF00112C0000/README.md) (SDK 8.2.1, Atlus's GFD engine, CRI middleware; one boot).
 
+### A function closed with `};`
+
+- **Symptom:** `gl_shaders.log`: `does not translate: … glslang: ERROR: … 'extraneous semicolon' : not supported with this profile: es`, on the line of a function's closing brace; the game's draws with that shader are skipped (`a shader is missing from the library`).
+- **Cause:** the game ends `main()` with `};`. NVIDIA's compiler takes the stray semicolon at file scope; glslang's ES profile does not.
+- **Fix:** `gl_shaders.py`'s `fn_semicolons()`, in `fixups()`, drops a semicolon right after the `}` that closes a block opened after a `)` at file scope (a function body). A struct's or an interface block's `};` stays.
+- **Found on:** Mega Man Legacy Collection (`01002D4007AE0000`, provisional profile): three of the five shaders it puts together at run time. `dm/tools/tests/test_gl_fixups.py` checks the rule without glslang.
+
 ### GLSL ES 1.00 sources without a `#version` line
 
 - **Symptom:** `gl_shaders.py` failed on the captured sources: `ES shaders for SPIR-V require version 310 or higher`.

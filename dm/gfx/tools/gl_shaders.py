@@ -87,8 +87,25 @@ def call_args(t, i):
         elif c == ',' and depth == 1: args.append(t[start:k]); start = k + 1
     raise ValueError('unbalanced parentheses')
 
+def fn_semicolons(t):
+    """`};` closing a function at file scope: NVIDIA's compiler takes the semicolon, glslang's ES profile stops on it ('extraneous semicolon'). Mega Man Legacy Collection
+    ends main() so in three of its five run-time shaders. Only a block opened after a `)` (a function's parameters) loses it: a struct's or an interface block's `};` stays"""
+    out, depth, fn, i = [], 0, False, 0
+    for k, c in enumerate(t):
+        if k < i: continue
+        if c == '{':
+            if depth == 0: fn = t[:k].rstrip().endswith(')')
+            depth += 1
+        elif c == '}' and depth:
+            depth -= 1
+            m = re.match(r'\s*;', t[k + 1:]) if depth == 0 and fn else None
+            if m:
+                out.append(t[i:k + 1] + t[k + 1:k + m.end()]); i = k + 1 + m.end()   # everything up to the semicolon, the semicolon dropped
+    return ''.join(out) + t[i:]
+
 def fixups(t):
     for a, b in OLD_TEX: t = re.sub(a, b, t)
+    t = fn_semicolons(t)
     t = re.sub(r'^[ \t]*out\s+(?:highp\s+|mediump\s+|lowp\s+)?vec4\s+gl_Position\s*;', '', t, flags=re.M)
     out, i = [], 0
     for m in re.finditer(r'\btextureOffset\s*\(', t):

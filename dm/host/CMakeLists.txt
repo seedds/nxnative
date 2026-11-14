@@ -769,19 +769,18 @@ if(NXHOST_LAUNCHER)
 endif()
 # The player's second pack end to end (t_second_pack.py): nxlauncher --play starts this build's nxhost-run on the synthetic module packed by nxaot, the host writes the JIT misses,
 # --list says a better pack is possible, --repack runs a packer (tests/second_pack/packer.py: the real packer's pack stage and made rows) that packs with --misses, --list says it
-# no longer is, and the game runs again without the JIT fallback. It needs nxaot: this option, else NXAOT in the environment; without it CTest reports it skipped (exit 77).
-# A Python driver: host_scripts.tsv lists it for the runners, which pass NXAOT from their environment. Linux only: it runs nxhost-run and nxlauncher without .exe, writes
-# launch-linux.tsv and a /bin/sh host wrapper, packs with --platform linux and expects main.aot.so
+# no longer is, and the game runs again without the JIT fallback. It needs nxaot: this option, else NXAOT in the environment; without it, the packs build_packs.sh prebuilt for it
+# with nxaot (<NXAOT_PACKS>/second_pack: the option NXAOT_PACKS above, else NXAOT_PACKS in the environment; on Windows, where there is no nxaot, the win64-packs artifact); with
+# neither CTest reports it skipped (exit 77). A Python driver: host_scripts.tsv lists it for the runners, which pass NXAOT and NXAOT_PACKS from their environment. On Windows it
+# runs nxhost-run.exe and nxlauncher.exe with launch-windows.tsv, a .cmd host wrapper and main.aot.dll packs; a host without the JIT fallback (NXHOST_JIT off: the Windows
+# cross-build) stops the first session at the hidden function with status 3, its miss recorded, and the repack is what makes the second session run to its end
 set(NXAOT "" CACHE FILEPATH "nxaot (dm/tools/aot, the nxnative-aot image) for t_second_pack; empty: the environment variable NXAOT")
-set(T_SECOND_PACK_WINDOWS "the driver is Linux only: nxhost-run and nxlauncher without .exe, launch-linux.tsv, a /bin/sh host wrapper, --platform linux, main.aot.so")
-if(NXHOST_PROGRAM AND NXHOST_LAUNCHER AND NXHOST_JIT)
+if(NXHOST_PROGRAM AND NXHOST_LAUNCHER)
     file(MAKE_DIRECTORY ${CMAKE_BINARY_DIR}/tmp)
-    host_script_test(t_second_pack INTERPRETER python3 SCRIPT ${TESTS}/t_second_pack.py ARGS --build ${CMAKE_BINARY_DIR} --nxaot "${NXAOT}" READS NXAOT
-                     WORKING_DIRECTORY ${CMAKE_BINARY_DIR} SKIP_RETURN_CODE 77 TIMEOUT 120 ENV "TMPDIR=${CMAKE_BINARY_DIR}/tmp" NOT_WINDOWS "${T_SECOND_PACK_WINDOWS}")
-elseif(WIN32)
-    string(APPEND MANIFEST "# not run on Windows: t_second_pack (${T_SECOND_PACK_WINDOWS})\n")
+    host_script_test(t_second_pack INTERPRETER python3 SCRIPT ${TESTS}/t_second_pack.py ARGS --build ${CMAKE_BINARY_DIR} --nxaot "${NXAOT}" --packs "${NXAOT_PACKS}"
+                     READS NXAOT NXAOT_PACKS WORKING_DIRECTORY ${CMAKE_BINARY_DIR} SKIP_RETURN_CODE 77 TIMEOUT 120 ENV "TMPDIR=${CMAKE_BINARY_DIR}/tmp")
 else()
-    string(APPEND MANIFEST "# not registered: t_second_pack (it needs NXHOST_PROGRAM, NXHOST_LAUNCHER and NXHOST_JIT)\n")
+    string(APPEND MANIFEST "# not registered: t_second_pack (it needs NXHOST_PROGRAM and NXHOST_LAUNCHER)\n")
 endif()
 
 # fork() death tests

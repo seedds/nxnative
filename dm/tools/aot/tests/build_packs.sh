@@ -8,7 +8,7 @@
 # Then the synthetic game module of CTest t_aot_module (dm/host/tests/t_aot_module.c) into <out>/module: dm/tools/tests/aot_synth.py writes its NSO,
 # its patch file and, through patch_nso.py's own writer, the behaviour image and manifest patch_nso.py --aot writes for it (main.image.bin,
 # main.aot.tsv), and `nxaot build` packs them into main.aot.so beside them, as a game's packs lie beside their manifests; its log is <out>/module.log.
-# Last, all of them again as Windows packs (DLLs) into <out>/win64 (below)
+# Then the game of CTest t_second_pack prebuilt into <out>/second_pack (below), and last all of them again as Windows packs (DLLs) into <out>/win64 (below)
 set -eu
 
 if [ $# -ne 2 ]; then
@@ -57,6 +57,26 @@ if ! { python3 "$here/../../tests/aot_synth.py" --hostfn "$out/hostfn" &&
     exit 1
 fi
 echo "build_packs.sh: the host-function module's two packs in $out/hostfn"
+# The game of CTest t_second_pack (dm/host/tests/t_second_pack.py) for a run without nxaot (a Windows PC has none) into <folder>: t_second_pack.py --prebuild writes the game
+# (main.image.bin, aot_synth.py's image with synth_hidden set; main.aot.tsv) and the misses a first session records (main.misses.tsv: 0x<hidden> indirect 1), and nxaot packs it
+# twice as the packer does (--mode balanced), each pack with its log nxaot_main.log beside it: first/main<suffix> from the manifest alone (the first pack) and
+# misses/main<suffix> with --misses main.misses.tsv (the repack). The test's packer stand-in (dm/host/tests/second_pack/packer.py) puts them in place of its nxaot build.
+# second_pack <folder> <pack suffix> [nxaot options]: into <out>/second_pack (.aot.so) here and <out>/win64/second_pack (.aot.dll, --target windows) below
+second_pack() {
+    dir=$1; suffix=$2; shift 2
+    rm -rf "$dir"
+    mkdir -p "$dir/first" "$dir/misses"
+    if ! { python3 "$here/../../../host/tests/t_second_pack.py" --prebuild "$dir" &&
+           "$nxaot" build "$dir/main.aot.tsv" --shared "$dir/first/main$suffix" --mode balanced "$@" ${NXAOT_ARGS:-} > "$dir/first/nxaot_main.log" 2>&1 &&
+           "$nxaot" build "$dir/main.aot.tsv" --shared "$dir/misses/main$suffix" --mode balanced --misses "$dir/main.misses.tsv" "$@" ${NXAOT_ARGS:-} \
+               > "$dir/misses/nxaot_main.log" 2>&1; } > "$dir.log" 2>&1; then
+        cat "$dir.log" "$dir/first/nxaot_main.log" "$dir/misses/nxaot_main.log" >&2 2>/dev/null
+        echo "build_packs.sh: t_second_pack's prebuilt packs failed ($dir)" >&2
+        exit 1
+    fi
+}
+second_pack "$out/second_pack" .aot.so
+echo "build_packs.sh: t_second_pack's two prebuilt packs in $out/second_pack"
 # The same packs for the Windows host (nxaot build --target windows: DLLs, README.md "Windows packs") into <out>/win64, the folder NXAOT_PACKS names
 # on the Windows PC (dm/host/tests/run_win64_tests.ps1 looks for it as build\packs\win64; docker/README.md): <name>.dll per corpus NRO (t_aot_host's
 # name for it on Windows), and module/ and hostfn/ with the synthetic modules' inputs written again by aot_synth.py and main.aot.dll, sub.aot.dll
@@ -82,4 +102,5 @@ if ! { python3 "$here/../../tests/aot_synth.py" "$win/module" &&
     echo "build_packs.sh: the synthetic modules' Windows packs failed" >&2
     exit 1
 fi
-echo "build_packs.sh: $n Windows packs and the synthetic modules' in $win ($(($(date +%s) - start)) s)"
+second_pack "$win/second_pack" .aot.dll --target windows
+echo "build_packs.sh: $n Windows packs, the synthetic modules' and t_second_pack's in $win ($(($(date +%s) - start)) s)"

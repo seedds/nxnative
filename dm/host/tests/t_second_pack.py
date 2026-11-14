@@ -28,6 +28,19 @@ writes the launch file's made rows, the rule turns off, and the game runs again 
      function lines), not rows: the entry runs the same loop, so the sampled functions are synth_hot's (and whichever others a sample happened to land in) again, however many
      of its instructions this session sampled: `-` when they are the same functions; a session that sampled 10 % more functions, or another set of functions with 25 % more
      samples, shows its reason
+That is the Linux run with nxaot and the JIT fallback (27 checks). What else it runs, the platform from sys.platform (PLATFORMS below holds every difference):
+  Windows  nxhost-run.exe and nxlauncher.exe, launch-windows.tsv, main.aot.dll packs, the packer with --platform windows; the host row a .cmd (the launcher's CreateProcess starts a
+           batch file through cmd.exe), APPDATA for the launcher's own settings
+  no JIT   a host built without the JIT fallback (CMake NXHOST_JIT off: the Windows cross-build's image has no Boost), which the first session's log says: the hidden function
+           stops the module with status 3 and the [RED] line that it needs the JIT fallback, its miss recorded all the same (aot_run.c note_jit), before synth_hot's loop (no
+           profile to check); the repack is then what makes the game run to its end. The rule's answers are computed here from the files either way
+  no nxaot there is no Windows nxaot: the packs dm/tools/aot/tests/build_packs.sh prebuilt with nxaot for this game (<packs>/second_pack: the folder --packs or NXAOT_PACKS names,
+           the Windows packs folder on Windows), which the packer stand-in puts in place of its nxaot build when T_SECOND_PACK_PREBUILT names that folder (packer.py prebuilt):
+           the first pack from the manifest alone, the repack with the misses a first session records (`0x<hidden> indirect 1`); every step runs as above (the launcher's
+           repack too), but the packs took no profile (made profile unused), so `nxaot build --profile` is not checked and the rule names only misses
+  t_second_pack.py --prebuild <folder>   writes that game for build_packs.sh: main.image.bin, main.aot.tsv and main.misses.tsv
+  t_second_pack.py --dry linux|windows   runs nothing: writes the platform's game, host wrapper and launch file into a temporary folder (the platform as sys.platform would give it),
+                                         prints them and compares the launch file with what the packer's port_launch_file writes for --platform <platform>
 """
 import argparse
 import hashlib
@@ -37,6 +50,7 @@ import shutil
 import struct
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -48,6 +62,24 @@ sys.path.insert(0, str(REPO / 'dm/tools'))
 SKIP = 77
 ID = '0100AA0700000000'   # a title ID no game has (aot_synth.py's build ID is aa07...)
 TITLE = 'Synthetic Game'
+PREBUILT = 'second_pack'   # the folder of the prebuilt packs in the packs folder (build_packs.sh)
+
+# Every difference between the platforms: the programs' suffix, the launch file the launcher reads there (launcher_model.cpp find_games: launch-<kPlatform>.tsv), a pack's name
+# after its module's (kPackSuffix, aot.h DM_AOT_PACK_SUFFIX), the host row's wrapper (its file name and text: the launcher starts the host row with the pack folder alone, by
+# execve on Linux, by CreateProcess on Windows, which runs a .cmd through cmd.exe; {host} is this build's nxhost-run), the packer's --platform, and the variable that names the
+# launcher's own settings folder (launcher_model.cpp config_path)
+PLATFORMS = {
+    'linux': dict(exe='', launch='launch-linux.tsv', pack='.aot.so', packer='linux', config='XDG_CONFIG_HOME', wrapper='nxhost-run',
+                  text='#!/bin/sh\n# the launch file\'s host: this build\'s nxhost-run with the module named (its game profile lists another game\'s modules)\n'
+                       'dir=$1; shift\nexec \'{host}\' "$dir" main "$@"\n'),
+    'windows': dict(exe='.exe', launch='launch-windows.tsv', pack='.aot.dll', packer='windows', config='APPDATA', wrapper='nxhost-run.cmd',
+                    text='@echo off\r\nrem the launch file\'s host: this build\'s nxhost-run.exe with the module named (its game profile lists another game\'s modules); '
+                         'the launcher\'s CreateProcess runs it through cmd.exe\r\n"{host}" "%~1" main\r\nexit /b %ERRORLEVEL%\r\n'),
+}
+
+
+def platform_of(sys_platform): return 'windows' if sys_platform == 'win32' else 'linux'
+
 
 checks = fails = 0
 
@@ -57,6 +89,9 @@ def check(ok, what):
     checks += 1; fails += not ok
     print(f'{"ok  " if ok else "FAIL"} {what}', flush=True)
     return ok
+
+
+def skipped(what): print(f'[skipped] {what}', flush=True)
 
 
 def show(text, lines):   # the lines of text that hold any of lines' words, for the report
@@ -149,155 +184,331 @@ def profile_reason(now, had):   # launcher_model.cpp profile_state's profile bra
     return ''
 
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument('--build', required=True)
-    ap.add_argument('--nxaot', default='')
-    a = ap.parse_args()
-    build = Path(a.build).resolve()
-    host, launcher = build / 'nxhost-run', build / 'nxlauncher'
-    nxaot = a.nxaot or os.environ.get('NXAOT', '')
-    if not nxaot:
-        print('t_second_pack: skipped: no nxaot (NXAOT=<path> in the environment, or the CMake option NXAOT; dm/tools/aot/README.md builds it in the nxnative-aot image)')
-        return SKIP
-    nxaot = Path(nxaot).resolve()
-    try: usage = subprocess.run([str(nxaot), 'build'], capture_output=True, text=True, errors='replace', timeout=60)
-    except OSError as e: usage = None; why = str(e)
-    if usage is None or 'nxaot build' not in usage.stdout + usage.stderr:
-        print(f't_second_pack: skipped: {nxaot} does not run as nxaot ({why if usage is None else (usage.stdout + usage.stderr).strip()[-300:] or "no output"}); built in the '
-              'nxnative-aot image it links that image\'s libLLVM.so.18.1, which the nxnative-build image has too: run it there')
-        return SKIP
-    for p in (host, launcher):
-        if not p.is_file(): print(f'FAIL: no {p} (the CMake targets nxhost-run and nxlauncher)'); return 1
-    print(f't_second_pack: host {host}, launcher {launcher}, nxaot {nxaot}, packer {PACKER}')
+def counted(n, one, many): return f'{n:,} {one if n == 1 else many}'   # launcher_model.cpp counted
 
-    # 0. The game, packed as build_ipa_from_nsp.py --platform linux lays it out
-    root = Path(os.environ.get('TMPDIR') or '/tmp') / 't_second_pack'
-    shutil.rmtree(root, ignore_errors=True)
-    games = root / 'games'; nsp_dir = games / 'synth'
-    work, wdir = nsp_dir / f'{ID}_build', nsp_dir / f'{ID}-work'
-    rd, prof, aot = wdir / 'run', wdir / 'profile', work / 'aot_v0'
-    aot.mkdir(parents=True)
+
+def better_pack(launch, prof, sha):
+    """What --list's better_pack says of the module main (launcher_model.cpp profile_state, the same rule, computed here on its own from the profile folder's files of this image and
+    the launch file's made rows): the reasons joined with '; ', '-' for none"""
+    if not prof.is_dir() or not any(prof.glob('*.tsv')): return '-'   # no file recorded: no reason
+    made = {(k, n): v for k, n, v in made_of(launch)}
+    reasons, mfile, pfile = [], prof / 'main.misses.tsv', prof / 'main.tsv'
+    if made.get(('made', 'misses')) == 'yes' and mfile.is_file():
+        msha, mrows = misses_rows(mfile)
+        if msha == sha and mrows:
+            pairs = sorted({(o, why) for o, why, _ in mrows})
+            now = (len({o for o, _ in pairs}), fnv64(''.join(f'{o:x} {why}\n' for o, why in pairs)))
+            had = made.get(('misses', 'main'), '0 ').split(' ')
+            if now[0] > int(had[0]): reasons.append(counted(now[0] - int(had[0]), 'new JIT miss', 'new JIT misses'))
+            elif now[1] != had[1]: reasons.append('JIT misses the packs did not take')
+    if made.get(('made', 'profile')) in ('yes', 'no') and pfile.is_file():
+        psha, rows, fns, _ = profile_rows(pfile)
+        now = recorded(rows, fns)
+        if psha in (None, sha) and now[0]:
+            had = made.get(('samples', 'main'))
+            if made[('made', 'profile')] != 'yes' or had is None: reasons.append(counted(now[0], 'sampled function', 'sampled functions') + ' the packs were made without')
+            else:
+                c, s, d = had.split(' ')
+                why = profile_reason(now, (int(c), int(s), d))
+                if why: reasons.append(why)
+    return '; '.join(reasons) or '-'
+
+
+def write_game(aot):
+    """The game in aot: main.image.bin (aot_synth.py's image with synth_hidden set: the entry calls the hidden function, aot_synth.py HIDDEN) and main.aot.tsv, its manifest.
+    Returns {sha, hidden, build_id, hot_loop, hot_entry}"""
     import aot_synth as sm
     t = sm.aot_tables()
     img = bytearray(t['image'])
     hidden = sm.L['f_hidden']
-    global HOT_LOOP, HOT_ENTRY
-    HOT_LOOP = (sm.L['f_hot_loop'], sm.L['f_hot_loop'] + 12)   # synth_hot's loop: add, subs, b.ne (aot_synth.py's labels, from which its image is assembled)
-    HOT_ENTRY = sm.L['f_hot']                                   # synth_hot's entry: its function line's
     assert struct.unpack_from('<I', img, sm.HIDDEN)[0] == 0
-    struct.pack_into('<I', img, sm.HIDDEN, hidden ^ sm.HIDDEN_KEY)   # synth_hidden: the entry calls the hidden function (aot_synth.py HIDDEN)
+    struct.pack_into('<I', img, sm.HIDDEN, hidden ^ sm.HIDDEN_KEY)
     t['image'] = bytes(img)
-    sha = hashlib.sha256(t['image']).hexdigest()
+    aot.mkdir(parents=True, exist_ok=True)
     (aot / 'main.image.bin').write_bytes(t['image'])
-    (aot / 'main.aot.tsv').write_text(sm.manifest_text(t))
-    print(f'the game: {work}: main.image.bin (SHA-256 {sha}, synth_hidden = main+{hidden:#x} ^ {sm.HIDDEN_KEY:#x}), main.aot.tsv')
-    wrapper = root / 'bin/nxhost-run'
-    wrapper.parent.mkdir(parents=True)
-    wrapper.write_text('#!/bin/sh\n# the launch file\'s host: this build\'s nxhost-run with the module named (its game profile lists another game\'s modules)\n'
-                       f'dir=$1; shift\nexec \'{host}\' "$dir" main "$@"\n')
-    wrapper.chmod(0o755)
-    rows = [('game', 'title', TITLE), ('game', 'title_id', ID), ('game', 'version', '1.0.0'), ('game', 'package', 'v0'), ('game', 'platform', 'linux'), ('game', 'graphics', 'nvn'),
+    manifest = sm.manifest_text(t)
+    (aot / 'main.aot.tsv').write_text(manifest, newline='\n')
+    return dict(sha=hashlib.sha256(t['image']).hexdigest(), hidden=hidden, build_id=manifest.split('\n', 1)[0].split('\t')[2], key=sm.HIDDEN_KEY,
+                hot_loop=(sm.L['f_hot_loop'], sm.L['f_hot_loop'] + 12),   # synth_hot's loop: add, subs, b.ne (aot_synth.py's labels, from which its image is assembled)
+                hot_entry=sm.L['f_hot'])                                  # synth_hot's entry: its function line's
+
+
+def first_misses(g):   # the misses file a first session of the game records (the host's header lines that nxaot and the packer read, and its one row)
+    return (f'# nxaot misses: what a first session of t_second_pack\'s game records (dm/host/tests/t_second_pack.py --prebuild; the host writes them in dm/host/aot_profile.c)\n'
+            f'# module main, build ID {g["build_id"]}, image SHA-256 {g["sha"]}\n'
+            f'0x{g["hidden"]:x} indirect 1\n')
+
+
+def write_wrapper(folder, plat, host):   # the host row's file: this build's nxhost-run with the module named
+    path = folder / plat['wrapper']
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(plat['text'].format(host=host), newline='')
+    path.chmod(0o755)
+    return path
+
+
+def launch_rows(plat, wrapper, rd, prof, nsp_dir, nxaot, aot, work):
+    return [('game', 'title', TITLE), ('game', 'title_id', ID), ('game', 'version', '1.0.0'), ('game', 'package', 'v0'), ('game', 'platform', plat['packer']),
+            ('game', 'graphics', 'nvn'),
             ('path', 'host', wrapper), ('path', 'cwd', rd), ('path', 'choices', rd / 'env.txt'), ('path', 'log', rd / 'log.txt'), ('path', 'profile', prof),
-            ('path', 'package', nsp_dir), ('path', 'packer', PACKER), ('path', 'python', sys.executable), ('path', 'nxaot', nxaot),
-            ('pack', 'balanced', aot),
+            ('path', 'package', nsp_dir), ('path', 'packer', PACKER), ('path', 'python', sys.executable)] + ([('path', 'nxaot', nxaot)] if nxaot else []) + \
+           [('pack', 'balanced', aot),
             ('env', 'DM_ROOT', work), ('env', 'DM_SAVE', rd / 'save'), ('env', 'DM_TEMP', rd / 'temp'), ('env', 'DM_LANG', 'en-US'), ('env', 'DM_WINDOW', '1'),
             ('env', 'DM_AOT_RAW', '1'), ('env', 'DM_DBG', '1')]
-    launch = work / 'launch-linux.tsv'
-    launch.write_text('# nxnative launch 1\n# the synthetic module, written by t_second_pack.py\n' + ''.join('\t'.join(str(x) for x in r) + '\n' for r in rows))
-    env = {k: v for k, v in os.environ.items() if k not in ('NXHOST', 'NXPACK', 'DM_AOT_PROFILE', 'DM_AOT_PROFILE_HZ', 'DM_LAUNCHER', 'DM_SAVED_CHOICES')}
-    env.update(SDL_VIDEO_DRIVER='dummy', SDL_VIDEODRIVER='dummy', SDL_AUDIO_DRIVER='dummy', DM_VK_HEADLESS='1', XDG_CONFIG_HOME=str(root / 'config'), PYTHONDONTWRITEBYTECODE='1')
+
+
+def write_launch(path, rows):
+    path.write_text('# nxnative launch 1\n# the synthetic module, written by t_second_pack.py\n' + ''.join('\t'.join(str(x) for x in r) + '\n' for r in rows), encoding='utf-8',
+                    newline='\n')
+
+
+def prebuild(folder):   # --prebuild: the game and its first session's misses, for build_packs.sh's prebuilt packs
+    g = write_game(folder)
+    (folder / 'main.misses.tsv').write_text(first_misses(g), newline='\n')
+    print(f't_second_pack.py --prebuild: {folder}: main.image.bin (SHA-256 {g["sha"]}), main.aot.tsv, main.misses.tsv (0x{g["hidden"]:x} indirect 1)')
+    return 0
+
+
+def dry(name):
+    """--dry: the platform's game folder, wrapper and launch file as a run writes them, nothing run; the launch file against port_launch_file's for --platform <platform>"""
+    import importlib.util
+    import types
+    plat_name = platform_of({'windows': 'win32', 'linux': 'linux'}[name])   # as sys.platform gives it on that platform
+    plat = PLATFORMS[plat_name]
+    spec = importlib.util.spec_from_file_location('build_ipa_from_nsp', REPO / 'scripts/build_ipa_from_nsp.py')
+    nsp = importlib.util.module_from_spec(spec); spec.loader.exec_module(nsp)
+    with tempfile.TemporaryDirectory(prefix='t_second_pack_dry_') as tmp:
+        root = Path(tmp)
+        build = root / 'build'
+        nsp_dir = root / 'games/synth'
+        work, wdir = nsp_dir / f'{ID}_build', nsp_dir / f'{ID}-work'
+        rd, prof, aot = wdir / 'run', wdir / 'profile', work / 'aot_v0'
+        g = write_game(aot)
+        host, launcher = build / f'nxhost-run{plat["exe"]}', build / f'nxlauncher{plat["exe"]}'
+        wrapper = write_wrapper(root / 'bin', plat, host)
+        launch = work / plat['launch']
+        nxaot = build / f'nxaot{plat["exe"]}'
+        rows = launch_rows(plat, wrapper, rd, prof, nsp_dir, nxaot, aot, work)
+        write_launch(launch, rows)
+        print(f'--dry {name} (sys.platform {"win32" if name == "windows" else "linux"}: {plat_name}): host {host}, launcher {launcher}, pack {aot / ("main" + plat["pack"])}')
+        print(f'{wrapper.name}:\n' + ''.join(f'  | {line}\n' for line in wrapper.read_text().splitlines()), end='')
+        print(f'{launch.name}:\n' + ''.join(f'  | {line}\n' for line in launch.read_text().splitlines()), end='')
+        # The packer's own launch file for the platform (its rows for a pack of this folder, its paths under a stand-in repository)
+        pw, pwork = root / 'port', root / 'port' / f'{ID}_build'
+        pwork.mkdir(parents=True)
+        made = [('made', 'profile', 'yes'), ('made', 'misses', 'yes')]
+        port = nsp.port_launch_file(plat_name, root / 'repo', pwork, pw / f'{ID}-work', aot, root / 'extracted', root / 'msl', None, 'gl', 'en-US',
+                                    types.SimpleNamespace(id=ID, table=lambda n: root / n), TITLE, '1.0.0', 'v0', ['balanced'],
+                                    repack={'package': nsp_dir, 'packer': PACKER, 'python': sys.executable, 'nxaot': nxaot}, made=made)
+        print(f'port_launch_file({plat_name!r}, ...): {port.name}:\n' + ''.join(f'  | {line}\n' for line in port.read_text().splitlines() if not line.startswith('# ')), end='')
+        prow = rows_of(port)
+        mine = rows_of(launch)
+        names = lambda rs, k: [n for kk, n, _ in rs if kk == k]
+        port_host = nsp.port_host(root / 'repo', plat_name, ID)[0]
+        check(port.name == launch.name, f'the launch file\'s name: {launch.name} (port_launch_file: {port.name})')
+        check(port.read_text().split('\n', 1)[0] == launch.read_text().split('\n', 1)[0] == nsp.LAUNCH_HEAD, f'its first line: {nsp.LAUNCH_HEAD}')
+        check(names(mine, 'game') == names(prow, 'game') and dict((n, v) for k, n, v in prow if k == 'game')['platform'] == plat['packer'] ==
+              dict((n, v) for k, n, v in mine if k == 'game')['platform'], f'the game rows, in order, platform {plat["packer"]}')
+        check(all(n in names(prow, 'path') for n in names(mine, 'path')) and
+              [n for n in names(prow, 'path') if n in names(mine, 'path')] == names(mine, 'path'), f'the path rows {", ".join(names(mine, "path"))}: the packer\'s, in its order')
+        check([(n, v) for k, n, v in mine if k == 'pack'] == [(n, v) for k, n, v in prow if k == 'pack'] == [('balanced', str(nsp.pack_dir(aot, 'balanced')))],
+              f'the pack row: balanced {aot} (pack_dir)')
+        kinds = lambda rs: [k for i, (k, _, _) in enumerate(rs) if not i or rs[i - 1][0] != k]
+        check(kinds(prow) == ['game', 'path', 'made', 'pack', 'env'] and kinds(mine) == ['game', 'path', 'pack', 'env'],
+              'the rows\' order: game, path, (made: the packer stand-in puts them before the pack rows, as port_launch_file does), pack, env')
+        check(plat['pack'] == nsp.PACK_SUFFIXES[plat_name] and plat['exe'] == port_host.suffix and host.name == port_host.name,
+              f'the pack suffix {plat["pack"]} (PACK_SUFFIXES) and the host\'s name {host.name} (port_host: {port_host.name})')
+        if plat_name == 'windows':
+            text = wrapper.read_text()
+            check(wrapper.suffix == '.cmd' and f'"{host}" "%~1" main\r\n' in wrapper.read_bytes().decode() and 'exit /b %ERRORLEVEL%' in text,
+                  f'{wrapper.name}: a batch file that runs "{host.name}" with the pack folder and the module main, its status passed on')
+        else:
+            check(wrapper.read_text().startswith('#!/bin/sh\n') and f'exec \'{host}\' "$dir" main "$@"' in wrapper.read_text() and os.access(wrapper, os.X_OK),
+                  f'{wrapper.name}: an executable shell script that execs {host.name} with the pack folder and the module main')
+        check((aot / 'main.aot.tsv').read_text().split('\n', 1)[0].split('\t')[3] == g['sha'], f'main.aot.tsv names the image\'s SHA-256 {g["sha"][:16]}...')
+    print(f't_second_pack --dry {name}: {checks} checks, {fails} failed')
+    return 1 if fails else 0
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument('--build', help='the build folder that holds nxhost-run and nxlauncher')
+    ap.add_argument('--nxaot', default='')
+    ap.add_argument('--packs', default='', help=f'the packs folder of build_packs.sh (else NXAOT_PACKS): its {PREBUILT}/ when there is no nxaot')
+    ap.add_argument('--prebuild', metavar='FOLDER', help='write the game and its first session\'s misses into FOLDER (build_packs.sh) and exit')
+    ap.add_argument('--dry', choices=('linux', 'windows'), help='write and compare the platform\'s launch file and wrapper; run nothing')
+    a = ap.parse_args()
+    if a.prebuild: return prebuild(Path(a.prebuild))
+    if a.dry: return dry(a.dry)
+    if not a.build: ap.error('--build is required')
+    plat_name = platform_of(sys.platform)
+    plat = PLATFORMS[plat_name]
+    build = Path(a.build).resolve()
+    host, launcher = build / f'nxhost-run{plat["exe"]}', build / f'nxlauncher{plat["exe"]}'
+    # The recompiler: nxaot when it runs here, else the prebuilt packs (route)
+    nxaot, route, why = a.nxaot or os.environ.get('NXAOT', ''), None, 'no nxaot (NXAOT=<path> in the environment, or the CMake option NXAOT)'
+    if nxaot:
+        nxaot = Path(nxaot).resolve()
+        try: usage = subprocess.run([str(nxaot), 'build'], capture_output=True, text=True, errors='replace', timeout=60)
+        except OSError as e: usage, err = None, str(e)
+        if usage is not None and 'nxaot build' in usage.stdout + usage.stderr: route = 'nxaot'
+        else: why = (f'{nxaot} does not run as nxaot ({err if usage is None else (usage.stdout + usage.stderr).strip()[-300:] or "no output"}); built in the nxnative-aot image it '
+                     'links that image\'s libLLVM.so.18.1, which the nxnative-build image has too: run it there')
+    packs = a.packs or os.environ.get('NXAOT_PACKS', '')
+    prebuilt = Path(packs).resolve() / PREBUILT if packs else None
+    if not route:
+        if prebuilt and all((prebuilt / d / f'main{plat["pack"]}').is_file() for d in ('first', 'misses')):
+            route, nxaot = 'prebuilt', ''
+            print(f't_second_pack: {why}: the prebuilt packs of {prebuilt} instead')
+        else:
+            print(f't_second_pack: skipped: {why}, and no prebuilt packs ({prebuilt or "NXAOT_PACKS / --packs not set"}: dm/tools/aot/tests/build_packs.sh writes '
+                  f'<out>/{PREBUILT} and <out>/win64/{PREBUILT}; on Windows the win64-packs artifact of the aot workflow)')
+            return SKIP
+    for p in (host, launcher):
+        if not p.is_file(): print(f'FAIL: no {p} (the CMake targets nxhost-run and nxlauncher)'); return 1
+    print(f't_second_pack: {plat_name}: host {host}, launcher {launcher}, ' + (f'nxaot {nxaot}' if route == 'nxaot' else f'no nxaot: the prebuilt packs of {prebuilt}') +
+          f', packer {PACKER}')
+
+    # 0. The game, packed as build_ipa_from_nsp.py --platform <platform> lays it out
+    root = Path(os.environ.get('TMPDIR') or tempfile.gettempdir()) / 't_second_pack'
+    shutil.rmtree(root, ignore_errors=True)
+    games = root / 'games'; nsp_dir = games / 'synth'
+    work, wdir = nsp_dir / f'{ID}_build', nsp_dir / f'{ID}-work'
+    rd, prof, aot = wdir / 'run', wdir / 'profile', work / 'aot_v0'
+    g = write_game(aot)
+    sha, hidden = g['sha'], g['hidden']
+    hot_loop, hot_entry = g['hot_loop'], g['hot_entry']
+    print(f'the game: {work}: main.image.bin (SHA-256 {sha}, synth_hidden = main+{hidden:#x} ^ {g["key"]:#x}), main.aot.tsv')
+    if route == 'prebuilt' and not check((prebuilt / 'main.aot.tsv').is_file() and (prebuilt / 'main.aot.tsv').read_bytes() == (aot / 'main.aot.tsv').read_bytes() and
+                                         (prebuilt / 'main.image.bin').read_bytes() == (aot / 'main.image.bin').read_bytes(),
+                                         f'0. the prebuilt packs\' game ({prebuilt}) is this one: its manifest and image byte for byte (build_packs.sh of this commit)'):
+        print(f't_second_pack: {checks} checks, {fails} failed'); return 1
+    wrapper = write_wrapper(root / 'bin', plat, host)
+    launch = work / plat['launch']
+    write_launch(launch, launch_rows(plat, wrapper, rd, prof, nsp_dir, nxaot, aot, work))
+    env = {k: v for k, v in os.environ.items() if k.upper() not in ('NXHOST', 'NXPACK', 'DM_AOT_PROFILE', 'DM_AOT_PROFILE_HZ', 'DM_LAUNCHER', 'DM_SAVED_CHOICES',
+                                                                     'T_SECOND_PACK_PREBUILT', plat['config'])}
+    env.update(SDL_VIDEO_DRIVER='dummy', SDL_VIDEODRIVER='dummy', SDL_AUDIO_DRIVER='dummy', DM_VK_HEADLESS='1', PYTHONDONTWRITEBYTECODE='1')
+    env[plat['config']] = str(root / 'config')   # the launcher's own settings (launcher.txt) in the test's folder, not the user's
+    if route == 'prebuilt': env['T_SECOND_PACK_PREBUILT'] = str(prebuilt)   # the packer stand-in puts these packs in place of its nxaot build (packer.py prebuilt)
+    pack_name = f'main{plat["pack"]}'
+    made_by = 'nxaot' if route == 'nxaot' else f'nxaot (prebuilt by build_packs.sh: {prebuilt / "first" / pack_name})'
     t_start = time.time()
 
     # 1. The first pack: the packer as the launcher's repack runs it (repack_command's argv), on an empty profile folder
-    r = run([sys.executable, PACKER, nsp_dir, '--platform', 'linux', '--pack-mode', 'balanced', '--nxaot', nxaot], env, cwd=nsp_dir, timeout=300)
+    r = run([sys.executable, PACKER, nsp_dir, '--platform', plat['packer'], '--pack-mode', 'balanced'] + (['--nxaot', nxaot] if nxaot else []), env, cwd=nsp_dir, timeout=300)
     print(r.stdout + r.stderr, end='')
     nxlog = (work / 'logs/nxaot_main.log').read_text(errors='replace') if (work / 'logs/nxaot_main.log').is_file() else ''
     red_gate = f'the observation gate at main+{hidden:#x} is in no discovered function\'s code'
     show(nxlog, ['gate sites', red_gate, 'aot: misses'])
-    check(r.returncode == 0 and (aot / 'main.aot.so').is_file(), '1. the first pack: main.aot.so built by nxaot from the manifest')
+    check(r.returncode == 0 and (aot / pack_name).is_file(), f'1. the first pack: {pack_name} built by {made_by} from the manifest')
     check('gate sites 2 (design 1.1)' in nxlog and red_gate in nxlog and 'aot: misses' not in nxlog,
           f'1. no misses yet: the hidden function main+{hidden:#x} is no discovered code, its gate not served (nxaot: gate sites 2 and its [RED] line)')
     made = made_of(launch)
     print(f'      launch file: {made}')
-    check(made == [('made', 'profile', 'yes'), ('made', 'misses', 'yes')], '1. the launch file\'s made rows: made profile yes, made misses yes, no module rows (made_rows)')
+    took = 'yes' if route == 'nxaot' else 'unused'   # the prebuilt packs took no profile: the nxaot the stand-in names has no --profile (made_rows)
+    check(made == [('made', 'profile', took), ('made', 'misses', 'yes')], f'1. the launch file\'s made rows: made profile {took}, made misses yes, no module rows (made_rows)')
     check([(n, v) for k, n, v in rows_of(launch) if k == 'pack'] == [('balanced', str(aot))], '1. the pack row: balanced (packs_ready)')
     lst = run([launcher, '--list', games], env)
     row = listed(lst)
     print(f'      {row}')
     check(lst.returncode == 0 and row.get('packs') == 'balanced' and row.get('problem') == '-' and row.get('better_pack') == '-',
           '1. --list: the game with its balanced pack, no problem, better_pack - (no profile recorded)')
-    pack1 = (aot / 'main.aot.so').read_bytes()
+    pack1 = (aot / pack_name).read_bytes()
 
     # 2. Play: the host on the pack, recording
     r = run([launcher, '--games', games, '--play', ID], env)
     print(r.stderr, end='')
     log = (rd / 'log.txt').read_text(errors='replace') if (rd / 'log.txt').is_file() else ''
-    show(log, ['nxhost-run: modules from', 'DM_AOT_PROFILE', 'gates (', 'that its pack does not call', '[guest]', 'guest code ended', 'aot: misses', 'aot: profile'])
+    show(log, ['nxhost-run: modules from', 'DM_AOT_PROFILE', 'gates (', 'that its pack does not call', 'needs the JIT fallback', '[guest]', 'guest code ended', 'aot: misses',
+               'aot: profile'])
     end = end1 = end_line(log)
-    check(r.returncode == 0 and f'nxhost-run: modules from {aot};' in log and 'with the JIT fallback' in log and end and end[0] == 0,
-          f'2. --play: nxlauncher started nxhost-run on {aot} (the JIT fallback in it), and the module ran to ExitProcess: status 0 (launcher status {r.returncode})')
-    check('every guest thread sampled' in log and f'the profile goes to {prof}/<module>.tsv' in log, '2. DM_AOT_PROFILE set to the launch file\'s profile folder (Play records by default)')
+    jit = 'with the JIT fallback' in log   # the host's engine, as its first line says (main_x86.c): a host built without it stops at the hidden function
+    red_jit = f'at main+{hidden:#x} needs the JIT fallback (design section 11), which this host is built without'
+    if jit:
+        check(r.returncode == 0 and f'nxhost-run: modules from {aot};' in log and end and end[0] == 0,
+              f'2. --play: nxlauncher started nxhost-run on {aot} (the JIT fallback in it), and the module ran to ExitProcess: status 0 (launcher status {r.returncode})')
+    else:
+        check(r.returncode == 3 and f'nxhost-run: modules from {aot};' in log and 'without the JIT fallback' in log and end and end[0] == 3 and red_jit in log,
+              f'2. --play: nxlauncher started nxhost-run on {aot} (built without the JIT fallback), and the hidden function stopped the module: its [RED] line, status 3 (the JIT '
+              f'fallback needed; launcher status {r.returncode})')
+    hp = lambda name: f'{prof}/{name}'   # a path in the profile folder as the host writes it (the folder DM_AOT_PROFILE names, '/', the name)
+    check('every guest thread sampled' in log and f'the profile goes to {hp("<module>.tsv")}' in log, '2. DM_AOT_PROFILE set to the launch file\'s profile folder (Play records by default)')
     check('aot: main: 2 gates (2 observation gates, 1 spin wait back-edges) called by its pack, 1 not' in log and
           f'has an observation gate at main+{hidden:#x} that its pack does not call' in log, '2. the loader: the hidden function\'s gate is the one the pack does not call ([RED] line, 1 not)')
-    check('[guest] aot module: done' in log, '2. the module\'s OutputDebugString line')
-    check(end is not None and end[2] >= 1, f'2. the JIT fallback ran guest code: {end[2] if end else "?"} JIT addresses, {end[1] if end else "?"} dispatcher misses')
+    if jit: check('[guest] aot module: done' in log, '2. the module\'s OutputDebugString line')
+    else: check('[guest] aot module: done' not in log, '2. no OutputDebugString line: the module stopped at the hidden function, before its end')
+    check(end is not None and end[2] >= 1, f'2. the JIT fallback {"ran" if jit else "was needed for"} guest code: {end[2] if end else "?"} JIT addresses, '
+          f'{end[1] if end else "?"} dispatcher misses')
     mfile = prof / 'main.misses.tsv'
     msha, mrows = misses_rows(mfile) if mfile.is_file() else (None, [])
     if mfile.is_file(): print('      main.misses.tsv:\n' + ''.join(f'      | {line}\n' for line in mfile.read_text().splitlines()))
-    check(msha == sha and mrows == [(hidden, 'indirect', 1)] and f'aot: misses: {mfile}: 1 addresses, 1 entries into the JIT fallback, 1 of the addresses this session (main)' in log,
+    check(msha == sha and mrows == [(hidden, 'indirect', 1)] and
+          f'aot: misses: {hp("main.misses.tsv")}: 1 addresses, 1 entries into the JIT fallback, 1 of the addresses this session (main)' in log,
           f'2. {mfile}: the hidden function\'s row ({hidden:#x} indirect 1) under the header naming this image')
     pfile = prof / 'main.tsv'
     psha, prows, pfns, plines = profile_rows(pfile) if pfile.is_file() else (None, {}, {}, False)
     if pfile.is_file(): print('      main.tsv:\n' + ''.join(f'      | {line}\n' for line in pfile.read_text().splitlines()))
     total = sum(prows.values())
-    in_loop = sum(n for o, n in prows.items() if HOT_LOOP[0] <= o < HOT_LOOP[1])
+    in_loop = sum(n for o, n in prows.items() if hot_loop[0] <= o < hot_loop[1])
     top = max(prows, key=prows.get) if prows else None
-    check(psha == sha and prows and f'aot: profile: {pfile}: ' in log and plines and pfns.get(HOT_ENTRY, 0) > 0,
-          f'2. {pfile}: the sample profile written at exit under the header naming this image ({len(prows)} rows, {total} samples), each sampled function\'s rows after its '
-          f'function line, synth_hot\'s (main+{HOT_ENTRY:#x}) among them: {", ".join(f"{e:#x} {n}" for e, n in sorted(pfns.items()))}')
-    check(top is not None and HOT_LOOP[0] <= top < HOT_LOOP[1] and in_loop * 2 > total,
-          f'2. its samples in synth_hot\'s loop [main+{HOT_LOOP[0]:#x}, main+{HOT_LOOP[1]:#x}) (add, subs, b.ne: aot_synth.py\'s labels): {in_loop} of {total}, the most at '
-          f'main+{top if top is not None else 0:#x} ({prows.get(top, 0)})')
-    rec1 = recorded(prows, pfns)
+    if jit:
+        check(psha == sha and prows and f'aot: profile: {hp("main.tsv")}: ' in log and plines and pfns.get(hot_entry, 0) > 0,
+              f'2. {pfile}: the sample profile written at exit under the header naming this image ({len(prows)} rows, {total} samples), each sampled function\'s rows after its '
+              f'function line, synth_hot\'s (main+{hot_entry:#x}) among them: {", ".join(f"{e:#x} {n}" for e, n in sorted(pfns.items()))}')
+        check(top is not None and hot_loop[0] <= top < hot_loop[1] and in_loop * 2 > total,
+              f'2. its samples in synth_hot\'s loop [main+{hot_loop[0]:#x}, main+{hot_loop[1]:#x}) (add, subs, b.ne: aot_synth.py\'s labels): {in_loop} of {total}, the most at '
+              f'main+{top if top is not None else 0:#x} ({prows.get(top, 0)})')
+    else:
+        skipped(f'2. the sample profile in synth_hot\'s loop: the module stopped before the loop (no JIT fallback); {pfile.name} '
+                + (f'written with {total} samples' if pfile.is_file() else 'not written (no sample)'))
+    rec1, had_profile = recorded(prows, pfns), pfile.is_file()
     misses1 = mfile.read_bytes() if mfile.is_file() else b''
 
     # 3. The rule turns on
     lst = run([launcher, '--list', games], env)
     row = listed(lst)
     print(f'      better_pack: {row.get("better_pack")}')
-    without = f'{rec1[0]} sampled function{"" if rec1[0] == 1 else "s"} the packs were made without'
-    check(row.get('better_pack') == f'1 new JIT miss; {without}',
-          f'3. --list: better_pack says 1 new JIT miss; {without} (profile_state against the made rows: made profile yes, no samples row)')
+    want = better_pack(launch, prof, sha)
+    check(row.get('better_pack') == want and want.startswith('1 new JIT miss'),
+          f'3. --list: better_pack says {want} (profile_state against the made rows: made profile {took}, no samples row)')
 
     # 4. The repack, through the launcher
     r = run([launcher, '--games', games, '--repack', ID], env, timeout=300)
     print(r.stderr, end='')
     rlog = (rd / 'repack.txt').read_text(errors='replace') if (rd / 'repack.txt').is_file() else ''
     print(''.join(f'      repack.txt | {line}\n' for line in rlog.splitlines()), end='')
-    want = ['--platform', 'linux', '--pack-mode', 'balanced', '--nxaot', str(nxaot)]
+    argv = ['--platform', plat['packer'], '--pack-mode', 'balanced'] + (['--nxaot', str(nxaot)] if nxaot else [])
     check(r.returncode == 0 and 'the packer started for the balanced pack' in r.stderr and 'nxlauncher: the packer exited with status 0' in r.stderr and
           'packer stand-in: 1 packs built (balanced)' in rlog,
-          f'4. --repack: the launcher ran the launch file\'s packer ({" ".join(want)}) and waited: status 0')
+          f'4. --repack: the launcher ran the launch file\'s packer ({" ".join(argv)}) and waited: status 0')
     nxlog = (work / 'logs/nxaot_main.log').read_text(errors='replace') if (work / 'logs/nxaot_main.log').is_file() else ''
     show(nxlog, ['gate sites', red_gate, 'aot: misses'])
     check('aot: misses: 1 addresses, 1 new entries, 0 resume points, 0 still unserved (none)' in nxlog and 'gate sites 3 (design 1.1)' in nxlog and red_gate not in nxlog,
-          '4. nxaot build --misses: the hidden function compiled (1 new entry), its gate served (gate sites 3), no [RED] line for it')
+          f'4. nxaot build --misses{"" if route == "nxaot" else " (the prebuilt repack: " + str(prebuilt / "misses" / pack_name) + ")"}: the hidden function compiled '
+          '(1 new entry), its gate served (gate sites 3), no [RED] line for it')
     show(nxlog, ['aot: profile', 'aot: tiers'])
-    pw = re.search(r'^aot: profile weights: (\d+) functions, (\d+) branches weighted', nxlog, re.M)
-    tiers = re.search(r'^aot: tiers C (\d+) W (\d+) H (\d+) H\+ (\d+) \(functions\)$', nxlog, re.M)
-    check(f'aot: profile {prof / "main.tsv"}: {total} samples at {len(prows)} offsets, 0 outside every function' in nxlog and pw and int(pw.group(1)) >= 1 and
-          tiers and int(tiers.group(3)) >= 1,
-          f'4. nxaot build --profile: the profile\'s rows taken ({total} samples at {len(prows)} offsets: nxaot skips the function lines), {pw.group(1) if pw else "?"} functions '
-          f'weighed, {tiers.group(3) if tiers else "?"} at tier H')
-    pack2 = (aot / 'main.aot.so').read_bytes() if (aot / 'main.aot.so').is_file() else b''
-    check(bool(pack2) and pack2 != pack1, '4. a new main.aot.so in the balanced folder')
+    if route == 'nxaot' and had_profile:
+        pw = re.search(r'^aot: profile weights: (\d+) functions, (\d+) branches weighted', nxlog, re.M)
+        tiers = re.search(r'^aot: tiers C (\d+) W (\d+) H (\d+) H\+ (\d+) \(functions\)$', nxlog, re.M)
+        check(f'aot: profile {prof / "main.tsv"}: {total} samples at {len(prows)} offsets, 0 outside every function' in nxlog and pw and int(pw.group(1)) >= 1 and
+              tiers and int(tiers.group(3)) >= 1,
+              f'4. nxaot build --profile: the profile\'s rows taken ({total} samples at {len(prows)} offsets: nxaot skips the function lines), {pw.group(1) if pw else "?"} functions '
+              f'weighed, {tiers.group(3) if tiers else "?"} at tier H')
+    else:
+        skipped('4. nxaot build --profile: ' + ('the prebuilt repack was made from the misses alone (no profile: made profile unused)' if route == 'prebuilt' else
+                                                'the first session wrote no sample profile'))
+    pack2 = (aot / pack_name).read_bytes() if (aot / pack_name).is_file() else b''
+    check(bool(pack2) and pack2 != pack1, f'4. a new {pack_name} in the balanced folder')
     made = made_of(launch)
     digest = fnv64(f'{hidden:x} indirect\n')
     print(f'      launch file: {made}')
     samples_row = f'{rec1[0]} {rec1[1]} {rec1[2]}'
-    check(made == [('made', 'profile', 'yes'), ('made', 'misses', 'yes'), ('samples', 'main', samples_row), ('misses', 'main', f'1 {digest}')],
-          f'4. the made rows: made profile yes, made misses yes, samples main {samples_row} (sampled functions, their samples, FNV-1a 64 of their entries, computed here), '
+    want = [('made', 'profile', took), ('made', 'misses', 'yes')] + ([('samples', 'main', samples_row)] if route == 'nxaot' and had_profile else []) + \
+           [('misses', 'main', f'1 {digest}')]
+    check(made == want,
+          f'4. the made rows: made profile {took}, made misses yes, ' + (f'samples main {samples_row} (sampled functions, their samples, FNV-1a 64 of their entries, computed here), '
+                                                                        if len(want) == 4 else '') +
           f'misses main 1 {digest} (FNV-1a 64 of "{hidden:x} indirect\\n")')
 
     # 5. The rule turns off
@@ -310,31 +521,36 @@ def main():
     r = run([launcher, '--games', games, '--play', ID], env)
     print(r.stderr, end='')
     log = (rd / 'log.txt').read_text(errors='replace') if (rd / 'log.txt').is_file() else ''
-    show(log, ['gates (', 'that its pack does not call', '[guest]', 'guest code ended', 'aot: misses', 'aot: profile'])
+    show(log, ['gates (', 'that its pack does not call', 'needs the JIT fallback', '[guest]', 'guest code ended', 'aot: misses', 'aot: profile'])
     end = end_line(log)
     check(r.returncode == 0 and end and end[0] == 0 and '[guest] aot module: done' in log, '6. --play again: the module ran to ExitProcess, status 0')
     check('aot: main: 3 gates (2 observation gates, 1 spin wait back-edges) called by its pack, 0 not' in log and 'that its pack does not call' not in log,
           '6. the loader: the new pack calls every gate, the hidden function\'s too (0 not, no [RED] line)')
-    check(end is not None and end1 is not None and end[2] == 0 and end[1] == end1[1] + 1,
-          f'6. no JIT fallback: 0 JIT addresses ({end[2] if end else "?"}); {end[1] if end else "?"} dispatcher misses, the first session\'s {end1[1] if end1 else "?"} and the hidden '
-          'function\'s call binding its inline cache to its new standard entry (aot.h dm_aot_stats_t misses)')
+    if jit:
+        check(end is not None and end1 is not None and end[2] == 0 and end[1] == end1[1] + 1,
+              f'6. no JIT fallback: 0 JIT addresses ({end[2] if end else "?"}); {end[1] if end else "?"} dispatcher misses, the first session\'s {end1[1] if end1 else "?"} and the '
+              'hidden function\'s call binding its inline cache to its new standard entry (aot.h dm_aot_stats_t misses)')
+    else:
+        check(end is not None and end[2] == 0 and red_jit not in log,
+              f'6. the JIT fallback not needed: 0 JIT addresses ({end[2] if end else "?"}), no [RED] line (the first session stopped at the hidden function: its '
+              f'{end1[1] if end1 else "?"} dispatcher misses are not this one\'s {end[1] if end else "?"})')
     check('aot: misses: the JIT fallback ran for no pack this session: no misses file written' in log and mfile.is_file() and mfile.read_bytes() == misses1,
           f'6. no misses file written; {mfile.name} unchanged')
     psha2, prows2, pfns2, plines2 = profile_rows(pfile) if pfile.is_file() else (None, {}, {}, False)
     rec2 = recorded(prows2, pfns2)
     print(f'      main.tsv: {len(prows2)} rows: ' + ', '.join(f'{o:#x} {n}' for o, n in sorted(prows2.items())) + '; function lines: ' +
           ', '.join(f'{e:#x} {n}' for e, n in sorted(pfns2.items())))
-    check(psha2 == sha and f'aot: profile: {pfile}: ' in log and plines2 and sum(n for o, n in prows2.items() if HOT_LOOP[0] <= o < HOT_LOOP[1]) * 2 > sum(prows2.values()),
+    check(psha2 == sha and f'aot: profile: {hp("main.tsv")}: ' in log and plines2 and sum(n for o, n in prows2.items() if hot_loop[0] <= o < hot_loop[1]) * 2 > sum(prows2.values()),
           f'6. {pfile.name} written again, this session\'s: {len(prows2)} rows in {rec2[0]} sampled functions, {rec2[1]} samples, most in synth_hot\'s loop (the first session: '
           f'{len(prows)} rows in {rec1[0]} functions, {rec1[1]} samples)')
     check('nxhost-run: modules from' in (rd / 'log.prev.txt').read_text(errors='replace') if (rd / 'log.prev.txt').is_file() else False, '6. the first session\'s log kept as log.prev.txt')
     lst = run([launcher, '--list', games], env)
     row = listed(lst)
     print(f'      better_pack: {row.get("better_pack")}')
-    want = profile_reason(rec2, rec1) or '-'
+    want = better_pack(launch, prof, sha)
     check(lst.returncode == 0 and row.get('better_pack') == want,
-          f'6. --list: {want} (the rule on this session\'s profile against the samples row: {rec2[0]} sampled functions vs {rec1[0]}, {rec2[1]} samples vs {rec1[1]}, '
-          f'{"the same" if rec2[2] == rec1[2] else "another"} hot set)')
+          f'6. --list: {want} (the rule on this session\'s profile against the made rows: made profile {took}; {rec2[0]} sampled functions vs {rec1[0]}, {rec2[1]} samples vs '
+          f'{rec1[1]}, {"the same" if rec2[2] == rec1[2] else "another"} hot set)')
 
     print(f't_second_pack: {checks} checks, {fails} failed ({time.time() - t_start:.1f} s)')
     if not fails: shutil.rmtree(root, ignore_errors=True)

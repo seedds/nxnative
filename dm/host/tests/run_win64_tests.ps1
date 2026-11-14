@@ -1,11 +1,13 @@
 # Runs the host unit tests of a Windows build folder on this PC and records the run in the repository: one log per test and summary.txt in logs\win64\
 # (logs\README.md). The tree is cross-built in Docker with llvm-mingw (docker\README.md); this script only runs what was built. From the repository root:
 #   powershell -NoProfile -ExecutionPolicy Bypass -File dm\host\tests\run_win64_tests.ps1 [-BuildDir build\win64] [-LogDir logs\win64] [-TimeoutSeconds 120] [-Packs build\packs\win64]
-# The runs come from <BuildDir>\host_tests.tsv (written by dm\host\CMakeLists.txt), then the script tests of <BuildDir>\host_scripts.tsv that run on Windows (none yet:
-# t_second_pack and t_vk_spirv are Linux only, and summary.txt lists them as "not run on Windows" with the reason); the old *.log files and summary.txt in <LogDir> are removed first.
-# The AOT tests (t_aot_host, t_aot_module, t_aot_hostfn, t_host_program) run the recompiled packs of NXAOT_PACKS: -Packs, else the environment's NXAOT_PACKS, else
+# The runs come from <BuildDir>\host_tests.tsv (written by dm\host\CMakeLists.txt), then the script tests of <BuildDir>\host_scripts.tsv that run on Windows (t_second_pack,
+# with Python: $env:PYTHON, else py -3; t_vk_spirv is Linux only, and summary.txt lists it as "not run on Windows" with the reason); the old *.log files and summary.txt in
+# <LogDir> are removed first.
+# The AOT tests (t_aot_host, t_aot_module, t_aot_hostfn, t_host_program, and the script test t_second_pack, which has no nxaot on Windows and takes the packs build_packs.sh
+# prebuilt for it in <packs>\second_pack) run the recompiled packs of NXAOT_PACKS: -Packs, else the environment's NXAOT_PACKS, else
 # build\packs\win64 when it exists (the Windows packs dm/tools/aot/tests/build_packs.sh writes into <out>\win64: docker\README.md); t_aot_host also gets the corpus of the
-# checkout (--corpus dm\tools\aot\corpus: the one compiled in is the container's path). Without packs those tests pass with a note.
+# checkout (--corpus dm\tools\aot\corpus: the one compiled in is the container's path). Without packs those tests pass with a note (t_second_pack is a SKIP).
 # Exit status: 0 when every run passed, 1 when one did not, 2 when the build folder or its test list (or a given packs folder) is missing. Windows PowerShell 5.1 (stock on
 # Windows 10) or PowerShell 7. dm/host/tests/run_host_tests.sh does the same from Git Bash (and on Linux), with NXAOT_PACKS from the environment
 param(
@@ -175,6 +177,7 @@ if (-not (Test-Path -LiteralPath $scriptsFile -PathType Leaf)) {
             foreach ($v in ($reads -split ' ')) {
                 if ($v -eq '') { continue }
                 $val = [Environment]::GetEnvironmentVariable($v)
+                if ($v -eq 'NXAOT_PACKS' -and $Packs) { $val = $Packs; $envPairs += ,@('NXAOT_PACKS', $Packs) }   # the packs folder of the AOT tests (-Packs, build\packs\win64)
                 if ($val) { $note = "$v=$val" } else { $note = "$v not set"; $missing += $v }
                 if (-not $sReads.Contains($note)) { $sReads.Add($note) }
             }

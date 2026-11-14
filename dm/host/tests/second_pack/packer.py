@@ -9,6 +9,8 @@ packer's own code for the rest, imported from scripts/build_ipa_from_nsp.py (its
   made_rows       the launch file's made, samples and misses rows: what the packs took
   packs_ready     the pack modes whose packs are complete and current: the launch file's pack rows
 and writes the launch file again as port_launch_file orders its rows (game, path, made / samples / misses, pack, env), its other rows as they were.
+Without nxaot (a Windows PC: there is no Windows nxaot), T_SECOND_PACK_PREBUILT=<folder> in the environment (t_second_pack.py sets it; the launcher's repack passes it on) names
+the packs dm/tools/aot/tests/build_packs.sh made with nxaot for that game (<packs>/second_pack): they take the place of aot_packs' nxaot build (prebuilt below), the rest as above.
   packer.py <NSP folder> --platform linux|windows --pack-mode balanced|max [-k <prod.keys>] [--nxaot <nxaot>]
 the arguments the launcher's repack passes (dm/launcher/launcher_model.cpp repack_command). The game: the one <id>_build/ in the NSP folder with a launch file of the platform;
 its recompiler's input: the balanced pack row's folder (aot_<version>/, pack_dir), its modules: the manifests there; the profile folder: the launch file's profile row. Exit 0
@@ -16,6 +18,7 @@ when the packs and the launch file are written, 1 on an error ([RED] line), 2 on
 import argparse
 import importlib.util
 import os
+import shutil
 import sys
 from pathlib import Path
 
@@ -36,6 +39,30 @@ def rows_of(path):   # the launch file: its '#' lines and its (kind, name, value
     return head, rows
 
 
+def prebuilt(folder, mode, aot, mods, misses, logs, platform):
+    """aot_packs without nxaot: the packs build_packs.sh made with nxaot from the same inputs (t_second_pack.py --prebuild), put in the mode's folder with nxaot's log as aot_packs
+    keeps it: <folder>/first/<name><suffix> (`nxaot build <name>.aot.tsv`) when the profile folder holds no JIT misses of the module, <folder>/misses/<name><suffix> (with
+    `--misses <folder>/<name>.misses.tsv`) when its misses' (address, reason) pairs are that file's (aot_misses, the pairs a pack's key takes). The manifest and the image must be
+    the folder's byte for byte. Their nxaot's options: --target (the Windows packs) and --misses; no --profile (they took no profile: made_rows says made profile unused).
+    Returns (the packs placed, the options)"""
+    suffix, opts = nsp.PACK_SUFFIXES[platform], {'--target', '--misses'}
+    if mode != 'balanced': raise nsp.BuildError(f'the prebuilt packs of {folder} are balanced ones, not {mode}')
+    for m in mods:
+        for f in (f'{m}.aot.tsv', f'{m}.image.bin'):
+            if not (folder / f).is_file() or (folder / f).read_bytes() != (aot / f).read_bytes():
+                raise nsp.BuildError(f'{folder / f} is not {aot / f}: the prebuilt packs are of another game (build_packs.sh of another commit?)')
+        sha = nsp.manifest_sha(aot, m)
+        _, pairs = nsp.aot_misses(misses, m, sha, quiet=True)
+        want = nsp.aot_misses(folder, m, sha, quiet=True)[1] if pairs else ()
+        if pairs != want: raise nsp.BuildError(f'no prebuilt pack of {m} with the misses {misses / (m + ".misses.tsv")} ({len(pairs)} pairs; {folder}/misses was made with {len(want)})')
+        src = folder / ('misses' if pairs else 'first')
+        nsp.say(f'{m}: the prebuilt pack {src / (m + suffix)} (nxaot build{" --misses " + str(folder / (m + ".misses.tsv")) if pairs else ""}), in place of nxaot')
+        logs.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(src / f'nxaot_{m}.log', logs / f'nxaot_{m}.log')
+        shutil.copyfile(src / f'{m}{suffix}', aot / f'{m}{suffix}.partial'); os.replace(aot / f'{m}{suffix}.partial', aot / f'{m}{suffix}')
+    return len(mods), opts
+
+
 def repack(a):
     platform, mode = a.platform, a.pack_mode
     builds = sorted(p for p in Path(a.package).iterdir() if p.name.endswith('_build') and (p / f'launch-{platform}.tsv').is_file())
@@ -51,18 +78,24 @@ def repack(a):
     nro_dir, wdir = work / f'nro_{pkg_ver}', Path(paths['cwd']).parent
     mods = sorted(p.name[:-len('.aot.tsv')] for p in aot.glob('*.aot.tsv'))
     profiles = misses = Path(paths['profile'])   # as main: <id>-work/profile, the sample profiles and the JIT misses
-    nxaot = Path(a.nxaot or paths.get('nxaot', ''))
     env = dict(os.environ)
-    opts = nsp.nxaot_options(nxaot, env)
-    nsp.say(f'packer stand-in: {work.name}: modules {", ".join(mods)} from {aot}; nxaot {nxaot} (options {", ".join(sorted(opts)) or "none"}); profile folder {profiles}')
-    built = nsp.aot_packs(nxaot, opts, mode, 0, wdir / 'aot-cache', aot, nro_dir, mods, env, work / 'logs', work / 'tmp/aot', platform, profiles, misses)
+    pre = os.environ.get('T_SECOND_PACK_PREBUILT', '')
+    if pre:
+        nsp.say(f'packer stand-in: {work.name}: modules {", ".join(mods)} from {aot}; no nxaot: the prebuilt packs of {pre}; profile folder {profiles}')
+        built, opts = prebuilt(Path(pre), mode, aot, mods, misses, work / 'logs', platform)
+    else:
+        nxaot = Path(a.nxaot or paths.get('nxaot', ''))
+        opts = nsp.nxaot_options(nxaot, env)
+        nsp.say(f'packer stand-in: {work.name}: modules {", ".join(mods)} from {aot}; nxaot {nxaot} (options {", ".join(sorted(opts)) or "none"}); profile folder {profiles}')
+        built = nsp.aot_packs(nxaot, opts, mode, 0, wdir / 'aot-cache', aot, nro_dir, mods, env, work / 'logs', work / 'tmp/aot', platform, profiles, misses)
     for m in mods:
         log = work / 'logs' / f'nxaot_{m}.log'
         if built and log.is_file():
             for line in log.read_text(errors='replace').splitlines():
                 if line.startswith(('aot: misses', '[RED]', 'aot: profile')) or 'gate sites' in line: nsp.say(f'nxaot_{m}.log: {line}')
     made = nsp.made_rows(opts, aot, mods, profiles, misses, False)
-    ready = sorted(nsp.packs_ready(nxaot, opts, aot, nro_dir, mods, platform, profiles, misses), key=lambda m: m != mode)   # the mode just packed first, as main
+    if pre: ready = [mode]   # the prebuilt packs have no keys (aot_packs writes them): the mode just placed, complete
+    else: ready = sorted(nsp.packs_ready(nxaot, opts, aot, nro_dir, mods, platform, profiles, misses), key=lambda m: m != mode)   # the mode just packed first, as main
     # port_launch_file's order: game and path rows, the made rows, the pack rows, the env rows; the rows this run writes replace theirs
     keep = [r for r in rows if r[0] not in ('made', 'samples', 'misses', 'pack')]
     at = max((i + 1 for i, r in enumerate(keep) if r[0] in ('game', 'path')), default=0)

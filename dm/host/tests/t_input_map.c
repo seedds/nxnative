@@ -76,6 +76,18 @@ int main(void) {
     CHECK(stick_dz_valid("0") && stick_dz_valid("0.50") && !stick_dz_valid("0.51") && !stick_dz_valid(""), "dead zone check: 0 to 0.5");
     CHECK(stick_sens_valid("0.25") && stick_sens_valid("3") && !stick_sens_valid("0.2") && !stick_sens_valid(NULL), "sensitivity check: 0.25 to 3");
 
+    // Held keys: each key keeps the function of its first press, and the held functions are the OR over the keys (GitHub #386: two keys on one function, Shift during a repeat)
+    key_state ks = {0}; key_map_default(&k);
+    const uint32_t rup = 1u << IM_RUP, dup = 1u << 13;   // the D-pad's Up is function 13
+    CHECK(key_state_event(&ks, &k, 126, 1, 1) == rup, "Shift+Up holds the right stick up");
+    CHECK(key_state_event(&ks, &k, 126, 1, 0) == rup, "a repeat after Shift is released keeps the right stick, not the D-pad");
+    CHECK(key_map_parse(&k, "RUp=31") == 0 && key_state_event(&ks, &k, 31, 1, 0) == rup, "a key mapped to RUp holds the same direction");
+    CHECK(key_state_event(&ks, &k, 126, 0, 0) == rup, "releasing Shift+Up keeps the direction the other key still holds");
+    CHECK(key_state_event(&ks, &k, 31, 0, 1) == 0, "releasing the last key clears it, whatever Shift does");
+    CHECK(key_state_event(&ks, &k, 126, 1, 0) == dup, "plain Up holds the D-pad");
+    CHECK(key_state_event(&ks, &k, 126, 1, 1) == dup && key_state_event(&ks, &k, 126, 0, 1) == 0, "Shift pressed during a repeat adds no second function to stick");
+    CHECK(key_state_event(&ks, &k, 50, 1, 0) == 0 && key_state_event(&ks, &k, 300, 1, 0) == 0, "a key without a function or past the table holds nothing");
+
     printf("input map: %d checks, %d failed\n", checks, fails);
     return fails != 0;
 }

@@ -144,15 +144,15 @@ static void cursor_hide_for_input(void) {
 }
 // Keyboard: each key holds one function of the key map (input_map.h; DM_KEYMAP changes it), the held functions make the buttons and both sticks
 static key_map g_keys;
-static uint32_t g_held_fn;   // bit f: a key holding function f is down
-static int8_t g_key_down_fn[IM_KEYS];   // the function each key pressed when it went down, +1 (0: up): it goes back up as it went down, whatever Shift does meanwhile
+static key_state g_key_state;   // each key held and the function it took at its first press
+static uint32_t g_held_fn;   // bit f: a key holding function f is down (key_state_event)
 static void push(void) {
     uint32_t h = g_held_fn;
     #define D(f) ((int32_t)(h >> (f) & 1))
     dm_input_set(g_btn, (D(IM_LRIGHT) - D(IM_LLEFT)) * 32767, (D(IM_LUP) - D(IM_LDOWN)) * 32767, (D(IM_RRIGHT) - D(IM_RLEFT)) * 32767, (D(IM_RUP) - D(IM_RDOWN)) * 32767);
     #undef D
 }
-static void keys_release(void) { g_btn = 0; g_held_fn = 0; memset(g_key_down_fn, 0, sizeof g_key_down_fn); push(); }
+static void keys_release(void) { g_btn = 0; g_held_fn = 0; memset(&g_key_state, 0, sizeof g_key_state); push(); }
 // fn held with a letter: the arrow and function keys carry the same modifier flag, so the key must be a letter for this to be a Globe shortcut
 static int fn_shortcut(NSEvent *e) {
     NSString *s = e.charactersIgnoringModifiers;
@@ -168,17 +168,10 @@ static void on_key(NSEvent *e, int down) {
         return;
     }
     if (c >= IM_KEYS) return;
-    int f;
-    if (down) {
-        f = key_map_fn(&g_keys, c); if (f < 0) return;
-        // A key holding a D-pad direction, pressed with Shift held, is that direction of the right stick until it is released. By default these are the arrow keys:
-        // the keyboard had no right stick, and a 3D game's camera could be turned only with a controller (Donkey Kong Bananza)
-        if ((e.modifierFlags & NSEventModifierFlagShift) && f >= 12 && f <= 15) f = (int[]){IM_RLEFT, IM_RUP, IM_RRIGHT, IM_RDOWN}[f - 12];
-        g_key_down_fn[c] = (int8_t)(f + 1);
-    } else { f = g_key_down_fn[c] - 1; g_key_down_fn[c] = 0; if (f < 0) return; }
-    g_held_fn = down ? (g_held_fn | 1u << f) : (g_held_fn & ~(1u << f));
+    // Shift with a key of the D-pad is the right stick (key_state_event): the keyboard had no right stick, and a 3D game's camera could be turned only with a controller (Donkey Kong Bananza)
+    g_held_fn = key_state_event(&g_key_state, &g_keys, c, down, (e.modifierFlags & NSEventModifierFlagShift) != 0);
     g_btn = (g_held_fn & 0xffff) | (g_held_fn >> IM_SHAKE & 1 ? DM_BTN_SHAKE : 0);
-    if (down) cursor_hide_for_input();   // a key the game takes
+    if (down && g_key_state.fn[c]) cursor_hide_for_input();   // a key the game takes
     push();
 }
 

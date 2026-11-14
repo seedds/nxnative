@@ -81,6 +81,25 @@ static int input_map_valid(const char *spec, int pad) {
     return pad ? !im_parse(spec, IM_BUTTONS, im_pad_one, &m, 0) : !im_parse(spec, IM_N, im_key_one, &k, 0);
 }
 static int key_map_fn(const key_map *m, unsigned code) { return code < IM_KEYS ? m->fn[code] : -1; }
+// The keys held down, each with the function it took at its first press (+1; 0: up). A key-down repeat, or Shift pressed or released while the key is held, keeps that
+// function, so nothing is left held that no key-up clears. The held functions are the OR over the keys: two keys holding one function (Shift+Up and a key mapped to RUp)
+// keep it held until both are up
+typedef struct { uint8_t fn[IM_KEYS]; } key_state;
+// One key event (shift: Shift is held at it); returns the functions held now, bit f for function f. A key holding a D-pad direction, pressed with Shift held, holds that
+// direction of the right stick instead (by default the arrow keys: the camera of a 3D game)
+static uint32_t key_state_event(key_state *s, const key_map *m, unsigned code, int down, int shift) {
+    if (code < IM_KEYS) {
+        if (!down) s->fn[code] = 0;
+        else if (!s->fn[code]) {
+            int f = key_map_fn(m, code);
+            if (shift && f >= 12 && f <= 15) f = (int[]){IM_RLEFT, IM_RUP, IM_RRIGHT, IM_RDOWN}[f - 12];   // Left Up Right Down
+            if (f >= 0) s->fn[code] = (uint8_t)(f + 1);
+        }
+    }
+    uint32_t held = 0;
+    for (int c = 0; c < IM_KEYS; c++) if (s->fn[c]) held |= 1u << (s->fn[c] - 1);
+    return held;
+}
 // The buttons a controller sends for the buttons the default mapping read (DM_BTN_* bits); bits above the 16 buttons (DM_BTN_SHAKE) pass through
 static uint64_t pad_map_apply(const pad_map *m, uint64_t btn) {
     uint64_t out = btn & ~0xffffull;

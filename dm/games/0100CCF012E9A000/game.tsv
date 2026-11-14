@@ -1,0 +1,36 @@
+# ENDER LILIES: Quietus of the Knights: Binary Haze Interactive / Live Wire / Adglobe, Unreal Engine 4 (version 11 pak with GlobalShaderCache and inline shaders in IoStore v2 containers, MallocBinned3), SDK 10.4.0, NVN, FMOD sound, NintendoSDK_movie for cinematics; update 1.1.5c (v458752).
+# Started from the NSP script's provisional profile (dm/games/profile_guess.py) and brought up on the Mac (docs/agents)
+# Format: see dm/games/README.md
+
+# ---- Identity ----
+title_id	0100CCF012E9A000
+program_id	0100CCF012E9A000
+
+# ---- App ----
+name	ENDER LILIES: Quietus of the Knights
+ipa	EnderLiliesQuietusOfTheKnights.ipa
+app_category	public.app-category.role-playing-games
+
+# ---- Versions ----
+build	v458752	1.1.5c	main=50ed9207cfdbbfa42d5e1b98e7fde9ea	subsdk0=2c35246689bc9c3d21b19cebedd74646	sdk=204eaef83fe5e5617d0787c8ef01a080
+package	v458752
+shader_versions	v458752
+
+# ---- Files ----
+modules	main subsdk0 sdk
+romfs_marker	EnderLilies/Content/Paks/EnderLilies-Switch.pak
+zip_store	.bank:.pak:.ucas:.metallib
+
+# ---- Memory ----
+mem_reserve	0x1028000000
+mem_alias	0x1000000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+sys_resource	0x1000000
+
+# ---- Shader split ----
+shader_groups	GlobalShaderCache=global EnderLilies/=game
+shader_note	ENDER LILIES: Quietus of the Knights shaders
+
+# ---- Graphics ----
+depth_mode	zero

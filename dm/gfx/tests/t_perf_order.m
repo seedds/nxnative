@@ -73,7 +73,7 @@ static void rt(chain *c, const tex_t *t, int layer, const tex_t *ds) {
     if(layer>=0) { r.has_cview[0]=1; r.cview[0]=(view_t){.set_layers=1,.min_layer=layer,.nlayers=1}; }
     emit(c,OP_SET_RT,&r,sizeof r);
 }
-static void bind(chain *c, const prog_t *p, int stages) {
+static void bind_op(chain *c, const prog_t *p, int stages) {
     p_bind_program b={p,stages}; emit(c,OP_BIND_PROGRAM,&b,sizeof b);
 }
 static void triangle(chain *c) {
@@ -98,7 +98,7 @@ static NvProg *make_program(id<MTLLibrary> lib, prog_t *pg, const char *fragment
 static void slices(id<MTLLibrary> lib) {
     tex_t t=texture(NVN_TEXTURE_TARGET_2D_ARRAY,NVN_FORMAT_RGBA8,6);
     prog_t pg={0}; NvProg *p=make_program(lib,&pg,"red");
-    chain c={0}; bind(&c,&pg,3);
+    chain c={0}; bind_op(&c,&pg,3);
     for(int sl=0;sl<6;sl++) { rt(&c,&t,sl,NULL); triangle(&c); }
     // Warm the demanded amplified pipeline before checking the actual merge.
     execute(&c);
@@ -144,7 +144,7 @@ static void hoists(id<MTLLibrary> lib) {
     void *mem=NULL; if(posix_memalign(&mem,getpagesize(),getpagesize())) abort(); memset(mem,0,getpagesize()); mtl_pool_add(mem,getpagesize());
     tex_t t=texture(NVN_TEXTURE_TARGET_2D,NVN_FORMAT_RGBA8,1);
     for(int hazard=0;hazard<2;hazard++) {
-        chain c={0}; rt(&c,&t,-1,NULL); bind(&c,&pg,3); bind(&c,&cp,32);
+        chain c={0}; rt(&c,&t,-1,NULL); bind_op(&c,&pg,3); bind_op(&c,&cp,32);
         p_bind_buf b={.stage=5,.index=0,.addr=(uint64_t)mem,.size=4}; emit(&c,OP_BIND_SSBO,&b,sizeof b);
 
         triangle(&c);

@@ -541,7 +541,8 @@ def inline_shaders(path, key=None):
     (inline_in_containers; Mario & Luigi: Brothership and Yoshi and the Mysterious Book: the same setting with IoStore on). FINAL FANTASY RESONANCE's pak names the global shader cache too, but its
     shaders are in its container's shader libraries (neither counts). An encrypted index is read with key, main's (Keys; Octopath Traveler 0's holds the archives, DRAGON BALL Sparking! ZERO's
     pakchunk0-Switch.pak the global shader cache, its cooked packages in the encrypted containers beside it); without a key it counts as one with archives, as before keys were tried here.
-    None: the pak names no file, so it holds neither (the empty pakchunk1-17-Switch.pak beside Sparking! ZERO's containers, mount point "/")"""
+    None: the pak names no file, so it holds neither (the empty pakchunk1-17-Switch.pak beside Sparking! ZERO's containers, mount point "/"), or names no shader code archive, cooked
+    package or global shader cache (Persona 3 Reload's pakchunk1, 2 and 4: audio and fonts)"""
     with open(path, 'rb') as f:
         enc, ioff, isz, _, ver = footer(f)
         if ver in LEGACY: return True
@@ -554,6 +555,7 @@ def inline_shaders(path, key=None):
         if r.take('<i'): r.take('<QQ'); r.raw(20)
         if not r.take('<i'): return False
         doff, dsz = r.take('<QQ'); d = at(doff, dsz)
+    if b'.ushaderbytecode\0' not in d and b'.uexp\0' not in d and b'GlobalShaderCache-' not in d: return None   # audio and fonts only (Persona 3 Reload's pakchunk1, 2 and 4)
     return b'.ushaderbytecode\0' not in d and (b'.uexp\0' in d or (b'GlobalShaderCache-' in d and inline_in_containers(path)))
 
 def unreal_paks(romfs, inline=None, mains=()):
@@ -629,11 +631,12 @@ def finish(work, out):
 
 def lslg(s):
     """A decoded Switch shader (LSLG): 'LSLG', a stage tag (SV vertex, SP pixel, SC compute, ...), a header with the shader's source name, then u32 code length, the code area,
-    u32 control length and the control section (0x880 bytes), and a short tail (24 or 29 bytes). → (tag, control section, code area), or None if the layout differs"""
+    u32 control length and the control section (0x880 bytes; an NVN2 one on a Switch 2), and a short tail (24 or 29 bytes). → (tag, control section, code area), or None if the layout differs"""
     if s[:4] != b'LSLG': return None
     k = s.find(b'\x34\x12\x76\x98')
-    if k < 8 or k + 0x708 > len(s): return None
-    nctl, ncode = struct.unpack_from('<I', s, k - 4)[0], struct.unpack_from('<I', s, k + 0x704)[0]
+    at = 0x44 if s[k:k + 8] == CTL_NVN2 else 0x704   # an NVN2 control section (Persona 3 Reload, UE 4.27's SF_GLSL_SAGE): the code length at +0x44, as sage_record reads it
+    if k < 8 or k + at + 4 > len(s): return None
+    nctl, ncode = struct.unpack_from('<I', s, k - 4)[0], struct.unpack_from('<I', s, k + at)[0]
     c = k - 4 - ncode
     if c < 4 or struct.unpack_from('<I', s, c - 4)[0] != ncode or k + nctl > len(s): return None
     return s[4:6].decode('latin1'), s[k:k + nctl], s[c:c + ncode]

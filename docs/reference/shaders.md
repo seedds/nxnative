@@ -492,6 +492,13 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Reader:** `uepak.py` writes them out as version 2 archives, so the split reads them as any other. The pak beside them can name the global shader cache as [an inline game's does](#unreal-engine-427-shaders-inline-in-iostore-export-bundles), so that name alone does not tell the two apart: `inline_in_containers` does, by the shader libraries.
 - **Found on:** [FINAL FANTASY RESONANCE](../../dm/games/0100606026F12000/README.md) (Unreal Engine 5.6.1): 73,496 unique shaders (9,253 vertex, 61,305 pixel, 2,934 compute, 4 geometry). The symptom on its [Asian release](../../dm/games/0100B8A026F14000/README.md#found-on-this-game).
 
+### Unreal Engine 5.6 IoStore shader libraries for the Switch 2
+
+- **Symptom:** the NSP script's `UE shader decode` finds both libraries (`ShaderArchive-Global-SF_GLSL_SWITCH2-SP_GLSL_SWITCH2.ushaderbytecode` and the game's), then the split stops at once: `[RED] /ue_shaders/ShaderArchive-Global-…: shader 0 is not an LSLG record`.
+- **How it is stored:** as [the Switch's 5.6 libraries](#unreal-engine-56-iostore-shader-libraries), but each decoded shader is the NVN2 record of [Unreal Engine 5.4 for the Switch 2](#unreal-engine-54-shaders-for-the-switch-2) (`uepak.sage_record`: header, source name, code area, NVN2 control section), with no `LSLG` tag to give the stage. The frequency byte is in Unreal Engine 5's numbering (0 vertex, 1 mesh, 2 amplification, 3 pixel, 4 geometry, 5 compute), where Unreal Engine 4 had hull and domain at 1 and 2.
+- **Fix:** `shader_split.py` `ue_shaders` takes such a record when it is not `LSLG`, its stage from the record itself (`nvn2_stage`: the control section's stage byte, else the SPH), and checks the stage against the frequency in that numbering. Covered by `dm/tools/tests/test_uepak_iostore.py` (a synthetic decoded archive).
+- **Found on:** [Orbitals](../../dm/games/040032B023CA4000/README.md) (Unreal Engine 5.6.1): 40,995 shaders in the two libraries (4,515 + 36,480), 23,432 unique (3,556 vertex, 16,459 pixel, 3,415 compute, 2 geometry), split in 57 s.
+
 ### IoStore patch containers keep their shader groups in the base container
 
 - **Symptom:** `ValueError: …/Glow-Switch_0_P.utoc: shader group 0 has no chunk` from `uepak.py io_archive` while the NSP script decodes the shaders (`decode_ue_shaders`, after `[4/8] UE shader decode`).

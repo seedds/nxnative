@@ -702,20 +702,43 @@ void FunctionLifter::FnJitCall(uint64_t target, uint64_t call_pc) {
 }
 
 void FunctionLifter::FnJitTail(Value* target) {
-    // A branch to an address that is no compiled entry (into the middle of another function): a tail call of jit_entry, whose stop is this
-    // function's return
-    ++stats->traps;
-    const auto off = OffsetOf(target);
-    StoreField(off ? Rel(*off) : target, offsetof(dm_guest_state, pc));
-    StoreField(B.getInt32(NXAOT_TRAP_JIT_TARGET), offsetof(dm_guest_state, exit_reason));
-    FnTail(plan->indirect, plan->conv.Type(C, plan->indirect.pass), plan->jit_entry);
+    // A branch to an address that is no compiled entry (into the middle of another function): the JIT from there, whose stop is this function's
+    // return: its entry's lr, whatever x30 holds (FnTailLr), the guest's x30 in the block. It was a tail call of jit_entry with x30 as the lr, which
+    // took a return to the entry's lr for a non-local transfer when the function had changed x30 (FnTailLr), and returned jit_entry's v0..v3 (rv 0)
+    // where this function's callers take its RV from the return value
+    FnJitContinue(target, NXAOT_TRAP_JIT_TARGET);
 }
 
 void FunctionLifter::FnJitContinue(Value* pc, uint32_t reason) {
+    ++stats->traps;
+    JitContinue(pc, reason);
+}
+
+void FunctionLifter::FnTailLr(Value* target, uint32_t reason) {
+    // A callee returns natively when the guest returns to the lr it was given (FnReturn), and a tail call gives it x30; the native frame that
+    // receives that return is this function's caller, which waits for this function's entry lr. They are the same in a real tail call (the
+    // epilogue restored x30, or nothing changed it: LLVM folds the compare then). With another x30 the b or br is no tail call: a br through a jump
+    // table discovery could not bound, after a call of this function changed x30; a branch into a function discovery split off. A native tail
+    // call would take the guest's return to this function's entry lr, through its epilogue, for a non-local transfer that no frame takes (each
+    // frame resumes only at its own resume points), and the thread's outermost level would run the rest of the thread in the JIT; and a return to
+    // that x30 for this function's return. So the JIT runs from the target, with x30 in the block and this function's return as its stop: it calls
+    // a compiled entry there natively, which goes on until the guest comes back here (dm/host/aot_run.c jit_loop)
+    Value* lr_now = B.CreateLoad(B.getInt64Ty(), x[30], "x30_at_tail");
+    auto* tail = BasicBlock::Create(C, "tail_lr", F);
+    auto* other = BasicBlock::Create(C, "tail_other_lr", F);
+    llvm::MDBuilder md{C};
+    B.CreateCondBr(B.CreateICmpEQ(lr_now, entry_lr), tail, other, md.createBranchWeights(1u << 16, 1));
+    B.SetInsertPoint(other);
+    const Regs dirty = cur_dirty;
+    JitContinue(target, reason);
+    cur_dirty = dirty;
+    B.SetInsertPoint(tail);
+}
+
+void FunctionLifter::JitContinue(Value* pc, uint32_t reason) {
     // The rest of this function cannot run as compiled code: every dirty register and pc to the block, the JIT from there until the guest
     // returns where this function returns (its entry's lr and SP), then a native return of what the JIT left in the block (the whole register
     // file; with st->pending set when the guest left non-locally, which the callers propagate)
-    ++stats->traps;
     StoreRegs(plan->correctness ? Regs::All() : cur_dirty);
     FlushFpsr();
     const auto off = OffsetOf(pc);
@@ -925,11 +948,15 @@ void FunctionLifter::FnTailDirect(uint64_t target) {
         return;
     }
     ++stats->tail_calls;
+    // On another x30 the JIT enters the target by its address: a miss there (a function with no standard entry) asks for one, as the
+    // dispatcher's does (indirect)
+    FnTailLr(Rel(target), NXAOT_TRAP_JIT_MISS);
     FnTail(*c, c->fn->getFunctionType(), c->fn);
 }
 
 void FunctionLifter::FnTailIndirect(Value* target, uint64_t site) {
     ++stats->indirect_tails;
+    FnTailLr(target, NXAOT_TRAP_JIT_MISS);  // before the inline cache: on another x30 the JIT looks the target up itself
     if (const CalleeView* g = Guarded(site, false)) {
         // A guarded tail call (FunctionPlan::guarded, design 12's hot indirect targets): the computed address against the dominant target's, on a match a tail call of
         // the target's body as b makes it (FnTailDirect: musttail between the convention's prototypes, which FnTailDirect already relies on), else the inline cache's

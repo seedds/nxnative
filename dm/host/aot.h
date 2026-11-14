@@ -414,8 +414,10 @@ int dm_aot_targets_write(void);   // the files now (once: later calls and the at
 //   nocode        compiled code that ran on into an address that is no compiled function's entry               an entry
 //   nonlocal      a non-local transfer (longjmp, an exception, 3.3) to a continuation no native frame took       a resume point of the function holding it (else an entry)
 //   fpcr, refused, untranslated, other: msr fpcr left the module's FPCR, a function the lifter refused, an encoding it does not translate: misses no pack serves
-// A run of the JIT that goes on with code it was already running (after a compiled entry it called returned into it, a host call, a pause) is no miss (its address still counts
-// in dm_aot_stats' jit_addresses), and no miss is recorded under DM_AOT_JIT_ALL. The [RED] line comes once per address and reason
+// A run of the JIT that goes on with code it was already running (after a compiled entry it called returned into it, a host call, a pause, a stop at the return of a call the
+// JIT made itself) is no miss (its address still counts in dm_aot_stats' jit_addresses), and no miss is recorded under DM_AOT_JIT_ALL. The [RED] line comes once per address
+// and reason. A host before the tail-call fix (dm/tools/aot/README.md, "Tail calls and the native frame's return") wrote every such stop as `nonlocal`: an earlier session's
+// rows merged into a file stay; such a file is best removed before the next pack, whose resume points they would only add
 typedef struct { uint64_t pc, count; uint32_t reason; } dm_aot_miss;
 // The (address, reason) pairs so far into out[0..max) (a copy, under the table's lock): their number (with out NULL, all of them); *dropped: entries the full tables did not keep
 size_t dm_aot_jit_misses(dm_aot_miss *out, size_t max, uint64_t *dropped);

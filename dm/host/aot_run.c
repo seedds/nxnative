@@ -37,7 +37,7 @@ void thr_svc_leave(void);
 // Why the JIT fallback runs at an address (run_jit's reason), besides the NXAOT_TRAP_* reasons compiled code hands over: host-private values. REASON_HOSTCALL and
 // REASON_CROSS are st->exit_reason's (the dispatcher's hand-overs, which need no JIT); REASON_HOST, a guest call from the host; REASON_NONLOCAL, a non-local transfer no
 // native frame took; REASON_FORCED, DM_AOT_JIT_ALL. 0: the JIT goes on with the guest code it was already running (a compiled entry it called natively returned into
-// it, a host call did, a pause ended): no new miss
+// it, a host call did, a pause ended, it stopped at the return of a call it made itself): no new miss
 enum { REASON_HOSTCALL = 0x100, REASON_CROSS = 0x101, REASON_HOST = 0x102, REASON_NONLOCAL = 0x103, REASON_FORCED = 0x104 };
 
 static _Atomic uint64_t c_svcs, c_host_calls, c_misses, c_cross, c_safepoints, c_jit_runs, c_cross_handovers, c_obs_gates, c_spin_gates;
@@ -353,8 +353,9 @@ int dm_aot_jit_stop_at(uint64_t pc) { (void)pc; return 0; }
 
 // Run st->pc in the JIT until it stops; without it, the [RED] line and the process stop. past: compiled code served the observation gate at st->pc already
 // (nxaot_rt_jit), so its instruction runs at once. *why: why the JIT runs there (a miss of the pack, note_jit; 0 for a run going on), and on return why its next
-// run in the loop would: a non-local transfer after a stop at a compiled call site's return address (jit_loop runs that only when no native frame takes it), else
-// the same run going on (it stopped at a compiled entry, which returns into its code, at a gate, or for a pause)
+// run in the loop would: the same run going on (it stopped at a compiled entry, which returns into its code, at a gate, for a pause, or at a compiled call site's
+// return address: jit_loop runs that only when no native frame takes it, so it is the return of a call the JIT itself made, inside the continuation it was given.
+// A return no native frame takes above that continuation is a non-local transfer, which jit_loop propagates and the thread's outermost level counts)
 static void run_jit(dm_aot_thread *t, uint64_t lr, uint32_t *why, int past) {
     const uint64_t pc = t->st.pc;
     char name[64];
@@ -413,7 +414,10 @@ static void run_jit(dm_aot_thread *t, uint64_t lr, uint32_t *why, int past) {
         *why = jit_all() ? REASON_FORCED : 0;
         return;
     }
-    *why = jit_all() ? REASON_FORCED : dm_jit_reason(j) == DM_JIT_RETURN ? REASON_NONLOCAL : 0;
+    // A stop at a compiled call site's return address is no miss when the JIT runs on there (jit_loop): it labelled every such stop a non-local transfer, so
+    // every return of a call the JIT made in the code it ran was a `nonlocal` row of the misses file and a [RED] line (5,124 of them in the 4,000-function
+    // benchmark, dm/tools/aot/README.md "Tail calls and the native frame's return")
+    *why = jit_all() ? REASON_FORCED : 0;
     switch (dm_jit_reason(j)) {
     case DM_JIT_ENTRY: case DM_JIT_RETURN: case DM_JIT_STEPPED: return;   // st->pc = stop: the loop decides
     case DM_JIT_HALTED: safepoint(t); return;        // a pause or a stop
@@ -472,8 +476,9 @@ static void jit_loop(dm_aot_thread *t, uint64_t lr, uint64_t sp, int outermost, 
             return;
         }
         if (pc == DM_AOT_HOST_RETURN) { st->pending = pc; return; }   // the guest returned to the host while native frames wait
-        if (dm_aot_hostfn_name(pc)) { host_call(t, pc); continue; }   // a host function through its guest-visible address (2.4)
-        if (dm_aot_stub_index(pc) >= 0) { stub_call(t, dm_aot_stub_index(pc)); continue; }   // an unimplemented import
+        // A host call, or a compiled entry's normal return, goes on with the guest code around it: a run going on, no miss (why 0) where the JIT runs it
+        if (dm_aot_hostfn_name(pc)) { host_call(t, pc); why = jit_all() ? REASON_FORCED : 0; continue; }   // a host function through its guest-visible address (2.4)
+        if (dm_aot_stub_index(pc) >= 0) { stub_call(t, dm_aot_stub_index(pc)); why = jit_all() ? REASON_FORCED : 0; continue; }   // an unimplemented import
         if (mode && !jit_all()) {   // DM_AOT_JIT_ALL: no native frame, every address in the JIT
             const dm_aot_pack *p;
             const nxaot_lookup_entry *e = dm_aot_find(pc, &p);
@@ -485,6 +490,7 @@ static void jit_loop(dm_aot_thread *t, uint64_t lr, uint64_t sp, int outermost, 
                     // a normal return is a ret to the lr the entry was called with; SP is the call's unless the function may change it (NXAOT_LOOKUP_SP_KEPT)
                     st->pc = ret; st->x[30] = ret;
                     if (e->flags & NXAOT_LOOKUP_SP_KEPT) st->sp = sp_at_call;
+                    why = 0;
                 }
                 continue;
             }

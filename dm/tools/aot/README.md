@@ -520,8 +520,10 @@ path, the counter. `dm_jit_run_past` goes on after a gate the host served, `dm_j
 - **When it runs** (design 11, cases 1 to 4), and how compiled code hands over:
   1. an indirect branch to an address with no compiled entry: the dispatcher's miss path writes the target to `st->pc` and returns `jit_entry`
      (a function of the pack with the standard entries' signature) instead of a standard entry; `jit_entry` stores what it is passed and calls
-     `nxaot_rt_jit(st, lr, sp)`; the inline cache keeps its descriptor, so the next call misses again. A direct `bl` or `b` to such an address
-     (never made by discovery: every target is an entry) calls or tail-calls `jit_entry` the same way;
+     `nxaot_rt_jit(st, lr, sp)`; the inline cache keeps its descriptor, so the next call misses again. A direct `bl` to such an address
+     (never made by discovery: every target is an entry) calls `jit_entry` the same way, a `b` hands the rest over as case 3 does, with the
+     function's own return as the stop. A `br` or `b` that leaves the function with x30 other than its entry lr is no tail call and goes to the
+     JIT the same way ("Tail calls and the native frame's return");
   2. a non-local transfer to a continuation with no native frame (a fiber switch, a return past the caller, a longjmp nobody recorded): the frames
      propagate it (`st->pending`, 3.3) to the thread's outermost level, which runs it in the JIT when it has no compiled entry;
   3. `msr fpcr` leaving the specialisation, an encoding the lifter leaves untranslated, code that runs into no entry: the function stores every
@@ -534,9 +536,11 @@ path, the counter. `dm_jit_run_past` goes on after a gate the host served, `dm_j
   further out: nested, it is propagated to them (`st->pending`); at the outermost level nothing can own it and the JIT runs it. Back where the native
   frame waits but under another FPCR than it was compiled for, the return is propagated too (the caller cannot go on under it). A halt is a
   safepoint ("Threads and safepoints"); an SVC that ends the thread or the run leaves through the thread's base, outside dynarmic's `Run()`.
-- **Logging and counting**: every JIT entry is a discovery gap or a continuation without a native frame, logged once per address on standard error
-  as `[RED] aot: <why> at 0x... (module+0x...) runs in the JIT fallback (design section 11)` and counted (`nxaot_host`'s second summary line: runs,
-  distinct addresses, `Run()` calls, stepped stops, native calls, seconds). `NXAOT_JIT_TRACE=1` prints every JIT run and native call.
+- **Logging and counting**: a JIT entry that is a discovery gap or a continuation without a native frame is logged once per address on standard
+  error as `[RED] aot: <why> at 0x... (module+0x...) runs in the JIT fallback (design section 11)`; every run is counted (`nxaot_host`'s second
+  summary line: runs, distinct addresses, `Run()` calls, stepped stops, native calls, seconds), a run that goes on with code the JIT was running (a
+  compiled entry it called returned into it, it stopped at an entry or at the return of a call it made itself) only there.
+  `NXAOT_JIT_TRACE=1` prints every JIT run and native call.
 - **Modes** (`nxaot_host`; in the host `DM_AOT_JIT_ALL=1` is `--jit-all`): mixed (the default), `--jit-all` (everything in the JIT: no stop at compiled entries, the dispatcher and the entries
   never used), `--jit-none` (every case above stops the run with a [RED] line and status 3: phase 1's behaviour; nxaot_funcdiff runs so),
   `--jit-one-block` (the measurement of the alternative above).
@@ -586,9 +590,11 @@ pack's misses taught stays for the next pack (which no longer misses there); a f
 hand-overs of section 11: `indirect` (the dispatcher's miss: `blr` / `br` to an address with no compiled entry), `call` (a `b` or `bl` to
 an address that is no compiled function's entry), `host` (`dm_guest_call` to an address with no compiled entry), `nocode` (compiled code ran
 on into no entry), `nonlocal` (a non-local transfer no native frame took, 3.3), and `fpcr`, `refused`, `untranslated`. A run of the JIT that
-goes on with code it was already running (after a compiled entry it called returned into it, a host call, a pause) is no miss: the host
-labelled those "a non-local transfer" before, and logged a `[RED]` line for each such return address; it now records and logs only the cause.
-Nothing is recorded under `DM_AOT_JIT_ALL`.
+goes on with code it was already running (after a compiled entry it called returned into it, a host call, a pause, a stop at the return of a
+call the JIT made itself) is no miss: the host labelled those "a non-local transfer" before, and logged a `[RED]` line for each such return
+address; it now records and logs only the cause (the last of them since the fix of "Tail calls and the native frame's return": a misses file
+an older host wrote holds such `nonlocal` rows, which a session merges and keeps; remove it before the next pack). Nothing is recorded under
+`DM_AOT_JIT_ALL`.
 
 `nxaot build --misses <file>` (and `nxaot discover --misses <file>`) takes them as roots of discovery:
 
@@ -633,6 +639,92 @@ hidden function's row, `indirect`, 1 entry; 2 after a second run; another image'
 
 Not verified: a game (no game files here), the Windows host's writer (written, not run), and a JIT miss of the kinds the test modules do not
 have (`nocode`, `fpcr`, `refused`, `untranslated` from a real run, a `nonlocal` from a real longjmp the analysis missed).
+
+## Tail calls and the native frame's return
+
+The 4,000-function benchmark (`gen_bench.py --functions 4000`, seed 1, tier W) ran almost all of its time in the JIT fallback: through dm/host's
+runners 1.87 s, 1,819 of its 1,908 samples in the JIT fallback and none in compiled code (one run; pinned ones below), its misses file 5,124 `nonlocal` rows and 131
+`indirect` ones, although the program is plain C with no longjmp and no exception; repacked with `--misses` from that file, it ran as much in
+the JIT. The cause, in its `f9` (module offsets):
+
+```
+79e80  stp x29, x30, [sp, #-0x40]!        the entry: lr 0x1834, drive0's return after its bl f9 at 0x1830
+7a044  bl f3982                           x30 = 0x7a048
+7a0ac  ubfx x10, x8, #37, #5; cmp x10, #0x13; b.hi ...; adrp x11; add x11; adr x12, 7a0d0; ldrb w13, [x11, x10]; add x12, x12, x13, lsl #2
+7a0cc  br x12                             a switch whose index discovery cannot bound (it depends on more than one value): left to the dispatcher
+7a17c  (a case)                           no compiled entry: the dispatcher hands it to the JIT fallback
+7b800  ldp x29, x30, [sp], #0x40; ret     back to 0x1834
+```
+
+The `br` ends the function's compiled code, so the lifter lowered it as a tail call through the inline cache (`FnTailIndirect`), and a tail call
+passed the guest's x30 (0x7a048) as the callee's lr, the return its native frame waits for. The dispatcher returned `jit_entry`, which ran the
+JIT with 0x7a048 as its stop; the JIT ran the case and the rest of `f9`, whose return to 0x1834 was not that stop but a compiled call site's
+return above the JIT's SP: a non-local transfer (`st->pending`, design 3.3). `drive0`'s frame waits at 0x1834 for a normal return, and a frame
+resumes from `st->pending` only at its own resume points, so the transfer went up to the thread's outermost level (`run_guest`), which had no
+compiled entry at 0x1834 and ran the rest of the thread in the JIT: every driver, every statement function, calling natively only the 508
+functions with a standard entry. Each return of a call the JIT made stopped at a compiled call site's return address, which `run_jit` labelled
+a non-local transfer: the 5,124 `nonlocal` misses, each a resume point of the next pack that nothing enters. With the misses the case labels
+became entries of their own, the same tail calls (and the falls into them) still passed x30, and the result was the same.
+
+The fix:
+
+- **A tail call is native only when x30 is the function's entry lr** (`lower_calls.cpp` `FnTailLr`, before every direct and indirect tail
+  call): the callee's return to its lr is the native return the function's caller receives, and that caller waits for the function's entry lr.
+  The two are equal in every real tail call (the epilogue restored x30, or nothing wrote it: LLVM folds the compare). With another x30 the
+  transfer is no tail call (a `br` like the one above; a branch into a function discovery split off), and the JIT runs it from the target with
+  x30 in the block and the function's own return as its stop (`JitContinue`, as for code after `msr fpcr`), calling a compiled entry at the
+  target natively; its miss there is `indirect` (a standard entry for the next pack). A branch into the middle of a function goes the same way
+  (`FnJitTail`, which tail-called `jit_entry` with x30 too, and returned `jit_entry`'s v0..v3 where the function's callers take its RV).
+- **A stop at the return of a call the JIT made is no miss** (`dm/host/aot_run.c` `run_jit`, `jit_loop`; `src/rt/host.cpp` `Host::JitLoop`):
+  `jit_loop` runs on there only when no native frame can wait for it, so the JIT goes on with the code it was running; a host call or a
+  compiled entry's normal return likewise. The `nonlocal` rows and their `[RED]` lines are now only non-local transfers no native frame took.
+
+**Measured** in the images, build trees on tmpfs, the machine's one-minute load 3 to 6 (other agents' builds). The benchmark through dm/host's
+runners, each run pinned to CPU 3 (`taskset -c 3`), three runs of each: `t_aot_host --run` for the guest time and the JIT's counts,
+`t_aot_targets --run ... --write` under `DM_AOT_PROFILE` for the samples and the misses file; "before" is 2088f48's nxaot and host, each
+`--misses` pack built from the misses file of the pack above it (the second from both sessions' merged file):
+
+| Pack | time (s) | samples: compiled / JIT / elsewhere in the host | JIT runs, addresses | misses file |
+|---|---:|---:|---:|---|
+| before | 2.02, 2.07, 2.03 | 0 / 1,903 / 151; 0 / 1,921 / 136; 1 / 1,886 / 119 | (not printed), 6,690 | 5,124 `nonlocal`, 131 `indirect` |
+| before, `--misses` (5,124 resume points) | 1.93, 1.91, 1.77 | 2 / 1,740 / 138; 1 / 1,749 / 141; 4 / 1,738 / 125 | (not printed), 6,170 | 4,788 `nonlocal`, 36 `indirect` |
+| after | 0.455, 0.427, 0.414 | 5 / 377 / 63; 6 / 387 / 60; 2 / 384 / 61 | 800, 703 | 339 `indirect` |
+| after, `--misses` once | 0.282, 0.282, 0.320 | 5 / 239 / 57; 2 / 250 / 54; 3 / 245 / 57 | 206, 158 | 63 `indirect` |
+| after, `--misses` twice | 0.244, 0.254, 0.250 | 2 / 206 / 56; 4 / 206 / 61; 4 / 201 / 58 | 31, 28 | 12 `indirect` |
+
+About 200 of the JIT's samples are a fixed cost of its first use in the host, whatever runs: fp-gcc's 8 JIT runs give 204 of its 240 samples
+and 0.227 s, fiber-gcc's 442 runs 200 of 234 (nxaot_host's first use costs about 60 ms). So the guest code the JIT ran went from about 1,700
+samples to about 180, 45 and 5; the rest of the benchmark is compiled code, too short to draw more than a few samples (`int_ops`-style
+rounds would be needed). The repack before the fix: `.text` 5.9 to 12.4 MB, the pack 16 to 131 s and 120 to 1,082 MiB at its peak, for 5,124
+resume points nothing enters. nxaot_host, one run each: 1.59 s (7,818 JIT runs from 6,690 addresses, 1.52 s of them) before, 0.28 s (800 runs
+from 703 addresses, 0.24 s) after, 0.137 s and 0.104 s after one and two repacks (31 runs from 28 addresses, 0.067 s, mostly the first use's
+cost). [tests/measure_packs.py](tests/measure_packs.py), A 2088f48's nxaot, B this one, no misses file:
+
+| Program | A | B | change | layout spread A / B | rounds spread | .text A -> B | pack time A -> B | verdict |
+|---|---:|---:|---:|---:|---:|---:|---:|---|
+| benchmark, 4,000 functions (fastest of 3; 3 rounds, 2 layouts) | 1.529 s | 189.8 ms | -87.59 % | 0.06 / 3.91 % | 4.36 % | 5,946,016 -> 6,019,056 | 14.79 -> 14.97 s | faster |
+| int_ops-gcc, `int_ops_rounds = 200` (10; 6 rounds, 4 layouts) | 69.489 ms | 63.506 ms | -8.61 % | 2.37 / 12.68 % | 28.78 % | 64,508 -> 64,860 | 0.33 -> 0.34 s | within noise |
+| except-gcc (10) | 25.723 ms | 22.494 ms | -12.55 % | 14.89 / 46.19 % | 58.80 % | 82,396 -> 82,492 | 0.29 -> 0.26 s | within noise |
+| switch-gcc (200) | 152.8 µs | 151.3 µs | -0.98 % | 0.33 / 25.12 % | 51.23 % | 365,260 -> 365,692 | 0.74 -> 0.69 s | within noise |
+| fnptr-gcc (200) | 6.0 µs | 6.0 µs | 0 % | 0 / 0 % | 8.33 % | 58,092 -> 58,188 | 0.23 -> 0.23 s | within noise |
+
+The same guest output in every pair (measure_packs.py checks it). The corpus programs make no such `br`: their JIT runs are the same before and
+after (nxaot_host: except-gcc 1,618 runs from 5 addresses, fiber-gcc 442 from 29, fp-gcc 8 from 8); what changes is their misses files, which
+lose the returns of calls the JIT made (dm/host, `t_aot_targets --run ... --write`): except-gcc `0x1d34 nonlocal 692` gone, its two `indirect`
+rows (232 entries each) kept; fiber-gcc 17 `nonlocal` rows to 9 (its stack switches' continuations), fp-gcc 3 to 1 (and its 2 `fpcr`).
+
+**The packs change**: the compare and its cold path at every tail call where x30 may differ from the entry lr, and `FnJitTail`'s new form. Every
+pack of `build_packs.sh` differs from 2088f48's; their `.text` is 1,538,240 bytes against 1,542,140 (+0.25 %, from -1.02 % for sjlj-gcc to
++1.38 % for switch-clang), the benchmark's +1.23 %. CTest: 29 of 29; dm/host's 100 of 100 with `NXAOT`, with and without
+`DM_AOT_ARENA_CHECK=1`. Its check is `t_aot_host`'s `lrtail` row (`dm/host/tests/t_aot_host.c`): a module the test writes word by word, packed by
+`NXAOT`, whose function calls and then jumps through such a `br` into code with no compiled entry, 63 times: 126 JIT runs from 5 addresses,
+4 misses, none `nonlocal`, and 2088f48's nxaot's pack of it fails the row (189 runs, 4 addresses, 2 misses, 1 `nonlocal`).
+
+Open: the JIT calls natively only functions with a standard entry (the lookup table), so a missed stretch also runs in the JIT whatever other
+functions it calls: with every function given one (`--all-entries`), nxaot_host's first session of the benchmark ran 0.169 s in the JIT
+against 0.223 s (pinned, one run each), and after two repacks 0.065 against 0.067 s. A JIT-only entry for every function (its own table, so
+that inline caches do not bind to it) would make a miss cost only its own stretch; it is not done. Not verified: a game (none runs on the
+x86-64 engine yet) and Windows (the lifter's change is the same code for a Windows pack; not run there).
 
 ## Threads and safepoints
 
@@ -2875,6 +2967,10 @@ parentheses), the machine's one-minute load 5 to 7 (another agent's tests); text
 | fnptr-gcc (20,000) | 646, 142 | 6 µs (6 .. 6) | 6 µs (4 .. 6) | 0 (1 µs resolution) | 79,815 → 79,901 |
 | benchmark, 4,000 functions (3; 3 rounds) | 1,068, 761 | 1,512.8 ms (1,505.1 .. 1,551.7) | 1,505.6 ms (1,502.0 .. 1,510.0) | −0.5 % (98 % of it is the JIT fallback) | 11,488,155 → 11,496,212 |
 
+The benchmark's 98 % in the JIT fallback was the tail-call bug of "Tail calls and the native frame's return": with it fixed, its tier W pack
+runs 189.8 ms against 1,529 ms (fastest of 3), and dm/host's runner samples 377 to 387 of about 450 in the JIT, about 200 of them the JIT's
+first use; its profile then samples compiled code, which this table's row did not weigh.
+
 An earlier session, at a load of 1.4 to 2.4 and with the call-graph profile still on (below), gave int_ops-gcc 70.04 and 70.10 ms, int_ops-clang
 73.56 and 73.01, switch-gcc 149 and 133 µs, switch-clang 109 and 98, simd-gcc 42 and 41, except-gcc 25.07 and 24.95 ms, the benchmark 1,502.6
 and 1,494.3. The layout moves int_ops by itself: the same pack under eight file names (the soname's length shifts the code by a few bytes),
@@ -3095,7 +3191,9 @@ constant and a direct call, which LLVM may inline when the target is in the same
   by dm/host's runner on its tier W pack (`t_aot_targets --run <pack> bench.nro --write` under `DM_AOT_PROFILE`): 2,007 samples, 1,853 of them in
   the JIT fallback (its misses file: 5,124 addresses of non-local transfers to continuations with no native frame, 131 indirect) and 3 in
   compiled code, at the entries of 2 functions; 140 sites, 394 rows, 394 binds, 53 sites with one target (a pack built with `--misses` from it
-  still ran 1,738 of 1,860 samples in the JIT fallback). With that profile (2 functions at H, 4,086 at C) every site lies outside tier H:
+  still ran 1,738 of 1,860 samples in the JIT fallback; both were the tail-call bug of "Tail calls and the native frame's return", the
+  `nonlocal` rows returns of calls the JIT made: fixed, the session samples 377 to 387 of about 450 in the JIT, about 200 of them its first use,
+  and its misses file is 339 `indirect` rows, 12 after two repacks). With that profile (2 functions at H, 4,086 at C) every site lies outside tier H:
   `140 sites, 0 guarded`, and the packs are the same bytes (17,261,688; not run). In the max mode (every function at H or H+) `140 sites, 53
   guarded, 87 with several targets`, fastest of 3:
 
@@ -3103,7 +3201,7 @@ constant and a direct call, which LLVM may inline when the target is in the same
   |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
   | bench (max mode) | 1.505 s | 1.505 s | +0.06 % | 0.97 / 1.37 % | 3.86 % | 5,960,496 -> 5,946,032 | 9,261,696 -> 9,243,800 | 21.90 -> 21.62 s | 272 -> 268 |
 
-  "within noise" (most of its time is the JIT fallback). A pack with guards is 0.2 to 1.9 % larger in `.text` (both paths of each guarded call
+  "within noise" (most of its time was the JIT fallback, before the tail-call fix). A pack with guards is 0.2 to 1.9 % larger in `.text` (both paths of each guarded call
   are kept); its pack time is within the noise (fnptr 0.20 s against 0.21 and 0.22 s, the benchmark in the max mode 21.90 s against 21.62 s).
 - **The default.** No program measured is slower with the guards beyond the noise, so they stay on whenever a targets file lies beside the
   profile, and `NXAOT_PROFILE_TARGETS=0` stays a test switch. What the numbers do not show is a gain: no program here spends its time in compiled

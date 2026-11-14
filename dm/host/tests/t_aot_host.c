@@ -31,6 +31,9 @@
 //     corpus/nro/<name>.syms.tsv), most of its samples inside its loops (the range of its backward branches, read from the NRO's words) and away from its entry, at
 //     several instructions. With nxaot (--nxaot or the environment variable NXAOT; the aot image), the profile round-trips: `nxaot build --profile` weighs functions
 //     (its `aot: profile weights:` line), NXAOT_PROFILE_WEIGHTS=0 gives another pack, the same bytes as the entry form's (the tiers alone)
+//   lrtail, with the JIT built in and nxaot (it packs it): a module this test writes word by word whose function calls, then jumps through a br discovery cannot
+//     bound into code with no compiled entry, 63 times: the JIT runs each case and the rest of the function, and execution comes back to the caller's compiled code
+//     when the function returns (exact JIT runs, addresses and misses, none nonlocal: dm/tools/aot/README.md, "Tail calls and the native frame's return")
 //   t_aot_host [--packs <dir>] [--corpus <dir>] [--nro <name>]... [--nxaot <nxaot>]
 //     the packs: --packs, else the environment variable NXAOT_PACKS, else the CMake option NXAOT_PACKS; with none, a note and exit 0 (CTest stays green where
 //     no packs exist: the Windows runner, a build without the aot image)
@@ -381,6 +384,13 @@ static int child(int argc, char **argv) {
            (unsigned long long)s.svcs, (unsigned long long)s.host_calls, (unsigned long long)s.misses, (unsigned long long)s.cross_pack,
            (unsigned long long)s.safepoints, (unsigned long long)s.jit_addresses, (unsigned long long)atomic_load(&g_t_aot_hidden_calls),
            (unsigned long long)atomic_load(&g_dirty_faults), (unsigned long long)atomic_load(&g_dirty_compiled), (unsigned long long)atomic_load(&g_dirty_callback));
+    {   // The JIT fallback's runs and misses (aot_run.c note_jit): the (address, reason) pairs of entries the next pack could serve, the nonlocal ones among them
+        size_t nonlocal = 0;
+        const size_t n = dm_aot_jit_misses(NULL, 0, NULL);
+        dm_aot_miss *ms = calloc(n ? n : 1, sizeof *ms);
+        if (ms) { dm_aot_jit_misses(ms, n, NULL); for (size_t i = 0; i < n; i++) { const char *w = dm_aot_miss_word(ms[i].reason); nonlocal += w && !strcmp(w, "nonlocal"); } free(ms); }
+        printf("t_aot_host: jit: %llu runs, %llu addresses, %zu misses (%zu nonlocal)\n", (unsigned long long)s.jit_runs, (unsigned long long)s.jit_addresses, n, nonlocal);
+    }
     if (a.pause)
         printf("t_aot_host: pause test: %u pauses (%u with more than one thread running), %u register-invariant checks, %u inconsistent, %u exited%s%s\n",
                g_pt.done, g_pt.threaded, g_pt.invariant, g_pt.inconsistent, g_pt.exited, g_pt.inconsistent ? "; first: " : "", g_pt.bad);
@@ -417,6 +427,7 @@ static int log_race(unsigned n) {
 // ---------- The parent ----------
 typedef struct {
     int status; char *guest; size_t nguest; char red[400]; double secs; unsigned long long stat[12]; int have_stat; unsigned pt[5]; int have_pt;
+    unsigned long long jit[4]; int have_jit;   // the child's JIT line: runs, addresses, misses, nonlocal misses
     unsigned ndm, spliced; char splice[300];   // "[dm] " lines; lines holding a "[guest] " line after their start (the first of them)
     char pos[700], prof[900], fl[300];         // the positions' check of the child (--positions), the sampler's summary line (aot_profile.c), the child's function lines' check
 } result;
@@ -444,6 +455,8 @@ static int run_cmd(const char *cmd, result *r) {
                                         "%llu pauses at polls, %llu JIT addresses, hidden %llu, dirty faults %llu (%llu by compiled code, %llu in the JIT's memory callbacks)", &r->secs, &r->stat[0],
                                   &r->stat[1], &r->stat[2], &r->stat[3], &r->stat[4], &r->stat[5], &r->stat[6], &r->stat[7], &r->stat[8], &r->stat[9], &r->stat[10]) == 12;
         }
+        if (!strncmp(line, "t_aot_host: jit: ", 17))
+            r->have_jit = sscanf(line, "t_aot_host: jit: %llu runs, %llu addresses, %llu misses (%llu nonlocal)", &r->jit[0], &r->jit[1], &r->jit[2], &r->jit[3]) == 4;
         if (!strncmp(line, "t_aot_host: pause test: ", 24))
             r->have_pt = sscanf(line, "t_aot_host: pause test: %u pauses (%u with more than one thread running), %u register-invariant checks, %u inconsistent, %u exited",
                                 &r->pt[0], &r->pt[1], &r->pt[2], &r->pt[3], &r->pt[4]) == 5;
@@ -593,6 +606,154 @@ static int same_file(const char *a, const char *b) {
     const int same = x && y && na == nb && !memcmp(x, y, na);
     free(x); free(y);
     return same;
+}
+
+// ---------- A br that is no tail call (dm/tools/aot/README.md, "Tail calls and the native frame's return") ----------
+// The NRO lrtail, written here word by word (no compiler in the host's image; nxaot packs it): start calls F LRTAIL_CALLS times with i = 0, 1, ... and sums
+// the results. F(i) with i above 0 calls G (x30 then holds the return address inside F) and jumps through br to case (i & 3) of four, at x30 + 16 + 8 *
+// (i & 3): no table load, so discovery leaves the br to the dispatcher, and no case is a block of F; the cases join, call G again and return through F's
+// epilogue. F(0) branches to the join at once, which makes the join a block of F: its call of G is a compiled call site. G(x) = x + 16, so F(0) = 16 and
+// F(i) = i + 33 + (i & 3). start prints "lrtail PASS" or "lrtail FAIL" (svcOutputDebugString) and ends the process (svcExitProcess). Text at 0 (the entry
+// branch, the NRO header to 0x80, the code), MOD0 and an empty dynamic section and the two strings in read-only data at 0x1000, a page of data at 0x2000,
+// a page of bss
+enum { LRTAIL_CALLS = 64 };
+static uint32_t a_b(int64_t off) { return 0x14000000u | (uint32_t)((off >> 2) & 0x3FFFFFF); }
+static uint32_t a_bl(int64_t off) { return 0x94000000u | (uint32_t)((off >> 2) & 0x3FFFFFF); }
+static uint32_t a_bcond(unsigned cond, int64_t off) { return 0x54000000u | (uint32_t)((off >> 2) & 0x7FFFF) << 5 | cond; }
+static uint32_t a_adr(unsigned rd, int64_t off) { return 0x10000000u | (uint32_t)(off & 3) << 29 | (uint32_t)((off >> 2) & 0x7FFFF) << 5 | rd; }
+static uint32_t a_movz(unsigned rd, unsigned imm) { return 0xD2800000u | imm << 5 | rd; }
+static uint32_t a_addi(unsigned rd, unsigned rn, unsigned imm) { return 0x91000000u | imm << 10 | rn << 5 | rd; }
+static size_t lrtail_nro(uint8_t *img, size_t cap, uint64_t *want) {
+    enum { TEXT = 0x1000, RO = 0x1000, DATA = 0x2000, SIZE = 0x3000, BSS = 0x1000, PASS_AT = RO + 0x100, FAIL_AT = RO + 0x120 };
+    if (cap < SIZE) return 0;
+    memset(img, 0, SIZE);
+    uint32_t w[256] = {0};
+    size_t n = 0x80 / 4;   // words before 0x80: the entry branch, MOD0's offset, the header (written below)
+    const size_t start = n;
+    // start: x19 = i, x20 = the sum
+    w[n++] = 0xA9BE7BFDu;               // stp x29, x30, [sp, #-32]!
+    w[n++] = 0x910003FDu;               // mov x29, sp
+    w[n++] = 0xA90153F3u;               // stp x19, x20, [sp, #16]
+    w[n++] = a_movz(19, 0);
+    w[n++] = a_movz(20, 0);
+    const size_t loop = n;
+    w[n++] = 0xAA1303E0u;               // mov x0, x19
+    const size_t call_f = n++;          // bl F
+    w[n++] = 0x8B000294u;               // add x20, x20, x0
+    w[n++] = a_addi(19, 19, 1);
+    w[n++] = 0xF100027Fu | LRTAIL_CALLS << 10;   // cmp x19, #LRTAIL_CALLS
+    w[n] = a_bcond(3, (int64_t)(loop - n) * 4); n++;   // b.lo loop
+    uint64_t sum = 16;
+    for (unsigned i = 1; i < LRTAIL_CALLS; i++) sum += i + 33 + (i & 3);
+    *want = sum;
+    w[n++] = a_movz(9, (unsigned)sum);  // the sum fits 16 bits
+    w[n++] = 0xEB09029Fu;               // cmp x20, x9
+    const size_t to_fail = n++;         // b.ne fail
+    w[n] = a_adr(0, (int64_t)PASS_AT - (int64_t)n * 4); n++;
+    w[n++] = a_movz(1, 11);             // "lrtail PASS"
+    w[n++] = 0xD40004E1u;               // svc #0x27 (OutputDebugString)
+    const size_t to_exit = n++;         // b exit
+    w[to_fail] = a_bcond(1, (int64_t)(n - to_fail) * 4);
+    w[n] = a_adr(0, (int64_t)FAIL_AT - (int64_t)n * 4); n++;
+    w[n++] = a_movz(1, 11);             // "lrtail FAIL"
+    w[n++] = 0xD40004E1u;               // svc #0x27
+    w[to_exit] = a_b((int64_t)(n - to_exit) * 4);
+    w[n++] = 0xD40000E1u;               // svc #0x7 (ExitProcess)
+    w[n++] = 0xD4200000u;               // brk #0
+    // F
+    const size_t f = n;
+    w[call_f] = a_bl((int64_t)(f - call_f) * 4);
+    w[n++] = 0xA9BE7BFDu;               // stp x29, x30, [sp, #-32]!
+    w[n++] = 0x910003FDu;               // mov x29, sp
+    w[n++] = 0xF9000BF3u;               // str x19, [sp, #16]
+    w[n++] = 0xAA0003F3u;               // mov x19, x0
+    const size_t to_join0 = n++;        // cbz x19, join
+    const size_t call_g1 = n++;         // bl G
+    w[n++] = 0x92400669u;               // and x9, x19, #3       (at x30)
+    w[n++] = a_addi(10, 30, 16);        // add x10, x30, #16     (the first case)
+    w[n++] = 0x8B090D4Au;               // add x10, x10, x9, lsl #3
+    w[n++] = 0xD61F0140u;               // br x10
+    if ((n - (call_g1 + 1)) * 4 != 16) return 0;
+    size_t to_join[4];
+    for (unsigned k = 0; k < 4; k++) { w[n++] = a_addi(0, 0, k + 1); to_join[k] = n++; }
+    const size_t join = n;
+    for (unsigned k = 0; k < 4; k++) w[to_join[k]] = a_b((int64_t)(join - to_join[k]) * 4);
+    w[to_join0] = 0xB4000000u | (uint32_t)(((join - to_join0) & 0x7FFFF) << 5) | 19;   // cbz x19
+    const size_t call_g2 = n++;         // bl G
+    w[n++] = 0xF9400BF3u;               // ldr x19, [sp, #16]
+    w[n++] = 0xA8C27BFDu;               // ldp x29, x30, [sp], #32
+    w[n++] = 0xD65F03C0u;               // ret
+    // G
+    const size_t g = n;
+    w[call_g1] = a_bl((int64_t)(g - call_g1) * 4);
+    w[call_g2] = a_bl((int64_t)(g - call_g2) * 4);
+    w[n++] = a_addi(0, 0, 16);
+    w[n++] = 0xD65F03C0u;               // ret
+    w[0] = a_b((int64_t)start * 4);
+    w[1] = RO;                          // MOD0's offset
+    memcpy(img, w, n * 4);
+    // The NRO header: magic, version, size, flags; text, read-only data and data (offset, size); bss
+    memcpy(img + 0x10, "NRO0", 4);
+    const uint32_t hdr[] = {0, SIZE, 0, 0, TEXT, RO, DATA - RO, DATA, SIZE - DATA, BSS};
+    memcpy(img + 0x14, hdr, sizeof hdr);
+    // MOD0 (offsets from it): the dynamic section (DT_NULL alone), bss start and end, an empty .eh_frame_hdr, the module object (bss)
+    memcpy(img + RO, "MOD0", 4);
+    const int32_t mod0[] = {0x20, SIZE - RO, SIZE + BSS - RO, 0x40, 0x40, SIZE - RO};
+    memcpy(img + RO + 4, mod0, sizeof mod0);
+    memcpy(img + PASS_AT, "lrtail PASS", 11);
+    memcpy(img + FAIL_AT, "lrtail FAIL", 11);
+    return SIZE;
+}
+// nxaot build <nro> --shared <out>: its exit status, its last line into line
+static int nxaot_pack(const char *nxaot, const char *nro, const char *out, char *line, size_t n) {
+    char cmd[4096], buf[4096];
+#if defined(_WIN32)
+    snprintf(cmd, sizeof cmd, "\"\"%s\" build \"%s\" --shared \"%s\" 2>&1\"", nxaot, nro, out);
+#else
+    snprintf(cmd, sizeof cmd, "'%s' build '%s' --shared '%s' 2>&1", nxaot, nro, out);
+#endif
+    line[0] = 0;
+    FILE *f = popen(cmd, "r");
+    if (!f) return -1;
+    while (fgets(buf, sizeof buf, f)) { snprintf(line, n, "%s", buf); line[strcspn(line, "\n")] = 0; }
+    return pclose(f);
+}
+// The row: lrtail packed by nxaot and run. Each call of F but the first reaches the JIT fallback once, at its case (the dispatcher has no entry there), and
+// comes back to start's compiled code when F returns: 2 JIT runs per call (the case to the return of the join's call of G, which the JIT itself made, and from
+// there to F's return), 5 addresses (the four cases, that return), 4 misses (the cases, indirect), none nonlocal. Before, the br was a native tail call of the
+// JIT with x30 as its stop, F's return to start a non-local transfer no frame took, and the thread's outermost level ran the rest of start's loop, every F and
+// G in it, in the JIT; and every return of a call the JIT made was a nonlocal miss
+static void lrtail_row(const char *self, const char *nxaot) {
+    if (!NXHOST_JIT) { printf("%-14s %-9s note: no JIT fallback (NXHOST_JIT): not run\n", "lrtail", "jit"); return; }
+    if (!nxaot || !*nxaot) { printf("%-14s %-9s note: no nxaot (--nxaot, NXAOT): lrtail is not packed here\n", "lrtail", "jit"); return; }
+    static uint8_t img[0x3000];
+    uint64_t want = 0;
+    const size_t len = lrtail_nro(img, sizeof img, &want);
+    char nro[200], pack[200], line[600] = "", note[1400];
+    mkdir("t_aot_host.tmp", 0755);
+    mkdir("t_aot_host.tmp/lrtail", 0755);
+    snprintf(nro, sizeof nro, "t_aot_host.tmp/lrtail/lrtail.nro");
+    snprintf(pack, sizeof pack, "t_aot_host.tmp/lrtail/lrtail%s", PACK_EXT);
+    FILE *f = fopen(nro, "wb");
+    const int wrote = f && fwrite(img, 1, len, f) == len;
+    if (f) fclose(f);
+    result r;
+    memset(&r, 0, sizeof r);
+    static char no_lines[1];
+    r.guest = no_lines;
+    const int built = wrote && nxaot_pack(nxaot, nro, pack, line, sizeof line) == 0;
+    if (!built) {
+        snprintf(note, sizeof note, "%s: %s", wrote ? "nxaot build failed" : "cannot write the NRO", line);
+        row("lrtail", "jit", 0, &r, note);
+        return;
+    }
+    run_child(self, pack, nro, "", &r);
+    const unsigned runs = 2 * (LRTAIL_CALLS - 1);
+    const int ok = r.status == 0 && !strcmp(r.guest, "lrtail PASS\n") && r.have_jit && r.jit[0] == runs && r.jit[1] == 5 && r.jit[2] == 4 && r.jit[3] == 0;
+    snprintf(note, sizeof note, "%u calls of F, %u through a br after a call: %llu JIT runs (want %u), %llu JIT addresses (want 5), %llu misses (want 4), %llu nonlocal (want 0)%s%s",
+             LRTAIL_CALLS, LRTAIL_CALLS - 1, r.jit[0], runs, r.jit[1], r.jit[2], r.jit[3], r.red[0] ? "; " : "", r.red);
+    row("lrtail", "jit", ok, &r, note);
+    if (r.guest != no_lines) free(r.guest);
 }
 
 // int_ops under the sampler: the child's run and checks (--positions), the profile's rows of the hot function, and with nxaot the round trip (the header's list)
@@ -843,6 +1004,9 @@ int main(int argc, char **argv) {
         free(expected);
     }
     free(tsv);
+    int lrtail = !nonly;
+    for (int i = 0; i < nonly; i++) lrtail |= !strcmp(only[i], "lrtail");
+    if (lrtail) lrtail_row(argv[0], nxaot);   // 7. A br that is no tail call: the JIT's continuation comes back to compiled code
     printf("t_aot_host: %d checks, %d failed\n", checks, fails);
     return fails != 0;
 }

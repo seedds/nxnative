@@ -1018,14 +1018,16 @@ void Host::JitLoop(Thread& t, uint64_t lr, uint64_t sp, bool outermost, const ch
                 if (st->pending) {
                     st->pc = st->pending;  // a non-local transfer: the block holds the whole register file
                     st->pending = 0;
+                    why = "a non-local transfer to a continuation with no native frame";
                 } else {
                     // A normal return is a ret to the lr the entry was called with: x30 holds it; SP is the call's unless the function may
-                    // change it, which then stored it (aot_module.h, NXAOT_LOOKUP_SP_KEPT)
+                    // change it, which then stored it (aot_module.h, NXAOT_LOOKUP_SP_KEPT). The JIT goes on with the code around the call: no miss
                     st->pc = ret;
                     st->x[30] = ret;
                     if (slot->flags & NXAOT_LOOKUP_SP_KEPT) {
                         st->sp = sp_at_call;
                     }
+                    why = nullptr;
                 }
                 continue;
             }
@@ -1040,7 +1042,7 @@ void Host::JitLoop(Thread& t, uint64_t lr, uint64_t sp, bool outermost, const ch
         if (options.jit == JitMode::None) {
             StopInfo i;
             i.status = kJit;
-            i.message = std::string("[RED] aot: ") + why + " at " + Hex(pc) +
+            i.message = std::string("[RED] aot: ") + (why ? why : "guest code the JIT ran on") + " at " + Hex(pc) +
                         (InModule(pc) ? " (module+" + Hex(pc - kModuleBase) + ")" : std::string(" (outside the module)")) +
                         ": the JIT fallback is off (--jit-none)";
             RequestStop(std::move(i));
@@ -1066,8 +1068,10 @@ void Host::JitLoop(Thread& t, uint64_t lr, uint64_t sp, bool outermost, const ch
             std::lock_guard<std::mutex> guard{g_run.lock};
             first = g_run.jit_addresses.insert(pc).second;
         }
-        if (first && options.jit == JitMode::Mixed && options.jit_log) {
-            // Every JIT entry is a discovery gap or a continuation without a native frame (section 11): once per address, for the next pack
+        if (first && why && options.jit == JitMode::Mixed && options.jit_log) {
+            // A JIT entry that is a discovery gap or a continuation without a native frame (section 11): once per address, for the next pack. A run
+            // that goes on with code the JIT ran (a compiled entry it called returned into it, it stopped at an entry or at the return of a call it
+            // made) is none: counted among the addresses, not logged
             std::fprintf(stderr, "[RED] aot: %s at %s%s runs in the JIT fallback (design section 11)\n", why, Hex(pc).c_str(),
                          InModule(pc) ? (" (module+" + Hex(pc - kModuleBase) + ")").c_str() : " (outside the module)");
         }
@@ -1083,7 +1087,10 @@ void Host::JitLoop(Thread& t, uint64_t lr, uint64_t sp, bool outermost, const ch
             std::lock_guard<std::mutex> guard{g_run.out};
             g_run.result->jit_seconds += secs;
         }
-        why = "a non-local transfer to a continuation with no native frame";
+        // The next run goes on with this one's code: a stop at a compiled entry (called natively above) or at a compiled call site's return that
+        // no native frame takes (the return of a call the JIT made; one above the JIT's frame is propagated above). Labelling those "a non-local
+        // transfer" logged every return of a call made in JIT code as one (dm/tools/aot/README.md, "Tail calls and the native frame's return")
+        why = nullptr;
         switch (dm_jit_reason(j)) {
         case DM_JIT_ENTRY:
         case DM_JIT_RETURN:

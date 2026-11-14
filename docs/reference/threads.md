@@ -96,6 +96,16 @@ Guest threads, their synchronization and how the host schedules them. Each entry
 - **Check:** `t_aot_module`'s step 8: the synthetic module's run with JIT entries ended by `exit()` on its guest thread at 1,000 Hz, with 20 ms of CPU time spent after the C++ destructors, 20 times. Before the fix 20 of 20 died with SIGSEGV (19 of 20 exited 0 without the 20 ms); with either half of the fix alone, and with both, 20 of 20 exit 0 (also at 10,000 Hz).
 - **Found on:** the end-to-end test of a second pack (the synthetic game module run with `DM_AOT_PROFILE`); no game.
 
+## The x86-64 engine's JIT fallback
+
+### A thread that stays in the JIT fallback after a jump table discovery left unbounded
+
+- **Symptom:** on the x86-64 engine a program spends almost all its time in the JIT fallback although its pack compiled its code: the sampler's line (`DM_AOT_PROFILE`) has few samples in compiled code and most `in the JIT fallback`, and the misses file holds thousands of `nonlocal` rows, with as many `[RED] aot: a non-local transfer to a continuation with no native frame at ... runs in the JIT fallback (design section 11)` lines, from a program that makes no non-local transfer. A pack built with `nxaot build --misses` from that file has a resume point per row (twice the code, eight times the pack time) and runs as much in the JIT.
+- **Cause:** a `br` discovery leaves to the dispatcher (a jump table whose index it cannot bound) is lowered as a tail call, and a tail call gave the callee the guest's x30 as the return its native frame waits for. A function that called something before such a `br` holds that call's return address in x30, not its entry lr: the JIT ran the case and the rest of the function, and took the function's return to its caller for a non-local transfer, which no native frame took (each resumes only at its own resume points) and the thread's outermost level ran in the JIT, with the rest of the thread: the JIT calls only functions with a standard entry natively. Every return of a call the JIT made there stopped at a compiled call site's return address, which `run_jit` labelled a non-local transfer: a `nonlocal` miss each.
+- **Fix:** a tail call is native only when x30 is the function's entry lr (`lower_calls.cpp` `FnTailLr`, a compare LLVM folds where x30 is never written); otherwise the JIT runs from the target with the function's own return as its stop (`JitContinue`), and calls a compiled entry there natively; a branch into the middle of a function goes the same way (`FnJitTail`). A stop at the return of a call the JIT made is no miss (`aot_run.c` `run_jit`, `jit_loop`; nxaot's `Host::JitLoop`). A misses file an older host wrote keeps its `nonlocal` rows across sessions: remove it before the next pack.
+- **Check:** `t_aot_host`'s `lrtail` row (a module the test writes word by word, packed by `NXAOT`): 126 JIT runs from 5 addresses, 4 misses, none `nonlocal`; the base nxaot's pack gives 189 runs, 4 addresses, 2 misses, 1 `nonlocal`. The 4,000-function benchmark: [dm/tools/aot/README.md](../../dm/tools/aot/README.md#tail-calls-and-the-native-frames-return).
+- **Found on:** the 4,000-function benchmark (`gen_bench.py`); no game has run on the x86-64 engine yet.
+
 ## Synchronization and address arbitration
 
 ### `SignalToAddress` type 2 with count ≤ 0

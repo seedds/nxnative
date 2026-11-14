@@ -342,6 +342,11 @@ public:
     void FnJitCall(uint64_t target, uint64_t call_pc);
     void FnJitTail(Value* target);
     void FnJitContinue(Value* pc, uint32_t reason);
+    void JitContinue(Value* pc, uint32_t reason);   // FnJitContinue's code, not counted as a trap
+    // A guest b or br that leaves the function (a tail call) is a native tail call only when x30 is this function's entry lr, the return its native
+    // caller waits for (section 3.3): the compare, and on another x30 the transfer handed to the JIT with that return as its stop (JitContinue at the
+    // target, reason the JIT's miss there). Leaves the insert point where x30 is the entry's lr
+    void FnTailLr(Value* target, uint32_t reason);
     // A safepoint poll (section 6.2): one compare and branch on st->poll; the cold path stores the dirty registers and pc (the block then holds
     // the whole register file) and calls plan->rt_safepoint
     void FnPoll(Value* pc, const Regs& dirty);

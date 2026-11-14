@@ -231,6 +231,10 @@ Turn off **Show this window at launch** to start the game at once with your choi
 
 **Window** or **Fullscreen**: how the game's window opens. ⌃⌘F or the green button changes it while you play. In an `env.txt`: `DM_FULLSCREEN=1` or `0`.
 
+### Keyboard layout
+
+**WASD and arrows** by default: WASD is the left stick, the arrows the D-pad, J K U I the A B X Y buttons and Q E the L and R buttons. **Button letters**: the keys named like the Switch's buttons press them, A B X Y L R, with Z and C for ZL and ZR; the arrows are the left stick and U H J K the D-pad (up, left, down, right). In both, Shift with an arrow is the right stick, Return and Tab are + and −, F and G press the sticks, and Space shakes the controller ([Keyboard](playing.md#keyboard)). In an `env.txt`: `DM_KBD_LAYOUT=letters` or `classic`.
+
 ### Switch 2 controllers
 
 **Off** by default. On, the game takes Joy-Con 2 and Pro Controller 2 over Bluetooth: hold the small Sync button on one during the game, until its player lights sweep, to pair it with this Mac; after that a press of any of its buttons connects it ([Switch 2 controllers](playing.md#switch-2-controllers-mac)). macOS asks for Bluetooth access the first time, and again after the app is packed again. In an `env.txt`: `DM_SW2=1`.
@@ -279,6 +283,7 @@ A line like `DM_PRESENT_SNAP=0` in `Documents/env.txt` (in the Files app, under 
 | Rumble strength | `DM_RUMBLE_GAIN` | `0` to `3` |
 | Rumble cutoff | `DM_RUMBLE_MIN` | `0` to `0.9` |
 | Press a button to join | `DM_PAD_PRESS_TO_JOIN` | `1`, `0` |
+| Keyboard layout (Mac) | `DM_KBD_LAYOUT` | `classic` WASD and arrows, `letters` button letters |
 | Upscaling | `DM_PRESENT_UPSCALE` | `off`, `metalfx` |
 | Game's upscaler | `DM_UPSCALER` | `game`, `metalfx` |
 | Frame buffering | `DM_PRESENT_SNAP` | `1`, `0` |

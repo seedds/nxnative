@@ -494,7 +494,12 @@ static void file_rule(void) {
     const uint64_t G = 1ull << 30, pool9 = 9 * G, pool3 = 0xCD500000;
     assert(guest_file_wanted(NULL, pool9, 8 * G) && guest_file_wanted("", pool9, 6 * G));   // Mario Kart World's pool on an 8 and a 6 GiB limit
     assert(!guest_file_wanted(NULL, pool9, 12 * G) && !guest_file_wanted(NULL, pool3, 6 * G));   // it fits an iPad's 12 GiB; a Switch game's pool fits 6
-    assert(!guest_file_wanted(NULL, pool9, 0));   // no limit known: the Mac
+    assert(!guest_file_wanted(NULL, pool9, 0));   // no room known
+#if !TARGET_OS_IPHONE
+    assert(guest_file_wanted(NULL, pool9, guest_file_mac_room(18 * G)) && guest_file_wanted(NULL, pool9, guest_file_mac_room(16 * G)));   // on an 18 and a 16 GB Mac
+    assert(!guest_file_wanted(NULL, pool9, guest_file_mac_room(24 * G)) && !guest_file_wanted(NULL, pool3, guest_file_mac_room(16 * G)));   // a 24 GB Mac; a Switch game's pool on 16 GB
+    assert(!guest_file_wanted("0", pool9, guest_file_mac_room(16 * G)) && guest_file_mac_room(0) == 0);
+#endif
     assert(!guest_file_wanted("0", pool9, 8 * G) && guest_file_wanted("1", pool3, 12 * G) && guest_file_wanted("1", pool3, 0));
 }
 // With the guest in files, what the game gives back in the alias region is punched out by the sweep once it has stayed given back over a whole sweep interval: a page mapped again in between keeps

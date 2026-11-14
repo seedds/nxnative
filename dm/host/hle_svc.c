@@ -5,6 +5,7 @@
 #include <sys/mount.h>
 #include <sys/resource.h>
 #include <sys/stat.h>
+#include <sys/sysctl.h>   // hw.memsize (guest_file_mac_room)
 #include <errno.h>
 #include <fcntl.h>
 #include <unistd.h>
@@ -64,8 +65,11 @@ static size_t env_size(const char *name, size_t min, size_t align) {
 // ends an app at, which otherwise charges every page the game has touched; they take the same memory while they stay in it, and the kernel can write them to the files when it needs the room, which it
 // cannot do with an iPhone app's anonymous pages. A page never written reads 0, and mprotect (dirty tracking), vm_remap (virtual pools) and Metal's no-copy buffers work on them as on anonymous pages.
 // The cost is disk: the files take up to what the game has touched, and the kernel writes them back as it does any file (Mario Kart World on a 16 GB Mac: 5.6 GB on disk and 8-10 GB of logical writes
-// in 5.5 minutes). So a game that fits stays anonymous: on iOS the files are on when the game's memory pool is larger than the room to the memory limit at start (guest_file_wanted), and on the Mac,
-// which can swap, only when asked. DM_GUEST_FILE=1 forces them on and 0 off.
+// in 5.5 minutes). So a game that fits stays anonymous: on iOS the files are on when the game's memory pool is larger than the room to the memory limit at start (guest_file_wanted), and on the Mac
+// when the pool is more than 2/5 of the Mac's memory (guest_file_mac_room). The Mac swaps instead of ending the game, but every page the game touches stays charged even after its own allocator has
+// freed it, so a large pool fills the footprint over a session: Mario Kart World's 9 GB on an 18 GB M3 Pro, 3 players, 21 minutes, went 8.0 → 12.3 GB and still climbing, 6.1 GB of it the guest
+// (4.6 GB of that compressed or swapped), with 87 frames over 100 ms; in files it held 5.5 GB from minute 15 with 40 frames over 100 ms, the same frame and GPU medians, 11 GB written to disk.
+// DM_GUEST_FILE=1 forces them on and 0 off.
 // DM_GUEST_FILE_CHUNK=<size> sets each file's size (default 1G, at least 64M, raised to make at most GF_MAX files; one file when it is not under the block's size). The stall at the system's periodic
 // flush, about every 30 s, grows with the file: threads touching the memory stalled 130-432 ms on an iPhone with one 20 GB file, and on a 16 GB M5 Mac with 1 GB touched up to 148 ms with one 20 GB
 // file and 4 ms with 20 files of 1 GB. A pool across two files still gets one no-copy Metal buffer (played on iPhones with 512 MB and 1 GB files; a refused buffer stops the host, mtl_pool_add).
@@ -197,8 +201,11 @@ static void *guest_file_thread(void *arg) {
     }
     return NULL;
 }
-// Whether the guest goes in files: DM_GUEST_FILE when it is set, otherwise when the game's memory pool does not fit the room to the memory limit (room 0: no limit known, as on the Mac)
+// Whether the guest goes in files: DM_GUEST_FILE when it is set, otherwise when the game's memory pool does not fit the room (iOS: to the memory limit; the Mac: guest_file_mac_room; 0: none known)
 static int guest_file_wanted(const char *e, uint64_t pool, uint64_t room) { return e && *e ? atoi(e) > 0 : room && pool > room; }
+// The Mac's room for the rule above: 2/5 of its memory (0 when unknown). The host and Metal take several GB of their own beside the guest (about 5 GB for Mario Kart World at 3 players: render
+// target heaps, texture copies, malloc), so a pool over this share leaves the machine short once the game has touched it: 7.2 GB on an 18 GB Mac, 6.4 on 16, 9.6 on 24, 12.8 on 32
+static uint64_t guest_file_mac_room(uint64_t ram) { return ram / 5 * 2; }
 // A new file of this process's own, never a link's target (O_EXCL, O_NOFOLLOW): one a dead process with the same number left is replaced
 static int guest_file_open(const char *path) {
     const int fl = O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC;
@@ -271,7 +278,10 @@ static void guest_file_init(void) {
     int want = guest_file_wanted(e, DM_GAME_APP_POOL, room);
     LOG("[mem] guest memory: memory pool %.2f GB, room to the memory limit %.2f GB, DM_GUEST_FILE %s: %s", DM_GAME_APP_POOL / G, room / G, e && *e ? e : "unset", want ? "in files" : "anonymous");
 #else
-    int want = guest_file_wanted(e, DM_GAME_APP_POOL, 0);
+    uint64_t ram = 0; size_t rl = sizeof ram; if (sysctlbyname("hw.memsize", &ram, &rl, NULL, 0)) ram = 0;
+    uint64_t room = guest_file_mac_room(ram);
+    int want = guest_file_wanted(e, DM_GAME_APP_POOL, room);
+    LOG("[mem] guest memory: memory pool %.2f GB, Mac memory %.1f GB (files over %.2f GB), DM_GUEST_FILE %s: %s", DM_GAME_APP_POOL / G, ram / G, room / G, e && *e ? e : "unset", want ? "in files" : "anonymous");
 #endif
     if (!want) return;
     g_gf_min_free = mf && *mf ? env_size("DM_GUEST_FILE_MIN_FREE", 0, 0x100000) : (uint64_t)2 << 30;

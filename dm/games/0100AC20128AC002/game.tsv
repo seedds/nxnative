@@ -1,0 +1,37 @@
+# Radical Dreamers in CHRONO CROSS: THE RADICAL DREAMERS EDITION (program 2 of application 0100AC20128AC000; update v131072 = 1.0.2), SDK 13.3.0, NVN
+# Started by the launcher with oe::ExecuteProgram(2) and no launch parameter. Packed with the launcher, as one game
+
+# ---- Identity ----
+title_id	0100AC20128AC002
+program_id	0100AC20128AC002
+
+# ---- App ----
+name	CHRONO CROSS: THE RADICAL DREAMERS EDITION: Radical Dreamers
+ipa	ChronoCrossTheRadicalDreamersEdition.ipa
+app_category	public.app-category.games
+# a program of CHRONO CROSS: THE RADICAL DREAMERS EDITION, not a game of its own (dm/games/README.md, programs): packed with it
+program_of	0100AC20128AC000
+
+# ---- Versions ----
+build	v131072	1.0.2	main=f1fb9740b859009e4a6a90ddd06cac7b	sdk=2bf3519216f5b9d3e8ce26863c2e98b6
+package	v131072
+shader_versions	v131072
+
+# ---- Files ----
+# every module main imports from
+modules	main sdk
+romfs_marker	data/radicaldreamers/translate.txt
+zip_store	.png:.rom:.txt:.metallib
+
+# ---- Memory ----
+# main sets a heap of at most the pool − 64 MB: a 3328 MB heap region
+mem_reserve	0x100000000
+mem_alias	0x10000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+# the NPDM declares 0 MB of system resource: IsVirtualAddressMemoryEnabled is false, as on Horizon (Big Brain Academy: Brain vs. Brain sets a heap only then)
+sys_resource	0x0
+
+# ---- Shader split ----
+shader_groups	/data/=data /glslc/=glslc
+shader_note	CHRONO CROSS: THE RADICAL DREAMERS EDITION shaders

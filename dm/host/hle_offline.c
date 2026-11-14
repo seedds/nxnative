@@ -64,6 +64,12 @@ HLE_FORCE("_ZN2nn9bluetooth22StopBleScanSmartDeviceEv", "BLE scan stop (cut)", R
 HLE_FORCE("_ZN2nn9bluetooth16GetBleScanResultEPNS0_13BleScanResultEi", "BLE scan results (cut): 0 found", int, h_bt_ScanRes, void *out, int max) { (void)out; (void)max; return 0; }
 HLE_FORCE("_ZN2nn9bluetooth24GetBleConnectionInfoListEPNS0_17BleConnectionInfoEi", "BLE connections (cut): 0", int, h_bt_ConnList, void *out, int max) { (void)out; (void)max; return 0; }
 HLE_FORCE("_ZN2nn9bluetooth19ConnectToGattServerERKNS0_7AddressE", "BLE connect (cut)", Result, h_bt_Connect, const void *a) { (void)a; return RES_FAIL; }
+// Registering a GATT notification path is btm:u's job, and InitializeBle made no session: the SDK aborts (Pokémon: Let's Go, Pikachu!'s Options → Open Pokémon GO Settings).
+// A Switch with no paired device registers the path all the same; the game retries only on 0x871 (main+0x114128 in 1.0.0)
+HLE_FORCE("_ZN2nn9bluetooth33RegisterGattOperationNotificationERKNS0_17GattAttributeUuidE", "BLE GATT notification path (cut): registered, nothing ever arrives", Result,
+          h_bt_RegNotif, const void *uuid) { (void)uuid; return RES_OK; }
+HLE_FORCE("_ZN2nn9bluetooth35UnregisterGattOperationNotificationERKNS0_17GattAttributeUuidE", "BLE GATT notification path (cut)", Result, h_bt_UnregNotif, const void *uuid) {
+    (void)uuid; return RES_OK; }
 
 // ---------- socket: offline. Initialization succeeds (the network library's global init depends on it), every later operation fails with errno = ENETDOWN ----------
 enum { SK_ENETDOWN = 50, SK_EAI_FAIL = 4 };

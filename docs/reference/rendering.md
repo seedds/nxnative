@@ -1458,7 +1458,15 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Cause:** the game updates uniforms inline (`CommandBufferUpdateUniformBuffer`) between draws, and every copy or update ended the host's render pass. This was correct but cost submit time.
 - **Fix:** an inline uniform update inside a pass no longer ends it: it is deferred to the pass end (`DM_NVN_UB_DEFER=0` restores the old behaviour), and the draws after it read a shadow ([Partial-cover uniform shadows keep passes open](#partial-cover-uniform-shadows-keep-passes-open)); see [development.md, Power](../development.md#power).
 - **Found on:** [Metroid Dread](../../dm/games/010093801237C000/README.md).
-- **Note:** 04's Metroid Dread section (at `6a06877`) still described the old behaviour ("every copy or update ends the host's render pass"); the deferral came later (development.md's Power section), and it is now the default (`ubd_on` in `nvn_mtl.m`, off with `DM_NVN_UB_DEFER=0` or `DM_NVN_TBDR=1`).
+- **Note:** 04's Metroid Dread section (at `6a06877`) still described the old behaviour ("every copy or update ends the host's render pass"); the deferral came later (development.md's Power section), and it is now the default (`ubd_on` in `nvn_mtl.m`, off with `DM_NVN_UB_DEFER=0`; also in TBDR mode since [Deferred uniform updates in TBDR mode](#deferred-uniform-updates-in-tbdr-mode)).
+
+### Deferred uniform updates in TBDR mode
+
+- **Symptom:** with `DM_NVN_TBDR=1`, every inline uniform update inside a pass ended it again (the passes and attachment traffic [Inline uniform updates inside a render pass](#inline-uniform-updates-inside-a-render-pass) had removed came back), so the TBDR mode's gains could not be measured on their own.
+- **Cause:** `ubd_on` was off in TBDR mode because the mode reorders passes. Its reorderers never move a draw across an update: `defer_try` refuses an `OP_UPDATE_UB` between the deferred pass and its target pass or in the target pass before its first draw, `fuse_try` stops at one, the multi-draw scan (`mdx_run`) stops at one that writes a record it copied, `hoist_try` moves only clear-only passes (they read no uniforms), and the layer lookahead asks `ubd_on`. A deferred pass replayed later reads the updates made before it, whether they are still deferred (shadows) or landed.
+- **Fix:** `ubd_on` no longer depends on `tbdr_on`; `DM_NVN_UB_DEFER=0` still turns the deferral off. Nothing changes by default (TBDR mode is off). A step toward #159, with the store lookahead fix for bindless readers (PR #1340).
+- **Check:** `make -C dm/gfx/tests GAME=01007EF00011E000 check_t_tbdr_ubd` (production `mtl_exec` with `DM_NVN_TBDR=1`, a fragment shader returning a uniform buffer's first `float4`, closed-form pixels): an update between two draws of one pass and before a same-target continuation (one pass, both halves right), an update before a pass `defer_try` defers into a later one (deferred, reads the update), and an update between that pass and its target pass (not deferred, reads the update made before it). On `main` its pixels pass and the 6 counter checks fail (the updates end the passes); with `OP_UPDATE_UB` taken out of `defer_try`'s refusals the last case draws the later update's colour (64 pixels).
+- **Found on:** code reading toward #159; no game run yet.
 
 ### Partial-cover uniform shadows keep passes open
 

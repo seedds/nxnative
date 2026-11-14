@@ -244,6 +244,9 @@ check_t_reorder_chain: RUN_ENV = MTL_DEBUG_LAYER=1
 t_defer_chain: t_defer_chain.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_defer_chain.m $(MTL_T_SRC) $(FW)
 check_t_defer_chain: RUN_ENV = MTL_DEBUG_LAYER=1
+t_tbdr_ubd: t_tbdr_ubd.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_tbdr_ubd.m $(MTL_T_SRC) $(FW)
+check_t_tbdr_ubd: RUN_ENV = MTL_DEBUG_LAYER=1
 t_zskip: t_zskip.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_zskip.m $(MTL_T_SRC) $(FW)
 t_xv: t_xv.m $(MTL_T_DEP)

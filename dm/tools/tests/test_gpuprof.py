@@ -89,16 +89,62 @@ class GpuProf(unittest.TestCase):
         self.assertEqual(r['base']['phases'], 2); self.assertAlmostEqual(r['base']['gpu_p50'], 7.1); self.assertAlmostEqual(r['BARRIER']['gpu_p50'], 7.25)
         self.assertEqual(r['base']['passes'], 150.0)
 
+    @staticmethod
+    def ab_line(n, config, gpu, passes=14.0):
+        return (f'[dm] [vk] [ab] phase {n} {config}: 90 frames, GPU p50 {gpu:.2f} / p90 {gpu + 1:.2f} / mean {gpu:.2f} ms, frame p50 16.67 / p90 17.00 / mean 16.70 ms; '
+                f'per frame: attachments load 10 MB store 20 MB, passes {passes}')
+
+    def cycles(self, n_cycles, offsets=(('A', 0.0), ('B', 0.5), ('C', 0.2)), drift=0.0, passes=14.0):
+        """a run of n_cycles cycles: a phase costs the cycle's level + its configuration's offset, and the level rises by <drift> ms from one cycle to the next (a GPU clock that follows load or temperature)"""
+        lines = []
+        for p in range(n_cycles * len(offsets)):
+            cfg, off = offsets[p % len(offsets)]
+            lines.append(self.ab_line(p, cfg, 5.0 + off + drift * (p // len(offsets)), passes))
+        return gpuprof.parse_ab(lines)
+
+    def test_ab_paired_cancels_drift(self):
+        # the level rises 0.3 ms every cycle, 3 ms over the run; the offsets of B and C are the same in every cycle
+        phases = self.cycles(10, drift=0.3)
+        res, dropped = gpuprof.ab_paired(phases, 'A', skip=0)
+        self.assertEqual(dropped, {})
+        for cfg, want in (('B', 0.5), ('C', 0.2)):
+            self.assertEqual(res[cfg]['cycles'], 10)
+            for got in res[cfg]['gpu']: self.assertAlmostEqual(got, want)   # median and both quartiles
+        self.assertEqual(res['B']['above'], 10)
+        self.assertGreater(max(p['gpu_p50'] for p in phases) - min(p['gpu_p50'] for p in phases), 3.0)   # the run did drift
+
+    def test_ab_paired_drops_cycles(self):
+        phases = self.cycles(6)
+        phases[7]['passes'] = 15.0   # a different scene in cycle 2 (phases 6-8)
+        del phases[-1]               # cycle 5 (phases 15-17) is incomplete
+        res, dropped = gpuprof.ab_paired(phases, 'A', skip=3, exclude=gpuprof.phase_set('9-10, 13'))
+        # skip=3 leaves cycle 0 out, 9-10 cycle 3, 13 cycle 4: only cycle 1 is left
+        self.assertEqual(dropped, {'incomplete': 1, 'left out': 3, 'passes differ (scene change)': 1})
+        self.assertEqual((res['B']['cycles'], res['C']['cycles']), (1, 1))
+
+    def test_ab_paired_refuses_what_it_cannot_pair(self):
+        phases = self.cycles(4)
+        with self.assertRaisesRegex(ValueError, "no configuration 'Z'"): gpuprof.ab_paired(phases, 'Z')
+        phases[4]['config'] = 'C'   # phase 4 would be B: the run has no single period
+        with self.assertRaisesRegex(ValueError, 'one period'): gpuprof.ab_paired(phases, 'A')
+        with self.assertRaises(ValueError): gpuprof.phase_set('5-3')
+        self.assertEqual(gpuprof.phase_set(' 3-5, 9 ,,'), {3, 4, 5, 9})
+
     def test_cli(self):
         with tempfile.TemporaryDirectory() as d:
             p = Path(d) / 'log.txt'; p.write_text('\n'.join(LOG) + '\n')
             for args, want in ((['--by', 'class'], 'full, 4 colours + depth'), (['--timeline', '600'], 'gap 20.0'), (['--ab'], 'BARRIER - base: GPU p50 +0.15 ms'),
-                               (['--frames', '600', '--top', '2'], 'other (3 groups)')):
+                               (['--frames', '600', '--top', '2'], 'other (3 groups)'), (['--ab-paired'], 'BARRIER - base: 1 cycles, GPU p50 -0.50 ms'),
+                               (['--ab-paired', '--ab-skip', '0'], 'BARRIER - base: 2 cycles, GPU p50 -0.75 ms (quartiles -0.88 … -0.62; above 0 in 0)')):
                 out = io.StringIO()
                 with contextlib.redirect_stdout(out): rc = gpuprof.main([str(p)] + args)
                 self.assertEqual(rc, 0, args); self.assertIn(want, out.getvalue(), args)
             err = io.StringIO()
             with contextlib.redirect_stderr(err): self.assertEqual(gpuprof.main([str(p), '--timeline', '7']), 1)
+            for args in (['--ab-paired', '--ab-base', 'nope'], ['--ab-paired', '--ab-exclude', '5-2'], ['--ab-paired', '--ab-exclude', 'x']):
+                err = io.StringIO()
+                with contextlib.redirect_stderr(err): self.assertEqual(gpuprof.main([str(p)] + args), 1, args)
+                self.assertIn('--ab-paired:', err.getvalue(), args)
 
 
 if __name__ == '__main__':

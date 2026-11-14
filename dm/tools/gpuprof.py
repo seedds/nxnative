@@ -10,11 +10,14 @@ line per phase. This tool reads both:
   gpuprof.py log.txt --frames 600 1200     only those frames
   gpuprof.py log.txt --timeline 600        every encoder of frame 600 in GPU order, with the idle gaps between them
   gpuprof.py log.txt --ab                  the [ab] phases: medians per configuration and the difference from the base
+  gpuprof.py log.txt --ab-paired --ab-base 'VK_DONTCARE=none' --ab-exclude 92-140,171
+                                           each configuration against the base within each cycle of phases (median and quartiles of the differences): a GPU
+                                           whose clock drifts with load or temperature over the run shifts both phases of a cycle alike, so the drift cancels
 
 Times are GPU timestamps taken where each encoder begins and ends (relaxed: encoders may overlap), so the sum over encoders is not the frame's GPU time; the frame line's
 span (first start to last end) is closer to it. See docs/agents/05-debugging.md, "GPU time on the device".
 """
-import argparse, collections, re, statistics, sys
+import argparse, collections, math, re, statistics, sys
 
 ENC = re.compile(r'\[gpuprof\] F(\d+)\s+(\d+)\s+([\d.]+) us (render pass|compute / copy)(.*)')
 RP = re.compile(r'^ (\d+) (\d+)x(\d+) colors (\d+) depth (\d+) loads (\d+) draws (\d+) start ([+-][\d.]+) seg (\d+)(?: load (\d+) KB store (\d+) KB)?(?: fmt (\d+)/(\d+))?')
@@ -147,6 +150,50 @@ def ab_summary(phases, skip=1):
     return res
 
 
+def phase_set(spec):
+    """'92-140,171' → {92, ..., 140, 171}"""
+    out = set()
+    for part in filter(None, (s.strip() for s in spec.split(','))):
+        lo, _, hi = part.partition('-')
+        lo, hi = int(lo), int(hi or lo)
+        if hi < lo: raise ValueError(f'phase range {part}: the end is before the start')
+        out.update(range(lo, hi + 1))
+    return frozenset(out)
+
+
+def ab_paired(phases, base, skip=1, exclude=()):
+    """Each configuration against <base> within each cycle: phase p runs configuration list[p % n] for the n configurations of the run, so phases n·c to n·c + n - 1
+    are cycle c. A cycle counts only when all its phases are there, none is left out (before <skip>, or in <exclude>) and all ran the same number of passes per
+    frame (a different count is a different scene). Returns ({config: {'cycles', 'gpu': (median, q1, q3), 'frame': (...), 'above'}}, {reason: dropped cycles}), the spreads nan when
+    no cycle is left; ValueError when the configurations do not repeat with one period or <base> is not one of them"""
+    by_phase = {p['phase']: p for p in phases}
+    configs = list(dict.fromkeys(p['config'] for p in sorted(phases, key=lambda p: p['phase'])))
+    if base not in configs: raise ValueError(f'no configuration {base!r} in the run: {", ".join(configs)}')
+    n = len(configs)
+    slot = {}
+    for p in phases:
+        if slot.setdefault(p['phase'] % n, p['config']) != p['config']:
+            raise ValueError(f'phase {p["phase"]} ran {p["config"]}, an earlier phase in the same place of the {n}-phase cycle ran {slot[p["phase"] % n]}: '
+                             'the configurations do not repeat with one period')
+    diffs = {c: {'gpu': [], 'frame': []} for c in configs if c != base}
+    dropped = collections.Counter()
+    for c in range(max(by_phase) // n + 1):
+        cyc = [p for p in (by_phase.get(c * n + i) for i in range(n)) if p is not None]
+        if len(cyc) < n: dropped['incomplete'] += 1; continue
+        if any(p['phase'] < skip or p['phase'] in exclude for p in cyc): dropped['left out'] += 1; continue
+        if len({p['passes'] for p in cyc}) > 1: dropped['passes differ (scene change)'] += 1; continue
+        b = next(p for p in cyc if p['config'] == base)
+        for p in cyc:
+            if p['config'] == base: continue
+            diffs[p['config']]['gpu'].append(p['gpu_p50'] - b['gpu_p50']); diffs[p['config']]['frame'].append(p['frame_p50'] - b['frame_p50'])
+    def spread(v):
+        if not v: return (math.nan,) * 3
+        q = statistics.quantiles(v, n=4, method='inclusive') if len(v) > 1 else [v[0], v[0], v[0]]
+        return statistics.median(v), q[0], q[2]
+    res = {c: {'cycles': len(d['gpu']), 'gpu': spread(d['gpu']), 'frame': spread(d['frame']), 'above': sum(x > 0 for x in d['gpu'])} for c, d in diffs.items()}
+    return res, dict(dropped)
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split('\n\n')[0])
     ap.add_argument('log', help='the run log or Documents/log.txt')
@@ -156,12 +203,26 @@ def main(argv=None):
     ap.add_argument('--timeline', type=int, metavar='FRAME', help='every encoder of that frame in GPU order')
     ap.add_argument('--ab', action='store_true', help='summarise the DM_AB [ab] lines instead')
     ap.add_argument('--ab-skip', type=int, default=1, help='with --ab: phases left out at the start (default 1)')
+    ap.add_argument('--ab-paired', action='store_true', help='summarise the [ab] lines as differences to --ab-base within each cycle of phases')
+    ap.add_argument('--ab-base', metavar='CONFIG', default='base', help='with --ab-paired: the configuration the others are measured against (default base)')
+    ap.add_argument('--ab-exclude', metavar='PHASES', default='', help='with --ab-paired: phases left out, like 92-140,171: cycles that touch one are dropped (a stretch where something else loaded the GPU)')
     a = ap.parse_args(argv)
+    if a.ab_paired: a.ab = True
     with open(a.log, errors='replace') as fh: lines = fh.readlines()
 
     if a.ab:
         phases = parse_ab(lines)
         if not phases: print('no [ab] lines (DM_AB=<frames> with a switch set to ab)', file=sys.stderr); return 1
+        if a.ab_paired:
+            try: res, dropped = ab_paired(phases, a.ab_base, a.ab_skip, phase_set(a.ab_exclude))
+            except ValueError as e: print(f'--ab-paired: {e}', file=sys.stderr); return 1
+            print(f'{len(phases)} phases; each configuration against {a.ab_base} within its cycle (median, quartiles; first {a.ab_skip} phases left out):')
+            if dropped: print('  cycles dropped: ' + ', '.join(f'{n} {why}' for why, n in dropped.items()))
+            for cfg, r in res.items():
+                if not r['cycles']: print(f'  {cfg}: no cycle left'); continue
+                g, f = r['gpu'], r['frame']
+                print(f'  {cfg} - {a.ab_base}: {r["cycles"]} cycles, GPU p50 {g[0]:+.2f} ms (quartiles {g[1]:+.2f} … {g[2]:+.2f}; above 0 in {r["above"]}), frame p50 {f[0]:+.2f} ms')
+            return 0
         res = ab_summary(phases, a.ab_skip)
         print(f'{len(phases)} phases; medians per configuration (first {a.ab_skip} left out):')
         print(f'  {"configuration":32s} {"phases":>6s} {"GPU p50":>8s} {"GPU p90":>8s} {"frame p50":>9s} {"frame p90":>9s} {"load MB":>8s} {"store MB":>8s} {"passes":>7s}')

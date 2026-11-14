@@ -4,6 +4,7 @@ One line per symptom in the [subsystem references](../reference/): what you see 
 
 ## Packing
 
+- `nx_extract --aoc` aborts with an unhandled `ResultFsOutOfRange (2002-3005)` when a package's file table declares bytes that are not present. → [PFS0 files extend beyond a truncated package](../reference/packing.md#pfs0-files-extend-beyond-a-truncated-package)
 - package identification stops with `ValueError: subsection not found` in `pfs0_names`, or LibHac reports `ResultFsPathNotFound` opening the last file of an NSP. → [PFS0 file-name table missing its final NUL](../reference/packing.md#pfs0-file-name-table-missing-its-final-nul)
 - `no base game, only update packages: pack the base game and its update into one NUP`, even when the update carries the complete game's files (issue #1195). → [A NUP with complete standalone updates stops at "no base game"](../reference/packing.md#a-nup-with-complete-standalone-updates-stops-at-no-base-game)
 - `[RED] a NUP packs only a game with a profile, and <title ID> has none: the survey that makes a provisional profile reads NSPs`, or the same line for a dump folder (issue #1265). A folder holding `exefs/` and `romfs/` directly, or only `updates/<version>/`, was not taken for a dump at all: the script asks for `prod.keys`, then stops with `no NSP with a readable title ID`. → [A NUP or a dump of a game with no profile stops before the survey](../reference/packing.md#a-nup-or-a-dump-of-a-game-with-no-profile-stops-before-the-survey)

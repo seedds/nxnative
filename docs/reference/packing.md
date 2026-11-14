@@ -2,6 +2,13 @@
 
 ## Game packages
 
+### PFS0 files extend beyond a truncated package
+
+- **Symptom:** `nx_extract --aoc` aborts with an unhandled `ResultFsOutOfRange (2002-3005)` when a package's file table declares bytes that are not present.
+- **Cause:** the PFS0 header and name table were checked, but each payload-relative file offset and size was trusted. LibHac later tried to read the missing bytes, before the extractor could issue its normal damaged-package diagnostic.
+- **Fix:** `PackageStorage` validates every file range against the original payload before mounting or adding a virtual final name terminator. The size check uses subtraction to avoid 64-bit overflow, and accepts an empty file at EOF. `OpenNsp` probes the XCI header only when enough bytes exist, then routes malformed PFS0 headers and payload ranges to a named `[RED] the NSP is damaged` message and exit code 3. `--allow-damaged` cannot supply missing container bytes, so it does not bypass this check. The source is never changed.
+- **Found on:** [Diablo II: Resurrected, issue #2013](https://github.com/seedds/nxnative/issues/2013), whose separate licence-only DLC package was truncated. There is no repository profile yet. The base game's SHAD/BTCD shader discovery is a separate unresolved problem; rejecting damaged packages does not fix it or establish gameplay support.
+
 ### PFS0 file-name table missing its final NUL
 
 - **Symptom:** package identification stops with `ValueError: subsection not found` in `pfs0_names`, or LibHac reports `ResultFsPathNotFound` opening the last file of an NSP.

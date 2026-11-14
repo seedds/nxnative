@@ -82,7 +82,11 @@ Measured on an M6 Mac with 16 GB, headless, on one walk with camera turns (`walk
 
 ## Saves
 
-The game autosaves into `slot_00` and `slot_01`, with `option.sav` and `account.sav`. The Load screen lists them and reloading works. A save's thumbnail is a 543x306 JPEG in `caption.sav`, made from a copy of a texture to a buffer. A manual save (Menu, System, Save) on the current build has the picture (slot 02, mean colour 138 / 123 / 86). The autosaves in the work folder's saves, made on older chains, hold a black one. Open: an autosave made on the current build has not been looked at.
+The game writes six slots, `slot_00` to `slot_05`, with `option.sav` and `account.sav`. The Load screen lists six, and reloading works. The engine keeps `save.work` while it runs and swaps it into `save` on every commit, so the six rotate rather than two, and a long session comes back round to overwrite the oldest: the log counts `save commit #N: save.work swapped atomically into save`, 184 times in one session of 2.1 h that left saves in Inside Ganon's Castle (three), Ganon's Castle (two) and the Market.
+
+A save's thumbnail is a 543x306 JPEG in `caption.sav`, made from a copy of a texture to a buffer. The file is a container, not a bare picture: bytes 0 to 1395 are its header and key table, and 1396 to the end are the JPEG, which ends in `FF D9` at the last two bytes of all six slots, so a thumbnail can be cut out without decoding anything. `caption.sav` also keeps the slot's own record: `C_LOCATION` (0xF74E0E8E, a string such as `HyruleField`), `C_STAGE_PATH` (0x0CCCC6CD), `C_AUTOSAVE` (0x25F03CAA), and a clock to the minute in `C_TIME_year`, `month`, `day`, `hour` and `min` (0x9811A3F7, 0xDFD840D3, 0xBD46F485, 0x23F3D75E, 0x27853BF7). The Load screen's place name and time come from there.
+
+Six slots from a play through Hyrule Field to Ganon's Castle, on host `92aa1222` (240 commits behind `main`): every thumbnail is a picture, 31.8 to 42.1 KB, none black, and each names the place it holds. A manual save (Menu, System, Save) on the current build has the picture (slot 02, mean colour 138 / 123 / 86). The autosaves in the work folder's saves, made on older chains, hold a black one. Open: an autosave made on the current build has not been looked at.
 
 ## Driving it on the Mac
 

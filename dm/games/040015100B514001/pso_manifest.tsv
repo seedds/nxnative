@@ -1,0 +1,2 @@
+# Prewarm seed list (shipped in the app, next to shader_map.tsv). Rows: S<TAB>shader key<TAB>stage / R<TAB>render pipeline key (pso_skey hex) / C<TAB>compute shader key.
+# No Edition-specific prewarm seed route has been recorded yet; do not reuse the original Wonder list.

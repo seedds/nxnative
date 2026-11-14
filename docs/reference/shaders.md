@@ -165,6 +165,13 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
   - [Absolum](../../dm/games/0100A83022A22000/README.md): 163 GLSLC outputs in `shaders.nx.bin` (`rom:/shaders.nx.bin`: a u32 count, then per entry a u32 hash, a u32 size and one whole output): 162 unique shaders, 83 pixel and 79 vertex, every vertex shader paired with the single-stage cover ([Single-stage programs paired with a cover](#single-stage-programs-paired-with-a-cover)). Its `.xnb` effects are XNA's D3D9 effects, MOJOSHADER linked in, which the GPU does not run.
   - [Catherine: Full Body](../../dm/games/0100BF00112C0000/README.md): 3,050 loose files in `data/shaders_binary` (`*.vs` / `*.ps`, one stage each, one output per file), read like FINAL FANTASY TACTICS' technique files; its vertex shaders are in two parts ([VertexA and VertexB parts merged into one vertex shader](#vertexa-and-vertexb-parts-merged-into-one-vertex-shader)).
 
+### GLSLC shaders inside Larian LSPK archives
+
+- **Symptom:** the shader split finds only shaders in `main`, followed by `[RED] shader ... is not in the shader map` and missing pictures.
+- **Cause:** Larian's version 13 `.pak` archives keep their file list in an LZ4 block addressed by a footer header. The compiled `.bshd` entries can be stored, zlib or LZ4 blocks, including in numbered archive parts; each then holds a big-endian size with bit 31 set and a zlib-wrapped GLSLC program. A raw scan cannot see the compressed shaders.
+- **Fix:** `lspk_jobs` selects only `.bshd` entries and excludes the archive parts from loose-file scanning. `lspk_shaders` decodes both compression layers and gives the result to the existing GLSLC reader, retaining a vertex/pixel program's pairing. File-list ranges, part references, decoded lengths and one-GiB per-block budgets are checked before scanning. Damaged inputs, unsupported versions, solid archives and unsupported compression are reported as unreadable rather than silently treated as shaderless files.
+- **Found on:** [Divinity: Original Sin 2 - Definitive Edition, issue #1679](https://github.com/seedds/nxnative/issues/1679); the reporter supplied the archive and `.bshd` layout and an initial reader. The archive layout also matches [LSLib's LSPKHeader13 and FileEntry10](https://github.com/Norbyte/lslib/blob/6f5f6987d10d8485876b8368431c948e4dea4f83/LSLib/LS/PackageFormat.cs). No repository profile exists yet. The title-screen loading loop is a separate unresolved problem, and this extraction fix does not establish gameplay support.
+
 ### GLSLC outputs holding several stages
 
 - **Symptom:** the split found no shader in the game (0 shaders).

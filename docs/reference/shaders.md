@@ -2700,6 +2700,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Found on:** [OCTOPATH TRAVELER II](../../dm/games/0100A3501946E000/README.md): from Castti's opening flashback and the battlefield of Hikari's opening on.
 - **Check:** found by bisecting with four runs started at once on copies of one save: `DM_NVN_PREDICT=0` fixed it, a look-ahead that compiled nothing did not, and of its parts only the state ops brought it back; four runs green before the fix, four right after it.
 
+### A burst of pipeline misses compiled one after another
+
+- **Symptom:** a freeze of seconds when a scene first loads with pipelines no prewarm list names: `[longframe] … whole frame 4675.9 ms, submit+present 4672.2 ms … new pipelines 34`, and in the `pipelines up to frame` line `draws that waited: pulling base not made yet 29 / 4603.8 ms`.
+- **Cause:** a draw with no pulling stand-in compiles its pipeline on the submit thread. After the first miss of a submission the look-ahead (`pso_predict_rest`) admitted only two speculative builds, so the rest of the submission's misses compiled one after another, about 135 ms each on an M1 Max.
+- **Fix:** the look-ahead builds every later draw of the submission that would wait, at the key of its pass's attachments, at once (`pso_pend_demand(…, 1)`), on serial queues at user-initiated QoS, one per performance core (`pp_queue(1)`). A draw that reaches a build still queued makes it itself (`pso_pend_take`). The depth and stencil alternatives keep the budget of two speculative builds. Every game; a prewarm list still removes the compiles for the scenes it names.
+- **Found on:** [EA SPORTS FC 27](../../dm/games/0100C49025D3E000/README.md): the match load, cold, at 4K on an M1 Max: worst frame 6.1 / 5.9 s before (two runs), 2.8 s after; time waiting on pipelines 19.2 / 18.5 s before, 10.4 s after.
+- **Check:** `t_pso_pending` (`test_burst_admits_every_waiting_draw`): a submission with four cold draws admits all four while the gated compiler holds them.
+
 ### GPU frame captures need pipelines built through the device
 
 - **Symptom:** a GPU frame capture (`DM_GPU_CAPTURE`, or Xcode with `MTL_CAPTURE_ENABLED=1`) fails with `Capturing Render pipeline specialization is not supported`, or the capture layer crashes on the pipeline archive; a capture of the `MTLDevice` is refused.

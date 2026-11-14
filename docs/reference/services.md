@@ -926,6 +926,13 @@ Most service calls can be found before they crash, before the first boot or the 
 
 ## Accounts, network, shop and parental controls
 
+### Account ID accessor accepts locally constructed handles
+
+- **Symptom:** connecting a second controller before launch or during play aborts with `FATAL account::GetUserId: the handle was not issued by the host (0x8)`.
+- **Cause:** the host validated the third word of `UserHandle` against its private marker. The SDK accessor copies only the first two words, the Uid; it does not read or validate the manager word at +0x10. FC 26 constructs a local guest-player handle with a different manager word; FC 27 imports the same accessor.
+- **Fix:** copy the Uid without validating the manager word, matching the SDK. `t_account` checks the ordinary preselected user and locally constructed handles with manager words 8, zero and all bits set. From the FC 26 120 fps patch by @imnotsharingmyname (MIT).
+- **Found on:** EA SPORTS FC 26 1.86.1233; EA SPORTS FC 27 imports the same accessor.
+
 ### Account, friends, play data and Nintendo Account calls
 
 - **Symptom:** a null read at `sdk+0x336ccc` in `pdm::QueryApplicationPlayStatistics` (Pokémon Sword, the second boot); undefined `nn::account::` / `nn::friends::` imports with no hook, found from the import list ([Listing a game's unhooked imports before they are met](#listing-a-games-unhooked-imports-before-they-are-met)) before they were met.

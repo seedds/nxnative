@@ -38,8 +38,11 @@ end = next(i for i, n in enumerate(tree.body[start:], start) if isinstance(n, as
 REGISTRY_CODE = compile(ast.Module(body=tree.body[start:end], type_ignores=[]), str(source), 'exec')
 
 
-def builds_of(g):   # {build ID: module name} of a profile's build rows (a profile or its title ID)
-    return {bid: m for row in (game.load(g) if isinstance(g, str) else g).builds().values() for m, bid in row.items() if m != 'display'}
+def builds_of(g):   # {build ID: module name} of a profile's build rows and nro_builds (a profile or its title ID)
+    g = game.load(g) if isinstance(g, str) else g
+    out = {bid: m for row in g.builds().values() for m, bid in row.items() if m != 'display'}
+    out.update({bid: m for row in g.values('nro_builds') for m, bid in (w.split('=', 1) for w in row[0].split())})
+    return out
 
 
 class Registry(unittest.TestCase):

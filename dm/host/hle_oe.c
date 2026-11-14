@@ -358,7 +358,14 @@ HLE_FORCE("_ZN2nn2gs3sdk26SetGraphicsFrameLengthModeENS1_23GraphicsFrameLengthMo
           void, h_gs_FrameLength, int mode) {
     static int last = -1; if (mode != last) { LOG("gs: graphics frame length mode %d (0 auto, 1 30 fps, 2 60 fps, 3 120 fps)", mode); last = mode; }
 }
-HLE_FORCE("_ZN2nn2oe27GetDefaultDisplayResolutionEPiS1_", "default display resolution: 1920x1080 docked, 1280x720 handheld", void, h_oe_DefRes, int *w, int *h) {
+HLE_FORCE("_ZN2nn2oe27GetDefaultDisplayResolutionEPiS1_", "default display resolution: 1920x1080 docked, 1280x720 handheld; DM_DISPLAY_SIZE=WxH overrides", void, h_oe_DefRes, int *w, int *h) {
+    const char *e = getenv("DM_DISPLAY_SIZE");
+    if (!e || !*e) e = DM_GAME_DISPLAY_SIZE;
+    if (e && *e) {
+        int ww = 0, hh = 0;
+        if (sscanf(e, "%dx%d", &ww, &hh) == 2 && ww >= 320 && hh >= 240 && ww <= 7680 && hh <= 4320) { if (w) *w = ww; if (h) *h = hh; return; }
+        LOG("[RED] DM_DISPLAY_SIZE=%s: must be WxH between 320x240 and 7680x4320; using the default", e);
+    }
     int con = opmode() == 1; if (w) *w = con ? 1920 : 1280; if (h) *h = con ? 1080 : 720;
 }
 HLE_FORCE("_ZN2nn2oe38GetDefaultDisplayResolutionChangeEventEPNS_2os11SystemEventE", "default display resolution change event: bound, never signaled (the operation mode notification carries the change)",

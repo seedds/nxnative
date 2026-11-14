@@ -319,7 +319,7 @@ static void install_fps_state(module_t *m) {
 void dm_fps_state_apply(void) {
     if (!dm_fps_state) return;
     const char *e = getenv("DM_FPS_TARGET"); int t = e ? atoi(e) : DM_GAME_FPS_TARGET;
-    if (t != 0 && t != 30 && t != 60) { LOG("[RED] DM_FPS_TARGET=%s: must be 0, 30 or 60; using the game's own frame step", e); t = 0; }
+    if (t != 0 && t != 30 && t != 60 && !(t == 100 && DM_GAME_FPS_MAX >= 100) && !(t == 120 && DM_GAME_FPS_MAX >= 120)) { LOG("[RED] frame target %d: must be 0, 30 or 60%s; using the game's own frame step", t, DM_GAME_FPS_MAX >= 120 ? ", 100 or 120" : DM_GAME_FPS_MAX >= 100 ? " or 100" : ""); t = 0; }
     float f = (float)t; memcpy(dm_fps_state, &f, sizeof f);
     // Render scale of the 3D views (the stubs at Tears of the Kingdom's main+0xd5cc0, Breath of the Wild's main+0x1266880, Hades II's render size): 1.0 keeps the game's own size
     // and dynamic resolution; another factor fixes the size at that fraction (DM_RENDER_SCALE, 0.5 to the stub's largest scale: 1.0, or above for a stub that also raises it,
@@ -878,6 +878,7 @@ void load_modules(const char *dir, const char **names, int n) {
     t = now_ns(); for (int i = 0; i < g_nmod; i++) relocate(&g_mod[i]); tr = now_ns() - t;
     force_check();
     preload_nros(dir, nros);   // mapped now, relocated when the game loads them (hle_ro.c)
+    nro_runtime_patch();   // runtime NRO code patches keyed by build ID (hle_nro.c)
     { void hlecount_seal(void); hlecount_seal(); }   // DM_HLECOUNT: relocation done, seal the counting stub pages as read-only executable
     if (getenv("DM_SYMCHECK")) LOG("DM_SYMCHECK: %lu symbol lookups at load time, hash and linear disagree %lu", g_symchk_n, g_symchk_bad);
     if (g_flag.bootprof) LOG("① breakdown: mapping (read + copy + seal pages) %.1f ms, dynamic section parsing %.1f ms, gate registration %.1f ms, relocation + forced takeover %.1f ms, total %.1f ms",

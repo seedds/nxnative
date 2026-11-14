@@ -7874,3 +7874,5 @@ cs_data.bin	3218	compute	8b76ea49bb0b67d9	/Data/NX/superbundlelayout/installpack
 cs_data.bin	3219	compute	cd4e1b4365c83da1	/Data/NX/superbundlelayout/installpackage_05/cas_04.cas#shaders/bytecode/af9ac820-be8f-22e5-76e4-e66f351ed523
 cs_data.bin	3220	compute	1f7c1e241e74e041	/Data/NX/superbundlelayout/installpackage_05/cas_04.cas#shaders/bytecode/c21204de-09d7-253a-e755-a9214a04693f
 cs_data.bin	3221	compute	8bf6e80b5e7691d1	/Data/NX/superbundlelayout/installpackage_05/cas_04.cas#shaders/bytecode/d5c0e238-501d-1845-4230-bdb67d412017
+vs_patch.bin	0	vertex	1312f56f42a942d7	/Patch/NX/superbundlelayout/installpackage_00/cas_01.cas#shaders/bytecode/05c209bb-02a3-34b0-0a44-9b89fb81a4c1
+vs_patch.bin	1	vertex	43f1a6de4954699f	/Patch/NX/superbundlelayout/installpackage_00/cas_01.cas#shaders/bytecode/68a36071-6d06-4789-1fdd-45b38b20b0e8

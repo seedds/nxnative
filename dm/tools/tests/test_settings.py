@@ -1,6 +1,6 @@
 """Offer the resolution control only when the rewritten build supports it, and the game's upscaler choice only to games whose shader map holds their own upscaler (agl's NDSR network: game.py upscaler_keys)."""
 from pathlib import Path
-import sys,tempfile,unittest
+import os,sys,tempfile,unittest
 from unittest.mock import patch
 sys.path.insert(0,str(Path(__file__).resolve().parents[2]/'games'))
 import settings
@@ -20,6 +20,20 @@ class ResolutionSetting(unittest.TestCase):
                 self.assertEqual(fps['default'],'60')
                 self.assertEqual(fps['options'],[['30','30 fps'],['60','60 fps']])
 
+class DisplaySizeSetting(unittest.TestCase):
+    def test_mac_only(self):
+        with tempfile.TemporaryDirectory() as tmp,patch.object(settings.nacp,'languages',return_value=['en-US']):
+            (Path(tmp)/'main.fixups.tsv').write_text('')
+            for platform,shown in [('mac',True),('ios',False)]:
+                with patch.dict(os.environ,{'SETTINGS_PLATFORM':platform}):
+                    rows=settings.build('0100C49025D3E000',tmp,'unused')['settings']
+                ds=[s for s in rows if s['env']=='DM_DISPLAY_SIZE']
+                self.assertEqual(bool(ds),shown,platform)
+                if ds:
+                    self.assertEqual(ds[0]['default'],'2560x1440')
+                    self.assertEqual([o[0] for o in ds[0]['options']],['1280x720','1920x1080','2560x1440','3840x2160'])
+
+
 class FrameRateOption(unittest.TestCase):
     def test_120_only_on_the_mac_for_a_game_checked_at_that_speed(self):
         with tempfile.TemporaryDirectory() as tmp,patch.object(settings.nacp,'languages',return_value=['en-US']):
@@ -28,7 +42,7 @@ class FrameRateOption(unittest.TestCase):
                 with patch.dict(settings.os.environ,{'SETTINGS_PLATFORM':platform}):
                     fps=next(s for s in settings.build(gid,tmp,'unused')['settings'] if s['env']=='DM_FPS_TARGET')
                 self.assertEqual(fps['default'],'60',gid)
-                self.assertEqual(fps['options'],[['30','30 fps'],['60','60 fps']]+([['120','120 fps']] if has else []),(gid,platform))
+                self.assertEqual(fps['options'],[['30','30 fps'],['60','60 fps']]+([['100','100 fps'],['120','120 fps']] if has else []),(gid,platform))
 
 class UpscalerSetting(unittest.TestCase):
     def test_only_for_games_naming_their_upscaler(self):

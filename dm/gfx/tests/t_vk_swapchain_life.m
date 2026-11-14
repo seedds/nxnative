@@ -21,8 +21,12 @@ enum { CYCLES = 140, FRAMES = 3, IMAGES = 3 };   // more cycles than the present
 static void one_cycle(__weak id<MTLTexture> *weak) {
     @autoreleasepool {
         VkSwapchainCreateInfoKHR ci = {.sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR, .minImageCount = IMAGES, .imageFormat = VK_FORMAT_B8G8R8A8_UNORM,
-                                       .imageExtent = {64, 32}, .imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT, .presentMode = VK_PRESENT_MODE_FIFO_KHR};
-        VkSwapchainKHR sc; h_vkCreateSwapchainKHR(&g_device, &ci, NULL, &sc);
+                                       .imageExtent = {64, 32}, .imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT, .preTransform = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR,
+                                       .compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR, .presentMode = VK_PRESENT_MODE_FIFO_KHR};
+        VkSwapchainKHR sc = VK_NULL_HANDLE;
+        VkResult result = h_vkCreateSwapchainKHR(&g_device, &ci, NULL, &sc);
+        CHECK(result == VK_SUCCESS && sc != VK_NULL_HANDLE, "swap chain creation succeeds");
+        if (result != VK_SUCCESS || sc == VK_NULL_HANDLE) return;
         for (uint32_t i = 0; i < sc->n; i++) weak[i] = sc->img[i]->tex;
         for (int f = 0; f < FRAMES; f++) {
             uint32_t k; h_vkAcquireNextImageKHR(&g_device, sc, UINT64_MAX, NULL, NULL, &k);

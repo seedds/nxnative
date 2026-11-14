@@ -316,6 +316,31 @@ static void native_mesh(NSString *dir) {
     g_warm_t0 = bp_now(); warm_finish();
 }
 
+static void converted_inputs(NSString *dir) {
+    if (!hybrid_on()) return;
+    g_shcache = [NSMutableDictionary dictionary]; warm_load_begin();
+    NvShader *vs=warm_shader(@"warm-vs",0), *fs=warm_shader(@"warm-fs",1);
+    EXPECT("conversion fixture shaders loaded",1,vs && fs); if(!vs || !fs)return;
+    vs->has_pull=1;vs->pfn_state=1;vs->pfn=vs->fn;
+    vs->rf.nv=1;vs->rf.v[0].nvn=vs->rf.v[0].loc=0;vs->rf.v[0].ct=NVN_CT_FLOAT;
+    memset(vs->rf.v[0].sh,0xff,sizeof vs->rf.v[0].sh);
+    pso_key key={.cfmt={MTLPixelFormatRGBA8Unorm},.samples=1,.chmask=15};
+    key.attr[0].fmt=0x14;key.stream[0].stride=4;
+    NSString *manifest=[dir stringByAppendingPathComponent:@"converted.tsv"];
+    EXPECT("conversion manifest written",1,[row(&key,0) writeToFile:manifest atomically:YES encoding:NSUTF8StringEncoding error:nil]);
+    long lines=0;NSArray<WarmTask *> *tasks=warm_parse(@[manifest],&lines);
+    EXPECT("conversion row parsed",1,tasks.count);if(tasks.count!=1)return;
+    warm_task(tasks[0]);warm_claim();key.vs=(__bridge void*)vs;key.fs=(__bridge void*)fs;
+    id<MTLRenderPipelineState> warmed=hm_get_id(&g_pso_hy,&key);
+    EXPECT("converted input warmed into pulling cache",1,warmed!=nil);
+    EXPECT("converted input not published as native pipeline",1,hm_get_id(&g_pso,&key)==nil);
+    uint64_t builds=g_pb_spec+g_pb_legacy;
+    EXPECT("draw takes the warmed pulling pipeline",1,hybrid_get(&key,vs,fs)==warmed);
+    EXPECT("draw performs no foreground pipeline build",builds,g_pb_spec+g_pb_legacy);
+    if(warmed){uint8_t pixel[4];pixels(warmed,0,pixel);EXPECT("warmed pulling pipeline draws",1,pixel[0]==128 && pixel[1]==64 && pixel[2]==255);}
+    warm_finish();
+}
+
 int main(void) { @autoreleasepool {
     alarm(60);   // A regression in owner/waiter progress must fail rather than hang the suite.
     setenv("DM_PSO_ARCHIVE", "off", 1); setenv("DM_NVN_PREDICT", "0", 1);
@@ -328,6 +353,7 @@ int main(void) { @autoreleasepool {
     singleflight(@(dir));
     scenario(@(dir), 0); scenario(@(dir), 1);
     native_mesh(@(dir));
+    converted_inputs(@(dir));
     const char *mode = getenv("DM_PSO_MTL4");
     if (mode) EXPECT("requested compiler path selected", strcmp(mode, "0") != 0, g_comp4 != nil);
     [NSFileManager.defaultManager removeItemAtPath:@(dir) error:nil];

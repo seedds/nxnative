@@ -1246,6 +1246,36 @@ static Class DuoHarnessInstallReservedRegionProbe(UIView *view) API_AVAILABLE(io
     [self endTouches:@[video, button] onPad:pad cancelled:NO];
 }
 
+- (void)testMenuButtonFollowsTheGameViewAndTheController {
+    UIViewController *root = [self harnessRootViewController];
+    UIView *game = [root valueForKey:@"game"], *pad = [root valueForKey:@"pad"];
+    UIButton *menu = [self menuButtonInPad:pad];
+    UIView *tv = [[UIView alloc] initWithFrame:root.view.bounds];
+    GCController *controller = [GCController controllerWithExtendedGamepad];
+    @try {
+        // The TV scene moves the same game view into its own view hierarchy.
+        [tv addSubview:game]; [root.view setNeedsLayout]; [root.view layoutIfNeeded];
+        XCTAssertEqual([pad hitTest:menu.center withEvent:nil], menu, @"A touch-only player still has the menu on TV");
+        [self setHarnessControllers:@[controller] notification:GCControllerDidConnectNotification];
+        [self waitForView:menu hidden:YES];
+        XCTAssertNotEqual([pad hitTest:menu.center withEvent:nil], menu);
+        [self deliverSnapshotChangeFor:controller button:controller.extendedGamepad.buttonB value:1];
+        XCTAssertEqual(duo_harness_state().players[0].buttons, DM_BTN_A);
+
+        [root.view insertSubview:game atIndex:0]; [root.view setNeedsLayout]; [root.view layoutIfNeeded];
+        XCTAssertEqual([pad hitTest:menu.center withEvent:nil], menu, @"The gear returns even with the controller still connected");
+        XCTAssertEqual(duo_harness_state().players[0].buttons, DM_BTN_A);
+        [tv addSubview:game]; [root.view setNeedsLayout]; [root.view layoutIfNeeded];
+        XCTAssertTrue(menu.hidden, @"The TV can also connect after the controller");
+        [self setHarnessControllers:@[] notification:GCControllerDidDisconnectNotification];
+        [self waitForView:menu hidden:NO];
+        XCTAssertEqual([pad hitTest:menu.center withEvent:nil], menu);
+    } @finally {
+        [root.view insertSubview:game atIndex:0]; [root.view setNeedsLayout]; [root.view layoutIfNeeded];
+        [self setHarnessControllers:@[] notification:GCControllerDidDisconnectNotification];
+    }
+}
+
 - (void)testConnectedVirtualControllerKeepsVideoTouchAndMapsPhysicalButtons {
     if (@available(iOS 17.0, *)) {
         [self setHarnessControllers:nil notification:nil];

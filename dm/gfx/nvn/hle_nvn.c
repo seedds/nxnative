@@ -2718,6 +2718,8 @@ NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
     // Actual presentation interval (windowed mode): taken 8 presents late (the presented callback has arrived by then), as the difference between the n-th and the (n−1)-th; −1 = discarded
     if (o->presents > 9) { uint64_t n = o->presents - 8; double a_ = mtl_presented_time(n), b_ = mtl_presented_time(n - 1);
         if (a_ < 0) trow(f - 8, "@presented_ms", -1); else if (a_ > 0 && b_ > 0) trow(f - 8, "@presented_ms", (a_ - b_) * 1e3);
+        { double mtl_present_gpu_ms(uint64_t), mtl_snap_gpu_ms(uint64_t); double pg = mtl_present_gpu_ms(n), sg = mtl_snap_gpu_ms(n);   // the present command buffer's GPU time (MetalFX and the present pass) and the snapshot's (the copy and, at the snapshot, the scaler): both on the game's queue
+          if (pg > 0) trow(f - 8, "@present_gpu_ms", pg); if (sg > 0) trow(f - 8, "@snap_gpu_ms", sg); }
         g_pres_exp[g_presn % TWIN] = g_pres_exp_last = pres_expect_ms(n);
         g_pres_iv[g_presn++ % TWIN] = a_ < 0 ? -1 : (a_ > 0 && b_ > 0 ? (a_ - b_) * 1e3 : 0);
         { double iv_ = a_ < 0 ? -1 : (a_ > 0 && b_ > 0 ? (a_ - b_) * 1e3 : 0); mtl_ub_present(iv_); }   // same-process alternating measurement (DM_NVN_UB) tallies on-screen present intervals per phase; when off it is just one atomic read
@@ -2726,7 +2728,11 @@ NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
         // The display-link tick that took this frame: its target display time (same base as @pres_at_ms, so @pres_at_ms − @link_target_ms is how late the system showed it), the callback's lead
         // before that target, the callbacks since the previous frame's (1 = every tick took a frame) and the longest interval between them (33 ms on a 60 Hz link = a refresh the link skipped)
         double lt, ll, lg; int lk;
-        if (g_tsv && mtl_link_tick(n, &lt, &ll, &lk, &lg)) { trow(f - 8, "@link_target_ms", lt * 1e3 - g_t0_ns / 1e6); trow(f - 8, "@link_lead_ms", ll); trow(f - 8, "@link_ticks", lk); trow(f - 8, "@link_gap_ms", lg); } }
+        if (g_tsv && mtl_link_tick(n, &lt, &ll, &lk, &lg)) { trow(f - 8, "@link_target_ms", lt * 1e3 - g_t0_ns / 1e6); trow(f - 8, "@link_lead_ms", ll); trow(f - 8, "@link_ticks", lk); trow(f - 8, "@link_gap_ms", lg); }
+        // Where that callback spent its time (mtl_link_detail): @link_slack_ms (submission deadline minus the present call), @link_wait_ms (snapshot / producer waits), @link_alloc_ms,
+        // @link_run_ms (entry to exit), @link_idle_ms (since the previous callback exited), @link_held_ms (longest callback that took no frame since the previous present), @link_lock_ms
+        double lv[7]; static const char *ln[7] = {"@link_slack_ms", "@link_wait_ms", "@link_alloc_ms", "@link_run_ms", "@link_idle_ms", "@link_held_ms", "@link_lock_ms"};
+        if (g_tsv && mtl_link_detail(n, lv)) for (int i = 0; i < 7; i++) trow(f - 8, ln[i], lv[i]); }
     if (f >= 8 && slow_on()) slow_emit(f - 8);
     prev_out = now_ns();
 }

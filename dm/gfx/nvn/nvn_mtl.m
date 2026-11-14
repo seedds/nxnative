@@ -16368,7 +16368,8 @@ static struct { uint64_t frame; char path[1024]; } g_shotq[SHOTQ_MAX]; static in
 static pthread_mutex_t g_shotq_mu = PTHREAD_MUTEX_INITIALIZER;
 static int present_encode(id<MTLCommandBuffer> cb, id<MTLTexture> src, id<MTLTexture> dst, const int crop[4]);
 static int present_crop_rect(id<MTLTexture> src, const int crop[4], NSUInteger r[4]);
-enum { PRESENT_FAILED, PRESENT_STANDARD, PRESENT_METALFX };
+enum { PRESENT_FAILED, PRESENT_STANDARD, PRESENT_METALFX, PRESENT_METALFX_SNAP };   // METALFX_SNAP: the picture was scaled at the snapshot (snap_take) and the present drew it 1:1
+static int present_draw_m4(id<MTL4CommandBuffer> cb, id<MTLTexture> tex, const NSUInteger r[4], MTLViewport vp, id<MTLTexture> dst, id<MTLBuffer> uvb, int full);
 static int present_offscreen_m4(id<MTLTexture> src, const int crop[4], id<MTLTexture> out, void (^done)(int));
 static int present_offscreen_wait(id<MTLTexture> src, const int crop[4], id<MTLTexture> out);
 // Game picture needed by the whole-window screenshot (front end window_shot; no longer does drawViewHierarchy on a Metal layer with the display link attached): at the next present, the present thread draws the same frame
@@ -16701,8 +16702,87 @@ static void pres_seen(uint64_t pn, double tt) {
 }
 // Ring of the display-link tick that took each present (written on the display-link callback thread, read 8 presents later for DM_NVN_TSV, as g_pres): its target display time
 // (seconds, CACurrentMediaTime base), how long before it the callback ran, the callbacks since the previous present's (1 = no tick without a frame) and the longest interval between them
-typedef struct { uint64_t n; double target, lead_ms, gap_ms; int ticks; } link_ent;
+// Where the callback that took a present spent its time (ms): the submission deadline's slack (update.targetTimestamp − the present call: negative = past it), the snapshot and
+// external-producer waits, present_now's allocator wait, the callback's own run (entry to exit), the idle time since the previous callback exited (near 0 = the previous one ran
+// up to this one), the longest held callback since the previous present and the wait for g_pq_mu. They tell a tick the system did not deliver from one our own callback delayed
+typedef struct { uint64_t n; double target, lead_ms, gap_ms; int ticks; double slack_ms, wait_ms, alloc_ms, run_ms, idle_ms, held_ms, lock_ms; } link_ent;
 static link_ent g_link_ring[PRING];
+// The screen moving under the display link (DM_PRESENT_RESYNC=1, default; 0 off). Measured on Breath of the Wild in fullscreen on a ProMotion Mac (DM_NVN_TSV, runs 4-10): at one
+// frame (87, 251, 342, 355 s into a session, no timer of ours) the system starts showing every frame exactly 4.17 ms (1/240 s) after the link's target and keeps that offset;
+// nothing on our side changes at that frame. From then on the link calls back a tick late about every 11-12 frames: our callbacks run 0.16 ms with no wait and present 8.1 ms
+// before their deadline, and the link thread sits idle 20.7 ms before each late one (run 9). That costs 56 fps on the 60 Hz link and 58.6 on the 120 Hz link, at frame latency
+// 2 and 1 alike, and a link made again keeps the offset. Without the link (mode 0: the present thread takes drawables and presents each frame for its period) the game held
+// 60.03 fps for 15 minutes (run 10). So once LINK_SHIFT_N presents in a row were shown LINK_SHIFT_MS or more after their targets (three quarters of them; a frame a whole refresh
+// late is a miss of its own; half of them, as when run 6's offset flipped each second at 60 fps, is not the steady shift), the game leaves the link for mode 0 (at 60 or 30 fps), where it
+// fits (link_leave_ok): fullscreen on a variable-refresh screen, which shows a frame when it is presented, at any rate. Fixed-rate screens (frame latency 1, where the shift was
+// not seen) and windows keep the link; leaving those conditions takes pacing back to it. What the system changes at the shift is open (docs/reference/frame-rate.md)
+#define LINK_SHIFT_N 120
+#define LINK_SHIFT_MS 2.0
+typedef struct { int late, n; } link_shift_t;
+static int link_shift_judge(link_shift_t *s, double late_ms) {   // one presented frame: 1 when a full window was steadily shown after its targets
+    s->n++; s->late += late_ms >= LINK_SHIFT_MS;
+    if (s->n < LINK_SHIFT_N) return 0;
+    int late = s->late >= LINK_SHIFT_N * 3 / 4; s->n = s->late = 0;
+    return late;
+}
+// Pacing may leave the display link for the screen's shift: fullscreen on a variable-refresh screen, at any rate. Not on a fixed-rate screen, not in a window
+static int link_leave_ok(int fullscreen, int variable) { return fullscreen && variable; }
+// The offset of the frames on screen against their targets, and when it moves (the log line that dates the system's shift): level is the settled offset; a new one (cand) settles
+// after LINK_OFFSET_N presents within 1 ms of it. Isolated presents at neither are skipped (after the shift about one in twelve is on its target, and a few a refresh off); three in a
+// row at the old level, or three in a row at neither, start the count again. Returns 1 on the present that settles it, with *first the first present at it and *was the offset before
+#define LINK_OFFSET_N 30
+#define LINK_OFFSET_LOG 8
+typedef struct { double level, cand; int have, n, back, odd; uint64_t first; } link_offset_t;
+static int link_offset_note(link_offset_t *o, double late_ms, uint64_t pn, uint64_t *first, double *was) {
+    if (!o->have) { o->level = late_ms; o->have = 1; return 0; }
+    if (fabs(late_ms - o->level) < 1.0) { if (++o->back >= 3) o->n = 0; return 0; }
+    o->back = 0;
+    if (o->n && fabs(late_ms - o->cand) >= 1.0) { if (++o->odd >= 3) o->n = 0; else return 0; }
+    if (!o->n) { o->cand = late_ms; o->n = 1; o->odd = 0; o->first = pn; return 0; }
+    o->odd = 0;
+    if (++o->n < LINK_OFFSET_N) return 0;
+    *first = o->first; *was = o->level; o->level = o->cand; o->n = 0; return 1;
+}
+__attribute__((weak)) int front_fullscreen(void);
+__attribute__((weak)) int front_screen_variable_refresh(void);
+__attribute__((weak)) int front_screen_max_fps(void);
+static int link_latency(void);
+static link_shift_t g_link_shift; static link_offset_t g_link_offset; static int g_link_moved, g_link_leave;   // under g_pq_mu; moved: pacing left the link (mode 0) because of the shift; leave: the presented handler asks link_sync to leave it
+static int link_resync_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_PRESENT_RESYNC"); v = !(e && !strcmp(e, "0")); } return v; }
+static void link_late_note(uint64_t pn, double presented) {   // a frame's actual presentation time against its display-link target (the presented handler, under g_pq_mu)
+    link_ent e = g_link_ring[pn % PRING]; if (e.n != pn || !(presented > 0) || !(e.target > 0)) return;
+    double late_ms = (presented - e.target) * 1e3; if (late_ms > 20) return;   // a frame shown a whole refresh late or more is a miss of its own (a stall, a heavy frame), not the grid
+    int fs = front_fullscreen(), vrr = front_screen_variable_refresh(), hz = front_screen_max_fps(); uint64_t first; double was;
+    static unsigned moves, quiet; static uint64_t quiet_at;   // the first LINK_OFFSET_LOG moves in full, then a count a minute (Breath of the Wild run 6: the offset went 0 ↔ 4.15 ms about once a second for four minutes)
+    if (link_offset_note(&g_link_offset, late_ms, pn, &first, &was)) {
+        uint64_t t = now_ns();
+        if (++moves <= LINK_OFFSET_LOG) {
+            pres_ent f2 = g_pres[(pn - 2) % PRING]; double cb = e.target - e.lead_ms / 1e3;
+            MLOG("display link: frames now reach the screen %.2f ms after the link's targets (was %.2f) from present %llu; callback %.2f ms after present %llu reached the screen, lead %.2f ms; screen %d Hz %s, %s, frame latency %d, pacing mode %d",
+                 g_link_offset.level, was, (unsigned long long)first, f2.n == pn - 2 && f2.t > 0 ? (cb - f2.t) * 1e3 : -1.0,
+                 (unsigned long long)(pn - 2), e.lead_ms, hz, vrr ? "variable refresh" : "fixed refresh", fs ? "fullscreen" : "window", link_latency(), g_dm_present_link);
+            if (moves == LINK_OFFSET_LOG) quiet_at = t + 60000000000ull;
+        } else if (++quiet && t >= quiet_at) {
+            MLOG("display link: the frames' offset against the link's targets moved %u more times in the last minute or more (now %.2f ms)", quiet, g_link_offset.level);
+            quiet = 0; quiet_at = t + 60000000000ull;
+        }
+    }
+    // Mode 1 only: 1 is the default; 2 (120 Hz link) is a DM_PRESENT_LINK choice, which keeps the link though it also loses frames after the shift (58.6 fps)
+    if (!link_resync_on() || g_link_moved || g_link_leave || g_dm_present_link != 1 || !link_shift_judge(&g_link_shift, late_ms)) return;
+    if (link_leave_ok(fs, vrr)) {   // at 60 and 30 fps alike: mode 0 presents each frame for its period (Donkey Kong Bananza on the 30 Hz link after the shift: 33 and 58 ms frames, 26-27 fps)
+        // Only a request: link_sync, on the game's present thread, sets the mode and invalidates the link in one step. Setting the mode here would stop the callback taking frames
+        // while the link still owns the layer, and a game waiting in mtl_present_wait for an untaken frame would wait forever (the ticking link keeps the stall drop from firing)
+        g_link_leave = 1;
+        MLOG("display link: %d presents shown %.2f ms after their targets: pacing leaves the link at the next present, the present thread presents each frame (DM_PRESENT_LINK=0)", LINK_SHIFT_N, g_link_offset.level);
+    } else {
+        static int said; if (!said++) MLOG("display link: %d presents shown %.2f ms after their targets; pacing stays on the link (screen %d Hz %s, %s: leaving it needs fullscreen on a variable-refresh screen)",
+                                          LINK_SHIFT_N, late_ms, hz, vrr ? "variable refresh" : "fixed refresh", fs ? "fullscreen" : "window");
+    }
+}
+int mtl_link_detail(uint64_t n, double v[7]) {   // link_ent's callback timing for the n-th present: slack, wait, alloc, run, idle, held, lock (ms); 0 when there is none
+    link_ent e = g_link_ring[n % PRING]; if (e.n != n || !(e.run_ms > 0)) return 0;
+    v[0] = e.slack_ms; v[1] = e.wait_ms; v[2] = e.alloc_ms; v[3] = e.run_ms; v[4] = e.idle_ms; v[5] = e.held_ms; v[6] = e.lock_ms; return 1;
+}
 int mtl_link_tick(uint64_t n, double *target, double *lead_ms, int *ticks, double *gap_ms) {
     link_ent e = g_link_ring[n % PRING]; if (e.n != n) return 0;
     *target = e.target; *lead_ms = e.lead_ms; *ticks = e.ticks; *gap_ms = e.gap_ms; return 1;
@@ -16823,21 +16903,32 @@ static int present_encode(id<MTLCommandBuffer> cb, id<MTLTexture> src, id<MTLTex
 // format. Each texture of its own is made when a present first needs it. Queue barriers serialize both the frame's rendering and reuse of the scaler's textures across presents.
 // Replacing the scaler waits for earlier presents; throttle replacement during resizing, and keep standard scaling for refused sizes. Offscreen captures own separate state.
 #define FX_REMAKE_PRESENTS 30
-// in, out: the scaler's own input and output (nil until needed); in_place_n, direct_n: presents that read the presented texture, wrote the canvas
-typedef struct { id<MTL4FXSpatialScaler> sc; id<MTLTexture> in, out; uint64_t made_at, in_place_n, direct_n; int made; NSUInteger refused[6]; } fx_state;
+// in, out: the scaler's own input and output (nil until needed; the snapshot scaler has no out of its own); ow, oh, out_pf: the snapshot scaler's output size and format;
+// in_place_n, direct_n: presents that read the presented texture, wrote the canvas
+typedef struct { id<MTL4FXSpatialScaler> sc; id<MTLTexture> in, out; NSUInteger ow, oh; MTLPixelFormat out_pf; uint64_t made_at, in_place_n, direct_n; int made; NSUInteger refused[6]; } fx_state;
 static fx_state g_fx_present;   // only the present thread encodes or replaces the scaler
+static fx_state g_fx_snap;      // the scaler of the snapshot path (snap_take, DM_PRESENT_FX_AT_SNAP): only the thread taking snapshots (the game's presenting thread) encodes or replaces it
 static id<MTL4Compiler> g_fx_comp;
-static int g_fx_mode = -1;   // 1 = metalfx, 0 = off
+// The present through MetalFX costs GPU time on the game's queue, in order with its segments (present_now: 1920x1080 → 3456x1944 took 2.6 ms a present at an M5 Pro's 338 MHz
+// floor clock, 1 ms at 850 MHz; Breath of the Wild's 13 ms frames then took 17–19 ms, docs/reference/frame-rate.md). DM_PRESENT_UPSCALE=ab (with DM_AB) alternates it with the
+// bilinear pass per phase, so one run shows the cost (sw_mode; the [ab] line names PRESENT_UPSCALE). The decision is read per present (fx_on), on the display-link thread
+static int g_fx_mode = -1;   // 1 = metalfx, 0 = off, 2 + ... = ab (sw_mode)
 static int fx_mode(void) {
     if (g_fx_mode >= 0) return g_fx_mode;
     const char *e = getenv("DM_PRESENT_UPSCALE"); int v = 0;
-    if (e && (!strcmp(e, "metalfx") || !strcmp(e, "1"))) v = 1;
+    if (e && !strncmp(e, "ab", 2)) v = sw_mode("DM_PRESENT_UPSCALE", 0);
+    else if (e && (!strcmp(e, "metalfx") || !strcmp(e, "1"))) v = 1;
     else if (e && (!strcmp(e, "off") || !strcmp(e, "0"))) v = 0;
-    else if (e && *e) MLOG("[RED] DM_PRESENT_UPSCALE=%s: metalfx or off; keeping %s", e, v ? "metalfx" : "off");
+    else if (e && *e) MLOG("[RED] DM_PRESENT_UPSCALE=%s: metalfx, off or ab; keeping %s", e, v ? "metalfx" : "off");
     if (v && !(g_q4 && [MTLFXSpatialScalerDescriptor supportsMetal4FX:g_dev])) { MLOG("present upscaling: this GPU has no Metal 4 MetalFX spatial scaler; the present scales bilinearly"); v = 0; }
-    MLOG("present upscaling (DM_PRESENT_UPSCALE): %s", v ? "metalfx, MetalFX's spatial scaler where the picture is shown larger than the game renders it" : "off, bilinear");
+    MLOG("present upscaling (DM_PRESENT_UPSCALE): %s", v == 1 ? "metalfx, MetalFX's spatial scaler where the picture is shown larger than the game renders it" : v ? "metalfx in the DM_AB phases that have it on, bilinear in the others" : "off, bilinear");
     return g_fx_mode = v;
 }
+static int fx_on(void) { return sw_on(fx_mode()); }
+// The present command buffer's GPU time by the game's present number (hle_nvn.c @present_gpu_ms, 8 presents late like @presented_ms); written in the commit feedback under g_pq_mu
+typedef struct { uint64_t n; float ms; } pres_gpu_ent;
+static pres_gpu_ent g_pres_gpu[PRING];
+double mtl_present_gpu_ms(uint64_t n) { pthread_mutex_lock(&g_pq_mu); pres_gpu_ent e = g_pres_gpu[n % PRING]; pthread_mutex_unlock(&g_pq_mu); return e.n == n ? e.ms : 0; }
 // MetalFX scales the content (cw x ch) to its rectangle on the canvas (vp) when the rectangle is at least as large in both directions and larger in one
 static int fx_wanted(MTLViewport vp, NSUInteger cw, NSUInteger ch) {
     NSUInteger w = (NSUInteger)vp.width, h = (NSUInteger)vp.height;
@@ -16897,6 +16988,58 @@ static id<MTLTexture> fx_encode(fx_state *fx, id<MTL4CommandBuffer> cb, id<MTLTe
     if (direct && !fx->direct_n++ && remake_wait) MLOG("present upscaling: MetalFX writes the drawable itself (%lux%lu), no present pass after it (DM_FX_DIRECT=0 keeps the pass)", (unsigned long)ow, (unsigned long)oh);
     *wrote = direct;
     return out;
+}
+// The snapshot path (snap_take, DM_PRESENT_FX_AT_SNAP): the scaler for cw x ch (in_pf) → ow x oh (out_pf), made or remade as needed; returns whether fx->sc can be used. own_out: the state keeps an output texture of its own (the present's
+// scaler; the snapshot scaler writes into each ring slot's texture, fx_run's out). The present's state (fx == &g_fx_present) remakes only after FX_REMAKE_PRESENTS presents and
+// once no present is in flight (its textures may be read by queued presents); the snapshot state (g_fx_snap) once every snapshot command buffer committed so far has run
+static int snap_drain_try(uint64_t ms);
+static int fx_prepare(fx_state *fx, NSUInteger cw, NSUInteger ch, MTLPixelFormat in_pf, NSUInteger ow, NSUInteger oh, MTLPixelFormat out_pf, int own_out) {
+    int present = fx == &g_fx_present;
+    if (fx->sc && fx->in.width == cw && fx->in.height == ch && fx->in.pixelFormat == in_pf && fx->ow == ow && fx->oh == oh && fx->out_pf == out_pf) return 1;
+    NSUInteger key[6] = {cw, ch, in_pf, ow, oh, out_pf};
+    if (!memcmp(key, fx->refused, sizeof key)) return 0;
+    if (present && fx->made && g_present_n < fx->made_at + FX_REMAKE_PRESENTS) return 0;
+    if (present) { pthread_mutex_lock(&g_pq_mu); while (g_pq_inflight) pthread_cond_wait(&g_pq_cv, &g_pq_mu); pthread_mutex_unlock(&g_pq_mu); }
+    else if (fx->sc && !snap_drain_try(200)) return 0;   // snapshot command buffers queued so far read fx->in; a queue that does not run them within 200 ms (a present waiting for a drawable ahead of them) keeps the scaler and this snapshot takes the old path. This blocks the game's presenting thread up to 200 ms, only when the canvas or output size changes
+    res_remove(fx->in); res_remove(fx->out); fx->sc = nil; fx->in = fx->out = nil;
+    uint64_t t0 = now_ns(); NSError *e = nil;
+    if (!g_fx_comp) g_fx_comp = [g_dev newCompilerWithDescriptor:[MTL4CompilerDescriptor new] error:&e];
+    MTLFXSpatialScalerDescriptor *d = [MTLFXSpatialScalerDescriptor new];
+    d.colorTextureFormat = in_pf; d.outputTextureFormat = out_pf; d.inputWidth = cw; d.inputHeight = ch; d.outputWidth = ow; d.outputHeight = oh;
+    d.colorProcessingMode = MTLFXSpatialScalerColorProcessingModePerceptual;
+    id<MTL4FXSpatialScaler> sc = g_fx_comp ? [d newSpatialScalerWithDevice:g_dev compiler:g_fx_comp] : nil;
+    fx->made_at = g_present_n; fx->made++;
+    if (!sc) { memcpy(fx->refused, key, sizeof key);
+        MLOG("present upscaling: MetalFX makes no spatial scaler for %lux%lu format %lu → %lux%lu format %lu%s; this size is scaled bilinearly", (unsigned long)cw, (unsigned long)ch, (unsigned long)in_pf,
+             (unsigned long)ow, (unsigned long)oh, (unsigned long)out_pf, g_fx_comp ? "" : " (no Metal 4 compiler)"); return 0; }
+    MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:in_pf width:cw height:ch mipmapped:NO];
+    td.storageMode = MTLStorageModePrivate; td.usage = sc.colorTextureUsage | MTLTextureUsageShaderRead;
+    id<MTLTexture> in = [g_dev newTextureWithDescriptor:td], out = nil;
+    if (own_out) {
+        td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:out_pf width:ow height:oh mipmapped:NO];
+        td.storageMode = MTLStorageModePrivate; td.usage = sc.outputTextureUsage | MTLTextureUsageShaderRead;
+        out = [g_dev newTextureWithDescriptor:td];
+    }
+    if (!in || (own_out && !out)) { memcpy(fx->refused, key, sizeof key); MLOG("[RED] present upscaling: cannot create the scaler's textures (%lux%lu, %lux%lu)", (unsigned long)cw, (unsigned long)ch, (unsigned long)ow, (unsigned long)oh); return 0; }
+    in.label = present ? @"present upscale input" : @"snapshot upscale input"; out.label = @"present upscale output";
+    res_add(in); if (out) res_add(out); res_commit();
+    fx->sc = sc; fx->in = in; fx->out = out; fx->ow = ow; fx->oh = oh; fx->out_pf = out_pf;
+    MLOG("present upscaling: MetalFX spatial scaler %lux%lu → %lux%lu (format %lu → %lu, %s scaler #%d, made in %.1f ms)", (unsigned long)cw, (unsigned long)ch, (unsigned long)ow, (unsigned long)oh,
+         (unsigned long)in_pf, (unsigned long)out_pf, present ? "present" : "snapshot", fx->made, (now_ns() - t0) / 1e6);
+    return 1;
+}
+// The texture a ring slot's scaled picture takes (the snapshot scaler's output: its usage), ow x oh of out_pf
+static id<MTLTexture> fx_out_texture(const fx_state *fx, NSUInteger ow, NSUInteger oh, MTLPixelFormat out_pf) {
+    MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:out_pf width:ow height:oh mipmapped:NO];
+    td.storageMode = MTLStorageModePrivate; td.usage = fx->sc.outputTextureUsage | MTLTextureUsageShaderRead;
+    return [g_dev newTextureWithDescriptor:td];
+}
+// Encodes the snapshot scaler: raw's rectangle r copied into the scaler's input, scaled into out (nil = the state's own)
+static void fx_run(fx_state *fx, id<MTL4CommandBuffer> cb, id<MTLTexture> raw, const NSUInteger r[4], id<MTLTexture> out) {
+    NSUInteger cw = r[2], ch = r[3];
+    mfx_order(cb, raw, MTLOriginMake(r[0], r[1], 0), MTLSizeMake(cw, ch, 1), fx->in);   // the scaler after the frame's work, behind the copy of the crop (MetalFX's encoders take no barrier)
+    fx->sc.colorTexture = fx->in; fx->sc.inputContentWidth = cw; fx->sc.inputContentHeight = ch; fx->sc.outputTexture = out ? out : fx->out;
+    [fx->sc encodeToCommandBuffer:cb];
 }
 // ---------- A game's own upscaler drawn by MetalFX (DM_UPSCALER) ----------
 // Donkey Kong Bananza upscales its frame with agl's NDSR network: one compute dispatch (agl_ndsr.pck, 24 variants; Splatoon Raiders ships 20) reading the scene colour (texture slot 0, R11G11B10F; see up_mfx_color)
@@ -17100,6 +17243,11 @@ static int present_encode_m4(id<MTL4CommandBuffer> cb, id<MTLTexture> src, id<MT
              !direct_ok ? "DM_FX_DIRECT=0" : !full ? "the picture does not fill it" : flipped ? "the lower-left origin flips it" : "the scaler cannot write it",
              (unsigned long)dst.width, (unsigned long)dst.height, (unsigned long)dst.pixelFormat, (unsigned long)dst.usage, (unsigned long)up.width, (unsigned long)up.height); }
     if (up) { tex = up; r[0] = r[1] = 0; r[2] = up.width; r[3] = up.height; }   // the scaled picture, the viewport's size: drawn 1:1
+    if (!present_draw_m4(cb, tex, r, vp, dst, uvb, full)) return 0;
+    return up ? PRESENT_METALFX : PRESENT_STANDARD;
+}
+// The present pass itself: tex's rectangle r drawn into vp of dst (full: vp covers dst). A ring slot's picture scaled at the snapshot (snap_take) is drawn through this alone, 1:1
+static int present_draw_m4(id<MTL4CommandBuffer> cb, id<MTLTexture> tex, const NSUInteger r[4], MTLViewport vp, id<MTLTexture> dst, id<MTLBuffer> uvb, int full) {
     MTL4RenderPassDescriptor *rp = [MTL4RenderPassDescriptor new];
     rp.colorAttachments[0].texture = dst;
     rp.colorAttachments[0].loadAction = full ? MTLLoadActionDontCare : MTLLoadActionClear;
@@ -17114,12 +17262,12 @@ static int present_encode_m4(id<MTL4CommandBuffer> cb, id<MTLTexture> src, id<MT
     float *uv = uvb.contents; NSUInteger tw = tex.width, th = tex.height, cx = r[0], cy = r[1], cw = r[2], ch = r[3];
     uv[0] = (float)cx / tw; uv[1] = (float)cy / th; uv[2] = (float)cw / tw; uv[3] = (float)ch / th;
     uv[4] = (cx + 0.5f) / tw; uv[5] = (cy + 0.5f) / th; uv[6] = (cx + cw - 0.5f) / tw; uv[7] = (cy + ch - 0.5f) / th;
-    if (flipped) { uv[1] += uv[3]; uv[3] = -uv[3]; }   // lower-left origin: the window image is stored bottom-up
+    if (atomic_load_explicit(&g_origin_ll, memory_order_relaxed)) { uv[1] += uv[3]; uv[3] = -uv[3]; }   // lower-left origin: the window image is stored bottom-up (the scaler keeps the order)
     [g_present_args setAddress:uvb.gpuAddress atIndex:0];
     [en setViewport:vp]; [en setRenderPipelineState:g_blit_pso];
     [en drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
     m4_end(en);
-    return up ? PRESENT_METALFX : PRESENT_STANDARD;
+    return 1;
 }
 // The present's picture drawn into an offscreen texture (out: private, render target) the way present_now draws it into the drawable, MetalFX included, on the Metal 4 queue;
 // returns whether it was submitted. Completion reports the encoding kind, or PRESENT_FAILED on a GPU error. Resources remain resident and retained until GPU completion.
@@ -17153,17 +17301,22 @@ static int present_offscreen_wait(id<MTLTexture> src, const int crop[4], id<MTLT
 }
 // The present command buffer's GPU time (its commit feedback: from its first to its last command, the MetalFX scaler and the present pass), every 600 presents as p50 / p95, apart
 // for presents through MetalFX and through the bilinear pass. Under g_pq_mu (the feedback handler)
-static void present_gpu_note(double s, int fx) {
-    static double v[2][600]; static int n[2];
-    if (!(s > 0 && s < 1)) return;
+static void present_gpu_note(double s, int fx) {   // fx: 0 bilinear, 1 MetalFX in the present, 2 a snapshot scaled by MetalFX at snap_take, drawn 1:1
+    static double v[3][600]; static int n[3];
+    static const char *const how[3] = {"through the bilinear pass", "through MetalFX", "of a snapshot scaled by MetalFX at the snapshot"};
+    if (!(s > 0 && s < 1) || fx < 0 || fx > 2) return;
     v[fx][n[fx]++] = s * 1e3;
     if (n[fx] < 600) return;
     double *a = v[fx]; for (int i = 1; i < 600; i++) { double x = a[i]; int j = i - 1; while (j >= 0 && a[j] > x) { a[j + 1] = a[j]; j--; } a[j + 1] = x; }
-    MLOG("present command buffer GPU time over 600 presents %s: p50 %.3f ms, p95 %.3f ms, max %.3f ms", fx ? "through MetalFX" : "through the bilinear pass", a[299], a[569], a[599]);
+    MLOG("present command buffer GPU time over 600 presents %s: p50 %.3f ms, p95 %.3f ms, max %.3f ms", how[fx], a[299], a[569], a[599]);
     n[fx] = 0;
 }
 static double g_link_it_tin;   // Enqueue time of the frame the display-link callback is presenting (read and written only on the display-link thread)
-static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t ticket, const int crop[4], id<CAMetalDrawable> supplied, double target_ts) {
+static int snap_up_for(int slot, uint64_t gen, NSUInteger dw, NSUInteger dh, MTLPixelFormat pf, id<MTLTexture> *up, MTLViewport *vp);   // the snapshot ring (below)
+static void snap_up_stale(int slot, uint64_t gen);
+// For the display-link timing rows (link_ent): present_now's last wait for its command allocator and the time it called present (CACurrentMediaTime, seconds)
+static double g_pn_alloc_s, g_pn_present_at;
+static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t ticket, const int crop[4], id<CAMetalDrawable> supplied, double target_ts, int up_slot, uint64_t up_gen) {
     if (g_present_stall_ns) { struct timespec ts = {0, (long)g_present_stall_ns}; nanosleep(&ts, NULL); }
     g_present_n++;
     if (bootprof() && (g_present_n == 1 || g_present_n % 120 == 0)) {
@@ -17233,25 +17386,37 @@ static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t t
     if (!supplied) g_drawable_ns += now_ns() - dt0;
     if (!dr) return 0;
     int alloc_i = (int)(ticket % 3);
+    g_pn_alloc_s = 0;
     if (g_present_alloc_fence[alloc_i]) {
+        double a0 = CACurrentMediaTime();
         pthread_mutex_lock(&g_pq_mu);
         while (g_present_alloc_done[alloc_i] < g_present_alloc_fence[alloc_i]) pthread_cond_wait(&g_pq_cv, &g_pq_mu);
         pthread_mutex_unlock(&g_pq_mu);
+        g_pn_alloc_s = CACurrentMediaTime() - a0;
     }
     [g_present_alloc4[alloc_i] reset];
     [g_q4 waitForDrawable:dr];
     id<MTL4CommandBuffer> cb = g_present_cb[alloc_i];
     [cb beginCommandBufferWithAllocator:g_present_alloc4[alloc_i]];
-    int kind = present_encode_m4(cb, src, dr.texture, crop, g_present_uv[alloc_i], &g_fx_present);
+    int kind; id<MTLTexture> up = nil; MTLViewport upvp;
+    if (snap_up_for(up_slot, up_gen, dr.texture.width, dr.texture.height, dr.texture.pixelFormat, &up, &upvp)) {   // scaled at the snapshot (snap_take): drawn 1:1, no scaler here
+        NSUInteger r[4] = {0, 0, up.width, up.height}; present_pipeline(dr.texture.pixelFormat);
+        int full = upvp.originX == 0 && upvp.originY == 0 && (NSUInteger)upvp.width == dr.texture.width && (NSUInteger)upvp.height == dr.texture.height;
+        kind = present_draw_m4(cb, up, r, upvp, dr.texture, g_present_uv[alloc_i], full) ? PRESENT_METALFX_SNAP : 0;
+    } else {
+        snap_up_stale(up_slot, up_gen);   // counts a picture scaled for another canvas: the present's own scaler this frame
+        kind = present_encode_m4(cb, src, dr.texture, crop, g_present_uv[alloc_i], &g_fx_present);
+    }
     if (!kind) { [cb endCommandBuffer]; [g_q4 signalDrawable:dr]; return 0; }
-    int fx_kind = kind == PRESENT_METALFX;
+    int fx_kind = kind == PRESENT_METALFX ? 1 : kind == PRESENT_METALFX_SNAP ? 2 : 0;
     [cb endCommandBuffer];
     MTL4CommitOptions *o = [MTL4CommitOptions new];
     [o addFeedbackHandler:^(id<MTL4CommitFeedback> f) {
         if (f.error) { MLOG("[RED] display command buffer error: %s", f.error.description.UTF8String); gpu_lost_check(f.error, "display"); }
         pthread_mutex_lock(&g_pq_mu); if (ticket > g_pq_done) g_pq_done = ticket; if (ticket > g_present_alloc_done[alloc_i]) g_present_alloc_done[alloc_i] = ticket; g_pq_inflight--; pthread_cond_broadcast(&g_pq_cv);
         NSArray *retire = nil; if (!g_pq_inflight && g_ext_retire.count) { retire = g_ext_retire; g_ext_retire = nil; }   // every present committed before their release has completed
-        present_gpu_note(f.GPUEndTime - f.GPUStartTime, fx_kind); pthread_mutex_unlock(&g_pq_mu);
+        double pg = f.GPUEndTime - f.GPUStartTime; g_pres_gpu[ticket % PRING] = (pres_gpu_ent){ticket, pg > 0 && pg < 1 ? (float)(pg * 1e3) : 0};
+        present_gpu_note(pg, fx_kind); pthread_mutex_unlock(&g_pq_mu);
         if (retire) ext_retire(retire);
     }];
     id<MTL4CommandBuffer> buffers[] = {cb};
@@ -17282,8 +17447,10 @@ static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t t
         CFTimeInterval tt = d.presentedTime;
         g_pres[pn % PRING] = (pres_ent){pn, tt > 0 ? tt : -1};
         pres_seen(pn, tt);
+        pthread_mutex_lock(&g_pq_mu); link_late_note(pn, tt); pthread_mutex_unlock(&g_pq_mu);   // against the display link's target for this frame (the screen moving under the link)
     }];
     // Each frame is displayed for at least one present period: when the GPU completion time jitters around a 120 Hz refresh boundary, the paired "25 ms + 8.33 ms" stutter no longer appears
+    g_pn_present_at = CACurrentMediaTime();
     if (target_ts > 0) [dr present];
     else if (period > 0) [dr presentAfterMinimumDuration:period]; else [dr present];
 #endif
@@ -17297,14 +17464,14 @@ static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t t
 // Swapchain texture return: before AcquireTexture gets a texture it waits for the ticket of that texture's previous present to be processed (mtl_present_wait), after which the commands the game draws into it
 // are necessarily ordered after that blit on the GPU queue.
 #define PQ 8
-typedef struct { tex_t t; double period; uint64_t frame; int crop[4]; double t_in; uint64_t ev_val, snap_v; } pq_item;   // snap_v: the snapshot copy this present shows (snap_commit_wait)   // t_in: the time the game handed this frame into the present queue (CACurrentMediaTime); ev_val: see g_ext_ev
+typedef struct { tex_t t; double period; uint64_t frame; int crop[4]; double t_in; uint64_t ev_val, snap_v; int up_slot; uint64_t up_gen; } pq_item;   // up_slot, up_gen: the ring slot and its snapshot count whose scaled picture this present may draw (snap_up_for; −1 none)   // snap_v: the snapshot copy this present shows (snap_commit_wait)   // t_in: the time the game handed this frame into the present queue (CACurrentMediaTime); ev_val: see g_ext_ev
 // External producer (the Vulkan layer, dm/gfx/vk) renders on its own queue and signals this event when a frame's rendering is done: the present of that frame waits for the value on g_q4
 static id<MTLSharedEvent> g_ext_ev;
 static void ext_wait(uint64_t v) { if (v && g_ext_ev) [g_q4 waitForEvent:g_ext_ev value:v]; }
 static void snap_commit_wait(uint64_t v);
 static pq_item g_pq[PQ];
 static uint64_t g_pq_in;
-static int present_now(const tex_t *, double, uint64_t, uint64_t, const int[4], id<CAMetalDrawable>, double);
+static int present_now(const tex_t *, double, uint64_t, uint64_t, const int[4], id<CAMetalDrawable>, double, int, uint64_t);
 static double g_link_vperiod, g_link_vhalf;   // virtual ticks (link_range): seconds per counted tick (0 = every callback is a tick) and half a refresh of the screen
 
 @interface NvMetalDisplayLinkDelegate : NSObject <CAMetalDisplayLinkDelegate>
@@ -17323,6 +17490,7 @@ static uint64_t g_stall_t0, g_stall_drop, g_stall_n; static int g_stall_red, g_s
 #define LINK_RESCUE_NS 500000000ull
 static _Atomic int g_rescue_mode;   // Also read by link_on without g_pq_mu, to stop pacing on silent ticks immediately
 static uint64_t g_rescue_back_at, g_rescue_back_ns = 3000000000ull, g_rescue_n;
+static int link_takes(void) { return g_dm_present_link && !g_rescue_mode; }   // under g_pq_mu: the display-link callback takes queued frames (mode and rescue change only in link_sync and mtl_present_wait, on the game's threads)
 // The display link watchdog only recognizes the "active" state: when the App loses active status (pulling down Control Center / notifications, incoming call, system popup) and in the background the system does not call back anyway, and the picture is covered too -- the frame-drop fallback stays as before,
 // but it is not counted as stuck and no failure is reported; the stall is measured from the later of "the most recent callback / the most recent activation" (A16 logs: 8–17 seconds inactive and 17 seconds in the background were both reported as "stuck in foreground")
 __attribute__((weak)) int dm_focus_now(void) { return 1; }   // The host's hle_oe.c provides the strong definition; when graphics unit tests do not link the host it is treated as always active
@@ -17346,10 +17514,21 @@ static void link_drain_note(double cb, double age, int dropped) {
     int k = nvn_link_drain_next(&g_link_drain, cb, age, 1.0 / rate, atomic_load(&g_link_blocked_ns) / 1e9, ok);
     if (k) atomic_store(&g_link_drain_req, k);
 }
+// One tick of the display link in seconds: a counted virtual tick (link_range) or one callback at the link's rate (120, 60 or 30 Hz)
+static double link_tick_s(void) { return g_link_vperiod > 0 ? g_link_vperiod : 1.0 / mtl_link_rate(); }
+// How long the link callback keeps a presented frame on screen before it takes the next one: the frame's present period when that covers two or more of the link's ticks, 0 when
+// the next tick may take a frame. Measured in the link's own ticks, not in 60 Hz vsyncs: a 60 fps game's 16.7 ms frame on a 120 Hz link (DM_PRESENT_LINK=2) holds two ticks, as an
+// interval-2 frame holds two on a 60 Hz link. A fixed "period > 25 ms" let every 120 Hz tick take a frame: with present snapshots, where the ring slot each present frees paces
+// the game, Breath of the Wild then ran one frame per 8.3 ms tick at 1.16 of real time (87 fps, game time 30.3 s in 26.0 s) on the 120 Hz link
+static double link_hold_s(double period) { double tick = link_tick_s(); return tick > 0 && period > 1.5 * tick ? period : 0; }
+// The callback's run on every return (link_ent): when it exited, and the longest run of the callbacks that took no frame since the previous present
+static double g_cb_exit, g_cb_held_max; static int g_cb_took;
+static void link_cb_done(double *entry) { double t = CACurrentMediaTime(); if (!g_cb_took && t - *entry > g_cb_held_max) g_cb_held_max = t - *entry; g_cb_exit = t; }
 @implementation NvMetalDisplayLinkDelegate
 - (void)metalDisplayLink:(CAMetalDisplayLink *)link needsUpdate:(CAMetalDisplayLinkUpdate *)update {
     (void)link;
-    double cb = CACurrentMediaTime();
+    double cb = CACurrentMediaTime(), idle = g_cb_exit > 0 ? cb - g_cb_exit : -1;
+    __attribute__((cleanup(link_cb_done))) double cb_entry = cb; g_cb_took = 0;
     pthread_mutex_lock(&g_pq_mu);
     if (g_stall_t0) { uint64_t since = dm_focus_in_since(), t = now_ns();
         MLOG("display link recovered: stalled %.0f ms (%.0f ms of it active), fallback dropped %llu frames (stall #%llu)", (t - g_stall_t0) / 1e6, (t - (g_stall_t0 > since ? g_stall_t0 : since)) / 1e6, (unsigned long long)g_stall_drop, (unsigned long long)g_stall_n); g_stall_t0 = 0; }
@@ -17369,9 +17548,11 @@ static void link_drain_note(double cb, double age, int dropped) {
     g_link_tick_n++;
     pthread_cond_broadcast(&g_link_cv);
     pthread_mutex_unlock(&g_link_mu);
+    double l0 = CACurrentMediaTime();
     pthread_mutex_lock(&g_pq_mu);
-    if (!g_dm_present_link || g_rescue_mode || g_pq_read == g_pq_in) { if (g_dm_present_link && !g_rescue_mode) g_link_empty++; pthread_mutex_unlock(&g_pq_mu); return; }
-    // The previous frame's present interval was >= 2 (period > 25 ms): keep it on screen for its whole period before taking the next one, as the Switch flips only every N vertical syncs. This also holds while the link runs at 60 Hz (Mario 1.2.1 sets 2 for single frames, see nvn_game_fps in hle_nvn.c);
+    double lock_s = CACurrentMediaTime() - l0;
+    if (!link_takes() || g_pq_read == g_pq_in) { if (link_takes()) g_link_empty++; pthread_mutex_unlock(&g_pq_mu); return; }
+    // The previous frame's period covers two or more link ticks (link_hold_s: interval >= 2, or any 60 fps frame on a 120 Hz link): keep it on screen for its whole period before taking the next one, as the Switch flips only every N vertical syncs. This also holds while the link runs at 60 Hz (Mario 1.2.1 sets 2 for single frames, see nvn_game_fps in hle_nvn.c);
     //   before, every tick took the newest frame, so that frame, carrying the extra time step the game advanced for it, was shown for only 16.7 ms and the game looked like it jumped ahead
     if (g_link_hold_until > 0 && update.targetPresentationTimestamp < g_link_hold_until - tol) { g_link_held++; pthread_mutex_unlock(&g_pq_mu); return; }
     uint64_t first = g_pq_read + 1, ticket = g_pq_in;
@@ -17385,13 +17566,21 @@ static void link_drain_note(double cb, double age, int dropped) {
     if (ticket > first) { g_link_dropped += ticket - first; for (uint64_t k = first; k < ticket; k++) { g_pres[k % PRING] = (pres_ent){k, -1}; mtl_tex_unpin(g_pq[(k-1)%PQ].t.serial); } }   // Old frames merged and dropped are recorded as "not presented", so the present statistics honestly count them as dropped frames
     if (ticket > 1 && g_pq_done < ticket - 1) g_pq_done = ticket - 1;
     g_link_ring[ticket % PRING] = (link_ent){ticket, update.targetPresentationTimestamp, (update.targetPresentationTimestamp - cb) * 1e3, gap_max * 1e3, nticks}; nticks = 0; gap_max = 0;
+    double held_s = g_cb_held_max; g_cb_held_max = 0; g_cb_took = 1;
     pthread_cond_broadcast(&g_pq_cv);
     pthread_mutex_unlock(&g_pq_mu);
     link_drain_note(cb, cb - it.t_in, ticket > first);
     int submitted;
+    double w0 = CACurrentMediaTime();
     ext_wait(it.ev_val); snap_commit_wait(it.snap_v);
-    @autoreleasepool { submitted = present_now(&it.t, it.period, it.frame, ticket, it.crop, update.drawable, update.targetPresentationTimestamp); mtl_tex_unpin(it.t.serial); }
-    g_link_hold_until = submitted && it.period > 0.025 ? update.targetPresentationTimestamp + it.period : 0;
+    double wait_s = CACurrentMediaTime() - w0; g_pn_present_at = 0; g_pn_alloc_s = 0;
+    @autoreleasepool { submitted = present_now(&it.t, it.period, it.frame, ticket, it.crop, update.drawable, update.targetPresentationTimestamp, it.up_slot, it.up_gen); mtl_tex_unpin(it.t.serial); }
+    {   // written without g_pq_mu (the fields above are written under it): only this callback writes them, and hle_nvn.c reads them 8 presents later
+        link_ent *le = &g_link_ring[ticket % PRING]; double t1 = CACurrentMediaTime();
+        le->slack_ms = g_pn_present_at > 0 ? (update.targetTimestamp - g_pn_present_at) * 1e3 : -999; le->wait_ms = wait_s * 1e3; le->alloc_ms = g_pn_alloc_s * 1e3;
+        le->run_ms = (t1 - cb) * 1e3; le->idle_ms = idle * 1e3; le->held_ms = held_s * 1e3; le->lock_ms = lock_s * 1e3;
+    }
+    double hold = submitted ? link_hold_s(it.period) : 0; g_link_hold_until = hold > 0 ? update.targetPresentationTimestamp + hold : 0;
     if (!submitted) {
         pthread_mutex_lock(&g_pq_mu);
         if (ticket > g_pq_done) g_pq_done = ticket;
@@ -17477,6 +17666,12 @@ static void link_sync(void) {   // Called every frame by the game's present thre
         g_rescue_mode = 0; g_stall_t0 = 0; __atomic_store_n(&g_link_tick_ns, now_ns(), __ATOMIC_RELAXED);
         MLOG("display link: rescue ended, trying pacing mode %d (frame %llu)", want, (unsigned long long)atomic_load(&g_cur_frame));
     }
+    if (g_link_leave) { g_link_leave = 0; if (want == 1 && !g_rescue_mode) { g_dm_present_link = want = 0; g_link_moved = 1; } }   // asked by link_late_note; a mode set meanwhile wins
+    else if (g_link_moved && want) { g_link_moved = 0; g_link_shift = (link_shift_t){0}; }   // a runtime setting (DM_AB, the settings) put pacing back on a link: it wins, and the shift is judged afresh
+    if (g_link_moved && !link_leave_ok(front_fullscreen(), front_screen_variable_refresh())) {   // left for the shift (link_late_note), and the screen or window no longer fits it (a change of rate does not: mode 0 paces 30 and 60)
+        g_link_moved = 0; g_dm_present_link = want = 1; g_link_shift = (link_shift_t){0};
+        MLOG("display link: pacing back on the link (screen %d Hz %s, %s)", front_screen_max_fps(), front_screen_variable_refresh() ? "variable refresh" : "fixed refresh", front_fullscreen() ? "fullscreen" : "window");
+    }
     if (g_rescue_mode) want = 0;
     pthread_mutex_unlock(&g_pq_mu);
     if (want && mtl_fps_target() == 30 && link_30hz()) want = 3;   // Power-saving mode: display link at 30 Hz
@@ -17534,7 +17729,7 @@ static void *present_main(void *arg) {
         pthread_mutex_unlock(&g_pq_mu);
         int submitted;
         ext_wait(it.ev_val); snap_commit_wait(it.snap_v);
-        @autoreleasepool { submitted = present_now(&it.t, it.period, it.frame, ticket, it.crop, nil, 0); mtl_tex_unpin(it.t.serial); }
+        @autoreleasepool { submitted = present_now(&it.t, it.period, it.frame, ticket, it.crop, nil, 0, it.up_slot, it.up_gen); mtl_tex_unpin(it.t.serial); }
         pthread_mutex_lock(&g_pq_mu); g_classic_busy = 0; pthread_cond_broadcast(&g_pq_cv); pthread_mutex_unlock(&g_pq_mu);
         if (!submitted) {
             pthread_mutex_lock(&g_pq_mu);
@@ -17601,7 +17796,39 @@ extern _Atomic uint64_t dm_present_ns;   // hle_thread.c (DM_HITCH_DUMP); the NV
 // The ring's length is the number of frames the game may run ahead of the screen: DM_PRESENT_SNAP=<n> (2 to SNAP_MAX; 1 = 2). Off by default; the iOS launcher's Frame buffering toggle enables it.
 #define SNAP_MAX 4
 // old: the slot's texture before the presented size or format last changed, resident until the slot's next use (snap_take)
-static struct { id<MTLTexture> tex, old; uint64_t serial; _Atomic uint64_t ticket, ev; } g_snap[SNAP_MAX];
+// up: the slot's picture scaled by MetalFX at the snapshot (DM_PRESENT_FX_AT_SNAP, default on: the scaler runs in the snapshot's command buffer, right after the frame's last segment, in the
+// gap the game's own work leaves before the next frame's first segment, instead of in the present command buffer between the next frame's segments; present_now draws it 1:1), ow x oh of
+// up_pf at (up_vx, up_vy) of a canvas up_dw x up_dh. up_gen counts the slot's snapshots; up_valid says the latest one scaled into up (a present whose canvas differs falls back to the
+// slot's raw copy and the present's own scaler for that frame). old_up follows the rule of old
+static struct { id<MTLTexture> tex, old; uint64_t serial; _Atomic uint64_t ticket, ev;
+                id<MTLTexture> up, old_up; uint64_t up_gen; int up_valid; NSUInteger up_dw, up_dh; double up_vx, up_vy; MTLPixelFormat up_pf; } g_snap[SNAP_MAX];
+static NSUInteger g_snap_canvas_test[2]; static MTLPixelFormat g_snap_canvas_test_pf;   // tests (t_present_snap.m): the canvas of a layer the test has none of
+static uint64_t g_snap_fx_fallback;   // presents whose snapshot was scaled for another canvas (a resize between the snapshot and the present): drawn through the present's own scaler
+// DM_PRESENT_FX_AT_SNAP=1 / 0 / ab (with DM_AB, read per snapshot): the MetalFX scaler runs at the snapshot copy instead of in the present. On by default on the Mac,
+// where it was measured (Breath of the Wild); off by default on iOS until it is measured there
+static int fx_at_snap_mode(void) { static int m = -1; if (m < 0) m = sw_mode("DM_PRESENT_FX_AT_SNAP", TARGET_OS_OSX ? 1 : 0); return m; }
+static int fx_at_snap_on(void) { return sw_on(fx_at_snap_mode()); }
+// The canvas a snapshot would be scaled for: the layer's drawable size and pixel format (read off the game's thread; present_now reads the same properties on the display-link thread)
+static int snap_canvas(NSUInteger *dw, NSUInteger *dh, MTLPixelFormat *pf) {
+    if (g_snap_canvas_test[0]) { *dw = g_snap_canvas_test[0]; *dh = g_snap_canvas_test[1]; *pf = g_snap_canvas_test_pf; return 1; }
+    CAMetalLayer *layer = (__bridge CAMetalLayer *)front_metal_layer(); if (!layer) return 0;
+    CGSize s = layer.drawableSize; if (!(s.width >= 1 && s.height >= 1)) return 0;
+    *dw = (NSUInteger)s.width; *dh = (NSUInteger)s.height; *pf = layer.pixelFormat; return 1;
+}
+// The snapshot command buffer's GPU time (the copy and, with DM_PRESENT_FX_AT_SNAP, the scaler) by the game's present number: hle_nvn.c @snap_gpu_ms, 8 presents late like @presented_ms.
+// The feedback knows the snapshot's version v; present_enqueue maps the ticket to it. Both under g_pq_mu
+static struct { uint64_t v; float ms; } g_snap_gpu[PRING]; static uint64_t g_snap_v_of[PRING];   // by v; by ticket
+double mtl_snap_gpu_ms(uint64_t n) {
+    pthread_mutex_lock(&g_pq_mu); uint64_t v = g_snap_v_of[n % PRING]; double ms = v && g_snap_gpu[v % PRING].v == v ? g_snap_gpu[v % PRING].ms : 0; pthread_mutex_unlock(&g_pq_mu); return ms;
+}
+// What present_now draws for a ring slot's snapshot: its scaled picture when this present's snapshot scaled one for this canvas (1: up and vp set), else 0 (the raw copy, scaled in the present)
+static int snap_up_for(int slot, uint64_t gen, NSUInteger dw, NSUInteger dh, MTLPixelFormat pf, id<MTLTexture> *up, MTLViewport *vp) {
+    if (slot < 0 || slot >= SNAP_MAX || !g_snap[slot].up_valid || g_snap[slot].up_gen != gen || !g_snap[slot].up) return 0;
+    if (g_snap[slot].up_dw != dw || g_snap[slot].up_dh != dh || g_snap[slot].up_pf != pf) return 0;   // the canvas changed since the snapshot (a resize, fullscreen): the old path for this frame
+    *up = g_snap[slot].up; *vp = (MTLViewport){g_snap[slot].up_vx, g_snap[slot].up_vy, (double)g_snap[slot].up.width, (double)g_snap[slot].up.height, 0, 1};
+    return 1;
+}
+static void snap_up_stale(int slot, uint64_t gen) { if (slot >= 0 && slot < SNAP_MAX && g_snap[slot].up_valid && g_snap[slot].up_gen == gen) g_snap_fx_fallback++; }
 static id<MTL4CommandAllocator> g_snap_alloc[SNAP_MAX]; static id<MTL4CommandBuffer> g_snap_cb[SNAP_MAX];
 static id<MTLResidencySet> g_snap_res; static id<MTLSharedEvent> g_snap_ev; static uint64_t g_snap_v;
 static _Atomic uint64_t g_snap_next, g_snap_cmt;   // g_snap_cmt: the last copy the encode thread has committed (its g_snap_v)
@@ -17621,6 +17848,12 @@ static void snap_drain(void) {
     snap_commit_wait(v);
     if (![g_snap_ev waitUntilSignaledValue:v timeoutMS:10000]) MDIE("present snapshots: GPU did not drain within 10 s");
 }
+// The same with a bound: whether every snapshot command buffer committed so far ran within ms (the snapshot scaler's remake, fx_prepare)
+static int snap_drain_try(uint64_t ms) {
+    uint64_t v = g_snap_v; if (!v) return 1;
+    snap_commit_wait(v);
+    return [g_snap_ev waitUntilSignaledValue:v timeoutMS:ms] ? 1 : 0;
+}
 uint64_t mtl_snap_acquire_wait(void) {
     if (!mtl_snap_on() || atomic_load(&g_present_discard)) return 0;
     int k = (int)(atomic_load(&g_snap_next) % (uint64_t)g_snap_n);
@@ -17636,14 +17869,15 @@ uint64_t mtl_snap_acquire_wait(void) {
     return ws_t0() - w0;
 }
 // Copy the presented texture into the next ring slot; returns the slot's serial (0 = no snapshot: the game's texture is presented as before)
-static uint64_t snap_take(const tex_t *t) {
+static uint64_t snap_take(const tex_t *t, const int crop[4]) {
     int k = (int)(atomic_load(&g_snap_next) % (uint64_t)g_snap_n);
     pthread_mutex_lock(&g_pq_mu); int busy = atomic_load(&g_snap[k].ticket) > g_pq_done; pthread_mutex_unlock(&g_pq_mu);
     uint64_t ev = atomic_load(&g_snap[k].ev);
     if (busy || (ev && g_snap_ev.signaledValue < ev)) return 0;
     // The texture this slot held before it was last replaced: every present that read it had been committed when the replacing copy was (the busy check then), and the queue
-    // signals g_snap_ev only after all work committed before the signal, so those presents have run and it can leave the residency set
+    // signals g_snap_ev only after all work committed before the signal, so those presents have run and it can leave the residency set. The slot's scaled picture (up) the same
     if (g_snap[k].old) { [g_snap_res removeAllocation:g_snap[k].old]; [g_snap_res commit]; g_snap[k].old = nil; }
+    if (g_snap[k].old_up) { [g_snap_res removeAllocation:g_snap[k].old_up]; [g_snap_res commit]; g_snap[k].old_up = nil; }
     id<MTLTexture> src = tex_mtl(t); if (!src) return 0;
     // The copy reads the source before present_now runs, so it needs the same commit as present_now: a window texture presented before any submission has used it was made just
     // now and is outside the committed residency set. DRAGON QUEST XI S presents three times before its first submission; on an A17 Pro the copy faulted silently (its command buffer
@@ -17679,17 +17913,45 @@ static uint64_t snap_take(const tex_t *t) {
     [ce barrierAfterQueueStages:MTLStageAll beforeStages:MTLStageBlit visibilityOptions:resource_vis()];   // after the frame's work and the slot's last blit to the screen
     [ce copyFromTexture:src sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(src.width, src.height, 1) toTexture:dst destinationSlice:0 destinationLevel:0 destinationOrigin:MTLOriginMake(0, 0, 0)];
     [ce barrierAfterStages:MTLStageBlit beforeQueueStages:MTLStageAll visibilityOptions:resource_vis()];   // the game's next writes to its texture come after the copy
-    [ce endEncoding]; [cb endCommandBuffer];
+    [ce endEncoding];
+    // The scaled picture (DM_PRESENT_FX_AT_SNAP): the presented rectangle of the game's texture scaled by MetalFX into the slot's up, the size of its rectangle on the canvas, in this command
+    // buffer, so it runs right after the frame's work. The present then draws up 1:1 (snap_up_for) and no scaler runs between the next frame's segments. The raw copy above stays: the
+    // present falls back to it when the canvas has changed by then, and screenshots and the readback take it
+    g_snap[k].up_gen++; g_snap[k].up_valid = 0;
+    NSUInteger dw, dh, r[4]; MTLPixelFormat pf;
+    if (fx_at_snap_on() && fx_on() && snap_canvas(&dw, &dh, &pf) && present_crop_rect(src, crop, r)) {
+        id<MTLTexture> raw = present_raw_src(src); MTLViewport vp = present_viewport(r[2], r[3], dw, dh); NSUInteger ow = (NSUInteger)vp.width, oh = (NSUInteger)vp.height;
+        if (fx_wanted(vp, r[2], r[3]) && fx_prepare(&g_fx_snap, r[2], r[3], raw.pixelFormat, ow, oh, pf, 0)) {
+            if (g_snap[k].up && (g_snap[k].up.width != ow || g_snap[k].up.height != oh || g_snap[k].up.pixelFormat != pf)) { g_snap[k].old_up = g_snap[k].up; g_snap[k].up = nil; }   // kept resident until the slot's next use, as old
+            if (!g_snap[k].up) {
+                id<MTLTexture> up = fx_out_texture(&g_fx_snap, ow, oh, pf);
+                if (up) { up.label = @"snapshot upscale output"; [g_snap_res addAllocation:up]; [g_snap_res commit]; g_snap[k].up = up;
+                          MLOG("present snapshots: ring slot %d scaled picture %lux%lu format %lu (canvas %lux%lu)", k, (unsigned long)ow, (unsigned long)oh, (unsigned long)pf, (unsigned long)dw, (unsigned long)dh); }
+                else RED_ONCE(113, "present snapshots: no texture for the scaled picture; the present scales");
+            }
+            if (g_snap[k].up) {
+                fx_run(&g_fx_snap, cb, raw, r, g_snap[k].up);
+                g_snap[k].up_valid = 1; g_snap[k].up_dw = dw; g_snap[k].up_dh = dh; g_snap[k].up_pf = pf; g_snap[k].up_vx = vp.originX; g_snap[k].up_vy = vp.originY;
+            }
+        }
+    }
+    [cb endCommandBuffer];
     uint64_t v = ++g_snap_v;
+    MTL4CommitOptions *o = [MTL4CommitOptions new];   // the GPU time of the copy and the scaler, by v (mtl_snap_gpu_ms)
+    [o addFeedbackHandler:^(id<MTL4CommitFeedback> f) {
+        double s = f.GPUEndTime - f.GPUStartTime;
+        if (f.error) { static int n; if (n++ < 8) MLOG("[RED] snapshot command buffer error: %s", f.error.description.UTF8String); }
+        pthread_mutex_lock(&g_pq_mu); g_snap_gpu[v % PRING].v = v; g_snap_gpu[v % PRING].ms = s > 0 && s < 1 ? (float)(s * 1e3) : 0; pthread_mutex_unlock(&g_pq_mu);
+    }];
     if (rec_on() && g_rb_started) {   // a block of the encode thread's queue, behind the frame's work (see above)
         if (on_sub_thread()) rec_publish();   // what the submitting thread recorded outside a submission goes first
         rec_blk *b = rec_own_begin();
-        rec_t *r = rec_own_put(b, RO_COMMIT_REAL, 2); r->a[0] = 0; r->a[1] = rec_obj(cb);
+        rec_t *r = rec_own_put(b, RO_COMMIT_REAL, 2); r->a[0] = rec_obj(o); r->a[1] = rec_obj(cb);
         r = rec_own_put(b, RO_SIGNAL, 1); r->a[0] = rec_obj(g_snap_ev); r->a[1] = v;
         r = rec_own_put(b, RO_NOTE, 0); r->a[0] = (uint64_t)(uintptr_t)&g_snap_cmt; r->a[1] = v;
         rec_own_push(b);
     } else {
-        pthread_mutex_lock(&g_res_commit_mu); [g_q4 commit:&cb count:1]; [g_q4 signalEvent:g_snap_ev value:v]; pthread_mutex_unlock(&g_res_commit_mu);
+        pthread_mutex_lock(&g_res_commit_mu); [g_q4 commit:&cb count:1 options:o]; [g_q4 signalEvent:g_snap_ev value:v]; pthread_mutex_unlock(&g_res_commit_mu);
         atomic_store(&g_snap_cmt, v);
     }
     g_snap[k].ev = v;
@@ -17719,16 +17981,17 @@ static uint64_t present_enqueue(const tex_t *t, double period, const int crop[4]
     tex_t snap; uint64_t ss = 0; int slot = 0;
     if (!ev_val && mtl_snap_on()) {
         slot = (int)(atomic_load(&g_snap_next) % (uint64_t)g_snap_n);
-        if ((ss = snap_take(t))) { memset(&snap, 0, sizeof snap); snap.magic = MAGIC('T', 'E', 'X', 0); snap.serial = ss; t = &snap; }
+        if ((ss = snap_take(t, crop))) { memset(&snap, 0, sizeof snap); snap.magic = MAGIC('T', 'E', 'X', 0); snap.serial = ss; t = &snap; }
     }
     if (t->serial < EXT_SERIAL) mtl_tex_pin(t->serial);   // an external texture is the present path's until mtl_ext_tex_release, which waits for its presents (the unpins find no pin)
     pthread_mutex_lock(&g_pq_mu);
     while (g_pq_in - g_pq_done >= PQ) pthread_cond_wait(&g_pq_cv, &g_pq_mu);   // Wait only when the queue is full; normally AcquireTexture blocks first
-    pq_item *it = &g_pq[g_pq_in % PQ]; *it = (pq_item){*t, period, atomic_load(&g_cur_frame), {0}, CACurrentMediaTime(), ev_val, ss ? g_snap[slot].ev : 0};
+    pq_item *it = &g_pq[g_pq_in % PQ]; *it = (pq_item){*t, period, atomic_load(&g_cur_frame), {0}, CACurrentMediaTime(), ev_val, ss ? g_snap[slot].ev : 0, ss ? slot : -1, ss ? g_snap[slot].up_gen : 0};
     if (crop) memcpy(it->crop, crop, sizeof it->crop);   // The current frame's state is enqueued with the ticket number, rather than reading the mutable window late on the present thread
     uint64_t tk = ++g_pq_in;
     g_pres_tin[tk % PRING] = it->t_in;
     g_pres_frm[tk % PRING] = it->frame;
+    g_snap_v_of[tk % PRING] = ss ? g_snap[slot].ev : 0;   // the snapshot this present shows, for @snap_gpu_ms
     if (ss) { g_snap[slot].ticket = tk; atomic_fetch_add(&g_snap_next, 1); if (copy) *copy = g_snap[slot].ev; }
     pthread_cond_broadcast(&g_pq_cv);
     pthread_mutex_unlock(&g_pq_mu);

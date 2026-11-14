@@ -12,7 +12,8 @@ A dated record of what is done, what is in progress and what is left on the Wind
 | `5d3f25e` | AOT: `dm/tools/aot/tests/measure_packs.py`, two builds of a pack measured against each other; its unit test passes here (9 tests); not yet run against the real `nxaot` |
 | `df5c568` | Scripts: `scripts/port_docker.sh` builds the two images when missing with disk checks and runs the whole verification, `--low-disk` one image at a time; its test with a stand-in Docker passes here (13 tests); no real build or verify run yet |
 | `931af1a` | CI: the `chain` job's translator build ran outside its image (a comment line after a backslash): fixed; the `aot` job prints the failed tests' logs and the runner's CPU; the last runs' failures read: the two `tests` jobs were fixed by `fc0a8f1`, the `aot` vector run's mismatch is undetermined (its log expired) |
-| (this commit's parent) | Tests: the Python suites skip with a named reason where this PC lacks a module or a Mac tool (0 failures and 0 errors here now); `scripts/regress.py` loads Apple's libproc at its first use, so `regress.py impact` and `test_regress` run on Linux |
+| `d47d9b5` | Tests: the Python suites skip with a named reason where this PC lacks a module or a Mac tool (0 failures and 0 errors here now); `scripts/regress.py` loads Apple's libproc at its first use, so `regress.py impact` and `test_regress` run on Linux |
+| (this commit's parent) | Tools: the switch inventory covers the port's non-`DM_` switches (62 rows added); a retired name the docs quote is checked, not listed as a warning |
 
 Done on the machine, not in the repository: Docker emptied on the owner's request (every image and container, the owner's other projects' included; the data volumes `aitrade_pgdata`, `smilepetstore_pgdata`, `smilepetstore_redisdata` kept).
 
@@ -34,8 +35,7 @@ No Docker image exists (the disk filled while ten worktrees were checked out, 28
 | `agent-ab4b98db3bb336302` | Hot indirect targets (design 12 of the recompiler): the host writes `<module>.targets.tsv`, nxaot guards the dominant target with a direct call at tier H | new `dm/host/aot_targets.c`, new `t_aot_targets.c`, `dm/tools/aot/src/build/pack.cpp`, `src/lift/*`, new `test_profile_targets.py` |
 | branch `wip/provoking-strips-polygons` (parked: one commit, no worktree) | The provoking vertex of converted quad strips and polygons; a flat-varying check through the guest GL layer. The SPIR-V headers under `shaders/gen` must be regenerated in the image | `dm/gfx/hostvk/vk_index.c`, `shaders/index_expand.comp`, `index_restart.comp`, `t_vk_provoking.c`, `t_vk_guest_gl.c` |
 | branch `wip/runner-scripts` (parked: one commit, no worktree) | The host test runners also run the Python-driver tests (`t_second_pack`, `t_vk_spirv`) | `dm/host/CMakeLists.txt` (two registrations), `run_host_tests.sh`, `run_win64_tests.ps1` |
-| `agent-ada28324b2ad7f998` | The switch inventory covers the port's non-`DM_` switches (`NXHOST`, `NXPACK`, `NXAOT`, ...); five stale mentions of removed switches | `dm/tools/env_switches.py`, `docs/env_switches.tsv` |
-| `agent-aeff9ad0fb6c3dfd8` | Apple's log macros write each line in one stdio call, as the port's `LOG` does since `9872bae`. Prepared for a Mac: not to be merged before a Mac or macOS CI run | `dm/host/dm.h` (Apple branches), `docs/reference/threads.md` |
+| branch `wip/apple-log-one-call` (parked: one commit, no worktree) | Apple's log macros write each line in one stdio call, as the port's `LOG` does since `9872bae`. Prepared for a Mac: not to be merged before a Mac or macOS CI run | `dm/host/dm.h` (Apple branches), `docs/reference/threads.md` |
 
 ### Left, not started
 

@@ -2091,7 +2091,9 @@ def region_check(repo, d, patched, work, env, logs, g):
             g = set_keys(g, {'stdalloc_cap': (f'{need:#x}' if need else None, f'{CHECKED_CAP}: the regions made after the StandardAllocator region need more room than the 256 MB the host leaves them')}, 'Address region check')
             say(f'address regions: stdalloc_cap {need:#x} ({need / 2**30:.2f} GB) set in {g.dir / "game.tsv"}' if need else 'address regions: the stdalloc_cap an earlier check set is no longer needed: removed')
         have = need or 0
-    found = pg.region_findings(rows, alias, syms, REGION_CHECK_NNMAIN_SECS, have)
+    try: unreal = pg.unreal_region_sites((logs / 'rewrite_main.log').read_text(errors='replace'))   # Unreal's engine region: the host sizes it on the iPhone layout
+    except OSError: unreal = set()
+    found = pg.region_findings(rows, alias, syms, REGION_CHECK_NNMAIN_SECS, have, unreal)
     if not rows: how = 'no region table (the sdk has no region gates)' if rc is None or '>>> nnMain' in log.read_text(errors='replace') else f'the host stopped before nnMain (exit {rc})'
     elif not found: how = 'no address regions'
     else: how = found[-1][1]

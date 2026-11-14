@@ -418,7 +418,13 @@ def stdalloc_cap_needed(rows, alias):   # the stdalloc_cap the regions need (the
     return min(caps) if caps else None
 
 
-def region_findings(table, alias, sdk_syms=None, secs=15, cap=0):
+def unreal_region_sites(log):
+    """The return addresses of the Unreal engine region requests the rewrite gated, from its log of main (patch_nso.py prints ue_region.find's line: "main: Unreal's engine
+    region: reserved at <call> in nninitStartup's ..."): the call's address + 4, as the host's region table names it (main+0x14394 for Minecraft Dungeons II)"""
+    return {f'main+{int(m.group(1), 16) + 4:#x}' for m in re.finditer(r"^main: Unreal's engine region: reserved at (0x[0-9a-f]+) ", log, re.M)}
+
+
+def region_findings(table, alias, sdk_syms=None, secs=15, cap=0, host_sized=()):
     """[(red, text)] from the host's address region table (DM_REGIONS, hle_svc.c "Address regions") of a run with a Switch-sized alias region, against the profile's alias
     region (the layout an iPhone runs): where the regions reach, and for each of 256 MB or more where the request returns to in the game (the first return address outside the
     sdk: the function that asked, or its caller when it tail-called the SDK API), through which SDK API (sdk_syms: the sdk's nso_syms.defined) and how much of it the game used.
@@ -426,7 +432,9 @@ def region_findings(table, alias, sdk_syms=None, secs=15, cap=0):
     startup block at the top of its region). One the SDK's StandardAllocator lays out the host makes fit at run time (hle_svc.c "StandardAllocator's address space": what the alias
     region has room for, less 256 MB for the regions made after it); when those need more, the profile key stdalloc_cap (cap: the profile's, 0 when it sets none) sets the size,
     which this computes from them (stdalloc_room; Absolum: its .NET garbage collector's region). One the game's own allocator takes with nn::os::AllocateAddressRegion works
-    smaller only if that allocator places nothing by fixed offsets (memory.md, A 62 GB page allocator behind nu::VirtualAllocHook)"""
+    smaller only if that allocator places nothing by fixed offsets (memory.md, A 62 GB page allocator behind nu::VirtualAllocHook). host_sized: the return addresses of the
+    requests the rewriter gates so the host sizes them as StandardAllocator's (Unreal's engine region, dm/tools/ue_region.py, found in the rewrite's log by unreal_region_sites); those fit as long as
+    the regions made after them need no more than the 256 MB the host leaves, and what the run opened of them fits the size the host gives"""
     rows = region_rows(table, sdk_syms)
     if not rows: return []
     gb = lambda n: f'{n / 2**30:.2f} GB'
@@ -436,7 +444,15 @@ def region_findings(table, alias, sdk_syms=None, secs=15, cap=0):
         use = 'not used yet' if r['end'] is None else f'opened up to +{gb(r["end"])}'
         line = f'{gb(r["size"])} at alias +{gb(r["off"])}' + (f' through {api}' if api else '') + f', returning to {r["who"]}: {gb(r["mapped"])} mapped, {use}'
         if r['off'] + r['size'] <= alias: out.append((False, line)); continue
-        if api and 'StandardAllocator' in api:
+        if r['who'] in host_sized:
+            # Unreal's engine region: the host gives it what the alias region has room for at run time (hle_svc.c "Unreal's engine region"); no profile key sets that size
+            later = sum(x['size'] for x in rows if x['off'] > r['off'] and x['size'] <= alias - NODE_AREA)
+            room = (alias - r['off'] - STDALLOC_LATER) & ~0x1ffffff if alias > r['off'] + STDALLOC_LATER else 0
+            used = max(r['mapped'], r['end'] or 0)
+            if later > STDALLOC_LATER: red.append(f'the regions made after the one returning to {r["who"]} take {gb(later)}, more than the {gb(STDALLOC_LATER)} the host leaves them')
+            elif used > room: red.append(f'the run opened {gb(used)} of the region returning to {r["who"]}, more than the {gb(room)} the host gives it on the iPhone layout')
+            out.append((False, line + f'; on the iPhone layout the host gives it {gb(room)}, what the alias region has room for (Unreal\'s engine region)'))
+        elif api and 'StandardAllocator' in api:
             # placed after it, they need room past its end on the iPhone (one too big by itself is reported as such)
             later, need = stdalloc_room(rows, r, alias); note = ''
             if cap and r['off'] + cap + later <= alias: note = f'; the profile\'s stdalloc_cap gives it {gb(cap)}, which leaves the {gb(later)} of regions made after it room'
@@ -451,9 +467,11 @@ def region_findings(table, alias, sdk_syms=None, secs=15, cap=0):
     red += [f'the request returning to {r["who"]} takes {gb(r["size"])}' + (f' through {r["api"]}' if r['api'] else '') + ': a smaller one works only if its allocator places nothing by fixed offsets' for r in own]
     reach = max(r['off'] + r['size'] for r in rows)
     where = f'in its first {secs} s in nnMain the game\'s regions reach alias +{gb(reach)}'
-    capped = any(r['api'] and 'StandardAllocator' in r['api'] and r['off'] + r['size'] > alias for r in rows)
+    capped = any(((r['api'] and 'StandardAllocator' in r['api']) or r['who'] in host_sized) and r['off'] + r['size'] > alias for r in rows)
     if not red and reach > alias and not capped: red.append('no single region is too big, but together they need more room than the alias region has')
     if red: out.append((True, f'{where}, past the profile\'s {gb(alias)} alias region, the iPhone layout: ' + '; '.join(red) + ' (docs/reference/memory.md, Virtual address memory and the alias region)'))
+    elif reach > alias and not any(r['api'] and 'StandardAllocator' in r['api'] and r['off'] + r['size'] > alias for r in rows):
+        out.append((False, f'{where}, past the profile\'s {gb(alias)} alias region only by Unreal\'s engine region, which the host makes fit (what it takes later in play is not measured here)'))
     elif reach > alias: out.append((False, f'{where}, past the profile\'s {gb(alias)} alias region only by StandardAllocator regions, which the host makes fit (what it takes later in play is not measured here)'))
     else: out.append((False, f'{where}, within the profile\'s {gb(alias)} alias region (what it takes later in play is not measured here)'))
     return out

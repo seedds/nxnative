@@ -252,6 +252,28 @@ class AddressRegions(unittest.TestCase):
         self.assertIn('the request returning to main+0x30 takes 62.00 GB through nn::os::AllocateAddressRegion: a smaller one works only if its allocator places nothing by fixed offsets', text)
         self.assertNotIn('stdalloc_cap', text)
 
+    def test_unreal_engine_region_the_host_sizes(self):
+        # Minecraft Dungeons II v65536: Unreal's 62 GB engine region, gated by the rewriter (ue_region.py), in the 3.12 GB alias region of the 3.75 GB block. The host gives it
+        # what the alias region has room for, so not red (the iPhone ran into it only while the profile kept the Mac's 64 GB block); the same table without the gate is red
+        t = self.HEAD + '0x4000000\t0xf80000000\tmain+0x14394\t0xfe0f000\t0\t0x565c4000\t0\n'
+        site = pg.unreal_region_sites("main: Unreal's engine region: reserved at 0x14390 in nninitStartup's 0x13f30, its size stored from x1 at 0x1438c\n")
+        self.assertEqual(site, {'main+0x14394'})
+        f = pg.region_findings(t, 0xC8000000, self.SYMS, host_sized=site)
+        self.assertFalse(any(red for red, _ in f), f)
+        self.assertIn('on the iPhone layout the host gives it 2.81 GB, what the alias region has room for', f[0][1])
+        self.assertIn("only by Unreal's engine region, which the host makes fit", f[-1][1])
+        red, text = pg.region_findings(t, 0xC8000000, self.SYMS)[-1]
+        self.assertTrue(red); self.assertIn('the request returning to main+0x14394 takes 62.00 GB', text)
+        # regions made after it need more than the 256 MB the host leaves: red, and no profile key changes that
+        later = t + '0xf84000000\t0x40000000\tmain+0x40\t0\t-\t-\t0x2010\n'
+        red, text = pg.region_findings(later, 0xC8000000, self.SYMS, host_sized=site)[-1]
+        self.assertTrue(red); self.assertIn('the regions made after the one returning to main+0x14394 take 1.00 GB, more than the 0.25 GB the host leaves them', text)
+        # the run opened more of it than the host gives it on the iPhone layout: red
+        big = self.HEAD + '0x4000000\t0xf80000000\tmain+0x14394\t0xfe0f000\t0\t0xc0000000\t0\n'
+        red, text = pg.region_findings(big, 0xC8000000, self.SYMS, host_sized=site)[-1]
+        self.assertTrue(red); self.assertIn('the run opened 3.00 GB of the region returning to main+0x14394, more than the 2.81 GB the host gives it', text)
+        self.assertEqual(pg.unreal_region_sites('main: no engine region option\n'), set())
+
     def test_together_too_big(self):
         t = self.HEAD + '0x4000000\t0xc0000000\tmain+0x30\t0\t-\t-\t0x2010\n0xc4000000\t0x80000000\tmain+0x50\t0\t-\t-\t0x2010\n'
         red, text = pg.region_findings(t, 0x118000000, self.SYMS)[-1]

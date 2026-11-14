@@ -58,6 +58,20 @@ t_dirty_slots: t_dirty_slots.c ../nvn/nvn_dirty.c ../../host/crash.c ../nvn/nvn_
 	clang $(CFLAGS) -o $@ t_dirty_slots.c ../../host/crash.c ../nvn/nvn_dirty.c
 t_dirty_race: t_dirty_race.c ../nvn/nvn_dirty.c ../../host/crash.c ../nvn/nvn_dirty.h $(GAME_H)
 	clang $(CFLAGS) -o $@ t_dirty_race.c ../../host/crash.c
+t_dirty_init: t_dirty_init.c ../nvn/nvn_dirty.c ../../host/crash.c ../nvn/nvn_dirty.h $(GAME_H)
+	clang $(CFLAGS) -o $@ t_dirty_init.c ../../host/crash.c ../nvn/nvn_dirty.c
+t_dirty_init_tsan: t_dirty_init.c ../nvn/nvn_dirty.c ../../host/crash.c ../nvn/nvn_dirty.h $(GAME_H)
+	clang $(CFLAGS) -fsanitize=thread -o $@ t_dirty_init.c ../../host/crash.c ../nvn/nvn_dirty.c
+.PHONY: tsan-dirty-init
+tsan-dirty-init: t_dirty_init_tsan
+	TSAN_OPTIONS=halt_on_error=1:abort_on_error=0 ./t_dirty_init_tsan   # exit, not abort: the crash handler this test installs would report the abort
+t_dirty_reuse: t_dirty_reuse.c ../nvn/nvn_dirty.c ../../host/crash.c ../nvn/nvn_dirty.h $(GAME_H)
+	clang $(CFLAGS) -o $@ t_dirty_reuse.c ../../host/crash.c ../nvn/nvn_dirty.c
+t_dirty_reuse_tsan: t_dirty_reuse.c ../nvn/nvn_dirty.c ../../host/crash.c ../nvn/nvn_dirty.h $(GAME_H)
+	clang $(CFLAGS) -fsanitize=thread -o $@ t_dirty_reuse.c ../../host/crash.c ../nvn/nvn_dirty.c
+.PHONY: tsan-dirty-reuse
+tsan-dirty-reuse: t_dirty_reuse_tsan
+	TSAN_OPTIONS=halt_on_error=1:abort_on_error=0 ./t_dirty_reuse_tsan 2000   # exit, not abort: the crash handler this test installs would report the abort
 t_dirty_retire_race: t_dirty_retire_race.c ../nvn/nvn_dirty.c ../../host/crash.c ../nvn/nvn_dirty.h $(GAME_H)
 	clang $(CFLAGS) -o $@ t_dirty_retire_race.c ../../host/crash.c
 t_host_msl: t_host_msl.m ../nvn/host_msl.m ../nvn/host_msl.h $(MSL_H)
@@ -395,8 +409,8 @@ check_t_pull_inv: RUN_ENV = MTL_DEBUG_LAYER=1
 t_wline: t_wline.m ../tools/dmsh_pull.py ../tools/dmsh_pull.metal
 	clang -O1 -g -Wall -fobjc-arc -o $@ t_wline.m -framework Metal -framework Foundation
 check_t_wline: RUN_ENV = MTL_DEBUG_LAYER=1
-t_pso_archive: t_pso_archive.m $(MTL_T_DEP)
-	clang $(CFLAGS) -fobjc-arc -o $@ t_pso_archive.m $(MTL_T_SRC) $(FW)
+t_pso_archive: t_pso_archive.m $(MTL_T_DEP) ../../host/hle_lifecycle.c
+	clang $(CFLAGS) -fobjc-arc -o $@ t_pso_archive.m $(MTL_T_SRC) ../../host/hle_lifecycle.c $(FW)
 .PHONY: check_t_pso_archive
 check_t_pso_archive: t_pso_archive
 	MTL_DEBUG_LAYER=1 ./t_pso_archive

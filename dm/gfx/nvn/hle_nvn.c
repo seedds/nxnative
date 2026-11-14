@@ -1770,6 +1770,8 @@ void dm_gfx_suspend(int on) {
     // the pipeline archive starts writing what it holds: a process in the background may be ended without a word (iOS), and a prewarm's captures wait for a full period
 }
 void dm_gfx_quit(int wait_ms) { mtl_arch_save(wait_ms, 1); }
+void dm_gfx_quit_begin(void) { mtl_warm_stop(); mtl_arch_save(0, 0); }   // the end's first step: no more prewarm compiles, and what the archive holds starts writing beside the drain (which can wait on a draw that compiles)
+_Static_assert(DM_QUIT_ARCH_MS == MTL_QUIT_ARCH_MS, "a graceful exit gives the pipeline archive the time a quit does");
 // One submission at a time: the Metal replay keeps one command buffer and one upload batch for the submission in progress (nvn_mtl.m g_cb). Fire Emblem: Three Houses initializes two queues and
 // submits on both from two threads; the second submission arrived while the first was replaying and the host stopped with "submit re-entered" at the ninth frame. NVN orders work on different queues only
 // through syncs and events. The continuation scheduler parks unresolved queues and serializes only ready prefixes onto this Metal queue.

@@ -8,6 +8,7 @@
 # The first version followed only the last variable of an index and took any mask, min or clamp it met as proof: `_1 + (_2 & 3u)` with _1 read from an input passed,
 # masks wider than the data passed, and compute shaders (cp_c1) were never checked.
 import datetime
+import hashlib
 import json
 import multiprocessing
 import os
@@ -180,11 +181,7 @@ class Interval:
 
 def c1_span(json_path):
     """Bytes a shared bank gives the shader's c1: its data rounded up to 256 bytes plus the 256-byte zero gap (nvn_mtl.m c1_store); None when the reflection has no c1."""
-    try:
-        with romfs.open(json_path, encoding="utf-8") as stream: length = len(json.load(stream).get("c1") or "") // 2
-    except (OSError, ValueError):
-        return None
-    return (length + 255) // 256 * 256 + 256
+    return c1_span_of(read_bytes(json_path))
 
 
 def definitions_of(source):
@@ -209,19 +206,117 @@ def outputs(version_dir, ext):
     return [n for n in sorted(romfs.os.listdir(version_dir)) if (m := OUTPUT.fullmatch(n)) and m.group(1) == ext]
 
 
+# Each shader's answer follows from its own files alone (its .metal and its reflection json) and from these tools' code, so with DMSH_TABLE_MEMO set to a folder (the NSP script sets its
+# shader cache folder) c1_guard.py and cb_extent.py keep it there as <tool>.memo: a line per shader, the SHA-256 of the files it read, then its answer. A build that restores every shader
+# from the cache gives back the same files, so the tables are made again from the memo instead of the analysis: about 100 s of a 42,848-shader game's reuse build (Ocarina of Time), the
+# progress bar at 99% meanwhile. The memo's first line is the tools' fingerprint; another one (an edit to these files) starts it empty. It keeps the answers of the last run only
+MEMO_ENV = "DMSH_TABLE_MEMO"
+MEMO_CODE = ("c1_guard.py", "cb_extent.py", "dmsh_abi.py", os.path.join("..", "nvn", "dmsh_abi.h"))   # cb_extent.py runs this file's interval arithmetic and the binding kinds
+# dmsh_abi.py reads from the header when it loads: a header-only edit of a kind changes cb_extent.py's answer for the same files
+_memo = None   # the worker processes' copy of the memo ({digest: answer}); None without one, and then nothing is hashed
+
+
+def memo_path(tool):
+    folder = os.environ.get(MEMO_ENV)
+    return os.path.join(folder, tool + ".memo") if folder else None
+
+
+def memo_fingerprint(tool):
+    h = hashlib.sha256(tool.encode())
+    for name in MEMO_CODE:
+        with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), name), "rb") as stream: h.update(b"\0" + stream.read())
+    return h.hexdigest()
+
+
+def memo_load(tool):
+    """{digest: answer} of the tool's last run; empty when there is none, it is unreadable or another version of the tools made it"""
+    path = memo_path(tool)
+    if not path: return None
+    try:
+        with open(path, encoding="utf-8") as stream:
+            if stream.readline().rstrip("\n") != "# " + memo_fingerprint(tool): return {}
+            return dict(line.rstrip("\n").split("\t", 1) for line in stream if "\t" in line)
+    except (OSError, ValueError):
+        return {}
+
+
+def memo_save(tool, answers):   # answers: [(digest, answer)] of this run; a memo that cannot be written only costs the next run its time
+    path = memo_path(tool)
+    if not path: return
+    tmp = f"{path}.tmp-{os.getpid()}"
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(tmp, "w", encoding="utf-8", newline="") as stream:
+            stream.write("# " + memo_fingerprint(tool) + "\n")
+            stream.writelines(f"{digest}\t{answer}\n" for digest, answer in dict(answers).items())
+        os.replace(tmp, path)
+    except OSError:
+        try: os.unlink(tmp)
+        except OSError: pass
+
+
+def _memo_start(memo):   # the pool's initializer
+    global _memo
+    _memo = memo
+
+
+def memo_map(tool, worker, jobs):
+    """pool.map of worker over jobs, every core, in order, with the memo given to each process; worker returns (digest or None, answer, its own value), and answers are strings without tabs
+    or newlines. → the workers' own values"""
+    memo = memo_load(tool)
+    with multiprocessing.Pool(initializer=_memo_start, initargs=(memo,)) as pool:   # map keeps the sorted order, so the list is the same as one core's
+        results = pool.map(worker, jobs, chunksize=64)
+    if memo is not None: memo_save(tool, [(digest, answer) for digest, answer, _ in results if digest])
+    return [value for _, _, value in results]
+
+
+def memo_digest(*files):   # the files' bytes (None: missing), as the memo's key
+    h = hashlib.sha256()
+    for data in files: h.update(b"none\0" if data is None else b"%d\0" % len(data) + data)
+    return h.hexdigest()
+
+
+def memo_answer(files, compute):   # (digest, answer): the memo's when it holds the files, else compute()'s; no digest without a memo
+    if _memo is None: return None, compute()
+    digest = memo_digest(*files)
+    answer = _memo.get(digest)
+    return digest, compute() if answer is None else answer
+
+
+def read_bytes(path):
+    try:
+        with romfs.open(path, "rb") as stream: return stream.read()
+    except OSError:
+        return None
+
+
+def text_of(data):   # what romfs.open(path, encoding="utf-8") reads: UTF-8, universal newlines
+    return data.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
+
+
+def c1_span_of(data):   # c1_span on the reflection's bytes (None: missing)
+    if data is None: return None
+    try: length = len(json.loads(text_of(data)).get("c1") or "") // 2
+    except ValueError: return None
+    return (length + 255) // 256 * 256 + 256
+
+
+def unproven_in(source, reflection):   # whether one of the shader's c1 reads is not proven bounded: its MSL, its reflection json's bytes
+    accesses = set(ACCESS.findall(source))
+    if not accesses: return False
+    definitions, span = definitions_of(source), c1_span_of(reflection)
+    return not all(proven(index, definitions, span) for index in accesses)
+
+
 def unproven(job):
-    """(version dir, a .metal file name) → the shader's key when one of its c1 reads is not proven bounded, else None. Each shader is checked on its own, so main()
+    """(version dir, a .metal file name) → (memo digest, answer, the shader's key when one of its c1 reads is not proven bounded, else None). Each shader is checked on its own, so main()
     spreads them over every core, as cb_extent.py does (Breath of the Wild's 19,592 libraries, FINAL FANTASY RESONANCE's 73,496: minutes on one core)"""
     version_dir, name = job
-    with romfs.open(os.path.join(version_dir, name), encoding="utf-8") as stream:
-        source = stream.read()
-    accesses = set(ACCESS.findall(source))
-    if not accesses:
-        return None
     key = name[:-len("_b.metal")] if name.endswith("_b.metal") else name[:-6]
-    definitions = definitions_of(source)
-    span = c1_span(os.path.join(version_dir, key + "_b.json"))
-    return None if all(proven(index, definitions, span) for index in accesses) else key
+    with romfs.open(os.path.join(version_dir, name), "rb") as stream: metal = stream.read()
+    reflection = read_bytes(os.path.join(version_dir, key + "_b.json"))
+    digest, answer = memo_answer((metal, reflection), lambda: "u" if unproven_in(text_of(metal), reflection) else "-")
+    return digest, answer, key if answer == "u" else None
 
 
 def main():
@@ -230,8 +325,7 @@ def main():
     lib, output = map(os.path.abspath, sys.argv[1:])
     version_dir = str(shader_lib.view(lib))   # its folder or its one file, read in place
     jobs = [(version_dir, name) for name in outputs(version_dir, "metal")]
-    with multiprocessing.Pool() as pool:   # map keeps the sorted order, so the list is the same as one core's
-        keys = [key for key in pool.map(unproven, jobs, chunksize=64) if key]
+    keys = [key for key in memo_map("c1_guard", unproven, jobs) if key]
     os.makedirs(os.path.dirname(output), exist_ok=True)
     with open(output, "w", encoding="utf-8", newline="") as stream:
         stamp = datetime.datetime.now().astimezone().isoformat(timespec="seconds")

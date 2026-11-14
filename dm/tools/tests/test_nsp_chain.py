@@ -95,6 +95,11 @@ class Tables(Base):
         self.assertTrue(self.tables(self.current(), f'b-{self.CHAIN} inputs bbbbbbbbbbbb'))
         self.assertEqual(self.ran, ['cb_extent.py']); self.assertIn(f'named b-{self.CHAIN} inputs bbbbbbbbbbbb', self.said[0])
 
+    def test_made_again_with_the_shader_builds_memo(self):   # c1_guard.py / cb_extent.py DMSH_TABLE_MEMO: the folder a full build gives them
+        envs = []
+        with mock.patch.object(nsp, 'run', lambda cmd, log, env=None: envs.append(env)): self.tables(None, self.current())
+        self.assertEqual([e['DMSH_TABLE_MEMO'] for e in envs], [str(self.sh / 'cache')])
+
     def test_other_chain_made_again(self):
         self.assertTrue(self.tables(f'b-fc6c0368c7b9 inputs {self.INPUTS}', self.current()))
         self.assertEqual(self.ran, ['c1_guard.py'])
@@ -134,6 +139,75 @@ class TableTools(unittest.TestCase):
                 r = subprocess.run([sys.executable, REPO / 'dm/gfx/tools' / tool, lib, lib.parent / table], capture_output=True, text=True)
                 self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual((lib.parent / 'c1_full.tsv').read_text().splitlines()[1:], [key])   # the shader itself is still checked
+
+    UNBOUNDED = 'fragment float4 main0(constant cb& fp_c1) { int _5 = in.v; return (fp_c1)._m0[_5]; }\n'
+    BOUNDED = 'fragment float4 main0(constant cb& fp_c1) { int _5 = in.v & 3; return (fp_c1)._m0[_5]; }\n'
+
+    def memo_lib(self):   # two shaders: one c1 read unbounded, one masked to the first 64 bytes of a 64-byte c1; both read cbuf slot 0
+        lib = Path(tempfile.mkdtemp()) / 'b-0123456789ab'; lib.mkdir(); self.addCleanup(shutil.rmtree, lib.parent)
+        refl = json.dumps({'c1': '00' * 64, 'bindings': [{'kind': 'cbuf', 'reg': 0, 'msl_name': 'fp_c1'}]})
+        for key, src in (('00112233aabbccdd', self.UNBOUNDED), ('44556677eeff0011', self.BOUNDED)):
+            (lib / f'{key}_b.metal').write_text(src); (lib / f'{key}_b.json').write_text(refl)
+        return lib
+
+    def table(self, lib, tool, memo):   # the table's lines after its header (the header holds the time)
+        table = lib.parent / f'{tool}.tsv'
+        env = {k: v for k, v in os.environ.items() if k != 'DMSH_TABLE_MEMO'}
+        if memo: env['DMSH_TABLE_MEMO'] = str(memo)
+        r = subprocess.run([sys.executable, REPO / 'dm/gfx/tools' / f'{tool}.py', lib, table], capture_output=True, text=True, env=env)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        return table.read_text().splitlines()[1:]
+
+    def test_memo_gives_the_same_tables(self):   # DMSH_TABLE_MEMO: a reuse build's tables from the memo are the ones the analysis makes
+        lib = self.memo_lib(); memo = lib.parent / 'memo'
+        for tool in ('c1_guard', 'cb_extent'):
+            with self.subTest(tool=tool):
+                plain = self.table(lib, tool, None)
+                self.assertFalse((memo / f'{tool}.memo').exists())
+                self.assertEqual(self.table(lib, tool, memo), plain)   # empty memo: analysed, then kept
+                lines = (memo / f'{tool}.memo').read_text().splitlines()
+                self.assertTrue(lines[0].startswith('# ')); self.assertEqual(len(lines), 3)
+                self.assertEqual(self.table(lib, tool, memo), plain)   # from the memo
+        self.assertEqual(self.table(lib, 'c1_guard', None), ['00112233aabbccdd'])
+
+    def test_memo_answers_are_used_and_keyed_by_the_files(self):
+        lib = self.memo_lib(); memo = lib.parent / 'memo'
+        self.table(lib, 'c1_guard', memo)
+        path = memo / 'c1_guard.memo'; head, *rows = path.read_text().splitlines()
+        path.write_text(head + '\n' + ''.join(r.split('\t')[0] + '\tu\n' for r in rows))   # every shader answered "not proven"
+        self.assertEqual(self.table(lib, 'c1_guard', memo), ['00112233aabbccdd', '44556677eeff0011'])   # a warm run takes the memo's answer
+        (lib / '44556677eeff0011_b.metal').write_text(self.BOUNDED.replace('& 3', '& 3 '))   # changed bytes: a new digest, analysed again
+        self.assertEqual(self.table(lib, 'c1_guard', memo), ['00112233aabbccdd'])
+        self.assertEqual(len(path.read_text().splitlines()), 3)   # only this run's answers are kept
+
+    def test_memo_of_other_tools_is_not_taken(self):   # another version of the tools (its first line) starts the memo empty
+        lib = self.memo_lib(); memo = lib.parent / 'memo'
+        self.table(lib, 'c1_guard', memo)
+        path = memo / 'c1_guard.memo'; head, *rows = path.read_text().splitlines()
+        path.write_text('# another\n' + ''.join(r.split('\t')[0] + '\tu\n' for r in rows))
+        self.assertEqual(self.table(lib, 'c1_guard', memo), ['00112233aabbccdd'])
+        self.assertEqual(path.read_text().splitlines()[0], head)
+
+    def test_memo_of_another_abi_header_is_not_taken(self):   # cb_extent.py's binding kinds come from dmsh_abi.h through dmsh_abi.py: a header-only edit kept a warm memo's row
+        tree = Path(tempfile.mkdtemp()); self.addCleanup(shutil.rmtree, tree)
+        for f in ('dm/gfx/tools/c1_guard.py', 'dm/gfx/tools/cb_extent.py', 'dm/gfx/tools/dmsh_abi.py', 'dm/gfx/nvn/dmsh_abi.h', 'dm/tools/romfs.py', 'dm/tools/shader_lib.py'):
+            (tree / f).parent.mkdir(parents=True, exist_ok=True); shutil.copy(REPO / f, tree / f)
+        lib = Path(tempfile.mkdtemp()) / 'b-0123456789ab'; lib.mkdir(); self.addCleanup(shutil.rmtree, lib.parent)
+        (lib / '00112233aabbccdd_b.metal').write_text('struct S { constant cb* fp_c1 [[id(0)]]; };\n'
+                                                     'fragment float4 main0(constant S& spvDescriptorSet0) { int _5 = in.v & 3; return (*spvDescriptorSet0.fp_c1)._m0[_5]; }\n')
+        (lib / '00112233aabbccdd_b.json').write_text(json.dumps({'c1': '00' * 64, 'bindings': [{'kind': 'cbuf', 'reg': 0, 'msl_name': 'fp_c1'}]}))
+        env = dict(os.environ, DMSH_TABLE_MEMO=str(lib.parent / 'memo'))
+
+        def rows():
+            table = lib.parent / 'cb_extent.tsv'
+            r = subprocess.run([sys.executable, tree / 'dm/gfx/tools/cb_extent.py', lib, table], capture_output=True, text=True, env=env)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            return [line for line in table.read_text().splitlines() if not line.startswith('#')]
+        self.assertEqual(rows(), ['00112233aabbccdd\t0:64'])
+        header = tree / 'dm/gfx/nvn/dmsh_abi.h'; text = header.read_text()
+        self.assertEqual(text.count('#define DMSH_KIND_CBUF "cbuf"'), 1)
+        header.write_text(text.replace('#define DMSH_KIND_CBUF "cbuf"', '#define DMSH_KIND_CBUF "cbuf_renamed"'))   # the reflection's "cbuf" is no longer a uniform buffer
+        self.assertEqual(rows(), [])
 
 
 class TableDifference(unittest.TestCase):   # the row the build error names when a split table differs from the profile's (GitHub issue #1263)

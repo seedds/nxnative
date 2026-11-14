@@ -64,8 +64,8 @@ import Foundation
         let mac = try! JSONDecoder().decode(SettingsFile.self, from: Data(contentsOf: URL(fileURLWithPath: CommandLine.arguments[2])))
         setenv("DM_ENV_FILE_KEYS", "", 1); unsetenv("DM_FULLSCREEN"); unsetenv("DM_OPMODE")
         let mm = LauncherModel(mac.settings, defaults: d)
-        expect(mm.sections(basic: true) == ["Game", "Controls"] && mm.sections(basic: false) == ["Game", "Controls", "Performance"], "Basic and Advanced keep the list's sections")
-        expect(mm.rows(in: "Game", basic: true).map(\.env) == ["DM_FPS_TARGET", "DM_RENDER_SCALE", "DM_OPMODE", "DM_LANG", "DM_FULLSCREEN"], "Basic rows in the list's order")
+        expect(mm.sections(basic: true) == ["Game", "Picture", "Controls"] && mm.sections(basic: false) == ["Picture", "Controls", "Performance"], "Basic and Advanced keep the list's sections")   // every Game row is basic on the Mac once Render scale and Upscaling are under Picture
+        expect(mm.rows(in: "Game", basic: true).map(\.env) == ["DM_FPS_TARGET", "DM_OPMODE", "DM_LANG", "DM_FULLSCREEN"] && mm.rows(in: "Picture", basic: true).map(\.env) == ["DM_RENDER_SCALE"], "Basic rows in the list's order")
         expect(!file.settings.contains { $0.env == "DM_FULLSCREEN" } && mm.values["DM_FULLSCREEN"] == "0", "Display mode is the Mac's, Window by default")
         mm.values["DM_FULLSCREEN"] = "1"; mm.apply()
         expect(String(cString: getenv("DM_FULLSCREEN")) == "1" && d.string(forKey: "launcher.DM_FULLSCREEN") == "1", "Fullscreen goes into the environment and is saved")

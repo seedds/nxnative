@@ -122,6 +122,68 @@ int main(void) {
     char root[1024], save[1100], work[1200], p[1200];
     const char *sp = getenv("TMPDIR"); snprintf(root, sizeof root, "%s/t_fs.XXXXXX", sp ? sp : "/private/tmp");
     if (!mkdtemp(root)) { perror("mkdtemp"); return 1; }
+    {   // cache storage list: the <DM_TEMP>_cache<N> folders that exist when the list opens, in index order, a page at a time; a closed or foreign handle finds no list
+        char temp[1100], c[1200]; snprintf(temp, sizeof temp, "%s/temp", root); setenv("DM_TEMP", temp, 1);
+        uint64_t empty = 0; int count = -1; uint8_t rec[4 * 0x20];
+        CHECK(h_fs_OpenCacheList(&empty) == RES_OK && h_fs_ReadCacheList(&count, rec, empty, 4) == RES_OK && count == 0, "cache list: none on a fresh run");
+        h_fs_CloseCacheList(empty);
+        for (int i = 0; i < 4; i++) { static const char *names[] = {"_cache8", "_cache2", "_cache300", "_cache65535"}; snprintf(c, sizeof c, "%s%s", temp, names[i]); mkdir(c, 0755); }
+        snprintf(c, sizeof c, "%s_cache08", temp); mkdir(c, 0755);   // not a name cache_dir writes
+        snprintf(c, sizeof c, "%s_cache65536", temp); mkdir(c, 0755);
+        snprintf(c, sizeof c, "%s_cache9x", temp); mkdir(c, 0755);
+        snprintf(c, sizeof c, "%s_cache5", temp); put(c, "a file");
+        uint64_t l = 0; CHECK(h_fs_OpenCacheList(&l) == RES_OK && l, "cache list opens");
+        snprintf(c, sizeof c, "%s_cache6", temp); mkdir(c, 0755);   // after the open: the next list's
+        memset(rec, 0xff, sizeof rec);
+        CHECK(h_fs_ReadCacheList(&count, rec, l, 3) == RES_OK && count == 3 && rec[0] == 2 && rec[0x20] == 8 && rec[0x40] == 0x2c && rec[0x41] == 1, "cache list: first page in index order");
+        int zero = 1; for (int i = 4; i < 0x20; i++) zero &= !rec[i];
+        CHECK(zero && !rec[1] && !rec[2] && !rec[3], "cache list: an entry is the index and zeroed reserved bytes");
+        CHECK(h_fs_ReadCacheList(&count, rec, l, 3) == RES_OK && count == 1 && rec[0] == 0xff && rec[1] == 0xff, "cache list: second page, index 65535; nothing the open did not see");
+        CHECK(h_fs_ReadCacheList(&count, rec, l, 3) == RES_OK && count == 0, "cache list: the end");
+        uint64_t l2 = 0; CHECK(h_fs_OpenCacheList(&l2) == RES_OK && l2 != l && h_fs_ReadCacheList(&count, rec, l2, 4) == RES_OK && count == 4 && rec[0x40] == 8, "cache list: a new list sees the folder made since");
+        h_fs_CloseCacheList(l); h_fs_CloseCacheList(l);
+        CHECK(h_fs_ReadCacheList(&count, rec, l, 1) != RES_OK && count == 0, "cache list: a closed handle is no list");
+        CHECK(h_fs_ReadCacheList(&count, rec, 0x7bbd001230ull, 1) != RES_OK, "cache list: a handle never opened is no list");
+        h_fs_CloseCacheList(l2);
+        uint64_t many[17]; int opened = 0; for (int i = 0; i < 17; i++) opened += h_fs_OpenCacheList(&many[i]) == RES_OK;
+        CHECK(opened == 16, "cache list: 16 open at once, the 17th fails");
+        for (int i = 0; i < 16; i++) h_fs_CloseCacheList(many[i]);
+        CHECK(h_fs_OpenCacheList(&l) == RES_OK, "cache list: closed lists free their slots"); h_fs_CloseCacheList(l);
+        unsetenv("DM_TEMP");
+    }
+    {   // fs::GetCacheStorageMax: the application's control data, DM_CONTROL_NACP else control.nacp beside the RomFS
+        char ver[1100], rom[1200], control[1300]; snprintf(ver, sizeof ver, "%s/v65536", root); snprintf(rom, sizeof rom, "%s/RomFS", ver); mkdir(ver, 0755); mkdir(rom, 0755);
+        snprintf(control, sizeof control, "%s/control.nacp", ver);
+        unsetenv("DM_CONTROL_NACP"); setenv("DM_ROMFS", rom, 1);
+        int index = -1; int64_t size = -1;
+        CHECK(h_fs_CacheMax(&index, &size) != RES_OK && index == -1, "cache storage max: no control data is an error, not a guess");
+        static uint8_t nacp[0x4000]; const uint64_t max = 1715470336; memcpy(nacp + 0x3180, &max, 8); nacp[0x3188] = 43;
+        FILE *f = fopen(control, "wb"); fwrite(nacp, 1, sizeof nacp, f); fclose(f);
+        CHECK(h_fs_CacheMax(&index, &size) == RES_OK && index == 43 && size == 1715470336, "cache storage max: control.nacp beside the RomFS folder");
+        char slash[1300]; snprintf(slash, sizeof slash, "%s/", rom); setenv("DM_ROMFS", slash, 1); index = -1;
+        CHECK(h_fs_CacheMax(&index, &size) == RES_OK && index == 43, "cache storage max: a RomFS path with a trailing slash");
+        nacp[0x3188] = 7; nacp[0x3189] = 1; char other[1300]; snprintf(other, sizeof other, "%s/other.nacp", root);
+        f = fopen(other, "wb"); fwrite(nacp, 1, sizeof nacp, f); fclose(f); setenv("DM_CONTROL_NACP", other, 1);
+        CHECK(h_fs_CacheMax(&index, &size) == RES_OK && index == 0x107, "cache storage max: DM_CONTROL_NACP first, the index a u16");
+        put(other, "short"); CHECK(h_fs_CacheMax(&index, &size) != RES_OK, "cache storage max: a short file is an error");
+        unsetenv("DM_CONTROL_NACP");
+        // fs::GetCacheStorageSize: the size the storage was created with; a folder without a record takes the control data's default (here none, then 50 MB / 1 MB); no storage is an error
+        char temp[1100], c[1300]; snprintf(temp, sizeof temp, "%s/temp2", root); setenv("DM_TEMP", temp, 1);
+        int64_t journal = -1; size = -1;
+        CHECK(h_fs_CacheSize(&size, &journal, 3) == RES_TARGET_NOT_FOUND && size == -1, "cache storage size: no storage is ResultTargetNotFound");
+        CHECK(h_fs_CreateCache(3, 54198272, 180224) == RES_OK && h_fs_CacheSize(&size, &journal, 3) == RES_OK && size == 54198272 && journal == 180224, "cache storage size: the size it was created with");
+        CHECK(h_fs_CreateCache(3, 1 << 20, 1 << 20) == RES_OK && h_fs_CacheSize(&size, &journal, 3) == RES_OK && size == 54198272, "cache storage size: creating it again keeps its size");
+        uint64_t l = 0; int count = -1; uint8_t rec[2 * 0x20];
+        CHECK(h_fs_OpenCacheList(&l) == RES_OK && h_fs_ReadCacheList(&count, rec, l, 2) == RES_OK && count == 1 && rec[0] == 3, "cache storage size: the list skips the record beside the folder");
+        h_fs_CloseCacheList(l);
+        CHECK(h_fs_DeleteCache(3) == RES_OK && h_fs_CacheSize(&size, &journal, 3) == RES_TARGET_NOT_FOUND, "cache storage size: deleting removes the storage");
+        snprintf(c, sizeof c, "%s_cache3.size", temp); CHECK(access(c, F_OK), "cache storage size: deleting removes the record");
+        CHECK(h_fs_MountCache("cachet", 4) == RES_OK && h_fs_CacheSize(&size, &journal, 4) == RES_OK && size == 256 << 20 && journal == 256 << 20, "cache storage size: no record, no default: 256 MB");
+        const int64_t def[2] = {50 << 20, 1 << 20}; memcpy(nacp + 0x3170, def, sizeof def);
+        f = fopen(control, "wb"); fwrite(nacp, 1, sizeof nacp, f); fclose(f); setenv("DM_ROMFS", rom, 1);
+        CHECK(h_fs_CacheSize(&size, &journal, 4) == RES_OK && size == 50 << 20 && journal == 1 << 20, "cache storage size: no record: the control data's default");
+        unsetenv("DM_TEMP"); unsetenv("DM_ROMFS");
+    }
     char rom[1100], overlay[1100], rdata[1200], odata[1200], fn[1300], got[64];
     snprintf(rom, sizeof rom, "%s/rom", root); snprintf(overlay, sizeof overlay, "%s/overlay", root); snprintf(rdata, sizeof rdata, "%s/data", rom); snprintf(odata, sizeof odata, "%s/data", overlay);
     mkdir(rom, 0755); mkdir(overlay, 0755); mkdir(rdata, 0755); mkdir(odata, 0755);

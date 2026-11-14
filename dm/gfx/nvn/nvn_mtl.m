@@ -9843,9 +9843,10 @@ static size_t stand_cap_of(const tex_t *t) { return pool_tex_size(t) >= stand_bi
 static size_t stand_pick(void) { return MAX((size_t)STAND_PICK, stand_level()); }
 // DM_TEXTURES_KEEP=WxH,WxH,...: textures of these sizes are never replaced by DM_TEXTURES_OFF (the map's, say); DM_TEXTURES_LOG=1 lists every texture replaced, with its size and the frame, to find them
 static int tex_kept(const tex_t *t) {
-    static int n = -1; static uint32_t kw[32], kh[32];
-    if (n < 0) { n = 0; const char *e = getenv("DM_TEXTURES_KEEP"); for (const char *q = e; q && *q && n < 32; q = strchr(q, ',') ? strchr(q, ',') + 1 : q + strlen(q)) { unsigned w, h; if (sscanf(q, "%ux%u", &w, &h) == 2) { kw[n] = w; kh[n++] = h; } }
-        if (n) MLOG("textures kept as they are (DM_TEXTURES_KEEP): %d sizes", n); }
+    static int n = -1, ui; static uint32_t kw[32], kh[32];
+    if (n < 0) { n = 0; const char *e = getenv("DM_TEXTURES_KEEP"); for (const char *q = e; q && *q && n < 32; q = strchr(q, ',') ? strchr(q, ',') + 1 : q + strlen(q)) { unsigned w, h; if (sscanf(q, "%ux%u", &w, &h) == 2) { kw[n] = w; kh[n++] = h; } else if (!strncmp(q, "ui", 2)) ui = 1; }
+        if (n || ui) MLOG("textures kept as they are (DM_TEXTURES_KEEP): %d sizes%s", n, ui ? ", and UI-like textures (one level, a side that is not a power of two, 1 MB or less in storage)" : ""); }
+    if (ui && t->d.levels <= 1 && ((t->d.width & (t->d.width - 1)) || (t->d.height & (t->d.height - 1))) && pool_tex_size(t) <= (1u << 20)) return 1;
     for (int i = 0; i < n; i++) if (t->d.width == kw[i] && t->d.height == kh[i]) return 1;
     return 0;
 }

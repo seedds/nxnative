@@ -1,0 +1,59 @@
+# The Duskbloods (network test, Switch 2), FromSoftware's engine (Dantelion2), SDK 20.5.19 built for the Switch 2, NVN2. Started from the provisional profile the NSP
+# script wrote (dm/games/profile_guess.py); see README.md
+
+# ---- Identity ----
+title_id	0400D1D02399A000
+program_id	0400D1D02399A000
+
+# ---- App ----
+name	THE DUSKBLOODS NETWORK TEST VER
+ipa	TheDuskbloodsNetworkTestVer.ipa
+app_category	public.app-category.games
+
+# ---- Versions ----
+build	v0	?	main=14925e87e1acd4d5e9d071afeed230a1	sdk=18265daea2105b31f25346adfbbd09b5
+package	v0
+shader_versions	v0
+
+# ---- Files ----
+# not loaded, main takes nothing from them the host does not supply: subsdk0 (C / libc), subsdk1 (C / libc)
+modules	main sdk
+romfs_marker	movie/s81_00_0000_cut0010_00.bk2
+zip_store	.bk2:.dat:.tpfbdt:.metallib
+
+# ---- Cores ----
+# main.npdm's ThreadInfo allows cores 0-5 (the NPLN threads run on 3-4, mask 0x18). With the Switch's 0-2, gRPC's per-CPU call counters (channelz, sized by the highest core in
+# GetInfo's mask, indexed by GetCurrentProcessorNumber) were written one entry past their end from core 4: the store of the call's start time (main+0x51d808) landed on the next
+# heap object, an NPLN task's allocator pointer, and the task crashed on destruction (main+0x39cf10) after every NPLN request
+core_mask	0x3f
+
+# ---- Shaders ----
+# Compute shaders that pick an image from c2's image table at run time: Ryujinx makes those 32-entry arrays indexed by the handle's texture ID, which the replay fills with
+# the bound image slots while c2 holds slot indices (nvn_refl.m / nvn_mtl.m). Images whose handle comes from memory (the fog volume, GXFogVolume_*) use the image pool instead
+tex_dyn_slots	on
+
+# ---- Depth ----
+# The game sets near = 0 (nvnDeviceSetDepthMode) at boot: the pipeline archive built with the app must be made for it, or none of its pipelines match and the device builds them all
+depth_mode	zero
+
+# ---- Memory ----
+mem_alias	0x118000000
+mem_stack	0x10000000
+# The engine plans its memory from QueryMemoryInfo (main+0x1d7ac40). It takes plan row 4 of its table (main+0x5a63340) when total + virtual address memory usage is 9 GiB or
+# more, else row 3. Row 4 sets the heap to total - used - 120 MB and takes heap - 7,304 MB as the root block its heaps come from: with a pool of 9 GiB exactly that block was 1,728 MB,
+# 20 MB short of the first four heaps (990 + 340 + 279 + 139 MB), and heap G failed (Dantelion2 Panic, CSMemory.cpp 3771). Row 4 is a plan for more memory than a console gives
+# (a larger pool only moved the failure to the next heap); row 3 (root block heap - 5,718 MB) fits. So the pool is just under 9 GiB. The Switch 2's real pool is not measured
+app_pool	0x238000000
+# the NPDM declares 2 MB of system resource
+sys_resource	0x200000
+
+# ---- Shader split ----
+shader_groups	/asset/=asset /sound/=sound /map/=map /menugf/=menugf /chr/=chr /cutscene/=cutscene /parts/=parts /param/=param /script/=script /sfx/=sfx /action/=action /msg/=msg /shader/=shader /event/=event /soundinfo/=soundinfo /other/=otherx /modelinfo/=modelinfo /capture/=capture /movie/=movie /material/=material
+shader_note	THE DUSKBLOODS NETWORK TEST VER shaders
+
+# ---- Heap check on the Mac ----
+# a 9.375 GB heap region (256 MB in front + 4.375 GB alias region + 256 MB stack region): room for the heap the game asks for (8.70 GB with the pool above)
+mem_reserve	0x390000000
+
+
+# address regions: 2026-11-13, no address regions (rewrite 720f0b9c08d0)

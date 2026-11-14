@@ -372,6 +372,13 @@ The guest address space, heaps, pools, virtual address memory and the allocators
 - **Fix:** profile key `mem_map_limit` (`hle_svc.c`): a map past the pool fails with ResultLimitReached, and the used memory `GetInfo` reports counts the mapped pages, as on Horizon (without that, the startup probe itself, sized as total − used, was refused).
 - **Found on:** [Pokémon Legends: Z-A](../../dm/games/0100F43008C44000/README.md) (2.0.2, SDK 19.3.11; one boot). Measured: one refused 4 MB map, the 3.15 GB unmap, the same map again.
 
+### A last-resort cutoff for games without `mem_map_limit`
+
+- **Symptom:** on iOS, a game whose profile leaves `mem_map_limit` off keeps mapping until iOS stops the app for memory, while the SDK still holds freed pages it would give back if a map failed.
+- **Cause:** without `mem_map_limit` the host never refuses `MapPhysicalMemory`, so the SDK's retry after ResultLimitReached (unmap its cached block, map again; see the entry above) never runs. Some games need more mapped than their pool leaves beside the heap, so the pool limit cannot simply be turned on for them.
+- **Fix:** `mem_cutoff_hit` (`hle_svc.c`): for a game without `mem_map_limit`, a map is refused with ResultLimitReached while, on iOS, less than `DM_MEM_ROOM_MIN_MB` (768) is left to the memory limit (`os_proc_available_memory`), or, anywhere, the process holds more than `DM_MEM_CUTOFF_MB` (footprint plus guest-file pages in memory; off by default). The figures are read at most every 200 ms. The first eight refusals are logged as `[RED] [mem] MapPhysicalMemory … refused by the memory cutoff`. `t_svc_memory_unlimited --cutoff-probe` checks a refused map.
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md) on an iPhone, by HookLink, which ships it from 1.8. **Open:** not measured on main; how often the SDK has cached pages to give back at that point is not known.
+
 ### Unmapped guest memory stays resident
 
 - **Symptom:** after a large `UnmapPhysicalMemory` or heap shrink, RAM does not come back. `phys_footprint` may still fall, so it hides this: the `guest` class in `DM_MEMSTAT` shows the real figure.

@@ -351,6 +351,7 @@ $(B)/t_svc_memory_dirty: $(MEM_DEPS) ../../gfx/nvn/nvn_dirty.c ../../gfx/nvn/nvn
 memory: $(B)/t_svc_memory $(B)/t_svc_memory_unlimited $(B)/t_svc_memory_16k
 	$(B)/t_svc_memory
 	$(B)/t_svc_memory_unlimited
+	DM_MEM_CUTOFF_MB=1 $(B)/t_svc_memory_unlimited --cutoff-probe
 	$(B)/t_svc_memory_16k
 memory-tsan: $(B)/t_svc_memory_tsan
 	$(B)/t_svc_memory_tsan

@@ -1,5 +1,6 @@
-# What the repository's tools import beyond the standard library, pinned: the rewriter (capstone, lz4), the shader tools, and the rarer packers (zstandard, zbic, nsz, texture2ddecoder).
+# What the repository's tools import beyond the standard library, pinned: the rewriter (capstone, lz4), the shader tools, and the rarer packers (zstandard, zbic, nsz, texture2ddecoder); backports.zstd for the NSP script before Python 3.14 (built in as compression.zstd from 3.14).
 # One environment serves every game: python3 -m venv <drive with the games>/venv && <that>/bin/pip install -r .github/requirements/tools.txt
+backports.zstd==1.8.0; python_version < "3.14"
 capstone==5.0.9
 fonttools==4.68.0
 lz4==4.4.5

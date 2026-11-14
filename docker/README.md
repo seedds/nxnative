@@ -224,6 +224,16 @@ docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -v "$(pwd):/src" -w /src
   'cmake -S dm/host -B build/win64 -G Ninja -DGAME=010015100B514000 -DCMAKE_TOOLCHAIN_FILE=/src/dm/host/cmake/x86_64-w64-mingw32.cmake && cmake --build build/win64 --target all nxhost-run nxlauncher'
 ```
 
+## The images and the verification on a small disk
+
+[scripts/port_docker.sh](../scripts/port_docker.sh) builds `nxnative-build` and `nxnative-aot` and runs the port's local verification, for a machine whose disk cannot hold both images and their build cache at once. `images [build|aot|all]` builds an image only when it is missing or its Dockerfile changed since the script built it (the image carries the label `org.nxnative.port-docker.dockerfile-sha256`, the Dockerfile's SHA-256, and `org.nxnative.port-docker.built-by`; an image built by hand has neither and is used as it is, `--force` rebuilds it), checks the free space on Docker's data root first (the image's size, about 1.9 GB and 2 GB, plus a 1 GB margin; it stops with exit status 3 and lists what could be removed) and prunes the builder cache after each build. `status` shows which images exist and are current, the free space and what a verification needs. `verify` runs the commands of [The recompiled corpus in the host](#the-recompiled-corpus-in-the-host) and [The launcher](#the-launcher) in sequence, with the build trees on tmpfs: nxaot, the corpus packs and nxaot's CTest in `nxnative-aot`, then the host with `NXAOT_PACKS` and `NXHOST_PROGRAM`, its programs and CTest twice (plain and with `DM_AOT_ARENA_CHECK=1`, `NXAOT` set) in `nxnative-build`; the packs, `nxaot` and each step's log go to a work folder (`--work <dir>`, default `${TMPDIR:-/tmp}/nxnative-port-docker`), and it prints each step's result and CTest's totals and exits with 1 when one failed. `verify --low-disk` holds one image at a time: it removes `nxnative-aot` after its stage when that run built it, then builds `nxnative-build`. The host stage runs the shared-LLVM `nxaot` when `nxnative-build` has `libLLVM.so.18.1` (its `llvm-18`, `lld-18` and `clang-18` depend on `libllvm18`) and builds the static one (`-DNXAOT_LLVM_STATIC=ON`) otherwise. `clean` removes the images the script labelled and its work folder, nothing else.
+
+```sh
+scripts/port_docker.sh status
+scripts/port_docker.sh verify --low-disk
+scripts/port_docker.sh clean
+```
+
 ## Continuous integration
 
 [.github/workflows/chain.yml](../.github/workflows/chain.yml) builds the chain image, the Vulkan translator, checks the lock and runs `test_dmsh_vk.py` and `test_nsp_chain.py` in it, for pull requests and pushes to `main` and `multiplataforma` that change the chain's files; each run's `logs/chain/` is kept as the artifact `logs-chain`.

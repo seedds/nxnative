@@ -16320,7 +16320,7 @@ void mtl_exec(const uint8_t *p) {
 }
 
 // ---------- Present: draw the swapchain texture to the CAMetalLayer; optional screenshot ----------
-static id<MTLRenderPipelineState> g_blit_pso; static MTLPixelFormat g_blit_fmt;
+static id<MTLRenderPipelineState> g_blit_pso, g_easu_pso; static MTLPixelFormat g_blit_fmt;
 static id<MTLSamplerState> g_blit_samp;
 static uint64_t g_present_n;
 uint64_t mtl_present_count(void) { return g_present_n; }   // Actual present count (heat attribution DM_HEAT computes the present frame rate)
@@ -16699,6 +16699,9 @@ static void present_pipeline(MTLPixelFormat format) {
         pd.colorAttachments[0].pixelFormat = format;
         g_blit_pso = [g_dev newRenderPipelineStateWithDescriptor:pd error:&e];
         if (!g_blit_pso) MDIE("present pipeline failed %s", e.localizedDescription.UTF8String);
+        pd.fragmentFunction = [lib newFunctionWithName:@"easu"];
+        g_easu_pso = [g_dev newRenderPipelineStateWithDescriptor:pd error:&e];
+        if (!g_easu_pso) MLOG("[RED] present FSR 1 pipeline failed (%s); DM_PRESENT_UPSCALE=fsr scales bilinearly", e.localizedDescription.UTF8String);
         g_blit_fmt = format;
         MTLSamplerDescriptor *sd = [MTLSamplerDescriptor new]; sd.minFilter = sd.magFilter = MTLSamplerMinMagFilterLinear; sd.supportArgumentBuffers = YES;
         g_blit_samp = [g_dev newSamplerStateWithDescriptor:sd];
@@ -16792,13 +16795,15 @@ static int present_encode(id<MTLCommandBuffer> cb, id<MTLTexture> src, id<MTLTex
 typedef struct { id<MTL4FXSpatialScaler> sc; id<MTLTexture> in, out; uint64_t made_at, in_place_n, direct_n; int made; NSUInteger refused[6]; } fx_state;
 static fx_state g_fx_present;   // only the present thread encodes or replaces the scaler
 static id<MTL4Compiler> g_fx_comp;
-static int g_fx_mode = -1;   // 1 = metalfx, 0 = off
+static int g_fx_mode = -1;   // 1 = metalfx, 2 = fsr, 0 = off
 static int fx_mode(void) {
     if (g_fx_mode >= 0) return g_fx_mode;
     const char *e = getenv("DM_PRESENT_UPSCALE"); int v = 0;
     if (e && (!strcmp(e, "metalfx") || !strcmp(e, "1"))) v = 1;
+    else if (e && !strcmp(e, "fsr")) v = 2;
     else if (e && (!strcmp(e, "off") || !strcmp(e, "0"))) v = 0;
-    else if (e && *e) MLOG("[RED] DM_PRESENT_UPSCALE=%s: metalfx or off; keeping %s", e, v ? "metalfx" : "off");
+    else if (e && *e) MLOG("[RED] DM_PRESENT_UPSCALE=%s: metalfx, fsr or off; keeping %s", e, v ? "metalfx" : "off");
+    if (v == 2) { MLOG("present upscaling (DM_PRESENT_UPSCALE): fsr, FSR 1's edge adaptive upsampling in the present pass where the picture is shown larger than the game renders it"); return g_fx_mode = v; }
     if (v && !(g_q4 && [MTLFXSpatialScalerDescriptor supportsMetal4FX:g_dev])) { MLOG("present upscaling: this GPU has no Metal 4 MetalFX spatial scaler; the present scales bilinearly"); v = 0; }
     MLOG("present upscaling (DM_PRESENT_UPSCALE): %s", v ? "metalfx, MetalFX's spatial scaler where the picture is shown larger than the game renders it" : "off, bilinear");
     return g_fx_mode = v;
@@ -17081,10 +17086,11 @@ static int present_encode_m4(id<MTL4CommandBuffer> cb, id<MTLTexture> src, id<MT
     uv[4] = (cx + 0.5f) / tw; uv[5] = (cy + 0.5f) / th; uv[6] = (cx + cw - 0.5f) / tw; uv[7] = (cy + ch - 0.5f) / th;
     if (flipped) { uv[1] += uv[3]; uv[3] = -uv[3]; }   // lower-left origin: the window image is stored bottom-up
     [g_present_args setAddress:uvb.gpuAddress atIndex:0];
-    [en setViewport:vp]; [en setRenderPipelineState:g_blit_pso];
+    int easu = !up && fx && g_easu_pso && fx_mode() == 2 && fx_wanted(vp, cw, ch);   // FSR 1 upscales in this pass (DM_PRESENT_UPSCALE=fsr)
+    [en setViewport:vp]; [en setRenderPipelineState:easu ? g_easu_pso : g_blit_pso];
     [en drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
     m4_end(en);
-    return up ? PRESENT_METALFX : PRESENT_STANDARD;
+    return up || easu ? PRESENT_METALFX : PRESENT_STANDARD;
 }
 // The present's picture drawn into an offscreen texture (out: private, render target) the way present_now draws it into the drawable, MetalFX included, on the Metal 4 queue;
 // returns whether it was submitted. Completion reports the encoding kind, or PRESENT_FAILED on a GPU error. Resources remain resident and retained until GPU completion.
@@ -17124,7 +17130,7 @@ static void present_gpu_note(double s, int fx) {
     v[fx][n[fx]++] = s * 1e3;
     if (n[fx] < 600) return;
     double *a = v[fx]; for (int i = 1; i < 600; i++) { double x = a[i]; int j = i - 1; while (j >= 0 && a[j] > x) { a[j + 1] = a[j]; j--; } a[j + 1] = x; }
-    MLOG("present command buffer GPU time over 600 presents %s: p50 %.3f ms, p95 %.3f ms, max %.3f ms", fx ? "through MetalFX" : "through the bilinear pass", a[299], a[569], a[599]);
+    MLOG("present command buffer GPU time over 600 presents %s: p50 %.3f ms, p95 %.3f ms, max %.3f ms", fx ? (fx_mode() == 2 ? "through FSR 1" : "through MetalFX") : "through the bilinear pass", a[299], a[569], a[599]);
     n[fx] = 0;
 }
 static double g_link_it_tin;   // Enqueue time of the frame the display-link callback is presenting (read and written only on the display-link thread)

@@ -123,7 +123,7 @@ Controls, saves and settings: [Playing](docs/playing.md).
 
 ## Discussions
 
-[Discussions](https://github.com/seedds/nxnative/discussions); is for questions about nxnative, reports about how a game runs on your Mac or iPhone, and ideas.
+Use [Discussions](https://github.com/seedds/nxnative/discussions) for questions about nxnative, reports about how a game runs on your Mac or iPhone, and ideas.
 [Issues](https://github.com/seedds/nxnative/issues) is for bug reports, with the exception of Ocarina of Time, its performance (frame rate, resolution, which Macs hold 60 fps) is followed in [Ocarina of Time: state on main](https://github.com/seedds/nxnative/discussions/1789).
 
 ## For developers

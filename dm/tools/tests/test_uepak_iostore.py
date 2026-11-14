@@ -302,8 +302,16 @@ class IoStore(unittest.TestCase):
         self.assertFalse(uepak.inline_shaders(pak))   # one without export bundles
 
     def test_a_pak_with_an_archive_or_only_configs_is_not_inline(self):
-        self.assertFalse(uepak.inline_shaders(self.inline_pak(('Engine/GlobalShaderCache-X.bin', 'ShaderArchive-Global-X.ushaderbytecode'))))
-        self.assertFalse(uepak.inline_shaders(self.inline_pak(('Engine/Config/a.ini',))))
+        self.assertIs(uepak.inline_shaders(self.inline_pak(('Engine/GlobalShaderCache-X.bin', 'ShaderArchive-Global-X.ushaderbytecode'))), False)
+        self.assertIsNone(uepak.inline_shaders(self.inline_pak(('Engine/Config/a.ini',))))   # no shaders of either kind
+
+    def test_a_pak_of_audio_and_fonts_holds_no_shaders(self):
+        """Persona 3 Reload's pakchunk1, 2 and 4: taken as paks with shader code archives, the NSP script's decode step found none in them and stopped"""
+        container(self.romfs, 'Game.utoc', [(chunk_id(1, uepak.IO_EXPORT_BUNDLE_427), b'b')], version=3)
+        inline = self.inline_pak(); pak11(self.romfs / 'Audio.pak', ['Sound/a.awb', 'Movie/b.usm', 'Font/c.ufont'])
+        self.assertIsNone(uepak.inline_shaders(str(self.romfs / 'Audio.pak')))
+        self.assertEqual(uepak.unreal_paks(str(self.romfs), inline=False), [])
+        self.assertEqual(uepak.unreal_paks(str(self.romfs), inline=True), [inline])
 
     KEY = bytes(range(40, 72))
 

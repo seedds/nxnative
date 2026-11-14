@@ -1761,8 +1761,10 @@ def decode_ue_shaders(repo, dirs, pkg_ver, patched, work, env, logs, g):
         except ValueError as e: raise BuildError(str(e)) from e   # a damaged pak, archive or main (uepak's errors name it)
         finally:
             if dec: dec.close()
-        if not listing: raise BuildError(f'the RomFS has Unreal paks, but none under {rfs.source(d)} holds a shader code archive: where the shaders are has to be found first')
-        say(f'{v}: ' + '; '.join(f'{x["name"]} {x["shaders"]:,} shaders' + (f' ({x["compression"]})' if x.get('compression') else '') for x in listing)
+        if not listing and not uepak.unreal_paks(str(rfs.source(d)), inline=True, mains=[str(d / 'ExeFS/main')]):
+            raise BuildError(f'the RomFS has Unreal paks, but none under {rfs.source(d)} holds a shader code archive: where the shaders are has to be found first')
+        if not listing: say(f'{v}: no pak holds a shader code archive: the shaders are inline in the cooked packages, which the shader split reads (Persona 3 Reload)')
+        else: say(f'{v}: ' + '; '.join(f'{x["name"]} {x["shaders"]:,} shaders' + (f' ({x["compression"]})' if x.get('compression') else '') for x in listing)
             + (f'; decoding {n:,} with the game\'s Oodle in the Mac host' if n else ''))
         if n:   # Oodle-compressed shaders (Octopath Traveler 0); LZ4 ones (Unreal Engine 4.26 and later by default) are decoded by uepak.py already
             if not host:

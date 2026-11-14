@@ -541,7 +541,8 @@ def inline_shaders(path, key=None):
     (inline_in_containers; Mario & Luigi: Brothership and Yoshi and the Mysterious Book: the same setting with IoStore on). FINAL FANTASY RESONANCE's pak names the global shader cache too, but its
     shaders are in its container's shader libraries (neither counts). An encrypted index is read with key, main's (Keys; Octopath Traveler 0's holds the archives, DRAGON BALL Sparking! ZERO's
     pakchunk0-Switch.pak the global shader cache, its cooked packages in the encrypted containers beside it); without a key it counts as one with archives, as before keys were tried here.
-    None: the pak names no file, so it holds neither (the empty pakchunk1-17-Switch.pak beside Sparking! ZERO's containers, mount point "/")"""
+    None: the pak names no file, so it holds neither (the empty pakchunk1-17-Switch.pak beside Sparking! ZERO's containers, mount point "/"), or names no shader code archive, cooked
+    package or global shader cache (Persona 3 Reload's pakchunk1, 2 and 4: audio and fonts)"""
     with open(path, 'rb') as f:
         enc, ioff, isz, _, ver = footer(f)
         if ver in LEGACY: return True
@@ -554,6 +555,7 @@ def inline_shaders(path, key=None):
         if r.take('<i'): r.take('<QQ'); r.raw(20)
         if not r.take('<i'): return False
         doff, dsz = r.take('<QQ'); d = at(doff, dsz)
+    if b'.ushaderbytecode\0' not in d and b'.uexp\0' not in d and b'GlobalShaderCache-' not in d: return None   # audio and fonts only (Persona 3 Reload's pakchunk1, 2 and 4)
     return b'.ushaderbytecode\0' not in d and (b'.uexp\0' in d or (b'GlobalShaderCache-' in d and inline_in_containers(path)))
 
 def unreal_paks(romfs, inline=None, mains=()):

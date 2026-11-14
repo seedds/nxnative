@@ -551,6 +551,8 @@ Limits: the replay matches the recording read for read only while the game's rea
 
 ### GPU measurement
 
+Frame totals and spans omit completion feedback with missing, non-finite, reversed or future timestamps; those completions still retire normally. A frame can therefore have a partial total when some feedback is invalid. This avoids [corrupt GPU timings](reference/frame-rate.md#invalid-gpu-completion-times-inflate-frame-diagnostics) and does not resolve the GPU fault that produced them.
+
 The benchmark gives each frame's GPU time; these switches split it by pass, on the Mac or on an iPhone (`Documents/env.txt`), and are off by default: `DM_NVN_GPUPROF=every:<n>` (each encoder's GPU time and attachment traffic in one frame of every n), `DM_NVN_PASSDUMP=every:<n>`, `DM_AB=<frames>` (switches set to `ab` alternate in phases of one run) and `DM_GPU_CAPTURE` (Metal GPU traces for Xcode, written to `DM_GPU_CAPTURE_DIR`, by default `gpu_captures/` in the working directory, which keeps the newest `DM_GPU_CAPTURE_KEEP`; an IPA built with `DM_METAL_CAPTURE=1`, or `MTL_CAPTURE_ENABLED=1` on the Mac). `dm/tools/gpuprof.py` reads their log lines. How to use them: [05, GPU time on the device](agents/05-debugging.md#gpu-time-on-the-device).
 
 ### Frame capture and replay

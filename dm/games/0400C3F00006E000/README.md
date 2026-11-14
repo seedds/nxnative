@@ -85,6 +85,20 @@ Whole groups of trees and bushes vanished or appeared in one frame while the cam
 
 Resolved on the base game, on chain `d5fe9ae8bfba` (M6, 16 GB, another session's game running at the same time): at Crown City the array's `y` stays at or below 0.9 and the sky shots show no panels, and desert scenes checked with an earlier host that remapped the slots show none either. The first race, on the route of `measure.sh`, keeps a frame median of 16.6 to 16.7 ms and a 95th percentile of 17 to 18 ms, with GPU time 7.2 to 7.7 ms and resident memory 11.4 GB. That matches runs from before the fix, so reading real data costs nothing measurable there. One run reached 14 to 15 ms of GPU time and did not repeat. 1.8.0 has not been run here.
 
+## HDR output
+
+With the HDR setting (`DM_HDR=1`), on the base game, to the title and in races:
+
+- Like [Donkey Kong Bananza](../040074A01BF12000/README.md#hdr-output), the game boots an RGBA8 window (format 0x25), queries `vi::QueryDisplayHdrStatus`, then makes an RGB10A2 window (0x3d). Told the paper white 203 and the peak 1000, it declares SDR 0 to 203 nits and extended 0 to 1000 while it makes the HDR window, then 0 to 1801 at the title, and sets no content gamut before the title. No new `[RED]` line with HDR on.
+- It asks for the HDR status every frame (over 1,000 queries in 80 s) and queries the paper white. Moved to an SDR monitor, its window is answered SDR at the next query and the game makes its SDR window (0x25) again; moved back, its HDR window. Each move between the screens drops 6 to 82 frames of 300 around it, and as many (7 to 81) when it is answered HDR on both screens and never rebuilds its window: the drops come from the move, not the rebuild.
+- On an SDR monitor, its own SDR picture looks less saturated than its HDR picture mapped down by Core Animation, by eye side by side; the host shows its own SDR picture there, as a Switch 2 does.
+- It declares more than it draws (off-screen, the window read back every 120 presents): told 400, 1000 or 4000 it declares 628, 1801 or 7206, about 1.6 to 1.8 times the peak, while the brightest pixel at its title stays at about 280, 357 and 357 nits. So HDR10 metadata of its range makes Core Animation compress the whole picture at any brightness, and a roll-off keyed on the declared range alone would compress highlights it never draws ([PQ on macOS is relative to the screen's white](../../../docs/reference/rendering.md#pq-on-macos-is-relative-to-the-screens-white-and-metadata-above-the-headroom-compresses-everything)).
+- Brighter than SDR by the game's own grade (the paper white 203): its title logo, the same image in both modes, is about 1.8 times brighter in linear light and more saturated in the decoded screenshot, which fits its SDR colours taken as Display P3 and drawn near 360 nits.
+- By eye in a race on a built-in XDR screen and on an external HDR TV in macOS HDR mode, switched while the game ran: at the paper white 100 it has SDR's base brightness with brighter highlights and richer colour; at 203 the whole picture is brighter.
+- Core Animation's mapping by HDR10 metadata and the present's roll-off look alike side by side, and reach the screen in the same time in a window (`DM_PRESENT_SHOWN=1`, from the present call to on screen, p50 per 300 frames: SDR 49.58 to 49.68 ms, the roll-off 49.53 to 49.61, Core Animation 49.52 to 49.59; each run dropped 0 to 3 of 300).
+- An RGBA16Float extended-range layer showed black blocks with coloured squares in them over the course map's water, now and then and after ⌘-Tab back to the game, while the game's frames were clean; the RGB10A2 PQ layer shows none, with the same colours by eye ([the reference entry](../../../docs/reference/rendering.md#the-status-query-and-the-present-for-an-hdr-window)).
+- On iOS, with the defaults, the title and races look right by eye, the automatic peak follows the screen's headroom, and no frame jumps back ([A fullscreen HDR layer shows rectangles of older frames](../../../docs/reference/rendering.md#a-fullscreen-hdr-layer-shows-rectangles-of-older-frames)).
+
 ## Driving it on the Mac
 
 The work folder `0400C3F00006E000-work` beside the dump has `rewrite.sh`, `rebuild.sh` (host copy `build/mkwhost`), `split.sh`, `shaders.sh`, `play.sh` (boots headless with `DM_CTL=run/ctl.txt`), `ctl.sh` (control lines; `wait S`, `snap NAME`), `to_race.sh` and `measure.sh <log>`. From a boot at the title (about 80 s): `to_race.sh` presses L+R, then A nine times with waits (Single Player, Grand Prix, Mario, the kart, the Mushroom Cup, 50cc, "Start Grand Prix?"). The opening and the race's start then take about a minute; `A~40` drives. `measure.sh` does all of this, waits for the race (over 1,500 draws a frame, no movie thread), and writes the timing and the `restop` residency lines to `run/<log>.res`. Control presses run in order, so `A~40` holds up later lines.
@@ -102,6 +116,7 @@ Frame step (current): the framework's interval function is `main+0x69cbb0` on 1.
 - **Mesh draws:** `DrawMeshTasks3D` and the indirect forms are not implemented; no run reached them.
 - `649e36162cad9e79`, a foliage shader with an 8x8 local size, keeps a first-invocation race: its setup loops over a uniform's count, so [the host cannot make it as stores](../../../docs/reference/shaders.md#a-store-only-a-dispatchs-first-invocation-makes). Its list's count read 0 in every one of 7,350 traced title frames, so the race had nothing to act on there; whether that list should be empty is not known.
 - The engine class screen offers 50, 100 and 150cc in this build.
+- **HDR:** the window's primaries are taken to be BT.2020, as on Donkey Kong Bananza, but are not measured here. Fullscreen is not timed.
 
 ## Found on this game
 
@@ -125,6 +140,7 @@ Frame step (current): the framework's interval function is `main+0x69cbb0` on 1.
 - [Variable rate shading ignored](../../../docs/reference/rendering.md#variable-rate-shading-ignored)
 - [Image views of the type a shader declares](../../../docs/reference/rendering.md#image-views-of-the-type-a-shader-declares) (the dark box around each kart's shadow, issue #1648)
 - [A haptic engine that stops under a call raises, and ended the app](../../../docs/reference/services.md#a-haptic-engine-that-stops-under-a-call-raises-and-ended-the-app) (the iPhone crash after about 85 s of a race)
+- [The status query and the present for an HDR window](../../../docs/reference/rendering.md#the-status-query-and-the-present-for-an-hdr-window): the same HDR window as Donkey Kong Bananza's
 - [A DualShock 4 that connects after the first stays on Core Haptics](../../../docs/reference/services.md#a-dualshock-4-that-connects-after-the-first-stays-on-core-haptics)
 - [Identical controllers that GameController lists as one](../../../docs/reference/services.md#identical-controllers-that-gamecontroller-lists-as-one) (two Pro Controllers over USB, split-screen races)
 - [Scaled shared memory addresses](../../../docs/reference/shaders.md#scaled-shared-memory-addresses)

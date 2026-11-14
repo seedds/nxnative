@@ -90,6 +90,17 @@ Run headless, `DM_CTL` at a control file. The work folder has `boot.sh <secs> <l
 
 From an empty save: at about 45 s `A` (title), `A` (New Game), then the movie. From `save_ref`: at about 58 s `A~0.2`, 5 s later `A~0.2` (Load), 30 s later three `A~0.1` 3 s apart, then 12 s to the bridge outside Link's house. There `LUp~3.5`, `A~0.2` (Climb Down) and `LDown~4` three or four times reach the village floor.
 
+## HDR output
+
+With the HDR setting, on the Mac:
+
+- Like [Donkey Kong Bananza](../040074A01BF12000/README.md#hdr-output), the game boots an RGBA8 window (format 0x25, 2560x1440), queries `vi::QueryDisplayHdrStatus`, then makes an RGB10A2 window (0x3d). It asks every frame (1,000 queries in 38 s) and queries the paper white.
+- It declares its standard range 0 to the paper white and its extended range min(peak, 3.5 × paper white), gamut 0 and tone mapping 0: with the paper white 203, told the peak 400 it declares 0..400 and told 1000 or 1600 0..710; with the paper white 300 and the peak 1000, 0..1000; with the paper white 100, at most 0..350. So the paper white also raises its highlights, and the peak counts only below 3.5 times it: with [HDR peak](../../../docs/settings.md#hdr-peak) Automatic its range changes only while the screen's headroom is under 3.5 (at the default paper white 100). No new `[RED]` line with HDR on.
+- Its pixels stay within that range: the brightest about 330 nits on its title, its white or less through the opening and its movie (the paper white 203, the window read back off-screen; [PQ on macOS is relative to the screen's white](../../../docs/reference/rendering.md#pq-on-macos-is-relative-to-the-screens-white-and-metadata-above-the-headroom-compresses-everything)).
+- On a screen without EDR (potential headroom 1.0) the status answers SDR and the game keeps its RGBA8 window.
+- By eye on built-in XDR screens: in Link's house the paper white 100 looks as SDR does, as the game draws little above its white there, and 203 brightens the whole picture.
+- In fullscreen with HDR10 metadata on the layer (`DM_HDR_META=1`), rectangles of older frames flicker over play and the opening movie looks like its frames are out of order; without metadata, the default, there are none ([A fullscreen HDR layer shows rectangles of older frames](../../../docs/reference/rendering.md#a-fullscreen-hdr-layer-shows-rectangles-of-older-frames)).
+
 ## Open
 
 - Root cause confirmed on M4 Pro (2026-11-08): [ignored event waits](../../../docs/reference/nvn-objects.md#gpu-event-waits-order-work-across-queues) let lighting consumers run before their producers. The game issues about 25 waits and 19 signals per frame. All 297 complete traced frames submit queue 5's ambient-cache consumer `9e6b00b050e30801` before queue 1's SH producer `21d9f83e6027c565`, despite the explicit dependency. Queue 1 also waits for the CPU frame-ready event after the CPU clears the lighting buffer. At frame 3872 the consumer ran at 0.686 ms, the clear at 0.966–0.968 ms, and the producer at 1.282 ms; its release followed at 4.467 ms. Exposure writer `1bba09ec4bc8ff67` has another event dependency. The native SDK's flush/invalidate functions are no-ops for these coherent pools.
@@ -201,6 +212,8 @@ Its 37 kernels that correct samples, NDSR's network among them, gave about 0.25 
 - [A pipeline archive on an external drive is read into memory](../../../docs/reference/memory.md#a-pipeline-archive-on-an-external-drive-is-read-into-memory): 3.5 GB of swapped memory, now mapped.
 - [A texture in a sparse pool came out CPU-written at its first use](../../../docs/reference/memory.md#a-texture-in-a-sparse-pool-came-out-cpu-written-at-its-first-use): found by the unit test, on this profile's `tex_dirty_upload`.
 - [Textures made for GPU use kept from their CPU rewrites](../../../docs/reference/nvn-objects.md#textures-made-for-gpu-use-kept-from-their-cpu-rewrites): the terrain tiles' height, blend and hole maps rewritten as tile slots are reused; flat blue holes in the ground after an hour of play.
+- [The status query and the present for an HDR window](../../../docs/reference/rendering.md#the-status-query-and-the-present-for-an-hdr-window): the same HDR window as Donkey Kong Bananza.
+- [A fullscreen HDR layer shows rectangles of older frames](../../../docs/reference/rendering.md#a-fullscreen-hdr-layer-shows-rectangles-of-older-frames): in fullscreen with the menu bar hidden.
 - [`EventFd` needs no network](../../../docs/reference/services.md#eventfd-needs-no-network)
 - [No virtual audio input devices (SDK 22)](../../../docs/reference/audio.md#no-virtual-audio-input-devices-sdk-22)
 - [`nn::ndve`'s movie enhancement file](../../../docs/reference/shaders.md#nnndves-movie-enhancement-file)

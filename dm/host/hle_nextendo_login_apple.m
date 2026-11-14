@@ -20,6 +20,7 @@
 void dm_guest_host_wait_begin(void);
 void dm_guest_host_wait_end(void);
 void dm_nextendo_login_online_check(const char *when);
+void dm_nextendo_session_start(void);   // hle_nextendo_social_apple.m (loader.c has a weak empty default)
 
 enum { ACCESS_LIFE = 50 * 60 };   // Nextendo's access tokens live an hour; one older than this is renewed first
 
@@ -56,9 +57,14 @@ static bool provide_credential(uint8_t *buffer, size_t capacity, size_t *size) {
     if (usable) { memcpy(buffer, g_cache.json.bytes, g_cache.json.length); *size = g_cache.json.length; }
     pthread_mutex_unlock(&g_cache.lock);
     dm_guest_host_wait_end();
-    static atomic_bool asked;   // the first game credential also asks once whether Nextendo will let this account play (on a queue: the game does not wait)
-    if (usable && !atomic_exchange(&asked, true))
+    // The first game credential also asks once whether Nextendo will let this account play (on a queue: the game does not wait), and starts the
+    // Nextendo session (the account's Mii and play time) if the module load did not: on the iPhone the modules can load before the launcher has set
+    // DM_NETWORK, and then loader.c's nextendo_main saw no Nextendo (Mario Kart 8 Deluxe, 2026-11-14). It starts once either way
+    static atomic_bool asked;
+    if (usable && !atomic_exchange(&asked, true)) {
+        dm_nextendo_session_start();
         dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{ dm_nextendo_login_online_check("at the game's first sign-in"); });
+    }
     return usable;
 } }
 

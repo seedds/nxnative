@@ -209,7 +209,7 @@ int dm_nextendo_account_mii(uint8_t store[MII_STORE_SIZE]) {
 // Play time: Nextendo keeps each game's total seconds per account and keeps the larger of what it has and what it is sent (/api/history), so
 // the host reads the account's total for this game once and then sends it plus this run's time every minute. A minute counts only while the timer
 // runs: a gap longer than that (the app suspended) counts as one period at most
-static struct { bool known; int told; int64_t base; double played, last; } g_history;   // told: 1 the read failure was logged, 2 the first total sent
+static struct { bool known; int told; int64_t base; double played, last; } g_history;   // told: 1 the read failure was logged, 2 the last total sent, 3 its send failed (logged)
 static bool history_base(void) {   // the account's seconds for this game so far; false while they cannot be read
     size_t capacity=8*1024*1024,size=0; uint8_t *buffer=malloc(capacity); if(!buffer)return false;
     uint32_t result=dm_nextendo_api_request("history",NULL,0,buffer,capacity,&size);
@@ -236,8 +236,12 @@ static bool history_tick(void) { @autoreleasepool {   // false stops the timer
     NSISO8601DateFormatter *format=[NSISO8601DateFormatter new]; format.timeZone=[NSTimeZone timeZoneWithAbbreviation:@"UTC"];
     NSDictionary *object=@{@"history":@[@{@"title_id":game_title(),@"name":game_name(),@"seconds":@(seconds),@"last_played":[format stringFromDate:NSDate.date]}]};
     NSData *body=[NSJSONSerialization dataWithJSONObject:object options:0 error:nil]; size_t size=0;
-    if(body.length&&!dm_nextendo_api_request("history",body.bytes,body.length,NULL,0,&size)&&g_history.told!=2){
-        fprintf(stderr,"[dm] nextendo: play time on Nextendo: %lld min of this game in all\n",(long long)(seconds/60)); g_history.told=2;
+    // Each total sent is logged (one line a minute), so a log shows the total climbing, or where it stopped. A failed send is logged once until one
+    // succeeds again; Nextendo keeps the larger total, so the next tick's carries the minutes this one did not
+    if(body.length&&!dm_nextendo_api_request("history",body.bytes,body.length,NULL,0,&size)){
+        fprintf(stderr,"[dm] nextendo: play time sent: %lld min of this game in all\n",(long long)(seconds/60)); g_history.told=2;
+    }else if(g_history.told!=3){
+        fprintf(stderr,"[dm] [RED] nextendo: play time not sent (%lld min of this game in all); the next minute tries again\n",(long long)(seconds/60)); g_history.told=3;
     }
     return true;
 } }

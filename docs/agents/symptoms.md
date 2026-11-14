@@ -1020,6 +1020,9 @@ One line per symptom in the [subsystem references](../reference/): what you see 
 
 ## Rendering
 
+- VR-only diagonal breaks and sideways steps across walls, roofs and windows; the ordinary Mac picture is intact. → [Scene depth inverted by the final composite](../reference/rendering.md#scene-depth-inverted-by-the-final-composite)
+- VR-only horizontal bands, with some diagonal tears, across the whole picture; or the scene's geometry warped by depth that does not belong to it. The ordinary Mac picture is intact. → [VR depth from a pass that is not the visible scene](../reference/rendering.md#vr-depth-from-a-pass-that-is-not-the-visible-scene)
+- in the VR picture the HUD (a clock, a map, a dialogue box) bends with the scene behind it, taking its depth; the ordinary Mac picture is intact. A capture has no base (`f.base` NULL, overlay share 0). → [HUD drawn into the scene's texture before the window composite](../reference/rendering.md#hud-drawn-into-the-scenes-texture-before-the-window-composite)
 - a direct zero-sized grid changes replay state or reaches Metal's invalid empty-grid dispatch API. → [Direct compute dispatches with an empty grid](../reference/rendering.md#direct-compute-dispatches-with-an-empty-grid)
 - Shader Validation aborts with `Texture is not resident` in a fragment sampling copy even though the texture's heap is resident. → [Views of placed textures need their parent resident](../reference/rendering.md#views-of-placed-textures-need-their-parent-resident)
 - a compressed texture's Metal copy and guest storage disagree after a GPU copy. FIFA 23 shows a corrupt checkerboard in place of the controller-button glyph before Select. → [GPU copies into compressed IMAGE textures](../reference/rendering.md#gpu-copies-into-compressed-image-textures)

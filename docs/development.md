@@ -635,6 +635,16 @@ Why the host is a child process: macOS privacy checks (TCC) cover files on remov
 
 Signing: `pack_app.py` signs the inner host first, then the bundle (`codesign --force --sign <identity>`). It signs ad-hoc by default; `--mac-sign "<identity>"` (`MAC_SIGN` in Spyder) names a Developer ID or another identity. It never uses the hardened runtime: `--options runtime` refuses the executable memory the host maps for the game's code. Notarization needs the hardened runtime, so the app is not notarized. Gatekeeper blocks it on a Mac it was downloaded to until it is allowed in System Settings › Privacy & Security. The first launch of a large app can take minutes, and later launches start at once: Persona 5 Royal's 34 GB app on an external volume sat about four minutes in `_dyld_start`, at tens of KB of memory, before the game started (macOS presumably checking the new bundle; not traced further). `dm/tools/tests/test_nsp_mac_app.py` tests the packer and the launcher with a stand-in host, without game files.
 
+## The game on a Vision Pro
+
+Window › Show on Apple Vision Pro (`DM_IMMERSIVE=1`: at launch) also shows the game on a screen in a Vision Pro, drawn by the Mac:
+
+- **The scene** (`dm/host/immersive_mac.swift`): a SwiftUI `RemoteImmersiveSpace` added to the AppKit app, the host's one Swift source (compiled to `gen/swift/immersive_mac.o`).
+- **The stereo tap** (`dm/gfx/nvn/nvn_mtl.m`, `mtl_stereo.h`): each present's picture and the depth of [the visible scene](reference/rendering.md#vr-depth-from-a-pass-that-is-not-the-visible-scene), [in the picture's row order](reference/rendering.md#scene-depth-inverted-by-the-final-composite), with the picture before its HUD ([the base](reference/rendering.md#hud-drawn-into-the-scenes-texture-before-the-window-composite)).
+- **The pass** (`dm/host/immersive_mac.m`, `dm/gfx/msl/stereo.metal`): each eye's picture at the headset's rate, from depth alone (no constant of the game); the HUD stands in front of the scene.
+
+`dm/gfx/tests/t_stereo.m` checks the tap and the pass on synthetic frames. Tested on a Mac and a physical Apple Vision Pro. **Open:** Vulkan and GL games stay flat (no depth); the Mac's display link still paces the game, so its window must stay visible; whether an ad-hoc signed app needs more in its `Info.plist` to open the space is not known.
+
 ## Build and run on a device with Xcode
 
 With an Apple developer account, Xcode can sign and install the app itself:

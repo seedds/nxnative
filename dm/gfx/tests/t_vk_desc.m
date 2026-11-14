@@ -166,8 +166,9 @@ int main(void) {
         CHECK(L3->refs == 2, "destroying the layouts drops only the handle's hold");
         CHECK(p->pc_size == 96 && p->nset == 1 && p->set[0] == L3, "the pipeline keeps its push-constant size and set layout");
         CHECK(s3->L == L3 && L3->idx[3] >= 0 && L3->total == 1, "the set still reads its layout");
-        MTLDepthStencilDescriptor *dd = [MTLDepthStencilDescriptor new]; dd.depthCompareFunction = MTLCompareFunctionLess;
-        p->dss_dyn = [g_dev newDepthStencilStateWithDescriptor:dd]; wdss = p->dss_dyn;
+        // A unique object tests ARC ownership; Metal caches depth-stencil states past their caller.
+        p->dss_dyn = (id<MTLDepthStencilState>)[NSObject new]; wdss = p->dss_dyn;
+        CHECK(wdss != nil, "the pipeline retains its dynamic depth-stencil state");
         h_vkFreeDescriptorSets(dev, lp, 1, &s3);
         CHECK(L3->refs == 1, "freeing the set drops its hold");
         h_vkDestroyPipeline(dev, p, NULL);   // the last hold: the set layout is freed

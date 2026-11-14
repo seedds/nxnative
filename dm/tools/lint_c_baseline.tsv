@@ -19,12 +19,11 @@ dm/gfx/nvn/nvn_capture.inc	bugprone-command-processor	1
 dm/gfx/nvn/nvn_capture.inc	bugprone-suspicious-memory-comparison	2
 dm/gfx/nvn/nvn_capture.inc	bugprone-suspicious-realloc-usage	7
 dm/gfx/nvn/nvn_geometry.inc	clang-analyzer-unix.Malloc	1
-dm/gfx/nvn/nvn_hmap.h	clang-analyzer-core.NullPointerArithm	1
 dm/gfx/nvn/nvn_hmap.h	clang-analyzer-unix.cstring.UninitializedRead	2
 dm/gfx/nvn/nvn_mtl.m	bugprone-misplaced-widening-cast	1
 dm/gfx/nvn/nvn_mtl.m	bugprone-signed-char-misuse	1
 dm/gfx/nvn/nvn_mtl.m	bugprone-suspicious-memory-comparison	8
-dm/gfx/nvn/nvn_mtl.m	clang-analyzer-core.NullDereference	9
+dm/gfx/nvn/nvn_mtl.m	clang-analyzer-core.NullDereference	6
 dm/gfx/nvn/nvn_mtl.m	clang-analyzer-core.uninitialized.Assign	2
 dm/gfx/nvn/nvn_mtl.m	clang-analyzer-nullability.NullableDereferenced	5
 dm/gfx/nvn/nvn_mtl.m	clang-analyzer-nullability.NullablePassedToNonnull	15
@@ -48,7 +47,6 @@ dm/gfx/tests/t_initial_uncached.m	clang-analyzer-nullability.NullablePassedToNon
 dm/gfx/tests/t_logic.m	clang-analyzer-nullability.NullablePassedToNonnull	1
 dm/gfx/tests/t_missing_src1.m	bugprone-suspicious-memory-comparison	2
 dm/gfx/tests/t_perf_order.m	bugprone-unsafe-functions	2
-dm/gfx/tests/t_pfv.m	clang-analyzer-nullability.NullablePassedToNonnull	1
 dm/gfx/tests/t_present_alloc.m	bugprone-unsafe-functions	1
 dm/gfx/tests/t_present_alloc.m	clang-analyzer-nullability.NullablePassedToNonnull	1
 dm/gfx/tests/t_present_crop.m	clang-analyzer-nullability.NullablePassedToNonnull	1
@@ -83,7 +81,7 @@ dm/gfx/vk/hle_vk.m	bugprone-suspicious-realloc-usage	2
 dm/gfx/vk/hle_vk.m	clang-analyzer-core.uninitialized.Assign	1
 dm/gfx/vk/hle_vk.m	clang-analyzer-security.ArrayBound	1
 dm/gfx/vk/hle_vk.m	clang-analyzer-unix.Malloc	1
-dm/gfx/vk/hle_vk.m	misc-misplaced-const	5
+dm/gfx/vk/hle_vk.m	misc-misplaced-const	3
 dm/host/haptics_apple.m	clang-analyzer-nullability.NullablePassedToNonnull	1
 dm/host/hle_fs.c	bugprone-suspicious-realloc-usage	4
 dm/host/hle_fs.c	clang-analyzer-unix.Errno	2

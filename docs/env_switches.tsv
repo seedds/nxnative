@@ -373,6 +373,7 @@ DM_SCREEN_FOV	diagnostic	`off` with DM_SCREEN_ASPECT: the scene keeps the game's
 DM_SCREEN_HUD	diagnostic	`=<edge>,<listed>,<full width>,<full height>[,<tallest>]` with DM_SCREEN_ASPECT: the layout rules' distances and sizes in the 1280x720 space (default 280,100,1270,710,1300)
 DM_SCREEN_MATCH	switch	`0` keeps the screen's refresh rate in fullscreen; by default a Mac screen whose rate is not a multiple of the game's frame rate switches to one that is (144 → 120 Hz), and a variable-refresh screen to a fixed-rate mode at a multiple (ProMotion 120 → 60 Hz at 60 and 30 fps)
 DM_SF_TRACE	diagnostic	`=1` logs every request on the game's own HIPC client sessions that the host answers (`hle_sf.c`)
+DM_SHADER_CACHE_COMPRESSION_METRICS	diagnostic	`1` logs a JSON metrics summary when converting the shader compile cache between raw and compressed SQLite formats; off by default
 DM_SHADER_FILES	switch	`1` packs an NVN game's shader library into the unsigned IPA of `build_ipa.sh` as its separate files, `msl/b-<chain>/`, not as the one file `b-<chain>.img`, for install tools that cannot copy a large file (AltServer: 2 GiB) (`pack_ipa.py --shader-files`; off by default; `--shader-files` of the NSP script sets this)
 DM_SHAKE_G	switch	`=<G>`: on iOS, the acceleration beyond gravity above which a flick of the phone shakes the controller's six-axis sensor (default 1.5)
 DM_SHARED_FONT	path	Font file served for every shared-font type except the Nintendo extension (default `$DM_FONT_DIR/standard.ttf`, then macOS's Arial Unicode)

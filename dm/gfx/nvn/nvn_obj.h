@@ -302,6 +302,7 @@ void mtl_stats(uint64_t *passes, uint64_t *draws);
 void mtl_args_stats(uint64_t *enc, uint64_t *reuse, uint64_t *patch);
 void mtl_use_stats(uint64_t *call, uint64_t *skip);
 uint64_t mtl_ds_omit(void);   // Cumulative number of passes with no depth attachment because the lookahead proved depth-stencil unused
+void mtl_frame_queue_take(double q[5]);   // per-frame queue columns (perf.tsv): allocator wait ms, submissions, allocators busy, submissions unfinished, present queue depth
 uint64_t mtl_drawable_ns_take(void);   // Take and zero: cumulative ns spent waiting for nextDrawable in present   // Cumulative useResource calls actually issued / skipped by same-encoder dedup   // Cumulative argument buffer new-encode / reuse counts
 void mtl_bw(uint64_t *load, uint64_t *store, uint64_t *full_rw_passes);   // Cumulative attachment load / store bytes, cumulative number of full load-store passes
 uint64_t mtl_udc_saved_bytes(void);                                      // Write-back bytes actually saved by DM_NVN_UNWRITTEN_DC

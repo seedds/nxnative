@@ -183,6 +183,48 @@ def nvn2_stage(ctl, code):   # an NVN2 shader's stage: compute, task and mesh by
     if len(ctl) > 0x56 and ctl[0x56] in (5, 6, 7): return {5: 'cs', 6: 'ts', 7: 'ms'}[ctl[0x56]]
     return sph_stage(bytes(0x30) + code[:4]) if len(code) >= 4 else None
 
+def shn_shaders(d, label):
+    """Shin'en's SHN! resources: three {offset, stored length, length} triples at +4, +0x18 and +0x24 name metadata, relocations and GPU data, raw or LZ4 blocks when lengths differ.
+    SHDROUNC objects in the metadata (loose shaders and SCENOUNC models) have a variant count at +0xc and an absolute metadata offset at +0x30 to nine 0x50-byte stage records per
+    variant: {u64 GPU offset, u64 control offset}, then code/control lengths at +0x40. Relocations are for the game's CPU pointers; these offsets are read before relocation.
+    Verified against Fast Fusion's loose shaders, embedded scene programs and the control keys and GPU bytes captured at startup (see the game's note).
+    Decode GPU data only after finding shader objects: texture resources use the same wrapper but their large pixel payloads hold no shaders."""
+    import lz4.block
+    span(d, 0, 0x44, f'{label} SHN! header')
+    def block(at):
+        off, stored, size = field(d, '<III', at, f'{label} SHN! block')
+        if stored and off < 0x44: red(f'{label} SHN! block at {at:#x}: data overlaps the header')
+        raw = span(d, off, stored, f'{label} SHN! block at {at:#x}')
+        if stored == size: return raw
+        # LZ4's match-length extensions add at most 255 decoded bytes per stored byte. Reject a damaged length before the decoder allocates it.
+        if not stored or size > 255 * stored: red(f'{label} SHN! block at {at:#x}: impossible LZ4 length {size:#x} for {stored:#x} bytes')
+        try: raw = lz4.block.decompress(raw, uncompressed_size=size)
+        except lz4.block.LZ4BlockError as e: red(f'{label} SHN! block at {at:#x}: invalid LZ4 data: {e}')
+        if len(raw) != size: red(f'{label} SHN! block at {at:#x}: decoded {len(raw):#x} bytes, expected {size:#x}')
+        return raw
+    meta = block(4)
+    objects = [m.start() for m in re.finditer(b'SHDROUNC', meta)]
+    if not objects: return []
+    data, out = block(0x24), []
+    for h in objects:
+        count = field(meta, '<I', h + 0xc, f'{label} SHDROUNC header')[0]
+        table = field(meta, '<Q', h + 0x30, f'{label} SHDROUNC header')[0]
+        span(meta, table, count * 9 * 0x50, f'{label} SHDROUNC stage table')
+        for v in range(count):
+            for slot in range(9):
+                r = table + (v * 9 + slot) * 0x50
+                k, c = struct.unpack_from('<QQ', meta, r)
+                if not c: continue
+                nk, nc = struct.unpack_from('<II', meta, r + 0x40)
+                ctl = span(meta, c, nc, f'{label} SHDROUNC control section')
+                code = span(data, k, nk, f'{label} SHDROUNC code area')
+                if not nvn2_ctl(ctl): red(f'{label} SHDROUNC: invalid NVN2 control section at {c:#x}')
+                st = nvn2_stage(ctl, code)
+                why = check(label, st, ctl, code) if st else 'unknown shader stage'
+                if why: red(f'{label} SHDROUNC variant {v} slot {slot}: {why}')
+                out.append((f'{label}#SHN@{h:#x}#var{v}', st, ctl, code))
+    return out
+
 def bahs_shaders(d, label):
     rsz, region = field(d, '<II', 0x18, f'{label} BAHS header')
     if region + rsz > len(d): red(f'{label} BAHS code region out of bounds')
@@ -3051,6 +3093,7 @@ NEST = 16   # archives in archives scan_blob opens (SARC, PlatinumGames' DAT): r
             # that expands 9 times, which then added up to 18 times the file)
 def scan_blob(d, label, out, depth=0, left=None):
     if depth > NEST: red(f'{label}: archives nested more than {NEST} deep')
+    if d[:4] == b'SHN!': out.extend(shn_shaders(d, label)); return
     if d[:8] == SUMO_MUX:
         members = list(sumo_members(d, label))
         if left is None: left = [NEST * sum(len(member) for _, member in members)] * 2   # as with Yaz0, count decoded bytes, not compressed bytes
@@ -3413,6 +3456,9 @@ def scan_file_in(args):
     if head[:4] == ZSTD_MAGIC: d = unzs(path)   # by the magic: Paper Mario: The Thousand-Year Door names its zstd files .zst (8,726, its shaders among them)
     else:
         with open(path, 'rb') as f: d = f.read()
+    if d[:4] == b'SHN!':
+        found += shn_shaders(d, '/' + rel)
+        return rel, uniq_keys(found), var_pairs(found), trees
     if d[:3] == b'\x1f\x8b\x08':   # standard gzip: Skyward Sword HD's Shaders.arc.gz wraps paired GLSLC outputs
         d = ungzip(d, '/' + rel); head = d[:16]   # later format probes inspect decoded bytes, not the gzip timestamp
     if head[4:5] == b'\x78' and path.endswith('.gz') and (z := gust_gz(d)) is not None: d = z   # Gust's chunked zlib (gust_gz)

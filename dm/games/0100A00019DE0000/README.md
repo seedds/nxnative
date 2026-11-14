@@ -56,6 +56,7 @@ General host changes first needed here; each applies to every game:
 
 ## Open
 
+- **Crashes at launch on macOS 26.7.3 (25G416) on an M1 Pro** (2026-11-07), although the [Mac route](#mac-routes) above reached Erebus before. No crash log or host log has been captured yet.
 - `game.tsv` says values marked "Mario's" are not measured for this game; none of its rows is marked so.
 - The iPhone retest of the movie backgrounds (#1956). The game is on this Mac since 2026-11-10 (v0 and 1.0.141667), but only a Mac run was made then.
 - Render size: no iPhone run above 1.0 yet (GPU time and heat there), no play past the first Erebus room at a raised size, the anchored rule not run on 1.0.131248 or 1.0.137848 (no copies here).

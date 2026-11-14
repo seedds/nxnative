@@ -49,6 +49,7 @@ The development build is `01008CF01BAAC000_build/` beside the NSPs, with runs an
 
 ## Open
 
+- **Purple artifacts in full screen on macOS 26.7.3 (25G416) on an M1 Pro** (2026-11-07). The same build renders correctly in a window.
 - Later gameplay and iOS runtime validation remain open.
 
 ## Found on this game

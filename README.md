@@ -93,16 +93,15 @@ python3 scripts/build_ipa_from_nsp.py ~/Games/DonkeyKongBananza.nup --platform m
 
 [Hyrule Warriors: Age of Imprisonment](dm/games/04003F40232DE000/README.md) is played this way: its 47 GB NUP unpacks in under five minutes. A NUP that carries the game's control data (its NACP) and icon gives the app the game's name and icon; otherwise the name comes from the game's profile and the app has no icon unless you give it one with `--icon <image>` (`ICON` in Spyder; a JPEG or PNG of any size).
 
-A NUP without the base game also works, when its base package is empty or it has none and its s are marked `standalone_`: the  is taken as the whole game, and the script says so. If the game then stops on missing files, that  holds only what changed: pack a NUP with the base game. The newest  is selected by default; `--package v<N>` selects another version in the container. Such a container has no `v0` (base game) to select.
+A NUP without the base game also works, when its base package is empty or it has none and its updates are marked `standalone_`: the  is taken as the whole game, and the script says so. If the game then stops on missing files, that  holds only what changed: pack a NUP with the base game. The newest  is selected by default; `--package v<N>` selects another version in the container. Such a container has no `v0` (base game) to select.
 
-**From a folder of files**. The script expects the following layout (`s` and `dlc` are optional):
-
+**From a folder**. The script expects this layout (`updates` and `dlc` are optional):
 ```
 ~/Games/DonkeyKongBananza/
   base/exefs/                     main, main.npdm, sdk, rtld
   base/romfs/
-  s/458752/exefs/           the 's version, as a decimal number
-  s/458752/romfs/           the patched RomFS, not a patch
+  updates/458752/exefs/           the update's version, as a decimal number
+  updates/458752/romfs/           the patched RomFS, not a patch
   dlc/040074a01bf13001/0/romfs/   the DLC's title ID
 ```
 
@@ -110,9 +109,10 @@ A NUP without the base game also works, when its base package is empty or it has
 python3 scripts/build_ipa_from_nsp.py ~/Games/DonkeyKongBananza --platform mac-app
 ```
 
-An `'s` folder alone will do (no `base/`), and so will `exefs/` and `romfs/` directly in the folder, as `nup extract` writes them, which count as `base/`. The app has no icon, because the folder holds none; `--icon <image>` (`ICON` in Spyder) gives it one.
-To turn such a folder into a NUP, use `nup pack ~/Games/DonkeyKongBananza game.nup`.
+An `update's` folder alone will do (no `base/`), and so will `exefs/` and `romfs/` directly in the folder, as `nup extract` writes them, which count as `base/`. The app has no icon, because the folder holds none; `--icon <image>` (`ICON` in Spyder) gives it one.
+To turn such a folder into a NUP, use `nup pack ~/Games/DonkeyKongBananza gamename.nup`.
 For more information and options for packing, see: [The packing script in detail](docs/development.md#the-packing-script-in-detail).
+
 ### Install on iOS
 
 Install the IPA on your iPhone or iPad with a sideloading tool such as AltStore, Sideloadly or LiveContainer. If your tool offers **Increased Memory Limit**, turn it on: the bigger games need it.

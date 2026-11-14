@@ -19,6 +19,7 @@
 // nvnNativeImage to an RGBA texture (hle_nvn.c "Native images"), so a pool whose handle was asked for keeps each picture as RGBA in the pool's own memory, which the texture is made over
 #include "hle.h"
 #include <pthread.h>
+#include <stdatomic.h>
 #include <stdbool.h>
 #include <sys/mman.h>
 #include "vpx/vpx_decoder.h"
@@ -112,6 +113,16 @@ static void pool_native_write(cv_pool *p, uint32_t i, const vpx_image_t *im) {
     free(tmp);
 }
 static int cv_pending(const cv_dec *d) { return d->nheld + (int)d->qcount + d->busy; }   // what the decoder holds for the client: packets not yet decoded and pictures no released buffer has taken (decoder lock held)
+// A video's picture rate while it plays, for the frame step (hle_nvn.c fps_step_cap): a player that takes one picture per game frame plays a 60-picture stream at half speed
+// at a 30 fps cap. Ocarina of Time's title and opening movies (AV1, 60 pictures a second, nn::codec) did; nn::movie's decoders are counted in hle_movie.c. Half a second
+// without a picture ends it
+static _Atomic uint64_t g_codec_pic_ns; static _Atomic int g_codec_hz;
+static void codec_pace(int64_t ts) {
+    static int64_t last; int64_t dt = ts - last; last = ts;
+    if (dt > 4000000 && dt < 200000000) atomic_store_explicit(&g_codec_hz, (int)((1000000000 + dt / 2) / dt), memory_order_relaxed);   // a picture's time in ns: 250 to 5 a second
+    atomic_store_explicit(&g_codec_pic_ns, now_ns(), memory_order_relaxed);
+}
+int dm_codec_movie_hz(void) { uint64_t t = atomic_load_explicit(&g_codec_pic_ns, memory_order_relaxed); return t && now_ns() - t < 500000000ull ? atomic_load_explicit(&g_codec_hz, memory_order_relaxed) : 0; }
 // Pictures and end of stream into the released buffers, in order (decoder lock held). decoded: the decoder's thread calls, with the pictures of the packet it has just decoded:
 // a buffer they go into was waiting for them
 static void fill(cv_dec *d, int decoded) {
@@ -126,6 +137,7 @@ static void fill(cv_dec *d, int decoded) {
             b->w = (uint16_t)im->d_w; b->h = (uint16_t)im->d_h; b->ts = ts; b->eos = eos;
             if (b->pool && b->pidx < b->pool->count) { pool_native_write(b->pool, b->pidx, im); if (b->pool->img[b->pidx]) vpx_img_free(b->pool->img[b->pidx]); b->pool->img[b->pidx] = im; } else vpx_img_free(im);
             if (!d->pictures++) LOG("[codec] %s decoder %u: first picture %ux%u into buffer %u", k_cv_name[d->codec], d->id, b->w, b->h, i);
+            codec_pace(ts);
             if (decoded) d->st.late++;
         } else { b->w = b->h = 0; b->ts = 0; b->eos = 1; d->eos_pending = 0; }
         if (b->eos) LOG("[codec] %s decoder %u: end of stream after %llu pictures", k_cv_name[d->codec], d->id, (unsigned long long)d->pictures);

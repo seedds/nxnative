@@ -5,9 +5,12 @@
 // and the primitive's ID + 1 (shaders/pv.frag), so every pixel names the primitive it belongs to. The oracle below gives, per primitive the device draws (gl_PrimitiveID: a
 // converted quad is two triangles), the vertex NVN takes (GL's table) and the vertex the port takes (Vulkan's last-vertex mode over the backend's conversions, as vk_index.c's
 // table writes them); every pixel must hold the port's vertex, every primitive must be seen, and the primitives where the port's vertex is not NVN's must be exactly the rows
-// vk_index.c declares (the first triangle of a converted quad, the second of a converted quad strip, a polygon's triangles): none for points, lines, line loops, line strips,
-// triangles, triangle strips and fans (native, and expanded as on a device without fans). Then the same draws in a second start of the backend (a child process, t_vk_harness.h
-// hv_spawn) with VK_EXT_provoking_vertex taken as absent (hvk_test_no_provoking_vertex): one red line, and every pixel holds Vulkan's first-vertex result. Checks: the device's
+// vk_index.c declares (the first triangle of a converted quad): none for points, lines, line loops, line strips, triangles, triangle strips, fans (native, and expanded as on a
+// device without fans), quad strips and polygons (2026-11-14: their triangles rotated so NVN's vertex is last). The converted shapes (quads, quad strips, polygons) are drawn
+// again through each other path that writes their lists, each seen in vk_index.c's counters: with restart on at an index the stream never holds (index_restart.comp, direct),
+// on the CPU (the GPU path's limit lowered to 4 bytes: cpu_run) and through an indirect record (index_restart.comp from the record; quads without indices over the shared quad
+// list). Then the same draws in a second start of the backend (a child process, t_vk_harness.h hv_spawn) with VK_EXT_provoking_vertex taken as absent
+// (hvk_test_no_provoking_vertex): one red line, and every pixel holds Vulkan's first-vertex result (a quad strip's triangles 2j and 2j+2, a polygon's k+1). Checks: the device's
 // extension, one per draw and form, the red lines, the child's exit status, and the validation check of each start.
 #include "t_vk_harness.h"
 #include "shaders/gen/pv_vert.h"
@@ -15,6 +18,7 @@
 #include <math.h>
 
 void hvk_test_index_opts(int no_fans, int no_uint8, int no_list_restart, int64_t limit);   // vk_index.c: -1 keeps an option; limit 0 is the default
+void hvk_test_index_stats(uint64_t s[21]);                                                 // vk_index.c's counters: [0] GPU, [2] with the restart kernel, [6] CPU, [12] indirect
 
 enum { W = 64, H = 64, NV = 64 };
 static NVNqueue g_q; static hv_pool g_mp; static hv_cmds g_c; static NVNprogram g_prog;
@@ -90,10 +94,11 @@ static uint32_t port_vertex(int prim, uint32_t t, uint32_t n, int last, int fans
         case NVN_DRAW_PRIMITIVE_LINE_LOOP: return t + 1 < n ? t + (last ? 1 : 0) : (last ? 0 : n - 1);   // the converted list: (t, t+1), then (n-1, 0)
         case NVN_DRAW_PRIMITIVE_TRIANGLES: return 3 * t + (last ? 2 : 0);
         case NVN_DRAW_PRIMITIVE_TRIANGLE_STRIP: return t + (last ? 2 : 0);
-        case NVN_DRAW_PRIMITIVE_TRIANGLE_FAN: case NVN_DRAW_PRIMITIVE_POLYGON:   // native: (t+1, t+2, 0), last mode t+2 (VK_EXT_provoking_vertex), first t+1; expanded: (0, t+1, t+2)
+        case NVN_DRAW_PRIMITIVE_TRIANGLE_FAN:   // native: (t+1, t+2, 0), last mode t+2 (VK_EXT_provoking_vertex), first t+1; expanded: (0, t+1, t+2)
             return last ? t + 2 : fans_expanded ? 0 : t + 1;
+        case NVN_DRAW_PRIMITIVE_POLYGON: return last ? 0 : t + 1;                                 // always a list: (t+1, t+2, 0)
         case NVN_DRAW_PRIMITIVE_QUADS: return last ? 4 * j + 2 + h : 4 * j;                       // (4j, 4j+1, 4j+2) (4j, 4j+2, 4j+3)
-        case NVN_DRAW_PRIMITIVE_QUAD_STRIP: return last ? 2 * j + 3 - h : 2 * j;                  // (2j, 2j+1, 2j+3) (2j, 2j+3, 2j+2)
+        case NVN_DRAW_PRIMITIVE_QUAD_STRIP: return last ? 2 * j + 3 : 2 * j + 2 * h;              // (2j, 2j+1, 2j+3) (2j+2, 2j, 2j+3)
         default: return 0;
     }
 }
@@ -110,8 +115,10 @@ static const char *prim_name(int prim) {
 static uint8_t *take(size_t bytes) { uint8_t *p = g_mp.mem + (512u << 10) + g_data; g_data += (bytes + 255) & ~(size_t)255; if (g_data > (3u << 20)) { fprintf(stderr, "data region full\n"); exit(2); } return p; }
 static uint32_t g_px[2][W * H];
 // One draw of prim (indexed: 16-bit indices, a permutation of the 64 vertex slots), read back and compared: every pixel holds the port's vertex (last-vertex mode where the
-// device has the extension: last), every primitive is seen, and the primitives whose port vertex is not NVN's are counted (*differ). 1 when all hold
-static int one(int prim, int indexed, int last, int fans_expanded, uint32_t *differ, uint32_t *nprims) {
+// device has the extension: last), every primitive is seen, and the primitives whose port vertex is not NVN's are counted (*differ). form: 0 direct, restart off; 1 direct,
+// restart on at 0xffff (no slot: nothing restarts; indexed only); 2 an indirect record (DrawElementsIndirect or DrawArraysIndirect, one instance). 1 when all hold
+enum { F_DIRECT, F_RESTART, F_INDIRECT };
+static int one(int prim, int indexed, int last, int fans_expanded, int form, uint32_t *differ, uint32_t *nprims) {
     pt s[NV]; uint32_t n = shape(prim, s), np = prims_of(prim, n);
     float *vb = (float *)take(NV * 16); uint16_t *ib = indexed ? (uint16_t *)take(n * 2 + 4) : NULL;
     memset(vb, 0, NV * 16);
@@ -126,8 +133,14 @@ static int one(int prim, int indexed, int last, int fans_expanded, uint32_t *dif
     hv_bind(&g_c, &g_prog, 3); hv_depth(&g_c, 0, 0, NVN_DEPTH_FUNC_ALWAYS); hv_cull(&g_c, NVN_FACE_NONE);
     va_st a[1]; memset(a, 0, sizeof a); a[0].fmt = NVN_FORMAT_RGBA32F; vs_st st[1] = {{16, 0}};
     hv_attrs(&g_c, 1, a); hv_streams(&g_c, 1, st); hv_vbuf(&g_c, 0, vb, NV * 16);
-    p_prim_restart pr = {0, 0}; hv_emit(&g_c, OP_PRIM_RESTART, &pr, sizeof pr);
-    if (ib) hv_draw_idx(&g_c, prim, 1, (int)n, ib, 0, 1); else hv_draw(&g_c, prim, 0, (int)n, 1);
+    p_prim_restart pr = {form == F_RESTART, form == F_RESTART ? 0xffffu : 0}; hv_emit(&g_c, OP_PRIM_RESTART, &pr, sizeof pr);
+    if (form == F_INDIRECT) {   // the frontend's records (hle_nvn.c): {count, instances, first index, base vertex, base instance} or {count, instances, first, base instance}
+        uint32_t *rec = (uint32_t *)(void *)take(32), r[5] = {n, 1, 0, 0, 0};
+        memcpy(rec, r, ib ? 20 : 16);
+        if (ib) { p_draw_idx dd; memset(&dd, 0, sizeof dd); dd.prim = prim; dd.itype = 1; dd.instances = 1; dd.ibuf = (uint64_t)(uintptr_t)ib; dd.ind = (uint64_t)(uintptr_t)rec; hv_emit(&g_c, OP_DRAW_IDX, &dd, sizeof dd); }
+        else { p_draw dd; memset(&dd, 0, sizeof dd); dd.prim = prim; dd.instances = 1; dd.ind = (uint64_t)(uintptr_t)rec; hv_emit(&g_c, OP_DRAW, &dd, sizeof dd); }
+    } else if (ib) hv_draw_idx(&g_c, prim, 1, (int)n, ib, 0, 1);
+    else hv_draw(&g_c, prim, 0, (int)n, 1);
     hv_submit(&g_q, &g_c);
     g_data = 0;
     for (int i = 0; i < 2; i++) if (!hv_read(&g_t[i], VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 0, 0, W, H, 4, g_px[i])) { fprintf(stderr, "%s: readback %d failed\n", prim_name(prim), i); return 0; }
@@ -152,20 +165,14 @@ static int one(int prim, int indexed, int last, int fans_expanded, uint32_t *dif
 
 static const int k_prims[] = {NVN_DRAW_PRIMITIVE_LINES, NVN_DRAW_PRIMITIVE_LINE_LOOP, NVN_DRAW_PRIMITIVE_LINE_STRIP, NVN_DRAW_PRIMITIVE_TRIANGLES, NVN_DRAW_PRIMITIVE_TRIANGLE_STRIP,
                               NVN_DRAW_PRIMITIVE_TRIANGLE_FAN, NVN_DRAW_PRIMITIVE_QUADS, NVN_DRAW_PRIMITIVE_QUAD_STRIP, NVN_DRAW_PRIMITIVE_POLYGON};
-// The primitives of a draw whose port vertex differs from NVN's with the last-vertex mode: vk_index.c's declared rows
-static uint32_t declared(int prim, uint32_t np) {
-    switch (prim) {
-        case NVN_DRAW_PRIMITIVE_QUADS: case NVN_DRAW_PRIMITIVE_QUAD_STRIP: return np / 2;   // one triangle of each quad
-        case NVN_DRAW_PRIMITIVE_POLYGON: return np;                                          // every triangle: k+2 is never vertex 0
-        default: return 0;
-    }
-}
+// The primitives of a draw whose port vertex differs from NVN's with the last-vertex mode: vk_index.c's declared row (quad strips and polygons resolved on 2026-11-14)
+static uint32_t declared(int prim, uint32_t np) { return prim == NVN_DRAW_PRIMITIVE_QUADS ? np / 2 : 0; }   // the first triangle of each quad
 
 static int run(int last) {
     char name[300]; int bad = 0;
     for (unsigned i = 0; i < sizeof k_prims / sizeof *k_prims; i++) for (int indexed = 0; indexed < 2; indexed++) {
         int prim = k_prims[i]; uint32_t d = 0, np = 0;
-        int ok = one(prim, indexed, last, 0, &d, &np);
+        int ok = one(prim, indexed, last, 0, F_DIRECT, &d, &np);
         if (last) {
             uint32_t want = declared(prim, np);
             snprintf(name, sizeof name, "%s, %s: %u primitives, every pixel holds the port's vertex; %u take another vertex than NVN's (%s)", prim_name(prim),
@@ -180,12 +187,34 @@ static int run(int last) {
     hvk_test_index_opts(1, -1, -1, -1);
     for (int indexed = 0; indexed < 2; indexed++) {
         uint32_t d = 0, np = 0;
-        int ok = one(NVN_DRAW_PRIMITIVE_TRIANGLE_FAN, indexed, last, 1, &d, &np);
+        int ok = one(NVN_DRAW_PRIMITIVE_TRIANGLE_FAN, indexed, last, 1, F_DIRECT, &d, &np);
         if (last) { snprintf(name, sizeof name, "triangle fan expanded into a list (no fans taken), %s: %u primitives, NVN's vertex on every one", indexed ? "16-bit indices" : "no indices", np); ok = ok && d == 0; }
         else snprintf(name, sizeof name, "without the extension: triangle fan expanded into a list, %s: %u primitives, the list's first vertex (the centre)", indexed ? "16-bit indices" : "no indices", np);
         t(name, ok); bad += !ok;
     }
     hvk_test_index_opts(0, -1, -1, -1);
+    // The converted shapes through the other paths that write their lists (above: index_expand.comp, and for quads without indices the shared quad list), each path seen in
+    // the counters: the restart kernel of a direct draw (indexed only), the CPU (the limit at 4 bytes), the restart kernel from an indirect record
+    static const int k_conv[] = {NVN_DRAW_PRIMITIVE_QUADS, NVN_DRAW_PRIMITIVE_QUAD_STRIP, NVN_DRAW_PRIMITIVE_POLYGON};
+    static const char *const k_path[] = {"with restart on (index_restart.comp)", "on the CPU (cpu_run)", "through an indirect record (index_restart.comp)"};
+    for (int path = 0; path < 3; path++) for (unsigned i = 0; i < sizeof k_conv / sizeof *k_conv; i++) for (int indexed = 0; indexed < 2; indexed++) {
+        int prim = k_conv[i]; uint32_t d = 0, np = 0;
+        if (path == 0 && !indexed) continue;   // restart applies to indexed draws only
+        if (path == 1 && !indexed && prim == NVN_DRAW_PRIMITIVE_QUADS) continue;   // quads without indices: the shared quad list, nothing converted
+        uint64_t s0[21], s1[21];
+        if (path == 1) hvk_test_index_opts(-1, -1, -1, 4);
+        hvk_test_index_stats(s0);
+        int ok = one(prim, indexed, last, 0, path == 0 ? F_RESTART : path == 1 ? F_DIRECT : F_INDIRECT, &d, &np);
+        hvk_test_index_stats(s1);
+        if (path == 1) hvk_test_index_opts(-1, -1, -1, 0);
+        int took = path == 0 ? s1[2] - s0[2] == 1 && s1[6] == s0[6] : path == 1 ? s1[6] - s0[6] == 1 && s1[0] == s0[0] : s1[12] - s0[12] == 1 && s1[6] == s0[6];
+        uint32_t want = last ? declared(prim, np) : d;
+        snprintf(name, sizeof name, "%s%s %s, %s: %u primitives, every pixel holds the port's vertex%s; %u take another vertex than NVN's (%s)", last ? "" : "without the extension: ",
+                 prim_name(prim), k_path[path], indexed ? "16-bit indices" : "no indices", np, took ? "" : " (NOT the path's counter)", d,
+                 !last ? "Vulkan's first vertex" : want ? "declared in vk_index.c" : "none: NVN's last vertex");
+        ok = ok && took && d == want;
+        t(name, ok); bad += !ok;
+    }
     return bad;
 }
 

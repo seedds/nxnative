@@ -17,8 +17,8 @@
 //   triangle strip   triangle strip                   (k, k+1, k+2), odd k (k+1, k, k+2)                                              n < 3              nvn_geometry.h:55
 //   triangle fan     triangle fan, or list            (0, k+1, k+2)                                                                   n < 3              nvn_primitive.h:14-18
 //   quads            triangle list (converted)        quad j: (4j, 4j+1, 4j+2) (4j, 4j+2, 4j+3)                                       n mod 4            nvn_primitive.h:19-25
-//   quad strip       triangle list (converted)        quad j = (2j, 2j+1, 2j+3, 2j+2) split as quads: (2j, 2j+1, 2j+3) (2j, 2j+3, 2j+2)  an odd last; n < 4  GL, the quad rule
-//   polygon          triangle fan, or list            as the fan: (0, k+1, k+2)                                                       n < 3              GL, the fan rule
+//   quad strip       triangle list (converted)        quad j = (2j, 2j+1, 2j+3, 2j+2) split as quads: (2j, 2j+1, 2j+3) (2j+2, 2j, 2j+3)  an odd last; n < 4  GL, the quad rule
+//   polygon          triangle list (converted)        the fan's triangles (0, k+1, k+2), each rotated: (k+1, k+2, 0)                  n < 3              GL, the fan rule
 //   with adjacency   their list                       groups of 4 and 6 (patches: of the patch size)                                  n mod the group    nvn_geometry.h:41, 43
 // A list, strip or fan is drawn from the game's indices where Vulkan can (restart at the all-ones index for a strip or fan, and for a list where the device restarts lists); a
 // list with restart the device does not restart is converted into a list without (index_restart.comp); one with another restart index, or 8-bit indices without the device's
@@ -29,7 +29,7 @@
 // quad strip's quad j is (2j, 2j+1, 2j+3, 2j+2) and an odd last vertex is ignored, a polygon is the convex polygon of its vertices), drawn by the Metal backend's quad and fan rules.
 // Two differences from what the Metal backend draws, both its limits: 8-bit indices in a strip restart at 0xff here (it widens them to 16 bits, and 0x00ff does not restart:
 // nvn_mtl.m:8680), and a list with restart drops the primitive a restart cuts short here, NVN's rule (it hands a list's indices to Metal as they are: nvn_mtl.m:8700).
-// What the device draws natively, said once per device: triangle fans and polygons as VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN unless the device lists VK_KHR_portability_subset (whose
+// What the device draws natively, said once per device: triangle fans as VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN unless the device lists VK_KHR_portability_subset (whose
 // triangleFans may be off: then they are expanded); 8-bit indices with VK_KHR_index_type_uint8; restart on point, line and triangle lists and their adjacency forms with
 // VK_EXT_primitive_topology_list_restart's primitiveTopologyListRestart (vk_device.c enables it; patch lists stay converted). The extension lets primitiveRestartEnable apply to
 // lists, where the restart index "restarts the assembly of primitives" (VkPipelineInputAssemblyStateCreateInfo): the vertices gathered for the primitive in progress make none,
@@ -40,13 +40,16 @@
 // mode where the device has VK_EXT_provoking_vertex (vk_device.c, vk_pipeline.c hvk_raster_next). Per row, primitive k of a segment (j: the quad), GL's vertex / this port's:
 //   points k / k; lines 2k+1 / 2k+1; line loop k+1, the closing line 0 / the same (the converted list's second vertex); line strip k+1 / k+1; triangles 3k+2 / 3k+2;
 //   triangle strip k+2 / k+2; triangle fan k+2 / k+2 (Vulkan's last-vertex mode takes k+2 of a native fan, VK_EXT_provoking_vertex; the expanded list (0, k+1, k+2) ends with it);
-//   lists and strips with adjacency 4k+2, k+2, 6k+4, 2k+4 / the same (Vulkan's last-vertex mode skips the adjacent vertices as GL does).
-// Three rows differ, declared (the conversions keep the Metal backend's triangles; changing them is the shader kernels' and the shared quad list's, not this table's):
-//   quads: GL's quad takes 4j+3 for both its triangles; the split (4j, 4j+1, 4j+2) (4j, 4j+2, 4j+3) gives 4j+2 to the first, and no rotation of a triangle without vertex 4j+3
-//     can give it (the split along (4j+1, 4j+3): (4j, 4j+1, 4j+3) (4j+1, 4j+2, 4j+3) would, with the other diagonal);
-//   quad strips: GL takes 2j+3; the second triangle (2j, 2j+3, 2j+2) gives 2j+2 (its rotation (2j+2, 2j, 2j+3), the same winding, would give 2j+3);
-//   polygons: GL takes vertex 0 in both conventions; the fan gives k+2 (a list (k+1, k+2, 0), the same winding, would give 0).
-// Without the extension (a red line once per device) Vulkan's first-vertex mode is left: lists 3k, strips k, native fans k+1, expanded fans and converted quads 0 / 4j.
+//   lists and strips with adjacency 4k+2, k+2, 6k+4, 2k+4 / the same (Vulkan's last-vertex mode skips the adjacent vertices as GL does);
+//   quad strips 2j+3 / 2j+3 (2026-11-14: the second triangle is (2j+2, 2j, 2j+3), a rotation of the quad split's (2j, 2j+3, 2j+2): the same three vertices, the same directed
+//     edges, so the same coverage, winding and smooth varyings, and 2j+3 last; the first, (2j, 2j+1, 2j+3), already ends with it);
+//   polygons 0 / 0 (2026-11-14: GL takes vertex 0 in both conventions; every polygon is converted, also on a device with triangle fans, whose native fan would give k+2, into
+//     the list (k+1, k+2, 0), each a rotation of the fan's (0, k+1, k+2): the same triangles and winding, vertex 0 last).
+// One row differs, declared: quads: GL's quad takes 4j+3 for both its triangles; the split (4j, 4j+1, 4j+2) (4j, 4j+2, 4j+3), the Metal backend's and the shared quad list's,
+//   gives 4j+2 to the first, and no rotation of a triangle without vertex 4j+3 can give it; the split along the other diagonal, (4j, 4j+1, 4j+3) (4j+1, 4j+2, 4j+3), would,
+//   but it changes how smooth varyings interpolate across a quad whose four values do not lie on one plane, against the Metal backend and the Switch's unknown split: left.
+// Without the extension (a red line once per device) Vulkan's first-vertex mode is left: lists 3k, strips k, native fans k+1, expanded fans and converted quads 0 / 4j, quad
+// strips 2j / 2j+2 (the first vertex of each triangle), polygons k+1.
 // Draws whose count the GPU holds (2026-11-02): DrawArraysIndirect and DrawElementsIndirect, their indirect-count multi-draws, and DrawTransformFeedback, whose records (or the
 // capture's byte count) a compute shader or the CPU writes, are converted by the same rules on the GPU from the record: shaders/index_restart.comp, one workgroup a record, reads
 // the count, instances, first index, base vertex (an array draw's first vertex) and base instance there (DrawTransformFeedback: the control buffer's byte offset over the
@@ -66,7 +69,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-enum { M_MAP, M_QUADS, M_QSTRIP, M_FAN, M_LOOP, M_LIST };
+enum { M_MAP, M_QUADS, M_QSTRIP, M_FAN, M_LOOP, M_LIST, M_POLY = 7 };   // the kernels' modes (6: index_restart.comp's quads over the shared list)
 enum { QUAD_SHARED = 65536 };   // quads the shared list holds (vk_commands.c g_quad_ib)
 #define HVK_IX_LIMIT (16ull << 20)   // the bytes of one draw's list the GPU path takes from the ring
 #define HVK_IX_ARENA (3u << 20)      // the bytes of a submission's arena for the lists of draws whose count the GPU holds (786,432 indices; a ring chunk is 4 MiB)
@@ -112,7 +115,7 @@ static uint64_t segc(int mode, uint32_t g, uint64_t n) {
     switch (mode) {
         case M_QUADS: return n / 4 * 6;
         case M_QSTRIP: return n >= 4 ? (n - 2) / 2 * 6 : 0;
-        case M_FAN: return n >= 3 ? 3 * (n - 2) : 0;
+        case M_FAN: case M_POLY: return n >= 3 ? 3 * (n - 2) : 0;
         case M_LOOP: return n >= 2 ? 2 * n : 0;
         case M_LIST: return g ? n / g * g : 0;
         default: return n;
@@ -143,7 +146,8 @@ void hvk_ix_plan_make(const hvk_ix_in *in, VkPrimitiveTopology native, hvk_ix_pl
         case NVN_DRAW_PRIMITIVE_QUADS: mode = M_QUADS; break;
         case NVN_DRAW_PRIMITIVE_QUAD_STRIP: mode = M_QSTRIP; break;
         case NVN_DRAW_PRIMITIVE_LINE_LOOP: mode = M_LOOP; break;
-        case NVN_DRAW_PRIMITIVE_TRIANGLE_FAN: case NVN_DRAW_PRIMITIVE_POLYGON: if (!g_ix.fans) mode = M_FAN; break;
+        case NVN_DRAW_PRIMITIVE_TRIANGLE_FAN: if (!g_ix.fans) mode = M_FAN; break;
+        case NVN_DRAW_PRIMITIVE_POLYGON: mode = M_POLY; break;   // always a list: (k+1, k+2, 0) takes vertex 0 last, GL's provoking vertex (a native fan would take k+2)
         default: break;
     }
     if (mode >= 0) {   // no Vulkan primitive: a list
@@ -313,7 +317,8 @@ int hvk_ix_ind_gpu(VkCommandBuffer cb, int pre, const hvk_ix_in *in, const hvk_i
     return 1;
 }
 
-// The CPU's conversion: the kernels' list. Indexed quads and fans go through nvn_primitive.h, the Metal backend's expansion; the rest segment by segment
+// The CPU's conversion: the kernels' list. Indexed quads and fans go through nvn_primitive.h, the Metal backend's expansion; the rest segment by segment (quad strips and
+// polygons in the rotated orders of the rules table)
 static uint32_t rd(const uint8_t *s, int isz, uint64_t k) {
     if (!isz) return (uint32_t)k;
     if (isz == 1) return s[k];
@@ -332,8 +337,9 @@ static uint32_t cpu_run(const hvk_ix_in *in, const hvk_ix_plan *pl, uint32_t *d)
         #define V(k) rd(s, isz, st + (k))
         switch (pl->mode) {
             case M_QUADS: for (uint64_t q = 0; q + 4 <= m; q += 4) { uint32_t a = V(q), b = V(q + 1), c = V(q + 2), e = V(q + 3); d[o++] = a; d[o++] = b; d[o++] = c; d[o++] = a; d[o++] = c; d[o++] = e; } break;
-            case M_QSTRIP: for (uint64_t k = 0; m >= 4 && k + 4 <= m; k += 2) { uint32_t a = V(k), b = V(k + 1), w = V(k + 2), c = V(k + 3); d[o++] = a; d[o++] = b; d[o++] = c; d[o++] = a; d[o++] = c; d[o++] = w; } break;
+            case M_QSTRIP: for (uint64_t k = 0; m >= 4 && k + 4 <= m; k += 2) { uint32_t a = V(k), b = V(k + 1), w = V(k + 2), c = V(k + 3); d[o++] = a; d[o++] = b; d[o++] = c; d[o++] = w; d[o++] = a; d[o++] = c; } break;
             case M_FAN: for (uint64_t k = 0; k + 3 <= m; k++) { d[o++] = V(0); d[o++] = V(k + 1); d[o++] = V(k + 2); } break;
+            case M_POLY: for (uint64_t k = 0; k + 3 <= m; k++) { d[o++] = V(k + 1); d[o++] = V(k + 2); d[o++] = V(0); } break;
             case M_LOOP: for (uint64_t k = 0; m >= 2 && k < m; k++) { d[o++] = V(k); d[o++] = V(k + 1 == m ? 0 : k + 1); } break;
             default: for (uint64_t k = 0; k + g <= m; k += g) for (uint32_t c = 0; c < g; c++) d[o++] = V(k + c); break;
         }

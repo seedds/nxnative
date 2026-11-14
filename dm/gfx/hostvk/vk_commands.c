@@ -741,8 +741,8 @@ void hvk_tf_bind_note(void);
 void hvk_tf_bind_note(void) { if (g_cur >= 0 && P.xfb_open) xfb_end(hvk_main()); }
 
 // ---------- Draws ----------
-// The Vulkan topology nearest to NVN's primitive and its class: what a draw is made with unless vk_index.c converts its indices (line loops, quad strips and quads become lists there;
-// fans and polygons too on a device without fans)
+// The Vulkan topology nearest to NVN's primitive and its class: what a draw is made with unless vk_index.c converts its indices (line loops, quad strips, quads and polygons become
+// lists there, polygons for NVN's provoking vertex; fans too on a device without fans)
 static VkPrimitiveTopology topology(int prim, int *klass) {
     switch (prim) {
         case NVN_DRAW_PRIMITIVE_POINTS: *klass = VK_PRIMITIVE_TOPOLOGY_POINT_LIST; return VK_PRIMITIVE_TOPOLOGY_POINT_LIST;

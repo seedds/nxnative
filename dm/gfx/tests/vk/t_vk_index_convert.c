@@ -53,7 +53,10 @@ enum { NPRIM = sizeof k_prims / sizeof *k_prims };
 // The primitives NVN draws (the rules: a restart index, indexed draws only, compared before the base vertex is added, ends a segment and drops the vertices of a primitive it cuts
 // short; a line loop closes from its last vertex to its first; a fan or polygon is (0, k+1, k+2); quad k is (4k, 4k+1, 4k+2) (4k, 4k+2, 4k+3); a quad strip's quad k is
 // (2k, 2k+1, 2k+3, 2k+2), split as quads; without a geometry stage a line list with adjacency draws (4k+1, 4k+2) and a triangle list with adjacency (6k, 6k+2, 6k+4)), as the
-// absolute vertex indices of a point (cls 1), line (2) or triangle (3) list. v: the stream (NULL: none, vertex k is base + k)
+// absolute vertex indices of a point (cls 1), line (2) or triangle (3) list. v: the stream (NULL: none, vertex k is base + k). The backend's lists rotate some triangles for the
+// provoking vertex (vk_index.c, 2026-11-14: a quad strip's second triangle (2k+2, 2k, 2k+3), a polygon's (k+1, k+2, 0)); the oracle keeps the rules' order on purpose: the
+// targets see coverage, winding and the primitive's ID, not the order within a triangle, so the same pictures show the rotations change none of them
+// (t_vk_provoking checks the order)
 static int cls_of(int prim) {
     switch (prim) {
         case NVN_DRAW_PRIMITIVE_POINTS: return 1;
@@ -253,11 +256,11 @@ static uint32_t ind_pair(int prim, int isz, int restart, uint32_t ri, const uint
     ref_list(prim, k, inst);
     return k / (uint32_t)cls_of(prim);
 }
-// Whether an indirect draw of the form converts (vk_index.c's plan): the primitives Vulkan has not, fans without the device's, 8-bit indices without its support, a restart index
-// other than all ones (widened), lists with restart where the device does not restart lists
+// Whether an indirect draw of the form converts (vk_index.c's plan): the primitives Vulkan has not, polygons (always lists: their provoking vertex), fans without the device's,
+// 8-bit indices without its support, a restart index other than all ones (widened), lists with restart where the device does not restart lists
 static int ind_converts(int prim, int isz, int kind, int no_fans, int no_uint8, int no_lr) {
-    if (prim == NVN_DRAW_PRIMITIVE_LINE_LOOP || prim == NVN_DRAW_PRIMITIVE_QUADS || prim == NVN_DRAW_PRIMITIVE_QUAD_STRIP) return 1;
-    if ((prim == NVN_DRAW_PRIMITIVE_TRIANGLE_FAN || prim == NVN_DRAW_PRIMITIVE_POLYGON) && no_fans) return 1;
+    if (prim == NVN_DRAW_PRIMITIVE_LINE_LOOP || prim == NVN_DRAW_PRIMITIVE_QUADS || prim == NVN_DRAW_PRIMITIVE_QUAD_STRIP || prim == NVN_DRAW_PRIMITIVE_POLYGON) return 1;
+    if (prim == NVN_DRAW_PRIMITIVE_TRIANGLE_FAN && no_fans) return 1;
     if (!isz) return 0;
     return (isz == 1 && no_uint8) || kind == 2 || (kind && is_list(prim) && no_lr);
 }
@@ -357,7 +360,7 @@ int main(int argc, char **argv) {
     printf("note: the device draws triangle fans natively (no VK_KHR_portability_subset here) and has 8-bit indices: %s\n", d && d->x.index_uint8 ? "yes" : "no");
 
     // 1. Every primitive, index size and restart form, the short and the long stream (with 2 instances); the restart kernel takes the indexed draws with restart of the primitives
-    // Vulkan has not (loops, quads, quad strips) and, where the device does not restart lists, of the lists
+    // Vulkan has not (loops, quads, quad strips) and of polygons (always lists: their provoking vertex) and, where the device does not restart lists, of the lists
     int lr = d && d->x.list_restart;
     printf("note: the device restarts lists (VK_EXT_primitive_topology_list_restart): %s\n", lr ? "yes" : "no");
     stats(s0);
@@ -366,7 +369,8 @@ int main(int argc, char **argv) {
         if (!isz && kind == 2) continue;   // without indices restart is off or on (no index to compare)
         bad += !one(k_prims[p], isz, kind, longer, 0, "");
         int pr = k_prims[p];
-        want_restart += isz && kind && (pr == NVN_DRAW_PRIMITIVE_LINE_LOOP || pr == NVN_DRAW_PRIMITIVE_QUADS || pr == NVN_DRAW_PRIMITIVE_QUAD_STRIP || (is_list(pr) && !lr));
+        want_restart += isz && kind && (pr == NVN_DRAW_PRIMITIVE_LINE_LOOP || pr == NVN_DRAW_PRIMITIVE_QUADS || pr == NVN_DRAW_PRIMITIVE_QUAD_STRIP ||
+                                        pr == NVN_DRAW_PRIMITIVE_POLYGON || (is_list(pr) && !lr));
     }
     stats(s1);
     snprintf(name, sizeof name, "every conversion of the matrix on the GPU in the prologue: %llu (%llu with the restart kernel, %llu by the rules), %llu on the CPU", (unsigned long long)(s1[ST_GPU] - s0[ST_GPU]),
@@ -388,7 +392,7 @@ int main(int argc, char **argv) {
     t(name, s1[ST_GPU_RESTART] - s0[ST_GPU_RESTART] == lists && s1[ST_CPU] == s0[ST_CPU]);
     hvk_test_index_opts(-1, -1, 0, -1);
 
-    // 2. A device without triangle fans or 8-bit indices: fans and polygons converted, 8-bit indices widened
+    // 2. A device without triangle fans or 8-bit indices: fans converted (polygons as on every device), 8-bit indices widened
     hvk_test_index_opts(1, 1, -1, -1);
     stats(s0);
     for (int p = 0; p < NPRIM; p++) for (int isz = 0; isz <= 4; isz = isz ? isz * 2 : 1) for (int kind = 0; kind < 3; kind++) for (int longer = 0; longer < 2; longer++) {
@@ -657,8 +661,8 @@ int main(int argc, char **argv) {
     }
 
     // 7f. DrawTransformFeedback: 69 points captured (20 bytes each), drawn from the capture's count as every primitive, the capture in the same submission (the counter read at the
-    // draw's place) and in the one before (in the prologue); the primitives Vulkan has (and fans, polygons on a device with fans) through vkCmdDrawIndirectByteCountEXT, the rest
-    // converted from the counter; then fans and polygons with the device's fans taken as absent
+    // draw's place) and in the one before (in the prologue); the primitives Vulkan has (and fans on a device with fans) through vkCmdDrawIndirectByteCountEXT, the rest (polygons
+    // too) converted from the counter; then fans and polygons with the device's fans taken as absent
     {
         uint8_t *out = g_mp.mem + (15u << 20), *ctl = out + 8192;
         uint64_t want_xfb = 0;

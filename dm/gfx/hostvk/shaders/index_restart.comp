@@ -3,9 +3,10 @@
 // draw: each of its 128 threads takes a contiguous chunk of the indices and sums it up (has a restart, its first and last position, the indices drawn by the segments wholly
 // inside it); a scan of the summaries gives each chunk the start of the segment open at its entry and where that segment's indices go; then each thread writes its chunk's
 // primitives, and the first writes the indexed indirect record {count, instances, first index, base vertex, base instance} that the draw reads. Modes: 0 the indices as they are
-// (widened to 32 bits, the restart index made all ones), 1 quads, 2 quad strips, 3 triangle fans and polygons, 4 line loops (as a line list), 5 lists of group vertices (points,
-// lines, triangles, the adjacency lists, patches), 6 quads without indices over the backend's shared quad list (the record only). Without restart (flags bit 0 off, and always
-// for a draw without indices, whose implicit indices are 0 .. n-1) the stream is one segment.
+// (widened to 32 bits, the restart index made all ones), 1 quads, 2 quad strips, 3 triangle fans, 4 line loops (as a line list), 5 lists of group vertices (points, lines,
+// triangles, the adjacency lists, patches), 6 quads without indices over the backend's shared quad list (the record only), 7 polygons (quad strips and polygons in the rotated
+// orders of the rules table: NVN's provoking vertex last). Without restart (flags bit 0 off, and always for a draw without indices, whose implicit indices are 0 .. n-1) the
+// stream is one segment.
 // A direct draw (rec 0): its count n, the list's size cap and the record's instances, base vertex and base instance are the push constants; the list starts at dst.
 // A draw whose count the GPU holds (rec != 0; 2026-11-02): workgroup d reads record d of the game's, rec + d * stride (kind 0 DrawArraysIndirect {count, instances, first, base
 // instance}: first becomes the base vertex; kind 1 DrawElementsIndirect {count, instances, first index, base vertex, base instance}; kind 2 DrawTransformFeedback: the byte count
@@ -39,7 +40,7 @@ uint fetch(uint k) {   // index k of the draw (k + g_from < 2^30: its bytes may 
 uint segc(uint n) {   // the indices a segment of n vertices draws
     if (p.mode == 1u) return n / 4u * 6u;
     if (p.mode == 2u) return n >= 4u ? (n - 2u) / 2u * 6u : 0u;
-    if (p.mode == 3u) return n >= 3u ? 3u * (n - 2u) : 0u;
+    if (p.mode == 3u || p.mode == 7u) return n >= 3u ? 3u * (n - 2u) : 0u;
     if (p.mode == 4u) return n >= 2u ? 2u * n : 0u;
     if (p.mode == 5u) return n / p.group * p.group;
     return n;
@@ -126,10 +127,12 @@ void main() {
         uint q = i - s;   // the vertex's place in its segment
         if (p.mode == 1u) {
             if ((q & 3u) == 3u) { uint o = off + q / 4u * 6u, x = fetch(i - 3u), y = fetch(i - 2u), z = fetch(i - 1u); put(o, x); put(o + 1u, y); put(o + 2u, z); put(o + 3u, x); put(o + 4u, z); put(o + 5u, v); }
-        } else if (p.mode == 2u) {   // the quad (2k, 2k+1, 2k+3, 2k+2) = (x, y, v, w), as quads
-            if (q >= 3u && (q & 1u) == 1u) { uint o = off + (q - 3u) / 2u * 6u, x = fetch(i - 3u), y = fetch(i - 2u), w = fetch(i - 1u); put(o, x); put(o + 1u, y); put(o + 2u, v); put(o + 3u, x); put(o + 4u, v); put(o + 5u, w); }
+        } else if (p.mode == 2u) {   // the quad (2k, 2k+1, 2k+3, 2k+2) = (x, y, v, w): (x, y, v) (w, x, v), v last in both
+            if (q >= 3u && (q & 1u) == 1u) { uint o = off + (q - 3u) / 2u * 6u, x = fetch(i - 3u), y = fetch(i - 2u), w = fetch(i - 1u); put(o, x); put(o + 1u, y); put(o + 2u, v); put(o + 3u, w); put(o + 4u, x); put(o + 5u, v); }
         } else if (p.mode == 3u) {
             if (q >= 2u) { uint o = off + 3u * (q - 2u); put(o, fetch(s)); put(o + 1u, fetch(i - 1u)); put(o + 2u, v); }
+        } else if (p.mode == 7u) {   // the polygon's triangle (k+1, k+2, 0): its first vertex last
+            if (q >= 2u) { uint o = off + 3u * (q - 2u); put(o, fetch(i - 1u)); put(o + 1u, v); put(o + 2u, fetch(s)); }
         } else if (p.mode == 4u) {
             if (q >= 1u) { uint o = off + 2u * (q - 1u); put(o, fetch(i - 1u)); put(o + 1u, v); }
         } else if (q % p.group == p.group - 1u) {

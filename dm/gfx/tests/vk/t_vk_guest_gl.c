@@ -4,7 +4,8 @@
 // the build (CMakeLists.txt): programs in Digimon's dialect (GLSL ES 3.20) and LÖVE's (#version 330 core, attributes bound with glBindAttribLocation, varyings declared in
 // another order in each stage), a texture defined level by level and its levels picked by the size of the quads, glUniform* between draws, depth through the clip-space pass,
 // culling by GL's winding, scissored and masked clears, gl_FragCoord in GL's orientation, a persistently mapped vertex stream rewritten after its fence, an index buffer
-// orphaned while a draw reads it, a disabled attribute's current value, a triangle fan, uploads before and among a frame's draws, a framebuffer object sampled and blitted
+// orphaned while a draw reads it, a disabled attribute's current value, a triangle fan, a flat varying read back from a triangle strip (the provoking vertex: GL's last, the
+// backend's VK_EXT_provoking_vertex mode; 2026-11-14), uploads before and among a frame's draws, a framebuffer object sampled and blitted
 // (straight, scaled and flipped), mipmaps generated (a texture of all its levels, and one of one level), glReadPixels (rows bottom first, as GL lays them out) and the
 // presented picture read back from the backend's headless presenter (upright: it flips the bottom-up rows); what the game sees of host memory (the buffer mappings, a slab's
 // and one of its own, the strings, a fence object) in the x86-64 engine's arena below 2^39. Every validation message fails the test; without a Vulkan device
@@ -30,7 +31,7 @@ Result h_vi_CreateLayerWH(void **out, void *disp, int w, int h);   // dm/gfx/hle
 
 typedef uint32_t GLenum, GLuint, GLbitfield; typedef int32_t GLint, GLsizei; typedef float GLfloat; typedef intptr_t GLsizeiptr, GLintptr; typedef char GLchar;
 enum {
-    GL_TRIANGLES = 4, GL_TRIANGLE_FAN = 6, GL_LESS = 0x201, GL_FRONT = 0x404, GL_BACK = 0x405, GL_CULL_FACE = 0xb44, GL_DEPTH_TEST = 0xb71, GL_VIEWPORT = 0xba2,
+    GL_TRIANGLES = 4, GL_TRIANGLE_STRIP = 5, GL_TRIANGLE_FAN = 6, GL_LESS = 0x201, GL_FRONT = 0x404, GL_BACK = 0x405, GL_CULL_FACE = 0xb44, GL_DEPTH_TEST = 0xb71, GL_VIEWPORT = 0xba2,
     GL_SCISSOR_TEST = 0xc11, GL_TEXTURE_2D = 0xde1, GL_UNSIGNED_BYTE = 0x1401, GL_UNSIGNED_SHORT = 0x1403, GL_FLOAT = 0x1406, GL_COLOR = 0x1800, GL_RGBA = 0x1908,
     GL_RENDERER = 0x1f01, GL_EXTENSIONS = 0x1f03, GL_NEAREST = 0x2600, GL_NEAREST_MIPMAP_NEAREST = 0x2700, GL_TEXTURE_MAG_FILTER = 0x2800, GL_TEXTURE_MIN_FILTER = 0x2801, GL_RGBA8 = 0x8058,
     GL_TEXTURE0 = 0x84c0, GL_ARRAY_BUFFER = 0x8892, GL_ELEMENT_ARRAY_BUFFER = 0x8893, GL_STATIC_DRAW = 0x88e4, GL_DEPTH24_STENCIL8 = 0x88f0, GL_FRAGMENT_SHADER = 0x8b30,
@@ -352,7 +353,39 @@ int main(int argc, char **argv) {
     G.glGenerateMipmap(GL_TEXTURE_2D);
     G.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST_MIPMAP_NEAREST); G.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
     rect(uRect, 62, 0, 63, 1, WW, WH); G.glDrawArrays(GL_TRIANGLES, 0, 6);
+    // a flat varying (shaders/gl/flat.vert, flat.frag) through the layer's own draw: a triangle strip of six vertices, each its own colour, over GL (0, 0) to (16, 8) (vertex i
+    // at x 8 * (i / 2), y 0 for even i and 8 for odd); triangle k takes vertex k + 2's colour, GL's default last-vertex convention (the backend's VK_EXT_provoking_vertex mode),
+    // or vertex k's on a device without the extension (Vulkan's first vertex, said by the backend's red line)
+    GLuint vfl = shader(GL_VERTEX_SHADER, "flat.vert"), ffl = shader(GL_FRAGMENT_SHADER, "flat.frag"), PF = vfl && ffl ? program(vfl, ffl, 0) : 0;
+    GLint lfl = 0; if (PF) G.glGetProgramiv(PF, GL_LINK_STATUS, &lfl);
+    GLint fPos = lfl ? G.glGetAttribLocation(PF, "aPos") : -1, fCol = lfl ? G.glGetAttribLocation(PF, "aColor") : -1;
+    uint8_t fv[6 * 12], fcol[6][4];
+    for (int i = 0; i < 6; i++) {
+        const float x = -1 + 2.0f * (float)(8 * (i / 2)) / WW, y = -1 + 2.0f * (float)(8 * (i & 1)) / WH;
+        fcol[i][0] = (uint8_t)(40 * (i + 1)); fcol[i][1] = (uint8_t)(250 - 40 * i); fcol[i][2] = (uint8_t)(30 * i); fcol[i][3] = 255;
+        memcpy(fv + 12 * i, &x, 4); memcpy(fv + 12 * i + 4, &y, 4); memcpy(fv + 12 * i + 8, fcol[i], 4);
+    }
+    GLuint vao3, fbuf; G.glGenVertexArrays(1, &vao3); G.glGenBuffers(1, &fbuf);
+    G.glBindVertexArray(vao3); G.glBindBuffer(GL_ARRAY_BUFFER, fbuf); G.glBufferData(GL_ARRAY_BUFFER, sizeof fv, fv, GL_STATIC_DRAW);
+    if (fPos >= 0 && fCol >= 0) {
+        G.glEnableVertexAttribArray((GLuint)fPos); G.glVertexAttribPointer((GLuint)fPos, 2, GL_FLOAT, 0, 12, (const void *)0);
+        G.glEnableVertexAttribArray((GLuint)fCol); G.glVertexAttribPointer((GLuint)fCol, 4, GL_UNSIGNED_BYTE, 1, 12, (const void *)8);
+        G.glUseProgram(PF); G.glDrawArrays(GL_TRIANGLE_STRIP, 0, 6);
+    }
     G.glReadPixels(0, 0, WW, WH, GL_RGBA, GL_UNSIGNED_BYTE, g_rp);
+    {
+        const hostvk_dev *dv = hvk_device(); int lastv = dv && dv->x.provoking_last, okf = lfl && fPos >= 0 && fCol >= 0;
+        static const int probe[4][2] = {{2, 2}, {5, 5}, {10, 2}, {13, 5}};   // a pixel inside each triangle
+        char got[160]; size_t o = 0;
+        for (int k = 0; k < 4; k++) {
+            const uint8_t *p = rp(probe[k][0], probe[k][1]); int v = lastv ? k + 2 : k;
+            okf = okf && is(p, fcol[v][0], fcol[v][1], fcol[v][2], 0);
+            o += (size_t)snprintf(got + o, sizeof got - o, "%s%u %u %u (vertex %d's)", k ? ", " : "", p[0], p[1], p[2], v);
+        }
+        snprintf(name, sizeof name, "a flat varying through the layer's draw (a triangle strip; %s): triangles 0-3 read %s", lastv ? "GL's last vertex, the backend's last-vertex mode" :
+                 "no VK_EXT_provoking_vertex: Vulkan's first vertex", got);
+        t(name, okf);
+    }
     px("frame 2, Q1: the stream rewritten after its fence, faded by uScale[1]", rp(25, 22), 128, 0, 128, 1);
     px("Q2: the orphaned index buffer's new indices (the lower right triangle)", rp(46, 17), 128, 128, 0, 1);
     px("Q2: its upper left corner stays clear", rp(41, 22), 0, 0, 0, 0);

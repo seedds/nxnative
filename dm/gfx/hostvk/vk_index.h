@@ -12,7 +12,7 @@ typedef struct { int prim, isz; uint64_t src; uint32_t n; int restart; uint32_t 
 // count is the GPU's: the draw reads an indexed indirect record)
 enum { HVK_IX_NATIVE, HVK_IX_SHARED, HVK_IX_MAP, HVK_IX_EXPAND, HVK_IX_RESTART };
 typedef struct {
-    int form, mode;              // mode: the kernels' (0 widen, 1 quads, 2 quad strips, 3 fans and polygons, 4 line loops, 5 lists)
+    int form, mode;              // mode: the kernels' (0 widen, 1 quads, 2 quad strips, 3 fans, 4 line loops, 5 lists, 7 polygons)
     VkPrimitiveTopology topo;    // the topology the draw is made with
     int restart;                 // primitive restart enable for it: an indexed strip or fan, or list where the device restarts lists, of the game's or widened indices
     uint32_t nout;               // the indices drawn (MAP, EXPAND, SHARED), or at most (RESTART: a segment of the whole stream draws the most)

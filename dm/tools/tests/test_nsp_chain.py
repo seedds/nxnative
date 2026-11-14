@@ -29,6 +29,16 @@ class Base(unittest.TestCase):
             cm.__enter__(); self.addCleanup(cm.__exit__, None, None, None)
 
 
+class CacheNote(unittest.TestCase):
+    def test_the_metal_cache_is_counted_beside_the_per_shader_cache(self):   # a chain change read "0 from the cache" while the Metal cache gave back 95% of the libraries
+        log = 'shader cache: hit 0, rebuilt 42851\nMetal cache: mac 98356 reused, 8 compiled; mac_tensor 3 reused, 0 compiled, 2 filled from earlier builds\n'
+        self.assertEqual(nsp.shader_cache_note(log), ' (0 from the cache; Metal libraries: 98,359 reused, 8 compiled)')
+
+    def test_a_log_without_either_says_nothing(self):
+        self.assertEqual(nsp.shader_cache_note('shaders 1: ok 1\n'), '')
+        self.assertEqual(nsp.shader_cache_note('shader cache: hit 3, rebuilt 0\n'), ' (3 from the cache)')
+
+
 class Header(Base):
     def setUp(self):   # a repository whose chain tools are the real ones (linked) and whose header is its own
         super().setUp()

@@ -2502,13 +2502,13 @@ def build_shaders(py, repo, sh, xlate, env, logs, g, pkg_key=None, mac=False, se
     t = log.read_text(errors='replace')
     if own := re.search(r'^note: (built with this Mac\'s compilers.*)$', t, re.M): say(own.group(1))
     if lost := re.search(r'^\[RED\] lost without failing: .*$', t, re.M): say(f'{lost.group(0)}; each is named in {log}, and the build goes on: a shader the game never reaches costs nothing')
-    m, c = re.search(r'shaders (\d+): ok (\d+)', t), re.search(r'shader cache: hit (\d+)', t)
+    m = re.search(r'shaders (\d+): ok (\d+)', t)
     note = ''
     if m:
         total, ok = int(m.group(1)), int(m.group(2))
         failed = f'; {total - ok:,} failed, reasons at the end of {log}' if ok < total else ''
         note = f'{ok:,} of {total:,} shaders ready{failed}'
-        PROG.end(f'{ok:,} of {total:,} shaders ready' + (f' ({int(c.group(1)):,} from the cache)' if c else '') + failed)
+        PROG.end(f'{ok:,} of {total:,} shaders ready' + shader_cache_note(t) + failed)
     else: PROG.end()
     if not seen: shader_regressions(py, repo, sh / 'cache', chain, logs)   # before the key: a stopped build is checked again on the next run
     if key:
@@ -2517,6 +2517,15 @@ def build_shaders(py, repo, sh, xlate, env, logs, g, pkg_key=None, mac=False, se
         prune_stale_chains(sh, chain); prune_shader_cache(sh, chain); pack_libraries(sh, chain, None if mac else pull)
         if mac: rmtree(sh / 'partial')   # the whole library replaces a partial one; partial-keys.txt stays
     return out
+
+
+def shader_cache_note(log):
+    """What dmsh_build.py's log says of its two caches, for the step's last line. "From the cache" counts the per-shader cache, whose keys hold the chain version, so a chain change reads 0 there
+    even when the Metal cache, keyed by the MSL, compiles almost nothing: without its count that line reads as if every library had been compiled again"""
+    hit = re.search(r'shader cache: hit (\d+)', log)
+    metal = [(int(a), int(b)) for line in re.findall(r'^Metal cache: (.*)$', log, re.M) for a, b in re.findall(r'(\d+) reused, (\d+) compiled', line)]
+    parts = ([f'{int(hit.group(1)):,} from the cache'] if hit else []) + ([f'Metal libraries: {sum(a for a, _ in metal):,} reused, {sum(b for _, b in metal):,} compiled'] if metal else [])
+    return f' ({"; ".join(parts)})' if parts else ''
 
 
 def check_metal(py, repo, env):

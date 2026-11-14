@@ -12,6 +12,7 @@
 #import <Cocoa/Cocoa.h>
 #import <QuartzCore/CAMetalLayer.h>
 #import <Metal/Metal.h>
+#import <ImageIO/ImageIO.h>
 #import <GameController/GameController.h>
 #include "dm.h"
 #include "dm_input.h"
@@ -34,6 +35,7 @@ static void merge_rumble_to_s2(int on);
 #include <signal.h>
 #include <math.h>
 #include <sys/stat.h>
+#include "capture_mac.h"
 
 static CAMetalLayer *g_layer;
 static uint64_t g_btn;
@@ -662,6 +664,99 @@ static void *guest_tramp(void *p) {
 
 // Metal reads MTL_HUD_ENABLED when the process makes its first device, which can be before the window: set from DM_METAL_HUD before main (set in front_run, the HUD did not show)
 __attribute__((constructor)) static void hud_env(void) { front_hud_env(); }
+
+// Explicit local captures work in every profile, including apps opened directly from Finder.
+// AppKit owns this state; bounded log reads run on a utility queue. No repeating timer is installed.
+@interface DmCaptureNotice : NSTextField @end
+@implementation DmCaptureNotice
+- (NSView *)hitTest:(NSPoint)point { (void)point; return nil; }
+@end
+static NSTextField *g_capture_notice;
+static NSUInteger g_capture_notice_id;
+static void capture_notice(NSString *message) {
+    if (!g_capture_notice) {
+        NSView *v = g_win.contentView;
+        g_capture_notice = [DmCaptureNotice labelWithString:message];
+        g_capture_notice.frame = NSMakeRect(16, v.bounds.size.height - 56, MIN(640, v.bounds.size.width - 32), 36);
+        g_capture_notice.autoresizingMask = NSViewWidthSizable | NSViewMinYMargin;
+        g_capture_notice.alignment = NSTextAlignmentCenter; g_capture_notice.font = [NSFont systemFontOfSize:14 weight:NSFontWeightMedium];
+        g_capture_notice.textColor = NSColor.whiteColor; g_capture_notice.backgroundColor = [NSColor colorWithWhite:0 alpha:0.85];
+        g_capture_notice.drawsBackground = YES; [v addSubview:g_capture_notice];
+    }
+    g_capture_notice.stringValue = message; g_capture_notice.hidden = NO;
+    NSUInteger token = ++g_capture_notice_id;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 4 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+        if (token == g_capture_notice_id) g_capture_notice.hidden = YES;
+    });
+}
+
+@interface DmDiagnosticsMenu : NSObject
+@property(nonatomic, strong) NSURL *last;
+@property(nonatomic) BOOL busy;
+@property(nonatomic) CFTimeInterval requested;
+- (void)capture:(id)sender;
+- (void)reveal:(id)sender;
+@end
+@implementation DmDiagnosticsMenu
+- (void)capture:(id)sender {
+    (void)sender;
+    if (NSApp.currentEvent.type == NSEventTypeKeyDown && NSApp.currentEvent.isARepeat) return;
+    if (self.busy || (self.requested && CACurrentMediaTime() - self.requested < 10)) { capture_notice(@"Please wait before capturing again"); return; }
+    NSString *root = getenv("DM_DIAGNOSTICS_DIR") ? @(getenv("DM_DIAGNOSTICS_DIR")) :
+        [NSHomeDirectory() stringByAppendingPathComponent:@"Library/Logs/nxnative/diagnostics/" DM_GAME_ID];
+    NSString *name = [NSString stringWithFormat:@"%.0f-%@", NSDate.date.timeIntervalSince1970, NSUUID.UUID.UUIDString];
+    if (!root.length) { capture_notice(@"Invalid diagnostic capture folder"); return; }
+    NSURL *dir = [NSURL fileURLWithPath:[root stringByAppendingPathComponent:name] isDirectory:YES];
+    NSURL *metadata = [dir URLByAppendingPathComponent:@"capture.json"], *png = [dir URLByAppendingPathComponent:@"frame.png"];
+    NSURL *headFile = [dir URLByAppendingPathComponent:@"engine-head.log"], *tailFile = [dir URLByAppendingPathComponent:@"engine-tail.log"];
+    NSString *pngPath = png.path;
+    if (!dir || !metadata || !png || !pngPath || !headFile || !tailFile) { capture_notice(@"Invalid diagnostic capture folder"); return; }
+    NSError *error = nil;
+    if (![NSFileManager.defaultManager createDirectoryAtURL:dir withIntermediateDirectories:YES attributes:nil error:&error]) {
+        LOG("diagnostic capture could not create its folder: %s", error.localizedDescription.UTF8String);
+        capture_notice(@"Could not create diagnostic capture folder"); return;
+    }
+    self.busy = YES; self.requested = CACurrentMediaTime(); self.last = dir;
+    NSMutableDictionary *meta = [capture_metadata() mutableCopy];
+    meta[@"requested_at"] = [NSDate.date description];
+    meta[@"render_trace_status"] = @"Best effort: two frames requested; completion is not verified. Late frames or older details may fall outside the log excerpts.";
+    meta[@"log_excerpt_limits_bytes"] = @{@"head": @(64 * 1024), @"tail": @(8 * 1024 * 1024)};
+    NSData *initial = [NSJSONSerialization dataWithJSONObject:meta options:NSJSONWritingPrettyPrinted error:&error];
+    if (!initial || ![initial writeToURL:metadata options:NSDataWritingAtomic error:&error]) {
+        self.busy = NO; capture_notice(@"Could not write diagnostic metadata"); return;
+    }
+    NSString *log = capture_stderr_path();
+    void dm_gfx_passdump_next(long n);
+    LOG("diagnostic capture requested: 2 frames, %s", dir.path.UTF8String);
+    dm_gfx_passdump_next(2); dm_gfx_shot_at(1, pngPath.fileSystemRepresentation);
+    capture_notice(@"Capturing diagnostics…");
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC), dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        for (int i = 0; i < 20 && ![NSFileManager.defaultManager fileExistsAtPath:pngPath]; i++) usleep(250000);
+        BOOL ok = YES; NSError *err = nil;
+        if (log) {
+            NSData *head = capture_log_slice(log, NO, 64 * 1024), *tail = capture_log_slice(log, YES, 8 * 1024 * 1024);
+            BOOL h = head && [head writeToURL:headFile options:NSDataWritingAtomic error:&err];
+            BOOL t = tail && [tail writeToURL:tailFile options:NSDataWritingAtomic error:&err];
+            ok = h && t;
+        } else meta[@"log_note"] = @"stderr is not a regular log file; rendering details remain on stderr";
+        CGImageSourceRef source = CGImageSourceCreateWithURL((__bridge CFURLRef)png, NULL);
+        CGImageRef image = source ? CGImageSourceCreateImageAtIndex(source, 0, NULL) : NULL;
+        BOOL imageOK = image && CGImageSourceGetStatus(source) == kCGImageStatusComplete;
+        if (image) CGImageRelease(image); if (source) CFRelease(source);
+        meta[@"screenshot_saved"] = @(imageOK);
+        NSData *json = [NSJSONSerialization dataWithJSONObject:meta options:NSJSONWritingPrettyPrinted error:&err];
+        ok = json && [json writeToURL:metadata options:NSDataWritingAtomic error:&err] && ok;
+        BOOL saved = ok && [meta[@"screenshot_saved"] boolValue];
+        LOG("diagnostic capture %s: %s", saved ? "saved" : "incomplete", dir.path.UTF8String);
+        dispatch_async(dispatch_get_main_queue(), ^{
+            self.busy = NO; capture_notice(saved ? @"Diagnostics saved — Diagnostics menu → Show Last Capture" : @"Capture incomplete — check Diagnostics → Show Last Capture");
+        });
+    });
+}
+- (void)reveal:(id)sender { (void)sender; if (self.last) [NSWorkspace.sharedWorkspace activateFileViewerSelectingURLs:@[self.last]]; }
+- (BOOL)validateMenuItem:(NSMenuItem *)item { return item.action != @selector(reveal:) || self.last != nil; }
+@end
+static DmDiagnosticsMenu *g_diagnostics_menu;
 
 // ---------- Cheats: the menu and the panel (hle_cheats.c holds every state; these only show it and call it) ----------
 
@@ -1512,6 +1607,8 @@ void front_run(void (*guest)(void)) {
     // A game: tell macOS its work is latency-critical, so the system does not trade its frame time for power while the frame rate is capped
     static id activity; activity = [[NSProcessInfo processInfo] beginActivityWithOptions:NSActivityUserInitiated | NSActivityLatencyCritical reason:@"game"];
     if (!getenv("DM_WINDOW")) { guest(); return; }
+    // Full detail is quiet until an explicitly selected pass-dump frame; arm before replay reads the switch once.
+    if (!getenv("DM_NVN_PASSDUMP_ALL")) setenv("DM_NVN_PASSDUMP_ALL", "1", 0);
     @autoreleasepool {
         [NSApplication sharedApplication];
         [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
@@ -1562,6 +1659,12 @@ void front_run(void (*guest)(void)) {
         if (getenv("DM_CHEATS_WINDOW") && atoi(getenv("DM_CHEATS_WINDOW")))   // the Cheats panel open from the start (beside the game, not key)
             dispatch_async(dispatch_get_main_queue(), ^{ [g_cheats_menu showPanel:nil]; });
         [[bar addItemWithTitle:@"Window" action:nil keyEquivalent:@""] setSubmenu:wm];
+        g_diagnostics_menu = [DmDiagnosticsMenu new];
+        NSMenu *diagnostics = [[NSMenu alloc] initWithTitle:@"Diagnostics"];
+        NSMenuItem *cap = [diagnostics addItemWithTitle:@"Capture Rendering Diagnostics" action:@selector(capture:) keyEquivalent:@"d"];
+        cap.target = g_diagnostics_menu; cap.keyEquivalentModifierMask = NSEventModifierFlagCommand | NSEventModifierFlagShift;
+        [diagnostics addItemWithTitle:@"Show Last Capture" action:@selector(reveal:) keyEquivalent:@""].target = g_diagnostics_menu;
+        [[bar addItemWithTitle:@"Diagnostics" action:nil keyEquivalent:@""] setSubmenu:diagnostics];
         [wm addItemWithTitle:@"Enter Full Screen" action:@selector(toggleFullScreen:) keyEquivalent:@"f"].keyEquivalentModifierMask = NSEventModifierFlagControl | NSEventModifierFlagCommand;
         NSApp.mainMenu = bar;
         const char *fs = getenv("DM_FULLSCREEN");   // 1 (or any value but 0): start in fullscreen; 0, the settings window's Window, or unset: a window

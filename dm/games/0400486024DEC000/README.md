@@ -258,3 +258,11 @@ Its 37 kernels that correct samples, NDSR's network among them, gave about 0.25 
 - [dav1d decoded one frame at a time](../../../docs/reference/movies.md#dav1d-decoded-one-frame-at-a-time): resolved, the title movie's heavy packets on an M2 Pro; and the drain that must go to its end.
 - [`devicectl` copies a large RomFS image through the Mac's memory](../../../docs/reference/packing.md#devicectl-copies-a-large-romfs-image-through-the-macs-memory): the 26.2 GB image's pushes to an iPad filled a 16 GB Mac's swap and failed; now sent over AFC.
 - [`devicectl`'s `--remove-existing-content` empties the app's whole container](../../../docs/reference/packing.md#devicectls---remove-existing-content-empties-the-apps-whole-container): the first complete copy of the image, deleted by the DLC step after it.
+
+### Native Mac rendering captures
+
+Command-Shift-D requests a bounded local capture while a defect is visible:
+[Mac capture details](../../../docs/reference/rendering.md#capturing-a-transient-rendering-defect-on-the-mac).
+The shortcut, screenshot, selected pass frames and metadata were exercised in a
+local integration on M4 Max. That evidence is distinct from testing the standalone
+upstream branch; no new flicker or frame-rate fix is attributed to the shortcut.

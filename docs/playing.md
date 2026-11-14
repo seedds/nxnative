@@ -73,3 +73,21 @@ The mouse pointer hides when you press a key or a controller button, or move a s
 ## Shaders on first sight
 
 Short stutters the first time a new scene appears are normal: the app compiles graphics for it once and remembers them for the next launch. What it remembered, and what the game's list names, is built before the game starts, behind "Preparing shaders" and a progress bar when that takes more than half a second.
+
+
+## Capture a rendering problem on the Mac
+
+Press **Command-Shift-D** with the game active, or choose **Diagnostics → Capture
+Rendering Diagnostics**. A brief message appears in the game window. Each request
+requests one screenshot and two detailed NVN pass frames, and records rendering settings
+and bounded engine-log snapshots (64 KiB from the start and at most 8 MiB from the
+end). Captures can interrupt timing. Holding the shortcut does not repeat captures;
+requests are spaced by at least ten seconds. There is no continuous readback.
+
+**Diagnostics → Show Last Capture** reveals the folder in Finder. Apps opened
+directly use `~/Library/Logs/nxnative/diagnostics/<title ID>/`; a front end may set
+`DM_DIAGNOSTICS_DIR`. Captures remain local and contain no copied saves. Review log
+paths before sharing. With a stalled frame loop the logs may be saved without a
+screenshot; the on-screen message and metadata identify incomplete captures. Log
+excerpts can omit late frames; trace completion is best effort and explicitly
+marked in the metadata.

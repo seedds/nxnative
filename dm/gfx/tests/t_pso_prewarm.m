@@ -177,6 +177,7 @@ int main(int argc, char **argv) { @autoreleasepool {
     setenv("DM_PSO_ARCHIVE", "off", 1); setenv("DM_PSO_MANIFEST", "off", 1);
 #if !TARGET_OS_IPHONE
     if (cache_clean_tests(root)) { [NSFileManager.defaultManager removeItemAtPath:root error:nil]; return 1; }
+    if (argc >= 2 && !strcmp(argv[1], "--cache-only")) { [NSFileManager.defaultManager removeItemAtPath:root error:nil]; return 0; }
 #endif
     if (!fixtures(msl, tables)) { printf("t_pso_prewarm: no Metal compiler (xcrun metal), not run\n"); [NSFileManager.defaultManager removeItemAtPath:root error:nil]; return 0; }
     mtl_init(); shmap_load();

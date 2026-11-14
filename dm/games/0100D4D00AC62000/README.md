@@ -37,6 +37,10 @@ On the Mac (2026-11-13, an Apple silicon MacBook on macOS 27.2.1, a Mac app from
 - The credit dialog after the intro closes with A. Out Run is an arcade game on its own coin: X inserts a credit and X again starts the game; the music is chosen by steering.
 - The keyboard plays as player 1: J is A, U is X, the arrows the D-pad and WASD the left stick. The game draws its 4:3 arcade picture inside its own black bars in the 16:9 frame; fullscreen (⌃⌘F) keeps them.
 
+## Menus
+
+- **The Start Menu's and pause menu's slot panel, half black (resolved, not a fault).** The panel beside the menu is the save-state slot carousel: a 4:3 screenshot on the left and the save's date and time on the right. An empty slot shows the SEGA AGES placeholder at 4:3 and an empty, black details area; after a Save in the pause menu the slot showed the race's screenshot and `11/13/2026 23:40`, and Load was enabled.
+
 ## Found on this game
 
 - Nothing new: the standard host ran it unchanged.
@@ -46,4 +50,3 @@ On the Mac (2026-11-13, an Apple silicon MacBook on macOS 27.2.1, a Mac app from
 - iPhone: an IPA from this profile is not built or tested.
 - The online rankings (NEX) were not tried; the log shows no network use in these runs.
 - Only Stage 1 was raced; the later stages, the Start Menu's Ranking, Play Replay and Manual, and the game's own display options (its wallpaper and screen size) are untested.
-- The SEGA AGES preview panel on the Start Menu showed its right half black in one screenshot; whether that is the panel's transition or a rendering fault is not known.

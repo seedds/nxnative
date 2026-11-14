@@ -199,11 +199,11 @@ bool load_launch(const std::string &path, LaunchFile *out, std::string *err) {
             else if (name == "profile") out->profile = value; else if (name == "package") out->package_dir = value; else if (name == "packer") out->packer = value;
             else if (name == "python") out->python = value; else if (name == "keys") out->keys = value; else if (name == "nxaot") out->nxaot = value;
         } else if (kind == "made") {
-            if (name == "profile") out->made_profile = value; else if (name == "misses") out->made_misses = value;
-        } else if (kind == "samples" || kind == "misses") {   // '<functions> <samples> <digest>', '<addresses> <digest>' (build_ipa_from_nsp.py made_rows)
+            if (name == "profile") out->made_profile = value; else if (name == "misses") out->made_misses = value; else if (name == "targets") out->made_targets = value;
+        } else if (kind == "samples" || kind == "misses" || kind == "targets") {   // '<functions> <samples> <digest>', '<addresses> <digest>', '<sites> <digest>' (made_rows)
             std::istringstream ss(value); Recorded r;
             if (kind == "samples" ? !(ss >> r.count >> r.samples >> r.digest) : !(ss >> r.count >> r.digest)) continue;
-            (kind == "samples" ? out->made_samples : out->made_miss)[name] = r;
+            (kind == "samples" ? out->made_samples : kind == "misses" ? out->made_miss : out->made_target)[name] = r;
         } else if (kind == "pack") out->packs.push_back({name, value, false});
         else if (kind == "env") out->env.push_back({name, value});
     }
@@ -866,6 +866,40 @@ static bool read_misses(const std::string &path, const std::string &sha, Recorde
     return true;
 }
 
+// <module>.targets.tsv (dm/host/aot_targets.c) as nxaot reads it beside the profile (dm/tools/aot/src/build/pack.cpp TargetsFromProfile) and the packer takes it (aot_targets):
+// '0x<site> 0x<target> <binds>' lines, '#' to the end of a line a comment; taken when it parses and its image line names sha (as the misses: the file is merged over the sessions
+// of one image, and the packer refuses one that names none or another). r: the sites with a dominant target and the digest of the (site, dominant target) pairs. The rule is
+// nxaot's, stated here, in the packer's targets_summary and in TargetsFromProfile (one rule in three languages; t_launcher_model and test_nsp_x86.py check the same fixture):
+// a site's binds summed per target (a row of 0 binds counts for nothing), the target with the most (the lowest offset of equal ones) dominates when it has at least 90 % of the
+// site's binds (10 x best >= 9 x total). nxaot then guards the site only at tier H and only at a blr or br to a function of the module; the launcher cannot tell those without the
+// module's code, so it counts every site with a dominant target
+static bool read_targets(const std::string &path, const std::string &sha, Recorded *r) {
+    std::string text, image;
+    if (!read_file(path, &text)) return false;
+    std::map<uint64_t, std::map<uint64_t, uint64_t>> sites;   // site -> target -> binds
+    for (const auto &line : lines_of(text)) {
+        if (image.empty()) image = image_of(line);
+        auto w = words(line.substr(0, line.find('#')));
+        if (w.empty()) continue;
+        uint64_t site, target, n;
+        if (w.size() != 3 || !hex_word(w[0], &site) || !hex_word(w[1], &target) || !dec_word(w[2], &n)) return false;   // nxaot stops on such a row; the packer takes none
+        if (n) sites[site][target] += n;
+    }
+    if (image.empty() || (!sha.empty() && image != sha)) return false;
+    std::string list;
+    *r = Recorded();
+    for (const auto &s : sites) {
+        uint64_t total = 0, best = 0, to = 0;
+        for (const auto &t : s.second) { total += t.second; if (t.second > best) { best = t.second; to = t.first; } }
+        const bool dominant = total <= UINT64_MAX / 10 ? best * 10 >= total * 9 : best >= total - total / 10;   // the second form for counts no session reaches
+        if (!dominant) continue;   // no dominant target: nxaot does not guard it
+        char buf[48]; std::snprintf(buf, sizeof buf, "%llx:%llx\n", (unsigned long long)s.first, (unsigned long long)to);
+        list += buf; r->count++;
+    }
+    r->digest = fnv64(list);
+    return true;
+}
+
 static std::string count_text(uint64_t n) {   // 3400 -> "3,400"
     std::string d = std::to_string(n), out;
     for (size_t i = 0; i < d.size(); i++) { if (i && (d.size() - i) % 3 == 0) out += ','; out += d[i]; }
@@ -884,10 +918,23 @@ ProfileState profile_state(const Game &g, const std::string &mode) {
     ProfileState s; s.folder = profile_folder(g);
     const LaunchFile &l = g.launch;
     std::error_code ec;
-    for (const auto &e : fs::directory_iterator(P(s.folder), ec)) {   // <module>.tsv and <module>.misses.tsv (dm/host/aot_profile.c), not the writer's .tmp files
+    // <module>.tsv, <module>.misses.tsv (dm/host/aot_profile.c) and <module>.targets.tsv (aot_targets.c), not the writers' .tmp files; another .tsv is named once in the log
+    static std::set<std::string> said;
+    for (const auto &e : fs::directory_iterator(P(s.folder), ec)) {
         std::string n = S(e.path().filename());
-        if (e.is_regular_file(ec) && n.size() >= 5 && !n.compare(n.size() - 4, 4, ".tsv")) s.files++;
+        if (!e.is_regular_file(ec) || n.size() < 5 || n.compare(n.size() - 4, 4, ".tsv")) continue;
+        std::string stem = n.substr(0, n.size() - 4);
+        for (const char *kind : {".misses", ".targets"}) {
+            const size_t k = std::strlen(kind);
+            if (stem.size() > k && !stem.compare(stem.size() - k, k, kind)) { stem.resize(stem.size() - k); break; }
+        }
+        if (!stem.empty() && stem.find('.') == std::string::npos) { s.files++; continue; }
+        s.ignored.push_back(n);
+        if (said.insert(S(e.path())).second)
+            std::fprintf(stderr, "nxlauncher: %s: ignored: the profile folder holds the host's <module>.tsv, <module>.misses.tsv and <module>.targets.tsv, and this is none of them\n",
+                         S(e.path()).c_str());
     }
+    std::sort(s.ignored.begin(), s.ignored.end());
     const std::string suffix = kPackSuffix;
     const Pack *pack = nullptr;
     for (const auto &p : l.packs) {
@@ -903,12 +950,14 @@ ProfileState profile_state(const Game &g, const std::string &mode) {
     // What the packer would take now: per module of the packs, its files of its image
     for (const auto &m : pack_images(pack->folder)) {
         Recorded r;
-        if (read_profile(S(P(s.folder) / P(m.first + ".tsv")), m.second, &r) && r.count) s.samples[m.first] = r;
+        const bool profile = read_profile(S(P(s.folder) / P(m.first + ".tsv")), m.second, &r);
+        if (profile && r.count) s.samples[m.first] = r;
         if (read_misses(S(P(s.folder) / P(m.first + ".misses.tsv")), m.second, &r) && r.count) s.misses[m.first] = r;
+        if (profile && read_targets(S(P(s.folder) / P(m.first + ".targets.tsv")), m.second, &r) && r.count) s.targets[m.first] = r;   // nxaot reads it beside the profile only
     }
-    // Against what the packs took (the made rows); without them, as packs made without either
+    // Against what the packs took (the made rows); without them, as packs made without any
     s.known = !l.made_profile.empty() || !l.made_misses.empty();
-    uint64_t new_misses = 0, without = 0, new_functions = 0, longer = 0;
+    uint64_t new_misses = 0, without = 0, new_functions = 0, longer = 0, new_targets = 0, targets_without = 0;
     bool other_misses = false;
     if (!s.known || l.made_misses == "yes") {
         for (const auto &m : s.misses) {
@@ -928,11 +977,24 @@ ProfileState profile_state(const Game &g, const std::string &mode) {
                 longer = std::max(longer, had.samples ? (now.samples - had.samples) * 100 / had.samples : 100);
         }
     }
+    // The known targets (launcher_model.h, "The second pack"): made targets as written, or for packs made before that row as made profile says, unknown (no made rows) or not
+    const std::string made_targets = !l.made_targets.empty() ? l.made_targets : l.made_profile == "unused" ? "unused" : "";
+    if (made_targets != "unused") {
+        for (const auto &m : s.targets) {
+            auto it = l.made_target.find(m.first);
+            if (made_targets != "yes" || it == l.made_target.end()) { targets_without += m.second.count; continue; }   // the packs took no targets of the module
+            const Recorded &had = it->second, &now = m.second;
+            const uint64_t more = now.count > had.count ? now.count - had.count : now.count == had.count && now.digest != had.digest ? 1 : 0;   // at least that many new sites
+            if (more && more * 100 >= had.count * kMoreTargetsPercent) new_targets += more;
+        }
+    }
     if (new_misses) s.reasons.push_back(counted(new_misses, "new JIT miss", "new JIT misses"));
     else if (other_misses) s.reasons.push_back("JIT misses the packs did not take");
     if (new_functions) s.reasons.push_back(counted(new_functions, "new sampled function", "new sampled functions"));
     if (without) s.reasons.push_back(counted(without, "sampled function", "sampled functions") + " the packs were made without");
     if (longer) s.reasons.push_back("a longer session's profile (+" + std::to_string(longer) + " % samples)");
+    if (new_targets) s.reasons.push_back(counted(new_targets, "new known call target", "new known call targets"));
+    if (targets_without) s.reasons.push_back(counted(targets_without, "known call target", "known call targets") + " the packs were made without");
     if (!s.known && !s.reasons.empty()) s.reasons.push_back("the packs were made before the launch file recorded what they took");
     return s;
 }

@@ -1,7 +1,7 @@
 // nxlauncher's model (dm/launcher/launcher_model.cpp) over a games folder this test writes (fake_games.h): the games found and their pack modes, the settings rows and their effective
 // values (saved choices, a value the pack does not offer, the pack's own defaults, what the environment fixes), what starts a game (the pack, the host, the environment in the order
 // run.sh gives it, DM_SAVED_CHOICES=0, NXHOST), the saved-choice round trip through the player's env.txt, the second pack (the profile folder, "Record a profile while playing",
-// whether the recorded profile and JIT misses make a better pack possible against what the launch file says the packs took, the repack's command), a moved bundle (the host, packer
+// whether the recorded profile, JIT misses and known targets make a better pack possible against what the launch file says the packs took, the repack's command), a moved bundle (the host, packer
 // and nxaot taken from the launcher's folder when the launch file's are gone; NXHOST over both; the problem when none is there), the launcher's own settings,
 // DM_LAUNCHER and "Show this window at launch", and a child process with its environment,
 // working folder, log and exit status (this program, which acts as nxhost-run and as the packer with NXL_FAKE_HOST=1).
@@ -212,6 +212,26 @@ static void misses_file(const fs::path &dir, const std::string &name, const std:
     fake::write(dir / (name + ".misses.tsv"), t);
 }
 
+// The host's known targets (dm/host/aot_targets.c): '#' lines naming the module and its image, then '0x<site> 0x<target> <binds>'
+struct Target { uint64_t site, target, binds; };
+static void targets_file(const fs::path &dir, const std::string &name, const std::string &sha, const std::vector<Target> &rows) {
+    std::string t = "# nxaot targets: what the x86-64 engine's inline caches of indirect calls and branches were bound to (dm/host/aot_targets.c, DM_AOT_PROFILE); "
+                    "nxaot build --profile <module>.tsv reads it beside the profile\n";
+    if (!sha.empty()) t += "# module " + name + ", build ID " + std::string(32, 'a') + ", image SHA-256 " + sha + "\n";
+    t += "# pack /packs/" + name + kPackSuffix + "\n# <site module offset> <target module offset> <binds>\n";
+    for (const auto &r : rows) { char b[96]; std::snprintf(b, sizeof b, "0x%llx 0x%llx %llu\n", (unsigned long long)r.site, (unsigned long long)r.target, (unsigned long long)r.binds); t += b; }
+    fake::write(dir / (name + ".targets.tsv"), t);
+}
+// The fixture dm/tools/tests/test_nsp_x86.py reads too (TARGET_ROWS): nxaot's rule (at least 90 % of a site's binds) gives 0x1a64 -> 0x1820 (its only target), 0x2000 -> 0x3000 (18
+// of 20), 0x2300 -> 0x3300 (5 + 4 in two rows); 0x1984 (2, 1, 2), 0x2100 (17 of 19) and 0x2200 (0 binds) none. Its digest: FNV-1a 64 of '1a64:1820\n2000:3000\n2300:3300\n'
+static const std::vector<Target> kTargetRows = {{0x1a64, 0x1820, 1}, {0x1984, 0x1690, 2}, {0x1984, 0x16d0, 1}, {0x1984, 0x1720, 2}, {0x2000, 0x3000, 18}, {0x2000, 0x3100, 2},
+                                                {0x2100, 0x3000, 17}, {0x2100, 0x3100, 2}, {0x2200, 0x3200, 0}, {0x2300, 0x3300, 5}, {0x2300, 0x3300, 4}};
+static std::vector<Target> single_targets(uint64_t sites) {   // sites call sites with one target each
+    std::vector<Target> rows;
+    for (uint64_t i = 0; i < sites; i++) rows.push_back({0x10000 + 4 * i, 0x20000, 1});
+    return rows;
+}
+
 static std::vector<std::pair<uint64_t, uint64_t>> sampled(uint64_t offsets, uint64_t samples) {   // offsets functions sampled, samples in all
     std::vector<std::pair<uint64_t, uint64_t>> rows;
     for (uint64_t i = 0; i < offsets; i++) rows.push_back({0x1000 + 0x40 * i, samples / offsets + (i == 0 ? samples % offsets : 0)});
@@ -383,6 +403,69 @@ static void second_pack(const fake::Folder &f) {
     fake::write(prof / "main.tsv", "0x100 many\n");          // one that does not parse: the packer packs without it
     s = state(yes + same);
     CHECK(!s.better() && s.samples.empty() && s.files == 4, "a profile of another image, of no module of the packs, or one that does not parse: not taken");
+    // The known targets (<module>.targets.tsv, aot_targets.c): what changes the next pack is a site whose dominant target the packs were made without
+    fs::remove_all(prof);
+    const std::string d_targets = "fca3e8e0f0106c26";   // test_nsp_x86.py DIGEST_TARGETS
+    misses_file(prof, "main", main_sha, {{0x100, "nonlocal", 2}, {0x208, "indirect", 1}});
+    targets_file(prof, "main", main_sha, kTargetRows);
+    fake::write(prof / "main.weights.tsv", "0x100 0x200 1\n");   // no file the host writes: ignored, never read as a profile
+    s = state(main_same);
+    CHECK(s.files == 2 && s.ignored == std::vector<std::string>{"main.weights.tsv"} && s.samples.empty() && s.targets.empty() && !s.better(),
+          "a targets file alone is not a profile, and without the profile beside it nxaot reads none: nothing; another .tsv ignored: " + s.reason());
+    profile_file(prof, "main", main_sha, sampled(100, 10000));   // main_same's profile
+    const std::string targets_yes = main_same + "made\ttargets\tyes\n", took = targets_yes + "targets\tmain\t3 " + d_targets + "\n";
+    s = state(main_same);
+    CHECK(s.targets["main"].count == 3 && s.targets["main"].digest == d_targets && s.files == 3,
+          "main.targets.tsv as the packer reads it: 3 sites with a dominant target (nxaot's 90 %), the packer's digest of the pairs");
+    CHECK(s.better() && s.reason() == "3 known call targets the packs were made without", "made rows from before the targets rows, a targets file now: better: " + s.reason());
+    s = state("");
+    CHECK(s.reason() == "2 new JIT misses; 100 sampled functions the packs were made without; 3 known call targets the packs were made without; the packs were made before the "
+                        "launch file recorded what they took", "no made rows at all: every file counts: " + s.reason());
+    {
+        fake::write(launch, launch0 + took);
+        auto gs = find_games(fake::str(f.games));
+        const LaunchFile &l = gs[0].launch;
+        CHECK(l.made_targets == "yes" && l.made_target.at("main").count == 3 && l.made_target.at("main").digest == d_targets,
+              "the made targets and targets rows read");
+    }
+    CHECK(!state(took).better(), "the packs took them: nothing better");
+    CHECK(state(targets_yes).reason() == "3 known call targets the packs were made without",
+          "made targets yes but no targets row of main (no targets of it then): better");
+    targets_file(prof, "main", main_sha, [] { auto r = kTargetRows; r.push_back({0x1a64, 0x1820, 7}); r.push_back({0x2000, 0x3000, 9}); r.push_back({0x1984, 0x1690, 1}); return r; }());
+    s = state(took);
+    CHECK(s.targets["main"].digest == d_targets && !s.better(), "more binds at the same dominant targets (a later session merged in): the same pairs, nothing better: " + s.reason());
+    targets_file(prof, "main", main_sha, [] { auto r = kTargetRows; r.push_back({0x2400, 0x3400, 1}); return r; }());
+    s = state(took);
+    CHECK(s.better() && s.reason() == "1 new known call target", "a new site with a dominant target, 1 of 3 (over 10 %): better: " + s.reason());
+    targets_file(prof, "main", main_sha, [] { auto r = kTargetRows; r.push_back({0x2000, 0x3100, 16}); return r; }());
+    s = state(took);
+    CHECK(s.targets["main"].count == 2 && !s.better(),
+          "a site whose binds became 50/50 (18 and 18): no dominant target, 2 sites; the packs' guard there still works (a mismatch takes the inline cache): nothing better");
+    targets_file(prof, "main", main_sha, [] { auto r = kTargetRows; r.push_back({0x2000, 0x3100, 200}); return r; }());
+    s = state(took);
+    CHECK(s.targets["main"].count == 3 && s.targets["main"].digest != d_targets && s.better() && s.reason() == "1 new known call target",
+          "a site whose dominant target changed (0x3000 to 0x3100): as many sites, another digest: at least 1 new: " + s.reason());
+    targets_file(prof, "main", main_sha, single_targets(109));
+    const std::string hundred_sites = targets_yes + "targets\tmain\t100 0000000000000000\n";
+    CHECK(!state(hundred_sites).better(), "9 new sites with a dominant target among 100 (9 %): below the threshold, nothing better");
+    targets_file(prof, "main", main_sha, single_targets(110));
+    s = state(hundred_sites);
+    CHECK(s.better() && s.reason() == "10 new known call targets", "10 new among 100 (10 %): better: " + s.reason());
+    targets_file(prof, "main", main_sha, single_targets(100));
+    CHECK(state(hundred_sites).reason() == "", "as many sites, another digest, 1 of 100 at least (1 %): nothing better");
+    targets_file(prof, "main", main_sha, kTargetRows);
+    s = state(main_same + "made\ttargets\tno\n");
+    CHECK(s.better() && s.reason() == "3 known call targets the packs were made without", "made targets no (--no-profile; a repack takes them with the profile): better: " + s.reason());
+    CHECK(!state(main_same + "made\ttargets\tunused\n").better(), "made targets unused (NXAOT_PROFILE_TARGETS=0, or no profile taken): nothing better");
+    CHECK(state("made\tprofile\tunused\nmade\tmisses\tyes\nmisses\tmain\t2 " + d_misses + "\n").reason().empty(),
+          "made profile unused and no made targets row: no targets taken by a repack either");
+    targets_file(prof, "main", other_sha, kTargetRows);
+    s = state(targets_yes);
+    CHECK(s.targets.empty() && !s.better(), "targets recorded on another image: the packer would not take them");
+    targets_file(prof, "main", "", kTargetRows);
+    CHECK(state(targets_yes).targets.empty(), "targets that name no image: not taken (as the misses)");
+    fake::write(prof / "main.targets.tsv", "# module main, build ID " + std::string(32, 'a') + ", image SHA-256 " + main_sha + "\n0x2000 0x3000 many\n");
+    CHECK(state(targets_yes).targets.empty(), "a row that does not parse: not taken (nxaot stops on it, the packer keeps it from nxaot)");
     fake::write(launch, launch0);
     fs::remove_all(prof);
     // The repack: the packer on the NSP folder with this system, the mode and what the pack was made with

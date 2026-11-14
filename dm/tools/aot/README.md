@@ -3110,8 +3110,11 @@ constant and a direct call, which LLVM may inline when the target is in the same
   code behind a hot single-target indirect site (fnptr runs 7 µs, the benchmark's time is the JIT fallback's). That needs a game's profile, or a
   corpus program with a rounds symbol around such calls.
 - **Not done here.** Windows: the recorder and the writer are the same C (`aot_targets.c`, `MoveFileExA` for the replace) and `t_aot_targets`
-  uses `_popen`, not run (no Windows runner here). Later steps outside nxaot and the host: the launcher's "better pack" rule (a targets file that
-  would guard more sites) and the packer's `made` rows (a digest of the targets file the pack took).
+  uses `_popen`, not run (no Windows runner here). The launcher and the packer know the file since: the packer's `made targets` and `targets <module>
+  <sites> <digest>` rows (the sites with a dominant target by this rule, the digest of their `<site>:<target>` pairs; the pairs in the pack's key), the
+  launcher's "better pack" rule on a site with a dominant target the packs were made without, at least 10 % more of them
+  ([launcher_model.h](../../launcher/launcher_model.h), "The second pack"); the rule is stated three times (`TargetsFromProfile`, the packer's
+  `targets_summary`, the launcher's `read_targets`), the last two tested on one fixture.
 
 ## The lock file
 

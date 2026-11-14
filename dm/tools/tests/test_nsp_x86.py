@@ -75,13 +75,19 @@ def launch_rows(path):
 
 
 def made(path):
-    """The launch file's rows of what the packs were made with (made, samples, misses: made_rows), which the launcher compares with the profile folder"""
-    return [r for r in launch_rows(path) if r[0] in ('made', 'samples', 'misses')]
+    """The launch file's rows of what the packs were made with (made, samples, misses, targets: made_rows), which the launcher compares with the profile folder"""
+    return [r for r in launch_rows(path) if r[0] in ('made', 'samples', 'misses', 'targets')]
 
 
 # The digests the launcher checks too (dm/launcher/tests/t_launcher_model.cpp holds the same constants): FNV-1a 64 of main.tsv's offsets 0x100 and 0x200 ('100\n200\n'), and of the
 # misses' pairs (0x100 nonlocal) and (0x208 indirect) ('100 nonlocal\n208 indirect\n')
 DIGEST_OFFSETS, DIGEST_MISSES = 'ce9643fb137f8dce', 'b3c6eacf4fcf4a0e'
+# The known targets' fixture, the same rows in t_launcher_model.cpp (kTargetRows), and the dominant targets nxaot's rule gives them (dm/tools/aot/src/build/pack.cpp
+# TargetsFromProfile: at least 90 % of a site's binds): 0x1a64 its only target; 0x1984 none (2, 1, 2: the best 40 %); 0x2000 0x3000 (18 of 20, 90 %); 0x2100 none (17 of 19,
+# 89 %); 0x2200 no site (0 binds); 0x2300 0x3300 (a repeated row, 5 + 4). DIGEST_TARGETS: FNV-1a 64 of '1a64:1820\n2000:3000\n2300:3300\n'
+TARGET_ROWS = [(0x1a64, 0x1820, 1), (0x1984, 0x1690, 2), (0x1984, 0x16d0, 1), (0x1984, 0x1720, 2), (0x2000, 0x3000, 18), (0x2000, 0x3100, 2), (0x2100, 0x3000, 17),
+               (0x2100, 0x3100, 2), (0x2200, 0x3200, 0), (0x2300, 0x3300, 5), (0x2300, 0x3300, 4)]
+DOMINANT, DIGEST_TARGETS = ((0x1a64, 0x1820), (0x2000, 0x3000), (0x2300, 0x3300)), 'fca3e8e0f0106c26'
 
 
 def env_txt(path):
@@ -138,7 +144,7 @@ class Pack(unittest.TestCase):
         self.nro = b'\0' * 0x10 + b'NRO0' + bytes(0x6c)   # the module the game loads at run time, collected by nro_collect.py (mocked)
         self.nxaot = self.tmp / 'bin/nxaot'; self.nxaot.parent.mkdir(); self.nxaot.write_text(NXAOT.format(py=sys.executable)); self.nxaot.chmod(0o755)
         self.dll = self.tmp / 'xlate_vk/dmsh_xlate_vk.dll'; self.dll.parent.mkdir(); self.dll.write_bytes(b'translator')
-        self.said, self.ran, self.rewrites = [], [], []
+        self.said, self.ran, self.rewrites, self.targets_switch = [], [], [], []
         self.gfx = 'nvn'
         fam = {'base': self.nsp_dir / 'base.nsp', 'updates': [], 'dlc': []}
         for cm in (mock.patch.dict(os.environ, {'DM_GAMES_DIR': str(self.tmp / 'games'), 'XLATE_VK': str(self.dll)}), mock.patch.dict(sys.modules, {'capstone': types.SimpleNamespace(__version__='test')}),
@@ -169,7 +175,9 @@ class Pack(unittest.TestCase):
         cmd = [str(c) for c in cmd]; log = Path(log); log.parent.mkdir(parents=True, exist_ok=True)
         tool = Path(cmd[1] if cmd[0] == sys.executable else cmd[0]).name
         self.ran.append((tool, cmd))
-        if tool == 'nxaot': return REAL_RUN(cmd, log, env=env, cwd=cwd, on_line=on_line, ok=ok)   # the fake nxaot, run for real
+        if tool == 'nxaot':   # the fake nxaot, run for real; whether the packer kept the targets file from it (NXAOT_PROFILE_TARGETS)
+            self.targets_switch.append((env or os.environ).get('NXAOT_PROFILE_TARGETS'))
+            return REAL_RUN(cmd, log, env=env, cwd=cwd, on_line=on_line, ok=ok)
         if tool == 'settings.py':   # the launcher's settings (test_settings_platforms.py tests the lists): what it was asked for, and a list of one row
             self.settings_env = {k: env.get(k) for k in ('SETTINGS_PLATFORM', 'GFXAPI', 'DM_LANG')}
             Path(cmd[-1]).write_text(json.dumps({'schema': 1, 'game': cmd[2], 'settings': [{'env': 'DM_RUMBLE', 'kind': 'toggle', 'section': 'Controls', 'label': 'Game rumble', 'note': '',
@@ -198,7 +206,7 @@ class Pack(unittest.TestCase):
 
     # ---- helpers ----
     def pack(self, platform='linux', *extra):
-        self.ran.clear(); self.rewrites.clear(); self.said.clear()
+        self.ran.clear(); self.rewrites.clear(); self.said.clear(); self.targets_switch.clear()
         args = nsp.parse_args([str(self.nsp_dir), '-k', str(self.keys), '--platform', platform, '--nxaot', str(self.nxaot)] + list(extra))
         nsp.main(args)
 
@@ -320,7 +328,7 @@ class Linux(Pack):
         self.pack()
         sha = (self.aot / 'main.aot.tsv').read_text().split('\n', 1)[0].split('\t')[3]
         launch = self.work / 'launch-linux.tsv'
-        self.assertEqual(made(launch), [('made', 'profile', 'yes'), ('made', 'misses', 'yes')])   # no profile yet: no module's row
+        self.assertEqual(made(launch), [('made', 'profile', 'yes'), ('made', 'misses', 'yes'), ('made', 'targets', 'yes')])   # no profile yet: no module's row
         self.assertEqual(nsp.fnv64(''), 'cbf29ce484222325'); self.assertEqual(nsp.fnv64('a'), 'af63dc4c8601ec8c')   # FNV-1a 64's offset basis and its test vector
         prof = self.wdir / 'profile'; prof.mkdir(parents=True)
         self.assertIn(f'\n# export DM_AOT_PROFILE={prof}\nexec ', (self.work / 'run.sh').read_text())   # run.sh shows how to record one
@@ -335,7 +343,7 @@ class Linux(Pack):
         self.assertIn(f'main: sample profile {prof / "main.tsv"} (42 samples at 2 functions): those at tier H, the others at C', self.said)
         self.assertTrue(any(m.startswith(f'the sample profile {prof / "nro0.tsv"} was recorded on another image of nro0') for m in self.said), self.said)
         # the launch file records what main's packs took (nro0's profile of another image: none), for the launcher's "a better pack is possible"
-        self.assertEqual(made(launch), [('made', 'profile', 'yes'), ('made', 'misses', 'yes'), ('samples', 'main', f'2 42 {DIGEST_OFFSETS}')])
+        self.assertEqual(made(launch), [('made', 'profile', 'yes'), ('made', 'misses', 'yes'), ('made', 'targets', 'yes'), ('samples', 'main', f'2 42 {DIGEST_OFFSETS}')])
         self.pack(); self.assertEqual(self.tools('nxaot'), [])   # reused while it is unchanged
         self.pack('linux', '--pack-mode', 'max')
         self.assertEqual([c[-2:] for c in self.tools('nxaot')], [['--profile', str(prof / 'main.tsv')], ['--cache', str(self.wdir / 'aot-cache')]])
@@ -344,28 +352,28 @@ class Linux(Pack):
         self.assertEqual([Path(c[2]).name for c in self.tools('nxaot')], ['main.aot.tsv'])
         self.assertEqual([c for c in self.tools('nxaot') if '--profile' in c], [])
         self.assertIn(f'--no-profile: the sample profiles in {prof} are not used', self.said)
-        self.assertEqual(made(launch), [('made', 'profile', 'no'), ('made', 'misses', 'yes')])   # a repack (no --no-profile) takes the profile: the launcher says so
+        self.assertEqual(made(launch), [('made', 'profile', 'no'), ('made', 'misses', 'yes'), ('made', 'targets', 'no')])   # a repack (no --no-profile) takes the profile: the launcher says so
         with mock.patch.object(nsp, 'AOT_PROFILE', False):   # the setting off: a repack would not take it either
             self.pack('linux', '--pack-mode', 'max'); self.assertEqual(self.tools('nxaot'), [])
-        self.assertEqual(made(launch), [('made', 'profile', 'unused'), ('made', 'misses', 'yes')])
+        self.assertEqual(made(launch), [('made', 'profile', 'unused'), ('made', 'misses', 'yes'), ('made', 'targets', 'unused')])
         (prof / 'main.tsv').write_text('0x100 many\n')   # one that does not parse: packed without it, said
         self.pack('linux', '--pack-mode', 'max'); self.assertEqual(self.tools('nxaot'), [])
         self.assertTrue(any(m.startswith(f'[RED] the sample profile {prof / "main.tsv"} does not parse') for m in self.said), self.said)
-        self.assertEqual(made(launch), [('made', 'profile', 'yes'), ('made', 'misses', 'yes')])   # packed without it: no row of main
+        self.assertEqual(made(launch), [('made', 'profile', 'yes'), ('made', 'misses', 'yes'), ('made', 'targets', 'yes')])   # packed without it: no row of main
         # an offset repeated (nxaot adds the counts up) and one with no samples (no function hot): the same hot set, so the same digest
         (prof / 'main.tsv').write_text(head + f'# module main, build ID {BID}, image SHA-256 {sha}\n0x100 40\n0x200 2\n0x100 1\n0x300 0\n')
         self.pack('linux', '--pack-mode', 'max')
-        self.assertEqual(made(launch), [('made', 'profile', 'yes'), ('made', 'misses', 'yes'), ('samples', 'main', f'2 43 {DIGEST_OFFSETS}')])
+        self.assertEqual(made(launch), [('made', 'profile', 'yes'), ('made', 'misses', 'yes'), ('made', 'targets', 'yes'), ('samples', 'main', f'2 43 {DIGEST_OFFSETS}')])
         # the host's function lines (dm/host/aot_profile.c): a row per sampled instruction under `# function 0x<entry> <samples> <rows>`; the samples row counts the functions
         # (nxaot's tier H) and their samples (the lines', host calls' too), so a longer session over the same functions gives the same count and digest as the entry form above
         fhead = head + f'# module main, build ID {BID}, image SHA-256 {sha}\n# functions: each sampled function\'s rows follow its line `# function 0x<entry> <samples> <rows>`\n'
         (prof / 'main.tsv').write_text(fhead + '# function 0x100 40 2\n0x104 25\n0x108 13\n# function 0x200 3 1\n0x200 3\n')
         self.pack('linux', '--pack-mode', 'max')
         self.assertIn(f'main: sample profile {prof / "main.tsv"} (43 samples at 2 functions): those at tier H+, the others at H', self.said)
-        self.assertEqual(made(launch), [('made', 'profile', 'yes'), ('made', 'misses', 'yes'), ('samples', 'main', f'2 43 {DIGEST_OFFSETS}')])
+        self.assertEqual(made(launch), [('made', 'profile', 'yes'), ('made', 'misses', 'yes'), ('made', 'targets', 'yes'), ('samples', 'main', f'2 43 {DIGEST_OFFSETS}')])
         (prof / 'main.tsv').write_text(fhead + '# function 0x100 400 5\n' + ''.join(f'0x{o:x} 79\n' for o in range(0x104, 0x118, 4)) + '# function 0x200 30 1\n0x200 30\n')
         self.pack('linux', '--pack-mode', 'max')
-        self.assertEqual(made(launch), [('made', 'profile', 'yes'), ('made', 'misses', 'yes'), ('samples', 'main', f'2 430 {DIGEST_OFFSETS}')])   # more rows, the same functions
+        self.assertEqual(made(launch), [('made', 'profile', 'yes'), ('made', 'misses', 'yes'), ('made', 'targets', 'yes'), ('samples', 'main', f'2 430 {DIGEST_OFFSETS}')])   # more rows, the same functions
         self.assertEqual(nsp.profile_summary(['0x104 25', '0x108 13', '0x200 3']), (3, 41, nsp.fnv64('104\n108\n200\n')))   # without function lines: the rows, as before
         with self.assertRaisesRegex(nsp.BuildError, '--no-profile make the packs'):
             nsp.main(nsp.parse_args([str(self.nsp_dir), '-k', str(self.keys), '--platform', 'ios', '--no-profile']))
@@ -389,18 +397,81 @@ class Linux(Pack):
         self.assertIn(f'main: JIT misses {prof / "main.misses.tsv"} (2 addresses the game ran in the JIT fallback): roots of discovery for its pack', self.said)
         self.assertTrue(any(m.startswith(f'the JIT misses {prof / "nro0.misses.tsv"} were recorded on another image of nro0') for m in self.said), self.said)
         self.assertEqual([n for k, n, v in launch_rows(self.work / 'launch-linux.tsv') if k == 'pack'], ['balanced'])   # complete with them
-        self.assertEqual(made(self.work / 'launch-linux.tsv'), [('made', 'profile', 'yes'), ('made', 'misses', 'yes'), ('misses', 'main', f'2 {DIGEST_MISSES}')])
+        self.assertEqual(made(self.work / 'launch-linux.tsv'), [('made', 'profile', 'yes'), ('made', 'misses', 'yes'), ('made', 'targets', 'yes'), ('misses', 'main', f'2 {DIGEST_MISSES}')])
         misses('main', sha, [(0x208, 'indirect', 9), (0x100, 'nonlocal', 4)])   # a later session: the same addresses, other counts
         self.pack(); self.assertEqual(self.tools('nxaot'), [])                      # the counts are in no key
         misses('main', sha, [(0x208, 'indirect', 9), (0x100, 'nonlocal', 4), (0x300, 'host', 1)])   # a new address: packed again
         self.pack(); self.assertEqual([c[-2:] for c in self.tools('nxaot')], [['--misses', str(prof / 'main.misses.tsv')]])
-        self.assertEqual(made(self.work / 'launch-linux.tsv')[2:], [('misses', 'main', '3 ' + nsp.fnv64('100 nonlocal\n208 indirect\n300 host\n'))])
+        self.assertEqual(made(self.work / 'launch-linux.tsv')[3:], [('misses', 'main', '3 ' + nsp.fnv64('100 nonlocal\n208 indirect\n300 host\n'))])
         self.pack('linux', '--no-profile'); self.assertEqual(self.tools('nxaot'), [])   # --no-profile leaves the misses in use: the same key
         (prof / 'main.tsv').write_text(head.replace('misses', 'profile') + f'# module main, build ID {BID}, image SHA-256 {sha}\n0x100 40\n')   # beside a profile: both
         self.pack(); self.assertEqual([c[-4:] for c in self.tools('nxaot')], [['--profile', str(prof / 'main.tsv'), '--misses', str(prof / 'main.misses.tsv')]])
         (prof / 'main.misses.tsv').write_text('0x208 indirect many\n')   # one that does not parse: packed without it, said
         self.pack(); self.assertEqual([c[-2:] for c in self.tools('nxaot')], [['--profile', str(prof / 'main.tsv')]])
         self.assertTrue(any(m.startswith(f'[RED] the JIT misses {prof / "main.misses.tsv"} do not parse') for m in self.said), self.said)
+
+    def test_known_targets(self):   # <NSP folder>/<id>-work/profile/<module>.targets.tsv (dm/host/aot_targets.c): nxaot reads it beside --profile; its dominant targets in the key and the made rows
+        # the rule on the fixture the launcher's test reads too: nxaot's 90 %, the digest of the pairs
+        rows = [f'{s:#x} {t:#x} {n}' for s, t, n in TARGET_ROWS]
+        self.assertEqual(nsp.targets_summary(rows), DOMINANT)
+        self.assertEqual(nsp.targets_digest(DOMINANT), DIGEST_TARGETS); self.assertEqual(DIGEST_TARGETS, nsp.fnv64('1a64:1820\n2000:3000\n2300:3300\n'))
+        self.assertEqual(nsp.targets_summary(rows + ['0x1a64 0x1820 7', '1A64\t0X1820 2 # a comment', '# a line']), DOMINANT)   # more binds at the same targets: the same pairs
+        self.assertEqual(nsp.targets_summary(['0x10 0x20 1', '0x10 0x30 1']), ())                                              # 50/50: no dominant target
+        self.assertEqual(nsp.targets_summary(['0x10 0x30 9', '0x10 0x20 9']), ())                                              # a tie never reaches 90 %
+        with self.assertRaises(ValueError): nsp.targets_summary(['0x10 0x20'])                                                 # nxaot stops on it
+        self.pack()
+        sha = (self.aot / 'main.aot.tsv').read_text().split('\n', 1)[0].split('\t')[3]
+        launch, prof, tmp = self.work / 'launch-linux.tsv', self.wdir / 'profile', self.work / 'tmp/aot'
+        prof.mkdir(parents=True)
+        head = ('# nxaot targets: what the x86-64 engine\'s inline caches of indirect calls and branches were bound to (dm/host/aot_targets.c, DM_AOT_PROFILE); '
+                'nxaot build --profile <module>.tsv reads it beside the profile\n')
+        def targets(image, rows, name='main'):   # the host's form
+            (prof / f'{name}.targets.tsv').write_text(head + f'# module {name}, build ID {BID}, image SHA-256 {image}\n# pack x\n# <site module offset> <target module offset> <binds>\n'
+                                                      + ''.join(f'{s:#x} {t:#x} {n}\n' for s, t, n in rows))
+        targets(sha, TARGET_ROWS)
+        self.pack(); self.assertEqual(self.tools('nxaot'), [])   # no profile: nxaot would not read them, so neither the key nor the made rows take them
+        self.assertEqual(made(launch), [('made', 'profile', 'yes'), ('made', 'misses', 'yes'), ('made', 'targets', 'yes')])
+        (prof / 'main.tsv').write_text(f'# nxaot profile\n# module main, build ID {BID}, image SHA-256 {sha}\n0x100 40\n0x200 2\n')
+        self.pack()
+        self.assertEqual(self.tools('nxaot'), [[str(self.nxaot), 'build', str(self.aot / 'main.aot.tsv'), '-o', str(tmp / 'main.o'), '--shared', str(tmp / 'main.aot.so'), '--mode', 'balanced',
+                                                '--cache', str(self.wdir / 'aot-cache'), '--profile', str(prof / 'main.tsv')]])
+        self.assertEqual(self.targets_switch, [None])   # nxaot reads the file beside the profile itself
+        self.assertIn(f'main: sample profile {prof / "main.tsv"} (42 samples at 2 functions) and 3 known targets (main.targets.tsv: indirect call sites with a dominant target, a direct '
+                      'call at those in functions at tier H): those at tier H, the others at C', self.said)
+        dominant = [('made', 'profile', 'yes'), ('made', 'misses', 'yes'), ('made', 'targets', 'yes'), ('samples', 'main', f'2 42 {DIGEST_OFFSETS}'), ('targets', 'main', f'3 {DIGEST_TARGETS}')]
+        self.assertEqual(made(launch), dominant)
+        key = (self.aot / '.keys/main.key').read_text()
+        targets(sha, TARGET_ROWS + [(0x1a64, 0x1820, 7), (0x2000, 0x3000, 9)])   # a later session: more binds at the same dominant targets, the same pack
+        self.pack(); self.assertEqual(self.tools('nxaot'), []); self.assertEqual(made(launch), dominant)
+        targets(sha, TARGET_ROWS + [(0x2400, 0x3400, 1)])   # a new site with a dominant target: packed again, and the key holds it
+        self.pack(); self.assertEqual([c[-2:] for c in self.tools('nxaot')], [['--profile', str(prof / 'main.tsv')]])
+        self.assertNotEqual((self.aot / '.keys/main.key').read_text(), key)
+        self.assertEqual(made(launch)[-1], ('targets', 'main', '4 ' + nsp.fnv64('1a64:1820\n2000:3000\n2300:3300\n2400:3400\n')))
+        targets(sha, TARGET_ROWS + [(0x2000, 0x3100, 16)])   # 0x2000 now 18 and 18: no dominant target, its guard goes: packed again
+        self.pack(); self.assertEqual(len(self.tools('nxaot')), 1)
+        self.assertEqual(made(launch)[-1], ('targets', 'main', '2 ' + nsp.fnv64('1a64:1820\n2300:3300\n')))
+        targets('00' * 32, TARGET_ROWS)   # recorded on another image: not taken, and kept from nxaot
+        self.pack(); self.assertEqual((len(self.tools('nxaot')), self.targets_switch), (1, ['0']))
+        self.assertTrue(any(m.startswith(f'the known targets {prof / "main.targets.tsv"} were recorded on another image of main') for m in self.said), self.said)
+        self.assertEqual(made(launch), dominant[:-1])
+        targets(sha, TARGET_ROWS); self.pack(); self.assertEqual(made(launch), dominant)   # this image's again: the first key
+        self.assertEqual((self.aot / '.keys/main.key').read_text(), key)
+        (prof / 'main.targets.tsv').write_text(f'# module main, build ID {BID}, image SHA-256 {sha}\n0x2000 0x3000 many\n')   # a row nxaot would stop on: not taken, kept from it
+        self.pack(); self.assertEqual(self.targets_switch, ['0'])
+        self.assertTrue(any(m.startswith(f'[RED] the known targets {prof / "main.targets.tsv"} do not parse') for m in self.said), self.said)
+        self.assertEqual(made(launch), dominant[:-1])
+        targets(sha, [(0x10, 0x20, 1), (0x10, 0x30, 1)])   # taken, but no site with a dominant target: the pack of the profile alone, its key the one without the file
+        self.pack(); self.assertEqual(made(launch)[-1], ('targets', 'main', f'0 {nsp.fnv64("")}'))
+        targets(sha, TARGET_ROWS); self.pack()
+        self.pack('linux', '--no-profile')   # without the profile nxaot reads no targets: made targets no, as made profile
+        self.assertEqual([c for c in self.tools('nxaot') if '--profile' in c], [])
+        self.assertEqual(made(launch), [('made', 'profile', 'no'), ('made', 'misses', 'yes'), ('made', 'targets', 'no')])
+        with mock.patch.dict(os.environ, {'NXAOT_PROFILE_TARGETS': '0'}):   # nxaot's test switch, passed on to it: no targets taken, a repack with it would take none either
+            self.pack()
+        self.assertEqual(made(launch), [('made', 'profile', 'yes'), ('made', 'misses', 'yes'), ('made', 'targets', 'unused'), ('samples', 'main', f'2 42 {DIGEST_OFFSETS}')])
+        self.assertNotIn('known targets', ' '.join(self.said))
+        self.pack(); self.assertEqual(made(launch), dominant)
+        self.assertEqual((self.aot / '.keys/main.key').read_text(), key)
 
     def test_removed_module_and_nros_leave_no_stale_input(self):
         self.pack()
@@ -413,7 +484,7 @@ class Linux(Pack):
             self.assertEqual(nsp.nxaot_options(self.nxaot, dict(os.environ)), set())
             self.pack('linux', '--aot-workers', '3')
         for c in self.tools('nxaot'): self.assertNotIn('--cache', c); self.assertNotIn('--workers', c)
-        self.assertEqual(made(self.work / 'launch-linux.tsv'), [('made', 'profile', 'unused'), ('made', 'misses', 'unused')])   # a repack with it would take neither
+        self.assertEqual(made(self.work / 'launch-linux.tsv'), [('made', 'profile', 'unused'), ('made', 'misses', 'unused'), ('made', 'targets', 'unused')])   # a repack with it would take neither
         self.assertIn('this nxaot has no --cache option: every function is compiled again on each pack', self.said)
         self.assertEqual(nsp.nxaot_options(self.nxaot, dict(os.environ)), {'--cache', '--workers', '--target', '--profile', '--misses'})
         (self.aot / 'main.aot.so').unlink(); self.pack('linux', '--aot-workers', '3')

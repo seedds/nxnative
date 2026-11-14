@@ -4,11 +4,11 @@ on a repack of a game whose recompiler's input is already there, without the NSP
 packer's own code for the rest, imported from scripts/build_ipa_from_nsp.py (its import has no side effect: main runs only from cli):
   nxaot_options   the options this nxaot has (its `nxaot build` usage)
   aot_packs       the stage "AOT packs": `nxaot build <name>.aot.tsv --shared <name>.aot.so --mode <mode> [--cache] [--profile <profile>/<name>.tsv] [--misses <profile>/<name>.misses.tsv]`
-                  per module, the pack reused when its key (the manifest, nxaot, the mode, the profile's bytes, the misses' pairs) is as at its last build; nxaot's log in
-                  <id>_build/logs/nxaot_<name>.log
-  made_rows       the launch file's made, samples and misses rows: what the packs took
+                  per module (nxaot reads <profile>/<name>.targets.tsv beside the profile itself), the pack reused when its key (the manifest, nxaot, the mode, the profile's bytes,
+                  the misses' pairs, the known targets' dominant pairs) is as at its last build; nxaot's log in <id>_build/logs/nxaot_<name>.log
+  made_rows       the launch file's made, samples, misses and targets rows: what the packs took
   packs_ready     the pack modes whose packs are complete and current: the launch file's pack rows
-and writes the launch file again as port_launch_file orders its rows (game, path, made / samples / misses, pack, env), its other rows as they were.
+and writes the launch file again as port_launch_file orders its rows (game, path, made / samples / misses / targets, pack, env), its other rows as they were.
 Without nxaot (a Windows PC: there is no Windows nxaot), T_SECOND_PACK_PREBUILT=<folder> in the environment (t_second_pack.py sets it; the launcher's repack passes it on) names
 the packs dm/tools/aot/tests/build_packs.sh made with nxaot for that game (<packs>/second_pack): they take the place of aot_packs' nxaot build (prebuilt below), the rest as above.
   packer.py <NSP folder> --platform linux|windows --pack-mode balanced|max [-k <prod.keys>] [--nxaot <nxaot>]
@@ -43,7 +43,8 @@ def prebuilt(folder, mode, aot, mods, misses, logs, platform):
     """aot_packs without nxaot: the packs build_packs.sh made with nxaot from the same inputs (t_second_pack.py --prebuild), put in the mode's folder with nxaot's log as aot_packs
     keeps it: <folder>/first/<name><suffix> (`nxaot build <name>.aot.tsv`) when the profile folder holds no JIT misses of the module, <folder>/misses/<name><suffix> (with
     `--misses <folder>/<name>.misses.tsv`) when its misses' (address, reason) pairs are that file's (aot_misses, the pairs a pack's key takes). The manifest and the image must be
-    the folder's byte for byte. Their nxaot's options: --target (the Windows packs) and --misses; no --profile (they took no profile: made_rows says made profile unused).
+    the folder's byte for byte. Their nxaot's options: --target (the Windows packs) and --misses; no --profile (they took no profile, and so no known targets: made_rows says made
+    profile unused, made targets unused).
     Returns (the packs placed, the options)"""
     suffix, opts = nsp.PACK_SUFFIXES[platform], {'--target', '--misses'}
     if mode != 'balanced': raise nsp.BuildError(f'the prebuilt packs of {folder} are balanced ones, not {mode}')
@@ -97,7 +98,7 @@ def repack(a):
     if pre: ready = [mode]   # the prebuilt packs have no keys (aot_packs writes them): the mode just placed, complete
     else: ready = sorted(nsp.packs_ready(nxaot, opts, aot, nro_dir, mods, platform, profiles, misses), key=lambda m: m != mode)   # the mode just packed first, as main
     # port_launch_file's order: game and path rows, the made rows, the pack rows, the env rows; the rows this run writes replace theirs
-    keep = [r for r in rows if r[0] not in ('made', 'samples', 'misses', 'pack')]
+    keep = [r for r in rows if r[0] not in ('made', 'samples', 'misses', 'targets', 'pack')]
     at = max((i + 1 for i, r in enumerate(keep) if r[0] in ('game', 'path')), default=0)
     out = keep[:at] + made + [('pack', m, str(nsp.pack_dir(aot, m))) for m in ready] + keep[at:]
     text = '\n'.join([h for h in head if h] + ['\t'.join(nsp.launch_field(x, f'the launch file\'s {r[0]} row {r[1]}') for x in r) for r in out]) + '\n'

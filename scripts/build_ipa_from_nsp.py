@@ -20,7 +20,8 @@
 #   packs: nxaot build (NXAOT / --nxaot, default bin/nxaot in the port's bundle, else build/aot/nxaot) of every module's manifest and every NRO into <name>.aot.so beside them (on Windows <name>.aot.dll, nxaot build --target
 #   windows: dm/tools/aot/README.md, "Windows packs"), mode PACK_MODE / --pack-mode (balanced or max), with the per-function cache <NSP folder>/<id>-work/aot-cache/ when this nxaot has --cache,
 #   and a module's sample profile <NSP folder>/<id>-work/profile/<name>.tsv when there is one (nxhost-run writes it with DM_AOT_PROFILE; AOT_PROFILE / --no-profile ignores them), and the
-#   JIT misses beside it, <name>.misses.tsv (nxaot build --misses: the addresses the game ran in the JIT fallback become entries of the next pack). The launch file names the NSP folder, this
+#   JIT misses beside it, <name>.misses.tsv (nxaot build --misses: the addresses the game ran in the JIT fallback become entries of the next pack), and the known targets <name>.targets.tsv
+#   (nxaot reads them beside the profile: an indirect call with a dominant target becomes a guarded direct call at tier H). The launch file names the NSP folder, this
 #   script and what it ran with, so that the launcher nxlauncher can pack the game again with what a session recorded ("Repack with profile").
 #   nxaot is a Linux program (its Docker image): on Windows, --nxaot names a script that runs it there. Steps that boot the game in the Mac host (run-time shader captures, Oodle
 #   decodes, a provisional profile's heap check) are not available there: their output is reused when a Mac run
@@ -2228,7 +2229,66 @@ def aot_misses(folder, name, sha, quiet=False):
     return p, tuple(sorted(rows))
 
 
-PACK_MODES = ('balanced', 'max')   # nxaot's pack modes (decision AOT 7): both can be packed at once, and the player picks one in the launcher (dm/launcher) or with NXPACK for run.sh
+TARGET_ROW = re.compile(r'^(?:0[xX])?([0-9a-fA-F]+)[ \t]+(?:0[xX])?([0-9a-fA-F]+)[ \t]+(\d+)$')   # a row of the host's known targets: <site> <target> <binds> (module offsets)
+
+
+def targets_summary(lines):
+    """The (site, dominant target) pairs of a known targets file's lines, by site: the sites nxaot guards with a direct call at tier H (dm/tools/aot/README.md, "Hot indirect targets").
+    The rule is nxaot's (dm/tools/aot/src/build/pack.cpp TargetsFromProfile), stated again here and in the launcher (dm/launcher/launcher_model.cpp read_targets; one rule in three
+    languages, which dm/tools/tests/test_nsp_x86.py and t_launcher_model check on the same fixture): a site's binds summed per target (a row of 0 binds counts for nothing), the
+    target with the most (the lowest offset of equal ones) dominates when it has at least 90 % of the site's binds (10 x best >= 9 x total). nxaot then guards a site only at tier H
+    and at a blr or br to a function of the module, which the module's code decides; these pairs are what the file gives it. ValueError for a row that does not parse as nxaot reads
+    it (`<site> <target> <count>`, hexadecimal, 0x optional, and decimal; '#' to the end of a line a comment), on which nxaot stops"""
+    sites = {}
+    for line in lines:
+        body = line.split('#', 1)[0].strip()
+        if not body: continue
+        r = TARGET_ROW.match(body)
+        if not r: raise ValueError(line)
+        s, t, n = int(r.group(1), 16), int(r.group(2), 16), int(r.group(3))
+        if n: d = sites.setdefault(s, {}); d[t] = d.get(t, 0) + n
+    pairs = []
+    for s in sorted(sites):
+        total = sum(sites[s].values())
+        best = max(sorted(sites[s].items()), key=lambda tn: tn[1])   # the first of the most binds in target order: the lowest offset
+        if 10 * best[1] >= 9 * total: pairs.append((s, best[0]))
+    return tuple(pairs)
+
+
+def targets_digest(pairs):   # a targets row's digest: fnv64 of '<site>:<dominant target>' in hexadecimal, one per line, by site (the launcher's read_targets computes the same)
+    return fnv64(''.join('%x:%x\n' % p for p in pairs))
+
+
+def aot_targets(folder, name, sha, quiet=False):
+    """The known targets of module name (dm/tools/aot/README.md, "Hot indirect targets"): <folder>/<name>.targets.tsv, which nxhost-run writes beside the sample profile with
+    DM_AOT_PROFILE=<folder> (dm/host/aot_targets.c: what the inline caches of the pack's indirect calls were bound to, merged over the sessions of one image) and nxaot reads beside the
+    --profile it is given, when it is there, parses as nxaot reads it and names this image in its header (as the misses: the SHA-256 against sha; nxaot itself does not check it).
+    Returns (path, its (site, dominant target) pairs: targets_summary) or (None, ()), with a line said for a file that is there and not taken (none when quiet): the pairs are what the
+    pack's key takes, as they are all of the file nxaot's guards depend on (more binds at the same dominant targets give the same pack)"""
+    p = folder / f'{name}.targets.tsv' if folder else None
+    if not p or not p.is_file(): return None, ()
+    image = None
+    try:
+        lines = p.read_text().splitlines()
+        for line in lines:
+            m = PROFILE_HEAD.match(line)
+            if m: image = m.group(3)
+        pairs = targets_summary(lines)
+    except (OSError, UnicodeDecodeError, ValueError) as e:
+        if not quiet: say(f'[RED] the known targets {p} do not parse ({e}): {name} is packed without them')
+        return None, ()
+    if not image or (sha and image != sha.lower()):
+        if not quiet: say(f'the known targets {p} were recorded on ' + (f'another image of {name} (SHA-256 {image[:12]}..., this one {sha[:12]}...)' if image else 'an image they do not name')
+                          + ': not used; play again with DM_AOT_PROFILE to record them for this one')
+        return None, ()
+    return p, pairs
+
+
+def targets_read():   # whether nxaot reads the known targets beside a profile: not with its test switch NXAOT_PROFILE_TARGETS=0 (dm/tools/aot/README.md), which the packer passes on to it
+    return os.environ.get('NXAOT_PROFILE_TARGETS') != '0'
+
+
+PACK_MODES =('balanced', 'max')   # nxaot's pack modes (decision AOT 7): both can be packed at once, and the player picks one in the launcher (dm/launcher) or with NXPACK for run.sh
 
 
 def pack_dir(aot, mode):
@@ -2286,8 +2346,23 @@ def pack_profiles(opts, aot, mods, nro_rows, profiles, mode=None):
             if not said and mode: say(f'this nxaot has no --profile option: the sample profiles in {profiles} are not used'); said = True
             continue
         prof[n] = p
-        if mode: say(f'{n}: sample profile {p} ({samples} samples at {offsets} functions): those at tier {"H+" if mode == "max" else "H"}, the others at {"H" if mode == "max" else "C"}')
+        tp, pairs = aot_targets(profiles, n, sha, quiet=mode is None) if targets_read() else (None, ())   # nxaot reads them beside the profile (pack_targets)
+        took = f' and {len(pairs)} known target{"" if len(pairs) == 1 else "s"} ({tp.name}: indirect call sites with a dominant target, a direct call at those in functions at tier H)' if tp else ''
+        if mode: say(f'{n}: sample profile {p} ({samples} samples at {offsets} functions){took}: those at tier {"H+" if mode == "max" else "H"}, the others at {"H" if mode == "max" else "C"}')
     return prof
+
+
+def pack_targets(aot, mods, nro_rows, folder, prof):
+    """The known targets each module and NRO is packed with ({name: (path, pairs)}, aot_targets): nxaot reads <name>.targets.tsv beside the profile it is given (TargetsPathOf), so only
+    for a module packed with its profile (prof, pack_profiles: which says what each pack takes), and not with NXAOT_PROFILE_TARGETS=0 (targets_read). A targets file beside a taken
+    profile that is not taken here (another image, a row that does not parse) is kept from nxaot by NXAOT_PROFILE_TARGETS=0 for that module (aot_packs)"""
+    if not targets_read(): return {}
+    out = {}
+    for n, sha in [(m, manifest_sha(aot, m)) for m in mods] + [(n, r[0] if r else '') for n, r in nro_rows.items()]:
+        if n not in prof: continue
+        p, pairs = aot_targets(prof[n].parent, n, sha, quiet=True)
+        if p: out[n] = (p, pairs)
+    return out
 
 
 def pack_misses(opts, aot, mods, nro_rows, folder, mode=None):
@@ -2324,12 +2399,17 @@ def made_rows(opts, aot, mods, profiles, misses, no_profile):
                         host's function lines: its offsets with samples, as functions)
       misses <module>   '<addresses> <digest>': the JIT misses its packs took (aot_misses): their addresses, and fnv64 of the (address, reason) pairs the pack's key takes ('<hex> <reason>' lines,
                         sorted)
-    The same rows hold for every pack row of the file: a mode is offered only while its packs' keys, which take the profile's bytes and the misses' pairs, are those of a pack made now
-    (packs_ready). A module has rows only for the files its packs took (parsed, recorded on its image)"""
+      made targets  yes, no or unused as made profile (nxaot reads the known targets beside the profile it is given), unused also with NXAOT_PROFILE_TARGETS=0 (targets_read)
+      targets <module>  '<sites> <digest>': the known targets its packs took (aot_targets, beside the profile they took): the indirect call sites with a dominant target (targets_summary:
+                        at least 90 % of the site's binds, nxaot's rule), and fnv64 of the '<site>:<dominant target>' pairs in hexadecimal, one per line by site (targets_digest)
+    The same rows hold for every pack row of the file: a mode is offered only while its packs' keys, which take the profile's bytes, the misses' pairs and the dominant targets, are
+    those of a pack made now (packs_ready). A module has rows only for the files its packs took (parsed, recorded on its image)"""
     nro_rows = nro_pack_rows(aot)
     prof, miss = pack_profiles(opts, aot, mods, nro_rows, profiles), pack_misses(opts, aot, mods, nro_rows, misses)
-    rows = [('made', 'profile', 'unused' if not AOT_PROFILE or '--profile' not in opts else 'no' if no_profile else 'yes'),
-            ('made', 'misses', 'yes' if '--misses' in opts else 'unused')]
+    targ = pack_targets(aot, mods, nro_rows, profiles, prof)
+    made_profile = 'unused' if not AOT_PROFILE or '--profile' not in opts else 'no' if no_profile else 'yes'
+    rows = [('made', 'profile', made_profile), ('made', 'misses', 'yes' if '--misses' in opts else 'unused'),
+            ('made', 'targets', 'unused' if made_profile == 'unused' or not targets_read() else made_profile)]
     for n in sorted(prof):   # aot_profile parsed it
         functions, samples, digest = profile_summary(prof[n].read_text().splitlines())
         rows.append(('samples', n, f'{functions} {samples} {digest}'))
@@ -2337,15 +2417,20 @@ def made_rows(opts, aot, mods, profiles, misses, no_profile):
         pairs = miss[n][1]
         digest = fnv64(''.join('%x %s\n' % (o, r) for o, r in pairs))
         rows.append(('misses', n, f'{len({o for o, _ in pairs})} {digest}'))
+    for n in sorted(targ):
+        pairs = targ[n][1]
+        rows.append(('targets', n, f'{len(pairs)} {targets_digest(pairs)}'))
     return rows
 
 
-def pack_jobs(nxaot, mode, aot, nro_dir, mods, nro_rows, prof, win, miss=None):
-    """The packs of a mode: (name, the input nxaot builds it from, the key of a pack built now: the input, nxaot, the mode, the target, the sample profile and the JIT misses' addresses
-    and reasons; a pack without misses keeps the key it had before they existed)"""
-    miss = miss or {}
+def pack_jobs(nxaot, mode, aot, nro_dir, mods, nro_rows, prof, win, miss=None, targ=None):
+    """The packs of a mode: (name, the input nxaot builds it from, the key of a pack built now: the input, nxaot, the mode, the target, the sample profile, the JIT misses' addresses
+    and reasons, and the known targets' (site, dominant target) pairs, all nxaot's guards depend on; a pack without misses keeps the key it had before they existed, and one without
+    a dominant target (no targets file, none taken, or none with a dominant target: the same pack) the key it had before the targets file existed)"""
+    miss, targ = miss or {}, targ or {}
     tool = fingerprint(('files', [nxaot]), mode, *(['windows'] if win else []))   # the cache and the workers do not change a pack
-    def extra(n): return [*([('files', [prof[n]])] if n in prof else []), *([('misses', miss[n][1])] if n in miss else [])]
+    def extra(n): return [*([('files', [prof[n]])] if n in prof else []), *([('misses', miss[n][1])] if n in miss else []),
+                          *([('targets', targ[n][1])] if targ.get(n, (None, ()))[1] else [])]
     return [(m, aot / f'{m}.aot.tsv', fingerprint(tool, ('files', [aot / f'{m}.aot.tsv']), *extra(m))) for m in mods] + \
            [(n, nro_dir / f'{n}.nro', fingerprint(tool, n, r, *extra(n))) for n, r in nro_rows.items()]
 
@@ -2358,8 +2443,9 @@ def packs_ready(nxaot, opts, aot, nro_dir, mods, platform, profiles=None, misses
     """The pack modes whose folder holds every pack a pack of now would build, each with its key, and the recompiler's input beside them: the modes the launch file offers"""
     win, suffix, nro_rows = platform == 'windows', PACK_SUFFIXES[platform], nro_pack_rows(aot)
     prof, miss, ready = pack_profiles(opts, aot, mods, nro_rows, profiles), pack_misses(opts, aot, mods, nro_rows, misses), []
+    targ = pack_targets(aot, mods, nro_rows, profiles, prof)
     for mode in PACK_MODES:
-        dest, jobs = pack_dir(aot, mode), pack_jobs(nxaot, mode, aot, nro_dir, mods, nro_rows, prof, win, miss)
+        dest, jobs = pack_dir(aot, mode), pack_jobs(nxaot, mode, aot, nro_dir, mods, nro_rows, prof, win, miss, targ)
         if all((dest / f'{n}{suffix}').is_file() and reused(pack_keys(dest, win) / f'{n}.key', k) is not None for n, _, k in jobs) and \
            all((dest / f'{m}{s}').is_file() for m in mods for s in ('.aot.tsv', '.image.bin')) and (not nro_rows or (dest / 'nro.tsv').is_file()):
             ready.append(mode)
@@ -2376,7 +2462,9 @@ def aot_packs(nxaot, opts, mode, workers, cache, aot, nro_dir, mods, env, logs, 
     packs of modules no longer listed go. With a sample profile of a module in profiles (<NSP folder>/<id>-work/profile/<name>.tsv, aot_profile; None: --no-profile) and an nxaot that has
     --profile, its pack is built with it: the sampled functions at tier H (H+ in the max mode), the others at C (H), the profile part of the pack's key. With the JIT misses of a module in
     misses (the same folder's <name>.misses.tsv, aot_misses; used with --no-profile too) and an nxaot that has --misses, its pack is built with --misses beside them: the addresses the game ran
-    in the JIT fallback become entries and resume points, their addresses and reasons part of the pack's key. Returns the number of packs built"""
+    in the JIT fallback become entries and resume points, their addresses and reasons part of the pack's key. nxaot reads the module's known targets (<name>.targets.tsv, aot_targets)
+    beside its profile by itself: their (site, dominant target) pairs are part of the pack's key (pack_targets, pack_jobs), so new targets make the pack again and more binds at the
+    same targets do not; a targets file the packer does not take is kept from nxaot (NXAOT_PROFILE_TARGETS=0 for that module). Returns the number of packs built"""
     win = platform == 'windows'
     suffix = PACK_SUFFIXES[platform]
     if win and '--target' not in opts:
@@ -2387,7 +2475,8 @@ def aot_packs(nxaot, opts, mode, workers, cache, aot, nro_dir, mods, env, logs, 
     nro_rows = nro_pack_rows(aot)
     prof = pack_profiles(opts, aot, mods, nro_rows, profiles, mode)
     miss = pack_misses(opts, aot, mods, nro_rows, misses, mode)
-    jobs = pack_jobs(nxaot, mode, aot, nro_dir, mods, nro_rows, prof, win, miss)
+    targ = pack_targets(aot, mods, nro_rows, profiles, prof)
+    jobs = pack_jobs(nxaot, mode, aot, nro_dir, mods, nro_rows, prof, win, miss, targ)
     keys, names = pack_keys(dest, win), {n for n, _, _ in jobs}
     for p in sorted(dest.glob('*' + suffix)):
         if p.name[:-len(suffix)] not in names: p.unlink(); rmtree(keys / f'{p.name[:-len(suffix)]}.key')
@@ -2404,8 +2493,10 @@ def aot_packs(nxaot, opts, mode, workers, cache, aot, nro_dir, mods, env, logs, 
         PROG.set(step=n, done=i, total=len(todo), unit='packs')
         rmtree(keys / f'{n}.key')
         obj, so, log = tmp / f'{n}{".obj" if win else ".o"}', tmp / f'{n}{suffix}', logs / f'nxaot_{n}.log'
+        # nxaot reads <name>.targets.tsv beside the profile by itself: one the packer did not take (another image, a row that does not parse) is kept from it
+        refused = n in prof and n not in targ and (prof[n].parent / f'{n}.targets.tsv').is_file()
         run([nxaot, 'build', src, '-o', obj, '--shared', so, '--mode', mode] + (['--target', 'windows'] if win else []) + extra + (['--profile', prof[n]] if n in prof else [])
-            + (['--misses', miss[n][0]] if n in miss else []), log, env=env)
+            + (['--misses', miss[n][0]] if n in miss else []), log, env=dict(os.environ if env is None else env, NXAOT_PROFILE_TARGETS='0') if refused else env)
         if not so.is_file(): raise BuildError(f'nxaot build wrote no {so.name} (output: {log})')
         os.replace(so, dest / so.name); rmtree(obj)
         (keys / f'{n}.key').write_text(f'{k}\n')
@@ -2445,10 +2536,10 @@ def port_launch_file(platform, repo, work, wdir, aot, game, msl, aoc, gfx, lang,
     """<id>_build/launch-<platform>.tsv: what starts this pack, the one source that run.sh (run.cmd) and the launcher nxlauncher (dm/launcher) both read (docs/settings.md, On Windows and Linux).
     Tab-separated rows <kind> <name> <value> under '#' lines: game (title, title_id, version, package, platform, graphics), path (host: the nxhost-run built for the game's profile; cwd: its
     working folder <NSP folder>/<id>-work/run/, kept from run to run; choices: the player's env.txt there, KEY=VALUE lines the launcher writes; log: where the launcher keeps nxhost-run's
-    output; settings: launcher-<platform>.json; profile: <NSP folder>/<id>-work/profile/, where DM_AOT_PROFILE records the sample profiles and JIT misses the next pack takes; and, from
+    output; settings: launcher-<platform>.json; profile: <NSP folder>/<id>-work/profile/, where DM_AOT_PROFILE records the sample profiles, JIT misses and known targets the next pack takes; and, from
     repack, what packs the game again as this run did, for the launcher's "Repack with profile": package, the NSP folder; packer and python, this script and the Python running it; keys,
-    the prod.keys file it read (its path only); nxaot, the recompiler), made, samples and misses (made: what the packs were made with, made_rows: the launcher compares them with what
-    the profile folder holds now), pack (one row per mode in modes, whose packs are complete: the folder nxhost-run is given, the first the default) and env (the environment
+    the prod.keys file it read (its path only); nxaot, the recompiler), made, samples, misses and targets (made: what the packs were made with, made_rows: the launcher compares them with
+    what the profile folder holds now), pack (one row per mode in modes, whose packs are complete: the folder nxhost-run is given, the first the default) and env (the environment
     nxhost-run gets: an environment file's switches (DM_ENV_FILE / --env-file), then the pack's layout as mac_run gives the Mac host: the recompiler's input, the RomFS image, the save and
     temporary storage, the shader libraries (msl, DM_MSL_DIR), the DLC, an NVN game's shader map, the game language, a window and sound). A reader sets each env row only when the
     environment and the player's env.txt have not set it, first row first. host: the nxhost-run to name (port_host's by default). Returns its path"""
@@ -2477,10 +2568,12 @@ def port_launch_file(platform, repo, work, wdir, aot, game, msl, aoc, gfx, lang,
             '#   game  title, title_id, version (the display version), package (the version tag), platform, graphics',
             '#   path  host (nxhost-run; NXHOST in the environment names another; when it is gone, a bundle\'s hosts/<title ID>/nxhost-run: the launcher\'s folder\'s, or one above the run script),',
             '#         cwd (its working folder), choices (the player\'s env.txt: KEY=VALUE lines, read unless DM_SAVED_CHOICES=0),',
-            '#         log (the launcher\'s copy of the output), settings (the settings the launcher shows), profile (DM_AOT_PROFILE\'s folder: the sample profiles and JIT misses the next pack takes),',
+            '#         log (the launcher\'s copy of the output), settings (the settings the launcher shows), profile (DM_AOT_PROFILE\'s folder: the sample profiles, JIT misses and known targets the next pack takes),',
             '#         package, packer, python, keys, nxaot (what packs the game again: the NSP folder, this script, its Python, the prod.keys file\'s path, the recompiler)',
-            '#   made  profile yes|no|unused (the sample profiles taken; no: --no-profile, which a repack takes them without; unused: not taken by AOT_PROFILE or this nxaot), misses yes|unused',
-            '#   samples <module> <sampled functions> <samples> <digest of their entries>; misses <module> <addresses> <digest of the address and reason pairs>: what each module\'s packs took',
+            '#   made  profile yes|no|unused (the sample profiles taken; no: --no-profile, which a repack takes them without; unused: not taken by AOT_PROFILE or this nxaot), misses yes|unused,',
+            '#         targets yes|no|unused (the known targets beside the profiles taken, as profile; unused also with NXAOT_PROFILE_TARGETS=0)',
+            '#   samples <module> <sampled functions> <samples> <digest of their entries>; misses <module> <addresses> <digest of the address and reason pairs>;',
+            '#         targets <module> <call sites with a dominant target> <digest of the site and target pairs>: what each module\'s packs took',
             '#         (every pack row\'s packs took the same; the launcher compares them with the profile folder to say whether a better pack is possible)',
             '#   pack  <mode> <folder>: the folder nxhost-run is given, one row per pack mode with complete packs; the first is the default, NXPACK=<mode> picks another',
             '#   env   <VAR> <value>: set when neither the environment nor the player\'s env.txt sets it, first row first']
@@ -2960,9 +3053,9 @@ def main(args=None):
     if port:   # Windows / Linux: the launcher settings, the launch file and the run script, then the packs (shared objects on Linux, DLLs on Windows), then the launch file with them
         wdir = nsp_dir / f'{g.id}-work'   # the work folder beside <id>_build (AGENTS.md): the save and temporary storage, the player's choices, the recompiler's cache
         title, nro_dir, mods = app_name or g.get('name', g.id), work / f'nro_{pkg_ver}', g.words('modules')
-        profiles = misses = wdir / 'profile'   # the sample profiles and JIT misses nxhost-run records (DM_AOT_PROFILE; dm/host/aot_profile.c), one of each per module
+        profiles = misses = wdir / 'profile'   # the sample profiles, JIT misses and known targets nxhost-run records (DM_AOT_PROFILE; dm/host/aot_profile.c, aot_targets.c), one of each per module
         if args.no_profile or not AOT_PROFILE:
-            if any(p for p in profiles.glob('*.tsv') if not p.name.endswith('.misses.tsv')): say(f'--no-profile: the sample profiles in {profiles} are not used')   # the misses are
+            if any(p for p in profiles.glob('*.tsv') if not p.name.endswith(('.misses.tsv', '.targets.tsv'))): say(f'--no-profile: the sample profiles in {profiles} are not used')   # the misses are; the targets go with the profiles
             profiles = None
         settings = port_settings(py, repo, work, game, patched, gfx, lang, g, platform, env, logs)
         # what packs the game again as this run does, for the launcher's "Repack with profile" (dm/launcher): the NSP folder, this script and its Python, the keys' path, the recompiler

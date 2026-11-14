@@ -15885,7 +15885,15 @@ int mtl_fps_target(void) { static int env = -2; if (env == -2) { const char *e =
 // submit returns, and a game may reuse the copy's source right after. Catherine: Full Body's resource thread writes the next texture into the staging block 64 ms after the main thread
 // recorded a copy from it (main+0x305e64, frame start) and before that frame's submit had even returned: the host was building pipelines inside the submit for 300 ms, and committed the
 // copy only at its end, so the subtitle band's gradient (BC3, 32x512) came out as the next texture's blocks. Committed at the first pass boundary, the copies run while the host encodes the rest
-static int cut_draws(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_CUT"); v = e ? atoi(e) : 64; MLOG("segmented submission: a segment is submitted between passes every %d draws (DM_NVN_CUT, 0 = off)", v); } return v; }
+// The defaults on the Mac are the profile's cut_draws (64 unless a game sets it) and cut_busy (on unless a game sets it: sub_cut); on iOS, where neither was measured, 64 and on for every game
+#if TARGET_OS_IPHONE
+#define CUT_DRAWS_DEFAULT 64
+#define CUT_BUSY_DEFAULT 1
+#else
+#define CUT_DRAWS_DEFAULT DM_GAME_CUT_DRAWS
+#define CUT_BUSY_DEFAULT DM_GAME_CUT_BUSY
+#endif
+static int cut_draws(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_CUT"); v = e ? atoi(e) : CUT_DRAWS_DEFAULT; MLOG("segmented submission: a segment is submitted between passes every %d draws (%s, 0 = off)", v, e ? "DM_NVN_CUT" : "the default or the profile's cut_draws"); } return v; }
 static uint64_t g_cut_draw0, g_cuts, g_copy_cuts;
 // The count starts with the submission (mtl_sub_begin). It used to start at the submission's first sub_cut, which only a render target change reaches (OP_SET_RT): the draws a
 // submission makes into the target it inherited, before its first target change, were never counted, and the first segment came that many draws late
@@ -15898,8 +15906,9 @@ static void sub_cut(void) {
     if (!g_cb || g_enc) return;
     if ((!g_cut_copy && (n <= 0 || g_stat_draw - g_cut_draw0 < (uint64_t)n)) || g_hoist_n || g_defer_nact || g_defer_pend || g_fz.active || g_rt_merged) return;
     // The cut is there so that the GPU does not sit idle while the host encodes. With earlier work still running a commit gains nothing and queues one more command buffer: each is a call into the kernel on Metal's one submission queue, and with buffers queued behind running work
-    // the GPU waited 5-40 ms with the next one already committed (docs/reference/frame-rate.md). So it stays a boundary for the game's timestamps (ts_boundary), with the commit left for when the GPU has run out. A copy still commits, as its data must land. DM_NVN_CUT_BUSY=0: every cut commits
-    static int busy = -1; if (busy < 0) { const char *e = getenv("DM_NVN_CUT_BUSY"); busy = !e || atoi(e) != 0; }
+    // the GPU waited 5-40 ms with the next one already committed (docs/reference/frame-rate.md). So it stays a boundary for the game's timestamps (ts_boundary), with the commit left for when the GPU has run out. A copy still commits, as its data must land.
+    // The profile's cut_busy off, or DM_NVN_CUT_BUSY=0: every cut commits (Breath of the Wild on the Mac, where the GPU otherwise waits for the host inside each frame)
+    static int busy = -1; if (busy < 0) { const char *e = getenv("DM_NVN_CUT_BUSY"); busy = e ? atoi(e) != 0 : CUT_BUSY_DEFAULT; if (!busy) MLOG("segmented submission: every segment commits, with earlier work still running (%s)", e ? "DM_NVN_CUT_BUSY=0" : "the profile's cut_busy off"); }
     if (busy && !g_cut_copy && (!seg_ts() || ts_on()) && atomic_load_explicit(&g_seg_inflight, memory_order_relaxed) > 0) {
         if (ts_on()) { ts_boundary(); g_seg++; }
         g_cut_draw0 = g_stat_draw; return; }

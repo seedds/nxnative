@@ -70,6 +70,7 @@ Measured on the M4 Pro, in a 1920x1080 window: 60 fps at the title, 44 to 52 fps
 - [Ampere forms met on PRAGMATA](../../../docs/reference/shaders.md#ampere-forms-met-on-pragmata-tld-through-a-uniform-register-i2f-of-an-immediate-suatomcas): 21 shaders.
 - [Subgroup operations rewritten for a one-lane subgroup](../../../docs/reference/shaders.md#subgroup-operations-rewritten-for-a-one-lane-subgroup): two domain shaders.
 - [A base the GPU compiler cannot encode cost the whole offline archive](../../../docs/reference/shaders.md#a-base-the-gpu-compiler-cannot-encode-cost-the-whole-offline-archive): three bases with pixel shader `c4ac3ca598cea32e`.
+- [Reads past a storage buffer bound by address](../../../docs/reference/shaders.md#reads-past-a-storage-buffer-bound-by-address): the colour wash in the R53 hangar ([GitHub issue #2618](https://github.com/seedds/nxnative/issues/2618)). The GI voxeliser `ef4ad01151918469` read past the one run mapped at the base of a sparse pool; its reads past the bound memory now give 0. Open: the hangar retest (no save near it here).
 - [IPA at an offset, and the barycentric coordinates](../../../docs/reference/shaders.md#ipa-at-an-offset-and-the-barycentric-coordinates): pixel shader `4a9d4507eea6c837` did not translate; NVN2's sample position table is signed from the pixel centre.
 
 ## Open

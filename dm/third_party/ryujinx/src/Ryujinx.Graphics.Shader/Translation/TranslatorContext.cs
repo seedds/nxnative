@@ -406,6 +406,7 @@ namespace Ryujinx.Graphics.Shader.Translation
 
             resourceManager.UniformBounds = Options.Flags.HasFlag(TranslationFlags.MetalUniformBounds);   // nxnative: before any uniform slot gets its binding
             resourceManager.BufferImageBias = Options.Flags.HasFlag(TranslationFlags.MetalBufferImageBias);   // nxnative: see ResourceManager.NoteBufferImage
+            resourceManager.StorageBounds = Options.Flags.HasFlag(TranslationFlags.MetalStorageBounds);   // nxnative: before any storage buffer gets its binding
 
             if (IsTransformFeedbackEmulated)
             {

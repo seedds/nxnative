@@ -23,6 +23,7 @@ namespace Ryujinx.Graphics.Shader.Translation
         private readonly SetBindingPair[] _cbSlotToBindingMap;
         private readonly SetBindingPair[] _sbSlotToBindingMap;
         private uint _sbSlotWritten;
+        private uint _sbSlotBounded;   // nxnative: TranslationFlags.MetalStorageBounds
 
         private readonly Dictionary<int, int> _sbSlots;
         private readonly Dictionary<int, int> _sbSlotsReverse;
@@ -64,6 +65,9 @@ namespace Ryujinx.Graphics.Shader.Translation
         // nxnative: TranslationFlags.MetalBufferImageBias
         public bool BufferImageBias { get; set; }
 
+        // nxnative: TranslationFlags.MetalStorageBounds
+        public bool StorageBounds { get; set; }
+
         public ResourceManager(ShaderStage stage, IGpuAccessor gpuAccessor, ResourceReservations reservations = null)
         {
             _gpuAccessor = gpuAccessor;
@@ -72,9 +76,9 @@ namespace Ryujinx.Graphics.Shader.Translation
             _stage = stage;
             _stagePrefix = GetShaderStagePrefix(stage);
 
-            // Constant buffer banks 0-17 (Maxwell's), 24: NVN2's push constants (c[24]), 25: the uniform slots' sizes (Constants.NxUniformSizesBank), and 26: the
-            // buffer images' offsets (Constants.NxBufferImageBiasBank)
-            _cbSlotToBindingMap = new SetBindingPair[Constants.NxBufferImageBiasBank + 1];
+            // Constant buffer banks 0-17 (Maxwell's), 24: NVN2's push constants (c[24]), 25: the uniform slots' sizes (Constants.NxUniformSizesBank), 26: the
+            // buffer images' offsets (Constants.NxBufferImageBiasBank), and 27: the storage buffers' lengths (Constants.NxStorageLengthsBank)
+            _cbSlotToBindingMap = new SetBindingPair[Constants.NxStorageLengthsBank + 1];
             // Storage buffers the global-to-storage pass found: the stage's storage buffer table and, for compute, its uniform buffer address table (NVN 16 + 16 slots)
             _sbSlotToBindingMap = new SetBindingPair[32];
             _cbSlotToBindingMap.AsSpan().Fill(new(-1, -1));
@@ -364,8 +368,40 @@ namespace Ryujinx.Graphics.Shader.Translation
                 _sbSlotWritten |= 1u << slot;
             }
 
+            // nxnative: a storage buffer whose address is in a game uniform slot (c[3] and up) or was pushed (c[24]) has no size: its accesses are bounded by the host's
+            // length table (TranslationFlags.MetalStorageBounds). NVN's own storage buffer table (c[0]) and the host's pool table (GlobalToStorage.GmemMapCbSlot) are not
+            if (StorageBounds && sbCbSlot >= Constants.NxFirstUniformSlot && sbCbSlot != Optimizations.GlobalToStorage.GmemMapCbSlot && (_sbSlotBounded & (1u << slot)) == 0)
+            {
+                _sbSlotBounded |= 1u << slot;
+                Properties.AddBoundedStorageBuffer(setAndBinding.Binding, slot);
+                Properties.StorageLengthsBinding = GetStorageLengthsBinding();
+            }
+
             binding = setAndBinding.Binding;
             return true;
+        }
+
+        // nxnative: the length table, bank Constants.NxStorageLengthsBank: two u32 a storage buffer slot, in uint4 data[16]. Declared with the first bounded storage buffer
+        private int GetStorageLengthsBinding()
+        {
+            int slot = Constants.NxStorageLengthsBank;
+            SetBindingPair setAndBinding = _cbSlotToBindingMap[slot];
+
+            if (setAndBinding.Binding < 0)
+            {
+                setAndBinding = _gpuAccessor.CreateConstantBufferBinding(slot);
+                _cbSlotToBindingMap[slot] = setAndBinding;
+
+                StructureType type = new(new[]
+                {
+                    new StructureField(AggregateType.Array | AggregateType.Vector4 | AggregateType.U32, "data", Constants.NxStorageLengthSlots * 2 / 4),
+                });
+
+                Properties.AddOrUpdateConstantBuffer(new(BufferLayout.Std140, setAndBinding.SetIndex, setAndBinding.Binding, $"{_stagePrefix}_c{slot.ToString(CultureInfo.InvariantCulture)}", type));
+                SetUsedConstantBufferBinding(setAndBinding.Binding);
+            }
+
+            return setAndBinding.Binding;
         }
 
         private bool TryGetSbSlot(byte sbCbSlot, ushort sbCbOffset, out int slot)
@@ -774,6 +810,11 @@ namespace Ryujinx.Graphics.Shader.Translation
                 {
                     (int sbCbSlot, int sbCbOffset) = UnpackSbCbInfo(key);
                     BufferUsageFlags flags = (_sbSlotWritten & (1u << slot)) != 0 ? BufferUsageFlags.Write : BufferUsageFlags.None;
+                    if ((_sbSlotBounded & (1u << slot)) != 0)
+                    {
+                        flags |= BufferUsageFlags.Bounded;   // nxnative: TranslationFlags.MetalStorageBounds
+                    }
+
                     descriptors[descriptorIndex++] = new BufferDescriptor(setAndBinding.SetIndex, setAndBinding.Binding, slot, sbCbSlot, sbCbOffset, flags);
                 }
             }

@@ -46,10 +46,18 @@ After rebasing onto `f226affd`, the rebuilt Mac host reloads the autosave into t
 - [Larian LSPK packages and BSHD programs](../../../docs/reference/shaders.md#larian-lspk-packages-and-bshd-programs): black rendering with the executable's shaders alone.
 - [UDP loopback works offline](../../../docs/reference/services.md#udp-loopback-works-offline): New Game stayed on the loading artwork with an empty progress bar. Before the fix both socket attempts failed; afterward the first socket succeeded and the bind, send and receive calls executed, reaching the opening ship.
 - [Time zone rules, calendar conversion and the network clock](../../../docs/reference/services.md#time-zone-rules-calendar-conversion-and-the-network-clock): found earlier on the Android host fork; the Mac host already has the general fix.
+- [Alpha-test comparisons without an alpha export](../../../docs/reference/rendering.md#alpha-test-comparisons-without-an-alpha-export): the depth-pass warnings described below.
+
+## Alpha-test warnings
+
+**Resolved on the Mac (2026-11-15).** Character creation used to warn on `faca851c03a852eb`, `ATM_Wind_Tree_AlphaTest_2S_PBR_ST_DEP_NX.bshd`; directly reloading the ship warned on `7ffa2f2d8d5c5c26`, `Base_AlphaTest_PBR_ST_DEP_NX.bshd`. Both programs have an original output map of zero, no colour outputs and their own fragment discard. The host's comparison-eligibility check requested an alpha-test entry despite the absent alpha export. The general [output-map fix](../../../docs/reference/rendering.md#alpha-test-comparisons-without-an-alpha-export) leaves their shader bodies intact and needs no profile rule or shader rebuild.
+
+Fresh-save character creation and Continue into the opening ship both render with zero red lines. A one-frame pass dump from each scene confirms the affected shader actually draws. The test profile is separate from the established autosave; testing stayed under ten minutes. The Mac app was rebuilt and its signature verified.
+
+The expanded alpha replay passes 1,216 checks (168 failed before the fix), including an RGB-only export with padded MSL alpha and the unconditional `NEVER` case. The eight alpha Python tests compile the variants for Mac and iPhone; all pass, as do the 31 documentation/chain checks and Python lint. The full graphics suite passes its 167 native targets and two final Python targets; six optional reflection-cache sample checks are skipped because their fixtures are absent. Targeted LLVM 23.1.4 lint reports no new findings. Regression level is moderate because RGB-only exports with an existing side variant also change pipeline selection: a full Isaac comparison passes with all 19 shaders unchanged and no new red lines. This is the light local NVN regression game; the run was busy, so its timings are not performance evidence.
 
 ## Open
 
 - Later areas, combat, manual saving, multiplayer and online features are untested.
-- Character creation logs an alpha-test warning for `faca851c03a852eb`, `ATM_Wind_Tree_AlphaTest_2S_PBR_ST_DEP_NX.bshd`; directly reloading the ship logs the same warning for `7ffa2f2d8d5c5c26`, `Base_AlphaTest_PBR_ST_DEP_NX.bshd`. Both fragment programs write no colour and perform their own discard; the host has no fixed-function alpha-test side entry for them. The visible consequence is not established; no profile switch hides it.
 - No iPhone run or IPA yet. Later memory use in the alias region is unmeasured.
 - Only update 1.0.12 is registered; the base game alone is untested.

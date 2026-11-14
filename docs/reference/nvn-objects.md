@@ -617,6 +617,14 @@ Games read this count as a position in their own command memory and size their h
 - **Fix:** `nvn_tex.c` recognizes either flag for linear sizing and excludes both from block-linear level offsets, GOB columns and sparse layout. `nvn_deswizzle_geom` rejects both. `tex_linear` uses the same calculated row pitch, including implicit alignment, as `GetStorageSize`. Render-target rows align to 128 bytes; ordinary linear rows align to 32. Explicit strides are preserved. `t_tex` covers the layout and `t_linear_readback` checks a GPU clear against padded CPU-visible rows.
 - **Found on:** [Persona 5 Royal](../../dm/games/01005CA01580E000/README.md#rendering): a 16x16 RGBA8 target with flags `0x44` and stride 128 needs 2 KB; block-linear sizing returned 1 KB.
 
+### A CPU-written block-linear IMAGE texture reads back with scrambled rows
+
+- **Symptom:** `nvnTextureReadTexels` of a block-linear texture with the `IMAGE` flag that the CPU wrote (`WriteTexels`) returns scrambled rows: the bytes are its block-linear storage, copied as if they were linear rows.
+- **Cause:** `IMAGE` says only that shaders may store into the texture, not that its storage is linear. `linear_gpu_may_write` answered yes for `IMAGE` alone, so `mtl_read_texels` took any CPU-written `IMAGE` texture as a linear one whose storage holds its content and copied rows of the linear stride out of block-linear storage.
+- **Fix:** `linear_gpu_may_write` is true only for a linear texture (`LINEAR` or `LINEAR_RENDER_TARGET`) the GPU may render or store into. A block-linear `IMAGE` texture is read through the deswizzling path. Its other callers already required a linear layout.
+- **Check:** `t_linear_readback` writes a 6x6 RGBA8 `IMAGE` texture through `WriteTexels` and reads it back through `ReadTexels` before any Metal texture is made: all six rows were wrong before the fix.
+- **Found on:** no game; found in review (GitHub PR #2032). No game-specific symptom or performance gain is attributed to it.
+
 ### Linear textures a device cannot view on their pool's buffer
 
 - **Symptom:** on an iPhone only, a scene's backgrounds are solid magenta and magenta frames flash, while the Mac is right. The log has `[RED] linear texture offset … / row pitch 32 not aligned to 64 bytes; created as a private texture (CPU writes invisible)`, then `[RED] deswizzle failed format 0x25 target 1`. Or movie backgrounds are grey and flicker, or show green and magenta blocks, after `linear texture ser=… 736x480 format 0x1 flags 0x14: offset … / row pitch 736 not aligned to 64 bytes` and `[RED] linear texture 8x8 format 0x9a flags 0x14: rows of 32 bytes no view can take, a private texture the CPU's writes do not reach`.

@@ -99,6 +99,20 @@ class Regress(unittest.TestCase):
                     self.assertIn('set ' + missing + ':', result.stderr)
             self.assertEqual(list(Path(td).iterdir()), [])
 
+    def test_list_stops_without_games(self):   # as check and usage do; only list runs here, since they clean Metal's cache before they look
+        env = dict(regress.os.environ, REGRESS_ROOT='', REGRESS_GAMES='', REGRESS_SKIP='')
+        with tempfile.TemporaryDirectory() as td:
+            root, empty = Path(td) / 'harness', Path(td) / 'empty'; empty.mkdir()
+            (empty / 'no-build').mkdir()   # an NSP folder without a Mac build
+            command = [regress.sys.executable, REPO / 'scripts/regress.py', '--root', root]
+            for games in (Path(td) / 'mistyped', empty):
+                with self.subTest(games=games.name):
+                    result = regress.sh([*command, '--games-dir', games, 'list'], cwd=td, env=env)
+                    self.assertEqual(result.returncode, 2)
+                    self.assertEqual(result.stderr, f'[RED] regress.py: no game with a Mac build under {games}\n')
+                    self.assertEqual(result.stdout, '')
+            self.assertFalse(root.exists())
+
     def test_interface(self):
         vo, fi = regress.msl_io(VS, 'main0_z', 'vs'), regress.msl_io(PS, 'main0', 'ps')
         self.assertEqual(vo, {'locn0': 'float4', 'locn2': 'float4'})

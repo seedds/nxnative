@@ -6,7 +6,13 @@
 #include <string.h>
 
 // Log lines as the replay layer prints them (nvn_mtl.m MLOG), so a run's log reads as it did before the move
+#if defined(__APPLE__)
 #define SLOG(...) do { fprintf(stderr, "[dm] [nvn-mtl] " __VA_ARGS__); fputc('\n', stderr); } while (0)
+#else
+// One log line, one stdio call, as the port's LOG (dm.h; docs/reference/threads.md, "Log lines of two threads spliced together"). Apple's form above is the old one until its change
+// has run on a Mac
+#define SLOG(fmt, ...) do { fprintf(stderr, "[dm] [nvn-mtl] " fmt "\n", ##__VA_ARGS__); } while (0)
+#endif
 
 nvn_draw_state S;
 nvn_rt_state R;

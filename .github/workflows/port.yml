@@ -184,6 +184,7 @@ jobs:
           path: |
             build/win64/*.exe
             build/win64/host_tests.tsv
+            build/win64/host_scripts.tsv
           if-no-files-found: error
           retention-days: 7
       # The Windows bundle, after the tests' upload (whose nxhost-run.exe is GAME's): build/win64/hosts/<title ID>/nxhost-run.exe for GAME and each profile of BUNDLE_GAMES

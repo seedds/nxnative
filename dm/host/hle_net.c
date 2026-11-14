@@ -75,7 +75,7 @@ void dm_guest_cond_wait_ns(pthread_cond_t *c, pthread_mutex_t *m, int64_t ns);  
 // Poll / Select with nothing to wait on waits out the timeout and returns 0, as POSIX and Horizon's bsd service ignore negative descriptors (Dark Souls Remastered's
 // "NexusRevolution Socket" thread spun a core on Poll(fds, 0, 33 ms) when it failed at once). An endless wait on nothing never returns; HLE_FORCE_WAIT publishes the guest
 // context, so a collector can pause the thread while it waits
-static int sk_idle(int64_t ms) { if (ms < 0) return dm_net_idle(); if (ms > INT64_MAX / 1000000) return sk_error(SK_EINVAL); dm_guest_sleep_ns(ms * 1000000); return 0; }
+static int sk_idle(int64_t ms) { if (ms < 0) return dm_net_idle(); if (ms > INT64_MAX / 1000000) return sk_error(22);   /* EINVAL */ dm_guest_sleep_ns(ms * 1000000); return 0; }
 typedef struct { int32_t fd; int16_t events, revents; } sk_pollfd;
 enum { EFD_MAX = 64, SK_POLLIN = 1, SK_POLLOUT = 4, SK_POLLRDNORM = 0x40, SK_POLLWRNORM = 4, SK_POLLNVAL = 0x20,
        SK_EBADF = 9, SK_EAGAIN = 35, SK_EINVAL = 22, SK_EMSGSIZE = 40, SK_EOPNOTSUPP = 45, SK_EADDRINUSE = 48, SK_ENOTCONN = 57,

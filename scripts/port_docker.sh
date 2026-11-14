@@ -108,7 +108,7 @@ what_to_remove() {
         echo "  other images (not built by this script; remove by hand with docker image rm if you do not need them):"
         echo "$others" | sed 's/^/    /'
     fi
-    echo "  the builder cache and unused data: docker system df shows them, docker builder prune removes the cache"
+    echo "  the builder cache and unused data: docker system df shows them, docker builder prune -a removes the cache"
 }
 
 # ensure_image <key>: build when missing or stale (or unlabelled with --force); exit 3 when it does not fit
@@ -142,7 +142,8 @@ ensure_image() {
     docker build --label "$LABEL_SHA=$sha" --label "$LABEL_BY=$BY" -t "$IMG" -f "$DF" "$repo/docker"
     rc=$?
     echo "pruning the builder cache"
-    docker builder prune -f >/dev/null || red "docker builder prune failed"
+    # -a: with the containerd image store a build's layers stay in the builder cache as well (2 GB beside a 2 GB image); without -a the prune keeps them
+    docker builder prune -af >/dev/null || red "docker builder prune failed"
     [ $rc -eq 0 ] || die "$IMG: docker build failed (exit $rc)"
     BUILT_THIS_RUN="$BUILT_THIS_RUN $1"
     echo "$IMG: built in $(($(date +%s) - t0)) s; $(free_mb "$root") MB free on $root"
@@ -303,6 +304,7 @@ cmd_verify() {
         if built_this_run aot; then
             echo "--low-disk: removing nxnative-aot (built by this run)"
             docker image rm nxnative-aot >/dev/null || red "could not remove nxnative-aot"
+            docker builder prune -af >/dev/null || red "docker builder prune failed"   # the removed image's layers are still in the cache (the first real run stopped here)
         else
             echo "--low-disk: nxnative-aot was not built by this run: kept"
         fi

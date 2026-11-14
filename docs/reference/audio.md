@@ -388,7 +388,7 @@ For a replaced DSP renderer the size query keeps the service's work-buffer contr
 - **Cause:** an effect's "needs init" parameter state is set only in the update where the game flags it new; the next update copies the game's value over it. Mario updates twice in a row at start-up; with a real audio device the first frame came after both.
 - **Fix:** the `AudioRenderSystem::Update` hook renders a catch-up frame first when nothing was rendered since the last update.
 - **Found on:** [Super Mario Bros. Wonder](../../dm/games/010015100B514000/README.md).
-- **Check:** `DM_AUDREN_TRACE=1` logs every update with the number of frames rendered since the previous one.
+- **Check:** `DM_AUDREN_TRACE=1` logs the first 199 updates with the number of frames rendered since the previous one. It also timestamps every 200 renders (about one second), counting the captured nonzero and all-zero mixes and the renders without a captured mix. Compare these windows with the separate AudioOut underrun counters when investigating a silent scene. The trace contains counts only.
 
 ### A sound driver that never waits on the renderer event
 

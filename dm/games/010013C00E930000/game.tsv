@@ -42,3 +42,10 @@ app_pool	0xCD500000
 # everything is under Data/: the player's serialized files and the StreamingAssets bundles
 shader_groups	/Data/=data
 shader_note	Hollow Knight: Silksong shaders
+
+# ---- Frame rate ----
+# 60 fps, as on the Switch, up to 120 on the Mac: Unity steps the game by the time that really passed. The rewriter finds QualitySettings.vSyncCount and Application.targetFrameRate
+# through Unity's internal-call table (dm/tools/unity_fps.py; on 1.0.30000 targetFrameRate at main+0x8020db0), the host writes the target there (hle_fpslock.c) and presents at it.
+# The speed checked at 60 and 120: the credits, which scroll by the game's clock, show the same names at the same second at both rates
+fps_target	60
+fps_max	120

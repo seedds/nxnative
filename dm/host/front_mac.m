@@ -1534,6 +1534,12 @@ void front_run(void (*guest)(void)) {
         if (getenv("DM_METAL_HUD") && atoi(getenv("DM_METAL_HUD"))) LOG("front end: Metal performance HUD on (DM_METAL_HUD)");
         v.layer = g_layer; [(DmGameView *)v fitDrawable];
         [win center];
+        // DM_SCREEN=<part of a screen's name> (as in System Settings › Displays): open on that screen instead of the main one, so fullscreen fills it
+        const char *sn = getenv("DM_SCREEN");
+        if (sn && *sn) for (NSScreen *s in NSScreen.screens) if ([s.localizedName rangeOfString:@(sn) options:NSCaseInsensitiveSearch].location != NSNotFound) {
+            NSRect f = s.visibleFrame; [win setFrameOrigin:NSMakePoint(NSMidX(f) - win.frame.size.width / 2, NSMidY(f) - win.frame.size.height / 2)];
+            LOG("front end: window on screen %s (DM_SCREEN)", s.localizedName.UTF8String); break;
+        }
         [win makeKeyAndOrderFront:nil];
         screen_refresh(win.screen ?: NSScreen.mainScreen);
         g_win = win;

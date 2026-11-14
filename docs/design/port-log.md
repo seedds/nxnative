@@ -21,7 +21,9 @@ A dated record of what is done, what is in progress and what is left on the Wind
 | `93b94dd` | Port: `nvn_state.c`'s `SLOG` writes a line in one stdio call outside Apple; `port.yml` uploads `host_scripts.tsv` for the Windows job. Verified in Docker (99 of 99 twice) |
 | `b1eff1c` | Vulkan: converted quad strips and polygons take NVN's provoking vertex (the same triangles rotated); `t_vk_provoking` 37 checks, `t_vk_guest_gl` 53. Verified in Docker on lavapipe |
 | `eaa9aa1` | AOT: hot indirect targets (design 12): the host writes `<module>.targets.tsv`, nxaot guards a site's dominant target with a direct call at tier H. Verified in Docker (nxaot 29 of 29, host 100 of 100 twice, packs identical without the file, the Windows cross-build); measured within noise, no gain shown |
-| `561082f` | Host tests: `t_second_pack` can run on Windows (a platform table, prebuilt packs where there is no nxaot, the engine read from the log). Verified in Docker on Linux, in a tree without the JIT, and by the Windows cross-build; nothing run on Windows: expected there `25 checks, 0 failed` |
+| `561082f` | Host tests: `t_second_pack` can run on Windows (a platform table, prebuilt packs where there is no nxaot, the engine read from the log). Verified in Docker on Linux, in a tree without the JIT, and by the Windows cross-build; nothing run on Windows |
+| `61e11b3` | Port: the Windows host gets the JIT fallback (a vendored subset of Boost 1.83.0, 869 headers; two missing includes in dynarmic; the Windows fault handler takes a fault inside a JIT callback as a guest fault). The cross-build with `-DNXHOST_JIT=ON` builds and links; Linux CTest 100 of 100 twice; nothing run on Windows |
+| `0ccf7a2` | Launcher and packer: the targets file in the `made` rows, the packs' reuse key (it was missing: a repack reused the old pack) and the better-pack rule ("N known call targets the packs were made without"). Verified in Docker (`t_launcher_model` 174 checks, `t_second_pack` 29 / 29 / 27 by route) |
 
 Done on the machine, not in the repository: Docker emptied on the owner's request (every image and container, the owner's other projects' included; the data volumes `aitrade_pgdata`, `smilepetstore_pgdata`, `smilepetstore_redisdata` kept).
 
@@ -33,7 +35,7 @@ Done on the machine, not in the repository: Docker emptied on the owner's reques
 
 ### In progress: written by agents, NOT built and NOT verified
 
-Verified and integrated on 2026-11-14 (nxaot CTest 28 of 28; host CTest 99 of 99 with and without `DM_AOT_ARENA_CHECK`, `NXAOT` given): the three rows that were `wip/second-pack-profile`, `wip/launcher-rule-by-function` and `wip/runner-scripts`. Agents at work: the JIT fallback for the Windows host (it has none: the cross-build image lacks Boost's headers); why the 4,000-function benchmark stays in the JIT fallback on non-local transfers.
+Verified and integrated on 2026-11-14 (nxaot CTest 28 of 28; host CTest 99 of 99 with and without `DM_AOT_ARENA_CHECK`, `NXAOT` given): the three rows that were `wip/second-pack-profile`, `wip/launcher-rule-by-function` and `wip/runner-scripts`. Agent at work: why the 4,000-function benchmark stays in the JIT fallback on non-local transfers.
 
 No Docker image exists (the disk filled while ten worktrees were checked out, 280 MB each), so nothing below has been compiled or run. Each item is uncommitted in its worktree under `.claude/worktrees/`; a new session reads the diff there (`git -C <worktree> diff`), verifies it in Docker, and only then cherry-picks it. One build at a time: the two images (`nxnative-build` 1.9 GB, `nxnative-aot` 1.9 GB) do not fit beside the worktrees.
 
@@ -41,11 +43,21 @@ No Docker image exists (the disk filled while ten worktrees were checked out, 28
 |---|---|---|
 | branch `wip/apple-log-one-call` (parked: one commit, no worktree) | Apple's log macros write each line in one stdio call, as the port's `LOG` does since `9872bae`. Prepared for a Mac: not to be merged before a Mac or macOS CI run | `dm/host/dm.h` (Apple branches), `docs/reference/threads.md` |
 
+### Waiting on the owner
+
+What only the owner can do, in the order that unblocks most:
+
+1. **GitHub Actions.** No workflow has run since 2026-10-29, so nothing later is checked on Windows or macOS by CI. `port` and `aot` are active and trigger on every push to this branch; `tests` was disabled by hand on 2026-10-31. Look at the repository's Settings, Actions (are actions allowed, is there a spending limit) and at the account's billing; re-enable `tests`. The first run will also show whether the fixes of `fc0a8f1` and `931af1a` hold.
+2. **The Windows PC.** Nothing of the port has run on Windows since 2026-10-29. With CI back: unzip the artifacts `win64-tests` into `build\win64` and `win64-packs` into `build\packs\win64` of a checkout of the same commit, then `powershell -NoProfile -ExecutionPolicy Bypass -File dm\host\tests\run_win64_tests.ps1`, and push `logs\win64\`. Without CI the two folders can be made on Linux: `mstorsjo/llvm-mingw:20261020` for `build/win64` and `build_packs.sh` for the packs (docker/README.md). Expected with the JIT now in the Windows host: `t_aot_host` runs all 18 corpus programs, `t_second_pack` ends `29 checks, 0 failed`.
+3. **A game package.** Phases 3 and 5 need one NSP with its keys in a folder outside the repository and the home folder, and `scripts/build_ipa_from_nsp.py --platform linux` (or `windows`) on it. Everything so far ran on homebrew and a synthetic module.
+4. **The RTX 4060.** The Vulkan backend has only run on lavapipe (software). `nxhost-run` with a packed game on that GPU, and the `t_vk_*` tests there, are the next step of phase 4.
+5. **A Mac or macOS CI** for the parked branch `wip/apple-log-one-call` (its commit message lists the checks) and for the Metal backend's provoking vertex.
+
 ### Left, not started
 
 - Verify and integrate every row above (Docker; the Apple one on a Mac).
 - `t_astc_mesa` is registered outside `host_test` and is in no runner (declared in the manifest as CTest only).
-- The launcher's rule and the packer's `made` rows for the targets file.
+- Hot indirect targets: once a site is guarded its dominant target never binds again while other targets may, so over sessions a guarded site can lose dominance and its guard (the counts are binds, not calls).
 - The 4,000-function benchmark spends 92 % of its samples in the JIT fallback on non-local transfers, also after a repack with its misses: the cause is to be found (a game that switches stacks would run mostly in the JIT).
 - Converted quads still take another provoking vertex than the Switch's (declared: the fix changes the quad's diagonal).
 - The Metal backend takes the first vertex on every shape where the Switch takes the last (a Mac).

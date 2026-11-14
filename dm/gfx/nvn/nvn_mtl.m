@@ -8712,6 +8712,13 @@ static NSString *arch_compact_marker(void) { return [g_arch_dir stringByAppendin
 static NSString *arch_os_build(void) { char b[64] = ""; size_t n = sizeof b; sysctlbyname("kern.osversion", b, &n, NULL, 0); return [NSString stringWithFormat:@"os\t%s\n", b]; }
 static NSString *arch_compact_stamp(void) { return [arch_os_build() stringByAppendingString:@"capture\toriginal-functions-v1\n"]; }
 static int arch_compact_allowed(void) {
+    // Recapturing archive hits requires recompiling their original functions.
+    // Callers can defer that maintenance without disabling the archive.
+    const char *compact = getenv("DM_PSO_COMPACT");
+    if (compact && !strcmp(compact, "0")) {
+        MLOG("pipeline archive: automatic compaction disabled (DM_PSO_COMPACT=0)");
+        return 0;
+    }
     NSString *m = [NSString stringWithContentsOfFile:arch_compact_marker() encoding:NSUTF8StringEncoding error:nil];
     if (!m) return 1;
     if ([m isEqualToString:arch_compact_stamp()]) { MLOG("[RED] pipeline archive: a compaction did not finish on this system build (issue #342): the files are left as they are"); return 0; }

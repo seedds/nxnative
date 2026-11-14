@@ -156,6 +156,49 @@ class Registry(unittest.TestCase):
                 self.assertIn(old, old_words, why); self.assertIn(new, new_words, why)
                 self.assertEqual(int(old[:2], 16) & 31, int(new[:2], 16) & 31, why)
 
+    def test_smash_render_size_stubs_keep_the_game_at_no_size(self):
+        """With the state page at 0 (1080p), every stub of Super Smash Bros. Ultimate's render size must run the words it replaced, adrp pages included, and return right after them."""
+        import struct, types
+        m = next(m for p, m in MODS.items() if p.parent.name == '01006A800016E000' and p.name == 'patches.py')
+        area, base, state = {}, -0x2000000, 0x744c000
+        page = lambda word, at: (at & ~0xfff) + ((((word >> 5 & 0x7ffff) << 2 | word >> 29 & 3) ^ 0x100000) - 0x100000 << 12)   # an adrp's target
+        is_adrp = lambda word: word & 0x9f000000 == 0x90000000
+        branch = lambda word, at: at + (((word & 0x3ffffff) ^ 0x2000000) - 0x2000000) * 4
+        cursor, sites, puts = [base], {}, []
+        def emit(word): area[cursor[0]] = word; cursor[0] += 4
+        ctx = types.SimpleNamespace(here=lambda: cursor[0], emit=emit, state=state, render_scale=0, site=lambda off, orig: sites.__setitem__(off, bytes.fromhex(orig)),
+                                    put=lambda off, words, why: puts.append((off, words, why)))
+        m.FRAME_STEP[m.render_build](ctx)
+        self.assertEqual({off for off, _, _ in puts}, set(sites))
+        self.assertEqual(len(puts), 25)
+        for off, words, why in puts:
+            self.assertEqual(len(words), 1, why)
+            start = branch(words[0], off); orig = struct.unpack(f'<{len(sites[off]) // 4}I', sites[off]); back = off + 4 * len(orig)
+            # the stub, up to its last branch back: its old path is the last len(orig) words before that branch
+            end = start; last = None
+            while end in area:
+                if area[end] >> 26 == 0b000101 and branch(area[end], end) == back: last = end
+                elif last is not None and end > last and area[end] >> 26 == 0b000101: break
+                end += 4
+                if last is not None and end - last > 4 * 40: break
+            self.assertIsNotNone(last, why); assert last is not None
+            def same(at, word, was, old):   # old: where the word stood in the game's code, for an adrp's page
+                if is_adrp(word) or is_adrp(was):
+                    return is_adrp(word) and is_adrp(was) and word & 0x1f == was & 0x1f and page(word, at) == page(was, old)
+                return word == was
+            # one-word stubs run the original first or last; a sequence runs it just before the branch back
+            if len(orig) == 1: self.assertIn(orig[0], [area[a] for a in range(start, last, 4)], why)
+            else:
+                for i, was in enumerate(orig):
+                    at = last - 4 * (len(orig) - i)
+                    self.assertTrue(same(at, area[at], was, off + 4 * i), f'{why}: word {i} at {at:#x}')
+        # the state page is reached from the patch area wherever a stub loads it
+        self.assertTrue(any(is_adrp(w) and page(w, a) == state for a, w in area.items()))
+        # the gates name the upper bits' register for the host (x19 or x22), and the capability opens the setting
+        self.assertEqual({oid & 0xff for _, oid, _, _ in m.OBS[m.render_build]}, {27, 28})
+        self.assertEqual({oid >> 8 for _, oid, _, _ in m.OBS[m.render_build]}, {19, 22})
+        self.assertIn('RENDER_SIZE', m.CAPABILITIES[m.render_build])
+
     def test_game_files_name_their_own_builds(self):
         for p, m in MODS.items():
             if p.name != 'patches.py' or not (p.parent / 'game.tsv').is_file(): continue

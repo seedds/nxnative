@@ -18,6 +18,8 @@ app_category	public.app-category.games
 # ---- Versions ----
 # only the merged 13.0.5 copy is extracted
 build	v2031616	13.0.5	main=21450c647b8c5940ed5b68218ea128fd	subsdk0=60c6edbbfcebd4176cc301d5d9cb5a6f	sdk=5fd4f531c1195e9e5510c9e73f22cd39
+# 13.0.1 is registered for its render size stubs (patches.py); its tables still come from a derived profile, as shader_versions below stays 13.0.5
+build	v1769472	13.0.1	main=b9b166df1db90baffbd8027eb0df14d6	subsdk0=60c6edbbfcebd4176cc301d5d9cb5a6f	sdk=5fd4f531c1195e9e5510c9e73f22cd39
 package	v2031616
 shader_versions	v2031616
 

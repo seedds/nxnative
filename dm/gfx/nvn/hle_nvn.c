@@ -3698,6 +3698,11 @@ NVN(nvnCommandBufferDownsample, void, NVNcommandBuffer *c, const NVNtexture *s, 
 NVN(nvnCommandBufferDownsampleTextureView, void, NVNcommandBuffer *c, const NVNtexture *s, const NVNtextureView *sv, const NVNtexture *d, const NVNtextureView *dv) {
     rec_downsample(c, s, sv, d, dv, (uint64_t)__builtin_return_address(0));
 }
+// Tiled resolves differ in Tegra cache scheduling, not the destination pixels. The host already treats the tiled-cache actions as hints; both forms keep the ordinary resolve ordering and snapshots.
+NVN(nvnCommandBufferTiledDownsample, void, NVNcommandBuffer *c, const NVNtexture *s, const NVNtexture *d) { rec_downsample(c, s, NULL, d, NULL, (uint64_t)__builtin_return_address(0)); }
+NVN(nvnCommandBufferTiledDownsampleTextureView, void, NVNcommandBuffer *c, const NVNtexture *s, const NVNtextureView *sv, const NVNtexture *d, const NVNtextureView *dv) {
+    rec_downsample(c, s, sv, d, dv, (uint64_t)__builtin_return_address(0));
+}
 
 // CPU texture write (NVN WriteTexels): texture storage lives in pool memory in Tegra block-linear layout; decode the whole level → patch the region → re-encode.
 // Write protection is lifted and the range marked dirty first, so the replay layer re-uploads it the next time it is used

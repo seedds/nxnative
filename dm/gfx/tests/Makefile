@@ -471,6 +471,12 @@ check_t_upload_budget: t_upload_budget
 .PHONY: check_t_upload_budget
 t_linear_readback: t_linear_readback.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_linear_readback.m ../../host/crash.c ../../host/hle_bigstack.c t_host_stubs.c $(filter-out ../nvn/nvn_mtl.m,$(GFX)) $(FW)
+t_tiled_resolve: t_tiled_resolve.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_tiled_resolve.m ../../host/crash.c ../../host/hle_bigstack.c t_host_stubs.c $(filter-out ../nvn/nvn_mtl.m,$(GFX)) $(FW)
+.PHONY: check_t_tiled_resolve
+check_t_tiled_resolve: t_tiled_resolve
+	DM_NVN_ENC_THREAD=0 MTL_DEBUG_LAYER=1 ./t_tiled_resolve
+	DM_NVN_ENC_THREAD=1 MTL_DEBUG_LAYER=1 ./t_tiled_resolve
 t_copy_alias: t_copy_alias.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_copy_alias.m ../../host/crash.c ../../host/hle_bigstack.c t_host_stubs.c $(filter-out ../nvn/nvn_mtl.m,$(GFX)) $(FW)
 .PHONY: check_t_copy_alias

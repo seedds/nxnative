@@ -1605,6 +1605,13 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Fix:** a single-sample source is drawn into the destination as a whole-level scaling copy with bilinear filtering, converting the format (`copy_t2t`, through `copy_t2t_draw`; [Copies a blit cannot do, drawn](#copies-a-blit-cannot-do-drawn)).
 - **Found on:** [Bayonetta 2](../../dm/games/01007960049A0000/README.md): its bloom from a 320x176 target into 80x48 and 48x32 textures, and its 1280x720 BGRA8 frame into an RGBA8 texture of the same size.
 
+### Tiled multisample resolves
+
+- **Symptom:** `[RED] NVN unimplemented function called: nvnCommandBufferTiledDownsample`; menus render but the stage is black or incomplete.
+- **Cause:** the tiled resolve entry points reached the unimplemented-call stub, leaving their destination textures unchanged. Ordinary `Downsample` already recorded a resolve.
+- **Fix:** `TiledDownsample` and `TiledDownsampleTextureView` use the same recorded resolve as their ordinary counterparts. Texture descriptors and the selected views are copied when recorded; the resolve runs in submission order. Tegra tiled-cache scheduling hints remain host no-ops. This adds no new format, size-conversion or sample-count support to the existing resolve path.
+- **Found on:** Ikaruga 1.0.2, reported by [hada0127 in issue #592](https://github.com/seedds/nxnative/issues/592), with a [source-only patch](https://gist.github.com/hada0127/5cf963267ae4e0da47ecf8e150c7bdf6). The report's independent SDK audio-layout failure is separate. No repository game profile or current gameplay validation is provided by this change.
+
 ### Depth-stencil copies carry the stencil
 
 - **Symptom:** no ambient occlusion (Mac); on a device the result depends on whatever that memory holds.

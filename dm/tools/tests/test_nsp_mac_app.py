@@ -508,6 +508,9 @@ class App(unittest.TestCase):
         self.assertEqual((p['CFBundleExecutable'], p['CFBundleName'], p['CFBundleIdentifier'], p['CFBundleShortVersionString']), ('nxnative', 'Game: Test', 'org.nxnative.01008cf01baac000', '1.0.1'))
         self.assertEqual((p['DMTitleID'], p['DMLanguage'], p['DMRomfsMarker'], p['CFBundleIconFile']), (TID, 'fr', 'region_common/audio/edward.bfsar', 'AppIcon'))
         self.assertIs(p['LSSupportsGameMode'], False)   # macOS's Game Mode holds the GPU at its lowest clock (frame-rate.md)
+        g = plistlib.loads((self.app / 'Contents/Helpers/Game Mode.app/Contents/Info.plist').read_bytes())   # the Game Mode setting's copy of the host (launcher.c DM_GAME_MODE)
+        self.assertEqual((g['CFBundleIdentifier'], g['CFBundleExecutable'], g['CFBundleName'], g['LSSupportsGameMode']), ('org.nxnative.01008cf01baac000.gamemode', 'dmhost', 'Game: Test', True))
+        self.assertTrue(os.access(self.app / 'Contents/Helpers/Game Mode.app/Contents/MacOS/dmhost', os.X_OK))
         self.assertEqual(p['DMSettings'], [])   # launcher.json's settings, as the saved choices they accept: none here
         self.assertRegex(p['DMCommit'], r'^[0-9a-f]{12}(\+dirty)?$')   # the packing checkout (scripts/bug_report.py, the host's start line)
         self.assertEqual(p['DMChain'], '0123456789ab')   # the chain of the libraries packed (msl/b-<chain>)

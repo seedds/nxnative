@@ -97,7 +97,7 @@ def build_launcher(out, minos, clang, swiftc, sdk):   # launcher.c's main and th
         for obj, src in zip(objs, (HERE / 'launcher.c', HERE.parent / 'host/save_sync.c')):
             run([clang, '-isysroot', sdk, '-arch', 'arm64', f'-mmacosx-version-min={minos}', '-O2', '-Wall', '-I', HERE.parent / 'host', '-c', '-o', obj, src])
         run([swiftc, '-sdk', sdk, '-target', f'arm64-apple-macos{minos}', '-O', '-swift-version', '5', '-parse-as-library', '-module-cache-path', Path(t) / 'module-cache',
-             '-o', out, *swift_sources(), *objs, '-framework', 'CoreFoundation', '-framework', 'AppKit', '-framework', 'SwiftUI'])
+             '-o', out, *swift_sources(), *objs, '-framework', 'CoreFoundation', '-framework', 'CoreServices', '-framework', 'AppKit', '-framework', 'SwiftUI'])
 
 
 def make_icns(jpg, out):   # the game's icon (256x256 JPEG) at every size an .icns holds
@@ -119,7 +119,8 @@ def settings_rules(listed):   # DMSettings: what the launcher accepts as each se
 
 
 def info_plist(a, minos, icon):
-    # LSSupportsGameMode off: macOS's Game Mode holds the GPU at its lowest clock while it is busy (docs/reference/frame-rate.md, macOS Game Mode holds the GPU at its lowest clock)
+    # LSSupportsGameMode off: macOS's Game Mode holds the GPU at its lowest clock while it is busy (docs/reference/frame-rate.md, macOS Game Mode holds the GPU at its lowest clock);
+    # the player's Game Mode setting runs the host from a nested bundle that allows it instead (game_mode_helper)
     p = {'CFBundleName': a.name, 'CFBundleDisplayName': a.name, 'CFBundleIdentifier': a.bundle_id or f'org.nxnative.{a.title_id.lower()}',
          'CFBundleVersion': a.version or '1.0', 'CFBundleShortVersionString': a.version or '1.0', 'CFBundlePackageType': 'APPL', 'CFBundleExecutable': EXE,
          'CFBundleInfoDictionaryVersion': '6.0', 'LSMinimumSystemVersion': minos, 'LSArchitecturePriority': ['arm64'], 'NSHighResolutionCapable': True,
@@ -132,6 +133,23 @@ def info_plist(a, minos, icon):
         lang = next((s['default'] for s in listed if s['env'] == 'DM_LANG'), None)
         if lang: p['DMLanguage'] = lang   # the Game language row's default: --lang, or the game's first language when it lacks that one (settings.py), with or without the window
     return p
+
+
+HELPER = 'Game Mode.app'
+
+
+def game_mode_helper(c, info, icon):
+    # Contents/Helpers/Game Mode.app: a second copy of the host in a bundle of its own (ID <app's>.gamemode, LSSupportsGameMode true), which the launcher runs instead of
+    # Contents/MacOS/dmhost when the player turns Game Mode on (launcher.c, DM_GAME_MODE). macOS remembers an app it has run in Game Mode and keeps it on after a re-pack with the key
+    # false (frame-rate.md), so the app's own ID is never the one that runs in it, and turning the setting off always works
+    h = c / f'Helpers/{HELPER}/Contents'; (h / 'MacOS').mkdir(parents=True)
+    shutil.copy(c / 'MacOS/dmhost', h / 'MacOS/dmhost')
+    keep = ('CFBundleName', 'CFBundleDisplayName', 'CFBundleVersion', 'CFBundleShortVersionString', 'CFBundlePackageType', 'CFBundleInfoDictionaryVersion', 'CFBundleIconFile',
+            'LSMinimumSystemVersion', 'LSArchitecturePriority', 'NSHighResolutionCapable', 'LSApplicationCategoryType', 'DMTitleID', 'DMCommit', 'DMChain')
+    p = {k: info[k] for k in keep if k in info} | {'CFBundleIdentifier': info['CFBundleIdentifier'] + '.gamemode', 'CFBundleExecutable': 'dmhost', 'LSSupportsGameMode': True}
+    if icon: (h / 'Resources').mkdir(); shutil.copyfile(c / 'Resources/AppIcon.icns', h / 'Resources/AppIcon.icns')
+    (h / 'Info.plist').write_bytes(plistlib.dumps(p))
+    (h / 'PkgInfo').write_text('APPL????')
 
 
 def source_commit():   # DMCommit: the checkout that packed the app (scripts/bug_report.py reads it), short hash, +dirty with uncommitted changes to tracked files; None outside a checkout
@@ -153,8 +171,8 @@ def strip_detritus(app):   # the "._name" files a copy from or onto an exFAT vol
 
 def sign(app, identity, codesign):   # the inner host first, then the bundle (its resources and the launcher); no --options runtime (see the top)
     strip_detritus(app)   # before codesign reads the bundle, so that a build folder or an output folder on exFAT is not a signing failure
-    host = app / 'Contents/MacOS/dmhost'
-    for target in (host, app):
+    host, helper = app / 'Contents/MacOS/dmhost', app / f'Contents/Helpers/{HELPER}'
+    for target in (host, *([helper] if helper.is_dir() else []), app):   # nested code before the bundle that holds it
         try: run([codesign, '--force', '--sign', identity, target])
         except SystemExit as e:
             if not any(s in str(e) for s in ('detritus', '._', 'not signed at all')): raise
@@ -349,6 +367,7 @@ def pack(a):
     if msl_dst.name.startswith('b-'): info['DMChain'] = msl_dst.name[2:]   # the library chain the app carries (a Vulkan or GL game's vk / gl has none)
     (c / 'Info.plist').write_bytes(plistlib.dumps(info))
     (c / 'PkgInfo').write_text('APPL????')
+    game_mode_helper(c, info, icon)
     step(f'signing ({"ad-hoc" if a.sign == "-" else a.sign})'); sign(tmp, a.sign, codesign)
     had_old = out.exists()
     replace_app(tmp, out)

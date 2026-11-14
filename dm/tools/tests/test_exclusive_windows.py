@@ -22,9 +22,9 @@ scope = dict(vars(nso_asm), re=re, struct=struct, combinations=combinations, md=
              patch=bytearray(), PATCH_BASE=0x10000, KEY_PAGE_OFF=0x8000,
              KEY_INDEX={'K18': 0}, fix=[])
 names = {'here', 'emit', 'emit_key_addr', 'emit_slot_addr', 'dis', 'regset', 'num',
-         'has18', 'regs_in', 'pick', 'subst', 'find_windows', 'window_adrp', 'check_window_branches', 'site_window', 'site_retry_window'}
+         'has18', 'regs_in', 'pick', 'subst', 'find_windows', 'window_adrp', 'check_window_branches', 'site_window', 'site_retry_window', 'BX', 'reach_via'}   # BX and reach_via (with REACH, _holes and _hops): the site's branches, through a hop where a b does not reach
 tree = ast.parse((TOOLS / 'patch_nso.py').read_text())
-exec(compile(ast.Module(body=[n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in names],
+exec(compile(ast.Module(body=[n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in names or isinstance(n, ast.Assign) and {getattr(t, 'id', None) for t in ast.walk(n.targets[0])} & {'REACH', '_holes'}],
                         type_ignores=[]), str(TOOLS / 'patch_nso.py'), 'exec'), scope)
 scope['EXCL_LD'] = ('ldxr', 'ldaxr', 'ldxp', 'ldaxp', 'ldxrb', 'ldaxrb', 'ldxrh', 'ldaxrh')
 scope['EXCL_ST'] = ('stxr', 'stlxr', 'stxp', 'stlxp', 'stxrb', 'stlxrb', 'stxrh', 'stlxrh')

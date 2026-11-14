@@ -161,7 +161,7 @@ int main(void) {
         pr->sh[1]->rf.color_mask = 1;
         prog_t pg = {.serial = nvn_new_serial()};
         serial_put(pg.serial, pr);
-        int failures = 0; // NOLINT(clang-analyzer-osx.cocoa.RetainCount): serial_put retains pr in g_by_serial and serial_del releases it after the draws.
+        int failures = 0;
         for (int indexed = 0; indexed <= 1; indexed++) {
             failures += !run(&pg, pool, indexed, 1024, 1024, 1023, STRIDE);
             failures += !run(&pg, pool, indexed, 1025, 1025, 1024, STRIDE);

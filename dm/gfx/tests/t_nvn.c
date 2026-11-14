@@ -194,6 +194,15 @@ int main(void) {
     P(nvnDeviceGetInteger)(&dev, (NVNdeviceInfo)0x30, &v); EXPECT("newest GPU code minor", 16, v);
     P(nvnDeviceGetInteger)(&dev, (NVNdeviceInfo)0x2F, &v); EXPECT("oldest GPU code major", 1, v);
     P(nvnDeviceGetInteger)(&dev, (NVNdeviceInfo)0x31, &v); EXPECT("oldest GPU code minor", 5, v);
+    // The X1 driver's own constants past the measured table (SDK 19.3's sdk): Frostpunk sizes a 32-slot binding table per stage to min(separate textures, separate samplers) and clears that
+    // many slots every frame, so 4096 samplers ran it past its end; the rest answered 0 with a red line before
+    P(nvnDeviceGetInteger)(&dev, NVN_DEVICE_INFO_SEPARATE_TEXTURE_BINDINGS_PER_STAGE, &v); EXPECT("separate texture bindings per stage (128 measured on X1)", 128, v);
+    P(nvnDeviceGetInteger)(&dev, NVN_DEVICE_INFO_SEPARATE_SAMPLER_BINDINGS_PER_STAGE, &v); EXPECT("separate sampler bindings per stage (32, the driver's)", 32, v);
+    P(nvnDeviceGetInteger)(&dev, (NVNdeviceInfo)0x60, &v); EXPECT("X1 item 0x60 (65535, the driver's)", 65535, v);
+    P(nvnDeviceGetInteger)(&dev, (NVNdeviceInfo)0x67, &v); EXPECT("X1 item 0x67, shader code alignment (256)", 256, v);
+    P(nvnDeviceGetInteger)(&dev, (NVNdeviceInfo)0x68, &v); EXPECT("X1 item 0x68 (16383, the driver's last)", 16383, v);
+    P(nvnDeviceGetInteger)(&dev, (NVNdeviceInfo)0x62, &v); EXPECT("X1 item 0x62 (32: the driver's table, the device's value read at init)", 32, v);
+    v = -1; P(nvnDeviceGetInteger)(&dev, (NVNdeviceInfo)0x69, &v); EXPECT("X1 items past 0x68 answer 0", 0, v);
     // The Switch 2 table (NVN2's own constants: the newest seen, SDK 21.4.4's, as an older sdk's own switch answers its older versions through dm_sdk_nvn2_item): its GPU code range and Ampere's limits, the host's 16 vertex slots, and the run-time items
     EXPECT("NVN2: API 231.39", 231 * 100 + 39, g_devinfo2[0] * 100 + g_devinfo2[1]);
     EXPECT("NVN2: GPU code 201.0 to 201.20", 1, g_devinfo2[0x2E] == 201 && g_devinfo2[0x30] == 20 && g_devinfo2[0x2F] == 201 && g_devinfo2[0x31] == 0);
@@ -425,7 +434,7 @@ int main(void) {
     EXPECT("buffer copy 64 B identical", 0, memcmp(src, dst, 64));
     uint64_t ts[2]; memcpy(ts, cnt, 16);
     EXPECT("counter timestamp written (non-zero)", 1, ts[1] != 0);
-    EXPECT("its counter field: the time, 0 with the profile's render_cond (as on the GPU)", DM_GAME_RENDER_COND ? 0 : ts[1], ts[0]);
+    EXPECT("its counter field: 0, as on the GPU", 0, ts[0]);
     NVNcounterData fixed_counter = {0, 614400};
     EXPECT("614400 raw counter ticks = 1 ms", 1000000, P(nvnDeviceGetTimestampInNanoseconds)(&dev, &fixed_counter));
     NVNcounterData reported_counter; memcpy(&reported_counter, cnt, sizeof reported_counter);
@@ -698,6 +707,50 @@ int main(void) {
         EXPECT("lists checked", 126, lists);
         P(nvnCommandBufferFinalize)(&c3); P(nvnMemoryPoolFinalize)(&mp);
     }
+    // 5b''. A grant is not a write. Slot A (at 512) overflows its 64 bytes into a host-lent segment; slot B before it is then re-recorded with a grant of 512 bytes that
+    //       reaches over A's bytes but writes only one record (max(S, 512), as above). A is still live: another buffer's overflow must not be handed A's segment
+    {
+        static uint8_t m[8192] __attribute__((aligned(4096))); NVNmemoryPoolBuilder mb; NVNmemoryPool mp; NVNcommandBuffer ca, cb, cx;
+        P(nvnMemoryPoolBuilderSetDefaults)(&mb); P(nvnMemoryPoolBuilderSetStorage)(&mb, m, sizeof m); P(nvnMemoryPoolInitialize)(&mp, &mb);
+        P(nvnCommandBufferInitialize)(&ca, &dev); P(nvnCommandBufferInitialize)(&cb, &dev); P(nvnCommandBufferInitialize)(&cx, &dev);   // no callbacks: an overflow goes to a host segment
+        enum { NB = 40 };
+        P(nvnCommandBufferAddCommandMemory)(&ca, &mp, 512, 64); P(nvnCommandBufferBeginRecording)(&ca);
+        for (int i = 0; i < NB; i++) P(nvnCommandBufferBindUniformBuffer)(&ca, NVN_SHADER_STAGE_FRAGMENT, i & 15, UINT64_C(0x10000) * (uint64_t)(i + 1), 0x100);
+        NVNcommandHandle ha = P(nvnCommandBufferEndRecording)(&ca);
+        P(nvnCommandBufferAddCommandMemory)(&cb, &mp, 0, 1024); P(nvnCommandBufferBeginRecording)(&cb);   // B's grant covers A's slot; B writes 24 bytes at 0
+        P(nvnCommandBufferBindUniformBuffer)(&cb, NVN_SHADER_STAGE_VERTEX, 1, 0x7770000, 0x100); P(nvnCommandBufferEndRecording)(&cb);
+        P(nvnCommandBufferAddCommandMemory)(&cx, &mp, 4096, 64); P(nvnCommandBufferBeginRecording)(&cx);   // another overflow, which takes a free segment of the same size
+        for (int i = 0; i < NB; i++) P(nvnCommandBufferBindUniformBuffer)(&cx, NVN_SHADER_STAGE_COMPUTE, 0, 0xdead0000, 0x40);
+        P(nvnCommandBufferEndRecording)(&cx);
+        int good = 0; size_t ln; uint8_t *L = nvn_rec_linear(ha, &ln);
+        for (const uint8_t *p = L; p < L + ln; ) {
+            op_hdr h; memcpy(&h, p, sizeof h); if (!h.size) break;
+            if (h.op == OP_BIND_UBO || h.op == OP_BIND_UBO_SMALL) {
+                p_bind_buf tmp; const p_bind_buf *b = bind_buf_rec(h.op, p + 8, &tmp);
+                if (b->stage == NVN_SHADER_STAGE_FRAGMENT && b->index == (good & 15) && b->addr == UINT64_C(0x10000) * (uint64_t)(good + 1) && b->size == 0x100) good++;
+                else break;
+            }
+            p += h.size;
+        }
+        free(L);
+        EXPECT("live list keeps its lent segment after a wider grant", NB, good);
+        // A recorded again in place: its old records are overwritten, so its segment is free, and the next overflow of that size takes it instead of a new one
+        uint8_t *a_seg = NULL; pthread_mutex_lock(&g_hostseg_mu);
+        for (int i = 0; i < g_nhostseg; i++) if (g_hostseg[i].busy && g_hostseg[i].org_lo == (uintptr_t)(m + 512)) a_seg = g_hostseg[i].mem;
+        pthread_mutex_unlock(&g_hostseg_mu);
+        EXPECT("the lent segment is A's", 1, a_seg != NULL);
+        P(nvnCommandBufferAddCommandMemory)(&ca, &mp, 512, 64); P(nvnCommandBufferBeginRecording)(&ca);
+        P(nvnCommandBufferBindUniformBuffer)(&ca, NVN_SHADER_STAGE_FRAGMENT, 0, 0x5550000, 0x100); P(nvnCommandBufferEndRecording)(&ca);
+        int a_busy = 1, nseg = g_nhostseg; pthread_mutex_lock(&g_hostseg_mu);
+        for (int i = 0; i < g_nhostseg; i++) if (g_hostseg[i].mem == a_seg) a_busy = g_hostseg[i].busy;
+        pthread_mutex_unlock(&g_hostseg_mu);
+        EXPECT("re-recording A in place frees its segment", 0, a_busy);
+        P(nvnCommandBufferAddCommandMemory)(&cx, &mp, 4096, 64); P(nvnCommandBufferBeginRecording)(&cx);
+        for (int i = 0; i < NB; i++) P(nvnCommandBufferBindUniformBuffer)(&cx, NVN_SHADER_STAGE_COMPUTE, 0, 0xdead0000, 0x40);
+        P(nvnCommandBufferEndRecording)(&cx);
+        EXPECT("the next overflow reuses it: no new segment", nseg, g_nhostseg);
+        P(nvnCommandBufferFinalize)(&ca); P(nvnCommandBufferFinalize)(&cb); P(nvnCommandBufferFinalize)(&cx); P(nvnMemoryPoolFinalize)(&mp);
+    }
     // 5b'''. Calls and copies (NVN): CallCommands copies the called list's pieces into the caller's list, as the driver copies a command set's GPU FIFO entries, so the called
     //        recording's control memory may be given out again once the call is recorded (Donkey Kong Bananza resets its control arena twice per command arena: when a call
     //        pointed at the called list, the caller replayed whatever the next recordings wrote there); CopyCommands copies the records, so its command memory may go too
@@ -751,6 +804,29 @@ int main(void) {
         EXPECT("control used: the entries in the last block", 1, P(nvnCommandBufferGetControlMemoryUsed)(&cl) > 0 && P(nvnCommandBufferGetControlMemoryUsed)(&cl) <= 32);
         memset(dst, 0, DSTN); P(nvnQueueSubmitCommands)(&q, 1, &hl); P(nvnQueueFinish)(&q);
         EXPECT("the linked list replays", 1, !memcmp(dst, d1, 16) && !memcmp(dst + 16, d2, 16) && !memcmp(dst + 32, d2, 16));
+        // A called recording recorded over before the caller is submitted (Advance Wars 1+2's rendering plugin re-adds its block for each event): the piece runs what its
+        // command memory holds then, as the GPU runs a command set's bytes. A record that does not fit in the piece ends it; records that fit run
+        {
+            static uint8_t d3[48]; memset(d3, 0x33, sizeof d3);
+            #define CALLEE_AT0(sz, data) do { P(nvnCommandBufferAddCommandMemory)(&ca, &mp, 0, 1024); P(nvnCommandBufferAddControlMemory)(&ca, ctl_a, sizeof ctl_a); \
+                P(nvnCommandBufferBeginRecording)(&ca); P(nvnCommandBufferUpdateUniformBuffer)(&ca, (uintptr_t)dst, DSTN, 0, (sz), (data)); hc = P(nvnCommandBufferEndRecording)(&ca); } while (0)
+            #define CALLER() do { P(nvnCommandBufferAddCommandMemory)(&cc, &mp, 1024, 1024); P(nvnCommandBufferAddControlMemory)(&cc, ctl_b, sizeof ctl_b); \
+                P(nvnCommandBufferBeginRecording)(&cc); P(nvnCommandBufferCallCommands)(&cc, 1, &hc); P(nvnCommandBufferUpdateUniformBuffer)(&cc, (uintptr_t)dst, DSTN, 48, 16, d2); \
+                hcall = P(nvnCommandBufferEndRecording)(&cc); } while (0)
+            CALLEE_AT0(16, d1); CALLER();
+            CALLEE_AT0(sizeof d3, d3);   // a longer record over the called piece's head
+            size_t ln; free(nvn_rec_linear(hcall, &ln));
+            EXPECT("recorded over by a longer record: the linear copy holds the caller's own record", rec_sz + 8, ln);
+            memset(dst, 0, DSTN); P(nvnQueueSubmitCommands)(&q, 1, &hcall); P(nvnQueueFinish)(&q);
+            static const uint8_t zero[48];
+            EXPECT("recorded over by a longer record: the piece is skipped, the caller's own record runs", 1, !memcmp(dst, zero, 48) && !memcmp(dst + 48, d2, 16));
+            CALLEE_AT0(16, d1); CALLER();
+            CALLEE_AT0(16, d3);   // a record of the same size: it fits, and runs as the GPU would run those bytes
+            memset(dst, 0, DSTN); P(nvnQueueSubmitCommands)(&q, 1, &hcall); P(nvnQueueFinish)(&q);
+            EXPECT("recorded over by a record that fits: it runs", 1, !memcmp(dst, d3, 16) && !memcmp(dst + 48, d2, 16));
+            #undef CALLEE_AT0
+            #undef CALLER
+        }
         P(nvnCommandBufferFinalize)(&ca); P(nvnCommandBufferFinalize)(&cc); P(nvnCommandBufferFinalize)(&cl); P(nvnMemoryPoolFinalize)(&mp); P(nvnMemoryPoolFinalize)(&dp);
     }
     // 5b''''. Compact records (nvn_obj.h OPC_*): each call recorded both ways expands to exactly the canonical records, in no more command memory
@@ -795,7 +871,7 @@ int main(void) {
         EQ(P(nvnCommandBufferBindSeparateTexture)(CB_, NVN_SHADER_STAGE_FRAGMENT, 4, (NVNseparateTextureHandle){77}));
         EQ(h_nvnCommandBufferBindTexturesDeferred(CB_, NVN_SHADER_STAGE_FRAGMENT, 0, 2, th));
         EQ(P(nvnCommandBufferBindUniformBuffers)(CB_, NVN_SHADER_STAGE_VERTEX, 4, 3, r3));
-        EQ(P(nvnCommandBufferBindUniformBuffers)(CB_, NVN_SHADER_STAGE_VERTEX, 14, 3, r3));   // past slot 16: one by one both ways
+        EQ(P(nvnCommandBufferBindUniformBuffers)(CB_, NVN_SHADER_STAGE_VERTEX, 14, 3, r3));   // past slot 16: the two slots inside it
         EQ(P(nvnCommandBufferBindUniformBuffers)(CB_, NVN_SHADER_STAGE_FRAGMENT, 0, 2, rbig));
         EQ(P(nvnCommandBufferBindStorageBuffer)(CB_, NVN_SHADER_STAGE_COMPUTE, 5, 0x40000, 0x1000));
         EQ(P(nvnCommandBufferBindStorageBuffers)(CB_, NVN_SHADER_STAGE_COMPUTE, 1, 3, r3));
@@ -822,6 +898,20 @@ int main(void) {
         EQ(P(nvnCommandBufferBarrier)(CB_, 0x1f)); EQ(P(nvnCommandBufferBarrier)(CB_, 1 << 30));
         EQ(P(nvnCommandBufferSetPrimitiveRestart)(CB_, 1, -1)); EQ(P(nvnCommandBufferSetPrimitiveRestart)(CB_, 1, 0xffff)); EQ(P(nvnCommandBufferSetPrimitiveRestart)(CB_, 0, 0x7fffffff));
         EQ(P(nvnCommandBufferSetScissor)(CB_, 0, 0, 1920, 1080)); EQ(P(nvnCommandBufferSetScissor)(CB_, -4, 0, 70000, 8));
+        // A range a stage's table does not hold records nothing, either way (SetViewports with first -1 wrote S.vp[-1] at replay; a first near INT_MAX overflowed first + n)
+        size_t ln0; { P(nvnCommandBufferAddCommandMemory)(&ce, &mp, 0, sizeof m); P(nvnCommandBufferBeginRecording)(&ce); free(nvn_rec_linear(P(nvnCommandBufferEndRecording)(&ce), &ln0)); }
+        #define NONE(...) do { for (int k = 0; k < 2; k++) { size_t ln; g_rec_compact = !k; P(nvnCommandBufferAddCommandMemory)(&ce, &mp, 0, sizeof m); P(nvnCommandBufferBeginRecording)(&ce); __VA_ARGS__; \
+                free(nvn_rec_linear(P(nvnCommandBufferEndRecording)(&ce), &ln)); if (ln != ln0) { bad++; printf("out-of-range bind recorded at line %d (%s): %zu bytes\n", __LINE__, k ? "canonical" : "compact", ln); } } \
+            g_rec_compact = 1; } while (0)
+        NVNviewportSwizzle sw4[4] = {0};
+        NONE(P(nvnCommandBufferSetViewports)(CB_, -1, 1, vp)); NONE(P(nvnCommandBufferSetViewports)(CB_, 0x7fffffff, 1, vp)); NONE(P(nvnCommandBufferSetViewportSwizzles)(CB_, -1, 1, sw4));
+        NONE(P(nvnCommandBufferBindVertexBuffers)(CB_, -1, 1, r3)); NONE(P(nvnCommandBufferBindVertexBuffers)(CB_, 0x7fffffff, 2, r3));
+        NONE(P(nvnCommandBufferBindTextures)(CB_, NVN_SHADER_STAGE_FRAGMENT, -1, 1, th)); NONE(P(nvnCommandBufferBindTextures)(CB_, NVN_SHADER_STAGE_FRAGMENT, 0x7fffffff, 3, th));
+        NONE(P(nvnCommandBufferBindSeparateSamplers)(CB_, NVN_SHADER_STAGE_FRAGMENT, -2, 2, sh)); NONE(P(nvnCommandBufferBindImages)(CB_, NVN_SHADER_STAGE_FRAGMENT, 32, 1, ih));
+        NONE(h_nvnCommandBufferBindTexturesDeferred(CB_, NVN_SHADER_STAGE_FRAGMENT, -1, 1, th)); NONE(P(nvnCommandBufferBindTextures)(CB_, (NVNshaderStage)-1, 0, 1, th));
+        NONE(P(nvnCommandBufferBindUniformBuffer)(CB_, NVN_SHADER_STAGE_VERTEX, -1, 0x20000, 0x100)); NONE(P(nvnCommandBufferBindUniformBuffers)(CB_, (NVNshaderStage)-1, 0, 2, r3));
+        NONE(P(nvnCommandBufferBindStorageBuffer)(CB_, NVN_SHADER_STAGE_COMPUTE, 16, 0x40000, 0x1000)); NONE(P(nvnCommandBufferBindStorageBuffers)(CB_, NVN_SHADER_STAGE_COMPUTE, -1, 2, r3));
+        #undef NONE
         #undef EQ
         #undef CB_
         printf("(compact records: %d cases, %d smaller, %zu bytes saved)\n", cases, smaller, saved);

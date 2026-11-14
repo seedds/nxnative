@@ -158,6 +158,7 @@ static void crash_gate(int sig) {
     for (;;) pause();
 }
 __attribute__((weak)) void dm_gfx_addr_note(uint64_t a, char *note, size_t n) { (void)a; if (n) note[0] = 0; }   // nvn_mtl.m provides the strong definition
+__attribute__((weak)) void dm_vm_census(FILE *f) { (void)f; }   // memstat.m provides the strong definition (tests that link crash.c alone have none)
 static void on_crash(int sig, siginfo_t *si, void *uc_) {
     ucontext_t *uc = uc_;
     if (sig == SIGTRAP && g_trap_hook && g_trap_hook(uc)) return;
@@ -235,6 +236,8 @@ static void on_crash(int sig, siginfo_t *si, void *uc_) {
             else if (dladdr((void *)v, &di) && di.dli_sname && di.dli_fname && strstr(di.dli_fname, "dmhost")) { fprintf(stderr, " [%+d]%s+%#llx", i * 8, di.dli_sname, (unsigned long long)(v - (uint64_t)di.dli_saddr)); n++; }
         }
         fputc('\n', stderr); }
+    // How full the address space is: an allocation that found no room (a thread's stack, a realloc, a Metal heap) aborts with the footprint far below the memory limit (issue #2444)
+    dm_vm_census(stderr);
     if (g_dump_hook) g_dump_hook();
     _exit(128 + sig);
 }

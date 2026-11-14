@@ -13,11 +13,14 @@ The full [tested games table](dm/games/README.md#games) includes original Switch
 These Switch 2 games have passed Mac gameplay testing. Build them from a [`.nup` file or a dump folder](#switch-2-games):
 
 - [Donkey Kong Bananza](dm/games/040074A01BF12000/README.md)
+- [Fast Fusion](dm/games/040041E0212AE000/README.md)
 - [Fire Emblem Fortune's Weave](dm/games/04007EF01F8AE000/README.md) — up to 120 fps
 - [Hyrule Warriors: Age of Imprisonment](dm/games/04003F40232DE000/README.md)
 - [Kirby Air Riders](dm/games/040077201BE50000/README.md)
 - [Mario Kart World](dm/games/0400C3F00006E000/README.md)
 - [Mario Tennis Fever](dm/games/0400D4201C6EA000/README.md)
+- [Nintendo Switch Sports Resort](dm/games/04008E001F098000/README.md)
+- [Orbitals](dm/games/040032B023CA4000/README.md) — two players: a controller for player 2
 - [Pokémon Pokopia](dm/games/0400A3A01EE4C000/README.md)
 - [PRAGMATA](dm/games/0400C76024710000/README.md)
 - [Splatoon Raiders](dm/games/0400380020056000/README.md)

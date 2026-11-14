@@ -140,6 +140,20 @@ class Suatom(Translated):
         self.assertIn('cp_i_cb3_C_r32ui', msl)
         self.assertIn('atomic_fetch_add', msl)
 
+    # The register forms (0x394, 0x396, 0x3a0; SULD / SUST 0x998..0x99e): the handle in Rc (64..72), read here from c[3][0] by a MOV as Orbitals' (Unreal Engine 5.6) global
+    # compute shaders read their ShaderPrint counter's (45389d82b79dbf0c +0x1850, its handle register R20 there). The handle names the binding as the bound form's word would
+    MOV_R12_C3 = (0x003fde0000000f00, 0x00c00000000c7a02)   # MOV R12, c[3][0]
+
+    def test_handle_in_a_register(self):   # SUATOM.ADD.U32 R12, [R12], R24 on a 1D buffer image, as the game encodes it with its handle in R12
+        msl = self.translate(inst(*self.MOV_R12_C3) + inst(0x00321e00001ee00c, 0x200000180c0c7394) + inst(*EXIT))
+        self.assertIn('atomic_fetch_add', msl)
+        self.assertIn('cp_i_cb3_', msl)   # bank 3, word 0: the binding the bound form names
+
+    def test_reduction_with_its_handle_in_a_register(self):   # SURED.OR.U32 above with its handle in R12 (0x3a0)
+        msl = self.translate(inst(*self.MOV_R12_C3) + inst(0x000fe2000310e00c, 0xa00000010800759f - 0x59f + 0x3a0) + inst(*EXIT))
+        self.assertIn('atomic_fetch_or', msl)
+        self.assertIn('cp_i_cb3_', msl)
+
     def test_sured_takes_its_operation(self):   # SURED.OR.U32 as Yoshi and the Mysterious Book's compute shaders encode it, in bank 3
         self.assertIn('atomic_fetch_or', self.translate(inst(0x000fe2000310e000, 0xa0c002010800759f) + inst(*EXIT)))
 
@@ -229,6 +243,49 @@ class PixelCovered(unittest.TestCase):
 
 
 @unittest.skipUnless(os.environ.get('DMSH_TEST_XLATE'), 'set DMSH_TEST_XLATE to the offline translator')
+class IpaAtOffset(unittest.TestCase):
+    """IPA at an offset from the pixel centre (location 2, the offset word in the second source register) and the barycentric coordinates a[0x3b4], as PRAGMATA's pixel
+    shader 4a9d4507eea6c837 reads them at the sample's position (+0x130: IPA R3, a[0x3b4], R5; R0 here, colour 0's x). The offset is the sample index here, which no
+    pass folds. What IPA.PASS reads is linear over the screen, so the value at the offset is the centre's plus the offset times its screen derivatives"""
+    run_job = PixelCovered.run_job
+    SPH = PixelCovered.SPH
+    SAMPLE_R5 = (0x040e0200000ec000, 0x0000000000057925)
+    BARY_AT = (0x000ee200000e20ed | 0x3f << 52, 0x0000000500007326)   # waits on every scoreboard: it reads the register just written
+    BARY = (0x000ee200000e00ed, 0x000000ff00007326)                   # the same read at the centre
+
+    def test_reads_the_centre_value_and_its_derivatives(self):
+        msl, log = self.run_job(self.SAMPLE_R5, self.BARY_AT)
+        self.assertIsNotNone(msl, log)
+        self.assertIn('[[barycentric_coord', msl)
+        self.assertRegex(msl, r'float (_\d+) = in\.gl_BaryCoordEXT\.x;\n\s*float (_\d+) = gl_FragCoord\.w;\n\s*float _\d+ = spvFMul\(\1, \2\);')   # over w, as a perspective attribute is read
+        self.assertRegex(msl, r'float (_\d+) = dfdx\((_\d+)\);\n\s*float (_\d+) = dfdy\(\2\);')
+        self.assertRegex(msl, r'int (_\d+) = as_type<int>\(_\d+\) << 20;\n\s*int _\d+ = \1 >> 28;')   # x: bits 8..11, signed
+        self.assertRegex(msl, r'int (_\d+) = as_type<int>\(_\d+\) << 4;\n\s*int _\d+ = \1 >> 28;')    # y: bits 24..27
+        self.assertIn('0.0625', msl)
+
+    def test_a_centre_read_takes_no_derivative(self):
+        msl, log = self.run_job(self.BARY)
+        self.assertIsNotNone(msl, log)
+        self.assertIn('[[barycentric_coord', msl)
+        self.assertNotIn('dfdx(', msl)
+
+
+@unittest.skipUnless(os.environ.get('DMSH_TEST_XLATE'), 'set DMSH_TEST_XLATE to the offline translator')
+class ShadingRate(unittest.TestCase):
+    """S2UR of system register 0x84, the fragment's size in pixels (X in bits 8..15, Y in 16..23), as Nintendo Switch Sports Resort's sea shaders encode it (2271b2e0293b3c55 +0x2600):
+    the host shades every pixel, so 1 x 1. It read 0 as an unknown register, and the sea's colour, divided by the fragment's area, was NaN"""
+    run_job = PixelCovered.run_job
+    SPH = PixelCovered.SPH
+    S2UR = (0x000e220000008400, 0x00000000000479c3)   # S2UR UR4, SR 0x84
+    I2F_R0 = (0x03ffe20008201400, 0x0000000400007c45)   # I2F R0, UR4 as the game reads it (+0x2d90), waiting on every barrier: colour 0's x, 65792 for 1 x 1
+
+    def test_reads_one_by_one(self):
+        msl, log = self.run_job(self.S2UR, self.I2F_R0)
+        self.assertIsNotNone(msl, log)
+        self.assertIn('float(65792)', msl)   # 0 before (an unknown system register)
+
+
+@unittest.skipUnless(os.environ.get('DMSH_TEST_XLATE'), 'set DMSH_TEST_XLATE to the offline translator')
 class DepthRegister(unittest.TestCase):
     """A pixel shader's depth output follows its colours at four registers per enabled render target, then the sample mask register. Ocarina of Time's agl_common depth pass
     (ps_lib 519, OmapTargets 0x10f: RT0 RGBA in R0..R3, RT2 R in R4) writes its depth to R9; the component count put it in R6, which holds a step before"""
@@ -301,6 +358,28 @@ class StageMemory(Translated):
     def test_input_is_at_its_offset(self):   # 0x10 + 0x20
         self.assertRegex(self.msl(self.INPUT, self.KEEP_R19), r'as_type<float>\(_\d+\[12\]\)')
 
+    def test_subword_inputs_are_unsigned_and_keep_the_byte_offset(self):
+        # Fast Fusion reads packed U16 entries with mode 0x34. The high half of word 12 must stay unsigned, as must an U8 input at its own byte within the word.
+        for mode, offset, bits in ((0x34, 0x22, 16), (0x30, 0x23, 8)):
+            read = (self.INPUT[0] & ~0xff00 | mode << 8, self.INPUT[1] & ~(0xffffff << 40) | offset << 40)
+            src = self.msl(read, self.KEEP_R19)
+            self.assertIn('[12]', src)
+            self.assertRegex(src, rf'uint\(as_type<int>\(\w+\)\) >> uint\({(offset & 3) * 8}\)')
+            self.assertIn(f'& {(1 << bits) - 1};', src)
+
+    def test_subword_payload_stores_use_their_width(self):
+        for mode, bits in ((0xb4, 16), (0xb0, 8)):
+            write = (self.PAYLOAD[0] & ~0xff00 | mode << 8, self.PAYLOAD[1])
+            self.assertRegex(self.msl(write), rf'void dmsh_shared_store{bits}_\d+\(')
+
+    def test_subword_vertex_records_keep_the_offset_within_the_word(self):
+        # A U16 output read at byte 0x202 must read the high half of its remapped SoA word, not its low half.
+        read = (self.READBACK[0] & ~0xff00 | 0xb400, self.READBACK[1] & ~(0xffffff << 40) | 0x202 << 40)
+        src = self.translate(inst(*read) + inst(*self.KEEP_R8) + inst(*EXIT), stage_memory=[0, 0x10, 0x120, 0x400, 0x200, 6, 128 * 24], shared=0x800)
+        self.assertIn('[72]', src)
+        self.assertIn('>> uint(16)', src)
+        self.assertIn('& 65535;', src)
+
     def test_word_store_goes_to_the_outputs(self):   # 0x120 + 0x80
         self.assertIn('0 + 416', self.msl(self.ATTRIBUTE))
 
@@ -347,6 +426,16 @@ class BarrierMoves(Translated):
         plain = self.translate(inst(*SUATOM) + inst(*EXIT))
         moved = self.translate(inst(*self.SAVE) + inst(*self.RESTORE) + inst(*SUATOM) + inst(*self.RESTORE_PLAIN) + inst(*EXIT))
         self.assertEqual(moved, plain)
+
+
+class Yield(Translated):
+    """YIELD (0x946) in Resident Evil 4's encoding, as its 21 compute shaders with it have it (after MEMBAR; ERRBAR, before a branch): per thread it does nothing"""
+    YIELD = (0x000fde0003800000, 0x0000000000007946)
+
+    def test_no_effect_on_the_shader(self):
+        plain = self.translate(inst(*SUATOM) + inst(*EXIT))
+        yielded = self.translate(inst(*SUATOM) + inst(*self.YIELD) + inst(*EXIT))
+        self.assertEqual(yielded, plain)
 
 
 class LdcIndexedBank(Translated):

@@ -1,5 +1,5 @@
 // nn::vi::ListFrameHistory answers as the SDK fills FrameInfo (sdk 20.5.15 sdk+0x4510a0): a null buffer gets the history's size, 8; entries come newest first, status 2 for a
-// frame the present queue handed on with a present tick, 1 for one still queued or dropped by the system, the frame numbers of GetLatestFrameNumber. Unreal's RHI takes the
+// frame the present queue handed on with a present tick (one the Mac dropped too: a Switch shows every frame it is handed), 1 for one still queued, the frame numbers of GetLatestFrameNumber. Unreal's RHI takes the
 // first status-2 entry as its latest flip (Minecraft Dungeons II main+0x142b0b0), so the newest shown frame has to come first
 #include "../../gfx/hle_vi.c"
 #include <assert.h>
@@ -32,7 +32,7 @@ int main(void) {
     for (int k = 0; k < n; k++) assert(fi[k][1] == (uint64_t)(10 - k));
     for (int k = 0; k < 3; k++) assert(fi[k][0] == 1 && fi[k][3] == 0 && fi[k][4] == 0);   // 10, 9, 8: queued
     assert(fi[3][0] == 2 && fi[3][3] == fi[3][4] && fi[3][3] == ticks(g_gns - 100000000ull));   // 7: its presented time on the guest clock
-    assert(fi[4][0] == 1 && fi[4][3] == 0);       // 6: dropped
+    assert(fi[4][0] == 2 && fi[4][3] == ticks(g_gns));   // 6: dropped by the Mac, shown from when it was first seen handed on (Orbitals' frame-end sync waited for its flip for ever)
     assert(fi[5][0] == 2 && fi[5][3] == ticks(g_gns));   // 5: handed on, no presented time (headless): the time it was first seen
     assert(fi[0][2] == ticks(5000000000ull + 9 * 16666667ull));   // queue tick of frame 10
     assert(fi[8][0] == 0xa5a5a5a5a5a5a5a5ull);    // nothing written past the entries returned
@@ -40,6 +40,6 @@ int main(void) {
     n = h_vi_FrameHist(fi, 10, NULL);
     assert(fi[5][3] == ticks(g_gns - 1000000000ull));   // the first-seen time stays
     assert(h_vi_FrameHist(fi, 2, NULL) == 2 && fi[0][1] == 10 && fi[1][1] == 9);   // a smaller buffer gets the newest
-    puts("vi frame history: count query 8, newest first, shown once handed on, presented or first-seen tick, dropped and queued frames not shown");
+    puts("vi frame history: count query 8, newest first, shown once handed on, presented or first-seen tick, dropped frames shown, queued ones not");
     return 0;
 }

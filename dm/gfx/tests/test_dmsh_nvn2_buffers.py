@@ -82,6 +82,24 @@ class Nvn2Buffers(unittest.TestCase):
         self.assertEqual([t for t in res['textures'] if t['cbuf_slot'] not in (0, 2)], [], res['textures'])   # no texture named by a word of the uniform buffer
         self.assertTrue(any(t['array'] > 32 for t in res['textures']), res['textures'])   # the pool array
 
+    def test_indexed_native_c0_texture_handles_use_the_driver_table(self):
+        # Fast Fusion's fog: the byte offset comes from a uniform, LDC reads c0[offset], and a fixed c0 sampler word is ORed in. With 1 UBO, 4 combined textures and 4 separate
+        # textures, native separate textures start at 0x40 and the sampler at 0x60. Canonical c2 has the separate textures at 0x168 and the sampler at 0x568.
+        ldc = (0x000fe20000000800, 0x0000000006067b82)
+        sampler = (MOV_R6_C3_10[0], 0xa02 | 0x7000 | 7 << 16 | 0x60 << 38)
+        combine = (LOP3_R6_OR_SAMPLER[0], 0x212 | 0x7000 | 6 << 16 | 6 << 24 | 7 << 32)
+        code = [MOV_R6_C3_10, ldc, sampler, combine, TEX_LZ_R6, SUATOM_R7, EXIT]
+        res = self.translate(b''.join(inst(*i) for i in code), [1, 0, 4, 0x70, 0, 4, 1])
+        self.assertTrue(any(t['cbuf_slot'] == (2 | 3 << 16) and t['handle'] == 0x10568000 for t in res['textures']), res['textures'])
+        self.assertFalse(any(t['cbuf_slot'] & 0xffff == 0 for t in res['textures']), res['textures'])
+        self.assertFalse(any(c['slot'] == 0 for c in res['cbufs']), res['cbufs'])
+
+    def test_indexed_native_c0_combined_handles_use_the_driver_table(self):
+        ldc = (0x000fe20000000800, 0x0000000006067b82)
+        res = self.translate(b''.join(inst(*i) for i in [MOV_R6_C3_10, ldc, TEX_LZ_R6, SUATOM_R7, EXIT]), [1, 0, 4, 0x50, 0])
+        self.assertTrue(any(t['cbuf_slot'] == 2 and t['handle'] == 0 for t in res['textures']), res['textures'])
+        self.assertFalse(any(c['slot'] == 0 for c in res['cbufs']), res['cbufs'])
+
 
     def test_a_handle_read_as_2d_and_as_a_2d_array_is_an_array(self):
         # One handle, TEX 2D and TEX ARRAY_2D (PRAGMATA: 24 pixel shaders, 21ba8fea5a5eb03c among them, whose Metal source did not compile: the binding was declared an array

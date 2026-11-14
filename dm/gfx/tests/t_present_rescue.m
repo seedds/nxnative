@@ -137,11 +137,17 @@ static void latency(void) {   // Only variable-refresh fullscreen needs the late
 static void thirty(void) {   // A 30 fps target runs the link at 30 Hz, except in fullscreen on a fixed-rate screen, where it stays at 60 Hz and the present interval paces the 30.
     reset(); test_fullscreen = 0; test_variable_refresh = 0; test_game_fps = 30;
     SilentDisplayLink *link = [SilentDisplayLink new]; g_link = link; g_link_started = 1;
+    g_link_drain_on = 0;   // standing frames not drained (DM_PRESENT_DRAIN=0, iOS): a window keeps the 30 Hz link
     link_sync(); CHECK("a window at 30 fps takes the 30 Hz link", g_link_mode == 3 && link.preferredFrameRateRange.preferred == 30 && mtl_link_rate() == 30);
     test_fullscreen = 1; link_sync(); CHECK("fullscreen on a fixed-rate screen at 30 fps keeps the 60 Hz link", g_link_mode == 1 && link.preferredFrameRateRange.preferred == 60 && mtl_link_rate() == 60);
     test_variable_refresh = 1; link_sync(); CHECK("fullscreen on a variable-refresh screen at 30 fps takes the 30 Hz link", g_link_mode == 3 && link.preferredFrameRateRange.preferred == 30);
     test_variable_refresh = 0; link_sync(); CHECK("back on a fixed-rate screen: the 60 Hz link again", g_link_mode == 1 && link.preferredFrameRateRange.preferred == 60);
     test_fullscreen = 0; link_sync(); CHECK("leaving fullscreen: the 30 Hz link again", g_link_mode == 3 && link.preferredFrameRateRange.preferred == 30);
+    g_link_drain_on = 1;   // with the drain a window at 30 fps keeps the 60 Hz link, where a frame waits half as long for its tick; fullscreen is as before
+    link_sync(); CHECK("with the drain a window at 30 fps keeps the 60 Hz link", g_link_mode == 1 && link.preferredFrameRateRange.preferred == 60 && mtl_link_rate() == 60);
+    test_fullscreen = 1; test_variable_refresh = 1; link_sync(); CHECK("with the drain variable-refresh fullscreen at 30 fps still takes the 30 Hz link", g_link_mode == 3);
+    test_variable_refresh = 0; link_sync(); CHECK("with the drain fixed-rate fullscreen at 30 fps keeps the 60 Hz link", g_link_mode == 1);
+    test_fullscreen = 0; link_sync(); CHECK("with the drain, back in a window: the 60 Hz link", g_link_mode == 1 && link.preferredFrameRateRange.preferred == 60);
     test_game_fps = 60; link_sync(); CHECK("60 fps in a window: the 60 Hz link", g_link_mode == 1 && link.preferredFrameRateRange.preferred == 60);
     g_link = nil; g_link_started = 0;
 }

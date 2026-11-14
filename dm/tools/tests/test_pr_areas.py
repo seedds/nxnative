@@ -3,6 +3,7 @@
 from pathlib import Path
 import shutil
 import sys
+import re
 import tempfile
 import unittest
 
@@ -20,7 +21,6 @@ class Labels(unittest.TestCase):
         (self.root / 'dm/games' / BOTW / 'game.tsv').write_text('')
         (self.root / 'dm/gfx/tools').mkdir(parents=True)
         shutil.copy(REPO / 'dm/gfx/tools/dmsh_chain.py', self.root / 'dm/gfx/tools')   # the real chain file list
-        (self.root / 'dm/mac').mkdir(); shutil.copy(REPO / 'dm/mac/min_os.mk', self.root / 'dm/mac')   # which dmsh_chain.py reads when run
         (self.root / 'dm/games/README.md').write_text(f'| [The Legend of Zelda: Breath of the Wild]({BOTW}/README.md) | `{BOTW}` |\n')
 
     def tearDown(self):
@@ -50,6 +50,13 @@ class Labels(unittest.TestCase):
 
     def test_patches_are_rewriter(self):
         self.assertIn('rewriter', self.names(f'dm/games/{BOTW}/patches.py'))
+
+
+class CommitAreas(unittest.TestCase):
+    def test_guide_lists_the_commit_areas(self):   # the dev-loop guide's table of commit areas names pr_areas.py's areas, each once
+        text = (REPO / 'docs/agents/06-dev-loop.md').read_text(encoding='utf-8')
+        section = text.split('## 8. Commit messages', 1)[1].split('\n## ', 1)[0]
+        self.assertCountEqual(re.findall(r'^ *\| `([a-z]+)` \|', section, re.M), pr_areas.COMMIT_AREAS)
 
 
 if __name__ == '__main__':

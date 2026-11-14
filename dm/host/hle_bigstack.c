@@ -1,15 +1,16 @@
-// Big-stack entry (hle.h HLE_FORCE_BIG): a take-over function runs directly on the stack of the guest thread that calls it, and the stack a game gives a thread can be small --
+// Big-stack entry (hle.h HLE_FORCE, every take-over but HLE_FORCE_DIRECT's): a take-over function runs directly on the stack of the guest thread that calls it, and the stack a game gives a thread can be small --
 // the save thread of Super Mario 3D World + Bowser's Fury has only 8 KB (CreateThread stack top 0x…9fe0, crash 0x21a0 below it); when it calls fs::MountSaveData,
 // the host's mount path (two 1 KB-class path buffers in h_fs_MountSave + two 1100-byte ones in mount_ex + snprintf) ran past the stack bottom, SIGBUS in __vfprintf.
 // On hardware this call is one IPC that needs a few hundred bytes of stack; the host's file system take-overs size their buffers by PATH_MAX, and one file open takes 6-7 KB (-fstack-usage: OpenFile 1.3 KB -> host_path_ex 1.9 KB -> path_component 3.2 KB).
 // How: what gets registered is a static stub (one per take-over function, which loads the implementation's address into x16 and jumps to dm_bigstack_enter). The entry looks at the current sp: inside the guest address block (a guest thread stack)
-// it switches to this thread's host stack (512 KB, mapped on first use, with a guard page), calls the implementation with x0-x8 / d0-d7 untouched, and switches back after it returns; outside the guest block (a host thread, or already on the host stack) it jumps straight through.
+// it switches to this thread's host stack (512 KB, mapped on first use, with a guard page), calls the implementation with x0-x8 / d0-d7 untouched and the caller's stack arguments copied below the saved pair, and switches back after it returns; outside the guest block (a host thread, or already on the host stack) it jumps straight through.
 // The implementation's own return address is then the instruction after the entry's call, not the game's call site: the entry keeps the game's return address beside the saved sp at the top of the host stack,
 // and dm_bigstack_caller (hle.h) gives it back, so take-overs that log their call site (audio Start / Stop / Close) name the game's code on either path.
-// Only register arguments are carried over: functions with more than 8 integer / 8 floating-point arguments, or variadic ones reading from the stack, cannot use it.
+// Stack arguments: a take-over's stub with more than 8 parameters enters at dm_bigstack_enter_n with how many bytes the caller put on its stack in x17, 8 per parameter past the eighth (hle.h; the video decoder's and Opus's take-overs have 9-12),
+// rounded up to 16, at most 64; only those are read, all inside the caller's own frame (none for 8 parameters or fewer). Variadic functions reading their arguments from the stack cannot use it.
 // iOS does not allow generating executable code at run time, so the stubs are generated at compile time by the macro, not written at run time as DM_HLECOUNT does
 // Log lines take the same entry (dm_log below, dm.h LOG): any take-over may log, and formatting one line takes about 2.7 KB of stack, so a line logged on a guest stack is
-// written on the host stack whether or not its take-over is registered through HLE_FORCE_BIG (the controller applet's stand-in from a game thread of Drag x Drive, PR #1943)
+// written on the host stack wherever it is called from: a HLE_FORCE_DIRECT take-over, or host code called on a guest stack (the controller applet's stand-in from a game thread of Drag x Drive, PR #1943)
 #include <pthread.h>
 #include <stdarg.h>
 #include <stdint.h>
@@ -42,16 +43,23 @@ uintptr_t dm_bigstack_top(uintptr_t sp) {
     return (uintptr_t)top;
 }
 
-// x16 = implementation. Frame (on the original stack, 0xa0 bytes): +0x00 x0-x8, x16, +0x50 d0-d7, +0x90 x29 / x30. After the switch the original sp and the game's return address are stored at the new stack top; the sp is restored when the implementation returns
+// x16 = implementation. dm_bigstack_enter carries over no stack arguments (the NVN, Vulkan and GL layers' entries, log lines, take-overs with 8 parameters or fewer);
+// dm_bigstack_enter_n takes their size in x17 (16-64 bytes, a multiple of 16; the take-over's stub sets it). Frame (on the original stack, 0xb0 bytes): +0x00 x0-x8, x16,
+// +0x50 d0-d7, +0x90 x17 / x19, +0xa0 x29 / x30. After the switch the original sp and the game's return address are stored at the new stack top, the stack arguments copied below
+// them, and x19 (callee-saved, so the implementation keeps it) holds where the pair is; the sp and x19 are restored when the implementation returns
 __asm__(
     ".text\n"
     ".p2align 2\n"
     ".globl _dm_bigstack_enter\n"
     ".private_extern _dm_bigstack_enter\n"
     "_dm_bigstack_enter:\n"
-    "    sub sp, sp, #0xa0\n"
-    "    stp x29, x30, [sp, #0x90]\n"
-    "    add x29, sp, #0x90\n"
+    "    mov x17, #0\n"
+    ".globl _dm_bigstack_enter_n\n"
+    ".private_extern _dm_bigstack_enter_n\n"
+    "_dm_bigstack_enter_n:\n"
+    "    sub sp, sp, #0xb0\n"
+    "    stp x29, x30, [sp, #0xa0]\n"
+    "    add x29, sp, #0xa0\n"
     "    stp x0, x1, [sp, #0x00]\n"
     "    stp x2, x3, [sp, #0x10]\n"
     "    stp x4, x5, [sp, #0x20]\n"
@@ -61,6 +69,7 @@ __asm__(
     "    stp d2, d3, [sp, #0x60]\n"
     "    stp d4, d5, [sp, #0x70]\n"
     "    stp d6, d7, [sp, #0x80]\n"
+    "    stp x17, x19, [sp, #0x90]\n"
     "    mov x0, sp\n"
     "    bl _dm_bigstack_top\n"
     "    mov x17, x0\n"
@@ -75,21 +84,32 @@ __asm__(
     "    ldp d6, d7, [sp, #0x80]\n"
     "    cbz x17, 1f\n"
     "    mov x9, sp\n"
-    "    ldr x10, [x9, #0x98]\n"
+    "    ldr x10, [x9, #0xa8]\n"         // the game's return address
+    "    ldr x11, [x9, #0x90]\n"         // bytes of stack arguments
     "    mov sp, x17\n"
     "    stp x9, x10, [sp, #-16]!\n"
-    "    blr x16\n"
+    "    mov x19, sp\n"
+    "    add x12, x9, #0xb0\n"           // the caller's stack arguments: its sp at the call
+    "    sub sp, sp, x11\n"
+    "    mov x13, sp\n"
+    "    cbz x11, 3f\n"
+    "2:  ldp x14, x15, [x12], #16\n"
+    "    stp x14, x15, [x13], #16\n"
+    "    subs x11, x11, #16\n"
+    "    b.ne 2b\n"
+    "3:  blr x16\n"
     ".globl _dm_bigstack_ret\n"
     ".private_extern _dm_bigstack_ret\n"
     "_dm_bigstack_ret:\n"
-    "    ldr x9, [sp]\n"
+    "    ldr x9, [x19]\n"
     "    mov sp, x9\n"
-    "    ldp x29, x30, [sp, #0x90]\n"
-    "    add sp, sp, #0xa0\n"
+    "    ldr x19, [sp, #0x98]\n"
+    "    ldp x29, x30, [sp, #0xa0]\n"
+    "    add sp, sp, #0xb0\n"
     "    ret\n"
     "1:\n"
-    "    ldp x29, x30, [sp, #0x90]\n"
-    "    add sp, sp, #0xa0\n"
+    "    ldp x29, x30, [sp, #0xa0]\n"
+    "    add sp, sp, #0xb0\n"
     "    br x16\n");
 
 // The return address inside an implementation that came through the switch is _dm_bigstack_ret; the game's own is in the slot the entry stored below this thread's host stack top. Only the outermost

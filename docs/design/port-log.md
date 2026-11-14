@@ -27,6 +27,7 @@ A dated record of what is done, what is in progress and what is left on the Wind
 | `4cbabbf` | AOT: a `br` after a call was lowered as a tail call with the wrong return address, which stranded the thread in the JIT fallback (the benchmark's 5,124 "nonlocal" misses): the 4,000-function benchmark goes from 1.529 s to 189.8 ms. Verified in Docker (nxaot 29 of 29, host 100 of 100 twice, `t_aot_host` 50 checks, the Windows cross-build) |
 | `fb0a872` | AOT discovery: a jump table's index may depend on several values (the form of a switch on a computed value was left to the dispatcher): the benchmark's 736 tables all bounded, 0 JIT runs, 181.9 ms to 1.097 ms; except-gcc 26.1 ms to 0.64 ms. Verified in Docker (nxaot 29 of 29, host 100 of 100 twice, a tree without the JIT, the Windows cross-build) |
 | `06928a9` | Host: the JIT's first use no longer stops the thread that needs it: the decoder table and a spare instance are made ahead of time on a helper thread, and the JIT glue is compiled with `-O2` (it had no optimisation): 200-233 ms to 0.03-0.08 ms. Verified in Docker (nxaot 29 of 29, host 100 of 100 twice, `t_aot_host` 52 checks, the Windows cross-build) |
+| `9daae9a` | Port: the host's own C is compiled at `-O2` instead of `-O1` (CPU ASTC decode -22 %, CPU deswizzle -18 %, audio volume -20 %, the rest within noise; `-O3` adds nothing). Bench modes in five tests. Verified in Docker (host 100 of 100 twice, every check count the same at both levels, the Windows cross-build) |
 
 Done on the machine, not in the repository: Docker emptied on the owner's request (every image and container, the owner's other projects' included; the data volumes `aitrade_pgdata`, `smilepetstore_pgdata`, `smilepetstore_redisdata` kept).
 
@@ -45,6 +46,7 @@ No Docker image exists (the disk filled while ten worktrees were checked out, 28
 | Worktree | Task | Files it owns |
 |---|---|---|
 | branch `wip/apple-log-one-call` (parked: one commit, no worktree) | Apple's log macros write each line in one stdio call, as the port's `LOG` does since `9872bae`. Prepared for a Mac: not to be merged before a Mac or macOS CI run | `dm/host/dm.h` (Apple branches), `docs/reference/threads.md` |
+| branch `wip/ub-fixes-shared` (parked: one commit, no worktree) | Three one-line fixes of undefined behaviour found by UBSan in trap mode, in files Apple also compiles. For a Mac: not to be merged before a Mac or macOS CI run | `dm/host/hle_ro.c`, `dm/gfx/nvn/nvn_pools.c`, `dm/gfx/tests/t_replay.c` |
 
 ### Waiting on the owner
 
@@ -54,14 +56,14 @@ What only the owner can do, in the order that unblocks most:
 2. **The Windows PC.** Nothing of the port has run on Windows since 2026-10-29. With CI back: unzip the artifacts `win64-tests` into `build\win64` and `win64-packs` into `build\packs\win64` of a checkout of the same commit, then `powershell -NoProfile -ExecutionPolicy Bypass -File dm\host\tests\run_win64_tests.ps1`, and push `logs\win64\`. Without CI the two folders can be made on Linux: `mstorsjo/llvm-mingw:20261020` for `build/win64` and `build_packs.sh` for the packs (docker/README.md). Expected with the JIT now in the Windows host: `t_aot_host` runs all 18 corpus programs, `t_second_pack` ends `29 checks, 0 failed`.
 3. **A game package.** Phases 3 and 5 need one NSP with its keys in a folder outside the repository and the home folder, and `scripts/build_ipa_from_nsp.py --platform linux` (or `windows`) on it. Everything so far ran on homebrew and a synthetic module.
 4. **The RTX 4060.** The Vulkan backend has only run on lavapipe (software). `nxhost-run` with a packed game on that GPU, and the `t_vk_*` tests there, are the next step of phase 4.
-5. **A Mac or macOS CI** for the parked branch `wip/apple-log-one-call` (its commit message lists the checks) and for the Metal backend's provoking vertex.
+5. **A Mac or macOS CI** for the parked branches `wip/apple-log-one-call` and `wip/ub-fixes-shared` (each commit message lists the checks) and for the Metal backend's provoking vertex.
 
 ### Left, not started
 
 - Verify and integrate every row above (Docker; the Apple one on a Mac).
 - `t_astc_mesa` is registered outside `host_test` and is in no runner (declared in the manifest as CTest only).
 - Hot indirect targets: once a site is guarded its dominant target never binds again while other targets may, so over sessions a guarded site can lose dominance and its guard (the counts are binds, not calls).
-- After the tail-call fix: the JIT calls only functions with a standard entry natively (a JIT-only entry per function would cure it); a misses file written by an older host keeps its bogus `nonlocal` rows until it is removed; the host's own C code is compiled at `-O1` as on Apple (`HOST_FLAGS`): whether `-O2` helps the port has not been measured.
+- After the tail-call fix: the JIT calls only functions with a standard entry natively (a JIT-only entry per function would cure it); a misses file written by an older host keeps its bogus `nonlocal` rows until it is removed; `hle_sdk16.c`'s `diag_abort` walks the host's frame chain, which on x86-64 is not the guest's (a game abort's backtrace on the port); `t_vk_present` failed once under a loaded `-j4` run ("took no frame for 100 ms").
 - Converted quads still take another provoking vertex than the Switch's (declared: the fix changes the quad's diagonal).
 - The Metal backend takes the first vertex on every shape where the Switch takes the last (a Mac).
 - On a real GPU: the cost of one dispatch per small index conversion, the 3 MiB arena for indirect draws.

@@ -101,6 +101,42 @@ static int open_run(NSString *root) {
     return failed != 0;
 }
 
+// The tool's exit removes the gpuarchiver-* folders it made (ga_tool_cleanup), on a stand-in cache folder: only the folders new since the start, never one with another process's file open in
+// the cache folder (that leaves all of them), never other names, and only once the waited-for process has exited
+static NSTask *spawn_sh(NSString *script) {
+    NSTask *t = [NSTask new]; t.executableURL = [NSURL fileURLWithPath:@"/bin/sh"]; t.arguments = @[@"-c", script];
+    t.standardOutput = NSFileHandle.fileHandleWithNullDevice; t.standardError = NSFileHandle.fileHandleWithNullDevice; [t launchAndReturnError:nil]; return t;
+}
+static int wait_until(int ms, int (^cond)(void)) { for (int i = 0; i < ms / 20; i++) { if (cond()) return 1; usleep(20000); } return cond(); }
+static void check_ga_cleanup(void) {
+    NSFileManager *fm = NSFileManager.defaultManager;
+    NSString *dir = [NSTemporaryDirectory() stringByAppendingFormat:@"t_ga_%d", (int)getpid()]; [fm removeItemAtPath:dir error:nil];
+    void (^mk)(NSString *) = ^(NSString *n) { NSString *p = [dir stringByAppendingPathComponent:n]; [fm createDirectoryAtPath:p withIntermediateDirectories:YES attributes:nil error:nil]; [@"state" writeToFile:[p stringByAppendingPathComponent:@"PersistentState"] atomically:NO encoding:NSUTF8StringEncoding error:nil]; };
+    mk(@"gpuarchiver-old"); NSSet<NSString *> *before = ga_list(dir);
+    EXPECT("cleanup: the start's list", 1, before.count == 1 && [before containsObject:@"gpuarchiver-old"]);
+    mk(@"gpuarchiver-b"); mk(@"gpuarchiver-c"); mk(@"other-folder");
+    NSArray<NSString *> *made = ga_made_since(dir, before);
+    EXPECT("cleanup: made since the start: the two new gpuarchiver folders", 1, made.count == 2 && [made[0] isEqualToString:@"gpuarchiver-b"] && [made[1] isEqualToString:@"gpuarchiver-c"]);
+    EXPECT("cleanup: nothing new, nothing handed over", 0, ga_tool_cleanup(dir, ga_list(dir), getpid()));
+    EXPECT("cleanup: no other process uses the folder", 0, ga_others_using(dir));
+    // another process has a file of one new folder open: all stay
+    NSTask *holder = spawn_sh([NSString stringWithFormat:@"exec 3< '%@/gpuarchiver-b/PersistentState'; exec sleep 30", dir]);
+    EXPECT("cleanup: a process with a file open is seen", 1, wait_until(3000, ^int{ return ga_others_using(dir) == 1; }));
+    EXPECT("cleanup: left in place while another process uses the folder", -1, ga_tool_cleanup(dir, before, getpid()));
+    EXPECT("cleanup: left in place: gpuarchiver-b", 1, [fm fileExistsAtPath:[dir stringByAppendingPathComponent:@"gpuarchiver-b"]]);
+    EXPECT("cleanup: left in place: gpuarchiver-c", 1, [fm fileExistsAtPath:[dir stringByAppendingPathComponent:@"gpuarchiver-c"]]);
+    [holder terminate]; [holder waitUntilExit];
+    EXPECT("cleanup: the process is gone", 1, wait_until(3000, ^int{ return ga_others_using(dir) == 0; }));
+    // handed to the shell while the waited-for process still runs: nothing is removed yet; after its exit the two new folders go and nothing else
+    NSTask *waited = spawn_sh(@"sleep 1");
+    EXPECT("cleanup: two folders handed over", 2, ga_tool_cleanup(dir, before, waited.processIdentifier));
+    EXPECT("cleanup: not removed while the process runs", 1, [fm fileExistsAtPath:[dir stringByAppendingPathComponent:@"gpuarchiver-b"]]);
+    [waited waitUntilExit];
+    EXPECT("cleanup: removed once it has exited", 1, wait_until(5000, ^int{ return ![fm fileExistsAtPath:[dir stringByAppendingPathComponent:@"gpuarchiver-b"]] && ![fm fileExistsAtPath:[dir stringByAppendingPathComponent:@"gpuarchiver-c"]]; }));
+    EXPECT("cleanup: the folder from before the start stays", 1, [fm fileExistsAtPath:[dir stringByAppendingPathComponent:@"gpuarchiver-old"]]);
+    EXPECT("cleanup: other names stay", 1, [fm fileExistsAtPath:[dir stringByAppendingPathComponent:@"other-folder"]]);
+    [fm removeItemAtPath:dir error:nil];
+}
 int main(int argc, char **argv) { @autoreleasepool {
     alarm(240);
     unsetenv("DM_NVN_HILITE"); unsetenv("DM_NVN_MAGSCAN"); unsetenv("DM_PSO_RECORD"); unsetenv("DM_PSO_USER"); unsetenv("DM_SAVE"); setenv("DM_NVN_PREDICT", "0", 1);
@@ -116,6 +152,7 @@ int main(int argc, char **argv) { @autoreleasepool {
     if (!fixtures(msl, tables)) { printf("t_pso_prewarm: no Metal compiler (xcrun metal), not run\n"); [NSFileManager.defaultManager removeItemAtPath:root error:nil]; return 0; }
     setenv("DM_PSO_ARCHIVE", "off", 1); setenv("DM_MSL_DIR", [root stringByAppendingPathComponent:@"msl"].UTF8String, 1); setenv("DM_NVN_SHMAP", [tables stringByAppendingPathComponent:@"shader_map.tsv"].UTF8String, 1); setenv("DM_PSO_MANIFEST", "off", 1);
     mtl_init(); shmap_load();
+    check_ga_cleanup();
     NSString *gpu = g_dev.architecture.name;
     NvShader *vs = shader_load(@"warm-vs", 0, 0), *fs = shader_load(@"warm-fs", 1, 0);
     EXPECT("fixture shaders loaded", 1, vs && fs);

@@ -9271,6 +9271,57 @@ static NSSet<NSString *> *ga_claim(NSString *dir, int *fd) {
     *fd = f;
     return old;
 }
+#if !TARGET_OS_IPHONE
+// The one exception to the rule above: the prebuild tool (DM_PSO_PREBUILD=tool) owns its process, and a build runs it for hours of folders (one per flush period: 763 folders, 2.6 GB for a
+// cold prewarm of Ocarina of Time's list, 3.5 MB each; the cache folder held 19,270 and 67 GB after a few days of builds and tests). At its exit it removes the folders that appeared since it
+// started (listed at the start, listed again at the end), and only when no other process of the user has a file open in the cache folder and none runs this executable: a folder of another
+// compiler, alive or just made, is then never in the list. The removal is done by a shell that waits for the tool's exit (Metal's own teardown may still touch them), and covers only names
+// listed at the exit, never a folder made later (the NSP script's retry run, another build)
+#include <libproc.h>
+static NSArray<NSString *> *ga_made_since(NSString *dir, NSSet<NSString *> *before) {
+    NSMutableArray<NSString *> *made = [NSMutableArray array];
+    for (NSString *n in ga_list(dir)) if (![before containsObject:n]) [made addObject:n];
+    return [made sortedArrayUsingSelector:@selector(compare:)];
+}
+static int ga_others_using(NSString *dir) {   // the other processes of this user with a file open under dir, or running this executable; -1 when the process list is not readable
+    int cap = proc_listallpids(NULL, 0); if (cap <= 0) return -1;
+    pid_t *pids = malloc(sizeof(pid_t) * (size_t)(cap + 64)); if (!pids) return -1;
+    int n = proc_listallpids(pids, (int)sizeof(pid_t) * (cap + 64)), busy = 0;
+    char self[PROC_PIDPATHINFO_MAXSIZE] = ""; proc_pidpath(getpid(), self, sizeof self);
+    char real[PATH_MAX]; if (!realpath(dir.fileSystemRepresentation, real)) { free(pids); return -1; }   // the kernel names open files by their real path (/private/var/folders, the cache folder's is /var/folders)
+    const char *prefix = real; size_t pl = strlen(prefix);
+    for (int i = 0; i < n; i++) {
+        pid_t p = pids[i]; if (p <= 0 || p == getpid()) continue;
+        char path[PROC_PIDPATHINFO_MAXSIZE] = "";
+        if (proc_pidpath(p, path, sizeof path) > 0 && *self && !strcmp(path, self)) { busy++; continue; }
+        int sz = proc_pidinfo(p, PROC_PIDLISTFDS, 0, NULL, 0); if (sz <= 0) continue;
+        struct proc_fdinfo *fds = malloc((size_t)sz); if (!fds) continue;
+        sz = proc_pidinfo(p, PROC_PIDLISTFDS, 0, fds, sz);
+        for (int k = 0; k < sz / (int)sizeof *fds; k++) {
+            if (fds[k].proc_fdtype != PROX_FDTYPE_VNODE) continue;
+            struct vnode_fdinfowithpath vi;
+            if (proc_pidfdinfo(p, fds[k].proc_fd, PROC_PIDFDVNODEPATHINFO, &vi, sizeof vi) == (int)sizeof vi && !strncmp(vi.pvip.vip_path, prefix, pl)) { busy++; break; }
+        }
+        free(fds);
+    }
+    free(pids); return busy;
+}
+// Removes what appeared in dir since `before`, once process `after` has exited (the tool's own pid); returns the number of folders handed to the shell, or -1 when another user of the cache was found
+static int ga_tool_cleanup(NSString *dir, NSSet<NSString *> *before, pid_t after) {
+    NSArray<NSString *> *made = ga_made_since(dir, before); if (!made.count) return 0;
+    int others = ga_others_using(dir);
+    if (others) { MLOG("pipeline prebuild: Metal's %lu build folders it made are left in place (%s)", (unsigned long)made.count, others < 0 ? "the process list is not readable" : "another process uses the cache folder or runs this executable"); return -1; }
+    unsigned long long bytes = 0;
+    for (NSString *n in made) for (NSString *f in [NSFileManager.defaultManager enumeratorAtPath:[dir stringByAppendingPathComponent:n]]) bytes += [[NSFileManager.defaultManager attributesOfItemAtPath:[[dir stringByAppendingPathComponent:n] stringByAppendingPathComponent:f] error:nil] fileSize];
+    NSMutableArray<NSString *> *args = [NSMutableArray arrayWithObjects:@"-c", @"pid=$1; dir=$2; shift 2; while kill -0 \"$pid\" 2>/dev/null; do sleep 0.2; done; cd \"$dir\" && rm -rf -- \"$@\"", @"sh", [NSString stringWithFormat:@"%d", (int)after], dir, nil];
+    [args addObjectsFromArray:made];
+    NSTask *t = [NSTask new]; t.executableURL = [NSURL fileURLWithPath:@"/bin/sh"]; t.arguments = args;
+    t.standardOutput = NSFileHandle.fileHandleWithNullDevice; t.standardError = NSFileHandle.fileHandleWithNullDevice; t.standardInput = NSFileHandle.fileHandleWithNullDevice;
+    if (![t launchAndReturnError:nil]) { MLOG("pipeline prebuild: Metal's %lu build folders it made could not be handed to a shell: left in place", (unsigned long)made.count); return -1; }
+    MLOG("pipeline prebuild: Metal's %lu build folders it made (%.1f MB, in %s) are removed once it has exited", (unsigned long)made.count, bytes / 1048576.0, dir.UTF8String);
+    return (int)made.count;
+}
+#endif
 static ArchEpoch *ep_new(void) {   // a flush period: its compiler and serializer, nil when Metal makes none
     MTL4PipelineDataSetSerializerDescriptor *sd = [MTL4PipelineDataSetSerializerDescriptor new]; sd.configuration = MTL4PipelineDataSetSerializerConfigurationCaptureBinaries;
     ArchEpoch *ep = [ArchEpoch new]; ep->ser = [g_dev newPipelineDataSetSerializerWithDescriptor:sd];
@@ -10675,7 +10726,7 @@ static int pre_bundle_out(NSString *out, long lines) {
 // The bundle form, DM_PSO_PREBUILD_OUT=<folder> (the NSP script's --prebake, after pso_offline.py's pair archive): DM_PSO_ARCHIVE is a work folder, each flush period is also written
 // as a pipelines script (prewarm_script), and the work folder's files go into <folder> for the app (pre_bundle_out). With the pair archive as DM_PSO_BUNDLE, the pairs build only those
 // pso_offline.py left to the device (rest_pairs.tsv: function constants). Returns 0 when not asked for, 1 done, 2 failed (the bundle form's output incomplete or missing what it needs)
-int mtl_pso_prebuild_tool(void) {
+static int pre_tool_run(void) {
     const char *e = getenv("DM_PSO_PREBUILD"); if (!e || strcmp(e, "tool")) return 0;
     g_pre_tool = 1;
     const char *w = getenv("DM_PSO_PREBUILD_WARM"), *m = getenv("DM_PSO_MANIFEST"), *oc = getenv("DM_PSO_PREBUILD_OUT"), *ac = getenv("DM_PSO_ARCHIVE");
@@ -10696,6 +10747,17 @@ int mtl_pso_prebuild_tool(void) {
     if (!g_pre_out) return 1;
     if (!g_comp4 || !g_arch_cap) { MLOG("[RED] pipeline prebuild: no Metal 4 compiler or pipeline serializer: nothing for the app"); return 2; }
     return pre_bundle_out(g_pre_out, lines);
+}
+int mtl_pso_prebuild_tool(void) {
+    const char *e = getenv("DM_PSO_PREBUILD"); if (!e || strcmp(e, "tool")) return 0;
+#if !TARGET_OS_IPHONE
+    NSString *gdir = ga_dir(); NSSet<NSString *> *gbefore = ga_list(gdir);   // before Metal makes any folder of this run
+#endif
+    int rc = pre_tool_run();
+#if !TARGET_OS_IPHONE
+    if (gdir && !ga_own()) ga_tool_cleanup(gdir, gbefore, getpid());   // a tool with a bundle ID has its own folder: the next start of that app removes it, under its lock
+#endif
+    return rc;
 }
 static void warm_start(void) {
     if (g_warm_started++) return;

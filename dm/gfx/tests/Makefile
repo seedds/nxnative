@@ -373,6 +373,13 @@ t_rt_depth_ro: t_rt_depth_ro.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_rt_depth_ro.m $(MTL_T_SRC) $(FW)
 t_pso_pending: t_pso_pending.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_pso_pending.m $(MTL_T_SRC) $(FW)
+t_pso_demand_record: t_pso_demand_record.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_pso_demand_record.m $(MTL_T_SRC) $(FW)
+.PHONY: check_t_pso_demand_record
+check_t_pso_demand_record: t_pso_demand_record
+	MTL_DEBUG_LAYER=1 ./t_pso_demand_record
+	MTL_DEBUG_LAYER=1 ./t_pso_demand_record --off
+	MTL_DEBUG_LAYER=1 ./t_pso_demand_record --cap
 t_shmap_warm: t_shmap_warm.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_shmap_warm.m $(MTL_T_SRC) $(FW)
 t_pso_depth_stencil: t_pso_depth_stencil.m $(MTL_T_DEP)

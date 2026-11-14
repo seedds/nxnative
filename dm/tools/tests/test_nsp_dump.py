@@ -116,6 +116,43 @@ class Pack(Base):
         self.assertIn('dir/new', names)
         self.assertNotIn('dir/old', names)   # an update's RomFS is the patched tree, never laid over the base
 
+    def test_extracted_control_and_edition_identity(self):
+        src = self.dump / f'updates/{VER}'
+        (src / 'control/Acd_1').mkdir(parents=True)
+        (src / 'control/control.nacp').write_bytes(b'normal game name')
+        (src / 'control/icon_AmericanEnglish.dat').write_bytes(b'normal icon')
+        (src / 'control/Acd_1/control.nacp').write_bytes(b'edition title')
+        (src / 'control/Acd_1/icon_AmericanEnglish.dat').write_bytes(b'edition icon')
+        (src / 'control.nacp').write_bytes(b'legacy loose name')
+        (src / 'exefs/main.npdm').write_bytes(npdm(0x010015100B514000))
+        pack_dump.copy_control(src, self.out())
+        self.assertEqual((self.out() / 'control.nacp').read_bytes(), b'normal game name')
+        self.assertEqual((self.out() / 'icon.jpg').read_bytes(), b'normal icon')
+        # The Edition Program[1] selects Acd_1, not the game's standard identity.
+        (src / 'exefs/main.npdm').write_bytes(npdm(0x040015100B514001))
+        pack_dump.copy_control(src, self.out())
+        self.assertEqual((self.out() / 'control.nacp').read_bytes(), b'edition title')
+        self.assertEqual((self.out() / 'icon.jpg').read_bytes(), b'edition icon')
+        # The survey consumes the identical files, not only the final packer.
+        survey = self.dump / 'survey'
+        nsp.survey_dump(src, survey)
+        self.assertEqual((survey / 'control.nacp').read_bytes(), b'edition title')
+        self.assertEqual((survey / 'icon.jpg').read_bytes(), b'edition icon')
+
+    def test_control_data_fallback_and_absence(self):
+        src = self.dump / f'updates/{VER}'
+        (src / 'control').mkdir()
+        (src / 'control/control.nacp').write_bytes(b'control name')
+        (src / 'control/icon_German.dat').write_bytes(b'fallback icon')
+        pack_dump.copy_control(src, self.out())
+        self.assertEqual((self.out() / 'icon.jpg').read_bytes(), b'fallback icon')
+        self.assertEqual((self.out() / 'control.nacp').read_bytes(), b'control name')
+        (src / 'control/icon_German.dat').unlink()
+        (src / 'control/control.nacp').unlink()
+        pack_dump.copy_control(src, self.out())
+        self.assertFalse((self.out() / 'icon.jpg').exists())
+        self.assertFalse((self.out() / 'control.nacp').exists())
+
     def test_other_title_refused(self):
         with self.assertRaisesRegex(pack_dump.Error, 'the base is'): pack_dump.pack_version(self.dump / f'updates/{VER}', TID + 0x2000, self.out(), say=lambda s: None)
 

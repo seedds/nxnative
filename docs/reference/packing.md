@@ -529,3 +529,11 @@
 - **Cause:** the base game's HtmlDocument NCA can be sparse too (16 KB, beside the sparse Program NCA). `--html` reads the update's HtmlDocument NCAs, each over a base one when it is a patch, and then every base HtmlDocument NCA on its own; a sparse one read alone fails the hash check while its tables open.
 - **Fix:** `dm/tools/nx_extract/Program.cs` reads no sparse base HtmlDocument NCA on its own (`a sparse HtmlDocument NCA of the base game (… bytes): read only through the update's patch, not alone`), as Horizon mounts it only through its patch.
 - **Found on:** [Minecraft Dungeons II](../../dm/games/0100A7C01B792000/README.md), base v0 with update v131072: the update's patch (`accessible-urls`) and its full legal information NCA are read, the base's legal information NCA too.
+
+
+### Extracted Control NCA metadata for dump folders
+
+- **Symptom:** A game built from a folder dump was labelled after the folder (such as `dump`), had display version `?` and no macOS app icon, even though the extracted game included Nintendo's Control NCA (`control/control.nacp`, `control/icon_AmericanEnglish.dat`). A Switch 2 Edition's additional `control/Acd_1` directory could contain a different, Edition-specific localized title and JPEG icon from its standard Control identity.
+- **Cause:** `pack_dump.py` treated all folder dumps as without Control data and never mapped those original files to the same `control.nacp` and `icon.jpg` extraction names that `nx_extract` uses for NSPs. The survey also discarded any control metadata that happened to be present.
+- **Fix:** Take the selected dumped program's `control/control.nacp` and American English icon (falling back to another available localized icon). When its NPDM is an Ounce `0400` program and `control/Acd_1/control.nacp` exists, prefer the official Edition-specific Acd_1 NACP and icon. Legacy adjacent `control.nacp`/`icon.jpg` remain fallback; removed originals remove stale metadata in a reused extraction. Both `pack_version` and `survey_dump` import the same files. This does not read tar files or add game files to the repository; extracted `control/` directories stay with the user's game.
+- **Found on:** Super Mario Bros. Wonder Nintendo Switch 2 Edition, Program 1 (v327680); its regular `control/` identified the Switch 1 title while `Acd_1` supplied the Edition title and artwork.

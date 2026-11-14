@@ -769,6 +769,7 @@ def survey_dump(src, out):
         if p.lower().endswith('.nro'):
             o = out / 'romfs_nro' / p.lstrip('/'); o.parent.mkdir(parents=True, exist_ok=True)
             pack_dump.clone(src / 'romfs' / p.lstrip('/'), o)
+    pack_dump.copy_control(src, out)
     (out / 'romfs_manifest.tsv').write_text(MANIFEST_HEAD + ''.join(rows))
     return len(rows)
 
@@ -831,7 +832,7 @@ def survey(nsp_dir, app, fam, keys, repo, py, env):
     swap_in(tmp, ex)
     PROG.stage('survey: code modules', step='reading')
     dv = nacp.version(ex / 'control.nacp') if files else (m.group(1) if (m := re.search(r'display version (\S+)', (logs / 'extract.log').read_text(errors='replace'))) else '')
-    title = nacp.name(ex / 'control.nacp') or (nsp_dir.name if dump else '')   # a dump has no control data: its folder names the game
+    title = nacp.name(ex / 'control.nacp') or (nsp_dir.name if dump else '')   # a dump can include the original Control NCA's metadata
     check_aarch64(ex / 'ExeFS', f'{title or "?"} ({app:016X})')
     F = pg.facts_of(ex / 'ExeFS', ex / 'romfs_manifest.tsv'); mods, rom = F['mods'], F['romfs']   # dm/games/profile_guess.py: what the code modules and the RomFS show
     def size(k): return package_size(fam, k)[1] / 2**30

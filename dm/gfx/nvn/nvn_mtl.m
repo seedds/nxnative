@@ -877,7 +877,21 @@ static void pool_res(int i) {
 // stride holding its address and on up to the end of what it asked (rounded up to the stride, plus a stride), made when first asked for. Only what lookups reach is wired. The chunks overlap, as adjacent
 // pools' buffers do at shared pages; GPU addresses are not contiguous across them, so a lookup must say how far it reads. One that does not know (length 1: an indirect draw's index buffer, a raw storage
 // address) gets BIG_UNKNOWN past its address. Raw global memory, whose pool table the shader walks by itself, takes the whole pool: big_full
-enum { BIG_MIN = 512u << 20, BIG_S = 16u << 20, BIG_UNKNOWN = 64u << 20, BIG_MAX = 32 };
+enum { BIG_MIN = 512u << 20, BIG_MIN_SMALL = 32u << 20, BIG_S = 16u << 20, BIG_UNKNOWN = 64u << 20, BIG_MAX = 64 };
+// The size from which a pool goes into chunks. On a Mac whose GPU working set is under 8 GB (an 8 GB M1: 5,461 MB) the pools wrapped whole are what fills it: Ocarina of Time's
+// Hyrule Field loads about 4,000 pools, the largest 305, 244, 201, 149 and 88 MB, and their buffers, wired whole, were 2,244 MB of the 5,258 MB in the residency set when the GPU
+// ran out of memory there (GitHub issue #2600). In chunks from 32 MB the same play allocated 0.7 to 0.9 GB less (an M4 Max: 4.7-5.0 GB in the area against 5.5 GB, 2.6 against
+// 3.6 GB at the start), with the same picture. DM_NVN_POOL_CHUNK_MB sets the size on any device
+static uint64_t big_min(void) {
+    static uint64_t v; if (v) return v;
+    const char *e = getenv("DM_NVN_POOL_CHUNK_MB");
+    if (e && atoi(e) > 0) v = (uint64_t)atoi(e) << 20;
+#if TARGET_OS_OSX
+    else if (g_dev.recommendedMaxWorkingSetSize < (8ull << 30)) v = BIG_MIN_SMALL;
+#endif
+    else v = BIG_MIN;
+    return v;
+}
 typedef struct { uintptr_t lo, hi, a, b; const void *mem; int *chunk, full; NSMutableArray *old; } big_pool;   // chunk: stride → g_pools index + 1; full: the whole pool's entry + 1; old: buffers a longer chunk replaced, alive with the pool
 static big_pool g_big[BIG_MAX]; static int g_nbig;
 static id<MTLBuffer> pool_buf(uintptr_t a, uintptr_t b);   // a pool's zero-copy buffer over [a, b), made over writable pages (below)
@@ -909,7 +923,7 @@ static id<MTLBuffer> pool_buf_made(const void *mem, uint64_t size, uintptr_t a, 
 static void pool_new_prep(pool_new *n, const void *mem, uint64_t size) {
     uintptr_t pg = (uintptr_t)getpagesize(), lo = (uintptr_t)mem, hi = lo + size;
     *n = (pool_new){mem, size, lo, hi, lo & ~(pg - 1), (hi + pg - 1) & ~(pg - 1), nil};
-    if (size >= BIG_MIN && pool_chunks()) { pthread_mutex_lock(&g_mu); int room = g_nbig < BIG_MAX; pthread_mutex_unlock(&g_mu); if (room) return; }
+    if (size >= big_min() && pool_chunks()) { pthread_mutex_lock(&g_mu); int room = g_nbig < BIG_MAX; pthread_mutex_unlock(&g_mu); if (room) return; }
     n->buf = pool_buf_made(mem, size, n->a, n->b);
 }
 static void pool_new_put(pool_new *n) {   // caller holds g_mu

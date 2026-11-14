@@ -1034,6 +1034,14 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Check:** `make -C dm/host/tests GAME=<id> nextendo-api` (history read and write, profile read, the status-only write) and `nextendo-social` (the description from the field, a field that does not end its strings).
 - **Found on:** Mario Kart 8 Deluxe 4.0.1 and Super Mario Bros. Wonder 1.2.1 on an iPhone, 2026-11-14. Not yet seen on a device.
 
+### A Nextendo presence update holds the game's thread
+
+- **Symptom:** in Nextendo mode, changing menus in an online game takes a moment longer than offline, most on the first visit or on a slow network.
+- **Cause:** `UserPresence::Commit` and `DeclareOpenOnlinePlaySession` / `DeclareCloseOnlinePlaySession` sent the presence to `/api/presence` and waited for the answer on the game's thread, up to the request's 15 s timeout. On a console these calls hand the presence to the friends service, which uploads it in the background, and the game is never told how the upload went. Each request also opened a new HTTPS connection.
+- **Fix:** `hle_nextendo_social_apple.m` `dm_nextendo_social_publish` checks the sign-in, queues the presence and returns. One serial queue sends it and the 45 s repeats, and only the newest presence still waiting is sent. A failed send is logged once (`nextendo: presence not sent`) until one succeeds. `hle_nextendo_api_apple.m` sends every account API request through one `NSURLSession`, so the connection to nextendo.network is kept between them.
+- **Check:** `make -C dm/host/tests GAME=<id> nextendo-social` (the description reaches the server after the queue drains, a refused upload is not the game's failure and the next publish is still sent).
+- **Found on:** Mario Kart 8 Deluxe 4.0.1 and Super Mario Bros. Wonder 1.2.1 on an iPhone, 2026-11-14: a short delay between online menus on the first visits. Found by reading the code; the frame times in the log had no stall.
+
 ### `EventFd` in a network mode shares the socket numbering
 
 - **Symptom:** with `DM_NETWORK` set to a network mode, a game that uses gRPC (`nn::npln`) aborts in `grpc_init` as it does offline without event descriptors, or its poller never wakes while it polls its sockets.

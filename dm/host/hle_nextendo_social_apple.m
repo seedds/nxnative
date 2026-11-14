@@ -100,34 +100,52 @@ uint32_t dm_nextendo_social_friends_refresh(dm_social_friend **output,size_t *co
 // Nextendo shows a player online while presence keeps arriving (Mush8 sends it again every 45 seconds). The last presence a game published
 // is sent again on that period until the game publishes status 0 (its online session closed) or a send fails
 enum { PRESENCE_EVERY_S = 45 };
-static pthread_mutex_t g_presence_send = PTHREAD_MUTEX_INITIALIZER;   // one presence request at a time, so a repeat never lands after a newer publish; taken before g_presence_lock
+// A publish returns once the presence is queued, as UserPresence::Commit and Declare*OnlinePlaySession do on a console: they hand it to the friends
+// service, which uploads it in the background, and the game is never told how the upload went. Waiting for the request on the game's thread held a
+// menu change for a round trip to nextendo.network (up to the request's 15 s timeout on a poor network). One serial queue sends and repeats, so a
+// repeat never lands after a newer publish, and only the newest presence still waiting is sent: a menu that publishes several in a row sends one
 static pthread_mutex_t g_presence_lock = PTHREAD_MUTEX_INITIALIZER;
-static NSData *g_presence_body;           // the last published body while its status is not 0
+static NSData *g_presence_waiting;        // the newest published body not sent yet, and its status (under g_presence_lock)
+static unsigned g_presence_waiting_status;
+static NSData *g_presence_body;           // on presence_queue(): the last body sent while its status is not 0, which the timer sends again
 static dispatch_source_t g_presence_timer;
+static bool g_presence_failing;           // on presence_queue(): the last send failed (logged once per run of failures)
+static dispatch_queue_t presence_queue(void) {
+    static dispatch_queue_t queue; static dispatch_once_t once;
+    dispatch_once(&once,^{ queue=dispatch_queue_create("nextendo.presence",dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL,QOS_CLASS_UTILITY,0)); });
+    return queue;
+}
 static uint32_t presence_post(NSData *body,NSData *identity) {
     uint8_t response[4096];size_t count=0;
     uint32_t result=dm_nextendo_api_request("presence",body.bytes,body.length,response,sizeof response,&count);
     return !result&&[identity isEqual:dm_nextendo_api_identity()]?0:DM_ACCOUNT_FAIL;
 }
-static void presence_keep(NSData *body) {   // nil stops the repeats
-    pthread_mutex_lock(&g_presence_lock);
+static void presence_keep(NSData *body) {   // on presence_queue(); nil stops the repeats
     g_presence_body=body;
     if (body && !g_presence_timer) {
-        g_presence_timer=dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER,0,0,dispatch_get_global_queue(QOS_CLASS_UTILITY,0));
+        g_presence_timer=dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER,0,0,presence_queue());
         dispatch_source_set_timer(g_presence_timer,dispatch_time(DISPATCH_TIME_NOW,PRESENCE_EVERY_S*NSEC_PER_SEC),PRESENCE_EVERY_S*NSEC_PER_SEC,5*NSEC_PER_SEC);
         dispatch_source_set_event_handler(g_presence_timer,^{ @autoreleasepool {
-            pthread_mutex_lock(&g_presence_send);
-            pthread_mutex_lock(&g_presence_lock); NSData *again=g_presence_body; pthread_mutex_unlock(&g_presence_lock);
-            NSData *identity=again?dm_nextendo_api_identity():nil;
-            if (again && (!identity || presence_post(again,identity))) {
-                pthread_mutex_lock(&g_presence_lock); if (g_presence_body==again) g_presence_body=nil; pthread_mutex_unlock(&g_presence_lock);
-            }
-            pthread_mutex_unlock(&g_presence_send);
+            NSData *again=g_presence_body,*identity=again?dm_nextendo_api_identity():nil;
+            if (again && (!identity || presence_post(again,identity))) g_presence_body=nil;
         } });
         dispatch_resume(g_presence_timer);
     }
-    pthread_mutex_unlock(&g_presence_lock);
 }
+static void presence_send(void) { @autoreleasepool {   // on presence_queue()
+    pthread_mutex_lock(&g_presence_lock);
+    NSData *body=g_presence_waiting; unsigned status=g_presence_waiting_status; g_presence_waiting=nil;
+    pthread_mutex_unlock(&g_presence_lock);
+    if (!body) return;   // a send queued earlier already took this publish
+    NSData *identity=dm_nextendo_api_identity();
+    uint32_t result=identity?presence_post(body,identity):DM_ACCOUNT_FAIL;
+    if (result && !g_presence_failing) fprintf(stderr,"[dm] [RED] nextendo: presence not sent (the game is not told, as on a console; the next publish tries again)\n");
+    g_presence_failing=result!=0;
+    presence_keep(!result&&status?body:nil);
+} }
+#ifdef DM_NEXTENDO_API_TEST
+void dm_nextendo_social_flush(void) { dispatch_sync(presence_queue(),^{}); }
+#endif
 static NSString *game_title(void) { return [@DM_GAME_ID lowercaseString]; }
 static NSString *game_name(void) {   // the app's name, the game's title ID without one
     id name=[NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleDisplayName"];
@@ -154,11 +172,9 @@ uint32_t dm_nextendo_social_publish(unsigned status,const uint8_t *app_field,siz
         @"plateforme":@"nxnative",@"app_detail":size?presence_description(app_field,size):@""};
     NSData *body=[NSJSONSerialization dataWithJSONObject:object options:0 error:nil];
     if(!body)return DM_ACCOUNT_FAIL;
-    pthread_mutex_lock(&g_presence_send);
-    uint32_t result=presence_post(body,identity);
-    presence_keep(!result&&status?body:nil);
-    pthread_mutex_unlock(&g_presence_send);
-    return result;
+    pthread_mutex_lock(&g_presence_lock); g_presence_waiting=body; g_presence_waiting_status=status; pthread_mutex_unlock(&g_presence_lock);
+    dispatch_async(presence_queue(),^{ presence_send(); });
+    return 0;
 } }
 
 // ---- The account's Mii and play time, from the start of a Nextendo session (loader.c nextendo_main) ----

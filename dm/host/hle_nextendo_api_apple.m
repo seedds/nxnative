@@ -158,6 +158,20 @@ uint32_t dm_nextendo_account_birthday(char output[11]) { @autoreleasepool {
 }
 @end
 
+// One session for every request, so the TLS connection to nextendo.network stays open between them (a session per request made each one a new
+// handshake). Each task has its own delegate (NSURLSessionTask.delegate, iOS 15 / macOS 12), which keeps that answer and its size cap.
+// Ephemeral, with no cookies, credentials or cache: every answer comes from the server
+static NSURLSession *api_session(void) {
+    static NSURLSession *session; static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        NSURLSessionConfiguration *configuration = NSURLSessionConfiguration.ephemeralSessionConfiguration;
+        configuration.HTTPCookieStorage = nil; configuration.HTTPShouldSetCookies = NO; configuration.URLCredentialStorage = nil;
+        configuration.requestCachePolicy = NSURLRequestReloadIgnoringLocalCacheData; configuration.timeoutIntervalForResource = 15;
+        session = [NSURLSession sessionWithConfiguration:configuration];
+    });
+    return session;
+}
+
 #ifdef DM_NEXTENDO_API_TEST
 static dm_nextendo_api_transport test_transport;
 void dm_nextendo_api_test_transport(dm_nextendo_api_transport transport) { test_transport = transport; }
@@ -194,19 +208,15 @@ uint32_t dm_nextendo_api_request(const char *resource, const uint8_t *body, size
     [request setValue:@"nxnative" forHTTPHeaderField:@"User-Agent"];
     [request setValue:@"application/json" forHTTPHeaderField:@"Accept"];
     if (body_size) { request.HTTPBody = [NSData dataWithBytes:body length:body_size]; [request setValue:@"application/json" forHTTPHeaderField:@"Content-Type"]; }
-    NSURLSessionConfiguration *configuration = NSURLSessionConfiguration.ephemeralSessionConfiguration;
-    configuration.HTTPCookieStorage = nil; configuration.HTTPShouldSetCookies = NO; configuration.URLCredentialStorage = nil;
-    configuration.requestCachePolicy = NSURLRequestReloadIgnoringLocalCacheData; configuration.timeoutIntervalForResource = 15;
     DmNextendoApiTransfer *transfer = [DmNextendoApiTransfer new]; transfer.limit = capacity;
-    NSURLSession *session = [NSURLSession sessionWithConfiguration:configuration delegate:transfer delegateQueue:nil];
-    NSURLSessionDataTask *task = [session dataTaskWithRequest:request]; [task resume];
+    NSURLSessionDataTask *task = [api_session() dataTaskWithRequest:request]; task.delegate = transfer; [task resume];
     dm_guest_host_wait_begin(); long timed_out = dispatch_semaphore_wait(transfer.completed,dispatch_time(DISPATCH_TIME_NOW,15 * NSEC_PER_SEC)); dm_guest_host_wait_end();
-    if (timed_out) { [task cancel]; [session invalidateAndCancel]; return DM_ACCOUNT_FAIL; }
+    if (timed_out) { [task cancel]; return DM_ACCOUNT_FAIL; }
     [transfer.lock lock];
     BOOL valid = !transfer.failed && transfer.status >= 200 && transfer.status < 300 && transfer.data.length <= capacity;
     if (valid && output) { memcpy(output,transfer.data.bytes,transfer.data.length); *output_size = transfer.data.length; }
     NSInteger status = transfer.status;
-    [transfer.lock unlock]; [session finishTasksAndInvalidate];
+    [transfer.lock unlock];
     // A refused request is logged once per resource and status (no body, no token), so a device log shows whether Nextendo takes this
     // bearer for the resource: 401 or 403 here would mean it wants another kind of token
     if (!valid) {

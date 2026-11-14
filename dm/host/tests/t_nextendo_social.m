@@ -94,13 +94,16 @@ int main(void){@autoreleasepool{
     uint64_t nsa=0;CHECK(!dm_nextendo_api_baas_id(&nsa)&&nsa==0xabcdef0000001234ull);
     uint8_t own[0xe0+16];memset(own,0,sizeof own);own[0xe0]=0xa5;
     CHECK(!dm_nextendo_presence_initialize(own,uid)&&!memcmp(own,uid,16)&&own[0xe0]==0xa5);
-    own[0x20]=1;own[0x21]=2;CHECK(!dm_nextendo_presence_commit(own)&&[posted_detail isEqual:@""]);
+    own[0x20]=1;own[0x21]=2;CHECK(!dm_nextendo_presence_commit(own));dm_nextendo_social_flush();CHECK([posted_detail isEqual:@""]);
     // the game's description: key and value strings in turn, the description under sys_description
     static const char described[]="mode\0race\0sys_description\0Grand Prix";memset(own+0x20,0,192);memcpy(own+0x20,described,sizeof described);
-    CHECK(!dm_nextendo_presence_commit(own)&&[posted_detail isEqual:@"Grand Prix"]);
-    memset(own+0x20,'x',192);CHECK(!dm_nextendo_presence_commit(own)&&[posted_detail isEqual:@""]);   // a field that never ends its strings
+    CHECK(!dm_nextendo_presence_commit(own));dm_nextendo_social_flush();CHECK([posted_detail isEqual:@"Grand Prix"]);
+    memset(own+0x20,'x',192);CHECK(!dm_nextendo_presence_commit(own));dm_nextendo_social_flush();CHECK([posted_detail isEqual:@""]);   // a field that never ends its strings
     memset(own+0x20,0,192);
-    response_status=503;CHECK(dm_nextendo_presence_commit(own)!=0);response_status=200;
+    // a refused upload is not the game's failure (a console's friends service uploads in the background), and the next publish is still sent
+    response_status=503;CHECK(!dm_nextendo_presence_commit(own));dm_nextendo_social_flush();response_status=200;
+    memcpy(own+0x20,described,sizeof described);posted_detail=nil;CHECK(!dm_nextendo_presence_commit(own));dm_nextendo_social_flush();CHECK([posted_detail isEqual:@"Grand Prix"]);
+    memset(own+0x20,0,192);
     presence_constructor[0]=0;CHECK(dm_nextendo_presence_initialize(own,uid)!=0);presence_constructor[0]=0x52801c02;
     mode=DM_NET_OFFLINE;CHECK(dm_nextendo_presence_commit(own)!=0);mode=DM_NET_AUTO;
     linked=NO;CHECK(dm_nextendo_api_baas_id(&nsa)!=0&&!nsa);CHECK(dm_nextendo_presence_initialize(own,uid)!=0);

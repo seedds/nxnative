@@ -19,6 +19,7 @@ A dated record of what is done, what is in progress and what is left on the Wind
 | `8caf012` | Launcher: the better-pack rule counts sampled functions (`# function` lines in the host's profile); `t_launcher_model` 154 checks. Verified in Docker |
 | `da9f34b` | Host tests: the runners run the script tests (`t_vk_spirv`, `t_second_pack`) from `host_scripts.tsv`. Verified in Docker on Linux; the PowerShell runner not run |
 | `93b94dd` | Port: `nvn_state.c`'s `SLOG` writes a line in one stdio call outside Apple; `port.yml` uploads `host_scripts.tsv` for the Windows job. Verified in Docker (99 of 99 twice) |
+| `b1eff1c` | Vulkan: converted quad strips and polygons take NVN's provoking vertex (the same triangles rotated); `t_vk_provoking` 37 checks, `t_vk_guest_gl` 53. Verified in Docker on lavapipe |
 
 Done on the machine, not in the repository: Docker emptied on the owner's request (every image and container, the owner's other projects' included; the data volumes `aitrade_pgdata`, `smilepetstore_pgdata`, `smilepetstore_redisdata` kept).
 
@@ -30,14 +31,13 @@ Done on the machine, not in the repository: Docker emptied on the owner's reques
 
 ### In progress: written by agents, NOT built and NOT verified
 
-Verified and integrated on 2026-11-14 (nxaot CTest 28 of 28; host CTest 99 of 99 with and without `DM_AOT_ARENA_CHECK`, `NXAOT` given): the three rows that were `wip/second-pack-profile`, `wip/launcher-rule-by-function` and `wip/runner-scripts`. Two agents are taking `wip/hot-indirect-targets` and `wip/provoking-strips-polygons` to green in Docker (their worktrees under `.claude/worktrees/`, each the tip plus the branch's commit).
+Verified and integrated on 2026-11-14 (nxaot CTest 28 of 28; host CTest 99 of 99 with and without `DM_AOT_ARENA_CHECK`, `NXAOT` given): the three rows that were `wip/second-pack-profile`, `wip/launcher-rule-by-function` and `wip/runner-scripts`. An agent is taking `wip/hot-indirect-targets` to green in Docker (its worktree under `.claude/worktrees/`, the tip plus the branch's commit); another is making `t_second_pack` run on Windows.
 
 No Docker image exists (the disk filled while ten worktrees were checked out, 280 MB each), so nothing below has been compiled or run. Each item is uncommitted in its worktree under `.claude/worktrees/`; a new session reads the diff there (`git -C <worktree> diff`), verifies it in Docker, and only then cherry-picks it. One build at a time: the two images (`nxnative-build` 1.9 GB, `nxnative-aot` 1.9 GB) do not fit beside the worktrees.
 
 | Worktree | Task | Files it owns |
 |---|---|---|
 | branch `wip/hot-indirect-targets` (parked: one commit, no worktree) | Hot indirect targets (design 12 of the recompiler): the host writes `<module>.targets.tsv`, nxaot guards the dominant target with a direct call at tier H | new `dm/host/aot_targets.c`, new `t_aot_targets.c`, `dm/tools/aot/src/build/pack.cpp`, `src/lift/*`, new `test_profile_targets.py` |
-| branch `wip/provoking-strips-polygons` (parked: one commit, no worktree) | The provoking vertex of converted quad strips and polygons; a flat-varying check through the guest GL layer. The SPIR-V headers under `shaders/gen` must be regenerated in the image | `dm/gfx/hostvk/vk_index.c`, `shaders/index_expand.comp`, `index_restart.comp`, `t_vk_provoking.c`, `t_vk_guest_gl.c` |
 | branch `wip/apple-log-one-call` (parked: one commit, no worktree) | Apple's log macros write each line in one stdio call, as the port's `LOG` does since `9872bae`. Prepared for a Mac: not to be merged before a Mac or macOS CI run | `dm/host/dm.h` (Apple branches), `docs/reference/threads.md` |
 
 ### Left, not started

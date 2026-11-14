@@ -72,8 +72,9 @@ def sources(roots):
 #   · the GLSL ES 1.0 texture functions (89 of Digimon's fragment shaders call textureCube; with -V glslang reads textureCube as Vulkan's texture type, so a macro cannot rename it);
 #   · a redeclaration of gl_Position as a plain output (the built-in sprite shader of main declares `out float4 vPosition;` with vPosition defined as gl_Position);
 #   · textureOffset with an offset that is not a constant (the built-in FXAA shader): Metal's sample offsets are constants too, so it becomes texture at P + offset / level 0 size
-OLD_TEX = [(r'\btexture2DLod\s*\(', 'textureLod('), (r'\btextureCubeLod\s*\(', 'textureLod('), (r'\btexture2DProj\s*\(', 'textureProj('),
-           (r'\btexture2D\s*\(', 'texture('), (r'\btextureCube\s*\(', 'texture(')]
+OLD_TEX = [(r'\btexture2DLod\s*\(', 'textureLod('), (r'\btextureCubeLod\s*\(', 'textureLod('), (r'\btexture3DLod\s*\(', 'textureLod('),
+           (r'\btexture2DProj\s*\(', 'textureProj('), (r'\btexture3DProj\s*\(', 'textureProj('),
+           (r'\btexture2D\s*\(', 'texture('), (r'\btexture3D\s*\(', 'texture('), (r'\btextureCube\s*\(', 'texture(')]
 
 def call_args(t, i):
     """the arguments of the call whose '(' is at t[i], and the index after its ')'"""
@@ -132,11 +133,25 @@ def es100(t, stage):
     t = re.sub(r'\bsample\b', 'gm_sample', t)   # `sample` became a reserved word after ES 1.00 (GameMaker's sprite shaders use it as a variable)
     return '#version 310 es\nprecision highp float;\nprecision highp int;\n' + t
 
+# Desktop GLSL 1.10–1.40 (Darkest Dungeon's #version 120): attribute, varying, gl_FragColor. SPIR-V with glslang -V needs
+# desktop versions 140 or higher, and core profile; #version 450 core supports implicit int-to-float conversion and samplers without precision qualifiers
+def upgrade_desktop_glsl(t, stage):
+    t = re.sub(r'^[ \t]*#version[ \t]+[^\n]*\r?\n?', '', t, flags=re.M)
+    t = re.sub(r'\battribute\b', 'in', t)
+    t = re.sub(r'\bvarying\b', 'out' if stage == 'vert' else 'in', t)
+    if stage == 'frag' and 'gl_FragColor' in t:
+        t = 'out vec4 gm_FragColor;\n' + t.replace('gl_FragColor', 'gm_FragColor')
+    return '#version 450 core\n' + t.lstrip()
+
 def translate(src, stage, key, tmp):
     """GLSL → MSL; returns (msl path, table fields) or an error string"""
     t = src.decode('latin1')
     v = re.search(r'^[ \t]*#version[ \t]+(\d+)[^\n]*\n?', t, re.M)
-    if not v or v.group(1) == '100': src = es100(t.replace(v.group(0), '', 1) if v else t, stage).encode('latin1')
+    ver = v.group(1) if v else None
+    if ver in ('110', '120', '130', '140'):
+        src = upgrade_desktop_glsl(t, stage).encode('latin1')
+    elif not v or ver == '100':
+        src = es100(t.replace(v.group(0), '', 1) if v else t, stage).encode('latin1')
     g = os.path.join(tmp, f'{key}.{stage}'); spv = g + '.spv'; msl = os.path.join(tmp, f'{key}_{stage[0]}.metal')
     open(g + '.in', 'wb').write(src)
     r = subprocess.run(['glslangValidator', '-E', '-S', stage, g + '.in'], capture_output=True, text=True)

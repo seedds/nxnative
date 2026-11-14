@@ -1852,7 +1852,28 @@ Digimon Story Cyber Sleuth: Complete Edition (Media.Vision's MVGL engine, SDK 6.
 - **Symptom:** `UNIMPL glCreateShader` returns 0, followed by `UNIMPL glShaderSource`, `glCompileShader`, `glGetShaderiv` and `glGetShaderInfoLog`; the game crashes in `sdk` with a null shader handle even though EGL initialized.
 - **Cause:** the GL implementations were registered only in `__DATA,swgl`, which `eglGetProcAddress` searched. Normal imports search `__DATA,swhle`; a game that imports GL directly never consulted the GL table and got named unimplemented stubs instead.
 - **Fix:** `GL` and `GLB` register in `swhle`, and `eglGetProcAddress` searches that same table. Both paths retain `GLB`'s big-stack entry; unsupported loader names still return null by default (`DM_GL_STUBS=1` enables diagnostic stubs). `make -C dm/gfx/tests GAME=010014E00DB56000 gl-imports` exercises the real import resolver and GL registrations, shader creation and source queries, wrapper addresses and missing names in both diagnostic modes, without game files.
-- **Found on:** Darkest Dungeon Complete (`01008F1008DA6000`, update v327680, SDK 3.6.0, provisional profile), reported in [issue #228](https://github.com/seedds/nxnative/issues/228). The import failure is reproduced by the regression test; gameplay and run-time shader capture for this title remain unverified.
+- **Found on:** Darkest Dungeon Complete (`01008F1008DA6000`, update v327680, SDK 3.6.0, provisional profile), reported in [issue #228](https://github.com/seedds/nxnative/issues/228), and [Darkest Dungeon](../../dm/games/01008A700989A000/README.md) (base game 1.0.2, SDK 3.6.0).
+
+### Desktop GLSL 1.20 shader upgrade
+
+- **Symptom:** shaders fail to translate with `glslangValidator` or `spirv-cross` reporting syntax errors on `attribute`, `varying`, `gl_FragColor`, or undeclared `texture3D`; in-game, missing shaders cause hundreds of dropped draws and a black screen.
+- **Cause:** the game assembles desktop GLSL 1.20 (`#version 120`) shaders at run time, which lack modern `#version 450 core` keywords (`in`, `out`), require `#version 450 core` for implicit int-to-float conversions, and use legacy 3D texture lookup intrinsics.
+- **Fix:** `gl_shaders.py` upgrades `#version 120` shaders to `#version 450 core`, replacing `attribute` with `in`, `varying` with `out`/`in`, `gl_FragColor` with an explicit output, and mapping `texture3D` variants to `texture()`.
+- **Found on:** [Darkest Dungeon](../../dm/games/01008A700989A000/README.md) (SDK 3.6.0).
+
+### Sampler units initialized from layout binding points
+
+- **Symptom:** video cutscenes and in-game movies display with an intense green tint across the entire picture, while gameplay renders normally.
+- **Cause:** the movie fragment shader declares bi-planar NV12 samplers with explicit binding points (`layout(binding = 0) uniform sampler2D u_textureY; layout(binding = 1) uniform sampler2D u_textureUV;`). Under OpenGL 4.2+, explicit layout bindings assign default texture units without requiring `glUniform1i`. In `hle_gl.m`, `u->unit` defaulted to 0, causing `u_textureUV` to also sample from texture unit 0 (`tex_y`), whose missing green channel zeroed chroma and biased the BT.709 conversion into pure green.
+- **Fix:** `glLinkProgram` initializes `u->unit = m->slot;`, defaulting each sampler's unit to its reflection slot or layout binding point.
+- **Found on:** [Darkest Dungeon](../../dm/games/01008A700989A000/README.md) (SDK 3.6.0).
+
+### Texture swizzle via `glTexParameteriv`
+
+- **Symptom:** `UNIMPL glTexParameteriv (x0=0xde1 x1=0x8e46)` reported in logs.
+- **Cause:** the game sets 4-component swizzles (`GL_TEXTURE_SWIZZLE_RGBA` = `0x8E46`) for 3D color lookup tables using `glTexParameteriv`.
+- **Fix:** `hle_gl.m` implements `glTexParameteriv` with handling for `GL_TEXTURE_SWIZZLE_RGBA`, copying all four channel swizzles into the texture state.
+- **Found on:** [Darkest Dungeon](../../dm/games/01008A700989A000/README.md) (SDK 3.6.0).
 
 ### Telling a GL game from an NVN or Vulkan one
 

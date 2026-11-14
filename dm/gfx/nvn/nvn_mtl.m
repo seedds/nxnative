@@ -2820,7 +2820,7 @@ static int tex_atomic_alias(id<MTLTexture> base) {
 }
 // DM_SHADOW_DIV=N (2 to 4, default 1 = off): the game's 12288x12288 depth texture, 288 MB, is made N times smaller on each side (12288 / N must stay whole). The game draws into it with viewports and scissors in its own 12288 pixels:
 // state_op divides those by N while that texture is the depth target. The shaders sample it by 0..1 coordinates, so they read the smaller map; shadow edges get coarser. Experimental
-static unsigned shadow_div(void) { static unsigned v; if (!v) { const char *e = getenv("DM_SHADOW_DIV"); int n = e && *e ? atoi(e) : 1; if (n < 1 || n > 5) { MLOG("[RED] DM_SHADOW_DIV=%s: must be 1 to 5; 1 used", e ? e : ""); n = 1; } v = (unsigned)n; if (n > 1) MLOG("shadow map 12288x12288 made %ux smaller on each side (DM_SHADOW_DIV)", v); } return v; }
+static unsigned shadow_div(void) { static unsigned v; if (!v) { const char *e = getenv("DM_SHADOW_DIV"); int n = e && *e ? atoi(e) : 1; if (n < 1 || n > 48) { MLOG("[RED] DM_SHADOW_DIV=%s: must be 1 to 48; 1 used", e ? e : ""); n = 1; } v = (unsigned)n; if (n > 1) MLOG("shadow map 12288x12288 made %ux smaller on each side (DM_SHADOW_DIV)", v); } return v; }
 static int is_shadow_map(const tex_t *t) { return t->d.width == 12288 && t->d.height == 12288 && t->d.target == NVN_TEXTURE_TARGET_2D && fmt_depth(t->d.format); }
 static MTLTextureDescriptor *tex_desc(const tex_t *t, int packaged) {
     uint32_t pf = 0; uint8_t swz[4];

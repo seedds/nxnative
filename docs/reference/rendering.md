@@ -1132,6 +1132,15 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Fix:** non-indexed fans draw through a shared `(0, i, i+1)` index buffer with `first` as the base vertex; indexed fans and quads are expanded on the CPU into a 32-bit triangle list in the frame arena at replay (`nvn_mtl.m`, as for 8-bit indices).
 - **Found on:** [13 Sentinels: Aegis Rim](../../dm/games/01003FC01670C000/README.md).
 
+### Restart markers in direct triangle lists
+
+- **Symptom:** bright cyan streaks across the ground and sky in MGS4’s Virtual Range, while the normal distance markings and models render correctly.
+- **Cause:** Metal does not restart triangle lists at the game’s separator indices. Passing the original list through shifts triangle grouping after each marker and connects unrelated vertices. The traced draw has 18,442 16-bit indices, including ten `0xffff` markers separating complete batches of 2,049 or 1,020 indices. The pending upload’s source and the destination were captured; suppressing only fragment shader `6a1654a5be1c43e8_b` removed the streaks.
+- **Fix:** `list_restart_prepare` reuses `nvn_expand_primitive` to compact complete triangles into one 32-bit index list. Leading, consecutive and trailing markers reset assembly; incomplete groups are discarded. One draw preserves primitive numbering, base vertex and instancing. The existing index-range cache avoids copying when the restart value cannot occur. Pending uploads use the same verified CPU-source reader as [vertex binding bounds](#vertex-binding-limits-beyond-the-memory-pool); other GPU-written indices are synchronized before reading.
+- **Found on:** MGS4 program `0100D0B01C4F4002`, update 393216, main build `3e7443aca182388f98e13069311fb51f`, vertex `4185cf154723bf99_b`, fragment `6a1654a5be1c43e8_b` in Virtual Range.
+- **Check:** `t_primitive_restart` reproduces all eighteen triangle-list cases before the fix and checks the rendered pixels afterward for 8-, 16- and 32-bit indices, standard/custom markers, queued uploads and a later GPU write to the upload source. Existing fan/quad cases remain covered. Total: 91 checks. The user confirmed the cyan streaks are gone in Virtual Range.
+- **Open:** this extension covers direct triangle lists. Indirect list restart and other list topologies are outside this change. GPU-written indices with no safely readable source require a synchronization wait; the ordinary MGS4 upload uses the source path without one. Full gameplay and performance validation remain separate from the synthetic checks.
+
 ### Indirect draws and dispatches read by the GPU
 
 - **Symptom:** indirect draws whose record the GPU writes earlier in the frame cannot be read on the CPU at replay; GPU-driven effects drawn as indirect quads, which Metal has no primitive for.

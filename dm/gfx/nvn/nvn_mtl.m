@@ -14398,6 +14398,33 @@ static uint32_t mdi_count(uint64_t cnt) {
     return g_mdi_count;
 }
 static int mdi_live(uint64_t cnt, int i) { return (uint32_t)i < mdi_count(cnt); }
+// Metal does not restart triangle lists. Keep one compact draw so primitive IDs continue across the separators.
+// shortcut: direct lists only; extend the GPU indirect converter when an indirect triangle list needs restart.
+static int list_restart_prepare(const p_draw_idx *di, uint64_t *gpu, uint32_t *count) {
+    if (!di || di->ind || di->prim != 4 || !S.restart.on || di->count <= 0 || (unsigned)di->itype > 2) return 0;
+    unsigned bytes = 1u << di->itype; uint64_t n = (uint64_t)di->count * bytes;
+    if ((uint64_t)S.restart.index >= (1ull << (8 * bytes))) return 0;
+    p_draw_idx source = *di; source.ibuf = index_cpu_source(di);
+    uint32_t lo, hi;
+    if (source.ibuf) {
+        if (!ix_range(&source, &lo, &hi)) ix_minmax((const void *)(uintptr_t)source.ibuf, bytes, di->count, &lo, &hi);
+        if (S.restart.index < lo || S.restart.index > hi) return 0;
+    } else {
+        // Unknown GPU-written indices must land before reading; ordinary queued uploads use their unchanged CPU source above.
+        mdi_wait(); void *mb; uint64_t off;
+        if (!drw_valid() || !mtl_addr(di->ibuf, n, &mb, &off) || !nvn_host_readable(di->ibuf, n)) {
+            RED_ONCE(22, "restart index buffer cannot be read safely; draw skipped"); return -1;
+        }
+        source.ibuf = (uint64_t)((uint8_t *)[(__bridge id<MTLBuffer>)mb contents] + off);
+        ix_minmax((const void *)(uintptr_t)source.ibuf, bytes, di->count, &lo, &hi);
+        if (S.restart.index < lo || S.restart.index > hi) return 0;
+    }
+    id<MTLBuffer> out; size_t off = arena_alloc((size_t)di->count * 4, &out);
+    *count = nvn_expand_primitive((uint32_t *)((uint8_t *)out.contents + off), (const uint8_t *)(uintptr_t)source.ibuf,
+                                  (uint32_t)di->count, bytes, 4, 1, S.restart.index);
+    *gpu = out.gpuAddress + off;
+    return 1;
+}
 // ---------- Indirect-count multi-draws masked on the GPU ----------
 // The wait above held the submitting thread for the GPU at every GPU-driven pass: in Monster Hunter Rise's Kamura Village, 14 of the 20 ms a submission took on an iPhone were that wait
 // (6 ms of work), and the game ran at 36–54 fps. Instead a compute pass copies each such draw's record into the frame arena, or zeros for a draw past the count, and the draw reads the copy:
@@ -14837,6 +14864,8 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) {
     // Xenoblade Chronicles 3 uses vertex-only work before its skinned-model draws; Metroid Prime Remastered fills its fog volume with image stores from points.
     if (S.rast_discard && (!pr->sh[0] || !pr->sh[0]->discard_fn)) { PD("Z %llu draw skipped: rasterizer discard with no vertex storage or image writes vs=%s", g_stat_pass + !g_enc, pr->sh[0] ? pr->sh[0]->key : "-"); return; }
     if (g_nubd && (g_enc || ubd_lazy()) && ubd_conflict(pr, dw, di)) { g_ubd_conflicts++; rp_end(); ubd_land(); }   // land the deferred inline updates before this draw (see ubd_conflict)
+    uint64_t restart_gpu = 0; uint32_t restart_count = 0;
+    if (!g_geo_program && !g_geo_mesh.on && !g_wl.on && list_restart_prepare(di, &restart_gpu, &restart_count) < 0) return;
     vertex_dump(pr->sh[0], dw, di);
     if (zskip_can_draw(pr)) {   // Zero-source skip: the output is always 0, writing 0 over 0, so this draw changes no result (see zskip_can_draw)
         g_zskip_count++; { static int once; if (!once++) MLOG("zero-source skip: first case pass %llu", g_stat_pass + 1); }
@@ -15091,6 +15120,11 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) {
         if (g_tess_ind) { enc_r_draw_indirect(en, mp, g_tess_ind); return; }   // nvn_tess.inc: the expansion kernel's vertex count
         if (g_geo_count) enc_r_draw_indexed(en, mp, g_geo_count, MTLIndexTypeUInt32, g_geo_indices, g_geo_index_bytes, 1, 0, (uint32_t)g_draw_binst);   // geo_lean_tri's slots
         else enc_r_draw_indexed_indirect(en, mp, MTLIndexTypeUInt32, g_geo_indices, g_geo_index_bytes, g_geo_args);
+        return;
+    }
+    if (restart_gpu) {
+        if (restart_count) enc_r_draw_indexed(en, mp, restart_count, MTLIndexTypeUInt32, restart_gpu, (NSUInteger)restart_count * 4,
+                                             di->instances ? di->instances : 1, di->base_vertex, di->base_instance);
         return;
     }
     // A draw with 0 primitives (the game does send count=0) draws no pixels, so skip encoding; Metal requires the count to be non-zero, otherwise the validation layer aborts on the spot (measured on the camp / wilderness / combat pages)

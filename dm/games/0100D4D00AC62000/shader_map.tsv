@@ -1,0 +1,17 @@
+# kind: evidence  SEGA AGES OUTRUN shaders (BNSH / BAHS in RomFS + main) → control section + code area keys (dm/gfx/tools/shader_split.py)
+# column 5 records where each key first appears, a copy in the game before one in an add-on; no PC shader pairing supplied
+package	index	stage	dm_ctl_sha16	source
+ps_main.bin	0	pixel	68c2648fbdb9a026	main#BNSH@0xcbb8a0#var0
+ps_main.bin	1	pixel	d2ffc6c8f538337e	main#BNSH@0xcbb8a0#var1
+ps_main.bin	2	pixel	f704efa10996626e	main#BNSH@0xcbb8a0#var2
+ps_main.bin	3	pixel	7a5e70e6b07ca72b	main#BNSH@0xcbb8a0#var3
+vs_main.bin	0	vertex	010618c379dcf426	main#BNSH@0xcbb8a0#var4
+ps_main.bin	4	pixel	1c644c746e0eb7e2	main#BNSH@0xcbb8a0#var4
+ps_main.bin	5	pixel	d3c3ff9d635d173c	main#BNSH@0xcc2c08#var0
+ps_main.bin	6	pixel	bfe0a458434c8434	main#BNSH@0xcc2c08#var1
+ps_main.bin	7	pixel	856324856ff134f1	main#BNSH@0xcc2c08#var2
+ps_main.bin	8	pixel	dbda8f474e5abe00	main#BNSH@0xcc2c08#var3
+vs_main.bin	1	vertex	0791bd1d8eebd3f8	main#BNSH@0xcc2c08#var4
+ps_main.bin	9	pixel	34961b9d978076a0	main#BNSH@0xcc2c08#var4
+vs_main.bin	2	vertex	d4bfcf7c926f2768	main#BNSH@0xcc9f80#var0
+ps_main.bin	10	pixel	e4b4be9f31e54a01	main#BNSH@0xcc9f80#var0

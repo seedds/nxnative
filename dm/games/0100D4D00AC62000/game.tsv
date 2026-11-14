@@ -1,0 +1,35 @@
+# SEGA AGES Out Run (SEGA; M2's engine, `m2engage`), SDK 5.5.0, NVN.
+# Started from the NSP script's provisional profile; brought up on the Mac with no change to its keys (README.md).
+
+# ---- Identity ----
+title_id	0100D4D00AC62000
+program_id	0100D4D00AC62000
+
+# ---- App ----
+name	SEGA AGES OUTRUN
+ipa	SegaAgesOutrun.ipa
+app_category	public.app-category.games
+
+# ---- Versions ----
+build	v65536	1.1.0	main=7453489bd7a7684e86b2092bb4774167	sdk=0bce43d102a52d02033ca5e145d4be53
+package	v65536
+shader_versions	v65536
+
+# ---- Files ----
+# every module main imports from
+modules	main sdk
+romfs_marker	alldata.bin
+zip_store	.bin:.m4a:.metallib
+
+# ---- Memory ----
+# main sets a heap of at most the pool − 64 MB: a 3328 MB heap region
+mem_reserve	0x100000000
+mem_alias	0x10000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+# the NPDM declares 0 MB of system resource: IsVirtualAddressMemoryEnabled is false, as on Horizon (Big Brain Academy: Brain vs. Brain sets a heap only then)
+sys_resource	0x0
+
+# ---- Shader split ----
+shader_groups	/204/=204
+shader_note	SEGA AGES OUTRUN shaders

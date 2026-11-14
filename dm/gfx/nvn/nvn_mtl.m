@@ -17401,8 +17401,8 @@ static id<MTLTexture> fx_encode(fx_state *fx, id<MTL4CommandBuffer> cb, id<MTLTe
 // (DM_GAME_UPSCALER_KEYS: game.py takes the compute shaders the shader map found in an NDSR pack, whatever engine ships it) is replaced by the spatial scaler from the input rectangle to the output rectangle, in the colour mode of that shader. MetalFX takes whole textures: each side is the
 // game's own texture where it can be (up_mfx_encode; the input in its own format), else a texture of the scaler's own (RGBA16F; RGBA8Unorm for the output of sRGB input), which the input rectangle is drawn
 // into first or which is drawn into the output rectangle after (copy_t2t_draw, a render pass each). An output rectangle not larger than the input in both directions, an indirect dispatch, or anything
-// the checks below refuse runs the game's shader. The look changes (Apple's scaler instead of the game's network), so it is the player's choice; DM_UPSCALER=game (the default)
-// keeps the network. Found with the iPhone port's NDSR replacement (PR #1073), which decoded the rectangles. The network's own cost on the GPU is the translator's
+// the checks below refuse runs the game's shader. The look changes (Apple's scaler instead of the game's network), so it is the player's choice, by default the profile's (upscaler, DM_GAME_UPSCALER: game unless the game
+// was measured faster with MetalFX, Ocarina of Time); DM_UPSCALER=game keeps the network. Found with the iPhone port's NDSR replacement (PR #1073), which decoded the rectangles. The network's own cost on the GPU is the translator's
 // LDSM / MOVM shuffles, open in docs/reference/shaders.md (Ampere HMMA through simdgroup_matrix)
 // key: input w, h, output w, h, sRGB input, colour format, output format. in, out: the scaler's own input and output, made on first use (up_mfx_scratch) by a side that cannot take the game's texture;
 // read: what the game's image is drawn from (out, or its sRGB view)
@@ -17414,10 +17414,11 @@ void mtl_up_mfx_stats(uint64_t *n, uint64_t *kept) { *n = g_up_mfx_n; *kept = g_
 static int up_mfx_on(void) {
     static int v = -1;
     if (v >= 0) return v;
-    const char *e = getenv("DM_UPSCALER"); v = e && !strcmp(e, "metalfx");
-    if (e && *e && strcmp(e, "metalfx") && strcmp(e, "game")) MLOG("[RED] DM_UPSCALER=%s: metalfx or game; keeping the game's", e);
+    const char *e = getenv("DM_UPSCALER"); int set = e && (!strcmp(e, "metalfx") || !strcmp(e, "game"));
+    v = !strcmp(set ? e : DM_GAME_UPSCALER, "metalfx");   // unset: the profile's upscaler (game.py), game unless the game was tested with MetalFX
+    if (e && *e && !set) MLOG("[RED] DM_UPSCALER=%s: metalfx or game; keeping the profile's %s", e, DM_GAME_UPSCALER);
     if (v && !(g_q4 && [MTLFXSpatialScalerDescriptor supportsMetal4FX:g_dev])) { MLOG("upscaler: this GPU has no Metal 4 MetalFX spatial scaler; the game's own upscaler draws"); v = 0; }
-    if (v) MLOG("upscaler (DM_UPSCALER): metalfx, the game's upscaler shaders (%d, from the shader map) are drawn by MetalFX's spatial scaler", DM_GAME_UPSCALER_N);
+    if (v) MLOG("upscaler (%s): metalfx, the game's upscaler shaders (%d, from the shader map) are drawn by MetalFX's spatial scaler", set ? "DM_UPSCALER" : "the profile's default; DM_UPSCALER=game keeps the game's", DM_GAME_UPSCALER_N);
     return v;
 }
 // The colour a variant of the network takes and writes, from the sRGB curves in its code (their constants are immediates, whole bytes in the code). The variants differ inside a pack, so this is the shader's and not the game's:

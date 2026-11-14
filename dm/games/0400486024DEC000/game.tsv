@@ -43,6 +43,8 @@ fps_target	60
 
 # ---- Graphics ----
 draw_barriers	game
+# The game's NDSR network drawn by MetalFX's spatial scaler by default (the launcher's Game's upscaler; DM_UPSCALER=game keeps the game's): on an M4 Pro the frame's GPU time 17.15 -> 15.79 ms
+upscaler	metalfx
 # As Tears of the Kingdom: the terrain's height, blend and hole maps are written by the CPU into textures after they are created. Without these keys they stay zero: holes in the ground and the wrong materials
 tex_flush_upload	on
 tex_dirty_upload	on

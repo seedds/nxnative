@@ -2307,6 +2307,13 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Fix:** every SDK's driver runs the code of the GLSLC in the same SDK, so the host now reports at least the version the game's own `glslcGetVersion` returns (`hle_glslc.c` `dm_glslc_gpu_code`, `hle_nvn.c`). The host also advertises the translator's supported range for precompiled shaders ([Newest GPU code version reported by the driver](nvn-objects.md#newest-gpu-code-version-reported-by-the-driver)).
 - **Found on:** [Catherine: Full Body](../../dm/games/0100BF00112C0000/README.md) (SDK 8.2.1, Atlus's GFD engine, CRI middleware; one boot).
 
+### A sampler the shader never reads
+
+- **Symptom:** a GL game's window stays black while every draw reaches the GPU with no `[RED]` line; `DM_GL_DRAWLOG` names a sampler with no texture (`program N sampler T1 (unit 1) has no texture: drawing the 1x1 black placeholder`), and `DM_GL_TEXDUMP` shows the source textures full and every render target at its clear colour. The shader table lists two samplers at one slot (`t:T0=0:sampler2D t:T1=0:sampler2D`).
+- **Cause:** the shader declares a sampler it never samples. SPIRV-Cross leaves it out of the MSL, but the reflection still lists it, with the binding of one that is used. The host bound the game's texture for each listed sampler in turn, so the unused one's (here an empty unit: the black placeholder) replaced the real texture in that slot.
+- **Fix:** `gl_shaders.py` lists only the samplers the MSL takes as `[[texture(n)]]` parameters.
+- **Found on:** Mega Man Legacy Collection (`01002D4007AE0000`, provisional profile): its sprite shader declares `T0` and `T1` and samples only `T0`. `dm/tools/tests/test_gl_samplers.py` checks it where glslang and the in-repo spirv-cross run.
+
 ### GLSL ES 1.00 sources without a `#version` line
 
 - **Symptom:** `gl_shaders.py` failed on the captured sources: `ES shaders for SPIR-V require version 310 or higher`.

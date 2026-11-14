@@ -168,8 +168,13 @@ def translate(src, stage, key, tmp):
         f.append(f'b:{u["binding"]}:{u["block_size"]}')
         e = uni_members(refl, t['members'], '', 0, f, bools)
         if e: return e
+    # A sampler the code never reads is in the reflection but not in the MSL, and glslang gives it the binding of one that is: listed, the host bound the game's texture for it
+    # into that slot after the real one. Mega Man Legacy Collection's sprite shader declares T1 and samples only T0, both at binding 0; the game leaves unit 1 empty, so every draw sampled
+    # the 1x1 black placeholder and the window stayed black. Only the samplers the MSL takes ([[texture(n)]] parameters) are listed
+    used = set(re.findall(r'\b(\w+)\s*\[\[texture\(\d+\)\]\]', m))
     for t in refl.get('textures', []):
         if t.get('array'): return f'sampler array {t["name"]}'
+        if t['name'] not in used: continue
         f.append(f't:{t["name"]}={t["binding"]}:{t["type"]}')
     for k in ('separate_images', 'separate_samplers', 'images', 'ssbos', 'push_constants'):
         if refl.get(k): return f'{k} are not implemented'

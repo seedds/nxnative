@@ -126,6 +126,8 @@ def info_plist(a, minos, icon):
          'NSBluetoothAlwaysUsageDescription': 'Connect Switch 2 Joy-Con and Pro Controllers over Bluetooth.',
          'LSApplicationCategoryType': a.category or 'public.app-category.games', 'LSSupportsGameMode': False, 'DMTitleID': a.title_id.upper(), 'DMRomfsMarker': a.marker or '', 'DMLanguage': a.lang or 'en-US', 'DMSaveSyncChoice': 1}
     if icon: p['CFBundleIconFile'] = 'AppIcon'
+    # macOS asks the player before the host captures the microphone (DM_MIC=1, hle_audio.c input streams); without this key the capture is refused without asking
+    p['NSMicrophoneUsageDescription'] = "A game that uses a microphone hears this Mac's input only when DM_MIC=1 is set (Ocarina of Time: the ocarina played into it)."
     if a.settings:
         listed = json.loads(Path(a.settings).read_text(encoding='utf-8'))['settings']
         p['DMSettings'] = settings_rules(listed)

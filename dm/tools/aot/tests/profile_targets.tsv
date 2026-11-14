@@ -1,0 +1,15 @@
+# nxaot profile: the fixture of CTest profile_targets (tests/test_profile_targets.py; README.md, "Hot indirect targets"), written by hand for fnptr-gcc.nro: a sample at
+# each indirect site of the functions that should be at tier H (main, rt_exit, fold, shape_total, apply_op, with_cleanup), none in rt_init (its site stays at tier C),
+# in the form of the host's sampler (dm/host/aot_profile.c). Beside it profile_targets.targets.tsv, the targets those sites' inline caches are bound to
+# module fnptr-gcc, build ID none, image SHA-256 9ed219b145336d6f1cf5a93a4288ae127c18d0ebd1086e9e1baf8859497334da
+# <module offset> <samples>
+0x434 3
+0x1608 1
+0x1904 5
+0x1984 4
+0x1998 4
+0x19bc 4
+0x1a2c 6
+0x1a64 2
+0x1a7c 2
+0x1a90 2

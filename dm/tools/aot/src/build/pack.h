@@ -92,6 +92,14 @@ struct BuildStats {
     bool profile_weights = false;
     uint64_t weighted_functions = 0, weighted_branches = 0, entry_counts = 0, weighted_calls = 0, entry_only_functions = 0;
     uint64_t no_flow_functions = 0;
+    // --profile: the hot indirect targets (README.md, "Hot indirect targets"): the targets file beside the profile (targets_path: read, none there, or not read with the
+    // test switch NXAOT_PROFILE_TARGETS=0); its sites, those the lifted code guards (summed over the units, cached ones too), those planned for a guard, and why the others
+    // are not: several targets (none at 90 % of the counts), outside every function at tier H or H+, at a word that is no blr or br, a target that is no function of the
+    // module (or a call's target that does not return)
+    enum class TargetsState : uint8_t { NoProfile, None, Read, Off };
+    TargetsState targets_state = TargetsState::NoProfile;
+    std::string targets_path;
+    uint64_t target_sites = 0, guarded_sites = 0, guard_planned = 0, several_targets = 0, targets_outside = 0, targets_no_branch = 0, targets_no_function = 0;
     uint64_t cache_hits = 0, cache_misses = 0, cache_bytes_read = 0, cache_bytes_written = 0;  // units
     uint64_t cache_hit_functions = 0, cache_miss_functions = 0;  // the functions of those units
     std::string analysis_cache;               // with --cache: "hit", or "miss (why)" (analysis_cache.h)

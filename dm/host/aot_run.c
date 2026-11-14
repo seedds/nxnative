@@ -4,7 +4,8 @@
 //                       thr_svc_enter / thr_svc_leave (hle_thread.c: a thread paused inside an SVC); svcExitProcess stops the process
 //   nxaot_rt_dispatch   an inline-cache miss: the lookup table of the pack that holds the target, the caller's or another of the same standard-entry signature (ABI 3:
 //                       a descriptor published in the site's slot, so the next call goes there directly), else the caller pack's jit_entry with the target in
-//                       st->pc: the host-function page (a host call), another pack of another signature (its enter), or the JIT fallback
+//                       st->pc: the host-function page (a host call), another pack of another signature (its enter), or the JIT fallback; with DM_AOT_PROFILE
+//                       each miss noted for the hot indirect targets (aot_targets.c)
 //   nxaot_rt_jit        what compiled code hands over (jit_entry's call, msr fpcr, untranslated encodings, refused functions): host calls, compiled entries
 //                       called natively through the pack's enter trampoline, non-local transfers propagated (3.3), the rest in the JIT (dynarmic, NXHOST_JIT)
 //                       or, without it, a [RED] line per address and a process stop with status DM_AOT_JIT_NEEDED; every entry into the JIT counted per address
@@ -712,8 +713,9 @@ static const nxaot_ic_desc *desc_for(uint64_t guest, const void *native) {
     return &n->d;
 }
 
+// With DM_AOT_PROFILE every miss is noted with its site (the blr or br's module offset) and what became of it, the hot indirect targets of design 12 (aot_targets.c: nothing is
+// counted on the caches' hits, which never reach the host)
 DM_AOT_EXPORT void *nxaot_rt_dispatch(dm_guest_state *st, uint64_t target, const nxaot_ic_desc **slot, uint64_t site) {
-    (void)site;
     // The pack whose code missed: its call sites pass the standard entries' signature its descriptor records (std_x, std_v, rv: ABI 3)
     const dm_aot_pack *caller = dm_aot_pack_of_code((uint64_t)(uintptr_t)__builtin_return_address(0));
     if (!caller) die("aot: a dispatcher miss from outside every pack (return address %p)", __builtin_return_address(0));
@@ -725,6 +727,7 @@ DM_AOT_EXPORT void *nxaot_rt_dispatch(dm_guest_state *st, uint64_t target, const
         const void *native = dm_aot_entry_of(e);
         atomic_fetch_add_explicit(&c_misses, 1, memory_order_relaxed);
         if (p != caller) atomic_fetch_add_explicit(&c_cross, 1, memory_order_relaxed);
+        dm_aot_target_note(caller, site, target, p == caller ? DM_AOT_TARGET_BOUND : DM_AOT_TARGET_OTHER_PACK);
         __atomic_store_n(slot, desc_for(target, native), __ATOMIC_RELEASE);
         return (void *)native;
     }
@@ -733,6 +736,7 @@ DM_AOT_EXPORT void *nxaot_rt_dispatch(dm_guest_state *st, uint64_t target, const
     if (e) atomic_fetch_add_explicit(&c_cross_handovers, 1, memory_order_relaxed);
     st->pc = target;
     st->exit_reason = e ? REASON_CROSS : dm_aot_hostfn_name(target) || dm_aot_stub_index(target) >= 0 ? REASON_HOSTCALL : NXAOT_TRAP_JIT_MISS;
+    dm_aot_target_note(caller, site, target, e ? DM_AOT_TARGET_HANDOVER : st->exit_reason == REASON_HOSTCALL ? DM_AOT_TARGET_HOST : DM_AOT_TARGET_NOCODE);
     return (void *)dm_aot_pack_jit_entry(caller);
 }
 

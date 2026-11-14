@@ -33,7 +33,9 @@
 //                                                     the cache
 //                                                     --cache (compiled units and the module's analysis); --profile gives each function its tier
 //                                                     by the samples it holds (--gap-tier C: gap code at tier C in the balanced mode; --tiers-tsv
-//                                                     writes each function's tier); with the tables' object (lookup table, function map, line table,
+//                                                     writes each function's tier), and <file without .tsv>.targets.tsv beside it, when there,
+//                                                     guards the indirect sites at tier H with a dominant target (README.md, "Hot indirect
+//                                                     targets"; the test switch NXAOT_PROFILE_TARGETS=0 reads none); with the tables' object (lookup table, function map, line table,
 //                                                     descriptor: include/nxaot/aot_module.h) linked by lld into the shared object nxaot_host
 //                                                     loads (--shared) and / or one relocatable object (-o); prints the module's numbers, the
 //                                                     seconds of each stage and the caches' hits and misses. --target windows: a pack for the
@@ -805,6 +807,21 @@ int Build(int argc, char** argv) {
                         static_cast<unsigned long long>(s.entry_only_functions), static_cast<unsigned long long>(s.no_flow_functions));
         } else {
             std::printf("aot: profile weights: off (NXAOT_PROFILE_WEIGHTS=0): the profile chooses the tiers only\n");
+        }
+        // The hot indirect targets (README.md, "Hot indirect targets"): <module>.targets.tsv beside the profile; off with the test switch NXAOT_PROFILE_TARGETS=0
+        using TS = nxaot::build::BuildStats::TargetsState;
+        if (s.targets_state == TS::Off) {
+            std::printf("aot: profile targets: off (NXAOT_PROFILE_TARGETS=0): no guarded calls\n");
+        } else if (s.targets_state == TS::None) {
+            std::printf("aot: profile targets: none (no %s): no guarded calls\n", s.targets_path.c_str());
+        } else if (s.targets_state == TS::Read) {
+            const unsigned long long unreached = s.guard_planned > s.guarded_sites ? s.guard_planned - s.guarded_sites : 0;
+            std::printf("aot: profile targets: %llu sites, %llu guarded, %llu with several targets, not guarded, %llu outside tier H; %llu whose target is no function "
+                        "of the module or a call's that does not return, %llu at no blr or br, %llu planned that no lifted code reaches (%s)\n",
+                        static_cast<unsigned long long>(s.target_sites), static_cast<unsigned long long>(s.guarded_sites),
+                        static_cast<unsigned long long>(s.several_targets), static_cast<unsigned long long>(s.targets_outside),
+                        static_cast<unsigned long long>(s.targets_no_function), static_cast<unsigned long long>(s.targets_no_branch), unreached,
+                        s.targets_path.c_str());
         }
     }
     if (!o.cache_dir.empty()) {

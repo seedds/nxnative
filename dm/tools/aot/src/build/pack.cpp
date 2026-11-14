@@ -776,6 +776,9 @@ struct Common {
     // and whether they weigh the code of the functions at H and H+ (with a profile, unless the test switch NXAOT_PROFILE_WEIGHTS=0 says not)
     std::map<uint64_t, uint64_t> samples;
     bool weights = false;
+    // The hot indirect targets (design 12; README.md, "Hot indirect targets"): the guarded sites, site -> target (module offsets), from the targets file beside the profile
+    // (TargetsFromProfile); empty without one, and with the test switch NXAOT_PROFILE_TARGETS=0
+    std::map<uint64_t, uint64_t> guards;
 
     std::vector<nxaot_gate_site> SitesOf(uint64_t entry) const {
         const auto it = sites.find(entry);
@@ -826,6 +829,7 @@ struct UnitStats {
     // The sample profile's weights (WeighFunction): the functions weighed, their branches, entry counts and call sites given counts; the
     // functions (or parts) with samples profi found no flow for
     uint64_t weighted = 0, weighted_branches = 0, entry_counts = 0, weighted_calls = 0, no_flow = 0;
+    uint64_t guarded = 0;  // indirect sites lowered with a guard (the hot indirect targets: Common::guards)
     double t_lift = 0, t_verify = 0, t_opt = 0, t_codegen = 0;
     std::vector<std::string> notes;
     // --isel-misses: FastISel's misses by kind (IselMissKind): how many, and the IR instructions they handed to SelectionDAG; not cached
@@ -840,6 +844,9 @@ struct UnitStats {
         if (weighted || no_flow) {  // a unit with samples to weigh by only: the facts of the others are as before
             f.counts.insert({{"weighted", weighted}, {"weighted_branches", weighted_branches}, {"entry_counts", entry_counts},
                              {"weighted_calls", weighted_calls}, {"no_flow", no_flow}});
+        }
+        if (guarded) {  // a unit with guarded sites only: the facts of the others are as before
+            f.counts["guarded"] = guarded;
         }
         f.notes = notes;
         return f;
@@ -869,6 +876,7 @@ struct UnitStats {
         u.entry_counts = get("entry_counts");
         u.weighted_calls = get("weighted_calls");
         u.no_flow = get("no_flow");
+        u.guarded = get("guarded");
         u.notes = f.notes;
         return u;
     }
@@ -2247,6 +2255,10 @@ bool CompileUnit(const Common& c, llvm::TargetMachine& tm, const Unit& u, std::s
             region.extra.emplace_back(c.image.aux_off, c.image.aux_off + c.image.aux_size);  // the frame step's stubs (design 1.1)
         }
         region.max_blocks = size_t{1} << 20;
+        // Its guarded indirect sites (the hot indirect targets: Common::guards, TargetsFromProfile): those in the range it lifts
+        for (auto g = c.guards.lower_bound(region.lo); g != c.guards.end() && g->first < region.hi; ++g) {
+            fp.guarded.emplace(g->first, g->second);
+        }
         lo.plan = &fp;
         const module::Image& image = c.image;
         const uint64_t code_lo = region.lo, code_hi = region.hi;
@@ -2290,6 +2302,7 @@ bool CompileUnit(const Common& c, llvm::TargetMachine& tm, const Unit& u, std::s
         st->svcs += l.svcs;
         st->traps += l.traps;
         st->splits += l.splits;
+        st->guarded += l.guarded.size();
         if (!l.function) {
             // Refused (an opcode the lowering does not cover, an internal error): a body that hands the function to the JIT fallback (section 11,
             // case 4), so that the rest of the module still runs: what it is passed to the block, the JIT from its entry until it returns to lr,
@@ -3110,6 +3123,19 @@ std::string UnitKey(const Common& c, uint64_t entry) {
         }
         k.Add("samples", list);
     }
+    // Its guarded indirect sites (the hot indirect targets: Common::guards; README.md, "Hot indirect targets"): each site, its target and the target's convention facts (its
+    // direct call's signature, stores and reloads), and only for a function with some, so that the keys of a pack without a targets file (or with NXAOT_PROFILE_TARGETS=0),
+    // and of the functions with no guarded site, are as before. A target that changes at a site outside the unit's functions changes nothing in it
+    list.clear();
+    for (auto it = c.guards.lower_bound(entry); it != c.guards.end() && it->first < ff.limit; ++it) {
+        const FnFacts& tf = c.plan.fns.at(it->second);
+        list += std::to_string(it->first) + ":" + std::to_string(it->second) + ":" + std::to_string(tf.pass.x) + "," + std::to_string(tf.pass.v) + "," +
+                std::to_string(tf.pass.sp) + "/" + std::to_string(tf.writes.x) + "," + std::to_string(tf.writes.v) + "," + std::to_string(tf.writes.sp) + "," +
+                std::to_string(tf.writes.nzcv) + "/" + std::to_string(tf.rv) + "/" + std::to_string(tf.returns) + ";";
+    }
+    if (!list.empty()) {
+        k.Add("targets", list);
+    }
     return k.Hex();
 }
 
@@ -3422,6 +3448,114 @@ bool TiersFromProfile(const BuildOptions& o, const Plan& plan, std::map<uint64_t
     return true;
 }
 
+// The hot indirect targets (design 12's "hot indirect targets"; README.md, "Hot indirect targets"): the targets file beside the profile, <folder>/<module>.targets.tsv for
+// --profile <folder>/<module>.tsv (the host writes both at exit with DM_AOT_PROFILE: dm/host/aot_profile.c, dm/host/aot_targets.c): '#' lines, then `0x<site> 0x<target>
+// <count>` per indirect call or branch site and target its inline cache was bound to (module offsets; the count: the dispatcher's binds there). A site gets a guard
+// (Common::guards; the lifter's FnCallGuarded and FnTailIndirect) when
+//   - it lies in a function at tier H or H+ (TierOf: with a profile, a sampled function, or in the max mode any),
+//   - one target dominates it: the only one, or at least 90 % of the site's counts,
+//   - its word is a blr (a call) or a br other than br x30 (a tail call; br x30 returns, section 3.3), the two the inline cache serves,
+//   - the target is a function of the module (Plan::fns) and, for a call, one that returns (FnFacts::returns: what the code after a direct call to it assumes).
+// No file: nothing (the pack is the one without; the log says so). The test switch NXAOT_PROFILE_TARGETS=0 reads nothing. Deterministic: the rows as a map, the rule per site.
+// A malformed row stops the build, as one of the profile does
+std::string TargetsPathOf(const std::string& profile) {
+    constexpr std::string_view ext = ".tsv";
+    const bool tsv = profile.size() > ext.size() && profile.compare(profile.size() - ext.size(), ext.size(), ext) == 0;
+    return (tsv ? profile.substr(0, profile.size() - ext.size()) : profile) + ".targets.tsv";
+}
+
+bool TargetsFromProfile(Common* c, BuildStats* s, std::string* error) {
+    const BuildOptions& o = c->o;
+    if (o.profile_path.empty()) {
+        return true;
+    }
+    const char* sw = std::getenv("NXAOT_PROFILE_TARGETS");
+    if (sw && std::string_view(sw) == "0") {
+        s->targets_state = BuildStats::TargetsState::Off;
+        return true;
+    }
+    const std::string path = TargetsPathOf(o.profile_path);
+    s->targets_path = path;
+    std::ifstream in{path};
+    if (!in) {
+        s->targets_state = BuildStats::TargetsState::None;
+        return true;
+    }
+    s->targets_state = BuildStats::TargetsState::Read;
+    std::map<uint64_t, std::map<uint64_t, uint64_t>> by_site;  // site -> target -> count
+    std::string line;
+    unsigned number = 0;
+    while (std::getline(in, line)) {
+        ++number;
+        const size_t hash = line.find('#');
+        if (hash != std::string::npos) line.resize(hash);
+        std::replace(line.begin(), line.end(), '\t', ' ');
+        llvm::SmallVector<llvm::StringRef, 4> pieces, f;
+        llvm::StringRef(line).split(pieces, ' ', -1, false);
+        for (const llvm::StringRef p : pieces) {
+            if (!p.trim().empty()) f.push_back(p);  // a '\r' of a line ending is no column
+        }
+        if (f.empty()) continue;
+        if (f.size() != 3) {
+            *error = path + ":" + std::to_string(number) + ": not `0x<site> 0x<target> <count>`";
+            return false;
+        }
+        llvm::StringRef site_text = f[0].trim(), target_text = f[1].trim(), count_text = f[2].trim();
+        site_text.consume_front_insensitive("0x");
+        target_text.consume_front_insensitive("0x");
+        uint64_t site = 0, target = 0, count = 0;
+        if (site_text.getAsInteger(16, site) || target_text.getAsInteger(16, target)) {
+            *error = path + ":" + std::to_string(number) + ": the site or the target is no hexadecimal number";
+            return false;
+        }
+        if (count_text.getAsInteger(10, count)) {
+            *error = path + ":" + std::to_string(number) + ": the count is no decimal number";
+            return false;
+        }
+        if (count) by_site[site][target] += count;
+    }
+    for (const auto& [site, targets] : by_site) {
+        ++s->target_sites;
+        const auto f = c->plan.fns.upper_bound(site);
+        if (f == c->plan.fns.begin() || site >= std::prev(f)->second.limit) {
+            ++s->targets_outside;  // in no function (the aux region's stubs, code discovery did not find)
+            continue;
+        }
+        const Tier t = c->TierOf(std::prev(f)->first);
+        if (t != Tier::H && t != Tier::HPlus) {
+            ++s->targets_outside;
+            continue;
+        }
+        uint64_t total = 0, best = 0, to = 0;
+        for (const auto& [target, n] : targets) {
+            total += n;
+            if (n > best) {
+                best = n;
+                to = target;
+            }
+        }
+        if (static_cast<unsigned __int128>(best) * 10 < static_cast<unsigned __int128>(total) * 9) {
+            ++s->several_targets;
+            continue;
+        }
+        const std::optional<uint32_t> w = c->image.InCode(site) ? c->image.Word(site) : std::nullopt;
+        const bool call = w && (*w & 0xFFFFFC1Fu) == 0xD63F0000u;
+        const bool tail = w && (*w & 0xFFFFFC1Fu) == 0xD61F0000u && ((*w >> 5) & 31) != 30;
+        if (!call && !tail) {
+            ++s->targets_no_branch;
+            continue;
+        }
+        const auto tf = c->plan.fns.find(to);
+        if (tf == c->plan.fns.end() || (call && !tf->second.returns)) {
+            ++s->targets_no_function;
+            continue;
+        }
+        c->guards.emplace(site, to);
+    }
+    s->guard_planned = c->guards.size();
+    return true;
+}
+
 // Gap code (design 1.3 "Coverage" and 9.3, whose tier C is for "gap code, and functions the profile never sampled"; README.md, "Gap code at
 // tier C"): a function whose only source is discovery's gap sweep (analysis::IsGapCode: provenance exactly `gap`) is code nothing names. By
 // default it takes its mode's tier as any other function: measured, tier C for it bought 2 % of a pack's time for a pack 13 to 15 % larger and
@@ -3651,7 +3785,7 @@ bool BuildObjects(const module::Image& image, const BuildOptions& o, const std::
     // The gates (design 1.1): the manifest's obs and spin rows the functions' code holds are served (the units call them, CompileUnit checks
     // it); a row no discovered code holds is not, and the host, which checks every row against the descriptor, says so as well
     Common c{image, o, d, plan, conv, Sanitize(image.name), fpsr, tm0->getTargetTriple().str(), s.cpu, s.features, TargetOf(*tm0), "",
-             GatesOf(image), {}, {}, {}, {}, {}, {}, false};
+             GatesOf(image), {}, {}, {}, {}, {}, {}, false, {}};
     if (o.split) {
         for (const auto& [entry, ff] : plan.fns) {
             std::vector<Part> parts = SplitParts(d.functions.at(entry), ff, o.split_above);
@@ -3674,6 +3808,10 @@ bool BuildObjects(const module::Image& image, const BuildOptions& o, const std::
     }
     GapTiers(o, d, plan, &c.tiers, &s);
     for (const auto& [entry, ff] : plan.fns) s.entry_only_functions += c.SampledAtEntryOnly(entry);
+    // The hot indirect targets beside the profile (README.md, "Hot indirect targets"): the guarded sites, by the functions' final tiers
+    if (!TargetsFromProfile(&c, &s, error)) {
+        return false;
+    }
     if (!o.tiers_path.empty() && !WriteTiers(o.tiers_path, c, error)) {
         return false;
     }
@@ -3963,6 +4101,7 @@ bool BuildObjects(const module::Image& image, const BuildOptions& o, const std::
         s.entry_counts += u.entry_counts;
         s.weighted_calls += u.weighted_calls;
         s.no_flow_functions += u.no_flow;
+        s.guarded_sites += u.guarded;
         s.refused += u.refused;
         s.lines_lost += u.lines_lost;
         s.spills += u.spills;

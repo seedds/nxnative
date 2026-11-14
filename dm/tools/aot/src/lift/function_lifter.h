@@ -330,6 +330,11 @@ public:
     void FnTrap(Value* pc, uint32_t reason);
     void FnSvc(Value* number, Value* next_pc);
     Value* FnDispatch(Value* target, uint64_t site);  // the inline cache: the native standard entry of a guest address
+    // A guarded site (FunctionPlan::guarded, design 12's hot indirect targets): the view of the target its guard calls directly, null when it has none (or, for a call,
+    // when that target does not return)
+    const CalleeView* Guarded(uint64_t site, bool call) const;
+    void FnCallGuarded(Value* target, uint64_t call_pc, uint64_t to, const CalleeView& c);  // blr: the compare, the direct call, the inline cache
+    std::set<uint64_t> guarded_sites;                 // the sites lowered with a guard (Lifted::guarded)
     llvm::Value* RetValue();                          // {x0, x1, v0..v3} of the current registers (poison outside self.rv)
     // The JIT fallback (section 11): a call or tail call to a target that is no compiled entry goes through plan->jit_entry; a continuation the
     // compiled code cannot run (FPCR away from the specialisation, an untranslated encoding, code that runs into no entry) is handed to

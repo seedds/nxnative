@@ -1,0 +1,34 @@
+# nxaot targets: the fixture of CTest profile_targets (tests/test_profile_targets.py; README.md, "Hot indirect targets"), beside profile_targets.tsv, in the form the host
+# writes (dm/host/aot_targets.c), written by hand from fnptr.c and fnptr-gcc.nro's words and symbols (the test checks every row against them), and row for row what
+# dm/host/tests/t_aot_targets.c records from one run of the corpus pack: one session's binds, the dispatcher binding a site's cache once per switch of target
+# nxaot targets: what the x86-64 engine's inline caches of indirect calls and branches were bound to (dm/host/aot_targets.c, DM_AOT_PROFILE); nxaot build --profile <module>.tsv reads it beside the profile
+# module fnptr-gcc, build ID none, image SHA-256 9ed219b145336d6f1cf5a93a4288ae127c18d0ebd1086e9e1baf8859497334da
+# pack /packs/fnptr-gcc.so
+# 11 sites, 26 targets, 40 binds; 11 of the sites this session, the rest from earlier sessions of this image
+# <site module offset> <target module offset> <binds>: the blr or br, the function its inline cache was bound to, how many times the dispatcher bound it there (once per cache for a site with one target, once per switch back to it for a site with several: switches, not calls)
+0x434 0x1840 1
+0x1598 0xe0 1
+0x1598 0x100 1
+0x1598 0x120 1
+0x1608 0x1ae0 1
+0x1904 0x17a0 1
+0x1904 0x17b0 1
+0x1904 0x17c0 1
+0x1984 0x1690 2
+0x1984 0x16d0 1
+0x1984 0x1720 2
+0x1998 0x16a0 2
+0x1998 0x16e0 1
+0x1998 0x1730 2
+0x19bc 0x16b0 2
+0x19bc 0x1700 1
+0x19bc 0x1740 2
+0x1a2c 0x1760 2
+0x1a2c 0x1770 2
+0x1a2c 0x1780 3
+0x1a2c 0x1790 2
+0x1a2c 0x1860 3
+0x1a2c 0x1880 2
+0x1a64 0x1820 1
+0x1a7c 0x1820 1
+0x1a90 0x1820 1

@@ -184,9 +184,9 @@ add_custom_command(OUTPUT ${HLE_THUNKS_C}
     COMMENT "host-call thunks from the HLE entries" VERBATIM)
 # The x86-64 execution engine (docs/design/aot-recompiler.md; dm/host/aot.h): the run time of a pack's recompiled code in the host. Its arena below 2^39, module
 # images and packs (aot_arena.c), what a pack imports and dm_guest_call (aot_run.c), guest threads (aot_thread.c), faults (aot_fault.c) and the floating-point
-# helpers (aot_fp.c), and the sampler that writes nxaot's profiles (aot_profile.c, DM_AOT_PROFILE). A pack's library resolves those imports against the executable that links them
-# (ENABLE_EXPORTS)
-set(AOT_SRC aot_hostfn.c aot_arena.c aot_run.c aot_thread.c aot_fault.c aot_fp.c aot_profile.c)
+# helpers (aot_fp.c), the sampler that writes nxaot's profiles (aot_profile.c, DM_AOT_PROFILE) and beside them the targets the inline caches were bound to (aot_targets.c, design
+# 12's hot indirect targets). A pack's library resolves those imports against the executable that links them (ENABLE_EXPORTS)
+set(AOT_SRC aot_hostfn.c aot_arena.c aot_run.c aot_thread.c aot_fault.c aot_fp.c aot_profile.c aot_targets.c)
 add_library(nxhost STATIC ${NXHOST_SRC} ${AOT_SRC} ${HLE_THUNKS_C})
 add_dependencies(nxhost game_profile)
 target_compile_options(nxhost PRIVATE ${HOST_FLAGS})
@@ -689,6 +689,18 @@ if(NXHOST_JIT)
     target_link_libraries(t_aot_host PRIVATE nxhost_jit)
 endif()
 set_tests_properties(t_aot_host PROPERTIES TIMEOUT 600)
+# The hot indirect targets of design 12 (t_aot_targets.c; aot_targets.c): fnptr's corpus packs run with DM_AOT_PROFILE write <module>.targets.tsv, a row per inline-cache site
+# and the target it was bound to, as the program's source says (with_cleanup's calls through work_ptr, the vtables, the init and fini arrays), merged across sessions of the
+# image; a host function's target is no row; with nxaot (the environment variable NXAOT) the file round-trips through nxaot build --profile into guarded direct calls that
+# print the program's lines and bind nothing at their sites. The same packs as t_aot_host (without them, a note and a pass); its one host function has a thunk of its own
+host_test(t_aot_targets SOURCES t_aot_targets.c t_aot_host_stub.c ${AOT_TEST_SRC} PROFILE INCLUDES ${REPO}/dm/tools/aot/include)
+target_compile_definitions(t_aot_targets PRIVATE "T_AOT_CORPUS=\"${REPO}/dm/tools/aot/corpus\"" "T_AOT_PACKS=\"${NXAOT_PACKS}\"")
+set_target_properties(t_aot_targets PROPERTIES ENABLE_EXPORTS ON)   # a pack's library resolves its imports against it
+if(NXHOST_JIT)
+    target_compile_definitions(t_aot_targets PRIVATE NXHOST_JIT=1)
+    target_link_libraries(t_aot_targets PRIVATE nxhost_jit)
+endif()
+set_tests_properties(t_aot_targets PROPERTIES TIMEOUT 300)
 # A game module through the engine's game-module path (t_aot_module.c): the synthetic module of dm/tools/tests/aot_synth.py (no game files), its behaviour image and
 # manifest as patch_nso.py --aot writes them, packed by build_packs.sh into <packs>/module; loader.c's load_modules maps it, registers its gates, binds its imports into
 # its GOT (a host function of t_aot_module_entries.c, an unimplemented import) and loads its pack; the module runs through dm_aot_run, and its SetHeapSize reaches the

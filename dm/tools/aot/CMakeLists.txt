@@ -297,3 +297,11 @@ set_tests_properties(tables PROPERTIES TIMEOUT 900)
 add_test(NAME profile_weights COMMAND Python3::Interpreter "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_profile_weights.py" --nxaot $<TARGET_FILE:nxaot>
          --nxaot-host $<TARGET_FILE:nxaot_host> --work "${CMAKE_CURRENT_BINARY_DIR}/profile_weights")
 set_tests_properties(profile_weights PROPERTIES TIMEOUT 900)
+# The hot indirect targets (aot-recompiler.md 4 and 12; README.md, "Hot indirect targets"): the targets file beside a profile of fnptr-gcc
+# (tests/profile_targets.tsv and tests/profile_targets.targets.tsv) guards the indirect sites at tier H with a dominant target (a compare, a direct
+# call or tail call of the target's body, the inline cache otherwise): the log against the rule, the guards in the lifted IR, the same pack with 1 and
+# 4 workers and twice, NXAOT_PROFILE_TARGETS=0 the pack of the profile alone, the 90 % boundary, the cache missing only the units whose guards changed,
+# the guarded packs (balanced, max, ghccc, guards that miss) printing the expected output
+add_test(NAME profile_targets COMMAND Python3::Interpreter "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_profile_targets.py" --nxaot $<TARGET_FILE:nxaot>
+         --nxaot-host $<TARGET_FILE:nxaot_host> --work "${CMAKE_CURRENT_BINARY_DIR}/profile_targets")
+set_tests_properties(profile_targets PROPERTIES TIMEOUT 900)

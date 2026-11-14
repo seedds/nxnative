@@ -63,7 +63,7 @@ docker build -t nxnative-aot -f docker/Dockerfile.aot docker
 # differential test, the JIT fallback's three modes, the threaded programs, the safepoint pause test, the pack caches, the indirect calls'
 # reloads and the standard entries' signature, the line tables, functions split for size, tiers by profile, Windows packs, the analysis on threads,
 # the differential test at tier C, the host's JIT misses as discovery's input, the workers bounded by memory, gap code at tier C, the tables'
-# object through MC, the sample profile at tier H); --tmpfs
+# object through MC, the sample profile at tier H, the hot indirect targets); --tmpfs
 # /src/build:exec,uid=$(id -u),gid=$(id -g) keeps the build tree in memory on a machine short of disk
 docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -v "$(pwd):/src" -w /src nxnative-aot sh -c \
   'cmake -S dm/tools/aot -B build/aot -G Ninja -DCMAKE_BUILD_TYPE=Release && cmake --build build/aot && ctest --test-dir build/aot --output-on-failure'
@@ -96,7 +96,8 @@ builds were loading (cache 16 s). Phase 5d's `corpus_funcdiff_c` (23 tests): 94 
 C"'s `gaps` (26 tests): 48 s with the tier rule alone, 84 s since it builds the module both ways (the default and `--gap-tier C`); the whole
 run 811 s, one test at a time, with another agent's builds loading the machine at times. "The tables' object through MC"'s `tables` (27
 tests): 33 s; the whole run 948 s, the machine loaded by other builds. "The sample profile at tier H"'s `profile_weights` (28 tests): 5 s;
-the whole run 888 s, one test at a time.
+the whole run 888 s, one test at a time. "Hot indirect targets"'s `profile_targets` (29 tests): 4 s; the whole run 981 s, one test at a
+time, the machine loaded by another agent's builds and dm/host's CTest (vectors 277 s).
 
 ## Running the harness and the census
 
@@ -1548,7 +1549,8 @@ a function with samples at no instruction (its host calls and SVCs, or a pack wi
 function's rows after a comment line `# function 0x<entry> <samples> <rows>` ("The sampler's positions", the file); the NSP
 script passes `<NSP folder>/<id>-work/profile/<module>.tsv` to the module's next pack (docs/development.md, the x86 packing section;
 `--no-profile` ignores it); beside it the host writes the JIT fallback's misses, `<module>.misses.tsv`, which `--misses` takes ("JIT
-misses"). Design 12's path (`dm/games/<id>/aot_profile/<build ID>.tsv`) is not where it writes, its rows are design 12's sampled instruction
+misses"), and the targets its inline caches were bound to, `<module>.targets.tsv`, which `--profile` reads beside the profile ("Hot indirect
+targets"). Design 12's path (`dm/games/<id>/aot_profile/<build ID>.tsv`) is not where it writes, its rows are design 12's sampled instruction
 offsets. CTest `t_aot_module` (dm/host) checks a written profile's hot function, and `profile` below builds the synthetic module with a
 profile in the host's earlier form. Here the counts only chose the tier; since, the samples' positions inside a function weigh its code at H
 and H+ (the design's "the sample profile" of tier H: "The sample profile at tier H" below); a function sampled at its entry only still has
@@ -2926,8 +2928,7 @@ its unit only), and the packs' output. dm/host's tests with this binary's corpus
 - **LLVM's sample loader** (`SampleProfileLoaderPass` with a profile file, design 12's "an LLVM sample profile"): not taken, as the direct
   metadata measured a gain where the code branches and none to lose elsewhere; it would add a profile file per unit, guest offsets as line
   offsets from each function's line, and its inline replay, which a profile of guest code has no inline frames for.
-- **The hot indirect targets** of design 12 (an inline cache's misses per call site with their targets): not recorded, so no value profile on
-  indirect calls and no devirtualisation.
+- **The hot indirect targets** of design 12: recorded and used since ("Hot indirect targets" below).
 - **The entry block's samples** include those of the prologue (its instructions carry the entry's line): a short function's entry block
   looks hotter than its body; small, and left.
 - **Function ordering by heat** (`.text.hot`): every function stays in `.text` (above), H+'s open item.
@@ -2999,6 +3000,115 @@ counts for its function, as before, and at the guest instruction whose code hold
   `--nxaot` / `NXAOT` the round trip (`nxaot build --profile` weighs functions, `NXAOT_PROFILE_WEIGHTS=0` gives the pack of the entry form);
   `t_aot_module`: synth_hot's samples in its loop. Windows: the sampler thread's path calls the same lookup on the suspended thread's `Rip`
   and the DLL exports the table (`/export:nxaot_positions`); not run here.
+
+### Hot indirect targets
+
+Design 12's profile holds "hot indirect targets" beside the sampled offsets, and section 4 gives them their use: a hot indirect site with a dominant
+target gets a guarded direct call. An indirect call through the inline cache costs two loads, a compare and an indirect call, and LLVM cannot inline
+across it; one that always reaches the same function (a vtable slot with one implementation, a callback, a pointer set once) becomes a compare with a
+constant and a direct call, which LLVM may inline when the target is in the same unit. Done for tiers H and H+, from what the host records.
+
+- **What a cache holds, and what is recorded.** A site's inline cache is one slot (a global of its function's unit, `nxaot.ic.<function>.<site>`:
+  [src/lift/lower_calls.cpp](src/lift/lower_calls.cpp) `FnDispatch`) pointing at an immutable `{guest, native}` descriptor, and nothing else: no
+  count of hits, which stay in the pack's code. The host sees the misses: `nxaot_rt_dispatch(st, target, slot, site)` with the site's module offset
+  ([dm/host/aot_run.c](../../host/aot_run.c)), once whenever the slot's descriptor is not the target's. Under `DM_AOT_PROFILE` each miss is noted
+  ([dm/host/aot_targets.c](../../host/aot_targets.c) `dm_aot_target_note`: a table of pack, site, target and kind under one lock, on the miss path
+  only), and the number written is the binds: how many times the dispatcher bound the site's cache to that target. That is 1 per cache for a site
+  that only ever reaches one target, and for a site with several one per switch back to it (the targets A, B, A, A give A 2, B 1): switches, not
+  calls. A count of calls needs a counter on the hit path, an increment at every indirect call of every pack (and a pack format that holds the
+  counters); none was added, as nothing measured it free. So the rule's 90 % below acts on switches: in practice a site is guarded when its cache
+  was only ever bound to one target, or to one far more often than to the others.
+- **The file.** At exit, beside the profile, `<folder>/<module>.targets.tsv` per module whose caches were bound to its own functions: the header of
+  the profile's and the misses file's (`# module <name>, build ID <id>, image SHA-256 <hex>`, the pack, the totals), then `0x<site> 0x<target>
+  <binds>` by site and target (module offsets). Not written, counted in the log's `aot: targets: this session <p> (site, target) pairs bound <b> times
+  in their own module's code, <f> files; not written: <x> misses bound to another pack's code, <y> handed to another pack of another signature, <h> to
+  host functions, <j> to addresses with no compiled entry (the misses file)`: a target in another pack (bound, but its offset is another module's), a
+  host function (the host-function page, the stub page), an address with no compiled entry (the misses file has it). The file is merged across
+  sessions of the same image, as the misses file is: a guarded pack's hits never reach the dispatcher, so a session recorded on it binds none of its
+  guarded targets, and a file rewritten per session would take the guards away from the pack after it; another image's file is replaced. Written by
+  an atexit handler registered at the first note, or earlier by `dm_aot_targets_write` (hle_lifecycle.c's graceful exit, beside
+  `dm_aot_profile_write`, as `_exit` runs no atexit handler). fnptr-gcc's rows from one run of its corpus pack under `DM_AOT_PROFILE` (dm/host's
+  `t_aot_targets`; 11 sites, 26 rows, 40 binds, the dispatcher's 40 misses; the fixture below, written by hand before any build, has the same 26
+  rows): `0x1a64 0x1820 1`, `0x1a7c 0x1820 1`, `0x1a90 0x1820 1` (with_cleanup's three calls through `work_ptr`, all to `work`), `0x434 0x1840 1`
+  (main's call through `hidden_ptr`), `0x1608 0x1ae0 1` (rt_exit's fini array), `0x1984 0x1690 2`, `0x1984 0x16d0 1`, `0x1984 0x1720 2`
+  (shape_total's area slot over rect, tri, sq, rect, sq), `0x1a2c 0x1780 3` and five more (apply_op's tail call over the six operations).
+  fnptr-clang: 10 sites, 23 rows, 37 binds (clang specializes `fold` per callback, `fold.specialized.1` to `.3`, with the callback inlined: no
+  site there).
+- **The rule.** With `--profile <folder>/<module>.tsv`, nxaot reads `<folder>/<module>.targets.tsv` beside it when it is there (no option, no
+  packer change; [src/build/pack.cpp](src/build/pack.cpp) `TargetsFromProfile`). A site gets a guard when it lies in a function at tier H or H+
+  (with a profile, a sampled function; in the max mode every function), one target has at least 90 % of the site's counts (the only one, or
+  `10 × count ≥ 9 × total`; a tie goes to the lower offset), the site's word is a `blr` (a call) or a `br` other than `br x30` (a tail call; the two
+  the inline cache serves), and the target is a function of the module that, for a call, returns. The log: `aot: profile targets: <s> sites, <g>
+  guarded, <m> with several targets, not guarded, <o> outside tier H; <x> whose target is no function of the module or a call's that does not
+  return, <n> at no blr or br, <u> planned that no lifted code reaches (<file>)`, g counted by the lifter (cached units' from their facts); `aot:
+  profile targets: none (no <file>): no guarded calls` without a file, `aot: profile targets: off (NXAOT_PROFILE_TARGETS=0): no guarded calls` with
+  the test switch, which reads none.
+- **The code.** A guarded call ([src/lift/lower_calls.cpp](src/lift/lower_calls.cpp) `FnCallGuarded`): `icmp eq` of the computed address with
+  `base + target`, a branch with the inline cache's own weights (2^16 : 1) to `guard_hit_<site>_`, which calls the target's body as `bl` does (its
+  own signature, what it takes in host registers, its exact writes reloaded after it, the same pending check and resume points), or to
+  `guard_miss_<site>_`, the inline cache's call as before; both join before the block goes on. The successors' dirty sets were computed with the
+  indirect call's (FnDataflow), so the direct path then stores what it keeps newer than the block beyond what the indirect call keeps (a register
+  the target does not write but the union of indirect targets may), and FnDataflow counts those stores in what the function may leave in the block
+  (`restore_block`). A guarded tail call (`FnTailIndirect`): the same compare, then `musttail` of the target's body as `b` makes it, or the
+  inline cache's tail call; nothing joins. Gates, safepoint polls, the calling convention, the return table and the descriptor are unchanged: the
+  call site, its return address and its cache slot are the same.
+- **The cache key.** A function with guarded sites gets a `targets` field (each site, its target, the target's convention facts: what the direct
+  call depends on); the others none, so the keys of a pack without a targets file, with `NXAOT_PROFILE_TARGETS=0`, and of the functions without a
+  guarded site are as before (format still `nxaot-unit 4`). A unit's facts gain `guarded` only when it has some.
+- **Tests.** CTest `profile_targets` ([tests/test_profile_targets.py](tests/test_profile_targets.py), the fixture
+  [tests/profile_targets.tsv](tests/profile_targets.tsv) and [tests/profile_targets.targets.tsv](tests/profile_targets.targets.tsv): fnptr-gcc's
+  sites in the host's form, checked against the NRO's words and discovery; its rows are the host's own from a run, above), 31 checks: the log
+  against the rule (11 sites: 5 guarded at `0x434`, `0x1608`, `0x1a64`, `0x1a7c`, `0x1a90`, 5 with several targets, 1 in rt_init at tier C), the
+  guards in `--ir`, the same pack with 1 and 4 workers and twice, `NXAOT_PROFILE_TARGETS=0` the pack of the profile alone, the 90 % boundary (18
+  of 20 guarded, 17 of 19 not), the cache (cold 22 units; targets changed outside every guarded function hit all 22, a guarded site's target
+  changed or a second target added misses its unit only, 21 hits and 1 miss), and the guarded packs (balanced, max, ghccc, and guards that miss
+  on some calls) printing `fnptr.out` natively. dm/host's `t_aot_targets` ([dm/host/tests/t_aot_targets.c](../../host/tests/t_aot_targets.c)),
+  10 checks: fnptr-gcc and fnptr-clang from their corpus packs under `DM_AOT_PROFILE`, the rows the program's source implies, the binds adding up
+  to the dispatcher's misses (40 and 37), a second session doubling them (`merged with an earlier session's`), a host function's target giving no
+  row, and with `NXAOT` the round trip (`aot: profile targets: 11 sites, 5 guarded, 6 with several targets` for gcc, `10 sites, 5 guarded, 5 with
+  several targets` for clang, every site sampled; the guarded pack printing `fnptr.out` and binding nothing at its guarded sites, the others as
+  before).
+- **The rule on sites with several targets.** A site's binds count switches, so one that alternates between two targets has about as many of each
+  and is never guarded: fnptr-gcc's fixture with main's site given two targets of 5 binds each (`0x434 0x1840 5`, `0x434 0x1820 5`) logs `11
+  sites, 4 guarded, 6 with several targets` and its IR has no `guard_hit_434_`; shape_total's area site (`0x1984`: rect 2, tri 1, sq 2, the best
+  40 %) and apply_op's tail call (best 3 of 14) stay unguarded in every run above.
+- **Identity.** With no targets file beside the profile, and with no profile, the packs are the base's bytes: build_packs.sh's 42 corpus packs
+  (`.so` and `.dll`) from this binary and from 361d769's, the same SHA-256 every one; int_ops-gcc with `--profile tests/profile_weights.tsv` (`aot:
+  profile targets: none`) the same bytes; fnptr-gcc with the fixture's profile and `NXAOT_PROFILE_TARGETS=0` the bytes 361d769's binary gives
+  with the same profile.
+- **Measured.** [tests/measure_packs.py](tests/measure_packs.py) in the image, the build tree on tmpfs: A the guards (the targets file beside the
+  profile), B `NXAOT_PROFILE_TARGETS=0` (the same profile without them), 6 rounds, 4 layouts, pinned to CPU 3, the machine's load 3 to 9 (other
+  agents' builds). fnptr's profiles: the host's targets file of one run and a sample at each of its sites (the program runs 7 µs, too short for the
+  sampler; the pair t_aot_targets's round trip writes), fastest of 20,000; fnptr has no rounds symbol and nxaot_host prints its times to the
+  microsecond, so a change under about 15 % cannot show:
+
+  | Program | A | B | change | layout spread A / B | rounds spread | .text A -> B | bytes A -> B | pack time A -> B | pack peak MiB A -> B |
+  |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+  | fnptr-gcc | 7.0 us | 7.0 us | +0.00 % | 0.00 / 0.00 % | 28.57 % | 123,012 -> 121,476 | 182,128 -> 180,600 | 0.20 -> 0.22 s | 88 -> 87 |
+  | fnptr-clang | 6.5 us | 7.0 us | +7.69 % | 7.69 / 7.14 % | 36.26 % | 103,712 -> 101,824 | 158,736 -> 156,736 | 0.20 -> 0.21 s | 85 -> 84 |
+
+  Both "within noise"; over the 24 samples of each variant, fnptr-gcc 23 at 7 µs with the guards and 20 without, fnptr-clang 10 at 6 µs with them
+  and 5 without (the rest 7 µs, and 1 to 5 outliers at 11 µs). The 4,000-function benchmark (`gen_bench.py --functions 4000`, seed 1), recorded
+  by dm/host's runner on its tier W pack (`t_aot_targets --run <pack> bench.nro --write` under `DM_AOT_PROFILE`): 2,007 samples, 1,853 of them in
+  the JIT fallback (its misses file: 5,124 addresses of non-local transfers to continuations with no native frame, 131 indirect) and 3 in
+  compiled code, at the entries of 2 functions; 140 sites, 394 rows, 394 binds, 53 sites with one target (a pack built with `--misses` from it
+  still ran 1,738 of 1,860 samples in the JIT fallback). With that profile (2 functions at H, 4,086 at C) every site lies outside tier H:
+  `140 sites, 0 guarded`, and the packs are the same bytes (17,261,688; not run). In the max mode (every function at H or H+) `140 sites, 53
+  guarded, 87 with several targets`, fastest of 3:
+
+  | Program | A | B | change | layout spread A / B | rounds spread | .text A -> B | bytes A -> B | pack time A -> B | pack peak MiB A -> B |
+  |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+  | bench (max mode) | 1.505 s | 1.505 s | +0.06 % | 0.97 / 1.37 % | 3.86 % | 5,960,496 -> 5,946,032 | 9,261,696 -> 9,243,800 | 21.90 -> 21.62 s | 272 -> 268 |
+
+  "within noise" (most of its time is the JIT fallback). A pack with guards is 0.2 to 1.9 % larger in `.text` (both paths of each guarded call
+  are kept); its pack time is within the noise (fnptr 0.20 s against 0.21 and 0.22 s, the benchmark in the max mode 21.90 s against 21.62 s).
+- **The default.** No program measured is slower with the guards beyond the noise, so they stay on whenever a targets file lies beside the
+  profile, and `NXAOT_PROFILE_TARGETS=0` stays a test switch. What the numbers do not show is a gain: no program here spends its time in compiled
+  code behind a hot single-target indirect site (fnptr runs 7 µs, the benchmark's time is the JIT fallback's). That needs a game's profile, or a
+  corpus program with a rounds symbol around such calls.
+- **Not done here.** Windows: the recorder and the writer are the same C (`aot_targets.c`, `MoveFileExA` for the replace) and `t_aot_targets`
+  uses `_popen`, not run (no Windows runner here). Later steps outside nxaot and the host: the launcher's "better pack" rule (a targets file that
+  would guard more sites) and the packer's `made` rows (a digest of the targets file the pack took).
 
 ## The lock file
 

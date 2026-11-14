@@ -13,6 +13,7 @@ void dm_host_shutdown(const char *why) {
     hlecount_flush();                               // DM_HLECOUNT: _exit does not run atexit, write a copy here
 #if !DM_NATIVE_EXEC
     { int dm_aot_profile_write(void); dm_aot_profile_write(); }   // DM_AOT_PROFILE (aot_profile.c): the sample profile too, for the same reason; nothing without the switch
+    { int dm_aot_targets_write(void); dm_aot_targets_write(); }   // and beside it the inline caches' targets (aot_targets.c, design 12's hot indirect targets)
 #endif
     dm_audio_suspend(1);
     dm_gfx_suspend(1);

@@ -314,6 +314,11 @@ void FunctionLifter::FnDataflow() {
             }
         } else if (e.kind == EndKind::Blr) {
             stored = stored | CallStores(at_end, plan->indirect);
+            if (const CalleeView* g = Guarded(A64::LocationDescriptor{block.EndLocation()}.PC() - 4, true)) {
+                // A guarded call (FnCallGuarded): its direct path stores what bl to the target stores, then what it keeps newer than the block beyond what the
+                // indirect call keeps (the successors were computed with the indirect call's)
+                stored = stored | CallStores(at_end, *g) | (after_call(at_end, *g) - after_call(at_end, plan->indirect));
+            }
         }
     }
     restore_block = (stored & written) - plan->self.writes;
@@ -840,8 +845,59 @@ void FunctionLifter::FnCallDirect(uint64_t target, uint64_t call_pc) {
 
 void FunctionLifter::FnCallIndirect(Value* target, uint64_t call_pc) {
     ++stats->indirect_calls;
+    if (const CalleeView* g = Guarded(call_pc, true)) {
+        FnCallGuarded(target, call_pc, plan->guarded.at(call_pc), *g);
+        return;
+    }
     Value* fn = FnDispatch(target, call_pc);
     FnCall(plan->indirect, plan->conv.Type(C, plan->indirect.pass), fn, call_pc);
+    Goto(B.getInt64(cur_end));
+}
+
+// ---- Guarded indirect sites (design 12's hot indirect targets: FunctionPlan::guarded; README.md, "Hot indirect targets") ----
+
+const CalleeView* FunctionLifter::Guarded(uint64_t site, bool call) const {
+    if (!plan || plan->guarded.empty() || !plan->callee) {
+        return nullptr;
+    }
+    const auto it = plan->guarded.find(site);
+    if (it == plan->guarded.end()) {
+        return nullptr;
+    }
+    const CalleeView* c = plan->callee(it->second);
+    return c && (!call || c->returns) ? c : nullptr;
+}
+
+// A blr whose profile names a dominant target `to`: the computed address against the target's (base + to), on a match a direct call of the target's body as bl makes
+// it (its own signature: what it takes in host registers, its exact writes reloaded after it, its own return registers; a real call that LLVM may inline when the
+// target is in this unit), anything else the inline cache's call as before. Both paths join before the call's block goes on, with the dirty set the indirect call
+// leaves (FnDataflow's after_call over plan->indirect: the successors' dirty sets were computed with it); the direct path first stores what it keeps newer than the
+// block beyond that set (a register the target does not write but the union of indirect targets may: the indirect path reloads it, the direct path keeps it in SSA),
+// which FnDataflow adds to what the function may leave in the block (restore_block). The pending checks, resume points and return address are the call site's on
+// both paths, so the return table and the non-local transfers (section 3.3) are unchanged; the guard's branch carries the inline cache's own weights (2^16 : 1)
+void FunctionLifter::FnCallGuarded(Value* target, uint64_t call_pc, uint64_t to, const CalleeView& c) {
+    guarded_sites.insert(call_pc);
+    const CalleeView& ind = plan->indirect;
+    const Regs before = cur_dirty;
+    const Regs after = ((before & (ind.pass | kSpLr)) - ind.writes) | Regs::X(kRetX) | Regs::V(ind.rv);
+    const std::string at = llvm::utohexstr(call_pc);
+    auto* hit = BasicBlock::Create(C, "guard_hit_" + at + "_", F);
+    auto* miss = BasicBlock::Create(C, "guard_miss_" + at + "_", F);
+    auto* join = BasicBlock::Create(C, "guard_join_" + at + "_", F);
+    llvm::MDBuilder md{C};
+    B.CreateCondBr(B.CreateICmpEQ(target, Rel(to)), hit, miss, md.createBranchWeights(1u << 16, 1));
+    B.SetInsertPoint(hit);
+    FnCall(c, c.fn->getFunctionType(), c.fn, call_pc);
+    if (!plan->correctness) {
+        StoreRegs(cur_dirty - after);
+    }
+    B.CreateBr(join);
+    B.SetInsertPoint(miss);
+    cur_dirty = before;
+    Value* fn = FnDispatch(target, call_pc);
+    FnCall(ind, plan->conv.Type(C, ind.pass), fn, call_pc);
+    B.CreateBr(join);
+    B.SetInsertPoint(join);
     Goto(B.getInt64(cur_end));
 }
 
@@ -874,6 +930,20 @@ void FunctionLifter::FnTailDirect(uint64_t target) {
 
 void FunctionLifter::FnTailIndirect(Value* target, uint64_t site) {
     ++stats->indirect_tails;
+    if (const CalleeView* g = Guarded(site, false)) {
+        // A guarded tail call (FunctionPlan::guarded, design 12's hot indirect targets): the computed address against the dominant target's, on a match a tail call of
+        // the target's body as b makes it (FnTailDirect: musttail between the convention's prototypes, which FnTailDirect already relies on), else the inline cache's
+        // tail call below. Neither path comes back, so nothing joins
+        guarded_sites.insert(site);
+        const std::string at = llvm::utohexstr(site);
+        auto* hit = BasicBlock::Create(C, "guard_hit_" + at + "_", F);
+        auto* miss = BasicBlock::Create(C, "guard_miss_" + at + "_", F);
+        llvm::MDBuilder md{C};
+        B.CreateCondBr(B.CreateICmpEQ(target, Rel(plan->guarded.at(site))), hit, miss, md.createBranchWeights(1u << 16, 1));
+        B.SetInsertPoint(hit);
+        FnTail(*g, g->fn->getFunctionType(), g->fn);
+        B.SetInsertPoint(miss);
+    }
     Value* fn = FnDispatch(target, site);
     FnTail(plan->indirect, plan->conv.Type(C, plan->indirect.pass), fn);
 }

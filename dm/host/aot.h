@@ -9,6 +9,7 @@
 //   aot_thread.c  a state block per guest thread, its native and alternate signal stacks (6.1), the live threads
 //   aot_fault.c   faults (5.4): the dirty-tracking hooks first, then (with the JIT) dynarmic's fastmem handler, then the report through the line table (3.5)
 //   aot_fp.c      the floating-point and AES helpers lifted code calls (dm/tools/aot/src/lift/runtime.h), in C
+//   aot_profile.c the sampler (DM_AOT_PROFILE) and its profile and misses files; aot_targets.c beside them, the targets the inline caches were bound to (design 12)
 // The JIT fallback is dynarmic (dm/tools/aot/src/rt/jit.cpp), built in only with the CMake option NXHOST_JIT (it needs C++20 and Boost's headers)
 #pragma once
 #include "dm.h"
@@ -386,6 +387,20 @@ _Atomic uint64_t *dm_aot_pack_samples(const dm_aot_pack *p);   // the sampler's 
 _Atomic uint32_t *dm_aot_pack_pos_samples(const dm_aot_pack *p, uint64_t *words);
 const module_t *dm_aot_pack_module(const dm_aot_pack *p);
 const char *dm_aot_pack_path(const dm_aot_pack *p);
+
+// ---------- The hot indirect targets (aot_targets.c; design 12; dm/tools/aot/README.md, "Hot indirect targets") ----------
+// With DM_AOT_PROFILE=<folder>, nxaot_rt_dispatch notes every inline-cache miss of a pack's indirect calls and branches (dm_aot_target_note): the site's module offset, the target, what
+// the dispatcher did with it. At exit (atexit, or dm_aot_targets_write before it: hle_lifecycle.c's graceful exit calls it beside dm_aot_profile_write) <folder>/<module>.targets.tsv
+// is written per module whose caches were bound to its own functions: '#' lines naming the module, its build ID, its image's SHA-256 and its pack (as the profile's), then
+// `0x<site> 0x<target> <binds>` per site and target (module offsets: the blr or br, the function its cache was bound to; binds: how many times the dispatcher bound that cache to
+// it: once per cache for a site with one target, once per switch back to it for a site with several; the caches keep no count of hits). Merged with an earlier session's file of the
+// same image (a guarded pack's hits never reach the dispatcher), another image's replaced. `nxaot build --profile <folder>/<module>.tsv` reads it beside the profile: a site at tier
+// H whose target dominates calls that target directly behind a compare (a guarded call). The kinds of a miss: bound to a standard entry of the caller's pack (the rows), bound to
+// another pack's, handed to another pack of another signature, a host function (the host-function page, the stub page), no compiled entry (the JIT fallback): only the first
+// written, the others counted in the log
+enum { DM_AOT_TARGET_BOUND, DM_AOT_TARGET_OTHER_PACK, DM_AOT_TARGET_HANDOVER, DM_AOT_TARGET_HOST, DM_AOT_TARGET_NOCODE };
+void dm_aot_target_note(const dm_aot_pack *caller, uint64_t site, uint64_t target, int kind);   // a miss at module offset site of caller's code; nothing without DM_AOT_PROFILE
+int dm_aot_targets_write(void);   // the files now (once: later calls and the atexit writer do nothing); 0 when written or nothing to write; -1 without DM_AOT_PROFILE, or on an error
 
 // ---------- The JIT fallback's misses (aot_run.c counts them, aot_profile.c writes them; design 1.3 and 11, dm/tools/aot/README.md "JIT misses") ----------
 // Every entry into the JIT fallback is counted per guest address and reason (aot_run.c note_jit): why the pack had no compiled code there. With DM_AOT_PROFILE=<folder> the

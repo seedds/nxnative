@@ -398,6 +398,7 @@ Lifted FunctionLifter::Run(const std::string& name) {
     out.function = F;
     out.dynarmic_issues.assign(issues.begin(), issues.end());
     out.gates.assign(gates_emitted.begin(), gates_emitted.end());
+    out.guarded.assign(guarded_sites.begin(), guarded_sites.end());
     return out;
 }
 

@@ -173,6 +173,11 @@ struct FunctionPlan {
     std::set<uint64_t> obs_gates;
     std::map<uint64_t, uint64_t> spin_gates;
     llvm::Function* rt_gate = nullptr;         // preserve_all void (ptr st, i64 site): nxaot_rt_gate (null when the module has no gate)
+    // Guarded indirect sites (design 12's hot indirect targets; src/build/pack.cpp, TargetsFromProfile), site -> target, module offsets: a blr, or a br the inline cache
+    // serves, whose profile names one dominant target, a function of the module (for a call, one that returns). The computed address is compared with the target's; a
+    // match calls (tail-calls) the target's body directly as bl (b) does, anything else takes the inline cache as before (lower_calls.cpp FnCallGuarded, FnTailIndirect).
+    // Empty: every indirect site as before
+    std::map<uint64_t, uint64_t> guarded;
     // A function split for size (design 9.3; src/build/pack.cpp, SplitParts): its code is parts, each an LLVM function of its own that the
     // others reach by tail calls through the state block. A part is entered with the block holding the whole register file, its arguments st,
     // the function's entry SP and lr, and in x0's argument (conv.Type(Regs{})'s fourth) the module offset of the block it starts at, one of
@@ -249,6 +254,7 @@ struct Lifted {
     size_t calls = 0, indirect_calls = 0, tail_calls = 0, indirect_tails = 0, returns = 0, svcs = 0, traps = 0;
     size_t splits = 0;                     // transfers to another part of a split function (FunctionPlan::part_of)
     std::vector<uint64_t> gates;           // the gate sites (FunctionPlan::obs_gates, spin_gates) the function's code calls, sorted, each once
+    std::vector<uint64_t> guarded;         // the sites lowered with a guard (FunctionPlan::guarded), sorted, each once
     // The guest blocks the function was lowered from (the sample profile at tier H, src/build/pack.cpp: samples at guest offsets become the
     // counts of these blocks), in address order: each [start, end) of guest offsets (the translation runs a block on to its terminal, so the
     // ranges of blocks that start inside another overlap) and the basic block its code starts in (a branch to start lands there). Empty when

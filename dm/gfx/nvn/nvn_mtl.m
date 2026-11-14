@@ -7617,7 +7617,13 @@ static void udc_note_draw(NvProg *pr, uint32_t raster_mask) {
 // NVN2's task and mesh bits (0x40, 0x80) of a program bind: stages 3 and 4, where those shaders are kept (hle_nvn.c st_host)
 static inline int gfx_stage_bits(int stages) { return (stages & 0x1f) | (stages & 0x40 ? 8 : 0) | (stages & 0x80 ? 16 : 0); }
 static const prog_t *bind_stages(const prog_t *p, int stages) {
-    for (int st = 0; st < 5; st++) if (stages >> st & 1) S.bst[st] = p;
+    for (int st = 0; st < 5; st++) if (stages >> st & 1) {
+        // A NULL bind keeps a bound vertex (or mesh) program. Falcom's Trails unbinds the vertex and tessellation stages with NULL at the top of every frame and then
+        // draws: clearing the vertex stage made every one of those draws "no program bound" and dropped them (Trails From Zero / Trails To Azure: 147 of 163 draws a
+        // frame in the menus, the menu background and the title screen among them). A draw has no vertex shader of its own, so a game cannot want the vertex stage empty.
+        if (!p && (st == 0 || st == 4) && S.bst[st]) continue;
+        S.bst[st] = p;
+    }
     const prog_t *v = S.bst[0] ? S.bst[0] : S.bst[4];   // a mesh program has no vertex stage
     if (!v) return NULL;
     int same = 1; for (int st = 1; st < 5; st++) if (S.bst[st] && S.bst[st] != v) same = 0;

@@ -2662,15 +2662,31 @@ def arh_entries(d):
     return out
 
 
+def arh2_entries(data):
+    """Read X DE's hashed index. Layout reference: Nenkai/XbxDeTool."""
+    if len(data) < 16:
+        red('ARH2: truncated header')
+    _, count, alignment, _ = struct.unpack_from('<4I', data)
+    if not alignment or alignment & (alignment - 1) or 16 + count * 16 > len(data):
+        red('ARH2: invalid index')
+    out, offset = [], 0
+    for key, size, _ in struct.iter_unpack('<QII', memoryview(data)[16:16 + count * 16]):
+        if size:
+            out.append((f'/@{key:016x}', offset, size))
+        offset = (offset + size + alignment - 1) & -alignment
+    return out
+
+
 def arh_jobs(files, parts=64):
     jobs, used = [], set()
     for path, rel in files:
         if not path.endswith('.arh'): continue
         with open(path, 'rb') as f: d = f.read()
-        if d[:4] != b'arh1': continue
+        if d[:4] not in (b'arh1', b'arh2'): continue
         ard = path[:-4] + '.ard'
-        if not os.path.isfile(ard): red(f'{rel}: ARH1 index has no ARD data file')
-        entries = arh_entries(d); length = os.path.getsize(ard)
+        if not os.path.isfile(ard): red(f'{rel}: ARH index has no ARD data file')
+        entries = arh2_entries(d) if d[:4] == b'arh2' else arh_entries(d)
+        length = os.path.getsize(ard)
         if any(o > length or n > length - o for _, o, n in entries): red(f'{rel}: ARD entry out of bounds')
         step = max(1, (len(entries) + parts - 1) // parts)
         jobs += [(ard, rel[:-4] + '.ard', (b'ARH1', entries[i:i + step])) for i in range(0, len(entries), step)]
@@ -2738,15 +2754,23 @@ def hcps_shaders(d, base, label):
             # 768-byte vertex + 256-byte geometry, two 0x880 controls). NVSD's
             # vertex size covers both; each NVN control gives its own code size.
             while c < pend:
-                if c + 0x708 > pend: red(f'{label} HCPS: truncated control')
-                nc = struct.unpack_from('<I', ctls, c + 0x20)[0]
-                nk = struct.unpack_from('<I', ctls, c + 0x704)[0]
-                if nc < 0x760 or c + nc > pend or not nk or k + nk > kend: red(f'{label} HCPS: shader exceeds program range')
+                if nvn2_ctl(ctls[c:min(c + NVN2_KEY_CTL, pend)]):
+                    nc = struct.unpack_from('<I', ctls, c + 0x30)[0] or 0xd8
+                    nk = struct.unpack_from('<I', ctls, c + 0x44)[0]
+                    minimum = NVN2_KEY_CTL
+                else:
+                    if c + 0x708 > pend: red(f'{label} HCPS: truncated control')
+                    nc = struct.unpack_from('<I', ctls, c + 0x20)[0]
+                    nk = struct.unpack_from('<I', ctls, c + 0x704)[0]
+                    minimum = 0x760
+                if nc < minimum or c + nc > pend or not nk or k + nk > kend: red(f'{label} HCPS: shader exceeds program range')
                 ctl, code = ctls[c:c + nc], codes[k:k + nk]; c += (nc + 7) & ~7; k += nk
                 st = glslc_stage(ctl, code)
                 why = check(label, st, ctl, code) if st else 'unknown stage'
                 if why: red(f'{label} HCPS SLCT {i} variant {j}: {why}')
-                out.append((f'{label}#HCPS@{base:#x}#var{i}.{j}', st, ctl, code))
+                # The Switch 1 X DE executable selects the NVN control variants.
+                if GAME.id != '0100453019AA8000' or not nvn2_ctl(ctl):
+                    out.append((f'{label}#HCPS@{base:#x}#var{i}.{j}', st, ctl, code))
             if k != kend: red(f'{label} HCPS: unused program code bytes')
         if c != ce or k != ke: red(f'{label} HCPS SLCT {i}: unused control/code bytes')
     return out

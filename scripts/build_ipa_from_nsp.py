@@ -1027,6 +1027,10 @@ def derived_key(profile_dir):
     return profile_dir.with_name(profile_dir.name + '.derived.key')
 
 
+def derived_split_key(profile_dir):   # the split's inputs among a derived profile's (derive_profile): a match keeps the tables it wrote
+    return profile_dir.with_name(profile_dir.name + '.derived.split.key')
+
+
 def frame_step_builds(path, table='FRAME_STEP'):   # the keys of a table of a patches.py (FRAME_STEP: build IDs; MATCH_FRAME_STEP: module names), read without running the file (empty: no table)
     try:
         for n in ast.parse(path.read_text(encoding='utf-8')).body:
@@ -1085,24 +1089,38 @@ def derive_profile(g, pdir, ver, d, mods, app=None, shader_only=False):
             if not put: out += [row, f'package{T}{ver}', f'shader_versions{T}{ver}']; put = True
             continue
         out.append(line)
-    text, kf = '\n'.join(out) + '\n', derived_key(pdir)   # beside the profile, not in it: no tool reads it as a table
+    text, kf, skf = '\n'.join(out) + '\n', derived_key(pdir), derived_split_key(pdir)   # beside the profile, not in it: no tool reads them as tables
     key = fingerprint(('files', src), text)
-    if (pdir / 'game.tsv').is_file() and reused(kf, key) is not None:
-        def rows(text):   # the same whitespace and comment rules as game.Game
-            return [tuple(c.strip() for c in l.split(T)) for l in text.splitlines() if l.strip() and not l.lstrip().startswith('#')]
+    # What the split reads of the derived profile besides the tables it writes (split_profile_inputs): game.tsv's settings and the registered tables of SPLIT_TABLES the folder
+    # copies (the hand-written facts). When only other copied files changed (the game's note, the prewarm list, geo_mesh.tsv, the patches.py link), the copies are made again and
+    # the tables the split and the shader step wrote are kept, so the split's reuse holds: wiping them made the split run again on unchanged game files
+    skey = fingerprint(('files', [p for p in src if p.name in SPLIT_TABLES]), text)
+    def rows(text):   # the same whitespace and comment rules as game.Game
+        return [tuple(c.strip() for c in l.split(T)) for l in text.splitlines() if l.strip() and not l.lstrip().startswith('#')]
+    def game_kept():   # game.tsv holds the rows written for these inputs (later stages may have added their own)
         expected = collections.Counter(rows(text)); keys = {r[0] for r in expected}
         try: kept = collections.Counter(r for r in rows((pdir / 'game.tsv').read_text(encoding='utf-8')) if r[0] in keys)
         except (OSError, UnicodeError): kept = None
-        if kept == expected: return disp
-    rmtree(kf); pdir.mkdir(parents=True, exist_ok=True)
+        return kept == expected
+    def copy_in(keep):   # the copies of src, made again; the folder's other files go, but for game.tsv and keep
+        for p in pdir.iterdir():
+            if p.name != 'game.tsv' and not keep(p): rmtree(p)
+        for p in src:
+            # Registered cuts stay the same file: patch_nso.py deduplicates real paths, so an external profile must not register copied claims for the same builds.
+            if shader_only and p.name == 'patches.py': (pdir / p.name).symlink_to(p.resolve())
+            else: shutil.copyfile(p, pdir / p.name)
+        kf.write_text(f'{key}\n'); skf.write_text(f'{skey}\n')
+    why = 'no folder yet' if not (pdir / 'game.tsv').is_file() else 'game.tsv changed since' if not game_kept() else None
+    if not why:
+        if reused(kf, key) is not None: return disp
+        if reused(skf, skey) is not None:   # the tables later stages wrote (DERIVED_SKIP's names, but the patches.py link) stay
+            copy_in(lambda p: p.name in DERIVED_SKIP and p.name != 'patches.py')
+            say(f'derived profile {pdir}: copied files changed, the split\'s tables kept'); return disp
+        why = 'no split key' if not skf.is_file() else 'the split\'s inputs changed'
+    say(f'derived profile {pdir}: made again ({why})')
+    rmtree(kf); rmtree(skf); pdir.mkdir(parents=True, exist_ok=True)
     atomic_text(pdir / 'game.tsv', text)
-    for p in pdir.iterdir():
-        if p.name != 'game.tsv': rmtree(p)
-    for p in src:
-        # Registered cuts stay the same file: patch_nso.py deduplicates real paths, so an external profile must not register copied claims for the same builds.
-        if shader_only and p.name == 'patches.py': (pdir / p.name).symlink_to(p.resolve())
-        else: shutil.copyfile(p, pdir / p.name)
-    kf.write_text(f'{key}\n')
+    copy_in(lambda p: False)
     return disp
 
 
@@ -1167,9 +1185,12 @@ def chain_files(repo):   # what the iOS shaders run: not the split's readers (sh
     return python_tool_files(repo, 'dm/gfx/tools/dmsh_build.py', ('dm/gfx/tools', 'dm/ios/tools', 'dm/games')) + [repo / 'dm/gfx/tools/dmsh_chain.lock']
 
 
+SPLIT_TABLES = ('shader_facts_manual.tsv', 'shader_map.tsv', 'shader_facts.tsv', 'shader_pairs.tsv', 'pso_pairs.tsv')   # the profile tables the split reads or is checked against (derive_profile keys on them too)
+
+
 def split_profile_inputs(g):   # shader_split.py's GAME reads, plus the tables the packer checks or writes; renderer settings, notes and translation tables are not extraction inputs
     settings = [(name, g.get(name, '')) for name in ('modules', 'shader_groups', 'shader_note', 'shader_key_skip')]
-    tables = [g.table(n) for n in ('shader_facts_manual.tsv', 'shader_map.tsv', 'shader_facts.tsv', 'shader_pairs.tsv', 'pso_pairs.tsv')]
+    tables = [g.table(n) for n in SPLIT_TABLES]
     return [g.id, settings, ('files', tables)]
 
 
@@ -1609,6 +1630,53 @@ def decoder_host_key(host):
     return None
 
 
+SOURCE_EXTS = ('.c', '.m', '.S')
+
+
+def split_compile_line(cmd):
+    """dm/host's one compile line (clang <flags> -o <out> <sources> <archives> -framework <F> ...) as (compiler, flags, sources, link inputs), or None for a line of another shape (an argument
+    that is no flag, source, archive or framework), which is then run as it is"""
+    flags, srcs, tail, i = [], [], [], 1
+    while i < len(cmd):
+        a = cmd[i]
+        if a == '-o': i += 2; continue
+        if a == '-framework' and i + 1 < len(cmd): tail += [a, cmd[i + 1]]; i += 2; continue
+        if a.endswith(SOURCE_EXTS): srcs.append(a)
+        elif a.endswith('.a'): tail.append(a)
+        elif a.startswith('-') and a not in ('-I', '-D', '-include', '-isysroot', '-arch', '-target', '-x'): flags.append(a)   # flags of one argument (dm/host's -I<dir>, -D<x>)
+        else: return None
+        i += 1
+    return (cmd[0], flags, srcs, tail) if srcs else None
+
+
+def compile_parallel(cmd, out, cwd, env, log):
+    """Run a one-line compile of many sources as one compile per source on every core, then a link: the same flags, the same objects and the same link inputs, so the same program. clang
+    compiles the sources of one command one after another. A line of another shape is run as it is"""
+    parts = split_compile_line(cmd)
+    if not parts: run(cmd, log, env=env, cwd=cwd); return
+    cc, flags, srcs, tail = parts
+    objs_dir = Path(out).with_name(Path(out).name + '.obj'); rmtree(objs_dir); objs_dir.mkdir(parents=True)
+    objs = [objs_dir / f'{i:03d}_{Path(s).stem}.o' for i, s in enumerate(srcs)]   # numbered: two sources of one name in different folders
+    def one(job):   # each compile in a process group of its own, its output in a log of its own (run: an interrupt stops it, a failure prints its last lines)
+        src, obj = job
+        return src, run([cc, *flags, '-c', src, '-o', obj], obj.with_suffix('.log'), env=env, cwd=cwd, fatal=False)
+    import concurrent.futures as cf
+    ex = cf.ThreadPoolExecutor(os.cpu_count() or 4)
+    try: results = list(ex.map(one, zip(srcs, objs)))
+    except BaseException: ex.shutdown(wait=False, cancel_futures=True); raise   # an interrupt: the queued compiles do not start
+    ex.shutdown()
+    with open(log, 'w') as f:
+        for o in objs:
+            if (text := o.with_suffix('.log').read_text(errors='replace') if o.with_suffix('.log').is_file() else ''): f.write(f'== {o.name}\n{text}')
+    if bad := [src for src, rc in results if rc]: raise BuildError(f'the Mac host did not compile: {", ".join(bad[:5])}{" …" if len(bad) > 5 else ""} (full output: {log})')
+    link = [a for a in flags if a.startswith(('-m', '-g', '-O', '-f', '-L', '-l', '-Wl,'))]   # the compile-only ones (-I, -D, -W) are left out of the link
+    run([cc, *link, '-o', out, *objs, *tail], objs_dir / 'link.log', env=env, cwd=cwd)
+    if '-g' in flags:   # the debug info, as clang's one-step compile and link writes it beside the program (<out>.dSYM, which crash reports and lldb read): from the objects, before they go
+        rmtree(Path(str(out) + '.dSYM'))
+        run(['dsymutil', out], objs_dir / 'dsymutil.log', env=env, cwd=cwd)
+    rmtree(objs_dir)
+
+
 def build_mac_host(repo, out, env, logs, g):
     """The Mac host for the profile, built into out: dm/host's own compile line (make -n) with the output moved, since make takes no target path with spaces and dm/host/dmhost may be another build's.
     Reused when the compile line and its inputs (the source files of HOST_DIRS, the chain header dm/gfx/nvn/dmsh_chain.h among them, the profile header make generates, libvpx, dav1d and the third-party headers, the compiler
@@ -1632,7 +1700,7 @@ def build_mac_host(repo, out, env, logs, g):
     decoder = fingerprint('oodle-host-v1', common, ('files', [p for p in srcs if p != chain]), chain_text)
     if out.is_file() and reused(kf, key) is not None and decoder_host_key(out) == decoder: return out
     rmtree(kf); out.parent.mkdir(parents=True, exist_ok=True)
-    run(cmd, logs / 'mac_host_build.log', env=env, cwd=host)
+    compile_parallel(cmd, out, host, env, logs / 'mac_host_build.log')
     record = out.with_name(out.name + '.decoder.json')
     part = record.with_suffix('.json.partial')
     part.write_text(json.dumps({'format': 1, 'binary': fingerprint(('files', [out])), 'inputs': decoder}) + '\n')
@@ -2399,6 +2467,17 @@ def prune_shader_cache(sh, chain):
     return n
 
 
+def shader_profile_key(py, repo, env, g):
+    """The profile's part of the shader step's key: the game and the digest of its shader inputs (dmsh_chain.py --inputs: the shader tables, geo_mesh.tsv, bf_want.tsv, dual_want.tsv and the
+    nvn_* / shader_* keys), which the libraries' stamp records and every per-shader cache key already assumes are all a shader build reads of the profile. Hashing every profile file
+    instead restored every library from the cache and rewrote the image after an edit of the game's note or prewarm list. Without the digest: every file, as before"""
+    r = subprocess.run([str(py), str(repo / 'dm/gfx/tools/dmsh_chain.py'), '--inputs'], env=env, capture_output=True, text=True)
+    words = r.stdout.split() if r.returncode == 0 else []
+    if words: return ('shader inputs', g.id, words[-1])
+    say(f'[RED] dmsh_chain.py --inputs gave no digest ({(r.stderr.strip().splitlines() or ["exit code " + str(r.returncode)])[-1]}): the shader step is keyed on every profile file, so any profile edit rebuilds it')
+    return ('files', profile_files(g))
+
+
 def stale_shaders(py, repo, env, lib_dirs, chain, g):
     """Why cached shader libraries cannot be reused by the build that starts: (reason, old, new, count) or None. 'chain': library folders b-<V> of another translation chain (lib_dirs: the
     selected targets' cache folders) have libraries without a completed current build; old is those folders' names, new b-<chain>. A full build writes its stamp only at the end,
@@ -2463,7 +2542,7 @@ def build_shaders(py, repo, sh, xlate, env, logs, g, pkg_key=None, mac=False, se
     if not pso_pairs.is_file(): pso_pairs = sh / 'pso_pairs.tsv'   # the split's copy is a shader input too (vs_pad)
     if pkg_key:
         PROG.set(step='checking the inputs')
-        key = fingerprint(pkg_key, ('files', chain_files(repo)), ('stat', xlate.parent), ('files', profile_files(g)), ('files', [pso_pairs]), *toolchain(repo, env), str(xlate),
+        key = fingerprint(pkg_key, ('files', chain_files(repo)), ('stat', xlate.parent), shader_profile_key(py, repo, env, g), ('files', [pso_pairs]), *toolchain(repo, env), str(xlate),
                           {k: env.get(k) for k in ('XLATE_DEBUG', 'XLATE_REDUCED')}, *((seen,) if seen else ()), env=env)
         note = next((n for k in ((kmac,) if seen else (kmac, kf) if mac else (kf,)) if (n := reused(k, key)) is not None), None)
         # the libraries are the last build's, so are tables that name their stamp; a missing or stale one is made from that build's Mac outputs, and without them the step runs again
@@ -3215,7 +3294,7 @@ def main(args=None):
         if missing: raise BuildError(f'the current Python ({sys.executable}) is missing modules: {", ".join(missing)}')
         check_capstone()
         pdir = profile_folder(args, nsp_dir, app)
-        if not (args.survey_only or SURVEY_ONLY): rmtree(derived_key(pdir / f'{app:016X}'))
+        if not (args.survey_only or SURVEY_ONLY): rmtree(derived_key(pdir / f'{app:016X}')); rmtree(derived_split_key(pdir / f'{app:016X}'))
         if (pdir / f'{app:016X}' / 'game.tsv').exists() and not (args.survey_only or SURVEY_ONLY):
             say(f'no game profile for {app:016X}: reusing the provisional profile from the last run (delete it to survey again)')
         else:

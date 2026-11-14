@@ -45,6 +45,21 @@ class ProvisionalVersionSelection(unittest.TestCase):
         self.assertEqual(nsp.provisional_version({"v0": None, "v9": None, "v10": None}, {"v0": {}, "v9": {}, "v10": {}}, "", Path("cached-profile")), "v10")
 
 
+class HostCompileLine(unittest.TestCase):   # the Mac host's one compile line, compiled one source per core (compile_parallel)
+    def test_the_line_splits_into_flags_sources_and_link_inputs(self):
+        cmd = ['clang', '-O2', '-g', '-Wall', '-mmacosx-version-min=26.6', '-Igen/x/', '-fobjc-arc', '-o', 'dmhost', 'main.c', '../gfx/a.m', 'entry.S',
+               'gen/vpx/libvpx.a', '-framework', 'Cocoa', '-framework', 'Metal']
+        cc, flags, srcs, tail = nsp.split_compile_line(cmd)
+        self.assertEqual(cc, 'clang')
+        self.assertEqual(flags, ['-O2', '-g', '-Wall', '-mmacosx-version-min=26.6', '-Igen/x/', '-fobjc-arc'])
+        self.assertEqual(srcs, ['main.c', '../gfx/a.m', 'entry.S'])
+        self.assertEqual(tail, ['gen/vpx/libvpx.a', '-framework', 'Cocoa', '-framework', 'Metal'])
+
+    def test_a_line_of_another_shape_is_not_split(self):   # run as it is
+        for cmd in (['clang', '-I', 'inc', '-o', 'x', 'a.c'], ['clang', '-o', 'x', 'a.c', 'notes.txt'], ['clang', '-o', 'x', 'lib.a']):
+            with self.subTest(cmd): self.assertIsNone(nsp.split_compile_line(cmd))
+
+
 class Base(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp()).resolve(); self.addCleanup(shutil.rmtree, self.tmp)
@@ -148,8 +163,6 @@ class DeriveProfile(Base):
         changes = {
             'source game.tsv': lambda: (self.src / 'game.tsv').write_text((self.src / 'game.tsv').read_text() + 'pad_layout\tfull\n'),
             'source manual table': lambda: (self.src / 'shader_facts_manual.tsv').write_text('k\t{"manual": 2}\n'),
-            'source chain header': lambda: (self.src / 'dmsh_chain.h').write_text('#define DMSH_CHAIN "new"\n'),
-            'new source file': lambda: (self.src / 'bf_want.tsv').write_text('# new\n'),
             'main build': lambda: nso(self.ex / 'ExeFS/main', 'ef' * 16),
             'display version': lambda: control(self.ex / 'control.nacp', '1.2.0'),
         }
@@ -169,10 +182,29 @@ class DeriveProfile(Base):
                 self.derive(**kw); self.assert_fresh()
         self.assertEqual(game.Game(self.pdir).title_id, 0x0100AAAA00FFF000)
 
+    def test_a_file_the_split_does_not_read_refreshes_the_copies_and_keeps_later_stages(self):   # a geo_mesh.tsv row used to wipe the split's tables
+        changes = {
+            'source chain header': lambda: (self.src / 'dmsh_chain.h').write_text('#define DMSH_CHAIN "new"\n'),
+            'new source file': lambda: (self.src / 'bf_want.tsv').write_text('# new\n'),
+            'edited source file': lambda: (self.src / 'pso_manifest.tsv').write_text('S\tk3\tpixel\n'),
+        }
+        for what, change in changes.items():
+            with self.subTest(what):
+                self.derive(); self.later_stages(); self.derive(); self.assert_kept()
+                change(); self.derive(); self.assert_kept()
+                for p in self.src.iterdir():
+                    if p.name not in nsp.DERIVED_SKIP: self.assertEqual((self.pdir / p.name).read_bytes(), p.read_bytes())
+                self.assertEqual(self.derive(), '1.1.0'); self.assert_kept()   # and the next run reuses the folder as it is
+
     def test_removed_source_file_goes(self):
         self.derive(); self.later_stages(); self.derive(); self.assert_kept()
         (self.src / 'pso_manifest.tsv').unlink(); self.derive()
-        self.assertFalse((self.pdir / 'pso_manifest.tsv').exists()); self.assert_fresh()
+        self.assertFalse((self.pdir / 'pso_manifest.tsv').exists()); self.assert_kept()
+
+    def test_no_split_key_derives_again(self):   # a folder derived before the split key, or one whose split key is gone
+        self.derive(); self.later_stages()
+        nsp.derived_split_key(self.pdir).unlink()
+        (self.src / 'pso_manifest.tsv').write_text('S\tk3\tpixel\n'); self.derive(); self.assert_fresh()
 
     def test_edited_copy_is_kept_until_inputs_change(self):   # the stored digest is of the inputs, not of the derived files
         self.derive(); (self.pdir / 'pso_manifest.tsv').write_text('S\tk2\tpixel\n'); self.derive()
@@ -1037,6 +1069,30 @@ class JitBootDone(unittest.TestCase):
             self.assertTrue(done())
             (part / 'late.jit').write_bytes(b'x')
             self.assertFalse(done())   # something new starts the wait again
+
+
+class ShaderProfileKey(Base):   # the shader step's key takes the profile's shader inputs (dmsh_chain.py --inputs), not every file's bytes
+    def key(self):
+        env = dict(os.environ, DM_GAME=f'{TID:016X}', DM_GAMES_DIR=str(self.tmp / 'games'))
+        return nsp.fingerprint(nsp.shader_profile_key(sys.executable, REPO, env, game.Game(self.src)))
+
+    def test_files_no_shader_build_reads_keep_the_key(self):   # a note edit used to restore every library
+        before = self.key()
+        (self.src / 'README.md').write_text('# a note\n')
+        (self.src / 'pso_manifest.tsv').write_text('S\tk2\tpixel\n')
+        (self.src / 'game.tsv').write_text((self.src / 'game.tsv').read_text() + 'pad_layout\tfull\n')
+        self.assertEqual(self.key(), before)
+
+    def test_shader_inputs_change_the_key(self):
+        changes = {
+            'shader map': lambda: (self.src / 'shader_map.tsv').write_text('# registered\npkg.bin\t0\tvertex\tother\tx\n'),
+            'geo_mesh.tsv': lambda: (self.src / 'geo_mesh.tsv').write_text('a\tb\n'),
+            'an nvn_ key': lambda: (self.src / 'game.tsv').write_text((self.src / 'game.tsv').read_text() + 'nvn_test\ton\n'),
+        }
+        for what, change in changes.items():
+            with self.subTest(what):
+                before = self.key(); change(); self.assertNotEqual(self.key(), before)
+
 
 
 if __name__ == '__main__': unittest.main()

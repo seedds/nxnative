@@ -476,12 +476,13 @@ The Mac is the development host. To test or debug a game on the Mac, `--platform
 - the same steps up to the shaders: extraction, rewrite, run-time shader captures and decodes, a provisional profile's heap check and the shader split;
 - the Mac shader libraries only: `dmsh_build.py` without `IOSOUT` into `<id>_build/shader/cache/b-<chain>.img` (one file), which a full build stamps with the profile's inputs (`inputs.tsv`) and from which it makes the profile's `c1_full.tsv` and `cb_extent.tsv`, or a Vulkan or GL game's library without `--ios` into `<id>_build/shader/vk/` or `gl/`;
 - the Mac host for the profile into `<id>_build/tools/dmhost`: the compile line of `make -C dm/host GAME=<id> dmhost`, with a provisional or derived profile through `DM_GAMES_DIR` / `DM_GAMES_FIRST` as for the script's other host builds. It is reused while its sources (the chain header `dm/gfx/nvn/dmsh_chain.h` among them), the generated profile header, libvpx and the compiler are unchanged;
-- the button-icon font (`make_ext_font.py`) into `<id>_build/font/`.
+- the button-icon font (`make_ext_font.py`) into `<id>_build/font/`;
+- a development app around a clone of that host, `<id>_build/run/<game name>.app` (`dm/mac/pack_app.py` `dev_app`), so the Dock and the app switcher show the game's name and its icon with a DEV ribbon instead of `dmhost`. It holds no game files, and the run command starts the host inside it.
 
 It skips the iOS shaders, the Xcode project and the IPA. For Mario Kart 8 Deluxe that saves about 30,000 iOS shader compiles and the 12 GB IPA. It keeps the extracted files even with `--no-keep-extracted`, because the game runs from them. It needs a Mac with Apple silicon, and it cannot be combined with `--prepare-xcode`. The last line it prints is the command that runs the game, built from the run's own paths (step 5 of [Build by hand (Mac)](#build-by-hand-mac)), for example:
 
 ```
-cd "<NSP folder>/<id>_build/run" && DM_ROOT="<NSP folder>/<id>_build" DM_ROMFS="<NSP folder>/<id>_build/extract/<version>/RomFS.img" DM_SAVE="<NSP folder>/<id>_build/run/save" DM_TEMP="<NSP folder>/<id>_build/run/temp" DM_MSL_DIR="<NSP folder>/<id>_build/shader/cache" DM_FONT_DIR="<NSP folder>/<id>_build/font" DM_NVN_SHMAP="<repository>/dm/games/<id>/shader_map.tsv" DM_LANG=en-US DM_WINDOW=1 DM_AUDIO=1 "<NSP folder>/<id>_build/tools/dmhost" "<NSP folder>/<id>_build/patched_<version>"
+cd "<NSP folder>/<id>_build/run" && DM_ROOT="<NSP folder>/<id>_build" DM_ROMFS="<NSP folder>/<id>_build/extract/<version>/RomFS.img" DM_SAVE="<NSP folder>/<id>_build/run/save" DM_TEMP="<NSP folder>/<id>_build/run/temp" DM_MSL_DIR="<NSP folder>/<id>_build/shader/cache" DM_FONT_DIR="<NSP folder>/<id>_build/font" DM_NVN_SHMAP="<repository>/dm/games/<id>/shader_map.tsv" DM_LANG=en-US DM_WINDOW=1 DM_AUDIO=1 "<NSP folder>/<id>_build/run/<game name>.app/Contents/MacOS/dmhost" "<NSP folder>/<id>_build/patched_<version>"
 ```
 
 The save is in `<id>_build/run/save` and stays there from run to run. `DM_AOC_DIR` is added when the folder has DLC. `DM_NVN_SHMAP` is added for an NVN game; it names the profile's shader map, or the derived or provisional profile's. A Vulkan or GL game's `DM_MSL_DIR` is `<id>_build/shader`. The switches of `--env-file` are added to the command.
@@ -579,7 +580,7 @@ What step 1 does not cover yet (GitHub issue #402): a replay that equals the liv
 
 ### A Mac app
 
-`--platform mac-app` (`PLATFORM = 'mac-app'` in Spyder) builds everything `--platform mac` builds, then packs a Mac app of the game with `dm/mac/pack_app.py`. The app is `<NSP folder>/<game name>.app` (a `:` or `/` in the name becomes ` - `); `-o` names another path ending in `.app`. Open it from Finder, from any folder: it does not need the build folder or the drive it is on. Like the Mac host, it needs a Mac with Apple silicon. Its name, version and bundle ID are the IPA's: the game name and display version from the control data, and `org.nxnative.<title ID>`. Its icon is the game's icon as `AppIcon.icns` (`sips`, `iconutil`).
+`--platform mac-app` (`PLATFORM = 'mac-app'` in Spyder) builds everything `--platform mac` builds, then packs a Mac app of the game with `dm/mac/pack_app.py`. The app is `<NSP folder>/<game name>.app` (a `:` or `/` in the name becomes ` - `); `-o` names another path ending in `.app`. Open it from Finder, from any folder: it does not need the build folder or the drive it is on. Like the Mac host, it needs a Mac with Apple silicon. Its name, version and bundle ID are the IPA's: the game name and display version from the control data, and `org.nxnative.<title ID>`. Its icon is the game's icon as `AppIcon.icns`, drawn by `dm/mac/app_icon.swift` in macOS's rounded-square shape: the whole art on a blurred copy of itself, so the corners do not cut a logo that runs to the edges, and `iconutil`. Where Swift cannot run, the square art resized by `sips`.
 
 The bundle holds what the IPA holds, with the Mac's shader libraries:
 

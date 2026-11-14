@@ -22,7 +22,7 @@
 // frame for two, so a shorter time showed some frames for one (30.4 fps); 30 writes the game's own 33.333 ms
 // Also: a frame time in ticks as a uint32 (scale / frame rate: 19,200,000 for the Switch's 19.2 MHz system tick), a frame step in seconds as a float (1 / frame rate), and a mode
 // switch an engine reads before it takes those fields at all (written 1 at any target)
-enum { FPS_F32, VSYNCS_I32, MS_F32, FPS_I32, TICKS_U32, SECS_F32, MODE_U32, FPS_F64 };
+enum { FPS_F32, VSYNCS_I32, MS_F32, FPS_I32, TICKS_U32, SECS_F32, MODE_U32, FPS_F64, FPS_UNLIM };
 #define MS_MARGIN 0.5f
 static float ms_want(int fps) { return 1000.0f / (float)fps - (fps == 60 ? MS_MARGIN : 0); }
 typedef struct { const char *build, *what; uint64_t ptr_off; uint32_t field; uint8_t kind, copies; uint32_t scale; uint32_t flag; } lock_t;   // flag: byte offset << 8 | bit mask the object must have set for the write (0: none)
@@ -200,7 +200,7 @@ static int ue_rows(const module_t *m, lock_t *out, int *missing) {
         const char *name = m->ue_cvar[k].name; int fps = !strcmp(name, DM_GAME_UE_FPS_CVAR);
         if (!fps && strcmp(name, "rhi.SyncInterval") && strcmp(name, "nvn.SyncInterval")) continue;
         have |= fps; snprintf(what[n], sizeof what[n], "Unreal %s", name);
-        out[n] = (lock_t){ "", what[n], m->ue_cvar[k].off + 0x10, 0, fps ? FPS_F32 : VSYNCS_I32, 2, 0 }; n++;
+        out[n] = (lock_t){ "", what[n], m->ue_cvar[k].off + 0x10, 0, fps ? (DM_GAME_UE_FPS_OFF ? FPS_UNLIM : FPS_F32) : VSYNCS_I32, 2, 0 }; n++;
     }
     *missing = m->n_ue_cvar > 0 && !have;
     return n;
@@ -326,6 +326,14 @@ void dm_fps_lock_tick(void) {
                 want = 1;
                 if (cur) continue;   // already 1, or not this switch: 0 is the engine's default
                 snprintf(was, sizeof was, "%u", cur);
+            } else if (L->kind == FPS_UNLIM) {
+                // No limit in the engine, and the present cap paces: an engine whose limiter sleeps a whole frame period (1 / limit, subtracting none of the
+                // frame's work) puts that sleep after the host's display tick every frame at the target, and the pacer keeps its phase and gives the frame two
+                // ticks. GTA III measured on one run: t.MaxFPS 60 → p50 33.45 ms (30.0 fps), 61 → 21.0, 120 → 22.6–25.4, 240 → 17.0, 0 → 16.48 = 60.7 fps
+                float f; memcpy(&f, &cur, sizeof f);
+                if (!cur || !(f >= 10 && f <= 1000)) continue;   // already 0 (no limit), or not set yet
+                want = 0;
+                snprintf(was, sizeof was, "%g", f);
             } else {
                 int fps = L->kind == FPS_I32;
                 want = fps ? (uint32_t)target : target > 60 ? 1 : 60 / (uint32_t)target;   // above 60 the display link paces it: a vsync count stays 1
@@ -334,11 +342,12 @@ void dm_fps_lock_tick(void) {
             }
             uint32_t *p = (uint32_t *)(uintptr_t)a;
             dm_guest_write_prepare(p, sizeof *p); __atomic_store_n(p, want, __ATOMIC_RELAXED);
-            if (nlog[r] < 8) { nlog[r]++; char now[24];
+            if (nlog[r] < 8) { nlog[r]++; char now[128];
                 if (L->kind == MS_F32) snprintf(now, sizeof now, "%.3f ms (%d fps)", ms_want(target), target);
                 else if (L->kind == SECS_F32) snprintf(now, sizeof now, "%.5f s (%d fps)", 1.0 / target, target);
                 else if (L->kind == TICKS_U32) snprintf(now, sizeof now, "%u (%d fps)", want, target);
                 else if (L->kind == MODE_U32) snprintf(now, sizeof now, "1 (%d fps)", target);
+                else if (L->kind == FPS_UNLIM) snprintf(now, sizeof now, "0 (no engine limit; the present cap paces at %d)", target);
                 else snprintf(now, sizeof now, "%u%s", L->kind == FPS_F32 ? (unsigned)target : want, L->kind == FPS_F32 || L->kind == FPS_I32 ? " fps" : " vsyncs");
                 LOG("main: %s%s %s → %s (%s)", L->what, L->copies > 1 ? (c ? " (render thread)" : " (game thread)") : "", was, now, src); }
         }

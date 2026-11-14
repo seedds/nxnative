@@ -164,8 +164,15 @@ static void check(int which) {
         munmap(base, len); return;
     }
     if (which == 21) {
+#if DM_GAME_UE_FPS_OFF
+        // The profile zeroes t.MaxFPS, so the two limits the game set are cleared, and the 120 → 60 hold change leaves them at 0
+        assert(f[0] == 0 && f[1] == 0 && sync[0] == 1 && sync[1] == 1 && writes == 4);
+        test_high = 60; dm_fps_lock_tick(); assert(f[0] == 0 && f[1] == 0 && sync[0] == 1 && sync[1] == 1 && writes == 4);
+        f[0] = f[1] = 30; dm_fps_lock_tick(); assert(f[0] == 0 && f[1] == 0 && writes == 6);   // a limit the game sets again is cleared again
+#else
         assert(f[0] == 120 && f[1] == 120 && sync[0] == 1 && sync[1] == 1);
         test_high = 60; dm_fps_lock_tick(); assert(f[0] == 60 && f[1] == 60 && sync[0] == 1 && sync[1] == 1);
+#endif
         munmap(base, len); return;
     }
     if (which == 0) {
@@ -178,7 +185,15 @@ static void check(int which) {
         assert(*unity == (which == 4 ? -1 : which == 5 ? 0 : 30));
     } else if (which == 6) assert(*f == 60 && writes == 1);
     else if (which == 7) assert(fabsf(*f - (1000.0f / 60 - 0.5f)) < 0.001f && writes == 1);
-    else if (which == 8) assert(f[0] == 60 && f[1] == 60 && sync[0] == 1 && sync[1] == 1 && writes == 4);
+    else if (which == 8) {
+#if DM_GAME_UE_FPS_OFF
+        // The profile zeroes t.MaxFPS (no engine limit; the present cap paces), so the game's 30 is cleared rather than raised
+        assert(f[0] == 0 && f[1] == 0 && sync[0] == 1 && sync[1] == 1 && writes == 4);
+        f[0] = f[1] = 30; dm_fps_lock_tick(); assert(f[0] == 0 && f[1] == 0 && writes == 6);   // a limit the game sets again is cleared again
+#else
+        assert(f[0] == 60 && f[1] == 60 && sync[0] == 1 && sync[1] == 1 && writes == 4);
+#endif
+    }
     else if (which == 9) {
         assert(sync[0] == 1 && sync[1] == 1 && writes == 2);
         dm_fps_lock_tick(); assert(writes == 2);

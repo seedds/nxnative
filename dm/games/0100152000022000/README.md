@@ -81,6 +81,10 @@ General host changes first needed here; each applies to every game:
 - **The zero cube for a 2D array of fewer than six layers in a cube slot** (`tex_fit`): [A 2D texture in a cube slot binds the zero cube](../../../docs/reference/rendering.md#a-2d-texture-in-a-cube-slot-binds-the-zero-cube).
 - **Cold Mac Metal shader builds:** [Cold Mac shader builds compile each pixel shader more than once](../../../docs/reference/shaders.md#cold-mac-shader-builds-compile-each-pixel-shader-more-than-once). Apple M2, `J=8`, no keys, `own_compilers`: 22:46 (1366 s) to 14:47 (886.86 s), 1.54×.
 
+## Player reports
+
+- **Mac mini, base 3.0.5 on the 4.0.x profile (player report, 2026-11-02):** Mac mini M4 (24 GB), macOS 27.2, commit `cd859c38a8f8`, shader chain `b7cd656abd7c`, built with `scripts/build_ipa_from_nsp.py --platform mac-app -l es`. The Mac app boots, runs the menus, starts a Grand Prix and races. "Smart steering" is switched on or off from the pause menu with L. The only `[RED]` line in that boot was `texture ID 1112 not registered`; nothing looked wrong.
+
 ## Open
 
 - Mii heads draw nothing unless the player supplies their console's MiiModel archive (`0100000000000802`) under `DM_SYSTEM_DIR` ([A console's own Mii database and system data](../../../docs/reference/services.md#a-consoles-own-mii-database-and-system-data)); not run with one, as no console files are on hand.

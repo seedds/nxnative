@@ -93,6 +93,10 @@ General host changes first needed here; each applies to every game:
 - **Uniform reads past the bound size give 0** (the translator's `MetalUniformBounds`: the host's zeros past a short binding for reads at fixed offsets, the size table `DMSH_CBSIZE_BANK` for computed ones): [Reads past a uniform binding's size](../../../docs/reference/shaders.md#reads-past-a-uniform-bindings-size).
 - **The host's StandardAllocator cap** (`hle_svc.c`, the `stdalloc_cap` key): [StandardAllocators over 12 to 62 GB of address space](../../../docs/reference/memory.md#standardallocators-over-12-to-62-gb-of-address-space).
 
+## Player reports
+
+- **Mac mini, base 1.0.0 (v0) on the 1.0.1 profile (player report, 2026-11-02):** Mac mini M4 (24 GB), macOS 27.2, commit `cd859c38a8f8`, shader chain `b7cd656abd7c`, built with `scripts/build_ipa_from_nsp.py --platform mac-app -l es`. The NSP had damaged files, so it was packed with `--allow-damaged` (3 files failed the NCA hash check, among them `GROUP_SE_Common.bfgrp.bin`; one shader source, `map/field/pik_03.bfres.zst`, was left out). The build warns that v0 has no function patch (the profile is for v65536). With the 9,708 pipelines prepared (about 2 minutes on the first run) it reaches the title, File 1, a new game, the storybook intro and the first scene in Rogueport. That is as far as it was played. This closes the Mac check under [Startup](#startup) only as far as Rogueport.
+
 ## Open
 
 - The 4 domain shaders of `shaders/tessellation.bfsha` have no Metal stage and the host does not run them; nothing seen so far draws with them.

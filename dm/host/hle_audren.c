@@ -96,6 +96,8 @@ typedef struct {
     void *render_tt;                         // the render thread (ThreadType from dm_guest_thread_spawn): Close joins it before the SDK tears the renderer down
     int16_t frame[FRAME_MAX * 2]; int frame_n;   // the latest frame (stereo int16)
     _Atomic uint64_t frames, nonsilent, updates, renders, catchups;
+    int effects;                             // its effect count (AudioRendererParameter +0x18): with none, updates closer than a frame merge (h_ars_Update)
+    _Atomic uint64_t merged;                 // updates that merged with a queued catch-up frame instead of rendering one
     uint64_t last_r; int updated;            // the render count at the last update, once there was one
     int16_t cq[CQ][FRAME_MAX * 2]; int cq_n[CQ]; _Atomic uint32_t cq_head, cq_tail;   // output queue of catch-up frames
     pthread_mutex_t cq_mu; pthread_cond_t cq_cv;   // the render thread signals each frame it takes off the queue (catch-up pacing)
@@ -234,7 +236,7 @@ static Result ar_open(void **handle, void *ev, const uint8_t *param, void *work,
     if (a) {   // the slot's old contents are of a closed renderer, whose thread has ended; memset leaves no lock held
         memset(a, 0, sizeof *a);
         pthread_mutex_init(&a->cq_mu, NULL); pthread_cond_init(&a->cq_cv, NULL);
-        a->handle[0] = handle[0]; a->handle[1] = handle[1]; atomic_store(&a->open, 1);
+        a->handle[0] = handle[0]; a->handle[1] = handle[1]; a->effects = *(int32_t *)(param + 0x18); atomic_store(&a->open, 1);
     }
     pthread_mutex_unlock(&g_ar_mu);
     LOG("audren: renderer %d opened from %s+%#llx", a ? ar_index(a) : -1, m ? m->name : "host", m ? (unsigned long long)((uint8_t *)ra - m->base) : 0ULL);
@@ -502,7 +504,7 @@ static Result render_once(ar_t *a, uint8_t *sys, int16_t *dst, int *nout) {
     if (dst) *nout = capture(a, cl, n, dst);
     // render time per frame (budget: 5 ms per frame): mean / max every 2000 frames
     static uint64_t sum, mx, cnt; uint64_t d = now_ns() - t0; sum += d; if (d > mx) mx = d;
-    if (++cnt == 2000) { LOG("audren: render time mean %.2f ms / max %.2f ms (5 ms budget per frame, last 2000 frames); catch-up renders so far %llu", sum / 2000 / 1e6, mx / 1e6, (unsigned long long)atomic_load(&a->catchups)); sum = mx = cnt = 0; }
+    if (++cnt == 2000) { LOG("audren: render time mean %.2f ms / max %.2f ms (5 ms budget per frame, last 2000 frames); catch-up renders so far %llu, updates merged %llu", sum / 2000 / 1e6, mx / 1e6, (unsigned long long)atomic_load(&a->catchups), (unsigned long long)atomic_load(&a->merged)); sum = mx = cnt = 0; }
     pthread_mutex_unlock(&g_render_mu);
     return RES_OK;
 }
@@ -556,7 +558,13 @@ HLE_FORCE("_ZN2nn5audio6server17AudioRenderSystem6UpdateEPvmS3_mPKvm", "renderer
     ar_t *a = ar_of_sys(sys);
     if (!a) return orig(sys, o, on, p, pn, in, inn);   // two renderers just opened, neither has rendered: at most one catch-up frame less
     uint64_t u = atomic_fetch_add(&a->updates, 1) + 1, r = atomic_load(&a->renders);
-    if (a->updated && r == a->last_r) {
+    // A renderer without effects needs no frame between two updates (that is only for an effect's initialization, above), and on hardware updates closer than 5 ms simply merge.
+    // Bink's sound (Assassin's Creed Brotherhood's Previously_On.bk2, 0 effects) updates many times per 5 ms from two threads while holding its own lock: each update past a full
+    // queue waited ~5 ms for the render thread, the game's task thread waited on Bink's lock, and the video ran at ~10 fps with silent sound. One unplayed catch-up frame queued is enough there.
+    // Only where the profile asks (audren_merge on, DM_GAME_AUDREN_MERGE): every other game keeps a catch-up frame per update
+    int merge = DM_GAME_AUDREN_MERGE && !a->effects && atomic_load(&a->cq_tail) != atomic_load(&a->cq_head);
+    if (a->updated && r == a->last_r && merge) atomic_fetch_add(&a->merged, 1);
+    else if (a->updated && r == a->last_r) {
         uint64_t c = atomic_fetch_add(&a->catchups, 1) + 1;
         if (c <= 3) LOG("audren: renderer %d: no frame rendered before update %llu, rendering a catch-up frame first (%llu so far)", ar_index(a), (unsigned long long)u, (unsigned long long)c);
         uint32_t t = atomic_load(&a->cq_tail);

@@ -68,6 +68,7 @@ class Nup:
     """A validated NUP (SPEC §6.1): the superblock, the TOC's SHA-256, every record's bounds. File content is checked against its SHA-256 as it is read"""
     def __init__(self, path):
         self.path = Path(path)
+        self.owners = []   # scan: a several-program NUP's application IDs, which its DLC counts from
         with open(self.path, 'rb') as f:   # the map keeps its own descriptor
             try: self.mm = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
             except ValueError: raise Error(f'{self.path}: empty file') from None
@@ -204,21 +205,76 @@ def is_nup(path):
     except OSError: return False
 
 
-def scan(n):
-    """What a NUP holds: (title ID, base package or None, {update version: package}, {DLC title ID: package}), with the checks pack_dump.scan makes"""
+def program_of(n, k):   # the program ID of a package's code, or None when it has none
+    i = n.child(k.exefs, b'main.npdm') if k.exefs != NO_DIR else None
+    return None if i is None else program_id(n.read(i), f'{k.name} exefs/main.npdm')
+
+
+def need_program(n, k):   # program_of, for a package that must have code
+    pid = program_of(n, k)
+    if pid is None: raise Error(f'{n.path}: {k.name} has no exefs/main.npdm')
+    return pid
+
+
+STUB_ROMFS = 1 << 20   # a program whose RomFS is smaller than this has none of its own (a Switch 2 program's: 144 bytes)
+
+
+def pick_program(n, bases, want):
+    """One application can hold several programs, each a base package of its own (Super Mario Bros. Wonder's Switch 2 Edition: the Switch 1 program 010015100B514000 and the Switch 2 program
+    040015100B514001, whose RomFS is a stub: it runs on the application's, which the other program's package holds). Their title IDs differ only in the low 12 bits. want: the program ID (or
+    package title ID) asked for, else the highest program ID, the newest code. Returns the package; its RomFS is the sibling's when its own is a stub (k.shared_from names the sibling)"""
+    if len({k.title_id >> 12 for k in bases}) > 1: raise Error(f'{n.path}: {len(bases)} base packages of different applications')
+    progs = {k: need_program(n, k) for k in bases}
+    if want is not None:
+        hit = [k for k in bases if want in (progs[k], k.title_id)]
+        if len(hit) != 1: raise Error(f'{n.path}: no one base package for {want:016X}; it holds ' + ', '.join(f'{progs[k]:016X}' for k in bases))
+        k = hit[0]
+    else: k = max(bases, key=progs.__getitem__)
+    if k.romfs == NO_DIR or n.tree_bytes(k.romfs) < STUB_ROMFS:
+        sib = max((b for b in bases if b is not k and b.romfs != NO_DIR), key=lambda b: n.tree_bytes(b.romfs), default=None)
+        if sib is not None and n.tree_bytes(sib.romfs) >= STUB_ROMFS:
+            own = [k.romfs] if k.romfs != NO_DIR else []   # what the program has of its own (Wonder's: System/RegionLangMask.txt) goes over the sibling's RomFS
+            k.romfs, k.shared_from = sib.romfs, sib
+            k.overlay = own + [a.romfs for a in upgrade_addons(n)]   # then the Switch 2 files that the add-on holds
+    return k
+
+
+def upgrade_addons(n):
+    """The add-on packages that carry a Switch 2 Edition's files: each holds System/AocUpgradeVersion.txt, and its RomFS is laid over the Switch 1 program's (Super Mario Bros. Wonder: 8,643
+    of its 26,452 files replace a file of the base RomFS, among them System/HeapSize/Product.Nin_Ounce_NVN2.HeapDef.byml.zs and the address table the Switch 2 code looks for first)"""
+    out = []
+    for k in n.packages:
+        if k.kind != ADDON or k.romfs == NO_DIR: continue
+        sysd = next((i for name, isdir, i in n.children(k.romfs) if isdir and name == b'System'), None)
+        if sysd is not None and n.child(sysd, b'AocUpgradeVersion.txt') is not None: out.append(k)
+    return sorted(out, key=lambda k: (k.title_id, k.version))
+
+
+def dlc_index(tid, owners):   # a DLC's index (title ID − the application's − 0x1000) for the first owner it fits, else None
+    return next((i for o in owners if 0 < (i := tid - o - 0x1000) <= 2000), None)
+
+
+def scan(n, want=None):
+    """What a NUP holds: (title ID, base package or None, {update version: package}, {DLC title ID: package}), with the checks pack_dump.scan makes. A NUP with several programs
+    (pick_program) gives the one asked for with want, else the newest"""
     bases = [k for k in n.packages if k.kind == BASE]
-    if len(bases) > 1: raise Error(f'{n.path}: {len(bases)} base packages')
+    if len(bases) > 1:
+        progs = [k for k in bases if n.tree_bytes(k.root)]   # a base record with no files is no program
+        if len(progs) < 2: raise Error(f'{n.path}: {len(bases)} base packages')
+        n.owners = sorted({need_program(n, k) & ~0xFFF for k in progs})   # the applications' IDs the DLC counts from
+        bases = [pick_program(n, progs, want)]
+    else: n.owners = []
     updates = [k for k in n.packages if k.kind == UPDATE]
     if not bases and (not updates or any(not k.flags & STANDALONE for k in updates)):
         raise Error(f'{n.path}: no base game: pack the base game and its update into one NUP, or use updates marked standalone_update with complete exefs/ and romfs/')
     base = bases[0] if bases and n.tree_bytes(bases[0].root) else None   # a base record with no files is no base game
     # With no base the game is identified from the code actually present; each selected version is checked by pack_version.
-    ids ={program_id(n.read(i), f'{k.name} exefs/main.npdm') for k in n.packages if k.kind in (BASE, UPDATE) and k.exefs != NO_DIR
+    ids ={program_id(n.read(i), f'{k.name} exefs/main.npdm') for k in n.packages if (k in bases or k.kind == UPDATE) and k.exefs != NO_DIR
            if (i := n.child(k.exefs, b'main.npdm')) is not None}
     if not ids: raise Error(f'{n.path}: no exefs/main.npdm in the base or updates')
     if len(ids) != 1: raise Error(f'{n.path}: base and updates have different program IDs: ' + ', '.join(f'{pid:016X}' for pid in sorted(ids)))
     app = ids.pop()
-    if app & 0xFFF: raise Error(f'{n.path}: base program ID {app:016X} is not a base title ID')
+    if app & 0xFFF and not n.owners: raise Error(f'{n.path}: base program ID {app:016X} is not a base title ID')   # a program of a multi-program application has its index there
     vers, dlc = {}, {}
     for k in n.packages:
         if k.kind == UPDATE:
@@ -226,7 +282,7 @@ def scan(n):
             if not k.version: raise Error(f'{n.path}: an update of version 0')
             vers[k.version] = k
         elif k.kind == ADDON:
-            if not 0 < k.title_id - app - 0x1000 <= 2000: raise Error(f'{n.path}: {k.title_id:016X} is not a DLC of {app:016X}')
+            if dlc_index(k.title_id, n.owners or [app]) is None: raise Error(f'{n.path}: {k.title_id:016X} is not a DLC of {app:016X}')
             if k.romfs == NO_DIR: raise Error(f'{n.path}: DLC {k.title_id:016X} has no romfs/')
             if k.title_id in dlc: raise Error(f'{n.path}: DLC {k.title_id:016X} more than once')
             dlc[k.title_id] = k
@@ -255,13 +311,20 @@ def exefs(n, k, dst):   # the package's ExeFS into dst, kept as it is when every
     shutil.rmtree(dst, ignore_errors=True); tmp.rename(dst)
 
 
-def entries(n, d):   # romfs_image.entries for a folder of the container: [name, file index, is dir, a, b], breadth-first
-    ents, i = [[b'', d, True, 0, 0]], 0
+def entries(n, d):   # romfs_image.entries for a folder of the container, or for several laid over each other (a later folder's file replaces an earlier one's): [name, file index, is dir, a, b], breadth-first
+    dirs = d if isinstance(d, (list, tuple)) else [d]
+    ents, i = [[b'', dirs, True, 0, 0]], 0   # a folder entry keeps the container folders it merges
     while i < len(ents):
         if ents[i][2]:
-            kids = n.children(ents[i][1])
+            kids = {}
+            for f in ents[i][1]:
+                for name, isdir, j in n.children(f):
+                    old = kids.get(name)
+                    if isdir and old is not None and old[0]: old[1].append(j)
+                    elif isdir: kids[name] = (True, [j])
+                    else: kids[name] = (False, j)   # a file replaces a file or a folder of that name
             ents[i][3], ents[i][4] = len(ents), len(kids)
-            ents.extend([name, j, isdir, 0, 0] for name, isdir, j in kids)
+            ents.extend([name, v[1], v[0], 0, 0] for name, v in sorted(kids.items()))
         i += 1
     return ents
 
@@ -296,11 +359,11 @@ def verified(n, ents, dst):
 
 
 def pack(n, d, img, say=print, step=lambda s: None):
-    """The RomFS folder d of the container → img. Returns how: 'kept' (the stamp says the container tree and the packers are the same), 'verified' (the stamp is
+    """The RomFS folder d of the container (or a list of folders laid over each other) → img. Returns how: 'kept' (the stamp says the container tree and the packers are the same), 'verified' (the stamp is
     from another packer, but the image checks against the container's hashes: its stamp is renewed) or 'packed'. step(name): the step it is in, for a progress line"""
     img.parent.mkdir(parents=True, exist_ok=True)
     ents, dst = entries(n, d), os.fspath(img)
-    digest = hashlib.sha256(Path(romfs_image.__file__).read_bytes() + Path(__file__).read_bytes() + n.toc_sha + struct.pack('<I', d)).hexdigest()   # the TOC hash covers every name and file hash
+    digest = hashlib.sha256(Path(romfs_image.__file__).read_bytes() + Path(__file__).read_bytes() + n.toc_sha + b''.join(struct.pack('<I', x) for x in (d if isinstance(d, (list, tuple)) else [d]))).hexdigest()   # the TOC hash covers every name and file hash
     if romfs_image.reusable(dst, digest): return 'kept'
     if img.is_file():   # a packer update changes the digest, not the image: check its bytes before unpacking minutes of data again
         step('checking the image'); say(f'checking {img} against {n.path.name}')
@@ -353,19 +416,30 @@ def romfs_of(k, base):   # the RomFS folder a version runs with: its own, or the
     return d
 
 
+def romfs_dirs(k, base):   # the RomFS folders a version runs with, laid over each other: romfs_of's, then the upgrade add-ons' for a Switch 2 program
+    return [romfs_of(k, base)] + list(getattr(k, 'overlay', []))
+
+
+def romfs_bytes(n, k, base):   # the size of the image's files before replacements (an upper bound)
+    return sum(n.tree_bytes(d) for d in romfs_dirs(k, base))
+
+
 def pack_version(n, k, base, app, out, say=print, step=lambda s: None):   # one version (the base package, or an update package) → out/ExeFS, out/RomFS.img and its control data; returns how pack() got the image
     if k.exefs == NO_DIR or n.child(k.exefs, b'main') is None or n.child(k.exefs, b'main.npdm') is None: raise Error(f'{k.name}: no exefs/main and exefs/main.npdm')
     if (pid := program_id(n.read(n.child(k.exefs, b'main.npdm')), f'{k.name} exefs/main.npdm')) != app: raise Error(f'{k.name}: program ID {pid:016X}, the base is {app:016X}')
-    d = romfs_of(k, base)
+    dirs = romfs_dirs(k, base)   # before anything is written: a package with no RomFS of its own or its base's stops here
+    if (sib := getattr(k, 'shared_from', None)) is not None: say(f'program {pid:016X} has no RomFS of its own: it runs on the RomFS of program {need_program(n, sib):016X}')
     out.mkdir(parents=True, exist_ok=True)
     exefs(n, k, out / 'ExeFS')
-    how = pack(n, d, out / 'RomFS.img', say, step)
-    control(k, out, app_package(n) if base is None else None)
+    if len(dirs) > 1: say(f'{len(dirs) - 1} more RomFS folder(s) are laid over it: the program\'s own and the upgrade add-on\'s')
+    how = pack(n, dirs, out / 'RomFS.img', say, step)
+    control(k, out, app_package(n) if base is None else next((b for b in n.packages if b.kind == BASE and b is not k and T_NACP in b.meta()), None) if n.owners and T_NACP not in k.meta() else None)   # a program of a several-program NUP takes the control data of its sibling
     return how
 
 
 def pack_dlc(n, app, dlc, aoc, say=print):   # {DLC title ID: package} → aoc/<index>.img; images of DLC no longer in the container go
-    want = {f'{tid - app - 0x1000}.img': k for tid, k in dlc.items()}
+    owners = n.owners or [app]
+    want = {f'{dlc_index(tid, owners)}.img': k for tid, k in dlc.items()}
     if aoc.is_dir():
         for f in aoc.iterdir():
             if f.name.removesuffix('.inputs.json') not in want: f.unlink()
@@ -376,12 +450,13 @@ def main():
     ap = argparse.ArgumentParser(description='Pack a game in a NUP container into the extraction layout of build_ipa_from_nsp.py')
     ap.add_argument('nup', type=Path, help='the .nup file')
     ap.add_argument('--version', type=int, help='the update version to pack (default: the newest in the container; 0 = the base game)')
+    ap.add_argument('--title-id', help='a NUP with several programs (Switch 2 Edition of a Switch 1 game): the program ID of the one to pack, 16 hex digits (default: the highest)')
     ap.add_argument('--work-dir', type=Path, help='the build folder (default: <folder of the .nup>/<title ID>_build)')
     a = ap.parse_args()
     path = a.nup.resolve()
     try:
         with Nup(path) as n:
-            app, base, vers, dlc = scan(n)
+            app, base, vers, dlc = scan(n, int(a.title_id, 16) if a.title_id else None)
             ver = a.version if a.version is not None else max(vers, default=0)
             if ver and ver not in vers: raise Error(f'no update {ver} in {path.name} (have: {", ".join(map(str, sorted(vers))) or "none"})')
             k = vers[ver] if ver else base

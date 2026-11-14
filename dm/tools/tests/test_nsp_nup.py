@@ -535,6 +535,75 @@ class Pack(Base):
         self.assertEqual((aoc / '1.img').read_bytes(), b'from the NSP')
 
 
+class Programs(Base):
+    """A Switch 2 Edition of a Switch 1 game: one application with two base packages (the Switch 1 program, which holds the RomFS, and the Switch 2 program, whose RomFS is a stub) and an
+    add-on that holds the Switch 2 files and replaces some of the base's (Super Mario Bros. Wonder)"""
+    APP = 0x040015100B514000
+    S1, S2 = 0x010015100B514000, 0x040015100B514001   # the programs' IDs; the packages are titled APP and APP + 1
+    DLC = 0x010015100B515001
+
+    def setUp(self):
+        super().setUp()
+        s1 = {'exefs': {'main': b'switch 1', 'main.npdm': npdm(self.S1)},
+              'romfs': {'big': b'\0' * (1 << 21), 'System/HeapSize/Product.NX.byml': b'nx', 'dir/replaced': b'base', 'dir/kept': b'base'}}
+        s2 = {'exefs': {'main': b'switch 2', 'main.npdm': npdm(self.S2)}, 'romfs': {'System/RegionLangMask.txt': b'mask'}}
+        aoc = {'romfs': {'System/AocUpgradeVersion.txt': b'3', 'System/HeapSize/Product.Ounce.byml': b'ounce', 'dir/replaced': b'upgrade'}}
+        write_nup(self.path, [(0, self.APP + 1, 0, s2, META), (0, self.APP, 0, s1, tlv([])), (2, self.DLC, 0, aoc, b'')])
+
+    def packed(self, want=None):
+        n = self.open(); app, base, vers, dlc = pack_nup.scan(n, want)
+        pack_nup.pack_version(n, base, base, app, self.dir / 'out', say=lambda s: None)
+        pack_nup.pack_dlc(n, app, dlc, self.dir / 'aoc', say=lambda s: None)
+        return n, app, base, dlc
+
+    def test_the_newest_program_is_packed_on_the_siblings_romfs_with_the_upgrade_over_it(self):
+        n, app, base, dlc = self.packed()
+        self.assertEqual(app, self.S2)
+        self.assertEqual((self.dir / 'out/ExeFS/main').read_bytes(), b'switch 2')
+        idx = romfs_image.read_index(self.dir / 'out/RomFS.img')
+        for path in ('big', 'dir/kept', 'dir/replaced', 'System/RegionLangMask.txt', 'System/HeapSize/Product.NX.byml', 'System/HeapSize/Product.Ounce.byml', 'System/AocUpgradeVersion.txt'):
+            self.assertIn(path, idx)
+        with open(self.dir / 'out/RomFS.img', 'rb') as f:
+            isdir, off, size = idx['dir/replaced']; f.seek(off); self.assertEqual(f.read(size), b'upgrade')   # the add-on's file wins
+            isdir, off, size = idx['dir/kept']; f.seek(off); self.assertEqual(f.read(size), b'base')
+        self.assertEqual(pack_nup.romfs_bytes(n, base, base), (1 << 21) + len(b'nxbasebase') + 4 + 1 + 5 + 7)   # every folder's files, before replacements
+        self.assertIn('System/AocUpgradeVersion.txt', romfs_image.read_index(self.dir / 'aoc/1.img'))   # the add-on stays an add-on too
+        self.assertEqual(sorted(p.name for p in (self.dir / 'aoc').iterdir() if p.suffix == '.img'), ['1.img'])   # its index counts from the application, not from the Switch 2 program
+
+    def test_the_switch_1_program_is_packed_alone_when_asked_for(self):
+        for want in (self.S1, self.APP):
+            with self.subTest(want=f'{want:016X}'):
+                n, app, base, dlc = self.packed(want)
+                self.assertEqual(app, self.S1)
+                self.assertEqual((self.dir / 'out/ExeFS/main').read_bytes(), b'switch 1')
+                idx = romfs_image.read_index(self.dir / 'out/RomFS.img')
+                self.assertIn('dir/kept', idx); self.assertNotIn('System/RegionLangMask.txt', idx); self.assertNotIn('System/HeapSize/Product.Ounce.byml', idx)   # no upgrade over it
+                self.assertEqual(sorted(dlc), [self.DLC])
+
+    def test_a_program_that_is_not_there_is_refused_and_the_others_are_named(self):
+        with self.assertRaisesRegex(pack_nup.Error, f'no one base package for 0000000000001234.*{self.S2:016X}.*{self.S1:016X}'): pack_nup.scan(self.open(), 0x1234)
+
+    def test_bases_of_different_applications_are_refused(self):
+        write_nup(self.path, [(0, self.APP, 0, version(tid=self.S1), META), (0, self.APP + 0x1000000, 0, version(tid=self.S2), META)])
+        with self.assertRaisesRegex(pack_nup.Error, 'different applications'): pack_nup.scan(self.open())
+
+    def test_one_program_and_an_empty_base_record_are_still_refused(self):   # as before: only two bases that both hold code are programs of one application
+        write_nup(self.path, [(0, 0, 0, {}, META), (0, TID, 0, version(), b'')])
+        with self.assertRaisesRegex(pack_nup.Error, '2 base packages'): pack_nup.scan(self.open())
+
+    def test_a_single_program_nup_is_unchanged(self):
+        write_nup(self.path, [(0, TID, 0, version(), META)])
+        n = self.open(); app, base, _, _ = pack_nup.scan(n)
+        self.assertEqual((app, n.owners, getattr(base, 'overlay', None)), (TID, [], None))
+        self.assertEqual(pack_nup.romfs_dirs(base, base), [base.romfs])
+
+    def test_the_script_takes_the_program_with_title_id(self):
+        app, fam = nsp.scan_nup(self.path, self.S1); self.addCleanup(fam['nup'].close)
+        self.assertEqual(app, self.S1)
+        app, fam2 = nsp.scan_nup(self.path); self.addCleanup(fam2['nup'].close)
+        self.assertEqual(app, self.S2)
+
+
 class Stop(Exception): pass
 
 

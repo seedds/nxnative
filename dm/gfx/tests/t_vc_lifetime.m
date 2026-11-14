@@ -1,6 +1,7 @@
 // The texture view cache's lifetime (vc_get / vc_put / vc_commit): views are kept by the Metal texture they view, for as long as the owner holds that texture. A texture the game has
 // finalized while one of its IDs is still registered resolves through the ghost table and keeps reading the view it had, with none made again; the ghost table alone keeps it once the
-// sharing table lets go; its pool's finalization drops it; and when more textures go than the owner's list of released objects holds, the commit checks every texture it keeps
+// sharing table lets go; its pool's finalization drops it; and when more textures go than the owner's list of released objects holds, the commit checks every texture it keeps. A buffer
+// texture's 2D rows (tbuf_as_2d) first asked for after the game finalized it are kept with it while the owner holds it, not only in the table by what they view (g_tb2_gone)
 #define nvn_game_fps nvn_game_fps_mtl_default
 #include "../nvn/nvn_mtl.m"
 #undef nvn_game_fps
@@ -64,6 +65,32 @@ int main(void) { @autoreleasepool {
     // The pool's finalization drops the views of its textures
     mtl_reg_tex(1, NULL, NULL); h_nvnMemoryPoolFinalize((NVNmemoryPool *)&pool);
     CHECK(!cached(base), "the pool's finalization drops its textures' views");
+
+    // A buffer texture read as 2D rows only after the game finalized it: the rows are kept with the texture while the ghost table holds it
+    {   uint8_t *bm = mmap(NULL, len, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0); if (bm == MAP_FAILED) abort();
+        pool_t bpool = {0}; pool_builder_t bpb = {.mem=bm, .size=len, .flags=NVN_MEMORY_POOL_FLAGS_CPU_UNCACHED | NVN_MEMORY_POOL_FLAGS_GPU_CACHED};
+        CHECK(h_nvnMemoryPoolInitialize((NVNmemoryPool *)&bpool, (const NVNmemoryPoolBuilder *)&bpb), "buffer pool initialized");
+        NVNtextureBuilder bb; NVNtexture btex = {0}; h_nvnTextureBuilderSetDefaults(&bb);
+        h_nvnTextureBuilderSetTarget(&bb, NVN_TEXTURE_TARGET_BUFFER); h_nvnTextureBuilderSetWidth(&bb, 1024); h_nvnTextureBuilderSetFormat(&bb, NVN_FORMAT_R32F);
+        h_nvnTextureBuilderSetStorage(&bb, (NVNmemoryPool *)&bpool, 0);
+        CHECK(h_nvnTextureInitialize(&btex, &bb), "buffer texture initialized");
+        mtl_reg_tex(2, (const tex_t *)&btex, NULL);
+        id<MTLTexture> bt = read_id(2);
+        CHECK(bt && bt.buffer, "the live buffer texture's ID reads a buffer texture");
+        h_nvnTextureFinalize(&btex);
+        mtl_sub_begin(); os_unfair_lock_lock(&g_rmu);
+        id<MTLTexture> bt2 = tex_by_id(2); uint64_t rid = 0, made0 = g_tb2_made;
+        id<MTLTexture> rows = bt2 ? tbuf_as_2d(2, bt2, NVN_DPF_FLOAT, &rid) : nil;
+        id<MTLTexture> root = bt2; while (root.parentTexture) root = root.parentTexture;
+        uint64_t ra = vc_addr(root); vc_set *rs = nvn_hm_get(&g_vc, &ra);
+        int kept = rows && rs && rs->rows == (__bridge void *)rows;
+        id<MTLTexture> rows2 = bt2 ? tbuf_as_2d(2, bt2, NVN_DPF_FLOAT, &rid) : nil;
+        os_unfair_lock_unlock(&g_rmu); mtl_wait(mtl_sub_commit(), 5000000000ull);
+        CHECK(bt2 && holds(root), "the finalized buffer texture resolves, held by the owner");
+        CHECK(kept && g_tb2_made == made0 + 1, "its rows, first asked for after its finalization, are kept with the texture");
+        CHECK(rows2 == rows && g_tb2_made == made0 + 1, "and the next bind reads them again: none made");
+        mtl_reg_tex(2, NULL, NULL); h_nvnMemoryPoolFinalize((NVNmemoryPool *)&bpool);
+        CHECK(!cached(root), "the pool's finalization drops them"); }
 
     // More objects released between two commits than the owner lists: the commit then checks every texture it keeps, dropping those no longer held and keeping the rest
     {   MTLTextureDescriptor *d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:4 height:4 mipmapped:NO];

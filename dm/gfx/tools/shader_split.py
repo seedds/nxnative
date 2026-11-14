@@ -2620,6 +2620,7 @@ def ue_inline_shaders(d, label, out):
     The engine combines vertex and pixel shaders per draw (separable_pairs)"""
     import zlib, lz4.block
     def take(s, at):
+        if bytes(s[4:5]) == b'S' and bytes(s[5:6]) in b'123456789': return   # a ray tracing stage (Persona 3 Reload's global shader cache: FDefaultMainCHS, S1 to S3), which NVN has no stage for
         rec = uepak.lslg(s)
         if not rec: red(f'{label}: the shader record at {at:#x} is not an LSLG record of the known layout')
         tag, ctl, code = rec; st = UE_TAG.get(tag)

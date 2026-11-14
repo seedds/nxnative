@@ -322,6 +322,16 @@ class IoStore(unittest.TestCase):
         self.assertEqual(uepak.lslg(rec), ('SC', ctl, code))
         self.assertIsNone(uepak.lslg(rec.replace(struct.pack('<I', len(code)) + code, struct.pack('<I', len(code) + 4) + code, 1)))
 
+    def test_a_ray_tracing_record_is_left_out_and_the_file_read_on(self):
+        """Persona 3 Reload's global shader cache holds closest-hit shaders (FDefaultMainCHS, stage tag S1): the first one made the whole file unreadable, every global shader with it"""
+        rt, _, _ = self.lslg(b'S1', b'\x22' * 0x40)
+        rt = rt[:rt.index(uepak.CTL_NVN2) + 0x44] + struct.pack('<I', 0x200) + rt[rt.index(uepak.CTL_NVN2) + 0x48:]   # its code length is not where a stage's is
+        cs, ctl, code = self.lslg()
+        d = struct.pack('<I', len(rt)) + rt + struct.pack('<I', len(cs)) + cs
+        out = []
+        with patch.object(ss, 'check', return_value=None): ss.ue_inline_shaders(d, 'G', out)
+        self.assertEqual(out, [(f'G#UE{4 + len(rt) + 4:x}', 'cs', ctl, code)])
+
     KEY = bytes(range(40, 72))
 
     def sparking_zero(self):

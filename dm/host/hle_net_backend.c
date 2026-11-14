@@ -172,6 +172,44 @@ static void net_trace(const char *op, int fd, long result) {
     const char *s = getenv("DM_NET_TRACE");
     if (s && atoi(s)) fprintf(stderr, "net: %s guest_fd=%d result=%ld errno=%d\n", op, fd, result, result < 0 ? t_net_errno : 0);
 }
+// The UDP watch. A game's own peer-to-peer traffic (Mario Kart 8 Deluxe's races, through Pia) ends without any host error when datagrams stop
+// coming: the game times its peers out and shows its communication error, and the log said nothing. Each UDP socket counts what it sends and
+// receives; one that has received and then gets nothing for NET_UDP_QUIET_MS is logged once, with its counts, and again when datagrams come back,
+// so a log shows which side went quiet. A send or receive error is logged the first time each errno appears. No addresses: the peers are other players
+enum { NET_UDP_QUIET_MS = 2000 };
+typedef struct { uint64_t generation, in, out, last_in_ms, quiet_since_ms; int quiet; } net_udp_watch;
+static net_udp_watch g_udp_watch[NET_MAX];
+static pthread_mutex_t g_udp_watch_lock = PTHREAD_MUTEX_INITIALIZER;
+static _Atomic uint64_t g_udp_errors_told[2];   // bit n: errno n already logged (receive, send)
+static net_udp_watch *net_udp_entry(const net_ref *r) {   // with g_udp_watch_lock held; a reused slot starts again
+    net_udp_watch *w = &g_udp_watch[r->guest];
+    if (w->generation != r->generation) { memset(w, 0, sizeof *w); w->generation = r->generation; }
+    return w;
+}
+static void net_udp_note(const net_ref *r, int received, int sent) {
+    if (r->type != 2 || r->guest < 0 || r->guest >= NET_MAX) return;
+    uint64_t now = net_ms(); char line[160]; line[0] = 0;
+    pthread_mutex_lock(&g_udp_watch_lock);
+    net_udp_watch *w = net_udp_entry(r);
+    w->in += (uint64_t)received; w->out += (uint64_t)sent;
+    if (received) {
+        if (w->quiet) snprintf(line, sizeof line, "net: UDP socket %d: datagrams again after %.1f s without (in %llu, out %llu)", r->guest,
+                               (now - w->quiet_since_ms) / 1000.0, (unsigned long long)w->in, (unsigned long long)w->out);
+        w->quiet = 0; w->last_in_ms = now;
+    } else if (w->in && !w->quiet && now - w->last_in_ms >= NET_UDP_QUIET_MS) {
+        w->quiet = 1; w->quiet_since_ms = w->last_in_ms;
+        snprintf(line, sizeof line, "[RED] net: UDP socket %d: no datagram for %d s after %llu in (%llu sent so far)", r->guest,
+                 NET_UDP_QUIET_MS / 1000, (unsigned long long)w->in, (unsigned long long)w->out);
+    }
+    pthread_mutex_unlock(&g_udp_watch_lock);
+    if (line[0]) fprintf(stderr, "%s\n", line);
+}
+static void net_udp_error(const net_ref *r, int sending, int err) {
+    if (r->type != 2 || err <= 0 || err >= 64) return;
+    uint64_t bit = 1ull << err;
+    if (!(atomic_fetch_or(&g_udp_errors_told[sending], bit) & bit))
+        fprintf(stderr, "[RED] net: UDP %s failed on the host: %s (errno %d; logged once)\n", sending ? "send" : "receive", strerror(err), err);
+}
 // Each operation borrows a duplicate while under the lock. Close removes the guest slot first;
 // a generation check in every bounded wait prevents an old waiter touching a subsequently reused slot.
 // Poll and Select take any descriptor (net_borrow_any); every socket operation takes only a socket, and an event descriptor fails it with ENOTSOCK (net_borrow)
@@ -463,7 +501,7 @@ long dm_net_recv(int guest, void *buf, unsigned long len, int flags, void *addr,
         dm_guest_write_prepare(buf ? (char *)buf + total : NULL, len - total);
         socklen_t n = sizeof a; ssize_t got = recvfrom(r.fd, buf ? (char *)buf + total : NULL, len - total, hostflags, addr ? (struct sockaddr *)&a : NULL, addr ? &n : NULL); int err = errno;
         if (got >= 0) {
-            total += (size_t)got; result = (long)total;
+            total += (size_t)got; result = (long)total; net_udp_note(&r, 1, 0);
             if (addr) net_addr_out(addr, addrlen, &a);
             if (!got || r.type != 1 || !(flags & 0x40) || r.nonblock || (flags & 0x80) || total == len) break;
             continue;
@@ -471,6 +509,7 @@ long dm_net_recv(int guest, void *buf, unsigned long len, int flags, void *addr,
         // A host report of ICMP unreachable for an earlier send, delivered on the next receive of a UDP socket. In Nextendo mode it counts as
         // no datagram yet, so a peer that is not listening yet does not end a session (Mush8 does the same for Mario Kart 8 Deluxe)
         if (r.type == 2 && (err == ECONNREFUSED || err == ECONNRESET || err == ENETRESET) && dm_net_nextendo_enabled()) err = EAGAIN;
+        if (err == EAGAIN) net_udp_note(&r, 0, 0); else net_udp_error(&r, 0, err);
         if (err != EAGAIN || r.nonblock || (flags & 0x80)) { if (!total) result = net_error(net_errno(err)); break; }
         if (net_wait(&r, POLLIN, r.recv_ms, start)) { if (!total) result = -1; break; }
     }
@@ -496,7 +535,8 @@ long dm_net_send(int guest, const void *buf, unsigned long len, int flags, const
     uint64_t start = net_ms(); long result; int reported = 0;
     for (;;) {
         result = addr ? net_discovery_packet(r.fd,buf,len,hostflags,&a) : sendto(r.fd,buf,len,hostflags,NULL,0); int err = errno;
-        if (result >= 0) break;
+        if (result >= 0) { net_udp_note(&r, 0, 1); break; }
+        if (err != EAGAIN) net_udp_error(&r, 1, err);
         // As on a receive (dm_net_recv): the host hands an earlier datagram's ICMP report to the next call on a UDP socket, a send too, and then
         // does not send this datagram (the report is cleared). In Nextendo mode it is sent again once
         if (r.type == 2 && !reported && (err == ECONNREFUSED || err == ECONNRESET || err == ENETRESET) && dm_net_nextendo_enabled()) { reported = 1; continue; }

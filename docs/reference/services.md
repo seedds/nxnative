@@ -1042,6 +1042,14 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Check:** `make -C dm/host/tests GAME=<id> nextendo-social` (the description reaches the server after the queue drains, a refused upload is not the game's failure and the next publish is still sent).
 - **Found on:** Mario Kart 8 Deluxe 4.0.1 and Super Mario Bros. Wonder 1.2.1 on an iPhone, 2026-11-14: a short delay between online menus on the first visits. Found by reading the code; the frame times in the log had no stall.
 
+### An online race ends in a communication error with nothing in the log
+
+- **Symptom:** in Nextendo mode, Mario Kart 8 Deluxe finds a Worldwide race and starts it, then shows a communication error during the race (on the second lap here) and returns to the menu. The log has no error line from the host.
+- **Cause:** not known yet. The race is the game's own peer-to-peer UDP (Pia), and a peer that stops answering only times out inside the game. The host logged no socket traffic unless `DM_NET_TRACE=1`, which logs every call and is too much for a race.
+- **Fix (diagnostic):** `hle_net_backend.c` watches every UDP socket in a network mode: a socket that has received datagrams and then gets none for 2 s logs `net: UDP socket <n>: no datagram for 2 s after <in> in (<out> sent so far)`, and `datagrams again after <s> s` when they come back. A host send or receive error logs `net: UDP send failed on the host: <reason>` the first time each errno appears. No addresses are logged, since the peers are other players.
+- **Check:** none without a device; the next race that fails shows whether datagrams stopped arriving, stopped leaving, or the host refused a send.
+- **Found on:** Mario Kart 8 Deluxe 4.0.1 on an iPhone, 2026-11-14, a Worldwide race on Nextendo.
+
 ### `EventFd` in a network mode shares the socket numbering
 
 - **Symptom:** with `DM_NETWORK` set to a network mode, a game that uses gRPC (`nn::npln`) aborts in `grpc_init` as it does offline without event descriptors, or its poller never wakes while it polls its sockets.

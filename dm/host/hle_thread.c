@@ -19,6 +19,7 @@
 #include <time.h>
 #include <mach/mach.h>
 #include <pthread/qos.h>
+#include <stdatomic.h>
 #include <dlfcn.h>
 #include <stdatomic.h>
 
@@ -107,6 +108,9 @@ static pthread_mutex_t G = PTHREAD_MUTEX_INITIALIZER;
 #define MAX_H 4096
 static struct { int type; void *obj; } g_h[MAX_H];
 static pthread_key_t g_keythr;
+// Set once svc_thread_main_init has made g_keythr. Before that the key is 0, and on Darwin slot 0 of every thread holds the thread's own pthread
+// structure, so pthread_getspecific(0) is never NULL: a host thread that asked before then was taken for a guest thread (dm_thread_native_wait)
+static atomic_bool g_keythr_made;
 static uint64_t g_next_id = 0x51;
 static thr_t *g_wait;          // All waiting threads (lock / condition / address / synchronization)
 
@@ -197,6 +201,8 @@ void dm_thread_service_request(void) {
 // between publishing its blocked state and pthread_cond_wait releasing that
 // mutex. On return it is runnable before it goes back to guest code.
 void dm_thread_native_wait(int entering) {
+    // a host thread before the guest threads exist: nothing to release (Nextendo's start-of-session work begins while the modules load)
+    if (!atomic_load_explicit(&g_keythr_made, memory_order_acquire)) return;
     thr_t *t = pthread_getspecific(g_keythr);
     if (!t) return;
     pthread_mutex_lock(&G);
@@ -558,7 +564,7 @@ static void hitch_init(void) {
 }
 // Register the main thread and return its handle (passed to nnosInitialize as the main thread handle)
 uint32_t svc_thread_main_init(void) {
-    pthread_key_create(&g_keythr, NULL);
+    pthread_key_create(&g_keythr, NULL); atomic_store_explicit(&g_keythr_made, true, memory_order_release);
     qos_map_init();
     { const char *e = getenv("DM_PREEMPT"); g_core_preempt = e ? atoi(e) != 0 : DM_GAME_CORE_PREEMPT; }
     pause_install();

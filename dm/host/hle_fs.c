@@ -767,20 +767,86 @@ HLE_FORCE("_ZN2nn2fs21MountTemporaryStorageEPKc", "fsp-srv; temporary storage �
     char b[1024]; return mount(name, envdir("DM_TEMP", "run/platform/temp", b, sizeof b), 0);
 }
 // Cache storage (Tears of the Kingdom; its first list call opened fsp-srv and aborted in sm::Initialize): storage <index> is the host folder <temporary storage>_cache<index>,
-// created when it is created or mounted. The list reports none (a fresh console), so the game creates its storage at every boot; creating an existing one succeeds
+// created when it is created or mounted; creating an existing one succeeds
 static const char *cache_dir(int index, char *b, size_t n) { char t[1024]; snprintf(b, n, "%s_cache%d", envdir("DM_TEMP", "run/platform/temp", t, sizeof t), index); return b; }
-HLE_FORCE("_ZN2nn2fs20OpenCacheStorageListEPNS0_22CacheStorageListHandleE", "fsp-srv; cache storage list: reports none", Result, h_fs_OpenCacheList, void *h) { (void)h; return RES_OK; }
-HLE_FORCE("_ZN2nn2fs20ReadCacheStorageListEPiPNS0_16CacheStorageInfoENS0_22CacheStorageListHandleEi", "fsp-srv; cache storage list: reports none", Result, h_fs_ReadCacheList,
-          int *n, void *info, uint64_t h, int max) { (void)info; (void)h; (void)max; *n = 0; return RES_OK; }
-HLE_FORCE("_ZN2nn2fs21CloseCacheStorageListENS0_22CacheStorageListHandleE", "fsp-srv; cache storage list", void, h_fs_CloseCacheList, uint64_t h) { (void)h; }
-HLE_FORCE("_ZN2nn2fs18CreateCacheStorageEill", "fsp-srv; cache storage → host directory", Result, h_fs_CreateCache, int index, int64_t size, int64_t journal) {
-    char b[1100]; LOG("fs create cache storage %d (%lld bytes, journal %lld) → %s", index, (long long)size, (long long)journal, cache_dir(index, b, sizeof b)); mkdir(b, 0755); return RES_OK;
+// The list is the cache storages that exist, as on Horizon: a fresh run has none, and a later one finds those an earlier run created (or a player copied in). Open takes a snapshot, one readdir of the
+// temporary storage's parent for the folders cache_dir names (canonical decimal, index 0..65535), in index order; Read hands it out a page at a time, Close frees it. The handle the game holds
+// is a list number, never a host pointer: a closed or foreign handle finds no list
+typedef struct { uint64_t id; int n, next; uint16_t *index; } cache_list;
+static cache_list g_cache_lists[16];
+static uint64_t g_cache_list_id;
+static pthread_mutex_t g_cache_list_lock = PTHREAD_MUTEX_INITIALIZER;
+static int cmp_u16(const void *a, const void *b) { return (int)*(const uint16_t *)a - (int)*(const uint16_t *)b; }
+static int cache_list_scan(uint16_t **out) {
+    char path[1100]; cache_dir(0, path, sizeof path); path[strlen(path) - 1] = 0;   // "<temporary storage>_cache"
+    char *leaf = strrchr(path, '/'); const char *dir = ".", *prefix = path;
+    if (leaf) { *leaf = 0; dir = *path ? path : "/"; prefix = leaf + 1; }
+    *out = NULL; DIR *d = opendir(dir); if (!d) return 0;
+    size_t pl = strlen(prefix); int n = 0, cap = 0; struct dirent *e;
+    while ((e = readdir(d))) {
+        const char *s = e->d_name + pl; char *end; struct stat st;
+        if (strncmp(e->d_name, prefix, pl) || *s < '0' || *s > '9' || (*s == '0' && s[1])) continue;
+        unsigned long i = strtoul(s, &end, 10);
+        if (*end || i > 0xFFFF || fstatat(dirfd(d), e->d_name, &st, 0) || !S_ISDIR(st.st_mode)) continue;
+        if (n == cap) { uint16_t *v = realloc(*out, (size_t)(cap = cap ? cap * 2 : 16) * sizeof **out); if (!v) break; *out = v; }
+        (*out)[n++] = (uint16_t)i;
+    }
+    closedir(d);
+    if (n) qsort(*out, (size_t)n, sizeof **out, cmp_u16);
+    return n;
+}
+static cache_list *cache_list_find(uint64_t h) {   // under g_cache_list_lock
+    for (size_t i = 0; h && i < sizeof g_cache_lists / sizeof *g_cache_lists; i++) if (g_cache_lists[i].id == h) return &g_cache_lists[i];
+    return NULL;
+}
+HLE_FORCE("_ZN2nn2fs20OpenCacheStorageListEPNS0_22CacheStorageListHandleE", "fsp-srv; cache storage list: the cache folders that exist", Result, h_fs_OpenCacheList, uint64_t *h) {
+    uint16_t *index; int n = cache_list_scan(&index);
+    pthread_mutex_lock(&g_cache_list_lock);
+    cache_list *l = NULL; for (size_t i = 0; !l && i < sizeof g_cache_lists / sizeof *g_cache_lists; i++) if (!g_cache_lists[i].id) l = &g_cache_lists[i];
+    if (l) { *l = (cache_list){.id = ++g_cache_list_id, .n = n, .index = index}; *h = l->id; }
+    pthread_mutex_unlock(&g_cache_list_lock);
+    if (!l) { free(index); LOG("[RED] fs::OpenCacheStorageList: %zu lists open, none closed", sizeof g_cache_lists / sizeof *g_cache_lists); return RES_FAIL; }
+    LOG("fs cache storage list: %d", n); return RES_OK;
+}
+HLE_FORCE("_ZN2nn2fs20ReadCacheStorageListEPiPNS0_16CacheStorageInfoENS0_22CacheStorageListHandleEi", "fsp-srv; cache storage list: the cache folders that exist", Result, h_fs_ReadCacheList,
+          int *n, void *info, uint64_t h, int max) {
+    pthread_mutex_lock(&g_cache_list_lock);
+    cache_list *l = cache_list_find(h); *n = 0;
+    for (; l && l->next < l->n && *n < max; (*n)++) {   // CacheStorageInfo: 0x20 bytes, the index (s32) first, the rest reserved (zero)
+        uint8_t *e = (uint8_t *)info + (size_t)*n * 0x20; int32_t i = l->index[l->next++];
+        memset(e, 0, 0x20); memcpy(e, &i, sizeof i);
+    }
+    pthread_mutex_unlock(&g_cache_list_lock);
+    if (!l) { LOG("[RED] fs::ReadCacheStorageList: handle %#llx is no open list", (unsigned long long)h); return RES_FAIL; }
+    return RES_OK;
+}
+HLE_FORCE("_ZN2nn2fs21CloseCacheStorageListENS0_22CacheStorageListHandleE", "fsp-srv; cache storage list", void, h_fs_CloseCacheList, uint64_t h) {
+    pthread_mutex_lock(&g_cache_list_lock);
+    cache_list *l = cache_list_find(h); uint16_t *index = l ? l->index : NULL;
+    if (l) *l = (cache_list){0};
+    pthread_mutex_unlock(&g_cache_list_lock);
+    free(index);
+}
+// A cache storage's size is the one it was created with (GetCacheStorageSize reports it, as Horizon does): CreateCacheStorage writes it beside the folder, <folder>.size = "<data> <journal>"
+// (the list skips that name). Creating one that exists keeps its record, as its size does not change; a folder with no record (made by MountCacheStorage, an older host or the player) gets none
+static const char *cache_size_path(int index, char *b, size_t n) { char d[1100]; snprintf(b, n, "%s.size", cache_dir(index, d, sizeof d)); return b; }
+static void cache_size_put(int index, int64_t size, int64_t journal) {
+    char p[1200], t[1300]; cache_size_path(index, p, sizeof p); snprintf(t, sizeof t, "%s.tmp", p);
+    if (!access(p, F_OK)) return;
+    FILE *f = fopen(t, "w"); int bad = !f || fprintf(f, "%lld %lld\n", (long long)size, (long long)journal) < 0;
+    if (f && fclose(f)) bad = 1;
+    if (bad || rename(t, p)) { LOG("[RED] fs cache storage %d: cannot record its size in %s (%s)", index, p, strerror(errno)); unlink(t); }
+}
+HLE_FORCE("_ZN2nn2fs18CreateCacheStorageEill", "fsp-srv; cache storage → host directory, its size recorded beside it", Result, h_fs_CreateCache, int index, int64_t size, int64_t journal) {
+    char b[1100]; LOG("fs create cache storage %d (%lld bytes, journal %lld) → %s", index, (long long)size, (long long)journal, cache_dir(index, b, sizeof b));
+    if (mkdir(b, 0755) && errno != EEXIST) { LOG("[RED] fs create cache storage %d: %s", index, strerror(errno)); return RES_FAIL; }
+    cache_size_put(index, size, journal); return RES_OK;
 }
 HLE_FORCE("_ZN2nn2fs17MountCacheStorageEPKci", "fsp-srv; cache storage → host directory", Result, h_fs_MountCache, const char *name, int index) {
     char b[1100]; cache_dir(index, b, sizeof b); mkdir(b, 0755); return mount(name, b, 0);
 }
 HLE_FORCE("_ZN2nn2fs18DeleteCacheStorageEi", "fsp-srv; cache storage → deletes the host directory", Result, h_fs_DeleteCache, int index) {
-    char b[1100]; rm_tree(cache_dir(index, b, sizeof b)); return RES_OK;
+    char b[1100]; rm_tree(cache_dir(index, b, sizeof b)); unlink(cache_size_path(index, b, sizeof b)); return RES_OK;
 }
 HLE_FORCE("_ZN2nn2fs17MountCacheStorageEPKc", "fsp-srv; cache storage 0 → host directory (SDK 11 one-argument form, Monster Hunter Rise)", Result, h_fs_MountCache0, const char *name) { return h_fs_MountCache(name, 0); }
 // Save data size (Monster Hunter Rise, SDK 11): the save directory has no size of its own, so it reports 256 MB of data and journal, more than a game asks for; extending succeeds without doing anything
@@ -792,8 +858,46 @@ HLE_FORCE("_ZN2nn2fs15GetSaveDataSizeEPlS1_RKNS_7account3UidE", "fsp-srv; save d
 HLE_FORCE("_ZN2nn2fs18GetSaveDataSizeMaxEPlS1_", "fsp-srv; largest save data size: 256 MB data + 256 MB journal", Result, h_fs_SaveSizeMax, int64_t *size, int64_t *journal) {
     if (size) *size = 256 << 20; if (journal) *journal = 256 << 20; return RES_OK;
 }
-HLE_FORCE("_ZN2nn2fs19GetCacheStorageSizeEPlS1_i", "fsp-srv; cache storage size: 256 MB data + 256 MB journal", Result, h_fs_CacheSize, int64_t *size, int64_t *journal, int index) {
-    (void)index; if (size) *size = 256 << 20; if (journal) *journal = 256 << 20; return RES_OK;
+// The application's control data (control.nacp: nn::ns::ApplicationControlProperty, 0x4000 bytes, little-endian), which Horizon serves the SDK from the installed title: DM_CONTROL_NACP, else
+// control.nacp beside the RomFS (the NSP script's extraction folder <version>/{RomFS,control.nacp}, the Mac app's Resources). 0 = len bytes read at off
+static int control_read(off_t off, void *out, size_t len) {
+    char p[1100], b[1024]; const char *e = getenv("DM_CONTROL_NACP");
+    if (e && *e) snprintf(p, sizeof p, "%s", e);
+    else {
+        snprintf(p, sizeof p, "%s", envdir("DM_ROMFS", "romfs", b, sizeof b));
+        size_t k = strlen(p); while (k > 1 && p[k - 1] == '/') p[--k] = 0;
+        char *sl = strrchr(p, '/'); if (sl) sl[1] = 0; else p[0] = 0;
+        strlcat(p, "control.nacp", sizeof p);
+    }
+    int fd = open(p, O_RDONLY); ssize_t r = fd < 0 ? -1 : pread(fd, out, len, off);
+    if (fd >= 0) close(fd);
+    if (r != (ssize_t)len) { LOG("[RED] control data: %s %s", p, fd < 0 ? "is missing" : "is too short"); return -1; }
+    return 0;
+}
+// The cache storage limits the application declares: CacheStorageDataAndJournalSizeMax (s64 at 0x3180) and CacheStorageIndexMax (u16 at 0x3188). Without the SDK's service the call read a null
+// object (Just Dance 25.0.3, SDK 14: SIGSEGV at sdk+0x34fb44, issue #1049). No control data: an error, not a guessed limit
+HLE_FORCE("_ZN2nn2fs18GetCacheStorageMaxEPiPl", "fsp-srv; cache storage limits from the application's control data", Result, h_fs_CacheMax, int *index, int64_t *size) {
+    uint8_t c[10]; if (control_read(0x3180, c, sizeof c)) return RES_TARGET_NOT_FOUND;
+    int64_t sz; memcpy(&sz, c, sizeof sz); int i = c[8] | c[9] << 8;
+    if (index) *index = i;
+    if (size) *size = sz;
+    LOG("fs cache storage max: index %d, %lld bytes of data and journal", i, (long long)sz); return RES_OK;
+}
+// The size a cache storage was created with (its record, CreateCacheStorage above). A folder without one: the application's default cache storage size from its control data (CacheStorageSize
+// and CacheStorageJournalSize, s64 at 0x3170 / 0x3178), else 256 MB of each, more than a game asks for. No storage: ResultTargetNotFound, as on Horizon
+HLE_FORCE("_ZN2nn2fs19GetCacheStorageSizeEPlS1_i", "fsp-srv; cache storage size: the size it was created with", Result, h_fs_CacheSize, int64_t *size, int64_t *journal, int index) {
+    char b[1200]; struct stat st;
+    if (stat(cache_dir(index, b, sizeof b), &st) || !S_ISDIR(st.st_mode)) { LOG("fs cache storage size %d: no such storage", index); return RES_TARGET_NOT_FOUND; }
+    long long s = 0, j = 0; const char *from = "its record"; FILE *f = fopen(cache_size_path(index, b, sizeof b), "r");
+    if (!f || fscanf(f, "%lld %lld", &s, &j) != 2) {
+        int64_t c[2] = {0, 0}; from = "the control data's default";
+        if (control_read(0x3170, c, sizeof c) || (!c[0] && !c[1])) { c[0] = c[1] = 256 << 20; from = "no record and no default: 256 MB"; }
+        s = c[0]; j = c[1];
+    }
+    if (f) fclose(f);
+    if (size) *size = s;
+    if (journal) *journal = j;
+    LOG("fs cache storage size %d: %lld bytes, journal %lld (%s)", index, s, j, from); return RES_OK;
 }
 HLE_FORCE("_ZN2nn2fs16GetFreeSpaceSizeEPlPKc", "fsp-srv; free space of a mount: 256 MB (the host directory has no size limit of its own)", Result, h_fs_FreeSpace, int64_t *out, const char *path) {
     (void)path; if (out) *out = 256 << 20; return RES_OK;

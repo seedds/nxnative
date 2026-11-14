@@ -240,6 +240,8 @@ static NSString *program_env(void) {
     setenv("DM_ROMFS", romfs.fileSystemRepresentation, 0);
     setenv("DM_NVN_SHMAP", [dmdir stringByAppendingPathComponent:@"shader_map.tsv"].fileSystemRepresentation, 0);
     setenv("DM_MSL_DIR", msl.fileSystemRepresentation, 0);
+    NSString *control = [dmdir stringByAppendingPathComponent:@"control.nacp"];   // the game's control data (build_ipa.sh program_tables; hle_fs.c control_read)
+    if ([fm fileExistsAtPath:control]) setenv("DM_CONTROL_NACP", control.fileSystemRepresentation, 0);
     return dmdir;
 }
 static int g_boot_ok;

@@ -20,6 +20,7 @@ DM_CHEATS_ANY_BUILD	switch	`1` loads a cheat file written for another build of t
 DM_CHEATS_DEBUG	diagnostic	Logs every memory write a cheat makes and the cheat file context the menu's "another version" rows come from
 DM_CHEATS_ON	switch	Comma-separated cheat names turned on at launch, besides the saved per-build enabled states
 DM_CHEATS_WINDOW	switch	`1` opens the Mac Cheats panel beside the game from the start
+DM_CONTROL_NACP	path	The game's control data, `control.nacp` (default: `control.nacp` beside the RomFS, as in the NSP script's extraction folder and the Mac app's Resources); the iOS app sets it to its `dm/control.nacp`. The host answers `fs::GetCacheStorageMax` from it
 DM_COPY_GAME_RESOURCES	switch	`NO` skips the Xcode build phase that copies the game's resources into the app (`stage_resources.sh`, on by default); `build_ipa.sh` sets it for its unsigned build, which packs them itself
 DM_COPY_ROMFS	switch	`NO` keeps the game files out of the app, in the Xcode build phase (`stage_resources.sh`) and in the unsigned IPA of `build_ipa.sh` (on by default): `main.m` takes the validated `Documents/romfs.img` copied by `scripts/push_romfs.sh`, then a `Documents/romfs` folder; the build writes the image's identity as `romfs.id` into the app, and `main.m` uses only a matching image (`--romfs separate` of the NSP script sets this)
 DM_CRASH_PEEK	diagnostic	`="sp+0x248*,x22-0x20"` adds 0x100 bytes at each address to the crash report: `sp` or a register plus or minus an offset, a trailing `*` reading the pointer stored there first
@@ -37,7 +38,7 @@ DM_ENV_FILE	path	`=<file>` makes `build_ipa.sh` bake its `KEY=VALUE` lines into 
 DM_ENV_FILE_KEYS	switch	Set by the iOS app and the Mac launcher at launch to the space-separated names an env file set; the settings screen keeps those values and shows them greyed out
 DM_ENV_LAUNCH_KEYS	switch	Set at launch by the Mac launcher (the launcher settings already in the environment) and the iOS app (every DM_* variable already in it) to the space-separated names; the settings screen keeps those values and shows them greyed out
 DM_EXEC_OUT	path	File `oe::ExecuteProgram` records the next program and its parameters in, then the app ends (the iOS app of a game of several programs sets it to `Documents/program.bin`)
-DM_EXFAT_DIR	test	A folder on an exFAT volume: `test_shader_cache.py` also runs `test_on_the_drive` there, where a new cache's file takes another inode at its first write
+DM_EXFAT_DIR	test	`=<folder on an exFAT volume>`: `test_shader_cache.py` (`Renumbered`) makes its cache files there, so `test_on_the_drive` writes and reads 200 entries on that drive, whose new file may take another inode at its first write (issue #2434), without checking how often the store opened it
 DM_FD_LOG	diagnostic	`=<seconds>` logs, every that many seconds, the number and kinds of file descriptors the process has open
 DM_FIXED_TIME	switch	`=<seconds>`: the user clock always returns that time and the host time zone is pinned to UTC, for deterministic comparison
 DM_FOCUS_KEEP	switch	`1` keeps the game in focus while its Mac window is up, whichever app is active (minimizing still counts); `scripts/regress.py` sets it, so another app taking the key window during a run does not pause a game that stops out of focus

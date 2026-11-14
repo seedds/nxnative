@@ -129,6 +129,8 @@ else cp "$GD/shader_map.tsv" "$GD/pso_manifest.tsv" "$GD/c1_full.tsv" $TD/ || di
   for f in shader_pairs.tsv pso_pairs.tsv; do if [ -f "$GD/$f" ]; then cp "$GD/$f" $TD/ || die "copy $f"; fi; done; fi   # optional
 # The launcher's settings for this game (Launcher.swift): dm/games/settings.tsv filtered by the profile, main's rewriter table and the game's languages (dm/games/settings.py)
 L=$(GFXAPI="$GFXAPI" python3 "$DM/games/settings.py" "$GAME" "$PATCHED" "$VNACP" $TD/launcher.json) || die "launcher settings (dm/games/settings.py)"; t "launcher: $L"
+# The game's control data, which the host answers control-property queries from (hle_fs.c control_read: fs::GetCacheStorageMax); main.m names it in DM_CONTROL_NACP
+if [ -f "$VNACP" ]; then cp "$VNACP" $TD/control.nacp || die "copy $VNACP"; else t "[RED] no control data at $VNACP: fs::GetCacheStorageMax fails in the app"; fi
 }
 if [ -n "${PROGRAMS_TSV:-}" ]; then
   : > Gen/dm/programs.txt

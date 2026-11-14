@@ -246,14 +246,14 @@ Most service calls can be found before they crash, before the first boot or the 
 
 - **Symptom:** SIGSEGV at address 0 in `nn::fs::GetSaveDataSizeMax`, about 13 minutes into a new game.
 - **Cause:** Unreal's save system asks before its first save; the SDK's version reads the fsp-srv object the host never made.
-- **Fix:** it reports 256 MB of data and journal, as `GetSaveDataSize` does (`hle_fs.c`). `fs::GetCacheStorageSize` and `fs::GetFreeSpaceSize` give the same answers. Also hooked: `fs::GetSaveDataSize` / `ExtendSaveData` and the one-argument `fs::MountCacheStorage`.
+- **Fix:** it reports 256 MB of data and journal, as `GetSaveDataSize` does (`hle_fs.c`). `fs::GetFreeSpaceSize` gives the same answer; `fs::GetCacheStorageSize` reports the size the storage was created with ([Cache storage limits and the cache storage list](#cache-storage-limits-and-the-cache-storage-list)). Also hooked: `fs::GetSaveDataSize` / `ExtendSaveData` and the one-argument `fs::MountCacheStorage`.
 - **Found on:** [Octopath Traveler 0](../../dm/games/01005270232F2000/README.md) (`GetSaveDataSizeMax`, `GetCacheStorageSize`, `GetFreeSpaceSize`, found by the import list); [Monster Hunter Rise](../../dm/games/0100B04011742000/README.md) (SDK 11: `GetSaveDataSize`, `ExtendSaveData`, `MountCacheStorage`).
 
 ### Cache storage and other titles' save data
 
 - **Symptom:** each aborted in `sm::Initialize` or read a null applet proxy, one per boot.
 - **Cause:** SDK 20 file system calls that reach a service.
-- **Fix:** cache storage: `OpenCacheStorageList` / `ReadCacheStorageList` report none, `CreateCacheStorage` / `MountCacheStorage` use a host folder beside the temporary storage. `fs::IsSaveDataExisting(ApplicationId, Uid)` for another title (it asks for Breath of the Wild's save: none) and `MountSaveDataReadOnly`.
+- **Fix:** cache storage: `OpenCacheStorageList` / `ReadCacheStorageList` list the cache folders that exist, none on a fresh run ([Cache storage limits and the cache storage list](#cache-storage-limits-and-the-cache-storage-list)), `CreateCacheStorage` / `MountCacheStorage` use a host folder beside the temporary storage. `fs::IsSaveDataExisting(ApplicationId, Uid)` for another title (it asks for Breath of the Wild's save: none) and `MountSaveDataReadOnly`.
 - **Found on:** [The Legend of Zelda: Tears of the Kingdom](../../dm/games/0100F2C0115B6000/README.md) (1.4.3, the same `sdk` build as Breath of the Wild 1.9.0).
 
 ### A read-only mount of the game's own save data
@@ -347,6 +347,14 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Fix:** the shared array holds 2000 indices, covering the scanner's existing accepted range (1..2000), and a static buffer holds the complete index log without increasing guest-stack use. Folder and `.img` discovery, sorting, deduplication, pagination and `DM_AOC_OWNED=0` retain their behavior. This applies to every game using the add-on content hooks.
 - **Open:** the existing 1..2000 acceptance range is retained; it is not established here as Horizon's full legal range. More than 2000 accepted folder/image entries can still fill the array before deduplication, even when their unique indices fit.
 - **Found on:** [Super Smash Bros. Ultimate](../../dm/games/01006A800016E000/README.md) (13.0.5, 99 DLC licences; PR #441).
+
+### Cache storage limits and the cache storage list
+
+- **Symptom:** SIGSEGV at address 0 in `sdk+0x34fb44` at start-up, in `nn::fs::GetCacheStorageMax(int*, long*)` (SDK 14), which reads the SDK's service object and dereferences it. Separately, cache storage the game made on an earlier run (or a player copied in) is not found: the list reported none.
+- **Cause:** no host hook for `GetCacheStorageMax`, whose answer is the application's own control data; `OpenCacheStorageList` / `ReadCacheStorageList` reported none on every run, a fresh console's answer.
+- **Fix:** `GetCacheStorageMax` reads the game's control data (`control_read` in `hle_fs.c`): `CacheStorageDataAndJournalSizeMax` (s64 at 0x3180) and `CacheStorageIndexMax` (u16 at 0x3188) of `control.nacp`, from `DM_CONTROL_NACP`, else beside the RomFS: the NSP script's extraction folder (`<version>/control.nacp`, so `regress.py` and Mac runs need nothing), the Mac app's `Resources` (`pack_app.py --control-nacp`), the iOS app's `dm/control.nacp` (`build_ipa.sh`, which `main.m` names). No control data is a `[RED]` line and an error, not a guessed limit. The list is the `<DM_TEMP>_cache<N>` folders that exist: `OpenCacheStorageList` takes a snapshot (one `readdir` of their parent), `ReadCacheStorageList` hands it out in index order as 0x20-byte `CacheStorageInfo` records (the index, the rest zero), and the handle is a list number, never a host pointer. A storage's size is the one it was created with, as on Horizon: `CreateCacheStorage` records it beside the folder (`<folder>.size`, which the list skips; creating it again keeps it, `DeleteCacheStorage` removes it), and `GetCacheStorageSize` reports it. A folder with no record (made by `MountCacheStorage`, an older host or the player) gets the control data's default (`CacheStorageSize` / `CacheStorageJournalSize` at 0x3170 / 0x3178), else 256 MB of each; a storage that does not exist is `ResultTargetNotFound`.
+- **Found on:** Just Dance 25.0.3 (0100BEE017FC0000, SDK 14; no profile in this repository, [issue #1049](https://github.com/seedds/nxnative/issues/1049)): a diagnostic host passed the crash, mounted nine cache storages and read the offline save. [Tears of the Kingdom](../../dm/games/0100F2C0115B6000/README.md) created cache storage 0 (54,198,272 bytes, journal 180,224) and mounted it as `savct`, then `savc`, at every boot because the list was empty; from its second run on it now finds it.
+- **Open:** the record layout was read from SDK 14's `ReadCacheStorageList` only. Tears of the Kingdom's second boot with the list is not run yet (no build of it on the test Mac); no other local game makes cache storage on its route (OCTOPATH TRAVELER 0 and II, Princess Peach: Showtime!, Yoshi and the Mysterious Book and Orbitals list it and find none).
 
 ### Add-on content mount cache sized as RomFS working memory
 

@@ -95,8 +95,38 @@ static int test_output_lifetime(void) {
     printf("AudioOut fields and lifetime (%s): %d guarded open / close / unmap / resume cycles, no consumer left\n", real_audio() ? "real output" : "silent sink", CYCLES);
     return 0;
 }
+// DM_AUDIO_FRONTEND=1: no AudioUnit and no silent sink; the app's pull plays the started outputs (stereo as it is, mono doubled), counts what held the game's PCM, releases the
+// played buffers in order with their event, and answers -1 (nothing playing) before Start and after Stop
+static int test_frontend_output(void) {
+    enum { N = 480 };
+    char out[64], mono[64], ev[64]; uint8_t prm[16]; gbuf b[2], bm; static int16_t pcm[2][N * 2], pcm_m[N]; int16_t dst[600 * 2];
+    for (int i = 0; i < N * 2; i++) { pcm[0][i] = 1000; pcm[1][i] = 2000; }
+    for (int i = 0; i < N; i++) pcm_m[i] = 100;
+    setenv("DM_AUDIO_FRONTEND", "1", 1); g_sig = 0;
+    h_au_InitParam(prm);
+    if (h_au_Open(out, ev, NULL, prm)) return 1;
+    *(uint16_t *)(prm + 4) = 1; if (h_au_Open(mono, NULL, NULL, prm)) return 1;
+    if (ao(out)->au || ao(mono)->au) { puts("FAIL front end output: an AudioUnit was made"); return 1; }
+    for (int i = 0; i < 2; i++) { h_au_SetBuf(&b[i], pcm[i], sizeof pcm[i], sizeof pcm[i]); h_au_Append(out, &b[i]); }
+    h_au_SetBuf(&bm, pcm_m, sizeof pcm_m, sizeof pcm_m); h_au_Append(mono, &bm);
+    if (dm_frontend_audio_pull(dst, 600) != -1) { puts("FAIL front end output: a pull before Start is not silence (-1)"); return 1; }
+    h_au_Start(out); h_au_Start(mono);
+    int got = dm_frontend_audio_pull(dst, 600);
+    int ok = got == 600 && dst[0] == 1100 && dst[1] == 1100 && dst[2 * N - 1] == 1100 && dst[2 * N] == 2000 && dst[2 * 600 - 1] == 2000;
+    if (!ok) { printf("FAIL front end output: first pull returned %d, samples %d %d %d %d\n", got, dst[0], dst[2 * N - 1], dst[2 * N], dst[2 * 600 - 1]); return 1; }
+    got = dm_frontend_audio_pull(dst, 600);
+    ok = got == N * 2 - 600 && dst[0] == 2000 && dst[2 * (N * 2 - 600) - 1] == 2000 && dst[2 * (N * 2 - 600)] == 0;
+    if (!ok) { printf("FAIL front end output: underrun pull returned %d (expected %d)\n", got, N * 2 - 600); return 1; }
+    if (h_au_Released(out) != &b[0] || h_au_Released(out) != &b[1] || h_au_Released(mono) != &bm || atomic_load(&g_sig) != 2) { puts("FAIL front end output: release order or events"); return 1; }
+    h_au_Stop(out); h_au_Stop(mono);
+    if (dm_frontend_audio_pull(dst, 600) != -1) { puts("FAIL front end output: a pull after Stop is not silence (-1)"); return 1; }
+    h_au_Close(out); h_au_Close(mono);
+    unsetenv("DM_AUDIO_FRONTEND"); *(uint16_t *)(prm + 4) = 2; g_sig = 0;
+    puts("front end output: no AudioUnit, stereo and doubled mono mixed, underrun counted, buffers released in order, silence before Start and after Stop");
+    return 0;
+}
 int main(void) {
-    if (test_surround_output() || test_output_lifetime()) return 1;
+    if (test_surround_output() || test_frontend_output() || test_output_lifetime()) return 1;
     char out[64], ev[64]; uint8_t prm[16]; gbuf b[3]; static int16_t pcm[3][4800 * 2];
     h_au_InitParam(prm);
     if (h_au_Open(out, ev, NULL, prm)) return 1;

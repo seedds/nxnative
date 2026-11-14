@@ -18,12 +18,13 @@ A dated record of what is done, what is in progress and what is left on the Wind
 | `8ef8546` | Host tests: the profile half of the second-pack loop (`aot_synth`'s entry runs `synth_hot` for 20 ms; `t_second_pack` 27 checks). Verified in Docker |
 | `8caf012` | Launcher: the better-pack rule counts sampled functions (`# function` lines in the host's profile); `t_launcher_model` 154 checks. Verified in Docker |
 | `da9f34b` | Host tests: the runners run the script tests (`t_vk_spirv`, `t_second_pack`) from `host_scripts.tsv`. Verified in Docker on Linux; the PowerShell runner not run |
-| (this commit's parent) | Port: `nvn_state.c`'s `SLOG` writes a line in one stdio call outside Apple; `port.yml` uploads `host_scripts.tsv` for the Windows job. Verified in Docker (99 of 99 twice) |
+| `93b94dd` | Port: `nvn_state.c`'s `SLOG` writes a line in one stdio call outside Apple; `port.yml` uploads `host_scripts.tsv` for the Windows job. Verified in Docker (99 of 99 twice) |
 
 Done on the machine, not in the repository: Docker emptied on the owner's request (every image and container, the owner's other projects' included; the data volumes `aitrade_pgdata`, `smilepetstore_pgdata`, `smilepetstore_redisdata` kept).
 
 ### Checked
 
+- Windows cross-build at `93b94dd`, done locally as CI's `win64-cross` job does it (`mstorsjo/llvm-mingw:20261020`, `-DNXHOST_PROGRAM=ON -DNXHOST_LAUNCHER=ON`, targets `all nxhost-run nxlauncher`): builds and links, 84 `.exe`, 24 warnings and no error. This covers every commit since CI's last run (2026-10-29) for compiling on Windows; nothing was run on Windows.
 - Python suites at `649d422` without Docker: `test_docs` 10 of 10, the symptom index check and `env_switches.py --check` pass. The other suites end in errors only where this PC lacks `lz4`, `capstone`, the Mac tools, APFS or `DM_GAME`.
 - GitHub Actions: no run since 2026-10-29 for any later commit. `port` and `aot` are active and their triggers match a push to this branch; `tests` was disabled by hand on 2026-10-31. The reason is not visible through the API: the repository's Actions settings and the account's billing are to be checked by the owner.
 

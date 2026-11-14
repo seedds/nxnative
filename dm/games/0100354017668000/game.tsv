@@ -1,0 +1,52 @@
+# Game profile of A Little to the Left (Switch, update 3.6.0 = v1179648, with its two DLC). Plays on the Mac and an iPhone
+# Format: see dm/games/README.md
+# Unity 2020.3.26f1 (IL2CPP) with FMOD, SDK 13.3.7, NVN API 55.15; subsdk0 is NintendoSDK_movie.
+# The shaders are Unity shader objects in the player's serialized files and bundles under Data/, read by the shader split: 4,063 of them (2,001 vertex, 2,005 pixel, 56 compute, 1 geometry).
+# Started from the NSP script's provisional profile; stdalloc_cap and fps_target added (README.md).
+
+# ---- Identity ----
+title_id	0100354017668000
+program_id	0100354017668000
+
+# ---- App ----
+# Game name: only a label for profile listings and the Mac window title; the iOS app name is the game name in the base NSP, and the bundle ID comes from the base game title ID
+name	A Little to the Left
+ipa	ALittleToTheLeft.ipa
+app_category	public.app-category.games
+
+# ---- Versions ----
+build	v1179648	3.6.0	main=eabc67cc4cf58a9e9faa1ec95c8dd5d6	subsdk0=525feff80957be306b46b74636256582	sdk=9c73fb73f529fedc9ffefa28246711cc
+package	v1179648
+shader_versions	v1179648
+
+# ---- Files ----
+# load order as on Horizon: main, subsdk*, sdk (subsdk0 = NintendoSDK_movie)
+modules	main subsdk0 sdk
+romfs_marker	Data/sharedassets1.assets.resS
+zip_store	.assets:.bundle:.dat:.json:.resource:.ress:.metallib
+
+# ---- Memory ----
+# The NPDM declares 16 MB of system resource, so the game takes its memory as address regions; it sets no heap. nninitStartup gives StandardAllocator the pool less what is used,
+# 3.14 GB at alias +0.06 GB, and Unity's own regions come after it. In the iPhone's 4.375 GB alias region they ran past the end when Play loads the first level: the iPhone
+# crashed writing 0x1fffe0 (main+0x82b7a8), the Mac with DM_ALIAS_SIZE=0x118000000 stopped on an empty screen with the high-water mark at +4.26 GB and 1.01 GB mapped.
+# stdalloc_cap gives StandardAllocator 2 GB of address space instead, about twice what the game maps; the pool stays the Switch's (README.md, Memory).
+sys_resource	0x1000000
+mem_reserve	0x140000000
+mem_alias	0x118000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+stdalloc_cap	0x80000000
+
+# ---- Shader split (shader_split.py; Unity shader objects) ----
+# everything is under Data/: the player's serialized files and its bundles
+shader_groups	/Data/=data
+shader_note	A Little to the Left shaders
+
+# ---- Graphics ----
+# the game calls nvnDeviceSetDepthMode with near = 0 (the NSP script's heap check boot): the pipeline bases made before it runs are made for that mode
+depth_mode	zero
+
+# ---- Frame rate ----
+# The game runs at 60 fps, as on the Switch (Unity's vSyncCount 1). The host finds Unity's vSyncCount and targetFrameRate through the internal-call table (dm/tools/unity_fps.py),
+# so the player's Frame rate offers 30 fps, at the same game speed (Unity steps by the time that passed).
+fps_target	60

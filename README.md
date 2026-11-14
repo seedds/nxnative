@@ -67,7 +67,7 @@ python3 -m pip install lz4 "capstone>=5,<6" fonttools nsz zbic "backports.zstd; 
 **2. Building**:
 
   #### Switch 1 games:
-Put your game and any updates or DLC you wish to include in a folder. For the switch 1 these file extensions will be `.nsp`, `.xci`, `.nsz`, and `.xcz`. 
+Put your game and any updates or DLC you wish to include in a folder. For Switch 1 games, these file extensions are `.nsp`, `.xci`, `.nsz`, and `.xcz`.
 ```
 ~/Games/MarioWonder/
   Super Mario Bros. Wonder [010015100B514000][v0].nsp
@@ -82,7 +82,7 @@ The IPA or Mac App will appear in the game's folder. The first build takes 30–
 
 For all other build command options view: [The packing script in detail](docs/development.md#the-packing-script-in-detail).
 
-#### Switch 2 games:
+  #### Switch 2 games:
 Switch 2 games are either built from one [NUP](https://github.com/a55uka/nup) container (a `.nup` file) or a folder with the game's contents, neither of which need `prod.keys`. If a game has no premade profile in this project, it is surveyed and receives a provisional profile as NSPs do ([Port another game](docs/development.md#port-another-game)). Games with provisional profiles may not boot. You get a Mac app; iPhone and iPad are untested.
 
 **From a `.nup` file**, which holds the base game, its updates and DLC in one file. Give the file, or a folder that holds it:

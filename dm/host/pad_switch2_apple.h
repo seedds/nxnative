@@ -53,6 +53,12 @@ typedef struct {
     uint16_t stick[2][2];     // the latest raw 12-bit x, y of each stick (index 1 only on a Pro Controller 2)
     uint32_t clock_ms;        // the controller's clock at that report (the s2_clock milliseconds the session already keeps)
     int saving;               // a save on it is running
+    char firmware[40];        // "2.1.4 (DSP 0.2.3)", empty until it is read after the handshake
+    int has_colour; uint8_t colour[4][3];   // body, buttons, highlight, grip (S2_COLOUR_*), red green blue, from the identity block
+    uint16_t battery_mv;      // the latest report's battery voltage
+    int battery_level;        // about 0..100 from the controller's own thresholds (s2_battery_level, inferred), -1 unknown
+    int charging;             // the report's charge status is not 0 (on a cable)
+    int pairings, paired_here;   // the hosts in its pairing table (-1 unknown) and whether this one is among them
 } dm_sw2_info;
 int dm_switch2_on(void);                                   // dm_switch2_start returned 1
 int dm_switch2_controllers(dm_sw2_info *out, int max);     // connected controllers whose handshake finished, oldest connection first, at most max; returns the count
@@ -66,3 +72,8 @@ int dm_switch2_saving(void);                               // some save is runni
 // stick's own. Kept in this app's defaults under the controller's serial and the stick (the controller refuses writes to its own), so it holds at each connect. Ignored for an
 // unknown id or a slot the controller has no stick in
 void dm_switch2_set_dead_zone(uint32_t id, int slot, float share);
+// Actions on controller id, ignored for an unknown id and refused (a log line) while a save runs on it: identify flashes its player lights and plays the console's search tone for
+// four seconds; rumble_test plays a buzz of about a second; power_off turns it off (it disconnects; a button press wakes it)
+void dm_switch2_identify(uint32_t id);
+void dm_switch2_rumble_test(uint32_t id);
+void dm_switch2_power_off(uint32_t id);

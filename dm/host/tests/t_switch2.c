@@ -477,6 +477,44 @@ int main(void) {
         for (int i = 0; i <= 9; i++) n = s2_turns_update(&t, cosf(i * 0.17453293f), sinf(i * 0.17453293f));
         CHECK(fabsf(n - 0.5f) < 0.01f && fabsf(t.winding - 3.14159265f) < 0.01f);             // the jump from the bottom to the right is no turn: two quarters, half a turn
     }
+    // What else a controller tells (the Controller menu and panel), on a Pro Controller 2's answers
+    {
+        s2_report rr; n = unhex("b3240000000000e0ff0f14d882fff77f000000000000000000edff12ffd6fda70d0015080000000000012ee30200fdff000000000000000000000000000000", b);
+        b[0x21] = 0x34; b[0x22] = 0x00; CHECK(s2_report_parse(b, n, &rr) && rr.charge == 0x34);   // the charge status at 0x21, beside the battery's 0x1F
+        b[0x21] = 0; CHECK(s2_report_parse(b, n, &rr) && rr.charge == 0);
+        // the firmware version: 2.1.4 (Pro Controller), Bluetooth 12.0.0, DSP 0.2.3; a Joy-Con's (commands.md's example) has no DSP firmware
+        s2_firmware f; char txt[40];
+        n = unhex("020104020c00000000020300", b); CHECK(s2_firmware_parse(b, n, &f) && f.fw[0] == 2 && f.fw[1] == 1 && f.fw[2] == 4 && f.type == 2 && f.bt[0] == 12 && f.has_dsp && f.dsp[1] == 2);
+        s2_firmware_text(&f, txt, sizeof txt); CHECK(!strcmp(txt, "2.1.4 (DSP 0.2.3)"));
+        n = unhex("01000e010c000000ffffffff", b); CHECK(s2_firmware_parse(b, n, &f) && !f.has_dsp && f.type == 1); s2_firmware_text(&f, txt, sizeof txt); CHECK(!strcmp(txt, "1.0.14"));
+        CHECK(!s2_firmware_parse(b, 6, &f) && !s2_firmware_parse(NULL, 12, &f));
+        // the colours in the identity block, as a Pro Controller 2 holds them
+        uint8_t col[4][3];
+        n = unhex("010048455737303030343132313933330000"   "7e0569200106012323"   "23a0a0a0e6e6e6323232ffffff", b);
+        CHECK(n == 0x28 && s2_info_colours(b, n, col) && col[S2_COLOUR_BODY][0] == 0x23 && col[S2_COLOUR_BUTTONS][2] == 0xA0 && col[S2_COLOUR_HIGHLIGHT][1] == 0xE6 && col[S2_COLOUR_GRIP][0] == 0x32);
+        CHECK(!s2_info_colours(b, 0x24, col));
+        memset(b + 0x19, 0xFF, 12); CHECK(!s2_info_colours(b, n, col));   // blank there
+        // the pairing table: its count, and whether this host's address is in it (the key bytes are never looked at)
+        uint8_t host[6] = {0xFC, 0x9B, 0x37, 0x5F, 0x3E, 0x60}, other[6] = {1, 2, 3, 4, 5, 6}, pt[S2_PAIRINGS_READ]; int here;
+        memset(pt, 0xFF, sizeof pt); pt[0] = 2; memcpy(pt + 8, other, 6); memcpy(pt + 8 + 0x28, host, 6);
+        CHECK(s2_pairings(pt, sizeof pt, host, &here) == 2 && here);
+        pt[0] = 1; CHECK(s2_pairings(pt, sizeof pt, host, &here) == 1 && !here);   // only the first entry counts
+        CHECK(s2_pairings(pt, sizeof pt, NULL, &here) == 1 && !here);           // no host known
+        pt[0] = 0xFF; CHECK(s2_pairings(pt, sizeof pt, host, &here) == -1);     // blank
+        pt[0] = 9; CHECK(s2_pairings(pt, 0x30, host, &here) == 9 && !here);     // more entries than were read: no read past them
+        // the battery level from the controller's thresholds (0x1FB04A on a Pro Controller 2): 3450 mV lies between 3540 (90 %) and 3404 (80 %)
+        uint16_t bt[S2_BATTERY_STEPS];
+        n = unhex("990ed40d4c0dd50c900c660cfd0bf70baa0baa0a", b);
+        CHECK(s2_battery_table(b, n, bt) && bt[0] == 3737 && bt[9] == 2730);
+        CHECK(s2_battery_level(bt, 1, 3450) == 83 && s2_battery_level(bt, 1, 3900) == 100 && s2_battery_level(bt, 1, 3737) == 100 && s2_battery_level(bt, 1, 3540) == 90);
+        CHECK(s2_battery_level(bt, 1, 2730) == 10 && s2_battery_level(bt, 1, 2500) == 0 && s2_battery_level(bt, 0, 3450) == -1 && s2_battery_level(bt, 1, 0) == -1);
+        CHECK(!s2_battery_table(b, n - 1, bt));
+        b[2] = 0xA0; b[3] = 0x0F; CHECK(!s2_battery_table(b, n, bt));         // 4000 after 3737: not descending
+        memset(b, 0xFF, 20); CHECK(!s2_battery_table(b, 20, bt));             // blank
+        // the actions' payload sizes, as the controller took them
+        CHECK(S2_LEDS_FLASH_LEN == 8 && S2_VIB_SAMPLE_LEN == 4 && S2_POWER_OFF_LEN == 12 && S2_SAMPLE_SEARCH == 2);
+    }
+
     printf("t_switch2: %d checks, %d failed\n", checks, fails);
     return fails != 0;
 }

@@ -42,6 +42,11 @@ static inline int motion_map_parse(motion_map *m, const char *s) {
     *m = r;
     return 1;
 }
+// The shake threshold in G (DM_SHAKE_G, the iPhone's Shake sensitivity): a positive number, kept in 0.1...10 (as before, any positive number was taken); unset, 0, negative or no number is the default 1.5
+static inline double motion_shake_threshold(const char *s) {
+    double g = s ? atof(s) : 0;
+    return g > 0 ? (g < 0.1 ? 0.1 : g > 10 ? 10 : g) : 1.5;
+}
 static inline void motion_map_apply(const motion_map *m, const float in[3], float out[3], float scale) {
     for (int i = 0; i < 3; i++) out[i] = m->sign[i] * in[m->src[i]] * scale;
 }

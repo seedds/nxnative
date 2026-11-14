@@ -25,5 +25,11 @@ namespace Ryujinx.Graphics.Shader
         // entries. Those past NxBufferImageBiases are accessed unchanged
         public const int NxBufferImageBiasBank = 26;
         public const int NxBufferImageBiases = 512;
+
+        // nxnative: storage bounds (TranslationFlags.MetalStorageBounds). A storage buffer whose address the shader takes from a game uniform slot or the push constants
+        // (c[3] and up) is bounded by the memory the host bound there, two u32 a storage buffer slot in the table of bank 27 (dm/gfx/nvn/dmsh_abi.h DMSH_SBLEN_BANK, kind
+        // DMSH_KIND_SBLEN), in uint4s: the words readable before the address, then that count plus the words from the address on. Slot s is at u32 2s and 2s + 1
+        public const int NxStorageLengthsBank = 27;
+        public const int NxStorageLengthSlots = 32;
     }
 }

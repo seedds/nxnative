@@ -686,6 +686,7 @@ static void t_touch_sampling(void) {
     const int modes[] = {1, 1, 0, 0, 1, 0};
     for (int i = 0; i < 6; i++) {
         g_mode = modes[i]; memset(s, 0, sizeof s);
+        test_frame++;   // one read per presented frame: the sample is published once a frame
         if (i & 1) CHECK(h_hid_TouchN_16(s, 1) == 1, "touch: GetTouchScreenStates gives one state");
         else h_hid_Touch1_16(s);
         memcpy(&v, s, 8);
@@ -694,6 +695,15 @@ static void t_touch_sampling(void) {
                                 : i == 5 ? "touch: handheld again continues the sampling numbers" : "touch: sampling numbers increase");
         prev = v;
     }
+    // One complete sample is published per guest frame and copied whole to every reader, so two
+    // readers in one frame see the same sampling number and the same Start / End edges (issue #2567:
+    // Animal Crossing's input manager and its own keyboard both read; the second used to see a held point).
+    uint8_t s2[sizeof s]; int64_t a, b;
+    g_mode = 0; memset(s, 0, sizeof s); memset(s2, 0, sizeof s2); test_frame++;
+    h_hid_Touch1_16(s); h_hid_Touch1_16(s2);
+    memcpy(&a, s, 8); memcpy(&b, s2, 8);
+    CHECK(a == b, "touch: two readers in one guest frame share the sampling number");
+    CHECK(memcmp(s, s2, sizeof s) == 0, "touch: two readers in one guest frame get the same sample");
     g_mode = 1;
 }
 

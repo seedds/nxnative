@@ -65,6 +65,42 @@ class Base(unittest.TestCase):
     def blobs(self): return self.store.db.execute('SELECT count(*) FROM blob').fetchone()[0]
 
 
+@unittest.skipIf(sys.version_info < (3, 11), 'an sqlite3 error carries its code from Python 3.11')
+class Renumbered(unittest.TestCase):
+    """A new file that takes another inode at its first write (an exFAT drive under macOS 26.6.2, GitHub issue #2434): SQLite's real SQLITE_READONLY_DBMOVED, made here by
+    putting a copy of the file in its place. DM_EXFAT_DIR=<a folder on an exFAT volume> also runs test_on_the_drive there"""
+    def setUp(self):
+        t = tempfile.TemporaryDirectory(dir=os.environ.get('DM_EXFAT_DIR')); self.addCleanup(t.cleanup)
+        self.path = Path(t.name) / 'sub' / 'cas.db'
+        self.renumber = 0; self.opened = 0; connect = shader_cache.sqlite3.connect; test = self
+
+        class Drive(sqlite3.Connection):
+            def execute(self, sql, *args):
+                cursor = super().execute(sql, *args)
+                if sql.startswith('PRAGMA auto_vacuum') and test.renumber:
+                    test.renumber -= 1; copy = test.path.with_name('copy'); copy.write_bytes(test.path.read_bytes()); os.replace(copy, test.path)
+                return cursor
+
+        def counted(*a, **k): self.opened += 1; return connect(*a, factory=Drive, **k)
+        patcher = mock.patch.object(shader_cache.sqlite3, 'connect', counted); patcher.start(); self.addCleanup(patcher.stop)
+
+    def check(self, opened):
+        s = shader_cache.Store(self.path); self.addCleanup(s.close)
+        if opened: self.assertEqual(self.opened, opened)
+        for i in range(200): s.put(f'x/{i}', os.urandom(5000))
+        self.assertEqual(len(s.names('x/')), 200)
+        self.assertEqual([s.db.execute(f'PRAGMA {p}').fetchone()[0] for p in ('page_size', 'auto_vacuum', 'journal_mode')], [16384, 2, 'wal'])
+
+    def test_a_renumbered_file_is_opened_again(self): self.renumber = 1; self.check(2)
+
+    def test_a_file_that_moves_again_fails(self):
+        self.renumber = 2
+        with self.assertRaises(sqlite3.OperationalError) as e: shader_cache.Store(self.path)
+        self.assertEqual((e.exception.sqlite_errorcode, self.opened), (shader_cache.DBMOVED, 2))
+
+    def test_on_the_drive(self): self.check(0 if os.environ.get('DM_EXFAT_DIR') else 1)   # opened once where the file keeps the inode SQLite notes, as on APFS; twice on such a drive
+
+
 class Entries(Base):
     def test_in_and_out(self):
         self.store.put('x/y', b'bytes')

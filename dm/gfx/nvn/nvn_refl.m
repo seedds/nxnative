@@ -107,6 +107,7 @@ int nvn_refl_from_json(NSDictionary *j, nvn_refl *o, char *err, int errlen) {
             else if ([k isEqualToString:@DMSH_KIND_GMEM_LOG]) { r->kind = NVN_RB_GMEML; r->rw = 1; }
             else if ([k isEqualToString:@DMSH_KIND_C1]) r->kind = NVN_RB_C1;
             else if ([k isEqualToString:@DMSH_KIND_CBSIZE]) r->kind = NVN_RB_CBSIZE;
+            else if ([k isEqualToString:@DMSH_KIND_SBLEN]) { if (o->sblen) FAIL("B binding %s: a second length table", nm.UTF8String); r->kind = NVN_RB_SBLEN; o->sblen = 1; }
             else if ([k isEqualToString:@DMSH_KIND_TBIAS]) { int tn = [b[@"n"] intValue];   // the offset table: its length in entries, as the shader declares it
                 if (tn < 4 || tn > DMSH_TBIAS_SLOTS || tn % 4 || o->tbias_n) FAIL("B binding %s: offset table of %d entries", nm.UTF8String, tn);
                 r->kind = NVN_RB_TBIAS; o->tbias_n = (uint16_t)tn; }
@@ -119,6 +120,10 @@ int nvn_refl_from_json(NSDictionary *j, nvn_refl *o, char *err, int errlen) {
                                                                             !(arr && r->dtt == (uint8_t)MTLTextureTypeTextureBuffer)))
                     FAIL("B binding %s: offset table index %d of a binding that is not an image or buffer texture, nor an array of buffer textures", nm.UTF8String, x);
                 r->tbx = (uint16_t)(x + 1); }
+            id sx = b[@"sbx"];   // a bounded storage buffer's slot in the length table (dmsh_reflect.py; Ryujinx TranslationFlags.MetalStorageBounds)
+            if (sx) { int x = [sx intValue];
+                if (x < 0 || x >= DMSH_SBLEN_SLOTS || (r->kind != NVN_RB_SBUFU && r->kind != NVN_RB_SBUFQ)) FAIL("B binding %s: length table slot %d of a binding that is not a storage buffer by address", nm.UTF8String, x);
+                r->sbx = (uint8_t)(x + 1); }
             id bb = b[@"border_bit"];   // a twin sampler (dmsh_rewrite.py border_emu)
             if (bb) { int bit = [bb intValue]; if (bit < 0 || bit >= DMSH_BORDER_SAMPLERS || (r->kind != NVN_RB_SAMP && r->kind != NVN_RB_SAMPT && r->kind != NVN_RB_SAMPU && r->kind != NVN_RB_SAMPI) || r->n)
                     FAIL("B binding %s: border colour twin %d of a binding that is not one sampler", nm.UTF8String, bit);
@@ -130,6 +135,7 @@ int nvn_refl_from_json(NSDictionary *j, nvn_refl *o, char *err, int errlen) {
         for (int i = 0; i < o->nb; i++) {   // every offset table entry a binding takes lies in the table the shader declares
             const nvn_rbind *r = &o->b[i]; int many = r->kind == NVN_RB_TEXD || r->kind == NVN_RB_TEXA;
             if (r->tbx && r->tbx - 1 + (many ? r->n : 1) > o->tbias_n) FAIL("B binding %d: offset table entries %d + %d past the table's %d", i, r->tbx - 1, many ? r->n : 1, o->tbias_n);
+            if (r->sbx && !o->sblen) FAIL("B binding %d: a bounded storage buffer in a shader with no length table", i);
         }
         NSDictionary *dr = j[@"drv_reads"];
         if ([dr isKindOfClass:[NSDictionary class]]) { o->drv_read[0] = dr[@"0"] != nil; o->drv_read[2] = dr[@"2"] != nil; }

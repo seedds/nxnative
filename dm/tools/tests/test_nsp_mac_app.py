@@ -489,6 +489,13 @@ class App(unittest.TestCase):
         self.assertEqual(sorted(p.name for p in (c / 'Resources/pso').iterdir()), ['applegpu_g14s.mtl4a', 'prebuilt.tsv'])   # the pipeline archive and its stamp only
         self.assertEqual((c / 'Resources/AppIcon.icns').read_bytes()[:4], b'icns')
 
+    def test_control_metadata_packed_for_cache_limits(self):
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as d, mock.patch.object(pack_app, "sign", lambda *a: None), mock.patch("sys.stdout"):
+            d = Path(d); control = d / "control.nacp"; control.write_bytes(bytes(0x4000))
+            a = types.SimpleNamespace(**vars(self.args)); a.out = str(d / "Metadata.app"); a.control_nacp = str(control)
+            pack_app.pack(a)
+            self.assertEqual((d / "Metadata.app/Contents/Resources/control.nacp").read_bytes(), bytes(0x4000))
+
     def test_pipeline_pair_tables(self):   # the pipeline prebuild reads them beside DM_NVN_SHMAP: without them it builds nothing, though every shader library is there
         dm = self.app / 'Contents/Resources/dm'
         self.assertEqual((dm / 'shader_pairs.tsv').read_text(), 'vertex-key\tpixel-key\n')

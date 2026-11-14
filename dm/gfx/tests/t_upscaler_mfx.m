@@ -42,6 +42,26 @@ static int matches(id<MTLTexture> t, const float inside[4], MTLRegion region, co
     }
     return 1;
 }
+// Every texel of an R11G11B10F texture holds rgb (HDR scaler rounding on each channel), and their mean is within 1.5 % (or 0.005): MetalFX's own R11G11B10F writes come out about 3 % low
+static float r11_unpack(uint32_t v, int mb) { uint32_t e = v >> mb, m = v & ((1u << mb) - 1); return e ? ldexpf(1 + m / (float)(1u << mb), (int)e - 15) : ldexpf(m / (float)(1u << mb), -14); }
+static int matches_r11(id<MTLTexture> t, const float rgb[3]) {
+    NSUInteger n = t.width * t.height; id<MTLBuffer> b = [g_dev newBufferWithLength:n * 4 options:MTLResourceStorageModeShared];
+    if (!b) { fprintf(stderr, "readback buffer did not allocate\n"); return 0; }
+    id<MTLCommandBuffer> cb = q_cb(); id<MTLBlitCommandEncoder> e = [cb blitCommandEncoder];
+    [e copyFromTexture:t sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(t.width, t.height, 1) toBuffer:b destinationOffset:0 destinationBytesPerRow:t.width * 4 destinationBytesPerImage:n * 4];
+    [e endEncoding]; [cb commit]; [cb waitUntilCompleted];
+    const uint32_t *p = b.contents; double sum[3] = {0};
+    for (NSUInteger i = 0; i < n; i++) {
+        float c[3] = {r11_unpack(p[i] & 0x7ff, 6), r11_unpack(p[i] >> 11 & 0x7ff, 6), r11_unpack(p[i] >> 22, 5)};
+        for (int k = 0; k < 3; k++) sum[k] += c[k];
+        for (int k = 0; k < 3; k++) if (!(fabsf(c[k] - rgb[k]) <= fmaxf(0.01f, 0.03f * fabsf(rgb[k])))) {
+            fprintf(stderr, "texel %lu,%lu channel %d: %g, expected %g\n", (unsigned long)(i % t.width), (unsigned long)(i / t.width), k, c[k], rgb[k]);
+            return 0;
+        }
+    }
+    for (int k = 0; k < 3; k++) if (!(fabs(sum[k] / n - rgb[k]) <= fmax(0.005, 0.015 * fabs(rgb[k])))) { fprintf(stderr, "channel %d: mean %g, expected %g\n", k, sum[k] / n, rgb[k]); return 0; }
+    return 1;
+}
 // Code holding each constant 12 times, among others: the shape of a real variant's curves
 static int color_of(const float *f32, int n32, const float *f16, int n16) {
     uint8_t code[4096]; size_t o = 0;
@@ -143,6 +163,31 @@ int main(void) { @autoreleasepool {
         CHECK(up_mfx_encode(named), "linear input after sRGB at the same sizes");
         CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull) && !mtl_last_commit_error(), "the second linear submission completes");
         CHECK(matches(written, colour, MTLRegionMake2D(0, 0, 1920, 1080), black), "the same sizes in linear colour are not decoded: each colour has its own scaler");
+        // The input the game's own texture in its own format when the rectangle is the whole texture (DM_NVN_MFX_DIRECT, on by default; =0: only RGBA16F), the output only in RGBA16F:
+        // R11G11B10F into R11G11B10F, as Ocarina of Time's (the output drawn back, at full precision); into a whole RGBA16F image (both straight); into an offset rectangle (drawn back)
+        int any = !(getenv("DM_NVN_MFX_DIRECT") && !strcmp(getenv("DM_NVN_MFX_DIRECT"), "0"));
+        tex_t r11 = texture(83, 960, 540, NVN_FORMAT_R11G11B10F), r11_out = texture(84, 1920, 1080, NVN_FORMAT_R11G11B10F);
+        r11_out.d.flags |= NVN_TEXTURE_FLAGS_IMAGE; mtl_tex_init(&r11); mtl_tex_init(&r11_out);
+        mtl_reg_tex(706, &r11, NULL); mtl_reg_image(707, &r11_out, NULL);
+        fill(tex_mtl(&r11), MTLClearColorMake(hdr[0], hdr[1], hdr[2], 1)); fill(tex_mtl(&r11_out), MTLClearColorMake(0, 0, 0, 1));
+        { const uint32_t r[8] = {0, 0, 959, 539, 0, 0, 1919, 1079}; memcpy(S.push[1], r, sizeof r); } S.tex[5][0] = 706; S.img[5][1] = 707;
+        uint64_t s_in = g_up_mfx_straight[0], s_out = g_up_mfx_straight[1]; mtl_sub_begin();
+        CHECK(up_mfx_encode(named), "MetalFX takes R11G11B10F into R11G11B10F");
+        CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull) && !mtl_last_commit_error(), "the R11G11B10F submission completes");
+        CHECK(g_up_mfx_straight[0] == s_in + any && g_up_mfx_straight[1] == s_out, any ? "R11G11B10F whole textures: the input the game's own, the output drawn back" : "DM_NVN_MFX_DIRECT=0: R11G11B10F goes through RGBA16F");
+        CHECK(matches_r11(tex_mtl(&r11_out), hdr), "the R11G11B10F image holds the HDR colour everywhere, not darkened");
+        fill(written, MTLClearColorMake(0, 0, 0, 1)); S.img[5][1] = 702; s_in = g_up_mfx_straight[0]; s_out = g_up_mfx_straight[1]; mtl_sub_begin();
+        CHECK(up_mfx_encode(named), "MetalFX takes R11G11B10F into RGBA16F");
+        CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull) && !mtl_last_commit_error(), "the mixed-format submission completes");
+        CHECK(g_up_mfx_straight[0] == s_in + any && g_up_mfx_straight[1] == s_out + 1, "R11G11B10F into RGBA16F: the output the game's own, the input too with the switch");
+        CHECK(matches(written, hdr, MTLRegionMake2D(0, 0, 1920, 1080), black), "the RGBA16F image holds the HDR colour everywhere");
+        fill(written, MTLClearColorMake(0, 0, 0, 1)); { const uint32_t r[8] = {0, 0, 959, 539, 13, 9, 1899, 1059}; memcpy(S.push[1], r, sizeof r); }
+        s_in = g_up_mfx_straight[0]; s_out = g_up_mfx_straight[1]; mtl_sub_begin();
+        CHECK(up_mfx_encode(named), "MetalFX takes R11G11B10F into an offset rectangle");
+        CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull) && !mtl_last_commit_error(), "the offset submission completes");
+        CHECK(g_up_mfx_straight[0] == s_in + any && g_up_mfx_straight[1] == s_out, "an offset output rectangle is drawn back, the whole input still the game's own");
+        CHECK(matches(written, hdr, MTLRegionMake2D(13, 9, 1900, 1060), black), "the offset output fills only its destination rectangle");
+        { const uint32_t r[8] = {0, 0, 959, 539, 0, 0, 1919, 1079}; memcpy(S.push[1], r, sizeof r); } S.tex[5][0] = 701;
         NvShader *encoded_out = upscaler(key); encoded_out->up_color = UP_COLOR_KEEP;
         CHECK(!up_mfx_wanted(encoded_out), "a named shader whose output stays encoded is left to its shader");
         S.tex[5][0] = 701;

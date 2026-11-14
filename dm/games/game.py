@@ -84,21 +84,21 @@ def load(name=None):
     return Game(d)
 
 
-def all_games():
-    out, seen = [], set()
+def all_games(skip=()):   # skip: profile folders left out (the NSP script's own provisional and derived profiles, which it never takes as registered ones)
+    out, seen, skip = [], set(), {Path(d).resolve() for d in skip}
     for root in search_dirs():
-        if not root.is_dir(): continue
+        if not root.is_dir() or root.resolve() in skip: continue
         for d in sorted(root.iterdir()):
             if (d / 'game.tsv').exists() and d.name not in seen: seen.add(d.name); out.append(Game(d))
     return out
 
 
-def by_title(tid):
-    return next((g for g in all_games() if g.title_id == tid), None)
+def by_title(tid, skip=()):
+    return next((g for g in all_games(skip) if g.title_id == tid), None)
 
 
-def by_build(main_id):   # the profile whose build rows register this main build ID (a release of the same build under another title ID: the NSP script's same_build)
-    return next((g for g in all_games() if any(b.get('main') == main_id for b in g.builds().values())), None)
+def by_build(main_id, skip=()):   # the profile whose build rows register this main build ID (a release of the same build under another title ID: the NSP script's same_build)
+    return next((g for g in all_games(skip) if any(b.get('main') == main_id for b in g.builds().values())), None)
 
 
 # agl's upscaler network (NDSR), by where the shader map found each key: the compute shaders of agl_ndsr.pck (Donkey Kong Bananza's 24 in its release library, Splatoon Raiders' 20 in its debug one)

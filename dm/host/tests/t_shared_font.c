@@ -80,6 +80,26 @@ int main(void) {
     CHECK(seen_index == 0 && seen_capacity == 0, "zero unsigned arguments preserved");
     CHECK(lookups == 1, "original resolved once");
     CHECK(!memcmp(standard, unrelated, sizeof standard) && !memcmp(extension, unrelated, sizeof extension), "input bytes unchanged");
+    // GetBuiltInFontDataSet (Switch 2 types): one entry per type asked, in order, at most 6; the address and size are GetBuiltInFontData's
+    (void)font_get(5);   // the fonts are opened once: what follows sets them
+    std_f = (font_t){standard, sizeof standard}; ext_f = (font_t){extension, sizeof extension};
+    pl_builtin_font_t set[8]; memset(set, 0xa5, sizeof set);
+    const uint8_t types[8] = {5, 0, 3, 5, 1, 2, 4, 0};
+    int got = -1;
+    CHECK(h_pl_BuiltInSetOunce(&got, set, types, 3, 0, 0) == 1 && got == 3, "font set: three types, three entries");
+    CHECK(set[0].type == 5 && set[0].address == extension + font_skip() && set[0].size == sizeof extension - font_skip(), "font set: the extension font for type 5");
+    CHECK(set[1].type == 0 && set[1].address == standard + font_skip() && set[2].type == 3 && set[2].address == standard + font_skip(), "font set: the standard font for the others, in order");
+    pl_builtin_font_t one; CHECK(h_pl_BuiltInOunce(&one, 3, 0) == 1 && !memcmp(&one, &set[2], sizeof one), "font set: an entry as GetBuiltInFontData fills it");
+    CHECK(set[3].type == 0xa5, "font set: nothing past the count");
+    memset(set, 0, sizeof set);
+    CHECK(h_pl_BuiltInSetOunce(&got, set, types, 8, 0, 0) == 1 && got == 6 && set[5].type == 2 && set[6].type == 0 && set[6].address == NULL, "font set: at most 6, as the SDK sends");
+    // The Switch 1 overload: at most 7, the same entries
+    memset(set, 0, sizeof set);
+    CHECK(h_pl_BuiltInSetNx(&got, set, types, 8, 0, 0) == 1 && got == 7 && set[6].type == 4 && set[6].address == standard + font_skip() && set[7].address == NULL, "font set (Switch 1 types): at most 7");
+    std_f = ext_f = (font_t){0};
+    CHECK(h_pl_BuiltInSetOunce(&got, set, types, 3, 0, 0) == 0 && got == 0, "font set: no fonts, no entries");
+    got = -1;
+    CHECK(h_pl_BuiltInSetNx(&got, set, types, 3, 0, 0) == 0 && got == -1, "font set (Switch 1 types): no fonts, count left as it was");
     printf("shared font: %d checks, %d failed\n", checks, fails);
     return fails != 0;
 }

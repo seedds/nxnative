@@ -128,15 +128,15 @@ struct LauncherView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            HStack(spacing: 12) {
-                Image(nsImage: NSApp.applicationIconImage).resizable().frame(width: 64, height: 64).accessibilityHidden(true)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(info("CFBundleName") ?? "Game").font(.title2.weight(.semibold))
-                    Text("Version \(info("CFBundleShortVersionString") ?? "1.0")").foregroundStyle(.secondary)
+            HStack(spacing: 10) {
+                Image(nsImage: NSApp.applicationIconImage).resizable().frame(width: 44, height: 44).accessibilityHidden(true)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(info("CFBundleName") ?? "Game").font(.headline)
+                    Text(Self.version).font(.callout).foregroundStyle(.secondary)
                 }
                 Spacer()
             }
-            .padding([.horizontal, .top], 20)
+            .padding(.horizontal, 20).padding(.top, 34)   // below the traffic lights: the title bar is part of the header
             Form {
                 settingSections(basic: true)
                 CloudSavesSection()
@@ -154,6 +154,7 @@ struct LauncherView: View {
                 }
             }
             .formStyle(.grouped)
+            .background(OverlayScrollers())
             .onScrollGeometryChange(for: CGFloat.self) {
                 $0.contentSize.height + $0.contentInsets.top + $0.contentInsets.bottom - $0.containerSize.height
             } action: { _, extraHeight in
@@ -174,6 +175,14 @@ struct LauncherView: View {
         }
         .frame(minWidth: 520, idealWidth: 560)
     }
+
+    /// "Version 1.6.0 (nxnative d0ab754c)": the game's version and the nxnative commit that packed the app (DMCommit, pack_app.py source_commit)
+    static let version: String = {
+        let v = "Version \(info("CFBundleShortVersionString") ?? "1.0")"
+        guard let c = info("DMCommit"), !c.isEmpty else { return v }
+        let dirty = c.hasSuffix("+dirty")
+        return v + " (nxnative \(c.prefix(8))\(dirty ? "+dirty" : ""))"
+    }()
 
     /// Play, once the cloud's save is compared with this Mac's: a save that changed on both sides is the player's pick, not the newer file's (SaveCheck)
     private func start() {
@@ -203,6 +212,39 @@ struct LauncherView: View {
             }
         }
     }
+}
+
+/// The Form's scroll bar as an overlay: thin, shown while scrolling or under the pointer, whatever "Show scroll bars" says in System Settings
+/// (with a mouse connected, the default there is a permanent wide bar). AppKit sets the style again when that setting changes, so it is set again then
+struct OverlayScrollers: NSViewRepresentable {
+    final class Probe: NSView {
+        private var token: NSObjectProtocol?
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            apply()
+            if token == nil {
+                token = NotificationCenter.default.addObserver(forName: NSScroller.preferredScrollerStyleDidChangeNotification, object: nil, queue: .main) { [weak self] _ in
+                    DispatchQueue.main.async { self?.apply() }
+                }
+            }
+        }
+        deinit { if let t = token { NotificationCenter.default.removeObserver(t) } }
+        func apply() {
+            DispatchQueue.main.async { [weak self] in
+                guard let root = self?.window?.contentView else { return }
+                func walk(_ v: NSView) {
+                    if let s = v as? NSScrollView {
+                        s.scrollerStyle = .overlay; s.autohidesScrollers = true
+                        s.verticalScroller?.controlSize = .small
+                    }
+                    v.subviews.forEach(walk)
+                }
+                walk(root)
+            }
+        }
+    }
+    func makeNSView(context: Context) -> Probe { Probe() }
+    func updateNSView(_ v: Probe, context: Context) { v.apply() }
 }
 
 /// Cloud saves: a folder the save is synced through (dm/host/save_sync.h), the one the iPhone app picks in its launcher's Cloud saves section. It is kept in this app's
@@ -263,8 +305,9 @@ private final class Launcher: NSObject, NSApplicationDelegate, NSWindowDelegate 
         app.addItem(withTitle: "Close Window", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
         app.addItem(withTitle: "Quit \(name)", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         item.submenu = app; menu.addItem(item); NSApp.mainMenu = menu
-        let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 560, height: 660), styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
+        let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 560, height: 660), styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView], backing: .buffered, defer: false)
         w.title = name; w.isReleasedWhenClosed = false; w.delegate = self
+        w.titlebarAppearsTransparent = true; w.titleVisibility = .hidden; w.titlebarSeparatorStyle = .none   // one surface with the header, which shows the name
         w.contentMinSize = NSSize(width: 520, height: 0)
         window = w
         if let screen = w.screen ?? NSScreen.main {
@@ -278,6 +321,14 @@ private final class Launcher: NSObject, NSApplicationDelegate, NSWindowDelegate 
         if NSApp.isActive { w.makeKeyAndOrderFront(nil) } else { w.orderBack(nil) }
     }
     func applicationDidBecomeActive(_ n: Notification) { window?.makeKeyAndOrderFront(nil) }
+    // No control holds the focus when the window first becomes key, so none shows a focus ring until the player presses Tab. AppKit gives the first key view the focus
+    // then (with keyboard navigation on in System Settings, a ring around a button); Return still presses Play, the window's default button
+    private var focusCleared = false
+    func windowDidBecomeKey(_ n: Notification) {
+        guard !focusCleared, let w = window else { return }
+        focusCleared = true
+        DispatchQueue.main.async { w.makeFirstResponder(nil) }
+    }
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {   // ⌘Q, or a logout or restart: the app ends without the game (exit 0, as Quit)
         fputs("launcher: quit without starting the game\n", stderr)
         return .terminateNow   // not terminateCancel, which a logout or restart takes as a refusal and stops

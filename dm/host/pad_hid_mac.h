@@ -151,7 +151,8 @@ static void hidpad_found(void *ctx, IOReturn result, void *sender, IOHIDDeviceRe
     uint64_t entry = hidpad_entry(hid);
     if (hidpad_known(g_hidpads, hid, entry) || hidpad_known(g_hidpads_waiting, hid, entry) || hidpad_known(g_hidpads_gc, hid, entry)) return;
     hid_pad *d = calloc(1, sizeof *d); if (!d) { LOG("[RED] HID gamepad: cannot allocate device state"); return; }
-    pad_hid_init(&d->st, getenv("DM_HID_MAP"));
+    const char *ab = getenv("DM_PAD_AB");
+    pad_hid_init(&d->st, getenv("DM_HID_MAP"), ab && !strcmp(ab, "xbox"));   // DM_PAD_AB=xbox swaps the default A and B
     NSString *name = (__bridge NSString *)IOHIDDeviceGetProperty(hid, CFSTR(kIOHIDProductKey));
     snprintf(d->name, sizeof d->name, "%s", name.UTF8String ?: "HID gamepad");
     d->vid = [(__bridge NSNumber *)IOHIDDeviceGetProperty(hid, CFSTR(kIOHIDVendorIDKey)) intValue];
@@ -285,7 +286,8 @@ static void hidpad_twins_take(GCController *gone) {
             IOHIDDeviceRegisterInputReportCallback(d->hid, d->report, sizeof d->report, hidpad_report, d);
         } else {
             uint8_t has[PH_AXES]; memcpy(has, d->st.has, sizeof has);   // the axes hidpad_found saw
-            pad_hid_init(&d->st, getenv("DM_HID_MAP")); memcpy(d->st.has, has, sizeof has);   // nothing held from an earlier turn
+            const char *ab = getenv("DM_PAD_AB");
+            pad_hid_init(&d->st, getenv("DM_HID_MAP"), ab && !strcmp(ab, "xbox")); memcpy(d->st.has, has, sizeof has);   // nothing held from an earlier turn
             IOHIDDeviceRegisterInputValueCallback(d->hid, hidpad_value, d);
         }
         hidpad_attach(d);

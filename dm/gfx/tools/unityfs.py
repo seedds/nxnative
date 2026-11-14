@@ -365,9 +365,79 @@ def tree_from_layout(root, layout):
         return n
     return node(root, 'Base')
 
+# Unity 2017.2.0f1 / 2017.2.1p3 Shader type tree.
+# Mercenaries Wings: The False Phoenix, 010094500C216000.
+# The bundled dump is from AssetRipper TypeTreeDumps.
+UNITY_2017_2_SHADER_HASH = bytes.fromhex(
+    '71556c0fc74d861cf024e0cd349bd987'
+)
+KNOWN_TREES[(CLASS_SHADER, UNITY_2017_2_SHADER_HASH)] = (
+    'Shader', '@unity-2017.2-dump'
+)
+
+
+def tree_from_unity_2017_2_dump():
+    """Load the exact Shader type tree, preserving Unity alignment flags."""
+    import re
+    from pathlib import Path
+
+    path = Path(__file__).with_name('unity_shader_2017_2.dump')
+    pattern = re.compile(
+        r"^(\s*)(.+?) // ByteSize\{([0-9a-fA-F]+)\}, "
+        r"Index\{[0-9a-fA-F]+\}, Version\{\d+\}, "
+        r"IsArray\{[01]\}, MetaFlag\{([0-9a-fA-F]+)\}$"
+    )
+
+    stack = []
+    root = None
+    count = 0
+
+    for line in path.read_text().splitlines():
+        match = pattern.match(line)
+        if not match:
+            continue
+
+        whitespace, declaration, size_hex, flags_hex = match.groups()
+        depth = len(whitespace.expandtabs(8))
+        node_type, node_name = declaration.rsplit(' ', 1)
+
+        size = int(size_hex, 16)
+        node = Node(
+            node_type,
+            node_name,
+            -1 if size == 0xffffffff else size,
+            int(flags_hex, 16),
+        )
+
+        while stack and stack[-1][0] >= depth:
+            stack.pop()
+
+        if stack:
+            stack[-1][1].kids.append(node)
+        else:
+            if root is not None:
+                raise ValueError('multiple roots in Unity 2017.2 dump')
+            root = node
+
+        stack.append((depth, node))
+        count += 1
+
+    if root is None or root.type != 'Shader' or count != 1178:
+        raise ValueError(
+            f'invalid Unity 2017.2 Shader dump: {count} nodes'
+        )
+
+    return root
+
+
 _KNOWN = {}
 def known_tree(cid, h):
-    if (cid, h) not in _KNOWN: _KNOWN[cid, h] = tree_from_layout(*KNOWN_TREES[cid, h])
+    if (cid, h) not in _KNOWN:
+        root, layout = KNOWN_TREES[cid, h]
+        if layout == '@unity-2017.2-dump':
+            _KNOWN[cid, h] = tree_from_unity_2017_2_dump()
+        else:
+            _KNOWN[cid, h] = tree_from_layout(root, layout)
     return _KNOWN[cid, h]
 
 def serialized_objects(d, common, want=None, trees=None):

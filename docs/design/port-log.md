@@ -23,6 +23,8 @@ Done on the machine, not in the repository: Docker emptied on the owner's reques
 
 ### In progress: written by agents, NOT built and NOT verified
 
+Verification under way (started 2026-11-14): the branch `verify/wip-1` (worktree `.claude/worktrees/verify`) is the tip plus `wip/second-pack-profile`, `wip/launcher-rule-by-function` and `wip/runner-scripts`; `scripts/port_docker.sh verify --low-disk` runs on it (its first real run). Green: those three commits go onto `multiplataforma` and their `wip/*` branches are deleted. Not in it: `wip/provoking-strips-polygons` (its SPIR-V headers must be regenerated in the build image first).
+
 No Docker image exists (the disk filled while ten worktrees were checked out, 280 MB each), so nothing below has been compiled or run. Each item is uncommitted in its worktree under `.claude/worktrees/`; a new session reads the diff there (`git -C <worktree> diff`), verifies it in Docker, and only then cherry-picks it. One build at a time: the two images (`nxnative-build` 1.9 GB, `nxnative-aot` 1.9 GB) do not fit beside the worktrees.
 
 | Worktree | Task | Files it owns |

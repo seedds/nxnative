@@ -64,6 +64,7 @@ static void s2_rumble_limit(s2_haptic *v) { float lo = v->lf_amp / 1023.f, hi = 
 @property (nonatomic) BOOL live;
 @property (nonatomic, readonly) uint32_t cid;   // this connection's id (dm_sw2_info.id)
 @property (nonatomic, readonly) BOOL saving;    // a calibration save is running on it
+- (BOOL)setDeadZone:(float)share slot:(int)slot;   // dm_switch2_set_dead_zone: NO for a slot it has no stick in
 @end
 
 static NSMutableDictionary<NSUUID *, S2Session *> *g_sessions;
@@ -205,8 +206,10 @@ static s2_pad *s2_pad_for(uint16_t pid) {   // a Joy-Con joins a pad that has th
             if (!f && keep && !hasU && !hasF) { done(); return; }   // neither the stick's user calibration nor its factory one is known: what the session holds stays
             s2_cal_pick(&uc, hasU, &fc, hasF, &t->_cal[slot], &t->_factory[slot]); t->_hasFactory[slot] = hasF;
             t->_cal[slot].dead = t->_factory[slot].dead = dead;
+            t->_cal[slot].dead_set = [t keptDeadZone:slot];
             LOG("[sw2] %s: stick %d uses its %s calibration%s, dead zone %.1f %% of its travel (%s)", s2_kind(t->_pid), slot + 1, hasU ? "user" : hasF ? "factory" : "default (none reads)",
-                hasF ? "" : "; its factory block does not read", s2_cal_dead_share(&t->_cal[slot]) * 100, s2_cal_dead_own(&t->_cal[slot]) > 0 ? "its own" : "the default");
+                hasF ? "" : "; its factory block does not read", s2_cal_dead_share(&t->_cal[slot]) * 100,
+                t->_cal[slot].dead_set > 0 ? "set on this Mac" : s2_cal_dead_own(&t->_cal[slot]) > 0 ? "its own" : "the default");
             if (t->_pad) s2_dev_of(t->_pad, t->_pid)->cal[slot] = t->_cal[slot];
             done();
         });
@@ -240,6 +243,22 @@ static s2_pad *s2_pad_for(uint16_t pid) {   // a Joy-Con joins a pad that has th
     __weak S2Session *w = self;
     [self saveCal:cal slot:0 done:^(S2CalOutcome o, NSString *path) { (void)o; (void)path; S2Session *s = w; if (s) s->_calStep = 0; }];
 }
+// ---- a dead zone set for a stick on this host (dm_switch2_set_dead_zone): the controller refuses writes to its stick parameters (below 0x1F5000), so it is kept in this app's
+// defaults under the controller's serial and the stick, as the learned gyro offset is, and read at each connect ----
+- (NSString *)deadKey:(int)slot { return [NSString stringWithFormat:@"sw2.deadZone.%s.%d", _serial, slot + 1]; }
+- (float)keptDeadZone:(int)slot { return _serial[0] ? s2_dead_set_clamp([NSUserDefaults.standardUserDefaults floatForKey:[self deadKey:slot]]) : 0; }
+- (BOOL)setDeadZone:(float)share slot:(int)slot {
+    if (slot != 0 && (slot != 1 || _pid != S2_PID_PRO)) return NO;
+    share = s2_dead_set_clamp(share);
+    if (_cal[slot].dead_set == share) return YES;
+    _cal[slot].dead_set = share;
+    if (_pad) s2_dev_of(_pad, _pid)->cal[slot].dead_set = share;   // what the game's next read applies
+    if (_serial[0]) {
+        if (share > 0) [NSUserDefaults.standardUserDefaults setFloat:share forKey:[self deadKey:slot]];
+        else [NSUserDefaults.standardUserDefaults removeObjectForKey:[self deadKey:slot]];
+    }
+    return YES;
+}
 // cal as the user calibration of slot (0, or 1 for a Pro Controller 2's right stick: s2op_save_user_cal), then the session's calibration of that slot read again from the controller whatever came of it, so the game and the
 // tester use what the controller now holds (a failed restore may have left it blank). Refused at once when one is running, the link is gone or cal is no calibration. done after it returns
 - (void)saveCal:(s2_cal)cal slot:(int)slot done:(void (^)(S2CalOutcome, NSString *))done {
@@ -250,7 +269,7 @@ static s2_pad *s2_pad_for(uint16_t pid) {   // a Joy-Con joins a pad that has th
         dispatch_async(dispatch_get_main_queue(), ^{ if (done) done(S2CalNoBackup, nil); });
         return;
     }
-    cal.dead = _factory[slot].dead;   // the stick's dead zone stays its own whatever calibration it takes
+    cal.dead = _factory[slot].dead; cal.dead_set = _cal[slot].dead_set;   // the stick's dead zone stays its own (or the one set here) whatever calibration it takes
     _saving = YES; g_saving++;
     LOG("[sw2] %s %s: saving centre %.0f, %.0f, travel %.0f, %.0f up and %.0f, %.0f down as stick %d's user calibration", s2_kind(_pid), _serial, cal.cx, cal.cy, cal.maxx, cal.maxy, cal.minx, cal.miny, slot + 1);
     if (g_changed) g_changed();
@@ -676,6 +695,11 @@ void dm_switch2_save(uint32_t id, int slot, s2_cal cal, void (^done)(S2CalOutcom
     [s saveCal:cal slot:slot done:done];
 }
 
+void dm_switch2_set_dead_zone(uint32_t id, int slot, float share) {
+    S2Session *s = s2_session_by_id(id);
+    if (!s || ![s setDeadZone:share slot:slot]) return;
+    if (g_changed) g_changed();
+}
 int dm_switch2_start(const dm_switch2_front *front) {
     const char *e = getenv("DM_SW2"); if (!e || !atoi(e)) return 0;   // off by default: no Bluetooth client, so no permission prompt
     if (![NSBundle.mainBundle objectForInfoDictionaryKey:@"NSBluetoothAlwaysUsageDescription"]) {

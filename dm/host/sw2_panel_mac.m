@@ -3,8 +3,9 @@
 // The menu, between Cheats and Window: Show Controller Window (⌘⇧P, or DM_CONTROLLER_WINDOW=1 at launch), then one disabled line per connected controller, or why there is none.
 // The panel is a utility NSPanel like the Cheats one (floating, over a fullscreen game too, never key for a click, closed only to hide, frame autosave "DmControllerPanel"). It
 // works on one controller and stick at a time (a picker with two or more, Left / Right on a Pro Controller 2): the whole range, the centre zoomed 12x with the dead zone drawn as
-// the round one s2_cal_apply applies (the stick's own, read from the controller), a marker where the stick came to rest after each release (orange inside the dead zone, red where
-// the game would see it move), the readouts, the tally and the dead zone's size, and the guided calibration: let go (the rest becomes the centre), edges (two turns at the
+// the round one s2_cal_apply applies, a marker where the stick came to rest after each release (orange inside the dead zone, red where the game would see it move), the readouts,
+// the tally, the dead zone (a slider per stick: the stick's own, read from the controller, until one is set here; kept on this Mac per controller serial and stick, since the
+// controller refuses writes to its own: dm_switch2_set_dead_zone), and the guided calibration: let go (the rest becomes the centre), edges (two turns at the
 // edge give the travel, judged against the factory calibration), review and save (either stick of a Pro Controller 2), and a
 // save's outcome stays on screen, naming the controller, whichever controller is shown or connected, until Done. While the panel is open the game gets nothing from Switch 2
 // controllers (front_mac.m asks sw2_panel_open), so circles drawn here never move a character
@@ -172,6 +173,7 @@ static DmControllerPanel *g_panel;   // created on the first Show Controller Win
     NSPopUpButton *_picker; NSTextField *_kindLabel; NSSegmentedControl *_sticks;
     DmCtlBox *_wait; NSTextField *_waitTitle, *_waitBody;
     DmCtlBox *_live; NSTextField *_liveTitle, *_rangeCap, *_centreCap, *_readout, *_tally, *_deadName, *_deadValue; DmCtlStickView *_range, *_centre;
+    NSSlider *_deadSlider; NSButton *_deadReset;   // the dead zone set for this stick on this Mac, and back to the stick's own
     DmCtlBox *_cal; NSTextField *_calTitle, *_steps, *_whoLabel, *_big, *_text, *_spinText, *_grid, *_foot, *_small, *_hintLabel; NSProgressIndicator *_progress, *_spinner;
     DmCtlStickView *_edge; NSButton *_btnL, *_btnR;
     NSTextField *_note;
@@ -186,7 +188,7 @@ static DmControllerPanel *g_panel;   // created on the first Show Controller Win
 // The stick's slot: its raw position, its calibration and its factory one are all at this index (a right Joy-Con 2's only stick is index 0 too: pad_switch2_apple.m fills it so)
 - (int)slot { return [self rightStick] ? 1 : 0; }
 // The calibration the game uses for this stick: the one read, or the defaults s2_cal_apply falls back to
-- (s2_cal)calibration { const dm_sw2_info *d = [self device]; s2_cal c; if (d && d->cal[[self slot]].valid) c = d->cal[[self slot]]; else { s2_cal_default(&c); if (d) c.dead = d->cal[[self slot]].dead; } return c; }
+- (s2_cal)calibration { const dm_sw2_info *d = [self device]; s2_cal c; if (d && d->cal[[self slot]].valid) c = d->cal[[self slot]]; else { s2_cal_default(&c); if (d) { c.dead = d->cal[[self slot]].dead; c.dead_set = d->cal[[self slot]].dead_set; } } return c; }
 - (BOOL)otherSaving { const dm_sw2_info *d = [self device]; return d && d->saving; }   // a save on this controller runs that this panel did not start (DM_SW2_CALIBRATE's), and a second is refused
 - (BOOL)canCalibrate { const dm_sw2_info *d = [self device]; return d && d->cal[[self slot]].valid && !d->saving; }
 - (BOOL)canSave { return ![self otherSaving]; }
@@ -314,6 +316,9 @@ static DmControllerPanel *g_panel;   // created on the first Show Controller Win
     if (_stick == 1 && _list[i].pid != S2_PID_PRO) _stick = 0;
     [self restart:nil]; [self takeRaw]; [self update];
 }
+// The slider moved: the dead zone the game applies to this stick from now on (the session keeps it under the controller's serial). The panel redraws through the change hook
+- (void)deadMoved:(NSSlider *)s { const dm_sw2_info *d = [self device]; if (d) dm_switch2_set_dead_zone(d->id, [self slot], (float)s.doubleValue); }
+- (void)deadReset:(id)sender { (void)sender; const dm_sw2_info *d = [self device]; if (d) dm_switch2_set_dead_zone(d->id, [self slot], 0); }
 - (void)stickPicked:(NSSegmentedControl *)s { int v = (int)s.selectedSegment; if (v == _stick || v < 0) return; _stick = v; [self restart:nil]; [self takeRaw]; [self update]; }
 
 // ---- building ----
@@ -355,8 +360,13 @@ static NSButton *button(NSString *title, id target) { NSButton *b = [NSButton bu
     _tally = label(13, NSFontWeightRegular, sec);
     _deadName = label(13, NSFontWeightRegular, pri); _deadName.stringValue = @"Dead zone";
     _deadValue = label(13, NSFontWeightRegular, sec); _deadValue.font = [NSFont monospacedDigitSystemFontOfSize:13 weight:NSFontWeightRegular]; _deadValue.alignment = NSTextAlignmentRight;
-    _deadValue.toolTip = @"How far the stick moves before the game sees it, as a share of its travel: the stick's own, read from the controller, or 10 % when it gives none";
-    for (NSView *v in @[_liveTitle, _range, _centre, _rangeCap, _centreCap, _readout, _tally, _deadName, _deadValue]) [_live addSubview:v];
+    _deadValue.toolTip = @"How far the stick moves before the game sees it, as a share of its travel: the one set here, else the stick's own, read from the controller, or 10 % when it gives none";
+    _deadSlider = [NSSlider sliderWithValue:S2_DEAD_SHARE minValue:S2_DEAD_SET_MIN maxValue:S2_DEAD_SET_MAX target:self action:@selector(deadMoved:)];
+    _deadSlider.continuous = YES;
+    _deadSlider.toolTip = @"This stick's dead zone, kept on this Mac for this controller (the controller does not take one of its own)";
+    _deadReset = button(@"Stick's own", self); _deadReset.action = @selector(deadReset:); _deadReset.controlSize = NSControlSizeSmall; _deadReset.font = [NSFont systemFontOfSize:11];
+    _deadReset.toolTip = @"Back to the dead zone the controller gives for this stick";
+    for (NSView *v in @[_liveTitle, _range, _centre, _rangeCap, _centreCap, _readout, _tally, _deadName, _deadValue, _deadSlider, _deadReset]) [_live addSubview:v];
 
     _cal = [DmCtlBox new];
     _calTitle = label(13, NSFontWeightSemibold, pri); _calTitle.stringValue = @"Calibrate";
@@ -442,8 +452,11 @@ static void hide(NSArray<NSView *> *vs) { for (NSView *v in vs) v.hidden = YES; 
     [t appendAttributedString:[[NSAttributedString alloc] initWithString:rows attributes:@{NSFontAttributeName: f, NSParagraphStyleAttributeName: ps, NSForegroundColorAttributeName: NSColor.labelColor}]];
     return t;
 }
-// The stick's dead zone: its share of the travel, and whether it is the stick's own (s2_cal_dead_own) or the default
-- (NSString *)deadLabel { s2_cal c = [self calibration]; return [NSString stringWithFormat:@"%.1f %% · %@", s2_cal_dead_share(&c) * 100, s2_cal_dead_own(&c) > 0 ? @"the stick's own" : @"the default"]; }
+// The stick's dead zone: its share of the travel, and whether it is set on this Mac, the stick's own (s2_cal_dead_own) or the default
+- (NSString *)deadLabel {
+    s2_cal c = [self calibration];
+    return [NSString stringWithFormat:@"%.1f %% · %@", s2_cal_dead_share(&c) * 100, c.dead_set > 0 ? @"set on this Mac" : s2_cal_dead_own(&c) > 0 ? @"the stick's own" : @"the default"];
+}
 
 // The parts that change with every report: the dots, the readout, let go's progress, the edges view and its turns
 - (void)updateLive {
@@ -521,7 +534,12 @@ static void hide(NSArray<NSView *> *vs) { for (NSView *v in vs) v.hidden = YES; 
     y = place(_readout, in, y, w, 0, 6);
     _tally.attributedStringValue = [self tallyText]; y = place(_tally, in, y, w, 0, 10);
     _deadValue.stringValue = [self deadLabel];
-    place(_deadName, in, y, w / 2, 0, 0); y = place(_deadValue, in + w / 2, y, w / 2, 0, 0);
+    place(_deadName, in, y, w / 2, 0, 0); y = place(_deadValue, in + w / 2, y, w / 2, 0, 4);
+    s2_cal c = [self calibration]; BOOL set = c.dead_set > 0;
+    if (!_deadSlider.highlighted) _deadSlider.doubleValue = s2_cal_dead_share(&c);   // not under a drag: the value the drag sets comes back through the change hook
+    _deadSlider.enabled = [self device] != NULL;
+    if (set) { CGFloat bw = 96; place(_deadSlider, in, y, w - bw - 8, 21, 0); place(_deadReset, in + w - bw, y, bw, 21, 0); y += 21; }
+    else { _deadReset.hidden = YES; y = place(_deadSlider, in, y, w, 21, 0); }
     return y + in;
 }
 // The Calibrate box's parts above its buttons, for the step; returns the height it needs, buttons included

@@ -129,8 +129,12 @@ static inline int s2_info_parse(const uint8_t *d, size_t n, uint16_t *vid, uint1
 }
 
 // Stick calibration (0x0B bytes): centre, maximum and minimum travel, each a packed 12-bit pair
-typedef struct { float cx, cy, maxx, maxy, minx, miny; int valid; float dead; } s2_cal;   // dead: the stick's own dead zone in raw counts (s2_params_dead), 0 when unknown
-static inline void s2_cal_default(s2_cal *c) { c->cx = c->cy = 2048; c->maxx = c->maxy = c->minx = c->miny = 1200; c->valid = 0; c->dead = 0; }
+// dead: the stick's own dead zone in raw counts (s2_params_dead), 0 when unknown. dead_set: a dead zone chosen for the stick on this host, a share of its travel
+// (S2_DEAD_SET_MIN..S2_DEAD_SET_MAX), 0 for none. The controller refuses writes below 0x1F5000, its stick parameters included, so a dead zone of the user's own cannot live in
+// it: the host keeps it per controller serial and stick (pad_switch2_apple.m, dm_switch2_set_dead_zone). Both belong to the stick, not to its calibration: whatever builds a
+// calibration from another carries them
+typedef struct { float cx, cy, maxx, maxy, minx, miny; int valid; float dead, dead_set; } s2_cal;
+static inline void s2_cal_default(s2_cal *c) { c->cx = c->cy = 2048; c->maxx = c->maxy = c->minx = c->miny = 1200; c->valid = 0; c->dead = 0; c->dead_set = 0; }
 static inline int s2_cal_blank(const uint8_t *d, size_t n) { return !d || n < 3 || (d[0] == 0xFF && d[1] == 0xFF && d[2] == 0xFF); }
 static inline int s2_cal_parse(const uint8_t *d, size_t n, s2_cal *c) {
     if (!d || !c || n < 9 || s2_cal_blank(d, n)) return 0;
@@ -139,6 +143,7 @@ static inline int s2_cal_parse(const uint8_t *d, size_t n, s2_cal *c) {
     c->maxx = (float)(q & 0xFFF); c->maxy = (float)(q >> 12);   // travel above and below the centre, not absolute positions
     c->minx = (float)(r & 0xFFF); c->miny = (float)(r >> 12);
     c->valid = c->maxx > 100 && c->maxy > 100 && c->minx > 100 && c->miny > 100;
+    c->dead = c->dead_set = 0;   // the 9 bytes hold no dead zone: the caller gives the stick's (s2_cal_from_flash, readCal), and none is left from whatever c held
     return c->valid;
 }
 // Stick parameters (S2_STICK_PARAMS bytes before each stick's calibration, 0x13080 and 0x130C0): a format byte, then 13 packed 12-bit pairs, x and y. They are the same on
@@ -164,7 +169,7 @@ static inline float s2_params_dead(const uint8_t *d, size_t n) {
 // S2_ADDR_USER_STICK1 / 2, blank unless the stick was calibrated on a console; either may be NULL): the user's centre and travel when set, else the factory's, and the dead zone
 // from the parameters either way. Returns 2 for the user's calibration, 1 for the factory's, 0 for none (c keeps the typical travel, s2_cal_default, and any dead zone read).
 static inline int s2_cal_from_flash(const uint8_t *block, size_t n, const uint8_t *user, size_t un, s2_cal *c) {
-    s2_cal_default(c); s2_cal t;
+    s2_cal_default(c); s2_cal t; s2_cal_default(&t);   // t whole: s2_cal_parse fills the calibration only, and *c takes all of it
     if (block && n >= S2_STICK_PARAMS) c->dead = s2_params_dead(block, n);
     float dead = c->dead;
     if (user && s2_cal_parse(user, un, &t)) { *c = t; c->dead = dead; return 2; }
@@ -176,19 +181,28 @@ static inline int s2_cal_from_flash(const uint8_t *block, size_t n, const uint8_
 #define S2_DEAD_SHARE 0.10f
 #define S2_DEAD_MIN 0.03f
 #define S2_DEAD_MAX 0.25f
+// The range a dead zone set on this host may take (the Controller panel's slider)
+#define S2_DEAD_SET_MIN 0.01f
+#define S2_DEAD_SET_MAX 0.30f
+// A dead zone to set, held to that range; 0 (or less, or not a number) clears it
+static inline float s2_dead_set_clamp(float share) { return !(share > 0) ? 0 : share < S2_DEAD_SET_MIN ? S2_DEAD_SET_MIN : share > S2_DEAD_SET_MAX ? S2_DEAD_SET_MAX : share; }
 // The stick's own dead zone as a share of its mean travel, 0 when it has none to trust
 static inline float s2_cal_dead_own(const s2_cal *c) {
     float travel = (c->maxx + c->minx + c->maxy + c->miny) / 4, share = travel > 0 ? c->dead / travel : 0;
     return share >= S2_DEAD_MIN && share <= S2_DEAD_MAX ? share : 0;
 }
-static inline float s2_cal_dead_share(const s2_cal *c) { float own = s2_cal_dead_own(c); return own > 0 ? own : S2_DEAD_SHARE; }
+// The dead zone applied: the one set on this host, else the stick's own, else the default
+static inline float s2_cal_dead_share(const s2_cal *c) {
+    float set = s2_dead_set_clamp(c->dead_set); if (set > 0) return set;
+    float own = s2_cal_dead_own(c); return own > 0 ? own : S2_DEAD_SHARE;
+}
 // A stick in -1..1 (x right, y up): each axis over its travel on that side of the centre, then a round dead zone (the stick's own, s2_cal_dead_share), and past it the deflection
 // scaled back to start at 0, as pad_hid_stick does. A stick that comes to rest a little off its centre reads 0, and the output grows from 0 at the dead zone's edge instead of
 // jumping to it, and a small movement keeps both axes (a dead zone per axis would zero the smaller one). Each axis is clamped after the scale.
 // Before (2026-11), each axis had its own dead zone of 40 raw counts with no scale: a Pro Controller 2's right stick comes to rest 0 to 60 counts off its centre, so it read 0 or
 // a constant 3 to 5 % after a release, and Breath of the Wild, which decides at the start of an aim whether the right stick is in use, left motion aiming off about half the time.
 static inline void s2_cal_apply(const s2_cal *c, uint16_t rawx, uint16_t rawy, float *x, float *y) {
-    s2_cal d; if (!c || !c->valid) { s2_cal_default(&d); if (c) d.dead = c->dead; c = &d; }
+    s2_cal d; if (!c || !c->valid) { s2_cal_default(&d); if (c) { d.dead = c->dead; d.dead_set = c->dead_set; } c = &d; }
     float sx = (float)rawx - c->cx, sy = (float)rawy - c->cy;
     float tx = sx >= 0 ? c->maxx : c->minx, ty = sy >= 0 ? c->maxy : c->miny;
     float nx = tx > 0 ? sx / tx : 0, ny = ty > 0 ? sy / ty : 0, r = sqrtf(nx * nx + ny * ny), dead = s2_cal_dead_share(c);
@@ -238,7 +252,7 @@ static inline int s2_cal_recentre(const s2_cal *c, float cx, float cy, s2_cal *o
     if (!c || !c->valid) return 0;
     cx = roundf(cx); cy = roundf(cy);
     float dx = cx - c->cx, dy = cy - c->cy;
-    out->cx = cx; out->cy = cy; out->dead = c->dead;   // the dead zone is the stick's (s2_params_dead), not its calibration's
+    out->cx = cx; out->cy = cy; out->dead = c->dead; out->dead_set = c->dead_set;   // the dead zone is the stick's (s2_params_dead, or set here), not its calibration's
     out->maxx = c->maxx - dx; out->minx = c->minx + dx; out->maxy = c->maxy - dy; out->miny = c->miny + dy;
     out->valid = out->maxx > 100 && out->maxy > 100 && out->minx > 100 && out->miny > 100;
     return out->valid;
@@ -313,7 +327,7 @@ static inline int s2_reach_travel(const s2_reach *r, const s2_cal *c, const s2_c
     if (r->up[0] > S2_REACH_MAX_FRAC * limits->maxx || r->down[0] > S2_REACH_MAX_FRAC * limits->minx ||
         r->up[1] > S2_REACH_MAX_FRAC * limits->maxy || r->down[1] > S2_REACH_MAX_FRAC * limits->miny) f |= S2_REACH_TOO_FAR;
     if (f) return f;
-    s2_cal t; t.cx = c->cx; t.cy = c->cy; t.dead = c->dead;
+    s2_cal t; t.cx = c->cx; t.cy = c->cy; t.dead = c->dead; t.dead_set = c->dead_set;
     t.maxx = r->up[0] * S2_REACH_TRIM; t.minx = r->down[0] * S2_REACH_TRIM; t.maxy = r->up[1] * S2_REACH_TRIM; t.miny = r->down[1] * S2_REACH_TRIM;
     t.valid = t.maxx > 100 && t.maxy > 100 && t.minx > 100 && t.miny > 100;
     if (!t.valid) return S2_REACH_SHORT_RIGHT | S2_REACH_SHORT_LEFT | S2_REACH_SHORT_UP | S2_REACH_SHORT_DOWN;

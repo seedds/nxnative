@@ -62,3 +62,7 @@ void dm_switch2_observe(void (^changed)(void), void (^report)(uint32_t id));
 // or an invalid cal. After any other outcome the session re-reads that slot's calibration (user, else factory) into the pad the game reads before done runs. done on the main queue, after this returns
 void dm_switch2_save(uint32_t id, int slot, s2_cal cal, void (^done)(S2CalOutcome outcome, NSString *backupPath));
 int dm_switch2_saving(void);                               // some save is running (the quit wait)
+// The dead zone the game applies to stick slot of controller id, set on this host: a share of the stick's travel, held to S2_DEAD_SET_MIN..S2_DEAD_SET_MAX; 0 goes back to the
+// stick's own. Kept in this app's defaults under the controller's serial and the stick (the controller refuses writes to its own), so it holds at each connect. Ignored for an
+// unknown id or a slot the controller has no stick in
+void dm_switch2_set_dead_zone(uint32_t id, int slot, float share);

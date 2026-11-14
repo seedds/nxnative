@@ -199,6 +199,19 @@ int main(void) {
     memset(b, 0xFF, S2_STICK_BLOCK); CHECK(s2_params_dead(b, S2_STICK_BLOCK) == 0.f && s2_cal_from_flash(b, S2_STICK_BLOCK, NULL, 0, &c) == 0);
     { s2_cal r = {2048, 2048, 1200, 1200, 1200, 1200, 1, 20}; CHECK(s2_cal_dead_own(&r) == 0 && s2_cal_dead_share(&r) == S2_DEAD_SHARE);   // 1.7 %
       r.dead = 600; CHECK(s2_cal_dead_own(&r) == 0 && s2_cal_dead_share(&r) == S2_DEAD_SHARE); }                                      // 50 %
+    // A dead zone set on this host (dm_switch2_set_dead_zone): it goes before the stick's own and the default, held to 1..30 % of the travel; 0 clears it
+    CHECK(s2_dead_set_clamp(0) == 0 && s2_dead_set_clamp(-0.1f) == 0 && s2_dead_set_clamp(NAN) == 0 && s2_dead_set_clamp(0.001f) == S2_DEAD_SET_MIN && s2_dead_set_clamp(0.9f) == S2_DEAD_SET_MAX && s2_dead_set_clamp(0.2f) == 0.2f);
+    { s2_cal r = {2048, 2048, 1600, 1600, 1600, 1600, 1, 160}; float rx, ry;   // its own: 10 %
+      CHECK(r.dead_set == 0 && s2_cal_dead_share(&r) == 0.1f);
+      s2_cal_apply(&r, 2048 + 240, 2048, &rx, &ry); CHECK(rx > 0.f);                                // 15 %: past its own
+      r.dead_set = 0.20f; CHECK(s2_cal_dead_share(&r) == 0.20f);
+      s2_cal_apply(&r, 2048 + 240, 2048, &rx, &ry); CHECK(rx == 0.f && ry == 0.f);                  // inside the one set
+      s2_cal_apply(&r, 2048 + 1600, 2048, &rx, &ry); CHECK(rx == 1.f);                              // full tilt still reads full
+      r.dead_set = 0.02f; s2_cal_apply(&r, 2048 + 64, 2048, &rx, &ry); CHECK(rx > 0.f);             // 4 %: past a 2 % one, inside its own
+      r.dead_set = 0.9f; CHECK(s2_cal_dead_share(&r) == S2_DEAD_SET_MAX);                           // held to the range
+      r.valid = 0; r.dead_set = 0.25f; s2_cal_apply(&r, 2048 + 240, 2048, &rx, &ry); CHECK(rx == 0.f);   // the defaults' travel keeps it (20 % < 25 %)
+      r.dead_set = 0; s2_cal_apply(&r, 2048 + 240, 2048, &rx, &ry); CHECK(rx > 0.f); }                 // and without it, its own (13 %)
+    CHECK(s2_cal_from_flash(NULL, 0, NULL, 0, &c) == 0 && c.dead_set == 0);                        // read from a controller: none set
 
     // Writing a user calibration (DM_SW2_CALIBRATE): the recorded block packs back to its own bytes; the user block is the marker B2 A1 and those 9 bytes
     {
@@ -213,6 +226,7 @@ int main(void) {
         // A new centre keeps the end stops (2095 + 1175 = 3270 and 2095 - 1181 = 914 still read full tilt) and the stick's own dead zone (a Pro Controller 2's 160 counts)
         c.dead = 160;
         s2_cal rc; CHECK(s2_cal_recentre(&c, 2300.4f, 1980.f, &rc) && rc.cx == 2300 && rc.cy == 1980 && rc.maxx == 970 && rc.minx == 1386 && rc.maxy == 1244 && rc.miny == 1110 && rc.dead == 160);
+        { s2_cal d = c, rd; d.dead_set = 0.15f; CHECK(s2_cal_recentre(&d, 2300, 1980, &rd) && rd.dead_set == 0.15f); }   // a dead zone set here is the stick's too
         s2_cal_apply(&rc, 3270, 1980, &x, &y); CHECK(x == 1.f && y == 0.f);
         s2_cal_apply(&rc, 914, 1980, &x, &y); CHECK(x == -1.f);
         s2_cal_apply(&rc, 2300 + 30, 1980 - 30, &x, &y); CHECK(x == 0.f && y == 0.f);   // the new rest is inside the dead zone
@@ -247,6 +261,7 @@ int main(void) {
             s2_reach_update(&rc2, &c, 2095 + 1200, 1999); s2_reach_update(&rc2, &c, 2095 - 1180, 1999);
             s2_reach_update(&rc2, &c, 2095, 1999 + 1230); s2_reach_update(&rc2, &c, 2095, 1999 - 1130);
             CHECK(s2_reach_travel(&rc2, &c, &c, &nc) == 0 && nc.cx == 2095 && nc.cy == 1999 && nc.valid && nc.dead == c.dead);   // the dead zone is the stick's, not the travel's
+            { s2_cal d = c, nd; d.dead_set = 0.12f; CHECK(s2_reach_travel(&rc2, &d, &c, &nd) == 0 && nd.dead_set == 0.12f); }
             CHECK(fabsf(nc.maxx - 1164.f) < 0.01f && fabsf(nc.minx - 1144.6f) < 0.01f && fabsf(nc.maxy - 1193.1f) < 0.01f && fabsf(nc.miny - 1096.1f) < 0.01f);
             memset(&rc2, 0, sizeof rc2);
             s2_reach_update(&rc2, &c, 2095 + 700, 1999); s2_reach_update(&rc2, &c, 2095 - 1180, 1999);

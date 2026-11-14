@@ -220,6 +220,7 @@ __attribute__((unused)) static BOOL nxl_same_account(NSString *access, NSDiction
     return YES;
 }
 
+static NSString *nxl_refusal_words(id given);
 // /api/online-status says whether this account may play online now: {"allow": true}, or {"allow": false, "reason": ...}. When it refuses,
 // the reason in words for the player; nil when it allows, cannot be asked, or gives no answer
 __attribute__((unused)) static NSString *nxl_online_refusal(NSString *access) {
@@ -228,7 +229,12 @@ __attribute__((unused)) static NSString *nxl_online_refusal(NSString *access) {
     [get setValue:[NSString stringWithFormat:@"Bearer %@", access] forHTTPHeaderField:@"Authorization"];
     NSDictionary *answer = nxl_send(get, NULL);
     if (![answer[@"allow"] isEqual:@NO]) return nil;
-    NSString *reason = [answer[@"reason"] isKindOfClass:NSString.class] ? answer[@"reason"] : @"";
+    return nxl_refusal_words(answer[@"reason"]);
+}
+// A refusal's reason ("unverified", "discord_unlinked", ...) in words for the player. Nextendo's game servers apply the same gates at
+// the game's own login, where the NEX protocol carries no reason (a game shows an authentication error, Mario Kart 8 Deluxe 2306-0807)
+__attribute__((unused)) static NSString *nxl_refusal_words(id given) {
+    NSString *reason = [given isKindOfClass:NSString.class] ? given : @"";
     NSDictionary<NSString *, NSString *> *words = @{
         @"discord_unlinked": @"link a Discord account on your nextendo.network account page",
         @"unverified": @"verify the account's e-mail address with the link Nextendo sent you",
@@ -265,8 +271,10 @@ __attribute__((unused)) static NSDictionary *nxl_record_for(NSString *access, NS
     return record && nxl_same_account(access, record, error) ? record : nil;
 }
 
-// From the saved sign-in to a game token's record: refresh grant (under nxl_lock), then nxl_record_for. nil and the reason when a step fails
-__attribute__((unused)) static NSDictionary *nxl_game_record(NSString **error) {
+// From the saved sign-in to a game token's record: refresh grant (under nxl_lock), then nxl_record_for. nil and the reason when a step fails.
+// With access set, it also gets the refresh's access token (about an hour's life), which the caller keeps in memory only and never logs
+__attribute__((unused)) static NSDictionary *nxl_game_record_access(NSString **error, NSString **access_out) {
+    if (access_out) *access_out = nil;
     NSString *client = nxl_client_id();
     if (!client) { nxl_fail(error, kNxNoClient); return nil; }
     int lock = nxl_lock();
@@ -281,8 +289,11 @@ __attribute__((unused)) static NSDictionary *nxl_game_record(NSString **error) {
 #endif
         return nil;
     }
-    return access ? nxl_record_for(access, error) : nil;
+    NSDictionary *record = access ? nxl_record_for(access, error) : nil;
+    if (record && access_out) *access_out = access;
+    return record;
 }
+__attribute__((unused)) static NSDictionary *nxl_game_record(NSString **error) { return nxl_game_record_access(error, NULL); }
 
 // ---- Signing in (the browser part belongs to the caller: the Mac opens the default browser, the iPhone a web authentication session) ----
 

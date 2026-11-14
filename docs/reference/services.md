@@ -979,6 +979,22 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Check:** `dm/tools/tests/test_nextendo_services.py` (`test_pinned_routes_carry_their_certificate`).
 - **Found on:** Mario Kart 8 Deluxe 4.0.1 on an iPhone, 2026-11-14. The certificate was read from the server (RSA 2048, SHA-256, valid 2026-07-13 to 2036-07-10). A session past the pin has not run yet.
 
+### A NEX login refused by Nextendo carries no reason
+
+- **Symptom:** in Nextendo mode, past the certificate check, a NEX game's online menu shows 2306-08xx (Mario Kart 8 Deluxe: 2306-0807, `game asks to show an error (ErrorResultVariant): state 2 ... as an error code 2306-0807`). The game wrote its WebSocket upgrade to the game server, read the answer and gave up about 4 s later, with no UDP socket opened.
+- **Cause:** 2306-08xx is the game's NEX authentication failing. Nextendo's game servers ask the account server whether the account may play before they accept a login (an unconfirmed e-mail, no linked Discord account, the account online on another device, a disabled account), and a refusal reaches the game as a generic NEX error. The NEX protocol has no field for the reason, so neither the game nor the log could say which it was.
+- **Fix:** the host asks Nextendo itself. `hle_nextendo_login_apple.m` `dm_nextendo_login_online_check` sends the sign-in's OAuth access token to `/api/online-status` and logs `Nextendo allows online play for this account`, the refusal in words, or why it could not ask, once per change of answer. It asks once off the game's thread after the first game credential, and again when the game shows a 2306-08xx error in Nextendo mode (`hle_offline.c` `nextendo_refusal`). The access token stays in memory only and is never logged.
+- **Check:** none without a device; the next Mario Kart 8 Deluxe run in Nextendo mode logs the answer.
+- **Found on:** Mario Kart 8 Deluxe 4.0.1 on an iPhone, 2026-11-14, with an account that plays Super Mario Bros. Wonder online. Which gate refuses it, if any, is not known yet.
+
+### `/api/me` refuses the game token
+
+- **Symptom:** in Nextendo mode the log has `[RED] nextendo: /api/me answered HTTP 401` (and `/api/friends answered HTTP 401`) while the game's own online login works.
+- **Cause:** the account API was called with the nx2 game token. Nextendo's `/api/me` takes only a session or OAuth access token; friends and presence take the game token too.
+- **Fix:** `hle_nextendo_apple.m` `dm_nextendo_api_bearer` returns the access token the sign-in's last refresh got (`dm_nextendo_login_access`, renewed after 50 minutes, kept in memory only) and the game token only without one.
+- **Check:** `make -C dm/host/tests GAME=<id> nextendo-account`; the 401 lines go away on a device.
+- **Found on:** Super Mario Bros. Wonder 1.2.1 and Mario Kart 8 Deluxe 4.0.1 on an iPhone, 2026-11-14.
+
 ### `EventFd` in a network mode shares the socket numbering
 
 - **Symptom:** with `DM_NETWORK` set to a network mode, a game that uses gRPC (`nn::npln`) aborts in `grpc_init` as it does offline without event descriptors, or its poller never wakes while it polls its sockets.

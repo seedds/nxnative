@@ -5,7 +5,7 @@
 #include <stdint.h>
 #include <stddef.h>
 
-// Returns only a currently valid NEX proof, in explicit Nextendo mode.
+// In explicit Nextendo mode with a currently valid game credential: the sign-in's OAuth access token, or the nx2 game token without one.
 NSString *dm_nextendo_api_bearer(void);
 NSData *dm_nextendo_api_identity(void);
 bool dm_nextendo_api_baas_namespace(const char *kind);

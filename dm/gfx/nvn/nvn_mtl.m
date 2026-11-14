@@ -9234,11 +9234,7 @@ static NSSet<NSString *> *ga_list(void) {
 // The Mac app's bundle ID gives Metal a private cache root. Hold this lock for the host's lifetime:
 // a second copy of the same game must not remove folders its compiler is using.
 static int g_ga_lock_fd = -1;
-static int ga_clean_bundle_cache(void) {
-    NSString *bundle = NSBundle.mainBundle.bundleIdentifier;
-    if (![bundle hasPrefix:@"org.nxnative."]) return 0;   // command-line tools use the shared cache
-    char b[PATH_MAX]; size_t n = confstr(_CS_DARWIN_USER_CACHE_DIR, b, sizeof b); if (!n || n > sizeof b) return 0;
-    NSString *owner = [[@(b) stringByAppendingPathComponent:bundle] stringByStandardizingPath];
+static int ga_clean_dir(NSString *owner, dispatch_queue_t queue) {
     NSError *e = nil;
     if (![NSFileManager.defaultManager createDirectoryAtPath:owner withIntermediateDirectories:YES attributes:nil error:&e]) {
         MLOG("[RED] pipeline archive: cannot prepare the app's Metal cache lock (%s)", e.localizedDescription.UTF8String); return 0;
@@ -9267,7 +9263,7 @@ static int ga_clean_bundle_cache(void) {
         if (lstat(path.fileSystemRepresentation, &st) || !S_ISDIR(st.st_mode)) continue;   // do not follow links
         [old addObject:path];
     }
-    if (old.count) dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+    if (old.count) dispatch_async(queue, ^{
         int removed = 0, failed = 0;
         for (NSString *path in old) {
             struct stat st; if (lstat(path.fileSystemRepresentation, &st) || !S_ISDIR(st.st_mode)) continue;
@@ -9278,6 +9274,13 @@ static int ga_clean_bundle_cache(void) {
         MLOG("pipeline archive: %d old app Metal build folders removed, %d failed", removed, failed);
     });
     return 1;
+}
+static int ga_clean_bundle_cache(void) {
+    NSString *bundle = NSBundle.mainBundle.bundleIdentifier;
+    if (![bundle hasPrefix:@"org.nxnative."]) return 0;   // command-line tools use the shared cache
+    char b[PATH_MAX]; size_t n = confstr(_CS_DARWIN_USER_CACHE_DIR, b, sizeof b); if (!n || n > sizeof b) return 0;
+    NSString *owner = [[@(b) stringByAppendingPathComponent:bundle] stringByStandardizingPath];
+    return ga_clean_dir(owner, dispatch_get_global_queue(QOS_CLASS_UTILITY, 0));
 }
 #endif
 static ArchEpoch *ep_new(void) {   // a flush period: its compiler and serializer, nil when Metal makes none

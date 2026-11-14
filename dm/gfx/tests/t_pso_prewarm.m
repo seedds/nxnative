@@ -58,6 +58,63 @@ static int run_self(NSArray<NSString *> *args, NSDictionary<NSString *, NSString
     NSError *err = nil; if (![t launchAndReturnError:&err]) return -1;
     [t waitUntilExit]; return t.terminationStatus;
 }
+#if !TARGET_OS_IPHONE
+static int cache_clean_child(NSString *owner, BOOL late) {
+    dispatch_queue_t q = dispatch_queue_create("test.gpuarchiver-clean", DISPATCH_QUEUE_SERIAL);
+    if (late) dispatch_suspend(q);   // hold the removal block until after ga_clean_dir has taken its snapshot
+    int cleaned = ga_clean_dir(owner, q);
+    if (late && !cleaned) return 1;
+    if (!late && !cleaned) return 0;   // another process holding the lock is an expected no-op
+    if (late) {
+        NSString *p = [[owner stringByAppendingPathComponent:@"com.apple.gpuarchiver"] stringByAppendingPathComponent:@"gpuarchiver-late"];
+        if (![NSFileManager.defaultManager createDirectoryAtPath:p withIntermediateDirectories:NO attributes:nil error:nil]) return 2;
+        dispatch_resume(q);
+    }
+    dispatch_sync(q, ^{});   // drain the asynchronous removal before this process releases its lock
+    return 0;
+}
+static int cache_clean_tests(NSString *root) {
+    NSString *owner = [root stringByAppendingPathComponent:@"ga-clean-owner"];
+    NSString *cache = [owner stringByAppendingPathComponent:@"com.apple.gpuarchiver"];
+    NSString *old = [cache stringByAppendingPathComponent:@"gpuarchiver-old"];
+    NSString *other = [cache stringByAppendingPathComponent:@"unrelated"];
+    NSString *link = [cache stringByAppendingPathComponent:@"gpuarchiver-link"];
+    NSString *file = [cache stringByAppendingPathComponent:@"gpuarchiver-file"];
+    put([old stringByAppendingPathComponent:@"state"], @"old");
+    put([other stringByAppendingPathComponent:@"state"], @"keep");
+    put(file, @"keep");
+    if (symlink(other.fileSystemRepresentation, link.fileSystemRepresentation)) {
+        fprintf(stderr, "cache cleanup: could not create symlink fixture (%s)\n", strerror(errno)); failed++; return 1;
+    }
+    NSString *log = [root stringByAppendingPathComponent:@"ga-clean.log"];
+    EXPECT("cache cleanup: child succeeds", 0, run_self(@[@"--cache-clean", owner, @"late"], @{}, log));
+    struct stat st;
+    EXPECT("cache cleanup: old matching directory removed", 0, lstat(old.fileSystemRepresentation, &st) == 0);
+    EXPECT("cache cleanup: unrelated directory kept", 1, [NSFileManager.defaultManager fileExistsAtPath:[other stringByAppendingPathComponent:@"state"]]);
+    EXPECT("cache cleanup: matching symlink kept without following it", 1, lstat(link.fileSystemRepresentation, &st) == 0 && S_ISLNK(st.st_mode));
+    EXPECT("cache cleanup: matching regular file kept", 1, [NSFileManager.defaultManager fileExistsAtPath:file]);
+    NSString *late = [cache stringByAppendingPathComponent:@"gpuarchiver-late"];
+    EXPECT("cache cleanup: folder created after snapshot kept", 1, [NSFileManager.defaultManager fileExistsAtPath:late]);
+
+    NSString *busy_owner = [root stringByAppendingPathComponent:@"ga-clean-busy-owner"];
+    NSString *busy_cache = [busy_owner stringByAppendingPathComponent:@"com.apple.gpuarchiver"];
+    NSString *busy_old = [busy_cache stringByAppendingPathComponent:@"gpuarchiver-busy"];
+    put([busy_old stringByAppendingPathComponent:@"state"], @"keep");
+    NSString *lock = [busy_owner stringByAppendingPathComponent:@".nxnative-gpuarchiver.lock"];
+    int fd = open(lock.fileSystemRepresentation, O_CREAT | O_RDWR | O_CLOEXEC, 0600);
+    EXPECT("cache cleanup: test lock opened", 1, fd >= 0);
+    if (fd >= 0 && flock(fd, LOCK_EX | LOCK_NB) == 0) {
+        EXPECT("cache cleanup: competing process succeeds", 0, run_self(@[@"--cache-clean", busy_owner, @"ready"], @{}, [root stringByAppendingPathComponent:@"ga-clean-busy.log"]));
+        EXPECT("cache cleanup: second lock holder leaves folders", 1, [NSFileManager.defaultManager fileExistsAtPath:[busy_old stringByAppendingPathComponent:@"state"]]);
+        flock(fd, LOCK_UN); close(fd);
+    } else {
+        fprintf(stderr, "cache cleanup: could not hold fixture lock (%s)\n", strerror(errno)); failed++;
+        if (fd >= 0) close(fd);
+    }
+    printf("t_pso_prewarm cache cleanup: %d checks, %d failed\n", checks, failed);
+    return failed != 0;
+}
+#endif
 static NSArray<NSString *> *mtl4a(NSString *dir) { return [[[NSFileManager.defaultManager contentsOfDirectoryAtPath:dir error:nil] filteredArrayUsingPredicate:[NSPredicate predicateWithFormat:@"self ENDSWITH '.mtl4a'"]] sortedArrayUsingSelector:@selector(compare:)]; }
 static NSString *slurp(NSString *p) { return [NSString stringWithContentsOfFile:p encoding:NSUTF8StringEncoding error:nil] ?: @""; }
 
@@ -104,6 +161,9 @@ static int open_run(NSString *root) {
 int main(int argc, char **argv) { @autoreleasepool {
     alarm(240);
     unsetenv("DM_NVN_HILITE"); unsetenv("DM_NVN_MAGSCAN"); unsetenv("DM_PSO_RECORD"); unsetenv("DM_PSO_USER"); unsetenv("DM_SAVE"); setenv("DM_NVN_PREDICT", "0", 1);
+#if !TARGET_OS_IPHONE
+    if (argc >= 4 && !strcmp(argv[1], "--cache-clean")) return cache_clean_child(@(argv[2]), !strcmp(argv[3], "late"));
+#endif
     if (argc >= 3 && !strcmp(argv[1], "--tool")) {   // DM_PSO_PREBUILD=tool, the flush period as small as a test can make it
         if (getenv("T_PERIOD")) g_arch_period_max = atoi(getenv("T_PERIOD"));
         // T_HARVEST_HOLD=<ms>: the harvest queue (arch_harvest) busy that long, as a slow capture of a compute pipeline the MTLDevice built makes it
@@ -113,8 +173,12 @@ int main(int argc, char **argv) { @autoreleasepool {
     if (argc >= 3 && !strcmp(argv[1], "--open")) { mtl_init(); shmap_load(); return open_run(@(argv[2])); }
     char tmp[PATH_MAX]; snprintf(tmp, sizeof tmp, "%s/t_pso_prewarm.XXXXXX", getenv("TMPDIR") ?: "/tmp"); if (!mkdtemp(tmp)) abort();
     NSString *root = @(tmp), *msl = [root stringByAppendingFormat:@"/msl/b-%s", DMSH_CHAIN], *tables = [root stringByAppendingPathComponent:@"tables"];
+    setenv("DM_MSL_DIR", [root stringByAppendingPathComponent:@"msl"].UTF8String, 1); setenv("DM_NVN_SHMAP", [tables stringByAppendingPathComponent:@"shader_map.tsv"].UTF8String, 1);
+    setenv("DM_PSO_ARCHIVE", "off", 1); setenv("DM_PSO_MANIFEST", "off", 1);
+#if !TARGET_OS_IPHONE
+    if (cache_clean_tests(root)) { [NSFileManager.defaultManager removeItemAtPath:root error:nil]; return 1; }
+#endif
     if (!fixtures(msl, tables)) { printf("t_pso_prewarm: no Metal compiler (xcrun metal), not run\n"); [NSFileManager.defaultManager removeItemAtPath:root error:nil]; return 0; }
-    setenv("DM_PSO_ARCHIVE", "off", 1); setenv("DM_MSL_DIR", [root stringByAppendingPathComponent:@"msl"].UTF8String, 1); setenv("DM_NVN_SHMAP", [tables stringByAppendingPathComponent:@"shader_map.tsv"].UTF8String, 1); setenv("DM_PSO_MANIFEST", "off", 1);
     mtl_init(); shmap_load();
     NSString *gpu = g_dev.architecture.name;
     NvShader *vs = shader_load(@"warm-vs", 0, 0), *fs = shader_load(@"warm-fs", 1, 0);

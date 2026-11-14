@@ -199,24 +199,37 @@ HLE_FORCE("_ZN2nn3mii8Database6ImportEPKvm", "mii:u service; importing needs the
 HLE_FORCE("_ZNK2nn3mii8Database6ExportEPvm", "mii:u service; nothing to export", Result, h_mii_Export, const void *self, void *p, size_t n) {
     (void)self; (void)p; (void)n; LOG("[RED] mii: Database::Export refused"); return MII_RES_TEST_MODE;
 }
-// MiiModel system data (0100000000000802) stand-in. The Mii rendering code an application links (Mario Kart 8 Deluxe 4.0.0: main+0x8f1400..+0x8fc000) reads one texture file
+// MiiModel system data (0100000000000802) stand-in, also the Switch 2's MiiResource (0400000000000849, below). The Mii rendering code an application links (Mario Kart 8 Deluxe 4.0.0: main+0x8f1400..+0x8fc000) reads one texture file
 // (NXTexture{Low,Mid}{Linear,SRGB}.dat) and one shape file (Shape{Mid,High}.dat) whole and builds each part of a head from them; the firmware's files are not the host's to ship, so it writes
-// files of the same layout in which every part is absent:
+// files of the same layout in which every part is blank:
 //   texture file: +0x0c u32 largest decompressed size of each of the 11 part kinds, +0x38 their alignments, then from +0x64 one 0x1c-byte entry per part (u32 offset, u32 size, u32 stored size,
-//     4 zlib parameters, then the texture: u16 width / height at +0x14, format, mip count and kind at +0x18), hats 132, eyes 62, eyebrows 24, beards 2, wrinkles 12, make-up 12, glasses 20,
-//     moles 2, mouths 37, mustaches 6, noselines 18 (main+0x8fb0dc);
+//     4 zlib parameters, then the texture: u16 width / height at +0x14, format index, mip count and tile mode index at +0x18), hats 132, eyes 62, eyebrows 24, beards 2, wrinkles 12, make-up 12,
+//     glasses 20, moles 2, mouths 37, mustaches 6, noselines 18 (main+0x8fb0dc);
 //   shape file: +0x0c the 12 largest sizes, +0x3c their alignments, from +0x6c one 0x58-byte entry per part (offset, size, stored size, zlib parameters, five vertex attribute offsets
 //     and sizes, index offset and size, bounding box), beards 4, facelines 12, masks 12, hats / foreheads / hair in normal and cap form 132 each, glasses 1, noses 18, noselines 18
 //     (main+0x8faee8); then the hair transforms (132 × 0x48, +0x12704) and faceline transforms (12 × 0x24, +0x14c24).
-// A texture whose size is 0 is skipped when the model is built (main+0x8faaf4); the model's own render targets (face, mask) do not come from the file. Shapes cannot all be absent: the
-// faceline is drawn without a check (its position buffer, main+0x8286c4: a null buffer read at main+0xa690d0), so every shape entry points at one shared mesh, one vertex at the origin
-// (attribute 0, the position: 4 halves) and the triangle (0, 0, 0) (u16 indices at +0x10), 0x20 bytes of zeros inflated with nn::util::DecompressZlib, stored here as one raw deflate block.
-// It builds, and draws nothing. The largest sizes size the model's memory pool (main+0x8f2e6c) and the first alignment is that pool's alignment, so they are one page each instead of 0.
-// The first 12 bytes of each header are not read
-enum { MII_TEX_SIZE = 0x64 + 0x1c * 327, MII_SHAPE_TABLES = 0x6c + 0x58 * 857 + 0x48 * 132 + 0x24 * 12, MII_MESH_AT = 0x14de0, MII_MESH = 0x20 };
-_Static_assert(MII_TEX_SIZE == 0x2428 && MII_SHAPE_TABLES == 0x14dd4, "MiiModel stand-in layout");
+// Parts cannot be absent: the firmware's files have every one, and the Mii code relies on it. A texture whose size is 0 is skipped when the model is built (main+0x8faaf4; Nintendo
+// Switch Sports Resort main+0x1cdead0), but the model's texture getter answers for a part by the create flags alone (Switch Sports Resort main+0x1cd5490: the hat texture whenever
+// the normal or hat flag was given), so a game that asks for a skipped part's texture gets an empty holder: with every part of size 0, Switch Sports Resort's two-player skate
+// registered the hat texture of a Mii model leaving its practice zone (main+0x3fbc9ac) and called nvnTextureGetFlags with a null texture (main+0x49c54). Every texture entry
+// points at one shared blank texture instead: 8x4 texels of format index 0 (nn::gfx R8_Unorm, main+0x42d2688), one level, optimal tiling, the same 0x20 zero bytes as the mesh below,
+// which the reader inflates into the texture's storage (512 bytes on NVN, one GOB). Shapes cannot be absent either: the faceline is drawn without a check (its position buffer,
+// main+0x8286c4: a null buffer read at main+0xa690d0), so every shape entry points at one shared mesh, one vertex at the origin (attribute 0, the position: 4 halves) and the triangle
+// (0, 0, 0) (u16 indices at +0x10), 0x20 bytes of zeros inflated with nn::util::DecompressZlib, stored here as one raw deflate block. It builds, and draws nothing. The largest sizes
+// size the model's memory pool (main+0x8f2e6c) and the first alignment is that pool's alignment, so they are one page each instead of 0. The first 12 bytes of each header are not read
+enum { MII_TEX_PARTS = 327, MII_TEX_SIZE = 0x64 + 0x1c * MII_TEX_PARTS, MII_SHAPE_TABLES = 0x6c + 0x58 * 857 + 0x48 * 132 + 0x24 * 12, MII_MESH_AT = 0x14de0, MII_MESH = 0x20,
+       MII_TEXELS_AT = 0x2430, MII_TEX_W = 8, MII_TEX_H = 4 };
+_Static_assert(MII_TEX_SIZE == 0x2428 && MII_SHAPE_TABLES == 0x14dd4 && MII_TEXELS_AT >= MII_TEX_SIZE && MII_TEX_W * MII_TEX_H == MII_MESH, "MiiModel stand-in layout");
 static const uint8_t mii_mesh_z[] = {0x78, 0x01, 0x01, MII_MESH, 0, (uint8_t)~MII_MESH, 0xff, [7 ... 7 + MII_MESH - 1] = 0, 0x00, MII_MESH, 0x00, 0x01};   // zlib: stored block, Adler-32 of 32 zeros
-enum { MII_SHAPE_SIZE = MII_MESH_AT + sizeof mii_mesh_z };
+enum { MII_SHAPE_SIZE = MII_MESH_AT + sizeof mii_mesh_z, MII_TEXFILE_SIZE = MII_TEXELS_AT + sizeof mii_mesh_z };
+static void mii_textures(uint8_t *b) {   // every part the one blank texture (see above): its 0x20 zero bytes are the mesh's
+    for (int i = 0; i < MII_TEX_PARTS; i++) {
+        uint8_t *e = b + 0x64 + 0x1c * i; uint32_t at = MII_TEXELS_AT, size = MII_MESH, stored = sizeof mii_mesh_z; uint16_t w = MII_TEX_W, h = MII_TEX_H;
+        memcpy(e, &at, 4); memcpy(e + 4, &size, 4); memcpy(e + 8, &stored, 4);   // data offset, inflated size, stored size
+        memcpy(e + 0x14, &w, 2); memcpy(e + 0x16, &h, 2); e[0x18] = 0; e[0x19] = 1; e[0x1a] = 0;   // R8_Unorm, one level, optimal tiling
+    }
+    memcpy(b + MII_TEXELS_AT, mii_mesh_z, sizeof mii_mesh_z);
+}
 static void mii_shapes(uint8_t *b) {
     for (int i = 0; i < 857; i++) {
         uint32_t *e = (uint32_t *)(b + 0x6c + 0x58 * i);
@@ -231,25 +244,32 @@ static int mii_write(const char *dir, const char *name, int parts, size_t size) 
     uint8_t *b = calloc(1, size); FILE *f = fopen(p, "wb");
     for (int i = 0; b && i < parts; i++) { uint32_t page = 0x1000; memcpy(b + 0xc + 4 * i, &page, 4); memcpy(b + 0xc + 4 * parts + 4 * i, &page, 4); }
     if (b && parts == 12) mii_shapes(b);
+    if (b && parts == 11) mii_textures(b);
     int ok = b && f && fwrite(b, 1, size, f) == size;
     if (f && fclose(f)) ok = 0;
     free(b);
-    if (!ok) LOG("[RED] mii: cannot write the MiiModel stand-in %s", p);
+    if (!ok) LOG("[RED] mii: cannot write the Mii model stand-in %s", p);
     return ok;
 }
-int dm_mii_standin(const char *dir) {   // written once per process (the query and the mount both ask), so a host with another layout never leaves old files behind
-    static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER; static int done;
+// One stand-in serves both archives, the Switch's MiiModel (0100000000000802) and the Switch 2's (0400000000000849), whose files have the same layout (Nintendo Switch Sports Resort's
+// accessors, main+0x1cdcd80..+0x1cdd0c4: 11 texture part kinds from +0x64 in 0x1c-byte entries, 12 shape kinds from +0x6c in 0x58-byte entries, hair transforms at +0x12704, faceline
+// at +0x14c24); the Switch 2's adds its own texture sets, OunceTexture{Low,Mid,High}{Linear,SRGB}.dat, and a game reads only the files it names. Written once per process (the query
+// and the mount both ask, for either archive), so a host with another layout never leaves old files behind; again only if the directory changes (a test's DM_TEMP)
+int dm_mii_standin(const char *dir) {
+    static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER; static char done_dir[1024]; static int done;
     pthread_mutex_lock(&mu);
-    if (done) { pthread_mutex_unlock(&mu); return done > 0; }
+    if (done && !strcmp(done_dir, dir)) { pthread_mutex_unlock(&mu); return done > 0; }
     char p[1024]; strlcpy(p, dir, sizeof p);
     for (char *s = p + 1; *s; s++) if (*s == '/') { *s = 0; mkdir(p, 0755); *s = '/'; }
     mkdir(p, 0755);
-    static const char *tex[] = {"NXTextureLowLinear.dat", "NXTextureLowSRGB.dat", "NXTextureMidLinear.dat", "NXTextureMidSRGB.dat"}, *shape[] = {"ShapeMid.dat", "ShapeHigh.dat"};
+    static const char *tex[] = {"NXTextureLowLinear.dat", "NXTextureLowSRGB.dat", "NXTextureMidLinear.dat", "NXTextureMidSRGB.dat",
+                                "OunceTextureLowLinear.dat", "OunceTextureLowSRGB.dat", "OunceTextureMidLinear.dat", "OunceTextureMidSRGB.dat", "OunceTextureHighLinear.dat", "OunceTextureHighSRGB.dat"},
+                      *shape[] = {"ShapeMid.dat", "ShapeHigh.dat"};
     int ok = 1;
-    for (int i = 0; i < 4; i++) ok &= mii_write(dir, tex[i], 11, MII_TEX_SIZE);
-    for (int i = 0; i < 2; i++) ok &= mii_write(dir, shape[i], 12, MII_SHAPE_SIZE);
-    LOG("mii: MiiModel system data is the host's stand-in (no textures, every shape one degenerate triangle: Mii heads draw nothing) in %s", dir);
-    done = ok ? 1 : -1;
+    for (size_t i = 0; i < sizeof tex / sizeof *tex; i++) ok &= mii_write(dir, tex[i], 11, MII_TEXFILE_SIZE);
+    for (size_t i = 0; i < sizeof shape / sizeof *shape; i++) ok &= mii_write(dir, shape[i], 12, MII_SHAPE_SIZE);
+    LOG("mii: Mii model system data is the host's stand-in (every texture part one blank 8x4 texture, every shape one degenerate triangle: Mii heads draw nothing) in %s", dir);
+    strlcpy(done_dir, dir, sizeof done_dir); done = ok ? 1 : -1;
     pthread_mutex_unlock(&mu);
     return ok;
 }

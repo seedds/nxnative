@@ -15,6 +15,7 @@
 #if TARGET_OS_IPHONE
 #include <os/proc.h>
 #endif
+#include <stdatomic.h>
 #include "dm.h"
 
 void svc_guest_range(uint8_t **base, size_t *size);
@@ -149,9 +150,12 @@ static void *memstat_thread(void *p) {
     return NULL;
 }
 
-__attribute__((constructor)) static void memstat_start(void) {
+// Started twice: by the constructor below, which sees only the launch environment (a Mac app, devicectl), and by dm_diag_samplers_start once main.m on iOS has read the
+// env files (Documents/env.txt, the bundle's dm/env.txt), which set nothing before main runs. The first call that finds the variable starts the thread, later ones do nothing
+static void memstat_start(void) {
+    static _Atomic int started;
     const char *p = getenv("DM_MEMSTAT");
-    if (!p || !*p) return;
+    if (!p || !*p || atomic_exchange(&started, 1)) return;
     char *path = strdup(p);
 #if TARGET_OS_IPHONE
     if (*p != '/') { size_t n = strlen(getenv("HOME")) + strlen(p) + 16; path = malloc(n); snprintf(path, n, "%s/Documents/%s", getenv("HOME"), p); }   // Relative name → the container's Documents (the container path is not known before launch)
@@ -191,12 +195,17 @@ static void *thrcpu_thread(void *p) {
     }
     return NULL;
 }
-__attribute__((constructor)) static void thrcpu_start(void) {
+static void thrcpu_start(void) {   // started as memstat_start is
+    static _Atomic int started;
     const char *p = getenv("DM_THRCPU");
-    if (!p || !*p) return;
+    if (!p || !*p || atomic_exchange(&started, 1)) return;
     char *spec = strdup(p);
 #if TARGET_OS_IPHONE
     if (*p != '/') { size_t n = strlen(getenv("HOME")) + strlen(p) + 16; spec = malloc(n); snprintf(spec, n, "%s/Documents/%s", getenv("HOME"), p); }
 #endif
     pthread_t th; pthread_create(&th, NULL, thrcpu_thread, spec); pthread_detach(th);
 }
+
+// The memory and per-thread CPU samplers: at load from the launch environment, and again from main.m on iOS after the env files (see memstat_start)
+void dm_diag_samplers_start(void) { memstat_start(); thrcpu_start(); }
+__attribute__((constructor)) static void diag_samplers_ctor(void) { dm_diag_samplers_start(); }

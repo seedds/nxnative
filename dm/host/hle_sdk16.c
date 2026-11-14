@@ -11,6 +11,7 @@
 #include <unistd.h>
 
 // ---------- oe ----------
+static _Atomic int g_exit_section;   // EnterExitRequestHandlingSection nesting (a system exit request would be held off here; the host has none)
 HLE_FORCE("_ZN2nn2oe15SetCpuBoostModeENS0_12CpuBoostModeE", "CPU boost mode; the host does not scale clocks", void, h_oe_CpuBoost, int m) { (void)m; }
 // DisplayVersion = char[16] (the application's display version): the value from that version's control data (NACP), chosen by main's build ID (the game profile's build rows); unknown builds get 1.0.0
 HLE_FORCE("_ZN2nn2oe17GetDisplayVersionEPNS0_14DisplayVersionE", "display version (by the main build ID)", void, h_oe_DispVer, char *v) {
@@ -24,8 +25,8 @@ HLE_FORCE("_ZN2nn2oe24GetExpectedVolumeBalanceEPfS1_", "system / application vol
 HLE_FORCE("_ZN2nn2oe24SetExpectedVolumeBalanceEff", "volume balance; the host ignores it", void, h_oe_SetVolBal, float sys, float app) { (void)sys; (void)app; }
 // Program total active time (nn::TimeSpan, nanoseconds): the host's monotonic time since startup
 HLE_FORCE("_ZN2nn2oe25GetProgramTotalActiveTimeEv", "total active time → time since the host started", int64_t, h_oe_ActiveTime, void) { return (int64_t)(now_ns() - g_t0_ns); }
-HLE_FORCE("_ZN2nn2oe31EnterExitRequestHandlingSectionEv", "exit request critical section; the host exits through SIGTERM / the lifecycle", void, h_oe_EnterExit, void) {}
-HLE_FORCE("_ZN2nn2oe31LeaveExitRequestHandlingSectionEv", "exit request critical section; the host ignores it", void, h_oe_LeaveExit, void) {}
+HLE_FORCE("_ZN2nn2oe31EnterExitRequestHandlingSectionEv", "exit request critical section: a system exit request (HOME, the console sleeping) is held off until the game leaves it; the host has no system exit requests, so this only marks the section", void, h_oe_EnterExit, void) { atomic_fetch_add(&g_exit_section, 1); }
+HLE_FORCE("_ZN2nn2oe31LeaveExitRequestHandlingSectionEv", "exit request critical section: left; an application exit the game asked for inside it has already ended the host", void, h_oe_LeaveExit, void) { if (atomic_fetch_sub(&g_exit_section, 1) < 1) atomic_store(&g_exit_section, 0); }
 
 // ---------- time ----------
 // CalendarTime = { int16 year; int8 month, day, hour, minute, second }, returned by value (within 8 bytes, in x0)

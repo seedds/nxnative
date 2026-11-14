@@ -515,10 +515,45 @@ static void save_old_names(const char *from, const char *to) {
     for (size_t i = 0; i < count; i++) free(names[i]);
     free(names);
 }
+// The directories on the way to a guest path that do not exist yet, made for a create on a transactional save mount. A game may write into a directory of its
+// save data that it never created and never asks for: Borderlands GOTY creates save0:/save255:/Save0001.sav (and .sav.tmp) with no CreateDirectory call at all,
+// so every save failed with "path not found" -- the game then wrote through a FileHandle it had never been given, the pwrite failed with EBADF, it raised the
+// error applet (Result 0x2A2) and committed an empty save. On a console the save data is the application's own tree and its create lands there, so a create on
+// this mount makes the directories on the way; rom, add-on content and system data are read-only, and a plain writable mount (temp) is left as it was.
+// Caller holds PATH_LOCK. Returns 1 when path is on a writable transactional save mount (the directories were made).
+static int save_dirs(const char *path) {
+    char buf[1024]; strlcpy(buf, path, sizeof buf);
+    char *c = strchr(buf, ':'); if (!c) return 0;
+    size_t ln = (size_t)(c - buf); int txn = -1;
+    for (int i = 0; i < g_nmnt; i++) if (mnt_is(&g_mnt[i], buf, ln) && g_mnt[i].txn_root >= 0 && !g_mnt[i].ro) { txn = i; break; }
+    if (txn < 0) return 0;
+    for (char *p = c + 1; *p; p++) {
+        if (*p != '/') continue;
+        *p = 0;
+        char hp[1024]; struct stat st;
+        if (host_path_ex(buf, hp, sizeof hp, NULL, 1) && stat(hp, &st)) mkdir(hp, 0755);
+        *p = '/';
+    }
+    return 1;
+}
 static Result err_res(const char *op, const char *path) {
     if (errno == ENOENT || errno == ENOTDIR) { if (g_flag.fs) LOG("fs %s not found: %s", op, path); return RES_PATH_NOT_FOUND; }   // Logged under DM_FS=1 (the game often probes with "not found", not logged by default)
     if (errno == EEXIST) return RES_PATH_EXISTS;
     LOG("fs %s %s failed errno=%d", op, path, errno); return RES_FAIL;
+}
+// A failed descriptor operation names the handle it was given and whether that is an open descriptor, plus the guest call site: a FileHandle that holds something else
+// (the SDK's own accessor pointer, a closed fd, an untouched out-parameter after a failed open) reads the same errno as a real I/O error, and errno alone cannot tell
+// them apart (Borderlands GOTY: a save write came in with a handle that was no descriptor at all, and the log said only "pwrite fd failed errno=9")
+__attribute__((weak)) void dm_thread_caller(char *b, size_t n) { if (n) snprintf(b, n, "?"); }
+__attribute__((weak)) uint32_t thr_cur_handle(void) { return 0; }   // hle_thread.c provides the real one (unit tests link hle_fs.c alone)
+static Result err_fd(const char *op, uint64_t h) {
+    int e = errno, fd = (int)h, mode = -1;
+    int is_open = fd >= 0 && fd < (int)sizeof g_fmode && fcntl(fd, F_GETFD) != -1;
+    if (fd >= 0 && fd < (int)sizeof g_fmode) mode = g_fmode[fd];
+    char cb[80]; dm_thread_caller(cb, sizeof cb);
+    LOG("fs %s failed errno=%d: handle %#llx → fd %d (%s), recorded open mode %d, caller %s", op, e, (unsigned long long)h, fd,
+        is_open ? "an open descriptor" : "not an open descriptor", mode, cb);
+    errno = e; return RES_FAIL;
 }
 // Name resolution shares one lock with create/rename/enumerate, aliases and xattr are published to the guest together.
 #define HP_EX(path, create) PATH_LOCK(); char hp[1024]; int ro = 0; if (!host_path_ex(path, hp, sizeof hp, &ro, create)) return err_res("path", path)
@@ -1076,7 +1111,7 @@ HLE_FORCE("_ZN2nn2fs8OpenFileEPNS0_10FileHandleEPKci", "fsp-srv → open(2)", Re
       atomic_store(&g_ftxn[fd], token); }
     fslog_init();
     if (g_fslog && fd < 4096) { pthread_mutex_lock(&g_fslog_lock); free(g_fdpath[fd]); g_fdpath[fd] = strdup(path); pthread_mutex_unlock(&g_fslog_lock); }
-    if (g_flag.fs) LOG("fs open [%.2fs] %s mode=%d → fd %d", (now_ns() - g_t0_ns) / 1e9, path, mode, fd);
+    if (g_flag.fs) { char w[64]; dm_thread_caller(w, sizeof w); LOG("fs open [%.2fs] %s mode=%d → fd %d (handle %#llx) thread %#x from %s", (now_ns() - g_t0_ns) / 1e9, path, mode, fd, (unsigned long long)FH_OUT(fd), (unsigned)thr_cur_handle(), w); }
     return RES_OK;
 }
 HLE_FORCE("_ZN2nn2fs8ReadFileEPmNS0_10FileHandleElPvm", "fsp-srv → pread(2)", Result, h_fs_ReadFile, size_t *out, uint64_t h, int64_t off, void *buf, size_t sz) { dm_thread_service_request();
@@ -1104,7 +1139,7 @@ HLE_FORCE("_ZN2nn2fs8ReadFileEPmNS0_10FileHandleElPvm", "fsp-srv → pread(2)", 
                 kern_return_t kr = vm_region_64(mach_task_self(), &ra, &rs, VM_REGION_BASIC_INFO_64, (vm_region_info_t)&vi, &cnt, &obj);
                 LOG("[RED] fs ReadFile into %p+%#zx failed at +%#zx (EFAULT): VM region %#lx+%#lx protection %d%s", buf, sz, got, (unsigned long)ra, (unsigned long)rs, kr == KERN_SUCCESS ? vi.protection : -1, kr == KERN_SUCCESS ? "" : " (none)");
                 errno = e; }
-            return err_res("pread", "fd"); }
+            return err_fd("pread", h); }
         if (r == 0) break;
         got += r;
     }
@@ -1136,12 +1171,12 @@ HLE_FORCE("_ZN2nn2fs9WriteFileENS0_10FileHandleElPKvmRKNS0_11WriteOptionE", "fsp
         int n = atomic_fetch_add(&g_save_writes, 1) + 1;
         { uint64_t z = 0; atomic_compare_exchange_strong(&g_mnt[txn].first_write_ns, &z, clock_gettime_nsec_np(CLOCK_MONOTONIC)); }
         if (g_save_kill_n && n == g_save_kill_n) { LOG("DM_TEST_KILL_AT: save write #%d, calling _exit (simulates being killed mid-write)", n); _exit(9); }
-        if (g_save_fail_n && n == g_save_fail_n) { LOG("DM_TEST_FS_FAIL: save write #%d returns failure errno=%d", n, g_save_fail_e); errno = g_save_fail_e; save_poison_txn(txn, g_save_fail_e); return err_res("pwrite (injected)", "fd"); }
+        if (g_save_fail_n && n == g_save_fail_n) { LOG("DM_TEST_FS_FAIL: save write #%d returns failure errno=%d", n, g_save_fail_e); errno = g_save_fail_e; save_poison_txn(txn, g_save_fail_e); return err_fd("pwrite (injected)", h); }
     }
     while (put < sz) {
         ssize_t r = pwrite((int)h, (const uint8_t *)buf + put, sz - put, off + put);
-        if (r < 0) { if (errno == EINTR) continue; if (txn >= 0) save_poison_txn(txn, errno); return err_res("pwrite", "fd"); }
-        if (r == 0) { errno = ENOSPC; if (txn >= 0) save_poison_txn(txn, ENOSPC); return err_res("pwrite (wrote 0 bytes)", "fd"); }   // This used to loop forever here
+        if (r < 0) { if (errno == EINTR) continue; if (txn >= 0) save_poison_txn(txn, errno); return err_fd("pwrite", h); }
+        if (r == 0) { errno = ENOSPC; if (txn >= 0) save_poison_txn(txn, ENOSPC); return err_fd("pwrite (wrote 0 bytes)", h); }   // This used to loop forever here
         put += r;
     }
     return RES_OK;
@@ -1151,7 +1186,7 @@ HLE_FORCE("_ZN2nn2fs11GetFileSizeEPlNS0_10FileHandleE", "fsp-srv → fstat(2)", 
     h = FH_IN(h);
     if (!h) return RES_FAIL;
     if (IMG_H(h)) { *out = (int64_t)g_mnt[IMG_M(h)].img->e[IMG_K(h)].b; return RES_OK; }
-    struct stat st; if (fstat((int)h, &st)) return err_res("fstat", "fd");
+    struct stat st; if (fstat((int)h, &st)) return err_fd("fstat", h);
     *out = st.st_size; return RES_OK;
 }
 HLE_FORCE("_ZN2nn2fs11SetFileSizeENS0_10FileHandleEl", "fsp-srv → ftruncate(2)", Result, h_fs_SetFileSize, uint64_t h, int64_t sz) { dm_thread_service_request();
@@ -1163,7 +1198,7 @@ HLE_FORCE("_ZN2nn2fs11SetFileSizeENS0_10FileHandleEl", "fsp-srv → ftruncate(2)
     if (txn >= 0) { txn_guard = &g_txn_lock[txn]; pthread_rwlock_rdlock(txn_guard); }
     if (!ftruncate((int)h, sz)) return RES_OK;
     if (txn >= 0) save_poison_txn(txn, errno);
-    return err_res("ftruncate", "fd");
+    return err_fd("ftruncate", h);
 }
 HLE_FORCE("_ZN2nn2fs9FlushFileENS0_10FileHandleE", "fsp-srv; host writes are already in the page cache, flushing is a no-op", Result, h_fs_FlushFile, uint64_t h) { dm_thread_service_request();
     SDK_HANDLE(h, "_ZN2nn2fs9FlushFileENS0_10FileHandleE", Result (*)(uint64_t), RES_FAIL, h);
@@ -1177,6 +1212,7 @@ HLE_FORCE("_ZN2nn2fs9CloseFileENS0_10FileHandleE", "fsp-srv → close(2)", void,
     }
     h = FH_IN(h);
     if (!h || IMG_H(h)) return;   // the null handle after a failed open (see ReadFile): do not touch fd 0; an image entry holds no descriptor
+    if (g_flag.fs) LOG("fs close fd %d (mode %d, handle %#llx)", (int)h, g_fmode[(int)h & 0xffff], (unsigned long long)FH_OUT((int)h));
     g_fmode[(int)h & 0xffff] = 0; atomic_store(&g_ftxn[(int)h & 0xffff], 0);
     close((int)h); }
 HLE_FORCE("_ZN2nn2fs15GetFileOpenModeENS0_10FileHandleE", "fsp-srv; the open mode is recorded by the host", int, h_fs_GetFileOpenMode, uint64_t h) {
@@ -1187,7 +1223,11 @@ HLE_FORCE("_ZN2nn2fs15GetFileOpenModeENS0_10FileHandleE", "fsp-srv; the open mod
 HLE_FORCE("_ZN2nn2fs10CreateFileEPKcl", "fsp-srv → open(O_CREAT|O_EXCL)+ftruncate", Result, h_fs_CreateFile, const char *path, int64_t sz) { dm_thread_service_request();
     SDK_PATH(path, "_ZN2nn2fs10CreateFileEPKcl", Result (*)(const char *, int64_t), path, sz);
     int mi; int64_t k; if (img_path(path, &mi, &k)) return k >= 0 ? RES_PATH_EXISTS : RES_FAIL;   // as RW_CREATE answers on a read-only folder
-    HP_EX(path, 1); RW_CREATE();
+    PATH_LOCK(); char hp[1024]; int ro = 0;
+    if (!host_path_ex(path, hp, sizeof hp, &ro, 1) && errno == ENOENT) {   // a directory on the way that does not exist yet: a save mount makes it (save_dirs)
+        if (!save_dirs(path) || !host_path_ex(path, hp, sizeof hp, &ro, 1)) return err_res("create", path);
+    }
+    RW_CREATE();
     int fd = open(hp, O_WRONLY | O_CREAT | O_EXCL, 0644);
     if (fd < 0) return err_res("create", hp);
     int rc = ftruncate(fd, sz); int e = errno; close(fd);

@@ -508,6 +508,24 @@ int main(void) {
         g_nmnt = 0;
     }
 
+    {   // (10) a save write into a directory the game never created: Borderlands GOTY creates save0:/save255:/Save0001.sav and never calls CreateDirectory,
+        //      so the create makes the directories on the way (a rom mount and a plain writable mount do not), and the save commits with the file inside
+        setenv("DM_SAVE", save, 1);
+        g_nmnt = 0;
+        CHECK(h_fs_MountSave("save", NULL) == RES_OK && !g_mnt[0].ro, "the save mounts for the directory case");
+        CHECK(h_fs_CreateFile("save:/save255:/Save0001.sav", 5) == RES_OK, "CreateFile makes a directory the game never created");
+        CHECK(write_save("save:/save255:/Save0001.sav", "hello") == RES_OK, "and the file writes through the handle it then opens");
+        struct stat dst; char fp[1200]; snprintf(fp, sizeof fp, "%s/save255:/Save0001.sav", g_mnt[0].dir);   // in the working directory
+        CHECK(!stat(fp, &dst) && dst.st_size == 5, "the file is in the work directory under the directory made for it");
+        CHECK(h_fs_Commit("save") == RES_OK, "the save commits");
+        snprintf(fp, sizeof fp, "%s/save255:/Save0001.sav", save);
+        CHECK(same(fp, "hello"), "the committed save holds it");
+        CHECK(h_fs_CreateFile("rom:/nodir/f", 1) != RES_OK, "a rom mount makes no directory on the way");
+        char tw[1100]; snprintf(tw, sizeof tw, "%s/tmpw", root); mkdir(tw, 0755);
+        CHECK(mount("tmpw", tw, 0) == RES_OK && h_fs_CreateFile("tmpw:/nodir/f", 1) != RES_OK, "and neither does a plain writable mount");
+        g_nmnt = 0;
+    }
+
     char cmd[1200]; snprintf(cmd, sizeof cmd, "rm -rf '%s'", root); system(cmd);
     printf("== %d checks, %d failed ==\n", checks, fails);
     return fails != 0;

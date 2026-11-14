@@ -1,5 +1,6 @@
 name	class	meaning
 DM_AB	diagnostic	`=<frames>` splits the run into phases of that many frames and alternates every switch set to `ab` (on in the odd phases); logs an `[ab]` line per phase with GPU and frame time and attachment traffic
+DM_ACC	diagnostic	`1` logs every `nn::account` user-service call a title makes with the time since the host started, the guest thread and the call site, so a user read that happens before the application opens one can be told from one after it
 DM_ALIAS_SIZE	diagnostic	`=<bytes>` gives the guest an alias region of that size instead of the platform's, which is at least the Switch's 64 GB on the Mac and the profile's `mem_alias` on an iPhone (at least 256 MB, whole host pages; the heap and stacks stay as they are): the profile's value reproduces an iPhone's address space on the Mac, as the NSP script's heap check does; its address region check sets 64 GB (Mac only: an iPhone has no room)
 DM_ALIAS_WINDOWS	diagnostic	`=<MB>` logs every 30 s how much of each window of that size in the alias region is mapped (windows aligned to their size in absolute addresses)
 DM_ALLOW_OTHER_METAL	switch	`1` lets `own_compilers.py` build the shader libraries with a Metal compiler other than the one in `dmsh_chain.lock` (it stops otherwise, GitHub issue #242); the NSP script sets it for `--allow-other-metal`

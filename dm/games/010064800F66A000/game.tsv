@@ -1,0 +1,49 @@
+# Game profile of Borderlands: Game of the Year Edition (Switch, 1.0.2 = v131072). Plays on the Mac: the title screen, the main menu,
+# character select, the Arid Badlands in first person with the HUD, save, load and save-and-quit, at 30 fps as on the Switch
+# Format: see dm/games/README.md; bring-up and measurements in README.md beside this file
+# Gearbox's Unreal Engine 3 (package version 595) with FMOD, SDK 9.3.0, NVN. The shaders are inside the Oodle-compressed .xxx packages plus
+# the global shader cache (GlobalShaderCache-PC-NVN-SM5.bin, BMSG), read by shader_split.py's ue3_body / ue3_shaders
+
+# ---- Identity ----
+title_id	010064800F66A000
+program_id	010064800F66A000
+
+# ---- App ----
+name	Borderlands: Game of the Year Edition
+ipa	BorderlandsGameOfTheYearEdition.ipa
+app_category	public.app-category.games
+
+# ---- Versions ----
+build	v131072	1.0.2	main=1c37c3673e0e4e7aadf7860078d55f63	sdk=230994acc1eb0f13878dd155361beff3
+package	v131072
+shader_versions	v131072
+
+# ---- Files ----
+# every module main imports from
+modules	main sdk
+romfs_marker	WillowGame/CookedSwitch/WorldTextures.tfc
+zip_store	.afc:.bin:.bk2:.dat:.tfc:.upk:.xxx:.metallib
+
+# ---- Memory ----
+# main sets a heap of at most the pool − 64 MB: a 3328 MB heap region
+mem_reserve	0x100000000
+mem_alias	0x10000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+# The provisional 64 MB is below what this game's modules actually occupy, so nninitStartup asked for pool − 64 MB of heap (0xc9400000),
+# nn::os::SetMemoryHeapSize was refused with ResultLimitReached and the game does not retry: it handed StandardAllocator::Initialize a base from
+# an unwritten out parameter and crashed at sdk+0xbf430 (write to 0x2000). The host's own line names the footprint:
+# "[mem] SetHeapSize 0xc9400000 + modules 0x5e00000 > app pool 0xcd500000" → used memory reported here is 0x5e00000, so the game asks for
+# pool − 0x5e00000 = 0xc7700000 and the request fits.
+mem_used	0x5e00000
+# the NPDM declares 0 MB of system resource: IsVirtualAddressMemoryEnabled is false, as on Horizon (Big Brain Academy: Brain vs. Brain sets a heap only then)
+sys_resource	0x0
+
+# ---- Graphics ----
+# The game selects near-zero NVN depth at run time (the packaged run's own line: "this run needs … depth near=0"), so the offline
+# pipeline archive must be built with main0_z vertex entries; without the key it was made for near=-w and matched none of the run's bases.
+depth_mode	zero
+
+# ---- Shader split ----
+shader_groups	/WillowGame/=willowgame
+shader_note	Borderlands: Game of the Year Edition shaders

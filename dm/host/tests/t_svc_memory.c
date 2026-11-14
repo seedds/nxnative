@@ -24,6 +24,10 @@ static int memory_getpagesize(void) {
 #define mprotect memory_mprotect
 #define mmap memory_mmap
 #define abort memory_abort
+// The dispatcher names host helpers from other files (the caller lookup in hle_thread.c, the graceful exit in hle_lifecycle.c); this test links it alone
+// and exercises the memory cases, so the weak stand-ins below answer for them — the shape t_fs.c uses for dm_thread_caller (the production files stay as they are).
+__attribute__((weak)) void dm_thread_caller(char *b, size_t n) { if (n) snprintf(b, n, "?"); }
+__attribute__((weak)) void dm_host_shutdown(const char *why) { (void)why; }
 #include "../hle_svc.c"
 #undef abort
 #undef mprotect

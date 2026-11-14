@@ -17,6 +17,11 @@ static _Noreturn void heap_abort(void);
 #ifndef HLE_SVC_SOURCE
 #define HLE_SVC_SOURCE "../hle_svc.c"
 #endif
+// hle_svc.c's dispatcher also names host helpers that live in other files (the caller lookup in hle_thread.c, the graceful exit in hle_lifecycle.c).
+// This test links the dispatcher alone and only exercises its memory cases, so the weak stand-ins below answer for them — the same shape as t_fs.c's
+// weak dm_thread_caller (the production file stays as it is).
+__attribute__((weak)) void dm_thread_caller(char *b, size_t n) { if (n) snprintf(b, n, "?"); }
+__attribute__((weak)) void dm_host_shutdown(const char *why) { (void)why; }
 #include HLE_SVC_SOURCE
 #undef abort
 #undef mprotect

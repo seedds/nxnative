@@ -1023,6 +1023,14 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
         if (regs[0] & 0x80000000ull) return 0;   // notification only, can continue
         _exit(42);
     }
+    case 0x07: {   // ExitProcess(w0 exit code, x1 stack limit): the application asks the kernel to end it (nn::os::ExitProcess, and through it nn::oe::ExitApplication).
+        // It never returns on Horizon, so the host wraps up the way the window's Quit does instead of returning 0 to the guest: a game that ended itself and
+        // then found the next instruction does not exist in its own logic (Borderlands GOTY's Save and Quit sat on its "saving" screen for ever, the save already committed).
+        char w[64]; dm_thread_caller(w, sizeof w);
+        LOG("svcExitProcess(%llu) from %s: the application exits", (unsigned long long)regs[0], w);
+        dm_host_shutdown("the application's ExitProcess");
+        for (;;) { struct timespec ts = {1, 0}; nanosleep(&ts, NULL); }   // dm_host_shutdown ends in _exit; never return to the guest in between
+    }
     case 0x1E: guest_clock_read_wait(); regs[0] = 0; regs[1] = guest_ticks(); return 0;   // GetSystemTick
     case 0x27: {  // OutputDebugString(str, len)
         if (g_flag.dbg) fprintf(stderr, "[guest] %.*s\n", (int)regs[1], (char *)regs[0]);

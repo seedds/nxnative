@@ -2,6 +2,7 @@
 // Online accounts (network service account / Nintendo Account authorization / tokens) are out of scope and uniformly return RES_FAIL; the async context's completion event fires immediately.
 // Environment switch: DM_NICK=nickname (default Player).
 #include "hle.h"
+#include <stdatomic.h>
 
 typedef struct { uint64_t v[2]; } Uid;                 // nn::account::Uid, 16 bytes
 typedef struct { uint64_t v[3]; } UserHandle;          // nn::account::UserHandle, 24 bytes
@@ -9,38 +10,75 @@ _Static_assert(sizeof(Uid) == 16, "Uid");
 static const Uid k_uid = {{0x78626c0000000001ull, 0x53574e4154495645ull}};   // Non-zero means valid
 #define HANDLE_MAGIC 0x55534552484e444cull                                    // "USERHNDL"
 
-HLE_FORCE("_ZN2nn7account10InitializeEv", "connects to the acc:u0 account service; the host has one fixed local user", void, h_acc_Init, void) {}
+// DM_ACC=1: one line per user-service call with the time since the host started. A title that reads a user id
+// once at startup (Borderlands reads ULocalPlayer::UserId from an UnrealScript call 20 ms after it maps the
+// first gamepad, main+0xe96e00) makes the *order* of these calls against the game's own the thing to read:
+// a user that arrives after that read leaves the game on user -1 for the whole session.
+static int acc_trace(void) { static int on = -1; if (on < 0) { const char *e = getenv("DM_ACC"); on = e && *e && *e != '0'; } return on; }
+static double acc_t(void) { return (double)(now_ns() - g_t0_ns) / 1e9; }
+// The guest thread and call site, so a call made from the game thread can be told from one made by a task thread
+static void acc_at(char *b, size_t n) { char w[64]; dm_thread_caller(w, sizeof w); snprintf(b, n, "T=%x from %s", (unsigned)thr_cur_handle(), w); }
+// Whether a user handle for the local user is open in this process. ListOpenUsers must report only those: at
+// launch none is, and the system hands the launching user over through TryOpenPreselectedUser /
+// OpenPreselectedUser / PopOpenUsers, which is how a title gets its user *synchronously* at startup.
+// Reporting the local user before the application has opened one makes a title skip that fallback — Borderlands
+// GOTY then reads ULocalPlayer::UserId (main+0xe96e00, 20 ms after it maps the first gamepad) with no user in
+// its own user map, keeps -1 for the session, and lists saves as "save-1:", a device no mount can answer.
+static _Atomic int g_user_open;
 
-HLE_FORCE("_ZN2nn7account13ListOpenUsersEPiPNS0_3UidEi", "list of open users; always the one local user", Result, h_acc_ListOpen, int *n, Uid *out, int max) {
+HLE_FORCE("_ZN2nn7account10InitializeEv", "connects to the acc:u0 account service; the host has one fixed local user", void, h_acc_Init, void) { if (acc_trace()) LOG("acc [%.3fs] Initialize", acc_t()); }
+
+HLE_FORCE("_ZN2nn7account13ListOpenUsersEPiPNS0_3UidEi", "list of the users with an open handle in this process; none until the application opens one (the system hands the launching user over through TryOpenPreselectedUser/PopOpenUsers)", Result, h_acc_ListOpen, int *n, Uid *out, int max) {
     *n = 0;
-    if (max > 0) { out[0] = k_uid; *n = 1; }
+    if (max > 0 && atomic_load(&g_user_open)) { out[0] = k_uid; *n = 1; }
+    if (acc_trace()) { char at_[64]; acc_at(at_, sizeof at_); LOG("acc [%.3fs] ListOpenUsers(max %d) → %d, %s", acc_t(), max, *n, at_); }
     return RES_OK;
 }
 HLE_FORCE("_ZN2nn7account12ListAllUsersEPiPNS0_3UidEi", "list of all users; always the one local user (Super Mario 3D World + Bowser's Fury)", Result, h_acc_ListAll, int *n, Uid *out, int max) {
     *n = 0;
     if (max > 0) { out[0] = k_uid; *n = 1; }
+    if (acc_trace()) LOG("acc [%.3fs] ListAllUsers(max %d) → %d", acc_t(), max, *n);
     return RES_OK;
 }
 HLE_FORCE("_ZN2nn7account16ShowUserSelectorEPNS0_3UidERKNS0_21UserSelectionSettingsE", "user selection applet; the host picks the local user directly", Result, h_acc_ShowSel, Uid *out, const void *settings) { DM_APPLET("user selector");
-    (void)settings; *out = k_uid; return RES_OK;
+    (void)settings; *out = k_uid;
+    if (acc_trace()) { char at_[64]; acc_at(at_, sizeof at_); LOG("acc [%.3fs] ShowUserSelector → %#llx, %s", acc_t(), (unsigned long long)k_uid.v[0], at_); }
+    return RES_OK;
 }
-// Take the users the system opened on the application's behalf (Mario 1.2.1 asks this first and falls back to TryOpenPreselectedUser on 0; the game only reads the count, not the return value):
-// the host has no such users and returns 0, so the game opens the preselected user itself, as in v0
-HLE_FORCE("_ZN2nn7account12PopOpenUsersEPiPNS0_10UserHandleEi", "users opened by the system: none (the game falls back to the preselected user)", void, h_acc_PopOpen, int *n, UserHandle *out, int max) { (void)out; (void)max; *n = 0; }
+// Take the users the system opened on the application's behalf: on a console the launching user is handed over
+// here, once ("pop": the system's queue is emptied, so a second call has nothing left). The handle is shaped
+// exactly like OpenUser's, so GetUserId/CloseUser accept it. Mario 1.2.1 reads only the count and falls back to
+// TryOpenPreselectedUser on 0, which is now the same user either way.
+HLE_FORCE("_ZN2nn7account12PopOpenUsersEPiPNS0_10UserHandleEi", "the launching user the system opened, handed over once (later calls have nothing left)", void, h_acc_PopOpen, int *n, UserHandle *out, int max) {
+    static _Atomic int given;
+    int got = 0;
+    if (max > 0 && !atomic_exchange(&given, 1)) {
+        out[0].v[0] = k_uid.v[0]; out[0].v[1] = k_uid.v[1]; out[0].v[2] = HANDLE_MAGIC; got = 1;
+        atomic_store(&g_user_open, 1);
+    }
+    *n = got;
+    if (acc_trace()) { char at_[64]; acc_at(at_, sizeof at_); LOG("acc [%.3fs] PopOpenUsers(max %d) → %d, %s", acc_t(), max, got, at_); }
+}
 // Hand the open users to the next program of a multi-program application (Octopath Traveler 0 imports it with oe::ExecuteProgram): the host runs one program, so there is nothing to hand over
 HLE_FORCE("_ZN2nn7account13PushOpenUsersEv", "hand the open users to the next program: the host runs only this one", void, h_acc_PushOpen, void) {}
 HLE_FORCE("_ZN2nn7account22TryOpenPreselectedUserEPNS0_10UserHandleE", "user preselected at launch; always the local user (returns bool)", unsigned, h_acc_TryOpenPre, UserHandle *h) {
-    h->v[0] = k_uid.v[0]; h->v[1] = k_uid.v[1]; h->v[2] = HANDLE_MAGIC; return 1;
+    h->v[0] = k_uid.v[0]; h->v[1] = k_uid.v[1]; h->v[2] = HANDLE_MAGIC;
+    atomic_store(&g_user_open, 1);
+    if (acc_trace()) LOG("acc [%.3fs] TryOpenPreselectedUser → 1", acc_t());
+    return 1;
 }
 // The aborting form (Super Mario Odyssey, SDK 7): without the hook the SDK's IPC call fails and aborts with no message. In SDK 6 the same symbol returns a Result, and Fire Emblem: Three Houses
 // skips its save mount when it is non-zero (main+0x53b7e0); returning void left the handle pointer in w0, so the game never mounted "save" and its loading screen waited forever for save:/system.
 // It returns 0 now, which SDK 7+ callers ignore
 HLE_FORCE("_ZN2nn7account19OpenPreselectedUserEPNS0_10UserHandleE", "user preselected at launch (returns a Result in SDK 6, later versions abort on failure); always the local user", Result, h_acc_OpenPre, UserHandle *h) {
-    h->v[0] = k_uid.v[0]; h->v[1] = k_uid.v[1]; h->v[2] = HANDLE_MAGIC; return RES_OK;
+    h->v[0] = k_uid.v[0]; h->v[1] = k_uid.v[1]; h->v[2] = HANDLE_MAGIC; atomic_store(&g_user_open, 1); return RES_OK;
 }
 HLE_FORCE("_ZN2nn7account17GetLastOpenedUserEPNS0_3UidE", "last opened user; always the local user (Super Mario Odyssey)", Result, h_acc_LastOpened, Uid *out) { *out = k_uid; return RES_OK; }
 HLE_FORCE("_ZN2nn7account8OpenUserEPNS0_10UserHandleERKNS0_3UidE", "open user; the handle holds the Uid itself", Result, h_acc_OpenUser, UserHandle *h, const Uid *uid) {
-    h->v[0] = uid->v[0]; h->v[1] = uid->v[1]; h->v[2] = HANDLE_MAGIC; return RES_OK;
+    h->v[0] = uid->v[0]; h->v[1] = uid->v[1]; h->v[2] = HANDLE_MAGIC;
+    if (uid->v[0] == k_uid.v[0] && uid->v[1] == k_uid.v[1]) atomic_store(&g_user_open, 1);
+    if (acc_trace()) { char at_[64]; acc_at(at_, sizeof at_); LOG("acc [%.3fs] OpenUser(%#llx) → handle magic %#llx, %s", acc_t(), (unsigned long long)uid->v[0], (unsigned long long)h->v[2], at_); }
+    return RES_OK;
 }
 HLE_FORCE("_ZN2nn7account9GetUserIdEPNS0_3UidERKNS0_10UserHandleE", "gets the Uid from the handle", Result, h_acc_GetUserId, Uid *out, const UserHandle *h) {
     if (h->v[2] != HANDLE_MAGIC) die("account::GetUserId: the handle was not issued by the host (%#llx)", h->v[2]);
@@ -133,7 +171,11 @@ HLE_FORCE("_ZN2nn7account27StoreSaveDataThumbnailImageERKNS0_3UidEPKvm", "save-d
 }
 HLE_FORCE("_ZN2nn7account28DeleteSaveDataThumbnailImageERKNS0_3UidE", "save-data thumbnail; the host keeps none", Result, h_acc_DeleteThumb, const Uid *uid) { (void)uid; return RES_OK; }
 HLE_FORCE("_ZN2nn7account32IsNetworkServiceAccountAvailableEPbRKNS0_10UserHandleE", "network service account, out of scope; always unavailable", Result, h_acc_NsaAvail, uint8_t *out, const UserHandle *h) { (void)h; *out = 0; return RES_OK; }
-HLE_FORCE("_ZN2nn7account9CloseUserERKNS0_10UserHandleE", "close user; the handle holds no session", void, h_acc_CloseUser, const UserHandle *h) { (void)h; }
+// Closing the local user's handle leaves no user open in the process, so ListOpenUsers reports none again
+HLE_FORCE("_ZN2nn7account9CloseUserERKNS0_10UserHandleE", "close user; the handle holds no session", void, h_acc_CloseUser, const UserHandle *h) {
+    if (h->v[2] == HANDLE_MAGIC) atomic_store(&g_user_open, 0);
+    if (acc_trace()) LOG("acc [%.3fs] CloseUser → open 0", acc_t());
+}
 HLE_FORCE("_ZN2nn7account12AsyncContext6CancelEv", "async context cancel; no request", Result, h_acc_AcCancel, void *self) { (void)self; return RES_OK; }
 HLE_FORCE("_ZN2nn7account12AsyncContext7HasDoneEPb", "async context: always done", Result, h_acc_AcHasDone, void *self, uint8_t *done) { (void)self; *done = 1; return RES_OK; }
 HLE_FORCE("_ZN2nn7account12AsyncContextD1Ev", "async context destructor; no session to close", void, h_acc_AcDtor, void *self) { (void)self; }

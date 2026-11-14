@@ -190,6 +190,17 @@ void dm_thread_service_request(void) {
     pthread_mutex_unlock(&G);
     if (back) { struct timespec ts = {0, SERVICE_ROUND_TRIP_NS}; nanosleep(&ts, 0); }
 }
+// "module+0xoff" of the guest instruction that entered the current SVC (thr_svc_enter records the caller's x30). Host error lines about a call the guest made name where it came from:
+// an SDK wrapper and its host take-over see the same handle, and only the guest call site says which one the game used (dm/host/hle_fs.c err_fd, module_of resolves the module)
+void dm_thread_caller(char *b, size_t n) {
+    if (!n) return;
+    thr_t *t = pthread_getspecific(g_keythr);
+    uint64_t lr = t ? t->last_lr : 0;
+    module_t *m = lr ? module_of((void *)lr) : NULL;
+    if (m) snprintf(b, n, "%s+%#llx", m->name, lr - (uint64_t)m->base);
+    else if (lr) snprintf(b, n, "%#llx", (unsigned long long)lr);
+    else snprintf(b, n, "?");
+}
 // A native HLE condition wait is a guest blocking boundary, like a kernel wait.
 // Called with the HLE's condition mutex held: the waiter cannot miss a signal
 // between publishing its blocked state and pthread_cond_wait releasing that

@@ -108,8 +108,17 @@ HLE_FORCE("_ZN2nn2oe21SwitchLcdBacklightOffEv", "turn the handheld screen off (t
 // Star Fox (SDK 21): the game marks the sections where it shows the player's own photographs (GameChat's camera pictures on screen); the system keeps those out of captures. No captures here
 HLE_FORCE("_ZN2nn2oe32BeginPresentPhotographedContentsEv", "photographed contents on screen: noted nowhere (no capture service)", void, h_oe_PhotoBegin, void) {}
 HLE_FORCE("_ZN2nn2oe30EndPresentPhotographedContentsEv", "photographed contents off screen", void, h_oe_PhotoEnd, void) {}
-HLE_FORCE("_ZN2nn2oe41ExitApplicationAndGoBackToInStoreDemoMenuEv", "the in-store demo's exit: the host runs no demo menu, the call is logged and ignored", void, h_oe_DemoExit, void) {
-    static int once; if (!once++) LOG("[RED] oe: ExitApplicationAndGoBackToInStoreDemoMenu called: ignored (no in-store demo menu)");
+// nn::oe::ExitApplication: the application ends itself (the SDK maps it to nn::os::ExitProcess). The player's "Save and Quit", a launcher handing over to another
+// program, or a game's own Quit menu all arrive here; the host runs the same wrap-up as the window's Quit so the save that was committed stays committed and the
+// process leaves with status 0. Returning to the guest is not an option: the call has no return on Horizon, and the game's next instruction is not written for it.
+HLE_FORCE("_ZN2nn2oe14ExitApplicationEv", "the application exits itself: the host wraps up as the window's Quit does", void, h_oe_ExitApp, void) {
+    char w[64]; dm_thread_caller(w, sizeof w);
+    LOG("oe::ExitApplication from %s: the application exits", w);
+    dm_host_shutdown("the application's ExitApplication");
+}
+HLE_FORCE("_ZN2nn2oe41ExitApplicationAndGoBackToInStoreDemoMenuEv", "the in-store demo's exit: no demo menu here, so the application exits", void, h_oe_DemoExit, void) {
+    static int once; if (!once++) LOG("oe: ExitApplicationAndGoBackToInStoreDemoMenu: no in-store demo menu, the application exits");
+    dm_host_shutdown("the in-store demo's ExitApplication");
 }
 HLE_FORCE("_ZN2nn2oe17FinishStartupLogoEv", "dismiss the system boot screen (through the am application proxy); the host has no boot screen", void, h_oe_FinishLogo, void) {}   // Metroid Dread calls it at main+0xadfed0
 // am retains the requested inactivity extension even when auto-sleep is disabled.

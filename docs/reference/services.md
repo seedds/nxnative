@@ -55,6 +55,13 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Capture services:** Super Smash Bros. Ultimate links clients of `caps:su` and `caps:u` (screenshots and clips) and aborts with `Result=0xe15` when `sm` refuses them at the start of its single-player mode. The host has no album, so `caps:su`, `caps:u`, `caps:a`, `caps:c`, `caps:sc` and `caps:ss` get host sessions too: a list reads as empty and a save does nothing.
 - **Found on:** [Animal Crossing: New Horizons](../../dm/games/01006F8002326000/README.md) (SDK 20.5.4); [Super Smash Bros. Ultimate](../../dm/games/01006A800016E000/README.md) (capture services).
 
+### A user listed before the application opened one
+
+- **Symptom:** the character or save list is empty although the save is on disk; a save from the pause menu commits and the game then sits on its own "Saving content. Please don't turn off your console." panel for ever; save and quit never returns to the menu. The log's tells: a save device built with index −1 (`fs path not found: save0:/save255:/Save0001.sav`, or `fs opendir … asset:/save-1:/`), and a save whose user byte is `0xff` where the game's player id is `0xffffffff`.
+- **Cause:** `nn::account::ListOpenUsers` answered one user from boot, before the application had opened any. A title that reads `ULocalPlayer::UserId` once, a few milliseconds after it maps its first gamepad, only takes its "no user" path when that list is empty: with a user listed but none in the application's own user map, the read keeps −1 for the session. The −1 then becomes both the save device the title builds (`save<N>:` with N = −1: written as `save255:`, listed as `save-1:`) and the user byte it compares a save against (`0xffffffff` against the save's `0xff`), so one value empties the list, names a directory nothing mounts, and skips the call that clears the panel and publishes the save's completion.
+- **Fix:** `ListOpenUsers` reports only the users with an open handle in this process (`hle_account.c` tracks `OpenUser`, `TryOpenPreselectedUser`, `OpenPreselectedUser` and `PopOpenUsers` setting it, `CloseUser` clearing it), so at boot it answers 0 as a console does before the application has opened anything, and the title takes its synchronous `TryOpenPreselectedUser` fallback. `PopOpenUsers` hands the launching user over once, a second call having nothing left, with a handle shaped like `OpenUser`'s. `DM_ACC=1` traces each user-service call with its time, guest thread and call site.
+- **Found on:** [Borderlands: Game of the Year Edition](../../dm/games/010064800F66A000/README.md) (SDK 9.3.0): `ListOpenUsers` answered 1 at 1.934 s while the game's own `AddUserToMap` ran at 14.637 s, so the `UserId` read at 1.982 s kept −1; with the fix the list answered 0 at 1.715 s, `TryOpenPreselectedUser` followed in the same millisecond, and the lobby listed the save's character.
+
 ## SDK names that changed between versions
 
 ### Older SDK names for the same calls
@@ -331,6 +338,13 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Fix:** always close an opened stream, preserve the first write/close/rename error, and rename the temporary file only after both writing and closing succeed. Cleanup leaves the previous sync metadata in place.
 - **Found on:** static analysis reported in [issue #313](https://github.com/seedds/nxnative/issues/313#issuecomment-6543080671); reproduced without game files.
 - **Check:** `t_save_sync_metadata` injects open, write, close and rename failures into the production writer, including simultaneous write/close failures and cleanup changing `errno`. It checks descriptor closure, preservation of existing metadata, diagnostics and a successful replacement. No cloud service or gameplay validation is claimed.
+
+### A create on a save mount makes the directories on the way
+
+- **Symptom:** every save fails: `fs path not found: save0:/save255:/Save0001.sav`, then `fs pwrite failed errno=9` on a handle that was never open, the game's error applet (`Result 0x2a2`), and `save commit #N … (0 save writes so far)` — an empty save committed while the game waits on its saving panel.
+- **Cause:** the title writes its save into a subdirectory of its save data that it never creates (it calls no `CreateDirectory` at all), and a create resolved only a path whose intermediate directories already existed. On a console the save data is the application's own tree and its create lands there, so the title never had to create it. `errno=9` on both the `ftruncate` and the `pwrite` is the tell: the file handle it was given was never a descriptor, so it is not a read-only or full-disk failure.
+- **Fix:** `hle_fs.c` `save_dirs`: a create on a *writable transactional save mount* makes the directories on the way (rom, add-on content, system data and plain writable mounts are untouched, and their create still answers "path not found"). A failed descriptor operation now logs the handle, the fd, whether it is an open descriptor, its recorded open mode and the guest call site (`err_fd`, `dm_thread_caller`), because errno alone cannot tell a foreign handle from a real I/O error.
+- **Found on:** [Borderlands: Game of the Year Edition](../../dm/games/010064800F66A000/README.md): `save0:/save255:/Save0001.sav` and `.sav.tmp`, with no create for `save255:`; the same save then wrote through its handle, committed twice and the count climbed `(1 save writes so far)`, `(2 …)`.
 
 ## Add-on content
 

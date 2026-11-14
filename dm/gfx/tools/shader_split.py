@@ -2555,7 +2555,11 @@ def ue3_body(d, label):
     if i < 0: return d
     out = [d[:i]]
     while i < len(d):
-        if d[i:i + 4] != UE3_TAG or i + 16 > len(d): red(f'{label}: no compressed chunk at {i:#x} (the chunks do not run to the end of the package)')
+        if d[i:i + 4] != UE3_TAG or i + 16 > len(d):
+            # a package zero-padded past its last chunk ends the chain there (Borderlands: Game of the Year Edition pads its
+            # cooked packages to 32 KB, so the chunks stop ~30 KB before the file does, every chunk size agreeing)
+            if i + 4 > len(d) or not any(d[i:]): break
+            red(f'{label}: no compressed chunk at {i:#x} (the chunks do not run to the end of the package)')
         bs, cs, us = struct.unpack_from('<III', d, i + 4)
         if not bs: red(f'{label}: chunk at {i:#x} has block size 0')
         nb = (us + bs - 1) // bs; o = i + 16 + 8 * nb

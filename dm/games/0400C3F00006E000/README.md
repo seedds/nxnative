@@ -28,6 +28,8 @@ The full Mac build translates all 11,561. Getting there took four things, all ge
 - The 168 compute shaders of `DrivePassShaderDefault` that declare 48 KB of shared memory build since [Compute shared memory past 32 KB](../../../docs/reference/shaders.md#compute-shared-memory-past-32-kb); before it, the 3D scene of the title had sky and clouds over black geometry. A probe on the base game (2026-11-09) counted their dispatches from the title to the first race: all direct, of 1 to 3 workgroups, 700 to 2,400 every 300 frames before the race and 6 a frame in it, so the slices indexed modulo 512 they had before never collided here (pull request #1242).
 - `dcb0504c844f1ecc` copies a flat per-primitive attribute into an R8Uint target, so it needs the integer entry point `fs_uint` now gives such a shader.
 
+**Prewarm seed list (current).** `pso_manifest.tsv` holds 5,689 shader, 3,492 render-pipeline, 150 compute and 11 task / mesh pipeline rows (9,342, first-use order), recorded by play on an iPhone 19,4 (a Duo foldable, `applegpu_g19p`, iOS 27.3 beta) with update 1.8.0 on 2026-11-09: the device's own `pso_user.tsv` over about 15 launches from an empty list, each the boot, the title, the menus into a Grand Prix and Mario Bros. Circuit with 24 racers, and 5 to 8 minutes of driving. With no list, the first race had 115 frames of 50 ms or more in 7,800 (the worst 3.9 s), with 381 pipelines or shader libraries built inside them. With the list at 9,418 lines the same race had 23 in 28,700 (the worst 378 ms), and 3 of them built a pipeline (6 pipelines). The list was replayed as the device's `pso_user.tsv`, which the host reads as it reads this file. It has not been run as the bundled file, on a Mac or on the base game: 21 of its shader keys and 7 of its compute keys are 1.8.0's only and are dropped at load on the base game. It covers that route, not the other courses.
+
 ## Rendering
 
 The game draws into the top left 2048x1152 of a 3840x2160 window texture and crops the window to it, so screenshots are taken with `DM_NVN_SHOT_OUT=1920x1080` (`play.sh` in the work folder does).
@@ -97,9 +99,9 @@ Frame step (current): the framework's interval function is `main+0x69cbb0` on 1.
 
 ## Open
 
-- **Long frames:** first-use pipeline compiles (no `pso_manifest.tsv` yet).
+- **Long frames:** first-use pipeline compiles away from the seed list's route (one Grand Prix race on Mario Bros. Circuit). The profile leaves `pso_mtl4` off, so on an iPhone a draw whose pipeline is not built waits for it.
 - **Shading rate:** the calls are accepted and ignored ([Variable rate shading ignored](../../../docs/reference/rendering.md#variable-rate-shading-ignored)), so every pixel is shaded where the game meant to save GPU time.
-- **Mesh draws:** `DrawMeshTasks3D` and the indirect forms are not implemented; no run reached them.
+- **Mesh draws:** `DrawMeshTasks` and `DrawMeshTasksIndirect` draw through native task / mesh pipelines, which the host records, prewarms and keeps in the pipeline archive since main `bf420fdae`; update 1.8.0 on an iPhone Duo built 11 of them, the seed list's M rows. `DrawMeshTasks3D`, its indirect form and the multi-draw forms are not implemented ([NVN2 task and mesh shaders](../../../docs/reference/shaders.md#nvn2-task-and-mesh-shaders)); no run reached them.
 - `649e36162cad9e79`, a foliage shader with an 8x8 local size, keeps a first-invocation race: its setup loops over a uniform's count, so [the host cannot make it as stores](../../../docs/reference/shaders.md#a-store-only-a-dispatchs-first-invocation-makes). Its list's count read 0 in every one of 7,350 traced title frames, so the race had nothing to act on there; whether that list should be empty is not known.
 - The engine class screen offers 50, 100 and 150cc in this build.
 

@@ -503,6 +503,15 @@ class App(unittest.TestCase):
             a.out = str(self.tmp / 'Own.app'); a.tables = self.args.tables; pack_app.pack(a)
             self.assertEqual((self.tmp / 'Own.app/Contents/Resources/dm/pso_pairs.tsv').read_text(), 'other-vertex\tother-pixel\n')
 
+    def test_deploy_host(self):
+        new_host = self.tmp / 'new_dmhost'
+        new_host.write_bytes(b'new_dmhost_binary')
+        args = pack_app.parse([str(self.app), '--host', str(new_host), '--host-only'])
+        with mock.patch.object(pack_app, 'sign') as mock_sign, contextlib.redirect_stdout(io.StringIO()):
+            pack_app.pack(args)
+            mock_sign.assert_called_once()
+        self.assertEqual((self.app / 'Contents/MacOS/dmhost').read_bytes(), b'new_dmhost_binary')
+
     def test_info_plist(self):
         p = plistlib.loads((self.app / 'Contents/Info.plist').read_bytes())
         self.assertEqual((p['CFBundleExecutable'], p['CFBundleName'], p['CFBundleIdentifier'], p['CFBundleShortVersionString']), ('nxnative', 'Game: Test', 'org.nxnative.01008cf01baac000', '1.0.1'))

@@ -35,6 +35,8 @@
 
 extern char **environ;
 int dm_mac_launcher(void);   // Launcher.swift: 1 = Play (the settings are in the environment), 0 = the player quit, 2 = no window (apply the saved choices here)
+int dm_mac_settings_available(void);   // Launcher.swift: 1 = the settings window can be shown while the game runs
+int dm_mac_launcher_wait(pid_t pid);   // Launcher.swift: waits for the host with the run loop that shows it (the game's Settings…); waitpid's status, -1 on failure
 static pid_t g_child;
 static char *g_file_keys, *g_launch_keys;   // the variables the env files set, and the settings the launch environment set (DM_ENV_FILE_KEYS, DM_ENV_LAUNCH_KEYS)
 
@@ -136,6 +138,8 @@ static void saved_control(CFStringRef domain, const char *env, int pad) {   // D
 // The controls profile: ~/Library/Application Support/nxnative/controls/<name>.txt, the one this game picked in the settings window's Input tab (controls.profile in the app's
 // preferences), else Default.txt, which every game shares. KEY=VALUE lines of DM_KEYMAP, DM_PAD_MAP, DM_PAD_ABXY, DM_PAD_STICK_DZ, DM_PAD_STICK_SENS, each checked by the host's parser (input_map.h);
 // a variable already set (the environment, an env file, a launcher.<VAR> saved choice) keeps its value. No file: the host's own mapping
+static const char *const controls[] = {"DM_KEYMAP", "DM_PAD_MAP", "DM_PAD_STICK_DZ", "DM_PAD_STICK_SENS", "DM_PAD_ABXY"};
+enum { NCONTROLS = sizeof controls / sizeof *controls };
 static void controls_profile(CFStringRef domain, const char *home) {
     char name[128] = "Default", path[PATH_MAX];
     CFPropertyListRef v = CFPreferencesCopyAppValue(CFSTR("controls.profile"), domain);
@@ -145,15 +149,13 @@ static void controls_profile(CFStringRef domain, const char *home) {
     snprintf(path, sizeof path, "%s/Library/Application Support/nxnative/controls/%s.txt", home, name);
     FILE *f = fopen(path, "r");
     if (!f) { fprintf(stderr, "launcher: no controls profile %s (%s): the host's own mapping\n", name, path); return; }
-    static const char *const keys[] = {"DM_KEYMAP", "DM_PAD_MAP", "DM_PAD_STICK_DZ", "DM_PAD_STICK_SENS", "DM_PAD_ABXY"};
-    enum { NKEYS = sizeof keys / sizeof *keys };
     char ln[2048];
     while (fgets(ln, sizeof ln, f)) {
         ln[strcspn(ln, "\r\n")] = 0;
         char *eq = strchr(ln, '='); if (*ln == '#' || !eq) continue;
         *eq = 0; const char *k = ln, *s = eq + 1; int i = 0;
-        while (i < NKEYS && strcmp(k, keys[i])) i++;
-        if (i == NKEYS) { fprintf(stderr, "launcher: controls profile %s: %s is not a control, ignored\n", name, k); continue; }
+        while (i < NCONTROLS && strcmp(k, controls[i])) i++;
+        if (i == NCONTROLS) { fprintf(stderr, "launcher: controls profile %s: %s is not a control, ignored\n", name, k); continue; }
         int ok = i == 0 ? input_map_valid(s, 0) : i == 1 ? input_map_valid(s, 1) : i == 2 ? stick_dz_valid(s) : i == 3 ? stick_sens_valid(s) : pad_abxy_valid(s);
         if (!ok) fprintf(stderr, "launcher: controls profile %s: %s=%s ignored: the host does not take it\n", name, k, s);
         else if (getenv(k)) fprintf(stderr, "launcher: controls profile %s: %s=%s not used: %s=%s is set\n", name, k, s, k, getenv(k));
@@ -243,6 +245,7 @@ int main(int argc, char **argv) {
     fprintf(stderr, "launcher: %s (%s), host %s\n", name, id, host);
     CFArrayRef rules = setting_rules();   // the settings the launch environment already set: the window shows them, fixed
     for (CFIndex i = 0; rules && i < CFArrayGetCount(rules); i++) { char env[128]; if (rule_env(CFArrayGetValueAtIndex(rules, i), env, sizeof env) && getenv(env)) add_key(&g_launch_keys, env); }
+    for (int i = 0; i < NCONTROLS; i++) if (getenv(controls[i])) add_key(&g_launch_keys, controls[i]);   // the controls too: the Input tab shows them fixed, also once the profile is in the environment
     snprintf(p, sizeof p, "%s/env.txt", sup); env_file(p);
     snprintf(p, sizeof p, "%s/env.txt", dm); env_file(p);
     setenv("DM_ENV_FILE_KEYS", g_file_keys ? g_file_keys : "", 1); setenv("DM_ENV_LAUNCH_KEYS", g_launch_keys ? g_launch_keys : "", 1);
@@ -269,11 +272,15 @@ int main(int argc, char **argv) {
     struct sigaction sa = {.sa_handler = forward};   // no SA_RESTART: waitpid below sees EINTR and waits again
     sigemptyset(&sa.sa_mask);
     sigaction(SIGTERM, &sa, NULL); sigaction(SIGINT, &sa, NULL); sigaction(SIGHUP, &sa, NULL);
+    // The game's Settings… (dm/host/front_mac.m) asks this process for the settings window: DM_SETTINGS_PID names it, and the wait runs with the window's run loop
+    int live = dm_mac_settings_available();
+    if (live) { snprintf(p, sizeof p, "%d", (int)getpid()); setenv("DM_SETTINGS_PID", p, 1); }
     char *host_argv[] = {host, dm, NULL};
     int err = posix_spawn(&g_child, host, NULL, NULL, host_argv, environ);
     if (err) { fprintf(stderr, "[RED] launcher: cannot start %s: %s\n", host, strerror(err)); return 1; }
     int status;
-    while (waitpid(g_child, &status, 0) < 0) if (errno != EINTR) return 1;
+    if (live) { if ((status = dm_mac_launcher_wait(g_child)) == -1) return 1; }
+    else while (waitpid(g_child, &status, 0) < 0) if (errno != EINTR) return 1;
     // Cloud saves (DM_SAVE_SYNC, dm/host/save_sync.h): what the host committed and had not sent yet goes now, after a crash too (the committed save is whole whatever the host was doing)
     // DM_SAVE as the host had it: an env file or the launch environment may have set another folder than this app's own
     if (!save_sync_after_exit(getenv("DM_SAVE"), id)) fprintf(stderr, "launcher: the save did not reach the cloud; it goes at the next start\n");

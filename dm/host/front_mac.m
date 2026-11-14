@@ -600,6 +600,44 @@ int front_ctrl_support(int min, int max) {
     dispatch_semaphore_wait(done, DISPATCH_TIME_FOREVER);
     return g_cp_ok;
 }
+// Settings while the game runs: the app menu's Settings… (⌘,) asks the launcher (dm/mac/launcher.c, which sets DM_SETTINGS_PID; Launcher.swift dm_mac_launcher_wait) with SIGUSR1 to show
+// its settings window again. On Done the launcher writes the live settings the player changed as KEY=VALUE lines to $DM_ROOT/live.env and sends SIGUSR1 back; the others apply at the
+// next start. These keys and Launcher.swift's LiveSettings.keys are the same list (dm/tools/tests/test_nsp_mac_app.py). Runs on the main thread, as the key and controller handlers
+static pid_t g_settings_pid;
+static void live_settings_apply(void) {
+    const char *root = getenv("DM_ROOT"); char p[PATH_MAX], ln[4096];
+    snprintf(p, sizeof p, "%s/live.env", root ? root : ".");
+    FILE *f = fopen(p, "r");
+    if (!f) { LOG("[RED] front end: Settings window: cannot read %s", p); return; }
+    while (fgets(ln, sizeof ln, f)) {
+        ln[strcspn(ln, "\r\n")] = 0;
+        char *eq = strchr(ln, '='); if (!eq) continue;
+        *eq = 0; const char *k = ln, *v = eq + 1; int bad = 0;
+        if (!strcmp(k, "DM_KEYMAP")) { key_map_default(&g_keys); bad = key_map_parse(&g_keys, v); keys_release(); }
+        else if (!strcmp(k, "DM_PAD_MAP")) { pad_map_default(&g_padmap); bad = pad_map_parse(&g_padmap, v); }
+        else if (!strcmp(k, "DM_PAD_ABXY")) { int a = pad_abxy_parse(v); bad = a < 0; if (!bad) g_abxy = a; }
+        else if (!strcmp(k, "DM_PAD_STICK_DZ")) { g_stick.dz = 0; bad = stick_shape_parse(&g_stick, v, NULL); }
+        else if (!strcmp(k, "DM_PAD_STICK_SENS")) { g_stick.sens = 1; bad = stick_shape_parse(&g_stick, NULL, v); }
+        else if (!strcmp(k, "DM_RUMBLE_GAIN")) dm_haptics_apple_tune(strtof(v, NULL), -1);
+        else if (!strcmp(k, "DM_RUMBLE_MIN")) dm_haptics_apple_tune(-1, strtof(v, NULL));
+        else if (!strcmp(k, "DM_FPS_HOLD")) dm_gfx_fps_hold(strcmp(v, "off") != 0);
+        else if (!strcmp(k, "DM_PRESENT_UPSCALE")) dm_gfx_present_upscale(!strcmp(v, "metalfx") || !strcmp(v, "1"));
+        else if (!strcmp(k, "DM_FULLSCREEN")) { if ((strcmp(v, "0") != 0) != g_fullscreen) [g_win toggleFullScreen:nil]; }
+        else { LOG("[RED] front end: Settings window: %s cannot change while the game runs, ignored", k); continue; }
+        LOG("front end: %s=%s (Settings window)%s", k, v, bad ? ", malformed entries left out" : "");
+    }
+    fclose(f);
+}
+@interface DmSettingsItem : NSObject
+@end
+@implementation DmSettingsItem
+- (void)open:(id)sender {
+    (void)sender;
+    NSRunningApplication *l = [NSRunningApplication runningApplicationWithProcessIdentifier:g_settings_pid];
+    if (l) [NSApp yieldActivationToApplication:l];   // macOS lets the launcher take the front only when the active app yields it
+    if (kill(g_settings_pid, SIGUSR1)) LOG("[RED] front end: Settings window: the launcher (pid %d) is gone", (int)g_settings_pid);
+}
+@end
 static void pads_start(void) {
     key_map_default(&g_keys); pad_map_default(&g_padmap);
     const char *km = getenv("DM_KEYMAP"), *pm = getenv("DM_PAD_MAP");
@@ -1565,6 +1603,16 @@ void front_run(void (*guest)(void)) {
         // Main menu: AppKit runs ⌘ shortcuts only through menu items, so ⌘Q quits and ⌃⌘F toggles fullscreen from here (AppKit shows the item as Globe-F and keeps ⌃⌘F as a hidden twin)
         NSMenu *bar = [NSMenu new], *app = [NSMenu new], *wm = [[NSMenu alloc] initWithTitle:@"Window"];
         [[bar addItemWithTitle:@"" action:nil keyEquivalent:@""] setSubmenu:app];
+        const char *sp = getenv("DM_SETTINGS_PID"); g_settings_pid = sp ? (pid_t)atoi(sp) : 0;
+        if (g_settings_pid > 0 && g_settings_pid == getppid()) {   // started by a launcher that can show the settings window (not by a script)
+            static DmSettingsItem *target; target = [DmSettingsItem new];
+            [app addItemWithTitle:@"Settings…" action:@selector(open:) keyEquivalent:@","].target = target;
+            [app addItem:[NSMenuItem separatorItem]];
+            signal(SIGUSR1, SIG_IGN);
+            static dispatch_source_t back; back = dispatch_source_create(DISPATCH_SOURCE_TYPE_SIGNAL, SIGUSR1, 0, dispatch_get_main_queue());
+            dispatch_source_set_event_handler(back, ^{ live_settings_apply(); [NSApp activate]; [win makeKeyAndOrderFront:nil]; });
+            dispatch_resume(back);
+        }
         [app addItemWithTitle:[@"Quit " stringByAppendingString:@(DM_GAME_NAME)] action:@selector(terminate:) keyEquivalent:@"q"];
         // Cheats (hle_cheats.c): the rows rebuild on every open through the delegate, the same rows the file reload changes
         g_cheats_menu = [DmCheatsMenuDelegate new];

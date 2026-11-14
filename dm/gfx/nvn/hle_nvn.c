@@ -2491,13 +2491,17 @@ static int fstep_cpu_slowed(uint64_t presents) {
 // Whether late frames may raise the hold above the cap's vsyncs (profile fps_hold, DM_FPS_HOLD=on / off). Off for a game whose updates do not wait for the presents and step
 // by the cap whatever the hold (Age of Calamity): holding frames there only paces the screen, and an iPhone lowers the GPU clock to the longer hold, so frames got slower and
 // the hold never came back (battle GPU 10 → 41 ms at the same draws, 20 fps at thermal state 0); off, each frame is shown as soon as it is ready
+static int g_fs_hold = -1;
 static int fstep_hold(void) {
-    static int h = -1;
-    if (h < 0) {
-        const char *e = getenv("DM_FPS_HOLD"); h = e ? strcmp(e, "off") != 0 : DM_GAME_FPS_HOLD;
-        if (!h) LOG("[nvn] frame step: frames are not held longer than the cap's vsyncs (%s)", e ? "DM_FPS_HOLD" : "game profile fps_hold");
+    if (g_fs_hold < 0) {
+        const char *e = getenv("DM_FPS_HOLD"); g_fs_hold = e ? strcmp(e, "off") != 0 : DM_GAME_FPS_HOLD;
+        if (!g_fs_hold) LOG("[nvn] frame step: frames are not held longer than the cap's vsyncs (%s)", e ? "DM_FPS_HOLD" : "game profile fps_hold");
     }
-    return h;
+    return g_fs_hold;
+}
+void dm_gfx_fps_hold(int on) {
+    g_fs_hold = on != 0;
+    LOG("[nvn] frame step: frames %s held longer than the cap's vsyncs when late (Settings window)", on ? "are" : "are not");
 }
 // Once per present, before this frame's period is taken: the time since the previous frame's start (shown) and the frame's cost decide this frame's hold and the next frame's step.
 // Cost = max(CPU: the time between the frames' starts without the pacing wait, GPU: the latest finished frame's GPU time), in vsyncs

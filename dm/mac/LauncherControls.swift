@@ -46,10 +46,12 @@ final class ControlsModel: ObservableObject {
     @Published var sens = 1.0
     @Published var abxy = "auto"
     @Published var profile: String { didSet { UserDefaults.standard.set(profile, forKey: "controls.profile"); load() } }
-    /// The controls the launch environment or an env file set: they win over the profile, so the tab says so
+    /// The controls the launch environment or an env file set (launcher.c lists them in DM_ENV_LAUNCH_KEYS, DM_ENV_FILE_KEYS): they win over the profile, so the tab says so.
+    /// Not the environment itself: while the game runs it also holds the profile's values (LiveSettings)
     let fixed: [String] = {
         let env = ProcessInfo.processInfo.environment
-        return ["DM_KEYMAP", "DM_PAD_MAP", "DM_PAD_ABXY", "DM_PAD_STICK_DZ", "DM_PAD_STICK_SENS"].filter { env[$0] != nil }
+        let set = Set(((env["DM_ENV_FILE_KEYS"] ?? "") + " " + (env["DM_ENV_LAUNCH_KEYS"] ?? "")).split(separator: " ").map(String.init))
+        return ["DM_KEYMAP", "DM_PAD_MAP", "DM_PAD_ABXY", "DM_PAD_STICK_DZ", "DM_PAD_STICK_SENS"].filter { set.contains($0) }
     }()
 
     init() {
@@ -114,6 +116,13 @@ final class ControlsModel: ObservableObject {
         if dz != 0 { lines.append(String(format: "DM_PAD_STICK_DZ=%.2f", dz)) }
         if sens != 1 { lines.append(String(format: "DM_PAD_STICK_SENS=%.2f", sens)) }
         return lines.map { $0 + "\n" }.joined()
+    }
+
+    /// The controls as the host takes them: an empty map is the host's default
+    func env() -> [String: String] {
+        var v = ["DM_KEYMAP": "", "DM_PAD_MAP": "", "DM_PAD_ABXY": "auto", "DM_PAD_STICK_DZ": String(format: "%.2f", dz), "DM_PAD_STICK_SENS": String(format: "%.2f", sens)]
+        for line in text().split(separator: "\n") { if let eq = line.firstIndex(of: "=") { v[String(line[..<eq])] = String(line[line.index(after: eq)...]) } }
+        return v
     }
 
     func save() { save(as: profile) }

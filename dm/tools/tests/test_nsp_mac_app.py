@@ -760,6 +760,13 @@ class App(unittest.TestCase):
         self.assertEqual(grab(r'im_key_usable\(int code\) \{ return code >= 0 && code < IM_KEYS && !\(code >= (\d+ && code <= \d+)\)', h).replace(' && code <= ', '...'),
                          grab(r'static func usable\(_ code: Int\) -> Bool \{ \(0\.\.<128\)\.contains\(code\) && !\((\d+\.\.\.\d+)\)', s))
 
+    def test_live_settings_match_the_host(self):   # the settings window while the game runs sends only what front_mac.m's live_settings_apply takes
+        import re
+        h = (REPO / 'dm/host/front_mac.m').read_text(); s = (REPO / 'dm/mac/Launcher.swift').read_text()
+        body, keys = re.search(r'static void live_settings_apply\(void\) \{(.*?)\n\}', h, re.S), re.search(r'static let keys: Set<String> = \[(.*?)\]', s)
+        assert body is not None and keys is not None
+        self.assertEqual(set(re.findall(r'!strcmp\(k, "(DM_\w+)"\)', body.group(1))), set(re.findall(r'"(DM_\w+)"', keys.group(1))))
+
     def test_signed(self):   # ad-hoc, both the host and the bundle, never the hardened runtime (it refuses the executable memory the host makes for the game's code)
         for target in (self.app, self.app / 'Contents/MacOS/dmhost'):
             subprocess.run(['codesign', '--verify', '--strict', target], check=True, capture_output=True)
@@ -793,6 +800,25 @@ class App(unittest.TestCase):
         time.sleep(0.2)
         p.send_signal(signal.SIGTERM); p.communicate(timeout=30)
         self.assertEqual(p.returncode, 3)
+
+    def test_wait_with_settings(self):   # with settings, the launcher waits with its run loop (Launcher.swift dm_mac_launcher_wait), so the host's Settings… can ask it for the window
+        app = self.tmp / 'Live.app'; shutil.rmtree(app, ignore_errors=True); shutil.copytree(self.app, app, symlinks=True)
+        (app / 'Contents/Resources/dm/launcher.json').write_text(json.dumps({'game': TID, 'settings': [
+            {'env': 'DM_FPS_HOLD', 'kind': 'toggle', 'section': 'Performance', 'label': 'Hold', 'note': '', 'default': 'on', 'on': 'on', 'off': 'off'}]}))
+        p = self.launch(app=app); p.communicate(timeout=30)
+        self.assertEqual(p.returncode, 7)   # the host's exit code, as without the run loop
+        self.assertEqual(self.host_run()['DM_SETTINGS_PID'], str(p.pid))
+        p = self.launch(); p.communicate(timeout=30)
+        self.assertNotIn('DM_SETTINGS_PID', self.host_run())   # no settings: no window to show, no Settings… item
+        (self.tmp / 'home/host_run.txt').unlink()
+        p = self.launch(wait=True, app=app)
+        for _ in range(100):
+            if (self.tmp / 'home/host_run.txt').exists() and 'STANDIN_WAIT' in self.host_run(): break
+            time.sleep(0.05)
+        time.sleep(0.2)
+        p.send_signal(signal.SIGTERM); p.communicate(timeout=30)
+        self.assertEqual(p.returncode, 3)   # still forwarded
+        shutil.rmtree(app)
 
     def test_missing_data(self):
         broken = self.tmp / 'Broken.app'; shutil.rmtree(broken, ignore_errors=True)

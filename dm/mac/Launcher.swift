@@ -3,7 +3,7 @@
 // and so is the store: launcher.<VAR> in the app's preferences, which launcher.c reads when the window is not shown (docs/frontends.md, Saved choices). Basic settings (level basic) come
 // first, the others under Advanced settings, each in the list's sections. An Input tab beside them edits the controls profile (LauncherControls.swift). Play puts the settings into this process's environment, which the host inherits; Quit and closing the window end the
 // app without the game. "Show this window at launch" off: no window unless Option is held at launch, and launcher.c applies the saved choices. The window never takes focus by itself: an app
-// opened in the background (open -g) keeps its window behind until the player switches to it
+// opened in the background (open -g) keeps its window behind until the player switches to it. While the game runs, the game's Settings… (⌘,) shows the window again (LiveSettings below)
 import AppKit
 import QuartzCore
 import SwiftUI
@@ -121,10 +121,11 @@ struct LauncherView: View {
     @ObservedObject var m: LauncherModel
     let done: (Bool) -> Void
     let fit: (CGFloat) -> Void
+    @ObservedObject var controls: ControlsModel
+    var live = false   // the game runs: Done instead of Quit and Play, and the settings the host cannot change now say so
     @AppStorage("window.show") private var show = true
     @AppStorage("window.advanced") private var advanced = false
     @AppStorage("window.tab") private var tab = 0
-    @StateObject private var controls = ControlsModel()
     @State private var checking = false
     @State private var check = 0   // which Play the running check is for: one the player went on from without it is dropped
 
@@ -164,13 +165,17 @@ struct LauncherView: View {
             HStack {
                 Toggle("Show this window at launch", isOn: $show).toggleStyle(.checkbox)
                 Spacer()
-                if checking {
-                    ProgressView().controlSize(.small)
-                    Text("Checking the cloud save…").foregroundStyle(.secondary)
-                    Button("Play Without It") { checking = false; SaveCheck.apply("offline"); done(true) }
+                if live {
+                    Button("Done") { done(true) }.keyboardShortcut(.defaultAction)
+                } else {
+                    if checking {
+                        ProgressView().controlSize(.small)
+                        Text("Checking the cloud save…").foregroundStyle(.secondary)
+                        Button("Play Without It") { checking = false; SaveCheck.apply("offline"); done(true) }
+                    }
+                    Button("Quit") { done(false) }
+                    Button("Play") { start() }.keyboardShortcut(.defaultAction).disabled(checking)
                 }
-                Button("Quit") { done(false) }
-                Button("Play") { start() }.keyboardShortcut(.defaultAction).disabled(checking)
             }
             .padding(20)
         }
@@ -219,7 +224,14 @@ struct LauncherView: View {
                 Text("Brings back all settings this game was tested with.")
             }
         }
-        CloudSavesSection()
+        CloudSavesSection(nextStart: live)
+    }
+
+    static let nextStartNote = "Applies the next time the game starts."
+    private func shown(_ s: Setting) -> Setting {
+        guard live, !LiveSettings.keys.contains(s.env) else { return s }
+        return Setting(env: s.env, kind: s.kind, label: s.label, note: s.note.isEmpty ? Self.nextStartNote : s.note + " " + Self.nextStartNote, def: s.def, section: s.section,
+                       needs: s.needs, level: s.level, base: s.base, options: s.options, min: s.min, max: s.max, step: s.step, on: s.on, off: s.off)
     }
 
     /// The rows of each of the list's sections, under the section's name as a small caption inside the card
@@ -230,7 +242,7 @@ struct LauncherView: View {
                 if !section.isEmpty {
                     Text(section.uppercased()).font(.caption.weight(.semibold)).foregroundStyle(.secondary).padding(.top, 4).accessibilityAddTraits(.isHeader)
                 }
-                ForEach(rows) { SettingRow(s: $0, m: m) }
+                ForEach(rows) { SettingRow(s: shown($0), m: m) }
             }
         }
     }
@@ -321,6 +333,7 @@ struct TabBar: NSViewRepresentable {
 /// Cloud saves: a folder the save is synced through (dm/host/save_sync.h), the one the iPhone app picks in its launcher's Cloud saves section. It is kept in this app's
 /// preferences as cloudSaves.folder, which launcher.c puts into DM_SAVE_SYNC before the host starts; a DM_SAVE_SYNC an env file or the launch environment set wins, and is shown here.
 struct CloudSavesSection: View {
+    var nextStart = false
     @AppStorage("cloudSaves.folder") private var folder = ""
     private let fixed: String? = {
         let env = ProcessInfo.processInfo.environment
@@ -341,7 +354,8 @@ struct CloudSavesSection: View {
                 }
             }
         } footer: {
-            Text("Choose the iCloud Drive folder the iPhone app uses for this game. The save comes in when the game starts and goes out after each save; a save that is replaced is kept in the save's -backups folder.")
+            Text("Choose the iCloud Drive folder the iPhone app uses for this game. The save comes in when the game starts and goes out after each save; a save that is replaced is kept in the save's -backups folder."
+                 + (nextStart ? " " + LauncherView.nextStartNote : ""))
         }
     }
 
@@ -363,8 +377,35 @@ struct CloudSavesSection: View {
     }
 }
 
+/// The settings window, at the top of the screen, centred; its content's height fits the window (fitWindow)
+private func settingsWindow<V: View>(_ root: V, delegate: NSWindowDelegate) -> NSWindow {
+    let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 560, height: 660), styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView], backing: .buffered, defer: false)
+    w.title = info("CFBundleName") ?? "Game"; w.isReleasedWhenClosed = false; w.delegate = delegate
+    w.titlebarAppearsTransparent = true; w.titleVisibility = .hidden; w.titlebarSeparatorStyle = .none   // one surface with the header, which shows the name
+    w.contentMinSize = NSSize(width: 520, height: 0)
+    if let screen = w.screen ?? NSScreen.main {
+        w.setFrameTopLeftPoint(NSPoint(x: screen.visibleFrame.midX - w.frame.width / 2, y: screen.visibleFrame.maxY))
+    }
+    let host = NSHostingView(rootView: root)
+    host.sizingOptions = []   // the Form's measured scroll content owns the height, including after collapse
+    w.contentView = host
+    host.layoutSubtreeIfNeeded()
+    return w
+}
+private func fitWindow(_ w: NSWindow?, _ extraHeight: CGFloat) {
+    guard let w, let screen = w.screen else { return }
+    let frame = LauncherWindowLayout.fitted(w.frame, extraHeight: extraHeight, visible: screen.visibleFrame)
+    if abs(frame.height - w.frame.height) > 0.5 { w.setFrame(frame, display: true) }
+}
+/// NSApp.run returns at the next event after stop, so one is posted
+private func stopRun() {
+    NSApp.stop(nil)
+    NSApp.postEvent(NSEvent.otherEvent(with: .applicationDefined, location: .zero, modifierFlags: [], timestamp: 0, windowNumber: 0, context: nil, subtype: 0, data1: 0, data2: 0)!, atStart: true)
+}
+
 private final class Launcher: NSObject, NSApplicationDelegate, NSWindowDelegate {
     let model: LauncherModel
+    let controls = ControlsModel()
     var window: NSWindow?
     var play = false
 
@@ -376,18 +417,8 @@ private final class Launcher: NSObject, NSApplicationDelegate, NSWindowDelegate 
         app.addItem(withTitle: "Close Window", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
         app.addItem(withTitle: "Quit \(name)", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         item.submenu = app; menu.addItem(item); NSApp.mainMenu = menu
-        let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 560, height: 660), styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView], backing: .buffered, defer: false)
-        w.title = name; w.isReleasedWhenClosed = false; w.delegate = self
-        w.titlebarAppearsTransparent = true; w.titleVisibility = .hidden; w.titlebarSeparatorStyle = .none   // one surface with the header, which shows the name
-        w.contentMinSize = NSSize(width: 520, height: 0)
+        let w = settingsWindow(LauncherView(m: model, done: { [weak self] in self?.finish($0) }, fit: { [weak self] in fitWindow(self?.window, $0) }, controls: controls), delegate: self)
         window = w
-        if let screen = w.screen ?? NSScreen.main {
-            w.setFrameTopLeftPoint(NSPoint(x: screen.visibleFrame.midX - w.frame.width / 2, y: screen.visibleFrame.maxY))
-        }
-        let host = NSHostingView(rootView: LauncherView(m: model, done: { [weak self] in self?.finish($0) }, fit: { [weak self] in self?.fit($0) }))
-        host.sizingOptions = []   // the Form's measured scroll content owns the height, including after collapse
-        w.contentView = host
-        host.layoutSubtreeIfNeeded()
         // no activation and no ordering in front of another app's windows: LaunchServices activates an app opened from Finder or the Dock (applicationDidBecomeActive), open -g does not
         if NSApp.isActive { w.makeKeyAndOrderFront(nil) } else { w.orderBack(nil) }
     }
@@ -406,12 +437,6 @@ private final class Launcher: NSObject, NSApplicationDelegate, NSWindowDelegate 
     }
     func windowWillClose(_ n: Notification) { finish(false) }
 
-    func fit(_ extraHeight: CGFloat) {
-        guard let w = window, let screen = w.screen else { return }
-        let frame = LauncherWindowLayout.fitted(w.frame, extraHeight: extraHeight, visible: screen.visibleFrame)
-        if abs(frame.height - w.frame.height) > 0.5 { w.setFrame(frame, display: true) }
-    }
-
     func finish(_ play: Bool) {
         guard let w = window else { return }
         window = nil; self.play = play
@@ -419,8 +444,61 @@ private final class Launcher: NSObject, NSApplicationDelegate, NSWindowDelegate 
         // and dmMacLauncher flushes the order-out (AppKit commits it at the end of a pass). Without both, the window stayed on screen, not responding, until the game ended
         w.animationBehavior = .none
         w.delegate = nil; w.orderOut(nil)
-        NSApp.stop(nil)
-        NSApp.postEvent(NSEvent.otherEvent(with: .applicationDefined, location: .zero, modifierFlags: [], timestamp: 0, windowNumber: 0, context: nil, subtype: 0, data1: 0, data2: 0)!, atStart: true)   // run returns at the next event
+        stopRun()
+    }
+}
+
+/// The settings window while the game runs: the game's Settings… (⌘,; dm/host/front_mac.m) sends SIGUSR1 to this process, which waits for the host in dm_mac_launcher_wait.
+/// Done (or closing the window) saves every choice for the next start, writes the live settings the player changed to live.env in the game's Application Support folder
+/// (this process's working folder, the host's DM_ROOT) and sends SIGUSR1 back; the host applies them and takes the front again. keys: what the host can change live
+/// (front_mac.m live_settings_apply; dm/tools/tests/test_nsp_mac_app.py checks that the lists match). A setting an env file or the launch environment set is never sent
+final class LiveSettings: NSObject, NSWindowDelegate {
+    static let keys: Set<String> = ["DM_KEYMAP", "DM_PAD_MAP", "DM_PAD_ABXY", "DM_PAD_STICK_DZ", "DM_PAD_STICK_SENS", "DM_RUMBLE_GAIN", "DM_RUMBLE_MIN", "DM_FPS_HOLD", "DM_PRESENT_UPSCALE", "DM_FULLSCREEN"]
+    let settings: [Setting], host: pid_t
+    private var window: NSWindow?, model: LauncherModel?, controls: ControlsModel?, before: [String: String] = [:]
+
+    init(_ settings: [Setting], host: pid_t) { self.settings = settings; self.host = host }
+
+    func show() {
+        if let w = window { NSApp.activate(); w.makeKeyAndOrderFront(nil); return }
+        let m = LauncherModel(settings), c = ControlsModel()
+        model = m; controls = c; before = current()
+        NSApp.setActivationPolicy(.accessory)   // a window and the front, without a second Dock icon beside the game's
+        let w = settingsWindow(LauncherView(m: m, done: { [weak self] _ in self?.done() }, fit: { [weak self] in fitWindow(self?.window, $0) }, controls: c, live: true), delegate: self)
+        window = w
+        NSApp.activate(); w.makeKeyAndOrderFront(nil)
+        fputs("launcher: settings window while the game runs\n", stderr)
+    }
+
+    /// The live settings as the host would take them now; the controls as launcher.c puts them together: a saved launcher.DM_KEYMAP or DM_PAD_MAP wins over the profile
+    private func current() -> [String: String] {
+        guard let m = model, let c = controls else { return [:] }
+        var v: [String: String] = [:]
+        for s in m.settings where Self.keys.contains(s.env) && !m.fixed.contains(s.env) { v[s.env] = m.values[s.env] ?? s.def }
+        for (k, x) in c.env() where !c.fixed.contains(k) && UserDefaults.standard.string(forKey: "launcher." + k) == nil { v[k] = x }
+        return v
+    }
+
+    func windowWillClose(_ n: Notification) { done() }
+
+    func done() {
+        guard window != nil, let m = model else { return }
+        let changed = current().filter { before[$0.key] != $0.value }.sorted { $0.key < $1.key }
+        m.apply()   // saves the choices; the environment it sets is this process's, which the running host does not see
+        let file = FileManager.default.currentDirectoryPath + "/live.env"
+        do { try changed.map { "\($0.key)=\($0.value)\n" }.joined().write(toFile: file, atomically: true, encoding: .utf8) }
+        catch { fputs("[RED] launcher: cannot write \(file): \(error.localizedDescription)\n", stderr) }
+        fputs("launcher: live settings: \(changed.isEmpty ? "none changed" : changed.map { "\($0.key)=\($0.value)" }.joined(separator: " "))\n", stderr)
+        close()
+        if let h = NSRunningApplication(processIdentifier: host) { NSApp.yieldActivation(to: h) }
+        NSApp.setActivationPolicy(.prohibited)
+        kill(host, SIGUSR1)
+    }
+
+    func close() {
+        guard let w = window else { return }
+        window = nil; model = nil; controls = nil
+        w.delegate = nil; w.orderOut(nil)
     }
 }
 
@@ -432,11 +510,20 @@ enum LauncherWindowLayout {
     }
 }
 
+/// The bundle's settings (dm/launcher.json); nil without them. quiet: no red line for a file that cannot be read
+private func settingsFile(quiet: Bool = false) -> SettingsFile? {
+    guard let url = Bundle.main.resourceURL?.appendingPathComponent("dm/launcher.json"), let data = try? Data(contentsOf: url) else { return nil }
+    guard let file = try? JSONDecoder().decode(SettingsFile.self, from: data), !file.settings.isEmpty else {
+        if !quiet { fputs("[RED] launcher: dm/launcher.json cannot be read; starting the game\n", stderr) }
+        return nil
+    }
+    return file
+}
+
 // 1: Play (the window's settings are in the environment), 0: the player quit, 2: no window (no launcher.json, or "Show this window at launch" off): launcher.c applies the saved choices
 @_cdecl("dm_mac_launcher")
 public func dmMacLauncher() -> Int32 {
-    guard let url = Bundle.main.resourceURL?.appendingPathComponent("dm/launcher.json"), let data = try? Data(contentsOf: url) else { return 2 }
-    guard let file = try? JSONDecoder().decode(SettingsFile.self, from: data), !file.settings.isEmpty else { fputs("[RED] launcher: dm/launcher.json cannot be read; starting the game\n", stderr); return 2 }
+    guard let file = settingsFile() else { return 2 }
     if (UserDefaults.standard.object(forKey: "window.show") as? Bool) == false && !NSEvent.modifierFlags.contains(.option) {
         fputs("launcher: settings window off (hold Option at launch to show it)\n", stderr)
         return SaveCheck.withoutWindow() ? 2 : 0
@@ -452,4 +539,35 @@ public func dmMacLauncher() -> Int32 {
     guard launcher.play else { fputs("launcher: quit without starting the game\n", stderr); return 0 }
     model.apply()
     return 1
+}
+
+// 1: the settings window can be shown while the game runs (dm_mac_launcher_wait), so launcher.c sets DM_SETTINGS_PID for the host's Settings… item
+@_cdecl("dm_mac_settings_available")
+public func dmMacSettingsAvailable() -> Int32 { settingsFile(quiet: true) != nil ? 1 : 0 }
+
+// Waits for the host with this process's run loop, so the game's Settings… can show the settings window (LiveSettings); returns waitpid's status, -1 when the wait failed
+@_cdecl("dm_mac_launcher_wait")
+public func dmMacLauncherWait(_ pid: Int32) -> Int32 {
+    guard let file = settingsFile(quiet: true) else { return -1 }
+    let app = NSApplication.shared
+    app.setActivationPolicy(.prohibited)
+    let live = LiveSettings(file.settings, host: pid)
+    signal(SIGUSR1, SIG_IGN)
+    let ask = DispatchSource.makeSignalSource(signal: SIGUSR1, queue: .main)
+    ask.setEventHandler { live.show() }
+    ask.resume()
+    var status: Int32 = 0
+    // polled: a process source registered after a quick exit would never fire
+    let poll = DispatchSource.makeTimerSource(queue: .main)
+    poll.schedule(deadline: .now(), repeating: 0.25)
+    poll.setEventHandler {
+        let r = waitpid(pid, &status, WNOHANG)
+        guard r == pid || (r < 0 && errno != EINTR) else { return }
+        if r < 0 { status = -1 }
+        poll.cancel(); live.close(); stopRun()
+    }
+    poll.resume()
+    app.run()
+    ask.cancel()
+    return status
 }

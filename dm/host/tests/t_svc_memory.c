@@ -584,8 +584,9 @@ int main(int argc, char **argv) {
     if (argc == 2 && !strcmp(argv[1], "--heap-probe")) {
         mem_init();
         assert(resize(g_heap_cap + 0x200000) == OOM);
-        g_nmod = 1; g_mod[0].size = 0xa00000;
-        assert(resize(0x800000) == LIMIT);
+        g_nmod = 1; g_mod[0].size = 0xa00000;   // modules larger than mem_used: the pool less the used memory reported still fits, a page more does not
+        assert(!resize(DM_GAME_APP_POOL - DM_GAME_MEM_USED) && !resize(0));
+        assert(resize(DM_GAME_APP_POOL - DM_GAME_MEM_USED + 0x200000) == LIMIT);
         return 0;
     }
     if (argc == 2 && !strcmp(argv[1], "--alias-probe")) {   // DM_ALIAS_SIZE sets the alias region; the heap and stacks stay as the profile has them
@@ -618,8 +619,13 @@ int main(int argc, char **argv) {
     assert(info(I_UsedNonSys) == DM_GAME_MEM_USED + 0xff00000);
     g_mod[0].back_len = 0x40000;   // a back patch area (patch_nso.py TWO) is code from the file, not bss
     assert(info(I_UsedMem) == DM_GAME_MEM_USED + 0xfec0000);
-    g_mod[0].back_len = 0;
-    assert(image_bytes() == 0x10000000);
+    // SetHeapSize charges the used memory GetInfo reports, not the size of the rewritten modules (patch areas and key pages): a heap of total − used fits however large the host's copies
+    // are (MIO: Memories in Orbit, 68 MB of modules against the default 64 MB, was refused the heap nninitStartup asks for; GitHub issue #941). A byte more is ResultLimitReached
+    g_nmod = 1; g_mod[0] = (module_t){.size=4 * DM_GAME_APP_POOL, .patch_off=0x100000};
+    assert(info(I_UsedMem) == DM_GAME_MEM_USED);
+    size_t room = (DM_GAME_APP_POOL - info(I_UsedMem)) & ~(size_t)0x1fffff;
+    assert(room <= g_heap_cap && !resize(room) && info(I_UsedMem) == DM_GAME_MEM_USED + room && !resize(0));
+    assert(resize(DM_GAME_APP_POOL - DM_GAME_MEM_USED + P) == 0x10801 && !g_heap_cur);
     g_nmod = 0;
     free(g_alias_bits); free(g_alias_exposed); assert(!munmap(g_as, g_reserve));
     printf("memory SVCs passed (map limit=%d, host page=%d, guest files %d)\n", DM_GAME_MEM_MAP_LIMIT, memory_getpagesize(), g_gf_n);

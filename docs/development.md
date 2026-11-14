@@ -63,6 +63,20 @@ On top of the format (`hle_cheats.c`; the `dm_cheat*` calls of `dm.h` give them 
 
 `dm/host/tests/t_cheats.c` covers the opcodes and this layer on a synthetic image.
 
+### Finding an address for a cheat
+
+`dm/tools/ctl_scan.py` does the searching a cheat tool does, through `DM_CTL` ([05-debugging.md](agents/05-debugging.md), Scripted input), so no debugger is needed. Start the game with `DM_CTL=<an empty file>`, and, with the number the game shows (`1015.01`):
+
+```
+python3 dm/tools/ctl_scan.py --ctl ctl.txt --log <the host's log> scan f64 1015.01     # main, alias and heap, in chunks of 256 MB
+# play until the number changes (1018.06)
+python3 dm/tools/ctl_scan.py --ctl ctl.txt --log <the host's log> filter f64 1018.06   # the candidates that follow it
+python3 dm/tools/ctl_scan.py show                                                     # heap + 0x..., main + 0x...
+python3 dm/tools/ctl_scan.py cheat 999999                                              # the Atmosphère words that write 999999 to what is left
+```
+
+A number a screen shows is rounded or cut, so a float matches within `--decimals` (default 2: +-0.01); integers match exactly. Try the other types (`i32`, `f32`, `i64`) when `f64` finds nothing: a game may keep the number in other units (Donkey Kong Bananza's gold is an `i32` of thousandths, [its note](../dm/games/040074A01BF12000/README.md)). Two rules from that game: a candidate is only good for the run it came from (`filter` stops when the log shows a new start), and a cheat that keeps writing an offset that moves between launches or loads overwrites other data, so `peek` the offset after a fresh start before it goes into a file.
+
 ### Cheats that survive game updates
 
 `scripts/cheat_anchor.py` carries cheats from one build of a game to another. An Atmosphère file names fixed offsets of one build. The script first converts such a file into a version-independent source, `<game>.cheats.toml`, where each address is described by the game's own code. Then it compiles that source into the plain `<build ID>.txt` of any build. It needs only the build's `ExeFS/main`, which the NSP script extracts to `<title ID>_build/extract/v<version>/ExeFS/`. The compiled file is ordinary Atmosphère text: this host, a Switch, Ryujinx and yuzu forks all run it.
@@ -867,6 +881,7 @@ Each game's notes are in its profile folder, `dm/games/<id>/README.md`: what the
 | `nso2elf.py` | Converts NSO to ELF for Ghidra / REA |
 | `env_switches.py` | Writes [docs/env_switches.tsv](env_switches.tsv): every `DM_*` environment switch the code reads, with its class and a one-line meaning. The classes: player (a launcher setting, `dm/games/settings.tsv`), path (names a file or folder), switch (changes what the host or a tool does), diagnostic (logs, dumps, probes, measurements), test (read only by tests). It keeps the class and meaning of each row and adds a row for a new switch, whose meaning its author writes; `test_env_switches.py` fails until they do, and when a row names a switch nothing reads. It also lists the names the docs quote that nothing reads |
 | `gpuprof.py` | Sums the host's `[gpuprof]` lines (`DM_NVN_GPUPROF`) by pass shape or size class, lists one frame's encoders in GPU order, and gives the medians of the `[ab]` phases (`DM_AB`) |
+| `ctl_scan.py` | Finds where a number the game shows lives in its memory, through `DM_CTL` (`memdump` and `peek`, read only): scans the main module, the alias and the heap for a value, keeps the candidates that follow its changes, names them as `heap + offset`, and prints the Atmosphère words that write a value to them; its search is `ctl_scan.c`, compiled with `cc` once |
 | `insn_census.py` | Counts the instruction sites the rewriter must handle |
 | `nso_code.py` | Function ranges from `.eh_frame` and the data blocks in a text segment, which the rewriter and the census leave out |
 | `nso_syms.py` | Compares the SDK import surface of two games, or of one game (`-` for the reference) with the host hooks |

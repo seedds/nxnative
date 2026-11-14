@@ -25,6 +25,7 @@
 #include <ctype.h>
 #include <sys/wait.h>
 #include <sys/time.h>
+#include <sys/sysctl.h>
 
 struct dm_flags g_flag; uint64_t g_t0_ns;
 uint64_t now_ns(void) { return clock_gettime_nsec_np(CLOCK_MONOTONIC); }
@@ -343,7 +344,11 @@ int main(void) {
     set_mtime(p, time(NULL) - 100);
     CHECK(session(R1, cloud4, "game.dat", "r3-more-progress") == 0 && cloud_has(cf4, root, "game.dat", "r3-more-progress"), "then the Mac saves more and sends it");
     snprintf(p, sizeof p, "%s/game.dat", R2); put(p, "new"); set_mtime(p, time(NULL) + 45);
-    CHECK(REPORT(R2, cloud4) && strstr(line, "conflict=1") && strstr(line, "cfiles=1 ") && strstr(line, "cdevice=Mac"),
+    // the cloud's save was sent from this machine, so its device is this machine's model, as save_sync.c names it: a GitHub runner, a virtual machine, is "VirtualMac2,1"
+    char model[64] = "", want[96]; size_t mlen = sizeof model;
+    if (sysctlbyname("hw.model", model, &mlen, NULL, 0) || !model[0]) snprintf(model, sizeof model, "unknown");
+    snprintf(want, sizeof want, "cdevice=%s ", model);
+    CHECK(REPORT(R2, cloud4) && strstr(line, "conflict=1") && strstr(line, "cfiles=1 ") && strstr(line, want),
           "both changed: the report says conflict, with the cloud's device (%s)", line);
     CHECK(strstr(line, " pull=0") != NULL, "no pull pending (%s)", line);
     {   // a pull that did not finish: what is in place may be half the cloud's, so no comparison is offered; the start's mount puts this device's save back first

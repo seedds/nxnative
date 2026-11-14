@@ -20,6 +20,7 @@ A dated record of what is done, what is in progress and what is left on the Wind
 | `da9f34b` | Host tests: the runners run the script tests (`t_vk_spirv`, `t_second_pack`) from `host_scripts.tsv`. Verified in Docker on Linux; the PowerShell runner not run |
 | `93b94dd` | Port: `nvn_state.c`'s `SLOG` writes a line in one stdio call outside Apple; `port.yml` uploads `host_scripts.tsv` for the Windows job. Verified in Docker (99 of 99 twice) |
 | `b1eff1c` | Vulkan: converted quad strips and polygons take NVN's provoking vertex (the same triangles rotated); `t_vk_provoking` 37 checks, `t_vk_guest_gl` 53. Verified in Docker on lavapipe |
+| `eaa9aa1` | AOT: hot indirect targets (design 12): the host writes `<module>.targets.tsv`, nxaot guards a site's dominant target with a direct call at tier H. Verified in Docker (nxaot 29 of 29, host 100 of 100 twice, packs identical without the file, the Windows cross-build); measured within noise, no gain shown |
 
 Done on the machine, not in the repository: Docker emptied on the owner's request (every image and container, the owner's other projects' included; the data volumes `aitrade_pgdata`, `smilepetstore_pgdata`, `smilepetstore_redisdata` kept).
 
@@ -31,13 +32,12 @@ Done on the machine, not in the repository: Docker emptied on the owner's reques
 
 ### In progress: written by agents, NOT built and NOT verified
 
-Verified and integrated on 2026-11-14 (nxaot CTest 28 of 28; host CTest 99 of 99 with and without `DM_AOT_ARENA_CHECK`, `NXAOT` given): the three rows that were `wip/second-pack-profile`, `wip/launcher-rule-by-function` and `wip/runner-scripts`. An agent is taking `wip/hot-indirect-targets` to green in Docker (its worktree under `.claude/worktrees/`, the tip plus the branch's commit); another is making `t_second_pack` run on Windows.
+Verified and integrated on 2026-11-14 (nxaot CTest 28 of 28; host CTest 99 of 99 with and without `DM_AOT_ARENA_CHECK`, `NXAOT` given): the three rows that were `wip/second-pack-profile`, `wip/launcher-rule-by-function` and `wip/runner-scripts`. Agents at work: `t_second_pack` on Windows (written, being integrated), the JIT fallback for the Windows host (it has none: the cross-build image lacks Boost's headers).
 
 No Docker image exists (the disk filled while ten worktrees were checked out, 280 MB each), so nothing below has been compiled or run. Each item is uncommitted in its worktree under `.claude/worktrees/`; a new session reads the diff there (`git -C <worktree> diff`), verifies it in Docker, and only then cherry-picks it. One build at a time: the two images (`nxnative-build` 1.9 GB, `nxnative-aot` 1.9 GB) do not fit beside the worktrees.
 
 | Worktree | Task | Files it owns |
 |---|---|---|
-| branch `wip/hot-indirect-targets` (parked: one commit, no worktree) | Hot indirect targets (design 12 of the recompiler): the host writes `<module>.targets.tsv`, nxaot guards the dominant target with a direct call at tier H | new `dm/host/aot_targets.c`, new `t_aot_targets.c`, `dm/tools/aot/src/build/pack.cpp`, `src/lift/*`, new `test_profile_targets.py` |
 | branch `wip/apple-log-one-call` (parked: one commit, no worktree) | Apple's log macros write each line in one stdio call, as the port's `LOG` does since `9872bae`. Prepared for a Mac: not to be merged before a Mac or macOS CI run | `dm/host/dm.h` (Apple branches), `docs/reference/threads.md` |
 
 ### Left, not started
@@ -45,6 +45,7 @@ No Docker image exists (the disk filled while ten worktrees were checked out, 28
 - Verify and integrate every row above (Docker; the Apple one on a Mac).
 - `t_astc_mesa` is registered outside `host_test` and is in no runner (declared in the manifest as CTest only).
 - The launcher's rule and the packer's `made` rows for the targets file.
+- The 4,000-function benchmark spends 92 % of its samples in the JIT fallback on non-local transfers, also after a repack with its misses: the cause is to be found (a game that switches stacks would run mostly in the JIT).
 - Converted quads still take another provoking vertex than the Switch's (declared: the fix changes the quad's diagonal).
 - The Metal backend takes the first vertex on every shape where the Switch takes the last (a Mac).
 - On a real GPU: the cost of one dispatch per small index conversion, the 3 MiB arena for indirect draws.

@@ -3312,17 +3312,54 @@ static void sps_note(uint64_t lo, uint64_t n) {
     if (g_nsps >= SPS_N && g_sps[i].fence > g_done && g_sps[i].fence > g_sps_lost) g_sps_lost = g_sps[i].fence;
     g_sps[i].lo = lo; g_sps[i].hi = lo + n; g_sps[i].fence = f; g_nsps++;
 }
+static id<MTLBuffer> up_big_src(uint64_t addr, uint64_t len, uint64_t *off);
+// A gather reads the physical memory behind a texture once: through zero-copy buffers that the open upload batch holds and retires (up_big_src), not through the pools' own buffers, which
+// mtl_gpu_addr puts into the residency set for good, committed on the spot (pool_res). Resident Evil 4 had 148 pools and 777 MB wired that way by the forest, against 8 and 52 MB with
+// the CPU gather (issue #2350). Its pages lie scattered through the pools: a buffer per run of pages made 193,000 in 5 minutes, residency commits 2.4 s against 0.9 s while it loaded;
+// a buffer over each whole pool, made again in each batch, wired 2 to 3 times the bytes of the runs in the forest. So the pages are sorted by address and taken in spans across gaps of up
+// to SP_GAP (a buffer costs about what 1 MB of wiring does in a residency commit), and a buffer the batch already holds over a span is used again. A pool already resident is read
+// through its own buffer (mtl_gpu_addr)
+enum { SP_GAP = 1u << 20, SP_SRC_N = 256 };
+static struct { uintptr_t a, b; __unsafe_unretained id<MTLBuffer> buf; } g_sp_src[SP_SRC_N]; static int g_nsp_src; static unsigned g_sp_src_seq;   // this batch's (g_up_seq); g_up_keep holds them
+static int sp_src_gpu(uint64_t a, uint64_t len, uint64_t *g) {
+    if (g_sp_src_seq != g_up_seq) { g_nsp_src = 0; g_sp_src_seq = g_up_seq; }
+    for (int k = 0; k < g_nsp_src; k++) if (a >= g_sp_src[k].a && a + len <= g_sp_src[k].b) { *g = g_sp_src[k].buf.gpuAddress + (a - g_sp_src[k].a); return 1; }
+    uint64_t o; void *b; id<MTLBuffer> u = up_big_src(a, len, &o);
+    if (!u) return mtl_gpu_addr(a, len, &b, &o, g);
+    if (g_nsp_src < SP_SRC_N) { g_sp_src[g_nsp_src].a = a - o; g_sp_src[g_nsp_src].b = a - o + u.length; g_sp_src[g_nsp_src++].buf = u; }
+    *g = u.gpuAddress + o; return 1;
+}
+typedef struct { uint64_t p, k; } sp_pg;   // a mapped page's physical address and its index in the table
+static int sp_pg_cmp(const void *x, const void *y) { uint64_t a = ((const sp_pg *)x)->p, b = ((const sp_pg *)y)->p; return (a > b) - (a < b); }
+// The GPU addresses of the pages of [va, va + n) in a sparse pool into pt (0: unmapped, or memory the GPU cannot address); 0 if any mapped page is in such memory. A gather's table
+// names buffers of the upload batch it is built in, and runs in that batch
 static int sp_pages_gpu(const void *pool, uint64_t va, uint64_t n, uint64_t *pt, int wrote) {   // wrote: the GPU writes the pages (sbw_note each run)
     uint64_t np = sp_pages_n(va, n); const uint8_t **ph = malloc((size_t)np * sizeof *ph);
     if (!ph) MDIE("sparse page table of %llu pages", (unsigned long long)np);
     int ok = nvn_sparse_pages(pool, va & ~0xFFFull, np << 12, ph);
-    for (uint64_t i = 0; ok && i < np;) {
+    if (!ok) memset(pt, 0, (size_t)np * sizeof *pt);
+    if (ok && wrote) for (uint64_t i = 0; i < np;) {
         if (!ph[i]) { pt[i++] = 0; continue; }
         uint64_t j = i + 1; while (j < np && ph[j] == ph[j - 1] + 0x1000) j++;
         void *b; uint64_t o, g;
-        if (wrote) { sbw_note((uint64_t)(uintptr_t)ph[i], (j - i) << 12, SBW_GPU); sps_note((uint64_t)(uintptr_t)ph[i], (j - i) << 12); }
+        sbw_note((uint64_t)(uintptr_t)ph[i], (j - i) << 12, SBW_GPU); sps_note((uint64_t)(uintptr_t)ph[i], (j - i) << 12);
         if (mtl_gpu_addr((uint64_t)(uintptr_t)ph[i], (j - i) << 12, &b, &o, &g)) { for (uint64_t k = i; k < j; k++) pt[k] = g + ((k - i) << 12); i = j; continue; }
-        for (; ok && i < j; i++) { ok = mtl_gpu_addr((uint64_t)(uintptr_t)ph[i], 0x1000, &b, &o, &g); pt[i] = g; }   // a run over two pools
+        for (; i < j; i++) { pt[i] = mtl_gpu_addr((uint64_t)(uintptr_t)ph[i], 0x1000, &b, &o, &g) ? g : 0; ok &= pt[i] != 0; }   // a run over two pools
+    } else if (ok) {
+        sp_pg *v = malloc((size_t)np * sizeof *v); uint64_t m = 0;
+        if (!v) MDIE("sparse page list of %llu pages", (unsigned long long)np);
+        for (uint64_t k = 0; k < np; k++) { pt[k] = 0; if (ph[k]) { v[m].p = (uint64_t)(uintptr_t)ph[k]; v[m++].k = k; } }
+        qsort(v, (size_t)m, sizeof *v, sp_pg_cmp);
+        for (uint64_t i = 0, j, g; i < m; i = j) {
+            for (j = i + 1; j < m && v[j].p <= v[j - 1].p + 0x1000 + SP_GAP; j++) {}
+            if (sp_src_gpu(v[i].p, v[j - 1].p + 0x1000 - v[i].p, &g)) { for (uint64_t x = i; x < j; x++) pt[v[x].k] = g + (v[x].p - v[i].p); continue; }
+            for (uint64_t x = i, e; x < j; x = e) {   // the span lies over two pools: its runs, then their pages
+                for (e = x + 1; e < j && v[e].p <= v[e - 1].p + 0x1000; e++) {}
+                if (sp_src_gpu(v[x].p, v[e - 1].p + 0x1000 - v[x].p, &g)) { for (uint64_t y = x; y < e; y++) pt[v[y].k] = g + (v[y].p - v[x].p); continue; }
+                for (uint64_t y = x; y < e; y++) { if (sp_src_gpu(v[y].p, 0x1000, &g)) pt[v[y].k] = g; else ok = 0; }
+            }
+        }
+        free(v);
     }
     free(ph);
     if (!ok) RED_ONCE(171, "a page mapped in a sparse pool lies in memory the GPU cannot address: its textures are gathered on the CPU, and GPU writes into them stay out of their storage");
@@ -3515,6 +3552,7 @@ static id<MTLTexture> pkg_upload_(const tex_t *t, uint64_t *stamp, id<MTLTexture
     if (sparse && !linear && !rb_shift && g_nvn_deswz_gpu && sp_gather_pso() && !((uintptr_t)t->mem & 15) && !(zblock_on() && t->d.format >= 0x79 && t->d.format <= 0x94)) {
         spn = sp_pages_n((uint64_t)(uintptr_t)t->mem, t->L.size);
         if (!(spt = malloc((size_t)spn * sizeof *spt))) MDIE("sparse page table of %llu pages", (unsigned long long)spn);
+        up_begin(); src_batch = g_up_seq;
         if (!sp_pages_gpu(t->pool, (uint64_t)(uintptr_t)t->mem, t->L.size, spt, 0)) { free(spt); spt = NULL; }
     }
     int use_gpu = !linear && !rb_shift && g_nvn_deswz_gpu && (sparse ? spt != NULL : upsrc || mtl_addr((uint64_t)t->mem, t->L.size, &mb, &mo));
@@ -3542,7 +3580,10 @@ static id<MTLTexture> pkg_upload_(const tex_t *t, uint64_t *stamp, id<MTLTexture
         // A sparse pool's texture is gathered into the same staging block, after the deswizzled levels: one allocation, as a second could flush the batch that holds the first
         size_t stg_off, sto = ((total ? total : 16) + 255) & ~(size_t)255, gsz = spt ? (t->L.size + 255) & ~(size_t)255 : 0;
         id<MTLBuffer> stg = up_alloc(sto + gsz, &stg_off);
-        if (spt) { mb = (__bridge void *)stg; mo = stg_off + sto; sp_gather(t, spt, spn, stg, mo); free(spt); spt = NULL; }
+        if (spt) {   // up_alloc may have flushed the batch that holds the buffers the page table names: the table again, in this batch (a page it no longer reaches reads as 0)
+            if (g_up_seq != src_batch) sp_pages_gpu(t->pool, (uint64_t)(uintptr_t)t->mem, t->L.size, spt, 0);
+            mb = (__bridge void *)stg; mo = stg_off + sto; sp_gather(t, spt, spn, stg, mo); free(spt); spt = NULL;
+        }
         // up_alloc may have flushed the batch that held the first source buffer: only then the new batch needs one of its own. Made for every texture, each staged upload from a large pool
         // put its storage twice into the residency set (Switch Sports Resort's first court frame: 855 textures, 1.8 GB of source buffers for 908 MB of storage; t_upload_src)
         if (upsrc && g_up_seq != src_batch) { uint64_t mo2; id<MTLBuffer> u2 = up_big_src((uint64_t)t->mem, t->L.size, &mo2); if (u2) { upsrc = u2; mb = (__bridge void *)u2; mo = mo2; } }

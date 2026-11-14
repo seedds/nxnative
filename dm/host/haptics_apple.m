@@ -1,6 +1,7 @@
 // Core Haptics adapts the game's bands; it cannot reproduce the Switch's exact waveforms.
 // All engines and players belong to one serial queue. Guest threads enqueue ordered snapshots only.
 #import "haptics_apple.h"
+#include "pad_pro.h"
 #import <CoreHaptics/CoreHaptics.h>
 #import <TargetConditionals.h>
 #if TARGET_OS_IPHONE
@@ -303,29 +304,123 @@ static void ds4_release(int p) {
     if (o->dev && (o->sent[0] || o->sent[1]) && !o->motor[0] && !o->motor[1]) ds4_send(self.player);
 }
 @end
-// The first DualShock 4 device no other player drives, opened for player p. The registry is asked at each connect: an IOHIDManager that is never scheduled
-// keeps the devices of the moment its matching was set, so a controller turned on later found none and stayed on Core Haptics, and one that came back got
-// its dead device. A scheduled one would depend on its arrival callback running before GameController's connect; the registry has the device by then
-static BOOL ds4_take(int p) {
+// A Switch Pro Controller, or a controller that presents itself as one (an 8BitDo pad in Switch mode over Bluetooth: Nintendo 057E / 2009), is driven through its own rumble
+// report 0x10 (pad_pro.h), as SDL's hidapi driver does. On macOS 27.2 the Core Haptics route of an 8BitDo pad started and played without an error and the pad never vibrated,
+// while the same pad vibrated from report 0x10 (2026-11-13); why gamecontrollerd's output does not reach it is open. The report also keeps the game's two actuators apart, each
+// with its own high and low band at the game's frequencies, where a server without advanced players mixes both into one Core Haptics engine (applyLevel). Its rumble ends unless
+// the report comes again, so an active one is sent again every PRO_REFRESH seconds, as SDL refreshes it.
+#define PRO_REFRESH 0.03
+typedef struct { IOHIDDeviceRef dev; uint64_t id; uint8_t side[2][4], sent[2][4], counter; BOOL on; dispatch_source_t refresh; } pro_out;   // id: its registry entry
+static pro_out pro[DM_PLAYERS];
+static const uint8_t pro_neutral[4] = {0x00, 0x01, 0x40, 0x40};
+static IOReturn pro_send_raw(IOHIDDeviceRef dev, uint8_t counter, const uint8_t left[4], const uint8_t right[4]) {
+    uint8_t r[10]; size_t n = pad_pro_rumble(r, counter, left, right);
+    return IOHIDDeviceSetReport(dev, kIOHIDReportTypeOutput, r[0], r, (CFIndex)n);
+}
+static void pro_send(int p) {
+    pro_out *o = &pro[p];
+    IOReturn e = pro_send_raw(o->dev, o->counter++, o->side[0], o->side[1]);
+    if (e != kIOReturnSuccess) { if (++errors <= 8 || errors % 64 == 0) fprintf(stderr, "[RED] haptics: Pro Controller rumble report: IOReturn 0x%x\n", e); return; }
+    memcpy(o->sent, o->side, sizeof o->sent);
+}
+static void pro_refresh(int p, BOOL on) {
+    pro_out *o = &pro[p];
+    if (on == o->on) return;
+    o->on = on;
+    if (!on) { if (o->refresh) { dispatch_source_cancel(o->refresh); o->refresh = nil; } return; }
+    o->refresh = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, queue);
+    dispatch_source_set_timer(o->refresh, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(PRO_REFRESH * NSEC_PER_SEC)), (uint64_t)(PRO_REFRESH * NSEC_PER_SEC), NSEC_PER_MSEC);
+    dispatch_source_set_event_handler(o->refresh, ^{ if (pro[p].dev && pro[p].on) pro_send(p); });
+    dispatch_resume(o->refresh);
+}
+static BOOL pro_silent(const pro_out *o) { return !memcmp(o->side[0], pro_neutral, 4) && !memcmp(o->side[1], pro_neutral, 4); }
+static void pro_apply(dm_haptic_state s) {
+    pro_out *o = &pro[s.player];
+    if (!o->dev) return;
+    for (int m = 0; m < 2; m++) {
+        const dm_vibration *v = &s.motor[m];
+        pad_pro_rumble_side(o->side[m], controller_level(v->amplitude_low * gain), v->frequency_low, controller_level(v->amplitude_high * gain), v->frequency_high);
+    }
+    BOOL silent = pro_silent(o);
+    if (memcmp(o->side, o->sent, sizeof o->sent)) pro_send(s.player);
+    pro_refresh(s.player, !silent);
+}
+static void pro_release(int p) {
+    pro_out *o = &pro[p];
+    pro_refresh(p, NO);
+    if (o->dev) {
+        memcpy(o->side[0], pro_neutral, 4); memcpy(o->side[1], pro_neutral, 4);
+        if (memcmp(o->sent, o->side, sizeof o->sent)) pro_send(p);
+        IOHIDDeviceClose(o->dev, kIOHIDOptionsTypeNone); CFRelease(o->dev);
+    }
+    *o = (pro_out){0};
+}
+@interface DmProChannel : DmRumbleChannel   // one per motor; the route takes both motors' values at once (pro_apply)
+@end
+@implementation DmProChannel
+- (void)apply:(dm_haptic_level)level { (void)level; }
+- (void)stop {
+    pro_out *o = &pro[self.player];
+    memcpy(o->side[self.motor], pro_neutral, 4);
+    if (!pro_silent(o)) return;
+    pro_refresh(self.player, NO);
+    if (o->dev && memcmp(o->sent, o->side, sizeof o->sent)) pro_send(self.player);
+}
+@end
+#endif
+
+#if !TARGET_OS_IPHONE
+// The first HID device of the vendor, with one of the products, that no other player drives (ds4[] / pro[]: taken), opened for player p. The registry is asked at each connect: an
+// IOHIDManager that is never scheduled keeps the devices of the moment its matching was set, so a controller turned on later found none and stayed on Core Haptics, and one that came back
+// got its dead device. A scheduled one would depend on its arrival callback running before GameController's connect; the registry has the device by then. accept may refuse an opened
+// device (it is then closed and the next one tried)
+static IOHIDDeviceRef hid_take(int vendor, const int *pids, int npids, BOOL (^taken)(uint64_t id), BOOL (^accept)(IOHIDDeviceRef dev), uint64_t *taken_id) {
     CFMutableDictionaryRef match = IOServiceMatching(kIOHIDDeviceKey); io_iterator_t it = 0;
-    if (!match) return NO;
-    CFDictionarySetValue(match, CFSTR(kIOHIDVendorIDKey), (__bridge CFNumberRef)@0x054C);
-    if (IOServiceGetMatchingServices(kIOMainPortDefault, match, &it) != KERN_SUCCESS) return NO;   // takes match
-    BOOL found = NO;
+    if (!match) return NULL;
+    CFDictionarySetValue(match, CFSTR(kIOHIDVendorIDKey), (__bridge CFNumberRef)@(vendor));
+    if (IOServiceGetMatchingServices(kIOMainPortDefault, match, &it) != KERN_SUCCESS) return NULL;   // takes match
+    IOHIDDeviceRef found = NULL;
     for (io_service_t s; !found && (s = IOIteratorNext(it)); IOObjectRelease(s)) {
-        uint64_t id = 0; BOOL taken = NO;   // GameController does not name a controller's HID device: two connecting together may get each other's
-        if (IORegistryEntryGetRegistryEntryID(s, &id) != KERN_SUCCESS) continue;
-        for (int q = 0; q < DM_PLAYERS; q++) taken |= q != p && ds4[q].dev && ds4[q].id == id;
-        IOHIDDeviceRef dev = taken ? NULL : IOHIDDeviceCreate(kCFAllocatorDefault, s);
+        uint64_t id = 0;   // GameController does not name a controller's HID device: two connecting together may get each other's
+        if (IORegistryEntryGetRegistryEntryID(s, &id) != KERN_SUCCESS || taken(id)) continue;
+        IOHIDDeviceRef dev = IOHIDDeviceCreate(kCFAllocatorDefault, s);
         if (!dev) continue;
-        int pid = [(__bridge NSNumber *)IOHIDDeviceGetProperty(dev, CFSTR(kIOHIDProductIDKey)) intValue];
-        if ((pid == 0x05C4 || pid == 0x09CC || pid == 0x0BA0) && IOHIDDeviceOpen(dev, kIOHIDOptionsTypeNone) == kIOReturnSuccess) {   // DualShock 4 v1, v2, the USB wireless adapter
-            ds4[p].dev = dev; ds4[p].id = id; found = YES;
-            ds4[p].bluetooth = [(__bridge NSString *)IOHIDDeviceGetProperty(dev, CFSTR(kIOHIDTransportKey)) isEqualToString:@"Bluetooth"];
-        } else CFRelease(dev);
+        int pid = [(__bridge NSNumber *)IOHIDDeviceGetProperty(dev, CFSTR(kIOHIDProductIDKey)) intValue]; BOOL want = NO;
+        for (int i = 0; i < npids; i++) want |= pid == pids[i];
+        if (want && IOHIDDeviceOpen(dev, kIOHIDOptionsTypeNone) == kIOReturnSuccess) {
+            if (!accept || accept(dev)) { found = dev; *taken_id = id; continue; }
+            IOHIDDeviceClose(dev, kIOHIDOptionsTypeNone);
+        }
+        CFRelease(dev);
     }
     IOObjectRelease(it);
     return found;
+}
+// Only a controller GameController calls a Pro Controller, and only while such a HID device is free and takes a report: after a long Bluetooth disconnect IOKit can keep a second entry
+// of the pad that sends nothing and whose output fails (MACH_SEND_INVALID_DEST, motion_pro.h), so a neutral report picks the live one
+static BOOL pro_route(int p, GCController *controller) {
+    if (![controller.productCategory isEqualToString:@"Switch Pro Controller"]) return NO;
+    static const int pids[] = {0x2009};
+    uint64_t id = 0;
+    IOHIDDeviceRef dev = hid_take(0x057E, pids, 1, ^BOOL(uint64_t i) { for (int q = 0; q < DM_PLAYERS; q++) if (q != p && pro[q].dev && pro[q].id == i) return YES; return NO; },
+                                  ^BOOL(IOHIDDeviceRef d) { return pro_send_raw(d, 0, pro_neutral, pro_neutral) == kIOReturnSuccess; }, &id);
+    if (!dev) return NO;
+    pro[p].dev = dev; pro[p].id = id; pro[p].counter = 1;
+    memcpy(pro[p].side[0], pro_neutral, 4); memcpy(pro[p].side[1], pro_neutral, 4); memcpy(pro[p].sent, pro[p].side, sizeof pro[p].sent);
+    for (int m = 0; m < 2; m++) { DmProChannel *c = [DmProChannel new]; c.player = p; c.motor = m; c.target = @"Pro Controller report"; [channels[p] addObject:c]; }
+    fprintf(stderr, "haptics: player %d controller %s, rumble through the Pro Controller rumble report (%s)\n", p + 1, controller.vendorName.UTF8String ?: "unknown",
+            [(__bridge NSString *)IOHIDDeviceGetProperty(dev, CFSTR(kIOHIDTransportKey)) UTF8String] ?: "unknown transport");
+    return YES;
+}
+// The first free DualShock 4 device, opened for player p
+static BOOL ds4_take(int p) {
+    static const int pids[] = {0x05C4, 0x09CC, 0x0BA0};   // DualShock 4 v1, v2, the USB wireless adapter
+    uint64_t id = 0;
+    IOHIDDeviceRef dev = hid_take(0x054C, pids, 3, ^BOOL(uint64_t i) { for (int q = 0; q < DM_PLAYERS; q++) if (q != p && ds4[q].dev && ds4[q].id == i) return YES; return NO; }, nil, &id);
+    if (!dev) return NO;
+    ds4[p].dev = dev; ds4[p].id = id;
+    ds4[p].bluetooth = [(__bridge NSString *)IOHIDDeviceGetProperty(dev, CFSTR(kIOHIDTransportKey)) isEqualToString:@"Bluetooth"];
+    return YES;
 }
 // Only a controller GameController calls a DualShock 4, and only while such a HID device is free
 static BOOL ds4_route(int p, GCController *controller) {
@@ -350,6 +445,7 @@ static void apply(dm_haptic_state s) {
         NSArray<DmRumbleChannel *> *out = channels[s.player];
 #if !TARGET_OS_IPHONE
         if ([out.firstObject isKindOfClass:DmDs4Channel.class]) { ds4_apply(s); return; }
+        if ([out.firstObject isKindOfClass:DmProChannel.class]) { pro_apply(s); return; }
 #endif
         for (NSUInteger i = 0; i < out.count; i++) {
             if (s.epoch != dm_haptics_epoch(s.player)) break;   // a failed channel may replace this route
@@ -372,8 +468,8 @@ static void configure(int p, GCController *controller) {
     channels[p] = [NSMutableArray new];
     if (sinks[p]) { sink_silence(p); dm_haptics_route(p, 1); return; }
 #if !TARGET_OS_IPHONE
-    ds4_release(p);
-    if (controller && ds4_route(p, controller)) { dm_haptics_route(p, 1); return; }   // the report first, as SDL drives it
+    ds4_release(p); pro_release(p);
+    if (controller && (ds4_route(p, controller) || pro_route(p, controller))) { dm_haptics_route(p, 1); return; }   // the report first, as SDL drives it
 #endif
     if (controller) {
         GCDeviceHaptics *h = controller.haptics;

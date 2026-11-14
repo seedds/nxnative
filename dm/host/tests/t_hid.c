@@ -438,7 +438,7 @@ static void t_script_hold(void) {
     CHECK(buttons_of(0, STYLE_FULLKEY) == (DM_BTN_A | DM_BTN_B | DM_BTN_X), "script, controller and keyboard buttons are combined");
     CHECK(buttons_of(0, STYLE_FULLKEY) == (DM_BTN_A | DM_BTN_B | DM_BTN_X), "a scripted hold survives controller updates after the press latch is consumed");
     CHECK(lx_of(0) == -0x7000, "the scripted stick wins over controller drift");
-    CHECK(atomic_load(&g_shake_on), "controller updates do not stop a scripted shake");
+    CHECK(atomic_load(&g_shake_on[0]), "controller updates do not stop a scripted shake");
 }
 static void t_script(void) {
     g_mode = 1; dm_pad_players(1);
@@ -449,7 +449,7 @@ static void t_script(void) {
     script_hold = t_script_hold; keys_main(NULL); script_hold = NULL;
     CHECK(buttons_of(0, STYLE_FULLKEY) == (DM_BTN_B | DM_BTN_X), "script release preserves the controller and keyboard buttons");
     CHECK(lx_of(0) == 120, "script release preserves the controller stick");
-    CHECK(!atomic_load(&g_shake_on), "script release ends its shake hold");
+    CHECK(!atomic_load(&g_shake_on[0]), "script release ends its shake hold");
     dm_input_set(0, 0, 0, 0, 0); dm_pad_set(0, 0, 0, 0, 0); buttons_of(0, STYLE_FULLKEY);
     g_steps[0] = (key_step){.btn = DM_BTN_Y}; keys_main(NULL);
     CHECK(buttons_of(0, STYLE_FULLKEY) == DM_BTN_Y, "a short scripted press is latched until the game reads");
@@ -594,7 +594,7 @@ static void t_motion_threads(void) {
 }
 static void t_motion_live(void) {
     g_mode = 1; dm_pad_players(1);
-    atomic_store(&g_shake_t0, 0); atomic_store(&g_shake_end, 0);   // no shake: the clocks here stand at 1 s, so the cycle t_script's shake finishes would never end
+    atomic_store(&g_shake_t0[0], 0); atomic_store(&g_shake_end[0], 0);   // no shake: the clocks here stand at 1 s, so the cycle t_script's shake finishes would never end
 
     uint32_t h; uint32_t id = 0;
     CHECK(h_hid_SixHandles(&h, 1, &id, STYLE_FULLKEY) == 1, "one six-axis handle for player 1");
@@ -739,7 +739,7 @@ static void *imu_reader(void *arg) {   // reads the newest 16 at a fixed guest t
 static void t_npad_imu_samples(void) {
     g_mode = 1; dm_pad_players(1); g_phone_mode = 0;
     setenv("DM_IMU_NOISE", "0", 1); unsetenv("DM_IMU_ACC_SIGN"); unsetenv("DM_IMU_GYRO_SIGN"); imu_env_read();   // exact values and the host's own signs here; t_imu_noise checks the noise
-    atomic_store(&g_shake_t0, 0); atomic_store(&g_shake_end, 0);
+    atomic_store(&g_shake_t0[0], 0); atomic_store(&g_shake_end[0], 0);
     uint32_t h = 0x20003;   // the SDK's own handle (utility::GetSixAxisSensorHandle, sdk+0x6d8490): full key (style index 3) on No1, the whole controller (device 2)
     imu_handle = h;
     TestImuSample s[40], t[40]; memset(s, 0xAB, sizeof s);
@@ -858,7 +858,7 @@ static void t_imu_sdk_handles(void) {
 // with the intended spread, uncorrelated from one tick to the next; DM_IMU_NOISE=0 leaves it out
 static void t_imu_noise(void) {
     g_mode = 1; dm_pad_players(1); g_phone_mode = 0;
-    atomic_store(&g_shake_t0, 0); atomic_store(&g_shake_end, 0);
+    atomic_store(&g_shake_t0[0], 0); atomic_store(&g_shake_end[0], 0);
     unsetenv("DM_IMU_NOISE"); imu_env_read();
     uint32_t h[2] = {0x20003, 0x10003};   // the SDK's handles of player 1's full-key controller, two device indexes
     uint8_t ring[64]; h_hid_ImuEnable(ring, sizeof ring);
@@ -1570,6 +1570,195 @@ static void t_unsupported_style(void) {
     CHECK(h_hid_GetStyle(&(uint32_t){0}) == STYLE_FULLKEY, "JoyLeft | JoyRight only: no style with a whole controller's buttons supported, full-key as before");
     h_hid_SetStyles(0xffffffffu); pthread_mutex_lock(&g_style_lock); g_style_ev[0] = NULL; pthread_mutex_unlock(&g_style_lock);
 }
+static void t_shake(void) {
+    hwm_clear();
+    SixAxisState six[6]; NpadState pad;
+    uint32_t first = 0x20003;
+    g_mode = 1; ids((uint32_t[]){0,1,2,3,4,5,6,7,NPAD_HANDHELD}, 9);
+    dm_input_set(0,0,0,0,0);
+    for (int p = 0; p < DM_PLAYERS; p++) { dm_pad_set_player(p,0,0,0,0,0); dm_pad_motion(p,NULL); }
+    dm_pad_players(0xff); guest_now += 1000000000ull; motion_now = guest_now; hwm_clear();
+    for (int p = 0; p < DM_PLAYERS; p++) fill(&pad,(uint32_t)p,STYLE_FULLKEY);   // consume older tests' press latches
+
+    for (int p = 1; p < DM_PLAYERS; p++) {
+        uint32_t h = 0x20003 | (uint32_t)p << 8;
+        dm_pad_set_player(p,DM_BTN_A | DM_BTN_SHAKE,0,0,0,0); guest_now += 20000000; motion_now = guest_now; hwm_clear();
+        h_hid_SixState(six,&h);
+        CHECK(six[0].acc[0] > 0 && six[0].gyro[2] > 0 && !h_hid_SixRest(&h), "each secondary player receives its own mapped Shake");
+        h_hid_SixState(six,&first);
+        CHECK(six[0].acc[0] == 0 && h_hid_SixRest(&first), "secondary Shake does not leak into player 1 in multiplayer");
+        fill(&pad,(uint32_t)p,STYLE_FULLKEY);
+        CHECK(pad.buttons == DM_BTN_A, "Shake never reaches the game's Npad button bits");
+        dm_pad_set_player(p,0,0,0,0,0); guest_now += 20000000; motion_now = guest_now; hwm_clear();
+        h_hid_SixState(six,&h);
+        CHECK(six[0].acc[0] > 0 && !h_hid_SixRest(&h), "releasing secondary Shake lets the current cycle finish");
+        guest_now += 200000000; motion_now = guest_now; hwm_clear();
+        h_hid_SixState(six,&h);
+        CHECK(six[0].acc[0] == 0 && h_hid_SixRest(&h), "released secondary Shake returns to rest");
+    }
+
+    // DM_KBD_PLAYER=own puts the controller in slot 1. A one-player game
+    // merges it into player 1, including a tap released before any sensor read.
+    ids((uint32_t[]){0,NPAD_HANDHELD}, 2); dm_pad_players(7);
+    guest_now = (guest_now / SIX_PERIOD_NS + 1) * SIX_PERIOD_NS; motion_now = guest_now; hwm_clear();
+    dm_pad_set_player(1,DM_BTN_SHAKE,0,0,0,0); guest_now += 1000000; motion_now = guest_now; hwm_clear();
+    dm_pad_set_player(1,0,0,0,0,0); guest_now += 19000000; motion_now = guest_now; hwm_clear();
+    CHECK(h_hid_SixStates(six,6,&first) == 6 && six[0].acc[0] > 0 && six[5].acc[0] == 0,
+          "one-player merged Shake preserves a short tap and its sensor history");
+    CHECK(!h_hid_SixRest(&first), "one-player merged Shake is not reported at rest");
+    guest_now += 200000000; motion_now = guest_now; hwm_clear();
+    CHECK(h_hid_SixRest(&first), "one-player merged tap finishes its cycle");
+
+    dm_pad_set_player(1,DM_BTN_SHAKE,0,0,0,0); guest_now += 20000000; motion_now = guest_now; hwm_clear();
+    ids((uint32_t[]){0,1}, 2);
+    uint32_t second = 0x20103;
+    h_hid_SixState(six,&second);
+    CHECK(six[0].acc[0] > 0 && h_hid_SixRest(&first), "held Shake follows the player's current Npad assignment");
+    dm_pad_set_player(2,DM_BTN_SHAKE,0,0,0,0); guest_now += 20000000; motion_now = guest_now; hwm_clear();
+    CHECK(h_hid_SixRest(&first), "unsupported multiplayer slots do not shake player 1");
+    ids((uint32_t[]){0}, 1);
+    dm_pad_set_player(1,0,0,0,0,0); guest_now += 200000000; motion_now = guest_now; hwm_clear();
+    h_hid_SixState(six,&first);
+    CHECK(six[0].acc[0] != 0 && !h_hid_SixRest(&first), "releasing one merged controller leaves another controller's Shake held");
+    dm_pad_set_player(2,0,0,0,0,0); guest_now += 200000000; motion_now = guest_now; hwm_clear();
+    CHECK(h_hid_SixRest(&first), "all merged Shake sources released returns to rest");
+
+    g_mode = 0; ids((uint32_t[]){NPAD_HANDHELD}, 1);
+    uint32_t handheld = 0x22004;
+    dm_pad_set_player(1,DM_BTN_SHAKE,0,0,0,0); guest_now += 20000000; motion_now = guest_now; hwm_clear();
+    h_hid_SixState(six,&handheld);
+    CHECK(six[0].acc[0] > 0 && !h_hid_SixRest(&handheld), "secondary Shake merges into the handheld sensor");
+    dm_pad_players(1);
+    h_hid_SixState(six,&handheld);
+    CHECK(six[0].acc[0] == 0 && h_hid_SixRest(&handheld), "disconnecting a merged Shake controller removes its motion");
+    dm_pad_players(3);
+    h_hid_SixStates(six,6,&handheld);
+    int cleared = 1; for (int i = 0; i < 6; i++) cleared &= six[i].acc[0] == 0;
+    CHECK(cleared && h_hid_SixRest(&handheld), "immediate slot reuse does not inherit the disconnected controller's Shake history");
+    guest_now += 200000000; motion_now = guest_now; hwm_clear();
+
+    g_mode = 1; ids((uint32_t[]){0,1}, 2);
+    dm_motion physical = {.acc={0,0,-1}, .gyro={0,0,0.25f}, .dir={1,0,0,0,1,0,0,0,1}};
+    dm_pad_motion(1,&physical);
+    dm_pad_set_player(1,DM_BTN_SHAKE,0,0,0,0); guest_now += 20000000; motion_now = guest_now; hwm_clear();
+    h_hid_SixState(six,&second);
+    CHECK(six[0].acc[0] > 0 && six[0].gyro[2] > 0.5f, "secondary Shake overrides physical motion for its whole cycle");
+    dm_pad_set_player(1,0,0,0,0,0); guest_now += 200000000; motion_now = guest_now; hwm_clear(); dm_pad_motion(1,&physical);
+    h_hid_SixState(six,&second);
+    CHECK(six[0].acc[0] == 0 && six[0].gyro[2] == 0.25f, "physical motion resumes after secondary Shake finishes");
+    dm_pad_motion(1,NULL);
+
+    dm_input_set(DM_BTN_SHAKE,0,0,0,0); dm_pad_set(DM_BTN_SHAKE,0,0,0,0); guest_now += 20000000; motion_now = guest_now; hwm_clear();
+    dm_input_set(0,0,0,0,0); guest_now += 200000000; motion_now = guest_now; hwm_clear();
+    CHECK(!h_hid_SixRest(&first) && h_hid_SixRest(&second), "keyboard release preserves player 1's controller Shake without affecting player 2");
+    dm_pad_set(0,0,0,0,0); guest_now += 200000000; motion_now = guest_now; hwm_clear();
+    CHECK(h_hid_SixRest(&first), "keyboard and first-controller Shake still return to rest");
+
+    script_set(DM_BTN_SHAKE,0,0,0,0); guest_now += 20000000; motion_now = guest_now; hwm_clear();
+    h_hid_SixState(six,&first);
+    CHECK(six[0].acc[0] > 0 && !h_hid_SixRest(&first) && h_hid_SixRest(&second), "scripted Shake reaches only player 1's sensor");
+    dm_pad_set_player(1,DM_BTN_SHAKE,0,0,0,0); guest_now += 20000000; motion_now = guest_now; hwm_clear();
+    CHECK(!h_hid_SixRest(&first) && !h_hid_SixRest(&second), "scripted and secondary-controller Shake can run together");
+    script_set(0,0,0,0,0); guest_now += 200000000; motion_now = guest_now; hwm_clear();
+    CHECK(h_hid_SixRest(&first) && !h_hid_SixRest(&second), "script release preserves the secondary controller's Shake");
+    dm_pad_set_player(1,0,0,0,0,0); guest_now += 200000000; motion_now = guest_now; hwm_clear();
+    CHECK(h_hid_SixRest(&second), "secondary Shake returns to rest after the overlapping script finishes");
+}
+
+// An offline applet sees every input route while guest reads remain quiet. Its edge latch is independent of each npad's consumed press latch.
+static void t_applet_input(void) {
+    g_mode = 1; ids((uint32_t[]){0, 1, 2, NPAD_HANDHELD}, 4); dm_pad_players(7);
+    dm_input_set(0, 0, 0, 0, 0); script_set(0, 0, 0, 0, 0);
+    for (int p = 0; p < DM_PLAYERS; p++) dm_pad_set_player(p, 0, 0, 0, 0, 0);
+    uint64_t b; int32_t a[4]; dm_input_peek(&b, a);
+    dm_input_hold(1);
+    dm_input_set(DM_BTN_A, 100, 0, 0, 0);
+    script_set(DM_BTN_X, 300, -400, 0, 0);
+    dm_pad_set_player(1, DM_BTN_B, -200, 0, 0, 500);
+    CHECK(buttons_of(0, STYLE_FULLKEY) == 0 && buttons_of(1, STYLE_FULLKEY) == 0, "applet hold hides keyboard, script and the other player's buttons from the game");
+    CHECK(lx_of(0) == 0 && lx_of(1) == 0, "applet hold centres every guest npad's sticks");
+    dm_input_peek(&b, a);
+    CHECK(b == (DM_BTN_A | DM_BTN_X | DM_BTN_B), "applet sees every route after guest reads consumed their press latches");
+    CHECK(a[0] == 300 && a[1] == -400 && a[2] == 0 && a[3] == 500, "applet combines the most deflected axes across routes and players");
+    dm_input_set(0, 0, 0, 0, 0); script_set(0, 0, 0, 0, 0); dm_pad_set_player(1, 0, 0, 0, 0, 0);
+    dm_pad_set_player(2, DM_BTN_Y, 0, 0, 0, 0); dm_pad_set_player(2, 0, 0, 0, 0, 0);
+    CHECK(buttons_of(2, STYLE_FULLKEY) == 0, "a tapped third-player button stays hidden from guest reads during the applet");
+    dm_input_peek(&b, a); CHECK(b == DM_BTN_Y, "applet retains a third-player tap between polls");
+    dm_input_peek(&b, a); CHECK(b == 0, "applet consumes that short press once");
+    dm_input_hold(0);
+    CHECK(buttons_of(0, STYLE_FULLKEY) == 0 && buttons_of(1, STYLE_FULLKEY) == 0 && buttons_of(2, STYLE_FULLKEY) == 0, "closing the applet does not replay its taps to the game");
+    dm_pad_set(DM_BTN_A, 0, 0, 0, 0); dm_pad_set(0, 0, 0, 0, 0);
+    dm_input_peek(&b, a); CHECK(b == DM_BTN_A, "applet peek still sees a short controller press after the hold");
+    uint64_t first = buttons_of(0, STYLE_FULLKEY), second = buttons_of(0, STYLE_FULLKEY);
+    CHECK(first == DM_BTN_A && second == 0, "applet peek does not consume the game's independent short-press latch");
+    dm_pad_players(0);
+}
+
+static void t_direct_motion(void) {
+    g_mode = 1; ids((uint32_t[]){0,1}, 2); dm_pad_players(3);
+    guest_now = (guest_now / SIX_PERIOD_NS + 1) * SIX_PERIOD_NS; motion_now = guest_now; hwm_clear();
+    dm_motion motion = {.acc={0,0,-1}, .gyro={0.1f,0.2f,0.3f}, .dir={1,0,0,0,1,0,0,0,1}};
+    dm_pad_motion(1, &motion);
+    SixAxisState six[3]; uint32_t h = 0x20103;
+    CHECK(six_states(six, 3, h) == 3 && six[0].gyro[2] == 0.3f, "physical gyro reaches its player's six-axis state");
+    CHECK(!h_hid_SixRest(&h), "physical gyro is not reported at rest");
+    guest_now += SIX_PERIOD_NS; motion_now = guest_now; hwm_clear(); motion.gyro[2] = 0.6f; dm_pad_motion(1, &motion);
+    six_states(six, 3, h);
+    CHECK(six[0].gyro[2] == 0.6f && six[1].gyro[2] == 0.3f, "six-axis history preserves distinct samples");
+    ids((uint32_t[]){0},1); six_states(six,1,0x20003);
+    CHECK(six[0].gyro[2] == 0.6f, "one-player title receives merged controller motion");
+    guest_now += 1000000000ull; motion_now = guest_now; hwm_clear(); six_states(six,1,0x20003);
+    CHECK(six[0].gyro[2] == 0 && six[0].acc[2] == -1, "stale physical motion returns to rest");
+    guest_now += 1000000; motion_now = guest_now; hwm_clear(); memset(motion.gyro,0,sizeof motion.gyro); dm_pad_motion(1,&motion);
+    six_states(six,3,0x20003);
+    CHECK(six[0].gyro[2]==0 && six[1].gyro[2]==0 && six[2].gyro[2]==0, "fresh motion never revives history from before a stale gap");
+    dm_pad_motion(1, NULL); six_states(six, 1, 0x20003); CHECK(six[0].gyro[2] == 0, "disconnect clears sensor history");
+    // The direct Steam history participates in the same source policy as GC, Pro and phone motion.
+    guest_now = (guest_now / SIX_PERIOD_NS + 1) * SIX_PERIOD_NS; motion_now = guest_now; hwm_clear();
+    motion.acc[0] = .25f; dm_pad_motion(0, &motion);
+    dm_motion_set_switch(0, (float[]){0, -1, 0}, (float[]){0, 0, 0});
+    six_states(six, 1, 0x20003);
+    CHECK(six[0].acc[0] == .25f, "auto phone does not replace direct controller history");
+    g_phone_mode = 1; six_states(six, 1, 0x20003);
+    CHECK(six[0].acc[1] == -1, "forced phone overrides direct controller history");
+    g_phone_mode = -1;
+    dm_motion_set(0, (float[]){.5f, 0, -.8660254f}, (float[]){0, 0, 0});
+    six_states(six, 1, 0x20003);
+    CHECK(six[0].acc[0] == .5f, "fresh GC motion has priority over direct HID history");
+    dm_motion_clear(0); six_states(six, 1, 0x20003);
+    CHECK(six[0].acc[0] == .25f, "clearing GC reveals the preserved direct HID history");
+    dm_pad_motion(0, NULL); six_states(six, 1, 0x20003);
+    CHECK(six[0].acc[1] == -1, "disconnecting direct HID allows auto phone fallback");
+    g_motion_off = 1; dm_pad_motion(0, &motion); six_states(six, 1, 0x20003);
+    CHECK(six[0].acc[2] == -1, "DM_MOTION disables direct history and all fallback sources");
+    g_motion_off = 0; g_phone_motion.last_ns = 0;
+    dm_pad_motion(1, NULL); six_states(six,1,0x20003); CHECK(six[0].gyro[2] == 0, "disconnect clears sensor history");
+    // A newly arriving merged controller cannot erase the previous source's history.
+    guest_now = (guest_now / SIX_PERIOD_NS + 1) * SIX_PERIOD_NS; motion_now = guest_now; hwm_clear();
+    dm_pad_motion(0, &motion);
+    guest_now += SIX_PERIOD_NS + 2000000; motion_now = guest_now; hwm_clear();
+    dm_motion later = motion; later.acc[0] = .75f; dm_pad_motion(1, &later);
+    six_states(six, 2, 0x20003);
+    CHECK(six[0].acc[0] == .25f && six[1].acc[0] == .25f, "new direct source with no matching history preserves the older source");
+    guest_now += SIX_PERIOD_NS; motion_now = guest_now; hwm_clear(); six_states(six, 1, 0x20003);
+    CHECK(six[0].acc[0] == .75f, "new direct source takes over once its sample reaches the sensor clock");
+    dm_pad_motion(0, NULL); dm_pad_motion(1, NULL);
+    // Steam's integrated history and passive Pro integration never clear or mix each other.
+    guest_now = (guest_now / SIX_PERIOD_NS + 1) * SIX_PERIOD_NS; motion_now = guest_now; hwm_clear();
+    dm_motion_set_hid(0, (float[]){.5f, 0, -.8660254f}, (float[]){0, 0, 0}, guest_now);
+    dm_pad_motion(0, &motion); dm_pad_motion(0, NULL); six_states(six, 1, 0x20003);
+    CHECK(six[0].acc[0] == .5f, "direct disconnect leaves passive Pro motion intact");
+    dm_pad_motion(0, &motion); dm_motion_clear_hid(0); six_states(six, 1, 0x20003);
+    CHECK(six[0].acc[0] == .25f, "passive Pro removal leaves direct Steam history intact");
+    dm_pad_motion(0, NULL);
+    // Upstream native motion keeps its orientation during a synthetic Shake.
+    dm_motion_set(0, (float[]){.5f, 0, -.8660254f}, (float[]){0, 0, (float)M_PI});
+    dm_pad_set(DM_BTN_SHAKE, 0, 0, 0, 0); guest_now += 20000000; motion_now = guest_now; hwm_clear();
+    six_states(six, 1, 0x20003);
+    CHECK(fabsf(six[0].gyro[2] - .5f) < 1e-6f && fabsf(six[0].dir[2] + .5f) < .01f && six[0].acc[0] > .5f,
+          "native motion retains its gyro and orientation while Shake adds acceleration");
+    dm_pad_set(0, 0, 0, 0, 0); guest_now += 200000000; motion_now = guest_now; hwm_clear(); dm_motion_clear(0);
+}
 
 int main(void) {
     CHECK(setenv("DM_RUMBLE_LOG", "1", 1) == 0, "enable rumble diagnostics");
@@ -1608,6 +1797,8 @@ int main(void) {
     t_pair_half_pause();
     t_six_ic_info();
     t_touch_sampling();
+    t_direct_motion();
+    t_shake();
     t_rec();
     {   // Nmouse with no device (SDK 21's forms): the pointer range is kept, the merged handle 0 takes settings, the standard mouse and the handle queries report nothing
         int w = 0, h = 0; uint64_t std = 7; uint32_t npad = 9;

@@ -149,6 +149,16 @@ dm/host/motion_pro_mac.h	hle:*SixAxisSensor*	Mac Pro Controller raw motion trans
 dm/host/switch2_proto.h	hle:*hid*	Switch 2 controller protocol: reports, sticks, buttons, motion maps
 dm/host/pad_switch2_apple.h	hle:*hid*	Switch 2 controllers over Bluetooth LE (off unless DM_SW2=1)
 dm/host/pad_switch2_apple.m	hle:*hid*	Switch 2 controllers over Bluetooth LE (off unless DM_SW2=1)
+dm/host/input_map.h	present:*	the Mac front end's key and controller button map
+dm/host/input_preferences_mac.h	present:*	shared per-game control choices and launch overrides
+dm/host/controllers_mac.h	present:*	Mac controller lifecycle and mapping panel
+dm/host/pad_map.h	hle:*hid*	physical controller button mapping
+dm/host/pad_hid_mac.h	hle:*hid*	generic Mac HID ownership, lifecycle and input
+dm/host/pad_motion.h	hle:*SixAxisSensor*	Steam Controller motion history
+dm/host/steam_input.h	hle:*hid*	Steam Controller report decoding and trackpads
+dm/host/haptics_apple.h	hle:*Vibration*	Apple and direct controller rumble routes
+dm/host/haptics_apple.m	hle:*Vibration*	Apple and direct controller rumble output
+dm/host/hle_haptics.h	hle:*Vibration*	the shared rumble interface
 dm/host/front.h	present:*	the front end
 dm/ios/*	*:*	the iOS app
 dm/third_party/ryujinx/src/Ryujinx.Graphics.Shader/Translation/Transforms/GeometryToCompute.cs	shader:stage:gs	geometry compute input and output lowering

@@ -282,7 +282,9 @@ For a replaced DSP renderer the size query keeps the service's work-buffer contr
 
 ### Checking audio without listening
 
-`DM_AUDIO_DUMP=file` writes the PCM the host plays (16-bit, 48 kHz, stereo). RMS per second, clipping share, spectral flatness (music ≈ 0.1–0.5, white noise ≈ 0.85) and the strongest FFT peaks (they should land on musical notes) tell real music from noise or silence.
+`DM_AUDIO_DUMP=file` writes the PCM each output plays (16-bit, 48 kHz, the output's own channel count: a Wwise mix is often 6), each output to its own file: `file` for `audio #0`, `file.N` for `audio #N`, which the log's `DM_AUDIO_DUMP: its blocks … go to` line names. Blocks the full queue refuses are not written. RMS per second, clipping share, spectral flatness (music ≈ 0.1–0.5, white noise ≈ 0.85) and the strongest FFT peaks (they should land on musical notes) tell real music from noise or silence.
+
+- **One file for every output:** before, all outputs went to one file, in the order their blocks came. Divinity: Original Sin 2's dump then showed every 1024-frame block of its Wwise mix (`audio #0`, 6 channels) followed by 240–480 zero frames (a quarter of the samples), and 247 s of audio for about 190 s of play. Those were the audio renderer's near-silent 2-channel 240-frame blocks (`audio #1`), 3 to 6 of them between two Wwise blocks, read as 6 channels. Counters on both sides showed nothing of it in what played: each output appended and played the same seconds, matching real time, with no refused block and no underrun. Per output, the Wwise file holds 134.4 s for a 135 s run, with no zero runs in its front pair. `t_audio` checks that two outputs appended in turn land in two files.
 
 ### AudioOut volume kept per output
 

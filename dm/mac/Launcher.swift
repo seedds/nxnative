@@ -386,6 +386,7 @@ private func settingsWindow<V: View>(_ root: V, delegate: NSWindowDelegate) -> N
     let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 560, height: 660), styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView], backing: .buffered, defer: false)
     w.title = info("CFBundleName") ?? "Game"; w.isReleasedWhenClosed = false; w.delegate = delegate
     w.titlebarAppearsTransparent = true; w.titleVisibility = .hidden; w.titlebarSeparatorStyle = .none   // one surface with the header, which shows the name
+    w.isMovableByWindowBackground = true   // the header stands where the title bar was, so dragging it moves the window as the title bar did
     w.contentMinSize = NSSize(width: 520, height: 0)
     if let screen = w.screen ?? NSScreen.main {
         w.setFrameTopLeftPoint(NSPoint(x: screen.visibleFrame.midX - w.frame.width / 2, y: screen.visibleFrame.maxY))

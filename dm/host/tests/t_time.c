@@ -51,12 +51,16 @@ int main(void) {
     CHECK(guards_ok, "adjustable snapshot writes only its 0xd0 bytes");
     CHECK(adjustable[0xcd] == 2, "adjustable snapshot type is 2");
     CHECK(get64(adjustable, 0x40) == 1700000000, "adjustable user time follows the host clock");
+    Result (*net)(int64_t *) = hook("_ZN2nn4time26StandardNetworkSystemClock14GetCurrentTimeEPNS0_9PosixTimeE");
+    int64_t nt = -1;
+    CHECK(net && net(&nt) == RES_OK && nt == 1700000000, "the network clock reads the host clock, as the user clock (saves are dated by it)");
     const CalendarTime *cal = (const CalendarTime *)(adjustable + 0x50);
     CHECK(cal->year == 2023 && cal->month == 11 && cal->day == 14 && cal->hour == 22 && cal->minute == 13 && cal->second == 20,
           "adjustable snapshot has the UTC calendar for the fixed time");
-    uint8_t zero[0x20] = {0};
-    CHECK(!memcmp(adjustable + 0x20, zero, sizeof zero) && get64(adjustable, 0x48) == 0,
-          "offline snapshot has no network clock context or time");
+    CHECK(!memcmp(adjustable + 0x20, adjustable, 0x20) && get64(adjustable, 0x48) == 1700000000 && !memcmp(adjustable + 0x58, adjustable + 0x50, 8) &&
+          !memcmp(adjustable + 0x78, adjustable + 0x60, 0x18), "snapshot network fields are the user clock's (context, time, calendar, its info)");
+    int64_t (*net_now)(void) = hook("_ZN2nn4time26StandardNetworkSystemClock3nowEv");
+    CHECK(net_now && net_now() == 1700000000, "the network clock's now() reads the host clock, as GetCurrentTime does");
     CHECK(!memcmp(a + 0x98, adjustable + 0x98, 16), "both snapshots use the same steady clock source");
     CHECK(udiff(a, adjustable) == 0, "changing snapshot type does not report a user clock change");
     CHECK(!strcmp((const char *)adjustable + 0xa8, "UTC"), "adjustable snapshot carries the host time zone");
@@ -68,6 +72,7 @@ int main(void) {
     CHECK(span(&ts, a, b) == 1 && ts == 90 * 1000000000LL, "span from the steady time points, in nanoseconds");
     CHECK(span(&ts, b, a) == 1 && ts == -90 * 1000000000LL, "span backwards is negative");
     memcpy(c, b, sizeof c); c[0x98] ^= 1; ts = 1234;   // c: another steady clock source, no network time
+    put64(a, 0x48, 0); put64(c, 0x48, 0);   // as a snapshot made with no network clock
     CHECK(span(&ts, a, c) == 0 && ts == 1234, "different sources and no network time: false, output untouched");
     put64(a, 0x48, 1000); put64(c, 0x48, 1600);   // with network times the span comes from them
     CHECK(span(&ts, a, c) == 1 && ts == 600 * 1000000000LL, "different sources: span from the network times");

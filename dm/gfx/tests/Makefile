@@ -525,6 +525,9 @@ t_upgrade_alias: t_upgrade_alias.m $(MTL_T_DEP)
 check_t_upgrade_alias: RUN_ENV = MTL_DEBUG_LAYER=1
 t_alias_takeover: t_alias_takeover.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_alias_takeover.m $(MTL_T_SRC) $(FW)
+t_dead_targets: t_dead_targets.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_dead_targets.m $(MTL_T_SRC) $(FW)
+check_t_dead_targets: RUN_ENV = MTL_DEBUG_LAYER=1
 check_t_alias_takeover: RUN_ENV = MTL_DEBUG_LAYER=1
 # The resource owner alone: nvn_owner.m (and the texture layouts it sizes shared entries with) with this test's stand-ins for the replay layer's hooks, no nvn_mtl.m
 t_serial_owner: t_serial_owner.m ../nvn/nvn_owner.m ../nvn/nvn_owner.h ../nvn/nvn_tex.c ../nvn/nvn_tex.h ../nvn/nvn_hmap.h ../nvn/nvn_obj.h $(GAME_H)

@@ -112,13 +112,60 @@ static struct {
     void *(*nvn_sync)(const void *buf);   // used only by the native texture mode; Engage's subsdk0 has it too, but it is not required
 } G;
 
-// A movie is playing while a video decoder hands out pictures. The frame step (hle_nvn.c fps_step_cap) then holds 30 fps, the rate the games it steps run at on the Switch:
-// their players take one picture per game frame rather than by its time. Breath of the Wild's movies (VP9 1080p, 30 fps) went at twice their speed at 60 and left their sound
-// behind (GitHub issue #636: 3,507 pictures in about 3,300 presents); Tears of the Kingdom's, from the same SDK build, had rewriter stubs at its movie start and end for this.
-// Half a second without a picture ends it (a 30 fps movie gives one every 33 ms), as does stopping or destroying the decoder
+// The movie signal of the frame step (hle_nvn.c fps_step_cap and high_cap_tick). The players of the games it steps take one picture per game frame rather than by the picture's time,
+// so the step must follow the movie's picture rate, whatever the cap: Breath of the Wild's movies (VP9 1080p, 30 pictures a second, nn::movie) went at twice their speed at 60 and left
+// their sound behind (GitHub issue #636: 3,507 pictures in about 3,300 presents); Ocarina of Time's title and opening movies (AV1, 60 a second, nn::codec in hle_codec_video.c) went at
+// half speed at a 30 fps cap (PR #2622: 2 s of movie in 4 s). Each video decoder handing out pictures has a slot with its rate, from its pictures' times; the movie's rate is the fastest
+// of the decoders that handed out a picture in the last MD_PLAYING_NS (a 30 fps movie gives one every 33 ms). Stopping or destroying a decoder ends its part at once. A decoder whose
+// times give no rate counts as its library's unknown_hz once it has handed out MD_RATE_AFTER pictures: 30 for nn::movie (the rule before rates were read), none for nn::codec.
+// Every MD_PACE_PICS pictures a decoder's line says how much of its stream it handed out in how much time: a movie at the wrong speed shows there
 #define MD_PLAYING_NS 500000000ull
-static _Atomic uint64_t g_movie_pic_ns;   // when a video decoder last handed out a picture (0 = stopped since)
-int dm_movie_playing(void) { uint64_t t = atomic_load_explicit(&g_movie_pic_ns, memory_order_relaxed); return t && now_ns() - t < MD_PLAYING_NS; }
+#define MD_SLOTS 8
+#define MD_RATE_AFTER 3
+#define MD_PACE_PICS 600
+#define MD_RATE_PICS 8   // the rate is taken over the last 8 pictures: Ocarina of Time's times are whole milliseconds, 16 and 17 apart, 63 and 59 a picture alone
+typedef struct { const void *dec; const char *lib; uint64_t ns, base_ns; int64_t ts, base_ts, win[MD_RATE_PICS]; int hz, unknown_hz, logged_hz, nwin; uint32_t n, pace_n; } md_slot;
+static md_slot g_md_slots[MD_SLOTS];
+static pthread_mutex_t g_md_slots_mu = PTHREAD_MUTEX_INITIALIZER;
+static int md_slot_hz(const md_slot *s, uint64_t now) { return !s->dec || now - s->ns >= MD_PLAYING_NS ? 0 : s->hz ? s->hz : s->n >= MD_RATE_AFTER ? s->unknown_hz : 0; }
+void dm_movie_picture(const void *dec, const char *lib, int64_t ts_ns, int unknown_hz) {
+    uint64_t now = now_ns();
+    pthread_mutex_lock(&g_md_slots_mu);
+    md_slot *s = NULL, *spare = &g_md_slots[0];   // spare: a free slot, else one whose decoder handed out nothing for MD_PLAYING_NS, else the one idle longest
+    for (int i = 0; i < MD_SLOTS && !s; i++) {
+        md_slot *e = &g_md_slots[i];
+        if (e->dec == dec) s = e;
+        else if (spare->dec && (!e->dec || e->ns < spare->ns)) spare = e;
+    }
+    if (!s) { s = spare; *s = (md_slot){ .dec = dec, .lib = lib, .unknown_hz = unknown_hz }; }
+    int64_t dt = s->n ? ts_ns - s->ts : 0;
+    if (dt > 4000000 && dt < 200000000) {   // 250 to 5 pictures a second; a seek, a loop or a pause starts the window again and leaves the rate as it was
+        if (!s->nwin) s->win[s->nwin++] = s->ts;
+        if (s->nwin == MD_RATE_PICS) memmove(s->win, s->win + 1, sizeof s->win[0] * --s->nwin);
+        s->win[s->nwin++] = ts_ns;
+        int64_t span = ts_ns - s->win[0], gaps = s->nwin - 1; s->hz = (int)((gaps * 1000000000 + span / 2) / span);
+    } else s->nwin = 0;
+    if (!s->n || dt < 0 || dt > 1000000000) { s->base_ts = ts_ns; s->base_ns = now; s->pace_n = 0; }   // the pace line counts from here
+    else if (++s->pace_n >= MD_PACE_PICS) {
+        LOG("[movie] %s decoder %p: %.2f s of pictures in %.2f s (%d pictures a second)", lib, dec, (double)(ts_ns - s->base_ts) / 1e9, (double)(now - s->base_ns) / 1e9, s->hz);
+        s->base_ts = ts_ns; s->base_ns = now; s->pace_n = 0;
+    }
+    if (s->nwin == MD_RATE_PICS && abs(s->hz - s->logged_hz) > 1) { LOG("[movie] %s decoder %p: %d pictures a second", lib, dec, s->hz); s->logged_hz = s->hz; }
+    s->ts = ts_ns; s->ns = now; s->n++;
+    pthread_mutex_unlock(&g_md_slots_mu);
+}
+void dm_movie_stopped(const void *dec) {
+    pthread_mutex_lock(&g_md_slots_mu);
+    for (int i = 0; i < MD_SLOTS; i++) if (g_md_slots[i].dec == dec) g_md_slots[i] = (md_slot){0};
+    pthread_mutex_unlock(&g_md_slots_mu);
+}
+int dm_movie_hz(void) {
+    uint64_t now = now_ns(); int hz = 0;
+    pthread_mutex_lock(&g_md_slots_mu);
+    for (int i = 0; i < MD_SLOTS; i++) { int h = md_slot_hz(&g_md_slots[i], now); if (h > hz) hz = h; }
+    pthread_mutex_unlock(&g_md_slots_mu);
+    return hz;
+}
 static void *msym(const char *n) { void *p = guest_sym(n); if (!p) die("movie: missing SDK symbol %s", n); return p; }
 // SDK 1.3.1 exports mutable Buffer getters. Both overloads take the same this pointer.
 static void *buffer_getter(const char *const_name, const char *mutable_name) {
@@ -604,7 +651,7 @@ static void md_free(void **self) {
     // this decoder (md_defer_at), and one queued after the drop would reach the deferred thread after free(d)
     if (d->pk_on) { pthread_mutex_lock(&d->pkm); d->pk_quit = 1; pthread_cond_signal(&d->pkc); pthread_mutex_unlock(&d->pkm); pthread_join(d->pk, NULL); }
     md_defer_drop(d);
-    if (!MD_AUDIO(d)) atomic_store_explicit(&g_movie_pic_ns, 0, memory_order_relaxed);
+    if (!MD_AUDIO(d)) dm_movie_stopped(d);
     self[1] = NULL;
     LOG("[movie] decoder %p destroyed: %lu packets in, %lu frames out; decoded %llu packets, average %.2f ms per packet, longest %.2f ms", (void *)self, d->ncall[7], d->ncall[8],
         (unsigned long long)d->dec_n, d->dec_n ? d->dec_ns / 1e6 / d->dec_n : 0.0, d->dec_max / 1e6);
@@ -684,7 +731,7 @@ HLE_FORCE("_ZN5movie7Decoder4StopEv", "movie decoder stop", int, h_movie_Stop, v
     MD_TRACE(d, 3, "Stop");
     dm_host_lock(&g_dfmu); pthread_mutex_lock(&d->mu); d->started = 0; pthread_mutex_unlock(&d->mu); pthread_mutex_unlock(&g_dfmu);   // the deferred thread signals holding g_dfmu: taking it guarantees no signal afterwards
     md_defer_drop(d);
-    if (!MD_AUDIO(d)) atomic_store_explicit(&g_movie_pic_ns, 0, memory_order_relaxed);   // the movie ended: the frame step's cap need not wait out MD_PLAYING_NS
+    if (!MD_AUDIO(d)) dm_movie_stopped(d);   // the movie ended: the frame step's cap need not wait out MD_PLAYING_NS
     md_reset(d, 1); return 0;
 }
 HLE_FORCE("_ZN5movie7Decoder5ResetEv", "movie decoder reset", int, h_movie_Reset, void **self) {
@@ -785,7 +832,7 @@ HLE_FORCE("_ZN5movie7Decoder24AcquireOutputBufferIndexEPiPlPjS1_", "movie decode
         *idx = s; *pts = d->out[s].pts; *flags = d->out[s].flags; *left = d->noutq; d->out[s].cli = 1; r = 0;
     }
     pthread_mutex_unlock(&d->mu);
-    if (!r && !MD_AUDIO(d)) atomic_store_explicit(&g_movie_pic_ns, now_ns(), memory_order_relaxed);
+    if (!r && !MD_AUDIO(d)) dm_movie_picture(d, "nn::movie", *pts * 1000, 30);   // its times are in µs
     if (!r) MD_TRACE(d, 8, "AcquireOutputBufferIndex → index %d time %lld flags %#x left %d", *idx, (long long)*pts, *flags, *left);
     return r;
 }

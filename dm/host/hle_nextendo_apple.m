@@ -60,6 +60,8 @@ static NSData *read_credentials(void) {
     if (!data || !provider(data.mutableBytes, data.length, &size) || !size || size > data.length) return nil;
     data.length = size; return data;
 }
+// Nextendo's clock less this device's; hle_nextendo_login_apple.m has the strong definition, a host without it judges by its own clock
+__attribute__((weak)) double dm_nextendo_clock_offset(void) { return 0; }
 static DmNextendoCredential *decode_credential(NSData *data) {
     if (!data.length || data.length > 65536) return nil;
     id decoded = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil]; if (![decoded isKindOfClass:NSDictionary.class]) return nil; NSDictionary *json = decoded;
@@ -73,7 +75,7 @@ static DmNextendoCredential *decode_credential(NSData *data) {
     NSString *username = [[claims subarrayWithRange:NSMakeRange(1, claims.count - 2)] componentsJoinedByString:@"."]; if (!username.length || username.length > 128) return nil;
     id identity = json[@"identity"]; if (![identity isKindOfClass:NSDictionary.class] || !number(identity[@"pid"])) return nil;
     uint64_t storedPid; if (!unsigned_decimal([identity[@"pid"] stringValue], &storedPid) || storedPid != pid || ![identity[@"username"] isEqual:username]) return nil;
-    NSTimeInterval now = NSDate.date.timeIntervalSince1970;
+    NSTimeInterval now = NSDate.date.timeIntervalSince1970 + dm_nextendo_clock_offset();   // Nextendo's time: the record's are
     if (!number(json[@"created_at"]) || !number(json[@"expires_at"])) return nil;
     double created = [json[@"created_at"] doubleValue], until = [json[@"expires_at"] doubleValue];
     if (!isfinite(created) || !isfinite(until) || created <= 0 || created > now + 60 || until <= now || until <= created || until > (double)expiry) return nil;
@@ -142,7 +144,7 @@ static NSString *random_hex(size_t count) {
     NSMutableString *hex = [NSMutableString stringWithCapacity:count * 2]; for (size_t i = 0; i < count; i++) [hex appendFormat:@"%02x", bytes[i]]; return hex;
 }
 static NSData *id_token(DmNextendoCredential *c) {
-    NSTimeInterval now = NSDate.date.timeIntervalSince1970; NSData *proof = [c.token dataUsingEncoding:NSASCIIStringEncoding]; unsigned char hash[CC_SHA256_DIGEST_LENGTH]; CC_SHA256(proof.bytes, (CC_LONG)proof.length, hash);
+    NSTimeInterval now = NSDate.date.timeIntervalSince1970 + dm_nextendo_clock_offset(); NSData *proof = [c.token dataUsingEncoding:NSASCIIStringEncoding]; unsigned char hash[CC_SHA256_DIGEST_LENGTH]; CC_SHA256(proof.bytes, (CC_LONG)proof.length, hash);
     NSData *fingerprint = [NSData dataWithBytes:hash length:sizeof hash]; pthread_mutex_lock(&accountLock);
     NSString *version = explicitVersion ?: [NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleShortVersionString"];
     if (![version isKindOfClass:NSString.class] || !version.length || version.length > 64 || ![version canBeConvertedToEncoding:NSASCIIStringEncoding]) { pthread_mutex_unlock(&accountLock); return nil; }

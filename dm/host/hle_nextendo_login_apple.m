@@ -49,7 +49,7 @@ static void refresh_locked(NSTimeInterval now) {
 static bool provide_credential(uint8_t *buffer, size_t capacity, size_t *size) { @autoreleasepool {
     dm_guest_host_wait_begin();   // a refresh is network round trips, and other callers wait on the lock meanwhile: their guest cores are free
     pthread_mutex_lock(&g_cache.lock);
-    NSTimeInterval now = NSDate.date.timeIntervalSince1970;
+    NSTimeInterval now = nxl_now();
     bool stale = !g_cache.json || g_cache.expires - now < 120;
     if (stale && now >= g_cache.next_try) refresh_locked(now);
     bool usable = g_cache.json && g_cache.expires > now && g_cache.json.length <= capacity;
@@ -66,7 +66,7 @@ static bool provide_credential(uint8_t *buffer, size_t capacity, size_t *size) {
 NSString *dm_nextendo_login_access(void) { @autoreleasepool {
     dm_guest_host_wait_begin();
     pthread_mutex_lock(&g_cache.lock);
-    NSTimeInterval now = NSDate.date.timeIntervalSince1970;
+    NSTimeInterval now = nxl_now();
     if ((!g_cache.access || now - g_cache.access_at >= ACCESS_LIFE) && now >= g_cache.next_try) refresh_locked(now);
     NSString *access = g_cache.access && now - g_cache.access_at < ACCESS_LIFE + 600 ? g_cache.access : nil;
     pthread_mutex_unlock(&g_cache.lock);
@@ -95,6 +95,9 @@ void dm_nextendo_login_online_check(const char *when) { @autoreleasepool {
     pthread_mutex_lock(&told_lock); bool fresh = ![told isEqual:line]; if (fresh) told = line; pthread_mutex_unlock(&told_lock);
     if (fresh) fprintf(stderr, "[dm] %s (%s)\n", line.UTF8String, when ? when : "asked");
 } }
+
+// Nextendo's clock less this device's (nxl_note_server_date), for hle_nextendo_apple.m's credential checks and id token
+double dm_nextendo_clock_offset(void) { return atomic_load(&nxl_clock_offset); }
 
 __attribute__((constructor)) static void install_provider(void) { dm_nextendo_set_credential_provider(provide_credential); }
 #endif

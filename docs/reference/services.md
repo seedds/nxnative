@@ -1018,6 +1018,14 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Check:** `make -C dm/host/tests GAME=<id> nextendo-account`; the 401 lines go away on a device.
 - **Found on:** Super Mario Bros. Wonder 1.2.1 and Mario Kart 8 Deluxe 4.0.1 on an iPhone, 2026-11-14.
 
+### A device clock that is off fails the Nextendo sign-in
+
+- **Symptom:** in Nextendo mode on a device whose time was set by hand, `nextendo: no game credential: the game token is past its expiry` though the sign-in just worked, or a game's own online login is refused while the account may play.
+- **Cause:** the game token's expiry is Nextendo's time, and the id token a game hands to Nextendo's game servers carries times (`iat`, `nbf`, `exp`) they judge by their own clock. The host judged and stamped both by the device's clock, so a device far enough ahead found every new token expired, and one ahead or behind sent times the server's clock disagrees with.
+- **Fix:** every answer from nextendo.network to the sign-in carries an HTTP `Date` header. `nextendo_login_apple.inc` `nxl_note_server_date` keeps Nextendo's clock less the device's (0 below 2 s, since the header has whole seconds), and the record's checks (`nxl_now`, `hle_nextendo_login_apple.m`) and the id token (`hle_nextendo_apple.m`, through `dm_nextendo_clock_offset`) use the device's clock plus that offset. An offset of a minute or more is logged as `[RED] nextendo: this device's clock is N min behind / ahead of Nextendo's`, again when its whole minutes change.
+- **Check:** none without a device; a device with its clock set by hand shows the line.
+- **Found on:** a review of where the host trusts the device's own state, 2026-11-14. No device with a wrong clock has been seen.
+
 ### The Nextendo account's play time, Mii and activity
 
 - **Symptom:** in Nextendo mode, Nextendo's site shows no play time for the game, the game's Mii list has only the six default Miis though the account has a Mii, and friends see the game's name with nothing about what the player is doing.

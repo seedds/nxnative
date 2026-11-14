@@ -129,6 +129,26 @@ __attribute__((unused)) static NSData *nxl_form_body(NSDictionary<NSString *, NS
 
 // Sends one request and waits for it (the request's timeout bounds the wait). The JSON object of a 200 answer; otherwise nil, with
 // Nextendo's "error" code, the HTTP status or the transport's failure in *error
+// Nextendo's clock less this device's, from the Date header of its last answer; 0 until one arrives, and below 2 s (the header has whole
+// seconds). The game token's expiry is Nextendo's time, and the id token a game hands to Nextendo's game servers carries times they judge by
+// their clock, so the sign-in judges and stamps them by this device's clock plus the offset (nxl_now, dm_nextendo_clock_offset): a phone whose
+// time is set by hand still signs in. An offset of a minute or more is logged, again whenever its whole minutes change
+static _Atomic double nxl_clock_offset;
+__attribute__((unused)) static void nxl_note_server_date(NSHTTPURLResponse *response) {
+    NSString *header = [response valueForHTTPHeaderField:@"Date"]; if (!header.length) return;
+    NSDateFormatter *format = [NSDateFormatter new];
+    format.locale = [NSLocale localeWithLocaleIdentifier:@"en_US_POSIX"]; format.timeZone = [NSTimeZone timeZoneForSecondsFromGMT:0];
+    format.dateFormat = @"EEE, dd MMM yyyy HH:mm:ss zzz";   // RFC 9110's IMF-fixdate, the form every current server sends
+    NSDate *server = [format dateFromString:header]; if (!server) return;
+    double offset = server.timeIntervalSince1970 - NSDate.date.timeIntervalSince1970; if (fabs(offset) < 2) offset = 0;
+    double before = atomic_exchange(&nxl_clock_offset, offset);
+    long minutes = (long)(offset / 60);
+    if (minutes && minutes != (long)(before / 60))
+        fprintf(stderr, "[dm] [RED] nextendo: this device's clock is %ld min %s Nextendo's: set Date & Time to automatic; the sign-in uses Nextendo's time meanwhile\n",
+                labs(minutes), offset > 0 ? "behind" : "ahead of");
+}
+__attribute__((unused)) static NSTimeInterval nxl_now(void) { return NSDate.date.timeIntervalSince1970 + atomic_load(&nxl_clock_offset); }
+
 __attribute__((unused)) static NSDictionary *nxl_send(NSURLRequest *request, NSString **error) {
     __block NSData *body; __block NSHTTPURLResponse *response; __block NSError *transport;
     dispatch_semaphore_t finished = dispatch_semaphore_create(0);
@@ -139,6 +159,7 @@ __attribute__((unused)) static NSDictionary *nxl_send(NSURLRequest *request, NSS
     }] resume];
     dispatch_semaphore_wait(finished, DISPATCH_TIME_FOREVER);
     [session finishTasksAndInvalidate];
+    if (response) nxl_note_server_date(response);
     id parsed = body.length ? [NSJSONSerialization JSONObjectWithData:body options:0 error:nil] : nil;
     NSDictionary *json = [parsed isKindOfClass:NSDictionary.class] ? parsed : nil;
     if (response.statusCode == 200) {
@@ -267,7 +288,7 @@ __attribute__((unused)) static NSDictionary *nxl_record_for(NSString *access, NS
         else if (answer) nxl_fail(error, @"Nextendo issued no game token for this account (Nextendo asks for a verified e-mail address and a Discord link before online play)");
         return nil;
     }
-    NSDictionary *record = nxl_record(token, NSDate.date.timeIntervalSince1970, error);
+    NSDictionary *record = nxl_record(token, nxl_now(), error);
     return record && nxl_same_account(access, record, error) ? record : nil;
 }
 

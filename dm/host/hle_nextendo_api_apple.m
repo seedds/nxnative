@@ -187,7 +187,7 @@ uint32_t dm_nextendo_api_request(const char *resource, const uint8_t *body, size
     if ((presence && !body_size) || (!presence && !history && body_size)) return DM_ACCOUNT_FAIL;
     // no output buffer keeps only the status: a history write answers with the whole merged history, which the host does not read
     if ((!output) != (!capacity) || (!output && !(history && body_size)) || capacity > (history ? API_HISTORY_MAX : API_MAX)) return DM_ACCOUNT_FAIL;
-    NSString *proof = dm_nextendo_api_bearer(resource); if (!proof.length) return DM_ACCOUNT_FAIL;
+    NSString *proof = dm_nextendo_api_bearer(history && body_size ? "history-write" : resource); if (!proof.length) return DM_ACCOUNT_FAIL;
     NSString *authorization = [@"Bearer " stringByAppendingString:proof];
     NSString *resourceName = [NSString stringWithUTF8String:resource]; if (!resourceName) return DM_ACCOUNT_FAIL;
     NSString *url = [@"https://nextendo.network/api/" stringByAppendingString:resourceName];

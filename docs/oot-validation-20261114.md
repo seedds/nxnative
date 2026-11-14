@@ -1,6 +1,6 @@
 # OOT integration validation — November 14, 2026
 
-The branch integrates upstream `72047f1aa94f42f6f8d359e4934787304d85d5cc`. Its shader chain is the exact upstream `d254f45e8002`, including translator binary, lock and all 43 chain inputs. These are actual M4 Pro and Python results for the merged integration, separate from the older private performance experiments.
+The initial publication checks below validated upstream `72047f1aa94f42f6f8d359e4934787304d85d5cc` and its exact `d254f45e8002` shader chain. The subsequent conflict-resolution validation is recorded at the end of this document. These actual M4 Pro and Python results are separate from the older private performance experiments.
 
 ## Executed checks
 
@@ -43,3 +43,23 @@ Two suspected issues were not reproduced in source: snapshot acquisition calls `
 Dirty texture re-uploads switch to a new texture or an idle, unowned spare (`spare_fence <= done` and `own_object_free`); prior readers retain their old texture. This is source evidence against an in-place overwrite hypothesis, not a new multi-game rendering run. There is one `g_cur_frame` definition in the renderer, not a second accidental global.
 
 The corrective follow-up in the same Claude review found no remaining blocking code defect in that scope. Two remaining documentation descriptions (focus retention and preview mode 2) were checked against source and corrected. The additional `check_t_upload_budget` target passed with the current eight-argument upload API, and the final five-file scoped LLVM run passed without increasing the ratchet. None of this closes the gameplay and full-suite limits above.
+
+## Subsequent main conflict resolution — 18:49 UTC
+
+The branch now incorporates upstream `d33e5152710e0a31df6cb0bc0a0e1de06b6bdf8d`, including archive-library readahead, per-source incremental host builds and the updated geometry mesh path. The only textual conflict was in `dm/host/Makefile`; the upstream object-build rules were retained. Clang's generated dependency file includes our `probe_context.inc`, so editing that include still rebuilds its object without restoring the old monolithic build.
+
+The new shader-chain header and every chain input exactly match upstream: `66eab9c9a6b4`. A cache from either `d254f45e8002` or the older private chain must not be relabeled to this identity.
+
+Fresh validation on the M4 Pro private mirror passed:
+
+- Complete host build: 11.59 seconds.
+- All 18 selected Metal targets above, plus `check_t_geometry_mesh` and `check_t_pso_bundle`: 68.00 seconds, including their encoding-mode variants.
+- Complete host CPU suite: 66.23 seconds.
+- Both yield modes, selector compilation and selector self-test: passed.
+- The portable documentation/profile/chain checks: 40 tests passed.
+- On macOS, the host-MSL build tests and shader-pair/geometry Python suite: 40 cases, 35 passed and five explicitly skipped for missing optional offline-translator inputs. `DM_GAME=0400486024DEC000` selects the required profile.
+- A dry incremental build with `-W probe_context.inc` schedules `probe.c` recompilation, confirming the generated include dependency.
+
+These are integration checks, not a new game-performance result. The installed application and player saves were not replaced. The full-game, portable-package and other-game validation boundaries remain open.
+
+The first expanded Python invocation exposed harness prerequisites: the private rsync mirror has no Git metadata for the generated-doc index test, and the shader-pair import needs `DM_GAME`. Documentation checks passed in the real Git checkout; macOS-specific build and shader tests were rerun successfully with the explicit profile. No product or test assertion was weakened.

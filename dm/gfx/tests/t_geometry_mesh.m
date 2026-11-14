@@ -4,19 +4,23 @@
 // keeps it when bit 0 of vertex t's x is set. The depth of every column and every draw's counter must be the same whether the draws
 // are dispatched one by one (DM_NVN_GEO_MESH_RUN=0) or in runs, and in runs the scissor must cut only the draws after it.
 // Then again with samples-passed counting on (a counter reset before the draws, a report after them; Donkey Kong Bananza draws its depth prepass so): the draws still join runs,
-// and the report holds every sample the draws passed (the draws cover separate columns, so the count is the same in any order)
+// and the report holds every sample the draws passed (the draws cover separate columns, so the count is the same in any order).
+// Then with a fragment shader that reads a uniform buffer and discards when its x is set, bound for draw 2 alone: draws with the same fragment bindings share a run, a change
+// of them draws the waiting run first (geo_mesh_ft_change), so draw 2's columns stay clear and the others keep their depth: four runs (0-1, 2, 3, and 4-5 after the scissor)
 #define main geometry_fixture_main
 #include "t_geometry.m"
 #undef main
 enum { MR_W = 128, MR_H = 4, MR_TRIS = 64, MR_DRAWS = 6 };
 static const unsigned mr_first[MR_DRAWS] = {0, 5, 60, 37, 41, 61}, mr_count[MR_DRAWS] = {5, 32, 1, 4, 17, 3}, mr_scissored = 4;   // first triangle, triangles; draws from 4 on after the scissor
-static int mr_bit(unsigned v) { return v % 5 != 2; }   // the kernel keeps triangle t of a draw when vertex (first + t)'s bit is set
-static int run_case(NSString *directory, int pass, int counting) {
+static int mr_bit(unsigned v) { return v % 5 != 2; }
+static int mr_discard(unsigned k) { return k == 2; }   // the fragment case: draws whose fragment uniform discards   // the kernel keeps triangle t of a draw when vertex (first + t)'s bit is set
+static NvProg *mr_nolib;   // the test pair's kernel after another vertex shader, which has no mesh library
+static int run_case(NSString *directory, int pass, int counting, int frag) {
     NSError *error = nil;
     id<MTLLibrary> vl = [g_dev newLibraryWithURL:[NSURL fileURLWithPath:[directory stringByAppendingPathComponent:@"vertex.metallib"]] error:&error];
     id<MTLLibrary> ll = [g_dev newLibraryWithURL:[NSURL fileURLWithPath:[directory stringByAppendingPathComponent:@"lean.metallib"]] error:&error];
     if (!vl || !ll) { fprintf(stderr, "fixture missing: %s\n", error.description.UTF8String); return 1; }
-    static NvProg *pr; static prog_t cp;
+    static NvProg *pr, *pk; static prog_t cp, ck;
     if (!pr) {
         g_msl_dir = directory; g_shcache = [NSMutableDictionary dictionary];
         pr = [NvProg new];
@@ -36,6 +40,14 @@ static int run_case(NSString *directory, int pass, int counting) {
         pr->sh[0] = vs; pr->sh[1] = fs; pr->sh[2] = gs;
         static NSMutableArray *keep; keep = [NSMutableArray arrayWithObjects:pr, vs, fs, gs, lean, nil];
         cp.serial = 8950; serial_put(cp.serial, pr);
+        pk = [NvProg new];   // the same pair with a fragment shader that reads a uniform buffer
+        NvShader *fk = shader(vl, @"depth_keep", 1, NULL, 0); strcpy(fk->key, "7e57000000000c00_b");
+        fk->rf.nb = 1; fk->rf.b[0] = (nvn_rbind){.kind = NVN_RB_CBUF, .reg = 0, .aid = 0}; fk->ae = [fk->fn newArgumentEncoderWithBufferIndex:0]; fk->arg_len = fk->ae.encodedLength;
+        pk->sh[0] = vs; pk->sh[1] = fk; pk->sh[2] = gs; [keep addObjectsFromArray:@[pk, fk]];
+        NvShader *v2 = shader(vl, @"main0", 0, NULL, 0); strcpy(v2->key, "7e57000000000d00_b");
+        v2->rf.nb = 1; v2->rf.b[0] = vs->rf.b[0]; v2->ae = vs->ae; v2->arg_len = vs->arg_len; v2->has_pull = 1; v2->rf.nv = 1; v2->rf.v[0] = vs->rf.v[0];
+        mr_nolib = [NvProg new]; mr_nolib->sh[0] = v2; mr_nolib->sh[1] = fs; mr_nolib->sh[2] = gs; [keep addObjectsFromArray:@[mr_nolib, v2]];
+        ck.serial = 8951; serial_put(ck.serial, pk);
     }
     tex_t depth = {.magic = MAGIC('T','E','X',0), .serial = 8960 + (uint64_t)pass};
     depth.d.width = MR_W; depth.d.height = MR_H; depth.d.depth = depth.d.samples = depth.d.levels = 1; depth.d.target = NVN_TEXTURE_TARGET_2D; depth.d.format = NVN_FORMAT_DEPTH32F;
@@ -55,16 +67,18 @@ static int run_case(NSString *directory, int pass, int counting) {
     p_viewports vp = {.n = 1}; vp.v[0][2] = MR_W; vp.v[0][3] = MR_H; EMIT(OP_VIEWPORTS, vp);
     p_scissor all = {0, 0, MR_W, MR_H}; EMIT(OP_SCISSOR, all);
     p_clear_ds cl = {.depth = 1, .depth_mask = 1}; EMIT(OP_CLEAR_DS, cl);
-    p_bind_program bp = {&cp, 7}; EMIT(OP_BIND_PROGRAM, bp);
+    p_bind_program bp = {frag ? &ck : &cp, 7}; EMIT(OP_BIND_PROGRAM, bp);
     p_bind_vattr va = {.n = 1}; va_st attribute = {.fmt = NVN_FORMAT_RGBA32F}; memcpy(va.st, &attribute, 4); EMIT(OP_BIND_VATTR, va);
     p_bind_vstream stream = {.n = 1}; stream.st[0].stride = 16; EMIT(OP_BIND_VSTREAM, stream);
     p_bind_vbuf vb = {.n = 1}; vb.r[0] = (NVNbufferRange){(uint64_t)vtx, MR_TRIS * 3 * 16}; EMIT(OP_BIND_VBUF, vb);
     uint64_t *rep = (uint64_t *)(mem + 106496); rep[0] = UINT64_MAX;   // the samples-passed report (counter, time)
+    float *fu = (float *)(mem + 110592); fu[64] = 1;   // the fragment uniforms: keep (x 0), discard (x 1)
     if (counting) { uint64_t t = NVN_COUNTER_TYPE_SAMPLES_PASSED; EMIT(OP_RESET_COUNTER, t); }
     for (unsigned k = 0; k < MR_DRAWS; k++) {
         if (k == mr_scissored) { p_scissor cut = {0, 0, 120, MR_H}; EMIT(OP_SCISSOR, cut); }   // ends the run: columns 120 on keep the earlier draws, not the later ones
         p_bind_buf u = {.stage = 0, .index = 0, .addr = (uint64_t)(uni + 64 * k), .size = 16}; EMIT(OP_BIND_UBO, u);
         p_bind_buf c = {.stage = 2, .index = 0, .addr = (uint64_t)(ctr + 4 * k), .size = 16}; EMIT(OP_BIND_SSBO, c);
+        if (frag && (!k || mr_discard(k) != mr_discard(k - 1))) { p_bind_buf f = {.stage = 1, .index = 0, .addr = (uint64_t)(fu + 64 * mr_discard(k)), .size = 16}; EMIT(OP_BIND_UBO, f); }
         p_draw d = {.prim = 4, .first = (int32_t)(3 * mr_first[k]), .count = (int32_t)(3 * mr_count[k]), .instances = 1}; EMIT(OP_DRAW, d);
     }
     if (counting) { uint64_t rc[2] = {NVN_COUNTER_TYPE_SAMPLES_PASSED, (uint64_t)(uintptr_t)rep}; EMIT(OP_REPORT_COUNTER, rc); }
@@ -82,25 +96,46 @@ static int run_case(NSString *directory, int pass, int counting) {
         const float *px = b.contents; unsigned drawn = 0;
         for (unsigned g = 0; g < MR_TRIS; g++) {
             float want = 1;
-            for (unsigned k = 0; k < MR_DRAWS; k++) if (g >= mr_first[k] && g < mr_first[k] + mr_count[k] && mr_bit(3 * mr_first[k] + g - mr_first[k]) && (k < mr_scissored || 2 * g < 120)) want = 0.1f * (k + 1);
+            for (unsigned k = 0; k < MR_DRAWS; k++) if (g >= mr_first[k] && g < mr_first[k] + mr_count[k] && mr_bit(3 * mr_first[k] + g - mr_first[k]) && (k < mr_scissored || 2 * g < 120) && !(frag && mr_discard(k))) want = 0.1f * (k + 1);
             for (unsigned y = 0; y < MR_H; y++) { float got = px[y * MR_W + 2 * g];
                 if (fabsf(got - want) > 1e-5f) { fprintf(stderr, "triangle %u row %u: depth %g, expected %g\n", g, y, got, want); bad = 1; } }
         }
         for (unsigned i = 0; i < MR_W * MR_H; i++) drawn += px[i] != 1;   // each pixel is covered by one triangle at most: one sample passed for each written
         if (counting) EXPECT("samples-passed counting on: the report holds every sample the draws passed", drawn, rep[0]);
         for (unsigned k = 0; k < MR_DRAWS; k++) EXPECT("each draw's kernel ran once per triangle with its own counter", mr_count[k], ctr[4 * k]);
-        if (geo_mesh_run_on()) EXPECT(counting ? "with counting on, the scissor and the report split the draws into two runs" : "the scissor and the end split the draws into two runs", 2, g_mrun_runs - runs0);
+        if (geo_mesh_run_on() && frag) EXPECT("a change of the fragment bindings and the scissor split the draws into four runs", 4, g_mrun_runs - runs0);
+        else if (geo_mesh_run_on()) EXPECT(counting ? "with counting on, the scissor and the report split the draws into two runs" : "the scissor and the end split the draws into two runs", 2, g_mrun_runs - runs0);
         else EXPECT("no runs with DM_NVN_GEO_MESH_RUN=0", 0, g_mrun_runs - runs0);
     }
     res_remove(b); mtl_tex_release(&depth); mtl_pool_del(mem); mtl_drain(); free(mem);
     return bad ? -1 : ready;
 }
 int main(int argc, char **argv) { @autoreleasepool {
-    if (argc != 2) return 2; mtl_init();
+    if (argc != 2) return 2;
+    char record[256]; snprintf(record, sizeof record, "%s/t_geometry_mesh_record_%d.tsv", NSTemporaryDirectory().UTF8String, (int)getpid()); unlink(record);
+    setenv("DM_PSO_RECORD", record, 1); setenv("DM_PSO_USER", "/dev/null", 1);   // the pipeline record (pso_record) is opened at its first line
+    mtl_init();
     int r = 0;
-    for (int pass = 0; pass < 40 && !(r = run_case(@(argv[1]), pass, 0)); pass++) usleep(100000);   // until the mesh pipelines (single and run) are built
+    for (int pass = 0; pass < 40 && !(r = run_case(@(argv[1]), pass, 0, 0)); pass++) usleep(100000);   // until the mesh pipelines (single and run) are built
     if (r < 0 || failed) return 1;
     if (!r) { fprintf(stderr, "the mesh pipelines were never ready\n"); return 1; }
-    if ((r = run_case(@(argv[1]), 40, 1)) <= 0 || failed) { if (!r) fprintf(stderr, "with counting on, the draws did not join runs\n"); return 1; }
+    if ((r = run_case(@(argv[1]), 40, 1, 0)) <= 0 || failed) { if (!r) fprintf(stderr, "with counting on, the draws did not join runs\n"); return 1; }
+    r = 0; for (int pass = 41; pass < 81 && !(r = run_case(@(argv[1]), pass, 0, 1)); pass++) usleep(100000);   // the fragment case's pipelines
+    if (r <= 0 || failed) { if (!r) fprintf(stderr, "the fragment case's mesh pipelines were never ready\n"); return 1; }
+    {   // the log's compute-path line (mtl_geocomp_stats): the first passes drew while the mesh pipelines were built, the test pair's vertex and geometry keys among the most
+        char gc[768]; uint64_t n = mtl_geocomp_stats(gc, sizeof gc); printf("geometry compute path: %s\n", gc);
+        EXPECT("the compute path's draws are counted", 1, n > 0);
+        EXPECT("with the reason they took it", 1, strstr(gc, "mesh pipeline being built") != NULL);
+        EXPECT("and the pair", 1, strstr(gc, "7e57000000000a00_b+7e57000000000b00_b") != NULL);
+        EXPECT("a second call has nothing new", 0, mtl_geocomp_stats(gc, sizeof gc)); }
+    {   // a lean pair with no mesh library: the compute path draws it, and the pipeline record names it once as a G row (geo_mesh_fn), for dmsh_build.py's mesh_pairs
+        p_draw d = {.prim = 4, .first = 0, .count = 3, .instances = 1};
+        EXPECT("a lean pair with no mesh library takes the compute path", 1, geo_mesh_fn(mr_nolib, &d, NULL) == nil && g_geo_why == GCP_NOLIB);
+        EXPECT("for every draw", 1, geo_mesh_fn(mr_nolib, &d, NULL) == nil);
+        NSString *t = [NSString stringWithContentsOfFile:@(record) encoding:NSUTF8StringEncoding error:nil] ?: @"";
+        EXPECT("the pipeline record holds its G row once", 1, (int)[t componentsSeparatedByString:@"G\t7e57000000000d00\t7e57000000000b00\n"].count - 1);
+        EXPECT("and none for the pair with a mesh library", 0, (int)[t rangeOfString:@"G\t7e57000000000a00"].length);
+        unlink(record); }
+    if (failed) return 1;
     printf("geometry mesh %s: %d checks passed\n", geo_mesh_run_on() ? "runs" : "single draws", checks); return 0;
 }}

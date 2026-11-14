@@ -313,6 +313,15 @@ class IoStore(unittest.TestCase):
         self.assertEqual(uepak.unreal_paks(str(self.romfs), inline=False), [])
         self.assertEqual(uepak.unreal_paks(str(self.romfs), inline=True), [inline])
 
+    def lslg(self, tag=b'SC', code=b'\x11' * 0x40):   # UE 4.27's SF_GLSL_SAGE record (Persona 3 Reload): LSLG, a header, then the code and an NVN2 control section
+        ctl = uepak.CTL_NVN2 + bytes(0x3c) + struct.pack('<I', len(code)) + bytes(0x98)
+        return b'LSLG' + tag + bytes(0x40) + struct.pack('<I', len(code)) + code + struct.pack('<I', len(ctl)) + ctl + bytes(24), ctl, code
+
+    def test_an_lslg_record_with_an_nvn2_control_section(self):
+        rec, ctl, code = self.lslg()
+        self.assertEqual(uepak.lslg(rec), ('SC', ctl, code))
+        self.assertIsNone(uepak.lslg(rec.replace(struct.pack('<I', len(code)) + code, struct.pack('<I', len(code) + 4) + code, 1)))
+
     KEY = bytes(range(40, 72))
 
     def sparking_zero(self):

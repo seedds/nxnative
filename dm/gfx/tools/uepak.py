@@ -631,11 +631,12 @@ def finish(work, out):
 
 def lslg(s):
     """A decoded Switch shader (LSLG): 'LSLG', a stage tag (SV vertex, SP pixel, SC compute, ...), a header with the shader's source name, then u32 code length, the code area,
-    u32 control length and the control section (0x880 bytes), and a short tail (24 or 29 bytes). → (tag, control section, code area), or None if the layout differs"""
+    u32 control length and the control section (0x880 bytes; an NVN2 one on a Switch 2), and a short tail (24 or 29 bytes). → (tag, control section, code area), or None if the layout differs"""
     if s[:4] != b'LSLG': return None
     k = s.find(b'\x34\x12\x76\x98')
-    if k < 8 or k + 0x708 > len(s): return None
-    nctl, ncode = struct.unpack_from('<I', s, k - 4)[0], struct.unpack_from('<I', s, k + 0x704)[0]
+    at = 0x44 if s[k:k + 8] == CTL_NVN2 else 0x704   # an NVN2 control section (Persona 3 Reload, UE 4.27's SF_GLSL_SAGE): the code length at +0x44, as sage_record reads it
+    if k < 8 or k + at + 4 > len(s): return None
+    nctl, ncode = struct.unpack_from('<I', s, k - 4)[0], struct.unpack_from('<I', s, k + at)[0]
     c = k - 4 - ncode
     if c < 4 or struct.unpack_from('<I', s, c - 4)[0] != ncode or k + nctl > len(s): return None
     return s[4:6].decode('latin1'), s[k:k + nctl], s[c:c + ncode]

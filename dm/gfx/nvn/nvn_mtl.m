@@ -173,8 +173,8 @@ static int allocprof_level(void) { if (g_allocprof < 0) { const char *e = getenv
 // Diagnostic only: inclusive wall/CPU time on the replay thread. No GPU waits
 // are added, and no clocks are read when DM_NVN_CPUPROF is absent or zero.
 typedef struct { uint64_t wall, cpu; } cp_stamp;
-static _Thread_local uint64_t g_cp_wall[8], g_cp_cpu[8], g_cp_calls[8], g_cp_last;
-static _Thread_local uint64_t g_cp_geo_waited, g_cp_geo_safe;
+// Shared, not thread-local: the replay (or encode) thread records, the present path reports (mtl_stats); thread-local counters left every report empty
+static _Atomic uint64_t g_cp_wall[8], g_cp_cpu[8], g_cp_calls[8], g_cp_geo_waited, g_cp_geo_safe; static uint64_t g_cp_last;
 static int cp_on(void) { static _Thread_local int on = -1; if (on < 0) { const char *e = getenv("DM_NVN_CPUPROF"); on = e && atoi(e); } return on; }
 static cp_stamp cp_begin(void) {
     if (!cp_on()) return (cp_stamp){0};
@@ -182,9 +182,9 @@ static cp_stamp cp_begin(void) {
 }
 static void cp_end(int phase, cp_stamp start) {
     if (!start.wall) return;
-    g_cp_cpu[phase] += clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID) - start.cpu;
-    g_cp_wall[phase] += clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW) - start.wall;
-    g_cp_calls[phase]++;
+    atomic_fetch_add_explicit(&g_cp_cpu[phase], clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID) - start.cpu, memory_order_relaxed);
+    atomic_fetch_add_explicit(&g_cp_wall[phase], clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW) - start.wall, memory_order_relaxed);
+    atomic_fetch_add_explicit(&g_cp_calls[phase], 1, memory_order_relaxed);
 }
 static void cp_report(void) {
     if (!cp_on()) return;
@@ -193,12 +193,11 @@ static void cp_report(void) {
     if (now - g_cp_last < 5000000000ull) return;
     static const char *names[] = {"pass_end", "pass_begin", "pipeline", "arguments", "texture", "draw", "geometry", "index"};
     char line[1000] = {0}; size_t at = 0;
-    for (int i = 0; i < 8; i++) if (g_cp_calls[i])
-        at += snprintf(line + at, sizeof line - at, " %s %llu calls %.2f/%.2f ms CPU/wall;", names[i], (unsigned long long)g_cp_calls[i], g_cp_cpu[i] / 1e6, g_cp_wall[i] / 1e6);
+    for (int i = 0; i < 8; i++) { uint64_t n = atomic_exchange(&g_cp_calls[i], 0), c = atomic_exchange(&g_cp_cpu[i], 0), w = atomic_exchange(&g_cp_wall[i], 0); if (n)
+        at += snprintf(line + at, sizeof line - at, " %s %llu calls %.2f/%.2f ms CPU/wall;", names[i], (unsigned long long)n, c / 1e6, w / 1e6); }
     MLOG("[cpuprof] inclusive phases over %.2f s (nested phases overlap):%s", (now - g_cp_last) / 1e9, line);
-    if (g_cp_geo_waited || g_cp_geo_safe) MLOG("[cpuprof] geometry CPU reads: waited %llu / proven safe %llu", (unsigned long long)g_cp_geo_waited, (unsigned long long)g_cp_geo_safe);
-    memset(g_cp_wall, 0, sizeof g_cp_wall); memset(g_cp_cpu, 0, sizeof g_cp_cpu); memset(g_cp_calls, 0, sizeof g_cp_calls); g_cp_last = now;
-    g_cp_geo_waited = g_cp_geo_safe = 0;
+    { uint64_t gw = atomic_exchange(&g_cp_geo_waited, 0), gs = atomic_exchange(&g_cp_geo_safe, 0); if (gw || gs) MLOG("[cpuprof] geometry CPU reads: waited %llu / proven safe %llu", (unsigned long long)gw, (unsigned long long)gs); }
+    g_cp_last = now;
 }
 #define AP_B uint64_t _ap0 = g_allocprof > 0 ? g_dev.currentAllocatedSize : 0; cp_stamp _cp0 = cp_begin()
 #define AP_E(i) do { if (g_allocprof > 0) { uint64_t _n = g_dev.currentAllocatedSize; if (_n > _ap0) g_ap_fn[i] += _n - _ap0; } cp_end(i, _cp0); } while (0)   // Per-frame arenas created so far (4 MiB each; for the memory report)

@@ -19,6 +19,7 @@ import game
 import gen_resources
 import nacp
 import profile_guess
+import romfs_image
 import xcode_projects
 
 
@@ -48,6 +49,7 @@ class XcodePipelineTests(unittest.TestCase):
             extraction = root / 'extracted' / version
             (extraction / 'RomFS').mkdir(parents=True)
             (extraction / 'ExeFS').mkdir()
+            romfs_image.pack(extraction / 'RomFS', extraction / 'RomFS.img')
             def fake_run(cmd, log, **kwargs):
                 log.parent.mkdir(parents=True, exist_ok=True)
                 log.write_text('')  # a successful command with no diagnostic output
@@ -83,7 +85,7 @@ class XcodePipelineTests(unittest.TestCase):
                                       '--language', 'ja', '--no-show-fps', '--no-motion', '--progress', 'json'])
             finally:
                 progress.close()
-            self.assertEqual(code, 0)
+            self.assertEqual(code, 0, output.getvalue())
             events = [json.loads(line) for line in output.getvalue().splitlines()]
             self.assertTrue(any(event.get('name') == 'prepare Xcode' for event in events))
             self.assertFalse(any(event.get('name') == 'app build' for event in events))

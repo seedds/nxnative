@@ -14,6 +14,7 @@
 #include <unistd.h>
 #include <strings.h>
 #include <pthread.h>
+#include <string.h>
 #include <time.h>
 #include <math.h>
 #include "motion_fusion.h"
@@ -1672,11 +1673,28 @@ HLE_FORCE("_ZN2nn3hid28ShowControllerFirmwareUpdateERKNS0_27ControllerFirmwareUp
 // Touch screen: TouchScreenState<N> = { int64 sampling number; int32 count; int32 reserved; TouchState[N] }, filled from the front end's touch points (hle_touch.c touch_fill_n:
 // the Mac's mouse, the iPhone touches no gamepad control takes, DM_KEYS taps) in handheld mode, as on the Switch, whose screen is out of reach when docked: a game may read touches
 // without checking the mode, so in console mode the state has no touch points. Super Mario Galaxy's pointer is the touch screen in handheld mode. hle_touch.c numbers
-// the states of both modes from its one count
+// the states of both modes from its one count.
+// An SDK read copies one shared HID sample and does not consume its Start / End edges. A game may read the touch screen twice in one original frame (Animal Crossing: New
+// Horizons: its input manager at main+0x1b65260 and its own keyboard's reader): sampling at each read let the first reader take the Start or End and the second see only a held
+// point, so the keyboard highlighted a key and entered nothing (issue #2567). One complete 16-finger sample is published per original frame and copied whole into each caller's
+// capacity; before the first present the grid is the host's 120 Hz one.
 int touch_fill_n(void *out, int max, uint64_t now_ns, int points);
+static pthread_mutex_t g_touch_sample_mu = PTHREAD_MUTEX_INITIALIZER;
+static uint8_t g_touch_sample[0x290];   // TouchScreenState<16>: 0x10 + 0x28 * 16
+static uint64_t g_touch_sample_frame, g_touch_sample_boot;
+static int g_touch_sample_valid;
 static void touch_read(void *s, int n) {
     keys_sync();   // DM_KEYS frame steps due in this frame (their touches), before the read
-    touch_fill_n(s, n, now_ns(), dm_opmode() == 0);
+    if (dm_opmode() != 0) { touch_fill_n(s, n, now_ns(), 0); return; }   // console mode: no touch points, as before
+    pthread_mutex_lock(&g_touch_sample_mu);
+    uint64_t frame = dm_guest_frame(), now = now_ns(), boot = frame ? 0 : now / 8333333;   // 120 Hz before the first present
+    if (!g_touch_sample_valid || frame != g_touch_sample_frame || boot != g_touch_sample_boot) {
+        touch_fill_n(g_touch_sample, 16, now, 1);
+        g_touch_sample_frame = frame; g_touch_sample_boot = boot; g_touch_sample_valid = 1;
+    }
+    memcpy(s, g_touch_sample, 0x10 + 0x28 * (size_t)n);
+    if (((int32_t *)s)[2] > n) ((int32_t *)s)[2] = n;   // more fingers than this reader asked for: the rest stay unseen here
+    pthread_mutex_unlock(&g_touch_sample_mu);
 }
 HLE_FORCE("_ZN2nn3hid21InitializeTouchScreenEv", "connect to the hid touch screen; the host takes touch points from the front end", void, h_hid_InitTouch, void) {}
 // SDK 18 overload with two ints (Super Mario Galaxy); the SDK's own one opens the hid service and aborts in sm::Initialize

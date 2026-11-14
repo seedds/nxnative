@@ -22,8 +22,12 @@ void *objmap_get(const void *k) {
 }
 void objmap_put(const void *k, void *v) {
     pthread_mutex_lock(&g_om_lock);
-    for (unsigned i = om_h(k);; i = (i + 1) & (OM_SIZE - 1))
-        if (g_om[i].k == k || !g_om[i].k || g_om[i].k == (void *)1) { g_om[i].k = k; g_om[i].v = v; break; }
+    int tomb = -1;   // a deleted slot before the key's own entry must not take the key: the key would then sit twice in its chain (t_objmap)
+    for (unsigned i = om_h(k);; i = (i + 1) & (OM_SIZE - 1)) {
+        if (g_om[i].k == k) { g_om[i].v = v; break; }
+        if (g_om[i].k == (void *)1) { if (tomb < 0) tomb = (int)i; continue; }
+        if (!g_om[i].k) { unsigned j = tomb >= 0 ? (unsigned)tomb : i; g_om[j].k = k; g_om[j].v = v; break; }
+    }
     pthread_mutex_unlock(&g_om_lock);
 }
 void *objmap_del(const void *k) {

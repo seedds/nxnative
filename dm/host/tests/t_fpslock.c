@@ -74,9 +74,9 @@ static void check(int which) {
         *(uintptr_t *)(base + 0x7b32690 + 0x10) = (uintptr_t)(object + 16);
         f = (float *)object; f[0] = f[1] = 30;
         sync = (int32_t *)(object + 16); sync[0] = sync[1] = 2;
-    } else if (which == 14) {
-        strcpy(g_mod[0].build_id, "a48c0de3bc353efa0e4d359bde05ef24");
-        *(uintptr_t *)(base + 0xda20e38) = (uintptr_t)object;
+    } else if (which == 14 || which == 30) {   // EA SPORTS FC 27's frame regulator: 1.8d.310c (14) and 1.8c.cab1 (30), its global 0x7000 lower
+        strcpy(g_mod[0].build_id, which == 14 ? "a48c0de3bc353efa0e4d359bde05ef24" : "fb81983aa1cc3a2e97402497e2ca6528");
+        *(uintptr_t *)(base + (which == 14 ? 0xda20e38 : 0xda19e38)) = (uintptr_t)object;
         double *d = (double *)(object + 8); d[0] = d[1] = 30;
     } else if (which == 15 || which == 16) {
         strcpy(g_mod[0].build_id, "0123456789abcdef0123456789abcdef");
@@ -185,7 +185,7 @@ static void check(int which) {
         sync[0] = sync[1] = 2; dm_fps_lock_tick();
         assert(sync[0] == 1 && sync[1] == 1 && writes == 4);
     } else if (which == 10) assert(sync[0] == 2 && sync[1] == 2 && writes == 2);
-    else if (which == 14) { double *d = (double *)(object + 8); assert(d[0] == 60 && d[1] == 60 && writes == 2); }
+    else if (which == 14 || which == 30) { double *d = (double *)(object + 8); assert(d[0] == 60 && d[1] == 60 && writes == 2); }
     else if (which == 15) {
         assert(*(float *)(object + 0x34) == 60 && *(int32_t *)(object + 0x38) == 60 && writes == 2);
         dm_fps_lock_tick(); assert(writes == 2);
@@ -209,7 +209,7 @@ static void check(int which) {
 
 int main(void) {
     // Each process starts the production one-time initialization with a fresh build and target.
-    for (int i = 0; i < 30; i++) {
+    for (int i = 0; i < 31; i++) {
         pid_t p = fork(); assert(p >= 0);
         if (!p) { check(i); _exit(0); }
         int status; assert(waitpid(p, &status, 0) == p); assert(WIFEXITED(status) && WEXITSTATUS(status) == 0);

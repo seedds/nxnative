@@ -51,6 +51,10 @@ static const lock_t k_locks[] = {
     // this row the game keeps 30 fps at the right speed (the simulation at 60 and the regulator at 30: match clock as at 30). The game asks for present interval 2
     // (BaseDisplaySettings.PresentInterval), which the profile's present_interval display ignores
     { "a48c0de3bc353efa0e4d359bde05ef24", "FIFA frame regulator", 0xda20e38, 0x8, FPS_F64, 2, 0 },
+    // EA SPORTS FC 27 1.8c.cab1 (the update before it): the same regulator, its global at main+0xda19e38, 0x7000 below 1.8d's. This address came from a running main, as the two mains cannot be paired
+    // here (nso_fnmap.py wants both, only one is on this machine): of 1.54 M pointers in main's data and bss, one points to an object holding the same frame rate twice at +0x8 and +0x10 (30.0, 30.0,
+    // with 1 at +0x18), the shape of the row above, and writing the target into both took its menus from 33.4 to 16.7 ms. Nothing else in main looked like a frame limit, so this build has one row
+    { "fb81983aa1cc3a2e97402497e2ca6528", "FIFA frame regulator", 0xda19e38, 0x8, FPS_F64, 2, 0 },
 };
 #define NLOCKS ((int)(sizeof k_locks / sizeof k_locks[0]))
 

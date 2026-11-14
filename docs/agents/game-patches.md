@@ -80,7 +80,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 | [Taiko Risshiden V DX](#taiko-risshiden-v-dx) | 1 | 0 | 0 | 2 | 0 | `game` |
 | [The Legend of Zelda: Breath of the Wild](#the-legend-of-zelda-breath-of-the-wild) | 7 | 0 | 43 | 0 | 0 | `build` → `game` ×2 |
 | [The Legend of Zelda: Link's Awakening](#the-legend-of-zelda-links-awakening) | 1 | 0 | 0 | 0 | 0 | `build` → `game` |
-| [The Legend of Zelda: Ocarina of Time](#the-legend-of-zelda-ocarina-of-time) | 0 | 0 | 2 | 0 | 0 | `game` ×2 |
+| [The Legend of Zelda: Ocarina of Time](#the-legend-of-zelda-ocarina-of-time) | 0 | 0 | 17 | 0 | 0 | `game` ×3 |
 | [The Legend of Zelda: Tears of the Kingdom](#the-legend-of-zelda-tears-of-the-kingdom) | 0 | 0 | 9 | 0 | 0 | `game` |
 | [Xenoblade Chronicles 3](#xenoblade-chronicles-3) | 6 | 0 | 0 | 0 | 0 | `build` → `game` |
 
@@ -580,8 +580,9 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 
 - **`game`**, frame rate, at goal, checked: v131072 main: one function with this fingerprint, the site and its free registers read by disassembly (2026-11-08): frame ratio from the host's step. The game's own frame-ratio division, found by its function's fingerprint on any build that keeps the function
 - **`game`**, rendering, at goal, checked: v131072 main: one function with each fingerprint (the level function a leaf, x2..x11 / x16 / x17 / s0..s2 free), its callers, the update and the controller fields read by disassembly, the fields read in play (2026-11-08); the climb run natively against a model of the update and in play to full size (2026-11-09): dynamic resolution: full size, or a climb on the load measured at each level. The game's own dynamic-resolution level function and update, found by their functions' fingerprints on any build that keeps both; switchable (DM_DYNAMIC_RESOLUTION)
+- **`game`**, rendering, at goal, checked: v131072 main: one function per fingerprint, free registers read at each site (2026-11-13); verified in play at 16:9, 16:10, and 4:3 with Vert+ framing and unstretched HUD widgets (heart1 68x33 across all three): screen shape: render heights, base resolution, and Layout2 ortho projections scaled from 16:9 (DM_SCREEN_ASPECT). All fifteen display, scene-default, base-resolution, perspective projection, and Layout2 sites matched by their functions' fingerprints on any build that keeps them; inactive when oh is 0 (16:9)
 
-- **function-matched frame step** (`main` of builds without FRAME_STEP): frame ratio from the host's step: a function of 0x9b4 bytes, `+0xe4` in it; dynamic resolution, a function of 0x294 bytes, `+0x0` in it; dynamic resolution update, a function of 0xb24 bytes,  in it; launcher capabilities: DYNAMIC_RESOLUTION
+- **function-matched frame step** (`main` of builds without FRAME_STEP): frame ratio from the host's step: a function of 0x9b4 bytes, `+0xe4` in it; dynamic resolution, a function of 0x294 bytes, `+0x0` in it; dynamic resolution update, a function of 0xb24 bytes,  in it; graphics init, a function of 0x570 bytes, `+0x204`, `+0x3c0` in it; scene app init, a function of 0x273c bytes, `+0x168`, `+0x174` in it; base scene defaults, a function of 0x3cc bytes, `+0x38c`, `+0x39c` in it; display mgr defaults, a function of 0x4e0 bytes, `+0xc` in it; base res read, a function of 0x1a0 bytes, `+0x114` in it; display target a, a function of 0x58 bytes, `+0x44` in it; display target b, a function of 0x1a8 bytes, `+0x110` in it; display target c, a function of 0x188 bytes, `+0x130` in it; layout ortho, a function of 0x7b0 bytes, `+0x208` in it; layout view ortho, a function of 0x62c bytes, `+0x398` in it; perspective proj, a function of 0xb8 bytes, `+0x0` in it; layout calc matrix, a function of 0x208 bytes, `+0x19c` in it; launcher capabilities: DYNAMIC_RESOLUTION
 
 ### The Legend of Zelda: Tears of the Kingdom
 

@@ -46,3 +46,5 @@ draw_barriers	game
 # As Tears of the Kingdom: the terrain's height, blend and hole maps are written by the CPU into textures after they are created. Without these keys they stay zero: holes in the ground and the wrong materials
 tex_flush_upload	on
 tex_dirty_upload	on
+# Screen shape (patches.py): DM_SCREEN_ASPECT renders a screen taller than 16:9 in its own shape (16:10 on a MacBook, ~4:3 on an iPad) with the HUD at the screen's edges and 16:9's sides in view (more above and below)
+screen_aspect	on

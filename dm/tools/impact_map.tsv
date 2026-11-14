@@ -151,4 +151,5 @@ dm/host/pad_switch2_apple.h	hle:*hid*	Switch 2 controllers over Bluetooth LE (of
 dm/host/pad_switch2_apple.m	hle:*hid*	Switch 2 controllers over Bluetooth LE (off unless DM_SW2=1)
 dm/host/front.h	present:*	the front end
 dm/ios/*	*:*	the iOS app
+dm/third_party/ryujinx/src/Ryujinx.Graphics.Shader/Translation/ResourceReservations.cs	shader:stage:gs	geometry compute varying slots
 dm/third_party/ryujinx/src/Ryujinx.Graphics.Shader/Translation/Transforms/GeometryToCompute.cs	shader:stage:gs	geometry compute input and output lowering

@@ -139,7 +139,6 @@ static void callback_handoff(void) {
 }
 int main(void) {
     svc_thread_main_init(); synced_sample();
-    Result (*get_time)(int64_t *) = hook("_ZN2nn4time26StandardNetworkSystemClock14GetCurrentTimeEPNS0_9PosixTimeE");
     unsigned (*accurate)(void) = hook("_ZN2nn4time26StandardNetworkSystemClock20IsAccuracySufficientEv");
     void (*ctor)(void *) = hook(CLOCK_SYMBOL("C1Ev"));
     void (*dtor)(void *) = hook(CLOCK_SYMBOL("D1Ev"));
@@ -147,14 +146,13 @@ int main(void) {
     Result (*start)(void *) = hook(CLOCK_SYMBOL("9StartTaskEv"));
     void *(*event)(void *) = hook(CLOCK_SYMBOL("14GetFinishEventEv"));
     Result (*result)(void *) = hook(CLOCK_SYMBOL("9GetResultEv"));
-    if (!get_time || !accurate || !ctor || !dtor || !init || !start || !event || !result) return 1;
-    uint64_t output[3] = {0x1234, 0x55, 0x5678}; unsigned before;
+    if (!accurate || !ctor || !dtor || !init || !start || !event || !result) return 1;
+    unsigned before;
+    // GetCurrentTime is hle_time.c's (the host clock, t_time); here only whether the kernel says the clock is synchronized
     errno = EDOM;
-    CHECK(get_time((int64_t *)&output[1]) == 0 && output[1] == 1700000000 && output[0] == 0x1234 && output[2] == 0x5678, "synchronized kernel time writes only the PosixTime");
-    CHECK(errno == EDOM && accurate(), "kernel query preserves errno and agrees with accuracy");
-    before = reads; CHECK(get_time(NULL) != 0 && reads == before, "null output fails without querying");
+    CHECK(accurate() && errno == EDOM, "a synchronized kernel clock is accurate, and the query preserves errno");
     setenv("DM_FIXED_TIME", "1", 1); setenv("DM_NETWORK", "offline", 1);
-    CHECK(get_time((int64_t *)&output[1]) == 0 && output[1] == 1700000000, "network time does not use fixed/user time or launcher protocol selection");
+    CHECK(accurate(), "accuracy does not use fixed/user time or launcher protocol selection");
     for (int test = 0; test < 9; test++) {
         synced_sample();
         switch (test) {
@@ -168,8 +166,8 @@ int main(void) {
             case 7: sample.time.tv_sec = 0; break;
             default: sample.time.tv_nsec = 1000000000; break;
         }
-        output[1] = 0x55; errno = EDOM;
-        CHECK(get_time((int64_t *)&output[1]) != 0 && output[1] == 0x55 && !accurate(), "bad kernel status/precision/structure fails closed with untouched output");
+        errno = EDOM;
+        CHECK(!accurate(), "bad kernel status/precision/structure fails closed");
         CHECK(errno == EDOM, "failed query preserves errno");
     }
     synced_sample(); sample.time.tv_nsec = -1;

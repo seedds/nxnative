@@ -1,6 +1,9 @@
-// The kernel's NTP discipline is a read-only source for the network clock. A
-// user/fixed clock is not evidence of synchronization. No daemon, system clock
-// setting, entitlement or trust configuration is changed here.
+// The kernel's NTP discipline is a read-only source for whether the network
+// clock is synchronized (IsAccuracySufficient, the availability task). A
+// user/fixed clock is not evidence of synchronization. The clock's time itself
+// is the host's (hle_time.c GetCurrentTime and now(), main's PR #2359): a Switch
+// keeps its network clock from its last sync and reads it unsynchronized too.
+// No daemon, system clock setting, entitlement or trust configuration is changed here.
 #include "hle.h"
 #include <errno.h>
 #include <pthread.h>
@@ -27,10 +30,7 @@ static Result network_clock_read(int64_t *out) {
     *out = (int64_t)value.time.tv_sec;
     return RES_OK;
 }
-HLE_FORCE("_ZN2nn4time26StandardNetworkSystemClock14GetCurrentTimeEPNS0_9PosixTimeE", "network clock from the synchronized kernel NTP discipline with checked precision", Result, h_time_NetNow, int64_t *out) {
-    return network_clock_read(out);
-}
-HLE_FORCE("_ZN2nn4time26StandardNetworkSystemClock20IsAccuracySufficientEv", "accuracy follows the same kernel NTP state and error bounds as the network time getter", unsigned, h_time_NetAccurate, void) {
+HLE_FORCE("_ZN2nn4time26StandardNetworkSystemClock20IsAccuracySufficientEv", "accuracy follows the kernel NTP state and its error bounds", unsigned, h_time_NetAccurate, void) {
     int64_t value;
     return network_clock_read(&value) == RES_OK;
 }

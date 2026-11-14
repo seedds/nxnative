@@ -912,7 +912,7 @@ def survey(nsp_dir, app, fam, keys, repo, py, env):
                      + (' (look inside archives for the registered modules)' if nrr and not nro else '') + ' and embedded in the iOS app (gen_embed.py)')
     if fam['dlc']: notes.append('DLC present: it is extracted into the IPA and the host reports the indices as owned and mounts them; check that the host hooks every aoc / fs add-on content call main imports')
     R += ['', '## What it means for a port', ''] + [f'- {n}' for n in notes or ['—']]
-    R += ['', '## Provisional profile keys (dm/games/profile_guess.py)', '', 'What the game files decide; mem_used follows the rewrite, and a game with virtual address memory that sets a heap gets a heap check on the Mac (scripts/build_ipa_from_nsp.py heap_check).', '', '```']
+    R += ['', '## Provisional profile keys (dm/games/profile_guess.py)', '', 'What the game files decide; a game with virtual address memory that sets a heap gets a heap check on the Mac (scripts/build_ipa_from_nsp.py heap_check).', '', '```']
     R += [f'{k}\t{v}' + (f'\t# {why}' if why else '') for k, (v, why) in G.items()] + ['```']
     R += ['', 'Next steps: docs/agents (02 survey, 03 bring-up, symptoms.md for each failure).']
     (work / 'survey.md').write_text('\n'.join(R) + '\n')
@@ -1042,7 +1042,7 @@ def derive_profile(g, pdir, ver, d, mods, app=None, shader_only=False):
     main.npdm's program ID when app is not the profile's title. The shader tables, the chain header and the run-time capture list are
     left out: the build makes them again from this version's own files, as for a provisional profile. The hand-written tables (the prewarm list, shader_facts_manual.tsv) are copied:
     they name shaders by content key. A folder derived from the same inputs (the files copied and the game.tsv written, kept in <pdir>.derived.key) is kept as it is, with what later
-    stages wrote into it (mem_used, the heap check, the split's tables), so their own reuse holds. shader_only preserves all registered game.tsv rows and links its existing cuts:
+    stages wrote into it (the heap check, the region check, the split's tables), so their own reuse holds. shader_only preserves all registered game.tsv rows and links its existing cuts:
     only the shader tables change with installed DLC or newly decoded compute kernels. The modules are the profile's that this version ships and those main imports from that the list leaves out. A profile with frame step stubs (FRAME_STEP) and no function-matched ones (MATCH_FRAME_STEP) for other builds only gets fps_target 0 for this version:
     its main has no state page, so a cap of 30 or 60 would present every vsync while the game steps 1/30 s per frame (double speed). Returns the version's display version"""
     if pdir.resolve() == g.dir.resolve():   # the delete below would take the files the copy reads; main never takes this script's own profiles as registered ones (own_profile_folders)
@@ -1901,7 +1901,7 @@ def capture_shaders(repo, d, patched, work, env, logs, g, api):
     return out
 
 
-# ---- A provisional profile after the rewrite: mem_used and the heap check ----
+# ---- A provisional profile after the rewrite: the heap check ----
 def atomic_text(path, text):
     f = tempfile.NamedTemporaryFile(mode='w', encoding='utf-8', dir=path.parent, prefix=f'.{path.name}.', delete=False)
     try:
@@ -1981,23 +1981,6 @@ def chain_tables(py, repo, sh, env, logs, g, chain):
     return True
 
 
-def refine_after_rewrite(g, ex_dir, patched, reg=None):
-    """Refresh computed mem_used for the current modules; explicit profile values always win."""
-    for profile in (reg, g) if reg else (g,):
-        section, reason = '', ''
-        for line in (profile.dir / 'game.tsv').read_text(encoding='utf-8').splitlines():
-            if line.startswith('# ----'): section = line
-            if line.split('\t', 1)[0].strip() == 'mem_used':
-                computed = section == '# ---- After the rewrite ----' and reason.startswith(('# used memory for the rewritten modules', '# used memory for the current rewritten modules', '# the rewritten modules are larger than the default 64 MB'))
-                if not computed: return g
-            reason = line
-    if pg.npdm(ex_dir / 'ExeFS/main.npdm')[0]: return g
-    used = pg.mem_used(patched, g.modules_in(patched)) or 0x4000000
-    if int(g.get('mem_used', '0x4000000'), 0) == used: return g
-    say(f'mem_used {used:#x}: from the current rewritten modules (64 MB when the default covers them)')
-    return set_keys(g, {'mem_used': (f'{used:#x}', 'used memory for the current rewritten modules, at least the default 64 MB')}, 'After the rewrite')
-
-
 def heap_checked(g):   # the heap check's stamp in the profile ("# heap check: ..."): its result is kept, later runs skip it
     return any(l.startswith('# heap check: ') for l in (g.dir / 'game.tsv').read_text(encoding='utf-8').splitlines())
 
@@ -2007,11 +1990,11 @@ def heap_check(repo, d, patched, work, env, logs, g):
     its heap request decides the alias / heap split of the guest block, and only a run shows it (Wonder asks for 1.44 GB, Tears of the Kingdom for 2.09 GB, which Engage's split
     has no room for). The game boots in the Mac host (headless and silent, no shader libraries) until its first heap request is answered or fails, or until it has run
     HEAP_CHECK_NNMAIN_SECS in nnMain without one (Engage sets none): a few seconds. A boot that resized the heap region (mem_alias / mem_reserve) is followed by another on the new
-    layout, up to HEAP_CHECK_ROUNDS, since the checks behind the request (the app pool's, mem_used) run only once it fits. The keys go into the profile (profile_guess.py heap_signals), which is stamped"""
+    layout, up to HEAP_CHECK_ROUNDS, since the checks behind the request (the app pool's) run only once it fits. The keys go into the profile (profile_guess.py heap_signals), which is stamped"""
     PROG.stage('heap check')
     host, rd, log = work / 'tools/dmhost', work / 'tmp/heap_run', logs / 'heap_check.log'
     # Up to HEAP_CHECK_ROUNDS boots: a heap request that did not fit the heap region stops the first one there (mem_alias / mem_reserve set), and only the next boot reaches the app pool
-    # check behind it (Pokémon FireRed / LeafGreen 2026: a 3.15 GB heap plus 102 MB of modules over the 3.2 GB pool, which mem_used then covers)
+    # check behind it (Pokémon FireRed / LeafGreen 2026 and MIO: Memories in Orbit, GitHub issue #941, were refused there until the host charged the used memory it reports, hle_svc.c used_beside_heap)
     set_all, hows, t0 = {}, [], time.time()
     for rnd in range(HEAP_CHECK_ROUNDS):
         PROG.set(step='building the Mac host'); build_mac_host(repo, host, env, logs, g)
@@ -2032,7 +2015,7 @@ def heap_check(repo, d, patched, work, env, logs, g):
         sig = {k: v for k, v in pg.heap_signals(text, g).items() if g.get(k, '') != v[0]} | pg.depth_signal(text, g)   # the boot often passes the game's depth mode call too
         for k, (v, why) in sig.items(): say(f'heap check: {k} {v}: {why}')
         m = re.search(r'\[mem\] heap ([0-9.]+ GB)', text)
-        how = ('the heap request did not fit' if 'SetHeapSize OOM' in text else 'the heap and the modules did not fit the app pool' if re.search(r'\[mem\] SetHeapSize \S+ \+ modules \S+ > app pool', text)
+        how = ('the heap request did not fit' if 'SetHeapSize OOM' in text else 'the heap did not fit the app pool less used memory' if re.search(r'\[mem\] SetHeapSize \S+ > app pool \S+ less used memory', text)
                else f'heap {m.group(1)}' if m else 'no heap set' if '>>> nnMain' in text
                else f'the host stopped before nnMain (exit {rc})' if rc is not None else 'no nnMain within the time limit')
         hows.append(how)
@@ -2040,7 +2023,7 @@ def heap_check(repo, d, patched, work, env, logs, g):
         if not sig.keys() & {'mem_alias', 'mem_reserve'}: break   # the heap region as it was: another boot would stop where this one did
     how = ', then '.join(hows)
     p = g.dir / 'game.tsv'; atomic_text(p, p.read_text(encoding='utf-8') + f'\n# heap check: {time.strftime("%Y-%m-%d")}, {how}' + (f'; set {", ".join(set_all)}' if set_all else '') + '\n')
-    if not m and '>>> nnMain' not in text and 'SetHeapSize OOM' not in text and 'mem_used' not in set_all:   # stopped before any heap request: worth a look before the IPA is tried
+    if not m and '>>> nnMain' not in text and 'SetHeapSize OOM' not in text:   # stopped before any heap request: worth a look before the IPA is tried
         PROG.say(f'[RED] heap check: {how}; ---- last lines of {log} ----\n' + ''.join(collections.deque(open(log, errors='replace'), maxlen=20)).rstrip('\n'))
     PROG.end(f'{how} in {hms(time.time() - t0)}' + (f'; set {", ".join(set_all)}' if set_all else ''))
     return type(g)(g.dir)
@@ -3386,9 +3369,8 @@ def main(args=None):
     routes = nextendo_build(py, repo, game / 'ExeFS', patched, work, env, logs, g) if getattr(args, 'nextendo', False) else None
     if nd := captured_nros(patched): env = dict(env, DM_NRO_DIR=str(nd))
     chain_header(py, repo, env, logs)   # before any host is built
-    if provisional or derived:   # the keys that need the rewritten modules, then (provisional) the heap check (both only change keys the host is built with, not the rewrite or the shader steps)
+    if provisional or derived:   # (provisional) the heap check, then the region check (both only change keys the host is built with, not the rewrite or the shader steps)
         provisional_prep(py, repo, env, logs, g)
-        g = refine_after_rewrite(g, game, patched, reg if derived else None)
         if provisional and heapck and pg.heap_check_needed(game / 'ExeFS'):
             if apple_silicon(): PROG.add(1); g = heap_check(repo, game, patched, work, env, logs, g)
             else: say('no heap check: it boots the game in the Mac host, which needs a Mac with Apple silicon; the profile keeps its guessed heap keys')

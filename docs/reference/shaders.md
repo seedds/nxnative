@@ -609,9 +609,9 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 
 - **Symptom:** a Switch 2 game's picture is far too bright and warm wherever the view opens out: lifted blacks, yellow skin, a pale veil. The build log has `Invalid reduction type: F32FtzRn`, easy to miss among thousands of lines.
 - **Cause:** RED.F32.FTZ.RN (0x98e, type 3) adds a float to a word of memory, and the translator dropped it with that log line. agl's scene analysis sums luminance this way (`probe_analyze`, `shadow_analyze`, `sky_analyze`, `cube_map_probe_analyze`, `inner_mask_analyze`, and Foliage and TerrainGround variants). The CPU reads those buffers back into exposure: the sums stayed 0, so it applied its full negative correction. The tone map itself was right.
-- **Fix:** `InstEmitMemory.cs` `EmitAtomicAddF32`: a compare-and-swap loop on the word, in `EmitAtomicOp`, so ATOM's float form gets it too. Metal's buffer atomics have no float add in the form the chain uses. A chain change. F16x2FtzRn stays a log line: no shader here uses it.
-- **Check:** `DMSH_TEST_XLATE=<translator> python3 dm/gfx/tests/test_dmsh_ampere_alu.py FloatRed`.
-- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md): 28 of its seen shaders; the frame's mean brightness at Navi's close-up went from 0.71 to 0.38.
+- **Fix:** `InstEmitMemory.cs` `EmitAtomicAddF32`: a compare-and-swap loop on the word, in `EmitAtomicOp`, so ATOM's float form gets it too. A chain change. F16x2FtzRn stays a log line: no shader here uses it. The shader build then turns the loop of an add whose result nothing reads into one `atomic_fetch_add_explicit` on a `device atomic_float` (MSL 3.0; `dmsh_rewrite.py` `float_add_msl`, only the exact loop spirv-cross writes): agl's analysis adds every thread's value into the same few words, so the loops retried for each other. The translator cannot write the native add itself: its storage buffers are `uint` arrays, a float pointer to one is an `OpBitcast` that SPIR-V's logical addressing forbids, and spirv-cross writes that as a `reinterpret_cast` of the loaded value, not of its address. An add traced to no storage buffer (through the memory pool table), a bounded buffer's guarded swap, shared memory and an ATOM whose result is used stay loops: correct, only slower.
+- **Check:** `DMSH_TEST_XLATE=<translator> python3 dm/gfx/tests/test_dmsh_ampere_alu.py FloatRed` (the translator's loop, and that `float_add_msl` still finds it); `test_dmsh_float_add.py` (the rewrite, and on the GPU the loop and the native add reach the same sums).
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md): 28 of its seen shaders; the frame's mean brightness at Navi's close-up went from 0.71 to 0.38. With the native add, on a MacBook Air M4, `6e28359aa3558f61` (one workgroup of 256 threads, four words) went from 0.25 ms a frame to under 0.13 ms and `1bba09ec4bc8ff67` from 0.40 ms, the exposure the same (mean luminance 116-117 of 255 both ways); the Hyrule Field view's frame p50 went from 23.42 to 22.39 ms, between two builds (PR #1930).
 
 ### textureGatherOffsets and a loop over its offsets
 
@@ -1044,6 +1044,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Fix:** `geo_prep` (`nvn_geometry.inc`) compacts a sparse draw when that saves at least `GEO_COMPACT_MIN` (1 MB): the vertices actually used are captured in contiguous runs (`nvn_geo_capture_runs`), one capture per run, and the geometry stage reads through a map from the original ID to the compact one (`nvn_geo_compact_map`). Up to `GEO_COMPACT_RUNS` runs; a kernel that keeps its original addressing has the original map.
 - **Check:** `t_geometry` checks the runs, the map and a draw through both.
 - **Found on:** [Kirby Air Riders](../../dm/games/040077201BE50000/README.md): resident from 28.3 GB (and closed) to about 10 GB through a race.
+
+### Viewport indices in geometry compute records
+
+- **Symptom:** Metal rejects a translated geometry shader with `invalid return type 'main0_out' for kernel function`: the compute entry writes `out.gl_ViewportIndex` instead of placing that output in its emitted vertex records.
+- **Cause:** `ResourceReservations.FillIoOffsetMap` (in the vendored translator, as in Ryujinx) reserved the slot for a stage that writes the viewport index under `VertexIndex`. The geometry-to-compute transform found no viewport-index slot, left that store as a raster output on the compute kernel, and the raster reader read the wrong builtin.
+- **Fix:** the slot is reserved as `ViewportIndex`, so the geometry store and the raster reader use the same field of the emitted vertex, a dynamic index included. Shaders that do not write the viewport index translate as before.
+- **Check:** `test_dmsh_geometry.py` (`PassthroughCompiler.test_viewport_index_survives_geometry_compute_conversion`, with `DMSH_TEST_XLATE`): a geometry shader that writes the viewport index from the primitive ID, for all five input topologies, compiled as kernel and reader for macOS and iOS.
+- **Found on:** Alien: Isolation (SDK 8.2.0): both of its geometry shaders.
 
 ### Geometry passthrough and viewport masks in compute
 

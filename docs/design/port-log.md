@@ -25,6 +25,7 @@ A dated record of what is done, what is in progress and what is left on the Wind
 | `61e11b3` | Port: the Windows host gets the JIT fallback (a vendored subset of Boost 1.83.0, 869 headers; two missing includes in dynarmic; the Windows fault handler takes a fault inside a JIT callback as a guest fault). The cross-build with `-DNXHOST_JIT=ON` builds and links; Linux CTest 100 of 100 twice; nothing run on Windows |
 | `0ccf7a2` | Launcher and packer: the targets file in the `made` rows, the packs' reuse key (it was missing: a repack reused the old pack) and the better-pack rule ("N known call targets the packs were made without"). Verified in Docker (`t_launcher_model` 174 checks, `t_second_pack` 29 / 29 / 27 by route) |
 | `4cbabbf` | AOT: a `br` after a call was lowered as a tail call with the wrong return address, which stranded the thread in the JIT fallback (the benchmark's 5,124 "nonlocal" misses): the 4,000-function benchmark goes from 1.529 s to 189.8 ms. Verified in Docker (nxaot 29 of 29, host 100 of 100 twice, `t_aot_host` 50 checks, the Windows cross-build) |
+| `fb0a872` | AOT discovery: a jump table's index may depend on several values (the form of a switch on a computed value was left to the dispatcher): the benchmark's 736 tables all bounded, 0 JIT runs, 181.9 ms to 1.097 ms; except-gcc 26.1 ms to 0.64 ms. Verified in Docker (nxaot 29 of 29, host 100 of 100 twice, a tree without the JIT, the Windows cross-build) |
 
 Done on the machine, not in the repository: Docker emptied on the owner's request (every image and container, the owner's other projects' included; the data volumes `aitrade_pgdata`, `smilepetstore_pgdata`, `smilepetstore_redisdata` kept).
 
@@ -36,7 +37,7 @@ Done on the machine, not in the repository: Docker emptied on the owner's reques
 
 ### In progress: written by agents, NOT built and NOT verified
 
-Verified and integrated on 2026-11-14 (nxaot CTest 28 of 28; host CTest 99 of 99 with and without `DM_AOT_ARENA_CHECK`, `NXAOT` given): the three rows that were `wip/second-pack-profile`, `wip/launcher-rule-by-function` and `wip/runner-scripts`. Agent at work: the jump tables discovery cannot bound (the benchmark's remaining JIT addresses; its worktree is the tip plus the fix above).
+Verified and integrated on 2026-11-14 (nxaot CTest 28 of 28; host CTest 99 of 99 with and without `DM_AOT_ARENA_CHECK`, `NXAOT` given): the three rows that were `wip/second-pack-profile`, `wip/launcher-rule-by-function` and `wip/runner-scripts`. Agent at work: the host's first JIT use, about 200 ms on the thread that needs it (60 ms in `nxaot_host`).
 
 No Docker image exists (the disk filled while ten worktrees were checked out, 280 MB each), so nothing below has been compiled or run. Each item is uncommitted in its worktree under `.claude/worktrees/`; a new session reads the diff there (`git -C <worktree> diff`), verifies it in Docker, and only then cherry-picks it. One build at a time: the two images (`nxnative-build` 1.9 GB, `nxnative-aot` 1.9 GB) do not fit beside the worktrees.
 

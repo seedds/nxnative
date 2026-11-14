@@ -98,6 +98,8 @@ int main(void) {
         CHECK("projection subtracts the time spent frozen", guest < host && guest >= frozen);
         CHECK("a host sample older than the pause offset cannot underflow", guest_ns_at_host_time(1) == 0);
         CHECK("feedback conversion uses the resumed guest epoch", llabs((int64_t)gpu_s_guest_ns(host / 1e9) - (int64_t)guest) <= 2);
+        { int bad = 0; for (int i = 0; i < 20000; i++) { uint64_t h = now_ns(); if (!gpu_s_guest_ns(h / 1e9)) bad++; } CHECK("a feedback time in the clock tick of the read is not in the future", bad == 0); }
+        CHECK("a feedback time one double step ahead of the read is the read's time", llabs((int64_t)gpu_s_guest_ns(nextafter(host / 1e9, INFINITY)) - (int64_t)guest) <= 2);
         CHECK("future feedback is rejected", gpu_s_guest_ns(host / 1e9 + 1) == 0);
         CHECK("invalid feedback is rejected", gpu_s_guest_ns(NAN) == 0 && gpu_s_guest_ns(INFINITY) == 0);
 

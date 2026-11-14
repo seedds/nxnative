@@ -133,8 +133,9 @@ int own_tex_live_locked(uint64_t serial);
 int own_tex_live(uint64_t serial);
 int own_tex_end_locked(tex_t *t);   // a finalize: -1 when t is a copy and the object the texture was initialized in still holds it (nothing ends), else whether it was live (it is not now)
 
-// Program pins (the caller holds the submission lock); mtl_prog_release and mtl_prog_unpin (nvn_obj.h) are the other two
+// Program pins (their own lock; mtl_prog_release and mtl_prog_unpin, nvn_obj.h, are the other two). own_prog_pin_live pins only a program the serial table holds (0: none)
 void own_prog_pin(uint64_t serial);
+int own_prog_pin_live(uint64_t serial);
 
 // The change generation. g_ser_gen is read directly (an atomic load on the hot paths); only the owner's functions change it
 enum { SER_NOTES = 64,     // notes kept between two takes

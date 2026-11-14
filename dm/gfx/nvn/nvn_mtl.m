@@ -1652,6 +1652,7 @@ static int g_pkg_kept;   // a texture written during this submission kept its te
 void mtl_prepare(void) {
     if (!g_warm_started && prepare_on()) { mtl_init(); shmap_load(); }
 }
+int mtl_prepared(void) { return __atomic_load_n(&g_warm_started, __ATOMIC_ACQUIRE) || !prepare_on(); }
 static void sub_cut_begin(void); static void ts_sub_begin(void), ts_boundary(void); static int ts_on(void);
 static void tu_tick(void);
 static void gmem_commit_patch(void);   // the raw pool table words of the arguments encoded so far follow the pools (gmem_slot_note)
@@ -7014,6 +7015,11 @@ static __unsafe_unretained NvProg *prog_get(const prog_t *cp) {   // Called only
     return o;
 }
 // A submitted descriptor and a queue binding pin the program by its serial (own_prog_pin; mtl_prog_release and mtl_prog_unpin are nvn_owner.m's)
+int mtl_prog_snapshot_live(prog_t *copy,const prog_t *source) {   // any thread: prog_get's result for a resolved program is its serial table entry, so nothing of prog_get runs
+    if(!source->serial) MDIE("cannot retain a program without an initialization serial");
+    if(!own_prog_pin_live(source->serial)) return 0;
+    *copy=*source; return 1;
+}
 void mtl_prog_snapshot(prog_t *copy,const prog_t *source) {
     prog_get(source); *copy=*source;
     if(!source->serial) MDIE("cannot retain a program without an initialization serial");

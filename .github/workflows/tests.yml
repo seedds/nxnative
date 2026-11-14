@@ -242,6 +242,8 @@ jobs:
           tests=$(sed -n 's/^\(t_[a-z0-9_]*\):.*/\1/p' Makefile | sort -u)
           echo "$tests" | tr '\n' ' '; echo
           make GAME="$GAME" -j3 $tests 2>&1 | tee ../../../logs/gfx-tests-build.log
+      - name: App Metal cache cleanup (temporary folders only)
+        run: dm/gfx/tests/t_pso_prewarm --cache-only
       - name: iOS host sources compiled for the iPhone SDK (no signing, no Xcode project)
         run: python3 dm/ios/tools/compile_check.py 2>&1 | tee logs/ios-compile.log
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

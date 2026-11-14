@@ -14,5 +14,8 @@ namespace Ryujinx.Graphics.Shader
         /// Buffer is written to.
         /// </summary>
         Write = 1 << 0,
+
+        // nxnative: a storage buffer whose accesses are bounded by the host's length table (TranslationFlags.MetalStorageBounds)
+        Bounded = 1 << 1,
     }
 }

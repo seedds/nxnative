@@ -267,6 +267,7 @@ def reflect(key, stage, msl, res):
                 e.update(kind=abi.KIND_CBUF, reg=n - 3, fixed=next((b['fixed'] for b in res['cbufs'] if b['slot'] == n), 0))
             elif n == abi.CBSIZE_BANK: e.update(kind=abi.KIND_CBSIZE)   # the uniform slots' bound sizes, which the translator's reads at computed offsets compare with
             elif n == abi.TBIAS_BANK: e.update(kind=abi.KIND_TBIAS, n=buffer_bias_entries(res))   # the buffer textures' element offsets, which the translator adds to their coordinates (buffer_image_bias)
+            elif n == abi.SBLEN_BANK: e.update(kind=abi.KIND_SBLEN)   # the bounded storage buffers' lengths, which their accesses compare with (Ryujinx TranslationFlags.MetalStorageBounds)
             else: e.update(kind=abi.KIND_C1 if n == 1 else abi.KIND_DRVCB, bank=n)
         elif sb := re.fullmatch(r'[a-z]+_s(\d+)', nm):
             e.update(kind=abi.KIND_SBUF, index=int(sb.group(1)))
@@ -323,6 +324,12 @@ def reflect(key, stage, msl, res):
                 e.update(kind=abi.KIND_SBUF_UBO, reg=b['cb_slot'] - 3, off=b['cb_offset'] * 4)
             else: e['reg'] = (off - base) // abi.C0_ROW if off is not None and base is not None and 0 <= off - base < abi.C0_ROW * abi.C0_SSBO_SLOTS and (off - base) % abi.C0_ROW == 0 else None
             e['rw'] = bool(b and b['flags'] & 1)   # BufferUsageFlags.Write; Program.cs serializes the translator enum unchanged (atomics count as writes too)
+            if b and b['flags'] & 2:   # BufferUsageFlags.Bounded: its accesses compare with its entry in the length table (dmsh_abi.h DMSH_SBLEN_BANK), the translator's storage slot
+                if e['kind'] not in (abi.KIND_SBUF_UBO, abi.KIND_SBUF_PUSH) or not 0 <= b['slot'] < abi.SBLEN_SLOTS:
+                    raise ValueError(f"{key}: storage buffer {e['msl_name']} is bounded but is a {e['kind']} binding, slot {b['slot']}")
+                e['sbx'] = b['slot']
+    if any('sbx' in e for e in binds) and not any(e['kind'] == abi.KIND_SBLEN for e in binds):
+        raise ValueError(f'{key}: bounded storage buffers without their length table')
     return binds
 
 DRV_FILL = {0: [(b, b + abi.C0_ROW * abi.C0_SSBO_SLOTS) for k, b in sorted(SSBO.items(), key=lambda kv: kv[1]) if k not in ('ts', 'ms')],   # c0: storage buffer address tables (vertex / compute / geometry / pixel; a task or mesh stage's: unfillable())

@@ -707,6 +707,13 @@ t_vpool_first_map: t_vpool_first_map.m $(MTL_T_DEP)
 check_t_vpool_first_map: t_vpool_first_map
 	MTL_DEBUG_LAYER=1 ./t_vpool_first_map
 
+# Storage buffers by address (SBUFU / SBUFQ) bounded by the memory the host bound there (nvn_mtl.m sblen_put; GitHub issue #2618)
+t_storage_bounds: t_storage_bounds.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_storage_bounds.m ../../host/crash.c ../../host/hle_bigstack.c t_host_stubs.c $(filter-out ../nvn/nvn_mtl.m,$(GFX)) $(FW)
+.PHONY: check_t_storage_bounds
+check_t_storage_bounds: t_storage_bounds
+	MTL_DEBUG_LAYER=1 ./t_storage_bounds
+
 # A texture pool table of another layered type than the ID's texture holds a view of it when a shader read the ID through that type (pool_fit): a 2D sprite read as a 2D array, a cube read as a cube
 t_pool_typebridge: t_pool_typebridge.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_pool_typebridge.m $(MTL_T_SRC) $(FW)

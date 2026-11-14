@@ -1,6 +1,7 @@
 """Storage words the translator split, read whole again (dmsh_wide.py wide_loads): which words become one read, which are left alone, and the compile."""
 from pathlib import Path
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -9,6 +10,7 @@ import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'tools'))
 from dmsh_wide import wide_loads   # noqa: E402
+import dmsh_abi as abi   # noqa: E402
 
 # Splatoon Raiders' Hoian_UBER (3e5a302ac52b73bf) as spirv-cross writes it, cut down: one light's words from fp_s3 at 80 * index + 16 .. 44, a written buffer,
 # and words in two blocks
@@ -84,7 +86,45 @@ fragment main0_out main0(main0_in in [[stage_in]], constant spvDescriptorSetBuff
 '''
 
 
+# The same shader with fp_s3 bounded (TranslationFlags.MetalStorageBounds, GitHub issue #2618), as the translator writes a bounded read and dmsh_fetch.select_guards makes it a
+# select: its signed index, the comparison with the length table (fp_c27, slot 3's words before the address and in all), and a read that gives 0 outside
+TABLE = '(*spvDescriptorSet0.fp_c%d)._m0[1]' % abi.SBLEN_BANK
+
+
+def bounded(src):
+    src = src.replace('    device _29* fp_s4 [[id(2)]];\n', '    device _29* fp_s4 [[id(2)]];\n    constant _30* fp_c27 [[id(3)]];\n')
+    src = src.replace('struct spvDescriptorSetBuffer0', 'struct _30\n{\n    uint4 _m0[16];\n};\n\nstruct spvDescriptorSetBuffer0')
+    def one(m):
+        indent, decl, pre, idx, post = m.groups()
+        return (f'{indent}int {idx}_i = int({idx});\n{indent}bool {idx}_b = (uint({idx}_i) + {TABLE}.z) < {TABLE}.w;\n'
+                f'{indent}{decl}{pre}select(0u, (*spvDescriptorSet0.fp_s3)._m0[{idx}_b ? {idx}_i : 0], {idx}_b){post}')
+    return re.sub(r'^( *)(\w+ _\d+ = )(.*?)\(\*spvDescriptorSet0\.fp_s3\)\._m0\[int\((_\d+)\)\](.*)$', one, src, flags=re.M)
+
+
+BOUNDED = bounded(LIGHT)
+
+
 class WideLoads(unittest.TestCase):
+    def test_bounded_words(self):
+        out = wide_loads(BOUNDED)
+        # read whole when the run's first and last words are inside the bound memory, else each word bounded as the translator bounds it
+        inside = lambda k: f'(uint(_3499_i + {k}) + {TABLE}.z) < {TABLE}.w'
+        self.assertIn(f'bool _dmw0_in = {inside(0)} && {inside(3)};', out)
+        lanes = ', '.join(f'select(0u, (*spvDescriptorSet0.fp_s3)._m0[{inside(k)} ? _3499_i + {k} : 0], {inside(k)})' for k in range(4))
+        self.assertIn(f'packed_uint4 _dmw0 = _dmw0_in ? *(const device packed_uint4*)&(*spvDescriptorSet0.fp_s3)._m0[_3499_i] : packed_uint4({lanes});', out)
+        for lane, var in zip('xyz', ('_3501', '_3507', '_3513')): self.assertIn(f'float {var} = as_type<float>(_dmw0.{lane});', out)
+        self.assertIn('uint _3519 = _dmw0.w;', out)
+        self.assertIn('float _3495 = as_type<float>(select(0u, (*spvDescriptorSet0.fp_s3)._m0[_3493_b ? _3493_i : 0], _3493_b));', out)   # alone on its step: as it was
+        self.assertIn('(*spvDescriptorSet0.fp_s4)._m0[int(_20)]', out)
+
+    def test_bounded_and_plain_words_stay_apart(self):
+        # a run is all bounded reads or all plain ones (a buffer is one or the other; mixed, the words are left alone)
+        mixed = BOUNDED.replace('    float _3507 = as_type<float>(select(0u, (*spvDescriptorSet0.fp_s3)._m0[_3505_b ? _3505_i : 0], _3505_b));',
+                                '    float _3507 = as_type<float>((*spvDescriptorSet0.fp_s3)._m0[int(_3505)]);')
+        out = wide_loads(mixed)
+        self.assertIn('(*spvDescriptorSet0.fp_s3)._m0[int(_3505)]', out)
+        self.assertNotIn('_dmw', out)   # a run starts on a 16-byte step: from byte 32 the bounded words stop at 36, which is plain
+
     def test_words_of_one_light(self):
         out = wide_loads(LIGHT)
         # bytes 32..44 from one value: one packed_uint4 at the first word, each word its lane (float or uint alike)
@@ -121,7 +161,7 @@ class WideLoads(unittest.TestCase):
     @unittest.skipUnless(shutil.which('xcrun') and sys.platform == 'darwin', 'Metal compiler')
     def test_compiles(self):
         with tempfile.TemporaryDirectory() as d:
-            for name, src in (('before', LIGHT), ('after', wide_loads(LIGHT))):
+            for name, src in (('before', LIGHT), ('after', wide_loads(LIGHT)), ('bounded', BOUNDED), ('bounded_after', wide_loads(BOUNDED))):
                 m = os.path.join(d, name + '.metal'); Path(m).write_text(src)
                 r = subprocess.run(['xcrun', '-sdk', 'macosx', 'metal', '-c', '-O1', '-fpreserve-invariance', m, '-o', os.path.join(d, name + '.air')],
                                    capture_output=True, text=True)

@@ -71,6 +71,12 @@ import Foundation
         expect(String(cString: getenv("DM_FULLSCREEN")) == "1" && d.string(forKey: "launcher.DM_FULLSCREEN") == "1", "Fullscreen goes into the environment and is saved")
         mm.values["DM_FULLSCREEN"] = "0"; mm.apply()
         expect(String(cString: getenv("DM_FULLSCREEN")) == "0" && d.string(forKey: "launcher.DM_FULLSCREEN") == nil, "Window is the default: set to 0, not saved")
+        unsetenv("DM_MOTION")
+        expect(mm.rows(in: "Controls").contains { $0.env == "DM_MOTION" } && mm.values["DM_MOTION"] == "1", "Motion controls is in Controls, on by default")
+        mm.values["DM_MOTION"] = "0"; mm.apply()
+        expect(getenv("DM_MOTION").map { String(cString: $0) } == "0" && d.string(forKey: "launcher.DM_MOTION") == "0", "Motion controls off goes into the environment as DM_MOTION=0 and is saved")
+        mm.values["DM_MOTION"] = "1"; mm.apply()
+        expect(getenv("DM_MOTION").map { String(cString: $0) } == "1" && d.string(forKey: "launcher.DM_MOTION") == nil, "on is the default: set to 1, not saved")
         let macScale = mac.settings.first { $0.env == "DM_RENDER_SCALE" }!
         mm.values["DM_OPMODE"] = "1"
         expect(mm.rangeLabel(macScale, 1) == "1600 × 900 (100 %)" && mm.rangeLabel(macScale, 0.5) == "800 × 450 (50 %)", "docked size in pixels at 1.0 and 0.5")

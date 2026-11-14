@@ -405,6 +405,29 @@ class Prune(Base):
         self.assertEqual(self.blobs(), before - 1)   # D2's source; its library's bytes stay under metallib/
         self.assertEqual(self.store.get('metallib/mac/m.metallib'), b'L' + D2.encode())
 
+    def test_slim_drops_the_hit_cache_and_keeps_the_libraries(self):   # the listed shaders and the index go, not the compiled libraries (metallib/, variant/), what is newer, or other names
+        now = time.time()
+        for d in (D1, D2): self.shader(d, now - 100)
+        self.shader(D3, now + 100)
+        self.store.put('index/k.json', b'{"digest": "x"}', now - 100); self.store.put('index/new.json', b'{}', now + 100)
+        self.store.put('metallib/mac/m.metallib', b'L' + D1.encode(), now - 100); self.store.put('variant/ee/mac.metallib', b'v', now - 100)
+        self.store.put('stage/mac/k_b.metal', b'staged', now - 100); self.store.put('shader/notadigest/mac/x', b'k', now - 100)
+        self.assertEqual(self.store.slim(now), (2, 640 + 640 + len(b'{"digest": "x"}')))
+        self.assertEqual(self.store.names('index/'), {'index/new.json'})
+        self.assertEqual({n.split('/')[1] for n in self.store.names('shader/')}, {D3, 'notadigest'})
+        self.assertEqual(self.store.get('metallib/mac/m.metallib'), b'L' + D1.encode())   # D1's library is still named by metallib/: its bytes stay
+        self.assertIsNone(self.store.get(f'shader/{D1}/mac/k_b.metallib'))
+        self.assertEqual(self.store.get('variant/ee/mac.metallib'), b'v'); self.assertEqual(self.store.get('stage/mac/k_b.metal'), b'staged')
+        self.assertEqual(self.store.slim(now), (0, 0))   # nothing left to remove
+
+    def test_slim_gives_back_its_pages(self):
+        now = time.time()
+        for i in range(40): self.store.put(f'shader/{i:064x}/mac/k_b.metal', os.urandom(100000), now - 100); self.store.put(f'index/{i}.json', os.urandom(100000), now - 100)
+        self.store.db.execute('PRAGMA wal_checkpoint(TRUNCATE)'); big = self.path.stat().st_size
+        self.assertEqual(self.store.slim(now)[0], 40)
+        self.store.db.execute('PRAGMA wal_checkpoint(TRUNCATE)')
+        self.assertLess(self.path.stat().st_size, big // 4); self.assertEqual(self.store.names('index/'), set())
+
     def test_the_file_gives_back_its_pages(self):
         now = time.time()
         for i in range(40): self.store.put(f'shader/{i:064x}/mac/k_b.metal', os.urandom(100000), now - 100)

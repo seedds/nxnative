@@ -34,6 +34,7 @@ int test_variable_refresh;
 int test_game_fps = 60;
 int test_screen_hz;   // the screen's maximumFramesPerSecond (front_screen_max_fps); 0 = not known, as the graphics layer's weak default
 int test_match_fps;   // the last rate link_sync asked the screen for (front_screen_match)
+int test_covered;   // the Mac window is covered (front_window_covered)
 uint64_t test_focus_since;
 void *front_metal_layer(void) { return NULL; }
 module_t *module_of(const void *p) { (void)p; return NULL; }
@@ -45,6 +46,7 @@ static int checks, failed;
 static void reset(void) {
     test_now = 10000000000ull; test_focus = 1; test_focus_since = 0;
     g_dm_present_link = 1; g_rescue_mode = 0; g_rescue_back_ns = 3000000000ull; g_rescue_n = 0;
+    test_covered = 0; g_rescue_covered = 0; g_rescue_back_kept = 0;
     g_link_tick_ns = test_now - 1000000000ull; g_stall_t0 = g_link_tick_ns;
     g_stall_logged = g_stall_red = 0; g_stall_drop = 0;
     g_pq_in = g_pq_read = g_pq_done = 0; g_link_owns_layer = 1;
@@ -82,6 +84,27 @@ static void backoff(void) {
         CHECK("retry delay doubles and stops at 60 s", g_rescue_back_at - test_now == seconds[i] * 1000000000ull);
         test_now = g_rescue_back_at; link_sync();
     }
+}
+static void covered(void) {   // A rescue of a covered window (the fullscreen animation, a window behind others) ends once it is visible, and the delay is as before it was covered.
+    reset(); test_covered = 1;
+    g_stall_t0 = g_link_tick_ns = test_now - 500000000ull; wait_frame();
+    CHECK("a covered window's silent link triggers rescue", g_rescue_mode == 1 && g_rescue_covered);
+    CHECK("its first retry is in 3 s", g_rescue_back_at - test_now == 3000000000ull);
+    test_now += 1000000000ull; link_sync(); CHECK("rescue holds while the window stays covered", g_rescue_mode == 1);
+    test_covered = 0; link_sync();
+    CHECK("the window visible again ends rescue before the retry delay", !g_rescue_mode && !g_stall_t0 && g_link_tick_ns == test_now);
+    CHECK("a covered rescue leaves the retry delay as before", g_rescue_back_ns == 3000000000ull);
+    test_covered = 1;   // left covered: the retries back off as before, and the window showing brings the delay back
+    for (int i = 0; i < 3; i++) { g_stall_t0 = g_link_tick_ns = test_now - 500000000ull; wait_frame(); test_now = g_rescue_back_at; link_sync(); }
+    CHECK("a window left covered still backs off", g_rescue_back_ns == 24000000000ull);
+    g_stall_t0 = g_link_tick_ns = test_now - 500000000ull; wait_frame();
+    test_covered = 0; link_sync();
+    CHECK("the window shown after a covered spell restores the delay from before it", !g_rescue_mode && g_rescue_back_ns == 3000000000ull);
+    g_stall_t0 = g_link_tick_ns = test_now - 500000000ull; wait_frame();
+    CHECK("a visible window's rescue doubles the delay", g_rescue_mode == 1 && !g_rescue_covered && g_rescue_back_ns == 6000000000ull);
+    uint64_t deadline = g_rescue_back_at;
+    test_now = deadline - 1; link_sync(); CHECK("a visible window's rescue still waits for its retry", g_rescue_mode == 1);
+    test_now = deadline; link_sync(); CHECK("and retries on time", !g_rescue_mode);
 }
 static void settings(void) {
     for (int mode = 0; mode <= 2; mode += 2) {
@@ -190,7 +213,7 @@ static void metal_lifecycle(void) {
 int main(int argc, char **argv) { @autoreleasepool {
     alarm(10); setbuf(stdout, NULL);
     if (argc > 2 || (argc == 2 && strcmp(argv[1], "--metal"))) return 2;
-    thresholds(); backoff(); settings(); lifecycle(); latency(); thirty(); vrr120();
+    thresholds(); backoff(); covered(); settings(); lifecycle(); latency(); thirty(); vrr120();
     if (argc == 2) metal_lifecycle();
     printf("present rescue: %d checks, %d failed\n", checks, failed); return failed != 0;
 } }

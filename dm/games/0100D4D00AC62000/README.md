@@ -29,7 +29,7 @@ On the Mac (2026-11-13, an Apple silicon MacBook on macOS 27.2.1, a Mac app from
 
 ## Performance
 
-- Frame time p50 16.67 ms at 60 fps, CPU about 15 % of one core. Frames were dropped only around window events: entering fullscreen, the window being covered or another app taking focus (the display link fires about once a second while the window is covered, `display link silent … rescue`), never in steady play. A few 30–35 ms frames in the intro come from the game itself (a GPU time of 0.2–1.7 ms on them).
+- Frame time p50 16.67 ms at 60 fps, CPU about 15 % of one core. Frames were dropped only around window events: entering fullscreen, the window being covered or another app taking focus (the display link fires about once a second while the window is covered, `display link silent … rescue`), never in steady play. A fullscreen switch leaves about 45 frames of macOS's own animation undisplayed; the rescue it starts now ends as the window shows ([Found on this game](#found-on-this-game)). A few 30–35 ms frames in the intro come from the game itself (a GPU time of 0.2–1.7 ms on them).
 
 ## On the Mac
 
@@ -43,7 +43,7 @@ On the Mac (2026-11-13, an Apple silicon MacBook on macOS 27.2.1, a Mac app from
 
 ## Found on this game
 
-- Nothing new: the standard host ran it unchanged.
+- **A display-link rescue of a covered window outlasted the cover** (fullscreen switches): [frame rate](../../../docs/reference/frame-rate.md#present-thread-rescues-a-silent-display-link).
 
 ## Open
 

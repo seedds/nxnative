@@ -662,6 +662,47 @@ int main(void) {
                b->first == 7 && b->n == 1 && b->r[0].address == UINT64_C(0xabcd123456780000) && b->r[0].size == UINT64_C(0x100000001));
         P(nvnCommandBufferFinalize)(&c2); P(nvnMemoryPoolFinalize)(&mp);
     }
+    // 5a'. DM_NVN_CMDSTAT's control-memory rows: per command buffer the AddControlMemory calls, bytes and chunk range, the getters'
+    //      calls and last values, the callback switch, and the recordings ended with no control memory given; rows retired at Finalize and re-Initialize; an overflow row
+    {
+        memset(g_cs_ctl, 0, sizeof g_cs_ctl); memset(&g_cs_ctl_over, 0, sizeof g_cs_ctl_over); memset(&g_cs_ctl_retired, 0, sizeof g_cs_ctl_retired); memset(&g_cs, 0, sizeof g_cs); g_cs.on = 1;
+        static uint8_t m[4096] __attribute__((aligned(4096))), ctl[1024] __attribute__((aligned(8))); NVNmemoryPoolBuilder mb; NVNmemoryPool mp; NVNcommandBuffer ca, cb;
+        P(nvnMemoryPoolBuilderSetDefaults)(&mb); P(nvnMemoryPoolBuilderSetStorage)(&mb, m, sizeof m); P(nvnMemoryPoolInitialize)(&mp, &mb);
+        P(nvnCommandBufferInitialize)(&ca, &dev); P(nvnCommandBufferInitialize)(&cb, &dev);
+        P(nvnCommandBufferAddCommandMemory)(&cb, &mp, 0, 2048); P(nvnCommandBufferBeginRecording)(&cb); P(nvnCommandBufferEndRecording)(&cb);   // no control memory
+        P(nvnCommandBufferAddControlMemory)(&ca, ctl, 256); P(nvnCommandBufferAddControlMemory)(&ca, ctl, 1024);
+        P(nvnCommandBufferGetControlMemoryFree)(&ca); P(nvnCommandBufferGetControlMemorySize)(&ca); P(nvnCommandBufferGetControlMemorySize)(&ca); P(nvnCommandBufferGetControlMemoryUsed)(&ca);
+        h_nvnCommandBufferSetControlMemoryCallbackEnabled(&ca, 1);
+        P(nvnCommandBufferAddCommandMemory)(&ca, &mp, 2048, 2048); P(nvnCommandBufferBeginRecording)(&ca); P(nvnCommandBufferEndRecording)(&ca);
+        P(nvnCommandBufferBeginRecording)(&ca); P(nvnCommandBufferEndRecording)(&ca);
+        const cs_ctl_t *rb = &g_cs_ctl[0], *ra = &g_cs_ctl[1];
+        EXPECT("control rows: one per buffer, in first-use order", 1, rb->cmd == CB(&cb) && ra->cmd == CB(&ca) && !g_cs_ctl[2].cmd);
+        EXPECT("control rows: a recording with no control memory", 1, rb->recs == 1 && rb->recs_bare == 1 && rb->adds == 0 && rb->cb_on == -1);
+        EXPECT("control rows: two grants, their bytes and range", 1, ra->adds == 2 && ra->bytes == 1280 && ra->min == 256 && ra->max == 1024);
+        EXPECT("control rows: getter calls", 1, ra->gets[CS_GET_USED] == 1 && ra->gets[CS_GET_FREE] == 1 && ra->gets[CS_GET_SIZE] == 2);
+        EXPECT("control rows: the values returned last", 1, ra->ret[CS_GET_USED] == 0 && ra->ret[CS_GET_FREE] == 1024 && ra->ret[CS_GET_SIZE] == 1024);
+        EXPECT("control rows: callback enabled, recordings with control memory", 1, ra->cb_on == 1 && ra->recs == 2 && ra->recs_bare == 0);
+        // Finalize retires a row into the sum and frees it; an Initialize at a used address (a stack buffer never finalized) does the same, so the next buffer there starts afresh
+        P(nvnCommandBufferFinalize)(&ca);
+        EXPECT("control rows: Finalize sums the row and frees it", 1, !ra->cmd && g_cs_ctl_retired.bufs == 1 && g_cs_ctl_retired.given == 1 && g_cs_ctl_retired.sum.adds == 2 && g_cs_ctl_retired.sum.recs == 2 && g_cs_ctl_retired.cb_on == 1);
+        P(nvnCommandBufferInitialize)(&cb, &dev);
+        EXPECT("control rows: a second Initialize at the address retires its row", 1, !rb->cmd && g_cs_ctl_retired.bufs == 2 && g_cs_ctl_retired.bare_bufs == 1);
+        P(nvnCommandBufferAddCommandMemory)(&cb, &mp, 0, 2048); P(nvnCommandBufferAddControlMemory)(&cb, ctl, 512); P(nvnCommandBufferBeginRecording)(&cb); P(nvnCommandBufferEndRecording)(&cb);
+        EXPECT("control rows: the new buffer there starts afresh", 1, rb->cmd == CB(&cb) && rb->recs == 1 && rb->recs_bare == 0 && rb->adds == 1 && rb->cb_on == -1);
+        for (int k = 0; k < CS_CTL_BUFS + 2; k++) cs_ctl_add((const cmd_t *)(uintptr_t)(0x100000 + 0x100 * k), 64);   // 31 take the free rows, 3 find none
+        EXPECT("control rows: buffers past the free rows go to the overflow row", 3, g_cs_ctl_over.adds);
+        // A small recording read through its control list: its compact records under their own ops, and the list's one entry as its control bytes
+        memset(&g_cs, 0, sizeof g_cs); memset(g_cs_thr, 0, sizeof g_cs_thr); g_cs.on = 1;
+        P(nvnCommandBufferBeginRecording)(&cb); P(nvnCommandBufferSetScissor)(&cb, 1, 2, 3, 4); P(nvnCommandBufferBarrier)(&cb, 1); P(nvnCommandBufferEndRecording)(&cb);
+        EXPECT("CMDSTAT: one small recording, its two compact records", 1, g_cs.small_recs == 1 && g_cs.sop_n[OPC_SCISSOR] == 1 && g_cs.sop_b[OPC_SCISSOR] == 16 && g_cs.sop_n[OPC_BARRIER] == 1 && g_cs.sop_b[OPC_BARRIER] == 8);
+        EXPECT("CMDSTAT: its record bytes", 24, g_cs.small_bytes);
+        EXPECT("CMDSTAT: its control list, one piece", 8, g_cs.small_ctl);
+        EXPECT("CMDSTAT: counted for the recording thread", 1, g_cs_thr[0].recs == 1 && g_cs_thr[0].bytes == 24 && g_cs_thr[0].op_n[OPC_SCISSOR] == 1);
+        cs_dump_ex(1);   // the dump's lines, read by eye in the log ("at least 35 command buffers": 32 live, 2 retired, the overflow row as one)
+        memset(g_cs_ctl, 0, sizeof g_cs_ctl); memset(&g_cs_ctl_over, 0, sizeof g_cs_ctl_over); memset(&g_cs_ctl_retired, 0, sizeof g_cs_ctl_retired);
+        memset(&g_cs, 0, sizeof g_cs); memset(g_cs_thr, 0, sizeof g_cs_thr); g_cs.on = -1;
+        P(nvnCommandBufferFinalize)(&cb); P(nvnMemoryPoolFinalize)(&mp);
+    }
     // 5b'. Fixed slots sized by GetCommandMemoryUsed, as Tears of the Kingdom gives each model's prerecorded lists (GitHub issue #61): a list measured at S bytes is recorded
     //      into slot k = base + S × k with AddCommandMemory(max(S, 512)), and slot k + 1 is recorded right after it. The list here is an uniform update of n bytes and a
     //      uniform buffer bind (the last record before the END in the crash), the next slot's starts with a call. Slot 0 must still be its two records, in one piece inside

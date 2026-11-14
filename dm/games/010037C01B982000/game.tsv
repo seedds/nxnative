@@ -1,0 +1,35 @@
+# Xuan Yuan Sword: Mists Beyond the Mountains (DOMO's in-house engine on a self-hosted SDL-switch 2.24.0, SDK 15), 4.0.6.
+# Started from the NSP script's provisional profile; see README.md for what the game needs
+
+# ---- Identity ----
+title_id	010037C01B982000
+program_id	010037C01B982000
+
+# ---- App ----
+name	Xuan Yuan Sword: Mists Beyond the Mountains
+ipa	XuanYuanSwordMistsBeyondTheMountains.ipa
+app_category	public.app-category.games
+
+# ---- Versions ----
+build	v65536	4.0.6	main=fa12e800fe5d549b0898bedddd950659	subsdk2=8618895246b420329b77746b960a66ab	subsdk3=368f01d5cb42f06cd125dc739d036719	subsdk4=1e3f59ac437a9dd4725b5107916ada7e	sdk=8618895246b420329b77746b960a66ab
+package	v65536
+shader_versions	v65536
+
+# ---- Files ----
+# not loaded, main takes nothing from them the host does not supply: subsdk0 (NintendoSDK_OpenGL), subsdk1 (NintendoSDK_Vulkan)
+modules	main subsdk2 subsdk3 subsdk4 sdk
+romfs_marker	Mods/tsw_2x.ssmod
+zip_store	.ani:.mp4:.otf:.png:.ssmod:.ttf:.metallib
+
+# ---- Memory ----
+# main never sets a heap (its memory is its own bss): a 256 MB heap region
+mem_reserve	0x40000000
+mem_alias	0x10000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+# the NPDM declares 0 MB of system resource: IsVirtualAddressMemoryEnabled is false, as on Horizon (Big Brain Academy: Brain vs. Brain sets a heap only then)
+sys_resource	0x0
+
+# ---- Shader split ----
+shader_groups	/Music/=music /Video/=video /Resource/=resource /Mods/=mods /en/=en /zh-Hant/=zhhant /ja/=ja /zh-Hans/=zhhans
+shader_note	Xuan Yuan Sword: Mists Beyond the Mountains shaders

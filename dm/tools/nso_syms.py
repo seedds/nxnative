@@ -46,7 +46,8 @@ def defined(img):   # {name: (offset, size)} of the module's defined dynamic sym
     except (KeyError, ValueError, IndexError, struct.error): return {}
 
 def imports(exefs, mod='main'): return {s for s, defined, _ in dynsyms(load(os.path.join(exefs, mod))) if not defined}
-def exports(exefs, mod='sdk'): return {s for s, defined, bind in dynsyms(load(os.path.join(exefs, mod))) if defined and bind in (1, 2)}
+def exports(exefs, mod='sdk'):   # {} when the game has no such module: the SDK can be linked into main, or main only loads an NRO payload (wine-nx ports)
+    return set() if not os.path.isfile(os.path.join(exefs, mod)) else {s for s, defined, bind in dynsyms(load(os.path.join(exefs, mod))) if defined and bind in (1, 2)}
 
 def area(s):
     m = re.match(r'_ZN(?:K)?2nn(\d+)(\w+)', s)
@@ -74,7 +75,7 @@ if __name__ == '__main__':
     import nso
     try: ia, ib, eb = (set() if A == '-' else imports(A)), imports(B), exports(B)   # A = -: no reference game, compare with the host hooks only
     except nso.Error as e: sys.exit(f'[RED] {e}')
-    print('HLE hooks in host:', len(hooks), '| present in new game sdk exports:', len(hooks & eb))
+    print('HLE hooks in host:', len(hooks), '| present in new game sdk exports:', len(hooks & eb) if os.path.isfile(os.path.join(B, 'sdk')) else 'none (no sdk module: the SDK is linked into main, or main only loads an NRO payload)')
     print('main imports: old game %d, new game %d, shared %d, new-only %d' % (len(ia), len(ib), len(ia & ib), len(ib - ia)))
     new = ib - ia
     by = collections.Counter(area(s) for s in new); allb = collections.Counter(area(s) for s in ib)

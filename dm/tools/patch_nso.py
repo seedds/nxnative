@@ -701,15 +701,30 @@ def rd(o, enc):
     if app == 0x10: v += o
     if app == 0x30: v += ehs
     return v, sz
-_, penc, cenc, tenc = IMG[ehs:ehs + 4]
-o = ehs + 4
-_, s = rd(o, penc); o += s
-nfde, s = rd(o, cenc); o += s
 starts = set()
-for _ in range(nfde):
-    a, s = rd(o, tenc); o += s
-    _, s = rd(o, tenc); o += s
-    starts.add(a)
+hdr = IMG[ehs:ehs + 4]
+if hdr[0] == 1 and hdr[1] & 0xF and hdr[2] & 0xF and hdr[3] & 0xF:   # the binary-search table a Nintendo linker writes: version 1 and every encoding named
+    _, penc, cenc, tenc = hdr
+    o = ehs + 4
+    _, s = rd(o, penc); o += s
+    nfde, s = rd(o, cenc); o += s
+    for _ in range(nfde):
+        a, s = rd(o, tenc); o += s
+        _, s = rd(o, tenc); o += s
+        starts.add(a)
+else:   # no table: a homebrew toolchain links without --eh-frame-hdr and points MOD0's empty eh_frame_hdr range at .eh_frame's CIEs (this fork's wine-nx loaders). The FDEs carry the same boundaries.
+    seen, enc, o = False, 0x1B, ehs
+    while o + 8 <= len(IMG):
+        ln = struct.unpack_from('<I', IMG, o)[0]
+        if ln == 0 or o + 4 + ln > len(IMG): break
+        if struct.unpack_from('<I', IMG, o + 4)[0] == 0:   # a CIE: its zR augmentation names the FDE's pointer encoding
+            end = IMG.find(b'\0', o + 9, o + 4 + ln); aug = IMG[o + 9:end] if end != -1 else b''
+            if b'z' in aug:
+                zl = IMG[end + 3]; augd = IMG[end + 4:end + 4 + zl]
+                if b'R' in augd: seen, enc = True, augd[0]
+        elif seen and enc == 0x1B:   # FDE: the sdata4 pcrel initial location of the function it describes
+            starts.add(o + 8 + struct.unpack_from('<i', IMG, o + 8)[0])
+        o += 4 + ln
 starts = sorted(x for x in starts if x < TEXT_END)
 
 # ---- Linear scan to find all rewrite points (not relying on register read/write reports) ----

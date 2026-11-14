@@ -101,6 +101,46 @@ static int open_run(NSString *root) {
     return failed != 0;
 }
 
+// The app-folder cleanup runs before the first serializer. Exercise its snapshot, per-app lock and remover in an isolated folder without requiring a Metal device.
+static int cache_clean_tests(NSString *root) {
+    NSString *owner = [root stringByAppendingPathComponent:@"ga-clean-owner"];
+    NSString *cache = [owner stringByAppendingPathComponent:@"com.apple.gpuarchiver"];
+    NSString *old1 = [cache stringByAppendingPathComponent:@"gpuarchiver-old1"];
+    NSString *old2 = [cache stringByAppendingPathComponent:@"gpuarchiver-old2"];
+    NSString *other = [cache stringByAppendingPathComponent:@"unrelated"];
+    NSString *other_file = [other stringByAppendingPathComponent:@"state"];
+    NSString *file = [cache stringByAppendingPathComponent:@"gpuarchiver-file"];
+    NSString *link = [cache stringByAppendingPathComponent:@"gpuarchiver-link"];
+    put([old1 stringByAppendingPathComponent:@"state"], @"old");
+    put([old2 stringByAppendingPathComponent:@"state"], @"old");
+    put(other_file, @"keep"); put(file, @"keep");
+    if (symlink(other.fileSystemRepresentation, link.fileSystemRepresentation)) { fprintf(stderr, "cache cleanup: symlink fixture failed (%s)\n", strerror(errno)); return 1; }
+
+    int a, b, c, d;
+    NSSet<NSString *> *old = ga_claim(cache, &a), *want = [NSSet setWithObjects:@"gpuarchiver-old1", @"gpuarchiver-old2", nil];
+    EXPECT("cache cleanup: first copy snapshots only old directories", 1, a >= 0 && [old isEqualToSet:want]);
+    NSString *late = [cache stringByAppendingPathComponent:@"gpuarchiver-late"];
+    EXPECT("cache cleanup: post-snapshot directory created", 1, [NSFileManager.defaultManager createDirectoryAtPath:late withIntermediateDirectories:NO attributes:nil error:nil]);
+    EXPECT("cache cleanup: second copy takes shared lock and snapshots none", 1, ga_claim(cache, &b) == nil && b >= 0);
+    close(a);
+    EXPECT("cache cleanup: third copy keeps live second copy's folders", 1, ga_claim(cache, &c) == nil && c >= 0);
+    close(b); close(c);
+    NSSet<NSString *> *again = ga_claim(cache, &d);
+    EXPECT("cache cleanup: a later copy sees old and late directories", 3, again.count);
+    close(d);
+
+    EXPECT("cache cleanup: removes only snapshotted directories", 2, ga_remove(cache, old));
+    struct stat st;
+    EXPECT("cache cleanup: old directory removed", 0, lstat(old1.fileSystemRepresentation, &st) == 0);
+    EXPECT("cache cleanup: unrelated directory retained", 1, [NSFileManager.defaultManager fileExistsAtPath:other_file]);
+    EXPECT("cache cleanup: matching regular file retained", 1, [NSFileManager.defaultManager fileExistsAtPath:file]);
+    EXPECT("cache cleanup: matching symlink retained", 1, lstat(link.fileSystemRepresentation, &st) == 0 && S_ISLNK(st.st_mode));
+    EXPECT("cache cleanup: directory created after snapshot retained", 1, [NSFileManager.defaultManager fileExistsAtPath:late]);
+    EXPECT("cache cleanup: no folder means no lock", 1, ga_claim(nil, &d) == nil && d < 0);
+    printf("t_pso_prewarm cache cleanup: %d checks, %d failed\n", checks, failed);
+    return failed != 0;
+}
+
 int main(int argc, char **argv) { @autoreleasepool {
     alarm(240);
     unsetenv("DM_NVN_HILITE"); unsetenv("DM_NVN_MAGSCAN"); unsetenv("DM_PSO_RECORD"); unsetenv("DM_PSO_USER"); unsetenv("DM_SAVE"); setenv("DM_NVN_PREDICT", "0", 1);
@@ -113,6 +153,7 @@ int main(int argc, char **argv) { @autoreleasepool {
     if (argc >= 3 && !strcmp(argv[1], "--open")) { mtl_init(); shmap_load(); return open_run(@(argv[2])); }
     char tmp[PATH_MAX]; snprintf(tmp, sizeof tmp, "%s/t_pso_prewarm.XXXXXX", getenv("TMPDIR") ?: "/tmp"); if (!mkdtemp(tmp)) abort();
     NSString *root = @(tmp), *msl = [root stringByAppendingFormat:@"/msl/b-%s", DMSH_CHAIN], *tables = [root stringByAppendingPathComponent:@"tables"];
+    if (argc >= 2 && !strcmp(argv[1], "--cache-only")) { int r = cache_clean_tests(root); [NSFileManager.defaultManager removeItemAtPath:root error:nil]; return r; }
     if (!fixtures(msl, tables)) { printf("t_pso_prewarm: no Metal compiler (xcrun metal), not run\n"); [NSFileManager.defaultManager removeItemAtPath:root error:nil]; return 0; }
     setenv("DM_PSO_ARCHIVE", "off", 1); setenv("DM_MSL_DIR", [root stringByAppendingPathComponent:@"msl"].UTF8String, 1); setenv("DM_NVN_SHMAP", [tables stringByAppendingPathComponent:@"shader_map.tsv"].UTF8String, 1); setenv("DM_PSO_MANIFEST", "off", 1);
     mtl_init(); shmap_load();

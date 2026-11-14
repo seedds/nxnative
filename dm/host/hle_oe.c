@@ -351,6 +351,15 @@ static int gfx_scale(void) { const char *e = getenv("DM_GFX_SCALE"); int v = e ?
 HLE_FORCE("_ZN2nn2oe23GetCurrentGraphicsScaleEv", "graphics scale (Switch 2, through am): 0, the whole GPU (DM_GFX_SCALE sets 1 or 2)", int, h_oe_GfxScale, void) { return gfx_scale(); }
 HLE_FORCE("_ZN2nn2oe42SetGraphicsScaleChangedNotificationEnabledEb", "graphics scale change notification (Switch 2, through am); the host's scale never changes",
           void, h_oe_GfxScaleNotify, unsigned on) { (void)on; }
+// The GPU time the application used between two ticks (Switch 2 SDKs; Nintendo Switch 2 Welcome Tour asks each frame, main+0x30a83c). The SDK's own (gs::sdk::QueryApplicationGpuTimeSpan)
+// locks the gs graphics server's context, which the host does not have (null in os::SdkMutexType::Lock, as SetGraphicsFrameLengthMode below). The host has no per-application GPU
+// accounting: success and a fixed 8 ms, under a 60 fps frame, so a game that sizes its picture by it stays at full size, and a span that is not 0 takes no divide or "not
+// measured" path (the game reads the span only on success)
+HLE_FORCE("_ZN2nn2oe27QueryApplicationGpuTimeSpanEPNS_8TimeSpanEmm", "application GPU time between two ticks: a fixed 8 ms, no accounting on the host", Result, h_oe_GpuTimeSpan, int64_t *out, uint64_t from, uint64_t to) {
+    static atomic_int once; if (!atomic_exchange(&once, 1)) LOG("oe::QueryApplicationGpuTimeSpan %#llx..%#llx: a fixed 8 ms (the host has no per-application GPU time)", (unsigned long long)from, (unsigned long long)to);
+    if (out) *out = 8000000;   // nn::TimeSpan: nanoseconds
+    return RES_OK;
+}
 // The frame length the game aims at (Switch 2 SDKs): oe::SetGraphicsTargetFrameRate maps up to 59 fps to mode 1, up to 119 to mode 2 and above to mode 3, SetGraphicsTargetFrameRateAuto
 // to mode 0, and both call this, which locks the gs graphics server's context and sends it the mode. The host has no graphics server (nv::InitializeGraphics), so the context is null and
 // the lock crashed: Hyrule Warriors: Age of Imprisonment sets 60 / its present interval at boot (main+0x1e5d244). The host paces by the window's present interval, so the mode is only noted

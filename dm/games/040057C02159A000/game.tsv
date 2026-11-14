@@ -1,0 +1,36 @@
+# Nintendo Switch 2 Welcome Tour (Switch 2, update v262144). In bring-up
+# NintendoWare's Bezel Engine, SDK 20.5.29 built for the Switch 2 (Ounce), NVN2; modules main + subsdk0, subsdk1 (movie), subsdk3 + sdk (subsdk2 and subsdk4, C / libc, are not loaded:
+# main takes nothing from them the host does not supply). Started from dm/games/profile_guess.py's profile; the memory below was changed by hand (see the note).
+
+# ---- Identity ----
+title_id	040057C02159A000
+program_id	040057C02159A000
+
+# ---- App ----
+name	Nintendo Switch 2 Welcome Tour
+ipa	WelcomeTour.ipa
+app_category	public.app-category.games
+
+# ---- Versions ----
+build	v262144	v262144	main=6e3d11763a988c6b947510e0ae08ad00	subsdk0=4231539cc2c921bf968abf05ffd2cbab	subsdk1=d314fe6517f644ccf25d152ff194d3e1	subsdk3=23679a6598fb74093de7fcede0c6e5bd	sdk=d743946430d5252672cb63013b73a0ea
+package	v262144
+shader_versions	v262144
+
+# ---- Files ----
+modules	main subsdk0 subsdk1 subsdk3 sdk
+romfs_marker	Archive/flow~flow100.ounce.bea
+zip_store	.bea:.bfstm:.mp4:.metallib
+
+# ---- Memory ----
+# The Switch 2's 9 GB, as Splatoon Raiders and Star Fox have it: 256 MB in front + alias region + 256 MB stack region + heap region. The guess (a 5 GB block with a 4.4 GB alias region
+# and a 1 GB pool) ran out at boot: the Bezel Engine's allocator found no room and stopped on its NotNull check
+mem_reserve	0x550000000
+mem_alias	0x400000000
+mem_stack	0x10000000
+app_pool	0x240000000
+# the NPDM declares 16 MB of system resource, so virtual address memory is on
+sys_resource	0x1000000
+
+# ---- Shader split ----
+shader_groups	/movie/=movie /Archive/=archive /stream/=stream /nro/=nro /.nrr/=nrr
+shader_note	040057C02159A000 shaders

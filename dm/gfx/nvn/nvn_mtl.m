@@ -10912,6 +10912,7 @@ static uint64_t pool_stand(int id_, int dtt) {
     return r->stand && r->stand_tt1 - 1 == dtt ? r->stand_rid : 0;
 }
 // The stand-ins that waited (pool_stand), into the tables in place where the entry is still the dummy. Once a submission; caller holds g_rmu
+static inline void pr_log(const pool_snap *q, uint32_t at, uint64_t v);   // see PR_N
 static void pool_stand_scan(void) {
     uint64_t f = atomic_load(&g_cur_frame); if (f != g_stand_frame) { g_stand_frame = f; g_stand_frame_n = 0; }
     unsigned words = MIN((unsigned)g_ntreg / 32 + 1, (unsigned)POOL_SEEN_WORDS);
@@ -10927,7 +10928,7 @@ static void pool_stand_scan(void) {
             for (int k = 0; k < POOL_SNAPS; k++) { pool_snap *q = &g_psnap[k]; int at = id_ - q->base;
                 if (!q->buf || q->samp || at < 0 || (uint32_t)at >= *(uint32_t *)q->buf.contents || q->dtt != r->stand_tt1 - 1) continue;
                 uint64_t *e = (uint64_t *)((uint8_t *)q->buf.contents + DMSH_POOL_HEAD);
-                if (e[at] == e[*(uint32_t *)q->buf.contents]) e[at] = r->stand_rid; }
+                if (e[at] == e[*(uint32_t *)q->buf.contents]) { e[at] = r->stand_rid; pr_log(q, (uint32_t)at, r->stand_rid); } }
         }
 }
 // A first read of an ID whose texture is not made: what it found. DM_NVN_POOL_FIRST=1 logs each (up to 32 a frame); the totals go to the log every 300 frames in which they changed
@@ -10980,7 +10981,7 @@ static void pool_seen_scan(void) {
                     if (!pool_seen_t(id_, q->dtt)) continue;
                     er = pool_bridge_pair((int)tt, q->dtt) ? pool_fit(id_, (__bridge id<MTLTexture>)tv, q->dtt) : 0;
                     if (!er) { pool_type_note(id_, (int)tt, q->dtt); continue; } }
-                ((uint64_t *)((uint8_t *)q->buf.contents + DMSH_POOL_HEAD))[at] = er;
+                ((uint64_t *)((uint8_t *)q->buf.contents + DMSH_POOL_HEAD))[at] = er; pr_log(q, (uint32_t)at, er);
                 if (trans) { ids_push(&q->trans, id_); if (!q->sub) q->sub = g_sub_serial; } }   // a view of a retired registration goes at this submission's end, so the next one takes it again (pool_gpu)
         }
     }
@@ -11003,6 +11004,35 @@ static void pool_table_give(id<MTLBuffer> b) {
         int o = 0; for (int i = 1; i < POOL_SPARES; i++) if (g_pool_spare[i].fence < g_pool_spare[o].fence) o = i;
         defer_obj_release(g_pool_spare[o].buf); g_pool_spare[o] = g_pool_spare[--g_npool_spare]; g_pool_spare[g_npool_spare].buf = nil; }
     g_pool_spare[g_npool_spare].buf = b; g_pool_spare[g_npool_spare].fence = g_fence + 1; g_npool_spare++;
+}
+// A patched table goes into a new buffer, as draws already encoded read the old one: with a table per texture type (pool_fit) Ocarina of Time patched about 30 tables a frame
+// of 33,024 IDs, about 8 MB of copies on the replay thread, which left the GPU waiting at its slow spot (about 0.3 ms of a frame on an M1). Each table keeps its last buffers
+// (PR_N) and a log of the entries written since (PR_LOG): a patch takes one the GPU has finished with and writes the logged entries into it, and copies the table whole only
+// when none is free or the log has moved past it. Every write into a table is logged: the patches' and the in-place ones (pool_seen_scan, pool_stand_scan)
+enum { PR_N = 16, PR_LOG = 32768 };
+static struct { __strong id<MTLBuffer> b[PR_N]; uint64_t fence[PR_N], lpos[PR_N]; uint32_t li[PR_LOG]; uint64_t lv[PR_LOG]; uint64_t ln; } g_pr[POOL_SNAPS];
+static uint64_t g_pr_reused, g_pr_copied, g_pr_entries;
+static inline void pr_log(const pool_snap *q, uint32_t at, uint64_t v) { int k = (int)(q - g_psnap); g_pr[k].li[g_pr[k].ln % PR_LOG] = at; g_pr[k].lv[g_pr[k].ln % PR_LOG] = v; g_pr[k].ln++; }
+static void pr_reset(const pool_snap *q) { int k = (int)(q - g_psnap); for (int i = 0; i < PR_N; i++) { if (g_pr[k].b[i]) pool_table_give(g_pr[k].b[i]); g_pr[k].b[i] = nil; } g_pr[k].ln = 0; }
+// A buffer for the next version of q's table, holding what q->buf holds now (the caller writes the patch's entries after)
+static id<MTLBuffer> pr_take(const pool_snap *q) {
+    int k = (int)(q - g_psnap), best = -1; uint64_t done = g_done, ln = g_pr[k].ln;
+    for (int i = 0; i < PR_N; i++) { id<MTLBuffer> c = g_pr[k].b[i];
+        if (c && g_pr[k].fence[i] <= done && c.length == q->buf.length && ln - g_pr[k].lpos[i] <= PR_LOG && (best < 0 || g_pr[k].lpos[i] > g_pr[k].lpos[best])) best = i; }
+    if (best < 0) { id<MTLBuffer> b = pool_table_take(q->buf.length); memcpy(b.contents, q->buf.contents, q->buf.length); g_pr_copied++; return b; }
+    id<MTLBuffer> b = g_pr[k].b[best]; g_pr[k].b[best] = nil; uint64_t *e = (uint64_t *)((uint8_t *)b.contents + DMSH_POOL_HEAD);
+    memcpy(b.contents, q->buf.contents, DMSH_POOL_HEAD);   // the head: count and the seen bitmap's address
+    for (uint64_t j = g_pr[k].lpos[best]; j < ln; j++) e[g_pr[k].li[j % PR_LOG]] = g_pr[k].lv[j % PR_LOG];
+    g_pr_entries += ln - g_pr[k].lpos[best]; g_pr_reused++;
+    if ((g_pr_reused + g_pr_copied) % 20000 == 0) MLOG("pool table patches: %llu into a finished buffer of the table (%.1f entries written each), %llu copied whole", (unsigned long long)g_pr_reused, (double)g_pr_entries / (double)(g_pr_reused ? g_pr_reused : 1), (unsigned long long)g_pr_copied);
+    return b;
+}
+// q's old buffer after a patch, from log position lpos (where the patch's own entries begin): kept for a later patch once the work that may read it has completed
+static void pr_retire(const pool_snap *q, id<MTLBuffer> old, uint64_t lpos) {
+    int k = (int)(q - g_psnap), slot = -1;
+    for (int i = 0; i < PR_N && slot < 0; i++) if (!g_pr[k].b[i]) slot = i;
+    if (slot < 0) { slot = 0; for (int i = 1; i < PR_N; i++) if (g_pr[k].lpos[i] < g_pr[k].lpos[slot]) slot = i; pool_table_give(g_pr[k].b[slot]); }
+    g_pr[k].b[slot] = old; g_pr[k].fence[slot] = g_fence + 1; g_pr[k].lpos[slot] = lpos;
 }
 // One entry of a pool table, as the walk takes it: the resource ID of what the ID holds (0: nothing of the type, or a texture not made). gone counts IDs without storage, and *dead is set for
 // one whose storage does not exist (yet): one marked gone stays so until it is registered again, which is noted. left / left_req count the textures past limit (what this frame may still
@@ -11076,7 +11106,7 @@ static uint64_t pool_gpu(int samp, int dtt, int dpf, int base, __unsafe_unretain
         if (!known) { g_stat_pool_nopatch[3]++; break; }
         if (nid >= POOL_IDS_MAX) { g_stat_pool_nopatch[0]++; break; }
         uint64_t *e = (uint64_t *)((uint8_t *)p->buf.contents + DMSH_POOL_HEAD), dummy = e[nn], room = samp ? UINT64_MAX : pool_room(), spent = g_walk_spent;
-        int gone = 0, left = 0, left_req = 0; id<MTLBuffer> b = nil; uint64_t *be = NULL;
+        int gone = 0, left = 0, left_req = 0; id<MTLBuffer> b = nil; uint64_t *be = NULL; uint64_t lpos0 = 0;
         pool_ids nd = {0}, nt = {0}; ids_begin(0); ids_begin(1);
         if (!pools) ids_keep(0, &nd, &p->dead);    // not taken again: they stay on the list for the next pool change
         if (!stale) ids_keep(1, &nt, &p->trans);   // this submission's views, still good
@@ -11087,14 +11117,14 @@ static uint64_t pool_gpu(int samp, int dtt, int dpf, int base, __unsafe_unretain
             if (d) ids_add(0, &nd, ids[k]);
             if (t) ids_add(1, &nt, ids[k]);
             if (r == (be ? be[i] : e[i])) continue;
-            if (!b) { b = pool_table_take(p->buf.length); memcpy(b.contents, p->buf.contents, p->buf.length); be = (uint64_t *)((uint8_t *)b.contents + DMSH_POOL_HEAD); }
-            be[i] = r;
+            if (!b) { b = pr_take(p); be = (uint64_t *)((uint8_t *)b.contents + DMSH_POOL_HEAD); lpos0 = g_pr[p - g_psnap].ln; }
+            be[i] = r; pr_log(p, (uint32_t)i, r);
         }
         g_stat_pool_pchg += pools; g_stat_pool_schg += stale; free(p->dead.v); free(p->trans.v);
         p->reg = rg; p->ser = sg; p->sub = nt.n ? g_sub_serial : 0; p->dead = nd; p->trans = nt;
         if (left) { p->left += left; p->left_req += left_req; p->frame = atomic_load(&g_cur_frame); }   // textures past this frame's room: the walk goes on next frame, as for its own
         if (!b) { g_stat_pool_kept++; *out = p->buf; return p->gpu; }
-        pool_table_give(p->buf); p->buf = b; p->gpu = b.gpuAddress;
+        pr_retire(p, p->buf, lpos0); p->buf = b; p->gpu = b.gpuAddress;
         g_psnap_gen++; g_stat_pool_patched++;
         *out = b; return p->gpu;
     } while (0);
@@ -11120,7 +11150,7 @@ static uint64_t pool_gpu(int samp, int dtt, int dpf, int base, __unsafe_unretain
         e[i] = r ? r : dummy; real += r != 0;
     }
     e[n] = dummy;
-    pool_table_give(p->buf); free(p->dead.v); free(p->trans.v);
+    pr_reset(p); pool_table_give(p->buf); free(p->dead.v); free(p->trans.v);
     // Retired registrations drop their views at submission end; their resource IDs cannot outlive that submission (trans, taken again by the next one)
     *p = (pool_snap){b, b.gpuAddress, rg, sg, atomic_load(&g_cur_frame), nt.n ? g_sub_serial : 0, samp, dtt, dpf, base, left, left_req, nd, nt, samp || g_walk_over};
     g_psnap_gen++;

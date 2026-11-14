@@ -6,6 +6,9 @@
 // multisampled rule the rectangle 4 pixels across it, pixel for pixel
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
+#import <spawn.h>
+#import <sys/wait.h>
+extern char **environ;
 static int checks, failed;
 #define EXPECT(name, want, got) do { long w = (want), g = (got); checks++; if (w != g) { fprintf(stderr, "%s: expected %ld, got %ld\n", name, w, g); failed++; } } while (0)
 static NSString *k_vs =
@@ -49,10 +52,12 @@ int main(void) { @autoreleasepool {
     dev = MTLCreateSystemDefaultDevice(); q = [dev newCommandQueue]; NSError *e = nil;
     char dir[] = "/tmp/t_wline.XXXXXX"; if (!mkdtemp(dir)) return 1;
     NSString *in = [@(dir) stringByAppendingPathComponent:@"v.metal"], *out = [@(dir) stringByAppendingPathComponent:@"vp.metal"];
-    [k_vs writeToFile:in atomically:NO encoding:NSUTF8StringEncoding error:nil];
-    char cmd[2048]; snprintf(cmd, sizeof cmd, "python3 -c \"import sys; sys.path.insert(0, '../tools'); import dmsh_pull; v, i = dmsh_pull.variant(open(sys.argv[1]).read()); assert i['entry_wl'] == 'main0_wl', i; open(sys.argv[2], 'w').write(v)\" '%s' '%s'", in.UTF8String, out.UTF8String);
-    if (system(cmd)) { fprintf(stderr, "dmsh_pull.variant failed\n"); return 1; }
+    if (!in || !out || ![k_vs writeToFile:in atomically:NO encoding:NSUTF8StringEncoding error:nil]) return 1;
+    char *const argv[] = {"python3", "-c", "import sys; sys.path.insert(0, '../tools'); import dmsh_pull; v, i = dmsh_pull.variant(open(sys.argv[1]).read()); assert i['entry_wl'] == 'main0_wl', i; open(sys.argv[2], 'w').write(v)", (char *)in.UTF8String, (char *)out.UTF8String, NULL};
+    pid_t pid; int status = 0;
+    if (posix_spawnp(&pid, "python3", NULL, NULL, argv, environ) || waitpid(pid, &status, 0) != pid || !WIFEXITED(status) || WEXITSTATUS(status)) { fprintf(stderr, "dmsh_pull.variant failed\n"); return 1; }
     NSString *pull = [NSString stringWithContentsOfFile:out encoding:NSUTF8StringEncoding error:nil];
+    if (!pull) return 1;
     [NSFileManager.defaultManager removeItemAtPath:@(dir) error:nil];
     MTLCompileOptions *o = [MTLCompileOptions new]; o.preserveInvariance = YES;
     id<MTLLibrary> lp = [dev newLibraryWithSource:pull options:o error:&e], lf = lp ? [dev newLibraryWithSource:k_fs options:o error:&e] : nil;

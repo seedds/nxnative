@@ -55,6 +55,7 @@ static void check(int which) {
     strcpy(g_mod[0].build_id, "94ceae325c205c4b9d6f7235552f28fd");
     setenv("DM_FPS_TARGET", which == 27 ? "0" : which == 26 ? "120" : which >= 25 ? "60" : which == 22 || which == 24 ? "60" : which >= 19 ? "120" : which == 1 || which == 10 || which == 18 ? "30" : which == 2 || which == 11 ? "0" : "60", 1);
     if (which == 20) test_fps_max = 60;
+    if (which >= 30) setenv("DM_FPS_TARGET", which == 31 ? "120" : which == 32 ? "90" : which == 33 ? "100" : "60", 1);
     int32_t *unity = (int32_t *)(base + 0x4afc868);
     *unity = which == 1 ? 60 : which == 4 ? -1 : which == 5 ? 0 : 30;
     uint8_t object[0x500] = {0};
@@ -77,6 +78,10 @@ static void check(int which) {
     } else if (which == 14) {
         strcpy(g_mod[0].build_id, "a48c0de3bc353efa0e4d359bde05ef24");
         *(uintptr_t *)(base + 0xda20e38) = (uintptr_t)object;
+        double *d = (double *)(object + 8); d[0] = d[1] = 30;
+    } else if (which >= 30) {
+        strcpy(g_mod[0].build_id, "570dc9f1750fa7ea9df20b95b482d039");
+        *(uintptr_t *)(base + 0xda450d8) = (uintptr_t)object;
         double *d = (double *)(object + 8); d[0] = d[1] = 30;
     } else if (which == 15 || which == 16) {
         strcpy(g_mod[0].build_id, "0123456789abcdef0123456789abcdef");
@@ -127,6 +132,15 @@ static void check(int which) {
     if (which & 1) assert(dm_fps_lock_engine() == engine);   // the graphics layer's present cap may ask before the first present (the acquire)
     dm_fps_lock_tick();
     assert(dm_fps_lock_engine() == engine);
+    if (which >= 30) {
+        double *d = (double *)(object + 8);
+        if (which == 32) assert(d[0] == 30 && d[1] == 30 && writes == 0);
+        else {
+            int target = which == 31 ? 120 : which == 33 ? 100 : 60;
+            assert(fabs(d[0] - 1000.0 / (1000.0 / target - 0.5)) < 0.01 && d[1] == target && writes == 2);
+        }
+        munmap(base, len); return;
+    }
     if (which == 19) {   // 120: the target follows the hold, so the game's step stays what the screen shows; the game setting its own 30 again changes nothing
         int32_t *t = (int32_t *)(object + 0x1dc);
         assert(*t == 120);
@@ -185,7 +199,7 @@ static void check(int which) {
         sync[0] = sync[1] = 2; dm_fps_lock_tick();
         assert(sync[0] == 1 && sync[1] == 1 && writes == 4);
     } else if (which == 10) assert(sync[0] == 2 && sync[1] == 2 && writes == 2);
-    else if (which == 14) { double *d = (double *)(object + 8); assert(d[0] == 60 && d[1] == 60 && writes == 2); }
+    else if (which == 14) { double *d = (double *)(object + 8); assert(fabs(d[0] - 1000.0 / (1000.0 / 60 - 0.5)) < 0.01 && d[1] == 60 && writes == 2); }
     else if (which == 15) {
         assert(*(float *)(object + 0x34) == 60 && *(int32_t *)(object + 0x38) == 60 && writes == 2);
         dm_fps_lock_tick(); assert(writes == 2);
@@ -209,7 +223,7 @@ static void check(int which) {
 
 int main(void) {
     // Each process starts the production one-time initialization with a fresh build and target.
-    for (int i = 0; i < 30; i++) {
+    for (int i = 0; i < 34; i++) {
         pid_t p = fork(); assert(p >= 0);
         if (!p) { check(i); _exit(0); }
         int status; assert(waitpid(p, &status, 0) == p); assert(WIFEXITED(status) && WEXITSTATUS(status) == 0);

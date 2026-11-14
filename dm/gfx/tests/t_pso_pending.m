@@ -337,6 +337,39 @@ static void test_nil_prediction_falls_back_then_predicts(void) {
     g_exec_next = NULL; reset_queue(); reset_pso_cache();
 }
 
+// Every later draw of the submission that would wait is built at once, beyond the speculative budget, while the gate holds them in the compiler
+static void test_burst_admits_every_waiting_draw(void) {
+    reset_queue(); reset_pso_cache(); state_reset();
+    GateDevice *dev = [[GateDevice alloc] initBlockingThrough:100 nilCall:0]; g_dev = (id<MTLDevice>)(id)dev;
+    [dev releaseThrough:1];   // the demanded draw's own build, on the submit thread
+    enum { NP = PSO_PREDICT_BUDGET + 2 };
+    NvProg *progs[NP + 1]; prog_t ctl[NP + 1]; pso_key keys[NP + 1];
+    uint8_t stream[512] = {0}; size_t used = 0;
+    for (int i = 0; i <= NP; i++) {
+        NvShader *vs = [NvShader new], *fs = [NvShader new];
+        snprintf(vs->key, sizeof vs->key, "burst-vs%d", i); snprintf(fs->key, sizeof fs->key, "burst-fs%d", i);
+        progs[i] = [NvProg new]; progs[i]->sh[0] = vs; progs[i]->sh[1] = fs;
+        ctl[i] = (prog_t){.magic = MAGIC('P', 'R', 'O', 'G'), .nstage = 2, .serial = 0x7f020000u + (uint32_t)i};
+        serial_put(ctl[i].serial, progs[i]);
+        pso_key_fill(&keys[i], vs, fs, g_pass.cfmt, g_pass.dfmt, g_pass.sfmt, g_pass.samples, 0);
+        if (!i) continue;
+        p_bind_program bind = {&ctl[i], 3}; append_op(stream, &used, OP_BIND_PROGRAM, &bind, sizeof bind);
+        p_draw draw = {.prim = NVN_DRAW_PRIMITIVE_TRIANGLES, .first = 0, .count = 3, .instances = 1};
+        append_op(stream, &used, OP_DRAW, &draw, sizeof draw);
+    }
+    append_op(stream, &used, OP_END, NULL, 0);
+    g_exec_next = stream; g_sub_serial = 2; g_pp_submit_mark = 0;
+    EXPECT_TRUE("demanded draw builds on the submit thread", pso_get_(progs[0], nil) != nil && [dev callWasOnSubmitter:1]);
+    EXPECT_EQ("every later draw that would wait is admitted", NP, g_pp_kicked);
+    int queued = 0; for (int i = 1; i <= NP; i++) queued += queue_index(&keys[i]) >= 0;
+    EXPECT_EQ("each admitted build is the key of its draw", NP, queued);
+    [dev releaseAll];
+    int done = 0; for (int i = 1; i <= NP; i++) done += pending_done(&keys[i], 5000);
+    EXPECT_EQ("every admitted build completes", NP, done);
+    EXPECT_TRUE("all fake compiler work has drained", drain_queue(5000));
+    g_exec_next = NULL; reset_queue(); reset_pso_cache();
+}
+
 static void test_prediction_restores_scissor(void) {
     state_reset();
     uint8_t stream[64] = {0}; size_t used = 0;
@@ -373,6 +406,7 @@ int main(void) {
         test_two_active_exact_take_and_release();
         test_full_table_reclaims_done_not_running();
         test_nil_prediction_falls_back_then_predicts();
+        test_burst_admits_every_waiting_draw();
         test_prediction_restores_scissor();
         test_prediction_at_first_new_miss();
         printf("== %d PSO pending checks, %d failed ==\n", g_checks, g_failed);

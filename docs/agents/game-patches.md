@@ -31,9 +31,11 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 | `build` → `game` | interval controller: the lower bound and the GPU-time path | frame rate | gap | judgement | 1 | [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md) | sead::GameFrameworkNx's interval controller in this build; Tears of the Kingdom shares sead but not this code |
 | `build` → `game` | job pool wake-up | race | gap | judgement | 1 | [FINAL FANTASY TACTICS - The Ivalice Chronicles](../../dm/games/010038B015560000/README.md) | a lost wake-up in the game's own job pool, not a host or SDK difference |
 | `build` → `game` | malloc region 60 GB → 4 GB and its first arena | address space | gap | judgement | 1 | [Xenoblade Chronicles 3](../../dm/games/010074F013262000/README.md) | Monolith's own allocator; its constants span two functions (a multi-function rule). The cause, an iPhone's address space, is a platform limit |
+| `build` → `game` | native 1440p swapchain: the NRO swapchain object forced to 2560x1440 | rendering | gap | judgement | 1 | [EA SPORTS FC 27](../../dm/games/0100C49025D3E000/README.md) | the swapchain size is a per-build constant in the Frostbite NVN renderer; a future build needs the same instructions verified |
 | `build` → `game` | PhysX completion task release | race | gap | judgement | 1 | [The Legend of Zelda: Link's Awakening](../../dm/games/01006BB00C6F0000/README.md) | a lifetime race in the game's own completion task (its release slot serves this one vtable) |
 | `build` → `game` | render intervals, the forced-interval flag and the render-wait timeout | frame rate | gap | judgement | 1 | [Fire Emblem: Three Houses](../../dm/games/010055D009F78000/README.md) | the game's own tables, flag and timeout |
 | `build` → `game` | task ring push and pop barriers | race | gap | judgement | 1 | [Batman: Arkham Knight](../../dm/games/0100ACD0163D0000/README.md) | a data race in the game's own task ring |
+| `build` → `game` | the native swapchain size rewritten in the renderer NRO at load | rendering | gap | judgement | 1 | [EA SPORTS FC 27](../../dm/games/0100C49025D3E000/README.md) | the Frostbite NVN swapchain constructor and resize are per-build instructions; the host rewrites their four size immediates |
 | `build` → `game` | UE3's GMalloc setup skipped, the host allocator in (hle_uemalloc.c) | address space | gap | judgement | 1 | [Batman: Arkham Knight](../../dm/games/0100ACD0163D0000/README.md) | UE3 inlines the allocator's constructor into the GMalloc setup and has its own vtable layout (25 slots, 32-bit sizes), so the Unreal 4/5 discovery does not apply |
 | `build` → `game` | unused 272-byte slot pool: 4,194,304 → 65,536 slots | address space | gap | judgement | 1 | [Mario + Rabbids® Sparks of Hope](../../dm/games/0100317013770000/README.md) | Sparks of Hope's own init (Kingdom Battle has none) |
 | `build` → `sdk` | VammManager node area and alignment, SDK 4.4.0 (9de92bad) | address space | blocked: one game ships it | judgement | 1 | [sdk_patches.py](../../dm/tools/sdk_patches.py) | an older implementation no rule covers (its large regions aligned to 32 MB, not the rules' 2 MB); a rule once a second game ships it |
@@ -60,7 +62,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 | [Batman: Arkham Knight](#batman-arkham-knight) | 8 | 0 | 0 | 0 | 1 | `build` → `game` ×2 |
 | [DARK SOULS: REMASTERED](#dark-souls-remastered) | 2 | 0 | 0 | 0 | 0 | `build` → `game` |
 | [Diablo II: Resurrected](#diablo-ii-resurrected) | 2 | 0 | 0 | 1 | 0 | `game` |
-| [EA SPORTS FC 27](#ea-sports-fc-27) | 0 | 0 | 0 | 0 | 1 | `build` → `engine` |
+| [EA SPORTS FC 27](#ea-sports-fc-27) | 9 | 0 | 0 | 0 | 15 | `build` → `game` ×2, `build` → `engine` |
 | [FINAL FANTASY TACTICS - The Ivalice Chronicles](#final-fantasy-tactics---the-ivalice-chronicles) | 2 | 0 | 0 | 0 | 0 | `build` → `game` |
 | [Fire Emblem: Three Houses](#fire-emblem-three-houses) | 7 | 0 | 0 | 0 | 0 | `build` → `game` |
 | [Hades II](#hades-ii) | 0 | 0 | 1 | 0 | 0 | `game` |
@@ -279,12 +281,39 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 
 ### EA SPORTS FC 27
 
-[EA SPORTS FC 27](../../dm/games/0100C49025D3E000/README.md), `0100C49025D3E000`.
+[EA SPORTS FC 27](../../dm/games/0100C49025D3E000/README.md), `0100C49025D3E000`, [patches.py](../../dm/games/0100C49025D3E000/patches.py).
 
+- **`build` → `game`**, rendering, gap, judgement: native 1440p swapchain: the NRO swapchain object forced to 2560x1440. The swapchain size is a per-build constant in the Frostbite NVN renderer; a future build needs the same instructions verified
 - **`build` → `engine`**, frame rate, blocked: one Frostbite game here, judgement: Frostbite's frame regulator at a fixed pointer. Engine code other Frostbite games ship (the simulation's own rate is already set by name)
+- **`build` → `game`**, rendering, gap, judgement: the native swapchain size rewritten in the renderer NRO at load. The Frostbite NVN swapchain constructor and resize are per-build instructions; the host rewrites their four size immediates
 
+- **1.8d.6523 `nro0`** `d924da0d…` ([patches.py:8](../../dm/games/0100C49025D3E000/patches.py#L8))
+  - cut `+0x7a310`: swapchain width 2560: cbz w8 → mov w8, #0xa00
+  - cut `+0x7a314`: swapchain width store: ldr w8,[x19,#0x10] → str w8,[x19,#0xc]
+  - cut `+0x7a318`: swapchain height 1440: cbz w8 → mov w8, #0x5a0
+  - cut `+0x7a31c`: swapchain height store: mov x0,x19 → str w8,[x19,#0x10]
+  - cut `+0x7ad00`: resize: ignore a zero width, the object is always forced to 2560x1440
+  - cut `+0x7ad18`: resize: height 1440 instead of x2
+  - cut `+0x7ad1c`: resize: ignore a zero height
+  - cut `+0x7ad24`: resize: width 2560 instead of x1
+  - cut `+0x7ad3c`: resize: recreate even when the requested size equals the current one
+  - host [hle_nro.c:23](../../dm/host/hle_nro.c#L23): runtime NRO patch
+  - host [hle_nro.c:24](../../dm/host/hle_nro.c#L24): runtime NRO patch
+  - host [hle_nro.c:25](../../dm/host/hle_nro.c#L25): runtime NRO patch
+  - host [hle_nro.c:26](../../dm/host/hle_nro.c#L26): runtime NRO patch
+  - host [hle_nro.c:34](../../dm/host/hle_nro.c#L34): k_nro_restore
+  - host [hle_nro.c:35](../../dm/host/hle_nro.c#L35): k_nro_restore
+  - host [hle_nro.c:36](../../dm/host/hle_nro.c#L36): k_nro_restore
+  - host [hle_nro.c:37](../../dm/host/hle_nro.c#L37): k_nro_restore
+  - host [hle_nro.c:38](../../dm/host/hle_nro.c#L38): k_nro_restore
+  - host [hle_nro.c:39](../../dm/host/hle_nro.c#L39): k_nro_restore
+  - host [hle_nro.c:40](../../dm/host/hle_nro.c#L40): k_nro_restore
+  - host [hle_nro.c:41](../../dm/host/hle_nro.c#L41): k_nro_restore
+  - host [hle_nro.c:42](../../dm/host/hle_nro.c#L42): k_nro_restore
+- **1.8d.6523 `main`** `570dc9f1…`
+  - host [hle_fpslock.c:63](../../dm/host/hle_fpslock.c#L63): engine frame limit set to fps_target: FIFA frame regulator
 - **1.8d.310c `main`** `a48c0de3…`
-  - host [hle_fpslock.c:53](../../dm/host/hle_fpslock.c#L53): engine frame limit set to fps_target: FIFA frame regulator
+  - host [hle_fpslock.c:59](../../dm/host/hle_fpslock.c#L59): engine frame limit set to fps_target: FIFA frame regulator
 
 ### FINAL FANTASY TACTICS - The Ivalice Chronicles
 
@@ -341,7 +370,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 - **`build` → `engine`**, frame rate, blocked: one game on that engine here, judgement: Next Level Games' frame limiter target at a fixed address. The studio's engine, which its other games ship
 
 - **1.4.0 `main`** `79e5950f…`
-  - host [hle_fpslock.c:38](../../dm/host/hle_fpslock.c#L38): engine frame limit set to fps_target: NLG frame limiter target
+  - host [hle_fpslock.c:44](../../dm/host/hle_fpslock.c#L44): engine frame limit set to fps_target: NLG frame limiter target
 
 ### Mario + Rabbids® Sparks of Hope
 
@@ -368,7 +397,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 - **`build` → `engine`**, frame rate, blocked: one RE Engine game here, judgement: RE Engine's frame limit at a fixed pointer. Engine code other RE Engine games ship
 
 - **16.0.2 `main`** `c9a3dd77…`
-  - host [hle_fpslock.c:34](../../dm/host/hle_fpslock.c#L34): engine frame limit set to fps_target: RE Engine frame limit
+  - host [hle_fpslock.c:40](../../dm/host/hle_fpslock.c#L40): engine frame limit set to fps_target: RE Engine frame limit
 
 ### Need For Speed™ Hot Pursuit Remastered
 
@@ -379,11 +408,11 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 
 - **1.0.3 `main`** `799d1061…` ([patches.py:7](../../dm/games/010029B0118E8000/patches.py#L7))
   - cut `+0x4835a4`: frame limiter spin: b.gt main+0x483588 → nop (the host paces the frames)
-  - host [hle_fpslock.c:43](../../dm/host/hle_fpslock.c#L43): engine frame limit set to fps_target: Criterion 60 fps mode
-  - host [hle_fpslock.c:44](../../dm/host/hle_fpslock.c#L44): engine frame limit set to fps_target: Criterion frame ticks
-  - host [hle_fpslock.c:45](../../dm/host/hle_fpslock.c#L45): engine frame limit set to fps_target: Criterion frame ticks / 10
-  - host [hle_fpslock.c:46](../../dm/host/hle_fpslock.c#L46): engine frame limit set to fps_target: Criterion 2D game step
-  - host [hle_fpslock.c:47](../../dm/host/hle_fpslock.c#L47): engine frame limit set to fps_target: Criterion 3D game step
+  - host [hle_fpslock.c:49](../../dm/host/hle_fpslock.c#L49): engine frame limit set to fps_target: Criterion 60 fps mode
+  - host [hle_fpslock.c:50](../../dm/host/hle_fpslock.c#L50): engine frame limit set to fps_target: Criterion frame ticks
+  - host [hle_fpslock.c:51](../../dm/host/hle_fpslock.c#L51): engine frame limit set to fps_target: Criterion frame ticks / 10
+  - host [hle_fpslock.c:52](../../dm/host/hle_fpslock.c#L52): engine frame limit set to fps_target: Criterion 2D game step
+  - host [hle_fpslock.c:53](../../dm/host/hle_fpslock.c#L53): engine frame limit set to fps_target: Criterion 3D game step
 
 ### NieR:Automata The End of YoRHa Edition (010056B015FE8000)
 
@@ -402,7 +431,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
   - cut `+0x9bf4d4`: dynamic resolution: optimal frame cost 32.01 -> 16.005 ms at 60 fps (second load)
   - cut `+0x9bf4f8`: dynamic resolution: good frame cost 30 -> 15 ms at 60 fps
   - launcher capabilities: DYNAMIC_RESOLUTION
-  - host [hle_fpslock.c:69](../../dm/host/hle_fpslock.c#L69): frame interval and dynamic-resolution floor
+  - host [hle_fpslock.c:79](../../dm/host/hle_fpslock.c#L79): frame interval and dynamic-resolution floor
 
 ### NieR:Automata The End of YoRHa Edition (0100B8E016F76000)
 
@@ -421,7 +450,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
   - cut `+0x9c08e8`: dynamic resolution lower bound follows the selected preset
   - cut `+0x9c08f4`: dynamic resolution lower bound follows the selected preset
   - launcher capabilities: DYNAMIC_RESOLUTION
-  - host [hle_fpslock.c:70](../../dm/host/hle_fpslock.c#L70): frame interval and dynamic-resolution floor
+  - host [hle_fpslock.c:80](../../dm/host/hle_fpslock.c#L80): frame interval and dynamic-resolution floor
 
 ### Ori and the Will of the Wisps
 

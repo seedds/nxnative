@@ -90,6 +90,7 @@ static inline void dm_applet_leave_(const char *const *name) { (void)name; dm_ap
 extern uint8_t *dm_fps_state;   // frame step state page (loader.c install_fps_state): +0 float target fps, +4 movie flag (dm_movie_playing, written by the host at each present: Tears of the Kingdom's step stub caps its first, undecided steps by it), +0x10 float render scale, +0x18 double game seconds stepped; NULL when the build has none
 extern int dm_fps_step_max;   // loader.c: the largest step the frame step stubs give the game (patch_nso.py ctx.step_max; 0 = FSTEP_MAX)
 int dm_movie_playing(void);   // hle_movie.c: a video decoder of the SDK's movie library handed out a picture in the last half second (the frame step then holds 30 fps)
+int dm_codec_movie_hz(void);   // hle_codec_video.c: the picture rate of an nn::codec video handing out pictures in the last half second, 0 when none (the frame step follows a 60)
 void dm_audio_suspend(int on);
 uint64_t dm_audio_render_calls(void);   // Cumulative sound card callback count (the silent sink is not counted)
 void dm_audio_reset(void);   // iOS media services reset: recreate the AudioUnits (hle_audio.c)

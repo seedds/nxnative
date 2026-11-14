@@ -1,4 +1,12 @@
 name	class	meaning
+DECOMP_DEBUG	diagnostic	When set (any value), the Ghidra script `dm/tools/ghidra/Decompile.java` prints each call instruction it meets with its flow type, fall-through and overrides
+DMSH_CAS	path	The shader build's content-addressed cache folder (`dmsh_build.py`; `dmsh_build_vk.py` uses its `vk/` subfolder); default `<output cache dir>/cas`
+DMSH_PREFILL	path	`<Mac library root>[=<iOS library root>]`, several separated by `:` (`os.pathsep`): `dmsh_build.py` first files the `b-*/` libraries of earlier chain versions under them into its compile cache (the `b-*/` beside the output always are)
+DMSH_STACK	diagnostic	When set (any value), the shader translators (`dmsh_xlate/Program.cs`, `dmsh_xlate_vk/Program.cs`) print the stack trace after each shader's `[RED]` failure line
+DMSH_TEST_GPU	test	`1` with `DMSH_TEST_METAL=1`: `test_image_atomic_bounds.py` also runs the compiled returning-buffer case on the Mac's GPU
+DMSH_TEST_METAL	test	`1`: `test_image_atomic_bounds.py` also compiles and links each generated MSL file with Apple's Metal compiler (Mac)
+DMSH_TEST_METAL_SDKS	test	`macosx` (the default), `iphoneos` or `macosx,iphoneos`: the SDKs `test_image_atomic_bounds.py` compiles the MSL for with `DMSH_TEST_METAL=1`
+DMSH_TEST_XLATE	test	Path of a rebuilt offline shader translator: `test_dmsh_geometry.py` and `test_image_atomic_bounds.py` run their translator cases through it, and skip them when it is unset
 DM_AB	diagnostic	`=<frames>` splits the run into phases of that many frames and alternates every switch set to `ab` (on in the odd phases); logs an `[ab]` line per phase with GPU and frame time and attachment traffic
 DM_ALIAS_SIZE	diagnostic	`=<bytes>` gives the guest an alias region of that size instead of the profile's (at least 256 MB, whole host pages; the heap and stacks stay as they are): `0x1000000000`, the Switch's 64 GB, holds what a game reserves unchanged; the NSP script's address region check sets it (Mac only: an iPhone has no room)
 DM_ALIAS_WINDOWS	diagnostic	`=<MB>` logs every 30 s how much of each window of that size in the alias region is mapped (windows aligned to their size in absolute addresses)
@@ -305,3 +313,57 @@ DM_XCODE_DERIVED_DATA	path	Xcode derived data folder for `build_ipa.sh` (default
 DM_XCODE_PROJECT_DIR	path	Folder of the per-game Xcode project that `build_ipa.sh --prepare-xcode` makes (default `$W/xcode`); the NSP script sets it
 DM_XV_FILE	path	File where the attachment validity ledger keeps the keys it disabled after a violation, read at the next launch
 DM_YIELD_BACKOFF	switch	`0` turns off the yield back-off; `=<cap µs>[:<start µs>]` sets its sleep cap and the run of yields after which it starts (default 250:2000)
+DOTNET	path	The `dotnet` program that runs the Vulkan shader translator `dmsh_xlate_vk.dll` (`dmsh_chain_vk.py`, `dmsh_build_vk.py`, `test_dmsh_vk.py`; the NSP script's Vulkan layer check reads it too); default `dotnet` on `PATH`
+FAKE_BUILD_FAIL	test	When set, `test_port_docker.py`'s stand-in `docker build` fails
+FAKE_DIR	test	The folder in which `test_measure_packs.py`'s stand-in nxaot_host keeps its per-variant run counters
+FAKE_EXIT_	test	`FAKE_EXIT_<output>=<status>`: the exit status of `test_measure_packs.py`'s stand-in nxaot_host for the pack whose guest output is `<output>` (default 0)
+FAKE_FAIL_STEP	test	The `verify` step that fails in `test_port_docker.py`'s stand-in `docker run` (for example `host-ctest-arena`)
+FAKE_IMAGE_MB	test	`=<MiB>` (default 1800): the size of an image `test_port_docker.py`'s stand-in `docker build` makes, taken from the stand-in `df`'s free space
+FAKE_LIBLLVM	test	`1`: `test_port_docker.py`'s stand-in build image has `libLLVM.so.18.1` (the shared nxaot is kept); otherwise the script builds nxaot statically
+FAKE_LOG	test	The file `test_measure_packs.py`'s stand-in nxaot_host appends each call to (variant and pack file), from which the test reads the order of the runs
+FAKE_NXAOT_OLD	test	When set, `test_nsp_x86.py`'s stand-in nxaot prints the usage of an nxaot without `--workers`, `--cache`, `--target`, `--profile` and `--misses`
+FAKE_OUT	test	The JSON file `test_nsp_x86.py`'s stand-in for nxhost-run writes what it was started with into (environment, arguments, working folder)
+FAKE_SPEED	test	`=<seconds>`: the time `test_measure_packs.py`'s stand-in nxaot bakes into a pack, over its `--fake-speed` argument (a variant's environment in the tool's `--b-env`)
+FAKE_STATE	test	The folder holding the state of `test_port_docker.py`'s stand-in `docker` and `df` (the images as JSON, the call log, the free space)
+GAME	switch	The base game title ID for `dm/ios/tools/compile_check.py` and `build_smoke.py` when `DM_GAME` is not set (as `make -C dm/host` and `build_ipa.sh` take it)
+GFXAPI	switch	`nvn`, `vulkan` or `gl`: the packer's graphics API, which `dm/games/settings.py` checks a settings row's `gfxapi:` condition against (unset matches none)
+IOSOUT	path	A folder: `dmsh_build.py` also compiles the same MSL for iOS (iphoneos metallib and reflection) into its `b-<chain version>/`; unset builds the Mac libraries only (the NSP script removes it for a Mac-only build)
+J	switch	`=<n>`: the worker count of `shader_split.py`, `dmsh_build.py`, `dmsh_build_vk.py` and `dmsh_dryrun.py` (default 8; the NSP script sets it to the processor count)
+NXAOT	test	Path of an nxaot executable for the tests that build packs with it (`t_aot_host.c` and `t_second_pack.py`, where `--nxaot` overrides it; `test_aot_manifest.py`); unset, they skip those cases
+NXAOT_CHECK_PROGRAMS	diagnostic	When set (any value), nxaot's summary analysis (`dm/tools/aot/src/analysis/summary.cpp`) runs the interpreter on dynarmic's IR beside each cached program and stops at the first state that differs (the cache's equivalence check)
+NXAOT_DEBUG_REGION	diagnostic	When set (any value), nxaot (`analysis/jumptable.cpp`) logs on standard error why each region it tried for a jump table's `br` was not used
+NXAOT_DEBUG_SUMMARIES	diagnostic	When set (any value), nxaot's summary analysis (`analysis/summary.cpp`) logs each round's progress on standard error
+NXAOT_DUMP_REGION	diagnostic	`=<hex pc of a br>`: nxaot (`analysis/jumptable.cpp`) prints the optimised LLVM IR of every region it lifts for that jump table's `br` on standard error
+NXAOT_JIT_TRACE	diagnostic	When set (any value), the AOT runtime's JIT driver (`dm/tools/aot/src/rt/host.cpp`) logs every JIT run and native call on standard error
+NXAOT_MEM_AVAILABLE_MIB	switch	`=<MiB>`: a test switch (`tests/test_workers.py`): nxaot (`build/pack.cpp`) takes it as the memory available now, in place of Linux's MemAvailable or Windows' available physical memory, when it chooses the compile workers and warns that the analysis may swap
+NXAOT_PACKS	test	Folder of the corpus packs (made by `dm/tools/aot/tests/build_packs.sh`) for the host tests `t_aot_host.c` (`--packs` overrides it), `t_aot_hostfn.c`, `t_aot_module.c` and `t_host_program.c`; unset, CMake's `T_AOT_PACKS`, else they skip
+NXAOT_PROFILE_WEIGHTS	switch	`0`: a test switch: with `--profile`, nxaot (`build/pack.cpp`) uses the samples to choose the tiers only and does not weigh the code at tiers H and H+ (its log says `profile weights: off`); any other value or unset weighs it
+NXAOT_TABLES_IR	switch	When set (any value), a test switch: nxaot (`build/pack.cpp`) builds the tables' object through LLVM IR instead of the MC layer (the object is the same either way; CTest `tables` compares them)
+NXAOT_TABLES_OBJECT	diagnostic	`=<file>`: nxaot (`build/pack.cpp`) also writes a copy of the tables' object there, for CTest `tables` to compare with the `NXAOT_TABLES_IR` build's
+NXAOT_TRACE	diagnostic	When set (any value), nxaot (`build/pack.cpp`) prints each unit's entry on standard error before it compiles it
+NXHOST	switch	Path of another nxhost-run for a port pack: `run.sh` and `run.cmd` (written by `scripts/build_ipa_from_nsp.py`) and the launcher nxlauncher (`dm/launcher/launcher_model.cpp`, `find_host`) start it in place of the launch file's host row or the bundle's `hosts/<title ID>/nxhost-run`
+NXL_FAKE_HOST	test	When set, the launcher tests (`t_launcher_model.cpp`, `t_launcher_window.cpp`) act as nxhost-run (and the packer): they print what they were started with and exit with `NXL_FAKE_STATUS`
+NXL_FAKE_STATUS	test	`=<n>`: the exit status of the launcher tests' stand-in nxhost-run (`NXL_FAKE_HOST`); default 0
+NXNATIVE_TEST_ROOT	test	The folder `test_nsp_mac_app.py` makes its temporary folders in; default the system's temporary folder
+NXPACK	switch	`balanced` or `max`: the pack mode `run.sh` and `run.cmd` (written by `scripts/build_ipa_from_nsp.py`) start, from the launch file's `pack` rows; unset, the first row (the launcher picks the mode in its window instead)
+PYTHON	switch	The Python 3.12 or later that a port bundle's `pack.sh` and `pack.cmd` (written by `scripts/package_port.py`) run the NSP script with; default `python3` (`pack.sh`), `py -3` or `python` (`pack.cmd`)
+REGRESS_GAMES	path	The folder of the games' NSP folders with their Mac builds for `scripts/regress.py` (`--games-dir` overrides it); no default
+REGRESS_ROOT	path	The folder of `scripts/regress.py`'s source trees and reports (`--root` overrides it); no default
+REGRESS_SKIP	switch	Title IDs separated by commas that `scripts/regress.py` leaves out of the games it finds, unless the command names them
+SETTINGS_PLATFORM	switch	`ios` (the default), `mac`, `linux` or `windows`: the platform `dm/games/settings.py` writes the launcher settings for (its rows' `platform:` conditions and `<ios>|<mac>` defaults)
+SPIRV_CROSS	path	The spirv-cross program of the NVN shader chain (`dmsh_chain.py`; the NSP script and `scripts/regress.py` read it too); default the in-repo build `dm/gfx/tools/spirv_cross_bin/spirv-cross` that `dmsh_chain.lock` names
+SPIRV_CROSS_VK	path	The spirv-cross program of the Vulkan shader chain (`dmsh_chain_vk.py`); default `spirv-cross` on `PATH`
+STANDIN_WAIT	test	When set, `test_nsp_mac_app.py`'s stand-in host waits until it is terminated instead of exiting at once
+TBDR_BUDGET_TOOL	test	Path of the `tbdr_budget.py` that `test_tbdr_budget.py` tests; default `dm/gfx/tools/tbdr_budget.py`
+T_AOT_EXIT_BURN_MS	test	`=<ms>` (default 20): the CPU time `t_aot_module --exit` spends on the exiting thread after the destructors, so that the profiler's sampling timer fires during the process's exit
+T_VK_ASTC_QUIET	test	When set, `t_vk_astc` does not print the first texel that differs from lavapipe's decode
+T_VK_C1_DIR	test	The folder `t_vk_c1`'s child processes write their `<case>.res` result files into; the parent sets it
+T_VK_FORMATS_QUIET	test	When set, `t_vk_formats` does not print each texel component outside its tolerance
+T_VK_PCACHE_DIR	test	The folder `t_vk_pipeline_cache`'s child processes write their `<case>.res` result files into; the parent sets it
+T_VK_PRESENT_DUMP	test	`=<folder>`: `t_vk_present` writes each picture it reads back there as `<n>.ppm`, to look at
+T_VK_PREWARM_DIR	test	The folder `t_vk_prewarm`'s child processes write their `<case>.res` result files into; the parent sets it
+WORK	path	The parent folder of `dmsh_build.py`'s and `dmsh_build_vk.py`'s temporary folders; default the system's temporary folder (the NSP script sets it to its work folder)
+XLATE	path	The NVN shader translator `dmsh_build.py` runs; `dmsh_chain.py` fingerprints its folder for the chain version; default the in-repo `dm/gfx/tools/dmsh_xlate_bin/dmsh_xlate`, the build `dmsh_chain.lock` names
+XLATE_DEBUG	switch	`0` turns the shader translator's debug mode off (the AST optimizer runs; `dmsh_build.py`); default `1`. A part of the chain version (`dmsh_chain.py`), so libraries built with another value are not the host's
+XLATE_REDUCED	switch	`1` (the default) lets the shader translator use relaxed precision (`dmsh_build.py`); another value turns it off. A part of the chain version (`dmsh_chain.py`), so libraries built with another value are not the host's
+XLATE_VK	path	The Vulkan shader translator `dmsh_xlate_vk.dll` (`dmsh_chain_vk.py`; the NSP script reads it too); default `build/xlate_vk/bin/dmsh_xlate_vk/release/dmsh_xlate_vk.dll`, the build of docker/README.md

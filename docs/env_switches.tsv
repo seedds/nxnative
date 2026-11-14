@@ -37,6 +37,7 @@ DM_ENV_FILE	path	`=<file>` makes `build_ipa.sh` bake its `KEY=VALUE` lines into 
 DM_ENV_FILE_KEYS	switch	Set by the iOS app and the Mac launcher at launch to the space-separated names an env file set; the settings screen keeps those values and shows them greyed out
 DM_ENV_LAUNCH_KEYS	switch	Set at launch by the Mac launcher (the launcher settings already in the environment) and the iOS app (every DM_* variable already in it) to the space-separated names; the settings screen keeps those values and shows them greyed out
 DM_EXEC_OUT	path	File `oe::ExecuteProgram` records the next program and its parameters in, then the app ends (the iOS app of a game of several programs sets it to `Documents/program.bin`)
+DM_EXFAT_DIR	test	A folder on an exFAT volume: `test_shader_cache.py` also runs `test_on_the_drive` there, where a new cache's file takes another inode at its first write
 DM_FD_LOG	diagnostic	`=<seconds>` logs, every that many seconds, the number and kinds of file descriptors the process has open
 DM_FIXED_TIME	switch	`=<seconds>`: the user clock always returns that time and the host time zone is pinned to UTC, for deterministic comparison
 DM_FOCUS_KEEP	switch	`1` keeps the game in focus while its Mac window is up, whichever app is active (minimizing still counts); `scripts/regress.py` sets it, so another app taking the key window during a run does not pause a game that stops out of focus

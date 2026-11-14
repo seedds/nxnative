@@ -280,6 +280,13 @@ For a replaced DSP renderer the size query keeps the service's work-buffer contr
 - **Fix:** the host logs each output as `audio #N`: the open with its call site, Start / Stop / Close (the first 32 per output), and the callback statistics normally every 2000 of that output's callbacks, through the [watchdog](#periodic-diagnostics-outside-the-audiounit-callback).
 - **Found on:** [Fire Emblem Engage](../../dm/games/0100A6301214E000/README.md).
 
+### An AudioOut at a rate other than 48 kHz
+
+- **Symptom:** the host stops with `AudioOut sample rate <N> not supported (48 kHz only)` as the game opens an AudioOut at another rate.
+- **Cause:** the audout service takes 0 (the default) or 48 kHz and answers any other rate with an error that the SDK hands back to the game, which may then open again at 48 kHz. The host ended the process instead, beside an OutputStream open (`os_open`) that already failed the same request.
+- **Fix:** `au_open_at` logs a `[RED]` line with the call site and returns 0x699, the audio module's unsupported sample rate (module 153, description 3, as in Ryujinx's `Ryujinx.Audio` `ResultCode`), before it allocates anything, so the guest AudioOut stays unopened as after a failed open on hardware.
+- **Found on:** no game in the table yet: found by reading the open path.
+
 ### Checking audio without listening
 
 `DM_AUDIO_DUMP=file` writes the PCM the host plays (16-bit, 48 kHz, stereo). RMS per second, clipping share, spectral flatness (music ≈ 0.1–0.5, white noise ≈ 0.85) and the strongest FFT peaks (they should land on musical notes) tell real music from noise or silence.

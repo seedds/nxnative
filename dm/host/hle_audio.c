@@ -10,6 +10,7 @@
 #include <unistd.h>
 
 enum { FMT_PCM16 = 2, STATE_STARTED = 0, STATE_STOPPED = 1, RATE = 48000 };
+#define RES_AUDIO_UNSUPPORTED_RATE ((3u << 9) | 153u)   // 0x699, the audio module's "unsupported sample rate" (au_open_at)
 enum { BK_NONE, BK_AU, BK_NULL };   // what is consuming an output's queue right now (aout.backend)
 enum { AU_IDLE, AU_STARTING, AU_CANCELED, AU_WAIT_CALLBACK };
 
@@ -410,7 +411,14 @@ static Result au_open_at(void *g, void *ev, const char *name, const uint8_t *par
     static _Atomic int nopen;
     int ch = *(const uint16_t *)(param + 4); int rate = *(const int32_t *)param;
     if (!ch) ch = 2;
-    if (rate && rate != RATE) die("AudioOut sample rate %d not supported (48 kHz only)", rate);
+    // The audout service takes 0 (the default) or 48 kHz and answers any other rate with an error the SDK hands back to the game (Ryujinx's Ryujinx.Audio ResultCode
+    // UnsupportedSampleRate, module 153 description 3), which may then open again at 48 kHz. Dying here ended the host on a request the game can recover from.
+    // Nothing is allocated yet and the guest AudioOut is left unopened, as after a failed open on hardware
+    if (rate && rate != RATE) {
+        char sb[64];
+        LOG("[RED] AudioOut sample rate %d: not supported (48 kHz only), the open fails with 0x%x (call site %s)", rate, RES_AUDIO_UNSUPPORTED_RATE, site(lr, sb, sizeof sb));
+        return RES_AUDIO_UNSUPPORTED_RATE;
+    }
     aout *a = calloc(1, sizeof *a);
     const char *mute = getenv("DM_AUDIO_MUTE"); a->mute = mute && atoi(mute);
     pthread_mutex_init(&a->m, NULL); a->event = ev; a->ch = ch;

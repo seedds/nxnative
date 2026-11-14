@@ -2820,7 +2820,7 @@ static int tex_atomic_alias(id<MTLTexture> base) {
 }
 // DM_SHADOW_DIV=N (2 to 4, default 1 = off): the game's 12288x12288 depth texture, 288 MB, is made N times smaller on each side (12288 / N must stay whole). The game draws into it with viewports and scissors in its own 12288 pixels:
 // state_op divides those by N while that texture is the depth target. The shaders sample it by 0..1 coordinates, so they read the smaller map; shadow edges get coarser. Experimental
-static unsigned shadow_div(void) { static unsigned v; if (!v) { const char *e = getenv("DM_SHADOW_DIV"); int n = e && *e ? atoi(e) : 1; if (n < 1 || n > 4 || (n > 1 && 12288 % n)) { MLOG("[RED] DM_SHADOW_DIV=%s: must be 1 to 4; 1 used", e ? e : ""); n = 1; } v = (unsigned)n; if (n > 1) MLOG("shadow map 12288x12288 made %ux smaller on each side (DM_SHADOW_DIV)", v); } return v; }
+static unsigned shadow_div(void) { static unsigned v; if (!v) { const char *e = getenv("DM_SHADOW_DIV"); int n = e && *e ? atoi(e) : 1; if (n < 1 || n > 5) { MLOG("[RED] DM_SHADOW_DIV=%s: must be 1 to 5; 1 used", e ? e : ""); n = 1; } v = (unsigned)n; if (n > 1) MLOG("shadow map 12288x12288 made %ux smaller on each side (DM_SHADOW_DIV)", v); } return v; }
 static int is_shadow_map(const tex_t *t) { return t->d.width == 12288 && t->d.height == 12288 && t->d.target == NVN_TEXTURE_TARGET_2D && fmt_depth(t->d.format); }
 static MTLTextureDescriptor *tex_desc(const tex_t *t, int packaged) {
     uint32_t pf = 0; uint8_t swz[4];
@@ -2831,7 +2831,7 @@ static MTLTextureDescriptor *tex_desc(const tex_t *t, int packaged) {
     d.pixelFormat = (MTLPixelFormat)pf;
     d.width = t->d.width ? t->d.width : 1; d.height = t->d.height ? t->d.height : 1; d.depth = 1; d.arrayLength = 1;
     d.mipmapLevelCount = t->d.levels ? t->d.levels : 1;
-    if (shadow_div() > 1 && is_shadow_map(t)) { d.width /= shadow_div(); d.height /= shadow_div(); }   // DM_SHADOW_DIV: the 12288x12288 depth texture (a 288 MB shadow map) is made smaller; state_op scales the viewports and scissors aimed at it
+    if (shadow_div() > 1 && is_shadow_map(t)) { d.width = (d.width + shadow_div() - 1) / shadow_div(); d.height = (d.height + shadow_div() - 1) / shadow_div(); }   // DM_SHADOW_DIV: the 12288x12288 depth texture (a 288 MB shadow map) is made smaller; state_op scales the viewports and scissors aimed at it
     switch (t->d.target) {
         // 1D / 1D array are created as one-row 2D / 2D array textures: translated shaders never declare texture1d (0 in all five games' libraries) and always sample them as 2D; a Metal 1D texture bound to a texture2d argument is a type mismatch with undefined reads.
         // Super Mario 3D World + Bowser's Fury's material shaders sample 64x1 R32F 1D lookup tables heavily every frame (on Maxwell a 2D sample of a 1D texture reads that one row)

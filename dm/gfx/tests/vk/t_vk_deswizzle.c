@@ -4,8 +4,11 @@
 // back and must equal the texels written, bit for bit. One case runs its GPU upload in bands of 64 KiB (the scratch reused band after band), one is a linear texture (the GPU
 // path's direct copy from the pool at the texture's stride). Then a 2048 x 2048 RGBA8 texture (16 MiB) is uploaded both ways and timed: lavapipe runs the compute pass on the
 // CPU, so the numbers are a first data point of the two paths' cost on this machine, not a GPU measurement.
-// Checks: two per case (the GPU and the CPU image equal the texels), the GPU path taken and the CPU path taken, the two timings' readbacks, and the validation check
+// Checks: two per case (the GPU and the CPU image equal the texels), the GPU path taken and the CPU path taken, the two timings' readbacks, and the validation check.
+// With the argument "bench" (not a CTest run; validation off): the CPU deswizzle alone (nvn_deswizzle, no Vulkan) of 2048 x 2048 RGBA8, RGBA16F and BC7 textures, the fastest
+// and the median of seven, with a checksum of the texels; then the 16 MiB upload through both paths three times
 #include "t_vk_harness.h"
+#include "nvn_deswizzle.h"
 extern __typeof__(*(NVNT_nvnTextureBuilderSetStride)0) h_nvnTextureBuilderSetStride;
 
 static hv_pool g_p; static size_t g_off = 0;
@@ -84,11 +87,49 @@ static int run_case(const dcase *c, int gpu_band, double *ms_gpu, double *ms_cpu
     return ok;
 }
 
-int main(void) {
+static int cmp_dbl(const void *a, const void *b) { double x = *(const double *)a, y = *(const double *)b; return (x > y) - (x < y); }
+static void bench_cpu(void) {
+    static const struct { int fmt; const char *what; } k[] = {{NVN_FORMAT_RGBA8, "RGBA8 2048x2048 (16 MiB)"}, {NVN_FORMAT_RGBA16F, "RGBA16F 2048x2048 (32 MiB)"},
+                                                             {NVN_FORMAT_BPTC_UNORM, "BC7 2048x2048 (4 MiB)"}};
+    for (size_t i = 0; i < sizeof k / sizeof *k; i++) {
+        nvn_texdesc d = {NVN_TEXTURE_TARGET_2D, k[i].fmt, 0, 0, 2048, 2048, 1, 1, 0, 0};
+        nvn_texlayout lay; nvn_tex_layout(&d, &lay);
+        int bw, bh, bpb = nvn_fmt_bpb(k[i].fmt, &bw, &bh);
+        size_t pitch = (size_t)(2048 / bw) * (size_t)bpb, n = pitch * (size_t)(2048 / bh);
+        uint8_t *lin = malloc(n), *st = calloc(1, (size_t)lay.size), *out = malloc(n);
+        if (!lin || !st || !out) exit(2);
+        for (size_t j = 0; j < n; j++) lin[j] = (uint8_t)rnd();
+        nvn_swizzle(&d, 0, 0, lin, pitch, st);
+        enum { REPS = 7 }; double ms[REPS];
+        for (int r = 0; r < REPS; r++) {
+            uint64_t t0 = plat_now_ns();
+            nvn_deswizzle(&d, 0, 0, st, out, pitch);
+            ms[r] = (double)(plat_now_ns() - t0) / 1e6;
+        }
+        qsort(ms, REPS, sizeof *ms, cmp_dbl);
+        printf("bench deswizzle CPU %-28s fastest %7.2f ms, median %7.2f ms (%5.0f MiB/s at the fastest), %s\n", k[i].what, ms[0], ms[REPS / 2],
+               (double)n / 1048576.0 / (ms[0] / 1000), memcmp(lin, out, n) ? "texels DIFFER" : "texels equal");
+        free(lin); free(st); free(out);
+    }
+}
+
+int main(int argc, char **argv) {
+    int bench_mode = argc > 1 && !strcmp(argv[1], "bench");
+    if (bench_mode) { setenv("DM_VK_VALIDATION", "0", 1); bench_cpu(); }
     const hostvk_dev *dev = hv_up("t_vk_deswizzle");
     hv_device(0);
     NVNqueue q; NVNqueueBuilder qb; memset(&qb, 0, sizeof qb); h_nvnQueueBuilderSetDefaults(&qb); h_nvnQueueBuilderSetDevice(&qb, &g_dev); h_nvnQueueInitialize(&q, &qb);
-    if (!hv_pool_make(&g_p, 64u << 20)) { t("memory pool allocated", 0); return hv_finish(); }
+    if (!hv_pool_make(&g_p, bench_mode ? 112u << 20 : 64u << 20)) { t("memory pool allocated", 0); return hv_finish(); }
+    if (bench_mode) {
+        for (int r = 0; r < 3; r++) {
+            double ms_gpu = 0, ms_cpu = 0;   // fresh storage each run (the pool holds three runs' textures)
+            dcase big = {NVN_TEXTURE_TARGET_2D, NVN_FORMAT_RGBA8, 2048, 2048, 1, 1, 4, 0, "RGBA8 2048x2048 (16 MiB), timed"};
+            run_case(&big, 0, &ms_gpu, &ms_cpu);
+            printf("bench upload of 16 MiB on %s: GPU path %.1f ms, CPU path %.1f ms (deswizzle, staging and copy, waited for)\n", dev->props.deviceName, ms_gpu, ms_cpu);
+        }
+        hv_pool_free(&g_p);
+        return hv_finish();
+    }
     dcase cases[] = {
         {NVN_TEXTURE_TARGET_2D, NVN_FORMAT_R8, 1, 1, 1, 1, 0, 0, "R8 1x1"},
         {NVN_TEXTURE_TARGET_2D, NVN_FORMAT_R8, 37, 23, 1, 3, 1, 0, "R8 37x23, 3 levels, block height 2"},

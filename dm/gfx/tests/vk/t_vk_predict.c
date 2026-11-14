@@ -184,9 +184,10 @@ static void run_level(char level, int first) {
                  v ? "the miss inside a called list" : "the miss before the calls", ex.n, v ? "the return into the caller, " : "", (unsigned long long)d.queued, (unsigned long long)d.ready);
         t(name, ex.n == expect_n[v] && same_set(&queued, &ex) && d.ready == (uint64_t)ex.n && d.waits == 1 && d.walks == 1);
     }
-    // budget: 12 records, then 1 ns
+    // budget: 12 records, then 1 ns. The records run has a time budget out of reach (60 s): with the default 2 ms, a walk preempted for 2 ms before its first record (the
+    // walk reads the clock there) stopped at the time with 0 records and failed the check, once under ctest -j4 on a loaded machine (2026-11-14)
     for (int k = 0; k < 2; k++) {
-        hvk_pso_test_level(level); hvk_predict_test(1, 1, k ? 0 : 12, k ? 1 : 0);
+        hvk_pso_test_level(level); hvk_predict_test(1, 1, k ? 0 : 12, k ? 1 : 60000000000ull);
         snap_get(&a); scene(&cmds, &tb); snap_get(&b); d = delta_of(&a, &b);
         snprintf(name, sizeof name, "level %c, a budget of %s: the walk stopped (%llu records, %llu queued) and walked once though %llu draws waited", level, k ? "1 ns" : "12 records",
                  (unsigned long long)d.records, (unsigned long long)d.queued, (unsigned long long)d.waits);

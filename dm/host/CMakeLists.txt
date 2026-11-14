@@ -36,7 +36,16 @@ add_custom_target(game_profile DEPENDS ${GAME_H})
 # ---- Compiler settings ----
 set(CMAKE_C_STANDARD 17)
 set(CMAKE_C_EXTENSIONS ON)   # GNU C, as on Apple: ?:, typeof, statement expressions
-set(HOST_FLAGS -O1 -g -Wall -Wno-unused-function)
+# The host's own C at -O2 (Apple's Makefiles keep -O1, chosen with the first Mac host and never measured): measured on 2026-11-14 with clang 18 in nxnative-build, each level's
+# tree built alone and the benchmark modes of docker/README.md ("Optimisation level") run interleaved, medians of seven runs. Against -O1, -O2 decodes ASTC on the CPU 19 to 26%
+# faster (every block size, 1024 x 1024), deswizzles 18 to 19% faster (2048 x 2048 RGBA8, RGBA16F) and applies the output volume 20% faster; the replay's CPU time per draw, the
+# execution engine's guest calls, gates, host calls and dispatcher lookups and the descriptor benchmark do not move beyond noise. -O3 adds nothing measurable over -O2 except
+# the CPU index conversion, a fallback past the GPU path's limit (15% faster), and nxhost-run grows 0.5% at -O2, 1.6% at -O3. The same check counts and CTest totals at every
+# level. -g stays, for a debugger. The crash report (aot_fault.c) names guest code through the packs' line tables and walks the guest's x29 chain, which the host's level
+# does not touch; host code it names by the nearest exported symbol (dladdr), which more inlining at -O2 can make the caller's. Frame pointers are omitted at -O1 already.
+# -DHOST_OPT=<flags> (a list: "-O1;-fno-inline") builds another level for a measurement
+set(HOST_OPT -O2 CACHE STRING "optimisation flags of the host's own C (HOST_FLAGS); a list")
+set(HOST_FLAGS ${HOST_OPT} -g -Wall -Wno-unused-function)
 if(WIN32)
     # Windows 10 1803+ (VirtualAlloc2 / high-resolution waitable timers era); 64-bit file offsets for game files over 2 GB
     # _POSIX_THREAD_SAFE_FUNCTIONS: mingw-w64's localtime_r / gmtime_r

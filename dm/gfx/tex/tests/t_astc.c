@@ -14,11 +14,14 @@
 //   K an HDR endpoint mode in one partition: the error colour in that partition's texels only;
 //   L random legal blocks of every kind and block size: the per-texel decode (the GPU's shape) equals the whole-block decode.
 // The general case against an independent decoder is the GPU test's (dm/gfx/tests/vk/t_vk_astc.c: lavapipe's own ASTC decoder).
+// With the argument "bench" (not a CTest run): the CPU fallback's cost, astc_decode_image of a 1024 x 1024 texture of random legal LDR blocks per block size (a pool of 512
+// blocks tiled over the image, the same every run), the fastest and the median of seven decodes and a checksum of the texels
 #include "../astc_decode.h"
 #include "astc_synth.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 static int fail, total;
 static void t(const char *name, int ok) { total++; fail += !ok; if (!ok) printf("FAIL %s\n", name); }
@@ -46,7 +49,40 @@ static int mode_block(int cem, const int *v, int srgb, int e0[4], int e1[4], uin
     return h.kind == ASTC_NORMAL;
 }
 
-int main(void) {
+static uint64_t bench_ns(void) { struct timespec ts; timespec_get(&ts, TIME_UTC); return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec; }
+static int cmp_dbl(const void *a, const void *b) { double x = *(const double *)a, y = *(const double *)b; return (x > y) - (x < y); }
+static int bench(void) {
+    enum { SIZE = 1024, POOL = 512, REPS = 7 };
+    uint8_t *dst = malloc((size_t)SIZE * SIZE * 4), pool[POOL][16];
+    double total = 0;
+    for (int k = 0; k < 14; k++) {
+        int bw = BS[k][0], bh = BS[k][1];
+        uint32_t nbx = (SIZE + bw - 1) / bw, nby = (SIZE + bh - 1) / bh;
+        uint64_t rng = 0xA57C + (uint64_t)k;
+        for (int i = 0; i < POOL; i++) astc_synth_random(&rng, bw, bh, 3 + i % 13, pool[i], NULL);   // normal LDR blocks of every partition count, plane count and grid
+        uint8_t *src = malloc((size_t)nbx * nby * 16);
+        for (size_t b = 0; b < (size_t)nbx * nby; b++) memcpy(src + b * 16, pool[(b * 7919) % POOL], 16);
+        double ms[REPS];
+        for (int r = 0; r < REPS; r++) {
+            uint64_t t0 = bench_ns();
+            astc_decode_image(src, (size_t)nbx * 16, SIZE, SIZE, bw, bh, 0, dst, (size_t)SIZE * 4);
+            ms[r] = (double)(bench_ns() - t0) / 1e6;
+        }
+        qsort(ms, REPS, sizeof *ms, cmp_dbl);
+        total += ms[0];
+        uint64_t sum = 0;   // the texels' checksum: the same at every optimisation level
+        for (size_t i = 0; i < (size_t)SIZE * SIZE * 4; i++) sum = sum * 31 + dst[i];
+        printf("bench astc %2dx%-2d 1024x1024: fastest %7.2f ms, median %7.2f ms (%6.1f Mtexel/s at the fastest), texels %016llx\n", bw, bh, ms[0], ms[REPS / 2],
+               (double)SIZE * SIZE / 1e3 / ms[0], (unsigned long long)sum);
+        free(src);
+    }
+    printf("bench astc every block size: %.1f ms (the sum of the fastest decodes)\n", total);
+    free(dst);
+    return 0;
+}
+
+int main(int argc, char **argv) {
+    if (argc > 1 && !strcmp(argv[1], "bench")) return bench();
     char name[256];
     // ---- A: unquantization ----
     {

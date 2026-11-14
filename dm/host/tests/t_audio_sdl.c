@@ -1,7 +1,10 @@
 // SDL3 audio output of hle_audio.c (Linux and Windows) on SDL's dummy audio driver, whose device thread consumes in real time like a sound card (one callback per device buffer, about
 // 5 ms here): an output opened through OpenAudioOut gets an SDL stream in the guest's format, its device calls back while started, the game's buffers come back in order with their
 // release events and dm_audio_render_calls() advances; Stop and the background suspend stop the callbacks (the silent sink takes over while suspended), Close frees it, and a second
-// open / play / close cycle leaves no thread behind (Linux, where /proc counts them). Also a six-channel output (stereo to the device) and DM_AUDIO=0 (the silent sink, no device)
+// open / play / close cycle leaves no thread behind (Linux, where /proc counts them). Also a six-channel output (stereo to the device) and DM_AUDIO=0 (the silent sink, no device).
+// With the argument "bench" (not a CTest run; no device): the host's own work on the sound card callback, one second of a six-channel output pulled in 5 ms callbacks through
+// pull_device (the queue, the volume at 1.0 and at 0.5, the 6 -> 2 downmix), the fastest and the median of nine, with a checksum of the samples. The audio renderer's mixing
+// is the SDK's own code (hle_audren.c runs it as guest code), not the host's C
 #include "../hle_audio.c"
 __thread _Atomic int dm_host_work;   // defined by the graphics host in a full build
 #include <time.h>
@@ -95,7 +98,36 @@ static void cycle(int ch, int real, const char *what) {
     h_au_Close(out);
 }
 
-int main(void) {
+static int cmp_dbl(const void *a, const void *b) { double x = *(const double *)a, y = *(const double *)b; return (x > y) - (x < y); }
+static int bench(void) {
+    enum { FR = RATE, CB = RATE / 200, REPS = 9 };
+    static int16_t in[FR * 6], out[FR * 2];
+    uint32_t r = 12345;
+    for (int i = 0; i < FR * 6; i++) { r = r * 1103515245u + 12345u; in[i] = (int16_t)(r >> 16); }
+    static const float vols[2] = {1.0f, 0.5f};
+    for (int v = 0; v < 2; v++) {
+        double ms[REPS]; uint64_t sum = 0;
+        for (int k = 0; k < REPS; k++) {
+            aout *a = calloc(1, sizeof *a);
+            if (!a) return 2;
+            gbuf b = {in, sizeof in, sizeof in};
+            a->ch = 6; atomic_store(&a->state, STATE_STARTED); uint32_t vb; memcpy(&vb, &vols[v], 4); atomic_store(&a->vol, vb);
+            a->q[0] = &b; atomic_store(&a->q_tail, 1);
+            uint64_t t0 = now_ns();
+            for (int f = 0; f < FR; f += CB) pull_device(a, (uint8_t *)(out + 2 * f), (uint64_t)CB * 4);
+            ms[k] = (double)(now_ns() - t0) / 1e6;
+            free(a);
+        }
+        for (int i = 0; i < FR * 2; i++) sum = sum * 31 + (uint16_t)out[i];
+        qsort(ms, REPS, sizeof *ms, cmp_dbl);
+        printf("bench audio: 1 s of six channels pulled in 5 ms callbacks, volume %.1f, downmixed to stereo: fastest %.3f ms, median %.3f ms, samples %016llx\n", vols[v], ms[0],
+               ms[REPS / 2], (unsigned long long)sum);
+    }
+    return 0;
+}
+
+int main(int argc, char **argv) {
+    if (argc > 1 && !strcmp(argv[1], "bench")) return bench();
     SDL_SetHint(SDL_HINT_AUDIO_DRIVER, "dummy");   // before hle_audio.c starts SDL's audio
     setenv("DM_AUDIO", "1", 1); unsetenv("DM_DBG_AU_FRAMES"); unsetenv("DM_AUDIO_MUTE");
     int t0 = threads(NULL);

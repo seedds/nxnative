@@ -20,7 +20,8 @@
 // points as every primitive, the capture in the same submission and in the one before, and fans and polygons with the device's fans taken as absent (only buffer 0 is bound and
 // captured: lavapipe crashes on a counter buffer for an unbound buffer, the README's P8 finding). Checks: one per draw and the counters, and the validation check.
 // With the argument "bench" (not a CTest run; validation off): the submit thread's time per converted draw on the CPU path and on the GPU path, for a 10,000-quad draw, a
-// 100,000-index fan with restart and a 6-quad draw, three runs.
+// 100,000-index fan with restart and a 6-quad draw, three runs; then the replay's own CPU cost, the submit thread's CPU time per draw for 4,000 small draws needing no conversion,
+// plain and with state changing between them (a scissor each draw, the primitive class and the blend state alternating: pipeline lookups), five runs.
 #include "t_vk_harness.h"
 #include "shaders/gen/ixc_vert.h"
 #include "shaders/gen/ixc_frag.h"
@@ -322,7 +323,47 @@ static void bench_one(const char *what, int prim, int isz, int restart, uint32_t
     printf("bench %-58s %s: %3llu conversions, %9.1f us a draw converting on the submit thread, %9.1f us a draw of its CPU time in the submission, %8.3f ms a draw submitted and waited for\n",
            what, path_gpu ? "GPU" : "CPU", (unsigned long long)conv, conv ? ns / 1e3 / (double)conv : 0.0, (c1 - c0) / 1e3 / d, (w1 - w0) / 1e6 / d);
 }
+// d small draws in a submission, none needing a conversion (a triangle each; indexed: three 2-byte indices); churn: a scissor before each draw, the primitive alternating between
+// triangles and lines and the blend enable every other draw (a pipeline lookup per draw). The submit thread's CPU time per draw, which holds the replay (decoding the records,
+// state, pipeline and descriptor lookups, the Vulkan commands recorded) and the driver's recording, and the wall time of the submission and its wait
+static void bench_replay(const char *what, int d, int indexed, int churn, double *us_cpu) {
+    targets(0);
+    uint16_t *ib = (uint16_t *)ib_take(8);
+    ib[0] = 0; ib[1] = 1; ib[2] = 2;
+    for (int i = 0; i < d; i++) {
+        int prim = churn && (i & 1) ? NVN_DRAW_PRIMITIVE_LINES : NVN_DRAW_PRIMITIVE_TRIANGLES;
+        if (churn) {
+            hv_scissor(&g_c, i % W, (i / W) % H, W, H);
+            color_st cs; memset(&cs, 0, sizeof cs); cs.blend_en = (i >> 1) & 1; cs.logic_op = NVN_LOGIC_OP_COPY; hv_state(&g_c, 1, &cs, sizeof cs);
+        }
+        if (indexed) hv_draw_idx(&g_c, prim, 1, prim == NVN_DRAW_PRIMITIVE_LINES ? 2 : 3, ib, 0, 1);
+        else hv_draw(&g_c, prim, 0, prim == NVN_DRAW_PRIMITIVE_LINES ? 2 : 3, 1);
+    }
+    hv_emit(&g_c, OP_END, NULL, 0);
+    uint64_t c0 = thread_ns(), w0 = plat_now_ns();
+    NVNcommandHandle h = (NVNcommandHandle)(uintptr_t)g_c.base;
+    h_nvnQueueSubmitCommands(&g_q, 1, &h);
+    uint64_t c1 = thread_ns();
+    h_nvnQueueFinish(&g_q);
+    uint64_t w1 = plat_now_ns();
+    g_c.used = 0; g_ib_used = 0;
+    *us_cpu = (c1 - c0) / 1e3 / d;
+    printf("bench replay %-52s: %6.2f us a draw of the submit thread's CPU time, %6.2f us a draw submitted and waited for\n", what, *us_cpu, (w1 - w0) / 1e3 / d);
+}
+static int cmp_dbl(const void *a, const void *b) { double x = *(const double *)a, y = *(const double *)b; return (x > y) - (x < y); }
 static void bench(void) {
+    {
+        static const struct { const char *what; int indexed, churn; } k[] = {{"4,000 triangles", 0, 0}, {"4,000 indexed triangles (2-byte)", 1, 0},
+                                                                             {"4,000 draws, state changing between them", 0, 1}};
+        enum { RUNS = 5 };
+        double us[3][RUNS], warm;
+        for (int i = 0; i < 3; i++) bench_replay(k[i].what, 4000, k[i].indexed, k[i].churn, &warm);   // warm-up: pipelines made, rings grown
+        for (int r = 0; r < RUNS; r++) for (int i = 0; i < 3; i++) bench_replay(k[i].what, 4000, k[i].indexed, k[i].churn, &us[i][r]);
+        for (int i = 0; i < 3; i++) {
+            qsort(us[i], RUNS, sizeof *us[i], cmp_dbl);
+            printf("bench replay %-52s: fastest %6.2f us, median %6.2f us a draw (submit thread CPU)\n", k[i].what, us[i][0], us[i][RUNS / 2]);
+        }
+    }
     for (int run = 1; run <= 3; run++) {
         printf("bench run %d\n", run);
         for (uint32_t i = 0; i < 40000; i++) g_v[i] = i & 0xffff;   // 10,000 quads of 16-bit indices
@@ -345,7 +386,7 @@ int main(int argc, char **argv) {
     hv_device(0);
     NVNqueueBuilder qb; memset(&qb, 0, sizeof qb); h_nvnQueueBuilderSetDefaults(&qb); h_nvnQueueBuilderSetDevice(&qb, &g_dev); h_nvnQueueInitialize(&g_q, &qb);
     if (!hv_pool_make(&g_mp, 16u << 20)) { t("memory pool allocated", 0); return hv_finish(); }
-    g_c = (hv_cmds){g_mp.mem + (64u << 10), 0, 1u << 20};
+    g_c = (hv_cmds){g_mp.mem + (64u << 10), 0, bench_mode ? (2u << 20) - (64u << 10) : 1u << 20};   // bench: the replay's 4,000 draws with state between them
     g_stage = g_mp.mem + (2u << 20); g_ib = g_mp.mem + (4u << 20); g_ref = g_mp.mem + (9u << 20);
     const hv_shader sh[2] = {{"ixc_vert", 0, HV_SPV(ixc_vert_spv), NULL, NULL}, {"ixc_frag", 1, HV_SPV(ixc_frag_spv), NULL, NULL}};
     hv_program(&g_prog, &g_mp, 0, sh, 2);

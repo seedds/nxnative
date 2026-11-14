@@ -22,7 +22,8 @@
 //     misses). The same checks hold: the JIT stops at the pack's gate sites (design 11) and the host serves them, the observer before its instruction with the
 //     same registers and its x0 taken back, the spin wait's back-off on the taken back-edge only; the frame step's stub runs from the aux region, one of the JIT's
 //     code ranges; the fault probe's load is named exactly (the JIT's memory abort, jit.h). Each run also times guest calls of three leaf functions from the host
-//     (no gate, an untaken spin back-edge, an observation gate) and the JIT's stop lookup per translated instruction, for design 11's figures
+//     (no gate, an untaken spin back-edge, an observation gate) and the JIT's stop lookup per translated instruction, for design 11's figures; and a host call through
+//     the import's guest-visible slot from the host and the dispatcher miss path's two lookups per target (the host C's cost at each optimisation level, docker/README.md)
 //   with the JIT fallback, both runs also reach the hidden function (aot_synth.py HIDDEN): a manifest obs row on code no pack holds (the load's [RED] line, "1 not"),
 //     called through a pointer the entry computes, so the JIT runs it and serves its gate: the observer sees x0 = 7, x19 = &results and the call's return address,
 //     and the 1000 it adds is what the add reads (results[13] = 1009); 3 observation gate calls in the run instead of 2
@@ -287,7 +288,22 @@ static void *guest_main(void *arg) {
         printf("t_aot_module: timing (%s): a guest call from the host of synth_cut %.0f ns, of synth_spin through its untaken back-edge gate %.0f ns (%+.0f), "
                "of synth_observed through its observation gate %.0f ns (%+.0f); the JIT's stop lookup %.1f ns per translated instruction (%llu)\n",
                g_jit_forced ? "JIT-forced" : "compiled", t_cut, t_spin, t_spin - t_cut, t_obs, t_obs - t_cut, t_look, (unsigned long long)(sink & 0xF));
-        check(f_cut && t_cut > 0 && t_spin > 0 && t_obs > 0, "the timing calls returned");
+        // The host side of a host call (run_guest's host_call: the thunk, the C function, back) through the import's guest-visible slot, GOT[0]; the run's check counts the
+        // module's own call of it, so the timing's calls are taken off the counter again. And the lookups of the dispatcher's miss path (nxaot_rt_dispatch): the pack of the
+        // calling code, then the target's slot in the pack's table, for each instruction of the module's text
+        const uint64_t calls0 = g_t_aot_mod_calls;
+        const double t_host = time_calls(st, got[0], 7, n);
+        g_t_aot_mod_calls = calls0;
+        const nxaot_lookup_entry *ent = dm_aot_find(base + d->entry, NULL);
+        const uint64_t code = ent ? (uint64_t)(uintptr_t)dm_aot_entry_of(ent) : 0;
+        uint64_t hits = 0;
+        const uint64_t m0 = plat_now_ns();
+        for (int r = 0; r < reps; r++)
+            for (uint64_t a = 0; a < 0x1000; a += 4) hits += (dm_aot_pack_of_code(code) != NULL) + (dm_aot_find(base + a, NULL) != NULL);
+        const double t_miss = (double)(plat_now_ns() - m0) / (double)looks;
+        printf("t_aot_module: timing (%s): a host call through its guest-visible slot from the host %.0f ns; the dispatcher's miss lookups %.1f ns per target (%llu found)\n",
+               g_jit_forced ? "JIT-forced" : "compiled", t_host, t_miss, (unsigned long long)hits);
+        check(f_cut && t_cut > 0 && t_spin > 0 && t_obs > 0 && t_host > 0, "the timing calls returned");
     }
     dm_aot_stats_t s0;
     dm_aot_stats(&s0);   // the counts before the run: the timing's observation gate calls are not the run's

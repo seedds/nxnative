@@ -48,8 +48,9 @@ HLE_FORCE("_ZN2nn4nifm22GetCurrentProxySettingEPNS0_12ProxySettingE", "network m
 // this service, not Darwin's fd table, and stay small enough for games' fd_set arrays. Address/flag/error constants below are the Horizon/FreeBSD ABI (libnx's BSD service passes
 // these structures/flags unchanged; FreeBSD11 sys/socket.h and netinet/in.h). IPv4 payloads retain packet boundaries; the per-endpoint queue holds at most256 packets/1MiB.
 // Not cut: Inet* / nnsocketInet* byte order and address text conversion (pure computation).
-// Both keep one errno (dm_net_errno). The offline service sets the FreeBSD numbers below; the network transport sets the Linux numbers hle_net_backend.c documents.
-#define SK_ENETDOWN 50
+// Both keep one errno (dm_net_errno). The network transport sets the Linux numbers hle_net_backend.c documents, and remote networking offline is Linux's ENETDOWN
+// too, as Horizon's BSD IPC errno reaches the game unchanged (MK8 SDK 4 detail::Socket / GetLastErrno). The local service's other numbers below are FreeBSD's.
+#define SK_ENETDOWN 100
 // The game's errno. On Horizon nn::socket's errno is the C library's: detail::SetLastErrno and GetLastErrno write and read *__errno_location(), and code such
 // as gRPC's reads errno itself. Super Mario Bros. Wonder's gRPC sets 97 when it leaves IPv6 (main+0xb61480) and reads errno after its non-blocking connect
 // (main+0xb61e38, tcp_client_posix.cc:299): with only the host's copy set, it took that connect's EINPROGRESS for the stale 97 and gave the address up.
@@ -71,7 +72,10 @@ int dm_sk_errno(void) { return dm_net_errno(); }
 #define SKD(net, local) dm_net_guest_errno(dm_net_enabled() ? (long)(net) : (long)(local))
 void dm_guest_sleep_ns(int64_t ns);
 void dm_guest_cond_wait_ns(pthread_cond_t *c, pthread_mutex_t *m, int64_t ns);   // hle_thread.c
-static int sk_idle(int64_t ms) { dm_guest_sleep_ns((ms < 0 ? 100 : ms) * 1000000); return 0; }
+// Poll / Select with nothing to wait on waits out the timeout and returns 0, as POSIX and Horizon's bsd service ignore negative descriptors (Dark Souls Remastered's
+// "NexusRevolution Socket" thread spun a core on Poll(fds, 0, 33 ms) when it failed at once). An endless wait on nothing never returns; HLE_FORCE_WAIT publishes the guest
+// context, so a collector can pause the thread while it waits
+static int sk_idle(int64_t ms) { if (ms < 0) return dm_net_idle(); if (ms > INT64_MAX / 1000000) return sk_error(SK_EINVAL); dm_guest_sleep_ns(ms * 1000000); return 0; }
 typedef struct { int32_t fd; int16_t events, revents; } sk_pollfd;
 enum { EFD_MAX = 64, SK_POLLIN = 1, SK_POLLOUT = 4, SK_POLLRDNORM = 0x40, SK_POLLWRNORM = 4, SK_POLLNVAL = 0x20,
        SK_EBADF = 9, SK_EAGAIN = 35, SK_EINVAL = 22, SK_EMSGSIZE = 40, SK_EOPNOTSUPP = 45, SK_EADDRINUSE = 48, SK_ENOTCONN = 57,
@@ -329,7 +333,7 @@ static int efd_ready(sk_pollfd *p, uint64_t n, uint64_t open, const uint64_t gen
 int dm_sk_poll(void *fds, uint64_t n, int ms) {   // also hle_offline.c's plain pollfd form
     if (dm_net_enabled()) return dm_net_poll(fds, n, ms);   // the transport's sockets and event descriptors
     sk_pollfd *p = fds; uint64_t open = 0, generation[EFD_MAX] = {0};
-    if (!p && n) return sk_error(SK_EINVAL);
+    if (n > 1024 || (!p && n)) return sk_error(!p && n ? 14 : SK_EINVAL);   // EFAULT for a missing array
     dm_host_mutex_lock(&g_efd_m);
     for (uint64_t i = 0; i < n; i++) if (p[i].fd >= 0 && sk_used(p[i].fd)) { open |= 1ull << p[i].fd; generation[p[i].fd] = g_efd[p[i].fd].generation; }
     for (uint64_t i = 0; i < n; i++) p[i].revents = 0;

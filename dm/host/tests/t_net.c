@@ -15,6 +15,7 @@
 #include <unistd.h>
 #include <sys/mman.h>
 #include <assert.h>
+__thread _Atomic int dm_host_work;   // dm.h: hle_net.c's local service takes its lock with dm_host_mutex_lock, as the other socket tests define it
 
 pthread_key_t g_keygate;
 extern uint64_t dm_gate_top[1024];
@@ -116,7 +117,7 @@ static int native_udp(address *a) {
 }
 static void offline(void) {
     unsetenv("DM_NETWORK");
-    CHECK(!dm_net_enabled() && SOCKET(2, 2, 17) == -1, "offline remains the default, no socket created");
+    CHECK(!dm_net_enabled() && SOCKET(2, 1, 6) == -1, "offline remains the default, no TCP socket created (UDP is the local service, t_net_loopback)");
     CHECK(GET(fn_void, "_ZN2nn6socket12GetLastErrnoEv")() == 100, "offline reports actual Horizon ENETDOWN");
     CHECK(GET(fn_void, "_ZN2nn4nifm18IsNetworkAvailableEv")() == 0, "offline NIFM unavailable");
     fn_void on_hold = GET(fn_void, "_ZN2nn4nifm22IsNetworkRequestOnHoldEv"); on_hold();

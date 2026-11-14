@@ -1,6 +1,20 @@
 // NVN raw timestamp ABI: known vectors, long uptimes and an independent game's inline conversion.
 #include "../nvn/nvn_timestamp.h"
+uint64_t nvn_ts_profile_hz = 0;   // the default rate (nvn_mtl.m defines it from the profile)
 #include <stdio.h>
+#include <pthread.h>
+#include <sched.h>
+#include <stdatomic.h>
+
+static _Atomic int ready, start;
+static void *timestamp_reader(void *unused) {
+    (void)unused;
+    atomic_fetch_add(&ready, 1);
+    while (!atomic_load(&start)) sched_yield();
+    for (int i = 0; i < 1000; i++)
+        if (nvn_timestamp_from_ns(1000000000) != NVN_TS_HZ_DEFAULT) return (void *)1;
+    return NULL;
+}
 
 static int checks, fails;
 #define CHECK(c, why) do { checks++; if (!(c)) { fails++; fprintf(stderr, "FAIL: %s\n", why); } } while (0)
@@ -25,6 +39,11 @@ static float nier_dr_ms(uint64_t ticks) {
 }
 
 int main(void) {
+    pthread_t workers[8];
+    for (int i = 0; i < 8; i++) if (pthread_create(&workers[i], NULL, timestamp_reader, NULL)) abort();
+    while (atomic_load(&ready) != 8) sched_yield();
+    atomic_store(&start, 1);
+    for (int i = 0; i < 8; i++) { void *result = NULL; pthread_join(workers[i], &result); CHECK(!result, "concurrent first timestamp conversion"); }
     const struct { uint64_t ns, ticks; } exact[] = {
         {0, 0}, {625, 384}, {1000000, 614400}, {16000000, 9830400}, {1000000000, 614400000},
         {UINT64_C(5000000000000000000), UINT64_C(3072000000000000000)},

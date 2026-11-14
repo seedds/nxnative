@@ -10,7 +10,8 @@ A dated record of what is done, what is in progress and what is left on the Wind
 |---|---|
 | `8b44de4` | Handoff: the state at the pause |
 | `5d3f25e` | AOT: `dm/tools/aot/tests/measure_packs.py`, two builds of a pack measured against each other; its unit test passes here (9 tests); not yet run against the real `nxaot` |
-| (this commit's parent) | Scripts: `scripts/port_docker.sh` builds the two images when missing with disk checks and runs the whole verification, `--low-disk` one image at a time; its test with a stand-in Docker passes here (13 tests); no real build or verify run yet |
+| `df5c568` | Scripts: `scripts/port_docker.sh` builds the two images when missing with disk checks and runs the whole verification, `--low-disk` one image at a time; its test with a stand-in Docker passes here (13 tests); no real build or verify run yet |
+| (this commit's parent) | CI: the `chain` job's translator build ran outside its image (a comment line after a backslash): fixed; the `aot` job prints the failed tests' logs and the runner's CPU; the last runs' failures read: the two `tests` jobs were fixed by `fc0a8f1`, the `aot` vector run's mismatch is undetermined (its log expired) |
 
 Done on the machine, not in the repository: Docker emptied on the owner's request (every image and container, the owner's other projects' included; the data volumes `aitrade_pgdata`, `smilepetstore_pgdata`, `smilepetstore_redisdata` kept).
 
@@ -31,7 +32,6 @@ No Docker image exists (the disk filled while ten worktrees were checked out, 28
 | `agent-aaa1c2d479f167006` | The provoking vertex of converted quad strips and polygons; a flat-varying check through the guest GL layer. The SPIR-V headers under `shaders/gen` must be regenerated in the image | `dm/gfx/hostvk/vk_index.c`, `shaders/index_expand.comp`, `index_restart.comp`, `t_vk_provoking.c`, `t_vk_guest_gl.c` |
 | branch `wip/runner-scripts` (parked: one commit, no worktree) | The host test runners also run the Python-driver tests (`t_second_pack`, `t_vk_spirv`) | `dm/host/CMakeLists.txt` (two registrations), `run_host_tests.sh`, `run_win64_tests.ps1` |
 | `agent-a9b88962d77203ce4` | Python tests skip with a reason where this PC lacks a module or a Mac tool, instead of ending in errors | `dm/tools/tests/test_*.py`, `dm/ios/tests`, `dm/gfx/tests` |
-| `agent-a0e9229602796991b` | Why the last CI runs failed (`tests` #13, `aot` #11, `chain` #2), and fixes to the workflow files | `.github/workflows/*.yml` |
 | `agent-ada28324b2ad7f998` | The switch inventory covers the port's non-`DM_` switches (`NXHOST`, `NXPACK`, `NXAOT`, ...); five stale mentions of removed switches | `dm/tools/env_switches.py`, `docs/env_switches.tsv` |
 | `agent-aeff9ad0fb6c3dfd8` | Apple's log macros write each line in one stdio call, as the port's `LOG` does since `9872bae`. Prepared for a Mac: not to be merged before a Mac or macOS CI run | `dm/host/dm.h` (Apple branches), `docs/reference/threads.md` |
 

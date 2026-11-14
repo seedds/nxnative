@@ -3,9 +3,9 @@
 The screen before the game starts shows the settings the game supports. A setting that only matters while another is on appears under it and disappears when that one is turned off. Tap **Play** to start; the app remembers your choices for the next start. All settings are on one scrollable screen, under **Game**, **Controls** and **Performance**. Tap a menu or move a slider there; no settings page needs opening. **Upscaling** is in **Game**, beside **Console mode**. A Mac app shows the same settings in a [window of its own](#the-mac-settings-window).
 
 - [Tested defaults](#tested-defaults)
-- [Game](#game): [Frame rate](#frame-rate), [Render scale](#render-scale), [Console mode](#console-mode), [Upscaling](#upscaling), [Game's upscaler](#games-upscaler), [Game language](#game-language), [Picture](#picture), [Frame-rate counter](#frame-rate-counter)
+- [Game](#game): [Frame rate](#frame-rate), [Render scale](#render-scale), [Output resolution](#output-resolution), [Console mode](#console-mode), [Upscaling](#upscaling), [Game's upscaler](#games-upscaler), [Game language](#game-language), [Picture](#picture), [Frame-rate counter](#frame-rate-counter)
 - [Controls](#controls): [Touch feedback](#touch-feedback), [Game rumble](#game-rumble), [Rumble strength](#rumble-strength), [Rumble cutoff](#rumble-cutoff), [Press a button to join](#press-a-button-to-join)
-- [Performance](#performance): [Frame buffering](#frame-buffering), [Metal 4 pipelines](#metal-4-pipelines), [Pipeline prebuild](#pipeline-prebuild), [Encode thread](#encode-thread), [Hold frames when late](#hold-frames-when-late), [Performance HUD](#performance-hud), [Reset to tested defaults](#reset-to-tested-defaults)
+- [Performance](#performance): [Frame buffering](#frame-buffering), [Metal 4 pipelines](#metal-4-pipelines), [Pipeline prebuild](#pipeline-prebuild), [Encode thread](#encode-thread), [Game memory](#game-memory), [Hold frames when late](#hold-frames-when-late), [Performance HUD](#performance-hud), [Reset to tested defaults](#reset-to-tested-defaults)
 - [The Mac settings window](#the-mac-settings-window): [Display mode](#display-mode)
 - [In-game menu](#in-game-menu)
 - [TV](#tv)
@@ -33,9 +33,15 @@ Off, the default, keeps the 3D picture at full size. On lets the game lower its 
 
 ### Render scale
 
-The size of the 3D picture, from 50 to 100 %. Below 100 % the size is fixed there and the game's own dynamic resolution is off; 100 % keeps the game's own. Lower can be lighter on the GPU but is blurrier; the HUD and text keep their sharpness. Only games the app can scale offer it.
+The size of the 3D picture, from 50 to 100 % (of **Output resolution** where the game has it). Below 100 % the size is fixed there and the game's own dynamic resolution is off; 100 % keeps the game's own. Lower can be lighter on the GPU but is blurrier; the HUD and text keep their sharpness. Only games the app can scale offer it.
 
 Hades II goes up to 300 %: it renders its whole picture, the HUD and text included, at 1280x720 docked and handheld, and above 100 % it renders larger instead of being scaled up: 150 % is 1920x1080, 200 % 2560x1440, 300 % 3840x2160. Sharper on a large screen or window, at more GPU time (about 2.5 times the GPU time at 200 % on an Apple M6); on a small screen the difference is slight. [Its note](../dm/games/0100A00019DE0000/README.md#rendering) has the measurements.
+
+### Output resolution
+
+The size the game draws at, on the Mac and in docked mode, for games the app can resize: **1600x900 (standard)**, the game's own picture (Breath of the Wild draws its 3D scene at 1600x900 and scales it to a 1080p output, as on a docked Switch), then 1080p, 1440p, 4K or 5K. At those four the 3D picture and the HUD are drawn at that size, and **Render scale** is then a share of it: 100 % is the size chosen here. Larger sizes need far more GPU time, so a 120 fps target may fall back to 60.
+
+They also need more [Game memory](#game-memory): 1440p from 4 GB, and 4K and 5K from 8 GB. Every size is listed; one that needs more memory than Game memory is set to is greyed out and says what it needs ("4K — needs 8 GB of Game memory"). Lowering Game memory below what the chosen size needs sets Output resolution back to 1600x900.
 
 ### Console mode
 
@@ -189,6 +195,12 @@ The app turns the game's graphics commands into Metal commands on a thread of it
 
 - **When to change it:** leave it on unless a game misbehaves with it; turning it off is a diagnostic step.
 
+### Game memory
+
+On the Mac, for games that can take more memory than the Switch gives them (Breath of the Wild). The slider starts at **Default**, the game's own size (3.2 GB for Breath of the Wild), and goes up in steps of 2 GB to 12 GB. A game drawing a larger picture than the Switch's needs more: at 5K, Breath of the Wild's own heap ran out.
+
+- **When to change it:** leave it at Default unless the game needs more for the picture size you chose. The Mac needs that much free memory as well: the game only takes what it uses, but on a Mac with 16 GB, 12 GB of game memory leaves little for anything else.
+
 ### Hold frames when late
 
 For games whose frame rate the app controls ([Frame rate](#frame-rate)). With 60 fps chosen, each frame is meant to stay on screen for one refresh. When a frame comes late, the app can either slow the game down to 30 fps for a while, or keep 60 and show late frames as they come.
@@ -267,9 +279,11 @@ A line like `DM_PRESENT_SNAP=0` in `Documents/env.txt` (in the Files app, under 
 |---|---|---|
 | Frame rate | `DM_FPS_TARGET` | `30`, `60`, `120` (Mac, games with `fps_max 120`) |
 | Render scale | `DM_RENDER_SCALE` | `0.5` to `1.0` (Hades II: to `3.0`) |
+| Output resolution | `DM_OUTPUT_SIZE` | `off` (1600x900, the game's own), `1920x1080`, `2560x1440`, `3840x2160`, `5120x2880` |
 | Console mode | `DM_OPMODE` | `1` docked, `0` handheld |
 | Game language | `DM_LANG` | a language code, such as `ja` |
 | Display mode (Mac) | `DM_FULLSCREEN` | `1` fullscreen, `0` a window |
+| Game memory (Mac) | `DM_MEMORY_GB` | `2` the game's own size, `4` to `12` GB |
 | Cloud saves folder (Mac) | `DM_SAVE_SYNC` | a folder; `icloud`: iCloud Drive › nxnative Saves; `0`: off |
 | Picture (iPhone and iPad) | `DM_PICTURE_FIT` | `fit` 16:9 with black bars, `fill` covers the screen, cropped |
 | Picture shape | `DM_SCREEN_ASPECT` | `auto` the app window's own shape where it is taller than 16:9 (iPad 4:3, iPhone Duo 1.43:1), else 16:9 (iOS only); `1.43` the iPhone Duo's shape, `0` 16:9 |

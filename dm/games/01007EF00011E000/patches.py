@@ -137,6 +137,52 @@ def frame_step(ctx):
             (0x1266188, '045a8052', LAY, W4, 'handheld viewport height 720'),
             (0x1266134, '8986a852', LAYF, W9, 'scaled display height 720.0')):
         taller(site, orig, load, apply, why)
+    # A larger native picture (DM_OUTPUT_SIZE, loader.c): the widths of the output size too (state +0x30c u32; the heights are the stubs above, +0x48), and the render-target memory, which the
+    # game sizes as constants. The function at main+0x12616d4 hands four pools to its graphics system; the second, 115 MB, is the one the frame's render targets come from: at 1.5 x 1600x900 it ran
+    # out and the next target came back null (main+0xed7128). It and the third (60 MB) are multiplied by state +0x308 (0 = the game's own). x16 is free: a bl precedes both pool sites
+    WID, W8, W3 = 0xb9430e10, 0x2a1003e8, 0x2a1003e3   # ldr w16,[x16,#0x30c]; mov w8,w16; mov w3,w16
+    for site, orig, apply, why in (
+            (0xc61ee8, '09f08012'.replace('12', 'd2'), W9, 'output size static, nnMain: its width'),
+            (0xc61f1c, '09f08012'.replace('12', 'd2'), W9, 'output size static, nnMain (second path): its width'),
+            (0x12618b8, '09f08012'.replace('12', 'd2'), W9, 'output size static, its getter: its width'),
+            (0x12660d0, '08f08012'.replace('12', 'd2'), W8, 'docked display size: its width'),
+            (0x1266104, '03f08052', W3, 'docked viewport width')):
+        taller(site, orig, WID, apply, why)
+    # nninitStartup (main+0x710) asks for a fixed heap of 0xc3000000 (3.05 GB), whatever the application pool: the host's size when it set one (state +0x310 u64, loader.c from the
+    # player's game memory, DM_MEMORY_GB; 0 = the game's). x16 is free at its entry
+    fs_site(0x71c, '0060b852')
+    start = here(); emit(ADRP(16, here(), FS_STATE_OFF))
+    for w in (0xf9418a00,   # ldr x0,[x16,#0x310]
+              0xb5000040,   # cbnz x0,back (+2)
+              0x52b86000):  # orig: mov w0,#0xc3000000
+        emit(w)
+    emit(B(here(), 0x720))
+    fs_put(0x71c, [B(0x71c, start)], 'nninitStartup: the heap size from the host (state +0x310; 0 = the game\'s 3.05 GB)')
+    # nnMain hands the framework its root arena, the heap less the 32 MB nninitStartup took (0xc1000000): the host's size when it set one (state +0x318 u64). x16 is free after the bl before it
+    fs_site(0xc617c0, '0820b852')
+    start = here(); emit(0x52b82008); emit(ADRP(16, here(), FS_STATE_OFF))   # orig: mov w8,#0xc1000000
+    for w in (0xf9418e10,   # ldr x16,[x16,#0x318]
+              0xb4000050,   # cbz x16,back (+2)
+              0xaa1003e8):  # mov x8,x16
+        emit(w)
+    emit(B(here(), 0xc617c4))
+    fs_put(0xc617c0, [B(0xc617c0, start)], 'nnMain: the root arena from the host (state +0x318; 0 = the game\'s)')
+    ctx.capabilities.add('GAME_HEAP')   # the launcher's Game memory (settings.tsv DM_MEMORY_GB, Mac): the host's application pool becomes the game's heap through these two stubs
+    ctx.capabilities.add('OUTPUT_SIZE')   # the launcher's Output resolution (dm/games/settings.tsv)
+    POOLX = 0xb9430a10   # ldr w16,[x16,#0x308]
+    fs_site(0x1261700, struct.pack('<IIII', 0x52a01409, 0x52a0e60a, 0x52a00808, 0xa9042be9).hex())
+    start = here(); emit(0x52a00808); emit(ADRP(16, here(), FS_STATE_OFF))   # orig: mov w8,#0x400000
+    for w in (POOLX, 0x34000050,   # cbz w16,back (+2)
+              0x9b107d4a):  # mul x10,x10,x16 (the 10 MB pool in x9 stays the game's: nothing has needed it larger)
+        emit(w)
+    emit(B(here(), 0x126170c))
+    fs_put(0x1261708, [B(0x1261708, start)], 'render-target pool 2 by the host\'s multiplier (state +0x308; 0 = the game\'s)')
+    fs_site(0x1261710, '09788052'.replace('8052', 'a052'))
+    start = here(); emit(0x52a07809); emit(ADRP(16, here(), FS_STATE_OFF))   # orig: mov w9,#0x3c00000
+    for w in (POOLX, 0x34000050, 0x9b107d29):   # cbz w16,back (+2); mul x9,x9,x16
+        emit(w)
+    emit(B(here(), 0x1261714))
+    fs_put(0x1261710, [B(0x1261710, start)], 'render-target pool 3 by the host\'s multiplier (state +0x308; 0 = the game\'s)')
     # The game's conversions between output pixels and the 1280x720 layout space, and the layout objects built with that size: each takes the layout height too, while
     # its bit of state +0x54 is set (loader.c DM_SCREEN_ASPECT_SITES, all by default), so one build can try them one by one. 720.0 constants: main+0xdf19ac divides the
     # output size by (1280, 720) for the layout scale; the others pair 720.0 with 1280.0 the same way. 1280x720 pairs: layout objects' defaults

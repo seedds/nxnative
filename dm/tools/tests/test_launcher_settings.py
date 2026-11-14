@@ -112,6 +112,36 @@ class LauncherSettingsTests(unittest.TestCase):
         self.assertEqual(rows['DM_RUMBLE_GAIN']['needs'], 'DM_RUMBLE=1')
         self.assertFalse({'level', 'needs'} & set(rows['DM_METAL_HUD']), 'a row without meta has no optional fields')
 
+    def test_game_memory_is_a_mac_slider_in_gb_for_builds_with_the_heap_stubs(self):
+        # settings.tsv DM_MEMORY_GB: fixups:GAME_HEAP&platform:mac (patches.py's heap stubs declare the capability); the slider's lowest stop is the game's own pool
+        def listed(platform, fixups):
+            with tempfile.TemporaryDirectory() as tmp, patch.object(settings.nacp, 'languages', return_value=['en-US']), patch.dict(os.environ, {'GFXAPI': 'nvn', 'SETTINGS_PLATFORM': platform}):
+                (Path(tmp) / 'main.fixups.tsv').write_text(fixups)
+                return {s['env']: s for s in settings.build(BOTW, tmp, Path(tmp) / 'control.nacp')['settings']}
+        s = listed('mac', '# GAME_HEAP\t1\n')['DM_MEMORY_GB']
+        self.assertEqual((s['kind'], s['section'], s['default'], s['min'], s['max'], s['step']), ('range', 'Performance', '2', 2.0, 12.0, 2.0))
+        self.assertEqual((s['unit'], s['first']), ('GB', 'Default (3.2 GB)'))   # Breath of the Wild's app_pool, 0xCD500000
+        self.assertNotIn('DM_MEMORY_GB', listed('ios', '# GAME_HEAP\t1\n'))   # a reservation on iOS is at most 6 GB
+        self.assertNotIn('DM_MEMORY_GB', listed('mac', ''))   # no stubs to hand the pool to the game
+
+    def test_output_resolution_offers_each_size_from_the_game_memory_it_needs(self):
+        # settings.tsv DM_OUTPUT_SIZE option_needs, from the measured minimums in the game note (1440p 4 GB, 5K 8 GB; 4K held to 5K's)
+        def listed(platform, fixups):
+            with tempfile.TemporaryDirectory() as tmp, patch.object(settings.nacp, 'languages', return_value=['en-US']), patch.dict(os.environ, {'GFXAPI': 'nvn', 'SETTINGS_PLATFORM': platform}):
+                (Path(tmp) / 'main.fixups.tsv').write_text(fixups)
+                return {s['env']: s for s in settings.build(BOTW, tmp, Path(tmp) / 'control.nacp')['settings']}
+        s = listed('mac', '# GAME_HEAP\t1\n# OUTPUT_SIZE\t1\n')['DM_OUTPUT_SIZE']
+        self.assertEqual(s['option_needs'], {'2560x1440': 'DM_MEMORY_GB>=4', '3840x2160': 'DM_MEMORY_GB>=8', '5120x2880': 'DM_MEMORY_GB>=8'})
+        self.assertNotIn('1920x1080', s['option_needs'])
+        self.assertEqual([o[0] for o in s['options']], ['off', '1920x1080', '2560x1440', '3840x2160', '5120x2880'])   # the game's own 1600x900 first
+        self.assertEqual((s['default'], s['options'][0][1]), ('off', '1600x900 (standard)'))
+        self.assertNotIn('option_needs', listed('ios', '# OUTPUT_SIZE\t1\n').get('DM_OUTPUT_SIZE', {}))   # iOS offers only the game's own picture
+
+    def test_option_needs_is_checked(self):
+        for bad in ['option_needs=2560x1440', 'option_needs=2560x1440:DM_MEMORY_GB=4', 'option_needs=:DM_MEMORY_GB>=4']:
+            with self.subTest(bad=bad), self.assertRaises(SystemExit):
+                settings.meta(bad, 1)
+
     def test_meta_is_strict(self):
         self.assertEqual(settings.meta('level=basic; needs=DM_RUMBLE=1', 1), {'level': 'basic', 'needs': 'DM_RUMBLE=1'})
         self.assertEqual(settings.meta('', 1), {})

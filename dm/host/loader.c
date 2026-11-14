@@ -306,6 +306,7 @@ static void read_layout(module_t *m, const char *dir) {
 // target, 0 = the game's own interval logic. The profile's fps_target, overridden by DM_FPS_TARGET (0, 30 or 60); the graphics layer decides the steps and paces presents
 // (hle_nvn.c fstep_tick)
 uint8_t *dm_fps_state;
+__attribute__((weak)) uint64_t dm_app_pool(void) { return DM_GAME_APP_POOL; }   // the profile's pool where hle_svc.c is not linked (host tests); hle_svc.c's adds the player's game memory
 int dm_fps_step_max;   // the largest step the stubs give the game (STEP_MAX in its fixups table; 0 = FSTEP_MAX): the frame step holds frames and pays back within it (hle_nvn.c)
 static const char *g_fps_mod;   // the module holding the state page (for the log)
 static float g_render_scale_max = 1.0f;   // the render-scale stub's largest scale (RENDER_SCALE in its fixups table; 1 for a stub that only lowers the game's size)
@@ -321,11 +322,39 @@ void dm_fps_state_apply(void) {
     const char *e = getenv("DM_FPS_TARGET"); int t = e ? atoi(e) : DM_GAME_FPS_TARGET;
     if (t != 0 && t != 30 && t != 60) { LOG("[RED] DM_FPS_TARGET=%s: must be 0, 30 or 60; using the game's own frame step", e); t = 0; }
     float f = (float)t; memcpy(dm_fps_state, &f, sizeof f);
+    // The game's heap, for builds whose stubs hand it to the game (the GAME_HEAP capability: Breath of the Wild's nninitStartup and nnMain read +0x310 / +0x318): the application
+    // pool (hle_svc.c dm_app_pool, the player's DM_MEMORY_GB on the Mac) less 512 MB for the modules, in 2 MB steps, when the player raised the pool and that is more than the fixed 3.05 GB the
+    // game asks for; the root arena is the heap less the 32 MB nninitStartup takes. 0 keeps the game's own; builds without such stubs ignore the fields
+    {   uint64_t pool = dm_app_pool(), heap = pool > DM_GAME_APP_POOL && pool > 0x20000000ull + 0xc3000000ull ? (pool - 0x20000000ull) & ~0x1fffffull : 0, arena = heap ? heap - 0x2000000ull : 0;
+        memcpy(dm_fps_state + 0x310, &heap, 8); memcpy(dm_fps_state + 0x318, &arena, 8);
+        if (heap) LOG("%s: game heap %.2f GB from the application pool of %.2f GB", g_fps_mod, heap / 1073741824.0, pool / 1073741824.0); }
     // Render scale of the 3D views (the stubs at Tears of the Kingdom's main+0xd5cc0, Breath of the Wild's main+0x1266880, Hades II's render size): 1.0 keeps the game's own size
     // and dynamic resolution; another factor fixes the size at that fraction (DM_RENDER_SCALE, 0.5 to the stub's largest scale: 1.0, or above for a stub that also raises it,
     // Hades II's 3.0). Independent of the frame step: written at target 0 too
+    // A larger native picture for a build with the output-size stubs (Breath of the Wild, docked): DM_OUTPUT_SIZE=<w>x<h>, 16:9 multiples of 8. The output (+0x30c width, +0x48 height), the
+    // render-target pools (+0x308: 1.6 times the area over 1080p, rounded up, or DM_RENDER_POOL) and, by default, the 3D views (at the output's size) follow. Without it nothing changes
+    const char *os = getenv("DM_OUTPUT_SIZE"); uint32_t ow = 0, oph = 0; float native = 0;
+    const char *om = getenv("DM_OPMODE"); int docked = om ? atoi(om) != 0 : DM_GAME_OPMODE != 0;   // the output sizes are the docked ones
+    if (os && strcmp(os, "off") && DM_GAME_SCREEN_ASPECT && docked) {
+        if (sscanf(os, "%ux%u", &ow, &oph) != 2 || ow < 1280 || ow > 7680 || ow % 8 || oph % 8 || (uint64_t)ow * 9 != (uint64_t)oph * 16) { LOG("[RED] DM_OUTPUT_SIZE=%s: <width>x<height>, 16:9, multiples of 8; keeping the game's own picture (1600x900 scaled to 1080p)", os); ow = oph = 0; }
+        // The game memory a size needs (M5 Max, a save outdoors, Link running): above 1080p the game's own 3.2 GB crashed at load (a null render target, main+0xed7128); 1440p ran at
+        // 4 GB, 5K at 8 GB (at 6 GB it loaded but the GPU failed while the world streamed in); 4K is held to 5K's 8 GB, unmeasured. Larger than 5K is not measured: 12 GB, the most there is. The launcher offers the sizes
+        // by the same rule (settings.tsv option_needs); this catches a choice that came another way (a saved choice with the window skipped, an env file)
+        else if ((uint64_t)ow * oph > 1920u * 1080u) {
+            uint64_t area = (uint64_t)ow * oph, need = area <= 2560u * 1440u ? 4 : area <= 5120u * 2880u ? 8 : 12, have = dm_app_pool() >> 30;
+            if (have < need) { LOG("[RED] DM_OUTPUT_SIZE=%s needs %llu GB of game memory and the game has %.1f GB (DM_MEMORY_GB, the launcher's Game memory); keeping the game's own picture (1600x900 scaled to 1080p)", os,
+                                   (unsigned long long)need, dm_app_pool() / 1073741824.0); ow = oph = 0; }
+        }
+        if (ow) {
+            const char *rp = getenv("DM_RENDER_POOL"); double area = (double)ow * oph / (1920.0 * 1080.0); uint32_t mul = rp ? (uint32_t)atoi(rp) : (uint32_t)(area * 1.6 + 0.999); if (mul < 1) mul = 1;
+            memcpy(dm_fps_state + 0x48, &oph, 4); memcpy(dm_fps_state + 0x30c, &ow, 4); memcpy(dm_fps_state + 0x308, &mul, 4); native = 1.2f;   /* the views' scale divides by a fixed 1920: 1.2 x 1600 / 1920 is the output's own size at any width */
+            extern void mtl_present_screen(uint32_t w, uint32_t h); mtl_present_screen(ow, oph);
+            LOG("%s: native output and 3D views %ux%u, render-target pools x%u (DM_OUTPUT_SIZE)", g_fps_mod, ow, oph, mul);
+        }
+    }
     const char *rs = getenv("DM_RENDER_SCALE"); float sc = 1.0f, hi = g_render_scale_max;
     if (rs) { char *end; sc = strtof(rs, &end); if (end == rs || *end || !(sc >= 0.5f && sc <= hi)) { LOG("[RED] DM_RENDER_SCALE=%s: must be 0.5 to %.1f; keeping the game's size", rs, hi); sc = 1.0f; } else LOG("%s: 3D views rendered at %.2f of the game's size (DM_RENDER_SCALE)", g_fps_mod, sc); }
+    if (native > 0) sc *= native;   // with a native output size the Render scale is a share of that size
     memcpy(dm_fps_state + 0x10, &sc, sizeof sc);
     // The game's own dynamic resolution, for builds whose stubs read it (the DYNAMIC_RESOLUTION capability of a frame step stub: Ocarina of Time's level function): 1 lets it
     // run, 0 (the default) holds full resolution. Builds without such a stub ignore the field

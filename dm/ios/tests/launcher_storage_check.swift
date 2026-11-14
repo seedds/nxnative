@@ -1,5 +1,5 @@
 // The launcher's storage (LauncherSettings.swift LauncherModel), run by test_launcher_storage.py on macOS: only choices that differ from the game's default are
-// stored, Reset to tested defaults followed by Play forgets the choices, an env file's values are kept. Arguments: the iOS and the Mac launcher.json of Breath of the Wild (settings.py, GFXAPI=nvn)
+// stored, Reset to tested defaults followed by Play forgets the choices, an env file's values are kept, a choice with option_needs is checked once every saved choice is read. Arguments: the iOS and the Mac launcher.json of Breath of the Wild (settings.py, GFXAPI=nvn)
 import Foundation
 @main struct Check {
     static func main() {
@@ -93,6 +93,20 @@ import Foundation
         let none = SaveSyncReport(line: "sync=1 cloud=0 local=\(lh) saved=1 files=1 size=1 chash=- csaved=0 cfiles=0 csize=0 cdevice=- sametitle=1 conflict=0 pull=0")!
         expect(none.localChoice == "local:none", "no cloud save: local:none")
         failed += checkLauncherLayout(LauncherModel(mac.settings, defaults: d), defaults: d)
+        // Options with a rule (option_needs): Output resolution's sizes by Game memory. The output row comes first in the list, as in settings.tsv, so a saved size is
+        // checked against the saved memory only once both are read; an option that is not available is listed with what it needs
+        let sized = try! JSONDecoder().decode(SettingsFile.self, from: Data(#"{"settings":[{"env":"DM_OUTPUT_SIZE","kind":"choice","label":"Output resolution","note":"","default":"off","options":[["off","1600x900 (standard)"],["1920x1080","1080p"],["5120x2880","5K"]],"option_needs":{"5120x2880":"DM_MEMORY_GB>=8"}},{"env":"DM_MEMORY_GB","kind":"range","label":"Game memory","note":"","default":"2","min":2,"max":12,"step":2,"unit":"GB","first":"Default"}]}"#.utf8))
+        let out = sized.settings[0]
+        d.set("5120x2880", forKey: "launcher.DM_OUTPUT_SIZE"); d.set("10.00", forKey: "launcher.DM_MEMORY_GB")
+        let big = LauncherModel(sized.settings, defaults: d)
+        expect(big.values["DM_OUTPUT_SIZE"] == "5120x2880", "a saved size with the saved memory it needs is kept at start, whatever the rows' order")
+        expect(big.needLabel(out, "5120x2880") == nil && big.offers(out, "5120x2880"), "a size the memory covers is selectable, with no note")
+        big.values["DM_MEMORY_GB"] = "6"
+        expect(big.values["DM_OUTPUT_SIZE"] == "off", "memory lowered below the chosen size: back to the default")
+        expect(!big.offers(out, "5120x2880") && big.needLabel(out, "5120x2880") == "needs 8 GB of Game memory" && big.needLabel(out, "1920x1080") == nil, "a size the memory does not cover is greyed out with what it needs")
+        d.removeObject(forKey: "launcher.DM_MEMORY_GB")
+        expect(LauncherModel(sized.settings, defaults: d).values["DM_OUTPUT_SIZE"] == "off", "a saved size without the memory it needs starts at the default")
+        d.removeObject(forKey: "launcher.DM_OUTPUT_SIZE")
         print("launcher storage: \(failed) failed")
         exit(failed == 0 ? 0 : 1)
     }

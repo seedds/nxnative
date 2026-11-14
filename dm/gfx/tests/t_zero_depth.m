@@ -14,7 +14,10 @@ int main(void) { @autoreleasepool {
     NSError *error = nil;
     id<MTLLibrary> library = [g_dev newLibraryWithSource:@"#include <metal_stdlib>\nusing namespace metal;\n"
         "kernel void count_nz(depth2d<float,access::read> d [[texture(0)]], device atomic_uint *o [[buffer(0)]], uint2 p [[thread_position_in_grid]]) { if (p.x < d.get_width() && p.y < d.get_height() && d.read(p) != 0.0f) atomic_fetch_add_explicit(o, 1u, memory_order_relaxed); }\n" options:nil error:&error];
-    id<MTLComputePipelineState> counter = [g_dev newComputePipelineStateWithFunction:[library newFunctionWithName:@"count_nz"] error:&error];
+    CHECK(library != nil, "synthetic non-zero counter library compiles"); if (!library) return 1;
+    id<MTLFunction> function = [library newFunctionWithName:@"count_nz"];
+    CHECK(function != nil, "synthetic non-zero counter function exists"); if (!function) return 1;
+    id<MTLComputePipelineState> counter = [g_dev newComputePipelineStateWithFunction:function error:&error];
     CHECK(counter != nil, "synthetic non-zero counter compiles");
     if (!counter) return 1;
     id<MTLCommandQueue> queue = [g_dev newCommandQueue];

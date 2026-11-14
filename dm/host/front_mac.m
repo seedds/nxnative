@@ -1,7 +1,7 @@
 // Mac front end: with DM_WINDOW=1 open a window (CAMetalLayer, for the graphics backend to present frames) + keyboard and controllers → dm_input; the guest runs on a large-stack thread instead and the main thread belongs to AppKit.
 // Without DM_WINDOW: the guest runs directly on the current thread, behaving the same as with no front end (windowless tests use this).
 // The window is fullscreen-capable (the green button and ⌃⌘F); DM_FULLSCREEN=1 starts it that way. ⌘Q quits, and so does a controller's Home button held for 2 s and
-// confirmed with A (home_quit.h); the left mouse button is the touchscreen.
+// confirmed with A (home_quit.h); the left mouse button is the touchscreen (DM_MOUSE_STICK=left / right: the mouse is a stick instead, mouse_stick.h).
 // Cheats (hle_cheats.c): the Cheats menu's rows toggle, reload (⌘R) and open the cheats folder; its first item "Show Cheats
 // Window" (⌘⇧C, or DM_CHEATS_WINDOW=1 at launch) opens a Cheats panel beside the game: sections, search, the master switch,
 // safe mode, values, details and the import of cheat files (see the code below).
@@ -31,6 +31,7 @@ static void merge_rumble_to_s2(int on);
 #include "home_quit.h"
 #include "home_quit_mac.h"
 #include "ctrl_prompt.h"
+#include "mouse_stick.h"
 #include <signal.h>
 #include <math.h>
 #include <sys/stat.h>
@@ -40,6 +41,9 @@ static uint64_t g_btn;
 static int g_w, g_a, g_s, g_d;
 static int g_rl, g_ru, g_rr, g_rd;   // arrow keys pressed with Shift held: the right stick (each goes back up as it went down, whatever Shift does meanwhile)
 static int g_input_on = 1;   // main thread: the game window is key, so its keyboard, mouse and controllers reach the game (input_release / input_resume)
+static mouse_stick g_ms;      // DM_MOUSE_STICK (mouse_stick.h): the mouse as a stick while the pointer is captured (ms_capture); main thread
+static int g_ms_captured;     // the pointer is captured: hidden, held in place, its movement drives g_ms
+static uint64_t g_ms_btn;     // the Switch buttons the mouse buttons hold while captured
 
 void *front_metal_layer(void) { return (__bridge void *)g_layer; }
 static _Atomic int g_screen_fps;   // the window's screen's maximumFramesPerSecond, kept up to date when the window moves to another screen
@@ -144,7 +148,32 @@ static void cursor_hide_for_input(void) {
 static void push(void) {
     int32_t lx = (g_d - g_a) * 32767, ly = (g_w - g_s) * 32767;
     int32_t rx = (g_rr - g_rl) * 32767, ry = (g_ru - g_rd) * 32767;
-    dm_input_set(g_btn, lx, ly, rx, ry);
+    if (g_ms_captured) {   // the mouse's stick and the keyboard's: each axis the more deflected (mouse_stick.h)
+        int32_t mx = ms_axis(g_ms.x), my = ms_axis(g_ms.y);
+        if (g_ms.target == MS_LEFT) { lx = ms_merge(lx, mx); ly = ms_merge(ly, my); }
+        else { rx = ms_merge(rx, mx); ry = ms_merge(ry, my); }
+    }
+    dm_input_set(g_btn | g_ms_btn, lx, ly, rx, ry);
+}
+// DM_MOUSE_STICK: a click on the picture captures the pointer (hidden and held in place, so it cannot leave the window), Escape or a focus loss lets it go. The stick goes
+// back to the centre from a timer, since a still mouse sends no events; the timer runs only while captured
+static NSTimer *g_ms_timer;
+static void ms_capture(int on) {
+    if (on == g_ms_captured || (on && (!g_ms.target || !g_input_on))) return;
+    g_ms_captured = on; g_ms_btn = 0; ms_center(&g_ms);
+    if (on) {
+        CGAssociateMouseAndMouseCursorPosition(false); [NSCursor hide];
+        g_win.acceptsMouseMovedEvents = YES;
+        g_ms_timer = [NSTimer scheduledTimerWithTimeInterval:1.0 / 120 repeats:YES block:^(NSTimer *t) {
+            (void)t; double x = g_ms.x, y = g_ms.y; ms_tick(&g_ms, CACurrentMediaTime()); if (g_ms.x != x || g_ms.y != y) push(); }];
+        LOG("front end: mouse captured, it is the %s stick (Escape lets it go)", g_ms.target == MS_LEFT ? "left" : "right");
+    } else {
+        [g_ms_timer invalidate]; g_ms_timer = nil;
+        CGAssociateMouseAndMouseCursorPosition(true); [NSCursor unhide];
+        g_win.acceptsMouseMovedEvents = NO;
+        LOG("front end: mouse let go");
+    }
+    push();
 }
 static int key_bit(unsigned short code) {
     switch (code) {
@@ -166,6 +195,7 @@ static int cp_poll(void);
 static void on_key(NSEvent *e, int down) {
     if (!g_input_on) return;
     unsigned short c = e.keyCode;
+    if (c == 53 && g_ms_captured) { if (down) ms_capture(0); return; }   // Escape lets the captured mouse go (DM_MOUSE_STICK); it is no Switch key
     if (cp_blocks_input(g_cp.phase)) {   // the prompt has the keyboard: Return or J (A) is done, Escape or K (B) closes it, no key reaches the game
         if (down && g_cp.phase == CP_OPEN) { if (c == 53 || c == 40) g_cp_cancel = 1; else if (c == 36 || c == 38) g_cp_confirm = 1; cp_poll(); }
         return;
@@ -340,6 +370,7 @@ static void input_release(void) {
     dm_switch2_active(0);
     g_btn = 0; g_w = g_a = g_s = g_d = 0; g_rl = g_ru = g_rr = g_rd = 0; push();
     if (g_mouse_down) { g_mouse_down = 0; dm_touch_set(NULL, 0); }
+    ms_capture(0);   // the captured mouse lets go: nothing it holds stays pressed, and the pointer is back
     pads_release();
 }
 static void input_resume(void) {
@@ -494,6 +525,7 @@ static void hq_changed(hq_phase was, hq_phase now, GCController *holder) {
     case HQ_PROMPT: {
         pads_release();   // nothing the game held stays pressed while the prompt has the controllers
         if (g_mouse_down) { g_mouse_down = 0; dm_touch_set(NULL, 0); }
+        ms_capture(0);   // the captured mouse lets go: nothing it holds stays pressed, and the pointer is back
         dm_focus_set(2);
         GCExtendedGamepad *g = holder.extendedGamepad;
         g_hq_prompt = hq_prompt_view(cv.bounds, @(g_hq_text[HQ_TEXT_TITLE]), @(g_hq_text[HQ_TEXT_NOTE]), @(g_hq_text[HQ_TEXT_QUIT]), @(g_hq_text[HQ_TEXT_CANCEL]),
@@ -588,6 +620,7 @@ int front_ctrl_support(int min, int max) {
     dispatch_async(dispatch_get_main_queue(), ^{
         g_btn = 0; g_w = g_a = g_s = g_d = 0; g_rl = g_ru = g_rr = g_rd = 0; push();   // nothing the game held stays pressed while the prompt has the input
         if (g_mouse_down) { g_mouse_down = 0; dm_touch_set(NULL, 0); }
+        ms_capture(0);   // the captured mouse lets go: nothing it holds stays pressed, and the pointer is back
         pads_release();
         int a, b; cp_buttons(&a, &b);
         g_cp_done = done; cp_open(&g_cp, min, max, dm_players_reported(), a, b);
@@ -606,6 +639,9 @@ static void pads_start(void) {
     LOG("front end: %s", g_merge ? "every controller is player 1 (DM_PAD_MERGE)" : g_kbd_own ? "the keyboard is player 1, each controller a player of its own from player 2 on (DM_KBD_PLAYER=own)"
                                                                            : "each controller is a player of its own, the keyboard plays with player 1");
     if (g_press_to_join) LOG("front end: a controller becomes a player at its first button press, the lowest player free (DM_PAD_PRESS_TO_JOIN)");
+    if (ms_config(&g_ms, getenv("DM_MOUSE_STICK"), getenv("DM_MOUSE_SENS"), getenv("DM_MOUSE_RECENTER"), getenv("DM_MOUSE_BUTTONS")))
+        LOG("front end: the mouse is the %s stick once a click captures it (DM_MOUSE_STICK), sensitivity %.2f, recentering half-life %.0f ms, buttons %#llx %#llx",
+            g_ms.target == MS_LEFT ? "left" : "right", g_ms.sens / MS_SENS_BASE, g_ms.half_life * 1000, (unsigned long long)g_ms.btn_left, (unsigned long long)g_ms.btn_right);
     hq_start();
     pads_changed(nil);
     hq_log_setting();
@@ -620,11 +656,22 @@ static void pads_start(void) {
 // The picture's width / height (front.h front_picture_shape; 16:9 until the first present), which the present fits into the view
 static _Atomic double g_picture_aspect = 16.0 / 9.0;
 void front_picture_shape(int w, int h) { if (w > 0 && h > 0) g_picture_aspect = (double)w / h; }
+// DM_MOUSE_STICK: the mouse is a stick instead (ms_capture). The click that captures it reaches the game as nothing; then the buttons are Switch buttons
+// (mouse_stick.h) and movement, dragging included, comes through the window's event monitor (front_run), not here
+static void ms_button(uint64_t b, int down) { g_ms_btn = down ? (g_ms_btn | b) : (g_ms_btn & ~b); push(); }
 @interface DmGameView : NSView @end
 @implementation DmGameView
-- (void)mouseDown:(NSEvent *)e { [self mouseDragged:e]; }
+- (void)mouseDown:(NSEvent *)e {
+    if (g_ms.target) {   // no capture while a prompt over the game (controller applet, Home quit) has the input
+        if (!g_ms_captured) { if (!cp_blocks_input(g_cp.phase) && !hq_blocks_input(g_hq.phase)) ms_capture(1); } else ms_button(g_ms.btn_left, 1);
+        return;
+    }
+    [self mouseDragged:e];
+}
+- (void)rightMouseDown:(NSEvent *)e { if (g_ms_captured) ms_button(g_ms.btn_right, 1); else [super rightMouseDown:e]; }
+- (void)rightMouseUp:(NSEvent *)e { if (g_ms_captured) ms_button(g_ms.btn_right, 0); else [super rightMouseUp:e]; }
 - (void)mouseDragged:(NSEvent *)e {
-    if (!g_input_on) return;
+    if (!g_input_on || g_ms.target) return;
     NSPoint p = [self convertPoint:e.locationInWindow fromView:nil]; NSSize b = self.bounds.size;
     double w = b.width, h = b.height;
     if (w <= 0 || h <= 0) return;
@@ -633,7 +680,11 @@ void front_picture_shape(int w, int h) { if (w > 0 && h > 0) g_picture_aspect = 
     dm_touch t = {0, (float)fmin(fmax((p.x - x0) / w, 0), 0.999), (float)fmin(fmax(1 - (p.y - y0) / h, 0), 0.999)};   // The AppKit view origin is at bottom left, the touchscreen origin is at top left
     dm_touch_set(&t, 1); g_mouse_down = 1;
 }
-- (void)mouseUp:(NSEvent *)e { (void)e; if (g_mouse_down) { g_mouse_down = 0; dm_touch_set(NULL, 0); } }
+- (void)mouseUp:(NSEvent *)e {
+    (void)e;
+    if (g_ms_captured) ms_button(g_ms.btn_left, 0);
+    if (g_mouse_down) { g_mouse_down = 0; dm_touch_set(NULL, 0); }
+}
 // The drawable follows the view in pixels: a layer assigned to a layer-backed view kept the drawable at the first window's 1280x720 in fullscreen too, so the game picture was
 // scaled down to it and up again by the compositor
 - (void)fitDrawable {
@@ -1605,6 +1656,12 @@ void front_run(void (*guest)(void)) {
             if (!e.isARepeat) on_key(e, e.type == NSEventTypeKeyDown);
             return nil;   // Swallow it to avoid the system beep
         }];
+        // The captured mouse's movement (DM_MOUSE_STICK, ms_capture): the pointer is held in place, so only the deltas move; dragging with a button held moves the stick too
+        [NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskMouseMoved | NSEventMaskLeftMouseDragged | NSEventMaskRightMouseDragged | NSEventMaskOtherMouseDragged
+                                              handler:^NSEvent *(NSEvent *e) {
+            if (g_ms_captured) { ms_move(&g_ms, e.deltaX, e.deltaY); push(); }   // captured only while the game window is key (input_release lets it go)
+            return e;
+        }];
         [[NSNotificationCenter defaultCenter] addObserverForName:NSWindowWillCloseNotification object:win queue:nil
                                                       usingBlock:^(NSNotification *n) { (void)n; exit(0); }];
         // Lifecycle (hle.h / dm.h): focus lost → 2, focus regained → 1; minimized → 3 + audio paused + GPU suspended, restored → resume (followed by focus regained → 1).
@@ -1679,7 +1736,7 @@ int front_text_input(const char *title, const char *sub, const char *guide, cons
         // The box takes the keyboard and the mouse, so the game window never sees the key-up of the button or the touch-up of the click that opened it: nothing may stay pressed
         // while it is up, or the game reads the stuck button / touch the moment the box closes (Stardew Valley's character creation re-opened the keyboard endlessly)
         g_btn = 0; g_w = g_a = g_s = g_d = 0; g_rl = g_ru = g_rr = g_rd = 0; push();
-        dm_touch_set(NULL, 0);
+        dm_touch_set(NULL, 0); ms_capture(0);   // the box needs the pointer
         int min_chars = g_swkbd_min_chars > 0 ? g_swkbd_min_chars : 0;
         NSString *info = [NSString stringWithFormat:@"%s%s%s", sub ? sub : "", sub && *sub && guide && *guide ? "\n" : "", guide ? guide : ""];
         for (;;) {

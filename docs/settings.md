@@ -115,6 +115,10 @@ A controller's vibration weaker than this stays off, and the rest is spread over
 
 Off by default: each controller is a player as soon as it connects, in the order the system lists them. On: a controller becomes a player only when you press one of its buttons, as the lowest player free, so the players choose their order and how many play. That press also reaches the game. When a game asks for more players than have joined, a prompt over the game waits for the others to press a button; B closes it.
 
+### Mouse
+
+On the Mac, what the mouse is in the game. **Touchscreen** (the default): the left button touches the screen where you click. **Left stick** or **Right stick**: click the game picture to capture the pointer; it hides, and moving the mouse pushes that stick, which goes back to the centre when the mouse stops. The left button is then A and the right one B for the left stick (aim and throw in Pokémon: Let's Go), ZR and ZL for the right one (the camera, fire and aim). Press Escape, or switch to another window, to get the pointer back. The keyboard keeps working alongside. In `env.txt`: `DM_MOUSE_SENS` sets the sensitivity (`1.0` by default, `2.0` twice as fast), `DM_MOUSE_RECENTER` how fast the stick comes back, in milliseconds to half way (`80` by default; `0` keeps it where the mouse put it), and `DM_MOUSE_BUTTONS` the two buttons, such as `A,B` or `ZR,ZL`.
+
 ## Performance
 
 These settings change how the app hands frames to the screen and how it prepares the GPU's work. The game's tested defaults are a good start; change them when a game stutters, runs hot, or you want less latency.
@@ -279,6 +283,7 @@ A line like `DM_PRESENT_SNAP=0` in `Documents/env.txt` (in the Files app, under 
 | Rumble strength | `DM_RUMBLE_GAIN` | `0` to `3` |
 | Rumble cutoff | `DM_RUMBLE_MIN` | `0` to `0.9` |
 | Press a button to join | `DM_PAD_PRESS_TO_JOIN` | `1`, `0` |
+| Mouse (Mac) | `DM_MOUSE_STICK` | `off` the touchscreen, `left` the left stick, `right` the right stick |
 | Upscaling | `DM_PRESENT_UPSCALE` | `off`, `metalfx` |
 | Game's upscaler | `DM_UPSCALER` | `game`, `metalfx` |
 | Frame buffering | `DM_PRESENT_SNAP` | `1`, `0` |

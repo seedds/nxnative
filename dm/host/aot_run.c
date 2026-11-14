@@ -272,6 +272,24 @@ static void serve_gate(dm_aot_thread *t, uint64_t pc, uint32_t kind) {
 }
 
 #if NXHOST_JIT
+#define JIT_MAX_THREADS 64           // instances at a time: the shared exclusive monitor's processors
+#define JIT_CODE_CACHE (16u << 20)   // per instance
+static _Atomic uint64_t c_first_use_ns;   // dm_aot_stats jit_first_use_ns: the longest
+// The first use's instance made ahead (aot.h dm_aot_jit_prepare; jit.h dm_jit_prepare): a thread's first JIT use stopped about 35 ms to make its instance and,
+// the process's first, 63 to 70 ms more for dynarmic's decoder table (181 to 197 ms as dm/host's CMake builds nxhost_jit, without optimisation): a dozen frames
+// and more on a game's main or render thread. A helper thread pays both from the first pack's load, before a game's first miss in practice; a first use that
+// comes earlier waits for it, about as long as it would have taken. The cost for a program that never misses: the helper's CPU time, off the guest threads,
+// and about 23 MiB resident (dm/tools/aot/README.md, "The JIT fallback", the first use)
+static void jit_made(void) { dm_aot_fault_after_jit(); }   // dynarmic installed its fault handler with the process's first instance: ours in front again (5.4's order)
+static pthread_once_t g_prepare_once = PTHREAD_ONCE_INIT;
+static void jit_prepare_once(void) {
+    dm_jit_ahead a;
+    memset(&a, 0, sizeof a);
+    a.max_threads = JIT_MAX_THREADS; a.code_cache = JIT_CODE_CACHE; a.made = jit_made;
+    dm_jit_prepare(&a);
+}
+void dm_aot_jit_prepare(void) { pthread_once(&g_prepare_once, jit_prepare_once); }
+__attribute__((constructor)) static void jit_prepare_hook(void) { atomic_store(&dm_aot_pack_loaded, dm_aot_jit_prepare); }   // aot_arena.c dm_aot_pack_load calls it
 static pthread_once_t g_jit_once = PTHREAD_ONCE_INIT;
 // Where the JIT stops (jit.h stop_at), asked once per translated instruction: a compiled entry (continued natively), a compiled call site's return (a native
 // frame may wait there), and a manifest's gate row (its observer or back-off, served by run_jit; compiled code serves the gates it reaches itself), the rows
@@ -323,7 +341,7 @@ static void jit_code_give(int n, int first) {
         memset(&h, 0, sizeof h);
         h.code = r; h.code_count = k;
         h.fpcr = dm_aot_module_fpcr() & FPCR_MODE;
-        h.max_threads = 64; h.code_cache = 16u << 20;
+        h.max_threads = JIT_MAX_THREADS; h.code_cache = JIT_CODE_CACHE;
         h.stop_at = jit_stop_at; h.svc = jit_svc; h.cntpct = jit_cntpct;
         dm_jit_init(&h);
     } else {
@@ -349,6 +367,7 @@ static void jit_code_sync(void) {
 int dm_aot_jit_stop_at(uint64_t pc) { return jit_stop_at(NULL, pc); }
 #else
 int dm_aot_jit_stop_at(uint64_t pc) { (void)pc; return 0; }
+void dm_aot_jit_prepare(void) {}
 #endif
 
 // Run st->pc in the JIT until it stops; without it, the [RED] line and the process stop. past: compiled code served the observation gate at st->pc already
@@ -378,12 +397,15 @@ static void run_jit(dm_aot_thread *t, uint64_t lr, uint32_t *why, int past) {
     jit_code_sync();
     dm_jit *j = t->jit;
     if (!j) {
+        // This thread's first use: its instance, ready (made ahead), waited for, or made here with dynarmic's decoder table; timed (dm_aot_stats jit_first_use_ns)
+        const uint64_t t0 = plat_now_ns();
+        dm_aot_jit_prepare();   // at the first pack's load already (aot_arena.c): the instance is ready, or being made
         if (!(j = dm_jit_create(&t->st))) {
             dm_aot_stop(DM_AOT_JIT_NEEDED, "[RED] aot: no JIT instance for this guest thread (more than 64 threads in the JIT fallback)");
             dm_aot_leave(DM_AOT_LEFT_STOP);
         }
-        static atomic_flag faults_ordered = ATOMIC_FLAG_INIT;
-        if (!atomic_flag_test_and_set(&faults_ordered)) dm_aot_fault_after_jit();   // dynarmic installed its fault handler with this first instance (5.4's order)
+        const uint64_t ns = plat_now_ns() - t0;
+        for (uint64_t m = atomic_load(&c_first_use_ns); ns > m && !atomic_compare_exchange_weak(&c_first_use_ns, &m, ns);) {}
         dm_aot_thread_set_jit(j);   // halted at once when a pause or stop was requested before it existed
     }
     if (note_jit(pc, *why) && *why) LOG("[RED] aot: %s at %s runs in the JIT fallback (design section 11)", jit_why(*why), name);   // a run going on: counted, not said
@@ -677,6 +699,11 @@ void dm_aot_stats(dm_aot_stats_t *o) {
     o->safepoints = atomic_load(&c_safepoints); o->jit_runs = atomic_load(&c_jit_runs); o->threads = dm_aot_threads_made();
     o->cross_pack_handovers = atomic_load(&c_cross_handovers); o->obs_gates = atomic_load(&c_obs_gates); o->spin_gates = atomic_load(&c_spin_gates);
     pthread_mutex_lock(&g_seen_lock); o->jit_addresses = (uint64_t)g_nseen; pthread_mutex_unlock(&g_seen_lock);
+#if NXHOST_JIT
+    const dm_jit_pool_stats ps = dm_jit_get_pool_stats();
+    o->jit_ahead = ps.made_ahead; o->jit_taken = ps.taken; o->jit_made_on_use = ps.made_on_use; o->jit_waits = ps.waits;
+    o->jit_wait_ns = (uint64_t)(ps.wait_seconds * 1e9); o->jit_first_use_ns = atomic_load(&c_first_use_ns);
+#endif
 }
 
 // ---------- What a pack imports ----------

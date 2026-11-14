@@ -12,6 +12,9 @@
 //   every NRO once: its expected lines and exit 0. A host built without the JIT fallback (CMake NXHOST_JIT off) cannot run what has no compiled entry: the
 //     programs listed in JIT_NEEDED below then stop with status 3 (DM_AOT_JIT_NEEDED) and a [RED] line naming the address, after printing the start of
 //     their expected lines; any other NRO stopping so fails
+//   fp again with the JIT built in (jit-start): the JIT's first instance is made ahead on a helper thread from the pack's load (aot_run.c dm_aot_jit_prepare): run once it
+//     is ready (--jit-ready, as a game's boot gives it time), the first use takes it and makes nothing (no instance, no decoder table: the 35 + 181..197 ms it cost
+//     the thread before; a generous 20 ms bound on the time it took); and in the plain run, whose miss comes at once, the first use waited for it rather than made one
 //   excl again, EXCL_RUNS times per compiler: the exact totals of its threaded counters, with real host threads contending
 //   excl with the pause test (design 6.2, in the manner of dm/tools/aot/tests/test_safepoints.py): a guest thread whose entry is a host function pauses
 //     every other guest thread PAUSES times through SetThreadActivity while more than one runs, reads each through GetThreadContext3 and checks it (pc a
@@ -37,7 +40,7 @@
 //   t_aot_host [--packs <dir>] [--corpus <dir>] [--nro <name>]... [--nxaot <nxaot>]
 //     the packs: --packs, else the environment variable NXAOT_PACKS, else the CMake option NXAOT_PACKS; with none, a note and exit 0 (CTest stays green where
 //     no packs exist: the Windows runner, a build without the aot image)
-//   t_aot_host --run <pack> <nro> [--set <symbol>=<value>]... [--hidden-host] [--dirty] [--pause N --seed S] [--positions]      one run (the child)
+//   t_aot_host --run <pack> <nro> [--set <symbol>=<value>]... [--hidden-host] [--dirty] [--pause N --seed S] [--positions] [--jit-ready]      one run (the child)
 //   t_aot_host --log-race N      N log lines and N guest lines from two threads (the child of the log-lines row)
 #include "../aot.h"
 #include "../aot_hostfn.h"
@@ -174,6 +177,7 @@ static void *dirty_rearm(void *p) {
 typedef struct {
     const char *pack, *nro; int nsets; const char *sets[8]; int hidden, dirty, positions; unsigned pause, seed; int status; double secs;
     const dm_aot_pack *loaded; const module_t *m;   // the pack and module the run loaded (the positions' check)
+    int jit_ready, ready_ahead;                     // --jit-ready: the run starts once the JIT's instance made ahead is ready; it was
 } run_args;
 
 static uint8_t *slurp(const char *path, size_t *n) {
@@ -245,6 +249,12 @@ static void *guest_main(void *p) {
         uint64_t s[32] = {r[1]};
         svc_dispatch(0x09, s, 0);
     }
+#if NXHOST_JIT
+    if (a->jit_ready) {   // as a game's boot gives the helper time before its first miss: the run starts once the JIT's instance made ahead is ready (10 s at most)
+        for (int i = 0; i < 10000 && !dm_jit_get_pool_stats().spare; i++) plat_sleep_ns(1000000);
+        a->ready_ahead = dm_jit_get_pool_stats().spare;
+    }
+#endif
     a->status = dm_aot_run((uint64_t)(uintptr_t)m->base + dm_aot_pack_desc(pack)->entry, 0, hmain, &a->secs);
     atomic_store(&g_dirty_stop, 1);
     return NULL;
@@ -363,6 +373,7 @@ static int child(int argc, char **argv) {
         else if (!strcmp(argv[i], "--hidden-host")) a.hidden = 1;
         else if (!strcmp(argv[i], "--dirty")) a.dirty = 1;
         else if (!strcmp(argv[i], "--positions")) a.positions = 1;
+        else if (!strcmp(argv[i], "--jit-ready")) a.jit_ready = 1;
         else if (!strcmp(argv[i], "--pause") && i + 1 < argc) a.pause = (unsigned)atoi(argv[++i]);
         else if (!strcmp(argv[i], "--seed") && i + 1 < argc) a.seed = (unsigned)atoi(argv[++i]);
         else { fprintf(stderr, "t_aot_host: unknown option %s\n", argv[i]); return DM_AOT_USAGE; }
@@ -390,6 +401,9 @@ static int child(int argc, char **argv) {
         dm_aot_miss *ms = calloc(n ? n : 1, sizeof *ms);
         if (ms) { dm_aot_jit_misses(ms, n, NULL); for (size_t i = 0; i < n; i++) { const char *w = dm_aot_miss_word(ms[i].reason); nonlocal += w && !strcmp(w, "nonlocal"); } free(ms); }
         printf("t_aot_host: jit: %llu runs, %llu addresses, %zu misses (%zu nonlocal)\n", (unsigned long long)s.jit_runs, (unsigned long long)s.jit_addresses, n, nonlocal);
+        printf("t_aot_host: jit instances: %llu made ahead, %llu taken, %llu made on first use, %llu waits (%.3f ms), longest first use %.3f ms; ready before the run %d\n",
+               (unsigned long long)s.jit_ahead, (unsigned long long)s.jit_taken, (unsigned long long)s.jit_made_on_use, (unsigned long long)s.jit_waits,
+               (double)s.jit_wait_ns * 1e-6, (double)s.jit_first_use_ns * 1e-6, a.ready_ahead);
     }
     if (a.pause)
         printf("t_aot_host: pause test: %u pauses (%u with more than one thread running), %u register-invariant checks, %u inconsistent, %u exited%s%s\n",
@@ -428,6 +442,7 @@ static int log_race(unsigned n) {
 typedef struct {
     int status; char *guest; size_t nguest; char red[400]; double secs; unsigned long long stat[12]; int have_stat; unsigned pt[5]; int have_pt;
     unsigned long long jit[4]; int have_jit;   // the child's JIT line: runs, addresses, misses, nonlocal misses
+    unsigned long long ji[4]; double ji_wait_ms, ji_first_ms; int ji_ready, have_ji;   // its JIT instances line: made ahead, taken, made on first use, waits
     unsigned ndm, spliced; char splice[300];   // "[dm] " lines; lines holding a "[guest] " line after their start (the first of them)
     char pos[700], prof[900], fl[300];         // the positions' check of the child (--positions), the sampler's summary line (aot_profile.c), the child's function lines' check
 } result;
@@ -457,6 +472,9 @@ static int run_cmd(const char *cmd, result *r) {
         }
         if (!strncmp(line, "t_aot_host: jit: ", 17))
             r->have_jit = sscanf(line, "t_aot_host: jit: %llu runs, %llu addresses, %llu misses (%llu nonlocal)", &r->jit[0], &r->jit[1], &r->jit[2], &r->jit[3]) == 4;
+        if (!strncmp(line, "t_aot_host: jit instances: ", 27))
+            r->have_ji = sscanf(line, "t_aot_host: jit instances: %llu made ahead, %llu taken, %llu made on first use, %llu waits (%lf ms), longest first use %lf ms; ready before the run %d",
+                                &r->ji[0], &r->ji[1], &r->ji[2], &r->ji[3], &r->ji_wait_ms, &r->ji_first_ms, &r->ji_ready) == 7;
         if (!strncmp(line, "t_aot_host: pause test: ", 24))
             r->have_pt = sscanf(line, "t_aot_host: pause test: %u pauses (%u with more than one thread running), %u register-invariant checks, %u inconsistent, %u exited",
                                 &r->pt[0], &r->pt[1], &r->pt[2], &r->pt[3], &r->pt[4]) == 5;
@@ -949,7 +967,22 @@ int main(int argc, char **argv) {
             snprintf(note, sizeof note, "lines differ from byte %zu of %zu (got %zu)%s%s%s", k, strlen(expected), r.nguest, diff, r.red[0] ? "; " : "", r.red);
         }
         row(name, "plain", ok, &r, note);
+        const int plain_ji = r.have_ji, plain_on_use = (int)r.ji[2];
         free(r.guest);
+        if (NXHOST_JIT && !strcmp(program, "fp")) {
+            // 1b. The JIT's first use (aot_run.c run_jit, jit.h dm_jit_prepare): its instance made ahead on a helper thread from the pack's load, with dynarmic's decoder table.
+            // The run starts once it is ready, as a game's boot gives it time before its first miss: the first use takes it, made nothing and waited for nothing; and in the
+            // plain run above, whose miss comes a millisecond after the load, the first use waited for it rather than make one. The time bound is generous (a ready
+            // instance is a pointer taken under a lock; making one took 35 ms and the decoder table 181 to 197 ms more before)
+            run_child(argv[0], pack, nrop, "--jit-ready", &r);
+            ok = r.status == 0 && !strcmp(r.guest, expected) && r.have_ji && plain_ji && r.ji_ready == 1 && r.ji[1] >= 1 && r.ji[2] == 0 && r.ji[3] == 0 && plain_on_use == 0 &&
+                 r.ji_first_ms < 20.0;
+            diff_note(expected, &r, diff, sizeof diff);
+            snprintf(note, sizeof note, "ready before the run %d: %llu made ahead, %llu taken, %llu made on first use, %llu waits, first use %.3f ms; plain run: %d made on first use%s%s%s",
+                     r.ji_ready, r.ji[0], r.ji[1], r.ji[2], r.ji[3], r.ji_first_ms, plain_on_use, diff, r.red[0] ? "; " : "", r.red);
+            row(name, "jit-start", ok, &r, note);
+            free(r.guest);
+        }
         if (!strcmp(program, "excl")) {
             // 2. The threaded totals again; 3. the pause test
             for (int i = 0; i < EXCL_RUNS; i++) {

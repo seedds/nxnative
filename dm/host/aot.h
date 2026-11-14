@@ -323,11 +323,24 @@ static inline uint64_t dm_gc_arg(uint64_t v, int isptr, const char *file, unsign
 //   cross_pack           of those, the ones into another pack: the inline cache then calls that pack's standard entry directly (the same signature, ABI 3)
 //   cross_pack_handovers calls into another pack of another signature or mode, handed over through jit_entry and that pack's enter at every call
 //   obs_gates, spin_gates  calls of the packs' gates (nxaot_rt_gate, design 1.1): observation gates, spin waits' back-edges
+//   jit_ahead            JIT instances made ahead by the helper thread (dm_aot_jit_prepare: at the first pack's load), the decoder table with the first
+//   jit_taken            instances a thread's first JIT use took ready (made ahead, or given back by a thread that ended)
+//   jit_made_on_use      instances a thread's first JIT use made itself, on its own path (none was ready or being made, or another first use already waited for it)
+//   jit_waits            first uses that waited for the instance being made ahead (the miss came before the helper was done), jit_wait_ns in total
+//   jit_first_use_ns     the longest time a thread's first JIT use took to get its instance: taken ready, waited for, or made with dynarmic's decoder table
 typedef struct {
     uint64_t svcs, host_calls, misses, cross_pack, safepoints, jit_runs, jit_addresses, threads;
     uint64_t cross_pack_handovers, obs_gates, spin_gates;
+    uint64_t jit_ahead, jit_taken, jit_made_on_use, jit_waits, jit_wait_ns, jit_first_use_ns;
 } dm_aot_stats_t;
 void dm_aot_stats(dm_aot_stats_t *out);
+// The JIT fallback's instances made ahead of their threads' first use (aot_run.c; dm/tools/aot/src/rt/jit.h dm_jit_prepare): a helper thread builds dynarmic's decoder
+// table and makes one instance, so that the first thread to reach code no pack holds does not stop for them (about 100 ms optimised, 235 ms as dm/host builds the
+// JIT's glue, without optimisation). Once per process, at
+// the first pack's load (aot_arena.c dm_aot_pack_load calls it through dm_aot_pack_loaded, which aot_run.c sets when the program starts: some tests link aot_arena.c
+// alone); later calls do nothing. Without the JIT (NXHOST_JIT off) nothing
+void dm_aot_jit_prepare(void);
+extern void (*_Atomic dm_aot_pack_loaded)(void);
 uint32_t dm_aot_guest_mxcsr(uint32_t fpcr);   // the MXCSR guest code runs with (7.1): exceptions masked, RMode as rounding control, FZ as FTZ and DAZ
 
 // What a pack's library imports (include/nxaot/aot_module.h), defined by aot_run.c and aot_fp.c and exported from the executable

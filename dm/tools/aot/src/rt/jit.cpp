@@ -1,12 +1,16 @@
 #include "rt/jit.h"
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
+#include <cstdlib>
 #include <cstring>
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <thread>
 #include <vector>
 
 #include <immintrin.h>
@@ -24,9 +28,19 @@ namespace {
 using namespace Dynarmic;
 
 dm_jit_host g_host{};
-std::unique_ptr<ExclusiveMonitor> g_monitor;
+ExclusiveMonitor* g_monitor = nullptr;  // never freed: an instance made ahead may still use it while the process exits (dm_jit_prepare)
 std::mutex g_ids_lock;
 std::vector<bool> g_ids;  // the monitor's processor ids in use
+
+// The shared monitor for max_threads processors, made once (under g_ids_lock): never replaced while an instance holds an id of it
+void EnsureMonitor(unsigned max_threads) {
+    if (g_monitor && (g_ids.size() == max_threads || std::find(g_ids.begin(), g_ids.end(), true) != g_ids.end())) {
+        return;
+    }
+    delete g_monitor;
+    g_monitor = new ExclusiveMonitor(max_threads);
+    g_ids.assign(max_threads, false);
+}
 
 // The code ranges (dm_jit_set_code): published whole, read by every instance at translation; a list replaced stays allocated (an instance may be
 // reading it, and lists are replaced only when modules are loaded), and g_code_gen tells instances to drop what they translated before
@@ -76,6 +90,7 @@ uint32_t FpsrFromMxcsr(uint32_t mxcsr) {
 }  // namespace
 
 struct dm_jit final : A64::UserCallbacks {
+    // state may be null: an instance made ahead (dm_jit_prepare), bound to a thread's block when that thread first needs one (dm_jit_create)
     dm_jit(dm_guest_state* state, bool one_block_per_run) : st(state), one_block(one_block_per_run) {
         {
             std::lock_guard<std::mutex> guard{g_ids_lock};
@@ -89,7 +104,7 @@ struct dm_jit final : A64::UserCallbacks {
         A64::UserConfig conf;
         conf.callbacks = this;
         conf.processor_id = id;
-        conf.global_monitor = g_monitor.get();
+        conf.global_monitor = g_monitor;
         // Section 11: one-to-one addresses (guest address = host address) below 2^39, the arena's bound; a fault takes the callbacks below
         conf.fastmem_pointer = 0;
         conf.fastmem_address_space_bits = 39;
@@ -104,12 +119,13 @@ struct dm_jit final : A64::UserCallbacks {
         conf.cntfrq_el0 = nxaot::lift::kCntfrq;
         conf.ctr_el0 = nxaot::lift::kCtr;
         conf.dczid_el0 = nxaot::lift::kDczid;
-        conf.tpidr_el0 = &st->tpidr_el0;
-        conf.tpidrro_el0 = &st->tpidrro_el0;
+        // The instance's own copies, which the hand-over moves from and to the block (an instance may be made before it has a thread)
+        conf.tpidr_el0 = &tpidr_el0;
+        conf.tpidrro_el0 = &tpidrro_el0;
         conf.wall_clock_cntpct = true;
         conf.enable_cycle_counting = one_block;  // off (section 11), except in the measurement mode of one block per Run()
         conf.define_unpredictable_behaviour = false;
-        conf.code_cache_size = g_host.code_cache ? g_host.code_cache : 16u * 1024 * 1024;
+        conf.code_cache_size = CodeCacheSize();
         // Without A64GetSetElimination, as the reference runs (README.md, "Known issues", 1: it reads msr nzcv back wrong)
         conf.optimizations = all_safe_optimizations & ~OptimizationFlag::GetSetElimination;
         jit = std::make_unique<A64::Jit>(conf);
@@ -126,6 +142,8 @@ struct dm_jit final : A64::UserCallbacks {
 
     // ---- The hand-over (sections 2.5 and 11) ----
     void LoadFrom(uint64_t pc) {
+        tpidr_el0 = st->tpidr_el0;
+        tpidrro_el0 = st->tpidrro_el0;
         std::array<uint64_t, 31> x;
         std::memcpy(x.data(), st->x, sizeof st->x);
         jit->SetRegisters(x);
@@ -152,6 +170,7 @@ struct dm_jit final : A64::UserCallbacks {
         st->fpcr = jit->GetFpcr();
         st->fpsr = jit->GetFpsr();
         st->excl_valid = 0;
+        st->tpidr_el0 = tpidr_el0;  // msr tpidr_el0 in JIT code
     }
 
     static bool Under(uint64_t fpcr) { return (fpcr & nxaot::lift::kFpcrModeMask) == g_host.fpcr; }
@@ -222,9 +241,14 @@ struct dm_jit final : A64::UserCallbacks {
             return pc;
         }
         if (code_gen != g_code_gen.load(std::memory_order_acquire)) {
-            jit->ClearCache();  // the code ranges grew (dm_jit_set_code): a block translated before may end where there was no code then
+            // The code ranges grew (dm_jit_set_code): a block translated before may end where there was no code then. An instance that has run
+            // nothing has no block (one made ahead, the ranges given after it was made): dynarmic's ClearCache would only write its dispatch table again
+            if (ran) {
+                jit->ClearCache();
+            }
             code_gen = g_code_gen.load(std::memory_order_acquire);
         }
+        ran = true;
         LoadFrom(pc);
         if (past >= 0 || (k && !one_block)) {
             // A stop address the host wants run, or a gate site the host served: its instruction, then on (or back, with one)
@@ -374,6 +398,8 @@ struct dm_jit final : A64::UserCallbacks {
         std::memcpy(x.data(), st->x, sizeof st->x);
         jit->SetRegisters(x);
         jit->SetSP(st->sp);
+        tpidr_el0 = st->tpidr_el0;  // as the general registers: the block holds the thread's state again
+        tpidrro_el0 = st->tpidrro_el0;
         jit->ClearExclusiveState();  // an svc returns through an exception return, which clears the local monitor
     }
     void ExceptionRaised(A64::VAddr pc, A64::Exception e) override {
@@ -434,8 +460,110 @@ struct dm_jit final : A64::UserCallbacks {
     uint64_t allow = UINT64_MAX;  // the stop address being single-stepped (MemoryReadCode hands its instruction over)
     uint64_t retry_pc = 0;        // the instruction Retry steps: its callback accesses are made, and reported at it
     uint64_t code_gen = 0;        // g_code_gen when this instance last dropped its translations
+    bool ran = false;             // it has run: blocks to drop when the code ranges change
+    uint64_t tpidr_el0 = 0, tpidrro_el0 = 0;  // the guest's TPIDR_EL0 / TPIDRRO_EL0 while it runs here (dynarmic reads them through the configuration)
     dm_jit_counts counts{};
+
+    static size_t CodeCacheSize();
 };
+
+namespace {
+
+// ---- Instances made ahead of their threads' first use (dm_jit_prepare) ----
+// What a first use cost (dm/tools/aot/README.md, "The JIT fallback", "The first use"): making an instance (about 35 ms: dynarmic's emitter writes its
+// 16 MiB fast-dispatch table, whose entries have member initializers (a64_emit_x64.h FastDispatchEntry), and emits its prelude and fastmem thunks)
+// and, once per process, dynarmic's A64 decoder table (frontend/A64/decoder/a64.h GetDecodeTable, a function-local static built at the first
+// translation). A helper thread pays both ahead: it builds the decoder table, then makes one instance bound to no thread, the spare, which the next
+// dm_jit_create binds to its block; a take starts the next spare (a pool of one), and an instance whose thread ends comes back as the spare with its
+// translations, which belong to no thread. Pool::lock guards the spare and the helper's state. A first use that finds the spare being made waits for
+// it (it started earlier, so the wait is shorter than making one, which would also compete with it for the CPU); a second first use meanwhile makes
+// its own rather than queue behind the next spare (a burst of threads that miss at once pays about what it paid before). One spare, not one per
+// thread: an instance holds about 20 MiB resident (the dispatch table, the prelude), and only the threads that miss need one
+struct Pool {
+    std::mutex lock;
+    std::condition_variable cv;
+    dm_jit* spare = nullptr;  // made ahead or given back, bound to no thread
+    bool making = false;      // a helper thread is making the spare
+    bool waiting = false;     // a first use waits for it
+    bool on = false;          // dm_jit_prepare was called: a take starts the next spare, an instance given back is kept
+    size_t code_cache = 16u * 1024 * 1024;
+    void (*made)(void) = nullptr;  // on the thread that made an instance, right after
+    dm_jit_pool_stats stats{};
+};
+Pool& ThePool() {
+    static Pool* p = new Pool;  // never destroyed: a helper thread may use it while the process exits (exit waits for it: AtExit)
+    return *p;
+}
+
+void WarmDecoder() {
+    // One instruction (a nop) through the frontend: dynarmic's decoder table is built at its first use, once per process (decode/translate.cpp's
+    // Decode<TranslatorVisitor>, the instantiation every translation of the JIT uses)
+    static std::once_flag once;
+    std::call_once(once, [] {
+        const auto read = [](uint64_t vaddr) -> std::optional<uint32_t> {
+            return vaddr == 0 ? std::optional<uint32_t>{0xD503201Fu} : std::nullopt;
+        };
+        (void)nxaot::decode::TranslateBlock(0, read);
+    });
+}
+
+dm_jit* MakeInstance(dm_guest_state* st, bool one_block) {
+    auto* j = new dm_jit(st, one_block);
+    if (!j->jit) {
+        delete j;
+        return nullptr;
+    }
+    if (void (*made)(void) = ThePool().made) {
+        made();
+    }
+    return j;
+}
+
+void Helper() {
+    Pool& p = ThePool();
+    const auto t0 = std::chrono::steady_clock::now();
+    WarmDecoder();
+    dm_jit* j = MakeInstance(nullptr, false);
+    const double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    std::lock_guard<std::mutex> guard{p.lock};
+    p.making = false;
+    if (j) {
+        p.stats.made_ahead++;
+        p.stats.ahead_seconds += secs;
+        if (p.spare) {
+            delete j;  // an instance came back meanwhile (dm_jit_destroy)
+        } else {
+            p.spare = j;
+        }
+    }
+    p.cv.notify_all();
+}
+
+// With p.lock held: a helper thread makes the spare when there is none and none is being made
+void Refill(Pool& p) {
+    if (!p.on || p.spare || p.making) {
+        return;
+    }
+    p.making = true;
+    try {
+        std::thread(Helper).detach();
+    } catch (...) {
+        p.making = false;  // no thread: the next first use makes its instance itself
+    }
+}
+
+// exit() while a helper makes an instance: wait for it, before the static objects it uses are destroyed
+void AtExit() {
+    Pool& p = ThePool();
+    std::unique_lock<std::mutex> guard{p.lock};
+    p.cv.wait(guard, [&] { return !p.making; });
+}
+
+}  // namespace
+
+size_t dm_jit::CodeCacheSize() {
+    return g_host.code_cache ? g_host.code_cache : ThePool().code_cache;
+}
 
 extern "C" {
 
@@ -444,10 +572,33 @@ void dm_jit_init(const dm_jit_host* host) {
     SetCode(host->code, host->code_count);
     g_host.code = nullptr;  // the copy in g_code is the one read
     std::lock_guard<std::mutex> guard{g_ids_lock};
-    if (!g_monitor || g_ids.size() != host->max_threads) {
-        g_monitor = std::make_unique<ExclusiveMonitor>(host->max_threads);
-        g_ids.assign(host->max_threads, false);
+    EnsureMonitor(host->max_threads);
+}
+
+void dm_jit_prepare(const dm_jit_ahead* a) {
+    {
+        std::lock_guard<std::mutex> guard{g_ids_lock};
+        EnsureMonitor(a->max_threads);
     }
+    Pool& p = ThePool();
+    std::lock_guard<std::mutex> guard{p.lock};
+    if (p.on) {
+        return;
+    }
+    p.on = true;
+    p.code_cache = a->code_cache ? a->code_cache : p.code_cache;
+    p.made = a->made;
+    std::atexit(AtExit);
+    Refill(p);
+}
+
+dm_jit_pool_stats dm_jit_get_pool_stats(void) {
+    Pool& p = ThePool();
+    std::lock_guard<std::mutex> guard{p.lock};
+    dm_jit_pool_stats s = p.stats;
+    s.spare = p.spare != nullptr;
+    s.making = p.making;
+    return s;
 }
 
 void dm_jit_set_code(const dm_jit_range* code, unsigned count) {
@@ -455,12 +606,32 @@ void dm_jit_set_code(const dm_jit_range* code, unsigned count) {
 }
 
 dm_jit* dm_jit_create_stepping(dm_guest_state* st, int one_block_per_run) {
-    auto* j = new dm_jit(st, one_block_per_run != 0);
-    if (!j->jit) {
-        delete j;
-        return nullptr;
+    Pool& p = ThePool();
+    if (!one_block_per_run) {
+        std::unique_lock<std::mutex> guard{p.lock};
+        if (!p.spare && p.making && !p.waiting) {
+            // Being made ahead: wait for it, which takes less than making one here (it started earlier). One thread waits for it; another first
+            // use meanwhile makes its own, in parallel, rather than queue behind the next spare
+            const auto t0 = std::chrono::steady_clock::now();
+            p.waiting = true;
+            p.cv.wait(guard, [&] { return p.spare || !p.making; });
+            p.waiting = false;
+            p.stats.waits++;
+            p.stats.wait_seconds += std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+        }
+        if (dm_jit* j = p.spare) {
+            p.spare = nullptr;
+            p.stats.taken++;
+            Refill(p);  // the next thread's
+            guard.unlock();
+            j->st = st;
+            j->counts = dm_jit_counts{};
+            return j;
+        }
+        p.stats.made_on_use++;
     }
-    return j;
+    WarmDecoder();  // here rather than at the first translation, so that the instance is ready when it returns (waits while the helper builds it)
+    return MakeInstance(st, one_block_per_run != 0);
 }
 
 dm_jit* dm_jit_create(dm_guest_state* st) {
@@ -468,6 +639,25 @@ dm_jit* dm_jit_create(dm_guest_state* st) {
 }
 
 void dm_jit_destroy(dm_jit* j) {
+    if (!j) {
+        return;
+    }
+    if (!j->one_block) {
+        Pool& p = ThePool();
+        std::lock_guard<std::mutex> guard{p.lock};
+        if (p.on && !p.spare) {
+            // Back as the spare with its translations (they belong to no thread): unbound, its monitor reservation and any halt cleared
+            g_monitor->ClearProcessor(j->id);
+            j->jit->ClearHalt(kHalted);
+            j->jit->ClearHalt(kStopped);
+            j->st = nullptr;
+            j->stopped = false;
+            p.spare = j;
+            p.stats.given_back++;
+            p.cv.notify_all();
+            return;
+        }
+    }
     delete j;
 }
 

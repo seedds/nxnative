@@ -211,16 +211,24 @@ static void alt_own(void);
 // (aot_run.c), whose alternate signal stack dynarmic's SigHandler replaced with a 2 MiB block of its own (third_party/dynarmic exception_handler_posix.cpp
 // SigHandler::SigHandler), which its static destructor frees at exit without taking it off the thread: a signal after that (the sampler's SIGPROF, while
 // exit's handlers run on that thread) was delivered onto unmapped memory, and the kernel killed the process with SIGSEGV. The thread gets its own stack
-// back (alt_own), so the host never runs a handler on a stack it does not own; every other thread never had dynarmic's (its constructor runs once)
+// back (alt_own), so the host never runs a handler on a stack it does not own; every other thread never had dynarmic's (its constructor runs once).
+// Called after every instance made (aot_run.c: the JIT's made hook, on the thread that made it, which may be the helper thread that makes them ahead):
+// the handlers are taken over only while dynarmic's is in front (once), the thread's own stack installed again each time (cheap: one call)
 void dm_aot_fault_after_jit(void) {
-    struct sigaction sa;
-    memset(&sa, 0, sizeof sa);
-    sa.sa_sigaction = on_fault;
-    sa.sa_flags = SA_SIGINFO | SA_ONSTACK;
-    sigemptyset(&sa.sa_mask);
-    sigaction(SIGSEGV, &sa, &g_next_segv);
-    sigaction(SIGBUS, &sa, &g_next_bus);
-    if ((g_next_segv.sa_flags & SA_SIGINFO) && g_next_segv.sa_sigaction != on_fault) atomic_store(&g_have_next, 1);
+    static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
+    pthread_mutex_lock(&lock);
+    struct sigaction cur;
+    if (!sigaction(SIGSEGV, NULL, &cur) && !((cur.sa_flags & SA_SIGINFO) && cur.sa_sigaction == on_fault)) {
+        struct sigaction sa;
+        memset(&sa, 0, sizeof sa);
+        sa.sa_sigaction = on_fault;
+        sa.sa_flags = SA_SIGINFO | SA_ONSTACK;
+        sigemptyset(&sa.sa_mask);
+        sigaction(SIGSEGV, &sa, &g_next_segv);
+        sigaction(SIGBUS, &sa, &g_next_bus);
+        if ((g_next_segv.sa_flags & SA_SIGINFO) && g_next_segv.sa_sigaction != on_fault) atomic_store(&g_have_next, 1);
+    }
+    pthread_mutex_unlock(&lock);
     alt_own();
 }
 

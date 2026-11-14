@@ -1,7 +1,8 @@
 // The JIT fallback of docs/design/aot-recompiler.md section 11: dynarmic's A64 JIT (dm/third_party/dynarmic, unmodified) behind the C interface
 // the design names, one instance per guest thread on that thread's state block (include/nxaot/guest_state.h), configured as section 11 says:
 // fastmem with the one-to-one arena (guest addresses below 2^39 are host addresses), the shared exclusive monitor with inline exclusives (the
-// same compare-and-swap on the same memory as compiled code, section 6.5), tpidr_el0 / tpidrro_el0 in the state block, cntfrq_el0 = 19.2 MHz,
+// same compare-and-swap on the same memory as compiled code, section 6.5), tpidr_el0 / tpidrro_el0 from the state block (the instance keeps
+// copies, which the hand-over moves both ways, so that it can be made before its thread: dm_jit_prepare), cntfrq_el0 = 19.2 MHz,
 // ctr_el0 = 0x40000, dczid_el0 = 4, the counter from the host clock, no cycle counting, svc into the host's SVC path, a 16 MB code cache, and
 // without dynarmic's A64GetSetElimination pass (README.md, "Known issues", 1).
 //
@@ -80,10 +81,35 @@ void dm_jit_init(const dm_jit_host *host);
 void dm_jit_set_code(const dm_jit_range *code, unsigned count);
 
 // One instance per guest thread, on its state block; one_block_per_run (measurements only): cycle counting with a budget of one block, so that
-// Run() returns after every block and the host checks the next pc against stop_at (the alternative to the code-reader stops, design 11)
+// Run() returns after every block and the host checks the next pc against stop_at (the alternative to the code-reader stops, design 11).
+// After dm_jit_prepare, dm_jit_create binds the instance made ahead (waiting for it while a helper thread makes it) and starts the next one, and
+// dm_jit_destroy keeps the instance as the next thread's when none is waiting (with its translations); without it, each call makes or frees one
 dm_jit *dm_jit_create(dm_guest_state *st);
 dm_jit *dm_jit_create_stepping(dm_guest_state *st, int one_block_per_run);
 void dm_jit_destroy(dm_jit *j);
+
+// Instances made ahead of their threads' first use. A thread's first dm_jit_run cost about 35 ms of instance creation (dynarmic writes a 16 MiB
+// dispatch table and emits its prelude) and, once per process, dynarmic's decoder table (63 to 70 ms optimised, about 190 ms without): on the thread
+// that needed the JIT, a game's main or render thread, that is frames dropped. dm_jit_prepare starts a helper thread that builds the decoder table and
+// makes one instance bound to no thread (a pool of one: about 23 MiB resident, 16 MiB of it the dispatch table); may come before dm_jit_init (it needs none of the host's
+// interface), once per process (later calls do nothing). made: called on the thread that made an instance, right after (the host's fault handler
+// goes in front of dynarmic's again, whose first instance installs its own: dm/host/aot_fault.c dm_aot_fault_after_jit)
+typedef struct dm_jit_ahead {
+    unsigned max_threads;   // the shared exclusive monitor's processors, as dm_jit_host's
+    size_t code_cache;      // bytes of code cache per instance (dm_jit_host's, which dm_jit_init may give later, wins when set)
+    void (*made)(void);
+} dm_jit_ahead;
+void dm_jit_prepare(const dm_jit_ahead *a);
+
+// The pool's counts: instances made ahead (and the helper's seconds for them, the decoder table included), taken by a first use, given back by an
+// ending thread, made by a first use itself (none was coming), first uses that waited for one being made (and how long, in total); a spare now, one
+// being made now
+typedef struct dm_jit_pool_stats {
+    uint64_t made_ahead, taken, given_back, made_on_use, waits;
+    double ahead_seconds, wait_seconds;
+    int spare, making;
+} dm_jit_pool_stats;
+dm_jit_pool_stats dm_jit_get_pool_stats(void);
 
 // st -> the JIT, run from pc (pc itself is run even when stop_at names it DM_JIT_ENTRY or DM_JIT_RETURN; at a gate site nothing runs and the run
 // returns DM_JIT_GATE) until a stop, the JIT -> st; returns st->pc

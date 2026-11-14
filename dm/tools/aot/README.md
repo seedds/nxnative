@@ -477,7 +477,7 @@ Design section 11, on the vendored dynarmic with nothing changed in it ([src/rt/
 [src/rt/host.cpp](src/rt/host.cpp), `Host::JitLoop`):
 
 ```c
-dm_jit  *dm_jit_create(dm_guest_state *st);   // one instance per guest thread, made at its first use, on that thread's state block
+dm_jit  *dm_jit_create(dm_guest_state *st);   // one instance per guest thread, bound at its first use to that thread's state block (made ahead: dm_jit_prepare)
 uint64_t dm_jit_run(dm_jit *j, uint64_t pc);  // st -> the JIT, run from pc until a stop, the JIT -> st; returns where the guest continues
 void     dm_jit_halt(dm_jit *j);              // from any thread: dm_jit_run returns at the next block boundary (pauses and stops)
 ```
@@ -555,6 +555,35 @@ path, the counter. `dm_jit_run_past` goes on after a gate the host served, `dm_j
   callback: fastmem accesses cost nothing more); `dm_jit_run` steps that instruction again with its callback accesses made, and a fault there is
   reported as a guest fault at that instruction (`nxaot_host`: "in a memory access of the JIT fallback near guest 0x...", now exact; the host:
   "a memory access of the JIT fallback, guest instruction main+0x..."; `dc zva`, whose hook has no such check, keeps "near").
+- **The first use** ([docs/reference/threads.md](../../../docs/reference/threads.md#a-thread-stops-for-100-to-250-ms-the-first-time-it-reaches-code-no-pack-holds)).
+  A thread's first JIT run cost two one-time steps on that thread: its instance (33 to 37 ms, 5,192 page faults: dynarmic's emitter writes a 16 MiB
+  fast-dispatch table whose entries have member initializers, `a64_emit_x64.h` `FastDispatchEntry`, and emits its prelude) and, the process's first,
+  dynarmic's decoder table in the first translation (`frontend/A64/decoder/a64.h` `GetDecodeTable`: 181 to 197 ms in dm/host, 63 to 70 ms optimised).
+  dm/host's figure is three times `nxaot_host`'s because `nxhost_jit` is compiled without optimisation (dm/host/CMakeLists.txt gives the tree no build
+  type; dynarmic's directory gets `-O3`) and `decode/translate.cpp` instantiates `Decode<TranslatorVisitor>`, whose unoptimised copy the linker keeps
+  (`nm` shows its out-of-line iterator predicates). Now `dm_jit_prepare` makes both ahead on a helper thread: the decoder table, then one instance bound
+  to no thread (it keeps its own `tpidr_el0` / `tpidrro_el0`, which the hand-over moves), which `dm_jit_create` binds; a take starts the next one,
+  and `dm_jit_destroy` keeps an instance as the next thread's (with its translations) when there is no spare. A first use that comes before the
+  helper is done waits for it; a second meanwhile makes its own. dm/host starts it at the first pack's load (`aot_run.c` `dm_aot_jit_prepare`, from
+  `aot_arena.c` `dm_aot_pack_load`; the made hook calls `dm_aot_fault_after_jit` on the thread that made each instance); `dm_aot_stats` counts the
+  instances made ahead, taken, made on first use and the waits, and the longest time a first use took to get its instance; `nxaot_host` does not call
+  it (its first use now builds the decoder table in `dm_jit_create`, outside its JIT seconds). Measured in the images (one-minute load 3 to 4,
+  another agent's build), `t_aot_host --run`, three runs each:
+
+  | Case (dm/host as built by CMake, no optimisation of `nxhost_jit`) | before | after |
+  |---|---:|---:|
+  | fp-gcc, first use (instance, then first run with the decoder table), pinned to one CPU | 19 + 181, 35 + 196, 37 + 197 ms | 0.034, 0.046, 0.072 ms once the instance is ready (`--jit-ready`) |
+  | fp-gcc's whole run (8 JIT runs) | 0.201, 0.233, 0.237 s | 0.0013, 0.0013, 0.0015 s (ready); 0.197, 0.227, 0.225 s when it misses 1 ms after the load and waits |
+  | the same with `-DCMAKE_CXX_FLAGS=-O2` (measurement only) | 35 + 64, 35 + 69, 36 + 63 ms | 0.13 to 0.29 ms ready (first run included); 96 to 101 ms waited |
+  | excl-gcc under `DM_AOT_JIT_ALL`, 4 threads that start at once, 2 CPUs: each thread's instance | 36 to 123 ms each (and the first thread's decoder table) | the first ready; longest 86, 97, 106 ms (one waits for the next spare, two make their own) |
+  | int_ops-gcc (no miss), 2000 rounds, 2 CPUs: run / resident at 0.5 s / virtual | 0.70 s / 5.6 MiB / base | 0.70 s / 28.8 MiB / +106 MiB (the instance's code cache and table, the helper's malloc arena) |
+  | the same pinned to one CPU (the helper's CPU time taken from the guest) | 0.704, 0.705, 0.709 s | 0.936, 0.945, 0.950 s |
+  | the pack's load (the helper started) | | 0.055 to 0.081 ms |
+
+  A game reaches its first miss well after its packs load (its SDK start, its loading screens), so its first use finds the instance ready; a
+  program that misses at once waits for the rest of the helper's work, as long as it took before. Threads that miss in a burst pay about what they
+  paid before (the pool holds one spare: about 20 MiB resident each; more would cost that per spare for programs that never use them). Not measured:
+  a game (none runs on the x86-64 engine yet), Windows (the helper is a `std::thread`; `dm_aot_fault_after_jit` is a no-op there).
 
 The corpus in the three modes (CTest `corpus_jit`, [tests/test_corpus_jit.py](tests/test_corpus_jit.py)): every NRO prints its expected lines
 mixed, with `--jit-all` and, where the mixed run needed no JIT, with `--jit-none`; fnptr's `hidden_ptr` pointed at the second instruction of
@@ -697,7 +726,8 @@ runners, each run pinned to CPU 3 (`taskset -c 3`), three runs of each: `t_aot_h
 | after, `--misses` twice | 0.244, 0.254, 0.250 | 2 / 206 / 56; 4 / 206 / 61; 4 / 201 / 58 | 31, 28 | 12 `indirect` |
 
 About 200 of the JIT's samples are a fixed cost of its first use in the host, whatever runs: fp-gcc's 8 JIT runs give 204 of its 240 samples
-and 0.227 s, fiber-gcc's 442 runs 200 of 234 (nxaot_host's first use costs about 60 ms). So the guest code the JIT ran went from about 1,700
+and 0.227 s, fiber-gcc's 442 runs 200 of 234 (nxaot_host's first use costs about 60 ms; both are now paid ahead on a helper thread: "The JIT
+fallback", the first use). So the guest code the JIT ran went from about 1,700
 samples to about 180, 45 and 5; the rest of the benchmark is compiled code, too short to draw more than a few samples (`int_ops`-style
 rounds would be needed). The repack before the fix: `.text` 5.9 to 12.4 MB, the pack 16 to 131 s and 120 to 1,082 MiB at its peak, for 5,124
 resume points nothing enters. nxaot_host, one run each: 1.59 s (7,818 JIT runs from 6,690 addresses, 1.52 s of them) before, 0.28 s (800 runs
@@ -1283,7 +1313,7 @@ caching of the analyses (design 10, 13) are phase 5's; the numbers are the measu
 | Per block in the JIT, int_ops-gcc with `--jit-all` (`int_ops_rounds` = 20, 5,733,411 blocks; time inside `dm_jit_run`, translation included) | 4.7 to 4.9 ns |
 | Per block with one block per `Run()` and the next pc checked in the host (`--jit-one-block`, the alternative to the code-reader stops) | 40.2 ns (+35.6 ns; 45.0 ns, +40.0 ns, in the runner's run) |
 | Compiled code against the JIT on the same run | 4.0 times as fast (phase 1: 4.3 against dynarmic with fastmem in `nxaot_run`) |
-| A new JIT instance (16 MB code cache; dynarmic's emitter builds its fastmem and exclusive fallback thunks) | 27 to 32 ms; the first instance of a process and its first translations about 100 ms more (dynarmic's static decoder tables): the time of every `--jit-all` run of the small NROs and of the pause test's first pause in the JIT |
+| A new JIT instance (16 MB code cache; dynarmic's emitter builds its fastmem and exclusive fallback thunks) | 27 to 32 ms; the first instance of a process and its first translations about 100 ms more (dynarmic's static decoder tables): the time of every `--jit-all` run of the small NROs and of the pause test's first pause in the JIT (dm/host makes both ahead now: "The JIT fallback", the first use) |
 
 The corpus with the JIT (CTest `corpus_jit`): ms of the run natively (mixed) and with `--jit-all`, the mixed run's JIT runs and the addresses they
 started at; the native times of the NROs that enter the JIT include an instance's creation and the first translations:

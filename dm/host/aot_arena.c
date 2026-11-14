@@ -547,6 +547,7 @@ struct dm_aot_pack {
 static dm_aot_pack *g_packs[MAX_PACKS];
 static _Atomic int g_npacks;     // published with release after g_packs[n] is written; packs are never removed
 static pthread_mutex_t g_pack_lock = PTHREAD_MUTEX_INITIALIZER;
+void (*_Atomic dm_aot_pack_loaded)(void);   // aot.h: set by aot_run.c's constructor (null in the tests that link this file without it)
 
 static int map_cmp(const void *a, const void *b) {
     uint64_t x = ((const map_t *)a)->native, y = ((const map_t *)b)->native;
@@ -710,6 +711,8 @@ dm_aot_pack *dm_aot_pack_load(const char *path, module_t *m, const dm_aot_identi
     LOG("aot: pack %s for %s at %p: %llu functions, %u lookup slots, %zu line entries, %llu positions, %llu returns, %llu gate sites, code %#llx..%#llx; %s", path,
         m->name, (void *)m->base, (unsigned long long)d->fn_count, d->lookup_mask + 1, p->nlines, p->pos ? (unsigned long long)p->pos->rows : 0ull,
         (unsigned long long)d->return_count, (unsigned long long)d->gate_count, (unsigned long long)p->code_lo, (unsigned long long)p->code_hi, d->tool ? d->tool : "");
+    void (*loaded)(void) = atomic_load(&dm_aot_pack_loaded);
+    if (loaded) loaded();   // aot_run.c's dm_aot_jit_prepare: the JIT fallback's first instance made ahead on a helper thread, so no guest thread stops for it at its first miss
     return p;
 }
 

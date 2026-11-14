@@ -26,6 +26,7 @@
 #   · BEA (NintendoWare Bezel Engine archives, Big Brain Academy: Brain vs. Brain): BNSH in the .bfsha entries of the archives (zstd entries), see bea_members
 #   · MGFX (MonoGame effects, Celeste, Bastion): the effects in its XNB files and SpriteBatch's in main, each shader a control section and a code area (version 5: a whole GLSLC output), see mgfx_effect
 #   · dvdbnd (FromSoftware, Dark Souls Remastered): GLSLC outputs in the BND3 archives (DCX zlib entries) of the .bdt files, indexed by the .bhd5 beside each, see bhd5_entries and bdt_shaders
+#   · shaderbnd (FromSoftware, The Duskbloods): NVN2 shaders, one CGSB per member of the BND4 archive in each romfs/shader/*.shaderbnd.dcx (DCX zlib), see bnd4_members and cgsb_shaders
 #   · data.arc (Super Smash Bros. Ultimate, smash_arc.py): GLSLC outputs in its SSBH shader databases and BNSH in its effects and UI layouts, each of its current files (zstd) scanned, see smash_arc_jobs
 #   · PKZ (PlatinumGames, Bayonetta 3): shader objects (VSO / PSO / CSO / HSO / DSO, a control section and a code area each) in the DAT archives of the PKZ entries (Oodle Kraken, decoded by the
 #       game's own decoder in the Mac host), see pkz_entries, pgdat_members and pg_shader
@@ -1796,13 +1797,26 @@ def bdt_jobs(files, parts=64):
         if cur: jobs.append((p, r, tuple(cur)))
     return jobs, taken
 
+# The Duskbloods' shader archives: romfs/shader/*.shaderbnd.dcx (zlib) and shaderbdle.shaderbdlebnd.dcx (Oodle Kraken, the per-material shader bundles: 492 BND4 archives of CGSB)
+FS_SHADER_DCX = ('.shaderbnd.dcx', '.shaderbdlebnd.dcx')
+def undcx_krak(d, label, n, csz):
+    """Kraken (KRAK) DCX streams go through an external decoder: DM_OOZ names an ooz binary (github.com/powzix/ooz, GPL-3.0: kept out of the repository), run as ooz <in> <size> <out>"""
+    import subprocess, tempfile
+    ooz = os.environ.get('DM_OOZ')
+    if not ooz: red(f'{label}: an Oodle Kraken DCX; set DM_OOZ to an ooz binary to read it')
+    with tempfile.TemporaryDirectory(dir=os.environ.get('DM_OOZ_TMP')) as t:
+        src, dst = os.path.join(t, 'in'), os.path.join(t, 'out')
+        with open(src, 'wb') as f: f.write(d[0x4c:0x4c + csz])
+        r = subprocess.run([ooz, src, str(n), dst], capture_output=True)
+        if r.returncode or not os.path.exists(dst): red(f'{label}: ooz failed ({r.returncode})')
+        with open(dst, 'rb') as f: return f.read()
 def undcx(d, label):
     """FromSoftware's DCX container (big-endian): 'DCX\\0', +0x18 'DCS\\0' u32 length, u32 stored length, +0x24 'DCP\\0' + the method, +0x44 'DCA\\0' u32 8, then the stream. Dark Souls Remastered
     uses only DFLT (a zlib stream) on all 5,184 of its DCX entries"""
     import zlib
     n, csz = struct.unpack_from('>II', d, 0x1c)
-    if d[0x28:0x2c] != b'DFLT' or d[0x44:0x48] != b'DCA\0': red(f'{label}: DCX method {d[0x28:0x2c]}: only DFLT is known')
-    out = zlib.decompress(d[0x4c:0x4c + csz])
+    if d[0x44:0x48] != b'DCA\0' or d[0x28:0x2c] not in (b'DFLT', b'KRAK'): red(f'{label}: DCX method {d[0x28:0x2c]}: only DFLT and KRAK are known')
+    out = zlib.decompress(d[0x4c:0x4c + csz]) if d[0x28:0x2c] == b'DFLT' else undcx_krak(d, label, n, csz)
     if len(out) != n: red(f'{label}: DCX holds {len(out):#x} bytes, its header says {n:#x}')
     return out
 
@@ -1828,6 +1842,50 @@ def bdt_shaders(path, rel, ents, out):
             if d[:4] != BND3 or b'\x91\x68\x86\x19' not in d: continue   # the game's other BND3 archives use other formats (0x78) and hold no shaders
             for nm, b in bnd3_members(d, label):
                 if b[:4] == b'\x91\x68\x86\x19': out.extend(glslc_shaders(b, f'{label}/{nm}'))
+
+BND4, CGSB, CGSB_NVN = b'BND4', b'CGSB', b'NVN '
+def bnd4_members(d, label):
+    """FromSoftware's BND4 archive: 'BND4', +0xc i32 count, +0x10 u64 header size (0x40), +0x18 8-byte version string, +0x20 u64 entry size, +0x28 u64 data start, +0x30 u8 unicode
+    names, +0x31 u8 format; then count entries of 0x24 bytes {u32 flags, i32 -1, u64 stored length, u64 unpacked length, u32 offset, i32 ID, u32 name offset} (formats 0x74 and 0x54, as The
+    Duskbloods' shaderbnd archives, gameface's 0x54: the same entries; names UTF-16LE when unicode is set, else Shift JIS). → (name, data) of each entry"""
+    n, esz, uni, fmt = struct.unpack_from('<i', d, 0xc)[0], struct.unpack_from('<Q', d, 0x20)[0], d[0x30], d[0x31]
+    if esz != 0x24 or fmt not in (0x54, 0x74): red(f'{label}: BND4 entry size {esz:#x}, format {fmt:#x}: only 0x24-byte entries of formats 0x54 and 0x74 are known')
+    for i in range(n):
+        _, _, cs, us, off, _, nm = struct.unpack_from('<IiQQIiI', d, 0x40 + esz * i)
+        if cs != us: red(f'{label}: BND4 entry {i} is compressed ({cs:#x} of {us:#x} bytes)')
+        name = d[nm:d.index(b'\0\0', nm) + 1].decode('utf-16-le', 'replace') if uni else d[nm:d.index(b'\0', nm)].decode('shift-jis', 'replace')
+        yield name.strip('\0').replace('\\', '/'), d[off:off + cs]
+
+def nvn2_embedded(d, label):
+    """NVN2 shaders a game keeps whole in a code module's data, each code area right before or right after its control section (its length at control +0x44, the section's own at +0x30). The Duskbloods'
+    main: RAD's Bink 2, 12 compute shaders that decode a movie and the vertex / pixel pair that draws it; without them the opening movie played black with its sound. A match only counts
+    with a stage and the split's checks, so stray bytes that look like a control section add nothing"""
+    out = []
+    for m in re.finditer(re.escape(CTL_MAGIC + b'\xc9\0\0\0'), d):
+        c = m.start()
+        if c + NVN2_KEY_CTL > len(d): continue
+        n, own = struct.unpack_from('<I', d, c + 0x44)[0], struct.unpack_from('<I', d, c + 0x30)[0]
+        if not 0 < n <= len(d) or n % 0x10: continue
+        clen = own if NVN2_KEY_CTL <= own <= 0x1000 and c + own <= len(d) else NVN2_KEY_CTL; ctl = d[c:c + clen]
+        # two layouts: the code area right before the section (the movie's vertex / pixel pair, as the game asked for them at run time), or right after it (Bink's 12 compute
+        # shaders, a small record of the two lengths and zeros before them). Code is mostly non-zero 16-byte instructions; the denser candidate, if at least half, is the code
+        def dense(code): return sum(any(code[i:i + 16]) for i in range(0, len(code), 16)) / max(1, len(code) // 16)
+        cands = [code for code in (d[c - n:c], d[c + clen:c + clen + n]) if len(code) == n and dense(code) >= 0.5]
+        for code in sorted(cands, key=dense, reverse=True):
+            st = nvn2_stage(ctl, code)
+            if st and not check(label, st, ctl, code): out.append((f'{label}#NVN2@{c:#x}', st, ctl, code)); break
+    return out
+
+def cgsb_shaders(d, label):
+    """One shader of The Duskbloods' shaderbnd archives (its extension the stage: .vpo .ppo .cpo .gpo .hpo .dpo .mpo .apo): 'CGSB', u32 0x00112233, +0x10 u64 0x18, then a record
+    'NVN ' u32 1, 8 bytes 0, {u64 offset, u64 length} of the code area (Ampere code with its 0x80-byte SPH), of the NVN2 control section, and of two blocks the split does not read"""
+    if d[0x18:0x1c] != CGSB_NVN: red(f'{label}: CGSB record {d[0x18:0x1c]!r}: only NVN is known')
+    co, cn, to, tn = struct.unpack_from('<4Q', d, 0x28)
+    code, ctl = span(d, co, cn, f'{label} code area'), span(d, to, tn, f'{label} control section')
+    if not nvn2_ctl(ctl): red(f'{label}: not an NVN2 control section')
+    st = nvn2_stage(ctl, code); why = 'no stage' if not st else check(label, st, ctl, code)
+    if why: red(f'{label}: {why}')
+    return [(label, st, ctl, code)]
 
 class LzxError(Exception): pass
 
@@ -3125,6 +3183,13 @@ def scan_blob(d, label, out, depth=0, left=None):
         import cra
         for i, m in enumerate(cra.narc_members(d, label)): scan_blob(cra.undo(m), f'{label}/{i}', out, depth + 1)
         return
+    if d[:4] == DCX:   # FromSoftware's compressed files: the shaderbnd archives are zlib (DFLT); other files that reach here by a chance byte match (The Duskbloods' geometry, Oodle KRAK) hold no shaders
+        if d[0x28:0x2c] != b'DFLT' and not label.endswith(FS_SHADER_DCX): return
+        d = undcx(d, label)
+    if d[:4] == BND4:
+        for nm, m in bnd4_members(d, label): scan_blob(m, f'{label}/{nm}', out, depth + 1, left)
+        return
+    if d[:4] == CGSB: out.extend(cgsb_shaders(d, label)); return
     if d[:4] == b'BAHS': out.extend(bahs_shaders(d, label)); return
     if d[:4] == RGXD: out.extend(rgxd_shaders(d, label)); return
     if d[:4] == b'NDSR': out.extend(ndsr_shaders(d, label)); return
@@ -3485,7 +3550,7 @@ def scan_file_in(args):
         try: pairs = unity_shaders(d, '/' + rel, found, trees if not TREES else dict(TREES))
         except unityfs.NoTree: return rel, {}, set(), 'defer'
         return rel, uniq_keys(found), var_pairs(found) | {(a, b, 'prog') for a, b in pairs}, trees
-    elif b'BNSH\0\0\0\0' not in d and b'BAHS' not in d and d[:4] != b'MSHD' and d[:4] != b'NDSR' and d[:4] != b'NARC' and d[:4] != b'NDVE' and not (d[:4] == b'SARC' and b'Yaz0' in d) and b'\x91\x68\x86\x19' not in d and MGFX not in d and NEEDLE not in d and d[:8] != PACX4 and d[:8] != SUMO_MUX and SUMO_NX not in d and NVNSH not in d: return rel, {}, set(), {}   # a SARC may hold Yaz0 members, a NARC packed ones (cra.undo)
+    elif b'BNSH\0\0\0\0' not in d and b'BAHS' not in d and d[:4] != b'MSHD' and d[:4] != b'NDSR' and d[:4] != b'NARC' and d[:4] != b'NDVE' and not (d[:4] == b'SARC' and b'Yaz0' in d) and b'\x91\x68\x86\x19' not in d and MGFX not in d and NEEDLE not in d and d[:8] != PACX4 and d[:8] != SUMO_MUX and SUMO_NX not in d and NVNSH not in d and not (d[:4] == DCX and path.endswith(FS_SHADER_DCX)): return rel, {}, set(), {}   # a SARC may hold Yaz0 members, a NARC packed ones (cra.undo)
     else:
         scan_blob(d, '/' + rel, found)
         # whole GLSLC outputs in a file no other reader takes (FINAL FANTASY TACTICS - The Ivalice Chronicles: its engine's technique files, resources_nx/…/shader/*.tec, 261 outputs beside
@@ -3544,6 +3609,7 @@ def main():
         found += glslc_shaders(img, 'main' + ('@' + tag if tag else ''), need=False)
         found += tfxo_streams(img, 'main' + ('@' + tag if tag else ''))   # YEBIS's effect file, a zlib stream in main (Pokémon Sword)
         found += retro_main_forms(img, 'main' + ('@' + tag if tag else ''))   # Retro's startup material archive, LZSS in main (Donkey Kong Country: Tropical Freeze)
+        found += nvn2_embedded(img, 'main' + ('@' + tag if tag else ''))   # NVN2 shaders kept whole in main's data (The Duskbloods' Bink 2)
         if RGXD in img: found += rgxd_shaders(img, 'main' + ('@' + tag if tag else ''))   # RAGE's built-in effects (Red Dead Redemption: 20 in main's data, 168 shaders that shaders.rpf lacks)
         found += raw_shaders(img, 'main' + ('@' + tag if tag else ''), {c[:struct.unpack_from('<I', c, 0x20)[0]] for _, _, c, _ in found})   # compared at their own length, as raw_shaders reads them
         # NROs the game decodes at run time (Mario Tennis Fever: main is a boot stub, and the real code's data holds 11 shaders the game draws its UI and sky with): scanned like main, as no RomFS file holds them

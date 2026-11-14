@@ -86,6 +86,7 @@ typedef struct {
     int job; const uint8_t *jp; int jn, jslot, jgot; int64_t jpts, jpts_out; int jflush;
     mavc *avc; int avc_drain; int64_t drain_pts; // H.264 (hle_movie_avc.c); avc_drain: the end-of-stream packet's output had a picture; the pictures still queued leave one per free slot, then an empty output with the
                                                  // end-of-stream flag and the packet's time (drain_pts)
+    int avc_due;                                 // H.264: a picture that is next in presentation order waits for a free slot (md_pump); a released slot pumps again
     vpx_codec_ctx_t vpx; int vpx_on, red_dec, red_img;
     int vpx_cs, vpx_full;   // the colour matrix (vpx_color_space_t) and range of the last VP8 / VP9 picture, for md_format
     uint8_t *bgra; size_t bgra_cap;              // native-texture mode: the picture with red and blue swapped, for a BGRA8 / BGRX8 client texture (md_out_tex)
@@ -510,6 +511,20 @@ static void md_pump(mdec_t *d) {
             md_pump_ev(d, 1);
             continue;
         }
+        // H.264: a picture that became due without a packet (the next one in presentation order, mavc_ready) leaves in a free slot of its own: a player that never sends
+        // end of stream otherwise waits for a stream's last pictures for good (Cozy Land, docs/reference/movies.md)
+        d->avc_due = 0;
+        if (d->avc && !d->in_eos && mavc_ready(d->avc)) {
+            int s = -1; for (int k = 0; k < d->nout; k++) if (!d->out[k].used) { s = k; break; }
+            if (s < 0) { d->avc_due = 1; pthread_mutex_unlock(&d->mu); break; }
+            d->out[s].used = 1; pthread_mutex_unlock(&d->mu);
+            d->jslot = s; d->jflush = 0; md_job(d, MDJ_TAKE); int got = d->jgot;
+            dm_host_mutex_lock(&d->mu);
+            if (got) { d->out[s].pic = 1; d->out[s].pts = d->jpts_out; d->out[s].flags = 0; d->outq[d->noutq++] = s; } else d->out[s].used = 0;
+            pthread_mutex_unlock(&d->mu);
+            if (got) { md_pump_ev(d, 1); continue; }
+            dm_host_mutex_lock(&d->mu);
+        }
         int slot = -1;
         if (d->npend) for (int k = 0; k < d->nout; k++) if (!d->out[k].used) { slot = k; break; }
         if (slot < 0) { pthread_mutex_unlock(&d->mu); break; }
@@ -673,7 +688,7 @@ static void md_reset(mdec_t *d, int close) {
     // control thread flushes to loop an activity preview, and sends them after the flush (SendInputBufferForDecode claims them back). Those are withheld for a while (h_movie_AcqIn)
     uint64_t now = now_ns();
     for (int i = 0; i < MD_NIN; i++) { d->infree[i] = i; d->instale[i] = d->inown[i] ? now : 0; d->inown[i] = 0; }
-    d->ninfree = MD_NIN; d->noutq = 0; d->npend = 0; d->avc_drain = 0; d->in_eos = 0; d->hold_n = 0; d->vb_prev = 0;
+    d->ninfree = MD_NIN; d->noutq = 0; d->npend = 0; d->avc_drain = 0; d->avc_due = 0; d->in_eos = 0; d->hold_n = 0; d->vb_prev = 0;
     // a flush keeps each slot's last picture: the same game reads an output it acquired before the flush right after it (a black frame in the loop otherwise)
     for (int i = 0; i < MD_NOUT; i++) { d->out[i].used = 0; d->out[i].cli = 0; d->out[i].rnd = 0; if (close) d->out[i].pic = 0; }
     pthread_mutex_unlock(&d->mu);
@@ -884,7 +899,7 @@ static int md_out_tex(mdec_t *d, int i, void *buf) {
     // so a client never has to release it. Super Mario Party Jamboree's player (SDK 17.5.9) never calls ReleaseOutputBufferIndex: holding all 16 video slots, the decoder stopped and
     // the opening movie froze on its 16th picture. Metroid Dread (SDK 11.4.3, which does the same) still releases each index. The host returns the slot later (md_rendered)
     dm_host_mutex_lock(&d->mu);
-    int n = md_rendered(d, i), queued = d->npend, drain = d->avc_drain;
+    int n = md_rendered(d, i), queued = d->npend, drain = d->avc_drain || d->avc_due;
     pthread_mutex_unlock(&d->mu);
     if (n) MD_TRACE(d, 13, "GetOutputBuffer index %d: %d earlier rendered output%s returned (%d packets queued%s)", i, n, n > 1 ? "s" : "", queued, drain ? ", H.264 pictures draining" : "");
     if (n && (queued || drain)) md_pump_async(d);
@@ -929,7 +944,7 @@ static int md_rel(mdec_t *d, int i) {
     int held = d->out[i].cli;
     if (held && d->out[i].rnd) d->tex_rel = 1;   // this client releases what it rendered: md_rendered leaves its slots to it
     if (held) { d->out[i].used = 0; d->out[i].pic = 0; d->out[i].cli = 0; d->out[i].rnd = 0; }
-    int queued = d->npend, drain = d->avc_drain;
+    int queued = d->npend, drain = d->avc_drain || d->avc_due;
     pthread_mutex_unlock(&d->mu);
     MD_TRACE(d, 13, "release output index %d%s (%d packets queued%s)", i, held ? "" : ": not held by the client, nothing to release", queued, drain ? ", H.264 pictures draining" : "");
     // An H.264 drain waits for a free slot too: AI: THE SOMNIUM FILES (Unity 2017.4) held all 16 video slots when its logo movie's end-of-stream packet came, the drain stopped

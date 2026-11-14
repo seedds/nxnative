@@ -43,6 +43,7 @@ with no JIT, and print what dynarmic prints. No game runs through it yet, and no
 | Threads and safepoints | [src/rt/host.cpp](src/rt/host.cpp), the polls in [lower_calls.cpp](src/lift/lower_calls.cpp) | design 6.1 to 6.5: guest threads on host threads with a state block and a native stack each, Horizon's thread and synchronization SVCs, the shared exclusive monitor; the polls of 6.2 and the pause protocol of dm/host's `SetThreadActivity`, with a pause test (`nxaot_host --pause-test`) ("Threads and safepoints") |
 | Per-function differential test | [src/rt/funcdiff.cpp](src/rt/funcdiff.cpp) (`nxaot_funcdiff`) | every function of a module from one register and memory snapshot under the recompiled code and under dynarmic, final registers and written memory compared (design 12, item 2) |
 | Runner | [tests/run_aot_tests.sh](tests/run_aot_tests.sh) | runs the tests and the benchmark and writes `logs/aot/` ([logs/README.md](../../../logs/README.md)) |
+| Against native | [tests/native_ratio.py](tests/native_ratio.py), [tests/native_rt.c](tests/native_rt.c) | the corpus programs and the game-shaped benchmark compiled natively for x86-64 from the same C, timed against their packs at each tier ("Against native") |
 | Host run time | [dm/host/aot.h](../../host/aot.h), `dm/host/aot_*.c`, CTest `t_aot_host` | what dm/host provides for packs: the arena below 2^39, packs loaded, the SVC path, the dispatcher, `dm_guest_call`, guest threads with safepoints on hle_thread.c, faults, the floating-point helpers in C; the corpus run through the host's loader, SVC dispatcher and thread layer ("Threads and safepoints") |
 | Game modules | `patch_nso.py --aot`, dm/host/loader.c `load_modules`, CTest `t_aot_module`, `t_guest_map` | the recompiler's input written by the rewriter (a behaviour image and its manifest) and read by the host: the image checked and mapped, gates registered, imports bound into the GOT, the pack loaded; guest memory announced to the graphics backend ("A game module in the host") |
 | CI | [.github/workflows/aot.yml](../../../.github/workflows/aot.yml) | the image, the build, CTest and the runner on every pull request and push to `main` and `multiplataforma`; then the corpus packed, `t_aot_host` in the host's image and with the JIT fallback here, and the floating-point differential test |
@@ -1336,6 +1337,237 @@ waiter's wake-up through a condition variable, so a convoy forms on some runs; t
 `safepoints`): 50 pauses with more than one thread running in each run; a thread at a poll stops within about 100 microseconds of the request (its
 wake-up from the previous resume), the longest stop natively 0.2 to 10 ms, in the JIT about 100 ms (a worker's first instance and translations).
 CTest's new tests take about 33 s (`corpus_jit`), 11 s (`corpus_threads`) and 7 s (`safepoints`).
+
+## Against native
+
+How far the recompiled code is from the same C compiled natively for x86-64, what the difference is made of, and what was changed for it
+(the tier pipelines are those of "Phase 5d"; no profile).
+
+```sh
+python3 dm/tools/aot/tests/native_ratio.py --nxaot build/aot/nxaot --host build/aot/nxaot_host --work /tmp/ratio --cpu 7   # in the nxnative-aot image
+python3 -m unittest dm/tools/aot/tests/test_native_ratio.py                                                                 # its parsing, statistics and port
+```
+
+**The native build.** [tests/native_ratio.py](tests/native_ratio.py) compiles each program's C with the image's clang-18 for the host,
+`-O2 -march=native` (nxaot compiles for the host's CPU by default, design 9.3) and the corpus's flags that change code (`-std=gnu11
+-ffreestanding -fPIE -fno-stack-protector -ffp-contract=off -fno-math-errno`, the program's unwind flags), and links it with
+[tests/native_rt.c](tests/native_rt.c): the corpus's `rt.c` compiled for the host (its DT_INIT and DT_FINI functions renamed, run as the first
+constructor and the last destructor), the output SVC as a line on standard output, and a harness that runs `main` N times in one process,
+each run after the first from the executable's writable data as it was before the first (as `nxaot_host --repeat` maps a fresh image),
+`--set` through `dlsym`. int_ops is built from a port of its source: its six inline-assembly divisions and shifts become the C of the A64
+results they check, and `arm_acle.h` a header with the CRC-32 that nxaot lowers CRC32B / H / W / X to (a 256-entry table a byte at a time),
+SSE4.2's `crc32` for CRC-32C, `bitreverse` and rev16. Every native program prints its `corpus/expected` file (the script checks it) and every
+pack the native build's lines. The guest builds are GCC 15.2 (devkitA64) and clang-18; the native one is clang-18 for both, so the clang rows
+compare one compiler with itself. Measurable: int_ops (`int_ops_rounds = 20`), switch, fnptr and the 4,000-function benchmark (`gen_bench.py`'s
+`bench.c`, compiled natively from the same file). Not: simd (NEON intrinsics), fp (an inline A64 instruction per case; its run is the JIT
+fallback's), sjlj, excl, except, fiber (A64 assembly, Horizon's SVCs). fnptr runs 1.3 µs natively, below `nxaot_host`'s resolution (it
+prints microseconds) and its fixed cost per run (a thread record, `sigsetjmp`, MXCSR): its row is the run time's floor, not the code's.
+
+**The machine.** The development machine is a virtual machine on a hybrid CPU (8 vCPUs of an i9-13950HX), and a pinned process runs at one
+of two speeds, 1.7 to 2.4 times apart depending on the program, which changes from one process to the next: the native switch takes 24.4 or
+58.8 µs, native int_ops 2.48 or 4.28 ms, switch-gcc's tier W pack 67 or 135 µs, the same binary on the same CPU minutes apart. A probe run
+just before and after a sample did not tell its speed (a first version of `native_ratio.py` had one: the probes ran slow while the samples
+between them ran fast), nor does turning ASLR off (`setarch -R` on the host). So `native_ratio.py` splits each variant's samples (each the
+fastest of N runs in one process) into those within 1.3 times its fastest, the fast speed, and the others, and compares variants at one
+speed; in 8 rounds every variant but fnptr's met both. measure_packs.py does not split: with another agent's builds loading the machine (a
+one-minute load of 5 to 13 during these runs) most of its samples ran at the slow speed, so its per-layout medians are the slow speed's
+and agree within 1.5 %, while its rounds' spread (the two speeds) is 30 to 56 %; its rule, whose noise takes the rounds' spread, calls most
+changes below "within noise" although B is below A in every layout, and the tables give the per-layout medians, which are what the verdicts
+compare (where both speeds were met in every layout, the fast speed's medians change the same way: below). Earlier sections' timings mixed
+the two speeds where they say "varies by about 10 %" or more.
+
+**The ratio**, the base binary (5f154c9) and this one, `native_ratio.py --rounds 8 --cpu 6` (8 samples per variant; the load 3 to 7);
+each cell the ratio to native's time at one speed, base → now, and now's time; `.text` of this tree's packs against the native
+executable's (17,002 bytes for int_ops, 42,074 for switch, 11,738 for fnptr, 2,571,754 for the benchmark; it holds the C library's start-up
+besides the program). At the slow speed (most samples, and the speed of measure_packs.py's medians below):
+
+| Program | native | tier W: base → now | tier C | tier H | tier H+ | `.text` / native's: W, C, H, H+ |
+|---|---:|---:|---:|---:|---:|---:|
+| int_ops-gcc | 4.275 ms | 1.60 → **1.28** (5.452 ms) | 3.97 → 3.43 (14.649 ms) | 1.49 → 1.08 (4.612 ms) | 1.46 → 1.15 (4.907 ms) | 3.2, 7.9, 3.9, 4.0 |
+| int_ops-clang | 4.275 ms | 1.65 → **1.31** (5.588 ms) | 3.14 → 2.41 (10.296 ms) | 1.43 → 1.20 (5.122 ms) | 1.51 → 0.91 (3.884 ms) | 3.2, 7.2, 3.3, 3.4 |
+| switch-gcc | 58.8 µs | 2.57 → **2.30** (135.0 µs) | 6.18 → 5.70 (335.0 µs) | 2.52 → 2.33 (137.0 µs) | - → 2.21 (130.0 µs) | 8.4, 16.1, 8.8, 8.8 |
+| switch-clang | 58.8 µs | 1.87 → **1.77** (104.0 µs) | 5.29 → 5.14 (302.5 µs) | 1.84 → 1.85 (109.0 µs) | 1.83 → 1.70 (100.0 µs) | 1.9, 4.8, 1.9, 1.9 |
+| benchmark | 274.9 µs | 2.45 → **2.40** (659.0 µs) | 6.04 → 6.13 (1.686 ms) | 2.39 → 2.51 (690.0 µs) | 2.50 → 2.42 (664.5 µs) | 2.4, 5.4, 2.5, 2.5 |
+
+At the fast speed (fewer samples: 1 to 8 per variant, the native benchmark's one):
+
+| Program | native | tier W: base → now | tier C | tier H | tier H+ |
+|---|---:|---:|---:|---:|---:|
+| int_ops-gcc | 2.483 ms | 1.86 → **1.28** (3.182 ms) | 3.60 → 2.97 (7.365 ms) | 1.49 → 1.12 (2.793 ms) | 1.45 → 1.17 (2.916 ms) |
+| int_ops-clang | 2.483 ms | 1.64 → **1.21** (3.002 ms) | 3.34 → 2.53 (6.284 ms) | 1.61 → 1.38 (3.426 ms) | 1.58 → 1.04 (2.580 ms) |
+| switch-gcc | 24.4 µs | 2.95 → **2.75** (67.0 µs) | 7.12 → 6.66 (162.5 µs) | 2.91 → 2.66 (65.0 µs) | 2.77 → 2.58 (63.0 µs) |
+| switch-clang | 24.4 µs | 1.89 → **1.76** (43.0 µs) | 5.73 → 5.78 (141.0 µs) | 1.93 → 1.84 (45.0 µs) | 1.79 → 1.76 (43.0 µs) |
+| fnptr-gcc, fnptr-clang | 1.3 µs | 3.08 → 3.07 (4.0 µs) | 5.39 → 5.38 (7.0 µs) | 3.08 → 3.07, 2.31 (4.0, 3.0 µs) | 3.08 → 3.07 (4.0 µs) |
+| benchmark | 162.7 µs | 2.26 → **2.02** (328.0 µs) | 6.06 → 5.50 (894.0 µs) | 2.41 → 2.23 (362.0 µs) | 2.35 → 2.15 (350.0 µs) |
+
+So at tier W, without a profile, the recompiled code takes 1.2 to 1.3 times native's time on int_ops, 1.8 to 2.8 times on switch and 2.0
+to 2.4 times on the game-shaped benchmark; the GCC builds are the farther (their code is not native's compiler's, and GCC's switch code is
+8 times native's size). At H+ int_ops-clang comes to native's time (0.9 to 1.0) and int_ops-gcc to 1.15: H and H+ inline the guest's
+functions that the native build keeps out of line (`RT_NOINLINE`), which is the C's attribute, not a property of the code. Tier C is 2.4 to
+6.7 times native: code the profile never sampled. fnptr's 1.3 µs is below what `nxaot_host` resolves (above).
+
+**Where the difference goes.** Sampled on the tier W packs with a `SIGPROF` sampler preloaded into `nxaot_host` (a `CLOCK_MONOTONIC` timer
+asked for 20 kHz, about 9 kHz delivered; each interrupted pc mapped to its function and, through the pack's DWARF line table, its guest
+offset; a measurement tool,
+not in the repository; the image has no `perf`, and the host's `perf_event_paranoid` is 4), then the hot loops read beside the native code and
+the A64 original, and each mechanism measured by switching it off (below). int_ops-gcc: `ref_crc` 45 % of the samples, `main` 23 %,
+`ref_udiv` 17 %; int_ops-clang: `ref_crc`'s share the same order; switch-gcc: `main` half of the pack's time, its loop around the call at
+0x434 the hottest place. The loops, int_ops-clang's `ref_crc` (one bit of the CRC; the loop runs it 8 times per byte):
+
+| A64 (clang-18 -O2, 3 instructions) | native x86-64 (clang-18 -O2, 6) | pack before, tier W (9) | pack after, tier W (6) |
+|---|---|---|---|
+| `sbfx w11, w10, #0, #1` | `movl %eax, %edi` | `movl %eax, %r10d` | `movl %eax, %r10d` |
+| `and w11, w11, w3` | `shrl %edi` | `andl $0x1, %r10d` | `andl $0x1, %r10d` |
+| `eor w10, w11, w10, lsr #1` | `andl $0x1, %eax` | `movl %r10d, %r11d` | `negl %r10d` |
+| | `negl %eax` | `negl %r11d` | `andl %r9d, %r10d` |
+| | `andl %ecx, %eax` | `andl $-0x2, %r11d` | `shrl %eax` |
+| | `xorl %edi, %eax` | `orl %r10d, %r11d` | `xorl %r10d, %eax` |
+| | | `andl %r9d, %r11d` | |
+| | | `shrl %eax` | |
+| | | `xorl %r11d, %eax` | |
+
+and per byte the pack adds the back edge's poll, `movzbl 0x358(%r13), %ebp; testb %bpl, %bpl; jne <safepoint>`, and a loop shape of two
+branches where the native loop has one (`cmpq; je <exit>; poll; addq; jmp <head>`). int_ops-gcc's `ref_crc` keeps the bit loop GCC wrote (not
+unrolled): per bit 6 instructions of work, the same 6 as native's after the change, plus a test, the poll and a `dec; jmp`. Its `main` makes
+about 20 calls per inner iteration, each of them in the pack (the native side calls the same noinline functions): the dirty registers the
+callee is not passed stored to the block, before the change the flags of the last compare packed into NZCV (three `setcc`, shifts, ors, a
+store to `0x108(%r13)`: 10 to 15 instructions), the return address built from the base (`movq nxaot.base, %rax; leaq off(%rax), %rsi`), the
+call, `subq $8, %rsp` after it (swifttailcc's callee pops an argument area that LLVM rounds to 8 bytes), `st` reloaded from the stack (R13,
+swiftself, is not callee-saved in swifttailcc), the pending check (`cmpq $0, 0x350(%r13); jne`) and the reloads of what the callee may write;
+the native call is the arguments' moves and `call`. switch-gcc's loop at 0x434 stored x4..x27 at its call on every iteration, most of them
+values set before the loop and never changed in it.
+
+The items, each a share of the base pack's distance from native at tier W at the slow speed (the base's tier W time minus native's: the
+times of measure_packs.py's per-layout medians, which are the slow speed's, against native's slow-speed median in `native_ratio.py`'s
+runs), measured as the change when the item alone is taken out or changed (measure_packs.py, 12 rounds, 3 layouts; the experiments'
+binaries were hacks of this tree, reverted, and remove what the design requires, so their packs are not correct in general, only on these
+programs). "Changed" are the three changes below; "left" is what the experiments of "What is left" take out of this tree's packs:
+
+| Item | int_ops-gcc | int_ops-clang | switch-gcc | switch-clang | benchmark | Avoidable within the design? |
+|---|---:|---:|---:|---:|---:|---|
+| the distance, base tier W − native (slow speed) | 6.878 − 4.275 = 2.603 ms | 7.095 − 4.275 = 2.820 ms | 151.5 − 58.8 = 92.7 µs | 110 − 58.8 = 51.2 µs | 692 − 274.9 = 417 µs | |
+| sbfm lowered as dynarmic writes it | 43.8 % | 37.9 % | 0 (no sbfm in its hot code) | 0 | 0 | yes: changed (1) |
+| registers set before a loop stored at its call on every iteration | 0 | 0 | 10.8 % | 5.9 % | 0 | yes: changed (2) |
+| NZCV packed and stored at every call | 10.6 % | 11.0 % | 4.3 % | 17.6 % | 0.8 % (not in every layout) | yes (a dead NZCV, design 6.2's rule): changed (3) |
+| safepoint polls | 0 | 1.0 % | 10.8 % | 18.6 % | 8.5 % | no (6.2); a bounded loop's: possibly, not done |
+| the pending check after each call | 1.9 % | 2.0 % | 0 | 2.0 % | 3.2 % | no (3.3) |
+| guest memory volatile | 0 | 0 | (hangs) | (hangs) | (hangs) | no (6.4) |
+| FnTailLr's compare | 0 | 2.0 % | 0 | 7.8 % | (mixed) | no (3.3) |
+| swifttailcc against ghccc | 5.1 % | 3.8 % | 5.4 % | 9.8 % | 0 | the convention (2.3): the owner's |
+| left after the change, not taken apart: the convention's other per-call costs (`st`, the argument area, the return address, stores and reloads; indirect calls through the inline cache), the code's size (2 to 8 times native's `.text`), no inlining or unrolling at W | 45.5 % | 48.9 % | 82 % | 88 % | 96 % | partly (the tiers: H, H+); the rest the convention |
+
+The rows are not additive where items interact (switch-clang: the three changes together take 6 µs, 11.7 %, of its 51.2; "left" is this
+tree's tier W time less native's, as a share of the base's distance). The changed rows are of the base or the base with the earlier
+changes (the "Each change alone" table below); the "left" experiments are of this tree.
+
+**What was changed** (in this order, each a lowering in the lifter; the unit key's format is `nxaot-unit 5`, since a unit's object changes
+for the same key):
+
+1. **sbfm as a shift pair** ([src/lift/lifter.cpp](src/lift/lifter.cpp), `SignedField`). dynarmic's frontend writes sbfm (`asr` by an
+   immediate, `sxtb` / `sxth` / `sxtw`, `sbfx`, `sbfiz`) as `Or(And(ReplicateBit(src, S), ~T), And(And(RotateRight(src, R), W), T))`, T the
+   low k bits; lowered as written, LLVM kept an or of the replicated bit's select and the field, since nothing told it that bit k - 1 of the
+   field is the replicated bit: `asr x0, x1, #5` became five x86 instructions and a 64-bit constant (`sar $63`, `movabs`, `and`, `shr`, `or`),
+   `sxtw` five, `sbfx w0, w1, #0, #1` five (checked with `opt-18` and `llc-18` on the lowering's IR). An `Or` whose operands have that form,
+   checked on the operands (W has bit k - 1, and bit k - 1 of the rotate is bit (k - 1 + R) mod n of src, which is S) and not on the
+   instruction, is now `ashr(shl(And(Y, T), n - k), n - k)`: a `sar`, a `movsx`, or a `shl` / `sar` pair. The integer vectors of `bitfield`
+   (in `dp_imm.tsv`) and every other vector pass.
+2. **The stores of a loop whose iterations call, on the edges into it** ([src/lift/lower_calls.cpp](src/lift/lower_calls.cpp),
+   `FnLoopHeads`, `FnDataflow`, `FnGoto`). A call stores every dirty register the callee is not passed (design 2.3, the block's invariant);
+   the dirty set at a loop's head was the union over its predecessors, so the edge into the loop brought what the code before it changed,
+   and every call in the loop stored it again on every iteration. Now, for the head of a natural loop (it dominates the source of a back edge
+   into it) entered only through the lifted code's own branches (not the function's entry, a landing pad, a part's entry, a resume point or a
+   jump table's case), in which a call or an svc runs on every iteration (the head dominates it and it dominates every back edge's source): an
+   edge from outside the loop stores the registers that call would store and that are dirty on the edge but not at the head (sp, x30 and NZCV
+   excepted), once per entry instead of once per iteration; the head's dirty set is what its back edges bring. Such stores enter what a
+   preserving function stores again at its return (`restore_block`). switch-gcc's loop at 0x434 stores 7 registers at its call instead of 22.
+3. **NZCV at a call only where it is live** (`FnCall`, `FnDataflow`; `CalleeView::reads_nzcv` from the callee's summary, `src/build/pack.cpp`).
+   NZCV's liveness took every call as a reader, so a call stored a dirty NZCV (the flags of the last compare, packed) to the block. A call now
+   reads NZCV when the callee may read it before writing it (its summary's `reads`; the indirect view always, its callees may be no function
+   of the module) or the caller's code after it may (its successors' liveness), and a return when `LIVE_AFTER` holds it (`FnReturn` stores
+   nothing else); a dead NZCV is left in the block as a poll leaves it (design 6.2), and a callee that may read it, or a caller that reads it
+   after the call, still gets it. The deferred flags are made before a call block's terminator (`LowerBlock`), as its reloads replace them.
+   Found on the way: without that, a reload of NZCV after the call met flags still deferred and the lifter refused the function (in a first
+   build the main loop of every corpus program it was tried on ran in the JIT fallback: int_ops-gcc's `main`, switch-clang's 0x57a0, ...;
+   the refusal count of every corpus pack, 0 since, and CTest's `corpus_native` check it).
+
+Measured, the base binary (A) against this one (B), `measure_packs.py --rounds 12 --layouts 3 --cpu 7`, the per-layout medians:
+
+| Program | A | B | change | per layout A / B | `.text` A → B (bytes) |
+|---|---:|---:|---:|---|---:|
+| int_ops-gcc (`int_ops_rounds = 20`, 20 runs) | 6.878 ms | 5.460 ms | −20.6 % | 6.878, 6.879, 6.877 / 5.463, 5.456, 5.460 ms | 64,860 → 53,852 |
+| int_ops-clang | 7.095 ms | 5.654 ms | −20.3 % ("faster") | 7.095, 7.083, 7.104 / 5.638, 5.659, 5.654 ms | 60,824 → 54,104 |
+| switch-gcc (1,500 runs) | 151.5 µs | 135.0 µs | −10.9 % | 152, 151, 151.5 / 135, 135, 135 µs | 365,692 → 353,612 |
+| switch-clang | 110.0 µs | 104.0 µs | −5.5 % | 110, 110, 110 / 104, 104, 104 µs | 85,864 → 79,480 |
+| simd-gcc | 47.0 µs | 43.0 µs | −8.5 % | 47, 47, 47 / 43, 43, 43 µs | 109,300 → 92,756 |
+| simd-clang | 38.0 µs | 37.0 µs | −2.6 % | 38, 38, 38 / 37, 37, 37 µs | 107,812 → 102,292 |
+| fnptr-gcc, fnptr-clang | 6 µs | 6 µs | 0 (1 µs resolution) | | 58,188 → 49,196; 49,768 → 45,784 |
+| benchmark, 4,000 functions (300 runs) | 692.0 µs | 677.0 µs | −2.2 % | 687, 692, 697 / 675.5, 677, 682.5 µs | 6,339,712 → 6,262,560 |
+
+B is faster in every layout of every program it changes and slower in none; by measure_packs.py's own rule int_ops-clang is "faster" and
+the others "within noise", their rounds' spread being the machine's two speeds (31 to 56 %; see above). The pack's time and memory: the
+benchmark 18.55 → 18.89 s and 140 → 136 MiB (4 workers, under load), the corpus programs within 0.1 s. Each change alone, in the same way
+(per-layout medians; a binary with the change taken out of this tree, built for the measurement and not kept):
+
+| Program | 1. sbfm (base → base + 1) | 2. loop stores (this tree less 2 → this tree) | 3. NZCV (base + 1 + 2 → this tree) | 1 and 2 without 3 (base → base + 1 + 2) |
+|---|---:|---:|---:|---:|
+| int_ops-gcc | −16.6 % | identical packs | −4.8 % ("faster") | −16.7 % |
+| int_ops-clang | −15.1 % | +0.3 % | −5.2 % | −16.1 % |
+| switch-gcc | identical packs | −6.9 % (145.5 → 135.5 µs) ¹ | −2.9 % | −8.0 % |
+| switch-clang | identical packs | −2.8 % | −8.0 % | +2.7 % |
+| simd-gcc | identical packs | 0.0 % | −8.5 % | −1.1 % |
+| simd-clang | 0.0 % | identical packs | −2.6 % | 0.0 % |
+| fnptr-gcc, fnptr-clang | identical packs | identical packs | 0 (1 µs resolution) | identical packs |
+| benchmark | −0.1 % | identical packs | −0.5 % (not in every layout) | −0.4 % |
+
+¹ measure_packs.py's medians for this pair were split between the two speeds (A 74.5, 145, 75.5 µs per layout); the figure is from five
+alternating runs of the two packs on another CPU, each the fastest of 2,000 (145, 146, 145, 147, 145 µs against 135, 136, 136, 136, 135);
+the fastest samples of measure_packs.py's run agree (73 → 69 µs, −5.5 %, "faster" by its rule applied to them). At the fast speed, where
+every layout of both variants met it (each layout's samples split as `native_ratio.py` splits them), the changes go the same way: sbfm −29.1 %
+and −19.1 % (int_ops-gcc, -clang), the loop stores −4.8 % (switch-gcc), NZCV −10.2 % (switch-clang), each "faster" by the rule.
+
+Change 2 without 3 made switch-clang 2.7 % slower (110 → 113 µs in two of three layouts; sbfm alone 110 → 110; the pack differs from the base
+in `main` and one other function only): why was not found (its loop's NZCV is still packed and stored at each call there); with 3 the same
+loop stores are 3 % faster (107 → 104 µs, alternating runs on another CPU). Kept together, the three are faster on every program and slower on
+none.
+
+**What is left**, with the measured potential of each where an experiment could take it out, for the owner (each is design-level: the
+convention of 2.3, the returns of 3.3, the safepoints of 6.2, the memory model of 6.4, the tiers of 9.3). After the change, at tier W:
+
+| Taken out (an experiment on this tree; per-layout medians, change of the median) | int_ops-gcc | int_ops-clang | switch-gcc | switch-clang | simd-gcc | simd-clang | benchmark |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| the safepoint polls (`--no-safepoints`) | +0.3 % | −0.5 % | −7.4 % | −9.1 % | −9.3 % | −2.7 % | −5.3 % |
+| the pending check after each call | −0.9 % | −1.0 % | +0.7 % | −1.0 % | −2.3 % | −2.7 % | −2.0 % |
+| volatile guest memory (every plain access a plain LLVM one) | 0.0 % | +0.4 % | hangs | hangs | 0.0 % | 0.0 % | hangs |
+| FnTailLr's compare | +0.8 % | −1.0 % | +1.5 % | −3.8 % | 0.0 % | 0.0 % | −2.0 % (not in every layout) |
+| swifttailcc replaced by ghccc (`--cc ghc`) | −2.5 % | −1.9 % | −3.7 % | −4.8 % | 0.0 % | 0.0 % | −0.3 % (not in every layout) |
+
+fnptr (6 µs at the host's resolution) moved by none of them beyond its 1 µs steps (5 to 6 µs without polls). Changes of about 1 % with
+either sign (FnTailLr's compare, the pending check on switch-gcc) are within what a pack's layout alone moves ("The sample profile at
+tier H": 1 to 3 %).
+
+- **The convention's cost per call** (design 2.3), the largest part of what is left wherever the code calls (int_ops' `main`, the
+  benchmark's drivers and chains): `st` reloaded from the stack after every call (swifttailcc keeps R13, its swiftself register, in no
+  callee-saved slot), `subq $8, %rsp` after it (the callee pops an argument area that LLVM rounds up to 8 bytes even when it is empty), the
+  return address built from the base for the lr argument, the stores of what the callee is not passed and the reloads of what it may write.
+  ghccc (the stand-in for preserve_none: no callee-saved register, one signature) measured 0 to 4.8 % faster than swifttailcc on every
+  program above, where phase 1 had chosen swifttailcc for 10 to 30 % fewer reloads and one loop twice as fast; LLVM 19's `preserve_nonecc`
+  is the one to measure when nxaot.lock moves. Changing the convention changes the standard entries' signature (ABI 3,
+  [include/nxaot/aot_module.h](include/nxaot/aot_module.h)): the owner's decision, now with this measurement for ghccc.
+- **The pending check after every call** (3.3: `cmpq $0, 0x350(%r13); jne`): 0 to 2.7 % by its removal. A return to a frame that waits for
+  a non-local transfer cannot be told apart otherwise without another way back from a callee (a second return address, or unwinding to the
+  resume points), a change of 3.3.
+- **The safepoint polls** (6.2): 3 to 9 % of switch, simd and the benchmark, nothing on int_ops (there a load, a test and a predicted
+  branch beside the loop's own work). A loop whose trip count a constant
+  bounds would need none (it runs a bounded time between the polls of the code around it, as a function that neither calls nor loops does:
+  int_ops-gcc's 8-iteration bit loop polls 8 times per byte); that needs the bound on the lifted IR (the induction register's compare
+  against a constant), not done, and int_ops shows it would buy little there.
+- **Guest memory as volatile** (6.4): every plain access made non-volatile, an unsound experiment, changed int_ops, simd and fnptr by at most
+  0.4 % and made switch and the benchmark hang: on this code the guest compilers left LLVM nothing to merge; nothing here argues for
+  revisiting 6.4 for speed.
+- **No inlining and no loop passes at tier W** (9.3): the W and H+ columns of the ratio table. int_ops-gcc's `ref_crc` keeps GCC's bit loop
+  at W, where native clang unrolled it fully; the profile's tier H is where that is bought.
+- **FnTailLr's compare** (4cbabbf, before every tail call: x30 against the entry's lr, folded where x30 is never written): its removal moved
+  the programs by −3.8 to +1.5 %, with no consistent sign: no measurable cost here.
 
 ## Pack throughput
 

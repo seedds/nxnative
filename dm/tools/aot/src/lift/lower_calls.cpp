@@ -234,6 +234,162 @@ void FunctionLifter::FnRelative(uint64_t pc, IR::Block& block, const std::functi
 
 // ---- The dirty registers at every block end ----
 
+// A loop whose every iteration makes a call (or an svc) stores at that call, each time round, every register newer than the block that the
+// callee is not passed: the dirty set at the loop's head is the union over its predecessors, and the edge that enters the loop brings what the
+// code before it changed and never stored (a loop of switch-gcc's main stored x4..x27 at its call each time round, two thirds of them
+// values set before the loop: README.md, "Against native"). Here, for every head h of a natural loop (h dominates the source of a back edge
+// into it) that is entered only through branches of the lifted code (not the function's entry, a landing pad, a part's entry, a resume
+// point or a jump table's case, which carry no stores), and in which a call or svc block runs on every iteration (h dominates it and it
+// dominates every back edge's source): entry_stores[h] is what that call stores of a full dirty set, without sp, x30 and NZCV (passed to every
+// call, or kept apart). An edge from outside the loop stores the part of it that is dirty there and not at the head, once per entry instead
+// of once per iteration (FnGoto); the store is a value's current copy in the block, which the convention allows at any point (design 2.3).
+// Returns, per head, its predecessors inside its loop (the back edges' sources)
+std::map<uint64_t, std::set<uint64_t>> FunctionLifter::FnLoopHeads() {
+    std::map<uint64_t, std::set<uint64_t>> heads;
+    if (plan->correctness) {
+        return heads;
+    }
+    // Dominators over the guest blocks (Cooper, Harvey and Kennedy), from a root before every way in: the entry, the landing pads, the parts'
+    // entries; the resume points are successors of their call blocks
+    std::vector<uint64_t> order;  // reverse postorder
+    std::map<uint64_t, int> index;
+    std::map<uint64_t, std::vector<uint64_t>> preds;
+    for (const auto& [pc, next] : succs) {
+        for (const uint64_t s : next) {
+            if (blocks.count(s)) preds[s].push_back(pc);
+        }
+    }
+    std::vector<uint64_t> starts;
+    if (blocks.count(plan->entry)) starts.push_back(plan->entry);
+    for (const uint64_t r : plan->roots) {
+        if (blocks.count(r)) starts.push_back(r);
+    }
+    for (const uint64_t e : plan->part_entries) {
+        if (blocks.count(e)) starts.push_back(e);
+    }
+    {
+        std::set<uint64_t> seen;
+        std::vector<std::pair<uint64_t, size_t>> stack;
+        std::vector<uint64_t> post;
+        for (const uint64_t s : starts) {
+            if (!seen.insert(s).second) continue;
+            stack.push_back({s, 0});
+            while (!stack.empty()) {
+                auto& [pc, i] = stack.back();
+                const auto& next = succs[pc];
+                if (i < next.size()) {
+                    const uint64_t n = next[i++];
+                    if (blocks.count(n) && seen.insert(n).second) stack.push_back({n, 0});
+                } else {
+                    post.push_back(pc);
+                    stack.pop_back();
+                }
+            }
+        }
+        order.assign(post.rbegin(), post.rend());
+    }
+    for (size_t i = 0; i < order.size(); ++i) index[order[i]] = static_cast<int>(i);
+    // idom by reverse-postorder index; kRoot is the virtual root, kUnknown a block not reached yet. A dominator has a smaller index
+    constexpr int kRoot = -1, kUnknown = -2;
+    std::vector<int> idom(order.size(), kUnknown);
+    const std::set<uint64_t> start_set(starts.begin(), starts.end());
+    for (const uint64_t s : starts) idom[static_cast<size_t>(index.at(s))] = kRoot;
+    const auto intersect = [&](int a, int b) {
+        while (a != b) {
+            while (a > b) a = idom[static_cast<size_t>(a)];  // never kUnknown: a and b are processed blocks, and so are their dominators
+            while (b > a) b = idom[static_cast<size_t>(b)];
+        }
+        return a;
+    };
+    for (bool changed = true; changed;) {
+        changed = false;
+        for (size_t i = 0; i < order.size(); ++i) {
+            const uint64_t pc = order[i];
+            if (start_set.count(pc)) continue;  // the virtual root's successors
+            int d = kUnknown;
+            for (const uint64_t p : preds[pc]) {
+                const auto it = index.find(p);
+                if (it == index.end() || idom[static_cast<size_t>(it->second)] == kUnknown) continue;
+                d = d == kUnknown ? it->second : intersect(d, it->second);
+            }
+            if (d != kUnknown && idom[i] != d) {
+                idom[i] = d;
+                changed = true;
+            }
+        }
+    }
+    const auto dominates = [&](uint64_t a, uint64_t b) {  // a dominates b
+        const auto ia = index.find(a), ib = index.find(b);
+        if (ia == index.end() || ib == index.end()) return false;
+        for (int x = ib->second; x >= 0; x = idom[static_cast<size_t>(x)]) {
+            if (x == ia->second) return true;
+        }
+        return false;
+    };
+    // The heads no lifted branch alone enters: they cannot carry an edge's stores
+    std::set<uint64_t> excluded(starts.begin(), starts.end());
+    for (const auto& [pc, targets] : table_targets) {
+        excluded.insert(targets.begin(), targets.end());
+    }
+    if (plan->resume) {
+        for (const auto& [pc, e] : ends) {
+            if (e.kind == EndKind::Bl || e.kind == EndKind::Blr) {
+                for (const uint64_t r : plan->resume(A64::LocationDescriptor{blocks.at(pc).EndLocation()}.PC() - 4)) excluded.insert(r);
+            }
+        }
+    }
+    // What a call block stores of a full dirty set (FnCall's CallStores; a guarded call's two paths both store it)
+    const Regs all = Regs::All();
+    const auto stores_of = [&](uint64_t pc) -> std::optional<Regs> {
+        if (svc_blocks.count(pc)) return all;
+        const End& e = ends[pc];
+        const uint64_t site = A64::LocationDescriptor{blocks.at(pc).EndLocation()}.PC() - 4;
+        if (e.kind == EndKind::Bl) {
+            const CalleeView* c = plan->callee(e.target);
+            return CallStores(all, c ? *c : plan->indirect);
+        }
+        if (e.kind == EndKind::Blr) {
+            Regs r = CallStores(all, plan->indirect);
+            if (const CalleeView* g = Guarded(site, true)) r = r & CallStores(all, *g);
+            return r;
+        }
+        return std::nullopt;
+    };
+    for (const uint64_t h : order) {
+        if (excluded.count(h)) continue;
+        std::set<uint64_t> back;
+        for (const uint64_t p : preds[h]) {
+            if (dominates(h, p)) back.insert(p);
+        }
+        if (back.empty()) continue;
+        // The loop's body: h and what reaches a back edge's source without passing h
+        std::set<uint64_t> body{h};
+        std::vector<uint64_t> work(back.begin(), back.end());
+        while (!work.empty()) {
+            const uint64_t b = work.back();
+            work.pop_back();
+            if (!body.insert(b).second) continue;
+            for (const uint64_t p : preds[b]) {
+                if (!body.count(p)) work.push_back(p);
+            }
+        }
+        Regs m;
+        for (const uint64_t b : body) {
+            const auto s = stores_of(b);
+            if (!s || !dominates(h, b)) continue;
+            bool every = true;
+            for (const uint64_t p : back) every = every && dominates(b, p);
+            if (every) m = m | *s;
+        }
+        m = m - kSpLr;
+        m.nzcv = false;
+        if (m.Empty()) continue;
+        entry_stores[h] = m;
+        heads[h] = back;
+    }
+    return heads;
+}
+
 void FunctionLifter::FnDataflow() {
     for (auto& [pc, block] : blocks) {
         Regs g;
@@ -270,26 +426,36 @@ void FunctionLifter::FnDataflow() {
         // What stays newer than the block after a call: what was passed and not changed, and what the return value brought
         return ((d & (c.pass | kSpLr)) - c.writes) | Regs::X(kRetX) | Regs::V(c.rv);
     };
+    const auto out_of = [&](uint64_t pc) {
+        const Regs at_end = dirty_in[pc] | gen[pc];
+        const End& e = ends[pc];
+        if (svc_blocks.count(pc)) {
+            return Regs{};  // the svc stores every dirty register and reloads x0..x8
+        } else if (e.kind == EndKind::Bl) {
+            const CalleeView* c = plan->callee(e.target);
+            return c ? after_call(at_end, *c) : Regs{};
+        } else if (e.kind == EndKind::Blr) {
+            return after_call(at_end, plan->indirect);
+        }
+        return at_end;
+    };
+    // An edge into a loop whose iterations call stores what the call would store each time round (FnLoopHeads, FnGoto): the head's dirty
+    // set is then what its back edges bring, and what the edges from outside keep after their stores
+    const std::map<uint64_t, std::set<uint64_t>> heads = FnLoopHeads();
+    const auto reaching = [&](uint64_t pc, uint64_t s, const Regs& out) {
+        const auto h = heads.find(s);
+        return h == heads.end() || h->second.count(pc) ? out : out - entry_stores.at(s);
+    };
     bool changed = true;
     while (changed) {
         changed = false;
         for (auto& [pc, block] : blocks) {
-            const Regs at_end = dirty_in[pc] | gen[pc];
-            Regs out = at_end;
-            const End& e = ends[pc];
-            if (svc_blocks.count(pc)) {
-                out = {};  // the svc stores every dirty register and reloads x0..x8
-            } else if (e.kind == EndKind::Bl) {
-                const CalleeView* c = plan->callee(e.target);
-                out = c ? after_call(at_end, *c) : Regs{};
-            } else if (e.kind == EndKind::Blr) {
-                out = after_call(at_end, plan->indirect);
-            }
+            const Regs out = out_of(pc);
             for (const uint64_t s : succs[pc]) {
                 if (!blocks.count(s)) {
                     continue;
                 }
-                const Regs next = dirty_in[s] | out;
+                const Regs next = dirty_in[s] | reaching(pc, s, out);
                 if (!(next == dirty_in[s])) {
                     dirty_in[s] = next;
                     changed = true;
@@ -318,6 +484,12 @@ void FunctionLifter::FnDataflow() {
                 // A guarded call (FnCallGuarded): its direct path stores what bl to the target stores, then what it keeps newer than the block beyond what the
                 // indirect call keeps (the successors were computed with the indirect call's)
                 stored = stored | CallStores(at_end, *g) | (after_call(at_end, *g) - after_call(at_end, plan->indirect));
+            }
+        }
+        for (const uint64_t s : succs[pc]) {
+            const auto h = entry_stores.find(s);
+            if (h != entry_stores.end() && blocks.count(s)) {
+                stored = stored | ((out_of(pc) & h->second) - dirty_in[s]);  // an edge into a loop head (FnGoto)
             }
         }
     }
@@ -364,6 +536,19 @@ void FunctionLifter::FnDataflow() {
         def[pc] = d;
         const End& e = ends[pc];
         bool unknown = svc_blocks.count(pc) || e.kind != EndKind::Other;
+        if (!plan->correctness && !svc_blocks.count(pc)) {
+            // A call reads NZCV when the callee may read it before writing it (its summary; the indirect view always), and after it the caller's
+            // successor may: a dirty NZCV dead there is not stored for the call (FnCall), as a poll leaves a dead one alone (design 6.2). A return
+            // reads it when a caller may after the call (LIVE_AFTER: FnReturn stores no other)
+            if (e.kind == EndKind::Bl) {
+                const CalleeView* c = plan->callee(e.target);
+                unknown = !c || c->reads_nzcv;
+            } else if (e.kind == EndKind::Blr) {
+                unknown = plan->indirect.reads_nzcv;
+            } else if (e.kind == EndKind::Ret) {
+                unknown = plan->live_after.nzcv;
+            }
+        }
         for (const uint64_t n : succs[pc]) {
             unknown = unknown || !blocks.count(n);
         }
@@ -785,8 +970,12 @@ llvm::CallInst* FunctionLifter::EmitCall(const CalleeView& c, llvm::FunctionType
 
 void FunctionLifter::FnCall(const CalleeView& c, llvm::FunctionType* type, Value* callee, uint64_t call_pc) {
     // Before the call: what the callee does not take in host registers must be current in the block (section 2.3); through the dispatcher also
-    // what it takes but the union of the possible callees may change (it is reloaded afterwards; CalleeView::exact)
-    StoreRegs(plan->correctness ? Regs::All() : CallStores(cur_dirty, c));
+    // what it takes but the union of the possible callees may change (it is reloaded afterwards; CalleeView::exact). NZCV only where it is live
+    // after the call: the callee may read it, or the caller after it (FnDataflow); a dead one is left as a poll leaves it (design 6.2). In a loop
+    // of calls the flags of every compare were packed and stored at each call (int_ops-gcc's main: README.md, "Against native")
+    Regs stores = plan->correctness ? Regs::All() : CallStores(cur_dirty, c);
+    stores.nzcv = stores.nzcv && (plan->correctness || nzcv_live_out.count(cur_start));
+    StoreRegs(stores);
     FlushFpsr();  // the QC and FPSR bits the lowering raised, to st->fpsr (a callee or the host may read them)
     Value* frame_sp = B.CreateLoad(B.getInt64Ty(), sp, "frame_sp");
     llvm::CallInst* ret = EmitCall(c, type, callee, B.CreateLoad(B.getInt64Ty(), x[30]), false);
@@ -1165,6 +1354,12 @@ void FunctionLifter::FnGoto(Value* target) {
                 Regs dirty = cur_dirty;
                 dirty.nzcv = dirty.nzcv && nzcv_live.count(*off);
                 FnPoll(Rel(*off), dirty);
+            }
+            const auto loop = entry_stores.find(*off);
+            if (loop != entry_stores.end()) {
+                // An edge into a loop whose iterations call (FnLoopHeads): what the call would store each time round, once here; nothing on
+                // the loop's own back edges, whose dirty set is the head's
+                StoreRegs((cur_dirty & loop->second) - dirty_in.at(*off));
             }
             B.CreateBr(it->second);
         } else if (plan->part_of && plan->part_of(*off)) {

@@ -130,8 +130,10 @@ constexpr uint64_t kAnalysisPerWord = 64, kAnalysisFixed = 128ull << 20;
 // sites and the aux region's code, the line marks' section, the standard entries' fixed signature (ABI 3). 3: groups of functions, parts of
 // split functions, a tier per function (phase 5b). 4: phase 5d's units: the NaN helpers declared (the tables' object defines them), the
 // registers forwarded within blocks and NZCV made lazily, rotates by a constant as shifts, the tier pipelines of 5d and tier C's code for
-// FastISel (an object of format 3 under the same key would hold its own helpers, which the tables' object now defines too)
-constexpr const char* kUnitKeyFormat = "nxaot-unit 4";
+// FastISel (an object of format 3 under the same key would hold its own helpers, which the tables' object now defines too). 5: the code of
+// "Against native" (README.md): sbfm as a shift pair, the stores of a loop whose iterations call on the edges into it, NZCV stored at a call
+// only where the caller may read it after the call or the callee may read it (a callee's reads.nzcv in "callees" and "targets")
+constexpr const char* kUnitKeyFormat = "nxaot-unit 5";
 
 // The section each unit's !pcsections marks go to (the line table, "The line table" below): read back after code generation and kept out of
 // the link (SHF_EXCLUDE)
@@ -2163,6 +2165,7 @@ bool CompileUnit(const Common& c, llvm::TargetMachine& tm, const Unit& u, std::s
         v.writes = pf->second.writes;
         v.rv = pf->second.rv;
         v.returns = pf->second.returns;
+        v.reads_nzcv = pf->second.reads.nzcv;
         return &views.emplace(off, v).first->second;
     };
     lift::CalleeView indirect;
@@ -3109,7 +3112,7 @@ std::string UnitKey(const Common& c, uint64_t entry) {
         const FnFacts& cf = it->second;
         list += std::to_string(t) + ":" + std::to_string(cf.pass.x) + "," + std::to_string(cf.pass.v) + "," + std::to_string(cf.pass.sp) + "/" +
                 std::to_string(cf.writes.x) + "," + std::to_string(cf.writes.v) + "," + std::to_string(cf.writes.sp) + "," +
-                std::to_string(cf.writes.nzcv) + "/" + std::to_string(cf.rv) + "/" + std::to_string(cf.returns) + ";";
+                std::to_string(cf.writes.nzcv) + "/" + std::to_string(cf.rv) + "/" + std::to_string(cf.returns) + "/" + std::to_string(cf.reads.nzcv) + ";";
     }
     k.Add("callees", list);
     // The samples that weigh its code at H and H+ (WeighFunction; README.md, "The sample profile at tier H"): its (offset, count) pairs, and only
@@ -3131,7 +3134,7 @@ std::string UnitKey(const Common& c, uint64_t entry) {
         const FnFacts& tf = c.plan.fns.at(it->second);
         list += std::to_string(it->first) + ":" + std::to_string(it->second) + ":" + std::to_string(tf.pass.x) + "," + std::to_string(tf.pass.v) + "," +
                 std::to_string(tf.pass.sp) + "/" + std::to_string(tf.writes.x) + "," + std::to_string(tf.writes.v) + "," + std::to_string(tf.writes.sp) + "," +
-                std::to_string(tf.writes.nzcv) + "/" + std::to_string(tf.rv) + "/" + std::to_string(tf.returns) + ";";
+                std::to_string(tf.writes.nzcv) + "/" + std::to_string(tf.rv) + "/" + std::to_string(tf.returns) + "/" + std::to_string(tf.reads.nzcv) + ";";
     }
     if (!list.empty()) {
         k.Add("targets", list);

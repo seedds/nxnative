@@ -131,6 +131,9 @@ struct CalleeView {
     Regs writes;                   // what may hold another value when it returns: reloaded from the block after a call unless returned
     uint32_t rv = 0;               // which of v0..v3 (bits 0..3) its return value holds; the others are poison
     bool returns = true;           // it has a return path (the analysis' summary)
+    // It may read NZCV before writing it (its summary's reads). Otherwise a call stores a dirty NZCV only where the caller may read it after
+    // the call (lower_calls.cpp, FnCall); true for the indirect view, whose callees may be no function of the module
+    bool reads_nzcv = true;
     // writes is this function's own (a direct call). False for the indirect view, whose writes is a union over every function an indirect
     // call may reach: the one that runs stores only what it writes itself, so a register it is passed and the union says may change must be
     // current in the block before the call too

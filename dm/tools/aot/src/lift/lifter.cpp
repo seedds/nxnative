@@ -1,6 +1,7 @@
 #include "lift/lifter.h"
 
 #include <array>
+#include <bit>
 #include <cstddef>
 #include <deque>
 #include <map>
@@ -524,8 +525,12 @@ void FunctionLifter::LowerBlock(IR::Block& block) {
     if (!terminated) {
         if (Fn()) {
             // The deferred flags reach the allocas before the terminator when a successor, or what the terminator leaves to, may read them
-            // (FnDataflow); otherwise only a path of the terminator that stores NZCV makes them (MaterializeNzcv, on that path)
-            if (deferred_nzcv && nzcv_live_out.count(cur_start)) {
+            // (FnDataflow), and before a call, whose reloads (the callee's writes, a resume point's whole register file) replace them on its
+            // paths even where they are dead (FnCall then stores none: LLVM drops what nothing reads); otherwise only a path of the terminator
+            // that stores NZCV makes them (MaterializeNzcv, on that path)
+            const auto end = ends.find(cur_start);
+            const bool calls = end != ends.end() && (end->second.kind == EndKind::Bl || end->second.kind == EndKind::Blr);
+            if (deferred_nzcv && (nzcv_live_out.count(cur_start) || calls)) {
                 MaterializeNzcv();
             }
             in_terminator = true;
@@ -1434,6 +1439,62 @@ Value* FunctionLifter::FunnelRight(Value* hi, Value* lo, Value* amount) {
     return B.CreateCall(llvm::Intrinsic::getDeclaration(&M, llvm::Intrinsic::fshr, {lo->getType()}), {hi, lo, amount});
 }
 
+// sbfm (asr by an immediate, sxtb / sxth / sxtw, sbfx, sbfiz) as dynarmic's frontend writes it: Or(And(ReplicateBit(src, S), ~T), And(Y, T))
+// with Y = And(RotateRight(src, R), W), the rotate and the mask each possibly absent, and T the low k bits. Lowered as written, LLVM keeps an
+// or of the replicated bit's select and the field, since nothing tells it that bit k - 1 of the field is the replicated bit: asr x0, x1, #5
+// became five x86 instructions and a 64-bit constant, sxtw five, sbfx w0, w1, #0, #1 five (README.md, "Against native"). When that bit is the
+// replicated one (W has bit k - 1, and bit k - 1 of the rotate is bit (k - 1 + R) mod n of src, which is S), the or is the low k bits of
+// And(Y, T) sign-extended: ashr(shl(And(Y, T), n - k), n - k), which LLVM makes a sar, a movsx or a shl / sar pair. Checked on the operands, not on
+// the instruction's shape: any or of that form is exactly this
+Value* FunctionLifter::SignedField(const IR::Inst& inst) {
+    using IR::Opcode;
+    const bool wide = inst.GetOpcode() == Opcode::Or64;
+    const unsigned n = wide ? 64 : 32;
+    const uint64_t ones = wide ? ~0ull : 0xFFFFFFFFull;
+    const Opcode and_op = wide ? Opcode::And64 : Opcode::And32;
+    const auto def = [](const IR::Value& v, Opcode op) -> const IR::Inst* {
+        return !v.IsImmediate() && v.GetInst()->GetOpcode() == op ? v.GetInst() : nullptr;
+    };
+    const auto imm = [&](const IR::Inst* i, size_t a, uint64_t* out) {  // an immediate argument that is no address built from the pc
+        const IR::Value v = i->GetArg(a);
+        if (!v.IsImmediate() || relative.count({i, a})) return false;
+        *out = v.GetImmediateAsU64() & ones;
+        return true;
+    };
+    const auto same = [](const IR::Value& a, const IR::Value& b) {
+        if (a.IsImmediate() || b.IsImmediate()) {
+            return a.IsImmediate() && b.IsImmediate() && a.GetType() == b.GetType() && a.GetImmediateAsU64() == b.GetImmediateAsU64();
+        }
+        return a.GetInst() == b.GetInst();
+    };
+    for (size_t t = 0; t < 2; ++t) {
+        const IR::Inst* top = def(inst.GetArg(t), and_op);
+        const IR::Inst* bot = def(inst.GetArg(1 - t), and_op);
+        uint64_t not_t = 0, tm = 0;
+        if (!top || !bot || !imm(top, 1, &not_t) || !imm(bot, 1, &tm)) continue;
+        const IR::Inst* rep = def(top->GetArg(0), wide ? Opcode::ReplicateBit64 : Opcode::ReplicateBit32);
+        if (!rep || !rep->GetArg(1).IsImmediate()) continue;
+        if ((not_t ^ tm) != ones || tm == 0 || tm == ones || (tm & (tm + 1)) != 0) continue;  // T: the low k bits, 0 < k < n
+        const unsigned k = static_cast<unsigned>(std::popcount(tm));
+        const unsigned s = rep->GetArg(1).GetU8();
+        IR::Value y = bot->GetArg(0);
+        uint64_t w = ones;
+        unsigned r = 0;
+        if (const IR::Inst* a = def(y, and_op)) {
+            if (!imm(a, 1, &w)) continue;
+            y = a->GetArg(0);
+        }
+        if (const IR::Inst* ror = def(y, wide ? Opcode::RotateRight64 : Opcode::RotateRight32)) {
+            if (!ror->GetArg(1).IsImmediate()) continue;
+            r = ror->GetArg(1).GetU8() % n;
+            y = ror->GetArg(0);
+        }
+        if (!(w >> (k - 1) & 1) || (k - 1 + r) % n != s || !same(y, rep->GetArg(0))) continue;
+        return B.CreateAShr(B.CreateShl(Arg(inst, 1 - t), n - k), n - k);
+    }
+    return nullptr;
+}
+
 Value* FunctionLifter::Div(bool is_signed, Value* a, Value* b) {
     // Arm: a divisor of 0 gives 0, INT_MIN / -1 gives INT_MIN; LLVM's udiv / sdiv are undefined there, so the divisor is made safe first
     llvm::Type* t = a->getType();
@@ -1617,6 +1678,10 @@ bool FunctionLifter::LowerInteger(IR::Inst& inst) {
         return true;
     case Opcode::Or32:
     case Opcode::Or64:
+        if (Value* field = SignedField(inst)) {
+            Def(inst, field);
+            return true;
+        }
         Def(inst, B.CreateOr(Arg(inst, 0), Arg(inst, 1)));
         return true;
     case Opcode::Not32:

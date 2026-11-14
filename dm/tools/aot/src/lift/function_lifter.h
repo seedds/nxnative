@@ -153,6 +153,7 @@ public:
     // ---- Integer helpers ----
     Value* Shift(IR::Opcode op, Value* v, Value* amount);
     Value* FunnelRight(Value* hi, Value* lo, Value* amount);  // fshr; shifts and an or by a constant amount
+    Value* SignedField(const IR::Inst& or_inst);              // sbfm's or of a replicated bit and a field: a shift pair, or null
     Value* Div(bool is_signed, Value* a, Value* b);
     Value* Crc32Iso(Value* crc, Value* data, unsigned bytes);
     Value* Crc32c(Value* crc, Value* data, unsigned bits);
@@ -284,6 +285,8 @@ public:
     std::map<uint64_t, std::vector<uint64_t>> succs;    // per block start: the successors inside the function
     std::map<uint64_t, Regs> gen;                       // per block start: the registers it writes
     std::map<uint64_t, Regs> dirty_in;                  // per block start: the registers newer than their copy in the block at its start
+    std::map<uint64_t, Regs> entry_stores;              // loop heads whose every iteration calls: what an edge from outside the loop stores
+                                                        // (FnLoopHeads; FnGoto stores it on every edge, empty on the back edges)
     std::set<uint64_t> svc_blocks;                      // blocks that end in svc (it stores the whole register file)
     std::set<uint64_t> nzcv_live;                       // block starts where NZCV is live (some path reads it before writing it): a poll there
                                                         // stores it, elsewhere it is dead and a poll leaves its block copy as it was
@@ -305,6 +308,8 @@ public:
     void FnClassify(uint64_t pc, const IR::Block& block, std::vector<uint64_t>& next);  // Discover: the block's end and successors
     void FnRelative(uint64_t pc, IR::Block& block, const std::function<void(IR::Block&)>& passes);  // the base-relative immediates
     void FnDataflow();
+    // The loop heads FnDataflow lets edges from outside store into (entry_stores) and, per head, which of its predecessors are in its loop
+    std::map<uint64_t, std::set<uint64_t>> FnLoopHeads();
     void FnPrologue();
     void FnInitRegisters();  // after the body: the first values of the registers it reads
     void FnCleanup();        // then: the FPSR flushes of a function that raises no bit, and the allocas nothing loads (lifter.cpp)

@@ -82,12 +82,12 @@ int main(void) { @autoreleasepool {
 
     // A 4 KB request over the texture's page: no registration, serial change or CPU write at the request, a note at the next submission
     uint64_t rg = atomic_load(&g_reg_gen), dg = nvn_dirty_now(); sg = g_ser_gen;
-    args_sync_dirty(); memset(g_args_dirty, 0, sizeof g_args_dirty);
+    args_sync_dirty(); for (int st = 0; st < 6; st++) g_args_wrote[st] = g_args_seq;   // as if every stage had just written its block
     CHECK(map(&virt, &phys, 0, 0x10000, 0x1000), "the texture's page mapped from elsewhere");
     CHECK(atomic_load(&g_reg_gen) == rg && g_ser_gen == sg && nvn_dirty_now() == dg, "the request itself changes no registration, serial or CPU-write generation");
     next_sub();
     CHECK(g_ser_gen == sg + 1, "the next submission notes the texture's serial once");
-    args_sync_dirty(); int all = 1; for (unsigned i = 0; i < sizeof g_args_dirty; i++) all &= g_args_dirty[i] != 0;
+    args_sync_dirty(); int all = 1; for (int st = 0; st < 6; st++) all &= args_changed(st);
     CHECK(all, "the note sends cached argument blocks through their check");
     pool_gpu(0, MTLTextureType2D, NVN_DPF_FLOAT, 0, &table);
     CHECK(g_stat_pool_builds == builds, "the pool table is patched, not built whole");

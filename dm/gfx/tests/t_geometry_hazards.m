@@ -64,7 +64,7 @@ static void drain_contract(void) {
     EXPECT("no drain: a write earlier in the submission is a hazard",1,geo_cpu_hazard(0x10000,4));
     drw_drained();
     EXPECT("drained: an earlier write no longer counts",0,geo_cpu_hazard(0x10000,4));
-    EXPECT("the drain re-encodes bindings",1,g_args_dirty[0]&&g_args_dirty[2]);
+    EXPECT("the drain re-encodes bindings",1,args_changed(0)&&args_changed(2));
     sbw_note(0x20000, 16, SBW_GPU);
     EXPECT("a storage write after the drain counts",1,geo_cpu_hazard(0x2000c,4));
     EXPECT("only where it wrote",0,geo_cpu_hazard(0x20010,4));

@@ -1579,6 +1579,13 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Fix:** `gp_begin` records the encoder it stamped, and `gp_end` ignores any other encoder, so the open pass keeps its label until its own end.
 - **Found on:** [The Legend of Zelda: Tears of the Kingdom](../../dm/games/0100F2C0115B6000/README.md) with `DM_NVN_GPUPROF=every:300` on the Mac (issue #531; one run in four, about frame 23,000). `t_gpuprof` ends an upload encoder inside a profiled pass; it runs in CPU CI. Not rerun in the game.
 
+### An argument block reused after another shader of its stage encoded
+
+- **Symptom:** none seen in a game. A draw could bind a texture, sampler, storage or uniform buffer from before a binding change: the draw's shader had written its block earlier in the pass, another shader wrote a block on the same stage after the change, and the first shader drew again. [PR #2249](https://github.com/seedds/nxnative/pull/2249) found the mechanism by reading ([#1898](https://github.com/seedds/nxnative/pull/1898)'s 56e7ee16).
+- **Cause:** a stage's binding changes were flags (`g_args_dirty`, `g_args_ubo`) that whichever shader wrote the stage's next block cleared, so they told the next shader on that stage nothing about its own block. Every path that puts another shader on a stage marks the stages first, and a program switch marks them all, so the one route found is a combined program (`bind_stages`, stages bound from different programs): when the bound combination was the next of the `NCMP` ring slots to be replaced, a new combination took that slot and came back as the same pointer, and `OP_BIND_PROGRAM` (`np != S.prog`) saw no change. It needs more than 64 combinations in use; AI: THE SOMNIUM FILES made more than that in the precompile prediction.
+- **Fix:** in `nvn_mtl.m`, for every NVN game. A block is valid by generation: each binding change takes the next number of one sequence for every stage (`g_args_gen` for any binding, `g_args_ugen` for what the uniform slots point at only), each block keeps the numbers it was written at (`ab_gen`, `ab_ugen`), and it is reused only while both hold, patched when only the uniform one moved. Shaders that take turns on a stage with no binding change keep their blocks. `bind_stages` never gives a new combination the slot `S.prog` names.
+- **Found on:** reading; no game failure reported. `t_args_gen` runs the sequence (a binding change, another shader's encode, the first shader again), shaders taking turns, a uniform-only change, and the ring slot; without the `bind_stages` change its slot checks fail.
+
 ## Conditional rendering and queries
 
 ### Conditional rendering evaluated at replay

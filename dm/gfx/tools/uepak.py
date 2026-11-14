@@ -165,7 +165,7 @@ def magic_back(f):
     """(how far from the end the footer's magic is, the pak version): a legacy footer is the last 0x2d bytes (magic 0x2c from the end); version 11's magic is 0xc8 from the end in
     Octopath Traveler 0 (UE5) and 0xcc in Unreal Engine 4.27 (DRAGON QUEST VII Reimagined: five whole 32-byte compression method names after the SHA-1)"""
     size = f.seek(0, 2)
-    for back, foot in ((0x2c, 0x2d), (0xc8, 0xc8 + 21), (0xcc, 0xcc + 21)):
+    for back, foot in ((0x2c, 0x2d), (0xac, 0xac + 21), (0xc8, 0xc8 + 21), (0xcc, 0xcc + 21)):
         if size < foot: continue   # shorter than this footer
         f.seek(-back, 2); m, ver = struct.unpack('<II', f.read(8))
         if m == PAK_MAGIC: return back, ver
@@ -257,15 +257,21 @@ class Pak:
     def __init__(self, path, key=None):
         self.path, self.key = path, key; self.f = open(path, 'rb')
         enc, ioff, isz, self.methods, self.version = footer(self.f)
+        # Bloodstained uses a PAK v8 footer at -0xAC and
+        # a 1-byte FPakEntry compression method.
+        self.short_entry = self.version == 8 and magic_back(self.f)[0] == 0xac
         if enc and not key: raise ValueError(f'{path}: the index is encrypted and no key was given')
         r = R(self.read_at(ioff, isz, enc), what=f'{path}: the index')
         self.mount = r.fstr(); self.count = r.take('<i')
         if self.version in LEGACY:   # one FPakEntry per file, kept as parsed
             self.files = {}
             for _ in range(self.count):
-                name = r.fstr(); off, size, raw, meth = r.take('<qqqi'); r.raw(20)
+                name = r.fstr()
+                off, size, raw, meth = r.take('<qqqB' if self.short_entry else '<qqqi')
+                r.raw(20)
                 blocks = [r.take('<qq') for _ in range(r.take('<i'))] if meth else []
-                e, bsz = r.take('<BI'); head = 53 + (4 + 16 * len(blocks) if meth else 0)
+                e, bsz = r.take('<BI')
+                head = (50 if self.short_entry else 53) + (4 + 16 * len(blocks) if meth else 0)
                 if self.version < 5: blocks = [(s - off, t - s) for s, t in blocks]
                 else: blocks = [(s, t - s) for s, t in blocks]
                 self.files[name] = dict(off=off, raw=raw, size=size, method=(LEGACY_METHODS.get(meth, f'flags {meth}') if self.version < 8 else self.methods[meth - 1] if 0 < meth <= len(self.methods) else f'method {meth}') if meth else '', encrypted=e, block_size=bsz, blocks=blocks or [(head, size)])
@@ -303,7 +309,9 @@ class Pak:
         """A file's bytes, block by block (each block holds block_size raw bytes, the last one the rest). Zlib and LZ4 blocks are decoded here (OCTOPATH TRAVELER II: Zlib); any other
         method needs decode(block bytes, raw length) → bytes: the game's own decoder in the Mac host (shader_split.py oodle); Octopath Traveler 0's archives go through the Oodle job instead"""
         e = self.entry(path)
-        if not e['method']: return self.read_at(e['off'] + 53, e['size'], e['encrypted'])
+        if not e['method']:
+            head = 50 if getattr(self, 'short_entry', False) else 53
+            return self.read_at(e['off'] + head, e['size'], e['encrypted'])
         import zlib
         bad = (zlib.error,)   # a block its decoder refuses
         if e['method'] == 'Zlib': decode = zlib_block
@@ -335,6 +343,86 @@ def archive(b, what='shader code archive') -> dict:
     r.raw(16 * r.take('<I'))
     indices = list(r.array('I', r.take('<I')))
     return dict(maps=maps, shaders=shaders, indices=indices, code=r.o)
+
+
+def archive_v1_decoded(b):
+    """Convert Unreal shader archive v1 to decoded v2 format.
+
+    v1 has a flat array of 37-byte records:
+    SHA1[20], offset:u64, size:u32, raw:u32, frequency:u8.
+    Its shader bytecode is Zlib-compressed LSLG.
+    """
+    import zlib
+
+    if len(b) < 8:
+        raise ValueError('shader archive v1 is too short')
+
+    version, count = struct.unpack_from('<II', b)
+    if version != 1:
+        raise ValueError(f'expected shader archive v1, got {version}')
+
+    code_start = 8 + count * 37
+    if code_start > len(b):
+        raise ValueError('shader archive v1 table exceeds file')
+
+    hashes = bytearray()
+    entries = bytearray()
+    decoded = bytearray()
+    cursor = 0
+
+    for i in range(count):
+        pos = 8 + i * 37
+        hashes.extend(b[pos:pos + 20])
+
+        off, size, raw, stage = struct.unpack_from(
+            '<QIIB', b, pos + 20
+        )
+
+        if (
+            not 0 < size <= raw <= 32 * 1024 * 1024
+            or stage > 5
+            or off + size > len(b) - code_start
+        ):
+            raise ValueError(f'invalid v1 shader entry {i}')
+
+        compressed = b[
+            code_start + off:code_start + off + size
+        ]
+
+        z = zlib.decompressobj()
+        shader = z.decompress(compressed, raw + 1)
+
+        if (
+            not z.eof
+            or z.unused_data
+            or z.unconsumed_tail
+            or len(shader) != raw
+            or not shader.startswith(b'LSLG')
+        ):
+            raise ValueError(
+                f'v1 shader {i} does not decode to valid LSLG'
+            )
+
+        entries.extend(
+            struct.pack('<QIIB', cursor, raw, raw, stage)
+        )
+        decoded.extend(shader)
+        cursor += raw
+
+    # Build the standard v2 archive structure.
+    # Shader-map metadata is empty; shader_split.py
+    # consumes shader entries and decoded LSLG data.
+    header = (
+        struct.pack('<II', 2, 0)
+        + struct.pack('<I', count)
+        + hashes
+        + struct.pack('<I', 0)
+        + struct.pack('<I', count)
+        + entries
+        + struct.pack('<II', 0, 0)
+    )
+
+    return bytes(header + decoded)
 
 def decoded_archive(b, raws):
     """The archive with every shader replaced by its decoded bytes (raws, in entry order): the same tables, each entry's size = its raw size, the code laid out again
@@ -544,6 +632,15 @@ def inline_shaders(path, key=None):
     None: the pak names no file, so it holds neither (the empty pakchunk1-17-Switch.pak beside Sparking! ZERO's containers, mount point "/")"""
     with open(path, 'rb') as f:
         enc, ioff, isz, _, ver = footer(f)
+        if ver == 8 and magic_back(f)[0] == 0xac:
+            pak = Pak(path, key)
+            try:
+                return not any(
+                    name.lower().endswith('.ushaderbytecode')
+                    for name in pak.files
+                )
+            finally:
+                pak.f.close()
         if ver in LEGACY: return True
         if enc and not key: return False
         def at(off, n):   # the index and the full directory index are encrypted alike (Pak.read_at)
@@ -594,7 +691,11 @@ def job(romfs, main_nso, work, decode=None):
     for pak in unreal_paks(romfs, inline=False, mains=[main_nso]):
         p = Pak(pak, keys(pak))
         for path in sorted(x for x in p.files if x.endswith('.ushaderbytecode')):
-            b = p.read(path); a = archive(b, f'{pak}: {path}'); name = os.path.basename(path)
+            b = p.read(path)
+            if b[:4] == struct.pack('<I', 1):
+                b = archive_v1_decoded(b)
+            a = archive(b, f'{pak}: {path}')
+            name = os.path.basename(path)
             comp = [i for i, (_, size, raw, _) in enumerate(a['shaders']) if size != raw]
             raws = lz4_shaders(b, a)
             if comp and raws: b = decoded_archive(b, raws); comp, how = [], 'LZ4'   # decoded here: the Oodle job gets none of them

@@ -40,6 +40,8 @@ Community projects build on nxnative with tools to turn your games into apps for
 
 ## Requirements
 
+An opt-in [experimental iOS 18 / Metal 3 build](docs/ios18.md) is available for BC-capable devices. The default requirements below are unchanged.
+
 - **Mac:** Apple silicon, macOS 26.6 or later. Building games requires Xcode 27.2.
 - **iPhone:** A17 Pro chip or later, with iOS 26 or later.
 - **iPad:** M1 chip or later, with iPadOS 26 or later.

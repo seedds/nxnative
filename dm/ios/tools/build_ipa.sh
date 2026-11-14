@@ -188,7 +188,14 @@ if [ "$PREPARE_XCODE" = YES ] && [ -n "${DM_ENTITLEMENTS-default}" ]; then
 fi
 # DM_COPY_ROMFS=NO also for the prepared project: its Copy game resources phase (stage_resources.sh) then leaves the game files out and writes the image's identity; Gen/dm.xcconfig is made again by every run
 [ "${DM_COPY_ROMFS:-YES}" != NO ] || [ "$PREPARE_XCODE" != YES ] || echo "DM_COPY_ROMFS = NO" >> Gen/dm.xcconfig
-xcodegen generate -q > /dev/null || die "xcodegen"
+if [ "${DM_METAL3:-0}" = 1 ]; then
+  if [ "$IOS" != "$IOS_SOURCE" ]; then
+    cp "$IOS_SOURCE/project-metal3.yml" "$IOS/project-metal3.yml" || die "copy classic Metal project template"
+  fi
+  xcodegen generate --spec project-metal3.yml -q > /dev/null || die "xcodegen (classic Metal)"
+else
+  xcodegen generate -q > /dev/null || die "xcodegen"
+fi
 # DMCommit / DMChain: the checkout that built the app (+dirty with uncommitted changes to tracked files) and the shader chain it carries, which the host logs at start (main.c)
 COMMIT=$(git -C "$DM" rev-parse --short=12 HEAD 2> /dev/null) && { [ -z "$(git -C "$DM" status --porcelain --untracked-files=no 2> /dev/null)" ] || COMMIT=$COMMIT+dirty
   /usr/libexec/PlistBuddy -c "Add :DMCommit string $COMMIT" Gen/Info.plist > /dev/null || die "DMCommit"; t "source: $COMMIT"; }

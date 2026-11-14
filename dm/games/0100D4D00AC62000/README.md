@@ -2,7 +2,7 @@
 
 Update 1.1.0 (v65536), SDK 5.5.0, on NVN (14 shaders, all built into `main`). Modules `main` and `sdk`. SEGA's 1986 arcade game in M2's SEGA AGES series: the build path in `main` names M2's engine (`sega_ages_outrun\m2engage\…`), and the game ships Quazal's NEX library for its online rankings ("BEST OUTRUNNERS"). The standard host and rewriter run this build with no game-specific fix: no shader overrides, rewriter cuts or host changes. The profile is the NSP script's provisional one with no key changed, plus a prewarm list recorded on the Mac ([Shaders](#shaders)). Only this update is registered in the profile.
 
-On the Mac (2026-11-13, an Apple silicon MacBook on macOS 27.2.1, a Mac app from the NSP script): boot, the Start Menu, the credit dialog, the arcade game's music select and races on Stage 1, over six launches; the longest ran 29,100 frames (about 8 minutes) of menus and races. The keyboard, the save (three commits in that run), audio and the window and fullscreen presents all worked, with no `[RED]` line in any run. The unsigned IPA has not been built from this profile or tested on an iPhone.
+On the Mac (2026-11-13, an Apple silicon MacBook on macOS 27.2.1, a Mac app from the NSP script): boot, the Start Menu, the credit dialog, the arcade game's music select and races on Stage 1, over six launches; the longest ran 29,100 frames (about 8 minutes) of menus and races. The keyboard, the save (three commits in that run), audio and the window and fullscreen presents all worked, with no `[RED]` line in any run. On an iPhone Duo (2026-11-14, iPhone19,4, an app from this profile built and signed through its Xcode project): boot, menus and about 6 minutes of the arcade game at 60 fps in the overlay layout, with the touch gamepad, audio and saves, and no `[RED]` line ([On the iPhone](#on-the-iphone)).
 
 ## What it needs
 
@@ -26,6 +26,7 @@ On the Mac (2026-11-13, an Apple silicon MacBook on macOS 27.2.1, a Mac app from
 ## Memory
 
 - Resident memory was 430–800 MB and Metal allocations 290–480 MB, flat over the 8-minute run.
+- On the iPhone Duo, 250–555 MB resident, with 7.6 GB of headroom to the system memory limit.
 
 ## Performance
 
@@ -37,6 +38,11 @@ On the Mac (2026-11-13, an Apple silicon MacBook on macOS 27.2.1, a Mac app from
 - The credit dialog after the intro closes with A. Out Run is an arcade game on its own coin: X inserts a credit and X again starts the game; the music is chosen by steering.
 - The keyboard plays as player 1: J is A, U is X, the arrows the D-pad and WASD the left stick. The game draws its 4:3 arcade picture inside its own black bars in the 16:9 frame; fullscreen (⌃⌘F) keeps them.
 
+## On the iPhone
+
+- iPhone Duo, run of about 21,000 frames (6 minutes), Picture at Fit: frame time p50 16.7 ms, p95 about 17.4 ms; 60 of 70 five-second windows dropped no frame and the rest 1–4; 17 long frames, the longest 57 ms, none building a pipeline. The prewarm list built its 14 shaders and 9 pipelines in 40 ms before the first frame. Audio had no underruns, two save commits went through, the thermal state stayed 0 and the CPU drew about 0.3 W. The front end laid the picture out over the touch controls (`layout overlay`) and read the hinge.
+- The arcade game draws 2 draws a frame; the menus up to about 70.
+
 ## Menus
 
 - **The Start Menu's and pause menu's slot panel, half black (resolved, not a fault).** The panel beside the menu is the save-state slot carousel: a 4:3 screenshot on the left and the save's date and time on the right. An empty slot shows the SEGA AGES placeholder at 4:3 and an empty, black details area; after a Save in the pause menu the slot showed the race's screenshot and `11/13/2026 23:40`, and Load was enabled.
@@ -47,6 +53,6 @@ On the Mac (2026-11-13, an Apple silicon MacBook on macOS 27.2.1, a Mac app from
 
 ## Open
 
-- iPhone: an IPA from this profile is not built or tested.
+- iPhone: only the Duo was tried, with the touch gamepad; a controller, Picture at Fill and other iPhones and iPads are untested.
 - The online rankings (NEX) were not tried; the log shows no network use in these runs.
 - Only Stage 1 was raced; the later stages, the Start Menu's Ranking, Play Replay and Manual, and the game's own display options (its wallpaper and screen size) are untested.

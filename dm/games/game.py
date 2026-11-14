@@ -178,6 +178,18 @@ def header_one(g):
         sys.exit(f"{g.id}: pso_gpu takes 1-4 whitespace-separated GPU architectures such as 'g18p applegpu_g19p' (each an optional applegpu_ prefix then an alphanumeric token; there is no none: omit the key for g18p with pso_mtl4 on, or no archive with pso_mtl4 off): {pg}")
     et = g.get('enc_thread', 'off')   # Metal encoding on its own thread on the Mac by default (nvn_rec.h rec_on; on iOS it is on for every game; DM_NVN_ENC_THREAD overrides): on / off
     if et not in ('on', 'off'): sys.exit(f'{g.id}: enc_thread must be on or off: {et}')
+    # The launcher's starting choices for the graphics settings a game's patches offer (the player's own choices and an env file still win): the game's own look unless the profile says more
+    ds = g.get('default_render_scale', '1.0'); dan = g.get('default_anisotropy', 'game'); dsh = g.get('default_shadow_scale', '1'); dmd = g.get('default_model_detail', '0')
+    dmb = g.get('default_mip_bias', '0'); dfs = g.get('default_fullscreen', '0'); ddd = g.get('default_draw_distance', '1'); dasp = g.get('default_aspect', '16:9')
+    if dasp not in ('16:9', '16:10'): sys.exit(f'{g.id}: default_aspect must be 16:9 or 16:10: {dasp}')
+    if ddd not in ('1', '1.5', '2', '4'): sys.exit(f'{g.id}: default_draw_distance must be 1, 1.5, 2 or 4: {ddd}')
+    try: ok_scale = 0.5 <= float(ds) <= 9
+    except ValueError: ok_scale = False
+    if not ok_scale: sys.exit(f'{g.id}: default_render_scale is a number from 0.5 to 9: {ds}')
+    if dan not in ('game', '2', '4', '8', '16'): sys.exit(f'{g.id}: default_anisotropy must be game, 2, 4, 8 or 16: {dan}')
+    if dsh not in ('1', '2', '4'): sys.exit(f'{g.id}: default_shadow_scale must be 1, 2 or 4: {dsh}')
+    if dmd not in ('0', '1') or dfs not in ('0', '1'): sys.exit(f'{g.id}: default_model_detail and default_fullscreen must be 0 or 1: {dmd} {dfs}')
+    if dmb not in ('0', '-0.25', '-0.5', '-1'): sys.exit(f'{g.id}: default_mip_bias must be 0, -0.25, -0.5 or -1: {dmb}')
     cp = g.get('core_preempt', 'off')   # same-core preemption approximation (hle_thread.c): on / off
     if cp not in ('on', 'off'): sys.exit(f'{g.id}: core_preempt must be on or off: {cp}')
     aba = g.get('alloc_big_align', 'off')   # nn::mem::StandardAllocator::Allocate aligns blocks of 64 KB or more to 64 KB (hle_os.c; Vanillaware's memory pool storage): on / off
@@ -249,6 +261,8 @@ def header_one(g):
          f'#define DM_GAME_PRESENT_SNAP {int(ps == "on")}',
          f'#define DM_GAME_PSO_MTL4 {int(p4 == "on")}',
          f'#define DM_GAME_ENC_THREAD {int(et == "on")}',
+         f'#define DM_GAME_RENDER_SCALE {q(ds)}', f'#define DM_GAME_ANISOTROPY {q(dan)}', f'#define DM_GAME_SHADOW_SCALE {q(dsh)}', f'#define DM_GAME_MODEL_DETAIL {int(dmd)}',
+         f'#define DM_GAME_MIP_BIAS {q(dmb)}', f'#define DM_GAME_FULLSCREEN {int(dfs)}', f'#define DM_GAME_DRAW_DISTANCE {q(ddd)}', f'#define DM_GAME_ASPECT {q(dasp)}',   # the launcher's starting values (settings.tsv): the game's own unless the profile sets them
          *([f'#define DM_GAME_SHARED_FONT_TTF {int(sf == "ttf")}'] if g.get('shared_font', '') else []),   # without the key the host decides by the SDK version (hle_sdk16.c)
          f'#define DM_GAME_PAD_LAYOUT {("simple", "full", "touch").index(pl)}',
          f'#define DM_GAME_OPMODE {int(om == "console")}',

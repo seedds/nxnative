@@ -310,7 +310,7 @@ int dm_fps_step_max;   // the largest step the stubs give the game (STEP_MAX in 
 static const char *g_fps_mod;   // the module holding the state page (for the log)
 static float g_render_scale_max = 1.0f;   // the render-scale stub's largest scale (RENDER_SCALE in its fixups table; 1 for a stub that only lowers the game's size)
 static void install_fps_state(module_t *m) {
-    if (m->fps_state_off + 0x40 > m->size || m->fps_state_off < m->key_page_off + m->key_page_size) die("%s: frame step state page out of range", m->name);
+    if (m->fps_state_off + 0xbc > m->size || m->fps_state_off < m->key_page_off + m->key_page_size) die("%s: frame step state page out of range", m->name);
     dm_fps_state = m->base + m->fps_state_off; g_fps_mod = m->name; dm_fps_step_max = (int)m->step_max;
     if (m->render_scale_max > 1) g_render_scale_max = (float)m->render_scale_max;
 }
@@ -327,11 +327,47 @@ void dm_fps_state_apply(void) {
     const char *rs = getenv("DM_RENDER_SCALE"); float sc = 1.0f, hi = g_render_scale_max;
     if (rs) { char *end; sc = strtof(rs, &end); if (end == rs || *end || !(sc >= 0.5f && sc <= hi)) { LOG("[RED] DM_RENDER_SCALE=%s: must be 0.5 to %.1f; keeping the game's size", rs, hi); sc = 1.0f; } else LOG("%s: 3D views rendered at %.2f of the game's size (DM_RENDER_SCALE)", g_fps_mod, sc); }
     memcpy(dm_fps_state + 0x10, &sc, sizeof sc);
+    // The picture's shape (DM_ASPECT: 16:9, the default, or 16:10), for builds whose stubs declare the ASPECT_RATIO capability (Bayonetta 3's patches.py): the heights' scale at +0xb0,
+    // the render scale times (16/9) over the shape's ratio (1.111 for 16:10), so a 16:10 window and scene have the width of the 16:9 one and a ninth more rows. Written always: a build
+    // without those stubs ignores it
+    const char *as_ = getenv("DM_ASPECT"); float ak = 1.0f;
+    if (as_ && *as_ && strcmp(as_, "16:9")) {
+        // The present shows a picture in the layer's shape, 16:9, unless told the screen's (nvn_mtl.m present_shape): a frame of this shape then fills the screen instead of being fitted into a
+        // 16:9 rectangle with bars above and below. Only a frame of that shape (the docked 16:10 swap chain) counts; the 16:9 handheld one does not
+        if (!strcmp(as_, "16:10")) { extern void mtl_present_screen(uint32_t w, uint32_t h); mtl_present_screen(1920, 1200); ak = (float)((16.0 / 9.0) / 1.6); LOG("%s: picture shape 16:10: the 3D views and the window have %.3f times the rows of 16:9's (DM_ASPECT)", g_fps_mod, ak); }
+        else LOG("[RED] DM_ASPECT=%s: 16:9 or 16:10; keeping 16:9", as_);
+    }
+    float hs = sc * ak; memcpy(dm_fps_state + 0xb0, &hs, sizeof hs);
+    // The interface's shape (DM_UI_SHAPE: 16:9, the default, or screen): 16:9 keeps its layout's proportions in a taller window (+0xb4 = the picture's rows relative to 16:9's as a float, 0 = off: the stub of its 2D projection widens it by that,
+    // Bayonetta 3's patches.py), screen stretches it over the whole window as the game does
+    const char *us = getenv("DM_UI_SHAPE"); int fill = us && !strcmp(us, "fill"); float keep = ((us && !strcmp(us, "screen")) || fill) ? 0.0f : ak, fillk = fill ? ak : 0.0f;   // the game's own window fields hold 16:9 whatever the swap chain, so the stub gets the factor itself
+    if (us && *us && strcmp(us, "16:9") && strcmp(us, "screen") && !fill) LOG("[RED] DM_UI_SHAPE=%s: 16:9, fill or screen; keeping 16:9", us);
+    memcpy(dm_fps_state + 0xb4, &keep, sizeof keep); memcpy(dm_fps_state + 0xb8, &fillk, sizeof fillk);   // fill: the layout scaled to the picture's height, its sides cut
     // The game's own dynamic resolution, for builds whose stubs read it (the DYNAMIC_RESOLUTION capability of a frame step stub: Ocarina of Time's level function): 1 lets it
     // run, 0 (the default) holds full resolution. Builds without such a stub ignore the field
     const char *dr = getenv("DM_DYNAMIC_RESOLUTION"); uint32_t dyn = dr && !strcmp(dr, "1");
     if (dr && strcmp(dr, "0") && strcmp(dr, "1")) LOG("[RED] DM_DYNAMIC_RESOLUTION=%s: must be 0 or 1; keeping full resolution", dr);
     memcpy(dm_fps_state + 0x40, &dyn, sizeof dyn);
+    // Shadow map size and model detail, for builds whose stubs read them (the SHADOW_SCALE and MODEL_DETAIL capabilities of a frame step stub: Bayonetta 3's patches.py):
+    // +0xa0 u32 the factor on the shadow maps' sizes (DM_SHADOW_SCALE: 1, the default, keeps the game's; 2 doubles each side), +0xa4 u32 1 = a model that is drawn takes its
+    // finest level (DM_MODEL_DETAIL; 0, the default, keeps the game's choice by distance). Builds without such stubs ignore the fields
+    const char *sh = getenv("DM_SHADOW_SCALE"); uint32_t shf = sh && !strcmp(sh, "2") ? 2 : sh && !strcmp(sh, "4") ? 4 : 1;
+    if (sh && strcmp(sh, "1") && strcmp(sh, "2") && strcmp(sh, "4")) LOG("[RED] DM_SHADOW_SCALE=%s: must be 1, 2 or 4; keeping the game's shadow maps", sh);
+    if (shf > 1) LOG("%s: shadow maps at %u times the game's size (DM_SHADOW_SCALE)", g_fps_mod, shf);
+    memcpy(dm_fps_state + 0xa0, &shf, sizeof shf);
+    const char *md = getenv("DM_MODEL_DETAIL"); uint32_t mdv = md && !strcmp(md, "1");
+    if (md && strcmp(md, "0") && strcmp(md, "1")) LOG("[RED] DM_MODEL_DETAIL=%s: must be 0 or 1; keeping the game's model levels", md);
+    if (mdv) LOG("%s: models drawn at their finest level (DM_MODEL_DETAIL)", g_fps_mod);
+    memcpy(dm_fps_state + 0xa4, &mdv, sizeof mdv);
+    // Draw distance (+0xa8 float): the reciprocal of DM_DRAW_DISTANCE (1.5, 2, 3 or 4 times the distance a model is chosen a level by), for builds whose stubs declare DRAW_DISTANCE;
+    // 0, the default (1 or unset), keeps the game's
+    const char *dd = getenv("DM_DRAW_DISTANCE"); float ddk = 0.0f;
+    if (dd && *dd && strcmp(dd, "1")) {
+        char *end; float f = strtof(dd, &end);
+        if (end == dd || *end || !(f >= 1.0f && f <= 4.0f)) LOG("[RED] DM_DRAW_DISTANCE=%s: 1 to 4; keeping the game's distances", dd);
+        else { ddk = 1.0f / f; LOG("%s: models chosen their level by distances %.2f times as long (DM_DRAW_DISTANCE)", g_fps_mod, f); }
+    }
+    memcpy(dm_fps_state + 0xa8, &ddk, sizeof ddk);
     // Screen shape: DM_SCREEN_ASPECT, the screen's width / height between 1.3 and 1.77, makes the builds with screen-shape stubs
     // (Breath of the Wild 1.9.0's patches.py) render that shape: the output keeps its width (1920) and takes the height that gives the ratio, a multiple of 48 so the
     // 2/3-size layout space (1280 wide) stays whole: 1.43 → 1920x1344 and 1280x896. State +0x48 u32 output height, +0x4c u32 layout height, +0x50 its float; 0 = 16:9

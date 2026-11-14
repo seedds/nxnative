@@ -3,7 +3,7 @@
 The screen before the game starts shows the settings the game supports. A setting that only matters while another is on appears under it and disappears when that one is turned off. Tap **Play** to start; the app remembers your choices for the next start. All settings are on one scrollable screen, under **Game**, **Controls** and **Performance**. Tap a menu or move a slider there; no settings page needs opening. **Upscaling** is in **Game**, beside **Console mode**. A Mac app shows the same settings in a [window of its own](#the-mac-settings-window).
 
 - [Tested defaults](#tested-defaults)
-- [Game](#game): [Frame rate](#frame-rate), [Render scale](#render-scale), [Console mode](#console-mode), [Upscaling](#upscaling), [Game's upscaler](#games-upscaler), [Game language](#game-language), [Picture](#picture), [Frame-rate counter](#frame-rate-counter)
+- [Game](#game): [Frame rate](#frame-rate), [Render scale](#render-scale), [Console mode](#console-mode), [Upscaling](#upscaling), [Game's upscaler](#games-upscaler), [Texture filtering](#texture-filtering), [Texture sharpness](#texture-sharpness), [Shadow quality](#shadow-quality), [Highest model detail](#highest-model-detail), [Draw distance](#draw-distance), [Picture shape (Bayonetta 3)](#picture-shape-bayonetta-3), [Game language](#game-language), [Picture](#picture), [Frame-rate counter](#frame-rate-counter)
 - [Controls](#controls): [Touch feedback](#touch-feedback), [Game rumble](#game-rumble), [Rumble strength](#rumble-strength), [Rumble cutoff](#rumble-cutoff), [Press a button to join](#press-a-button-to-join)
 - [Performance](#performance): [Frame buffering](#frame-buffering), [Metal 4 pipelines](#metal-4-pipelines), [Pipeline prebuild](#pipeline-prebuild), [Encode thread](#encode-thread), [Hold frames when late](#hold-frames-when-late), [Performance HUD](#performance-hud), [Reset to tested defaults](#reset-to-tested-defaults)
 - [The Mac settings window](#the-mac-settings-window): [Display mode](#display-mode)
@@ -29,13 +29,15 @@ On a Mac, a game checked at that speed (Fire Emblem Fortune's Weave, Mario & Lui
 
 ### Dynamic resolution
 
-Off, the default, keeps the 3D picture at full size. On lets the game lower its resolution when frames run heavy and raise it again when they fit, as on the Switch: steadier frame rate, at times a softer picture. Only games whose resolution control the app can hold offer it (NieR:Automata, Ocarina of Time).
+Off, the default, keeps the 3D picture at full size. On lets the game lower its resolution when frames run heavy and raise it again when they fit, as on the Switch: steadier frame rate, at times a softer picture. Only games whose resolution control the app can hold offer it (NieR:Automata, Ocarina of Time, Bayonetta 3). Bayonetta 3's picks one of eight sizes each frame by the load; off, it stays at the largest size, which matters most in fights at a high [render scale](#render-scale), where it would otherwise drop to a smaller size.
 
 ### Render scale
 
 The size of the 3D picture, from 50 to 100 %. Below 100 % the size is fixed there and the game's own dynamic resolution is off; 100 % keeps the game's own. Lower can be lighter on the GPU but is blurrier; the HUD and text keep their sharpness. Only games the app can scale offer it.
 
 Hades II goes up to 300 %: it renders its whole picture, the HUD and text included, at 1280x720 docked and handheld, and above 100 % it renders larger instead of being scaled up: 150 % is 1920x1080, 200 % 2560x1440, 300 % 3840x2160. Sharper on a large screen or window, at more GPU time (about 2.5 times the GPU time at 200 % on an Apple M6); on a small screen the difference is slight. [Its note](../dm/games/0100A00019DE0000/README.md#rendering) has the measurements.
+
+Bayonetta 3 goes up to 400 % in docked mode: its 3D picture and its window grow together from 1600x900, so 120 % is 1920x1080, 160 % 2560x1440, 200 % 3200x1800, 215 % about a 16-inch MacBook's own width (3456 across) and 240 % 3840x2160, 4K, 320 % 5120x2880, 5K (about twice the GPU time of 100 % at 200 % on an M4 Max, half as much again at 240 % and about two and a half times that of 200 % at 320 %); the settings window shows each size in pixels. Below 100 % and in handheld mode it keeps the game's own sizes. [Its note](../dm/games/01004A4010FEA000/README.md#render-scale) has the details.
 
 ### Console mode
 
@@ -76,6 +78,45 @@ flowchart LR
 - **When to change it:** when the game falls short of its frame rate in busy scenes because of GPU time: Donkey Kong Bananza's upscaler is the largest single piece of a heavy frame on an M1 (3.5-5 ms of about 24 in handheld mode). Compare the look side by side before keeping it.
 - **Cost:** none in GPU time (it saves 2.5-4 ms a frame in that case); the picture is Apple's scaler's rather than the game's. Frames where the game renders at its output size are not upscaled and keep the game's shader either way. Devices without MetalFX keep the game's upscaler.
 - **Not the same as [Upscaling](#upscaling):** that one scales the finished picture, HUD included, to the screen; this one replaces the game's own step inside the frame. Both can be on.
+
+### Texture filtering
+
+Anisotropic filtering: **Game's own** (the default) leaves each texture filter as the game set it; **2x** to **16x** raises the filtering of the scene's surface textures to that level, so floors, walls and roads seen at a shallow angle stay sharp into the distance instead of blurring. It never lowers what the game asks for, and it leaves shadows, depth and screen-sized effects as they are. NVN games only.
+
+- **When to change it:** when distant ground looks smeared, most of all at a higher [render scale](#render-scale) or on a large screen. 16x is the sharpest.
+- **Cost:** a little GPU time on the surfaces it sharpens. It adds no detail the game's textures do not have.
+
+### Texture sharpness
+
+Adds a negative LOD bias to the scene's surface textures, so the GPU picks sharper texture detail than the game asked for: **Slightly sharper** (-0.25), **Sharper** (-0.5), **Sharpest** (-1). Game's own (the default) changes nothing. It acts on the same samplers as [Texture filtering](#texture-filtering) and leaves shadows, depth and screen-sized effects alone. NVN games only.
+
+- **Cost:** none in GPU time, but fine textures can shimmer in motion, more at -1. Pair it with 16x texture filtering and compare in motion before keeping it.
+
+### Shadow quality
+
+**High** doubles the size of the game's shadow maps (Bayonetta 3: 4096 squares for 2048), **Ultra** quadruples it (8192), for sharper shadow edges. Only games whose patches can size their shadow maps offer it.
+
+- **Cost:** GPU time in the shadow passes and memory for the larger maps (Bayonetta 3: 96 MB for High, 480 MB for Ultra).
+
+### Highest model detail
+
+Draws every model at its finest level whatever its distance, so models no longer change to simpler ones as they move away. A model the game stops drawing at a distance still disappears there. Only games whose patches reach the level choice offer it.
+
+- **Cost:** more triangles a frame; GPU time grows with how many distant models a scene has.
+
+### Draw distance
+
+**Far**, **Farther** and **Farthest** make the game choose a model's level of detail by a distance 1.5, 2 or 4 times shorter, so models keep their detail, and stay drawn, out to 1.5, 2 or 4 times as far. Game's own changes nothing. Only games whose patches reach the level choice offer it (Bayonetta 3). It acts on the models that choice covers; other visibility limits of a level are not changed.
+
+- **Cost:** more models and triangles in a frame, so more GPU time; heaviest in wide scenes.
+
+### Picture shape (Bayonetta 3)
+
+**16:9** is the game's own shape. **16:10** (experimental) renders the 3D picture and the window with a ninth more rows at the same width (1920x1200 at 120 %, 3456x2160 at 216 %), which fills a 16:10 screen such as a MacBook's without black bars above and below. The game works out its camera's shape from the window's width and height, so the 3D view follows; the interface, the cut scenes and the movies were made for 16:9 and may not fit, which is why it is off by default.
+
+- **Cost:** a ninth more pixels, so more GPU time and memory.
+
+With 16:10 the settings window shows **Interface**: **Keep 16:9** (the default) leaves the menus and HUD at their own 16:9 proportions, centred in the taller picture, with the 3D scene filling it; **Fill the picture** stretches them over the whole window, as the game does. Screen fades and bars the game draws as interface may cover only the 16:9 part.
 
 ### Game language
 
@@ -266,7 +307,7 @@ A line like `DM_PRESENT_SNAP=0` in `Documents/env.txt` (in the Files app, under 
 | Setting | Variable | Values |
 |---|---|---|
 | Frame rate | `DM_FPS_TARGET` | `30`, `60`, `120` (Mac, games with `fps_max 120`) |
-| Render scale | `DM_RENDER_SCALE` | `0.5` to `1.0` (Hades II: to `3.0`) |
+| Render scale | `DM_RENDER_SCALE` | `0.5` to `1.0` (Hades II: to `3.0`; Bayonetta 3: to `4.0`, docked only, `2.4` is 4K, `3.2` 5K) |
 | Console mode | `DM_OPMODE` | `1` docked, `0` handheld |
 | Game language | `DM_LANG` | a language code, such as `ja` |
 | Display mode (Mac) | `DM_FULLSCREEN` | `1` fullscreen, `0` a window |
@@ -281,6 +322,13 @@ A line like `DM_PRESENT_SNAP=0` in `Documents/env.txt` (in the Files app, under 
 | Press a button to join | `DM_PAD_PRESS_TO_JOIN` | `1`, `0` |
 | Upscaling | `DM_PRESENT_UPSCALE` | `off`, `metalfx` |
 | Game's upscaler | `DM_UPSCALER` | `game`, `metalfx` |
+| Texture filtering | `DM_ANISOTROPY` | `game`, `2`, `4`, `8`, `16` |
+| Shadow quality | `DM_SHADOW_SCALE` | `1`, `2`, `4` |
+| Texture sharpness | `DM_MIP_BIAS` | `0`, `-0.25`, `-0.5`, `-1` |
+| Highest model detail | `DM_MODEL_DETAIL` | `0`, `1` |
+| Draw distance | `DM_DRAW_DISTANCE` | `1`, `1.5`, `2`, `4` |
+| Picture shape (Bayonetta 3) | `DM_ASPECT` | `16:9`, `16:10` |
+| Interface (Bayonetta 3, 16:10) | `DM_UI_SHAPE` | `16:9`, `screen` |
 | Frame buffering | `DM_PRESENT_SNAP` | `1`, `0` |
 | Metal 4 pipelines | `DM_PSO_MTL4` | `1`, `0` |
 | Pipeline prebuild | `DM_PSO_PREBUILD` | `1`, `0` |

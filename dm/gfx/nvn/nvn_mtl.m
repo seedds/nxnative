@@ -1502,6 +1502,9 @@ void mtl_prepare(void) {
 static void sub_cut_begin(void); static void ts_sub_begin(void), ts_boundary(void); static int ts_on(void);
 static void gmem_commit_patch(void);   // the raw pool table words of the arguments encoded so far follow the pools (gmem_slot_note)
 static void treg_sparse_notes(void);
+static void pass_split_try(void);
+static uint64_t g_setrt_n;   // render target changes so far (pass_split_try: splits per NVN pass)
+static int g_split_resume;   // the pass was split at this draw: it opens again where the dispatch scan already looked (cs_hoist_try)
 void mtl_sub_begin(void) {
     mtl_init(); g_sub_serial++; g_seg = 0;
     treg_sparse_notes();   // the mappings made before this submission
@@ -12245,11 +12248,12 @@ static int ds_scan(const uint8_t *p, ds_st *ds, int depth) {
 static const uint8_t *g_exec_cur;   // The op currently being replayed (inclusive)
 static void sd_need(sd_att *t, int why) { if (!t->state) { t->state = 1; t->why = (uint8_t)why; } }   // why: 1 a draw reads it as a texture 2 as an attachment, drawn before cleared 3 copy 4 texture clear 5 scanned to the end undecided 6 no start point / index unavailable
 static int sdx_decide(uint8_t st[SD_ATT_MAX]);   // Store lookahead decision (for the index see mtl_sub_index)
+static int g_split_store;   // the pass ends at a split (pass_split_try): the rest of it loads its attachments, so the lookahead is not asked
 static void sd_finish(void) {
     if (!g_nsd) return;
     uint8_t nst[SD_ATT_MAX];
     // Unchanged, loaded attachments already have their content in memory. Their proof depends only on writes in this pass, independently of future bindless readers or the optional lookahead.
-    if (tbdr_on() && sdx_decide(nst)) { for (int i = 0; i < g_nsd; i++) if (nst[i] == 2) g_sd[i].state = 2; else sd_need(&g_sd[i], nst[i] >> 2); }
+    if (tbdr_on() && !g_split_store && sdx_decide(nst)) { for (int i = 0; i < g_nsd; i++) if (nst[i] == 2) g_sd[i].state = 2; else sd_need(&g_sd[i], nst[i] >> 2); }
     else for (int i = 0; i < g_nsd; i++) sd_need(&g_sd[i], 6);   // Pass ended outside the list / index unavailable: always write back
     for (int i = 0; i < g_nsd; i++) {
         sd_att *t = &g_sd[i]; int udc_dead = udc_on() && t->load && !t->wrote;
@@ -14772,6 +14776,7 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) {
     }
     if (!g_geo_mesh.on) geo_mesh_flush_draw();   // another draw (a geometry draw decides in geo_mesh_draw): a waiting run of mesh draws goes first
     if (g_enc && g_enc_geo_nocolor != g_geo_omit_colors) rp_end();
+    if (g_enc && !g_geo_program && !g_geo_mesh.on) pass_split_try();
     int mdx_on = (dw && dw->mdi_cnt) || (di && di->mdi_cnt) ? mdx_wanted(dw, di) : 0;   // an indirect-count multi-draw's record masked on the GPU (mdx_run), else read after a wait
     if (!mdx_on && ((di && di->mdi_cnt && !mdi_live(di->mdi_cnt, di->mdi_i)) || (dw && dw->mdi_cnt && !mdi_live(dw->mdi_cnt, dw->mdi_i)))) return;   // past the multi-draw's count
     if (mdx_on && mdx_next(dw, di)) return;   // the next draw of a masked multi-draw: only the draw is encoded
@@ -14843,7 +14848,8 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) {
     // The deferral decision comes after hoist_try: hoisted pure-clear render passes are skipped in the lookahead, and only then can P's same-target continuation segment be recognized
     if (!g_enc && tbdr_on() && !g_geo_program && !defer_has_in_p() && !g_defer_replaying && !g_fz.active && !g_fz_checking && g_exec_next && !g_wl.on) { defer_try(dw, di); if (g_defer_cur->active && g_defer_cur->in_p) return; }
     if (!g_enc && tbdr_on() && !g_fz_checking && !g_geo_program) fuse_try();   // Readable tile render pass merge is on by default; when the structure / same-pixel proof does not hold it still falls back to a normal render pass, and it is not re-entered during the CHECK redraw
-    if (!g_enc && !tbdr_on() && !g_geo_program && cshoist_on()) cs_hoist_try(pr, dw, di);   // see DM_NVN_CS_HOIST
+    if (!g_enc && !tbdr_on() && !g_geo_program && cshoist_on() && !g_split_resume) cs_hoist_try(pr, dw, di);   // see DM_NVN_CS_HOIST
+    g_split_resume = 0;
     int need = g_enc || !tbdr_on() ? 3 : pass_ds_need(), mode = defer_q_draw ? 0 : need == 0 ? 2 : need == 2 ? 3 : need == 1 ? 4 : 0;   // 2 attach neither, 3 attach stencil only, 4 attach depth only
     int skip_d = mode != 0;
     if (!g_enc) { g_fd_dw = dw; g_fd_di = di; }
@@ -16088,10 +16094,13 @@ static void sub_cut_begin(void) { g_cut_draw0 = g_stat_draw; }
 // DM_FSTEP_PROBE_RAMP=1 (default) / 0 / ab: a frame-step probe's grace is renewed while its frames keep getting cheaper (nvn_fstep.h FSTEP_RAMP), the time macOS's GPU clock takes to rise for the shorter deadline
 static int probe_ramp_mode(void) { static int m = -1; if (m < 0) m = sw_mode("DM_FSTEP_PROBE_RAMP", 1); return m; }
 int mtl_probe_ramp_on(void) { return sw_on(probe_ramp_mode()); }
-static void sub_cut(void) {
+// Whether a segment may end here, the pass aside: pass_split_try ends a pass only when the commit after it will be made
+static int sub_cut_ready(void) {
     int n = cut_draws();
-    if (!g_cb || g_enc) return;
-    if ((!g_cut_copy && (n <= 0 || g_stat_draw - g_cut_draw0 < (uint64_t)n)) || g_hoist_n || g_defer_nact || g_defer_pend || g_fz.active || g_rt_merged) return;
+    return g_cb && (g_cut_copy || (n > 0 && g_stat_draw - g_cut_draw0 >= (uint64_t)n)) && !g_hoist_n && !g_defer_nact && !g_defer_pend && !g_fz.active && !g_rt_merged;
+}
+static void sub_cut(void) {
+    if (g_enc || !sub_cut_ready()) return;
     // The cut is there so that the GPU does not sit idle while the host encodes. With earlier work still running a commit gains nothing and queues one more command buffer: each is a call into the kernel on Metal's one submission queue, and with buffers queued behind running work
     // the GPU waited 5-40 ms with the next one already committed (docs/reference/frame-rate.md). So it stays a boundary for the game's timestamps (ts_boundary), with the commit left for when the GPU has run out. A copy still commits, as its data must land. DM_NVN_CUT_BUSY=0: every cut commits
     static int busy = -1; if (busy < 0) { const char *e = getenv("DM_NVN_CUT_BUSY"); busy = !e || atoi(e) != 0; }
@@ -16129,6 +16138,28 @@ static void sub_cut(void) {
     g_cut_draw0 = g_stat_draw;
     if (!g_cuts++) MLOG("segmented submission: first segment submitted at frame %llu pass %llu", (unsigned long long)f, (unsigned long long)g_stat_pass);
 }
+// A long render pass is one segment: Breath of the Wild draws 2,700 of its 4,100 draws a frame into the G-buffer, and the GPU, done with the shadow passes before it,
+// waited for the whole pass to be translated (about 2.5 ms of the 9 ms frame at 120 fps on the Mac). With no segment left on the GPU and DM_NVN_PASS_SPLIT draws (default 256,
+// 0 = off) encoded since the last cut, the pass is ended (its attachments stored), the segment committed, and the next draw opens the pass again, loading them. Each split
+// costs a store and a load of the attachments, so it is taken only while the GPU would otherwise wait
+// The split's pass end stores every attachment it holds (g_split_store, sd_finish): the store lookahead skips the rest of this pass's draws, as they set no target, and could find a later
+// clear and leave the attachment unstored while the reopened pass still loads it. A split is taken only when sub_cut will commit after it (sub_cut_ready): otherwise the pass would be
+// stored and loaded for nothing (DM_NVN_CUT=0, or above DM_NVN_PASS_SPLIT)
+static uint64_t g_pass_splits, g_split_pass; static int g_split_n;   // g_split_n: splits of the pass g_split_pass so far
+static int pass_split_draws(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_PASS_SPLIT"); v = e ? atoi(e) : 256; } return v; }
+static int pass_split_max(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_PASS_SPLIT_MAX"); v = e ? atoi(e) : 2; } return v; }   // per NVN pass: each split stores and loads its attachments
+static void pass_split_try(void) {
+    int n = pass_split_draws();
+    if (n <= 0 || !g_enc || g_stat_draw - g_cut_draw0 < (uint64_t)n || atomic_load_explicit(&g_seg_inflight, memory_order_relaxed) || !sub_cut_ready()) return;
+    if (g_rt_range_active || g_rt_range_pending || g_sm_pass || g_defer_replaying || g_fz_checking || g_lp.count) return;
+    if (g_split_pass != g_setrt_n) { g_split_pass = g_setrt_n; g_split_n = 0; }
+    if (pass_split_max() > 0 && g_split_n >= pass_split_max()) return;
+    g_split_n++;
+    g_split_store = 1; rp_end(); g_split_store = 0;
+    sub_cut(); g_split_resume = 1;
+    if (!g_pass_splits++) MLOG("pass split: a long render pass was ended and its segment committed while the GPU had nothing to do (DM_NVN_PASS_SPLIT=%d, frame %llu pass %llu)", n, (unsigned long long)atomic_load(&g_cur_frame), g_stat_pass);
+}
+uint64_t mtl_pass_splits(void) { return g_pass_splits; }
 uint64_t mtl_cut_count(void) { return g_cuts; }
 uint64_t mtl_copy_cut_count(void) { return g_copy_cuts; }
 
@@ -16349,7 +16380,7 @@ void mtl_exec(const uint8_t *p) {
                 PD("Y update_ub cmd=%p src=%#llx dst=%#llx bytes=%llu f=%g,%g,%g,%g", p, (unsigned long long)((const uint8_t *)a + 16), (unsigned long long)d, (unsigned long long)n,
                    n >= 4 ? ((const float *)((const uint8_t *)a + 16))[0] : 0.f, n >= 8 ? ((const float *)((const uint8_t *)a + 16))[1] : 0.f, n >= 12 ? ((const float *)((const uint8_t *)a + 16))[2] : 0.f, n >= 16 ? ((const float *)((const uint8_t *)a + 16))[3] : 0.f); mtl_sub_update((const uint8_t *)a + 16, d, n); break; }
             case OP_SET_RT: {
-                const p_set_rt *r = a;
+                const p_set_rt *r = a; g_setrt_n++; g_split_resume = 0;   // a split's resume is for its own pass only
                 if (defer_begin_q(p)) break;
                 int pend = R.clear_d || R.clear_s; for (int i = 0; i < 8; i++) pend |= R.clear_c[i];
                 if (g_enc && !pend && R.has_rt && tbdr_on() && rt_range_same(&R.rt,r)) {

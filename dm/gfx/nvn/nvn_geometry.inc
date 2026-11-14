@@ -672,6 +672,7 @@ static id<MTLRenderPipelineState> mtk_pso(NvProg *raster) {
 }
 static void mtk_encode(id<MTLRenderCommandEncoder> en_) {
     id<MTL4RenderCommandEncoder> en = (id<MTL4RenderCommandEncoder>)en_; NvShader *ts = g_mtk.ts, *ms = g_mtk.ms;
+    vis_draw_state(en);   // occlusion query counting as for other draws (nvn_mtl.m vis_need_on)
     [en setArgumentTable:g_vt atStages:MTLRenderStageMesh];
     uint64_t draw_gpu = g_mtk.ind_rec;
     if (!g_mtk.ind) { id<MTLBuffer> b; size_t o = arena_alloc(16, &b); uint32_t rec[2] = {g_mtk.count, g_mtk.first}; memcpy((uint8_t *)b.contents + o, rec, 8); draw_gpu = b.gpuAddress + o; }

@@ -35,6 +35,42 @@ static unsigned checks, failures;
 }
 @end
 
+// Three submissions of one frame, each a single command buffer (guest ns), and what the Switch would have done with them: A ready at 1,000 runs 1,000 to 2,000. B was submitted
+// at 1,500, while A ran, but the host translated it first: the GPU ran it 4,000 to 6,000, idle 2,000 to 4,000 for the host alone. C was submitted at 7,000, after B's end on the
+// Switch (4,000) and here (6,000): the GPU's wait for it is the game's own, and it ran 7,500 to 8,000. sub_lag places B at 2,000 to 4,000 and C at 7,000 to 7,500
+static uint64_t lag_of(uint64_t fence, uint64_t ready, uint64_t c0, uint64_t c1) {
+    static post_rec r; memset(&r, 0, sizeof r); atomic_store(&r.fence, fence); r.t_ready = ready;
+    return sub_lag(&r, c0, c1);
+}
+static void check_submission_lag(void) {
+    g_lag_fence = 0; g_lag_h_end = 0;
+    post_op top = {.type = 0x10}, end = {.type = 0};
+    CHECK("a submission ready when the GPU starts it keeps its times", lag_of(1, 1000, 1000, 2000) == 0);
+    uint64_t lag = lag_of(2, 1500, 4000, 6000);
+    CHECK("the GPU's wait for the host's translation is left out", lag == 2000);
+    CHECK("its start report is where the previous submission ended", rep_ticks(&top, NULL, 0, 4000, 6000, lag) == nvn_timestamp_from_ns(2000));
+    CHECK("its end report keeps its own GPU time", rep_ticks(&end, NULL, 0, 4000, 6000, lag) == nvn_timestamp_from_ns(4000));
+    lag = lag_of(3, 7000, 7500, 8000);
+    CHECK("the GPU's wait for the game's own submit is kept", lag == 500 && rep_ticks(&top, NULL, 0, 7500, 8000, lag) == nvn_timestamp_from_ns(7000));
+    CHECK("the frame's span is its GPU work and the game's own wait: 6,500 ns (7,000 with the host's)", rep_ticks(&end, NULL, 0, 7500, 8000, lag) - nvn_timestamp_from_ns(1000) == nvn_timestamp_from_ns(7500) - nvn_timestamp_from_ns(1000));
+    CHECK("a submission with no ready time is not moved", lag_of(4, 0, 9000, 9500) == 0);
+    CHECK("a submission placed out of order is not moved", lag_of(2, 1500, 10000, 11000) == 0);
+    // A submission of two command buffers, with a timestamp boundary inside the first (segments 0 and 1, committed after segment 1: 4,000 to 5,000) and the last 6,000 to 7,000,
+    // ready at 1,500 while the one before ran 1,000 to 2,000: it is placed from its first command buffer's start, 2,000 earlier, and its own 1,000 between command buffers is out too
+    g_lag_fence = 0; g_lag_h_end = 0;
+    CHECK("the first of the pair keeps its times", lag_of(1, 1000, 1000, 2000) == 0);
+    static seg_clk two; memset(&two, 0, sizeof two); two.ncm = 1; two.cm[0] = 1;
+    atomic_store(&two.t[1][0], 4000); atomic_store(&two.t[1][1], 5000);
+    static post_rec r2; memset(&r2, 0, sizeof r2); atomic_store(&r2.fence, 2); r2.t_ready = 1500; r2.sc = &two; r2.seg_last = 2;
+    lag = sub_lag(&r2, 6000, 7000);
+    post_op top1 = {.type = 0x10, .seg = 1}, end2 = {.type = 0, .seg = 2};
+    CHECK("a submission of several command buffers is placed from its first one's start", lag == 2000);
+    CHECK("its first segment's report reads where the one before ended", rep_ticks(&top1, &two, 2, 6000, 7000, lag) == nvn_timestamp_from_ns(2000));
+    CHECK("its end leaves out both waits: its own GPU work after the one before", rep_ticks(&end2, &two, 2, 6000, 7000, lag) == nvn_timestamp_from_ns(4000));
+    atomic_store(&two.t[1][0], 0); atomic_store(&r2.fence, 3);
+    CHECK("with its first command buffer's feedback missing nothing is moved", sub_lag(&r2, 6000, 7000) == 0);
+    g_lag_fence = 0; g_lag_h_end = 0;
+}
 // A submission of three command buffers, its GPU idle between them while the host translated (sub_cut commits only once the GPU has run out of work):
 //   command buffer 0: segments 0 and 1, GPU 0 to 3,000 ns, committed at the boundary after segment 1; the boundary's stamp lands at the start of command buffer 1 (4,010)
 //   command buffer 1: segment 2, 4,000 to 6,000, committed after segment 2; that boundary's stamp landed in its last encoder, before the commit (5,990)
@@ -54,12 +90,12 @@ static void check_idle_gaps(ClockDevice *device, ClockHeap *heap) {
     CHECK("a gap counts once a time is past its middle", seg_idle_before(&clock, g0 + 3600, c0) == 1000);
     CHECK("both gaps before the last command buffer", seg_idle_before(&clock, g0 + 9000, c0) == 4000);
     post_op top0 = {.type = 0x10, .seg = 0}, end1 = {.type = 0, .seg = 1}, end2 = {.type = 0, .seg = 2}, top4 = {.type = 0x10, .seg = 4}, end4 = {.type = 0, .seg = 4};
-    CHECK("the first report keeps its time", rep_ticks(&top0, &clock, 4, c0, c1) == nvn_timestamp_from_ns(g0 + 5));
-    CHECK("a stamp written after a commit leaves out the gap before it", rep_ticks(&end1, &clock, 4, c0, c1) == nvn_timestamp_from_ns(g0 + 3010));
-    CHECK("a stamp written before a commit keeps the time of its command buffer", rep_ticks(&end2, &clock, 4, c0, c1) == nvn_timestamp_from_ns(g0 + 4990));
-    CHECK("a stamp in the last command buffer leaves out both gaps", rep_ticks(&top4, &clock, 4, c0, c1) == nvn_timestamp_from_ns(g0 + 6000));
-    CHECK("the submission's end leaves out both gaps", rep_ticks(&end4, &clock, 4, c0, c1) == nvn_timestamp_from_ns(g0 + 8000));
-    CHECK("the span of the submission is its GPU work", rep_ticks(&end4, &clock, 4, c0, c1) - rep_ticks(&top0, &clock, 4, c0, c1) == nvn_timestamp_from_ns(g0 + 8000) - nvn_timestamp_from_ns(g0 + 5));
+    CHECK("the first report keeps its time", rep_ticks(&top0, &clock, 4, c0, c1, 0) == nvn_timestamp_from_ns(g0 + 5));
+    CHECK("a stamp written after a commit leaves out the gap before it", rep_ticks(&end1, &clock, 4, c0, c1, 0) == nvn_timestamp_from_ns(g0 + 3010));
+    CHECK("a stamp written before a commit keeps the time of its command buffer", rep_ticks(&end2, &clock, 4, c0, c1, 0) == nvn_timestamp_from_ns(g0 + 4990));
+    CHECK("a stamp in the last command buffer leaves out both gaps", rep_ticks(&top4, &clock, 4, c0, c1, 0) == nvn_timestamp_from_ns(g0 + 6000));
+    CHECK("the submission's end leaves out both gaps", rep_ticks(&end4, &clock, 4, c0, c1, 0) == nvn_timestamp_from_ns(g0 + 8000));
+    CHECK("the span of the submission is its GPU work", rep_ticks(&end4, &clock, 4, c0, c1, 0) - rep_ticks(&top0, &clock, 4, c0, c1, 0) == nvn_timestamp_from_ns(g0 + 8000) - nvn_timestamp_from_ns(g0 + 5));
     atomic_store(&clock.t[2][0], 0); atomic_store(&clock.t[2][1], 0);   // command buffer 1's feedback has not arrived
     CHECK("a command buffer with no feedback gives no gap", seg_idle_before(&clock, g0 + 9000, c0) == 0);
     heap.slots = NULL; heap.nslots = 0;
@@ -80,14 +116,15 @@ int main(void) {
         seg_clk clock = {.nb = 1, .b = {0}};
         post_op report = {.type = 0x10, .seg = 0};
         uint64_t expected = nvn_timestamp_from_ns(device.cpu - age);
-        CHECK("a late read preserves the GPU boundary's sampled guest time", rep_ticks(&report, &clock, 0, 0, 0) == expected);
+        CHECK("a late read preserves the GPU boundary's sampled guest time", rep_ticks(&report, &clock, 0, 0, 0, 0) == expected);
         device.cpu += 1000;
         device.gpu += 1000;
-        CHECK("a later clock pair maps the same boundary to the same report", rep_ticks(&report, &clock, 0, 0, 0) == expected);
+        CHECK("a later clock pair maps the same boundary to the same report", rep_ticks(&report, &clock, 0, 0, 0, 0) == expected);
         device.cpu = 0;
-        CHECK("a missing CPU sample takes the existing feedback fallback", rep_ticks(&report, &clock, 0, 10000, 0) == nvn_timestamp_from_ns(10000));
+        CHECK("a missing CPU sample takes the existing feedback fallback", rep_ticks(&report, &clock, 0, 10000, 0, 0) == nvn_timestamp_from_ns(10000));
         device.cpu = now_ns() - delay; device.gpu = device.cpu + offset;
         check_idle_gaps(device, heap);
+        check_submission_lag();
 
         guest_clock_freeze(1);
         uint64_t frozen = guest_ns();

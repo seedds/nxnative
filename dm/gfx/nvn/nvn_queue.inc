@@ -17,7 +17,7 @@ typedef struct nq_node {
     tex_t texture; double period; int crop[4];
 } nq_node;
 typedef struct nq_owned { struct nq_owned *next; unsigned kind; uint64_t data[]; } nq_owned;
-typedef struct nq_job { struct nq_job *next; nq_node *first, *last; nq_receipt *receipt; nq_owned *owned; nvn_hmap objects; uint64_t frame; } nq_job;
+typedef struct nq_job { struct nq_job *next; nq_node *first, *last; nq_receipt *receipt; nq_owned *owned; nvn_hmap objects; uint64_t frame, submitted; } nq_job;   // submitted: guest ns of its nvnQueueSubmitCommands (mtl_sub_ready)
 static void nq_job_free(nq_job *j) {
     for(nq_owned *o=j->owned,*next;o;o=next) { next=o->next; if(o->kind==CAP_K_PROG) mtl_prog_unpin((prog_t *)o->data); else if(o->kind==CAP_K_TEX) mtl_tex_unpin(((tex_t *)o->data)->serial); free(o); }
     free(j->objects.keys); free(j->objects.vals); free(j);
@@ -37,7 +37,7 @@ static int nq_snapshot_object(void *ctx,int kind,uint64_t *field,uint8_t *payloa
 }
 static const cap_ops nq_snapshot_ops={nq_snapshot_address,nq_snapshot_object};
 typedef struct nq_queue {
-    struct nq_queue *next; uint64_t serial, physical, present, copy; int origin;
+    struct nq_queue *next; uint64_t serial, physical, present, copy, wait_passed; int origin;   // wait_passed: guest ns a wait it held for passed (mtl_sub_ready)
     nq_job *first, *last; nq_receipt *tail;
 } nq_queue;
 static pthread_mutex_t nq_mu = PTHREAD_MUTEX_INITIALIZER;
@@ -161,6 +161,7 @@ static void *nq_worker(void *unused) {
         // Round-robin ready queues: a continually fed independent producer cannot starve another queue.
         if(q->next) { nq_queue **link=&nq_queues; while(*link!=q) link=&(*link)->next; *link=q->next; nq_queue *tail=nq_queues; while(tail->next) tail=tail->next; tail->next=q; q->next=NULL; }
         if(n->kind==NQ_SYNC || n->kind==NQ_EVENT) { uint64_t f=n->receipt?n->receipt->fence:n->wait_fence; if(f>q->physical) q->physical=f; }
+        if((n->kind==NQ_SYNC || n->kind==NQ_EVENT) && n->wait_since) q->wait_passed=guest_ns();   // the GPU could not start what follows before this either
         if(n->kind==NQ_FENCE) nq_publish(n->receipt,q->physical);
         pthread_mutex_unlock(&nq_mu);
         uint64_t fence=0, present=0, copy=0;
@@ -174,7 +175,7 @@ static void *nq_worker(void *unused) {
             if(n->kind==NQ_COMMANDS) {
                 uint64_t handle=(uintptr_t)n->bytes;
                 nvn_cap_submit(1,&handle);
-                mtl_sub_begin(); nvn_ft_poll(); mtl_sub_index(&handle,1);
+                mtl_sub_begin(); mtl_sub_ready(j->submitted>q->wait_passed?j->submitted:q->wait_passed); nvn_ft_poll(); mtl_sub_index(&handle,1);
                 mtl_exec_rest(NULL,0); mtl_exec(n->bytes); fence=mtl_sub_commit();
             } else {
                 nvn_cap_present(&n->texture,n->crop);
@@ -236,7 +237,7 @@ static void nq_flatten(nq_job *j,const uint8_t *list) {
 static void nq_enqueue(nq_queue *q,nq_job *j) { if(q->last) q->last->next=j; else q->first=j; q->last=j; nq_put(q->tail); q->tail=j->receipt; q->tail->refs++; pthread_cond_broadcast(&nq_cv); }
 void nvn_queue_submit(queue_t *q,int count,const uint64_t *handles) {
     pthread_once(&nq_once,nq_start); nq_job *j=calloc(1,sizeof *j); if(!j) die("queue job allocation failed"); j->receipt=nq_new();
-    j->objects.klen=16; j->frame=dm_nvn_frame_count();
+    j->objects.klen=16; j->frame=dm_nvn_frame_count(); j->submitted=guest_ns();
     // No scheduler lock while copying descriptors or resolving shader libraries.
     dm_host_mutex_lock(&g_sub_mu); void *pool=objc_autoreleasePoolPush(); dm_host_work++; mtl_prepare(); dm_host_work--; nq_cost cost=nq_cost_begin();
     for(int i=0;i<count;i++) nq_flatten(j,(const uint8_t *)(uintptr_t)handles[i]); nq_end(j);

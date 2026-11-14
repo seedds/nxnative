@@ -2235,11 +2235,11 @@ static uint64_t gpu_ticks(void) { return nvn_timestamp_from_ns(guest_ns()); }
 // so a game that waits for the fence reads one submission's reports together; a segment whose feedback has not arrived by then takes the last segment's times
 #define SEG_CLK_N 1024
 struct seg_clk { _Atomic int refs; _Atomic uint64_t t[SEG_CLK_N][2]; uint32_t nb, ncm; uint16_t b[SEG_CLK_N + 1], cm[SEG_CLK_N]; uint64_t begin; };   // per submission (g_sclk, allocated at its first report, boundary or cut): guest ns of each cut segment's GPU start / end (0 = no feedback yet); b: with ts_on, the heap slots of the segment boundaries, segment k from b[k] to b[k + 1]; cm: the segments that ended a command buffer (sub_cut's commits), in order
-static int ts_mode(void) {   // 0 submission, 1 segment (the default), 2 segment with the GPU's idle gaps kept (seg_idle_before)
+static int ts_mode(void) {   // 0 submission, 1 segment (the default), 2 segment with the GPU's idle gaps kept (seg_idle_before), 3 segment with the gaps between submissions kept (sub_lag)
     static int v = -1;
     if (v < 0) { const char *e = getenv("DM_NVN_GPU_TS"); v = 1;
-        if (e && *e) { if (!strcmp(e, "submission")) v = 0; else if (!strcmp(e, "segment_gaps")) v = 2; else if (strcmp(e, "segment")) MLOG("[RED] DM_NVN_GPU_TS=%s: not segment, segment_gaps or submission; segment stands", e); }
-        MLOG("counter timestamps: %s (DM_NVN_GPU_TS=segment / segment_gaps / submission)", v == 0 ? "one time for the whole submission" : v == 1 ? "GPU start / end time of their segment, without the GPU's idle time between command buffers" : "GPU start / end time of their segment, the GPU's idle time between command buffers included"); }
+        if (e && *e) { if (!strcmp(e, "submission")) v = 0; else if (!strcmp(e, "segment_gaps")) v = 2; else if (!strcmp(e, "segment_submit_gaps")) v = 3; else if (strcmp(e, "segment")) MLOG("[RED] DM_NVN_GPU_TS=%s: not segment, segment_submit_gaps, segment_gaps or submission; segment stands", e); }
+        MLOG("counter timestamps: %s (DM_NVN_GPU_TS=segment / segment_submit_gaps / segment_gaps / submission)", v == 0 ? "one time for the whole submission" : v == 1 ? "GPU start / end time of their segment, without the GPU's idle time the host's translation caused (between command buffers and between submissions)" : v == 3 ? "GPU start / end time of their segment, without the GPU's idle time between command buffers" : "GPU start / end time of their segment, the GPU's idle time between command buffers included"); }
     return v;
 }
 static int seg_ts(void) { return ts_mode() > 0; }
@@ -2265,7 +2265,7 @@ static uint64_t seg_idle_before(seg_clk *sc, uint64_t ns, uint64_t c0) {
     }
     return idle;
 }
-static uint64_t rep_ticks(const post_op *o, seg_clk *sc, uint32_t last, uint64_t c0, uint64_t c1) {   // the time a counter report records (614.4 MHz); c0 / c1: the last segment's GPU start / end on the guest clock
+static uint64_t rep_ticks(const post_op *o, seg_clk *sc, uint32_t last, uint64_t c0, uint64_t c1, uint64_t lag) {   // the time a counter report records (614.4 MHz); c0 / c1: the last segment's GPU start / end on the guest clock; lag: sub_lag's
     int top = o->type == 0x10; uint64_t ns = 0;
     uint32_t bi = o->seg + !top;
     if (sc && bi < sc->nb && g_ts_heap) {   // Map the GPU boundary through the paired CPU sample. Reading the guest clock later adds CPU scheduling delay to the timestamp.
@@ -2279,7 +2279,8 @@ static uint64_t rep_ticks(const post_op *o, seg_clk *sc, uint32_t last, uint64_t
     }
     if (!ns && sc && o->seg < last && o->seg < SEG_CLK_N) ns = atomic_load(&sc->t[o->seg][!top]);
     if (!ns) ns = top ? c0 : c1;
-    if (ns && sc && ts_mode() == 1) { uint64_t idle = seg_idle_before(sc, ns, c0); if (idle < ns) ns -= idle; }
+    if (ns && sc && (ts_mode() == 1 || ts_mode() == 3)) { uint64_t idle = seg_idle_before(sc, ns, c0); if (idle < ns) ns -= idle; }
+    if (ns && lag < ns) ns -= lag;
     return ns ? nvn_timestamp_from_ns(ns) : gpu_ticks();
 }
 
@@ -2438,7 +2439,7 @@ static void cbs_fly_report(uint64_t fence); static void cbs_fly_put(uint64_t fen
 static void lc_land(void);
 // A submission's CPU-side writes at its end (events, samples-passed and counter reports): run once, by its feedback handler or, when a game's SyncWait wakes on the
 // GPU's own signal of the fence first, by that waiter (DM_NVN_FAST_WAKE, on by default): the feedback handler comes 0.26 ms after the GPU end on an M2 Max
-typedef struct { _Atomic uint64_t fence; _Atomic int claimed; int n; post_op *ops; seg_clk *sc; uint32_t seg_last; uint64_t t_commit; } post_rec;   // t_commit: guest ns when it was committed
+typedef struct { _Atomic uint64_t fence; _Atomic int claimed; int n; post_op *ops; seg_clk *sc; uint32_t seg_last; uint64_t t_commit, t_ready; } post_rec;   // t_commit: guest ns when it was committed; t_ready: when it was ready to run (mtl_sub_ready, 0 = not known)
 // One record per submission in flight: mtl_sub_begin lets at most ALLOC_MAX allocators of ALLOC_SHARE submissions each stand uncompleted, so the submission that reuses a slot
 // comes after the one that last held it has completed and run its writes (post_complete runs every record up to a fence before it raises g_done). 128 records, sized for one
 // allocator per submission, wrapped once allocators were shared (PR #2090): Super Mario Party's 70-80 submissions a frame overran them two frames behind the feedback (PR #2469)
@@ -2452,11 +2453,39 @@ static int post_claim(post_rec *r, uint64_t fence) {
     if (r->fence != fence || r->claimed) { pthread_mutex_unlock(&g_post_mu); return 0; }
     return 1;
 }
+// The GPU's idle time before a submission that only the host caused. A Switch GPU starts a submission as soon as the previous one ends, or when the game submits it if that is
+// later (or when a queue wait it was held for passes). Here the host translates a submission after the game submits it, and the GPU waits for that as well: Nintendo Switch Sports
+// Resort submits a frame's three submissions within 0.2 ms, and the GPU then waited 1.3-2.6 ms before each while the host translated it, so the frame-start (TIMESTAMP_TOP) and
+// frame-end (TIMESTAMP) reports spanned about 14.3 ms where the GPU worked about 12. agl's dynamic resolution, which reads that span, stepped down to 854x480 and stayed there, as no
+// resolution shortens the host's translation. As seg_idle_before does inside one submission, the reports leave that wait out: each submission is placed where the Switch would have
+// run it, at the later of the previous one's end there and its ready time (mtl_sub_ready), and its reports move back by the lag. They never move before the game submitted, so the
+// game's own waits (for its CPU work, the present, its pacing) stay in, and a lag is at most the time from the game's submit to the GPU's start. A submission run early by a SyncWait (post_early)
+// is placed by the estimate post_complete gives it. Out of order, or with no ready time (replay tools, tests), nothing is moved. DM_NVN_GPU_TS=segment_submit_gaps keeps the wait
+static pthread_mutex_t g_lag_mu = PTHREAD_MUTEX_INITIALIZER;
+static uint64_t g_lag_fence, g_lag_h_end;   // the last submission placed, and its end where the Switch would have run it (guest ns)
+static uint64_t sub_lag(const post_rec *r, uint64_t c0, uint64_t c1) {
+    if (ts_mode() != 1 || !r->t_ready || !c0 || c1 < c0) return 0;
+    uint64_t s = c0, idle = 0;
+    if (r->sc && r->sc->ncm) {   // its first command buffer's start (unknown before that one's feedback: nothing is moved), and the idle between its own command buffers; one command buffer: c0
+        uint64_t s0 = atomic_load(&r->sc->t[r->sc->cm[0]][0]); if (!s0) return 0;
+        if (s0 < s) s = s0; idle = seg_idle_before(r->sc, c1, c0); }
+    pthread_mutex_lock(&g_lag_mu);
+    uint64_t lag = 0, fence = atomic_load(&r->fence);
+    if (fence > g_lag_fence) {
+        uint64_t h = g_lag_h_end > r->t_ready ? g_lag_h_end : r->t_ready;
+        lag = h < s ? s - h : 0;
+        uint64_t busy = c1 - s > idle ? c1 - s - idle : 0;
+        g_lag_h_end = s - lag + busy; g_lag_fence = fence;
+    }
+    pthread_mutex_unlock(&g_lag_mu);
+    return lag;
+}
 static void post_run(post_rec *r, uint64_t c0, uint64_t c1) {
     // A guest SyncWait may run completion on a thread whose outer pool never drains.
     // MTLBuffer.contents may autorelease its receiver; keep that lifetime inside the completed copy.
     @autoreleasepool {
     int n = r->n; post_op *ops = r->ops; seg_clk *sc = r->sc; uint32_t seg_last = r->seg_last;
+    uint64_t lag = sub_lag(r, c0, c1);
     for (int i = 0; i < n; i++) {
         if (ops[i].kind == 1) continue;   // A terminal release publishes after every earlier GPU write has landed.
         else if (ops[i].kind == 3) {   // Samples passed: the running total, in submission order
@@ -2465,7 +2494,7 @@ static void post_run(post_rec *r, uint64_t c0, uint64_t c1) {
             for (int k = 0; k < l->n; k++) { g_vis_acc += ((const uint64_t *)((__bridge id<MTLBuffer>)l->s[k].buf).contents)[l->s[k].slot]; CFRelease(l->s[k].buf); }
             free(l); if (ops[i].mode == VIS_REPORT) { uint64_t rec[2] = {g_vis_acc, gpu_ticks()}; memcpy((void *)ops[i].addr, rec, sizeof rec); }
         }
-        else { uint64_t t = rep_ticks(&ops[i], sc, seg_last, c0, c1), rec[2] = {0, t}; memcpy((void *)ops[i].addr, rec, sizeof rec); }   // a timestamp report's counter field is 0, as on the GPU (see rc_value)
+        else { uint64_t t = rep_ticks(&ops[i], sc, seg_last, c0, c1, lag), rec[2] = {0, t}; memcpy((void *)ops[i].addr, rec, sizeof rec); }   // a timestamp report's counter field is 0, as on the GPU (see rc_value)
     }
     // Forwarded counter values expire once their CPU-visible reports have landed.
     // This precedes event publication so a released CPU writer is never hidden by stale knowledge.
@@ -2496,6 +2525,8 @@ static void post_complete(uint64_t fence, uint64_t c0, uint64_t c1) {
     pthread_mutex_lock(&g_mu); if (fence > g_done) g_done = fence; pthread_cond_broadcast(&g_cv); pthread_mutex_unlock(&g_mu);
     nvn_queue_gpu_progress();
 }
+static uint64_t g_sub_ready;   // mtl_sub_ready, for the submission being encoded
+void mtl_sub_ready(uint64_t t) { g_sub_ready = t; }
 static _Atomic int g_seg_inflight;   // main command buffers committed and not reported back yet (sub_cut)
 static void rt_preserve_bound(void);
 static void queue_program_preserve(void);
@@ -2533,7 +2564,7 @@ uint64_t mtl_sub_commit(void) {
     seg_clk *sc = g_sclk; uint32_t seg_last = g_seg; g_sclk = NULL;
     pthread_mutex_lock(&g_post_mu);
     if (!atomic_load(&pr->claimed) && pr->fence) MDIE("post ring: the writes of fence %llu never ran, %d submissions on (more in flight than the allocator pool allows)", (unsigned long long)pr->fence, POST_RING);
-    pr->n = n; pr->ops = ops; pr->sc = sc; pr->seg_last = seg_last; pr->t_commit = guest_ns(); atomic_store(&pr->claimed, 0); atomic_store(&pr->fence, fence);
+    pr->n = n; pr->ops = ops; pr->sc = sc; pr->seg_last = seg_last; pr->t_commit = guest_ns(); pr->t_ready = g_sub_ready; g_sub_ready = 0; atomic_store(&pr->claimed, 0); atomic_store(&pr->fence, fence);
     pthread_mutex_unlock(&g_post_mu);
     int lost_test = gpu_lost_test();
     [o addFeedbackHandler:^(id<MTL4CommitFeedback> cb) {

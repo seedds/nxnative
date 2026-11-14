@@ -102,12 +102,14 @@ Frame step (current): the framework's interval function is `main+0x69cbb0` on 1.
 - **Mesh draws:** `DrawMeshTasks3D` and the indirect forms are not implemented; no run reached them.
 - `649e36162cad9e79`, a foliage shader with an 8x8 local size, keeps a first-invocation race: its setup loops over a uniform's count, so [the host cannot make it as stores](../../../docs/reference/shaders.md#a-store-only-a-dispatchs-first-invocation-makes). Its list's count read 0 in every one of 7,350 traced title frames, so the race had nothing to act on there; whether that list should be empty is not known.
 - The engine class screen offers 50, 100 and 150cc in this build.
+- **A freeze that takes the phone down** (1.8.0 on an iPhone 19,4, iOS 27.3 beta, 2026-11-09): twice in four runs of one build the picture stopped with every thread waiting, once 2 to 3 s into a race and once at the title with no input, each in a scene load; the first time the phone restarted itself 15 minutes later. A residency set commit did not return from the kernel: [A residency commit that does not return freezes the game, then the iPhone](../../../docs/reference/rendering.md#a-residency-commit-that-does-not-return-freezes-the-game-then-the-iphone).
 
 ## Found on this game
 
 - [GPU timestamps per submission segment](../../../docs/reference/frame-rate.md#gpu-timestamps-per-submission-segment): dynamic resolution never stepped down with one time per submission; with the GPU's idle gaps counted it swung and distant detail flickered
 - [A fixed frame step plays in slow motion on a slow Mac](../../../docs/reference/frame-rate.md#a-fixed-frame-step-plays-in-slow-motion-on-a-slow-mac): the interval chosen from CPU time.
 - [Frame-step stubs placed by their function](../../../docs/reference/rewriter.md#frame-step-stubs-placed-by-their-function)
+- [A residency commit that does not return freezes the game, then the iPhone](../../../docs/reference/rendering.md#a-residency-commit-that-does-not-return-freezes-the-game-then-the-iphone): open.
 - [Three late frames among frames on time raised the hold](../../../docs/reference/frame-rate.md#three-late-frames-among-frames-on-time-raised-the-hold): about 40 fps in races on an M4 Max (issue #1823)
 - [Frames held longer than the game's largest step](../../../docs/reference/frame-rate.md#frames-held-longer-than-the-games-largest-step): hold 3 at 2/3 speed
 - [Render targets that move with the dynamic resolution get new Metal memory each time](../../../docs/reference/rendering.md#render-targets-that-move-with-the-dynamic-resolution-get-new-metal-memory-each-time): its resized targets, family heaps and feedback snapshots (issue #1823)

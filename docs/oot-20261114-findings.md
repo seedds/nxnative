@@ -2,7 +2,7 @@
 
 The goal remains constant 60-native-FPS Hyrule Field play, with image quality preserved, before further interpolation work. **No new native-FPS win is established here.** The earlier bounded 30-native + 30-generated results and the title-movie correction remain documented in the [contributor guide](oot-m4-pro-fork.md); they do not qualify native 60 throughout Field.
 
-This page records completed investigations against the older private renderer and shader chain. The branch now integrates newer upstream work through `2ad01cb47cfd37ccb68791671bc62068c1b9408a`. Historical GPU receipts are not a runtime qualification of that merged renderer. Use the current `DMSH_CHAIN` in [dmsh_chain.h](../dm/gfx/nvn/dmsh_chain.h), rebuild compatible shader data, and record fresh validation for the combined build. Do not substitute a cache from the old `bc8830d4ba5a` chain.
+This page records completed investigations against the older private renderer and shader chain. The branch now integrates newer upstream work through `72047f1aa94f42f6f8d359e4934787304d85d5cc`. Historical GPU receipts are not a runtime qualification of that merged renderer. Use the current `DMSH_CHAIN` in [dmsh_chain.h](../dm/gfx/nvn/dmsh_chain.h), rebuild compatible shader data, and record fresh validation for the combined build. Do not substitute a cache from the old `bc8830d4ba5a` chain.
 
 ## Correctness: argument validity and bound-program ownership
 

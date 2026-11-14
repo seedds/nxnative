@@ -4,6 +4,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 
 ## Containers by engine
 
+### Larian LSPK packages and BSHD programs
+
+- **Symptom:** the split finds only the GLSLC outputs in the executable, while the game presents a black picture and reports missing vertex, pixel and compute shaders.
+- **Cause:** Larian's version 13 packages have their `LSPK` signature and header at the end. Their LZ4-compressed index names individually stored, zlib or LZ4 members, possibly in numbered archive parts. BSHD members have a big-endian decoded length (the top bit selects zlib), followed by a stage/range table; the NX stages are complete GLSLC outputs. The same archives also carry other platforms' programs.
+- **Fix:** `dm/gfx/tools/lspk.py` reads the footer and index, validates member ranges and bounds decompression. `shader_split.py` scans the indexed BSHD members and preserves each program's vertex/pixel pair. Other assets and sound/video continuation parts need no whole-file scan. Detection follows the archive signature and compiled-stage format, with no title ID, build or archive-name gate.
+- **Check:** synthetic parser tests cover compressed and stored members, numbered parts, stage pairing and corrupt ranges/streams. The live shader census and startup capture comparison are in the game's note.
+- **Found on:** [Divinity: Original Sin 2](../../dm/games/010027400CDC6000/README.md).
+
 ### SHN resources and embedded shader objects
 
 - **Symptom:** the split finds only a loose upscaler pack, while a game's `.shdr` files and scene resources produce no shaders; the host reports missing vertex and pixel shaders and draws a blank picture.

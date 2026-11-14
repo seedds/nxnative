@@ -1027,6 +1027,10 @@ def derived_key(profile_dir):
     return profile_dir.with_name(profile_dir.name + '.derived.key')
 
 
+def derived_split_key(profile_dir):   # the split's inputs among a derived profile's (derive_profile): a match keeps the tables it wrote
+    return profile_dir.with_name(profile_dir.name + '.derived.split.key')
+
+
 def frame_step_builds(path, table='FRAME_STEP'):   # the keys of a table of a patches.py (FRAME_STEP: build IDs; MATCH_FRAME_STEP: module names), read without running the file (empty: no table)
     try:
         for n in ast.parse(path.read_text(encoding='utf-8')).body:
@@ -1085,24 +1089,38 @@ def derive_profile(g, pdir, ver, d, mods, app=None, shader_only=False):
             if not put: out += [row, f'package{T}{ver}', f'shader_versions{T}{ver}']; put = True
             continue
         out.append(line)
-    text, kf = '\n'.join(out) + '\n', derived_key(pdir)   # beside the profile, not in it: no tool reads it as a table
+    text, kf, skf = '\n'.join(out) + '\n', derived_key(pdir), derived_split_key(pdir)   # beside the profile, not in it: no tool reads them as tables
     key = fingerprint(('files', src), text)
-    if (pdir / 'game.tsv').is_file() and reused(kf, key) is not None:
-        def rows(text):   # the same whitespace and comment rules as game.Game
-            return [tuple(c.strip() for c in l.split(T)) for l in text.splitlines() if l.strip() and not l.lstrip().startswith('#')]
+    # What the split reads of the derived profile besides the tables it writes (split_profile_inputs): game.tsv's settings and the registered tables of SPLIT_TABLES the folder
+    # copies (the hand-written facts). When only other copied files changed (the game's note, the prewarm list, geo_mesh.tsv, the patches.py link), the copies are made again and
+    # the tables the split and the shader step wrote are kept, so the split's reuse holds: wiping them made the split run again on unchanged game files
+    skey = fingerprint(('files', [p for p in src if p.name in SPLIT_TABLES]), text)
+    def rows(text):   # the same whitespace and comment rules as game.Game
+        return [tuple(c.strip() for c in l.split(T)) for l in text.splitlines() if l.strip() and not l.lstrip().startswith('#')]
+    def game_kept():   # game.tsv holds the rows written for these inputs (later stages may have added their own)
         expected = collections.Counter(rows(text)); keys = {r[0] for r in expected}
         try: kept = collections.Counter(r for r in rows((pdir / 'game.tsv').read_text(encoding='utf-8')) if r[0] in keys)
         except (OSError, UnicodeError): kept = None
-        if kept == expected: return disp
-    rmtree(kf); pdir.mkdir(parents=True, exist_ok=True)
+        return kept == expected
+    def copy_in(keep):   # the copies of src, made again; the folder's other files go, but for game.tsv and keep
+        for p in pdir.iterdir():
+            if p.name != 'game.tsv' and not keep(p): rmtree(p)
+        for p in src:
+            # Registered cuts stay the same file: patch_nso.py deduplicates real paths, so an external profile must not register copied claims for the same builds.
+            if shader_only and p.name == 'patches.py': (pdir / p.name).symlink_to(p.resolve())
+            else: shutil.copyfile(p, pdir / p.name)
+        kf.write_text(f'{key}\n'); skf.write_text(f'{skey}\n')
+    why = 'no folder yet' if not (pdir / 'game.tsv').is_file() else 'game.tsv changed since' if not game_kept() else None
+    if not why:
+        if reused(kf, key) is not None: return disp
+        if reused(skf, skey) is not None:   # the tables later stages wrote (DERIVED_SKIP's names, but the patches.py link) stay
+            copy_in(lambda p: p.name in DERIVED_SKIP and p.name != 'patches.py')
+            say(f'derived profile {pdir}: copied files changed, the split\'s tables kept'); return disp
+        why = 'no split key' if not skf.is_file() else 'the split\'s inputs changed'
+    say(f'derived profile {pdir}: made again ({why})')
+    rmtree(kf); rmtree(skf); pdir.mkdir(parents=True, exist_ok=True)
     atomic_text(pdir / 'game.tsv', text)
-    for p in pdir.iterdir():
-        if p.name != 'game.tsv': rmtree(p)
-    for p in src:
-        # Registered cuts stay the same file: patch_nso.py deduplicates real paths, so an external profile must not register copied claims for the same builds.
-        if shader_only and p.name == 'patches.py': (pdir / p.name).symlink_to(p.resolve())
-        else: shutil.copyfile(p, pdir / p.name)
-    kf.write_text(f'{key}\n')
+    copy_in(lambda p: False)
     return disp
 
 
@@ -1121,7 +1139,7 @@ def files_under(d):   # (relative path, stat) of every file under d, sorted; [] 
 
 def fingerprint(*items, env=None):
     """sha256 over a stage's inputs. Items: ('files', paths) = names and content (a missing file counts too); ('tree', folder) = relative path and size of every file under it
-    (a RomFS: check_build pins its version, so names and sizes stand for its content); ('stat', folder) = relative path, size and mtime of every file under it (the translator's binaries);
+    (a RomFS: check_build pins its version, so names and sizes stand for its content); ('stat', folder) = relative path, size and mtime of every file under it (extracted or provisional game files, too large to read for a key);
     ('cmd', argv) = a tool's version output (run with env); anything else = its repr"""
     h = hashlib.sha256()
     for it in items:
@@ -1163,13 +1181,20 @@ def python_tool_files(repo, entry, roots):   # transitive repository imports, in
     return sorted(seen)
 
 
+def translator_key(xlate):   # the translator by its bytes alone: a checkout that rewrites the same bytes (a commit switched and back) gives them a new mtime, and each worktree has its own path; either rebuilt every shader
+    return ('files', [xlate])
+
+
 def chain_files(repo):   # what the iOS shaders run: not the split's readers (shader_split.py, unityfs.py, uepak.py)
     return python_tool_files(repo, 'dm/gfx/tools/dmsh_build.py', ('dm/gfx/tools', 'dm/ios/tools', 'dm/games')) + [repo / 'dm/gfx/tools/dmsh_chain.lock']
 
 
+SPLIT_TABLES = ('shader_facts_manual.tsv', 'shader_map.tsv', 'shader_facts.tsv', 'shader_pairs.tsv', 'pso_pairs.tsv')   # the profile tables the split reads or is checked against (derive_profile keys on them too)
+
+
 def split_profile_inputs(g):   # shader_split.py's GAME reads, plus the tables the packer checks or writes; renderer settings, notes and translation tables are not extraction inputs
     settings = [(name, g.get(name, '')) for name in ('modules', 'shader_groups', 'shader_note', 'shader_key_skip')]
-    tables = [g.table(n) for n in ('shader_facts_manual.tsv', 'shader_map.tsv', 'shader_facts.tsv', 'shader_pairs.tsv', 'pso_pairs.tsv')]
+    tables = [g.table(n) for n in SPLIT_TABLES]
     return [g.id, settings, ('files', tables)]
 
 
@@ -1976,7 +2001,7 @@ def chain_tables(py, repo, sh, env, logs, g, chain):
         except OSError: head = ''
         if head.startswith(want + ' '): continue
         PROG.set(step=step)
-        run([py, repo / 'dm/gfx/tools' / tool, lib, p], logs / f'{tool[:-3]}.log', env=env)
+        run([py, repo / 'dm/gfx/tools' / tool, lib, p], logs / f'{tool[:-3]}.log', env=dict(env, DMSH_TABLE_MEMO=str(sh / 'cache')))   # the shader build's memo (c1_guard.py)
         say(f'{name} ' + (f'named {" ".join(head.split()[2:5])}' if head.startswith('# chain ') else 'names no library' if head else 'missing') + f': made for {want[2:]} ({p})')
     return True
 
@@ -2382,6 +2407,17 @@ def prune_shader_cache(sh, chain):
     return n
 
 
+def shader_profile_key(py, repo, env, g):
+    """The profile's part of the shader step's key: the game and the digest of its shader inputs (dmsh_chain.py --inputs: the shader tables, geo_mesh.tsv, bf_want.tsv, dual_want.tsv and the
+    nvn_* / shader_* keys), which the libraries' stamp records and every per-shader cache key already assumes are all a shader build reads of the profile. Hashing every profile file
+    instead restored every library from the cache and rewrote the image after an edit of the game's note or prewarm list. Without the digest: every file, as before"""
+    r = subprocess.run([str(py), str(repo / 'dm/gfx/tools/dmsh_chain.py'), '--inputs'], env=env, capture_output=True, text=True)
+    words = r.stdout.split() if r.returncode == 0 else []
+    if words: return ('shader inputs', g.id, words[-1])
+    say(f'[RED] dmsh_chain.py --inputs gave no digest ({(r.stderr.strip().splitlines() or ["exit code " + str(r.returncode)])[-1]}): the shader step is keyed on every profile file, so any profile edit rebuilds it')
+    return ('files', profile_files(g))
+
+
 def stale_shaders(py, repo, env, lib_dirs, chain, g):
     """Why cached shader libraries cannot be reused by the build that starts: (reason, old, new, count) or None. 'chain': library folders b-<V> of another translation chain (lib_dirs: the
     selected targets' cache folders) have libraries without a completed current build; old is those folders' names, new b-<chain>. A full build writes its stamp only at the end,
@@ -2425,7 +2461,7 @@ def ios_wants_pulling(g, gpus, prepare_xcode, env):
 
 def build_shaders(py, repo, sh, xlate, env, logs, g, pkg_key=None, mac=False, seen=None, pull=None):
     """The iOS shader libraries (dmsh_build.py, which also builds the Mac's into sh/cache when the build wants them), or with mac only the Mac's (a Mac-only build: no IOSOUT). Returns the folder the host takes
-    them from. Reused when the shader package (pkg_key, its content; None never reuses) and the chain's tools, translator binaries, profile and compilers are as at the last successful build:
+    them from. Reused when the shader package (pkg_key, its content; None never reuses) and the chain's tools, the translator's bytes, profile and compilers are as at the last successful build:
     dmsh_build.py would only restore every shader from its cache (63,000 for Breath of the Wild: about 100 s). The key of the iOS libraries is sh/ios/b-<chain>.key, that of the Mac's
     sh/mac-b-<chain>.key (not in sh/cache, whose b-* entries dmsh_build.py reads as library folders). Each target writes only its own key (an iOS build that keeps a Mac build's libraries, both); either is taken only
     while the Mac sources and reflection carry a full build's stamp (inputs.tsv) for c1_full.tsv and cb_extent.tsv to name (chain_tables).
@@ -2446,7 +2482,7 @@ def build_shaders(py, repo, sh, xlate, env, logs, g, pkg_key=None, mac=False, se
     if not pso_pairs.is_file(): pso_pairs = sh / 'pso_pairs.tsv'   # the split's copy is a shader input too (vs_pad)
     if pkg_key:
         PROG.set(step='checking the inputs')
-        key = fingerprint(pkg_key, ('files', chain_files(repo)), ('stat', xlate.parent), ('files', profile_files(g)), ('files', [pso_pairs]), *toolchain(repo, env), str(xlate),
+        key = fingerprint(pkg_key, ('files', chain_files(repo)), translator_key(xlate), shader_profile_key(py, repo, env, g), ('files', [pso_pairs]), *toolchain(repo, env),
                           {k: env.get(k) for k in ('XLATE_DEBUG', 'XLATE_REDUCED')}, *((seen,) if seen else ()), env=env)
         note = next((n for k in ((kmac,) if seen else (kmac, kf) if mac else (kf,)) if (n := reused(k, key)) is not None), None)
         # the libraries are the last build's, so are tables that name their stamp; a missing or stale one is made from that build's Mac outputs, and without them the step runs again
@@ -2472,6 +2508,7 @@ def build_shaders(py, repo, sh, xlate, env, logs, g, pkg_key=None, mac=False, se
     if mac: del benv['IOSOUT']   # dmsh_build.py builds the iOS libraries only with IOSOUT
     elif pull is False: benv['DMSH_IOS_PULL'] = '0'   # nothing in this app reads them
     if seen: benv['DMSH_CAS'] = str(cas)
+    benv['DMSH_TABLE_MEMO'] = str(sh / 'cache')   # c1_guard.py / cb_extent.py keep each shader's answer there: a build that restores every shader makes the tables in seconds
     prog = sh / 'progress.json'; rmtree(prog); benv['DMSH_PROGRESS'] = str(prog)   # dmsh_build.py's progress (ShaderWatch)
     try: PROG.watch(ShaderWatch(prog))
     except Exception: pass   # progress never stops the build
@@ -3198,7 +3235,7 @@ def main(args=None):
         if missing: raise BuildError(f'the current Python ({sys.executable}) is missing modules: {", ".join(missing)}')
         check_capstone()
         pdir = profile_folder(args, nsp_dir, app)
-        if not (args.survey_only or SURVEY_ONLY): rmtree(derived_key(pdir / f'{app:016X}'))
+        if not (args.survey_only or SURVEY_ONLY): rmtree(derived_key(pdir / f'{app:016X}')); rmtree(derived_split_key(pdir / f'{app:016X}'))
         if (pdir / f'{app:016X}' / 'game.tsv').exists() and not (args.survey_only or SURVEY_ONLY):
             say(f'no game profile for {app:016X}: reusing the provisional profile from the last run (delete it to survey again)')
         else:

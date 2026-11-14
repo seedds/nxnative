@@ -6,12 +6,13 @@
 # and dm/ (the rewritten modules and their rewriter tables, nro.tsv, the profile's shader_map.tsv / pso_manifest.tsv / c1_full.tsv / cb_extent.tsv / shader_pairs.tsv / pso_pairs.tsv, font/, env.txt,
 # launcher.json: the game's launcher settings, dm/games/settings.py, which the settings window and Mac front ends show),
 # plus AppIcon.icns from the game's icon (sips, iconutil) and the Info.plist keys the launcher reads (DMTitleID, DMRomfsMarker, DMLanguage).
+# romfs.img, msl, aoc and pso are links into the signed data bundles in Contents/PlugIns that hold them (see Data bundles below), so that a pack which changes only the host signs in a second.
 # The large folders are APFS clones (cp -c) when the app is on the same APFS volume as the build, so they take no space; plain copies otherwise.
-# Signing: the inner host first, then the bundle (codesign --force --sign <identity>; '-' = ad-hoc), without the hardened runtime: the host maps the game's code executable, which the hardened
+# Signing: the new data bundles, the inner host, then the bundle (codesign --force --sign <identity>; '-' = ad-hoc), without the hardened runtime: the host maps the game's code executable, which the hardened
 # runtime refuses without entitlements, and so the app cannot be notarized. The bundle is stripped of its "._name" files first: on exFAT (an external drive for the build or the app) every
 # file's extended attributes live in such a file beside it, and codesign reads each one as a code object that is not signed, which fails the whole bundle.
 # Usage: pack_app.py <out.app> --host <dmhost> --patched <dir> --romfs <image or dir> --msl <dir> --tables <profile dir> --font <dir> --title-id <id> --name <name> [options]
-#   Reuses <out.app> while <out.app>.key matches; otherwise writes <out.app>.partial and swaps it in at the end. Prints "step: ..." and "app: <path>[, reused (inputs unchanged)]".
+#   Reuses <out.app> while <out.app>.key matches, and otherwise each of its data bundles that still matches; writes <out.app>.partial and swaps it in at the end. Prints "step: ..." and "app: <path>[, reused (inputs unchanged)]".
 import argparse, ctypes, errno, hashlib, json, os, plistlib, re, shutil, stat, subprocess, sys, tempfile
 from pathlib import Path
 
@@ -151,10 +152,9 @@ def strip_detritus(app):   # the "._name" files a copy from or onto an exFAT vol
                 except OSError: pass   # a ._ file the volume maps to the attributes of the file it belongs to: gone with them
 
 
-def sign(app, identity, codesign):   # the inner host first, then the bundle (its resources and the launcher); no --options runtime (see the top)
+def sign(app, identity, codesign, nested=()):   # the new data bundles and the inner host first, then the bundle (its resources and the launcher); no --options runtime (see the top)
     strip_detritus(app)   # before codesign reads the bundle, so that a build folder or an output folder on exFAT is not a signing failure
-    host = app / 'Contents/MacOS/dmhost'
-    for target in (host, app):
+    for target in (*nested, app / 'Contents/MacOS/dmhost', app):
         try: run([codesign, '--force', '--sign', identity, target])
         except SystemExit as e:
             if not any(s in str(e) for s in ('detritus', '._', 'not signed at all')): raise
@@ -164,11 +164,51 @@ def sign(app, identity, codesign):   # the inner host first, then the bundle (it
     strip_detritus(app)   # codesign sets an attribute on what it signs, which is a "._name" file again on exFAT: the signature still verifies without it, and a later --force would refuse it
 
 
+# Data bundles: the game's large files, RomFS (24 GB for Ocarina of Time), shader libraries, pipeline archive and DLC, each in a code bundle of its own in Contents/PlugIns
+# (<name>.bundle: an Info.plist and the files in Contents/Resources, no executable), with a symbolic link at their usual place in Contents/Resources, so the launcher and the host read
+# the same paths. The app's signature seals a nested bundle by its code directory hash alone and does not read its files again, so a pack that changes only the host (the usual one)
+# signs in about a second instead of reading every byte of the game again: on a USB SSD codesign read 38 GB at about 80 MB/s, 7-8 minutes a pack (M1 Pro, Ocarina of Time, PR #2673).
+# A bundle of the app being replaced is cloned with its signature when the last pack made it from the same inputs and its files are as that pack left them (both recorded in
+# <out.app>.key): the app's seal holds the bundle by its code hash only, so a file changed in it since would go into the new app unseen (codesign --verify --deep finds it, by reading it
+# all). Otherwise it is filled and signed anew. The other programs of a game of several programs have their RomFS in bundles of their own, their libraries in ShaderLibraries
+DATA_FORMAT = 'nxnative data bundle 1'
+
+
+def data_bundle(contents, name): return contents / 'PlugIns' / f'{name}.bundle'
+
+
+def data_reused(old_app, previous, name, key, dst):
+    """Clone the bundle <name> of the app being replaced to dst when the last pack (previous: its <out.app>.key) made it from these inputs (key) and its files are as that pack left
+    them → True"""
+    if not old_app or not isinstance(previous, dict) or not isinstance(previous.get('data'), dict) or previous['data'].get(name) != key or not isinstance(previous.get('app'), list): return False
+    b = data_bundle(old_app / 'Contents', name); top = str(b.relative_to(old_app))
+    want = {('.' if r[0] == top else r[0][len(top) + 1:]): r[1:] for r in previous['app'] if isinstance(r, list) and r and isinstance(r[0], str) and (r[0] == top or r[0].startswith(top + '/'))}
+    try:
+        if not want or {r[0]: r[1:] for r in inventory(b)} != want: return False   # a file changed, added or removed since
+    except OSError: return False
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    copy([b], dst, can_clone(b / 'Contents/Info.plist', dst.parent))
+    return True
+
+
+def data_shell(dst, name, bundle_id):
+    """An empty data bundle at dst, its files to go into dst/Contents/Resources"""
+    (dst / 'Contents/Resources').mkdir(parents=True)
+    (dst / 'Contents/Info.plist').write_bytes(plistlib.dumps({'CFBundleIdentifier': f'{bundle_id}.data.{name.lower()}', 'CFBundleName': name, 'CFBundlePackageType': 'BNDL',
+                                                             'CFBundleInfoDictionaryVersion': '6.0'}))
+
+
 def digest(path):
     h = hashlib.sha256()
     with Path(path).open('rb') as f:
         for b in iter(lambda: f.read(1 << 20), b''): h.update(b)
     return h.hexdigest()
+
+
+def file_row(p, by_stat=False):
+    """A selected file in the reuse keys: its mode, its link target, and its content's digest, or for a large file its size and times (a write changes its ctime, which nothing sets back)"""
+    st = p.stat()
+    return [str(p), st.st_mode, *([st.st_size, st.st_mtime_ns, st.st_ctime_ns] if by_stat else [digest(p)]), os.readlink(p) if p.is_symlink() else None]
 
 
 def inventory(root):
@@ -288,7 +328,8 @@ def pack(a):
         codesign = Path(codesign).resolve()
         minos = min_os(a.host)
         sources = [Path(__file__).resolve(), HERE / 'launcher.c', HERE.parent / 'host/romfs_image.h', HERE.parent / 'host/save_sync.c', HERE.parent / 'host/save_sync.h', HERE.parent / 'tools/romfs.py'] + swift_sources()
-        inputs = {'options': vars(a), 'files': [(str(p), p.stat().st_mode, digest(p), os.readlink(p) if p.is_symlink() else None) for p in files + sources],
+        large = {*msls, *pso, *(p for x in programs for p in x[5])}   # the shader libraries and pipeline archives (13.5 GB for Ocarina of Time): by stat, as the RomFS trees below
+        inputs = {'options': vars(a), 'files': [file_row(p, p in large) for p in files + sources],
                   'trees': [(p, inventory(Path(p))) for p in (a.romfs, a.aoc, a.html, *(str(x[1]) for x in programs), *(str(x[3]) for x in programs)) if p and Path(p).exists()],
                   'tools': [[str(c), c.stat().st_mode, c.stat().st_size, c.stat().st_mtime_ns, c.stat().st_ctime_ns, run([c, '--version']).strip()] for c in (clang, swiftc)] + [
                             str(sdk), run(['xcrun', '--sdk', 'macosx', '--show-sdk-version']).strip(),
@@ -324,22 +365,40 @@ def pack(a):
     if a.env_file: shutil.copyfile(a.env_file, dm / 'env.txt')
     if a.settings: shutil.copyfile(a.settings, dm / 'launcher.json')
     if a.control_nacp: shutil.copyfile(a.control_nacp, res / 'control.nacp')
-    step('shader libraries'); msl_dst = res / 'msl' / (a.msl_name or msl.name); msl_dst.parent.mkdir(exist_ok=True); copy_msl(msl, msls, msl_dst, clone['msl'])
-    if aoc: step('add-on content'); copy([aoc], res / 'aoc', clone['aoc'])
-    if pso: step('pipeline archive'); (res / 'pso').mkdir(); copy(pso, res / 'pso', clone['pso'])
-    step('game files'); copy([romfs], res / ('romfs.img' if romfs.is_file() else 'romfs'), clone['romfs'])
+    msl_dst = res / 'msl' / (a.msl_name or msl.name)
+    old_app = out if out.is_dir() else None
+    took = {f[0]: f[1:] for f in inputs['files']}   # what the app's key took of each selected file
+    common = [DATA_FORMAT, a.sign, str(codesign), digest(codesign), a.bundle_id or a.title_id]
+    data, fresh = {}, []   # each data bundle's key, for <out.app>.key; the bundles filled in this pack, signed below
+    def place(name, top, label, inputs, fill):   # one item's files: into its data bundle (made, or cloned from the old app), linked at Resources/<top>
+        b = data_bundle(c, name); link = res / top
+        data[name] = hashlib.sha256(json.dumps(common + [name, top, inputs], sort_keys=True).encode()).hexdigest()
+        if data_reused(old_app, previous, name, data[name], b): step(f'{label} (reused, signed)')
+        else:
+            step(label); data_shell(b, name, a.bundle_id or f'org.nxnative.{a.title_id.lower()}'); (b / 'Contents/Resources' / top).parent.mkdir(parents=True, exist_ok=True)
+            fill(b / 'Contents/Resources' / top); fresh.append(b)
+        link.parent.mkdir(parents=True, exist_ok=True); link.symlink_to(os.path.relpath(b / 'Contents/Resources' / top, link.parent))
+    def fill_msl(d):   # the libraries of every program: msl/<library>, msl/p<N>/<library>
+        d.mkdir(parents=True); copy_msl(msl, msls, d / msl_dst.name, clone['msl'])
+        for n, _, pmsl, _, _, pmsls, _ in programs: (d / f'p{n}').mkdir(); copy_msl(pmsl, pmsls, d / f'p{n}' / pmsl.name, can_clone(pmsls[0], res))
+    lib_code = [digest(Path(shader_lib.__file__)), digest(Path(rfs.__file__))]   # what writes a chain library's one file
+    place('ShaderLibraries', 'msl', 'shader libraries', [lib_code, msl_dst.name, [took[str(p)] for p in msls], [(x[0], x[2].name, [took[str(p)] for p in x[5]]) for x in programs]], fill_msl)
+    if aoc: place('AddOnContent', 'aoc', 'add-on content', inventory(aoc), lambda d: copy([aoc], d, clone['aoc']))
+    if pso: place('PipelineArchive', 'pso', 'pipeline archive', [took[str(p)] for p in pso], lambda d: (d.mkdir(parents=True), copy(pso, d, clone['pso'])))
+    rtop = 'romfs.img' if romfs.is_file() else 'romfs'
+    place('GameData', rtop, 'game files', inventory(romfs), lambda d: copy([romfs], d, clone['romfs']))
     if a.html and Path(a.html).is_dir(): copy([Path(a.html)], res / 'html', False)   # the offline pages, beside the RomFS where the host looks for them (hle_web.c)
-    # The other programs: p<N>/ (RomFS, offline pages), msl/p<N>/<library>, dm/p<N>/ (modules, tables), and the table of them all, which the launcher makes DM_PROGRAMS (launcher.c, hle_oe.c): @R@ Resources, @C@ Contents, @S@ the app's Application Support folder
+    # The other programs: p<N>/ (RomFS in the data bundle GameData<N>, offline pages), msl/p<N>/<library> (in ShaderLibraries), dm/p<N>/ (modules, tables), and the table of them all, which the
+    # launcher makes DM_PROGRAMS (launcher.c, hle_oe.c): @R@ Resources, @C@ Contents, @S@ the app's Application Support folder
     if programs:
         rows = ['# The programs of this game (dm/mac/pack_app.py; hle_oe.c DM_PROGRAMS)',
-                '\t'.join(['0', 'exe=@C@/MacOS/dmhost', 'arg=@R@/dm', 'cwd=@S@', f'DM_ROMFS=@R@/{"romfs.img" if romfs.is_file() else "romfs"}', 'DM_MSL_DIR=@R@/msl'] + (['DM_NVN_SHMAP=@R@/dm/shader_map.tsv'] if (dm / 'shader_map.tsv').is_file() else []) + (['DM_PSO_BUNDLE=@R@/pso'] if pso else []))]
-        for n, prom, pmsl, phtml, pmods, pmsls, ptables in programs:
-            step(f'program {n}'); pdm, pres, pm = dm / f'p{n}', res / f'p{n}', res / 'msl' / f'p{n}' / pmsl.name
-            for d in (pdm, pres, pm.parent): d.mkdir(parents=True)
-            copy(pmods, pdm, can_clone(pmods[0], res)); copy(ptables, pdm, False); copy_msl(pmsl, pmsls, pm, can_clone(pmsls[0], res))
-            copy([prom], pres / ('romfs.img' if prom.is_file() else 'romfs'), can_clone(prom, res))
-            if phtml.is_dir(): copy([phtml], pres / 'html', False)
-            rows.append('\t'.join([n, 'exe=@C@/MacOS/dmhost', f'arg=@R@/dm/p{n}', 'cwd=@S@', f'DM_ROMFS=@R@/p{n}/{"romfs.img" if prom.is_file() else "romfs"}', f'DM_MSL_DIR=@R@/msl/p{n}', f'DM_NVN_SHMAP=@R@/dm/p{n}/shader_map.tsv', f'DM_PROGRAM={n}']))
+                '\t'.join(['0', 'exe=@C@/MacOS/dmhost', 'arg=@R@/dm', 'cwd=@S@', f'DM_ROMFS=@R@/{rtop}', 'DM_MSL_DIR=@R@/msl'] + (['DM_NVN_SHMAP=@R@/dm/shader_map.tsv'] if (dm / 'shader_map.tsv').is_file() else []) + (['DM_PSO_BUNDLE=@R@/pso'] if pso else []))]
+        for n, prom, pmsl, phtml, pmods, _, ptables in programs:
+            pdm, ptop = dm / f'p{n}', f'p{n}/{"romfs.img" if prom.is_file() else "romfs"}'
+            pdm.mkdir(parents=True); copy(pmods, pdm, can_clone(pmods[0], res)); copy(ptables, pdm, False)
+            place(f'GameData{n}', ptop, f'program {n} game files', inventory(prom), lambda d, prom=prom: copy([prom], d, can_clone(prom, res)))
+            if phtml.is_dir(): copy([phtml], res / f'p{n}/html', False)
+            rows.append('\t'.join([n, 'exe=@C@/MacOS/dmhost', f'arg=@R@/dm/p{n}', 'cwd=@S@', f'DM_ROMFS=@R@/{ptop}', f'DM_MSL_DIR=@R@/msl/p{n}', f'DM_NVN_SHMAP=@R@/dm/p{n}/shader_map.tsv', f'DM_PROGRAM={n}']))
         (dm / 'programs.tsv').write_text('\n'.join(rows) + '\n')
     icon = bool(a.icon)
     if icon: step('icon'); make_icns(a.icon, res / 'AppIcon.icns')
@@ -350,12 +409,12 @@ def pack(a):
     if msl_dst.name.startswith('b-'): info['DMChain'] = msl_dst.name[2:]   # the library chain the app carries (a Vulkan or GL game's vk / gl has none)
     (c / 'Info.plist').write_bytes(plistlib.dumps(info))
     (c / 'PkgInfo').write_text('APPL????')
-    step(f'signing ({"ad-hoc" if a.sign == "-" else a.sign})'); sign(tmp, a.sign, codesign)
+    step(f'signing ({"ad-hoc" if a.sign == "-" else a.sign})'); sign(tmp, a.sign, codesign, fresh)   # a new data bundle is read whole once; the app's signature then takes its hash
     had_old = out.exists()
     replace_app(tmp, out)
     key_tmp = key_file.with_name(key_file.name + '.partial')
     try:
-        key_tmp.write_text(json.dumps({'inputs': key, 'app': inventory(out)}, sort_keys=True) + '\n')
+        key_tmp.write_text(json.dumps({'inputs': key, 'data': data, 'app': inventory(out)}, sort_keys=True) + '\n')
         key_tmp.replace(key_file)
     except BaseException:
         if had_old: replace_app(tmp, out)

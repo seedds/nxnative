@@ -18,7 +18,9 @@ private func gameMenuItems() -> [UIMenuElement] {
     let layouts = (0..<3).filter { dm_pad_layout_offered(Int32($0)) }.map { l in
         UIAction(title: names[l], state: dm_pad_layout() == l ? .on : .off) { _ in dm_pad_layout_set(Int32(l)) }
     }
-    let layout = UIMenu(title: "Controller layout", options: .singleSelection, children: layouts)   // a choice's value shows in its submenu: a subtitle would make each row two lines
+    let edit = UIAction(title: "Edit controls", image: UIImage(systemName: "slider.horizontal.3")) { _ in dm_pad_edit() }   // move, resize, restyle and fade the on-screen controls
+    // a choice's value shows in its submenu: a subtitle would make each row two lines
+    let layout = UIMenu(title: "Controller layout", children: [UIMenu(options: [.displayInline, .singleSelection], children: layouts), edit])
     var items: [UIMenuElement] = []
     var placed = false
     if let m = gameMenuModel {

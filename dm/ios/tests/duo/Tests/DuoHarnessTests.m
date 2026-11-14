@@ -123,6 +123,8 @@ static Class DuoHarnessInstallReservedRegionProbe(UIView *view) API_AVAILABLE(io
 
 - (void)tearDown {
     NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
+    [defaults removeObjectForKey:@"DmPadSplit"]; [defaults removeObjectForKey:@"DmPadLabels"];
+    dm_gamepad_view(CGRectMake(0, 0, 10, 10));   // a new pad reads the saved split again: the next test starts with the diamond whole
     if (self.savedLayout) [defaults setObject:self.savedLayout forKey:@"DmPadLayout"];
     else [defaults removeObjectForKey:@"DmPadLayout"];
     if (self.controllerListOverridden) {
@@ -611,6 +613,47 @@ static Class DuoHarnessInstallReservedRegionProbe(UIView *view) API_AVAILABLE(io
     XCTAssertEqual(duo_harness_input().buttons, DM_BTN_B);
     [self endTouches:@[touch] onPad:pad cancelled:NO];
     XCTAssertEqual(duo_harness_input().buttons, 0);
+}
+
+- (void)testSplitDiamondKeepsPlacesThenMakesFourIndependentKeys {
+    CGRect bounds = CGRectMake(0, 0, 844, 390);
+    DmLayout layout = dm_layout(bounds, UIEdgeInsetsZero, NO, CGRectNull, DM_PICTURE_16_9);
+    UIView *whole = [self padForLayout:layout bounds:bounds];
+    CGPoint a0 = [self controlCenterNamed:@"A" inPad:whole], b0 = [self controlCenterNamed:@"B" inPad:whole];
+    [NSUserDefaults.standardUserDefaults setBool:YES forKey:@"DmPadSplit"];
+    UIView *pad = [self padForLayout:layout bounds:bounds];
+    CGPoint a = [self controlCenterNamed:@"A" inPad:pad], b = [self controlCenterNamed:@"B" inPad:pad];
+    XCTAssertEqualWithAccuracy(a.x, a0.x, 0.5, @"split keys start where the diamond had them"); XCTAssertEqualWithAccuracy(a.y, a0.y, 0.5);
+    XCTAssertEqualWithAccuracy(b.x, b0.x, 0.5); XCTAssertEqualWithAccuracy(b.y, b0.y, 0.5);
+    DuoFakeTouch *touch = [self touchAt:a time:1];
+    [self beginTouches:@[touch] onPad:pad];
+    XCTAssertEqual(duo_harness_input().buttons, DM_BTN_A);
+    [self moveTouch:touch to:CGPointMake((a.x + b.x) / 2, (a.y + b.y) / 2) onPad:pad];
+    XCTAssertEqual(duo_harness_input().buttons, DM_BTN_A, @"split keys do not slide: the touch stays on the key it began on");
+    [self moveTouch:touch to:b onPad:pad];
+    XCTAssertEqual(duo_harness_input().buttons, DM_BTN_A);
+    [self endTouches:@[touch] onPad:pad cancelled:NO];
+    XCTAssertEqual(duo_harness_input().buttons, 0);
+    DuoFakeTouch *ta = [self touchAt:a time:2], *tb = [self touchAt:b time:3];
+    [self beginTouches:@[ta, tb] onPad:pad];
+    XCTAssertEqual(duo_harness_input().buttons, DM_BTN_A | DM_BTN_B, @"two fingers hold two split keys");
+    [self endTouches:@[ta, tb] onPad:pad cancelled:NO];
+}
+
+- (void)testKeyLabelsAreThePlayersOwnTextOrEmoji {
+    CGRect bounds = CGRectMake(0, 0, 844, 390);
+    DmLayout layout = dm_layout(bounds, UIEdgeInsetsZero, NO, CGRectNull, DM_PICTURE_16_9);
+    NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
+    [defaults setObject:@{@"0": @"\U0001F3AE", @"1": @"Go!", @"8": @"\U0001F468\u200D\U0001F469\u200D\U0001F467", @"13": @"Up"} forKey:@"DmPadLabels"];   // A, B, ZL (a family: one emoji), the D-pad's up arm
+    UIView *pad = [self padForLayout:layout bounds:bounds];
+    XCTAssertNotNil([self textLayerNamed:@"\U0001F3AE" inLayer:pad.layer], @"A shows the emoji");
+    XCTAssertNotNil([self textLayerNamed:@"Go!" inLayer:pad.layer]);
+    XCTAssertNotNil([self textLayerNamed:@"\U0001F468\u200D\U0001F469\u200D\U0001F467" inLayer:pad.layer], @"an emoji with joiners counts as one character");
+    XCTAssertNil([self textLayerNamed:@"A" inLayer:pad.layer], @"A's own label is replaced");
+    XCTAssertNotNil([self textLayerNamed:@"X" inLayer:pad.layer], @"a key without a label of the player's keeps its own");
+    [defaults setObject:@{@"0": @"Jump"} forKey:@"DmPadLabels"];   // four characters: not a saved label
+    pad = [self padForLayout:layout bounds:bounds];
+    XCTAssertNotNil([self textLayerNamed:@"A" inLayer:pad.layer], @"a label past the limit is ignored");
 }
 
 - (void)testOverlappingLockedButtonTargetsChooseNearestAndStayLocked {

@@ -205,7 +205,10 @@ are counted.
 **Jump tables** ([src/analysis/jumptable.h](src/analysis/jumptable.h)), by data flow on the lifted IR as design 1.3 asks: for each `br`, the blocks
 from one of the br block's dominators (the br block itself, then up the dominator tree) that reach the br are lifted by the lifter into one LLVM
 function (`Region::follow`), SROA and EarlyCSE make it SSA, and the br's target (the operand of an `nxaot.indirect` marker the lifter emits,
-`Region::mark_indirect`) must be a function of one guest load whose address is a function of one index. The index is bounded at the br by
+`Region::mark_indirect`) must be a function of one guest load whose address is a function of one index: a node of the address's expression
+that cuts it from every value it depends on (the address is constants and arithmetic of that node alone), whatever computed the node: a bit field
+of a product, the case offset of a sum, a mask of an exclusive or ("Jump tables whose index depends on several values" below). Of those nodes the
+one with the smallest range at the br is the index. It is bounded at the br by
 LLVM's LazyValueInfo and known bits, through casts, constant arithmetic and phis (each lifted instruction reads its registers anew, so `cmp w13`
 and the index `w13` are two `trunc x13`: an equal cast on each predecessor's straight line gives the edge's range); the entries are read from the
 image (through the relocation of a slot, for tables of pointers in data) and every target must be a decoded instruction of the function or another
@@ -214,9 +217,12 @@ Regions continue past a call by the callee's summary (`Region::calls`: what it m
 base in `x18` across a call to a function its interprocedural register allocation knows leaves `x18` alone) and through the function's known tables,
 which become LLVM `switch`es (`Region::tables`, the lowering of design section 4). A switch in a loop, whose cases branch back to it, is first
 bounded with the code no known edge reaches left out, then verified: with its cases walked, a closed region that includes them must give the same
-targets, or the table is dropped. InstCombine is not run: it rewrites the index's `zext (trunc x)` as `and x, mask`, a value the compare does not
+targets, or the table is dropped; one that does not verify without calls is tried once more past calls, since its cases may call what the
+code before the br does not. InstCombine is not run: it rewrites the index's `zext (trunc x)` as `and x, mask`, a value the compare does not
 name. Shapes covered by the corpus: byte, halfword and word entries, signed (GCC) and unsigned (clang), `adr` bases and table-relative bases (clang's
-uncompressed tables), bounds by `cmp` / `b.hi`, by `sub` then `cmp` (offset cases), bases set before calls, switches in loops. A br left unbounded is
+uncompressed tables), bounds by `cmp` / `b.hi`, by `sub` then `cmp` (offset cases), bases set before calls, switches in loops (except-gcc's CFA
+interpreter, whose cases call memcpy); test_discover.py adds a module written word by word with each form over an index computed from several
+values, and the unsound look-alikes that must stay brs. A br left unbounded is
 a `br` row with its reason, for the dispatcher (design section 4): in the corpus only fnptr's `unops[i % 6](x)`, an indirect tail call whose index is
 a remainder computed with a multiply and shifts that no LLVM analysis bounds.
 
@@ -243,9 +249,8 @@ summary. `NXAOT_DUMP_REGION=<br pc>` prints the optimised IR of every region tri
 What is not done: the census numbers of phase 0 over whole modules (FDE coverage, LSDA counts, setjmp imports, the address-taken set: all available
 from `nxaot discover` now, not folded into `nxaot census`), the `oracle-T` / `oracle-J` / `oracle-W` comparisons at pack time (the parser reads
 them; test_aot_manifest.py compares them on the synthetic module), the
-non-local control flow census beyond landing pads (setjmp by symbol, SP from memory), functions split for size (design 9.3), and bounds of an
-index computed from more than one value (a switch over `(a * b) >> 37 & 31`: the br goes to the dispatcher, and its cases run in the JIT fallback;
-gen_bench.py's benchmark has 383 such brs). Discovery's cost on game-shaped modules is in "Pack throughput".
+non-local control flow census beyond landing pads (setjmp by symbol, SP from memory) and functions split for size (design 9.3). Discovery's
+cost on game-shaped modules is in "Pack throughput".
 
 ## The corpus
 
@@ -557,10 +562,9 @@ mixed, with `--jit-all` and, where the mixed run needed no JIT, with `--jit-none
 entries in the mixed runs, all expected: `fiber` (its continuations after every switch, 29 and 54 addresses), `fp` (the FPCR checks: the rest
 of `div_rz` after its `msr fpcr`, case 3, back to compiled code at its return; and the rest of `fpcr_set`, which returns to its caller under RM:
 the JIT stops nowhere under another FPCR, so it runs `main` on under RM, then, FPCR restored, until `main` returns, taking compiled entries
-natively again; 8 and 9 addresses), `except-gcc` (5 targets of the opcode switch of rt/unwind.c's
-`run_program`: GCC's halfword table, whose base register is set in the function's prologue outside the loop that dispatches on it, is left
-unbounded by discovery, "the entry address depends on more than one value": a discovery gap of the kind the JIT exists for, which phase 5's
-feedback compiles).
+natively again; 8 and 9 addresses). `except-gcc` entered it at 5 targets of the opcode switch of rt/unwind.c's `run_program` (GCC's
+halfword table, whose base register is set in the function's prologue outside the loop that dispatches on it, whose cases call memcpy) until
+discovery bounded that switch ("Jump tables whose index depends on several values"): it needs no JIT now.
 
 Found by these tests and fixed: after the JIT called a compiled entry natively, the block's SP and x30 were the copies some inner frame stored
 (they travel in host registers at every call, design 2.3), so the JIT continued with SP 32 bytes low and the next native call overwrote its
@@ -725,6 +729,99 @@ functions it calls: with every function given one (`--all-entries`), nxaot_host'
 against 0.223 s (pinned, one run each), and after two repacks 0.065 against 0.067 s. A JIT-only entry for every function (its own table, so
 that inline caches do not bind to it) would make a miss cost only its own stretch; it is not done. Not verified: a game (none runs on the
 x86-64 engine yet) and Windows (the lifter's change is the same code for a Windows pack; not run there).
+
+The switch at `7a0cc` above and every other `br` of the benchmark are jump tables since "Jump tables whose index depends on several values"
+(below): its first pack runs no JIT at all, and its misses file has no row.
+
+## Jump tables whose index depends on several values
+
+After "Tail calls and the native frame's return", the 4,000-function benchmark's first pack still ran 800 JIT runs from 703 addresses
+(`nxaot_host`, one run), and its misses file held 339 `indirect` rows: every one of them a case of a switch whose `br` discovery left to the
+dispatcher (339 cases of 218 of those switches; no function pointer among them). `nxaot discover --tsv`'s `br` rows, by reason, before and after:
+
+| Program | jump tables before → after | brs left before → after | reason before (count) | after |
+|---|---:|---:|---|---|
+| benchmark, 4,000 functions (seed 1) | 353 → 736 | 383 → 0 | "the entry address depends on more than one value" (383) | none |
+| `gen_bench.py --direct`, 16,000 (seed 2) | 632 → 1,311 | 679 → 0 | the same (679) | none |
+| except-gcc | 0 → 1 | 1 → 0 | the same (1: rt/unwind.c's CFA interpreter) | none |
+| fnptr-gcc, fnptr-clang | 0 → 0 | 1 → 1 | "the index range has more than 4096 values" (`unops[i % 6](x)`) | the same |
+| the other 15 corpus NROs | the same (switch-gcc and switch-clang 12 each, fp-gcc and fp-clang 2, except-clang 1) | 0 | | |
+
+One example per group (module offsets):
+
+```
+benchmark 77c14..77c6c  ror / mov / add / eor ... madd x8, x8, x10, x11    x8: arithmetic of x0 and x1, live into the function
+          77c70  ubfx x10, x8, #16, #5; cmp x10, #0xd; b.hi 77e0c       the index, bounded on every path to the br
+          77c7c  adrp x11; add x11, x11, #0x600; adr x12, 77c94; ldrb w13, [x11, x10]; add x12, x12, x13, lsl #2; br x12
+except-gcc 1ce4  adrp x28, 0x3000; add x28, x28, #0xc04                 the table's base, in the prologue, before the loop at 1cf0
+          1d00   ldrb w0, [x21], #1 ... 1d20 cmp w0, #0x2e; b.ls 1d9c   the opcode, a byte read in the loop
+          1d9c   ldrh w0, [x28, w0, uxtw #1]; adr x1, 1dac; add x0, x1, w0, sxth #2; br x0
+          1ddc   bl memcpy; b 1d48                                        a case that calls, then branches back into the loop
+```
+
+**What the analysis could not see.** The benchmark's form is the one GCC and clang emit for a dense switch: a byte (or halfword, sign- or
+zero-extended) entry scaled by 4 and added to an `adr` label, or clang's word entry added to the table's own address. Discovery modelled it:
+the target is a function of one guest load, the `adr` base and the `adrp` + `add` table are constants after SSA, and LazyValueInfo bounds
+`x10` by the `cmp` / `b.hi` that dominates the br. It refused it before computing any range: `AnalyseTarget` took the address's leaves (the
+values of its expression that are no arithmetic: registers live into the region, loads, phis) and demanded exactly one, the index. Here the
+index `x10` is a bit field of `x8`, the product of a sum of `x0` and `x1`: two leaves. Not the base, not a copy of the index, not the shared
+default block. The rule asked for an index of one value where it needs an index of which the address is a function alone.
+
+**The rule** ([src/analysis/jumptable.cpp](src/analysis/jumptable.cpp), `FunctionOf` and `AnalyseTarget`): the candidates are the nodes of the
+address's expression of which the address is a function alone: the node itself, constants, and arithmetic whose operands are each such a
+function (every path of the expression to a variable passes through the node: it cuts the address from what computed the index). Of those,
+the one with the smallest range at the br (LazyValueInfo at the br, through casts, constant arithmetic and phis, intersected with its known
+bits) is the index; ties go to the node nearest the variables. With one variable this is the node the old rule took whenever it succeeded
+(it took the smallest range over every node and failed when that node did not cut the address), so every table bounded before has the same
+targets (the benchmark's 353: their rows the same but for 70 found from a nearer region, 20 of them now without crossing a call).
+
+**The proof obligation**, checked for each table: (1) the region is closed (every block of it that reaches the br but its first is entered
+only from inside it), so its IR has every path into the br; (2) the entry's address is the index's value through constants and arithmetic
+only (`FunctionOf`), so one value of the index gives one address; (3) the index's range is LazyValueInfo's at the br, from the conditions on
+every path into it, intersected with its known bits, each an over-approximation; the index's definition dominates the load and the load
+dominates the br, so the value the index has at the br is the one the load used; (4) every entry of the range is read from the image (an entry
+outside it refuses the table) and every target must be a decoded instruction of the function or another function's entry. Then every target
+the br can take is in the table. Refused, and left to the dispatcher with its reason: an index changed by another value after its compare or
+its mask (`idx + y`: the address takes several values for one value of the node), a compare of another register, a compare a path to the
+load goes around, a compare of the low half (`cmp w8`) of a 64-bit index, a signed compare (a negative index passes it: the range has 2^63
+values). [tests/test_discover.py](tests/test_discover.py) writes a module word by word with each form bounded (a byte table over a bit field
+of a product, a signed halfword table over the case offset of a sum with a case before the base, clang's table-relative word table over a mask
+of an exclusive or, an unsigned byte table over the zero-extended low half of a shifted sum, `b.hs`), checked index by index, and each
+look-alike above, which must stay a br; the base nxaot bounds none of the four.
+
+**The switch in a loop** (except-gcc): inside the loop the base `x28` is a value live into the region, so the address had two variables
+there; a region from the prologue, where `x28` is a constant, is closed only while the cases (which branch back into the loop) are left out.
+The optimistic try ("Module loader and discovery") bounded it so, without calls, and its verification with the cases walked failed: the
+cases call memcpy, and without calls the region is entered from outside at `1d48` from memcpy's return. The br was then never tried that way
+again, not even past calls. Now a tentative table that did not verify without calls is tried once more past calls, and verified past calls
+(`discover.cpp` `UnverifiedKey`: the tries that failed are kept per mode): a halfword table of 47 entries, and `run_program` becomes a
+preserving function (its unbounded br was a call of every address-taken function to the summaries). `NXAOT_DEBUG_REGION` now names the block
+a region is entered at from outside, and from where (`(0x1d48 from 0x1de0)`).
+
+**Measured** in the images, build trees on tmpfs, the machine's one-minute load 5 to 10 (another agent's builds); A is the base commit's nxaot
+(`git archive` of it), B this one. The benchmark's discovery: 56 rounds to 4, 3,376 regions lifted to 1,472, the summaries 240 rounds to 10, its
+analysis 2.4 to 0.5 s (`--workers 4`). Its first pack through `nxaot_host`, one run pinned to CPU 3: 0.320 s with 800 JIT runs from 703
+addresses and 339 `[RED]` indirect misses before, 0.0022 s with no JIT run after; except-gcc 0.099 s with 1,618 JIT runs from 5 addresses
+before, 0.00077 s with none after; the same output. [tests/measure_packs.py](tests/measure_packs.py):
+
+| Program | A | B | change | layout spread A / B | rounds spread | .text A -> B | pack time A -> B | verdict |
+|---|---:|---:|---:|---:|---:|---:|---:|---|
+| benchmark, 4,000 functions (fastest of 3; 3 rounds, 2 layouts) | 181.862 ms | 1.097 ms | -99.40 % | 2.53 / 6.29 % | 5.65 % | 6,019,056 -> 6,339,712 | 15.46 -> 13.47 s | faster |
+| except-gcc (fastest of 10; 6 rounds, 4 layouts) | 26.136 ms | 635.5 µs | -97.57 % | 0.41 / 0.87 % | 2.04 % | 82,492 -> 90,748 | 0.36 -> 0.38 s | faster |
+| switch-gcc, switch-clang, int_ops-gcc (`int_ops_rounds = 200`), fnptr-gcc | | | identical packs | | | 365,692; 85,864; 64,860; 58,188 | the same | not run |
+
+The benchmark's `.text` grows 5.3 % (its cases now compiled inside their functions: 36,859 blocks to 44,653), its pack's peak 188 to 217 MiB.
+**The packs**: of `build_packs.sh`'s 46 (the corpus for Linux and Windows, the synthetic modules, t_second_pack's), only except-gcc's `.so`
+and `.dll` change (its table); every other pack is the same bytes as A's, and every corpus NRO's `nxaot discover --tsv` is the same but
+except-gcc's. CTest: 29 of 29 (852 s); dm/host's 100 of 100 with these packs and `NXAOT`, with and without `DM_AOT_ARENA_CHECK=1`
+(`t_aot_host`'s `lrtail` row, whose `br` computes its target from x30 and must stay unbounded, as before: 126 JIT runs from 5 addresses, 4
+misses, none `nonlocal`). `t_aot_host` still lists except-gcc among the programs that need the JIT (`JIT_NEEDED`, read only by a host built
+without the JIT, whose row would now note "listed as needing the JIT, ran without it: update JIT_NEEDED"). Not verified: a game (none runs
+on the x86-64 engine yet) and a Windows run (the packs change the same way; not run there).
+
+What stays unbounded: fnptr's `unops[i % 6](x)`, a remainder by 6 computed with a multiply-high that no LLVM analysis bounds, through a table
+of function pointers in data (a call, which the dispatcher's inline cache serves), and `gen_bench.py --unbounded-switches`'s remainders but
+by 16 (a mask).
 
 ## Threads and safepoints
 
@@ -1010,7 +1107,7 @@ of `.pdata`); their code is larger by the home areas, the red zones' frames and 
 owner's Windows runner (dm/host/tests/run_win64_tests.ps1) runs `t_aot_host`, `t_aot_module`, `t_aot_hostfn` and `t_host_program` on the DLLs
 [tests/build_packs.sh](tests/build_packs.sh) writes into `<out>/win64` ([docker/README.md](../../../docker/README.md#the-recompiled-corpus-in-the-host)).
 The Windows host has the JIT fallback (dynarmic built by llvm-mingw, Boost from [dm/third_party/boost](../../third_party/boost/VENDOR.md)), so there too
-all 18 corpus programs are expected to run to their output, fp, fiber and except-gcc through the JIT; its fault path on Windows (dynarmic's
+all 18 corpus programs are expected to run to their output, fp and fiber through the JIT; its fault path on Windows (dynarmic's
 frame-based handler behind the host's vectored one, dm/host/aot_fault.c) is written, not run.
 
 ## Floating point and SIMD
@@ -1250,11 +1347,12 @@ flags, with unwind tables and no exported symbols but main's: thousands of funct
 some of four to twelve, one in twenty of twenty to sixty; statements of the kinds game code has (arithmetic, loads and stores, loops, switches
 over a field with a range check (jump tables), floating point, NEON vectors, struct copies, byte loops, direct calls, calls through a table of
 pointers); main calls every function through drivers with a bounded depth and prints one checksum, so a pack of it runs and is compared with
-dynarmic (`nxaot_run`). `--unbounded-switches` switches over a remainder instead, which discovery cannot bound (a stress case). With 4,000
+dynarmic (`nxaot_run`). `--unbounded-switches` switches over a remainder instead, which discovery cannot bound (a stress case; but a remainder
+by 16, a mask). With 4,000
 functions (seed 1): 533,160 instructions in 4,088 functions; with 16,000 (seed 2): 2,163,759 in 16,276. Both packs print what dynarmic prints
 (`bench 9bd31f1d51c59eda` for seed 1), with 1 and with 8 workers, balanced and max; 383 of its brs compute their table's index from more than one
-value, which discovery does not bound ("Module loader and discovery"), so their cases run in the JIT fallback at run time (7,818 JIT runs, the same
-before and after these changes).
+value, which discovery did not bound then, so their cases ran in the JIT fallback at run time (7,818 JIT runs, the same before and after these
+changes; discovery bounds them since "Jump tables whose index depends on several values").
 
 ### Before and after
 
@@ -2222,8 +2320,8 @@ threads; the functions with an FDE were found with their exact bounds by both):
 (One function more than the module's: the module entry's branch, provenance `start`.) The pieces of the 16,000-function module at Q = 20 by
 their provenance: 2,067 `gap`, 354 `tail`, 288 `jt,gap`, 154 `adr`, 23 `adr,jt`. The cause: the function "whose own range holds" an address
 (`Owner`, [src/analysis/discover.cpp](src/analysis/discover.cpp)) was the one whose FDE's range or symbol's size held it, and a function with
-neither had no range. So code inside such a function that no known edge reached, the cases of a switch discovery does not bound (half the
-switches here: "the entry address depends on more than one value"), became an entry of its own: first the label the switch's `adr` names at
+neither had no range. So code inside such a function that no known edge reached, the cases of a switch discovery did not bound (half the
+switches here then: "the entry address depends on more than one value"), became an entry of its own: first the label the switch's `adr` names at
 its cases' base (`adr`), then at the gap sweep each case (`gap`); each new entry cut the function's limit, so the code after the cases became
 a tail call's target (`tail`) and a bounded table further on had targets outside the cut function (`jt`). With an FDE the same code is a
 speculative root of its function. The fix, in discovery's own rule: a function with neither an FDE nor a symbol owns the span its walk
@@ -2449,8 +2547,8 @@ the drivers' one call per function (`nxaot discover --tsv`'s rows; per 1,000 ins
 | `--direct`, 600,000 (seed 5) | 609,527 | 31,185,206 | 51 (26) | 1,622,392 (5.2 %) | 114.9 | 23.63 | 1.57 | 0.75 | 0.83 | 0.63 |
 
 The bl column holds the drivers' one call per function (about 19.5 per 1,000 here, 7.4 in the C program): the statements' calls are 4.1 per
-1,000 against the C program's 3.6. Half the switches' brs stay unbounded ("the entry address depends on more than one value"), as half of the C
-program's do. One thing the direct module does not follow: its distinct words grow more slowly than its instructions (random 16-bit
+1,000 against the C program's 3.6. Half the switches' brs stayed unbounded then ("the entry address depends on more than one value"), as half of
+the C program's did (none since "Jump tables whose index depends on several values"). One thing the direct module does not follow: its distinct words grow more slowly than its instructions (random 16-bit
 immediates and few registers repeat at scale), 5.2 % at 600,000 functions against the C program's 24.8 %; the instruction cache's tables grow
 with the distinct words, so section 8 carries them over at both ratios.
 

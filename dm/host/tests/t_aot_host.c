@@ -72,8 +72,8 @@
 #endif
 
 // The programs whose runs enter the JIT fallback (dm/tools/aot/README.md, "The JIT fallback": fiber's continuations after a stack switch, fp's code after
-// msr fpcr, except-gcc's opcode switch that discovery leaves unbounded)
-static const char *const JIT_NEEDED[] = {"fp-gcc", "fp-clang", "fiber-gcc", "fiber-clang", "except-gcc"};
+// msr fpcr; except-gcc left the list when discovery bounded its unwinder's opcode switch)
+static const char *const JIT_NEEDED[] = {"fp-gcc", "fp-clang", "fiber-gcc", "fiber-clang"};
 enum { EXCL_RUNS = 5, PAUSES = 50, PAUSE_SEEDS = 3, LOG_RACE_LINES = 20000 };
 
 void guest_thread_init(void);          // thread.c

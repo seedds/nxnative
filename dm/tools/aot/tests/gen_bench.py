@@ -91,7 +91,8 @@ class Gen:
         if k < 70:
             # A switch over a field with a range check before its table, as on an enum; with --unbounded-switches a switch over a remainder
             # with every value a case, which has no check: its index is a multiply-high nothing bounds (README.md, "Module loader and
-            # discovery"), so discovery leaves its br to the dispatcher after trying every region (a stress case of discovery's cost)
+            # discovery"), so discovery leaves its br to the dispatcher after trying every region (a stress case of discovery's cost; a
+            # remainder by 16 is a mask, which bounds it)
             cases = r.randrange(5, 24)
             body = ' '.join(f'case {c}: b += {c64(r)}; a ^= b >> {r.randrange(1, 60)}; break;' for c in range(cases))
             if self.unbounded:
@@ -149,8 +150,9 @@ class Gen:
 # kinds in the same proportions (arithmetic with 64-bit constants, rotates, if / else, loads and stores, struct fields and copies, loops,
 # switches through byte jump tables, scalar floating point, NEON vectors, byte loops, direct calls, calls through a table of function pointers),
 # plus exclusive read-modify-write loops (ldaxr / stlxr), which game code has and the C program has not; some switches start their own block
-# (discovery bounds their tables) and the others compute their index from two values in the block before (discovery leaves most of their brs
-# to the dispatcher, "the entry address depends on more than one value", as it does for half of the C program's switches). Functions are 16-byte
+# and the others compute their index from two values in the block before (discovery left most of those brs to the dispatcher, "the entry
+# address depends on more than one value", as it did half of the C program's switches, until it took the index as any value the entry address
+# is a function of: README.md, "Jump tables whose index depends on several values"; it bounds them all now). Functions are 16-byte
 # aligned (nop padding) with an FDE each; a non-leaf function saves x19 to x22 and x29 / x30 and keeps its arguments there, as clang's do;
 # drivers call every function, 64 per driver, and main every driver of the level below. --no-fde-percent Q: Q % of the statement functions, chosen
 # by a generator of their own seeded from the seed (the main generator draws what it drew without the option), get no FDE (.eh_frame_hdr's count and
@@ -351,11 +353,11 @@ class Direct:
         r = self.r
         cases = r.randrange(5, 24)
         skip = None
-        if r.random() < 0.3:          # (0.3: about half of them bounded, as the C program's are; some of the others are bounded past calls)
-            skip = self.forward()     # if (!(a & bit)): the switch starts its own block, with one value live into it (bounded)
+        if r.random() < 0.3:          # (0.3: half of them bounded before the index of several values was, as the C program's were)
+            skip = self.forward()     # if (!(a & bit)): the switch starts its own block, with one value live into it
             src = A
         else:
-            self.w.append(a_eor(8, A, B, r.randrange(1, 21), 1))   # the index of two values in the block (left to the dispatcher)
+            self.w.append(a_eor(8, A, B, r.randrange(1, 21), 1))   # the index of two values in the block
             src = 8
         self.w.extend((a_ubfx(10, src, r.randrange(0, 40), 5), a_cmpi(10, cases - 1)))
         default = self.forward()

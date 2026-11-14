@@ -243,17 +243,33 @@ void Leaves(llvm::Value* v, std::set<llvm::Value*>& out, std::set<llvm::Value*>&
     out.insert(v);
 }
 
-bool DependsOn(llvm::Value* v, llvm::Value* leaf, std::map<llvm::Value*, bool>& memo) {
-    if (v == leaf) return true;
+// Whether v depends on one of the leaves
+bool DependsOn(llvm::Value* v, const std::set<llvm::Value*>& leaves, std::map<llvm::Value*, bool>& memo) {
+    if (leaves.count(v)) return true;
     if (const auto it = memo.find(v); it != memo.end()) return it->second;
     bool d = false;
     if (IsArith(v)) {
         for (llvm::Value* op : Operands(v)) {
-            d = d || DependsOn(op, leaf, memo);
+            d = d || DependsOn(op, leaves, memo);
         }
     }
     memo[v] = d;
     return d;
+}
+
+// Whether v is a function of n alone: v is n, a constant, or arithmetic whose operands are each a function of n alone. Then every path of v's
+// expression to a leaf passes through n (n cuts v from its leaves), and Eval(v, {{n, x}}) gives v's value for n = x
+bool FunctionOf(llvm::Value* v, llvm::Value* n, std::map<llvm::Value*, bool>& memo) {
+    if (v == n || llvm::isa<llvm::ConstantInt>(v)) return true;
+    if (const auto it = memo.find(v); it != memo.end()) return it->second;
+    bool f = IsArith(v);
+    if (f) {
+        for (llvm::Value* op : Operands(v)) {
+            f = f && FunctionOf(op, n, memo);
+        }
+    }
+    memo[v] = f;
+    return f;
 }
 
 // A guest load: a volatile load from inttoptr of a 64-bit address
@@ -382,17 +398,20 @@ Analysed AnalyseTarget(const module::Image& image, llvm::CallInst* marker, llvm:
     }
     std::set<llvm::Value*> index_leaves, seen2;
     Leaves(addr, index_leaves, seen2);
-    if (index_leaves.size() != 1) {
-        out.why = index_leaves.empty() ? "a constant entry address (no index)" : "the entry address depends on more than one value";
+    if (index_leaves.empty()) {
+        out.why = "a constant entry address (no index)";
         return out;
     }
-    llvm::Value* leaf = *index_leaves.begin();
-    // The index: of the nodes on the address's path to its one variable, the one with the smallest range at the br
+    // The index: a node of the address's expression of which the address is a function alone (FunctionOf: it cuts the address from every
+    // variable the address depends on), with the smallest range at the br. The variables may be several: an index computed from more than
+    // one value (a bit field of a product, a sum of two registers: (a * b) >> 37 & 31) is bounded by its own compare or mask whatever
+    // computed it, and the address is then a function of the index alone. A node that does not cut every variable off (an index modified
+    // after its compare by another value: idx + y) is no index: the address takes other values for one value of it
     std::vector<llvm::Value*> nodes;
     std::map<llvm::Value*, bool> memo;
     std::set<llvm::Value*> visited;
     std::function<void(llvm::Value*)> collect = [&](llvm::Value* v) {
-        if (!visited.insert(v).second || !DependsOn(v, leaf, memo)) return;
+        if (!visited.insert(v).second || !DependsOn(v, index_leaves, memo)) return;
         nodes.push_back(v);
         if (IsArith(v)) {
             for (llvm::Value* op : Operands(v)) collect(op);
@@ -405,18 +424,22 @@ Analysed AnalyseTarget(const module::Image& image, llvm::CallInst* marker, llvm:
     std::optional<llvm::ConstantRange> best_range;
     for (llvm::Value* n : nodes) {
         if (!n->getType()->isIntegerTy()) continue;
+        std::map<llvm::Value*, bool> cut_memo;
+        if (!FunctionOf(addr, n, cut_memo)) continue;
         std::set<llvm::Value*> active;
         llvm::ConstantRange r = RangeOf(n, marker, lvi, active, 0);
         const llvm::KnownBits kb = llvm::computeKnownBits(n, dl);
         r = r.intersectWith(llvm::ConstantRange::fromKnownBits(kb, false));
         if (r.isFullSet() || r.isEmptySet()) continue;
-        if (!best_range || set_size(r) <= set_size(*best_range)) {  // ties: the node nearest the variable, the index itself
+        if (!best_range || set_size(r) <= set_size(*best_range)) {  // ties: the node nearest the variables, the index itself
             best = n;
             best_range = r;
         }
     }
     if (!best || set_size(*best_range) > max_table) {
-        out.why = best ? "the index range has more than " + std::to_string(max_table) + " values" : "the index is not bounded at the br";
+        out.why = best                       ? "the index range has more than " + std::to_string(max_table) + " values"
+                  : index_leaves.size() == 1 ? "the index is not bounded at the br"
+                                             : "the entry address depends on more than one value, and no value it is a function of is bounded at the br";
         return out;
     }
     const unsigned entry_bits = load->getType()->getIntegerBitWidth();
@@ -608,6 +631,7 @@ TableResult ResolveJumpTable(const module::Image& image, const Function& fn, uin
         }
         if (excluded.count(home)) {
             res.why = "the br lies in code only speculative roots reach";
+            trace(home, res.why);
             return res;
         }
     }
@@ -659,16 +683,33 @@ TableResult ResolveJumpTable(const module::Image& image, const Function& fn, uin
             }
         }
         bool closed = true;
+        uint64_t open_at = 0, open_from = 0;  // the first block entered from outside, and from where (~0: an entry of the function), for the trace
         for (const uint64_t n : slice) {
             if (n == e) continue;
-            if (g.external.count(n)) closed = false;
+            if (g.external.count(n) && closed) {
+                closed = false;
+                open_at = n;
+                open_from = ~0ull;
+            }
             for (const auto& [p, kind] : g.preds.at(n)) {
-                if (!excluded.count(p) && (!slice.count(p) || !followable(p, kind))) closed = false;
+                if (!excluded.count(p) && (!slice.count(p) || !followable(p, kind)) && closed) {
+                    closed = false;
+                    open_at = n;
+                    open_from = p;
+                }
             }
         }
         if (!closed) {
             shape_why = "the region is entered from outside it";
-            trace(e, shape_why);
+            if (debug) {
+                char buf[96];
+                if (open_from == ~0ull) {
+                    std::snprintf(buf, sizeof buf, " (%#llx, an entry of the function)", static_cast<unsigned long long>(open_at));
+                } else {
+                    std::snprintf(buf, sizeof buf, " (%#llx from %#llx)", static_cast<unsigned long long>(open_at), static_cast<unsigned long long>(open_from));
+                }
+                trace(e, shape_why + buf);
+            }
             continue;
         }
         // The region's key (RegionMemo): what its lifting and analysis read. The lifter consults the call effects at the calls that end its

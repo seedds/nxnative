@@ -642,6 +642,8 @@ private:
         uint64_t changes = 0;  // walks that changed the digest
         uint64_t walks = 0;    // walks of the function
     };
+    // Function::unverified's key: the br for a tentative table found without calls, the br + 1 (a br is 4-aligned) for one found past calls
+    static uint64_t UnverifiedKey(uint64_t br, bool across) { return br + (across ? 1 : 0); }
     static bool SameEffect(const std::optional<lift::CallEffect>& a, const std::optional<lift::CallEffect>& b) {
         return a.has_value() == b.has_value() && (!a || (a->x == b->x && a->v == b->v && a->sp == b->sp && a->nzcv == b->nzcv));
     }
@@ -705,9 +707,12 @@ private:
             out_f.regions += r.regions;
             out_f.reused += r.reused;
             bool tentative = false;
-            if (!r.table && !f.spec_live.empty() && !f.unverified.count(br)) {
+            if (!r.table && !f.spec_live.empty() && !f.unverified.count(UnverifiedKey(br, across))) {
                 // The region may need code the function's walk did not reach yet (a switch in a loop: its cases branch back to the
-                // dispatch): a table found while ignoring that code is kept only if it verifies once its cases are walked (Verify)
+                // dispatch): a table found while ignoring that code is kept only if it verifies once its cases are walked (Verify). One
+                // that did not verify without calls is tried once more past calls: its cases may make calls the code before the br does
+                // not (a memcpy in a case of the unwinder's CFA interpreter, except-gcc), and only a region that continues past them
+                // includes the cases when it verifies
                 TableResult o = ResolveJumpTable(img, f, br, opts, valid, seen, true, &memo);
                 out_f.regions += o.regions;
                 out_f.reused += o.reused;
@@ -782,7 +787,7 @@ private:
                                   });
                 if (!same) {
                     f.tables.erase(br);
-                    f.unverified.insert(br);
+                    f.unverified.insert(UnverifiedKey(br, tentative.across_calls));
                     f.indirect[br] = "a table found without its cases did not verify with them (" + (r.table ? std::string("other targets") : r.why) + ")";
                     dirty.insert(entry);
                     changed = true;

@@ -2,7 +2,8 @@
 // function's blocks from one of the br block's dominators to the br are lifted into one LLVM function (src/lift, Region::follow keeps the region
 // to the blocks that reach the br; Region::calls continues past calls with what their summaries say they change), promoted to SSA and simplified
 // (SROA, EarlyCSE), and the br's target (the operand of the nxaot.indirect marker, Region::mark_indirect) must reduce to a function
-// of one guest load whose address is a function of one index; LLVM's LazyValueInfo bounds the index at the br (a dominating unsigned compare, a
+// of one guest load whose address is a function of one index: a value of the address's expression that the address is a function of alone,
+// whatever computed it from how many values; LLVM's LazyValueInfo bounds the index at the br (a dominating unsigned compare, a
 // mask) and known bits narrow it; the entries are read from the image and every target must be a decoded instruction of the function.
 // The region is sound only when it is closed: every block of it that reaches the br, except its first, is entered only from inside it.
 #pragma once

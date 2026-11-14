@@ -162,7 +162,8 @@ struct Function {
                                        // bounded yet, code after a call that does not return
     FlatSet<uint64_t> spec_live;       // the speculative roots the last walk still needed (no known edge reached them)
     FlatSet<uint64_t> tentative;       // brs whose table was found by ignoring the speculative code and waits for its verification
-    FlatSet<uint64_t> unverified;      // brs whose tentative table did not verify: not tried that way again
+    FlatSet<uint64_t> unverified;      // brs whose tentative table did not verify: not tried that way again (the br for a table found
+                                       // without calls, br + 1 for one found past calls: discover.cpp, UnverifiedKey)
     FlatMap<uint64_t, Block> blocks;   // by start
     std::vector<std::pair<uint64_t, uint64_t>> calls;  // (pc, target), target 0 for blr
     FlatMap<uint64_t, JumpTable, true> tables;         // by the br's pc

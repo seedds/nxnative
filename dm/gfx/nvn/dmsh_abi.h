@@ -160,3 +160,6 @@
 // buffer index, one slice of the reflection's tg_spill bytes per workgroup, at the workgroup's index in the whole grid (nvn_mtl.m dispatch binds a slice for every workgroup of the dispatch)
 #define DMSH_TG_SLOT 30
 #define DMSH_TG_MAX 0x8000
+// The abort word of a submission's compute dispatches (dm/gfx/tools/dmsh_rewrite.py loop_abort): a uint at this compute buffer index, raised by the first thread that reaches loop_guard's
+// cap; every capped loop of a compute kernel reads it every 1,024 iterations and ends once it is raised. The host binds one zeroed word for each submission (nvn_mtl.m dispatch)
+#define DMSH_ABORT_SLOT 28

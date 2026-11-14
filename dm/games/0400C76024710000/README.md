@@ -55,6 +55,7 @@ Measured on the M4 Pro, in a 1920x1080 window: 60 fps at the title, 44 to 52 fps
 - [Ampere forms with a handle in a register, and SURED's other operations](../../../docs/reference/shaders.md#ampere-forms-with-a-handle-in-a-register-and-sureds-other-operations).
 - [Ampere BMSK and the read of a covered pixel](../../../docs/reference/shaders.md#ampere-bmsk-and-the-read-of-a-covered-pixel).
 - [A guard band cull in every vertex shader (0x80d)](../../../docs/reference/shaders.md#a-guard-band-cull-in-every-vertex-shader-0x80d).
+- [A capped compute dispatch runs every thread to the cap](../../../docs/reference/shaders.md#a-capped-compute-dispatch-runs-every-thread-to-the-cap): its queue kernels `12a52b683eec95c1`, `8c48c7ffd257c63d` and `251426e9d44fd558` kept the GPU at 100 % after the game had exited; why their counters disagree is open.
 - [MEMBAR is a fence, not a barrier](../../../docs/reference/shaders.md#membar-is-a-fence-not-a-barrier).
 - [NVN2 compute's second push block holds buffer entries](../../../docs/reference/shaders.md#nvn2-computes-second-push-block-holds-buffer-entries): the hang at frame ~1,300.
 - [NVN2 graphics stages' buffer banks (c\[25\] to c\[29\]) are push blocks](../../../docs/reference/shaders.md#nvn2-graphics-stages-buffer-banks-c25-to-c29-are-push-blocks): the black title and structures: the root cause.

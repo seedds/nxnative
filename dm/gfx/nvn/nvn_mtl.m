@@ -15664,6 +15664,15 @@ static void dispatch(const p_dispatch *dp) {
     if (own && g_blit) { enc_b_end(g_blit); g_blit = nil; }
     id<MTLComputeCommandEncoder> ce = own ? pg_compute() : (id<MTLComputeCommandEncoder>)dispatch_enc_cs(cs, dp->ind);
     enc_c_pso(ce, ps);
+    {   // The submission's abort word, zeroed when the submission's first dispatch is encoded: the first thread at loop_guard's cap raises it, and the capped loops of that
+        // dispatch and of the submission's later ones leave within 1,024 iterations (dmsh_rewrite.py loop_abort). The next submission gets a word of its own, so an abort never
+        // reaches later frames. The GPU raises it: a CPU store reaches a running dispatch only sometimes (issue #2664). DM_NVN_LOOP_ABORT=0 binds none (loop_guard's cap alone)
+        static int on = -1; static uint64_t aw, aw_sub = ~0ull;
+        if (on < 0) { const char *e = getenv("DM_NVN_LOOP_ABORT"); on = !(e && !strcmp(e, "0")); if (!on) MLOG("[RED] DM_NVN_LOOP_ABORT=0: capped compute loops do not end with the submission's first runaway"); }
+        uint64_t sub = atomic_load(&g_fence);
+        if (on && aw_sub != sub) { __strong id<MTLBuffer> ab = nil; size_t ao = arena_alloc(4, &ab); *(uint32_t *)((uint8_t *)ab.contents + ao) = 0; aw = ab.gpuAddress + ao; aw_sub = sub; }
+        enc_c_args(ce, on ? aw : 0, DMSH_ABORT_SLOT);
+    }
     if (tg_groups) {
         __strong id<MTLBuffer> tb = nil; size_t to = arena_alloc((size_t)(tg_groups * cs->rf.tg_spill), &tb);
         enc_c_args(ce, tb.gpuAddress + to, DMSH_TG_SLOT);

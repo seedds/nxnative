@@ -1710,6 +1710,29 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Check:** `python3 dm/gfx/tests/test_dmsh_loop_guard.py` (each loop form gets the cap; on the GPU a loop with no end stops at exactly `LOOP_CAP` and a later loop of the same function runs no more; a function with no loop is unchanged, and the counter is declared alone on its line, so a task or mesh kernel's stage memory stays where `dmsh_meshstage.to_stage` looks for it).
 - **Found on:** [Kirby Air Riders](../../dm/games/040077201BE50000/README.md); PRAGMATA (no profile).
 
+### A capped compute dispatch runs every thread to the cap
+
+- **Symptom:** with [the loop guard](#a-shader-loop-that-never-ends-hangs-the-gpu), a compute dispatch whose loops never end still keeps the GPU busy for seconds, and several queued behind each other for minutes, also after the game has exited. The GPU stays at 100 % with no game running, and WindowServer can stop until a reboot.
+- **Cause:** the cap is per thread. Every thread of the dispatch, and of each dispatch queued behind it, runs its own 2^18 iterations. PRAGMATA's persistent queue kernels `12a52b683eec95c1`, `8c48c7ffd257c63d` and `251426e9d44fd558` (128 workgroups of 32 threads) poll a shared counter with a device fence each pass and never leave once the queue's counters disagree; why they disagree is **open**. Each such dispatch took roughly 10 to 30 s, and a run of them committed one behind another kept the GPU pinned for minutes after the exit ([issue #2664](https://github.com/seedds/nxnative/issues/2664)).
+- **Fix:** the first runaway ends the rest. `dmsh_rewrite.loop_abort` extends loop_guard in a compute kernel's entry function:
+  - A thread that reaches the cap raises an abort word at compute buffer `DMSH_ABORT_SLOT` (28).
+  - Every capped loop reads the word every 1,024 iterations of the function's loops and ends once it is raised.
+  - `dispatch` binds one zeroed word for each submission (`nvn_mtl.m`), so the dispatch's other threads, the workgroups still to start, and the submission's later dispatches leave within 1,024 iterations. The next submission starts with a word of its own.
+  - While no thread reaches the cap, no loop ends sooner than loop_guard ends it. After one has, a later loop of that submission running past 1,024 iterations ends early too; that frame already computes wrong.
+  - The word is raised on the GPU: a CPU store reaches a dispatch that is already running only sometimes (#2664). That is also why there is no host-side drain at the exit.
+  - `DM_NVN_LOOP_ABORT=0` binds no word and leaves loop_guard's cap alone.
+- **Limit:**
+  - A loop with a barrier in its body, directly or through a helper it calls, raises the word at its cap but does not read it: threads of one threadgroup can see the word at different iterations, and one that left early would leave the others at a barrier.
+  - Helpers, other stages and work that is not a loop keep loop_guard's cap alone.
+  - Threads already running when the word is raised gain little, because they reached the cap at about the same time: 1.2 to 1.4× in one 128- to 1,024-workgroup dispatch on an M4 Pro.
+- **Found on:** [PRAGMATA](../../dm/games/0400C76024710000/README.md): the three queue kernels above. Of 243 translated compute kernels from older libraries (Donkey Kong Bananza's for the most part, and PRAGMATA's `12a52b683eec95c1`), 130 have loops: 309 of their capped loops read the word, 2 barrier loops only raise it, and all 130 compile.
+- **Check:** `python3 dm/gfx/tests/test_dmsh_loop_abort.py`:
+  - Each loop form reads the word, barrier loops only raise it, and helpers and other stages are unchanged.
+  - With `DMSH_TEST_GPU=1`, at a test cap of 2^14 and 5 trials each (M4 Pro, GPU time, medians):
+    - one dispatch of 16,384 workgroups spinning on a flag nobody writes: 118.8 ms with the change, 809.3 ms without;
+    - PRAGMATA's shape, 8 dispatches of 128 workgroups in one submission: 8.6 ms with, 59.8 ms without.
+  - In both, the next submission's loop of 5,000 iterations runs in full.
+
 ### Barrier moves around warp shuffles
 
 - **Symptom:** `Ampere instruction f55 at 0x… (000fe20000000000000000001a0f7f55) is not implemented` in the shader build; those shaders are left out.

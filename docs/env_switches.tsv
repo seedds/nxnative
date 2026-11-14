@@ -189,6 +189,7 @@ DM_NVN_LAZY_CLEAR	switch	`0` makes clears with no draw after them open a pass of
 DM_NVN_LINE_WIDTH	switch	`0` draws every NVN line 1 pixel wide, as before; by default a line draw wider than a pixel is drawn as a quad per segment (`nvn_wline.inc`)
 DM_NVN_LOADPROBE	diagnostic	`=1`, `2` or `3`: attachments whose load is skipped are cleared to a sentinel colour (`3` NaN; `1` NaN for float formats) and the sentinel pixels left at pass end are counted (should be 0)
 DM_NVN_LOG	diagnostic	`=1` logs the creation of NVN objects
+DM_NVN_LOOP_ABORT	switch	`0` binds no abort word for compute dispatches, so the first thread at `loop_guard`'s cap no longer ends the other capped loops of its submission (`dmsh_rewrite.py` `loop_abort`; on by default)
 DM_NVN_MAGSCAN	diagnostic	`=<fs key>[:every[:phase]]`: device self-check that reads each pass's colour attachments every `every` frames (default 30) and logs `[mag]` lines for solid magenta 16×16 blocks or non-finite pixels
 DM_NVN_MDX_PRESCAN	switch	`0` copies an indirect-count multi-draw's records at its own first draw, which splits a render pass an earlier draw opened; by default the draw that opens a pass copies those of the multi-draws after it first (ab with DM_AB)
 DM_NVN_MFX_DIRECT	switch	`0` copies the game's colour into MetalFX's RGBA16F input (DM_UPSCALER=metalfx) unless it is RGBA16F; by default an input that is the whole rectangle MetalFX reads is taken in its own format (ab with DM_AB)

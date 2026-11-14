@@ -190,6 +190,70 @@ def loop_guard(msl):
     for at in sorted(used, reverse=True): out.insert(at, '    uint dm_lg = 0u;')
     return '\n'.join(out)
 
+# Loop abort: a compute dispatch whose loops never end runs every thread to loop_guard's cap. PRAGMATA's persistent queue kernels (12a52b683eec95c1,
+# 8c48c7ffd257c63d, 251426e9d44fd558: 128 workgroups of 32 threads polling one counter) took 10 to 30 s a dispatch that way, and several queued behind each other kept
+# the GPU at 100 % for minutes after the game had exited (issue #2664). In a compute kernel's entry function, a thread that reaches the cap also raises an abort word at
+# compute buffer abi.ABORT_SLOT, and every capped loop reads the word every 1,024 iterations of the function's loops and ends once it is raised: the rest of the
+# dispatch follows the first runaway out within 1,024 iterations, the threads still to start at once, and so do the submission's later dispatches: the host binds one
+# zeroed word for each submission (nvn_mtl.m dispatch), so the abort never reaches the next one. While no thread reaches the cap no loop ends sooner than loop_guard
+# ends it; after one has, a later loop of that submission running past 1,024 iterations ends early too (that frame already computes wrong). The word is raised
+# from the GPU: a CPU store reaches a dispatch already running only sometimes (issue #2664). A loop with a barrier in its body, directly or through a helper it calls,
+# raises the word at the cap but does not read it, since threads of one threadgroup can see it at different iterations and one that left early would leave the others
+# at a barrier. spirv-cross's helper functions and other stages keep loop_guard's cap alone
+ABORT_EVERY = 1024
+_LG = re.compile(r'\+\+dm_lg < (\d+)u')
+def loop_abort(msl):
+    m = re.search(r'^kernel\s+void\s+main0\s*\(', msl, re.M)
+    if not m or 'dm_lg_go(' in msl: return msl
+    depth = 1; i = m.end()   # the parameter list's end: its attributes hold parentheses ([[buffer(0)]])
+    while depth: depth += {'(': 1, ')': -1}.get(msl[i], 0); i += 1
+    if f'[[buffer({abi.ABORT_SLOT})]]' in msl[m.end():i]: raise ValueError(f'compute buffer {abi.ABORT_SLOT} is taken')
+    open_at = msl.find('\n{\n', i - 1)
+    if open_at < 0: return msl
+    open_at += 3   # the body's brace alone in column 0, as spirv-cross writes it
+    close_at = msl.find('\n}\n', open_at)
+    if close_at < 0: return msl
+    lines = msl[open_at:close_at].split('\n')
+    fns = {f.group(1): f.group(2) for f in re.finditer(r'^\S[^\n]*\b(\w+)\([^()\n]*\)\n\{\n((?:(?!\}\n)[^\n]*\n)*?)\}\n', msl[:m.start()], re.M)}
+    def calls_barrier(text, names): return 'barrier(' in text or any(re.search(rf'\b{f}\(', text) for f in names)
+    barrier_fns, grew = set(), True
+    while grew:   # the helpers that reach a barrier, through the helpers they call
+        more = {f for f, b in fns.items() if f not in barrier_fns and calls_barrier(b, barrier_fns)}
+        barrier_fns |= more; grew = bool(more)
+    def has_barrier(body): return any(calls_barrier(l, barrier_fns) for l in body)
+    def body_end(at, ind):   # the line closing the loop opened at line at: the first later line at its indent starting with '}'
+        return next((k for k in range(at + 1, len(lines)) if lines[k].startswith(ind + '}')), len(lines))
+    cap = None
+    for k, l in enumerate(lines):
+        g = _LG.search(l)
+        if not g: continue
+        if cap is None: cap = g.group(1)
+        ind = l[:len(l) - len(l.lstrip())]
+        if l.lstrip().startswith('} while'):
+            start = next((s for s in range(k - 1, -1, -1) if lines[s] == ind + 'do'), 0)
+            body = lines[start:k]
+        else: body = lines[k + 1:body_end(k, ind)]
+        lines[k] = _LG.sub('dm_lg_cap(dm_lg, dm_abort)' if has_barrier(body) else 'dm_lg_go(dm_lg, dm_abort)', l)
+    if cap is None: return msl
+    helper = f"""// loop_guard's cap in a compute kernel (dmsh_rewrite.py loop_abort): at the cap the thread raises the submission's abort word; a loop without a barrier also ends
+// within {ABORT_EVERY} iterations of another thread raising it
+static inline __attribute__((always_inline)) bool dm_lg_cap(thread uint& n, device atomic_uint* a)
+{{
+    if (++n < {cap}u) return true;
+    if (a != nullptr) atomic_store_explicit(a, 1u, memory_order_relaxed);
+    return false;
+}}
+static inline __attribute__((always_inline)) bool dm_lg_go(thread uint& n, device atomic_uint* a)
+{{
+    if (!dm_lg_cap(n, a)) return false;
+    return (n & {ABORT_EVERY - 1}u) != 0u || a == nullptr || atomic_load_explicit(a, memory_order_relaxed) == 0u;
+}}
+
+"""
+    src = msl[:open_at] + '\n'.join(lines) + msl[close_at:]
+    src = src[:i - 1] + f', device atomic_uint* dm_abort [[buffer({abi.ABORT_SLOT})]]' + src[i - 1:]
+    return src[:m.start()] + helper + src[m.start():]
+
 # Ampere HMMA.16816 with an f16 accumulator (agl's upscaler networks, the NDVE video networks) reaches the MSL as calls of dmsh_hmma16816_f16(lane, block, A0..A3, B0, B1, C0, C1,
 # flags, A's LDSM address, A0..A3's offsets, A's row stride, out D1) → D0, the subgroup's 256-word block of the scratch shared memory as the last argument (InstEmitAmpereTensor.AHmma,
 # TensorPass, HelperFunctionManager.GenerateHmma16816F16). The translator's body computes D lane by lane from the block; here it becomes simdgroup_matrix code over the same block:

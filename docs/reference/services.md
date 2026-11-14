@@ -516,6 +516,14 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md) (v131072), one Pro Controller over Bluetooth on a MacBook Air M4 with macOS 27.2, in two runs after long disconnects ([issue #2237](https://github.com/seedds/nxnative/issues/2237)).
 - **Check:** `t_pad_hid_mac` (`dm/host/tests`, fake IOKit entries and GameController controllers): one pad with a silent second entry stays with GameController, as does a reconnected pad whose old entry fell silent; two pads over USB become twins only once both send, go back when one falls silent and come back when it sends again. With every entry counted, it fails with the report's two `read here` lines. `t_motion_pro_mac`: a silent entry does not stop the pairing, and a pad whose old entry fell silent is paired on its new one. `t_motion_pro`: `pro_live`.
 
+### An analog trigger at rest read as ZL held
+
+- **Symptom:** on the Mac, with an Xbox controller, ZL stays held without the trigger being touched; in The Legend of Zelda: Ocarina of Time, Z-targeting stays on and the camera stays locked behind Link.
+- **Cause:** the Mac front end set ZL and ZR from GameController's `isPressed` on `leftTrigger` and `rightTrigger`. That controller's LT reads about 0.06 at rest, and `isPressed` already counts it as pressed; macOS offers no setting for the threshold.
+- **Fix:** ZL and ZR are set from the trigger's `value` above 0.25 (`pad_read`, `front_mac.m`).
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md) (v131072), an Xbox controller on a Mac with an Apple M4 and macOS 27.2.
+- **Open:** a fixed threshold, not a setting; no host test drives `pad_read` (it reads GameController objects).
+
 ### A keyboard receiver that declares a gamepad takes player 1
 
 - **Symptom:** on the Mac, with a keyboard and mouse receiver plugged in, the log shows `controller '<receiver>' (HID) connected: player 1` and the real controller as player 2; a one-player game takes no input from it and opens the controller applet again and again (`hid controller applet: 1 to 1 players wanted, 2 connected`).

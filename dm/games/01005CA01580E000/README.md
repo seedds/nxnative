@@ -4,6 +4,8 @@ Update 1.0.2 (`v65536`) over the base game, SDK 13.3.2. Atlus GFD / Needle on NV
 
 **Current:** opening casino gameplay tested on Mac with the complete shader library. The unsigned 1.0.2 IPA is built (15,969,549,546 bytes, about 14.9 GiB). iOS and later battles have not been tested.
 
+The base game (1.0.0, `v0`) is also playable: on 2026-11-12 a self-contained Mac app was built from `P5R [01005ca01580e000].nsp`, the only NSP, through a profile derived from this one (which registers 1.0.2 alone). Boot, the Thieves Guild network prompt, the opening movie, the title screen, the main menu, the load screen's existing saves, New Game with English voices and the opening casino cutscene rendered at 30 fps with no red line; movement in the casino was not exercised. Its 30,646 shader keys match 1.0.2's, and its shaders were compiled for the Mac with Xcode 27.3's Metal (`--allow-other-metal`, not the chain's tested 27.2).
+
 ## What it needs
 
 | Setting | Where | Why |
@@ -31,6 +33,8 @@ Update 1.0.2 (`v65536`) over the base game, SDK 13.3.2. Atlus GFD / Needle on NV
 - **Resolved:** all 30,646 keys translated successfully for both Mac and iOS, producing 27,501 variants. The full libraries use chain `dec5ee141a9f` and profile-input stamp `f53e8a12f4ad`; there are no unfillable driver reads or undecoded bindings. Final Mac gameplay validation loaded this full stamped library on base `7a3b958`. The port was subsequently integrated onto `c3a0880`, whose upstream image-atomic changes advance the chain to `467efdfd0b62`; the affected Metal regression tests were rebuilt and passed there, but a full game shader rebuild and gameplay replay on that chain have not been performed. The existing IPA remains the validated earlier-chain build.
 
 ## Testing and running
+
+The packed app's first launch took about four minutes ([A Mac app](../../../docs/development.md#a-mac-app), signing).
 
 On 2026-10-25, update 1.0.2 was tested on an M4 Pro Mac with Metal API validation enabled. Boot, startup movies, title and language menus, opening dialogue, and casino gameplay rendered. Movement, camera control and the first two platform jumps were exercised. The full-library run exceeded 35 minutes without a crash, missing shader or Metal validation error. Recent casino frame-time windows measured p50 33.33 ms and p95 33.36 ms (about 30 fps); occasional longer frames occurred during the run. Resident memory was about 1.9 GB and GPU allocations about 1.75 GB. This is an opening-sequence check, not a full playthrough.
 

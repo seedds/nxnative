@@ -1,0 +1,42 @@
+diff --git a/dm/gfx/nvn/nvn_temporal_async.inc b/dm/gfx/nvn/nvn_temporal_async.inc
+index 1f0fe35b..e7e56b39 100644
+--- a/dm/gfx/nvn/nvn_temporal_async.inc
++++ b/dm/gfx/nvn/nvn_temporal_async.inc
+@@ -56,7 +56,7 @@ static void temporal_async_wait_source(uint64_t serial) {
+ static pthread_mutex_t g_framegen_async_gpu_mu=PTHREAD_MUTEX_INITIALIZER;static FILE *g_framegen_async_gpu_file;
+ static void temporal_async_note_gpu(uint64_t frame,const char *kind,double begin,double end) {
+     const char *path=getenv("DM_FRAMEGEN_ASYNC_GPU_TIMES");if(!path || !*path)return;
+-    static char trace_buffer[1u<<20];static int opened;
++    static char trace_buffer[4u<<20];static int opened;
+     pthread_mutex_lock(&g_framegen_async_gpu_mu);
+     if(!opened){opened=1;g_framegen_async_gpu_file=fopen(path,"w");if(g_framegen_async_gpu_file){setvbuf(g_framegen_async_gpu_file,trace_buffer,_IOFBF,sizeof trace_buffer);fprintf(g_framegen_async_gpu_file,"frame\tkind\tgpu_start_s\tgpu_end_s\tgpu_ms\n");}}
+     if(g_framegen_async_gpu_file){fprintf(g_framegen_async_gpu_file,"%llu\t%s\t%.9f\t%.9f\t%.6f\n",(unsigned long long)frame,kind,begin,end,(end-begin)*1000);}
+@@ -198,6 +198,12 @@ static id<MTLTexture> temporal_async_upscale(id<MTLCommandBuffer> cb,id<MTLTextu
+     s->scaler.colorTexture=input;s->scaler.outputTexture=output;s->scaler.inputContentWidth=r[2];s->scaler.inputContentHeight=r[3];[s->scaler encodeToCommandBuffer:cb];
+     *keep=@[s->scaler,input,output];return output;
+ }
++// PRIVATE causal test: keep native simulation, vsync, FIFO and image work unchanged.
++// Alter only the positive minimum duration requested for each asynchronous display.
++static int present_min_slack_probe(uint64_t frame) {
++    static int on=-1;if(on<0){const char *e=getenv("DM_PRESENT_MIN_CONTROL");on=e && !strcmp(e,"1");}
++    return on && frame>=3600 && ((frame-3600)/180%4==1 || (frame-3600)/180%4==2);
++}
+ // A full-size, same-format copy preserves the scaler's encoded pixels. It
+ // avoids a render pass when the drawable cannot be a legal MetalFX output.
+ // Crops, orientation changes and framebuffer-only destinations keep present_encode.
+@@ -226,12 +232,13 @@ static int temporal_async_present(uint64_t serial,id<MTLTexture> src,double peri
+     uint64_t value=++g_temporal_display_sequence;atomic_store(&g_temporal_snap[slot].display_reader,value);
+     [cb encodeSignalEvent:g_temporal_display_done value:value];
+     present_track_drawable(drawable,frame,ticket,generated);
+-    if(target>0 || period<=0)[cb presentDrawable:drawable];else [cb presentDrawable:drawable afterMinimumDuration:period];
++    int min_slack=target<=0 && period>0 && present_min_slack_probe(frame);
++    if(target>0 || period<=0)[cb presentDrawable:drawable];else [cb presentDrawable:drawable afterMinimumDuration:period*(min_slack?0.98:1.0)];
+     [cb addCompletedHandler:^(id<MTLCommandBuffer> finished) {
+         (void)keep.count;
+         if(finished.error){MLOG("[RED] auxiliary display GPU error: %s",finished.error.description.UTF8String);gpu_lost_check(finished.error,"auxiliary display");}
+         pthread_mutex_lock(&g_pq_mu);if(!generated && ticket>g_pq_done)g_pq_done=ticket;g_pq_inflight--;present_gpu_note(finished.GPUEndTime-finished.GPUStartTime,up!=nil);pthread_cond_broadcast(&g_pq_cv);pthread_mutex_unlock(&g_pq_mu);
+-        temporal_async_note_gpu(frame,up==drawable.texture?(generated?"generated display direct":"native display direct"):(generated?"generated display":"native display"),finished.GPUStartTime,finished.GPUEndTime);
++        temporal_async_note_gpu(frame,min_slack?(up==drawable.texture?(generated?"generated display direct slack":"native display direct slack"):(generated?"generated display slack":"native display slack")):up==drawable.texture?(generated?"generated display direct":"native display direct"):(generated?"generated display":"native display"),finished.GPUStartTime,finished.GPUEndTime);
+     }];
+     pthread_mutex_lock(&g_pq_mu);g_pq_inflight++;pthread_mutex_unlock(&g_pq_mu);
+     [cb commit];atomic_store(&g_temporal_display_latest,value);

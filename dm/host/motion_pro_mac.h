@@ -8,19 +8,22 @@
 #include "dm_input.h"
 #include <stdlib.h>
 
-typedef struct pro_device { IOHIDDeviceRef hid; uint8_t report[512]; pro_motion motion; struct pro_device *next; } pro_device;
+typedef struct pro_device { IOHIDDeviceRef hid; uint8_t report[512]; pro_motion motion; uint64_t heard; struct pro_device *next; } pro_device;   // heard: its last 0x30 (pro_live)
 static IOHIDManagerRef g_pro_manager;
 static pro_device *g_pro_devices, *g_pro_bound;
 static int g_pro_player = -1, g_pro_active = 1, g_pro_controllers, g_pro_slot = -1;
 static int g_pro_seen_devices = -1, g_pro_seen_controllers = -1;
 static void (*g_pro_changed)(void);
 
+// Only the devices that send report 0x30 count (pro_live): an entry with no pad behind it would leave one pad unpaired. A device counts again at its first report after a
+// silence (pro_report); one that falls silent is left out at the next change
 static void pro_route(void) {
-    int n = 0; for (pro_device *d = g_pro_devices; d; d = d->next) n++;
+    uint64_t now = now_ns(); int n = 0; pro_device *live = NULL;
+    for (pro_device *d = g_pro_devices; d; d = d->next) if (pro_live(d->heard, now)) { n++; live = d; }
     int p = pro_motion_player(n, g_pro_controllers, g_pro_slot);
-    pro_device *d = p >= 0 ? g_pro_devices : NULL;
+    pro_device *d = p >= 0 ? live : NULL;
     if (p < 0 && n && g_pro_controllers && (n != g_pro_seen_devices || g_pro_controllers != g_pro_seen_controllers))
-        LOG("[hid] Pro Controller raw motion: %d HID devices / %d controllers; cannot pair them uniquely, keeping GameController motion", n, g_pro_controllers);
+        LOG("[hid] Pro Controller raw motion: %d HID devices sending reports / %d controllers; cannot pair them uniquely, keeping GameController motion", n, g_pro_controllers);
     g_pro_seen_devices = n; g_pro_seen_controllers = g_pro_controllers;
     if (d == g_pro_bound && p == g_pro_player) return;
     if (g_pro_player >= 0) dm_motion_clear_hid(g_pro_player);
@@ -36,9 +39,12 @@ static void dm_motion_pro_active(int active) {
 static void pro_report(void *ctx, IOReturn result, void *sender, IOHIDReportType type, uint32_t report_id, uint8_t *r, CFIndex len) {
     (void)sender;
     pro_device *d = ctx;
-    if (result != kIOReturnSuccess || type != kIOHIDReportTypeInput || report_id != 0x30 || len < 0 || !g_pro_active || d != g_pro_bound) return;
+    if (result != kIOReturnSuccess || type != kIOHIDReportTypeInput || report_id != 0x30 || len < 0) return;
+    uint64_t now = now_ns(); int was = pro_live(d->heard, now); d->heard = now;
+    if (!was) { if (g_pro_changed) g_pro_changed(); else pro_route(); }   // it counts from now on; pro_route registers no callback, so this is safe inside one
+    if (!g_pro_active || d != g_pro_bound) return;
     pro_motion_sample samples[3];
-    int n = pro_motion_decode(&d->motion, r, (size_t)len, now_ns(), samples);
+    int n = pro_motion_decode(&d->motion, r, (size_t)len, now, samples);
     for (int i = 0; i < n; i++) dm_motion_set_hid(g_pro_player, samples[i].acc, samples[i].rot, samples[i].ns);
 }
 static void pro_found(void *ctx, IOReturn result, void *sender, IOHIDDeviceRef hid) {

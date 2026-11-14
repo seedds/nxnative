@@ -100,13 +100,13 @@ int main(void) { @autoreleasepool {
     id<MTLTexture> out=texture(MTLPixelFormatRG11B10Float,r.ow,r.oh,MTLTextureUsageShaderWrite);
     CHECK(!(out.usage&MTLTextureUsageRenderTarget),"output is image-only, no render-target upgrade");
     if(front_hdr_enabled()) {
-        up_mfx_scaler *old=up_mfx_scaler_for(r.iw,r.ih,r.ow,r.oh,0);
-        CHECK(old && !(old->in.usage&MTLTextureUsageShaderWrite),"old generic HDR mode lacks compute-write usage; bad descriptor reproduced without illegal GPU work");
-        up_mfx_scaler *fixed=up_mfx_scaler_for(r.iw,r.ih,r.ow,r.oh,3);
-        CHECK(fixed && (fixed->in.usage&MTLTextureUsageShaderWrite),"HDR recipe declares actual compute writer");
+        up_mfx_scaler *old=up_mfx_scaler_for(r.iw,r.ih,r.ow,r.oh,0,MTLPixelFormatRGBA16Float,MTLPixelFormatRGBA16Float);
+        CHECK(old && up_mfx_scratch(old,0) && !(old->in.usage&MTLTextureUsageShaderWrite),"old generic HDR mode lacks compute-write usage; bad descriptor reproduced without illegal GPU work");
+        up_mfx_scaler *fixed=up_mfx_scaler_for(r.iw,r.ih,r.ow,r.oh,3,MTLPixelFormatRGBA16Float,MTLPixelFormatRGBA16Float);
+        CHECK(fixed && up_mfx_scratch(fixed,0) && (fixed->in.usage&MTLTextureUsageShaderWrite),"HDR recipe declares actual compute writer");
     }
     mtl_sub_begin();CHECK(up_recipe_draw(&r,in,out),"recipe encoded");finish();
-    up_mfx_scaler *cached=up_mfx_scaler_for(r.iw,r.ih,r.ow,r.oh,front_hdr_enabled()?3:2);CHECK(cached!=NULL,"scaler cached");
+    up_mfx_scaler *cached=up_mfx_scaler_for(r.iw,r.ih,r.ow,r.oh,front_hdr_enabled()?3:2,MTLPixelFormatRGBA16Float,MTLPixelFormatRGBA16Float);CHECK(cached!=NULL,"scaler cached");
     CHECK(cached->sc.colorProcessingMode==(front_hdr_enabled()?MTLFXSpatialScalerColorProcessingModeHDR:MTLFXSpatialScalerColorProcessingModeLinear),"Linear mode");
     id<MTLBuffer> rb=[g_dev newBufferWithLength:r.iw*r.ih*8 options:MTLResourceStorageModeShared];res_add(rb);
     mtl_sub_begin();enc_b_copy_texture_buffer(blit(),cached->in,0,0,MTLOriginMake(0,0,0),MTLSizeMake(r.iw,r.ih,1),rb,0,r.iw*8,r.iw*r.ih*8);finish();
@@ -142,7 +142,7 @@ int main(void) { @autoreleasepool {
     dp.x--; mtl_sub_begin();CHECK(!up_recipe_encode(cs,&dp),"partial dispatch grid retained");finish();CHECK(first(out)==sentinel,"partial grid fallback leaves output unchanged");
     // Force eviction before deferred encoding drains: old scratch and scaler remain resident/alive through the fence.
     mtl_sub_begin();CHECK(up_recipe_draw(&r,in,out),"encode before cache eviction");
-    for(int i=0;i<5;i++)CHECK(up_mfx_scaler_for(64+i*2,64,128+i*2,128,front_hdr_enabled()?3:2)!=NULL,"cache shape churn");finish();
+    for(int i=0;i<5;i++)CHECK(up_mfx_scaler_for(64+i*2,64,128+i*2,128,front_hdr_enabled()?3:2,MTLPixelFormatRGBA16Float,MTLPixelFormatRGBA16Float)!=NULL,"cache shape churn");finish();
     packed=first(out);CHECK(front_hdr_enabled()?packed==expected_before_eviction:abs((int)(packed&2047u)-(int)want[0])<=1,"recorded work survives cache eviction");
     composed_dispatch(profile);
     printf("upscale recipe GPU: %d checks, %d failed; deferred=%s\n",checks,failed,getenv("DM_NVN_ENC_THREAD")?:"default");return failed!=0;

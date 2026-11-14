@@ -61,7 +61,7 @@ static void suspend_case(void) {
     gate_encoder();
     // The OS has stopped the display link before notifying the app to suspend.
     pthread_mutex_lock(&g_pq_mu); g_link_owns_layer = 1; pthread_mutex_unlock(&g_pq_mu);
-    present_enqueue(&t, 1. / 60, NULL, 0); mtl_present_discard(1);
+    present_enqueue(&t, 1. / 60, NULL, 0, NULL); mtl_present_discard(1);
     suspend_started = dispatch_semaphore_create(0); suspend_done = dispatch_semaphore_create(0);
     pthread_t th; pthread_create(&th, NULL, suspend_thread, NULL);
     dispatch_semaphore_wait(suspend_started, DISPATCH_TIME_FOREVER);
@@ -111,17 +111,18 @@ static void pending_copy_case(void) {
     tex_t t = source(0);
     id<MTLSharedEvent> gpu_gate = [g_dev newSharedEvent]; if (!gpu_gate) abort(); [g_q4 waitForEvent:gpu_gate value:1];
     pthread_mutex_lock(&g_pq_mu); g_link_owns_layer = 1; pthread_mutex_unlock(&g_pq_mu);
-    CHECK("first snapshot queued", present_enqueue(&t, 1. / 60, NULL, 0) == 0);
-    CHECK("second snapshot queued", present_enqueue(&t, 1. / 60, NULL, 0) == 0);
+    uint64_t v0 = g_snap_v;   // a snapshot keeps its present ticket (LNPANDY/NX2Apple#1117): the copy count tells a snapshot from a fallback
+    CHECK("first snapshot queued", present_enqueue(&t, 1. / 60, NULL, 0, NULL) != 0 && g_snap_v == v0 + 1);
+    CHECK("second snapshot queued", present_enqueue(&t, 1. / 60, NULL, 0, NULL) != 0 && g_snap_v == v0 + 2);
     present_drop_for_suspend();   // Tickets are free, but the GPU still owns both allocators.
-    uint64_t v = g_snap_v, start = now_ns(), ticket = present_enqueue(&t, 1. / 60, NULL, 0);
+    uint64_t v = g_snap_v, start = now_ns(), ticket = present_enqueue(&t, 1. / 60, NULL, 0, NULL);
     CHECK("pending copy falls back without waiting", ticket != 0 && now_ns() - start < 50000000);
     CHECK("pending copy's allocator was not reused", g_snap_v == v);
     gpu_gate.signaledValue = 1; mtl_drain();
     CHECK("discarded copies finish before drain returns", g_snap_ev.signaledValue >= v);
     pixels(g_snap[0].tex, 73); pixels(g_snap[1].tex, 73);
 }
-static void snap_present(const tex_t *t) { present_enqueue(t, 1. / 60, NULL, 0); mtl_present_flush(); snap_commit_wait(g_snap_v); }
+static void snap_present(const tex_t *t) { present_enqueue(t, 1. / 60, NULL, 0, NULL); mtl_present_flush(); snap_commit_wait(g_snap_v); }
 // A new presented size replaces the ring slot's texture while a present that sampled the old one may still be queued on the GPU (a gate holds the queue): the old texture stays
 // resident until the slot's next use, which comes only after the replacing copy, and with it everything queued before, has run
 static void resize_case(void) {
@@ -135,8 +136,8 @@ static void resize_case(void) {
     CHECK("slot 0's old texture is still resident", [g_snap_res containsAllocation:old0]);
     snap_present(&big);
     CHECK("slot 1's old texture is still resident", [g_snap_res containsAllocation:old1]);
-    uint64_t ticket = present_enqueue(&big, 1. / 60, NULL, 0); mtl_present_flush();
-    CHECK("a present while slot 0's copy is queued falls back", ticket != 0);
+    uint64_t copies = g_snap_v; present_enqueue(&big, 1. / 60, NULL, 0, NULL); mtl_present_flush();
+    CHECK("a present while slot 0's copy is queued falls back", g_snap_v == copies);
     CHECK("the old texture stays resident while the copy is queued", [g_snap_res containsAllocation:old0]);
     gpu_gate.signaledValue = 1;
     CHECK("the replacing copies complete", [g_snap_ev waitUntilSignaledValue:g_snap_v timeoutMS:2000]);
@@ -155,6 +156,50 @@ static void *acquire_thread(void *arg) { @autoreleasepool {
     h_nvnWindowAcquireTexture((NVNwindow *)job->window, NULL, &job->index);
     dispatch_semaphore_signal(job->done);
 } return NULL; }
+// A snapshot present keeps its ticket (LNPANDY/NX2Apple#1117): acquiring that texture again waits until its copy, and with it the frame drawn into it, has run on the GPU,
+// though not for the screen. Before, the ticket was 0 and only the next ring slot paced the acquire; with more ring slots than window textures, or a game that
+// acquires its next texture before presenting the current frame, the game ran frames further ahead of the GPU and rewrote per-frame data queued draws still read
+// (Xenoblade Chronicles 3: the scene one flat colour in a third to a half of the frames)
+static void ticket_case(void) {
+    state_reset(); memset(&R, 0, sizeof R); mtl_sub_begin();
+    CHECK("prior submission completed", mtl_wait(mtl_sub_commit(), 2000000000ull));
+    g_snap_n = 4;   // more ring slots than window textures: ring capacity alone does not hold the acquire
+    tex_t textures[2]; win_t win = {.ntex=2};
+    for (int i = 0; i < 2; i++) { textures[i] = source(i); win.tex[i] = (NVNtexture *)&textures[i]; }
+    id<MTLSharedEvent> gpu_gate = [g_dev newSharedEvent]; if (!gpu_gate) abort();
+    mtl_present_test_stall(400000000); uint64_t copies = g_snap_v; int idx;
+    h_nvnWindowAcquireTexture((NVNwindow *)&win, NULL, &idx); h_nvnQueuePresentTexture(&fixture_queue, (NVNwindow *)&win, idx);
+    queue_encoded(); snap_commit_wait(g_snap_v);
+    // nvnQueueFinish after a snapshot present waits for the copy, not for the screen: by the present's ticket it waited for the stalled display link (400 ms here),
+    // which paces a game that finishes its queue every frame by the screen again
+    uint64_t f0 = now_ns(); h_nvnQueueFinish(&fixture_queue); double fms = (now_ns() - f0) / 1e6; printf("finish: %.3f ms\n", fms);
+    CHECK("finish waits for the snapshot's copy, not the stalled display", fms < 200 && g_snap_ev.signaledValue >= copies + 1);
+    [g_q4 waitForEvent:gpu_gate value:1];   // holds the queue: the next copy stays unrun until the gate opens
+    h_nvnWindowAcquireTexture((NVNwindow *)&win, NULL, &idx); h_nvnQueuePresentTexture(&fixture_queue, (NVNwindow *)&win, idx);
+    for (uint64_t t0 = now_ns(); g_snap_v < copies + 2 && now_ns() - t0 < 2000000000ull;) usleep(1000);   // the queue worker takes the second snapshot (its copy waits behind the gate)
+    CHECK("both presents took snapshots", g_snap_v == copies + 2);
+    // The window holds the queue's receipts; the ticket the next acquire waits for is the present ticket the receipt was published with (0: nothing to wait for)
+    nq_receipt *r0 = (nq_receipt *)(uintptr_t)win.ticket[0];
+    CHECK("snapshot presents keep their present tickets", r0 && r0->published && r0->present);
+    uint64_t ev0 = r0 ? r0->copy : 0;
+    CHECK("the first texture's receipt names its copy", ev0 == copies + 1);
+    h_nvnWindowAcquireTexture((NVNwindow *)&win, NULL, &idx);   // (it also takes the stalled display link's pacing wait, as any acquire with snapshots does)
+    CHECK("acquiring the first texture again waited for its copy", idx == 0 && g_snap_ev.signaledValue >= ev0);
+    // the second texture's copy is still behind the gate: its acquire must hold until the gate opens
+    h_nvnQueuePresentTexture(&fixture_queue, (NVNwindow *)&win, idx);
+    acquire_job job = {.window = &win, .started = dispatch_semaphore_create(0), .done = dispatch_semaphore_create(0)};
+    pthread_t thread; if (pthread_create(&thread, NULL, acquire_thread, &job)) { gpu_gate.signaledValue = 1; exit(2); }
+    dispatch_semaphore_wait(job.started, DISPATCH_TIME_FOREVER);
+    int returned = dispatch_semaphore_wait(job.done, dispatch_time(DISPATCH_TIME_NOW, 100000000ll)) == 0;
+    CHECK("acquiring the second texture waits for its unrun copy", !returned);
+    gpu_gate.signaledValue = 1;
+    if (!returned) returned = dispatch_semaphore_wait(job.done, dispatch_time(DISPATCH_TIME_NOW, 2000000000ll)) == 0;
+    CHECK("that acquire returns once the copy has run", returned && job.index == 1);
+    if (!returned) exit(2); pthread_join(thread, NULL);
+    h_nvnQueuePresentTexture(&fixture_queue, (NVNwindow *)&win, job.index); queue_encoded();
+    mtl_present_flush(); mtl_present_test_stall(0); snap_commit_wait(g_snap_v);
+    CHECK("the last snapshot completes", [g_snap_ev waitUntilSignaledValue:g_snap_v timeoutMS:2000]);
+}
 static void queued_case(void) {
     uint8_t *memory = NULL; if (posix_memalign((void **)&memory, getpagesize(), 65536)) exit(2); memset(memory, 0, 65536);
     NVNmemoryPool pool; NVNmemoryPoolBuilder pb = {0}; h_nvnMemoryPoolBuilderSetDefaults(&pb); h_nvnMemoryPoolBuilderSetDevice(&pb, &fixture_device);
@@ -198,10 +243,65 @@ static void queued_case(void) {
     h_nvnWindowFinalize((NVNwindow *)&win); h_nvnQueueFinish(&fixture_queue);
     h_nvnCommandBufferFinalize(&command); h_nvnEventFinalize(&event); h_nvnMemoryPoolFinalize(&pool); free(memory);
 }
+// The acquire's wait for the screen without the display link (mtl_present_screen_wait, DM_PRESENT_DEPTH 1): presents queued against the newest one the presented handlers reported
+static void *screen_report_later(void *arg) { usleep(20000); pres_seen((uint64_t)(uintptr_t)arg, -1); return NULL; }
+static void screen_case(void) {
+    const double per = 0.02;   // timeout 2 periods = 40 ms
+    pthread_mutex_lock(&g_pq_mu); uint64_t base = g_pq_in; pthread_mutex_unlock(&g_pq_mu);
+    // A screen that has reported no present at all (newest seen 0: a window covered from its first frame, a headless run): one timeout, then no more waits
+    if (!atomic_load(&g_pres_seen)) {
+        pthread_mutex_lock(&g_pq_mu); g_pq_in = base + 3; pthread_mutex_unlock(&g_pq_mu);
+        uint64_t to0 = atomic_load(&g_sdw_to), t0 = now_ns(), w = mtl_present_screen_wait(per), dt = now_ns() - t0;
+        CHECK("screen: no report ever, the first wait times out after two periods", w > 0 && dt >= 38000000ull && atomic_load(&g_sdw_to) == to0 + 1);
+        int fast = 1;
+        for (int i = 0; i < 3; i++) { t0 = now_ns(); w = mtl_present_screen_wait(per); fast &= w == 0 && now_ns() - t0 < 5000000ull; }
+        CHECK("screen: no report ever, then no wait while it stays silent (newest seen 0)", fast);
+        pthread_mutex_lock(&g_pq_mu); g_pq_in = base; pthread_mutex_unlock(&g_pq_mu);
+        pres_seen(base + 1, -1); base++;   // the screen's first report ends the silence
+        pthread_mutex_lock(&g_pq_mu); g_pq_in = base; pthread_mutex_unlock(&g_pq_mu);
+    }
+    pres_seen(base, -1);
+    pthread_mutex_lock(&g_pq_mu); g_pq_in = base + 1; pthread_mutex_unlock(&g_pq_mu);
+    uint64_t t0 = now_ns(); uint64_t w = mtl_present_screen_wait(per);
+    CHECK("screen: one present not yet shown, depth 1: no wait", w == 0 && now_ns() - t0 < 5000000ull && g_sdw_depth == 1);
+    pthread_mutex_lock(&g_pq_mu); g_pq_in = base + 3; pthread_mutex_unlock(&g_pq_mu);
+    pthread_t th; pthread_create(&th, NULL, screen_report_later, (void *)(uintptr_t)(base + 2));
+    t0 = now_ns(); w = mtl_present_screen_wait(per); uint64_t dt = now_ns() - t0; pthread_join(th, NULL);
+    CHECK("screen: three queued waits until the screen reports the second", w > 0 && dt >= 15000000ull && dt < 38000000ull);
+    pthread_mutex_lock(&g_pq_mu); g_pq_in = base + 5; pthread_mutex_unlock(&g_pq_mu);
+    uint64_t to0 = atomic_load(&g_sdw_to); t0 = now_ns(); w = mtl_present_screen_wait(per); dt = now_ns() - t0;
+    CHECK("screen: a silent screen times out after two periods", w > 0 && dt >= 38000000ull && dt < 80000000ull && atomic_load(&g_sdw_to) == to0 + 1);
+    t0 = now_ns(); w = mtl_present_screen_wait(per);
+    CHECK("screen: then no wait while the screen stays silent", w == 0 && now_ns() - t0 < 5000000ull);
+    pthread_create(&th, NULL, screen_report_later, (void *)(uintptr_t)(base + 3)); pthread_join(th, NULL);
+    t0 = now_ns(); w = mtl_present_screen_wait(per); dt = now_ns() - t0;
+    CHECK("screen: a new report brings the wait back", w > 0 && dt >= 38000000ull);
+    pres_seen(base + 5, -1);
+    t0 = now_ns(); w = mtl_present_screen_wait(per);
+    CHECK("screen: all shown, no wait", w == 0 && now_ns() - t0 < 5000000ull);
+    // counted in the game's presents: the game recorded frame 1002's present while the replay has queued only up to frame 1000's (a stale g_pq_in would release at once)
+    pthread_mutex_lock(&g_pq_mu); g_pq_in = base + 10; pthread_mutex_unlock(&g_pq_mu);
+    g_pres_frm[(base + 10) % PRING] = 1000; g_pres_frm[(base + 11) % PRING] = 1001;
+    pres_seen(base + 10, -1); mtl_present_recorded(1002);
+    pthread_create(&th, NULL, screen_report_later, (void *)(uintptr_t)(base + 11));
+    t0 = now_ns(); w = mtl_present_screen_wait(per); dt = now_ns() - t0; pthread_join(th, NULL);
+    CHECK("screen: counted in the game's presents, waits for frame 1001's present although the replay's count is caught up", w > 0 && dt >= 15000000ull && dt < 38000000ull && atomic_load(&g_seen_frame) == 1001);
+    t0 = now_ns(); w = mtl_present_screen_wait(per);
+    CHECK("screen: frame 1001 shown, frame 1002 recorded: no wait at depth 1", w == 0 && now_ns() - t0 < 5000000ull);
+    atomic_store(&g_rec_frame, 0);
+    pthread_mutex_lock(&g_pq_mu); g_pq_in = base; pthread_mutex_unlock(&g_pq_mu);
+}
+// With present snapshots the game runs a frame ahead of the screen on purpose and their ring paces it: the screen wait stays off, as the display link's drain does
+static void screen_snap_case(void) {
+    pthread_mutex_lock(&g_pq_mu); uint64_t base = g_pq_in; g_pq_in = base + 3; pthread_mutex_unlock(&g_pq_mu);
+    uint64_t t0 = now_ns(), w = mtl_present_screen_wait(0.02);
+    CHECK("screen: with present snapshots, three queued and none shown: no wait", mtl_snap_on() && w == 0 && now_ns() - t0 < 5000000ull);
+    pthread_mutex_lock(&g_pq_mu); g_pq_in = base; pthread_mutex_unlock(&g_pq_mu);
+}
 int main(int argc, char **argv) { @autoreleasepool {
     alarm(15); setbuf(stdout, NULL);
     if (argc != 2) return 2;
-    setenv("DM_PRESENT_SNAP", "1", 1); setenv("DM_PRESENT_HZ", "0", 1);
+    setenv("DM_PRESENT_SNAP", strcmp(argv[1], "screen") ? "1" : "0", 1); setenv("DM_PRESENT_HZ", "0", 1);   // the screen wait is off with snapshots (screen_snap)
     mtl_init();
     NVNdeviceBuilder db = {0}; h_nvnDeviceBuilderSetDefaults(&db); CHECK("fixture device initialized", h_nvnDeviceInitialize(&fixture_device, &db));
     NVNqueueBuilder qb = {0}; h_nvnQueueBuilderSetDefaults(&qb); h_nvnQueueBuilderSetDevice(&qb, &fixture_device);
@@ -211,6 +311,9 @@ int main(int argc, char **argv) { @autoreleasepool {
     else if (!strcmp(argv[1], "copy")) pending_copy_case();
     else if (!strcmp(argv[1], "resize")) resize_case();
     else if (!strcmp(argv[1], "queued")) queued_case();
+    else if (!strcmp(argv[1], "ticket")) ticket_case();
+    else if (!strcmp(argv[1], "screen")) screen_case();
+    else if (!strcmp(argv[1], "screen_snap")) screen_snap_case();
     else return 2;
     printf("present snapshots: %d checks, %d failed\n", checks, failed); return failed != 0;
 } }

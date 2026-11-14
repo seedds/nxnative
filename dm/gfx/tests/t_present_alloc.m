@@ -88,25 +88,25 @@ int main(void) { @autoreleasepool {
 
     // A dropped ticket consumes no allocator: tickets 1, 3 and 4 use all three; ticket 5 must wait for the first physical submission.
     [g_q4 waitForEvent:gate value:1];   // nothing committed to the Metal 4 queue from here runs until the gate opens
-    present_enqueue(&a, 1. / 60, NULL, 0);
+    present_enqueue(&a, 1. / 60, NULL, 0, NULL);
     id<CAMetalDrawable> first = tick();
-    present_enqueue(&b, 1. / 60, NULL, 0); present_enqueue(&b, 1. / 60, NULL, 0); present_enqueue(&c, 1. / 60, left_half, 0);
+    present_enqueue(&b, 1. / 60, NULL, 0, NULL); present_enqueue(&b, 1. / 60, NULL, 0, NULL); present_enqueue(&c, 1. / 60, left_half, 0, NULL);
     tick();
     printf("after the drop: read %llu, done %llu, in flight %d\n", (unsigned long long)g_pq_read, (unsigned long long)g_pq_done, g_pq_inflight);
     CHECK("ticket 1 has not completed", g_pq_inflight == 2);
     tick();
     CHECK("three physical presents fit despite the dropped ticket", g_pq_inflight == 3);
-    present_enqueue(&c, 1. / 60, left_half, 0);
+    present_enqueue(&c, 1. / 60, left_half, 0, NULL);
     reuse_case(drawable(), gate, 1, 5, 3, 1);
     int bad = bad_pixels(first.texture, 50, 150); printf("ticket 1 drawable: %d of 64 pixels wrong\n", bad);
     CHECK("ticket 1 shows its own picture", bad == 0);
 
     // One frame per tick: tickets 6, 7 and 8 occupy all three allocators; ticket 9 waits for ticket 6.
     [g_q4 waitForEvent:gate value:2];
-    present_enqueue(&a, 1. / 60, NULL, 0); id<CAMetalDrawable> fifth = tick();
-    present_enqueue(&b, 1. / 60, NULL, 0); tick();
-    present_enqueue(&b, 1. / 60, NULL, 0); tick();
-    present_enqueue(&c, 1. / 60, left_half, 0);
+    present_enqueue(&a, 1. / 60, NULL, 0, NULL); id<CAMetalDrawable> fifth = tick();
+    present_enqueue(&b, 1. / 60, NULL, 0, NULL); tick();
+    present_enqueue(&b, 1. / 60, NULL, 0, NULL); tick();
+    present_enqueue(&c, 1. / 60, left_half, 0, NULL);
     printf("one per tick: read %llu, done %llu, in flight %d, dropped %llu\n", (unsigned long long)g_pq_read, (unsigned long long)g_pq_done, g_pq_inflight, (unsigned long long)g_link_dropped);
     CHECK("tickets 6-8 have not completed", g_pq_inflight == 3 && g_link_dropped == 1);
     reuse_case(drawable(), gate, 2, 9, 3, 6);

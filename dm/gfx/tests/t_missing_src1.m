@@ -53,7 +53,7 @@ int main(void) { @autoreleasepool {
         CHECK(reference != nil, "explicit secondary source compiles");
         __fp16 want[4]; if (reference) pixels(reference, want);
         for (int metal4 = 0; metal4 < 2; metal4++) {
-            id<MTLRenderPipelineState> ps = metal4 ? pso_build(d, &error) : [g_dev newRenderPipelineStateWithDescriptor:d error:&error];
+            id<MTLRenderPipelineState> ps = metal4 ? pso_build(d, 0, &error) : [g_dev newRenderPipelineStateWithDescriptor:d error:&error];
             CHECK(ps != nil, "folded pipeline compiles on both paths");
             if (ps && reference) { __fp16 got[4]; pixels(ps, got); CHECK(!memcmp(want, got, sizeof got), "folded blending equals explicit zero source"); }
         }
@@ -66,7 +66,7 @@ int main(void) { @autoreleasepool {
     d = pso_desc(&k, vs, fs, nil, 0);
     CHECK(d.fragmentFunction == fs->fn_d, "the pipeline takes the dual-source entry point");
     CHECK(d.colorAttachments[0].sourceRGBBlendFactor == bfac(k.blend[0].src_rgb) && d.colorAttachments[0].destinationAlphaBlendFactor == bfac(k.blend[0].dst_a), "its source-1 factors are kept");
-    id<MTLRenderPipelineState> legacy = [g_dev newRenderPipelineStateWithDescriptor:d error:&error], m4 = pso_build(d, &error);
+    id<MTLRenderPipelineState> legacy = [g_dev newRenderPipelineStateWithDescriptor:d error:&error], m4 = pso_build(d, 0, &error);
     CHECK(legacy != nil && m4 != nil, "the dual-source pipeline compiles on both paths");
     if (legacy && m4) { __fp16 a[4], b[4]; pixels(legacy, a); pixels(m4, b); CHECK(!memcmp(a, b, sizeof a), "both paths blend the same"); }
     k.cfmt[1] = MTLPixelFormatRGBA16Float; k.blend_en = 3; k.blend[1] = k.blend[0];

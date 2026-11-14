@@ -100,6 +100,16 @@ int main(void) { @autoreleasepool {
         check("B handle array: sampler kind", NVN_RB_SAMPU, r.b[3].kind); check("B handle array: sampler n", 32, r.b[3].n); check("B handle array: bindless", 1, r.bindless);
         printf("%-60s %s\n", "B array of 32 handles in uniform slot 11 (texture + sampler)", fail == f1 ? "✓" : "✗");
     }
+    {   int f1 = fail;   // a SeparateSamplerId (handle type 2, The Witcher 3): the texture from c2, the sampler ID itself in word 0 of uniform slot 7
+        NSDictionary *j = @{@"route": @"B", @"bindings": @[
+            @{@"kind": @"tex", @"reg": @128, @"arg_id": @0, @"msl_name": @"fp_t_cb720898_2000005A", @"msl_type": @"texture2d<float>"},
+            @{@"kind": @"samp_ubo", @"reg": @7, @"off": @0, @"raw_id": @YES, @"arg_id": @1, @"msl_name": @"fp_t_cb720898_2000005ASmplr", @"msl_type": @"sampler"},
+            @{@"kind": @"samp_ubo", @"reg": @11, @"off": @16, @"arg_id": @2, @"msl_name": @"fp_t_cb14_4Smplr", @"msl_type": @"sampler"}]};
+        check("B sampler ID: conversion succeeds", 0, nvn_refl_from_json(j, &r, err, sizeof err));
+        check("B sampler ID: kind", NVN_RB_SAMPU, r.b[1].kind); check("B sampler ID: uniform slot", 7, r.b[1].reg); check("B sampler ID: raw_id", 1, r.b[1].raw_id);
+        check("B sampler ID: a handle's sampler has no raw_id", 0, r.b[2].raw_id);
+        printf("%-60s %s\n", "B separate sampler ID in uniform slot 7 (raw_id)", fail == f1 ? "✓" : "✗");
+    }
     {   int f1 = fail;   // handles in a uniform buffer beyond textures: Unreal Engine 5.4 on the Switch 2 keeps images and buffer textures there, and ORs a texture and a sampler word in either order
         NSDictionary *j = @{@"route": @"B", @"bindings": @[
             @{@"kind": @"img_ubo", @"reg": @0, @"off": @8, @"arg_id": @0, @"msl_name": @"cp_i_cb3_2_", @"msl_type": @"texture_buffer<float, access::write>", @"atomic": @YES},

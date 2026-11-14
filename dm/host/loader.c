@@ -266,6 +266,7 @@ static void read_layout(module_t *m, const char *dir) {
         else if (!strcmp(key, "DATA_OFF")) m->data_off = v;
         else if (!strcmp(key, "FPS_STATE_OFF")) m->fps_state_off = v;
         else if (!strcmp(key, "RENDER_SCALE")) m->render_scale_max = (uint32_t)v;
+        else if (!strcmp(key, "STEP_MAX")) m->step_max = (uint32_t)v;
         else if (!strcmp(key, "UE_MALLOC_VT")) m->ue_malloc_vt = v;
         else if (!strcmp(key, "UE_MALLOC_SLOT")) m->ue_malloc_slot = (unsigned)v;
         else if (!strcmp(key, "FPS_TARGET_PTR")) m->fps_target_ptr = v;
@@ -305,11 +306,12 @@ static void read_layout(module_t *m, const char *dir) {
 // target, 0 = the game's own interval logic. The profile's fps_target, overridden by DM_FPS_TARGET (0, 30 or 60); the graphics layer decides the steps and paces presents
 // (hle_nvn.c fstep_tick)
 uint8_t *dm_fps_state;
+int dm_fps_step_max;   // the largest step the stubs give the game (STEP_MAX in its fixups table; 0 = FSTEP_MAX): the frame step holds frames and pays back within it (hle_nvn.c)
 static const char *g_fps_mod;   // the module holding the state page (for the log)
 static float g_render_scale_max = 1.0f;   // the render-scale stub's largest scale (RENDER_SCALE in its fixups table; 1 for a stub that only lowers the game's size)
 static void install_fps_state(module_t *m) {
     if (m->fps_state_off + 0x40 > m->size || m->fps_state_off < m->key_page_off + m->key_page_size) die("%s: frame step state page out of range", m->name);
-    dm_fps_state = m->base + m->fps_state_off; g_fps_mod = m->name;
+    dm_fps_state = m->base + m->fps_state_off; g_fps_mod = m->name; dm_fps_step_max = (int)m->step_max;
     if (m->render_scale_max > 1) g_render_scale_max = (float)m->render_scale_max;
 }
 // The settings in the state page, written when the game starts (main.c, after host loading): on iOS the loading runs at app launch, before the launcher has set DM_FPS_TARGET and
@@ -553,9 +555,11 @@ static unsigned rebind(module_t *k, module_t *nm, int load) {
     return n;
 }
 
-void nro_load(module_t *m) {
-    pthread_rwlock_wrlock(&g_modules_mu);
-    // No guest code can modify an inactive NRO before its first load. Copy here, before relocation/init: eagerly copying FFX/X-2's 1,432 modules committed 5.8 GB of mostly unused bss.
+// Every load of an NRO, linked or alone, starts from its data as rewritten and a zero bss. A module already loaded is not loaded again: resetting its data under a live
+// user (a second CreateJitEnvironment for a plugin whose first environment is not destroyed, a LoadModule of a plugin's image) would pull its state from under it. The first load snapshots the initialized data (only those bytes: no guest code can modify
+// an inactive NRO before it, and copying FFX/X-2's 1,432 modules eagerly committed 5.8 GB of mostly unused bss); a reload restores it and zeroes the bss. Call with g_modules_mu held
+static void nro_reset_data(module_t *m) {
+    if (m->loaded) die("NRO %s: loaded again while it is loaded%s", m->name, m->alone ? " alone (a JIT plugin whose environment was not destroyed)" : "");
     if (!m->pristine) {
         if (!(m->pristine = malloc(m->pristine_len ? m->pristine_len : 1))) die("%s: pristine data copy", m->name);
         memcpy(m->pristine, m->base + m->data_off, m->pristine_len);
@@ -564,10 +568,15 @@ void nro_load(module_t *m) {
         memcpy(m->base + m->data_off, m->pristine, m->pristine_len);
         memset(m->base + m->data_off + m->pristine_len, 0, m->key_page_off - m->data_off - m->pristine_len);
     }
-    m->loads++; m->loaded = 1; g_loaded[g_nloaded++] = m;
+    m->loads++; m->loaded = 1;
+}
+
+void nro_load(module_t *m) {
+    pthread_rwlock_wrlock(&g_modules_mu);
+    nro_reset_data(m); g_loaded[g_nloaded++] = m;
     relocate(m);
     unsigned n = 0;
-    for (int i = 0; i < g_nmod; i++) if (g_mod[i].loaded && &g_mod[i] != m) n += rebind(&g_mod[i], m, 1);
+    for (int i = 0; i < g_nmod; i++) if (g_mod[i].loaded && !g_mod[i].alone && &g_mod[i] != m) n += rebind(&g_mod[i], m, 1);   // a module loaded alone binds nothing outside itself
     pthread_rwlock_unlock(&g_modules_mu);
     LOG("NRO %s loaded (load %u, base %p): %u imports of the modules loaded before bound to it", m->name, m->loads, m->base, n);
 }
@@ -576,8 +585,7 @@ void nro_load(module_t *m) {
 // undefined weak symbols 0; Super Mario 64's EmuSystemJITPlugin.nro has only those and relative relocations) and never takes part in the game's symbol lookups
 void nro_load_alone(module_t *m) {
     pthread_rwlock_wrlock(&g_modules_mu);
-    if (m->loads) memcpy(m->base + m->data_off, m->pristine, m->pristine_len);
-    m->loads++; m->loaded = 1;
+    nro_reset_data(m); m->alone = 1;
     relocs_t rl = relocs_of(m);
     unsigned nrel = rl.relr ? relr_apply(m, rl.relr, rl.relrsz, (uint64_t)m->base) : 0, nsym = 0;
     for (int t = 0; t < 2; t++)
@@ -595,12 +603,23 @@ void nro_load_alone(module_t *m) {
     LOG("NRO %s loaded alone (load %u, base %p): %u relative relocations, %u to its own or undefined weak symbols", m->name, m->loads, m->base, nrel, nsym);
 }
 
+// Its fini has run (the caller's). Deactivated as nro_unload deactivates a linked one, under the same locks and with the same check of stacks borrowing its data; nothing to
+// unbind, as no other module was bound to it
+void nro_unload_alone(module_t *m) {
+    pthread_rwlock_wrlock(&g_modules_mu);
+    if (!m->alone) die("NRO %s: unloaded alone but not loaded alone", m->name);
+    if (!svc_nro_deactivate(m)) die("NRO %s: cannot unload while a mapped stack borrows its data", m->name);
+    m->alone = 0;
+    pthread_rwlock_unlock(&g_modules_mu);
+    LOG("NRO %s unloaded (it was loaded alone)", m->name);
+}
+
 void nro_unload(module_t *m) {
     pthread_rwlock_wrlock(&g_modules_mu);
     if (!svc_nro_deactivate(m)) die("NRO %s: cannot unload while a mapped stack borrows its data", m->name);
     for (int i = 0; i < g_nloaded; i++) if (g_loaded[i] == m) { memmove(g_loaded + i, g_loaded + i + 1, (size_t)(--g_nloaded - i) * sizeof *g_loaded); break; }
     unsigned n = 0;
-    for (int i = 0; i < g_nmod; i++) if (g_mod[i].loaded) n += rebind(&g_mod[i], m, 0);
+    for (int i = 0; i < g_nmod; i++) if (g_mod[i].loaded && !g_mod[i].alone) n += rebind(&g_mod[i], m, 0);
     pthread_rwlock_unlock(&g_modules_mu);
     LOG("NRO %s unloaded: %u imports that pointed into it bound again", m->name, n);
 }

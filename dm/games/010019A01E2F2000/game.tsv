@@ -1,0 +1,42 @@
+# Game profile of Metroid Prime 4: Beyond (Switch, 1.1.0 = v131072). Plays on the Mac (boot, the title, the menus, a new game's opening and the first area of Tanamaar)
+# Format: see dm/games/README.md
+# Retro Studios' engine (little-endian RFRM forms as in Metroid Prime Remastered: MaterialArchive.arc and .pak archives) on SDK 19.3.15, NVN; subsdk0 is the SDK's movie library.
+# Its shaders are SNVN program records, zstd streams here, in MaterialArchive.arc and in the packs' MTRL resources (shader_split.py rfrm_shaders / snvn_records).
+# Every value below is the provisional profile's (profile_guess.py); the bring-up changed none, added dual_want.tsv and needed no host change (README.md)
+
+# ---- Identity ----
+title_id	010019A01E2F2000
+program_id	010019A01E2F2000
+
+# ---- App ----
+# Game name: only a label for profile listings and the Mac window title; the iOS app name is the game name in the base NSP, and the bundle ID comes from the base game title ID (build_ipa.sh / NSP script)
+name	Metroid Prime 4: Beyond
+ipa	MetroidPrime4Beyond.ipa
+app_category	public.app-category.games
+
+# ---- Versions ----
+build	v131072	1.1.0	main=8275fbe1ec5191c279f3a943ad8524f4	subsdk0=9c8b2c03854ffda4e33614d6f42d4a64	sdk=0cc95d4d30133833d7df439a890414de
+package	v131072
+shader_versions	v131072
+
+# ---- Files ----
+# every module main imports from
+modules	main subsdk0 sdk
+romfs_marker	Preload/DuplicateData.pak
+zip_store	.arc:.pak:.patch:.metallib
+
+# ---- Memory ----
+# no system resource: the game raises SetMemoryHeapSize step by step (2.00, 3.00, 3.12 GB) and settles on 3.16 GB in the 4 GB layout's 3.25 GB heap region, as Metroid Prime
+# Remastered does; about 4.0 GB resident and 1.9 GB of Metal allocations in the first area on the Mac
+mem_reserve	0x100000000
+mem_alias	0x10000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+# the NPDM declares 0 MB of system resource: IsVirtualAddressMemoryEnabled is false, as on Horizon
+sys_resource	0x0
+
+# ---- Shader split ----
+# 259,989 shaders (129,992 vertex, 129,972 pixel, 19 geometry, 6 compute): MaterialArchive.arc and the MTRL resources of the world, preload, UI and patch packs;
+# 129,972 vertex / pixel pairs
+shader_groups	/Worlds/=worlds /Preload/=preload /UI/=ui /Patch/=patch
+shader_note	Metroid Prime 4: Beyond shaders

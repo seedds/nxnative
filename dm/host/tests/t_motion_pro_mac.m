@@ -51,21 +51,25 @@ int main(void) { @autoreleasepool {
     found(synthetic); assert(!g_pro_devices && !synthetic.callback);
     pro_found(NULL, kIOReturnError, NULL, hid(a)); assert(!g_pro_devices);
     dm_motion_pro_players(1, 2); found(a); found(a);
-    assert(g_pro_devices && !g_pro_devices->next && g_pro_player == 2);
-    report(a); assert(sent == 3 && player == 2 && sample_time == tick - 15000000);
+    assert(g_pro_devices && !g_pro_devices->next && g_pro_player == -1);   // no report 0x30 yet: not paired
+    report(a); assert(sent == 3 && player == 2 && g_pro_player == 2 && sample_time == tick - 15000000);   // its first report pairs it
     a.callback(a.context, kIOReturnError, hid(a), kIOHIDReportTypeInput, 0x30, a.buffer, 49); assert(sent == 3);
     dm_motion_pro_active(0); assert(cleared == 2); report(a); assert(sent == 3);
     dm_motion_pro_active(1); report(a); assert(sent == 6);
     dm_motion_pro_players(2, 0); assert(g_pro_player == -1 && cleared == 2); report(a); assert(sent == 6);
     dm_motion_pro_players(1, 2); found(b);
-    assert(a.buffer != b.buffer && a.context != b.context && g_pro_player == -1);
-    report(a); report(b); assert(sent == 6);
+    assert(a.buffer != b.buffer && a.context != b.context && g_pro_player == 2);   // b sends nothing (an entry with no pad behind it): a stays paired
+    report(a); assert(sent == 9);
+    report(b); assert(g_pro_player == -1); report(a); assert(sent == 9);   // both send: which one GameController reads is not known
     removed(b); assert(!b.callback && g_pro_player == 2);
-    report(a); assert(sent == 9 && player == 2);
-    dm_motion_pro_players(1, -1); report(a); assert(sent == 9 && cleared == 2);   // no free slot
-    dm_motion_pro_players(1, 4); report(a); assert(sent == 12 && player == 4);
+    report(a); assert(sent == 12 && player == 2);
+    dm_motion_pro_players(1, -1); report(a); assert(sent == 12 && cleared == 2);   // no free slot
+    dm_motion_pro_players(1, 4); report(a); assert(sent == 15 && player == 4);
     removed(a); assert(!a.callback && !g_pro_devices && !g_pro_bound && cleared == 4);
-    dm_motion_pro_players(1, 0); found(b); report(b); assert(sent == 15 && player == 0);   // reconnect / merged mode
-    removed(b); removed(synthetic); assert(!g_pro_devices);
+    dm_motion_pro_players(1, 0); found(b); report(b); assert(sent == 18 && player == 0);   // reconnect / merged mode
+    TestPro *c = [TestPro new]; found(c); assert(g_pro_bound && g_pro_bound->hid == hid(b));
+    tick += PRO_SILENT_NS; report(c);   // b fell silent without being removed (issue #2237's leftover entry), c streams: c is paired
+    assert(g_pro_bound && g_pro_bound->hid == hid(c) && sent == 21 && player == 0);
+    removed(c); removed(b); removed(synthetic); assert(!g_pro_devices);
     puts("t_motion_pro_mac: passed");
 } }

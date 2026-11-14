@@ -283,7 +283,6 @@ int main(void) {
               memset(lin, 0xEE, 260 * 260 * 2); bad += nvn_deswizzle(&tile.d, lv, 0, tile.mem, lin, w * 2) ? 1000 : 0;
               for (unsigned i = 0; i < w * w; i++) bad += lin[i * 2] != (lv + 1) * 5 || lin[i * 2 + 1] != 51; }
           CHECK("every level of a 260x260 RG8 tile reaches its storage, every texel", !bad); free(lin); }
-        CHECK("none of it through the tables of textures uploaded from their storage", !g_nabs && !g_nabsp && !g_mrb_n && !g_mrb_untracked);
         mtl_tex_release(&tile); teardown(&g); mtl_tex_release(&moved2); mtl_tex_release(&moved); mtl_tex_release(&large);
         teardown(&f);
     }

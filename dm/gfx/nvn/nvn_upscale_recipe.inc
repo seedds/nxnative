@@ -59,8 +59,8 @@ static void up_recipe_compute(id<MTLComputePipelineState> ps, id<MTLTexture> in,
 }
 static int up_recipe_draw(const up_recipe *r, id<MTLTexture> in, id<MTLTexture> out) {
     if (!up_recipe_valid(r, in, out) || !up_recipe_pipelines()) return 0;
-    up_mfx_scaler *e = up_mfx_scaler_for(r->iw, r->ih, r->ow, r->oh, front_hdr_enabled()?3:2);
-    if (!e || !(e->in.usage & MTLTextureUsageShaderWrite)) return 0;
+    up_mfx_scaler *e = up_mfx_scaler_for(r->iw, r->ih, r->ow, r->oh, front_hdr_enabled()?3:2, MTLPixelFormatRGBA16Float, MTLPixelFormatRGBA16Float);
+    if (!e || !up_mfx_scratch(e, 0) || !up_mfx_scratch(e, 1) || !(e->in.usage & MTLTextureUsageShaderWrite)) return 0;
     // Capture strong object values, never the mutable cache entry, for deferred encoding.
     id<MTL4FXSpatialScaler> sc = e->sc; id<MTLTexture> color = e->in, result = e->out;
     rp_end(); if (g_blit) { enc_b_end(g_blit); g_blit = nil; } ubd_land_compute();

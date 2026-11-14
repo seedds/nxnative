@@ -42,7 +42,7 @@ BASE, UPDATE, ADDON = 0, 1, 2
 KINDS = ('base', 'update', 'addon', 'addon_update', 'system')
 STANDALONE = 1   # package flags bit 0: an update in a container without a base
 T_NACP, T_ICON, T_LICONS = 2, 3, 10
-ARTIFACTS = {b'.listing'}   # dump-tool files a producer may have kept (SPEC §6.3): not game files
+ARTIFACTS = romfs_image.ARTIFACTS   # dump-tool files a producer may have kept (SPEC §6.3): not game files
 NO_BASE = 'no base game in this NUP: its update is taken as the whole game (if the game then stops on missing files, the update holds only what changed: pack a NUP with the base game)'
 
 
@@ -112,9 +112,24 @@ class Nup:
             if first + count > len(self.slots): raise Error(f'{self.path}: folder {n!r} out of bounds')
         for s in self.slots:
             if s >= self.ndirs + nfiles: raise Error(f'{self.path}: child {s} out of bounds')
+        self._acyclic()
         for k in self.packages:
             if k.root >= self.ndirs or any(d != NO_DIR and d >= self.ndirs for d in (k.exefs, k.romfs)) or k.meta_size and k.meta_off + k.meta_size > fsize:
                 raise Error(f'{self.path}: package {k.index} out of bounds')
+
+    def _acyclic(self):
+        """Refuses a folder that contains itself, at any depth: the bounds checks pass it, and every walk of the tree (tree_bytes, entries) would recurse or loop for ever"""
+        kids = [[s for s in self.slots[first:first + count] if s < self.ndirs] for _, first, count in self.dirs]
+        state = bytearray(self.ndirs)   # 0 not seen, 1 on the current path, 2 done
+        for top in range(self.ndirs):
+            if state[top]: continue
+            state[top], stack = 1, [(top, 0)]
+            while stack:   # depth first without recursion: a container's depth is not bounded by Python's recursion limit
+                d, i = stack[-1]
+                if i == len(kids[d]): state[d] = 2; stack.pop(); continue
+                stack[-1] = (d, i + 1); c = kids[d][i]
+                if state[c] == 1: raise Error(f'{self.path}: folder {self.dirs[c][0]!r} (index {c}) contains itself (damaged file)')
+                if not state[c]: state[c] = 1; stack.append((c, 0))
 
     def close(self):
         self.mm.close()

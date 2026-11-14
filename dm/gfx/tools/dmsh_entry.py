@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 # The entry points dmsh_build.py adds to a translated shader's MSL, or rewrites in it: a vertex shader's outputs and its void entry for rasterizer discard (vs_writes, vs_discard),
 # integer vertex inputs (int_inputs), outputs set before the body (vs_init), the base instance from Metal (vs_base_instance), the point size and the layer (drop_point_size,
-# vs_layer, layer_out, vs_layer_entry), the depth entry point (vs_depth), and a pixel shader's integer and dual-source entry points (int_outputs, fs_uint, fs_dual). Functions of
+# vs_layer, layer_out, vs_layer_entry), the depth entry point (vs_depth), and a pixel shader's integer and dual-source entry points (fs_uint, fs_dual). Functions of
 # the MSL text only, with no build state, so tests import them. Part of the translation chain (dmsh_chain.FILES) and of every shader's cache key (dmsh_build.py CODE_FP).
-import collections, re, sys
-import dmsh_fetch, dmsh_side
+import re, sys
+import dmsh_abi, dmsh_side
 from dmsh_reflect import attributes, in_word
 
 def vs_writes(src, binds):
@@ -148,79 +148,55 @@ def vs_depth(src):
     single = src[:m.start()] + gl
     return single, single + '\n' + re.sub(r'\bmain0\s*\(', 'main0_z(', body, count=1)
 
-def int_outputs(src, body, cols):
-    """The colour outputs that hold integers, not float bits. The translator keeps registers in integer locals, so a float colour also reaches its output as as_type<float>(_n), with _n =
-    as_type<int>(<a float>) somewhere above; Kirby Star Allies' G-buffer shaders write all four of colour 0 to 2 that way, and only colour 2 goes to an integer target (RGBA8Uint, its material bits:
-    constants, shifts and ORs). So each write is followed back through the locals: a value computed by an integer operation or a small integer constant counts as integer, the bits of a computed
-    float as float; zero, larger constants (the bits of a float constant) and words copied from a uniform or an input say nothing. A denormal float literal is a small integer constant SPIRV-Cross
-    printed through the output's type. → the outputs with integers and no float bits, or, when none is that clean (a register reused by two branches), the outputs with integers"""
-    types = {v: t for t, v in re.findall(r'^\s*(u?int\d?|float\d?|bool)\s+(_\d+)\b', body, re.M)}
-    defs = collections.defaultdict(list)
-    for v, e in re.findall(r'^\s*(?:(?:u?int\d?|float\d?|bool)\s+)?(_\d+)\s*=\s*([^;]+);', body, re.M): defs[v].append(e.strip())
-    def kinds(e, seen):
-        if re.fullmatch(r'_\d+', e):
-            if types.get(e, '').startswith('float'): return {'float'}
-            if e in seen: return set()
-            seen.add(e); return set().union(*(kinds(x, seen) for x in defs[e])) if defs[e] else set()
-        if re.fullmatch(r'-?\d+u?', e): return {'int'} if 0 < abs(int(e.rstrip('u'))) < 0x800000 else set()
-        t = re.fullmatch(r'[^?]+\?\s*([^:]+?)\s*:\s*(.+)', e)   # a choice between two values (a comparison's 1.0 or 0.0 in Ghost Trick's colour 0) is what its values are
-        if t: return kinds(t[1], seen) | kinds(t[2], seen)
-        a = re.fullmatch(r'as_type<u?int\d?>\((.*)\)', e)
-        if a: return set() if re.search(r'fp_c\d|\bin\.|^-?[0-9.]', a[1]) else {'float'}
-        return set() if e.startswith(('(*spvDescriptorSet0', 'spvDescriptorSet0')) else {'int'}
-    found = {}
-    for nm in cols:
-        k = set()
-        for w in re.findall(r'\bout\.%s(?:\.\w+)? = ([^;]+);' % nm, body):
-            w = w.strip(); a = re.fullmatch(r'as_type<float\d?>\((.*)\)', w)
-            if a: k |= kinds(a[1].strip(), set())
-            elif re.fullmatch(r'-?[0-9.]+(?:e[-+]?\d+)?f?', w): k |= {'int'} if 0 < abs(float(w.rstrip('f'))) < 1.17549e-38 else set()
-            else: k.add('float')
-        found[nm] = k
-    return {nm for nm, k in found.items() if k == {'int'}} or {nm for nm, k in found.items() if 'int' in k}
-
 def fs_uint(src):
     """Integer colour targets. With no PC version the translator declares every fragment output float; a shader writes an integer as the float with its bits (as_type<float>(…)), and Metal
     refuses a pipeline whose float output meets an integer attachment. Luigi's Mansion 3 draws its whole scene into an R32Uint + RGBA8Uint G-buffer (1,377 of its 4,307 pixel shaders write
-    an output from integer bits): a hand-written row per shader (shader_facts_manual.tsv) does not scale to that. A pixel shader that writes an output from integer bits gets a second entry
-    point, main0_u, the same body returning every colour output as the unsigned integer vector of the same bits (as_type, nothing converted); the host takes it for a pipeline whose colour
-    attachments are all unsigned integer formats (nvn_mtl.m).
-    A G-buffer may mix the two: Pokémon Sword's scene shaders write colour 0 and 2 as floats and colour 1 from integer bits into an RGBA16Uint target. A shader whose outputs include both
-    gets a third entry point, main0_m, that returns only the outputs written from integer bits as unsigned integers (their colour indices: the mask); the host takes it for a pipeline whose
-    integer attachments are exactly those; which outputs those are comes from how their values are computed (int_outputs), as nearly every float output is written as integer bits too.
-    Both call main0's body (dmsh_side.shared_body) instead of copying it. → (main0_u (and main0_m), to append to the source with its body shared, the main0_m mask or 0), or (None, 0)"""
+    an output from integer bits): a hand-written row per shader (shader_facts_manual.tsv) does not scale to that, and a G-buffer may mix the two (Pokémon Sword's scene shaders write colours
+    0 and 2 as floats and colour 1 into an RGBA16Uint target). The hardware writes an output's bits to an integer target whatever the shader computed, so which outputs are integers is the
+    pipeline's to say, not the shader's: such a shader gets a second entry point, main0_u, the same body (dmsh_side.shared_body) returning each float colour output n as a float or as the
+    unsigned integer vector of the same bits (as_type, nothing converted) by the bool function constant DMSH_UINT_FC + n (dm_ui<n>); its output struct holds both members on [[color(n)]],
+    each present by its constant. The host specializes it with the pipeline's integer targets (nvn_mtl.m uint_fn). Telling integer outputs from float bits in the code instead took four
+    rules and still missed (Trails in the Sky 2nd Chapter: a uniform word, zeros, a register reused by two branches, a texel read as it is, each beside integer outputs into integer targets).
+    → main0_u, to append to the source with its body shared, or None"""
     m = re.search(r'^.*\bfragment\s+main0_out\s+main0\s*\(', src, re.M); st = re.search(r'struct main0_out\s*\{(.*?)\};', src, re.S)
-    if not m or not st: return None, 0
+    if not m or not st: return None
     mem = re.findall(r'^\s*(\w+)\s+(\w+)\s*(\[\[[^\]]*\]\])?;', st.group(1), re.M)
     cols = {nm: ty for ty, nm, at in mem if 'color(' in at and ty.startswith('float')}
-    # The hardware writes an output's bits to an integer target whatever the shader computed, so main0_u is right for any pixel shader; only those that look like integer writers get one
-    # (the library stays small): an output from integer bits, nothing but constants (a clear drawn into an integer target, 35e1865e313f0553 writes 0 into Luigi's Mansion 3's R32Uint target),
-    # or nothing but flat stage inputs passed through (the bits its vertex or mesh stage wrote: Mario Kart World's dcb0504c844f1ecc copies a primitive's id into an R8Uint target)
+    # main0_u is right for any pixel shader; only those that look like integer writers get one (the library stays small, and a shader with none still names itself in the host's red
+    # line): an output from integer bits, directly or through a float local that holds them (PRAGMATA's visibility shaders write float _439 = as_type<float>(int(gl_PrimitiveID)) into an
+    # RG32Uint target), nothing but constants (a clear drawn into an integer target, 35e1865e313f0553 writes 0 into Luigi's Mansion 3's R32Uint target), or nothing but flat stage inputs
+    # passed through (the bits its vertex or mesh stage wrote: Mario Kart World's dcb0504c844f1ecc copies a primitive's id into an R8Uint target) and constants (Unreal's virtual texture
+    # page table update, 17eda07e4bac39f8 in DRAGON BALL: Sparking! ZERO, writes a flat input's x and 0 to y, z, w of an R16Uint target)
     stores = [m for m in re.finditer(r'out\.(\w+)(?:\.\w+)? = ([^;]+);', src) if m.group(1) in cols and not in_word(src, m.start())]   # one pass over the text, not one for each output and each question
-    from_int = {m.group(1) for m in stores if re.match(r'as_type<float\d?>\(', m.group(2))}
-    writes = [m.group(2) for m in stores]
+    writes = [m.group(2).strip() for m in stores]
+    bits = set(re.findall(r'\b(_\d+(?:\[\d+\])?) = as_type<float\d?>\(', src))   # locals given integer bits somewhere
     flat = set(re.findall(r'\b(\w+) \[\[user\(locn\d+\), flat\]\]', src)) if ', flat]]' in src else ()
     def passed(w):   # a flat input, or a local that holds one
-        w = w.strip(); d = re.fullmatch(r'\w+', w) and re.search(r'\bfloat\d? %s = (in\.\w+(?:\.\w+)?);' % w, src)
+        d = re.fullmatch(r'\w+', w) and re.search(r'\bfloat\d? %s = (in\.\w+(?:\.\w+)?);' % w, src)
         i = re.fullmatch(r'in\.(\w+)(?:\.\w+)?', d[1] if d else w)
         return bool(i and i[1] in flat)
-    body = src[m.start():]; body = body[:body.find('return out;') + 1 or len(body)]
-    ints = int_outputs(src, body, cols)
-    if not from_int and not ints and not (writes and (all(re.fullmatch(r'-?[0-9.]+f?|float\d\([-0-9., ]*\)', w.strip()) for w in writes) or all(passed(w) for w in writes))): return None, 0
-    uty = lambda ty: 'u' + ty.replace('float', 'int')   # float4 → uint4, float → uint
+    def constant(w): return re.fullmatch(r'-?[0-9.]+f?|float\d\([-0-9., ]*\)', w)
+    if not any(w.startswith('as_type<float') or w in bits for w in writes) and not (writes and all(constant(w) or passed(w) for w in writes)): return None
+    return uint_entry(src)
+
+
+def uint_entry(src):
+    """main0_u for main0 of src, whatever main0 writes (fs_uint) → its text, to append to the source with its body shared, or None when main0 is not of a shape dmsh_side.entry knows"""
+    st = re.search(r'struct main0_out\s*\{(.*?)\};', src, re.S)
     try: e = dmsh_side.entry(src, 'main0')
     except ValueError: e = None
-    if not e: return None, 0
-    def entry(sfx, as_uint):   # main0_<sfx>: main0's body (dmsh_side.shared_body), its outputs in as_uint returned as the unsigned integer vectors of their bits
-        struct = f'struct main0_out_{sfx}\n{{\n' + ''.join(f'    {uty(cols[nm]) if nm in as_uint else ty} {nm} {at};\n' for ty, nm, at in mem) + '};\n\n'
-        conv = f'return main0_out_{sfx}{{' + ', '.join(f'as_type<{uty(cols[nm])}>(out.{nm})' if nm in as_uint else f'out.{nm}' for _, nm, _ in mem) + '};'
-        return '\n' + struct + dmsh_side.calling(e, f'main0_{sfx}', f'main0_out_{sfx}', conv)
-    out, mask = entry('u', set(cols)), 0
-    as_int = ints or from_int
-    if as_int and set(cols) - as_int:   # some outputs from integer bits, some not: the mixed entry point
-        out += entry('m', as_int)
-        mask = sum(1 << int(re.search(r'color\((\d+)\)', at).group(1)) for _, nm, at in mem if nm in as_int)   # pyright: ignore[reportOptionalMemberAccess]  (every output member has its colour)
-    return out, mask
+    if not e or not st: return None
+    mem = re.findall(r'^\s*(\w+)\s+(\w+)\s*(\[\[[^\]]*\]\])?;', st.group(1), re.M)
+    cols = {nm: ty for ty, nm, at in mem if 'color(' in at and ty.startswith('float')}
+    uty = lambda ty: 'u' + ty.replace('float', 'int')   # float4 → uint4, float → uint
+    col = {nm: int(re.search(r'color\((\d+)\)', at).group(1)) for _, nm, at in mem if nm in cols}   # pyright: ignore[reportOptionalMemberAccess]  (every colour member has its index)
+    consts = ''.join(f'constant bool dm_ui{n} [[function_constant({dmsh_abi.UINT_FC + n})]];\nconstant bool dm_uf{n} = !dm_ui{n};\n' for n in sorted(set(col.values())))
+    struct = 'struct main0_out_u\n{\n' + ''.join(f'    {ty} {nm} {at[:-2]}, function_constant(dm_uf{col[nm]})]];\n    {uty(ty)} {nm}_ui {at[:-2]}, function_constant(dm_ui{col[nm]})]];\n'
+                                                if nm in cols else f'    {ty} {nm} {at};\n' for ty, nm, at in mem) + '};\n\n'
+    conv = 'main0_out_u r = {};\n' + ''.join(f'    if (dm_ui{col[nm]}) r.{nm}_ui = as_type<{uty(cols[nm])}>(out.{nm}); else r.{nm} = out.{nm};\n' if nm in cols else f'    r.{nm} = out.{nm};\n'
+                                          for _, nm, _ in mem) + '    return r;'
+    return '\n' + consts + '\n' + struct + dmsh_side.calling(e, 'main0_u', 'main0_out_u', conv)
+
 
 def fs_dual(src):
     """Dual-source blending. NVN's SRC1 blend factors read the pixel shader's output 1 as target 0's second source (Maxwell feeds MRT 1 to it), and the translator declares that

@@ -1,7 +1,6 @@
 """textureGatherOffsets (dmsh_rewrite.py gather_offsets): each call of spirv-cross's spvGatherConstOffsets / spvGatherCompareConstOffsets becomes its four gathers with their offsets written out,
 in plain and array forms, or one gather when the offsets form a 2x2 square (gather_quad). On this Mac's GPU a compute shader's rewritten gathers match texel reads in every lane, on two
 runs, and a square's one gather matches its four gathers bit for bit at positions inside, between and outside the texels, clamped and repeating."""
-import ast
 from pathlib import Path
 import re
 import shutil
@@ -13,9 +12,7 @@ import unittest
 TOOLS = Path(__file__).resolve().parents[1] / 'tools'
 sys.path.insert(0, str(TOOLS))
 from dmsh_rewrite import gather_offsets, gather_quad   # noqa: E402
-# the Mac compile's flags, from the build's own line (dmsh_build.py runs a build when imported)
-MAC_METAL = next(ast.literal_eval(n.value) for n in ast.parse((TOOLS / 'dmsh_build.py').read_text()).body
-                 if isinstance(n, ast.Assign) and getattr(n.targets[0], 'id', None) == 'MAC_METAL')
+from dmsh_chain import MAC_METAL   # noqa: E402  (the build's Mac compile)
 
 HEAD = '''#include <metal_stdlib>
 using namespace metal;

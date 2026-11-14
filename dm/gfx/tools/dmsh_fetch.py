@@ -65,17 +65,24 @@ def _gchoice(cond, read):   # cond ? read : 0 as spirv-cross writes it, in paren
 _GBOOL = re.compile(r'\bbool (_\d+) = [^;\n]* < %s;' % _GSIZE)   # the condition, a value of its own: the read's index and its choice both use it
 _GROW = _gchoice(r'_\d+', r'\(\*spvDescriptorSet0\.[a-z]+_c\d+\)\._m0\[(?P<i%s>_\d+) \? [^\]\n]+ : 0\](?:\[[^\]\n]+\]|\.[xyzw])')
 _GLEFT = re.compile(r'%s\) \?' % _GSIZE)
+# A bounded storage buffer's read (TranslationFlags.MetalStorageBounds, GitHub issue #2618): the same choice, the word when it lies in the memory the host bound there (the length table,
+# bank DMSH_SBLEN_BANK: bool _5 = (uint(idx) + before) < total) else 0, and out of bounds the index is word 0, inside the binding (_5 ? buf[_5 ? idx : 0] : 0u). Written as a select too:
+# the load needs no branch, and its words stay plain for wide_loads (dmsh_wide.py)
+_STABLE = r'\(\*spvDescriptorSet0\.[a-z]+_c%d\)\._m0\[\d+\]\.[xyzw]' % abi.SBLEN_BANK
+_SBOOL = re.compile(r'\bbool (_\d+) = \(uint\(_\d+\) \+ %s\) < %s;' % (_STABLE, _STABLE))
+_SROW = _gchoice(r'_\d+', r'\(\*spvDescriptorSet0\.[a-z]+_s\d+\)\._m0\[(?P<i%s>_\d+) \? [^\]\n]+ : 0\]')
 
 def select_guards(msl):
     if 'spvDescriptorSet0' not in msl: return msl
-    bools = set(_GBOOL.findall(msl))
-    def select(m):
+    bools, sbools = set(_GBOOL.findall(msl)), set(_SBOOL.findall(msl))
+    def select(m, conds):
         n = '1' if m.group('q1') else '2'; c = m.group('q' + n)
-        if c not in bools or m.group('i' + n) != c: return m.group(0)
+        if c not in conds or m.group('i' + n) != c: return m.group(0)
         return 'select(%s, %s, %s)' % (m.group('z' + n), m.group('r' + n), c)
-    if bools: msl = _GROW.sub(select, msl)
-    left = _GLEFT.search(msl) or next((m for m in re.finditer(r'(?<!\[)\b(_\d+) \?', msl) if m.group(1) in bools), None)
-    if left: raise ValueError('a bounded uniform read is not written as a select: ' + msl[msl.rfind('\n', 0, left.start()) + 1:left.end() + 100].split('\n')[0].strip()[:160])
+    if bools: msl = _GROW.sub(lambda m: select(m, bools), msl)
+    if sbools: msl = _SROW.sub(lambda m: select(m, sbools), msl)
+    left = _GLEFT.search(msl) or next((m for m in re.finditer(r'(?<!\[)\b(_\d+) \?', msl) if m.group(1) in bools | sbools), None)
+    if left: raise ValueError('a bounded uniform or storage read is not written as a select: ' + msl[msl.rfind('\n', 0, left.start()) + 1:left.end() + 100].split('\n')[0].strip()[:160])
     return msl
 _SCALE = '(*spvDescriptorSet0.support_buffer)._m5[0].x'   # the support buffer's render scale (Ryujinx's layout), which the host fills with 1 (nvn_mtl.m support buffer)
 

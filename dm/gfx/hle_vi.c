@@ -16,6 +16,10 @@ static struct { uint32_t magic; } g_display = {0x50534944}, g_layer = {0x5259414
 static struct { uint32_t magic; void *layer; } g_native = {0x4e49574e, 0};
 
 HLE_FORCE("_ZN2nn2vi10InitializeEv", "display service init; the host has no vi service", void, h_vi_Init, void) {}
+// The Switch 2 SDKs' variant with low frame rate compensation for a variable refresh rate display: nn::vi::Initialize's work through vi2::InitializeWithVrrLfcEnabled, whose
+// VRR hooks ask the graphics system's user session, which the host never opens (Resident Evil 4 v131072, SDK 21.4.3: main+0xb180288 → sdk+0x5d8cf0, a null read in SdkMutexType::Lock).
+// The host has no vi service and no VRR display (QueryDisplayVrrSupported below): the same as nn::vi::Initialize
+HLE_FORCE("_ZN2nn2vi27InitializeWithVrrLfcEnabledEv", "display service init with VRR low frame rate compensation; the host has no vi service and no VRR", void, h_vi_InitVrrLfc, void) {}
 HLE_FORCE("_ZN2nn2vi18OpenDefaultDisplayEPPNS0_7DisplayE", "open default display; the host returns a static object", Result, h_vi_OpenDisp, void **out) {
     *out = &g_display; return RES_OK;
 }
@@ -78,8 +82,10 @@ HLE_FORCE("_ZN2nn2vi20GetLatestFrameNumberEPmPKNS0_5LayerE", "the layer's latest
 // FlushRenderingCommands, which waits for every fence (FFrameEndSync, main+0x15015f0), waited for ever right after the opening movie: the game thread polled its fence each ms, nothing
 // was presented again. FrameInfo is 40 bytes, as the SDK's ListFrameHistory (sdk 20.5.15, sdk+0x4510a0) fills it from the compositor's records: status (2 shown with a present
 // time, 1 queued and not shown yet), frame number (the numbering of GetLatestFrameNumber), the queue tick and the present tick twice; sorted by frame number, newest first.
-// A frame is shown once the present queue has handed it on (nvn_mtl.m g_pq_done) and the system did not drop it; its present time is the drawable's presented time when Metal
-// reports one, else (headless, or before the handler runs) the time it was first seen handed on
+// A frame is shown once the present queue has handed it on (nvn_mtl.m g_pq_done); its present time is the drawable's presented time when Metal reports one, else (headless, before
+// the handler runs, or a drawable the Mac never put on screen) the time it was first seen handed on. A Switch's compositor shows every frame it is handed, in order, so a frame the
+// Mac dropped (presentedTime 0) still counts as shown: listed as queued, the newest ones stayed so for ever when the game presented nothing more until their flip came (Orbitals,
+// main+0x1540460: right after both players ready up the load stopped presenting, and its FFrameEndSync waited for the flip of a frame Metal had dropped, until Unreal aborted: "GameThread timed out waiting for …")
 #define VFH 8
 typedef struct { uint64_t frame, ticket, queued_ns, seen_ns; } vfh_ent;
 static vfh_ent g_vfh[VFH]; static pthread_mutex_t g_vfh_mu = PTHREAD_MUTEX_INITIALIZER;
@@ -100,9 +106,9 @@ HLE_FORCE("_ZN2nn2vi16ListFrameHistoryEPNS0_9FrameInfoEiPKNS0_5LayerE", "the lay
     for (uint64_t f = latest; f > 0 && latest - f < VFH && k < n; f--) {
         vfh_ent *e = &g_vfh[f % VFH]; if (e->frame != f) continue;
         uint64_t *o = (uint64_t *)out + 5 * k++, shown = 0;
-        double pt = e->ticket <= d ? mtl_presented_time(e->ticket) : -1;
+        double pt = e->ticket <= d ? mtl_presented_time(e->ticket) : 0;
         if (pt > 0) { uint64_t ago = hnow > (uint64_t)(pt * 1e9) ? hnow - (uint64_t)(pt * 1e9) : 0; shown = gnow > ago ? gnow - ago : 1; }
-        else if (pt == 0) { if (!e->seen_ns) e->seen_ns = gnow; shown = e->seen_ns; }
+        else if (e->ticket <= d) { if (!e->seen_ns) e->seen_ns = gnow; shown = e->seen_ns; }
         o[0] = shown ? 2 : 1; o[1] = f; o[2] = vfh_ticks(e->queued_ns); o[3] = o[4] = shown ? vfh_ticks(shown) : 0;
     }
     pthread_mutex_unlock(&g_vfh_mu);
@@ -130,13 +136,36 @@ HLE_FORCE("_ZN2nn2vi8FinalizeEv", "display service shutdown; the host has no vi 
 // The SDK's versions check the display against its own default display object and forward the layer to vi2, whose layer object the host never made (Donkey Kong Bananza: a call
 // through null from SetLayerNextHdrContentGamutMetadata, main+0x2036f4). HDR is advertised only when the front end has enabled its linear EDR output; otherwise output stays SDR.
 // The reported peak is a virtual content mastering target, not a measurement of the display. HdrOutputFormat 0 is SDR; paper white is the BT.2408 reference, 203 nits.
+// Forensic only: DM_VI_HDR_TRACE=1 observes requests without changing SDR answers. DM_VI_HDR_PROBE=1 implies trace and advertises HDR capabilities to discover a game's own path.
+// The probe does not report physical display support, configure an HDR layer or validate the game's output encoding/gamut. Both are off by default and cached per process.
+static pthread_once_t g_vi_hdr_once = PTHREAD_ONCE_INIT;
+static int g_vi_hdr_trace, g_vi_hdr_probe;
+static void vi_hdr_init(void) {
+    const char *trace = getenv("DM_VI_HDR_TRACE"), *probe = getenv("DM_VI_HDR_PROBE");
+    g_vi_hdr_probe = probe && !strcmp(probe, "1");
+    g_vi_hdr_trace = g_vi_hdr_probe || (trace && !strcmp(trace, "1"));
+}
+static int vi_hdr_probe(void) { pthread_once(&g_vi_hdr_once, vi_hdr_init); return g_vi_hdr_probe; }
+static int vi_hdr_trace_take(atomic_uint *seen) {
+    pthread_once(&g_vi_hdr_once, vi_hdr_init);
+    if (!g_vi_hdr_trace) return 0;
+    unsigned n = atomic_load_explicit(seen, memory_order_relaxed);
+    while (n < 8) if (atomic_compare_exchange_weak_explicit(seen, &n, n + 1, memory_order_relaxed, memory_order_relaxed)) return 1;
+    return 0;   // hard cap per entry point, including callers on different guest threads
+}
+#define VI_HDR_TRACE(format, ...) do { static atomic_uint seen; if (vi_hdr_trace_take(&seen)) { \
+    LOG("[vi-hdr] %s: " format, g_vi_hdr_probe ? "HDR capability probe (forensic, NOT physical display HDR support)" : vi_hdr_host() ? "host linear EDR (virtual content target; system tone mapping)" : "trace only (host SDR)", __VA_ARGS__); \
+} } while (0)
 HLE_FORCE("_ZN2nn2vi21QueryDisplayHdrStatusEPbPNS0_15HdrOutputFormatEPtPKNS0_7DisplayE", "display HDR status: front-end EDR capability, SDR otherwise", Result, h_vi_HdrStatus,
           uint8_t *on, uint32_t *fmt, uint16_t *peak, const void *disp) {
-    (void)disp; int hdr=vi_hdr_host();
-    if (on) *on = (uint8_t)hdr; if (fmt) *fmt = hdr ? 1u : 0u; if (peak) *peak = hdr ? 1000u : 0u;
+    int probe = vi_hdr_probe() || vi_hdr_host();
+    if (on) *on = (uint8_t)probe; if (fmt) *fmt = probe ? 1u : 0u; if (peak) *peak = probe ? 1000u : 0u;
+    VI_HDR_TRACE("QueryDisplayHdrStatus display=%p outputs=%p/%p/%p -> on=%u format=%u peak_nits=%u result=0", (void *)disp, (void *)on, (void *)fmt, (void *)peak, (unsigned)probe, probe ? 1u : 0u, probe ? 1000u : 0u);
     return RES_OK; }
 HLE_FORCE("_ZN2nn2vi25QueryDisplayHdrPaperWhiteEPtPKNS0_7DisplayE", "display HDR paper white: 203 nits (BT.2408)", Result, h_vi_PaperWhite, uint16_t *nits, const void *disp) {
-    (void)disp; if (nits) *nits = 203; return RES_OK; }
+    if (nits) *nits = 203;
+    VI_HDR_TRACE("QueryDisplayHdrPaperWhite display=%p output=%p -> paper_white_nits=203 result=0", (void *)disp, (void *)nits);
+    return RES_OK; }
 HLE_FORCE("_ZN2nn2vi24QueryDisplayVrrSupportedEPbPKNS0_7DisplayE", "display VRR: not supported (fixed refresh rate)", Result, h_vi_VrrSupported, uint8_t *on, const void *disp) {
     (void)disp; if (on) *on = 0; return RES_OK; }
 HLE_FORCE("_ZN2nn2vi23SetDisplayVrrCapabilityEPNS0_7DisplayEb", "display VRR capability: the host has no VRR", Result, h_vi_SetVrr, void *disp, unsigned on) {
@@ -163,17 +192,18 @@ HLE_FORCE("_ZN2nn2vi28SetLayerExtendedSwapIntervalEPNS0_5LayerEii", "layer exten
     (void)layer; static atomic_int once; if (!atomic_exchange(&once, 1)) LOG("vi::SetLayerExtendedSwapInterval %d %d: no VRR on the host, the NVN swap interval stays", a, b); return RES_OK; }
 HLE_FORCE("_ZN2nn2vi30ClearLayerExtendedSwapIntervalEPNS0_5LayerE", "layer extended swap interval cleared", Result, h_vi_ExtSwapClear, void *layer) { (void)layer; return RES_OK; }
 HLE_FORCE("_ZN2nn2vi35SetLayerNextHdrContentGamutMetadataEPNS0_5LayerENS0_15HdrContentGamutE", "layer HDR metadata: SDR output, nothing to apply", Result, h_vi_HdrGamut, void *layer, int g) {
-    (void)layer; (void)g; return RES_OK; }
+    VI_HDR_TRACE("SetLayerNextHdrContentGamutMetadata layer=%p gamut=%d result=0", layer, g); return RES_OK; }
 HLE_FORCE("_ZN2nn2vi39SetLayerNextHdrToSdrToneMappingMetadataEPNS0_5LayerENS0_14HdrToneMappingE", "layer HDR metadata: SDR output, nothing to apply", Result, h_vi_HdrToneMap, void *layer, int m) {
-    (void)layer; (void)m; return RES_OK; }
+    VI_HDR_TRACE("SetLayerNextHdrToSdrToneMappingMetadata layer=%p mode=%d result=0", layer, m); return RES_OK; }
 HLE_FORCE("_ZN2nn2vi52SetLayerNextHdrExtendedContentLuminanceRangeMetadataEPNS0_5LayerEtt", "layer HDR extended luminance: retained for the next native display ticket", Result, h_vi_HdrExtLum,
-          void *layer, uint32_t lo, uint32_t hi) { (void)layer; (void)lo; vi_hdr_content_peak(hi); return RES_OK; }
+          void *layer, uint32_t lo, uint32_t hi) { vi_hdr_content_peak(hi); VI_HDR_TRACE("SetLayerNextHdrExtendedContentLuminanceRangeMetadata layer=%p low=%u high=%u result=0", layer, lo, hi); return RES_OK; }
 HLE_FORCE("_ZN2nn2vi52SetLayerNextHdrStandardContentLuminanceRangeMetadataEPNS0_5LayerEtt", "layer HDR metadata: SDR output, nothing to apply", Result, h_vi_HdrStdLum,
-          void *layer, uint32_t lo, uint32_t hi) { (void)layer; (void)lo; (void)hi; return RES_OK; }
+          void *layer, uint32_t lo, uint32_t hi) { VI_HDR_TRACE("SetLayerNextHdrStandardContentLuminanceRangeMetadata layer=%p low=%u high=%u result=0", layer, lo, hi); return RES_OK; }
 // The rest of SDK 22's layer HDR metadata calls (the Bezier tone curve and the clears): the SDK forwards them through a table its graphics system fills, which is null on the host, so
 // unanswered they call through null (Mario Kart World 1.8.0 sets the curve every frame, by pull request #1116)
 HLE_FORCE("_ZN2nn2vi39SetLayerNextHdrAdjustableBezierMetadataEPNS0_5LayerEfff", "layer HDR metadata: SDR output, nothing to apply", Result, h_vi_HdrBezier,
-          void *layer, float a, float b, float c) { (void)layer; (void)a; (void)b; (void)c; return RES_OK; }
-HLE_FORCE("_ZN2nn2vi41ClearLayerNextHdrAdjustableBezierMetadataEPNS0_5LayerE", "layer HDR metadata cleared: SDR output", Result, h_vi_HdrBezierClear, void *layer) { (void)layer; return RES_OK; }
-HLE_FORCE("_ZN2nn2vi37ClearLayerNextHdrContentGamutMetadataEPNS0_5LayerE", "layer HDR metadata cleared: SDR output", Result, h_vi_HdrGamutClear, void *layer) { (void)layer; return RES_OK; }
-HLE_FORCE("_ZN2nn2vi41ClearLayerNextHdrToSdrToneMappingMetadataEPNS0_5LayerE", "layer HDR metadata cleared: SDR output", Result, h_vi_HdrToneMapClear, void *layer) { (void)layer; return RES_OK; }
+          void *layer, float a, float b, float c) { VI_HDR_TRACE("SetLayerNextHdrAdjustableBezierMetadata layer=%p values=%g/%g/%g result=0", layer, (double)a, (double)b, (double)c); return RES_OK; }
+HLE_FORCE("_ZN2nn2vi41ClearLayerNextHdrAdjustableBezierMetadataEPNS0_5LayerE", "layer HDR metadata cleared: SDR output", Result, h_vi_HdrBezierClear, void *layer) { VI_HDR_TRACE("ClearLayerNextHdrAdjustableBezierMetadata layer=%p result=0", layer); return RES_OK; }
+HLE_FORCE("_ZN2nn2vi37ClearLayerNextHdrContentGamutMetadataEPNS0_5LayerE", "layer HDR metadata cleared: SDR output", Result, h_vi_HdrGamutClear, void *layer) { VI_HDR_TRACE("ClearLayerNextHdrContentGamutMetadata layer=%p result=0", layer); return RES_OK; }
+HLE_FORCE("_ZN2nn2vi41ClearLayerNextHdrToSdrToneMappingMetadataEPNS0_5LayerE", "layer HDR metadata cleared: SDR output", Result, h_vi_HdrToneMapClear, void *layer) { VI_HDR_TRACE("ClearLayerNextHdrToSdrToneMappingMetadata layer=%p result=0", layer); return RES_OK; }
+#undef VI_HDR_TRACE

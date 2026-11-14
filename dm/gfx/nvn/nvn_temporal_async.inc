@@ -230,7 +230,10 @@ static int temporal_async_present(uint64_t serial,id<MTLTexture> src,double peri
     [cb addCompletedHandler:^(id<MTLCommandBuffer> finished) {
         (void)keep.count;
         if(finished.error){MLOG("[RED] auxiliary display GPU error: %s",finished.error.description.UTF8String);gpu_lost_check(finished.error,"auxiliary display");}
-        pthread_mutex_lock(&g_pq_mu);if(!generated && ticket>g_pq_done)g_pq_done=ticket;g_pq_inflight--;present_gpu_note(finished.GPUEndTime-finished.GPUStartTime,up!=nil);pthread_cond_broadcast(&g_pq_cv);pthread_mutex_unlock(&g_pq_mu);
+        pthread_mutex_lock(&g_pq_mu);if(!generated && ticket>g_pq_done)g_pq_done=ticket;g_pq_inflight--;
+        NSArray *retire = nil; if (!g_pq_inflight && g_ext_retire.count) { retire = g_ext_retire; g_ext_retire = nil; }
+        present_gpu_note(finished.GPUEndTime-finished.GPUStartTime,up!=nil);pthread_cond_broadcast(&g_pq_cv);pthread_mutex_unlock(&g_pq_mu);
+        if (retire) ext_retire(retire);
         temporal_async_note_gpu(frame,up==drawable.texture?(generated?"generated display direct":"native display direct"):(generated?"generated display":"native display"),finished.GPUStartTime,finished.GPUEndTime);
     }];
     pthread_mutex_lock(&g_pq_mu);g_pq_inflight++;pthread_mutex_unlock(&g_pq_mu);

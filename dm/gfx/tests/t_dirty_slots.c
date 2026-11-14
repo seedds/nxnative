@@ -143,5 +143,22 @@ int main(void) {
     EXPECT("an untracked span: SIZE_MAX", 1, nvn_dirty_since_except(NULL, &stamp, sizeof stamp, 0, NULL, 0, NULL) == SIZE_MAX);
     nvn_dirty_remove_range(st8);
     munmap(st8, 8 * pg);
+
+    // nvn_dirty_describe (DM_NVN_DIRTYCHECK's miss report): a protected page as the tracker and the kernel hold it, and one whose protection a call outside the tracker took away
+    uint8_t *dp = mmap(NULL, 2 * pg, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+    if (dp == MAP_FAILED) { perror("mmap"); exit(2); }
+    nvn_dirty_add_range(dp, 2 * pg);
+    const void *dspan = nvn_dirty_span(dp, 2 * pg);
+    nvn_dirty_protect(dp, 2 * pg);
+    char d[512];
+    nvn_dirty_describe(dp, dspan, d, sizeof d); printf("  %s\n", d);
+    EXPECT("describe: protected, kept range, kernel read-only", 1, strstr(d, "(kept) prot gen 0") && strstr(d, "kernel: r-") != NULL);
+    mprotect(dp + pg, pg, PROT_READ | PROT_WRITE);   // behind the tracker's back
+    nvn_dirty_describe(dp + pg, NULL, d, sizeof d); printf("  %s\n", d);
+    EXPECT("describe: held protected, kernel has it writable", 1, strstr(d, " prot gen 0") && strstr(d, "kernel: rw") && !strstr(d, "(kept)"));
+    nvn_dirty_remove_range(dp);
+    nvn_dirty_describe(dp, NULL, d, sizeof d);
+    EXPECT("describe: no live range once the pool goes", 1, strstr(d, "no live range") != NULL);
+    munmap(dp, 2 * pg);
     return g_fail != 0;
 }

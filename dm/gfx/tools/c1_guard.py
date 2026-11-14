@@ -2,7 +2,7 @@
 # c1_guard.py <dmsh_b version dir> <output tsv>: lists the shaders whose reads of c1 (the shader's embedded constant segment) are not proven to stay inside the span the host's
 # shared c1 banks give them. nvn_mtl.m c1_store packs the c1 of unlisted shaders into 4 MB banks: the data rounded up to 256 bytes, then a 256-byte zero gap, then the next shader's data.
 # A listed shader gets an exclusive 64 KiB of zeros instead (reads past the data return 0, as on the Switch). The host loads the list only when its header names its library's chain version
-# and inputs stamp (dmsh_chain.py table_head). dmsh_build.py runs it after each full build.
+# and inputs stamp (shader_lib.py table_head). dmsh_build.py runs it after each full build.
 # An index is proven when interval arithmetic over the whole expression, following each variable's definition, gives 0 <= index and 16 * (index + 1) <= that span (_m0 is float4[4096]).
 # Literals, & K, % K, >> K, min, max, clamp and casts bound a value; inputs, buffer reads and anything not understood are unbounded. Every stage's c1 counts (vp_, fp_, cp_, gp_ ...).
 # The first version followed only the last variable of an index and took any mask, min or clamp it met as proof: `_1 + (_2 & 3u)` with _1 read from an input passed,

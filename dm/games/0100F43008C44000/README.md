@@ -14,7 +14,7 @@ Update 2.0.2 (v393216) over the base game, SDK 19.3.11 (NVN 55). Game Freak's Tr
 | `pad_layout simple` | `game.tsv` | the 2D gamepad layout |
 | `depth_mode zero` | `game.tsv` | the game sets near = 0 with `nvnDeviceSetDepthMode`; see [Pipeline bases made before the game runs](#pipeline-bases-made-before-the-game-runs) |
 
-`render_cond` stays off: it changes nothing in this game.
+Render conditions, which the host evaluates for every game: evaluating them changed nothing in this game.
 
 ## Memory
 
@@ -110,6 +110,7 @@ General host changes first needed here; each applies to every game:
 - **Bounds checks before image-atomic pointer construction and matched image/buffer admission:** [Bounds of image atomics](../../../docs/reference/shaders.md#bounds-of-image-atomics).
 - **The host's StandardAllocator cap** (`hle_svc.c` "StandardAllocator's address space", the `stdalloc_cap` key): [StandardAllocators over 12 to 62 GB of address space](../../../docs/reference/memory.md#standardallocators-over-12-to-62-gb-of-address-space).
 - **The address region table and the NSP script's region check** (`patch_nso.py` "Address regions", `hle_svc.c`, `DM_REGIONS`): its allocator region, 4 GB through `nn::mem::StandardAllocator::Initialize`, returning to `main+0x1b2e690` in `nninitStartup` (the function at `main+0x1b3e3b0` that sets the size tail-calls the SDK), opened to its end by the startup block, which is why the check judges a region by who lays it out: [Measuring address regions and commits](../../../docs/reference/memory.md#measuring-address-regions-and-commits).
+- **Specialized second functions in the offline pipeline archive** (`needs_cut` in `pso_offline.py`): with `depth_mode zero` a pulling vertex shader's base takes its library's second function `main0_z`, which `metal-tt` 32023.922 cannot specialize, so the Mac app's archive step failed and the app had no archive (26,030 bases planned; issue #2337): [Specialized second functions in the offline pipeline archive](../../../docs/reference/shaders.md#specialized-second-functions-in-the-offline-pipeline-archive).
 
 ## Open
 
@@ -117,5 +118,5 @@ General host changes first needed here; each applies to every game:
 - The driver-segment word `0x640`, added to the vertex ID by 58 shaders, stays 0 until what the driver puts there is known.
 - Transform feedback: only plain array draws are captured; indexed, indirect or instanced ones give a red line. Feedback layouts other than one output per buffer from x on get a red line and no capture entry point.
 - `c85de3713170e519` ORs bit fields into output 0 and has not been seen with an integer attachment (no row).
-- The development notes list "the render condition the host does not evaluate" among the Mac route's red lines; `render_cond` changes nothing here and stays off.
+- The development notes list "the render condition the host does not evaluate" among the Mac route's red lines; evaluating it changed nothing here.
 - `game.tsv`'s header says "Plays on the Mac"; AGENTS.md and the development notes say it is playable on the iPhone.

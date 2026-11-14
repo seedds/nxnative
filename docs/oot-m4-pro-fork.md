@@ -1,6 +1,6 @@
 # OOT on M4 Pro: playable checkpoint and contributor guide
 
-This fork collects the OOT work from November 11–13, 2026. The initial shared engine checkpoint is `09a2572523bea861d0c7c7006826e57801d16de5`. Subsequent commits add a small external-build settings launcher and a title-movie cadence correction. This is a contribution checkpoint, not a full-game certification or a promise of a fixed frame rate on every Mac.
+This fork collects the OOT work from November 11–14, 2026. The initial shared engine checkpoint is `09a2572523bea861d0c7c7006826e57801d16de5`. Subsequent commits add a small external-build settings launcher and a title-movie cadence correction. This is a contribution checkpoint, not a full-game certification or a promise of a fixed frame rate on every Mac.
 
 The first player-confirmed shared configuration was **2560×1440 output, a 60-native-FPS cap, MetalFX spatial upscaling, interpolation off and HDR off**. On November 13, Nassim confirmed normal speed and very smooth play on his M4 Pro, then reported that Hyrule Field was still imperfect. He initially thought interpolation was running; the live configuration confirmed it was disabled. This is player evidence, not a controlled frame-time or battery benchmark or a locked-60 claim for every area.
 
@@ -14,7 +14,7 @@ python3 scripts/build_ipa_from_nsp.py /path/to/OcarinaOfTime.nup \
   --env-file dm/games/0400486024DEC000/presets/2k60-native.env
 ```
 
-Follow [the development guide](development.md) for the supported Apple SDK, compiler, Python and packing prerequisites. The tested update is `v131072`. This checkpoint uses shader chain `bc8830d4ba5a`; a different chain's cache is not a substitute. Build the full shader map for coverage beyond recorded playtest areas; `--seen-shaders` deliberately omits shaders those areas have not used.
+Follow [the development guide](development.md) for the supported Apple SDK, compiler, Python and packing prerequisites. The tested update is `v131072`. The November 13 measurements used shader chain `bc8830d4ba5a`. The November 14 upstream integration uses the current `DMSH_CHAIN` in [dmsh_chain.h](../dm/gfx/nvn/dmsh_chain.h); rebuild matching shader data rather than reusing the historical cache. Build the full shader map for coverage beyond recorded playtest areas; `--seen-shaders` deliberately omits shaders those areas have not used.
 
 The repository supplies source, synthetic fixtures, profile metadata and settings. Game files, extracted shader libraries, keys, saves, pipeline archives and GPU captures are not supplied. Build from your own game files. The private development launcher is not a portable installer; use the supported packer above.
 
@@ -22,7 +22,7 @@ For an already packed app, merge the preset into `~/Library/Application Support/
 
 Output size is distinct from internal rendering resolution. This preset makes no battery-life promise and starts no GPU clock helper. The development Mac has a separate clock-guard service; performance and power observations must state its policy. The packer already disables Game Mode for the [documented clock issue](reference/frame-rate.md#macos-game-mode-holds-the-gpu-at-its-lowest-clock).
 
-The clean public packing command with this new env file has not yet been replayed end to end. The installed host, relevant build-mirror sources, shader-map identity and live settings have been checked. That is not a claim that every clean packing environment has been validated.
+The clean public packing command with this new env file has not yet been replayed end to end. For the November 13 installation, the host, relevant build-mirror sources, shader-map identity and live settings were checked; that evidence does not validate the November 14 merged build. That is not a claim that every clean packing environment has been validated.
 
 ## What this checkpoint contains
 
@@ -30,6 +30,8 @@ The clean public packing command with this new env file has not yet been replaye
 - A guarded MetalFX spatial replacement recipe, with color/format/dimension/usage/alias checks and native fallback. OOT's observed input is square-root encoded linear color. Replaced dispatches preserve scene-discovery notifications so they do not silently disable interpolation.
 - Opt-in asynchronous MetalFX generation, immutable snapshot slots, camera/depth reprojection, reader timelines, paired presentation and retained resources. These are source and fixture foundations; generation remains experimental.
 - Native-panel output sizing and bounded timing/flow capture. Instrumentation helps diagnosis; it is not an FPS gain by itself.
+
+Read [the November 14 findings](oot-20261114-findings.md) for argument-generation correctness validation, neutral shader/pass-split trials and the still-open native-60 Field goal. Those historical private tests do not qualify the newly merged upstream build.
 
 Read [the OOT profile](../dm/games/0400486024DEC000/README.md), [triage and remaining work](oot-upstream-triage.md), and [agent notes](../AGENTS.md) before changing the host. Fixed guest addresses must remain gated to their verified build.
 
@@ -73,7 +75,7 @@ python3 -m unittest dm.tools.tests.test_docs \
   dm.tools.tests.test_game_profile dm.tools.tests.test_nsp_chain
 ```
 
-The complete graphics suite, final multi-game regression, clean public package run and merge onto current upstream remain open. Targeted historical checks are not substitutes. Other games are unqualified for this combined branch.
+The complete graphics suite, final multi-game regression and clean public package run remain open for the November 14 upstream integration. Targeted historical checks are not substitutes. Other games are unqualified for this combined branch.
 
 Use [the development loop](agents/06-dev-loop.md) when extracting fixes. Copy saves and pipeline archives for experiments, silence automated game runs and preserve the player's profile. Capture visual evidence separately: synchronous screenshots can create the hitch being investigated. Record actual display callbacks, source cadence, GPU work, display mode, thermal state and helper policy separately.
 

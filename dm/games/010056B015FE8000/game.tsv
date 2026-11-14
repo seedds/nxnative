@@ -38,8 +38,6 @@ depth_mode	zero
 # The native clock measures elapsed time; dynamic-resolution thresholds target 60 fps in patches.py.
 present_interval	display
 fps_target	60
-# The renderer subtracts two raw timestamp reports to measure its GPU cost.
-gpu_timestamps	segment
 # The game fills texture storage on the CPU and publishes it with mapped-range flushes.
 tex_flush_upload	on
 # Some title backgrounds are filled after initialization without an NVN flush.

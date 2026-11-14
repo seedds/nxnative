@@ -10,6 +10,12 @@
 enum { PRO_MOTION_PERIOD_NS = 5000000, PRO_MOTION_STALE_NS = 300000000 };
 typedef struct { int live, seen; uint8_t counter; uint64_t received; } pro_motion;
 typedef struct { float acc[3], rot[3]; uint64_t ns; } pro_motion_sample;
+// Whether a Pro Controller's HID entry has a pad behind it: macOS keeps the pad in full mode, which sends report 0x30 every 15 ms whether or not anything moves
+// (bluetooth_hid_notes.md: 60 Hz; the raw motion above lives on it), so heard is when its last 0x30 came and an entry silent for PRO_SILENT_NS counts as no pad.
+// After a long Bluetooth disconnect, IOKit can keep a second entry of the pad's model that sends nothing and whose output fails with MACH_SEND_INVALID_DEST
+// (0x10000003): counted, one pad was two (GitHub issue #2237)
+enum { PRO_SILENT_NS = 1000000000 };
+static inline int pro_live(uint64_t heard, uint64_t now) { return heard && now >= heard && now - heard < PRO_SILENT_NS; }
 static inline int pro_motion_player(int devices, int controllers, int player) {
     // GameController has no public per-controller HID identity. Only one physical Pro and one GC Pro can be paired without guessing.
     return devices == 1 && controllers == 1 ? player : -1;

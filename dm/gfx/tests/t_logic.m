@@ -21,7 +21,7 @@ static NvProg *prog(NSString *dir, prog_t *program, NvShader **out) {
     NvProg *pr = [NvProg new];
     pr->sh[0] = [NvShader new]; pr->sh[0]->fn = [lib newFunctionWithName:@"vertex_main"]; pr->sh[0]->stage = 0; snprintf(pr->sh[0]->key, sizeof pr->sh[0]->key, "vl_b");
     NvShader *ps = [NvShader new]; pr->sh[1] = ps; *out = ps;
-    ps->fn = fn4_note([lib newFunctionWithName:@"main0"], lib, @"main0", nil); ps->fn_u = fn4_note([lib newFunctionWithName:@"main0_u"], lib, @"main0_u", nil);
+    ps->fn = fn4_note([lib newFunctionWithName:@"main0"], lib, @"main0", nil); ps->fn_u = [lib newFunctionWithName:@"main0_u"]; ps->ulib = lib;
     ps->stage = 1; ps->has_logic = 1; ps->rf.color_known = 1; ps->rf.color_mask = 1;
     memset(ps->key, '1', 16); memcpy(ps->key + 16, "_b", 3);   // the host loads <dir>/<16 digits>_bx.metallib
     ps->ae = [ps->fn newArgumentEncoderWithBufferIndex:0]; ps->arg_len = ps->ae.encodedLength; ps->rf.nb = 1; ps->rf.b[0] = (nvn_rbind){.kind = NVN_RB_CBUF, .reg = 0, .aid = 0};
@@ -58,7 +58,8 @@ static void run(NvProg *pr, prog_t *program, NvShader *ps, int fmt, int bits) { 
     [blit() copyFromTexture:tex_mtl(&target) sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(4, 16, 1) toBuffer:pixels destinationOffset:0 destinationBytesPerRow:256 destinationBytesPerImage:256 * 16];
     CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull)); CHECK(!mtl_last_commit_error());
     CHECK(g_pso.n - psos == 2u);   // the operation is data: one pipeline with it (every operation but COPY), one without
-    CHECK(ps->lfn_state == 1 && ps->lfn.count == (normalized ? 2u : 1u));   // main0_u, then main0 for the normalized targets too: one entry per targets and entry point
+    CHECK(ps->lfn_state == 1 && ps->lfn.count == (normalized ? 2u : 1u));   // main0_u for integer output 0, then main0 for the normalized targets too: one entry per targets, entry point and integer outputs
+    CHECK(ps->ufn.count == 1u);   // main0_u specialized once, for integer output 0
     int nch = fmt == NVN_FORMAT_RG32UI ? 2 : 4;
     for (int f = 0; f < 16; f++) for (int x = 0; x < 4; x++) for (int c = 0; c < nch; c++) {
         const uint8_t *p = (const uint8_t *)pixels.contents + f * 256 + x * nch * bits / 8;
@@ -85,6 +86,19 @@ int main(int argc, char **argv) { @autoreleasepool {
     CHECK(unorm_chan_masks(MTLPixelFormatBGRA8Unorm, bits) && bits[2] == 0xff); CHECK(!unorm_chan_masks(MTLPixelFormatRGBA16Float, bits));
     k.cfmt[0] = MTLPixelFormatRG32Uint; k.chmask = 0; CHECK(lop_key(&k, ps, 0) == 0);   // no colour written: nothing to combine, no red line
     k.chmask = 0xf; S.color.logic_op = NVN_LOGIC_OP_COPY; CHECK(lop_key(&k, ps, 0) == 0);
+    // The integer-output entry point per pipeline's integer targets (pso_uint_mask, uint_fn): a float target beside an integer one, as Pokémon Sword's and Trails in the Sky 2nd Chapter's G-buffers
+    ps->rf.color_mask = 3; memset(&k, 0, sizeof k); k.cfmt[0] = MTLPixelFormatRGBA8Unorm; k.cfmt[1] = MTLPixelFormatRG32Uint;
+    CHECK(pso_uint_mask(&k, ps, 0) == 2u);
+    k.cfmt[0] = MTLPixelFormatRGBA16Uint; CHECK(pso_uint_mask(&k, ps, 0) == 3u);
+    k.cfmt[0] = MTLPixelFormatRGBA16Float; k.cfmt[1] = MTLPixelFormatRGBA8Unorm; CHECK(pso_uint_mask(&k, ps, 0) == 0u);
+    k.cfmt[0] = MTLPixelFormatR32Uint; k.lmap[0] = 1; CHECK(pso_uint_mask(&k, ps, 1) == 2u);   // a merged pass: target 0 holds output 1
+    ps->rf.color_mask = 1; k.lmap[0] = 0; k.cfmt[1] = MTLPixelFormatR32Uint; CHECK(pso_uint_mask(&k, ps, 0) == 1u);   // an output the shader does not write: no constant for it
+    id<MTLFunction> u2 = uint_fn(ps, 2), u3 = uint_fn(ps, 3);
+    CHECK(u2 && u3 && u2 != u3 && uint_fn(ps, 2) == u2 && !uint_fn(ps, 0));   // one specialization per set, kept
+    MTLRenderPipelineDescriptor *pd = [MTLRenderPipelineDescriptor new]; pd.vertexFunction = pr->sh[0]->fn; pd.fragmentFunction = fn_dev(u2);
+    pd.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm; pd.colorAttachments[1].pixelFormat = MTLPixelFormatRG32Uint;
+    NSError *perr = nil; CHECK([g_dev newRenderPipelineStateWithDescriptor:pd error:&perr] != nil);   // output 0 a float, output 1 the integer vector of its bits: Metal takes the pair
+    pd.colorAttachments[0].pixelFormat = MTLPixelFormatRG32Uint; CHECK([g_dev newRenderPipelineStateWithDescriptor:pd error:&perr] == nil);   // and refuses a float output into an integer target
     printf("logic operation replay: %d checks, %d failed\n", checks, failed);
     return failed != 0;
 } }

@@ -1,8 +1,8 @@
 # OOT checkpoint: upstream extraction triage
 
-This maps `release/oot-metalfx-20261113` for review, not wholesale replacement of main. See [the playable profile](oot-m4-pro-fork.md). Engine checkpoint: `09a2572`; common ancestor with upstream: `f02d0474`. The engine contribution range has 112 files, +6,613/−374 lines. An endpoint-tree diff incorrectly includes later upstream additions as removals.
+This maps `release/oot-metalfx-20261113` for review, not wholesale replacement of main. See [the playable profile](oot-m4-pro-fork.md). Engine checkpoint: `09a2572`; common ancestor with upstream: `f02d0474`. The historical engine contribution range had 112 files, +6,613/−374 lines; these are not the statistics of the November 14 upstream integration. An endpoint-tree diff incorrectly includes later upstream additions as removals.
 
-Preserve tested engine bytes. A rebase onto newer main needs new validation. Extract coherent fixes separately, crediting upstream PRs or commits where a mechanism already exists. A backport is not a second new contribution.
+The November 14 integration includes newer upstream through `2ad01cb4`, including argument generations and long-pass splitting. Preserve the newer upstream mechanisms rather than replaying older private backports. The combined renderer and current shader chain need new validation; historical receipts do not qualify merged bytes. See [the dated findings](oot-20261114-findings.md). Extract coherent fixes separately, crediting upstream PRs or commits where a mechanism already exists. A backport is not a second new contribution.
 
 ## General mechanisms without an OOT-specific contract
 
@@ -11,6 +11,8 @@ This describes semantic applicability, not completed multi-game testing.
 - **Uniform re-recording and short buffers.** Preserve the existing record span when changing one binding and pad only the missing uniform bytes. Start with `7ca292f9`, `nvn_mtl.m`, `t_nvn.c` and `t_uniform_padding.m`. Compare main before extracting.
 - **Bounded CPU texture-upload batching.** `2d1003fc` groups open-submission uploads within the staging budget and retains targets. `t_cpu_tex.m`, `t_upload_budget.m`, upload-slot and direct-upload fixtures cover correctness. The game observation does not isolate an FPS gain.
 - **Texture/view lifetimes and dirty epochs.** `e9678f60` and `09a2572` retain finalized resources for existing readers and assign recycled dirty slots a new registration epoch. Main already contains `born` epochs and finalized/ghost-view mechanisms in a newer owner layout. Treat them as carried fixes, not duplicate additions.
+- **Argument generations and bound-program ownership.** Upstream `f31276ad` already supplies the newer mechanism. A minimal older-private-base backport passed actual GPU red/green and a bounded Field smoke, with no FPS win. Do not import that compatibility adaptation over current main.
+- **Long-pass split/store/resume.** Upstream `18313129` already supplies it. The older private threshold-256 trial passed forced GPU preservation cases but did not improve Field. Do not duplicate it or transfer its private default to upstream policy.
 - **In-flight visibility and allocator reuse.** `5b77e8da`, verified past the old 64/128 boundaries by `t_wait_event.m`. Main already has `SUB_FLIGHT_MAX` and the corresponding visibility/post rings.
 - **Residency outside the hot mutex.** `a5863042` and `t_res_commit.m` separate the slow Metal commit from queued changes. Main already has the separate mutex and deferred changes.
 - **Prediction only at a new pipeline miss.** `be568428` and `t_pso_pending.m`. Main already has `pso_predict_due` and `g_pp_admit`.
@@ -38,7 +40,7 @@ This describes semantic applicability, not completed multi-game testing.
 2. **Reduce first-visit stalls.** Compare the effective manifest plus user list with [#2324](https://github.com/seedds/nxnative/pull/2324), [#2466](https://github.com/seedds/nxnative/pull/2466) and [#2550](https://github.com/seedds/nxnative/pull/2550). Deduplicate and prepare compatible missing entries. No complete ready-to-import Mac cache was verified in the search.
 3. **Extend 30→60 qualification.** The 60-FPS AV1 introduction now temporarily retains a 60-native cap; its matched timing test and the bounded 30+30 CastleTown gameplay test are documented in the contributor guide. Continue with long sessions and independent-motion quality; do not treat the movie fix as whole-game proof.
 4. **Implement actual 45-native / 90-output timing.** Audit fractional ratio, inverse and integer readers; an alternating whole-step average is not even motion. Verify the display can show 90 evenly.
-5. **Improve heavy-scene GPU headroom and tails.** Separate native/post work from display waits. Castle post-ablation removed features: it does not prove the same gain with features retained. Neutral palette/low-route experiments are not shipped gains.
+5. **Improve heavy-scene GPU headroom and tails.** Separate native/post work from display waits. Castle post-ablation removed features: it does not prove the same gain with features retained. Neutral palette/low-route experiments are not shipped gains. The November 14 direct-mesh/terrain and TASK reduction batches were also neutral or worse and remain unpromoted. The remaining older-source coalescing hypothesis concerns approximately three voluntary cuts, not all 39 native command buffers per frame.
 6. **Resolve FI quality cases.** Link/Navi, translucent tutorial/cave overlap, dialogue sharpness, fog/light shafts and cuts. A view-angle FPS change does not isolate a shader's cost.
 7. **Complete regression before merge.** Extract one mechanism at a time, run real fixtures and impact-selected games. This draft map does not replace those checks.
 

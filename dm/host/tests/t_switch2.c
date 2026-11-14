@@ -41,9 +41,11 @@ int main(void) {
         CHECK(s2_clock_sample(&c, 1000, base, &lost) == base && lost == 0);   // the first report: its arrival
         // a burst: three reports arrive within 1 ms but were sampled 30 ms apart
         uint64_t t1 = s2_clock_sample(&c, 1030, base + 61 * ms, &lost), t2 = s2_clock_sample(&c, 1060, base + 61 * ms + 300000, &lost), t3 = s2_clock_sample(&c, 1090, base + 62 * ms, &lost);
-        CHECK(t1 == base + 30 * ms && t2 == base + 60 * ms && t3 == base + 62 * ms);   // 30 ms apart until the arrival caps it (never in the future)
-        CHECK(s2_clock_sample(&c, 1180, base + 160 * ms, &lost) == base + 152 * ms && lost == 2);   // a 90 ms step: two reports lost, the gap kept
-        uint64_t same = s2_clock_sample(&c, 1180, base + 161 * ms, &lost); CHECK(same > base + 152 * ms && same < base + 153 * ms);   // the same millisecond: still after it
+#define NEAR_MS(a, b) ((a) + 200000 > (b) && (b) + 200000 > (a))   // within 0.2 ms: the anchor rises 1 ms a second
+        CHECK(NEAR_MS(t1, base + 30 * ms) && NEAR_MS(t2, base + 60 * ms) && t3 == base + 62 * ms);   // 30 ms apart until the arrival caps it (never in the future)
+        // a 90 ms step: two reports lost, the gap kept; the second report in a row earlier than the anchor (-28 ms, then -20) moves it, to the later of the two
+        uint64_t t4 = s2_clock_sample(&c, 1180, base + 160 * ms, &lost); CHECK(t4 == base + 160 * ms && lost == 2);
+        uint64_t same = s2_clock_sample(&c, 1180, base + 161 * ms, &lost); CHECK(same > t4 && same < t4 + ms);   // the same millisecond: still after it
         CHECK(s2_clock_sample(&c, 1210, base + 400 * ms, &lost) == base + 340 * ms);   // arriving late: held to 60 ms behind the arrival
         CHECK(s2_clock_sample(&c, 9000, base + 9000 * ms, &lost) == base + 9000 * ms && lost == 0);   // seconds of silence: starts over at the arrival
         CHECK(s2_clock_sample(&c, 100, base + 9030 * ms, &lost) == base + 9030 * ms);   // the clock went back: starts over too
@@ -56,6 +58,50 @@ int main(void) {
             prev = t;
         }
         CHECK(fabs(deg - 100 * S2_GYRO_DPS * 0.99) < 0.06 * 100 * S2_GYRO_DPS);   // 33 intervals of 30 ms: 0.99 s of rotation, the arrival jitter mostly gone
+        // the anchor is a report with about the least latency, not the first: a first report 20 ms late, then reports 2..12 ms late, sample at the low end of their latency
+        s2_clock e = {0}; uint64_t worst = 0;
+        for (int i = 0; i < 100; i++) {
+            uint64_t sent = base + (uint64_t)i * 30 * ms, arr = sent + (i ? 2 * ms + (uint64_t)((i * 7919) % 11) * ms : 20 * ms);
+            uint64_t t = s2_clock_sample(&e, 3000 + 30 * (unsigned)i, arr, NULL);
+            if (i > 10 && t - sent > worst) worst = t - sent;
+        }
+        CHECK(worst >= 2 * ms && worst < 8 * ms);   // two quick reports in a row set it: under 8 ms of the 2..12, far from the first report's 20
+        // a controller clock 500 ppm slow (its 30 ms are 30.015 of the host's) for a minute: the anchor follows, the samples stay near their arrival instead of drifting to 60 ms
+        s2_clock g = {0}; uint64_t lag_max = 0;
+        for (int i = 0; i < 2000; i++) {
+            uint64_t sent = base + (uint64_t)i * 30015000ull, arr = sent + 2 * ms + (uint64_t)((i * 7919) % 6) * ms;
+            uint64_t t = s2_clock_sample(&g, 3000 + 30 * (unsigned)i, arr, NULL);
+            if (i > 100 && arr - t > lag_max) lag_max = arr - t;
+        }
+        CHECK(lag_max < 8 * ms);   // the arrival jitter (up to 5 ms) and the anchor's rise, not the drift (30 ms over the minute)
+        // one report with an unusually short latency (1 ms, the others 5 ms) does not move the anchor: the samples after it stay 5 ms before their arrival
+        s2_clock o = {0}; int moved = 0; uint64_t sp_min = ~0ull, prev_o = 0;
+        for (int i = 0; i < 200; i++) {
+            uint64_t sent = base + (uint64_t)i * 30 * ms, arr = sent + (i == 100 ? 1 : 5) * ms;
+            uint64_t t = s2_clock_sample(&o, 3000 + 30 * (unsigned)i, arr, NULL);
+            if (i > 100 && (t > arr || arr - t > 100000)) moved++;   // within 0.1 ms of the arrival (the 1 ms a second rise, re-pinned by each report)
+            if (prev_o && t - prev_o < sp_min) sp_min = t - prev_o;
+            prev_o = t;
+        }
+        CHECK(!moved && sp_min >= 26 * ms);   // and the early one itself only takes its arrival (26 ms after the last), no sample microseconds apart
+        // a controller clock 1000 ppm fast (its 30 ms are 29.97 of the host's), arrivals 2..7 ms late: the times step evenly, not each one its own arrival
+        s2_clock fc = {0}; unsigned uneven = 0; uint64_t prev_f = 0;
+        for (int i = 0; i < 2000; i++) {
+            uint64_t sent = base + (uint64_t)i * 29970000ull, arr = sent + 2 * ms + (uint64_t)((i * 7919) % 6) * ms;
+            uint64_t t = s2_clock_sample(&fc, 3000 + 30 * (unsigned)i, arr, NULL);
+            if (i > 100 && (t - prev_f < 27 * ms || t - prev_f > 33 * ms)) uneven++;
+            prev_f = t;
+        }
+        CHECK(uneven < 100);   // under 5% of the steps more than 3 ms off 30
+        // connecting: a first burst read with the first report's anchor (three reports at once, 60 ms late), then 2 ms reports: only that burst's samples crowd
+        s2_clock cb = {0}; unsigned crowded = 0; uint64_t prev_b = 0;
+        for (int i = 0; i < 50; i++) {
+            uint64_t sent = base + (uint64_t)i * 30 * ms, arr = i < 3 ? base + 62 * ms : sent + 2 * ms;
+            uint64_t t = s2_clock_sample(&cb, 3000 + 30 * (unsigned)i, arr, NULL);
+            if (prev_b && t - prev_b < 15 * ms) crowded++;
+            prev_b = t;
+        }
+        CHECK(crowded <= 3);
     }
     n = unhex("722e0000080000e0ff0ffff77ff2a77d000000000000000000a000160002ff880d002608000000000001af628a00fdff000000000000000000000000000000", b);
     CHECK(s2_report_parse(b, n, &r) && r.buttons == (0xE0000000u | S2_A) && r.rx == 2034 && r.ry == 2010 && r.lx == 2047 && r.ly == 2047);
@@ -111,13 +157,45 @@ int main(void) {
     s2_cal c; n = unhex("2ff87c97944c9d9446ffff", b);
     CHECK(!s2_cal_blank(b, n) && s2_cal_parse(b, n, &c) && c.cx == 2095 && c.cy == 1999 && c.maxx == 1175 && c.maxy == 1225 && c.minx == 1181 && c.miny == 1129);
     float x, y;
-    s2_cal_apply(&c, 3270, 1999, 40, &x, &y); CHECK(x == 1.f && y == 0.f);
-    s2_cal_apply(&c, 2095 + 20, 1999 - 20, 40, &x, &y); CHECK(x == 0.f && y == 0.f);       // inside the dead zone
-    s2_cal_apply(&c, 2095 - 1181, 1999 + 2000, 40, &x, &y); CHECK(x == -1.f && y == 1.f);   // past the travel clamps
-    s2_cal_apply(NULL, 2048, 2048, 40, &x, &y); CHECK(x == 0.f && y == 0.f);
+    s2_cal_apply(&c, 3270, 1999, &x, &y); CHECK(x == 1.f && y == 0.f);
+    s2_cal_apply(&c, 2095 + 20, 1999 - 20, &x, &y); CHECK(x == 0.f && y == 0.f);       // inside the dead zone
+    s2_cal_apply(&c, 2095 - 1181, 1999 + 2000, &x, &y); CHECK(x == -1.f && y == 1.f);   // past the travel clamps
+    s2_cal_apply(NULL, 2048, 2048, &x, &y); CHECK(x == 0.f && y == 0.f);
     s2_cal blank; n = unhex("ffffffffffffffffffffff", b); s2_cal_default(&blank);
     CHECK(s2_cal_blank(b, n) && !s2_cal_parse(b, n, &blank) && !blank.valid);
-    s2_cal_apply(&blank, 2048 + 1200, 2048, 40, &x, &y); CHECK(x == 1.f);   // an uncalibrated stick uses the typical travel
+    s2_cal_apply(&blank, 2048 + 1200, 2048, &x, &y); CHECK(x == 1.f);   // an uncalibrated stick uses the typical travel
+
+    // The dead zone (issue #2245). A stick of 1200 counts each way with no dead zone of its own takes S2_DEAD_SHARE, 120 counts. With 40 counts per axis and no scale (before),
+    // 41 counts read 41 / 1200 = 3.4 % and a Pro Controller 2's right stick at rest 60 counts off its centre read 5 %; now both read 0, and the output grows from 0 past the edge
+    { s2_cal r = {2048, 2048, 1200, 1200, 1200, 1200, 1, 0};
+      s2_cal_apply(&r, 2048 + 41, 2048, &x, &y); CHECK(x == 0.f && y == 0.f);
+      s2_cal_apply(&r, 2048 + 60, 2048 - 60, &x, &y); CHECK(x == 0.f && y == 0.f);   // 85 counts from the centre, inside the round dead zone
+      s2_cal_apply(&r, 2048 + 121, 2048, &x, &y); CHECK(x > 0.f && x < 0.002f && y == 0.f);
+      s2_cal_apply(&r, 2048 + 600, 2048, &x, &y); CHECK(fabsf(x - 0.4f / 0.9f) < 1e-5f);
+      s2_cal_apply(&r, 2048 + 200, 2048 + 60, &x, &y); CHECK(x > 0.f && y > 0.f && fabsf(y / x - 0.3f) < 1e-4f);   // round: the small y stays, in proportion (a dead zone per axis zeroed it)
+      s2_cal_apply(&r, 2048 - 1200, 2048 + 1200, &x, &y); CHECK(x == -1.f && y == 1.f); }   // a corner still reaches full x and y
+
+    // Stick parameters: a Pro Controller 2's first factory block (ndeadly/switch2_controller_research, memory_layout.md 0x13080 and its calibration at 0x130A8): dead zone 160 counts,
+    // 10.3 % of its travel of 1510 to 1594, its own
+    n = unhex("01add99a555665a0000aa0000ae2200ee2200e9aadd99aadd90aa5500aa5502ff6622ff6620affff" "b36783" "2e665e" "3a065f", b);
+    CHECK(n == S2_STICK_BLOCK && s2_params_dead(b, n) == 160.f);
+    CHECK(s2_cal_from_flash(b, n, NULL, 0, &c) == 1 && c.cx == 1971 && c.cy == 2102 && c.maxx == 1582 && c.maxy == 1510 && c.minx == 1594 && c.miny == 1520 && c.dead == 160.f);
+    CHECK(fabsf(s2_cal_dead_own(&c) - 160.f / 1551.5f) < 1e-5f && s2_cal_dead_share(&c) == s2_cal_dead_own(&c));
+    s2_cal_apply(&c, 1971 + 150, 2102, &x, &y); CHECK(x == 0.f);   // 150 counts: inside its 160
+    s2_cal_apply(&c, 1971 + 170, 2102, &x, &y); CHECK(x > 0.f);
+    // A user calibration (magic skipped) replaces the centre and travel and keeps the dead zone; a blank one leaves the factory's
+    { uint8_t u[16]; size_t un = unhex("2ff87c97944c9d9446ffff", u);
+      CHECK(s2_cal_from_flash(b, n, u, un, &c) == 2 && c.cx == 2095 && c.maxx == 1175 && c.dead == 160.f);
+      un = unhex("ffffffffffffffffffffff", u);
+      CHECK(s2_cal_from_flash(b, n, u, un, &c) == 1 && c.cx == 1971 && c.dead == 160.f); }
+    // A Joy-Con 2's (GP2040-CE, Switch2ProDescriptors.h, the left Joy-Con's 0x13080): 147 counts, 12.2 % of its travel
+    n = unhex("02accaaa533555933009933009d2200dd2200dccacd9ccacd9d4422dd4422d8ff4488ff4480fffff" "fd2785" "a6444a" "ba644c", b);
+    CHECK(n == S2_STICK_BLOCK && s2_cal_from_flash(b, n, NULL, 0, &c) == 1 && c.dead == 147.f && s2_cal_dead_own(&c) > 0.12f && s2_cal_dead_own(&c) < 0.125f);
+    // No block, a blank one, or a value no dead zone could be: the default share
+    CHECK(s2_cal_from_flash(NULL, 0, NULL, 0, &c) == 0 && c.dead == 0 && !c.valid && s2_cal_dead_share(&c) == S2_DEAD_SHARE);
+    memset(b, 0xFF, S2_STICK_BLOCK); CHECK(s2_params_dead(b, S2_STICK_BLOCK) == 0.f && s2_cal_from_flash(b, S2_STICK_BLOCK, NULL, 0, &c) == 0);
+    { s2_cal r = {2048, 2048, 1200, 1200, 1200, 1200, 1, 20}; CHECK(s2_cal_dead_own(&r) == 0 && s2_cal_dead_share(&r) == S2_DEAD_SHARE);   // 1.7 %
+      r.dead = 600; CHECK(s2_cal_dead_own(&r) == 0 && s2_cal_dead_share(&r) == S2_DEAD_SHARE); }                                      // 50 %
 
     // Pads
     s2_pad_state pad; uint64_t m; int32_t st[4];
@@ -125,7 +203,7 @@ int main(void) {
     // A Pro Controller 2: its own buttons, both sticks
     pad.pro.have = 1; pad.pro.pid = S2_PID_PRO; s2_cal_default(&pad.pro.cal[0]); s2_cal_default(&pad.pro.cal[1]);
     pad.pro.r.buttons = S2_A | S2_ZL | S2_SL_L; pad.pro.r.lx = 2048 + 1200; pad.pro.r.ly = 2048; pad.pro.r.rx = 2048; pad.pro.r.ry = 2048 - 600;
-    CHECK(s2_pad_input(&pad, &m, st) && m == (DM_BTN_A | DM_BTN_ZL) && st[0] == DM_STICK_MAX && st[1] == 0 && st[2] == 0 && st[3] == -(int32_t)lrintf(600.f / 1200.f * DM_STICK_MAX));
+    CHECK(s2_pad_input(&pad, &m, st) && m == (DM_BTN_A | DM_BTN_ZL) && st[0] == DM_STICK_MAX && st[1] == 0 && st[2] == 0 && abs(st[3] + (int32_t)lrintf(0.4f / 0.9f * DM_STICK_MAX)) <= 1);
     CHECK(s2_pad_motion_dev(&pad, 1) == &pad.pro && s2_pad_motion_dev(&pad, 0) == &pad.pro);
     // Two Joy-Cons: the left's d-pad and stick, the right's face buttons and stick
     memset(&pad, 0, sizeof pad);
@@ -156,6 +234,12 @@ int main(void) {
     pad.left.have = 1; CHECK(s2_pad_map(&pad, &pad.right) == s2_map_pair && s2_pad_map(&pad, &pad.left) == s2_map_pair);
     pad.right.have = 0; CHECK(s2_pad_map(&pad, &pad.left) == s2_map_left_alone);
     pad.pro.have = 1; CHECK(s2_pad_map(&pad, &pad.pro) == s2_map_pro);
+    // A Pro Controller 2's recorded samples (issue #2245): flat and still, gravity straight down; held with its top tipped up toward the screen, gravity toward the player (-y)
+    // and down, with no roll (the Pro Controller 1's map made that about 50 degrees of roll)
+    { int16_t pf[6] = {-164, -584, 4193, 0, 0, 0}, ph[6] = {-73, 3227, 2597, 0, 0, 0};
+      s2_motion(pf, s2_map_pro, NULL, S2_GYRO_RAD, acc, rot); CHECK(fabsf(acc[2] + 1.02f) < 0.02f && fabsf(acc[0]) < 0.05f && fabsf(acc[1]) < 0.15f);
+      s2_motion(ph, s2_map_pro, NULL, S2_GYRO_RAD, acc, rot); CHECK(acc[1] < -0.7f && acc[2] < -0.5f && fabsf(acc[0]) < 0.05f);
+      s2_motion(ph, s2_map_right_alone, NULL, S2_GYRO_RAD, acc, rot); CHECK(fabsf(acc[0]) > 0.7f); }   // the old map: sideways
     // Rest offset: a second of nearly constant samples is learned, motion resets, a large offset is not rest
     s2_rest rs; memset(&rs, 0, sizeof rs); int16_t q[6] = {0, 0, 4096, 18, -20, -4};
     for (int i = 0; i < S2_REST_N - 1; i++) { q[3] = 18 + (i & 1); s2_rest_update(&rs, q); }

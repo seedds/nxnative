@@ -6,6 +6,7 @@
 typedef struct { uint32_t id; float x, y; } dm_touch;
 void dm_touch_set(const dm_touch *t, int n);
 int touch_fill(void *out, uint64_t now_ns);
+int touch_fill_n(void *out, int max, uint64_t now_ns, int points);
 static int fails, cases;
 typedef struct { int64_t dt; uint32_t attr; int32_t fid, x, y; } want_pt;
 static void expect(const char *what, uint64_t now, int64_t samp, int n, const want_pt *w) {
@@ -55,6 +56,13 @@ int main(void) {
     dm_touch_set(NULL, 0); e.x = 0.5f; e.y = 0.5f; dm_touch_set(&e, 1);
     expect("re-press: the old End first (320, 180)", T0 + 233333338, 15, 1, (want_pt[]){{16666667, 2, 3, 320, 180}});
     expect("re-press: then the new Start (640, 360)", T0 + 250000005, 16, 1, (want_pt[]){{16666667, 1, 3, 640, 360}});
+    // 8 Console mode (points 0) between handheld reads: an empty state with the next sample number, and the finger pressed meanwhile keeps its Start for the next handheld read
+    dm_touch_set(NULL, 0); touch_fill((uint8_t[0x290]){0}, T0 + 266666672);                 // sample 17: End
+    dm_touch f = {6, 0.5f, 0.5f}; dm_touch_set(&f, 1);
+    {   uint8_t got[0x290], exp[0x290]; memset(got, 0xaa, sizeof got); memset(exp, 0, sizeof exp); int64_t samp = 18; memcpy(exp, &samp, 8);
+        int r = touch_fill_n(got, 16, T0 + 283333339, 0); cases++;
+        if (r != 0 || memcmp(got, exp, sizeof exp)) { fails++; printf("\u2717 console mode: an empty state numbered 18\n"); } else printf("\u2713 console mode: an empty state numbered 18\n"); }
+    expect("handheld after console mode: number 19, the Start kept (640, 360)", T0 + 300000006, 19, 1, (want_pt[]){{16666667, 1, 6, 640, 360}});
     printf("== %d checks, %d failed ==\n", cases, fails);
     return fails != 0;
 }

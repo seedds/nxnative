@@ -1,7 +1,6 @@
-"""Signed integer overflow wraps in translated shaders (-fwrapv in dmsh_build.py MAC_METAL, ios_metal.py METAL, vk_shaders.py and gl_shaders.py): SPIR-V, GLSL and the Switch's GPUs wrap,
+"""Signed integer overflow wraps in translated shaders (-fwrapv in dmsh_chain.py MAC_METAL, ios_metal.py METAL, vk_shaders.py and gl_shaders.py): SPIR-V, GLSL and the Switch's GPUs wrap,
 while MSL leaves it undefined, and without the flag the compiler folds Ocarina of Time's low-half extraction (an IMAD by 65536, then a shift right by 16) to the whole word. On this Mac's GPU,
 with the chain's own compile command, the idioms below give the wrapped results; the iPhone command keeps the shift."""
-import ast
 from pathlib import Path
 import re
 import shutil
@@ -16,10 +15,11 @@ sys.path.insert(0, str(ROOT / 'dm/ios/tools'))
 import ios_metal  # noqa: E402
 
 
-def mac_metal():   # dmsh_build.py's MAC_METAL, read without running the script
-    for n in ast.parse((TOOLS / 'dmsh_build.py').read_text()).body:
-        if isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id == 'MAC_METAL' for t in n.targets): return ast.literal_eval(n.value)
-    raise AssertionError('no MAC_METAL in dmsh_build.py')
+sys.path.insert(0, str(TOOLS))
+import dmsh_chain  # noqa: E402
+
+
+def mac_metal(): return list(dmsh_chain.MAC_METAL)   # the build's Mac compile
 
 
 # The low half sign-extended as Ocarina's mesh shader 35785cddc971290c takes it (a = as_type<int>(w) * 65536, then (a >> 31) << 16 | uint(a) >> 16; without -fwrapv the compiler takes the

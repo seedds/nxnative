@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # scripts/clean_metal_cache.py: which of Metal's build folders go, on a fake cache folder (no real Metal state is touched)
-import importlib.util, os, tempfile, unittest
+import fcntl, importlib.util, os, tempfile, unittest
 from pathlib import Path
 from unittest import mock
 
@@ -43,6 +43,26 @@ class CleanTest(unittest.TestCase):
             self.assertTrue(d.exists())
             self.assertEqual(cmc.clean(root, idle_min=60, now=NOW, starts=[])[0], 1)
             self.assertFalse(d.exists())
+
+    def test_app_folder_lock(self):   # a built app's folder: kept while a copy of the app holds the lock beside it (nvn_mtl.m ga_claim), cleaned once none does
+        with tempfile.TemporaryDirectory() as td:
+            app = Path(td) / 'org.nxnative.0100a5c00d162000'; root = app / 'com.apple.gpuarchiver'; root.mkdir(parents=True)
+            d = folder(root, 'gpuarchiver-aaaaaa', NOW - 5 * 3600)
+            with open(app / 'gpuarchiver.lock', 'a') as held:
+                fcntl.flock(held, fcntl.LOCK_SH)   # a running copy
+                said = []
+                self.assertEqual(cmc.clean(root, now=NOW, starts=[], say=said.append), (0, 0, 0, 0))
+                self.assertTrue(d.exists()); self.assertIn('a copy of its app is running', said[0])
+            self.assertEqual(cmc.clean(root, now=NOW, starts=[], say=lambda m: None)[0], 1)
+            self.assertFalse(d.exists())
+
+    def test_default_folders(self):   # the shared folder and each built app's, nobody else's
+        with tempfile.TemporaryDirectory() as td:
+            c = Path(td)
+            for n in ('org.nxnative.0100a5c00d162000', 'org.nxnative.0400486024dec000', 'com.google.Chrome.helper'): (c / n / 'com.apple.gpuarchiver').mkdir(parents=True)
+            with mock.patch.object(cmc.subprocess, 'run', return_value=mock.Mock(returncode=0, stdout=f'{td}/\n', stderr='')):
+                self.assertEqual(cmc.cache_dirs(), [c / 'com.apple.gpuarchiver', c / 'org.nxnative.0100a5c00d162000/com.apple.gpuarchiver',
+                                                    c / 'org.nxnative.0400486024dec000/com.apple.gpuarchiver'])
 
     def test_missing_folder(self):
         self.assertEqual(cmc.clean('/nonexistent/com.apple.gpuarchiver', now=NOW, starts=[]), (0, 0, 0, 0))

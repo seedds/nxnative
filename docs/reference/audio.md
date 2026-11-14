@@ -309,8 +309,9 @@ For a replaced DSP renderer the size query keeps the service's work-buffer contr
 
 - **Symptom:** an `nn::diag` abort with Result 0xe15 on an audio thread at start, in `audio::CreateUserClientSessionByHipc` under `audio::AcquireAudioOutputDeviceNotification`, after the line `sf: the game connects to service aud:u itself`.
 - **Cause:** SDK 21 and 22 name the output device notification `AcquireAudioOutputDeviceNotification` (older SDKs: `AcquireAudioDeviceNotificationForOutput`, and SDK 7's `AcquireAudioDeviceSwitchNotification`). SDK 22.2.0's version (`sdk+0x1f1e00`) opens a user session with `aud:u`, which the host does not serve, asks it for a read end and attaches it AutoClear. It keeps no per-process flag (the service keys each acquire by its event) and returns a Result.
-- **Fix:** `hle_audren.c` takes the name over, first for SDK 21 (Splatoon Raiders); the same takeover serves SDK 22. The event is bound and never signaled, and the Result is 0. The takeover keeps the older names' once-per-process flag, so a second acquire returns 0x499 where SDK 22.2.0's code would bind again. No game has been seen to acquire twice. `ReleaseAudioOutputDeviceNotification` (which destroys the event once the service lets it go) is not taken over: no game seen imports it.
-- **Found on:** [Fire Emblem Fortune's Weave](../../dm/games/04007EF01F8AE000/README.md) (Switch 2, SDK 22.2.0, `main+0xe7b9c`).
+- **Fix:** `hle_audren.c` takes the name over, first for SDK 21 (Splatoon Raiders); the same takeover serves SDK 22. The event is bound and never signaled, and the Result is 0. The takeover keeps the older names' once-per-process flag, so a second acquire returns 0x499 where SDK 22.2.0's code would bind again. No game has been seen to acquire twice.
+- **The release:** `ReleaseAudioOutputDeviceNotification` (`sdk+0x1f2ac0` in Nintendo Switch Sports Resort's sdk) asks `aud:u` through the device session coordinator, then destroys the event. The game destroys the event itself only if it is still initialized afterwards (`main+0x3af11a0`). `hle_audren.c` takes it over: it destroys the event it bound (which drops the binding) and clears the flag, so a later acquire binds again. With nothing acquired it does nothing. `t_audren_work` covers acquire, the refused second acquire, release and acquire again.
+- **Found on:** [Fire Emblem Fortune's Weave](../../dm/games/04007EF01F8AE000/README.md) (Switch 2, SDK 22.2.0, `main+0xe7b9c`); [Nintendo Switch Sports Resort](../../dm/games/04008E001F098000/README.md) (`04008E001F098000`: the release, `main+0x3af119c`).
 
 ### No audio input devices
 
@@ -342,6 +343,15 @@ For a replaced DSP renderer the size query keeps the service's work-buffer contr
 - **A larger statistics result ends the game:** Star Fox keeps its 24 bytes at `sp` with its stack canary right behind them (`main+0xbce9b90`), so a 32-byte result ended in `__stack_chk_fail` on the audio thread (`CRASH sig=4`, `lr=main+0xbce9f98`).
 - **Focus:** Star Fox closes its stream when its window loses focus and opens a new one when it regains it; 14 rounds went by with the sound intact.
 - **Found on:** Xenoblade Chronicles 2, Nintendo Switch 2 Edition (`0400E95004038001`) (SDK 21.4.4, one or two 2-channel streams at 48 kHz, 10 ms periods, 40 ms capacity; the second when the active device is `AudioExternalOutput`); [Star Fox](../../dm/games/0400E88025B1A000/README.md) (Wwise 2024.1, SDK 21.4.4).
+
+### The virtual output device's properties, and the OutputStream open without flags
+
+- **Symptom:** `[RED] sf: the game connects to service auddmg:u itself, which the host does not serve`, then `game called nn::diag abort: Result 0xa99, call site sdk+0x224d1c` (`audio::detail::GetVirtualOutputDeviceProperties`), right after `GetDefaultVirtualOutputDevice`.
+- **Cause:** before each OutputStream open the game asks for the default virtual output device's properties with `nn::audio::GetVirtualOutputDeviceProperties` (`main+0x5eda90`, `main+0x7a0414`); the SDK's version asks the device manager service for the device's 0x228-byte profile. It then opens the stream with the `OpenOutputStream` overload that takes no flags (`main+0x5edb34`), which the host did not take over either.
+- **The properties:** `VirtualDeviceProperties` is 0x110 bytes, filled from the profile at `sdk+0x224cd4`: the name asked about (+0x00, 0x100 bytes); the profile's +0x218 at +0x100, the device's shortest stream as a duration in ns (`OutputStreamImpl::Open` refuses a capacity under ceil(duration x rate / 1e9) frames with 0x899, `sdk+0x225a94`; the input stream open the same); and the profile's +0x108 at +0x108, a 32-bit word nothing in the sdk reads. Both of the game's callers, and Donkey Kong Bananza's two (`main+0x57cadc`, `main+0x187cee4`), only test the Result.
+- **Fix:** `hle_audio.c` answers for its one device, `AudioVirtualOutput`: the name, a shortest stream of 10 ms (one period as Xenoblade Chronicles 2 and Star Fox write it; the host's own open sets no minimum) and 0 in the unidentified word. Any other name gets a red line and a failure. The overload without flags opens like the others. `t_output_stream` covers both.
+- **Open:** what the +0x108 word means; no caller seen reads it.
+- **Found on:** [Nintendo Switch Sports Resort](../../dm/games/04008E001F098000/README.md) (`04008E001F098000`; SDK 20+).
 
 ## Codecs
 

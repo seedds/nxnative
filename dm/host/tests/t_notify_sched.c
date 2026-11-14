@@ -14,6 +14,7 @@ static int observed_wait(pthread_cond_t *, pthread_mutex_t *);
 #include HLE_OE_SOURCE
 void dm_host_shutdown_then(const char *why, void (*then)(void *), void *arg) { (void)why; (void)then; (void)arg; }   // oe::ExecuteProgram: not exercised here
 void dm_host_shutdown(const char *why) { (void)why; }
+void dm_hid_opmode_changed(void) {}   // hle_hid.c: the npads follow the mode; not exercised here
 #undef pthread_cond_wait
 static _Atomic int waiting, resumed, finish;
 static uint32_t message;
@@ -25,6 +26,7 @@ static int observed_wait(pthread_cond_t *cv, pthread_mutex_t *mu) {
 void dm_audio_suspend(int on) { (void)on; }
 void guest_clock_freeze_for(int reason, int on) { (void)reason; (void)on; }
 void dm_gfx_suspend(int on) { (void)on; }
+void dm_gfx_quit_begin(void) {}
 static void timeout(int sig) { (void)sig; const char message[] = "[RED] notification scheduler test timed out\n"; write(2, message, sizeof message - 1); _exit(99); }
 static void notify(uint64_t unused) {
     (void)unused;

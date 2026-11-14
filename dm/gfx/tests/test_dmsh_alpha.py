@@ -3,9 +3,9 @@ a library that compiles for the Mac and the iPhone, and shaders without a float 
 sources and their side libraries, compiled"""
 import pathlib, re, shutil, subprocess, sys, tempfile, unittest
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / 'tools'))
-import dmsh_abi, dmsh_alpha, dmsh_side
+import dmsh_abi, dmsh_alpha, dmsh_entry, dmsh_side
 
-BASE = '''#include <metal_stdlib>
+MAIN = '''#include <metal_stdlib>
 using namespace metal;
 struct main0_out
 {
@@ -22,24 +22,12 @@ fragment main0_out main0(float4 gl_FragCoord [[position]])
     out.m_1 = out.m_0;
     return out;
 }
-
-struct main0_out_u
-{
-    uint4 m_0 [[color(0)]];
-    uint4 m_1 [[color(1)]];
-};
-
-fragment main0_out_u main0_u(float4 gl_FragCoord [[position]])
-{
-    main0_out out = {};
-    out.m_0 = float4(1.0, 0.0, 0.0, gl_FragCoord.x / 8.0);
-    return main0_out_u{as_type<uint4>(out.m_0), as_type<uint4>(out.m_1)};
-}
 '''
+BASE = MAIN + dmsh_entry.uint_entry(MAIN)   # main0_u as the build writes it (dmsh_entry.py), each colour a float or an integer by its function constant; the unit makes main0's body dm_body_main0
 VERTEX = '\nvertex float4 vertex_main(uint i [[vertex_id]]) { float2 v[3] = {float2(-1, -1), float2(3, -1), float2(-1, 3)}; return float4(v[i], 0, 1); }\n'
-ARGS = BASE.split('\nstruct main0_out_u')[0].replace('fragment main0_out main0(float4 gl_FragCoord [[position]])',
+ARGS = MAIN.replace('fragment main0_out main0(float4 gl_FragCoord [[position]])',
     'struct spvDescriptorSetBuffer0 { constant float* width [[id(0)]]; };\n\nfragment main0_out main0(float4 gl_FragCoord [[position]], constant spvDescriptorSetBuffer0& spvDescriptorSet0 [[buffer(0)]])').replace('gl_FragCoord.x / 8.0', 'gl_FragCoord.x / *spvDescriptorSet0.width')
-TEST = 'if (!dm_alpha_pass(float(dm_r.m_0.w), dm_alpha)) discard_fragment();'
+TEST = 'float dm_a = 1.0f; dm_a = float(dm_r.m_0.w);\n    if (!dm_alpha_pass(dm_a, dm_alpha)) discard_fragment();'
 PARAM = f'constant dm_alpha_state& dm_alpha [[buffer({dmsh_abi.ALPHA_BUFFER})]]'
 
 
@@ -62,7 +50,8 @@ class AlphaVariant(unittest.TestCase):
         self.assertEqual(entries, ['main0_a', 'main0_u_a'])
         self.assertEqual(v.count(PARAM), 2)
         self.assertEqual(v.count(TEST), 1)   # main0_a
-        self.assertEqual(v.count('if (!dm_alpha_pass(as_type<float>(dm_r.m_0.w), dm_alpha)) discard_fragment();'), 1)   # main0_u_a: colour 0 is the float's bits
+        # main0_u_a: colour 0 is the float or the integer vector of its bits, whichever the pipeline's constant leaves
+        self.assertEqual(v.count('float dm_a = 1.0f; if (dm_uf0) dm_a = float(dm_r.m_0.w); if (dm_ui0) dm_a = as_type<float>(dm_r.m_0_ui.w);'), 1)
         self.assertIn('main0_out dm_r = dm_body_main0(gl_FragCoord);', v)
 
     def test_the_body_stays_as_written(self):
@@ -111,7 +100,7 @@ class AlphaVariant(unittest.TestCase):
 
 def fixture(out):   # t_alpha.m's shaders: <name>.metal (the base, compiled by the test) and <key>_bx.metallib (the side library the host loads), for key 0 and 1
     out = pathlib.Path(out); out.mkdir(parents=True, exist_ok=True)
-    for i, src in enumerate((BASE.split('\nstruct main0_out_u')[0] + '\n', ARGS)):
+    for i, src in enumerate((MAIN, ARGS)):
         (out / f'base{i}.metal').write_text(src + VERTEX)
         u, info = dmsh_side.unit(src)
         lib = compile_lib(u + VERTEX, out, f'a{i}')

@@ -16,6 +16,7 @@
 #define VK_NO_PROTOTYPES
 #include "../../host/hle.h"
 #include "../nvn/nvn_mtl.h"
+#include "../nvn/host_msl.h"
 #include <vulkan/vulkan_core.h>
 #include <vulkan/vulkan_vi.h>
 #import <Metal/Metal.h>
@@ -230,7 +231,7 @@ struct VkPipeline_T {
     uint32_t pc_size, nset; VkDescriptorSetLayout set[8];   // from its pipeline layout, which may be destroyed first: the push-constant size, and the set layouts (held) for a missing binding's report
     MTLPrimitiveType prim; MTLCullMode cull; MTLWinding wind; MTLTriangleFillMode fill; MTLDepthClipMode clip;
     int bias; float bias_c, bias_s, bias_cl; float blend[4]; uint32_t sref_f, sref_b;
-    int dyn_vp, dyn_sc, has_vp, has_sc; MTLViewport vp; VkRect2D sc;
+    int dyn_vp, dyn_sc, has_vp, has_sc, dyn_blend; MTLViewport vp; VkRect2D sc;
     // Dynamic stencil state (Super Mario 3D All-Stars' Super Mario 64): the reference is the encoder's; the masks are part of a Metal depth-stencil state, so the
     // pipeline keeps its depth-stencil description and builds the state for the masks set (one cached)
     VkLogicOp logic;   // not implemented (0 = none: VK_LOGIC_OP_CLEAR is not met)
@@ -1066,6 +1067,7 @@ static VkPipeline pipe_make(const VkGraphicsPipelineCreateInfo *ci) {
             else if (s == VK_DYNAMIC_STATE_STENCIL_REFERENCE) p->dyn_sref = 1;
             else if (s == VK_DYNAMIC_STATE_LINE_WIDTH) continue;   // Metal draws lines one pixel wide whatever the width (Super Mario 64 sets 1)
             else if (s == VK_DYNAMIC_STATE_STENCIL_COMPARE_MASK || s == VK_DYNAMIC_STATE_STENCIL_WRITE_MASK) p->dyn_smask |= s == VK_DYNAMIC_STATE_STENCIL_COMPARE_MASK ? 1 : 2;
+            else if (s == VK_DYNAMIC_STATE_BLEND_CONSTANTS) p->dyn_blend = 1;
             else RED1("dynamic state %d not implemented (the imports have no matching set function)", s);
         }
         const VkPipelineViewportStateCreateInfo *vs = ci->pViewportState;
@@ -1086,7 +1088,7 @@ VKB(vkCreateGraphicsPipelines, VkResult, VkDevice d, VkPipelineCache c, uint32_t
 VKB(vkDestroyPipeline, void, VkDevice d, VkPipeline p, const VkAllocationCallbacks *a) { (void)d; (void)a; if (p) { p->pso = nil; p->dss = nil; p->dss_dyn = nil; for (uint32_t i = 0; i < p->nset; i++) dsl_put(p->set[i]); free(p); } }   // ARC does not release a malloc'd struct's strong fields
 
 // ---------- Command buffers: recording ----------
-enum { C_BRP = 1, C_ERP, C_PIPE, C_SETS, C_VB, C_IB, C_VP, C_SC, C_DRAWI, C_COPYB, C_COPYB2I, C_DRAW, C_PUSH, C_COPYI, C_COPYI2B, C_QRESET, C_QTS, C_QBEGIN, C_QEND, C_CLEARI, C_STENCIL };
+enum { C_BRP = 1, C_ERP, C_PIPE, C_SETS, C_VB, C_IB, C_VP, C_SC, C_DRAWI, C_COPYB, C_COPYB2I, C_DRAW, C_PUSH, C_COPYI, C_COPYI2B, C_QRESET, C_QTS, C_QBEGIN, C_QEND, C_CLEARI, C_STENCIL, C_BLIT, C_BLEND };
 typedef struct { uint32_t op, size; } chdr;
 typedef struct { VkRenderPass rp; VkFramebuffer fb; VkRect2D area; uint32_t nclear; VkClearValue clear[]; } c_brp;
 typedef struct { VkPipeline p; } c_pipe;
@@ -1105,6 +1107,8 @@ typedef struct { VkImage src; VkBuffer dst; uint32_t n; VkBufferImageCopy r[]; }
 typedef struct { VkQueryPool q; uint32_t first, n; } c_query;
 typedef struct { int what; VkStencilFaceFlags faces; uint32_t v; } c_stencil;   // what: 0 compare mask, 1 write mask, 2 reference
 typedef struct { VkImage im; int ds; VkClearValue v; uint32_t n; VkImageSubresourceRange r[]; } c_cleari;   // vkCmdClearColorImage / vkCmdClearDepthStencilImage
+typedef struct { VkImage src, dst; uint32_t n; VkImageBlit r[]; } c_blit;   // vkCmdBlitImage
+typedef struct { float v[4]; } c_blend;   // vkCmdSetBlendConstants
 static void *rec(VkCommandBuffer cb, uint32_t op, size_t sz) {
     size_t need = (sizeof(chdr) + sz + 7) & ~(size_t)7;
     if (cb->n + need > cb->cap) {
@@ -1208,6 +1212,36 @@ VK(vkCmdPipelineBarrier, void, VkCommandBuffer cb, VkPipelineStageFlags s, VkPip
     (void)cb; (void)s; (void)d; (void)f; (void)nm; (void)m; (void)nb; (void)b; (void)ni; (void)i;
 }
 
+// SDL_GPU resolves every entry point and calls some of them without checking the lookup (MARVEL Cosmic Invasion
+// crashed on a null vkCmd* right after "Setting backbuffer"). The ones below are no-ops so the call lands somewhere
+// real; they still need a Metal implementation before the picture is right (clears, blits, resolves, compute, indirect draws).
+VK(vkCmdSetBlendConstants, void, VkCommandBuffer cb, const float *v) { *(c_blend *)rec(cb, C_BLEND, sizeof(c_blend)) = (c_blend){{v[0], v[1], v[2], v[3]}}; }
+VK(vkCmdSetDepthBias, void, VkCommandBuffer cb, float c, float cl, float s) { (void)cb; (void)c; (void)cl; (void)s; }
+VK(vkCmdSetDepthBounds, void, VkCommandBuffer cb, float mn, float mx) { (void)cb; (void)mn; (void)mx; }
+VK(vkCmdClearAttachments, void, VkCommandBuffer cb, uint32_t na, const VkClearAttachment *a, uint32_t nr, const VkClearRect *r) {
+    (void)cb; (void)na; (void)a; (void)nr; (void)r;
+}
+VK(vkCmdBlitImage, void, VkCommandBuffer cb, VkImage s, VkImageLayout sl, VkImage d, VkImageLayout dl, uint32_t n, const VkImageBlit *r, VkFilter f) {
+    (void)sl; (void)dl; (void)f; c_blit *c = rec(cb, C_BLIT, sizeof *c + n * sizeof *r); c->src = s; c->dst = d; c->n = n; memcpy(c->r, r, n * sizeof *r);
+}
+VK(vkCmdResolveImage, void, VkCommandBuffer cb, VkImage s, VkImageLayout sl, VkImage d, VkImageLayout dl, uint32_t n, const VkImageResolve *r) {
+    (void)cb; (void)s; (void)sl; (void)d; (void)dl; (void)n; (void)r;
+}
+VK(vkCmdDispatch, void, VkCommandBuffer cb, uint32_t x, uint32_t y, uint32_t z) { (void)cb; (void)x; (void)y; (void)z; }
+VK(vkCmdDispatchIndirect, void, VkCommandBuffer cb, VkBuffer b, VkDeviceSize o) { (void)cb; (void)b; (void)o; }
+VK(vkCmdDrawIndirect, void, VkCommandBuffer cb, VkBuffer b, VkDeviceSize o, uint32_t n, uint32_t stride) { (void)cb; (void)b; (void)o; (void)n; (void)stride; }
+VK(vkCmdDrawIndexedIndirect, void, VkCommandBuffer cb, VkBuffer b, VkDeviceSize o, uint32_t n, uint32_t stride) { (void)cb; (void)b; (void)o; (void)n; (void)stride; }
+VK(vkCreateComputePipelines, VkResult, VkDevice d, VkPipelineCache c, uint32_t n, const VkComputePipelineCreateInfo *ci, const VkAllocationCallbacks *a, VkPipeline *out) {
+    (void)d; (void)c; (void)a; for (uint32_t i = 0; i < n; i++) out[i] = (VkPipeline)ci[i].layout;   // a token: a compute bind is refused anyway (vkCmdBindPipeline)
+    return VK_SUCCESS;
+}
+// VK_EXT_debug_utils: SDL_GPU queries them; the host labels nothing
+VK(vkSetDebugUtilsObjectNameEXT, VkResult, VkDevice d, const VkDebugUtilsObjectNameInfoEXT *i) { (void)d; (void)i; return VK_SUCCESS; }
+VK(vkSetDebugUtilsObjectTagEXT, VkResult, VkDevice d, const VkDebugUtilsObjectTagInfoEXT *i) { (void)d; (void)i; return VK_SUCCESS; }
+VK(vkCmdBeginDebugUtilsLabelEXT, void, VkCommandBuffer cb, const VkDebugUtilsLabelEXT *l) { (void)cb; (void)l; }
+VK(vkCmdEndDebugUtilsLabelEXT, void, VkCommandBuffer cb) { (void)cb; }
+VK(vkCmdInsertDebugUtilsLabelEXT, void, VkCommandBuffer cb, const VkDebugUtilsLabelEXT *l) { (void)cb; (void)l; }
+
 // ---------- Command buffers: replay at submit ----------
 // Queries of one submit: its event value (the ticket every query it writes gets) and, when it has occlusion queries, a visibility buffer that every render pass
 // of the submit counts into (one 8-byte slot per BeginQuery), copied to the pools when the submit completes
@@ -1227,6 +1261,7 @@ typedef struct {
     MTLRenderPassDescriptor *rpd; MTLStoreAction st_col[8], st_d, st_s; int cut;
     VkQueryPool aq; uint32_t aq_first;   // the occlusion query running (occ_start)
     uint32_t sdyn[3][2]; int sdyn_set[3], s_dirty;   // dynamic stencil compare mask / write mask / reference, front and back (C_STENCIL)
+    float blend[4]; int blend_dirty;   // dynamic blend constants, the command buffer's own state rather than the pipeline's (C_BLEND)
 } rs_t;
 #define DONE_RING 1024
 static uint64_t g_done_ns[DONE_RING];   // completion time of submit v at [v % DONE_RING] (timestamp query results)
@@ -1246,6 +1281,61 @@ static id<MTLBlitCommandEncoder> blit(rs_t *s, uint32_t op) {
     if (s->re) { static int n; if (n++ < 3) OLOG("copy inside a render pass (command %u): the pass is split and the next draw continues it", op); end_rp(s, 0); s->cut = 1; }
     if (!s->be) s->be = [s->cb blitCommandEncoder];
     return s->be;
+}
+static id<MTLRenderPipelineState> blit_ps(MTLPixelFormat f) {
+    static NSMutableDictionary<NSNumber *, id<MTLRenderPipelineState>> *pso; static id<MTLFunction> vf, ff; static int failed;
+    if (failed) return nil;
+    if (!pso) {
+        NSError *e = nil; id<MTLLibrary> lib = host_msl_lib(g_dev, nil, "draw_tex", &e);
+        vf = [lib newFunctionWithName:@"vs"]; ff = [lib newFunctionWithName:@"fs"];
+        if (!vf || !ff) { failed = 1; RED1("cannot load draw_tex for a format-converting blit: %s", e.localizedDescription.UTF8String); return nil; }
+        pso = [NSMutableDictionary dictionary];
+    }
+    id<MTLRenderPipelineState> ps = pso[@(f)];
+    if (!ps) {
+        MTLRenderPipelineDescriptor *d = [MTLRenderPipelineDescriptor new]; d.vertexFunction = vf; d.fragmentFunction = ff; d.colorAttachments[0].pixelFormat = f;
+        NSError *e = nil; ps = [g_dev newRenderPipelineStateWithDescriptor:d error:&e];
+        if (!ps) { RED1("cannot create the blit pipeline for format %lu: %s", (unsigned long)f, e.localizedDescription.UTF8String); return nil; }
+        pso[@(f)] = ps;
+    }
+    return ps;
+}
+// A blit a Metal copy cannot do: between different formats (SDL_GPU's RGBA8 frame blitted into the BGRA8 swapchain: MARVEL Cosmic
+// Invasion's black screen), scaled or flipped. Drawn with the draw_tex builtin, which samples the source; the linear mapping it
+// applies takes flips into account on its own (a negative source scale)
+static void blit_draw(rs_t *s, const c_blit *x) {
+    static id<MTLSamplerState> samp;
+    if (!samp) { MTLSamplerDescriptor *d = [MTLSamplerDescriptor new]; d.minFilter = d.magFilter = MTLSamplerMinMagFilterLinear; d.sAddressMode = d.tAddressMode = d.rAddressMode = MTLSamplerAddressModeClampToEdge; samp = [g_dev newSamplerStateWithDescriptor:d]; }
+    VkImage a = x->src, b = x->dst;
+    if (s->re) { end_rp(s, 0); s->cut = 1; }
+    end_blit(s);
+    for (uint32_t i = 0; i < x->n; i++) {
+        const VkImageBlit *r = &x->r[i];
+        if (a->type == VK_IMAGE_TYPE_3D || b->type == VK_IMAGE_TYPE_3D || fmt_has_depth(a->f) || fmt_has_depth(b->f)) { OLOG("a blit region was not drawn (3D or depth)"); continue; }
+        id<MTLRenderPipelineState> ps = blit_ps(b->tex.pixelFormat);
+        if (!ps) return;
+        NSUInteger pw = MAX(a->tex.width >> r->srcSubresource.mipLevel, 1ul), ph = MAX(a->tex.height >> r->srcSubresource.mipLevel, 1ul);
+        NSUInteger tw = MAX(b->tex.width >> r->dstSubresource.mipLevel, 1ul), th = MAX(b->tex.height >> r->dstSubresource.mipLevel, 1ul);
+        float dx0 = r->dstOffsets[0].x, dy0 = r->dstOffsets[0].y, dx1 = r->dstOffsets[1].x, dy1 = r->dstOffsets[1].y;
+        float dw = dx1 - dx0, dh = dy1 - dy0; if (!dw || !dh) continue;
+        float q[8] = { dx0, dy0, (float)(r->srcOffsets[1].x - r->srcOffsets[0].x) / dw, (float)(r->srcOffsets[1].y - r->srcOffsets[0].y) / dh,
+                       (float)r->srcOffsets[0].x, (float)r->srcOffsets[0].y, (float)pw, (float)ph };
+        float x0 = MIN(dx0, dx1), x1 = MAX(dx0, dx1), y0 = MIN(dy0, dy1), y1 = MAX(dy0, dy1);
+        NSUInteger sx = x0 <= 0 ? 0 : (NSUInteger)ceil(x0 - 0.5), sy = y0 <= 0 ? 0 : (NSUInteger)ceil(y0 - 0.5);
+        NSUInteger ex = (NSUInteger)ceil(x1 - 0.5), ey = (NSUInteger)ceil(y1 - 0.5); if (ex > tw) ex = tw; if (ey > th) ey = th;
+        if (ex <= sx || ey <= sy) continue;
+        for (uint32_t l = 0; l < r->dstSubresource.layerCount; l++) {
+            MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
+            MTLRenderPassColorAttachmentDescriptor *ca = rp.colorAttachments[0];
+            ca.texture = b->tex; ca.level = r->dstSubresource.mipLevel; ca.slice = r->dstSubresource.baseArrayLayer + l; ca.loadAction = MTLLoadActionLoad; ca.storeAction = MTLStoreActionStore;
+            id<MTLRenderCommandEncoder> re = [s->cb renderCommandEncoderWithDescriptor:rp];
+            [re setRenderPipelineState:ps]; [re setViewport:(MTLViewport){0, 0, tw, th, 0, 1}]; [re setScissorRect:(MTLScissorRect){sx, sy, ex - sx, ey - sy}];
+            [re setFragmentTexture:a->tex atIndex:0]; [re setFragmentSamplerState:samp atIndex:0]; [re setFragmentBytes:q length:sizeof q atIndex:0];
+            [re drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+            [re endEncoding];
+        }
+    }
+    g_n_copy += x->n;
 }
 // The occlusion query running counts the render encoder there is, each from a slot of its own in the submit's visibility buffer. It may have begun outside a render pass (Vulkan lets a query span
 // from before a pass to after it: Super Mario 3D All-Stars' Sunshine, Hagi's GX) and a pass's encoder may be split for a copy: every encoder started while it runs gets a slot
@@ -1370,7 +1460,7 @@ static int pre_draw(rs_t *s) {
         [re setRenderPipelineState:p->pso]; [re setDepthStencilState:p->dss ? p->dss : g_dss_off];
         [re setCullMode:p->cull]; [re setFrontFacingWinding:p->wind]; [re setTriangleFillMode:p->fill]; [re setDepthClipMode:p->clip];
         [re setDepthBias:p->bias ? p->bias_c : 0 slopeScale:p->bias ? p->bias_s : 0 clamp:p->bias ? p->bias_cl : 0];
-        [re setBlendColorRed:p->blend[0] green:p->blend[1] blue:p->blend[2] alpha:p->blend[3]];
+        { const float *bc = p->dyn_blend ? s->blend : p->blend; [re setBlendColorRed:bc[0] green:bc[1] blue:bc[2] alpha:bc[3]]; }
         [re setStencilFrontReferenceValue:p->sref_f backReferenceValue:p->sref_b];
         s->s_dirty = 1;
         if (p->has_vp && (!s->applied || !s->applied->has_vp || memcmp(&s->applied->vp, &p->vp, sizeof p->vp))) s->vp_dirty = 1;
@@ -1393,6 +1483,7 @@ static int pre_draw(rs_t *s) {
         }
     }
     s->s_dirty = 0;
+    if (s->blend_dirty) { if (p->dyn_blend) [re setBlendColorRed:s->blend[0] green:s->blend[1] blue:s->blend[2] alpha:s->blend[3]]; s->blend_dirty = 0; }
     if (s->vp_dirty) {
         MTLViewport v = p->has_vp ? p->vp : vp_of(&s->vp);
         [re setViewport:v]; s->vp_dirty = 0;
@@ -1496,6 +1587,32 @@ static void replay(rs_t *s, VkCommandBuffer cb) {
                 g_n_copy += x->n;
                 break;
             }
+            case C_BLIT: {
+                const c_blit *x = c; VkImage a = x->src, b = x->dst;
+                if (!a->tex || !b->tex) { RED1("a blitted image was not created"); break; }
+                int same = a->tex.pixelFormat == b->tex.pixelFormat, exact = same;
+                for (uint32_t i = 0; i < x->n && exact; i++) {
+                    const VkImageBlit *r = &x->r[i];
+                    int32_t sw = r->srcOffsets[1].x - r->srcOffsets[0].x, sh = r->srcOffsets[1].y - r->srcOffsets[0].y, sd = r->srcOffsets[1].z - r->srcOffsets[0].z;
+                    int32_t dw = r->dstOffsets[1].x - r->dstOffsets[0].x, dh = r->dstOffsets[1].y - r->dstOffsets[0].y, dd = r->dstOffsets[1].z - r->dstOffsets[0].z;
+                    if (sw != dw || sh != dh || sw <= 0 || sh <= 0 || ((a->type == VK_IMAGE_TYPE_3D || b->type == VK_IMAGE_TYPE_3D) && (sd != dd || sd <= 0))) exact = 0;
+                }
+                if (!exact) { blit_draw(s, x); break; }
+                id<MTLBlitCommandEncoder> be = blit(s, h->op);
+                for (uint32_t i = 0; i < x->n; i++) {
+                    const VkImageBlit *r = &x->r[i]; int a3 = a->type == VK_IMAGE_TYPE_3D, b3 = b->type == VK_IMAGE_TYPE_3D;
+                    int32_t sw = r->srcOffsets[1].x - r->srcOffsets[0].x, sh = r->srcOffsets[1].y - r->srcOffsets[0].y, sd = r->srcOffsets[1].z - r->srcOffsets[0].z;
+                    uint32_t nl = a3 ? 1 : r->srcSubresource.layerCount;
+                    for (uint32_t l = 0; l < nl; l++)
+                        [be copyFromTexture:a->tex sourceSlice:a3 ? 0 : r->srcSubresource.baseArrayLayer + l sourceLevel:r->srcSubresource.mipLevel
+                               sourceOrigin:MTLOriginMake(r->srcOffsets[0].x, r->srcOffsets[0].y, a3 ? r->srcOffsets[0].z : 0)
+                                 sourceSize:MTLSizeMake(sw, sh, a3 ? sd : 1) toTexture:b->tex
+                           destinationSlice:b3 ? 0 : r->dstSubresource.baseArrayLayer + l destinationLevel:r->dstSubresource.mipLevel
+                          destinationOrigin:MTLOriginMake(r->dstOffsets[0].x, r->dstOffsets[0].y, b3 ? r->dstOffsets[0].z : 0)];
+                }
+                g_n_copy += x->n;
+                break;
+            }
             case C_COPYI2B: {   // read-back into a buffer (shared storage: the CPU sees it once the submit's fence has signalled)
                 const c_copyi2b *x = c; VkImage im = x->src; const fmt_t *f = im->f;
                 if (!x->dst->mem || !im->tex) { RED1("the readback buffer has no bound memory or the image was not created"); break; }
@@ -1531,6 +1648,7 @@ static void replay(rs_t *s, VkCommandBuffer cb) {
             }
             case C_STENCIL: { const c_stencil *x = c; if (x->faces & VK_STENCIL_FACE_FRONT_BIT) s->sdyn[x->what][0] = x->v; if (x->faces & VK_STENCIL_FACE_BACK_BIT) s->sdyn[x->what][1] = x->v;
                               s->sdyn_set[x->what] = 1; s->s_dirty = 1; break; }
+            case C_BLEND: { const c_blend *x = c; memcpy(s->blend, x->v, sizeof s->blend); s->blend_dirty = 1; break; }
             case C_CLEARI: {   // an image cleared outside a render pass (Super Mario 3D All-Stars' Super Mario 64 clears its depth buffer so): a pass per level and layer that only clears
                 const c_cleari *x = c; VkImage im = x->im;
                 if (!im || !im->tex) { RED1("a cleared image was not created"); break; }
@@ -1593,7 +1711,7 @@ VKB(vkQueueSubmit, VkResult, VkQueue q, uint32_t n, const VkSubmitInfo *si, VkFe
                 VkCommandBuffer c = si[i].pCommandBuffers[j];
                 for (size_t o = 0; o < c->n; o += ((const chdr *)(c->buf + o))->size) {
                     uint32_t op = ((const chdr *)(c->buf + o))->op;   // a slot per query begun, and per encoder one may span: a pass, or what splits a pass's encoder
-                    sq->cap += op == C_QBEGIN; nsplit += op == C_BRP || op == C_COPYB || op == C_COPYB2I || op == C_COPYI || op == C_COPYI2B || op == C_CLEARI;
+                    sq->cap += op == C_QBEGIN; nsplit += op == C_BRP || op == C_COPYB || op == C_COPYB2I || op == C_COPYI || op == C_BLIT || op == C_COPYI2B || op == C_CLEARI;
                 }
             }
         if (sq->cap) {

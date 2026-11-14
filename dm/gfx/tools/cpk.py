@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # CRI CPK archives (CRIWARE File System): Bayonetta 2 keeps all its data but sound and movies in six of them (data000.cpk …). A CPK starts with 'CPK ' and a 0x10-byte header, then an
 # @UTF table that names where its table of contents is (TocOffset) and where the file data starts (ContentOffset); the TOC ('TOC ', 0x10 bytes, @UTF) has one row per file:
-# DirName, FileName, FileSize (stored), ExtractSize, FileOffset (relative to the smaller of TocOffset and ContentOffset). A file whose stored size is smaller than its size is
+# DirName, FileName, FileSize (stored), ExtractSize, FileOffset (relative to the smaller of ContentOffset and TocOffset, TocOffset counted as at most 0x800: files). A file whose stored size is smaller than its size is
 # CRILAYLA-compressed (crilayla). The @UTF tables may be stored masked (Unicorn Overlord; unmask). shader_split.py reads every CPK through it (cpk_jobs).
 # Usage: cpk.py <file.cpk> [--extract <dir> [<name regex>]] lists (or extracts) the files.
 import re, struct, sys, os
@@ -67,7 +67,11 @@ def files(path):
         f.seek(toc); t = f.read(0x10)
         if t[:4] != b'TOC ': raise ValueError(f'{path}: no TOC at {toc:#x}')
         n = struct.unpack_from('<I', t, 8)[0]; f.seek(toc + 0x10); t = utf_at(f.read(n), 0, n)
-    base = min(toc, ctt) if ctt else toc
+    # FileOffset counts from the smaller of ContentOffset and TocOffset, with TocOffset capped at 0x800 (CRI's rule, as CriPakTools reads it). The cap makes no
+    # difference when the TOC follows the header (Bayonetta 2, Unicorn Overlord: TocOffset 0x800); with the TOC at the end of the file (LUNAR Remastered Collection's
+    # data.cpk: ContentOffset 0x16000, TocOffset 0x42b06800) min(toc, ctt) read every file 0x15800 bytes too far in
+    toc_base = min(toc, 0x800)
+    base = min(ctt, toc_base) if ctt else toc_base
     out = []
     for r in utf(t)[1]:
         nm = (r['DirName'] + '/' if r.get('DirName') else '') + r['FileName']

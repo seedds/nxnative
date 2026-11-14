@@ -1,4 +1,4 @@
-// Expand indexed fans/quads into triangle lists, respecting NVN primitive restart.
+// Expand indexed lists/fans/quads into triangle lists, respecting NVN primitive restart.
 #pragma once
 #include <stdint.h>
 #include <string.h>
@@ -16,6 +16,9 @@ static inline uint32_t nvn_expand_primitive(uint32_t *out, const uint8_t *src, u
             else if (have >= 2) { out[used++] = first; out[used++] = previous; out[used++] = index; }
             previous = index;
             if (have < 2) have++;
+        } else if (primitive == 4) {
+            quad[have++] = index;
+            if (have == 3) { out[used++] = quad[0]; out[used++] = quad[1]; out[used++] = quad[2]; have = 0; }
         } else {
             quad[have++] = index;
             if (have == 4) {

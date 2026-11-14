@@ -9,7 +9,8 @@ A dated record of what is done, what is in progress and what is left on the Wind
 | Commit | What |
 |---|---|
 | `8b44de4` | Handoff: the state at the pause |
-| (this commit's parent) | AOT: `dm/tools/aot/tests/measure_packs.py`, two builds of a pack measured against each other; its unit test passes here (9 tests); not yet run against the real `nxaot` |
+| `5d3f25e` | AOT: `dm/tools/aot/tests/measure_packs.py`, two builds of a pack measured against each other; its unit test passes here (9 tests); not yet run against the real `nxaot` |
+| (this commit's parent) | Scripts: `scripts/port_docker.sh` builds the two images when missing with disk checks and runs the whole verification, `--low-disk` one image at a time; its test with a stand-in Docker passes here (13 tests); no real build or verify run yet |
 
 Done on the machine, not in the repository: Docker emptied on the owner's request (every image and container, the owner's other projects' included; the data volumes `aitrade_pgdata`, `smilepetstore_pgdata`, `smilepetstore_redisdata` kept).
 
@@ -32,7 +33,6 @@ No Docker image exists (the disk filled while ten worktrees were checked out, 28
 | `agent-a9b88962d77203ce4` | Python tests skip with a reason where this PC lacks a module or a Mac tool, instead of ending in errors | `dm/tools/tests/test_*.py`, `dm/ios/tests`, `dm/gfx/tests` |
 | `agent-a0e9229602796991b` | Why the last CI runs failed (`tests` #13, `aot` #11, `chain` #2), and fixes to the workflow files | `.github/workflows/*.yml` |
 | `agent-ada28324b2ad7f998` | The switch inventory covers the port's non-`DM_` switches (`NXHOST`, `NXPACK`, `NXAOT`, ...); five stale mentions of removed switches | `dm/tools/env_switches.py`, `docs/env_switches.tsv` |
-| `agent-aea2f0238dea05726` | `scripts/port_docker.sh`: builds the images when missing with disk checks, runs the whole verification, a low-disk mode that never holds both images | new `scripts/port_docker.sh`, new `test_port_docker.py` |
 | `agent-aeff9ad0fb6c3dfd8` | Apple's log macros write each line in one stdio call, as the port's `LOG` does since `9872bae`. Prepared for a Mac: not to be merged before a Mac or macOS CI run | `dm/host/dm.h` (Apple branches), `docs/reference/threads.md` |
 
 ### Left, not started

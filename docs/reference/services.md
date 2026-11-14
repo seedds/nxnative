@@ -980,6 +980,14 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Fix:** `GetUserId` copies the Uid and returns 0 for any handle, as the SDK does (`hle_account.c`); the open calls still write the marker, which nothing checks. `t_account` covers the host's handle and built handles with third words 2, 8, 0 and all ones.
 - **Found on:** [EA SPORTS FC 27](../../dm/games/0100C49025D3E000/README.md) (PR #1129; two DualSense controllers on a Mac and an iPad Air M4, reported in its review thread); first found on EA SPORTS FC 26 by the [FC 26 120 fps patch](https://github.com/imnotsharingmyname/nxnative-fc26-120fps) (MIT).
 
+### A program handoff inherits the local user
+
+- **Symptom:** the collection's menu successfully executes program 2, then `account::GetUserId` aborts because its user handle is zero.
+- **Cause:** `PopOpenUsers` always returned zero users, from when the host ran only one program. MGS4 calls it at `main+0x58b0`, then calls `GetUserId` on its first output at `main+0x58bc` without falling back to the preselected user.
+- **Fix:** after a program handoff (`DM_PREV_PROGRAM` is a valid program index), `PopOpenUsers` supplies the host's one always-open local user once. HOME launches still return none and use the existing preselected-user fallback; a zero-capacity call does not consume the handoff. Invalid-handle validation remains in place. The host has only one local user; multiple users would require explicit `PushOpenUsers` serialization.
+- **Found on:** MGS4 program `0100D0B01C4F4002`, update 393216, main build `3e7443aca182388f98e13069311fb51f`: a 35-second isolated boot rendered over 900 frames; the player confirmed that selecting MGS4 from the collection starts the game. The practice range and opening story area were subsequently played on the Mac; full progression is unverified.
+- **Check:** `make -C dm/host/tests GAME=<profile> account`; covers HOME fallback, invalid previous indices, capacity, a valid inherited handle, repeated retrieval; the same `t_account` checks that `GetUserId` copies the Uid of any handle (above). Existing `t_oe` program-handoff checks also pass (71 checks).
+
 ### An account AsyncContext needs its SDK constructor
 
 - **Symptom:** `CRASH sig=11` at `main+0x5b64f8`, `lr=main+0x3f1b8cc` (`nn.account.AsyncContext$$Finalize`), on an IL2CPP thread-pool worker a few seconds after the player confirms a name and birthday (Pokémon Friends 1.1.5). The object's first word, its vtable, holds stray bytes (`0xffffd256` in one run, `0x15600000128` in another). The game had started `account::EnsureNetworkServiceAccountIdTokenCacheAsync`.

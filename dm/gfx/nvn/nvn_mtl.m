@@ -9823,7 +9823,20 @@ static int pool_ds_read(const tex_t *t) {
 // budget has filled, pool_snap.over). Made where the walk leaves the ID out, at most STAND_FRAME a frame, as an area load registers thousands at once (Ocarina of Time's Hyrule
 // Field: 5,152, 82 ms in one frame without the limit); the rest wait in g_stand_todo and go into the tables in place (pool_stand_scan), as a newly read ID's texture does. In play
 // the game registers about 7 a frame, 6 us each on an M4 Pro, and about 6,000 are held at a time, in 16 MB of heaps. DM_NVN_POOL_STANDIN=0: the dummy, as before
-enum { STAND_LEVEL = 1024, STAND_PICK = 4096, STAND_LAYERS = 8, STAND_HEAP = 4u << 20, STAND_HEAPS = 32, STAND_FRAME = 512 };
+enum { STAND_LEVEL = 1024, STAND_PICK = 4096, STAND_LAYERS = 8, STAND_HEAP = 4u << 20, STAND_HEAPS = 512, STAND_FRAME = 512, STAND_BUF = 512u << 10 };
+// DM_STAND_KB (1 to 512, default 1): how big a level of a stand-in may be, in KB. At 1 a stand-in is a few texels (the blocky look); at 64 it keeps the largest mip level under 64 KB, which is a 256x256 ASTC 4x4 or a
+// 512x512 ASTC 8x8: a texture that was megabytes becomes under a hundred KB and keeps its detail. A texture already no bigger than twice that is kept as it is
+static size_t stand_level(void) { static size_t v; if (!v) { const char *e = getenv("DM_STAND_KB"); int kb = e && *e ? atoi(e) : 1; if (kb < 1 || kb > 512) { MLOG("[RED] DM_STAND_KB=%s: must be 1 to 512; 1 used", e ? e : ""); kb = 1; } v = (size_t)kb << 10; if (kb > 1) MLOG("texture stand-ins keep levels up to %d KB (DM_STAND_KB)", kb); } return v; }
+static size_t stand_pick(void) { return MAX((size_t)STAND_PICK, stand_level()); }
+// DM_TEXTURES_KEEP=WxH,WxH,...: textures of these sizes are never replaced by DM_TEXTURES_OFF (the map's, say); DM_TEXTURES_LOG=1 lists every texture replaced, with its size and the frame, to find them
+static int tex_kept(const tex_t *t) {
+    static int n = -1; static uint32_t kw[32], kh[32];
+    if (n < 0) { n = 0; const char *e = getenv("DM_TEXTURES_KEEP"); for (const char *q = e; q && *q && n < 32; q = strchr(q, ',') ? strchr(q, ',') + 1 : q + strlen(q)) { unsigned w, h; if (sscanf(q, "%ux%u", &w, &h) == 2) { kw[n] = w; kh[n++] = h; } }
+        if (n) MLOG("textures kept as they are (DM_TEXTURES_KEEP): %d sizes", n); }
+    for (int i = 0; i < n; i++) if (t->d.width == kw[i] && t->d.height == kh[i]) return 1;
+    return 0;
+}
+static int tex_log_on(void) { static int v = -1; if (v < 0) v = getenv("DM_TEXTURES_LOG") != NULL; return v; }
 static __strong id<MTLHeap> g_stand_heap[STAND_HEAPS]; static int g_nstand_heap, g_stand_heap_at;
 static uint32_t g_stand_todo[POOL_SEEN_WORDS]; static unsigned g_stand_todo_n, g_stand_frame_n; static uint64_t g_stand_frame = ~0ull;
 static uint64_t g_stand_made, g_stand_picked, g_stand_full, g_stand_ns, g_first_stand, g_first_dummy, g_first_dummy_big, g_first_stale;   // first reads of a texture not made: those that found a stand-in, the dummy (and of 256 KB or more), a stand-in whose levels the game has written since
@@ -9832,7 +9845,7 @@ static uint64_t g_stand_made, g_stand_picked, g_stand_full, g_stand_ns, g_first_
 // whether a shader read it. all: every one; big: those of 512 KB or more, which leaves the UI and small props. To see whether the game runs without them (GPU memory, not looks)
 static int tex_off_mode(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_TEXTURES_OFF"); v = !e || !*e || !strcmp(e, "0") ? 0 : !strcmp(e, "all") ? 1 : !strcmp(e, "big") ? 2 : -1;
     if (v < 0) { MLOG("[RED] DM_TEXTURES_OFF=%s: must be all, big or 0; textures made", e); v = 0; } else if (v) MLOG("textures off: %s block-compressed textures are not made (DM_TEXTURES_OFF)", v == 1 ? "every" : "the big"); } return v; }
-static int tex_off_wants(const tex_t *t) { int m = tex_off_mode(); if (!m) return 0; int bw, bh, bpb = nvn_fmt_bpb(t->d.format, &bw, &bh); if (!bpb || (bw < 2 && bh < 2)) return 0; return m == 1 || pool_tex_size(t) >= (512u << 10); }
+static int tex_off_wants(const tex_t *t) { int m = tex_off_mode(); if (!m) return 0; int bw, bh, bpb = nvn_fmt_bpb(t->d.format, &bw, &bh); if (!bpb || (bw < 2 && bh < 2) || tex_kept(t)) return 0; if (stand_level() > 1024 && pool_tex_size(t) <= 2 * stand_level()) return 0; return m == 1 || pool_tex_size(t) >= (512u << 10); }
 static int stand_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_POOL_STANDIN"); v = !(e && !strcmp(e, "0")); } return v; }
 static id<MTLTexture> stand_alloc(MTLTextureDescriptor *d) {
     for (int k = 0; k < g_nstand_heap; k++) {   // the heap that last had room first
@@ -9857,11 +9870,11 @@ static int stand_shape_of(const tex_t *t, stand_shape *s) {
     if (!bpb || levels > fit) return 0;
     memset(s, 0, sizeof *s);
     unsigned l = 0; uint32_t bx = 0, by = 0;
-    for (; l < levels; l++) { bx = (MAX(W >> l, 1u) + bw - 1) / bw; by = (MAX(H >> l, 1u) + bh - 1) / bh; if ((size_t)bx * by * bpb <= STAND_LEVEL) break; }
+    for (; l < levels; l++) { bx = (MAX(W >> l, 1u) + bw - 1) / bw; by = (MAX(H >> l, 1u) + bh - 1) / bh; if ((size_t)bx * by * bpb <= stand_level()) break; }
     if (l < levels) { s->l0 = l; s->n = levels - l; s->w = MAX(W >> l, 1u); s->h = MAX(H >> l, 1u); return 1; }
     if (bpb > 16 || (bpb & (bpb - 1))) return 0;   // (a block in one 16-byte piece of the storage, nvn_deswizzle_pick)
-    uint32_t step = (uint32_t)sqrt((double)bx * by * bpb / STAND_PICK); if (step < 2) step = 2;
-    while ((size_t)MAX(bx / step, 1u) * MAX(by / step, 1u) * bpb > STAND_PICK) step++;
+    uint32_t step = (uint32_t)sqrt((double)bx * by * bpb / stand_pick()); if (step < 2) step = 2;
+    while ((size_t)MAX(bx / step, 1u) * MAX(by / step, 1u) * bpb > stand_pick()) step++;
     s->l0 = levels - 1; s->n = 1; s->step = step; s->nx = MAX(bx / step, 1u); s->ny = MAX(by / step, 1u); s->w = s->nx * bw; s->h = s->ny * bh;
     return 1;
 }
@@ -9879,7 +9892,7 @@ static int stand_layers(const treg_t *r, unsigned *s0, unsigned *ns, MTLTextureT
 }
 // The stand-in's bytes, read from the texture's storage: into the stand-in, and their hash when asked for (pool_first_read). 0 when the storage cannot be read so
 static int stand_fill(const tex_t *t, const stand_shape *s, unsigned s0, unsigned ns, id<MTLTexture> into, uint64_t *sum) {
-    static uint8_t buf[STAND_PICK]; int bw, bh, bpb = nvn_fmt_bpb(t->d.format, &bw, &bh); uint64_t h = 1469598103934665603ull;
+    static uint8_t buf[STAND_BUF]; int bw, bh, bpb = nvn_fmt_bpb(t->d.format, &bw, &bh); uint64_t h = 1469598103934665603ull;
     for (unsigned y = 0; y < ns; y++) for (unsigned k = 0; k < s->n; k++) {
         uint32_t w = s->step ? s->w : MAX(s->w >> k, 1u), hh = s->step ? s->h : MAX(s->h >> k, 1u); size_t pitch = (size_t)((w + bw - 1) / bw) * bpb, rows = (hh + bh - 1) / bh;
         if (pitch * rows > sizeof buf) return 0;
@@ -9915,6 +9928,7 @@ static int stand_make_(int id_) {
     if (!mt || !stand_fill(t, &sh, s0, ns, mt, pool_first_log() ? &r->stand_sum : NULL)) return 0;
     r->stand = (void *)CFBridgingRetain(mt); r->stand_rid = mt.gpuResourceID._impl; r->stand_tt1 = (uint8_t)tt + 1;
     g_stand_made++; g_stand_live++; g_stand_picked += sh.step != 0;
+    if (tex_log_on()) { static unsigned nl; if (nl++ < 4000) MLOG("TEXLOG frame %llu: %ux%ux%u format %#x levels %u, %llu KB in storage -> stand-in %ux%u from level %u", (unsigned long long)atomic_load(&g_cur_frame), t->d.width, t->d.height, t->d.depth, t->d.format, t->d.levels, (unsigned long long)(pool_tex_size(t) >> 10), sh.w, sh.h, sh.l0); }
     return 1;
 }
 // What a table of type dtt holds for an ID the walk leaves out: its stand-in's resource ID, or 0 (the dummy). Caller holds g_rmu

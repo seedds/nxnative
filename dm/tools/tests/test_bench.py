@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # scripts/bench.py: the measured window of the host's per-frame rows (DM_NVN_TSV) and the percentiles taken from it, and the profiles' bench.tsv routes
-import argparse, contextlib, importlib.util, io, json, os, sys, tempfile, unittest
+import argparse, contextlib, importlib.util, io, json, os, signal, subprocess, sys, tempfile, time, unittest
 from pathlib import Path
 from unittest import mock
 
@@ -112,6 +112,82 @@ pathlib.Path('paths.json').write_text(json.dumps(paths))
                 seen.clear()
                 with self.assertRaises(FileNotFoundError): bench.run_one(argparse.Namespace(**{**vars(a), 'env': ['DM_SAVE_SYNC=0']}), '01007EF00011E000', build, {'host': str(root / 'host')}, route, root / 'out', None)
                 self.assertEqual(seen['DM_SAVE_SYNC'], '0')
+
+
+class Stop(unittest.TestCase):
+    """bench.py stopped while a host runs (a real bench.py process, a fake host that writes its pid once the lock is taken): a front end's SIGTERM or an interrupt to bench.py
+    alone stops the host, also one that ignores SIGTERM, and drops --lock; exit code 143 or 130"""
+    GID = '01007EF00011E000'   # a profile with a bench.tsv: its first route, whose window outlasts each test
+    BOUND = 20.0   # seconds bench.py may take to end (the host's grace period is 5 s)
+
+    def setUp(self):
+        d = tempfile.TemporaryDirectory(); self.addCleanup(d.cleanup)
+        root = Path(d.name); self.build = root / f'{self.GID}_build'; self.lock = root / 'measure.lock'; self.marker = root / 'host.pid'
+        for sub in ('patched_v0', 'extract/v0/RomFS', 'run/save'): (self.build / sub).mkdir(parents=True)
+        self.host = root / 'host'; self.out = root / 'out'
+        self.host.write_text(f'''#!{sys.executable}
+import os, signal, sys
+if os.environ.get('FAKE_HOST_IGNORE_TERM'): signal.signal(signal.SIGTERM, signal.SIG_IGN)
+open({str(self.marker)!r} + '.tmp', 'w').write(str(os.getpid())); os.rename({str(self.marker)!r} + '.tmp', {str(self.marker)!r})
+while True: signal.pause()
+''')
+        self.host.chmod(0o755)
+        self.host_pid = 0
+        self.addCleanup(self.kill_host)
+
+    def kill_host(self):
+        if self.host_pid:
+            with contextlib.suppress(ProcessLookupError): os.kill(self.host_pid, signal.SIGKILL)
+
+    def bench(self, *signals, ignore_term=False):
+        env = dict(os.environ, FAKE_HOST_IGNORE_TERM='1' if ignore_term else '')
+        p = subprocess.Popen([sys.executable, REPO / 'scripts/bench.py', self.build, '--runs', '1', '--no-hud', '--out', self.out, '--lock', self.lock,
+                              '--variant', f'base:host={self.host}'], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        try:
+            end = time.monotonic() + self.BOUND
+            while not self.marker.exists():
+                self.assertIsNone(p.poll(), 'bench.py ended before the host started'); self.assertLess(time.monotonic(), end, 'the host did not start')
+                time.sleep(0.05)
+            self.host_pid = int(self.marker.read_text())
+            self.assertTrue(self.lock.exists(), 'the lock is held while the host runs')
+            for sig in signals: p.send_signal(sig); time.sleep(0.3)
+            p.wait(self.BOUND)
+        finally:
+            if p.poll() is None: p.kill(); p.wait()
+            if p.stderr: p.stderr.close()
+        return p.returncode
+
+    def host_running(self):   # a zombie counts as gone: launchd reaps the orphan
+        if not self.host_pid: return False
+        try: os.kill(self.host_pid, 0)
+        except ProcessLookupError: return False
+        return subprocess.run(['ps', '-o', 'stat=', '-p', str(self.host_pid)], capture_output=True, text=True).stdout.strip()[:1] not in ('', 'Z')
+
+    def assert_stopped(self, rc, want):
+        end = time.monotonic() + 2
+        while self.host_running() and time.monotonic() < end: time.sleep(0.05)
+        self.assertFalse(self.host_running(), f'host {self.host_pid} still running after bench.py ended')
+        self.assertFalse(self.lock.exists(), 'the measuring lock was left behind')
+        self.assertEqual(rc, want)
+
+    def test_sigterm(self): self.assert_stopped(self.bench(signal.SIGTERM), 143)
+
+    def test_interrupt(self): self.assert_stopped(self.bench(signal.SIGINT), 130)
+
+    def test_sigterm_host_ignores_sigterm(self): self.assert_stopped(self.bench(signal.SIGTERM, ignore_term=True), 143)
+
+    def test_second_sigterm_while_the_host_is_stopped(self): self.assert_stopped(self.bench(signal.SIGTERM, signal.SIGTERM, ignore_term=True), 143)
+
+    def test_handler_given_back(self):   # main sets its SIGTERM handler only while it runs (the tests above call it in a process of its own; this one in-process)
+        def mine(sig, frame): pass
+        self.addCleanup(signal.signal, signal.SIGTERM, signal.signal(signal.SIGTERM, mine))
+        route = {'keys': '0:A', 'from': 0, 'secs': 0.1, 'about': 'synthetic'}   # a host run that ends by itself: the window and its two-second tail
+        for argv in (['bench.py', str(self.build), '--route', 'none'], ['bench.py', str(self.build), '--runs', '1', '--no-hud', '--out', str(self.out), '--variant', f'base:host={self.host}']):
+            with mock.patch.object(sys, 'argv', argv), mock.patch.object(bench, 'routes', return_value={'test': route}), \
+                 contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit): bench.main()
+            self.assertIs(signal.getsignal(signal.SIGTERM), mine)
+        self.host_pid = int(self.marker.read_text()); self.assertFalse(self.host_running())
 
 
 if __name__ == '__main__':

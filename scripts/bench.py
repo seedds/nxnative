@@ -4,7 +4,8 @@
 # Variants run the same route with other settings, in turn and repeated, so two hosts or two sets of switches compare under the same load; a screenshot after the measurement
 # window of every run shows whether a variant changes the picture without stalling a measured frame.
 # Usage: python3 scripts/bench.py <id>_build folder [options]   (the folder the NSP script made with --platform mac: tools/dmhost, the rewritten modules, the extracted RomFS,
-#   shader/cache and font; the game's title ID is the folder name's start). -h lists the options. Exit code 0 when every run gave frames, 1 otherwise.
+#   shader/cache and font; the game's title ID is the folder name's start). -h lists the options. Exit code 0 when every run gave frames, 1 otherwise, 130 when interrupted,
+#   143 when stopped by SIGTERM (either way the running host is stopped first and --lock released).
 #   --route <name>: a route of the game's profile (dm/games/<id>/bench.tsv); the first one by default. --save <folder>: the save the route starts from (default <id>_build/run/save);
 #   each run gets a copy, the folder itself is not changed. --variant 'label:KEY=VALUE,KEY=VALUE': a variant (repeatable; KEY host=<path> runs another host binary, msl=<folder>
 #   other Mac shader libraries, shmap=<file> another shader map (with the c1_full.tsv / cb_extent.tsv of those libraries beside it), patched=<folder> other rewritten modules,
@@ -20,6 +21,8 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / 'dm/tools'))
 import romfs as rfs
 import run_saves   # cloud saves off in every run (run_one)
+
+HOST_GRACE = 5.0   # seconds the host has to end after SIGTERM (its graceful exit) before SIGKILL
 
 
 def fail(msg):
@@ -118,11 +121,9 @@ def run_one(a, gid, build, var, route, out, lock):
                 with open(out / 'ctl', 'a') as c: c.write(f'shot {out}/shot_{int(shots.pop(0))}s.png\n')
             time.sleep(0.2)
     finally:
-        if p is not None and p.poll() is None:
-            p.send_signal(signal.SIGTERM)
-            try: p.wait(5)
-            except subprocess.TimeoutExpired: p.kill(); p.wait()
-        if lock: lock.unlink(missing_ok=True)
+        try: stop_host(p)
+        finally:
+            if lock: lock.unlink(missing_ok=True)
     budget = 1000.0 / (a.fps or 60)
     s = summary(*frames(out / 'frames.tsv', route['from'], route['from'] + route['secs']), route['secs'], budget) if (out / 'frames.tsv').is_file() else {'frames': 0}
     log_text = (out / 'log.txt').read_text(errors='replace')
@@ -130,6 +131,19 @@ def run_one(a, gid, build, var, route, out, lock):
     if m: s['game_speed'] = float(m[-1])
     s['red_lines'] = sum(1 for ln in log_text.splitlines() if '[RED]' in ln)
     return s
+
+
+def stop_host(p):
+    """SIGTERM to a host still running, HOST_GRACE seconds, then SIGKILL; reaps it. A second stop (an interrupt, or SIGTERM through main's handler) during the grace period
+    goes straight to the kill and is raised again once the host is gone"""
+    if p is None or p.poll() is not None: return
+    late = None
+    try:
+        p.send_signal(signal.SIGTERM); p.wait(HOST_GRACE); return
+    except subprocess.TimeoutExpired: pass
+    except BaseException as e: late = e
+    p.kill(); p.wait()
+    if late is not None: raise late
 
 
 def lock_holder(lock):
@@ -170,7 +184,27 @@ def table(results, keys):
     return '\n'.join(rows)
 
 
+class Stopped(BaseException):   # a SIGTERM, raised by main's handler: not an Exception, so it ends the benchmark through run_one's finally (the host stopped, the lock released)
+    pass
+
+
+def _sigterm(sig, frame): raise Stopped()
+
+
 def main():
+    # A SIGTERM (a front end's or a wrapper's stop) ends the benchmark as an interrupt does: Python's default ends the process at once, without run_one's finally.
+    # The handler is main's only while it runs: the caller's (a test calling main in its own process) is given back
+    term = signal.signal(signal.SIGTERM, _sigterm)
+    try: run_benchmark()
+    except KeyboardInterrupt:
+        print('interrupted', file=sys.stderr); sys.exit(130)
+    except Stopped:
+        print('stopped (SIGTERM)', file=sys.stderr); sys.exit(143)
+    finally:
+        signal.signal(signal.SIGTERM, signal.SIG_DFL if term is None else term)   # None: a handler not set from Python
+
+
+def run_benchmark():
     ap = argparse.ArgumentParser(description='Benchmark a game in the Mac host along a fixed route (see the comment at the top of this file).')
     ap.add_argument('build', help='the <id>_build folder of a --platform mac build')
     ap.add_argument('--route', help='a route name from dm/games/<id>/bench.tsv (default: its first)')

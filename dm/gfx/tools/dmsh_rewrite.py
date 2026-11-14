@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # The rewrites dmsh_build.py makes in a translated shader's MSL before it compiles it, where Metal or the translator falls short of what the Switch code does: precise
-# arithmetic (precise), memory barriers as fences (membar_fence, tg_fence), 64-bit products (mul_extended), uniform words tested against constants, which the front end would
+# arithmetic (precise), memory barriers as fences (membar_fence, tg_fence), 64-bit products (mul_extended), float atomic adds (float_add_msl), uniform words tested against constants, which the front end would
 # fold into switches (uniform_tests), Ampere's HMMA as simdgroup matrices (hmma_msl), first stores and shared-memory stores (first_store, shared_store_msl), threadgroup memory
 # past Metal's limit (tg_spill), texture gathers with offsets (gather_offsets), border colours Metal has no sampler state for (border_emu), a pixel shader's depth snapped to
 # its position (frag_z_snap) and the 0 / -1 mask of a tested bit 0 without its compare (bit0_mask). Functions of the MSL text and the library ABI only, with no build state,
@@ -99,6 +99,27 @@ def tg_fence(src):
     m = TG_FENCE_FN.search(src)
     if not m: return src
     return src[:m.end()] + '\n    ' + TG_FENCE + '\n' + src[block_end(src, m.end() - 1):]
+
+# A float add to storage memory whose result nothing reads (RED.F32, InstEmitMemory EmitAtomicAddF32) reaches the MSL as a compare-and-swap loop on the word. Metal has
+# atomic_float on device memory (MSL 3.0, which the Mac's and the iPhone's deployment targets both compile at), but the translator cannot ask for it: its storage buffers are uint arrays,
+# and a float pointer to one is an OpBitcast that logical addressing forbids, which spirv-cross then writes as a reinterpret_cast of the loaded value, not its address. agl's
+# scene analysis adds every thread's value into the same few words, so the loops retried for each other: Ocarina of Time's 6e28359aa3558f61 (one workgroup of 256 threads,
+# four words) took 0.25 ms a frame and 1bba09ec4bc8ff67 0.40 ms on a MacBook Air M4, under 0.13 ms each as one atomic_fetch_add; the exposure the same (PR #1930). Only the
+# exact loop spirv-cross writes, on the same word for the load and the swap, is replaced: its names are local to the do-block, so its result is read nowhere. Anything else
+# (an add through the memory pool table, a bounded buffer's guarded swap, shared memory, an ATOM whose result is used) stays a loop, which is correct and only slower. test_dmsh_ampere_alu.py FloatRed checks that
+# the translator's loop still has this shape
+# The add is `old + v`, or spvFAdd(old, v) where the translator marks it exact (XLATE_REDUCED=0): one atomic add has nothing to contract, so both become the native add.
+FLOAT_ADD = re.compile(r'(?m)^(?P<ind> *)bool (?P<again>_\d+);\n(?P=ind)do\n(?P=ind)\{\n'
+                       r'(?P=ind)    float (?P<old>_\d+) = as_type<float>\((?P<addr>[^\n]*?)\);\n'
+                       r'(?P=ind)    float (?P<sum>_\d+) = (?:(?P=old) \+ (?P<val>[^;\n]+)|spvFAdd\((?P=old), (?P<valp>[^;\n]+)\));\n'
+                       r'(?P=ind)    uint (?P<want>_\d+) = as_type<uint>\((?P=old)\);\n(?P=ind)    uint (?P<seen>_\d+);\n(?P=ind)    do\n(?P=ind)    \{\n(?P=ind)        (?P=seen) = (?P=want);\n'
+                       r'(?P=ind)    \} while \(!atomic_compare_exchange_weak_explicit\(\(device atomic_uint\*\)&(?P<addr2>[^\n]*?), &(?P=seen), as_type<uint>\((?P=sum)\), '
+                       r'memory_order_relaxed, memory_order_relaxed\) && (?P=seen) == (?P=want)\);\n'
+                       r'(?P=ind)    uint (?P<found>_\d+) = (?P=seen);\n(?P=ind)    (?P=again) = int\((?P=found)\) != as_type<int>\((?P=old)\);\n(?P=ind)\} while \((?P=again)\);\n')
+def float_add_msl(msl):
+    if 'atomic_compare_exchange_weak_explicit' not in msl: return msl
+    return FLOAT_ADD.sub(lambda m: m.group(0) if m.group('addr') != m.group('addr2') else
+                         f"{m.group('ind')}atomic_fetch_add_explicit((device atomic_float*)&{m.group('addr')}, {m.group('val') or m.group('valp')}, memory_order_relaxed);\n", msl)
 
 # spirv-cross writes OpUMulExtended / OpSMulExtended as calls of an optnone template, spvMulExtended, as Metal's compiler may fail on an inlined mulhi (spirv_msl.cpp,
 # SPVFuncImplMulExtended). The barrier keeps every product a call that is never folded: Switch 2 shaders divide by constants through the high word of a product (Ocarina of Time

@@ -1893,6 +1893,13 @@ Digimon Story Cyber Sleuth: Complete Edition (Media.Vision's MVGL engine, SDK 6.
 - **Check:** Well Dweller, the same scripted input that crashed at the pause menu: the OPTIONS, GRAPHICS, STATS and PAGES screens open and the game returns to play (`[gl] frame 15300`, 35 draws per frame).
 - **Found on:** [Well Dweller](../../dm/games/0100217023F6C000/README.md).
 
+### No uniform at location 0
+
+- **Symptom:** a GL game's own interface (logos, menus, text) is upside down while the picture that goes through one more offscreen image (an emulated console's screen) is upright; `DM_GL_DRAWLOG`'s `vertex uniforms` line shows the game's flip flag at 0 on every draw.
+- **Cause:** the layer gave a program's first uniform location 0. GL allows it, but the game takes 0 for "not found" and skips the uniform: its `u_flip`, which turns an offscreen image right side up when it is drawn, was never set, so each offscreen image it drew came out upside down.
+- **Fix:** a location is (uniform index + 1) × 4096 + array element (`LOC_U`, `LOC_E` in `dm/gfx/gl/hle_gl.m`), so no uniform has location 0, as with NVIDIA's driver. `t_gl_imports` checks that locations are not 0 and that a write reaches its uniform.
+- **Found on:** Mega Man Legacy Collection (`01002D4007AE0000`): `main+0x777e4` loads `u_flip`'s location and skips `glUniform1f` when it is 0.
+
 ### Direct GL imports use the same implementations as the loader
 
 - **Symptom:** `UNIMPL glCreateShader` returns 0, followed by `UNIMPL glShaderSource`, `glCompileShader`, `glGetShaderiv` and `glGetShaderInfoLog`; the game crashes in `sdk` with a null shader handle even though EGL initialized.

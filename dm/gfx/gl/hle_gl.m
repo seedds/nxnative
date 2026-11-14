@@ -1849,7 +1849,11 @@ static void prog_clear(prog_t *p) {
     free(p->pc); p->pc = NULL; p->npc = p->cappc = 0;
     free(p->u); p->u = NULL; p->nu = 0; free(p->ub[0]); free(p->ub[1]); p->ub[0] = p->ub[1] = NULL; p->fn[0] = p->fn[1] = nil; p->linked = 0;
 }
-// Uniforms are merged by name over both stages, as GL links them; a location is uniform index × 4096 + array element
+// Uniforms are merged by name over both stages, as GL links them; a location is (uniform index + 1) × 4096 + array element. No uniform has location 0: a game may take 0 for
+// "not found" (Mega Man Legacy Collection skips glUniform1f for a location of 0, main+0x777e8, so its u_flip, the program's first uniform, was never set and its offscreen images
+// were drawn upside down); NVIDIA's driver does not give the first uniform 0 either
+#define LOC_U(loc) ((loc) / 4096 - 1)
+#define LOC_E(loc) ((loc) % 4096)
 GLB(glLinkProgram, void, GLuint pr) {
     static uint32_t serials;
     if (!SP_CHECK(pr, 1)) return;
@@ -1951,7 +1955,7 @@ GL(glGetUniformLocation, GLint, GLuint pr, const GLchar *name) {
     char nm[64]; strlcpy(nm, name, sizeof nm); int elem = 0;
     char *br = strchr(nm, '[');
     if (br) { elem = atoi(br + 1); *br = 0; }
-    for (int i = 0; i < p->nu; i++) if (!strcmp(p->u[i].name, nm)) return (elem < 0 || elem >= (p->u[i].count ? p->u[i].count : 1)) ? -1 : i * 4096 + elem;
+    for (int i = 0; i < p->nu; i++) if (!strcmp(p->u[i].name, nm)) return (elem < 0 || elem >= (p->u[i].count ? p->u[i].count : 1)) ? -1 : (i + 1) * 4096 + elem;
     return -1;
 }
 // Write count elements from location loc of the current program: comps values each (a matrix: cols columns of comps / cols), into every stage that has the uniform.
@@ -1959,8 +1963,8 @@ GL(glGetUniformLocation, GLint, GLuint pr, const GLchar *name) {
 static void uni_write(GLint loc, GLsizei count, const void *v, int comps, int is_int, int transpose, int cols) {
     prog_t *p = prog_of(S.prog);
     if (!p || !p->linked || loc < 0 || count <= 0) return;
-    int i = loc / 4096, el = loc % 4096;
-    if (i >= p->nu) return;
+    int i = LOC_U(loc), el = LOC_E(loc);
+    if (i < 0 || i >= p->nu) return;
     puni_t *u = &p->u[i];
     if (is_samp(u->type)) { if (is_int) u->unit = *(const GLint *)v; return; }
     int n = u->count ? u->count : 1, rows = cols ? comps / cols : comps, size = cols ? cols * 16 : 16;
@@ -1981,7 +1985,7 @@ static void uni_write(GLint loc, GLsizei count, const void *v, int comps, int is
 // Integer values for a float uniform are converted (GL would reject them; NVIDIA's driver converts), as are float values for an integer one
 static void uni_ints(GLint loc, GLsizei n, const GLint *v, int comps) {
     prog_t *p = prog_of(S.prog);
-    if (p && p->linked && loc >= 0 && loc / 4096 < p->nu && !is_samp(p->u[loc / 4096].type) && !is_intt(p->u[loc / 4096].type)) {
+    if (p && p->linked && loc >= 4096 && LOC_U(loc) < p->nu && !is_samp(p->u[LOC_U(loc)].type) && !is_intt(p->u[LOC_U(loc)].type)) {
         float f[64]; for (GLsizei k = 0; k < n && (k + 1) * comps <= 64; k++) for (int c = 0; c < comps; c++) f[k * comps + c] = (float)v[k * comps + c];
         uni_write(loc, n > 64 / comps ? 64 / comps : n, f, comps, 0, 0, 0); return;
     }
@@ -1989,7 +1993,7 @@ static void uni_ints(GLint loc, GLsizei n, const GLint *v, int comps) {
 }
 static void uni_floats(GLint loc, GLsizei n, const GLfloat *v, int comps) {
     prog_t *p = prog_of(S.prog);
-    if (p && p->linked && loc >= 0 && loc / 4096 < p->nu && is_intt(p->u[loc / 4096].type)) {
+    if (p && p->linked && loc >= 4096 && LOC_U(loc) < p->nu && is_intt(p->u[LOC_U(loc)].type)) {
         GLint iv[64]; for (GLsizei k = 0; k < n && (k + 1) * comps <= 64; k++) for (int c = 0; c < comps; c++) iv[k * comps + c] = (GLint)v[k * comps + c];
         uni_write(loc, n > 64 / comps ? 64 / comps : n, iv, comps, 1, 0, 0); return;
     }
@@ -2018,8 +2022,8 @@ UMAT(glUniformMatrix3x2fv, 3, 2) UMAT(glUniformMatrix3x4fv, 3, 4) UMAT(glUniform
 // Values read back from the program's own copy (LÖVE keeps the values a shader initialises its uniforms with): the first stage that has the uniform
 static void uni_read(GLuint pr, GLint loc, void *out, int as_int) {
     prog_t *p = prog_of(pr);
-    if (!p || !p->linked || loc < 0 || loc / 4096 >= p->nu) return;
-    const puni_t *u = &p->u[loc / 4096]; int el = loc % 4096;
+    if (!p || !p->linked || loc < 4096 || LOC_U(loc) >= p->nu) return;
+    const puni_t *u = &p->u[LOC_U(loc)]; int el = LOC_E(loc);
     if (is_samp(u->type)) { if (as_int) *(GLint *)out = u->unit; else *(GLfloat *)out = (GLfloat)u->unit; return; }
     int st = u->off[0] >= 0 ? 0 : 1; if (u->off[st] < 0) return;
     int cols = u->type == T_MAT4 ? 4 : u->type == T_MAT3 ? 3 : u->type == T_MAT2 ? 2 : 0, rows = cols ? cols : tcomps(u->type);

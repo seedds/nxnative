@@ -271,6 +271,20 @@ int main(int argc, char **argv) {
     link(pr3); assert(!prog_of(pr3)->linked);   // relinked without a vertex shader: the link fails
     delprog(pr3); assert(!prog_of(pr3) && !shader_of(fs3));
 
+    // Uniform locations (Mega Man Legacy Collection): no uniform has location 0, which the game takes for "not found" and then never sets (its u_flip, the first uniform);
+    // a location reaches its uniform and element, and one that names no uniform is ignored
+    { GLint (*getloc)(GLuint, const GLchar *) = import("glGetUniformLocation");
+      void (*use1)(GLuint) = import("glUseProgram"); void (*u1f)(GLint, GLfloat) = import("glUniform1f");
+      GLuint pu = createprog(); prog_t *q = prog_of(pu); static shinfo vsi = {.ub_slot = 0, .ub_size = 16}, fsi = {.ub_slot = -1};
+      q->linked = 1; q->si[0] = &vsi; q->si[1] = &fsi; q->nu = 2; q->u = calloc(2, sizeof *q->u); q->ub[0] = calloc(1, 32);
+      strcpy(q->u[0].name, "u_flip"); q->u[0].type = T_FLOAT; q->u[0].off[0] = 0; q->u[0].off[1] = -1;
+      strcpy(q->u[1].name, "u_gain"); q->u[1].type = T_FLOAT; q->u[1].off[0] = 4; q->u[1].off[1] = -1;
+      GLint l0 = getloc(pu, "u_flip"), l1 = getloc(pu, "u_gain");
+      assert(l0 > 0 && l1 > 0 && l0 != l1 && getloc(pu, "nope") == -1);
+      use1(pu); u1f(l0, 1.0f); u1f(l1, 0.5f); u1f(0, 7.0f); u1f(4095, 7.0f);
+      float f[2]; memcpy(f, q->ub[0], 8); assert(f[0] == 1.0f && f[1] == 0.5f);
+      use1(0); }
+
     // GL's error flag: the first error since the last glGetError, which reads and clears it; a second error while one is pending is not recorded
     GLenum (*geterr)(void) = import("glGetError");
     assert(geterr() == GL_NO_ERROR);

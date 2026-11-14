@@ -1056,4 +1056,28 @@ class JitBootDone(unittest.TestCase):
             self.assertFalse(done())   # something new starts the wait again
 
 
+class ShaderProfileKey(Base):   # the shader step's key takes the profile's shader inputs (dmsh_chain.py --inputs), not every file's bytes
+    def key(self):
+        env = dict(os.environ, DM_GAME=f'{TID:016X}', DM_GAMES_DIR=str(self.tmp / 'games'))
+        return nsp.fingerprint(nsp.shader_profile_key(sys.executable, REPO, env, game.Game(self.src)))
+
+    def test_files_no_shader_build_reads_keep_the_key(self):   # a note edit used to restore every library
+        before = self.key()
+        (self.src / 'README.md').write_text('# a note\n')
+        (self.src / 'pso_manifest.tsv').write_text('S\tk2\tpixel\n')
+        (self.src / 'game.tsv').write_text((self.src / 'game.tsv').read_text() + 'pad_layout\tfull\n')
+        self.assertEqual(self.key(), before)
+
+    def test_shader_inputs_change_the_key(self):
+        changes = {
+            'shader map': lambda: (self.src / 'shader_map.tsv').write_text('# registered\npkg.bin\t0\tvertex\tother\tx\n'),
+            'geo_mesh.tsv': lambda: (self.src / 'geo_mesh.tsv').write_text('a\tb\n'),
+            'an nvn_ key': lambda: (self.src / 'game.tsv').write_text((self.src / 'game.tsv').read_text() + 'nvn_test\ton\n'),
+        }
+        for what, change in changes.items():
+            with self.subTest(what):
+                before = self.key(); change(); self.assertNotEqual(self.key(), before)
+
+
+
 if __name__ == '__main__': unittest.main()

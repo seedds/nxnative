@@ -329,6 +329,40 @@ class Nvn(Base):
         p.write_text('{"step": "comp')   # half written: no progress this time, not an error
         self.assertIsNone(watch())
 
+    def test_shader_watch_follows_the_steps_after_the_last_shader(self):   # the count's last write is up to half a second old: the line stood at 42,811 of 42,848 for two minutes
+        p, mac, ios = self.tmp / 'progress.json', self.tmp / 'cache/b-x.img', self.tmp / 'ios/b-x.img'
+        mac.parent.mkdir(); ios.parent.mkdir()
+        watch = nsp.ShaderWatch(p, [mac, ios], tables=True)
+        self.assertIsNone(watch())   # before dmsh_build.py writes the file, its absence is not the tables
+        p.write_text('{"step": "compiling", "done": 42811, "total": 42848, "cached": 42848, "misses": 0}')
+        self.assertEqual(watch()['step'], 'compiling')
+        Path(str(mac) + '.part').write_bytes(b'x' * 300)   # publish_library: the Mac image, then the iPhone's
+        self.assertEqual(watch(), {'step': 'writing the library image', 'done': 300, 'unit': 'B'})
+        Path(str(mac) + '.part').rename(mac)
+        self.assertEqual(watch()['step'], 'writing the library image')   # between the two images: not back to the stale count
+        Path(str(ios) + '.part').write_bytes(b'y' * 50)
+        self.assertEqual(watch(), {'step': 'writing the library image', 'done': 350, 'unit': 'B'})
+        Path(str(ios) + '.part').rename(ios); p.unlink()   # dmsh_build.py removes the file, then runs c1_guard.py
+        self.assertEqual(watch(), {'step': 'c1 bounds (c1_guard.py)'})
+        watch.line('c1_full.tsv: not proven bounded: 650 shaders')
+        self.assertEqual(watch(), {'step': 'uniform read extents (cb_extent.py)'})
+        watch.line('cb_extent.tsv: bounded uniform reads: 113457 slots; storage slots never written: 43088; 39125 shaders')
+        self.assertIsNone(watch())
+
+    def test_shader_watch_partial_build_has_no_tables(self):   # --seen-shaders: dmsh_build.py makes no tables, and exits once the file is gone
+        p = self.tmp / 'progress.json'; watch = nsp.ShaderWatch(p, [self.tmp / 'b-x.img'], tables=False)
+        p.write_text('{"step": "compiling", "done": 1, "total": 2}'); watch(); p.unlink()
+        self.assertIsNone(watch())
+
+    def test_the_build_follows_dmsh_builds_lines(self):   # ShaderWatch.line gets own_compilers.py's output, and watches the Mac library's image
+        lines = []
+        def recording(cmd, log, env=None, cwd=None, on_line=None):
+            if Path(cmd[1]).name == 'own_compilers.py': lines.append(on_line)
+            return self.fake_run(cmd, log, env=env, cwd=cwd, on_line=on_line)
+        with mock.patch.object(nsp, 'run', recording): self.build(True)
+        self.assertEqual(lines[0].__self__.images, [Path(nsp.shader_lib.image_of(self.sh / 'cache' / f'b-{CHAIN}'))])
+        self.assertTrue(lines[0].__self__.tables)
+
 
 class EnvFile(Base):
     def test_pairs(self):

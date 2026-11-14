@@ -331,6 +331,7 @@ static _Atomic uint32_t g_joy_sides[DM_PLAYERS];
 static _Atomic uint32_t g_joy_two[DM_PLAYERS];   // the pad's Joy-Cons are Joy-Con 2s (DM_JOY_2)
 static _Atomic uint32_t g_joy_paired[DM_PLAYERS];   // the pad has held both Joy-Cons since it last held none (six_stream: a half it lost lies flat)
 static _Atomic uint32_t g_joy_reported[DM_PLAYERS];   // bit side: that Joy-Con has reported its own motion since it was attached (joy_own)
+static _Atomic uint32_t g_joy_wide[DM_PLAYERS];       // sides whose front end feeds motion for a whole pad it still reads (dm_joy_motion)
 static _Atomic uint64_t g_joy_btn[DM_PLAYERS][2], g_joy_latch[DM_PLAYERS][2], g_joy_axes[DM_PLAYERS][2];
 static _Atomic uint32_t g_single_mask;               // bit id: the game asked for single assignment on npad No(id + 1)
 static _Atomic uint32_t g_single_keep[DM_PLAYERS];   // 1: the left Joy-Con stays on that npad, 2: the right one, 0: either (the left)
@@ -874,6 +875,21 @@ static void motion_set_to(live_motion *m, int p, const float acc[3], const float
 void dm_motion_set(int p, const float acc[3], const float rot[3]) { motion_set(p, acc, rot, 0, 0); }
 void dm_motion_set_switch(int p, const float acc[3], const float rot[3]) { motion_set(p, acc, rot, 1, 0); }
 void dm_motion_set_hid(int p, const float acc[3], const float rot[3], uint64_t t) { if (t) motion_set(p, acc, rot, 2, t); }
+// A front end that reads a pair's Joy-Cons one by one but leaves the pad's buttons and sticks to GameController (the
+// Mac front end's original Joy-Cons): each handle of the JoyDual npad reads its own Joy-Con's sensor. A side that
+// is attached but has not reported falls back to the pad's merged stream, so one Joy-Con alone still drives both
+// handles (the game reads device 0 of a pair 50 times as often as device 1).
+void dm_joy_motion(int p, uint32_t sides) {
+    if (p < 0 || p >= DM_PLAYERS) return;
+    sides &= 3;
+    uint32_t gone = atomic_exchange(&g_joy_wide[p], sides) & ~sides;
+    if (gone) {
+        atomic_fetch_and(&g_joy_reported[p], ~gone);
+        for (int s = 0; s < 2; s++) if (gone >> s & 1) {
+            pthread_mutex_lock(&g_joy_motion[p][s].mu); g_joy_motion[p][s].last_ns = 0; pthread_mutex_unlock(&g_joy_motion[p][s].mu);
+        }
+    }
+}
 void dm_motion_set_joy(int p, int side, const float acc[3], const float rot[3], uint64_t t) {
     if (t && p >= 0 && p < DM_PLAYERS && (side == 0 || side == 1)) { atomic_fetch_or(&g_joy_reported[p], 1u << side); motion_set_to(&g_joy_motion[p][side], p, acc, rot, 2, t); }
 }
@@ -1085,6 +1101,12 @@ static live_motion *six_stream(uint32_t h, npad_ref ref, int pl) {
     int dev = (int)(h >> 16 & 1);
     if (ref.kind >= KIND_DUAL) return motion_joy_pick(ref.pad, ref.kind == KIND_LEFT ? 0 : ref.kind == KIND_RIGHT ? 1 : dev, NULL);
     if (pl >= 0 && pl < DM_PLAYERS && kind_style(ref, h >> 8 & 0xff) == STYLE_JOYDUAL) {
+        if (atomic_load(&g_joy_wide[pl]) >> dev & 1) {   // a Joy-Con of the pad, reported on its own (dm_joy_motion)
+            pthread_once(&g_motion_once, motion_env);
+            if (g_motion_off) return NULL;
+            if (motion_copy(&g_joy_motion[pl][dev], NULL)) return &g_joy_motion[pl][dev];
+            if (atomic_load(&g_joy_reported[pl]) >> dev & 1) return NULL;   // it went quiet: flat, not the other half
+        }
         uint32_t src = 1u << pl | (pl ? 0 : merged_players());
         pthread_once(&g_motion_once, motion_env);
         for (int q = 0; q < DM_PLAYERS; q++) if (src >> q & 1 && joy_active(q)) {

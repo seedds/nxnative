@@ -43,6 +43,7 @@ void dm_motion_clear_hid(int player);
 void dm_joy_attach(int pad, uint32_t sides);   // sides | DM_JOY_2: they are Joy-Con 2s (the Switch 2 styles, the mouse sensor)
 #define DM_JOY_2 4u
 void dm_joy_set(int pad, int side, uint64_t buttons, int32_t sx, int32_t sy);   // side 0 left, 1 right
+void dm_joy_motion(int pad, uint32_t sides);   // sides whose front end feeds motion for a pad it still reads whole (buttons and sticks from GameController)
 void dm_motion_set_joy(int pad, int side, const float acc[3], const float rot[3], uint64_t sample_ns);   // like dm_motion_set_hid, for one Joy-Con's sensor
 void dm_motion_clear_joy(int pad, int side);
 // A Joy-Con's mouse sensor (the Joy-Con 2's, on its rail side): the movement since the last report, in sensor counts (x right, y toward the player), and its state (DM_JOYMOUSE_*).

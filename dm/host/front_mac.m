@@ -21,6 +21,7 @@
 #include "haptics_apple.h"
 #include "motion_apple.h"
 #include "motion_pro_mac.h"
+#include "pad_jc1_mac.h"
 #include "pad_apple.h"
 #include "pad_hid_mac.h"
 #include "pad_switch2_apple.h"
@@ -239,6 +240,9 @@ static void pro_players_changed(GCController *gone) {
     dm_motion_pro_players(count, player);
 }
 static void pro_devices_changed(void) { pro_players_changed(nil); }
+// An original Joy-Con's GameController has no motion (pad_jc1_mac.h reads its sensors itself): the pad's player is
+// the one its reports feed, merged or its own slot, as for any controller.
+static int jc1_pad_player(GCController *c) { return g_merge ? 0 : pad_slot_of(&g_slots, (__bridge const void *)c); }
 // DM_PAD_PRESS_TO_JOIN=1: a controller is no player until one of its buttons is pressed, then it is the lowest player free, as a console's "press a button" screen.
 // Whatever the port, the order of connection or the link (Bluetooth has no port), and for identical pads too: so the players pick their own order. Not with DM_PAD_MERGE
 // A raw HID pad joins this way without the setting too (hidpad_first_press), and then takes its slot as a connecting controller does (pad_slot_take)
@@ -610,6 +614,7 @@ static void pads_start(void) {
     pads_changed(nil);
     hq_log_setting();
     dm_motion_pro_start(pro_devices_changed);
+    dm_jc1_start(jc1_pad_player);
     hidpad_start();
     static const dm_switch2_front s2front = {s2pad_attach, s2pad_detach, s2pad_read, s2pad_player, s2pad_blocked};
     dm_switch2_start(&s2front);

@@ -105,6 +105,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Fix:** it now goes by the zstd magic (`28 b5 2f fd`) whatever the name.
 - **Found on:** [Paper Mario: The Thousand-Year Door](../../dm/games/0100ECD018EBE000/README.md) (8,726 of the RomFS's 9,959 files, the shader archives among them). Of the other 21 games' RomFS on hand only Super Mario Galaxy's `GDDR3.zst` (a Vulkan game, no NVN split) has such a file.
 
+### The split hangs decompressing a large zstd file
+
+- **Symptom:** `build_ipa_from_nsp.py` sits at the shader split with no progress (`splitting: 88%, 164,256/186,587 files` for minutes, then no new line), the worker processes asleep and `zstd -d -c -q` children at 0 % CPU.
+- **Cause:** `unzs` (`shader_split.py`) fed a frame without a dictionary to the `zstd` command on stdin while capturing its stdout. Once the frame is larger than the pipe buffers the two block on each other: the worker's write waits for `zstd` to read, and `zstd`'s output write waits for the worker to drain stdout, which `subprocess.run` does only after the write.
+- **Fix:** `unzs` decompresses in-process with `compression.zstd` (Python 3.14; `backports.zstd` before), which the dictionary frames already used; no pipes, and a bounded RomFS image entry is read the same way. An invalid stream is a red line with the path.
+- **Check:** `dm/tools/tests/test_split_zstd.py`: files and bounded RomFS entries decode without a subprocess, including a frame past the pipe size.
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md): the sound archives, at file 164,256 of the 186,587 (M3 Max, macOS 27.0.1, Python 3.14).
+
 ### HAL's `.cmp` containers: a size-prefixed frame
 
 - **Symptom:** the game asks for shaders the map does not have (`[RED] shader ... is not in the shader map`, hundreds of lines), and the split finds far fewer shaders than the game uses (121 against 27,288 on Kirby and the Forgotten Land).

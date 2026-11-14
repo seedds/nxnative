@@ -2881,12 +2881,14 @@ def unzs_dict(d, did, where):
     return zstd.decompress(d, zstd_dict=_ZD[did])
 
 def unzs(path):
-    """A zstd file decompressed: frames without a dictionary through the zstd command as before (fed the bytes: inside a RomFS image the path is not a file the command can open),
-    frames that name one with that dictionary from ZDICTS"""
-    d = open(path, 'rb').read()
+    """Decompress in-process, with the frame's dictionary when named. Feeding the CLI through stdin while capturing stdout can deadlock on macOS:
+    a worker's blocking pipe write waits for zstd to read, while zstd's output writer waits for that worker to drain stdout (Ocarina's sound archives).
+    The library already used for dictionary frames removes both pipes and also reads bounded RomFS image entries."""
+    with open(path, 'rb') as stream: d = stream.read()
     did = zs_dict_id(d)
-    if not did: return subprocess.run(['zstd', '-d', '-c', '-q'], input=d, capture_output=True, check=True).stdout
-    return unzs_dict(d, did, path)
+    zstd = zstd_mod()
+    try: return unzs_dict(d, did, path) if did else zstd.decompress(d)
+    except zstd.ZstdError as e: red(f'{path}: invalid zstd stream ({e})')
 
 def frame_size(f):
     """The uncompressed size a zstd or LZ4 frame header records, None when it records none"""

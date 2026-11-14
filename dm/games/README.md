@@ -47,6 +47,7 @@ One row per profile; the notes are each profile's `README.md`.
 | [13 Sentinels: Aegis Rim](01003FC01670C000/README.md) | `01003FC01670C000` | 1.10 | 11.4.3 | Vanillaware's engine | NVN |
 | [13 Sentinels: Aegis Rim, Asian release](01008D7016438000/README.md) | `01008D7016438000` | 1.00 (base) | 11.4.3 | Vanillaware's engine | NVN |
 | [13 Sentinels: Aegis Rim, Japanese release](010045C014650000/README.md) | `010045C014650000` | 1.00 (base) | 10.8.2 | Vanillaware's engine | NVN |
+| [A Little to the Left](0100354017668000/README.md) | `0100354017668000` | 3.6.0 | 13.3.7 | Unity 2020.3.26f1 IL2CPP, FMOD | NVN |
 | [Absolum](0100A83022A22000/README.md) | `0100A83022A22000` | 1.1.2 | 18.3.2 | FNA / .NET NativeAOT (FNA3D's NVN driver) | NVN |
 | [Ace Attorney Investigations Collection](010005501E68C000/README.md) | `010005501E68C000` | 1.0.0.2 | 17.5.3 | Unity 2022.3.17f1 IL2CPP | NVN |
 | [Advance Wars 1+2: Re-Boot Camp](0100300012F2A000/README.md) | `0100300012F2A000` | 1.0.0 (base) | 10.4.1 | Unity 2020.2.1f3 IL2CPP | NVN |

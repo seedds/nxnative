@@ -22,6 +22,12 @@ HLE_FORCE("_ZN2nn4time19StandardSteadyClock19GetCurrentTimePointEPNS0_20SteadyCl
     int64_t s = (int64_t)(clock_gettime_nsec_np(CLOCK_MONOTONIC) / 1000000000ull);
     memcpy(out, &s, 8); memcpy(out + 8, "dmhost-steady-01", 16); return RES_OK;
 }
+// The std::chrono-style now() of early SDKs (SDK 3.7: Mega Man Legacy Collection, six call sites in main): the SDK's own reads the time service's steady clock session straight from a global
+// (sdk+0x16edf4), not through GetCurrentTimePoint. time::Initialize is taken over and makes no session, so it took its fallback and returned 0 on every call: the game's clock never moved.
+// It returns the time point's value, seconds, in x0
+HLE_FORCE("_ZN2nn4time19StandardSteadyClock3nowEv", "steady clock now() (early SDKs) → host monotonic clock (seconds), as GetCurrentTimePoint", int64_t, h_time_SteadyNowChrono, void) {
+    uint8_t tp[0x18]; h_time_SteadyNow(tp); int64_t s; memcpy(&s, tp, 8); return s;
+}
 HLE_FORCE("_ZN2nn4time38GetStandardSteadyClockCurrentTimePointEPNS0_20SteadyClockTimePointE", "steady clock (the free function form, SDK 20) → host monotonic clock", Result, h_time_SteadyNowFn, uint8_t *out) { return h_time_SteadyNow(out); }
 HLE_FORCE("_ZN2nn4time23StandardUserSystemClock14GetCurrentTimeEPNS0_9PosixTimeE", "user clock → host time()", Result, h_time_GetCurrentTime, int64_t *out) {
     int64_t ft = fixed_time(); *out = ft >= 0 ? ft : time(NULL); return RES_OK;

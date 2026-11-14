@@ -32,6 +32,10 @@ int main(void) {
     int64_t (*udiff)(const uint8_t *, const uint8_t *) = hook("_ZN2nn4time48CalculateStandardUserSystemClockDifferenceByUserERKNS0_13ClockSnapshotES3_");
     if (!snap || !adj_snap || !span || !udiff) { printf("time: %d checks, %d failed\n", checks, fails); return 1; }
     uint8_t a[0xd0], b[0xd0], c[0xd0]; int64_t ts = -1;
+    // The early-SDK now() (Mega Man Legacy Collection): the steady clock's seconds, the same value GetCurrentTimePoint gives, never the SDK's fallback 0
+    int64_t (*chrono_now)(void) = hook("_ZN2nn4time19StandardSteadyClock3nowEv");
+    uint8_t steady_tp[0x18]; h_time_SteadyNow(steady_tp);
+    CHECK(chrono_now && chrono_now() >= get64(steady_tp, 0) && chrono_now() > 0, "StandardSteadyClock::now() returns the steady clock's seconds");
     // Before the first snapshot: h_time_GetCurrentTime reads DM_FIXED_TIME once and caches it
     setenv("DM_FIXED_TIME", "1700000000", 1);
     setenv("TZ", "UTC", 1); tzset();

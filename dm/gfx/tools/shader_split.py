@@ -1094,7 +1094,9 @@ def cra_shaders(path, rel, ents, out):
     with open(path, 'rb') as f:
         for e in ents:
             if cra.head(f, e)[:4] in (b'FSTM', b'\x1aE\xdf\xa3'): continue
-            scan_blob(cra.undo(cra.read(f, e)), f'/{rel}/{e[1]}', out)
+            try: d = cra.undo(cra.read(f, e))
+            except cra.Error as x: red(f'/{rel}/{e[1]}: {x}')
+            scan_blob(d, f'/{rel}/{e[1]}', out)
 
 PDAT, PDAT_PMAP = b'PDAT', b'PMAP'
 PDAT_ZSTD, PDAT_CTL, PDAT_SPAN = b'\x28\xb5\x2f\xfd', CTL_MAGIC + b'\xc9\0\0\0', 1 << 20   # a PMAP frame never takes up 1 MB (the largest of Kirby Air Riders' 27,299: 186 KB inflated); pdat_shaders stops if one does
@@ -3080,7 +3082,12 @@ def scan_blob(d, label, out, depth=0, left=None):
         return
     if d[:4] == b'NARC':   # Camelot's containers (cra.py): each member packed by its first byte, so its size says nothing about the budget above
         import cra
-        for i, m in enumerate(cra.narc_members(d, label)): scan_blob(cra.undo(m), f'{label}/{i}', out, depth + 1)
+        try: members = cra.narc_members(d, label)
+        except cra.Error as e: red(str(e))
+        for i, m in enumerate(members):
+            try: m = cra.undo(m)
+            except cra.Error as e: red(f'{label}/{i}: {e}')
+            scan_blob(m, f'{label}/{i}', out, depth + 1)
         return
     if d[:4] == b'BAHS': out.extend(bahs_shaders(d, label)); return
     if d[:4] == RGXD: out.extend(rgxd_shaders(d, label)); return

@@ -173,6 +173,27 @@ class Members(unittest.TestCase):
         with self.assertRaises(cra.Error): cra.narc_members(b'SARC' + bytes(32))
         with self.assertRaises(cra.Error): cra.narc_members(narc([b'abc'])[:40])
 
+    def test_a_cut_narc_names_its_layout(self):   # each was a struct.error, which names no layout (the fuzzer: an 8-byte NARC)
+        with self.assertRaisesRegex(cra.Error, 'header cut at 8 of 16'): cra.narc_members(b'NARCRC\x14\0')
+        whole = narc([b'abc', b'def'])
+        fat = whole.index(b'BTAF')
+        short = bytearray(whole); struct.pack_into('<I', short, fat + 8, 1000)   # more members than the table holds
+        with self.assertRaisesRegex(cra.Error, 'BTAF of 1000 members past the end'): cra.narc_members(bytes(short))
+        bare = whole[:16] + b'GMIF' + struct.pack('<I', 8) + b'BTAF' + struct.pack('<I', 8)   # the file ends before the BTAF's count
+        bare = bare[:8] + struct.pack('<IHH', len(bare), 16, 2) + bare[16:]
+        with self.assertRaisesRegex(cra.Error, 'BTAF header past the end'): cra.narc_members(bare)
+
+    def test_a_cut_member_names_its_layout(self):
+        text = b'BNSH\0\0\0\0 shaders shaders shaders shaders ' * 40
+        lz4d = b'\x94\0\0\0' + struct.pack('<I', len(text)) + lz4.block.compress(text, store_size=False)
+        with self.assertRaisesRegex(cra.Error, 'an LZ4 member'): cra.undo(lz4d[:-5])
+        with self.assertRaisesRegex(cra.Error, 'would expand to 4294967295'): cra.undo(b'\x94\0\0\0\xff\xff\xff\xff\0\0\0\0')   # not a 4 GB allocation
+        with self.assertRaisesRegex(cra.Error, 'a zstd member'): cra.undo(b'Z\0\0\0' + bytes(4) + cra.zstd_mod().compress(text)[:-4])
+        with self.assertRaisesRegex(cra.Error, 'MMMM header cut'): cra.undo(b'MMMM\0\0')
+        with self.assertRaisesRegex(cra.Error, 'MMMM table of 9 chunks'): cra.undo(b'MMMM' + struct.pack('<II', 0, 9))
+        with self.assertRaisesRegex(cra.Error, 'MMMM chunk 0 past the end'): cra.undo(b'MMMM' + struct.pack('<III', 0, 1, 64) + bytes(4))
+        with self.assertRaisesRegex(cra.Error, 'LZ stream cut inside a token'): cra.undo(b'\x60\0\0\0\x01')   # a flag byte with a match, and no match bytes
+
     def test_kinds(self):
         text = b'BNSH\0\0\0\0 shaders shaders shaders shaders ' * 40
         lz4d = b'\x94\0\0\0' + struct.pack('<I', len(text)) + lz4.block.compress(text, store_size=False)

@@ -441,6 +441,11 @@ check_t_view_levels: RUN_ENV = MTL_DEBUG_LAYER=1
 t_res_commit: t_res_commit.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_res_commit.m $(MTL_T_SRC) $(FW)
 check_t_res_commit: RUN_ENV = MTL_DEBUG_LAYER=1
+t_res_cb: t_res_cb.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_res_cb.m $(MTL_T_SRC) $(FW)
+.PHONY: check_t_res_cb
+check_t_res_cb: t_res_cb
+	@set -e; for enc in 0 1; do env -u DM_RES_CB DM_NVN_ENC_THREAD=$$enc MTL_DEBUG_LAYER=1 ./t_res_cb; DM_RES_CB=1 DM_NVN_ENC_THREAD=$$enc MTL_DEBUG_LAYER=1 ./t_res_cb; done
 t_upload_src: t_upload_src.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_upload_src.m $(MTL_T_SRC) $(FW)
 check_t_upload_src: RUN_ENV = MTL_DEBUG_LAYER=1

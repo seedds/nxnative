@@ -135,7 +135,7 @@ static void rec_exec(const rec_t *r) {
     switch (r->op) {
     case RO_CB_NEW: g_rx_cb = [g_dev newCommandBuffer]; break;
     case RO_CB_BEGIN: [(id<MTL4CommandBuffer>)g_rx_cb beginCommandBufferWithAllocator:rec_id(a[0])]; break;
-    case RO_CB_END: [(id<MTL4CommandBuffer>)g_rx_cb endCommandBuffer]; break;
+    case RO_CB_END: if (g_res_cb) res_use(g_rx_cb); [(id<MTL4CommandBuffer>)g_rx_cb endCommandBuffer]; break;
     case RO_CB_BLOCK: ((void (^)(id<MTL4CommandBuffer>))rec_id(a[0]))(g_rx_cb); break;
     case RO_COMMIT: case RO_COMMIT_REAL: {
         if (r->op == RO_COMMIT) ubc_wait(a[2]);   // the uniform shadows this command buffer reads

@@ -11,6 +11,12 @@ CUTS = {
     (0x93e8c, 'ea030232', '0a80a052', 'VammManager occupied node area: 1 GB to 64 MB'),
     (0x93fe0, 'ea030232', '0a40a052', 'AllocateAddressRegion: align regions of 1 GB and more to 32 MB'),
   ],
+  # We Love Katamari REROLL+ Royal Reverie 1.0.3 (v131072) sdk (SDK 14.3.1, Unity 2021.3.16f1): the AddressRegionManager node area cut.
+  # The constructor is at sdk+0x12d8a0 (limit = alias start + 0x3fe00000 at +0x12d8b0, registered as occupied at +0x12d94c)
+  '2587a39ac2547a780ec0e4b77e22afab': [
+    (0x12d8b0, '08fca752', '087ca052', 'AddressRegionManager constructor: node area limit mov w8,#0x3fe00000 → mov w8,#0x3e00000'),
+    (0x12d94c, '09fca752', '097ca052', 'AddressRegionManager constructor: length of the node area registered as an occupied region mov w9,#0x3fe00000 → mov w9,#0x3e00000'),
+  ],
 }
 
 # SDK-wide function patches (dm/tools/nso_match.py): the two fixes above that hold for any game on an iPhone's small address space, for every game's sdk of a build with no CUTS

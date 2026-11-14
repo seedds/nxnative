@@ -1,0 +1,36 @@
+# Game profile of We Love Katamari REROLL+ Royal Reverie (Switch, update 1.0.3 = v131072). Plays on the Mac
+# Format: see dm/games/README.md
+# Unity 2021.3.16f1 (IL2CPP) with CRIWARE and FMOD, SDK 14.3.1, NVN.
+
+# ---- Identity ----
+title_id	010089D018D18000
+program_id	010089D018D18000
+
+# ---- App ----
+name	We Love Katamari REROLL+ Royal Reverie
+ipa	WeLoveKatamariRerollRoyalReverie.ipa
+app_category	public.app-category.games
+
+# ---- Versions ----
+build	v131072	1.0.3	main=9fc7af389b98f61a4a7dca719a0e61f4	subsdk0=75c83c09e25f9a4e60bd960815722e86	sdk=2587a39ac2547a780ec0e4b77e22afab
+package	v131072
+shader_versions	v131072
+
+# ---- Files ----
+# every module main imports from
+modules	main subsdk0 sdk
+romfs_marker	Data/StreamingAssets/aa/Switch/image_assets_all_9b838b1187cca1642cc1d358b459dde9.bundle
+zip_store	.assets:.bundle:.dat:.json:.ress:.metallib
+
+# ---- Memory ----
+# the NPDM declares 16 MB of system resource (virtual address memory) and main sets a heap: a 5 GB block with a large alias region; the heap check sizes the heap region from the heap the game asks for
+mem_reserve	0x140000000
+mem_alias	0x118000000
+mem_stack	0x10000000
+app_pool	0x40000000
+# the NPDM declares 16 MB of system resource
+sys_resource	0x1000000
+
+# ---- Shader split ----
+shader_groups	/Data/=data
+shader_note	We Love Katamari REROLL+ Royal Reverie shaders

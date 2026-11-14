@@ -26,24 +26,24 @@ static NSDictionary<NSString *, NSString *> *read_settings(NSString *text) {
 }
 
 // Leave all unrelated lines, comments, paths and their newline convention intact.
+// An empty managed DM_WINDOW_SCREEN removes the pin, including duplicate assignments.
 static NSString *merge_settings(NSString *text, NSDictionary<NSString *, NSString *> *changes) {
-    NSMutableArray *lines = [[text componentsSeparatedByString:@"\n"] mutableCopy];
+    NSMutableArray *lines = [NSMutableArray array];
     NSMutableSet *found = [NSMutableSet set];
-    for (NSUInteger i = 0; i < lines.count; i++) {
-        NSString *line = lines[i];
-        if ([line hasPrefix:@"#"]) continue;
+    for (NSString *line in [text componentsSeparatedByString:@"\n"]) {
         NSRange eq = [line rangeOfString:@"="];
-        if (eq.location == NSNotFound) continue;
+        if ([line hasPrefix:@"#"] || eq.location == NSNotFound) { [lines addObject:line]; continue; }
         NSString *key = [line substringToIndex:eq.location], *value = changes[key];
-        if (!value) continue;
-        lines[i] = [NSString stringWithFormat:@"%@=%@%@", key, value, [line hasSuffix:@"\r"] ? @"\r" : @""];
+        if (!value) { [lines addObject:line]; continue; }
         [found addObject:key];
+        if ([key isEqualToString:@"DM_WINDOW_SCREEN"] && !value.length) continue;
+        [lines addObject:[NSString stringWithFormat:@"%@=%@%@", key, value, [line hasSuffix:@"\r"] ? @"\r" : @""]];
     }
     NSMutableString *result = [[lines componentsJoinedByString:@"\n"] mutableCopy];
     NSString *newline = [text containsString:@"\r\n"] ? @"\r\n" : @"\n";
     if (result.length && ![result hasSuffix:@"\n"]) [result appendString:newline];
     for (NSString *key in [[changes allKeys] sortedArrayUsingSelector:@selector(compare:)])
-        if (![found containsObject:key]) [result appendFormat:@"%@=%@%@", key, changes[key], newline];
+        if (![found containsObject:key] && !([key isEqualToString:@"DM_WINDOW_SCREEN"] && !changes[key].length)) [result appendFormat:@"%@=%@%@", key, changes[key], newline];
     return result;
 }
 
@@ -148,7 +148,8 @@ static oot_output_size native_output(CGDirectDisplayID display) {
     _fps.menu.autoenablesItems = NO;
     [_fps addItemWithTitle:@"60 FPS"]; _fps.lastItem.tag = 60;
     [_fps addItemWithTitle:@"90 FPS — pas encore disponible"]; _fps.lastItem.tag = 90; _fps.lastItem.enabled = NO;
-    [_fps addItemWithTitle:@"120 FPS"]; _fps.lastItem.tag = 120;
+    [_fps addItemWithTitle:@"120 FPS — cible expérimentale"]; _fps.lastItem.tag = 120;
+    _fps.lastItem.toolTip = @"Objectif de cadence, variable selon la scène et le Mac. Interpolation expérimentale.";
     _fps.target = self; _fps.action = @selector(update:);
     NSInteger native = [settings[@"DM_FPS_TARGET"] integerValue];
     [_fps selectItemWithTag:(_interpolation.state == NSControlStateValueOn && native >= 60) ? 120 : 60];
@@ -174,7 +175,7 @@ static oot_output_size native_output(CGDirectDisplayID display) {
     if (!fi && self.fps.selectedTag != 60) [self.fps selectItemWithTag:60];
     NSInteger target = self.fps.selectedTag;
     self.summary.stringValue = fi
-        ? [NSString stringWithFormat:@"Cible : %ld images natives + %ld interpolées par seconde.\nLes vidéos à 60 FPS gardent leur cadence native.", (long)(target/2), (long)(target/2)]
+        ? [NSString stringWithFormat:target == 120 ? @"Cible expérimentale : %ld natives + %ld interpolées/s.\nLes vidéos à 60 FPS gardent leur cadence native." : @"Cible : %ld images natives + %ld interpolées par seconde.\nLes vidéos à 60 FPS gardent leur cadence native.", (long)(target/2), (long)(target/2)]
         : @"Cible : 60 images natives par seconde. Interpolation désactivée.";
 }
 - (void)play:(id)sender { (void)sender; self.accepted = YES; [NSApp stopModal]; }
@@ -184,6 +185,10 @@ static oot_output_size native_output(CGDirectDisplayID display) {
     BOOL fi = self.interpolation.state == NSControlStateValueOn;
     BOOL upscale = self.upscale.state == NSControlStateValueOn;
     NSString *choice = self.resolution.selectedItem.representedObject;
+    // A display can disappear while the selector is open. Fall back as a unit:
+    // resolution choice, dimensions and cleared placement must agree.
+    if ([choice isEqualToString:@"native"] && (!self.nativeSize.width || !self.nativeSize.height ||
+        !self.outputDisplay || !CGDisplayIsActive(self.outputDisplay))) choice = @"2k";
     NSString *size = [choice isEqualToString:@"native"]
         ? [NSString stringWithFormat:@"%ux%u", self.nativeSize.width, self.nativeSize.height]
         : [choice isEqualToString:@"switch2"] ? @"2048x1152" : @"2560x1440";
@@ -192,7 +197,7 @@ static oot_output_size native_output(CGDirectDisplayID display) {
         @"DM_OOT_FRAMEGEN_ASYNC":fi ? @"1" : @"0", @"DM_PRESENT_UPSCALE":upscale ? @"metalfx" : @"off",
         @"DM_UPSCALER":upscale ? @"metalfx" : @"game", @"DM_UPSCALER_EXPERIMENTAL":upscale ? @"1" : @"0",
         @"DM_OOT_HDR":@"0", @"DM_OOT_HDR_OUTPUT_ALIAS":@"0", @"DM_DRAWABLE_SIZE":size,
-        @"DM_OOT_OUTPUT_RESOLUTION":choice,
+        @"DM_OOT_OUTPUT_RESOLUTION":choice, @"DM_WINDOW_SCREEN":@"",
         @"DM_PRESENT_FIFO":@"1", @"DM_PRESENT_LINK":@"0", @"DM_PRESENT_SNAP":@"2",
         @"DM_SCREEN_MATCH":@"0", @"DM_SCREEN_NATIVE":@"0", @"DM_FPS_HOLD":@"off"} mutableCopy];
     // Resolve native size and host placement against the same screen at launch.
@@ -269,12 +274,42 @@ int main(int argc, char **argv) {
                     if (fi) { [controller.fps selectItemWithTag:60]; [controller update:nil]; assert([controller.changes[@"DM_FPS_TARGET"] isEqualToString:@"30"]); }
                 }
             }
+            // A prior native pin must not survive either fixed-size choice.
+            // Duplicate pins and both newline conventions are deliberate.
+            for (NSString *newline in @[@"\n", @"\r\n"]) {
+                NSString *pinned = [@[@"# retain comment", @"DM_ROOT=/path with spaces", @"DM_SAVE=/save path", @"OTHER=a=b",
+                    @"DM_OOT_OUTPUT_RESOLUTION=native", @"DM_WINDOW_SCREEN=4000000000", @"DM_WINDOW_SCREEN=4000000001", @""] componentsJoinedByString:newline];
+                for (NSUInteger index = 0; index < 2; index++) {
+                    [controller.resolution selectItemAtIndex:index];
+                    NSString *merged = merge_settings(pinned, controller.changes);
+                    NSDictionary *parsed = read_settings(merged);
+                    assert(!parsed[@"DM_WINDOW_SCREEN"] && ![merged containsString:@"DM_WINDOW_SCREEN="]);
+                    assert([parsed[@"DM_ROOT"] isEqualToString:@"/path with spaces"]);
+                    assert([parsed[@"DM_SAVE"] isEqualToString:@"/save path"] && [parsed[@"OTHER"] isEqualToString:@"a=b"]);
+                    assert([merged hasPrefix:[@"# retain comment" stringByAppendingString:newline]]);
+                    assert([parsed[@"DM_OOT_OUTPUT_RESOLUTION"] isEqualToString:index ? @"2k" : @"switch2"]);
+                    assert([parsed[@"DM_DRAWABLE_SIZE"] isEqualToString:index ? @"2560x1440" : @"2048x1152"]);
+                }
+            }
+            // Simulate an unavailable native display without changing OS display state.
+            oot_output_size savedSize = controller.nativeSize; CGDirectDisplayID savedDisplay = controller.outputDisplay;
+            BOOL nativeEnabled = controller.resolution.lastItem.enabled; controller.resolution.lastItem.enabled = YES;
+            [controller.resolution selectItem:controller.resolution.lastItem];
+            assert([controller.resolution.selectedItem.representedObject isEqualToString:@"native"]);
+            controller.nativeSize = (oot_output_size){0, 0}; controller.outputDisplay = 0;
+            NSDictionary *fallback = read_settings(merge_settings(@"DM_WINDOW_SCREEN=4000000000\n", controller.changes));
+            assert(!fallback[@"DM_WINDOW_SCREEN"] && [fallback[@"DM_OOT_OUTPUT_RESOLUTION"] isEqualToString:@"2k"]);
+            assert([fallback[@"DM_DRAWABLE_SIZE"] isEqualToString:@"2560x1440"]);
+            controller.nativeSize = savedSize; controller.outputDisplay = savedDisplay; controller.resolution.lastItem.enabled = nativeEnabled;
+            assert([[controller.fps.menu itemWithTag:120].title containsString:@"cible expérimentale"]);
+            controller.interpolation.state = NSControlStateValueOn; [controller.fps selectItemWithTag:120]; [controller update:nil];
+            assert([controller.fps.menu itemWithTag:120].enabled && [controller.summary.stringValue containsString:@"Cible expérimentale"]);
             for (NSView *v in controller.window.contentView.subviews) {
                 NSRect f = v.frame; assert(NSMinX(f) >= 20 && NSMaxX(f) <= 500);
                 assert(NSMinY(f) >= 20 && NSMaxY(f) <= 340);
                 assert(fmod(f.origin.x, 4) == 0 && fmod(f.origin.y, 4) == 0);
             }
-            puts("selector: resolution persistence, combinations, native cap mapping, disabled choices and layout grid pass"); return 0;
+            puts("selector: resolution persistence, stale-screen removal, missing-display fallback, combinations, native cap mapping, target labels and layout grid pass"); return 0;
         }
         [controller.window makeKeyAndOrderFront:nil]; [NSApp activateIgnoringOtherApps:YES];
         [controller.window makeFirstResponder:nil];

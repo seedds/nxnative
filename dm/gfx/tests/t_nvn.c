@@ -152,6 +152,22 @@ int main(void) {
       atomic_store(&g_fs_k,0);
       dm_fps_state=NULL;unsetenv("DM_FPS_TARGET");g_present_cap=-1;nvn_present_config(0,0);
     }
+    // The cap's clock unit is independent of the selected display refresh for
+    // every title: engine-native limiters, native-120 and uncapped presents.
+    { win_t w={.interval=1};dm_fps_state=NULL;g_engine_stub=1;
+      nvn_present_config(120,0);setenv("DM_FPS_TARGET","60",1);g_present_cap=-1;
+      EXPECT("engine cap60 on display120 stays60",16666666,present_period(&w));
+      setenv("DM_FPS_TARGET","30",1);g_present_cap=-1;
+      EXPECT("engine cap30 on display120 stays30",33333333,present_period(&w));
+      g_fps_high=1;atomic_store(&g_high_cap,120);
+      EXPECT("native120 keeps its120 clock",8333333,present_period(&w));
+      g_fps_high=0;g_engine_stub=0;setenv("DM_FPS_TARGET","0",1);g_present_cap=-1;
+      EXPECT("uncapped interval1 keeps display120",8333333,present_period(&w));
+      w.interval=2;
+      EXPECT("uncapped interval2 keeps display120",16666666,present_period(&w));
+      atomic_store(&g_high_cap,60);
+      unsetenv("DM_FPS_TARGET");g_present_cap=-1;nvn_present_config(0,0);
+    }
     // No frame step page and no engine limiter the host writes (a main the profile's
     // stubs or limiter rows do not know): nothing makes the game follow the cap, so
     // presentation keeps the game's own interval (Tears of the Kingdom 1.4.2 at 2x).

@@ -140,8 +140,11 @@ check_t_perf_order: t_perf_order
 	DM_NVN_FAST_WAKE=0 DM_NVN_SLICE_MERGE=0 DM_NVN_CS_HOIST=0 MTL_DEBUG_LAYER=1 ./t_perf_order
 t_link_ticks: t_link_ticks.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_link_ticks.m $(filter-out ../nvn/hle_nvn.c,$(MTL_T_SRC)) $(FW)
-t_ghost_lru: t_ghost_lru.m $(MTL_T_DEP)
-	clang $(CFLAGS) -DTEST_GHOST_LRU=1 -fobjc-arc -o $@ t_ghost_lru.m $(MTL_T_SRC) $(FW)
+# The old monolithic-owner LRU fixture is superseded by t_serial_owner's
+# real owner working-set, idle-frame/submission, pin and stale-view checks.
+.PHONY: check_t_ghost_lru
+check_t_ghost_lru: check_t_serial_owner
+	@echo "t_ghost_lru retired: ran t_serial_owner for the current resource owner"
 t_spatial_output: t_spatial_output.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_spatial_output.m $(MTL_T_SRC) $(FW)
 check_t_spatial_output: RUN_ENV = DM_AUDIO=0 MTL_DEBUG_LAYER=1
@@ -903,3 +906,10 @@ check_t_sparse_pool_cache: RUN_ENV = MTL_DEBUG_LAYER=1
 t_sparse_copy: t_sparse_copy.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_sparse_copy.m $(filter-out ../nvn/hle_nvn.c,$(MTL_T_SRC)) $(FW)
 check_t_sparse_copy: RUN_ENV = MTL_DEBUG_LAYER=1
+
+# A known-refused shader without a host replacement must not split a live pass.
+t_dispatch_refused: t_dispatch_refused.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_dispatch_refused.m $(MTL_T_SRC) $(FW)
+check_t_dispatch_refused: t_dispatch_refused
+	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=0 ./t_dispatch_refused
+	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=1 ./t_dispatch_refused

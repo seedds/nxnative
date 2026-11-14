@@ -66,6 +66,7 @@ typedef struct {
 } cv_dec;
 
 static cv_dec *g_cv[16];
+static _Atomic uint64_t g_cv_cadence_seen[16];   // independent of decoder lifetime; publication under d->mu
 static pthread_mutex_t g_cv_mu = PTHREAD_MUTEX_INITIALIZER;   // lock order: g_cv_mu, then a decoder's mu, then g_spt_mu. A decoder's thread holds its mu while it writes a picture into a buffer
                                                               // (a conversion to RGBA for a native image), so the client's threads take both with dm_host_mutex_lock: waiting, they are blocked
 
@@ -75,14 +76,9 @@ static pthread_mutex_t g_cv_mu = PTHREAD_MUTEX_INITIALIZER;   // lock order: g_c
 int dm_codec_video_native_fps(void) {
     if (strcmp(DM_GAME_ID, "0400486024DEC000")) return 0;
     const char *off = getenv("DM_CODEC_VIDEO_FPS"); if (off && !strcmp(off, "0")) return 0;
-    int fps = 0; uint64_t now = now_ns();
-    dm_host_mutex_lock(&g_cv_mu);
-    for (int i = 0; i < 16; i++) if (g_cv[i]) {
-        cv_dec *d = g_cv[i]; dm_host_mutex_lock(&d->mu);
-        if (d->codec == CV_AV1 && codec_cadence_60(&d->cadence, now)) fps = 60;
-        pthread_mutex_unlock(&d->mu);
-    }
-    pthread_mutex_unlock(&g_cv_mu); return fps;
+    uint64_t now = now_ns();
+    for (int i = 0; i < 16; i++) if (codec_cadence_published_60(&g_cv_cadence_seen[i], now)) return 60;
+    return 0;
 }
 
 static cv_dec *cv_of(void *t) { cv_dec *d = t ? *(cv_dec **)t : NULL; return d && d->magic == CV_MAGIC ? d : NULL; }
@@ -314,7 +310,7 @@ static Result cv_dec_init(void *t, int codec, uint16_t w, uint16_t h, uint32_t i
     if (csd && csd_n && csd_n < (1u << 20)) { d->csd = malloc((size_t)csd_n); memcpy(d->csd, csd, (size_t)csd_n); d->csd_n = (size_t)csd_n; }
     cv_open(d);
     dm_host_mutex_lock(&g_cv_mu);
-    for (int i = 0; i < 16; i++) if (!g_cv[i]) { g_cv[i] = d; d->id = (uint32_t)i + 1; break; }
+    for (int i = 0; i < 16; i++) if (!g_cv[i]) { atomic_store_explicit(&g_cv_cadence_seen[i], 0, memory_order_release); g_cv[i] = d; d->id = (uint32_t)i + 1; break; }
     pthread_mutex_unlock(&g_cv_mu);
     if (!d->id) die("nn::codec: more than 16 video decoders");
     d->event = (uint8_t *)t + CV_EVENT_OFF; hle_bind_system_event(d->event, 0); hle_signal_system_event(d->event);
@@ -328,7 +324,7 @@ static Result cv_dec_init(void *t, int codec, uint16_t w, uint16_t h, uint32_t i
 }
 static Result cv_dec_fin(void *t) {
     cv_dec *d = cv_of(t); if (!d) return 0;
-    dm_host_mutex_lock(&g_cv_mu); g_cv[d->id - 1] = NULL; dm_host_mutex_lock(&d->mu); d->quit = 1; pthread_cond_signal(&d->work); pthread_mutex_unlock(&d->mu); pthread_mutex_unlock(&g_cv_mu);   // no sync handle lookup is still inside
+    dm_host_mutex_lock(&g_cv_mu); g_cv[d->id - 1] = NULL; dm_host_mutex_lock(&d->mu); d->quit = 1; atomic_store_explicit(&g_cv_cadence_seen[d->id - 1], 0, memory_order_release); pthread_cond_signal(&d->work); pthread_mutex_unlock(&d->mu); pthread_mutex_unlock(&g_cv_mu);   // no sync handle lookup is still inside
     dm_host_thread_join(d->th, NULL);   // a packet it decodes ends first (a codec cannot be stopped inside one); its pictures are dropped
     dm_movie_stopped(d);
     cv_stat_sum(d);
@@ -379,6 +375,7 @@ static Result cv_dec_reset(void *t, int stop) {
     for (int i = 0; i < d->nheld; i++) vpx_img_free(d->held[i]);
     d->nheld = 0; d->eos_pending = 0;
     d->cadence = (codec_cadence){0};
+    atomic_store_explicit(&g_cv_cadence_seen[d->id - 1], 0, memory_order_release);
     d->epoch++; d->reopen = 1;
     cv_stat_sum(d);
     pthread_cond_signal(&d->work);   // it may have waited for room
@@ -550,6 +547,7 @@ static Result cv_dec_props(uint16_t *w, uint16_t *h, uint16_t *cw, uint16_t *ch,
     if (ok) { *w = *cw = d->buf[i].w; *h = *ch = d->buf[i].h; *ts = d->buf[i].ts; *eos = d->buf[i].eos != 0;
         unsigned prior_samples = d->cadence.samples; int64_t prior_pts = d->cadence.pts;
         codec_cadence_note(&d->cadence, *ts, now_ns());
+        codec_cadence_publish(&g_cv_cadence_seen[d->id - 1], &d->cadence, d->codec == CV_AV1 && !d->quit);
         if (prior_samples == 2 && d->cadence.samples == 3)
             LOG("[codec] %s decoder %u: consumed 60-fps timestamps (step %lld ns)", k_cv_name[d->codec], d->id, (long long)(*ts - prior_pts));
         if (getenv("DM_CODEC_VIDEO_TIMING") && *ts != prior_pts) {

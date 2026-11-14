@@ -212,6 +212,20 @@ int main(void) {
         uint8_t da[0x400]; memset(da, 0, sizeof da);
         assert(!h_cv_av1tm(da, NULL, 0, 0x10000, 0xabcd0080, 0xabcd0040, 1, 3, 2, 2) && cv_of(da) && cv_of(da)->codec == CV_AV1 && cv_of(da)->w == 0x80 && cv_of(da)->h == 0x40);
         assert(h_cv_av1ev22(da) == da + CV_EVENT_OFF && ev_set(da + CV_EVENT_OFF));
+        // Real properties publish cadence; the frame-step query must complete
+        // even while both registry and decoder locks are held by this caller.
+        setenv("DM_CODEC_VIDEO_FPS", "1", 1); alarm(5);
+        cv_dec *cad = cv_of(da);
+        for (int k = 0; k < 4; k++) {
+            cad->buf[0].filled = 1; cad->buf[0].ts = k * 16666667LL;
+            assert(!cv_dec_props(&w, &h, &cw, &ch, &ts, &eos, da, 0));
+        }
+        pthread_mutex_lock(&g_cv_mu); pthread_mutex_lock(&cad->mu);
+        assert(dm_codec_video_native_fps() == (!strcmp(DM_GAME_ID, "0400486024DEC000") ? 60 : 0));
+        pthread_mutex_unlock(&cad->mu); pthread_mutex_unlock(&g_cv_mu); alarm(0);
+        assert(!cv_dec_reset(da, 0)); assert(!dm_codec_video_native_fps());
+        cad->buf[0].filled = 0;
+
         static const uint8_t delimiter[] = {0x12, 0x00};   // a temporal delimiter OBU alone
         uint64_t n; assert(!h_cv_av1submit(&n, da, delimiter, sizeof delimiter, 0, false));
         settle(da); assert(!cv_of(da)->nheld);
@@ -220,7 +234,14 @@ int main(void) {
         for (int k = 0; k < 7; k++) assert(!h_cv_av1submit(&n, da, av1, sizeof av1, 9000 + k, k == 6));
         settle(da); assert(cv_of(da)->nheld == 7 && !cv_of(da)->eos_pending);
         for (int k = 0; k < 7; k++) assert(cv_of(da)->held_ts[k] == 9000 + k && cv_of(da)->held_eos[k] == (k == 6) && cv_of(da)->held[k]->d_w == 64);
+        for (int k = 0; k < 4; k++) {
+            cad->buf[0].filled = 1; cad->buf[0].ts = k * 16666667LL;
+            assert(!cv_dec_props(&w, &h, &cw, &ch, &ts, &eos, da, 0));
+        }
+        uint32_t cadence_slot = cad->id - 1;
+        assert(atomic_load(&g_cv_cadence_seen[cadence_slot]));
         assert(!h_cv_av1fin(da) && !cv_of(da));
+        assert(!atomic_load(&g_cv_cadence_seen[cadence_slot]));
         // The av1C record from a sequence header: profile 0, one operating point at level 12 (tier 0), 2560x1440, 8-bit 4:2:0 with chroma position 0, written field by field
         uint8_t obu[32] = {0x0a, 0}; size_t bit = 16;
         #define PUT(v, nb) do { for (int k_ = (nb) - 1; k_ >= 0; k_--, bit++) if (((uint32_t)(v) >> k_) & 1) obu[bit / 8] |= (uint8_t)(0x80 >> (bit % 8)); } while (0)

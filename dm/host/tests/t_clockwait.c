@@ -5,23 +5,28 @@
 #include <stdatomic.h>
 #include <time.h>
 #include <unistd.h>
+#include <sched.h>
 #include <mach/mach.h>
 #include <mach/thread_switch.h>
 
 static _Atomic uint64_t clk = 1000000000ull;
+static _Atomic unsigned mach_yields, sched_yields;
+static int test_sched_yield(void) { atomic_fetch_add(&sched_yields,1); atomic_fetch_add(&clk,500); return 0; }
 static uint64_t test_now_ns(void) { return atomic_load(&clk); }
 static int test_nanosleep(const struct timespec *ts, struct timespec *rem) { (void)rem; atomic_fetch_add(&clk, (uint64_t)ts->tv_sec * 1000000000ull + (uint64_t)ts->tv_nsec); return 0; }
 static kern_return_t test_thread_switch(mach_port_name_t thread,int option,mach_msg_timeout_t timeout) {
     assert(thread==MACH_PORT_NULL && option==SWITCH_OPTION_NONE && timeout==0);
-    atomic_fetch_add(&clk,500);return KERN_SUCCESS;
+    atomic_fetch_add(&mach_yields,1); atomic_fetch_add(&clk,500);return KERN_SUCCESS;
 }
 #define now_ns test_now_ns
 #define nanosleep test_nanosleep
 #define thread_switch test_thread_switch
+#define sched_yield test_sched_yield
 #include "../hle_thread.c"
 #undef now_ns
 #undef nanosleep
 #undef thread_switch
+#undef sched_yield
 
 static thr_t *self(void) { thr_t *me = pthread_getspecific(g_keythr); assert(me); return me; }
 static void other_svc(void) { uint64_t r[32] = {0, self()->handle}; svc_thread(0x0C, r); }   // GetThreadPriority: ends a run of yields
@@ -36,6 +41,12 @@ static uint64_t limiter(uint64_t dl) {
 int main(void) {
     alarm(20);
     svc_thread_main_init();
+    unsigned mach0=atomic_load(&mach_yields),sched0=atomic_load(&sched_yields);
+    host_yield();
+    const char *yield_mode=getenv("DM_YIELD_NODEPRESS");
+    if(yield_mode&&!strcmp(yield_mode,"0")) assert(atomic_load(&sched_yields)==sched0+1 && atomic_load(&mach_yields)==mach0);
+    else assert(atomic_load(&mach_yields)==mach0+1 && atomic_load(&sched_yields)==sched0);
+    puts("PASS: configured yield route selected (default Mach, explicit0 sched_yield)");
 
     // A run of yields with no clock read: plain yields for its first 2 ms; with a read in each pass: back-off sleeps from its second yield (its first follows another SVC)
     other_svc(); uint64_t b0 = self()->nbackoff, t0 = test_now_ns();

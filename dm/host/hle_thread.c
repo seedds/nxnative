@@ -842,7 +842,14 @@ static void sleep_precise(uint64_t dl);
 // its short poll cost 10 ms. Horizon's yield does not lower a worker's priority
 // for a whole host quantum. Relinquish the CPU without depression; existing
 // progress detection and bounded back-off still keep idle polling from spinning.
-static void host_yield(void) { (void)thread_switch(MACH_PORT_NULL, SWITCH_OPTION_NONE, 0); }
+// Diagnostic DM_YIELD_NODEPRESS=0 restores Darwin sched_yield. The measured
+// non-depressing default stays on; concurrent first calls publish the same mode.
+static void host_yield(void) {
+    static _Atomic int mode;   // 0 unknown,1 non-depressing,2 original sched_yield
+    int m = atomic_load_explicit(&mode, memory_order_relaxed);
+    if (!m) { const char *e = getenv("DM_YIELD_NODEPRESS"); m = e && !strcmp(e, "0") ? 2 : 1; atomic_store_explicit(&mode, m, memory_order_relaxed); }
+    if (m == 2) sched_yield(); else (void)thread_switch(MACH_PORT_NULL, SWITCH_OPTION_NONE, 0);
+}
 
 // One back-off sleep of bo ns, counted for the power line
 static void backoff_sleep(thr_t *me, uint64_t bo) { me->nbackoff++; me->sleeping = 1; struct timespec ts = {0, (long)bo}; nanosleep(&ts, 0); me->sleeping = 0; }

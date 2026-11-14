@@ -2726,7 +2726,7 @@ void mtl_drain(void) { present_drop_for_suspend(); mtl_present_flush(); snap_dra
 __attribute__((weak)) int front_hdr_enabled(void) { return 0; }
 __attribute__((weak)) void front_hdr_prepare(uint16_t white,uint16_t peak) { (void)white;(void)peak; }
 __attribute__((weak)) uint32_t dm_vi_hdr_content(void) { return 203u|(1000u<<16); }
-static int g_red_once[173];   // one past the highest key: a new key raises this, and the macro refuses to compile otherwise
+static int g_red_once[175];   // one past the highest key: a new key raises this, and the macro refuses to compile otherwise
 #define RED_ONCE(k, ...) do { _Static_assert((k) < sizeof g_red_once / sizeof *g_red_once, "a RED_ONCE key past g_red_once: raise its size"); if (!g_red_once[k]++) MLOG("[RED] " __VA_ARGS__); } while (0)
 // NVN vertex streams 0–15 → Metal vertex buffer slots: 0–13 go to 16–29 (30 is the constant fallback buffer), 14 and 15 to 14 and 15. Metal has only the 31 slots 0–30; translated shaders use only buffer(0) (the argument buffer),
 // and the host's own vertex functions read no vertex buffers. 13 Sentinels uses stream 15, and the old 16 + stream went out of range (Metal assertion: buffer index (31) must be < 31)
@@ -14966,6 +14966,7 @@ static int lc_keeps(uint32_t op) {
 static void dispatch(const p_dispatch *dp);
 static void temporal_after_dispatch(NvShader *cs);
 static int up_mfx_wanted(NvShader *cs); static int up_mfx_encode(NvShader *cs, const p_dispatch *dp);   // a game's upscaler through MetalFX (see up_mfx_encode)
+static int ndve_may_replace(NvShader *cs);   // conservative recognition only; no image preparation or sequence changes
 static int ndve_engine_dispatch(NvShader *cs, const p_dispatch *dp);   // nn::ndve's movie network as the host's kernels (DM_NDVE_ENGINE=1, nvn_ndve.inc)
 // ---------- Compute dispatches moved ahead of the render pass they would split (DM_NVN_CS_HOIST) ----------
 // Metal cannot run a compute dispatch inside a render pass, so a dispatch between two draws of one pass ends it, and on a tile-based GPU every attachment is stored and loaded again:
@@ -15761,6 +15762,13 @@ static void dispatch(const p_dispatch *dp) {
         enc_c_end(ce);
         return;
     }
+    // A known-refused original does no work. Keep replacement candidates alive:
+    // NDVE can consume a layer without a translated PSO, and MetalFX can draw it.
+    // Otherwise return before first-store emulation, pending clears or image views.
+    // A different border specialization may still have a valid cached PSO; the
+    // lookup preserves it (cps_failed prevents a new build on a cache miss).
+    if (cs->cps_failed && !ndve_may_replace(cs) &&
+        !(!dp->ind && dp->x && dp->y && dp->z && up_mfx_wanted(cs)) && !dispatch_pipeline(cs)) return;
     const uint16_t *tg = cs->rf.tg;
     if (!tg[0]) { RED_ONCE(29, "compute shader lacks threadgroup size reflection"); return; }
     // A store the shader makes on its very first invocation only, before the others run on the Switch: the build takes it out of the shader (dmsh_rewrite.py first_store), as Apple's GPUs start workgroups in no order
@@ -17928,7 +17936,7 @@ static int present_now_kind(const tex_t *t, double period, uint64_t frame, uint6
     present_pipeline(layer.pixelFormat);   // Same as the original path: the first frame compiles the pipeline before taking the drawable
     if (g_grab_cb) { temporal_async_wait_source(t->serial); grab_present(src,crop,layer.drawableSize); }   // Game picture needed by the whole-window screenshot (peek without the lock first; the real take locks inside the function)
     if(front_hdr_enabled()) {
-        if(supplied || src.pixelFormat!=MTLPixelFormatRGBA16Float) { RED_ONCE(164,"HDR refuses an unconverted source or an already acquired display-link drawable");return 0; }
+        if(supplied || src.pixelFormat!=MTLPixelFormatRGBA16Float) { RED_ONCE(173,"HDR refuses an unconverted source or an already acquired display-link drawable");return 0; }
         front_hdr_prepare((uint16_t)hdr_content,(uint16_t)(hdr_content>>16));
     }
     uint64_t dt0 = now_ns();
@@ -18444,7 +18452,7 @@ static uint64_t snap_take(const tex_t *t,const int present_crop[4],uint64_t *gen
     int hdr=front_hdr_enabled();
     uint64_t hdr_frame=atomic_load(&g_cur_frame);
     id<MTLTexture> src=hdr && g_hdr_native_frame==hdr_frame && g_hdr_native_window==t->serial?g_hdr_native_linear:hdr?nil:tex_mtl(t);
-    if(!src){if(hdr)RED_ONCE(165,"HDR snapshot has no validated pre-PQ linear source; frame not displayed");return 0;}
+    if(!src){if(hdr)RED_ONCE(174,"HDR snapshot has no validated pre-PQ linear source; frame not displayed");return 0;}
     // The copy reads the source before present_now runs, so it needs the same commit as present_now: a window texture presented before any submission has used it was made just
     // now and is outside the committed residency set. DRAGON QUEST XI S presents three times before its first submission; on an A17 Pro the copy faulted silently (its command buffer
     // has no error handler) and every later command buffer of the process was ignored (GitHub issue #626). A commit with nothing new costs nothing
@@ -18863,4 +18871,10 @@ void mem_census(const char *why) { @autoreleasepool {
 } }
 #include "nvn_capture.inc"   // DM_NVN_CAPTURE (one frame for dm/gfx/tests/nvn_replay)
 #include "nvn_ndve.inc"      // DM_NDVE_ENGINE (nn::ndve's movie network)
+// Match the engine's side-effect-free rejection checks. Keep all recognized keys
+// eligible, including sequence resets/check mode and a background build in flight;
+// the engine itself remains the authority on whether this dispatch is consumed.
+static int ndve_may_replace(NvShader *cs) {
+    return (ndve_mode() || ndve_check()) && !g_nd.off && ndve_index(cs, 0) >= 0;
+}
 #pragma clang attribute pop

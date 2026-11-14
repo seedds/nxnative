@@ -65,18 +65,22 @@ static void ncap_frame(uint64_t frame) {
     if(g_ncap_first==UINT64_MAX){FILE *f=fopen(g_ncap_arm,"r");if(!f)return;fclose(f);g_ncap_first=frame;g_ncap_records=[NSMutableArray array];g_ncap_flow=g_ncap_flow_on?[NSMutableArray array]:nil;g_ncap_errors=[NSMutableArray array];MLOG("NATIVE_CAPTURE_ARMED frame %llu limit %u",(unsigned long long)frame,g_ncap_frames);return;}
     if(frame<g_ncap_first+g_ncap_frames)return;
     g_ncap_done=1;uint64_t fence=g_cb?mtl_sub_commit():mtl_last_fence();int complete=mtl_wait(fence,2000000000ull);
-    NSError *error=nil;[[NSFileManager defaultManager] createDirectoryAtPath:@(g_ncap_path) withIntermediateDirectories:YES attributes:nil error:&error];int io_ok=error==nil;
+    NSString *directory=@(g_ncap_path);NSError *error=nil;
+    if(directory)[[NSFileManager defaultManager] createDirectoryAtPath:directory withIntermediateDirectories:YES attributes:nil error:&error];
+    int io_ok=directory!=nil&&error==nil;
     NSMutableArray *records=[NSMutableArray array];
     for(NSDictionary *original in g_ncap_records){NSMutableDictionary *record=[original mutableCopy];NSMutableArray *resources=[NSMutableArray array];
         for(NSDictionary *originalResource in original[@"resources"]){NSMutableDictionary *r=[originalResource mutableCopy];id<MTLBuffer> buffer=r[@"_buffer"];[r removeObjectForKey:@"_buffer"];
             if(complete&&buffer){NSUInteger row=[r[@"row_bytes"] unsignedIntegerValue],gpuRow=[r[@"gpu_row_bytes"] unsignedIntegerValue],height=[r[@"height"] unsignedIntegerValue];NSData *bytes;
                 if(row&&gpuRow&&height){NSMutableData *packed=[NSMutableData dataWithLength:row*height];for(NSUInteger y=0;y<height;y++)memcpy((uint8_t *)packed.mutableBytes+row*y,(const uint8_t *)buffer.contents+gpuRow*y,row);bytes=packed;}
                 else bytes=[NSData dataWithBytes:buffer.contents length:[r[@"size"] unsignedIntegerValue]];
-                if(![bytes writeToFile:[@(g_ncap_path) stringByAppendingPathComponent:r[@"file"]] options:NSDataWritingAtomic error:&error])io_ok=0;}
+                NSString *name=r[@"file"],*path=directory&&name?[directory stringByAppendingPathComponent:name]:nil;
+                if(!path||![bytes writeToFile:path options:NSDataWritingAtomic error:&error])io_ok=0;}
             if(buffer){if(complete)res_remove(buffer);else defer_obj_release(buffer);}[resources addObject:r];}
         record[@"resources"]=resources;[records addObject:record];}
     NSDictionary *receipt=@{@"first_frame":@(g_ncap_first),@"frame_limit":@(g_ncap_frames),@"complete":@(complete),@"failed":@(g_ncap_failed),@"truncated":@(g_ncap_truncated),@"io_ok":@(io_ok),@"readback_bytes":@(g_ncap_bytes),@"records":records,@"logical_flow":g_ncap_flow?:@[],@"flow_truncated":@(g_ncap_flow_truncated),@"flow_scope":@"logical texture bindings and raster attachments; no clear/copy edges, implicit loads, buffer dependencies or original task/mesh aliases",@"errors":g_ncap_errors?:@[],@"scope":@"actual level-0/slice-0 texture views and effective buffer pointers; captures perturb timing"};
-    NSData *json=[NSJSONSerialization dataWithJSONObject:receipt options:NSJSONWritingPrettyPrinted error:&error];if(!json||![json writeToFile:[@(g_ncap_path) stringByAppendingPathComponent:@"receipt.json"] options:NSDataWritingAtomic error:&error])io_ok=0;
+    NSData *json=[NSJSONSerialization dataWithJSONObject:receipt options:NSJSONWritingPrettyPrinted error:&error];NSString *receiptPath=directory?[directory stringByAppendingPathComponent:@"receipt.json"]:nil;
+    if(!json||!receiptPath||![json writeToFile:receiptPath options:NSDataWritingAtomic error:&error])io_ok=0;
     MLOG("%sNATIVE_CAPTURE_DONE records %lu bytes %llu complete=%d failed=%d truncated=%d io_ok=%d",complete&&!g_ncap_failed&&!g_ncap_truncated&&io_ok?"":"[RED] ",(unsigned long)records.count,(unsigned long long)g_ncap_bytes,complete,g_ncap_failed,g_ncap_truncated,io_ok);
     g_ncap_records=nil;g_ncap_flow=nil;g_ncap_textures=nil;g_ncap_samplers=nil;g_ncap_shader=nil;
 }

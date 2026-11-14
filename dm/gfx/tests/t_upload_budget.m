@@ -36,7 +36,7 @@ static void cpu_burst(void) {
     mtl_sub_begin();
     for (int i=0; i<N; i++) {
         memset((void *)t.mem, i+71, t.L.size);
-        id<MTLTexture> image = pkg_upload_(&t, NULL, nil, 0);
+        id<MTLTexture> image = pkg_upload_(&t, NULL, nil, 0, nil, NULL, 0, NULL);
         CHECK(image != nil, "CPU fallback texture is created");
         if (image) [images addObject:image];
         CHECK(g_up_staging_bytes <= UP_BATCH_BYTES, "CPU fallback staging respects batch budget");

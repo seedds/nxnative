@@ -19,10 +19,13 @@ DM_CHEATS_ANY_BUILD	switch	`1` loads a cheat file written for another build of t
 DM_CHEATS_DEBUG	diagnostic	Logs every memory write a cheat makes and the cheat file context the menu's "another version" rows come from
 DM_CHEATS_ON	switch	Comma-separated cheat names turned on at launch, besides the saved per-build enabled states
 DM_CHEATS_WINDOW	switch	`1` opens the Mac Cheats panel beside the game from the start
+DM_CODEC_VIDEO_FPS	diagnostic	`0` disables the OOT AV1 native-picture-rate override; the normal cadence recognizer remains on otherwise
+DM_CODEC_VIDEO_TIMING	diagnostic	`1` logs codec media-time versus wall-time progress; off by default
 DM_CONTROL_NACP	path	The game's control data, `control.nacp` (default: `control.nacp` beside the RomFS, as in the NSP script's extraction folder and the Mac app's Resources); the iOS app sets it to its `dm/control.nacp`. The host answers `fs::GetCacheStorageMax` from it
 DM_COPY_GAME_RESOURCES	switch	`NO` skips the Xcode build phase that copies the game's resources into the app (`stage_resources.sh`, on by default); `build_ipa.sh` sets it for its unsigned build, which packs them itself
 DM_COPY_ROMFS	switch	`NO` keeps the game files out of the app, in the Xcode build phase (`stage_resources.sh`) and in the unsigned IPA of `build_ipa.sh` (on by default): `main.m` takes the validated `Documents/romfs.img` copied by `scripts/push_romfs.sh`, then a `Documents/romfs` folder; the build writes the image's identity as `romfs.id` into the app, and `main.m` uses only a matching image (`--romfs separate` of the NSP script sets this)
 DM_CRASH_PEEK	diagnostic	`="sp+0x248*,x22-0x20"` adds 0x100 bytes at each address to the crash report: `sp` or a register plus or minus an offset, a trailing `*` reading the pointer stored there first
+DM_CRASH_READS	diagnostic	Comma-separated bounded crash-context memory-read specifications; up to 16 reads of at most 256 bytes, see probe_context.inc; off when unset
 DM_CTL	diagnostic	`=<file>` (Mac): the host polls the file every 100 ms and runs each appended line: button presses, `shot`, `passdump`, `texdump`, `env KEY=VALUE`, `peek`, `memdump`, `drag` and more
 DM_CTRL_PROMPT_TEXT	switch	The texts of the controller applet's prompt (a game wants more players than have joined; `ctrl_prompt.h`) in the player's language, one per line: the title, the hint, the count, the done and the cancel button, with `{min}`, `{max}` and `{joined}` replaced by the numbers; a front end sets it ([Starting a game](frontends.md#starting-a-game)), an empty or missing line keeps the English text
 DM_DBG	diagnostic	When set, prints the guest's `svcOutputDebugString` text to stderr as `[guest]` lines
@@ -31,6 +34,7 @@ DM_DETCLOCK	switch	`=<step ns>`: from the first present on, the guest clock adva
 DM_DETCLOCK_PACE	switch	`=1` with `DM_DETCLOCK`: each frame takes at least one clock step of wall time, so background loading keeps up with the fixed clock (used by the screenshot gate)
 DM_DISPLAY_NAME	switch	Overrides the iOS app's name in `build_ipa.sh` (default the game name in the base NSP's control data)
 DM_DRAWABLE_COUNT	diagnostic	`2` or `3` sets the CAMetalLayer drawable limit before its first drawable; unset or invalid keeps the platform default; no frame-rate gain is implied
+DM_DRAWABLE_SIZE	switch	`WIDTHxHEIGHT` selects output pixels, each 1..16384, independently of internal render resolution; unset keeps view sizing
 DM_DYNAMIC_RESOLUTION	player	`1` lets the game's own dynamic resolution run, `0` (default) keeps full resolution; only on the builds that declare the DYNAMIC_RESOLUTION capability: NieR:Automata 1.0.3 (its patches.py; scales between 70 and 100 %, `hle_fpslock.c` `k_nier_dr`) and Ocarina of Time (its frame step stub of the level function, state page +0x40: on, it steps one level at a time on the measured load, as the game's own extrapolation from pixel count kept it at its lowest level on Apple GPUs). The launcher's Dynamic resolution
 DM_EMBED_TAG	path	Set by the iOS app of a game of several programs: the tag of the running program's embedded sections (`p<N>`, `gen_embed.py --tag`)
 DM_ENTITLEMENTS	path	`=<plist>` gives a prepared Xcode project another entitlements file instead of the Increased Memory Limit one, and the ad-hoc signature of the unsigned IPA's executable carries them; empty means no entitlements
@@ -47,6 +51,11 @@ DM_FORCE_STRICT	diagnostic	`=1` makes the loader fail on forced-hook entries no 
 DM_FPS	switch	`30` or `60` pins the frame rate the display link and frame pacing aim for; otherwise it follows the game's present interval (60, or 30 when the game asks for 30)
 DM_FPS_HOLD	player	`on` / `off` overrides the profile's `fps_hold`: whether late frames may raise the hold above the frame cap's vsyncs (on by default)
 DM_FPS_TARGET	player	Frame-rate cap: `30` or `60`, `120` for a game whose profile has `fps_max 120` (60 otherwise), or `0` for the game's own limit; overrides the profile's `fps_target`
+DM_FRAMEGEN_ASYNC_GPU_TIMES	diagnostic	Output TSV path for asynchronous generation/display command-buffer GPU intervals; off when unset
+DM_FRAMEGEN_GPU_TIMES	diagnostic	Output TSV path for snapshot/frame-generation GPU intervals; off when unset
+DM_FRAMEGEN_PROFILE_EVERY	diagnostic	Sampling interval in frames for DM_FRAMEGEN_STAGE_TIMES; does not alter the requested game frame rate
+DM_FRAMEGEN_STAGE_TIMES	diagnostic	Output path enabling sampled frame-generation stage timestamps; capture overhead is not a gameplay performance result
+DM_FRAMEGEN_TIMES	diagnostic	Output TSV path for physical drawable callbacks, including zero-time abandoned frames; works with interpolation off
 DM_FS	diagnostic	When set, logs file opens, paths not found or not mounted, and a read summary every 64 MiB or 1000 reads
 DM_FSLOG	diagnostic	`=<file>` writes one TSV line per ReadFile: seconds since boot, guest path, offset, length and guest buffer address
 DM_FSLOG_HASH	diagnostic	With `DM_FSLOG`, adds a column with the FNV-1a 64 hash of the bytes read
@@ -133,6 +142,7 @@ DM_NVN_API	switch	`=<major>.<minor>` overrides the NVN API version `nvnDeviceGet
 DM_NVN_BARRIER	switch	How draw passes are ordered: `full` (default) waits for all earlier GPU work, `game` only for the previous pass's fragment stage unless the game set a barrier, `ab` alternates with the `DM_AB` phases
 DM_NVN_BC_ALIAS	diagnostic	Set 0 to send copies to an uncompressed alias instead of its block-compressed storage, for an A/B check; default 1
 DM_NVN_BF_WANT	path	`=<file>`: appends the key of each fragment shader whose passes could not be merged for lack of a readable-tile version to that file, once per key
+DM_NVN_BIND_DIAGNOSTICS	diagnostic	`1` records per-thread program-binding crash breadcrumbs; header readability is not ownership proof
 DM_NVN_BLEND_ZERO	switch	`0` leaves a NaN or Inf colour under a zero blend weight to Apple's blender, which stores NaN; by default a pixel shader returns it as 0 where the draw's blend state gives its source colour a zero weight on a floating-point target, as NVIDIA's blender does with the option NVN's driver sets
 DM_NVN_BLIT_ORDER	diagnostic	`0` drops the barriers between dependent operations in the copy encoder, which reproduces the fountain's vertical stripes in Mario Wonder
 DM_NVN_BORDER_KEEP	diagnostic	1 keeps the border corrections in every pipeline, as before the DMSH_BORDER_FC specialization: a wrong border colour with the specialization, or its cost (ab with DM_AB)
@@ -166,6 +176,9 @@ DM_NVN_FB_DEPTH	switch	`0` lets a draw that samples the depth attachment of its 
 DM_NVN_FB_SNAP	switch	Draws that sample a colour attachment of their own render pass: unset, those that write it (or follow a write in the pass) read a snapshot, reused until the game's next barrier; `0` none; `all` a fresh snapshot for every draw that samples one (slow, diagnostic, no tile reads)
 DM_NVN_FB_TILE	switch	`0` makes such draws that sample the attachment at their own pixel (a projective sample at the vertex shader's screen varying) read a snapshot too, instead of the tile
 DM_NVN_FB_TILE_EARLY	switch	`0` makes such a draw that opens its render pass take a snapshot, as it did before; by default it reads the tile of the pass it opens, whose formats were learned from the first such draw of its program on those targets
+DM_NVN_FLOW	diagnostic	Output path for bounded CPU/GPU interval records flushed at shutdown; inspect overflow before analysis
+DM_NVN_FLOW_FROM	diagnostic	Lower tracing-window bound in seconds since process start; used with DM_NVN_FLOW
+DM_NVN_FLOW_TO	diagnostic	Upper tracing-window bound in seconds since process start; crossing intervals are retained
 DM_NVN_FLUSH_FILL	switch	`0` starts a new GPU texture in a CPU-writable pool as zeros; by default one whose storage the game flushed before its first use is filled from that storage once
 DM_NVN_FRAMES	diagnostic	`=<N>` prints the NVN call table frame by frame for the first N frames (default 3)
 DM_NVN_FUSE_CHECK	diagnostic	`=1` checks pass merging in the same frame: renders the merged passes again apart and logs the comparison of the attachments every time
@@ -194,6 +207,11 @@ DM_NVN_LOG	diagnostic	`=1` logs the creation of NVN objects
 DM_NVN_MAGSCAN	diagnostic	`=<fs key>[:every[:phase]]`: device self-check that reads each pass's colour attachments every `every` frames (default 30) and logs `[mag]` lines for solid magenta 16×16 blocks or non-finite pixels
 DM_NVN_MDX_PRESCAN	switch	`0` copies an indirect-count multi-draw's records at its own first draw, which splits a render pass an earlier draw opened; by default the draw that opens a pass copies those of the multi-draws after it first (ab with DM_AB)
 DM_NVN_MFX_DIRECT	switch	`0` copies the game's colour into MetalFX's RGBA16F input (DM_UPSCALER=metalfx) unless it is RGBA16F; by default an input that is the whole rectangle MetalFX reads is taken in its own format (ab with DM_AB)
+DM_NVN_NATIVE_CAPTURE_ARM	diagnostic	Marker-file path arming a bounded native-upscaler readback; needs OUT and KEYS; off by default
+DM_NVN_NATIVE_CAPTURE_FLOW	diagnostic	`1` includes bounded logical texture-binding records; not a complete last-writer dependency graph
+DM_NVN_NATIVE_CAPTURE_FRAMES	diagnostic	Native-upscaler capture length, clamped to 1..3 frames
+DM_NVN_NATIVE_CAPTURE_KEYS	diagnostic	Comma-separated 16-character shader keys selected for native-upscaler readback
+DM_NVN_NATIVE_CAPTURE_OUT	diagnostic	Destination directory for bounded native-upscaler resources and receipt; readback perturbs timing
 DM_NVN_PARTIAL_UPLOAD	switch	`0` reads a texture whole from its storage at every re-upload; by default a re-upload reads only the images (a layer's level) with a page written since the last upload and copies the others from the texture it replaces
 DM_NVN_PASSDUMP	diagnostic	`=<f>`, `<f1>-<f2>` or `every:<n>`: logs every render pass of those frames (attachments, clears, shader keys, bindings, draw state, presents, and the host function and line that ended each pass) for the `tbdr_*.py` tools
 DM_NVN_PASSDUMP_ALL	diagnostic	`=1` makes `DM_NVN_PASSDUMP` record every draw and binding change, not only the first per pass and stage, including copies and inline uniform updates
@@ -201,9 +219,19 @@ DM_NVN_PASSGPU	diagnostic	`=<file>` writes the GPU time of each render and compu
 DM_NVN_PASSGPU_SERIAL	diagnostic	`=1` makes each encoder on the main command buffer wait until all earlier work has finished, so `DM_NVN_PASSGPU` times read each pass's exclusive time (totals read high)
 DM_NVN_PASS_SPLIT	switch	`=<draws>` (default 256, `0` off): a render pass is ended and its segment committed after this many draws while the GPU has no segment left, so the GPU starts a long pass (a G-buffer) before it is all translated; its attachments are stored and loaded again
 DM_NVN_PASS_SPLIT_MAX	switch	`=<n>` (default 2, `0` no limit): the most splits of one render pass (`DM_NVN_PASS_SPLIT`), as each stores and loads its attachments
+DM_NVN_PIXEL_PROBE_ARM	diagnostic	Marker-file path arming a one-frame pixel-ownership probe; deliberately restricts selected draws to one pixel, so changes the image
+DM_NVN_PIXEL_PROBE_OUT	diagnostic	Pixel-ownership receipt destination; not a rendering or performance validation
 DM_NVN_POOL_CHUNKS	switch	`0` wraps a memory pool of 512 MB or more whole in one buffer, as before; by default it is wrapped in overlapping 16 MB chunks made as draws reach them, so only the parts in use are wired
 DM_NVN_POOL_FIRST	diagnostic	`1` logs every first read through the pool table of a texture ID whose texture was not made yet (up to 32 a frame): what the read found (the ID's stand-in, or the dummy, which reads 0), the texture, its view and how many frames before it was registered; it also checks at each such read whether the storage the stand-in was made from has been written since. The totals go to the log every 300 frames without it (`pool stand-ins up to frame`)
 DM_NVN_POOL_STANDIN	switch	`0` leaves the dummy (reads 0) in the pool tables for a texture the walk does not make, as before; by default, once the walk's budget is full, such a texture holds a stand-in until a shader reads its ID: its own smallest levels, or its last level cut down to every n-th block, so the first read draws the texture's colours coarse for one frame instead of black (Ocarina of Time's cliff beside the castle town wall dark for one frame when the game streams a sharper texture into it, issue #1969)
+DM_NVN_POSE_PROBE_ARM	diagnostic	Marker-file path arming a bounded vertex-uniform/pose capture; needs OUT and KEY
+DM_NVN_POSE_PROBE_FRAMES	diagnostic	Pose capture length clamped to 1..8 frames, except temporal-sync mode which uses 32
+DM_NVN_POSE_PROBE_GEOMETRY	diagnostic	`1` includes the geometry capture path in the opt-in pose probe
+DM_NVN_POSE_PROBE_KEY	diagnostic	Shader identity selected for the pose probe; title/build-specific research
+DM_NVN_POSE_PROBE_NATIVE	diagnostic	`1` enables native pose-buffer capture; off by default
+DM_NVN_POSE_PROBE_OUT	diagnostic	Destination for pose-capture records and readbacks; off when unset
+DM_NVN_POSE_PROBE_PALETTE_BYTES	diagnostic	Palette readback byte limit, clamped to 0..65536
+DM_NVN_POSE_PROBE_SYNC_TEMPORAL	diagnostic	`1` synchronizes pose investigation with the temporal capture and selects 32 frames; not a normal history policy
 DM_NVN_PREDICT	switch	`0` turns off the parallel precompile look-ahead: a pipeline miss compiles only the pipeline it needs
 DM_NVN_PREFETCH	switch	`0` turns off loading a program's shader libraries in the background when the game makes it (`nvnProgramSetShaders`); they load at its first draw instead
 DM_NVN_PRESENT_FINISH	diagnostic	`=1` makes each present return once the GPU has run the frame, so the game never runs ahead of the GPU
@@ -247,6 +275,7 @@ DM_NVN_TF_CPU	switch	`0` sends every transform feedback capture through the `tf_
 DM_NVN_TREG_ID	diagnostic	`=<n>` logs every registration of texture ID n: what it holds from then on, and the frame being recorded
 DM_NVN_TSV	diagnostic	`=<path>` writes the per-frame NVN call table and timing rows (frame, metric, value) to a TSV, read by `scripts/bench.py`
 DM_NVN_TSV_CALLS	diagnostic	`0` makes `DM_NVN_TSV` write only the timing rows, without the call counts (about two thirds of the file)
+DM_NVN_TSV_DEFER	diagnostic	`1` buffers up to 32 MiB of per-frame NVN TSV until suspend/quit instead of per-frame filesystem writes
 DM_NVN_UB	diagnostic	`="name=item,…;…"`: alternating measurement in one run; odd phases of `DM_NVN_UB_N` frames (default 180) take one category in turn (`@set:<global>=<value>` or dropped shader keys) and log present times
 DM_NVN_UBD_MEMO	diagnostic	`0` scans the deferred uniform update list for every lookup instead of remembering answers per range until the list changes (for timing)
 DM_NVN_UBP_CHECK	diagnostic	`=1` checks every uniform shadow made from memory: the pass ends, the updates land, the replay waits for the GPU and compares (a difference is a red line; slow)
@@ -259,6 +288,8 @@ DM_NVN_UB_PARTIAL	switch	`0`: a uniform block the deferred updates cover only in
 DM_NVN_UDC_AB	diagnostic	`=1` starts with the DontCare store for unwritten attachments off and turns it on after the second screenshot, for an on/off picture comparison in one run
 DM_NVN_UNWRITTEN_DC	switch	`0` disables optional stores elided for loaded, unchanged attachments (on by default, independent of TBDR lookahead), for equivalence comparisons; mandatory image-write preservation stays active
 DM_NVN_UPLOAD_REUSE	switch	0 keeps the original one-block upload-slot policy; default retains bounded demand-sized primary and overflow buffers after completion.
+DM_NVN_UPSCALE_AUDIT_ARM	diagnostic	Marker-file path arming a three-frame metadata-only upscaler audit; needs OUT
+DM_NVN_UPSCALE_AUDIT_OUT	diagnostic	JSON destination for upscaler binding metadata; provides no buffer-content or last-writer proof
 DM_NVN_VBUF_CACHE	switch	`0` turns off the cache of resolved vertex stream addresses and vertex argument table writes across draws (on by default), for A/B runs
 DM_NVN_VCONV_CHECK	diagnostic	`=1` scans the indices again at every reuse of a cached vertex conversion range (`vconv_range`) and reports differences
 DM_NVN_VCONV_CPU	switch	`=1` converts integer vertex inputs fed formats of another class on the CPU, as before, instead of through the shader's shadow inputs (`<key>_bv`)
@@ -278,6 +309,14 @@ DM_OODLE_HOST	path	The Mac host binary that `shader_split.py` runs in its Oodle 
 DM_OODLE_JOB	path	`=<job file>`: the host runs the game's own Oodle decoder on every record of the job file right before `nnMain`, writes `<job file>.out` and exits (Unreal shader archives)
 DM_OODLE_MODULES	path	The rewritten modules the Mac host's Oodle tool mode loads when `shader_split.py` decodes Trinity packs; set by the NSP script
 DM_OODLE_SERVE	switch	`=1`: the host answers decode requests on stdin / stdout with the game's own Oodle (or LZ5) decoder from the guest main thread before the SDK starts, until stdin ends
+DM_OOT_FRAMEGEN_ASYNC	switch	`1` enables the experimental asynchronous mode-3 MetalFX path; off by default
+DM_OOT_HDR	switch	`1` requests experimental linear EDR output; off in the shared presets, not HDR certification
+DM_OOT_HDR_OUTPUT_ALIAS	diagnostic	`1` requests optional HDR identity-copy elision; keeps reader ownership and allocated outputs; off by default
+DM_OOT_INTERPOLATION_PREVIEW	switch	`0` off; `1` early preview, `2` pre-UI full-scene path, `3` paired snapshots; experimental and off by default
+DM_OOT_TEMPORAL_CAPTURE	diagnostic	Destination for bounded temporal input/output readbacks; off when unset and perturbs timing
+DM_OOT_TEMPORAL_CAPTURE_FRAMES	diagnostic	Requested short temporal-capture sequence length; not a gameplay history policy
+DM_OOT_TEMPORAL_CAPTURE_MIN_HISTORY	diagnostic	Minimum history age before optional temporal readback; does not certify a valid interpolated midpoint
+DM_OOT_TEMPORAL_CAPTURE_WAIT_FOR_ARM	diagnostic	`1` waits for an ARM marker in the temporal-capture directory
 DM_OPMODE	player	The operation mode the game sees: `0` handheld, `1` console (default: the profile's `op_mode`, console unless set); read once at startup
 DM_PAD_IDENTICAL	switch	`0` stops reading identical pads here when GameController lists fewer of their model than IOKit has, such as two Pro Controllers over USB (each a player of its own: a Pro Controller from its report 0x30, another model from its HID elements; `pad_hid_mac.h`, `pad_pro.h`); `DM_HID_PADS=0` stops it too; Mac only
 DM_PAD_MERGE	switch	`=1` merges every controller into player 1, as before, instead of giving each controller a player of its own (Mac and iOS)
@@ -294,9 +333,11 @@ DM_PRESENT_HZ	switch	`=<N>`: the frequency of presentation pacing (default 60); 
 DM_PRESENT_INTERVAL	switch	`display` presents one frame per display-link tick whatever interval the game sets; `game` follows the game's present interval (default: the profile's `present_interval`)
 DM_PRESENT_LATENCY	switch	`=1` or `2`: overrides the display link's preferred frame latency for every screen and window mode; larger positive values use 2 (default 2 in variable-refresh fullscreen, 1 otherwise)
 DM_PRESENT_LINK	switch	Present pacing: `0` acquires the drawable itself, `1` (the default) presents on a 60 Hz display link, `2` uses a 120 Hz display link with a frame every other tick. Unset, a 60 fps game in fullscreen on a variable-refresh screen that keeps its variable mode (no fixed-rate mode, or `DM_SCREEN_MATCH=0`) at a multiple of 120 Hz takes the 120 Hz link of `2`; a value set here holds in every window and screen mode
+DM_PRESENT_PICTURE_LAYER	switch	`1` uses an aspect-correct picture sublayer instead of a whole-view drawable; opt-in
 DM_PRESENT_SCREEN	switch	`0` turns off the acquire's wait for the screen of `DM_PRESENT_DEPTH` (`ab` with `DM_AB`); default on
 DM_PRESENT_SNAP	player	`=<n>`: present snapshots, a ring of n host textures (2 to 4; `1` = 2) the presents are copied to so the game's swapchain texture is free at once; `0` off (default: the profile's `present_snap`)
 DM_PRESENT_UPSCALE	player	`metalfx` scales a picture smaller than its rectangle on the screen through MetalFX's spatial scaler; `off` (the default) scales it bilinearly
+DM_PRESENT_UPSCALE_DIRECT	diagnostic	`1` allows MetalFX to target a compatible drawable; incompatible dimensions/format/usage/storage retain copy fallback
 DM_PREV_PROGRAM	switch	What `oe::GetPreviousProgramIndex` answers (default -1, started from HOME); `oe::ExecuteProgram` sets it for the program it starts; a relaunch removes it
 DM_PROBE	diagnostic	`=module:offset,…` (Mac only): puts a `brk` at each guest address and on every hit prints the thread, registers, strings they point to and a backtrace, then runs the original instruction
 DM_PROBE_ALL	diagnostic	Set: probe hits (`DM_PROBE`) also print x8–x18
@@ -374,6 +415,7 @@ DM_SCREEN_ASPECT_SITES	diagnostic	`=<mask>` with DM_SCREEN_ASPECT: which of the 
 DM_SCREEN_FOV	diagnostic	`off` with DM_SCREEN_ASPECT: the scene keeps the game's vertical angle (narrower sides) instead of 16:9's sides with more above and below
 DM_SCREEN_HUD	diagnostic	`=<edge>,<listed>,<full width>,<full height>[,<tallest>]` with DM_SCREEN_ASPECT: the layout rules' distances and sizes in the 1280x720 space (default 280,100,1270,710,1300)
 DM_SCREEN_MATCH	switch	`0` keeps the screen's refresh rate in fullscreen; by default a Mac screen whose rate is not a multiple of the game's frame rate switches to one that is (144 → 120 Hz), and a variable-refresh screen to a fixed-rate mode at a multiple (ProMotion 120 → 60 Hz at 60 and 30 fps)
+DM_SCREEN_NATIVE	switch	`1` requests app-only native-pixel fullscreen sizing; unset keeps the existing desktop mode policy
 DM_SF_TRACE	diagnostic	`=1` logs every request on the game's own HIPC client sessions that the host answers (`hle_sf.c`)
 DM_SHADER_FILES	switch	`1` packs an NVN game's shader library into the unsigned IPA of `build_ipa.sh` as its separate files, `msl/b-<chain>/`, not as the one file `b-<chain>.img`, for install tools that cannot copy a large file (AltServer: 2 GiB) (`pack_ipa.py --shader-files`; off by default; `--shader-files` of the NSP script sets this)
 DM_SHAKE_G	switch	`=<G>`: on iOS, the acceleration beyond gravity above which a flick of the phone shakes the controller's six-axis sensor (default 1.5)
@@ -441,9 +483,11 @@ DM_WATCH_SAMPLE	diagnostic	`=<path>` (Mac): when the stall watchdog fires, sampl
 DM_WATCH_STALL	diagnostic	`=<s>`: when the frame loop makes no progress for that long (default 15 with `DM_WATCH`), logs a red line, dumps the threads and exits
 DM_WEB_LOG	diagnostic	`1` logs each key an offline HTML page is given and where the focus is after it
 DM_WINDOW	switch	When set (to any value, `0` included) opens a Mac window with keyboard and controller input; unset runs headless with the guest on the current thread; the Mac launcher sets it
+DM_WINDOW_SCREEN	switch	`builtin` or a display ID pins the game window; the selector removes stale pins when choosing non-native output
 DM_WINDOW_TOP	diagnostic	`1` (Mac, with `DM_WINDOW`) orders the game window in front without activating it and keeps it above other apps' windows, so a covered window does not slow the run; `regress.py` sets it
 DM_XCODE_DERIVED_DATA	path	Xcode derived data folder for `build_ipa.sh` (default `$W/build/ios/xcode-dd`); the NSP script points it into the game's build folder
 DM_XCODE_PROJECT_DIR	path	Folder of the per-game Xcode project that `build_ipa.sh --prepare-xcode` makes (default `$W/xcode`); the NSP script sets it
 DM_XV_FILE	path	File where the attachment validity ledger keeps the keys it disabled after a violation, read at the next launch
 DM_YIELD_BACKOFF	switch	`0` turns off the yield back-off; `=<cap µs>[:<start µs>]` sets its sleep cap and the run of yields after which it starts (default 250:2000)
 DM_YIELD_CLOCK	diagnostic	Clock-reading yield loops: 0 uses ordinary yield backoff, 1 backs off from the start, 2 also sleeps to the predicted end (default)
+DM_YIELD_NODEPRESS	diagnostic	`0` restores sched_yield on macOS; the default uses non-depressing Mach SWITCH_OPTION_NONE; other games remain unqualified

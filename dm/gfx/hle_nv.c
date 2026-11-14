@@ -34,7 +34,11 @@ HLE_FORCE("_ZN2nn2gs3sdk30CheckGraphicsSystemInitializedEPKcm", "the graphics sy
 // x0 = 0) while reporting video memory at startup. Report the pool the game installed, with nothing used from it
 HLE_FORCE("_ZN2nv21GetGraphicsMemoryInfoEPNS_10MemoryInfoE", WHY "; pool figures from nv::InitializeGraphics, no driver statistics", void, h_nv_MemInfo, uint64_t *out) {
     memset(out, 0, DM_SDK_OLD(dm_sdk_major()) ? 0x20 : 0x40);
-    if (g_nv_pool.inited) { out[0] = g_nv_pool.size; out[2] = g_nv_pool.size; }   // [0] total, [1] used (0), [2] free: within the four counters of both sizes
+    // A Switch 2 game boots graphics with no pool (nv::InitializeGraphics(nullptr, 0)): the driver's memory is the system's remote memory (BootWithRemoteMemory), which the
+    // console reports here. A total of 0 reads as graphics not initialised: The Duskbloods' display setup (main+0x491e150) and its renderer (main+0x1dc7264) stop on it, and
+    // the game then dereferenced the display object it never made (main+0x414b4d0). The console's figure is not measured: a nominal 512 MB, all of it free
+    unsigned long total = g_nv_pool.size ? g_nv_pool.size : g_nv_pool.inited && !g_nv_pool.mem && dm_sdk_ounce() ? 0x20000000ul : 0;
+    if (g_nv_pool.inited) { out[0] = total; out[2] = total; }   // [0] total, [1] used (0), [2] free: within the four counters of both sizes
 }
 HLE_FORCE("_ZN2nv22DumpGraphicsMemoryInfoEv", WHY "; the dump goes to the host log", void, h_nv_Dump, void) {
     LOG("nv::DumpGraphicsMemoryInfo: pool %.2f MB, 0 used (host graphics layer)", g_nv_pool.size / 1048576.0);

@@ -2,8 +2,9 @@
 #include "../../gfx/hle_nv.c"
 #include <assert.h>
 
-static int sdk;
+static int sdk, ounce;
 int dm_sdk_major(void) { return sdk; }
+int dm_sdk_ounce(void) { return ounce; }
 
 // The record between two guard words; after it, the old record again in an allocation of exactly its size, for AddressSanitizer
 static void check(int major, uint64_t pool) {
@@ -29,6 +30,10 @@ int main(void) {
         h_nv_Fin();
         check(majors[i], 0);
     }
-    puts("NV memory: the 0x20-byte record on SDK 10 and older, 0x40 bytes from SDK 11 on, pool figures in both");
+    // A Switch 2 boot with no pool (remote memory): a nominal total, all free; the same call on a Switch 1 SDK leaves the figures 0
+    h_nv_Init(NULL, 0); check(20, 0);
+    ounce = 1; check(20, 0x20000000); check(22, 0x20000000);
+    h_nv_Fin(); check(20, 0); ounce = 0;
+    puts("NV memory: the 0x20-byte record on SDK 10 and older, 0x40 bytes from SDK 11 on, pool figures in both, a nominal total for a Switch 2 boot with no pool");
     return 0;
 }

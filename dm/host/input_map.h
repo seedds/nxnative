@@ -17,6 +17,9 @@
 
 enum { IM_BUTTONS = 16, IM_LUP = 16, IM_LDOWN, IM_LLEFT, IM_LRIGHT, IM_RUP, IM_RDOWN, IM_RLEFT, IM_RRIGHT, IM_SHAKE, IM_N };   // functions 0..15 are the DM_BTN_* bits
 #define IM_KEYS 128   // virtual key codes are below 128
+// 54-63 are the modifier keys (Command, Shift, Caps Lock, Option, Control, their right-hand twins, fn): AppKit reports them as flagsChanged, never as a key-down or
+// key-up, so a function put on one would never be pressed (GitHub #386, akratch). The Input tab (dm/mac/LauncherControls.swift) does not offer them either
+static int im_key_usable(int code) { return code >= 0 && code < IM_KEYS && !(code >= 54 && code <= 63); }
 typedef struct { int8_t fn[IM_KEYS]; } key_map;   // the function each key code holds, -1 none
 typedef struct { int8_t to[IM_BUTTONS]; } pad_map;   // the button each default button sends, -1 none
 
@@ -61,7 +64,7 @@ static int im_key_one(void *ctx, int f, const char *v, size_t n) {
     if (n == 4 && !strncasecmp(v, "none", 4)) { for (int c = 0; c < IM_KEYS; c++) if (m->fn[c] == f) m->fn[c] = -1; return 1; }
     if (!n || n >= sizeof buf || strspn(v, "0123456789") < n) return 0;
     memcpy(buf, v, n); buf[n] = 0; int code = atoi(buf);
-    if (code >= IM_KEYS) return 0;
+    if (!im_key_usable(code)) return 0;
     for (int c = 0; c < IM_KEYS; c++) if (m->fn[c] == f) m->fn[c] = -1;   // the function leaves its old key
     m->fn[code] = (int8_t)f;   // the key's old function is left on no key
     return 1;

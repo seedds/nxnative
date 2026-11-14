@@ -43,6 +43,10 @@ int main(void) {
     CHECK(input_map_valid("A=B,B=A", 1) && input_map_valid("ZL=L,minus=none", 1), "pad map: a swap and none are valid");
     CHECK(!input_map_valid("Q=1", 0) && !input_map_valid("A=40,Q=1", 0), "keymap: an unknown name is invalid, also next to a good entry");
     CHECK(!input_map_valid("A=128", 0) && !input_map_valid("A=abc", 0) && !input_map_valid("A=-1", 0) && !input_map_valid("A=", 0) && !input_map_valid("A", 0), "keymap: a key code past 127, text, a sign or no value is invalid");
+    CHECK(!input_map_valid("A=54", 0) && !input_map_valid("RUp=56", 0) && !input_map_valid("A=58", 0) && !input_map_valid("A=59", 0) && !input_map_valid("A=63", 0),
+          "keymap: a modifier key (54-63: Command, Shift, Option, Control, fn) is invalid, AppKit sends it no key-down");
+    CHECK(input_map_valid("A=53", 0) && input_map_valid("A=64", 0) && im_key_usable(52) && !im_key_usable(57) && !im_key_usable(128) && !im_key_usable(-1), "the keys next to the modifiers stay usable");
+    { key_map km; key_map_default(&km); CHECK(key_map_parse(&km, "A=56,B=38") == 1 && key_map_fn(&km, 56) == -1 && key_map_fn(&km, 38) == 1 && key_map_fn(&km, 40) == -1, "a modifier entry is left out, the rest applies"); }
     CHECK(!input_map_valid("A=LUp", 1) && !input_map_valid("Shake=B", 1) && !input_map_valid("A=Q", 1) && !input_map_valid("A=40", 1), "pad map: sticks, Shake, unknown names and key codes are invalid");
     CHECK(!input_map_valid("A=B", 0) && !input_map_valid("A=40", 1) && !input_map_valid("A=40,B=38", 1), "a value of one map is not valid for the other");
     CHECK(!input_map_valid("", 0) && !input_map_valid("", 1) && !input_map_valid(NULL, 0) && !input_map_valid(NULL, 1), "empty and missing values are invalid (nothing to apply)");

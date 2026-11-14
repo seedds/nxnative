@@ -30,6 +30,9 @@ enum Controls {
         return table[code] ?? "Key \(code)"
     }
 
+    /// A key a function can be on: below 128 and not a modifier (54-63), which AppKit reports only as flagsChanged (input_map.h im_key_usable)
+    static func usable(_ code: Int) -> Bool { (0..<128).contains(code) && !(54...63).contains(code) }
+
     static func validName(_ s: String) -> Bool {
         !s.isEmpty && s.count <= 40 && !s.hasPrefix(".") && s.allSatisfy { $0.isLetter || $0.isNumber || " -_".contains($0) }
     }
@@ -74,7 +77,7 @@ final class ControlsModel: ObservableObject {
             let k = String(line[..<eq]), v = String(line[line.index(after: eq)...])
             switch k {
             case "DM_KEYMAP": entries(v) { f, val in
-                guard let code = val.lowercased() == "none" ? -1 : Int(val), code < 128, f < Controls.names.count else { return }
+                guard let code = val.lowercased() == "none" ? -1 : Int(val), code == -1 || Controls.usable(code), f < Controls.names.count else { return }
                 self.assign(f, code) }
             case "DM_PAD_MAP": entries(v) { f, val in
                 guard f < Controls.buttons else { return }
@@ -212,7 +215,7 @@ struct ControlsTab: View {
         stop(); recording = f
         monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { e in
             guard let f = recording else { return e }
-            if e.keyCode != 53 && e.keyCode < 128 { c.assign(f, Int(e.keyCode)); c.save() }
+            if e.keyCode != 53 && Controls.usable(Int(e.keyCode)) { c.assign(f, Int(e.keyCode)); c.save() }
             stop()
             return nil
         }

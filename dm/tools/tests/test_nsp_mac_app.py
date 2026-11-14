@@ -721,10 +721,11 @@ class App(unittest.TestCase):
             self.assertEqual(r, ('A=40,B=38', 'A=B,B=A', '0.10', '1.50', 'label'))
             self.assertIn('launcher: env DM_PAD_STICK_DZ=0.10 (controls profile Default)', text)
             self.assertIn('DM_FPS_TARGET is not a control, ignored', text)   # a profile holds controls only
-            (folder / 'Racing.txt').write_text('DM_PAD_STICK_SENS=2.00\nDM_PAD_STICK_DZ=0.9\nDM_PAD_ABXY=xbox\n')
+            (folder / 'Racing.txt').write_text('DM_KEYMAP=A=56\nDM_PAD_STICK_SENS=2.00\nDM_PAD_STICK_DZ=0.9\nDM_PAD_ABXY=xbox\n')
             subprocess.run(['defaults', 'write', domain, 'controls.profile', '-string', 'Racing'], check=True)
             r, text = run()
-            self.assertEqual(r, (None, None, None, '2.00', None))   # this game's profile, not Default; a dead zone past 0.5 and an unknown face mode are left out
+            self.assertEqual(r, (None, None, None, '2.00', None))   # this game's profile, not Default; Shift (a modifier key), a dead zone past 0.5 and an unknown face mode are left out
+            self.assertIn('controls profile Racing: DM_KEYMAP=A=56 ignored', text)
             self.assertIn('controls profile Racing: DM_PAD_STICK_DZ=0.9 ignored', text); self.assertIn('controls profile Racing: DM_PAD_ABXY=xbox ignored', text)
             r, text = run(DM_PAD_STICK_SENS='1')   # the launch environment wins
             self.assertEqual(r[3], '1'); self.assertIn('DM_PAD_STICK_SENS=2.00 not used', text)
@@ -755,6 +756,9 @@ class App(unittest.TestCase):
         for code, f in re.findall(r'\{(\d+), (\w+)\}', grab(r'key_map_default.*?d\[\] = \{(.*?)\};', h, re.S)):
             default[int(f) if f.isdigit() else fn[f]] = int(code)
         self.assertEqual([int(x) for x in grab(r'static let defaultKeys: \[Int\] = \[(.*?)\]', s).split(',')], default)
+        # the modifier keys (flagsChanged only) the host's parser refuses, which the tab does not offer
+        self.assertEqual(grab(r'im_key_usable\(int code\) \{ return code >= 0 && code < IM_KEYS && !\(code >= (\d+ && code <= \d+)\)', h).replace(' && code <= ', '...'),
+                         grab(r'static func usable\(_ code: Int\) -> Bool \{ \(0\.\.<128\)\.contains\(code\) && !\((\d+\.\.\.\d+)\)', s))
 
     def test_signed(self):   # ad-hoc, both the host and the bundle, never the hardened runtime (it refuses the executable memory the host makes for the game's code)
         for target in (self.app, self.app / 'Contents/MacOS/dmhost'):

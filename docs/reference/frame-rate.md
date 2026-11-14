@@ -283,6 +283,15 @@ Frame pacing: the host's frame step, engine frame limiters, present intervals an
 - **Fix:** no code change. Shots are diagnostics only, and the retries need a silent link; a link that stops while its picture is visible, as on the iPhone in the entry above, would show the retry as a stutter of about 0.5 s every 60 s. To measure frame times, take no shots, and read a long frame's cause from the log before looking for it in the game: the shot or `rescue ended` line before it, and the focus lines. A stall that repeats on a timer is worth timing first: the doubling gaps gave the retry away.
 - **Found on:** [Princess Peach: Showtime!](../../dm/games/01007A3009184000/README.md#frame-rate): of 491 long frames in one 18-minute run, 315 were link retries and 53 followed a shot; with neither, 112 s of lobby and play had none.
 
+### Long frames whose time is the game's own file reads
+
+- **Symptom:** `[longframe]` lines whose whole-frame time is far above their submit and GPU times, with no new pipeline, no shader library and no texture upload: Super Mario Bros. Wonder entering its first course on an iPhone printed twenty frames of 92–102 ms with submit+present 0.7–2.3 ms and GPU 3.6–4.4 ms.
+- **Cause:** the time is the game's own, and the line had no field for it. A read the game's loading waits on is not on the submit thread or the GPU, so the record could not tell loading from CPU work in the game.
+- **Fix:** the line ends with `fs reads <count> / <MiB> / <ms>`: the `nn::fs` reads the host served since the previous frame tick and the time spent in them (`dm_fs_frame_take` in `hle_fs.c`, taken by the long-frame record in `hle_nvn.c` beside its pipeline and upload counts). Only reads that succeeded count, each timed over its whole call; directory listings, metadata and file creation are left out. A game's loading threads read in parallel, so the time is a sum over threads. A large value beside small GPU and submit times is the game's own loading, typically the first entry into a level; a small one leaves CPU work in the game. The graphics tests have no file service and print zeros.
+- **Found on:** [Super Mario Bros. Wonder](../../dm/games/010015100B514000/README.md), the frames above.
+- **Check:** `dm/host/tests/t_fs.c`: reads of 5 and 2 bytes from a RomFS image count as 2 reads and 7 bytes.
+- **Not checked:** the Wonder frames with the field in the line: no run on a device with it is recorded.
+
 ### A present command allocator is reused only after its own present completes
 
 - **Symptom:** with the display link driving presents, a presented frame comes out black when three presents are on the GPU at once, or two after a dropped frame; on an M6 the same reuse also logs `[RED] display command buffer error` with `kIOGPUCommandBufferCallbackErrorPageFault`.

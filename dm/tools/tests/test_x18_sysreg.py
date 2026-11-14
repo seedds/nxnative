@@ -29,9 +29,9 @@ SLOT = {'K18': 0x40, 'KTLS': 0x48, 'KTLR': 0x50, 'KGATE': 0x58}   # byte offsets
 scope = dict(vars(nso_asm), re=re, struct=struct, combinations=combinations, md=md,
              patch=bytearray(), PATCH_BASE=PATCH_BASE, KEY_PAGE_OFF=KEY_PAGE, KEY_INDEX=KEY_INDEX, fix=[])
 names = {'here', 'emit', 'emit_key_addr', 'emit_slot_addr', 'dis', 'regset', 'num', 'regs_in', 'pick',
-         'site_slot_copy', 'site_sysreg_read', 'site_tpidr_write'}
+         'site_slot_copy', 'site_sysreg_read', 'site_tpidr_write', 'BX', 'reach_via'}   # BX and reach_via (with REACH, _holes and _hops): the site's branches, through a hop where a b does not reach
 tree = ast.parse((TOOLS / 'patch_nso.py').read_text())
-exec(compile(ast.Module(body=[n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in names],
+exec(compile(ast.Module(body=[n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in names or isinstance(n, ast.Assign) and {getattr(t, 'id', None) for t in ast.walk(n.targets[0])} & {'REACH', '_holes'}],
                         type_ignores=[]), str(TOOLS / 'patch_nso.py'), 'exec'), scope)
 
 SITE = 0x1000                      # the original instruction's address; every block ends with b SITE + 4

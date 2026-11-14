@@ -63,11 +63,127 @@ static void *sdk_sym(const char *name) {
     if (!strcmp(name, "_ZN2nn2fs7UnmountEPKc")) return (void *)sdk_unmount;
     return NULL;
 }
+// A stand-in for an SDK-owned RAM disk with files, as Nintendo Switch Sports Resort's "vtapi": VoiceText/ holds vt/, and vt/vtpath.ini holds "ini". Each SDK file call is counted
+#define VT_FILE ((uint64_t)0x7bbd001230)   // the SDK's handles: FileAccessor / DirectoryAccessor pointers
+#define VT_DIR ((uint64_t)0x7bbd004560)
+#define VT_INI "vtapi:/VoiceText/vt/vtpath.ini"
+static int g_vt_calls, g_vt_closed, g_vt_dirs_closed, g_vt_mount_asks;
+static int vt_is_mounted(const char *n) { g_vt_mount_asks++; return !strcmp(n, "vtapi"); }
+static int vt_on(const char *p) { return !strncmp(p, "vtapi:", 6); }
+static Result vt_entry_type(int32_t *out, const char *p) { g_vt_calls++; if (!strcmp(p, VT_INI)) { *out = ENT_FILE; return RES_OK; } if (!strcmp(p, "vtapi:/VoiceText")) { *out = ENT_DIR; return RES_OK; } return RES_PATH_NOT_FOUND; }
+static Result vt_path(const char *p) { g_vt_calls++; return vt_on(p) ? RES_OK : RES_FAIL; }
+static Result vt_create_file(const char *p, int64_t sz) { (void)sz; return vt_path(p); }
+static Result vt_rename(const char *a, const char *b) { g_vt_calls++; return vt_on(a) && vt_on(b) ? RES_OK : RES_FAIL; }
+static Result vt_open(uint64_t *out, const char *p, int mode) { (void)mode; g_vt_calls++; if (strcmp(p, VT_INI)) return RES_PATH_NOT_FOUND; *out = VT_FILE; return RES_OK; }
+static Result vt_read(size_t *out, uint64_t h, int64_t off, void *buf, size_t sz) {
+    g_vt_calls++; if (h != VT_FILE) abort();   // the SDK's ReadFile takes its handle as a FileAccessor*: anything else would crash on hardware
+    size_t k = off >= 3 ? 0 : (size_t)(3 - off) < sz ? (size_t)(3 - off) : sz; memcpy(buf, &"ini"[off], k); *out = k; return RES_OK;
+}
+static Result vt_write(uint64_t h, int64_t off, const void *buf, size_t sz, const void *opt) { (void)off; (void)buf; (void)sz; (void)opt; g_vt_calls++; return h == VT_FILE ? RES_OK : RES_FAIL; }
+static Result vt_size(int64_t *out, uint64_t h) { g_vt_calls++; *out = 3; return h == VT_FILE ? RES_OK : RES_FAIL; }
+static Result vt_set_size(uint64_t h, int64_t sz) { (void)sz; g_vt_calls++; return h == VT_FILE ? RES_OK : RES_FAIL; }
+static Result vt_flush(uint64_t h) { g_vt_calls++; return h == VT_FILE ? RES_OK : RES_FAIL; }
+static void vt_close(uint64_t h) { g_vt_calls++; if (h == VT_FILE) g_vt_closed++; }
+static int vt_open_mode(uint64_t h) { g_vt_calls++; return h == VT_FILE ? (MODE_READ | MODE_WRITE) : 0; }
+static Result vt_open_dir(uint64_t *out, const char *p, int mode) { (void)mode; g_vt_calls++; if (strcmp(p, "vtapi:/VoiceText")) return RES_PATH_NOT_FOUND; *out = VT_DIR; return RES_OK; }
+static Result vt_read_dir(int64_t *n, DirectoryEntry *e, uint64_t h, int64_t max) { g_vt_calls++; if (h != VT_DIR || max < 1) abort(); memset(e, 0, sizeof *e); strcpy(e->name, "vt"); e->type = ENT_DIR; *n = 1; return RES_OK; }
+static Result vt_dir_count(int64_t *out, uint64_t h) { g_vt_calls++; if (h != VT_DIR) abort(); *out = 1; return RES_OK; }
+static void vt_close_dir(uint64_t h) { g_vt_calls++; if (h == VT_DIR) g_vt_dirs_closed++; }
+static void *vt_sym(const char *name) {
+    static const struct { const char *name; void *fn; } t[] = {
+        { "_ZN2nn2fs9IsMountedEPKc", (void *)vt_is_mounted },
+        { "_ZN2nn2fs12GetEntryTypeEPNS0_18DirectoryEntryTypeEPKc", (void *)vt_entry_type },
+        { "_ZN2nn2fs15CreateDirectoryEPKc", (void *)vt_path },
+        { "_ZN2nn2fs10CreateFileEPKcl", (void *)vt_create_file },
+        { "_ZN2nn2fs10DeleteFileEPKc", (void *)vt_path },
+        { "_ZN2nn2fs26DeleteDirectoryRecursivelyEPKc", (void *)vt_path },
+        { "_ZN2nn2fs25CleanDirectoryRecursivelyEPKc", (void *)vt_path },
+        { "_ZN2nn2fs15DeleteDirectoryEPKc", (void *)vt_path },
+        { "_ZN2nn2fs10RenameFileEPKcS2_", (void *)vt_rename },
+        { "_ZN2nn2fs15RenameDirectoryEPKcS2_", (void *)vt_rename },
+        { "_ZN2nn2fs8OpenFileEPNS0_10FileHandleEPKci", (void *)vt_open },
+        { "_ZN2nn2fs8ReadFileEPmNS0_10FileHandleElPvm", (void *)vt_read },
+        { "_ZN2nn2fs9WriteFileENS0_10FileHandleElPKvmRKNS0_11WriteOptionE", (void *)vt_write },
+        { "_ZN2nn2fs11GetFileSizeEPlNS0_10FileHandleE", (void *)vt_size },
+        { "_ZN2nn2fs11SetFileSizeENS0_10FileHandleEl", (void *)vt_set_size },
+        { "_ZN2nn2fs9FlushFileENS0_10FileHandleE", (void *)vt_flush },
+        { "_ZN2nn2fs9CloseFileENS0_10FileHandleE", (void *)vt_close },
+        { "_ZN2nn2fs15GetFileOpenModeENS0_10FileHandleE", (void *)vt_open_mode },
+        { "_ZN2nn2fs13OpenDirectoryEPNS0_15DirectoryHandleEPKci", (void *)vt_open_dir },
+        { "_ZN2nn2fs13ReadDirectoryEPlPNS0_14DirectoryEntryENS0_15DirectoryHandleEl", (void *)vt_read_dir },
+        { "_ZN2nn2fs22GetDirectoryEntryCountEPlNS0_15DirectoryHandleE", (void *)vt_dir_count },
+        { "_ZN2nn2fs14CloseDirectoryENS0_15DirectoryHandleE", (void *)vt_close_dir },
+    };
+    for (size_t i = 0; i < sizeof t / sizeof *t; i++) if (!strcmp(name, t[i].name)) return t[i].fn;
+    return NULL;
+}
 
 int main(void) {
     char root[1024], save[1100], work[1200], p[1200];
     const char *sp = getenv("TMPDIR"); snprintf(root, sizeof root, "%s/t_fs.XXXXXX", sp ? sp : "/private/tmp");
     if (!mkdtemp(root)) { perror("mkdtemp"); return 1; }
+    {   // cache storage list: the <DM_TEMP>_cache<N> folders that exist when the list opens, in index order, a page at a time; a closed or foreign handle finds no list
+        char temp[1100], c[1200]; snprintf(temp, sizeof temp, "%s/temp", root); setenv("DM_TEMP", temp, 1);
+        uint64_t empty = 0; int count = -1; uint8_t rec[4 * 0x20];
+        CHECK(h_fs_OpenCacheList(&empty) == RES_OK && h_fs_ReadCacheList(&count, rec, empty, 4) == RES_OK && count == 0, "cache list: none on a fresh run");
+        h_fs_CloseCacheList(empty);
+        for (int i = 0; i < 4; i++) { static const char *names[] = {"_cache8", "_cache2", "_cache300", "_cache65535"}; snprintf(c, sizeof c, "%s%s", temp, names[i]); mkdir(c, 0755); }
+        snprintf(c, sizeof c, "%s_cache08", temp); mkdir(c, 0755);   // not a name cache_dir writes
+        snprintf(c, sizeof c, "%s_cache65536", temp); mkdir(c, 0755);
+        snprintf(c, sizeof c, "%s_cache9x", temp); mkdir(c, 0755);
+        snprintf(c, sizeof c, "%s_cache5", temp); put(c, "a file");
+        uint64_t l = 0; CHECK(h_fs_OpenCacheList(&l) == RES_OK && l, "cache list opens");
+        snprintf(c, sizeof c, "%s_cache6", temp); mkdir(c, 0755);   // after the open: the next list's
+        memset(rec, 0xff, sizeof rec);
+        CHECK(h_fs_ReadCacheList(&count, rec, l, 3) == RES_OK && count == 3 && rec[0] == 2 && rec[0x20] == 8 && rec[0x40] == 0x2c && rec[0x41] == 1, "cache list: first page in index order");
+        int zero = 1; for (int i = 4; i < 0x20; i++) zero &= !rec[i];
+        CHECK(zero && !rec[1] && !rec[2] && !rec[3], "cache list: an entry is the index and zeroed reserved bytes");
+        CHECK(h_fs_ReadCacheList(&count, rec, l, 3) == RES_OK && count == 1 && rec[0] == 0xff && rec[1] == 0xff, "cache list: second page, index 65535; nothing the open did not see");
+        CHECK(h_fs_ReadCacheList(&count, rec, l, 3) == RES_OK && count == 0, "cache list: the end");
+        uint64_t l2 = 0; CHECK(h_fs_OpenCacheList(&l2) == RES_OK && l2 != l && h_fs_ReadCacheList(&count, rec, l2, 4) == RES_OK && count == 4 && rec[0x40] == 8, "cache list: a new list sees the folder made since");
+        h_fs_CloseCacheList(l); h_fs_CloseCacheList(l);
+        CHECK(h_fs_ReadCacheList(&count, rec, l, 1) != RES_OK && count == 0, "cache list: a closed handle is no list");
+        CHECK(h_fs_ReadCacheList(&count, rec, 0x7bbd001230ull, 1) != RES_OK, "cache list: a handle never opened is no list");
+        h_fs_CloseCacheList(l2);
+        uint64_t many[17]; int opened = 0; for (int i = 0; i < 17; i++) opened += h_fs_OpenCacheList(&many[i]) == RES_OK;
+        CHECK(opened == 16, "cache list: 16 open at once, the 17th fails");
+        for (int i = 0; i < 16; i++) h_fs_CloseCacheList(many[i]);
+        CHECK(h_fs_OpenCacheList(&l) == RES_OK, "cache list: closed lists free their slots"); h_fs_CloseCacheList(l);
+        unsetenv("DM_TEMP");
+    }
+    {   // fs::GetCacheStorageMax: the application's control data, DM_CONTROL_NACP else control.nacp beside the RomFS
+        char ver[1100], rom[1200], control[1300]; snprintf(ver, sizeof ver, "%s/v65536", root); snprintf(rom, sizeof rom, "%s/RomFS", ver); mkdir(ver, 0755); mkdir(rom, 0755);
+        snprintf(control, sizeof control, "%s/control.nacp", ver);
+        unsetenv("DM_CONTROL_NACP"); setenv("DM_ROMFS", rom, 1);
+        int index = -1; int64_t size = -1;
+        CHECK(h_fs_CacheMax(&index, &size) != RES_OK && index == -1, "cache storage max: no control data is an error, not a guess");
+        static uint8_t nacp[0x4000]; const uint64_t max = 1715470336; memcpy(nacp + 0x3180, &max, 8); nacp[0x3188] = 43;
+        FILE *f = fopen(control, "wb"); fwrite(nacp, 1, sizeof nacp, f); fclose(f);
+        CHECK(h_fs_CacheMax(&index, &size) == RES_OK && index == 43 && size == 1715470336, "cache storage max: control.nacp beside the RomFS folder");
+        char slash[1300]; snprintf(slash, sizeof slash, "%s/", rom); setenv("DM_ROMFS", slash, 1); index = -1;
+        CHECK(h_fs_CacheMax(&index, &size) == RES_OK && index == 43, "cache storage max: a RomFS path with a trailing slash");
+        nacp[0x3188] = 7; nacp[0x3189] = 1; char other[1300]; snprintf(other, sizeof other, "%s/other.nacp", root);
+        f = fopen(other, "wb"); fwrite(nacp, 1, sizeof nacp, f); fclose(f); setenv("DM_CONTROL_NACP", other, 1);
+        CHECK(h_fs_CacheMax(&index, &size) == RES_OK && index == 0x107, "cache storage max: DM_CONTROL_NACP first, the index a u16");
+        put(other, "short"); CHECK(h_fs_CacheMax(&index, &size) != RES_OK, "cache storage max: a short file is an error");
+        unsetenv("DM_CONTROL_NACP");
+        // fs::GetCacheStorageSize: the size the storage was created with; a folder without a record takes the control data's default (here none, then 50 MB / 1 MB); no storage is an error
+        char temp[1100], c[1300]; snprintf(temp, sizeof temp, "%s/temp2", root); setenv("DM_TEMP", temp, 1);
+        int64_t journal = -1; size = -1;
+        CHECK(h_fs_CacheSize(&size, &journal, 3) == RES_TARGET_NOT_FOUND && size == -1, "cache storage size: no storage is ResultTargetNotFound");
+        CHECK(h_fs_CreateCache(3, 54198272, 180224) == RES_OK && h_fs_CacheSize(&size, &journal, 3) == RES_OK && size == 54198272 && journal == 180224, "cache storage size: the size it was created with");
+        CHECK(h_fs_CreateCache(3, 1 << 20, 1 << 20) == RES_OK && h_fs_CacheSize(&size, &journal, 3) == RES_OK && size == 54198272, "cache storage size: creating it again keeps its size");
+        uint64_t l = 0; int count = -1; uint8_t rec[2 * 0x20];
+        CHECK(h_fs_OpenCacheList(&l) == RES_OK && h_fs_ReadCacheList(&count, rec, l, 2) == RES_OK && count == 1 && rec[0] == 3, "cache storage size: the list skips the record beside the folder");
+        h_fs_CloseCacheList(l);
+        CHECK(h_fs_DeleteCache(3) == RES_OK && h_fs_CacheSize(&size, &journal, 3) == RES_TARGET_NOT_FOUND, "cache storage size: deleting removes the storage");
+        snprintf(c, sizeof c, "%s_cache3.size", temp); CHECK(access(c, F_OK), "cache storage size: deleting removes the record");
+        CHECK(h_fs_MountCache("cachet", 4) == RES_OK && h_fs_CacheSize(&size, &journal, 4) == RES_OK && size == 256 << 20 && journal == 256 << 20, "cache storage size: no record, no default: 256 MB");
+        const int64_t def[2] = {50 << 20, 1 << 20}; memcpy(nacp + 0x3170, def, sizeof def);
+        f = fopen(control, "wb"); fwrite(nacp, 1, sizeof nacp, f); fclose(f); setenv("DM_ROMFS", rom, 1);
+        CHECK(h_fs_CacheSize(&size, &journal, 4) == RES_OK && size == 50 << 20 && journal == 1 << 20, "cache storage size: no record: the control data's default");
+        unsetenv("DM_TEMP"); unsetenv("DM_ROMFS");
+    }
     char rom[1100], overlay[1100], rdata[1200], odata[1200], fn[1300], got[64];
     snprintf(rom, sizeof rom, "%s/rom", root); snprintf(overlay, sizeof overlay, "%s/overlay", root); snprintf(rdata, sizeof rdata, "%s/data", rom); snprintf(odata, sizeof odata, "%s/data", overlay);
     mkdir(rom, 0755); mkdir(overlay, 0755); mkdir(rdata, 0755); mkdir(odata, 0755);
@@ -265,6 +381,21 @@ int main(void) {
         h = 0; CHECK(h_fs_OpenDirectory(&h, "save:\\dir", DIRMODE_FILE) == RES_OK && h_fs_ReadDirectory(&cnt, de, h, 4) == RES_OK && cnt == 1 && !strcmp(de[0].name, "g"), "the directory lists g, not a name with backslashes (%s)", cnt ? de[0].name : "-"); h_fs_CloseDirectory(h);
     }
 
+    printf("⑦b a rename between two mounts is refused before either is touched, as Horizon refuses it (ResultRenameToOtherFileSystem)\n");
+    {   char rod[1100], tmpd[1100], q[1200]; int32_t t = -1;
+        snprintf(rod, sizeof rod, "%s/rodir", root); mkdir(rod, 0755); snprintf(tmpd, sizeof tmpd, "%s/tmpst", root); mkdir(tmpd, 0755);
+        CHECK(mount("rodir", rod, 1) == RES_OK && mount("tmpst", tmpd, 0) == RES_OK && mount_ex("dsave", save, 0, 1) == RES_OK && g_mnt[g_nmnt - 1].txn_root == g_mnt[0].txn_root,
+              "mount a read-only folder, a writable one and a second name for the save (one transaction)");
+        CHECK(h_fs_RenameFile("save:/dir/g", "rodir:/g") == RES_RENAME_OTHER_FS && h_fs_GetEntryType(&t, "save:/dir/g") == RES_OK, "a file into the read-only mount is refused, and stays");
+        snprintf(q, sizeof q, "%s/g", rod); CHECK(access(q, F_OK) != 0, "nothing is written into the read-only folder");
+        CHECK(h_fs_RenameDir("save:/dir", "tmpst:/dir") == RES_RENAME_OTHER_FS && h_fs_GetEntryType(&t, "save:/dir") == RES_OK && h_fs_GetEntryType(&t, "tmpst:/dir") != RES_OK,
+              "a directory into another writable mount is refused, and stays");
+        CHECK(h_fs_RenameFile("dsave:/dir/g", "save:/dir/h") == RES_RENAME_OTHER_FS && h_fs_GetEntryType(&t, "dsave:/dir/g") == RES_OK && h_fs_GetEntryType(&t, "save:/dir/h") != RES_OK,
+              "between two names of one save too: two mounts on Horizon");
+        CHECK(h_fs_RenameFile("dsave:/dir/g", "dsave:/dir/h") == RES_OK && h_fs_GetEntryType(&t, "save:/dir/h") == RES_OK, "on one mount the rename is made");
+        CHECK(h_fs_CreateFile("tmpst:/a", 0) == RES_OK && h_fs_RenameFile("tmpst:/a", "tmpst:/b") == RES_OK && h_fs_GetEntryType(&t, "tmpst:/b") == RES_OK, "and on a plain writable mount");
+    }
+
     printf("⑧ a save folder that cannot clone, and symlinks in recursive deletes\n");
     {   g_nmnt = 0; g_clone_enotsup = 1; int nf1 = g_nfail;
         CHECK(h_fs_MountSave("save", NULL) == RES_OK && g_mnt[0].ro && g_nfail == nf1 + 1, "clonefile ENOTSUP: the committed save mounts read-only and the front end is told once");
@@ -300,6 +431,41 @@ int main(void) {
         CHECK(g_sdk_unmounts == 1, "unmounting it again does not reach the SDK's Unmount");
         g_sdk_cache_mounted = 1; g_sdk_no_is_mounted = 1; h_fs_Unmount("cache");
         CHECK(g_sdk_unmounts == 1 && g_sdk_cache_mounted, "an SDK without an IsMounted symbol: no blind Unmount");
+        t_guest_sym = NULL;
+    }
+
+    printf("⑩ paths and handles on a mount in the SDK's own table (a RAM disk) go to the SDK\n");
+    {   int32_t et = -1; uint64_t h = 0; size_t n = 0; int64_t sz = 0, cnt = 0; DirectoryEntry de[4]; char b[16] = {0}; int calls;
+        CHECK(h_fs_GetEntryType(&et, "vtapi:/VoiceText") == RES_PATH_NOT_FOUND, "with no SDK in the process, a name the host does not hold is not found");
+        t_guest_sym = vt_sym;
+        CHECK(h_fs_IsMounted("vtapi") && h_fs_IsPathMounted("vtapi:/VoiceText") && !h_fs_IsMounted("nowhere"), "IsMounted and IsPathMounted answer from the SDK's table too");
+        calls = g_vt_calls;
+        CHECK(h_fs_GetEntryType(&et, "vtapi:/VoiceText") == RES_OK && et == ENT_DIR && g_vt_calls == calls + 1, "GetEntryType on the RAM disk is the SDK's");
+        CHECK(h_fs_CreateDirectory("vtapi:/VoiceText/vt") == RES_OK && h_fs_CreateFile("vtapi:/VoiceText/vt/new", 4) == RES_OK && g_vt_calls == calls + 3, "CreateDirectory and CreateFile on the RAM disk are the SDK's");
+        CHECK(h_fs_OpenFile(&h, "vtapi:/VoiceText/vt/vtpath.ini", MODE_READ | MODE_WRITE) == RES_OK && h == VT_FILE, "OpenFile on the RAM disk returns the SDK's handle as it is");
+        CHECK(h_fs_GetFileSize(&sz, h) == RES_OK && sz == 3, "GetFileSize of an SDK handle is the SDK's");
+        CHECK(h_fs_ReadFile(&n, h, 0, b, sizeof b) == RES_OK && n == 3 && !memcmp(b, "ini", 3), "ReadFile of an SDK handle reads the SDK's file");
+        memset(b, 0, sizeof b);
+        CHECK(h_fs_ReadFileExact(h, 1, b, 2) == RES_OK && !memcmp(b, "ni", 2), "the ReadFile overload without a byte count reads through it too");
+        CHECK(h_fs_WriteFile(h, 0, "INI", 3, NULL) == RES_OK && h_fs_SetFileSize(h, 3) == RES_OK && h_fs_FlushFile(h) == RES_OK && h_fs_GetFileOpenMode(h) == (MODE_READ | MODE_WRITE), "WriteFile, SetFileSize, FlushFile and GetFileOpenMode of an SDK handle are the SDK's");
+        calls = g_vt_calls; h_fs_CloseFile(h);
+        CHECK(g_vt_closed == 1 && g_vt_calls == calls + 1, "CloseFile of an SDK handle closes it in the SDK");
+        calls = g_vt_calls;
+        CHECK(!sdk_handle_known(VT_FILE) && h_fs_GetFileSize(&sz, h) != RES_OK && g_vt_calls == calls, "a closed SDK handle is forgotten: the next call does not reach the SDK");
+        CHECK(h_fs_OpenDirectory(&h, "vtapi:/VoiceText", DIRMODE_DIR | DIRMODE_FILE) == RES_OK && h == VT_DIR, "OpenDirectory on the RAM disk returns the SDK's handle");
+        CHECK(h_fs_DirCount(&cnt, h) == RES_OK && cnt == 1 && h_fs_ReadDirectory(&cnt, de, h, 4) == RES_OK && cnt == 1 && !strcmp(de[0].name, "vt"), "GetDirectoryEntryCount and ReadDirectory of an SDK handle list the SDK's directory");
+        calls = g_vt_calls; h_fs_CloseDirectory(h);
+        CHECK(g_vt_dirs_closed == 1 && g_vt_calls == calls + 1 && !sdk_handle_known(VT_DIR), "CloseDirectory closes it in the SDK and forgets it");
+        calls = g_vt_calls;
+        CHECK(h_fs_RenameFile("vtapi:/VoiceText/vt/new", "vtapi:/VoiceText/vt/old") == RES_OK && h_fs_DeleteFile("vtapi:/VoiceText/vt/old") == RES_OK
+              && h_fs_DeleteDirRec("vtapi:/VoiceText/vt") == RES_OK && h_fs_CleanDirRec("vtapi:/VoiceText") == RES_OK && h_fs_DeleteDir("vtapi:/VoiceText") == RES_OK && g_vt_calls == calls + 5,
+              "RenameFile, DeleteFile and the directory deletes on the RAM disk are the SDK's");
+        calls = g_vt_calls;
+        CHECK(h_fs_RenameFile("vtapi:/VoiceText/vt/vtpath.ini", "save:/vtpath.ini") == RES_RENAME_OTHER_FS && g_vt_calls == calls, "a rename between the SDK's mount and the host's is refused as two mounts and reaches neither");
+        calls = g_vt_calls; g_vt_mount_asks = 0;
+        CHECK(h_fs_CreateFile("save:/vt", 0) == RES_OK && write_save("save:/vt", "x") == RES_OK && read_fs("save:/vt", b, sizeof b) && h_fs_GetEntryType(&et, "save:/vt") == RES_OK && g_vt_calls == calls && !g_vt_mount_asks,
+              "the host's own mounts never ask the SDK");
+        CHECK(h_fs_GetEntryType(&et, "nowhere:/x") == RES_PATH_NOT_FOUND && g_vt_calls == calls, "a name in neither table is still not found");
         t_guest_sym = NULL;
     }
 

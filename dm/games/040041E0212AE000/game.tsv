@@ -1,0 +1,37 @@
+# Fast Fusion, SDK 20.5.13 (Ounce), NVN2.
+# The standard host and rewriter run this build; SHN! resources are read by the shared shader splitter.
+
+# ---- Identity ----
+title_id	040041E0212AE000
+program_id	040041E0212AE000
+
+# ---- App ----
+name	Fast Fusion
+ipa	FastFusion.ipa
+app_category	public.app-category.racing-games
+
+# ---- Versions ----
+build	v262144	v262144	main=e76e60ef4fe21decb40223b5de5e6396	sdk=bbaa095d525b16296c21f45ea0ae560b
+package	v262144
+shader_versions	v262144
+
+# ---- Files ----
+# not loaded, main takes nothing from them the host does not supply: subsdk0 (C / libc), subsdk1 (C / libc)
+modules	main sdk
+romfs_marker	terrain/10_materials/00_snow_normal.bc7u.tex
+zip_store	.otf:.tex:.vma:.metallib
+
+# ---- Memory ----
+# main sets a heap of at most the pool − 64 MB: a 9216 MB heap region
+mem_reserve	0x270000000
+mem_alias	0x10000000
+mem_stack	0x10000000
+# the sdk is built for the Switch 2 (spec: Ounce): its 9 GB pool
+app_pool	0x240000000
+# the NPDM declares no system resource: IsVirtualAddressMemoryEnabled is false, as on Horizon
+sys_resource	0x0
+
+# ---- Shader split ----
+depth_mode	zero
+shader_groups	/objects/=objects /sets2/=sets2 /audio/=audio /particles/=particles /sets3/=sets3 /shaders/=shaders /menu/=menu /tracks/=tracks /sets/=sets /fonts/=fonts /bulletcache/=bulletcache /lightprobes/=lightprobes /terrain/=terrain /vibration/=vibration /materials/=materials /localize/=localize /ndsr/=ndsr /prefabs/=prefabs /scripts/=scripts /shadertextures/=shadertextures
+shader_note	Fast Fusion shaders

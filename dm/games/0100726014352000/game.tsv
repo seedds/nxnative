@@ -1,0 +1,47 @@
+# Game profile of Diablo II: Resurrected (Switch, update 1.0.34.0 = v2228224, with Reign of the Warlock; PC build 3.3.94012). Plays on the Mac (the logo movie, the Act I opening cinematic,
+# offline hero creation, the Rogue Encampment at 60 fps with sound)
+# Format: see dm/games/README.md
+# Blizzard's D2R engine, FMOD, SDK 11.4.3, NVN. The game's data are in Blizzard's CASC storage (data/*.data with text manifests, dm/gfx/tools/casc.py); its shaders are SHAD containers in it
+# (data/hd/shaders/*.bin) and 10 records of the same form in main (shader_split.py shad_shaders, raw_shaders). The game allows offline play only within 30 days of a Battle.net login: a rewriter cut
+# (patches.py) lets it play offline without one
+
+# ---- Identity ----
+title_id	0100726014352000
+program_id	0100726014352000
+
+# ---- App ----
+# Game name: only a label for profile listings and the Mac window title; the iOS app name is the game name in the base NSP, and the bundle ID comes from the base game title ID (build_ipa.sh / NSP script)
+name	Diablo II: Resurrected
+ipa	DiabloIiResurrected.ipa
+app_category	public.app-category.role-playing-games
+
+# ---- Versions ----
+build	v2228224	1.0.34.0	main=db0507f36b84200ac05f75d76ed5026f	subsdk0=507f19d1240d09d00992248e8a0fd77e	sdk=2d369d9999e3e10e665106f840ffff9b
+package	v2228224
+shader_versions	v2228224
+
+# ---- Files ----
+# every module main imports from (subsdk0 is NintendoSDK_movie: the logo movie and the cinematics)
+modules	main subsdk0 sdk
+romfs_marker	data/00-00000001.data
+zip_store	.data:.psv:.metallib
+
+# ---- Memory ----
+# main sets a heap of at most the pool − 64 MB (3.14 GB on the Mac): a 3328 MB heap region. 2.79 GB physical footprint in the Rogue Encampment
+mem_reserve	0x100000000
+mem_alias	0x10000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+# the NPDM declares no system resource: IsVirtualAddressMemoryEnabled is false
+sys_resource	0x0
+# the rewritten modules are 72 MB, more than the default 64 MB
+mem_used	0x4c00000
+
+# ---- Shader split ----
+shader_groups	/data/=data
+shader_note	Diablo II: Resurrected shaders
+
+# ---- Graphics ----
+# The game asks for present interval 2 (30 fps, as on the Switch); its logic runs on its own clock, so one frame per display tick is 60 fps at the same game speed (the same 3 s walk from the
+# Rogue Encampment's start ends at the same place at 30 and at 60 fps)
+present_interval	display

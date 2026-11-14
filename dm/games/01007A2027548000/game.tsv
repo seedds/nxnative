@@ -1,0 +1,45 @@
+# Game profile of Trails in the Sky 2nd Chapter (Switch, update 1.0.4 = v393216). Plays on the Mac (the title, a new game on Normal, the prologue's cutscenes in Grancel Castle, walking
+# in its garden terrace, the save menu, at 60 fps)
+# Format: see dm/games/README.md
+# Nihon Falcom's engine (the Trails in the Sky 1st Chapter remake's), SDK 21.4.4, the SDK's movie player (subsdk0). Its shaders are GLSLC compiler outputs: 11,322 in asset/nx/shader/*.nvn
+# and 18 in main. The provisional profile's guesses held: no key needed changing
+
+# ---- Identity ----
+title_id	01007A2027548000
+program_id	01007A2027548000
+
+# ---- App ----
+# Game name: only a label for profile listings and the Mac window title; the iOS app name is the game name in the base NSP, and the bundle ID comes from the base game title ID (build_ipa.sh / NSP script)
+name	Trails in the Sky 2nd Chapter
+ipa	TrailsInTheSky2ndChapter.ipa
+app_category	public.app-category.role-playing-games
+
+# ---- Versions ----
+build	v393216	1.0.4	main=a4823d39bb21f39bf8aff69aa00a5c09	subsdk0=fc537f0b21c880e89d6f247d22a150ca	sdk=148394139d9d26ca8afd5c9ba5d30601
+package	v393216
+shader_versions	v393216
+
+# ---- Files ----
+# every module main imports from
+modules	main subsdk0 sdk
+romfs_marker	movie_en/mp4/sora_2nd_ed.mp4
+zip_store	.bmp:.mp4:.otf:.png:.metallib
+
+# ---- Memory ----
+# The NPDM declares 16 MB of system resource (virtual address memory), and main sets a heap: 2.02 GB asked (the NSP script's heap check), a 2.125 GB heap region in a 5 GB block.
+# The alias region below is the iPhone layout. At boot the engine's allocator takes an 11.27 GB address region (ten times its 0x48200000-byte capacity, returning to main+0x6a1dcc)
+# and maps 0.40 GB of it; on the Mac the alias region is 64 GB and holds it. An iPhone has no room for it: not run there yet (the game's note, Open)
+mem_reserve	0x140000000
+mem_alias	0x98000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+# the NPDM declares 16 MB of system resource
+sys_resource	0x1000000
+
+# ---- Shader split ----
+shader_groups	/asset/=asset /voice/=voice /voice_en/=voiceen /vfx/=vfx /se/=se /scene/=scene /script_de/=scriptde /script_en/=scripten /script_es/=scriptes /script_fr/=scriptfr /table_de/=tablede /table_en/=tableen /table_es/=tablees /table_fr/=tablefr /asset_de/=assetde /asset_fr/=assetfr /asset_es/=assetes /asset_en/=asseten /bgm1/=bgm1 /bgm2/=bgm2 /bgm3/=bgm3 /layout/=layout /system/=system /movie_en/=movieen
+shader_note	Trails in the Sky 2nd Chapter shaders
+
+# ---- Graphics ----
+# the game calls nvnDeviceSetDepthMode with near = 0 at boot (the NSP script's address region check): the pipeline bases made before it runs are made for that mode
+depth_mode	zero

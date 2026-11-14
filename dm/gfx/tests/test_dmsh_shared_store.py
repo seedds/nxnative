@@ -187,6 +187,17 @@ class Translated(unittest.TestCase):
         self.assertRegex(out, r'\(\(threadgroup uchar\*\)&_\d+\[0\]\)\[uint\(_\d+\)\] = uchar\(uint\(_\d+\)\);')
         self.assertNotIn('atomic_compare_exchange', out)
 
+    def test_payload_halfword_through_the_translator(self):
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        import test_dmsh_ampere_mem as mem
+        case = mem.StageMemory('test_subword_payload_stores_use_their_width')
+        write = (case.PAYLOAD[0] & ~0xff00 | 0xb400, case.PAYLOAD[1])
+        src = case.msl(write)
+        self.assertRegex(src, r'\nvoid dmsh_shared_store16_\d+\(')
+        out = shared_store_msl(src)
+        self.assertRegex(out, r'\(\(threadgroup dm_ushort_alias\*\)&_\d+\[0\]\)\[uint\(_\d+\) >> 1u\] = ushort\(uint\(_\d+\)\);')
+        self.assertNotIn('atomic_compare_exchange', out)
+
 
 if __name__ == '__main__':
     unittest.main()

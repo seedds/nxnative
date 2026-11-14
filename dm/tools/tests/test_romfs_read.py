@@ -46,6 +46,21 @@ class ReadImage(unittest.TestCase):
         with romfs.open(self.root / 'output', 'wb') as f: f.write(b'normal output')
         self.assertEqual((self.root / 'output').read_bytes(), b'normal output')
 
+    def test_scan_entries_answer_from_the_index_the_scan_found(self):
+        for parent in (self.image, self.image / 'data'):
+            with romfs.scandir(parent) as entries:
+                for e in entries:
+                    st = romfs.stat(e.path)
+                    self.assertEqual((e.is_dir(), e.is_file(), e.inode(), e.stat().st_mode, e.stat().st_size, e.stat().st_mtime_ns),
+                                     (romfs.isdir(e.path), romfs.isfile(e.path), st.st_ino, st.st_mode, st.st_size, st.st_mtime_ns), e.path)
+        with patch.object(romfs, '_resolve', wraps=romfs._resolve) as resolve:   # once per folder walked (and the top), not once more per entry
+            walked = list(romfs.walk(self.image))
+        self.assertEqual(resolve.call_count, 1 + len(walked))
+        self.assertEqual(sorted((Path(d).relative_to(self.image).as_posix(), sorted(ds), sorted(fs)) for d, ds, fs in walked),
+                         sorted((Path(d).relative_to(self.src).as_posix(), sorted(ds), sorted(fs)) for d, ds, fs in os.walk(self.src)))
+        other = self.root / 'other'; (other / 'only').mkdir(parents=True); romfs_image.pack(other, self.image)   # a new image at the same path: a new scan sees it
+        self.assertEqual([e.name for e in romfs.scandir(self.image)], ['only'])
+
     def test_seek_read_and_mmap_cannot_cross_an_entry_boundary(self):
         with romfs.open(self.virtual / 'data/archive', 'rb') as f:
             f.seek(-5, 2); self.assertEqual(f.read(100), self.data[-5:])

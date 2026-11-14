@@ -78,6 +78,11 @@ namespace Ryujinx.Graphics.Shader.Instructions
             Add(map, 0x2fc, AggregateType.S32, IoVariable.VertexId, StagesMask.Vertex, StagesMask.None);
             Add(map, 0x300, AggregateType.Vector4 | AggregateType.FP32, IoVariable.TextureCoord, StagesMask.TessellationGeometryFragment, StagesMask.VertexTessellationGeometry);
             Add(map, 0x3a0, AggregateType.Array | AggregateType.S32, IoVariable.ViewportMask, StagesMask.Fragment, StagesMask.VertexTessellationGeometry);
+            // nxnative: the pixel's barycentric coordinates, three words each (Mesa NAK's NAK_ATTR_BARY_COORD_NO_PERSP_X..Z at 0x3a8..0x3b0, NAK_ATTR_BARY_COORD_X..Z at
+            // 0x3b4..0x3bc). The perspective ones are read like a perspective attribute, divided by w (InstEmitAttribute.EmitIpa). Resident Evil 4's LDTRAM shaders read
+            // a[0x3b8] and a[0x3bc], the weights of vertices 1 and 2
+            Add(map, 0x3a8, AggregateType.Vector3 | AggregateType.FP32, IoVariable.BaryCoordNoPersp, StagesMask.Fragment, StagesMask.None);
+            Add(map, AttributeConsts.BaryCoordX, AggregateType.Vector3 | AggregateType.FP32, IoVariable.BaryCoord, StagesMask.Fragment, StagesMask.None);
             Add(map, 0x3fc, AggregateType.Bool, IoVariable.FrontFacing, StagesMask.Fragment, StagesMask.None);
 
             return map.AsReadOnly();
@@ -256,6 +261,81 @@ namespace Ryujinx.Graphics.Shader.Instructions
             {
                 context.Store(storageKind, ioVariable, invocationId, value);
             }
+        }
+
+        // nxnative: GenerateAttributeStore's store of a per-vertex output word, as an operation to insert in a pass (DirectCbeWrites), with invocationId the control point
+        // for a hull shader. Null with the reason when the word is not an output of the stage
+        public static Operation CreateOutputStore(ShaderDefinitions definitions, IGpuAccessor gpuAccessor, int offset, Operand invocationId, Operand value, out string reason)
+        {
+            reason = null;
+
+            if (!_attributes.TryGetValue(offset, out AttributeEntry entry))
+            {
+                reason = $"attribute offset 0x{offset:X} is not valid";
+                return null;
+            }
+
+            if (((StagesMask)(1 << (int)definitions.Stage) & entry.OutputMask) == StagesMask.None || !IsSupportedByHost(gpuAccessor, definitions.Stage, entry.IoVariable))
+            {
+                reason = $"attribute offset 0x{offset:X} ({entry.IoVariable}) is not an output of stage {definitions.Stage} here";
+                return null;
+            }
+
+            if (!HasInvocationId(definitions.Stage, isOutput: true))
+            {
+                invocationId = null;
+            }
+
+            int innerIndex = (offset - entry.BaseOffset) / 4;
+            IoVariable ioVariable = GetIoVariable(definitions.Stage, in entry);
+            AggregateType type = GetType(definitions, isOutput: true, innerIndex, in entry);
+            int elementCount = GetElementCount(type);
+
+            bool isArray = type.HasFlag(AggregateType.Array);
+            bool hasArrayIndex = isArray || definitions.HasPerLocationInputOrOutput(ioVariable, isOutput: true);
+            bool hasElementIndex = elementCount > 1;
+
+            List<Operand> sources = new() { Const((int)ioVariable) };
+
+            if (hasArrayIndex && hasElementIndex)
+            {
+                int arrayIndex = innerIndex / elementCount;
+                int elementIndex = innerIndex - (arrayIndex * elementCount);
+
+                if (invocationId == null || isArray)
+                {
+                    if (invocationId != null) sources.Add(invocationId);
+                    sources.Add(Const(arrayIndex));
+                }
+                else
+                {
+                    sources.Add(Const(arrayIndex));
+                    sources.Add(invocationId);
+                }
+
+                sources.Add(Const(elementIndex));
+            }
+            else if (hasArrayIndex || hasElementIndex)
+            {
+                if (invocationId == null || isArray || !hasArrayIndex)
+                {
+                    if (invocationId != null) sources.Add(invocationId);
+                    sources.Add(Const(innerIndex));
+                }
+                else
+                {
+                    sources.Add(Const(innerIndex));
+                    sources.Add(invocationId);
+                }
+            }
+            else if (invocationId != null)
+            {
+                sources.Add(invocationId);
+            }
+
+            sources.Add(value);
+
+            return new Operation(Instruction.Store, StorageKind.Output, null, sources.ToArray());
         }
 
         private static bool IsSupportedByHost(IGpuAccessor gpuAccessor, ShaderStage stage, IoVariable ioVariable)

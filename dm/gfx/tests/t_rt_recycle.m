@@ -105,6 +105,12 @@ int main(void) { @autoreleasepool {
         settle();
         CHECK(waiting() == 1, "its heap waits once the snapshot is freed");
     }
+    {   // critical memory pressure (the dispatch source mtl_init makes sets g_rh_pressure): a heap that just started waiting is freed at the next submission too
+        uint64_t trimmed = g_rh_trimmed; atomic_store(&g_rh_pressure, 1);
+        mtl_sub_commit(); mtl_drain(); mtl_sub_begin();   // rh_trim
+        CHECK(waiting() == 0 && g_rh_bytes == 0 && g_rh_trimmed == trimmed + 1, "under critical memory pressure every waiting heap is freed at the next submission");
+        CHECK(atomic_load(&g_rh_pressure) == 0, "and the pressure mark is taken once");
+    }
     mtl_sub_commit(); mtl_drain(); free(mem);
     printf("t_rt_recycle: %d checks, %d failed\n", checks, failed); return failed != 0;
 } }

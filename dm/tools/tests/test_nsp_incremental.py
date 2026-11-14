@@ -130,6 +130,13 @@ class DeriveProfile(Base):
         nsp.derive_profile(game.Game(self.src), self.pdir, 'v65536', self.ex, ['main'], shader_only=True)
         self.assertEqual(game.Game(self.pdir).words('modules'), ['main'])
 
+    def test_a_profile_is_never_derived_onto_its_own_folder(self):
+        own = self.tmp / 'profile' / f'{TID:016X}'; shutil.copytree(self.src, own)   # this script's own profile, where its derived copy would go
+        before = {p.name: p.read_bytes() for p in own.iterdir()}
+        with self.assertRaises(nsp.BuildError):   # before: the folder's files were deleted, then copied from themselves (Chained Echoes: FileNotFoundError, its tables gone)
+            nsp.derive_profile(game.Game(own), own, 'v65536', self.ex, ['main'], shader_only=True)
+        self.assertEqual({p.name: p.read_bytes() for p in own.iterdir()}, before)
+
     def test_the_same_profile_in_another_checkout_keeps_later_stages(self):
         self.derive(); self.later_stages()
         other = self.tmp / 'checkout2' / 'games' / f'{TID:016X}'; shutil.copytree(self.src, other)   # the repository cloned again, or a front end's own copy of it

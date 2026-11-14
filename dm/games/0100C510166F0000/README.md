@@ -18,7 +18,7 @@ No code of the game is cut: `main` and `subsdk0` take no cuts, and `sdk` takes t
 
 - `nninitStartup` gives the application pool to `StandardAllocator` as address regions (virtual address memory, the NPDM's 16 MB of system resource), so the SDK's node area and region alignment decide whether the prologue's allocations fit.
 - **Current:** a 2-minute play run mapped the alias region up to +3.5 GB of its 64 GB, 1.95 GB resident and 1.01 GB of Metal allocations, with 36 memory pools (5 resident) and 245 shared textures. Nothing grew between frames 4,200 and 7,200.
-- The pool is still the survey's guess: the NSP script did not heap-check this build, because the profile reached it through `DM_GAMES_DIR` and was read as registered rather than provisional.
+- The pool is still the survey's guess: the NSP script did not heap-check this build, because the profile reached it through `DM_GAMES_DIR` and was read as registered rather than provisional ([fixed since](../../../docs/reference/packing.md#a-provisional-profile-loses-its-tables-to-its-own-derived-copy)).
 
 ## Files and shaders
 
@@ -54,4 +54,5 @@ No code of the game is cut: `main` and `subsdk0` take no cuts, and `sdk` takes t
 
 ## Found on this game
 
+- [A provisional profile loses its tables to its own derived copy](../../../docs/reference/packing.md#a-provisional-profile-loses-its-tables-to-its-own-derived-copy): the build took the provisional profile for a registered one, derived it onto its own folder and skipped its heap check.
 - The SDK 14.3.0 instance of [the SDK's address-region node area](../../../docs/reference/memory.md#the-sdks-address-region-node-area) and of the 2 MB region alignment (Batman: Arkham Knight's `sdk` build), the first game to take both only from the SDK-wide rules.

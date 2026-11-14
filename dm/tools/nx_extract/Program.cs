@@ -87,7 +87,8 @@ static class P {
         Nca baseProg = Pick(basePkg, NcaContentType.Program, progId) ?? throw new Exception(progId == null ? "no Program NCA in the base NSP" : $"no Program NCA {progId:x16} in the base NSP");
         if (html) {   // an update's NCA is read alone, or over a base game's NCA when its header marks the data section a patch (a relocation table); which base NCA it patches the
                       // header does not say: the one it reads with passes the hash check
-            int k = 0; ulong tid = baseProg.Header.TitleId; var bases = basePkg.FindAll(n => n.Header.ContentType == NcaContentType.Manual && n.Header.TitleId == tid);
+            // updManual counts the update's HtmlDocument NCAs read: a sparse base NCA's pages can only come from them
+            int k = 0, updManual = 0; ulong tid = baseProg.Header.TitleId; var bases = basePkg.FindAll(n => n.Header.ContentType == NcaContentType.Manual && n.Header.TitleId == tid);
             bool Try(Func<IFileSystem> open, string dst) {   // a read over the wrong base does not throw: each file fails the hash check, which Copy lists and goes on; such a read is undone
                 int damaged = g_damaged.Count;
                 try { Copy(open, dst, null); if (g_damaged.Count == damaged) return true; }
@@ -100,14 +101,24 @@ static class P {
                 if (u.Header.ContentType != NcaContentType.Manual || u.Header.TitleId != tid) continue;
                 string dst = Path.Combine(a[3], $"html{k}");
                 bool patch = u.Header.GetFsHeader(Nca.GetSectionIndexFromType(NcaSectionType.Data, u.Header.ContentType)).IsPatchSection();
-                if (!patch) { Copy(() => u.OpenFileSystem(NcaSectionType.Data, IntegrityCheckLevel.ErrorOnInvalid), dst, null); k++; }   // a full NCA: its damage is the NSP's
-                else if (bases.Exists(b => Try(() => b.OpenFileSystemWithPatch(u, NcaSectionType.Data, IntegrityCheckLevel.ErrorOnInvalid), dst))) { Console.WriteLine($"{dst}: a patch of the base game's NCA"); k++; }
+                if (!patch) { Copy(() => u.OpenFileSystem(NcaSectionType.Data, IntegrityCheckLevel.ErrorOnInvalid), dst, null); k++; updManual++; }   // a full NCA: its damage is the NSP's
+                else if (bases.Exists(b => Try(() => b.OpenFileSystemWithPatch(u, NcaSectionType.Data, IntegrityCheckLevel.ErrorOnInvalid), dst))) { Console.WriteLine($"{dst}: a patch of the base game's NCA"); k++; updManual++; }
                 else Console.WriteLine($"[RED] an HtmlDocument NCA of the update patches none of the base game's: read over each, it fails the hash check");
             }
             foreach (Nca b in bases) {
                 // Horizon mounts a sparse NCA only through its patch; read alone, the left-out ranges fail the hash check while its tables open (exit code 3, "the NSP is damaged").
                 // Minecraft Dungeons II's base has one (16 KB, the HtmlDocument its update patches), beside its sparse Program NCA
-                if (Sparse(b)) { Console.WriteLine($"a sparse HtmlDocument NCA of the base game ({b.Header.NcaSize} bytes): read only through the update's patch, not alone"); continue; }
+                if (Sparse(b)) {
+                    // Skipping it is sound only when the update supplied HtmlDocument pages. Without an update, or when none of its HtmlDocument NCAs read,
+                    // the run used to claim "read only through the update's patch" and exit 0 with those pages missing. A sparse Program NCA with no update
+                    // already stops at exit 4, so use the same code instead of a silent, incomplete HTML set.
+                    if (updManual == 0) {
+                        Console.WriteLine($"[RED] a sparse HtmlDocument NCA of the base game ({b.Header.NcaSize} bytes) has no update HtmlDocument NCA to read it through: its pages are missing; pack the base game with its update NSP");
+                        return 4;
+                    }
+                    Console.WriteLine($"a sparse HtmlDocument NCA of the base game ({b.Header.NcaSize} bytes): read only through the update's patch, not alone");
+                    continue;
+                }
                 Copy(() => b.OpenFileSystem(NcaSectionType.Data, IntegrityCheckLevel.ErrorOnInvalid), Path.Combine(a[3], $"html{k++}"), null);
             }
             Console.WriteLine($"{k} HtmlDocument NCAs");

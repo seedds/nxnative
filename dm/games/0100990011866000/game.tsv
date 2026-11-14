@@ -1,0 +1,43 @@
+# Game profile of Aokana - Four Rhythms Across the Blue (Switch, update 1.01 = v65536 over the base cartridge). Plays on the Mac (boot, disclaimer, opening movie, title, a new game into its first story lines, save and load; 60 fps) and on an iPad with an Apple M1 GPU (60 fps in two sessions; README.md)
+# Format: see dm/games/README.md
+# Unity 2018.4.22f1 IL2CPP with FMOD, SDK 9.4.1; subsdk0 is the movie module, which plays the RomFS's 17 MP4s (H.264 with AAC audio). Started from the provisional profile of build_ipa_from_nsp.py: the keys below are its static guesses, kept unchanged because they boot and play; the note and what is open: README.md.
+# The RomFS (5.55 GB) is under Data/StreamingAssets: 14 .dat archives the game reads itself, the 17 movies, and data.unity3d, whose Unity Shader objects shader_split.py reads through unityfs.py
+
+# ---- Identity ----
+title_id	0100990011866000
+program_id	0100990011866000
+
+# ---- App ----
+# Game name: only a label for profile listings and the Mac window title; the iOS app name is the game name in the base NSP, and the bundle ID comes from the base game title ID (build_ipa.sh / NSP script)
+name	Aokana - Four Rhythms Across the Blue
+ipa	AokanaFourRhythmsAcrossTheBlue.ipa
+app_category	public.app-category.games
+
+# ---- Versions ----
+build	v65536	1.01	main=2ee74c89e223264e9456c118d0f3e361	subsdk0=fbb0b46fb4fdbf4be47b76f2285f53ed	sdk=290c9a04234847a176aa1c375c16af99
+package	v65536
+shader_versions	v65536
+
+# ---- Files ----
+# load order as on Horizon: main, subsdk*, sdk (subsdk0 = NintendoSDK_movie)
+modules	main subsdk0 sdk
+romfs_marker	Data/StreamingAssets/evcg2.dat
+zip_store	.dat:.mp4:.resource:.unity3d:.metallib
+
+# ---- Memory ----
+# the NPDM declares 16 MB of system resource (virtual address memory) and main sets a heap: a 5 GB block with a large alias region; the heap check sizes the heap region from the heap the game asks for
+mem_reserve	0x140000000
+mem_alias	0x118000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+# the NPDM declares 16 MB of system resource
+sys_resource	0x1000000
+
+# ---- Shader split ----
+# the game's last nvnDeviceSetDepthMode at boot is near = 0 (the heap check's boot): the pipeline bases made before it runs, and the Mac prebuild, take the main0_z vertex entries
+depth_mode	zero
+shader_groups	/Data/=data
+shader_note	Aokana - Four Rhythms Across the Blue shaders
+
+# heap check: 2026-11-04, no heap set; set depth_mode
+# address regions: 2026-11-04, in its first 15 s in nnMain the game's regions reach alias +3.21 GB, within the profile's 4.38 GB alias region (what it takes later in play is not measured here) (rewrite 31e3480d72cd)

@@ -59,6 +59,24 @@ With [Press a button to join](settings.md#press-a-button-to-join) on in the sett
 
 To quit with a controller, hold its Home button (the logo button on an Xbox or PlayStation controller) for 2 seconds, then press A to quit or B to go back to the game. Quitting this way is the same as ⌘Q: progress the game has not saved is lost. If holding Home opens the Games app instead, macOS keeps the Home button for itself: its controller settings for the Home button decide whether apps may use it. `DM_HOME_QUIT=0` in `env.txt` turns the hold off.
 
+### Keyboard
+
+The keyboard plays as player 1, together with the first controller. **Keyboard layout** in the settings window ([Keyboard layout](settings.md#keyboard-layout), `DM_KBD_LAYOUT`) picks the keys:
+
+| Switch | WASD and arrows (default) | Button letters |
+|---|---|---|
+| A B X Y | J K U I | A B X Y |
+| L R | Q E | L R |
+| ZL ZR | Z C | Z C |
+| Left stick | W A S D | arrows |
+| D-pad | arrows | U H J K (up, left, down, right) |
+| Right stick | Shift + arrows | Shift + arrows |
+| + − | Return, Tab | Return, Tab |
+| Press left, right stick | F, G | F, G |
+| Shake | Space | Space |
+
+The left mouse button is the touchscreen. When a game asks for players, Return or the A button's key closes the prompt, Escape or the B button's key cancels it.
+
 ### Switch 2 controllers (Mac)
 
 Joy-Con 2 and the Pro Controller 2 do not appear in macOS's Bluetooth settings: they speak Nintendo's own Bluetooth LE protocol. Turn on **Switch 2 controllers** in the game's settings window ([Switch 2 controllers](settings.md#switch-2-controllers)), then:

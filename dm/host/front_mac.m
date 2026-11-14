@@ -146,7 +146,18 @@ static void push(void) {
     int32_t rx = (g_rr - g_rl) * 32767, ry = (g_ru - g_rd) * 32767;
     dm_input_set(g_btn, lx, ly, rx, ry);
 }
+// DM_KBD_LAYOUT=letters (kbd_start): the keys named like the Switch's buttons press them (A B X Y L R), the arrows are the left stick and U H J K the D-pad;
+// the default layout keeps WASD as the left stick and the arrows as the D-pad. Shift with an arrow is the right stick in both
+static int g_kbd_letters;
 static int key_bit(unsigned short code) {
+    if (g_kbd_letters) switch (code) {
+        case 0: return 0;   case 11: return 1;  case 7: return 2;   case 16: return 3;    // A B X Y → A B X Y
+        case 3: return 4;   case 5: return 5;                                            // F G → press stick
+        case 37: return 6;  case 15: return 7;  case 6: return 8;   case 8: return 9;    // L R Z C → L R ZL ZR
+        case 36: return 10; case 48: return 11;                                          // Return Tab → + −
+        case 4: return 12;  case 32: return 13; case 40: return 14; case 38: return 15;  // H U K J → ← ↑ → ↓
+        default: return -1;
+    }
     switch (code) {
         case 38: return 0;  case 40: return 1;  case 32: return 2;  case 34: return 3;    // J K U I → A B X Y
         case 3: return 4;   case 5: return 5;                                            // F G → press stick
@@ -155,6 +166,15 @@ static int key_bit(unsigned short code) {
         case 123: return 12; case 126: return 13; case 124: return 14; case 125: return 15; // ← ↑ → ↓
     }
     return -1;
+}
+// the left stick's key for this layout: WASD, or the arrows with DM_KBD_LAYOUT=letters
+static int *left_stick_key(unsigned short code) {
+    if (g_kbd_letters) return code == 126 ? &g_w : code == 123 ? &g_a : code == 125 ? &g_s : code == 124 ? &g_d : NULL;
+    return code == 13 ? &g_w : code == 0 ? &g_a : code == 1 ? &g_s : code == 2 ? &g_d : NULL;
+}
+static void kbd_start(void) {
+    const char *e = getenv("DM_KBD_LAYOUT"); g_kbd_letters = e && !strcmp(e, "letters");
+    if (g_kbd_letters) LOG("front end: keyboard layout: button letters (A B X Y L R as named, arrows the left stick, U H J K the D-pad; DM_KBD_LAYOUT=letters)");
 }
 // fn held with a letter: the arrow and function keys carry the same modifier flag, so the key must be a letter for this to be a Globe shortcut
 static int fn_shortcut(NSEvent *e) {
@@ -166,19 +186,21 @@ static int cp_poll(void);
 static void on_key(NSEvent *e, int down) {
     if (!g_input_on) return;
     unsigned short c = e.keyCode;
-    if (cp_blocks_input(g_cp.phase)) {   // the prompt has the keyboard: Return or J (A) is done, Escape or K (B) closes it, no key reaches the game
-        if (down && g_cp.phase == CP_OPEN) { if (c == 53 || c == 40) g_cp_cancel = 1; else if (c == 36 || c == 38) g_cp_confirm = 1; cp_poll(); }
+    if (cp_blocks_input(g_cp.phase)) {   // the prompt has the keyboard: Return or the A button's key is done, Escape or the B button's key closes it, no key reaches the game
+        int b = key_bit(c);
+        if (down && g_cp.phase == CP_OPEN) { if (c == 53 || b == 1) g_cp_cancel = 1; else if (c == 36 || b == 0) g_cp_confirm = 1; cp_poll(); }
         return;
     }
-    switch (c) { case 13: g_w = down; break; case 0: g_a = down; break; case 1: g_s = down; break; case 2: g_d = down; break; }
-    // An arrow key pressed with Shift held is the right stick until it is released; without Shift, the D-pad. The keyboard had no right stick: a 3D game's camera
-    // could be turned only with a controller (Donkey Kong Bananza)
+    // An arrow key pressed with Shift held is the right stick until it is released; without Shift, the D-pad (the left stick with DM_KBD_LAYOUT=letters). The
+    // keyboard had no right stick: a 3D game's camera could be turned only with a controller (Donkey Kong Bananza)
     int *rs = c == 123 ? &g_rl : c == 126 ? &g_ru : c == 124 ? &g_rr : c == 125 ? &g_rd : NULL;
     if (rs && (down ? (e.modifierFlags & NSEventModifierFlagShift) != 0 : *rs)) { *rs = down; push(); return; }
+    int *ls = left_stick_key(c);
+    if (ls) *ls = down;
     int b = key_bit(c);
     uint64_t m = b >= 0 ? 1ull << b : c == 49 ? DM_BTN_SHAKE : 0;   // Space: shaken while held
     g_btn = down ? (g_btn | m) : (g_btn & ~m);
-    if (down && (m || c == 13 || c == 0 || c == 1 || c == 2)) cursor_hide_for_input();   // a key the game takes (WASD: the left stick)
+    if (down && (m || ls)) cursor_hide_for_input();   // a key the game takes (a button, or the left stick)
     push();
 }
 
@@ -601,6 +623,7 @@ static void pads_start(void) {
     const char *e = getenv("DM_PAD_MERGE"); g_merge = e && atoi(e);
     e = getenv("DM_KBD_PLAYER"); g_kbd_own = !g_merge && e && !strcmp(e, "own");
     e = getenv("DM_PAD_PRESS_TO_JOIN"); g_press_to_join = !g_merge && e && atoi(e);
+    kbd_start();
     static const char kbd = 0;
     if (g_kbd_own) pad_slot_take(&g_slots, &kbd, "keyboard");   // holds player 1 for good
     LOG("front end: %s", g_merge ? "every controller is player 1 (DM_PAD_MERGE)" : g_kbd_own ? "the keyboard is player 1, each controller a player of its own from player 2 on (DM_KBD_PLAYER=own)"

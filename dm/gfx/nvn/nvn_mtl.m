@@ -12853,6 +12853,24 @@ static void fz_snap_take(const p_draw *dw, const p_draw_idx *di) {
     fz_snap *z = &g_fzs[g_nfzs++]; z->idx = di != NULL; if (dw) z->dw = *dw; if (di) z->di = *di; z->sc = R.sc; z->has_sc = R.has_sc;
     z->S_ = malloc(sizeof S); memcpy(z->S_, &S, sizeof S);
 }
+// The double render's scratch copy and readback buffers. A Metal 4 command buffer neither makes resident nor retains what it uses: each one goes into the
+// residency set when made and is let go through the deferred release (out of the set and unreferenced once the submission that used it completes). The copy
+// was made with newTextureWithDescriptor and released when this function returned, and neither it nor the buffers were in the residency set, while the blits
+// into them ran later on the GPU: memory outside the set, or freed (the same pattern faulted with kIOGPUCommandBufferCallbackErrorPageFault in a sibling check)
+static uint64_t g_dbl_made, g_dbl_dropped_res;   // scratch objects made, and let go while still in the residency set (t_fuse_check: the two are equal)
+static id<MTLTexture> dbl_scratch_tex(MTLPixelFormat pf, NSUInteger w, NSUInteger h) {
+    MTLTextureDescriptor *d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:pf width:w height:h mipmapped:NO];
+    d.usage = MTLTextureUsageShaderRead; d.storageMode = MTLStorageModePrivate;
+    id<MTLTexture> c = [g_dev newTextureWithDescriptor:d]; if (c) { res_add(c); g_dbl_made++; } return c;
+}
+static id<MTLBuffer> dbl_scratch_buf(NSUInteger n) { id<MTLBuffer> b = [g_dev newBufferWithLength:n options:MTLResourceStorageModeShared]; if (b) { res_add(b); g_dbl_made++; } return b; }
+static void dbl_scratch_drop(id obj) {
+    if (!obj) return;
+    pthread_mutex_lock(&g_res_mu); int res = [g_res_objects containsObject:obj]; pthread_mutex_unlock(&g_res_mu);
+    if (res) g_dbl_dropped_res++;
+    defer_obj_release(obj);
+}
+void mtl_dbl_scratch_stats(uint64_t *made, uint64_t *dropped_resident) { *made = g_dbl_made; *dropped_resident = g_dbl_dropped_res; }
 static void fz_check_run(const fuse_t *fz) {
     if (!g_nfzs || g_fzs_bad) { if (g_fzs_bad) MLOG("[RED] in-game double render: the later pass has more than 8 draws, not compared"); goto out; }
     {
@@ -12860,9 +12878,8 @@ static void fz_check_run(const fuse_t *fz) {
     // fz_end has already restored R.rt from the physical union to the later pass's logical targets; wrote is still registered by physical slot and must be aligned through p2map.
     for (int j = 0; j < fz->rt2.n && j < 8; j++) if (fz->p2map[j] >= 0 && fz->wrote[fz->p2map[j]] && fz->rt2.color[j]) {
         id<MTLTexture> t = tex_mtl(fz->rt2.color[j]); if (!t) continue;
-        MTLTextureDescriptor *d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:t.pixelFormat width:t.width height:t.height mipmapped:NO];
-        d.usage = MTLTextureUsageShaderRead; d.storageMode = MTLStorageModePrivate;
-        id<MTLTexture> c = [g_dev newTextureWithDescriptor:d]; if (!c) continue;
+        id<MTLTexture> c = dbl_scratch_tex(t.pixelFormat, t.width, t.height); if (!c) continue;
+        dbl_scratch_drop(c);   // this function's reference lasts past the copy and the comparison encoded below
         enc_b_copy_texture(blit(), t, 0, 0, MTLOriginMake(0, 0, 0), MTLSizeMake(t.width, t.height, 1), c, 0, 0, MTLOriginMake(0, 0, 0));
         att[na] = t; scr[na] = c; sers[na] = fz->rt2.color[j]->serial; na++; }
     if (!na) { MLOG("[RED] in-game double render: %d draw snapshots kept, but no comparable attachment", g_nfzs); goto out; }
@@ -12875,7 +12892,8 @@ static void fz_check_run(const fuse_t *fz) {
     memcpy(&S, &Ssave, sizeof S); args_dirty_all(); R = Rsave; g_exec_next = en0; g_fz_checking = 0; g_pso_dirty = g_dss_dirty = 1; prog_resolve();
     for (int a = 0; a < na; a++) {
         id<MTLTexture> t = att[a], c = scr[a]; NSUInteger W = t.width, H = t.height, bpp = (NSUInteger)(att_bytes(t, 0) / (W * H));
-        id<MTLBuffer> b1 = [g_dev newBufferWithLength:W * H * bpp options:MTLResourceStorageModeShared], b2 = [g_dev newBufferWithLength:W * H * bpp options:MTLResourceStorageModeShared];
+        id<MTLBuffer> b1 = dbl_scratch_buf(W * H * bpp), b2 = dbl_scratch_buf(W * H * bpp);
+        dbl_scratch_drop(b1); dbl_scratch_drop(b2);   // the commit block below keeps them for the comparison
         id<MTL4ComputeCommandEncoder> b = blit();
         enc_b_copy_texture_buffer(b, c, 0, 0, MTLOriginMake(0, 0, 0), MTLSizeMake(W, H, 1), b1, 0, W * bpp, W * H * bpp);
         enc_b_copy_texture_buffer(b, t, 0, 0, MTLOriginMake(0, 0, 0), MTLSizeMake(W, H, 1), b2, 0, W * bpp, W * H * bpp);

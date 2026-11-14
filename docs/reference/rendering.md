@@ -766,6 +766,13 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Found on:** [DRAGON QUEST XI S](../../dm/games/01006C300E9F0000/README.md) 1.0.4 on an iPad mini 7 (A17 Pro), which presents three times before its first submission ([GitHub issue #626](https://github.com/seedds/nxnative/issues/626)). The reporter's Apple M4 test did not fault without the fix.
 - **Not checked:** the iPad with the fix.
 
+### The in-run double render's copies are resident until their submission completes
+
+- **Symptom:** none seen on a game yet: with `DM_NVN_TBDR=1 DM_NVN_FUSE_CHECK=1` Breath of the Wild's merged passes all have more than eight draws (`[RED] in-game double render: the later pass has more than 8 draws, not compared`, 875 times in 70 s), so the copies below were never made. The same pattern in a sibling check made `kIOGPUCommandBufferCallbackErrorPageFault` on a segment command buffer at its first compared region, then `kIOGPUCommandBufferCallbackErrorSubmissionsIgnored` on every later submission.
+- **Cause:** `fz_check_run` made its copy of each attachment with `newTextureWithDescriptor` and its two readback buffers with `newBufferWithLength`, encoded blits into them, and put none of them into the residency set; the copy's only reference was a local that went away when the function returned, before the submission ran. A Metal 4 command buffer neither makes resident nor retains what it uses, so the GPU's blits can reach memory outside the set, or freed. `t_fuse_check`'s 16×16 frames ran clean either way.
+- **Fix:** `dbl_scratch_tex` / `dbl_scratch_buf` put each such object into the residency set when it is made, and `dbl_scratch_drop` lets it go through the deferred release (`defer_obj_release`: out of the set and unreferenced once the submission that used it completes).
+- **Check:** `t_fuse_check` counts the objects made and those still resident when let go (`mtl_dbl_scratch_stats`): 6 of 6; with `res_add` taken out of the two helpers, 0 of 6.
+
 ### A GPU whose access macOS revoked stops the game
 
 - **Symptom:** after a GPU hang or GPU page faults, every upload, segment, submission and display command buffer comes back `kIOGPUCommandBufferCallbackErrorSubmissionsIgnored` ("Ignored (for causing prior/excessive GPU errors)"). Nothing is drawn again while the game's sound and logic go on, until the game aborts itself (`game called nn::diag abort`, about 70 s later); in full screen, WindowServer froze for 40 s and its watchdog killed it. With the fix the log has `[RED] GPU access revoked: the … command buffer was ignored`, and a Mac app shows an alert and quits.

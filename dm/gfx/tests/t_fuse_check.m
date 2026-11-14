@@ -53,5 +53,10 @@ int main(void) { @autoreleasepool {
     for (int i = 0; i < 4; i++) { t[i].magic = MAGIC('T', 'E', 'X', 0); t[i].serial = 101 + i; t[i].d.width = t[i].d.height = 16;
         t[i].d.depth = t[i].d.levels = t[i].d.samples = 1; t[i].d.target = NVN_TEXTURE_TARGET_2D; t[i].d.format = NVN_FORMAT_RGBA8; }
     check_color(0, &pg, t); check_color(1, &pg, t);
+    // A Metal 4 command buffer neither makes resident nor retains what it uses: every copy and readback buffer the check makes is in the residency set
+    // until it is let go through the deferred release
+    uint64_t made = 0, dres = 0; mtl_dbl_scratch_stats(&made, &dres);
+    EXPECT("scratch objects: the checks made some", 1, made > 0);
+    EXPECT("scratch objects: every one was resident when let go", made, dres);
     printf("== %d checks, %d failed ==\n", count, fail); return fail != 0;
 } }

@@ -144,6 +144,19 @@ class Registry(unittest.TestCase):
         self.assertIn(0x52800048, words)   # mov w8,#2: the cap
         self.assertEqual(ctx.step_max, 2)
 
+    def test_ocarina_movie_player_takes_two_pictures_a_frame(self):
+        # its movie player advances at most the pictures a frame its constructor sets (1 for the game's one caller), so a frame of two vsyncs left the picture behind the sound for
+        # good. One cut of one word in the constructor: cinc w8, w28, ge (1, or 2 for an argument of 2 or more) → mov w8, #2, into the register both stores take (the limit, and
+        # twice it for the queue). Not 3: no value of the constructor's, and the game stopped at the movie's start with it
+        m = MODS[REPO / 'dm/games/0400486024DEC000/patches.py']
+        rules = m.MATCH_CUTS['main']
+        self.assertEqual(len(rules), 1)
+        (delta, old, new, why), = rules[0]['cuts']
+        self.assertEqual((old, new), ('88b79c1a', '48008052'), why)
+        self.assertEqual(int(old[:2], 16) & 31, int(new[:2], 16) & 31, why)   # the same destination register
+        self.assertLess(delta, rules[0]['size'])
+        self.assertTrue(any(e['what'].startswith('movie pictures a frame') for e in m.BINDING))
+
     def test_sdk_wide_rules_change_what_their_names_say(self):
         # the rules were taken from registered SDK cuts, and the builds they reproduce exactly have no row any more: each cut replaces the constant its rule names (0x3fe00000, the node
         # area; 0x400000, 0x2000000 and 0x40000000, the alignments of the 4 MB, 32 MB and 1 GB classes; as movz or orr from wzr) with the reviewed one (62 MB; SDK 20's 2 MB) in the same register

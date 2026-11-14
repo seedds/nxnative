@@ -58,7 +58,7 @@ static int render(void *out, int count, int with_pcm) {
     aout *a = ao(out);
     for (int i = 0; i < count; i++) {
         int frames = 1 + (i & 1); int16_t input[] = {123, -456, 789, -1234}, played[4] = {0};
-        gbuf b = {input, sizeof input, (uint64_t)frames * 4};
+        gbuf b = {.ptr = input, .cap = sizeof input, .size = (uint64_t)frames * 4};
         if (with_pcm && !h_au_Append(out, &b)) return 0;
         AudioBufferList bl = {.mNumberBuffers = 1, .mBuffers = {{2, frames * 4, played}}};
         in_callback = 1; au_render(a, NULL, NULL, 0, frames, &bl); in_callback = 0;

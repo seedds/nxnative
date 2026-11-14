@@ -47,7 +47,7 @@ static int test_surround_output(void) {
         for (int f = 0; f < FRAMES; f++) for (int ch = 0; ch < 6; ch++)
             in[f * 6 + ch] = test < 6 ? (test == ch ? 10000 : 0) : test == 6 ? 32767 : -32768;
         memset(out, 0xa5, sizeof out);
-        gbuf b[2] = {{in, SPLIT * 12, SPLIT * 12}, {in + SPLIT * 6, (FRAMES - SPLIT) * 12, (FRAMES - SPLIT) * 12}};
+        gbuf b[2] = {{.ptr = in, .cap = SPLIT * 12, .size = SPLIT * 12}, {.ptr = in + SPLIT * 6, .cap = (FRAMES - SPLIT) * 12, .size = (FRAMES - SPLIT) * 12}};
         aout a = {.ch = 6};
         atomic_init(&a.state, STATE_STARTED); atomic_init(&a.vol, 0x3f800000u);
         a.q[0] = b; a.q[1] = b + 1; atomic_init(&a.q_tail, 2);
@@ -63,6 +63,24 @@ static int test_surround_output(void) {
         }
     }
     puts("surround callback: all six channels audible, saturation and split-buffer release verified");
+    return 0;
+}
+// The buffer description has to land in nn::audio::AudioOutBuffer's own fields: the host does not take GetAudioOutBufferBufferSize
+// over, and the SDK's version (sdk+0x80fb0) loads +0x10 for the capacity and +0x18 for the data size. A capacity read out of a
+// private layout answered with the block's data size instead, and a resampler sized by that came out one frame short, wrote
+// nothing, and was appended still holding its previous block (Metro 2033 Redux). The object is spelled out here as the SDK has
+// it rather than as gbuf has it, so the check is about the ABI and not about our own names.
+static int test_buffer_info_layout(void) {
+    struct { void *next; void *data; uint64_t buffer_size, data_size; void *tag; } sdk = {0};
+    static int16_t pcm[4096];   // 8192 bytes: the block size Metro 2033 Redux appends at 48 kHz, and 4 bytes more than the 2047 frames the resampler asked for
+    h_au_SetBuf((gbuf *)&sdk, pcm, sizeof pcm, sizeof pcm - 4);
+    if (sizeof sdk != sizeof(gbuf) || sdk.next || sdk.tag || sdk.data != pcm || sdk.buffer_size != sizeof pcm || sdk.data_size != sizeof pcm - 4) {
+        printf("FAIL buffer description: data %p, buffer size %llu, data size %llu (want %p, %zu, %zu)\n", sdk.data,
+               (unsigned long long)sdk.buffer_size, (unsigned long long)sdk.data_size, (void *)pcm, sizeof pcm, sizeof pcm - 4);
+        return 1;
+    }
+    if (h_au_BufPtr((gbuf *)&sdk) != pcm || h_au_BufSize((gbuf *)&sdk) != sizeof pcm - 4) { puts("FAIL buffer description: the host's own readers"); return 1; }
+    puts("buffer description: data at +0x08, buffer size at +0x10, data size at +0x18; a data size 4 bytes short of the capacity no longer stands in for it");
     return 0;
 }
 // The guest AudioOut's front as the SDK fills it (au_info), and its lifetime under a guard like the middleware's: open, play, go to the background, close only if the first word says open,
@@ -96,7 +114,7 @@ static int test_output_lifetime(void) {
     return 0;
 }
 int main(void) {
-    if (test_surround_output() || test_output_lifetime()) return 1;
+    if (test_buffer_info_layout() || test_surround_output() || test_output_lifetime()) return 1;
     char out[64], ev[64]; uint8_t prm[16]; gbuf b[3]; static int16_t pcm[3][4800 * 2];
     h_au_InitParam(prm);
     if (h_au_Open(out, ev, NULL, prm)) return 1;

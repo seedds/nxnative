@@ -1,7 +1,7 @@
 // nn::audio AudioOut: the game (FMOD nx output layer) appends PCM buffers block by block; once played the system puts them back on the "released" queue and signals the event.
 // Host: real audio output = CoreAudio AudioUnit (Mac DefaultOutput / iOS RemoteIO); silent sink = consumes buffers in real time (no sound, pacing matches the real device).
 //       iOS defaults to real audio output (the product must have sound), tests that want silence set DM_AUDIO=0 explicitly; Mac defaults to the silent sink (replay / gate checks are silent), DM_AUDIO=1 for real audio output.
-// The contents of AudioOut / AudioOutBuffer / AudioOutParameter are read and written only through the interfaces below; the host defines its own internal layout and only writes the front part of the structs (AudioOut: the SDK's own fields, au_info).
+// The contents of AudioOut / AudioOutBuffer / AudioOutParameter are read and written only through the interfaces below; the host defines its own internal layout and only writes the front part of the structs (AudioOut: the SDK's own fields, au_info; AudioOutBuffer: the SDK's own field names and offsets, because the SDK's own accessors read it)
 #include "hle.h"
 #include <AudioToolbox/AudioToolbox.h>
 #include <TargetConditionals.h>
@@ -13,7 +13,13 @@ enum { FMT_PCM16 = 2, STATE_STARTED = 0, STATE_STOPPED = 1, RATE = 48000 };
 enum { BK_NONE, BK_AU, BK_NULL };   // what is consuming an output's queue right now (aout.backend)
 enum { AU_IDLE, AU_STARTING, AU_CANCELED, AU_WAIT_CALLBACK };
 
-typedef struct { void *ptr; uint64_t cap, size; } gbuf;     // The first 24 bytes written into the guest AudioOutBuffer
+// nn::audio::AudioOutBuffer, in the guest's own layout: the host does not take every accessor over, and the SDK's own read it
+// with fixed offsets. SetAudioOutBufferInfo (sdk+0x80f80) stores data at +0x08, buffer_size at +0x10 and data_size at +0x18;
+// GetAudioOutBufferBufferSize (sdk+0x80fb0) loads +0x10. A private layout (data +0x00, buffer_size +0x08, data_size +0x10) made
+// that accessor answer with the block's data size where the capacity belongs: a resampler told 2047 frames of the 2048 it had
+// wrote nothing, and the game appended the whole block still holding its previous contents.
+typedef struct { void *next; void *ptr; uint64_t cap; uint64_t size; void *tag; } gbuf;   // +0x00 next, +0x08 data, +0x10 buffer_size, +0x18 data_size, +0x20 tag
+_Static_assert(sizeof(gbuf) == 40 && offsetof(gbuf, ptr) == 0x08 && offsetof(gbuf, cap) == 0x10 && offsetof(gbuf, size) == 0x18, "nn::audio::AudioOutBuffer layout");
 #define QMAX 64
 #define RELMAX QMAX                    // Released max = number of in-flight buffers (the game must take a buffer back before it can append again), same limit as pending
 typedef struct { uint64_t calls, count, qsum, underruns, zero_bytes; uint32_t fmin, fmax; } audio_stats;
@@ -531,7 +537,7 @@ HLE_FORCE("_ZN2nn5audio17GetAudioOutVolumeEPKNS0_8AudioOutE", "output volume", f
     uint32_t b = atomic_load_explicit(&ao(g)->vol, memory_order_relaxed); float v; memcpy(&v, &b, 4); return v;
 }
 
-HLE_FORCE("_ZN2nn5audio21SetAudioOutBufferInfoEPNS0_14AudioOutBufferEPvmm", "buffer description; written into the first 24 bytes of the guest struct", void, h_au_SetBuf, gbuf *b, void *p, uint64_t cap, uint64_t size) {
+HLE_FORCE("_ZN2nn5audio21SetAudioOutBufferInfoEPNS0_14AudioOutBufferEPvmm", "buffer description; the three fields SetAudioOutBufferInfo writes, at the SDK's own offsets (+8 data, +0x10 buffer size, +0x18 data size)", void, h_au_SetBuf, gbuf *b, void *p, uint64_t cap, uint64_t size) {
     b->ptr = p; b->cap = cap; b->size = size;
 }
 HLE_FORCE("_ZN2nn5audio28GetAudioOutBufferDataPointerEPKNS0_14AudioOutBufferE", "buffer data pointer", void *, h_au_BufPtr, const gbuf *b) { return b->ptr; }

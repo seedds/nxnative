@@ -353,6 +353,14 @@ For a replaced DSP renderer the size query keeps the service's work-buffer contr
 - **Open:** what the +0x108 word means; no caller seen reads it.
 - **Found on:** [Nintendo Switch Sports Resort](../../dm/games/04008E001F098000/README.md) (`04008E001F098000`; SDK 20+).
 
+### The AudioOutBuffer handed to the SDK is its own 40-byte object
+
+- **Symptom:** a game that resamples its own audio plays, in one block of every four, the sound of four blocks earlier: Metro 2033 Redux (44.1 kHz to 48 kHz in the game's own resampler) re-appended 518 of its 2,095 loud 8192-byte blocks (24.7 %) still holding the contents of the block 4 appends back, so that audio left 170.6 ms behind; after the fix 0 of 1,989, with no block appended twice or lost and no underruns.
+- **Cause:** the host declared `nn::audio::AudioOutBuffer` as 24 bytes, data at +0x00, capacity at +0x08, data size at +0x10. The SDK's object is 40 bytes, `{next, buffer, buffer_size, data_size, tag}`, data at +0x08, capacity at +0x10, data size at +0x18 (`SetAudioOutBufferInfo`, `sdk+0x80f80`). The host does not take `GetAudioOutBufferBufferSize` over, so the SDK's own (`sdk+0x80fb0`) read the host's data-size field as the capacity and answered with the previous block's: 2047 frames of the 2048 the resampler had room for. On every fourth block the resampler then wrote nothing, and the game appended that block at full length holding the earlier contents.
+- **Fix:** the host's buffer description is the SDK's object: five fields at the SDK's offsets, in `hle_audio.c` and in `hle_audren.c`'s copy of it for the blocks a renderer appends, with a `_Static_assert` on the offsets. `h_au_SetBuf` writes exactly the three fields `SetAudioOutBufferInfo` writes, and `GetAudioOutBufferBufferSize` answers 8192 on every block.
+- **Found on:** Metro 2033 Redux (SDK 8.2.0, 4A Engine).
+- **Check:** `t_audio`'s buffer-description case describes a 40-byte object through `h_au_SetBuf` with its data size 4 bytes short of its capacity and reads it back through the SDK's own field offsets. Against the 24-byte layout the same case fails, the data size standing in for the capacity (8188 where 8192 was declared).
+
 ## Codecs
 
 ### Hardware Opus decoders built on the SDK's software decoders

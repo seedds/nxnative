@@ -9,7 +9,7 @@ import sys
 import tempfile
 import unittest
 
-from capstone import Cs, CS_ARCH_ARM64, CS_MODE_ARM
+from capstone import Cs, CS_ARCH_ARM64, CS_MODE_ARM, CS_GRP_JUMP, CS_GRP_CALL, CS_GRP_RET, CS_GRP_INT, CS_GRP_IRET
 from capstone.arm64 import ARM64_OP_IMM
 
 TOOLS = Path(__file__).resolve().parents[1]
@@ -21,7 +21,8 @@ from nso_asm import ADRP, ADDI, ADDR, B, BEQ, BLR, BR, NOP
 tree = ast.parse((TOOLS / 'patch_nso.py').read_text())
 IMG = bytearray(0x5000); tabjumps = {}; jumps = {}   # the globals the recognizers read: the module image and the jump tables resolved so far in the function
 scope = {'re': re, 'struct': struct, 'ARM64_OP_IMM': ARM64_OP_IMM, 'IMG': IMG, 'tabjumps': tabjumps, 'jumps': jumps}
-exec(compile(ast.Module(body=[n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in ('num', 'written_w', 'writes_reg', 'null_base', 'writes_reg_any', 'half_count', 'copied_base', 'table_base', 'table_cands', 'forward_table_base', 'guarded_count', 'check_before_copy', 'jump_offsets', 'jump_adr_offsets', 'jump_zero_extended', 'jump_masked_pred', 'jump_masked_not')], type_ignores=[]), str(TOOLS / 'patch_nso.py'), 'exec'), scope)
+scope.update(CS_GRP_JUMP=CS_GRP_JUMP, CS_GRP_CALL=CS_GRP_CALL, CS_GRP_RET=CS_GRP_RET, CS_GRP_INT=CS_GRP_INT, CS_GRP_IRET=CS_GRP_IRET)
+exec(compile(ast.Module(body=[n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in ('num', 'written_w', 'writes_reg', 'null_base', 'writes_reg_any', 'half_count', 'copied_base', 'table_base', 'table_cands', 'forward_table_base', 'guarded_count', 'check_before_copy', 'jump_offsets', 'jump_adr_offsets', 'jump_zero_extended', 'jump_masked_pred', 'jump_masked_not', 'jump_masked_cfg')], type_ignores=[]), str(TOOLS / 'patch_nso.py'), 'exec'), scope)
 
 
 def mov(dst, src, wide=True): return (0xaa0003e0 if wide else 0x2a0003e0) | src << 16 | dst
@@ -739,6 +740,176 @@ class MaskedComplement(unittest.TestCase):
                 self.assertIsNone(self.run_site(self.words()))
         struct.pack_into('<i', IMG, self.TABLE, 8 - self.TABLE)
         self.assertEqual(self.run_site(self.words()), [8] + self.TARGETS[1:])
+
+
+class MaskedControlFlow(unittest.TestCase):
+    """Two loops reuse x8 for different tables; the first loop's initialization is later in address order.
+    The second table has two valid address candidates. Its linear writer chain is only a hint; both loops must pass the joint control-flow proof."""
+    TABLE, OTHER = 0x4040, 0x4080
+    TARGETS = [36, 40, 44, 8, 36, 40, 44]
+
+    def setUp(self):
+        tabjumps.clear(); jumps.clear()
+        for tb, targets in ((self.TABLE, self.TARGETS), (self.OTHER, [96] * 5)):
+            for i, target in enumerate(targets): struct.pack_into('<i', IMG, tb + 4 * i, target - tb)
+            struct.pack_into('<i', IMG, tb + 4 * len(targets), 0x1000)   # poison the next entry
+
+    def words(self, **over):
+        w = [B(0, 112), NOP,
+             0x12000a32, 0x71001e5f, BEQ(16, 104), 0xb8b27912, ADDR(18, 18, 8), mov(17, 0, False), BR(18),
+             B(36, 8), B(40, 8), B(44, 56), NOP, RET,
+             ADRP(8, 56, self.OTHER), NOP, ADDI(8, 8, self.OTHER & 0xfff), B(68, 72),
+             0x12000949, 0x7100113f, bhi(80, 104), 0xb8a97909, ADDR(9, 9, 8), BR(9),
+             B(96, 112), RET, RET, NOP,
+             ADRP(8, 112, self.TABLE), NOP, NOP, ADDI(8, 8, self.TABLE & 0xfff), NOP, B(132, 8), RET]
+        for k, v in over.items(): w[int(k[1:])] = v
+        return w
+
+    def run_site(self, words, entries=()):
+        md = Cs(CS_ARCH_ARM64, CS_MODE_ARM); md.detail = True
+        ins = [p for i, word in enumerate(words) for p in md.disasm(struct.pack('<I', word), 4 * i)]
+        return scope['jump_masked_cfg'](ins, next(i for i, p in enumerate(ins) if p.address == 32), 0, len(words) * 4, entries)
+
+    def test_forward_reused_base_reads_exactly_seven_entries(self):
+        self.assertEqual(self.run_site(self.words()), self.TARGETS)
+        self.assertEqual(self.run_site(self.words(w32=ldr_s(8))), self.TARGETS)
+
+    def test_uninitialized_entry_path_cannot_join_a_known_base(self):
+        self.assertIsNone(self.run_site(self.words(w0=cbz_w18(0, 112))))
+
+    def test_other_table_must_reinitialize_before_returning_to_first(self):
+        self.assertIsNone(self.run_site(self.words(w24=B(96, 8))))
+
+    def test_linear_base_hint_cannot_override_a_different_incoming_base(self):
+        struct.pack_into('<i', IMG, self.TABLE, 72 - self.TABLE)   # bypass the second loop's initializer
+        self.assertIsNone(self.run_site(self.words()))
+
+    def test_unknown_and_32_bit_writes_destroy_a_proven_base(self):
+        for word in (mov(8, 0), mov(8, 0, False), ADDI(8, 8, 4)):
+            with self.subTest(word=hex(word)):
+                self.assertIsNone(self.run_site(self.words(w32=word)))
+
+    def test_calls_traps_and_unknown_indirect_control_flow_are_refused(self):
+        for word in (B(128, 8) | 0x80000000, BLR(0), 0xd4000001, 0xd4200000, BR(0), 0xd65f0120):   # svc, brk, ret x9
+            with self.subTest(word=hex(word)):
+                self.assertIsNone(self.run_site(self.words(w32=word)))
+
+    def test_a_rewritten_return_address_cannot_hide_an_incoming_edge(self):
+        # adr x30,#20; ...; cbz w0,return. The ret would reach the load without its mask or check.
+        for word in (0x10fffd1e, mov(30, 0), mov(30, 0, False)):
+            with self.subTest(word=hex(word)):
+                self.assertIsNone(self.run_site(self.words(w29=word, w32=0x34000040)))
+        self.assertEqual(self.run_site(self.words(w29=ldr_s(30), w32=0x34000040)), self.TARGETS)
+
+    def test_direct_and_table_edges_cannot_bypass_mask_or_guard(self):
+        for target in (12, 16, 20, 24, 28, 32, 76, 80, 84, 88, 92):
+            with self.subTest(target=target):
+                self.assertIsNone(self.run_site(self.words(w1=B(4, target))))
+                tabjumps[0x1000] = [target]
+                self.assertIsNone(self.run_site(self.words()))
+                tabjumps.clear()
+                jumps[0x1004] = (target, 1)
+                self.assertIsNone(self.run_site(self.words()))
+                jumps.clear()
+        self.assertIsNone(self.run_site(self.words(w4=BEQ(16, 20))))
+        struct.pack_into('<i', IMG, self.OTHER, 20 - self.OTHER)
+        self.assertIsNone(self.run_site(self.words()))
+
+    def test_mask_check_branch_and_dataflow_must_agree(self):
+        for slot, word in ((2, NOP), (3, CMP_W18_3), (4, BEQ(16, 104) | 1), (6, ADDR(18, 18, 9)),
+                           (7, mov(18, 0)), (7, mov(18, 0, False))):
+            with self.subTest(slot=slot):
+                self.assertIsNone(self.run_site(self.words(**{f'w{slot}': word})))
+        # Use the spare move slot, keeping every branch/target address unchanged.
+        words = self.words(); words[4:8] = [CMP_W18_1, BEQ(20, 104), 0xb8b27912, ADDR(18, 18, 8)]
+        self.assertIsNone(self.run_site(words))   # another flag write between cmp and b.eq
+        words = self.words(); words[5:8] = [mov(18, 0), 0xb8b27912, ADDR(18, 18, 8)]
+        self.assertIsNone(self.run_site(words))   # the checked index changes before the load
+
+    def test_every_instruction_and_target_must_be_decoded(self):
+        for slot in (0, 1, 15, 29, 34):
+            with self.subTest(slot=slot):
+                self.assertIsNone(self.run_site(self.words(**{f'w{slot}': 0xe7ffdefe})))
+        for target in (37, -4, 0x1000):
+            with self.subTest(target=target):
+                struct.pack_into('<i', IMG, self.TABLE, target - self.TABLE)
+                self.assertIsNone(self.run_site(self.words()))
+
+    def test_forward_candidates_must_be_unique_without_a_local_hint(self):
+        for i in range(7): struct.pack_into('<i', IMG, self.OTHER + 4 * i, 96 - self.OTHER)
+        self.assertIsNone(self.run_site(self.words()))
+
+    def test_base_initializer_cannot_be_bypassed(self):
+        self.assertIsNone(self.run_site(self.words(w0=B(0, 124))))
+        self.assertIsNone(self.run_site(self.words(w28=NOP)))
+        self.assertIsNone(self.run_site(self.words(w31=NOP)))
+
+    def test_external_entries_need_their_own_base_initialization(self):
+        for entry in (-4, 21, 0x1000):
+            with self.subTest(entry=entry):
+                self.assertIsNone(self.run_site(self.words(), [entry]))
+        for entry in (8, 20, 124):
+            with self.subTest(entry=entry):
+                self.assertIsNone(self.run_site(self.words(), [entry]))
+                tabjumps[0x1000] = [entry]
+                self.assertIsNone(self.run_site(self.words()))
+                tabjumps.clear()
+                jumps[0x1000] = (entry, 1)
+                self.assertIsNone(self.run_site(self.words()))
+                jumps.clear()
+        for entry in (0, 56, 112):
+            with self.subTest(entry=entry):
+                self.assertEqual(self.run_site(self.words(), [entry]), self.TARGETS)
+
+    def test_real_rewriter_emits_only_the_seven_proven_targets(self):
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from test_nso_match import image
+        cases = [(None, True, 'b'), (8, False, 'b'), (124, False, 'b'), (0, True, 'b'), (112, True, 'b')]
+        cases += [(20, False, kind) for kind in ('b', 'bl', 'b.eq', 'cbz', 'cbnz', 'tbz', 'tbnz')]
+        cases += [(8, False, 'table_after'), (112, True, 'table_after')]
+        for entry, accepted, kind in cases:
+            with self.subTest(entry=entry, kind=kind), tempfile.TemporaryDirectory() as tmp:
+                table, other = 0x2040, 0x2080
+                words = self.words(w14=ADRP(8, 0x138, other), w28=ADRP(8, 0x170, table))
+                functions = {0x100: words}
+                if kind == 'table_after':
+                    # This later FDE's table enters the first mask with w17=1; its entry 1 reaches a target the first table does not list.
+                    functions[0x200] = [ADRP(8, 0x200, 0x20c0), ADDI(8, 8, 0xc0), 0x52800031, 0x52800012,
+                                        CMP_W18_1, bhi(0x214, 0x224), 0xb8b27912, ADDR(18, 18, 8), BR(18), RET]
+                elif entry is not None:
+                    # Another FDE enters with the other table's base and index 7. Only entry paths that reinitialize are safe.
+                    dest = 0x100 + entry; imm = (dest - 0x8c) // 4
+                    branch = {'b': B(0x8c, dest), 'bl': B(0x8c, dest) | 0x80000000, 'b.eq': BEQ(0x8c, dest),
+                              'cbz': 0x34000000 | imm << 5, 'cbnz': 0x35000000 | imm << 5,
+                              'tbz': 0x36000000 | imm << 5, 'tbnz': 0x37000000 | imm << 5}[kind]
+                    functions[0x80] = [ADRP(8, 0x80, other), ADDI(8, 8, other & 0xfff), 0x528000f2, branch]
+                raw = image(functions)
+                for tb, targets in ((table, self.TARGETS), (other, [96] * 5)):
+                    for i, target in enumerate(targets): struct.pack_into('<i', raw, tb + 4 * i, 0x100 + target - tb)
+                    struct.pack_into('<i', raw, tb + 4 * len(targets), 0x1000)
+                if entry is not None: struct.pack_into('<i', raw, other + 4 * 7, 0x168 - other)
+                if kind == 'table_after':
+                    assert entry is not None
+                    struct.pack_into('<ii', raw, 0x20c0, 0x100 + entry - 0x20c0, 0x168 - 0x20c0)
+                raw[0x1100:0x111c] = raw[0x20:0x3c]; struct.pack_into('<I', raw, 4, 0x1100)
+                struct.pack_into('<ii', raw, 0x1110, 0x3000 - 0x1100, 0x300c + len(functions) * 8 - 0x1100)
+                raw[0x10:0x14] = b'NRO0'; struct.pack_into('<I', raw, 0x18, len(raw))
+                struct.pack_into('<6I', raw, 0x20, 0, 0x1000, 0x1000, 0x2000, 0x3000, 0x1000); struct.pack_into('<I', raw, 0x38, 0)
+                src = Path(tmp) / 'input.nro'; src.write_bytes(raw)
+                run = subprocess.run([sys.executable, str(TOOLS / 'patch_nso.py'), str(src), tmp, 'nro0'],
+                                     env=os.environ | {'DM_GAME': '010015100B514000', 'DM_REWRITE_J': '1'}, capture_output=True, text=True)
+                if not accepted:
+                    emitted = (Path(tmp) / 'nro0.sites.tsv').read_text() if run.returncode == 0 else ''
+                    self.assertNotEqual(run.returncode, 0, run.stdout + run.stderr + emitted)
+                    self.assertIn('jump table 120', run.stderr)
+                    continue
+                self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+                rows = [line.split('\t') for line in (Path(tmp) / 'nro0.sites.tsv').read_text().splitlines()]
+                targets = [[0x100 + t for t in self.TARGETS]]
+                if kind == 'table_after':
+                    assert entry is not None
+                    targets.append([0x100 + entry, 0x168])
+                self.assertEqual([[int(t, 0) for t in row[2].split()] for row in rows if row[1] == 'T'], targets)
 
 
 if __name__ == '__main__': unittest.main()

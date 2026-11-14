@@ -1103,6 +1103,130 @@ def jump_zero_extended(insl, j):
     targets = [tb + struct.unpack_from('<i', IMG, tb + 4 * i)[0] for i in range(n)]
     addresses = {p.address for p in insl}
     return targets if all(t in addresses and not head < t <= end for t in targets) else None
+def jump_masked_cfg(insl, j, fa, fb, entries=()):
+    """Masked offset dispatches whose bases are initialized later, and reused for other tables on other paths (Tied Together 1.0.2).
+    Recognize every indirect branch in the function, then prove their proposed tables together by constant propagation from an unknown entry state. Proposed table edges are
+    safe only if every load receives its proposed base and no edge bypasses any mask/check. A linear writer chain is only a candidate, never the proof. Unknown instructions,
+    calls, traps, unrecognized indirect branches and ambiguous forward bases are refused. Kept last so older recognizers retain their results."""
+    if not insl or insl[0].address != fa or insl[-1].address + 4 != fb or any(b.address != a.address + 4 for a, b in zip(insl, insl[1:])): return None
+    addresses = {p.address: k for k, p in enumerate(insl)}
+    def direct(p): return p.mnemonic in ('b', 'cbz', 'cbnz', 'tbz', 'tbnz') or p.mnemonic.startswith('b.')
+    def control(p): return direct(p) or p.mnemonic in ('br', 'ret')
+    for p in insl:
+        if p.mnemonic == 'ret' and p.op_str not in ('', 'x30', 'lr'): return None
+        if writes_reg(p, 'x30'): return None   # ret is an exit only while the caller's return address is preserved
+        if any(p.group(g) for g in (CS_GRP_JUMP, CS_GRP_CALL, CS_GRP_RET, CS_GRP_INT, CS_GRP_IRET)) and not control(p): return None
+        if p.mnemonic in ('bl', 'blr', 'svc', 'hvc', 'smc', 'brk', 'hlt', 'eret', 'drps'): return None
+    # Straight-line ADRP/ADD pairs can be separated by arbitrarily many unrelated instructions. Stop at control flow or any other write of that base.
+    candidates = {}
+    for k, p in enumerate(insl):
+        m = re.fullmatch(r'(x\d+), #(0x[0-9a-f]+|\d+)', p.op_str) if p.mnemonic == 'adrp' else None
+        if not m: continue
+        rb = m.group(1)
+        for q in insl[k + 1:]:
+            if control(q): break
+            if not writes_reg(q, rb): continue
+            add = re.fullmatch(rf'{rb}, {rb}, #(0x[0-9a-f]+|\d+)', q.op_str) if q.mnemonic == 'add' else None
+            if add: candidates.setdefault(rb, set()).add(p.operands[1].imm + int(add.group(1), 0))
+            break
+    dispatches, protected = {}, set()
+    for k, jump in enumerate(insl):
+        if jump.mnemonic != 'br': continue
+        dest = jump.op_str
+        if not re.fullmatch(r'x\d+', dest): return None
+        kh = next((z for z in range(k - 1, max(-1, k - 32), -1) if control(insl[z])), None)
+        if kh is None or kh < 2: return None
+        mask, check, guard = insl[kh - 2:kh + 1]
+        mm = re.fullmatch(r'(w\d+), w\d+, #(0x[0-9a-f]+|\d+)', mask.op_str) if mask.mnemonic == 'and' else None
+        if not mm or check.mnemonic != 'cmp': return None
+        idx, bound = 'x' + mm.group(1)[1:], int(mm.group(2), 0)
+        mc = re.fullmatch(rf'{mm.group(1)}, #(0x[0-9a-f]+|\d+)', check.op_str)
+        if not mc or not bound or bound & (bound + 1): return None
+        limit = int(mc.group(1), 0)
+        if guard.mnemonic == 'b.eq' and limit == bound: n = bound   # the highest masked value exits; do not read an eighth entry for #7
+        elif guard.mnemonic == 'b.hi' and limit <= bound: n = limit + 1
+        else: return None
+        kl = next((z for z in range(kh + 1, k) if insl[z].mnemonic == 'ldrsw'), None)
+        if kl is None: return None
+        ml = re.fullmatch(rf'(x\d+), \[(x\d+), {idx}, lsl #2\]', insl[kl].op_str)
+        if not ml: return None
+        ent, rb = ml.groups()
+        if rb in (idx, ent, dest): return None
+        ka = next((z for z in range(kl + 1, k) if writes_reg(insl[z], dest)), None)
+        if ka is None or insl[ka].mnemonic != 'add' or insl[ka].op_str != f'{dest}, {ent}, {rb}': return None
+        if any(writes_reg(p, idx) for p in insl[kh + 1:kl]) or any(writes_reg(p, ent) or writes_reg(p, rb) for p in insl[kl + 1:ka]) or \
+           any(writes_reg(p, dest) for p in insl[ka + 1:k]): return None
+        forbidden = {p.address for p in insl[kh - 1:k + 1]}   # the mask itself is a valid loop entry
+        protected |= forbidden
+        valid = {}
+        for tb in candidates.get(rb, ()):
+            if not 0 <= tb <= len(IMG) - 4 * n: continue
+            targets = [tb + struct.unpack_from('<i', IMG, tb + 4 * z)[0] for z in range(n)]
+            if all(t in addresses and t not in forbidden for t in targets): valid[tb] = targets
+        tb = copied_base(insl, kl, rb)
+        if tb not in valid:
+            if len(valid) != 1: return None
+            tb = next(iter(valid))
+        dispatches[k] = (kl, rb, tb, valid[tb])
+    entries = set(entries) | {fa}
+    entries.update(t for at, targets in tabjumps.items() if not fa <= at < fb for t in targets if t in addresses)
+    entries.update(t for at, (b, width) in jumps.items() if not fa <= at < fb and b < fb and fa < b + 4 * width for t in addresses if b <= t < b + 4 * width)
+    if j not in dispatches or not entries <= addresses.keys() or entries & protected: return None
+    # A direct branch/call, any other proposed table, or a table already recognized by the driver must not skip the mask/check.
+    if any(p.operands[-1].imm in protected for p in insl if direct(p)): return None
+    if any(t in protected for _, _, _, targets in dispatches.values() for t in targets): return None
+    if any(t in protected for targets in tabjumps.values() for t in targets): return None
+    if any(any(b <= t < b + 4 * width for t in protected) for b, width in jumps.values()): return None
+    edges = {}
+    for k, p in enumerate(insl):
+        if p.mnemonic == 'br': targets = dispatches[k][3]
+        elif p.mnemonic == 'ret': targets = []
+        elif direct(p): targets = [p.operands[-1].imm] + ([] if p.mnemonic == 'b' else [p.address + 4])
+        else: targets = [p.address + 4]
+        edges[k] = [addresses[t] for t in targets if t in addresses]
+    bases = sorted({rb for _, rb, _, _ in dispatches.values()})
+    # Missing state means unreachable (bottom); None in a reachable state means unknown. A known value joined with unknown stays unknown.
+    states = {addresses[t]: (None,) * len(bases) for t in entries}; pending = list(states)
+    while pending:
+        k = pending.pop(); p = insl[k]; state = list(states[k])
+        for r, rb in enumerate(bases):
+            if not writes_reg(p, rb): continue
+            val = None
+            if p.mnemonic == 'adrp' and p.op_str.startswith(rb + ','): val = p.operands[1].imm
+            m = re.fullmatch(rf'{rb}, {rb}, #(0x[0-9a-f]+|\d+)', p.op_str) if p.mnemonic == 'add' else None
+            previous = state[r]
+            if m and previous is not None: val = (previous + int(m.group(1), 0)) & 0xffffffffffffffff
+            state[r] = val
+        state = tuple(state)
+        for dest in edges[k]:
+            old = states.get(dest)
+            merged = state if old is None else tuple(a if a == b else None for a, b in zip(old, state))
+            if old != merged: states[dest] = merged; pending.append(dest)
+    for kl, rb, tb, _ in dispatches.values():
+        if kl not in states or states[kl][bases.index(rb)] != tb: return None
+    return dispatches[j][3]
+masked_direct_entries = None
+def masked_cfg_entries(fa, fb):
+    """Direct entries from outside this function or analysis piece, including code with no x18 sites. Lazily index the module once, using the same branch decoding as pieces.
+    A target's lowest/highest source suffice to tell whether any source is outside [fa, fb). An entry at the mask still needs a proven base, so feed unknown states at every
+    incoming target instead of merely checking for jumps past the guard. Embedded words resembling branches may conservatively refuse this fallback."""
+    global masked_direct_entries
+    if masked_direct_entries is None:
+        entries = {}
+        for start, end in CODE_RANGES:
+            for at in range(start, end - 3, 4):
+                w = struct.unpack_from('<I', IMG, at)[0]; t = w >> 24
+                if t == 0x54 and not w & 0x10 or t & 0x7E == 0x34: d = (w >> 5) & 0x7FFFF; d -= (d & 0x40000) << 1
+                elif t & 0x7E == 0x36: d = (w >> 5) & 0x3FFF; d -= (d & 0x2000) << 1
+                elif t & 0x7C == 0x14: d = w & 0x3FFFFFF; d -= (d & 0x2000000) << 1
+                else: continue
+                dest = at + 4 * d
+                if not 0 <= dest < TEXT_END: continue
+                if dest in entries: entries[dest] = [min(entries[dest][0], at), max(entries[dest][1], at)]
+                else: entries[dest] = [at, at]
+        masked_direct_entries = sorted((dest, lo, hi) for dest, (lo, hi) in entries.items())
+    lo = bisect.bisect_left(masked_direct_entries, (fa,)); hi = bisect.bisect_left(masked_direct_entries, (fb,))
+    return {dest for dest, first, last in masked_direct_entries[lo:hi] if first < fa or last >= fb}
 def forward_table_base(insl, k, rb, n):
     """A loop's base initialized after its dispatch in address order (Blasphemous 1.0.8 main+0xae95f8: x17 is set at +0xae96dc, then the block branches backward).
     Used only after every older recognizer failed. Require exactly two writers of the full base in the function, an adjacent adrp + add after the load, no call that can clobber it,
@@ -1509,6 +1633,7 @@ if any(fb - fa > BIG_FN for fa, fb in funcs):
         split += [(p, q) for p, q in ps if bisect.bisect_left(sites18, p) < bisect.bisect_left(sites18, q)]   # the pieces that hold x18 sites
         print(f'function {fa:#x}..{fb:#x} ({(fb - fa) / 2**20:.2f} MB, no unwind entries) analysed in {len(ps)} pieces')
     funcs = split
+masked_cfg_funcs = {}
 for fa, fb in funcs:
     insl = disasm_fn(fa, fb)
     ws = find_windows(insl)
@@ -1540,6 +1665,9 @@ for fa, fb in funcs:
                 if not tgt: tgt = jump_masked_not(insl, j)   # a complemented low-bit index with its zero case branched away: exactly mask entries
                 if not tgt: tgt = jump_offsets(insl, j, copy_first=True, far_base=True, forward_base=True)   # a unique base initialized in a later block that branches backward
                 if not tgt: tgt = jump_zero_extended(insl, j)   # a 32-bit checked value zero-extended into the index, with its full path to the br verified
+                if not tgt:
+                    tgt = jump_masked_cfg(insl, j, fa, fb, masked_cfg_entries(fa, fb))   # mutually verified masked dispatches, including entries from other functions or pieces
+                    if tgt: masked_cfg_funcs.setdefault((fa, fb), ins.address)
                 assert tgt, f'jump table {ins.address:x}'
                 tabjumps[ins.address] = tgt; continue
             jumps[ins.address] = (base, width)
@@ -1570,6 +1698,11 @@ for fa, fb in funcs:
     for a_, tgt in tabjumps.items():
         if fa <= a_ < fb: assert not any(t in inwin and t not in heads for t in tgt), f'jump table target into window {a_:x}'
     rmid_all |= rmid
+# Tables recognized later can enter an earlier CFG at its mask or halfway through initialization. Recheck only the new fallback's functions with every table now known.
+# Keep addresses, not Capstone instruction objects, between passes; one site rechecks all dispatches in its function or analysis piece.
+for (fa, fb), at in masked_cfg_funcs.items():
+    insl = disasm_fn(fa, fb); j = next(k for k, p in enumerate(insl) if p.address == at)
+    assert jump_masked_cfg(insl, j, fa, fb, masked_cfg_entries(fa, fb)) == tabjumps[at], f'jump table {at:x}: unproven external entry'
 if far_into:   # functions analysed in pieces (pieces above): their far b / bl, and every jump table's targets (a cut may follow a br x18), may not land inside a window or a retry block
     win_mid = {x.address for wseg in windows for x in wseg[1:]}
     for at, to in far_into: assert to not in win_mid and to not in rmid_all, f'far branch into a window or retry block {at:x}'

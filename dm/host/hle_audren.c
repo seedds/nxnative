@@ -35,6 +35,309 @@ static void *gsym(const char *n) { void *p = guest_sym(n); if (!p) die("audren: 
 static void cpu_manual(uint8_t *dst, const uint8_t *src) { memcpy(dst, src, P_SIZE); *(int32_t *)(dst + P_DEVICE) = 1; *(int32_t *)(dst + P_MODE) = 1; }
 
 static size_t ar_align(size_t n, size_t alignment) { return (n + alignment - 1) & ~(alignment - 1); }
+
+// ---------- sound categories: one volume per kind of sound (Mario Kart World) ----------
+// The game's sound engine plays every sound as one or more nn::audio voices, and the renderer the SDK ships mixes them: nothing on the way to the output says whether a voice
+// is music or an engine. The wave data does. A voice's wave buffer points into a BWAV file the game holds in memory (inside a BARS archive, or the prefetch part of a
+// streamed sound), and a BWAV's header carries the CRC-32 of its samples. sound_cats.bin maps every CRC of the game's sound archives to a category chosen from the sound's
+// name (BGM_… music, SE_Kart_…_Engine engine, Voice_… voice, …), and the ADPCM coefficients of every sound to the same category, for a voice whose buffer is not inside a
+// BWAV (the stream buffers that follow a prefetch, or a copy). A 16-bit PCM voice with neither is a decoded Opus stream: the game's Opus sounds are all music.
+// The voice's volume is then the game's (SetVoiceVolume; the game never reads it back, main imports no GetVoiceVolume) times its category's gain: everything after the voice
+// (the submixes, reverb sends, the final mix) scales with it. A gain changed while a voice plays reaches it at the game's next renderer update.
+// DM_SOUND_CATS=<file> names the table (default <DM_ROOT>/sound_cats.bin; none: the game's volumes untouched). DM_SOUND_<NAME>=<0..200> sets a category's start volume in
+// percent (MUSIC, ENGINE, KART, ITEM, VOICE, WORLD, UI, OTHER). DM_SOUND_LOG=1 logs each voice's category and how it was found
+#if defined(DM_GAME_PROGRAM_ID) && DM_GAME_PROGRAM_ID == 0x0400C3F00006E000ull
+#define DM_SND_HOOKS 1
+#endif
+static const char *const g_snd_names[DM_SND_CATS] = {"other", "music", "engine", "kart", "item", "voice", "world", "ui"};
+static _Atomic float g_snd_gain[DM_SND_CATS] = {1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f};
+static _Atomic unsigned g_snd_gen;                // bumped by every change of a gain
+static _Atomic uint64_t g_snd_sq2, g_snd_sn2;       // the same after the master volume (hle_audio.c)
+void dm_snd_meter_out(const int16_t *x, uint64_t n) { static int on = -1; if (on < 0) on = getenv("DM_SOUND_LOG") != NULL; if (!on) return; uint64_t q = 0; for (uint64_t i = 0; i < n; i++) q += (uint64_t)((int64_t)x[i] * x[i]); atomic_fetch_add(&g_snd_sq2, q); atomic_fetch_add(&g_snd_sn2, n); }
+static _Atomic uint64_t g_snd_sq, g_snd_sn;         // the output's sum of squares and sample count since DM_SOUND_LOG's last line
+static _Atomic unsigned long g_snd_count[DM_SND_CATS];   // voices given each category since the start
+const char *dm_snd_name(int cat) { return cat < 0 || cat >= DM_SND_CATS ? "" : g_snd_names[cat]; }
+float dm_snd_gain(int cat) { return cat < 0 || cat >= DM_SND_CATS ? 1.0f : atomic_load(&g_snd_gain[cat]); }
+void dm_snd_gain_set(int cat, float g) {
+    if (cat < 0 || cat >= DM_SND_CATS) return;
+    atomic_store(&g_snd_gain[cat], g != g || g < 0 ? 0 : g > 2 ? 2 : g); atomic_fetch_add(&g_snd_gen, 1);
+}
+unsigned long dm_snd_voices(int cat) { return cat < 0 || cat >= DM_SND_CATS ? 0 : atomic_load(&g_snd_count[cat]); }
+static uint32_t snd_crc32(const uint8_t *p, size_t n) {
+    static uint32_t t[256]; static _Atomic int init;
+    if (!atomic_load(&init)) { for (uint32_t i = 0; i < 256; i++) { uint32_t c = i; for (int k = 0; k < 8; k++) c = c & 1 ? 0xedb88320u ^ (c >> 1) : c >> 1; t[i] = c; } atomic_store(&init, 1); }
+    uint32_t c = 0xffffffffu; for (size_t i = 0; i < n; i++) c = t[(c ^ p[i]) & 0xff] ^ (c >> 8);
+    return ~c;
+}
+// The table: "DMSNDCAT", u32 version 1, u32 CRC count, u32 coefficient count; the CRCs sorted, one category byte each (padded to 4); the coefficient hashes likewise
+static struct { int state; uint32_t ncrc, ncoef; const uint32_t *crc, *coef; const uint8_t *crc_cat, *coef_cat; } g_snd_tab;   // state 0 not tried, 1 loaded, 2 none
+static int snd_tab_parse(const uint8_t *d, size_t n) {
+    uint32_t h[3]; if (n < 20 || memcmp(d, "DMSNDCAT", 8)) return 0;
+    memcpy(h, d + 8, 12); if (h[0] != 1 || h[1] > 1u << 22 || h[2] > 1u << 22) return 0;
+    size_t a = 20, b = a + 4ull * h[1], c = b + ((h[1] + 3) & ~3u), e = c + 4ull * h[2], end = e + ((h[2] + 3) & ~3u);
+    if (end > n) return 0;
+    for (uint32_t i = 0; i < h[1]; i++) if (d[b + i] >= DM_SND_CATS) return 0;
+    for (uint32_t i = 0; i < h[2]; i++) if (d[e + i] >= DM_SND_CATS) return 0;
+    g_snd_tab.ncrc = h[1]; g_snd_tab.ncoef = h[2]; g_snd_tab.crc = (const uint32_t *)(d + a); g_snd_tab.crc_cat = d + b; g_snd_tab.coef = (const uint32_t *)(d + c); g_snd_tab.coef_cat = d + e;
+    return 1;
+}
+static int snd_log_on(void) { static int on = -1; if (on < 0) on = getenv("DM_SOUND_LOG") ? atoi(getenv("DM_SOUND_LOG")) : 0; return on; }
+static int snd_on(void) {   // under g_snd_mu the first time
+    if (g_snd_tab.state) return g_snd_tab.state == 1;
+    g_snd_tab.state = 2;
+    char path[1024]; const char *e = getenv("DM_SOUND_CATS"), *root = getenv("DM_ROOT");
+    if (e && *e) snprintf(path, sizeof path, "%s", e); else if (root) snprintf(path, sizeof path, "%s/sound_cats.bin", root); else return 0;
+    FILE *f = fopen(path, "rb"); if (!f) { LOG("audren: sound categories: no table at %s, the game's volumes are untouched", path); return 0; }
+    fseek(f, 0, SEEK_END); long n = ftell(f); fseek(f, 0, SEEK_SET);
+    uint8_t *d = n > 0 && n < (64 << 20) ? malloc((size_t)n) : NULL;
+    int ok = d && fread(d, 1, (size_t)n, f) == (size_t)n && snd_tab_parse(d, (size_t)n);
+    fclose(f);
+    if (!ok) { free(d); LOG("[RED] audren: sound categories: %s is not a sound category table, the game's volumes are untouched", path); return 0; }
+    static const char *const start[DM_SND_CATS] = {"DM_SOUND_OTHER", "DM_SOUND_MUSIC", "DM_SOUND_ENGINE", "DM_SOUND_KART", "DM_SOUND_ITEM", "DM_SOUND_VOICE", "DM_SOUND_WORLD", "DM_SOUND_UI"};
+    for (int c = 0; c < DM_SND_CATS; c++) { const char *v = getenv(start[c]); if (v && *v) dm_snd_gain_set(c, (float)atof(v) / 100.0f); }   // start volumes in percent: DM_SOUND_MUSIC=50
+    g_snd_tab.state = 1;
+    LOG("audren: sound categories: %u sounds and %u coefficient sets from %s; music %.0f%%, engine %.0f%%, kart %.0f%%, item %.0f%%, voice %.0f%%, world %.0f%%, ui %.0f%%, other %.0f%%", g_snd_tab.ncrc, g_snd_tab.ncoef, path,
+        dm_snd_gain(DM_SND_MUSIC) * 100, dm_snd_gain(DM_SND_ENGINE) * 100, dm_snd_gain(DM_SND_KART) * 100, dm_snd_gain(DM_SND_ITEM) * 100, dm_snd_gain(DM_SND_VOICE) * 100, dm_snd_gain(DM_SND_WORLD) * 100, dm_snd_gain(DM_SND_UI) * 100, dm_snd_gain(DM_SND_OTHER) * 100);
+    return 1;
+}
+static int snd_lookup(const uint32_t *keys, const uint8_t *cats, uint32_t n, uint32_t k) {   // the category, -1 when the table has no such key
+    uint32_t lo = 0, hi = n;
+    while (lo < hi) { uint32_t m = lo + (hi - lo) / 2; if (keys[m] < k) lo = m + 1; else hi = m; }
+    return lo < n && keys[lo] == k ? cats[lo] : -1;
+}
+// The memory pools the game attached: a wave buffer lies inside one, so the search for its BWAV header reads only inside the pool
+enum { SND_POOLS = 512, SND_VOICES = 4096, SND_SPANS = 8192, SND_BACK = 0x400, SND_HOW_NONE = 0, SND_HOW_BWAV, SND_HOW_COEF, SND_HOW_PCM };
+static struct { void *pool; uint8_t *lo, *hi; } g_snd_pool[SND_POOLS];
+static int g_snd_npool;
+// The sample spans of the BWAVs seen so far, sorted by address: [lo, hi) of one channel, its header (checked again at every hit: the game frees an archive and loads another there)
+typedef struct { uint8_t *lo, *hi, *hdr; uint32_t crc; uint8_t cat; } snd_span;
+static snd_span g_snd_span[SND_SPANS];
+static int g_snd_nspan;
+typedef struct { void *v; float game; uint8_t cat, how, fmt, live; } snd_voice;
+static snd_voice g_snd_voice[SND_VOICES];   // open addressing by the VoiceType's address; an entry stays once made (the game's voice objects are few and reused)
+static unsigned g_snd_done;                 // the gain change the voices have (under g_snd_mu)
+static unsigned long g_snd_how[4], g_snd_appends, g_snd_lines;
+static pthread_mutex_t g_snd_mu = PTHREAD_MUTEX_INITIALIZER;
+static snd_voice *snd_voice_of(void *v, int make) {
+    size_t i = ((uintptr_t)v >> 4) * 0x9e3779b97f4a7c15ull >> 52;   // 12 bits
+    for (int k = 0; k < SND_VOICES; k++, i = (i + 1) & (SND_VOICES - 1)) {
+        if (g_snd_voice[i].v == v) return &g_snd_voice[i];
+        if (!g_snd_voice[i].v) { if (!make) return NULL; g_snd_voice[i].v = v; return &g_snd_voice[i]; }
+    }
+    return NULL;
+}
+static int snd_pool_of(const uint8_t *p, uint8_t **lo, uint8_t **hi) {
+    for (int i = 0; i < g_snd_npool; i++) if (p >= g_snd_pool[i].lo && p < g_snd_pool[i].hi) { *lo = g_snd_pool[i].lo; *hi = g_snd_pool[i].hi; return 1; }
+    return 0;
+}
+static int snd_span_at(const uint8_t *p) {   // index of the span holding p, -1 when none
+    int lo = 0, hi = g_snd_nspan;
+    while (lo < hi) { int m = (lo + hi) / 2; if (g_snd_span[m].hi <= p) lo = m + 1; else hi = m; }
+    return lo < g_snd_nspan && g_snd_span[lo].lo <= p ? lo : -1;
+}
+static void snd_span_drop(uint8_t *lo, uint8_t *hi) {   // every span overlapping [lo, hi)
+    int w = 0;
+    for (int i = 0; i < g_snd_nspan; i++) if (g_snd_span[i].hi <= lo || g_snd_span[i].lo >= hi) g_snd_span[w++] = g_snd_span[i];
+    g_snd_nspan = w;
+}
+static void snd_span_add(uint8_t *lo, uint8_t *hi, uint8_t *hdr, uint32_t crc, int cat) {
+    snd_span_drop(lo, hi);
+    if (g_snd_nspan == SND_SPANS) { memmove(g_snd_span, g_snd_span + SND_SPANS / 2, sizeof *g_snd_span * (SND_SPANS - SND_SPANS / 2)); g_snd_nspan -= SND_SPANS / 2; }   // full: the lower half goes, found again when played
+    int i = g_snd_nspan; while (i > 0 && g_snd_span[i - 1].lo > lo) { g_snd_span[i] = g_snd_span[i - 1]; i--; }
+    g_snd_span[i] = (snd_span){lo, hi, hdr, crc, (uint8_t)cat}; g_snd_nspan++;
+}
+static uint32_t snd_u32(const uint8_t *p) { uint32_t v; memcpy(&v, p, 4); return v; }
+static uint16_t snd_u16(const uint8_t *p) { uint16_t v; memcpy(&v, p, 2); return v; }
+// A BWAV header at h (inside [plo, phi)): magic "BWAV", byte order mark 0xfeff, CRC-32 of the samples at +8, channel count at +0xe; each channel 0x4c bytes from +0x10:
+// encoding (0 PCM16, 1 ADPCM, 2 Opus), sample count of this file at +0xc, its samples' offset in this file at +0x34. Adds each channel's span; returns the category, -1 when h is no header
+static int snd_bwav(uint8_t *h, uint8_t *plo, uint8_t *phi, uint32_t *crc_out) {
+    if (h < plo || h + 0x10 > phi || snd_u32(h) != 0x56415742u || snd_u16(h + 4) != 0xfeff) return -1;
+    unsigned nch = snd_u16(h + 0xe); if (!nch || nch > 16 || h + 0x10 + 0x4c * nch > phi) return -1;
+    uint32_t crc = snd_u32(h + 8); int cat = snd_lookup(g_snd_tab.crc, g_snd_tab.crc_cat, g_snd_tab.ncrc, crc);
+    if (cat < 0) cat = DM_SND_OTHER;
+    for (unsigned c = 0; c < nch; c++) {
+        const uint8_t *ch = h + 0x10 + 0x4c * c; unsigned enc = snd_u16(ch); uint64_t ns = snd_u32(ch + 0xc), off = snd_u32(ch + 0x34);
+        uint64_t bytes = enc == 0 ? ns * 2 : enc == 1 ? (ns + 13) / 14 * 8 : 0;
+        if (!bytes || off < 0x10 + 0x4c * nch || h + off + bytes > phi) continue;
+        snd_span_add(h + off, h + off + bytes, h, crc, cat);
+    }
+    *crc_out = crc; return cat;
+}
+// The category of the sound a wave buffer at p belongs to (g_snd_mu held): -1 when p is in no BWAV
+static int snd_find(uint8_t *p, uint32_t *crc_out) {
+    uint8_t *plo, *phi; if (!p || !snd_pool_of(p, &plo, &phi)) return -1;
+    int i = snd_span_at(p);
+    if (i >= 0) {
+        snd_span s = g_snd_span[i];
+        if (s.hdr >= plo && s.hdr + 0x10 <= phi && snd_u32(s.hdr) == 0x56415742u && snd_u32(s.hdr + 8) == s.crc) { *crc_out = s.crc; return s.cat; }
+        snd_span_drop(s.lo, s.hi);   // another archive lives there now
+    }
+    uint8_t *q = (uint8_t *)((uintptr_t)p & ~(uintptr_t)3), *stop = q - SND_BACK < plo || q < (uint8_t *)SND_BACK ? plo : q - SND_BACK;
+    for (; q >= stop && q + 8 <= phi; q -= 4) {
+        if (snd_u32(q) != 0x56415742u || snd_u16(q + 4) != 0xfeff) continue;
+        int cat = snd_bwav(q, plo, phi, crc_out);
+        if (cat < 0) continue;
+        return snd_span_at(p) >= 0 ? cat : -1;   // the nearest header before p: p is inside one of its channels, or in no BWAV
+    }
+    return -1;
+}
+#ifdef DM_SND_HOOKS
+static void (*snd_set_orig(void))(void *, float) {
+    static void (*orig)(void *, float); if (!orig) orig = gsym("_ZN2nn5audio14SetVoiceVolumeEPNS0_9VoiceTypeEf");
+    return orig;
+}
+static void snd_voice_cat(snd_voice *s, int cat, int how) {   // g_snd_mu held
+    if (s->how != how || s->cat != cat) { atomic_fetch_add(&g_snd_count[cat], 1); g_snd_how[how]++; }
+    int changed = s->cat != cat; s->cat = (uint8_t)cat; s->how = (uint8_t)how;
+    if (changed && s->live) snd_set_orig()(s->v, s->game * dm_snd_gain(cat));
+}
+// The game's renderer update: every playing voice gets its category's gain when one changed
+static void snd_apply(void) {
+    if (atomic_load(&g_snd_gen) == g_snd_done || g_snd_tab.state != 1) return;
+    static unsigned (*valid)(const void *); if (!valid) valid = gsym("_ZN2nn5audio12IsVoiceValidEPKNS0_9VoiceTypeE");
+    pthread_mutex_lock(&g_snd_mu);
+    g_snd_done = atomic_load(&g_snd_gen);
+    int nlive = 0, nvalid = 0;
+    for (int i = 0; i < SND_VOICES; i++) {
+        snd_voice *s = &g_snd_voice[i]; if (!s->v || !s->live) continue;
+        nlive++; if (!(valid(s->v) & 0xff)) continue;
+        nvalid++; snd_set_orig()(s->v, s->game * dm_snd_gain(s->cat));
+        if (snd_log_on() > 1 && g_snd_lines++ < 40000) LOG("audren: sound voice %p: gain change, now %g x %g (%s)", s->v, s->game, dm_snd_gain(s->cat), g_snd_names[s->cat]);
+    }
+    if (snd_log_on() && g_snd_lines++ < 40000) LOG("audren: sound gains changed: %d voices acquired, %d of them valid and set", nlive, nvalid);
+    pthread_mutex_unlock(&g_snd_mu);
+}
+static void snd_reset(void) {   // the renderer closes: its voices and pools are gone
+    pthread_mutex_lock(&g_snd_mu);
+    for (int i = 0; i < SND_VOICES; i++) g_snd_voice[i].live = 0;
+    g_snd_npool = 0; g_snd_nspan = 0;
+    pthread_mutex_unlock(&g_snd_mu);
+}
+HLE_FORCE("_ZN2nn5audio17AcquireMemoryPoolEPNS0_19AudioRendererConfigEPNS0_14MemoryPoolTypeEPvm", "sound categories: note the pool's range (wave buffers lie inside pools), then hand over to the SDK",
+          unsigned, h_snd_PoolAcquire, void *cfg, void *pool, void *addr, size_t size) {
+    static unsigned (*orig)(void *, void *, void *, size_t); if (!orig) orig = gsym("_ZN2nn5audio17AcquireMemoryPoolEPNS0_19AudioRendererConfigEPNS0_14MemoryPoolTypeEPvm");
+    unsigned r = orig(cfg, pool, addr, size);
+    if (!(r & 0xff)) return r;
+    pthread_mutex_lock(&g_snd_mu);
+    if (snd_on()) {
+        int i = 0; while (i < g_snd_npool && g_snd_pool[i].pool != pool) i++;
+        if (i == g_snd_npool && i < SND_POOLS) g_snd_npool++;
+        if (i < SND_POOLS) { g_snd_pool[i].pool = pool; g_snd_pool[i].lo = addr; g_snd_pool[i].hi = (uint8_t *)addr + size; }
+        else if (g_snd_lines++ < 4) LOG("audren: sound categories: more than %d memory pools, sounds in this one keep the volume of \"other\"", SND_POOLS);
+        if (snd_log_on() && g_snd_lines++ < 4000) LOG("audren: sound pool %p: %p + %#zx (%d pools)", pool, addr, size, g_snd_npool);
+    }
+    pthread_mutex_unlock(&g_snd_mu);
+    return r;
+}
+HLE_FORCE("_ZN2nn5audio17ReleaseMemoryPoolEPNS0_19AudioRendererConfigEPNS0_14MemoryPoolTypeE", "sound categories: forget the pool's range and the sounds in it, then hand over to the SDK",
+          void, h_snd_PoolRelease, void *cfg, void *pool) {
+    static void (*orig)(void *, void *); if (!orig) orig = gsym("_ZN2nn5audio17ReleaseMemoryPoolEPNS0_19AudioRendererConfigEPNS0_14MemoryPoolTypeE");
+    pthread_mutex_lock(&g_snd_mu);
+    for (int i = 0; i < g_snd_npool; i++) if (g_snd_pool[i].pool == pool) { snd_span_drop(g_snd_pool[i].lo, g_snd_pool[i].hi); g_snd_pool[i] = g_snd_pool[--g_snd_npool]; break; }
+    pthread_mutex_unlock(&g_snd_mu);
+    orig(cfg, pool);
+}
+// AcquireVoiceSlot(config, voice, sample rate, channels, format, priority, parameter, parameter size, behavior options): format 2 is 16-bit PCM, 6 ADPCM, whose parameter is its 16 coefficients
+HLE_FORCE("_ZN2nn5audio16AcquireVoiceSlotEPNS0_19AudioRendererConfigEPNS0_9VoiceTypeEiiNS0_12SampleFormatEiPKvmPKNS3_15BehaviorOptionsE", "sound categories: a new voice starts at the game's volume 1 in the category its ADPCM coefficients name, then hand over to the SDK",
+          unsigned, h_snd_VoiceAcquire, void *cfg, void *voice, int rate, int ch, int fmt, int prio, const void *param, size_t psize, const void *opt) {
+    static unsigned (*orig)(void *, void *, int, int, int, int, const void *, size_t, const void *);
+    if (!orig) orig = gsym("_ZN2nn5audio16AcquireVoiceSlotEPNS0_19AudioRendererConfigEPNS0_9VoiceTypeEiiNS0_12SampleFormatEiPKvmPKNS3_15BehaviorOptionsE");
+    unsigned r = orig(cfg, voice, rate, ch, fmt, prio, param, psize, opt);
+    if (!(r & 0xff)) return r;
+    pthread_mutex_lock(&g_snd_mu);
+    snd_voice *s = snd_on() ? snd_voice_of(voice, 1) : NULL;
+    if (s) {
+        s->game = 1.0f; s->fmt = (uint8_t)fmt; s->live = 1; s->cat = DM_SND_OTHER; s->how = SND_HOW_NONE;
+        int cat = fmt == 6 && param && psize >= 32 ? snd_lookup(g_snd_tab.coef, g_snd_tab.coef_cat, g_snd_tab.ncoef, snd_crc32(param, 32)) : -1;
+        if (cat >= 0) snd_voice_cat(s, cat, SND_HOW_COEF);
+        else if (dm_snd_gain(DM_SND_OTHER) != 1.0f) snd_set_orig()(voice, dm_snd_gain(DM_SND_OTHER));
+        if (snd_log_on() && g_snd_lines++ < 40000) LOG("audren: sound voice %p: %d Hz, %d ch, format %d, priority %d: %s%s", voice, rate, ch, fmt, prio, g_snd_names[s->cat], cat >= 0 ? " (coefficients)" : "");
+    }
+    pthread_mutex_unlock(&g_snd_mu);
+    return r;
+}
+HLE_FORCE("_ZN2nn5audio16ReleaseVoiceSlotEPNS0_19AudioRendererConfigEPNS0_9VoiceTypeE", "sound categories: the voice is no longer the host's to set, then hand over to the SDK",
+          void, h_snd_VoiceRelease, void *cfg, void *voice) {
+    static void (*orig)(void *, void *); if (!orig) orig = gsym("_ZN2nn5audio16ReleaseVoiceSlotEPNS0_19AudioRendererConfigEPNS0_9VoiceTypeE");
+    pthread_mutex_lock(&g_snd_mu);
+    snd_voice *s = snd_voice_of(voice, 0);
+    if (s) { if (s->live && s->how == SND_HOW_NONE) atomic_fetch_add(&g_snd_count[DM_SND_OTHER], 1); s->live = 0; }   // it played with no category found
+    pthread_mutex_unlock(&g_snd_mu);
+    orig(cfg, voice);
+}
+HLE_FORCE("_ZN2nn5audio14SetVoiceVolumeEPNS0_9VoiceTypeEf", "sound categories: keep the game's voice volume, hand the SDK that volume times the gain of the voice's category",
+          void, h_snd_VoiceVolume, void *voice, float v) {
+    pthread_mutex_lock(&g_snd_mu);
+    snd_voice *s = snd_voice_of(voice, 0); float g = 1.0f;
+    if (s && s->live) { s->game = v; g = dm_snd_gain(s->cat); }
+    if (snd_log_on() > 1 && g_snd_lines++ < 40000) LOG("audren: sound voice %p: game volume %g x %g (%s%s)", voice, v, g, s ? g_snd_names[s->cat] : "untracked", s && !s->live ? ", released" : "");
+    snd_set_orig()(voice, v * g);
+    pthread_mutex_unlock(&g_snd_mu);
+}
+// AppendWaveBuffer(voice, wave buffer): the buffer's address at +0, its size at +8
+HLE_FORCE("_ZN2nn5audio16AppendWaveBufferEPNS0_9VoiceTypeEPKNS0_10WaveBufferE", "sound categories: the buffer's BWAV names the voice's category (its volume follows), then hand over to the SDK",
+          unsigned, h_snd_Append, void *voice, const void *wb) {
+    static unsigned (*orig)(void *, const void *); if (!orig) orig = gsym("_ZN2nn5audio16AppendWaveBufferEPNS0_9VoiceTypeEPKNS0_10WaveBufferE");
+    pthread_mutex_lock(&g_snd_mu);
+    snd_voice *s = g_snd_tab.state == 1 && wb ? snd_voice_of(voice, 0) : NULL;
+    if (s && s->live) {
+        uint8_t *p; size_t n; memcpy(&p, wb, 8); memcpy(&n, (const uint8_t *)wb + 8, 8);
+        uint32_t crc = 0; int cat = snd_find(p, &crc), was = s->cat, how = s->how;
+        g_snd_appends++;
+        if (cat >= 0) snd_voice_cat(s, cat, SND_HOW_BWAV);
+        else if (s->how == SND_HOW_NONE && s->fmt == 2) snd_voice_cat(s, DM_SND_MUSIC, SND_HOW_PCM);
+        if (snd_log_on() && (s->cat != was || s->how != how || s->how == SND_HOW_NONE) && g_snd_lines++ < 40000)
+            LOG("audren: sound voice %p: buffer %p + %#zx: %s (%s%s%08x)", voice, (void *)p, n, g_snd_names[s->cat],
+                s->how == SND_HOW_BWAV ? "BWAV " : s->how == SND_HOW_COEF ? "coefficients, no BWAV " : s->how == SND_HOW_PCM ? "PCM stream " : "unknown ", cat >= 0 ? "crc " : "", crc);
+    }
+    pthread_mutex_unlock(&g_snd_mu);
+    return orig(voice, wb);
+}
+#else
+static void snd_apply(void) {}
+static void snd_reset(void) {}
+#endif
+// A line every minute while DM_SOUND_LOG is on: how the voices were told apart so far, and the output's level since the last line (RMS of the 16-bit samples, in dB below
+// full scale). DM_SOUND_SOLO_CYCLE=<seconds> (a check of the categories, with DM_SOUND_LOG): every that many seconds the line comes, and the next category plays alone
+// (all others at 0; after the last, a round with every category at 0, then all at their start volume)
+// DM_SOUND_AT=<seconds>:<category>=<percent>,... (a check of changes while sounds play): each gain is set that many seconds after the first renderer update.
+// DM_SOUND_LEVEL_SECS=<n> gives the level line every n seconds instead of every minute
+static void snd_timed(uint64_t t) {
+    static const char *at; static uint64_t t0; static int init;
+    if (!init) { init = 1; at = getenv("DM_SOUND_AT"); t0 = t; }
+    while (at && *at) {
+        char *e; double sec = strtod(at, &e); if (e == at || *e != ':') { at = NULL; break; }
+        if ((double)(t - t0) < sec * 1e9) break;
+        const char *n = e + 1, *eq = strchr(n, '='); if (!eq) { at = NULL; break; }
+        int v = atoi(eq + 1);
+        for (int c = 0; c < DM_SND_CATS; c++) if (strlen(g_snd_names[c]) == (size_t)(eq - n) && !strncmp(g_snd_names[c], n, (size_t)(eq - n))) { dm_snd_gain_set(c, (float)v / 100.0f); LOG("audren: sound %s set to %d%% at %.0f s (DM_SOUND_AT)", g_snd_names[c], v, sec); }
+        at = strchr(eq, ','); if (at) at++;
+    }
+}
+static void snd_stats(void) {
+    if (g_snd_tab.state != 1) return;
+    snd_timed(now_ns());
+    if (!snd_log_on()) return;
+    static int cyc = -1, lvl; if (cyc < 0) { cyc = getenv("DM_SOUND_SOLO_CYCLE") ? atoi(getenv("DM_SOUND_SOLO_CYCLE")) : 0; lvl = getenv("DM_SOUND_LEVEL_SECS") ? atoi(getenv("DM_SOUND_LEVEL_SECS")) : 60; if (lvl < 1) lvl = 60; }
+    static uint64_t next; uint64_t t = now_ns(); if (t < next) return; next = t + (uint64_t)(cyc > 0 ? cyc : lvl) * 1000000000ull;
+    uint64_t sq = atomic_exchange(&g_snd_sq, 0), sn = atomic_exchange(&g_snd_sn, 0);
+    double rms = sn ? sqrt((double)sq / (double)sn) : 0;
+    static int solo = -2; static float start[DM_SND_CATS];   // -2 not started, -1 all at start volume, 0..CATS-1 that one alone, CATS all at 0
+    if (cyc > 0) {
+        if (solo == -2) { for (int c = 0; c < DM_SND_CATS; c++) start[c] = dm_snd_gain(c); solo = -1; }
+        LOG("audren: sound level %.1f dB (rms %.1f) with %s", rms > 0 ? 20 * log10(rms / 32768.0) : -999.0, rms, solo == -1 ? "every category at its start volume" : solo == DM_SND_CATS ? "every category at 0" : g_snd_names[solo]);
+        solo = solo == DM_SND_CATS ? -1 : solo + 1;
+        for (int c = 0; c < DM_SND_CATS; c++) dm_snd_gain_set(c, solo == -1 ? start[c] : c == solo ? (start[c] > 0 ? start[c] : 1.0f) : 0.0f);
+    } else {
+        uint64_t q2 = atomic_exchange(&g_snd_sq2, 0), n2 = atomic_exchange(&g_snd_sn2, 0); double r2 = n2 ? sqrt((double)q2 / (double)n2) : 0;
+        LOG("audren: sound level %.1f dB (rms %.1f), after the master volume %.1f dB", rms > 0 ? 20 * log10(rms / 32768.0) : -999.0, rms, r2 > 0 ? 20 * log10(r2 / 32768.0) : -999.0);
+    }
+    pthread_mutex_lock(&g_snd_mu);
+    LOG("audren: sound categories so far: music %lu, engine %lu, kart %lu, item %lu, voice %lu, world %lu, ui %lu, other %lu; by BWAV %lu, by coefficients %lu, PCM streams %lu; %lu buffers, %d spans, %d pools",
+        dm_snd_voices(DM_SND_MUSIC), dm_snd_voices(DM_SND_ENGINE), dm_snd_voices(DM_SND_KART), dm_snd_voices(DM_SND_ITEM), dm_snd_voices(DM_SND_VOICE), dm_snd_voices(DM_SND_WORLD), dm_snd_voices(DM_SND_UI), dm_snd_voices(DM_SND_OTHER),
+        g_snd_how[SND_HOW_BWAV], g_snd_how[SND_HOW_COEF], g_snd_how[SND_HOW_PCM], g_snd_appends, g_snd_nspan, g_snd_npool);
+    pthread_mutex_unlock(&g_snd_mu);
+}
 // Horizon's renderer service budget, through renderer revision 15. Its command/state representation is independent of the application's SDK: an older client still uses the
 // service's compact commands. The SDK's local server instead sizes its own CPU command structures, so forwarding its size inflates the guest's service requirement.
 // Derived from the service's sizing and revision gates; checked against its isolated machine-code execution. No firmware code is needed at runtime. Unknown revisions retain
@@ -253,6 +556,7 @@ HLE_FORCE("_ZN2nn5audio18CloseAudioRendererENS0_19AudioRendererHandleE", "close 
     ar_t *a = NULL;
     for (int i = 0; i < AR_MAX && !a; i++) if (g_ar[i].handle[0] == obj) a = &g_ar[i];
     if (a && a->render_tt) { atomic_store(&a->open, 0); dm_guest_thread_join(a->render_tt); a->render_tt = NULL; }
+    snd_reset();
     void *owned = objmap_del(obj), *sev = rev_find(obj);
     orig(obj, state);
     free(owned);
@@ -406,11 +710,12 @@ static int capture(ar_t *a, const uint8_t *cl, size_t len, int16_t *dst) {
                 st[2 * s] = l; st[2 * s + 1] = r;
             }
             uint32_t nout = rate == 48000 ? samples : up_3_2(a, st, samples, st);
-            uint64_t loud = 0;
+            uint64_t loud = 0, sq = 0;
             for (uint32_t s = 0; s < 2 * nout; s++) {
                 int32_t v = st[s]; v = v > 32767 ? 32767 : v < -32768 ? -32768 : v;
-                dst[s] = (int16_t)v; loud |= (uint64_t)v;
+                dst[s] = (int16_t)v; loud |= (uint64_t)v; sq += (uint64_t)((int64_t)v * v);
             }
+            atomic_fetch_add(&g_snd_sq, sq); atomic_fetch_add(&g_snd_sn, 2 * nout);   // DM_SOUND_LOG's level
             atomic_fetch_add(&a->frames, 1); if (loud) atomic_fetch_add(&a->nonsilent, 1);
             uint64_t f = atomic_load(&a->frames); if (f == 200 || f % 12000 == 0) LOG("audren: renderer %d rendered %llu frames, %llu of them not silent", ar_index(a), (unsigned long long)f, (unsigned long long)atomic_load(&a->nonsilent));
             return (int)nout;
@@ -571,6 +876,7 @@ HLE_FORCE("_ZN2nn5audio6server17AudioRenderSystem6UpdateEPvmS3_mPKvm", "renderer
     }
     static int tr = -1; if (tr < 0) tr = getenv("DM_AUDREN_TRACE") != NULL;
     if (tr && u < 200) LOG("audren update #%llu t=%.3f ms, %llu frames rendered since the last update", (unsigned long long)u, now_ns() / 1e6, (unsigned long long)(atomic_load(&a->renders) - (a->updated ? a->last_r : 0)));
+    snd_apply(); snd_stats();   // sound categories: a changed gain reaches the playing voices with this update
     Result res = orig(sys, o, on, p, pn, in, inn);
     a->last_r = atomic_load(&a->renders); a->updated = 1;
     return res;

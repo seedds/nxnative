@@ -35,6 +35,7 @@ run: $(B)/t_mii $(B)/t_net_eventfd $(B)/t_language $(B)/t_motion $(B)/t_heap_siz
 	$(B)/t_ue_heap_span
 	$(B)/t_audren_work
 	$(B)/t_audren_layout
+	$(B)/t_audren_snd
 	$(B)/t_swkbd
 	$(B)/t_altstack
 	$(B)/t_bigstack
@@ -100,6 +101,12 @@ $(B)/t_audren_work: t_audren_work.c ../hle_audren.c ../hle.h ../dm.h $(GAME_H) |
 .PHONY: audren-work
 audren-work: $(B)/t_audren_work
 	$(B)/t_audren_work
+run: $(B)/t_audren_snd
+$(B)/t_audren_snd: t_audren_snd.c ../hle_audren.c ../hle.h ../dm.h $(GAME_H) | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -I.. $(GINC) -o $@ t_audren_snd.c
+.PHONY: audren-snd
+audren-snd: $(B)/t_audren_snd
+	$(B)/t_audren_snd
 run: $(B)/t_audren_layout
 $(B)/t_audren_layout: t_audren_layout.c ../hle_audren.c ../hle.h ../dm.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -I.. $(GINC) -o $@ t_audren_layout.c

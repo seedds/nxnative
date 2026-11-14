@@ -5,6 +5,8 @@
 // Cheats (hle_cheats.c): the Cheats menu's rows toggle, reload (⌘R) and open the cheats folder; its first item "Show Cheats
 // Window" (⌘⇧C, or DM_CHEATS_WINDOW=1 at launch) opens a Cheats panel beside the game: sections, search, the master switch,
 // safe mode, values, details and the import of cheat files (see the code below).
+// Controller (sw2_panel_mac.h): Show Controller Window (⌘⇧P, or DM_CONTROLLER_WINDOW=1 at launch) opens the Switch 2 stick tester beside the game, and the menu lists the
+// connected Switch 2 controllers. While it is open the game gets no input from them; a quit waits for a calibration save it started (DmAppDelegate).
 // Key map (Nintendo layout): WASD left stick, arrow keys D-pad (with Shift held: the right stick, for the camera), J=A K=B U=X I=Y, Q=L E=R, Z=ZL C=ZR, F=press left stick G=press right stick, Return=+ Tab=−, Space=shake the controller.
 // Controllers: face buttons as on the iPhone, by position (right A, bottom B, top X, left Y) or on a Nintendo pad by its labels (pad_apple.h), shoulders L R, triggers ZL ZR, Menu + Options −, both sticks and their presses.
 // Each controller is a player of its own (local co-op): the first one connected is player 1, together with the keyboard, the next player 2, and so on up to 8 (pad_slots.h);
@@ -24,6 +26,7 @@
 #include "pad_apple.h"
 #include "pad_hid_mac.h"
 #include "pad_switch2_apple.h"
+#include "sw2_panel_mac.h"
 static int s2pad_player(s2_pad *d);   // the Switch 2 pads' player slots (below, beside the raw HID pads')
 static void s2pad_read(s2_pad *d);
 static int g_merge_s2_rumble;   // DM_PAD_MERGE: player 1's rumble goes to the Switch 2 pads (merge_rumble_to_s2)
@@ -399,12 +402,14 @@ static void merge_rumble_to_s2(int on) {
     if (!g_merge || g_merge_s2_rumble == on) return;
     g_merge_s2_rumble = on; dm_haptics_apple_set_sink(0, on ? dm_switch2_rumble : NULL);
 }
-static int s2pad_blocked(void) { return !g_input_on || hq_blocks_input(g_hq.phase) || cp_blocks_input(g_cp.phase); }   // no input to the game (focus lost, the Home or controller prompt up): its Joy-Con states are not sent (pad_switch2_apple.m)
+// No input to the game (focus lost, the Home or controller prompt up, the Controller panel open): its Joy-Con states and sensors are not sent (pad_switch2_apple.m)
+static int s2pad_blocked(void) { return !g_input_on || hq_blocks_input(g_hq.phase) || cp_blocks_input(g_cp.phase) || sw2_panel_open(); }
 static void s2pad_read(s2_pad *d) {
     hq_poll();   // Home and the prompt's A and B come from these pads too
-    if (!g_input_on || hq_blocks_input(g_hq.phase)) return;
+    // The Controller panel has the sticks: circles drawn there never move a character. The Joy-Con gestures (split a pair, join two) still act (pad_switch2_apple.m gesture:)
+    if (!g_input_on || hq_blocks_input(g_hq.phase) || sw2_panel_open()) return;
     int p = s2pad_player(d);
-    uint64_t m; int32_t s[4]; if (!s2_pad_input(&d->st, &m, s)) return;
+    uint64_t m; int32_t s[4]; if (!s2_pad_input(&d->st, dm_switch2_dead_zone(), &m, s)) return;
     if (p < 0) {   // DM_PAD_PRESS_TO_JOIN=1: joins at its first button
         if (!g_press_to_join || !m || (p = pad_join(d, d->name)) < 0) return;
         dm_haptics_apple_set_sink(p, dm_switch2_rumble);   // its rumble goes over Bluetooth, not to a Core Haptics engine
@@ -412,6 +417,16 @@ static void s2pad_read(s2_pad *d) {
     if (cp_poll()) return;   // the controller applet's prompt has the controllers
     if (m) merge_rumble_to_s2(1);
     pad_set(p, m, s[0], s[1], s[2], s[3]);
+}
+// The Controller panel opened: what the Switch 2 pads hold goes neutral once (buttons, sticks, each Joy-Con's own state and both sensors), as focus loss releases it; while the
+// panel is open nothing more is sent, and once it closes the next report sends the pad as it is. With DM_PAD_MERGE player 1 is shared, so a GameController or HID pad on it
+// reads neutral too until its next change, as after focus loss
+static void s2pads_release(void) {
+    for (s2_pad *d = dm_switch2_pads(); d; d = d->next) {
+        int p = s2pad_player(d); if (p < 0) continue;
+        dm_pad_set_player(p, 0, 0, 0, 0, 0); dm_joy_set(p, 0, 0, 0, 0); dm_joy_set(p, 1, 0, 0, 0);
+        dm_motion_clear_hid(p); dm_motion_clear_joy(p, 0); dm_motion_clear_joy(p, 1);
+    }
 }
 static int s2pad_attach(s2_pad *d) {   // 1: kept (a player, or waiting for its first button press); 0: no free player (pad_switch2_apple.h)
     if (g_press_to_join && !g_merge) { LOG("controller '%s' (Bluetooth) connected: press a button to play (DM_PAD_PRESS_TO_JOIN)", d->name); cp_poll(); return 1; }
@@ -646,11 +661,47 @@ void front_picture_shape(int w, int h) { if (w > 0 && h > 0) g_picture_aspect = 
 - (void)viewDidChangeBackingProperties { [super viewDidChangeBackingProperties]; [self fitDrawable]; }
 @end
 
+// A quit while a Switch 2 controller's calibration save runs waits for it to end, at most 30 s, since stopping between the erase and the write-back would leave the
+// controller's calibration sector blank or half written (pad_switch2_apple.h, dm_switch2_saving): ⌘Q, the Home button's quit prompt and a logout (DmAppDelegate, through
+// terminate:) and the game window's close button (DmWinDelegate). One wait serves them all and ends once: AppKit's pending reply when a terminate: is among them, else exit(0)
+// as the close button does. It polls every 0.1 s on the main queue (served while AppKit waits for the reply) rather than through the session's hook, which has one observer,
+// the Controller panel. The guest thread's own end, a lost GPU, the game's exit and SIGTERM, SIGINT and SIGHUP (a kill, a Ctrl-C in the terminal that started the app, a session end:
+// the launcher forwards them and dm_host_shutdown ends the host within 1.5 s) still end the process at once, and a save then cut off leaves the sector blank or partly written, each block
+// whole or blank, with the backup file on disk (the log names it)
+enum { QUIT_REPLY = 1, QUIT_EXIT = 2 };
+static int g_quit_wait;   // the QUIT_ bits of what waits for the save
+static void quit_wait(double until) {
+    if (dm_switch2_saving() && CACurrentMediaTime() < until) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC / 10), dispatch_get_main_queue(), ^{ quit_wait(until); });
+        return;
+    }
+    LOG("front end: %s", dm_switch2_saving() ? "the Switch 2 calibration save still runs after 30 s: quitting anyway" : "the Switch 2 calibration save ended: quitting");
+    if (g_quit_wait & QUIT_REPLY) [NSApp replyToApplicationShouldTerminate:YES]; else exit(0);
+}
+static void quit_after_save(int how) {
+    int first = !g_quit_wait; g_quit_wait |= how;
+    if (!first) return;   // a second quit while waiting: the first wait answers for both
+    LOG("front end: quitting waits for a Switch 2 controller's calibration save to end (at most 30 s)");
+    quit_wait(CACurrentMediaTime() + 30);
+}
+@interface DmAppDelegate : NSObject <NSApplicationDelegate> @end
+@implementation DmAppDelegate
+- (NSApplicationTerminateReply)applicationShouldTerminate:(NSApplication *)app {
+    (void)app;
+    if (!g_quit_wait && !dm_switch2_saving()) return NSTerminateNow;
+    quit_after_save(QUIT_REPLY);
+    return NSTerminateLater;
+}
+- (BOOL)applicationSupportsSecureRestorableState:(NSApplication *)app { (void)app; return YES; }   // AppKit asks a delegate this and logs a warning without it; no window is restored
+@end
+
 // AppKit reports a refused fullscreen request only to the window delegate (there is no notification for it)
 static void (^g_fs_failed)(void);
 @interface DmWinDelegate : NSObject <NSWindowDelegate> @end
 @implementation DmWinDelegate
 - (void)windowDidFailToEnterFullScreen:(NSWindow *)w { (void)w; if (g_fs_failed) g_fs_failed(); }
+// The close button ends the process (NSWindowWillCloseNotification → exit(0)); during a Switch 2 calibration save the window stays and the process ends once the save has
+- (BOOL)windowShouldClose:(NSWindow *)w { (void)w; if (!g_quit_wait && !dm_switch2_saving()) return YES; quit_after_save(QUIT_EXIT); return NO; }
 @end
 
 typedef struct { void (*fn)(void); } guest_arg;
@@ -1561,14 +1612,20 @@ void front_run(void (*guest)(void)) {
         [[bar addItemWithTitle:@"Cheats" action:nil keyEquivalent:@""] setSubmenu:cm];
         if (getenv("DM_CHEATS_WINDOW") && atoi(getenv("DM_CHEATS_WINDOW")))   // the Cheats panel open from the start (beside the game, not key)
             dispatch_async(dispatch_get_main_queue(), ^{ [g_cheats_menu showPanel:nil]; });
+        // Controller (sw2_panel_mac.h): the Switch 2 stick tester and the controllers connected, between Cheats and Window
+        sw2_panel_setup(win, s2pads_release);
+        [[bar addItemWithTitle:@"Controller" action:nil keyEquivalent:@""] setSubmenu:sw2_panel_menu()];
+        if (getenv("DM_CONTROLLER_WINDOW") && atoi(getenv("DM_CONTROLLER_WINDOW")))   // the Controller panel open from the start (beside the game, not key)
+            dispatch_async(dispatch_get_main_queue(), ^{ sw2_panel_show(); });
         [[bar addItemWithTitle:@"Window" action:nil keyEquivalent:@""] setSubmenu:wm];
         [wm addItemWithTitle:@"Enter Full Screen" action:@selector(toggleFullScreen:) keyEquivalent:@"f"].keyEquivalentModifierMask = NSEventModifierFlagControl | NSEventModifierFlagCommand;
         NSApp.mainMenu = bar;
+        static DmAppDelegate *ad; ad = [DmAppDelegate new]; NSApp.delegate = ad;   // NSApp and the window keep their delegates weakly
+        static DmWinDelegate *wd; wd = [DmWinDelegate new]; win.delegate = wd;     // the close button's wait for a save, and fullscreen's refusals below
         const char *fs = getenv("DM_FULLSCREEN");   // 1 (or any value but 0): start in fullscreen; 0, the settings window's Window, or unset: a window
         if (fs && strcmp(fs, "0")) {
             // A game opened from a fullscreen app starts while macOS leaves that Space. Wait for activation and for the window to reach the active Space before asking for fullscreen
             // (whichever happens last), and repeat a refused startup request once. Only a request made here owns a retry; a later player request must never restart startup handling
-            static DmWinDelegate *wd; wd = [DmWinDelegate new]; win.delegate = wd;
             __block int want = 1, retried = 0, entering = 0;
             void (^enter)(void) = ^{
                 if (!want || (win.styleMask & NSWindowStyleMaskFullScreen) || !NSApp.isActive || !win.isOnActiveSpace) return;

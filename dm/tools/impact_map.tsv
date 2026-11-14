@@ -149,6 +149,10 @@ dm/host/motion_pro_mac.h	hle:*SixAxisSensor*	Mac Pro Controller raw motion trans
 dm/host/switch2_proto.h	hle:*hid*	Switch 2 controller protocol: reports, sticks, buttons, motion maps
 dm/host/pad_switch2_apple.h	hle:*hid*	Switch 2 controllers over Bluetooth LE (off unless DM_SW2=1)
 dm/host/pad_switch2_apple.m	hle:*hid*	Switch 2 controllers over Bluetooth LE (off unless DM_SW2=1)
+dm/host/sw2_panel_mac.h	hle:*hid*	the Mac Controller menu and panel (the Switch 2 stick tester)
+dm/host/sw2_panel_mac.m	hle:*hid*	the Mac Controller menu and panel (the Switch 2 stick tester)
+dm/host/switch2_ops_apple.h	hle:*hid*	Switch 2 controller memory writes and bonding (off unless DM_SW2=1)
+dm/host/switch2_ops_apple.m	hle:*hid*	Switch 2 controller memory writes and bonding (off unless DM_SW2=1)
 dm/host/front.h	present:*	the front end
 dm/ios/*	*:*	the iOS app
 dm/third_party/ryujinx/src/Ryujinx.Graphics.Shader/Translation/ResourceReservations.cs	shader:stage:gs	geometry compute varying slots

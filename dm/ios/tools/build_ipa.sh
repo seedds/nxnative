@@ -147,7 +147,7 @@ if [ "$P4" = on ] && [ "$PG" ]; then case $N in 1 | 2 | 3 | 4) PGK=$(echo "$PG" 
 if [ -n "${DM_PSO_GPUS+set}" ]; then GPUS=$DM_PSO_GPUS; elif [ "$P4" = on ]; then GPUS=$PGK; else GPUS=none; fi
 if [ "$GFXAPI" = nvn ] && [ -n "$GPUS" ] && [ "$GPUS" != none ] && [ -f "$GD/shader_pairs.tsv" ]; then
   PSO=$W/build/ios/pso/bundle
-  # The prewarm lists' pipelines (the R rows' bases, which have a vertex layout, so the archive above does not hold them) go in beside it when there is a Mac
+  # The prewarm lists' pipelines (the R rows' bases with a vertex layout and the M rows' task / mesh pipelines, which the archive above does not hold) go in beside it when there is a Mac
   # host of this checkout and game to make them (pso_offline.py --prewarm-host: its prebuild tool, then metal-tt): DM_PSO_HOST=<the Mac dmhost>, else dm/host/dmhost when its last build was
   # for this game (made current here first), none: not made. Without them the device builds every listed one at its first start, and again after an OS update refuses its own archive
   PH=${DM_PSO_HOST:-}

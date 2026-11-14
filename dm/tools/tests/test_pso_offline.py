@@ -699,7 +699,7 @@ class Build(BuildCase):
 
 
 class Prewarm(BuildCase):
-    """--prewarm-host: the host's prebuild tool makes the prewarm lists' R rows here (a fake host below, writing what the bundle form writes), from the profile's tables without the
+    """--prewarm-host: the host's prebuild tool makes the prewarm lists' R and M rows here (a fake host below, writing what the bundle form writes), from the profile's tables without the
     pair lists; metal-tt compiles each period's script for each --gpu as <arch>-prewarm-<NN>.mtl4a beside the period's index; both cached; a failure leaves the archive as it is"""
     MAC = 'applegpu_g16g'
 
@@ -737,14 +737,14 @@ class Prewarm(BuildCase):
         return super().main('--os-min', '27.0', *extra)
 
     def test_rows(self):
-        self.assertEqual(po.prewarm_rows([self.prof / 'pso_manifest.tsv', self.t / 'none.tsv']), 'R\tr1\nR\tr2\n')
+        self.assertEqual(po.prewarm_rows([self.prof / 'pso_manifest.tsv', self.t / 'none.tsv']), 'R\tr1\nM\t-\tm1\nR\tr2\n')
 
     def test_files_beside_the_archive_and_reuse(self):
         with mock.patch.dict(os.environ, DM_SAVE='/x/save', DM_PSO_PREBUILD_THREADS='3'):
             self.assertEqual(self.main('--gpu', 'g18p,g17p', '--prewarm-host', str(self.host)), 0)
         env = self.host_runs[0]
         self.assertEqual((env['DM_PSO_PREBUILD'], env['DM_PSO_BUNDLE'], env['DM_PSO_PREBUILD_DEPTH'], env['DM_MSL_DIR']), ('tool', 'off', 'zero', str(self.t)))
-        self.assertEqual(Path(env['DM_PSO_MANIFEST']).read_text(), 'R\tr1\nR\tr2\n')
+        self.assertEqual(Path(env['DM_PSO_MANIFEST']).read_text(), 'R\tr1\nM\t-\tm1\nR\tr2\n')   # the M rows' mesh pipelines too
         self.assertEqual(sorted(p.name for p in Path(env['DM_NVN_SHMAP']).parent.iterdir()), ['c1_full.tsv', 'shader_map.tsv'])   # no pair list: those are the archive's
         self.assertFalse(any(k in env for k in ('DM_SAVE', 'DM_PSO_USER')))
         self.assertEqual(env.get('DM_PSO_PREBUILD_THREADS'), '3')   # passed on: fewer workers on a small Mac
@@ -795,6 +795,25 @@ class Prewarm(BuildCase):
         self.main('--prewarm-host', str(self.host))
         self.assertEqual(len(self.host_runs), 1)   # nothing kept from the failed run
         self.assertTrue((self.out / 'applegpu_g18p-prewarm-01.mtl4a').is_file())
+
+    @unittest.skipUnless(shutil.which('xcrun'), 'needs Xcode and Metal')
+    def test_metal_tt_takes_a_mesh_pipeline(self):   # the M rows: a native mesh pipeline descriptor, as the host's script writes it, compiles for an iPhone's GPU
+        src = ('#include <metal_stdlib>\nusing namespace metal;\nstruct V { float4 p [[position]]; };\nusing M = metal::mesh<V, void, 3, 1, topology::triangle>;\n'
+               '[[mesh]] void m0(M out, uint t [[thread_index_in_threadgroup]]) { if (t == 0) { out.set_primitive_count(1); for (uint i = 0; i < 3; i++) { V v; '
+               'v.p = float4(float(i), 0, 0, 1); out.set_vertex(i, v); out.set_index(i, i); } } }\nfragment float4 f0() { return float4(1); }\n')
+        (self.t / 'm.metal').write_text(src)
+        r = subprocess.run(['xcrun', '-sdk', 'iphoneos', 'metal', '-c', str(self.t / 'm.metal'), '-o', str(self.t / 'm.air')], capture_output=True, text=True)
+        if r.returncode: self.skipTest('no Metal compiler: ' + r.stderr[-200:])
+        subprocess.run(['xcrun', '-sdk', 'iphoneos', 'metallib', str(self.t / 'm.air'), '-o', str(self.t / 'm.metallib')], check=True, capture_output=True)
+        if subprocess.run(['xcrun', '-sdk', 'iphoneos', 'metal-tt', '-version'], capture_output=True).returncode: self.skipTest('no metal-tt')
+        h = hashlib.sha256((self.t / 'm.metallib').read_bytes()).hexdigest().upper()
+        cfg = {'libraries': [{'label': h, 'path': str(self.t / 'm.metallib')}],
+               'function_descriptors': {'library_function_descriptors': [{'label': 'M', 'name': 'm0', 'library': h}, {'label': 'F', 'name': 'f0', 'library': h}]},
+               'pipeline_descriptors': {'mesh_render_pipeline_descriptors': [{'mesh_function_descriptor': 'fnd:M', 'fragment_function_descriptor': 'fnd:F',
+                                                                              'max_total_threads_per_mesh_threadgroup': 32, 'color_attachments': [{'pixel_format': 'RGBA8Unorm'}]}]}}
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(po.compile_script(cfg, self.t / 'm.mtl4a', self.t / 'mw', 'applegpu_g18p', 'ios', '27.0', 1000), [])
+        self.assertGreater((self.t / 'm.mtl4a').stat().st_size, 0)
 
     def test_a_missing_host_is_a_warning(self):
         out = io.StringIO()

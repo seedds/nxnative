@@ -1,0 +1,38 @@
+# Divinity: Original Sin 2 - Definitive Edition, update 1.0.12 (v786432).
+# Larian's engine, Wwise, SDK 9.3.0, NVN. See README.md for bring-up and validation.
+
+# ---- Identity ----
+title_id	010027400CDC6000
+program_id	010027400CDC6000
+
+# ---- App ----
+name	Divinity: Original Sin 2 - Definitive Edition
+ipa	DivinityOriginalSin2.ipa
+app_category	public.app-category.role-playing-games
+
+# ---- Versions ----
+build	v786432	1.0.12	main=4979b200d53bb282e0d11871613286da	subsdk0=230994acc1eb0f13878dd155361beff3	sdk=230994acc1eb0f13878dd155361beff3
+package	v786432
+shader_versions	v786432
+
+# ---- Files ----
+# main imports both SDK modules, which carry the same build ID.
+modules	main subsdk0 sdk
+romfs_marker	Data/SharedSounds.pak
+zip_store	.pak:.metallib
+
+# ---- Memory ----
+# The NPDM declares 2 MB of system resource. The Mac heap check measured a
+# 0xbd400000-byte heap request; 1.5 GB of alias space leaves a 3 GB heap region.
+# The address-region check reached alias +1.25 GB at boot.
+mem_reserve	0x140000000
+mem_alias	0x60000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+sys_resource	0x200000
+
+# ---- Shaders ----
+shader_groups	/Data/=data
+shader_note	Divinity Original Sin 2 shaders
+# The game sets near = 0 before creating its programs; use it for prebuilt bases.
+depth_mode	zero

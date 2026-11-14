@@ -9116,9 +9116,12 @@ static id<MTL4Archive> g_arch_bundle; static NSString *g_bundle_dir;
 // output folder (each flush period is also written as a pipelines script); g_prewarm_files: the prewarm files opened
 static int g_pre_tool; static NSString *g_pre_out; static _Atomic int g_pre_warm_failed;
 static NSUInteger g_prewarm_files; static NSMutableArray<id<MTL4Archive>> *g_prewarm_open;   // g_prewarm_open: the prewarm files, which g_arch_ix names without owning them
+// The ranges of an archive file that Metal reads when it opens it (arch_open): rd collects them while the container is checked, rd == NULL only checks
+typedef struct { uint64_t off[64], len[64]; int n; } arch_reads;
+static void arch_reads_add(arch_reads *rd, uint64_t off, uint64_t len) { if (rd && len && rd->n < 64) { rd->off[rd->n] = off; rd->len[rd->n++] = len; } }
 // Metal's loader crashes on malformed containers rather than returning an error. Check the GPU image's load commands and referenced file ranges, including every slice of a
 // universal archive, before giving it to Metal. This checks the container, not the compiler's private payload: Metal still decides whether this system can use its binaries.
-static int arch_macho_ok(int fd, uint64_t off, uint64_t size) {
+static int arch_macho_ok(int fd, uint64_t off, uint64_t size, arch_reads *rd) {
     struct mach_header_64 h;
     if (size < sizeof h || pread(fd, &h, sizeof h, (off_t)off) != sizeof h || h.magic != MH_MAGIC_64 || h.filetype != MH_GPU_EXECUTE ||
         !h.ncmds || h.sizeofcmds > size - sizeof h || h.ncmds > h.sizeofcmds / sizeof(struct load_command)) return 0;
@@ -9130,6 +9133,13 @@ static int arch_macho_ok(int fd, uint64_t off, uint64_t size) {
             struct segment_command_64 s;
             if (lc.cmdsize < sizeof s || pread(fd, &s, sizeof s, (off_t)(off + pos)) != sizeof s || s.fileoff > size || s.filesize > size - s.fileoff ||
                 s.nsects > (lc.cmdsize - sizeof s) / sizeof(struct section_64)) return 0;
+            // what the open reads: every segment but __TEXT (the pipelines' records, __AIR_DATA), and in __TEXT the libraries (__metallib); the GPU code is read when a pipeline is taken
+            if (strncmp(s.segname, "__TEXT", sizeof s.segname)) arch_reads_add(rd, off + s.fileoff, s.filesize);
+            else for (uint32_t j = 0; rd && j < s.nsects; j++) {
+                struct section_64 sc;
+                if (pread(fd, &sc, sizeof sc, (off_t)(off + pos + sizeof s + j * sizeof sc)) != sizeof sc) return 0;
+                if (!strncmp(sc.sectname, "__metallib", sizeof sc.sectname) && sc.offset <= size && sc.size <= size - sc.offset) arch_reads_add(rd, off + sc.offset, sc.size);
+            }
         } else if (lc.cmd == LC_NOTE) {
             struct note_command n;
             if (lc.cmdsize < sizeof n || pread(fd, &n, sizeof n, (off_t)(off + pos)) != sizeof n || n.offset > size || n.size > size - n.offset) return 0;
@@ -9139,10 +9149,10 @@ static int arch_macho_ok(int fd, uint64_t off, uint64_t size) {
     }
     return pos == end && pipeline;
 }
-static int arch_container_ok(int fd, uint64_t size) {
+static int arch_container_ok(int fd, uint64_t size, arch_reads *rd) {
     struct fat_header h;
     if (size < sizeof h || pread(fd, &h, sizeof h, 0) != sizeof h) return 0;
-    if (h.magic == MH_MAGIC_64) return arch_macho_ok(fd, 0, size);
+    if (h.magic == MH_MAGIC_64) return arch_macho_ok(fd, 0, size, rd);
     // The serializer's 0xcbfebabe wrapper uses fat_arch entries and includes a Metal library slice beside the GPU images.
     int metal = h.magic == OSSwapBigToHostInt32(0xcbfebabe), wide = h.magic == OSSwapBigToHostInt32(FAT_MAGIC_64);
     if (!metal && !wide && h.magic != OSSwapBigToHostInt32(FAT_MAGIC)) return 0;
@@ -9166,16 +9176,44 @@ static int arch_container_ok(int fd, uint64_t size) {
             if (len < sizeof lib || pread(fd, lib, sizeof lib, (off_t)off) != sizeof lib || lib[2] != len) return 0;
             for (int j = 3; j < 11; j += 2) if (lib[j] > len || lib[j + 1] > len - lib[j]) return 0;
         } else {
-            if (!arch_macho_ok(fd, off, len)) return 0;
+            if (!arch_macho_ok(fd, off, len, rd)) return 0;
             gpu = 1;
         }
     }
     return gpu;
 }
-static int arch_file_ok(NSString *path) {
+static int arch_file_check(NSString *path, arch_reads *rd) {   // rd: what the open reads, or NULL
     int fd = open(path.fileSystemRepresentation, O_RDONLY); if (fd < 0) return 0;
-    struct stat st; int ok = !fstat(fd, &st) && S_ISREG(st.st_mode) && st.st_size > 0 && arch_container_ok(fd, (uint64_t)st.st_size);
+    struct stat st; int ok = !fstat(fd, &st) && S_ISREG(st.st_mode) && st.st_size > 0 && arch_container_ok(fd, (uint64_t)st.st_size, rd);
     close(fd); return ok;
+}
+static int arch_file_ok(NSString *path) { return arch_file_check(path, NULL); }
+// Opens an archive file once arch_file_ok has passed it; nil with *err (or nil when the file is no archive). Metal's open (MTL4ArchiveImpl::loadFromURL, macOS 27) makes a library of
+// every Metal library in the file and hashes all of it (SHA-256), on the calling thread: it reads the whole __AIR_DATA segment and __metallib section of every GPU image (the GPU
+// code it leaves until a pipeline is taken). From a mapping not read yet, that is one 16 KB page fault after another: Ocarina of Time's bundled archive (4.4 GB, 2.9 GB of
+// libraries) took 12.5 s on an M4 Max with the file not in memory, 1.5 s with it. So those ranges are asked for first, 8 MB at a time on every core, and Metal finds them in
+// memory: 1.6 s. Each piece is mapped on its own, given MADV_WILLNEED and unmapped: the kernel reads it into the file cache, which Metal's mapping shares, with no buffer of ours
+// and no copy when the pages are already in memory. The first version read the pieces into 8 MB heap buffers (the 1.6 s): as fast on an M6, but malloc kept the freed buffers,
+// +99 MB of footprint on its 12 cores. Only a piece at a time is mapped,
+// as Metal maps the whole file too (a second whole mapping of a 4.4 GB file does not fit an iPhone's address space). If the system ignores the advice, Metal reads as before.
+// The device's own files are opened in parallel (pso4_init) and each is read ahead the same way
+static id<MTL4Archive> arch_open(NSString *path, NSError **err) {
+    arch_reads rd = {0};
+    if (!arch_file_check(path, &rd)) return nil;
+    int fd = open(path.fileSystemRepresentation, O_RDONLY);
+    if (fd >= 0) {
+        enum { CH = 8 << 20 }; size_t first[65] = {0}, *fp = first; const arch_reads *r = &rd;   // first[i]: the first 8 MB piece of range i
+        for (int i = 0; i < rd.n; i++) first[i + 1] = first[i] + (rd.len[i] + CH - 1) / CH;
+        dispatch_apply(first[rd.n], dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^(size_t k) {
+            int i = 0; while (k >= fp[i + 1]) i++;
+            uint64_t at = r->off[i] + (uint64_t)(k - fp[i]) * CH, len = MIN((uint64_t)CH, r->len[i] - (uint64_t)(k - fp[i]) * CH);
+            uint64_t pg = (uint64_t)getpagesize(), a0 = at / pg * pg; size_t ml = (size_t)(len + (at - a0));   // a mapping starts on a page
+            void *w = mmap(NULL, ml, PROT_READ, MAP_SHARED, fd, (off_t)a0);
+            if (w != MAP_FAILED) { (void)madvise(w, ml, MADV_WILLNEED); munmap(w, ml); }
+        });
+        close(fd);
+    }
+    return [g_dev newArchiveWithURL:[NSURL fileURLWithPath:path] error:err];
 }
 static void pso_bundle_open(NSMutableArray<id<MTL4Archive>> *archp) {
     const char *e = getenv("DM_PSO_BUNDLE");
@@ -9189,8 +9227,8 @@ static void pso_bundle_open(NSMutableArray<id<MTL4Archive>> *archp) {
         return;
     }
     uint64_t t0 = bp_now(); NSError *ae = nil;
-    if (!arch_file_ok(p)) { MLOG("[RED] pipeline archive bundled with the app: %s is not a pipeline archive: the bases are built on the device", p.UTF8String); return; }
-    id<MTL4Archive> a = [g_dev newArchiveWithURL:[NSURL fileURLWithPath:p] error:&ae];
+    id<MTL4Archive> a = arch_open(p, &ae);
+    if (!a && !ae) { MLOG("[RED] pipeline archive bundled with the app: %s is not a pipeline archive: the bases are built on the device", p.UTF8String); return; }
     if (!a) { MLOG("pipeline archive bundled with the app: this system cannot open %s (%s; made for another system version, or an OS update changed the GPU compiler): the bases are built on the device",
                    p.UTF8String, ae.localizedDescription.UTF8String); return; }
     g_arch_bundle = a; g_bundle_dir = dir; [archp addObject:a];
@@ -9220,7 +9258,7 @@ static void pso_bundle_open_prewarm(NSMutableArray<id<MTL4Archive>> *arch) {
     uint64_t t0 = bp_now(); unsigned long long bytes = 0; NSUInteger n = 0, nidx = 0, nkeys = 0, nplain = 0; g_prewarm_open = [NSMutableArray array];
     for (NSString *name in names) {
         NSString *p = [dir stringByAppendingPathComponent:name]; NSError *ae = nil;
-        id<MTL4Archive> a = arch_file_ok(p) ? [g_dev newArchiveWithURL:[NSURL fileURLWithPath:p] error:&ae] : nil;
+        id<MTL4Archive> a = arch_open(p, &ae);
         if (!a) { MLOG("[RED] prewarm archive bundled with the app: %s not usable (%s): its bases are built on the device", p.UTF8String, ae ? ae.localizedDescription.UTF8String : "not a pipeline archive"); continue; }
         int complete = 0; NSData *keys = arch_keys_read(arch_keys_path(p), &complete);
         n++; bytes += [[NSFileManager.defaultManager attributesOfItemAtPath:p error:nil] fileSize];
@@ -9467,7 +9505,7 @@ static void pso4_init(void) {
             for (NSUInteger i = 0; i < nn; i++) { [opened addObject:NSNull.null]; [ixs addObject:NSNull.null]; [why addObject:NSNull.null]; }
             dispatch_apply(nn, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^(size_t i) { @autoreleasepool {
                 NSString *p = [g_arch_dir stringByAppendingPathComponent:names[i]]; NSError *ae = nil; int complete = 0;
-                id<MTL4Archive> a = arch_file_ok(p) ? [g_dev newArchiveWithURL:[NSURL fileURLWithPath:p] error:&ae] : nil;
+                id<MTL4Archive> a = arch_open(p, &ae);
                 NSData *keys = a ? arch_keys_read(arch_keys_path(p), &complete) : nil;
                 @synchronized (opened) {
                     if (a) opened[i] = a;

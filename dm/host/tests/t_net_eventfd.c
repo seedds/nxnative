@@ -1,5 +1,6 @@
-// nn::socket::EventFd offline (hle_net.c): a descriptor that works with no network, which gRPC's poll engine needs at startup, and that Poll waits on. Socket and the rest stay offline
+// nn::socket::EventFd offline (hle_net.c): the local descriptor gRPC needs to wake its poll engine. Remote networking stays unavailable.
 #include "../hle_net.c"
+__thread _Atomic int dm_host_work;
 #include <assert.h>
 #include <stdio.h>
 #include <time.h>

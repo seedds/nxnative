@@ -228,5 +228,34 @@ class TableDifference(unittest.TestCase):   # the row the build error names when
         self.assertEqual(nsp.table_difference('t.tsv', b'a\nb\n', b'b\na\n'), 't.tsv: the same rows in another order')
 
 
+
+class TranslatorKey(Base):   # the shader step's key takes the translator by its bytes: a commit switched and back rewrote the same bytes with a new mtime, and each worktree has its own path; either rebuilt every shader (PR #2496)
+    class Keyed(Exception): pass
+
+    def key(self, xlate):   # build_shaders' reuse key, with the other inputs fixed
+        keys = []
+        def reused(_kf, key): keys.append(key); raise self.Keyed
+        g = types.SimpleNamespace(id='0100000000000000', table=lambda n: self.tmp / 'profile' / n)
+        with mock.patch.multiple(nsp, reused=reused, chain_of=lambda repo: '0123456789ab', chain_files=lambda repo: [], toolchain=lambda repo, env=None: (),
+                                 shader_profile_key=lambda *a: ('shader inputs', g.id, 'digest')), mock.patch.object(nsp.shader_cache, 'adopt'):
+            with self.assertRaises(self.Keyed): nsp.build_shaders(sys.executable, xlate.parents[4], self.tmp / 'sh', xlate, {}, self.tmp / 'logs', g, pkg_key='pkg')
+        return keys[0]
+
+    def translator(self, checkout, data):
+        x = self.tmp / checkout / 'dm/gfx/tools/dmsh_xlate_bin/dmsh_xlate'; x.parent.mkdir(parents=True, exist_ok=True); x.write_bytes(data)
+        return x
+
+    def test_same_bytes_new_mtime_keep_the_key(self):
+        x = self.translator('a', b'translator v1'); before = self.key(x); st = x.stat()
+        x.write_bytes(b'translator v1'); os.utime(x, ns=(st.st_atime_ns, st.st_mtime_ns + 5_000_000_000))
+        self.assertEqual(self.key(x), before)
+
+    def test_another_checkout_keeps_the_key(self):   # a second worktree: the same bytes at another path
+        self.assertEqual(self.key(self.translator('a', b'translator v1')), self.key(self.translator('b', b'translator v1')))
+
+    def test_other_bytes_change_it(self):
+        x = self.translator('a', b'translator v1'); before = self.key(x); x.write_bytes(b'translator v2')
+        self.assertNotEqual(self.key(x), before)
+
 if __name__ == '__main__':
     unittest.main()

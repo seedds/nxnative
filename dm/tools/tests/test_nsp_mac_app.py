@@ -2,6 +2,7 @@
 runtime; the launcher's environment for the host (the bundle's files, the save, temporary files and log in the player's Library), the previous log kept, environment files, the host's exit
 code returned and SIGTERM forwarded to it, an alert when the game data is missing; the script's options and its pack_app.py command line; --seen-shaders' keys and partial library.
 No game files, keys or Xcode needed: a stand-in host compiled here records what it was given (temporary files only in a temporary folder)."""
+import argparse
 import contextlib
 import errno
 import hashlib
@@ -323,6 +324,62 @@ class PackReuse(unittest.TestCase):
         empty.rename(empty.with_name('renamed')); self.assert_repacked()
         shutil.rmtree(self.args.out); self.assert_repacked()
 
+    def test_data_bundles_reused_only_as_the_last_pack_left_them(self):
+        # a pack that changes the host clones the data bundles with their signatures; one whose files changed since the last pack (its seal in the app is its code hash only) is made again
+        def signed(): return {Path(c[-1]).name for c in self.commands if '--sign' in c}   # what the last pack signed
+        self.pack()
+        app, plugins = Path(self.args.out), Path(self.args.out) / 'Contents/PlugIns'
+        bundles = {'GameData.bundle', 'ShaderLibraries.bundle', 'PipelineArchive.bundle', 'AddOnContent.bundle'}
+        self.assertEqual({p.name for p in plugins.iterdir()}, bundles)
+        (self.tmp / 'dmhost').write_bytes(b'other host')
+        out = self.pack()
+        for label in ('game files', 'shader libraries', 'pipeline archive', 'add-on content'): self.assertIn(f'step: {label} (reused, signed)\n', out)
+        self.assertEqual(signed(), {'dmhost', app.name + '.partial'})
+        res = app / 'Contents/Resources'
+        changes = (('romfs/marker', lambda p: p.write_bytes(b'gamf')),   # the same size
+                   ('msl/msl/added.metallib', lambda p: p.write_bytes(b'x')), ('pso/gpu.mtl4a', Path.unlink), ('aoc/1/data', lambda p: p.chmod(0o600)))
+        for name, change in changes:
+            with self.subTest(change=name):
+                change(res / name); out = self.pack()
+                self.assertEqual(len([n for n in signed() if n.endswith('.bundle')]), 1)   # that bundle only
+                self.assertEqual(out.count('(reused, signed)'), 3)
+        self.assertEqual((app / 'Contents/Resources/romfs/marker').read_bytes(), b'game')
+        self.assertFalse((app / 'Contents/Resources/msl/msl/added.metallib').exists())
+        self.assertTrue((app / 'Contents/Resources/pso/gpu.mtl4a').is_file())
+        self.key.unlink(); self.args.name = 'Renamed'   # no record of what the last pack left: nothing is reused
+        self.pack(); self.assertEqual(signed() & bundles, bundles)
+
+    def test_large_files_are_not_read_for_the_keys(self):
+        # the shader libraries and the pipeline archive are keyed by stat, as the RomFS: a pack that changes only the host reads none of the game's data
+        self.pack(); (self.tmp / 'dmhost').write_bytes(b'other host')
+        real, read = pack_app.digest, []
+        with mock.patch.object(pack_app, 'digest', lambda p: (read.append(Path(p)), real(p))[1]): self.pack()
+        self.assertIn(self.tmp / 'dmhost', read)
+        self.assertFalse([p for p in read if p.parent in (self.tmp / 'msl', self.tmp / 'pso')])
+
+    def test_programs_in_data_bundles(self):
+        # a game of several programs: each other program's RomFS in a data bundle of its own, its libraries with the first's in ShaderLibraries, reused as the first program's
+        t = self.tmp
+        for d in ('p1/patched', 'p1/romfs', 'p1/msl', 'p1/profile', 'p1/html'): (t / d).mkdir(parents=True)
+        for n, b in (('patched/main.patched.bin', b'code1'), ('patched/main.fixups.tsv', b'f1'), ('romfs/data', b'game1'), ('msl/k.metallib', b'lib1'), ('profile/shader_map.tsv', b'map1'), ('html/index.html', b'page')):
+            (t / 'p1' / n).write_bytes(b)
+        self.args.program = ['\t'.join(['1', *(str(t / 'p1' / d) for d in ('patched', 'romfs', 'msl', 'profile', 'html'))])]
+        self.pack()
+        res, plugins = Path(self.args.out) / 'Contents/Resources', Path(self.args.out) / 'Contents/PlugIns'
+        self.assertTrue((res / 'p1/romfs').is_symlink())
+        self.assertEqual((res / 'p1/romfs').resolve(), (plugins / 'GameData1.bundle/Contents/Resources/p1/romfs').resolve())
+        self.assertEqual((res / 'p1/romfs/data').read_bytes(), b'game1'); self.assertEqual((res / 'p1/html/index.html').read_bytes(), b'page')
+        self.assertEqual((plugins / 'ShaderLibraries.bundle/Contents/Resources/msl/p1/msl/k.metallib').read_bytes(), b'lib1')
+        self.assertIn('DM_ROMFS=@R@/p1/romfs\tDM_MSL_DIR=@R@/msl/p1', (res / 'dm/programs.tsv').read_text())
+        (t / 'dmhost').write_bytes(b'other host')
+        self.assertEqual(self.pack().count('(reused, signed)'), 5)
+        (t / 'p1/romfs/data').write_bytes(b'game2')
+        out = self.pack()
+        self.assertIn('step: program 1 game files\n', out); self.assertEqual(out.count('(reused, signed)'), 4)
+        self.assertEqual((res / 'p1/romfs/data').read_bytes(), b'game2')
+        (t / 'p1/msl/k.metallib').write_bytes(b'lib2')
+        self.assertIn('step: shader libraries\n', self.pack())
+
     def test_unpacked_files_and_unselected_split_pairs_do_not_invalidate(self):
         self.pack()
         for name in ('msl/k.metal', 'msl/_b_build.json', 'msl/analysis/report.txt', 'patched/main.sites.tsv', 'profile/game.tsv',
@@ -625,11 +682,39 @@ class App(unittest.TestCase):
     def test_missing_data(self):
         broken = self.tmp / 'Broken.app'; shutil.rmtree(broken, ignore_errors=True)
         subprocess.run(['/bin/cp', '-R', self.app, broken], check=True)
-        shutil.rmtree(broken / 'Contents/Resources/romfs')
+        r = broken / 'Contents/Resources/romfs'
+        shutil.rmtree(r.resolve() if r.is_symlink() else r)   # the data itself: in its data bundle, behind the link
         (self.tmp / 'home/alert.txt').unlink(missing_ok=True)
         p = subprocess.run([broken / 'Contents/MacOS/nxnative'], env=dict(HOME=str(self.tmp / 'home'), PATH=f'{self.tmp / "bin"}:/usr/bin:/bin'), capture_output=True, text=True, timeout=30)
         self.assertEqual(p.returncode, 1)
         self.assertIn('game data inside this app is missing', (self.tmp / 'home/alert.txt').read_text())
+
+    def test_data_bundles(self):
+        # the game's files sit in signed nested bundles (Contents/PlugIns/<name>.bundle) behind links in Resources, and the app's signature holds them by hash
+        r = Path(self.app) / 'Contents/Resources/romfs'
+        self.assertTrue(r.is_symlink())
+        self.assertEqual(r.resolve(), (Path(self.app) / 'Contents/PlugIns/GameData.bundle/Contents/Resources/romfs').resolve())
+        self.assertFalse((Path(self.app) / 'Contents/PlugIns/GameData.bundle/Contents/MacOS').exists())   # data only: no executable
+        self.assertEqual(len(json.loads(Path(f'{self.app}.key').read_text())['data']['GameData']), 64)
+        subprocess.run(['codesign', '--verify', '--strict', self.app], check=True, capture_output=True)
+        seal = plistlib.loads((Path(self.app) / 'Contents/_CodeSignature/CodeResources').read_bytes())['files2']
+        self.assertIn('cdhash', seal['PlugIns/GameData.bundle'])
+        self.assertFalse(any(k.startswith('PlugIns/GameData.bundle/') for k in seal))
+
+    def test_data_bundles_repacked(self):
+        # another host: the data bundles are cloned with their signatures; a data file changed in the app since: its bundle is made again. Each result verifies whole (--deep reads every file)
+        out, host = self.tmp / 'Repack.app', self.tmp / 'host-other'
+        subprocess.run(['xcrun', 'clang', '-arch', 'arm64', '-O1', '-o', host, self.tmp / 'host.c'], check=True)
+        args = argparse.Namespace(**{**vars(self.args), 'out': str(out)})
+        def pack():
+            with contextlib.redirect_stdout(io.StringIO()) as o: pack_app.pack(args)
+            subprocess.run(['codesign', '--verify', '--deep', '--strict', out], check=True, capture_output=True)
+            return o.getvalue()
+        pack(); args.host = str(host)
+        self.assertEqual(pack().count('(reused, signed)'), 4)
+        data = out / 'Contents/Resources/romfs/region_common/audio/edward.bfsar'; data.write_bytes(b'snf')
+        self.assertEqual(pack().count('(reused, signed)'), 3)
+        self.assertEqual(data.read_bytes(), b'snd')
 
     def test_missing_modules(self):
         for missing in (('main.patched.bin',), ('main.fixups.tsv',), ('main.patched.bin', 'main.fixups.tsv')):

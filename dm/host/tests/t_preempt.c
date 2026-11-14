@@ -2,9 +2,51 @@
 // to model a host dispatch delay: it is guest-runnable as soon as StartThread or
 // a signal makes it ready, even though Mach still reports it stopped. Its payload
 // must precede the lower-priority caller's return, including delays over 5 ms.
-#include "../hle_thread.c"
+#include "../dm.h"
 #include <assert.h>
+#include <time.h>
 #include <unistd.h>
+
+static uint64_t test_now_ns(void);
+static int test_nanosleep(const struct timespec *duration, struct timespec *remaining);
+#define now_ns test_now_ns
+#define nanosleep test_nanosleep
+#include "../hle_thread.c"
+#undef now_ns
+#undef nanosleep
+
+// Only the service-request fixture uses a modeled clock. A host deschedule can
+// exceed either production deadline, so wall time cannot establish guest order.
+// Keep the real scheduler and its native-wait state; the request completes only
+// after the starter publishes its flag. The bounded-wait case advances the clock
+// past the deadline separately, without depending on either pthread's dispatch.
+static _Thread_local uint64_t request_clock, request_clock_step;
+static _Thread_local unsigned request_round_trips;
+static pthread_mutex_t request_gate = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t request_cv = PTHREAD_COND_INITIALIZER;
+static int request_starter_done;
+static uint64_t test_now_ns(void) {
+    if (!request_clock) return now_ns();
+    uint64_t value = request_clock;
+    request_clock += request_clock_step;
+    return value;
+}
+static int test_nanosleep(const struct timespec *duration, struct timespec *remaining) {
+    if (!request_clock) return nanosleep(duration, remaining);
+    assert(!request_clock_step);   // an expired start deadline must return without another sleep
+    assert(!duration->tv_sec && (duration->tv_nsec == 50000 || duration->tv_nsec == SERVICE_ROUND_TRIP_NS));
+    thr_t *me = pthread_getspecific(g_keythr);
+    pthread_mutex_lock(&G);
+    assert(me && !me->nhand);
+    if (duration->tv_nsec == 50000) assert(me->native_wait == 1);
+    pthread_mutex_unlock(&G);
+    if (duration->tv_nsec == SERVICE_ROUND_TRIP_NS) request_round_trips++;
+    pthread_mutex_lock(&request_gate);
+    while (!request_starter_done) pthread_cond_wait(&request_cv, &request_gate);
+    pthread_mutex_unlock(&request_gate);
+    request_clock += (uint64_t)duration->tv_nsec;
+    return 0;
+}
 
 static thr_t worker;
 static uint32_t event_read, event_write;
@@ -304,21 +346,25 @@ static int native_join_handoff(void) {
     printf("%s: native join releases the signaller, returns the helper result and preserves nested host work\n", blocked && finished && nesting ? "PASS" : "FAIL");
     return blocked && finished && nesting;
 }
-// A started higher-priority worker whose first act is a service request (a file system call, a blocking IPC on Horizon) gives its core back, and its first request ends only after the
-// starter is back in guest code. Digimon Story Cyber Sleuth's save manager sets a busy flag right after StartThread returns, and the worker clears it as its last act: with the starter
-// held until the worker exited, the flag stayed set for good and every later slot read was refused. The worker reads the flag after its request, then clears it
+// A started higher-priority worker whose first act is a service request (a file system call, a blocking IPC on Horizon) gives its core back. Its first request normally ends after the
+// starter is back in guest code; service_request_deadline covers the bounded exception. Digimon Story Cyber Sleuth's save manager sets a busy flag right after StartThread returns,
+// and the worker clears it as its last act: with the starter
+// held until the worker exited, the flag stayed set for good and every later slot read was refused. The worker reads the flag after its modeled request, then clears it.
 static _Atomic int request_busy, request_seen;
 static int request_calls;
 static void *request_work(void *arg) {
     thr_t *t = arg; pthread_setspecific(g_keythr, t); t->host_work = &dm_host_work;
     pthread_mutex_lock(&G); worker_ready = 1; while (!t->started) pthread_cond_wait(&t->cv, &G); pthread_mutex_unlock(&G);
+    request_clock = 1; request_round_trips = 0;
     for (int i = 0; i < request_calls; i++) dm_thread_service_request();
+    assert(request_round_trips == (unsigned)(request_calls != 0));
+    request_clock = 0;
     atomic_store(&request_seen, atomic_load(&request_busy));
     atomic_store(&request_busy, 0);
     atomic_store(&payload, 2);
     thread_exit(t); return NULL;
 }
-static int service_request_start(int calls) {
+static int service_request_start(int calls, unsigned starter_delay_us) {
     static thr_t t; uint64_t r[32] = {0};
     memset(&t, 0, sizeof t);
     pthread_cond_init(&t.cv, NULL); pthread_cond_init(&t.pcv, NULL);
@@ -326,11 +372,14 @@ static int service_request_start(int calls) {
     pthread_mutex_lock(&G); t.handle = h_new(O_THREAD, &t); t.all = g_all; g_all = &t; pthread_mutex_unlock(&G);
     request_calls = calls; worker_ready = 0;
     atomic_store(&request_busy, 0); atomic_store(&request_seen, 0); atomic_store(&payload, 0);
+    pthread_mutex_lock(&request_gate); request_starter_done = 0; pthread_mutex_unlock(&request_gate);
     pthread_t w; assert(!pthread_create(&w, NULL, request_work, &t));
     for (;;) { pthread_mutex_lock(&G); int ready = worker_ready; pthread_mutex_unlock(&G); if (ready) break; usleep(100); }
     r[0] = t.handle; svc_thread(0x09, r); assert(r[0] == 0);
+    if (starter_delay_us) usleep(starter_delay_us);
     int held = atomic_load(&payload) == 2;   // the worker finished before the starter came back
     atomic_store(&request_busy, 1);          // the store the game makes after StartThread
+    pthread_mutex_lock(&request_gate); request_starter_done = 1; pthread_cond_signal(&request_cv); pthread_mutex_unlock(&request_gate);
     pthread_join(w, NULL);
     int seen = atomic_load(&request_seen), busy = atomic_load(&request_busy);
     pthread_mutex_lock(&G); g_all = t.all;
@@ -339,8 +388,23 @@ static int service_request_start(int calls) {
     pthread_cond_destroy(&t.cv); pthread_cond_destroy(&t.pcv);
     // Without a request the starter is held to the end, so the flag stays set (the old behaviour of every file system call); with one the worker sees the flag and clears it
     int ok = calls ? !held && seen == 1 && busy == 0 : held && seen == 0 && busy == 1;
-    printf("%s: started worker with %d service requests: starter held to its end %d, worker saw the flag %d, flag afterwards %d\n", ok ? "PASS" : "FAIL", calls, held, seen, busy);
+    printf("%s: started worker with %d service requests, starter delay %u us: starter held to its end %d, worker saw the flag %d, flag afterwards %d\n", ok ? "PASS" : "FAIL", calls, starter_delay_us, held, seen, busy);
     return ok;
+}
+static void service_request_deadline(void) {
+    thr_t *starter = pthread_getspecific(g_keythr);
+    uint64_t epoch = atomic_load(&starter->hand_epoch);
+    thr_t requester = {.start_by = starter, .start_epoch = epoch, .nhand = 1};
+    requester.hand[0].by = starter; requester.hand[0].epoch = epoch;
+    pthread_setspecific(g_keythr, &requester);
+    request_clock = 1; request_clock_step = SERVICE_START_WAIT_NS; request_round_trips = 0;
+    dm_thread_service_request();
+    assert(request_clock == 1 + 2 * SERVICE_START_WAIT_NS && !request_round_trips);
+    assert(!requester.nhand && !requester.start_by && !requester.native_wait);
+    assert(atomic_load(&starter->hand_epoch) == epoch);   // the starter never returned to guest code
+    request_clock = 0; request_clock_step = 0;
+    pthread_setspecific(g_keythr, starter);
+    puts("PASS: a service request releases its handoff and returns at the start deadline without a round trip");
 }
 int main(int argc, char **argv) {
     (void)argv;
@@ -352,8 +416,9 @@ int main(int argc, char **argv) {
     int ok = 1;
     ok &= native_wait_handoff();
     ok &= native_join_handoff();
-    ok &= service_request_start(0);
-    for (int i = 0; i < 20; i++) ok &= service_request_start(1 + i % 2);
+    ok &= service_request_start(0, 0);
+    for (int i = 0; i < 20; i++) ok &= service_request_start(1 + i % 2, i < 2 ? 20000 : 0);
+    service_request_deadline();
     if (argc == 1) for (int kind = 0; kind <= 3; kind++) ok &= handoff_scope(kind);   // with every runnable peer checked (core_preempt), the busy peer holds the signaller by design
     for (int kind = 0; kind <= 4; kind++) if (kind != 3) {
         ok &= delayed_wake(1000, kind, 0);

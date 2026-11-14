@@ -20,6 +20,9 @@ int front_screen_max_fps(void);
 int front_display_pixels(int *w, int *h);
 // Whether the window's current screen mode supports variable refresh (Mac front_mac.m; none on iOS). Any thread
 int front_screen_variable_refresh(void);
+// Whether macOS reports the game window as covered (NSWindowOcclusionStateVisible unset: behind other windows, or during the fullscreen Space animation), when it pauses the
+// window's display link; nvn_mtl.m ends a rescue that started while covered once this is 0 again (Mac front_mac.m; none on iOS). Any thread
+int front_window_covered(void);
 // The frame rate the display link paces the game at (60, 30, 120; nvn_mtl.m link_sync): in fullscreen, a screen whose refresh rate is not a multiple of it is switched, while the game runs,
 // to a mode of the same size whose rate is, and back when the window leaves fullscreen or that screen (front_mac.m; none on iOS). Called from the present thread
 void front_screen_match(int fps);

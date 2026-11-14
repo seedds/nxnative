@@ -103,6 +103,43 @@ class CloneProbe(unittest.TestCase):
             self.assertEqual(sorted(p.name for p in (t / 'app').iterdir()), [])   # no probe left behind
 
 
+@unittest.skipUnless(sys.platform == 'darwin' and shutil.which('sips') and shutil.which('iconutil'), 'needs macOS (sips, iconutil)')
+class Icon(unittest.TestCase):
+    """make_icns with the real sips and iconutil: an icon sips cannot convert stops the pack naming that icon, with what sips said, whether sips fails (a file that is not an image),
+    exits 0 without writing anything (an empty file), or cannot be started."""
+    def setUp(self):
+        TEST_ROOT.mkdir(parents=True, exist_ok=True)
+        self.tmp = Path(tempfile.mkdtemp(dir=TEST_ROOT)); self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.out = self.tmp / 'AppIcon.icns'
+
+    def refused(self, icon, said):
+        with self.assertRaises(SystemExit) as e: pack_app.make_icns(str(icon), self.out)
+        self.assertIn(f'sips: cannot convert the icon {icon} ({said}', str(e.exception))
+        self.assertIn('--icon', str(e.exception))   # what the user can do
+        self.assertFalse(self.out.exists())
+        self.assertEqual([p.name for p in self.tmp.iterdir()], [icon.name])   # no iconset left behind
+
+    def test_not_an_image(self):   # sips exits 13
+        bad = self.tmp / 'icon.jpg'; bad.write_text('not an image')
+        self.refused(bad, 'Error: Cannot extract image from file.')
+
+    def test_empty(self):   # sips warns and exits 0 without an output; iconutil then failed on the temporary iconset, which named neither the icon nor sips
+        empty = self.tmp / 'icon.jpg'; empty.write_bytes(b'')
+        self.refused(empty, f'Warning: {empty} not a valid file - skipping')
+
+    def test_sips_cannot_start(self):
+        bad = self.tmp / 'icon.jpg'; bad.write_text('not an image')
+        with mock.patch.object(pack_app.subprocess, 'run', side_effect=FileNotFoundError(errno.ENOENT, 'No such file or directory', 'sips')):
+            self.refused(bad, "[Errno 2] No such file or directory: 'sips'")
+
+    def test_image(self):
+        icon = self.tmp / 'icon.jpg'
+        subprocess.run(['sips', '-s', 'format', 'jpeg', '-z', '256', '256', '/System/Library/CoreServices/CoreTypes.bundle/Contents/Resources/GenericApplicationIcon.icns',
+                        '--out', icon], check=True, capture_output=True)
+        pack_app.make_icns(str(icon), self.out)
+        self.assertEqual(self.out.read_bytes()[:4], b'icns')
+
+
 class PackReuse(unittest.TestCase):
     """Call the real pack entry point; only external compiler, icon and signing tools are faked. No host is run."""
     def setUp(self):
@@ -155,7 +192,8 @@ class PackReuse(unittest.TestCase):
             if name == 'iconutil': Path(cmd[cmd.index('-o') + 1]).write_bytes(b'icns'); return ''
             return real_run(cmd)
         def which(name): return str(self.codesign) if name == 'codesign' else real_which(name)
-        for patch in (mock.patch.object(pack_app, 'run', fake_run), mock.patch.object(pack_app, 'HERE', t / 'source'),
+        def icon_png(jpg, size, png): fake_run(['sips', '-s', 'format', 'png', '-z', size, size, jpg, '--out', png])
+        for patch in (mock.patch.object(pack_app, 'run', fake_run), mock.patch.object(pack_app, 'icon_png', icon_png), mock.patch.object(pack_app, 'HERE', t / 'source'),
                       mock.patch.object(pack_app, 'can_clone', return_value=False), mock.patch.object(shutil, 'which', which)):
             patch.start(); self.addCleanup(patch.stop)
         self.clone = pack_app.can_clone

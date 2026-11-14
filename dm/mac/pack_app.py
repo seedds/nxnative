@@ -100,12 +100,23 @@ def build_launcher(out, minos, clang, swiftc, sdk):   # launcher.c's main and th
              '-o', out, *swift_sources(), *objs, '-framework', 'CoreFoundation', '-framework', 'AppKit', '-framework', 'SwiftUI'])
 
 
+def icon_png(jpg, size, png):
+    """One size of the app icon, by sips. An icon it cannot convert stops the pack in build_ipa.sh's words, with sips' first message line. sips exits 0 without writing anything for a
+    file it does not take as an image (an empty one), so its output is checked too: iconutil would fail next, on the temporary iconset, naming neither the icon nor sips"""
+    try: r = subprocess.run(['sips', '-s', 'format', 'png', '-z', str(size), str(size), str(jpg), '--out', str(png)], capture_output=True, text=True)
+    except OSError as e: said = str(e)
+    else:
+        if not r.returncode and png.is_file(): return
+        said = next(iter((r.stderr or r.stdout).strip().splitlines()), f'exit code {r.returncode}')
+    raise SystemExit(f'sips: cannot convert the icon {jpg} ({said}): --icon (the NSP script\'s --icon / ICON) names another image, a JPEG or PNG')
+
+
 def make_icns(jpg, out):   # the game's icon (256x256 JPEG) at every size an .icns holds
     with tempfile.TemporaryDirectory(dir=out.parent) as t:
         s = Path(t) / 'AppIcon.iconset'; s.mkdir()
         for n in ICON_SIZES:
             for k, suffix in ((1, ''), (2, '@2x')):
-                run(['sips', '-s', 'format', 'png', '-z', n * k, n * k, jpg, '--out', s / f'icon_{n}x{n}{suffix}.png'])
+                icon_png(jpg, n * k, s / f'icon_{n}x{n}{suffix}.png')
         run(['iconutil', '-c', 'icns', s, '-o', out])
 
 

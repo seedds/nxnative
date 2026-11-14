@@ -147,9 +147,19 @@ if [ "$P4" = on ] && [ "$PG" ]; then case $N in 1 | 2 | 3 | 4) PGK=$(echo "$PG" 
 if [ -n "${DM_PSO_GPUS+set}" ]; then GPUS=$DM_PSO_GPUS; elif [ "$P4" = on ]; then GPUS=$PGK; else GPUS=none; fi
 if [ "$GFXAPI" = nvn ] && [ -n "$GPUS" ] && [ "$GPUS" != none ] && [ -f "$GD/shader_pairs.tsv" ]; then
   PSO=$W/build/ios/pso/bundle
+  # The prewarm lists' pipelines (the R rows' bases, which have a vertex layout, so the archive above does not hold them) go in beside it when there is a Mac
+  # host of this checkout and game to make them (pso_offline.py --prewarm-host: its prebuild tool, then metal-tt): DM_PSO_HOST=<the Mac dmhost>, else dm/host/dmhost when its last build was
+  # for this game (made current here first), none: not made. Without them the device builds every listed one at its first start, and again after an OS update refuses its own archive
+  PH=${DM_PSO_HOST:-}
+  if [ -z "$PH" ] && [ -x "$DM/host/dmhost" ] && [ "$(cat "$DM/host/gen/game.stamp" 2> /dev/null)" = "$GAME" ]; then
+    mkdir -p "$W/build/ios/pso"
+    if make -s -C "$DM/host" GAME="$GAME" > "$W/build/ios/pso/host_make.log" 2>&1; then PH=$DM/host/dmhost; else t "[RED] prewarm pipelines: make -C dm/host GAME=$GAME failed (see $W/build/ios/pso/host_make.log): the app gets none"; fi
+  fi
+  [ "$PH" != none ] || PH=
+  [ -n "$PH" ] || t "prewarm pipelines: no Mac host of this game (make -C dm/host GAME=$GAME, or DM_PSO_HOST=<host>): the device builds the prewarm lists' pipelines at its first start"
   t "pipeline archive for $GPUS (metal-tt; minutes when its inputs changed)"
   python3 "$DM/gfx/tools/pso_offline.py" --game "$GAME" --msl "$MSL_IOS/b-$V" --out "$PSO" --work "$W/build/ios/pso/work" --gpu "$GPUS" ${DM_PSO_IOS_MIN:+--os-min "$DM_PSO_IOS_MIN"} \
-    | while IFS= read -r ln; do t "$ln"; done
+    ${PH:+--prewarm-host "$PH"} | while IFS= read -r ln; do t "$ln"; done
   if [ "${PIPESTATUS[0]}" != 0 ]; then   # an optimization: the device builds the bases on its first start without it
     t "[RED] pipeline archive: pso_offline.py failed (its output is above); the app is built without one and the device builds its pipeline bases on its first start (DM_PSO_GPUS=none skips this step)"
     rm -rf "$PSO"; PSO=

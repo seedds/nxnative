@@ -419,6 +419,35 @@ int main(void) { @autoreleasepool {
     assert(sense2.haptics.engines[0].plainPlayers == 0 && sense2.haptics.engines[1].plainPlayers == 0);
     assert(fabsf(sense2.haptics.engines[1].testPlayer.levels.lastObject.floatValue - 0.4f) < 1e-6f);
     send_pair(0, 0); drain();
+    // Paired Joy-Cons report "JoyCon (L)" and "JoyCon (R)" instead of handle localities, and keep both channels on plain players
+    GCHapticsLocality joyL = (GCHapticsLocality)@"JoyCon (L)", joyR = (GCHapticsLocality)@"JoyCon (R)";
+    NSSet *joyLocalities = [NSSet setWithObjects:GCHapticsLocalityAll, GCHapticsLocalityDefault, joyL, joyR, nil];
+    TestController *joy = [TestController new]; joy.haptics = [TestHaptics new]; joy.haptics.noAdvanced = YES;
+    joy.vendorName = @"Joy-Con (L/R)"; joy.productCategory = @"Nintendo Switch Joy-Con (L/R)";
+    joy.haptics.supportedLocalities = joyLocalities;
+    dm_haptics_apple_controller(0, (id)joy); drain();
+    assert(channels[0].count == 2 && !channels[0][0].simple && !channels[0][0].merge && !channels[0][1].merge);
+    send_pair(0.6, 0); drain();   // left Joy-Con alone (e.g. npad 0 in single Joy-Con mode): right engine is not even started
+    NSArray *joyLeftOnly = @[joyL, joyL];
+    assert(channels[0].count == 2 && channels[0][0].simple && !channels[0][1].simple && [joy.haptics.requestedLocalities isEqual:joyLeftOnly]);
+    assert(fabsf(joy.haptics.engines[1].testPlayer.levels.lastObject.floatValue - 0.6f) < 1e-6f);
+    send_pair(0, 0.4); drain();   // right Joy-Con alone (e.g. npad 1 in single Joy-Con mode): left silences, right starts its own plain player
+    NSArray *joyBoth = @[joyL, joyL, joyR, joyR];
+    assert(channels[0][1].simple && [joy.haptics.requestedLocalities isEqual:joyBoth]);
+    assert(joy.haptics.engines[1].testPlayer.levels.lastObject.floatValue == 0);
+    assert(fabsf(joy.haptics.engines[3].testPlayer.levels.lastObject.floatValue - 0.4f) < 1e-6f);
+    send_pair(0.3, 0.7); drain();
+    assert(fabsf(joy.haptics.engines[1].testPlayer.levels.lastObject.floatValue - 0.3f) < 1e-6f);
+    assert(fabsf(joy.haptics.engines[3].testPlayer.levels.lastObject.floatValue - 0.7f) < 1e-6f);
+    send_pair(0, 0); drain();
+    TestController *joyFail = [TestController new]; joyFail.haptics = [TestHaptics new];
+    joyFail.haptics.supportedLocalities = joyLocalities; joyFail.haptics.failureStage = 2;
+    dm_haptics_apple_controller(0, (id)joyFail); drain();
+    send_pair(0.3, 0.4); drain();
+    assert(joyFail.haptics.attempts == 1 && channels[0].count == 1);
+    expire_retries(); send_pair(0.3, 0.4); drain();
+    assert(joyFail.haptics.attempts == 2 && [joyFail.haptics.requestedLocalities.lastObject isEqual:GCHapticsLocalityDefault]);
+    send_pair(0, 0); drain();
     dm_haptics_apple_controller(0, nil); drain();   // disconnect discards the controller factory and its old callbacks
     assert(!(dm_haptics_available() & 1));
     TestController *unsupported = [TestController new]; unsupported.haptics = [TestHaptics new];

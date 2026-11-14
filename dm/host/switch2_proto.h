@@ -50,7 +50,9 @@ static inline uint16_t s2_u16(const uint8_t *p) { return (uint16_t)(p[0] | (uint
 static inline uint32_t s2_u32(const uint8_t *p) { return (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24; }
 static inline int16_t s2_s16(const uint8_t *p) { return (int16_t)s2_u16(p); }
 
-typedef struct { uint32_t clock_ms, buttons; uint16_t lx, ly, rx, ry; int16_t raw[6]; uint16_t battery_mv; int16_t mouse_x, mouse_y; uint16_t mouse_q, mouse_s; } s2_report;   // clock_ms: the controller's own clock; raw: accel xyz, gyro xyz in counts; mouse_*: S2_FEATURE_MOUSE
+// clock_ms: the controller's own clock; raw: accel xyz, gyro xyz in counts; mouse_*: S2_FEATURE_MOUSE; charge: the charge status at 0x21 (ndeadly's hid_reports.md; 0 on battery,
+// as command 0x0B 0x04 gives it)
+typedef struct { uint32_t clock_ms, buttons; uint16_t lx, ly, rx, ry; int16_t raw[6]; uint16_t battery_mv, charge; int16_t mouse_x, mouse_y; uint16_t mouse_q, mouse_s; } s2_report;
 
 // A 63-byte input notification (the same characteristic also carries longer audio packets; the length tells them apart)
 static inline int s2_report_parse(const uint8_t *d, size_t n, s2_report *r) {
@@ -59,7 +61,7 @@ static inline int s2_report_parse(const uint8_t *d, size_t n, s2_report *r) {
     r->clock_ms = s2_u32(d); r->buttons = s2_u32(d + 4);
     uint32_t a = (uint32_t)d[10] | (uint32_t)d[11] << 8 | (uint32_t)d[12] << 16, b = (uint32_t)d[13] | (uint32_t)d[14] << 8 | (uint32_t)d[15] << 16;
     r->lx = (uint16_t)(a & 0xFFF); r->ly = (uint16_t)(a >> 12); r->rx = (uint16_t)(b & 0xFFF); r->ry = (uint16_t)(b >> 12);
-    r->battery_mv = s2_u16(d + 0x1F);
+    r->battery_mv = s2_u16(d + 0x1F); r->charge = s2_u16(d + 0x21);
     for (int i = 0; i < 6; i++) r->raw[i] = s2_s16(d + 0x30 + 2 * i);
     r->mouse_x = s2_s16(d + 0x10); r->mouse_y = s2_s16(d + 0x12); r->mouse_q = s2_u16(d + 0x14); r->mouse_s = s2_u16(d + 0x16);
     return 1;
@@ -368,6 +370,76 @@ static inline int s2_memory_erase_payload(uint8_t out[8], uint32_t addr) {
     out[0] = out[1] = out[2] = out[3] = 0;
     out[4] = (uint8_t)addr; out[5] = (uint8_t)(addr >> 8); out[6] = (uint8_t)(addr >> 16); out[7] = (uint8_t)(addr >> 24);
     return 1;
+}
+
+// ---- What else a controller tells and does (the Controller menu and panel; ndeadly/switch2_controller_research commands.md and memory_layout.md, each checked on a Pro Controller 2) ----
+// Commands: the firmware version (0x10 0x01, no payload); the player lights flashing (0x09 0x08: 1 on, 0 off, 8 bytes); a vibration sample (0x0A 0x02: its id, 4 bytes; 2 is
+// the console's "search for controllers" tone, 1 a low buzz of about a second); power off (0x06 0x02, 12 zero bytes: the console sends it over USB when it sleeps docked; over
+// Bluetooth the controller answers, disconnects and goes dark, and a button press wakes it)
+enum { S2_CMD_POWER = 0x06, S2_CMD_VIBRATION = 0x0A, S2_CMD_FIRMWARE = 0x10 };
+enum { S2_SUB_POWER_OFF = 0x02, S2_SUB_LEDS_FLASH = 0x08, S2_SUB_VIB_SAMPLE = 0x02, S2_SUB_FIRMWARE_VERSION = 0x01 };
+enum { S2_SAMPLE_BUZZ = 1, S2_SAMPLE_SEARCH = 2 };
+#define S2_POWER_OFF_LEN 12
+#define S2_LEDS_FLASH_LEN 8
+#define S2_VIB_SAMPLE_LEN 4
+#define S2_CMD_REPLY_DATA 8   // a command reply's data after its 8-byte header (a memory read's starts at S2_REPLY_DATA)
+// The firmware version reply's data: the controller's version, its type (0 Joy-Con L, 1 Joy-Con R, 2 Pro Controller, 3 GameCube), the Bluetooth patch, and on a Pro Controller with
+// updated firmware the audio jack's DSP firmware (FF FF FF without it). A Pro Controller 2 answered 02 01 04 02 0c 00 00 00 00 02 03 00: 2.1.4, Bluetooth 12.0.0, DSP 0.2.3
+typedef struct { uint8_t fw[3], type, bt[3], dsp[3]; int has_dsp; } s2_firmware;
+static inline int s2_firmware_parse(const uint8_t *d, size_t n, s2_firmware *f) {
+    if (f) memset(f, 0, sizeof *f);
+    if (!d || !f || n < 7) return 0;
+    memcpy(f->fw, d, 3); f->type = d[3]; memcpy(f->bt, d + 4, 3);
+    if (n >= 11 && !(d[8] == 0xFF && d[9] == 0xFF && d[10] == 0xFF)) { memcpy(f->dsp, d + 8, 3); f->has_dsp = 1; }
+    return 1;
+}
+// "2.1.4" and, with the DSP firmware, " (DSP 0.2.3)"
+static inline void s2_firmware_text(const s2_firmware *f, char *out, size_t cap) {
+    if (f->has_dsp) snprintf(out, cap, "%u.%u.%u (DSP %u.%u.%u)", f->fw[0], f->fw[1], f->fw[2], f->dsp[0], f->dsp[1], f->dsp[2]);
+    else snprintf(out, cap, "%u.%u.%u", f->fw[0], f->fw[1], f->fw[2]);
+}
+// The colours in the identity block (S2_ADDR_INFO): body at 0x19, buttons 0x1C, highlight 0x1F, grip 0x22, each red, green, blue. 0 when the block is short or blank there
+enum { S2_COLOUR_BODY, S2_COLOUR_BUTTONS, S2_COLOUR_HIGHLIGHT, S2_COLOUR_GRIP };
+static inline int s2_info_colours(const uint8_t *d, size_t n, uint8_t out[4][3]) {
+    if (!d || n < 0x25) return 0;
+    for (int i = 0; i < 4; i++) memcpy(out[i], d + 0x19 + 3 * i, 3);
+    return !(out[0][0] == 0xFF && out[0][1] == 0xFF && out[0][2] == 0xFF);
+}
+// The pairing table (S2_ADDR_PAIRINGS): a count, then from 8 an entry of 0x28 bytes per host, its address first (as s2_pair_host_payload sends it, little endian) and its link
+// key at 0x12. Only the count and whether host is among the addresses are taken: the keys are secrets and nothing here keeps them. -1 for a blank or unreadable table
+#define S2_ADDR_PAIRINGS 0x001FA000u
+#define S2_PAIRINGS_READ (8 + 0x28 * 4)   // enough for four hosts
+static inline int s2_pairings(const uint8_t *d, size_t n, const uint8_t host[6], int *has_host) {
+    if (has_host) *has_host = 0;
+    if (!d || n < 1 || d[0] == 0xFF) return -1;
+    int count = d[0];
+    for (int i = 0; i < count && host && has_host; i++) {
+        size_t at = 8 + (size_t)0x28 * (size_t)i;
+        if (at + 6 > n) break;
+        if (!memcmp(d + at, host, 6)) *has_host = 1;
+    }
+    return count;
+}
+// The battery level, about: 0x1FB04A holds ten descending 16-bit values (a Pro Controller 2: 3737, 3540, 3404, 3285, 3216, 3174, 3069, 3063, 2986, 2730), in the range of the
+// battery voltage the input report gives (3450 mV on one), read as the controller's thresholds for 100, 90 .. 10 %. That reading is inferred from their shape, not documented,
+// so the level is shown as "about". The table is per model (memory_layout.md: the same on every controller of a type). 0 for a table that is not of that shape
+#define S2_ADDR_BATTERY_TABLE 0x001FB04Au
+#define S2_BATTERY_STEPS 10
+static inline int s2_battery_table(const uint8_t *d, size_t n, uint16_t t[S2_BATTERY_STEPS]) {
+    if (!d || n < 2 * S2_BATTERY_STEPS) return 0;
+    for (int i = 0; i < S2_BATTERY_STEPS; i++) {
+        t[i] = s2_u16(d + 2 * i);
+        if (t[i] < 2000 || t[i] > 4500 || (i && t[i] >= t[i - 1])) return 0;
+    }
+    return 1;
+}
+// The level for mv between the thresholds, 0..100; -1 without a table or a reading
+static inline int s2_battery_level(const uint16_t t[S2_BATTERY_STEPS], int have_table, unsigned mv) {
+    if (!have_table || !mv) return -1;
+    if (mv >= t[0]) return 100;
+    for (int i = 0; i + 1 < S2_BATTERY_STEPS; i++)
+        if (mv >= t[i + 1]) return 100 - 10 * i - (int)lroundf(10.f * (float)(t[i] - mv) / (float)(t[i] - t[i + 1]));
+    return 0;   // below the last threshold (10 %)
 }
 
 // Player LED patterns of the console for players 1..8

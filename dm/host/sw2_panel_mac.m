@@ -1,6 +1,7 @@
 // The game window's Controller menu and panel (Mac): the Switch 2 stick tester, on the controller session the game already holds (pad_switch2_apple.h, the tester's side), so
 // a stick that makes a character creep can be checked and calibrated mid-game and the new calibration applies at once. Drawn with AppKit.
-// The menu, between Cheats and Window: Show Controller Window (⌘⇧P, or DM_CONTROLLER_WINDOW=1 at launch), then one disabled line per connected controller, or why there is none.
+// The menu, between Cheats and Window: Show Controller Window (⌘⇧P, or DM_CONTROLLER_WINDOW=1 at launch), then one disabled line per connected controller (its battery too),
+// or why there is none. The panel's top row also has Identify, Test Rumble and Turn Off, and under it the controller's colours, firmware, battery and pairings.
 // The panel is a utility NSPanel like the Cheats one (floating, over a fullscreen game too, never key for a click, closed only to hide, frame autosave "DmControllerPanel"). It
 // works on one controller and stick at a time (a picker with two or more, Left / Right on a Pro Controller 2): the whole range, the centre zoomed 12x with the dead zone drawn as
 // the round one s2_cal_apply applies, a marker where the stick came to rest after each release (orange inside the dead zone, red where the game would see it move), the readouts,
@@ -111,6 +112,21 @@ static void dead_zone(NSPoint c, CGFloat right, CGFloat left, CGFloat up, CGFloa
 - (BOOL)isFlipped { return YES; }
 - (void)drawRect:(NSRect)dirty { (void)dirty; [NSColor.controlBackgroundColor setFill]; [[NSBezierPath bezierPathWithRoundedRect:self.bounds xRadius:10 yRadius:10] fill]; }
 @end
+// The controller's colours as the identity block gives them: its body, with its buttons' colour as a dot (nothing drawn without them)
+@interface DmCtlSwatch : NSView { @public uint8_t _body[3], _buttons[3]; }
+@property (nonatomic) int has;
+@end
+@implementation DmCtlSwatch
+static NSColor *rgb(const uint8_t c[3]) { return [NSColor colorWithSRGBRed:c[0] / 255.0 green:c[1] / 255.0 blue:c[2] / 255.0 alpha:1]; }
+- (void)drawRect:(NSRect)dirty {
+    (void)dirty; if (!_has) return;
+    NSRect r = NSInsetRect(self.bounds, 0.5, 0.5);
+    NSBezierPath *b = [NSBezierPath bezierPathWithRoundedRect:r xRadius:4 yRadius:4];
+    [rgb(_body) setFill]; [b fill]; [NSColor.separatorColor setStroke]; b.lineWidth = 1; [b stroke];
+    CGFloat d = r.size.height * 0.45; NSRect dot = NSMakeRect(NSMaxX(r) - d - 3, NSMidY(r) - d / 2, d, d);
+    [rgb(_buttons) setFill]; [[NSBezierPath bezierPathWithOvalInRect:dot] fill];
+}
+@end
 @interface DmCtlFlip : NSView @end
 @implementation DmCtlFlip
 - (BOOL)isFlipped { return YES; }
@@ -171,6 +187,7 @@ static DmControllerPanel *g_panel;   // created on the first Show Controller Win
     s2_cal _limits;              // the factory calibration of the stick being calibrated: what its new travel is judged against (s2_reach_travel)
     // views
     NSPopUpButton *_picker; NSTextField *_kindLabel; NSSegmentedControl *_sticks;
+    DmCtlSwatch *_swatch; NSTextField *_info; NSButton *_btnIdentify, *_btnRumble, *_btnOff;   // what the controller tells about itself, and its actions
     DmCtlBox *_wait; NSTextField *_waitTitle, *_waitBody;
     DmCtlBox *_live; NSTextField *_liveTitle, *_rangeCap, *_centreCap, *_readout, *_tally, *_deadName, *_deadValue; DmCtlStickView *_range, *_centre;
     NSSlider *_deadSlider; NSButton *_deadReset;   // the dead zone set for this stick on this Mac, and back to the stick's own
@@ -317,6 +334,25 @@ static DmControllerPanel *g_panel;   // created on the first Show Controller Win
     [self restart:nil]; [self takeRaw]; [self update];
 }
 // The slider moved: the dead zone the game applies to this stick from now on (the session keeps it under the controller's serial). The panel redraws through the change hook
+- (void)identify:(id)sender { (void)sender; const dm_sw2_info *d = [self device]; if (d) dm_switch2_identify(d->id); }
+- (void)rumbleTest:(id)sender { (void)sender; const dm_sw2_info *d = [self device]; if (d) dm_switch2_rumble_test(d->id); }
+- (void)powerOff:(id)sender { (void)sender; const dm_sw2_info *d = [self device]; if (d) dm_switch2_power_off(d->id); }
+// The info line: firmware, battery (about, from the controller's own thresholds), what it is paired with
+- (NSString *)infoText {
+    const dm_sw2_info *d = [self device]; if (!d) return @"";
+    NSMutableArray<NSString *> *parts = [NSMutableArray new];
+    if (d->firmware[0]) [parts addObject:[NSString stringWithFormat:@"Firmware %s", d->firmware]];
+    if (d->battery_mv) {
+        NSString *v = [NSString stringWithFormat:@"%.2f V", d->battery_mv / 1000.0];
+        [parts addObject:[NSString stringWithFormat:@"Battery %@%@", d->battery_level >= 0 ? [NSString stringWithFormat:@"about %d %% (%@)", d->battery_level, v] : v, d->charging ? @", charging" : @""]];
+    }
+    if (d->pairings >= 0) {
+        int others = d->pairings - (d->paired_here ? 1 : 0);
+        [parts addObject:d->paired_here ? (others ? [NSString stringWithFormat:@"Paired with this Mac and %d other host%s", others, others == 1 ? "" : "s"] : @"Paired with this Mac")
+                                        : [NSString stringWithFormat:@"Paired with %d other host%s, not this Mac", d->pairings, d->pairings == 1 ? "" : "s"]];
+    }
+    return [parts componentsJoinedByString:@" · "];
+}
 - (void)deadMoved:(NSSlider *)s { const dm_sw2_info *d = [self device]; if (d) dm_switch2_set_dead_zone(d->id, [self slot], (float)s.doubleValue); }
 - (void)deadReset:(id)sender { (void)sender; const dm_sw2_info *d = [self device]; if (d) dm_switch2_set_dead_zone(d->id, [self slot], 0); }
 - (void)stickPicked:(NSSegmentedControl *)s { int v = (int)s.selectedSegment; if (v == _stick || v < 0) return; _stick = v; [self restart:nil]; [self takeRaw]; [self update]; }
@@ -385,9 +421,15 @@ static NSButton *button(NSString *title, id target) { NSButton *b = [NSButton bu
     _btnL = button(@"", self); _btnR = button(@"", self);
     for (NSView *v in @[_calTitle, _steps, _whoLabel, _big, _text, _progress, _spinner, _spinText, _edge, _grid, _foot, _small, _hintLabel, _btnL, _btnR]) [_cal addSubview:v];
 
+    _swatch = [[DmCtlSwatch alloc] initWithFrame:NSZeroRect]; _swatch.toolTip = @"The controller's colours (body, buttons), as it gives them";
+    _info = label(11, NSFontWeightRegular, sec);
+    _btnIdentify = button(@"Identify", self); _btnIdentify.action = @selector(identify:); _btnIdentify.toolTip = @"Flash its player lights and play the search tone";
+    _btnRumble = button(@"Test Rumble", self); _btnRumble.action = @selector(rumbleTest:); _btnRumble.toolTip = @"A buzz of about a second";
+    _btnOff = button(@"Turn Off", self); _btnOff.action = @selector(powerOff:); _btnOff.toolTip = @"Turn the controller off; a button press wakes it again";
+    for (NSButton *b in @[_btnIdentify, _btnRumble, _btnOff]) { b.controlSize = NSControlSizeSmall; b.font = [NSFont systemFontOfSize:11]; }
     _note = label(11, NSFontWeightRegular, sec);
     _note.stringValue = @"While this window is open the game gets no input from Switch 2 controllers: close it to play.";
-    for (NSView *v in @[_picker, _kindLabel, _sticks, _wait, _live, _cal, _note]) [_content addSubview:v];
+    for (NSView *v in @[_picker, _kindLabel, _sticks, _swatch, _info, _btnIdentify, _btnRumble, _btnOff, _wait, _live, _cal, _note]) [_content addSubview:v];
 
     __weak DmControllerPanel *w = self;
     dm_switch2_observe(^{ DmControllerPanel *s = w; if (!s) return; [s refresh]; if (s->_open) [s update]; },
@@ -463,6 +505,7 @@ static void hide(NSArray<NSView *> *vs) { for (NSView *v in vs) v.hidden = YES; 
     if (!_open) return;
     s2_cal c = [self calibration];
     _range.pic = _centre.pic = [self picture]; _range.needsDisplay = _centre.needsDisplay = YES;
+    NSString *info = [self infoText]; if ([self device] && ![info isEqualToString:_info.stringValue]) _info.stringValue = info;   // the battery moves with the reports
     _readout.stringValue = [NSString stringWithFormat:@"raw %u, %u · off centre %d, %d", _rawX, _rawY, (int)lroundf((float)_rawX - c.cx), (int)lroundf((float)_rawY - c.cy)];
     if (_step == ST_LETGO) _progress.doubleValue = _stillFor;
     if (_step == ST_EDGES) {
@@ -495,7 +538,19 @@ static void hide(NSArray<NSView *> *vs) { for (NSView *v in vs) v.hidden = YES; 
     }
     if ([self twoSticks]) { _sticks.selectedSegment = _stick; [_sticks sizeToFit]; place(_sticks, x, P + 1, _sticks.frame.size.width, 24, 0); }
     _picker.enabled = _sticks.enabled = !calibrating;
+    // the actions, right-aligned on the top row, and below it the colours and the info line
+    hide(@[_swatch, _info, _btnIdentify, _btnRumble, _btnOff]);
     CGFloat top = P + 26 + 10, bottom;
+    if (d) {
+        CGFloat bx = W - P;
+        for (NSButton *b in @[_btnOff, _btnRumble, _btnIdentify]) { [b sizeToFit]; CGFloat bw = b.frame.size.width; bx -= bw; place(b, bx, P + 2, bw, 22, 0); bx -= 6; }
+        _btnIdentify.enabled = _btnRumble.enabled = !d->saving; _btnOff.enabled = !d->saving && !calibrating;
+        CGFloat ix = P;
+        _swatch.has = d->has_colour; memcpy(_swatch->_body, d->colour[S2_COLOUR_BODY], 3); memcpy(_swatch->_buttons, d->colour[S2_COLOUR_BUTTONS], 3); _swatch.needsDisplay = YES;
+        if (d->has_colour) { place(_swatch, ix, top, 30, 16, 0); ix += 38; }
+        _info.stringValue = [self infoText]; place(_info, ix, top + 1, W - P - ix, 0, 0);
+        top += 16 + 10;
+    }
 
     if (!d && ![self holdsOutcome]) {   // nothing to show: why, and how to connect one
         hide(@[_live, _cal]);
@@ -657,7 +712,8 @@ static void hide(NSArray<NSView *> *vs) { for (NSView *v in vs) v.hidden = YES; 
     for (int i = 0; i < n; i++) {
         size_t len = strlen(l[i].serial); const char *tail = l[i].serial + (len > 4 ? len - 4 : 0);
         NSString *who = l[i].player >= 0 ? [NSString stringWithFormat:@"player %d", l[i].player + 1] : @"no player";
-        [menu addItemWithTitle:[NSString stringWithFormat:@"%s · …%s · %@", l[i].kind, tail, who] action:nil keyEquivalent:@""].enabled = NO;
+        NSString *batt = l[i].battery_level >= 0 ? [NSString stringWithFormat:@" · battery about %d %%%@", l[i].battery_level, l[i].charging ? @", charging" : @""] : l[i].charging ? @" · charging" : @"";
+        [menu addItemWithTitle:[NSString stringWithFormat:@"%s · …%s · %@%@", l[i].kind, tail, who, batt] action:nil keyEquivalent:@""].enabled = NO;
     }
 }
 - (void)showPanel:(NSMenuItem *)it { (void)it; sw2_panel_show(); }

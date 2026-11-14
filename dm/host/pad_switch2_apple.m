@@ -65,6 +65,7 @@ static void s2_rumble_limit(s2_haptic *v) { float lo = v->lf_amp / 1023.f, hi = 
 @property (nonatomic, readonly) uint32_t cid;   // this connection's id (dm_sw2_info.id)
 @property (nonatomic, readonly) BOOL saving;    // a calibration save is running on it
 - (BOOL)setDeadZone:(float)share slot:(int)slot;   // dm_switch2_set_dead_zone: NO for a slot it has no stick in
+- (void)identify; - (void)rumbleTest; - (void)powerOff;   // dm_switch2_identify, dm_switch2_rumble_test, dm_switch2_power_off
 @end
 
 static NSMutableDictionary<NSUUID *, S2Session *> *g_sessions;
@@ -107,6 +108,9 @@ static s2_pad *s2_pad_for(uint16_t pid) {   // a Joy-Con joins a pad that has th
     s2_hold _hold;   // the choosing gesture this Joy-Con holds now (s2_gesture)
     int _calStep; s2_stick_rest _stickRest;   // DM_SW2_CALIBRATE: 1 while it waits for the released stick's rest, 2 while it writes
     uint32_t _cid; BOOL _saving;
+    s2_firmware _fw; BOOL _hasFw; uint8_t _colour[4][3]; BOOL _hasColour;   // what the controller tells about itself (readExtras): its firmware, its colours,
+    uint16_t _battT[S2_BATTERY_STEPS]; BOOL _hasBattT; int _pairings, _pairedHere;   // its battery thresholds, how many hosts it is paired with and whether this one is
+    BOOL _flashing;   // identify: the player lights flash until it ends
     BOOL _closed;   // torn down: every command is answered nil at once, so an operation in progress (a calibration save) ends and says so
 }
 - (void)dealloc { [self saveRest]; }
@@ -120,9 +124,13 @@ static s2_pad *s2_pad_for(uint16_t pid) {   // a Joy-Con joins a pad that has th
     o->stick[0][0] = _pid == S2_PID_JOYCON_R ? d->r.rx : d->r.lx; o->stick[0][1] = _pid == S2_PID_JOYCON_R ? d->r.ry : d->r.ly;   // a Joy-Con's only stick is the one its side reports
     if (_pid == S2_PID_PRO) { o->stick[1][0] = d->r.rx; o->stick[1][1] = d->r.ry; }
     o->clock_ms = _clk.ms; o->saving = _saving;
+    if (_hasFw) s2_firmware_text(&_fw, o->firmware, sizeof o->firmware);
+    o->has_colour = _hasColour; memcpy(o->colour, _colour, sizeof o->colour);
+    o->battery_mv = d->r.battery_mv; o->charging = d->r.charge != 0; o->battery_level = s2_battery_level(_battT, _hasBattT, d->r.battery_mv);
+    o->pairings = _pairings; o->paired_here = _pairedHere;
 }
 - (instancetype)initWith:(CBPeripheral *)p pid:(uint16_t)pid use:(int)use {
-    if ((self = [super init])) { _peripheral = p; _pid = pid; _use = use; p.delegate = self; _queue = [NSMutableArray new]; s2_cal_default(&_cal[0]); s2_cal_default(&_cal[1]); _factory[0] = _cal[0]; _factory[1] = _cal[1]; _cid = ++g_next_id; }
+    if ((self = [super init])) { _peripheral = p; _pid = pid; _use = use; p.delegate = self; _queue = [NSMutableArray new]; s2_cal_default(&_cal[0]); s2_cal_default(&_cal[1]); _factory[0] = _cal[0]; _factory[1] = _cal[1]; _cid = ++g_next_id; _pairings = -1; }
     return self;
 }
 - (void)begin {
@@ -302,6 +310,7 @@ static s2_pad *s2_pad_for(uint16_t pid) {   // a Joy-Con joins a pad that has th
         if (!info || !s2_info_parse(info.bytes, info.length, &vid, &pid, serial) || vid != S2_VENDOR_ID) { [s fail:@"the controller did not answer the identity read"]; return; }
         if (pid != s->_pid) LOG("[sw2] advertised 0x%04x but identifies as 0x%04x", s->_pid, pid);
         s->_pid = pid; memcpy(s->_serial, serial, sizeof s->_serial);
+        s->_hasColour = s2_info_colours(info.bytes, info.length, s->_colour);
         void (^calibrate0)(void) = ^{ S2Session *a = w; if (!a) return;
             [a readCal:0 keep:NO done:^{ S2Session *b = w; if (!b) return;
                 void (^next)(void) = ^{ S2Session *c = w; if (!c) return; [c finish]; };
@@ -373,7 +382,65 @@ static s2_pad *s2_pad_for(uint16_t pid) {   // a Joy-Con joins a pad that has th
             if (!r2) { [t fail:@"enabling the features was refused"]; return; }
             [t attachPad];
             [t logUserSlots];
+            [t readExtras];
         }];
+    }];
+}
+// Read only, once per connection, after the pad is attached: the firmware version, the battery thresholds and the pairing table (its count and whether this host is in it;
+// the link keys are read with it and dropped here, never logged). One log line names them
+- (void)readExtras {
+    __weak S2Session *w = self;
+    [self send:S2_CMD_FIRMWARE sub:S2_SUB_FIRMWARE_VERSION payload:NULL len:0 done:^(NSData *r) {
+        S2Session *s = w; if (!s) return;
+        s->_hasFw = r.length > S2_CMD_REPLY_DATA && s2_firmware_parse((const uint8_t *)r.bytes + S2_CMD_REPLY_DATA, r.length - S2_CMD_REPLY_DATA, &s->_fw);
+        s2op_read(s, S2_ADDR_BATTERY_TABLE, 2 * S2_BATTERY_STEPS, S2_CAL_TRIES, nil, ^(NSData *bt) {
+            S2Session *t = w; if (!t) return;
+            t->_hasBattT = bt && s2_battery_table(bt.bytes, bt.length, t->_battT);
+            s2op_read(t, S2_ADDR_PAIRINGS, S2_PAIRINGS_READ, S2_CAL_TRIES, nil, ^(NSData *pt) {
+                S2Session *u = w; if (!u) return;
+                int here = 0; u->_pairings = pt ? s2_pairings(pt.bytes, pt.length, g_host_known ? g_host : NULL, &here) : -1; u->_pairedHere = here;
+                char fw[40] = "unknown"; if (u->_hasFw) s2_firmware_text(&u->_fw, fw, sizeof fw);
+                LOG("[sw2] %s %s: firmware %s; colours %s; battery thresholds %s; paired with %s", s2_kind(u->_pid), u->_serial, fw,
+                    u->_hasColour ? [NSString stringWithFormat:@"body #%02X%02X%02X, buttons #%02X%02X%02X", u->_colour[0][0], u->_colour[0][1], u->_colour[0][2], u->_colour[1][0], u->_colour[1][1], u->_colour[1][2]].UTF8String : "none",
+                    u->_hasBattT ? "read" : "not read (no level)",
+                    u->_pairings < 0 ? "unknown hosts" : [NSString stringWithFormat:@"%d host%s%s", u->_pairings, u->_pairings == 1 ? "" : "s", here ? ", this one among them" : ""].UTF8String);
+                if (g_changed) g_changed();
+            });
+        });
+    }];
+}
+// ---- the panel's actions (pad_switch2_apple.h): none while a save runs, so nothing comes between a save's erase and its write-back ----
+- (BOOL)actionRefused:(const char *)what {
+    if (_saving || _closed || !_live) { LOG("[sw2] %s: not %s: %s", s2_kind(_pid), what, _saving ? "a save is running" : "it is no longer connected"); return YES; }
+    return NO;
+}
+// The lights flash and the console's search tone plays, for a few seconds; then the lights show the player again
+- (void)identify {
+    if ([self actionRefused:"identified"] || _flashing) return;
+    _flashing = YES;
+    uint8_t on[S2_LEDS_FLASH_LEN] = {1}, tone[S2_VIB_SAMPLE_LEN] = {S2_SAMPLE_SEARCH};
+    [self send:S2_CMD_LEDS sub:S2_SUB_LEDS_FLASH payload:on len:sizeof on done:nil];
+    [self send:S2_CMD_VIBRATION sub:S2_SUB_VIB_SAMPLE payload:tone len:sizeof tone done:nil];
+    __weak S2Session *w = self;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 4 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+        S2Session *s = w; if (!s) return;
+        uint8_t off[S2_LEDS_FLASH_LEN] = {0};
+        [s send:S2_CMD_LEDS sub:S2_SUB_LEDS_FLASH payload:off len:sizeof off done:^(NSData *r) { (void)r; S2Session *t = w; if (!t) return; t->_flashing = NO; [t setLEDs:nil]; }];
+    });
+}
+- (void)rumbleTest {
+    if ([self actionRefused:"buzzed"]) return;
+    uint8_t buzz[S2_VIB_SAMPLE_LEN] = {S2_SAMPLE_BUZZ};
+    [self send:S2_CMD_VIBRATION sub:S2_SUB_VIB_SAMPLE payload:buzz len:sizeof buzz done:nil];
+}
+// Off: the controller answers, drops the link and goes dark (didDisconnect cleans up); a link still up two seconds later is dropped from here
+- (void)powerOff {
+    if ([self actionRefused:"turned off"]) return;
+    LOG("[sw2] %s %s: turning it off (a button press wakes it)", s2_kind(_pid), _serial);
+    uint8_t z[S2_POWER_OFF_LEN] = {0};
+    __weak S2Session *w = self;
+    [self send:S2_CMD_POWER sub:S2_SUB_POWER_OFF payload:z len:sizeof z done:^(NSData *r) { (void)r;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{ S2Session *s = w; if (s && !s->_closed) [g_central cancelPeripheralConnection:s.peripheral]; });
     }];
 }
 // Read only, once per connection: which of the user calibration sector's stick slots carry the marker (B2 A1), and their bytes. The second stick's is read and written at
@@ -695,6 +762,9 @@ void dm_switch2_save(uint32_t id, int slot, s2_cal cal, void (^done)(S2CalOutcom
     [s saveCal:cal slot:slot done:done];
 }
 
+void dm_switch2_identify(uint32_t id) { [s2_session_by_id(id) identify]; }
+void dm_switch2_rumble_test(uint32_t id) { [s2_session_by_id(id) rumbleTest]; }
+void dm_switch2_power_off(uint32_t id) { [s2_session_by_id(id) powerOff]; }
 void dm_switch2_set_dead_zone(uint32_t id, int slot, float share) {
     S2Session *s = s2_session_by_id(id);
     if (!s || ![s setDeadZone:share slot:slot]) return;

@@ -26,6 +26,8 @@ fps_target	60
 # which iOS's clock governor reads as headroom (30 fps without them, a steady 60 for 300 s with them and the encode thread); render pipelines through MTL4Compiler give the
 # pipeline archive, the prepare step and the hybrid pipelines on the iPhone too (5,100 prewarm lines prepared in 0.28 s at start instead of compiling on first use)
 present_snap	on
+# Metal encoding on its own thread on the Mac too: running laps outdoors at 120 fps (M5 Max) it took 10,000 frames from 106.4 to 112.0 fps average, the 1% low from 52.6 to 58.2 and the 0.1% low from 43.6 to 55.3 fps (submit 4.49 -> 3.77 ms)
+enc_thread	on
 pso_mtl4	on
 # Screen shape (patches.py): DM_SCREEN_ASPECT renders a screen taller than 16:9 in its own shape, the iPhone Duo's 1.43:1 as
 # 1920x1344 with a 1280x896 layout space, the HUD at the screen's edges and 16:9's sides in view (more above and below); the iOS launcher offers it

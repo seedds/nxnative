@@ -16,7 +16,8 @@ strict = dmsh_chain.check_tools
 def allowed(): return os.environ.get(ALLOW) == '1'
 
 def metal_version(sdk):   # as dmsh_chain.tools_now records it: the first line of metal --version, 'missing' without one
-    r = subprocess.run(['xcrun', '-sdk', sdk, 'metal', '--version'], capture_output=True, text=True)
+    try: r = subprocess.run(['xcrun', '-sdk', sdk, 'metal', '--version'], capture_output=True, text=True)
+    except FileNotFoundError: return 'missing'   # no xcrun at all (no Xcode, no command line tools): no compiler, as an xcrun that finds none
     return (r.stdout.splitlines() or ['missing'])[0]
 
 def other_metal_message(metal):

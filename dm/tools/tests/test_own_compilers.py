@@ -57,6 +57,12 @@ class CheckTools(unittest.TestCase):
             bad, out = self.check([failure], allow=allow)
             self.assertEqual(bad, [failure]); self.assertEqual(out, '')
 
+    def test_no_xcrun_is_a_missing_compiler(self):   # a Mac without Xcode or its command line tools, and any other system: 'missing', not a traceback
+        def no_xcrun(*a, **k): raise FileNotFoundError(2, 'No such file or directory', 'xcrun')
+        with mock.patch.object(own_compilers.subprocess, 'run', no_xcrun):
+            self.assertEqual(own_compilers.metal_version('macosx'), 'missing')
+            self.assertEqual(own_compilers.other_metal(), [])
+
     def test_missing_or_translator_still_fail(self):   # returned to dmsh_build.py, which stops with its own message
         xlate = mismatch('dmsh_xlate.dll', '0' * 16)
         for bad, want in (([mismatch('metal_macosx', 'missing')],) * 2, ([mismatch('spirv-cross', 'missing')],) * 2, ([xlate, mismatch('metal_macosx', OTHER)], [xlate])):

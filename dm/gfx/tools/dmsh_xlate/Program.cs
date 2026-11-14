@@ -10,7 +10,8 @@
 //           "tex": { "slot": "2d|2darray|cube|cubearray|3d|buffer|1d|1darray|2dms|2dmsarray", ... }, "img": { "slot": { "type", "fmt" } },
 //           "attr": { "location": "float|sint|uint" }, "fout": { "target": "float|sint|uint" }, "local": [x, y, z] }]
 //   Output: <key>.spv and <key>.res.json (offsets of storage buffer slots in c0, etc.; decoding texture handle → slot number is done in the script that builds the metallib;
-//           "fetch1d": the texture slots read by 1D integer fetches translated as wrapped 2D reads, see RecordTexelFetch1D)
+//           "fetch1d": the texture slots read by 1D integer fetches translated as wrapped 2D reads, see RecordTexelFetch1D;
+//           a texture's or an image's "tbx": a buffer texture's or buffer image's index in the offset table, TranslationFlags.MetalBufferImageBias)
 using Ryujinx.Common.Memory;
 using Ryujinx.Graphics.Shader;
 using Ryujinx.Graphics.Shader.Translation;
@@ -68,6 +69,7 @@ static class SwshXlate
         // c1 constant segment (the 0x100 bytes before the control segment in the shader package): the jump table of indirect jump BRX lives here (LDC c[1]); without it the translator cannot resolve jump targets and control flow goes wrong (particle shaders loop forever)
         public int QueryConstantBuffer1Size() => _c1.Length;
         public int[] QueryAmpereComputeC0Layout() => _job["nvn2_cs"] is JsonArray l ? l.Select(v => (int)v).ToArray() : null;
+        public int QueryAmpereStageBank() => _job["stage_bank"] is JsonNode b ? (int)b : -1;   // an NVN2 graphics stage's own bank, its push block 1 + stage index (dmsh_build.py job_for)
         public int[] QueryAmpereStageMemory() => _job["stage_memory"] is JsonArray l ? l.Select(v => (int)v).ToArray() : null;   // a task or mesh shader (dmsh_meshstage.py)
         public uint ConstantBuffer1Read(int offset) { if (offset >= 0 && offset + 4 <= _c1.Length) return BitConverter.ToUInt32(_c1, offset); Notes.Add($"c1 read out of bounds +{offset:X} (c1 length {_c1.Length})"); return 0; }
         // All resources go into set 0, each with a distinct binding number (spirv-cross emits them as one argument buffer); the translator's convention of giving the buffer of constant segment number index binding = index+1 is not relied on
@@ -201,7 +203,7 @@ static class SwshXlate
                 byte[] code = File.ReadAllBytes((string)job["code"]);
                 var acc = new Accessor(code, job);
                 // Job debug = false: turn off DebugMode (DebugMode skips the AST optimizer and the output is full of temporaries; semantics unchanged)
-                var flags = TranslationFlags.MetalImageAtomics | (job["debug"] is JsonNode dbg && !(bool)dbg ? 0 : TranslationFlags.DebugMode) | ((string)job["stage"] == "cs" ? TranslationFlags.Compute : 0) | ((string)job["arch"] == "sm86" ? TranslationFlags.Ampere : 0);
+                var flags = TranslationFlags.MetalImageAtomics | TranslationFlags.MetalUniformBounds | TranslationFlags.MetalBufferImageBias | (job["debug"] is JsonNode dbg && !(bool)dbg ? 0 : TranslationFlags.DebugMode) | ((string)job["stage"] == "cs" ? TranslationFlags.Compute : 0) | ((string)job["arch"] == "sm86" ? TranslationFlags.Ampere : 0);
                 var ctx = Translator.CreateContext(0, acc, new TranslationOptions(TargetLanguage.Spirv, TargetApi.Vulkan, flags));
                 bool geometry = job["geometry_topology"] != null;
                 ShaderProgram p = ctx.Translate(geometry);
@@ -234,11 +236,16 @@ static class SwshXlate
                     ["geometry_stride"] = geometry ? ctx.GetResourceReservations().OutputSizePerInvocation : 0,
                     ["uses_frag_coord"] = p.Info.UsesFragCoord, ["frag_out_map"] = p.Info.FragmentOutputMap,
                 };
-                foreach (var b in p.Info.CBuffers) res["cbufs"].AsArray().Add(new JsonObject { ["binding"] = b.Binding, ["slot"] = b.Slot });
-                foreach (var b in p.Info.SBuffers) res["sbufs"].AsArray().Add(new JsonObject { ["binding"] = b.Binding, ["slot"] = b.Slot, ["cb_slot"] = b.SbCbSlot, ["cb_offset"] = b.SbCbOffset, ["flags"] = (int)b.Flags });
+                foreach (var b in p.Info.CBuffers) res["cbufs"].AsArray().Add((JsonNode)new JsonObject { ["binding"] = b.Binding, ["slot"] = b.Slot, ["fixed"] = b.FixedSize });   // fixed: a game uniform slot's bytes read at fixed offsets (TranslationFlags.MetalUniformBounds), which the host makes readable
+                foreach (var b in p.Info.SBuffers) res["sbufs"].AsArray().Add((JsonNode)new JsonObject { ["binding"] = b.Binding, ["slot"] = b.Slot, ["cb_slot"] = b.SbCbSlot, ["cb_offset"] = b.SbCbOffset, ["flags"] = (int)b.Flags });
                 foreach (var (list, name) in new[] { (p.Info.Textures, "textures"), (p.Info.Images, "images") })
-                    foreach (var t in list) res[name].AsArray().Add(new JsonObject { ["binding"] = t.Binding, ["type"] = (int)t.Type, ["format"] = t.Format.ToString(), ["cbuf_slot"] = t.CbufSlot, ["handle"] = t.HandleIndex, ["array"] = t.ArrayLength, ["separate"] = t.Separate, ["flags"] = (int)t.Flags });
-                if (acc.Fetch1D.Count > 0) { var f1 = new JsonArray(); foreach (int h in acc.Fetch1D) f1.Add(h); res["fetch1d"] = f1; }
+                    foreach (var t in list)
+                    {
+                        var o = new JsonObject { ["binding"] = t.Binding, ["type"] = (int)t.Type, ["format"] = t.Format.ToString(), ["cbuf_slot"] = t.CbufSlot, ["handle"] = t.HandleIndex, ["array"] = t.ArrayLength, ["separate"] = t.Separate, ["flags"] = (int)t.Flags };
+                        if (t.BufferBias >= 0) o["tbx"] = t.BufferBias;   // a buffer image's or buffer texture's index in the offset table (TranslationFlags.MetalBufferImageBias; dmsh_reflect.py gives it to the binding, nvn_mtl.m tbuf_lead)
+                        res[name].AsArray().Add((JsonNode)o);
+                    }
+                if (acc.Fetch1D.Count > 0) { var f1 = new JsonArray(); foreach (int h in acc.Fetch1D) f1.Add((JsonNode)JsonValue.Create(h)); res["fetch1d"] = f1; }
                 File.WriteAllText(Path.Combine(outDir, key + ".res.json"), res.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
                 ok++;
             }

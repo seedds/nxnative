@@ -42,9 +42,6 @@ shader_note	Ocarina of Time shaders
 fps_target	60
 
 # ---- Graphics ----
-# agl wraps its clears in render conditions on Donkey Kong Bananza and Splatoon Raiders; the same library here
-render_cond	on
-gpu_timestamps	segment
 draw_barriers	game
 # As Tears of the Kingdom: the terrain's height, blend and hole maps are written by the CPU into textures after they are created. Without these keys they stay zero: holes in the ground and the wrong materials
 tex_flush_upload	on

@@ -2,8 +2,11 @@
 // 1920x1080 image is replaced by the spatial scaler, which fills the whole image with the texture's colour; equal sizes, another shader, and DM_UPSCALER unset
 // (the last run) leave the dispatch to the shader. Runs under any profile: the named shader is the profile's first upscaler (DM_GAME_UPSCALER_KEYS), and a profile with
 // none swaps no shader; the MetalFX draw itself (up_mfx_encode) does not look at the key. The colour (up_mfx_color) comes from synthetic code holding the curves' constants: a variant with sRGB input
-// comes out decoded to linear, and one whose output stays encoded is left to its shader
+// comes out decoded to linear, and one whose output stays encoded is left to its shader. The scaler comes after the work before it and the next draw pass after the scaler
+// (mfx_order): a slow pass that ends with no barrier writes the input just before each dispatch, and a draw pass copies the image just after it (the Makefile's
+// DM_NVN_BARRIER=game run makes that pass skip its consumer barrier unless the scaler cleared the relaxed end)
 #include "../nvn/nvn_mtl.m"
+#include "t_mfx_passes.h"
 void *front_metal_layer(void) { return NULL; }
 module_t *module_of(const void *p) { (void)p; return NULL; }
 module_t *g_mod; int g_nmod;
@@ -85,6 +88,17 @@ int main(void) { @autoreleasepool {
     os_unfair_lock_lock(&g_rmu); id<MTLTexture> written = tex_by_id(702); os_unfair_lock_unlock(&g_rmu);
     CHECK(matches(written, on ? colour : black, MTLRegionMake2D(0, 0, 1920, 1080), black), on ? "MetalFX filled the whole 1920x1080 image with the texture's colour" : "without the switch the image is untouched");
     if (on) {
+        // Passes around the scaler (see the top): each round a new colour, the last one the texture's colour again for the checks below
+        tex_t cp = texture(82, 1920, 1080, NVN_FORMAT_RGBA16F); mtl_tex_init(&cp);
+        const float rc[2][4] = {{0.125f, 0.625f, 0.25f, 1.0f}, {colour[0], colour[1], colour[2], colour[3]}}; int drawn = 0, stale_in = 0, stale_out = 0;
+        for (int round = 0; round < 8; round++) {
+            mtl_sub_begin(); drawn += slow_draw(tex_mtl(&in), rc[round & 1], 200000, 1); drawn += up_mfx_encode(named); drawn += copy_draw(written, tex_mtl(&cp));
+            CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull) && !mtl_last_commit_error(), "the submission with passes around the scaler completes");
+            stale_in += !matches(written, rc[round & 1], MTLRegionMake2D(0, 0, 1920, 1080), black); stale_out += !matches(tex_mtl(&cp), rc[round & 1], MTLRegionMake2D(0, 0, 1920, 1080), black);
+        }
+        CHECK(drawn == 24, "the passes around the scaler are drawn and MetalFX draws each dispatch");
+        CHECK(!stale_in, "the scaler reads the input the pass just before it wrote, in every round");
+        CHECK(!stale_out, "the pass after the scaler reads its output, in every round");
         tex_t packed = texture(80, 976, 548, NVN_FORMAT_R11G11B10F);
         mtl_tex_init(&packed); mtl_reg_tex(704, &packed, NULL);
         const float hdr[4] = {2.0f, 0.5f, 0.25f, 1.0f};

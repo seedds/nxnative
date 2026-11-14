@@ -68,9 +68,13 @@ int front_fullscreen(void) { return g_fullscreen; }   // nvn_mtl.m link_latency:
 // evenly: the display link counts a tick on the refresh nearest each 1/60 s slot (nvn_mtl.m link_range), so frames stay up 2 and 3 refreshes in turn (13.9 / 20.8 ms) and Apple's HUD shows
 // the frame interval jumping between them. In fullscreen, a screen whose rate is not a multiple of the game's switches to the mode of the same size with the highest rate that is (144 → 120 Hz
 // for 60 and 30 fps), for this app only: macOS switches it back when the host quits, crashes included, and leaving fullscreen or that screen switches it back at once. A window keeps the
-// screen's rate, because the switch changes the whole screen for every app and most external screens go black for a second or more. A screen with no such mode keeps the virtual ticks
+// screen's rate, because the switch changes the whole screen for every app and most external screens go black for a second or more. A screen with no such mode keeps the virtual ticks.
+// A variable-refresh screen (ProMotion) in fullscreen switches to a fixed-rate mode of the same size at a multiple of the game's rate (120 → 60 Hz for 60 and 30 fps), though its own
+// rate is a multiple: there the display link at 60 Hz missed its targets (every present a 120 Hz refresh late and every other tick skipped, 40 fps on an M5 Pro at frame latency 2;
+// 1 → 2 → 3 vsync steps at latency 1, issue #347), and the fixed 60 Hz mode held 60.0 fps at latency 1 (docs/reference/frame-rate.md). A screen with no such mode keeps its rate, and
+// the 120 Hz link paces it (nvn_mtl.m link_vrr_120)
 static NSWindow *g_win; static _Atomic int g_match_want;   // the game's window; the frame rate to match (0 = not known yet), written by the present thread only
-static CGDirectDisplayID g_match_id; static CGDisplayModeRef g_match_orig;   // main thread: the screen this host switched and its own mode (NULL = none switched)
+static CGDirectDisplayID g_match_id; static CGDisplayModeRef g_match_orig; static int g_match_orig_vrr;   // main thread: the screen this host switched, its own mode (NULL = none switched) and whether that mode is variable-refresh
 static double mode_hz(CGDisplayModeRef m) { double hz = CGDisplayModeGetRefreshRate(m); return hz > 0 ? hz : 0; }   // 0 = not known (older built-in screens report none)
 static int hz_multiple(double hz, int fps) { double k = round(hz / fps); return k >= 1 && fabs(hz / fps - k) < 0.01; }   // 59.94 Hz counts as 60
 static CGError screen_set_mode(CGDirectDisplayID id, CGDisplayModeRef m) {   // for this app only (kCGConfigureForAppOnly)
@@ -83,7 +87,7 @@ static CGError screen_set_mode(CGDirectDisplayID id, CGDisplayModeRef m) {   // 
 static void screen_match_restore(int on_it) {   // main thread: the screen this host switched gets its own mode again; on_it: the window is on that screen
     double hz = mode_hz(g_match_orig); CGError r = screen_set_mode(g_match_id, g_match_orig);
     LOG("front end: screen %s %.0f Hz", r == kCGErrorSuccess ? "back at" : "could not be switched back to", hz);
-    if (r == kCGErrorSuccess && on_it && hz > 0) g_screen_fps = (int)round(hz);
+    if (r == kCGErrorSuccess && on_it) { if (hz > 0) g_screen_fps = (int)round(hz); g_screen_variable_refresh = g_match_orig_vrr; }   // the screen observer may not show the mode yet
     CGDisplayModeRelease(g_match_orig); g_match_orig = NULL;
 }
 static void screen_match_apply(void) {   // main thread: on a new frame rate, on entering and leaving fullscreen and on a move to another screen
@@ -95,7 +99,10 @@ static void screen_match_apply(void) {   // main thread: on a new frame rate, on
     CGDisplayModeRef cur = CGDisplayCopyDisplayMode(id);
     if (!cur) return;
     double hz = mode_hz(cur);
-    if (hz <= 0 || hz_multiple(hz, want)) {   // already a multiple, or not known
+    // the current mode is variable-refresh: the screen's own mode as screen_refresh saw it; one this host switched to as it chose it (the screen observer may lag), so a
+    // fixed mode is never left for the variable one at a rate it already matches
+    int vrr = !g_match_orig ? g_screen_variable_refresh : CGDisplayModeGetIODisplayModeID(cur) == CGDisplayModeGetIODisplayModeID(g_match_orig) ? g_match_orig_vrr : 0;
+    if (!vrr && (hz <= 0 || hz_multiple(hz, want))) {   // already a multiple, or not known
         if (g_match_orig && hz > 0) g_screen_fps = (int)round(hz);   // the screen this host switched: its rate from the mode, which maximumFramesPerSecond (the screen observer) may not show yet
         CGDisplayModeRelease(cur); return;
     }
@@ -105,13 +112,20 @@ static void screen_match_apply(void) {   // main thread: on a new frame rate, on
     for (CFIndex i = 0; modes && i < CFArrayGetCount(modes); i++) {
         CGDisplayModeRef m = (CGDisplayModeRef)CFArrayGetValueAtIndex(modes, i); double r = mode_hz(m);
         if (CGDisplayModeGetWidth(m) != w || CGDisplayModeGetHeight(m) != h || CGDisplayModeGetPixelWidth(m) != pw || CGDisplayModeGetPixelHeight(m) != ph || !CGDisplayModeIsUsableForDesktopGUI(m)) continue;
+        // on a variable-refresh screen only a fixed-rate mode: not the current one, nor one at its rate (the variable mode at the screen's top rate)
+        if (vrr && (CGDisplayModeGetIODisplayModeID(m) == CGDisplayModeGetIODisplayModeID(cur) || (hz > 0 && fabs(r - hz) < 0.5))) continue;
         if (hz_multiple(r, want) && r > pick_hz) { pick = m; pick_hz = r; }
     }
-    if (!pick) LOG("front end: screen at %.0f Hz has no mode of this size at a multiple of %d Hz: frames are paced on the nearest refreshes", hz, want);
+    if (!pick && vrr && (hz <= 0 || hz_multiple(hz, want))) LOG("front end: variable-refresh screen at %.0f Hz has no fixed-rate mode of this size at a multiple of %d Hz: it keeps its rate", hz, want);
+    else if (!pick) LOG("front end: screen at %.0f Hz has no mode of this size at a multiple of %d Hz: frames are paced on the nearest refreshes", hz, want);
     else {
         CGError r = screen_set_mode(id, pick);
-        LOG("front end: screen at %.0f Hz %s %.0f Hz for %d fps in fullscreen (DM_SCREEN_MATCH=0 keeps it)", hz, r == kCGErrorSuccess ? "switched to" : "could not be switched to", pick_hz, want);
-        if (r == kCGErrorSuccess) { if (!g_match_orig) { g_match_orig = CGDisplayModeRetain(cur); g_match_id = id; } g_screen_fps = (int)round(pick_hz); }
+        LOG("front end: %sscreen at %.0f Hz %s %s%.0f Hz for %d fps in fullscreen (DM_SCREEN_MATCH=0 keeps it)", vrr ? "variable-refresh " : "", hz, r == kCGErrorSuccess ? "switched to" : "could not be switched to", vrr ? "fixed " : "", pick_hz, want);
+        if (r == kCGErrorSuccess) {
+            if (!g_match_orig) { g_match_orig = CGDisplayModeRetain(cur); g_match_id = id; g_match_orig_vrr = vrr; }
+            g_screen_fps = (int)round(pick_hz);   // the screen observer may not show the new mode yet: its rate, and whether it is variable (back to the screen's own mode: as that was)
+            g_screen_variable_refresh = CGDisplayModeGetIODisplayModeID(pick) == CGDisplayModeGetIODisplayModeID(g_match_orig) ? g_match_orig_vrr : vrr ? 0 : g_screen_variable_refresh;
+        }
     }
     if (modes) CFRelease(modes);
     CGDisplayModeRelease(cur);
@@ -227,8 +241,9 @@ static void pro_players_changed(GCController *gone) {
 static void pro_devices_changed(void) { pro_players_changed(nil); }
 // DM_PAD_PRESS_TO_JOIN=1: a controller is no player until one of its buttons is pressed, then it is the lowest player free, as a console's "press a button" screen.
 // Whatever the port, the order of connection or the link (Bluetooth has no port), and for identical pads too: so the players pick their own order. Not with DM_PAD_MERGE
+// A raw HID pad joins this way without the setting too (hidpad_first_press), and then takes its slot as a connecting controller does (pad_slot_take)
 static int pad_join(const void *owner, const char *name) {
-    int p = pad_slot_take_lowest(&g_slots, owner, name); char nb[16];
+    int p = g_press_to_join ? pad_slot_take_lowest(&g_slots, owner, name) : pad_slot_take(&g_slots, owner, name); char nb[16];
     if (p < 0) { LOG("controller '%s': a button pressed, but all %d players are taken", name, DM_PLAYERS); return -1; }
     npad_name(p, nb, sizeof nb); LOG("controller '%s': a button pressed: player %d (npad %s)", name, p + 1, nb);
     dm_pad_players(pad_slot_mask(&g_slots));
@@ -335,19 +350,24 @@ static void input_resume(void) {
     pads_reread();
 }
 // Raw HID gamepads (pad_hid_mac.h): a player slot each, as a GameController controller, named by the device's product name. Identical pads that GameController lists
-// fewer of are read the same way, an identical Pro Controller from its report 0x30
+// fewer of are read the same way, an identical Pro Controller from its report 0x30.
+// A HID device that declares a GamePad or Joystick collection only claims to be a controller: a keyboard and mouse receiver can declare one and never send a report through it
+// (a Keychron Link, 3434:d030, GitHub issue #1657), and nothing in its descriptor tells it from a pad at rest. So a raw HID pad is a player from its first button press, not
+// from its connection, with or without DM_PAD_PRESS_TO_JOIN: a device that never presses takes no player from a real controller. An identical pad (twin) is a model
+// GameController lists, so it is a player at its connection unless the setting is on
+static int hidpad_first_press(const hid_pad *d) { return !g_merge && (g_press_to_join || !d->twin); }
 static void hidpad_read(hid_pad *d) {
     if (!g_input_on || hq_blocks_input(g_hq.phase)) return;
     int p = g_merge ? 0 : pad_slot_of(&g_slots, d);
     int pro = d->twin && hidpad_is_pro(d);
-    if (p < 0 && (!g_press_to_join || !(pro ? d->pro_m : pad_hid_buttons(&d->st)) || (p = pad_join(d, d->name)) < 0)) return;   // DM_PAD_PRESS_TO_JOIN=1: joins at its first button
+    if (p < 0 && (!hidpad_first_press(d) || !(pro ? d->pro_m : pad_hid_buttons(&d->st)) || (p = pad_join(d, d->name)) < 0)) return;   // joins at its first button
     if (cp_poll()) return;   // the controller applet's prompt has the controllers
     if (pro) { pad_set(p, d->pro_m, d->pro_s[0], d->pro_s[1], d->pro_s[2], d->pro_s[3]); return; }
     int32_t s[4]; pad_hid_sticks(&d->st, s);
     pad_set(p, pad_hid_buttons(&d->st), s[0], s[1], s[2], s[3]);
 }
 static void hidpad_attach(hid_pad *d) {
-    if (g_press_to_join && !g_merge) { LOG("controller '%s' (HID) connected: press a button to play (DM_PAD_PRESS_TO_JOIN)", d->name); hidpad_read(d); return; }
+    if (hidpad_first_press(d)) { LOG("controller '%s' (HID) connected: press a button to play%s", d->name, g_press_to_join ? " (DM_PAD_PRESS_TO_JOIN)" : ""); hidpad_read(d); return; }
     int p = g_merge ? 0 : pad_slot_take(&g_slots, d, d->name); char nb[16];
     if (p < 0) { LOG("controller '%s' (HID) connected: all %d players are taken, not used", d->name, DM_PLAYERS); return; }
     npad_name(p, nb, sizeof nb); LOG("controller '%s' (HID) connected: player %d (npad %s)", d->name, p + 1, nb);
@@ -393,13 +413,14 @@ static void s2pad_read(s2_pad *d) {
     if (m) merge_rumble_to_s2(1);
     pad_set(p, m, s[0], s[1], s[2], s[3]);
 }
-static void s2pad_attach(s2_pad *d) {
-    if (g_press_to_join && !g_merge) { LOG("controller '%s' (Bluetooth) connected: press a button to play (DM_PAD_PRESS_TO_JOIN)", d->name); cp_poll(); return; }
+static int s2pad_attach(s2_pad *d) {   // 1: kept (a player, or waiting for its first button press); 0: no free player (pad_switch2_apple.h)
+    if (g_press_to_join && !g_merge) { LOG("controller '%s' (Bluetooth) connected: press a button to play (DM_PAD_PRESS_TO_JOIN)", d->name); cp_poll(); return 1; }
     int p = g_merge ? 0 : pad_slot_take(&g_slots, d, d->name); char nb[16];
-    if (p < 0) { LOG("controller '%s' (Bluetooth) connected: all %d players are taken, not used", d->name, DM_PLAYERS); return; }
+    if (p < 0) { LOG("controller '%s' (Bluetooth) connected: all %d players are taken, not used", d->name, DM_PLAYERS); return 0; }
     npad_name(p, nb, sizeof nb); LOG("controller '%s' (Bluetooth) connected: player %d (npad %s)", d->name, p + 1, nb);
     if (!g_merge) { dm_pad_players(pad_slot_mask(&g_slots)); dm_haptics_apple_set_sink(p, dm_switch2_rumble); }   // its rumble goes over Bluetooth, not to a Core Haptics engine
     cp_poll();   // one controller fewer to wait for
+    return 1;
 }
 static void s2pad_detach(s2_pad *d) {   // d is already off g_s2pads
     if (g_merge) {

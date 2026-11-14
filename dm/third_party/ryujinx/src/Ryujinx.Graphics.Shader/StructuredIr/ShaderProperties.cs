@@ -22,6 +22,37 @@ namespace Ryujinx.Graphics.Shader.StructuredIr
         // nxnative: a global memory access traced to no storage buffer goes through a physical storage buffer pointer (GlobalToStorage.TryGenerateRawStorageOp)
         public bool UsesPhysicalPointers { get; set; }
 
+        // nxnative: uniform bounds (TranslationFlags.MetalUniformBounds). The binding of each game uniform slot's buffer, whose reads past the bound size give 0, with its
+        // index in the size table; the words of each slot the shader reads at fixed offsets (the end of the highest one), which the host makes readable; and the binding of
+        // the size table (Constants.NxUniformSizesBank) that reads at computed offsets compare with, -1 when the shader has none
+        private readonly Dictionary<int, int> _boundedConstantBuffers = new();
+        public IReadOnlyDictionary<int, int> BoundedConstantBuffers => _boundedConstantBuffers;
+        public int[] FixedUniformWords { get; } = new int[Constants.NxUniformSlots];
+        public int UniformSizesBinding { get; set; } = -1;
+
+        // nxnative: buffer texture offsets (TranslationFlags.MetalBufferImageBias): each buffer image's and each buffer texture's index in the offset table, and the
+        // binding of the table (Constants.NxBufferImageBiasBank), -1 when the shader has none
+        private readonly Dictionary<SetBindingPair, int> _bufferImageBiases = new();
+        public IReadOnlyDictionary<SetBindingPair, int> BufferImageBiases => _bufferImageBiases;
+        private readonly Dictionary<SetBindingPair, int> _bufferTextureBiases = new();
+        public IReadOnlyDictionary<SetBindingPair, int> BufferTextureBiases => _bufferTextureBiases;
+        public int BufferImageBiasBinding { get; set; } = -1;
+
+        public void AddBufferImageBias(SetBindingPair image, int index)
+        {
+            _bufferImageBiases[image] = index;
+        }
+
+        public void AddBufferTextureBias(SetBindingPair texture, int index)
+        {
+            _bufferTextureBiases[texture] = index;
+        }
+
+        public void AddBoundedConstantBuffer(int binding, int sizeIndex)
+        {
+            _boundedConstantBuffers[binding] = sizeIndex;
+        }
+
         public ShaderProperties()
         {
             _constantBuffers = new Dictionary<int, BufferDefinition>();

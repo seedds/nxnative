@@ -43,13 +43,13 @@ class ToolPath(unittest.TestCase):   # issue #1474: TOOL_PATHS are fallbacks, so
     def test_caller_tools_win_and_fallbacks_find_the_rest(self):
         with tempfile.TemporaryDirectory() as folder:
             caller, fallback = Path(folder) / 'Project Tools', Path(folder) / 'fallback'   # a space in the caller's folder
-            for directory, names in ((caller, ('zstd', 'dotnet')), (fallback, ('zstd', 'dotnet', 'xcodegen'))):
+            for directory, names in ((caller, ('zstd', 'make')), (fallback, ('zstd', 'make', 'xcodegen'))):
                 directory.mkdir()
                 for name in names: tool = directory / name; tool.write_text('#!/bin/sh\n'); tool.chmod(0o755)
             with mock.patch.object(nsp, 'TOOL_PATHS', [str(fallback)]):
-                env = nsp.tool_env({'PATH': str(caller), 'HOME': '/h'})
-            self.assertEqual(env, {'PATH': os.pathsep.join([str(caller), str(fallback)]), 'HOME': '/h'})
-            for name in ('zstd', 'dotnet'): self.assertEqual(shutil.which(name, path=env['PATH']), str(caller / name))
+                env = nsp.tool_env({'PATH': str(caller), 'HOME': '/h', 'DM_SAVE_SYNC': '/cloud', 'DM_SAVE_SYNC_CHOICE': 'cloud'})   # the build's host runs play on scratch saves: never the player's cloud (docs/reference/services.md)
+            self.assertEqual(env, {'PATH': os.pathsep.join([str(caller), str(fallback)]), 'HOME': '/h', 'DM_SAVE_SYNC': '0'})
+            for name in ('zstd', 'make'): self.assertEqual(shutil.which(name, path=env['PATH']), str(caller / name))
             self.assertEqual(shutil.which('xcodegen', path=env['PATH']), str(fallback / 'xcodegen'))
 
     def test_no_path_takes_the_system_path(self):   # unset or empty: an empty PATH entry would search the current folder
@@ -64,7 +64,7 @@ class Prereqs(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d, mock.patch.object(nsp, '_importable', lambda m: True), mock.patch.object(nsp.shutil, 'which', which), \
                 mock.patch.object(nsp.subprocess, 'run', fake_run(calls=calls, **kw)), mock.patch.dict(sys.modules, capstone=fake_capstone(capstone)):
             xlate = Path(d) / 'dmsh_xlate'; xlate.write_text('')
-            try: nsp.check_prereqs({'PATH': '/usr/bin', 'DOTNET_ROOT': '/stale'}, xlate, mac)
+            try: nsp.check_prereqs({'PATH': '/usr/bin'}, xlate, mac)
             finally: self.calls = calls
 
     def test_ios_without_sdk_stops_before_the_metal_check(self):   # whose message would blame the Metal toolchain
@@ -81,13 +81,13 @@ class Prereqs(unittest.TestCase):
     def test_translator_runs_once_with_the_scripts_environment(self):
         run = mock.Mock(side_effect=fake_run())
         with tempfile.TemporaryDirectory() as d, mock.patch.object(nsp.subprocess, 'run', run):
-            xlate = Path(d) / 'dmsh_xlate'; nsp.check_translator(xlate, {'PATH': '/bin', 'DOTNET_ROOT': '/stale'})
+            xlate = Path(d) / 'dmsh_xlate'; nsp.check_translator(xlate, {'PATH': '/bin', 'TMPDIR': '/work/tmp/'})
         self.assertEqual(run.call_args.args[0], [str(xlate), '--source-sha'])
-        self.assertEqual(run.call_args.kwargs['env']['DOTNET_ROOT'], '/stale'); self.assertTrue(run.call_args.kwargs['timeout'])
+        self.assertEqual(run.call_args.kwargs['env']['TMPDIR'], '/work/tmp/'); self.assertTrue(run.call_args.kwargs['timeout'])
 
-    def test_translator_without_its_runtime_stops(self):   # the apphost's exit 131: its first line, not an empty `xlate_source` at the shader step
-        with self.assertRaises(nsp.BuildError) as e: self.check(xlate=(131, '', 'You must install .NET to run this application.\n\nApp: x'))
-        self.assertIn('does not run (You must install .NET to run this application.)', str(e.exception)); self.assertIn('DOTNET_ROOT', str(e.exception))
+    def test_translator_that_does_not_run_stops(self):   # its first error line, not an empty `xlate_source` at the shader step
+        with self.assertRaises(nsp.BuildError) as e: self.check(xlate=(137, '', 'Killed: 9\nmore'))
+        self.assertIn('does not run (Killed: 9)', str(e.exception)); self.assertIn('check out the repository again', str(e.exception))
         with self.assertRaisesRegex(nsp.BuildError, r'does not run \(exit code 0\)'): self.check(xlate=(0, ' \n', ''))
 
     def test_translator_that_cannot_start_or_hangs_stops(self):
@@ -132,7 +132,7 @@ class ChainCheck(unittest.TestCase):   # dmsh_build.py run directly (tool_lock.c
 
     def test_embedded(self):
         self.assertEqual(self.embedded((0, 'f21af1efa737a270\n', '')), 'f21af1efa737a270')
-        self.assertEqual(self.embedded((131, '', 'You must install .NET to run this application.\n\nApp: x')), 'does not run (You must install .NET to run this application.)')
+        self.assertEqual(self.embedded((137, '', 'Killed: 9\nmore')), 'does not run (Killed: 9)')
         self.assertEqual(self.embedded((0, ' \n', '')), 'does not run (exit code 0)')
         for exc in (OSError('Exec format error'), subprocess.TimeoutExpired('dmsh_xlate', 60)):
             with self.subTest(exc=exc): self.assertTrue(self.embedded(exc).startswith('does not run ('))
@@ -146,10 +146,10 @@ class ChainCheck(unittest.TestCase):   # dmsh_build.py run directly (tool_lock.c
         for name in ('tools_now', 'check_tools', 'xlate_embedded'): self.assertFalse(hasattr(dmsh_chain, name), name)
 
     def test_check_tools(self):
-        bad = self.check('does not run (You must install .NET to run this application.)')
-        self.assertEqual(len(bad), 1, bad); self.assertIn('the translator does not run (You must install .NET', bad[0]); self.assertIn('.NET 10 runtime', bad[0])
+        bad = self.check('does not run (Killed: 9)')
+        self.assertEqual(len(bad), 1, bad); self.assertIn('the translator does not run (Killed: 9)', bad[0]); self.assertIn('native_tools.sh', bad[0])
         bad = self.check('0123456789abcdef')   # a translator that runs but was built from other source: the lock line and the rebuild line
-        self.assertEqual(len(bad), 2, bad); self.assertIn('xlate_source: lock', bad[0]); self.assertIn('rebuild dmsh_xlate', bad[1])
+        self.assertEqual(len(bad), 2, bad); self.assertIn('xlate_source: lock', bad[0]); self.assertIn('native_tools.sh dmsh_xlate', bad[1])
 
 
 if __name__ == '__main__': unittest.main()

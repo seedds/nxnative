@@ -38,11 +38,20 @@ English by default. Pick another when packing with `--language` (`-l`), by code 
 
 Lines like `DM_OPMODE=0` (handheld mode: lower resolution, higher frame rate) in `Documents/env.txt` win over the settings screen, which then shows them greyed out ([the full list](settings.md#settings-in-a-file)). `DM_FPS_TARGET=30` keeps Breath of the Wild, Tears of the Kingdom, Octopath Traveler 0 and Octopath Traveler II at their original 30 fps, which saves battery; `DM_PRESENT_INTERVAL=game` does the same for Monster Train 2. `DM_SHOW_FPS=1` shows the frame rate at the top left (`--show-fps` when packing turns it on from the start). `DM_LAUNCHER=0` skips the settings screen.
 
+## Miis and console files
+
+Mii heads and your own Miis come from your console, not from this project. Copy them from your own console into a `system` folder: `Documents/system` on iPhone and iPad, `~/Library/Application Support/nxnative/system` on the Mac (shared by every game):
+
+- `sysdata/<system data ID>/`: a system data archive's files, for example `sysdata/0100000000000802/` (the Switch's Mii heads) or `sysdata/0400000000000849/` (a Switch 2 game's);
+- `save/8000000000000030/MiiDatabase.dat`: your console's Miis, listed before the six default ones. The file is only read.
+
+Without them, Miis have no heads, and only the six default Miis are listed ([details](reference/services.md#a-consoles-own-mii-database-and-system-data)). When a game asks you to make a Mii, it gets the default Mii, kept in `system/host/` for every game ([details](reference/services.md#a-mii-made-in-the-editors-place)).
+
 ## On the Mac
 
 A Mac app shows the game's settings in a window before the game starts ([The Mac settings window](settings.md#the-mac-settings-window)). Its `env.txt` is `~/Library/Application Support/nxnative/<title ID>/env.txt`, and its log is `~/Library/Logs/nxnative/<title ID>.log`. [NX2Apple](https://github.com/LNPANDY/NX2Apple)'s library can also start it with the settings you pick there.
 
-A controller macOS pairs but Apple's controller support does not list, such as an 8BitDo in its own mode (Ultimate 2C Wireless over Bluetooth), is read as a raw HID gamepad, with full analog sticks: it takes a player as any other controller does, and the log says `controller '<name>' (HID) connected`. A pad Apple's support says it will list gets two seconds to appear there first, so it is never read twice (an Xbox, PlayStation or Nintendo controller is always left to Apple's support); if it never appears, it is read as HID after that wait, and the log says so. Its buttons follow 8BitDo's numbering by default; another maker's pad may number them differently, and the log then says so. `DM_HID_MAP=A=1,B=2,X=4,Y=5` in `env.txt` moves them (here: the printed letters instead of the positions), `DM_HID_LOG=1` logs the number of each button pressed, and `DM_HID_PADS=0` turns this off.
+A controller macOS pairs but Apple's controller support does not list, such as an 8BitDo in its own mode (Ultimate 2C Wireless over Bluetooth), is read as a raw HID gamepad, with full analog sticks: it becomes a player at its first button press (a device that only declares a gamepad, such as a keyboard receiver, never presses one and so takes no player), and the log says `controller '<name>' (HID) connected: press a button to play`, then `a button pressed: player N`. The press that joins also reaches the game. A pad Apple's support says it will list gets two seconds to appear there first, so it is never read twice (an Xbox, PlayStation or Nintendo controller is always left to Apple's support); if it never appears, it is read as HID after that wait, and the log says so. Its buttons follow 8BitDo's numbering by default; another maker's pad may number them differently, and the log then says so. `DM_HID_MAP=A=1,B=2,X=4,Y=5` in `env.txt` moves them (here: the printed letters instead of the positions), `DM_HID_LOG=1` logs the number of each button pressed, and `DM_HID_PADS=0` turns this off.
 
 Two identical controllers that Apple's controller support lists as one, such as two Pro Controllers over USB, are each a player of their own: after 3 seconds the log says `GameController lists 1 of 2`, and each takes a player, by USB port. They have no vibration, player lights or Home button to quit. `DM_PAD_IDENTICAL=0` in `env.txt` turns this off.
 

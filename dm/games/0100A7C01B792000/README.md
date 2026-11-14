@@ -33,11 +33,13 @@ No host or rewriter rule is specific to this game.
 
 ## Found on this game
 
+- [Compute dispatches past the pipeline's thread limit](../../../docs/reference/shaders.md#compute-dispatches-past-the-pipelines-thread-limit): resolved, found offline (no M1 or M2 run): compute shader `ce4e9fdf514d0196` (8x8x8) took 124 registers on `applegpu_g13s` / `applegpu_g14g`, which allows 384 threads, so on an M1 or M2 its dispatches ran nothing; 104 with the local size on the kernel. What it draws is not known.
 - [Unreal's frame limit and present interval, found by name](../../../docs/reference/frame-rate.md#unreals-frame-limit-and-present-interval-found-by-name): 60 and 120 by `rhi.SyncInterval` alone
 - [Layer frame history](../../../docs/reference/services.md#layer-frame-history)
 - [The offline pages of a sparse base game stop the build as a damaged NSP](../../../docs/reference/packing.md#the-offline-pages-of-a-sparse-base-game-stop-the-build-as-a-damaged-nsp)
 - [The survey's build ID lookup stops on the base game alone with a hash error](../../../docs/reference/packing.md#the-surveys-build-id-lookup-stops-on-the-base-game-alone-with-a-hash-error)
 - [A shader build leaves a file per shader output while it runs or after a stop](../../../docs/reference/packing.md#a-shader-build-leaves-a-file-per-shader-output-while-it-runs-or-after-a-stop): measured here, its 61,655 library files the same under the new chain
+- [Writes beside a packaged texture in a shared host page](../../../docs/reference/nvn-objects.md#writes-beside-a-packaged-texture-in-a-shared-host-page): after GPU stores into packaged textures' storage, 17 small textures were uploaded again by writes beside them, until the stores wrote their edge bytes too
 
 ## Open
 

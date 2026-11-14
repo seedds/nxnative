@@ -40,6 +40,14 @@ Guest threads, their synchronization and how the host schedules them. Each entry
 - **Fix:** −2 resolves to the process default core (0), and a negative core is never returned (`hle_thread.c`).
 - **Found on:** [Super Mario Bros. Wonder](../../dm/games/010015100B514000/README.md), in its font engine (`main+0x107dbc0`).
 
+### Thread handle queries hold the scheduler lock
+
+- **Symptom:** ASan reports a heap-use-after-free in `svc_thread_impl` reading `t->id`; TSan reports a race between `GetThreadId` and `CloseHandle`, or between `SetThreadCoreMask` and the target's `GetCurrentProcessorNumber`.
+- **Cause:** `GetThreadId` (0x25), `GetThreadCoreMask` (0x0E) and `SetThreadCoreMask` (0x0F) looked up the handle table without `G`, the only thread SVCs that did. `CloseHandle` frees an exited thread under `G` at once when no wait holds it, so a query racing the close read a freed object. `SetThreadCoreMask` also wrote the ideal core in steps that `GetCurrentProcessorNumber` read without a lock.
+- **Fix:** the three handle SVCs hold `G` across lookup and read, as the priority SVCs do; on Horizon a query racing a close returns either the value or invalid handle. `SetThreadCoreMask` computes the final core and mask first and stores each once with a relaxed atomic. `GetCurrentProcessorNumber` and `dm_yield_to_core_peers` load them the same way without `G`: games call it often (Pokémon Scarlet about 7,400 times a second), and only the thread's own pair is read.
+- **Check:** `t_sync_wait` query-close (a query thread against `CloseHandle` of an exited thread, 200 rounds) and core-mask (`SetThreadCoreMask` against the target's own `GetCurrentProcessorNumber`). Before, ASan found the use-after-free in about one run in three and TSan the race in each; after, ASan and TSan are clean.
+- **Found on:** a code audit, with host unit tests; no game failure is known.
+
 ### Free thread count (`svcGetInfo` type 24)
 
 - **Symptom:** the main thread waits forever on an event right after `nnMain` starts, with only three or four threads created; `DM_THR=1` shows no `CreateThread` for the thread it waits on.
@@ -47,6 +55,14 @@ Guest threads, their synchronization and how the host schedules them. Each entry
 - **Fix:** the host answers 96 less the game's threads that have not exited (`thr_limit_used`; guest threads the host spawns for itself are left out).
 - **Found on:** [Monster Train 2](../../dm/games/010051701FB46000/README.md) (Unity 2022.3.54f1 on SDK 18.3.5: `main+0x3e7288` starts a thread and waits for it to signal `main+0x539cf80`). With the fix the game creates 40 threads and reaches its title.
 - **Note:** of the 20 games extracted on this machine, only this `main` imports the function.
+
+### A thread closed before it starts ends
+
+- **Symptom:** each `CreateThread` whose handle is closed without `StartThread` leaves a host pthread (1 MB stack) waiting for ever and lowers the free thread count for good.
+- **Cause:** `CreateThread` starts the pthread at once, and it waited only for `started`. `CloseHandle` marked the object closed but did not wake it, and the object is reclaimed only once exited, which it never was; [`thr_limit_used`](#free-thread-count-svcgetinfo-type-24) counted it as alive.
+- **Fix:** as on Horizon, where closing the last handle of a thread that never ran destroys it: `CloseHandle` of an unstarted thread wakes its pthread, which leaves through `thread_exit` without entering guest code; the object is freed with its slot. A `StartThread` before the close still runs the thread. A wait that already holds the object completes as for an exit.
+- **Check:** `t_sync_wait` closed-unstarted: 24 real `CreateThread` / `CloseHandle` pairs return the object count and `thr_limit_used` to where they were (under ASan and TSan); before, they stayed 24 higher.
+- **Found on:** a code audit, with host unit tests; no game failure is known.
 
 ### Pausing threads and reading their context for garbage collectors
 
@@ -62,6 +78,14 @@ Guest threads, their synchronization and how the host schedules them. Each entry
 - **Fix:** the resume clears `paused`, and a thread that waits for the resume in the signal handler sets it again on every wakeup, as the SVC exit already did (`hle_thread.c`). Clearing alone is not enough: a new pause can come before the woken thread has retaken `G`, SIGUSR2 is blocked inside the handler, and the requester would wait for ever.
 - **Check:** `t_pause` pauses a thread again after a resume from inside an SVC (entered from guest code and from host code), and resumes and pauses again while the handler is parked; `t_pause_stress` stops four threads that alternate real `SleepThread` SVCs with guest code about 3,700 times a second, marks a word and checks that none ran. Before, the two SVC cases failed in every run and the stress test found a running thread within the first few dozen stops; after, all pass. With the clearing alone, the parked-handler case hangs.
 - **Found on:** Aokana - Four Rhythms Across the Blue (`0100990011866000`, Unity 2018.4.22f1 IL2CPP with FMOD): three of five automated play sessions crashed at `BufferedReadStream.Seek`, each time on FMOD's stream thread, which sleeps in `SleepThread` between buffers and so was mostly paused inside an SVC.
+
+### A pause holds its target until it returns
+
+- **Symptom:** ASan reports a heap-use-after-free in `svc_thread_impl` (`SetThreadActivity`) reading `paused` or waiting on `pcv` of a thread that exited during the pause.
+- **Cause:** a pause of a thread in host code loops: it lets go of `G` to send SIGUSR2 and to wait 100 µs. The target could exit and its handle be closed meanwhile; `thread_exit` then freed the object (closed, exited, no wait reference), and the loop read it again.
+- **Fix:** the pause takes a reference (`thr_t.refs`, the count synchronization waits already take) before the loop and drops it with `thr_put` after; the last holder of a closed, exited thread frees it.
+- **Check:** `t_pause` exit_and_close_during_pause: a pause waits on a thread in host code, its handle is closed and it exits. Before, ASan found the use-after-free; after, the pause returns and the object is freed.
+- **Found on:** a code audit, with host unit tests; no game failure is known.
 
 ### SVCs leave the stack below sp untouched
 
@@ -147,6 +171,14 @@ Guest threads, their synchronization and how the host schedules them. Each entry
 - **Found on:** [FINAL FANTASY CRYSTAL CHRONICLES Remastered Edition](../../dm/games/0100CE4010AAC000/README.md) 1.0.0 and 1.0.3 (Unity 2018.4.2f1, SDK 8.2.1: 1.0.0 `main+0x1e425b0` and the stream functions after it, the same sites +0x25380 in 1.0.3). The rule also matches [Raging Loop](../../dm/games/010020400E1C2000/README.md) 1.0.0 (Unity 2018.3.10f1, the same four functions, 2026-11-09); Unity 2017.4 (Cuphead, AI: THE SOMNIUM FILES) has other code there, not reviewed. On the other mains on the drive it matches nothing.
 - **Check:** another Unity title that stops this way: look for `stlr` followed by a plain `ldr` of the other word in its `ThreadedStreamBuffer` (the functions around the `AcquireSemaphore` the worker waits in).
 
+### Unity's constant-buffer table changed by two threads at once
+
+- **Symptom:** boot crashes in its first second of shader loading, in a `std::map` copy walking a node pointer that is no pointer (`0x7e600004755`, `0x3`), on the main thread or `UnityGfxDeviceWorker` / `UnityPreload`, under a `vector::insert` of 40-byte entries; 3 of 7 Mac boots, the others run on.
+- **Cause:** a race in the engine's code, not a host bug. Unity 2018.4's GfxDevice keeps one table of constant-buffer layouts (`UnityPerDraw`, `UnityPerMaterial`, `VGlobals`, ...), a vector sorted by name hash and size whose entries each hold a map of their members. The shared device changes it with no lock; only the graphics-job devices take the registry's mutex. Two threads use the shared device at once: the main thread queues "set this constant buffer" to the render thread, whose queue publishes each command at once, and then registers the layout itself on the real device (look it up, insert it, fill its member map), while the render thread runs the command (look it up, insert it when missing). Probes showed both inserting the same new layout 0.1 ms apart; an insert shifting the entries copies the maps the other thread is changing. It happens with graphics jobs off too. The Switch's timing hides it.
+- **Fix:** a build-bound stub (the rewriter's `STUBS`, [Ori and the Will of the Wisps' `patches.py`](../../dm/games/01008DD013200000/patches.py)) runs Unity's own registry mutex, which is recursive, around every function of the table's API when it works on the shared device: on the main thread the register and the member lookup, on the render thread the per-draw parameter apply, the sets, the value writes and the slot updates, and the inserts, resets and the copy into a graphics-job device (probes of every function by thread found no other users). 10 of 10 boots ran on, with the render thread's CPU time in the same scenes unchanged. The binding is `build`: no other Unity 2018.4 main on the drive shares these functions (Ori and the Blind Forest's build has other code), so no fingerprint rule could be checked.
+- **Found on:** [Ori and the Will of the Wisps](../../dm/games/01008DD013200000/README.md#startup) 1.2.1 (Unity 2018.4.24f1).
+- **Check:** another Unity 2018 title that crashes this way: probe its constant-buffer insert (the function comparing names with `VGlobals`, `PGlobals`, `UnityPerMaterial`, ...) for the thread and device of each call.
+
 ### Trinity's rendezvous loses its release on Apple cores
 
 - **Symptom:** the picture stops and sound goes on, at a random frame (3,000 to 51,300, about 100 s at the quickest), with no `[RED]` line and the GPU idle and caught up. `main` is parked in `nn::os::WaitConditionVariable`, called from the park in Trinity's submit loop. The release flag is set, the state word is 1, the mutex is free, and no `SignalProcessWideKey` was ever issued for that key.
@@ -213,6 +245,14 @@ The yield back-off (`DM_YIELD_BACKOFF`) and the rewriter's spin waits (`patch_ns
 - **Fix:** a wait with a timeout under 20 µs (`WaitProcessWideKeyAtomic`, `WaitSynchronization`, `WaitForAddress`) is a step of the run of yields (`poll_wait_begin` / `poll_wait_end` in `hle_thread.c`): it continues the run when the SVC before it was one of the run's steps and under `SPIN_GAP_NS` (20 µs) of guest work came after it, and once the run has lasted the back-off's start (2 ms) its timeout becomes the back-off's sleep. A lengthened wait still ends at once when it is signalled. A wait that is signalled ends the run. The yields' register test does not apply to waits, since the SDK's own frames hold the time left at the SVC (SDK 3.5.1's `InternalConditionVariableImplByHorizon::TimedWait` keeps it in x21); a loop that works more than 20 µs between its waits starts a new run at each one.
 - **Found on:** [Hyrule Warriors: Definitive Edition](../../dm/games/0100AE00096EA000/README.md#power) (KTGL, SDK 3.5.1): its main thread waits for its frame's event with `TimedWaitEvent(30 ns)` and `SleepThread(1 µs)` in turn, its update thread with `TimedWaitEvent(500 ns)` alone. In its first battle at 60 fps on the Mac: CPU 102% → 27% of a core, CPU energy 4.6 → 1.5 W, wakeups 358,000 → 72,000 a second, frame time p95 17.5 → 16.9 ms.
 - **Check:** `make -C dm/host/tests GAME=<id> build/t_pollwait && dm/host/tests/build/t_pollwait`: loops of waits alone and of waits between short sleeps (condition variable and `WaitSynchronization`) back off after 2 ms, a loop with 30 µs of work between its waits does not, and a lengthened wait returns at the signal.
+
+### Short sleeps are polls
+
+- **Symptom:** an idle game keeps a performance core awake and the phone warm: the power line shows tens of thousands of wakeups a second, most of the CPU time on performance cores, and a Unity job worker (`Job.Worker 0`) at the top of its yielders, while the frame needs little work.
+- **Cause:** a loop that sleeps a few tens of microseconds between looks at a flag. On the Switch such a sleep costs little; here each one is a host sleep and a wakeup of a core, and at that rate the system keeps the thread on a performance core. Sleeps under 20 µs already took the yield path ([Sleeps under 20 µs take the yield path](#sleeps-under-20-µs-take-the-yield-path)), but from 20 µs on the guest's sleep was kept as it was. Unity 6's idle job workers do this: Hollow Knight: Silksong 1.0.30000 `main+0xbd99e0` calls `SleepThread` with a global 25 µs between looks at the job queue, about 25,000 times a second from one worker.
+- **Fix:** a sleep from 20 µs up to the back-off's longest sleep (250 µs; `DM_YIELD_BACKOFF` sets both, and `=0` turns this off with the rest of the back-off) is a step of the run of yields, as a short timed wait is (`poll_sleep` in `hle_thread.c`, the rule of [Short timed waits are polls](#short-timed-waits-are-polls)): it continues the run when the SVC before it was one of the run's steps and under `SPIN_GAP_NS` (20 µs) of guest work came after it, and once the run has lasted the back-off's start (2 ms) it sleeps the back-off's length when that is longer (one `nanosleep`). Before that, and for a loop that works more than 20 µs between its sleeps, the guest's own sleep runs as before, so handoffs between working threads keep their timing. Off under the deterministic clock. Silksong's worker loop chooses by a global between this sleep and a yield, which the back-off already covered. Open: such sleeps are not clock waits ([Clock waits sleep to their predicted end](#clock-waits-sleep-to-their-predicted-end)), so a frame limiter made of short sleeps and clock reads would end each wait up to 250 µs late; no game is known to wait that way.
+- **Found on:** [Hollow Knight: Silksong](../../dm/games/010013C00E930000/README.md#frame-rate) (Unity 6000.0.50f1). On the Mac (M1 Pro, first room, 60 fps, the old and new hosts in turn): wakeups 29,000 → 8,000 a second, CPU energy 0.46-0.48 → 0.32 W, frame-time p95 within run-to-run noise. On an iPhone Duo (A20 Pro), two play sessions of 5 and 15 minutes: CPU energy (median of the 5 s power lines) 0.63 → 0.09 W, wakeups 37,700 → 14,700 a second, the share on performance cores 86% → about 0%, 60 fps in both; dropped frames 0.17% → 0.25% (not the same route; small hitches of 2 to 6 frames now and then, open).
+- **Check:** `make -C dm/host/tests GAME=<id> build/t_pollwait && dm/host/tests/build/t_pollwait`: a loop of 25 µs sleeps backs off at 2 ms and not before, 300 µs sleeps keep their length (but back off with a 500 µs cap once the back-off is longer), no sleep backs off with the back-off off, and 25 µs sleeps with 30 µs of work between them never back off (the first fails without the change).
 
 ### Yields that make progress return at once (`thr_yield`)
 

@@ -15,7 +15,7 @@ void svc_thread_dump(void) {}
 uint64_t now_ns(void) { return bp_now(); }
 static int checks, fails;
 #define CHECK(c, label) do { checks++; if (!(c)) { fails++; fprintf(stderr,"FAIL: %s\n",label); } } while (0)
-static uint8_t commands[8192]; static size_t used;
+static uint8_t commands[8192] __attribute__((aligned(8))); static size_t used;
 static void emit(unsigned op, const void *p, size_t n) {
     size_t size = (8 + n + 7) & ~7ull; op_hdr h = {op, (uint32_t)size};
     memcpy(commands + used, &h, 8); if (n) memcpy(commands + used + 8, p, n); used += size;
@@ -75,8 +75,8 @@ int main(void) { @autoreleasepool {
     CHECK(!S.bst[0] && !S.bst[1] && !S.prog,"finalizing a program unbinds it from a saved queue state");
     // Stages bound from two programs make a composite: finalizing the fragment program takes the effective program again, the vertex stage alone
     static prog_t pf = {.serial=920003}; NvProg *fprogram = [NvProg new]; fprogram->sh[1] = fs; serial_put(pf.serial,fprogram);
-    S.prog = bind_stages(&pg,1); S.prog = bind_stages(&pf,2);   // NOLINT(clang-analyzer-osx.cocoa.RetainCount): g_by_serial owns fprogram (serial_put's CFBridgingRetain), not a leak
-    CHECK(S.prog && S.prog != &pg && prog_get(S.prog)->sh[0] == vs && prog_get(S.prog)->sh[1] == fs,"a vertex and a fragment program bound apart make a composite");   // NOLINT(clang-analyzer-osx.cocoa.RetainCount): g_by_serial owns the composite bind_stages made (serial_put's CFBridgingRetain), not a leak
+    S.prog = bind_stages(&pg,1); S.prog = bind_stages(&pf,2);
+    CHECK(S.prog && S.prog != &pg && prog_get(S.prog)->sh[0] == vs && prog_get(S.prog)->sh[1] == fs,"a vertex and a fragment program bound apart make a composite");
     P(nvnProgramFinalize)((NVNprogram *)&pf);
     CHECK(!S.bst[1] && S.prog && prog_get(S.prog)->sh[0] == vs && !prog_get(S.prog)->sh[1],"finalizing a composite's fragment program drops its stage from the effective program");
     memset(S.bst,0,sizeof S.bst); S.prog = NULL;
@@ -99,8 +99,9 @@ int main(void) { @autoreleasepool {
         struct { int32_t first,n; vs_st stream; } stream = {0,1,{.stride=16}}; emit(OP_BIND_VSTREAM,&stream,sizeof stream);
         p_bind_vbuf1 vb = {.index=0,.size=sizeof positions,.addr=(uint64_t)vertices}; emit(OP_BIND_VBUF1,&vb,sizeof vb);
         p_vp_swizzle sw = {.n=1}; sw.sw[0][1]=flip; emit(OP_VP_SWIZZLE,&sw,sizeof sw);
-        p_draw draw = {.prim=NVN_DRAW_PRIMITIVE_TRIANGLES,.count=3,.instances=1}; emit(OP_DRAW,&draw,sizeof draw); emit(OP_END,NULL,0);
-        NVNcommandHandle handle = (NVNcommandHandle)commands;
+        p_draw draw = {.prim=NVN_DRAW_PRIMITIVE_TRIANGLES,.count=3,.instances=1}; emit(OP_DRAW,&draw,sizeof draw);
+        static uint64_t list; list = ctl_e(CTL_CHUNK,commands,used) | CTL_LAST;   // the records' control list: one piece (nvn_obj.h ctl_e)
+        NVNcommandHandle handle = (NVNcommandHandle)&list;
         P(nvnQueueSubmitCommands)(&queues[queue],1,&handle); P(nvnQueueFinish)(&queues[queue]);
         int front = ccw == (front_in_clip[queue][current][winding] ^ flip);
         int visible = cull == NVN_FACE_NONE || (cull == NVN_FACE_FRONT && !front) || (cull == NVN_FACE_BACK && front);

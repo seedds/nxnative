@@ -1508,6 +1508,28 @@ static NSArray<NSURL *> *found_cheat_files(NSString *build) {
 }
 @end
 
+// Frame-rate counter (DM_SHOW_FPS=1, the settings window's Frame-rate counter): the frames put on screen in the last second, as on the iPhone (front_ios.m's
+// front_ios_fps_label; nvn_mtl.m counts them for NVN and the Vulkan layer alike), small at the window's top left over the game's view. A span over 1.5 s is the
+// window off screen or the app stopped in the debugger: no reading then
+uint64_t mtl_present_count(void);
+static NSView *front_fps_view(NSView *over) {
+    NSView *box = [[NSView alloc] initWithFrame:NSMakeRect(8, over.bounds.size.height - 8 - 22, 64, 22)];
+    box.autoresizingMask = NSViewMaxXMargin | NSViewMinYMargin;   // stays at the top left as the window or fullscreen resizes the view (not flipped: y from the bottom)
+    box.wantsLayer = YES; box.layer.backgroundColor = [NSColor colorWithWhite:0 alpha:0.45].CGColor; box.layer.cornerRadius = 6;
+    NSTextField *l = [NSTextField labelWithString:@"-- fps"];
+    l.font = [NSFont monospacedDigitSystemFontOfSize:13 weight:NSFontWeightSemibold]; l.textColor = NSColor.whiteColor; l.alignment = NSTextAlignmentCenter;
+    [l sizeToFit]; l.frame = NSMakeRect(0, floor((22 - l.frame.size.height) / 2), 64, l.frame.size.height);
+    [box addSubview:l];
+    __block uint64_t n0 = mtl_present_count(); __block double t0 = CACurrentMediaTime();
+    [NSTimer scheduledTimerWithTimeInterval:1.0 repeats:YES block:^(NSTimer *t) {
+        (void)t; uint64_t n = mtl_present_count(); double now = CACurrentMediaTime();
+        if (now - t0 < 1.5) l.stringValue = [NSString stringWithFormat:@"%.0f fps", (n - n0) / (now - t0)];
+        n0 = n; t0 = now;
+    }];
+    LOG("front end: frame-rate counter on (DM_SHOW_FPS)");
+    return box;
+}
+
 void front_run(void (*guest)(void)) {
     // A game: tell macOS its work is latency-critical, so the system does not trade its frame time for power while the frame rate is capped
     static id activity; activity = [[NSProcessInfo processInfo] beginActivityWithOptions:NSActivityUserInitiated | NSActivityLatencyCritical reason:@"game"];
@@ -1537,6 +1559,7 @@ void front_run(void (*guest)(void)) {
         [win makeKeyAndOrderFront:nil];
         screen_refresh(win.screen ?: NSScreen.mainScreen);
         g_win = win;
+        if (getenv("DM_SHOW_FPS") && atoi(getenv("DM_SHOW_FPS"))) [v addSubview:front_fps_view(v)];
         [NSApp activateIgnoringOtherApps:YES];
         // A host another process starts (scripts/regress.py) is not activated (its focus state stays 2), so its window opened wherever it landed in the window order, and behind
         // another app's window macOS fires its display link about once a second: Breath of the Wild stepped up to 3 vsyncs at boot and never came back (20 fps runs).

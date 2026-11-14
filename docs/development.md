@@ -713,7 +713,7 @@ Notes on these steps:
 - In that player build, settings declared in `dm/launcher.json` are controlled by the launcher and its saved choices; environment files cannot lock those rows. The raw `MTL_HUD_ENABLED` override is ignored when the launcher offers the Metal HUD control. `DM_METAL_HUD` supplied to the build sets its initial launcher default, while the control stays editable.
 - `DM_LANG=<code>` is the game language (`DMLanguage` in `Info.plist`, default `en-US`; `main.m` sets `DM_LANG` from it unless `Documents/env.txt` or the baked env file sets it).
 - `DM_METAL_CAPTURE=1` makes a build that can write GPU frame captures (`MetalCaptureEnabled` in `Info.plist`, for `DM_GPU_CAPTURE`, [GPU measurement](#gpu-measurement)).
-- `DM_SHOW_FPS=1` turns the frame-rate counter on (`DMShowFPS` in `Info.plist`, which `front_ios.m` reads; `DM_SHOW_FPS` in `Documents/env.txt` overrides it). It counts the frames put on screen each second (`mtl_present_count`), so frames the display link merges away are not counted.
+- `DM_SHOW_FPS=1` turns the frame-rate counter on (`DMShowFPS` in `Info.plist`, which `front_ios.m` reads; `DM_SHOW_FPS` in `Documents/env.txt` overrides it). It counts the frames put on screen each second (`mtl_present_count`), so frames the display link merges away are not counted. The Mac app reads `DM_SHOW_FPS` too (the settings window's Frame-rate counter) and draws the same counter at the window's top left (`front_fps_view` in `front_mac.m`).
 - The unsigned build pins its build product and intermediate directories inside `$W/build/ios/pkg/dd`, independently of Xcode's Locations preference.
 - hactool cannot read every update (Mario 1.2.1's patch NCA gives "Invalid BKTR layout!"), which is why `nx_extract` uses LibHac.
 

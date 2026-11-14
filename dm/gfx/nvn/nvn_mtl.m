@@ -294,6 +294,29 @@ static inline void gt_put(uint32_t kind, uint64_t t0, uint64_t a, uint64_t b) {
 }
 // The NVN queue worker (nvn_queue.inc) parked from t0 until now: why (0 no work queued, 1 an event wait, 2 a sync wait) and the held queue's serial
 void mtl_gp_note_park(uint64_t t0, unsigned why, uint64_t queue) { gt_put(GT_QPARK, t0, why, queue); }
+// A main command buffer's commit feedback, kept as blocks: the feedback of several submissions can then ride on one commit (nvn_rec.h, submissions merged into one command buffer)
+@interface DmCommitFB : NSObject { @public NSMutableArray *blocks; }
+- (void)addFeedbackHandler:(void (^)(id<MTL4CommitFeedback>))b;
+@end
+@implementation DmCommitFB
+- (instancetype)init { if ((self = [super init])) blocks = [NSMutableArray array]; return self; }
+- (void)addFeedbackHandler:(void (^)(id<MTL4CommitFeedback>))b { [blocks addObject:[b copy]]; }
+@end
+// The feedback one merged submission's blocks get: the command buffer's error and that submission's own part of its GPU time
+@interface DmPartFB : NSObject { @public double t0, t1; NSError *err; }
+@end
+@implementation DmPartFB
+- (CFTimeInterval)GPUStartTime { return t0; }
+- (CFTimeInterval)GPUEndTime { return t1; }
+- (NSError *)error { return err; }
+@end
+static MTL4CommitOptions *commit_opts(DmCommitFB *fb) {
+    if (!fb) return nil;
+    MTL4CommitOptions *o = [MTL4CommitOptions new]; NSArray *bl = fb->blocks;
+    [o addFeedbackHandler:^(id<MTL4CommitFeedback> f) { for (void (^b)(id<MTL4CommitFeedback>) in bl) b(f); }];
+    return o;
+}
+static id<MTL4CounterHeap> g_ts_heap;   // tentative: defined with the segment timestamps below
 #include "nvn_rec.h"   // deferred encoding (DM_NVN_ENC_THREAD)
 static NSHashTable *g_res_objects;
 static char g_tex_range_key;   // res_top: a GPU-made texture's storage (guest address, NVN size, pool flags)
@@ -2812,7 +2835,7 @@ uint64_t mtl_sub_commit(void) {
     if (ws_on()) for (int i = 0; i < n; i++) { int k = g_post[i].kind == 2 ? (g_post[i].type == 0 || g_post[i].type == 0x10 ? 3 : 4) : g_post[i].kind == 3 ? (g_post[i].mode == VIS_REPORT ? 2 : 0) : 1; atomic_fetch_add(&g_ws_post[k], 1); }   // 1 event, 2 samples passed, 3 timestamp, 4 other counter
     if (n) memcpy(ops, g_post, n * sizeof *ops);
     NSArray<dispatch_block_t> *commit_blocks = [g_commit_blocks copy];
-    MTL4CommitOptions *o = [MTL4CommitOptions new];
+    DmCommitFB *o = [DmCommitFB new];
     atomic_fetch_add(&g_seg_inflight, 1);
     [o addFeedbackHandler:^(id<MTL4CommitFeedback> f) { (void)f; atomic_fetch_sub(&g_seg_inflight, 1); for (dispatch_block_t block in commit_blocks) block(); }];
     uint64_t gpu_f = atomic_load(&g_cur_frame); gpu_tag_begin(gpu_f);
@@ -2839,7 +2862,7 @@ uint64_t mtl_sub_commit(void) {
     res_commit();
     if (g_gp_state == 1 && !gp_active()) { gp_snap snap = gp_close(); [o addFeedbackHandler:^(id<MTL4CommitFeedback> f) { (void)f; gp_report(snap); }]; }
     [g_cb endCommandBuffer];
-    rec_commit(g_cb, o); g_cbgen++;   // the stores it holds come before any later upload batch (gsb_held)
+    rec_commit(g_cb, o, 1); g_cbgen++;   // the stores it holds come before any later upload batch (gsb_held)
     if (!lost_test) rec_signal(g_ev, fence);
     // With the encode thread the records go to it and the replay goes on with the next submission: what comes after it on the queue is a record too (the next submission's commits,
     // upload batches, snapshot copies), a CPU wait for the GPU waits for the fence's signal behind this commit, and a present of the game's own texture waits for this note
@@ -14385,7 +14408,7 @@ static void mdi_wait(void) {
     if (g_blit) { enc_b_end(g_blit); g_blit = nil; }
     up_flush(); res_commit();
     [g_cb endCommandBuffer];
-    rec_commit(g_cb, nil); g_cbgen++;
+    rec_commit(g_cb, nil, 0); g_cbgen++;
     if (!g_mdi_ev) g_mdi_ev = [g_dev newSharedEvent];
     rec_signal(g_mdi_ev, ++g_mdi_v); rec_drain();
     uint64_t w0 = ws_t0(); int ok = [g_mdi_ev waitUntilSignaledValue:g_mdi_v timeoutMS:10000]; if (ws_on()) ws_put(WS_MDI, w0, 1);
@@ -16089,7 +16112,7 @@ static void sub_cut(void) {
     uint32_t k = g_seg++; seg_clk *sc = NULL;   // reports encoded so far keep this segment's GPU times (seg_ts)
     if (seg_ts()) { if (!g_sclk) { g_sclk = calloc(1, sizeof *g_sclk); if (!g_sclk) MDIE("segment clock allocation failed"); atomic_store(&g_sclk->refs, 1); } sc = g_sclk; atomic_fetch_add(&sc->refs, 1); if (k < SEG_CLK_N) sc->cm[sc->ncm++] = (uint16_t)k; }   // this command buffer ends with segment k (seg_idle_before)
     cbs_list *cbs = cbs_take(); uint64_t cbs_fence = g_fence + 1; cbs_fly_put(cbs_fence, cbs);
-    MTL4CommitOptions *o = [MTL4CommitOptions new];
+    DmCommitFB *o = [DmCommitFB new];
     atomic_fetch_add(&g_seg_inflight, 1);
     [o addFeedbackHandler:^(id<MTL4CommitFeedback> cb) {
         atomic_fetch_sub(&g_seg_inflight, 1);
@@ -16102,7 +16125,7 @@ static void sub_cut(void) {
     gmem_commit_patch();
     res_commit();
     [g_cb endCommandBuffer];
-    rec_commit(g_cb, o); g_cbgen++;
+    rec_commit(g_cb, o, 0); g_cbgen++;
     if (rec_on()) rec_publish();   // the segment reaches the encode thread now, not when its block of records fills
     g_cb = rec_cb_new();
     [g_cb beginCommandBufferWithAllocator:g_alloc4[g_alloc_cur]];   // one allocator encodes several command buffers in sequence; it is reset only once its fence (the last segment) has passed, when a later submission starts

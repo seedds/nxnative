@@ -472,6 +472,9 @@ static void cut_boundary_case(void) {
     tex_t colour; target(&colour, 99810);
     id<MTLBuffer> rep = [g_dev newBufferWithLength:64 options:MTLResourceStorageModeShared]; res_add(rep);
     CHECK(ts_on(), "segment mode has a timestamp heap");
+    // nothing of the cases before this one may still be on its way: a submission the encode thread kept open for the next one (merged submissions) reports back a moment later than
+    // one committed at once, and the case counts g_seg_inflight itself
+    rec_drain(); for (int i = 0; i < 20000 && atomic_load(&g_seg_inflight); i++) usleep(100);
     state_reset(); memset(&R, 0, sizeof R); mtl_sub_begin();
     R.has_rt = 1; R.rt.n = 1; R.rt.color[0] = &colour;
     clear(MTLClearColorMake(0, 0, 0, 1)); rp_end();
@@ -490,6 +493,50 @@ static void cut_boundary_case(void) {
     CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull), "the segments completed");
     uint64_t r0[2], r1[2]; memcpy(r0, rep.contents, 16); memcpy(r1, (uint8_t *)rep.contents + 16, 16);
     CHECK(r0[1] && r1[1] > r0[1], "two reports in one command buffer read two times");
+}
+
+// With Metal encoding on its own thread, submissions that reach it while the GPU still runs an earlier command buffer go to the queue in one command buffer (nvn_rec.h, merged
+// submissions): one commit carries the feedback of all of them, their notes and signals follow it, and each one's reports still read its own part of the GPU time. The encode
+// thread is held by a queue block until the three are recorded, and "an earlier command buffer runs" is the counter raised by hand
+static void merge_case(void) {
+    if (!rec_on()) return;
+    tex_t colour; target(&colour, 99820);
+    id<MTLBuffer> rep = [g_dev newBufferWithLength:64 options:MTLResourceStorageModeShared]; res_add(rep);
+    rec_drain(); for (int i = 0; i < 20000 && (atomic_load(&g_rx_fly) || atomic_load(&g_seg_inflight)); i++) usleep(100);
+    uint64_t cbs0 = g_rx_cbs, merged0 = g_rx_merged;
+    dispatch_semaphore_t gate = dispatch_semaphore_create(0);
+    atomic_fetch_add(&g_rx_fly, 1);
+    rec_queue_block(^{ dispatch_semaphore_wait(gate, DISPATCH_TIME_FOREVER); }); rec_publish();
+    uint64_t f[3];
+    for (int k = 0; k < 3; k++) {
+        state_reset(); memset(&R, 0, sizeof R); mtl_sub_begin();
+        R.has_rt = 1; R.rt.n = 1; R.rt.color[0] = &colour;
+        clear(MTLClearColorMake(k == 0, k == 1, k == 2, 1)); rp_end();
+        mtl_sub_counter((uint64_t)rep.contents + 16 * (uint64_t)k, 0);   // a timestamp at the end of its (only) segment: its command buffer's end, or its own part of a shared one
+        f[k] = mtl_sub_commit();
+    }
+    dispatch_semaphore_signal(gate);
+    // (polled, not waited for: a waiter that wakes on the queue's signal completes the records itself, with its own clock for every report: post_early)
+    for (int i = 0; i < 50000 && g_done < f[2]; i++) usleep(100);
+    CHECK(g_done >= f[2], "three submissions behind running work complete");
+    atomic_fetch_sub(&g_rx_fly, 1);
+    rec_drain();
+    CHECK(g_rx_merged - merged0 == 3 && g_rx_cbs - cbs0 == 1, "they went to the queue in one command buffer");
+    CHECK(atomic_load(&g_sub_cmt) >= f[2], "their commit notes are passed");
+    uint64_t r[3][2]; memcpy(r, rep.contents, sizeof r);
+    CHECK(r[0][1] && r[1][1] >= r[0][1] && r[2][1] >= r[1][1] && r[2][1] > r[0][1], "each one's report reads its own end, not the shared command buffer's");
+    // an upload batch, a snapshot copy or a queue operation after them keeps its place: they are committed first
+    rec_drain(); for (int i = 0; i < 20000 && (atomic_load(&g_rx_fly) || atomic_load(&g_seg_inflight)); i++) usleep(100);
+    cbs0 = g_rx_cbs; merged0 = g_rx_merged; __block uint64_t held_at_block = ~0ull; __block int pend_at_block = -1;
+    atomic_fetch_add(&g_rx_fly, 1);
+    rec_queue_block(^{ dispatch_semaphore_wait(gate, DISPATCH_TIME_FOREVER); }); rec_publish();
+    state_reset(); memset(&R, 0, sizeof R); mtl_sub_begin(); R.has_rt = 1; R.rt.n = 1; R.rt.color[0] = &colour; clear(MTLClearColorMake(1, 1, 0, 1)); rp_end(); uint64_t fa = mtl_sub_commit();
+    rec_queue_block(^{ held_at_block = g_rx_cbs; pend_at_block = g_rx_npend; }); rec_publish();
+    dispatch_semaphore_signal(gate);
+    CHECK(mtl_wait(fa, 5000000000ull), "a submission before a queue operation completes");
+    atomic_fetch_sub(&g_rx_fly, 1);
+    rec_drain();
+    CHECK(pend_at_block == 0 && held_at_block == cbs0 + 1 && g_rx_merged - merged0 == 1, "it was committed before the queue operation ran");
 }
 
 // Output-mapping-only fixture (no rewritable sample): main0 writes magenta to color(0); main0_f remaps
@@ -727,6 +774,7 @@ int main(int argc, char **argv) { @autoreleasepool {
     pool_depth_case();
     reuse_tables_case();
     cut_boundary_case();
+    merge_case();
     printf("feedback snapshot: %d checks, %d failed\n", checks, failed);
     return failed != 0;
 } }

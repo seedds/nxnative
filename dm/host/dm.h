@@ -220,6 +220,7 @@ const char *dm_cheats_skipped_why(int i);
 int dm_cheats_nsources(void);         // anchored sources (*.cheats.toml) in the cheats folder
 const char *dm_cheats_source(int i);
 void dm_cheats_exit(void);            // a clean exit (hle_lifecycle.c, atexit): removes the safe-mode flag
+void dm_fs_stall_summary(void);       // a clean exit (hle_lifecycle.c, atexit): the image reads' first-use summary line, when first-use bytes grew since the last one (hle_fs.c)
 // Graphics lifecycle (hle_nvn.c): on=1 suspends (afterwards submit / present block, and in-flight GPU work is drained before returning), on=0 resumes; called by the iOS front end when entering and leaving the background
 void dm_gfx_suspend(int on);
 void dm_gfx_quit(int wait_ms);   // hle_nvn.c: the process is ending (the graceful exit): what the pipeline archive has not written yet, written, waiting up to wait_ms

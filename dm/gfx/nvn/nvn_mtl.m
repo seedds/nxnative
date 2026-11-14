@@ -2817,6 +2817,10 @@ static int tex_atomic_alias(id<MTLTexture> base) {
         || pf == MTLPixelFormatRG16Unorm || pf == MTLPixelFormatRG16Snorm || pf == MTLPixelFormatRG16Uint || pf == MTLPixelFormatRG16Sint || pf == MTLPixelFormatRG16Float || pf == MTLPixelFormatR32Float;
     return bytes32 && (base.textureType == MTLTextureType2D || base.textureType == MTLTextureType2DArray) && base.sampleCount == 1 && base.storageMode == MTLStorageModePrivate && !base.buffer && !base.isSparse;
 }
+// DM_SHADOW_DIV=N (2 to 4, default 1 = off): the game's 12288x12288 depth texture, 288 MB, is made N times smaller on each side (12288 / N must stay whole). The game draws into it with viewports and scissors in its own 12288 pixels:
+// state_op divides those by N while that texture is the depth target. The shaders sample it by 0..1 coordinates, so they read the smaller map; shadow edges get coarser. Experimental
+static unsigned shadow_div(void) { static unsigned v; if (!v) { const char *e = getenv("DM_SHADOW_DIV"); int n = e && *e ? atoi(e) : 1; if (n < 1 || n > 4 || (n > 1 && 12288 % n)) { MLOG("[RED] DM_SHADOW_DIV=%s: must be 1 to 4; 1 used", e ? e : ""); n = 1; } v = (unsigned)n; if (n > 1) MLOG("shadow map 12288x12288 made %ux smaller on each side (DM_SHADOW_DIV)", v); } return v; }
+static int is_shadow_map(const tex_t *t) { return t->d.width == 12288 && t->d.height == 12288 && t->d.target == NVN_TEXTURE_TARGET_2D && fmt_depth(t->d.format); }
 static MTLTextureDescriptor *tex_desc(const tex_t *t, int packaged) {
     uint32_t pf = 0; uint8_t swz[4];
     if (!nvn_fmt_to_mtl(t->d.format, &pf, swz) || !pf) { RED_ONCE(0, "texture format %#x has no Metal equivalent (first case)", t->d.format); return nil; }
@@ -2826,6 +2830,7 @@ static MTLTextureDescriptor *tex_desc(const tex_t *t, int packaged) {
     d.pixelFormat = (MTLPixelFormat)pf;
     d.width = t->d.width ? t->d.width : 1; d.height = t->d.height ? t->d.height : 1; d.depth = 1; d.arrayLength = 1;
     d.mipmapLevelCount = t->d.levels ? t->d.levels : 1;
+    if (shadow_div() > 1 && is_shadow_map(t)) { d.width /= shadow_div(); d.height /= shadow_div(); }   // DM_SHADOW_DIV: the 12288x12288 depth texture (a 288 MB shadow map) is made smaller; state_op scales the viewports and scissors aimed at it
     switch (t->d.target) {
         // 1D / 1D array are created as one-row 2D / 2D array textures: translated shaders never declare texture1d (0 in all five games' libraries) and always sample them as 2D; a Metal 1D texture bound to a texture2d argument is a type mismatch with undefined reads.
         // Super Mario 3D World + Bowser's Fury's material shaders sample 64x1 R32F 1D lookup tables heavily every frame (on Maxwell a 2D sample of a 1D texture reads that one row)
@@ -11105,9 +11110,13 @@ static int first_draw_covers(int i, id<MTLTexture> t, NSUInteger level) {
 }
 
 int nvn_dpool_base(const void *pool, int tex);   // hle_nvn.c: where a descriptor pool's IDs start in the host table
+// The depth target is the shrunk shadow map (and nothing is drawn in colour): viewports and scissors given in the game's 12288 pixels are divided by shadow_div()
+static int shadow_target(void) { if (shadow_div() < 2 || !R.rt.depth || !is_shadow_map(R.rt.depth)) return 0; for (int i = 0; i < 8; i++) if (R.rt.color[i]) return 0; return 1; }
 static int state_op(uint32_t op, const void *a) {
     switch (op) {
-        case OP_SCISSOR: R.sc = *(const p_scissor *)a; R.has_sc = 1; break;
+        case OP_SCISSOR: R.sc = *(const p_scissor *)a; R.has_sc = 1;
+            if (shadow_target()) { int dv = (int)shadow_div(); R.sc.x /= dv; R.sc.y /= dv; R.sc.w = (R.sc.w + dv - 1) / dv; R.sc.h = (R.sc.h + dv - 1) / dv; }
+            break;
         // The pool bound when the draw runs, as on the GPU (a command buffer that binds none keeps the queue's): handles a shader reads from a uniform buffer are resolved only here,
         // so they take this base. Dark Souls Remastered keeps 12 sampler pools with different samplers under the same IDs and its map materials read their handles from uniform
         // memory; resolved in the first pool, the walls' tiling textures took a clamp-to-edge sampler and smeared sideways
@@ -11157,7 +11166,9 @@ static int state_op(uint32_t op, const void *a) {
             break;
         }
         case OP_POLY_OFFSET: S.po = *(const p_poly_offset *)a; break;
-        case OP_VIEWPORTS: { const p_viewports *b = a; for (int i = 0; i < b->n; i++) memcpy(S.vp[b->first + i], b->v[i], 16); S.has_vp = 1; break; }
+        case OP_VIEWPORTS: { const p_viewports *b = a; for (int i = 0; i < b->n; i++) memcpy(S.vp[b->first + i], b->v[i], 16); S.has_vp = 1;
+            if (shadow_target()) for (int i = 0; i < b->n; i++) for (int k = 0; k < 4; k++) S.vp[b->first + i][k] /= (float)shadow_div();
+            break; }
         case OP_DEPTH_RANGE: { const p_depth_range *b = a; S.dr[0] = b->n; S.dr[1] = b->f; break; }
         case OP_DEPTH_CLAMP: S.depth_clamp = ((const p_depth_clamp *)a)->on; break;
         case OP_VP_SWIZZLE: { const p_vp_swizzle *b = a; memcpy(S.vp_sw[b->first], b->sw, 4 * (size_t)b->n); break; }

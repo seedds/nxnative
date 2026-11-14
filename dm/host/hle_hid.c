@@ -1663,14 +1663,17 @@ HLE_FORCE("_ZN2nn3hid28ShowControllerFirmwareUpdateERKNS0_27ControllerFirmwareUp
 // Horizons: its input manager at main+0x1b65260 and its own keyboard's reader): sampling at each read let the first reader take the Start or End and the second see only a held
 // point, so the keyboard highlighted a key and entered nothing (issue #2567). One complete 16-finger sample is published per original frame and copied whole into each caller's
 // capacity; before the first present the grid is the host's 120 Hz one.
+// DM_TOUCH_DOCKED=1 answers touch points in console mode too. On hardware the screen is out of reach when docked, so console mode has none; a host whose front end draws into a
+// touchable display (an iPhone, a Mac window) can answer the touch screen anyway. Games that stop reading it in console mode are unaffected.
 int touch_fill_n(void *out, int max, uint64_t now_ns, int points);
+int dm_touch_docked(void) { const char *e = getenv("DM_TOUCH_DOCKED"); return e && *e && strcmp(e, "0") != 0; }
 static pthread_mutex_t g_touch_sample_mu = PTHREAD_MUTEX_INITIALIZER;
 static uint8_t g_touch_sample[0x290];   // TouchScreenState<16>: 0x10 + 0x28 * 16
 static uint64_t g_touch_sample_frame, g_touch_sample_boot;
 static int g_touch_sample_valid;
 static void touch_read(void *s, int n) {
     keys_sync();   // DM_KEYS frame steps due in this frame (their touches), before the read
-    if (dm_opmode() != 0) { touch_fill_n(s, n, now_ns(), 0); return; }   // console mode: no touch points, as before
+    if (dm_opmode() != 0 && !dm_touch_docked()) { touch_fill_n(s, n, now_ns(), 0); return; }   // console mode: no touch points, as before
     pthread_mutex_lock(&g_touch_sample_mu);
     uint64_t frame = dm_guest_frame(), now = now_ns(), boot = frame ? 0 : now / 8333333;   // 120 Hz before the first present
     if (!g_touch_sample_valid || frame != g_touch_sample_frame || boot != g_touch_sample_boot) {
@@ -1685,8 +1688,8 @@ HLE_FORCE("_ZN2nn3hid21InitializeTouchScreenEv", "connect to the hid touch scree
 // SDK 18 overload with two ints (Super Mario Galaxy); the SDK's own one opens the hid service and aborts in sm::Initialize
 HLE_FORCE("_ZN2nn3hid21InitializeTouchScreenEii", "connect to the hid touch screen (SDK 18 two-argument version); the host takes touch points from the front end", void, h_hid_InitTouch2, int a, int b) { (void)a; (void)b; }
 #define TOUCH(N) \
-    HLE_FORCE("_ZN2nn3hid19GetTouchScreenStateILm" #N "EEEvPNS0_16TouchScreenStateIXT_EEE", "touch screen current state (touch points only in handheld mode)", void, h_hid_Touch1_##N, void *s) { touch_read(s, N); } \
-    HLE_FORCE("_ZN2nn3hid20GetTouchScreenStatesILm" #N "EEEiPNS0_16TouchScreenStateIXT_EEEi", "touch screen states: 1 entry (touch points only in handheld mode)", int, h_hid_TouchN_##N, void *s, int n) { if (n <= 0) return 0; touch_read(s, N); return 1; }
+    HLE_FORCE("_ZN2nn3hid19GetTouchScreenStateILm" #N "EEEvPNS0_16TouchScreenStateIXT_EEE", "touch screen current state (touch points in handheld mode, or console mode with DM_TOUCH_DOCKED)", void, h_hid_Touch1_##N, void *s) { touch_read(s, N); } \
+    HLE_FORCE("_ZN2nn3hid20GetTouchScreenStatesILm" #N "EEEiPNS0_16TouchScreenStateIXT_EEEi", "touch screen states: 1 entry (touch points in handheld mode, or console mode with DM_TOUCH_DOCKED)", int, h_hid_TouchN_##N, void *s, int n) { if (n <= 0) return 0; touch_read(s, N); return 1; }
 TOUCH(1) TOUCH(2) TOUCH(3) TOUCH(4) TOUCH(5) TOUCH(6) TOUCH(7) TOUCH(8) TOUCH(9) TOUCH(10) TOUCH(11) TOUCH(12) TOUCH(13) TOUCH(14) TOUCH(15) TOUCH(16)
 // Gestures: recognized from the same touch points (hle_touch.c gesture_fill), so only in handheld mode too
 int gesture_fill(void *out, int n, uint64_t now_ns);

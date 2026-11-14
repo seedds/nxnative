@@ -132,6 +132,7 @@ static const CGFloat
 static const int k_btns[] = {B_ZL, B_L, B_ZR, B_R, B_MINUS, B_PLUS, B_LS, B_RS};   // keys locked at touch-down (L3 / R3 only in the 3D layout)
 static NSString *const k_layout_key = @"DmPadLayout";   // NSUserDefaults: 0 = 2D, 1 = 3D, 2 = Tap (DM_GAME_PAD_LAYOUT's numbers)
 int dm_opmode(void);   // hle_oe.c: 0 = handheld
+int dm_touch_docked(void);   // hle_hid.c: DM_TOUCH_DOCKED, the touch screen answers in console mode too
 
 @interface DmGamepad : UIView
 - (void)arrange:(DmLayout)layout;
@@ -219,7 +220,7 @@ static BOOL fullOnly(int b) { return b == B_LS || b == B_RS || b >= B_LEFT; }   
         [self addSubview:_menu];
         NSNumber *saved = [NSUserDefaults.standardUserDefaults objectForKey:k_layout_key];
         int l = saved ? (int)saved.integerValue : DM_GAME_PAD_LAYOUT;
-        if (l == 2 && dm_opmode() != 0) l = 0;   // Tap only in handheld mode (env.txt's DM_OPMODE may have changed it)
+        if (l == 2 && dm_opmode() != 0 && !dm_touch_docked()) l = 0;   // Tap only where the host answers touches: handheld, or console with DM_TOUCH_DOCKED (env.txt's DM_OPMODE may have changed it)
         _full = l == 1; _tap = l == 2;
         [self applyLayout];
         NSNotificationCenter *nc = NSNotificationCenter.defaultCenter;
@@ -240,14 +241,14 @@ static BOOL fullOnly(int b) { return b == B_LS || b == B_RS || b >= B_LEFT; }   
 }
 - (int)padLayout { return _tap ? 2 : _full ? 1 : 0; }
 - (void)setPadLayout:(int)l {   // the in-game menu's pick: release every touch first (no key stays held), save, lay out again
-    if (l == 2 && dm_opmode() != 0) l = 0;
+    if (l == 2 && dm_opmode() != 0 && !dm_touch_docked()) l = 0;
     [self reset];
     _full = l == 1; _tap = l == 2;
     [NSUserDefaults.standardUserDefaults setObject:@(l) forKey:k_layout_key];
     [self applyLayout]; [self setNeedsLayout];
 }
 - (void)opmodeChanged {   // docked: the Tap layout goes (the game reads no touch screen then), unsaved, so handheld mode at the next start brings it back
-    if (!_tap || dm_opmode() == 0) return;
+    if (!_tap || dm_opmode() == 0 || dm_touch_docked()) return;
     [self reset]; _tap = NO; _full = NO; [self applyLayout]; [self setNeedsLayout];
 }
 - (void)setTouchFeedback:(BOOL)on {
@@ -747,7 +748,7 @@ void dm_gamepad_arrange(UIView *view, DmLayout layout) { [(DmGamepad *)view arra
 void dm_gamepad_opmode_changed(void) { [g_view opmodeChanged]; }
 void dm_gamepad_touch_feedback(bool on) { [g_view setTouchFeedback:on]; }
 int dm_pad_layout(void) { return g_view ? [g_view padLayout] : 0; }
-bool dm_pad_layout_offered(int layout) { return layout == 0 || layout == 1 || (layout == 2 && dm_opmode() == 0); }
+bool dm_pad_layout_offered(int layout) { return layout == 0 || layout == 1 || (layout == 2 && (dm_opmode() == 0 || dm_touch_docked())); }
 void dm_pad_layout_set(int layout) { [g_view setPadLayout:layout]; }
 void dm_gamepad_active(void) { dispatch_async(dispatch_get_main_queue(), ^{ for (GCController *c in GCController.controllers) dm_motion_rearm(c); }); }   // On become active: motion_apple.h
 void dm_gamepad_reset(void) {   // On resign active: release everything (a key held while switching away and released in background gets no "release")

@@ -395,6 +395,7 @@ DM_TEST_UP_LOST	diagnostic	`=<batch index>` treats that batch of uploads as drop
 DM_THERMAL_CAP	switch	`0` turns off the thermal cap, which holds the frame step at 30 fps while iOS reports a serious or critical thermal state (on by default)
 DM_THR	diagnostic	`=1` logs each SVC (except `SleepThread`) with its first four arguments, and each `CreateThread` with entry, stack, priority and core
 DM_THRCPU	diagnostic	`=<tsv path>[,<seconds>]` writes each thread's CPU time (100% = one core) and the total every interval (default 10 s); on iOS a relative path is under `Documents`
+DM_TOUCH_DOCKED	player	`1` answers the touch screen in console mode too, for a front end whose picture the player can touch (an iPhone, a Mac window): on the Switch the screen is out of reach when docked and a game may read it without checking the mode, so console mode has no touch points by default; games that stop reading the touch screen in console mode themselves are unaffected
 DM_TOUCH_HAPTICS	player	`0` turns off the light haptic tap when a touch control is pressed (on by default); launcher setting
 DM_TOUCH_LOG	diagnostic	`=1` logs each touch-screen read with touch points (sample, finger, position, attributes) and each gesture entry, up to 500 lines
 DM_T_DUMP	test	`tests/t_blend_zero.m` prints the red channel each draw stored, row by row

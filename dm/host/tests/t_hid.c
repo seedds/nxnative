@@ -707,6 +707,26 @@ static void t_touch_sampling(void) {
     g_mode = 1;
 }
 
+// DM_TOUCH_DOCKED=1: console mode answers touch points too, for a front end whose picture the player can touch; unset or 0 keeps the hardware's empty console state
+static void t_touch_docked(void) {
+    uint8_t s[0x10 + 0x28 * 16];
+    unsetenv("DM_TOUCH_DOCKED"); g_mode = 1; test_frame++;
+    h_hid_Touch1_16(s);
+    CHECK(touch_points == 0, "touch docked: console mode without DM_TOUCH_DOCKED has no touch points");
+    setenv("DM_TOUCH_DOCKED", "1", 1); test_frame++;
+    h_hid_Touch1_16(s);
+    CHECK(touch_points == 1, "touch docked: DM_TOUCH_DOCKED=1 answers touch points in console mode");
+    test_frame++;
+    CHECK(h_hid_TouchN_16(s, 1) == 1 && touch_points == 1, "touch docked: GetTouchScreenStates answers them too");
+    g_mode = 0; test_frame++;
+    h_hid_Touch1_16(s);
+    CHECK(touch_points == 1, "touch docked: handheld mode answers them as before");
+    g_mode = 1; setenv("DM_TOUCH_DOCKED", "0", 1); test_frame++;
+    h_hid_Touch1_16(s);
+    CHECK(touch_points == 0, "touch docked: DM_TOUCH_DOCKED=0 is off");
+    unsetenv("DM_TOUCH_DOCKED"); g_mode = 1;
+}
+
 // Unintended Home button input protection: one flag per npad, on until the game turns it off (Nintendo Switch Sports Resort asks, then turns it off for each npad)
 
 // Npad IMU (Switch 2): the host serves the layer the SDK's sensor fusion reads from. Enabled with the game's buffer, disabled again; no samples yet (the buffer is never written)
@@ -1608,6 +1628,7 @@ int main(void) {
     t_pair_half_pause();
     t_six_ic_info();
     t_touch_sampling();
+    t_touch_docked();
     t_rec();
     {   // Nmouse with no device (SDK 21's forms): the pointer range is kept, the merged handle 0 takes settings, the standard mouse and the handle queries report nothing
         int w = 0, h = 0; uint64_t std = 7; uint32_t npad = 9;

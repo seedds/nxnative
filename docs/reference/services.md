@@ -619,6 +619,13 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Check:** `dm/host/tests/t_touch.c` reads in console mode between handheld reads (an empty state with the next number, the Start of a finger pressed meanwhile kept), and `dm/host/tests/t_hid.c` (`t_touch_sampling`) reads docked, handheld, docked and handheld again through both `GetTouchScreenState` and `GetTouchScreenStates` (every read reaches `touch_fill_n`, points asked for in handheld mode only). In Aokana on the Mac (the PR author's runs, headless, a tap every 1.5 s from 20 s, with the first form of the fix, which numbered both modes from the npad counter): a tap during the opening movie stops it and the title comes up, before the fix only when started handheld; with it, also started docked and switched with `DM_OE_SCRIPT=opmode=0@12`, and started handheld, docked at 12 s and back at 24 s. Not run on the iPad.
 - **Found on:** Aokana - Four Rhythms Across the Blue (`0100990011866000`, Unity 2018.4.22f1 IL2CPP; profile in PR #1372), on the iPad: started docked, then handheld and Tap in the in-game menu, and no tap reached the game.
 
+### Touch points in console mode (`DM_TOUCH_DOCKED`)
+
+- **Symptom:** a game run in console mode takes no touch, though the front end's picture is the phone's or the window's and the player touches it; switched to handheld (`DM_OPMODE=0`) the same touches work. A player wanting the console mode's resolution (1920x1080 through `oe::GetDefaultDisplayResolution`, `hle_oe.c`) therefore loses the touch screen.
+- **Cause:** `touch_read` (`hle_hid.c`) asked for touch points only in handheld mode, as on the Switch, whose screen is out of reach when docked; the picture on a phone or in a Mac window is touchable regardless of the mode the game is told.
+- **Fix:** `DM_TOUCH_DOCKED=1` makes `touch_read` ask for touch points in console mode too (`dm_touch_docked`, `hle_hid.c`); the iOS front end offers its Tap layout there as well (`DmGamepad.m`). Gestures stay handheld-only (`GetGestureStates`). Off by default, so a game sees the hardware's empty console state. For every game that reads the touch screen in console mode; a game that stops reading it there itself is unaffected.
+- **Check:** `dm/host/tests/t_hid.c` (`t_touch_docked`) reads in console mode with the switch unset, set to 1, set to 0 and in handheld mode, through both `GetTouchScreenState` and `GetTouchScreenStates`. Not run on a device.
+
 ### Mac pointer stays over the game
 
 - **Symptom:** on the Mac, the mouse pointer stays over the game picture while playing with a controller or the keyboard, in a window and in fullscreen ([issue #675](https://github.com/seedds/nxnative/issues/675)).

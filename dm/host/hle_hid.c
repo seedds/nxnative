@@ -8,6 +8,7 @@
 #include "hle.h"
 #include "hle_haptics.h"
 #include "dm_input.h"
+#include "stick_deadzone.h"
 #include "front.h"
 #include <stdatomic.h>
 #include <stdbool.h>
@@ -60,8 +61,16 @@ void dm_input_set(uint64_t buttons, int32_t lx, int32_t ly, int32_t rx, int32_t 
     uint64_t old = atomic_exchange(&g_btn, buttons); atomic_fetch_or(&g_latch, buttons & ~old); atomic_fetch_or(&g_peek_latch, buttons & ~old); atomic_store(&g_axes, pack(lx, ly, rx, ry));
     shake_note();
 }
+// The front end's per-stick deadzones (stick_deadzone.h), read once: the environment is fixed at launch. Every physical controller passes through
+// dm_pad_set_player, so the same deadzone holds on the Mac and the iPhone; keyboard, touch and scripted input do not use it.
+static int stick_dz(int right) {
+    static int cached[2] = {-1, -1};
+    if (cached[right] < 0) cached[right] = stick_deadzone_percent(getenv(right ? "DM_STICK_DEADZONE_R" : "DM_STICK_DEADZONE_L"));
+    return cached[right];
+}
 void dm_pad_set_player(int p, uint64_t buttons, int32_t lx, int32_t ly, int32_t rx, int32_t ry) {
     if (p < 0 || p >= DM_PLAYERS) return;
+    stick_deadzone_apply(&lx, &ly, stick_dz(0)); stick_deadzone_apply(&rx, &ry, stick_dz(1));
     uint64_t old = atomic_exchange(&g_pad_btn[p], buttons); atomic_fetch_or(&g_pad_latch[p], buttons & ~old); atomic_fetch_or(&g_peek_latch, buttons & ~old); atomic_store(&g_pad_axes[p], pack(lx, ly, rx, ry));
     if (!p) shake_note();
 }

@@ -405,6 +405,33 @@ class Prune(Base):
         self.assertEqual(self.blobs(), before - 1)   # D2's source; its library's bytes stay under metallib/
         self.assertEqual(self.store.get('metallib/mac/m.metallib'), b'L' + D2.encode())
 
+    def test_read_only_regression_reuse_defers_normal_cache_pruning(self):
+        name = f'metallib/mac/{D1}.metallib'
+        self.store.put(name, b'normal compile', 1)
+        reader = shader_cache.Store(self.root / 'regress/cas.db', readonly=self.path)
+        try:
+            self.assertEqual(reader.get(name), b'normal compile')
+            self.assertEqual(self.store.prune_compiled([], time.time()), (0, 0))
+            self.assertEqual(reader.get(name), b'normal compile')
+            self.assertFalse(reader.db.execute('SELECT 1 FROM entry').fetchall())
+        finally: reader.close()
+        self.assertEqual(self.store.prune_compiled([], time.time()), (1, len(b'normal compile')))
+
+    def test_failed_exclusive_upgrade_restores_the_shared_lease(self):
+        original = shader_cache.fcntl.flock
+        def upgrade(fd, operation):
+            if operation & shader_cache.fcntl.LOCK_EX:
+                # BSD flock conversion can drop LOCK_SH even when LOCK_EX fails.
+                original(fd, shader_cache.fcntl.LOCK_UN)
+                raise BlockingIOError('another reader')
+            return original(fd, operation)
+        with mock.patch.object(shader_cache.fcntl, 'flock', upgrade):
+            self.assertEqual(self.store.prune_compiled([], time.time()), (0, 0))
+        fd = os.open(self.root, os.O_RDONLY)
+        try:
+            with self.assertRaises(BlockingIOError): original(fd, shader_cache.fcntl.LOCK_EX | shader_cache.fcntl.LOCK_NB)
+        finally: os.close(fd)
+
     def test_the_file_gives_back_its_pages(self):
         now = time.time()
         for i in range(40): self.store.put(f'shader/{i:064x}/mac/k_b.metal', os.urandom(100000), now - 100)

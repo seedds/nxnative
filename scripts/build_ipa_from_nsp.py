@@ -2366,18 +2366,19 @@ def prune_stale_chains(sh, chain):
     holds what the old libraries compiled. Called only after the libraries, their tables and the key are in place, so a stopped or failed build keeps the old ones. Only names of the exact form
     b-<12 hex digits> go (the key files with .key, the Mac's with a mac- prefix), never another entry. A removal that fails is a [RED] line, not an error: the build is done, and the next one tries
     again. Returns the chain versions removed"""
-    def listing(d, pat): return [d / n for n in (os.listdir(d) if d.is_dir() else []) if re.fullmatch(pat, n) and n not in (f'b-{chain}', f'b-{chain}.img', f'b-{chain}.key', f'mac-b-{chain}.key')]
-    old = [p for d in (sh / 'cache', sh / 'ios') for p in listing(d, r'b-[0-9a-f]{12}') if p.is_dir()]
-    old += [p for d, pat in ((sh / 'ios', r'b-[0-9a-f]{12}\.key'), (sh, r'mac-b-[0-9a-f]{12}\.key'), (sh / 'cache', r'b-[0-9a-f]{12}\.img(\.part)?'), (sh / 'ios', r'b-[0-9a-f]{12}\.img(\.part)?')) for p in listing(d, pat) if p.is_file()]
-    gone, size = [], 0
-    for p in old:
-        try: n = tree_size(p)[1] if p.is_dir() else p.stat().st_size; rmtree(p)
-        except OSError as e: say(f'[RED] could not remove old shader libraries {p}: {e}'); continue
-        gone.append(p); size += n
-    if not gone: return []
-    names = sorted({re.sub(r'\.(key|img(\.part)?)$', '', p.name).removeprefix('mac-') for p in gone})
-    say(f'removed old shader libraries {", ".join(names)} ({amount(size, "B")})')
-    return names
+    with shader_cache.lease(sh / 'cache/cas.db'):
+        def listing(d, pat): return [d / n for n in (os.listdir(d) if d.is_dir() else []) if re.fullmatch(pat, n) and n not in (f'b-{chain}', f'b-{chain}.img', f'b-{chain}.key', f'mac-b-{chain}.key')]
+        old = [p for d in (sh / 'cache', sh / 'ios') for p in listing(d, r'b-[0-9a-f]{12}') if p.is_dir()]
+        old += [p for d, pat in ((sh / 'ios', r'b-[0-9a-f]{12}\.key'), (sh, r'mac-b-[0-9a-f]{12}\.key'), (sh / 'cache', r'b-[0-9a-f]{12}\.img(\.part)?'), (sh / 'ios', r'b-[0-9a-f]{12}\.img(\.part)?')) for p in listing(d, pat) if p.is_file()]
+        gone, size = [], 0
+        for p in old:
+            try: n = tree_size(p)[1] if p.is_dir() else p.stat().st_size; rmtree(p)
+            except OSError as e: say(f'[RED] could not remove old shader libraries {p}: {e}'); continue
+            gone.append(p); size += n
+        if not gone: return []
+        names = sorted({re.sub(r'\.(key|img(\.part)?)$', '', p.name).removeprefix('mac-') for p in gone})
+        say(f'removed old shader libraries {", ".join(names)} ({amount(size, "B")})')
+        return names
 
 
 def prune_shader_cache(sh, chain):
@@ -2386,17 +2387,46 @@ def prune_shader_cache(sh, chain):
     11.85 GB of sources and reflection nothing read. The digests in use are listed by dmsh_build.py's full build in b-<chain>/_b_cas.txt beside the Mac outputs (every full build writes them);
     index/ cannot tell, since a cache hit does not rewrite it. No list (libraries from before the list): nothing goes. An entry newer than the list stays (regress.py's chain builds share this
     cache and may publish meanwhile). The digests also cover the iOS compile convention, so a build of the other target translates again, as switching targets did before; the Metal compile cache
-    (metallib/) and the fetch variants (variant/) are keyed by the MSL and stay. Only names of 64 hex digits go. Removals that fail are one [RED] line, as for the libraries.
+    (metallib/) and old fetch variants (variant/) retain only groups still named by completed outputs or other cache entries. Only names of 64 hex digits go. Removals that fail are one [RED] line, as for the libraries.
     Logs the space of the sources and reflection: an entry's libraries are clones of the compile cache's. Returns the number removed"""
     used = shader_lib.view(sh / 'cache' / f'b-{chain}') / '_b_cas.txt'
     try: keep, since = set(used.read_text().split()), used.stat().st_mtime
     except OSError: return 0
     if not shader_cache.exists(sh / 'cache/cas.db'): return 0
     store = shader_cache.Store(sh / 'cache/cas.db', say)
-    try: n, size = store.prune_shaders(keep, since)
+    try:
+        n, size = store.prune_shaders(keep, since)
+        try:
+            compiled, freed = store.prune_compiled(shader_library_hashes(sh, chain), since)
+            if compiled: say(f'removed old compiled shader cache entries: {compiled:,} ({amount(freed, "B")})')
+        except (OSError, ValueError, shader_cache.sqlite3.Error) as e:
+            say(f'[RED] could not prune old compiled shader cache entries: {e}')
     finally: store.close()
     if n: say(f'removed old shader cache entries: {n:,} ({amount(size, "B")})')
     return n
+
+
+def shader_library_hashes(sh, chain):
+    """Hashes of every completed Mac/iOS library, including side and pulling variants that
+    shader/ does not cache. Read in place, a chunk at a time; no shader output is changed.
+    A missing stamp or an unreadable target aborts compiled pruning before anything goes.
+    Store consumes this generator under its exclusive lease, so a sharing build cannot
+    replace the images during the scan. Hashing uses the cache's content-address convention."""
+    for root in (sh / 'cache', sh / 'ios'):
+        lib = root / f'b-{chain}'
+        present = False
+        for p in (lib, Path(shader_lib.image_of(lib))):
+            try: p.stat(); present = True
+            except FileNotFoundError: pass   # permission and I/O failures must not hide a live target
+        if not present: continue
+        stamp = shader_lib.read_stamp(lib)
+        if not stamp.get('game') or not stamp.get('inputs'): raise ValueError(f'no full build stamp in {lib}')
+        for p in shader_lib.view(lib).iterdir():
+            if not p.name.endswith('.metallib'): continue
+            h = hashlib.blake2b(digest_size=16)
+            with p.open('rb') as f:
+                while data := f.read(8 << 20): h.update(data)
+            yield h.digest()
 
 
 def stale_shaders(py, repo, env, lib_dirs, chain, g):
@@ -2423,8 +2453,9 @@ def stale_shaders(py, repo, env, lib_dirs, chain, g):
 def pack_libraries(sh, chain, pull=None):
     """Each finished library folder as one file, which the host and the tools read in place (shader_lib.py). pull False: nothing reads the iPhone's pulling libraries (ios_wants_pulling), which stay out of its
     image, so the IPA packs that file as it is and reuses it. A build that wants them again compiles them"""
-    shader_lib.pack(sh / 'cache' / f'b-{chain}', say)
-    shader_lib.pack(sh / 'ios' / f'b-{chain}', say, leave_out=pull is False)
+    with shader_cache.lease(sh / 'cache/cas.db'):
+        shader_lib.pack(sh / 'cache' / f'b-{chain}', say)
+        shader_lib.pack(sh / 'ios' / f'b-{chain}', say, leave_out=pull is False)
 
 
 def ios_gpus(gpu_option, g):
@@ -2501,10 +2532,11 @@ def build_shaders(py, repo, sh, xlate, env, logs, g, pkg_key=None, mac=False, se
             + f'; {n:,} base libraries scheduled (including cache restores; later builds reuse as before)')
     if mac and not seen and g.table('shader_seen.tsv').is_file():
         say(f'building the whole shader map, {len(shader_keys(g)):,} shaders: hours for a large one the first time. --seen-shaders builds only the {len(seen_listed(g)):,} the profile\'s playtests used, in minutes; areas they do not cover then draw incomplete')
-    if not seen:   # the run's folder replaces the library: a stopped build keeps no old shaders under the same chain, as dmsh_build.py removes a folder's
-        shader_lib.remove_image(sh / 'cache' / f'b-{chain}')
-        if not mac: shader_lib.remove_image(ios / f'b-{chain}')
-    run([py, repo / 'dm/gfx/tools/own_compilers.py', sh / 'pkg', out if seen else sh / 'cache', *(seen or ())], log, env=benv)
+    with shader_cache.lease(cas):   # protect parent image removal as well as the child, including older tools
+        if not seen:   # the run's folder replaces the library: a stopped build keeps no old shaders under the same chain, as dmsh_build.py removes a folder's
+            shader_lib.remove_image(sh / 'cache' / f'b-{chain}')
+            if not mac: shader_lib.remove_image(ios / f'b-{chain}')
+        run([py, repo / 'dm/gfx/tools/own_compilers.py', sh / 'pkg', out if seen else sh / 'cache', *(seen or ())], log, env=benv)
     PROG.watch(None)
     if not seen and not chain_tables(py, repo, sh, env, logs, g, chain): raise BuildError(f'no stamped Mac shader outputs in {sh / "cache" / f"b-{chain}"} (inputs.tsv): dmsh_build.py did not finish a full build')
     what = 'Mac' if mac else 'iOS'

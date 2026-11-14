@@ -516,6 +516,32 @@ out = Path(sys.argv[2]) / 'b-v'; out.mkdir(parents=True, exist_ok=True)
             self.assertEqual(s.get('metallib/mac/new.metallib'), b'new')
             self.assertIsNone(s.get('metallib/mac/normal.metallib'))
 
+    def test_older_chain_build_holds_a_shared_cache_lease(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td); build = root / 'build'; old_tree = root / 'old-tree'
+            (old_tree / 'dm/tools').mkdir(parents=True); (old_tree / 'dm/tools/shader_cache.py').write_text('# before cache leases\n')
+            profile = root / 'profile'; profile.mkdir()
+            g = NS(id='game', kind='nvn', folder=root, build=build, env=lambda tree: {}, profile_dir=lambda tree: profile)
+            cas = regress.game_root(g) / 'cas.db'; name = 'metallib/mac/' + 'a' * 64 + '.metallib'
+            store = regress.shader_cache.Store(cas); store.put(name, b'old compile', 1); store.close()
+            def run(cmd, log, cwd, env, args, what):
+                # The baseline child predates leases. A current NSP prune must still see
+                # the harness's lease and leave its cache alone while that child runs.
+                self.assertEqual(env['DMSH_CAS'], str(cas))
+                current = regress.shader_cache.Store(cas)
+                try:
+                    self.assertEqual(current.prune_compiled([], time.time()), (0, 0))
+                    self.assertEqual(current.get(name), b'old compile')
+                finally: current.close()
+                lib = Path(cmd[-1]) / 'b-v'; lib.mkdir(); (lib / '_b_build.json').write_text('[]')
+                return 0, 0
+            with patch.object(regress, 'chain_key', return_value=('v', 'i', 'key')), patch.object(regress, 'run_heavy', run), \
+                    patch.object(regress, 'nvn_manifest', return_value={}), patch.object(regress, 'interface_check', return_value={'bad': []}):
+                regress.chain_build(NS(id='old', path=old_tree), g, NS(tools_fp='', jobs=1))
+            current = regress.shader_cache.Store(cas)
+            try: self.assertEqual(current.prune_compiled([], time.time()), (1, len(b'old compile')))
+            finally: current.close()
+
     def test_a_chain_build_becomes_one_file_with_the_same_hashes(self):
         k = '0123456789abcdef'
         with tempfile.TemporaryDirectory() as td:

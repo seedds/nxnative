@@ -13,17 +13,38 @@ from pathlib import Path
 SCHEMA = ('CREATE TABLE IF NOT EXISTS blob(id INTEGER PRIMARY KEY, hash BLOB UNIQUE NOT NULL, data BLOB NOT NULL)',
           'CREATE TABLE IF NOT EXISTS entry(name TEXT PRIMARY KEY, blob INTEGER NOT NULL, mtime REAL NOT NULL) WITHOUT ROWID')
 SHADER_ENTRY = re.compile(r'shader/([0-9a-f]{64})/')
+COMPILED_ENTRY = re.compile(r'(metallib/(?:mac|ios)/[0-9a-f]{64})(?:_x[0-9]*)?\.metallib$|(variant/[0-9a-f]{64})/[^/]+$')
 WAIT = 600   # seconds another process's write may hold this one up
 _DAMAGED = ('malformed', 'not a database', 'disk image')
 DBMOVED = 1032   # SQLITE_READONLY_DBMOVED, an error's sqlite_errorcode (Python 3.11+)
 READ_ONLY = None   # set only by --run: the harness supplies this module to older SQLite-based builders too
 
 
+@contextlib.contextmanager
+def lease(path):
+    """Share a cache while a build uses it, including an older revision launched by regress.py.
+    Lock its directory: no extra file, and replacing a damaged database does not lose the lock.
+    Readers and writers share it; compiled-entry pruning needs it exclusively. A drive without
+    flock can still build, but cannot do that prune. Independent older clients must not share
+    a cache while a current NSP build prunes it: only regress.py can lease on their behalf."""
+    parent = os.path.dirname(os.path.abspath(path)); os.makedirs(parent, exist_ok=True)
+    fd = os.open(parent, os.O_RDONLY)
+    try:
+        try: fcntl.flock(fd, fcntl.LOCK_SH)
+        except OSError: os.close(fd); fd = None
+        yield fd
+    finally:
+        if fd is not None: os.close(fd)
+
+
+
 class _ReadOnly:
     """A live SQLite reader: mode=ro sees a normal build's committed WAL, never migrates, repairs or writes its database. Mutable index/stage bookkeeping is local to each build."""
     def __init__(self, path, say):
         self.db, self.say, self.path, self.lock = None, say, os.fspath(path), threading.RLock()
+        self._lease = None
         if not os.path.isfile(self.path): return
+        self._lease = lease(self.path); self._lease.__enter__()
         try: self.db = sqlite3.connect(Path(self.path).resolve().as_uri() + '?mode=ro', uri=True, timeout=WAIT, check_same_thread=False, isolation_level=None)
         except sqlite3.Error as e: self._failed(e)
 
@@ -54,6 +75,8 @@ class _ReadOnly:
             if self.db is not None:
                 with contextlib.suppress(sqlite3.Error): self.db.close()
                 self.db = None
+            if self._lease is not None:
+                self._lease.__exit__(None, None, None); self._lease = None
 
 
 class _Files:   # an entry from or to a file, by get and put
@@ -87,7 +110,12 @@ class Store(_Files):
             self.use_lock = open(self.path + '.lock', 'a')
             fcntl.flock(self.use_lock, fcntl.LOCK_SH)
         self.readonly = _ReadOnly(source, say) if source else None
-        self._open()
+        self._lease = lease(self.path); self.lease_fd = self._lease.__enter__()
+        try: self._open()
+        except BaseException:
+            if self.readonly: self.readonly.close()
+            if self.use_lock: self.use_lock.close()
+            self._lease.__exit__(None, None, None); raise
 
     def _connect(self): return sqlite3.connect(self.path, timeout=WAIT, check_same_thread=False, isolation_level=None)
 
@@ -198,6 +226,38 @@ class Store(_Files):
         self._run('PRAGMA incremental_vacuum')
         return len(gone), sum(size.get(d, 0) for d in gone)
 
+    def prune_compiled(self, keep_hashes, since):
+        """Remove obsolete compiled groups, retaining every split piece when any piece is live.
+        keep_hashes is a lazy iterable of current output hashes, read only under an exclusive
+        lease. Other cache references and entries published since the full build also stay.
+        Returns (entries removed, distinct bytes freed), or nothing removed while a build uses
+        this cache. SQLite's write transaction keeps the metadata scan and deletion atomic."""
+        with self.lock:
+            if self.lease_fd is None: return 0, 0
+            try: fcntl.flock(self.lease_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                # A failed upgrade may have dropped the shared lease (BSD flock).
+                fcntl.flock(self.lease_fd, fcntl.LOCK_SH)
+                return 0, 0
+            try:
+                keep = set(keep_hashes)
+                with self.batch():
+                    rows = self.db.execute('SELECT e.name, e.mtime, e.blob, b.hash FROM entry e JOIN blob b ON b.id=e.blob').fetchall()
+                    groups, rooted = {}, set()
+                    for name, mtime, blob, digest in rows:
+                        match = COMPILED_ENTRY.fullmatch(name)
+                        if match: groups.setdefault(match.group(1) or match.group(2), []).append((name, mtime, blob, digest))
+                        else: rooted.add(blob)
+                    gone = [row for group in groups.values() if all(mtime < since and blob not in rooted and digest not in keep
+                                                                 for _, mtime, blob, digest in group) for row in group]
+                    if not gone: return 0, 0
+                    self.db.executemany('DELETE FROM entry WHERE name=?', ((r[0],) for r in gone))
+                    size = self.db.execute('SELECT coalesce(sum(length(data)), 0) FROM blob WHERE id NOT IN (SELECT blob FROM entry)').fetchone()[0]
+                    self.db.execute('DELETE FROM blob WHERE id NOT IN (SELECT blob FROM entry)')
+                self._run('PRAGMA incremental_vacuum')
+                return len(gone), size
+            finally: fcntl.flock(self.lease_fd, fcntl.LOCK_SH)
+
     def delete_prefix(self, prefix):
         """Remove every entry whose name starts with prefix, and the bytes nothing names any more, giving their pages back (dmsh_build.py's staged outputs once its image is written)"""
         with self.lock:
@@ -214,6 +274,8 @@ class Store(_Files):
         if self.readonly: self.readonly.close()
         if self.use_lock:
             self.use_lock.close(); self.use_lock = None
+        if self._lease is not None:
+            self._lease.__exit__(None, None, None); self._lease = None; self.lease_fd = None
 
     def trim(self, limit):
         """Bound the physical database size, oldest-written groups first; split libraries, shader outputs and variants leave whole. Called only with no builders using this regression cache."""

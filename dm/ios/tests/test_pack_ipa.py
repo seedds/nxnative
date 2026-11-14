@@ -108,6 +108,27 @@ class PackIpa(unittest.TestCase):
         self.assertFalse(lib.exists())
         self.assertEqual((image.stat().st_size, image.stat().st_mtime_ns), (before.st_size, before.st_mtime_ns))
 
+    def test_compressed_image_goes_in_plain(self):   # shader_lib.py compress: the app carries the original bytes, the Mac's image stays compressed
+        lib = self.tmp / 'b-test'; image = Path(str(lib) + '.img')
+        files = {'k_b.metallib': b'MTLB' + b'compiled shader ' * 400, 'k_b.json': b'{"chain": "test", ' + b'"slot": 1, ' * 200 + b'"end": 0}',
+                 'k_bp.metallib': b'MTLB' + b'pulling shader ' * 400, 'inputs.tsv': b'inputs\tfixture\n'}
+        pack.shader_lib.write(files, str(image)); pack.shader_lib.compress(lib)
+        self.assertTrue(pack.shader_lib.is_compressed(lib)); stored = image.read_bytes()
+        arc = 'Payload/DmIOS.app/msl/' + lib.name
+        mapped, source = pack.library_map(arc, str(lib), (), str(self.out))
+        self.assertEqual(mapped, arc + '.img'); self.assertNotEqual(source, str(image))
+        self.assertFalse(pack.shader_lib.is_compressed(source))
+        self.assertEqual({p.name: p.read_bytes() for p in pack.shader_lib.view(source).iterdir()}, files)
+        mapped, source = pack.library_map(arc, str(lib), (), str(self.out), shader_files=True)
+        self.assertEqual({p.name: p.read_bytes() for p in Path(source).iterdir()}, files)
+        self.maps = [f'{arc}={lib}', f'Payload/DmIOS.app={self.app}']
+        self.run_pack()
+        with zipfile.ZipFile(self.out) as z: packed = z.read(arc + '.img')
+        packed_image = self.tmp / 'packed.img'; packed_image.write_bytes(packed)
+        self.assertFalse(pack.shader_lib.is_compressed(packed_image))
+        self.assertEqual({p.name: p.read_bytes() for p in pack.shader_lib.view(packed_image).iterdir()}, files)
+        self.assertEqual(image.read_bytes(), stored)
+
     def test_shader_files_mode_switches_in_repacked_ipa(self):
         for program in ('', 'p1/'):
             with self.subTest(program=program):

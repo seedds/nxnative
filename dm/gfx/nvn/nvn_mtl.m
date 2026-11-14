@@ -35,6 +35,7 @@
 #include "nvn_primitive.h"
 #include "nvn_timestamp.h"
 #include "msl_image.h"
+#include "msl_imgz.h"
 #include "dmsh_chain.h"   // DMSH_CHAIN: the translation chain version of the B shader library expected by this source tree, one for every game (beside this file, tools/dmsh_chain.py --header)
 #include "game_profile.h"   // game profile constants (profile id, the profile's switches)
 // Texture slot table per stage: 0-127 the combined handles (nvnCommandBufferBindTexture), 128-255 the separate texture binds (NVN_SEPTEX_SLOT0, nvn_obj.h)
@@ -5866,13 +5867,31 @@ static const img_ent *msl_image_file(NSString *path, romfs_img **img) {
     *img = m;
     return m ? msl_image_find(m, path.lastPathComponent.UTF8String) : NULL;
 }
+// A compressed file of the image (msl_imgz.h, shader_lib.py compress), decoded as it loads; DM_MSL_IMGZ=0 refuses it instead (the file is named and its load fails, as on a host
+// from before this). On a 20.7 GB library (7.5 GB compressed): frame times within noise, boot unchanged, footprint +120-160 MB (Metal keeps the decoded bytes while a library
+// lives: a mapped library's pages are page cache, a decoded one's are the process's). Returns the original bytes (malloc'd) or NULL with *why set. The totals go to the log at the 1st, 2nd, 4th, 8th ... file
+static _Atomic uint64_t g_imgz_n, g_imgz_in, g_imgz_out, g_imgz_ns, g_imgz_max_ns;
+static void *msl_imgz_take(const void *p, size_t n, size_t *len, const char *name, const char **why) {
+    static int on; static dispatch_once_t once; dispatch_once(&once, ^{ const char *e = getenv("DM_MSL_IMGZ"); on = !(e && *e == '0'); });   // the loads run on several threads (prefetch, prepare workers)
+    static _Atomic uint32_t refused;   // a file may load many times (the prebuild loads a pair's libraries for each pair): the first 16 refusals, then every 2^k-th, are named
+    if (!on) { uint32_t r = atomic_fetch_add(&refused, 1) + 1; if (r <= 16 || !(r & (r - 1))) MLOG("[RED] shader library file %s is compressed (DMZ1) and DM_MSL_IMGZ=0 refuses it: it fails to load (%u refused)", name, r); *why = "compressed library file (DM_MSL_IMGZ=0 refuses it)"; return NULL; }
+    uint64_t t0 = now_ns(); void *o = msl_imgz_decode(p, n, len, why); uint64_t dt = now_ns() - t0;
+    if (!o) { uint32_t r = atomic_fetch_add(&refused, 1) + 1; if (r <= 16 || !(r & (r - 1))) MLOG("[RED] shader library file %s: cannot decode: %s (%u refused)", name, *why, r); return NULL; }
+    uint64_t k = atomic_fetch_add(&g_imgz_n, 1) + 1, in = atomic_fetch_add(&g_imgz_in, n) + n, out = atomic_fetch_add(&g_imgz_out, *len) + *len, ns = atomic_fetch_add(&g_imgz_ns, dt) + dt;
+    uint64_t mx = atomic_load(&g_imgz_max_ns); while (dt > mx && !atomic_compare_exchange_weak(&g_imgz_max_ns, &mx, dt)) {}
+    if (!(k & (k - 1))) MLOG("compressed shader library: %llu files decoded, %.1f MB -> %.1f MB, %.1f ms in all (largest %.0f us)", k, in / 1e6, out / 1e6, ns / 1e6, (dt > mx ? dt : mx) / 1e3);
+    return o;
+}
 static NSData *msl_data(NSString *path) {   // a file of the library, nil when it has none
     NSData *d = [NSData dataWithContentsOfFile:path];
     if (d) return d;
     romfs_img *m; const img_ent *x = msl_image_file(path, &m);
     if (!x) return nil;
     NSMutableData *o = [NSMutableData dataWithLength:(NSUInteger)x->b];
-    return romfs_image_read(m->fd, o.mutableBytes, (size_t)x->b, (off_t)x->a) ? o : nil;
+    if (!romfs_image_read(m->fd, o.mutableBytes, (size_t)x->b, (off_t)x->a)) return nil;
+    if (!msl_imgz_is(o.bytes, o.length)) return o;
+    size_t len; const char *why; void *raw = msl_imgz_take(o.bytes, o.length, &len, path.lastPathComponent.UTF8String, &why);
+    return raw ? [NSData dataWithBytesNoCopy:raw length:len freeWhenDone:YES] : nil;
 }
 static NSString *exe_rel(const char *rel) {
     char buf[4096]; uint32_t n = sizeof buf;
@@ -6098,8 +6117,15 @@ static NSString *lib_digest(const void *p, size_t n) {
 static id<MTLLibrary> lib_from_file(NSString *path, NSError **err) {
     int fd = open(path.fileSystemRepresentation, O_RDONLY); struct stat st;
     if (fd < 0) {   // not in the folder: the library's image, whose one descriptor is shared, and only this file's pages are mapped
-        int open_errno = errno; romfs_img *img; const img_ent *x = msl_image_file(path, &img); msl_map f;
-        if (x && msl_image_map(img, x, &f)) {
+        int open_errno = errno; romfs_img *img; const img_ent *x = msl_image_file(path, &img); msl_map f = {0};
+        if (x && msl_image_map(img, x, &f) && msl_imgz_is(f.data, f.size)) {   // compressed: the original bytes, which Metal holds while the library lives
+            size_t len; const char *why; void *raw = msl_imgz_take(f.data, f.size, &len, path.lastPathComponent.UTF8String, &why); munmap(f.base, f.base_len);
+            if (!raw) { if (err) *err = [NSError errorWithDomain:NSPOSIXErrorDomain code:EINVAL userInfo:@{NSLocalizedDescriptionKey: [NSString stringWithFormat:@"%@: %s", path, why]}]; return nil; }
+            NSString *tag = lib_digest(raw, len);   // before the data object owns raw: the digest of the original bytes, as the plain image's file gets
+            dispatch_data_t d = dispatch_data_create(raw, len, dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), DISPATCH_DATA_DESTRUCTOR_FREE);
+            return lib_tag([g_dev newLibraryWithData:d error:err], tag);
+        }
+        if (x && f.base) {
             void *base = f.base; size_t base_len = f.base_len;
             dispatch_data_t d = dispatch_data_create(f.data, f.size, dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{ munmap(base, base_len); });
             return lib_tag([g_dev newLibraryWithData:d error:err], lib_digest(f.data, f.size));

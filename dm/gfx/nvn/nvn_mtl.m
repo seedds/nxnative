@@ -16667,8 +16667,8 @@ static id<MTLTexture> present_raw_src(id<MTLTexture> src) {
 // differs from the game's, e.g. iPhone about 19.5:9 against the game's 16:9); when the ratios differ by under 1 % (the remainder from a game width that is a multiple of 8 in the
 // full-screen setup, e.g. 1952x900 against 2868x1320 differs by 0.17 %) the whole canvas, leaving no border of a few pixels
 static MTLViewport present_viewport(double pw, double ph, double dw, double dh) {
-    double s = fmin(dw / pw, dh / ph);
-    MTLViewport vp = {floor((dw - pw * s) / 2), floor((dh - ph * s) / 2), round(pw * s), round(ph * s), 0, 1};
+    double s = fmin(dw / pw, dh / ph), w = round(pw * s), h = round(ph * s);   // the size first: pw * s can land a hair over the canvas (1600 * 1710 / 1600 = 1710.0000000000002) and floor of half the negative rest put the picture at x = -1, its last column off screen
+    MTLViewport vp = {floor((dw - w) / 2), floor((dh - h) / 2), w, h, 0, 1};
     if (fabs((dw / dh) / (pw / ph) - 1) < 0.01) vp = (MTLViewport){0, 0, dw, dh, 0, 1};
     return vp;
 }

@@ -100,6 +100,39 @@ def tg_fence(src):
     if not m: return src
     return src[:m.end()] + '\n    ' + TG_FENCE + '\n' + src[block_end(src, m.end() - 1):]
 
+# A float add to device memory the shader makes as a compare-and-swap loop: the word read, the sum, a CAS of the sum against the word read, again until no other thread wrote between
+# (NVIDIA code without a float atomic for that address; spirv-cross also turns the CAS into a loop of its own). Under contention every lost race is another trip through memory:
+# Ocarina of Time's exposure kernel 1bba09ec4bc8ff67 adds into four words from each SIMD-group's leader, 96 workgroups, and took 483 us of an M1's frame, 289 us as atomic adds;
+# with four more such kernels, 810 -> 385 us. The NVN layer runs only on Metal 4 GPUs (Apple7 and later: M1, A14), which have float atomics on device memory. The order of the adds
+# differs from run to run either way; a NaN or infinity added stays one, as in the loop
+_CAS_DECL = r'(?:\s*(?:uint|int|float) _\d+ = [^;\n]+;\n)*'   # the loop's own index arithmetic, recomputed for the load and for the CAS (21d9f83e6027c565)
+_CAS_FADD = re.compile(r'(?P<ind>[ \t]*)bool (?P<F>_\d+);\n(?P=ind)do\n(?P=ind)\{\n(?P<D0>' + _CAS_DECL + r')\s*float (?P<A>_\d+) = as_type<float>\((?P<MEM>[^;]*?)\);\n'
+                       r'\s*float (?P<B>_\d+) = (?:(?P=A) \+ (?P<V1>[^;]+)|(?P<V2>[^;]+) \+ (?P=A));\n(?P<D1>' + _CAS_DECL + r')\s*uint (?P<C>_\d+) = as_type<uint>\((?P=A)\);\n\s*uint (?P<D>_\d+);\n'
+                       r'\s*do\n\s*\{\n\s*(?P=D) = (?P=C);\n\s*\} while \(!atomic_compare_exchange_weak_explicit\(\(device atomic_uint\*\)&(?P<MEM2>[^,]*?), &(?P=D), as_type<uint>\((?P=B)\), '
+                       r'memory_order_relaxed, memory_order_relaxed\) && (?P=D) == (?P=C)\);\n\s*uint (?P<E>_\d+) = (?P=D);\n\s*(?P=F) = int\((?P=E)\) != as_type<int>\((?P=A)\);\n(?P=ind)\} while \((?P=F)\);\n')
+def _cas_expand(expr, defs):
+    for _ in range(8):
+        e = re.sub(r'\b_\d+\b', lambda m: '(' + defs[m.group(0)] + ')' if m.group(0) in defs else m.group(0), expr)
+        if e == expr: return e
+        expr = e
+    return expr
+def cas_float_add(msl):
+    """Each compare-and-swap loop of a float add to device memory as one atomic float add (see _CAS_FADD). The loop's values are its own: the flag, the word read, the sum and
+    the index arithmetic are declared in it and used nowhere after it (checked), and the word the CAS writes is the one read (the same expression once the loop's own index
+    arithmetic is put in). Returns the shader unchanged when there is none"""
+    if 'atomic_compare_exchange_weak_explicit' not in msl: return msl
+    out, pos = [], 0
+    for m in _CAS_FADD.finditer(msl):
+        decl = re.findall(r'(?:uint|int|float) (_\d+) = ([^;\n]+);', m.group('D0') + m.group('D1'))
+        defs = dict(decl)
+        if _cas_expand(m.group('MEM'), defs) != _cas_expand(m.group('MEM2'), defs): continue
+        v = m.group('V1') or m.group('V2')
+        if any(re.search(r'\b%s\b' % n, v) for n, _ in decl): continue   # the added value from the loop's own arithmetic: leave it
+        rest = msl[m.end():]
+        if any(re.search(r'\b%s\b' % n, rest) for n in [m.group(g) for g in ('A', 'B', 'C', 'D', 'E')] + [n for n, _ in decl]): continue   # a value of the loop read after it
+        out.append(msl[pos:m.start()] + f"{m.group('ind')}atomic_fetch_add_explicit((device atomic_float*)&{_cas_expand(m.group('MEM'), defs)}, {v}, memory_order_relaxed);\n"); pos = m.end()
+    return ''.join(out) + msl[pos:] if out else msl
+
 # spirv-cross writes OpUMulExtended / OpSMulExtended as calls of an optnone template, spvMulExtended, as Metal's compiler may fail on an inlined mulhi (spirv_msl.cpp,
 # SPVFuncImplMulExtended). The barrier keeps every product a call that is never folded: Switch 2 shaders divide by constants through the high word of a product (Ocarina of Time
 # has 348,587 such calls, all scalar uint by a literal, 98% by a power of two), and its NDVE title movie ran 6.9% faster on an M1 Pro with its 5,679 others inline (PR #1741).

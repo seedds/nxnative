@@ -73,6 +73,16 @@ int main(void) { @autoreleasepool {
     EXPECT("bundle: this GPU's archive", 1, [NSFileManager.defaultManager fileExistsAtPath:[bundle stringByAppendingFormat:@"/%@.mtl4a", gpu]]);
     NSData *archiveBytes = [NSData dataWithContentsOfFile:[bundle stringByAppendingFormat:@"/%@.mtl4a", gpu]];
     EXPECT("archive guard: real offline archive accepted", 1, arch_file_ok([bundle stringByAppendingFormat:@"/%@.mtl4a", gpu]));
+    // what the open reads first (arch_open): the records outside __TEXT (__AIR_DATA) and the libraries (__TEXT,__metallib), not the GPU code
+    @autoreleasepool {
+        NSString *ap = [bundle stringByAppendingFormat:@"/%@.mtl4a", gpu]; arch_reads rd = {0};
+        EXPECT("archive reads: offline archive checked", 1, arch_file_check(ap, &rd));
+        EXPECT("archive reads: offline archive, records and libraries", 2, rd.n);
+        uint64_t tot = 0; for (int i = 0; i < rd.n; i++) tot += rd.len[i];
+        EXPECT("archive reads: offline archive, less than the file", 1, tot > 0 && tot < archiveBytes.length);
+        NSError *e = nil; EXPECT("archive reads: offline archive opens", 1, arch_open(ap, &e) != nil);
+        EXPECT("archive reads: not an archive opens nothing", 1, arch_open(bad, &e) == nil);
+    }
     for (NSUInteger len = 32; len < archiveBytes.length; len = MIN(len * 2, archiveBytes.length)) {
         [[archiveBytes subdataWithRange:NSMakeRange(0, len)] writeToFile:bad atomically:YES];
         EXPECT("archive guard: truncated offline archive refused", 0, arch_file_ok(bad));
@@ -211,6 +221,9 @@ int main(void) { @autoreleasepool {
         id<MTL4Archive> real = g_arch_bundle; NSError *e = nil;
         g_arch_bundle = [g_dev newArchiveWithURL:[NSURL fileURLWithPath:own] error:&e];
         EXPECT("archive guard: real serialized archive accepted", 1, arch_file_ok(own));
+        arch_reads rd = {0}; EXPECT("archive reads: serialized archive checked", 1, arch_file_check(own, &rd));
+        EXPECT("archive reads: serialized archive, records and libraries", 1, rd.n >= 2);
+        EXPECT("archive reads: serialized archive opens", 1, arch_open(own, &e) != nil);
         EXPECT("probe: another archive opened", 1, g_arch_bundle != nil);
         EXPECT("probe: its bases are not this run's", 0, pso_bundle_covers(pre_parse(txt), pre_stamp(txt, 0), 0, rest));
         g_arch_bundle = real;

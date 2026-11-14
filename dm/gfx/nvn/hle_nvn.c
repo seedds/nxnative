@@ -1739,10 +1739,12 @@ static uint64_t thr_instr(void) { uint64_t c[2] = {0, 0}; thread_selfcounts(1, c
 // Supplementary readings for the submit path (on a real device Metal 4 instruction count is -18% while submit CPU time is +49%; need to tell apart kernel mode, execution efficiency, or frequency throttling):
 // this thread's cycle count (the second item of the same interface), kernel-mode CPU time (THREAD_BASIC_INFO), wall clock
 static void thr_counts(uint64_t *instr, uint64_t *cyc) { uint64_t c[2] = {0, 0}; thread_selfcounts(1, c, sizeof c); *instr = c[0]; *cyc = c[1]; }
+// The thread's port is taken once per thread and kept: the queue worker reads this twice per node it replays, and mach_thread_self / mach_port_deallocate were two more kernel calls each time
 static uint64_t thr_sys_ns(void) {
-    thread_basic_info_data_t bi; mach_msg_type_number_t n = THREAD_BASIC_INFO_COUNT; mach_port_t me = mach_thread_self(); uint64_t r = 0;
+    static _Thread_local mach_port_t me; if (!me) me = mach_thread_self();
+    thread_basic_info_data_t bi; mach_msg_type_number_t n = THREAD_BASIC_INFO_COUNT; uint64_t r = 0;
     if (thread_info(me, THREAD_BASIC_INFO, (thread_info_t)&bi, &n) == KERN_SUCCESS) r = (uint64_t)bi.system_time.seconds * 1000000000ull + (uint64_t)bi.system_time.microseconds * 1000ull;
-    mach_port_deallocate(mach_task_self(), me); return r;
+    return r;
 }
 static _Atomic uint64_t g_cum_sub_cyc, g_cum_sub_sys_ns, g_cum_sub_wall_ns;
 static int frame_rec(void);

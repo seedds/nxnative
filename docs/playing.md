@@ -70,6 +70,10 @@ Joy-Con 2 and the Pro Controller 2 do not appear in macOS's Bluetooth settings: 
 
 The mouse pointer hides when you press a key or a controller button, or move a stick, while it is over the game picture. Moving the mouse shows it again, as does switching to another window or app.
 
+### Switch 2 controllers (iPhone and iPad)
+
+The same setting, **Switch 2 controllers**, plays Joy-Con 2 and the Pro Controller 2 on iPhone and iPad. iOS does not give an app the device's own Bluetooth address, which a controller needs to wake toward it, so a controller is used without pairing: **hold its Sync button after each start of the game**, until its player lights sweep. A press of a button alone does not connect it. The rest (pairs and singles, rumble, motion) is the Mac's code, and the touch controls hide while a controller is connected.
+
 ## Shaders on first sight
 
 Short stutters the first time a new scene appears are normal: the app compiles graphics for it once and remembers them for the next launch. What it remembered, and what the game's list names, is built before the game starts, behind "Preparing shaders" and a progress bar when that takes more than half a second.

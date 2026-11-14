@@ -46,7 +46,8 @@
 #   · Frostbite (EA SPORTS FC 27): the CompiledBytecode resources of the bundles its superbundle tables (.toc) list, in its cas files (Oodle Leviathan, decoded by the game's own decoder in the
 #       Mac host), each a VNVN record with one code area and control section (frostbite.py), see frostbite_jobs and frostbite_shaders
 #   · PDAT (the engine with the namespace phx, Kirby Air Riders): flatbuffer records tagged PMAP, zstd frames in the .dat archives, each holding a program's control sections and code areas, see pdat_jobs and pdat_shaders
-#   · Unreal Engine 3 (Batman: Arkham Knight): shader records in its global shader cache (BMSG) and in the packages (the combined shader cache), whose compressed chunks are Oodle blocks decoded by the game's own decoder in the Mac host, see ue3_body and ue3_shaders
+#   · Unreal Engine 3 (Batman: Arkham Knight, Batman: Arkham Asylum): shader records in the global shader cache (BMSG) and in the packages, whose compressed chunks are Oodle blocks decoded
+#       by the game's own decoder in the Mac host (uepak.ue3_summary / ue3_image, or the chunk tags of a later package version), see ue3_body and ue3_shaders
 # Code area: 0x30 header + (graphics) 0x50 SPH + instructions; header magic 0x12345678 for graphics, 0x12345679 for compute. The control section starts with 0x98761234, +0x704 = code area length,
 #   +0x700 = start of the c1 constant segment within the code area; for compute +0x748 thread group xyz (u32 ×3), +0x754 shared memory bytes (checked one by one against PC reflection on D2R's 22 compute shaders).
 # Stage: BNSH uses the stage slot; BAHS uses bits 10..13 of SPH word 0 (1 vertex 2 hull 3 domain 4 geometry 5 pixel), and a compute header means compute.
@@ -2499,7 +2500,13 @@ def ue3_package(head): return head[:4] == UE3_TAG and len(head) >= 6 and 0 < str
 def ue3_body(d, label):
     """An Unreal Engine 3 package with its compressed chunks decoded: the summary, then chunks, each {tag, u32 block size, u32 compressed and raw size of the chunk, then per block a u32
     compressed and raw size} and the blocks (Batman: Arkham Knight: blocks of 0x20000 bytes, Oodle Mermaid, 8C 0A; a block stored whole has its two sizes equal). Zlib blocks are inflated here,
-    the others go to the game's own decoder (oodle). A package without chunks is returned as it is"""
+    the others go to the game's own decoder (oodle). A package without chunks is returned as it is.
+    Batman: Arkham Asylum's packages (2,674, version 579) carry the earlier summary layout, whose chunk table uepak.ue3_summary reads: their chunks are laid out at the raw offsets it gives
+    (uepak.ue3_image, Oodle Leviathan 8C 0C). A package of a later version (Arkham Knight 864, whose summary has fields uepak.ue3_summary does not read) is decoded by its chunk tags instead"""
+    s = uepak.ue3_summary(d)
+    if s is not None and s['chunks']:
+        try: return uepak.ue3_image(d, oodle)
+        except ValueError as e: red(f'{label}: {e}; decoding its chunk tags instead')
     i = d.find(UE3_TAG, 4)
     if i < 0: return d
     out = [d[:i]]
@@ -2519,7 +2526,9 @@ def ue3_shaders(d, label):
     """Shader records of an Unreal Engine 3 game's shader caches (Batman: Arkham Knight: GlobalShaderCache-Switch.bin, 'BMSG', 1,847 shaders; CombinedShaderCache-Switch.xxx, a package holding
     22,874 once its chunks are decoded, ue3_body; none of 68 other packages sampled holds any): u32 record length, u32 code area length, u32 control length (0x880), on the global cache one more u32,
     then the code area, right followed by its control section. Found by the control section's magic, its code area length (+0x704) back to the code area's magic, and the two lengths in front.
-    The engine combines vertex and pixel shaders per draw, so they are paired as single-stage programs (separable_pairs)"""
+    Batman: Arkham Asylum serializes each shader as u8 platform (5), u8 frequency (0 vertex, 1 pixel), then the code as a byte array (i32 length, then {u32 code area length, u32 control length
+    0x880, u32 flags}, the code area, the control section and a tail): the same two lengths in front of the code area, so one search reads both. 574 of its 2,674 packages hold shaders, 516,000
+    records, and the global cache 179. The engine combines vertex and pixel shaders per draw, so they are paired as single-stage programs (separable_pairs)"""
     out = []
     for m in re.finditer(re.escape(CTL_MAGIC), d):
         c = m.start()

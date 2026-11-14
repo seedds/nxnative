@@ -126,6 +126,14 @@ int main(void) {
       setenv("DM_FPS_TARGET","0",1);g_present_cap=-1;nvn_present_config(60,0);
       EXPECT("no cap preserves game pacing",2,present_itv(&w));
       EXPECT("game mode: the game reads back the interval it set",2,window_interval(&w));
+      // uncapped (DM_FPS_TARGET=unlimited): no pacer deadline and no display-link wait; 0 above is still the game's own limit
+      setenv("DM_PRESENT_INTERVAL","display",1);setenv("DM_FPS_TARGET","unlimited",1);unsetenv("DM_PRESENT_HZ");nvn_present_config(-1,1);g_present_cap=-1;
+      EXPECT("uncapped: no pacer deadline",0,present_period(&w));
+      EXPECT("uncapped: the acquire waits for no display-link tick",1,present_unpaced(&w));
+      EXPECT("uncapped: display mode presents one frame a tick",1,present_itv(&w));
+      EXPECT("uncapped: the link takes the screen's rate (no window here: 60)",60,nvn_game_fps());
+      unsetenv("DM_PRESENT_INTERVAL");setenv("DM_FPS_TARGET","0",1);nvn_present_config(60,0);g_present_cap=-1;
+      EXPECT("0 is not uncapped: the acquire still paces by the game's interval",0,present_unpaced(&w));
       // the 30 Hz link only for even intervals: interval 3 (20 fps) has no whole number of 30 Hz ticks and stays on the 60 Hz link
       w.interval=1;present_period(&w);w.interval=2;present_period(&w);g_itv2_since=(now_ns()-2000000000ull)|1;
       EXPECT("interval 2 held a second: 30 Hz link",30,nvn_game_fps());

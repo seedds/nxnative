@@ -7,6 +7,7 @@ static int test_fps_max = 120;
 #define DM_GAME_FPS_MAX test_fps_max
 static int test_high = 120;   // what the frame step's hold allows (hle_nvn.c)
 int nvn_fps_high_now(void) { return test_high; }
+uint8_t *dm_fps_state;        // a main's frame step state page (loader.c); a case sets it to check that uncapped is refused there
 #include "../hle_fpslock.c"
 #include <assert.h>
 #include <math.h>
@@ -53,7 +54,7 @@ static void check(int which) {
     assert(base != MAP_FAILED);
     g_nmod = 1; strcpy(g_mod[0].name, "main"); g_mod[0].base = base;
     strcpy(g_mod[0].build_id, "94ceae325c205c4b9d6f7235552f28fd");
-    setenv("DM_FPS_TARGET", which == 27 ? "0" : which == 26 ? "120" : which >= 25 ? "60" : which == 22 || which == 24 ? "60" : which >= 19 ? "120" : which == 1 || which == 10 || which == 18 ? "30" : which == 2 || which == 11 ? "0" : "60", 1);
+    setenv("DM_FPS_TARGET", which == 30 || which == 31 ? "unlimited" : which == 27 ? "0" : which == 26 ? "120" : which >= 25 ? "60" : which == 22 || which == 24 ? "60" : which >= 19 ? "120" : which == 1 || which == 10 || which == 18 ? "30" : which == 2 || which == 11 ? "0" : "60", 1);
     if (which == 20) test_fps_max = 60;
     int32_t *unity = (int32_t *)(base + 0x4afc868);
     *unity = which == 1 ? 60 : which == 4 ? -1 : which == 5 ? 0 : 30;
@@ -117,6 +118,14 @@ static void check(int which) {
         g_mod[0].fps_target_ptr = 0x21e60d8; g_mod[0].fps_target_field = 0x1dc;
         *(uintptr_t *)(base + 0x21e60d8) = (uintptr_t)object;
         *(int32_t *)(object + 0x1dc) = which == 17 ? 30 : 60;
+    } else if (which == 30 || which == 31) {   // uncapped (DM_FPS_TARGET=unlimited): the engine's own limit is written out of the way; 31: a main whose frame step is in whole vsyncs, where it is refused
+        strcpy(g_mod[0].build_id, "0123456789abcdef0123456789abcdef");
+        cvar(DM_GAME_UE_FPS_CVAR, 0x7c738d0); cvar("rhi.SyncInterval", 0x7b32690);
+        *(uintptr_t *)(base + 0x7c738d0 + 0x10) = (uintptr_t)object;
+        *(uintptr_t *)(base + 0x7b32690 + 0x10) = (uintptr_t)(object + 16);
+        f = (float *)object; f[0] = f[1] = 30;
+        sync = (int32_t *)(object + 16); sync[0] = sync[1] = 2;
+        if (which == 31) dm_fps_state = (uint8_t *)object + 0x200;   // the profile's frame step stubs would hand the game whole vsyncs
     } else if (which >= 9) {   // the present interval alone (UE 4.18's nvn.SyncInterval); 12: a main the rewriter found no variable in
         strcpy(g_mod[0].build_id, "0123456789abcdef0123456789abcdef");
         if (which != 12) cvar("nvn.SyncInterval", 0x8adca10);
@@ -168,6 +177,13 @@ static void check(int which) {
         test_high = 60; dm_fps_lock_tick(); assert(f[0] == 60 && f[1] == 60 && sync[0] == 1 && sync[1] == 1);
         munmap(base, len); return;
     }
+    if (which == 30) {   // uncapped: the engine's limit out of the way (1000), the present interval one vsync, and the game's own limit raised again when it sets it
+        assert(f[0] == 1000 && f[1] == 1000 && sync[0] == 1 && sync[1] == 1 && writes == 4);
+        dm_fps_lock_tick(); assert(writes == 4);
+        *f = 30; dm_fps_lock_tick(); assert(*f == 1000);
+        munmap(base, len); return;
+    }
+    if (which == 31) { assert(f[0] == 30 && f[1] == 30 && sync[0] == 2 && sync[1] == 2 && writes == 0); munmap(base, len); return; }   // a frame step in whole vsyncs: refused, nothing written
     if (which == 0) {
         assert(*unity == 60 && writes == 1);
         dm_fps_lock_tick(); assert(writes == 1);
@@ -209,7 +225,7 @@ static void check(int which) {
 
 int main(void) {
     // Each process starts the production one-time initialization with a fresh build and target.
-    for (int i = 0; i < 30; i++) {
+    for (int i = 0; i < 32; i++) {
         pid_t p = fork(); assert(p >= 0);
         if (!p) { check(i); _exit(0); }
         int status; assert(waitpid(p, &status, 0) == p); assert(WIFEXITED(status) && WEXITSTATUS(status) == 0);

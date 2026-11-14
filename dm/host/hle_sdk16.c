@@ -322,8 +322,9 @@ static void *vsync_thread(void *arg) {
     const char *e = getenv("DM_VSYNC_HZ"); double hz = e ? atof(e) : 60.0; if (hz <= 0) hz = 60.0;
     uint64_t period = (uint64_t)(1e9 / hz), next = now_ns() + period, seen = 0;
     for (;;) {
-        if (!e) period = nvn_vsync_hz() == 120 ? 1000000000ull / 120 : 1000000000ull / 60;   // follows 120 fps (a game that waits for each vblank is held to its rate)
-        if (!e && mtl_link_wait_vsync(&seen, 2 * period)) { if (!vsync_tick(v)) break; next = now_ns() + period; continue; }
+        int hz = e ? 60 : nvn_vsync_hz();
+        if (!e) period = !hz ? 1000000ull : hz == 120 ? 1000000000ull / 120 : 1000000000ull / 60;   // follows 120 fps (a game that waits for each vblank is held to its rate); 0 = uncapped: no display rate, one signal a millisecond
+        if (!e && hz && mtl_link_wait_vsync(&seen, 2 * period)) { if (!vsync_tick(v)) break; next = now_ns() + period; continue; }
         uint64_t t = now_ns(); if (next > t) { struct timespec ts = {(time_t)((next - t) / 1000000000ull), (long)((next - t) % 1000000000ull)}; nanosleep(&ts, NULL); }
         if (!vsync_tick(v)) break;
         next += period; if (now_ns() > next + 4 * period) next = now_ns() + period;   // do not try to catch up when far behind

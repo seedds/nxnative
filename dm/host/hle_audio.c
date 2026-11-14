@@ -37,6 +37,7 @@ typedef struct {
     dispatch_semaphore_t rel_sem;      // Host outputs only (dm_pcmout_open): signaled for each release, so the in-process audio renderer blocks instead of polling (dm_pcmout_wait)
     int id;                            // open sequence number (#N in the log; tells simultaneous outputs apart, e.g. Engage's Wwise and Unity's built-in FMOD)
     int nlog;                          // Start / Stop / Close lines logged so far (at most 32 per output)
+    FILE *dump;                        // DM_AUDIO_DUMP: this output's own file (opened at its first append)
     _Atomic uint64_t under_n, under_b; // underruns: times the pending queue was empty when the callback needed data / zero-filled bytes
     uint64_t st_calls, st_count, st_qsum, st_u0, st_ub0; uint32_t st_fmin, st_fmax;   // callback-owned accumulators
     audio_stats st_report; _Atomic int st_pending; // one snapshot, consumed by the watchdog or Close under g_aos_lock
@@ -293,6 +294,7 @@ static void aout_free(aout *a) {
     if (a->au) au_dispose(a->au);
     dispatch_release(a->notify_sem);
     if (a->rel_sem) dispatch_release(a->rel_sem);
+    if (a->dump) fclose(a->dump);
     pthread_mutex_destroy(&a->m); free(a);
 }
 // A HAL start can block for seconds. Each output keeps consuming on the silent sink while its
@@ -538,11 +540,15 @@ HLE_FORCE("_ZN2nn5audio28GetAudioOutBufferDataPointerEPKNS0_14AudioOutBufferE", 
 HLE_FORCE("_ZN2nn5audio25GetAudioOutBufferDataSizeEPKNS0_14AudioOutBufferE", "buffer data size", uint64_t, h_au_BufSize, const gbuf *b) { return b->size; }
 HLE_FORCE("_ZN2nn5audio20AppendAudioOutBufferEPNS0_8AudioOutEPNS0_14AudioOutBufferE", "append a buffer to play", unsigned, h_au_Append, void *g, gbuf *b) {
     aout *a = ao(g);
-    // Diagnostic switch DM_AUDIO_DUMP=<file>: every PCM block the game appends is written out as is (16-bit, 48 kHz, channel count per the OpenAudioOut log, usually 6). Used to judge "did a given sound play or not":
-    // cross-correlate the original game's audio against it (this is how the tier-one drop sound was verified). The file is opened only when the variable is set; when unset this costs only one extra cached check
-    { static FILE *df; static int on = -1; if (on < 0) { const char *e = getenv("DM_AUDIO_DUMP"); on = e != NULL; if (on && !(df = fopen(e, "wb"))) LOG("[RED] DM_AUDIO_DUMP cannot open %s", e); }
-      if (df && b && b->ptr && b->size) fwrite(b->ptr, 1, (size_t)b->size, df); }
+    // Diagnostic switch DM_AUDIO_DUMP=<file>: every PCM block appended to an output is written out as is (16-bit, 48 kHz, channel count per the OpenAudioOut log), output #0 to <file> and each
+    // other output to <file>.<N>: one file held both the host's stereo renderer output and the game's six-channel FMOD output (Batman: Arkham Asylum), which no reading can tell apart. Used to
+    // judge "did a given sound play or not": cross-correlate the original game's audio against it (this is how the tier-one drop sound was verified). A file is opened at its output's first
+    // append, only when the variable is set; when unset this costs only one extra cached check
     pthread_mutex_lock(&a->m);
+    { static const char *path; static int on = -1; if (on < 0) { path = getenv("DM_AUDIO_DUMP"); on = path != NULL; }
+      if (on && !a->dump) { char fn[1024]; if (a->id) snprintf(fn, sizeof fn, "%s.%d", path, a->id); else snprintf(fn, sizeof fn, "%s", path);
+                            if (!(a->dump = fopen(fn, "wb"))) { LOG("[RED] DM_AUDIO_DUMP cannot open %s", fn); on = 0; } }
+      if (a->dump && b && b->ptr && b->size) fwrite(b->ptr, 1, (size_t)b->size, a->dump); }
     uint32_t qt = atomic_load_explicit(&a->q_tail, memory_order_relaxed);
     uint32_t qh = atomic_load_explicit(&a->q_head, memory_order_acquire);
     int ok = qt - qh < QMAX;

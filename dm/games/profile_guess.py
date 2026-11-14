@@ -4,7 +4,8 @@
 # guess(facts) turns the facts into profile keys, each with the reason written above it in game.tsv. Every rule was checked against the hand-made profiles; --check runs that comparison again.
 # mem_used needs the rewritten modules (mem_used below, after the rewrite). The alias / heap split of a game with virtual address memory that sets a heap needs its heap request:
 # the NSP script's heap check boots it on the Mac until that request (heap_signals below), a few seconds. The keys no short run decides (tex_flush_upload,
-# tex_dirty_upload, core_preempt, vconv_range, present_interval) keep their defaults for a developer: a minute's boot without input
+# tex_dirty_upload, core_preempt, vconv_range, present_interval) keep their defaults for a developer (the two texture keys are on for an engine whose files show it fills
+# textures that way: Unreal Engine 3's loose packages): a minute's boot without input
 # cannot tell the games that need them (Tears of the Kingdom) from those that only use what they answer (Breath of the Wild's flushed textures).
 # Usage: profile_guess.py <ExeFS dir> <romfs_manifest.tsv | RomFS dir>   the facts and the guessed keys
 #        profile_guess.py --check [<NSP root>]                        every profile in dm/games against its extraction under <NSP root> (default /Volumes/T7/nsp): where the guess differs
@@ -288,7 +289,7 @@ def shader_sources(imports, glsl_src, glslc_mods, spirv, unreal_paks, trinity_pa
                             'Frostbite superbundles (Data/layout.toc, cas files: EA SPORTS FC 27), the shaders in their CompiledBytecode resources' if frostbite else
                             f'{oodle_pkz} PlatinumGames PKZ archive(s) with Oodle Kraken entries (Bayonetta 3)' if oodle_pkz else
                             f'{oodle_gfpak} Game Freak GFPAK archive(s) with Oodle Kraken entries (Pokémon Legends: Arceus)' if oodle_gfpak else
-                            f'{oodle_ue3} Unreal Engine 3 package(s) with Oodle-compressed chunks (Batman: Arkham Knight, its combined shader cache among them)') + ', Oodle-compressed: the shader split decodes them with the game\'s own decoder in the Mac host (dm/host/hle_oodle.c DM_OODLE_SERVE)'),
+                            f'{oodle_ue3} Unreal Engine 3 package(s) with Oodle-compressed chunks (Batman: Arkham Asylum\'s 574 cooked packages with shader caches inside them, Batman: Arkham Knight\'s combined shader cache among its own)') + ', Oodle-compressed: the shader split decodes them with the game\'s own decoder in the Mac host (dm/host/hle_oodle.c DM_OODLE_SERVE)'),
             'ue_legacy': (not vulkan and not gl and bool(legacy_paks), f'{legacy_paks} Unreal pak(s) with the shaders inline in the cooked packages (legacy, version 4, UE 4.18: DRAGON QUEST XI S, LZ5, decoded by the game\'s own decoder in the Mac host, dm/host/hle_oodle.c DM_OODLE_SERVE; '
                           'version 11 without shader code archives, UE 4.27: OCTOPATH TRAVELER II, Zlib, or with the cooked packages in an IoStore container beside it: Mario & Luigi: Brothership, Oodle): the shader split reads them file by file')}
 

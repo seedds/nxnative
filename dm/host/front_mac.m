@@ -23,6 +23,7 @@
 #include "motion_pro_mac.h"
 #include "pad_apple.h"
 #include "pad_hid_mac.h"
+#include "pad_gip_mac.h"
 #include "pad_switch2_apple.h"
 static int s2pad_player(s2_pad *d);   // the Switch 2 pads' player slots (below, beside the raw HID pads')
 static void s2pad_read(s2_pad *d);
@@ -251,7 +252,7 @@ static int pad_join(const void *owner, const char *name) {
 }
 // DM_PAD_MERGE: whether a controller still plays player 1 (gone: one just removed, not counted), a GameController one or a raw HID pad (pad_hid_mac.h)
 static int merge_pads_left(GCController *gone) {
-    if (g_hidpads || dm_switch2_pads()) return 1;
+    if (g_hidpads || g_gippads || dm_switch2_pads()) return 1;
     for (GCController *c in GCController.controllers) if (c.extendedGamepad && c != gone) return 1;
     return 0;
 }
@@ -265,7 +266,7 @@ static void pads_changed(GCController *gone) {
             pad_read(c.extendedGamepad);
         }
         if (gone) dm_motion_detach(gone, 0);
-        if (!any) { if (!g_hidpads && !dm_switch2_pads()) dm_pad_set(0, 0, 0, 0, 0); dm_haptics_apple_controller(0, nil); }   // a raw HID pad still plays player 1 (pad_hid_mac.h)
+        if (!any) { if (!g_hidpads && !g_gippads && !dm_switch2_pads()) dm_pad_set(0, 0, 0, 0, 0); dm_haptics_apple_controller(0, nil); }   // a raw HID pad still plays player 1 (pad_hid_mac.h)
         pro_players_changed(gone);
         return;
     }
@@ -318,6 +319,7 @@ static void pads_release(void) {
     if (g_merge) { if (merge_pads_left(nil)) dm_pad_set(0, 0, 0, 0, 0); return; }
     for (int p = 0; p < DM_PLAYERS; p++) if (g_held[p]) dm_pad_set_player(p, 0, 0, 0, 0, 0);
     for (hid_pad *d = g_hidpads; d; d = d->next) { int p = pad_slot_of(&g_slots, d); if (p >= 0) dm_pad_set_player(p, 0, 0, 0, 0, 0); }
+    for (gip_pad *d = g_gippads; d; d = d->next) { int p = pad_slot_of(&g_slots, d); if (p >= 0) dm_pad_set_player(p, 0, 0, 0, 0, 0); }
     for (s2_pad *d = dm_switch2_pads(); d; d = d->next) { int p = s2pad_player(d); if (p >= 0) { dm_pad_set_player(p, 0, 0, 0, 0, 0); dm_joy_set(p, 0, 0, 0, 0); dm_joy_set(p, 1, 0, 0, 0); } }
 }
 static void hidpad_motion_clear(void) {   // the gyro of identical Pro Controllers read from IOKit (pad_hid_mac.h)
@@ -328,6 +330,7 @@ static void pads_reread(void) {
     if (g_merge) { for (GCController *c in GCController.controllers) if (c.extendedGamepad) pad_read(c.extendedGamepad); }
     else for (int p = 0; p < DM_PLAYERS; p++) if (g_held[p].extendedGamepad) pad_read(g_held[p].extendedGamepad);
     for (hid_pad *d = g_hidpads; d; d = d->next) hidpad_read(d);
+    for (gip_pad *d = g_gippads; d; d = d->next) gippad_read(d);
     for (s2_pad *d = dm_switch2_pads(); d; d = d->next) s2pad_read(d);
 }
 static void hq_close(void);
@@ -391,6 +394,36 @@ static void hidpad_detach(hid_pad *d) {   // d is already off g_hidpads
     dm_pad_set_player(p, 0, 0, 0, 0, 0);   // nothing stays pressed
     dm_pad_players(pad_slot_mask(&g_slots));
     cp_poll();   // one controller fewer to wait for, or one player fewer
+}
+// Xbox One pads over USB that macOS has no driver for (pad_gip_mac.h): a player from its connection, as a GameController controller (a GIP device is a pad, unlike a
+// raw HID device's GamePad collection), or at its first button press with DM_PAD_PRESS_TO_JOIN. Its Xbox button is Home (hq_buttons)
+static void gippad_read(gip_pad *d) {
+    hq_poll();   // Home and the prompt's A and B come from these pads too
+    if (!g_input_on || hq_blocks_input(g_hq.phase)) return;
+    int p = g_merge ? 0 : pad_slot_of(&g_slots, d);
+    if (p < 0 && (!g_press_to_join || !d->st.buttons || (p = pad_join(d, d->name)) < 0)) return;   // DM_PAD_PRESS_TO_JOIN=1: joins at its first button
+    if (cp_poll()) return;   // the controller applet's prompt has the controllers
+    pad_set(p, d->st.buttons, d->st.s[0], d->st.s[1], d->st.s[2], d->st.s[3]);
+}
+static void gippad_attach(gip_pad *d) {
+    if (g_press_to_join && !g_merge) { LOG("controller '%s' (USB) connected: press a button to play (DM_PAD_PRESS_TO_JOIN)", d->name); cp_poll(); return; }
+    int p = g_merge ? 0 : pad_slot_take(&g_slots, d, d->name); char nb[16];
+    if (p < 0) { LOG("controller '%s' (USB) connected: all %d players are taken, not used", d->name, DM_PLAYERS); return; }
+    npad_name(p, nb, sizeof nb); LOG("controller '%s' (USB) connected: player %d (npad %s)", d->name, p + 1, nb);
+    if (!g_merge) dm_pad_players(pad_slot_mask(&g_slots));
+    cp_poll();   // one controller fewer to wait for
+}
+static void gippad_detach(gip_pad *d) {   // d is already off g_gippads
+    if (g_merge) {
+        LOG("controller '%s' (USB) disconnected", d->name);
+        if (!merge_pads_left(nil)) dm_pad_set(0, 0, 0, 0, 0);
+        return;
+    }
+    int p = pad_slot_free(&g_slots, d); char nb[16]; if (p < 0) { cp_poll(); return; }   // one that had not joined: one fewer waiting
+    npad_name(p, nb, sizeof nb); LOG("controller '%s' (USB) disconnected: player %d (npad %s) is free", d->name, p + 1, nb);
+    dm_pad_set_player(p, 0, 0, 0, 0, 0);   // nothing stays pressed
+    dm_pad_players(pad_slot_mask(&g_slots));
+    cp_poll();   // one player fewer
 }
 // Switch 2 controllers over Bluetooth LE (pad_switch2_apple.h): a pad is a player's controller, as a GameController one or a raw HID pad
 static int s2pad_player(s2_pad *d) { return g_merge ? 0 : pad_slot_of(&g_slots, d); }
@@ -474,7 +507,8 @@ static void hq_buttons(int *home, int *a, int *b, GCController **holder) {
         if (g.buttonHome.isPressed) { *home = 1; if (!*holder) *holder = c; }
         *a |= g.buttonA.isPressed; *b |= g.buttonB.isPressed;
     }
-    for (s2_pad *d = dm_switch2_pads(); d; d = d->next) { if (s2_pad_home(&d->st)) *home = 1; s2_pad_ab(&d->st, a, b); }   // Switch 2 controllers: no GCController, so no holder (the prompt shows the default A / B symbols)
+    for (s2_pad *d = dm_switch2_pads(); d; d = d->next) { if (s2_pad_home(&d->st)) *home = 1; s2_pad_ab(&d->st, a, b); }
+    for (gip_pad *d = g_gippads; d; d = d->next) { *home |= d->st.guide; *a |= !!(d->st.buttons & DM_BTN_A); *b |= !!(d->st.buttons & DM_BTN_B); }   // Xbox One pads over USB: the Xbox button   // Switch 2 controllers: no GCController, so no holder (the prompt shows the default A / B symbols)
 }
 static void hq_fade(NSView *v, int in) {
     if (!v) return;
@@ -545,6 +579,7 @@ static void cp_buttons(int *a, int *b) {
     for (GCController *c in GCController.controllers) { GCExtendedGamepad *g = c.extendedGamepad; if (g) { *a |= g.buttonA.isPressed; *b |= g.buttonB.isPressed; } }
     for (hid_pad *d = g_hidpads; d; d = d->next) { uint64_t m = d->twin && hidpad_is_pro(d) ? d->pro_m : pad_hid_buttons(&d->st); *a |= !!(m & DM_BTN_A); *b |= !!(m & DM_BTN_B); }
     for (s2_pad *d = dm_switch2_pads(); d; d = d->next) s2_pad_ab(&d->st, a, b);   // Switch 2 controllers (pad_switch2_apple.h)
+    for (gip_pad *d = g_gippads; d; d = d->next) { *a |= !!(d->st.buttons & DM_BTN_A); *b |= !!(d->st.buttons & DM_BTN_B); }   // Xbox One pads over USB (pad_gip_mac.h)
 }
 static int cp_waiting(void) {   // connected controllers that are no player yet
     if (g_merge) return 0;
@@ -552,6 +587,7 @@ static int cp_waiting(void) {   // connected controllers that are no player yet
     for (GCController *c in GCController.controllers) if (c.extendedGamepad && !hidpad_gc_unread(c) && pad_slot_of(&g_slots, (__bridge const void *)c) < 0) n++;
     for (hid_pad *d = g_hidpads; d; d = d->next) if (pad_slot_of(&g_slots, d) < 0) n++;
     for (s2_pad *d = dm_switch2_pads(); d; d = d->next) if (pad_slot_of(&g_slots, d) < 0) n++;
+    for (gip_pad *d = g_gippads; d; d = d->next) if (pad_slot_of(&g_slots, d) < 0) n++;
     return n;
 }
 static void cp_show(void) {   // the card, built again when its count or its done action changes
@@ -611,6 +647,7 @@ static void pads_start(void) {
     hq_log_setting();
     dm_motion_pro_start(pro_devices_changed);
     hidpad_start();
+    gippad_start();
     static const dm_switch2_front s2front = {s2pad_attach, s2pad_detach, s2pad_read, s2pad_player, s2pad_blocked};
     dm_switch2_start(&s2front);
 }

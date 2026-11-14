@@ -30,6 +30,9 @@ pso_mtl4	on
 # Screen shape (patches.py): DM_SCREEN_ASPECT renders a screen taller than 16:9 in its own shape, the iPhone Duo's 1.43:1 as
 # 1920x1344 with a 1280x896 layout space, the HUD at the screen's edges and 16:9's sides in view (more above and below); the iOS launcher offers it
 screen_aspect	on
+# Metal encoding on its own thread on the Mac too (nvn_rec.h): the game waits on the fence of the frame it just submitted, so the submit thread's translation is in its frame.
+# M5 Pro (2026-11-01, 470 s outdoors): present-thread CPU 5.9 → 3.4–4.4 ms a frame, the submit 6.6 → 5.0 ms; M4 Pro 4.30 → 3.16 ms (PR #62); on by default on iOS already
+enc_thread	on
 
 # ---- Versions ----
 # only the merged 1.9.0 copy is extracted; the base game's own build IDs are added when needed

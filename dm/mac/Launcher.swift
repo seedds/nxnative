@@ -228,9 +228,13 @@ struct LauncherView: View {
     }
 
     static let nextStartNote = "Applies the next time the game starts."
+    /// While the game runs: a row the host cannot change now says so, and a row the game reports on (LauncherModel.now) shows what it does now
     private func shown(_ s: Setting) -> Setting {
-        guard live, !LiveSettings.keys.contains(s.env) else { return s }
-        return Setting(env: s.env, kind: s.kind, label: s.label, note: s.note.isEmpty ? Self.nextStartNote : s.note + " " + Self.nextStartNote, def: s.def, section: s.section,
+        guard live else { return s }
+        let extra = [LiveSettings.keys.contains(s.env) ? nil : Self.nextStartNote, m.now[s.env]].compactMap { $0 }
+        guard !extra.isEmpty else { return s }
+        let note = ([s.note].filter { !$0.isEmpty } + extra).joined(separator: " ")
+        return Setting(env: s.env, kind: s.kind, label: s.label, note: note, def: s.def, section: s.section,
                        needs: s.needs, level: s.level, base: s.base, options: s.options, min: s.min, max: s.max, step: s.step, on: s.on, off: s.off)
     }
 
@@ -455,7 +459,7 @@ private final class Launcher: NSObject, NSApplicationDelegate, NSWindowDelegate 
 final class LiveSettings: NSObject, NSWindowDelegate {
     static let keys: Set<String> = ["DM_KEYMAP", "DM_PAD_MAP", "DM_PAD_ABXY", "DM_PAD_STICK_DZ", "DM_PAD_STICK_SENS", "DM_RUMBLE_GAIN", "DM_RUMBLE_MIN", "DM_FPS_HOLD", "DM_PRESENT_UPSCALE", "DM_FULLSCREEN"]
     let settings: [Setting], host: pid_t
-    private var window: NSWindow?, model: LauncherModel?, controls: ControlsModel?, before: [String: String] = [:]
+    private var window: NSWindow?, model: LauncherModel?, controls: ControlsModel?, before: [String: String] = [:], timer: Timer?
 
     init(_ settings: [Setting], host: pid_t) { self.settings = settings; self.host = host }
 
@@ -466,8 +470,26 @@ final class LiveSettings: NSObject, NSWindowDelegate {
         NSApp.setActivationPolicy(.accessory)   // a window and the front, without a second Dock icon beside the game's
         let w = settingsWindow(LauncherView(m: m, done: { [weak self] _ in self?.done() }, fit: { [weak self] in fitWindow(self?.window, $0) }, controls: c, live: true), delegate: self)
         window = w
+        readNow()
+        timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in self?.readNow() }
         NSApp.activate(); w.makeKeyAndOrderFront(nil)
         fputs("launcher: settings window while the game runs\n", stderr)
+    }
+
+    /// The host's report of its upscaling (nvn_mtl.m fx_status), in words under the Upscaling row
+    private func readNow() {
+        guard let m = model else { return }
+        let path = FileManager.default.currentDirectoryPath + "/upscaling_now.txt"
+        let f = ((try? String(contentsOfFile: path, encoding: .utf8)) ?? "").split(whereSeparator: \.isWhitespace).map(String.init)
+        let n = f.dropFirst().compactMap(Int.init)
+        let text: String?
+        switch (f.first, n.count) {
+        case ("off", _): text = "Now: Standard."
+        case ("idle", 2): text = "Now: Standard. MetalFX starts when the window is larger than the picture (\(n[0]) × \(n[1]))."
+        case ("metalfx", 4): text = "Now: MetalFX, \(n[0]) × \(n[1]) to \(n[2]) × \(n[3])."
+        default: text = nil
+        }
+        if m.now["DM_PRESENT_UPSCALE"] != text { m.now["DM_PRESENT_UPSCALE"] = text }
     }
 
     /// The live settings as the host would take them now; the controls as launcher.c puts them together: a saved launcher.DM_KEYMAP or DM_PAD_MAP wins over the profile
@@ -498,6 +520,7 @@ final class LiveSettings: NSObject, NSWindowDelegate {
     func close() {
         guard let w = window else { return }
         window = nil; model = nil; controls = nil
+        timer?.invalidate(); timer = nil
         w.delegate = nil; w.orderOut(nil)
     }
 }

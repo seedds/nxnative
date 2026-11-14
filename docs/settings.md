@@ -227,7 +227,7 @@ Click **Play** (or press Return) to start the game. **Quit**, ⌘Q or closing th
 
 The version under the game's name ends with the commit the app was packed from; when that commit is on GitHub, click it to open its page. Its menu (Control-click) copies the commit ID or the link.
 
-While the game runs, **Settings…** in its app menu (⌘,) shows the window again, with **Done** in place of Quit and Play. The controls on the Input tab, **Upscaling**, **Rumble strength**, **Rumble cutoff**, **Hold frames when late** and **Display mode** change in the game when you click Done; the others say *Applies the next time the game starts*. Every choice is kept for the next start.
+While the game runs, **Settings…** in its app menu (⌘,) shows the window again, with **Done** in place of Quit and Play. The controls on the Input tab, **Upscaling**, **Rumble strength**, **Rumble cutoff**, **Hold frames when late** and **Display mode** change in the game when you click Done; the others say *Applies the next time the game starts*. Under **Upscaling** the window says what the game does now: MetalFX only scales a picture shown larger than the game renders it (1920 × 1080 for Breath of the Wild), so in a smaller window it stays standard. Every choice is kept for the next start.
 
 Turn off **Show this window at launch** to start the game at once with your choices. Hold Option while the app opens to see the window again. `DM_LAUNCHER=0` in the app's `env.txt` (`~/Library/Application Support/nxnative/<title ID>/env.txt`) or in its environment, or opening it with `open <app> --args --no-launcher`, also skips the window; your choices still apply. `DM_SAVED_CHOICES=0` starts with the tested defaults instead.
 

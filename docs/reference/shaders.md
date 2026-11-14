@@ -1045,6 +1045,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Check:** `t_geometry` checks the runs, the map and a draw through both.
 - **Found on:** [Kirby Air Riders](../../dm/games/040077201BE50000/README.md): resident from 28.3 GB (and closed) to about 10 GB through a race.
 
+### Viewport indices in geometry compute records
+
+- **Symptom:** Metal rejects a translated geometry shader with `invalid return type 'main0_out' for kernel function`: the compute entry writes `out.gl_ViewportIndex` instead of placing that output in its emitted vertex records.
+- **Cause:** `ResourceReservations.FillIoOffsetMap` (in the vendored translator, as in Ryujinx) reserved the slot for a stage that writes the viewport index under `VertexIndex`. The geometry-to-compute transform found no viewport-index slot, left that store as a raster output on the compute kernel, and the raster reader read the wrong builtin.
+- **Fix:** the slot is reserved as `ViewportIndex`, so the geometry store and the raster reader use the same field of the emitted vertex, a dynamic index included. Shaders that do not write the viewport index translate as before.
+- **Check:** `test_dmsh_geometry.py` (`PassthroughCompiler.test_viewport_index_survives_geometry_compute_conversion`, with `DMSH_TEST_XLATE`): a geometry shader that writes the viewport index from the primitive ID, for all five input topologies, compiled as kernel and reader for macOS and iOS.
+- **Found on:** Alien: Isolation (SDK 8.2.0): both of its geometry shaders.
+
 ### Geometry passthrough and viewport masks in compute
 
 - **Symptom:** geometry reader compilation fails with undeclared `gl_BuiltIn_5253` and a scalar `.elements` access. Compiling only the compute kernel also leaves native passthrough geometry without emitted vertices.

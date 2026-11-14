@@ -136,24 +136,10 @@ struct LauncherView: View {
                 }
                 Spacer()
             }
-            .padding(.horizontal, 20).padding(.top, 34)   // below the traffic lights: the title bar is part of the header
-            Form {
-                settingSections(basic: true)
-                CloudSavesSection()
-                Section {
-                    DisclosureGroup("Advanced settings", isExpanded: $advanced) {}
-                }
-                if advanced {
-                    settingSections(basic: false)
-                    Section {
-                        Button("Reset to tested defaults") { m.reset() }
-                            .disabled(!m.changed)
-                    } footer: {
-                        Text("Brings back all settings this game was tested with.")
-                    }
-                }
-            }
+            .padding(.horizontal, 20).padding(.top, 2)   // the title bar's safe area already keeps it below the traffic lights
+            Form { settings }
             .formStyle(.grouped)
+            .contentMargins(.top, 6, for: .scrollContent)
             .background(OverlayScrollers())
             .onScrollGeometryChange(for: CGFloat.self) {
                 $0.contentSize.height + $0.contentInsets.top + $0.contentInsets.bottom - $0.containerSize.height
@@ -202,13 +188,42 @@ struct LauncherView: View {
         }
     }
 
-    @ViewBuilder private func settingSections(basic: Bool) -> some View {
+    // Basic settings and the Advanced settings row share one card; the advanced ones open in a second card below it
+    @ViewBuilder private var settings: some View {
+        Section {
+            settingRows(basic: true)
+            Button { advanced.toggle() } label: {
+                HStack {
+                    Text("Advanced settings")
+                    Spacer()
+                    Image(systemName: advanced ? "chevron.down" : "chevron.right").foregroundStyle(.secondary).accessibilityHidden(true)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityValue(advanced ? "Shown" : "Hidden")
+        }
+        if advanced {
+            Section { settingRows(basic: false) }
+            Section {
+                Button("Reset to tested defaults") { m.reset() }
+                    .disabled(!m.changed)
+            } footer: {
+                Text("Brings back all settings this game was tested with.")
+            }
+        }
+        CloudSavesSection()
+    }
+
+    /// The rows of each of the list's sections, under the section's name as a small caption inside the card
+    @ViewBuilder private func settingRows(basic: Bool) -> some View {
         ForEach(m.sections(basic: basic), id: \.self) { section in
             let rows = m.rows(in: section, basic: basic)
             if !rows.isEmpty {
-                Section(section) {
-                    ForEach(rows) { SettingRow(s: $0, m: m) }
+                if !section.isEmpty {
+                    Text(section.uppercased()).font(.caption.weight(.semibold)).foregroundStyle(.secondary).padding(.top, 4).accessibilityAddTraits(.isHeader)
                 }
+                ForEach(rows) { SettingRow(s: $0, m: m) }
             }
         }
     }

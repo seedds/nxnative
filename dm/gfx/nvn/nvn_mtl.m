@@ -1340,6 +1340,8 @@ static vis_list *vis_snapshot(void) {
 // A write anywhere is left for a list that cannot grow (no memory) and a full wide list
 enum { PEND_HB_BITS = 13, PEND_HB = 1 << PEND_HB_BITS, PEND_SPAN = 8, PEND_WIDE = 256 };
 static uint64_t *g_pend_lo, *g_pend_hi; static int g_npend, g_pend_over, g_pend_cap; static uint8_t *g_pend_kind; static uint32_t *g_pend_upd;   // kind: 1 inline update, 2 copy, 3 fill
+typedef struct { uint64_t src, stamp; } pend_copy;
+static pend_copy *g_pend_copy;   // a copy's source, protected at its stamp so a later CPU write refuses reading through it
 static int32_t g_pend_head[PEND_HB]; static uint32_t g_pend_hgen[PEND_HB], g_pend_gen = 1;   // a bucket's chain is valid when its generation is this submission's
 typedef struct { int32_t e, next; } pend_node;
 static pend_node *g_pend_node; static int g_npnode, g_pnode_cap;
@@ -1352,7 +1354,8 @@ static int pend_grow(void **p, size_t n, size_t each) { void *q = realloc(*p, n 
 static int pend_room(int nodes) {
     if (g_npend == g_pend_cap) { if (g_pend_cap > INT_MAX / 2) return 0; int c = g_pend_cap ? g_pend_cap * 2 : 4096;
         if (!pend_grow((void **)&g_pend_lo, c, sizeof *g_pend_lo) || !pend_grow((void **)&g_pend_hi, c, sizeof *g_pend_hi) || !pend_grow((void **)&g_pend_kind, c, sizeof *g_pend_kind)
-            || !pend_grow((void **)&g_pend_upd, c, sizeof *g_pend_upd) || !pend_grow((void **)&g_upd, c, sizeof *g_upd)) return 0;   // a grown array kept at its new size is only spare room
+            || !pend_grow((void **)&g_pend_upd, c, sizeof *g_pend_upd) || !pend_grow((void **)&g_upd, c, sizeof *g_upd)
+            || !pend_grow((void **)&g_pend_copy, c, sizeof *g_pend_copy)) return 0;   // a grown array kept at its new size is only spare room
         g_pend_cap = c; }
     if (!g_pnode_cap || g_npnode + nodes > g_pnode_cap) { int c = g_pnode_cap ? g_pnode_cap : 8192; while (c < g_npnode + nodes) { if (c > INT_MAX / 2) return 0; c *= 2; }
         if (!pend_grow((void **)&g_pend_node, c, sizeof *g_pend_node) || !pend_grow((void **)&g_ubp_idx, (size_t)c + PEND_WIDE, sizeof *g_ubp_idx)) return 0;
@@ -1421,7 +1424,7 @@ static int pend_add(uint64_t dst, uint64_t n, int kind) {
             g_pend_node[k].e = e; g_pend_node[k].next = g_pend_hgen[b] == g_pend_gen ? g_pend_head[b] : -1; g_pend_head[b] = k; g_pend_hgen[b] = g_pend_gen; }
     else if (g_nwide < PEND_WIDE) g_pend_wide[g_nwide++] = e;
     else { g_pend_over = 1; return -1; }
-    g_pend_lo[e] = dst; g_pend_hi[e] = dst + n; g_pend_kind[e] = (uint8_t)kind; g_pend_upd[e] = 0; return g_npend++;
+    g_pend_lo[e] = dst; g_pend_hi[e] = dst + n; g_pend_kind[e] = (uint8_t)kind; g_pend_upd[e] = 0; g_pend_copy[e] = (pend_copy){0}; return g_npend++;
 }
 // The newest queued write overlapping [a, a+n): its index, -1 for none, -2 when it cannot be told (overflow)
 static int pend_last(uint64_t a, uint64_t n) {
@@ -1803,6 +1806,7 @@ static void drw_drained(void) { g_drain_sub = g_sub_serial; g_drain_other = g_wr
 static int drw_valid(void) { return g_drain_sub == g_sub_serial && !g_drw_over && g_wr_epoch - g_wr_geo == g_drain_other; }
 static int drw_hits(uint64_t lo, uint64_t n) { for (int i = 0; i < g_ndrw; i++) if (lo < g_drw_hi[i] && g_drw_lo[i] < lo + n) return 1; return 0; }
 int nvn_sparse_alias(uint64_t lo, uint64_t hi);   // hle_nvn.c: a sparse guest range may alias another pool at a different address
+uint64_t nvn_sparse_gen(void);
 static id<MTL4ComputeCommandEncoder> blit_buf(uint64_t rlo, uint64_t rhi, uint64_t wlo, uint64_t whi) {
     g_wr_epoch++;
     g_blit_alias = 1;   // before blit_raw, so an encoder it opens starts with alias visibility
@@ -1827,10 +1831,14 @@ static id<MTL4ComputeCommandEncoder> blit(void) {
 
 void mtl_sub_copy(uint64_t src, uint64_t dst, uint64_t n) {
     rc_copy(src,dst,n);
-    pend_add(dst, n, 2); g_mdx_epoch++;
+    int pi = pend_add(dst, n, 2); g_mdx_epoch++;
     void *sb, *db; uint64_t so, dof;
     if (!mtl_addr(src, n, &sb, &so) || !mtl_addr(dst, n, &db, &dof))
         MDIE("buffer copy address is in no memory pool src=%#llx dst=%#llx n=%#llx", (unsigned long long)src, (unsigned long long)dst, (unsigned long long)n);
+    if (pi >= 0 && n && !nvn_sparse_gen()) {
+        g_pend_copy[pi] = (pend_copy){src, nvn_dirty_now()};
+        nvn_dirty_protect((const void *)(uintptr_t)src, (size_t)n);
+    }
     if (src != dst && src < dst + n && dst < src + n) { static int once;   // Metal leaves an overlapping copy undefined; seen only in Cuphead while its pool allocator gave out overlapping blocks (hle_nvn.c zcull_size)
         if (!once++) MLOG("[RED] buffer copy with overlapping source and destination (src %#llx dst %#llx, %llu bytes): the result is undefined", (unsigned long long)src, (unsigned long long)dst, (unsigned long long)n); }
     enc_b_copy_buffer(blit_buf(src, src + n, dst, dst + n), (__bridge id<MTLBuffer>)sb, so, (__bridge id<MTLBuffer>)db, dof, n);
@@ -3256,7 +3264,7 @@ static id<MTLTexture> pkg_upload_(const tex_t *t, uint64_t *stamp, id<MTLTexture
 static int g_direct_upload_on = -1; static uint64_t g_direct_uploads, g_direct_dispatches;
 static int direct_upload_on(void) { if (g_direct_upload_on < 0) { const char *e=getenv("DM_NVN_DIRECT_UPLOAD"); g_direct_upload_on=!e||atoi(e); } return g_direct_upload_on; }
 int nvn_host_readable(uint64_t a, uint64_t n);   // hle_nvn.c: guest memory and sparse pools
-int nvn_sparse_pool(const void *pool); uint64_t nvn_sparse_gen(void); uint64_t nvn_sparse_copy(const void *pool, void *dst, uint64_t a, uint64_t n); int nvn_sparse_notes(uint64_t *seen, uint64_t (*out)[2], int max);
+int nvn_sparse_pool(const void *pool); uint64_t nvn_sparse_copy(const void *pool, void *dst, uint64_t a, uint64_t n); int nvn_sparse_notes(uint64_t *seen, uint64_t (*out)[2], int max);
 int nvn_sparse_pages(const void *pool, uint64_t a, uint64_t n, const uint8_t **out);
 // A texture of a sparse pool uploaded whole (pkg_upload_) is its storage as the pool's page table maps it: the physical memory behind each 4 KB page, 0 where nothing is mapped. The GPU
 // reads and writes it there through a table of each page's GPU address, so that both happen in the queue's order. A copy into such a texture, a clear or a render pass writes that
@@ -7496,6 +7504,12 @@ typedef struct { uint64_t gpu, epoch, writes; uint32_t sbw; int npend; } vbuf_co
 static nvn_hmap g_vbuf_unaligned = {.klen = 24};
 static uint64_t g_vbuf_write_epoch;   // shader writes invalidate snapshots without disturbing indirect conversions of the same draw
 static uint64_t g_vbuf_need[16];   // per stream: the bytes the draw reads when that is more than the bound size, else 0
+static uint64_t g_vbuf_read[16];   // per stream: bytes covering every fetch, or 0 when unknown
+static uint64_t vbuf_size(int s) {
+    // The bound limit need not fit the pool when the draw fetches less (MGS4's dynamic HUD streams).
+    uint64_t size = S.vbuf[s].size, read = g_vbuf_read[s];
+    return read && read < size ? read : size;
+}
 static uint64_t vbuf_unaligned(uint64_t addr, uint64_t size, uint64_t need, int prepare) {   // need: 0, or the copy's length (more than size; zeros past size)
     uint64_t key[3] = {addr, size, need}, len = need > size ? need : size; vbuf_copy *c = nvn_hm_get(&g_vbuf_unaligned, key);
     if (c && !prepare) return c->gpu;
@@ -7546,15 +7560,58 @@ static int vstream_last(int st, const p_draw *dw, const p_draw_idx *di, uint64_t
     if (!dw || dw->first < 0 || dw->count <= 0) return 0;
     *last = (uint64_t)dw->first + (uint64_t)dw->count - 1; return 1;
 }
+static int vc_draw_range(const p_draw *dw, const p_draw_idx *di, int64_t *lo, int64_t *hi);
+static uint64_t index_cpu_source(const p_draw_idx *di) {
+    if (!di || di->ind || di->mdi_cnt || di->count <= 0 || (unsigned)di->itype > 2) return 0;
+    p_draw_idx source = *di; uint64_t n = (uint64_t)di->count << di->itype; int before = g_npend;
+    if (nvn_sparse_gen() || g_sbw_over) return 0;
+    for (;;) {
+        uint64_t a = source.ibuf;
+        if (!a || a > UINT64_MAX - n || sbw_hits(a, a + n) || hw_sub_hits(a, a + n)) return 0;
+        int e = pend_last(a, n);
+        if (e == -1) {
+            if (gw_live(a, a + n) || !mtl_addr_known(a, n) || !nvn_host_readable(a, n)) return 0;
+            return a;
+        }
+        // The latest write must cover all indices and precede the copy that consumes it; later source writes cannot be read backward through a copy.
+        if (e < 0 || e >= before || g_pend_kind[e] != 2 || !g_pend_copy[e].src || a < g_pend_lo[e] || a + n > g_pend_hi[e]) return 0;
+        source.ibuf = g_pend_copy[e].src + (a - g_pend_lo[e]); before = e;
+        if (nvn_dirty_since((const void *)(uintptr_t)source.ibuf, (size_t)n, g_pend_copy[e].stamp)) return 0;
+    }
+}
+static int vbuf_index_range(const p_draw_idx *di, int64_t *lo, int64_t *hi) {
+    p_draw_idx source = *di; source.ibuf = index_cpu_source(di);
+    return source.ibuf && vc_draw_range(NULL, &source, lo, hi) && *lo >= 0 && *hi >= *lo;
+}
 static void vbuf_need(const nvn_refl *rf, const p_draw *dw, const p_draw_idx *di) {   // fills g_vbuf_need for the inputs the vertex shader reads
     memset(g_vbuf_need, 0, sizeof g_vbuf_need);
+    memset(g_vbuf_read, 0, sizeof g_vbuf_read); unsigned unknown = 0;
+    int ix_checked = 0, ix_known = 0; int64_t ix_lo = 0, ix_hi = 0;
     for (int v = 0; rf && v < rf->nv; v++) {
         int a = rf->v[v].nvn; if (a >= 32 || a >= S.nattr || !S.attr[a].fmt) continue;
         int st = S.attr[a].stream, eb = vattr_bytes(S.attr[a].fmt); uint64_t last;
-        if (st >= 16 || !eb || !S.vbuf[st].address || !vstream_last(st, dw, di, &last)) continue;
+        if (st >= 16 || !S.vbuf[st].address) continue;
+        if (!eb) { unknown |= 1u << st; continue; }
+        int exact = vstream_last(st, dw, di, &last);
+        if (!exact) {
+            if (dw || !di || di->ind || di->mdi_cnt || di->count <= 0 || (unsigned)di->itype > 2 || di->base_vertex < 0 || S.stream[st].divisor) { unknown |= 1u << st; continue; }
+            // The largest representable index bounds every fetch, including GPU-written indices (MGS4's explosion quads).
+            last = ((1ull << (8u << di->itype)) - 1) + (uint64_t)di->base_vertex;
+        }
+        if (S.stream[st].stride && last > (UINT64_MAX - S.attr[a].offset - (uint64_t)eb) / S.stream[st].stride) { unknown |= 1u << st; continue; }
         uint64_t end = last * S.stream[st].stride + S.attr[a].offset + (uint64_t)eb;
+        if (!exact && !mtl_addr_known(S.vbuf[st].address, MIN(end, S.vbuf[st].size))) {
+            // Small meshes and wider particle streams can need exact indices, including uploads from an unchanged CPU source.
+            if (!ix_checked) {
+                ix_checked = 1; ix_known = vbuf_index_range(di, &ix_lo, &ix_hi);
+            }
+            if (ix_known) { exact = 1; end = (uint64_t)ix_hi * S.stream[st].stride + S.attr[a].offset + (uint64_t)eb; }
+        }
+        if (!exact && end > S.vbuf[st].size) { unknown |= 1u << st; continue; }   // an upper bound cannot prove the draw needs a zero-padded copy
+        if (end > g_vbuf_read[st]) g_vbuf_read[st] = end;
         if (end > S.vbuf[st].size && end > g_vbuf_need[st]) g_vbuf_need[st] = end;
     }
+    for (int s = 0; s < 16; s++) if (unknown >> s & 1) g_vbuf_read[s] = 0;
 }
 static void vbuf_prepare(const nvn_refl *rf, const p_draw *dw, const p_draw_idx *di) {   // before the draw's render encoder: rf, dw / di the draw's vertex shader and record (NULL: no bounds)
     static uint64_t sub, gen, sparse;
@@ -7563,7 +7620,7 @@ static void vbuf_prepare(const nvn_refl *rf, const p_draw *dw, const p_draw_idx 
     vbuf_need(rf, dw, di);
     for (int s = 0; s < 16; s++) if (((S.vbuf[s].address & 3) && S.vbuf[s].size) || g_vbuf_need[s]) {   // an empty stream no draw reads past has no bytes to align
         if (g_vbuf_need[s]) { static int once; if (!once++) MLOG("a draw reads %llu bytes of vertex stream %d, bound with %llu: bound as a copy with zeros past the bound range, as Maxwell's fetch reads them", (unsigned long long)g_vbuf_need[s], s, (unsigned long long)S.vbuf[s].size); }
-        vbuf_unaligned(S.vbuf[s].address, S.vbuf[s].size, g_vbuf_need[s], 1);
+        vbuf_unaligned(S.vbuf[s].address, vbuf_size(s), g_vbuf_need[s], 1);
     }
     sub = g_sub_serial; gen = pool_gen; sparse = sparse_gen;
 }
@@ -7577,22 +7634,23 @@ static unsigned vs_streams(const nvn_refl *rf) {   // the streams the vertex sha
 // Returns the first stream the vertex shader reads (rf) whose non-zero address is in no memory pool, or -1. Such a slot would keep the buffer an earlier draw bound
 // there, so the caller skips the draw, as for an index buffer in no pool; a stream with address 0 reads the zero buffer through the vertex descriptor (ZERO_ATTR)
 static int bind_vbufs(id<MTL4RenderCommandEncoder> en, const nvn_refl *rf) {
-    static struct { uint64_t addr, gpu, gen; } cache[16];
+    static struct { uint64_t addr, gpu, gen, size; } cache[16];
     uint64_t gen = atomic_load_explicit(&g_pool_gen, memory_order_acquire);
     unsigned used = vs_streams(rf); int bad = -1;
     for (int s = 0; s < 16; s++) {
-        uint64_t addr = S.vbuf[s].address, gpu;
+        uint64_t addr = S.vbuf[s].address, size = vbuf_size(s), gpu;
         if (!addr) continue;
-        if (((addr & 3) && S.vbuf[s].size) || g_vbuf_need[s]) { uint64_t c = vbuf_unaligned(addr, S.vbuf[s].size, g_vbuf_need[s], 0); if (c) { cache[s].addr = 0; enc_r_vbuf(en, VB_SLOT(s), c); continue; } }   // not cached: the copy is per submission
-        if (g_vbuf_cache && cache[s].addr == addr && cache[s].gen == gen) { gpu = cache[s].gpu; g_vbuf_reuse++; }
+        if (((addr & 3) && size) || g_vbuf_need[s]) { uint64_t c = vbuf_unaligned(addr, size, g_vbuf_need[s], 0); if (c) { cache[s].addr = 0; enc_r_vbuf(en, VB_SLOT(s), c); continue; } }   // not cached: the copy is per submission
+        if (!size) size = 1;
+        if (g_vbuf_cache && cache[s].addr == addr && cache[s].gen == gen && size <= cache[s].size) { gpu = cache[s].gpu; g_vbuf_reuse++; }
         else {
             void *mb; uint64_t mo; g_vbuf_resolve++;
-            if (!mtl_gpu_addr(addr, S.vbuf[s].size ? S.vbuf[s].size : 1, &mb, &mo, &gpu)) {
+            if (!mtl_gpu_addr(addr, size, &mb, &mo, &gpu)) {
                 cache[s].addr = 0;
                 if (bad < 0 && used >> s & 1) bad = s;   // a stale stream no input reads is no matter
                 continue;
             }
-            cache[s].addr = addr; cache[s].gpu = gpu; cache[s].gen = gen;
+            cache[s].addr = addr; cache[s].gpu = gpu; cache[s].gen = gen; cache[s].size = size;
         }
         enc_r_vbuf(en, VB_SLOT(s), gpu);
     }
@@ -7612,10 +7670,10 @@ _Static_assert(sizeof(pull_layout) == 320, "dmsh_pull.metal dm_vlayout");
 static void pull_layout_fill(pull_layout *Lp) {
     pull_layout L; memset(&L, 0, sizeof L); uint32_t lo[16] = {0};
     for (int st = 0; st < 16; st++) {
-        uint64_t addr = S.vbuf[st].address, gpu; void *mb; uint64_t mo;
+        uint64_t addr = S.vbuf[st].address, size = vbuf_size(st), gpu; void *mb; uint64_t mo;
         if (!addr) continue;
-        if (!g_vbuf_need[st] || !(gpu = vbuf_unaligned(addr, S.vbuf[st].size, g_vbuf_need[st], 0)))   // a stream the draw reads past: its copy padded with zeros (vbuf_need)
-            if (!mtl_gpu_addr(addr, S.vbuf[st].size ? S.vbuf[st].size : 1, &mb, &mo, &gpu)) continue;
+        if (!g_vbuf_need[st] || !(gpu = vbuf_unaligned(addr, size, g_vbuf_need[st], 0)))   // a stream the draw reads past: its copy padded with zeros (vbuf_need)
+            if (!mtl_gpu_addr(addr, size ? size : 1, &mb, &mo, &gpu)) continue;
         L.s[st].base = gpu & ~3ull; lo[st] = (uint32_t)(gpu & 3); L.s[st].stride = S.stream[st].stride; L.s[st].divisor = S.stream[st].divisor;
     }
     for (int a = 0; a < 16 && a < S.nattr; a++) {
@@ -14340,6 +14398,33 @@ static uint32_t mdi_count(uint64_t cnt) {
     return g_mdi_count;
 }
 static int mdi_live(uint64_t cnt, int i) { return (uint32_t)i < mdi_count(cnt); }
+// Metal does not restart triangle lists. Keep one compact draw so primitive IDs continue across the separators.
+// shortcut: direct lists only; extend the GPU indirect converter when an indirect triangle list needs restart.
+static int list_restart_prepare(const p_draw_idx *di, uint64_t *gpu, uint32_t *count) {
+    if (!di || di->ind || di->prim != 4 || !S.restart.on || di->count <= 0 || (unsigned)di->itype > 2) return 0;
+    unsigned bytes = 1u << di->itype; uint64_t n = (uint64_t)di->count * bytes;
+    if ((uint64_t)S.restart.index >= (1ull << (8 * bytes))) return 0;
+    p_draw_idx source = *di; source.ibuf = index_cpu_source(di);
+    uint32_t lo, hi;
+    if (source.ibuf) {
+        if (!ix_range(&source, &lo, &hi)) ix_minmax((const void *)(uintptr_t)source.ibuf, bytes, di->count, &lo, &hi);
+        if (S.restart.index < lo || S.restart.index > hi) return 0;
+    } else {
+        // Unknown GPU-written indices must land before reading; ordinary queued uploads use their unchanged CPU source above.
+        mdi_wait(); void *mb; uint64_t off;
+        if (!drw_valid() || !mtl_addr(di->ibuf, n, &mb, &off) || !nvn_host_readable(di->ibuf, n)) {
+            RED_ONCE(22, "restart index buffer cannot be read safely; draw skipped"); return -1;
+        }
+        source.ibuf = (uint64_t)((uint8_t *)[(__bridge id<MTLBuffer>)mb contents] + off);
+        ix_minmax((const void *)(uintptr_t)source.ibuf, bytes, di->count, &lo, &hi);
+        if (S.restart.index < lo || S.restart.index > hi) return 0;
+    }
+    id<MTLBuffer> out; size_t off = arena_alloc((size_t)di->count * 4, &out);
+    *count = nvn_expand_primitive((uint32_t *)((uint8_t *)out.contents + off), (const uint8_t *)(uintptr_t)source.ibuf,
+                                  (uint32_t)di->count, bytes, 4, 1, S.restart.index);
+    *gpu = out.gpuAddress + off;
+    return 1;
+}
 // ---------- Indirect-count multi-draws masked on the GPU ----------
 // The wait above held the submitting thread for the GPU at every GPU-driven pass: in Monster Hunter Rise's Kamura Village, 14 of the 20 ms a submission took on an iPhone were that wait
 // (6 ms of work), and the game ran at 36–54 fps. Instead a compute pass copies each such draw's record into the frame arena, or zeros for a draw past the count, and the draw reads the copy:
@@ -14779,6 +14864,8 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) {
     // Xenoblade Chronicles 3 uses vertex-only work before its skinned-model draws; Metroid Prime Remastered fills its fog volume with image stores from points.
     if (S.rast_discard && (!pr->sh[0] || !pr->sh[0]->discard_fn)) { PD("Z %llu draw skipped: rasterizer discard with no vertex storage or image writes vs=%s", g_stat_pass + !g_enc, pr->sh[0] ? pr->sh[0]->key : "-"); return; }
     if (g_nubd && (g_enc || ubd_lazy()) && ubd_conflict(pr, dw, di)) { g_ubd_conflicts++; rp_end(); ubd_land(); }   // land the deferred inline updates before this draw (see ubd_conflict)
+    uint64_t restart_gpu = 0; uint32_t restart_count = 0;
+    if (!g_geo_program && !g_geo_mesh.on && !g_wl.on && list_restart_prepare(di, &restart_gpu, &restart_count) < 0) return;
     vertex_dump(pr->sh[0], dw, di);
     if (zskip_can_draw(pr)) {   // Zero-source skip: the output is always 0, writing 0 over 0, so this draw changes no result (see zskip_can_draw)
         g_zskip_count++; { static int once; if (!once++) MLOG("zero-source skip: first case pass %llu", g_stat_pass + 1); }
@@ -15033,6 +15120,11 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) {
         if (g_tess_ind) { enc_r_draw_indirect(en, mp, g_tess_ind); return; }   // nvn_tess.inc: the expansion kernel's vertex count
         if (g_geo_count) enc_r_draw_indexed(en, mp, g_geo_count, MTLIndexTypeUInt32, g_geo_indices, g_geo_index_bytes, 1, 0, (uint32_t)g_draw_binst);   // geo_lean_tri's slots
         else enc_r_draw_indexed_indirect(en, mp, MTLIndexTypeUInt32, g_geo_indices, g_geo_index_bytes, g_geo_args);
+        return;
+    }
+    if (restart_gpu) {
+        if (restart_count) enc_r_draw_indexed(en, mp, restart_count, MTLIndexTypeUInt32, restart_gpu, (NSUInteger)restart_count * 4,
+                                             di->instances ? di->instances : 1, di->base_vertex, di->base_instance);
         return;
     }
     // A draw with 0 primitives (the game does send count=0) draws no pixels, so skip encoding; Metal requires the count to be non-zero, otherwise the validation layer aborts on the spot (measured on the camp / wilderness / combat pages)

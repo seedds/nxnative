@@ -43,6 +43,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Found on:** [FINAL FANTASY X/X-2 HD Remaster](../../dm/games/0100BC300CB48000/README.md); base and both supplied DLC packs yield 5,752 unique shaders.
 - **Check:** `test_vbf.py` covers raw and zlib blocks, shared/missing members, truncation, unaligned effects, loose shader keys and inconsistent lengths. All 5,752 programs translate on the Mac.
 
+### NVN graphics records in VPAK archives
+
+- **Symptom:** the split finds no shaders while `common/shaders/vfp_Switch.*.pak` contain NVN control sections.
+- **Cause:** MGS4's `VPAK` version bytes `03 00 01 00` wrap unaligned GPU code immediately before its control section, the same record layout read by `phyre_shaders`.
+- **Fix:** `scan_file_in` and `scan_blob` recognize that exact header and reuse `phyre_shaders`, preserving its control/code validation, original shader keys and single-stage pixel-input cover. The main executable is also scanned for records with matching code/control length prefixes: its 15 unaligned records were excluded by `raw_shaders`' alignment filter, including the two shaders requested during movie playback. Requiring both lengths avoids guessing between adjacent code areas in unrelated executables.
+- **Found on:** METAL GEAR SOLID 4: Guns of the Patriots, program `0100D0B01C4F4002`, update 393216: all 101,510 control records in the two archives decode to 983 unique shaders; main adds 15, for 998 (190 vertex, 808 pixel), all compiled on the Mac. An independent byte scan of all 1,794 payload files and both executable modules found no other valid adjacent code/control records; one accidental control marker in a movie has invalid lengths. Launch from the collection, movie playback, the practice range and the opening story area were verified on the Mac; full progression is unverified.
+- **Check:** `test_split_vpak.py` covers the file-scanner entry point, unaligned vertex/pixel records, matching embedded length prefixes, truncation and an unknown archive version; all 89 `test_split_*.py` tests pass. All 998 audited keys match the rebuilt shader map.
+
 ### Diablo III's console packages
 
 - **Symptom:** the split finds no shaders (`[RED] the shader split found no shaders in main or the RomFS`), the RomFS holds only `.cpk` files, and `cpk.py` refuses them (`not a CPK`); the run prints `[RED] shader … is not in the shader map` for every program.

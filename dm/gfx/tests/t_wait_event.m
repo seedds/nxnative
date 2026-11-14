@@ -13,6 +13,7 @@ void *front_metal_layer(void) { return NULL; }
 module_t *module_of(const void *p) { (void)p; return NULL; }
 module_t *g_mod; int g_nmod;
 void svc_thread_dump(void) {}
+void crash_install(void);
 uint64_t now_ns(void) { return bp_now(); }
 static int checks, fails;
 #define CHECK(c,label) do { int ok=!!(c); checks++; fails+=!ok; printf("%s: %s\n",ok?"PASS":"FAIL",label); fflush(stdout); } while(0)
@@ -382,6 +383,7 @@ static void event_mirror_publication(void) {
     atomic_store(&event_test_storage,0); P(nvnSyncFinalize)(&fence); P(nvnTextureFinalize)(&texture);
 }
 int main(void) { @autoreleasepool {
+    crash_install();   // CPU writes after uploads use the host dirty-page fault handler
     if (setvbuf(stdout, NULL, _IONBF, 0)) abort(); setenv("DM_PSO_PREPARE","0",1);
     mtl_init();
     NVNdeviceBuilder db={0}; P(nvnDeviceBuilderSetDefaults)(&db); CHECK(P(nvnDeviceInitialize)(&device,&db),"device initialized");

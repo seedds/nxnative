@@ -1084,7 +1084,7 @@ static void geo_gs_gpu(id<MTL4ComputeCommandEncoder> ce, const geo_job *j, id<MT
 static void geo_capture_one(id<MTL4RenderCommandEncoder> re, const geo_job *j) {
     if (!j->capture_words) return;
     g_draw_binst = j->first_instance;
-    memset(g_vbuf_need, 0, sizeof g_vbuf_need);   // a later draw's bounds do not apply here (geo_prepare)
+    vbuf_need(NULL, NULL, NULL);   // a later draw's bounds do not apply here (geo_prepare)
     enc_r_pso(re, j->capture);
     {   // the capture shares its encoder with the job's other stages, which read what it writes: it is not skipped alone, and the stream's slot keeps an earlier buffer
         int bad = bind_vbufs(re, &j->vs->rf);

@@ -386,9 +386,17 @@ For a replaced DSP renderer the size query keeps the service's work-buffer contr
 
 - **Symptom:** the light limiter crashed on a null state pointer (`ApplyLightLimiterEffect`, `sdk+0x228494`).
 - **Cause:** an effect's "needs init" parameter state is set only in the update where the game flags it new; the next update copies the game's value over it. Mario updates twice in a row at start-up; with a real audio device the first frame came after both.
-- **Fix:** the `AudioRenderSystem::Update` hook renders a catch-up frame first when nothing was rendered since the last update.
+- **Fix:** for a renderer with effect capacity, the `AudioRenderSystem::Update` hook renders a catch-up frame first when nothing was rendered since the last update. A renderer with no effects keeps the output-paced render thread alone.
 - **Found on:** [Super Mario Bros. Wonder](../../dm/games/010015100B514000/README.md).
 - **Check:** `DM_AUDREN_TRACE=1` logs every update with the number of frames rendered since the previous one.
+
+### Silent movie tracks primed across several updates
+
+- **Symptom:** movie video plays, menus and gameplay sound work, but the movie is silent. The decoder and its output copies contain nonzero PCM; only a muted track starts, while the selected track has the correct mix volumes but no queued buffers.
+- **Cause:** Bink primes stopped voices across several `RequestUpdate` calls and starts them together after the last track is ready. Rendering between every pair of updates releases their buffers before that startup finishes. The host's catch-up rule exists to preserve effect initialization, but was also applied to renderers with no effects.
+- **Fix:** `ar_open` retains the public parameter's effect capacity in each `ar_t`; `h_ars_Update` only renders catch-up frames when that capacity is nonzero. All renderers still run on the output-paced render thread. No game ID, codec or SDK address is part of the fix.
+- **Found on:** MGS4 program `0100D0B01C4F4002`, update 393216, SDK 18.3.2: five stereo 48 kHz Bink tracks, effect capacity zero. Disabling catch-ups in the live process let all five tracks start and produced non-silent output; before that the selected third track stayed unstarted despite valid decoded PCM and stereo gains.
+- **Check:** `t_audren_work` sends twenty consecutive updates to an opened zero-effect renderer and checks no synchronous renders or queued frames, while retaining SDK result propagation. It also checks effect capacity through both open forms and the nested open. A fresh process played the opening FMV with zero catch-ups and nonzero stereo PCM (all 480 samples in one captured frame, peak 1,134). FMV audio playback was confirmed on the Mac.
 
 ### A sound driver that never waits on the renderer event
 

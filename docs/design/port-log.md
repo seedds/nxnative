@@ -21,6 +21,7 @@ A dated record of what is done, what is in progress and what is left on the Wind
 | `93b94dd` | Port: `nvn_state.c`'s `SLOG` writes a line in one stdio call outside Apple; `port.yml` uploads `host_scripts.tsv` for the Windows job. Verified in Docker (99 of 99 twice) |
 | `b1eff1c` | Vulkan: converted quad strips and polygons take NVN's provoking vertex (the same triangles rotated); `t_vk_provoking` 37 checks, `t_vk_guest_gl` 53. Verified in Docker on lavapipe |
 | `eaa9aa1` | AOT: hot indirect targets (design 12): the host writes `<module>.targets.tsv`, nxaot guards a site's dominant target with a direct call at tier H. Verified in Docker (nxaot 29 of 29, host 100 of 100 twice, packs identical without the file, the Windows cross-build); measured within noise, no gain shown |
+| `561082f` | Host tests: `t_second_pack` can run on Windows (a platform table, prebuilt packs where there is no nxaot, the engine read from the log). Verified in Docker on Linux, in a tree without the JIT, and by the Windows cross-build; nothing run on Windows: expected there `25 checks, 0 failed` |
 
 Done on the machine, not in the repository: Docker emptied on the owner's request (every image and container, the owner's other projects' included; the data volumes `aitrade_pgdata`, `smilepetstore_pgdata`, `smilepetstore_redisdata` kept).
 
@@ -32,7 +33,7 @@ Done on the machine, not in the repository: Docker emptied on the owner's reques
 
 ### In progress: written by agents, NOT built and NOT verified
 
-Verified and integrated on 2026-11-14 (nxaot CTest 28 of 28; host CTest 99 of 99 with and without `DM_AOT_ARENA_CHECK`, `NXAOT` given): the three rows that were `wip/second-pack-profile`, `wip/launcher-rule-by-function` and `wip/runner-scripts`. Agents at work: `t_second_pack` on Windows (written, being integrated), the JIT fallback for the Windows host (it has none: the cross-build image lacks Boost's headers).
+Verified and integrated on 2026-11-14 (nxaot CTest 28 of 28; host CTest 99 of 99 with and without `DM_AOT_ARENA_CHECK`, `NXAOT` given): the three rows that were `wip/second-pack-profile`, `wip/launcher-rule-by-function` and `wip/runner-scripts`. Agents at work: the JIT fallback for the Windows host (it has none: the cross-build image lacks Boost's headers); why the 4,000-function benchmark stays in the JIT fallback on non-local transfers.
 
 No Docker image exists (the disk filled while ten worktrees were checked out, 280 MB each), so nothing below has been compiled or run. Each item is uncommitted in its worktree under `.claude/worktrees/`; a new session reads the diff there (`git -C <worktree> diff`), verifies it in Docker, and only then cherry-picks it. One build at a time: the two images (`nxnative-build` 1.9 GB, `nxnative-aot` 1.9 GB) do not fit beside the worktrees.
 

@@ -43,6 +43,9 @@ jobs:
   lint:
     name: clang-tidy (ratchet)
     runs-on: xcode-27
+    concurrency:
+      group: ${{ github.event_name == 'pull_request' && 'pr-mac-analysis' || format('lint-{0}', github.run_id) }}
+      queue: max
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

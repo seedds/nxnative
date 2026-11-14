@@ -747,5 +747,5 @@ Frame pacing: the host's frame step, engine frame limiters, present intervals an
 - **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md). M4 Pro (20-core GPU, macOS 27.2), `kokiri-deck` with `scripts/bench.py`, three runs a variant, chain `a3ee07f000cb`, main with the finalized textures' sets of PR #2482 against the cache by Metal texture:
   - views made about 40 a frame → about 1.5 (by frame 5,700: 118,209–120,204 → 4,397–4,711, image views now counted too); the cache holds 700–786 textures instead of 2,349–2,406, one entry per texture rather than per serial;
   - frame time unchanged (frame p50 33.2 ms, the game's 30 fps step), no red lines, the pictures right; GPU p50 16.65 → 15.65 ms, measured while another session ran a game on the same Mac, so not counted;
-  - submit-thread time not measured on its own; at the 5,900 cycles a view PR #2482 measured, about 0.2 M cycles a frame.
+  - the submit thread standing on the deck (85–105 s, per-frame instructions fitted against draws a frame, at 2,180 draws): 73.93 → 73.06 M instructions a frame (−1.2 %), CPU p50 9.40 → 9.18 ms.
   - PR #2542's own run before PR #2482 (M4 Pro): 84,748 → 1,948 views made by frame 4,200.

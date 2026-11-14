@@ -198,6 +198,8 @@ def header_one(g):
     if tdu not in ('on', 'off') or (tdu == 'on' and tfu != 'on'): sys.exit(f'{g.id}: tex_dirty_upload must be on or off, and needs tex_flush_upload on: {tdu}')
     tds = g.get('tex_dyn_slots', 'off')   # shaders whose texture handle the translator could not trace to one slot: slot indices in c2, the bound slots in the fallback arrays (nvn_mtl.m): on / off
     if tds not in ('on', 'off'): sys.exit(f'{g.id}: tex_dyn_slots must be on or off: {tds}')
+    rsc = g.get('render_scale', 'off')   # the host sets the engine's own 3D resolution share from DM_RENDER_SCALE (hle_fpslock.c rows for the game's build), so the launchers offer Render scale: on / off
+    if rsc not in ('on', 'off'): sys.exit(f'{g.id}: render_scale must be on or off: {rsc}')
     vcr = g.get('vconv_range', 'off')   # vertex attributes converted on the CPU only over the vertices each draw reads (nvn_mtl.m vc_draw_range): on / off
     if vcr not in ('on', 'off'): sys.exit(f'{g.id}: vconv_range must be on or off: {vcr}')
     mml = g.get('mem_map_limit', 'off')   # MapPhysicalMemory refused beyond the application pool, as on Horizon (hle_svc.c): on / off
@@ -257,6 +259,7 @@ def header_one(g):
          f'#define DM_GAME_SHADER_KEY_SKIP_OFF {sko:#x}', f'#define DM_GAME_SHADER_KEY_SKIP_LEN {skl:#x}',
          f'#define DM_GAME_TEX_DIRTY_UPLOAD {int(tdu == "on")}',
          f'#define DM_GAME_TEX_DYN_SLOTS {int(tds == "on")}',
+         f'#define DM_GAME_RENDER_SCALE {int(rsc == "on")}',
          f'#define DM_GAME_DRAW_BARRIERS_GAME {int(dbr == "game")}',
          f'#define DM_GAME_UPSCALER_KEYS {q(",".join(ups))}', f'#define DM_GAME_UPSCALER_N {len(ups)}',
          f'#define DM_GAME_VCONV_RANGE {int(vcr == "on")}',

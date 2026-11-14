@@ -18,7 +18,7 @@ class ResolutionSetting(unittest.TestCase):
                 if dr:self.assertEqual((dr[0]['kind'],dr[0]['default']),('toggle','0'))
                 fps=next(s for s in rows if s['env']=='DM_FPS_TARGET')
                 self.assertEqual(fps['default'],'60')
-                self.assertEqual(fps['options'],[['30','30 fps'],['60','60 fps']])
+                self.assertEqual(fps['options'],[['30','30 fps'],['60','60 fps']])   # iOS (no SETTINGS_PLATFORM): no 120, no uncapped
 
 class FrameRateOption(unittest.TestCase):
     def test_120_only_on_the_mac_for_a_game_checked_at_that_speed(self):
@@ -28,7 +28,7 @@ class FrameRateOption(unittest.TestCase):
                 with patch.dict(settings.os.environ,{'SETTINGS_PLATFORM':platform}):
                     fps=next(s for s in settings.build(gid,tmp,'unused')['settings'] if s['env']=='DM_FPS_TARGET')
                 self.assertEqual(fps['default'],'60',gid)
-                self.assertEqual(fps['options'],[['30','30 fps'],['60','60 fps']]+([['120','120 fps']] if has else []),(gid,platform))
+                self.assertEqual(fps['options'],[['30','30 fps'],['60','60 fps']]+([['120','120 fps']] if has else [])+([['unlimited','Uncapped']] if platform=='mac' else []),(gid,platform))
 
 class UpscalerSetting(unittest.TestCase):
     def test_only_for_games_naming_their_upscaler(self):

@@ -369,14 +369,18 @@ def vertex_ab(key, code, ctl):
     {SPH offset, length from the SPH, ?} for A, then for B. The merge is what Ryujinx's TranslatorContext.Translate(VertexA) builds: A's instructions, each unconditional EXIT a branch to
     B's first instruction, then B's, under B's SPH with A's flags and input / output maps ORed in and the larger local memory sizes. Measured on all 1,244 of the game's vertex shaders: A
     writes no generic output (so none of B's loads reads one of A's), A ends in two EXITs (one predicated on CC FCSM_TR, which Ryujinx never takes, left as it is) and a BRA to itself,
-    and neither part has an absolute or table jump, so moving B keeps every branch. → (code area with its 0x30 header, c1), c1 being what follows part B; None for any other vertex shader"""
+    and neither part has an absolute or table jump, so moving B keeps every branch.
+    Batman: Arkham Asylum's GLSLC (SDK 14.3) writes 1,837 of its vertex shaders so, most with constants: part A ends at control +0x700, where the constant block c1 starts (0x100 bytes, A's and
+    B's constants together), and part B's header follows that block. Translated alone, both parts read c1 there (c1[0].x and .y: 0.01 and 0.001 in the one looked at), so the hardware binds
+    c1 at code +control 0x700 for both. → (code area with its 0x30 header, c1), c1 being that block, or what follows part B when there is none (Catherine); None for any other vertex shader"""
     if len(code) < 0x80 or len(ctl) < 0x760 or code[:4] != bytes.fromhex('78563412'): return None
     w0 = struct.unpack_from('<I', code, 0x30)[0]
     if w0 & 0x1f != 1 or (w0 >> 10) & 0xf != 0: return None
     a_sph, a_len, _, b_sph, b_len, _ = struct.unpack_from('<6I', ctl, 0x748)
     if not any((a_sph, a_len, b_sph, b_len)): return None   # one program of shader type 0, no part B: translated as it is (Ryujinx reads type 0 as a vertex shader)
     bw0 =struct.unpack_from('<I', code, b_sph)[0] if 0x80 <= b_sph <= len(code) - 0x50 else 0
-    if a_sph != 0x30 or b_sph != struct.unpack_from('<I', ctl, 0x700)[0] + 0x30 or bw0 & 0x1f != 1 or (bw0 >> 10) & 0xf != 1 or (a_len - 0x50) % 32 or (b_len - 0x50) % 32 or b_sph + b_len > len(code):
+    c1o = struct.unpack_from('<I', ctl, 0x700)[0]
+    if a_sph != 0x30 or c1o > b_sph - 0x30 or bw0 & 0x1f != 1 or (bw0 >> 10) & 0xf != 1 or (a_len - 0x50) % 32 or (b_len - 0x50) % 32 or b_sph + b_len > len(code):
         sys.exit(f'[RED] {key}: vertex shader of shader type 0 without a VertexB part in the expected place (control +0x748 {a_sph:#x} {a_len:#x} {b_sph:#x} {b_len:#x})')
     sa, sb = list(struct.unpack_from('<20I', code, a_sph)), list(struct.unpack_from('<20I', code, b_sph))
     sph = [sb[0] | sa[0] & ~(0xf << 10)] + [max(sa[i] & 0xffffff, sb[i] & 0xffffff) | sb[i] & ~0xffffff for i in (1, 2, 3)] + [sb[4]] + [sa[i] | sb[i] for i in range(5, 20)]
@@ -386,7 +390,7 @@ def vertex_ab(key, code, ctl):
         ins = struct.unpack_from('<Q', a, o)[0]
         if ins >> 52 == 0xe30 and ins & 0x1f == 0xf:   # EXIT with CC T (any predicate) → BRA to part B, keeping the predicate and CC bits; the offset counts from the next instruction
             struct.pack_into('<Q', a, o, 0xe24 << 52 | ((len(a) - (o + 8)) & 0xffffff) << 20 | ins & 0xfffff)
-    return code[:0x30] + struct.pack('<20I', *sph) + bytes(a) + b, code[b_sph + b_len:]
+    return code[:0x30] + struct.pack('<20I', *sph) + bytes(a) + b, code[c1o:b_sph - 0x30] if b_sph - 0x30 > c1o else code[b_sph + b_len:]
 
 def early_fragment_tests(ctl, code):
     """Early fragment tests: control +0x718 of a pixel shader (the NVN driver's control accessor reads that byte beside the other fragment flags at +0x719..+0x71d, the same accessor in

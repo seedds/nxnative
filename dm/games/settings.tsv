@@ -8,15 +8,15 @@
 #   default   a value (a toggle's: 1 on, 0 off); DM_GAME_<NAME>: the host's own default from the game profile (game_profile.h, game.py); build:<VAR>: the IPA build's setting (build_ipa.sh)
 #             <ios>|<mac> selects the platform's default before resolving a profile macro or build variable
 #   shown     always; DM_GAME_<NAME>!=<value> or ==<value>; fixups:<KEY>: main's rewriter table has that key (a stub in the game's build, patch_nso.py); languages>1 (more than one to pick, so also when the control data lists none); gfxapi:<API>: the packer's GFXAPI;
-#             platform:<ios | mac>: the app's platform (SETTINGS_PLATFORM, ios when unset), for a switch only that platform's front end reads
+#             platform:<ios | mac>: the app's platform (SETTINGS_PLATFORM, ios when unset), for a switch only that platform's front end reads; several conditions joined by | hold when any one does
 #   section   Game, Controls or Performance: a heading on the single settings screen. Rows appear in table order within each section
 #             Reset to tested defaults clears all launcher choices; values fixed by an env file stay
 #   label, note  the setting's name and the line under it (may be empty; only for a setting with a cost: latency, memory, heat)
 #   meta      optional, key=value pairs separated by ; (settings.py META lists the keys; docs/frontends.md, The settings list, describes them):
 #             level=basic  a setting a front end shows first;  needs=<VAR>=<value>  a sub-setting, drawn only while the row that sets <VAR> has that value
-DM_FPS_TARGET	choice	30=30 fps,60=60 fps,120=120 fps?DM_GAME_FPS_MAX==120&platform:mac	DM_GAME_FPS_TARGET	DM_GAME_FPS_TARGET!=0	Game	Frame rate		level=basic
+DM_FPS_TARGET	choice	30=30 fps,60=60 fps,120=120 fps?DM_GAME_FPS_MAX==120&platform:mac,unlimited=Uncapped?platform:mac	DM_GAME_FPS_TARGET	DM_GAME_FPS_TARGET!=0	Game	Frame rate		level=basic
 DM_DYNAMIC_RESOLUTION	toggle	-	0	fixups:DYNAMIC_RESOLUTION	Game	Dynamic resolution	Lets the game lower its resolution under load. Turn off to keep full resolution for the selected console mode.
-DM_RENDER_SCALE	range	0.5:1.0:0.05	1.0	fixups:RENDER_SCALE	Game	Render scale		level=basic
+DM_RENDER_SCALE	range	0.5:1.0:0.05	1.0	fixups:RENDER_SCALE|DM_GAME_RENDER_SCALE==1	Game	Render scale		level=basic
 DM_OPMODE	choice	1=Docked,0=Handheld	DM_GAME_OPMODE	always	Game	Console mode		level=basic
 DM_PRESENT_UPSCALE	choice	off=Standard,metalfx=MetalFX	off	always	Game	Upscaling	Uses more GPU time and can increase heat.
 DM_UPSCALER	choice	game=Game's own,metalfx=MetalFX	game	DM_GAME_UPSCALER_N!=0	Game	Game's upscaler

@@ -42,6 +42,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 | `build` → `engine` | Next Level Games' frame limiter target at a fixed address | frame rate | blocked: one game on that engine here | judgement | 1 | [Luigi's Mansion 3](../../dm/games/0100DCA0064A6000/README.md) | the studio's engine, which its other games ship |
 | `build` → `engine` | RE Engine's frame limit at a fixed pointer | frame rate | blocked: one RE Engine game here | judgement | 1 | [Monster Hunter Rise](../../dm/games/0100B04011742000/README.md) | engine code other RE Engine games ship |
 | `build` → `engine` | Unity's constant-buffer table locked on the shared device | race | blocked: the stubs have no function-matched form yet, and no other Unity 2018.4 main on the drive shares these functions (Ori and the Blind Forest 1.0.2: no fingerprint match) | checked: probes of both threads inserting the same key and of the table API's callers by thread; Blind Forest main compared with nso_fnmap | 1 | [Ori and the Will of the Wisps](../../dm/games/01008DD013200000/README.md) | Unity 2018.4's threaded GfxDevice: the main thread registers layouts on the real device while the render thread uses the same table; any Unity 2018.4 build with this code has the race |
+| `build` → `engine` | Unreal Engine 3's tick limit and dynamic-resolution budget at fixed addresses | frame rate | blocked: UE3's engine object and property reflection predate the Unreal 4 / 5 layouts the rewriter's searches read (dm/tools/ue_fixed_rate.py) | judgement | 1 | [Batman: Arkham Asylum](../../dm/games/0100E870163CA000/README.md) | engine code other Unreal Engine 3 games ship: the engine object's global pointer and the properties' offsets in it |
 | `build` → `game` | 60 fps frame step on 1.3.0 (the same stub at its known addresses) | frame rate | blocked: 1.3.0's main is on neither drive to fingerprint (v458752 is the update on them) | judgement | 1 | [Hyrule Warriors: Age of Calamity](../../dm/games/01002B00111A2000/README.md) | the stub above, placed at 1.3.0's addresses: the matched rule would serve it once its functions are fingerprinted |
 | `build` → `game` | screen shape: the sizes, the view, the layouts' projection and their edge widgets (DM_SCREEN_ASPECT) | rendering | blocked: the stubs have no function-matched form yet | judgement | 1 | [Animal Crossing: New Horizons](../../dm/games/01006F8002326000/README.md) | the output size is the host's, but where the game takes its sizes, its cameras and its layouts are this build's code |
 | `build` → `game` | 60 fps intervals and dynamic-resolution constants | frame rate | kept: 1.0.3 (v131072) is the newest update of both releases and likely their last: a function match would serve no other build; the rewriter would also need matched rules that write fixups and declare capabilities, a new mechanism (2026-11-09) | checked: both releases' mains, where the host's rows for them were found; the global main's sites mapped into ASTRAL CHAIN and Bayonetta 1-3 (2026-11-09) | 2 | [NieR:Automata The End of YoRHa Edition (010056B015FE8000)](../../dm/games/010056B015FE8000/README.md); [NieR:Automata The End of YoRHa Edition (0100B8E016F76000)](../../dm/games/0100B8E016F76000/README.md) | the game's own constants; the Asian release's function is the global one's 0x13c0 further on, so one function-matched rule could serve both releases. No PlatinumGames sibling shares the code: none of its sites has an exact match in ASTRAL CHAIN or Bayonetta 1-3 (nso_fnmap, 2026-11-09) |
@@ -57,6 +58,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 |---|---|---|---|---|---|---|
 | [Animal Crossing: New Horizons](#animal-crossing-new-horizons) | 0 | 0 | 14 | 0 | 0 | `build` → `game` |
 | [ASTRAL CHAIN](#astral-chain) | 0 | 0 | 112 | 0 | 0 | `build` → `game` |
+| [Batman: Arkham Asylum](#batman-arkham-asylum) | 0 | 0 | 0 | 0 | 3 | `build` → `engine` |
 | [Batman: Arkham Knight](#batman-arkham-knight) | 8 | 0 | 0 | 0 | 1 | `build` → `game` ×2 |
 | [DARK SOULS: REMASTERED](#dark-souls-remastered) | 2 | 0 | 0 | 0 | 0 | `build` → `game` |
 | [Diablo II: Resurrected](#diablo-ii-resurrected) | 2 | 0 | 0 | 1 | 0 | `game` |
@@ -238,6 +240,17 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
   </details>
 
 
+### Batman: Arkham Asylum
+
+[Batman: Arkham Asylum](../../dm/games/0100E870163CA000/README.md), `0100E870163CA000`.
+
+- **`build` → `engine`**, frame rate, blocked: UE3's engine object and property reflection predate the Unreal 4 / 5 layouts the rewriter's searches read (dm/tools/ue_fixed_rate.py), judgement: Unreal Engine 3's tick limit and dynamic-resolution budget at fixed addresses. Engine code other Unreal Engine 3 games ship: the engine object's global pointer and the properties' offsets in it
+
+- **1.0.0 `main`** `adc8fed8…`
+  - host [hle_fpslock.c:62](../../dm/host/hle_fpslock.c#L62): engine frame limit set to fps_target: UE3 GEngine MaxSmoothedFrameRate
+  - host [hle_fpslock.c:67](../../dm/host/hle_fpslock.c#L67): engine frame limit set to fps_target: UE3 dynamic resolution Min/MaxScreenPercentage
+  - host [hle_fpslock.c:68](../../dm/host/hle_fpslock.c#L68): engine frame limit set to fps_target: UE3 dynamic resolution FrameTimeBudget
+
 ### Batman: Arkham Knight
 
 [Batman: Arkham Knight](../../dm/games/0100ACD0163D0000/README.md), `0100ACD0163D0000`, [patches.py](../../dm/games/0100ACD0163D0000/patches.py).
@@ -284,7 +297,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 - **`build` → `engine`**, frame rate, blocked: one Frostbite game here, judgement: Frostbite's frame regulator at a fixed pointer. Engine code other Frostbite games ship (the simulation's own rate is already set by name)
 
 - **1.8d.310c `main`** `a48c0de3…`
-  - host [hle_fpslock.c:53](../../dm/host/hle_fpslock.c#L53): engine frame limit set to fps_target: FIFA frame regulator
+  - host [hle_fpslock.c:56](../../dm/host/hle_fpslock.c#L56): engine frame limit set to fps_target: FIFA frame regulator
 
 ### FINAL FANTASY TACTICS - The Ivalice Chronicles
 
@@ -341,7 +354,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 - **`build` → `engine`**, frame rate, blocked: one game on that engine here, judgement: Next Level Games' frame limiter target at a fixed address. The studio's engine, which its other games ship
 
 - **1.4.0 `main`** `79e5950f…`
-  - host [hle_fpslock.c:38](../../dm/host/hle_fpslock.c#L38): engine frame limit set to fps_target: NLG frame limiter target
+  - host [hle_fpslock.c:41](../../dm/host/hle_fpslock.c#L41): engine frame limit set to fps_target: NLG frame limiter target
 
 ### Mario + Rabbids® Sparks of Hope
 
@@ -368,7 +381,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 - **`build` → `engine`**, frame rate, blocked: one RE Engine game here, judgement: RE Engine's frame limit at a fixed pointer. Engine code other RE Engine games ship
 
 - **16.0.2 `main`** `c9a3dd77…`
-  - host [hle_fpslock.c:34](../../dm/host/hle_fpslock.c#L34): engine frame limit set to fps_target: RE Engine frame limit
+  - host [hle_fpslock.c:37](../../dm/host/hle_fpslock.c#L37): engine frame limit set to fps_target: RE Engine frame limit
 
 ### Need For Speed™ Hot Pursuit Remastered
 
@@ -379,11 +392,11 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 
 - **1.0.3 `main`** `799d1061…` ([patches.py:7](../../dm/games/010029B0118E8000/patches.py#L7))
   - cut `+0x4835a4`: frame limiter spin: b.gt main+0x483588 → nop (the host paces the frames)
-  - host [hle_fpslock.c:43](../../dm/host/hle_fpslock.c#L43): engine frame limit set to fps_target: Criterion 60 fps mode
-  - host [hle_fpslock.c:44](../../dm/host/hle_fpslock.c#L44): engine frame limit set to fps_target: Criterion frame ticks
-  - host [hle_fpslock.c:45](../../dm/host/hle_fpslock.c#L45): engine frame limit set to fps_target: Criterion frame ticks / 10
-  - host [hle_fpslock.c:46](../../dm/host/hle_fpslock.c#L46): engine frame limit set to fps_target: Criterion 2D game step
-  - host [hle_fpslock.c:47](../../dm/host/hle_fpslock.c#L47): engine frame limit set to fps_target: Criterion 3D game step
+  - host [hle_fpslock.c:46](../../dm/host/hle_fpslock.c#L46): engine frame limit set to fps_target: Criterion 60 fps mode
+  - host [hle_fpslock.c:47](../../dm/host/hle_fpslock.c#L47): engine frame limit set to fps_target: Criterion frame ticks
+  - host [hle_fpslock.c:48](../../dm/host/hle_fpslock.c#L48): engine frame limit set to fps_target: Criterion frame ticks / 10
+  - host [hle_fpslock.c:49](../../dm/host/hle_fpslock.c#L49): engine frame limit set to fps_target: Criterion 2D game step
+  - host [hle_fpslock.c:50](../../dm/host/hle_fpslock.c#L50): engine frame limit set to fps_target: Criterion 3D game step
 
 ### NieR:Automata The End of YoRHa Edition (010056B015FE8000)
 
@@ -402,7 +415,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
   - cut `+0x9bf4d4`: dynamic resolution: optimal frame cost 32.01 -> 16.005 ms at 60 fps (second load)
   - cut `+0x9bf4f8`: dynamic resolution: good frame cost 30 -> 15 ms at 60 fps
   - launcher capabilities: DYNAMIC_RESOLUTION
-  - host [hle_fpslock.c:69](../../dm/host/hle_fpslock.c#L69): frame interval and dynamic-resolution floor
+  - host [hle_fpslock.c:84](../../dm/host/hle_fpslock.c#L84): frame interval and dynamic-resolution floor
 
 ### NieR:Automata The End of YoRHa Edition (0100B8E016F76000)
 
@@ -421,7 +434,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
   - cut `+0x9c08e8`: dynamic resolution lower bound follows the selected preset
   - cut `+0x9c08f4`: dynamic resolution lower bound follows the selected preset
   - launcher capabilities: DYNAMIC_RESOLUTION
-  - host [hle_fpslock.c:70](../../dm/host/hle_fpslock.c#L70): frame interval and dynamic-resolution floor
+  - host [hle_fpslock.c:85](../../dm/host/hle_fpslock.c#L85): frame interval and dynamic-resolution floor
 
 ### Ori and the Will of the Wisps
 

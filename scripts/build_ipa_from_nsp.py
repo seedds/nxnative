@@ -21,7 +21,8 @@
 #   Or the folder may hold the game as one NUP container (a .nup file: base game, updates and DLC; scripts/pack_nup.py), or the .nup file may be given in its place: it needs no prod.keys, like a dump; a game with no profile is surveyed from the container's files (its newest version's code modules and RomFS file headers),
 #   and its RomFS images are written straight from it; the name, display version and icon come from the NACP and icon it carries, else as for a dump (its name record is a packer's label, not the game's), and --icon / ICON gives the app an icon when it carries none.
 #   The newest version in the folder is packed. A version the profile registers (with every version in its shader_versions in the folder) is built from the profile as it is; any other
-#   version (the base game alone, another update) from a profile derived from it in <build folder>/profile: the same settings, and the version's own shaders (derive_profile).
+#   version (the base game alone, another update), and any version of a profile that ships no shader tables (Batman: Arkham Asylum: the split makes them from the game's own files), from a
+#   profile derived from it in <build folder>/profile: the same settings, and the version's own shaders (derive_profile).
 # Every intermediate file is under the build folder, <id>_build/ in the NSP folder unless --work-dir / WORK_DIR names another: nsp/ (NSZ / XCZ files converted to NSP / XCI with nsz -D, kept for the next build; pip install nsz, or an nsz 5.0 or later executable on PATH), extract/ (the extracted game files, kept for the next build unless KEEP_EXTRACTED / --no-keep-extracted), aoc/ (one RomFS image per DLC index), tools/ (the Mac host for a run-time shader capture), patched_*/, shader/ (shader package and caches, kept so the next build is fast), logs/ (each step's full output), tmp/, ipa/. The finished IPA also goes beside the build folder by default (the NSP folder, without --work-dir).
 # The DLC, the rewrite, the shader split and the iOS (or Vulkan) shaders are reused when all their inputs are as at their last successful run (the game files, the tools, the profile, Xcode and the in-repo spirv-cross: fingerprint() keys beside their output);
 #   the iOS shaders' inputs are the shader package's content and the chain's own tools, so a split that runs again and writes the same package leaves them reused.
@@ -878,6 +879,7 @@ def survey(nsp_dir, app, fam, keys, repo, py, env):
     S = pg.shader_sources(mods['main']['imports'], F['glsl_src'], [m for m in sorted({*keep, *nro_add}, key=pg.load_order) if 'glslcCompile' in mods[m]['exports']], rom['mags']['SPIR-V'],
                           rom['exts'].get('.pak', 0) if 'Unreal' in F.get('main_markers', set()) else 0, rom['mags']['Trinity pack'], gl_names=F.get('gl_names', 0),
                           gl_src=F.get('gl_src', 0), gl_files=sum(rom['exts'].get(e, 0) for e in pg.GL_FILES), oodle_pkz=rom['mags']['PlatinumGames PKZ'],   # the manifest has no name tables: every PKZ counts
+                          oodle_ue3=rom['mags']['Unreal package'] if 'Unreal' in F['markers'] and not rom['exts'].get('.pak') else 0,   # nor chunk headers: every loose Unreal package counts as UE3 in Oodle chunks (Batman: Arkham Asylum)
                           nro_imports=frozenset(pg.romfs_nro_imports(ex / 'romfs_nro')))
     vulkan, gl = S['graphics'][0] == 'vulkan', S['graphics'][0] == 'gl'
     notes = []
@@ -895,6 +897,7 @@ def survey(nsp_dir, app, fam, keys, repo, py, env):
     if F['glslc']: notes.append(f'main has {F["glslc"]} GLSLC compiler output magics (0x19866891): shader_split.py takes those that are whole outputs (13 Sentinels and the KTGL games compile their shaders into main; Unity\'s player has 11 of its own)')
     if rom['mags']['Trinity pack']: notes.append('Trinity packs (Game Freak, arc/data.trpfs with its index data.trpfd): the shaders are BNSH inside Oodle Mermaid streams; shader_split.py decodes them with the game\'s own OodleLZ_Decompress in the Mac host, which dm/host/hle_oodle.c finds by the library\'s name string')
     elif rom['mags']['PlatinumGames PKZ']: notes.append('PlatinumGames PKZ archives (pkzl; Bayonetta 3): DAT archives inside, compressed per entry (OodleKraken, ZStandard or None); the shaders are shader objects (VSO / PSO / CSO …) in DATs, which shader_split.py reads (pkz_entries, pg_shader), Oodle Kraken through the game\'s own streaming decoder in the Mac host (dm/host/hle_oodle.c)')
+    elif rom['mags']['Unreal package'] and 'Unreal' in F['markers'] and not rom['exts'].get('.pak'): notes.append('Unreal Engine 3 packages (loose in the RomFS, no pak; Batman: Arkham Asylum): the shaders are in the shader caches inside the cooked packages and in GlobalShaderCache-*.bin, which shader_split.py reads (uepak.ue3_image, ue3_shaders), the packages\' Oodle chunks through the game\'s own OodleLZ_Decompress in the Mac host (dm/host/hle_oodle.c)')
     elif rom['mags']['RE Engine PAK']: notes.append('RE Engine PAK archives (KPKA; Capcom: Monster Hunter Rise, Ghost Trick, PRAGMATA): file names only as hashes, entries zstd / deflate, PRAGMATA\'s large ones in a block table; the shaders are SDF definitions inside them, which shader_split.py reads (kpka_jobs, sdf_shaders)')
     elif rom['mags']['MT Framework ARC']: notes.append('MT Framework ARC archives (Capcom, The Great Ace Attorney Chronicles): the shaders are in a shader package (SPK) inside one of them, which shader_split.py reads (mtarc_members, mtspk_shaders)')
     elif rom['mags']['Bezel Engine archive']: notes.append('NintendoWare Bezel Engine archives (.bea, magic SCNE; Big Brain Academy: Brain vs. Brain): every entry is a zstd frame, and the shaders are BNSH in their .bfsha entries, which shader_split.py reads (bea_members)')
@@ -1011,6 +1014,7 @@ def write_profile(pdir, app, f):
          '# ---- Versions ----', T.join(['build', f['version'], f['display']] + [f'{m}={F["mods"][m]["bid"]}' for m in mods]), f'package{T}{f["version"]}', f'shader_versions{T}{f["version"]}', '',
          '# ---- Files ----', *key('modules'), f'romfs_marker{T}{R["biggest"][1]}', f'zip_store{T}{":".join(store + [".metallib"])}', '',
          '# ---- Memory ----', *key('mem_reserve'), *key('mem_alias'), *key('mem_stack'), *key('app_pool'), *key('sys_resource'), '',
+         *(['# ---- Graphics ----', *key('tex_flush_upload'), *key('tex_dirty_upload'), ''] if 'tex_flush_upload' in G else []),
          '# ---- Shader split ----', *key('shader_groups', " ".join(groups) or "/=romfs"), f'shader_note{T}{name} shaders']
     (pdir / 'game.tsv').write_text('\n'.join(L) + '\n', encoding='utf-8')
     for n, text in EMPTY_TABLES.items(): (pdir / n).write_text(text)
@@ -3113,6 +3117,8 @@ def report_profile_status(g, reg, pkg_ver, derived, provisional, artifact='IPA',
             say(f'this {artifact} uses the registered {pkg_ver} ({disp}) builds and every fix for them, with derived shader tables ({derived})')
         elif g.title_id != reg.title_id and not other and pkg_ver in reg.builds():   # a registered build under another title ID (same_build): every fix applies
             say(f'this {artifact} is game profile {reg.id}\'s {pkg_ver} ({disp}) under title ID {g.title_id:016X}: its settings and every fix for its builds, with shaders split from this title\'s own files')
+        elif not reg.table('shader_map.tsv').exists() and not other and pkg_ver in reg.builds():   # a registered build of a profile that ships no shader tables (Batman: Arkham Asylum)
+            say(f'this {artifact} is game profile {reg.id}\'s {pkg_ver} ({disp}): its settings and every fix for its builds, with shaders split from the game\'s own files (the profile ships no shader tables)')
         else: say(f'[RED] this {artifact} uses {pkg_ver} ({disp}), which game profile {reg.id} was not brought up on ({registered_builds}): '
             'its settings, with this version\'s own shaders' + (f'; {", ".join(other)} {"is a build" if len(other) == 1 else "are builds"} the profile does not register, so the fixes made for '
             'the registered builds\' fixed addresses do not apply there; opt-in function patches apply only on a verified code match (see rewrite logs), and the game may not run as well' if other else '; every module is a registered build'))
@@ -3243,6 +3249,7 @@ def main(args=None):
             registered_builds = ", ".join(f'{v} {b["display"]}' for v, b in builds.items())
             derived = f'{pkg_ver} is not a version game profile {g.id} registers ({registered_builds})'
         elif not all(v in have for v in need): derived = f'the folder has no {", ".join(v for v in need if v not in have)}, whose files game profile {g.id}\'s shader tables were made from'
+        elif not g.table('shader_map.tsv').exists(): derived = f'game profile {g.id} ships no shader tables (they are made from the game files)'   # Batman: Arkham Asylum
         if alias and not derived: derived = f'title {app:016X} is not game profile {g.id}\'s title {g.title_id:016X}'
         if derived: say(f'{derived}: packing {pkg_ver} from a profile derived from it')
     versions = [pkg_ver] if derived else need + ([pkg_ver] if pkg_ver not in need else [])

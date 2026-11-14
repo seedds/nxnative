@@ -2284,9 +2284,11 @@ static void sleep_until_ns(uint64_t dl) {   // absolute time on the monotonic cl
 // Present is fixed at 60 Hz: the adaptive mechanism stepped down at frame 60 in 24/24 real-device logs and never came back up, so for this phase 60 fps is the hard floor.
 // DM_PRESENT_HZ=0 (uncapped frame rate) serves only as an explicit performance profiling switch: some of the game's UI logic counts frames (with the same save, uncapped gives
 // 4181 SaveIndicatorPanel entries and capped at 60 fps gives 0, which matches the ground truth), so uncapped is a semantically wrong way to run and must not be used as a criterion / cross-check / default. Unit tests set it directly with nvn_present_config
-static int g_hz = -1, g_display_mode;
+// DM_FPS_TARGET=unlimited (the launchers' Uncapped): presentation free-runs, as DM_PRESENT_HZ=0 does, and the host writes the engine's own limit out of the way (hle_fpslock.c
+// FPS_UNLIMITED). A value of its own: 0 still means the game's own limit
+static int g_hz = -1, g_display_mode, g_uncapped = -1;   // g_uncapped: DM_FPS_TARGET=unlimited, read once (-1: not yet); nvn_present_config resets it for the tests
 static _Atomic int g_game_itv = 1;   // when pacing by the game's interval, the interval the game currently sets (in game mode 2 = 30 fps; nvn_game_fps reports it to the graphics layer, which sets the display link from it)
-void nvn_present_config(int hz, int display_mode) { g_hz = hz; g_display_mode = display_mode; }
+void nvn_present_config(int hz, int display_mode) { g_hz = hz; g_display_mode = display_mode; g_uncapped = -1; }
 static _Atomic uint64_t g_itv2_since;   // start of the game's current run of even intervals >= 2 (now_ns; 0 = it is 1 or odd now)
 // The frame rate the game itself asks for: 30 in game mode when the present interval has been 2 (or another even interval) for a full second (the display link follows at 30 Hz, mtl_fps_target), otherwise 60; back to 60 at once when the interval returns to 1 or turns odd.
 // An odd interval has no whole number of 30 Hz ticks: interval 3 took (3 + 1) / 2 = 2 ticks (mtl_link_wait_tick), 66.7 ms a frame where the game asked for 50 (Donkey Kong Bananza, which steps 2 → 3 when its GPU
@@ -2331,7 +2333,8 @@ static int thermal_capped(void) {
 // A game may step by its target whatever the frames really take (Fire Emblem Fortune's Weave: 60.0 / target a frame), so a target of 120 at 70 frames a second is a game at 58% speed, and
 // on a 60 Hz screen at half speed: late frames step the hold up (nvn_fstep.h), the target follows the hold, and the game's step stays what the screen shows. The cap is 60 on a screen
 // below 120 Hz, while a movie plays (its pictures are paced for the Switch's 30 and 60) and under the thermal cap. No window (headless): nothing limits the rate but the pacer's clock.
-// A game with a frame step state page is out: its stubs hand the game whole vsyncs of 1/60 s
+// A game with a frame step state page is out, as for 120 fps: its stubs hand it whole vsyncs of 1/60 s, and hle_fpslock.c refuses uncapped there too
+static int fps_uncapped(void) { if (g_uncapped < 0) { const char *e = getenv("DM_FPS_TARGET"); g_uncapped = e && !strcmp(e, "unlimited") && !dm_fps_state; } return g_uncapped; }
 static int g_fps_high = -1;
 static _Atomic int g_high_cap = 60;
 static int fps_high(void) {
@@ -2350,7 +2353,9 @@ static void high_cap_tick(void) {
     static int win = -1, link_env = -1;
     if (win < 0) { win = mtl_display_hz() != 0; link_env = getenv("DM_PRESENT_LINK") != NULL; }
     int ok = !win || front_screen_max_fps() >= 120, cap = ok && !dm_movie_playing() && !thermal_capped() ? 120 : 60;
-    static int was; if (cap != was) { LOG("[nvn] 120 fps: cap %d → %d fps (%s)", was, cap, cap == 120 ? "the screen shows it" : !ok ? "the screen is below 120 Hz" : dm_movie_playing() ? "movie playing" : "thermal state serious"); was = cap; }
+    int unc = fps_uncapped();   // uncapped: the game's rate is its own, but the screen still shows the most it can, so the link goes to the screen's rate too (otherwise the picture and the HUD sit at 60 while the game runs faster)
+    static int was; if (cap != was) { if (unc) LOG("[nvn] uncapped: the display link is set to %d Hz (%s)", cap, cap == 120 ? "the screen shows it" : !ok ? "the screen is below 120 Hz" : dm_movie_playing() ? "movie playing" : "thermal state serious");
+        else LOG("[nvn] 120 fps: cap %d → %d fps (%s)", was, cap, cap == 120 ? "the screen shows it" : !ok ? "the screen is below 120 Hz" : dm_movie_playing() ? "movie playing" : "thermal state serious"); was = cap; }
     atomic_store(&g_high_cap, cap);
     if (!link_env) mtl_link_mode_set(ok ? 2 : 1);
 }
@@ -2399,14 +2404,22 @@ int nvn_fps_high_now(void) { return atomic_load(&g_fs_k) == 1 ? 120 : 60; }   //
 // The rate of vi::GetDisplayVsyncEvent (hle_sdk16.c, nvn_mtl.m mtl_link_wait_vsync): the Switch's 60 Hz, or 120 while 120 fps is on and its hold is one tick of 1/120 s. A game that
 // waits for the next vblank each frame is held to the event's rate whatever the present cap: Unity's NVN device waits until its vblank time (set from the event) passes
 // (The Rogue Prince of Persia: main+0x14f65f0), so at 120 every frame came two ticks late and the hold fell back to 60. The hold's trial at 120 must already have the event at 120
-int nvn_vsync_hz(void) { return fps_high() && atomic_load(&g_fs_k) == 1 && atomic_load(&g_high_cap) == 120 ? 120 : 60; }
-int nvn_game_fps(void) { int c = fps_present_cap(); if (c) return c == 30 && atomic_load(&g_fs_k) == 1 && fstep_on() ? 60 : c; uint64_t s = atomic_load(&g_itv2_since); return g_hz > 0 && !g_display_mode && s && now_ns() >= s + 1000000000ull ? 30 : 60; }
+int nvn_vsync_hz(void) { if (fps_uncapped()) return 0;   // uncapped: no display rate to hold the game to (hle_sdk16.c signals it as fast as it asks)
+    return fps_high() && atomic_load(&g_fs_k) == 1 && atomic_load(&g_high_cap) == 120 ? 120 : 60; }
+int nvn_game_fps(void) { if (fps_uncapped()) { int m = front_screen_max_fps(); return m >= 120 ? 120 : 60; }   // uncapped: the link takes the screen's rate, so frames up to it are seen
+    int c = fps_present_cap(); if (c) return c == 30 && atomic_load(&g_fs_k) == 1 && fstep_on() ? 60 : c; uint64_t s = atomic_load(&g_itv2_since); return g_hz > 0 && !g_display_mode && s && now_ns() >= s + 1000000000ull ? 30 : 60; }
 static void present_cfg(const win_t *o) {
     if (g_hz >= 0) return;
     // The interval mode comes from the game profile (present_interval, default game): whether frames follow the present interval the game sets depends on whether the game's logic counts frames, which differs per game. Environment variables override it, and can override the fixed 60 Hz.
     int scr = mtl_display_hz();
     const char *e = getenv("DM_PRESENT_HZ"); g_hz = e ? atoi(e) : fstep_hz();
-    if (!g_hz) LOG("[nvn] [WARNING] DM_PRESENT_HZ=0: frame rate uncapped, frame pacing unlike the device, UI logic may drift (for profiling only, not for verdicts / cross-checks)");
+    if (!e && fps_uncapped()) {
+        g_hz = 0;   // no pacer deadline: the game runs as fast as it can, and the display link shows the newest frame, dropping the rest
+        LOG("[nvn] frame rate uncapped (DM_FPS_TARGET=unlimited): presentation free-runs at no set rate, the display link shows the newest frame and drops the others%s",
+            dm_fps_state ? "; a frame step state page wins, at 60" : "");
+        if (dm_fps_state) g_hz = fstep_hz();
+    }
+    else if (!g_hz) LOG("[nvn] [WARNING] DM_PRESENT_HZ=0: frame rate uncapped, frame pacing unlike the device, UI logic may drift (for profiling only, not for verdicts / cross-checks)");
     // Cut (intentional deviation from the original game's behavior): with DM_PRESENT_INTERVAL=display the present interval set by the game is not followed and one frame is presented per display-link tick,
     // with a fixed hard floor of 60 fps; the logic stays at 25 ticks, and the client's frame-counted UI logic is unaffected -
     // with the same save and the same input, the UI message streams of the two modes match message by message. Proof (before character select): r9 game / display 60 ×3 / display 120 ×2, 6 groups in total, uicmp consistent
@@ -2423,7 +2436,7 @@ static int present_itv(const win_t *o) { int c = fps_present_cap(), k = atomic_l
 // wait, so the loading screen took about 5 minutes. Presentation keeps one frame per display tick (the display link drops the older frames waiting, nvn_mtl.m: there Ori made
 // 446 frames in 315 ticks, 146 dropped), and the acquire's ticket wait still holds a texture until the frame it showed is taken or dropped. A host frame cap (fps_target, the
 // frame step) or display mode decides the pacing itself and keeps it
-static int present_unpaced(const win_t *o) { present_cfg(o); return o->interval == 0 && !g_display_mode && !fps_present_cap(); }
+static int present_unpaced(const win_t *o) { present_cfg(o); return fps_uncapped() || (o->interval == 0 && !g_display_mode && !fps_present_cap()); }   // uncapped: no vsync wait either, the display link only takes the newest frame
 // The present interval the game reads back (nvnWindowGetPresentInterval): the one it set, except in display mode, where the window presents at the interval above (1, or the cap's)
 // whatever the game set, and answering the game's own let it pace for that interval itself. Luigi's Mansion 3 (30 fps on the Switch, interval 2) reads the newest frame-history entry
 // and the interval before each present (main+0xb7a4b8): while that frame is not shown it sleeps 16.67 ms per vsync of the interval, and once shown it waits until (interval - 1)
@@ -2585,7 +2598,7 @@ static const int *present_crop(const int win[4], int tw, int th, int lc[4]) {
 NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
     (void)q; win_t *o = (win_t *)w; o->presents++;
     dm_ue_cvar_tick();
-    if (fps_high()) high_cap_tick();
+    if (fps_high() || fps_uncapped()) high_cap_tick();
     if (dm_fps_state) __atomic_store_n((uint32_t *)(dm_fps_state + 4), (uint32_t)dm_movie_playing(), __ATOMIC_RELAXED);   // the stubs' copy of the movie state (hle.h)
     int c = fps_step_cap();
     if (dm_fps_state) { static int was; if (c != was) { LOG("[nvn] frame step cap %d → %d fps at present %llu%s", was, c, (unsigned long long)o->presents, c == 30 && was == 60 ? (dm_movie_playing() ? " (movie playing)" : thermal_capped() ? " (thermal state serious)" : "") : ""); was = c; } }

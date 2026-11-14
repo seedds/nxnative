@@ -10647,15 +10647,22 @@ enum { POOL_FRAME_BYTES = 32u << 20, POOL_REQ_BYTES = 128u << 20, POOL_SUB_MS = 
 static uint64_t g_walk_frame = ~0ull, g_walk_spent, g_walk_sub = ~0ull; static double g_walk_ms; static int g_walk_over;
 static uint64_t pool_tex_size(const tex_t *t) { return t->L.size ? t->L.size : 1; }
 static int pool_size_cmp(const void *a, const void *b) { uint64_t x = *(const uint64_t *)a, y = *(const uint64_t *)b; return x < y ? -1 : x > y; }
-static uint64_t pool_budget(void) { return g_dev.recommendedMaxWorkingSetSize / 20; }
+// DM_POOL_BUDGET_MB: make textures up front while the residency set is under this size. Without it, a twentieth of the working set against the device's allocated size, which counts each no-copy buffer in full, so a game with many pools has no room
+static uint64_t pool_budget_mb(void) { static int64_t v = -1; if (v < 0) { const char *e = getenv("DM_POOL_BUDGET_MB"); v = e ? atoll(e) : 0; if (v < 0) v = 0; } return (uint64_t)v; }
+static uint64_t pool_budget(void) { uint64_t mb = pool_budget_mb(); return mb ? mb << 20 : g_dev.recommendedMaxWorkingSetSize / 20; }
+static uint64_t pool_have(void) {
+    if (!pool_budget_mb()) return g_dev.currentAllocatedSize;
+    pthread_mutex_lock(&g_res_mu); uint64_t n = g_res.allocatedSize; pthread_mutex_unlock(&g_res_mu);
+    return n;
+}
 static uint64_t g_walk_req;
 // A render target no pass has written holds nothing to read, and a pass makes its texture when it renders. Made for a read, one that only registers next frame's target took three times the
 // textures and 17 GB allocated on Ocarina of Time: the game re-registers its IDs with transient targets, whose IDs a shader read as the previous texture
 static int pool_unwritten_target(const tex_t *t) { return (t->d.flags & NVN_TEXTURE_FLAGS_COMPRESSIBLE) && t->serial && !tex_get(t->serial) && !pkg_shared(t); }
-static int pool_budget_full(void) { return g_dev.currentAllocatedSize >= pool_budget(); }
+static int pool_budget_full(void) { return pool_have() >= pool_budget(); }
 static uint64_t pool_room(void) {   // what this frame may still make: its share of POOL_FRAME_BYTES, within the budget
     uint64_t f = atomic_load(&g_cur_frame); if (f != g_walk_frame) { g_walk_frame = f; g_walk_spent = 0; g_walk_req = 0; }
-    uint64_t want = pool_budget(), have = g_dev.currentAllocatedSize, room = have < want ? want - have : 0;
+    uint64_t want = pool_budget(), have = pool_have(), room = have < want ? want - have : 0;
     g_walk_over = have >= want;
     uint64_t left = g_walk_spent < POOL_FRAME_BYTES ? POOL_FRAME_BYTES - g_walk_spent : 0; if (room > left) room = left;
     return room;

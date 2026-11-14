@@ -644,20 +644,18 @@ def linkdata_index(path):
 
 def linkdata_jobs(path, rel, parts=64):
     """A LINKDATA archive's index (linkdata_index; Three Houses' DATA1.bin is 6.9 GB) has 32-byte entries {u64 offset, u64 inflated length, u64 stored length, u64 compressed}. The entries are split into
-    ranges of about equal stored size, one scan job each. → [(path, rel, (first entry, end entry)), …], or None when there is no index beside the file"""
+    ranges of about equal stored size, one scan job each. → [(path, rel, (first entry, end entry), index path), …], or None when there is no index beside the file"""
     idx = linkdata_index(path)
     if not idx: return None
     n = os.path.getsize(idx) // 32; step = os.path.getsize(path) / parts; jobs, lo = [], 0
     with open(idx, 'rb') as f: ents = [struct.unpack('<QQQQ', f.read(32)) for _ in range(n)]
     for i in range(1, n + 1):
-        if i == n or ents[i][0] >= (len(jobs) + 1) * step: jobs.append((path, rel, (lo, i))); lo = i
+        if i == n or ents[i][0] >= (len(jobs) + 1) * step: jobs.append((path, rel, (lo, i), idx)); lo = i
     return jobs
 
-def linkdata_shaders(path, rel, rng, out):
+def linkdata_shaders(path, rel, rng, index_path, out):
     from romfs import mmap
-    index = linkdata_index(path)
-    if not index: return red(f'{path}: the LINKDATA index its scan jobs were planned from is gone')
-    with open(index, 'rb') as f: idx = f.read()
+    with open(index_path, 'rb') as f: idx = f.read()
     with open(path, 'rb') as f, mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as d:
         for i in range(*rng):
             off, n, stored, comp = struct.unpack_from('<QQQQ', idx, i * 32)
@@ -3366,7 +3364,7 @@ def scan_file_in(args):
         bdt_shaders(path, rel, args[2], found)
         return rel, uniq_keys(found), var_pairs(found), trees
     if len(args) > 2:   # a range of LINKDATA entries (linkdata_jobs)
-        linkdata_shaders(path, rel, args[2], found)
+        linkdata_shaders(path, rel, args[2], args[3], found)
         return rel, uniq_keys(found), var_pairs(found), trees
     if head[:4] == BND2:   # a Criterion Bundle 2 (Need for Speed: Hot Pursuit Remastered's SHADERS.BNDL): GLSLC outputs in its zlib resources (bnd2_shaders)
         found += bnd2_shaders(open(path, 'rb').read(), '/' + rel)

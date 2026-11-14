@@ -121,6 +121,47 @@ class BugReport(unittest.TestCase):
         for folder in ('shader/cache/b-0123456789ab', 'shader/ios/b-abcdef012345', 'shader/b-deadbeef0001'):
             self.assertIn(folder, report)
 
+    def nsp_app(self, name, tid=TID):
+        """a Mac app the NSP script wrote into the NSP folder, stamped with DMCommit and DMChain"""
+        app = self.nsp / name; (app / 'Contents/Resources/msl/b-abcdef012345').mkdir(parents=True)
+        (app / 'Contents/Info.plist').write_bytes(plistlib.dumps({'DMTitleID': tid, 'CFBundleDisplayName': 'Beside Game', 'CFBundleShortVersionString': '9.9.9',
+                                                                  'CFBundleExecutable': 'FakeGame', 'DMCommit': 'abc1234', 'DMChain': 'abcdef012345'}))
+        (app / 'Contents/Resources/dm').mkdir(); (app / 'Contents/Resources/dm/env.txt').write_text('DM_BESIDE=1\n')
+        return app
+
+    def nsp_report(self, target=None):
+        with mock.patch.object(br, 'git_state', return_value='collector-commit'), mock.patch.object(br, 'chain_version', return_value='collector-chain'):
+            code, out = self.run_main(str(target or self.nsp))
+        self.assertEqual(code, 0)
+        return zipfile.ZipFile(out).read('report.md').decode(), self.names(out)
+
+    def test_nsp_folder_takes_its_one_app(self):
+        self.nsp_app('Fake Game.app')
+        for target in (self.nsp, self.nsp / f'{TID}_build'):
+            report, names = self.nsp_report(target)
+            self.assertIn('## nxnative commit\nabc1234 (recorded by Fake Game.app in the NSP folder)', report)
+            self.assertIn('## Shader chain version\nabcdef012345 (recorded by Fake Game.app in the NSP folder)', report)
+            self.assertIn('Contents/Resources/msl/b-abcdef012345, shader/b-deadbeef0001', report)
+            self.assertIn('Mac app in the NSP folder: Fake Game.app', report)
+            self.assertIn('logs/build/dmsh_build.log', names)   # the build's logs still go in
+            self.assertIn('## How it was built and run\nfill in', report)   # the app beside the build need not be what ran
+            for value in ('Beside Game', '9.9.9', 'DM_BESIDE'): self.assertNotIn(value, report)   # only its stamps are taken
+
+    def test_nsp_folder_never_guesses_between_apps(self):
+        self.nsp_app('Fake Game.app'); self.nsp_app('Fake Game-provisional.app')
+        report, _ = self.nsp_report()
+        self.assertIn('## nxnative commit\nunknown (not recorded by the build)', report)
+        self.assertIn('## Shader chain version\nunknown (not recorded by the build)', report)
+        self.assertIn('Mac app in the NSP folder: 2 with title ID', report)
+
+    def test_nsp_folder_app_of_another_title(self):
+        self.nsp_app('Other Game.app', tid='0100BBBB0000C000')
+        (self.nsp / 'Not An App.app').mkdir()   # no Info.plist
+        report, _ = self.nsp_report()
+        self.assertIn('## nxnative commit\nunknown (not recorded by the build)', report)
+        self.assertIn('## Shader chain version\nunknown (not recorded by the build)', report)
+        self.assertIn(f'Mac app in the NSP folder: none with title ID {TID}', report)
+
     def test_home_redacted(self):
         code, out = self.run_main(str(self.app))
         z = zipfile.ZipFile(out)

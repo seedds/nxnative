@@ -1010,6 +1010,14 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Check:** none without a device; the next Mario Kart 8 Deluxe run in Nextendo mode logs the answer.
 - **Found on:** Mario Kart 8 Deluxe 4.0.1 on an iPhone, 2026-11-14, with an account that plays Super Mario Bros. Wonder online. Which gate refuses it, if any, is not known yet.
 
+### A Nextendo build stops at "Unsupported signed patch policy"
+
+- **Symptom:** `scripts/build_ipa_from_nsp.py --nextendo` stops at `[5/10] Nextendo game patch` with `[RED] Nextendo game patch could not be verified, no game code was changed: Unsupported signed patch policy`, for a game whose patch did not change or that has no patch at all (Mario Kart 8 Deluxe).
+- **Cause:** `dm/tools/nextendo_patches.py` `validate_catalog` refused the whole signed catalog when any one patch was in a format it does not apply. Nextendo's catalog revision 10 added a Splatoon 3 patch with `patch_version` 2, which stopped every build.
+- **Fix:** `supported` names the one format the adapter applies (main module, `patch_version` 1, `nso_header_included`, `npln.ips32.v1`). `validate_catalog` still checks the signature, every patch's identity and `enabled`, and the full IPS32 records and guards of each supported patch, and leaves patches in another format alone. `apply_image` refuses a build whose own enabled patch is in another format (`Unsupported signed patch policy for this game build`), so a game is never built without the patch it needs.
+- **Check:** `PYTHONUTF8=1 python -m unittest dm.tools.tests.test_nextendo_patches` (an unknown format is left alone for another game and refused for its own).
+- **Found on:** the controls-12 builds of Mario Kart 8 Deluxe and Super Mario Bros. Wonder, 2026-11-15; catalog revision 10 had 22 patches, one of them `patch_version` 2.
+
 ### Nextendo's account routes take different tokens
 
 - **Symptom:** in Nextendo mode the log has `[RED] nextendo: /api/me answered HTTP 401` (and `/api/friends answered HTTP 401`) while the game's own online login works. Or, after the first fix below, `[RED] nextendo: /api/profile answered HTTP 401`, `/api/history answered HTTP 401` and `online status could not be asked: Session invalide ou expirée.`, and Nextendo's site keeps showing no play time.

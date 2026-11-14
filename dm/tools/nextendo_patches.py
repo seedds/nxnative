@@ -93,6 +93,12 @@ def validate_games(document):
     return document
 
 
+def supported(patch):
+    # The one patch format this adapter applies. Nextendo adds others for other games (revision 10 brought a Splatoon 3 patch with
+    # patch_version 2): validate_catalog leaves those alone, and apply_image refuses a build whose own patch is one of them
+    return patch.get('module') == 'main' and patch.get('patch_version') == 1 and patch.get('offset_basis') == 'nso_header_included' and patch.get('required_capabilities') == ['npln.ips32.v1']
+
+
 def validate_catalog(document):
     patches = document.get('patches')
     if type(document.get('revision')) is not int or not isinstance(patches, list) or len(patches) > 4096:
@@ -107,9 +113,8 @@ def validate_catalog(document):
         identity = (title.lower(), build.lower(), patch.get('id'))
         if identity in identities: raise ValueError('Duplicate signed patch identity')
         identities.add(identity)
-        if patch.get('module') != 'main' or patch.get('patch_version') != 1 or patch.get('offset_basis') != 'nso_header_included' or patch.get('required_capabilities') != ['npln.ips32.v1'] or type(patch.get('enabled')) is not bool:
-            raise ValueError('Unsupported signed patch policy')
-        records(patch)
+        if type(patch.get('enabled')) is not bool: raise ValueError('Unsupported signed patch policy')
+        if supported(patch): records(patch)
     return document
 
 
@@ -153,6 +158,7 @@ def apply_image(image, title_id, build_id, document):
     validate_catalog(document)
     matches = [p for p in document['patches'] if p['enabled'] and p['title_id'].lower() == title_id.lower() and p['build_id'].lower() == build_id.lower()]
     if not matches: return None, []
+    if not all(supported(p) for p in matches): raise ValueError('Unsupported signed patch policy for this game build')
     if len(image) > MAX_IMAGE: raise ValueError('NSO image exceeds patch bounds')
     changed = bytearray(image); all_positions = set()
     for patch in matches:

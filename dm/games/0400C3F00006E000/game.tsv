@@ -14,11 +14,12 @@ pad_layout	full
 
 # ---- Versions ----
 build	v0	v0	main=9e244438c3d8ef1c703a6a85ef99c4f0	subsdk0=d39a7a3d44530bb61b35690e5b0383d5	sdk=90ebba182862b9ecdc21fcb87b999012
+build	v917504	1.8.0	main=d00e4f399e411d0613aa8d26b1c02fef	subsdk0=746302f49f095cfca3d2188423c2bd77	subsdk1=8dec9c0b1bed821364e77b10a07b9a28	sdk=7a68b13d88183767fb9c7babffe89f3d
 package	v0
 shader_versions	v0
 
 # ---- Files ----
-# The base game's subsdk0 is a Mono runtime (nn::ecli); 1.8.0's subsdk0 is the movie player and its subsdk1 a C library (build IDs from pull request #1116, not checked here).
+# The base game's subsdk0 is a Mono runtime (nn::ecli); 1.8.0's subsdk0 is the movie player and its subsdk1 a C library (1.8.0's build IDs read from the files of its NUP, 2026-11-13; the shader tables below are the base game's, so 1.8.0 is packed from a profile derived from this one for its own shaders).
 # Each build row names its own modules, and the host loads those of main's build (main.c profile_modules)
 modules	main subsdk0 subsdk1 sdk
 romfs_marker	Movie/StaffRoll_00.webm

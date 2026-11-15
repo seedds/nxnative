@@ -41,7 +41,7 @@ int main(void) { @autoreleasepool {
     p_dispatch one = {.x=1, .y=1, .z=1};
     size_t used = 0;
     #define EMIT(OP, X) do { size_t z = (8 + sizeof(X) + 7) & ~7ull; op_hdr h = {OP, (uint32_t)z}; memcpy(commands + used, &h, 8); memcpy(commands + used + 8, &(X), sizeof(X)); used += z; } while (0)
-    #define RUN() do { op_hdr e_ = {OP_END, 8}; memcpy(commands + used, &e_, 8); uint64_t h_ = (uint64_t)commands; mtl_sub_index(&h_, 1); mtl_exec(commands); used = 0; } while (0)
+    #define RUN() do { op_hdr e_ = {OP_END, 8}; memcpy(commands + used, &e_, 8); mtl_exec(commands); used = 0; } while (0)
 
     // 1. A chain on one word, each dispatch behind the game's barrier: the sequential result in both modes
     { word[0] = 5; uint32_t want = 5; for (int i = 0; i < N; i++) want = want * 3u + 1u;

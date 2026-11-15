@@ -784,7 +784,7 @@ class App(unittest.TestCase):
         msls = sum(p.stat().st_size for pat in pack_app.MSL_FILES for p in Path(a.msl).glob(pat) if p.is_file() and p.name != '_b_build.json')
         pso = sum(p.stat().st_size for pat in pack_app.PSO_FILES for p in Path(a.pso).glob(pat))
         with mock.patch.object(pack_app, 'can_clone', lambda *a: False), mock.patch.object(pack_app, 'tree_bytes', lambda d: 0), \
-             mock.patch.object(shutil, 'disk_usage', lambda p: types.SimpleNamespace(free=(1 << 30) + msls + pso - 1)), contextlib.redirect_stdout(io.StringIO()) as o:
+             mock.patch.object(shutil, 'disk_usage', lambda p: types.SimpleNamespace(free=(1 << 30) + msls + pso - 1)), mock.patch.object(pack_app.vol_space, 'important_bytes', lambda p: None), contextlib.redirect_stdout(io.StringIO()) as o:
             with self.assertRaisesRegex(SystemExit, 'the app needs'): pack_app.pack(a)
         self.assertEqual(o.getvalue(), ''); self.assertFalse(Path(a.out).exists())
 
@@ -796,7 +796,7 @@ class App(unittest.TestCase):
         lists = sum(p.stat().st_size for d, pats in (('patched', pack_app.MODULE_FILES), ('msl', pack_app.MSL_FILES), ('pso', pack_app.PSO_FILES))
                     for pat in pats for p in (self.tmp / d).glob(pat) if p.is_file() and p.name != '_b_build.json')
         with mock.patch.object(pack_app, 'can_clone', can_clone), mock.patch.object(pack_app, 'tree_bytes', tree_bytes), \
-             mock.patch.object(shutil, 'disk_usage', lambda p: types.SimpleNamespace(free=(1 << 30) + lists - 1)), contextlib.redirect_stdout(io.StringIO()):
+             mock.patch.object(shutil, 'disk_usage', lambda p: types.SimpleNamespace(free=(1 << 30) + lists - 1)), mock.patch.object(pack_app.vol_space, 'important_bytes', lambda p: None), contextlib.redirect_stdout(io.StringIO()):
             with self.assertRaisesRegex(SystemExit, 'the app needs'): pack_app.pack(a)
         self.assertEqual(len(probed), 5); self.assertEqual(counted, [(self.tmp / 'aoc').resolve()])
 
@@ -938,6 +938,24 @@ class Script(unittest.TestCase):
         self.assertNotIn('DM_PSO_PREBUILD_DEPTH', self.tool_env or {})
         (tmp / 'profile/pso_manifest.tsv').write_text('M\t-\t00cc\n')   # other rows (a mesh pipeline alone is enough): again
         self.tool_env = None; self.pack_cmd('nvn', work=tmp, prebake=True); self.assertIsNotNone(self.tool_env)
+
+    def test_prebake_shader_inputs_in_folder_and_image(self):
+        # A profile input (dual_want.tsv) can change the functions without changing the chain or shader keys.
+        for packed in (False, True):
+            with self.subTest(packed=packed):
+                tmp = self.prebake_work(); lib = tmp / 'shader/cache/b-0123456789ab'
+                (lib / 'inputs.tsv').write_text('game\tfixture\ninputs\tbefore\n')
+                if packed: self.assertTrue(nsp.shader_lib.pack(lib, say=lambda _: None))
+                self.pack_cmd('nvn', work=tmp, prebake=True)
+                self.assertIsNotNone(self.tool_env)
+                self.tool_env = None
+                self.pack_cmd('nvn', work=tmp, prebake=True)
+                self.assertIsNone(self.tool_env)   # unchanged inputs reuse the captured pipelines
+                if packed: nsp.shader_lib.expand(lib)
+                (lib / 'inputs.tsv').write_text('game\tfixture\ninputs\tafter\n')
+                if packed: self.assertTrue(nsp.shader_lib.pack(lib, say=lambda _: None))
+                self.pack_cmd('nvn', work=tmp, prebake=True)
+                self.assertIsNotNone(self.tool_env)   # new shader functions need new pipelines in either storage form
 
     def test_prebake_other_gpus(self):   # --gpu naming more GPUs: the tool's pipelines scripts become each of their prewarm archives, through metal-tt
         tmp = self.prebake_work()

@@ -1,0 +1,8 @@
+# Fresh title, before starting avatar setup; exercises the adapted allocator and 3D title.
+save	new
+secs	45
+quick	45
+reach	1000@44
+window	32	10
+shots	40,43
+hang	20

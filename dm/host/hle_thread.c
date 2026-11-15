@@ -1377,6 +1377,13 @@ uint32_t hle_new_event(uint32_t *write_end) {   // A new kernel event, as svcCre
     g_lock(); uint32_t r = h_new(O_EVENT_R, e); if (write_end) *write_end = h_new(O_EVENT_W, e); g_unlock();
     return r;
 }
+int hle_signal_event_handle(uint32_t write_end) {   // Signal a host-made kernel event (hle_new_event) by its write end, from any thread; 0 once that end is closed
+    g_lock();
+    event_t *e = h_get(write_end, O_EVENT_W);
+    if (e) { e->signaled = 1; wake_sync_waiters(e); }
+    g_unlock();
+    return e != NULL;
+}
 uint64_t hle_system_event_binding(void *ev) {
     uint64_t id = 0;
     pthread_mutex_lock(&g_se_lock);

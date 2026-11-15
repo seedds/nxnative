@@ -939,6 +939,24 @@ class Script(unittest.TestCase):
         (tmp / 'profile/pso_manifest.tsv').write_text('M\t-\t00cc\n')   # other rows (a mesh pipeline alone is enough): again
         self.tool_env = None; self.pack_cmd('nvn', work=tmp, prebake=True); self.assertIsNotNone(self.tool_env)
 
+    def test_prebake_shader_inputs_in_folder_and_image(self):
+        # A profile input (dual_want.tsv) can change the functions without changing the chain or shader keys.
+        for packed in (False, True):
+            with self.subTest(packed=packed):
+                tmp = self.prebake_work(); lib = tmp / 'shader/cache/b-0123456789ab'
+                (lib / 'inputs.tsv').write_text('game\tfixture\ninputs\tbefore\n')
+                if packed: self.assertTrue(nsp.shader_lib.pack(lib, say=lambda _: None))
+                self.pack_cmd('nvn', work=tmp, prebake=True)
+                self.assertIsNotNone(self.tool_env)
+                self.tool_env = None
+                self.pack_cmd('nvn', work=tmp, prebake=True)
+                self.assertIsNone(self.tool_env)   # unchanged inputs reuse the captured pipelines
+                if packed: nsp.shader_lib.expand(lib)
+                (lib / 'inputs.tsv').write_text('game\tfixture\ninputs\tafter\n')
+                if packed: self.assertTrue(nsp.shader_lib.pack(lib, say=lambda _: None))
+                self.pack_cmd('nvn', work=tmp, prebake=True)
+                self.assertIsNotNone(self.tool_env)   # new shader functions need new pipelines in either storage form
+
     def test_prebake_other_gpus(self):   # --gpu naming more GPUs: the tool's pipelines scripts become each of their prewarm archives, through metal-tt
         tmp = self.prebake_work()
         o, _ = self.pack_cmd('nvn', work=tmp, prebake=True, gpus='g14s,g17p', lib_hashes=self.lib_hashes)
@@ -1122,7 +1140,7 @@ class SeenShaders(unittest.TestCase):   # --seen-shaders: the keys, the partial 
             self.assertEqual(len(self.ran), 1, self.ran)   # own_compilers.py alone
             cmd, env = self.ran[0]
             self.assertEqual(cmd[2:], [str(self.sh / 'pkg'), str(self.sh / 'partial'), a, b])
-            self.assertEqual((env['DMSH_CAS'], env['DMSH_TARGETS']), (str(self.sh / 'cache/cas.db'), 'mac')); self.assertNotIn('IOSOUT', env)
+            self.assertEqual((env['DMSH_CAS'], env['DMSH_TARGETS']), (str(self.sh / 'cache'), 'mac')); self.assertNotIn('IOSOUT', env)
             self.assertFalse(old.exists()); self.assertTrue((self.sh / f'partial/b-{self.CHAIN}/k_b.metallib').is_file())
             self.assertFalse((self.sh / f'partial/b-{self.CHAIN}/inputs.tsv').exists()); self.assertFalse((self.tmp / 'c1_full.tsv').exists())   # no stamp: unlisted shaders are not proven safe
             self.assertEqual(self.build([a, b]), self.sh / 'partial'); self.assertEqual(self.ran, [])   # reused

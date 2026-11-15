@@ -96,7 +96,8 @@ int nvn_refl_from_json(NSDictionary *j, nvn_refl *o, char *err, int errlen) {
             else if ([k isEqualToString:@DMSH_KIND_TBUF]) { r->kind = NVN_RB_TBUF; uint8_t tt; dummy_kind(b[@"msl_type"], &tt, &r->dpf); }
             else if ([k isEqualToString:@DMSH_KIND_IMG_UBO]) { r->kind = NVN_RB_IMGU; dummy_kind(b[@"msl_type"], &r->dtt, &r->dpf); r->off = (uint16_t)[b[@"off"] intValue]; o->bindless = 1;
                 r->rw = [ty isKindOfClass:[NSString class]] && ([ty containsString:@"access::write"] || [ty containsString:@"access::read_write"]); r->atom = [b[@"atomic"] boolValue] ? ([ty isKindOfClass:[NSString class]] && [ty containsString:@"<ulong"] ? 2 : 1) : 0; }   // 2: 64-bit atomics (texture2d<ulong>)
-            else if ([k isEqualToString:@DMSH_KIND_TBUF_UBO]) { r->kind = NVN_RB_TBUFU; uint8_t tt; dummy_kind(b[@"msl_type"], &tt, &r->dpf); r->off = (uint16_t)[b[@"off"] intValue]; o->bindless = 1; }
+            else if ([k isEqualToString:@DMSH_KIND_TBUF_UBO]) { r->kind = NVN_RB_TBUFU; uint8_t tt; dummy_kind(b[@"msl_type"], &tt, &r->dpf); r->off = (uint16_t)[b[@"off"] intValue]; o->bindless = 1;
+                if (b[@"soff"]) { r->soff = (uint16_t)([b[@"soff"] intValue] + 1); r->sreg = (uint8_t)[b[@"sreg"] intValue]; } }
             else if ([k isEqualToString:@DMSH_KIND_SBUF]) { r->kind = NVN_RB_SBUFP; r->rw = sbuf_rw(b); }
             else if ([k isEqualToString:@DMSH_KIND_UBO_PTR]) r->kind = NVN_RB_UBOP;
             else if ([k isEqualToString:@DMSH_KIND_SBUF_UBO]) { r->kind = NVN_RB_SBUFU; r->rw = sbuf_rw(b); r->off = (uint16_t)[b[@"off"] intValue]; }

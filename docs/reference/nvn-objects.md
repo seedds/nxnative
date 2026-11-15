@@ -944,6 +944,13 @@ Games read this count as a position in their own command memory and size their h
 
 ## NVN entry points
 
+### Sampler builder queries leave renderer state unread
+
+- **Symptom:** `[RED] NVN unimplemented function called: nvnSamplerBuilderGetLodBias`, `nvnSamplerBuilderGetCompare`, `nvnSamplerBuilderGetBorderColor`, `nvnSamplerBuilderGetMaxAnisotropy` or `nvnSamplerBuilderGetReductionFilter` during renderer setup.
+- **Cause:** the setters stored these values, but the builder getters still reached the generic unimplemented handler. Output parameters were left untouched, and scalar results did not follow the getters' float or enum return signatures.
+- **Fix:** the five getters read the builder's current sampler parameters through their typed NVN entry points, including the values restored by `SetDefaults`.
+- **Found on:** [Digimon Story Time Stranger, issue #872](https://github.com/seedds/nxnative/issues/872), whose reporter identified these calls before an early crash. No repository profile exists yet. Archive extraction, rendering and the reported iPhone freeze are separate unresolved parts of that report; these getters alone do not establish that the game runs.
+
 ### Integer sampler border colours
 
 - **Symptom:** `[RED] NVN unimplemented function called: nvnSamplerBuilderSetBorderColorui` during renderer initialization.
@@ -956,7 +963,7 @@ Games read this count as a position in their own command memory and size their h
 
 - **Symptom:** `[RED] sampler ID 4096 not registered` (or another ID past the sampler pool), once, from the first frames on.
 - **Cause:** NVN's texture, separate texture and sampler handles are 64-bit, but the driver writes each bound one into the c2 handle table as a 32-bit word (texture ID in bits 0-19, sampler ID in bits 20-31), so the GPU never sees the upper half. The host kept the whole 64 bits of the handles of `nvnCommandBufferBindTextures`, `BindSeparateTextures`, `BindSeparateSamplers` and `BindImages`, and took the sampler ID as the handle shifted right by 20. EA SPORTS FC 27 binds separate textures with bit 32 set (`0x1000001d1`, texture 0x1d1): a shader that takes its sampler from that combined word got ID 4096, where the GPU reads sampler 0. The single `nvnCommandBufferBindTexture` record already read its handle as 32 bits.
-- **Fix:** `bind_handles` (`hle_nvn.c`) keeps the low 32 bits of each handle before it moves the IDs to the part of the host's table of the pool the command buffer bound (which may then pass 12 bits).
+- **Fix:** `bind_handles` (`hle_nvn.c`) keeps the low 32 bits of each handle. Host-table IDs are resolved only against [the execution pools](shaders.md#descriptor-handles-use-the-execution-pools) when read (a host sampler ID may then pass 12 bits).
 - **Found on:** [EA SPORTS FC 27](../../dm/games/0100C49025D3E000/README.md), at the title and in the menus.
 
 ### Version and capability checks that fail quietly

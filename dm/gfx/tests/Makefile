@@ -31,8 +31,8 @@ MTL_T_SRC=../nvn/hle_nvn.c ../../host/crash.c ../../host/hle_bigstack.c t_host_s
 # target: ./t_x by default, with the environment its RUN_ENV gives it (check_t_x: RUN_ENV = MTL_DEBUG_LAYER=1, beside its build rule), or a check_t_x recipe of its own when it
 # runs several ways. A new test needs its source and its build rule; no list to add it to. NOT_RUN: helpers linked into other tests (t_host_stubs, t_present_rescue_focus, t_gpu_lost_front),
 # a fixture test_image_atomic_bounds.py builds itself (t_atomic_return), t_geometry_primitive_id (the GPU half of test_dmsh_geometry.py, which gives it the directory of
-# its translated fixtures), and t_gpuprof, which CI's CPU subset runs (.github/workflows/tests.yml)
-NOT_RUN = t_host_stubs t_present_rescue_focus t_gpu_lost_front t_atomic_return t_geometry_primitive_id t_gpuprof
+# its translated fixtures), t_gpuprof, which CI's CPU subset runs (.github/workflows/tests.yml), and t_gpu_fault_kinds, whose cases fault the GPU on purpose
+NOT_RUN = t_host_stubs t_present_rescue_focus t_gpu_lost_front t_atomic_return t_geometry_primitive_id t_gpuprof t_gpu_fault_kinds
 RUN_TESTS = $(filter-out $(NOT_RUN),$(basename $(sort $(wildcard t_*.c t_*.m))))
 check_t_%: t_%
 	$(RUN_ENV) ./$<
@@ -180,6 +180,9 @@ t_cbs_fault: t_cbs_fault.m $(MTL_T_DEP)
 .PHONY: check_t_cbs_fault
 check_t_cbs_fault: t_cbs_fault
 	./t_cbs_fault
+# What macOS records for each kind of bad GPU read (issue #1289); faults the GPU on purpose, so it is run by hand, not in the run list
+t_gpu_fault_kinds: t_gpu_fault_kinds.m
+	clang -O1 -g -Wall -fobjc-arc -o $@ t_gpu_fault_kinds.m -framework Metal -framework Foundation
 t_bc_alias: t_bc_alias.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_bc_alias.m $(MTL_T_SRC) $(FW)
 check_t_bc_alias: RUN_ENV = MTL_DEBUG_LAYER=1
@@ -575,6 +578,12 @@ check_t_pso_msaa: t_pso_msaa
 t_buffer_image_bias: t_buffer_image_bias.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_buffer_image_bias.m $(MTL_T_SRC) $(FW)
 check_t_buffer_image_bias: RUN_ENV = MTL_DEBUG_LAYER=1
+t_tbuf_handle: t_tbuf_handle.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_tbuf_handle.m $(MTL_T_SRC) $(FW)
+check_t_tbuf_handle: RUN_ENV = MTL_DEBUG_LAYER=1
+t_descriptor_pools: t_descriptor_pools.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_descriptor_pools.m $(filter-out ../nvn/hle_nvn.c,$(MTL_T_SRC)) $(FW)
+check_t_descriptor_pools: RUN_ENV = MTL_DEBUG_LAYER=1
 t_image_usage: t_image_usage.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_image_usage.m $(MTL_T_SRC) $(FW)
 check_t_image_usage: RUN_ENV = MTL_DEBUG_LAYER=1
@@ -588,6 +597,9 @@ t_stencil_view: t_stencil_view.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_stencil_view.m $(MTL_T_SRC) $(FW)
 check_t_stencil_view: RUN_ENV = MTL_DEBUG_LAYER=1
 # The Vulkan layer (#included) over the whole NVN layer, whose device and present path it uses
+t_vk_fan: t_vk_fan.m ../vk/hle_vk.m $(MTL_T_DEP)
+	clang $(CFLAGS) -I../../third_party/vulkan-headers/include -fobjc-arc -o $@ t_vk_fan.m $(MTL_T_SRC) ../nvn/nvn_mtl.m $(FW)
+check_t_vk_fan: RUN_ENV = MTL_DEBUG_LAYER=1
 t_vk_desc: t_vk_desc.m ../vk/hle_vk.m $(MTL_T_DEP)
 	clang $(CFLAGS) -I../../third_party/vulkan-headers/include -fobjc-arc -o $@ t_vk_desc.m $(MTL_T_SRC) ../nvn/nvn_mtl.m $(FW)
 t_gl_imports: t_gl_imports.m ../gl/hle_gl.m ../../host/hle.c ../../host/hle.h $(MTL_T_DEP)

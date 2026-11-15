@@ -154,6 +154,7 @@ dm/host/dualsense_mic*	hle:*InputStream*	The DualSense SetState report and USB a
 dm/host/save_sync.*	hle:*fs*	cloud saves: the first save mount and every Commit (hle_fs.c)
 dm/host/Makefile	*:*	the shared host build
 dm/host/hle_thread.c	svc:*	threads and synchronization
+dm/host/thr_census.h	svc:*	threads and synchronization: the main thread waits and host threads lines (hle_thread.c)
 dm/host/hle_svc.c	svc:*	SVCs
 dm/host/hle_stack_alloc.c	svc:*	deterministic stack-region placement
 dm/host/thread.c	svc:*	threads

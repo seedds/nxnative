@@ -306,6 +306,19 @@ The yield back-off (`DM_YIELD_BACKOFF`) and the rewriter's spin waits (`patch_ns
 - **Found on:** [Fire Emblem: Three Houses](../../dm/games/010055D009F78000/README.md#frame-rate), whose frame limiter (`main+0x5be430`) had a per-build cut that made it sleep; the cut is removed. On the Mac in a window, 100 s from the boot to the title: without the cut, the old back-off 59.4–59.5 fps, frame p50 16.80–16.85 ms, 0.28–0.79 W of CPU; backing off from the start alone 59.4–59.5 fps, 0.19–0.35 W; with the predicted sleep 59.8–60.0 fps, 16.67–16.81 ms in most windows (up to 17.06), 0.09–0.16 W, about 1,330 wakeups a second, 294–300 of every 300 waits slept to their predicted end. With the cut it was 59.9 fps, 16.68 ms, 0.11–0.49 W.
 - **Check:** `make -C dm/host/tests GAME=<id> build/t_clockwait && dm/host/tests/build/t_clockwait`, on a test clock that only sleeps and yields advance: a yield loop that reads the clock backs off from its start and one that does not after 2 ms; a limiter at a steady period sleeps to its predicted end and ends within a few yields of its deadline; a longer period never makes a wait later than the back-off's own lateness; a shorter period costs two late waits, then the waits end on time again.
 
+### Frames that wait with every frame thread idle
+
+- **Symptom:** after a load an iPhone run falls to 12-19 fps and stays there until the game is closed. Per frame the guest threads, the acquire thread and the replay and encode threads do the same CPU work as at 29 fps, at the same or higher clocks, so each of them is idle for more than half the frame. The power line shows 60-73% of the CPU on performance cores and 2.4 times the energy per frame, and its CPU exceeds the guest threads' (the threads line) plus the frame threads' (the thread policy line) by 0.6-0.9 of a core.
+- **Cause:** open. Three causes are ruled out:
+  - The clock and the time-constraint declaration: the stuck frame threads run at 1.8-1.9 GHz against 1.6 in good windows, and declare at least the CPU they use. A low "mean clock" in such a window shows a thread that is idle, not slow.
+  - The frame step's display link: a stuck run stays on the 60 Hz late-frame link because no 8 s pass without a late frame, while good runs hold 29 fps on that same link.
+  - A missing frame work interval: no iOS API creates one. `os_workgroup_interval_start` is public, but the only interval workgroups an app can get are Core Audio's, and `os_workgroup_create_with_port` is unavailable on iOS (iPhoneOS 27.2 SDK).
+- **Fix:** none yet. Two lines, every 300 frames (`dm/host/thr_census.h`), name what such a frame waits for:
+  - `main thread waits up to frame N`: per frame, the guest main thread's time and count in each kind of blocking SVC (address waits, WaitSynchronization, ArbitrateLock, condition variables, sleeps, yields, same-core handoffs), set against the mean frame, with the two addresses it waited on longest.
+  - `host threads up to frame N`: the five busiest threads of the process that are not guest threads, with the CPU of all of them. Each comes by name (an unnamed one by its thread ID, with whether a GCD worker runs it and its priority), with the kernel's share of its CPU.
+- **Check:** in a stuck window, if the main thread's address waits cover most of the frame, the top address is the game's sync object, and a thread dump (`DM_CTL dump`) shows which thread should have signalled it. If a host thread holds the extra CPU, look there next. A thread with a large kernel share is one making system calls in a loop.
+- **Found on:** [Ocarina of Time](../../dm/games/0400486024DEC000/README.md#frame-rate) on an iPhone 17: 8 of 24 overnight runs (2026-11-15), on all three builds tested.
+
 ## Events and notifications
 
 ### Synchronization waits retain objects and completed notifications

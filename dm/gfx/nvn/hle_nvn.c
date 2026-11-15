@@ -2160,6 +2160,8 @@ __attribute__((weak)) uint32_t dm_guest_work_qos(unsigned *count) { if (count) *
 int mtl_probe_ramp_on(void);   // nvn_mtl.m: DM_FSTEP_PROBE_RAMP (default on; ab with DM_AB)
 __attribute__((weak)) void dm_yield_top(char *out, size_t n) { if (n) snprintf(out, n, "-"); }   // hle_thread.c: the threads that yielded most since the last call; none in graphics unit tests
 __attribute__((weak)) void dm_thread_cpu(char *out, size_t n, double secs) { (void)secs; if (n) snprintf(out, n, "-"); }   // hle_thread.c: guest-thread CPU by Switch priority band since the last call
+__attribute__((weak)) void dm_host_thread_cpu(char *out, size_t n, double secs) { (void)secs; if (n) snprintf(out, n, "-"); }   // hle_thread.c: the busiest threads that are not guest threads (thr_census.h)
+__attribute__((weak)) void dm_main_wait_line(char *out, size_t n, double frames, double frame_ms) { (void)frames; (void)frame_ms; if (n) snprintf(out, n, "-"); }   // hle_thread.c: the guest main thread's waits per frame
 void mtl_res_stats(char *out, size_t n);
 void mtl_barrier_stats(uint64_t *skip, uint64_t *full);
 extern uint32_t mtl_present_qos(void);
@@ -2598,8 +2600,12 @@ static void power_line(uint64_t frame) {
             frame, (unsigned long long)(gn - pgn), (gb - pgb) / 1048576.0, (gn - pgn) / nf, (gb - pgb) / 1048576.0 / nf);
         pgn = gn; pgb = gb;
         char tc[400]; dm_thread_cpu(tc, sizeof tc, s);
-        LOG("[nvn] threads up to frame %llu: CPU %s", frame, tc); }
-    else { char yt[192], rs[400], tc[400]; dm_yield_top(yt, sizeof yt); mtl_res_stats(rs, sizeof rs); dm_thread_cpu(tc, sizeof tc, 1); }   // the first call only takes the baselines
+        LOG("[nvn] threads up to frame %llu: CPU %s", frame, tc);
+        // where the rest of the process's CPU goes and what the guest main thread's frames wait on: a frame slow with every frame thread idle (thr_census.h)
+        char hc[720], mwl[480]; dm_host_thread_cpu(hc, sizeof hc, s); dm_main_wait_line(mwl, sizeof mwl, nf, s * 1000.0 / nf);
+        LOG("[nvn] host threads up to frame %llu: %s", frame, hc);
+        LOG("[nvn] main thread waits up to frame %llu, per frame: %s", frame, mwl); }
+    else { char yt[192], rs[400], tc[400], hc[16], mwl[16]; dm_yield_top(yt, sizeof yt); mtl_res_stats(rs, sizeof rs); dm_thread_cpu(tc, sizeof tc, 1); dm_host_thread_cpu(hc, sizeof hc, 1); dm_main_wait_line(mwl, sizeof mwl, 1, 0); }   // the first call only takes the baselines
     pt = t; pe = e; pcpu = cpu; pp = p; piw = iw; ppw = idw; pg = g; pf = frame; mtl_bw(&pld, &pst, &pfu); pudc = mtl_udc_saved_bytes();
 }
 static void tsummary(uint64_t frame) {

@@ -1814,13 +1814,20 @@ def unzs_dict(d, did, where):
     if did not in _ZD: _ZD[did] = zstd.ZstdDict(ZDICTS[did])
     return zstd.decompress(d, zstd_dict=_ZD[did])
 
+_ZSTD_CMD = []   # [the zstd command's path, or None], looked up once
+
 def unzs(path):
-    """A zstd file decompressed: frames without a dictionary through the zstd command as before (fed the bytes: inside a RomFS image the path is not a file the command can open),
-    frames that name one with that dictionary from ZDICTS"""
+    """A zstd file decompressed: frames without a dictionary through the zstd command where it is installed, as before (fed the bytes: inside a RomFS image the path is not a
+    file the command can open), else with the zstd module (zstd_mod: a Windows or Linux PC that packs a game has the module, which the packer requires, but need not have the
+    command: without this every .zs file of a game was left out there, 2,414 files of the first game packed on Linux); frames that name a dictionary with it from ZDICTS"""
     d = open(path, 'rb').read()
     did = zs_dict_id(d)
-    if not did: return subprocess.run(['zstd', '-d', '-c', '-q'], input=d, capture_output=True, check=True).stdout
-    return unzs_dict(d, did, path)
+    if did: return unzs_dict(d, did, path)
+    if not _ZSTD_CMD:
+        import shutil
+        _ZSTD_CMD.append(shutil.which('zstd'))
+    if _ZSTD_CMD[0]: return subprocess.run([_ZSTD_CMD[0], '-d', '-c', '-q'], input=d, capture_output=True, check=True).stdout
+    return zstd_mod().decompress(d)
 
 def frame_size(f):
     """The uncompressed size a zstd or LZ4 frame header records, None when it records none"""

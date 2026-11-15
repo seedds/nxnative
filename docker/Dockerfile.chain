@@ -49,6 +49,15 @@ RUN apt-get update \
  && update-alternatives --install /usr/bin/clang clang /usr/bin/clang-18 100 \
  && dpkg-query -W -f '${Package} ${Version}\n' clang-18 libllvm18 binutils libc6-dev \
  && clang --version | head -1
+# What the packer itself imports (scripts/build_ipa_from_nsp.py --platform linux: check_prereqs_port), so that this image packs a game from its NSP folder: lz4 (the NSOs'
+# segments) and capstone (the rewriter's disassembly) from Ubuntu 24.04's archive, and backports.zstd from PyPI (Python 3.12 has no compression.zstd; the version is
+# pinned). No zstd program, on purpose: a player's PC need not have one, and the packer's tools read .zs files with the module there (shader_split.py unzs). The recompiler built in the nxnative-aot image runs here too (libLLVM-18 came with clang-18). Its own layer, so the layers above stay cached
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends python3-lz4 python3-capstone python3-pip \
+ && rm -rf /var/lib/apt/lists/* \
+ && pip install --break-system-packages --no-cache-dir backports.zstd==1.7.0 \
+ && dpkg-query -W -f '${Package} ${Version}\n' python3-lz4 python3-capstone \
+ && python3 -c "import lz4.block, capstone, backports.zstd; print('lz4', lz4.__version__, 'capstone', capstone.__version__)"
 COPY --from=spirv-cross /out/ /opt/spirv-cross/
 ENV PATH=/opt/spirv-cross:$PATH
 # The worktree is mounted at /src and the container runs as the caller's user (HOME=/tmp): git refuses a repository owned by another user without this

@@ -2,6 +2,27 @@
 
 A dated record of what is done, what is in progress and what is left on the Windows and Linux port (branch `multiplataforma`). The phases, decisions and open items of the port are in [migration-status.md](migration-status.md); this file is the running log a session reads first to pick up work that another session left in progress. Newest entry first.
 
+## 2026-11-15
+
+### Done and pushed
+
+| Commit | What |
+|---|---|
+| `35d6a49` | Tools: `regress.py impact` no longer hangs on a range that touches the stb or zycore headers (the pattern that finds C definitions took 2^lines steps on them: the report of `origin/main..HEAD` ran 20 hours before it was stopped; now 18 s). `test_usage` has the shape; `test_usage` and `test_regress` pass (31 tests) |
+| `daefef3` | Vulkan: `t_vk_present`'s failure under load (about 2 % of runs) traced: lavapipe runs the blit inside `vkQueuePresentKHR`, so the first present passed the presenter's 100 ms limit and the fourth frame was dropped, as its rule says. The drop's red line now names the step that held the present thread and for how long, per run of drops; the test asserts the guarantee and has a held-thread check. Verified in Docker (host 100 of 100 twice, `t_vk_present` 55 / 55 / 11, 40 repetitions, the tree without the JIT, the Windows cross-build) |
+
+### In progress
+
+- **Safepoint polls left out of loops bounded by a constant, at tiers H and H+** (agent's measurements: int_ops-clang -8.9 %, simd-gcc -7.9 %, switch-gcc and simd-clang -2.9 %, the rest within 1 %; the second pack 6.6 % slower to make and 44 MiB more at its peak on the benchmark; unit key 6; two `polls` rows in `t_aot_host`). Reviewed by the lead; its merge with `t_aot_host.c`'s `guestbt` rows is resolved. Where it is: see the last line of this section. Verification script: the pattern of the earlier ones (nxaot built and its CTest, expected 29 of 29; the corpus packs; host CTest with `NXAOT`, plain and with `DM_AOT_ARENA_CHECK=1`; a tree with `-DNXHOST_JIT=OFF`; the Windows cross-build).
+- **`nxaot.exe`: the recompiler built for Windows** (an agent, worktree under `.claude/worktrees/`): LLVM 18.1.3 and lld cross-built with llvm-mingw from the release's source tarballs by a committed script, `nxaot.exe` linked statically, taken into the Windows bundle by `scripts/package_port.py --aot`, a runner for the Windows PC. Its build tree is on tmpfs and is lost when the machine is switched off; the script and the changes are in its worktree.
+- The owner switches the machine off to enlarge the disk once the agent ends: `/tmp` (tmpfs) is emptied by that, so the corpus packs and `nxaot` of the verifications are built again by the next verification (its first stage does it).
+
+### Left, not started (added today)
+
+- The presenter holds the queue lock across `vkQueuePresentKHR` ([frame-rate.md](../reference/frame-rate.md#a-held-present-thread-drops-the-waiting-frame-and-names-what-held-it), Open): a queue of its own where the device has a second one; lavapipe has one queue, so it waits for the RTX 4060.
+- The Windows bundle still needs Python 3.12 with `lz4` and `capstone` and the .NET SDK on the player's PC (`scripts/package_port.py`, README.txt): an embedded Python with the wheels and a prebuilt `nx_extract` would remove both; the Vulkan shader translator is not in the bundle either.
+- The calling convention (ghccc, 0 to 4.8 % faster): not started; it changes the unwind tables of the Windows packs (`dm/tools/aot/src/build/coff.cpp`), which cannot be tested here. The owner's decision, asked on 2026-11-15.
+
 ## 2026-11-14
 
 ### Done and pushed

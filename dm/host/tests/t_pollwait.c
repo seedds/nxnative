@@ -10,6 +10,12 @@
 
 static _Atomic uint64_t poll_clock;
 static uint64_t test_now_ns(void) { return atomic_load(&poll_clock); }
+// sleep_precise reads this same clock after each sleep to decide how much time remains.
+static int test_nanosleep(const struct timespec *ts, struct timespec *rem) {
+    (void)rem;
+    atomic_fetch_add(&poll_clock, (uint64_t)ts->tv_sec * 1000000000ull + (uint64_t)ts->tv_nsec);
+    return 0;
+}
 static _Thread_local struct timespec wait_start;
 static int test_clock_gettime(clockid_t clock, struct timespec *ts) {
     int r = clock_gettime(clock, ts);
@@ -28,10 +34,12 @@ static int test_timedwait(pthread_cond_t *cv, pthread_mutex_t *mutex, const stru
     // The real condition wait and SignalProcessWideKey still perform the wake.
     return pthread_cond_wait(cv, mutex);
 }
+#define nanosleep test_nanosleep
 #define now_ns test_now_ns
 #define clock_gettime test_clock_gettime
 #define pthread_cond_timedwait test_timedwait
 #include "../hle_thread.c"
+#undef nanosleep
 #undef now_ns
 #undef clock_gettime
 #undef pthread_cond_timedwait
@@ -66,7 +74,7 @@ static void poll_run(int64_t wait_ns, int sleep_too, uint32_t event) {
     poll_step(wait_ns, sleep_too, event);   // exactly 2 ms: the wait (and any yield) backs off
     assert(backoffs() == b0 + 1 + sleep_too);
 }
-// A run of SleepThread(ns) with 10 us of guest work between the sleeps, as Unity 6's idle job workers poll their queue: the guest's own sleeps for steps * 10 us, then one more
+// A run of SleepThread(ns) with 10 us of guest work between the sleeps, as Unity 6's idle job workers poll their queue: the guest's own sleeps for steps sleeps, then one more
 static void sleep_run(int64_t ns, int steps, int expect_backoff) {
     atomic_fetch_add(&poll_clock, 30000);   // guest work ends the previous run
     uint64_t b0 = backoffs();
@@ -111,12 +119,12 @@ int main(void) {
     poll_step(500, 0, 0); assert(backoffs() == b0);
     puts("PASS: an intervening non-poll SVC resets the run");
 
-    sleep_run(25000, 200, 1);
+    sleep_run(25000, 58, 1);   // 58 x (25 us asleep + 10 us awake) first crosses 2 ms
     puts("PASS: 25 us sleeps back off at 2 ms, not before");
     sleep_run(300000, 200, 0);
     puts("PASS: sleeps of 250 us and more keep their own length");
     g_bo_cap = 500000;   // DM_YIELD_BACKOFF=500: the back-off reaches 300 us at 2.4 ms
-    sleep_run(300000, 241, 1);
+    sleep_run(300000, 8, 1);   // 8 x (300 us asleep + 10 us awake) first exceeds 2.4 ms
     puts("PASS: with a 500 us cap, 300 us sleeps back off once the back-off is longer");
     g_bo_cap = 0;   // DM_YIELD_BACKOFF=0
     sleep_run(25000, 300, 0);

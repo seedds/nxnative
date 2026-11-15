@@ -12,7 +12,7 @@ The gear at the top centre opens the in-game menu: **Controller layout** switche
 
 In 3D, the right stick (the camera in most games) is not drawn: swipe on the right third of the screen, starting anywhere off the buttons. In Super Mario Galaxy and Super Mario Galaxy 2, other touches outside the controls move the pointer; in Captain Toad: Treasure Tracker they touch the game's screen (touch blocks, stun enemies), and in Big Brain Academy: Brain vs. Brain too (its menus and activities).
 
-A connected game controller hides the touch controls, all but the gear, and keeps every button.
+A connected game controller hides the touch controls, all but the gear, and keeps every button. Its A and B buttons follow the settings screen's **A/B buttons** choice, Nintendo or Xbox / PlayStation.
 
 In portrait (an iPad, an iPhone Duo's inner screen) the picture sits above the controls; so it does on a Duo half folded, the picture on the upper half. An iPad game also runs in a window of any size (Stage Manager).
 

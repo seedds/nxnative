@@ -14,8 +14,15 @@ static inline int dm_pad_labelled(GCController *c) {
     return [k isEqualToString:@"Switch Pro Controller"] || [k containsString:@"Joy-Con"];
 }
 // DM_BTN_A / B / X / Y of the pad's pressed face buttons
-static inline uint64_t dm_pad_face(GCExtendedGamepad *g) {
+// DM_PAD_AB=xbox (ab_xbox) puts A at the bottom and B on the right (Xbox / PlayStation), overriding Nintendo's A right / B bottom
+static inline uint64_t dm_pad_face_ab(GCExtendedGamepad *g, int ab_xbox) {
     GCControllerButtonInput *a = g.buttonA, *b = g.buttonB, *x = g.buttonX, *y = g.buttonY;
-    if (!dm_pad_labelled(g.controller)) { GCControllerButtonInput *t = a; a = b; b = t; t = x; x = y; y = t; }   // by position: right A, bottom B, top X, left Y
+    int labelled = dm_pad_labelled(g.controller);
+    if (!labelled) { GCControllerButtonInput *t = x; x = y; y = t; }   // by position: top X, left Y
+    int swap_ab = ab_xbox ? labelled : !labelled;
+    if (swap_ab) { GCControllerButtonInput *t = a; a = b; b = t; }   // Nintendo default: right A, bottom B; xbox: bottom A, right B
     return (a.isPressed ? DM_BTN_A : 0) | (b.isPressed ? DM_BTN_B : 0) | (x.isPressed ? DM_BTN_X : 0) | (y.isPressed ? DM_BTN_Y : 0);
+}
+static inline uint64_t dm_pad_face(GCExtendedGamepad *g) {
+    return dm_pad_face_ab(g, 0);
 }

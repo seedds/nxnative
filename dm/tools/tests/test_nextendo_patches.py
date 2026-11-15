@@ -35,11 +35,17 @@ class NextendoPatchTests(unittest.TestCase):
         doc=catalog(); doc['patches'][0]['enabled']=False
         self.assertEqual(p.apply_image(b'0000abcd0000',TITLE,BUILD,doc),(None,[]))
     def test_unknown_policy_digest_and_incomplete_guard_fail(self):
-        for field, value in [('sha256','0'*64),('offset_basis','unknown'),('module','sdk'),('required_capabilities',[]),
-                             ('enabled',1),('guards',[]),('build_id','12'*16)]:
+        for field, value in [('sha256','0'*64),('enabled',1),('guards',[]),('build_id','12'*16)]:
             with self.subTest(field=field):
                 doc=catalog(); doc['patches'][0][field]=value
                 with self.assertRaises(ValueError): p.validate_catalog(doc)
+        # A patch in another format is left alone in the catalog, and refused only for the game build it is for
+        for field, value in [('offset_basis','unknown'),('module','sdk'),('required_capabilities',[]),('patch_version',2)]:
+            with self.subTest(field=field):
+                doc=catalog(); doc['patches'][0][field]=value
+                p.validate_catalog(doc)
+                with self.assertRaises(ValueError): p.apply_image(b'0000abcd0000',TITLE,BUILD,doc)
+                self.assertEqual(p.apply_image(b'0000abcd0000','0100000000002000',BUILD,doc),(None,[]))
         doc=catalog(); doc['patches'][0]['guards'][0]['patched_hex']='00'*4
         with self.assertRaises(ValueError): p.validate_catalog(doc)
     def test_overlapping_guard_and_conflicting_patches_rejected(self):

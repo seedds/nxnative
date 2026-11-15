@@ -12,6 +12,7 @@
 #include <pthread.h>
 #include <errno.h>
 #import "../nextendo_login_apple.inc"   // the sign-in (hle_nextendo_login_apple.m): its record must pass this decoder
+#import "../nextendo_api_apple.h"
 
 static int checks, failures;
 static _Atomic int entered, left, waits, providerCalls;
@@ -189,6 +190,15 @@ static void login_tests(void) {
     CHECK(nxl_write_refresh(@"synthetic-refresh") && nxl_write_refresh(nil) && !nxl_read_refresh(), "sign-out removes the stored sign-in");
     unsetenv("DM_NEXTENDO_LOGIN_DIR"); rmdir(dir); set_record(valid_record());
 }
+NSString *dm_nextendo_login_access(void) { return @"synthetic-access"; }   // in place of hle_nextendo_apple.m's weak one: a sign-in's access token
+// Each account route gets the token nextendo.network takes there (hle_nextendo_apple.m): the nx2 game token for online-status, the access
+// token for the rest
+static void bearer_tests(void) {
+    NSMutableDictionary *record = valid_record(); set_record(record); NSString *game = record[@"token"];
+    CHECK([dm_nextendo_api_bearer("me") isEqual:@"synthetic-access"] && [dm_nextendo_api_bearer("friends") isEqual:@"synthetic-access"] && [dm_nextendo_api_bearer("presence") isEqual:@"synthetic-access"]
+          && [dm_nextendo_api_bearer("online-status") isEqual:game],
+          "me, friends and presence get the access token; online-status the nx2 game token");
+}
 int main(void) { @autoreleasepool {
     // No configured provider is a normal unavailable result, not an OS storage
     // read or a spawned helper. Offline never invokes even an installed provider.
@@ -197,7 +207,7 @@ int main(void) { @autoreleasepool {
     dm_nextendo_set_credential_provider(provider); unsetenv("DM_NEXTENDO_ROUTES"); mode=DM_NET_AUTO;
     CHECK(!dm_nextendo_account_available(&absent) && !absent && !atomic_load(&providerCalls), "automatic local mode without a profile never invokes the credential provider");
     setenv("DM_NEXTENDO_ROUTES","/synthetic/public-policy.tsv",1); mode=DM_NET_NEXTENDO;
-    dm_nextendo_set_game_version("3.0.5"); identity_tests(); login_tests(); token_tests(); async_tests();
+    dm_nextendo_set_game_version("3.0.5"); identity_tests(); login_tests(); token_tests(); async_tests(); bearer_tests();
     CHECK(atomic_load(&entered) > 0 && atomic_load(&entered) == atomic_load(&left) && atomic_load(&waits) > 0, "blocking account hooks publish balanced guest contexts and mark host security waits");
     printf("Nextendo account: %d checks, %d failures; synthetic provider only, no user credentials read\n", checks, failures); return failures ? 1 : 0;
 } }

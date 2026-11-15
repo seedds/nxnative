@@ -177,10 +177,10 @@ uint32_t dm_nextendo_social_publish(unsigned status,const uint8_t *app_field,siz
     return 0;
 } }
 
-// ---- The account's Mii and play time, from the start of a Nextendo session (loader.c nextendo_main) ----
+// ---- The account's Mii, from the start of a Nextendo session (loader.c nextendo_main) ----
 void dm_guest_host_wait_begin(void);
 void dm_guest_host_wait_end(void);
-enum { MII_STORE_SIZE=0x44, HISTORY_EVERY_S=60, PROFILE_WAIT_S=5 };
+enum { MII_STORE_SIZE=0x44, PROFILE_WAIT_S=5 };
 static dispatch_group_t g_profile_fetch;   // the account's profile, asked for once at the start
 static NSData *g_account_mii;              // its Mii's StoreData, written before g_profile_fetch completes
 
@@ -206,55 +206,12 @@ int dm_nextendo_account_mii(uint8_t store[MII_STORE_SIZE]) {
     memcpy(store,g_account_mii.bytes,MII_STORE_SIZE); return 1;
 }
 
-// Play time: Nextendo keeps each game's total seconds per account and keeps the larger of what it has and what it is sent (/api/history), so
-// the host reads the account's total for this game once and then sends it plus this run's time every minute. A minute counts only while the timer
-// runs: a gap longer than that (the app suspended) counts as one period at most
-static struct { bool known; int told; int64_t base; double played, last; } g_history;   // told: 1 the read failure was logged, 2 the last total sent, 3 its send failed (logged)
-static bool history_base(void) {   // the account's seconds for this game so far; false while they cannot be read
-    size_t capacity=8*1024*1024,size=0; uint8_t *buffer=malloc(capacity); if(!buffer)return false;
-    uint32_t result=dm_nextendo_api_request("history",NULL,0,buffer,capacity,&size);
-    NSDictionary *answer=result?nil:[NSJSONSerialization JSONObjectWithData:[NSData dataWithBytesNoCopy:buffer length:size freeWhenDone:NO] options:0 error:nil];
-    free(buffer);
-    id entries=[answer isKindOfClass:NSDictionary.class]?answer[@"history"]:nil;
-    if(![entries isKindOfClass:NSArray.class])return false;
-    int64_t seconds=0;
-    for(id entry in entries){
-        if(![entry isKindOfClass:NSDictionary.class]||![entry[@"title_id"] isKindOfClass:NSString.class])continue;
-        uint64_t value=0;
-        if([entry[@"title_id"] caseInsensitiveCompare:game_title()]==NSOrderedSame&&unsigned_value(entry[@"seconds"],&value)&&value<INT64_MAX/2)seconds=(int64_t)value;
-    }
-    g_history.base=seconds; g_history.known=true; return true;
-}
-static bool history_tick(void) { @autoreleasepool {   // false stops the timer
-    double now=monotonic_time(); g_history.played+=fmin(now-g_history.last,HISTORY_EVERY_S); g_history.last=now;
-    if(!dm_nextendo_api_bearer()){fprintf(stderr,"[dm] [RED] nextendo: play time is not sent: no Nextendo sign-in\n");return false;}
-    if(!g_history.known&&!history_base()){
-        if(!g_history.told)fprintf(stderr,"[dm] [RED] nextendo: the account's play time could not be read: none is sent until it can\n");
-        g_history.told=1; return true;
-    }
-    int64_t seconds=g_history.base+(int64_t)g_history.played;
-    NSISO8601DateFormatter *format=[NSISO8601DateFormatter new]; format.timeZone=[NSTimeZone timeZoneWithAbbreviation:@"UTC"];
-    NSDictionary *object=@{@"history":@[@{@"title_id":game_title(),@"name":game_name(),@"seconds":@(seconds),@"last_played":[format stringFromDate:NSDate.date]}]};
-    NSData *body=[NSJSONSerialization dataWithJSONObject:object options:0 error:nil]; size_t size=0;
-    // Each total sent is logged (one line a minute), so a log shows the total climbing, or where it stopped. A failed send is logged once until one
-    // succeeds again; Nextendo keeps the larger total, so the next tick's carries the minutes this one did not
-    if(body.length&&!dm_nextendo_api_request("history",body.bytes,body.length,NULL,0,&size)){
-        fprintf(stderr,"[dm] nextendo: play time sent: %lld min of this game in all\n",(long long)(seconds/60)); g_history.told=2;
-    }else if(g_history.told!=3){
-        fprintf(stderr,"[dm] [RED] nextendo: play time not sent (%lld min of this game in all); the next minute tries again\n",(long long)(seconds/60)); g_history.told=3;
-    }
-    return true;
-} }
+// No play time is sent. Nextendo keeps each game's play time per account, and since 2026-11-15 only its own emulator may write it: a history
+// write from a third-party app's token answers 403 ("Le jeton de jeu d'une application tierce n'ouvre pas cette route"), and its developer wiki
+// says writing the history is not open to OAuth tokens
 void dm_nextendo_session_start(void) {
     static atomic_bool started; if(atomic_exchange(&started,true))return;
     dispatch_queue_t queue=dispatch_get_global_queue(QOS_CLASS_UTILITY,0);
     g_profile_fetch=dispatch_group_create();
     dispatch_group_async(g_profile_fetch,queue,^{ @autoreleasepool { g_account_mii=account_mii_fetch(); } });
-    g_history.last=monotonic_time();
-    dispatch_queue_t serial=dispatch_queue_create("nextendo.history",DISPATCH_QUEUE_SERIAL);
-    dispatch_source_t timer=dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER,0,0,serial);
-    dispatch_source_set_timer(timer,dispatch_time(DISPATCH_TIME_NOW,HISTORY_EVERY_S*NSEC_PER_SEC),HISTORY_EVERY_S*NSEC_PER_SEC,5*NSEC_PER_SEC);
-    __block dispatch_source_t keep=timer;
-    dispatch_source_set_event_handler(timer,^{ if(!history_tick()){dispatch_source_cancel(keep);keep=nil;} });
-    dispatch_resume(timer);
 }

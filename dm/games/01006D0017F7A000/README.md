@@ -50,7 +50,7 @@ On the Mac, on the small layout, through the first battle: 4.2 GB resident with 
 
 ## Sound
 
-Three outputs: renderer 0 (48 kHz, 32 voices, `main+0x358ca1c`), whose frames are not silent only during the movie; Wwise's own AudioOut (`main+0x365061c`, beside `AK::EventManager` in `main`); and Unreal's mixer on renderer 1 (32 kHz, 64 voices, `main+0x30a4ff0`), silent through all 108,000 frames of the movie, the field and the battle. With the renderers silent in the field, the sound there is Wwise's: no clipping, RMS about 1,000 in `DM_AUDIO_DUMP`, which interleaves all three outputs. The sound itself is still to be listened to.
+Three outputs: renderer 0 (48 kHz, 32 voices, `main+0x358ca1c`), whose frames are not silent only during the movie; Wwise's own AudioOut (`main+0x365061c`, beside `AK::EventManager` in `main`); and Unreal's mixer on renderer 1 (32 kHz, 64 voices, `main+0x30a4ff0`), silent through all 108,000 frames of the movie, the field and the battle. With the renderers silent in the field, the sound there is Wwise's: no clipping, RMS about 1,000 in `DM_AUDIO_DUMP`, which interleaves all three outputs. The sound itself is still to be listened to. Those measurements predate [per-renderer blocks](../../../docs/reference/audio.md#two-renderers-overwriting-each-others-queued-blocks): the movie's frames on renderer 0 could then be overwritten by renderer 1's silence before they played, which has not been checked on this game.
 
 ## Input
 
@@ -68,6 +68,7 @@ The work folder's `run/` has `host.sh` (copies a host to `build/mlhost`), `boot.
 General changes first needed here; each applies to every game:
 
 - **Inline shaders with the cooked packages in an IoStore container** (`uepak.py`, `shader_split.py`): [Unreal Engine 4.27 shaders inline in IoStore export bundles](../../../docs/reference/shaders.md#unreal-engine-427-shaders-inline-in-iostore-export-bundles).
+- **Buffer textures shared by storage** (`nvn_mtl.m` `tex_buffer`, `tbuf_usage`): about 18 transient buffer textures a frame each made a view of their own, 5,350 views added to the residency set every 300 frames (GitHub issue #1061): [Transient buffer textures shared by storage](../../../docs/reference/rendering.md#transient-buffer-textures-shared-by-storage). Not run on this game since: its build folder is gone.
 - **More than one audio renderer** (`hle_audren.c`): [A game with more than one renderer](../../../docs/reference/audio.md#a-game-with-more-than-one-renderer).
 - **An update whose RomFS tables fail the hash check** (`nx_extract`): [A damaged RomFS's own tables](../../../docs/reference/packing.md#a-damaged-romfss-own-tables).
 

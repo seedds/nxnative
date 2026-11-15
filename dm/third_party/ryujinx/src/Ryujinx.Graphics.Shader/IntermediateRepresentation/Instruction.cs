@@ -128,6 +128,8 @@ namespace Ryujinx.Graphics.Shader.IntermediateRepresentation
         // nxnative: Ampere HMMA.16816 with an f16 accumulator, lowered to a call by TensorPass, and a barrier for the lanes of one subgroup
         MatrixMultiplyAdd,
         SubgroupBarrier,
+        // nxnative: Ampere LDSM in a compute shader (InstEmitAmpereTensor.ALdsm), lowered to its per-lane emulation by TensorPass once the HMMAs it feeds are known
+        MatrixLoad,
 
         Count,
 

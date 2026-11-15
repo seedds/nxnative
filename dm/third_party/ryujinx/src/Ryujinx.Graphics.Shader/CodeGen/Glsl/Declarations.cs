@@ -331,7 +331,7 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Glsl
                 }
                 else
                 {
-                    context.AppendLine($"{prefix}{typeName} {memory.Name};");
+                    context.AppendLine($"{prefix}{typeName} {memory.Name}{(memory.ZeroInit ? $" = {typeName}(0)" : string.Empty)};");
                 }
             }
         }

@@ -105,3 +105,4 @@ No `patches.py`.
 The other findings are Scarlet's ([Found on this game](../0100A3D008C5C000/README.md#found-on-this-game)).
 
 - [Bluetooth LE at boot](../../../docs/reference/services.md#bluetooth-le-at-boot): 3.0.1 (`v720896`, a derived profile) calls `nn::bluetooth::InitializeBle` a second after boot and aborted without the `bt` service; the host answers the BLE calls offline (resolved).
+- [A recording that runs short before it writes into the game's memory](../../../docs/reference/nvn-objects.md#a-recording-that-runs-short-before-it-writes-into-the-games-memory): from 0d103787 the host stopped at the 1 GB cap of lent command memory at frame 1,939 ([PR #2713](https://github.com/seedds/nxnative/pull/2713), which found the cause; resolved).

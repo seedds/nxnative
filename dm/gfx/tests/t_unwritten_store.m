@@ -27,7 +27,7 @@ static void seed(void) {
 typedef struct { uint8_t color[256]; float depth[64]; uint8_t stencil[64]; uint64_t saved; double gpu_ms, wall_ms; } result;
 static result run(int enabled, int mode) {
     static uint64_t frame; uint64_t started=bp_now(); mtl_set_frame(++frame);
-    g_udc_ab=enabled; g_udc_ab_on=0;
+    g_udc=enabled;
     state_reset(); memset(&R,0,sizeof R); mtl_sub_begin(); seed();
     S.ds=(ds_st){.dt=1,.dw=mode==1||mode==7,.df=NVN_DEPTH_FUNC_LESS,.st=mode==2,
         .sf_f=NVN_STENCIL_FUNC_ALWAYS,.sf_b=NVN_STENCIL_FUNC_ALWAYS,
@@ -60,6 +60,7 @@ static result run(int enabled, int mode) {
     id<MTLBuffer> b[3]; b[0]=[g_dev newBufferWithLength:256 options:MTLResourceStorageModeShared];
     b[1]=[g_dev newBufferWithLength:256 options:MTLResourceStorageModeShared];
     b[2]=[g_dev newBufferWithLength:64 options:MTLResourceStorageModeShared];
+    if(!b[0]||!b[1]||!b[2]) { fprintf(stderr,"readback buffers: out of memory\n"); abort(); }
     [blit() copyFromTexture:tex_mtl(&color) sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0,0,0) sourceSize:MTLSizeMake(8,8,1) toBuffer:b[0] destinationOffset:0 destinationBytesPerRow:32 destinationBytesPerImage:256];
     [blit() copyFromTexture:tex_mtl(&depth) sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0,0,0) sourceSize:MTLSizeMake(8,8,1) toBuffer:b[1] destinationOffset:0 destinationBytesPerRow:32 destinationBytesPerImage:256 options:MTLBlitOptionDepthFromDepthStencil];
     [blit() copyFromTexture:tex_mtl(&depth) sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0,0,0) sourceSize:MTLSizeMake(8,8,1) toBuffer:b[2] destinationOffset:0 destinationBytesPerRow:8 destinationBytesPerImage:64 options:MTLBlitOptionStencilFromDepthStencil];
@@ -70,7 +71,7 @@ static result run(int enabled, int mode) {
 }
 int main(int argc,char **argv) { @autoreleasepool {
     int bench=argc>1&&!strcmp(argv[1],"--bench"); if(bench) { width=1920; height=1080; repeats=32; }
-    setenv("DM_NVN_TBDR","0",1); mtl_init(); CHECK(!tbdr_on(),"lookahead stays disabled");
+    mtl_init();
     color.d=(nvn_texdesc){.target=NVN_TEXTURE_TARGET_2D,.format=NVN_FORMAT_RGBA8,.width=width,.height=height,.depth=1,.levels=1,.samples=1};
     depth.d=color.d; depth.d.format=NVN_FORMAT_DEPTH32F_STENCIL8;
     NSError *error=nil;

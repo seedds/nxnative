@@ -27,6 +27,12 @@ static int pad_slot_take(pad_slots *s, const void *owner, const char *name) {
     s->owner[p] = owner; snprintf(s->last[p], sizeof s->last[p], "%s", name);
     return p;
 }
+// DM_PAD_PRESS_TO_JOIN=1 (front_mac.m): a controller takes the lowest free slot at its first button press, whatever slot its name held before
+static int pad_slot_take_lowest(pad_slots *s, const void *owner, const char *name) {
+    int p = pad_slot_of(s, owner); if (p >= 0 || !owner) return p;
+    for (int i = 0; i < DM_PLAYERS; i++) if (!s->owner[i]) { s->owner[i] = owner; snprintf(s->last[i], sizeof s->last[i], "%s", name ? name : ""); return i; }
+    return -1;
+}
 static int pad_slot_free(pad_slots *s, const void *owner) {
     int p = pad_slot_of(s, owner); if (p >= 0) s->owner[p] = NULL;
     return p;

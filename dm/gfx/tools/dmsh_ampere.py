@@ -27,3 +27,14 @@ def inst_len(ctl):   # the instructions (SPH included)
 def c1_segment(ctl, code):   # the c1 constant segment at the end of the code area
     a, e = struct.unpack_from('<II', ctl, 0x40)
     return code[a:e] if a <= e <= len(code) else b''
+
+
+EARLY_FRAGMENT_TESTS = 0x5b   # a pixel shader's early fragment tests byte (see early_fragment_tests)
+
+
+def early_fragment_tests(ctl):
+    """An NVN2 pixel shader's early fragment tests flag: control byte +0x5b (NVN1 keeps it at +0x718, which dmsh_build.early_fragment_tests reads). The NVN2 driver
+    reads the pixel shader's flags as single bytes at +0x58..+0x62, a getter each (ldr x8, [x0, #8]; ldrb w0, [x8, #0x5b]; ret), at the same slot in the sdk's seven
+    vtables, one per control section version, so the byte means the same in every version. Ampere's SPH has no such bit (NVK sends a fragment shader's
+    early_fragment_tests as the 3D method SET_API_MANDATED_EARLY_Z). Measurements: docs/reference/shaders.md, Early fragment tests from the control section"""
+    return len(ctl) > EARLY_FRAGMENT_TESTS and ctl[EARLY_FRAGMENT_TESTS] != 0

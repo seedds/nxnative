@@ -55,12 +55,12 @@ class XcodePipelineTests(unittest.TestCase):
             mocks = {}
             for name, value in {
                 'scan_nsps': (int(registered.id, 16), fam), 'check_prereqs': None, 'check_metal': None,
-                'free_gb': 10000, 'build_nx_extract': root / 'nx_extract',
-                'extract': extraction, 'can_clone': False, 'build_mismatch': [],
+                'free_gb': 10000, 'find_nx_extract': root / 'nx_extract',
+                'extract': extraction, 'check_formats': None, 'can_clone': False, 'build_mismatch': [],
                 'extract_aoc': None, 'rewrite': profile, 'split_shaders': 'fixture-key',
                 'build_shaders': root / 'shaders', 'build_vk_shaders': root / 'shaders',
                 'build_gl_shaders': root / 'shaders', 'provisional_prep': None, 'chain_header': None,
-                'refine_after_rewrite': profile, 'derive_profile': '1.0.0',
+                'derive_profile': '1.0.0',
             }.items():
                 mocks[name] = stack.enter_context(patch.object(build, name, return_value=value))
             mocks['run'] = stack.enter_context(patch.object(build, 'run', side_effect=fake_run))

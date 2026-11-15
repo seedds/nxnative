@@ -111,7 +111,7 @@ def pack_quiet(work, say=print, days: float = QUIET_DAYS, min_files=QUIET_MIN_FI
         if e.name == 'regress' or e.name.endswith(('.gone', '.unpack')) or tar_of(e.path).exists() or os.path.isfile(os.path.join(e.path, 'pyvenv.cfg')): continue
         try:
             if os.stat(e.path).st_ctime >= since or not (size := _quiet_size(e.path, since)) or size[0] < min_files: continue
-            if shutil.disk_usage(work).free < size[1] + QUIET_FREE:
+            if shutil.disk_usage(work).free < size[1] + QUIET_FREE:   # unallocated space only (not vol_space): housekeeping nobody asked for makes macOS purge nothing
                 say(f'{e.path} stays a folder: no room for its {size[1] / 2**30:.1f} GB tar'); continue
         except OSError: continue
         say(f'packing {e.path}, untouched for {days} days: {size[0]:,} files into one file')

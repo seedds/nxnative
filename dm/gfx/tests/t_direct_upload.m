@@ -30,6 +30,7 @@ static void run(int target,unsigned width,unsigned height,unsigned layers,unsign
         int fast=direct&&!(source_offset&7)&&nvn_deswz_gpu_direct_supported(&t.d);CHECK("direct upload selected only when eligible",g_direct_uploads-uploads==(uint64_t)fast);CHECK("one dispatch per mip across all faces",g_direct_dispatches-dispatches==(fast?levels:0));
         if(!round)first=image;else CHECK("pending/read texture is not overwritten",image!=previous);
         if(round==2)CHECK("idle spare texture is reused",image==first);previous=image;
+        up_wait_zero(&g_up_pending,WS_OLDQ);   // a dropped batch is reported by its completion handler, after the submission's fence
         if(atomic_load(&g_up_lost_n)) {
             uint64_t recovered=atomic_load(&g_up_lost_redo);mtl_sub_begin();image=tex_mtl(&t);finish();
             CHECK("direct target participates in dropped-upload recovery",atomic_load(&g_up_lost_redo)==recovered+1);CHECK("dropped upload marker consumed",!atomic_load(&g_up_lost_n));first=image;previous=image;
@@ -48,7 +49,7 @@ static void run(int target,unsigned width,unsigned height,unsigned layers,unsign
         CHECK("readback prefix guard",((uint8_t*)readback.contents)[255]==0xcd);CHECK("readback suffix guard",((uint8_t*)readback.contents)[256+bytes]==0xcd);
         uint64_t reuploads=g_pkg_reuploads;mtl_sub_begin();CHECK("unchanged storage reuses its image",tex_mtl(&t)==image);finish();CHECK("unchanged storage is not reuploaded",g_pkg_reuploads==reuploads);
     }
-    mtl_tex_release(&t);mtl_drain();nvn_dirty_remove_range(mem);mtl_pool_del(mem);mtl_drain();free(mem);free(expected);
+    mtl_tex_release(&t);mtl_drain();mtl_alias_drop_pool(&pool);nvn_dirty_remove_range(mem);mtl_pool_del(mem);mtl_drain();free(mem);free(expected);
 }
 int main(void){@autoreleasepool{
     mtl_init();CHECK("direct utility pipeline loads",g_nvn_deswz_gpu&&nvn_deswz_gpu_direct_supported(&(nvn_texdesc){.target=9,.format=NVN_FORMAT_RGBA16F,.width=16,.height=16,.depth=768,.levels=5,.samples=1}));

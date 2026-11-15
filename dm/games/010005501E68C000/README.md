@@ -6,7 +6,7 @@ Update 1.0.0.2 (v131072) over the base game, which is an XCI; its DLC NSP is a l
 
 | Setting | Where | Why |
 |---|---|---|
-| Node area cut 1 GB → 62 MB | `dm/tools/sdk_patches.py`, `sdk` build `311deab1…` (the AddressRegionManager constructor at `sdk+0x139458`; the movs at `+0x139468` and `+0x1394fc`) | without it `StandardAllocator::Initialize(nullptr, pool − used)` (`main+0x874b6c`) aborts at its first `CentralHeap::Init`; see [Memory](#memory) |
+| Node area cut 1 GB → 62 MB; regions of 4 MB and more aligned to 2 MB | the SDK-wide rules in `dm/tools/sdk_patches.py` (the AddressRegionManager constructor at `sdk+0x139458`: the movs at `+0x139468` and `+0x1394fc`; the placement's alignments at `+0x139654`, `+0x13965c`, `+0x139660`) | without it `StandardAllocator::Initialize(nullptr, pool − used)` (`main+0x874b6c`) aborts at its first `CentralHeap::Init`; see [Memory](#memory) |
 | 5 GB guest layout: `mem_reserve 0x140000000`, `mem_alias 0x118000000`, `mem_stack 0x10000000` | [`game.tsv`](game.tsv) | Engage's block: 256 MB in front + 4.375 GB alias region + 256 MB stack region + 128 MB heap region (the game never calls `SetHeapSize`) |
 | `app_pool 0x40000000` (1 GB) | `game.tsv` | with Engage's 2.5 GB pool the live address regions reached the end of the alias region after 140 s; see [Memory](#memory) |
 | `shader_groups _unitybuiltinshaders_=engine /Resources/=engine /StreamingAssets/=assets /Data/=data` | `game.tsv` | engine built-ins (the `unitybuiltinshaders` bundle, `Resources/`) go to engine, the player's serialized files to data, the other Addressables bundles to assets |
@@ -18,6 +18,7 @@ Update 1.0.0.2 (v131072) over the base game, which is an XCI; its DLC NSP is a l
 - **Resolved: then the alias region filled in minutes.** With Engage's 2.5 GB pool the game ran, but probes on `VammManager::AllocateAddressRegion`'s success path (`sdk+0x1395a8`: x21 size, x22 address) and `FreeAddressRegion` (`sdk+0x139df0`), with commits from the `MapPhysicalMemory` log, over the first five minutes (the title, Episode 1's opening, the first investigation) showed StandardAllocator reserving 2.44 GB and committing only 0.19 GB, Unity's pools holding 1.06 GB, and the live regions ending 4.37 GB into the 4.375 GB alias region after 140 s. Over ten minutes of the same route, a 1.5 GB pool (StandardAllocator 1.44 GB at +0.75 GB) let them reach +3.91 GB, a 1 GB pool +2.85 GB.
 - **Current:** the pool is reported as 1 GB. StandardAllocator gets 0.94 GB (five times its use) right after the node area, and running out of address space is a crash, while a pool a little smaller than what the game maps in all (1.02 GB at the peak) changes nothing: the host does not enforce it and only `nninitStartup` reads it. This game is why `mem_map_limit` is off by default ([dm/games/README.md, Keys](../README.md#keys)).
 - On the Mac about 1.55 GB resident and 1.25 GB of Metal allocations, flat from the first investigation on (25 minutes; address space at +2.81 GB).
+- Since 2026-11-09 the SDK-wide rules give the node area cut and the 2 MB alignment of regions of 4 MB and more in place of this `sdk` build's row; run with the iPhone's alias region (`DM_ALIAS_SIZE=0x118000000`): 240 s from a fresh save to the language dialog, the gaps between live regions 0.33 → 0.19 GB.
 
 ## Rewriter
 

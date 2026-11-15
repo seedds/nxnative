@@ -2,10 +2,10 @@
 # Provisional game profiles: the profile keys a game's own files decide, for a game without a hand-made profile in dm/games (scripts/build_ipa_from_nsp.py writes them).
 # facts_of(ExeFS, RomFS) reads the code modules (dynamic symbols, sizes, SDK strings) and the RomFS file headers (a romfs_manifest.tsv from nx_extract --manifest, or a RomFS folder);
 # guess(facts) turns the facts into profile keys, each with the reason written above it in game.tsv. Every rule was checked against the hand-made profiles; --check runs that comparison again.
-# mem_used needs the rewritten modules (mem_used below, after the rewrite). The alias / heap split of a game with virtual address memory that sets a heap needs its heap request:
-# the NSP script's heap check boots it on the Mac until that request (heap_signals below), a few seconds. The keys no short run decides (render_cond, tex_flush_upload,
-# tex_dirty_upload, core_preempt, gpu_timestamps, vconv_range, present_interval) keep their defaults for a developer: a minute's boot without input
-# cannot tell the games that need them (Tears of the Kingdom) from those that only use what they answer (Wonder's conditional clears, Breath of the Wild's flushed textures).
+# The alias / heap split of a game with virtual address memory that sets a heap needs its heap request:
+# the NSP script's heap check boots it on the Mac until that request (heap_signals below), a few seconds. The keys no short run decides (tex_flush_upload,
+# tex_dirty_upload, core_preempt, vconv_range, present_interval) keep their defaults for a developer: a minute's boot without input
+# cannot tell the games that need them (Tears of the Kingdom) from those that only use what they answer (Breath of the Wild's flushed textures).
 # Usage: profile_guess.py <ExeFS dir> <romfs_manifest.tsv | RomFS dir>   the facts and the guessed keys
 #        profile_guess.py --check [<NSP root>]                        every profile in dm/games against its extraction under <NSP root> (default /Volumes/T7/nsp): where the guess differs
 import collections, re, struct, sys
@@ -14,15 +14,19 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent / 'tools')); import nso_syms   # dynamic symbols, the host's hooks
 from romfs import Path, os, open, is_image, source
+from romfs_image import ARTIFACTS   # a dump tool's files in a RomFS folder, not game files
 
 MAGICS = [(b'UnityFS\0', 'UnityFS'), (b'UnityWeb', 'UnityWeb'), (b'UnityRaw', 'UnityRaw'), (b'BNSH', 'BNSH'), (b'BAHS', 'BAHS'), (b'SARC', 'SARC'), (b'Yaz0', 'Yaz0'),
           (bytes.fromhex('28b52ffd'), 'zstd'), (b'FRES', 'bfres'), (b'BNTX', 'BNTX'), (b'BWAV', 'BWAV'), (b'FSAR', 'BFSAR'), (b'CPK ', 'CRI CPK'), (b'CRID', 'CRI USM'),
           (b'@UTF', 'CRI UTF'), (b'AKPK', 'Wwise pck'), (b'BKHD', 'Wwise bnk'), (b'FSB5', 'FMOD'), (b'\x89PNG', 'PNG'), (b'RIFF', 'RIFF'), (b'OggS', 'Ogg'), (b'PK\x03\x04', 'zip'), (b'NSO0', 'NSO'),
-          (bytes.fromhex('03022307'), 'SPIR-V'), (b'ONEPACK\0', 'Trinity pack'), (b'ARC\0', 'MT Framework ARC'), (b'SCNE', 'Bezel Engine archive'), (b'XNB', 'XNB'), (b'pkzl', 'PlatinumGames PKZ')]
-PACKED = {'UnityFS', 'UnityWeb', 'Yaz0', 'zstd', 'BWAV', 'CRI CPK', 'CRI USM', 'Wwise pck', 'FMOD', 'PNG', 'Ogg', 'zip', 'Trinity pack', 'MT Framework ARC', 'Bezel Engine archive', 'PlatinumGames PKZ'}   # file headers of compressed / media formats (zip_store)
+          (bytes.fromhex('03022307'), 'SPIR-V'), (b'ONEPACK\0', 'Trinity pack'), (b'ARC\0', 'MT Framework ARC'), (b'SCNE', 'Bezel Engine archive'), (b'XNB', 'XNB'), (b'pkzl', 'PlatinumGames PKZ'),
+          (b'KPKA', 'RE Engine PAK')]
+PACKED = {'UnityFS', 'UnityWeb', 'Yaz0', 'zstd', 'BWAV', 'CRI CPK', 'CRI USM', 'Wwise pck', 'FMOD', 'PNG', 'Ogg', 'zip', 'Trinity pack', 'MT Framework ARC', 'Bezel Engine archive', 'PlatinumGames PKZ', 'RE Engine PAK'}   # file headers of compressed / media formats (zip_store)
+# Unreal by its name, which every Unreal 4 / 5 main here has; 'UE4' alone is no marker: it is a build path in Octopath Traveler II's main, and four bytes of machine code in Unreal 5 mains and in PRAGMATA's
+# (RE Engine), whose DLSS module also has a 'UE4 generic plugin' string. RE Engine by its via.render.* type names (PRAGMATA's main: 1,925)
 # IL2CPP by the metadata file every IL2CPP player opens: Unity 2022's main (Ace Attorney Investigations Collection) has no il2cpp_ API names, Engage's 2020.3 has both
 MARKERS = [(b'nvnBootstrapLoader', 'NVN'), (b'vkCreateInstance', 'Vulkan'), (b'eglGetProcAddress', 'EGL / OpenGL'), (b'global-metadata.dat', 'Unity IL2CPP'), (b'UnityEngine', 'Unity'),
-           (b'sead::', 'Nintendo sead'), (b'agl::', 'Nintendo agl'), (b'gsys::', 'Nintendo gsys'), (b'Unreal', 'Unreal'), (b'UE4', 'Unreal 4'), (b'Havok', 'Havok'), (b'CRIWARE', 'CRIWARE'), (b'Wwise', 'Wwise'),
+           (b'sead::', 'Nintendo sead'), (b'agl::', 'Nintendo agl'), (b'gsys::', 'Nintendo gsys'), (b'Unreal', 'Unreal'), (b'via.render.', 'RE Engine'), (b'Havok', 'Havok'), (b'CRIWARE', 'CRIWARE'), (b'Wwise', 'Wwise'),
            (b'MonoGame.Framework', 'MonoGame'), (b'FMOD mixer', 'FMOD')]
 GLSLC_MAGIC = b'\x91\x68\x86\x19'   # GLSLC compiler outputs (shader_split.py glslc_shaders)
 GL_SRC = rb'\0#version [0-9]'      # a GLSL source string as dm/gfx/tools/gl_shaders.py takes it from main (Balatro's main has none, only glslang's messages that start with '#version:')
@@ -68,6 +72,7 @@ def romfs_files(romfs):   # (path, size, first 32 bytes) of every RomFS file: fr
         return
     for d, _, names in os.walk(romfs):
         for n in names:
+            if os.fsencode(n) in ARTIFACTS: continue
             p = Path(d) / n
             with open(p, 'rb') as f: head = f.read(32)
             yield '/' + str(p.relative_to(romfs)), p.stat().st_size, head
@@ -154,7 +159,7 @@ def guess(F, hooks=None):
     G['modules'] = (' '.join(keep), f'not loaded, main takes nothing from them the host does not supply: {", ".join(drop)}' if drop else 'every module main imports from')
 
 
-    # Memory: the guest block is 256 MB in front + alias region + stack region + heap region (hle_svc.c mem_init)
+    # Memory: the guest block is 256 MB in front + heap region + stack region + alias region (hle_svc.c mem_init)
     giant = sum(m['bss'] for n, m in mods.items() if n in keep and m['far'])
     heap_api = HEAP_API in imp
     pool = OUNCE_POOL if F.get('ounce') else APP_POOL
@@ -173,17 +178,13 @@ def guess(F, hooks=None):
     G['sys_resource'] = (f'{F["sysres"]:#x}', f'the NPDM declares {F["sysres"] // MiB} MB of system resource' + ('' if F['sysres'] else
                          ': IsVirtualAddressMemoryEnabled is false, as on Horizon (Big Brain Academy: Brain vs. Brain sets a heap only then)'))
 
-    if F.get('main_markers', set()) & {'Unreal', 'Unreal 4'} and R['exts'].get('.pak') and 'nvnBootstrapLoader' in imp:
+    if 'Unreal' in F.get('main_markers', set()) and R['exts'].get('.pak') and 'nvnBootstrapLoader' in imp:
         G['shader_groups'] = ('ShaderArchive-Global-=global ShaderArchive-=game', 'the decoded shader code archives: the engine\'s global shaders and the game\'s material shaders')
-    # The engine region needs virtual address memory; without it (OCTOPATH TRAVELER 1.0.5, Unreal Engine 4 on SDK 3.5.1, no system resource; Yoshi's Crafted World, SDK 4: 0xc5200000) nninitStartup sets a heap of pool − used instead,
-    # which the heap-region layout above holds
-    if F.get('main_markers', set()) & {'Unreal', 'Unreal 4'} and R['exts'].get('.pak') and 'nvnBootstrapLoader' in imp and F['sysres']:
-        G['mem_reserve'] =('0x1028000000', 'Unreal: nninitStartup reserves a 62 GB address region and its FMallocBinned3 takes 37 GB of it, so a 64 GB alias region for the bring-up on the Mac. '
-                            'The rewriter cuts the allocator in any Unreal 4 / 5 main (dm/tools/ue_malloc.py) and gives the region what the alias region has room for (dm/tools/ue_region.py), so an iPhone '
-                            'takes a smaller guest block, as Octopath Traveler 0\'s profile (docs/reference/memory.md)')
-        # Leave 128 MB for the initial heap after the 256 MB module and stack regions.
-        # The old 64.125 GB alias consumed the entire block (SMT V: Vengeance's 6 MB heap failed).
-        G['mem_alias'] = ('0x1000000000', '')
+    if 'RE Engine' in F.get('main_markers', set()) and R['mags'].get('RE Engine PAK'):
+        G['shader_groups'] = ('re_chunk=sdf', 'RE Engine: the shaders are SDF definitions inside the KPKA PAKs (shader_split.py kpka_jobs / sdf_shaders), as in Monster Hunter Rise\'s and PRAGMATA\'s profiles')
+    # Unreal takes the layout above with no rule of its own: the rewriter cuts FMallocBinned3 in any Unreal 4 / 5 main (dm/tools/ue_malloc.py) and gives the 62 GB engine region what the
+    # alias region has room for (dm/tools/ue_region.py), 4.06 GB in the 5 GB block. A 64 GB alias region here gained the Mac nothing (it reserves the Switch's 64 GB anyway) and an iPhone
+    # refused it at launch (Dispatch, GitHub issue #2278: docs/reference/memory.md, Provisional Unreal profiles asked an iPhone for 64 GB)
     G.update(preset)
     return G
 
@@ -357,7 +358,7 @@ def build_sources(exefs, romfs, modules):
                 nb = (struct.unpack_from('<I', h, i + 12)[0] + max(struct.unpack_from('<I', h, i + 4)[0], 1) - 1) // max(struct.unpack_from('<I', h, i + 4)[0], 1)
                 oodle_ue3 += h[i + 16 + 8 * nb:i + 17 + 8 * nb] == b'\x8c'
     import frostbite   # Frostbite's superbundles (EA SPORTS FC 27): every item of the cas files is Oodle Leviathan, decoded with the game's own decoder
-    return shader_sources(imports, glsl_src, glslc_mods, spirv, len(uepak.unreal_paks(str(romfs), inline=False)), trinity, len(uepak.unreal_paks(str(romfs), inline=True)), gl_names, gl_src, gl_files, oodle_pkz, nro_imp,
+    return shader_sources(imports, glsl_src, glslc_mods, spirv, len(uepak.unreal_paks(str(romfs), inline=False, mains=[exefs / 'main'])), trinity, len(uepak.unreal_paks(str(romfs), inline=True, mains=[exefs / 'main'])), gl_names, gl_src, gl_files, oodle_pkz, nro_imp,
                           oodle_gfpak=oodle_gfpak, oodle_ue3=oodle_ue3, frostbite=frostbite.is_frostbite(str(romfs)), romfs_glsl=romfs_glsl)
 
 
@@ -462,20 +463,6 @@ def engine(F):   # keys that follow from the engine rather than from a general s
     return {}
 
 
-def mem_used(patched, modules):
-    """mem_used from the rewritten modules (scripts/build_ipa_from_nsp.py, after the rewrite): SetHeapSize checks heap + image against the pool (hle_svc.c), the game asks for pool − used − bss,
-    so used memory must cover the image without its bss. None when the default 64 MB does (Age of Calamity: 66.6 MB of modules → 72 MB)"""
-    total = big = 0
-    for m in modules:
-        hdr = dict(re.findall(r'^# (\w+)\t(\S+)', (Path(patched) / f'{m}.fixups.tsv').read_text(errors='replace'), re.M))
-        if int(hdr.get('PATCH_OFF', '0'), 16) < 0:   # patch area before the base: the image is IMAGE_SIZE, the part beyond the file is bss
-            size = int(hdr['IMAGE_SIZE'], 16); big += size - int(hdr['FILE_IMAGE_LEN'], 16)
-        else: size = ((Path(patched) / f'{m}.patched.bin').stat().st_size + 0x3FFF) & ~0x3FFF
-        total += size
-    need = ((total + 0x1FFFFF) & ~0x1FFFFF) - big
-    return need + 4 * MiB if need > 64 * MiB else None
-
-
 # ---- The heap check (scripts/build_ipa_from_nsp.py heap_check): host log lines → profile keys ----
 def depth_signal(log, g):
     """{'depth_mode': (value, reason)} when a check boot's host log shows the game setting a depth mode the profile does not say; g is the profile the run used. Only the game's own calls count
@@ -497,7 +484,11 @@ def heap_signals(log, g):
         heap = -(-max(req) // 0x8000000) * 0x8000000
         alias = reserve - 0x10000000 - stack - heap
         if alias >= 0x40000000: out['mem_alias'] = (f'{alias:#x}', f'the game asked for a {max(req) / 2**30:.2f} GB heap: a {heap / 2**30:.3f} GB heap region')
-        else: out['mem_reserve'] = (f'{0x10000000 + 0x40000000 + stack + heap:#x}', f'the game asked for a {max(req) / 2**30:.2f} GB heap')
+        else:   # not even 1 GB left for the alias region: the block grows around the alias region the profile has (at least 1 GB), which mem_reserve alone leaves as it is, so the heap
+            # region gets the whole request. Sized for a 1 GB alias region, the Switch 2 guess of 4.375 GB left Ocarina of Time 0xb8000000 of the 0x18ce00000 it asked for (issue #1361).
+            # Past the block an iPhone can reserve there is nothing to gain from a smaller alias region, and the Mac's layout is the same either way: its alias region is the Switch's 64 GB
+            keep = max(int(g.get('mem_alias'), 0), 0x40000000)
+            out['mem_reserve'] = (f'{0x10000000 + keep + stack + heap:#x}', f'the game asked for a {max(req) / 2**30:.2f} GB heap')
     top = [float(x) for x in re.findall(r'\[mem\] alias region mapped up to \+([0-9.]+) GB', log)]
     alias = int(g.get('mem_alias'), 0) / 2**30
     if not req and '[mem] heap ' not in log and int(g.get('sys_resource', '0'), 0) and top and max(top) > alias - 0.25 and int(g.get('app_pool'), 0) > 0x40000000:
@@ -505,10 +496,6 @@ def heap_signals(log, g):
         # beside it (Unity 2020 / 2022: Ace Attorney Investigations Collection, Brain Memory Training Academy, Patrick's Parabox, Monster Train 2, AI: THE SOMNIUM FILES - nirvanA Initiative,
         # whose heap check reached +4.26 GB of 4.38 in 5 s with the 3.2 GB pool); Unity 2018.3 maps only in StandardAllocator's region (Raging Loop keeps the hardware pool)
         out['app_pool'] = ('0x40000000', f'no heap set and the alias region used up to +{max(top):.2f} GB of {alias:.2f} GB in the heap check: a 1 GB pool, so StandardAllocator\'s region leaves the game room for its own')
-    m = re.search(r'\[mem\] SetHeapSize (0x[0-9a-f]+) \+ modules (0x[0-9a-f]+) > app pool', log)
-    if m and '[mem] heap ' not in log[m.end():]:   # the pool check failed and no SetHeapSize succeeded after it (Mario retries 2 MB smaller until one does; Age of Calamity gives up)
-        need = (int(m.group(2), 16) + 0x1FFFFF) & ~0x1FFFFF
-        if need > int(g.get('mem_used', '0x4000000'), 0): out['mem_used'] = (f'{need + 4 * MiB:#x}', f'the heap check failed for good: {need / MiB:.0f} MB of modules, more than the used memory reported')
     return out
 
 

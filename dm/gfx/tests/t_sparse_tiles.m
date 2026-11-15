@@ -19,6 +19,7 @@ uint64_t now_ns(void) { return bp_now(); }
 static int checks, failed;
 #define CHECK(label, c) do { checks++; if (!(c)) { failed++; fprintf(stderr, "FAIL: %s (line %d)\n", label, __LINE__); } } while (0)
 static void finish(void) { CHECK("submission completes", mtl_wait(mtl_sub_commit(), 5000000000ull)); CHECK("GPU has no submission error", !mtl_last_commit_error()); }
+int nvn_ft_tracked(uint64_t serial);
 static id<MTLTexture> resolve(const NVNtexture *x) { mtl_sub_begin(); id<MTLTexture> m = tex_mtl((const tex_t *)x); finish(); return m; }
 static pool_t g_phys, g_sparse;
 static void map_at(uint64_t voff, uint64_t size, uint64_t poff, int mapped) {
@@ -134,6 +135,7 @@ int main(void) { @autoreleasepool {
     // GPU-written: tiles and no uploads
     NVNtexture gx; h_nvnTextureBuilderSetLevels(&tb, 1); h_nvnTextureBuilderSetFlags(&tb, NVN_TEXTURE_FLAGS_SPARSE | NVN_TEXTURE_FLAGS_COMPRESSIBLE); h_nvnTextureBuilderSetStorage(&tb, (const NVNmemoryPool *)&g_sparse, 1ull << 30);
     CHECK("GPU-written sparse texture", h_nvnTextureInitialize(&gx, &tb));
+    CHECK("a virtual pool's addresses are not on the flush list, where they would read as written at once", !nvn_ft_tracked(((const tex_t *)&gx)->serial));
     id<MTLTexture> g = resolve(&gx);
     CHECK("placement sparse too", g.isSparse);
     uint64_t live1 = g_sp_live, nblit = g_bp_up_bytes;

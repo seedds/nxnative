@@ -16,7 +16,7 @@ On the Mac: the logos and the opening movie, the title (offline), the first-run 
 | `mem_used 0x6e00000` (110 MB) | `game.tsv` | the rewritten modules (110 MB with `main`'s 51 MB bss) are larger than the default 64 MB of used memory the game takes off the pool for its heap |
 | `shader_groups .bdt#=dvdbnd` | `game.tsv` | the shaders in the dvdbnd archives; see [Files and shaders](#files-and-shaders) |
 
-No `render_cond`: `SetRenderEnableConditional` is drawn unconditionally, as in Big Brain Academy; nothing seen looked wrong.
+`SetRenderEnableConditional`: drawn unconditionally, as in Big Brain Academy, nothing seen looked wrong; the host now evaluates it for every game, not checked on this game since.
 
 ## Frame rate
 

@@ -22,6 +22,9 @@ namespace Ryujinx.Graphics.Shader.Translation
         public Block CurrBlock { get; set; }
         public InstOp CurrOp { get; set; }
 
+        // nxnative: the last Operation.GlobalVectorGroup handed out (InstEmitAmpereMem.ALdg, InstEmitMemory.EmitLoad); 0 is no vector access
+        public int GlobalVectorGroups { get; set; }
+
         public int OperationsCount => _operations.Count;
 
         private readonly struct BrxTarget

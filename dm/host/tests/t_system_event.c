@@ -25,7 +25,7 @@ static int test_sleep(const struct timespec *ts, struct timespec *left) {
     // Bound an old worker that incorrectly follows a replacement event: inspect
     // its first tick, then destroy the replacement so even that worker can exit.
     if (sleeps++ && observe && observe->wh) {
-        pthread_mutex_lock(&G); observed_signal |= ((event_t *)h_get(observe->wh, O_EVENT_W))->signaled; pthread_mutex_unlock(&G);
+        g_lock(); observed_signal |= ((event_t *)h_get(observe->wh, O_EVENT_W))->signaled; g_unlock();
         destroy_event(observe);
     }
     assert(sleeps < 4);
@@ -56,6 +56,7 @@ void dm_thread_enter(uint64_t entry, uint64_t arg, uint64_t sp) { (void)entry; (
 uint64_t now_ns(void) { return clock_ns; }
 uint64_t guest_ns(void) { return now_ns(); }
 int dm_detclock_enabled(void) { return 0; }
+__thread uint64_t dm_clock_reads;   // guest clock reads per thread (hle_os.c in the host; thr_yield reads it)
 int dm_guest_as_contains(uintptr_t addr) { (void)addr; return 0; }
 int dm_sdk_major(void) { return 20; }
 int dm_game_imports(const char *prefix) { (void)prefix; return 1; }
@@ -81,7 +82,7 @@ static void destroy_event(test_event *ev) {
     ev->wh = ev->rh = 0;
 }
 static int signalled(test_event *ev) {
-    pthread_mutex_lock(&G); int signalled = ((event_t *)h_get(ev->wh, O_EVENT_W))->signaled; pthread_mutex_unlock(&G);
+    g_lock(); int signalled = ((event_t *)h_get(ev->wh, O_EVENT_W))->signaled; g_unlock();
     return signalled;
 }
 static void run_job(int i) {
@@ -132,11 +133,11 @@ static void copied_read_end(void) {
     uint32_t copy = hle_dup_readable_handle(ev.rh);
     assert(copy && copy != ev.rh && copy != ev.wh && !hle_dup_readable_handle(ev.wh));   // only a read end is copied
     assert(hle_signal_system_event_binding(hle_system_event_binding(&ev)));
-    pthread_mutex_lock(&G); event_t *e = h_get(copy, O_EVENT_R); assert(e && e->signaled && e == h_get(ev.rh, O_EVENT_R) && e->refs == 3); pthread_mutex_unlock(&G);
+    g_lock(); event_t *e = h_get(copy, O_EVENT_R); assert(e && e->signaled && e == h_get(ev.rh, O_EVENT_R) && e->refs == 3); g_unlock();
     destroy_event(&ev); assert(g_nse == 0);
-    pthread_mutex_lock(&G); assert(h_peek(copy, O_EVENT_R) == e && e->refs == 1); pthread_mutex_unlock(&G);
+    g_lock(); assert(h_peek(copy, O_EVENT_R) == e && e->refs == 1); g_unlock();
     uint64_t r[32] = {copy}; assert(svc_thread(0x16, r) && !r[0]);
-    pthread_mutex_lock(&G); assert(!h_peek(copy, O_EVENT_R)); pthread_mutex_unlock(&G);
+    g_lock(); assert(!h_peek(copy, O_EVENT_R)); g_unlock();
 }
 // Resolve exactly the SDK imports the service watcher calls, through the host's normal force-hook table.
 static void *purchase_hook(const char *name) {

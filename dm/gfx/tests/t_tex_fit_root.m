@@ -9,41 +9,142 @@ void svc_thread_dump(void) {}
 uint64_t now_ns(void) { return bp_now(); }
 static int checks, failed;
 #define CHECK(c, label) do { checks++; if (!(c)) { failed++; fprintf(stderr, "FAIL: %s\n", label); } } while (0)
-enum { W = 8, LEVELS = 3, LAYERS = 4, TID = 5 };
-static uint8_t texel(NSUInteger level, NSUInteger layer, int c) { return (uint8_t)(16 * level + 4 * layer + c + 1); }   // every level, layer and channel its own value
-static void read2d(id<MTLComputePipelineState> pipeline, id<MTLTexture> t, uint32_t level, float out[4]) {
+enum { W = 8, LEVELS = 3, LAYERS = 4, TID = 5, CUBE_LAYERS = 12, CUBE_CA = 6, CUBE_2A = 7, CA_2D = 8, CA_2A = 9, CA_CUBE = 10, NTID = 11 };
+static uint8_t texel(NSUInteger level, NSUInteger layer, int c) { return (uint8_t)(64 * level + 4 * layer + c + 1); }   // every level, layer and channel its own value
+static void read_args(id<MTLComputePipelineState> pipeline, id<MTLTexture> t, const void *args, size_t n, float out[4]) {
     id<MTLBuffer> b = [g_dev newBufferWithLength:16 options:MTLResourceStorageModeShared]; memset(b.contents, 0xcd, 16);
     id<MTLCommandBuffer> cb = [g_q commandBuffer]; id<MTLComputeCommandEncoder> e = [cb computeCommandEncoder];
-    [e setComputePipelineState:pipeline]; [e setTexture:t atIndex:0]; [e setBytes:&level length:sizeof level atIndex:0]; [e setBuffer:b offset:0 atIndex:1];
+    [e setComputePipelineState:pipeline]; [e setTexture:t atIndex:0]; [e setBytes:args length:n atIndex:0]; [e setBuffer:b offset:0 atIndex:1];
     [e dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(1, 1, 1)]; [e endEncoding]; [cb commit]; [cb waitUntilCompleted];
     CHECK(cb.status == MTLCommandBufferStatusCompleted && !cb.error, "the GPU reads the fitted view");
     memcpy(out, b.contents, 16);
 }
+static void read2d(id<MTLComputePipelineState> pipeline, id<MTLTexture> t, uint32_t level, float out[4]) { read_args(pipeline, t, &level, sizeof level, out); }
 static int same(const float v[4], NSUInteger level, NSUInteger layer, const int ch[4]) {
     for (int c = 0; c < 4; c++) if (fabsf(v[c] - texel(level, layer, ch[c]) / 255.0f) > 1e-4f) return 0;
     return 1;
 }
-int main(void) { @autoreleasepool {
-    mtl_init(); NSError *error = nil;
-    NSString *source = @"#include <metal_stdlib>\nusing namespace metal;\n"
-        "kernel void rd(texture2d<float> t [[texture(0)]], constant uint& level [[buffer(0)]], device float4* out [[buffer(1)]]) { out[0] = t.read(uint2(0, 0), level); }\n";
-    id<MTLLibrary> library = [g_dev newLibraryWithSource:source options:nil error:&error];
-    id<MTLComputePipelineState> pipeline = library ? [g_dev newComputePipelineStateWithFunction:[library newFunctionWithName:@"rd"] error:&error] : nil;
-    if (!pipeline) { fprintf(stderr, "%s\n", error.localizedDescription.UTF8String); return 2; }
+static id<MTLComputePipelineState> pipeline_of(id<MTLLibrary> library, NSString *name) {
+    NSError *error = nil; id<MTLComputePipelineState> p = [g_dev newComputePipelineStateWithFunction:[library newFunctionWithName:name] error:&error];
+    if (!p) { fprintf(stderr, "%s\n", error.localizedDescription.UTF8String); exit(2); }
+    return p;
+}
+static id<MTLTexture> layered_root(NSUInteger layers) {
     MTLTextureDescriptor *d = [MTLTextureDescriptor new];
-    d.textureType = MTLTextureType2DArray; d.width = d.height = W; d.arrayLength = LAYERS; d.mipmapLevelCount = LEVELS;
+    d.textureType = MTLTextureType2DArray; d.width = d.height = W; d.arrayLength = layers; d.mipmapLevelCount = LEVELS;
     d.pixelFormat = MTLPixelFormatRGBA8Unorm; d.storageMode = MTLStorageModeShared; d.usage = MTLTextureUsageShaderRead;
     id<MTLTexture> root = [g_dev newTextureWithDescriptor:d];
-    for (NSUInteger lv = 0; lv < LEVELS; lv++) for (NSUInteger l = 0; l < LAYERS; l++) {
+    for (NSUInteger lv = 0; lv < LEVELS; lv++) for (NSUInteger l = 0; l < layers; l++) {
         NSUInteger w = W >> lv; uint8_t px[W * W * 4];
         for (NSUInteger i = 0; i < w * w; i++) for (int c = 0; c < 4; c++) px[4 * i + c] = texel(lv, l, c);
         [root replaceRegion:MTLRegionMake2D(0, 0, w, w) mipmapLevel:lv slice:l withBytes:px bytesPerRow:4 * w bytesPerImage:4 * w * w];
     }
+    return root;
+}
+// Cubes and cube arrays in the slots of the other layered types: every face and layer the shader asks for, from the view's levels and layers (Splatoon Raiders: a cube in a cube array slot)
+static void cube_views(id<MTLLibrary> library) {
+    id<MTLComputePipelineState> rd_ca = pipeline_of(library, @"rd_ca"), rd_c = pipeline_of(library, @"rd_c"), rd_2a = pipeline_of(library, @"rd_2a"), rd_2d = pipeline_of(library, @"rd");
+    id<MTLTexture> root = layered_root(CUBE_LAYERS);
+    id<MTLTexture> cube = [root newTextureViewWithPixelFormat:root.pixelFormat textureType:MTLTextureTypeCube levels:NSMakeRange(1, 2) slices:NSMakeRange(6, 6)];   // the second cube, from level 1
+    id<MTLTexture> array = [root newTextureViewWithPixelFormat:root.pixelFormat textureType:MTLTextureTypeCubeArray levels:NSMakeRange(1, 2) slices:NSMakeRange(0, CUBE_LAYERS)];
+    uint64_t rid = 0; const int plain[4] = {0, 1, 2, 3}; float v[4];
+    static const float dirs[6][4] = {{1, 0, 0, 0}, {-1, 0, 0, 0}, {0, 1, 0, 0}, {0, -1, 0, 0}, {0, 0, 1, 0}, {0, 0, -1, 0}};
+    os_unfair_lock_lock(&g_rmu);
+    id<MTLTexture> c_ca = tex_fit(CUBE_CA, cube, MTLTextureTypeCubeArray, &rid), c_2a = tex_fit(CUBE_2A, cube, MTLTextureType2DArray, &rid);
+    id<MTLTexture> ca_2d = tex_fit(CA_2D, array, MTLTextureType2D, &rid), ca_2a = tex_fit(CA_2A, array, MTLTextureType2DArray, &rid), ca_c = tex_fit(CA_CUBE, array, MTLTextureTypeCube, &rid);
+    os_unfair_lock_unlock(&g_rmu);
+    CHECK(c_ca && c_ca.textureType == MTLTextureTypeCubeArray && c_ca.arrayLength == 1, "a cube in a cube array slot: an array of that one cube");
+    CHECK(c_ca.parentTexture == root && c_ca.parentRelativeSlice == 6 && c_ca.parentRelativeLevel == 1 && c_ca.mipmapLevelCount == 2, "from the root, with the cube's layers and levels");
+    for (int f = 0; f < 6; f++) { read_args(rd_ca, c_ca, dirs[f], sizeof dirs[f], v); CHECK(same(v, 1, 6 + f, plain), "every face of the cube through the cube array view"); }
+    CHECK(c_2a && c_2a.textureType == MTLTextureType2DArray && c_2a.arrayLength == 6 && c_2a.parentRelativeSlice == 6, "a cube in a 2D array slot: its six faces as layers");
+    for (uint32_t l = 0; l < 6; l++) { uint32_t a[2] = {l, 1}; read_args(rd_2a, c_2a, a, sizeof a, v); CHECK(same(v, 2, 6 + l, plain), "every layer of the cube through the 2D array view"); }
+    CHECK(ca_2d && ca_2d.textureType == MTLTextureType2D && ca_2d.parentRelativeSlice == 0, "a cube array in a 2D slot: its first face");
+    uint32_t level0 = 0; read_args(rd_2d, ca_2d, &level0, sizeof level0, v); CHECK(same(v, 1, 0, plain), "the first face through the 2D view");
+    CHECK(ca_2a && ca_2a.textureType == MTLTextureType2DArray && ca_2a.arrayLength == CUBE_LAYERS, "a cube array in a 2D array slot: all its faces as layers");
+    uint32_t last[2] = {CUBE_LAYERS - 1, 0}; read_args(rd_2a, ca_2a, last, sizeof last, v); CHECK(same(v, 1, CUBE_LAYERS - 1, plain), "the last face through the 2D array view");
+    CHECK(ca_c && ca_c.textureType == MTLTextureTypeCube, "a cube array in a cube slot: its first cube");
+    read_args(rd_c, ca_c, dirs[5], sizeof dirs[5], v); CHECK(same(v, 1, 5, plain), "the first cube's last face through the cube view");
+}
+// An ID marked gone (its memory pool finalized, or mtl_reg_tex_gone) lets go of every view it caches, as a full unregister does: the type-compatible view (tex_fit) and the pool
+// table's view (pool_fit) as well as the primary one, through the deferred release behind the open submission's fence (PR #923). Each case watches those two views themselves
+// (weak references; their parent, the root, the serial table holds): alive and reading right until the submission completes, gone after. Registering the same data again keeps
+// the views (mtl_reg_tex), so a gone case followed by one must not leave them; the unregister case is the control
+enum { RT_TID = NTID };
+static void rt_settle(void) {
+    CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull), "the submission completed");
+    @autoreleasepool { mtl_drain(); dispatch_sync(g_feedback_q, ^{}); defer_drain(); }
+}
+static void retire_views(id<MTLComputePipelineState> pipeline, id<MTLTexture> root) {
+    static const char *names[] = {"unregister", "descriptor gone", "pool gone", "descriptor gone, then the same registration"};
+    const int swapped[4] = {2, 1, 0, 3}; float px[4];
+    for (int mode = 0; mode < 4; mode++) {
+        char what[160];
+        pool_t pool = {.magic = MAGIC('P', 'O', 'O', 'L')};
+        tex_t t = {.magic = MAGIC('T', 'E', 'X', 0), .serial = nvn_new_serial(), .pool = &pool};
+        t.d = (nvn_texdesc){.target = NVN_TEXTURE_TARGET_2D_ARRAY, .format = NVN_FORMAT_RGBA8, .width = W, .height = W, .depth = LAYERS, .levels = LEVELS, .samples = 1};
+        nvn_tex_layout(&t.d, &t.L);
+        view_t v = {.set_levels = 1, .base_level = 1, .nlevels = 2, .set_layers = 1, .min_layer = 2, .nlayers = 2, .set_swizzle = 1,
+                    .swz = {MTLTextureSwizzleBlue, MTLTextureSwizzleGreen, MTLTextureSwizzleRed, MTLTextureSwizzleAlpha}};
+        int tid = RT_TID + mode;
+        __weak id<MTLTexture> w_alt = nil, w_palt = nil;
+        mtl_tex_init(&t); serial_put(t.serial, root); mtl_reg_tex(tid, &t, &v);
+        mtl_sub_begin();
+        @autoreleasepool {
+            uint64_t rid = 0;
+            os_unfair_lock_lock(&g_rmu);
+            id<MTLTexture> primary = tex_by_id(tid), alt = tex_fit(tid, primary, MTLTextureType2D, &rid);
+            uint64_t prid = pool_fit(tid, primary, MTLTextureType2D);
+            id<MTLTexture> palt = (__bridge id<MTLTexture>)g_treg[tid].palt[0];
+            os_unfair_lock_unlock(&g_rmu);
+            snprintf(what, sizeof what, "%s: the registered view, its type-compatible view and its pool table view are views of the root", names[mode]);
+            CHECK(primary && primary.parentTexture == root && alt && alt != primary && alt.parentTexture == root && prid && palt && palt.parentTexture == root, what);
+            w_alt = alt; w_palt = palt;
+            if (alt) { read2d(pipeline, alt, 1, px); snprintf(what, sizeof what, "%s: the type-compatible view reads level 2, layer 2, swizzled", names[mode]); CHECK(same(px, 2, 2, swapped), what); }
+            if (mode == 0) mtl_reg_tex(tid, NULL, NULL);
+            else if (mode == 2) mtl_alias_drop_pool(&pool);
+            else mtl_reg_tex_gone(tid);
+            if (mode == 3) mtl_reg_tex(tid, &t, &v);
+        }
+        @autoreleasepool {
+            defer_drain();   // the open submission's fence has not passed
+            snprintf(what, sizeof what, "%s: both views live until the submission that may read them completes", names[mode]);
+            CHECK(w_alt != nil && w_palt != nil, what);
+            id<MTLTexture> alt = w_alt;
+            if (alt) { read2d(pipeline, alt, 0, px); snprintf(what, sizeof what, "%s: the retired type-compatible view still reads level 1, layer 2", names[mode]); CHECK(same(px, 1, 2, swapped), what); }
+        }
+        rt_settle();
+        @autoreleasepool { snprintf(what, sizeof what, "%s: both views released once the submission completed", names[mode]); CHECK(w_alt == nil && w_palt == nil, what); }
+        mtl_sub_begin();
+        @autoreleasepool {
+            if (mode == 3) {   // registered again: the lookups make the views anew
+                uint64_t rid = 0;
+                os_unfair_lock_lock(&g_rmu);
+                id<MTLTexture> primary = tex_by_id(tid), alt = tex_fit(tid, primary, MTLTextureType2D, &rid);
+                os_unfair_lock_unlock(&g_rmu);
+                CHECK(alt && alt.parentTexture == root, "registered again: a new type-compatible view");
+                if (alt) { read2d(pipeline, alt, 0, px); CHECK(same(px, 1, 2, swapped), "registered again: the new view reads level 1, layer 2"); }
+            }
+            mtl_reg_tex(tid, NULL, NULL); mtl_tex_release(&t);
+        }
+        rt_settle();
+    }
+}
+int main(void) { @autoreleasepool {
+    mtl_init(); NSError *error = nil;
+    NSString *source = @"#include <metal_stdlib>\nusing namespace metal;\n"
+        "kernel void rd(texture2d<float> t [[texture(0)]], constant uint& level [[buffer(0)]], device float4* out [[buffer(1)]]) { out[0] = t.read(uint2(0, 0), level); }\n"
+        "kernel void rd_2a(texture2d_array<float> t [[texture(0)]], constant uint2& a [[buffer(0)]], device float4* out [[buffer(1)]]) { out[0] = t.read(uint2(0, 0), a.x, a.y); }\n"
+        "kernel void rd_ca(texturecube_array<float> t [[texture(0)]], constant float4& a [[buffer(0)]], device float4* out [[buffer(1)]]) { constexpr sampler s(filter::nearest); out[0] = t.sample(s, a.xyz, 0, level(a.w)); }\n"
+        "kernel void rd_c(texturecube<float> t [[texture(0)]], constant float4& a [[buffer(0)]], device float4* out [[buffer(1)]]) { constexpr sampler s(filter::nearest); out[0] = t.sample(s, a.xyz, level(a.w)); }\n";
+    id<MTLLibrary> library = [g_dev newLibraryWithSource:source options:nil error:&error];
+    if (!library) { fprintf(stderr, "%s\n", error.localizedDescription.UTF8String); return 2; }
+    id<MTLComputePipelineState> pipeline = pipeline_of(library, @"rd");
+    id<MTLTexture> root = layered_root(LAYERS);
     // the view cache's view: levels 1-2, layers 2-3, red and blue swapped
     MTLTextureSwizzleChannels sw = MTLTextureSwizzleChannelsMake(MTLTextureSwizzleBlue, MTLTextureSwizzleGreen, MTLTextureSwizzleRed, MTLTextureSwizzleAlpha);
     id<MTLTexture> view = [root newTextureViewWithPixelFormat:root.pixelFormat textureType:MTLTextureType2DArray levels:NSMakeRange(1, 2) slices:NSMakeRange(2, 2) swizzle:sw];
     os_unfair_lock_lock(&g_rmu);
-    g_treg = calloc(TID + 1, sizeof *g_treg); g_ntreg = TID + 1;
+    g_treg = calloc(NTID, sizeof *g_treg); g_ntreg = NTID;
     uint64_t rid = 0, rid2 = 0;
     id<MTLTexture> fit = tex_fit(TID, view, MTLTextureType2D, &rid);   // a shader that declares 2D reads the 2D array's first layer
     id<MTLTexture> again = tex_fit(TID, view, MTLTextureType2D, &rid2);
@@ -57,5 +158,7 @@ int main(void) { @autoreleasepool {
     float v[4];
     read2d(pipeline, fit, 0, v); CHECK(same(v, 1, 2, swapped), "level 0 of the fitted view is level 1, layer 2, swizzled");
     read2d(pipeline, fit, 1, v); CHECK(same(v, 2, 2, swapped), "level 1 of the fitted view is level 2, layer 2, swizzled");
+    cube_views(library);
+    retire_views(pipeline, root);
     printf("tex_fit views from the root: %d checks, %d failed\n", checks, failed); return failed != 0;
 } }

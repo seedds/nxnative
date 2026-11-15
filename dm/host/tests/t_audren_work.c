@@ -28,6 +28,8 @@ static int opens, starts, joins, closes, fail_open, nested;
 static int event_destroys, event_binds, attaches, event_in_handle;
 static void *sdk_event, *game_event;
 static void *sdk_work;
+static char notify_event[64];   // the output device notification's event (SDK 21+ names)
+static int notify_binds, notify_destroys;
 static void *map_key, *map_value;
 static size_t sdk_size(const uint8_t *param) {
     assert(*(int32_t *)(param + P_DEVICE) == 1 && *(int32_t *)(param + P_MODE) == 1);
@@ -53,7 +55,10 @@ static Result sdk_open_ev(void **handle, void *ev, const uint8_t *param, void *w
     if (!r && event_in_handle) handle[1] = ev;   // SDK 3 to 12 keep the event in the handle (SDK 3 sdk+0x17dffc, SDK 12 sdk+0x4d274); SDK 18 keeps it at *handle[1]
     return r;
 }
-static void sdk_destroy_event(void *ev) { assert(ev == sdk_event); event_destroys++; }
+static void sdk_destroy_event(void *ev) {
+    if (ev == notify_event) { notify_destroys++; return; }
+    assert(ev == sdk_event); event_destroys++;
+}
 static uint32_t sdk_readable(const void *ev) { assert(ev == sdk_event && event_binds); return 0x1002; }
 static void sdk_attach(void *ev, uint32_t h, int managed, int clear) {   // the game's object gets the copied read end, managed by the game, auto-clear: what the DSP open attaches
     assert(ev == game_event && h == 0x1003 && managed == 1 && clear == 1);
@@ -97,6 +102,7 @@ int dm_pcmout_append(void *k, void *b) { (void)k; (void)b; return 0; }
 void *dm_pcmout_released(void *k) { (void)k; return NULL; }
 void dm_pcmout_wait(void *k, int ms) { (void)k; (void)ms; }
 void hle_bind_system_event(void *ev, int ac) {
+    if (ev == notify_event) { assert(ac == 0); notify_binds++; return; }
     assert(ev == sdk_event && ac == 1 && event_destroys == 2 * event_binds + 1);   // after the open destroys the SDK's local event (each earlier Close destroyed one more)
     event_binds++;
 }
@@ -184,6 +190,16 @@ int main(void) {
         h_ar_Close(handle[0], handle[1]);
     }
     free(work);
+    // The output device notification: a second acquire is refused until a release, which destroys the event as the SDK's does (Nintendo Switch Sports Resort, main+0x3af119c)
+    h_ad_NotifyRelease21(notify_event);   // never acquired: nothing to destroy
+    assert(notify_destroys == 0);
+    assert(h_ad_Notify21(notify_event) == RES_OK);
+    assert(h_ad_Notify21(notify_event) == 0x499 && notify_binds == 1);   // the second acquire, before a release, is refused
+    h_ad_NotifyRelease21(notify_event);
+    assert(notify_destroys == 1);
+    assert(h_ad_Notify21(notify_event) == RES_OK && notify_binds == 2);
+    h_ad_NotifyRelease21(notify_event);
+    assert(notify_destroys == 2);
     puts("audren work buffer: Horizon sizing fixtures, both opens, nested open, failures and close lifetime passed");
     return 0;
 }

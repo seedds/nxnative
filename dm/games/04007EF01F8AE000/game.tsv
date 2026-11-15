@@ -25,6 +25,11 @@ shader_versions	v131072
 fps_target	60
 fps_max	120
 
+# ---- Graphics ----
+# The game sets the near=0 NVN depth mode (nvnDeviceSetDepthMode): offline pipeline bases take the main0_z vertex entries. Without the key the bundled archive was made for
+# near=-w, the host refused it ("the game's depth mode is not the one built for") and every Mac built its own 872 MB of bases on first start
+depth_mode	zero
+
 # ---- Files ----
 modules	main subsdk2 sdk
 romfs_marker	Fs.bin.zst

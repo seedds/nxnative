@@ -49,7 +49,7 @@ static int move(const nvn_texdesc *d, unsigned level, unsigned layer, uint8_t *b
     uint32_t row_bytes, rows, slices, bpb; uint64_t base; unsigned th, td;
     if (nvn_deswizzle_geom(d, level, layer, &row_bytes, &rows, &slices, &base, &th, &td, &bpb)) return -1;
     if (pitch < row_bytes || base < bl_at) return -1;
-    bl += base - bl_at; uint32_t lb = nvn_tex_level_gobs(d, level) * 64;   // the row as laid out (padded in a sparse texture's tiled levels)
+    bl += base - bl_at; uint32_t lb = nvn_tex_level_gobs(d, level) * 64;   // the row as laid out (padded in the tiled levels of a sparse texture or a packaged layout with width alignment)
     if (lb < row_bytes) lb = row_bytes;
     // Hoist nvn_bl_offset's slice and row terms out of the segment loop. The block height and depth are powers of two,
     // so their division / remainder become shifts and masks. At x = 16*j the block column is j >> 2, and the segment
@@ -87,6 +87,21 @@ int nvn_deswizzle(const nvn_texdesc *d, unsigned level, unsigned layer, const vo
 }
 int nvn_swizzle(const nvn_texdesc *d, unsigned level, unsigned layer, const void *src, size_t src_pitch, void *dst) {
     return move(d, level, layer, (uint8_t *)dst, 0, (uint8_t *)src, src_pitch, 0);
+}
+
+// Every step-th block of every step-th block row of a level and layer (2D, one slice), from half a step in: the block in the middle of each step x step cell. nx x ny blocks, rows of
+// nx blocks in dst. A block lies in one 16-byte piece of the storage, so only block sizes of 1, 2, 4, 8 and 16 bytes (-1 for others, and what nvn_deswizzle refuses)
+int nvn_deswizzle_pick(const nvn_texdesc *d, unsigned level, unsigned layer, const void *src, uint32_t step, void *dst, uint32_t nx, uint32_t ny) {
+    uint32_t row_bytes, rows, slices, bpb; uint64_t base; unsigned th, td;
+    if (!step || nvn_deswizzle_geom(d, level, layer, &row_bytes, &rows, &slices, &base, &th, &td, &bpb) || slices != 1 || bpb > 16 || (bpb & (bpb - 1))) return -1;
+    uint32_t lb = nvn_tex_level_gobs(d, level) * 64, bx = row_bytes / bpb;   // lb: the row as laid out (move)
+    if (lb < row_bytes) lb = row_bytes;
+    const uint8_t *bl = (const uint8_t *)src + base; uint8_t *o = dst;
+    for (uint32_t j = 0; j < ny; j++) {
+        uint32_t y = j * step + step / 2; if (y >= rows) y = rows - 1;
+        for (uint32_t i = 0; i < nx; i++, o += bpb) { uint32_t x = i * step + step / 2; if (x >= bx) x = bx - 1; memcpy(o, bl + nvn_bl_offset(x * bpb, y, 0, lb, rows, th, td), bpb); }
+    }
+    return 0;
 }
 
 // One 64 KB tile of a sparse texture's tiled level (2D, one slice). Such a level is laid out with its width padded to whole tiles (nvn_tex.c level_walk), and a tile is one block row of

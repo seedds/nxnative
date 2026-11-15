@@ -38,6 +38,5 @@ FRAME_STEP = {'0effe4af1dec3a7966b934d4a7c3d2bf': frame_step}
 # purpose, why; blocked or kept: why the gap stays open (cannot close yet, or left open on purpose); checked: what was checked on game files (else a judgement)
 BINDING = [
     {'what': 'frame step floor 2 → 1 vsync, and its frame step', 'now': 'build', 'goal': 'game', 'purpose': 'frame rate',
-     'why': "the game's own clock floor and step",
-     'blocked': 'frame-step stubs have no function-matched form yet'},
+     'why': "the game's own clock floor and step; MATCH_CUTS and MATCH_FRAME_STEP could carry the cut and the stub, both near the step's function (main+0x2e7750; one function not checked yet)"},
 ]

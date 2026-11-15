@@ -1,16 +1,13 @@
-"""A store only a dispatch's first invocation makes (dmsh_build.py first_store): recognised exactly, taken out of the shader for the host; anything else stays. The pattern is Splatoon Raiders' Hoian_Proc 029d9c3ec1fcb39f."""
+"""A store only a dispatch's first invocation makes (dmsh_rewrite.py first_store): recognised exactly, taken out of the shader for the host; anything else stays. The pattern is Splatoon Raiders' Hoian_Proc 029d9c3ec1fcb39f."""
 import ast
 from pathlib import Path
 import re
+import sys
 import unittest
 
 TOOLS = Path(__file__).resolve().parents[1] / 'tools'
-tree = ast.parse((TOOLS / 'dmsh_build.py').read_text())
-selected = [n for n in tree.body if (isinstance(n, ast.FunctionDef) and n.name == 'first_store')
-            or (isinstance(n, ast.Assign) and any(getattr(t, 'id', None) in ('FIRST_STORE', 'FIRST_STORE_2D') for t in n.targets))]
-scope = {'re': re}
-exec(compile(ast.Module(body=selected, type_ignores=[]), str(TOOLS / 'dmsh_build.py'), 'exec'), scope)
-first_store = scope['first_store']
+sys.path.insert(0, str(TOOLS))
+from dmsh_rewrite import first_store   # noqa: E402
 
 BODY = """    float _59 = as_type<float>(gl_WorkGroupID.x);
     float _61 = as_type<float>(gl_LocalInvocationID.x);

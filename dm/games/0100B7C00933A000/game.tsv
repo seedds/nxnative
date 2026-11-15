@@ -43,6 +43,12 @@ app_pool	0xCD500000
 # the NPDM declares 80 MB of system resource
 sys_resource	0x5000000
 
+# ---- Frame rate ----
+# 60 fps (30 on the Switch): the game steps a fixed frame time (bUseFixedFrameRate=True), so the host writes GEngine->FixedFrameRate (dm/tools/ue_fixed_rate.py) and rhi.SyncInterval 1
+fps_target	60
+# 120 on the Mac when chosen: under test (the note's Frame rate)
+fps_max	120
+
 # ---- Input ----
 # A 3D game with a free camera on the right stick: the 3D pad layout. It plays with the controller, so it stays docked (1920x1080)
 pad_layout	full

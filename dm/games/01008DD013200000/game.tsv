@@ -1,0 +1,44 @@
+# Game profile of Ori and the Will of the Wisps (Switch, update 1.2.1 = v196608). Plays on the Mac
+# Format: see dm/games/README.md
+# Moon Studios' game (Xbox Game Studios) on Unity 2018.4.24f1 IL2CPP with Wwise, SDK 9.4.0, NVN. The NSP script's provisional profile plus depth_mode; main's lock stubs in patches.py
+
+# ---- Identity ----
+title_id	01008DD013200000
+program_id	01008DD013200000
+
+# ---- App ----
+# Game name: only a label for profile listings and the Mac window title; the iOS app name is the game name in the base NSP, and the bundle ID comes from the base game title ID (build_ipa.sh / NSP script)
+name	Ori and the Will of the Wisps
+ipa	OriAndTheWillOfTheWisps.ipa
+app_category	public.app-category.games
+
+# ---- Versions ----
+build	v196608	1.2.1	main=11c33c7c2dbd3c5491841f67495c7ee8	subsdk0=8bdabfabc6964cd9e55b7079659f51f1	sdk=014256a5d58180219805a7d05fba02e4
+package	v196608
+shader_versions	v196608
+
+# ---- Files ----
+# every module main imports from (subsdk0 = the SDK's movie library, which plays the logo movies)
+modules	main subsdk0 sdk
+romfs_marker	Data/data_1.unity3d
+zip_store	.bnk:.dat:.resource:.unity3d:.wmv:.metallib
+
+# ---- Memory ----
+# the NPDM declares no system resource (no virtual address memory): main sets a heap of at most the pool − 64 MB − 4 MB of bss, 3.05 GB of a 3.25 GB heap region.
+# Resident up to 3.46 GB from the title into Swallow's Nest
+mem_reserve	0x100000000
+mem_alias	0x10000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+sys_resource	0x0
+# used memory for the rewritten modules (above the default 64 MB)
+mem_used	0x9d6c000
+
+# ---- Shader split ----
+# every shader is under Data/ (52,638 in the UnityFS bundles and main's GLSLC outputs)
+shader_groups	/Data/=data
+shader_note	Ori and the Will of the Wisps shaders
+
+# ---- Graphics ----
+# the game calls nvnDeviceSetDepthMode with near = 0: the pipeline bases made before it runs are made for that mode
+depth_mode	zero

@@ -116,6 +116,9 @@ int main(void) {
         const char *dir = getenv("DM_HOME_QUIT_CAPTURE");
         if (dir && *dir) {
             capture(hq_prompt_view(tv, @"Quit Super Mario Odyssey?", @"Unsaved progress will be lost.", @"Quit", @"Cancel", @"a.circle", @"b.circle"), tv.size, dir, "home-quit-prompt.png");
+            // The controller applet's prompt on the same card (front_mac.m, ctrl_prompt.h): Done drawn plain below the minimum, cream once it is met
+            capture(hq_card_view(tv, @"2 players wanted", @"Press a button on each controller to join.\nPlayers: 1 of 2", @"Done", @"Cancel", @"a.circle", @"b.circle", 0), tv.size, dir, "ctrl-prompt-waiting.png");
+            capture(hq_card_view(tv, @"2 players wanted", @"Press a button on each controller to join.\nPlayers: 2 of 2", @"Done", @"Cancel", @"a.circle", @"b.circle", 1), tv.size, dir, "ctrl-prompt-ready.png");
             CAShapeLayer *r = nil; NSView *hv = hq_hold_view(tv, @"Keep holding to quit", &r); hq_hold_set(r, 0.6);
             capture(hv, tv.size, dir, "home-quit-hold.png");
             capture(hq_prompt_view(tv, @"Quit Super Mario Odyssey?", @"Unsaved progress will be lost.", @"Quit", @"Cancel", @"xmark.circle", @"circle.circle"), tv.size, dir, "home-quit-prompt-ps.png");

@@ -22,9 +22,10 @@ import pso_offline
 
 def builder():
     # Use production functions without the CLI's translator/profile initialization.
-    names = {'load_pairs', 'vs_pad', 'vs_depth', 'shader_key', 'pair_keyed'}
+    names = {'load_pairs', 'partner_inputs', 'vs_pad', 'shader_key', 'pair_keyed'}
     tree = ast.parse((TOOLS / 'dmsh_build.py').read_text())
-    ns = dict(collections=collections, os=os, re=re, sys=sys, hashlib=hashlib)
+    import dmsh_entry
+    ns = dict(collections=collections, os=os, re=re, sys=sys, hashlib=hashlib, vs_depth=dmsh_entry.vs_depth)
     exec(compile(ast.Module(body=[n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in names],
                             type_ignores=[]), str(TOOLS / 'dmsh_build.py'), 'exec'), ns)
     return ns
@@ -74,7 +75,9 @@ class Pairing(unittest.TestCase):
         self.extra = self.package.parent / 'pso_pairs.tsv'
         self.extra.write_text('# BAHS\nv\tf1\nv\tf6\nv\tf1\n\n')
         self.ns = builder()
-        self.ns.update(out=str(self.root), PAIRS=self.ns['load_pairs'](self.g, self.package))
+        # output(): a finished shader's file as dmsh_build.py reads it back (from the compile cache there; from the folder here)
+        self.ns.update(out=str(self.root), PAIRS=self.ns['load_pairs'](self.g, self.package),
+                       output=lambda target, name: (self.root / name).read_bytes() if (self.root / name).is_file() else None)
         for key, loc in [('f0', 0), ('f1', 1), ('f6', 6)]:
             src = pixel(loc)
             if not loc: src = src.replace('    float4 missing [[user(locn0)]];\n', '').replace('in.v0 + in.missing', 'in.v0')
@@ -104,6 +107,20 @@ class Pairing(unittest.TestCase):
         self.g.table('pso_pairs.tsv').write_text('v\tf1\n')
         self.assertNotEqual(missing, present)
         self.assertNotEqual(present, dmsh_chain.inputs(self.g))
+
+    def test_mesh_pairs_from_record_and_hand_table(self):
+        manifest = self.g.table('pso_manifest.tsv')
+        self.assertEqual(dmsh_chain.mesh_pairs(self.g), set())
+        before = dmsh_chain.inputs(self.g)
+        manifest.write_text('# prewarm list\nS\tv_b\t0\nR\t00ff\nM\t-\t00ff\n')   # no G rows: the digest stays, so recording other pipelines again rebuilds nothing
+        self.assertEqual(dmsh_chain.inputs(self.g), before)
+        manifest.write_text('S\tv_b\t0\nG\t1111111111111111\t2222222222222222\nG\t1111111111111111\t2222222222222222\n')
+        self.g.table('geo_mesh.tsv').write_text('# kind: evidence  hand rows\n3333333333333333\t2222222222222222\n')
+        self.assertEqual(dmsh_chain.mesh_pairs(self.g), {('1111111111111111', '2222222222222222'), ('3333333333333333', '2222222222222222')})
+        recorded = dmsh_chain.inputs(self.g)
+        self.assertNotEqual(recorded, before)
+        manifest.write_text('G\t1111111111111111\t2222222222222222\nS\tv_b\t0\nR\t00ff\n')   # order and other rows do not count
+        self.assertEqual(dmsh_chain.inputs(self.g), recorded)
 
     def test_vertex_cache_depends_on_extra_pairs_and_pixel_code(self):
         self.ns.update(FACTS={}, MAP_ROWS={}, MAP_CONFLICT_ROWS={}, TOOL_FP=b'tools', CODE_FP='code',
@@ -147,6 +164,17 @@ class Pairing(unittest.TestCase):
                            env=dict(os.environ, TMPDIR=str(self.root)), capture_output=True, text=True)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertTrue(archive.is_file())
+
+
+class VariationPairs(unittest.TestCase):
+    def test_mesh_pairs_with_its_pixel_shader(self):   # NVN2: Ocarina of Time's foliage variations hold a mesh and a pixel shader, no vertex shader
+        import shader_split as split
+        sh = lambda tag: (bytes([tag]) * 0x40, bytes([tag]) * 0x40)
+        found = [('a.bfsha#BNSH@0x10#var0', 'vs', *sh(1)), ('a.bfsha#BNSH@0x10#var0', 'ps', *sh(2)),
+                 ('a.bfsha#BNSH@0x10#var1', 'ms', *sh(3)), ('a.bfsha#BNSH@0x10#var1', 'ps', *sh(4)),
+                 ('a.bfsha#BNSH@0x10#var2', 'ms', *sh(5))]   # no pixel shader: no pair
+        k = lambda tag: split.skey(*sh(tag))
+        self.assertEqual(split.var_pairs(found), {(k(1), k(2)), (k(3), k(4))})
 
 
 if __name__ == '__main__': unittest.main()

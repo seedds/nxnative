@@ -54,8 +54,65 @@ def cross_args(xc, spv):
 _EMULATED = re.compile(r'\bspvImage2DAtomicCoord\b|device\s+atomic_u?int\s*\*\s*\w+_atomic\b')
 
 
+# 64-bit image atomics (after uncraftablexd's PRAGMATA bring-up, PR #1801). Ampere SURED.D.2D.MAX.U64 (PRAGMATA's visibility buffer: depth << 32 | ID, 336 compute
+# shaders) is a 64-bit unsigned max with no result. Metal has it as texture2d<ulong, access::read_write>::atomic_max / atomic_min (MSL 3.1, an RG32Uint texture made with
+# the shader-atomic usage, Apple GPU family 9: M3 / A17 Pro and later), with no fetch form and no other operation. SPIRV-Cross refuses every 64-bit atomic, so the translator
+# (CodeGen/Spirv GenerateImageAtomic) writes the operation on its rg32ui image as two 32-bit atomics of the same operation on the same texel, the low word then the high word,
+# inside the IGN bounds check. wide_atomics turns each such pair into the one 64-bit atomic and declares the image as ulong; the high word is the more significant half, as the
+# RG32Uint texel's R channel holds the low 32 bits (Metal's ulong view of RG32Uint, little-endian as the guest's 64-bit texel). The image may be bound only for that: any
+# other access of it (a read, a write, a lone 32-bit atomic) fails the shader rather than run on the wrong type
+_WIDE_DECL = re.compile(r'\b(texture(?:2d|2d_array|3d))<uint, access::read_write>(\s+)(\w+_rg32ui)\b')
+_WIDE_STMT = r'^([ \t]*)(?:uint _\d+ = )?([\w.]*?\b%s)\.atomic_fetch_(max|min)\((.*)\)(?:\.x)?;[ \t]*$'
+_WIDE_QUERY = r'\.get_(?:width|height|depth|array_size)\(\)'
+
+
+def _split_args(text):
+    """The top-level comma-separated arguments of a call's argument text"""
+    out, depth, cur = [], 0, ''
+    for ch in text:
+        depth += {'(': 1, '[': 1, ')': -1, ']': -1}.get(ch, 0)
+        if ch == ',' and depth == 0:
+            out.append(cur.strip()); cur = ''
+        else:
+            cur += ch
+    out.append(cur.strip())
+    return out
+
+
+def wide_atomics(source):
+    """The translator's 32-bit atomic pairs on rg32ui images as Metal's 64-bit texture atomics (see above); the source unchanged when there are none"""
+    if '_rg32ui' not in source:
+        return source
+    for m in list(_WIDE_DECL.finditer(source)):
+        name = m.group(3)
+        if not re.search(r'\b%s\.atomic_' % re.escape(name), source):
+            continue   # an rg32ui image the shader only reads or writes: not this case
+        lines = source.split('\n')
+        stmt = re.compile(_WIDE_STMT % re.escape(name))
+        out, i = [], 0
+        while i < len(lines):
+            a = stmt.match(lines[i])
+            if not a:
+                out.append(lines[i]); i += 1; continue
+            b = stmt.match(lines[i + 1]) if i + 1 < len(lines) else None
+            if not b or b.group(2) != a.group(2) or b.group(3) != a.group(3):
+                raise ValueError(f'{name}: a 32-bit atomic on a 64-bit image that is not the translator\'s low / high pair')
+            x, y = _split_args(a.group(4)), _split_args(b.group(4))
+            if len(x) < 2 or x[:-1] != y[:-1]:
+                raise ValueError(f'{name}: the two halves of a 64-bit atomic name different texels')
+            out.append(f'{a.group(1)}{a.group(2)}.atomic_{a.group(3)}({", ".join(x[:-1])}, ulong4(as_type<ulong>(uint2({x[-1]}, {y[-1]}))));')
+            i += 2
+        source = '\n'.join(out)
+        left = re.sub(r'\b%s(?:%s|\.atomic_(?:max|min)\()' % (re.escape(name), _WIDE_QUERY), '', source)
+        uses = len(re.findall(r'\b%s\b' % re.escape(name), left))
+        if uses != 1:   # the declaration alone
+            raise ValueError(f'{name}: {uses - 1} accesses of a 64-bit atomic image besides its atomics and size queries')
+        source = re.sub(r'\b(texture(?:2d|2d_array|3d))<uint, access::read_write>(\s+%s)\b' % re.escape(name), r'\1<ulong, access::read_write>\2', source)
+    return source
+
+
 def check_msl(source):
-    """Fail closed on SPIRV-Cross's pointer emulation of image atomics; return the source unchanged"""
+    """Fail closed on SPIRV-Cross's pointer emulation of image atomics; return the source with 64-bit image atomics made native (wide_atomics)"""
     if 'tomic' in source and _EMULATED.search(source):   # (both alternatives hold the word; the pattern alone tries every character of the source)
         raise ValueError('image atomics emulated through a raw pointer; they must be native texture atomics (MSL 3.1)')
-    return source
+    return wide_atomics(source)

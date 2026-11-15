@@ -1,23 +1,23 @@
 # Pokémon Brilliant Diamond (`0100000011D90000`)
 
-Update 1.3.0 (v393216) over the base game. Unity 2019.4.27f1 IL2CPP, SDK 11.4.3, NVN, Wwise and FMOD. Modules `main`, `subsdk0` (NintendoSDK_movie) and `sdk`; the latter two are the builds used by [Metroid Dread](../010093801237C000/README.md). Plays on the Mac at 60 fps with 1.3.0. An unsigned IPA is built; iOS is untested.
+Update 1.3.0 (v393216) over the base game. Unity 2019.4.27f1 IL2CPP, SDK 11.4.3, NVN, Wwise and FMOD. Modules `main`, `subsdk0` (NintendoSDK_movie) and `sdk`; the latter two are the builds used by [Metroid Dread](../010093801237C000/README.md). Plays on the Mac at 60 fps. An unsigned IPA is built; iOS is untested.
 
 ## What it needs
 
 | Setting | Where | Why |
 |---|---|---|
-| SDK node area 1 GB → 62 MB | `dm/tools/sdk_patches.py`, build `2d369d99…`, `sdk+0x34e0c8` / `+0x34e164` | `StandardAllocator::Initialize` aborts before `nnMain` without it; see [Memory](#memory) |
+| SDK node area 1 GB → 62 MB and regions of 4 MB and more aligned to 2 MB | the SDK-wide rules in `dm/tools/sdk_patches.py` (`sdk+0x34e0c8` / `+0x34e164`; `sdk+0x34e2bc` / `+0x34e2c4` / `+0x34e2c8`) | `StandardAllocator::Initialize` aborts before `nnMain` without the node area cut; see [Memory](#memory) |
 | 5 GB block: `mem_reserve 0x140000000`, `mem_alias 0x118000000`, `mem_stack 0x10000000` | [`game.tsv`](game.tsv) | virtual address memory: StandardAllocator and Unity reserve regions independently |
 | `app_pool 0x80000000` (2 GB) | `game.tsv` | 1 GB exhausts the game's malloc while loading; the hardware pool leaves little alias space beside StandardAllocator |
 | `sys_resource 0x1000000` | `game.tsv` | the NPDM's 16 MB system resource selects virtual address memory |
-| `fps_target 60`, `present_interval display` | `game.tsv`, build-gated engine limiter | raises Unity's own cap and the interval-2 present cap; see [Frame rate](#frame-rate) |
+| `fps_target 60`, `present_interval display` | `game.tsv`; Unity's `targetFrameRate` and `vSyncCount` found by the rewriter | raises Unity's own cap and the interval-2 present cap; see [Frame rate](#frame-rate) |
 
 No game-specific code cuts. `DM_FPS_TARGET=30 DM_PRESENT_INTERVAL=game` restores the original 30 fps.
 
 ## Memory
 
 - **Resolved: abort before `nnMain`.** `nninitStartup` (`main+0x2c1cf0`) queries pool minus used memory, then calls `StandardAllocator::Initialize(nullptr, size)` at `main+0x2c1d5c`. It never sets a heap on the virtual-address-memory path. With the hardware pool and the original 1 GB node area, `CentralHeap::Init` fails: `Break` at `sdk+0x39fbd4`, backtrace `sdk+0x145038`, `sdk+0x145198`, `sdk+0x2f98e4`, `main+0x2c1d60`.
-- The SDK's `AddressRegionManager` constructor (`sdk+0x34e0b8`) loads the node-area limit at `+0x34e0c8`, and registers its occupied length at `+0x34e164`. Both are `mov w8/w9,#0x3fe00000`. The same two cuts as Engage's SDK shrink them to 62 MB. A repeat boot then reaches `nnMain` without a `Break`.
+- The SDK's `AddressRegionManager` constructor (`sdk+0x34e0b8`) loads the node-area limit at `+0x34e0c8`, and registers its occupied length at `+0x34e164`. Both are `mov w8/w9,#0x3fe00000`. The same two cuts as Engage's SDK shrink them to 62 MB. A repeat boot then reaches `nnMain` without a `Break`. Since 2026-11-09 the SDK-wide rules give them, with the 2 MB alignment of regions of 4 MB and more (`sdk+0x34e2bc`, `+0x34e2c4`, `+0x34e2c8`), in place of this build's row: with the iPhone's alias region (`DM_ALIAS_SIZE=0x118000000`, 240 s from a fresh save to the language menu), StandardAllocator's 1.94 GB region starts at alias +0.06 GB instead of +0.38 GB, the mapped high-water mark is +2.00 GB instead of +2.31 GB, and the gaps between live regions are 0.07 GB instead of 0.41 GB. Play past the menu was not run with them.
 - With the original 3.21 GB application pool and the node-area cut, mapped regions already reach +3.90 GB of the 4.375 GB alias region during startup; only 0.50 GB is committed in the first 12 seconds.
 - **Resolved: 1 GB pool exhausted during loading.** Both a windowed run with audio and a headless silent run crash as commits reach 1.00–1.01 GB, on null reads at `main+0x2605cc` (IL2CPP) and `main+0x578624`. A 2 GB pool passes this load and reaches the language menu and opening dialogue. At that point the alias high-water mark is +2.75 GB and 1.01 GB is committed. Over the 30-minute opening / Twinleaf Town run the high-water mark stayed at +2.75 GB, with up to 1.50 GB committed. The house settled near 2.24 GB resident / 0.87 GB Metal; outdoors near 2.50 GB / 1.01 GB, with scene-related steps rather than sustained growth.
 
@@ -30,7 +30,7 @@ No game-specific code cuts. `DM_FPS_TARGET=30 DM_PRESENT_INTERVAL=game` restores
 
 ## Frame rate
 
-- **Resolved: gameplay returns to 30 fps after 60 fps menus.** The game's IL2CPP initialization loads 30 at `main+0x2bc13f8` and calls the `Application.set_targetFrameRate` wrapper at `+0x26a0240`. The engine's icall registration at `+0xe34e60` resolves to `+0xdc8e70` → `+0x5fa640`, which stores the integer at `main+0x4afc868`; its getter at `+0x5fa630` reads the same field. The host's integer-FPS limiter row is gated on main build `94ceae32…` and keeps it at `fps_target`, even when the game resets it.
+- **Resolved: gameplay returns to 30 fps after 60 fps menus.** The game's IL2CPP initialization loads 30 at `main+0x2bc13f8` and calls the `Application.set_targetFrameRate` wrapper at `+0x26a0240`. The engine's icall registration at `+0xe34e60` resolves to `+0xdc8e70` → `+0x5fa640`, which stores the integer at `main+0x4afc868`; its getter at `+0x5fa630` reads the same field. The rewriter finds that field from the registration (`dm/tools/unity_fps.py`: Unity 2019.4 registers its internal calls from code, the function in `x1` and the name in `x0`), and the current quality level's `vSyncCount` (`[[main+0x4f3e0e0]+0x30] + [[main+0x4f3e0e0]+0x4c] * 0xa8 + 0x68`); the host keeps both at `fps_target`, even when the game resets them (`hle_fpslock.c`). Until 2026-11-09 a host row gated on main build `94ceae32…` wrote the same `targetFrameRate` field; the count, which the game sets to 2 at the language menu, was left to `present_interval display`.
 - Display pacing alone leaves that 30 fps engine cap. The profile also uses `present_interval display`, because the game asks for interval 2 independently. A headless Mac run with both changes reports 60.0 fps outdoors (frame-time median about 16.5 ms). `DM_WINDOW=0` still creates a window because the Mac front end tests whether the variable exists; timing comparisons omit it and use `DM_PRESENT_LINK=0` to avoid occluded-window display-link stalls.
 - **Current: movement and collision comparison passed.** Separate launches from the same save, at 30 and 60 fps, received `LDown~0.5`, `LRight~1`, `LUp~1`, with screenshots before and after each hold. Static-background phase correlation found offsets of (0, 0), (0, 1), (4, 1) and (-1, 4) pixels respectively: the same route and wall contact, within frame/input sampling differences. This checks that walking does not double in speed; it does not establish correctness of every later physics system. Captures are `run/shots/rate{30,60}-{start,down,right,wall}*.png` in the build folder.
 

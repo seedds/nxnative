@@ -136,14 +136,14 @@ def chain_version():
 
 
 def shader_dirs(app, build):
-    """Available library folder names only; a build may retain several old chains, so none establishes the chain the player ran."""
+    """Available library names only (a folder b-<chain>/ or its image b-<chain>.img, which dmsh_build.py writes); a build may retain several old chains, so none establishes the chain the player ran."""
     root = app if app else build
     dirs = [app / 'Contents/Resources/msl'] if app else [build / s for s in ('shader', 'shader/cache', 'shader/ios')] if build else []
     found = []
     for d in dirs:
         if d.is_symlink() or not d.is_dir(): continue
         found.extend(p.relative_to(root).as_posix() for p in d.iterdir()
-                     if not p.is_symlink() and p.is_dir() and re.fullmatch(r'b-[0-9a-f]+', p.name))
+                     if not p.is_symlink() and ((p.is_dir() and re.fullmatch(r'b-[0-9a-f]+', p.name)) or (p.is_file() and re.fullmatch(r'b-[0-9a-f]+\.img', p.name))))
     return sorted(found)
 
 

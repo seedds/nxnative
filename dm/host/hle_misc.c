@@ -33,9 +33,9 @@ static void aoc_load(void) {
 }
 // On the big host stack: the first query lists DM_AOC_DIR and logs, a few KB, and Digimon Story Cyber Sleuth asks from a thread with little stack left (SIGBUS in __vfprintf
 // under aoc_load, a store right below a page of the guest thread's stack)
-HLE_FORCE_BIG("_ZN2nn3aoc17CountAddOnContentEv", "add-on content count: length of the owned index list (DM_AOC_DIR)", int, h_aoc_Count, void) { aoc_load(); return g_naoc; }
+HLE_FORCE("_ZN2nn3aoc17CountAddOnContentEv", "add-on content count: length of the owned index list (DM_AOC_DIR)", int, h_aoc_Count, void) { aoc_load(); return g_naoc; }
 // ListAddOnContent(out, start index, max count): writes out from the owned index list starting at the start index, returns the number written
-HLE_FORCE_BIG("_ZN2nn3aoc16ListAddOnContentEPiii", "add-on content list: the owned index list", int, h_aoc_List, int *out, int off, int n) {
+HLE_FORCE("_ZN2nn3aoc16ListAddOnContentEPiii", "add-on content list: the owned index list", int, h_aoc_List, int *out, int off, int n) {
     int w = 0; aoc_load();
     for (int i = off < 0 ? 0 : off; i < g_naoc && w < n; i++) out[w++] = g_aoc[i];
     return w;
@@ -189,6 +189,7 @@ HLE_FORCE("_ZN2nn4pctl20EndFreeCommunicationEv", "parental controls · communica
 HLE_FORCE("_ZN2nn4pctl28IsFreeCommunicationAvailableEv", "parental controls · whether communication with others is available, networking out of scope; never", unsigned, h_pctl_IsFree, void) { return 0; }
 // The Legend of Zelda: Breath of the Wild: checks the parental-control permission for stereoscopic 3D before turning on the options' Labo VR mode (returns bool; the argument = whether to
 // show UI, the game passes 0). The host has no VR display (pl::BeginVrMode refuses, hle_sdk16.c): not permitted, so the game clears its VR flag and stays 2D (as MacNativeGames found on 1.6.0 and 1.9.0)
+HLE_FORCE("_ZN2nn4pctl33CheckAgcPermissionUnderMinimumAgeERKNS_7account3UidE", "parental controls · a user's permission under the minimum age (SDK 22), networking out of scope; never", unsigned, h_pctl_CheckAgc, const void *uid) { (void)uid; return 0; }
 HLE_FORCE("_ZN2nn4pctl27CheckStereoVisionPermissionEb", "parental controls · stereoscopic 3D permission; the host has no VR display, not permitted", unsigned, h_pctl_Stereo, unsigned show_ui) { (void)show_ui; return 0; }
 
 // swkbd software keyboard: see hle_swkbd.c

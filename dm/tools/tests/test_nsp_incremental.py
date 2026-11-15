@@ -72,7 +72,7 @@ class Base(unittest.TestCase):
 
 
 class DeriveProfile(Base):
-    def later_stages(self):   # what refine_after_rewrite and the shader split write into the derived profile
+    def later_stages(self):   # what later stages (a check boot, the shader split) write into the derived profile
         nsp.set_keys(game.Game(self.pdir), {'mem_used': ('0x4800000', 'rewritten modules')}, 'After the rewrite')
         (self.pdir / 'shader_map.tsv').write_text('# split\npkg.bin\t0\tvertex\tderived\tx\n')
 
@@ -130,6 +130,13 @@ class DeriveProfile(Base):
         nsp.derive_profile(game.Game(self.src), self.pdir, 'v65536', self.ex, ['main'], shader_only=True)
         self.assertEqual(game.Game(self.pdir).words('modules'), ['main'])
 
+    def test_a_profile_is_never_derived_onto_its_own_folder(self):
+        own = self.tmp / 'profile' / f'{TID:016X}'; shutil.copytree(self.src, own)   # this script's own profile, where its derived copy would go
+        before = {p.name: p.read_bytes() for p in own.iterdir()}
+        with self.assertRaises(nsp.BuildError):   # before: the folder's files were deleted, then copied from themselves (Chained Echoes: FileNotFoundError, its tables gone)
+            nsp.derive_profile(game.Game(own), own, 'v65536', self.ex, ['main'], shader_only=True)
+        self.assertEqual({p.name: p.read_bytes() for p in own.iterdir()}, before)
+
     def test_the_same_profile_in_another_checkout_keeps_later_stages(self):
         self.derive(); self.later_stages()
         other = self.tmp / 'checkout2' / 'games' / f'{TID:016X}'; shutil.copytree(self.src, other)   # the repository cloned again, or a front end's own copy of it
@@ -141,8 +148,6 @@ class DeriveProfile(Base):
         changes = {
             'source game.tsv': lambda: (self.src / 'game.tsv').write_text((self.src / 'game.tsv').read_text() + 'pad_layout\tfull\n'),
             'source manual table': lambda: (self.src / 'shader_facts_manual.tsv').write_text('k\t{"manual": 2}\n'),
-            'source chain header': lambda: (self.src / 'dmsh_chain.h').write_text('#define DMSH_CHAIN "new"\n'),
-            'new source file': lambda: (self.src / 'bf_want.tsv').write_text('# new\n'),
             'main build': lambda: nso(self.ex / 'ExeFS/main', 'ef' * 16),
             'display version': lambda: control(self.ex / 'control.nacp', '1.2.0'),
         }
@@ -162,10 +167,29 @@ class DeriveProfile(Base):
                 self.derive(**kw); self.assert_fresh()
         self.assertEqual(game.Game(self.pdir).title_id, 0x0100AAAA00FFF000)
 
+    def test_a_file_the_split_does_not_read_refreshes_the_copies_and_keeps_later_stages(self):   # a geo_mesh.tsv row used to wipe the split's tables
+        changes = {
+            'source chain header': lambda: (self.src / 'dmsh_chain.h').write_text('#define DMSH_CHAIN "new"\n'),
+            'new source file': lambda: (self.src / 'bf_want.tsv').write_text('# new\n'),
+            'edited source file': lambda: (self.src / 'pso_manifest.tsv').write_text('S\tk3\tpixel\n'),
+        }
+        for what, change in changes.items():
+            with self.subTest(what):
+                self.derive(); self.later_stages(); self.derive(); self.assert_kept()
+                change(); self.derive(); self.assert_kept()
+                for p in self.src.iterdir():
+                    if p.name not in nsp.DERIVED_SKIP: self.assertEqual((self.pdir / p.name).read_bytes(), p.read_bytes())
+                self.assertEqual(self.derive(), '1.1.0'); self.assert_kept()   # and the next run reuses the folder as it is
+
     def test_removed_source_file_goes(self):
         self.derive(); self.later_stages(); self.derive(); self.assert_kept()
         (self.src / 'pso_manifest.tsv').unlink(); self.derive()
-        self.assertFalse((self.pdir / 'pso_manifest.tsv').exists()); self.assert_fresh()
+        self.assertFalse((self.pdir / 'pso_manifest.tsv').exists()); self.assert_kept()
+
+    def test_no_split_key_derives_again(self):   # a folder derived before the split key, or one whose split key is gone
+        self.derive(); self.later_stages()
+        nsp.derived_split_key(self.pdir).unlink()
+        (self.src / 'pso_manifest.tsv').write_text('S\tk3\tpixel\n'); self.derive(); self.assert_fresh()
 
     def test_edited_copy_is_kept_until_inputs_change(self):   # the stored digest is of the inputs, not of the derived files
         self.derive(); (self.pdir / 'pso_manifest.tsv').write_text('S\tk2\tpixel\n'); self.derive()
@@ -199,6 +223,8 @@ class DeriveProfile(Base):
         (self.src / 'patches.py').write_text(f'FRAME_STEP = {{"{BID}": 1}}\n'); self.derive()
         nsp.derive_profile(game.Game(self.src), self.pdir, 'v65536', self.ex, ['main'], shader_only=True)   # shader tables only: the settings stay
         self.assertEqual(game.Game(self.pdir).get('fps_target'), '60')
+        (self.src / 'patches.py').write_text(f'FRAME_STEP = {{"{BID}": 1}}\nMATCH_FRAME_STEP = {{"main": []}}\n'); self.derive()   # stubs placed by function may serve it
+        self.assertEqual(game.Game(self.pdir).get('fps_target'), '60')
 
     def test_missing_corrupt_and_duplicate_override_rows_derive_again(self):
         for change in ('missing', 'corrupt', 'override', 'indented override', 'truncated'):
@@ -220,38 +246,6 @@ class DeriveProfile(Base):
         self.derive()
         self.assertEqual(game.Game(self.pdir).values('extra'), [['one'], ['one']])
 
-    def test_provisional_computed_mem_used_grows_shrinks_and_stays_stable(self):
-        self.derive(); g = game.Game(self.pdir)
-        # These reason comments were written by earlier versions of this script.
-        for reason in ('the rewritten modules are larger than the default 64 MB of used memory (Age of Calamity: 66.6 MB → 72 MB)',
-                       'used memory for the rewritten modules (above the default 64 MB)',
-                       'used memory for the current rewritten modules, at least the default 64 MB'):
-            g = nsp.set_keys(g, {'mem_used': ('0x4800000', reason)}, 'After the rewrite')
-            with mock.patch.object(nsp.pg, 'mem_used') as used:
-                for value in (0x5000000, None, 0x4800000):
-                    used.return_value = value
-                    g = nsp.refine_after_rewrite(g, self.ex, self.tmp / 'patched')
-                    self.assertEqual(int(g.get('mem_used'), 0), value or 0x4000000)
-                    before = g.table('game.tsv').read_bytes()
-                    nsp.refine_after_rewrite(g, self.ex, self.tmp / 'patched')
-                    self.assertEqual(g.table('game.tsv').read_bytes(), before)
-
-    def test_explicit_mem_used_without_registered_profile_is_kept(self):
-        self.derive(); p = self.pdir / 'game.tsv'; p.write_text(p.read_text() + 'mem_used\t0x5800000\n')
-        g = game.Game(self.pdir)
-        with mock.patch.object(nsp.pg, 'mem_used', side_effect=AssertionError('explicit value must win')):
-            self.assertIs(nsp.refine_after_rewrite(g, self.ex, self.tmp / 'patched'), g)
-            self.assertIs(nsp.refine_after_rewrite(g, self.ex, self.tmp / 'patched', game.Game(self.src)), g)
-
-    def test_computed_equal_numeric_value_keeps_bytes(self):
-        self.derive()
-        g = nsp.set_keys(game.Game(self.pdir), {'mem_used': ('75497472', 'used memory for the current rewritten modules, at least the default 64 MB')}, 'After the rewrite')
-        before = g.table('game.tsv').read_bytes()
-        with mock.patch.object(nsp.pg, 'mem_used', return_value=0x4800000) as used:
-            nsp.refine_after_rewrite(g, self.ex, self.tmp / 'patched')
-        used.assert_called_once()
-        self.assertEqual(g.table('game.tsv').read_bytes(), before)
-
     def test_derived_replace_failure_preserves_original(self):
         self.derive(); p = self.pdir / 'game.tsv'; before = p.read_bytes()
         with mock.patch.object(nsp.os, 'replace', side_effect=OSError('interrupted replace')):
@@ -267,7 +261,7 @@ class DeriveProfile(Base):
         self.assertEqual(sorted(p.name for p in self.pdir.iterdir() if p.name.startswith('.game.tsv')), [])
 
     def test_heap_stamp_replace_failure_preserves_original(self):
-        self.derive(); g = game.Game(self.pdir); before = g.table('game.tsv').read_bytes()
+        self.derive(); nsp.set_keys(game.Game(self.pdir), {'mem_alias': ('0x80000000', '')}, 'A profile'); g = game.Game(self.pdir); before = g.table('game.tsv').read_bytes()
         logs = self.tmp / 'logs'; logs.mkdir()
         def boot(*args): (logs / 'heap_check.log').write_text('>>> nnMain\n'); return 0
         with mock.patch.object(nsp, 'build_mac_host'), mock.patch.object(nsp, 'boot_mac', side_effect=boot), \
@@ -275,6 +269,25 @@ class DeriveProfile(Base):
             with self.assertRaisesRegex(OSError, 'interrupted replace'):
                 nsp.heap_check(REPO, self.ex, self.tmp / 'patched', self.tmp / 'work', {}, logs, g)
         self.assertEqual(g.table('game.tsv').read_bytes(), before)
+
+    def test_heap_check_runs_on_the_profiles_alias_region(self):   # its keys are for that layout, the iPhone's, not the Mac host's 64 GB
+        self.derive(); nsp.set_keys(game.Game(self.pdir), {'mem_alias': ('0x80000000', '')}, 'A profile'); g = game.Game(self.pdir)
+        logs = self.tmp / 'logs'; logs.mkdir(); seen = {}
+        def boot(host, patched, henv, *args): seen.update(henv); (logs / 'heap_check.log').write_text('>>> nnMain\n'); return 0
+        with mock.patch.object(nsp, 'build_mac_host'), mock.patch.object(nsp, 'boot_mac', side_effect=boot), mock.patch.object(nsp.pg, 'heap_signals', return_value={}):
+            nsp.heap_check(REPO, self.ex, self.tmp / 'patched', self.tmp / 'work', {}, logs, g)
+        self.assertEqual(seen['DM_ALIAS_SIZE'], '0x80000000')
+
+    def test_heap_check_boots_again_after_it_resizes_the_heap_region(self):   # the app pool check behind the heap request runs only on the second boot
+        with (self.src / 'game.tsv').open('a') as f: f.write('mem_alias\t0x80000000\nmem_reserve\t0x140000000\nmem_stack\t0x10000000\napp_pool\t0xc8000000\n')
+        self.derive(); logs = self.tmp / 'logs'; logs.mkdir(); aliases = []
+        runs = iter(['>>> nnMain\n[dm] SetHeapSize OOM: req 0xc9000000 > cap 0x8000000\n', '>>> nnMain\n[mem] SetHeapSize 0xc9000000 > app pool 0xc8000000 less used memory 0x4000000\n'])
+        def boot(host, patched, henv, *args): aliases.append(henv['DM_ALIAS_SIZE']); (logs / 'heap_check.log').write_text(next(runs)); return 0
+        with mock.patch.object(nsp, 'build_mac_host'), mock.patch.object(nsp, 'boot_mac', side_effect=boot):
+            g = nsp.heap_check(REPO, self.ex, self.tmp / 'work/patched_v65536', self.tmp / 'work', {}, logs, game.Game(self.pdir))
+        self.assertEqual(aliases, ['0x80000000', '0x50000000'])   # the second boot runs on the resized layout, and there is no third
+        self.assertEqual((g.get('mem_alias'), g.values('mem_used')), ('0x50000000', []))   # the host charges the used memory it reports: no module size to make up for
+        self.assertIn('the heap request did not fit, then the heap did not fit the app pool less used memory; set mem_alias', g.table('game.tsv').read_text())
 
     def check_boot(self, name, log):   # a check on the derived profile, whose boot writes this log; the profile after it
         logs = self.tmp / 'logs'; logs.mkdir(exist_ok=True); patched = self.tmp / 'work/patched_v65536'
@@ -354,30 +367,6 @@ class DeriveProfile(Base):
         g = check(AssertionError('a value set by hand is checked, not worked out again'))
         self.assertEqual(g.get('stdalloc_cap'), '0xa0000000')
 
-    def test_rewrite_changes_update_auto_mem_used(self):
-        self.derive(); g = game.Game(self.pdir); reg = game.Game(self.src)
-        with mock.patch.object(nsp.pg, 'mem_used') as used:
-            for value in (0x4800000, 0x5000000, None):
-                used.return_value = value
-                g = nsp.refine_after_rewrite(g, self.ex, self.tmp / 'patched', reg)
-                self.assertEqual(int(g.get('mem_used'), 0), value or 0x4000000)
-                before = g.table('game.tsv').read_bytes()
-                self.derive(); g = game.Game(self.pdir)
-                g = nsp.refine_after_rewrite(g, self.ex, self.tmp / 'patched', reg)
-                self.assertEqual(g.table('game.tsv').read_bytes(), before)
-
-    def test_explicit_mem_used_is_kept_and_equal_values_do_not_rewrite(self):
-        self.derive(); g = nsp.set_keys(game.Game(self.pdir), {'mem_used': ('75497472', '')}, 'After the rewrite')
-        before = g.table('game.tsv').read_bytes()
-        with mock.patch.object(nsp.pg, 'mem_used', return_value=0x4800000):
-            nsp.refine_after_rewrite(g, self.ex, self.tmp / 'patched', game.Game(self.src))
-        self.assertEqual(g.table('game.tsv').read_bytes(), before)
-        with (self.src / 'game.tsv').open('a') as f: f.write('mem_used\t0x5800000\n')
-        self.derive(); g = game.Game(self.pdir)
-        with mock.patch.object(nsp.pg, 'mem_used', side_effect=AssertionError('explicit value must win')):
-            self.assertIs(nsp.refine_after_rewrite(g, self.ex, self.tmp / 'patched', game.Game(self.src)), g)
-        self.assertEqual(g.get('mem_used'), '0x5800000')
-
     def test_provisional_run_invalidates_derivation(self):
         self.derive()
         key = nsp.derived_key(self.pdir)
@@ -394,6 +383,50 @@ class DeriveProfile(Base):
         self.assertFalse(key.exists())
         self.derive()
         self.assertFalse(game.Game(self.pdir).values('mem_alias'))
+
+
+class ProvisionalModules(Base):
+    """provisional_modules: the subsdks the NROs import from go into modules, and the build row of this ExeFS's main names every module of modules the ExeFS has, which the host loads
+    (game.py build_modules). Mario Golf: Super Rush's movie module went into modules alone and stayed unloaded (PR #2215)"""
+    SUB = 'ee' * 16
+
+    def setUp(self):
+        super().setUp()
+        self.ex = self.tmp / 'extract/v0/ExeFS'; nso(self.ex / 'main', BID); nso(self.ex / 'sdk', BID2); nso(self.ex / 'subsdk0', self.SUB)
+        self.add = {}
+        cm = mock.patch.object(nsp.pg, 'nro_modules', lambda exefs, nros, modules: {m: k for m, k in self.add.items() if m not in modules})
+        cm.__enter__(); self.addCleanup(cm.__exit__, None, None, None)
+
+    def profile(self, modules, *rows):
+        (self.src / 'game.tsv').write_text('\n'.join([f'title_id\t{TID:016X}', 'name\tTest Game', f'modules\t{modules}', *rows]) + '\n')
+        return game.Game(self.src)
+
+    def test_a_module_the_nros_import_from_goes_into_modules_and_the_row(self):
+        self.add = {'subsdk0': 'NintendoSDK_movie'}
+        g = nsp.provisional_modules(self.profile('main sdk', f'build\tv0\t4.0.0\tmain={BID}\tsdk={BID2}'), self.ex, {'a.nro': 'x'})
+        self.assertEqual(g.words('modules'), ['main', 'subsdk0', 'sdk'])
+        self.assertEqual(g.build_modules()[BID], ['main', 'subsdk0', 'sdk'])
+        self.assertEqual(g.builds()['v0']['subsdk0'], self.SUB)
+
+    def test_a_profile_written_before_gets_its_row_completed(self):   # modules already lists subsdk0, the row does not: nothing is added, the row is repaired
+        g = nsp.provisional_modules(self.profile('main subsdk0 sdk', f'build\tv0\t4.0.0\tmain={BID}\tsdk={BID2}'), self.ex, {'a.nro': 'x'})
+        self.assertEqual(g.build_modules()[BID], ['main', 'subsdk0', 'sdk'])
+        g = nsp.provisional_modules(self.profile('main subsdk0 sdk', f'build\tv0\t4.0.0\tmain={BID}\tsdk={BID2}'), self.ex, {})   # also with no NROs
+        self.assertEqual(g.build_modules()[BID], ['main', 'subsdk0', 'sdk'])
+
+    def test_another_versions_row_is_left_as_it_is(self):   # a provisional profile is reused for the versions packed from its folder
+        other = f'build\tv65536\t4.1.0\tmain={"77" * 16}\tsdk={BID2}'
+        self.add = {'subsdk0': 'NintendoSDK_movie'}
+        g = nsp.provisional_modules(self.profile('main sdk', other, f'build\tv0\t4.0.0\tmain={BID}\tsdk={BID2}'), self.ex, {'a.nro': 'x'})
+        self.assertNotIn('subsdk0', g.builds()['v65536'])
+        self.assertEqual(g.builds()['v0']['subsdk0'], self.SUB)
+
+    def test_a_complete_profile_is_not_written(self):   # subsdk0 is in the ExeFS but not in modules: it stays out, and the file is not touched
+        self.profile('main sdk', f'build\tv0\t4.0.0\tmain={BID}\tsdk={BID2}'); p = self.src / 'game.tsv'
+        os.utime(p, ns=(10**18, 10**18))
+        g = nsp.provisional_modules(game.Game(self.src), self.ex, {'a.nro': 'x'})
+        self.assertEqual(p.stat().st_mtime_ns, 10**18)
+        self.assertEqual(g.build_modules()[BID], ['main', 'sdk'])
 
 
 class DlcOnlyShaders(Base):
@@ -420,6 +453,21 @@ class DlcOnlyShaders(Base):
                 tables.joinpath('shader_map.tsv').write_text(shader_map)
                 tables.joinpath('shader_facts.tsv').write_text(facts)
                 self.assertEqual(nsp.dlc_only_shader_change(g, tables), want)
+
+    def test_a_shader_the_dlc_shares_with_the_game(self):   # issue #2439: the split gives a shared shader the game's row (merge_keys), so both directions are DLC-only changes
+        tables = self.tmp / 'new-tables'; tables.mkdir()
+        game_rows = 'vs_sdf.bin\t0\tvertex\tbase\t/re_chunk_000.pak#1#SDF#var0\nvs_sdf.bin\t1\tvertex\tshared\t/re_chunk_000.pak#1#SDF#var619\n'
+        dlc_rows = 'vs_other.bin\t0\tvertex\tdlc\t/aoc/1/re_dlc_000.pak#2#SDF#var1\n'
+        facts = 'base\t{}\n'
+        for name, profile, split, want in (
+            ('registered with the DLC, packed without it', game_rows + dlc_rows, game_rows, True),
+            ('registered without the DLC, packed with it', game_rows, game_rows + dlc_rows, True),
+            ('registered under the old crediting (the shared shader as the DLC\'s), packed without it',   # such a profile is split again, not accepted
+             game_rows.splitlines(True)[0] + dlc_rows + 'vs_other.bin\t1\tvertex\tshared\t/aoc/1/re_dlc_000.pak#2#SDF#var619\n', game_rows, False)):
+            with self.subTest(name=name):
+                self.src.joinpath('shader_map.tsv').write_text(profile); self.src.joinpath('shader_facts.tsv').write_text(facts)
+                tables.joinpath('shader_map.tsv').write_text(split); tables.joinpath('shader_facts.tsv').write_text(facts)
+                self.assertEqual(nsp.dlc_only_shader_change(game.Game(self.src), tables), want)
 
 
 class ComputeReaderAdditions(Base):
@@ -950,6 +998,30 @@ class JitBootDone(unittest.TestCase):
             self.assertTrue(done())
             (part / 'late.jit').write_bytes(b'x')
             self.assertFalse(done())   # something new starts the wait again
+
+
+class ShaderProfileKey(Base):   # the shader step's key takes the profile's shader inputs (dmsh_chain.py --inputs), not every file's bytes
+    def key(self):
+        env = dict(os.environ, DM_GAME=f'{TID:016X}', DM_GAMES_DIR=str(self.tmp / 'games'))
+        return nsp.fingerprint(nsp.shader_profile_key(sys.executable, REPO, env, game.Game(self.src)))
+
+    def test_files_no_shader_build_reads_keep_the_key(self):   # a note edit used to restore every library
+        before = self.key()
+        (self.src / 'README.md').write_text('# a note\n')
+        (self.src / 'pso_manifest.tsv').write_text('S\tk2\tpixel\n')
+        (self.src / 'game.tsv').write_text((self.src / 'game.tsv').read_text() + 'pad_layout\tfull\n')
+        self.assertEqual(self.key(), before)
+
+    def test_shader_inputs_change_the_key(self):
+        changes = {
+            'shader map': lambda: (self.src / 'shader_map.tsv').write_text('# registered\npkg.bin\t0\tvertex\tother\tx\n'),
+            'geo_mesh.tsv': lambda: (self.src / 'geo_mesh.tsv').write_text('a\tb\n'),
+            'an nvn_ key': lambda: (self.src / 'game.tsv').write_text((self.src / 'game.tsv').read_text() + 'nvn_test\ton\n'),
+        }
+        for what, change in changes.items():
+            with self.subTest(what):
+                before = self.key(); change(); self.assertNotEqual(self.key(), before)
+
 
 
 if __name__ == '__main__': unittest.main()

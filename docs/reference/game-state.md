@@ -32,6 +32,13 @@ The games' own state: saves, scripted state, and behaviour that looks like a hos
 - **Profile:** it plays handheld with Boost (`op_mode handheld`, `perf_mode boost`), which skips the TV setup and keeps the 1080p draw size.
 - **Found on:** [Rhythm Heaven Groove](../../dm/games/0100D9F01D474000/README.md) (SDK 21.4.0).
 
+### "Failed to authenticate" at the title: offline play only after a recent online login
+
+- **Symptom:** A at the title shows "Connecting to Battle.net", then "Failed to authenticate. Please try again."; OK goes back to the title, and every try ends the same way. No `[RED]` line.
+- **Cause (not a host bug):** the game's own policy. It allows offline play only within 30 days of its last Battle.net login, kept in its settings as "User Last Online"; a save that was never online has no such setting, so offline is refused, as on a console that never went online. The host is offline (nifm unavailable, the account token and Nintendo Account requests fail), and no answer of those services passes the check: the login is the game's own Battle.net request.
+- **Fix:** a rewriter cut in the game's `patches.py` sets the offline-allowed flag, so the game behaves as a console that was online within 30 days; the title then goes to the main menu, where Offline is chosen when a character is made. The game's code is where the cause lies, so the cut is the fix: a fixed cut for 1.0.34.0 and the same cut as a function-matched rule (`MATCH_CUTS`) for the game's other builds that keep the function.
+- **Found on:** [Diablo II: Resurrected](../../dm/games/0100726014352000/README.md) 1.0.34.0 (SDK 11.4.3). The check and its 30 days were first described in d2r-mobile's notes on a community offline fix; the cut here is its own.
+
 ## Scripted state
 
 ### The software keyboard in scripted runs (`DM_KBD`)

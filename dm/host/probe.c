@@ -22,7 +22,7 @@ void crash_set_trap_hook(int (*fn)(ucontext_t *uc));
 // The trampoline borrows x16: place probes only at function entries or at points where x16 is dead; the original instruction must not be PC-relative (adr/adrp/b/bl/ldr literal/cbz...).
 #define MAX_PROBE 16
 typedef void (*probe_fn)(ucontext_t *uc);
-static struct { uint64_t at; uint32_t *slot; unsigned hits; char name[40]; long dump, dpost; probe_fn fn; int freg; long foff; uint64_t fval; int hreg; } g_probe[MAX_PROBE];   // dpost: @*xN+off+dpost
+static struct { uint64_t at; uint32_t *slot; unsigned hits, seen; char name[40]; long dump, dpost; probe_fn fn; int freg; long foff; uint64_t fval; int hreg; } g_probe[MAX_PROBE];   // dpost: @*xN+off+dpost
 
 // !xN: treat xN as a sead::ExpHeap and print its free and used blocks (block size at block +0x18, alignment pad at +0x12). Settings (docs/agents/05-debugging.md):
 // DM_PROBE_HEAP=<name>,<start>,<size>,<free list>,<used list> layout by sead version (hex; node offset at list +0x14), default SMBW 0,28,30,b0,c8 (no name), BotW 28,38,40,e0,f8;
@@ -78,7 +78,7 @@ static void probe_heapwalk(uint64_t h) {
 }   // dump: on hit print 16 bytes at [x0+dump] (-1 = do not print); fn: dedicated handler (replaces the default print)
 static int g_nprobe;
 static uint64_t g_probe_frame_first, g_probe_frame_last = UINT64_MAX;
-static unsigned g_probe_limit;
+static unsigned g_probe_limit, g_probe_every;   // DM_PROBE_LIMIT printed hits per probe; DM_PROBE_EVERY=N every hit counts, every N-th prints (#N is then the true hit count: rates)
 uint64_t dm_guest_frame(void);
 static void probe_str(uint64_t p) {
     char buf[80]; vm_size_t got = 0;
@@ -112,6 +112,7 @@ static int probe_hit(ucontext_t *uc) {   // Registered by probe_install with the
     for (int i = 0; i < g_nprobe; i++) if (g_probe[i].at == pc) {
         if (g_probe[i].fn) { g_probe[i].hits++; g_probe[i].fn(uc); uc->uc_mcontext->__ss.__pc = (uint64_t)g_probe[i].slot; return 1; }
         uint64_t frame = dm_guest_frame();
+        if (g_probe_every && frame >= g_probe_frame_first && frame <= g_probe_frame_last && ++g_probe[i].seen % g_probe_every) { uc->uc_mcontext->__ss.__pc = (uint64_t)g_probe[i].slot; return 1; }
         if (frame < g_probe_frame_first || frame > g_probe_frame_last || (g_probe_limit && g_probe[i].hits >= g_probe_limit)) {
             uc->uc_mcontext->__ss.__pc = (uint64_t)g_probe[i].slot; return 1;
         }
@@ -126,7 +127,7 @@ static int probe_hit(ucontext_t *uc) {   // Registered by probe_install with the
         }
         probe_dump_once();
         flockfile(stderr);   // One block per hit when threads hit at once
-        { extern uint64_t g_t0_ns; uint64_t now_ns(void); uint32_t thr_cur_handle(void); fprintf(stderr, "[dm] PROBE %s #%u [%.4fs] F=%llu T=%x", g_probe[i].name, ++g_probe[i].hits, (now_ns() - g_t0_ns) / 1e9, (unsigned long long)frame, thr_cur_handle()); }
+        { extern uint64_t g_t0_ns; uint64_t now_ns(void); uint32_t thr_cur_handle(void); ++g_probe[i].hits; fprintf(stderr, "[dm] PROBE %s #%u [%.4fs] F=%llu T=%x", g_probe[i].name, g_probe_every ? g_probe[i].seen : g_probe[i].hits, (now_ns() - g_t0_ns) / 1e9, (unsigned long long)frame, thr_cur_handle()); }
         for (int r = 0; r < 8; r++) { uint64_t v = uc->uc_mcontext->__ss.__x[r]; fprintf(stderr, " x%d=%#llx", r, v); probe_str(v); }
         for (int r = 19; r < 24; r++) fprintf(stderr, " x%d=%#llx", r, uc->uc_mcontext->__ss.__x[r]);
         if (getenv("DM_PROBE_ALL")) for (int r = 8; r < 19; r++) fprintf(stderr, " x%d=%#llx", r, uc->uc_mcontext->__ss.__x[r]);   // also print x8–x18
@@ -306,7 +307,7 @@ static void *watch_arm(void *p) {
 // the bytes and, on each change, prints old → new and dumps every guest thread with its backtrace (svc_thread_dump, the first 8 changes): the writer is still inside the code that wrote.
 // Tears of the Kingdom's memory-shortage flag (a word its frame check compares with 1 and clears) lies on such a page. A suffix =<value> (hex) snapshots and dumps only the changes to that value,
 // for a word that changes thousands of times before the bad store (Mario vs. Donkey Kong: a heap block's list link, rewritten by every allocation beside it, until 0x3f landed in it)
-static uint64_t g_poll, g_plen, g_pval; static int g_pwant, g_pheap;
+static uint64_t g_poll, g_plen, g_pval; static int g_pwant, g_pheap, g_palias;
 // All threads but this one stopped at once, then their pc, lr and 8 frame-pointer frames read and printed after they run again: the writer is caught a few microseconds after its store
 static void poll_snap(void) {
     enum { MT = 256, NF = 8 }; static uint64_t fr[MT][NF + 2]; static thread_act_t keep[MT];
@@ -337,6 +338,7 @@ static void *poll_run(void *p) {
     (void)p; void svc_thread_dump(void); extern uint64_t g_t0_ns; uint64_t now_ns(void); vm_size_t got;
     uint64_t old = 0;   // read through the kernel: the address is not readable until the game maps it (the heap before SetHeapSize)
     if (g_pheap) { uint64_t hb = 0; while (dm_guest_heap_range(&hb, NULL), !hb) usleep(1000); g_poll += hb; }   // heap+<offset>
+    if (g_palias) { void svc_alias_range(uint8_t **base, size_t *size); uint8_t *ab = NULL; size_t as = 0; while (svc_alias_range(&ab, &as), !ab) usleep(1000); g_poll += (uint64_t)(uintptr_t)ab; }   // alias+<offset>: memory the game maps in its alias region (PRAGMATA's physical pools)
     while (vm_read_overwrite(mach_task_self(), g_poll, g_plen, (vm_address_t)&old, &got) || got != g_plen) usleep(1000);
     LOG("POLL %#llx + %llu armed, value %#llx", (unsigned long long)g_poll, (unsigned long long)g_plen, (unsigned long long)old);
     for (int n = 0;;) {
@@ -352,9 +354,9 @@ static void *poll_run(void *p) {
 }
 static void watch_install(void) {
     { const char *e = getenv("DM_PROBE_POLL");
-      if (e) { char *end; g_pheap = !strncmp(e, "heap+", 5); if (g_pheap) e += 5; g_poll = strtoull(e, &end, 16); g_plen = *end == '+' ? strtoull(end + 1, &end, 16) : 4;
+      if (e) { char *end; g_pheap = !strncmp(e, "heap+", 5); if (g_pheap) e += 5; g_palias = !strncmp(e, "alias+", 6); if (g_palias) e += 6; g_poll = strtoull(e, &end, 16); g_plen = *end == '+' ? strtoull(end + 1, &end, 16) : 4;
                if (*end == '=') { g_pwant = 1; g_pval = strtoull(end + 1, 0, 16); }
-               if ((!g_poll && !g_pheap) || !g_plen || g_plen > 8) die("DM_PROBE_POLL format: <address>[+<length up to 8>][=<value>] (hex)");
+               if ((!g_poll && !g_pheap && !g_palias) || !g_plen || g_plen > 8) die("DM_PROBE_POLL format: [heap+|alias+]<address>[+<length up to 8>][=<value>] (hex)");
                pthread_t t; pthread_create(&t, NULL, poll_run, NULL); pthread_detach(t); } }
     const char *e = getenv("DM_PROBE_WATCH"); if (!e) return;
     char *end; g_wheap = !strncmp(e, "heap+", 5);
@@ -371,6 +373,31 @@ static void watch_install(void) {
 
 #endif
 
+// DM_CTL atrace <hex address> <bytes> (hle_hid.c): the range made inaccessible; the first access to each page after that logs who made it (pc / lr as module offsets, read or write)
+// and opens the page again. Tells which code reads memory the GPU writes (PRAGMATA: the culling chain's results, read back by the game). Up to 64 ranges, 64 lines in all.
+// Mac and iOS: only mprotect and the page fault hooks (crash.c), as nvn_dirty.c's write tracking; hle_hid.c's DM_CTL reader calls it on both
+static struct { uint64_t lo, hi; } g_at[64]; static _Atomic int g_atn, g_atlog;
+static int atrace_fault(void *addr, int is_write, void *uc_) {
+    uint64_t a = (uint64_t)(uintptr_t)addr; int n = atomic_load(&g_atn);
+    for (int i = 0; i < n; i++) if (a >= g_at[i].lo && a < g_at[i].hi) {
+        uint64_t pg = (uint64_t)getpagesize(), p = a & ~(pg - 1);
+        mprotect((void *)(uintptr_t)p, pg, PROT_READ | PROT_WRITE);
+        if (atomic_fetch_add(&g_atlog, 1) < 64) { ucontext_t *uc = uc_; char b[256]; int k = snprintf(b, sizeof b, "[dm] atrace %s %#llx (range %d +%#llx):", is_write ? "write" : "read", (unsigned long long)a, i, (unsigned long long)(a - g_at[i].lo));
+            uint64_t at[2] = {uc->uc_mcontext->__ss.__pc, uc->uc_mcontext->__ss.__lr};
+            for (int j = 0; j < 2; j++) { module_t *m = module_of((void *)(uintptr_t)at[j]); k += m ? snprintf(b + k, sizeof b - k, " %s=%s+%#llx", j ? "lr" : "pc", m->name, (unsigned long long)(at[j] - (uint64_t)(uintptr_t)m->base)) : snprintf(b + k, sizeof b - k, " %s=%#llx", j ? "lr" : "pc", (unsigned long long)at[j]); }
+            b[k++] = '\n'; if (write(2, b, (size_t)k) < 0) {} }
+        return 1;
+    }
+    return 0;
+}
+void probe_atrace(uint64_t lo, uint64_t n) {
+    static int hooked; if (!hooked) { hooked = 1; dm_fault_hook_register(atrace_fault); }
+    int i = atomic_load(&g_atn); if (i >= 64 || !n) { LOG("atrace: 64 ranges at most"); return; }
+    uint64_t pg = (uint64_t)getpagesize(); lo &= ~(pg - 1); n = (n + pg - 1) & ~(pg - 1);
+    g_at[i].lo = lo; g_at[i].hi = lo + n; atomic_store(&g_atn, i + 1);
+    int r = mprotect((void *)(uintptr_t)lo, n, PROT_NONE);
+    LOG("DM_CTL: atrace range %d %#llx + %#llx armed%s", i, (unsigned long long)lo, (unsigned long long)n, r ? " (mprotect failed)" : "");
+}
 void probe_install(void) {
 #if !TARGET_OS_IPHONE
     crash_set_trap_hook(probe_hit);
@@ -381,6 +408,7 @@ void probe_install(void) {
     }
     const char *limit = getenv("DM_PROBE_LIMIT");
     if (limit) g_probe_limit = (unsigned)strtoul(limit, NULL, 10);
+    if ((limit = getenv("DM_PROBE_EVERY"))) g_probe_every = (unsigned)strtoul(limit, NULL, 10);
     const char *e = getenv("DM_PROBE");
     if (e) {
         char spec[512]; strlcpy(spec, e, sizeof spec);

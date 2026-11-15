@@ -1,0 +1,54 @@
+# DRAGON BALL: Sparking! ZERO: Spike Chunsoft / Bandai Namco on Unreal Engine 5.1.1 (IoStore, every pak and container encrypted, MallocBinned3), SDK 14.3.0, NVN, CRIWARE sound and movies;
+# update 2.0.76 (v327680) over the base game, with its six add-on contents.
+# Started from the NSP script's provisional profile (dm/games/profile_guess.py) and brought up on the Mac (docs/agents)
+# Format: see dm/games/README.md
+
+# ---- Identity ----
+title_id	010035F022078000
+program_id	010035F022078000
+
+# ---- App ----
+# Game name: only a label for profile listings and the Mac window title; the iOS app name is the game name in the base NSP, and the bundle ID comes from the base game title ID (build_ipa.sh / NSP script)
+name	DRAGON BALL: Sparking! ZERO
+ipa	DragonBallSparkingZero.ipa
+app_category	public.app-category.games
+
+# ---- Versions ----
+build	v327680	2.0.76	main=68edafd68c7bc1a1af50b82aac838018	subsdk0=c781dd63daf0ddcdb9975da50a198f93	sdk=2aef2cffb104ee7c9e212fd2f4c731e9
+package	v327680
+shader_versions	v327680
+
+# ---- Files ----
+# every module main imports from
+modules	main subsdk0 sdk
+romfs_marker	SparkingZERO/Content/Paks/pakchunk0-Switch.pak
+zip_store	.pak:.txt:.ucas:.utoc:.metallib
+
+# ---- Memory ----
+# Octopath Traveler 0's block: 3.2 GB of alias region, which the engine region gets nearly all of (dm/tools/ue_region.py). With FMallocBinned3 cut (dm/tools/ue_malloc.py, both of its calls)
+# the engine region's page allocator reached +0.50 GB through the tutorial battle on the Mac; Unreal's heap is the host's (1.25 GB there)
+mem_reserve	0xF0000000
+mem_alias	0xC8000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+# the NPDM declares 30 MB of system resource
+sys_resource	0x1e00000
+
+# ---- Frame rate ----
+# 60 fps (30 on the Switch): the host writes rhi.SyncInterval 1 and GEngine->FixedFrameRate 60 (dm/tools/ue_fixed_rate.py), which the engine steps the battles by; see the note's Frame rate
+fps_target	60
+# 120 on the Mac when chosen: under test (the note's Frame rate)
+fps_max	120
+
+# ---- Input ----
+# a 3D arena whose camera follows the fight, many buttons (D-pad, both sticks)
+pad_layout	full
+
+# ---- Shader split ----
+# shaders inline in the cooked packages (labels: <pak or container>#<package path>): the engine's global shader cache, the engine's and the game's packages
+shader_groups	GlobalShaderCache=global #Engine/=engine #SparkingZERO/=game
+shader_note	DRAGON BALL: Sparking! ZERO shaders
+
+# ---- Graphics ----
+# the game calls nvnDeviceSetDepthMode with near = 0 (the NSP script's address region check): the pipeline bases made before it runs are made for that mode
+depth_mode	zero

@@ -66,6 +66,20 @@ def imported(name, plt=0x1800, slot=0x2500):
     return out
 
 
+def two_callers(name):
+    out = imported(name)
+    return image_with(out, 0x800, caller(0x800, 0x1800), keep=0x100)
+
+
+def image_with(img, start, words, keep=None):
+    """img (from imported()) with its function replaced by words at start, or with a second function there (keep: the first one's start)"""
+    out = image({**({keep: caller(keep, 0x1800)} if keep else {}), start: words})
+    out[0x2000:0x3000] = img[0x2000:0x3000]   # the dynamic table, relocations, symbols and names
+    out[0x1800:0x1810] = img[0x1800:0x1810]   # the PLT entry
+    struct.pack_into('<i', out, 0x24, 0x2100 - 0x20)
+    return out
+
+
 class Matching(unittest.TestCase):
     def setUp(self):
         self.original = image({0x100: caller(0x100, 0x500), 0x500: [0xd2800020, RET]})
@@ -163,6 +177,78 @@ class Matching(unittest.TestCase):
             self.assertEqual(resolve(img, len(img), [self.rule], messages.append), [])
             self.assertTrue(messages[0].startswith('[RED] '))
 
+    def test_frame_step_rule_locates_its_function_or_nothing(self):
+        # MATCH_FRAME_STEP: the stub gets the start of the one matching function, wherever the build put it; none or two give a red line and no stub
+        from nso_match import locate_stub
+        stub = dict(name='step', size=self.rule['size'], fingerprints=self.rule['fingerprints'], stub=lambda ctx: None)
+        moved = image({0x800: caller(0x800, 0x1200, 0x2980), 0x1200: [0xd2800020, RET]})
+        messages = []
+        self.assertEqual(locate_stub(moved, 0x2000, [stub], messages.append), (stub, 0x800, {}, None))
+        self.assertFalse([m for m in messages if m.startswith('[RED]')], messages)
+        # others: more functions the stub patches, found the same way; one that does not match is left out with a red line, the frame step itself still goes in
+        leaf = Image(moved, 0x2000).fingerprint(0x1200)
+        found = dict(stub, others={'leaf': dict(size=8, fingerprints=[leaf]), 'gone': dict(size=12, fingerprints=[leaf])})
+        messages = []
+        self.assertEqual(locate_stub(moved, 0x2000, [found], messages.append), (found, 0x800, {'leaf': 0x1200, 'gone': None}, None))
+        self.assertEqual([m for m in messages if m.startswith('[RED]')], ["[RED] frame step 'step': gone left out: 0 matching functions (need exactly one)"])
+        with self.assertRaisesRegex(ValueError, 'needs size and fingerprints'): locate_stub(moved, 0x2000, [dict(stub, others={'leaf': dict(size=8)})], messages.append)
+        duplicate = image({0x100: caller(0x100, 0x500), 0x800: caller(0x800, 0x500), 0x500: [0xd2800020, RET]})
+        for img in (duplicate, image({0x100: [RET]})):
+            messages = []
+            self.assertIsNone(locate_stub(img, 0x2000, [stub], messages.append))
+            self.assertTrue(messages[0].startswith('[RED] frame step'), messages)
+        self.assertIsNone(locate_stub(moved, 0x2000, [], messages.append))
+        with self.assertRaisesRegex(ValueError, 'one frame step'): locate_stub(moved, 0x2000, [stub, dict(stub, name='other')], messages.append)
+        with self.assertRaisesRegex(ValueError, 'stub'): locate_stub(moved, 0x2000, [dict(stub, stub=None)], messages.append)
+        with self.assertRaisesRegex(ValueError, 'name, size'): locate_stub(moved, 0x2000, [dict(stub, cuts=[])], messages.append)
+
+    def test_anchored_frame_step_finds_the_one_caller_or_nothing(self):
+        # an anchored rule: the one function that calls the import, whatever its size or fingerprint, and what its find returned; find refusing, no caller or two give a red
+        # line and no stub
+        from nso_match import locate_stub
+        def find(fn): return fn.calls
+        stub = dict(name='step', calls='nn::vi::CreateLayer', find=find, stub=lambda ctx: None, reviewed=[[12]])
+        img = imported('nn::vi::CreateLayer')   # the function at 0x100 calls it at +12
+        messages = []
+        self.assertEqual(locate_stub(img, 0x2000, [stub], messages.append), (stub, 0x100, {}, [12]))
+        self.assertFalse([m for m in messages if m.startswith('[RED]')], messages)
+        def refuse(fn): raise MatchError('not this code')
+        for rule, img, why in ((dict(stub, find=refuse), imported('nn::vi::CreateLayer'), 'not this code'), (stub, imported('nn::vi::Other'), '0 functions call'),
+                               (stub, two_callers('nn::vi::CreateLayer'), '2 functions call')):
+            messages = []
+            self.assertIsNone(locate_stub(img, 0x2000, [rule], messages.append))
+            self.assertIn(why, messages[0]); self.assertTrue(messages[0].startswith('[RED] frame step'), messages)
+        for bad in (dict(stub, reviewed=[]), dict(stub, size=8), {k: v for k, v in stub.items() if k != 'reviewed'}, dict(stub, find=None)):
+            with self.assertRaises(ValueError): locate_stub(img, 0x2000, [bad], messages.append)
+
+    def test_function_view_reads_registers_and_branches(self):
+        from nso_match import Function
+        img = image({0x100: [0xaa1003e0, 0x1e300a31, 0x54000040, NOP, RET]})   # mov x0,x16; fmul s17,s17,s16; b.eq +8
+        fn = Function(Image(img, 0x2000), 0x100, [])
+        self.assertEqual(fn.uses({'x16', 'x17', 'v16', 'v17', 'v18'}), {'x16', 'v16', 'v17'})
+        self.assertEqual(fn.branch_targets(), {0x110})
+
+    def test_hades2_render_size_checks_its_site(self):
+        # Hades II's find (its patches.py): the one 1280x720 pair after the CreateLayer call, once in the text, no branch onto its movk, none of the stub's registers used
+        spec = importlib.util.spec_from_file_location('hades2_patches', TOOLS.parent / 'games/0100A00019DE0000/patches.py'); assert spec and spec.loader
+        h = importlib.util.module_from_spec(spec); spec.loader.exec_module(h)
+        rule, = h.MATCH_FRAME_STEP['main']
+        size = [0xd280a008, 0xf2c05a08]   # mov x8,#0x500; movk x8,#0x2d0,lsl #32
+        def build(after, before=()):
+            img = imported('_ZN2nn2vi11CreateLayerEPPNS0_5LayerEPNS0_7DisplayE')
+            words = [*before, *caller(0x100 + 4 * len(before), 0x1800)[:4], *after, RET]   # ... bl CreateLayer at +12 (after before), then the code after it
+            return image_with(img, 0x100, words)
+        messages = []
+        from nso_match import locate_stub
+        ok = build([*size, 0xf9000668])   # str x8,[x19,#8]
+        got = locate_stub(ok, 0x2000, [rule], messages.append); assert got
+        self.assertEqual(got[3], (16, 8))
+        for img, why in ((build([0xaa1003e0, *size]), 'uses x16'), (build([*size, *size]), '2 1280x720 sizes in the function'),
+                         (build([NOP], before=size), 'does not follow'), (build([*size, 0x54ffffe0]), 'lands on the movk')):   # b.eq back onto the movk
+            messages = []
+            self.assertIsNone(locate_stub(img, 0x2000, [rule], messages.append))
+            self.assertIn(why, messages[0])
+
     def test_overlapping_rules_are_rejected(self):
         other = dict(self.rule, name='another patch')
         with self.assertRaisesRegex(MatchError, 'overlap'):
@@ -191,11 +277,11 @@ class Matching(unittest.TestCase):
 
     def test_registry_scopes_rules_and_preserves_known_builds(self):
         source = TOOLS / 'patch_nso.py'; tree = ast.parse(source.read_text())
-        start = next(i for i, n in enumerate(tree.body) if isinstance(n, ast.Assign) and ast.unparse(n.targets[0]) == 'PATCH_FILES')
+        start = next(i for i, n in enumerate(tree.body) if isinstance(n, ast.Assign) and ast.unparse(n.targets[0]) == 'SHARED')   # the shared files, then PATCH_FILES
         end = next(i for i, n in enumerate(tree.body[start:], start) if isinstance(n, ast.Assign) and ast.unparse(n.targets[0]) == 'KEYS')
         code = compile(ast.Module(body=tree.body[start:end], type_ignores=[]), str(source), 'exec')
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp); (root / 'tools').mkdir(); (root / 'tools/sdk_patches.py').write_text('')
+            root = Path(tmp); (root / 'tools').mkdir(); (root / 'tools/sdk_patches.py').write_text(''); (root / 'tools/engine_patches.py').write_text('')
             for gid in ('0100000000000001', '0100000000000002'):
                 p = root / 'games' / gid / 'patches.py'; p.parent.mkdir(parents=True)
                 rule = copy.deepcopy(self.rule)
@@ -225,12 +311,12 @@ class Matching(unittest.TestCase):
     def test_registry_reports_what_an_unregistered_build_lost(self):
         # the repository profile's build rows name the registered builds of the module, whose CUTS the unregistered build did not get
         source = TOOLS / 'patch_nso.py'; tree = ast.parse(source.read_text())
-        start = next(i for i, n in enumerate(tree.body) if isinstance(n, ast.Assign) and ast.unparse(n.targets[0]) == 'PATCH_FILES')
+        start = next(i for i, n in enumerate(tree.body) if isinstance(n, ast.Assign) and ast.unparse(n.targets[0]) == 'SHARED')   # the shared files, then PATCH_FILES
         end = next(i for i, n in enumerate(tree.body[start:], start) if isinstance(n, ast.Assign) and ast.unparse(n.targets[0]) == 'KEYS')
         code = compile(ast.Module(body=tree.body[start:end], type_ignores=[]), str(source), 'exec')
         gid, known = '0100000000000001', 'ab' * 16
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp); (root / 'tools').mkdir(); (root / 'tools/sdk_patches.py').write_text('')
+            root = Path(tmp); (root / 'tools').mkdir(); (root / 'tools/sdk_patches.py').write_text(''); (root / 'tools/engine_patches.py').write_text('')
             g = root / 'games' / gid; g.mkdir(parents=True)
             (g / 'patches.py').write_text("CUTS = {'" + known + "': [(0x108, 'e00317aa', '1f2003d5', 'a'), (0x10c, '1f2003d5', '1f2003d5', 'b')]}\n")
             (g / 'game.tsv').write_text(f'build\tv65536\t1.0.1\tmain={known}\tsdk={"cd" * 16}\n')
@@ -250,13 +336,14 @@ class Matching(unittest.TestCase):
         # sdk_patches.py's MATCH_CUTS apply to every game's sdk of a build with no CUTS, the selected profile's own builds too (without a match.tsv: they lost nothing); an empty
         # CUTS list keeps Nintendo's code; a miss is not red
         source = TOOLS / 'patch_nso.py'; tree = ast.parse(source.read_text())
-        start = next(i for i, n in enumerate(tree.body) if isinstance(n, ast.Assign) and ast.unparse(n.targets[0]) == 'PATCH_FILES')
+        start = next(i for i, n in enumerate(tree.body) if isinstance(n, ast.Assign) and ast.unparse(n.targets[0]) == 'SHARED')   # the shared files, then PATCH_FILES
         end = next(i for i, n in enumerate(tree.body[start:], start) if isinstance(n, ast.Assign) and ast.unparse(n.targets[0]) == 'KEYS')
         code = compile(ast.Module(body=tree.body[start:end], type_ignores=[]), str(source), 'exec')
         gid, own, kept = '0100000000000001', 'cd' * 16, 'ef' * 16
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp); (root / 'tools').mkdir()
             (root / 'tools/sdk_patches.py').write_text(f'CUTS = {{{kept!r}: []}}\nMATCH_CUTS = {{"sdk": [{self.rule!r}]}}\n')
+            (root / 'tools/engine_patches.py').write_text('')
             g = root / 'games' / gid; g.mkdir(parents=True)
             (g / 'game.tsv').write_text(f'build\tv0\t1.0.0\tmain={"ab" * 16}\tsdk={own}\n')
             for name, bid, gamed, expected in (('sdk', '00' * 16, gid, ADD), ('sdk', own, gid, ADD), ('sdk', own, '0100000000000002', ADD), ('sdk', kept, gid, MOV),

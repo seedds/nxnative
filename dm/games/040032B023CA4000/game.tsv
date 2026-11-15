@@ -1,0 +1,46 @@
+# Orbitals (Switch 2, Deluxe Edition, update v327680, version 1.1.2.0)
+# Shapefarm's two-player co-op game on Unreal Engine 5.6.1 (SDK MW+EpicGames+UnrealEngine-5_6_1 in main; SF_GLSL_SWITCH2 / SP_GLSL_SWITCH2 shaders), SDK 21.4.2 built for the Switch 2 (Ounce), NVN2,
+# Wwise sound, Bink 2 movies. Modules main + subsdk0 (NintendoSDK_movie) + sdk. Packed from a NUP container (scripts/pack_nup.py); the Deluxe add-on is a licence with no content
+# Format: see dm/games/README.md
+
+# ---- Identity ----
+title_id	040032B023CA4000
+program_id	040032B023CA4000
+
+# ---- App ----
+name	Orbitals
+ipa	Orbitals.ipa
+app_category	public.app-category.adventure-games
+# a 3D field for two players, both sticks in use
+pad_layout	full
+
+# ---- Versions ----
+# v327680 is the update's title version, the title screen says 1.1.2.0-178968 (the NUP carries no display version)
+build	v327680	1.1.2.0	main=d6efcc0a51c1c792e1a83d986077ce97	subsdk0=caf9437bacb2aa161d837d5886f19ae8	sdk=daa31832ca979cdfbe07b3b09488d8e0
+package	v327680
+shader_versions	v327680
+
+# ---- Files ----
+modules	main subsdk0 sdk
+romfs_marker	Orbitals/Content/Paks/Orbitals-Switch2.ucas
+zip_store	.bk2:.pak:.ttf:.txt:.ucas:.utoc:.metallib
+
+# ---- Graphics ----
+# The game sets near-zero NVN depth (nvnDeviceSetDepthMode); offline pipeline bases use main0_z.
+depth_mode	zero
+
+# ---- Memory ----
+# Unreal Engine 5.6: nninitStartup reserves one 62 GB region for the engine; the rewriter's engine-wide rules cut the FMallocBinned3 constructor call (the host runs Unreal's heap on a malloc zone,
+# dm/tools/ue_malloc.py, hle_uemalloc.c) and give the region what the alias region has room for (dm/tools/ue_region.py, hle_svc.c), after the SDK's node area cut to 62 MB (sdk_patches.py, the
+# SDK 21.4 rule). Engage's 5 GB block, as Yoshi and the Mysterious Book's: a 4.375 GB alias region for an iPhone (the Mac reserves 64 GB whatever this says). See the note's Memory section.
+# 9 GB application pool as the Switch 2's. The NPDM declares 20 MB of system resource, so virtual address memory is on
+mem_reserve	0x140000000
+mem_alias	0x118000000
+mem_stack	0x10000000
+app_pool	0x240000000
+sys_resource	0x1400000
+
+# ---- Shader split ----
+# Two IoStore shader libraries in Orbitals-Switch2.utoc (global 4,515 and game 36,480 shaders) of NVN2 records (uepak.sage_record), written out as decoded archives by the NSP script's UE decode
+shader_groups	ShaderArchive-Global-=global ShaderArchive-=game
+shader_note	Orbitals shaders

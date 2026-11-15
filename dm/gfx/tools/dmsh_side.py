@@ -1,13 +1,15 @@
 # A pixel shader's alpha test and logic operation entry points from one Metal compile (GitHub issue #1036). Every pixel shader needs them, since which shaders draw with either shows only in play,
 # and few ever do: compiling each as a library of its own was 57% of Pokopia's 366,805 compiles. So the compile unit holds each entry point's body once, as a static function, with thin
-# entry points around it: main0 (and main0_u / main0_m / main0_d), and the <entry>_a (dmsh_alpha.py) and <entry>_l (dmsh_logic.py) that test or combine what the body returned.
+# entry points around it: main0 (and main0_u / main0_d), and the <entry>_a (dmsh_alpha.py) and <entry>_l (dmsh_logic.py) that test or combine what the body returned.
 # A pixel shader then costs about what its base alone cost: 34-36% of the Metal CPU of three compiles, on the Mac's flags and the iPhone's, over 125 shaders of six games (dm/games/0400A3A01EE4C000/README.md).
 # metallib gives every entry point a complete module, whether or not the body is shared, and two things in the host's path grow with what one file holds: metal-tt compiles every unspecialized
 # entry point of a library, so a base library with them made the pipeline archive twice as large, and the base library is what every shader loads. So the compile's one library is
 # cut in two: <key>_b with the plain entry points, <key>_bx with the others, which the host loads on first need (nvn_mtl.m at_fn, lo_fn). <key>_b.metal stays the plain source, which is
-# what every other tool reads. cut() takes functions out of the file as `metallib --function-name` does (byte-identical for one function), and unlike that option takes several. The Metal cache
-# keeps the cut libraries, not the whole one: a change to cut() changes what the cache holds, so it needs a new dmsh_mtlcache.FORMAT.
-# Usage: unit(msl) → (the compile unit, {'alpha': entry point names, 'logic': entry point names}), or (None, {'why': why}); cut(library bytes, names of the side library's functions) → (base bytes, side bytes)
+# what every other tool reads. cut() takes functions out of the file as `metallib --function-name` does (byte-identical for one function), and unlike that option takes several, in groups:
+# the readable-tile version main0_f (dmsh_fetch.fold) is a third library, <key>_bf, of the same compile. The Metal cache keeps the cut libraries, not the whole one: a change to what cut()
+# gives for the same groups changes what the cache holds, so it needs a new dmsh_mtlcache.FORMAT.
+# Usage: unit(msl) → (the compile unit, {'alpha': entry point names, 'logic': entry point names}), or (None, {'why': why}); cut(library bytes, names of each further library's functions...)
+# → (base bytes, each further library's bytes...); shared_body(msl) → msl with main0's body as dm_body_main0 (None on an unknown shape), calling(e, name, ret, tail) → an entry point calling it
 import re, struct
 import dmsh_alpha, dmsh_logic
 
@@ -31,23 +33,57 @@ def _params(s):   # a parameter list's parameters: commas inside <>, () or [] do
     return out + ([s[at:].strip()] if s[at:].strip() else [])
 
 
+def _entry(msl, m):
+    attr, ret, name = m.groups()
+    head = _close(msl, m.end(), '(', ')')
+    body = msl.find('{', head) if head >= 0 else -1
+    end = _close(msl, body + 1, '{', '}') if body >= 0 else -1
+    if end < 0: raise ValueError(f'no body for {name}')
+    params = _params(msl[m.end():head - 1]); decl, args = [], []
+    for p in params:
+        d = re.sub(r'\s*\[\[.*\]\]$', '', p); a = re.search(r'(\w+)$', d)
+        if not a or 'function_constant' in p: raise ValueError(f'a parameter of {name}: {p[:80]}')
+        decl.append(d); args.append(a.group(1))
+    return {'attr': attr, 'ret': ret, 'name': name, 'params': params, 'decl': ', '.join(decl), 'args': ', '.join(args), 'start': m.start(), 'head': head, 'end': end}
+
+
 def entries(msl):
     """The fragment entry points in source order: attr (the text before `fragment`), ret, name, params, decl (the parameters without attributes), args, start (of the entry point), head (after its
     parameter list), end (after its body). Raises ValueError on a shape it does not know"""
-    out = []
-    for m in _ENTRY.finditer(msl):
-        attr, ret, name = m.groups()
-        head = _close(msl, m.end(), '(', ')')
-        body = msl.find('{', head) if head >= 0 else -1
-        end = _close(msl, body + 1, '{', '}') if body >= 0 else -1
-        if end < 0: raise ValueError(f'no body for {name}')
-        params = _params(msl[m.end():head - 1]); decl, args = [], []
-        for p in params:
-            d = re.sub(r'\s*\[\[.*\]\]$', '', p); a = re.search(r'(\w+)$', d)
-            if not a or 'function_constant' in p: raise ValueError(f'a parameter of {name}: {p[:80]}')
-            decl.append(d); args.append(a.group(1))
-        out.append({'attr': attr, 'ret': ret, 'name': name, 'params': params, 'decl': ', '.join(decl), 'args': ', '.join(args), 'start': m.start(), 'head': head, 'end': end})
-    return out
+    return [_entry(msl, m) for m in _ENTRY.finditer(msl)]
+
+
+def entry(msl, name):   # one entry point as entries() gives it, None when there is none; the others are not read (a unit's _a and _l take function constants)
+    return next((_entry(msl, m) for m in _ENTRY.finditer(msl) if m.group(3) == name), None)
+
+
+# main0's body once, as a function the entry points that return what it computes call: main0 itself, main0_u (dmsh_entry.py fs_uint), main0_d (fs_dual) and main0_f (dmsh_fetch.fold).
+# Each of them used to be a copy of the body, which the compiler built again for each. always_inline: a caller that passes constants (main0's literals for main0_f's tile read) gets them folded,
+# and each entry point is a module of its own in the library anyway (metallib)
+_BODY = re.compile(r'static (__attribute__\(\(always_inline\)\) )?main0_out dm_body_main0\(')
+BODY = 'static __attribute__((always_inline)) main0_out dm_body_main0('
+
+
+def body(msl):   # dm_body_main0's definition: (its start, the end of its parameter list, the end of its body), None when there is none
+    m = _BODY.search(msl)
+    if not m: return None
+    head = _close(msl, m.end(), '(', ')'); end = _close(msl, msl.find('{', head) + 1, '{', '}')
+    return (m.start(), head, end) if head >= 0 and end >= 0 else None
+
+
+def shared_body(msl):
+    """msl with main0's body as dm_body_main0 and main0 calling it (unit's static body made always_inline), unchanged when it has that already; None when main0 is not of a shape entries()
+    knows"""
+    m = _BODY.search(msl)
+    if m: return msl if m.group(1) else msl[:m.start()] + BODY + msl[m.end():]
+    try: e = entry(msl, 'main0')
+    except ValueError: return None
+    if not e or e['ret'] != 'main0_out': return None
+    return msl[:e['start']] + f'{BODY}{e["decl"]})' + msl[e['head']:e['end']] + '\n' + calling(e, 'main0', 'main0_out', 'return out;') + msl[e['end']:]
+
+
+def calling(e, name, ret, tail):   # entry point name, with main0's (e) attributes and parameters, returning ret: the body's result as out, then tail
+    return f'{e["attr"]}fragment {ret} {name}({", ".join(e["params"])})\n{{\n    main0_out out = dm_body_main0({e["args"]});\n    {tail}\n}}\n'
 
 
 def unit(msl) -> tuple[str | None, dict]:
@@ -61,8 +97,9 @@ def unit(msl) -> tuple[str | None, dict]:
     if not alpha and not logic: return None, {'why': no_alpha or no_logic or 'no colour output'}
     thin = [a for a in alpha.values() if a] + [o[0] for o in logic.values()]; targets = set().union(*(o[1] for o in logic.values()))
     src, at = [], es[0]['start']
+    shared = bool(_BODY.search(msl))   # main0 already calls dm_body_main0 (shared_body): it is made again below as it is
     for e in es:
-        src += [msl[at:e['start']], f'static {e["ret"]} dm_body_{e["name"]}({e["decl"]})', msl[e['head']:e['end']]]; at = e['end']
+        src += [msl[at:e['start']]] + ([] if shared and e['name'] == 'main0' else [f'static {e["ret"]} dm_body_{e["name"]}({e["decl"]})', msl[e['head']:e['end']]]); at = e['end']
     plain = [f'{e["attr"]}fragment {e["ret"]} {e["name"]}({", ".join(e["params"])})\n{{\n    return dm_body_{e["name"]}({e["args"]});\n}}\n' for e in es]
     return msl[:es[0]['start']] + dmsh_alpha.HELPER + dmsh_logic.HELPER + dmsh_logic.constants(targets) + ''.join(src) + msl[at:] + '\n' + ''.join(plain + thin), {'alpha': list(alpha), 'logic': list(logic)}
 
@@ -102,8 +139,9 @@ def _take(b, keep, fns, tail, sections):
     return bytes(head) + listing + tail + newpub + newpriv + code
 
 
-def cut(lib, side):
-    """(the library without the functions named in side, the library of those), from the layout pso_offline.functions reads. Raises ValueError on a file it does not know"""
+def cut(lib, *groups):
+    """(the library without the functions named in groups, then the library of each group's), from the layout pso_offline.functions reads: cut(lib, side) gives the base and the side library,
+    cut(lib, side, {'main0_f'}) the readable-tile one too. Raises ValueError on a file it does not know, a name it does not hold or a name in two groups"""
     try:
         if lib[:4] != b'MTLB' or struct.unpack_from('<Q', lib, 0x10)[0] != len(lib): raise ValueError('not a whole Metal library')
         sections = struct.unpack_from('<QQQQQQQQ', lib, 0x18); fo = sections[0]; po = sections[2]; bo, bs = sections[6:8]
@@ -111,8 +149,10 @@ def cut(lib, side):
         n = struct.unpack_from('<I', lib, fo)[0]; p = fo + 4; fns, names = [], []
         for _ in range(n):
             size = struct.unpack_from('<I', lib, p)[0]; t = _tags(lib, p + 4, p + size); fns.append(t); names.append(dict(t)[b'NAME'].rstrip(b'\0').decode()); p += size
-        missing = set(side) - set(names)
+        groups = [set(g) for g in groups]; named = set().union(*groups)
+        missing = named - set(names)
         if missing: raise ValueError(f'no function {sorted(missing)[0]}')
+        if sum(map(len, groups)) != len(named): raise ValueError('a function in two groups')
         tail = lib[p:po]   # what lies between the function list and the public metadata stays
-        return tuple(_take(lib, keep, fns, tail, sections) for keep in ([i for i, x in enumerate(names) if x not in side], [i for i, x in enumerate(names) if x in side]))
+        return tuple(_take(lib, [i for i, x in enumerate(names) if keep(x)], fns, tail, sections) for keep in [lambda x: x not in named] + [g.__contains__ for g in groups])
     except (struct.error, KeyError) as e: raise ValueError(f'an unreadable library ({e})') from e

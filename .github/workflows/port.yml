@@ -120,6 +120,27 @@ jobs:
             build/aot/licenses/ICU.txt
           if-no-files-found: error
           retention-days: 1
+      # What nxaot.exe is compared with on a Windows PC (dm/tools/aot/tests/run_win64_nxaot.ps1; dm/tools/aot/README.md, "Building nxaot for Windows"): two corpus NROs packed
+      # by this nxaot as Windows packs with a named CPU (the default is the build machine's), the DLLs and their SHA-256 in nxaot_win64_ref.tsv, the artifact nxaot-win64-ref
+      - name: The Windows packs nxaot.exe is compared with (build/aot/win64-ref)
+        run: |
+          docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -e COMMIT="${GITHUB_SHA::10}" -v "$(pwd):/src" -w /src nxnative-aot sh -c '
+            set -eu
+            ref=build/aot/win64-ref; opts="--target windows --cpu x86-64-v3 --workers 1"
+            mkdir -p $ref
+            printf "# nxaot_win64_ref.tsv: Windows packs the Linux nxaot made (commit %s, nxaot SHA-256 %s), for run_win64_nxaot.ps1\n# name\tinput\tSHA-256 of the DLL\tnxaot build options\n" \
+              "$COMMIT" "$(sha256sum build/aot/nxaot | cut -d" " -f1)" > $ref/nxaot_win64_ref.tsv
+            for n in fnptr-gcc fp-gcc; do
+              build/aot/nxaot build dm/tools/aot/corpus/nro/$n.nro $opts --shared $ref/$n.dll > $ref/$n.log 2>&1 || { cat $ref/$n.log; exit 1; }
+              printf "%s\t%s\t%s\t%s\n" $n dm/tools/aot/corpus/nro/$n.nro "$(sha256sum $ref/$n.dll | cut -d" " -f1)" "$opts" >> $ref/nxaot_win64_ref.tsv
+            done
+            cat $ref/nxaot_win64_ref.tsv'
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: nxaot-win64-ref
+          path: build/aot/win64-ref
+          if-no-files-found: error
+          retention-days: 7
 
   # The Linux bundle: scripts/package_port.py over the two jobs' outputs, its archive (the same bytes for the same inputs), and its check on this runner, an Ubuntu like
   # a player's with no LLVM installed (the bundle's nxaot is static): no symbolic link, no path of the build trees, no ELF that needs libLLVM or the libraries whose
@@ -162,11 +183,14 @@ jobs:
             echo "Hosts for: $(sed -n 's/^hosts //p' build/bundle/nxnative-linux-x86_64/VERSION). Unpack it and read its \`README.txt\` (docs/development.md, \"The port's bundles\")."
           } >> "$GITHUB_STEP_SUMMARY"
 
-  # Windows, step 1: the cross-build with llvm-mingw; the test programs and their list (host_tests.tsv) go to the next job
+  # Windows, step 1: the cross-build with llvm-mingw; the test programs and their list (host_tests.tsv) go to the next job. Then the recompiler for Windows, nxaot.exe
+  # (dm/tools/aot/README.md, "Building nxaot for Windows"): LLVM and lld as static libraries for x86_64-w64-mingw32, built from their source tarballs by
+  # dm/tools/aot/tools/build_llvm_win64.sh and cached (about an hour on the 4 vCPUs of a runner the first time, hence the time limit; seconds once cached), then nxaot.exe
+  # against them, which goes into the Windows bundle
   win64-cross:
     name: Windows cross-build (llvm-mingw, Docker)
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -188,9 +212,52 @@ jobs:
             build/win64/host_scripts.tsv
           if-no-files-found: error
           retention-days: 7
+      # The prefix build_llvm_win64.sh installs, keyed on what decides its bytes: the script (the release, its hashes, the components and options), the toolchain file
+      # and the image. The script reuses a prefix whose stamp matches and builds it otherwise; the cache is saved right after the build, so a later step's failure
+      # does not lose it
+      # TODO: pin actions/cache to its commit SHA, as every other action here is (not looked up when this was written: no request to GitHub was made)
+      - name: LLVM for Windows (cache)
+        id: llvm-win64
+        uses: actions/cache/restore@v4
+        with:
+          path: build/llvm-win64/llvm-18.1.3-x86_64-w64-mingw32
+          key: llvm-win64-${{ hashFiles('dm/tools/aot/tools/build_llvm_win64.sh', 'dm/host/cmake/x86_64-w64-mingw32.cmake') }}-${{ env.MINGW_IMAGE }}
+      - name: LLVM for Windows (build/llvm-win64; built only when the cache has no prefix)
+        run: |
+          docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -v "$(pwd):/src" -w /src "$MINGW_IMAGE" \
+            sh dm/tools/aot/tools/build_llvm_win64.sh -j 4 /src/build/llvm-win64
+      - name: LLVM for Windows (cache save)
+        if: ${{ steps.llvm-win64.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@v4
+        with:
+          path: build/llvm-win64/llvm-18.1.3-x86_64-w64-mingw32
+          key: ${{ steps.llvm-win64.outputs.cache-primary-key }}
+      # nxaot.exe, linked statically: the imports it prints are Windows' own DLLs only (no libc++, libunwind, winpthread or LLVM DLL); LLVM's LICENSE.TXT as the licence
+      # of the LLVM and lld libraries in it, for the bundle
+      - name: nxaot.exe (build/aot-win64)
+        run: |
+          docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -v "$(pwd):/src" -w /src "$MINGW_IMAGE" sh -c '
+            set -eu
+            prefix=/src/build/llvm-win64/llvm-18.1.3-x86_64-w64-mingw32
+            cmake -S dm/tools/aot -B build/aot-win64 -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_TOOLCHAIN_FILE=/src/dm/host/cmake/x86_64-w64-mingw32.cmake \
+              -DLLVM_DIR=$prefix/lib/cmake/llvm -DLLD_DIR=$prefix/lib/cmake/lld
+            cmake --build build/aot-win64 --target nxaot
+            mkdir -p build/aot-win64/licenses && cp $prefix/LICENSE.TXT build/aot-win64/licenses/LLVM.txt
+            llvm-readobj --coff-imports build/aot-win64/nxaot.exe | grep "Name: "
+            if llvm-readobj --coff-imports build/aot-win64/nxaot.exe | grep -iE "Name: (libc\+\+|libunwind|libwinpthread|libLLVM|liblld)"; then echo "nxaot.exe needs a DLL that is not a Windows system DLL"; exit 1; fi'
+      # nxaot.exe for the Windows PC's check (dm/tools/aot/tests/run_win64_nxaot.ps1, against the artifact nxaot-win64-ref of the nxaot-bundle job): both unzipped into
+      # build\aot-win64 of a checkout of the same commit
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: nxaot-win64
+          path: |
+            build/aot-win64/nxaot.exe
+            build/aot-win64/licenses/LLVM.txt
+          if-no-files-found: error
+          retention-days: 7
       # The Windows bundle, after the tests' upload (whose nxhost-run.exe is GAME's): build/win64/hosts/<title ID>/nxhost-run.exe for GAME and each profile of BUNDLE_GAMES
-      # (the same tree configured again), then scripts/package_port.py with its zip and its check (the .exe files are not run here; nxlauncher.exe opens on Windows). No
-      # nxaot: there is no Windows build of it yet, and README.txt says how to pack
+      # (the same tree configured again), then scripts/package_port.py with its zip and its check (the .exe files are not run here; nxlauncher.exe opens on Windows), with
+      # the recompiler nxaot.exe of build/aot-win64 (bin\nxaot.exe, which the packer runs)
       - name: Hosts of the bundle (build/win64/hosts)
         if: ${{ github.event_name != 'pull_request' }}
         run: |
@@ -203,7 +270,7 @@ jobs:
           ls -l build/win64/hosts/*/nxhost-run.exe
       - name: Assemble, archive and check the bundle
         if: ${{ github.event_name != 'pull_request' }}
-        run: python3 scripts/package_port.py --platform windows --build build/win64 --out build/bundle/nxnative-windows-x86_64 --archive --check
+        run: python3 scripts/package_port.py --platform windows --build build/win64 --aot build/aot-win64 --out build/bundle/nxnative-windows-x86_64 --archive --check
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: ${{ github.event_name != 'pull_request' }}
         with:

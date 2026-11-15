@@ -100,6 +100,78 @@ tests): 33 s; the whole run 948 s, the machine loaded by other builds. "The samp
 the whole run 888 s, one test at a time. "Hot indirect targets"'s `profile_targets` (29 tests): 4 s; the whole run 981 s, one test at a
 time, the machine loaded by another agent's builds and dm/host's CTest (vectors 277 s).
 
+## Building nxaot for Windows
+
+`nxaot.exe` is the recompiler of the Windows bundle (`scripts/package_port.py --platform windows --aot <tree>` puts it in `bin\`, where the packer,
+`build_ipa_from_nsp.py`, finds it). It is cross-built on Linux with llvm-mingw, as the Windows host is ([docker/README.md](../../../docker/README.md)),
+and linked statically: it imports only Windows' own DLLs, so a player installs nothing for it. There is no prebuilt LLVM for llvm-mingw, so LLVM's and
+lld's libraries are built first from the official source tarballs of the release `nxaot.lock` pins. From the repository root, both steps in the llvm-mingw
+image (`<work>` is any folder with room, outside the repository on a machine short of disk):
+
+```sh
+# LLVM 18.1.3 and lld for x86_64-w64-mingw32, static, into <work>/llvm-18.1.3-x86_64-w64-mingw32 (the last line printed); a finished prefix is reused
+docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -v "$(pwd):/src:ro" -v <work>:/work mstorsjo/llvm-mingw:20261020 \
+  sh /src/dm/tools/aot/tools/build_llvm_win64.sh -j 4 /work
+
+# nxaot.exe against it, into build/aot-win64
+docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -v "$(pwd):/src" -v <work>:/work -w /src mstorsjo/llvm-mingw:20261020 sh -c \
+  'cmake -S dm/tools/aot -B build/aot-win64 -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_TOOLCHAIN_FILE=/src/dm/host/cmake/x86_64-w64-mingw32.cmake \
+     -DLLVM_DIR=/work/llvm-18.1.3-x86_64-w64-mingw32/lib/cmake/llvm -DLLD_DIR=/work/llvm-18.1.3-x86_64-w64-mingw32/lib/cmake/lld &&
+   cmake --build build/aot-win64 --target nxaot'
+```
+
+- **LLVM** ([tools/build_llvm_win64.sh](tools/build_llvm_win64.sh), whose header lists its steps): the `llvm`, `lld` and `cmake` tarballs of
+  `llvmorg-18.1.3` with their SHA-256 pinned in the script (the release's GPG signatures, by the LLVM release key `474E22316ABF4785A88C6E8EA2C794A986419D8A`,
+  were checked when they were written down); the image's gcc builds the native `llvm-tblgen` and `llvm-min-tblgen` the cross build runs; then LLVM with
+  lld in its tree, by llvm-mingw's clang through `dm/host/cmake/x86_64-w64-mingw32.cmake`: Release without assertions, the X86 target only, static libraries,
+  RTTI on (as in the Ubuntu LLVM the Linux nxaot links), no zlib, zstd, libxml2 or terminfo, and only what nxaot links: the components of
+  `NXAOT_LLVM_COMPONENTS`, lld's `lldCommon`, `lldELF` and `lldCOFF`, and the libraries they depend on (66 in all, `LLVM_DISTRIBUTION_COMPONENTS`;
+  no tool, test, example, benchmark, nor lld's MachO, wasm or MinGW driver). One line of lld's sources is changed: lld 18.1.3 gives a static library no
+  `install-<name>` target, which a distribution component needs. lld's headers have no install rule in 18.1.3 and are copied into the prefix. Measured on
+  2026-11-15 on the development machine (8 vCPUs, `-j 4`, another `-j 4` build beside it): the native tablegens 2 minutes, the cross build's 1,767
+  steps and its install 17 minutes; the work folder at its peak 0.85 GB (the cross build tree 394 MB, the sources 160 MB, the prefix 197 MB, the
+  downloads 61 MB), 0.26 GB after (the downloads and the prefix); the machine's available memory stayed above 6.5 GB. Then `nxaot.exe` (199 steps,
+  dynarmic among them) took 104 s.
+- **What the Windows build leaves out** ([CMakeLists.txt](CMakeLists.txt), the `WIN32` block after `nxaot`): everything but the `nxaot` executable and
+  the libraries it links. `nxaot_rt`, `nxaot_host` and `nxaot_funcdiff` run packs with POSIX threads, `dlopen` and signals (dm/host's `aot_*.c` is
+  the Windows run time of packs); `nxaot_vec`, `nxaot_run` and `nxaot_bench` are development tools whose results the Linux build gives; the tests run
+  those and the Linux nxaot (`pack_windows` checks the Windows packs there). Boost's headers come from
+  [dm/third_party/boost](../../third_party/boost/VENDOR.md) where CMake finds none, as dm/host's JIT fallback takes them; the Linux configure is unchanged.
+- **How it is linked**: `-static` (libc++, libunwind and winpthreads inside), an 8 MiB stack reserved for the main thread and every thread made
+  without a size (the compile workers, the analysis's pool: what Linux gives them; Windows' default is 1 MiB), and the host's UTF-8 code page manifest
+  (`dm/host/plat/win32_utf8.rc`), so the paths on nxaot's command line, the C++ streams that open them and LLVM's own file calls (UTF-8 on Windows) name the
+  same files when a folder's name is not ASCII. The result (2026-11-15): `PE32+ executable (console) x86-64, for MS Windows`, 66,293,248 bytes, 8 MiB
+  `SizeOfStackReserve`, the manifest as resource 1 of type 24; it imports `KERNEL32.dll`, `ADVAPI32.dll`, `SHELL32.dll`, `ole32.dll`, `WS2_32.dll` (LLVM's
+  Support library) and the UCRT's `api-ms-win-crt-*.dll`, all of them Windows' own, no `libc++.dll`, `libunwind.dll`, `libwinpthread-1.dll` or LLVM DLL
+  (`llvm-readobj --coff-imports build/aot-win64/nxaot.exe | grep 'Name: '` in the image).
+- **The sources' Windows branches** (`#if defined(_WIN32)`, the Linux preprocessed text unchanged): a module's name is its file name after the last `/`, `\`
+  or drive colon (src/module/image.cpp: the packer passes Windows paths, and the name is in the pack's descriptor); in src/build/pack.cpp the processors
+  available come from the process's affinity mask (`GetProcessAffinityMask` for `sched_getaffinity`), the analysis's CPU seconds from `GetProcessTimes`
+  and the peak resident set from `GetProcessMemoryInfo` (for `getrusage`), and the tool's identity in the analysis cache's key hashes the executable
+  `GetModuleFileNameA` names (for `/proc/self/exe`). `nxaot build --memory`'s resident-set lines read 0 on Windows (analysis/memory.h reads `/proc`).
+
+Nothing here runs a Windows program (no Windows or Wine on the development machine). The check on a Windows PC is
+[tests/run_win64_nxaot.ps1](tests/run_win64_nxaot.ps1) (logs in `logs\win64\nxaot\`, beside the host tests' `logs\win64\`): `nxaot.exe version`, then two
+corpus NROs (fnptr-gcc, fp-gcc) packed as Windows packs and each DLL's SHA-256 compared with the one the Linux nxaot made from the same NRO with the
+same options (`--target windows --cpu x86-64-v3 --workers 1`: a named CPU, since the default is the build machine's), which the reference file
+`nxaot_win64_ref.tsv` lists. The two programs use different C++ standard libraries (libstdc++ and libc++) and LLVM built by different compilers,
+so whether they make the same bytes is the question the run answers; a difference is reported with both hashes, the sizes and the first differing
+offset, and exit status 3. On 2026-11-15 the Linux nxaot made fnptr-gcc.dll `6209c445...b8b97d` (99,840 bytes) and fp-gcc.dll `06c0f080...bb4126`
+(103,936 bytes). The reference file for another commit, made with the Linux nxaot of `build/aot` (the CI's `nxaot-bundle` job makes it as the
+artifact `nxaot-win64-ref`):
+
+```sh
+docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -v "$(pwd):/src" -w /src nxnative-aot sh -c '
+  ref=build/aot-win64; opts="--target windows --cpu x86-64-v3 --workers 1"; mkdir -p $ref; printf "# nxaot_win64_ref.tsv\n" > $ref/nxaot_win64_ref.tsv
+  for n in fnptr-gcc fp-gcc; do build/aot/nxaot build dm/tools/aot/corpus/nro/$n.nro $opts --shared $ref/$n.dll > $ref/$n.log 2>&1 &&
+    printf "%s\t%s\t%s\t%s\n" $n dm/tools/aot/corpus/nro/$n.nro "$(sha256sum $ref/$n.dll | cut -d" " -f1)" "$opts" >> $ref/nxaot_win64_ref.tsv; done'
+```
+
+then on the PC, from the repository root, with `nxaot.exe` and the reference file in `build\aot-win64` (the CI artifacts `nxaot-win64` and
+`nxaot-win64-ref` of the same commit unzipped there): `powershell -NoProfile -ExecutionPolicy Bypass -File dm\tools\aot\tests\run_win64_nxaot.ps1`. On CI
+([port.yml](../../../.github/workflows/port.yml), the Windows cross job) the prefix is cached on the script's hash, the toolchain file and the image,
+`nxaot.exe` is built after the Windows host, its imports are checked, and it goes into the Windows bundle.
+
 ## Running the harness and the census
 
 ```sh

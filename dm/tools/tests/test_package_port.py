@@ -153,6 +153,31 @@ class Bundle(unittest.TestCase):
             self.assertIn('nxnative-windows-x86_64/pack.cmd', names); self.assertNotIn('nxnative-windows-x86_64/bin/nxaot.exe', names)
             self.assertEqual(len({i.date_time for i in infos}), 1)
             self.assertIn(b'\r\n', z.read('nxnative-windows-x86_64/pack.cmd')); self.assertIn(b'nxaot no', z.read('nxnative-windows-x86_64/VERSION'))
+            self.assertIn(b'nxaot is\r\nrem a Linux program', z.read('nxnative-windows-x86_64/pack.cmd'))   # without --aot, the text of a bundle without nxaot
+            self.assertIn(b'The recompiler nxaot is a Linux program: this folder has none', z.read('nxnative-windows-x86_64/README.txt'))
+
+    def test_windows_nxaot(self):   # --aot on Windows: bin/nxaot.exe and LLVM's licence in the bundle, pack.cmd and README.txt say the packer runs it
+        win, aot = self.tmp / 'build/win64', self.tmp / 'build/aot-win64'
+        self.fake_tree(win, '.exe')
+        self.write(aot / 'nxaot.exe', 'MZ nxaot', 0o755); self.write(aot / 'licenses/LLVM.txt', 'LLVM licence\n')
+        self.aot = aot
+        rc, err, out = self.package('--archive', platform='windows', build=win)
+        self.assertEqual((rc, err), (0, ''))
+        files = dict(pp.bundle_files(out))
+        self.assertEqual(files['bin/nxaot.exe'], 0o755); self.assertEqual((out / 'bin/nxaot.exe').read_text(), 'MZ nxaot')
+        self.assertEqual((out / 'licenses/LLVM.txt').read_text(), 'LLVM licence\n')
+        cmd, readme = (out / 'pack.cmd').read_bytes(), (out / 'README.txt').read_text()
+        self.assertIn(b"with the bundle's recompiler (bin\\nxaot.exe)", cmd); self.assertNotIn(b'Linux program', cmd); self.assertIn(b'\r\n', cmd)
+        self.assertNotIn('Linux program', readme); self.assertRegex(readme, r'\n  bin/nxaot\.exe +the recompiler the packer runs\r?\n')
+        self.assertIn('nxaot yes', (out / 'VERSION').read_text())
+        with zipfile.ZipFile(out.parent / (out.name + '.zip')) as z: self.assertIn('nxnative-windows-x86_64/bin/nxaot.exe', z.namelist())
+        # the licence is required with nxaot.exe, and the error says where it comes from
+        (aot / 'licenses/LLVM.txt').unlink()
+        rc, err, _ = self.package(platform='windows', build=win)
+        self.assertEqual(rc, 1); self.assertRegex(err, r'missing .*licenses/LLVM.txt: .*LICENSE.TXT from the prefix dm/tools/aot/tools/build_llvm_win64.sh built')
+        (aot / 'nxaot.exe').unlink()
+        rc, err, _ = self.package(platform='windows', build=win)
+        self.assertEqual(rc, 1); self.assertRegex(err, r'missing .*nxaot.exe: the recompiler')
 
     @unittest.skipUnless(sys.platform == 'linux', 'the Linux bundle\'s check runs its programs')
     def test_check(self):

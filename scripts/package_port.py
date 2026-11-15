@@ -2,7 +2,7 @@
 """The port's bundle: what a player downloads, unpacks and runs on Linux or Windows (docs/development.md, "The port's bundles").
 
     python3 scripts/package_port.py --platform linux --build build/linux --aot build/aot --out build/bundle/nxnative-linux-x86_64 --archive --check
-    python3 scripts/package_port.py --platform windows --build build/win64 --out build/bundle/nxnative-windows-x86_64 --archive --check
+    python3 scripts/package_port.py --platform windows --build build/win64 --aot build/aot-win64 --out build/bundle/nxnative-windows-x86_64 --archive --check
 
 It builds nothing: it assembles the bundle folder from build trees that CMake already made and from this checkout's tracked files, and fails with the missing file's name
 when something is not there.
@@ -10,7 +10,9 @@ when something is not there.
             <build>/hosts/<title ID>/nxhost-run (one per profile; the CI copies each build there) or as <build>/nxhost-run for the GAME of <build>/CMakeCache.txt; SDL3's licence
             from <build>/_deps/sdl3-src/LICENSE.txt (FetchContent's copy); any file in <build>/licenses/ goes to the bundle's licenses/ too. On Windows the .exe names
   --aot     the CMake tree of the recompiler (dm/tools/aot): nxaot, and licenses/LLVM.txt (the licence of the LLVM and lld libraries linked into it; the CI copies the image's
-            /usr/share/doc/libllvm18/copyright there). Required on Linux; on Windows there is no nxaot for Windows yet, and without --aot the bundle has none
+            /usr/share/doc/libllvm18/copyright there). Required on Linux. On Windows nxaot.exe, cross-built with llvm-mingw against the static LLVM of
+            dm/tools/aot/tools/build_llvm_win64.sh (dm/tools/aot/README.md, "Building nxaot for Windows"), with that LLVM's LICENSE.TXT as licenses/LLVM.txt; the packer
+            runs the bundle's bin/nxaot.exe. Without --aot a Windows bundle has no nxaot and its README.txt says how to pack
   --out     the bundle folder, created (or replaced when it holds an earlier bundle: a VERSION file); its name is the archive's top folder
   --archive <out>.tar.gz (Linux: executable bits kept) or <out>.zip (Windows) beside it; the same inputs give the same bytes (sorted entries, the commit's time on every entry)
   --check   the bundle's own smoke test: no symlink, no file naming the build trees or this checkout, no ELF run path outside the bundle and no ELF that needs a shared library
@@ -133,7 +135,9 @@ def licence_files(platform, build, aot):
         for d in sorted(p for p in ext.iterdir() if p.is_dir()):
             if any(re.match(r'(LICEN[CS]E|COPYING)', p.name, re.I) for p in d.iterdir()): out.append((f'dynarmic-{d.name}.txt', first(d)))
     out.append(('SDL3.txt', need(build / '_deps/sdl3-src/LICENSE.txt', 'SDL3\'s licence, which the host\'s CMake fetches with SDL3 (FetchContent) into the build tree')))
-    if aot: out.append(('LLVM.txt', need(aot / 'licenses/LLVM.txt', 'the licence of the LLVM and lld libraries linked into nxaot (copy /usr/share/doc/libllvm18/copyright from the nxnative-aot image)')))
+    where = ('copy LICENSE.TXT from the prefix dm/tools/aot/tools/build_llvm_win64.sh built' if platform == 'windows'
+             else 'copy /usr/share/doc/libllvm18/copyright from the nxnative-aot image')
+    if aot: out.append(('LLVM.txt', need(aot / 'licenses/LLVM.txt', f'the licence of the LLVM and lld libraries linked into nxaot ({where})')))
     for tree in (build, aot):
         if tree and (tree / 'licenses').is_dir():
             for p in sorted((tree / 'licenses').iterdir()):
@@ -141,7 +145,7 @@ def licence_files(platform, build, aot):
     return out
 
 
-def readme(platform, sha, date, hosts):
+def readme(platform, sha, date, hosts, nxaot):
     win, lines = platform == 'windows', []
     exe, py, pack = ('.exe', 'py -3', 'pack.cmd') if win else ('', 'python3', './pack.sh')
     lines += [f'nxnative for {"Windows" if win else "Linux"} (x86-64), {sha} of {date}',
@@ -154,8 +158,8 @@ def readme(platform, sha, date, hosts):
               f'  - To pack a game: Python 3.12 or later with lz4, capstone and backports.zstd ({py} -m pip install lz4 capstone backports.zstd; backports.zstd only before',
               '    Python 3.14), and the .NET SDK 10 (the packer builds its extraction tool, nx_extract, with it on the first pack; NVN games also need the Vulkan shader',
               '    translator, which this folder does not carry yet: docs/development.md, "The port\'s bundles").']
-    if win: lines += ['  - The recompiler nxaot is a Linux program: this folder has none. Pack with --nxaot naming a script that runs the Linux nxaot (in WSL or Docker), or pack',
-                      '    on Linux.']
+    if win and not nxaot: lines += ['  - The recompiler nxaot is a Linux program: this folder has none. Pack with --nxaot naming a script that runs the Linux nxaot (in WSL or Docker), or pack',
+                                    '    on Linux.']
     lines += ['',
               'Packing a game',
               f'  1. Put each game\'s NSP files (base game, update, DLC) in a folder of its own, outside this folder.',
@@ -170,7 +174,7 @@ def readme(platform, sha, date, hosts):
               'This folder',
               f'  {"nxlauncher" + exe:<25} the launcher',
               f'  {"hosts/<title ID>/":<25} nxhost-run{exe}, the host built for each game profile (a game whose profile has no folder here cannot be played with this bundle)']
-    if not win: lines += [f'  {"bin/nxaot":<25} the recompiler the packer runs']
+    if nxaot: lines += [f'  {"bin/nxaot" + exe:<25} the recompiler the packer runs']
     lines += [f'  {pack:<25} the packer: scripts/ and dm/ hold it and the game profiles',
               f'  {"licenses/":<25} the licences of nxnative and of the third-party code in it',
               f'  {"VERSION":<25} the commit this bundle was built from',
@@ -198,6 +202,16 @@ if not defined PYTHON (where py > nul 2>&1 && set "PYTHON=py -3" || set "PYTHON=
 exit /b %errorlevel%
 '''
 
+# pack.cmd of a bundle with nxaot.exe (--aot): the packer runs it from bin\ (build_ipa_from_nsp.py find_nxaot)
+PACK_CMD_NXAOT = '''@echo off
+rem Packs a game for this bundle: scripts\\build_ipa_from_nsp.py --platform windows with the bundle's recompiler (bin\\nxaot.exe) and hosts (hosts\\<title ID>\\), which the
+rem packer finds beside itself. PYTHON names another Python 3.12 or later. Usage: pack.cmd "<NSP folder>" -k "<prod.keys>" [options of build_ipa_from_nsp.py]
+setlocal
+if not defined PYTHON (where py > nul 2>&1 && set "PYTHON=py -3" || set "PYTHON=python")
+%PYTHON% "%~dp0scripts\\build_ipa_from_nsp.py" --platform windows %*
+exit /b %errorlevel%
+'''
+
 
 def assemble(platform, build, aot, out):
     """The bundle folder out: [(relative path, mode)] of every file it holds"""
@@ -213,7 +227,7 @@ def assemble(platform, build, aot, out):
         if not aot.is_dir(): raise PackError(f'--aot: no such folder: {aot}')
         nxaot = need(aot / f'nxaot{exe}', f'the recompiler (cmake --build {aot} --target nxaot)')
     elif platform == 'linux': raise PackError('--aot is required on Linux: the packer needs the recompiler nxaot (dm/tools/aot)')
-    else: say('no --aot: the Windows bundle has no nxaot (there is no Windows build of it yet; README.txt says how to pack)')
+    else: say('no --aot: the Windows bundle has no nxaot (dm/tools/aot/README.md, "Building nxaot for Windows", builds nxaot.exe; README.txt says how to pack without it)')
     lic = licence_files(platform, build, aot)
     files = tracked_files()
     if dirty: say('[RED] the packer\'s files differ from the commit: VERSION says so')
@@ -238,8 +252,8 @@ def assemble(platform, build, aot, out):
     for rel, mode in files: put(rel, REPO / rel, mode=mode)
     for name, src in lic: put(f'licenses/{name}', src)
     if platform == 'linux': put('pack.sh', data=PACK_SH.encode(), mode=0o755)
-    else: put('pack.cmd', data=PACK_CMD.replace('\n', '\r\n').encode())
-    put('README.txt', data=readme(platform, sha, date, hosts).encode())
+    else: put('pack.cmd', data=(PACK_CMD_NXAOT if nxaot else PACK_CMD).replace('\n', '\r\n').encode())
+    put('README.txt', data=readme(platform, sha, date, hosts, bool(nxaot)).encode())
     nl = '\r\n' if platform == 'windows' else '\n'
     put(MARKER, data=nl.join([f'nxnative {sha}{"-modified" if dirty else ""}', f'date {date}', f'platform {platform}-x86_64',
                               f'hosts {" ".join(hosts)}', f'nxaot {"yes" if nxaot else "no"}']).encode() + nl.encode())

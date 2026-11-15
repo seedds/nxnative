@@ -68,6 +68,15 @@ set(DYNARMIC_WARNINGS_AS_ERRORS OFF CACHE BOOL "" FORCE)
 set(DYNARMIC_USE_PRECOMPILED_HEADERS OFF CACHE BOOL "" FORCE)
 set(DYNARMIC_USE_BUNDLED_EXTERNALS ON CACHE BOOL "" FORCE)
 set(DYNARMIC_FRONTENDS "A64" CACHE STRING "" FORCE)
+# Windows (README.md, "Building nxaot for Windows"): the llvm-mingw image has no Boost, so where CMake finds none, the headers come from the subset vendored for
+# dynarmic in dm/third_party/boost, as dm/host's JIT fallback (NXHOST_JIT) takes them; set before dynarmic's own find_package(Boost). Linux is untouched: the
+# image's libboost-dev, found below
+if (WIN32)
+    find_package(Boost 1.57 QUIET)
+    if (NOT Boost_FOUND)
+        set(Boost_INCLUDE_DIR "${NXAOT_REPO}/dm/third_party/boost" CACHE PATH "Boost's headers (the subset vendored for dynarmic: dm/third_party/boost/VENDOR.md)" FORCE)
+    endif()
+endif()
 add_subdirectory("${NXAOT_DYNARMIC_DIR}" "${CMAKE_CURRENT_BINARY_DIR}/dynarmic" EXCLUDE_FROM_ALL)
 find_package(Boost 1.57 REQUIRED)
 
@@ -158,6 +167,24 @@ target_compile_options(nxaot_build PRIVATE ${NXAOT_WARNINGS})
 add_executable(nxaot src/main.cpp)
 target_link_libraries(nxaot PRIVATE nxaot_analysis nxaot_lift nxaot_build)
 target_compile_options(nxaot PRIVATE ${NXAOT_WARNINGS})
+
+# Windows: nxaot.exe for the Windows bundle, cross-built with llvm-mingw (-DCMAKE_TOOLCHAIN_FILE=<repo>/dm/host/cmake/x86_64-w64-mingw32.cmake) against the
+# static LLVM and lld of tools/build_llvm_win64.sh (-DLLVM_DIR=<prefix>/lib/cmake/llvm -DLLD_DIR=<prefix>/lib/cmake/lld; README.md, "Building nxaot for Windows").
+# Linked statically (-static: libc++, libunwind and winpthreads inside, so the .exe imports only Windows' own DLLs and nothing goes with it), with an 8 MiB stack
+# reserved for the main thread and every thread created without a size (the compile workers, the analysis's pool): what Linux gives them (its 8 MiB stack
+# limit, glibc's default thread stack), where Windows' default is 1 MiB, so LLVM's recursive passes have the same room on both. With the host's application
+# manifest (dm/host/plat/win32_utf8.rc: the process code page UTF-8), so that the paths nxaot takes on its command line, the C++ streams it opens them with and
+# LLVM's own file calls (UTF-8 on Windows) name the same files when a folder's name is not ASCII
+if (WIN32)
+    target_link_options(nxaot PRIVATE -static -Wl,--stack,8388608)
+    enable_language(RC)
+    target_sources(nxaot PRIVATE "${NXAOT_REPO}/dm/host/plat/win32_utf8.rc")
+    set_source_files_properties("${NXAOT_REPO}/dm/host/plat/win32_utf8.rc" PROPERTIES OBJECT_DEPENDS "${NXAOT_REPO}/dm/host/plat/win32_utf8.manifest")
+    # The rest of this file is not built for Windows. nxaot_rt, nxaot_host and nxaot_funcdiff run packs with POSIX threads, dlopen and signals (dm/host's aot_*.c
+    # is the Windows run time of packs, built by dm/host/CMakeLists.txt); nxaot_vec, nxaot_run and nxaot_bench are development tools whose results the Linux build
+    # gives; the tests run those programs and the Linux nxaot (pack_windows checks the Windows packs there), and no Windows program can run on the build machine
+    return()
+endif()
 
 # The native run time of a pack (src/rt, aot-recompiler.md sections 2.4, 3.3, 4, 5, 9.4): no LLVM code generation, the pack's shared object
 # loaded with dlopen; the library resolves the host's imports and the floating-point helpers against the executable (ENABLE_EXPORTS)

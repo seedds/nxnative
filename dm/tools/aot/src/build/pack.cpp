@@ -15,13 +15,16 @@
 #include <string_view>
 #include <thread>
 
+#if !defined(_WIN32)
 #include <sched.h>
 #include <sys/resource.h>
+#endif
 #if defined(__GLIBC__)
 #include <malloc.h>
 #endif
 #if defined(_WIN32)
 #include <windows.h>
+#include <psapi.h>
 #endif
 #include <unistd.h>
 
@@ -3243,11 +3246,20 @@ std::vector<Unit> Units(const Common& c) {
 std::string ToolIdentity() {
     std::string self;
     char buf[4096];
+#if defined(_WIN32)
+    // The executable's own file: its path in the process code page, UTF-8 by the manifest the Windows build links in (CMakeLists.txt), as
+    // cache::FileSha256's stream opens it
+    const DWORD n = GetModuleFileNameA(nullptr, buf, sizeof buf);
+    if (n > 0 && n < sizeof buf) {
+        self = cache::FileSha256(buf);
+    }
+#else
     const ssize_t n = readlink("/proc/self/exe", buf, sizeof buf - 1);
     if (n > 0) {
         buf[n] = '\0';
         self = cache::FileSha256(buf);
     }
+#endif
     return std::string("nxaot.lock llvm ") + NXAOT_LOCK_LLVM + " dynarmic " + NXAOT_LOCK_DYNARMIC + "; LLVM " + LLVM_VERSION_STRING +
            "; executable " + (self.empty() ? "unknown" : self);
 }
@@ -3271,12 +3283,21 @@ void ReturnFreeMemory() {
 }
 
 unsigned CpusAvailable() {
+#if defined(_WIN32)
+    // The processors of the process's affinity mask, as sched_getaffinity gives them on Linux (the mask is the process's processor group's;
+    // it is 0 when the process has threads in several groups, and then the count of every group's)
+    DWORD_PTR process = 0, system = 0;
+    if (GetProcessAffinityMask(GetCurrentProcess(), &process, &system) && process) {
+        return static_cast<unsigned>(__builtin_popcountll(process));
+    }
+#else
     cpu_set_t set;
     CPU_ZERO(&set);
     if (sched_getaffinity(0, sizeof set, &set) == 0) {
         const int n = CPU_COUNT(&set);
         if (n > 0) return static_cast<unsigned>(n);
     }
+#endif
     const unsigned h = std::thread::hardware_concurrency();
     return h ? h : 1;
 }
@@ -3776,10 +3797,20 @@ bool BuildObjects(const module::Image& image, const BuildOptions& o, const std::
         // The analysis runs on the workers too, the same plan with any number of them; its threads and CPU seconds (discovery's from its
         // own times, the plan's from the process's) beside the stage line's wall seconds (README.md, "Phase 5c")
         const auto cpu = [] {
+#if defined(_WIN32)
+            // The process's user and kernel time, as getrusage gives them (FILETIME: 100 ns units)
+            FILETIME created, exited, kernel, user;
+            if (!GetProcessTimes(GetCurrentProcess(), &created, &exited, &kernel, &user)) return 0.0;
+            const auto seconds = [](const FILETIME& f) {
+                return 1e-7 * static_cast<double>((static_cast<uint64_t>(f.dwHighDateTime) << 32) | f.dwLowDateTime);
+            };
+            return seconds(user) + seconds(kernel);
+#else
             struct rusage ru {};
             getrusage(RUSAGE_SELF, &ru);
             return static_cast<double>(ru.ru_utime.tv_sec + ru.ru_stime.tv_sec) +
                    1e-6 * static_cast<double>(ru.ru_utime.tv_usec + ru.ru_stime.tv_usec);
+#endif
         };
         const double c0 = cpu();
         fresh_plan = MakePlan(image, d, conv, o.all_entries, workers);
@@ -4246,9 +4277,17 @@ bool BuildObjects(const module::Image& image, const BuildOptions& o, const std::
     if (!o.asm_path.empty() && !WriteFile(o.asm_path, asm_text, error)) {
         return false;
     }
+#if defined(_WIN32)
+    // The process's peak working set, Windows' peak resident set (getrusage's ru_maxrss on Linux)
+    PROCESS_MEMORY_COUNTERS pmc{};
+    if (GetProcessMemoryInfo(GetCurrentProcess(), &pmc, sizeof pmc)) {
+        s.peak_rss_kib = static_cast<uint64_t>(pmc.PeakWorkingSetSize) >> 10;
+    }
+#else
     struct rusage ru {};
     getrusage(RUSAGE_SELF, &ru);
     s.peak_rss_kib = static_cast<uint64_t>(ru.ru_maxrss);
+#endif
     if (llvm::TimePassesIsEnabled) {
         llvm::reportAndResetTimings(&llvm::errs());
         // The timers inside passes (SelectionDAG's phases, the AsmPrinter's handlers: DWARF, the line marks' metadata), which

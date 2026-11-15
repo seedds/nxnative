@@ -99,6 +99,8 @@ docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -v "$(pwd):/src" -w /src
 
 The toolchain file is given by its absolute path inside the container: CMake looks for a relative `CMAKE_TOOLCHAIN_FILE` in the build folder first and then in `dm/host`, not in the current folder.
 
+The same image cross-builds the recompiler for Windows, `nxaot.exe` (statically linked, it imports only Windows' own DLLs): first LLVM 18.1.3 and lld as static libraries from their source tarballs (`dm/tools/aot/tools/build_llvm_win64.sh`, about 20 minutes at `-j 4` on 8 vCPUs and 0.85 GB of work space at its peak; the prefix it prints stays, 0.2 GB), then `nxaot.exe` against them (66 MB). The commands, the figures and the check on a Windows PC (`dm\tools\aot\tests\run_win64_nxaot.ps1`, logs in `logs\win64\nxaot\`) are in [dm/tools/aot/README.md, Building nxaot for Windows](../dm/tools/aot/README.md#building-nxaot-for-windows).
+
 ## From Git Bash on Windows (Docker Desktop)
 
 The same commands, with two changes: `MSYS_NO_PATHCONV=1`, so that Git Bash does not rewrite `/src` and the other container paths into Windows paths, and `$(pwd -W)` for the volume, which gives Docker the Windows form of the folder (`C:/...`). Leave out `--user`: Docker Desktop gives the files the container writes to your Windows user.
@@ -217,8 +219,8 @@ docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -v "$(pwd):/src" -w /src
 ```sh
 # pack the game on the system it runs on (docs/development.md, "Packing for Windows and Linux"): <id>_build/aot_<version>/ (the max mode's packs in aot_<version>/max/),
 # the Vulkan shaders, <id>_build/launch-linux.tsv and <id>_build/run.sh (launch-windows.tsv and run.cmd on Windows, whose packs are DLLs): run.sh runs the command below
-# with the pack's own paths, which it reads from the launch file, as the launcher nxlauncher does; nxaot is build/aot/nxaot unless --nxaot names it (on Windows a
-# script that runs it in its Docker image: nxaot is a Linux program)
+# with the pack's own paths, which it reads from the launch file, as the launcher nxlauncher does; nxaot is build/aot/nxaot unless --nxaot names it (on Windows the
+# bundle's bin\nxaot.exe, or from a checkout --nxaot build\aot-win64\nxaot.exe: dm/tools/aot/README.md, "Building nxaot for Windows")
 python3 scripts/build_ipa_from_nsp.py "<NSP folder>" -k <prod.keys> --platform linux
 
 # <id>_build/aot_<version>/ holds, per module, <name>.aot.tsv and <name>.image.bin (patch_nso.py --aot) and <name>.aot.so (nxaot build; .aot.dll on Windows),

@@ -548,7 +548,12 @@ std::optional<Image> LoadModule(const std::string& path, std::string* error) {
         *error = "cannot read " + path;
         return std::nullopt;
     }
+#if defined(_WIN32)
+    // The file's name without its folders: a Windows path separates them with \ as well (the packer passes such paths) and may start with a drive
+    const std::string base = path.substr(path.find_last_of("/\\:") == std::string::npos ? 0 : path.find_last_of("/\\:") + 1);
+#else
     const std::string base = path.substr(path.find_last_of('/') == std::string::npos ? 0 : path.find_last_of('/') + 1);
+#endif
     static const char kManifestTag[] = "# nxaot-manifest";
     if (file.size() >= sizeof kManifestTag - 1 && std::memcmp(file.data(), kManifestTag, sizeof kManifestTag - 1) == 0) {
         const std::string text(file.begin(), file.end());

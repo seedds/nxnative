@@ -1354,6 +1354,37 @@ def mtarc_members(d, label):
     stored when the stored length equals the length. → (path, data) of each entry"""
     import zlib
     ver, n = field(d, '<HH', 4, label)
+    if ver == 9:
+        width = 64
+        step = width + 20
+        table_end = 8 + n * step
+
+        if table_end > len(d):
+            red(f'{label}: ARC v9 directory exceeds archive')
+
+        for i in range(n):
+            o = 8 + i * step
+            path = d[o:o + width].split(b'\\0')[0].decode('latin-1')
+            h, csz, usz, flags, off = struct.unpack_from('<5I', d, o + width)
+
+            if off < table_end or off + csz > len(d):
+                red(f'{label}#{path}: invalid ARC v9 member bounds')
+
+            data = d[off:off + csz]
+
+            if csz != usz:
+                try:
+                    data = zlib.decompress(data)
+                except zlib.error as e:
+                    red(f'{label}#{path}: invalid ARC v9 zlib stream: {e}')
+
+            if len(data) != usz:
+                red(f'{label}#{path}: {len(data):#x} bytes, expected {usz:#x}')
+
+            yield path.replace('\\\\', '/'), data
+
+        return
+
     if ver != 7: red(f'{label}: ARC version {ver}: only version 7 is known')
     if not n: return
     # The version does not name the width. Check every member against the end of its candidate directory and the archive;
@@ -1387,33 +1418,69 @@ def mtarc_members(d, label):
         yield path.replace('\\', '/'), data
 
 def mtspk_shaders(d, label):
-    """MT Framework's shader package ('SPK\\0'; The Great Ace Attorney Chronicles keeps its only one, sc\\NX_64\\root, in sa/NX_64/root.arc): after the package's tables the shaders lie back to back to the
-    end of the file (230 vertex shaders, then 230 pixel shaders), each a code area and a control section: code first there, control first in Ultra Street Fighter II. Each control section names its code
-    length (+0x704), and every block must start where the previous one ended. The tables that say which vertex and pixel shaders the engine combines are not read, so the shaders are paired as
-    single-stage programs (separable_pairs)"""
-    out, end, c = [], None, d.find(CTL_MAGIC)
-    if c < 0: red(f'{label} SPK: no shader control section')
-    ncode, = field(d, '<I', c + 0x704, f'{label} SPK')
-    # In a code-first package the next shader's code also follows this control. Its *own* code comes
-    # before it at the declared distance. Once established, keep the order even if a later pair is damaged.
+    """MT Framework SPK reader supporting variable metadata between shader blocks."""
+    out = []
+    c = d.find(CTL_MAGIC)
+
+    if c < 0:
+        red(f'{label} SPK: no shader control section')
+
+    ncode = field(d, '<I', c + 0x704, f'{label} SPK')[0]
     control_first = c < ncode or d[c - ncode:c - ncode + 4] != GFX_MAGIC
+
     while c >= 0:
-        if c + 0x708 > len(d) or d[c:c + 4] != CTL_MAGIC: red(f'{label} SPK: no complete control header at {c:#x}')
-        nctl, ncode = struct.unpack_from('<I', d, c + 0x20)[0], struct.unpack_from('<I', d, c + 0x704)[0]
+        if c + 0x708 > len(d) or d[c:c + 4] != CTL_MAGIC:
+            red(f'{label} SPK: no complete control header at {c:#x}')
+
+        nctl = field(d, '<I', c + 0x20, label)[0]
+        ncode = field(d, '<I', c + 0x704, label)[0]
+
         g = c + nctl if control_first else c - ncode
         start = c if control_first else g
-        if nctl < 0x708 or g < 0 or c + nctl > len(d) or g + ncode > len(d) or d[g:g + 4] != GFX_MAGIC:
+
+        if (nctl < 0x708 or g < 0 or c + nctl > len(d)
+                or g + ncode > len(d) or d[g:g + 4] != GFX_MAGIC):
             red(f'{label} SPK: no matching graphics code area for control at {c:#x}')
-        if end is not None and start != end: red(f'{label} SPK: noncontiguous shader at {start:#x} after {end:#x}')
-        ctl, code = d[c:c + nctl], d[g:g + ncode]
+
+        ctl = d[c:c + nctl]
+        code = d[g:g + ncode]
         st = sph_stage(code)
         why = check(label, st, ctl, code) if st else 'no stage in the SPH'
-        if why: red(f'{label} SPK @{start:#x}: {why}')
+
+        if why:
+            red(f'{label} SPK @{start:#x}: {why}')
+
         out.append((f'{label}#MTSPK@{start:#x}', st, ctl, code))
+
         end = g + ncode if control_first else c + nctl
-        if end == len(d): return out
-        c = end if control_first else d.find(CTL_MAGIC, end)
-    red(f'{label} SPK: last shader ends at {end}, before the end of the package')
+
+        # Find the next structurally valid shader, skipping variable metadata.
+        candidate = d.find(CTL_MAGIC, end)
+
+        while candidate >= 0:
+            if candidate + 0x708 <= len(d):
+                cn = struct.unpack_from('<I', d, candidate + 0x20)[0]
+                cc = struct.unpack_from('<I', d, candidate + 0x704)[0]
+                cg = candidate + cn if control_first else candidate - cc
+
+                if (cn >= 0x708 and cg >= 0 and candidate + cn <= len(d)
+                        and cg + cc <= len(d) and d[cg:cg + 4] == GFX_MAGIC):
+                    candidate_ctl = d[candidate:candidate + cn]
+                    candidate_code = d[cg:cg + cc]
+                    candidate_stage = sph_stage(candidate_code)
+
+                    if candidate_stage and not check(
+                            label, candidate_stage, candidate_ctl, candidate_code):
+                        break
+
+            candidate = d.find(CTL_MAGIC, candidate + 4)
+
+        if candidate < 0:
+            return out
+
+        c = candidate
+
+    return out
 
 def mtarc_shaders(d, label, out):
     for path, m in mtarc_members(d, label):

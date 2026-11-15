@@ -7,7 +7,7 @@
 cmake_minimum_required(VERSION 3.20)
 project(nxnative_host C)
 
-set(GAME "" CACHE STRING "game profile (dm/games/<base game title ID>): the host is built for it")
+set(GAME "" CACHE STRING "game profile (dm/games/<base game title ID>): the profile the host starts with when nxhost-run is not told another (--profile, --game)")
 set(REPO ${CMAKE_CURRENT_SOURCE_DIR}/../..)
 cmake_path(NORMAL_PATH REPO)
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
@@ -22,16 +22,28 @@ if(APPLE)
     message(FATAL_ERROR "Apple builds use dm/host/Makefile and dm/host/tests/Makefile")
 endif()
 
-# ---- The game profile header (dm/games/game.py header, as the Makefile writes gen/<GAME>/game_profile.h) ----
-set(GEN ${CMAKE_BINARY_DIR}/gen/${GAME})
+# ---- The game profile: read at run time, so one nxhost-run serves every profile (dm/host/game_rt.c) ----
+# Apple's Makefiles compile a host for one profile (game.py header <id>: each DM_GAME_* a constant). Here game.py header --runtime writes game_profile.h's runtime form, the
+# same for every profile (each DM_GAME_* a read of dm_game's field; DM_GAME_RUNTIME marks the port's code), and game.py table the table of every profile in dm/games with
+# dm_game initialised to GAME's row: the default, so every program and test that is not told another profile runs as a host built for GAME did. nxhost-run picks another at
+# start with --profile <file> (game.py runtime <id> <file>; DM_GAME_PROFILE=<file>) or --game <title ID>. Nothing else in the tree depends on GAME: two trees configured with
+# different GAMEs build the same programs except for gen/profile/game_profiles.c's default row. GAME's folder is found as game.py finds it, now: a profile outside dm/games
+# (DM_GAMES_DIR, DM_GAMES_FIRST at configure time) becomes a row of its own in the table. nxprofile is the generated table and game_rt.c, linked by everything that includes
+# game_profile.h (nxhost and the libraries it links, the PROFILE tests)
+execute_process(COMMAND ${Python3_EXECUTABLE} ${REPO}/dm/games/game.py dir ${GAME} OUTPUT_VARIABLE GAME_DIR ERROR_VARIABLE game_err RESULT_VARIABLE game_rc OUTPUT_STRIP_TRAILING_WHITESPACE)
+if(game_rc)
+    message(FATAL_ERROR "GAME=${GAME}: ${game_err}")
+endif()
+set(GEN ${CMAKE_BINARY_DIR}/gen/profile)
 set(GAME_H ${GEN}/game_profile.h)
-set(PROFILE_DIR ${REPO}/dm/games/${GAME})
-add_custom_command(OUTPUT ${GAME_H}
-    COMMAND ${CMAKE_COMMAND} -E make_directory ${GEN}
-    COMMAND ${Python3_EXECUTABLE} ${REPO}/dm/games/game.py header ${GAME} ${GAME_H}
-    DEPENDS ${REPO}/dm/games/game.py ${PROFILE_DIR}/game.tsv
-    COMMENT "game profile header for ${GAME}" VERBATIM)
-add_custom_target(game_profile DEPENDS ${GAME_H})
+set(GAME_TABLE_C ${GEN}/game_profiles.c)
+file(GLOB GAME_TSVS CONFIGURE_DEPENDS ${REPO}/dm/games/*/game.tsv)
+add_custom_command(OUTPUT ${GAME_H} ${GAME_TABLE_C}
+    COMMAND ${Python3_EXECUTABLE} ${REPO}/dm/games/game.py header --runtime ${GAME_H}
+    COMMAND ${Python3_EXECUTABLE} ${REPO}/dm/games/game.py table ${GAME_TABLE_C} ${GAME_DIR}
+    DEPENDS ${REPO}/dm/games/game.py ${GAME_TSVS} ${GAME_DIR}/game.tsv
+    COMMENT "game profiles: game_profile.h's runtime form and the table of every profile (default ${GAME})" VERBATIM)
+add_custom_target(game_profile DEPENDS ${GAME_H} ${GAME_TABLE_C})
 
 # ---- Compiler settings ----
 set(CMAKE_C_STANDARD 17)
@@ -73,6 +85,13 @@ target_compile_options(nxplat PRIVATE ${HOST_FLAGS})
 target_compile_definitions(nxplat PUBLIC ${PLAT_DEFS})
 target_include_directories(nxplat PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(nxplat PUBLIC ${PLAT_LIBS})
+
+# ---- The game profile of a run: the generated table and its loader (game_rt.c; "The game profile" above) ----
+add_library(nxprofile STATIC ${GAME_TABLE_C} game_rt.c)
+add_dependencies(nxprofile game_profile)
+target_compile_options(nxprofile PRIVATE ${HOST_FLAGS})
+target_include_directories(nxprofile PUBLIC ${GEN})
+target_link_libraries(nxprofile PUBLIC nxplat)
 
 # ---- libvpx: the VP8 / VP9 decoders, C only (config/generic: no NEON, no x86 assembly) ----
 set(VPX ${REPO}/dm/third_party/libvpx)
@@ -199,8 +218,8 @@ set(AOT_SRC aot_hostfn.c aot_arena.c aot_run.c aot_thread.c aot_fault.c aot_fp.c
 add_library(nxhost STATIC ${NXHOST_SRC} ${AOT_SRC} ${HLE_THUNKS_C})
 add_dependencies(nxhost game_profile)
 target_compile_options(nxhost PRIVATE ${HOST_FLAGS})
-target_include_directories(nxhost PUBLIC ${GEN} ${PROFILE_DIR} ${REPO}/dm/third_party/stb_vorbis ${REPO}/dm/tools/aot/include)
-target_link_libraries(nxhost PUBLIC nxplat vpx SDL3::SDL3-static)
+target_include_directories(nxhost PUBLIC ${REPO}/dm/third_party/stb_vorbis ${REPO}/dm/tools/aot/include)
+target_link_libraries(nxhost PUBLIC nxprofile nxplat vpx SDL3::SDL3-static)
 # The JIT fallback of the engine (design section 11): dynarmic's A64 JIT behind the C interface of dm/tools/aot/src/rt/jit.h, the glue nxaot's own run time uses
 # (jit.cpp, with the decoder glue it calls). dynarmic needs a C++20 compiler and Boost's headers: the system's where CMake finds them (the Linux images' libboost-dev:
 # docker/Dockerfile.build since its Boost layer, Dockerfile.aot), else the subset of Boost 1.83.0 in dm/third_party/boost (the headers dynarmic includes and every header
@@ -314,7 +333,7 @@ function(host_test name)
     target_link_libraries(${name} PRIVATE nxplat)
     if(T_PROFILE)
         add_dependencies(${name} game_profile)
-        target_include_directories(${name} PRIVATE ${GEN} ${PROFILE_DIR})
+        target_link_libraries(${name} PRIVATE nxprofile)   # game_profile.h's runtime form, the table and dm_game: GAME's constants unless the test picks another
     endif()
     if(T_VPX)
         target_link_libraries(${name} PRIVATE vpx)
@@ -490,8 +509,8 @@ add_library(nvn_vk STATIC ${HOSTVK_BACKEND_SRC})
 add_dependencies(nvn_vk game_profile)
 target_compile_options(nvn_vk PRIVATE ${HOST_FLAGS})
 target_compile_definitions(nvn_vk PUBLIC VK_NO_PROTOTYPES)
-target_include_directories(nvn_vk PUBLIC ${HOSTVK_INC} PRIVATE ${GEN} ${PROFILE_DIR} ${REPO}/dm/gfx/nvn/include)
-target_link_libraries(nvn_vk PUBLIC nxplat)
+target_include_directories(nvn_vk PUBLIC ${HOSTVK_INC} PRIVATE ${REPO}/dm/gfx/nvn/include)
+target_link_libraries(nvn_vk PUBLIC nxprofile nxplat)
 # The graphics backend nxhost links (step M7, done at step P8): the Vulkan one on Linux and Windows, which takes the null backend's forms itself when no Vulkan device meets the
 # baseline of design 9.1 (vk_backend.c: one red line, nothing drawn, the CPU side runs); OFF links the null backend (nvn_null). t_frontend keeps the null backend either way. The
 # device comes up at the frontend's first call that needs it (a memory pool, a texture, a submission), as the Metal backend's mtl_init does: the host calls no be_init of its own.
@@ -511,7 +530,7 @@ set_target_properties(nxhost PROPERTIES LINK_INTERFACE_MULTIPLICITY 2)
 add_library(guest_vk STATIC ${GUEST_VK_SRC})
 add_dependencies(guest_vk game_profile)
 target_compile_options(guest_vk PRIVATE ${HOST_FLAGS})
-target_include_directories(guest_vk PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${GEN} ${PROFILE_DIR} ${REPO}/dm/gfx/nvn/include)
+target_include_directories(guest_vk PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${REPO}/dm/gfx/nvn/include)
 target_link_libraries(guest_vk PUBLIC nvn_vk)
 # The guest OpenGL layer on that backend (dm/gfx/hostvk/guest_gl.c; docs/design/vulkan-backend.md 8.2, step P9b): dm/gfx/gl/hle_gl.m's state machine with a Vulkan encoder, for
 # the games that render with NVIDIA's desktop GL through EGL. A library of its own beside guest_vk, for the same reason; its GL( / GLB( / EGL( entries get thunks through the same
@@ -519,7 +538,7 @@ target_link_libraries(guest_vk PUBLIC nvn_vk)
 add_library(guest_gl STATIC ${GUEST_GL_SRC})
 add_dependencies(guest_gl game_profile)
 target_compile_options(guest_gl PRIVATE ${HOST_FLAGS})
-target_include_directories(guest_gl PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${GEN} ${PROFILE_DIR} ${REPO}/dm/gfx/nvn/include)
+target_include_directories(guest_gl PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${REPO}/dm/gfx/nvn/include)
 target_link_libraries(guest_gl PUBLIC nvn_vk)
 if(NXHOST_VULKAN)
     target_link_libraries(nxhost PUBLIC guest_vk guest_gl)
@@ -550,8 +569,8 @@ endif()
 add_library(nvn_front_obj OBJECT ${NVN_FRONTEND_SRC} ${NVN_NAMES_C})
 add_dependencies(nvn_front_obj game_profile)
 target_compile_options(nvn_front_obj PRIVATE ${HOST_FLAGS})
-target_include_directories(nvn_front_obj PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${GEN} ${PROFILE_DIR} ${REPO}/dm/gfx/nvn ${REPO}/dm/gfx/nvn/include)
-target_link_libraries(nvn_front_obj PUBLIC nxplat)
+target_include_directories(nvn_front_obj PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${REPO}/dm/gfx/nvn ${REPO}/dm/gfx/nvn/include)
+target_link_libraries(nvn_front_obj PUBLIC nxprofile nxplat)
 target_compile_definitions(nvn_front_obj PRIVATE DM_TEST_GUEST_C)   # these tests call the frontend as C functions and link no execution engine: its guest call (the command-memory callback) takes the plain form
 foreach(t IN ITEMS queue_origin clear_ds clear_tex depth16_clear integer_blend primitive_restart rast_discard vbuf readback view_swizzle queries cond_render copy_alias index_convert provoking)
     host_test(t_vk_${t} SOURCES ../../gfx/tests/vk/t_vk_${t}.c PROFILE INCLUDES ${REPO}/dm/gfx/nvn ${REPO}/dm/gfx/nvn/include ${REPO}/dm/gfx/tests/vk TMPDIR ENV ${HOSTVK_ENV})
@@ -780,6 +799,28 @@ if(NXHOST_PROGRAM)
     host_test(t_host_program SOURCES t_host_program.c DEFS "T_AOT_PACKS=\"${NXAOT_PACKS}\"")
     add_dependencies(t_host_program nxhost-run)
     set_tests_properties(t_host_program PROPERTIES TIMEOUT 300)
+endif()
+# The game profile of a run (game_rt.c; "The game profile" above). t_game_profile: every profile of dm/games read back from the file game.py runtime writes for it (all of them,
+# gen/profile/files/<id>.tsv beside the test) equals its row of the compiled-in table, field by field; the reader's refusals and dm_game_profile_select's options.
+# t_host_profile (a Python driver, so it can run game.py): this tree's nxhost-run runs t_host_program's synthetic module under the default, a profile of the table by --game and
+# a DM_GAMES_DIR profile's file by --profile and DM_GAME_PROFILE, each one's constants in its log, and refuses an unknown title ID and bad files with [RED] lines; without the
+# packs only the refusals run
+set(GAME_FILES)
+foreach(tsv IN LISTS GAME_TSVS)
+    cmake_path(GET tsv PARENT_PATH profile_dir)
+    cmake_path(GET profile_dir FILENAME profile_id)
+    list(APPEND GAME_FILES ${GEN}/files/${profile_id}.tsv)
+endforeach()
+add_custom_command(OUTPUT ${GAME_FILES}
+    COMMAND ${Python3_EXECUTABLE} ${REPO}/dm/games/game.py runtime --all ${GEN}/files
+    DEPENDS ${REPO}/dm/games/game.py ${GAME_TSVS}
+    COMMENT "every game profile's file (game.py runtime --all), for t_game_profile" VERBATIM)
+add_custom_target(game_profile_files DEPENDS ${GAME_FILES})
+host_test(t_game_profile SOURCES t_game_profile.c PROFILE TMPDIR)
+add_dependencies(t_game_profile game_profile_files)
+if(NXHOST_PROGRAM)
+    host_script_test(t_host_profile INTERPRETER python3 SCRIPT ${TESTS}/t_host_profile.py ARGS --build ${CMAKE_BINARY_DIR} --packs "${NXAOT_PACKS}" READS NXAOT_PACKS
+                     WORKING_DIRECTORY ${CMAKE_BINARY_DIR} SKIP_RETURN_CODE 77 TIMEOUT 300 ENV "TMPDIR=${CMAKE_BINARY_DIR}/tmp")
 endif()
 # The memory SVCs' announcements to the graphics backend (hle_svc.c be_guest_map / be_guest_unmap; docs/design/vulkan-backend.md 4.2), recorded by a stub backend on
 # the small layout of t_svc_memory: which SVCs commit and decommit, the ranges, and that an unmapped range was still readable when announced

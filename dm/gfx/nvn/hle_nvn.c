@@ -209,6 +209,9 @@ static void nvn_api(int api[2]) {
 #ifdef DM_GAME_NVN_API_MAJOR
     api[0] = DM_GAME_NVN_API_MAJOR; api[1] = DM_GAME_NVN_API_MINOR; LOG("[nvn] device API %d.%d (game profile device_api)", api[0], api[1]);
 #else
+#ifdef DM_GAME_RUNTIME   // the port's one host (game_profile.h's runtime form): the profile's device_api is two fields, -1 when the profile has no such key
+    if (dm_game.nvn_api_major >= 0) { api[0] = dm_game.nvn_api_major; api[1] = dm_game.nvn_api_minor; LOG("[nvn] device API %d.%d (game profile device_api)", api[0], api[1]); return; }
+#endif
     int m = dm_sdk_major(); api[0] = DM_SDK_OLD(m) ? 53 : g_devinfo[0]; api[1] = DM_SDK_OLD(m) ? 313 : g_devinfo[1]; LOG("[nvn] device API %d.%d (SDK %d)", api[0], api[1], m);
 #endif
 }

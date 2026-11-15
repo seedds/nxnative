@@ -2,7 +2,10 @@
 // Apple program, unchanged; this file is a sibling because the two differ in substance, not in a few lines: every step of the SDK start is a guest call through dm_guest_call on the
 // engine's main guest thread (design docs/design/aot-recompiler.md 2.4) that may end the process, the game's arguments live in guest memory, the start-up needs the arena, the
 // engine's fault handlers and the process's start time on Linux and Windows, and a module without the SDK can be run as homebrew (DM_AOT_RAW). The order of the start is main.c's.
-//   nxhost-run <dir> [module...] [-- game arguments...]
+//   nxhost-run [--profile <file> | --game <title ID>] <dir> [module...] [-- game arguments...]
+//     --profile <file> / --game <title ID>: the game profile of the run (game_rt.c: one program for every profile). --profile takes the file dm/games/game.py runtime <id> <file>
+//     writes (any profile game.py finds, a derived or provisional one in DM_GAMES_DIR too; the environment switch DM_GAME_PROFILE=<file> names it when the option is not
+//     given), --game one of the profiles of dm/games built into the program; with neither, the profile it was configured with (cmake -DGAME). One log line names it.
 //     <dir>: the game's recompiler input, <NSP folder>/<id>_build/aot_<version>/ (dm/tools/aot/README.md, "A game module in the host"): per module its manifest <name>.aot.tsv, its
 //     behaviour image <name>.image.bin (patch_nso.py --aot) and its pack <name>.aot.so (.aot.dll on Windows; nxaot build). The modules: the arguments, else the game profile's
 //     modules list; the game's arguments: those after "--", else the profile's game_args. The DM_* switches mean what they mean on Apple (docs/env_switches.tsv): DM_WINDOW opens
@@ -28,7 +31,11 @@
 #if NXHOST_VULKAN
 #include "vk_present.h"   // the window the Vulkan backend's presenter draws into (front_sdl.c's surface)
 #endif
+#if !DM_GAME_RUNTIME
+#error "nxhost-run reads the game profile at run time: game_profile.h must be the runtime form (dm/games/game.py header --runtime)"
+#endif
 
+int dm_game_profile_select(int *argc, char ***argv);   // game_rt.c
 void hid_keys_init(void); void stubs_report(void); void guest_thread_init(void); uint32_t svc_thread_main_init(void);
 void crash_set_dump_hook(void (*fn)(void)); void svc_thread_dump(void);
 static void *req(const char *n) { void *p = guest_sym(n); if (!p) die("missing symbol %s", n); return p; }
@@ -134,7 +141,12 @@ static uint64_t proc_start_mono_ns(void) {
 static void host_preload(int argc, char **argv) {
     g_t0_ns = proc_start_mono_ns();
     flags_init();
-    if (argc < 2) { fprintf(stderr, "usage: nxhost-run <dir> [module...] [-- game arguments...]\n  <dir>: the game's aot_<version> folder (<name>.aot.tsv, <name>.image.bin, <name>%s per module)\n", DM_AOT_PACK_SUFFIX); exit(DM_AOT_USAGE); }
+    if (argc < 2) {
+        fprintf(stderr, "usage: nxhost-run <dir> [module...] [-- game arguments...]\n  <dir>: the game's aot_<version> folder (<name>.aot.tsv, <name>.image.bin, <name>%s per module)\n"
+                "  before <dir>: --profile <file> (the game profile file dm/games/game.py runtime writes; DM_GAME_PROFILE=<file> without the option) or --game <title ID> (a profile\n"
+                "  built into the program); with neither, the profile the program was configured with (cmake -DGAME)\n", DM_AOT_PACK_SUFFIX);
+        exit(DM_AOT_USAGE);
+    }
     if (getenv("DM_FIXED_TIME")) setenv("TZ", "UTC", 1);   // deterministic comparison: the calendar in UTC (main.c)
 #if defined(_WIN32)
     _setmaxstdio(4096);   // the C runtime's open stream limit (512 by default) as main.c raises the descriptor limit
@@ -173,7 +185,7 @@ static void host_preload(int argc, char **argv) {
         for (char *t = strtok(s, " "); t && g_argc < 63; t = strtok(NULL, " ")) g_argv[g_argc++] = t;
         LOG("game arguments from the game profile: %s", DM_GAME_ARGS);
     }
-    if (!n) { static const char *def[] = DM_GAME_MODULES; for (int k = 0; k < DM_GAME_NMOD; k++) names[n++] = def[k]; }   // the game profile's modules
+    if (!n) for (int k = 0; k < DM_GAME_NMOD; k++) names[n++] = DM_GAME_MODULES[k];   // the game profile's modules (main.c's initializer list is an array of the profile here)
     load_modules(argv[1], names, n);   // loader.c's game-module path: manifests, images, GOT bindings, packs
     dm_sdk_major();
     if (getenv("DM_PROBE")) LOG("[RED] DM_PROBE: the probes put brk words into the game's code (probe.c, Apple's native execution); the x86-64 engine runs packs: not set");
@@ -195,6 +207,8 @@ void dm_host_preload_start(int argc, char **argv) {
     if (pthread_create(&g_pre.th, &a, preload_thread, NULL)) die("dm_host_preload_start: cannot start the thread");
 }
 int main(int argc, char **argv) {
+    // The game profile first, before anything reads a DM_GAME_* constant (the loading thread of DM_PRELOAD too): --profile / --game are taken off the arguments here
+    if (dm_game_profile_select(&argc, &argv)) return DM_AOT_USAGE;
     const char *pso = getenv("DM_PSO_PREBUILD");
     if (pso && !strcmp(pso, "tool")) { fprintf(stderr, "[dm] [RED] DM_PSO_PREBUILD=tool is the Metal pipeline archive's prebuild (nvn_mtl.m); the Vulkan backend's is DM_VK_PREBUILD=1 at a game's start\n"); return DM_AOT_USAGE; }
     if (getenv("DM_PRELOAD")) dm_host_preload_start(argc, argv);

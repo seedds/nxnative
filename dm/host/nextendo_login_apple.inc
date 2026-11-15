@@ -24,7 +24,7 @@
 #include <unistd.h>
 
 // Not every user of this file needs every definition, hence the unused attributes.
-static NSString *const kNxScopes __attribute__((unused)) = @"identity friends game.matchmaking presence";
+static NSString *const kNxScopes __attribute__((unused)) = @"identity friends game.matchmaking presence profil";   // profil: /api/profile, the account's Mii (hle_nextendo_social_apple.m)
 static NSString *const kNxAuthorize __attribute__((unused)) = @"https://nextendo.network/oauth/authorize";
 static NSString *const kNxTokenEndpoint __attribute__((unused)) = @"https://nextendo.network/api/oauth/token";
 static NSString *const kNxGameTokenEndpoint __attribute__((unused)) = @"https://nextendo.network/api/nex-token";

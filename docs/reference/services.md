@@ -1115,6 +1115,14 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Check:** `t_net` reads `GetLastErrno` after an empty non-blocking `RecvFrom` (11), an oversized datagram (90), a refused address and an unwired family (97), an unwired option level (92), a second `Connect` on a connected socket (106) and a `Connect` to a closed port (111), and checks the table's rows the game compares with. With the host's numbers stored, seven of those checks fail: the calls report 35, 40, 47, 42, 56 and 61.
 - **Open:** the offline path's own constants in the same file, `SK_ENETDOWN` 50 and `SK_EAGAIN` 35, are host numbers as well (Horizon's are 100 and 11). They are what every offline game has been brought up with, so they are unchanged here. With `DM_NET=1` they still reach a game from name resolution (cut, ENETDOWN) and from an empty non-blocking `EventFdRead`.
 
+### With `DM_NET=1` the BSD service's calls are the host's sockets, and an EventFd cannot share a poll with one
+
+- **Symptom:** with `DM_NET=1`, a `Poll` or `Select` that lists an `EventFd` together with a real socket does not report the event descriptor.
+- **Cause:** `DM_NET` unset keeps the BSD service as it is, one table of small descriptors (0 to 63) that holds `EventFd` counters and the process-local UDP transport, with FreeBSD's error numbers. With `DM_NET=1` each `dm_sk_` entry point (`Socket`, `Bind`, `Connect`, `Listen`, `Accept`, `SendTo`, `RecvFrom`, `Close`, `Poll`, `Select` and the rest) goes to the host's own socket code in `hle_net.c` (`net_*`) and keeps Horizon's (Linux's) error numbers, and loopback traffic is the host's too. The guest's descriptor is then a host descriptor, so the host's `poll` or `select` reads an `EventFd`'s number as the host's own descriptor of that number. A set with no descriptor in it still takes the service's wait, so a timeout passes (Dark Souls' network thread).
+- **Fix:** none; this is a known limit of `DM_NET=1`, which is off by default. A game that waits on an `EventFd` and a socket in one call is run without it.
+- **Found on:** reading the dispatch against the service's shared table when PR #565 was rebased onto the local transport; no game was seen to do this with `DM_NET=1`.
+- **Check:** `t_net_dispatch` runs one loopback datagram round trip with `DM_NET` unset (the service's local transport: no host socket, the service's own EAGAIN 35, ENETDOWN for a remote address) and with `DM_NET=1` (a host socket, Horizon's EAGAIN 11). `t_net_eventfd` and `t_net_loopback` cover the service with `DM_NET` unset.
+
 ## Settings, languages and fonts
 
 ### Language codes

@@ -191,13 +191,13 @@ static void login_tests(void) {
     unsetenv("DM_NEXTENDO_LOGIN_DIR"); rmdir(dir); set_record(valid_record());
 }
 NSString *dm_nextendo_login_access(void) { return @"synthetic-access"; }   // in place of hle_nextendo_apple.m's weak one: a sign-in's access token
-// Each account route gets the token nextendo.network takes there (hle_nextendo_apple.m): the nx2 game token for a history write and
-// online-status, the access token for the rest
+// Each account route gets the token nextendo.network takes there (hle_nextendo_apple.m): the nx2 game token for online-status, the access
+// token for the rest
 static void bearer_tests(void) {
     NSMutableDictionary *record = valid_record(); set_record(record); NSString *game = record[@"token"];
     CHECK([dm_nextendo_api_bearer("me") isEqual:@"synthetic-access"] && [dm_nextendo_api_bearer("friends") isEqual:@"synthetic-access"] && [dm_nextendo_api_bearer("presence") isEqual:@"synthetic-access"]
-          && [dm_nextendo_api_bearer("history") isEqual:@"synthetic-access"] && [dm_nextendo_api_bearer("history-write") isEqual:game] && [dm_nextendo_api_bearer("online-status") isEqual:game],
-          "me, friends, presence and a history read get the access token; a history write and online-status the nx2 game token");
+          && [dm_nextendo_api_bearer("online-status") isEqual:game],
+          "me, friends and presence get the access token; online-status the nx2 game token");
 }
 int main(void) { @autoreleasepool {
     // No configured provider is a normal unavailable result, not an OS storage

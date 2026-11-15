@@ -60,7 +60,7 @@ static bool provide_credential(uint8_t *buffer, size_t capacity, size_t *size) {
     pthread_mutex_unlock(&g_cache.lock);
     dm_guest_host_wait_end();
     // The first game credential also asks once whether Nextendo will let this account play (on a queue: the game does not wait), and starts the
-    // Nextendo session (the account's Mii and play time) if the module load did not: on the iPhone the modules can load before the launcher has set
+    // Nextendo session (the account's Mii) if the module load did not: on the iPhone the modules can load before the launcher has set
     // DM_NETWORK, and then loader.c's nextendo_main saw no Nextendo (Mario Kart 8 Deluxe, 2026-11-14). It starts once either way
     static atomic_bool asked;
     if (usable && !atomic_exchange(&asked, true)) {

@@ -112,14 +112,14 @@ uint32_t dm_nextendo_account_username(char out[33]) { @autoreleasepool {
     if (!n) return DM_ACCOUNT_FAIL; memcpy(out, name, n); return 0;
 } }
 // Host-only API authorization. Never serialized into a game bundle or HLE output. Nextendo's routes differ in the token they take, as
-// nextendo.network answered on 2026-11-15 (each route asked with both tokens): the sign-in's OAuth access token for me, friends, presence and
-// a history read; the nx2 game token for a history write ("history-write": PUT and POST answered 401 to the access token) and online-status.
-// /api/profile took neither (only a web session), so the host cannot read it. The access token goes first where it is taken, the nx2 token
+// nextendo.network answered on 2026-11-15 (each route asked with both tokens): the sign-in's OAuth access token for me, friends and presence;
+// the nx2 game token for online-status. /api/profile took neither (only a web session), so the host cannot read it, and a history write is
+// refused to both (only Nextendo's own emulator may write play time), so the host sends none. The access token goes first where it is taken, the nx2 token
 // without one. hle_nextendo_login_apple.m has the strong dm_nextendo_login_access; a host without it has no access token
 __attribute__((weak)) NSString *dm_nextendo_login_access(void) { return nil; }
 NSString *dm_nextendo_api_bearer(const char *resource) {
     DmNextendoCredential *c = credential(); if (!c) return nil;
-    bool takes_game = resource && (!strcmp(resource, "history-write") || !strcmp(resource, "online-status"));
+    bool takes_game = resource && !strcmp(resource, "online-status");
     NSString *access = takes_game ? nil : dm_nextendo_login_access(); return access.length ? access : c.token;
 }
 NSData *dm_nextendo_api_identity(void) {

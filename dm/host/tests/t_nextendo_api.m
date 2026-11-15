@@ -25,9 +25,8 @@ static bool transport(const char *url,const char *method,const char *authorizati
                       uint8_t *output,size_t capacity,size_t *size,unsigned *status) {
     requests++; CHECK(!strcmp(authorization,"Bearer synthetic-proof"));
     CHECK(!strcmp(url,"https://nextendo.network/api/friends") || !strcmp(url,"https://nextendo.network/api/me") || !strcmp(url,"https://nextendo.network/api/presence") ||
-          !strcmp(url,"https://nextendo.network/api/history") || !strcmp(url,"https://nextendo.network/api/profile"));
+          !strcmp(url,"https://nextendo.network/api/profile"));
     if (strstr(url,"presence")) { CHECK(!strcmp(method,"POST") && body && body_size); }
-    else if (strstr(url,"history") && body_size) { CHECK(!strcmp(method,"PUT") && body && !capacity); *size=0; *status=response_status; return !transport_failed; }
     else { CHECK(!strcmp(method,"GET") && !body_size); }
     const char *json=me_reply && strstr(url,"/api/me")?me_reply:"{\"friends\":[]}"; size_t length=strlen(json); CHECK(capacity > length);
     memcpy(output,json,length); *size=oversized?capacity+1:length; *status=response_status;
@@ -38,10 +37,10 @@ int main(void) { @autoreleasepool {
     CHECK(!dm_nextendo_api_request("friends",NULL,0,output,sizeof output,&size) && size==14);
     CHECK(!dm_nextendo_api_request("me",NULL,0,output,sizeof output,&size));
     CHECK(!dm_nextendo_api_request("presence",(const uint8_t*)"{}",2,output,sizeof output,&size));
-    CHECK(!dm_nextendo_api_request("history",NULL,0,output,sizeof output,&size) && size==14);
     CHECK(!dm_nextendo_api_request("profile",NULL,0,output,sizeof output,&size));
-    size=99; CHECK(!dm_nextendo_api_request("history",(const uint8_t*)"{}",2,NULL,0,&size) && !size);   // a write keeps only the status
-    response_status=500; CHECK(dm_nextendo_api_request("history",(const uint8_t*)"{}",2,NULL,0,&size)!=0); response_status=200;
+    int asked=requests;   // play history is no resource any more (Nextendo refuses its writes to third-party apps): refused before any request
+    CHECK(dm_nextendo_api_request("history",NULL,0,output,sizeof output,&size)!=0 && dm_nextendo_api_request("history",(const uint8_t*)"{}",2,output,sizeof output,&size)!=0 && requests==asked);
+    response_status=500; CHECK(dm_nextendo_api_request("friends",NULL,0,output,sizeof output,&size)!=0); response_status=200;
     char country[3]="ZZ";
     me_reply="{\"account\":{\"country\":\"fr \"},\"nsa\":\"abcdef0000001234\"}"; CHECK(!dm_nextendo_account_country(country) && !strcmp(country,"FR"));
     me_reply="{\"account\":{\"country\":\"France\"}}"; CHECK(!dm_nextendo_account_country(country) && !country[0]);

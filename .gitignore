@@ -19,3 +19,5 @@ dm/games/*/cb_extent_vk.tsv
 .vscode/
 # Agent worktrees (CLAUDE.md): never committed
 /.claude/worktrees/
+
+Mario-vs-Donkey-Kong.xci

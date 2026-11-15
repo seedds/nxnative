@@ -86,12 +86,31 @@ def load_game():   # the current game profile (DM_GAME), only for what needs one
 def profile_rows(g):   # the profile keys that change how a shader is built (nvn_*, shader_*)
     return ''.join(f'{k}\t{chr(9).join(v)}\n' for k, v in g.rows if k.startswith(('nvn_', 'shader_'))).encode()
 
+def table_pairs(p, kind=None):
+    """{(vertex key, geometry key)} of a pair table: geo_mesh.tsv's rows (kind None), or the G rows of a pipeline record (kind 'G'); a missing table has none"""
+    out = set()
+    if not p.exists(): return out
+    for ln in p.read_text().splitlines():
+        c = ln.split('\t') if kind else ln.split()
+        if kind: c = c[1:] if c[:1] == [kind] else []
+        elif not ln.strip() or ln.startswith('#'): continue
+        if len(c) >= 2 and c[0] and c[1]: out.add((c[0][:16], c[1][:16]))
+    return out
+
+def mesh_pairs(g):
+    """The vertex / geometry pairs that get a mesh library (dmsh_mesh.py): those the game drew with a lean geometry kernel and no mesh library, which the host writes to the pipeline record
+    as G rows (pso_manifest.tsv; nvn_geometry.inc geo_mesh_fn), and the hand-written geo_mesh.tsv, for pairs no recording has reached yet"""
+    return table_pairs(g.table('pso_manifest.tsv'), 'G') | table_pairs(g.table('geo_mesh.tsv'))
+
 def inputs(g):
-    """Digest of a game profile's inputs to its shader library: the shader tables (a missing one counts as such) and the nvn_* / shader_* keys"""
+    """Digest of a game profile's inputs to its shader library: the shader tables (a missing one counts as such) and the nvn_* / shader_* keys. Of the pipeline record only its G rows
+    (mesh_pairs), and only when it has any: a profile whose record has none keeps its digest, and recording other pipelines again changes nothing"""
     h = hashlib.sha256()
     for f in INPUT_TABLES:
         p = g.table(f)
         h.update(f'game/{f}'.encode() + b'\0' + (p.read_bytes() if p.exists() else b'missing') + b'\0')
+    rec = table_pairs(g.table('pso_manifest.tsv'), 'G')
+    if rec: h.update(b'game/pso_manifest.tsv G\0' + ''.join(f'{v}\t{k}\n' for v, k in sorted(rec)).encode() + b'\0')
     h.update(profile_rows(g))
     return h.hexdigest()[:12]
 

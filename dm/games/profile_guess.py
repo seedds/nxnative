@@ -182,15 +182,9 @@ def guess(F, hooks=None):
         G['shader_groups'] = ('ShaderArchive-Global-=global ShaderArchive-=game', 'the decoded shader code archives: the engine\'s global shaders and the game\'s material shaders')
     if 'RE Engine' in F.get('main_markers', set()) and R['mags'].get('RE Engine PAK'):
         G['shader_groups'] = ('re_chunk=sdf', 'RE Engine: the shaders are SDF definitions inside the KPKA PAKs (shader_split.py kpka_jobs / sdf_shaders), as in Monster Hunter Rise\'s and PRAGMATA\'s profiles')
-    # The engine region needs virtual address memory; without it (OCTOPATH TRAVELER 1.0.5, Unreal Engine 4 on SDK 3.5.1, no system resource; Yoshi's Crafted World, SDK 4: 0xc5200000) nninitStartup sets a heap of pool − used instead,
-    # which the heap-region layout above holds
-    if 'Unreal' in F.get('main_markers', set()) and R['exts'].get('.pak') and 'nvnBootstrapLoader' in imp and F['sysres']:
-        G['mem_reserve'] =('0x1028000000', 'Unreal: nninitStartup reserves a 62 GB address region and its FMallocBinned3 takes 37 GB of it, so a 64 GB alias region for the bring-up on the Mac. '
-                            'The rewriter cuts the allocator in any Unreal 4 / 5 main (dm/tools/ue_malloc.py) and gives the region what the alias region has room for (dm/tools/ue_region.py), so an iPhone '
-                            'takes a smaller guest block, as Octopath Traveler 0\'s profile (docs/reference/memory.md)')
-        # Leave 128 MB for the initial heap after the 256 MB module and stack regions.
-        # The old 64.125 GB alias consumed the entire block (SMT V: Vengeance's 6 MB heap failed).
-        G['mem_alias'] = ('0x1000000000', '')
+    # Unreal takes the layout above with no rule of its own: the rewriter cuts FMallocBinned3 in any Unreal 4 / 5 main (dm/tools/ue_malloc.py) and gives the 62 GB engine region what the
+    # alias region has room for (dm/tools/ue_region.py), 4.06 GB in the 5 GB block. A 64 GB alias region here gained the Mac nothing (it reserves the Switch's 64 GB anyway) and an iPhone
+    # refused it at launch (Dispatch, GitHub issue #2278: docs/reference/memory.md, Provisional Unreal profiles asked an iPhone for 64 GB)
     G.update(preset)
     return G
 

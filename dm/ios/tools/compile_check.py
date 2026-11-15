@@ -14,7 +14,7 @@ env = dict(os.environ, GAME=game)
 subprocess.run(['make', '-s', '-C', host, 'game_profile', 'host_msl', 'MSL_SDK=iphoneos'], check=True, env=env)
 cmd = subprocess.run(['make', '-s', '-n', '-B', '-C', host, 'dmhost', 'MSL_SDK=iphoneos'], capture_output=True, text=True, check=True, env=env).stdout
 lines = [shlex.split(l) for l in cmd.splitlines() if l.lstrip().startswith('clang')]
-lines.sort(key=lambda t: 'dmhost' not in t)   # the host's own command first, as gen_build.py does, so its header paths come before libvpx's
+lines.sort(key=lambda t: any(a.startswith(('gen/vpx/', 'gen/dav1d/')) for a in t))   # the host's own commands first, as gen_build.py does, so its header paths come before the libraries'
 srcs, incs, defs = [], [], []
 for toks in lines:
     for t in toks:

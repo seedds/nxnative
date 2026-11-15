@@ -90,7 +90,6 @@ static int run(prog_t *pg, uint8_t *pool, int indexed, int maximum, int count, i
         state_reset();
         memset(&R, 0, sizeof R);
         mtl_sub_begin();
-        mtl_sub_index(&handle, 1);
         R.has_rt = 1;
         R.rt.n = 1;
         R.rt.color[0] = &rt;

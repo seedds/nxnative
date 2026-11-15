@@ -1,16 +1,53 @@
-// nn::codec::HardwareOpusDecoder: the real device decodes in hardware via the hwopus service (the game's audio and cutscene tracks are all Opus; this is not an online feature).
-// Host: the constructor instead constructs the SDK's software OpusDecoder in the same memory (the sdk bundles libopus, native ARM).
-// Basis: both are implementations of nn::codec::IOpusDecoder, with the 10 vtable slots identical one by one in order and signature (destructor×2, GetWorkBufferSize, IsInitialized,
-// Initialize, Finalize, GetSampleRate, GetChannelCount, Reset, DecodeInterleaved); the game allocates 0x40 bytes and the software object is 0x30 bytes.
+// nn::codec::HardwareOpusDecoder and HardwareOpusMultiStreamDecoder: the real device decodes in hardware via the hwopus service (the game's audio and cutscene tracks are Opus; this is
+// not an online feature). Host: each class is the SDK's software class (the sdk bundles libopus, native ARM). The constructor builds the software OpusDecoder /
+// OpusMultiStreamDecoder in the same memory, and every member binds to the software class's member of the same signature (guest aliases, hle.h HLE_FORCE_ALIAS: no host code).
+// Basis: each pair implements one interface. The single-stream classes' 10 vtable slots match one by one in order and signature (destructor×2, GetWorkBufferSize, IsInitialized,
+// Initialize, Finalize, GetSampleRate, GetChannelCount, Reset, DecodeInterleaved); the game allocates 0x40 bytes and the software object is 0x30. The multi-stream classes' 12 match
+// the same way (with GetTotalStreamCount and GetStereoStreamCount); 0x48 bytes, the software object 0x38. Each SDK defines the same member set for both classes of a pair (Super
+// Mario Party's: Reset, no Decode or SetContext; OKAMI HD's: Decode and SetContext, no Reset). The hardware constructor stores its vtable, zeroes the fields and keeps the option; both destructors are a bare ret.
+// Calls through the vtable reached the software members once the constructor was taken over. Calls to a member itself (an object held by value or by its own class, which the
+// compiler devirtualizes) ran the hardware member on the software object: Initialize, DecodeInterleaved and GetWorkBufferSize go to the C interface below, which kept a second
+// decoder state beside the object, and Finalize, IsInitialized, GetSampleRate, GetChannelCount and Reset read the hardware layout, Finalize calling through +0x08 (Super Mario
+// Party's sdk+0x22ff10). Found on Just Dance 2022 (SDK 11.4.0, PR #2746) and Rayman Legends (SDK 1.3.1, PR #1540). The option argument of the hardware constructor has no software
+// counterpart and is left in w1; C2 and D2 bind to C1 and D1 (no virtual bases: the same code), so a stripped software C2 or D2 does not matter
 #include "hle.h"
 
-HLE_FORCE("_ZN2nn5codec19HardwareOpusDecoderC1Ei", "hwopus service; replaced by the SDK software OpusDecoder (same IOpusDecoder virtual interface)",
-          void, h_codec_HwOpusCtor, void *self, int option) {
-    (void)option;
-    static void (*soft_ctor)(void *);
-    if (!soft_ctor && !(soft_ctor = guest_sym("_ZN2nn5codec11OpusDecoderC1Ev"))) die("missing the OpusDecoder constructor");
-    soft_ctor(self);
-}
+#define OPUS_WHY "hwopus service; the SDK software OpusDecoder's member of the same signature"
+HLE_FORCE_ALIAS("_ZN2nn5codec19HardwareOpusDecoderC1Ei", "_ZN2nn5codec11OpusDecoderC1Ev", OPUS_WHY);
+HLE_FORCE_ALIAS("_ZN2nn5codec19HardwareOpusDecoderC2Ei", "_ZN2nn5codec11OpusDecoderC1Ev", OPUS_WHY);
+HLE_FORCE_ALIAS("_ZN2nn5codec19HardwareOpusDecoderD0Ev", "_ZN2nn5codec11OpusDecoderD0Ev", OPUS_WHY);
+HLE_FORCE_ALIAS("_ZN2nn5codec19HardwareOpusDecoderD1Ev", "_ZN2nn5codec11OpusDecoderD1Ev", OPUS_WHY);
+HLE_FORCE_ALIAS("_ZN2nn5codec19HardwareOpusDecoderD2Ev", "_ZN2nn5codec11OpusDecoderD1Ev", OPUS_WHY);
+HLE_FORCE_ALIAS("_ZNK2nn5codec19HardwareOpusDecoder17GetWorkBufferSizeEii", "_ZNK2nn5codec11OpusDecoder17GetWorkBufferSizeEii", OPUS_WHY);
+HLE_FORCE_ALIAS("_ZNK2nn5codec19HardwareOpusDecoder13IsInitializedEv", "_ZNK2nn5codec11OpusDecoder13IsInitializedEv", OPUS_WHY);
+HLE_FORCE_ALIAS("_ZN2nn5codec19HardwareOpusDecoder10InitializeEiiPvm", "_ZN2nn5codec11OpusDecoder10InitializeEiiPvm", OPUS_WHY);
+HLE_FORCE_ALIAS("_ZN2nn5codec19HardwareOpusDecoder8FinalizeEv", "_ZN2nn5codec11OpusDecoder8FinalizeEv", OPUS_WHY);
+HLE_FORCE_ALIAS("_ZNK2nn5codec19HardwareOpusDecoder13GetSampleRateEv", "_ZNK2nn5codec11OpusDecoder13GetSampleRateEv", OPUS_WHY);
+HLE_FORCE_ALIAS("_ZNK2nn5codec19HardwareOpusDecoder15GetChannelCountEv", "_ZNK2nn5codec11OpusDecoder15GetChannelCountEv", OPUS_WHY);
+HLE_FORCE_ALIAS("_ZN2nn5codec19HardwareOpusDecoder5ResetEv", "_ZN2nn5codec11OpusDecoder5ResetEv", OPUS_WHY);
+HLE_FORCE_ALIAS("_ZN2nn5codec19HardwareOpusDecoder17DecodeInterleavedEPmPiPsmPKvm", "_ZN2nn5codec11OpusDecoder17DecodeInterleavedEPmPiPsmPKvm", OPUS_WHY);
+HLE_FORCE_ALIAS("_ZN2nn5codec19HardwareOpusDecoder6DecodeEPmPiPPsimPKvm", "_ZN2nn5codec11OpusDecoder6DecodeEPmPiPPsimPKvm", OPUS_WHY);
+HLE_FORCE_ALIAS("_ZN2nn5codec19HardwareOpusDecoder10SetContextEPKvm", "_ZN2nn5codec11OpusDecoder10SetContextEPKvm", OPUS_WHY);
+// The multi-stream class (Hyrule Warriors: Age of Calamity, SDK 9.6.0: its sound streams are multi-stream Opus; without the constructor's the game's KIDS resource loader never
+// finished the first sound stream, asset/data/0x272c6efb.file, and the main thread waited for it forever at main+0x8d9bc8)
+#define OPUS_MS_WHY "hwopus service; the SDK software OpusMultiStreamDecoder's member of the same signature"
+HLE_FORCE_ALIAS("_ZN2nn5codec30HardwareOpusMultiStreamDecoderC1Ei", "_ZN2nn5codec22OpusMultiStreamDecoderC1Ev", OPUS_MS_WHY);
+HLE_FORCE_ALIAS("_ZN2nn5codec30HardwareOpusMultiStreamDecoderC2Ei", "_ZN2nn5codec22OpusMultiStreamDecoderC1Ev", OPUS_MS_WHY);
+HLE_FORCE_ALIAS("_ZN2nn5codec30HardwareOpusMultiStreamDecoderD0Ev", "_ZN2nn5codec22OpusMultiStreamDecoderD0Ev", OPUS_MS_WHY);
+HLE_FORCE_ALIAS("_ZN2nn5codec30HardwareOpusMultiStreamDecoderD1Ev", "_ZN2nn5codec22OpusMultiStreamDecoderD1Ev", OPUS_MS_WHY);
+HLE_FORCE_ALIAS("_ZN2nn5codec30HardwareOpusMultiStreamDecoderD2Ev", "_ZN2nn5codec22OpusMultiStreamDecoderD1Ev", OPUS_MS_WHY);
+HLE_FORCE_ALIAS("_ZNK2nn5codec30HardwareOpusMultiStreamDecoder17GetWorkBufferSizeEiiii", "_ZNK2nn5codec22OpusMultiStreamDecoder17GetWorkBufferSizeEiiii", OPUS_MS_WHY);
+HLE_FORCE_ALIAS("_ZNK2nn5codec30HardwareOpusMultiStreamDecoder13IsInitializedEv", "_ZNK2nn5codec22OpusMultiStreamDecoder13IsInitializedEv", OPUS_MS_WHY);
+HLE_FORCE_ALIAS("_ZN2nn5codec30HardwareOpusMultiStreamDecoder10InitializeEiiiiPKhPvm", "_ZN2nn5codec22OpusMultiStreamDecoder10InitializeEiiiiPKhPvm", OPUS_MS_WHY);
+HLE_FORCE_ALIAS("_ZN2nn5codec30HardwareOpusMultiStreamDecoder8FinalizeEv", "_ZN2nn5codec22OpusMultiStreamDecoder8FinalizeEv", OPUS_MS_WHY);
+HLE_FORCE_ALIAS("_ZNK2nn5codec30HardwareOpusMultiStreamDecoder13GetSampleRateEv", "_ZNK2nn5codec22OpusMultiStreamDecoder13GetSampleRateEv", OPUS_MS_WHY);
+HLE_FORCE_ALIAS("_ZNK2nn5codec30HardwareOpusMultiStreamDecoder15GetChannelCountEv", "_ZNK2nn5codec22OpusMultiStreamDecoder15GetChannelCountEv", OPUS_MS_WHY);
+HLE_FORCE_ALIAS("_ZNK2nn5codec30HardwareOpusMultiStreamDecoder19GetTotalStreamCountEv", "_ZNK2nn5codec22OpusMultiStreamDecoder19GetTotalStreamCountEv", OPUS_MS_WHY);
+HLE_FORCE_ALIAS("_ZNK2nn5codec30HardwareOpusMultiStreamDecoder20GetStereoStreamCountEv", "_ZNK2nn5codec22OpusMultiStreamDecoder20GetStereoStreamCountEv", OPUS_MS_WHY);
+HLE_FORCE_ALIAS("_ZN2nn5codec30HardwareOpusMultiStreamDecoder5ResetEv", "_ZN2nn5codec22OpusMultiStreamDecoder5ResetEv", OPUS_MS_WHY);
+HLE_FORCE_ALIAS("_ZN2nn5codec30HardwareOpusMultiStreamDecoder17DecodeInterleavedEPmPiPsmPKvm", "_ZN2nn5codec22OpusMultiStreamDecoder17DecodeInterleavedEPmPiPsmPKvm", OPUS_MS_WHY);
+HLE_FORCE_ALIAS("_ZN2nn5codec30HardwareOpusMultiStreamDecoder6DecodeEPmPiPPsimPKvm", "_ZN2nn5codec22OpusMultiStreamDecoder6DecodeEPmPiPPsimPKvm", OPUS_MS_WHY);
+HLE_FORCE_ALIAS("_ZN2nn5codec30HardwareOpusMultiStreamDecoder10SetContextEPKvm", "_ZN2nn5codec22OpusMultiStreamDecoder10SetContextEPKvm", OPUS_MS_WHY);
 
 // The C interface to the same hardware decoder (Tears of the Kingdom, SDK 20.5.22: GetHardwareOpusDecoderWorkBufferSize opens hwopus and aborts in sm::Initialize).
 // Each call goes to the sdk's software C interface instead. The software decoder state lives in a host block kept per game decoder object (objmap), so the size of the
@@ -58,14 +95,7 @@ HLE_FORCE("_ZN2nn5codec33DecodeOpusInterleavedWithHardwareEPNS0_23HardwareOpusDe
     return f(opus_soft(hw), consumed, samples, out, out_size, in, in_size);
 }
 
-// nn::codec::HardwareOpusMultiStreamDecoder (Hyrule Warriors: Age of Calamity, SDK 9.6.0: its sound streams are multi-stream Opus): the same swap as HardwareOpusDecoder above.
-// Both classes implement one interface: their 12 vtable slots match one by one (destructor×2, GetWorkBufferSize, IsInitialized, Initialize, Finalize, GetSampleRate, GetChannelCount,
-// GetTotalStreamCount, GetStereoStreamCount, Reset, DecodeInterleaved); the hardware object is 0x48 bytes, the software one 0x38. Both destructors are a bare ret.
-// Without it the game's KIDS resource loader never finished the first sound stream (asset/data/0x272c6efb.file) and the main thread waited for it forever (main+0x8d9bc8)
-HLE_FORCE("_ZN2nn5codec30HardwareOpusMultiStreamDecoderC1Ei", "hwopus service; replaced by the SDK software OpusMultiStreamDecoder (same virtual interface)",
-          void, h_codec_HwOpusMsCtor, void *self, int option) {
-    (void)option; void (*f)(void *) = opus_fn("_ZN2nn5codec22OpusMultiStreamDecoderC1Ev"); f(self);
-}
+// The multi-stream work buffer size (the class above, Hyrule Warriors: Age of Calamity)
 HLE_FORCE("_ZN2nn5codec47GetHardwareOpusMultiStreamDecoderWorkBufferSizeEiiii", "hwopus service; work buffer computed for the software decoder", size_t, h_codec_HwOpusMsWorkSize,
           int rate, int ch, int streams, int stereo) {
     size_t (*f)(int, int, int, int) = opus_fn("_ZN2nn5codec39GetOpusMultiStreamDecoderWorkBufferSizeEiiii"); return f(rate, ch, streams, stereo);

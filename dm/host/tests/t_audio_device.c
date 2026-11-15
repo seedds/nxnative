@@ -151,14 +151,14 @@ static void blocked_start(void *out) {
     device_stopped = dispatch_semaphore_create(0);
     guest_closed = dispatch_semaphore_create(0);
     static int16_t pcm[480 * 2];
-    gbuf b = {pcm, sizeof pcm, sizeof pcm};
+    aout_buf b = {.ptr = pcm, .cap = sizeof pcm, .size = sizeof pcm};
     assert(h_au_Append(out, &b));
     pthread_t guest;
     assert(!pthread_create(&guest, NULL, guest_start, out));
     assert(signaled(start_entered, 2));
     int returned = signaled(guest_returned, 1);
     uint64_t until = now_ns() + NSEC_PER_SEC;
-    gbuf *released;
+    aout_buf *released;
     while (!(released = h_au_Released(out)) && now_ns() < until) usleep(1000);
     until = now_ns() + NSEC_PER_SEC;
     int lock_free;
@@ -169,7 +169,7 @@ static void blocked_start(void *out) {
     // A callback may arrive before Start returns. Only the silent sink may touch the PCM then.
     static int16_t music[RATE * 2];
     for (unsigned i = 0; i < sizeof music / sizeof *music; i++) music[i] = 1234;
-    gbuf next = {music, sizeof music, sizeof music};
+    aout_buf next = {.ptr = music, .cap = sizeof music, .size = sizeof music};
     assert(h_au_Append(out, &next));
     int16_t samples[2] = {-1, -1};
     AudioBufferList bl = {.mNumberBuffers = 1, .mBuffers = {{2, sizeof samples, samples}}};

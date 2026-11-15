@@ -510,7 +510,7 @@ static int fg_pace(double t_in, double period, int waiting) {
              (unsigned long long)n, (unsigned long long)g_up_mfx_kept); }
     if (g_fg_upto < 9) return 0;
     if (g_fg_gate_mode) {   // see DM_FRAMEGEN_GATE
-        static uint64_t n, closes_at[3], hold_until, win_n, win_closed, last_close, opened_at; static int room; static double on_ms, off_ms, penalty; int drop = late || waiting > 2; n++;
+        static uint64_t n, closes_at[3], hold_until, win_n, win_closed, last_close, opened_at, made_open; static int room; static double on_ms, off_ms, penalty; int drop = late || waiting > 2; n++;
         double per_ms = per * 1e3, g = nvn_last_gpu_ms(); int closed = atomic_load(&g_fg_closed);
         if (!sw_on(g_fg_gate_mode)) { if (closed) atomic_store(&g_fg_closed, 0); room = 0; }   // an ab phase with the gate off
         else {
@@ -518,14 +518,16 @@ static int fg_pace(double t_in, double period, int waiting) {
             double cost = (on_ms > 0 && off_ms > 0 ? MIN(MAX(on_ms - off_ms, 2.0), 20.0) : 5.0) + penalty;
             if (!closed && drop) {
                 atomic_store(&g_fg_closed, 1); closed = 1; room = 0; uint64_t c = atomic_fetch_add(&g_fg_closes, 1) + 1;
-                if (opened_at && n - opened_at <= 120) penalty = MIN(penalty + 4.0, 20.0);   // the opening was wrong
+                // the opening was wrong, if the generator worked since it: a late frame while it made nothing (the boot, a load, the first 300 upscales) is not its doing. Charged
+                // regardless, three closes during a load put the estimate at 10 ms and the gate never opened again in a 9,000-frame run at a GPU time of 25-28 ms (cut9, 11-15)
+                if (opened_at && n - opened_at <= 120 && FG.made > made_open) penalty = MIN(penalty + 4.0, 20.0);
                 last_close = n; closes_at[0] = closes_at[1]; closes_at[1] = closes_at[2]; closes_at[2] = n;
                 if (closes_at[0] && n - closes_at[0] <= 600) g_fg_need = MIN(g_fg_need * 2, FG_NEED * 10);   // it flaps: wait longer before the next try
                 if (c <= 20 || !(c & (c - 1))) MLOG("frame generation gate: a real frame came late (%s), the generator stops until the frame leaves room for it for %d frames in a row (close #%llu; GPU %.1f ms, generator about %.1f ms, period %.1f ms)",
                                                     late ? "over 1.25 periods" : "the present queue is behind", g_fg_need, (unsigned long long)c, g, cost, per_ms);
             } else if (closed) {
                 room = !drop && g > 0 && g + cost <= 0.95 * per_ms && n - last_close > 12 ? room + 1 : 0;
-                if (room >= g_fg_need && n >= hold_until) { atomic_store(&g_fg_closed, 0); closed = 0; room = 0; opened_at = n;
+                if (room >= g_fg_need && n >= hold_until) { atomic_store(&g_fg_closed, 0); closed = 0; room = 0; opened_at = n; made_open = FG.made;
                     uint64_t c = atomic_load(&g_fg_closes); if (c <= 20 || !(c & (c - 1))) MLOG("frame generation gate: %d frames with room (GPU %.1f ms + generator about %.1f ms in a period of %.1f ms), frames are generated again", g_fg_need, g, cost, per_ms); }
             } else if (n - last_close >= 1800 && (g_fg_need > FG_NEED || penalty > 0)) { if (g_fg_need > FG_NEED) g_fg_need /= 2; penalty *= 0.5; if (penalty < 1) penalty = 0; last_close = n; }
             win_n++; win_closed += closed;

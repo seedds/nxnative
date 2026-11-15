@@ -371,7 +371,11 @@ static NvShader *geo_lean_pick(NvProg *pr, NvShader *gs, int topology, int insta
         NSError *error = nil;
         id<MTLLibrary> lib = host_lib("geo_pack", &error);
         const char *names[] = {"geo_lean_cull", "geo_lean_index", "geo_lean_tri"};
-        for (int i = 0; i < 3 && lib; i++) g_geo_lean_k[i] = [g_dev newComputePipelineStateWithFunction:[lib newFunctionWithName:@(names[i])] error:&error];
+        for (int i = 0; i < 3 && lib; i++) {
+            id<MTLFunction> fn = [lib newFunctionWithName:@(names[i])];
+            if (!fn) break;
+            g_geo_lean_k[i] = [g_dev newComputePipelineStateWithFunction:fn error:&error];
+        }
         if (!g_geo_lean_k[0] || !g_geo_lean_k[1] || !g_geo_lean_k[2]) {
             failed = 1; g_geo_lean_k[0] = g_geo_lean_k[1] = g_geo_lean_k[2] = nil;
             MLOG("[RED] lean geometry index kernels: %s", error.localizedDescription.UTF8String); return NULL;

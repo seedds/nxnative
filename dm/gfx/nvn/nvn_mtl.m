@@ -6622,6 +6622,7 @@ static int progpf_first(NSString *pc) {
     os_unfair_lock_unlock(&g_progpf_lock); return fresh;
 }
 static NvShader *shader_get(NSString *pc, int stage) {
+    if (!pc) return nil;
     if (!g_shcache) g_shcache = [NSMutableDictionary dictionary];
     NvShader *o = g_shcache[pc];
     if (o) return o;

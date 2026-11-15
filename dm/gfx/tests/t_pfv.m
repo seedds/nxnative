@@ -61,6 +61,7 @@ static int rt_view_into(int nvn_format, MTLPixelFormat want_base, uint64_t seria
         id<MTLRenderCommandEncoder> en = [cb renderCommandEncoderWithDescriptor:rp];
         [en setRenderPipelineState:ps]; [en drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3]; [en endEncoding];
         id<MTLBuffer> out = [g_dev newBufferWithLength:16 options:MTLResourceStorageModeShared];
+        if (!out) { fprintf(stderr, "could not allocate readback buffer\n"); return 1; }
         id<MTLBlitCommandEncoder> b = [cb blitCommandEncoder];
         [b copyFromTexture:base sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(4, 1, 1) toBuffer:out destinationOffset:0 destinationBytesPerRow:16 destinationBytesPerImage:16];
         [b endEncoding]; [cb commit]; [cb waitUntilCompleted];

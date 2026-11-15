@@ -36,7 +36,8 @@ static int checks, failed;
 // The next program of a test hand-over (--exec-seed): it starts only after the archive's write, so the folder holds the file; it says so in exec.txt (the test reads it)
 static void exec_then(void *dir) {
     int files = 0; for (NSString *f in [NSFileManager.defaultManager contentsOfDirectoryAtPath:@((const char *)dir) error:nil]) files += [f hasSuffix:@".mtl4a"];
-    [[NSString stringWithFormat:@"%d\n", files] writeToFile:[@((const char *)dir) stringByAppendingPathComponent:@"exec.txt"] atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    NSString *path = [@((const char *)dir) stringByAppendingPathComponent:@"exec.txt"];
+    if (!path || ![[NSString stringWithFormat:@"%d\n", files] writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:nil]) { fprintf(stderr, "could not write exec.txt\n"); exit(1); }
 }
 #define EXPECT(name, want, got) do { uint64_t w = (want), g = (got); checks++; if (w != g) { fprintf(stderr, "%s: expected %llu, got %llu\n", name, (unsigned long long)w, (unsigned long long)g); failed++; } } while (0)
 

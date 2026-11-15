@@ -838,6 +838,13 @@ int dm_aot_where(uint64_t host_pc, char *out, size_t n) {
     return 1;
 }
 
+uint64_t dm_aot_line_of_code(uint64_t host_pc) {
+    const dm_aot_pack *p = dm_aot_pack_of_code(host_pc);
+    if (!p) return 0;
+    const map_t *f = last_at(p->fns, p->nfns, host_pc), *l = last_at(p->lines, p->nlines, host_pc);
+    return f && l && l->native >= f->native ? p->base + l->off : 0;
+}
+
 // ---------- The sampler's lookups (aot.h, "The sampler"): async-signal-safe ----------
 int dm_aot_pack_count(void) { return atomic_load_explicit(&g_npacks, memory_order_acquire); }
 const dm_aot_pack *dm_aot_pack_at(int i) { return i >= 0 && i < dm_aot_pack_count() ? g_packs[i] : NULL; }

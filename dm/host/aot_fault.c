@@ -16,6 +16,9 @@
 #include <signal.h>
 #include <ucontext.h>
 #include <unistd.h>
+#if defined(__GLIBC__)
+#include <execinfo.h>   // backtrace: a guest fault's native frames
+#endif
 #endif
 #if NXHOST_JIT
 #include "rt/jit.h"   // dm_jit_access_pc: the guest access a memory callback of the JIT is making
@@ -120,19 +123,96 @@ static int run_hooks(void *addr, int is_write, void *uc) {
     return 0;
 }
 
-// The guest's frame-record chain from fp (x29), read without faulting: return addresses as module offsets, as crash.c prints it on Apple
+// ---------- Backtraces (aot.h, "The calling guest's context, and backtraces") ----------
+// The guest's frame-record chain from fp (x29), read without faulting, appended to line: return addresses as module offsets, as crash.c prints them on Apple. Every
+// record lies in the arena (what the guest can address), 8-byte aligned; the chain ends at a caller fp that does not grow, a read that fails, or 32 records. The host-return
+// address (the outermost frame of a guest call the host made, aot_run.c guest_vcall) is "host", and the walk goes on to the frames of the guest code around that call only
+// when its record's fp leads there (a nested call keeps the x29 of the host call it is nested in); at a thread's outermost call that fp is 0 and the line ends
+static void bt_walk(char *line, int *p, size_t cap, uint64_t fp) {
+    for (int i = 0; i < 32 && fp && !(fp & 7) && dm_aot_in_arena(fp, 16) && *p < (int)cap - 64; i++) {
+        uint64_t w[2]; size_t got = 0;
+        if (plat_mem_read(fp, w, sizeof w, &got) || got != sizeof w) break;
+        const int more = w[0] > fp;
+        char nm[64];
+        if (w[1] == DM_AOT_HOST_RETURN) {
+            if (!more || (w[0] & 7) || !dm_aot_in_arena(w[0], 16)) break;
+            snprintf(nm, sizeof nm, "host");
+        } else dm_aot_guest_name(w[1], nm, sizeof nm);
+        *p += snprintf(line + *p, cap - (size_t)*p, " %s", nm);
+        if (!more) break;
+        fp = w[0];
+    }
+}
 void dm_backtrace(uint64_t fp) {
     char line[1024];
     int p = snprintf(line, sizeof line, "[dm] bt:");
-    for (int i = 0; i < 32 && fp && !(fp & 7) && p < (int)sizeof line - 64; i++) {
-        uint64_t w[2]; size_t got = 0;
-        if (plat_mem_read(fp, w, sizeof w, &got) || got != sizeof w) break;
-        char nm[64];
-        dm_aot_guest_name(w[1], nm, sizeof nm);
-        p += snprintf(line + p, sizeof line - (size_t)p, " %s", nm);
-        if (w[0] <= fp) break;
-        fp = w[0];
-    }
+    bt_walk(line, &p, sizeof line, fp);
+    fprintf(stderr, "%s\n", line);
+}
+
+// The calling guest's context: the block during a host call or an SVC, whose guest address aot_run.c keeps in prof_at (host_call, stub_call: x30; aot_svc: the svc
+// instruction; 0 in guest code and the run time, DM_AOT_PROF_JIT in the JIT fallback; a nested guest call sets 0 and puts it back, with x19..x30, when it returns)
+uint64_t dm_aot_guest_lr(void) {
+    const dm_aot_thread *t = dm_aot_self();
+    const uint64_t at = t && t->depth ? t->prof_at : 0;
+    return at > DM_AOT_PROF_JIT ? at : 0;
+}
+void dm_aot_guest_backtrace(void) {
+    const uint64_t lr = dm_aot_guest_lr();
+    if (!lr) { fprintf(stderr, "[dm] bt: (no guest call)\n"); return; }
+    char line[1024], nm[64];
+    if (lr == DM_AOT_HOST_RETURN) snprintf(nm, sizeof nm, "host");   // a host function that is a guest thread's entry (hle_thread.c)
+    else dm_aot_guest_name(lr, nm, sizeof nm);
+    int p = snprintf(line, sizeof line, "[dm] bt: %s", nm);
+    bt_walk(line, &p, sizeof line, dm_aot_self()->st.x[29]);
+    fprintf(stderr, "%s\n", line);
+}
+
+// A guest instruction word at guest address a is a call (bl, blr): where code inlined at a call site, or a frame's return, maps to
+static int guest_is_call(uint64_t a) {
+    uint32_t w; size_t got = 0;
+    if (plat_mem_read(a, &w, sizeof w, &got) || got != sizeof w) return 0;
+    return (w & 0xFC000000u) == 0x94000000u || (w & 0xFFFFFC1Fu) == 0xD63F0000u;
+}
+// A guest fault's backtrace (aot_run.c fault_report, after its [RED] line), the frames above the faulting instruction:
+//   compiled code with its native frames taken (Linux): compiled code keeps x29 in a host register between the calls it makes (2.3: the block holds it only at a
+//     call or an escape), so the x29 chain from the block may start a frame or more too far out; the native frames hold every compiled frame instead (3.5). Each
+//     native return address in a pack's function is its call's guest return address (the call instruction's position, the outermost one in inlined code, + 4), and
+//     the faulting instruction's own position, when it is a call other than the instruction (code inlined there), comes first. "host" marks host frames between
+//     compiled ones (the run time, the JIT fallback, a host function a nested guest call came from)
+//   the JIT fallback: its registers are not in the block until its run ends (dm/tools/aot/src/rt/jit.h), so the walk starts from the x29 the block held when the run
+//     began, or at its last SVC: "(JIT from <pc>)" names that guest pc, and the frames the JIT made since are not shown
+//   no native frames (Windows: a pack has no unwind tables there, design 3.5; an unwinder that found none): the walk from the last x29 written back
+void dm_aot_fault_backtrace(const dm_aot_thread *t) {
+    char line[1024], nm[64];
+    int p = snprintf(line, sizeof line, "[dm] bt:");
+    int i = 0, n = t->fault_nbt;
+    while (i < n && t->fault_bt[i] != t->fault_pc) i++;   // the faulting frame (the unwinder's frames before it are the handler's)
+    if (t->fault_jit_pc) {
+        dm_aot_guest_name(t->st.pc, nm, sizeof nm);
+        p += snprintf(line + p, sizeof line - (size_t)p, " (JIT from %s)", nm);
+        bt_walk(line, &p, sizeof line, t->st.x[29]);
+    } else if (i < n) {
+        int pk = -1;
+        long fn = dm_aot_fn_of_code(t->fault_pc, &pk);
+        const dm_aot_pack *pp = dm_aot_pack_at(pk);
+        const int64_t at = fn >= 0 && pp ? dm_aot_offset_of_code(t->fault_pc, pk, fn) : -1;
+        if (at >= 0 && dm_aot_pack_base(pp) + (uint64_t)at != dm_aot_line_of_code(t->fault_pc) && guest_is_call(dm_aot_pack_base(pp) + (uint64_t)at)) {
+            dm_aot_guest_name(dm_aot_pack_base(pp) + (uint64_t)at + 4, nm, sizeof nm);
+            p += snprintf(line + p, sizeof line - (size_t)p, " %s", nm);
+        }
+        int any = 0, gap = 0;
+        for (i++; i < n && p < (int)sizeof line - 64; i++) {
+            const uint64_t ra = t->fault_bt[i] - 1;   // inside the call instruction
+            if ((fn = dm_aot_fn_of_code(ra, &pk)) < 0 || !(pp = dm_aot_pack_at(pk))) { gap = any; continue; }
+            const int64_t off = dm_aot_offset_of_code(ra, pk, fn);
+            const uint64_t base = dm_aot_pack_base(pp);
+            if (off >= 0 && guest_is_call(base + (uint64_t)off)) dm_aot_guest_name(base + (uint64_t)off + 4, nm, sizeof nm);
+            else { dm_aot_guest_name(base + dm_aot_pack_fn(pp, (size_t)fn), nm, sizeof nm); snprintf(nm + strlen(nm), sizeof nm - strlen(nm), "(fn)"); }   // no position: the function
+            p += snprintf(line + p, sizeof line - (size_t)p, "%s %s", gap ? " host" : "", nm);
+            any = 1; gap = 0;
+        }
+    } else bt_walk(line, &p, sizeof line, t->st.x[29]);
     fprintf(stderr, "%s\n", line);
 }
 
@@ -152,7 +232,9 @@ static _Noreturn void host_crash(int sig, void *addr, uint64_t pc) {
     }
     fprintf(stderr, "[dm] CRASH sig=%d addr=%p (%s)\n", sig, addr, where);
     dm_aot_thread *t = dm_aot_self();
-    if (t && t->depth) dm_backtrace(t->st.x[29]);   // the guest frames around the host code, from the last x29 written back
+    // The guest frames around the host code: inside a host call or an SVC its call site and the guest's frames (the block is whole there), else from the last x29 written back
+    if (dm_aot_guest_lr()) dm_aot_guest_backtrace();
+    else if (t && t->depth) dm_backtrace(t->st.x[29]);
     if (g_dump_hook) g_dump_hook();                 // every guest thread's state, as crash.c's report ends on Apple
     fflush(stderr);
     _exit(128 + sig);
@@ -180,7 +262,17 @@ static void on_fault(int sig, siginfo_t *si, void *ucv) {
 #endif
     dm_aot_thread *t = dm_aot_self();
     if (t && t->depth && (dm_aot_pack_of_code(pc) || jit_pc)) {
-        // A guest fault: the facts only, the report is made after the jump (aot_run.c fault_report)
+        // A guest fault: the facts only, the report is made after the jump (aot_run.c fault_report). In compiled code its native frames too, which the jump discards:
+        // the unwinder goes through this handler's frame and the signal frame (glibc's __restore_rt has unwind tables) into the pack's code (async unwind tables, 3.5)
+        t->fault_nbt = 0;
+#if defined(__GLIBC__)
+        if (!jit_pc) {
+            void *bt[sizeof t->fault_bt / sizeof *t->fault_bt];
+            const int n = backtrace(bt, (int)(sizeof bt / sizeof *bt));
+            for (int i = 0; i < n; i++) t->fault_bt[i] = (uint64_t)(uintptr_t)bt[i];
+            t->fault_nbt = n > 0 ? n : 0;
+        }
+#endif
         t->fault_signal = sig; t->fault_address = (uint64_t)(uintptr_t)si->si_addr; t->fault_pc = pc; t->fault_jit_pc = jit_pc;
         t->left = DM_AOT_LEFT_FAULT;
         t_in_next = 0;
@@ -190,6 +282,9 @@ static void on_fault(int sig, siginfo_t *si, void *ucv) {
 }
 
 static void install_once(void) {
+#if defined(__GLIBC__)
+    { void *b[2]; (void)backtrace(b, 2); }   // glibc loads its unwinder (libgcc_s) at the first call: here, not in the fault handler
+#endif
     struct sigaction sa;
     memset(&sa, 0, sizeof sa);
     sa.sa_sigaction = on_fault;

@@ -295,12 +295,25 @@ HLE_FORCE("_ZN2nn4diag6detail7PutImplERKNS0_11LogMetaDataEPKcm", "game log → h
     (void)meta; while (n && (s[n - 1] == '\n' || s[n - 1] == '\0')) n--; if (n) LOG("[game] %.*s", (int)n, s);
 }
 // Abort: report the call site (module + offset) and the guest backtrace, then exit
+#if DM_NATIVE_EXEC || defined(DM_TEST_GUEST_C)
 static void diag_abort(uint32_t res, void *lr) {
     module_t *m = module_of(lr);
     LOG("game called nn::diag abort: Result %#x, call site %s+%#llx", res, m ? m->name : "?", m ? (unsigned long long)((uint8_t *)lr - m->base) : (unsigned long long)(uintptr_t)lr);
     dm_backtrace((uint64_t)__builtin_frame_address(1));
     die("game aborted");
 }
+#else
+// The x86-64 engine: lr (the callers' __builtin_return_address(0)) is the host-call thunk's return address and the host's frames are x86 ones (no frame pointer at -O2),
+// so the call site and the guest's frames come from the calling thread's state block (aot.h dm_aot_guest_lr, dm_aot_guest_backtrace: the call site, then the x29 chain)
+static void diag_abort(uint32_t res, void *lr) {
+    (void)lr;
+    const uint64_t at = dm_aot_guest_lr();
+    const module_t *m = module_of((const void *)(uintptr_t)at);
+    LOG("game called nn::diag abort: Result %#x, call site %s+%#llx", res, m ? m->name : "?", m ? (unsigned long long)(at - (uint64_t)(uintptr_t)m->base) : (unsigned long long)at);
+    dm_aot_guest_backtrace();
+    die("game aborted");
+}
+#endif
 HLE_FORCE("_ZN2nn4diag6detail9AbortImplEv", "game aborted", void, h_diag_Abort0, void) { diag_abort(0, __builtin_return_address(0)); }
 HLE_FORCE("_ZN2nn4diag6detail9AbortImplEPKNS_6ResultE", "game aborted (with Result)", void, h_diag_AbortR, const uint32_t *r) { diag_abort(r ? *r : 0, __builtin_return_address(0)); }
 HLE_FORCE("_ZN2nn4diag12GetBacktraceEPmi", "backtrace; the host provides none (0 frames)", int, h_diag_Bt, uint64_t *out, int n) { (void)out; (void)n; return 0; }

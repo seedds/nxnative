@@ -120,6 +120,8 @@ uint64_t dm_aot_pack_base(const dm_aot_pack *p);     // the guest address of its
 void dm_aot_guest_name(uint64_t guest, char *out, size_t n);
 // A host pc in compiled code as the guest function and instruction the function map and line table give (3.5); 0 when host_pc is not in a pack (signal-safe)
 int dm_aot_where(uint64_t host_pc, char *out, size_t n);
+// The guest instruction dm_aot_where names for host_pc (the line table's entry at or before it in its function: exact for a memory access), as a guest address; 0 when none
+uint64_t dm_aot_line_of_code(uint64_t host_pc);
 // A game module's pack (loader.c, "The game-module path"): <dir>/<name>.aot.so (.aot.dll on Windows), beside the manifest <name>.aot.tsv and the behaviour image <name>.image.bin
 // it was built from (nxaot build <dir>/<name>.aot.tsv -o <object> --shared <dir>/<name>.aot.so). The game's input folder is <NSP folder>/<id>_build/aot_<version>/, beside the
 // rewritten modules of Apple's patched_<version>/
@@ -203,6 +205,10 @@ typedef struct dm_aot_thread {
     // Where the sampler (aot_profile.c, DM_AOT_PROFILE) puts a sample taken outside compiled code: 0 for guest code or the run time, DM_AOT_PROF_JIT inside the JIT fallback,
     // else the guest address whose host code runs (a host call's return address, an SVC's instruction). Written by aot_run.c on this thread, read by its signal handler
     volatile uint64_t prof_at;
+    // A guest fault's native frames (aot_fault.c, Linux): the return addresses the unwinder found above the faulting instruction, taken in the signal handler before the jump
+    // to base (the frames are gone after it); fault_report names the compiled ones as guest call sites. fault_nbt 0: none taken (Windows, the JIT fallback, no unwinder)
+    int fault_nbt;
+    uint64_t fault_bt[48];
 } dm_aot_thread;
 dm_aot_thread *dm_aot_self(void);          // the calling thread's, NULL when it never ran guest code
 dm_guest_state *dm_aot_thread_begin(void); // the calling thread's state block, made at its first call (x30 the host-return address, FPCR the packs')
@@ -435,6 +441,27 @@ typedef struct { uint64_t pc, count; uint32_t reason; } dm_aot_miss;
 // The (address, reason) pairs so far into out[0..max) (a copy, under the table's lock): their number (with out NULL, all of them); *dropped: entries the full tables did not keep
 size_t dm_aot_jit_misses(dm_aot_miss *out, size_t max, uint64_t *dropped);
 const char *dm_aot_miss_word(uint32_t reason);   // a reason's word in the misses file; NULL for none of a pack
+
+// ---------- The calling guest's context, and backtraces (aot_fault.c) ----------
+// On Apple the guest's code calls the host natively, so a host function finds its guest caller in its own frames (__builtin_return_address, __builtin_frame_address, the
+// x29 chain from there). Here a host function runs on the native stack below the run time's x86 frames (2.4, 3.2), which name nothing of the guest's: the guest's context
+// is the calling thread's state block, which holds the whole register file during a host call (the hand-over before it, aot_run.c host_call) and an SVC (2.4):
+//   dm_aot_guest_lr()         the guest address whose host code runs on this thread: a host call's return address (x30, the call site + 4: what Apple's
+//                             __builtin_return_address(0) gives a host function the guest called) or an SVC's instruction (dm_aot_thread.prof_at); 0 when the thread is in
+//                             no host call (no guest code, compiled code, the JIT fallback, or nested guest code the host called)
+//   dm_aot_guest_backtrace()  "[dm] bt:" with dm_aot_guest_lr, then dm_backtrace's walk from the block's x29 (the frame record of the function that made the call):
+//                             the call site and the guest frames above it, as Apple's
+//                             dm_backtrace((uint64_t)__builtin_frame_address(1)) prints them from a host function the guest called; "[dm] bt: (no guest call)" outside one
+// dm_backtrace(fp) (dm.h) walks the guest's frame records from fp ([fp] the caller's fp, [fp + 8] the return address), each return address as module+offset: it stops at a
+// record outside the arena or not 8-byte aligned, a caller fp that does not grow (a corrupt or cyclic chain), a read that fails, and after 32 records; a record whose return
+// address is the host-return address (DM_AOT_HOST_RETURN: the outermost frame of a guest call the host made) prints "host" and goes on to the guest frames of the host call
+// around it when its fp leads there (that host call's own call site is in no frame record, only in the host's frames: the next entry is the frame above it), and ends
+// the line otherwise
+uint64_t dm_aot_guest_lr(void);
+void dm_aot_guest_backtrace(void);
+// A guest fault's "[dm] bt:" line (aot_run.c fault_report, after its [RED] line): the frames above the faulting instruction, from its native frames in compiled code
+// (Linux), from the x29 the block held when the JIT fallback's run began, or from the last x29 written back (aot_fault.c has the cases)
+void dm_aot_fault_backtrace(const dm_aot_thread *t);
 
 // ---------- Faults (aot_fault.c) ----------
 void crash_install(void);                  // the fault handlers (signals on POSIX, a vectored exception handler on Windows); once

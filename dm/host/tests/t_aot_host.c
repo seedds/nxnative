@@ -37,10 +37,13 @@
 //   lrtail, with the JIT built in and nxaot (it packs it): a module this test writes word by word whose function calls, then jumps through a br discovery cannot
 //     bound into code with no compiled entry, 63 times: the JIT runs each case and the rest of the function, and execution comes back to the caller's compiled code
 //     when the function returns (exact JIT runs, addresses and misses, none nonlocal: dm/tools/aot/README.md, "Tail calls and the native frame's return")
+//   guestbt, with nxaot (it packs it): a module this test writes word by word whose third function, two calls deep, aborts through a host function, through svcBreak,
+//     or faults on an address no page backs: the host's lines name the call site and the guest's frames exactly (aot.h dm_aot_guest_backtrace, hle_svc.c Break,
+//     aot_fault.c dm_aot_fault_backtrace), through compiled code and with the JIT built in through the JIT fallback alone (DM_AOT_JIT_ALL)
 //   t_aot_host [--packs <dir>] [--corpus <dir>] [--nro <name>]... [--nxaot <nxaot>]
 //     the packs: --packs, else the environment variable NXAOT_PACKS, else the CMake option NXAOT_PACKS; with none, a note and exit 0 (CTest stays green where
 //     no packs exist: the Windows runner, a build without the aot image)
-//   t_aot_host --run <pack> <nro> [--set <symbol>=<value>]... [--hidden-host] [--dirty] [--pause N --seed S] [--positions] [--jit-ready]      one run (the child)
+//   t_aot_host --run <pack> <nro> [--set <symbol>=<value>]... [--hidden-host] [--dirty] [--pause N --seed S] [--positions] [--jit-ready] [--bt <mode>]      one run (the child)
 //   t_aot_host --log-race N      N log lines and N guest lines from two threads (the child of the log-lines row)
 #include "../aot.h"
 #include "../aot_hostfn.h"
@@ -78,6 +81,9 @@
 // msr fpcr; except-gcc left the list when discovery bounded its unwinder's opcode switch)
 static const char *const JIT_NEEDED[] = {"fp-gcc", "fp-clang", "fiber-gcc", "fiber-clang"};
 enum { EXCL_RUNS = 5, PAUSES = 50, PAUSE_SEEDS = 3, LOG_RACE_LINES = 20000 };
+// The guestbt NRO's layout and its host abort's argument (guestbt_nro, below)
+enum { GBT_TEXT = 0x1000, GBT_RO = 0x1000, GBT_DATA = 0x2000, GBT_SIZE = 0x3000, GBT_BSS = 0x1000, GBT_PASS = GBT_RO + 0x100 };
+#define T_BT_ABORT 0xAB0127u
 
 void guest_thread_init(void);          // thread.c
 uint32_t svc_thread_main_init(void);   // hle_thread.c
@@ -109,8 +115,9 @@ static uint64_t svc(int n, uint64_t a0, uint64_t a1) {   // an SVC from host cod
 }
 static uint64_t rng(uint64_t *s) { *s ^= *s << 13; *s ^= *s >> 7; *s ^= *s << 17; return *s; }
 
+static void bt_host_abort(void);
 void t_aot_pause_body(uint64_t arg) {
-    (void)arg;
+    if (arg == T_BT_ABORT) bt_host_abort();   // the guestbt row's host function (its mode 1), not a pause tester
     g_pt.self = thr_cur_handle();
     uint64_t seed = 0x9E3779B97F4A7C15ull * (g_pt.seed + 1);
     uint32_t hs[64];
@@ -178,6 +185,7 @@ typedef struct {
     const char *pack, *nro; int nsets; const char *sets[8]; int hidden, dirty, positions; unsigned pause, seed; int status; double secs;
     const dm_aot_pack *loaded; const module_t *m;   // the pack and module the run loaded (the positions' check)
     int jit_ready, ready_ahead;                     // --jit-ready: the run starts once the JIT's instance made ahead is ready; it was
+    int bt;                                         // --bt <mode>: guestbt's mode, with the host function and the address no page backs it reads (guestbt_nro)
 } run_args;
 
 static uint8_t *slurp(const char *path, size_t *n) {
@@ -228,6 +236,10 @@ static void *guest_main(void *p) {
         uint64_t *hp = module_sym(m, "hidden_ptr");
         if (!hp) { printf("[RED] t_aot_host: no hidden_ptr in %s\n", name); return NULL; }
         *hp = dm_guest_fn((const void *)t_aot_hidden);
+    }
+    if (a->bt) {   // guestbt (its row's header): the mode, the host function's guest-visible address, the address of its fault
+        const uint64_t words[3] = {(uint64_t)a->bt, dm_guest_fn((const void *)t_aot_pause_tester), DM_AOT_ARENA_BASE + 0x800};
+        memcpy((uint8_t *)m->base + GBT_DATA, words, sizeof words);
     }
     if (a->dirty) {   // data and bss read-only, each page opened by the hook at its first write
         g_dirty_lo = (uint64_t)(uintptr_t)m->base + (data_off & ~(uint64_t)(plat_page_size() - 1));
@@ -374,6 +386,7 @@ static int child(int argc, char **argv) {
         else if (!strcmp(argv[i], "--dirty")) a.dirty = 1;
         else if (!strcmp(argv[i], "--positions")) a.positions = 1;
         else if (!strcmp(argv[i], "--jit-ready")) a.jit_ready = 1;
+        else if (!strcmp(argv[i], "--bt") && i + 1 < argc) a.bt = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--pause") && i + 1 < argc) a.pause = (unsigned)atoi(argv[++i]);
         else if (!strcmp(argv[i], "--seed") && i + 1 < argc) a.seed = (unsigned)atoi(argv[++i]);
         else { fprintf(stderr, "t_aot_host: unknown option %s\n", argv[i]); return DM_AOT_USAGE; }
@@ -774,6 +787,200 @@ static void lrtail_row(const char *self, const char *nxaot) {
     if (r.guest != no_lines) free(r.guest);
 }
 
+// ---------- The guest's call site and backtrace in the host's diagnostics (aot.h, "The calling guest's context, and backtraces") ----------
+// The NRO guestbt, written here word by word as lrtail is: start calls f1, f1 calls f2, each with a frame record (stp x29, x30; mov x29, sp). f2 reads the word at
+// GBT_DATA (the child's --bt <mode> writes it, with the words after it) and, by mode: 1 calls the host function at GBT_DATA + 8 with x0 = T_BT_ABORT (t_aot_pause_tester,
+// whose body then makes the calls hle_sdk16.c's diag_abort makes on this engine: the abort path of nn::diag); 2 makes svcBreak (hle_svc.c: the SDK's own abort, as a
+// game whose nn::diag is not taken over reaches it); 3 loads from the address at GBT_DATA + 16, which no page backs (a guest fault); 0 returns, and start prints
+// "guestbt PASS". The rows check the lines exactly: the call site, and the backtrace's return addresses, f2's call then f1's then start's, nothing after them
+typedef struct { uint64_t start_call, f1_call, f2_host, f2_svc, f2_fault, f2; } gbt_sites;   // module offsets of the calls (bl, blr), the svc, the faulting load; f2's entry
+static size_t guestbt_nro(uint8_t *img, size_t cap, gbt_sites *s) {
+    if (cap < GBT_SIZE) return 0;
+    memset(img, 0, GBT_SIZE);
+    uint32_t w[256] = {0};
+    size_t n = 0x80 / 4;
+    const size_t start = n;
+    w[n++] = 0xA9BF7BFDu;               // stp x29, x30, [sp, #-16]!
+    w[n++] = 0x910003FDu;               // mov x29, sp
+    const size_t call_f1 = n++;         // bl f1
+    w[n] = a_adr(0, (int64_t)GBT_PASS - (int64_t)n * 4); n++;
+    w[n++] = a_movz(1, 12);             // "guestbt PASS"
+    w[n++] = 0xD40004E1u;               // svc #0x27 (OutputDebugString)
+    w[n++] = 0xD40000E1u;               // svc #0x7 (ExitProcess)
+    w[n++] = 0xD4200000u;               // brk #0
+    const size_t f1 = n;
+    w[call_f1] = a_bl((int64_t)(f1 - call_f1) * 4);
+    w[n++] = 0xA9BF7BFDu;
+    w[n++] = 0x910003FDu;
+    const size_t call_f2 = n++;         // bl f2
+    w[n++] = 0xA8C17BFDu;               // ldp x29, x30, [sp], #16
+    w[n++] = 0xD65F03C0u;               // ret
+    const size_t f2 = n;
+    w[call_f2] = a_bl((int64_t)(f2 - call_f2) * 4);
+    w[n++] = 0xA9BF7BFDu;
+    w[n++] = 0x910003FDu;
+    w[n] = a_adr(9, (int64_t)GBT_DATA - (int64_t)n * 4); n++;   // x9 = the mode's word
+    w[n++] = 0xF940012Au;               // ldr x10, [x9]
+    w[n++] = 0xF100015Fu | 1u << 10;    // cmp x10, #1
+    const size_t to_not1 = n++;         // b.ne not1
+    w[n++] = 0xF9400530u;               // ldr x16, [x9, #8]
+    w[n++] = a_movz(0, 0x127);          // x0 = T_BT_ABORT: 0xAB0127 in two halves
+    w[n++] = 0xF2A01560u;               // movk x0, #0xab, lsl #16
+    const size_t call_host = n++;
+    w[call_host] = 0xD63F0200u;         // blr x16
+    const size_t to_out1 = n++;         // b out
+    w[to_not1] = a_bcond(1, (int64_t)(n - to_not1) * 4);
+    w[n++] = 0xF100015Fu | 2u << 10;    // cmp x10, #2
+    const size_t to_not2 = n++;
+    w[n++] = a_movz(0, 0);
+    w[n++] = a_movz(1, 0);
+    w[n++] = a_movz(2, 0);
+    const size_t svc_break = n;
+    w[n++] = 0xD40004C1u;               // svc #0x26 (Break)
+    const size_t to_out2 = n++;
+    w[to_not2] = a_bcond(1, (int64_t)(n - to_not2) * 4);
+    w[n++] = 0xF100015Fu | 3u << 10;    // cmp x10, #3
+    const size_t to_out3 = n++;
+    w[n++] = 0xF940092Bu;               // ldr x11, [x9, #16]
+    const size_t fault = n;
+    w[n++] = 0xF9400160u;               // ldr x0, [x11]: no page there
+    const size_t out = n;
+    w[to_out1] = a_b((int64_t)(out - to_out1) * 4);
+    w[to_out2] = a_b((int64_t)(out - to_out2) * 4);
+    w[to_out3] = a_bcond(1, (int64_t)(out - to_out3) * 4);
+    w[n++] = 0xA8C17BFDu;               // ldp x29, x30, [sp], #16
+    w[n++] = 0xD65F03C0u;               // ret
+    w[0] = a_b((int64_t)start * 4);
+    w[1] = GBT_RO;                      // MOD0's offset
+    memcpy(img, w, n * 4);
+    memcpy(img + 0x10, "NRO0", 4);
+    const uint32_t hdr[] = {0, GBT_SIZE, 0, 0, GBT_TEXT, GBT_RO, GBT_DATA - GBT_RO, GBT_DATA, GBT_SIZE - GBT_DATA, GBT_BSS};
+    memcpy(img + 0x14, hdr, sizeof hdr);
+    memcpy(img + GBT_RO, "MOD0", 4);
+    const int32_t mod0[] = {0x20, GBT_SIZE - GBT_RO, GBT_SIZE + GBT_BSS - GBT_RO, 0x40, 0x40, GBT_SIZE - GBT_RO};
+    memcpy(img + GBT_RO + 4, mod0, sizeof mod0);
+    memcpy(img + GBT_PASS, "guestbt PASS", 12);
+    *s = (gbt_sites){4 * call_f1, 4 * call_f2, 4 * call_host, 4 * svc_break, 4 * fault, 4 * f2};
+    return GBT_SIZE;
+}
+// The abort a host function makes for the guest (the guestbt row's mode 1): the lines hle_sdk16.c's diag_abort prints on this engine, by the same calls (it is not linked
+// into this test), then the end of the process without abort()'s signal
+static void bt_host_abort(void) {
+    const uint64_t at = dm_aot_guest_lr();
+    const module_t *m = module_of((const void *)(uintptr_t)at);
+    LOG("game called nn::diag abort: Result %#x, call site %s+%#llx", 0u, m ? m->name : "?", m ? (unsigned long long)(at - (uint64_t)(uintptr_t)m->base) : (unsigned long long)at);
+    dm_aot_guest_backtrace();
+    fflush(NULL);
+    _exit(DM_AOT_TRAP);
+}
+// The whole output of one child (stdout and stderr), and its status
+static int run_all(const char *self, const char *pack, const char *nro, const char *extra, char **out) {
+    char cmd[4096], line[8192];
+#if defined(_WIN32)
+    snprintf(cmd, sizeof cmd, "\"\"%s\" --run \"%s\" \"%s\" %s 2>&1\"", self, pack, nro, extra);
+#else
+    snprintf(cmd, sizeof cmd, "'%s' --run '%s' '%s' %s 2>&1", self, pack, nro, extra);
+#endif
+    size_t n = 0, cap = 0;
+    *out = calloc(1, 1);
+    FILE *f = popen(cmd, "r");
+    if (!f) return -1;
+    while (fgets(line, sizeof line, f)) append(out, &n, &cap, line, strlen(line));
+    const int st = pclose(f);
+#if defined(_WIN32)
+    return st;
+#else
+    return WIFEXITED(st) ? WEXITSTATUS(st) : 128 + (WIFSIGNALED(st) ? WTERMSIG(st) : 0);
+#endif
+}
+// The line of text that starts with prefix (its first), without its newline, into out; 0 when none
+static int line_with(const char *text, const char *prefix, char *out, size_t n) {
+    for (const char *l = text; l && *l; l = strchr(l, '\n') ? strchr(l, '\n') + 1 : NULL) {
+        const char *at = strstr(l, prefix);
+        const char *eol = strchr(l, '\n');
+        if (at && (!eol || at < eol)) { snprintf(out, n, "%.*s", (int)(eol ? eol - at : (long)strlen(at)), at); return 1; }
+    }
+    out[0] = 0;
+    return 0;
+}
+// The rows: guestbt packed by nxaot and run in each mode, through compiled code and (with the JIT built in) with every instruction in the JIT fallback (DM_AOT_JIT_ALL)
+static void guestbt_rows(const char *self, const char *nxaot) {
+    if (!nxaot || !*nxaot) { printf("%-14s %-9s note: no nxaot (--nxaot, NXAOT): guestbt is not packed here\n", "guestbt", "bt"); return; }
+    static uint8_t img[GBT_SIZE];
+    gbt_sites s;
+    const size_t len = guestbt_nro(img, sizeof img, &s);
+    char nro[200], pack[200], line[600] = "", note[1600];
+    mkdir("t_aot_host.tmp", 0755);
+    mkdir("t_aot_host.tmp/guestbt", 0755);
+    snprintf(nro, sizeof nro, "t_aot_host.tmp/guestbt/guestbt.nro");
+    snprintf(pack, sizeof pack, "t_aot_host.tmp/guestbt/guestbt%s", PACK_EXT);
+    FILE *f = fopen(nro, "wb");
+    const int wrote = len && f && fwrite(img, 1, len, f) == len;
+    if (f) fclose(f);
+    result r;
+    memset(&r, 0, sizeof r);
+    static char no_lines[1];
+    r.guest = no_lines;
+    if (!wrote || nxaot_pack(nxaot, nro, pack, line, sizeof line) != 0) {
+        snprintf(note, sizeof note, "%s: %s", wrote ? "nxaot build failed" : "cannot write the NRO", line);
+        row("guestbt", "bt", 0, &r, note);
+        return;
+    }
+    // The return addresses: each call's offset + 4
+    char ret_f2[48], ret_f1[48], ret_start[48];
+    snprintf(ret_f2, sizeof ret_f2, "guestbt+%#llx", (unsigned long long)(s.f2_host + 4));
+    snprintf(ret_f1, sizeof ret_f1, "guestbt+%#llx", (unsigned long long)(s.f1_call + 4));
+    snprintf(ret_start, sizeof ret_start, "guestbt+%#llx", (unsigned long long)(s.start_call + 4));
+    for (int jit = 0; jit <= NXHOST_JIT; jit++) {
+        set_env("DM_AOT_JIT_ALL", jit ? "1" : NULL);
+        for (int mode = 1; mode <= 3; mode++) {
+            char extra[64], want_head[300], want_bt[300], got_head[300], got_bt[300], *out = NULL;
+            snprintf(extra, sizeof extra, "--bt %d", mode);
+            const int st = run_all(self, pack, nro, extra, &out);
+            int want_st;
+            const char *head;
+            if (mode == 1) {
+                head = "game called nn::diag abort: ";
+                want_st = DM_AOT_TRAP;
+                snprintf(want_head, sizeof want_head, "game called nn::diag abort: Result 0, call site %s", ret_f2);
+                snprintf(want_bt, sizeof want_bt, "[dm] bt: %s %s %s", ret_f2, ret_f1, ret_start);
+            } else if (mode == 2) {
+                head = "Break#";
+                want_st = 42;
+                snprintf(want_head, sizeof want_head, "Break#1 reason=0 Result=0 svc at guestbt+%#llx", (unsigned long long)s.f2_svc);
+                snprintf(want_bt, sizeof want_bt, "[dm] bt: %s %s", ret_f1, ret_start);
+            } else {
+                head = "[RED] aot: SIGSEGV";
+                want_st = DM_AOT_FAULT;
+                if (jit) {
+                    snprintf(want_head, sizeof want_head, "[RED] aot: SIGSEGV at address %#llx in guest code (a memory access of the JIT fallback, guest instruction guestbt+%#llx)",
+                             (unsigned long long)(DM_AOT_ARENA_BASE + 0x800), (unsigned long long)s.f2_fault);
+                    // The JIT's registers reach the block only when its run ends: the walk starts from the x29 the block held at the run's start (the module's entry,
+                    // offset 0, with x29 0), so it names no frame: the frames the JIT made since are the open part (aot_fault.c dm_aot_fault_backtrace)
+                    snprintf(want_bt, sizeof want_bt, "[dm] bt: (JIT from guestbt+0)");
+                } else {
+                    snprintf(want_head, sizeof want_head, "[RED] aot: SIGSEGV at address %#llx in guest code (host pc ", (unsigned long long)(DM_AOT_ARENA_BASE + 0x800));
+                    snprintf(want_bt, sizeof want_bt, "[dm] bt: %s %s", ret_f1, ret_start);
+                }
+            }
+            line_with(out, head, got_head, sizeof got_head);
+            line_with(out, "[dm] bt:", got_bt, sizeof got_bt);
+            // The compiled fault's line names the function and the instruction after the host pc
+            char tail[160] = "";
+            if (mode == 3 && !jit) snprintf(tail, sizeof tail, ", in the function at guestbt+%#llx, guest instruction guestbt+%#llx)", (unsigned long long)s.f2, (unsigned long long)s.f2_fault);
+            const int head_ok = mode == 3 && !jit ? !strncmp(got_head, want_head, strlen(want_head)) && strstr(got_head, tail) != NULL : !strcmp(got_head, want_head);
+            const int ok = st == want_st && head_ok && !strcmp(got_bt, want_bt);
+            snprintf(note, sizeof note, "%s: \"%s\" / \"%s\"%s%s%s%s", mode == 1 ? "host-call abort" : mode == 2 ? "svcBreak" : "fault", got_head, got_bt,
+                     ok ? "" : "; want \"", ok ? "" : want_head, ok ? "" : tail, ok ? "" : "\"");
+            if (!ok) snprintf(note + strlen(note), sizeof note - strlen(note), " / \"%s\" with status %d", want_bt, want_st);
+            r.status = st;
+            row("guestbt", mode == 1 ? (jit ? "abort-jit" : "abort") : mode == 2 ? (jit ? "break-jit" : "break") : (jit ? "fault-jit" : "fault"), ok, &r, note);
+            free(out);
+        }
+    }
+    set_env("DM_AOT_JIT_ALL", NULL);
+}
+
 // int_ops under the sampler: the child's run and checks (--positions), the profile's rows of the hot function, and with nxaot the round trip (the header's list)
 static void positions_rows(const char *self, const char *name, const char *pack, const char *nrop, const char *corpus, const char *expected, const char *nxaot) {
     char dir[300], prof[400] = "", entries[400] = "", module[64] = "", note[2000];
@@ -1040,6 +1247,9 @@ int main(int argc, char **argv) {
     int lrtail = !nonly;
     for (int i = 0; i < nonly; i++) lrtail |= !strcmp(only[i], "lrtail");
     if (lrtail) lrtail_row(argv[0], nxaot);   // 7. A br that is no tail call: the JIT's continuation comes back to compiled code
+    int guestbt = !nonly;
+    for (int i = 0; i < nonly; i++) guestbt |= !strcmp(only[i], "guestbt");
+    if (guestbt) guestbt_rows(argv[0], nxaot);   // 8. The guest's call site and backtrace in an abort, an svcBreak and a fault
     printf("t_aot_host: %d checks, %d failed\n", checks, fails);
     return fails != 0;
 }

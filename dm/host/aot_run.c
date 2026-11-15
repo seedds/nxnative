@@ -573,6 +573,7 @@ static void fault_report(dm_aot_thread *t) {
     const char *sig = t->fault_signal == 11 ? "SIGSEGV" : t->fault_signal == 7 ? "SIGBUS" : t->fault_signal == 4 ? "SIGILL" : t->fault_signal == 8 ? "SIGFPE" : "an exception";
     snprintf(msg, sizeof msg, "[RED] aot: %s at address %#llx in guest code (%s)", sig, (unsigned long long)t->fault_address, where);
     dm_aot_stop(DM_AOT_FAULT, msg);
+    dm_aot_fault_backtrace(t);   // aot_fault.c: the frames above the faulting instruction
     t->fault_signal = 0;
 }
 

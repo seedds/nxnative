@@ -1,0 +1,73 @@
+# Grand Theft Auto III – The Definitive Edition: Rockstar's RenderWare game on Unreal Engine 4 (the `rhi.` console-variable generation, names stored UTF-16), SDK 10.4.1, NVN; update 1.0.8 (v524288), main build bb2dda80e83d0b2f.
+# Started from the NSP script's provisional profile (dm/games/profile_guess.py) and brought up on the Mac (docs/agents): every key here was measured on this build, and the note says how (README.md).
+
+# ---- Identity ----
+title_id	0100C3C012718000
+program_id	0100C3C012718000
+
+# ---- App ----
+name	Grand Theft Auto III – The Definitive Edition
+ipa	GrandTheftAutoIiiTheDefinitiveEdition.ipa
+app_category	public.app-category.games
+
+# ---- Versions ----
+build	v524288	1.0.8	main=bb2dda80e83d0b2f311929793f0613c8	subsdk0=84e50460493a12f26100e5150fbff271	sdk=d9add76fc264863d85fbbd1d70076c76
+package	v524288
+shader_versions	v524288
+
+# ---- Files ----
+# every module main imports from
+modules	main subsdk0 sdk
+romfs_marker	Gameface/Content/Paks/pakchunk0-Switch.pak
+zip_store	.dat:.mp4:.pak:.ttf:.metallib
+
+# ---- Memory ----
+# Unreal: nninitStartup reserves a 62 GB address region and its FMallocBinned3 takes 37 GB of it. The rewriter cuts the allocator in any Unreal 4 / 5 main (dm/tools/ue_malloc.py) and gives
+# the region what the alias region has room for (dm/tools/ue_region.py, the gate this build takes: rewrite_main.log's `Unreal's engine region: reserved at 0x16344e0 in nninitStartup's
+# 0x1633e70, its size stored from x8`). The alias region is the one an iPhone can reserve, and every Unreal 4 / 5 profile here uses the same partition on a phone (OCTOPATH TRAVELER 0,
+# DRAGON QUEST VII Reimagined, FINAL FANTASY RESONANCE, SMT V: Vengeance, OCTOPATH TRAVELER II): alias 3.125 GB, 3.75 GB in all, 256 MB stacks, heap 0.125 GB. iOS: alias = mem_alias, so
+# g_reserve = 3.75 - 3.125 + 3.125 = 3.75 GB, and the engine region gets the alias region less the SDK's 62 MB node area and 256 MB for regions made later, 2.81 GB.
+# The Mac's alias region is max(mem_alias, the Switch's 64 GB) (hle_svc.c), so g_reserve = 3.75 - 3.125 + 64 = 64.625 GB (0x1028000000) and the heap region 3.75 - 3.125 - 0.25 - 0.25 = 0.125 GB:
+# the layout a 64.62 GB profile gave it, unchanged, because the block it adds back takes nothing from the heap. Address space, not memory: the application pool bounds what is mapped.
+# Was mem_reserve 0x1028000000 / mem_alias 0x1000000000 (the Mac's numbers), which on iOS asked for one 64.62 GB reservation, and an iPhone cannot place it: `FATAL reserve guest AS` in
+# mem_init_once, the device's largest free block 51.00 GB (log GTAIII ipa, 2026-11-14).
+mem_reserve	0xF0000000
+mem_alias	0xC8000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+# the NPDM declares 80 MB of system resource
+sys_resource	0x5000000
+
+# ---- Shader split ----
+# The shaders are inline in pakchunk0-Switch.pak, in the two forms Unreal keeps without a shader code archive: the cooked packages (map rows pakchunk0-Switch.pak#Engine/Content/…
+# .uexp#UE<offset>, 4,399 keys) and the engine's global shader cache (pakchunk0-Switch.pak#Engine/GlobalShaderCache-GLSL_SWITCH.bin, 1,780). No source path names a
+# "ShaderArchive-" code archive, so every row lands in the split's "other" group; the key is required and kept as the provisional profile guessed it. 15,651 pak entries do
+# not decode (a reader limit on those pak blocks), and 37 keys reached only through run-time captures are not in this map (README.md)
+shader_groups	ShaderArchive-Global-=global ShaderArchive-=game
+shader_note	Grand Theft Auto III – The Definitive Edition shaders
+
+# ---- Frame rate ----
+# 60 fps: Unreal's own limit, found by name in main by the rewriter (ue_cvar.py; main.fixups.tsv UE_CVAR:t.MaxFPS 0x7584630, which is
+# FPSLocker's t.MaxFPS object for this build 0x7584640 minus its +0x10 value pointer). hle_fpslock.c writes the game thread's and the
+# render thread's copies every frame they differ, and rhi.SyncInterval (0x7455a40) 2 -> 1 vsync. The present cap at 60 makes the host
+# present one vsync a frame (hle_nvn.c present_itv), so neither the game's present interval 2 nor a display-mode cut is needed.
+fps_target	60
+# 120 is a runtime rung (settings.tsv's `120=120 fps?DM_GAME_FPS_MAX==120`): fps_max only unlocks it, the default stays 60. On the Mac and on iOS, where the cap reads
+# front_screen_max_fps: an iPad Pro's ProMotion screen shows it, a 60 Hz screen stays at 60.
+# fps_high() (hle_nvn.c) refuses 120 without an engine limiter the host writes; this title HAS one (UE_CVAR:t.MaxFPS in main.fixups.tsv,
+# dm_fps_lock_engine true) and has no frame step page (dm_fps_state 0), so the gate passes with this key at 120.
+fps_max	120
+ue_fps_cvar	t.MaxFPS
+# the engine's limiter sleeps a whole frame period (1/MaxFPS) and subtracts none of the frame's work, so any value near the target lands after the
+# host's 60 Hz tick and costs a tick: measured in one run on this build (p50 frame time) t.MaxFPS 60 -> 33.45 ms (30.0 fps), 61 -> 21.0, 120 -> 22.6-25.4,
+# 240 -> 17.0, 0 -> 16.48 (60.7 fps). So the host writes 0 (no engine limit) and its present cap at 60 paces the frames; the game steps by the time that
+# passed, so 60 is the same speed as 30 (FPSLocker's 60 fps patch for this build does the same: its ALL_FPS entry writes t.MaxFPS and r.VSync only).
+ue_fps_off	on
+
+# heap check: 2026-11-13, heap 0.01 GB
+
+# ---- Address region check ----
+# the game calls nvnDeviceSetDepthMode with near = 0 in the check boot: the pipeline bases made before it runs are made for that mode
+depth_mode	zero
+
+# address regions: 2026-11-13, in its first 15 s in nnMain the game's regions reach alias +62.06 GB, within the profile's 64.00 GB alias region (what it takes later in play is not measured here) (rewrite 2c358f12c412)

@@ -4,11 +4,14 @@
 // EXIT_DRAIN_MS), wait for the archive's write within DM_QUIT_ARCH_MS of the start, the same time a quit gives it, then the continuation (then: execve of the next program) or _exit(0).
 // The default action also exits in about 0.08 s (exit code 143); the value of this function is that order, exit code 0, the pipelines the run compiled kept, and the next program.
 #include "hle.h"
+#include "front.h"
 #include <dispatch/dispatch.h>
 #include <stdatomic.h>
 #include <signal.h>
 #include <unistd.h>
 void hlecount_flush(void); void dm_rec_finish(void);
+// front_mac.m: the display this host switched to another refresh mode (the 120 fps rung) gets its own back. Weak so the iOS build, which has no such switch, needs nothing
+__attribute__((weak)) void front_screen_mode_release(void) {}
 // The drain waits for the NVN calls under way. One that compiles its pipeline can take seconds (a draw waiting in pso_get → arch_capture → MTLCompiler: the stall a harness stops a
 // run for with SIGTERM), and before, the exit waited for it and ended at a 1.5 s fallback with nothing written: every SIGTERM run of Ocarina of Time without a window lost 400-500
 // pipelines, built again at the next start (PR #2625). The drain runs beside the rest now and is waited for EXIT_DRAIN_MS; the archive's write goes on either way
@@ -23,6 +26,7 @@ static int ms_left(uint64_t t0, int budget_ms) { int64_t left = budget_ms - (int
 void dm_host_shutdown_then(const char *why, void (*then)(void *), void *arg) {
     static _Atomic int once; if (atomic_exchange(&once, 1)) return;
     uint64_t t0 = now_ns(); LOG("received %s: graceful exit", why);
+    front_screen_mode_release();                    // the display first: _exit skips atexit, and a mode left switched is what another app would see
     // Past every wait below (something else stuck): end the process all the same, and start the next program if the exit has not, so a hand-over does not become a quit
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(DM_QUIT_ARCH_MS + EXIT_LATE_MS) * NSEC_PER_MSEC), dispatch_get_global_queue(QOS_CLASS_USER_INTERACTIVE, 0), ^{
         LOG("[RED] graceful exit not done in %.1f seconds, exiting at once", (DM_QUIT_ARCH_MS + EXIT_LATE_MS) / 1e3); exit_end(then, arg); });
@@ -41,9 +45,15 @@ void dm_host_shutdown_then(const char *why, void (*then)(void *), void *arg) {
 }
 void dm_host_shutdown(const char *why) { dm_host_shutdown_then(why, NULL, NULL); }
 void dm_term_install(void) {
-    signal(SIGTERM, SIG_IGN);                       // do not take the default action: hand over to the GCD signal source to wrap up on an ordinary thread
-    static dispatch_source_t src;
-    src = dispatch_source_create(DISPATCH_SOURCE_TYPE_SIGNAL, SIGTERM, 0, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0));
-    dispatch_source_set_event_handler(src, ^{ dm_host_shutdown("SIGTERM"); });
-    dispatch_resume(src);
+    // SIGTERM and SIGINT (the Mac launcher forwards both, dm/mac/launcher.c): do not take the default action, hand over to the GCD signal source to wrap up on an
+    // ordinary thread -- SIGINT used to kill the process outright, which left the display on the 120 fps rung's mode until something else changed it
+    static dispatch_source_t src[2];
+    const int sigs[2] = { SIGTERM, SIGINT };
+    for (int i = 0; i < 2; i++) {
+        signal(sigs[i], SIG_IGN);
+        const char *why = sigs[i] == SIGTERM ? "SIGTERM" : "SIGINT";
+        src[i] = dispatch_source_create(DISPATCH_SOURCE_TYPE_SIGNAL, (uintptr_t)sigs[i], 0, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0));
+        dispatch_source_set_event_handler(src[i], ^{ dm_host_shutdown(why); });
+        dispatch_resume(src[i]);
+    }
 }

@@ -108,6 +108,7 @@ One row per profile; the notes are each profile's `README.md`.
 | [Fire Emblem Fortune's Weave](04007EF01F8AE000/README.md) | `04007EF01F8AE000` | v131072 (Switch 2) | 22.2.0 (Ounce) | Intelligent Systems' engine, NintendoWare | NVN2 |
 | [Fire Emblem: Three Houses](010055D009F78000/README.md) | `010055D009F78000` | 1.2.0 | 6.5.0 | Koei Tecmo's KTGL | NVN |
 | [Ghost Trick: Phantom Detective](010029B018432000/README.md) | `010029B018432000` | 1.0.0 (base) | 13.3.0 | Capcom's RE Engine, Wwise | NVN |
+| [Grand Theft Auto III – The Definitive Edition](0100C3C012718000/README.md) | `0100C3C012718000` | 1.0.8 | 10.4.1 | Unreal Engine 4 (Rockstar's RenderWare game) | NVN |
 | [Hades](0100535012974000/README.md) | `0100535012974000` | 1.0.38233 | 9.3.0 | Supergiant Games' engine (The Forge) | Vulkan |
 | [Hades II](0100A00019DE0000/README.md) | `0100A00019DE0000` | 1.0.141667 (and base game) | 20.5.15 (base game: 19.3.9) | Supergiant Games' engine | NVN |
 | [Hollow Knight](0100633007D48000/README.md) | `0100633007D48000` | 1.5.12620 | 20.5.21 | Unity 6000.0.61f1 IL2CPP, FMOD | NVN |

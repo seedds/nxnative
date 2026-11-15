@@ -368,6 +368,13 @@ void front_progress(const char *title, long done, long total) {
     });
 }
 void *front_metal_layer(void) { return (__bridge void *)g_layer; }
+// The screen the picture is on (front.h): a ProMotion iPad or iPhone answers 120, so the 120 fps rung may run; a 60 Hz screen answers 60 and hle_nvn.c's cap stays at 60
+// (high_cap_tick). The game view's screen, not the main one, so a TV it was moved to (DmTVSceneDelegate) is answered as it is. UIScreen may be read from any thread, as front_display_pixels does
+int front_screen_max_fps(void) {
+    UIScreen *s = g_root.game.window.windowScene.screen;
+    if (!s) s = UIScreen.mainScreen;
+    return (int)s.maximumFramesPerSecond;
+}
 int front_display_pixels(int *w, int *h) {   // the screen in pixels, landscape (nativeBounds is portrait); UIScreen's sizes may be read from any thread
     CGRect b = UIScreen.mainScreen.nativeBounds; int a = (int)b.size.width, c = (int)b.size.height;
     if (a <= 0 || c <= 0) return 0;

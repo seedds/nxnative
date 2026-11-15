@@ -1,4 +1,4 @@
-// pad_jc1.h: the output report, the SPI calibration reply and the 0x30 IMU decode for an original Joy-Con.
+// pad_jc1.h: the output report, the SPI calibration reply and the 0x30 IMU decode for an original Joy-Con; its buttons, stick, sideways hold, HD rumble, lights and pairing.
 #include "../pad_jc1.h"
 #include <assert.h>
 #include <stdio.h>
@@ -145,27 +145,114 @@ int main(void) {
         for (int i = 0; i < JC1_REST_N; i++) { res[3] = 20; res[4] = -30; res[5] = 40; jc1_rest_update(&r2, res); }
         assert(r2.have && fabsf(r2.bias[0] - 20.f) < 1e-4f);
     }
-    // Routing by a press: the charging-grip bit is no button; one Joy-Con pressing alone, settled, with one controller pressed binds; anything less sure waits, then gives up
+    // Buttons: each Joy-Con its own half of the report, rail buttons as the npad's own bits; the charging grip and the other side's bytes are not its buttons
     {
-        uint8_t b[49] = {0}; b[4] = 0x80; assert(!jc1_buttons(b));
-        b[5] = 0x40; assert(jc1_buttons(b));
-        const uint64_t S = JC1_PRESS_SETTLE_NS, G = JC1_PRESS_GIVE_UP_NS;
-        uint64_t at = 10000000000ull;
-        jc1_press all[2] = {{0}, {0}};
-        assert(jc1_press_judge(all, 2, 0, 1, at) == JC1_PRESS_NONE);
-        jc1_press_update(&all[0], 1, at);
-        assert(jc1_press_judge(all, 2, 0, 1, at + S - 1) == JC1_PRESS_WAIT);    // GameController may not have seen it yet
-        assert(jc1_press_judge(all, 2, 0, 0, at + S) == JC1_PRESS_WAIT);
-        assert(jc1_press_judge(all, 2, 0, 2, at + S) == JC1_PRESS_WAIT);        // two controllers pressed: another player
-        assert(jc1_press_judge(all, 2, 0, 1, at + S) == JC1_PRESS_BIND);
-        jc1_press_update(&all[1], 1, at + 10);                                  // another Joy-Con pressing too: not this press's to say
-        assert(jc1_press_judge(all, 2, 0, 1, at + S + 20) == JC1_PRESS_WAIT);
-        assert(jc1_press_judge(all, 2, 0, 1, at + G) == JC1_PRESS_UNSURE);
-        jc1_press_update(&all[1], 0, at + G);                                   // it lets go: its controller may still show the press for a moment
-        assert(jc1_press_judge(all, 2, 0, 1, at + G + S - 1) == JC1_PRESS_UNSURE);
-        all[0].judged = 1; assert(jc1_press_judge(all, 2, 0, 1, at + G + S) == JC1_PRESS_NONE);   // judged once
-        jc1_press_update(&all[0], 0, at + G + S); jc1_press_update(&all[0], 1, at + G + 2 * S);   // a new press
-        assert(!all[0].judged && jc1_press_judge(all, 2, 0, 1, at + G + 3 * S) == JC1_PRESS_BIND);
+        uint8_t b[49] = {0}; b[0] = 0x30;
+        b[4] = 0x80; assert(!jc1_joy_buttons(b, 0) && !jc1_joy_buttons(b, 1));
+        b[5] = 0x01 | 0x20 | 0x40; b[4] = 0x01 | 0x08;   // left: Down, SL, L, Minus, stick press
+        assert(jc1_joy_buttons(b, 0) == (DM_BTN_DOWN | DM_BTN_LSL | DM_BTN_L | DM_BTN_MINUS | DM_BTN_LS));
+        assert(!jc1_joy_buttons(b, 1));
+        memset(b + 3, 0, 3); b[3] = 0x08 | 0x10 | 0x80; b[4] = 0x02 | 0x04 | 0x10;   // right: A, SR, ZR, Plus, stick press, Home
+        assert(jc1_joy_buttons(b, 1) == (DM_BTN_A | DM_BTN_RSR | DM_BTN_ZR | DM_BTN_PLUS | DM_BTN_RS));
+        assert(!jc1_joy_buttons(b, 0) && jc1_home(b));
+    }
+    // Stick: a left Joy-Con's stick is the report's left one, a right Joy-Con's the right one, through its SPI calibration (pad_pro.h)
+    {
+        uint8_t q[49] = {0}; q[0] = 0x30;
+        int lx = 2048 + 600, ly = 2048, rx = 2048, ry = 2048 - 600;   // left pushed right, right pushed down
+        q[6] = lx & 0xff; q[7] = (uint8_t)(lx >> 8 | (ly & 0x0f) << 4); q[8] = (uint8_t)(ly >> 4);
+        q[9] = rx & 0xff; q[10] = (uint8_t)(rx >> 8 | (ry & 0x0f) << 4); q[11] = (uint8_t)(ry >> 4);
+        // the factory block: the left stick above, centre, below; the right one centre, below, above; each x and y of 12 bits in three bytes, reach 1200 each way
+        uint8_t spi[64] = {0}; spi[0] = 0x21; spi[13] = 0x90; spi[14] = 0x10; spi[15] = 0x3D; spi[16] = 0x60; spi[19] = PAD_PRO_SPI_FACTORY_LEN;
+        int left_vals[6] = {1200, 1200, 2048, 2048, 1200, 1200}, right_vals[6] = {2048, 2048, 1200, 1200, 1200, 1200};
+        for (int k = 0; k < 3; k++) {
+            uint8_t *d = spi + 20 + 3 * k; int x = left_vals[2 * k], y = left_vals[2 * k + 1];
+            d[0] = x & 0xff; d[1] = (uint8_t)(x >> 8 | (y & 0x0f) << 4); d[2] = (uint8_t)(y >> 4);
+            d = spi + 29 + 3 * k; x = right_vals[2 * k]; y = right_vals[2 * k + 1];
+            d[0] = x & 0xff; d[1] = (uint8_t)(x >> 8 | (y & 0x0f) << 4); d[2] = (uint8_t)(y >> 4);
+        }
+        pad_pro sl = {0}, sr = {0};
+        assert(pad_pro_spi_reply(&sl, spi, 20 + PAD_PRO_SPI_FACTORY_LEN) == 3 && pad_pro_spi_reply(&sr, spi, 20 + PAD_PRO_SPI_FACTORY_LEN) == 3);
+        int32_t st[2];
+        assert(jc1_joy_stick(&sl, q, 49, 0, st));
+        int32_t half = (int32_t)((600 - 1200 * PAD_PRO_DEAD_PCT / 100) * (int64_t)DM_STICK_MAX / (1200 - 1200 * PAD_PRO_DEAD_PCT / 100));
+        assert(st[0] == half && st[1] == 0);
+        assert(jc1_joy_stick(&sr, q, 49, 1, st) && st[0] == 0 && st[1] == -half);
+        assert(!jc1_joy_stick(&sl, q, 11, 0, st));   // too short for both sticks
+    }
+    // Held sideways: the left Joy-Con turned counterclockwise, the right one clockwise; the rail toward the top in both
+    {
+        int32_t up_rail[2] = {DM_STICK_MAX, 0}, out[2];   // the left Joy-Con's stick pushed toward its rail (+x upright)
+        jc1_sideways_stick(up_rail, 0, out); assert(out[0] == 0 && out[1] == DM_STICK_MAX);
+        int32_t to_top[2] = {0, DM_STICK_MAX};            // toward its top, which points left held sideways
+        jc1_sideways_stick(to_top, 0, out); assert(out[0] == -DM_STICK_MAX && out[1] == 0);
+        int32_t rail_r[2] = {-DM_STICK_MAX, 0};          // the right one's rail is on its left
+        jc1_sideways_stick(rail_r, 1, out); assert(out[0] == 0 && out[1] == DM_STICK_MAX);
+        jc1_sideways_stick(to_top, 1, out); assert(out[0] == DM_STICK_MAX && out[1] == 0);   // its top points right
+        float g[3] = {-1, 0, 0}, v[3];   // the left one lying on its side, rail up: gravity along -x upright, so -y sideways (top up)
+        jc1_sideways_vec(g, 0, v); assert(v[0] == 0 && v[1] == -1 && v[2] == 0);
+        float gr[3] = {1, 0, 0};          // the right one, rail up: gravity along +x upright
+        jc1_sideways_vec(gr, 1, v); assert(v[0] == 0 && v[1] == -1 && v[2] == 0);
+        assert(jc1_sideways_buttons(DM_BTN_DOWN | DM_BTN_LSL | DM_BTN_LS, 0) == (DM_BTN_A | DM_BTN_L | DM_BTN_LS));
+        assert(jc1_sideways_buttons(DM_BTN_LEFT | DM_BTN_RIGHT | DM_BTN_UP | DM_BTN_LSR | DM_BTN_MINUS, 0) == (DM_BTN_B | DM_BTN_X | DM_BTN_Y | DM_BTN_R | DM_BTN_MINUS));
+        assert(jc1_sideways_buttons(DM_BTN_X | DM_BTN_A | DM_BTN_B | DM_BTN_Y, 1) == (DM_BTN_A | DM_BTN_B | DM_BTN_Y | DM_BTN_X));
+        assert(jc1_sideways_buttons(DM_BTN_X | DM_BTN_RS | DM_BTN_RSL | DM_BTN_RSR | DM_BTN_PLUS, 1) == (DM_BTN_A | DM_BTN_LS | DM_BTN_L | DM_BTN_R | DM_BTN_PLUS));
+    }
+    // A pad as one whole controller: a pair is a Pro Controller without rail buttons, one alone is held sideways, none is nothing
+    {
+        int have[2] = {1, 1}; uint64_t b[2] = {DM_BTN_LEFT | DM_BTN_LSL, DM_BTN_A | DM_BTN_RSR}; int32_t st[2][2] = {{100, 200}, {-300, -400}}, out[4]; uint64_t m;
+        assert(jc1_pad_input(have, b, st, &m, out) && m == (DM_BTN_LEFT | DM_BTN_A) && out[0] == 100 && out[1] == 200 && out[2] == -300 && out[3] == -400);
+        have[0] = 0;
+        assert(jc1_pad_input(have, b, st, &m, out) && m == (DM_BTN_B | DM_BTN_R) && out[0] == -400 && out[1] == 300 && !out[2] && !out[3]);
+        have[0] = 1; have[1] = 0;
+        assert(jc1_pad_input(have, b, st, &m, out) && m == (DM_BTN_B | DM_BTN_L) && out[0] == -200 && out[1] == 100);
+        have[0] = 0; assert(!jc1_pad_input(have, b, st, &m, out) && !m);
+    }
+    // Routing per device: which Joy-Con a new one pairs with, which feeds the merged stream, which motor each plays, and the gestures that split and join
+    {
+        uint32_t sides[4] = {3, 1, 2, 1};
+        assert(jc1_pair_pick(sides, 4, 1) == 1);    // a right Joy-Con joins the first left one alone
+        assert(jc1_pair_pick(sides, 4, 0) == 2);    // a left one the right one alone
+        assert(jc1_pair_pick(sides, 1, 0) == -1);   // a full pair takes no third
+        int have[2] = {1, 1}, live[2] = {1, 1};
+        assert(jc1_merged_side(have, live, 1) == 1 && jc1_merged_side(have, live, 0) == 0);
+        live[1] = 0; assert(jc1_merged_side(have, live, 1) == 0);   // the right one not streaming: the left one
+        live[0] = 0; assert(jc1_merged_side(have, live, 1) == 1);   // neither: the preferred one
+        have[1] = 0; assert(jc1_merged_side(have, live, 1) == 0);
+        have[0] = 0; assert(jc1_merged_side(have, live, 1) == -1);
+        dm_vibration m[2] = {{0.5f, 100, 0.1f, 300}, {0.2f, 150, 0.6f, 400}};
+        dm_vibration v = jc1_rumble_pick(m, 0, 1); assert(v.amplitude_low == 0.5f && v.frequency_high == 300);
+        v = jc1_rumble_pick(m, 1, 1); assert(v.amplitude_high == 0.6f && v.frequency_low == 150);
+        v = jc1_rumble_pick(m, 1, 0); assert(v.amplitude_low == 0.5f && v.frequency_low == 100 && v.amplitude_high == 0.6f && v.frequency_high == 400);
+        assert(jc1_gesture(DM_BTN_LSL | DM_BTN_LSR, 0, 1) == JC1_GESTURE_SPLIT && jc1_gesture(DM_BTN_LSL, 0, 1) == JC1_GESTURE_NONE);
+        assert(jc1_gesture(DM_BTN_RSL | DM_BTN_RSR, 0, 1) == JC1_GESTURE_NONE);   // the other side's rails
+        assert(jc1_gesture(DM_BTN_R, 1, 0) == JC1_GESTURE_JOIN && jc1_gesture(DM_BTN_R | DM_BTN_RSL, 1, 0) == JC1_GESTURE_NONE && jc1_gesture(DM_BTN_R, 1, 1) == JC1_GESTURE_NONE);
+        jc1_hold h = {0}; uint64_t at = 1000;
+        assert(!jc1_hold_update(&h, JC1_GESTURE_JOIN, at) && !jc1_hold_update(&h, JC1_GESTURE_JOIN, at + JC1_GESTURE_NS - 1) && jc1_hold_update(&h, JC1_GESTURE_JOIN, at + JC1_GESTURE_NS));
+        assert(!jc1_hold_update(&h, JC1_GESTURE_NONE, at + JC1_GESTURE_NS + 1) && !jc1_hold_update(&h, JC1_GESTURE_JOIN, at + 2 * JC1_GESTURE_NS));   // a break starts again
+        assert(jc1_led_pattern(0) == 0x01 && jc1_led_pattern(3) == 0x0F && jc1_led_pattern(7) == 0x06 && jc1_led_pattern(-1) == 0xF0);
+    }
+    // HD rumble: nothing at the default frequencies is the neutral sample the subcommand reports carry; the codes match Linux hid-nintendo's tables
+    {
+        uint8_t e[4];
+        dm_vibration off = {0, 160, 0, 320}; jc1_rumble_encode(&off, e); assert(memcmp(e, jc1_neutral_rumble, 4) == 0 && !jc1_vibration_on(&off));
+        dm_vibration full = {1, 160, 1, 320}; jc1_rumble_encode(&full, e);
+        assert(e[0] == 0x00 && e[1] == 0xC9 && e[2] == 0x40 && e[3] == 0x72 && jc1_vibration_on(&full));   // 1.0: code 100, high 0xC8, low 0x0072
+        // amplitude codes against the table's amplitudes (thousandths): 1 -> 10, 2 -> 12, 15 -> 112, 16 -> 117, 31 -> 225, 32 -> 230 (0.2299), 100 -> 1000
+        assert(jc1_amp_code(0.010f) == 1 && jc1_amp_code(0.012f) == 2 && jc1_amp_code(0.112f) == 15 && jc1_amp_code(0.117f) == 16 && jc1_amp_code(0.231f) == 32 && jc1_amp_code(0.226f) == 31);
+        assert(jc1_amp_code(0.f) == 0 && jc1_amp_code(0.005f) == 0 && jc1_amp_code(2.f) == 100 && jc1_amp_code(NAN) == 0);
+        for (int k = 1, last = 0; k <= 1000; k++) { int c = jc1_amp_code((float)k / 1000.f); assert(c >= last); last = c; }   // monotone across the three ranges
+        dm_vibration odd = {0.010f, 40, 0.012f, 2000}; jc1_rumble_encode(&odd, e);   // the low band's odd code sets bit 7 of byte 2; frequencies clamp to the bands
+        assert(e[0] == (uint8_t)(((0xDF - 0x60) * 4) & 0xff) && e[1] == (uint8_t)(2 * 2 + 1) && e[2] == (0x01 | 0x80) && e[3] == 0x40);
+        dm_vibration mid = {0, 160, 0.5f, 1000}; jc1_rumble_encode(&mid, e);   // 1000 Hz: code round(32 log2 100) = 213, (213 - 96) * 4 = 468 = 0x1D4; 0.5: code round(32 log2 4.35) = 68
+        assert(e[0] == 0xD4 && e[1] == 2 * 68 + 1);
+        uint8_t rep[JC1_RUMBLE_LEN]; jc1_rumble_report(rep, 0x13, e);
+        assert(rep[0] == 0x10 && rep[1] == 3 && memcmp(rep + 2, e, 4) == 0 && memcmp(rep + 6, e, 4) == 0);
+        // a pulse set and cleared between two reports still plays in the next one, then what is set now
+        jc1_rumble_hold h = {0}; dm_vibration pulse[2] = {{0.8f, 160, 0, 320}, {0}}, quiet[2] = {{0, 160, 0, 320}, {0}}, got[2];
+        jc1_rumble_set(&h, pulse); jc1_rumble_set(&h, quiet);
+        jc1_rumble_take(&h, got); assert(got[0].amplitude_low == 0.8f);
+        jc1_rumble_take(&h, got); assert(got[0].amplitude_low == 0.f);
     }
 
     puts("t_jc1: passed");

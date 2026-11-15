@@ -992,6 +992,45 @@ def cpk_shaders(path, rel, ents, out):
             print(f'[RED] /{rel}/{e[0]}: {x}; not scanned', flush=True); continue
         scan_blob(d, f'/{rel}/{e[0]}', out)
 
+LSPK = b'LSPK'   # job tag: Larian's footer-indexed packages (lspk.py)
+def lspk_jobs(files, parts=64):
+    """Larian packages: read the indices, then only BSHD members. Other assets and numbered sound/video continuations need no whole-file scan."""
+    import lspk
+    found, consumed, errors = [], set(), []
+    for p, r in files:
+        if p in consumed or not p.lower().endswith('.pak'): continue
+        try: package = lspk.package(p)
+        except (ValueError, OSError, struct.error) as e:
+            errors.append((p, r, (LSPK, None, str(e)))); consumed.add(p); continue
+        if package is None: continue
+        paths, entries = package; consumed.update(paths)
+        found.append((p, r, [e for e in entries if e[0].lower().endswith('.bshd')]))
+    jobs, step = errors, max(sum(e[3] for _, _, es in found for e in es) // parts, 1)
+    for p, r, entries in found:
+        cur, size = [], 0
+        for e in entries:
+            cur.append(e); size += e[3]
+            if size >= step: jobs.append((p, r, (LSPK, tuple(cur)))); cur, size = [], 0
+        if cur: jobs.append((p, r, (LSPK, tuple(cur))))
+    return jobs, consumed
+
+def bshd_shaders(data, label):
+    """Larian's per-program BSHD records: NX stages are GLSLC outputs; the same archives also carry other platforms' compiled stages."""
+    import lspk
+    out = []
+    for stage, program in lspk.bshd_sections(data, label):
+        if program[:4] != b'\x91\x68\x86\x19': continue
+        expected = {1: 'vs', 3: 'ps', 4: 'cs'}.get(stage)
+        stages = glslc_shaders(program, label, need=True)
+        if len(stages) != 1 or stages[0][1] != expected: red(f'{label}: BSHD stage {stage} disagrees with its GLSLC program')
+        _, st, ctl, code = stages[0]
+        out.append((f'{label}#BSHD#var', st, ctl, code))
+    return out
+
+def lspk_shaders(entries, rel, out):
+    import lspk
+    for e in entries: out.extend(bshd_shaders(lspk.read(e), f'/{rel}/{e[0]}'))
+
 D3CPK = b'D3CPK'   # job tag of a Diablo III package's byte range (d3cpk_jobs)
 def d3cpk_jobs(files, parts=64):
     """Diablo III's console packages (d3cpk.py; .cpk like CRI's, another format) in byte ranges of about equal length: Diablo III: Eternal Collection 2.7.7 has 37, 16 GB.
@@ -2293,13 +2332,22 @@ def raw_shaders(d, label, known=()):
     Of 25 mains on hand only that one has such control sections, so the tables of every other game stay as they were.
     Diablo II: Resurrected's main holds 10 (3 vertex, 3 pixel, 4 compute; 9 distinct) in the record its SHAD containers hold (shad_record: a 0x14-byte header, the code area, the control section): the code points at
     the record's start, not at either section (main+0x88d270 builds the first with adrp + add; four are relocated pointers at main+0x20ff410 + 0x28 i), so a record whose header gives
-    exactly this control section and the code area before it, referenced either way, gives that code area"""
+    exactly this control section and the code area before it, referenced either way, gives that code area.
+    A control section nothing references takes the code area that ends right at it, when that area has a header and exactly the length the control section gives (+0x704): the form Phyre's
+    effects use (phyre_shaders), labelled as theirs. FINAL FANTASY XII THE ZODIAC AGE's main holds 23 PhyreEngine built-in programs so (main+0xfc3e13 to +0xfd5d88, among them the UI's and the
+    cutscenes' composite passes), outside any RYHP container, 16 of them at unaligned addresses, and nothing in its code or data points at either part; without them its menus, dialogue icons and
+    cutscene backgrounds drew nothing. An unaligned control section is taken in this form only. References still decide first, so a neighbour that only looks right (Advance Wars above) is not taken"""
+    def adjacent(c):   # the start of the headed code area of the control section's length that ends right at it, else None
+        nctl, n = struct.unpack_from('<I', d, c + 0x20)[0], struct.unpack_from('<I', d, c + 0x704)[0]
+        k = c - n
+        return k if n >= 0x80 and nctl >= 0x760 and c + nctl <= len(d) and k >= 0 and d[k:k + 4] in (GFX_MAGIC, CS_MAGIC) and CTL_MAGIC not in d[k:c] else None
     skip = []
     for m in re.finditer(b'\x91\x68\x86\x19', d):
         size, _, first, _ = glslc_layout(d, m.start())
         if (0 if first == 0xa8 else 0x760) < size <= len(d) - m.start(): skip.append((m.start(), m.start() + size))
     for m in re.finditer(b'BNSH\0\0\0\0', d): skip.append((m.start(), m.start() + struct.unpack_from('<I', d, m.start() + 0x1c)[0]))
-    ctls = [c for m in re.finditer(re.escape(CTL_MAGIC), d) if not (c := m.start()) & 3 and not any(a <= c < b for a, b in skip) and d[c:c + struct.unpack_from('<I', d, c + 0x20)[0]] not in known]
+    ctls = [c for m in re.finditer(re.escape(CTL_MAGIC), d) if (c := m.start()) + 0x708 <= len(d) and not any(a <= c < b for a, b in skip) and (not c & 3 or adjacent(c) is not None)
+            and d[c:c + struct.unpack_from('<I', d, c + 0x20)[0]] not in known]
     if not ctls: return []
     rel, code_of, cset = rel_targets(d), {}, set(ctls)
     for s, c in rel.items():
@@ -2311,11 +2359,14 @@ def raw_shaders(d, label, known=()):
         nctl, n = struct.unpack_from('<I', d, c + 0x20)[0], struct.unpack_from('<I', d, c + 0x704)[0]
         r = c - n - 0x14   # a SHAD record's start (shad_record), when this control section ends one
         if c not in code_of and r >= 0 and (r in targets or r in built) and shad_record(d, r, r + 0x14 + n + struct.unpack_from('<I', d, r + 4)[0]): code_of[c] = c - n
-        ctl, why = d[c:c + nctl], 'no code area: no data record points at one, and the code builds the address of none right after or right before it'
+        ctl, why = d[c:c + nctl], 'no code area: no data record points at one, the code builds the address of none right after or right before it, and none of its length ends at it'
         near = lambda k: min(abs(a - b) for a in built[k] for b in built[c])   # how close the code builds this code area's address to the control section's
         for k in ([code_of[c]] if c in code_of else sorted((k for k in ((c + nctl + 15) & ~15, c - n) if k in built and c in built and near(k) < 0x400), key=near)):
             code = d[k:k + n]; st = glslc_stage(ctl, code) if k >= 0 and CTL_MAGIC not in code else None
             if st and not check(label, st, ctl, code): out.append((f'{label}#RAW@{c:#x}', st, ctl, code)); why = None; break
+        if why and c not in code_of and (k := adjacent(c)) is not None:   # nothing references it: the code area that ends right at it (Phyre's form)
+            code = d[k:c]; st = glslc_stage(ctl, code)
+            if st and not check(label, st, ctl, code): out.append((f'{label}#PHYRE@{k:#x}', st, ctl, code)); why = None
         if why: print(f'[RED] {label} control section @{c:#x}: {why}; left out', flush=True)
     return out
 
@@ -2671,10 +2722,25 @@ def ue_inline_shaders(d, label, out):
         out.append((f'{label}#UE{at:x}', st, bytes(ctl), bytes(code)))
 
 def arh_entries(d):
-    """Monolith ARH1 index → (path, ARD offset, stored size). The XOR trie
+    """Monolith ARH1/ARH2 index → (path, ARD offset, stored size). The ARH1 XOR trie
     reconstructs full paths; the metadata table supplies the actual file bounds.
     Format: https://github.com/roccodev/ard-tools/blob/master/docs/arh1.md
     Xenoblade 3 2.2.1: 76,445 entries in bf3.arh, 9.05 GB in bf3.ard."""
+    if d[:4] == b'arh2':
+        # ARH2 (Xenoblade X DE) replaces paths with hashes. Entries are
+        # (u64 hash, u32 disk size, u32 expanded size); offsets accumulate
+        # aligned disk sizes, which already include any XBC1 wrapper.
+        # Layout: Nenkai/XbxDeTool, ArchiveHeaderFile.cs; checked against sts.arh.
+        if len(d) < 16: red('ARH2: truncated header')
+        count, align = struct.unpack_from('<2I', d, 4)
+        if not align or align & (align - 1): red('ARH2: invalid file alignment')
+        if count > (len(d) - 16) // 16: red('ARH2: index table out of bounds')
+        out, off = [], 0
+        for i in range(count):
+            key, size, _ = struct.unpack_from('<Q2I', d, 16 + i * 16)
+            if size: out.append((f'/#{key:016x}', off, size))
+            off += (size + align - 1) & -align
+        return out
     if len(d) < 48 or d[:4] != b'arh1': return []
     _, count, so, sn, no, nn, fo, fn, key = struct.unpack_from('<9I', d, 4)
     if nn != count * 8 or any(o > len(d) or n > len(d) - o for o, n in ((so, sn), (no, nn), (fo, fn * 24))): red('ARH1: index table out of bounds')
@@ -2709,13 +2775,13 @@ def arh_jobs(files, parts=64):
     for path, rel in files:
         if not path.endswith('.arh'): continue
         with open(path, 'rb') as f: d = f.read()
-        if d[:4] != b'arh1': continue
+        if d[:4] not in (b'arh1', b'arh2'): continue
         ard = path[:-4] + '.ard'
-        if not os.path.isfile(ard): red(f'{rel}: ARH1 index has no ARD data file')
+        if not os.path.isfile(ard): red(f'{rel}: ARH index has no ARD data file')
         entries = arh_entries(d); length = os.path.getsize(ard)
         if any(o > length or n > length - o for _, o, n in entries): red(f'{rel}: ARD entry out of bounds')
         step = max(1, (len(entries) + parts - 1) // parts)
-        jobs += [(ard, rel[:-4] + '.ard', (b'ARH1', entries[i:i + step])) for i in range(0, len(entries), step)]
+        jobs += [(ard, rel[:-4] + '.ard', (b'ARH', entries[i:i + step])) for i in range(0, len(entries), step)]
         used.update((path, ard))
     return jobs, used
 
@@ -2780,12 +2846,16 @@ def hcps_shaders(d, base, label):
             # 768-byte vertex + 256-byte geometry, two 0x880 controls). NVSD's
             # vertex size covers both; each NVN control gives its own code size.
             while c < pend:
-                if c + 0x708 > pend: red(f'{label} HCPS: truncated control')
-                nc = struct.unpack_from('<I', ctls, c + 0x20)[0]
-                nk = struct.unpack_from('<I', ctls, c + 0x704)[0]
-                if nc < 0x760 or c + nc > pend or not nk or k + nk > kend: red(f'{label} HCPS: shader exceeds program range')
+                # One asset can contain both Maxwell and NVN2 HCPS programs
+                # (Xenoblade X DE). Read each control's own version and lengths.
+                if c + NVN2_KEY_CTL > pend: red(f'{label} HCPS: truncated control')
+                nvn2 = nvn2_ctl(ctls[c:c + NVN2_KEY_CTL])
+                if not nvn2 and c + 0x708 > pend: red(f'{label} HCPS: truncated control')
+                nc = struct.unpack_from('<I', ctls, c + (0x30 if nvn2 else 0x20))[0]
+                nk = struct.unpack_from('<I', ctls, c + (0x44 if nvn2 else 0x704))[0]
+                if nc < (NVN2_KEY_CTL if nvn2 else 0x760) or c + nc > pend or not nk or k + nk > kend: red(f'{label} HCPS: shader exceeds program range')
                 ctl, code = ctls[c:c + nc], codes[k:k + nk]; c += (nc + 7) & ~7; k += nk
-                st = glslc_stage(ctl, code)
+                st = nvn2_stage(ctl, code) if nvn2 else glslc_stage(ctl, code)
                 why = check(label, st, ctl, code) if st else 'unknown stage'
                 if why: red(f'{label} HCPS SLCT {i} variant {j}: {why}')
                 out.append((f'{label}#HCPS@{base:#x}#var{i}.{j}', st, ctl, code))
@@ -3123,7 +3193,13 @@ def scan_blob(d, label, out, depth=0, left=None):
         return
     if d[:4] == b'NARC':   # Camelot's containers (cra.py): each member packed by its first byte, so its size says nothing about the budget above
         import cra
-        for i, m in enumerate(cra.narc_members(d, label)): scan_blob(cra.undo(m), f'{label}/{i}', out, depth + 1)
+        try: members = cra.narc_members(d, label)
+        except cra.Error as e: red(str(e))   # preserve the reader's layout diagnosis through the split's rejection contract
+        for i, m in enumerate(members):
+            where = f'{label}/{i}'
+            try: unpacked = cra.undo(m)
+            except cra.Error as e: red(f'{where}: {e}')
+            scan_blob(unpacked, where, out, depth + 1)
         return
     if d[:4] == b'BAHS': out.extend(bahs_shaders(d, label)); return
     if d[:4] == RGXD: out.extend(rgxd_shaders(d, label)); return
@@ -3351,7 +3427,11 @@ def scan_file_in(args):
     if ext in ('.data', '.patch', '.debug', '.nxpc') and os.path.exists(stem + '.dict'): return rel, {}, set(), {}   # read through its Next Level Games index (nlg_shaders)
     with open(path, 'rb') as f: head = f.read(16)
     found = []; trees = {}
-    if len(args) > 2 and args[2][0] == b'ARH1':
+    if len(args) > 2 and args[2][0] == LSPK:
+        if args[2][1] is None: red(args[2][2])
+        lspk_shaders(args[2][1], rel, found)
+        return rel, uniq_keys(found), var_pairs(found), trees
+    if len(args) > 2 and args[2][0] == b'ARH':
         arh_shaders(path, rel, args[2][1], found)
         return rel, uniq_keys(found), var_pairs(found), trees
     if head[:4] == NLG_DICT:
@@ -3582,12 +3662,13 @@ def main():
     ca_jobs, cascs = casc_jobs(files)   # Diablo II: Resurrected's CASC archives (casc.py)
     cr_jobs, cras = cra_jobs(files)   # Mario Tennis Fever's CRA archive, its index in the NRO the game decodes at run time
     zp_jobs, zips = zip_jobs(files)   # Portal's game.zip (Deflate members)
-    ah_jobs, arhs = arh_jobs(files)   # Monolith's ARH1/ARD archives and embedded XBC1/HCPS programs
+    ah_jobs, arhs = arh_jobs(files)   # Monolith's ARH1/ARH2 indexes and embedded XBC1/HCPS programs
     fb_jobs, fbs = frostbite_jobs(files)   # EA SPORTS FC 27's Frostbite bundles, Oodle Leviathan decoded by the game's own decoder in the Mac host
     pd_jobs, pdats = pdat_jobs(files)   # Kirby Air Riders' PDAT archives: the PMAP records in byte ranges
     rp_jobs, rpfs = rpf_jobs(files, main_v)   # Red Dead Redemption's RPF6 archives, their tables decrypted with the key in main (rpf6.py)
-    big += pak_jobs + tr_jobs + ue_jobs + bd_jobs + arc_jobs + pz_jobs + ck_jobs + d3_jobs + ca_jobs + cr_jobs + zp_jobs + ah_jobs + fb_jobs + pd_jobs + rp_jobs
-    files = [(p, r) for p, r in files if not linkdata_jobs(p, r) and p not in paks and p not in trp and p not in uep and p not in bdts and p not in arcs and p not in pkzs and p not in cpks and p not in d3s and p not in cascs and p not in cras and p not in zips and p not in arhs and p not in fbs and p not in pdats and p not in rpfs]
+    ls_jobs, lsps = lspk_jobs(files)   # Larian's packages: indexed BSHD programs, without reading unrelated assets
+    big += pak_jobs + tr_jobs + ue_jobs + bd_jobs + arc_jobs + pz_jobs + ck_jobs + d3_jobs + ca_jobs + cr_jobs + zp_jobs + ah_jobs + fb_jobs + pd_jobs + rp_jobs + ls_jobs
+    files = [(p, r) for p, r in files if not linkdata_jobs(p, r) and p not in paks and p not in trp and p not in uep and p not in bdts and p not in arcs and p not in pkzs and p not in cpks and p not in d3s and p not in cascs and p not in cras and p not in zips and p not in arhs and p not in fbs and p not in pdats and p not in rpfs and p not in lsps]
     with cf.ProcessPoolExecutor(J, initializer=_pool_init, initargs=(common, {}, zdicts)) as ex:
         n = len(big) + len(files)
         results += pooled(ex, big, n) + pooled(ex, files, n, len(big), chunk=16)
@@ -3630,12 +3711,13 @@ def main():
     for name, rr in recs.items():
         with open(os.path.join(pkg, name), 'wb') as f: f.write(b''.join(rr))
     with open(mapout, 'w') as f:
-        kinds = ' / '.join(k for k, hit in (('BNSH / BAHS', any('#BNSH@' in r[4] or '#BAHS@' in r[4] for r in rows)), ('Unity Shader', any('#var' in r[4] and '#PMAP@' not in r[4] and '#BNSH@' not in r[4] and '#MSHD#' not in r[4] and '#SDF#' not in r[4] and '#GLSLC@' not in r[4] and '#SNVN@' not in r[4] for r in rows)),
+        kinds = ' / '.join(k for k, hit in (('BNSH / BAHS', any('#BNSH@' in r[4] or '#BAHS@' in r[4] for r in rows)), ('Monolith HCPS / SLCT', any('#HCPS@' in r[4] for r in rows)), ('Unity Shader', any('#var' in r[4] and '#HCPS@' not in r[4] and '#PMAP@' not in r[4] and '#BNSH@' not in r[4] and '#MSHD#' not in r[4] and '#SDF#' not in r[4] and '#GLSLC@' not in r[4] and '#SNVN@' not in r[4] and '#BSHD#' not in r[4] for r in rows)),
                                             ('Retro Studios SNVN', any('#SNVN@' in r[4] for r in rows)),
                                             ('phx PMAP', any('#PMAP@' in r[4] for r in rows)), ('MSHD', any('#MSHD#' in r[4] for r in rows)), ('GLSLC', any('#GLSLC@' in r[4] for r in rows)), ('RE Engine SDF', any('#SDF#' in r[4] for r in rows)),
                                             ('MT Framework SPK', any('#MTSPK@' in r[4] for r in rows)), ('MonoGame MGFX', any('#MGFX@' in r[4] for r in rows)),
                                             ('PlatinumGames shader objects', any('#PGSO' in r[4] for r in rows)),
                                             ('Snowdrop shader objects', any('#SNOWDROP@' in r[4] for r in rows)),
+                                            ('Larian BSHD', any('#BSHD#' in r[4] for r in rows)),
                                             ('Needle', any('#NEEDLE@' in r[4] for r in rows)),
                                             ('Unreal Engine shader code archives', any('#UE' in r[4] for r in rows))) if hit)
         f.write(f'# kind: evidence  {NOTE} ({kinds} in RomFS + main) → control section + code area keys (dm/gfx/tools/shader_split.py)\n')

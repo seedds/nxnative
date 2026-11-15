@@ -33,7 +33,9 @@ enum { S2_SUB_MEMORY_READ = 0x04, S2_SUB_LEDS_SET = 0x07, S2_SUB_FEATURE_SET = 0
 // 0x12 are int16 position counters that wrap (x right, y toward the player), 0x14 and 0x16 jump from about 1,600 and 150 on a surface to about 4,600 and 3,200 when lifted
 #define S2_FEATURE_MOUSE 0x10
 #define S2_MOUSE_SURFACE_MAX 1000   // 0x16 below this: on a surface
-enum { S2_ADDR_INFO = 0x00013000u, S2_ADDR_FACTORY_STICK1 = 0x000130A8u, S2_ADDR_FACTORY_STICK2 = 0x000130E8u, S2_ADDR_USER_STICK1 = 0x001FC042u, S2_ADDR_USER_STICK2 = 0x001FC062u };
+enum { S2_ADDR_INFO = 0x00013000u, S2_ADDR_STICK1 = 0x00013080u, S2_ADDR_STICK2 = 0x000130C0u, S2_ADDR_USER_STICK1 = 0x001FC042u, S2_ADDR_USER_STICK2 = 0x001FC062u };
+// Each stick's factory block (S2_ADDR_STICK1 / 2): its stick parameters (S2_STICK_PARAMS bytes), then its calibration (9 bytes: 0x130A8, 0x130E8)
+enum { S2_STICK_PARAMS = 0x28, S2_STICK_BLOCK = S2_STICK_PARAMS + 9 };
 
 // Raw button bits (32-bit little endian at report offset 4; the top three bits are always set). The right Joy-Con's rail buttons are 0x10 / 0x20 and the left's 0x100000 / 0x200000
 // (the Switch 1 order: SR before SL).
@@ -122,8 +124,8 @@ static inline int s2_info_parse(const uint8_t *d, size_t n, uint16_t *vid, uint1
 }
 
 // Stick calibration (0x0B bytes): centre, maximum and minimum travel, each a packed 12-bit pair
-typedef struct { float cx, cy, maxx, maxy, minx, miny; int valid; } s2_cal;
-static inline void s2_cal_default(s2_cal *c) { c->cx = c->cy = 2048; c->maxx = c->maxy = c->minx = c->miny = 1200; c->valid = 0; }
+typedef struct { float cx, cy, maxx, maxy, minx, miny; int valid; float dead; } s2_cal;   // dead: the stick's own dead zone in raw counts (s2_params_dead), 0 when unknown
+static inline void s2_cal_default(s2_cal *c) { c->cx = c->cy = 2048; c->maxx = c->maxy = c->minx = c->miny = 1200; c->valid = 0; c->dead = 0; }
 static inline int s2_cal_blank(const uint8_t *d, size_t n) { return !d || n < 3 || (d[0] == 0xFF && d[1] == 0xFF && d[2] == 0xFF); }
 static inline int s2_cal_parse(const uint8_t *d, size_t n, s2_cal *c) {
     if (!d || !c || n < 9 || s2_cal_blank(d, n)) return 0;
@@ -134,17 +136,60 @@ static inline int s2_cal_parse(const uint8_t *d, size_t n, s2_cal *c) {
     c->valid = c->maxx > 100 && c->maxy > 100 && c->minx > 100 && c->miny > 100;
     return c->valid;
 }
-static inline float s2_cal_axis(float v, float centre, float up, float down, float dead) {
-    float s = v - centre;
-    if (s > dead) return up > 0 ? fminf(s / up, 1.f) : 0.f;
-    if (s < -dead) return down > 0 ? -fminf(-s / down, 1.f) : 0.f;
-    return 0.f;
+// Stick parameters (S2_STICK_PARAMS bytes before each stick's calibration, 0x13080 and 0x130C0): a format byte, then 13 packed 12-bit pairs, x and y. They are the same on
+// every controller of a model and differ between models (the left and right Joy-Con 2 hold the same bytes), so they are the model's stick constants, as the Switch 1 controllers'
+// "stick parameters" at 0x6086 / 0x6098 are, whose third value is the dead zone the console applies (about 15 % of the travel on a Joy-Con, 10 % on a Pro Controller:
+// dekuNukem/Nintendo_Switch_Reverse_Engineering, spi_flash_notes.md). Dumps of real controllers (ndeadly/switch2_controller_research memory_layout.md; GP2040-CE's
+// Switch2ProDescriptors.h) read, pair by pair:
+//   Pro Controller 2 (format 01): 2477 1621 160 160 226 226 3482 3482 1290 1290 1583 1583
+//   Joy-Con 2, left and right (02): 2732/2730 1363 147 147 210 210 3276/3482 3276/3482 724 724 1167 1167
+// The last pair is the model's nominal travel (in their own calibrations the same dumps' sticks travel 1510 to 1615 and 1163 to 1237 counts). The third pair is taken as the dead zone:
+// 10 % of the nominal travel on the Pro Controller 2 and 12.6 % on a Joy-Con 2, where the Switch 1 models' dead zones lie. That reading is inferred from those two facts, not from
+// the console's hid code, so a value outside S2_DEAD_MIN..S2_DEAD_MAX of the travel is not trusted and S2_DEAD_SHARE is used instead.
+// Returns the dead zone in raw counts, 0 for a block that is blank, too short or not of that shape.
+static inline float s2_params_dead(const uint8_t *d, size_t n) {
+    if (!d || n < S2_STICK_PARAMS || d[0] == 0xFF) return 0;
+    const uint8_t *t = d + 1 + 3 * 2;   // the third pair
+    uint32_t p = (uint32_t)t[0] | (uint32_t)t[1] << 8 | (uint32_t)t[2] << 16, x = p & 0xFFF, y = p >> 12;
+    if (x != y || x == 0 || x == 0xFFF) return 0;   // the pairs of these values hold the same x and y
+    return (float)x;
 }
-// A stick in -1..1 (x right, y up), a deadzone of dead raw counts around the centre
-static inline void s2_cal_apply(const s2_cal *c, uint16_t rawx, uint16_t rawy, float dead, float *x, float *y) {
-    s2_cal d; if (!c || !c->valid) { s2_cal_default(&d); c = &d; }
-    *x = s2_cal_axis((float)rawx, c->cx, c->maxx, c->minx, dead);
-    *y = s2_cal_axis((float)rawy, c->cy, c->maxy, c->miny, dead);
+
+// One stick's calibration from its factory block (S2_STICK_BLOCK bytes at S2_ADDR_STICK1 / 2: the parameters, then the calibration) and its user calibration (0x0B bytes at
+// S2_ADDR_USER_STICK1 / 2, blank unless the stick was calibrated on a console; either may be NULL): the user's centre and travel when set, else the factory's, and the dead zone
+// from the parameters either way. Returns 2 for the user's calibration, 1 for the factory's, 0 for none (c keeps the typical travel, s2_cal_default, and any dead zone read).
+static inline int s2_cal_from_flash(const uint8_t *block, size_t n, const uint8_t *user, size_t un, s2_cal *c) {
+    s2_cal_default(c); s2_cal t;
+    if (block && n >= S2_STICK_PARAMS) c->dead = s2_params_dead(block, n);
+    float dead = c->dead;
+    if (user && s2_cal_parse(user, un, &t)) { *c = t; c->dead = dead; return 2; }
+    if (block && n >= S2_STICK_BLOCK && s2_cal_parse(block + S2_STICK_PARAMS, n - S2_STICK_PARAMS, &t)) { *c = t; c->dead = dead; return 1; }
+    return 0;
+}
+
+// The share of the travel a stick's dead zone takes when the stick has none of its own (none read, or one outside S2_DEAD_MIN..S2_DEAD_MAX): the Pro Controller 2's value
+#define S2_DEAD_SHARE 0.10f
+#define S2_DEAD_MIN 0.03f
+#define S2_DEAD_MAX 0.25f
+// The stick's own dead zone as a share of its mean travel, 0 when it has none to trust
+static inline float s2_cal_dead_own(const s2_cal *c) {
+    float travel = (c->maxx + c->minx + c->maxy + c->miny) / 4, share = travel > 0 ? c->dead / travel : 0;
+    return share >= S2_DEAD_MIN && share <= S2_DEAD_MAX ? share : 0;
+}
+static inline float s2_cal_dead_share(const s2_cal *c) { float own = s2_cal_dead_own(c); return own > 0 ? own : S2_DEAD_SHARE; }
+// A stick in -1..1 (x right, y up): each axis over its travel on that side of the centre, then a round dead zone (the stick's own, s2_cal_dead_share), and past it the deflection
+// scaled back to start at 0, as pad_hid_stick does. A stick that comes to rest a little off its centre reads 0, and the output grows from 0 at the dead zone's edge instead of
+// jumping to it, and a small movement keeps both axes (a dead zone per axis would zero the smaller one). Each axis is clamped after the scale.
+// Before (2026-11), each axis had its own dead zone of 40 raw counts with no scale: a Pro Controller 2's right stick comes to rest 0 to 60 counts off its centre, so it read 0 or
+// a constant 3 to 5 % after a release, and Breath of the Wild, which decides at the start of an aim whether the right stick is in use, left motion aiming off about half the time.
+static inline void s2_cal_apply(const s2_cal *c, uint16_t rawx, uint16_t rawy, float *x, float *y) {
+    s2_cal d; if (!c || !c->valid) { s2_cal_default(&d); if (c) d.dead = c->dead; c = &d; }
+    float sx = (float)rawx - c->cx, sy = (float)rawy - c->cy;
+    float tx = sx >= 0 ? c->maxx : c->minx, ty = sy >= 0 ? c->maxy : c->miny;
+    float nx = tx > 0 ? sx / tx : 0, ny = ty > 0 ? sy / ty : 0, r = sqrtf(nx * nx + ny * ny), dead = s2_cal_dead_share(c);
+    if (r <= dead) { *x = *y = 0; return; }
+    float k = (r - dead) / (1 - dead) / r; nx *= k; ny *= k;
+    *x = fminf(fmaxf(nx, -1.f), 1.f); *y = fminf(fmaxf(ny, -1.f), 1.f);
 }
 
 // Player LED patterns of the console for players 1..8
@@ -169,13 +214,11 @@ static inline uint64_t s2_buttons(uint32_t b, int joycon, int alone) {
     return m;
 }
 
-#define S2_DEADZONE 40.f   // raw counts around the centre
-
 // The pad's buttons and sticks (-32767..32767, y up): a Pro Controller 2's as they are; two Joy-Cons together are a Pro Controller (the left's stick is the left stick, the
 // right's the right stick); one Joy-Con alone is used sideways. Returns 0 when the pad holds no controller.
 static inline int s2_pad_input(const s2_pad_state *p, uint64_t *buttons, int32_t st[4]) {
     float x, y; uint64_t m = 0; st[0] = st[1] = st[2] = st[3] = 0;
-#define STICK(i, dev, c, rx_, ry_) do { s2_cal_apply(&(dev)->cal[c], rx_, ry_, S2_DEADZONE, &x, &y); st[i] = (int32_t)lrintf(x * DM_STICK_MAX); st[(i) + 1] = (int32_t)lrintf(y * DM_STICK_MAX); } while (0)
+#define STICK(i, dev, c, rx_, ry_) do { s2_cal_apply(&(dev)->cal[c], rx_, ry_, &x, &y); st[i] = (int32_t)lrintf(x * DM_STICK_MAX); st[(i) + 1] = (int32_t)lrintf(y * DM_STICK_MAX); } while (0)
     if (p->pro.have) {
         m = s2_buttons(p->pro.r.buttons, 0, 0);
         STICK(0, &p->pro, 0, p->pro.r.lx, p->pro.r.ly); STICK(2, &p->pro, 1, p->pro.r.rx, p->pro.r.ry);
@@ -314,7 +357,7 @@ static inline uint64_t s2_joy_buttons(uint32_t b, int right) {
     return m;
 }
 static inline void s2_joy_stick(const s2_dev *d, int right, int32_t out[2]) {
-    float x, y; s2_cal_apply(&d->cal[0], right ? d->r.rx : d->r.lx, right ? d->r.ry : d->r.ly, S2_DEADZONE, &x, &y);
+    float x, y; s2_cal_apply(&d->cal[0], right ? d->r.rx : d->r.lx, right ? d->r.ry : d->r.ly, &x, &y);
     out[0] = (int32_t)lrintf(x * DM_STICK_MAX); out[1] = (int32_t)lrintf(y * DM_STICK_MAX);
 }
 
@@ -353,11 +396,14 @@ static inline const s2_dev *s2_pad_motion_dev(const s2_pad_state *p, int want_ri
 // Measured on a right Joy-Con 2 held upright (stick on top, face toward the ceiling): raw x right, y forward, z up, and the gyro channels are right-handed rotations about the same
 // axes (tilting the top away: gyro x -83 degrees; turning left: gyro z +115; leaning the right side down: gyro y +104). So the pair's map is the identity for rotation and
 // the negated specific force for gravity. A Joy-Con held alone is turned a quarter turn about the up axis: the right one with its top to the player's left (the Pro Controller 1
-// map of motion_pro.h), the left one with its top to the right. The Pro Controller 2's frame is not measured: it takes the Pro Controller 1's map.
+// map of motion_pro.h), the left one with its top to the right. The Pro Controller 2's raw frame is the pair's (issue #2245, measured on one with Breath of the Wild on a Mac):
+// flat and still its accelerometer read -164, -584, 4193 (z up), held in both hands with its top tipped up, -73, 3227, 2597 (+0.79 G on y, forward). That fixes y and z, and so
+// x, of a right-handed frame, and the gyro shares the accelerometer's axes (one ICM-42670-P chip), so it takes the pair's map. The Pro Controller 1's map it took before turned
+// that tilt into a roll of about 50 degrees.
 static const int8_t s2_map_pair[6] = {-1, -2, -3, 4, 5, 6};
 static const int8_t s2_map_right_alone[6] = {2, -1, -3, -5, 4, 6};
 static const int8_t s2_map_left_alone[6] = {-2, 1, -3, 5, -4, 6};
-static const int8_t s2_map_pro[6] = {2, -1, -3, -5, 4, 6};
+static const int8_t s2_map_pro[6] = {-1, -2, -3, 4, 5, 6};
 static inline const int8_t *s2_pad_map(const s2_pad_state *p, const s2_dev *dev) {
     if (p->pro.have) return s2_map_pro;
     if (p->left.have && p->right.have) return s2_map_pair;

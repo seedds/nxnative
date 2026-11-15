@@ -10,7 +10,7 @@
 
 enum { SAMPLES = 240, NMIX = 8, NCMD = 6 };
 // test_renderer_blocks: the renderer each appended block came from; the output holds what it is given and plays none of it
-static int blocks_on; static gbuf *blocks[AR_MAX][NBUF]; static int blocks_n[AR_MAX];
+static int blocks_on; static aout_buf *blocks[AR_MAX][NBUF]; static int blocks_n[AR_MAX];
 static void blocks_exec(void *obj, void *state);
 // test_update_lock: the module's functions by name
 static struct { const char *name; void *p; } lock_syms[4];

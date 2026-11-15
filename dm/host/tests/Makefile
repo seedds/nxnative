@@ -19,6 +19,7 @@ run: $(B)/t_mii $(B)/t_net_eventfd $(B)/t_language $(B)/t_motion $(B)/t_heap_siz
 	$(B)/t_gesture
 	$(B)/t_oe $(QUIET)
 	$(B)/t_fs $(QUIET)
+	$(B)/t_fs_mutation $(QUIET)
 	TMPDIR="$(abspath $(B))" $(B)/t_fs_commit_list
 	$(B)/t_thread_leak
 	TMPDIR="$(abspath $(B))" $(B)/t_fs_case $(QUIET)
@@ -48,6 +49,7 @@ run: $(B)/t_mii $(B)/t_net_eventfd $(B)/t_language $(B)/t_motion $(B)/t_heap_siz
 	$(B)/t_pause_stress --seconds 1
 	$(B)/t_pctl
 	$(B)/t_net_eventfd
+	$(B)/t_net_loopback
 	$(B)/t_sf
 	$(B)/t_time
 	$(B)/t_sync_wait $(QUIET)
@@ -69,6 +71,7 @@ run: $(B)/t_mii $(B)/t_net_eventfd $(B)/t_language $(B)/t_motion $(B)/t_heap_siz
 	$(B)/t_ctrl_prompt
 	$(B)/t_motion_pro
 	$(B)/t_motion_pro_mac
+	$(B)/t_jc1
 	TMPDIR="$(abspath $(B))" $(B)/t_hid
 	$(B)/t_pad_hid
 	$(B)/t_pad_hid_mac
@@ -137,6 +140,10 @@ $(B)/t_thread_leak: t_thread_leak.c ../thread.c ../dm.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -Wno-unused-function -I.. $(GINC) -o $@ t_thread_leak.c
 $(B)/t_fs: t_fs.c t_fs_stub.c ../hle_fs.c ../save_sync.c ../save_sync.h ../hle_bigstack.c ../hle.h ../dm.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -Wno-unused-function -I.. $(GINC) -o $@ t_fs.c t_fs_stub.c ../hle_bigstack.c ../save_sync.c
+
+run: $(B)/t_fs_mutation
+$(B)/t_fs_mutation: t_fs_mutation.c t_fs_stub.c ../hle_fs.c ../romfs_image.h ../save_sync.c ../save_sync.h ../hle_bigstack.c ../hle.h ../dm.h $(GAME_H) | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -I.. $(GINC) -o $@ t_fs_mutation.c t_fs_stub.c ../hle_bigstack.c ../save_sync.c
 # Inject only the folder handle allocation; directory I/O remains real.
 $(B)/t_fs_directory: t_fs_directory.c t_fs_stub.c ../hle_fs.c ../romfs_image.h ../save_sync.c ../save_sync.h ../hle_bigstack.c ../hle.h ../dm.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -I.. $(GINC) -o $@ t_fs_directory.c t_fs_stub.c ../hle_bigstack.c ../save_sync.c
@@ -212,8 +219,11 @@ watch-sample: $(B)/t_watch_sample
 	$(B)/t_watch_sample
 $(B)/t_altstack: t_altstack.c t_altstack_stub.c ../crash.c ../dm.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -Wno-unused-function -I.. $(GINC) -o $@ t_altstack.c t_altstack_stub.c ../crash.c
-$(B)/t_net_eventfd: t_net_eventfd.c ../hle_net.c ../hle.h ../dm.h $(GAME_H) | $(B)
-	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -fsanitize=address,undefined -I.. $(GINC) -o $@ t_net_eventfd.c
+$(B)/t_net_eventfd: t_net_eventfd.c ../hle_net.c ../hle_net.h ../hle.h ../dm.h $(GAME_H) | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function $(if $(findstring -fsanitize,$(SAN)),,-fsanitize=address,undefined) -I.. $(GINC) -o $@ t_net_eventfd.c
+run: $(B)/t_net_loopback
+$(B)/t_net_loopback: t_net_loopback.c ../hle_net.c ../hle_net.h ../hle.h ../dm.h $(GAME_H) | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function $(if $(findstring -fsanitize,$(SAN)),,-fsanitize=address,undefined) -I.. $(GINC) -o $@ t_net_loopback.c
 
 $(B)/t_pctl: t_pctl.c ../hle_misc.c ../hle.h ../dm.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -Wall -Werror -Wno-unused-function -I.. $(GINC) -o $@ t_pctl.c
@@ -253,7 +263,9 @@ $(B)/t_home_quit_mac: t_home_quit_mac.m ../home_quit_mac.h | $(B)
 run: $(B)/t_ctrl_prompt
 $(B)/t_ctrl_prompt: t_ctrl_prompt.c ../ctrl_prompt.h | $(B)
 	$(CLANG) -O1 -g -Wall -Werror -fsanitize=address,undefined -I.. -o $@ t_ctrl_prompt.c
-run: $(B)/t_motion_pro $(B)/t_motion_pro_mac $(B)/t_pad_hid_mac
+run: $(B)/t_motion_pro $(B)/t_motion_pro_mac $(B)/t_pad_hid_mac $(B)/t_jc1
+$(B)/t_jc1: t_jc1.c ../pad_jc1.h ../pad_pro.h ../hle_haptics.h ../dm_input.h | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -fsanitize=address,undefined -I.. -o $@ t_jc1.c
 $(B)/t_motion_pro: t_motion_pro.c ../motion_pro.h | $(B)
 	$(CLANG) -O1 -g -Wall -Werror -fsanitize=address,undefined -o $@ t_motion_pro.c
 $(B)/t_pad_hid_mac: t_pad_hid_mac.m ../pad_hid_mac.h ../pad_hid.h ../pad_pro.h ../motion_pro.h ../dm_input.h | $(B)
@@ -385,10 +397,13 @@ asan:
 	@$(call san_fresh,$(B)/asan,$(ASAN_FLAGS))
 	$(ASAN_ENV) $(MAKE) B=$(B)/asan SAN="$(ASAN_FLAGS)" run
 TSAN_T = t_audio t_audio_stats t_audio_device t_thread_leak t_oe t_fs_commit_list t_fs_case t_save_sync t_condvar t_condvar_old t_preempt t_system_event t_notify_sched t_altstack t_sync_wait
+TSAN_T += t_net_eventfd t_net_loopback
 tsan-threads:
 	@$(call san_fresh,$(B)/tsan,$(TSAN_FLAGS))
 	$(TSAN_ENV) $(MAKE) B=$(B)/tsan SAN="$(TSAN_FLAGS)" tsan-threads-run
 tsan-threads-run: $(addprefix $(B)/,$(TSAN_T))
+	$(B)/t_net_eventfd
+	$(B)/t_net_loopback
 	$(B)/t_audio
 	$(B)/t_audio_stats
 	$(B)/t_audio_device

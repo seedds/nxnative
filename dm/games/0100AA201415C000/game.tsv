@@ -1,0 +1,45 @@
+# FINAL FANTASY V (Pixel Remaster), update 1.2.0_5 (v393216).
+# Unity 2020.3.37f1 IL2CPP, SDK 14.3.0, NVN 55.15.
+# The existing SDK-wide address-region rules apply; no game-specific patches.
+
+# ---- Identity ----
+title_id	0100AA201415C000
+program_id	0100AA201415C000
+
+# ---- App ----
+name	FINAL FANTASY V
+ipa	FinalFantasyV.ipa
+app_category	public.app-category.games
+
+# ---- Versions ----
+build	v393216	1.2.0_5	main=398e519cea82a9bd850888b1b04fccbc	subsdk0=c781dd63daf0ddcdb9975da50a198f93	sdk=2aef2cffb104ee7c9e212fd2f4c731e9
+package	v393216
+shader_versions	v393216
+
+# ---- Files ----
+# every module main imports from
+modules	main subsdk0 sdk
+romfs_marker	Data/StreamingAssets/aa/Switch/ff5_bgm_55_assets_all.bundle
+zip_store	.bundle:.dat:.json:.png:.ress:.metallib
+
+# ---- Memory ----
+# NPDM: 16 MB of system resource, enabling virtual address memory. No heap set.
+# With the 3.21 GB survey pool, StandardAllocator reserves 3.14 GB; the initial
+# 15-second check reaches alias +4.20 GB, but gameplay reaches at least +4.76 GB.
+# Report a 2 GB pool so StandardAllocator leaves room for Unity's other regions.
+# Its reservation is then 1.94 GB; a saved-map load reaches alias +3.26 GB of 4.38.
+# Device testing remains open. See README.md for the Mac layout check.
+mem_reserve	0x140000000
+mem_alias	0x118000000
+mem_stack	0x10000000
+app_pool	0x80000000
+sys_resource	0x1000000
+
+# ---- Shader split ----
+shader_groups	/Data/=data
+shader_note	FINAL FANTASY V shaders
+
+# The game sets near = 0; prebuild pipeline bases with the same depth convention.
+depth_mode	zero
+
+# heap check: 2026-11-15, no heap set; depth_mode zero; address regions fit.

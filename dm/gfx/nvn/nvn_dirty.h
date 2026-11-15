@@ -3,7 +3,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-void nvn_dirty_add_range(const void *mem, size_t size);           // Register a memory pool as a tracked range (the first call registers the page-fault hook and the host pre-write hook)
+void nvn_dirty_add_range(const void *mem, size_t size);           // Register a memory pool as a tracked range (the page-fault hook and the host pre-write hook are registered when the host loads)
 void nvn_dirty_stat(int *live, int *peak, int *cap);                // number of registered memory pools, peak, tracking table capacity (for the memory readout line)
 void nvn_dirty_remove_range(const void *mem);                     // Pool destruction: restore protected pages to writable and mark invalid
 void nvn_dirty_open(const void *addr, size_t len);                 // Make the covered protected pages writable, not counted as written, and hold off protection until nvn_dirty_close: around making a zero-copy buffer the GPU writes through

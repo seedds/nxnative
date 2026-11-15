@@ -22,6 +22,7 @@ struct spvUnsafeArray
     T elements[Num ? Num : 1];
     thread T& operator [] (size_t pos) thread { return elements[pos]; }
     threadgroup T& operator [] (size_t pos) threadgroup { return elements[pos]; }
+    device T& operator [] (size_t pos) device { return elements[pos]; }
 };
 struct B { uint _m0[4]; };
 struct spvDescriptorSetBuffer0 { constant B* cp_c3 [[id(0)]]; };
@@ -34,6 +35,118 @@ kernel void main0(constant spvDescriptorSetBuffer0& spvDescriptorSet0 [[buffer(0
     _23[%d] = (*spvDescriptorSet0.cp_c3)._m0[0];
 }
 """
+# The same with a byte store helper, as dmsh_build.py shared_store_msl leaves it, called on the stage memory
+STORE = KERNEL.replace('kernel void', 'void dmsh_shared_store8_0(thread const int& _9, thread const int& _10, threadgroup spvUnsafeArray<uint, %d>& _23)\n{\n    ((threadgroup uchar*)&_23[0])[uint(_9)] = uchar(uint(_10));\n}\n\nkernel void', 1) \
+    .replace('    if (gl_', '    int _11 = 3; int _12 = 7; dmsh_shared_store8_0(_11, _12, _23);\n    if (gl_', 1)
+
+# One long group among many short ones (GitHub pull request #2308): every lane stamps a word of its group's stage memory and reads it back. Workgroup 0 keeps reading until the given
+# number of tickets were taken after it started, so a slice handed out again while its group runs shows as a stamp another group zeroed or wrote. An M3 Pro let about 14,500 tickets pass
+# before later groups waited on workgroup 0 and reports a longer spin as a GPU hang, hence the bound of 100,000 reads. dm_rep: lanes that read another group's data, groups that ran, the
+# tickets the long group saw pass, groups running now, the most running at once
+STRESS = HEAD + """
+kernel void main0(device atomic_uint* dm_rep [[buffer(1)]], device atomic_uint* dm_ctr [[buffer(2)]], uint3 gl_LocalInvocationID [[thread_position_in_threadgroup]])
+{
+    threadgroup spvUnsafeArray<uint, %d> _23;
+    uint g = _23[0], lane = gl_LocalInvocationID.x, want = ((g + 1u) * 0x9E3779B1u) ^ lane;
+    if (lane == 0u) atomic_fetch_max_explicit(dm_rep + 4, atomic_fetch_add_explicit(dm_rep + 3, 1u, memory_order_relaxed) + 1u, memory_order_relaxed);
+    _23[4u + lane] = want;
+    uint t0 = atomic_load_explicit(dm_ctr, memory_order_relaxed), seen = 0u, bad = 0u;
+    if (g == 0u)
+        for (uint k = 0u; k < 100000u && seen < %du; k++)
+        {
+            seen = atomic_load_explicit(dm_ctr, memory_order_relaxed) - t0;
+            bad |= uint(atomic_load_explicit((threadgroup atomic_uint*)&_23[4u + lane], memory_order_relaxed) != want);
+        }
+    bad |= uint(_23[4u + lane] != want);
+    if (bad != 0u) atomic_fetch_add_explicit(dm_rep, 1u, memory_order_relaxed);
+    if (lane == 0u) { atomic_fetch_add_explicit(dm_rep + 1, 1u, memory_order_relaxed); atomic_fetch_sub_explicit(dm_rep + 3, 1u, memory_order_relaxed); if (g == 0u) atomic_store_explicit(dm_rep + 2, seen, memory_order_relaxed); }
+}
+"""
+# Builds the stage above into a mesh pipeline (an object function launching blocks of MESH_GRID) and draws BLOCKS x GRID groups a run, the head's words set as the host sets them.
+# Exit 2: no Metal device or pipeline; 3: the long group never saw the pool's slice count of tickets pass (no overtaking on this GPU)
+RUNNER = r"""#import <Metal/Metal.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+enum { BLOCKS = 24, GRID = 1024, TOTAL = BLOCKS * GRID };
+static id<MTLDevice> dev; static id<MTLRenderPipelineState> ps; static id<MTLCommandQueue> q; static id<MTLTexture> target; static id<MTLBuffer> scr, rep, draw;
+static uint32_t *head(void) { return scr.contents; }
+static uint32_t *flag(void) { return head() + FLAGS / 4; }
+static int draw_once(void) {   // one draw of TOTAL groups; 0, or 1 on a command buffer error
+    uint32_t *r = rep.contents; memset(r, 0, 32);
+    MTLRenderPassDescriptor *pass = [MTLRenderPassDescriptor renderPassDescriptor];
+    pass.colorAttachments[0].texture = target; pass.colorAttachments[0].loadAction = MTLLoadActionClear; pass.colorAttachments[0].storeAction = MTLStoreActionDontCare;
+    id<MTLCommandBuffer> cb = [q commandBuffer];
+    id<MTLRenderCommandEncoder> en = [cb renderCommandEncoderWithDescriptor:pass];
+    [en setRenderPipelineState:ps];
+    [en setObjectBuffer:draw offset:0 atIndex:DRAW_SLOT];
+    [en setMeshBuffer:rep offset:0 atIndex:1]; [en setMeshBuffer:scr offset:0 atIndex:2]; [en setMeshBuffer:scr offset:0 atIndex:SCR_SLOT];
+    [en drawMeshThreadgroups:MTLSizeMake(BLOCKS, 1, 1) threadsPerObjectThreadgroup:MTLSizeMake(1, 1, 1) threadsPerMeshThreadgroup:MTLSizeMake(32, 1, 1)];
+    [en endEncoding]; [cb commit]; [cb waitUntilCompleted];
+    if (cb.error) { printf("%s\n", cb.error.localizedDescription.UTF8String); return 1; }
+    return 0;
+}
+static void pool(uint32_t n, uint32_t tag, uint32_t done, uint32_t flags) {   // as the host's mesh_scratch and mesh_scratch_bind leave the head; every flag set to flags
+    uint32_t *h = head(); h[MASK] = n - 1; h[TAG] = tag; h[DONE] = done; h[OVER] = 0;
+    for (uint32_t i = 0; i < SLICES; i++) flag()[i] = flags;
+}
+static int flags_clear(uint32_t n) { for (uint32_t i = 0; i < n; i++) if (flag()[i]) { printf("slice %u is still claimed after the draw (%#x)\n", i, flag()[i]); return 0; } return 1; }
+int main(int argc, char **argv) {
+    @autoreleasepool {
+        if (argc != 2) return 64;
+        dev = MTLCreateSystemDefaultDevice();
+        if (!dev) { printf("no Metal device\n"); return 2; }
+        NSError *err = nil;
+        id<MTLLibrary> lib = [dev newLibraryWithURL:[NSURL fileURLWithPath:@(argv[1])] error:&err];
+        if (!lib) { printf("%s\n", err.localizedDescription.UTF8String); return 1; }
+        MTLMeshRenderPipelineDescriptor *pd = [MTLMeshRenderPipelineDescriptor new];
+        pd.objectFunction = [lib newFunctionWithName:@"main0_o"]; pd.meshFunction = [lib newFunctionWithName:@"main0"]; pd.fragmentFunction = [lib newFunctionWithName:@"dm_fs"];
+        pd.payloadMemoryLength = 16; pd.maxTotalThreadsPerObjectThreadgroup = 1; pd.maxTotalThreadsPerMeshThreadgroup = 32;
+        pd.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
+        ps = [dev newRenderPipelineStateWithMeshDescriptor:pd options:0 reflection:nil error:&err];
+        if (!ps) { printf("%s\n", err.localizedDescription.UTF8String); return 2; }
+        MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:16 height:16 mipmapped:NO];
+        td.usage = MTLTextureUsageRenderTarget;
+        target = [dev newTextureWithDescriptor:td];
+        scr = [dev newBufferWithLength:HEAD + (size_t)LONG_N * STRIDE options:MTLResourceStorageModeShared];
+        rep = [dev newBufferWithLength:32 options:MTLResourceStorageModeShared];
+        uint32_t rec[2] = {TOTAL, 0};
+        draw = [dev newBufferWithBytes:rec length:sizeof rec options:MTLResourceStorageModeShared];
+        q = [dev newCommandQueue];
+        const uint32_t *r = rep.contents; uint8_t *slices = (uint8_t *)scr.contents + HEAD;
+        // 1. A long group among short ones, 8 submissions (tag = fence, DONE the one before): no slice is handed out while its group runs, every flag is clear afterwards
+        int overtaken = 0; uint32_t peak = 0;
+        for (uint32_t run = 0; run < 8; run++) {
+            pool(LONG_N, run + 2, run + 1, 0);
+            if (draw_once()) return 1;
+            printf("long: %u groups ran, %u drew nothing, %u lanes read another group's data, the long group saw %u tickets pass, at most %u groups ran at once\n", r[1], head()[OVER], r[0], r[2], r[4]);
+            if (r[1] != TOTAL || r[0] || head()[OVER] || !flags_clear(LONG_N)) return 1;
+            overtaken |= r[2] >= LONG_N; if (r[4] > peak) peak = r[4];
+        }
+        // 2. Flags a failed submission left (tags no newer than DONE, across the 32-bit wrap): reclaimed, nothing lost
+        pool(LONG_N, 0x10u, 0x8u, 0xfffffff0u);
+        if (draw_once()) return 1;
+        printf("stale flags: %u groups ran, %u drew nothing, %u lanes read another group's data\n", r[1], head()[OVER], r[0]);
+        if (r[1] != TOTAL || r[0] || head()[OVER] || !flags_clear(LONG_N)) return 1;
+        // 3. Every slice owned by a running submission (tags newer than DONE, across the wrap): every group draws nothing and no slice is touched
+        pool(LONG_N, 0x10u, 0xfffffff0u, 0x8u); memset(slices, 0xa5, (size_t)LONG_N * STRIDE);
+        if (draw_once()) return 1;
+        printf("owned flags: %u groups ran, %u drew nothing\n", r[1], head()[OVER]);
+        if (r[1] || head()[OVER] != TOTAL) return 1;
+        for (size_t i = 0; i < (size_t)LONG_N * STRIDE; i++) if (slices[i] != 0xa5) { printf("byte %zu of the slices changed with no slice free\n", i); return 1; }
+        for (uint32_t i = 0; i < LONG_N; i++) if (flag()[i] != 0x8u) { printf("slice %u's owner changed\n", i); return 1; }
+        // 4. A pool smaller than the groups that run at once: some groups draw nothing, and those that run own their slices
+        pool(SMALL_N, 0x10u, 0xfu, 0);
+        if (draw_once()) return 1;
+        printf("%u slices: %u groups ran, %u drew nothing, %u lanes read another group's data\n", SMALL_N, r[1], head()[OVER], r[0]);
+        if (r[1] + head()[OVER] != TOTAL || !head()[OVER] || r[0] || !flags_clear(SMALL_N)) return 1;
+        printf("at most %u 32-thread groups ran at once\n", peak);
+        if (!overtaken) { printf("the long group never saw %u tickets pass: no overtaking on this GPU\n", LONG_N); return 3; }
+        return 0;
+    }
+}
+"""
+LONG_N, SMALL_N = 4096, 32   # the long run's pool, from which an M3 Pro let later groups pass the long one; one far below the groups an Apple GPU runs at once
 
 
 def sph(pos=0xf0, generics=b''):
@@ -305,10 +418,61 @@ class Stage(unittest.TestCase):
     def test_position_is_invariant(self):   # two mesh shaders of one geometry must agree: a pre-pass and a colour pass testing depth for equality
         self.assertIn('float4 position [[position, invariant]];', self.mesh()[0])
 
+    def big(self, task=False, store=False, threads=32):   # 256 vertices and 512 primitives with a primitive block: 9,876 bytes of stage memory, 2469 words (one past a multiple of four)
+        i = ms.info(control(7, threads=threads, payload=128, task=int(task), max_v=256, max_p=512, prim_at=0x80), sph(0xf0, b'\x30') + sph(0, b'\x01'))
+        w, at = ms.memory(i)[1] // 4, ms.memory(i)[0][3] // 4
+        return ms.to_stage(STORE % (w, w, at) if store else KERNEL % (w, at), i), i
+
+    def test_scratch_head(self):   # 80-core Ultra x 96 resident 32-thread groups (3072 threads) per core fit the largest pool; the head holds its words and a flag word a slice, 16-byte aligned for the uint4 zeroing
+        n = abi.MESH_SCRATCH_SLICES
+        self.assertGreater(n, 80 * 96); self.assertEqual(n & (n - 1), 0)
+        self.assertLessEqual(max(abi.MESH_SCRATCH_TICKET, abi.MESH_SCRATCH_MASK, abi.MESH_SCRATCH_TAG, abi.MESH_SCRATCH_DONE, abi.MESH_SCRATCH_OVER) * 4 + 4, abi.MESH_SCRATCH_FLAGS)
+        self.assertEqual(abi.MESH_SCRATCH_HEAD, abi.MESH_SCRATCH_FLAGS + 4 * n)
+        self.assertEqual(abi.MESH_SCRATCH_HEAD % 16, 0)
+
+    def test_big_stage_memory_is_a_device_slice(self):   # 5-16 KB of threadgroup memory a 32-thread group cost occupancy (Ocarina of Time's foliage meshes)
+        src, i = self.big(); w = 2469
+        self.assertEqual(i['spill'], 1)
+        h = '(device atomic_uint*)dm_scr'
+        fence = '    atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, thread_scope_device);\n'
+        for entry in src.split('[[mesh]] void ')[1:]:
+            self.assertIn(f'device uchar* dm_scr [[buffer({abi.MESH_SCRATCH_SLOT})]])\n{{\n', entry)
+            self.assertIn(f'        for (uint dm_k = 0u; dm_k < {abi.MESH_SCRATCH_TRIES}u; dm_k++)\n', entry)
+            self.assertIn(f'atomic_fetch_add_explicit({h} + {abi.MESH_SCRATCH_TICKET}, 1u, memory_order_relaxed) & dm_m;\n', entry)
+            # free, or its owner's submission is over; compare-and-swap to this group's tag
+            self.assertIn('if ((dm_v == 0u || int(dm_done - dm_v) >= 0) && atomic_compare_exchange_weak_explicit(dm_f, &dm_v, dm_tag, memory_order_relaxed, memory_order_relaxed)) { dm_t = dm_s; break; }\n', entry)
+            # no slice: counted, nothing drawn, no slice touched
+            self.assertIn(f'        if (dm_t == ~0u) atomic_fetch_add_explicit({h} + {abi.MESH_SCRATCH_OVER}, 1u, memory_order_relaxed);\n    }}\n'
+                          '    dm_t = simd_broadcast_first(dm_t);\n'
+                          '    if (dm_t == ~0u)\n    {\n        if (gl_LocalInvocationID.x == 0u) dm_out.set_primitive_count(0u);\n        return;\n    }\n' + fence +
+                          f'    device spvUnsafeArray<uint, {w}>& _23 = *(device spvUnsafeArray<uint, {w}>*)(dm_scr + {abi.MESH_SCRATCH_HEAD}ul + ulong(dm_t) * {abi.MESH_SCRATCH_STRIDE}ul);\n', entry)
+            self.assertIn('    }\n    threadgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup);\n' + fence +
+                          f'    if (gl_LocalInvocationID.x == 0u) atomic_store_explicit({h} + {abi.MESH_SCRATCH_FLAGS // 4}u + dm_t, 0u, memory_order_relaxed);\n}}\n', entry)   # released after the last read, at the end
+            self.assertIn(f'for (uint i = gl_LocalInvocationID.x; i < {w // 4}u; i += 32u) ((device uint4*)&_23[0])[i] = uint4(0u);\n', entry)   # zero at the body's start, vectors then the tail
+            self.assertIn(f'for (uint i = {w // 4 * 4}u + gl_LocalInvocationID.x; i < {w}u; i += 32u) _23[i] = 0u;\n', entry)
+            self.assertEqual(entry.count('return;'), 1)
+            self.assertNotIn('threadgroup spvUnsafeArray', entry)
+            self.assertNotIn('barrier(mem_flags::mem_threadgroup)', entry)
+        self.assertIn(f'dm_stage_body(constant spvDescriptorSetBuffer0& spvDescriptorSet0, uint3 gl_LocalInvocationID, device spvUnsafeArray<uint, {w}>& _23)', src)
+        self.assertEqual(src.count('threadgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup)'), 8)   # the start, the two around the body and the release's, in each depth convention
+
+    def test_device_slice_takes_the_byte_store_helpers(self):
+        src = self.big(store=True)[0]
+        self.assertIn('((device uchar*)&_23[0])[uint(_9)] = uchar(uint(_10));', src)
+        self.assertIn('device spvUnsafeArray<uint, 2469>& _23)\n{', src)
+        self.assertNotIn('threadgroup uchar', src)
+        self.assertIn('threadgroup T& operator [] (size_t pos) threadgroup', src)   # the template keeps its overload
+
+    def test_device_slice_only_where_it_pays(self):   # a stage array under 6000 bytes, a task shader, or a group that is not one SIMD-group stay in threadgroup memory
+        for src, i in (self.mesh(primitive=True), self.task(), self.big(threads=64)):
+            self.assertNotIn('spill', i); self.assertNotIn('dm_scr', src); self.assertRegex(src, r'\n    threadgroup spvUnsafeArray<uint, \d+> _23;\n')
+            self.assertNotIn('mem_device', src); self.assertNotIn('dm_tag', src)
+
     @unittest.skipUnless(shutil.which('xcrun') and subprocess.run(['xcrun', '-sdk', 'macosx', '-f', 'metal'], capture_output=True).returncode == 0, 'no Metal compiler')
     def test_compiles(self):
         i = ms.info(control(7, payload=128, max_v=128, max_p=126, prim_at=0x80), sph(0xf0) + sph(0x01, b'\x01'))   # the primitive id and an attribute
-        cases = [self.task()[0], self.mesh()[0], self.mesh(task=True)[0], self.mesh(primitive=True)[0], self.mesh(vertices=32, primitives=32, pos=0xf8, verts=1, reads={5: 0x7})[0], self.mesh(primitive=True, reads={0: 1, 1: 0xf, 5: 0xf})[0], self.local_word(), ms.to_stage(KERNEL % (ms.memory(i)[1] // 4, ms.memory(i)[0][3] // 4), i)]
+        cases = [self.task()[0], self.mesh()[0], self.mesh(task=True)[0], self.mesh(primitive=True)[0], self.mesh(vertices=32, primitives=32, pos=0xf8, verts=1, reads={5: 0x7})[0], self.mesh(primitive=True, reads={0: 1, 1: 0xf, 5: 0xf})[0], self.local_word(), ms.to_stage(KERNEL % (ms.memory(i)[1] // 4, ms.memory(i)[0][3] // 4), i),
+                 self.big()[0], self.big(task=True)[0], self.big(store=True)[0]]
         with tempfile.TemporaryDirectory() as d:
             for n, src in enumerate(cases):
                 f = Path(d, f's{n}.metal'); f.write_text(src)
@@ -448,6 +612,27 @@ fragment main0_out main0(main0_in in [[stage_in]])
 
     def test_computed_from_a_flat_input_gets_none(self):
         self.assertIsNone(self.fs_uint(self.SRC % (', flat', '_26 * 2.0')))
+
+
+@unittest.skipUnless(os.environ.get('DMSH_TEST_GPU') == '1' and shutil.which('xcrun') and shutil.which('clang'), 'set DMSH_TEST_GPU=1 on a Mac with Xcode')
+class OnGpu(unittest.TestCase):
+    def test_a_slice_is_owned_until_its_group_finishes(self):
+        i = ms.info(control(7, payload=128, max_v=256, max_p=512, prim_at=0x80), sph(0xf0, b'\x30') + sph(0, b'\x01'))
+        src = ms.to_stage(STRESS % (ms.memory(i)[1] // 4, LONG_N + 1024), i) + '\nfragment float4 dm_fs() { return float4(0.0); }\n'
+        self.assertEqual(i['spill'], 1)
+        defs = dict(HEAD=abi.MESH_SCRATCH_HEAD, FLAGS=abi.MESH_SCRATCH_FLAGS, SLICES=LONG_N, STRIDE=abi.MESH_SCRATCH_STRIDE, MASK=abi.MESH_SCRATCH_MASK, TAG=abi.MESH_SCRATCH_TAG,
+                    DONE=abi.MESH_SCRATCH_DONE, OVER=abi.MESH_SCRATCH_OVER, DRAW_SLOT=abi.MESH_DRAW_SLOT, SCR_SLOT=abi.MESH_SCRATCH_SLOT, LONG_N=f'{LONG_N}u', SMALL_N=f'{SMALL_N}u')
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d)
+            (d / 's.metal').write_text(src)
+            subprocess.run(['xcrun', '-sdk', 'macosx', 'metal', '-c', str(d / 's.metal'), '-o', str(d / 's.air')], check=True)
+            subprocess.run(['xcrun', '-sdk', 'macosx', 'metallib', str(d / 's.air'), '-o', str(d / 's.metallib')], check=True)
+            (d / 'run.m').write_text(''.join(f'#define {k} {v}\n' for k, v in defs.items()) + RUNNER)
+            subprocess.run(['clang', '-fobjc-arc', '-O1', str(d / 'run.m'), '-framework', 'Metal', '-framework', 'Foundation', '-o', str(d / 'run')], check=True)
+            r = subprocess.run([str(d / 'run'), str(d / 's.metallib')], capture_output=True, text=True)
+            print(r.stdout, end='')
+            if r.returncode in (2, 3): self.skipTest(r.stdout.strip().splitlines()[-1])
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
 
 
 if __name__ == '__main__':

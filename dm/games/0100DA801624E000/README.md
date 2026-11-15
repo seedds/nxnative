@@ -16,6 +16,7 @@ Update 1.0.3 (v196608) over the base game, SDK 14.3.0. Andrew Shouldice's game (
 - **60 fps (30 on the Switch)** (`fps_target 60`; `DM_FPS_TARGET=30` gives the Switch's rate). The game sets Unity's `QualitySettings.vSyncCount` to 2 (present interval 2). The rewriter finds it and `Application.targetFrameRate` through Unity's internal-call table, with no build ID (1.0.3: `targetFrameRate` at `main+0x353c738`, `vSyncCount` at `[[main+0x38864a0]+0x30] + [[main+0x38864a0]+0x4c] * 0xa8 + 0x68`), and the host writes the count ([Unity's vSyncCount and targetFrameRate](../../../docs/reference/frame-rate.md#unitys-vsynccount-and-targetframerate-found-through-the-internal-call-table)).
 - **Speed:** Unity steps the game by the time that really passed. A timed walk from the start of a new game (3 s of the stick to the left) ends at the same place at 30 and 60 (2026-11-10).
 - **Measured** (windowed, Apple M6, 60 Hz screen): 30 fps p50 33.35 / p95 33.82 ms; 60 fps p50 16.67 / p95 16.77 ms on the beach. GPU time about 6 ms a frame. 120 was not measured (the screen is below 120 Hz), so `fps_max` stays 60.
+- **Rechecked 2026-11-15**, chain `cd731f39944d`, Apple M6, window and HUD, audio on: a fresh save reached the title, New Game, the beach and left-stick movement with no red lines or crash. The 30 s standing beach sample (80–110 s after launch) contained 1,799 frames, 60.0 fps; frame time p50 16.67 / p95 16.72 / p99 16.77 ms, GPU p50 5.05 / p95 6.29 ms. Two frame intervals exceeded 25 ms and one presentation was dropped. Screenshots were taken outside the measurement window. This is a compatibility check, not an A/B performance comparison.
 - In a run with `DM_CTL` `shot`s, a long frame of 60–190 ms followed each shot; runs without shots had no long frame after the New Game load (100 s on the beach, with and without sound): [Long frames a test run makes itself](../../../docs/reference/frame-rate.md#long-frames-a-test-run-makes-itself). The collector's stops are short: 2–18 threads paused per collection, each pause under 1 µs.
 
 ## Memory
@@ -26,14 +27,20 @@ Update 1.0.3 (v196608) over the base game, SDK 14.3.0. Andrew Shouldice's game (
 ## Files and shaders
 
 - The RomFS has 10,553 files, 2.75 GB: 87 Unity serialized files (`.assets` and their `.resS` / `.ress`), 135 FMOD banks (0.71 GB), and under `Data/GI` 10,042 small files (`.neo`, `.caw`, `.ecm`, `.rgb`, `.vis`, `.pos`; 0.59 GB). No bundles, no DLC.
-- 35,753 shaders (17,845 vertex, 17,849 pixel, 56 compute, 3 geometry): 35,742 from `Data/` and 11 GLSLC outputs in `main`. All built for the Mac in 8 minutes, none failed, every binding decoded.
-- The prebuild makes pipeline bases from 17,847 shader pairs on the Mac in about 2 minutes: 17,833 built, 14 left to the draws, none failed. A run whose working folder has no archive builds them while the game waits at boot; point it at the NSP script's `run/pso_archive`.
+- 35,753 shaders (17,845 vertex, 17,849 pixel, 56 compute, 3 geometry): 35,742 from `Data/` and 11 GLSLC outputs in `main`. Full Mac and iOS builds passed on chain `cd731f39944d` (2026-11-15): none failed, no shaders lost without failing, every binding decoded.
+- The Mac prebuild made pipeline bases from 17,847 shader pairs in 173.1 s on the Apple M6 (2026-11-15): 17,833 built, 14 left to the draws, none failed. A run whose working folder has no archive builds them while the game waits at boot; point it at the NSP script's `run/pso_archive`.
 - `pso_manifest.tsv` is empty: no run recorded one.
 - The opening sea is an opaque saturated blue with a bright shore line, as on the console: its draws are `Custom/WaterEdge` over the clear colour. `Shader Forge/TUNIC water` is not drawn there.
 
 ## Sound
 
-- With `DM_AUDIO=1` the game opens one AudioOut (2 channels, 240-frame device buffer) and runs with no underruns; playback was not listened to or dumped.
+- With `DM_AUDIO=1` the game opens one AudioOut (2 channels, 240-frame device buffer) and runs with no underruns.
+- **Rechecked 2026-11-15:** the 112 s Mac run had no underruns. `DM_AUDIO_DUMP` captured 108.33 s of stereo 48 kHz signed 16-bit PCM with nonzero samples (peak 27,038); playback was not listened to.
+
+## iOS build
+
+- **Built 2026-11-15:** an unsigned `Tunic.ipa` from the base NSP and update 1.0.3, with the full iOS shader library on chain `cd731f39944d`. The app compiled successfully (264 source files); it targets iPhone and iPad on iOS 26.0 or later. Not installed or run on a device.
+- The default build has no bundled pipeline archive; the device prepares its pipeline bases on its first start when it takes the Metal 4 path. The Mac's archive is not an iOS archive.
 
 ## Mac routes
 
@@ -45,9 +52,9 @@ Update 1.0.3 (v196608) over the base game, SDK 14.3.0. Andrew Shouldice's game (
 ## Open
 
 - No fight, no item pickup, no save point and no area past the first plateau are checked, at any frame rate.
-- Sound was not heard or dumped.
-- iPhone and iPad runtime validation; no IPA has been built.
-- Input has gone only through `DM_CTL`, not a controller or the keyboard.
+- Sound was dumped but not heard.
+- iPhone and iPad runtime validation, including first-start pipeline preparation and memory use.
+- Input has gone only through `DM_KEYS` and `DM_CTL`, not a controller or the keyboard.
 - The base game alone was not played or registered; packing it takes a derived profile.
 
 ## Found on this game

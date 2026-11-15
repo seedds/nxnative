@@ -101,8 +101,12 @@ def by_build(main_id, skip=()):   # the profile whose build rows register this m
     return next((g for g in all_games(skip) if any(b.get('main') == main_id for b in g.builds().values())), None)
 
 
-# agl's upscaler network (NDSR), by where the shader map found each key: the compute shaders of agl_ndsr.pck (Donkey Kong Bananza's 24 in its release library, Splatoon Raiders' 20 in its debug one)
-UPSCALER_SOURCE = re.compile(r'/agl_ndsr\.pck#')
+# The upscaler network (NDSR), by where the shader map found each key: the compute shaders of an NDSR pack (shader_split.py ndsr_shaders: a source ending in #NDSR@<offset>), whatever
+# ships it. The pack is a library several engines carry under their own names: agl's agl_ndsr.pck (Donkey Kong Bananza, Splatoon Raiders, Mario Kart World, Nintendo Switch Sports Resort)
+# and its siblings agl_ndsr_vr.pck and agl_ndsr_vr_light.pck (Ocarina of Time), Kirby Air Riders' and Fast Fusion's .ndsr files (the same 20 networks), Star Fox's nested in a VIPR container
+# (Splatoon Raiders' 20), and the pack inside nn::ndve's movie file. Being named only lets the host read a shader's colour from its code; one whose colour it does not know, or a dispatch
+# it cannot draw, runs as the game's (nvn_mtl.m up_mfx_color, up_mfx_encode)
+UPSCALER_SOURCE = re.compile(r'#NDSR@0x[0-9a-f]+$')
 
 
 def upscaler_keys(g):

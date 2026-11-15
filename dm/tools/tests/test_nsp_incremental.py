@@ -148,8 +148,6 @@ class DeriveProfile(Base):
         changes = {
             'source game.tsv': lambda: (self.src / 'game.tsv').write_text((self.src / 'game.tsv').read_text() + 'pad_layout\tfull\n'),
             'source manual table': lambda: (self.src / 'shader_facts_manual.tsv').write_text('k\t{"manual": 2}\n'),
-            'source chain header': lambda: (self.src / 'dmsh_chain.h').write_text('#define DMSH_CHAIN "new"\n'),
-            'new source file': lambda: (self.src / 'bf_want.tsv').write_text('# new\n'),
             'main build': lambda: nso(self.ex / 'ExeFS/main', 'ef' * 16),
             'display version': lambda: control(self.ex / 'control.nacp', '1.2.0'),
         }
@@ -169,10 +167,29 @@ class DeriveProfile(Base):
                 self.derive(**kw); self.assert_fresh()
         self.assertEqual(game.Game(self.pdir).title_id, 0x0100AAAA00FFF000)
 
+    def test_a_file_the_split_does_not_read_refreshes_the_copies_and_keeps_later_stages(self):   # a geo_mesh.tsv row used to wipe the split's tables
+        changes = {
+            'source chain header': lambda: (self.src / 'dmsh_chain.h').write_text('#define DMSH_CHAIN "new"\n'),
+            'new source file': lambda: (self.src / 'bf_want.tsv').write_text('# new\n'),
+            'edited source file': lambda: (self.src / 'pso_manifest.tsv').write_text('S\tk3\tpixel\n'),
+        }
+        for what, change in changes.items():
+            with self.subTest(what):
+                self.derive(); self.later_stages(); self.derive(); self.assert_kept()
+                change(); self.derive(); self.assert_kept()
+                for p in self.src.iterdir():
+                    if p.name not in nsp.DERIVED_SKIP: self.assertEqual((self.pdir / p.name).read_bytes(), p.read_bytes())
+                self.assertEqual(self.derive(), '1.1.0'); self.assert_kept()   # and the next run reuses the folder as it is
+
     def test_removed_source_file_goes(self):
         self.derive(); self.later_stages(); self.derive(); self.assert_kept()
         (self.src / 'pso_manifest.tsv').unlink(); self.derive()
-        self.assertFalse((self.pdir / 'pso_manifest.tsv').exists()); self.assert_fresh()
+        self.assertFalse((self.pdir / 'pso_manifest.tsv').exists()); self.assert_kept()
+
+    def test_no_split_key_derives_again(self):   # a folder derived before the split key, or one whose split key is gone
+        self.derive(); self.later_stages()
+        nsp.derived_split_key(self.pdir).unlink()
+        (self.src / 'pso_manifest.tsv').write_text('S\tk3\tpixel\n'); self.derive(); self.assert_fresh()
 
     def test_edited_copy_is_kept_until_inputs_change(self):   # the stored digest is of the inputs, not of the derived files
         self.derive(); (self.pdir / 'pso_manifest.tsv').write_text('S\tk2\tpixel\n'); self.derive()
@@ -809,12 +826,22 @@ class SplitShaders(Base):
         with self.assertRaisesRegex(nsp.BuildError, 'differ from game profile'): self.go(g, own=False)   # a failed check is not reused
         self.assertEqual(self.splits, 3)
 
-    def test_damaged_never_reuses(self):
+    def test_damaged_reuses_only_the_same_extraction(self):
+        # --allow-damaged: a repaired copy keeps every path and size, which is all 'tree' sees, so a damaged RomFS is keyed by its files' times as well ('stat': an extraction writes
+        # them again) and by the damage check's list. Before, a damaged build never reused, and its None key kept the shader step from reusing too: Ocarina of Time's three damaged
+        # textures cost every build the split (56 s) and all 42,848 shaders restored from the cache (about ten minutes)
         g = self.own()
         with mock.patch.object(nsp, 'ALLOW_DAMAGED', True):
-            self.assertIsNone(self.go(g)); self.assertIsNone(self.go(g))
-        self.assertEqual(self.splits, 2)
-        self.go(g); self.assertEqual(self.splits, 3)   # a damaged run leaves no key behind
+            k = self.go(g); self.assertEqual(k, nsp.package_key(self.pkg))   # the shader step's key: its libraries are reused while the package is the same
+            self.assertEqual(self.go(g), k); self.assertEqual(self.splits, 1)
+            self.redump(self.ex / 'RomFS/a.bin')   # a repaired copy: the same size, extracted again
+            self.go(g); self.assertEqual(self.splits, 2)
+            self.go(g); self.assertEqual(self.splits, 2)
+            (self.ex / 'RomFS.img.formats').write_text('1 2\nTex/a.bntx.zs\t10\t00000000\n')   # check_formats' list beside the image
+            self.go(g); self.assertEqual(self.splits, 3)
+        self.go(g); self.assertEqual(self.splits, 4)   # an undamaged run takes nothing a damaged one keyed, and the other way round
+        with mock.patch.object(nsp, 'ALLOW_DAMAGED', True): self.go(g)
+        self.assertEqual(self.splits, 5)
 
     def test_missing_split_pairs_are_generated_again(self):
         for n in self.NAMES[:3]: (self.src / n).write_text(self.table(n))
@@ -981,6 +1008,30 @@ class JitBootDone(unittest.TestCase):
             self.assertTrue(done())
             (part / 'late.jit').write_bytes(b'x')
             self.assertFalse(done())   # something new starts the wait again
+
+
+class ShaderProfileKey(Base):   # the shader step's key takes the profile's shader inputs (dmsh_chain.py --inputs), not every file's bytes
+    def key(self):
+        env = dict(os.environ, DM_GAME=f'{TID:016X}', DM_GAMES_DIR=str(self.tmp / 'games'))
+        return nsp.fingerprint(nsp.shader_profile_key(sys.executable, REPO, env, game.Game(self.src)))
+
+    def test_files_no_shader_build_reads_keep_the_key(self):   # a note edit used to restore every library
+        before = self.key()
+        (self.src / 'README.md').write_text('# a note\n')
+        (self.src / 'pso_manifest.tsv').write_text('S\tk2\tpixel\n')
+        (self.src / 'game.tsv').write_text((self.src / 'game.tsv').read_text() + 'pad_layout\tfull\n')
+        self.assertEqual(self.key(), before)
+
+    def test_shader_inputs_change_the_key(self):
+        changes = {
+            'shader map': lambda: (self.src / 'shader_map.tsv').write_text('# registered\npkg.bin\t0\tvertex\tother\tx\n'),
+            'geo_mesh.tsv': lambda: (self.src / 'geo_mesh.tsv').write_text('a\tb\n'),
+            'an nvn_ key': lambda: (self.src / 'game.tsv').write_text((self.src / 'game.tsv').read_text() + 'nvn_test\ton\n'),
+        }
+        for what, change in changes.items():
+            with self.subTest(what):
+                before = self.key(); change(); self.assertNotEqual(self.key(), before)
+
 
 
 if __name__ == '__main__': unittest.main()

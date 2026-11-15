@@ -96,6 +96,30 @@ int main(void) {
     memset(tp, 0xaa, sizeof tp); memset(loc, 0xaa, sizeof loc);
     CHECK(loc_upd && loc_upd(loc, tp) == RES_OK && !memcmp(loc, a + 0xa8, sizeof loc) && !memcmp(tp, none, sizeof tp), "device location: the snapshot's name, a cleared time point");
     CHECK(memcmp(tp + 8, a + 0x90 + 8, 16), "the cleared time point's source ID is not the snapshots' steady clock");
+    // The network clock's context and the adjustable clocks (PR #1875): each is the user clock in every reader, its context the snapshot's, within the context's 0x20 bytes
+    // (DM_FIXED_TIME is read once, above, so the clocks still read 1700000000)
+    static const char *ctx_hooks[] = {
+        "_ZN2nn4time26StandardNetworkSystemClock21GetSystemClockContextEPNS0_18SystemClockContextE",
+        "_ZN2nn4time25AdjustableUserSystemClock21GetSystemClockContextEPNS0_18SystemClockContextE",
+        "_ZN2nn4time28AdjustableNetworkSystemClock21GetSystemClockContextEPNS0_18SystemClockContextE"};
+    CHECK(snap(a) == RES_OK, "snapshot for the contexts");
+    for (int h = 0; h < 3; h++) {
+        Result (*get_ctx)(uint8_t *) = hook(ctx_hooks[h]);
+        uint8_t g[0x40]; memset(g, 0xa5, sizeof g);
+        int ok = get_ctx && get_ctx(g + 0x10) == RES_OK && !memcmp(g + 0x10, a, 0x20) && !memcmp(g + 0x10, a + 0x20, 0x20);
+        for (int i = 0; i < 0x10; i++) ok &= g[i] == 0xa5 && g[0x30 + i] == 0xa5;
+        CHECK(ok, ctx_hooks[h]);
+    }
+    Result (*adj_net)(int64_t *) = hook("_ZN2nn4time28AdjustableNetworkSystemClock14GetCurrentTimeEPNS0_9PosixTimeE");
+    nt = -1; CHECK(adj_net && adj_net(&nt) == RES_OK && nt == 1700000000, "the adjustable network clock reads the host clock");
+    int64_t (*adj_now)(void) = hook("_ZN2nn4time25AdjustableUserSystemClock3nowEv");
+    int64_t (*adj_net_now)(void) = hook("_ZN2nn4time28AdjustableNetworkSystemClock3nowEv");
+    CHECK(adj_now && adj_now() == 1700000000 && adj_net_now && adj_net_now() == 1700000000, "the adjustable clocks' now() read the host clock");
+    int (*net_ts)(int64_t *) = hook("_ZN2nn4time44GetStandardNetworkSystemClockCurrentTimespecEP8timespec");
+    int (*adj_net_ts)(int64_t *) = hook("_ZN2nn4time46GetAdjustableNetworkSystemClockCurrentTimespecEP8timespec");
+    int64_t tsp[2] = {-1, -1}, tsq[2] = {-1, -1};
+    CHECK(net_ts && net_ts(tsp) == 0 && tsp[0] == 1700000000 && tsp[1] == 0 && adj_net_ts && adj_net_ts(tsq) == 0 && tsq[0] == 1700000000 && tsq[1] == 0,
+          "the network clocks' real-time getters read the host clock");
     printf("time: %d checks, %d failed\n", checks, fails);
     return fails != 0;
 }

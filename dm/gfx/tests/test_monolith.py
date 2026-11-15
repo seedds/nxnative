@@ -10,15 +10,16 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'tools'))
 import shader_split as split
 
 
-def program(stages, extra=0):
+def program(stages, extra=0, nvn2=False):
     controls, codes = [], []
     for stage in stages:
-        ctl, code = bytearray(0x880 + extra), bytearray(0x100)
+        ctl, code = bytearray(0xd8 if nvn2 else 0x880 + extra), bytearray(0x100)
         ctl[:4] = split.CTL_MAGIC
-        struct.pack_into('<I', ctl, 0x20, len(ctl))
-        struct.pack_into('<I', ctl, 0x704, len(code))
-        code[:4] = split.GFX_MAGIC
-        struct.pack_into('<I', code, 0x30, (split.STAGES.index(stage) + 1) << 10 | 1)
+        struct.pack_into('<I', ctl, 0x30 if nvn2 else 0x20, len(ctl))
+        struct.pack_into('<I', ctl, 0x44 if nvn2 else 0x704, len(code))
+        if nvn2: struct.pack_into('<I', ctl, 4, 0xc9)
+        else: code[:4] = split.GFX_MAGIC
+        struct.pack_into('<I', code, 0 if nvn2 else 0x30, (split.STAGES.index(stage) + 1) << 10 | 1)
         controls.append(bytes(ctl)); codes.append(bytes(code))
     # One SLCT, two identical variants; each vertex bundle includes geometry.
     slct = bytearray(72 + 16 + 2 * 52)
@@ -42,6 +43,13 @@ def program(stages, extra=0):
 
 
 class MonolithTests(unittest.TestCase):
+    def test_asset_with_maxwell_and_nvn2_programs(self):
+        maxwell, mc, mk = program(['vs', 'ps'], extra=-0x30)
+        nvn2, nc, nk = program(['vs', 'ps'], nvn2=True)
+        found = []; split.monolith_shaders(maxwell + nvn2, '/mixed', found)
+        self.assertEqual({split.skey(c, k) for _, _, c, k in found}, {split.skey(c, k) for c, k in zip(mc + nc, mk + nk)})
+        self.assertEqual(len(split.var_pairs(found)), 2)
+
     def test_loose_containers_reach_the_archive_decoder(self):
         data, controls, codes = program(['vs', 'ps'])
         packed = zlib.compress(data, level=0)
@@ -141,6 +149,40 @@ class MonolithTests(unittest.TestCase):
         header = struct.pack('<4s9I8x', b'arh1', len(strings), len(nodes), so, len(strings), no, len(trie), fo, 1, int.from_bytes(mask, 'little') ^ 0xf3f35353)
         data = header + enc(strings) + enc(trie) + struct.pack('<Q4I', 32, 100, 200, 2, 0)
         self.assertEqual(split.arh_entries(data), [('a.bin', 32, 148)])
+
+    def test_arh2_reads_aligned_bounded_members(self):
+        shader, controls, codes = program(['vs', 'ps'])
+        packed = zlib.compress(shader)
+        wrapped = struct.pack('<4s3I32x', b'xbc1', 1, len(shader), len(packed)) + packed
+        # A stored member can still carry XBC1 (expanded size zero). Its
+        # compressed bytes are included in disk size, unlike ARH1's wrapper.
+        index = struct.pack('<4s3I', b'arh2', 3, 16, 0)
+        index += struct.pack('<Q2I', 0x123, 3, 0)
+        index += struct.pack('<Q2I', 0x456, 0, 0)
+        index += struct.pack('<Q2I', 0x789, len(wrapped), 0)
+        with tempfile.TemporaryDirectory() as td:
+            arh, ard = Path(td) / 'test.arh', Path(td) / 'test.ard'
+            arh.write_bytes(index); ard.write_bytes(b'abc'.ljust(16, b'\0') + wrapped)
+            jobs, used = split.arh_jobs([(str(arh), 'test.arh'), (str(ard), 'test.ard')], parts=1)
+            self.assertEqual(used, {str(arh), str(ard)})
+            self.assertEqual(jobs[0][2][1], [('/#0000000000000123', 0, 3), ('/#0000000000000789', 16, len(wrapped))])
+            _, keys, pairs, _ = split.scan_file(jobs[0])
+        self.assertEqual(set(keys), {split.skey(c, k) for c, k in zip(controls, codes)})
+        self.assertEqual(pairs, {(split.skey(controls[0], codes[0]), split.skey(controls[1], codes[1]))})
+
+    def test_arh2_rejects_bad_index_and_member_bounds(self):
+        for data, why in [(b'arh2', 'truncated header'),
+                          (struct.pack('<4s3I', b'arh2', 0, 0, 0), 'file alignment'),
+                          (struct.pack('<4s3I', b'arh2', 0, 3, 0), 'file alignment'),
+                          (struct.pack('<4s3I', b'arh2', 1, 16, 0), 'table out of bounds')]:
+            with self.subTest(why=why), self.assertRaisesRegex(SystemExit, why):
+                split.arh_entries(data)
+        with tempfile.TemporaryDirectory() as td:
+            arh, ard = Path(td) / 'test.arh', Path(td) / 'test.ard'
+            arh.write_bytes(struct.pack('<4s3IQ2I', b'arh2', 1, 16, 0, 1, 20, 0))
+            ard.write_bytes(b'123')
+            with self.assertRaisesRegex(SystemExit, 'ARD entry out of bounds'):
+                split.arh_jobs([(str(arh), 'test.arh')])
 
 
 if __name__ == '__main__':

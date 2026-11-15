@@ -470,6 +470,8 @@ host_test(t_condvar_old SOURCES t_condvar.c t_condvar_stub.c ../hle_thread.c PRO
 host_test(t_preempt SOURCES t_preempt.c t_condvar_stub.c PROFILE DEFS DM_TEST_GUEST_C RUNS - --all-peers INCLUDES ${REPO}/dm/tools/aot/include)
 host_test(t_notify_sched SOURCES t_notify_sched.c t_condvar_stub.c PROFILE DEFS DM_TEST_THREAD_ENTER DM_TEST_GUEST_C RUNS - --all-peers INCLUDES ${REPO}/dm/tools/aot/include)
 host_test(t_movie_vpx SOURCES t_movie_vpx.c PROFILE VPX DEFS DM_TEST_GUEST_C)
+# The port's H.264 stopgap: a black picture per access unit, in presentation order (hle_movie_avc.c without VideoToolbox)
+host_test(t_movie_avc SOURCES t_movie_avc.c PROFILE DEFS DM_TEST_GUEST_C)
 # The NVN replay's draw and render-target state and its GPU-write ledger (dm/gfx/nvn, plain C; dm/gfx/tests/Makefile builds the same two on the Mac)
 host_test(t_state SOURCES ../../gfx/tests/t_state.c ../../gfx/nvn/nvn_state.c INCLUDES ${REPO}/dm/gfx/nvn ${REPO}/dm/gfx/nvn/include)
 host_test(t_gpuwrite SOURCES ../../gfx/tests/t_gpuwrite.c ../../gfx/nvn/nvn_gpuwrite.c INCLUDES ${REPO}/dm/gfx/nvn)

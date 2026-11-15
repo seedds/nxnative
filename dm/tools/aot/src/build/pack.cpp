@@ -136,8 +136,10 @@ constexpr uint64_t kAnalysisPerWord = 64, kAnalysisFixed = 128ull << 20;
 // FastISel (an object of format 3 under the same key would hold its own helpers, which the tables' object now defines too). 5: the code of
 // "Against native" (README.md): sbfm as a shift pair, the stores of a loop whose iterations call on the edges into it, NZCV stored at a call
 // only where the caller may read it after the call or the callee may read it (a callee's reads.nzcv in "callees" and "targets"). 6: the polls of
-// loops bounded by a constant left out at H and H+ (README.md, "Threads and safepoints"), the test switch NXAOT_POLL_ELISION in the key
-constexpr const char* kUnitKeyFormat = "nxaot-unit 6";
+// loops bounded by a constant left out at H and H+ (README.md, "Threads and safepoints"), the test switch NXAOT_POLL_ELISION in the key. 7: SP
+// stored again at the returns and tail calls of a function that keeps SP, moves it and calls (README.md, "A callee's SP left in the block"):
+// a unit of format 6 under the same key lacks the store
+constexpr const char* kUnitKeyFormat = "nxaot-unit 7";
 
 // The section each unit's !pcsections marks go to (the line table, "The line table" below): read back after code generation and kept out of
 // the link (SHF_EXCLUDE)
@@ -2265,9 +2267,9 @@ bool CompileUnit(const Common& c, llvm::TargetMachine& tm, const Unit& u, std::s
                 if (r >= part->lo && r < part->hi && !std::binary_search(part->entries.begin(), part->entries.end(), r)) fp.roots.push_back(r);
             }
             fp.split = true;
-            // Every x and v register outside WRITES: what a return stores again (FnDataflow's restore_block over the whole function, which
-            // no part sees; storing a restored register's value again is what the convention allows, design 2.3)
-            fp.restore = lift::Regs{0x7FFFFFFFu & ~ff.writes.x, ~ff.writes.v, false, false};
+            // Every x and v register outside WRITES, and SP when the function keeps it: what a return stores again (FnDataflow's restore_block
+            // over the whole function, which no part sees; storing a restored register's value again is what the convention allows, design 2.3)
+            fp.restore = lift::Regs{0x7FFFFFFFu & ~ff.writes.x, ~ff.writes.v, !ff.writes.sp, false};
             fp.part_of = [&m, &c, entry, self = part](uint64_t at) -> llvm::Function* {
                 const Part* p = c.PartAt(entry, at);
                 return p && p != self ? PartFn(m, c, entry, p->lo) : nullptr;

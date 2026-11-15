@@ -6,22 +6,43 @@
 #include "hle.h"
 #include "hle_movie_avc.h"
 #if !defined(__APPLE__)
-// No H.264 decoder on this platform yet: a declared stopgap until Phase 1 brings one. The decoder takes every access unit and hands out no picture (the first one is reported
-// with a red line), so an H.264 movie plays without its video: the player runs on, and its end-of-stream flag still comes through hle_movie.c
-struct mavc { int red, nq; };
-mavc *mavc_new(void) { mavc *a = calloc(1, sizeof *a); if (!a) die("movie: AVC decoder allocation failed"); return a; }
+// No H.264 decoder on this platform yet: a declared stopgap until Phase 1 brings one (a decoder library is a dependency the user decides on). Each access unit gives a black
+// picture at its presentation time, as the AAC stopgap gives silence (hle_movie.c), so a player that waits for its pictures runs at the movie's pace: Mario vs. Donkey Kong's
+// movie player held the game's main thread from its second movie on, and the game presented no frame, while this decoder took every access unit and handed out none
+// (docs/reference/movies.md, "H.264 movies without a decoder"). Pictures leave in presentation order, as VideoToolbox's do below: the times wait in a queue sorted by time
+// and leave once more than `depth` are queued (4, or 0 when the SPS says Baseline, which has no B-frames), or all at the end of the stream (flush)
+#define MAVC_QMAX 16
+struct mavc { int red, nq, depth, rgba; int64_t q[MAVC_QMAX]; };
+mavc *mavc_new(void) { mavc *a = calloc(1, sizeof *a); if (!a) die("movie: AVC decoder allocation failed"); a->depth = 4; return a; }
 void mavc_free(mavc *a) { free(a); }
-void mavc_param_sets(mavc *a, const uint8_t *p, size_t n) { (void)a; (void)p; (void)n; }
-void mavc_avcc(mavc *a, const uint8_t *p, size_t n) { (void)a; (void)p; (void)n; }
+// The profile of an SPS among the NAL units of p (Annex B start codes, or one unit without a prefix): Baseline (66) has no B-frames, so its pictures need no reordering
+static void ps_profile(mavc *a, const uint8_t *p, size_t n) {
+    if (n >= 2 && (p[0] & 31) == 7) { a->depth = p[1] == 66 ? 0 : 4; return; }
+    for (size_t i = 0; i + 4 < n; i++)
+        if (!p[i] && !p[i + 1] && p[i + 2] == 1 && (p[i + 3] & 31) == 7) { a->depth = p[i + 4] == 66 ? 0 : 4; return; }
+}
+void mavc_param_sets(mavc *a, const uint8_t *p, size_t n) { ps_profile(a, p, n); }
+void mavc_avcc(mavc *a, const uint8_t *p, size_t n) { if (n >= 2) a->depth = p[1] == 66 ? 0 : 4; }   // AVCDecoderConfigurationRecord: AVCProfileIndication
 int mavc_decode(mavc *a, const uint8_t *p, int n, int64_t pts_us) {
-    (void)p; (void)n; (void)pts_us;
-    if (!a->red++) LOG("[RED] movie: no H.264 decoder on this platform yet (Phase 1: the video of H.264 movies is not shown)");
+    if (!a->red++) LOG("[RED] movie: no H.264 decoder on this platform yet (Phase 1): black pictures at the movie's times instead of its video");
+    ps_profile(a, p, n > 64 ? 64 : (size_t)n);   // an SPS in the stream comes before the access unit's slices
+    if (a->nq == MAVC_QMAX) memmove(a->q, a->q + 1, --a->nq * sizeof *a->q);   // more than the deepest reordering: the oldest time goes (take keeps nq at depth or below)
+    int i = a->nq++;
+    for (; i > 0 && a->q[i - 1] > pts_us; i--) a->q[i] = a->q[i - 1];
+    a->q[i] = pts_us;
     return 0;
 }
-int mavc_take(mavc *a, int flush, uint8_t *nv12, int w, int h, int64_t *pts_us) { (void)a; (void)flush; (void)nv12; (void)w; (void)h; (void)pts_us; return 0; }
+int mavc_take(mavc *a, int flush, uint8_t *dst, int w, int h, int64_t *pts_us) {
+    if (!a->nq || (!flush && a->nq <= a->depth)) return 0;
+    if (pts_us) *pts_us = a->q[0];
+    memmove(a->q, a->q + 1, --a->nq * sizeof *a->q);
+    if (a->rgba) for (size_t i = 0; i < (size_t)w * h; i++) ((uint32_t *)dst)[i] = 0xff000000u;   // opaque black, as VideoToolbox's path pads
+    else { memset(dst, 16, (size_t)w * h); memset(dst + (size_t)w * h, 128, (size_t)w * h / 2); }   // NV12 black (video range)
+    return 1;
+}
 int mavc_queued(const mavc *a) { return a->nq; }
-void mavc_set_rgba(mavc *a) { (void)a; }
-void mavc_drop(mavc *a) { (void)a; }
+void mavc_set_rgba(mavc *a) { a->rgba = 1; }
+void mavc_drop(mavc *a) { a->nq = 0; }
 #else
 #include <VideoToolbox/VideoToolbox.h>
 #include <arm_neon.h>

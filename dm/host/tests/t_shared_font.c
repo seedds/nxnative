@@ -35,7 +35,50 @@ int hle_signal_system_event_binding(uint64_t binding) { (void)binding; return 1;
 uint32_t hle_hid_connected_npad(void) { return 0; }
 void dm_host_helper_qos(plat_qos_t q) { (void)q; }
 PLAT_TABLE_DEFINE(swforce)   // the real forced registrations (on Apple: getsectiondata of __DATA,swforce)
+#if !defined(__APPLE__)
+// The port's last stand-in for the standard font, a font of the system's (hle_sdk16.c font_system; docs/reference/services.md, "Shared fonts on Linux and Windows"): in
+// a child, since the host looks the fonts up once per process. data: the XDG data directory the child is given (XDG_DATA_DIRS, XDG_DATA_HOME), with no DM_SHARED_FONT
+// or DM_FONT_DIR. Its exit status: 0 when the load state, the address and the size are as want_loaded says (the file's bytes behind the BFTTF header, its size + 8)
+static const uint8_t g_ttf[] = "t_shared_font: a stand-in TrueType file's bytes";
+static int font_child(const char *data, int want_loaded) {
+    const pid_t child = fork();
+    if (child < 0) return -1;
+    if (!child) {
+        setenv("XDG_DATA_DIRS", data, 1); setenv("XDG_DATA_HOME", data, 1);
+        unsetenv("DM_SHARED_FONT"); unsetenv("DM_FONT_DIR");
+        const int state = h_pl_LoadState(0);
+        const uint8_t *p = h_pl_Addr(0);
+        const size_t n = h_pl_Size(0);
+        if (!want_loaded) _exit(state == 0 && !p && n == 0 ? 0 : 1);
+        uint32_t marker = 0;
+        if (p) memcpy(&marker, p, 4);
+        _exit(state == 1 && p && marker == 0x18029a7fu && n == sizeof g_ttf + 8 && !memcmp(p + 8, g_ttf, sizeof g_ttf) ? 0 : 2);
+    }
+    int s = 0;
+    waitpid(child, &s, 0);
+    return WIFEXITED(s) ? WEXITSTATUS(s) : 128 + (WIFSIGNALED(s) ? WTERMSIG(s) : 0);
+}
+static void system_font_checks(void) {
+    char cwd[900], dir[1100], file[1300];
+    if (!getcwd(cwd, sizeof cwd)) { CHECK(0, "the working folder"); return; }
+    snprintf(dir, sizeof dir, "%s/t_shared_font.tmp", cwd);
+    const char *parts[] = {"", "/empty", "/share", "/share/fonts", "/share/fonts/truetype", "/share/fonts/truetype/dejavu"};
+    for (unsigned i = 0; i < sizeof parts / sizeof *parts; i++) { snprintf(file, sizeof file, "%s%s", dir, parts[i]); mkdir(file, 0755); }
+    snprintf(file, sizeof file, "%s/share/fonts/truetype/dejavu/DejaVuSans.ttf", dir);
+    FILE *f = fopen(file, "wb");
+    const int wrote = f && fwrite(g_ttf, 1, sizeof g_ttf, f) == sizeof g_ttf;
+    if (f) fclose(f);
+    CHECK(wrote, "the stand-in font file written");
+    snprintf(file, sizeof file, "%s/share", dir);
+    CHECK(font_child(file, 1) == 0, "a system font in an XDG data directory is the standard font's stand-in: loaded, BFTTF header + the file, its size + 8");
+    snprintf(file, sizeof file, "%s/empty", dir);
+    CHECK(font_child(file, 0) == 0, "no system font: not loaded, no address, size 0");
+}
+#endif
 int main(void) {
+#if !defined(__APPLE__)
+    system_font_checks();
+#endif
     size_t bytes = 0;
     const hle_force_ent *e = (const hle_force_ent *)plat_table_swforce(&bytes);
     uint32_t (*load)(void *, char *, const void *, unsigned, unsigned) = NULL;

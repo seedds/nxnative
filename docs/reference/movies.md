@@ -183,6 +183,14 @@ A decoder hands out as many outputs as it has slots, and while every slot is tak
 
 - H.264 (type 1) into the client's NVN texture (output 3 = RGBA, mode 2), with AAC 5.1 sound (type 4, PCM16). VideoToolbox decodes to BGRA for that mode (`mavc_set_rgba`), and AAC goes through AudioToolbox's converter with an MPEG-4 ES descriptor built from the AudioSpecificConfig in `csd-0` (as FFmpeg's AudioToolbox decoder does). Found on [Monster Hunter Rise](../../dm/games/0100B04011742000/README.md); its end-of-stream packets and decoder deletes are in [End-of-stream packets with no data, and deleted decoders](#end-of-stream-packets-with-no-data-and-deleted-decoders).
 
+### H.264 movies without a decoder
+
+- **Symptom:** on Linux or Windows the game presents frames until a movie starts, then none: `[RED] movie: no H.264 decoder on this platform yet (Phase 1: the video of H.264 movies is not shown)`, a stall watchdog (`DM_WATCH`) finds no present for 15 s, the main thread waits on an address under the game's movie player, and the decoder's last line says `3283 packets in, 4 frames out`.
+- **Cause:** the port has no H.264 decoder yet (a decoder library is a dependency the user decides on; Apple's host decodes with VideoToolbox), and its stopgap took every access unit and handed out no picture, on the assumption that a player runs on without its video. A player that waits for its pictures, to show them at their times or to know where the movie is, waits for ever.
+- **Fix:** the stopgap (`hle_movie_avc.c`, the part outside `__APPLE__`) gives a black picture for each access unit at the unit's presentation time, as the AAC stopgap gives silence: NV12 black (Y 16, UV 128), or opaque black for the native-texture mode (`mavc_set_rgba`); pictures leave in presentation order through a queue as deep as VideoToolbox's path keeps (4, or none for a Baseline SPS from `Configure`'s parameter sets, the `avcC` record or the stream), and the end of the stream flushes the rest through the drain of `hle_movie.c`. It remains a stopgap: the movie's video is not shown. Apple's decoder is unchanged.
+- **Check:** `t_movie_avc` (Linux, Windows): times in decode order come out sorted, one black picture per access unit, 4 held until the end of the stream for Main, none held for Baseline, RGBA opaque black, a flush drops the queue; the stopgap before gives no picture (7 of its 21 checks fail).
+- **Found on:** [Mario vs. Donkey Kong](../../dm/games/0100B99019412000/README.md#on-linux-the-x86-64-engine) (its second movie at boot, two 960x1080 H.264 streams into textures: before, no frame after the first 160; after, 3,000 frames in 150 s on lavapipe).
+
 ### Vorbis movie sound
 
 - Movie sound in [The Legend of Zelda: Link's Awakening](../../dm/games/01006BB00C6F0000/README.md) (SDK 8.2.0): the decoder is asked for type 5 (Vorbis) with output format 1 (PCM16); see the other entries in this file and `hle_movie.c`.

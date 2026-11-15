@@ -37,6 +37,9 @@
 //   lrtail, with the JIT built in and nxaot (it packs it): a module this test writes word by word whose function calls, then jumps through a br discovery cannot
 //     bound into code with no compiled entry, 63 times: the JIT runs each case and the rest of the function, and execution comes back to the caller's compiled code
 //     when the function returns (exact JIT runs, addresses and misses, none nonlocal: dm/tools/aot/README.md, "Tail calls and the native frame's return")
+//   spkeep, with nxaot (it packs it): a module this test writes word by word whose function calls through a PLT stub's shape (WRITES the union, SP in it) a function
+//     that keeps SP, moves it and calls a leaf with an svc: the caller reloads SP from the block and must find its own (the right sum, no JIT run: dm/tools/aot/README.md,
+//     "A callee's SP left in the block")
 //   guestbt, with nxaot (it packs it): a module this test writes word by word whose third function, two calls deep, aborts through a host function, through svcBreak,
 //     or faults on an address no page backs: the host's lines name the call site and the guest's frames exactly (aot.h dm_aot_guest_backtrace, hle_svc.c Break,
 //     aot_fault.c dm_aot_fault_backtrace), through compiled code and with the JIT built in through the JIT fallback alone (DM_AOT_JIT_ALL), and with frames in both
@@ -807,6 +810,151 @@ static void lrtail_row(const char *self, const char *nxaot) {
     snprintf(note, sizeof note, "%u calls of F, %u through a br after a call: %llu JIT runs (want %u), %llu JIT addresses (want 5), %llu misses (want 4), %llu nonlocal (want 0)%s%s",
              LRTAIL_CALLS, LRTAIL_CALLS - 1, r.jit[0], runs, r.jit[1], r.jit[2], r.jit[3], r.red[0] ? "; " : "", r.red);
     row("lrtail", "jit", ok, &r, note);
+    if (r.guest != no_lines) free(r.guest);
+}
+
+// ---------- A callee's SP left in the block (dm/tools/aot/README.md, "A callee's SP left in the block") ----------
+// The NRO spkeep, written here word by word as lrtail is, in the shape of the SDK's nn::os start (Mario vs. Donkey Kong's nnosInitialize): start calls outer(i)
+// SPKEEP_CALLS times and sums the results. outer keeps i on its stack and calls stub, a PLT stub's shape (a br through a pointer in data, which start wrote: no
+// relocation needed), whose WRITES are the union over the address-taken functions; spfn (address-taken, never called) moves SP, so that union holds SP and outer
+// reloads SP from the block after the call. stub reaches target, which keeps SP but moves it (a frame of 32 bytes, its own value 0x777 where outer's i is in
+// outer's frame) and calls leaf, which makes an svc with its own frame (svcGetSystemTick): the svc stores leaf's SP, leaf's return stores its restored SP, the SP
+// target passed it. target(x) = x + 105, outer(i) = target(i) + 2i. start prints "spkeep PASS" when the sum is right, "spkeep FAIL" otherwise, and ends the process
+enum { SPKEEP_CALLS = 16 };
+static size_t spkeep_nro(uint8_t *img, size_t cap, uint64_t *want) {
+    enum { TEXT = 0x1000, RO = 0x1000, DATA = 0x2000, SIZE = 0x3000, BSS = 0x1000, PASS_AT = RO + 0x100, FAIL_AT = RO + 0x120 };
+    if (cap < SIZE) return 0;
+    memset(img, 0, SIZE);
+    uint32_t w[256] = {0};
+    size_t n = 0x80 / 4;
+    const size_t start = n;
+    // start: the stub's pointer (DATA) and spfn's address (DATA + 8, which makes it address-taken), then x19 = i, x20 = the sum
+    w[n++] = 0xA9BE7BFDu;               // stp x29, x30, [sp, #-32]!
+    w[n++] = 0x910003FDu;               // mov x29, sp
+    w[n++] = 0xA90153F3u;               // stp x19, x20, [sp, #16]
+    const size_t adr_target = n++;      // adr x9, target
+    w[n] = a_adr(10, (int64_t)DATA - (int64_t)n * 4); n++;   // adr x10, DATA
+    w[n++] = 0xF9000149u;               // str x9, [x10]
+    const size_t adr_spfn = n++;        // adr x11, spfn
+    w[n++] = 0xF900054Bu;               // str x11, [x10, #8]
+    w[n++] = a_movz(19, 0);
+    w[n++] = a_movz(20, 0);
+    const size_t loop = n;
+    w[n++] = 0xAA1303E0u;               // mov x0, x19
+    const size_t call_outer = n++;      // bl outer
+    w[n++] = 0x8B000294u;               // add x20, x20, x0
+    w[n++] = a_addi(19, 19, 1);
+    w[n++] = 0xF100027Fu | SPKEEP_CALLS << 10;   // cmp x19, #SPKEEP_CALLS
+    w[n] = a_bcond(3, (int64_t)(loop - n) * 4); n++;   // b.lo loop
+    uint64_t sum = 0;
+    for (unsigned i = 0; i < SPKEEP_CALLS; i++) sum += 105 + 3 * i;
+    *want = sum;
+    w[n++] = a_movz(9, (unsigned)sum);  // the sum fits 16 bits
+    w[n++] = 0xEB09029Fu;               // cmp x20, x9
+    const size_t to_fail = n++;         // b.ne fail
+    w[n] = a_adr(0, (int64_t)PASS_AT - (int64_t)n * 4); n++;
+    w[n++] = a_movz(1, 11);             // "spkeep PASS"
+    w[n++] = 0xD40004E1u;               // svc #0x27 (OutputDebugString)
+    const size_t to_exit = n++;         // b exit
+    w[to_fail] = a_bcond(1, (int64_t)(n - to_fail) * 4);
+    w[n] = a_adr(0, (int64_t)FAIL_AT - (int64_t)n * 4); n++;
+    w[n++] = a_movz(1, 11);             // "spkeep FAIL"
+    w[n++] = 0xD40004E1u;               // svc #0x27
+    w[to_exit] = a_b((int64_t)(n - to_exit) * 4);
+    w[n++] = 0xD40000E1u;               // svc #0x7 (ExitProcess)
+    w[n++] = 0xD4200000u;               // brk #0
+    // outer(i): i at [sp, #24] of its frame, read back after the call
+    const size_t outer = n;
+    w[call_outer] = a_bl((int64_t)(outer - call_outer) * 4);
+    w[n++] = 0xA9BE7BFDu;               // stp x29, x30, [sp, #-32]!
+    w[n++] = 0x910003FDu;               // mov x29, sp
+    w[n++] = 0xF9000BF3u;               // str x19, [sp, #16]
+    w[n++] = 0xF9000FE0u;               // str x0, [sp, #24]
+    w[n++] = 0xAA0003F3u;               // mov x19, x0
+    const size_t call_stub = n++;       // bl stub
+    w[n++] = 0xF9400FE1u;               // ldr x1, [sp, #24]
+    w[n++] = 0x8B010000u;               // add x0, x0, x1
+    w[n++] = 0x8B130000u;               // add x0, x0, x19
+    w[n++] = 0xF9400BF3u;               // ldr x19, [sp, #16]
+    w[n++] = 0xA8C27BFDu;               // ldp x29, x30, [sp], #32
+    w[n++] = 0xD65F03C0u;               // ret
+    // stub: br through the pointer at DATA, as a PLT entry through its GOT slot
+    const size_t stub = n;
+    w[call_stub] = a_bl((int64_t)(stub - call_stub) * 4);
+    w[n] = a_adr(16, (int64_t)DATA - (int64_t)n * 4); n++;   // adr x16, DATA
+    w[n++] = 0xF9400211u;               // ldr x17, [x16]
+    w[n++] = 0xD61F0220u;               // br x17
+    // target(x): keeps SP; its own frame holds 0x777 where outer's holds i
+    const size_t target = n;
+    w[adr_target] = a_adr(9, (int64_t)(target - adr_target) * 4);
+    w[n++] = 0xA9BE7BFDu;               // stp x29, x30, [sp, #-32]!
+    w[n++] = 0x910003FDu;               // mov x29, sp
+    w[n++] = 0xF9000BF3u;               // str x19, [sp, #16]
+    w[n++] = a_addi(19, 0, 100);        // add x19, x0, #100
+    w[n++] = a_movz(9, 0x777);
+    w[n++] = 0xF9000FE9u;               // str x9, [sp, #24]
+    const size_t call_leaf = n++;       // bl leaf
+    w[n++] = 0x8B130000u;               // add x0, x0, x19
+    w[n++] = 0xF9400BF3u;               // ldr x19, [sp, #16]
+    w[n++] = 0xA8C27BFDu;               // ldp x29, x30, [sp], #32
+    w[n++] = 0xD65F03C0u;               // ret
+    // leaf: an svc inside a frame of its own, 5
+    const size_t leaf = n;
+    w[call_leaf] = a_bl((int64_t)(leaf - call_leaf) * 4);
+    w[n++] = 0xF81F0FE0u;               // str x0, [sp, #-16]!
+    w[n++] = 0xD40003C1u;               // svc #0x1E (GetSystemTick)
+    w[n++] = 0x910043FFu;               // add sp, sp, #16
+    w[n++] = a_movz(0, 5);
+    w[n++] = 0xD65F03C0u;               // ret
+    // spfn: returns with SP 16 bytes up (never called: its address is taken)
+    const size_t spfn = n;
+    w[adr_spfn] = a_adr(11, (int64_t)(spfn - adr_spfn) * 4);
+    w[n++] = 0x910043FFu;               // add sp, sp, #16
+    w[n++] = 0xD65F03C0u;               // ret
+    w[0] = a_b((int64_t)start * 4);
+    w[1] = RO;                          // MOD0's offset
+    memcpy(img, w, n * 4);
+    memcpy(img + 0x10, "NRO0", 4);
+    const uint32_t hdr[] = {0, SIZE, 0, 0, TEXT, RO, DATA - RO, DATA, SIZE - DATA, BSS};
+    memcpy(img + 0x14, hdr, sizeof hdr);
+    memcpy(img + RO, "MOD0", 4);
+    const int32_t mod0[] = {0x20, SIZE - RO, SIZE + BSS - RO, 0x40, 0x40, SIZE - RO};
+    memcpy(img + RO + 4, mod0, sizeof mod0);
+    memcpy(img + PASS_AT, "spkeep PASS", 11);
+    memcpy(img + FAIL_AT, "spkeep FAIL", 11);
+    return SIZE;
+}
+// The row: spkeep packed by nxaot and run, with or without the JIT built in: the right sum and no JIT run at all. Before the fix (lower_calls.cpp FnDataflow: SP
+// counts as stored at every call), target returned without storing SP, outer went on with target's SP (leaf's return had stored it): its i read as 0x777 and its
+// return through target's frame record (to outer's own call site) a non-local transfer, which the thread's outermost level ran in the JIT ("spkeep FAIL", 1
+// nonlocal miss; without the JIT, status 3)
+static void spkeep_row(const char *self, const char *nxaot) {
+    if (!nxaot || !*nxaot) { printf("%-14s %-9s note: no nxaot (--nxaot, NXAOT): spkeep is not packed here\n", "spkeep", "sp"); return; }
+    static uint8_t img[0x3000];
+    uint64_t want = 0;
+    const size_t len = spkeep_nro(img, sizeof img, &want);
+    char nro[200], pack[200], line[600] = "", note[1400];
+    mkdir("t_aot_host.tmp", 0755);
+    mkdir("t_aot_host.tmp/spkeep", 0755);
+    snprintf(nro, sizeof nro, "t_aot_host.tmp/spkeep/spkeep.nro");
+    snprintf(pack, sizeof pack, "t_aot_host.tmp/spkeep/spkeep%s", PACK_EXT);
+    FILE *f = fopen(nro, "wb");
+    const int wrote = len && f && fwrite(img, 1, len, f) == len;
+    if (f) fclose(f);
+    result r;
+    memset(&r, 0, sizeof r);
+    static char no_lines[1];
+    r.guest = no_lines;
+    if (!wrote || nxaot_pack(nxaot, nro, pack, line, sizeof line) != 0) {
+        snprintf(note, sizeof note, "%s: %s", wrote ? "nxaot build failed" : "cannot write the NRO", line);
+        row("spkeep", "sp", 0, &r, note);
+        return;
+    }
+    run_child(self, pack, nro, "", &r);
+    const int ok = r.status == 0 && !strcmp(r.guest, "spkeep PASS\n") && r.have_jit && r.jit[0] == 0 && r.jit[2] == 0;
+    snprintf(note, sizeof note, "%u calls through a PLT stub's shape into a function that keeps SP and calls (sum %llu): %llu JIT runs (want 0), %llu misses (want 0), %llu nonlocal%s%s",
+             SPKEEP_CALLS, (unsigned long long)want, r.jit[0], r.jit[2], r.jit[3], r.red[0] ? "; " : "", r.red);
+    row("spkeep", "sp", ok, &r, note);
     if (r.guest != no_lines) free(r.guest);
 }
 
@@ -1712,6 +1860,9 @@ int main(int argc, char **argv) {
     int lrtail = !nonly;
     for (int i = 0; i < nonly; i++) lrtail |= !strcmp(only[i], "lrtail");
     if (lrtail) lrtail_row(argv[0], nxaot);   // 7. A br that is no tail call: the JIT's continuation comes back to compiled code
+    int spkeep = !nonly;
+    for (int i = 0; i < nonly; i++) spkeep |= !strcmp(only[i], "spkeep");
+    if (spkeep) spkeep_row(argv[0], nxaot);   // 7b. A callee that keeps SP leaves no SP of its own in the block for a caller that reloads it
     int guestbt = !nonly;
     for (int i = 0; i < nonly; i++) guestbt |= !strcmp(only[i], "guestbt");
     if (guestbt) guestbt_rows(argv[0], nxaot);   // 8. The guest's call site and backtrace in an abort, an svcBreak and a fault

@@ -843,6 +843,59 @@ x86-64 engine yet) and Windows (the lifter's change is the same code for a Windo
 The switch at `7a0cc` above and every other `br` of the benchmark are jump tables since "Jump tables whose index depends on several values"
 (below): its first pack runs no JIT at all, and its misses file has no row.
 
+## A callee's SP left in the block
+
+The first game started on the x86-64 engine, Mario vs. Donkey Kong ([its note](../../games/0100B99019412000/README.md#on-linux-the-x86-64-engine)),
+stopped in `nnosInitialize`, its SDK's first function, with `[RED] aot: a non-local transfer to a continuation with no native frame at
+sdk+0x13154c runs in the JIT fallback (design section 11)` and then a fault at address 0 in the code the JIT ran. `DM_AOT_JIT_ALL=1` ran the same
+code past it to `nnMain` and the NVN device, so the engine's model of the code was wrong, not the code. In `sdk` (module offsets; names from its
+symbols):
+
+```
+131420  OsResourceManager::OsResourceManager      bl 5c4e30 (PLT) -> 131530 at 131440
+131530  AslrSpaceManagerTemplate<...>::ctor       sub sp, sp, #0x40; stp x29, x30, [sp, #0x10]; ...; bl 5c4e80 (PLT) at 131548; ...;
+                                                  str w0, [sp, #8]; ...; ldp x29, x30, [sp, #0x10]; add sp, sp, #0x40; ret
+5c4e80  PLT stub                                  adrp x16; ldr x17, [x16, #0x9c0]; add x16, x16, #0x9c0; br x17   (GOT slot -> 1315f4)
+1315f4  AslrSpaceManagerImplByHorizon::ctor       sub sp, sp, #0x30; stp x29, x30, [sp, #0x10]; 4 x bl 1584ac; ldp x29, x30; add sp; ret
+1584ac  svcGetInfo's wrapper                      str x0, [sp, #-0x10]!; svc #0x29; ldr x2, [sp]; str x1, [x2]; add sp, sp, #0x10; ret
+```
+
+- The stub's `br x17` is a `br` discovery leaves to the dispatcher, so its summary is the union over the standard entries, and that union holds
+  SP (some address-taken function may return with another SP; in this `sdk` nearly every function that calls through a PLT stub is `open`, its
+  WRITES everything): `131530` reloads SP from the block after `bl 5c4e80` (design 2.3).
+- `1315f4` keeps SP (it is `preserving`) but moves it, and calls `1584ac` with its own SP in a host register. `1584ac`'s svc stores that SP less
+  16, and its return stores its restored SP again (the design 2.3 rule: a function that keeps a register but stored a changed value of it before
+  an svc stores the restored value at its return): the block's SP is then `1315f4`'s own, 0x30 below its caller's. `1315f4` returned without
+  storing SP, since it keeps SP and had stored none itself (`restore_block` counted what the function stores before a call, and a call stores
+  no SP: SP and lr travel as arguments).
+- `131530` went on with that SP: its `str w0, [sp, #8]` wrote into the dead frame and its epilogue loaded x29, x30 and x19, x20 from
+  `1315f4`'s frame record and saved registers. Its `ret` went to `1315f4`'s return address, `13154c`, not its own entry lr: a non-local transfer
+  that no frame takes (3.3), which the thread's outermost level ran in the JIT with x19 from the wrong slot, until
+  `AddressSpaceAllocatorBase`'s constructor stored through `x19 + 0x20` = 0.
+
+**The fix** (`lower_calls.cpp` `FnDataflow`): SP counts as stored at every call. A callee may store the SP it is passed (its own svc, its
+own return's store of a restored SP, a tail call through the dispatcher, a poll, a gate, a JIT continuation), so after a call the block may hold the
+function's moved SP as though the function had stored it before the call; a function that keeps SP and moves it stores its SP again at its
+returns and tail calls (`restore_block`), as it already did for one with an svc of its own. A function split for size (`pack.cpp`, the parts'
+`restore`) stores SP at its returns when it keeps SP. The host's JIT driver needs nothing: it takes the call's SP after a function that keeps SP
+(`NXAOT_LOOKUP_SP_KEPT`).
+
+**Checked** by dm/host's `t_aot_host` `spkeep` row: a module the test writes word by word in the shape above (a call through a PLT stub's `br`, an
+address-taken function that moves SP so that the union holds it, a callee that keeps SP and calls a leaf with an svc in a frame of its own), 16
+calls: the right sum and no JIT run; the base nxaot's pack prints `spkeep FAIL` with 32 JIT runs, 1 `nonlocal` miss and the same `[RED]` line at
+its call's return. The game went on from `nnosInitialize` to `nnMain` and, with the two host changes its note lists, to its frame loop. **The packs
+change** only where a function that keeps SP and moves it calls something: a store of SP at its returns. The unit key's format is
+`nxaot-unit 7`, so no unit cached by an earlier nxaot is taken for these functions. `.text` of the game's packs (balanced, tier
+W): `main` 166,333,492 to 166,354,612 bytes (+0.013 %), `sdk` 57,366,020 to 57,369,620 (+0.006 %), `subsdk0` 28,000,892 to 28,002,380 (+0.005 %);
+the pack of the three took 7:37 at 6 workers with a cold cache. The 18 corpus packs of `build_packs.sh`: 1,405,192 to 1,407,160 bytes (+0.14 %,
+from -0.10 % for except-clang to +0.30 % for except-gcc). CTest 29 of 29 (`== nxaot_vec: 179296 vectors, 0 mismatches ...`); dm/host's 103 of 103
+with `NXAOT`, with and without `DM_AOT_ARENA_CHECK=1` (`t_pipe` given `DM_REPO`, as a build folder outside the repository needs). Not run:
+Windows (the lifter's change is the same code for a Windows pack) and a performance measurement (the store is one per return of such a function).
+
+Not changed, open: a safepoint poll or a gate in a function stores the registers newer than the block in its cold path, so after a pause there a
+function that keeps x19 (or SP, with no call) and returns without storing it again may leave its own value in the block for a caller whose view
+reloads it; `restore_block` does not count polls and gates.
+
 ## Jump tables whose index depends on several values
 
 After "Tail calls and the native frame's return", the 4,000-function benchmark's first pack still ran 800 JIT runs from 703 addresses

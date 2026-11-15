@@ -486,12 +486,20 @@ void FunctionLifter::FnDataflow() {
     // What the function may leave in the block with another value than its callers keep in host registers: a register it writes and restores
     // (outside WRITES, so its callers keep their own copy) whose value of the moment it stored there before an inner call or an svc. Section
     // 2.3: such a function stores the restored value again before it returns, so that a caller that kept the register in SSA and a later
-    // callee that reads it from the block agree
+    // callee that reads it from the block agree.
+    // SP counts as stored at every call: it travels in a host register, and the callee may store the SP it is passed (its own svc, its own
+    // return's store of a restored SP, a tail call through the dispatcher). A function that keeps SP but moves it, and calls, may thus leave
+    // its own moved SP in the block, and a caller that reloads SP from the block after calling it (a view of it with SP in WRITES: an
+    // indirect call, a call of a PLT stub, whose WRITES are the union over the standard entries) went on with that SP: Mario vs. Donkey Kong's
+    // nnosInitialize returned through a frame record of the callee's (dm/tools/aot/README.md, "A callee's SP left in the block")
     Regs stored, written;
     for (auto& [pc, block] : blocks) {
         const Regs at_end = dirty_in[pc] | gen[pc];
         written = written | gen[pc];
         const End& e = ends[pc];
+        if (e.kind == EndKind::Bl || e.kind == EndKind::Blr) {
+            stored.sp = stored.sp || at_end.sp;
+        }
         if (svc_blocks.count(pc)) {
             stored = stored | at_end;
         } else if (e.kind == EndKind::Bl) {

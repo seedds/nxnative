@@ -10,6 +10,8 @@ $W/run/boot.sh <log name> [seconds] [VAR=value ...]
 
 `boot.sh` runs `dmhost <patched dir>` with `DM_ROMFS`, `DM_SAVE`, `DM_TEMP`, `DM_MSL_DIR` set, under a perl `alarm` (a run that hits the time limit ends with `CRASH sig=14` — that is the alarm, not a crash). Logs go to `run/<name>.log`. Logs may contain non-UTF-8 bytes: use `grep -a` / `LC_ALL=C` when filtering.
 
+Nothing writes `boot.sh` for you: write it once per game in `$W/run/`. The NSP script's Mac build (`--platform mac`) prints the whole run command as its last line, with every path for its build folder (`<id>_build/tools/dmhost`, `patched_v<ver>`, `extract/v<ver>/RomFS.img`, `shader/`, `font/`, `obsolete/`); `boot.sh` is that command with `DM_WINDOW=1 DM_AUDIO=1` left out (headless), `perl -e 'alarm shift; exec @ARGV' <seconds>` before the host, a `DMHOST=` override for a host built from the repository, and the extra `VAR=value` arguments passed through `env`. Build that host with the profile the NSP script found: a provisional one needs `DM_GAMES_DIR=<id>_build/profile` beside `make … GAME=<title ID>` (without it, make reports the game unknown or builds nothing new).
+
 ## Reading the log
 
 | Marker | Meaning |

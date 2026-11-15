@@ -101,4 +101,6 @@ What earlier titles needed beyond sections 1–5 is filed by mechanism: textures
 | `DM_NVN_UB_COPY_THREAD=0` | Uniform shadows of 512 bytes or more are copied on the submit thread, as before (by default a worker copies them) |
 | `MTL_DEBUG_LAYER=1 MTL_DEBUG_LAYER_ERROR_MODE=nslog` | Metal validation without aborting |
 
+For the GL and Vulkan layers the NVN dumps see only the window: `DM_GL_DRAWLOG` / `DM_GL_FBLOG` log the GL draws and binds, and `DM_GL_TEXDUMP=<frame>[,…]:fb%u_%llu.png` saves every GL framebuffer's picture at those swaps (UnMetal: the scene in framebuffer 2 while the window was right, which showed its black screenshots were the shots' own fault: [Screenshots of a GL or Vulkan frame wait for its producer](../reference/rendering.md#screenshots-of-a-gl-or-vulkan-frame-wait-for-its-producer)).
+
 A first-frame bring-up that worked for Mario: screenshot is black → `TEXDUMP` shows which targets have content → `PASSDUMP` the pass that writes the window → `HILITE` its fragment shader → `CBDUMP` its uniforms → read the translated `.metal` of its vertex shader.

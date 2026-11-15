@@ -56,7 +56,10 @@
 // a silent display link. What it took is not what the scene costs, and the frames after it run late for the host's reasons: the GPU clock fell while nothing was drawn (Ocarina
 // of Time on an M4 Pro: the first frame after a pause of 1.2–35 s took 26–67 ms of GPU time where the scene takes 15) and the display link is finding its ticks again. Counted,
 // they stepped the hold up to 3 after every pause and fullscreen switch, 20 then 30 fps for about a second in a scene that held 60 before and after. So a stall is not late, and
-// the FSTEP_GRACE frames after it do not count toward a step up, as after a probe (a stall in that grace starts it again)
+// the FSTEP_GRACE frames after it do not count toward a step up, as after a probe (a stall in that grace starts it again).
+// The caller can say so itself (nvn_fstep.settle: the game came back into focus, its window changed size or went fullscreen), which also covers the frames of a window's
+// animation, late by a fraction of a vsync before any of them is a stall. The time the game was behind in such a frame is not paid back either: a pause is not time the game
+// owes, and paid back it played the first quarter second after every pause at double speed
 #define FSTEP_STALL 8.0       // vsyncs a frame was shown for that make it a stall (133 ms): more than twice the longest hold, so no step up would have made the frame fit
 
 typedef struct {
@@ -72,6 +75,7 @@ typedef struct {
     int tpend; double tsince; // a trial that held and whose run at its hold has not lasted FSTEP_HOLD_MAX yet (a step up before then fails it), and vsyncs since it held
     int per_vsync;            // set by the caller: the ticks a 1/60 s vsync is (0 = 1). At 120 fps the unit is 1/120 s (hle_nvn.c fps_high), and the waits between trials stay the same real time
     double shown_slack;       // vsyncs a frame on time may show longer than k (set by the caller): one refresh on screens whose rate is not a multiple of 60; the cost keeps FSTEP_LATE
+    int settle;               // set by the caller before a call, then cleared: this frame spans a pause or a window change (a stall whatever it took; its lateness is not debt)
     int screen;               // set by the caller before each call, then cleared: 0 = judge lateness by shown and cost; 1 = the screen showed a recent frame on time, 2 = late. With present
                               // snapshots (nvn_mtl.m) the game runs ahead of the screen and a frame that runs long is absorbed, so only what the screen shows counts
     double run, crun, cref;   // vsyncs at kmin in a row; the cost of its frames on time (running mean; not during a probe's trial, whose frames run while the clock rises);
@@ -126,7 +130,8 @@ static inline int nvn_fstep_next(nvn_fstep *s, double shown, double cost, int km
     double over = shown - held; if (over < -1) over = -1; if (over > FSTEP_SHORT_MAX) over = FSTEP_SHORT_MAX;
     s->over_sum += over - s->over[s->over_i]; s->over[s->over_i] = over; s->over_i = (s->over_i + 1) % FSTEP_RUN;
     s->last_cost[0] = s->last_cost[1]; s->last_cost[1] = s->last_cost[2]; s->last_cost[2] = cost;
-    s->debt += shown - s->step;
+    int settle = s->settle; s->settle = 0;
+    if (settle && shown > s->step) s->dropped += shown - s->step; else s->debt += shown - s->step;   // a pause is not time the game owes
     if (s->debt > FSTEP_DEBT_MAX) { s->dropped += s->debt - FSTEP_DEBT_MAX; s->debt = FSTEP_DEBT_MAX; }
     if (s->debt < -1) s->debt = -1;   // ahead (a frame shorter than its step): nothing slows the game down, so at most one vsync is remembered
     s->since += shown; s->tsince += shown;
@@ -144,7 +149,7 @@ static inline int nvn_fstep_next(nvn_fstep *s, double shown, double cost, int km
         s->plate += late; s->ptotal++;
         if (!--s->grace && s->ramp && s->plate && s->ptotal + FSTEP_GRACE <= FSTEP_PROBE_MAX && s->pb <= (1 - FSTEP_RAMP) * s->pa) { s->grace = FSTEP_GRACE; s->pa = s->pb = 0; s->plate = 0; }   // still getting cheaper: another window
     }
-    int stall = shown >= FSTEP_STALL * (s->per_vsync ? s->per_vsync : 1), sgrace = stall || s->sgrace > 0;   // a stall, or a frame in the grace after one
+    int stall = settle || shown >= FSTEP_STALL * (s->per_vsync ? s->per_vsync : 1), sgrace = stall || s->sgrace > 0;   // a stall, or a frame in the grace after one
     if (stall) { s->sgrace = FSTEP_GRACE; s->stalls++; } else if (s->sgrace) s->sgrace--;
     if (late) { s->late++; s->late_run = grace || sgrace ? 0 : s->late_run + 1; s->fit_run = 0; } else s->late_run = 0;
     // The cost of the frames on time (a hitch is not what the scene costs): at kmin, and at the longer hold

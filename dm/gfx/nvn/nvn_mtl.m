@@ -17926,6 +17926,20 @@ static void sub_cut_begin(void) { g_cut_draw0 = g_stat_draw; }
 // DM_FSTEP_PROBE_RAMP=1 (default) / 0 / ab: a frame-step probe's grace is renewed while its frames keep getting cheaper (nvn_fstep.h FSTEP_RAMP), the time macOS's GPU clock takes to rise for the shorter deadline
 static int probe_ramp_mode(void) { static int m = -1; if (m < 0) m = sw_mode("DM_FSTEP_PROBE_RAMP", 1); return m; }
 int mtl_probe_ramp_on(void) { return sw_on(probe_ramp_mode()); }
+// A pause or a window change, for the frame step (nvn_fstep.h settle, asked once a frame by hle_nvn.c fstep_tick): the game came back into focus since the last call (the
+// front end's dm_focus_set(1): its window became key again, a pause ended), or the layer's drawable changed size (the window resized, entered or left fullscreen). The frames
+// around either are late for the host's reasons, not the scene's (frame-rate.md, "A pause or a window switch steps the hold up")
+uint64_t dm_focus_in_since(void);
+static _Atomic uint64_t g_settle_px, g_settle_focus; static _Atomic int g_settle;
+static void settle_present(CGSize px) {   // each present, with the layer's drawable size
+    uint64_t v = (uint64_t)px.width | (uint64_t)px.height << 32;
+    if (atomic_exchange(&g_settle_px, v) != v) atomic_store(&g_settle, 1);
+}
+int mtl_fstep_settle(void) {
+    uint64_t f = dm_focus_in_since();
+    if (atomic_exchange(&g_settle_focus, f) != f) atomic_store(&g_settle, 1);
+    return atomic_exchange(&g_settle, 0);
+}
 // Whether a segment may end here, the pass aside: pass_split_try ends a pass only when the commit after it will be made
 static int sub_cut_ready(void) {
     int n = cut_draws();
@@ -19286,6 +19300,7 @@ static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t t
     if (atomic_load(&g_gpu_lost) || atomic_load(&g_present_suspended)) return 0;
     CAMetalLayer *layer = (__bridge CAMetalLayer *)front_metal_layer();
     if (!layer) return 0;
+    settle_present(layer.drawableSize);
 #if TARGET_OS_OSX
     if (!layer.displaySyncEnabled) layer.displaySyncEnabled = YES;   // Windowed mode follows the display's vsync to prevent tearing
 #endif

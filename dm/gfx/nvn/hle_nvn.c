@@ -2063,6 +2063,7 @@ static int link_wait(const win_t *o, uint64_t timeout_ns);
 __attribute__((weak)) void dm_main_yield_stats(uint64_t *n, uint64_t *ns) { *n = 0; *ns = 0; }   // The host's hle_thread.c provides the ground truth; 0 in graphics unit tests
 __attribute__((weak)) uint32_t dm_guest_work_qos(unsigned *count) { if (count) *count = 0; return QOS_CLASS_UNSPECIFIED; }
 int mtl_probe_ramp_on(void);   // nvn_mtl.m: DM_FSTEP_PROBE_RAMP (default on; ab with DM_AB)
+int mtl_fstep_settle(void);    // nvn_mtl.m: the game came back into focus or its window changed size since the last call (nvn_fstep.h settle)
 __attribute__((weak)) void dm_yield_top(char *out, size_t n) { if (n) snprintf(out, n, "-"); }   // hle_thread.c: the threads that yielded most since the last call; none in graphics unit tests
 __attribute__((weak)) void dm_thread_cpu(char *out, size_t n, double secs) { (void)secs; if (n) snprintf(out, n, "-"); }   // hle_thread.c: guest-thread CPU by Switch priority band since the last call
 void mtl_res_stats(char *out, size_t n);
@@ -2736,6 +2737,7 @@ static void fstep_tick(const win_t *o, int c) {
     // A probe's grace lasts while its frames keep getting cheaper (nvn_fstep.h FSTEP_RAMP): macOS raises the GPU clock for the shorter deadline over seconds, not the iPhone's 30 frames
     // (Breath of the Wild on an M5 Pro: the probe's 33 frames took the clock 338 → 432 MHz and its GPU time 24.8 → 18.5 ms, then it failed at 22 ms frames; hold 1 needed about 560 MHz)
     g_fs.ramp = mtl_probe_ramp_on();
+    g_fs.settle = mtl_fstep_settle();   // a pause ended or the window changed: this frame and the grace after it are not what the scene costs
     g_fs.per_vsync = fstep_hz() / 60;
     g_fs.smax = dm_fps_step_max;   // the stub's largest step (Mario Kart World: 2): frames held longer than the game steps would play in slow motion
     g_fs.no_payback = fps_high();   // at 120 fps the game steps by its target, not by the step: a late frame is slow motion, so three raise the hold whatever the average

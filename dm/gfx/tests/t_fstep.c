@@ -570,6 +570,19 @@ int main(void) {
         check(f.s.k == 2 && f.s.stalls == 0, "  120 fps: 83 ms frames are not stalls");
         sim g = {0}; g.s.per_vsync = 2; run(&g, 240, 0.7, 1, 2, 0); run(&g, 1, 200, 1, 2, 0); run(&g, 3, 1.5, 1, 2, 0); run(&g, 60, 0.7, 1, 2, 0);
         check(g.s.k == 1 && g.s.stalls == 1, "  120 fps: a pause and three late frames keep 120");
+        // the caller names the pause (settle): nothing of it is paid back, where a stall it does not name (a load) still pays back FSTEP_DEBT_MAX
+        sim p = {0}; run(&p, 600, 0.9, 1, 3, 0); uint64_t paid0 = p.s.paid;
+        p.s.settle = 1; run(&p, 1, 114, 1, 3, 0); run(&p, 60, 0.9, 1, 3, 0);
+        snprintf(b, sizeof b, "  a pause the caller names is not paid back (paid %llu, debt %.2f)", (unsigned long long)(p.s.paid - paid0), p.s.debt);
+        check(p.s.paid == paid0 && p.s.debt < 1 && p.s.k == 1 && p.s.settle == 0, b);
+        sim q = {0}; run(&q, 600, 0.9, 1, 3, 0); paid0 = q.s.paid; run(&q, 1, 114, 1, 3, 0); run(&q, 60, 0.9, 1, 3, 0);
+        check(q.s.paid - paid0 == 15, "  a stall it does not name pays back 15 vsyncs as before");
+        // a fullscreen switch the caller names: frames late by a third of a vsync while the window animates, none of them a stall
+        sim w = {0}; run(&w, 600, 0.9, 1, 3, 0);
+        w.s.settle = 1; run(&w, 20, 1.34, 1, 3, 0); w.s.settle = 1; run(&w, 20, 1.34, 1, 3, 0); run(&w, 120, 0.9, 1, 3, 0);
+        check(w.s.k == 1 && w.s.ups == 0, "  a window change the caller names: 40 mildly late frames keep hold 1");
+        sim x = {0}; run(&x, 600, 0.9, 1, 3, 0); run(&x, 20, 1.34, 1, 3, 0);
+        check(x.s.k == 2 && x.s.ups == 1, "  the same frames with no window change step up as before");
     }
     printf("== %d checks, %d failed ==\n", checks, fail);
     return fail != 0;

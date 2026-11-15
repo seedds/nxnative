@@ -18260,6 +18260,7 @@ static uint64_t snap_take(const tex_t *t) {
     res_commit();
     if (!g_snap_ev) {
         g_snap_ev = [g_dev newSharedEvent];
+        if (!g_snap_ev) MDIE("present snapshots: no shared event");
         MTLResidencySetDescriptor *rd = [MTLResidencySetDescriptor new]; rd.initialCapacity = SNAP_MAX; NSError *e = nil;
         g_snap_res = [g_dev newResidencySetWithDescriptor:rd error:&e]; if (!g_snap_res) MDIE("present snapshots: no residency set: %s", e.localizedDescription.UTF8String);
         [g_q4 addResidencySet:g_snap_res];

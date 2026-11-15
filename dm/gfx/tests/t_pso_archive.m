@@ -36,7 +36,9 @@ static int checks, failed;
 // The next program of a test hand-over (--exec-seed): it starts only after the archive's write, so the folder holds the file; it says so in exec.txt (the test reads it)
 static void exec_then(void *dir) {
     int files = 0; for (NSString *f in [NSFileManager.defaultManager contentsOfDirectoryAtPath:@((const char *)dir) error:nil]) files += [f hasSuffix:@".mtl4a"];
-    [[NSString stringWithFormat:@"%d\n", files] writeToFile:[@((const char *)dir) stringByAppendingPathComponent:@"exec.txt"] atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    NSString *path = [@((const char *)dir) stringByAppendingPathComponent:@"exec.txt"];
+    if (!path) abort();
+    [[NSString stringWithFormat:@"%d\n", files] writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:nil];
 }
 #define EXPECT(name, want, got) do { uint64_t w = (want), g = (got); checks++; if (w != g) { fprintf(stderr, "%s: expected %llu, got %llu\n", name, (unsigned long long)w, (unsigned long long)g); failed++; } } while (0)
 
@@ -403,6 +405,7 @@ static void depth_only(void) {
     MTLDepthStencilDescriptor *ds = [MTLDepthStencilDescriptor new]; ds.depthWriteEnabled = YES; ds.depthCompareFunction = MTLCompareFunctionAlways;
     float v[4] = {1, 1, 1, 1}; id<MTLBuffer> vb = [g_dev newBufferWithBytes:v length:sizeof v options:MTLResourceStorageModeShared];
     id<MTLBuffer> out = [g_dev newBufferWithLength:1024 options:MTLResourceStorageModeShared];
+    if (!out) abort();
     id<MTLCommandBuffer> cb = [g_q commandBuffer]; id<MTLRenderCommandEncoder> enc = [cb renderCommandEncoderWithDescriptor:rp];
     [enc setRenderPipelineState:ps]; [enc setDepthStencilState:[g_dev newDepthStencilStateWithDescriptor:ds]];
     [enc setVertexBuffer:vb offset:0 atIndex:16]; [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3]; [enc endEncoding];
@@ -796,6 +799,7 @@ int main(int argc, char **argv) { @autoreleasepool {
     ArchEpoch *ep0 = g_ep;
     arch_flush_wait();
     NSString *file = [@(dir) stringByAppendingPathComponent:@"00000-1.mtl4a"];   // <seq>-<pipelines it holds>
+    if (!file) abort();
     EXPECT("archive file written", 1, [NSFileManager.defaultManager fileExistsAtPath:file]);
     EXPECT("the flush began a new period", 1, g_ep != ep0);
     EXPECT("nothing left to write", 0, g_arch_new);

@@ -405,6 +405,10 @@ void dm_aot_profile_init(void);            // the switches read, the handler (Wi
 int dm_aot_profile_on(void);               // DM_AOT_PROFILE is set and the sampler runs
 void dm_aot_profile_thread_begin(void);    // aot_thread.c: the calling thread made its state block (its timer starts; Windows: the sampler may suspend it from now on)
 void dm_aot_profile_thread_end(void);      // aot_thread.c: the calling thread's block goes (its timer stops, or the sampler lets it go; its totals are kept)
+// The JIT fallback's runs measured per thread (aot_run.c run_jit, with DM_AOT_PROFILE): the calling thread's CPU time, and a run that began at cpu0 under FPCR fpcr0 and ended
+// under fpcr1 (other0 / other1: another FPCR than the packs'). The writer logs each thread's runs, their CPU time and the part spent under another FPCR (design 7.1)
+uint64_t dm_aot_profile_cpu_ns(void);
+void dm_aot_profile_jit_run(uint64_t cpu0, uint32_t fpcr0, uint32_t fpcr1, int other0, int other1);
 int dm_aot_profile_write(void);            // the files now, sampling stopped (once: later calls and the atexit writer do nothing); 0 when written
 // The sampler's lookups (aot_arena.c): async-signal-safe (no lock, no allocation: a pack's tables are complete before it is published and never change)
 int dm_aot_pack_count(void);

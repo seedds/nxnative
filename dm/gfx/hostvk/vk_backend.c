@@ -264,14 +264,13 @@ int be_fps_target(void) {
 }
 int be_vsync_active(void) { return hvk_vsync_active(); }
 int be_vsync_wait(int vsyncs, uint64_t timeout_ns) { return hvk_vsync_wait(vsyncs, timeout_ns); }
-// The Metal backend's DM_CTL diagnostics (hle_hid.c "shot", "texlist", "texraw", "texdump", "passdump"; nvn_mtl.m): not on Vulkan yet, each a red line on its first call. The window
-// presenter's readback (vk_present.h, for the tests) is where a screenshot would come from
+// The Metal backend's DM_CTL diagnostics (hle_hid.c "texlist", "texraw", "texdump", "passdump"; nvn_mtl.m): not on Vulkan yet, each a red line on its first call. "shot" is the
+// headless presenter's (below)
 void dm_gfx_shot_at(long k, const char *path);
 void dm_gfx_texlist(int target);
 void dm_gfx_texraw(uint64_t serial, const char *path);
 void dm_gfx_texdump_next(const char *path);
 void dm_gfx_passdump_next(long n);
-void dm_gfx_shot_at(long k, const char *path) { (void)k; DECLARED("DM_CTL shot: screenshots are the Metal backend's (nvn_mtl.m), not written on Vulkan yet: %s not saved", path); }
 void dm_gfx_texlist(int target) { (void)target; DECLARED("DM_CTL texlist: the Metal backend's texture list (nvn_mtl.m), not on Vulkan yet"); }
 void dm_gfx_texraw(uint64_t serial, const char *path) { (void)serial; (void)path; DECLARED("DM_CTL texraw: the Metal backend's raw texture dump (nvn_mtl.m), not on Vulkan yet"); }
 void dm_gfx_texdump_next(const char *path) { (void)path; DECLARED("DM_CTL texdump: the Metal backend's render-target dump (nvn_mtl.m), not on Vulkan yet"); }
@@ -428,6 +427,93 @@ int hvk_present_last(void *texels, size_t n, hvk_present_info *info) {
     }
     pthread_mutex_unlock(&g_ext_mu);
     return ok;
+}
+// DM_CTL "shot <path>" (hle_hid.c) without a window (DM_VK_HEADLESS=1): the kth frame the headless presenter copies from the call on (k 1: the next), read back from its buffer
+// (hvk_present_last) and written as a PNG of its RGB, converted from the frame's 4-byte format (the picture a window would show: the layer crop, the rows upright). The PNG is
+// uncompressed (stored deflate blocks: no zlib in the host), about 6 MB at 1920x1080. It waits on the calling thread (DM_CTL's) up to 10 s for that frame; the render thread is not
+// held. With the window presenter on, the frame goes to the swapchain instead and nothing is written (a red line)
+static uint32_t png_crc(uint32_t c, const uint8_t *p, size_t n) {
+    static uint32_t t[256];
+    if (!t[1]) for (uint32_t i = 0; i < 256; i++) { uint32_t v = i; for (int b = 0; b < 8; b++) v = v & 1 ? 0xEDB88320u ^ (v >> 1) : v >> 1; t[i] = v; }
+    c = ~c;
+    for (size_t i = 0; i < n; i++) c = t[(c ^ p[i]) & 0xFF] ^ (c >> 8);
+    return ~c;
+}
+static void be32(uint8_t *p, uint32_t v) { p[0] = (uint8_t)(v >> 24); p[1] = (uint8_t)(v >> 16); p[2] = (uint8_t)(v >> 8); p[3] = (uint8_t)v; }
+static int png_chunk(FILE *f, const char *type, const uint8_t *data, size_t n) {
+    uint8_t h[8]; be32(h, (uint32_t)n); memcpy(h + 4, type, 4);
+    uint32_t crc = png_crc(png_crc(0, h + 4, 4), data, n);
+    uint8_t c[4]; be32(c, crc);
+    return fwrite(h, 1, 8, f) == 8 && (!n || fwrite(data, 1, n, f) == n) && fwrite(c, 1, 4, f) == 4;
+}
+// rgb: h rows of w * 3 bytes; 0 when written
+int hvk_png_write(const char *path, const uint8_t *rgb, uint32_t w, uint32_t h) {
+    const size_t row = (size_t)w * 3 + 1, raw = row * h, blocks = (raw + 65534) / 65535;
+    uint8_t *z = malloc(2 + raw + 5 * (blocks ? blocks : 1) + 4);
+    FILE *f = z ? fopen(path, "wb") : NULL;
+    if (!f) { free(z); return -1; }
+    size_t o = 0; uint32_t a = 1, b = 0;   // the zlib header (deflate, no dictionary), stored blocks, Adler-32 of the filtered rows
+    z[o++] = 0x78; z[o++] = 0x01;
+    size_t left = raw, y = 0, x = 0;   // position in the filtered rows: row y, byte x of it (x 0: its filter byte, 0 = none)
+    do {
+        const size_t n = left < 65535 ? left : 65535;
+        z[o++] = left <= 65535; z[o++] = (uint8_t)n; z[o++] = (uint8_t)(n >> 8); z[o++] = (uint8_t)~n; z[o++] = (uint8_t)(~n >> 8);
+        for (size_t i = 0; i < n; i++) {
+            const uint8_t v = x ? rgb[y * (size_t)w * 3 + x - 1] : 0;
+            z[o++] = v; a = (a + v) % 65521; b = (b + a) % 65521;
+            if (++x == row) { x = 0; y++; }
+        }
+        left -= n;
+    } while (left);
+    be32(z + o, b << 16 | a); o += 4;
+    static const uint8_t sig[8] = {0x89, 'P', 'N', 'G', '\r', '\n', 0x1A, '\n'};
+    uint8_t ihdr[13]; be32(ihdr, w); be32(ihdr + 4, h); ihdr[8] = 8; ihdr[9] = 2; ihdr[10] = ihdr[11] = ihdr[12] = 0;   // 8 bits, RGB
+    const int ok = fwrite(sig, 1, 8, f) == 8 && png_chunk(f, "IHDR", ihdr, 13) && png_chunk(f, "IDAT", z, o) && png_chunk(f, "IEND", NULL, 0);
+    free(z);
+    return fclose(f) || !ok ? -1 : 0;
+}
+// One 4-byte texel of a presented frame's format as R, G, B (the formats texel4 takes); 0 for a format it does not convert
+static int texel_rgb(VkFormat f, const uint8_t *t, uint8_t *o) {
+    uint32_t v; memcpy(&v, t, 4);
+    switch (f) {
+    case VK_FORMAT_R8G8B8A8_UNORM: case VK_FORMAT_R8G8B8A8_SRGB: case VK_FORMAT_A8B8G8R8_UNORM_PACK32: case VK_FORMAT_A8B8G8R8_SRGB_PACK32: case VK_FORMAT_R8G8B8A8_UINT:
+        o[0] = t[0]; o[1] = t[1]; o[2] = t[2]; return 1;
+    case VK_FORMAT_R8G8B8A8_SNORM: for (int i = 0; i < 3; i++) o[i] = (int8_t)t[i] <= 0 ? 0 : (uint8_t)((int8_t)t[i] * 2); return 1;
+    case VK_FORMAT_B8G8R8A8_UNORM: case VK_FORMAT_B8G8R8A8_SRGB: o[0] = t[2]; o[1] = t[1]; o[2] = t[0]; return 1;
+    case VK_FORMAT_A2B10G10R10_UNORM_PACK32: o[0] = (uint8_t)((v & 0x3FF) >> 2); o[1] = (uint8_t)((v >> 12) & 0xFF); o[2] = (uint8_t)((v >> 22) & 0xFF); return 1;
+    case VK_FORMAT_A2R10G10B10_UNORM_PACK32: o[2] = (uint8_t)((v & 0x3FF) >> 2); o[1] = (uint8_t)((v >> 12) & 0xFF); o[0] = (uint8_t)((v >> 22) & 0xFF); return 1;
+    default: return 0;
+    }
+}
+void dm_gfx_shot_at(long k, const char *path) {
+    if (hvk_win_ready()) { HVK_RED_ONCE("DM_CTL shot: frames go to the window presenter, whose swapchain is not read back: %s not saved (DM_VK_HEADLESS=1 shoots)", path); return; }
+    hvk_present_info info;
+    pthread_mutex_lock(&g_ext_mu);
+    const uint64_t want = g_last.frames + (uint64_t)(k > 0 ? k : 1);
+    pthread_mutex_unlock(&g_ext_mu);
+    const uint64_t t0 = plat_now_ns();
+    for (;;) {
+        pthread_mutex_lock(&g_ext_mu);
+        const uint64_t have = g_last.frames;
+        pthread_mutex_unlock(&g_ext_mu);
+        if (have >= want) break;
+        if (plat_now_ns() - t0 > 10000000000ull) { hostvk_log("[RED] [hostvk] DM_CTL shot: no frame presented within 10 s: %s not saved", path); return; }
+        plat_sleep_ns(2000000);
+    }
+    if (!hvk_present_last(NULL, 0, &info) || !info.width || !info.height) { hostvk_log("[RED] [hostvk] DM_CTL shot: no frame to read back: %s not saved", path); return; }
+    const size_t n = (size_t)info.width * info.height;
+    uint8_t *tex = malloc(n * 4), *rgb = malloc(n * 3);
+    if (!tex || !rgb || !hvk_present_last(tex, n * 4, &info) || (size_t)info.width * info.height != n) {
+        free(tex); free(rgb); hostvk_log("[RED] [hostvk] DM_CTL shot: the frame could not be read back: %s not saved", path); return;
+    }
+    int conv = 1;
+    for (size_t i = 0; i < n && conv; i++) conv = texel_rgb(info.format, tex + 4 * i, rgb + 3 * i);
+    if (!conv) for (size_t i = 0; i < n; i++) memcpy(rgb + 3 * i, tex + 4 * i, 3);   // the bytes as they are, said below
+    const int bad = hvk_png_write(path, rgb, info.width, info.height);
+    free(tex); free(rgb);
+    if (bad) hostvk_log("[RED] [hostvk] DM_CTL shot: cannot write %s", path);
+    else hostvk_log("[hostvk] DM_CTL shot: frame %llu (%ux%u, VkFormat %d%s) -> %s", (unsigned long long)info.frames, info.width, info.height, info.format,
+                    conv ? "" : ": not converted, its first three bytes per texel as R, G, B", path);
 }
 static void pres_flush(void) { pthread_mutex_lock(&g_ext_mu); uint64_t v = g_pres_n; pthread_mutex_unlock(&g_ext_mu); pres_wait(v); }
 static void pres_shutdown(void) {   // hvk_shutdown: every present finished, the presenter's objects released, the registry emptied

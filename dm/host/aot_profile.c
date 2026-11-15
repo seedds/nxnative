@@ -75,6 +75,12 @@ typedef struct prof_thread {
     long tid;
     uint64_t samples, code, hostcall, jit, host;   // all, in a pack's function, in a host call or SVC of one, in the JIT fallback, in the host
     uint64_t placed, crossed;   // of code: at a guest instruction of the pack's positions; at one outside its function (not counted at it: none expected)
+    // The JIT fallback's runs on this thread and its CPU time in them (dm_aot_profile_jit_run, below): all; begun under another FPCR than the packs'; the stretches of CPU time
+    // under another FPCR (from the first run begun under it, or ended under it, to the end of the run that leaves it), their number and the last such FPCR
+    uint64_t jit_runs, jit_ns, fpcr_runs, fpcr_ns, other_n, other_ns, other_t0;
+    uint32_t fpcr_last;
+    int in_other;
+    char name[32];              // the thread's name at its first JIT run (Linux; empty elsewhere)
 #if defined(_WIN32)
     HANDLE h;                   // the thread, while it is registered (g_lock); NULL once it unregistered
     const dm_aot_thread *t;     // its state block, while h is set (prof_at and depth are read from it while the thread is suspended)
@@ -127,6 +133,37 @@ static void count_pc(prof_thread *r, const dm_aot_thread *t, uint64_t pc, uint64
 }
 
 static void write_at_exit(void) { dm_aot_profile_write(); }
+
+// ---------- The JIT fallback's runs and the FPCR ----------
+// Besides the samples, the JIT fallback's own share of each thread's CPU time, measured rather than sampled, and what of it the FPCR caused (design 7.1: code runs compiled only
+// under the FPCR the packs were specialised for; under any other, every guest instruction runs in the JIT fallback until the FPCR comes back). aot_run.c run_jit reports each run of
+// dm_jit_run / dm_jit_run_past (the SVCs answered inside a run count in it; a host call or a compiled entry the run stops at does not): its CPU time on the thread's own clock, whether
+// the FPCR was another than the packs' when it began and when it ended. Only with DM_AOT_PROFILE (two clock reads per run)
+uint64_t dm_aot_profile_cpu_ns(void) {
+#if defined(_WIN32)
+    FILETIME c, e, k, u;   // the scheduler's charge (15.6 ms ticks): coarse, enough for the totals
+    if (!GetThreadTimes(GetCurrentThread(), &c, &e, &k, &u)) return 0;
+    return ((((uint64_t)k.dwHighDateTime << 32) | k.dwLowDateTime) + (((uint64_t)u.dwHighDateTime << 32) | u.dwLowDateTime)) * 100;
+#else
+    struct timespec ts;
+    clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+#endif
+}
+void dm_aot_profile_jit_run(uint64_t cpu0, uint32_t fpcr0, uint32_t fpcr1, int other0, int other1) {
+    prof_thread *r = t_prof;
+    if (!r) return;
+    const uint64_t now = dm_aot_profile_cpu_ns(), d = now > cpu0 ? now - cpu0 : 0;
+    r->jit_runs++; r->jit_ns += d;
+    if (other0) { r->fpcr_runs++; r->fpcr_ns += d; }
+    if ((other0 || other1) && !r->in_other) { r->in_other = 1; r->other_n++; r->other_t0 = other0 ? cpu0 : now; }
+    if (other1) r->fpcr_last = fpcr1;
+    else if (other0) r->fpcr_last = fpcr0;
+    if (!other1 && r->in_other) { r->in_other = 0; r->other_ns += now - r->other_t0; }
+#if !defined(_WIN32)
+    if (!r->name[0] && pthread_getname_np(pthread_self(), r->name, sizeof r->name)) r->name[0] = 0;
+#endif
+}
 
 // The switches; 0 when the sampler may start
 static int read_switches(void) {
@@ -484,6 +521,21 @@ int dm_aot_profile_write(void) {
         LOG("aot: profile: thread %ld: %llu samples: %llu compiled (%llu at an instruction), %llu host calls and SVCs, %llu JIT, %llu host", r->tid, (unsigned long long)r->samples,
             (unsigned long long)r->code, (unsigned long long)r->placed, (unsigned long long)r->hostcall, (unsigned long long)r->jit, (unsigned long long)r->host);
         shown++;
+    }
+    // The JIT fallback's measured share and the FPCR's part in it (dm_aot_profile_jit_run): in all, then every thread that ran the JIT, its CPU time the samples count
+    uint64_t runs = 0, jit_ns = 0, fruns = 0, fns = 0, other_n = 0, other_ns = 0;
+    for (const prof_thread *r = g_threads; r; r = r->next) {
+        runs += r->jit_runs; jit_ns += r->jit_ns; fruns += r->fpcr_runs; fns += r->fpcr_ns; other_n += r->other_n; other_ns += r->other_ns;
+    }
+    const double cpu_s = (double)all / g_hz;
+    LOG("aot: profile: the JIT fallback: %llu runs, %.3f s of CPU time (%.2f %% of the %.3f s the samples count); %llu runs, %.3f s (%.2f %%) begun under another FPCR than the packs' "
+        "%#x; %llu stretches under another FPCR, %.3f s", (unsigned long long)runs, jit_ns * 1e-9, cpu_s > 0 ? jit_ns * 1e-7 / cpu_s : 0.0, cpu_s, (unsigned long long)fruns, fns * 1e-9,
+        cpu_s > 0 ? fns * 1e-7 / cpu_s : 0.0, dm_aot_module_fpcr(), (unsigned long long)other_n, other_ns * 1e-9);
+    for (const prof_thread *r = g_threads; r; r = r->next) {
+        if (!r->jit_runs) continue;
+        LOG("aot: profile: thread %ld '%s': %.3f s of CPU time sampled; JIT %llu runs, %.3f s; under another FPCR %llu runs, %.3f s, %llu stretches, %.3f s%s, last FPCR %#x",
+            r->tid, r->name, (double)r->samples / g_hz, (unsigned long long)r->jit_runs, r->jit_ns * 1e-9, (unsigned long long)r->fpcr_runs, r->fpcr_ns * 1e-9,
+            (unsigned long long)r->other_n, r->other_ns * 1e-9, r->in_other ? " (one still open)" : "", r->fpcr_last);
     }
     pthread_mutex_unlock(&g_lock);
     char dir[sizeof g_dir];

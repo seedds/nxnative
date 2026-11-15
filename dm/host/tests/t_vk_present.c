@@ -23,7 +23,8 @@
 //     two pictures shown in order, every one, and the vsync source's ticks at 60 Hz;
 //   no validation message (the layer with synchronization validation).
 //   --mailbox: the same with DM_VK_PRESENT_MODE=mailbox (MAILBOX where the surface has it)
-//   --headless: DM_VK_HEADLESS=1: the device without a swapchain, the frames through the headless presenter (hvk_present_last: the crop's raw bytes), no vsync source.
+//   --headless: DM_VK_HEADLESS=1: the device without a swapchain, the frames through the headless presenter (hvk_present_last: the crop's raw bytes), no vsync source; DM_CTL's
+//     "shot" (dm_gfx_shot_at) writes the next frame as a PNG whose RGB is the crop's.
 // Without a Vulkan device it skips (t_vk_common.h's rule); without VK_EXT_headless_surface the window parts are reported as not run and the headless one runs
 #include "../dm.h"
 #include "nvn_be.h"
@@ -356,6 +357,43 @@ static void d12_window(const hostvk_dev *d, uint64_t serial, const int *crop, ui
     frames_in_order(mailbox ? "DM_VK_PRESENT_MODE=mailbox (this start's)" : "the default (FIFO)", serial, crop, userial);
 }
 
+// ---------- DM_CTL "shot" without a window (vk_backend.c dm_gfx_shot_at) ----------
+#define SHOT_PNG "t_vk_present.shot.png"
+void dm_gfx_shot_at(long k, const char *path);
+static _Atomic int g_shot_waiting;
+static void *shot_main(void *arg) { (void)arg; atomic_store(&g_shot_waiting, 1); dm_gfx_shot_at(1, SHOT_PNG); return NULL; }
+static uint32_t rd_be32(const uint8_t *p) { return (uint32_t)p[0] << 24 | (uint32_t)p[1] << 16 | (uint32_t)p[2] << 8 | p[3]; }
+// The RGB rows of a PNG the shot wrote (8-bit RGB, one IDAT of stored deflate blocks, filter 0 on every row): w x h x 3 bytes, NULL for anything else
+static uint8_t *png_read_stored(const char *path, uint32_t *w, uint32_t *h) {
+    FILE *f = fopen(path, "rb");
+    if (!f) return NULL;
+    fseek(f, 0, SEEK_END); const long n = ftell(f); fseek(f, 0, SEEK_SET);
+    uint8_t *b = n > 0 ? malloc((size_t)n) : NULL;
+    const int got = b && fread(b, 1, (size_t)n, f) == (size_t)n;
+    fclose(f);
+    if (!got || n < 8 + 25 || memcmp(b, "\x89PNG\r\n\x1a\n", 8) || memcmp(b + 12, "IHDR", 4) || b[24] != 8 || b[25] != 2) { free(b); return NULL; }
+    *w = rd_be32(b + 16); *h = rd_be32(b + 20);
+    const size_t at = 8 + 25, rowb = (size_t)*w * 3 + 1, raw = rowb * *h;
+    if ((size_t)n < at + 8 || memcmp(b + at + 4, "IDAT", 4)) { free(b); return NULL; }
+    const size_t len = rd_be32(b + at);
+    const uint8_t *z = b + at + 8, *end = z + len;
+    uint8_t *flat = malloc(raw ? raw : 1), *rgb = malloc(raw ? raw : 1);
+    size_t o = 0;
+    int ok = flat && rgb && end <= b + n && len >= 2 && z[0] == 0x78;
+    for (const uint8_t *p = z + 2; ok;) {   // stored blocks only
+        if (p + 5 > end || (p[0] & 6)) { ok = 0; break; }
+        const int last = p[0] & 1; const size_t bl = p[1] | (size_t)p[2] << 8;
+        if (p + 5 + bl > end || o + bl > raw) { ok = 0; break; }
+        memcpy(flat + o, p + 5, bl); o += bl; p += 5 + bl;
+        if (last) break;
+    }
+    ok = ok && o == raw;
+    for (uint32_t y = 0; ok && y < *h; y++) { ok = flat[y * rowb] == 0; memcpy(rgb + (size_t)y * *w * 3, flat + y * rowb + 1, (size_t)*w * 3); }
+    free(b); free(flat);
+    if (!ok) { free(rgb); return NULL; }
+    return rgb;
+}
+
 int main(int argc, char **argv) {
     setvbuf(stdout, NULL, _IONBF, 0);
     const char *phase = argc > 1 ? argv[1] : "";
@@ -588,6 +626,20 @@ int main(int argc, char **argv) {
         int got = hvk_present_last(pic, sizeof pic, &pi), exact = got && pi.width == CW && pi.height == CH;
         for (int y = 0; exact && y < CH; y++) for (int x = 0; x < CW; x++) if (memcmp(pic + ((size_t)y * CW + x) * 4, frame_texel(CX + x, CY + y), 4)) { exact = 0; break; }
         t("the headless presenter: the crop's region, every byte as stored", tk && exact);
+        // DM_CTL "shot" (vk_backend.c dm_gfx_shot_at): the next frame the headless presenter copies, as a PNG of its RGB; the shot waits for that frame on its own thread
+        remove(SHOT_PNG);
+        pthread_t sh;
+        const int started = !pthread_create(&sh, NULL, shot_main, NULL);
+        for (int i = 0; started && i < 200 && !atomic_load(&g_shot_waiting); i++) plat_sleep_ns(1000000);
+        plat_sleep_ns(20000000);   // the shot has read the frame count it waits past
+        be_present_wait(be_present_ext(serial, 1.0 / 60, NULL, 0, crop));
+        if (started) pthread_join(sh, NULL);
+        uint32_t sw = 0, shh = 0;
+        uint8_t *rgb = started ? png_read_stored(SHOT_PNG, &sw, &shh) : NULL;
+        int same = rgb && sw == CW && shh == CH;
+        for (int y = 0; same && y < CH; y++) for (int x = 0; x < CW; x++) if (memcmp(rgb + ((size_t)y * CW + x) * 3, frame_texel(CX + x, CY + y), 3)) { same = 0; break; }
+        t("DM_CTL shot without a window: the next frame as a PNG, the crop's region, its RGB as stored", same);
+        free(rgb);
         t("no window and no vsync source: be_has_window 0, be_vsync_active 0, be_vsync_wait returns 0 at once", !be_has_window() && !be_vsync_active() && !be_vsync_wait(1, 50000000ull));
         if (!window) printf("note: not run here: the swapchain, the scaling, the letterbox, the flip in the window, the vsync source (no %s)\n", VK_EXT_HEADLESS_SURFACE_EXTENSION_NAME);
     }

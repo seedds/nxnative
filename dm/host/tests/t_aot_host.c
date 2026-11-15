@@ -37,6 +37,8 @@
 //   lrtail, with the JIT built in and nxaot (it packs it): a module this test writes word by word whose function calls, then jumps through a br discovery cannot
 //     bound into code with no compiled entry, 63 times: the JIT runs each case and the rest of the function, and execution comes back to the caller's compiled code
 //     when the function returns (exact JIT runs, addresses and misses, none nonlocal: dm/tools/aot/README.md, "Tail calls and the native frame's return")
+//   fpret, with the JIT built in and nxaot (it packs it): a module this test writes word by word whose function sets FPCR and jumps to a host function that returns to
+//     the caller under it: the frames propagate the return, which is a miss `fpcr`, not `nonlocal` (aot_run.c REASON_FPCR_RETURN)
 //   spkeep, with nxaot (it packs it): a module this test writes word by word whose function calls through a PLT stub's shape (WRITES the union, SP in it) a function
 //     that keeps SP, moves it and calls a leaf with an svc: the caller reloads SP from the block and must find its own (the right sum, no JIT run: dm/tools/aot/README.md,
 //     "A callee's SP left in the block")
@@ -202,6 +204,7 @@ typedef struct {
     const dm_aot_pack *loaded; const module_t *m;   // the pack and module the run loaded (the positions' check)
     int jit_ready, ready_ahead;                     // --jit-ready: the run starts once the JIT's instance made ahead is ready; it was
     int bt;                                         // --bt <mode>: guestbt's mode, with the host function and the address no page backs it reads (guestbt_nro)
+    long hostfn;                                    // --hostfn <module offset>: the guest-visible address of t_aot_hidden written there (fpret_nro), 0: none
 } run_args;
 
 static uint8_t *slurp(const char *path, size_t *n) {
@@ -247,6 +250,10 @@ static void *guest_main(void *p) {
         if (!where) { printf("[RED] t_aot_host: --set %s: no such symbol\n", a->sets[i]); return NULL; }
         uint64_t v = strtoull(eq + 1, NULL, 0);
         memcpy(where, &v, 8);
+    }
+    if (a->hostfn) {   // a module written here that branches to a host function through a pointer in its data (fpret_nro)
+        const uint64_t fn = dm_guest_fn((const void *)t_aot_hidden);
+        memcpy((uint8_t *)m->base + a->hostfn, &fn, 8);
     }
     if (a->hidden) {   // fnptr's hidden_ptr: the guest-visible address of a host function (2.4)
         uint64_t *hp = module_sym(m, "hidden_ptr");
@@ -408,6 +415,7 @@ static int child(int argc, char **argv) {
     for (int i = 4; i < argc; i++) {
         if (!strcmp(argv[i], "--set") && i + 1 < argc && a.nsets < 8) a.sets[a.nsets++] = argv[++i];
         else if (!strcmp(argv[i], "--hidden-host")) a.hidden = 1;
+        else if (!strcmp(argv[i], "--hostfn") && i + 1 < argc) a.hostfn = strtol(argv[++i], NULL, 0);
         else if (!strcmp(argv[i], "--dirty")) a.dirty = 1;
         else if (!strcmp(argv[i], "--positions")) a.positions = 1;
         else if (!strcmp(argv[i], "--jit-ready")) a.jit_ready = 1;
@@ -955,6 +963,103 @@ static void spkeep_row(const char *self, const char *nxaot) {
     snprintf(note, sizeof note, "%u calls through a PLT stub's shape into a function that keeps SP and calls (sum %llu): %llu JIT runs (want 0), %llu misses (want 0), %llu nonlocal%s%s",
              SPKEEP_CALLS, (unsigned long long)want, r.jit[0], r.jit[2], r.jit[3], r.red[0] ? "; " : "", r.red);
     row("spkeep", "sp", ok, &r, note);
+    if (r.guest != no_lines) free(r.guest);
+}
+
+// ---------- A return under another FPCR is no non-local transfer (aot_run.c REASON_FPCR_RETURN) ----------
+// The NRO fpret, written here word by word: start calls f with x0 = 0; f sets FPCR to round towards zero (msr fpcr: the JIT fallback runs the rest of f) and jumps through a
+// pointer in its data (FPRET_HOSTFN, which the child's --hostfn fills) to the host function t_aot_hidden, which returns to start's call site under round towards zero. start's
+// native frame cannot go on under that FPCR: the frames propagate the return (jit_loop: the return its native frame waits for, under another FPCR), and the thread's outermost
+// level runs start's rest in the JIT, which reads FPCR (still RZ), clears it and checks t_aot_hidden's result. That return is no non-local transfer: a `nonlocal` miss there
+// would give the next pack a resume point at start's call site, where start's compiled code would go on under the wrong FPCR. Its miss is `fpcr`
+enum { FPRET_HOSTFN = 0x2000 };
+static size_t fpret_nro(uint8_t *img, size_t cap, uint64_t *cont) {
+    enum { TEXT = 0x1000, RO = 0x1000, DATA = FPRET_HOSTFN, SIZE = 0x3000, BSS = 0x1000, PASS_AT = RO + 0x100, FAIL_AT = RO + 0x120 };
+    if (cap < SIZE) return 0;
+    memset(img, 0, SIZE);
+    uint32_t w[128] = {0};
+    size_t n = 0x80 / 4;
+    const size_t start = n;
+    w[n++] = 0xA9BF7BFDu;               // stp x29, x30, [sp, #-16]!
+    w[n++] = 0x910003FDu;               // mov x29, sp
+    w[n++] = a_movz(0, 0);
+    const size_t call_f = n++;          // bl f
+    *cont = n * 4;
+    w[n++] = 0xD53B440Bu;               // mrs x11, fpcr        (round towards zero: the return came back under it)
+    w[n++] = 0xD51B441Fu;               // msr fpcr, xzr        (the packs' FPCR again)
+    w[n++] = 0xD28B4B49u;               // movz x9, #0x5a5a
+    w[n++] = 0xF2AB4B49u;               // movk x9, #0x5a5a, lsl #16
+    w[n++] = 0xF2CB4B49u;               // movk x9, #0x5a5a, lsl #32
+    w[n++] = 0xF2EB4B49u;               // movk x9, #0x5a5a, lsl #48   (t_aot_hidden(0) = 0 ^ 0x5a5a5a5a5a5a5a5a)
+    w[n++] = 0xEB09001Fu;               // cmp x0, x9
+    const size_t to_fail1 = n++;        // b.ne fail
+    w[n++] = 0xD2A0180Cu;               // movz x12, #0xc0, lsl #16   (FPCR.RMode = 3, RZ)
+    w[n++] = 0xEB0C017Fu;               // cmp x11, x12
+    const size_t to_fail2 = n++;        // b.ne fail
+    w[n] = a_adr(0, (int64_t)PASS_AT - (int64_t)n * 4); n++;
+    w[n++] = a_movz(1, 10);             // "fpret PASS"
+    w[n++] = 0xD40004E1u;               // svc #0x27 (OutputDebugString)
+    const size_t to_exit = n++;         // b exit
+    w[to_fail1] = a_bcond(1, (int64_t)(n - to_fail1) * 4);
+    w[to_fail2] = a_bcond(1, (int64_t)(n - to_fail2) * 4);
+    w[n] = a_adr(0, (int64_t)FAIL_AT - (int64_t)n * 4); n++;
+    w[n++] = a_movz(1, 10);             // "fpret FAIL"
+    w[n++] = 0xD40004E1u;               // svc #0x27
+    w[to_exit] = a_b((int64_t)(n - to_exit) * 4);
+    w[n++] = 0xD40000E1u;               // svc #0x7 (ExitProcess)
+    w[n++] = 0xD4200000u;               // brk #0
+    // f: FPCR to RZ, then a jump to the host function (x30 is still start's call site: the host function returns there)
+    const size_t f = n;
+    w[call_f] = a_bl((int64_t)(f - call_f) * 4);
+    w[n] = a_adr(9, (int64_t)DATA - (int64_t)n * 4); n++;   // adr x9, FPRET_HOSTFN
+    w[n++] = 0xF9400130u;               // ldr x16, [x9]
+    w[n++] = 0xD2A01802u;               // movz x2, #0xc0, lsl #16
+    w[n++] = 0xD51B4402u;               // msr fpcr, x2
+    w[n++] = 0xD61F0200u;               // br x16
+    w[0] = a_b((int64_t)start * 4);
+    w[1] = RO;
+    memcpy(img, w, n * 4);
+    memcpy(img + 0x10, "NRO0", 4);
+    const uint32_t hdr[] = {0, SIZE, 0, 0, TEXT, RO, DATA - RO, DATA, SIZE - DATA, BSS};
+    memcpy(img + 0x14, hdr, sizeof hdr);
+    memcpy(img + RO, "MOD0", 4);
+    const int32_t mod0[] = {0x20, SIZE - RO, SIZE + BSS - RO, 0x40, 0x40, SIZE - RO};
+    memcpy(img + RO + 4, mod0, sizeof mod0);
+    memcpy(img + PASS_AT, "fpret PASS", 10);
+    memcpy(img + FAIL_AT, "fpret FAIL", 10);
+    return SIZE;
+}
+// The row (the JIT built in): the right result under the right FPCR, two misses (the msr fpcr and the return), neither `nonlocal`, and no non-local transfer line. Before
+// REASON_FPCR_RETURN the return was a `nonlocal` miss at start's call site, with "a non-local transfer to a continuation with no native frame"
+static void fpret_row(const char *self, const char *nxaot) {
+    if (!NXHOST_JIT) { printf("%-14s %-9s note: no JIT fallback (NXHOST_JIT): not run\n", "fpret", "fpcr"); return; }
+    if (!nxaot || !*nxaot) { printf("%-14s %-9s note: no nxaot (--nxaot, NXAOT): fpret is not packed here\n", "fpret", "fpcr"); return; }
+    static uint8_t img[0x3000];
+    uint64_t cont = 0;
+    const size_t len = fpret_nro(img, sizeof img, &cont);
+    char nro[200], pack[200], line[600] = "", note[1400], extra[64];
+    mkdir("t_aot_host.tmp", 0755);
+    mkdir("t_aot_host.tmp/fpret", 0755);
+    snprintf(nro, sizeof nro, "t_aot_host.tmp/fpret/fpret.nro");
+    snprintf(pack, sizeof pack, "t_aot_host.tmp/fpret/fpret%s", PACK_EXT);
+    FILE *f = fopen(nro, "wb");
+    const int wrote = len && f && fwrite(img, 1, len, f) == len;
+    if (f) fclose(f);
+    result r;
+    memset(&r, 0, sizeof r);
+    static char no_lines[1];
+    r.guest = no_lines;
+    if (!wrote || nxaot_pack(nxaot, nro, pack, line, sizeof line) != 0) {
+        snprintf(note, sizeof note, "%s: %s", wrote ? "nxaot build failed" : "cannot write the NRO", line);
+        row("fpret", "fpcr", 0, &r, note);
+        return;
+    }
+    snprintf(extra, sizeof extra, "--hostfn %#x", FPRET_HOSTFN);
+    run_child(self, pack, nro, extra, &r);
+    const int ok = r.status == 0 && !strcmp(r.guest, "fpret PASS\n") && r.have_jit && r.jit[2] == 2 && r.jit[3] == 0 && r.have_stat && r.stat[7] == 1;
+    snprintf(note, sizeof note, "a return to start+%#llx under RZ: %llu misses (want 2: the msr fpcr and the return, both `fpcr`), %llu nonlocal (want 0), host function called %llu times%s%s",
+             (unsigned long long)cont, r.jit[2], r.jit[3], r.stat[7], r.red[0] ? "; first red line: " : "", r.red);
+    row("fpret", "fpcr", ok, &r, note);
     if (r.guest != no_lines) free(r.guest);
 }
 
@@ -1863,6 +1968,9 @@ int main(int argc, char **argv) {
     int spkeep = !nonly;
     for (int i = 0; i < nonly; i++) spkeep |= !strcmp(only[i], "spkeep");
     if (spkeep) spkeep_row(argv[0], nxaot);   // 7b. A callee that keeps SP leaves no SP of its own in the block for a caller that reloads it
+    int fpret = !nonly;
+    for (int i = 0; i < nonly; i++) fpret |= !strcmp(only[i], "fpret");
+    if (fpret) fpret_row(argv[0], nxaot);     // 7c. A return under another FPCR, which the frames propagate, is no non-local transfer
     int guestbt = !nonly;
     for (int i = 0; i < nonly; i++) guestbt |= !strcmp(only[i], "guestbt");
     if (guestbt) guestbt_rows(argv[0], nxaot);   // 8. The guest's call site and backtrace in an abort, an svcBreak and a fault

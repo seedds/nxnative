@@ -1115,6 +1115,13 @@ def derive_profile(g, pdir, ver, d, mods, app=None, shader_only=False):
         if not own_step and line.split(T, 1)[0] == 'fps_target' and line.partition(T)[2].strip() != '0':
             out += ['# the profile has frame step stubs for other builds only: this version\'s main has none, so it keeps the game\'s own step', f'fps_target{T}0']; continue
         if line.split(T, 1)[0] in ids: out.append(ids[line.split(T, 1)[0]]); continue
+        if not shader_only and ids and line.split(T, 1)[0] == 'romfs_marker':
+            # A matched main can ship different resource names in another region (Persona 5 Royal: ALL_USEU.CPK / ALL_ASIA.CPK).
+            # Keep a valid inherited marker; otherwise choose an actual file, as provisional profiles do. Empty RomFS still fails packing.
+            rom, marker = rfs.source(d), line.partition(T)[2].strip()
+            if marker and not (rom / marker).exists():
+                found = max(((st.st_size, name) for name, st in files_under(rom) if (rom / name).is_file()), default=None)
+                if found: out.append(f'romfs_marker{T}{found[1]}'); continue
         if not shader_only and line.split(T, 1)[0] == 'modules' and (d / 'ExeFS').is_dir():
             want = line.partition(T)[2].split(); have = [m for m in want if (d / 'ExeFS' / m).exists()]
             if add: have = sorted({*have, *add}, key=pg.load_order)
@@ -1309,13 +1316,15 @@ def extracted(log):   # (files, bytes) from the summary lines nx_extract wrote t
     return (sum(int(n) for n, _ in rows), int(sum(float(mb) for _, mb in rows) * 2**20)) if rows else None
 
 
-def extract(nx, keys, ex, name, base, upd, logs, g, app, repo):
+def extract(nx, keys, ex, name, base, upd, logs, app, repo):
     """One version of the packages (base, and upd when it has an update) → <ex>/<name>/: ExeFS/ and RomFS.img. The build IDs are checked by the caller (build_mismatch); app: the application
     read from the packages (--app). Reused while its key (<name>/extract.key, extraction_key: nx_extract, the packages, the options) is that of the extraction that made it; a folder with no
-    key, from a build before the key, a NUP or a dump folder, is extracted again once"""
-    dst, marker, log = ex / name, g.get('romfs_marker'), logs / f'extract_{name}.log'
+    key, from a build before the key, a NUP or a dump folder, is extracted again once. The image must be a valid one (its index checked), not hold the profile's RomFS marker: the
+    key names what made it, and that marker is the registered profile's, read before a derived profile can take one from another edition's files (Persona 5 Royal's Asian title has
+    CPK/ALL_ASIA.CPK, not the registered CPK/ALL_USEU.CPK: every build extracted its whole package again)"""
+    dst, log = ex / name, logs / f'extract_{name}.log'
     kf, key = dst / 'extract.key', extraction_key(repo, 'program', (base, upd), extract_flags(app))
-    try: reusable = (dst / 'ExeFS' / 'main').exists() and (dst / 'RomFS.img').is_file() and not (dst / 'RomFS').exists() and (rfs.source(dst) / marker).exists()
+    try: reusable = (dst / 'ExeFS' / 'main').exists() and (dst / 'RomFS.img').is_file() and not (dst / 'RomFS').exists() and rfs.source(dst).is_dir()
     except (OSError, ValueError, struct.error): reusable = False
     if reusable and (note := reused(kf, key)) is not None:
         PROG.stage(f'extract {name}')
@@ -3351,7 +3360,7 @@ def main(args=None):
     dirs = {}
     for ver in versions:   # each merged version streams directly into its own image
         b, u = picks[ver]
-        dirs[ver] = extract_nup(ex, ver, u or b, b, app, fam['nup']) if nup else extract_dump(ex, ver, u or b, app) if dump else extract(nx, keys, ex, ver, b, u, logs, g, app, repo)
+        dirs[ver] = extract_nup(ex, ver, u or b, b, app, fam['nup']) if nup else extract_dump(ex, ver, u or b, app) if dump else extract(nx, keys, ex, ver, b, u, logs, app, repo)
         if not nup and not dump: extract_html(nx, keys, dirs[ver], b, u, logs, app, repo)
     check_formats(dirs)
     check_versions_aarch64(dirs, logs, g, nacp.name(dirs[versions[0]] / 'control.nacp') or f'{app:016X}')   # before build_mismatch, derive_profile and build_sources read the modules

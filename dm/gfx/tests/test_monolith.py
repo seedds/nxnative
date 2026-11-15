@@ -10,9 +10,16 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'tools'))
 import shader_split as split
 
 
-def program(stages, extra=0):
+def program(stages, extra=0, nvn2=False):
     controls, codes = [], []
     for stage in stages:
+        if nvn2:   # NVN2 (Switch 2): a 0xd0-byte control section, version 0xc9, its own length at +0x30 and the code's at +0x44; the code starts with its SPH
+            ctl, code = bytearray(0xd0), bytearray(0x200)
+            ctl[:4] = split.CTL_MAGIC; ctl[4] = 0xc9
+            struct.pack_into('<I', ctl, 0x30, len(ctl))
+            struct.pack_into('<I', ctl, 0x44, len(code))
+            struct.pack_into('<I', code, 0, (split.STAGES.index(stage) + 1) << 10 | 1)
+            controls.append(bytes(ctl)); codes.append(bytes(code)); continue
         ctl, code = bytearray(0x880 + extra), bytearray(0x100)
         ctl[:4] = split.CTL_MAGIC
         struct.pack_into('<I', ctl, 0x20, len(ctl))
@@ -62,6 +69,28 @@ class MonolithTests(unittest.TestCase):
         data, ctls, codes = program(['vs', 'ps'], extra=13)
         out = split.hcps_shaders(data, 0, '/test')
         self.assertEqual([(s, c, k) for _, s, c, k in out], list(zip(['vs', 'ps'], ctls, codes)) * 2)
+
+    def test_ndsr_pack_in_an_archive_entry(self):   # Xenoblade Chronicles 2's Switch 2 Edition: /monolib/shader/ndsr.pck, an XBC1 entry of bf2.ard holding agl's NDSR layout
+        _, ctls, codes = program(['vs', 'ps'], nvn2=True)
+        head = bytearray(0x10); head[:4] = b'NDSR'; struct.pack_into('<I', head, 4, 0x500)
+        base = 0x10 + 16 * 4   # three records and the zero one
+        data_rec = struct.pack('<4I', 0, 0xc9, 0, 0x32000a)   # constant data: no control section
+        body = bytearray(); recs = [data_rec]
+        for c, k in zip(ctls, codes):
+            co = base + len(body); body += c; ko = base + len(body); body += k
+            recs.append(struct.pack('<4I', co, len(c) << 4, ko, len(k) // 16 << 8))
+        pack = bytes(head) + b''.join(recs) + bytes(16) + bytes(body)
+        packed = zlib.compress(pack)
+        entry = struct.pack('<4s4I28s', b'xbc1', 1, len(pack), len(packed), 0, b'ndsr.pck') + packed
+        out = []
+        split.monolith_shaders(entry, '/bf2.ard/monolib/shader/ndsr.pck', out)
+        self.assertEqual([(s, c, k) for _, s, c, k in out], list(zip(['vs', 'ps'], ctls, codes)))
+
+    def test_nvn2_controls(self):   # Xenoblade Chronicles 2's Switch 2 Edition: the controls name their own lengths (+0x30, +0x44)
+        data, ctls, codes = program(['vs', 'ps'], nvn2=True)
+        out = split.hcps_shaders(data, 0, '/test')
+        self.assertEqual([(s, c, k) for _, s, c, k in out], list(zip(['vs', 'ps'], ctls, codes)) * 2)
+        self.assertEqual(split.var_pairs(out), {(split.skey(ctls[0], codes[0]), split.skey(ctls[1], codes[1]))})
 
     def test_embedded_geometry_and_variant_pairs(self):
         data, ctls, codes = program(['vs', 'gs', 'ps'])

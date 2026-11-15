@@ -382,6 +382,11 @@ HLE_FORCE("_ZN2nn2oe24IsInStoreDemoModeEnabledEv", "retail store demo mode (thro
 HLE_FORCE("_ZN2nn2oe27SetPerformanceConfigurationENS0_15PerformanceModeEi", "set the CPU/GPU clock config; the host does not scale clocks", void, h_oe_SetPerfCfg, int mode, int cfg) {
     LOG("oe::SetPerformanceConfiguration mode=%d cfg=%#x (ignored)", mode, cfg);
 }
+// The one-argument overload sets the configuration of both modes (SDK 14.3, TUNIC's sdk+0x3a5630: a table lookup, then apm::SetPerformanceConfiguration for Normal and for Boost); SDK 21.4.7's
+// goes through oe::detail::ApmSetPerformanceConfiguration. Both read the apm session the host never opened (Warhammer Survivors: null read at sdk+0x40720c as a scene begins)
+HLE_FORCE("_ZN2nn2oe27SetPerformanceConfigurationEi", "set the CPU/GPU clock config of both modes (through apm); the host does not scale clocks", void, h_oe_SetPerfCfgBoth, int cfg) {
+    LOG("oe::SetPerformanceConfiguration cfg=%#x (ignored)", cfg);
+}
 
 // Scripted state changes (verify lifecycle / overheat downgrade without a window): DM_OE_SCRIPT="focus=3@10,focus=1@20,opmode=0@30" (second N); bg=1 / bg=0 run the whole background round trip (see script_bg)
 // Time counts from the game's first notification fetch. Coexists with front end calls.

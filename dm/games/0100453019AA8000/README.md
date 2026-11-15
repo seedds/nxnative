@@ -13,10 +13,9 @@ Continue reloads the saved field, with movement and camera control rechecked
 after rebasing. The test used the iPhone's 4.375 GB alias region. Combat,
 further progression and iPhone validation remain open.
 
-The opening field runs at about 30 fps: ten-second intervals report frame-time
-p50 33.24 ms / p95 33.26–33.30 ms after loading. First-use shader and pipeline
-loads still hitch. This is a new-port observation, with no working rendering
-baseline for a speed comparison.
+The opening field runs at about 60 fps with the profile's native interval
+setting; [Frame rate](#frame-rate) records the comparison with the original
+30 fps mode. First-use shader and pipeline loads still hitch.
 
 Resident memory settles near 2.6 GB / Metal allocation near 2.55 GB after the
 opening field loads (frames 4,800–5,700); the allocator change reduces virtual
@@ -65,6 +64,49 @@ to the tested fixed-cut output, including its gates and sites. The base is
 enrollment evidence only; its assets and gameplay are not registered as tested.
 An engine-wide recognizer with dynamic sizing would require shared-layout and
 capacity-propagation proof across titles, new gates and cross-title validation.
+
+## Frame rate
+
+`fps_target 60` selects the engine's native one-vsync interval. The standard
+launcher offers 30 and 60 fps; `DM_FPS_TARGET=30` restores the two-vsync setting,
+and `DM_FPS_TARGET=0` leaves it to the game. No present-interval profile override
+or frame-step state page is needed. The
+[shared engine recognizer](../../../docs/reference/frame-rate.md#monoliths-native-frame-interval)
+finds the setting from reviewed timing functions and their relocated globals,
+without a title or build ID. Its binding is engine; the selected default is
+profile data. Horizon's clock and NVN presentation alone cannot raise the
+game's internal wait.
+
+The setting controls the nominal simulation step as well as the wait. In 1.0.1
+the central update at `main+0x25060` derives its rate from the interval, clamps
+measured elapsed seconds to one–two nominal frames, and passes both seconds
+and `30 × seconds` to the game. Animation and task updates consume those
+seconds. A second update at `main+0x937c10` constructs the same timing values.
+The recognizer resolves the interval to `main+0x1da33a0` in 1.0.1 and
+`main+0x1da3380` in the supplied base; the base remains static evidence only.
+
+**Game-bound camera correction:** the orbit camera applies configured angular
+gain once per update, independently of that elapsed-time step. Raising the
+interval alone doubles its turn speed. A function-matched stub at the shared
+yaw/pitch gain load (`main+0xab510`, base `+0xae358`) multiplies the loaded gain
+by the game's own `30 × clamped elapsed seconds`, after the stick response
+curve. Raw input, the configured gain and saved sensitivity settings stay in
+their original units. The complete orbit function and three timing functions
+must match; their globals come from the matched instructions. No match means
+`NATIVE_FPS_BLOCKED` and the host retains the native frame rate. This local
+correction uses `MATCH_STUBS`, without declaring a host-controlled frame step.
+
+On the Apple M6, the original setting gives frame-time p50 33.24 ms, versus
+16.62 ms with the native 60 fps interval. Raising only the host's presentation
+cap leaves 33.24 ms unchanged. The same two-second walk ends at the same spot
+at both rates. After the camera correction, a half-second horizontal turn
+changes yaw by 1.367 radians at 30 and 1.361 at 60 (0.4% difference); menus and
+returning to the field work, with no red diagnostics. The work folder's
+`run/fps*-verified*` records the walk and initial camera mismatch;
+`run/camera*-fixed*` and `fps/camera-comparison.json` record the corrected turn.
+iPhone performance, combat, event cameras and later progression remain
+unmeasured at 60 fps. Camera bank/easing and event/shake effects have not been
+globally retimed.
 
 ## Files and shaders
 
@@ -121,26 +163,37 @@ the opening scenes does not make Continue available on the next boot.
   the row and allowing .NET major-version roll-forward; 16 tool tests skipped.
   Python lint reports zero new findings against its 321-entry baseline.
 - Required matcher, patch-registry, NRO-packing and documentation tests pass.
-  The enrolled matcher metadata equals the independently verified scratch rule;
-  registered 1.0.1 cuts and the IPA's patched bytes are unchanged.
-- After rebasing onto the current main, Mac and iOS libraries were rebuilt for
+  The allocator matcher metadata equals the independently verified scratch rule;
+  its six registered 1.0.1 allocator cuts are unchanged.
+- The initial port's Mac and iOS libraries were rebuilt for
   chain `8e41177b6eb3` (inputs `44f8fe0209f5`). The saved field reloads at about
   30 fps with no red diagnostics. All 158 targeted Python checks pass, including
   the upstream font and packaging changes; feedback, tiled-resolve and depth
   Metal checks pass. The IPA includes the current six shared-font stand-ins.
   An additional Mac-bundle test stops on immutable-`self` compile errors in the
   unchanged `dm/mac/Launcher.swift`; the direct Mac host and IPA build pass.
-- Regression reach is moderate because the HCPS reader is shared. Xenoblade
-  Chronicles 2 covers its ARH1 path: a fresh full extraction reproduces all
-  four existing tables, 15,910 shader keys and 12,370 pairs, unchanged. Its
-  `regress.py check --quick --games 0100E95004038000 --baseline HEAD` reached
-  the five-minute cutoff during pipeline-interface analysis after compiling
-  the shaders. No runtime baseline/candidate comparison completed. The log is
-  `verification/xcx-regress.log` in this game's work folder.
+- The 60 fps change passes 281 targeted Python checks, 38 native frame-limit
+  cases and 160 synthetic AArch64 stub executions. The engine finder resolves
+  both supplied XCX builds, Xenoblade 2 and Xenoblade 3; sixteen distinct
+  non-Monolith builds give no match or red diagnostics. An actual rewrite of
+  an equivalent-instruction variant deliberately missing the camera fingerprint
+  retains the original gain load and emits `NATIVE_FPS_BLOCKED`, while the
+  supplied base matches its complete camera correction. Neither gets a
+  frame-step state page. Python lint has zero new findings.
+- Regression reach is moderate: the shared Monolith finder and native frame-limit
+  path can reach another title. Xenoblade Chronicles 2 covers those paths and
+  ARH1; its fresh extraction reproduces all four tables, 15,910 shader keys and
+  12,370 pairs unchanged. The final quick regression passes within five minutes:
+  15,910/15,910 shaders on both revisions, unchanged MSL, no new interface failures
+  or red diagnostics, and screenshot dHash differences of zero. Baseline/candidate
+  frame p50 is 33.24/33.23 ms, p99 33.26/34.81 ms, fps 30.1/29.8. Reports are in
+  `regress-harness/reports/20261115-164020-check/` in this game's work folder.
 
 ## Found on this game
 
 - [Monolith archive and shader containers](../../../docs/reference/shaders.md#monolith-arh1-xbc1-and-hcpsslct-shader-containers): ARH2 hashed entries and mixed Maxwell / NVN2 programs.
+- [Monolith's native frame interval](../../../docs/reference/frame-rate.md#monoliths-native-frame-interval): one setting controls the internal wait and elapsed-time simulation step.
+- [Function-matched ordinary stubs](../../../docs/reference/rewriter.md#function-matched-ordinary-stubs): elapsed-time camera correction without a host frame-step state page; incomplete matching disables native frame targets.
 
 ## Open
 

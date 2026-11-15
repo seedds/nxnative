@@ -2,7 +2,7 @@
 # The rewrites dmsh_build.py makes in a translated shader's MSL before it compiles it, where Metal or the translator falls short of what the Switch code does: precise
 # arithmetic (precise), memory barriers as fences (membar_fence, tg_fence), 64-bit products (mul_extended), float atomic adds (float_add_msl), uniform words tested against constants, which the front end would
 # fold into switches (uniform_tests), Ampere's HMMA as simdgroup matrices (hmma_msl), first stores and shared-memory stores (first_store, shared_store_msl), threadgroup memory
-# past Metal's limit (tg_spill), texture gathers with offsets (gather_offsets), border colours Metal has no sampler state for (border_emu), a pixel shader's depth snapped to
+# past Metal's limit (tg_spill), one copy of each raw global memory lookup (raw_noinline), texture gathers with offsets (gather_offsets), border colours Metal has no sampler state for (border_emu), a pixel shader's depth snapped to
 # its position (frag_z_snap) and the 0 / -1 mask of a tested bit 0 without its compare (bit0_mask). Functions of the MSL text and the library ABI only, with no build state,
 # so tests import them. Part of the translation chain (dmsh_chain.FILES) and of every shader's cache key (dmsh_build.py CODE_FP).
 import bisect, collections, itertools, re
@@ -519,6 +519,28 @@ def gather_quad(off):
     rel = [(x - bx, y - by) for x, y in xy]
     if sorted(rel) != sorted(GATHER_QUAD): return None
     return f'int2({bx}, {by})', ''.join(GATHER_QUAD[r] for r in rel)
+
+# The pool table lookup of a raw global access (GlobalToStorage TryGenerateRawStorageOp: the last entry, the chunk's hint, a binary search; then the access through a physical
+# pointer) is a helper function, int / void <name>(address low, address high, [value,] the table, [the write log,] the last entry[, gmem_vec]), and spirv-cross marks every function
+# always_inline. A shader calls it at every raw access, so Metal's compiler built a copy of the search for each: Ocarina of Time's foliage mesh shader 3439aaa071d868ae calls its two
+# helpers 141 times, and its task / mesh pipeline took 1.9 s to compile cold on an M2 Air (25 s for the route's 54 at the first start; 11.5 s and 110 s with a resolve helper of
+# 6 arguments split off), while the GPU waited at its first draw (Native mesh pipelines compiled at their first draw). A helper called more than once is kept as one function the calls
+# branch to: that library is 0.57 -> 0.13 MB and the pipeline compiles in 0.46 s, with the frame time unchanged within the runs' noise (the search is rare: most accesses hit the
+# last entry, and the call is cheap beside the table and memory reads it makes)
+RAW_HELPER = re.compile(r'\nstatic inline __attribute__\(\(always_inline\)\)\n((?:int|uint|void) (\w+)\(([^)]*)\)\n\{)')
+def raw_noinline(msl):
+    if 'reinterpret_cast<' not in msl: return msl
+    out, at = [], 0
+    for m in RAW_HELPER.finditer(msl):
+        params = split_params(m.group(3))
+        if (len(params) < 4 or not all(re.fullmatch(r'thread const int& \w+', p) for p in params[:2])
+                or not any(re.fullmatch(r'(const )?device \w+& cp_s\d+', p) for p in params) or not any(re.fullmatch(r'thread uint& \w+', p) for p in params)):
+            continue
+        end = block_end(msl, m.end() - 1)
+        if 'reinterpret_cast<' not in msl[m.end():end] or len(re.findall(r'\b%s\(' % m.group(2), msl)) < 3: continue   # its definition and two calls
+        out.append(msl[at:m.start()] + '\nstatic __attribute__((noinline))\n'); at = m.start(1)
+    out.append(msl[at:])
+    return ''.join(out)
 
 GATHER4 = 'template<typename T> static inline __attribute__((always_inline)) vec<T, 4> dm_gather4(T a, T b, T c, T d) { return vec<T, 4>(a, b, c, d); }\n'
 

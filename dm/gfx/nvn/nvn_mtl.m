@@ -9498,14 +9498,63 @@ static void arch_cap_failed(ArchEpoch *ep, NSError *ce, const char *what) {
     MLOG("[RED] pipeline archive: capturing a %s pipeline failed after %d in its flush period (%s): built without the archive, the captures go on in a new period", what, n, why);
     arch_flush_from(ep);
 }
+// Captures that share a stage function do not compile at the same time. A capturing compile looks its program up in its period's archive (MultiLevelAirntBinaryCache::
+// getElementAtDestination → -[_MTLBinaryArchive getBinaryDataForKey:reflectionType:]) and messages the entry it gets back without holding it, while another compile of the same
+// program captures it and frees that entry: SIGSEGV in objc_msgSend at getElementAtDestination+60, the other workers in getBinaryDataForKey, and no archive write under way
+// (Ocarina of Time's prebuild 3 runs of 3 on an M2 Max, GitHub issue #815; Breath of the Wild 1.9.0's once on an M4 Pro, macOS 27.2.1). The cause is in Metal; the prebuild's
+// pairs come in list order, and consecutive ones often share a vertex shader (Ocarina of Time: 17,515 of 33,365). A function is its library (its digest, lib_tag, else the object)
+// and entry name, hashed: a collision only makes two compiles wait for each other. A wait gives up after g_fn_wait_ms and the compile goes ahead beside the other, so a compile that
+// does not return (#294) holds back the others with its functions by that much each, not for good (t_pso_stall). The tests lower it
+enum { FN_BUSY_MAX = 256, FN_WAIT_MS = 2000 };
+static int g_fn_wait_ms = FN_WAIT_MS;
+static pthread_mutex_t g_fn_mu = PTHREAD_MUTEX_INITIALIZER; static pthread_cond_t g_fn_cv = PTHREAD_COND_INITIALIZER;
+static uint64_t g_fn_busy[FN_BUSY_MAX]; static int g_fn_nbusy;   // the functions of the captures under way, one entry per capture
+static uint64_t fn_id(MTL4FunctionDescriptor *fd) {
+    MTL4FunctionDescriptor *f = fd;
+    while ([f isKindOfClass:MTL4SpecializedFunctionDescriptor.class]) f = ((MTL4SpecializedFunctionDescriptor *)f).functionDescriptor;
+    if (![f isKindOfClass:MTL4LibraryFunctionDescriptor.class]) return 0;
+    MTL4LibraryFunctionDescriptor *l = (MTL4LibraryFunctionDescriptor *)f; id<MTLLibrary> lib = l.library;
+    if (!lib || !l.name) return 0;
+    NSString *tag = objc_getAssociatedObject(lib, &g_lib_tag);
+    uint64_t h = (tag ? (uint64_t)tag.hash : (uint64_t)(uintptr_t)lib) * 0x9E3779B97F4A7C15ull ^ (uint64_t)l.name.hash;
+    return h ? h : 1;
+}
+static int fn_ids(MTL4PipelineDescriptor *d, uint64_t k[3]) {   // its stage functions, 0 to 3
+    MTL4FunctionDescriptor *f[3] = {nil, nil, nil};
+    if ([d isKindOfClass:MTL4RenderPipelineDescriptor.class]) { MTL4RenderPipelineDescriptor *r = (MTL4RenderPipelineDescriptor *)d; f[0] = r.vertexFunctionDescriptor; f[1] = r.fragmentFunctionDescriptor; }
+    else if ([d isKindOfClass:MTL4MeshRenderPipelineDescriptor.class]) { MTL4MeshRenderPipelineDescriptor *m = (MTL4MeshRenderPipelineDescriptor *)d; f[0] = m.objectFunctionDescriptor; f[1] = m.meshFunctionDescriptor; f[2] = m.fragmentFunctionDescriptor; }
+    else if ([d isKindOfClass:MTL4ComputePipelineDescriptor.class]) f[0] = ((MTL4ComputePipelineDescriptor *)d).computeFunctionDescriptor;
+    int n = 0; for (int i = 0; i < 3; i++) if ((k[n] = fn_id(f[i]))) n++;
+    return n;
+}
+static int fn_busy(const uint64_t *k, int n) { for (int i = 0; i < n; i++) for (int j = 0; j < g_fn_nbusy; j++) if (g_fn_busy[j] == k[i]) return 1; return 0; }
+static int fn_claim(const uint64_t *k, int n) {   // waits until no capture under way has one of k's functions; returns how many it took (fn_release)
+    if (!n) return 0;
+    pthread_mutex_lock(&g_fn_mu);
+    struct timespec until; clock_gettime(CLOCK_REALTIME, &until); until.tv_sec += g_fn_wait_ms / 1000; until.tv_nsec += (long)(g_fn_wait_ms % 1000) * 1000000;
+    if (until.tv_nsec >= 1000000000) { until.tv_sec++; until.tv_nsec -= 1000000000; }
+    while ((fn_busy(k, n) || g_fn_nbusy + n > FN_BUSY_MAX) && pthread_cond_timedwait(&g_fn_cv, &g_fn_mu, &until) != ETIMEDOUT) {}
+    int took = g_fn_nbusy + n <= FN_BUSY_MAX ? n : 0;
+    for (int i = 0; i < took; i++) g_fn_busy[g_fn_nbusy++] = k[i];
+    pthread_mutex_unlock(&g_fn_mu);
+    return took;
+}
+static void fn_release(const uint64_t *k, int n) {
+    if (!n) return;
+    pthread_mutex_lock(&g_fn_mu);
+    for (int i = 0; i < n; i++) for (int j = 0; j < g_fn_nbusy; j++) if (g_fn_busy[j] == k[i]) { g_fn_busy[j] = g_fn_busy[--g_fn_nbusy]; break; }
+    pthread_cond_broadcast(&g_fn_cv); pthread_mutex_unlock(&g_fn_mu);
+}
 // A compile the archive captures, in the current flush period, counted there when it built (d: a base, or a native mesh pipeline (mtk_build); vd: the base has a vertex layout; *captured: it is in the period). No task options: a
 // captured base never imports archive entries (see the compaction crash below). One the capture refuses is built by the plain compiler (arch_cap_failed); a pipeline both refuse
 // returns the plain compiler's error, or the capture's when it gave none
 static id<MTLRenderPipelineState> arch_capture(MTL4PipelineDescriptor *d, NSError **e, int vd, int *captured) {
     if (captured) *captured = 0;
     if (!arch_capturing()) { ser_compile_begin(); id<MTLRenderPipelineState> ps = [g_comp4 newRenderPipelineStateWithDescriptor:d compilerTaskOptions:nil error:e]; ser_compile_end(); return ps; }
+    uint64_t fk[3]; int fn = fn_claim(fk, fn_ids(d, fk));
     ser_compile_begin(); ArchEpoch *ep = ep_enter(); NSError *ce = nil;
     id<MTLRenderPipelineState> ps = [ep->comp newRenderPipelineStateWithDescriptor:d compilerTaskOptions:nil error:&ce];
+    fn_release(fk, fn);
     int full = 0;
     if (ps) { ep_key(ep, d); atomic_fetch_add(&g_arch_new, 1); if (vd) { atomic_fetch_add(&ep->vd, 1); atomic_fetch_add(&g_arch_new_vd, 1); }
               if ([d isKindOfClass:MTL4MeshRenderPipelineDescriptor.class]) atomic_fetch_add(&ep->ms, 1);
@@ -9520,8 +9569,10 @@ static id<MTLRenderPipelineState> arch_capture(MTL4PipelineDescriptor *d, NSErro
 static id<MTLComputePipelineState> arch_capture_cs(MTL4ComputePipelineDescriptor *d, NSError **e, int *captured) {
     if (captured) *captured = 0;
     if (!arch_capturing()) { ser_compile_begin(); id<MTLComputePipelineState> ps = [g_comp4 newComputePipelineStateWithDescriptor:d compilerTaskOptions:nil error:e]; ser_compile_end(); return ps; }
+    uint64_t fk[3]; int fn = fn_claim(fk, fn_ids(d, fk));
     ser_compile_begin(); ArchEpoch *ep = ep_enter(); NSError *ce = nil;
     id<MTLComputePipelineState> ps = [ep->comp newComputePipelineStateWithDescriptor:d compilerTaskOptions:nil error:&ce];
+    fn_release(fk, fn);
     int full = 0;
     if (ps) { ep_key(ep, d); atomic_fetch_add(&g_arch_new, 1); atomic_fetch_add(&ep->cs, 1); full = atomic_fetch_add(&ep->n, 1) + 1 == g_arch_period_max; }
     ep_leave(ep); ser_compile_end();
@@ -10333,6 +10384,12 @@ static int compile_tasks(void) {
     int c = 0; size_t sz = sizeof c; if (sysctlbyname("hw.activecpu", &c, &sz, NULL, 0) || c < 2) c = 2;
     return c;
 }
+// The prebuild's order: the i-th pair handed out is pair i * stride mod n, stride about n / workers and coprime to n, so each pair is built once, and the pairs under way at once come
+// from as many stretches of the list, and rarely share a vertex shader: in list order, the workers' captures waited for each other on one (fn_claim)
+static uint64_t pre_stride(int n, int workers) {
+    uint64_t s = workers > 1 && n / workers > 1 ? (uint64_t)(n / workers) : 1, a, b, t;
+    for (;; s++) { for (a = s, b = (uint64_t)MAX(n, 1); b; t = a % b, a = b, b = t) {} if (a == 1) return s; }   // gcd(s, n) == 1
+}
 // threads: workers; wait: run on the calling thread until done (the tool), else in the background. Returns the number of pairs, -1 when there is nothing to do
 static int pso_prebuild(int threads, int wait, dispatch_qos_class_t qos) {
     shmap_load(); pso4_init();
@@ -10362,6 +10419,7 @@ static int pso_prebuild(int threads, int wait, dispatch_qos_class_t qos) {
     int n = (int)pairs.count; uint64_t t0 = bp_now();
     MLOG("pipeline prebuild: %d shader pairs of %s%s%s, %d workers (%s)", n, pp.UTF8String, txt2 ? " and " : "", txt2 ? pp2.UTF8String : "", threads, wait ? "tool" : prepare_on() ? "prepare step, before the first frame" : "background");
     atomic_store(&g_pre_next, 0);
+    uint64_t stride = pre_stride(n, threads);
     dispatch_group_t g = dispatch_group_create();
     for (int t = 0; t < threads; t++) dispatch_group_async(g, dispatch_get_global_queue(qos, 0), ^{
         for (;;) {
@@ -10369,7 +10427,8 @@ static int pso_prebuild(int threads, int wait, dispatch_qos_class_t qos) {
             // the first worker to find no pair left hands the period over: it is written once the compiles still under way in it return, not after the slowest of all
             if (i >= n) { if (i == n) arch_flush(); break; }
             if (atomic_load(&g_warm_stop)) break;   // the process is ending: the pairs left are built at the next start
-            pre_pair(pairs[(NSUInteger)i][0], pairs[(NSUInteger)i][1], zero);
+            NSUInteger p = (NSUInteger)((uint64_t)i * stride % (uint64_t)n);
+            pre_pair(pairs[p][0], pairs[p][1], zero);
             int d = ++g_pre_done;
             if (d % 1000 == 0) {
                 MLOG("pipeline prebuild: %d of %d pairs, %d built, %d already archived, %d left to the draws, %d failed, %.0f s", d, n, (int)g_pre_built, (int)g_pre_archived, (int)g_pre_skipped, (int)g_pre_failed, (bp_now() - t0) / 1e9);

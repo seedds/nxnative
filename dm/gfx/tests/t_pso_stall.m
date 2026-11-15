@@ -77,6 +77,33 @@ int main(void) { @autoreleasepool {
     mtl_init(); pso4_init();
     if (!g_comp4 || !g_arch_cap) { printf("t_pso_stall: no Metal 4 compiler, not run\n"); return 0; }
 
+    // captures that share a stage function wait for each other, at most g_fn_wait_ms (fn_claim, GitHub issue #815); others do not wait
+    {
+        shmap_load(); uint64_t ka[3], kb[3]; int na = fn_ids(pre_desc(@"v1", @"f2", 0), ka), nb = fn_ids(pre_desc(@"v1", @"f3", 0), kb);
+        EXPECT("fn: a vertex and a pixel function", 2, na); EXPECT("fn: the other pair too", 2, nb);
+        EXPECT("fn: the same vertex function", 1, ka[0] == kb[0]); EXPECT("fn: another pixel function", 1, ka[1] != kb[1]);
+        int ca = fn_claim(ka, na); __block _Atomic int got = 0; dispatch_group_t fg = dispatch_group_create(); uint64_t *kp = kb;
+        dispatch_group_async(fg, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{ int c = fn_claim(kp, nb); got = 1; fn_release(kp, c); });
+        uint64_t t0 = bp_now(); int cp = fn_claim(&kb[1], 1);
+        EXPECT("fn: a capture of another function does not wait", 1, bp_now() - t0 < 100 * NSEC_PER_MSEC); fn_release(&kb[1], cp);
+        usleep(300000); EXPECT("fn: a capture of the same function waits", 0, got);
+        fn_release(ka, ca);
+        EXPECT("fn: and goes on once the other is done", 0, dispatch_group_wait(fg, dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC)));
+        g_fn_wait_ms = 200; ca = fn_claim(ka, na); t0 = bp_now(); int cb = fn_claim(kb, nb); uint64_t waited = bp_now() - t0;
+        EXPECT("fn: a capture held by one that does not return gives up waiting", 1, waited >= 150 * NSEC_PER_MSEC && waited < 1500 * NSEC_PER_MSEC);
+        fn_release(kb, cb); fn_release(ka, ca); g_fn_wait_ms = FN_WAIT_MS;
+        EXPECT("fn: nothing left under way", 0, g_fn_nbusy);
+        // the prebuild's order hands out every pair once, the pairs under way at once far apart in the list
+        int bij = 1;
+        for (int n = 1; n <= 300 && bij; n++) for (int t = 1; t <= 16 && bij; t++) {
+            uint64_t s = pre_stride(n, t); NSMutableIndexSet *seen = [NSMutableIndexSet indexSet];
+            for (int i = 0; i < n; i++) [seen addIndex:(NSUInteger)((uint64_t)i * s % (uint64_t)n)];
+            bij = seen.count == (NSUInteger)n;
+        }
+        EXPECT("pre_stride: every pair once", 1, bij);
+        EXPECT("pre_stride: 14 workers over 33,365 pairs take them about 2,383 apart", 1, pre_stride(33365, 14) >= 2383 && pre_stride(33365, 14) < 2400);
+    }
+
     ArchEpoch *ep1 = g_ep; HoldCompiler *hold = [HoldCompiler new]; hold->compiler = ep1->comp;
     hold->entered = dispatch_semaphore_create(0); hold->release = dispatch_semaphore_create(0); ep1->comp = (id<MTL4Compiler>)hold;
     EXPECT("three pairs", 3, pso_prebuild(2, 0, QOS_CLASS_USER_INITIATED));

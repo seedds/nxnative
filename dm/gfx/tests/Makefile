@@ -94,8 +94,6 @@ t_refl: t_refl.m ../nvn/nvn_refl.m ../nvn/nvn_refl.h ../nvn/dmsh_chain.h
 	clang -O1 -g -Wall -I../nvn -fobjc-arc -o $@ t_refl.m ../nvn/nvn_refl.m -framework Metal -framework Foundation
 t_hmap: t_hmap.c ../nvn/nvn_hmap.h
 	clang -O1 -Wall -o $@ t_hmap.c
-t_cover: t_cover.c ../nvn/nvn_cover.h
-	clang -O1 -Wall -o $@ t_cover.c
 t_pace: t_pace.c ../nvn/nvn_pace.h
 	clang -O1 -Wall -o $@ t_pace.c
 t_timestamp: t_timestamp.c ../nvn/nvn_timestamp.h
@@ -119,8 +117,6 @@ check_t_thermal: t_thermal
 thermal-tsan: t_thermal_tsan
 	./t_thermal_tsan
 	DM_THERMAL_CAP=0 ./t_thermal_tsan
-t_fuse_check: t_fuse_check.m $(MTL_T_DEP)
-	clang $(CFLAGS) -fobjc-arc -o $@ t_fuse_check.m $(MTL_T_SRC) $(FW)
 t_perf_order: t_perf_order.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_perf_order.m $(MTL_T_SRC) $(FW)
 t_perf_order_tsan: t_perf_order.m $(MTL_T_DEP)
@@ -259,13 +255,6 @@ check_t_present_snap: t_present_snap
 t_reorder_chain: t_reorder_chain.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_reorder_chain.m $(MTL_T_SRC) $(FW)
 check_t_reorder_chain: RUN_ENV = MTL_DEBUG_LAYER=1
-t_defer_chain: t_defer_chain.m $(MTL_T_DEP)
-	clang $(CFLAGS) -fobjc-arc -o $@ t_defer_chain.m $(MTL_T_SRC) $(FW)
-check_t_defer_chain: RUN_ENV = MTL_DEBUG_LAYER=1
-t_zskip: t_zskip.m $(MTL_T_DEP)
-	clang $(CFLAGS) -fobjc-arc -o $@ t_zskip.m $(MTL_T_SRC) $(FW)
-t_xv: t_xv.m $(MTL_T_DEP)
-	clang $(CFLAGS) -fobjc-arc -o $@ t_xv.m $(MTL_T_SRC) $(FW)
 t_ub: t_ub.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_ub.m $(MTL_T_SRC) $(FW)
 t_gpuprof: t_gpuprof.m $(MTL_T_DEP)
@@ -276,8 +265,8 @@ t_dispatch_own: t_dispatch_own.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_dispatch_own.m $(MTL_T_SRC) $(FW)
 .PHONY: check_t_dispatch_own
 check_t_dispatch_own: t_dispatch_own
-	@set -e; for own in 0 1; do for enc in 0 1; do \
-	    DM_NVN_DISPATCH_OWN=$$own DM_NVN_ENC_THREAD=$$enc MTL_DEBUG_LAYER=1 ./t_dispatch_own; \
+	@set -e; for own in "" --own; do for enc in 0 1; do \
+	    DM_NVN_ENC_THREAD=$$enc MTL_DEBUG_LAYER=1 ./t_dispatch_own $$own; \
 	done; done
 t_dispatch_barrier: t_dispatch_barrier.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_dispatch_barrier.m $(MTL_T_SRC) $(FW)
@@ -369,27 +358,10 @@ t_mip_extent: t_mip_extent.m ../nvn/hle_nvn.c ../../host/crash.c ../../host/hle_
 .PHONY: check_t_mip_extent
 check_t_mip_extent: t_mip_extent
 	MTL_DEBUG_LAYER=1 ./t_mip_extent
-	MTL_DEBUG_LAYER=1 ./t_mip_extent --stencil-only
-t_rt_range_shape: t_rt_range_shape.m $(MTL_T_DEP)
-	clang $(CFLAGS) -fobjc-arc -o $@ t_rt_range_shape.m $(MTL_T_SRC) $(FW)
-t_rt_range_ro: t_rt_range_ro.m $(MTL_T_DEP)
-	clang $(CFLAGS) -fobjc-arc -o $@ t_rt_range_ro.m $(MTL_T_SRC) $(FW)
-t_rt_range: t_rt_range.m $(MTL_T_DEP)
-	clang $(CFLAGS) -fobjc-arc -o $@ t_rt_range.m $(MTL_T_SRC) $(FW)
-.PHONY: check_t_rt_range
-check_t_rt_range: t_rt_range
-	DM_NVN_UNWRITTEN_DC=0 MTL_DEBUG_LAYER=1 ./t_rt_range
-	MTL_DEBUG_LAYER=1 ./t_rt_range   # DontCare on by default: attachment bytes use the closed-form expectation of "one depth-stencil store saved per pass"
-	DM_NVN_UNWRITTEN_DC=0 MTL_DEBUG_LAYER=1 ./t_rt_range --disabled
-	DM_NVN_ENC_THREAD=1 DM_NVN_UNWRITTEN_DC=0 MTL_DEBUG_LAYER=1 ./t_rt_range   # the encode thread (the iOS default) records the depth plane copy's blits with options
-	DM_NVN_UNWRITTEN_DC=0 MTL_DEBUG_LAYER=1 ./t_rt_range --small-depth
-	DM_NVN_UNWRITTEN_DC=0 MTL_DEBUG_LAYER=1 ./t_rt_range --sample-attachment --both-flags
 t_rec_draws: t_rec_draws.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_rec_draws.m $(MTL_T_SRC) $(FW)
 t_ubc_wait: t_ubc_wait.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_ubc_wait.m $(MTL_T_SRC) $(FW)
-t_rt_depth_ro: t_rt_depth_ro.m $(MTL_T_DEP)
-	clang $(CFLAGS) -fobjc-arc -o $@ t_rt_depth_ro.m $(MTL_T_SRC) $(FW)
 t_pso_pending: t_pso_pending.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_pso_pending.m $(MTL_T_SRC) $(FW)
 t_shmap_warm: t_shmap_warm.m $(MTL_T_DEP)
@@ -531,9 +503,9 @@ t_attachment_capacity: t_attachment_capacity.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_attachment_capacity.m $(MTL_T_SRC) $(FW)
 .PHONY: check_t_attachment_capacity
 check_t_attachment_capacity: t_attachment_capacity
-	@for compiler in 0 1; do for td in 0 1; do for enc in 0 1; do \
-	    DM_PSO_MTL4=$$compiler DM_NVN_TBDR=$$td DM_NVN_ENC_THREAD=$$enc MTL_DEBUG_LAYER=1 ./t_attachment_capacity || exit $$?; \
-	done; done; done
+	@for compiler in 0 1; do for enc in 0 1; do \
+	    DM_PSO_MTL4=$$compiler DM_NVN_ENC_THREAD=$$enc MTL_DEBUG_LAYER=1 ./t_attachment_capacity || exit $$?; \
+	done; done
 t_image_attachment_store: t_image_attachment_store.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_image_attachment_store.m $(MTL_T_SRC) $(FW)
 check_t_image_attachment_store: RUN_ENV = MTL_DEBUG_LAYER=1
@@ -715,8 +687,8 @@ t_tg_spill: t_tg_spill.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_tg_spill.m $(MTL_T_SRC) $(FW)
 .PHONY: check_t_tg_spill
 check_t_tg_spill: t_tg_spill
-	MTL_DEBUG_LAYER=1 DM_NVN_DISPATCH_OWN=0 ./$<
-	MTL_DEBUG_LAYER=1 DM_NVN_DISPATCH_OWN=1 ./$<
+	MTL_DEBUG_LAYER=1 ./$<
+	MTL_DEBUG_LAYER=1 ./$< --own
 
 # A read ID keeps its read mark when it gets another texture: first-table GPU pixels, finalized IDs, IDs waiting for the read budget.
 t_pool_seen_replace: t_pool_seen_replace.m $(MTL_T_DEP)

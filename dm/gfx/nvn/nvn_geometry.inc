@@ -561,7 +561,7 @@ static int geo_mesh_run_fits(NvProg *pr) {
 }
 // The draw about to be dispatched (geo_mesh_encode, with its arguments bound): 1 when it joined the run instead
 static int geo_mesh_take(id<MTL4RenderCommandEncoder> en) {
-    if (!geo_mesh_run_on() || g_defer_replaying) return 0;
+    if (!geo_mesh_run_on()) return 0;
     NvProg *pr = g_geo_program;
     if (g_mrun.n && ((__bridge void *)en != (__bridge void *)g_mrun.en || g_geo_mesh.ps != g_mrun.ps || g_geo_mesh.fn != g_mrun.fn || pr->sh[0] != g_mrun.vs || pr->sh[1] != g_mrun.fs)) {
         static int once; if (!once++) MLOG("[RED] geometry mesh run: a draw reached the encoder changed from the run's (first case pass %llu); the run is drawn first", g_stat_pass);
@@ -1182,13 +1182,13 @@ static int geo_run_passes(uint32_t op, const void *a) {
 }
 static int geo_run_walk(id<MTL4RenderCommandEncoder> re) {
     int n = 1;
-    if (!geo_hoist_on() || S.tf_on || g_geo_split_depth || g_defer_replaying || !g_exec_next || g_ret_n > 8) return n;
+    if (!geo_hoist_on() || S.tf_on || g_geo_split_depth || !g_exec_next || g_ret_n > 8) return n;
     typeof(S) s0 = S; typeof(R) r0 = R; int pd = g_pso_dirty, dd = g_dss_dirty;
-    fz_cursor cur = {.p = g_exec_next, .ret_n = g_ret_n}; memcpy(cur.ret, g_ret, sizeof(*g_ret) * (size_t)g_ret_n);
+    op_cursor cur = {.p = g_exec_next, .ret_n = g_ret_n}; memcpy(cur.ret, g_ret, sizeof(*g_ret) * (size_t)g_ret_n);
     const uint8_t *p; op_hdr h; const void *a;
     static geo_run_access run;   // 128 KiB: not on the stack
     run.w.n = run.r.n = run.unknown = 0; geo_run_note(&run, &g_geo_run[0].access);
-    for (int guard = 0; guard < 10000 && n < GEO_RUN && fz_next(&cur, &p, &h, &a); guard++) {
+    for (int guard = 0; guard < 10000 && n < GEO_RUN && op_next(&cur, &p, &h, &a); guard++) {
         if (geo_run_passes(h.op, a)) continue;
         if (h.op != OP_DRAW && h.op != OP_DRAW_IDX) break;
         p_draw dt; p_draw_idx it;
@@ -1219,8 +1219,6 @@ static void geo_draw_(NvProg *pr, const p_draw *dw0, const p_draw_idx *di0, uint
     g_geo_nrun = 0;
     if (!g_geo_split_depth && geo_mesh_draw(pr, dw0, di0)) return;
     gcp_count(pr, g_geo_split_depth ? GCP_SPLIT : g_geo_why);
-    // Land deferred commands before checking their writes against the CPU read.
-    if (defer_has_active()) defer_fallback();
     lc_land(); rp_flush(); rp_end(); ubd_land();
     // This is already an encoder boundary. Start earlier GPU work before the
     // CPU prepares the next run; retain sub_cut's deferral/fence safety gates.
@@ -1237,14 +1235,14 @@ static void geo_draw_(NvProg *pr, const p_draw *dw0, const p_draw_idx *di0, uint
     if (n > 1) { g_geo_hoisted += n - 1; g_geo_hoist_runs++; }
     enc_r_end(re);
     typeof(S) s0 = S; typeof(R) r0 = R; int pd = g_pso_dirty, dd = g_dss_dirty;
-    fz_cursor cur = {.p = g_exec_next, .ret_n = g_ret_n};
+    op_cursor cur = {.p = g_exec_next, .ret_n = g_ret_n};
     if (n > 1) memcpy(cur.ret, g_ret, sizeof(*g_ret) * (size_t)g_ret_n);
     id<MTL4ComputeCommandEncoder> ce = nil;
     int packs = 0;
     for (int i = 0; i < n; i++) {
         if (i) {
             const uint8_t *p; op_hdr h; const void *a;
-            while (fz_next(&cur, &p, &h, &a) && p != g_geo_run[i].op) state_op(h.op, a);
+            while (op_next(&cur, &p, &h, &a) && p != g_geo_run[i].op) state_op(h.op, a);
         }
         if (!ce) ce = enc_c_begin(NULL);
         geo_gs_one(ce, &g_geo_run[i]);

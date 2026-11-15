@@ -4486,8 +4486,39 @@ static void mem_trim(unsigned long long frame) {
     size_t freed = malloc_zone_pressure_relief(NULL, 0);
     static int n; if (n++ < 40) MLOG("memory trim at frame %llu: %zu MB given back to the system", frame, freed >> 20);
 }
+// DM_ALIAS_SWEEP=N: every report (300 frames) the shared textures that nothing resolves to (no live serial, finalized serial or pin holds them) and that no lookup found in the last N submissions are released,
+// the same eviction a storage takeover does (a later lookup rebuilds the texture from the pool's bytes). What a cutscene left behind (its textures stay cached until another texture takes their storage over) goes back. 0 / unset = off; 600 is a sound start
+static void alias_sweep(unsigned long long frame) {
+    static int idle = -1; if (idle < 0) { const char *e = getenv("DM_ALIAS_SWEEP"); idle = e && atoi(e) > 0 ? atoi(e) : 0; if (idle) MLOG("idle shared texture sweep on: %d submissions (DM_ALIAS_SWEEP)", idle); }
+    if (!idle) return;
+    pthread_mutex_lock(&g_smu);
+    uint32_t n = 0, cap = 0; alias_key *ks = NULL;
+    for (uint32_t i = 0; i < g_alias.cap; i++) {
+        if (!g_alias.vals[i]) continue;
+        alias_key k; memcpy(&k, g_alias.keys + (size_t)i * g_alias.klen, sizeof k);
+        uint64_t seen = (uint64_t)(uintptr_t)nvn_hm_get(&g_alias_seen, &k);
+        if ((seen && g_fence + 1 - seen < (uint64_t)idle) || entry_holds(g_alias.vals[i]) || tex_object_pinned((__bridge id)g_alias.vals[i])) continue;
+        if (n == cap) { cap = cap ? cap * 2 : 64; alias_key *nk = realloc(ks, cap * sizeof *ks); if (!nk) break; ks = nk; }
+        ks[n++] = k;
+    }
+    unsigned long long freed = 0;
+    for (uint32_t j = 0; j < n; j++) {
+        void *old = nvn_hm_del(&g_alias, &ks[j]);
+        if (!old) continue;
+        nvn_hm_del(&g_alias_seen, &ks[j]);
+        id o = CFBridgingRelease(old);
+        if ([o respondsToSelector:@selector(allocatedSize)]) freed += ((id<MTLTexture>)o).allocatedSize;
+        if (g_alias_set) CFSetRemoveValue(g_alias_set, (__bridge const void *)o);
+        defer_obj_release(o);
+    }
+    if (n) { ser_note(0); g_alias_taken += n; }
+    pthread_mutex_unlock(&g_smu);
+    free(ks);
+    static int logs; if (n && logs++ < 60) MLOG("idle shared texture sweep at frame %llu: %u released, about %llu MB", frame, n, freed >> 20);
+}
 void mtl_mem_stat(unsigned long long frame, unsigned long long rss_mb) {
     mem_trim(frame);
+    alias_sweep(frame);
     static unsigned long long last_rss, last_gpu, last_frame; static int lines; unsigned long long gpu = (unsigned long long)(g_dev.currentAllocatedSize >> 20);
     unsigned long long dr = rss_mb > last_rss ? rss_mb - last_rss : last_rss - rss_mb, dg = gpu > last_gpu ? gpu - last_gpu : last_gpu - gpu;
     if (lines >= 400 || (lines && dr < 64 && dg < 64 && frame - last_frame < 3000)) return; lines++; last_rss = rss_mb; last_gpu = gpu; last_frame = frame;

@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 # Generate a stand-in for the "Nintendo extension" shared font (nintendo_ext.ttf): controller-button icons at the original private-use code points (A/B/X/Y, L/R/ZL/ZR/SL/SR, +/−, D-pad, stick direction arrows).
 # The host has no original system fonts; button icons in game text (e.g. Mario's GameMsg/Key.msbt: U+E0E0 = A button) render as "?" when the glyph is missing. Letters come from macOS's Arial Rounded Bold, knocked out of a solid plate.
-# Usage: make_ext_font.py out.ttf [letter-font.ttf]; needs fontTools (pip install fonttools)
+# --layout xbox / playstation makes the variant a launcher's Controller layout offers: Xbox's A/B/X/Y letters (the same shapes) with LB/RB/LT/RT and Menu/View, or
+# PlayStation's Cross/Circle/Square/Triangle with L1/R1/L2/R2 and Options/Create, so the icons match the pad's own labels.
+# Usage: make_ext_font.py [--layout switch|xbox|playstation] out.ttf [letter-font.ttf]; needs fontTools (pip install fonttools)
 import math, sys
 from fontTools.ttLib import TTFont
 from fontTools.fontBuilder import FontBuilder
@@ -67,7 +69,37 @@ def cross(cx, cy, half, arm):   # D-pad outline (one closed ring)
     return [(cx - a, cy + h, 1), (cx + a, cy + h, 1), (cx + a, cy + a, 1), (cx + h, cy + a, 1), (cx + h, cy - a, 1), (cx + a, cy - a, 1),
             (cx + a, cy - h, 1), (cx - a, cy - h, 1), (cx - a, cy - a, 1), (cx - h, cy - a, 1), (cx - h, cy + a, 1), (cx - a, cy + a, 1)]
 
-def build(out, letter_font):
+# PlayStation face symbols, drawn bare (white in the game's colour): the Xbox and Switch letters are plates with the letter knocked out, but a PlayStation prompt is
+# recognised by its shape, and a bare ring / square / triangle keeps the same weight as the letters beside them.
+def ps_cross(cx, cy, half, arm):
+    a = arm / 2
+    return rot([(cx - a, cy + half, 1), (cx + a, cy + half, 1), (cx + a, cy + a, 1), (cx + half, cy + a, 1), (cx + half, cy - a, 1),
+                (cx + a, cy - a, 1), (cx + a, cy - half, 1), (cx - a, cy - half, 1), (cx - a, cy - a, 1), (cx - half, cy - a, 1),
+                (cx - half, cy + a, 1), (cx - a, cy + a, 1)], cx, cy, 45)
+def ps_triangle(cx, cy, half, inset):
+    def tri(h):
+        return [(cx, cy + h, 1), (cx - h * 0.92, cy - h * 0.78, 1), (cx + h * 0.92, cy - h * 0.78, 1)]
+    return tri(half), tri(half - inset * 1.35)
+def ps_symbol(pen, cx, kind):
+    if kind == 'X':
+        contour(pen, ps_cross(cx, CY, 370, 150))
+    elif kind == 'O':
+        contour(pen, circle(cx, CY, 360)); contour(pen, circle(cx, CY, 360 - 125), hole=True)
+    elif kind == 'S':
+        h, th, rad = 330, 125, 55
+        contour(pen, rrect(cx - h, CY - h, cx + h, CY + h, rad))
+        contour(pen, rrect(cx - h + th, CY - h + th, cx + h - th, CY + h - th, max(0, rad - th * 0.7)), hole=True)
+    else:   # Triangle
+        outer, inner = ps_triangle(cx, CY, 390, 125)
+        contour(pen, outer); contour(pen, inner, hole=True)
+def ps_menu(pen, cx, minus):   # Options / Create: three bars, or two offset cards
+    if minus:
+        contour(pen, rrect(cx - 330, CY - 250, cx + 130, CY + 250, 45))
+        contour(pen, rrect(cx - 130, CY - 250, cx + 330, CY + 250, 45), hole=True)
+    else:
+        for y in (150, 0, -150): contour(pen, rrect(cx - 330, CY + y - 45, cx + 330, CY + y + 45, 40))
+
+def build(out, letter_font, layout='switch'):
     L = Letters(letter_font); glyphs = {}; adv = {}; cmap = {}
     def glyph(name, codes, width, draw):
         pen = TTGlyphPen(None); draw(pen, width / 2); glyphs[name] = pen.glyph(); adv[name] = width
@@ -104,10 +136,21 @@ def build(out, letter_font):
         return d
 
     pen = TTGlyphPen(None); glyphs['.notdef'] = pen.glyph(); adv['.notdef'] = 500
-    for i, t in enumerate(['A', 'B', 'X', 'Y']): glyph('btn' + t, [0xE0A0 + i, 0xE0E0 + i], 1000, round_btn(t))
-    for i, (t, w) in enumerate([('L', 900), ('R', 900), ('ZL', 1200), ('ZR', 1200), ('SL', 1200), ('SR', 1200)]):
-        glyph('btn' + t, [0xE0A4 + i, 0xE0E4 + i], w + 100, plate(t, w))
-    glyph('btnPlus', [0xE0B5, 0xE0EF], 1000, sign(False)); glyph('btnMinus', [0xE0B6, 0xE0F0], 1000, sign(True))
+    if layout == 'playstation':
+        for i, k in enumerate(['X', 'O', 'S', 'T']):   # A, B, X, Y: Cross, Circle, Square, Triangle
+            glyph('btn' + 'ABXY'[i], [0xE0A0 + i, 0xE0E0 + i], 1000, lambda pen, cx, k=k: ps_symbol(pen, cx, k))
+    else:
+        for i, t in enumerate(['A', 'B', 'X', 'Y']): glyph('btn' + t, [0xE0A0 + i, 0xE0E0 + i], 1000, round_btn(t))
+    shoulders = {'switch': ['L', 'R', 'ZL', 'ZR', 'SL', 'SR'], 'xbox': ['LB', 'RB', 'LT', 'RT', 'SL', 'SR'],
+                 'playstation': ['L1', 'R1', 'L2', 'R2', 'SL', 'SR']}[layout]
+    for i, t in enumerate(shoulders):
+        w = 1200 if len(t) > 1 else 900
+        glyph('btn' + ['L', 'R', 'ZL', 'ZR', 'SL', 'SR'][i], [0xE0A4 + i, 0xE0E4 + i], w + 100, plate(t, w))
+    if layout == 'switch':
+        glyph('btnPlus', [0xE0B5, 0xE0EF], 1000, sign(False)); glyph('btnMinus', [0xE0B6, 0xE0F0], 1000, sign(True))
+    else:   # Menu / View (Xbox) and Options / Create (PlayStation), with the same code points as + / −
+        glyph('btnPlus', [0xE0B5, 0xE0EF], 1000, lambda pen, cx: ps_menu(pen, cx, False))
+        glyph('btnMinus', [0xE0B6, 0xE0F0], 1000, lambda pen, cx: ps_menu(pen, cx, True))
     glyph('dpad', [0xE0EA], 1000, dpad(None))
     for c, dr in [(0xE0AB, 'right'), (0xE0AC, 'down'), (0xE0AD, 'up'), (0xE0AE, 'left')]: glyph('dpad_' + dr, [c, c + 0x40], 1000, dpad(dr))
     for c, (nm, deg) in zip(range(0xE090, 0xE098), [('right', 0), ('left', 180), ('up', 90), ('down', 270), ('rightup', 45), ('rightdown', 315), ('leftdown', 225), ('leftup', 135)]):
@@ -130,5 +173,12 @@ def build(out, letter_font):
     print('%s: %d glyphs, %d code points' % (out, len(order), len(cmap)))
 
 if __name__ == '__main__':
-    if len(sys.argv) < 2: sys.exit(__doc__ or 'usage: make_ext_font.py out.ttf [letter-font.ttf]')
-    build(sys.argv[1], sys.argv[2] if len(sys.argv) > 2 else '/System/Library/Fonts/Supplemental/Arial Rounded Bold.ttf')
+    args = sys.argv[1:]
+    layout = 'switch'
+    if '--layout' in args:
+        i = args.index('--layout')
+        layout = args[i + 1] if i + 1 < len(args) else ''
+        del args[i:i + 2]
+    if not args or layout not in ('switch', 'xbox', 'playstation'):
+        sys.exit(__doc__ or 'usage: make_ext_font.py [--layout switch|xbox|playstation] out.ttf [letter-font.ttf]')
+    build(args[0], args[1] if len(args) > 1 else '/System/Library/Fonts/Supplemental/Arial Rounded Bold.ttf', layout)

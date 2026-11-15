@@ -165,6 +165,9 @@ dm/host/front_role.h	present:*	task scheduling for windowless Mac games
 dm/host/dm_input.h	hle:*hid*	the shared input interface
 dm/host/motion_apple.h	hle:*SixAxisSensor*	controller motion supplied by GameController
 dm/host/pad_apple.h	hle:*hid*	controller face buttons from GameController
+dm/host/pad_hid.h	hle:*hid*	controller layout mapping and physical HID input
+dm/tools/make_ext_font.py	*:*	shared-font button icons: every game's Mac and iOS build
+dm/tools/make_shared_fonts.py	*:*	shared-font stand-ins: every game's Mac and iOS build
 dm/host/motion_fusion.h	hle:*SixAxisSensor*	six-axis motion mapping and orientation
 dm/host/motion_pro.h	hle:*SixAxisSensor*	passive Switch Pro, DualShock 4 and 8BitDo Ultimate 2 Wireless IMU decoders
 dm/host/motion_pro_mac.h	hle:*SixAxisSensor*	Mac Switch Pro, DualShock 4 and 8BitDo Ultimate 2 Wireless raw motion transport and routing

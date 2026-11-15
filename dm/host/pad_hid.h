@@ -1,7 +1,8 @@
 // Raw HID gamepads that GameController does not list (an 8BitDo in its own mode: a Bluetooth HID gamepad macOS pairs, GitHub issue #637): one device's buttons, hat and axes
 // as HID reports them, turned into Switch buttons and sticks. Pure, so tests/t_pad_hid.c checks it without a controller; pad_hid_mac.h reads the devices.
-// Buttons by position, as front_mac.m maps GameController (right A, bottom B, top X, left Y). The default map is 8BitDo's D-input numbering (HID button usages 1 A, 2 B, 4 X,
-// 5 Y, 7 / 8 LB / RB, 9 / 10 LT / RT, 11 select, 12 start, 14 / 15 stick clicks, by Xbox labels); DM_HID_MAP=A=2,B=1,… replaces entries, DM_HID_LOG=1 logs each usage pressed.
+// Buttons by position, as front_mac.m maps GameController (right A, bottom B, top X, left Y), or by their printed labels with DM_PAD_LAYOUT=xbox / playstation. The default map
+// is 8BitDo's D-input numbering (HID button usages 1 A, 2 B, 4 X, 5 Y, 7 / 8 LB / RB, 9 / 10 LT / RT, 11 select, 12 start, 14 / 15 stick clicks, by Xbox labels);
+// DM_HID_MAP=A=2,B=1,… replaces entries, DM_HID_LOG=1 logs each usage pressed.
 // Sticks: X / Y left, Z / Rz right (Rx / Ry on a device without Z); analog triggers (Brake / Accelerator) press ZL / ZR past half.
 // Nintendo's report descriptor (a Pro Controller clone of another vendor, such as a PowerA NANO, GitHub PR #989) is told by its reports, not its name or vendor (pad_hid_nin_bit):
 // a pad that declares the console's protocol is driven by it (pad_hid_mac.h: the handshake into report 0x30, read as pad_pro.h reads a Pro Controller); its simple report 0x3F,
@@ -69,8 +70,9 @@ static inline int pad_dupes_want(int n, int listed, int read, int due) { return 
 // DM_HID_MAP: comma-separated NAME=usage entries over the layout's map (an unknown name or a usage past 32 is skipped). Nintendo's report 0x3F uses
 // usages 1 B, 2 A, 3 Y, 4 X, 5 / 6 L / R, 7 / 8 ZL / ZR, 9 minus, 10 plus, 11 / 12 stick clicks, 13 Home, 14 Capture.
 static void pad_hid_init(pad_hid *h, const char *map, enum pad_hid_layout layout) {
-    static const uint8_t default_map[16] = {2, 1, 5, 4, 14, 15, 7, 8, 9, 10, 12, 11};
-    const uint8_t *button_map = default_map;
+    static const uint8_t def_pos[DM_PAD_BTN_COUNT] = {2, 1, 5, 4, 14, 15, 7, 8, 9, 10, 12, 11};   // Switch positions: bottom B, right A, left Y, top X
+    static const uint8_t def_lab[DM_PAD_BTN_COUNT] = {1, 2, 4, 5, 14, 15, 7, 8, 9, 10, 12, 11};   // printed labels: A, B, X, Y (Xbox, PlayStation)
+    const uint8_t *button_map = dm_pad_labels_mode() ? def_lab : def_pos;
     switch (layout) {
     case PAD_HID_NINTENDO: button_map = pad_hid_nin_map; break;
     case PAD_HID_X360: button_map = pad_hid_x360_map; break;
@@ -80,10 +82,13 @@ static void pad_hid_init(pad_hid *h, const char *map, enum pad_hid_layout layout
     memset(h, 0, sizeof *h); h->hat = -1; h->layout = layout;
     memcpy(h->map, button_map, sizeof h->map);
     for (int a = 0; a < PH_AXES; a++) h->axis[a] = a >= PH_BRAKE ? -1 : 0;
-    for (const char *s = map; s && *s; s = strchr(s, ',') ? strchr(s, ',') + 1 : "") {
-        const char *eq = strchr(s, '='), *end = strchr(s, ','); if (!eq || (end && eq > end)) continue;
+    for (const char *s = map, *end; s && *s; s = end ? end + 1 : "") {
+        end = strchr(s, ',');
+        const char *eq = strchr(s, '=');
+        if (!eq || (end && eq > end)) continue;
+        int b = dm_pad_btn_index(s, (size_t)(eq - s));
         int u = atoi(eq + 1);
-        for (int b = 0; b < 16; b++) if ((size_t)(eq - s) == strlen(pad_hid_names[b]) && !strncasecmp(s, pad_hid_names[b], eq - s) && u >= 0 && u <= 32) h->map[b] = (uint8_t)u;
+        if (b >= 0 && u >= 0 && u <= 32) h->map[b] = (uint8_t)u;
     }
 }
 static int pad_hid_axis_of(uint32_t page, uint32_t usage) {   // -1: not a gamepad axis
@@ -141,7 +146,7 @@ static uint64_t pad_hid_buttons(const pad_hid *h) {
     if (h->hat >= 0 && h->hat < 8) m |= hat[h->hat];
     if (h->has[PH_BRAKE] && h->axis[PH_BRAKE] > 0) m |= DM_BTN_ZL;
     if (h->has[PH_ACCEL] && h->axis[PH_ACCEL] > 0) m |= DM_BTN_ZR;
-    return m;
+    return dm_pad_remap(m);
 }
 static void pad_hid_sticks(const pad_hid *h, int32_t s[4]) {   // lx, ly, rx, ry; HID's Y grows downward, the Switch's upward
     int z = h->has[PH_Z];

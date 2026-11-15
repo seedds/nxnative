@@ -310,15 +310,7 @@ static void pad_read(GCExtendedGamepad *g) {
     hq_poll(); if (hq_blocks_input(g_hq.phase)) return;
     int p = g_merge ? 0 : pad_slot_of(&g_slots, (__bridge const void *)g.controller);
     if (p < 0 && (!g_press_to_join || pad_gc_unread(g.controller))) return;   // a controller read from its HID reports: GameController's controller of it stays unread
-    uint64_t m = dm_pad_face(g);   // by position, a Nintendo pad by its labels
-    #define K(btn, bit) if (btn.isPressed) m |= bit
-    K(g.leftShoulder, DM_BTN_L); K(g.rightShoulder, DM_BTN_R);
-    // Work around nonzero resting values (Xbox LT about 0.06 with isPressed true): digital Switch triggers actuate above 25% (PR #2504).
-    if (g.leftTrigger.value > 0.25f) m |= DM_BTN_ZL;
-    if (g.rightTrigger.value > 0.25f) m |= DM_BTN_ZR;
-    K(g.buttonMenu, DM_BTN_PLUS); K(g.buttonOptions, DM_BTN_MINUS); K(g.leftThumbstickButton, DM_BTN_LS); K(g.rightThumbstickButton, DM_BTN_RS);   // nil on pads without them: not pressed
-    K(g.dpad.left, DM_BTN_LEFT); K(g.dpad.up, DM_BTN_UP); K(g.dpad.right, DM_BTN_RIGHT); K(g.dpad.down, DM_BTN_DOWN);
-    #undef K
+    uint64_t m = dm_pad_buttons(g);   // by position (Switch layout), or by label (Nintendo pad / DM_PAD_LAYOUT), plus DM_PAD_MAP
     if (p < 0) {   // DM_PAD_PRESS_TO_JOIN=1: it joins at its first button
         GCController *c = g.controller; if (!m || (p = pad_join((__bridge const void *)c, pad_name(c))) < 0) return;
         g_held[p] = c; dm_motion_attach(c, p); pads_motion_changed(nil);
@@ -504,7 +496,7 @@ static void hidpad_show_player(hid_pad *d, int p, uint64_t m) {
 static void hidpad_read(hid_pad *d) {
     if (!g_input_on || hq_blocks_input(g_hq.phase)) return;
     int p = hidpad_player(d), full = hidpad_full(d);
-    uint64_t m = full ? d->pro_m : pad_hid_buttons(&d->st);
+    uint64_t m = full ? dm_pad_remap(d->pro_m) : pad_hid_buttons(&d->st);
     if (p < 0 && (!hidpad_first_press(d) || !m || (p = pad_join(d, d->name)) < 0)) return;   // joins at its first button
     hidpad_show_player(d, p, m);
     if (cp_poll()) return;   // the controller applet's prompt has the controllers

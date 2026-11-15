@@ -6,6 +6,7 @@ static int checks, fails;
 #define CHECK(c) do { checks++; if (!(c)) { fails++; printf("FAIL %s:%d %s\n", __FILE__, __LINE__, #c); } } while (0)
 
 int main(void) {
+    unsetenv("DM_PAD_LAYOUT"); unsetenv("DM_PAD_MAP");
     pad_hid h; int32_t s[4];
     pad_hid_init(&h, NULL, PAD_HID_DEFAULT);
     CHECK(pad_hid_buttons(&h) == 0);
@@ -109,6 +110,20 @@ int main(void) {
     CHECK(pad_dupes_want(2, 1, 0, 0) == -1); CHECK(pad_dupes_want(2, 1, 0, 1) == 1); CHECK(pad_dupes_want(2, 0, 0, 1) == 1);
     CHECK(pad_dupes_want(3, 1, 1, 0) == 1);   // a third pad of a model read already joins it without a wait
     CHECK(pad_dupes_want(1, 1, 1, 0) == 0);   // one unplugged: back to GameController
+
+    // DM_PAD_LAYOUT=xbox / playstation switches raw HID face defaults to printed labels (usage 1 A, 2 B, 4 X, 5 Y)
+    setenv("DM_PAD_LAYOUT", "xbox", 1); pad_hid_init(&h, NULL, PAD_HID_DEFAULT);
+    h.buttons = 1u << 0; CHECK(pad_hid_buttons(&h) == DM_BTN_A);
+    h.buttons = 1u << 1; CHECK(pad_hid_buttons(&h) == DM_BTN_B);
+    h.buttons = 1u << 3; CHECK(pad_hid_buttons(&h) == DM_BTN_X);
+    h.buttons = 1u << 4; CHECK(pad_hid_buttons(&h) == DM_BTN_Y);
+    setenv("DM_PAD_LAYOUT", "playstation", 1); pad_hid_init(&h, NULL, PAD_HID_DEFAULT);
+    h.buttons = 1u << 0; CHECK(pad_hid_buttons(&h) == DM_BTN_A);
+    // DM_PAD_MAP remaps/unbinds on top of DM_HID_MAP, analog triggers, and hat D-pad
+    setenv("DM_PAD_MAP", "L=ZL,ZL=L,A=B,B=A,DOWN=", 1);
+    h.buttons = 1u << 0; h.has[PH_BRAKE] = 1; h.axis[PH_BRAKE] = 0.5f; h.hat = 3;
+    CHECK(pad_hid_buttons(&h) == (DM_BTN_B | DM_BTN_L | DM_BTN_RIGHT));
+    unsetenv("DM_PAD_LAYOUT"); unsetenv("DM_PAD_MAP");
 
     printf("t_pad_hid: %d checks, %d failed\n", checks, fails);
     return fails != 0;

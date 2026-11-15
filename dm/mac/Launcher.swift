@@ -325,6 +325,7 @@ struct LauncherView: View {
                     Box { ForEach(rows) { SettingLine($0, m).equatable() } }
                 }
             }
+            envFiles
             // Reset is one button, not a row with a name, a symbol and a button that says it again; what it does is its help tag
             Button("Reset to Tested Defaults") { m.reset() }
                 .controlSize(.small).disabled(!m.changed)
@@ -333,6 +334,35 @@ struct LauncherView: View {
             lastLine.padding(.top, 16)
         }
         .padding(.horizontal, 20).padding(.bottom, 16)
+    }
+
+    /// What the env files set, as a section of its own after the advanced settings: there only when a file set something. One box a file, a line a variable with
+    /// the value the game gets (and the setting's name when the window has a row for it, which says "Set by an env file"), then where the file is
+    @ViewBuilder private var envFiles: some View {
+        if !EnvFiles.read.isEmpty {
+            Text(EnvFiles.read.count == 1 ? "Env file" : "Env files").font(.headline).padding(.leading, 10).padding(.top, 38).padding(.bottom, 10)
+            ForEach(Array(EnvFiles.read.enumerated()), id: \.offset) { i, file in
+                Box {
+                    ForEach(file.lines, id: \.key) { line in
+                        HStack(spacing: 8) {
+                            Text(line.key).font(.system(.body, design: .monospaced)).lineLimit(1).layoutPriority(1)
+                            if let name = m.settings.first(where: { $0.env == line.key })?.label { Text(name).foregroundStyle(.secondary).lineLimit(1) }
+                            Spacer(minLength: 12)
+                            Text(line.value).font(.system(.body, design: .monospaced)).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
+                                .help(line.value)
+                        }
+                        .textSelection(.enabled)
+                    }
+                }
+                HStack(spacing: 6) {
+                    Text(EnvFiles.shown(file.path)).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle).help(file.path)
+                    Spacer(minLength: 8)
+                    Button("Show in Finder") { NSWorkspace.shared.selectFile(file.path, inFileViewerRootedAtPath: "") }.buttonStyle(.link)   // the accent colour: it is clicked
+                }
+                .font(.footnote)
+                .padding(.horizontal, 10).padding(.top, 6).padding(.bottom, i == EnvFiles.read.count - 1 ? 0 : 14)
+            }
+        }
     }
 
     /// Play, once the cloud's save is compared with this Mac's: a save that changed on both sides is the player's pick, not the newer file's (SaveCheck)
@@ -1034,6 +1064,38 @@ struct CloudSavesRow: View {
     static func shown(_ path: String) -> String {
         guard path == drive || path.hasPrefix(drive + "/") else { return path }
         return (["iCloud Drive"] + path.dropFirst(drive.count).split(separator: "/").map(String.init)).joined(separator: " › ")
+    }
+}
+
+/// The env files launcher.c read before the window (env_file: the player's in the game's Application Support folder, then the app's in Resources/dm; KEY=VALUE
+/// lines, # a comment, the first file to set a variable wins and the launch environment over both), each with the variables that took effect from it
+/// (DM_ENV_FILE_KEYS) and the value the game gets
+enum EnvFiles {
+    struct File { let path: String; let lines: [(key: String, value: String)] }
+
+    static let read: [File] = {
+        let env = ProcessInfo.processInfo.environment
+        let keys = Set((env["DM_ENV_FILE_KEYS"] ?? "").split(separator: " ").map(String.init))
+        guard !keys.isEmpty else { return [] }
+        let paths = [info("DMTitleID").map { NSHomeDirectory() + "/Library/Application Support/nxnative/\($0)/env.txt" }, Bundle.main.resourcePath.map { $0 + "/dm/env.txt" }].compactMap { $0 }
+        var taken = Set<String>()
+        return paths.compactMap { path in
+            guard let text = try? String(contentsOfFile: path, encoding: .utf8) else { return nil }
+            let lines: [(key: String, value: String)] = text.split(whereSeparator: \.isNewline).compactMap { raw in
+                let line = raw.trimmingCharacters(in: .whitespaces)
+                guard !line.hasPrefix("#"), let eq = line.firstIndex(of: "="), eq != line.startIndex else { return nil }
+                let key = line[..<eq].trimmingCharacters(in: .whitespaces)
+                guard keys.contains(key), taken.insert(key).inserted else { return nil }
+                return (key, env[key] ?? String(line[line.index(after: eq)...]))
+            }
+            return lines.isEmpty ? nil : File(path: path, lines: lines)
+        }
+    }()
+
+    /// The player's file under ~, the app's inside the app
+    static func shown(_ path: String) -> String {
+        if let res = Bundle.main.resourcePath, path.hasPrefix(res + "/") { return "In the app: Resources" + path.dropFirst(res.count) }
+        return path.hasPrefix(NSHomeDirectory() + "/") ? "~" + path.dropFirst(NSHomeDirectory().count) : path
     }
 }
 

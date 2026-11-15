@@ -83,6 +83,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 | [The Legend of Zelda: Ocarina of Time](#the-legend-of-zelda-ocarina-of-time) | 0 | 0 | 2 | 0 | 0 | `game` ×2 |
 | [The Legend of Zelda: Tears of the Kingdom](#the-legend-of-zelda-tears-of-the-kingdom) | 0 | 0 | 9 | 0 | 0 | `game` |
 | [Xenoblade Chronicles 3](#xenoblade-chronicles-3) | 6 | 0 | 0 | 0 | 0 | `build` → `game` |
+| [Xenoblade Chronicles X: Definitive Edition](#xenoblade-chronicles-x-definitive-edition) | 6 | 0 | 0 | 1 | 0 | `game` |
 
 ## Games
 
@@ -604,6 +605,21 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
   - cut `+0x12418d8`: first arena subtraction, sign extension
   - cut `+0x12418dc`: first arena subtraction: -(512 MB + 128 KB)
   - cut `+0x12418e8`: first arena stored capacity: 512 MB + 128 KB
+
+### Xenoblade Chronicles X: Definitive Edition
+
+[Xenoblade Chronicles X: Definitive Edition](../../dm/games/0100453019AA8000/README.md), `0100453019AA8000`, [patches.py](../../dm/games/0100453019AA8000/patches.py).
+
+- **`game`**, address space, at goal, checked: both complete functions and their callees in base 1.0.0 and update 1.0.1; forged-build rewrite byte-identical; 1.0.1 opening-field gameplay with the iPhone alias size, first arena 95 MB committed: malloc region 60 GB → 4 GB and its first arena. Monolith's allocator calls nn::os directly; its sizes span two functions matched atomically. The 512 MB first arena is sized for this game; an engine rule needs shared-layout proof and dynamic sizing
+
+- **1.0.1 `main`** `3f242586…` ([patches.py:12](../../dm/games/0100453019AA8000/patches.py#L12))
+  - cut `+0x13f3cf0`: malloc address region: 60 GB to 4 GB
+  - cut `+0xbabe70`: first arena bump size, low part: mov x9,#0xffff
+  - cut `+0xbabe80`: first arena bump size: 512 MB + 128 KB + 64 KB - 1
+  - cut `+0xbabf04`: first arena subtraction, sign extension
+  - cut `+0xbabf0c`: first arena subtraction: -(512 MB + 128 KB)
+  - cut `+0xbabf1c`: first arena stored capacity: 512 MB + 128 KB
+- **function-matched** (`main` of builds without CUTS): Monolith malloc region and first arena: 2 functions, 6 cuts
 
 ## SDK cuts
 

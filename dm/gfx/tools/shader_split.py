@@ -2722,10 +2722,25 @@ def ue_inline_shaders(d, label, out):
         out.append((f'{label}#UE{at:x}', st, bytes(ctl), bytes(code)))
 
 def arh_entries(d):
-    """Monolith ARH1 index → (path, ARD offset, stored size). The XOR trie
+    """Monolith ARH1/ARH2 index → (path, ARD offset, stored size). The ARH1 XOR trie
     reconstructs full paths; the metadata table supplies the actual file bounds.
     Format: https://github.com/roccodev/ard-tools/blob/master/docs/arh1.md
     Xenoblade 3 2.2.1: 76,445 entries in bf3.arh, 9.05 GB in bf3.ard."""
+    if d[:4] == b'arh2':
+        # ARH2 (Xenoblade X DE) replaces paths with hashes. Entries are
+        # (u64 hash, u32 disk size, u32 expanded size); offsets accumulate
+        # aligned disk sizes, which already include any XBC1 wrapper.
+        # Layout: Nenkai/XbxDeTool, ArchiveHeaderFile.cs; checked against sts.arh.
+        if len(d) < 16: red('ARH2: truncated header')
+        count, align = struct.unpack_from('<2I', d, 4)
+        if not align or align & (align - 1): red('ARH2: invalid file alignment')
+        if count > (len(d) - 16) // 16: red('ARH2: index table out of bounds')
+        out, off = [], 0
+        for i in range(count):
+            key, size, _ = struct.unpack_from('<Q2I', d, 16 + i * 16)
+            if size: out.append((f'/#{key:016x}', off, size))
+            off += (size + align - 1) & -align
+        return out
     if len(d) < 48 or d[:4] != b'arh1': return []
     _, count, so, sn, no, nn, fo, fn, key = struct.unpack_from('<9I', d, 4)
     if nn != count * 8 or any(o > len(d) or n > len(d) - o for o, n in ((so, sn), (no, nn), (fo, fn * 24))): red('ARH1: index table out of bounds')
@@ -2760,13 +2775,13 @@ def arh_jobs(files, parts=64):
     for path, rel in files:
         if not path.endswith('.arh'): continue
         with open(path, 'rb') as f: d = f.read()
-        if d[:4] != b'arh1': continue
+        if d[:4] not in (b'arh1', b'arh2'): continue
         ard = path[:-4] + '.ard'
-        if not os.path.isfile(ard): red(f'{rel}: ARH1 index has no ARD data file')
+        if not os.path.isfile(ard): red(f'{rel}: ARH index has no ARD data file')
         entries = arh_entries(d); length = os.path.getsize(ard)
         if any(o > length or n > length - o for _, o, n in entries): red(f'{rel}: ARD entry out of bounds')
         step = max(1, (len(entries) + parts - 1) // parts)
-        jobs += [(ard, rel[:-4] + '.ard', (b'ARH1', entries[i:i + step])) for i in range(0, len(entries), step)]
+        jobs += [(ard, rel[:-4] + '.ard', (b'ARH', entries[i:i + step])) for i in range(0, len(entries), step)]
         used.update((path, ard))
     return jobs, used
 
@@ -2831,12 +2846,16 @@ def hcps_shaders(d, base, label):
             # 768-byte vertex + 256-byte geometry, two 0x880 controls). NVSD's
             # vertex size covers both; each NVN control gives its own code size.
             while c < pend:
-                if c + 0x708 > pend: red(f'{label} HCPS: truncated control')
-                nc = struct.unpack_from('<I', ctls, c + 0x20)[0]
-                nk = struct.unpack_from('<I', ctls, c + 0x704)[0]
-                if nc < 0x760 or c + nc > pend or not nk or k + nk > kend: red(f'{label} HCPS: shader exceeds program range')
+                # One asset can contain both Maxwell and NVN2 HCPS programs
+                # (Xenoblade X DE). Read each control's own version and lengths.
+                if c + NVN2_KEY_CTL > pend: red(f'{label} HCPS: truncated control')
+                nvn2 = nvn2_ctl(ctls[c:c + NVN2_KEY_CTL])
+                if not nvn2 and c + 0x708 > pend: red(f'{label} HCPS: truncated control')
+                nc = struct.unpack_from('<I', ctls, c + (0x30 if nvn2 else 0x20))[0]
+                nk = struct.unpack_from('<I', ctls, c + (0x44 if nvn2 else 0x704))[0]
+                if nc < (NVN2_KEY_CTL if nvn2 else 0x760) or c + nc > pend or not nk or k + nk > kend: red(f'{label} HCPS: shader exceeds program range')
                 ctl, code = ctls[c:c + nc], codes[k:k + nk]; c += (nc + 7) & ~7; k += nk
-                st = glslc_stage(ctl, code)
+                st = nvn2_stage(ctl, code) if nvn2 else glslc_stage(ctl, code)
                 why = check(label, st, ctl, code) if st else 'unknown stage'
                 if why: red(f'{label} HCPS SLCT {i} variant {j}: {why}')
                 out.append((f'{label}#HCPS@{base:#x}#var{i}.{j}', st, ctl, code))
@@ -3412,7 +3431,7 @@ def scan_file_in(args):
         if args[2][1] is None: red(args[2][2])
         lspk_shaders(args[2][1], rel, found)
         return rel, uniq_keys(found), var_pairs(found), trees
-    if len(args) > 2 and args[2][0] == b'ARH1':
+    if len(args) > 2 and args[2][0] == b'ARH':
         arh_shaders(path, rel, args[2][1], found)
         return rel, uniq_keys(found), var_pairs(found), trees
     if head[:4] == NLG_DICT:
@@ -3643,7 +3662,7 @@ def main():
     ca_jobs, cascs = casc_jobs(files)   # Diablo II: Resurrected's CASC archives (casc.py)
     cr_jobs, cras = cra_jobs(files)   # Mario Tennis Fever's CRA archive, its index in the NRO the game decodes at run time
     zp_jobs, zips = zip_jobs(files)   # Portal's game.zip (Deflate members)
-    ah_jobs, arhs = arh_jobs(files)   # Monolith's ARH1/ARD archives and embedded XBC1/HCPS programs
+    ah_jobs, arhs = arh_jobs(files)   # Monolith's ARH1/ARH2 indexes and embedded XBC1/HCPS programs
     fb_jobs, fbs = frostbite_jobs(files)   # EA SPORTS FC 27's Frostbite bundles, Oodle Leviathan decoded by the game's own decoder in the Mac host
     pd_jobs, pdats = pdat_jobs(files)   # Kirby Air Riders' PDAT archives: the PMAP records in byte ranges
     rp_jobs, rpfs = rpf_jobs(files, main_v)   # Red Dead Redemption's RPF6 archives, their tables decrypted with the key in main (rpf6.py)
@@ -3692,7 +3711,7 @@ def main():
     for name, rr in recs.items():
         with open(os.path.join(pkg, name), 'wb') as f: f.write(b''.join(rr))
     with open(mapout, 'w') as f:
-        kinds = ' / '.join(k for k, hit in (('BNSH / BAHS', any('#BNSH@' in r[4] or '#BAHS@' in r[4] for r in rows)), ('Unity Shader', any('#var' in r[4] and '#PMAP@' not in r[4] and '#BNSH@' not in r[4] and '#MSHD#' not in r[4] and '#SDF#' not in r[4] and '#GLSLC@' not in r[4] and '#SNVN@' not in r[4] and '#BSHD#' not in r[4] for r in rows)),
+        kinds = ' / '.join(k for k, hit in (('BNSH / BAHS', any('#BNSH@' in r[4] or '#BAHS@' in r[4] for r in rows)), ('Monolith HCPS / SLCT', any('#HCPS@' in r[4] for r in rows)), ('Unity Shader', any('#var' in r[4] and '#HCPS@' not in r[4] and '#PMAP@' not in r[4] and '#BNSH@' not in r[4] and '#MSHD#' not in r[4] and '#SDF#' not in r[4] and '#GLSLC@' not in r[4] and '#SNVN@' not in r[4] and '#BSHD#' not in r[4] for r in rows)),
                                             ('Retro Studios SNVN', any('#SNVN@' in r[4] for r in rows)),
                                             ('phx PMAP', any('#PMAP@' in r[4] for r in rows)), ('MSHD', any('#MSHD#' in r[4] for r in rows)), ('GLSLC', any('#GLSLC@' in r[4] for r in rows)), ('RE Engine SDF', any('#SDF#' in r[4] for r in rows)),
                                             ('MT Framework SPK', any('#MTSPK@' in r[4] for r in rows)), ('MonoGame MGFX', any('#MGFX@' in r[4] for r in rows)),

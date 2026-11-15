@@ -409,6 +409,44 @@ def _gone(func, path, exc):   # shutil.rmtree's onexc hook (Python 3.12+, the sc
     if not (isinstance(exc, OSError) and exc.errno == errno.ENOENT): raise exc   # anything but "already gone" is a real failure
 
 
+OBSOLETE = 'obsolete'   # <build folder>/obsolete: what a build or a run of the game no longer uses, in one folder to delete (retire, empty_obsolete)
+STAMP = re.compile(r'\d{4}-\d{2}-\d{2} \d{6}')   # the start of the build or run that retired an entry, as its folder there is named: <date> <HHMMSS> <what>
+BUILD_STARTED = None   # this build's start, so named (cli)
+BUILD_FOLDERS = set()   # the build folders this build used (main), whose obsolete folders it empties once it succeeds
+
+
+def obsolete_stamp(): return time.strftime('%Y-%m-%d %H%M%S')
+
+
+def retire(work, p):
+    """p, under the build folder work, no longer used: moved into work/obsolete/<this build's start> build/ at its place in the build folder (a rename, at once however large), so that
+    what a build left behind is one folder to look at or delete; the next successful build empties it (empty_obsolete). On another volume (a move would be a copy) it is deleted"""
+    p = Path(p); rel = p.relative_to(work) if p.is_relative_to(work) else Path(p.name)
+    dest = work / OBSOLETE / f'{BUILD_STARTED or obsolete_stamp()} build' / rel
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    if dest.exists() or dest.is_symlink(): rmtree(dest)
+    try: os.rename(p, dest)
+    except OSError as e:
+        if e.errno != errno.EXDEV: raise
+        rmtree(p)
+
+
+def empty_obsolete(work):
+    """After a successful build: the obsolete folder's entries of earlier builds and runs go (those this build retired stay until the next one, so the previous chain's files can still be
+    taken back), and one line says what is left. A run of the game retires what its pipeline archive no longer uses there too (DM_OBSOLETE, mac_run)"""
+    root = work / OBSOLETE
+    if not root.is_dir(): return
+    for e in list(root.iterdir()):
+        m = STAMP.match(e.name)
+        if m and BUILD_STARTED and m.group(0) >= BUILD_STARTED: continue
+        try: rmtree(e)
+        except OSError as x: say(f'[RED] could not remove {e}: {x}')
+    size = tree_size(root)[1]
+    if size: say(f'no longer used: {amount(size, "B")} in {root}, removed after the next successful build (deleting the folder now costs nothing)')
+    else:
+        with contextlib.suppress(OSError): root.rmdir()
+
+
 def rmtree(p):
     """Make p gone. An entry that vanishes between the listing and its unlink is the goal reached, not an error: on an exFAT / FAT drive macOS keeps each AppleDouble `._x` beside `x`
     and drops it when `x` is deleted, so the walk's later unlink of `._x` raised FileNotFoundError and left the folder half deleted"""
@@ -2387,12 +2425,12 @@ def prune_stale_chains(sh, chain):
     old += [p for d, pat in ((sh / 'ios', r'b-[0-9a-f]{12}\.key'), (sh, r'mac-b-[0-9a-f]{12}\.key'), (sh / 'cache', r'b-[0-9a-f]{12}\.img(\.part)?'), (sh / 'ios', r'b-[0-9a-f]{12}\.img(\.part)?')) for p in listing(d, pat) if p.is_file()]
     gone, size = [], 0
     for p in old:
-        try: n = tree_size(p)[1] if p.is_dir() else p.stat().st_size; rmtree(p)
+        try: n = tree_size(p)[1] if p.is_dir() else p.stat().st_size; retire(sh.parent, p)
         except OSError as e: say(f'[RED] could not remove old shader libraries {p}: {e}'); continue
         gone.append(p); size += n
     if not gone: return []
     names = sorted({re.sub(r'\.(key|img(\.part)?)$', '', p.name).removeprefix('mac-') for p in gone})
-    say(f'removed old shader libraries {", ".join(names)} ({amount(size, "B")})')
+    say(f'removed old shader libraries {", ".join(names)} ({amount(size, "B")}) to {OBSOLETE}/')
     return names
 
 
@@ -2405,7 +2443,7 @@ def prune_shader_cache(sh, chain):
     hit does not rewrite it. No list (libraries from before the list): no entry goes. An entry newer than the list stays. Removals that fail are one [RED] line, as for the libraries.
     Logs the space of the sources and reflection: an entry's libraries are the Metal compiles'"""
     folder = sh / 'cache'
-    shader_cache.drop_generations(folder, chain, say)
+    shader_cache.drop_generations(folder, chain, say, remove=lambda p: retire(sh.parent, p))
     used = shader_lib.view(folder / f'b-{chain}') / '_b_cas.txt'
     try: keep, since = set(used.read_text().split()), used.stat().st_mtime
     except OSError: return 0
@@ -2734,7 +2772,7 @@ def mac_run(work, game, patched, host, font, msl, aoc, gfx, lang, env, logs, g, 
     parts: a dict that gets the command's parts (a multi-program application's programs.tsv, mac_programs). jit: what the game's nn::jit plugin makes in play goes to jit_capture/play, for the iPhone's image (capture_jit)"""
     rd = work / 'run'
     for d in ('save', 'temp'): (rd / d).mkdir(parents=True, exist_ok=True)
-    renv = {'DM_ROOT': work, 'DM_ROMFS': rfs.source(game), 'DM_SAVE': rd / 'save', 'DM_TEMP': rd / 'temp', 'DM_MSL_DIR': msl, 'DM_FONT_DIR': font}
+    renv = {'DM_ROOT': work, 'DM_ROMFS': rfs.source(game), 'DM_SAVE': rd / 'save', 'DM_TEMP': rd / 'temp', 'DM_MSL_DIR': msl, 'DM_FONT_DIR': font, 'DM_OBSOLETE': work / OBSOLETE}   # the pipeline archive's unused files go there
     if aoc: renv['DM_AOC_DIR'] = aoc
     if gfx == 'nvn': renv['DM_NVN_SHMAP'] = g.table('shader_map.tsv')
     if partial:
@@ -3278,7 +3316,7 @@ def main(args=None):
         if alias and not derived: derived = f'title {app:016X} is not game profile {g.id}\'s title {g.title_id:016X}'
         if derived: say(f'{derived}: packing {pkg_ver} from a profile derived from it')
     versions = [pkg_ver] if derived else need + ([pkg_ver] if pkg_ver not in need else [])
-    work = build_folder(args, nsp_dir, g.id)
+    work = build_folder(args, nsp_dir, g.id); BUILD_FOLDERS.add(work)
     out_ipa = Path(os.path.expanduser(args.out or OUT_IPA)).resolve() if (args.out or OUT_IPA) else work.parent / g.get('ipa')   # by default next to the build folder (the NSP folder, beside the NSPs and <id>_build/, unless --work-dir moved it)
     if shadowed and not (args.out or OUT_IPA): out_ipa = out_ipa.with_name(out_ipa.stem + '-provisional.ipa')   # never over the IPA of the game's real profile
     if mac_pack and (args.out or OUT_IPA) and out_ipa.suffix != '.app': raise BuildError(f'the Mac app (-o / OUT_IPA) must end in .app: {out_ipa}')
@@ -3528,8 +3566,11 @@ def cli(argv):   # returns the exit code: 0 done, 1 error, 130 interrupted, 143 
     # F5 in the same process, gets its own back
     main_thread = threading.current_thread() is threading.main_thread()
     saved = {s: signal.signal(s, _sigterm) for s in STOPS} if main_thread else {}
+    global BUILD_STARTED
+    BUILD_STARTED = obsolete_stamp(); BUILD_FOLDERS.clear()
     try:
         main(parse_args(argv))
+        for w in sorted(BUILD_FOLDERS): empty_obsolete(w)
         if NSP_FOLDER:   # a developer's work folder, which a player's NSP folder does not have (tree_tar.py)
             for w in NSP_FOLDER.glob('*-work'):
                 if re.fullmatch(r'[0-9A-Fa-f]{16}-work', w.name): tree_tar.pack_quiet(w, say)

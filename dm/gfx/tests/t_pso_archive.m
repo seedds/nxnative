@@ -660,6 +660,34 @@ int main(int argc, char **argv) { @autoreleasepool {
         printf("t_pso_archive %s: %d checks, %d failed\n", argv[1], checks, failed);
         return failed != 0;
     }
+    if (argc == 3 && !strncmp(argv[1], "--sweep-", 8)) {   // across fresh processes: two files of four bases; the next start takes the first file's alone, so once the prewarm and the
+        // pairs were asked for (arch_sweep's two conditions), the second leaves the archive (DM_OBSOLETE: into its folder), with its index
+        g_arch_period_max = 4; int seed = !strcmp(argv[1], "--sweep-seed");
+        pso4_init();
+        NSUInteger (^files)(void) = ^NSUInteger { return [[NSFileManager.defaultManager contentsOfDirectoryAtPath:@(argv[2]) error:nil] filteredArrayUsingPredicate:[NSPredicate predicateWithFormat:@"self ENDSWITH '.mtl4a'"]].count; };
+        for (int f = 0; f < (seed ? 2 : 1); f++) {
+            for (int i = 0; i < 4; i++) {
+                MTLRenderPipelineDescriptor *cd = desc(MTLPixelFormatRGBA8Unorm, 0, MTLPixelFormatRGBA8Unorm, MTLColorWriteMaskAll, 1);
+                cd.vertexDescriptor.layouts[16].stride = 16 * (i + 200 + 10 * f);
+                EXPECT("sweep: pipeline", 1, pso_build(cd, 0, &err) != nil);
+            }
+            dispatch_sync(g_arch_q, ^{ arch_flush(); }); arch_flush_wait();
+        }
+        if (seed) EXPECT("sweep: two files written", 2, (int)files());
+        else {
+            EXPECT("sweep: two files opened", 2, (int)g_arch_use.count);
+            EXPECT("sweep: every base from the archive", 4, (int)g_pb_archived);
+            atomic_store(&g_sweep_warm, 1); arch_sweep();
+            EXPECT("sweep: nothing goes before the pairs were asked for", 2, (int)files());
+            atomic_store(&g_sweep_pairs, 1); arch_sweep();
+            EXPECT("sweep: the file no base was taken from left the archive", 1, (int)files());
+            arch_sweep();
+            EXPECT("sweep: once", 1, (int)files());
+        }
+        [NSFileManager.defaultManager removeItemAtPath:@(dir) error:nil];
+        printf("t_pso_archive %s: %d checks, %d failed\n", argv[1], checks, failed);
+        return failed != 0;
+    }
     // Across fresh processes: a run ends in its prewarm, before any full period (Ocarina of Time's warm-up runs of 2026-11-10 without a window: 400-500 bases held, none written).
     // --warmflush-: the timer's flush in a prewarm the game plays through hands the period over once it is DM_PSO_ARCH_WARM_FLUSH_MS old, so a run killed after it (no exit write)
     // keeps them. --warmprep-: the same in the prepare step, which ends before the first frame, hands nothing over: the next start compiles them. --term-: SIGTERM while a draw is

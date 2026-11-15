@@ -476,11 +476,11 @@ def for_chain(folder, chain, say=print, **kw):
 def _file_size(p): return sum(os.path.getsize(p + s) for s in ('', '-wal') if os.path.isfile(p + s))
 
 
-def drop_generations(folder, chain, say=print):
+def drop_generations(folder, chain, say=print, remove=None):
     """After a successful build of chain: remove the cache folder's other generations whole, the files of older chains and cas.db (the one file from before generations).
     The build copied in every Metal compile it reused; a target it compiled nothing for (iOS after a Mac-only build, the Mac after an iPhone-only one) first takes the compiles of the newest
     other generation that holds some, the work its next build of that target can reuse. Nothing goes without the chain's own file, or when copying fails (a full drive).
-    Returns the names of the files removed"""
+    remove: what takes a file away (the NSP script's: into the build folder's obsolete/), else it is deleted. Returns the names of the files removed"""
     cur = chain_file(folder, chain)
     others = [p for p in generations(folder) if os.path.realpath(p) != os.path.realpath(cur)]
     if not others or not os.path.isfile(cur): return []
@@ -503,11 +503,13 @@ def drop_generations(folder, chain, say=print):
     for p in others:
         n = _file_size(p)
         try:
-            for s in ('', '-wal', '-shm', '-journal', '.lock'):
+            for s in ('', '-wal'):
+                if os.path.exists(p + s): (remove or os.unlink)(p + s)
+            for s in ('-shm', '-journal', '.lock'):
                 with contextlib.suppress(FileNotFoundError): os.unlink(p + s)
         except OSError as e: say(f'[RED] could not remove the old shader compile cache {p}: {e}'); continue
         gone.append(os.path.basename(p)); size += n
-    if gone: say(f'removed old shader compile caches {", ".join(gone)} ({size / 1e9:.2f} GB)')
+    if gone: say(f'removed old shader compile caches {", ".join(gone)} ({size / 1e9:.2f} GB){" to obsolete/" if remove else ""}')
     return gone
 
 

@@ -8962,6 +8962,34 @@ static int arch_keys_old(NSString *path) {   // an index of keys by library file
 static nvn_hmap g_arch_ix = {.klen = sizeof(uint64_t)};
 static NSArray<id<MTL4Archive>> *g_arch_ixf, *g_arch_run;
 static _Atomic uint64_t g_arch_asks;
+// The device's archive files opened at start, with how many pipelines were taken from each (arch_lookup, all threads): arch_sweep moves out those none was taken from once every
+// pipeline a start can want was asked for. A pipeline's key covers its libraries' bytes, so a chain change, a profile edit or a host change that alters a library or a descriptor
+// leaves the old pipelines where no lookup reaches them, and before this nothing removed them: Ocarina of Time's archive held about 33,700 indexed pipelines against a prewarm of
+// under 10,000 (13.9 GB). A file with some live pipelines stays whole; compaction drops its dead ones when it rewrites it
+@interface ArchUse : NSObject { @public NSString *path; __weak id<MTL4Archive> a; int pf, gone; uint64_t hits, keys; } @end   // keys: the pipelines its index names (0: none)
+@implementation ArchUse @end
+static char g_arch_use_tag; static NSArray<ArchUse *> *g_arch_use;
+static _Atomic int g_sweep_warm, g_sweep_pairs;   // the prewarm lists' pipelines, and every shader pair's pulling base (the prebuild), were asked for in this run
+static void arch_used(id<MTL4Archive> a) { ArchUse *u = objc_getAssociatedObject(a, &g_arch_use_tag); if (u) __atomic_fetch_add(&u->hits, 1, __ATOMIC_RELAXED); }
+// An archive file this host no longer uses, with its index: moved into DM_OBSOLETE's folder for this run, <DM_OBSOLETE>/<date time> <archive folder's name>/, which the NSP script's
+// next successful build empties (the Mac run command sets DM_OBSOLETE to <id>_build/obsolete, so what is unused is in one folder to look at or delete), else deleted (the app: nobody
+// reaches its files, and a move to another volume would be a copy). Returns 1 when it has left the archive
+static int arch_retire(NSString *p) {
+    static NSString *dir; static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        const char *o = getenv("DM_OBSOLETE"); if (!o || !*o) return;
+        time_t t = time(NULL); struct tm tm; localtime_r(&t, &tm); char s[32]; strftime(s, sizeof s, "%Y-%m-%d %H%M%S", &tm);
+        dir = [@(o) stringByAppendingPathComponent:[NSString stringWithFormat:@"%s %@", s, g_arch_dir.lastPathComponent ?: @"pso_archive"]];
+    });
+    int ok = 1;
+    for (NSString *f in @[p, arch_keys_path(p)]) {
+        if (access(f.fileSystemRepresentation, F_OK)) continue;
+        if (dir && [NSFileManager.defaultManager createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil] &&
+            !rename(f.fileSystemRepresentation, [dir stringByAppendingPathComponent:f.lastPathComponent].fileSystemRepresentation)) continue;
+        if (unlink(f.fileSystemRepresentation) && errno != ENOENT) ok = 0;
+    }
+    return ok;
+}
 // A pipeline from the archive: the file the index names for its key alone, else each file without a complete index (the bundle first among the p files, which plain skips: a base
 // with a vertex layout and a compute pipeline are never in one). *from_run: it came from a run file this compaction takes, so the compacting prewarm captures it again
 static int arch_compact_takes(id<MTL4Archive> a);
@@ -8970,7 +8998,9 @@ static id arch_lookup(MTL4PipelineDescriptor *d, int plain, int *from_run) {
     int compute = [d isKindOfClass:MTL4ComputePipelineDescriptor.class];
     id (^ask)(id<MTL4Archive>) = ^id(id<MTL4Archive> a) {
         atomic_fetch_add_explicit(&g_arch_asks, 1, memory_order_relaxed);
-        return compute ? (id)[a newComputePipelineStateWithDescriptor:(MTL4ComputePipelineDescriptor *)d error:nil] : (id)[a newRenderPipelineStateWithDescriptor:d error:nil];
+        id ps = compute ? (id)[a newComputePipelineStateWithDescriptor:(MTL4ComputePipelineDescriptor *)d error:nil] : (id)[a newRenderPipelineStateWithDescriptor:d error:nil];
+        if (ps) arch_used(a);
+        return ps;
     };
     uint64_t k = g_arch_ix.n ? arch_key(d) : 0;
     id<MTL4Archive> named = k ? (__bridge id<MTL4Archive>)nvn_hm_get(&g_arch_ix, &k) : nil;
@@ -9295,6 +9325,36 @@ static int arch_compact_takes(id<MTL4Archive> a) {   // a pipeline was found in 
     if (!g_compact_enabled || !g_compact_state) return g_compact_enabled;
     NSUInteger i = [g_arch_run.count ? g_arch_run : g_arch4 indexOfObjectIdenticalTo:a]; return i != NSNotFound && g_compact_state[i];   // g_arch4: a start that found no run file (the tests set it, files of no index)
 }
+// The archive files no pipeline was taken from, out of the archive (arch_retire), once every lookup that could reach one was made in this run: the prewarm lists' pipelines (every
+// pipeline a draw builds goes into pso_user.tsv, which the prewarm walks; g_sweep_warm) and every shader pair's pulling base (the prebuild's walk, which runs after a chain change, or
+// no pairs at all; g_sweep_pairs). Both, for every file: a run file can hold pulling bases beside bases with a vertex layout. A newer file that holds a key takes its lookups (the
+// index names the newest), so an older copy goes as well. Not in the bundle form of the prebuild (its work folder becomes the app's files), nor for a file the compaction
+// takes (it goes then). A pipeline a draw wants that the prewarm cannot make again (a specialized fragment it skipped) is built again when drawn, as after a compaction
+static void arch_sweep(void) {
+    if (!g_arch_use.count || g_pre_out || !atomic_load(&g_sweep_warm) || !atomic_load(&g_sweep_pairs) || atomic_load(&g_warm_stop)) return;
+    static os_unfair_lock lock = OS_UNFAIR_LOCK_INIT; int n = 0, np = 0; unsigned long long bytes = 0;
+    os_unfair_lock_lock(&lock);
+    for (ArchUse *u in g_arch_use) {
+        if (u->gone || __atomic_load_n(&u->hits, __ATOMIC_RELAXED)) continue;
+        id<MTL4Archive> a = u->a;
+        if (a && arch_compact_takes(a)) continue;
+        unsigned long long size = [[NSFileManager.defaultManager attributesOfItemAtPath:u->path error:nil] fileSize];
+        if (arch_retire(u->path)) { u->gone = 1; n++; np += u->pf; bytes += size; }
+    }
+    // What the files kept hold that no lookup took: a file with some live pipelines stays whole, and only compaction (which compiles each pipeline it keeps again, about 85 ms each
+    // on Ocarina of Time) would drop the rest. Counted from the indexes, once, so that whether compacting mostly unused files is worth that is a measurement, not a guess
+    static int told; int kept = 0, low = 0; unsigned long long taken = 0, named = 0, low_bytes = 0;
+    for (ArchUse *u in g_arch_use) {
+        if (u->gone || !u->keys) continue;
+        uint64_t h = MIN(__atomic_load_n(&u->hits, __ATOMIC_RELAXED), u->keys); kept++; taken += h; named += u->keys;
+        if (h * 4 < u->keys) { low++; low_bytes += [[NSFileManager.defaultManager attributesOfItemAtPath:u->path error:nil] fileSize]; }
+    }
+    int say_use = kept && !told; told = 1;
+    os_unfair_lock_unlock(&lock);
+    const char *o = getenv("DM_OBSOLETE");
+    if (n) MLOG("pipeline archive: %d files no pipeline was taken from (%d of bases without a vertex layout), %.1f MB, %s", n, np, bytes / 1048576.0, o && *o ? "moved to the obsolete folder" : "removed");
+    if (say_use) MLOG("pipeline archive: %d indexed files kept, %llu of their %llu pipelines taken; %d of them under a quarter used (%.1f MB)", kept, taken, named, low, low_bytes / 1048576.0);
+}
 static _Atomic int g_arch_cap_off;   // capturing failed in a period that held nothing yet: the store was not full, so no more captures this run (arch_cap_failed)
 static int arch_capturing(void) { return g_arch_cap && !atomic_load_explicit(&g_arch_cap_off, memory_order_relaxed); }
 static void arch_flush_from(ArchEpoch *only);
@@ -9400,10 +9460,10 @@ static void pso4_init(void) {
             for (NSString *n in names) {
                 NSString *p = [g_arch_dir stringByAppendingPathComponent:n];
                 if (!arch_keys_old(arch_keys_path(p))) { [keep addObject:n]; continue; }
-                unlink(p.fileSystemRepresentation); unlink(arch_keys_path(p).fileSystemRepresentation); nold++; pold += [n hasPrefix:@"p"];
+                arch_retire(p); nold++; pold += [n hasPrefix:@"p"];
             }
             if (pold) unlink([g_arch_dir stringByAppendingPathComponent:@"prebuilt.tsv"].fileSystemRepresentation);
-            if (nold) MLOG("pipeline archive: %d files indexed by library file names removed (%d of them the prebuild's): their bases are built again once", nold, pold);
+            if (nold) MLOG("pipeline archive: %d files indexed by library file names moved out (%d of them the prebuild's): their bases are built again once", nold, pold);
             names = keep;
             // each file with its index, in parallel: opening one takes about 15 ms (Breath of the Wild: 52 files in 715 ms, 78 in 1.2 s, one at a time)
             NSUInteger nn = names.count; NSMutableArray *opened = [NSMutableArray arrayWithCapacity:nn], *ixs = [NSMutableArray arrayWithCapacity:nn], *why = [NSMutableArray arrayWithCapacity:nn];
@@ -9419,18 +9479,21 @@ static void pso4_init(void) {
                 }
             } });
             NSMutableArray<id<MTL4Archive>> *ixf = [NSMutableArray array], *run = [NSMutableArray array]; int nopen = 0, np = 0, nidx = 0; unsigned long nkeys = 0;
+            NSMutableArray<ArchUse *> *use = [NSMutableArray array];
             for (NSUInteger i = 0; i < nn; i++) {
                 NSString *n = names[i], *p = [g_arch_dir stringByAppendingPathComponent:n]; int pf = [n hasPrefix:@"p"];
                 g_arch_seq = MAX(g_arch_seq, [n substringFromIndex:pf].intValue + 1);
                 if (opened[i] == NSNull.null) {
                     // never usable again on this system (an archive opens only on the major OS version it was made for): removed, as the old indexes are above; a
                     // prebuild file takes the prebuild's stamp with it, or the prebuild is skipped and its bases are left to the draws (about 0.3 s each on the submit thread, M1 Pro)
-                    MLOG("[RED] pipeline archive file %s not usable (%s): removed, its bases are built again", p.UTF8String, why[i] != NSNull.null ? [why[i] UTF8String] : "not a pipeline archive");
-                    unlink(p.fileSystemRepresentation); unlink(arch_keys_path(p).fileSystemRepresentation);
+                    MLOG("[RED] pipeline archive file %s not usable (%s): moved out, its bases are built again", p.UTF8String, why[i] != NSNull.null ? [why[i] UTF8String] : "not a pipeline archive");
+                    arch_retire(p);
                     if (pf) unlink([g_arch_dir stringByAppendingPathComponent:@"prebuilt.tsv"].fileSystemRepresentation);
                     continue;
                 }
                 id<MTL4Archive> a = opened[i]; NSArray *ix = ixs[i] != NSNull.null ? ixs[i] : nil;
+                ArchUse *u = [ArchUse new]; u->path = p; u->a = a; u->pf = pf; objc_setAssociatedObject(a, &g_arch_use_tag, u, OBJC_ASSOCIATION_RETAIN_NONATOMIC); [use addObject:u];
+                if (ix) u->keys = [ix[0] length] / sizeof(uint64_t);
                 bytes += [[NSFileManager.defaultManager attributesOfItemAtPath:p error:nil] fileSize];
                 nopen++; np += pf; nidx += ix != nil;
                 if (!pf) { [runf addObject:p]; [run addObject:a]; }
@@ -9439,7 +9502,7 @@ static void pso4_init(void) {
                 for (NSUInteger j = 0; j < nk; j++) if (!nvn_hm_get(&g_arch_ix, &kv[j])) { nvn_hm_put(&g_arch_ix, &kv[j], (__bridge void *)a); nkeys++; }   // newest first: the first holds it
                 if ([ix[1] intValue]) [ixf addObject:a]; else [pf ? archp : arch addObject:a];   // an incomplete index: its pipelines with no key are looked for in it
             }
-            g_arch_ixf = ixf; g_arch_run = run;
+            g_arch_ixf = ixf; g_arch_run = run; g_arch_use = use;
             arch_compact_pick(runf);
             MLOG("pipeline archive %s: %d files (%d of bases without a vertex layout, %d with an index of %lu pipelines), %.1f MB, opened in %.1f ms", g_arch_dir.UTF8String,
                  nopen, np, nidx, nkeys, bytes / 1048576.0, (bp_now() - t0) / 1e6);
@@ -10160,7 +10223,7 @@ static int pso_prebuild(int threads, int wait, dispatch_qos_class_t qos) {
     const char *ev = getenv("DM_PSO_PAIRS");
     NSString *pp2 = ev && *ev ? @(ev) : [g_shmap_path.stringByDeletingLastPathComponent stringByAppendingPathComponent:@"pso_pairs.tsv"];
     NSString *txt = [NSString stringWithContentsOfFile:pp encoding:NSUTF8StringEncoding error:nil], *txt2 = [NSString stringWithContentsOfFile:pp2 encoding:NSUTF8StringEncoding error:nil];
-    if (!txt) { MLOG("pipeline prebuild: no %s, nothing to build", pp.UTF8String); g_pre_running = 0; return -1; }
+    if (!txt) { MLOG("pipeline prebuild: no %s, nothing to build", pp.UTF8String); g_pre_running = 0; atomic_store(&g_sweep_pairs, 1); arch_sweep(); return -1; }   // no pairs: no pulling base is wanted
     if (txt2) txt = [txt stringByAppendingString:txt2];
     int zero = atomic_load(&g_depth_zero);
     NSString *want = pre_stamp(txt, zero);
@@ -10176,7 +10239,7 @@ static int pso_prebuild(int threads, int wait, dispatch_qos_class_t qos) {
     // done, unless its failures were found on another system build: then they are tried again (the rest are taken from the archive)
     if (pre_stamp_done([NSString stringWithContentsOfFile:stamp encoding:NSUTF8StringEncoding error:nil], want) && !other) { g_pre_running = 0; return -1; }
     g_pre_nolib = 0; g_pre_nolib_file = nil;
-    int n = (int)pairs.count; uint64_t t0 = bp_now();
+    int n = (int)pairs.count; uint64_t t0 = bp_now(); int done0 = g_pre_done;
     MLOG("pipeline prebuild: %d shader pairs of %s%s%s, %d workers (%s)", n, pp.UTF8String, txt2 ? " and " : "", txt2 ? pp2.UTF8String : "", threads, wait ? "tool" : prepare_on() ? "prepare step, before the first frame" : "background");
     atomic_store(&g_pre_next, 0);
     dispatch_group_t g = dispatch_group_create();
@@ -10202,6 +10265,7 @@ static int pso_prebuild(int threads, int wait, dispatch_qos_class_t qos) {
         else unlink(failp.fileSystemRepresentation);
         [pre_device_stamp(want) writeToFile:stamp atomically:YES encoding:NSUTF8StringEncoding error:nil];
         MLOG("pipeline prebuild done: %d pairs, %d bases built, %d already archived, %d left to the draws, %d failed, %.1f s", n, (int)g_pre_built, (int)g_pre_archived, (int)g_pre_skipped, (int)g_pre_failed, (bp_now() - t0) / 1e9);
+        if (g_pre_done - done0 == n && !atomic_load(&g_warm_stop)) { atomic_store(&g_sweep_pairs, 1); arch_sweep(); }   // every pair's base was asked for
         if (g_pre_nolib) MLOG("[RED] pipeline prebuild: %d pairs need a library file this app does not carry (first: %s), left to the draws until a package with them is installed (the pulling libraries <key>_bp.metallib: an IPA packed with IOS_PULL=0 leaves them out)", (int)g_pre_nolib, g_pre_nolib_file.UTF8String);
         if (fails.count) MLOG("pipeline prebuild: %lu pairs whose base failed are left to the draws (%s; %d of them failed on an earlier start of this system build, not built again); another system build tries them again",
                               (unsigned long)fails.count, failp.UTF8String, (int)g_pre_known_n);
@@ -10484,6 +10548,7 @@ static void warm_task(WarmTask *t) {
     }
 }
 static void warm_finish(void) {
+    if (g_warm_rps + g_warm_cps + g_warm_mps) { atomic_store(&g_sweep_warm, 1); arch_sweep(); }   // the lists asked for their pipelines: the files none was taken from go
     MLOG("pipeline prewarm done: shaders %llu / render pipelines %llu (specialized fragment skipped %llu) / compute pipelines %llu, background time %.1f ms; shader keys not in the shader map (another game version) %llu",
          (unsigned long long)g_warm_shaders, (unsigned long long)g_warm_rps, (unsigned long long)g_warm_skip_fz, (unsigned long long)g_warm_cps, (bp_now() - g_warm_t0) / 1e6, (unsigned long long)g_warm_skip_stale);
     if (g_warm_mps) MLOG("pipeline prewarm: %llu native task / mesh pipelines; so far %llu taken from the pipeline archive, %llu built and captured for it, %llu built without it",
@@ -10617,6 +10682,7 @@ static long pre_warm_lists(NSArray<NSString *> *paths, int threads) {
     }
     arch_flush_wait();   // with the C and M rows' captures, which the harvest queue makes after g: nothing is left for mtl_arch_save at exit
     g_warm_dict = nil; g_warm_loads = nil;
+    if (g_warm_rps + g_warm_cps + g_warm_mps) { atomic_store(&g_sweep_warm, 1); arch_sweep(); }
     MLOG("pipeline prebuild: the prewarm lists' %ld lines in %.1f s: %llu render pipelines (bases %llu compiled, %llu from the archives), %llu compute, %llu mesh, %d failed",
          lines, (bp_now() - t0) / 1e9, (unsigned long long)g_warm_rps, (unsigned long long)(g_pb_built - built0), (unsigned long long)(g_pb_archived - arch0),
          (unsigned long long)g_warm_cps, (unsigned long long)g_warm_mps, (int)atomic_load(&g_pre_warm_failed));

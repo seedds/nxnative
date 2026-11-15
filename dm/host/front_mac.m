@@ -144,10 +144,29 @@ static void cursor_hide_for_input(void) {
     NSView *v = g_win.contentView;
     if (NSPointInRect([v convertPoint:g_win.mouseLocationOutsideOfEventStream fromView:nil], v.bounds)) [NSCursor setHiddenUntilMouseMoves:YES];
 }
+// Pointer look (hle_hid.c dm_look_add), for a game whose profile has a look rate: a click on the picture captures the mouse (the pointer hides and stays put), its movement
+// turns the camera by DM_LOOK_SENS degrees per point (default 0.12), the left button is A, the right one B and the middle one the right stick's press; Esc, or the window
+// losing focus, lets the mouse go, and the next click takes it again. While it is not captured the left button is the touch screen, as before
+static int g_look_cap;
+static void look_capture(int on) {
+    if (on == g_look_cap) return;
+    g_look_cap = on;
+    CGAssociateMouseAndMouseCursorPosition(on ? false : true);
+    if (on) [NSCursor hide]; else [NSCursor unhide];
+    g_win.title = on ? @DM_GAME_NAME @" - mouse look (Esc releases the mouse)" : @DM_GAME_NAME;
+    LOG("front end: mouse look %s", on ? "on (Esc releases the mouse)" : "off");
+}
+static uint64_t g_look_btn;   // the mouse buttons while it looks, ORed into the keyboard's
+static void look_button(uint64_t bit, int down) { g_look_btn = down ? g_look_btn | bit : g_look_btn & ~bit; }
+static void look_move(NSEvent *e) {
+    if (!g_look_cap || !g_input_on) return;
+    static float sens = -1; if (sens < 0) sens = dm_look_sens(0.12f);
+    dm_look_add_at((float)e.deltaX * sens, (float)-e.deltaY * sens, NSProcessInfo.processInfo.systemUptime - e.timestamp);   // AppKit's mouse deltas are positive to the right and down
+}
 static void push(void) {
     int32_t lx = (g_d - g_a) * 32767, ly = (g_w - g_s) * 32767;
     int32_t rx = (g_rr - g_rl) * 32767, ry = (g_ru - g_rd) * 32767;
-    dm_input_set(g_btn, lx, ly, rx, ry);
+    dm_input_set(g_btn | g_look_btn, lx, ly, rx, ry);   // pointer look (Pokopia): the mouse buttons while the mouse is captured
 }
 static int key_bit(unsigned short code) {
     switch (code) {
@@ -173,6 +192,7 @@ static void on_key(NSEvent *e, int down) {
         if (down && g_cp.phase == CP_OPEN) { if (c == 53 || c == 40) g_cp_cancel = 1; else if (c == 36 || c == 38) g_cp_confirm = 1; cp_poll(); }
         return;
     }
+    if (c == 53 && g_look_cap) { if (down) { look_capture(0); g_look_btn = 0; push(); } return; }   // Esc lets the mouse go (pointer look)
     switch (c) { case 13: g_w = down; break; case 0: g_a = down; break; case 1: g_s = down; break; case 2: g_d = down; break; }
     // An arrow key pressed with Shift held is the right stick until it is released; without Shift, the D-pad. The keyboard had no right stick: a 3D game's camera
     // could be turned only with a controller (Donkey Kong Bananza)
@@ -355,6 +375,7 @@ static void input_release(void) {
     g_input_on = 0;
     dm_motion_pro_active(0); hidpad_motion_clear();
     dm_switch2_active(0); dm_jc1_active(0);
+    look_capture(0); g_look_btn = 0;   // pointer look lets the mouse go with the focus
     g_btn = 0; g_w = g_a = g_s = g_d = 0; g_rl = g_ru = g_rr = g_rd = 0; push();
     if (g_mouse_down) { g_mouse_down = 0; dm_touch_set(NULL, 0); }
     pads_release();
@@ -692,8 +713,19 @@ static _Atomic double g_picture_aspect = 16.0 / 9.0;
 void front_picture_shape(int w, int h) { if (w > 0 && h > 0) g_picture_aspect = (double)w / h; }
 @interface DmGameView : NSView @end
 @implementation DmGameView
-- (void)mouseDown:(NSEvent *)e { [self mouseDragged:e]; }
+- (BOOL)acceptsFirstResponder { return YES; }
+- (void)mouseDown:(NSEvent *)e {
+    if (g_input_on && dm_look_on()) { if (!g_look_cap) look_capture(1); else { look_button(DM_BTN_A, 1); push(); } return; }   // pointer look: the first click captures, then the left button is A
+    [self mouseDragged:e]; }
+- (void)mouseMoved:(NSEvent *)e { look_move(e); }
+- (void)rightMouseDown:(NSEvent *)e { (void)e; if (g_look_cap) { look_button(DM_BTN_B, 1); push(); } }
+- (void)rightMouseUp:(NSEvent *)e { (void)e; if (g_look_btn & DM_BTN_B) { look_button(DM_BTN_B, 0); push(); } }
+- (void)rightMouseDragged:(NSEvent *)e { look_move(e); }
+- (void)otherMouseDown:(NSEvent *)e { (void)e; if (g_look_cap) { look_button(DM_BTN_RS, 1); push(); } }
+- (void)otherMouseUp:(NSEvent *)e { (void)e; if (g_look_btn & DM_BTN_RS) { look_button(DM_BTN_RS, 0); push(); } }
+- (void)otherMouseDragged:(NSEvent *)e { look_move(e); }
 - (void)mouseDragged:(NSEvent *)e {
+    if (g_look_cap) { look_move(e); return; }
     if (!g_input_on) return;
     NSPoint p = [self convertPoint:e.locationInWindow fromView:nil]; NSSize b = self.bounds.size;
     double w = b.width, h = b.height;
@@ -703,7 +735,7 @@ void front_picture_shape(int w, int h) { if (w > 0 && h > 0) g_picture_aspect = 
     dm_touch t = {0, (float)fmin(fmax((p.x - x0) / w, 0), 0.999), (float)fmin(fmax(1 - (p.y - y0) / h, 0), 0.999)};   // The AppKit view origin is at bottom left, the touchscreen origin is at top left
     dm_touch_set(&t, 1); g_mouse_down = 1;
 }
-- (void)mouseUp:(NSEvent *)e { (void)e; if (g_mouse_down) { g_mouse_down = 0; dm_touch_set(NULL, 0); } }
+- (void)mouseUp:(NSEvent *)e { (void)e; if (g_look_btn & DM_BTN_A) { look_button(DM_BTN_A, 0); push(); } if (g_mouse_down) { g_mouse_down = 0; dm_touch_set(NULL, 0); } }
 // The drawable follows the view in pixels: a layer assigned to a layer-backed view kept the drawable at the first window's 1280x720 in fullscreen too, so the game picture was
 // scaled down to it and up again by the compositor
 - (void)fitDrawable {
@@ -1619,6 +1651,8 @@ void front_run(void (*guest)(void)) {
         // stay unset: mode=default forces this layer's HUD on, so the Metal HUD menu's Hide HUD left it on screen
         if (getenv("DM_METAL_HUD") && atoi(getenv("DM_METAL_HUD"))) LOG("front end: Metal performance HUD on (DM_METAL_HUD)");
         v.layer = g_layer; [(DmGameView *)v fitDrawable];
+        win.acceptsMouseMovedEvents = YES; [win makeFirstResponder:v];   // pointer look: the view gets the mouse's movement
+        if (dm_look_on()) LOG("front end: mouse look available: click the picture to capture the mouse, Esc releases it (DM_LOOK_SENS %.3f degrees per point)", dm_look_sens(0.12f));
         [win center];
         [win makeKeyAndOrderFront:nil];
         screen_refresh(win.screen ?: NSScreen.mainScreen);

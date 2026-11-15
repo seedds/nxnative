@@ -68,6 +68,12 @@ void dm_set_game_image_header(const void *mh);
 typedef struct { uint32_t id; float x, y; } dm_touch;
 void dm_touch_set(const dm_touch *t, int n);
 void dm_touch_script(const dm_touch *t, int n);   // scripted touches (DM_KEYS, DM_CTL; hle_hid.c): as dm_touch_set, but never recorded by DM_REC
+// Pointer look (hle_hid.c): turn the camera by this many degrees (right, up) through the right stick, exactly, over the next frames. dm_look_on: the game profile (or
+// DM_LOOK_RATE) gives the camera's turn rate, so a front end offers the mouse / look drags; dm_look_sens: DM_LOOK_SENS (degrees per point of movement), else def
+void dm_look_add(float right_deg, float up_deg);
+void dm_look_add_at(float right_deg, float up_deg, double age_s);   // the same for a movement that happened age_s seconds ago (the event's timestamp), which direct look places in time
+int dm_look_on(void);
+float dm_look_sens(float def);
 
 // Save not written (called by the host's hle_fs.c; the iOS front end provides a strong implementation of the same name that shows the native prompt "Not enough storage. Progress was not saved"; the default weak implementation only logs).
 // Timing: when a save write fails (disk full etc.) within one of the game's save transactions (between two Commits), so that this Commit is refused and the previously committed save is unchanged, it is called once per refused transaction;

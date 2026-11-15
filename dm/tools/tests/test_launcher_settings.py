@@ -119,7 +119,7 @@ class LauncherSettingsTests(unittest.TestCase):
             (Path(tmp) / 'main.fixups.tsv').write_text('# RENDER_SCALE\t1\n')   # the render scale row's condition
             listed = settings.build(BOTW, tmp, Path(tmp) / 'control.nacp')
         rows = {s['env']: s for s in listed['settings']}
-        self.assertEqual(listed['schema'], 1)
+        self.assertEqual(listed['schema'], 2)
         self.assertEqual([e for e, s in rows.items() if s.get('level') == 'basic'], ['DM_FPS_TARGET', 'DM_RENDER_SCALE', 'DM_OPMODE', 'DM_LANG', 'DM_RUMBLE'])
         self.assertEqual(rows['DM_RUMBLE_GAIN']['needs'], 'DM_RUMBLE=1')
         self.assertFalse({'level', 'needs'} & set(rows['DM_METAL_HUD']), 'a row without meta has no optional fields')
@@ -152,12 +152,37 @@ class LauncherSettingsTests(unittest.TestCase):
                     patch.object(settings.nacp, 'languages', return_value=['en-US']), patch.dict(os.environ, {'GFXAPI': api, **({'SETTINGS_PLATFORM': platform} if platform else {})}):
                 self.assertEqual(conforms(settings.build(gid, tmp, Path(tmp) / 'control.nacp'), schema, schema), [])
 
-    def test_schema_1_takes_new_sections_but_not_new_kinds(self):
-        """A section is a heading a reader draws by its name, so a new one stays schema 1; a new kind would not"""
+    def test_new_sections_keep_the_schema_but_new_kinds_do_not(self):
+        """A section is a heading a reader draws by its name, so a new one keeps the schema; a new kind would not (schema 2 added text)"""
         schema = json.loads((ROOT / 'docs/launcher.schema.json').read_text(encoding='utf-8'))
         row = {'env': 'DM_X', 'kind': 'toggle', 'section': 'Picture', 'label': 'X', 'note': '', 'default': '1', 'on': '1', 'off': '0'}
-        self.assertEqual(conforms({'schema': 1, 'game': BOTW, 'settings': [row]}, schema, schema), [])
-        self.assertNotEqual(conforms({'schema': 1, 'game': BOTW, 'settings': [{**row, 'kind': 'slider'}]}, schema, schema), [])
+        self.assertEqual(conforms({'schema': settings.SCHEMA, 'game': BOTW, 'settings': [row]}, schema, schema), [])
+        self.assertNotEqual(conforms({'schema': settings.SCHEMA, 'game': BOTW, 'settings': [{**row, 'kind': 'slider'}]}, schema, schema), [])
+        text = {'env': 'DM_X', 'kind': 'text', 'section': 'Game', 'label': 'X', 'note': '', 'default': ''}
+        self.assertEqual(conforms({'schema': settings.SCHEMA, 'game': BOTW, 'settings': [{**text, 'length': 19}]}, schema, schema), [])
+        self.assertNotEqual(conforms({'schema': settings.SCHEMA, 'game': BOTW, 'settings': [text]}, schema, schema), [], 'a text row has a length')
+
+    def test_link_play_rows(self):   # the co-op rows: Link Play, then the join address, internet play and its two text rows under it
+        rows = build(BOTW, 'nvn')
+        self.assertEqual((rows['DM_COOP']['kind'], rows['DM_COOP']['default']), ('toggle', 'off'))
+        self.assertEqual((rows['DM_COOP_JOIN']['kind'], rows['DM_COOP_JOIN']['default'], rows['DM_COOP_JOIN']['length'], rows['DM_COOP_JOIN']['needs']), ('text', '', 21, 'DM_COOP=auto'))
+        self.assertEqual((rows['DM_COOP_INTERNET']['kind'], rows['DM_COOP_INTERNET']['default'], rows['DM_COOP_INTERNET']['needs']), ('toggle', '0', 'DM_COOP=auto'))
+        for env, length in (('DM_COOP_ROOM', 19), ('DM_COOP_RELAY', 21)):
+            self.assertEqual((rows[env]['kind'], rows[env]['default'], rows[env]['length'], rows[env]['needs']), ('text', '', length, 'DM_COOP_INTERNET=1'))
+        envs = list(rows)
+        self.assertEqual(envs[envs.index('DM_COOP'):envs.index('DM_COOP') + 5], ['DM_COOP', 'DM_COOP_JOIN', 'DM_COOP_INTERNET', 'DM_COOP_ROOM', 'DM_COOP_RELAY'])
+
+    def test_interact_everywhere_row(self):   # an experimental switch under Link Play, after its internet rows
+        rows = build(BOTW, 'nvn')
+        self.assertEqual((rows['DM_COOP_INTERACT']['kind'], rows['DM_COOP_INTERACT']['default'], rows['DM_COOP_INTERACT']['needs']), ('toggle', '0', 'DM_COOP=auto'))
+        envs = list(rows)
+        self.assertEqual(envs.index('DM_COOP_INTERACT'), envs.index('DM_COOP_RELAY') + 1)
+
+    def test_story_coop_row(self):   # Story co-op, an experimental switch after Interact everywhere
+        rows = build(BOTW, 'nvn')
+        self.assertEqual((rows['DM_COOP_STORY']['kind'], rows['DM_COOP_STORY']['default'], rows['DM_COOP_STORY']['needs']), ('toggle', '0', 'DM_COOP=auto'))
+        envs = list(rows)
+        self.assertEqual(envs.index('DM_COOP_STORY'), envs.index('DM_COOP_INTERACT') + 1)
 
     def test_render_base_goes_into_the_render_scale_row(self):
         schema = json.loads((ROOT / 'docs/launcher.schema.json').read_text(encoding='utf-8'))
@@ -188,7 +213,8 @@ class LauncherSettingsTests(unittest.TestCase):
                          ('DM_X\ttoggle\t-\t0\talways\tGame\tX\t\tneeds=DM_NOPE=1\n', 'no row sets'),
                          ('DM_Y\ttoggle\t-\t0\talways\tGame\tY\t\tneeds=DM_X=on\n', 'never takes'),
                          ('DM_X\ttoggle\t-\t0\talways\tX\n', 'columns'), ('DM_X\ttoggle\t-\t0\talways\tsecret\tX\n', 'section'),
-                         ('DM_X\ttoggle\ton\t0\talways\tGame\tX\n', 'toggle values'), ('DM_X\ttoggle\t-\t2\talways\tGame\tX\n', 'defaults to 0 or 1')]:
+                         ('DM_X\ttoggle\ton\t0\talways\tGame\tX\n', 'toggle values'), ('DM_X\ttoggle\t-\t2\talways\tGame\tX\n', 'defaults to 0 or 1'),
+                         ('DM_Z\ttext\t0\t\talways\tGame\tZ\n', 'longest length'), ('DM_Z\ttext\t2\tabc\talways\tGame\tZ\n', 'at most 2')]:
             with self.subTest(why=why), tempfile.TemporaryDirectory() as tmp:
                 (Path(tmp) / 'settings.tsv').write_text('# header\n' + good + bad, encoding='utf-8')
                 with patch.object(settings, 'HERE', Path(tmp)), \

@@ -120,8 +120,17 @@ def settings_rules(listed):   # DMSettings: what the launcher accepts as each se
         if s['kind'] == 'range': rules.append({'env': s['env'], 'min': float(s['min']), 'max': float(s['max'])})
         elif s['kind'] == 'choice': rules.append({'env': s['env'], 'values': [o[0] for o in s['options']]})
         elif s['kind'] == 'toggle': rules.append({'env': s['env'], 'values': [s.get('on', '1'), s.get('off', '0')]})
+        elif s['kind'] == 'text': rules.append({'env': s['env'], 'length': int(s['length'])})
     return rules
 
+
+def profile_value(tables, key):   # one value of the profile's game.tsv (the tables folder is the profile folder), '' when it has none
+    try:
+        for line in (Path(tables) / 'game.tsv').read_text(encoding='utf-8').splitlines():
+            k, _, v = line.partition('\t')
+            if k == key: return v.strip()
+    except OSError: pass
+    return ''
 
 def info_plist(a, minos, icon):
     # LSSupportsGameMode off: macOS's Game Mode holds the GPU at its lowest clock while it is busy (docs/reference/frame-rate.md, macOS Game Mode holds the GPU at its lowest clock)
@@ -130,6 +139,9 @@ def info_plist(a, minos, icon):
          'CFBundleInfoDictionaryVersion': '6.0', 'LSMinimumSystemVersion': minos, 'LSArchitecturePriority': ['arm64'], 'NSHighResolutionCapable': True,
          'NSBluetoothAlwaysUsageDescription': 'Connect Switch 2 Joy-Con and Pro Controllers over Bluetooth.',
          'LSApplicationCategoryType': a.category or 'public.app-category.games', 'LSSupportsGameMode': False, 'DMTitleID': a.title_id.upper(), 'DMRomfsMarker': a.marker or '', 'DMLanguage': a.lang or 'en-US', 'DMSaveSyncChoice': 1}
+    # Link Play (hle_coop_*.c): a profile whose game.tsv names the DNS-SD service the module advertises (bonjour_service, Pokopia: _pokopia-ldn._udp) gets the local network entitlement text and the service
+    svc = profile_value(a.tables, 'bonjour_service')
+    if svc: p['NSLocalNetworkUsageDescription'] = "Link Play uses your local network to find and visit other players' towns."; p['NSBonjourServices'] = [svc]
     if icon: p['CFBundleIconFile'] = 'AppIcon'
     if a.settings:
         listed = json.loads(Path(a.settings).read_text(encoding='utf-8'))['settings']

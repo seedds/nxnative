@@ -88,7 +88,7 @@ static void env_file(const char *path) {   // KEY=VALUE lines, # starts a commen
     fclose(f);
 }
 
-static int saved_accepted(CFDictionaryRef rule, CFStringRef v, const char *s) {   // a saved choice this build still offers: one of its values, or a number in its range
+static int saved_accepted(CFDictionaryRef rule, CFStringRef v, const char *s) {   // a saved choice this build still offers: one of its values, a number in its range or a short text
     CFTypeRef values = CFDictionaryGetValue(rule, CFSTR("values"));
     if (values && CFGetTypeID(values) == CFArrayGetTypeID()) {
         for (CFIndex i = 0; i < CFArrayGetCount(values); i++) {
@@ -96,6 +96,14 @@ static int saved_accepted(CFDictionaryRef rule, CFStringRef v, const char *s) { 
             if (CFGetTypeID(o) == CFStringGetTypeID() && CFStringCompare(o, v, 0) == kCFCompareEqualTo) return 1;
         }
         return 0;
+    }
+    CFTypeRef len = CFDictionaryGetValue(rule, CFSTR("length"));
+    if (len && CFGetTypeID(len) == CFNumberGetTypeID()) {   // text: printable ASCII of at most length characters, as Setting.accepts
+        long n = 0; CFNumberGetValue(len, kCFNumberLongType, &n);
+        size_t k = strlen(s);
+        if ((long)k > n) return 0;
+        for (size_t i = 0; i < k; i++) if ((unsigned char)s[i] < 0x20 || (unsigned char)s[i] > 0x7E) return 0;
+        return 1;
     }
     CFTypeRef lo = CFDictionaryGetValue(rule, CFSTR("min")), hi = CFDictionaryGetValue(rule, CFSTR("max")); double l, h;
     if (!lo || !hi || CFGetTypeID(lo) != CFNumberGetTypeID() || CFGetTypeID(hi) != CFNumberGetTypeID()) return 0;

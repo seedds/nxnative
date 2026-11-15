@@ -128,13 +128,13 @@ static void nvn_profile_set_rt(const NVNcommandBuffer *c, int n, const NVNtextur
     if(!strcmp(dm_main_build(),"8275fbe1ec5191c279f3a943ad8524f4")) pthread_once(&mp4_quality_once,mp4_quality_init);
 }
 
-// Deliberately opt-in and independent from world resolution / UI-menu fitting.
-// The rewriter invokes this only through main.hud.runtime.tsv (DM_HUD_SCALE=85).
+// Screen-ratio layout remains separate from world resolution and animation.
+// The rewriter invokes this through main.hud.runtime.tsv for DM_SCREEN_RATIO=1610.
 #include "hud_layout.inc"
 static void mp4_hud_layout_v1(const void *properties,void *transform) {
     if(strcmp(dm_main_build(),"8275fbe1ec5191c279f3a943ad8524f4") || !properties || !transform) return;
-    const char *scale=getenv("DM_HUD_SCALE"),*ratio=getenv("DM_SCREEN_RATIO"),*mode=getenv("DM_INTERNAL_RESOLUTION");
-    if(!scale || strcmp(scale,"85") || !mode) return;
+    const char *ratio=getenv("DM_SCREEN_RATIO"),*mode=getenv("DM_INTERNAL_RESOLUTION");
+    if(!ratio || strcmp(ratio,"1610") || !mode) return;
     int full=0,wide=ratio && !strcmp(ratio,"1610");
     for(unsigned i=0;i<sizeof mp4_sizes/sizeof *mp4_sizes;i++) if(!strcmp(mode,mp4_sizes[i].name)) {full=1;wide|=strstr(mode,"_1610")!=NULL;break;}
     if(!full || !wide) return; // baseline, supersampling and 16:9 stay native
@@ -148,7 +148,7 @@ static void mp4_hud_layout_v1(const void *properties,void *transform) {
     if(!(atomic_fetch_or(&seen,bit)&bit)) LOG("MP4 HUD layout: group %d, %s/%s anchor, scale 85%%; native template root retained (experimental)",group,mp4_hud_groups[group].side<0?"left":mp4_hud_groups[group].side>0?"right":"center",mp4_hud_groups[group].anchor>0?"top":"bottom");
 }
 
-// Independent opt-in pause-menu candidate. Owner identity is checked in the
+// The 16:10 pause-menu layout. Owner identity is checked in the
 // original ROOM's template namespace, never inferred from frame history/draws.
 #include "pause_ui.inc"
 #include "menu_trace.inc"
@@ -177,8 +177,8 @@ static void mp4_menu_trace(const void *component,const void *node) {
 }
 static void mp4_pause_ui_v2(const void *component,void *payload,unsigned event) {
     if(strcmp(dm_main_build(),"8275fbe1ec5191c279f3a943ad8524f4")) return;
-    const char *fit=getenv("DM_MENU_FIT"),*mode=getenv("DM_INTERNAL_RESOLUTION"),*ratio=getenv("DM_SCREEN_RATIO");
-    if(!mode || (event!=2 && (!fit || strcmp(fit,"1610")))) return;
+    const char *mode=getenv("DM_INTERNAL_RESOLUTION"),*ratio=getenv("DM_SCREEN_RATIO");
+    if(!mode || !ratio || strcmp(ratio,"1610")) return;
     int full=0,wide=ratio && !strcmp(ratio,"1610");
     for(unsigned i=0;i<sizeof mp4_sizes/sizeof *mp4_sizes;i++) if(!strcmp(mode,mp4_sizes[i].name)) {full=1;wide|=strstr(mode,"_1610")!=NULL;break;}
     if(!full || !wide) return;
@@ -198,8 +198,8 @@ static void mp4_pause_ui_v2(const void *component,void *payload,unsigned event) 
 // projection stays native; the exact backdrop is excluded by provenance.
 static void mp4_menu_visual_v2(const void *node,void *packet,unsigned event) {
     if(strcmp(dm_main_build(),"8275fbe1ec5191c279f3a943ad8524f4")) return;
-    const char *fit=getenv("DM_MENU_FIT"),*mode=getenv("DM_INTERNAL_RESOLUTION"),*ratio=getenv("DM_SCREEN_RATIO");
-    if(!fit || strcmp(fit,"1610") || !mode) return;
+    const char *mode=getenv("DM_INTERNAL_RESOLUTION"),*ratio=getenv("DM_SCREEN_RATIO");
+    if(!mode || !ratio || strcmp(ratio,"1610")) return;
     int full=0,wide=ratio && !strcmp(ratio,"1610");
     for(unsigned i=0;i<sizeof mp4_sizes/sizeof *mp4_sizes;i++) if(!strcmp(mode,mp4_sizes[i].name)){full=1;wide|=strstr(mode,"_1610")!=NULL;break;}
     if(!full || !wide) return;

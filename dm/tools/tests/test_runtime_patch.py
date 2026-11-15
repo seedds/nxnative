@@ -283,11 +283,11 @@ class ScanSourcePatch(unittest.TestCase):
     def test_hud_layout_is_independent_default_off_and_strictly_validated(self):
         module, patched, fixups = self.fixture()
         rows = [r.split('\t') for r in self.runtime.generate_hud(module, patched, fixups).splitlines()]
-        self.assertEqual(rows[0][3], 'DM_HUD_SCALE')
-        self.assertEqual([r[1] for r in rows if r[0] == 'choice'], ['default', '85'])
+        self.assertEqual(rows[0][3], 'DM_SCREEN_RATIO')
+        self.assertEqual([r[1] for r in rows if r[0] == 'choice'], ['default', '1610'])
         stub = int(fixups['RUNTIME_HUD_LAYOUT_V1'], 0)
         self.assertEqual([r for r in rows if r[0] == 'write'],
-                         [['write', '85', '231240', self.profile.hud_layout_original,
+                         [['write', '1610', '231240', self.profile.hud_layout_original,
                            struct.pack('<I', B(self.profile.hud_layout_site, stub)).hex()]])
         base = self.runtime.generate(module, patched, fixups)
         self.assertNotIn('231240', base)  # baseline/scene manifests remain independent
@@ -356,7 +356,7 @@ class ScanSourcePatch(unittest.TestCase):
     def test_pause_ui_is_independent_default_off_and_validates_both_paths(self):
         module, patched, fixups=self.fixture()
         rows=[r.split('\t') for r in self.runtime.generate_pause(module,patched,fixups).splitlines()]
-        self.assertEqual(rows[0][3],'DM_MENU_FIT')
+        self.assertEqual(rows[0][3],'DM_SCREEN_RATIO')
         self.assertEqual([r[1] for r in rows if r[0]=='choice'],['default','1610'])
         self.assertEqual([r[2] for r in rows if r[0]=='write'],['916c0c']+[f'{off:x}' for off,_,_,_ in self.profile.menu_visual_hooks()])
         for off,_ in self.profile.pause_ui_sites+self.profile.pause_ui_abi+tuple((a,h) for a,h,_,_ in self.profile.menu_visual_hooks())+self.profile.menu_visual_abi()+(self.profile.scan_source_abi[1],):

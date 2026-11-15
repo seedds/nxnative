@@ -38,24 +38,8 @@ printf 'DM_INTERNAL_RESOLUTION=%s\nDM_PRESENT_UPSCALE=off\nDM_METAL_HUD=1\nDM_NV
 [ "${RT_TRACE:-}" = 1 ] && echo "DM_NVN_RT_TRACE=${RT_SIZE:-3456x2160}" >> "$OUT/env.txt"
 # FILL=1: the picture cropped to the window's shape instead of fitted with bars (DM_PICTURE_FIT=fill): 16:10 on a 16:10 screen in fullscreen
 [ "${FILL:-}" = 1 ] && echo "DM_PICTURE_FIT=fill" >> "$OUT/env.txt"
-# HUD_SCALE=85: experimental HUD visual children at 85%, with top/bottom anchors.
-# Separate runtime manifest; omitted/default retains the accepted HUD. Full 16:10 only.
-if [ -n "${HUD_SCALE:-}" ]; then
-    case "$HUD_SCALE" in default|85) ;; *) echo "HUD_SCALE must be default or 85" >&2; exit 2;; esac
-    if [ "$HUD_SCALE" = 85 ]; then
-        [ "${RATIO:-}" = 1610 ] && [[ "$MODE" = *_full ]] || { echo "HUD_SCALE=85 requires RATIO=1610 and a full-output mode" >&2; exit 2; }
-    fi
-    echo "DM_HUD_SCALE=$HUD_SCALE" >> "$OUT/env.txt"
-fi
-# MENU_FIT=1610: accepted pause canvas coverage + uniform foreground GUI render-copy fit.
-if [ -n "${MENU_FIT:-}" ]; then
-    case "$MENU_FIT" in default|1610) ;; *) echo "MENU_FIT must be default or 1610" >&2; exit 2;; esac
-    if [ "$MENU_FIT" = 1610 ]; then
-        [ "${HUD_LAYOUT_PROBE:-}" != 1 ] || { echo "MENU_FIT=1610 overlaps a camera probe; use the menu candidate without HUD_LAYOUT_PROBE" >&2; exit 2; }
-        [ "${RATIO:-}" = 1610 ] && [[ "$MODE" = *_full ]] || { echo "MENU_FIT=1610 requires RATIO=1610 and a full-output mode" >&2; exit 2; }
-    fi
-    echo "DM_MENU_FIT=$MENU_FIT" >> "$OUT/env.txt"
-fi
+# RATIO=1610 selects the accepted HUD 85% and pause-menu fit automatically.
+# Legacy HUD_SCALE/MENU_FIT environment values no longer select layout.
 # SHADOWS=2x or 4x: shadow tiles 2 or 4 times their size in a 4096 or 8192 atlas (DM_SHADOW_RESOLUTION, main.shadow.runtime.tsv)
 [ -n "${SHADOWS:-}" ] && echo "DM_SHADOW_RESOLUTION=$SHADOWS" >> "$OUT/env.txt"
 # LOD=x2, x4 or high: level switches 2 or 4 times as far away, or every model at its most detailed level (DM_MODEL_LOD, main.lod.runtime.tsv)

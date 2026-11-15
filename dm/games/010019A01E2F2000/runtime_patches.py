@@ -267,8 +267,8 @@ def generate_hud(module, patched, fixups):
     expected = b''.join(struct.pack('<I', w) for w in profile.hud_layout_words(stub))
     if stub+len(expected) > len(patched) or patched[stub:stub+len(expected)] != expected:
         raise ValueError('missing/out-of-range/mismatched HUD layout stub')
-    return manifest(module, patched, fixups, BUILD, 'DM_HUD_SCALE',
-                    [('85', profile.hud_layout_site, bytes.fromhex(profile.hud_layout_original), struct.pack('<I', B(profile.hud_layout_site, stub)))])
+    return manifest(module, patched, fixups, BUILD, 'DM_SCREEN_RATIO',
+                    [('1610', profile.hud_layout_site, bytes.fromhex(profile.hud_layout_original), struct.pack('<I', B(profile.hud_layout_site, stub)))])
 
 
 def generate_pause(module, patched, fixups):
@@ -297,7 +297,7 @@ def generate_pause(module, patched, fixups):
         if stub+len(expected)>len(patched) or patched[stub:stub+len(expected)]!=expected:
             raise ValueError('missing/out-of-range/mismatched pause UI stub')
         writes.append(('1610',off,bytes.fromhex(h),struct.pack('<I',B(off,stub))))
-    return manifest(module,patched,fixups,BUILD,'DM_MENU_FIT',writes)
+    return manifest(module,patched,fixups,BUILD,'DM_SCREEN_RATIO',writes)
 
 
 def generate_menu_trace(module, patched, fixups):

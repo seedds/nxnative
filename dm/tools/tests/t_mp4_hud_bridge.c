@@ -170,7 +170,7 @@ int main(int argc,char **argv) {
         enabled=mode==2;lookups=calls=0;
         pthread_jit_write_protect_np(0);memcpy(jit,source,size);
         uint32_t jump[]={0x58000050,0xd61f0200};memcpy(jit+0x138df60,jump,8);ptr=(void *)lookup;memcpy(jit+0x138df68,&ptr,8);
-        setenv("DM_HUD_SCALE",mode?"85":"default",1);f=fopen(argv[2],"r");CHECK(f);
+        setenv("DM_HUD_SCALE","85",1);setenv("DM_SCREEN_RATIO",mode?"1610":"default",1);f=fopen(argv[2],"r");CHECK(f);
         unsigned applied;char error[256];int rc=runtime_patch_apply(f,"8275fbe1ec5191c279f3a943ad8524f4",0x138ee20,jit,size,error,sizeof error,&applied);fclose(f);
         CHECK(!rc);CHECK(applied==(unsigned)(mode!=0));
         __builtin___clear_cache((char *)jit,(char *)jit+size);pthread_jit_write_protect_np(1);

@@ -36,7 +36,7 @@ int main(int argc,char **argv) {
         int change=kind!=2 && mode>=2 && mode!=3 && mode!=4;
         if(change)CHECK(kind?mp4_pause_fov(want):mp4_pause_bounds(want));
         pthread_jit_write_protect_np(0);memcpy(jit,src,size);uint32_t jump[]={0x58000050,0xd61f0200};memcpy(jit+0x138df60,jump,8);p=(void*)lookup;memcpy(jit+0x138df68,&p,8);
-        setenv("DM_MENU_FIT",mode?"1610":"default",1);setenv("DM_MENU_TRACE",mode?"1":"default",1);f=fopen(argv[kind==2?3:2],"r");CHECK(f);unsigned applied;char error[256];CHECK(!runtime_patch_apply(f,"8275fbe1ec5191c279f3a943ad8524f4",0x138ee20,jit,size,error,sizeof error,&applied));fclose(f);CHECK(applied==(mode?(kind==2?1u:35u):0u));
+        setenv("DM_MENU_FIT","1610",1);setenv("DM_SCREEN_RATIO",mode?"1610":"default",1);setenv("DM_MENU_TRACE",mode?"1":"default",1);f=fopen(argv[kind==2?3:2],"r");CHECK(f);unsigned applied;char error[256];CHECK(!runtime_patch_apply(f,"8275fbe1ec5191c279f3a943ad8524f4",0x138ee20,jit,size,error,sizeof error,&applied));fclose(f);CHECK(applied==(mode?(kind==2?1u:35u):0u));
         __builtin___clear_cache((char*)jit,(char*)jit+size);pthread_jit_write_protect_np(1);
         trace t={0};invoke(jit+(kind==2?0x101fc14:kind?0x3fd4c:0x916c0c),c,data,q,&t);
         CHECK(!memcmp(data,change?want:before,sizeof data));CHECK(t.x19==(uintptr_t)c);CHECK(t.x20==0x123);CHECK(t.x0==(uintptr_t)(kind?c:c+0x8c));

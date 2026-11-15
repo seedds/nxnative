@@ -6561,9 +6561,10 @@ static NvShader *shader_load(NSString *pc, int stage, int layer) {
     if (mst) { o->mesh_kind = [mst[@"kind"] isEqual:@"ts"] ? 1 : 2; o->mesh_threads = (uint16_t)[mst[@"threads"] unsignedIntValue]; o->mesh_payload = (uint16_t)[mst[@"payload"] unsignedIntValue];
                o->mesh_notask = o->mesh_kind == 2 && ![mst[@"task"] boolValue];
                // mesh_prim: the mesh function hands per-primitive values on (dmsh_meshstage.py's dm_prim_t: the primitive ID, per-primitive attributes), so its pipelines are built
-               // whole (mtk_build). The reflection does not say so; the function's source in the library does, and a library without the sources counts as one that may
-               if (o->mesh_kind == 2) { NSData *src = msl_data([NSString stringWithFormat:@"%@/%@.metal", g_msl_dir, pc]);
-                                        o->mesh_prim = !src || memmem(src.bytes, src.length, "dm_prim_t", 9) != NULL; }
+               // whole (mtk_build). The reflection does not say so; the compiled library does: Metal's compiler names each per-primitive output of a mesh function in the
+               // function's metadata (air.mesh_primitive_data), which an app's library carries too (it has no sources). A library that cannot be read counts as one that may
+               if (o->mesh_kind == 2) { static const char tag[] = "air.mesh_primitive_data"; NSData *ld = msl_data([NSString stringWithFormat:@"%@/%@.metallib", g_msl_dir, pc]);
+                                        o->mesh_prim = !ld || memmem(ld.bytes, ld.length, tag, sizeof tag - 1) != NULL; }
                if (o->mesh_kind == 2 && atomic_load(&g_depth_zero) && j[@"entry_z"]) entry = j[@"entry_z"]; }   // the depth convention, as a vertex shader takes it above
     if (j[@"entry_geometry_capture"]) {
         NSError *ge = nil; MTLFunctionConstantValues *gcv = [MTLFunctionConstantValues new];

@@ -2001,8 +2001,9 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 
 - **Symptom:** bindless handles read from a uniform buffer name the wrong texture when the game writes them earlier in the same submission.
 - **Cause:** the replay reads handles on the CPU, and a write queued earlier in the submission has not landed yet.
-- **Fix:** inline uniform updates keep where their data sits, so the handle is read from the newest one covering it (`pend_read`). The old limit of 256 writes per submission, after which every address counted as written, is gone: pending writes are now indexed by 4 KB page (8,192 per submission).
-- **Found on:** [Monster Hunter Rise](../../dm/games/0100B04011742000/README.md) (it queues more than 256 writes per submission).
+- **Fix:** inline uniform updates keep where their data sits, so the handle is read from the newest one covering it (`pend_read`). Pending writes use a growing entry list indexed by 4 KB page. Large writes spanning at least nine pages use a separate index list, which now grows with the entry capacity too. Its former 256-entry limit set `g_pend_over`, making every address look GPU-written and forcing stale reads even for unrelated handles. The lookup scratch array grows with both the page-node and entry capacities, so collecting wide and narrow hits remains in bounds. The conservative fallback remains when allocation or index capacity cannot grow, and its diagnostic names that failure.
+- **Check:** `python3 dm/gfx/tests/test_pending_wide.py` extracts the production tracker functions into a CPU-only C fixture. The baseline overflows on wide write 257; the fix passes growth across several allocations, newest-writer lookup, mixed-range scratch bounds, reset and generation rollover under AddressSanitizer/UBSan. No game or shader build was run for this host-only change. The fixture also passes after rebasing on current upstream; integrated gameplay remains pending.
+- **Found on:** [Monster Hunter Rise](../../dm/games/0100B04011742000/README.md) (it queues more than 256 writes per submission); Mortal Kombat 11 (`0100F2200C984000`) reported the overflow diagnostic for fragment uniform slot 3 +0x8; its installed host contains the growing entry list and the remaining fixed wide list.
 
 ### Storage buffer addresses in the game's own uniform buffer
 

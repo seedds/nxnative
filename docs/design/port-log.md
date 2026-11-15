@@ -28,6 +28,8 @@ A dated record of what is done, what is in progress and what is left on the Wind
 | `fb0a872` | AOT discovery: a jump table's index may depend on several values (the form of a switch on a computed value was left to the dispatcher): the benchmark's 736 tables all bounded, 0 JIT runs, 181.9 ms to 1.097 ms; except-gcc 26.1 ms to 0.64 ms. Verified in Docker (nxaot 29 of 29, host 100 of 100 twice, a tree without the JIT, the Windows cross-build) |
 | `06928a9` | Host: the JIT's first use no longer stops the thread that needs it: the decoder table and a spare instance are made ahead of time on a helper thread, and the JIT glue is compiled with `-O2` (it had no optimisation): 200-233 ms to 0.03-0.08 ms. Verified in Docker (nxaot 29 of 29, host 100 of 100 twice, `t_aot_host` 52 checks, the Windows cross-build) |
 | `9daae9a` | Port: the host's own C is compiled at `-O2` instead of `-O1` (CPU ASTC decode -22 %, CPU deswizzle -18 %, audio volume -20 %, the rest within noise; `-O3` adds nothing). Bench modes in five tests. Verified in Docker (host 100 of 100 twice, every check count the same at both levels, the Windows cross-build) |
+| `38293f9` | AOT: the recompiled corpus measured against the same C compiled natively (`native_ratio.py`), and three lowerings closer to it (sbfm as a shift pair, a loop's registers stored once on entry, NZCV stored at a call only where live): int_ops 1.60-1.65 to 1.28-1.31 times native, switch 2.57 / 1.87 to 2.30 / 1.77. Verified in Docker (vectors 0 mismatches, nxaot 29 of 29, host 100 of 100 twice, the Windows cross-build) |
+| `4b6f87d` | Port: a guest abort, `svcBreak` or fault prints the guest's call site and frames (the host's own return address and frames are not the guest's on the x86-64 engine); Apple's preprocessed text unchanged. Verified in Docker (`t_aot_host` 58 checks, host 100 of 100 twice, the Windows cross-build) |
 
 Done on the machine, not in the repository: Docker emptied on the owner's request (every image and container, the owner's other projects' included; the data volumes `aitrade_pgdata`, `smilepetstore_pgdata`, `smilepetstore_redisdata` kept).
 
@@ -39,7 +41,7 @@ Done on the machine, not in the repository: Docker emptied on the owner's reques
 
 ### In progress: written by agents, NOT built and NOT verified
 
-Verified and integrated on 2026-11-14 (nxaot CTest 28 of 28; host CTest 99 of 99 with and without `DM_AOT_ARENA_CHECK`, `NXAOT` given): the three rows that were `wip/second-pack-profile`, `wip/launcher-rule-by-function` and `wip/runner-scripts`. Agent at work: the recompiled corpus measured against the same C compiled natively for x86-64, the gap attributed and its largest avoidable part removed.
+Verified and integrated on 2026-11-14 (nxaot CTest 28 of 28; host CTest 99 of 99 with and without `DM_AOT_ARENA_CHECK`, `NXAOT` given): the three rows that were `wip/second-pack-profile`, `wip/launcher-rule-by-function` and `wip/runner-scripts`. Agent at work: safepoint polls that a bounded loop does not need (3 to 9 % on switch and the benchmark).
 
 No Docker image exists (the disk filled while ten worktrees were checked out, 280 MB each), so nothing below has been compiled or run. Each item is uncommitted in its worktree under `.claude/worktrees/`; a new session reads the diff there (`git -C <worktree> diff`), verifies it in Docker, and only then cherry-picks it. One build at a time: the two images (`nxnative-build` 1.9 GB, `nxnative-aot` 1.9 GB) do not fit beside the worktrees.
 
@@ -63,7 +65,7 @@ What only the owner can do, in the order that unblocks most:
 - Verify and integrate every row above (Docker; the Apple one on a Mac).
 - `t_astc_mesa` is registered outside `host_test` and is in no runner (declared in the manifest as CTest only).
 - Hot indirect targets: once a site is guarded its dominant target never binds again while other targets may, so over sessions a guarded site can lose dominance and its guard (the counts are binds, not calls).
-- After the tail-call fix: the JIT calls only functions with a standard entry natively (a JIT-only entry per function would cure it); a misses file written by an older host keeps its bogus `nonlocal` rows until it is removed; `hle_sdk16.c`'s `diag_abort` walks the host's frame chain, which on x86-64 is not the guest's (a game abort's backtrace on the port); `t_vk_present` failed once under a loaded `-j4` run ("took no frame for 100 ms").
+- After the tail-call fix: the JIT calls only functions with a standard entry natively (a JIT-only entry per function would cure it); a misses file written by an older host keeps its bogus `nonlocal` rows until it is removed; `hle_audio.c`'s call sites still log `host` on the port; the calling convention: ghccc measured up to 4.8 % faster than swifttailcc (it changes the packs' ABI: the owner's decision); `t_vk_present` failed once under a loaded `-j4` run ("took no frame for 100 ms").
 - Converted quads still take another provoking vertex than the Switch's (declared: the fix changes the quad's diagonal).
 - The Metal backend takes the first vertex on every shape where the Switch takes the last (a Mac).
 - On a real GPU: the cost of one dispatch per small index conversion, the 3 MiB arena for indirect draws.

@@ -279,6 +279,7 @@ DM_NVN_VSDUMP_KEY	diagnostic	Vertex key to capture, or `*` for all eligible vert
 DM_NVN_VSDUMP_MAX	diagnostic	Maximum post-vertex captures (default 1, or 256 for the wildcard key)
 DM_NVN_WAITS	diagnostic	`=1` turns on the wait ledger: every place a host or game thread waits on the CPU for the GPU or the encode thread, counted per frame
 DM_NVN_ZBLOCK	diagnostic	`=1` logs (`[zb]`) the all-zero blocks per level of each ASTC texture uploaded on the CPU (magenta when drawn); `=<folder>` also writes the raw storage of the first one per format and size
+DM_OBSOLETE	path	Folder the pipeline archive's unused files move to, into `<date time> <archive folder>/` there (the Mac run command sets `<id>_build/obsolete`, which the next successful build empties); unset, they are removed
 DM_OE_SCRIPT	diagnostic	Scripted applet state changes at given seconds, `key=value@seconds,…` with keys `focus`, `opmode` and `bg` (`bg=1` / `bg=0` run the whole background round trip), e.g. `bg=1@20,bg=0@25`
 DM_OODLE_HOST	path	The Mac host binary that `shader_split.py` runs in its Oodle tool mode to decode Trinity packs (`ONEPACK` files); set by the NSP script
 DM_OODLE_JOB	path	`=<job file>`: the host runs the game's own Oodle decoder on every record of the job file right before `nnMain`, writes `<job file>.out` and exits (Unreal shader archives)

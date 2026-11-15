@@ -3754,10 +3754,11 @@ static void tex_rep_init(void) {
     for (int set = 0; set < 2; set++) {
         const char *dir = dirs[set]; if (!dir || !*dir) continue;
         int n0 = g_ntrep;
-        for (NSString *n in [[NSFileManager defaultManager] contentsOfDirectoryAtPath:@(dir) error:nil]) {
-            tex_rep r = {0}; unsigned long long hs;
-            if (sscanf(n.UTF8String, "%ux%u_%u_%u_%16llx.bin", &r.w, &r.h, &r.fmt, &r.levels, &hs) != 5) continue;
-            r.hash = hs; r.set = set; snprintf(r.path, sizeof r.path, "%s/%s", dir, n.UTF8String);
+        NSString *ds = [NSString stringWithUTF8String:dir]; if (!ds) continue;
+        for (NSString *n in [[NSFileManager defaultManager] contentsOfDirectoryAtPath:ds error:nil]) {
+            tex_rep r = {0}; unsigned long long hs; const char *nm = n.UTF8String;
+            if (!nm || sscanf(nm, "%ux%u_%u_%u_%16llx.bin", &r.w, &r.h, &r.fmt, &r.levels, &hs) != 5) continue;
+            r.hash = hs; r.set = set; snprintf(r.path, sizeof r.path, "%s/%s", dir, nm);
             g_trep = realloc_or_die(g_trep, (size_t)(g_ntrep + 1) * sizeof *g_trep, "the texture replacements"); g_trep[g_ntrep++] = r;
         }
         if (g_ntrep > n0) g_trep_sets |= 1 << set;
@@ -3767,7 +3768,7 @@ static void tex_rep_init(void) {
 static id<MTLBuffer> tex_rep_buf(tex_rep *r, size_t total) {   // the file's content as a buffer, loaded once
     if (r->bad) return nil;
     if (!r->buf) {
-        NSData *data = [NSData dataWithContentsOfFile:@(r->path)];
+        NSString *ps = [NSString stringWithUTF8String:r->path]; NSData *data = ps ? [NSData dataWithContentsOfFile:ps] : nil;
         if (!data || data.length != total) { RED_ONCE(175, "texture replacement %s: %lu bytes, the upload copies %zu: not used", r->path, (unsigned long)data.length, total); r->bad = 1; return nil; }
         id<MTLBuffer> b = [g_dev newBufferWithBytes:data.bytes length:data.length options:MTLResourceStorageModeShared];
         if (!b) { r->bad = 1; return nil; }

@@ -352,11 +352,16 @@ def build_sources(exefs, romfs, modules):
     for d, _, names in os.walk(romfs):
         for n in names:
             with open(os.path.join(d, n), 'rb') as f: h = f.read(0x1000)
-            if h[:4] != UE3_TAG or not 0 < struct.unpack_from('<H', h, 4)[0] < 0x8000: continue
+            if h[:4] != UE3_TAG or len(h) < 6 or not 0 < struct.unpack_from('<H', h, 4)[0] < 0x8000: continue
             i = h.find(UE3_TAG, 4)
             if 0 < i and i + 16 <= len(h):
-                nb = (struct.unpack_from('<I', h, i + 12)[0] + max(struct.unpack_from('<I', h, i + 4)[0], 1) - 1) // max(struct.unpack_from('<I', h, i + 4)[0], 1)
-                oodle_ue3 += h[i + 16 + 8 * nb:i + 17 + 8 * nb] == b'\x8c'
+                word, fmt = (8, '<QQQ') if h[i:i + 8] == UE3_TAG + bytes(4) else (4, '<III')
+                if i + 4 * word > len(h): continue
+                bs, _, us = struct.unpack_from(fmt, h, i + word)
+                if not bs: continue
+                nb = (us + bs - 1) // bs
+                off = i + 4 * word + 2 * word * nb
+                oodle_ue3 += h[off:off + 1] == b'\x8c'
     import frostbite   # Frostbite's superbundles (EA SPORTS FC 27): every item of the cas files is Oodle Leviathan, decoded with the game's own decoder
     return shader_sources(imports, glsl_src, glslc_mods, spirv, len(uepak.unreal_paks(str(romfs), inline=False, mains=[exefs / 'main'])), trinity, len(uepak.unreal_paks(str(romfs), inline=True, mains=[exefs / 'main'])), gl_names, gl_src, gl_files, oodle_pkz, nro_imp,
                           oodle_gfpak=oodle_gfpak, oodle_ue3=oodle_ue3, frostbite=frostbite.is_frostbite(str(romfs)), romfs_glsl=romfs_glsl)

@@ -107,6 +107,7 @@ void own_alias_at_locked(const void *pool, int64_t off, void (^fn)(const alias_k
 void own_alias_each_locked(void (^fn)(const alias_key *k, id o));
 typedef struct { uint32_t n, cap, cells; uint64_t evicted, taken; } own_alias_stats;   // entries, capacity, index cells, evicted with pools / on takeover in total
 own_alias_stats own_alias_stats_locked(void);
+uint64_t own_alias_seen_locked(const alias_key *k);           // the submission of k's last lookup or creation (0: none)
 uint32_t own_alias_unref_locked(void);                        // entries no live or ghost entry resolves to (a walk: the memory report)
 
 // Retirement eligibility (see above). Caller holds g_smu

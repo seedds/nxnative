@@ -509,6 +509,7 @@ void own_prog_pin(uint64_t serial) {
     pin->refs++;
 }
 
+uint64_t own_alias_seen_locked(const alias_key *k) { return (uint64_t)(uintptr_t)nvn_hm_get(&g_alias_seen, k); }   // the submission of k's last lookup or creation (0: none): the memory breakdown's idle count (DM_NVN_MEM_BREAKDOWN)
 uint32_t own_alias_unref_locked(void) {
     CFMutableSetRef held = CFSetCreateMutable(NULL, 0, NULL); uint32_t n = 0;
     own_each_locked(^(uint64_t serial, id o, int ghost) { (void)serial; (void)ghost; CFSetAddValue(held, (__bridge const void *)o); });

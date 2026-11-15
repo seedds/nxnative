@@ -260,7 +260,7 @@ class Nvn(Base):
         self.assertEqual(seen, [False])
 
     def store(self):
-        s = nsp.shader_cache.Store(self.sh / 'cache/cas.db'); self.addCleanup(s.close)
+        s = nsp.shader_cache.Store(self.sh / f'cache/cas-{CHAIN}.db'); self.addCleanup(s.close)
         return s
 
     def entries(self):   # the shaders the cache holds, as the next build that runs would read them
@@ -282,6 +282,22 @@ class Nvn(Base):
         self.cas(OLD); said.clear()   # a reused build prunes too
         with mock.patch.object(nsp, 'say', said.append): self.build(False)
         self.assertEqual(self.ran, []); self.assertNotIn(OLD, self.entries()); self.assertIn(NEW, self.entries())
+
+    def test_older_compile_caches_go_with_a_build(self):   # other chains' files and the one file from before generations, once this chain has its own; a failed build keeps them
+        old = nsp.shader_cache.Store(self.sh / 'cache/cas.db'); old.put('metallib/ios/i.metallib', b'ios'); old.close()
+        other = nsp.shader_cache.Store(self.sh / 'cache/cas-fedcba987654.db'); other.put('metallib/mac/m.metallib', b'mac'); other.close()
+        self.build(False)
+        self.assertTrue((self.sh / 'cache/cas.db').exists())   # the chain has no file of its own yet
+        self.store().put('metallib/mac/a.metallib', b'a')
+        (self.sh / 'ios' / f'b-{CHAIN}.key').unlink()   # not reused: the step runs, and fails
+        def failing(cmd, log, env=None, cwd=None, on_line=None): raise nsp.BuildError('translator failed')
+        with mock.patch.object(nsp, 'run', failing), self.assertRaises(nsp.BuildError): self.build(False)
+        self.assertTrue((self.sh / 'cache/cas-fedcba987654.db').exists())
+        said = []
+        with mock.patch.object(nsp, 'say', said.append): self.build(False)
+        self.assertEqual(sorted(p.name for p in (self.sh / 'cache').glob('cas*.db')), [f'cas-{CHAIN}.db'])
+        self.assertEqual(self.store().get('metallib/ios/i.metallib'), b'ios')
+        self.assertTrue(any(m.startswith('removed old shader compile caches ') for m in said), said)
 
     def test_prune_shader_cache_needs_success_and_the_list(self):   # a failed build, or libraries from before the list, keep every entry
         self.build(False); self.cas(OLD)

@@ -195,6 +195,84 @@ class SeparateSamplerIds(unittest.TestCase):   # handle type 2: the texture word
         self.assertNotIn('raw_id', samp)
 
 
+class IntegerTexelFetch(unittest.TestCase):
+    # A sampled texture the shader reads by integer texel coordinates (or queries for its exact size) is flagged fetch: true, so a host that drops
+    # the top mip level of large textures keeps it whole; a sampled-only texture, an image and a buffer texture are not flagged
+    TEX = 'fp_t_cb720898_2000005A'          # direct tex, reg 128 (The Witcher 3)
+    TEXU = 'fp_t2ds_cb196614_10570000'      # tex_ubo array, depth2d (Kirby Air Riders)
+    TEXA = 'fp_t2das_cb2_0'                 # tex_c2a array (Luigi's Mansion 3)
+    IMG = 'fp_i_cb2_400'                    # image member
+    TBUF = 'fp_tb_cb2_400'                  # buffer texture member
+
+    def reflect(self, members, body, extra=None):
+        source = 'struct spvDescriptorSetBuffer0\n{\n' + ''.join(
+            f'    {t} {n} [[id({i})]];\n' for t, n, i in members) + '};\n' + body
+        res = {'sbufs': []}
+        if extra: res.update(extra)
+        return REFLECT('synthetic', 'ps', source, res)
+
+    def test_direct_texture_integer_read_is_flagged(self):
+        got = self.reflect([('texture2d<float>', self.TEX, 0)], f'float4 c = {self.TEX}.read(uint2(0, 0));\n')
+        self.assertEqual((got[0]['kind'], got[0].get('fetch')), ('tex', True))
+
+    def test_direct_texture_sample_only_is_not_flagged(self):
+        got = self.reflect([('texture2d<float>', self.TEX, 0)], f'float4 c = {self.TEX}.sample(s, uv);\n')
+        self.assertEqual((got[0]['kind'], got[0].get('fetch')), ('tex', None))
+
+    def test_direct_texture_width_query_is_flagged(self):   # TXQ: a step sized from the width reads half off a dropped texture
+        got = self.reflect([('texture2d<float>', self.TEX, 0)], f'uint w = {self.TEX}.get_width();\n')
+        self.assertEqual((got[0]['kind'], got[0].get('fetch')), ('tex', True))
+
+    def test_direct_texture_height_query_is_flagged(self):
+        got = self.reflect([('texture2d<float>', self.TEX, 0)], f'uint h = {self.TEX}.get_height();\n')
+        self.assertEqual((got[0]['kind'], got[0].get('fetch')), ('tex', True))
+
+    def test_bindless_array_indexed_read_is_flagged(self):
+        got = self.reflect([('array<depth2d<float>, 32>', self.TEXU, 0)], f'float d = {self.TEXU}[i].read(uint2(0, 0));\n')
+        self.assertEqual((got[0]['kind'], got[0].get('fetch')), ('tex_ubo', True))
+
+    def test_bindless_array_indexed_width_query_is_flagged(self):
+        got = self.reflect([('array<depth2d<float>, 32>', self.TEXU, 0)], f'uint w = {self.TEXU}[k + 1].get_width();\n')
+        self.assertEqual((got[0]['kind'], got[0].get('fetch')), ('tex_ubo', True))
+
+    def test_bindless_array_indexed_sample_only_is_not_flagged(self):
+        got = self.reflect([('array<depth2d<float>, 32>', self.TEXU, 0)], f'float d = {self.TEXU}[i].sample(s, uv);\n')
+        self.assertEqual((got[0]['kind'], got[0].get('fetch')), ('tex_ubo', None))
+
+    def test_c2_array_indexed_read_is_flagged(self):
+        got = self.reflect([('array<texture2d_array<float>, 301>', self.TEXA, 0)], f'float4 c = {self.TEXA}[k].read(uint2(0, 0), 0);\n')
+        self.assertEqual((got[0]['kind'], got[0].get('fetch')), ('tex_c2a', True))
+
+    def test_image_read_is_not_flagged(self):   # images are always integer-coordinate: a dropping host restores every image slot unconditionally
+        got = self.reflect([('texture2d<float, access::read_write>', self.IMG, 0)], f'float4 c = {self.IMG}.read(uint2(0, 0));\n')
+        self.assertEqual((got[0]['kind'], got[0].get('fetch')), ('img', None))
+
+    def test_buffer_texture_read_is_not_flagged(self):   # 1D, never mip-dropped
+        got = self.reflect([('texture_buffer<float>', self.TBUF, 0)], f'float v = {self.TBUF}.read(0u);\n')
+        self.assertEqual((got[0]['kind'], got[0].get('fetch')), ('tbuf', None))
+
+    def test_longer_identifier_ending_in_the_member_name_is_not_flagged(self):   # word boundary: x<name>.read( is another texture
+        got = self.reflect([('texture2d<float>', self.TEX, 0)], f'float4 c = x{self.TEX}.read(uint2(0, 0));\n')
+        self.assertEqual((got[0]['kind'], got[0].get('fetch')), ('tex', None))
+
+    def test_only_the_reading_texture_is_flagged(self):   # two textures, only the second reads
+        got = self.reflect([('texture2d<float>', self.TEX, 0), ('texture2d<float>', 'fp_t_cb720898_2000005B', 1)],
+                           'float4 c = fp_t_cb720898_2000005B.read(uint2(0, 0));\n')
+        self.assertEqual([(b['kind'], b.get('fetch')) for b in got], [('tex', None), ('tex', True)])
+
+    def test_nested_index_through_a_constant_buffer_is_flagged(self):   # nm[cb0[i]].read(: the index holds one nested bracket
+        got = self.reflect([('array<depth2d<float>, 32>', self.TEXU, 0)], f'float d = {self.TEXU}[cb0[i]].read(uint2(0, 0));\n')
+        self.assertEqual((got[0]['kind'], got[0].get('fetch')), ('tex_ubo', True))
+
+    def test_nested_index_through_an_index_array_is_flagged(self):   # nm[idx[0]].read(
+        got = self.reflect([('array<depth2d<float>, 32>', self.TEXU, 0)], f'float d = {self.TEXU}[idx[0]].read(uint2(0, 0));\n')
+        self.assertEqual((got[0]['kind'], got[0].get('fetch')), ('tex_ubo', True))
+
+    def test_fetch1d_unaffected(self):   # the translator-listed reg is still flagged fetch1d, and a sample-only texture gets no fetch
+        got = self.reflect([('texture2d<float>', self.TEX, 0)], f'float4 c = {self.TEX}.sample(s, uv);\n', {'fetch1d': [128]})
+        self.assertEqual((got[0].get('fetch1d'), got[0].get('fetch')), (True, None))
+
+
 def builder_unfillable():
     return lambda src, stage='ps': dmsh_reflect.unfillable(dmsh_reflect.drv_reads(src), stage)
 

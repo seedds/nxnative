@@ -79,7 +79,10 @@ namespace Ryujinx.Graphics.Shader.Instructions
                 srcA = context.BitwiseAnd(srcA, Const(0xffff));
             }
 
-            Operand addr = context.IAdd(srcA, Const(Imm16ToSInt(op.CbufOffset)));
+            // nxnative: the immediate is an unsigned byte offset added to the address register, as NVIDIA's LDC has it and as yuzu reads it. Sign-extended, a shader's
+            // read at 0x8448 above RZ became 0xFFFF8448: its word index 0x3FFFE112 overflowed the operand's 5-bit slot field, so a read of c14 landed in c15 at word
+            // 33,552,452, and the host refused the 512 MB binding it then declared (Mortal Kombat 11: 27 shaders, 11 distinct)
+            Operand addr = context.IAdd(srcA, Const(op.CbufOffset));
             Operand wordOffset = context.ShiftRightU32(addr, Const(2));
 
             for (int index = 0; index < count; index++)

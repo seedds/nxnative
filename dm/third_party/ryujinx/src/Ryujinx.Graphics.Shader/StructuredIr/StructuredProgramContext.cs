@@ -307,6 +307,13 @@ namespace Ryujinx.Graphics.Shader.StructuredIr
                 int cbufSlot = operand.GetCbufSlot();
                 int cbufOffset = operand.GetCbufOffset();
 
+                // nxnative: a fixed read past the end of the 64 KiB constant buffer reads 0, as Maxwell bounds every read by the size the game bound. Before, the
+                // index went to the binding as it was, past its end, and stretched it (NoteUniformRead): one bad word offset became a 512 MB uniform slot
+                if (cbufOffset >= Constants.ConstantBufferSize / 4)
+                {
+                    return Const(0);
+                }
+
                 int binding = ResourceManager.GetConstantBufferBinding(cbufSlot);
                 int vecIndex = cbufOffset >> 2;
                 int elemIndex = cbufOffset & 3;

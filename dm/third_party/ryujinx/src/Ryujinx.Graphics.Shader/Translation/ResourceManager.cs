@@ -227,7 +227,11 @@ namespace Ryujinx.Graphics.Shader.Translation
 
             if (fixedOffset)
             {
-                Properties.FixedUniformWords[sizeIndex] = Math.Max(Properties.FixedUniformWords[sizeIndex], word + 1);
+                // nxnative: a read that far is outside the constant buffer (`StructuredProgramContext.GetOperandOrCbLoad` reads 0 there), so it must not stretch the slot
+                if (word < Constants.ConstantBufferSize / 4)
+                {
+                    Properties.FixedUniformWords[sizeIndex] = Math.Max(Properties.FixedUniformWords[sizeIndex], word + 1);
+                }
             }
             else
             {

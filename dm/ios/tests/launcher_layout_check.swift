@@ -59,6 +59,9 @@ func checkLauncherLayout(_ model: LauncherModel, defaults: UserDefaults) -> Int 
     expect(at(0) == 0 && at(1) == 100 && at(100) == 100 && at(107) == 140 && at(114) == 180 && at(216) == 180 && at(223) == 184 && at(230) == 188 && at(900) == 188,
            "the bar's ground comes with the first scroll, then the bar takes the name, then Play, each with the scroll that follows its going under the bar")
     expect(LauncherView.scrolled(500, header: 0, name: 0) == 0 && LauncherView.scrolled(500, header: 230, name: 0) == 0, "and nothing while the header is not measured")
+    // Settings that end inside Play's band (they scroll to 222, 6 pt into it) bring Play all the way in at their end, not to 3/8 of the way, pale
+    expect(LauncherView.scrolled(222, header: 230, name: 100, end: 222) == 188 && LauncherView.scrolled(219, header: 230, name: 100, end: 222) == 184,
+           "settings that end inside a part's band bring that part all the way into the bar at their end")
     // Every row's symbol is a symbol of this system (a name it lacks draws nothing) or one drawn here, in rows of one length
     let missing = (Array(Symbols.rows.values) + ["gearshape"]).filter { Symbols.drawn[$0] == nil && NSImage(systemSymbolName: $0, accessibilityDescription: nil) == nil }
     expect(missing.isEmpty, "every row's symbol is one this system has, or is drawn (missing: \(missing))")

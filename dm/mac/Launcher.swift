@@ -176,10 +176,12 @@ struct LauncherView: View {
     /// measured). A part comes in over the `band` of scroll that follows its going under the bar, so none is in sight twice, and it comes with the scroll: the
     /// number is its place in that band in eighths, the name's in the tens, Play's in the units (88: the header's name and Play are in the bar), and a hundred
     /// once anything has scrolled at all: the bar's ground is there from then on, as a toolbar's edge comes when content goes under it. The icon does not go into
-    /// the bar: at a toolbar's size a game's art cannot be read, and the name says which game it is
-    static func scrolled(_ y: CGFloat, header: CGFloat, name: CGFloat) -> Int {
+    /// the bar: at a toolbar's size a game's art cannot be read, and the name says which game it is. `end`: the furthest the settings scroll
+    static func scrolled(_ y: CGFloat, header: CGFloat, name: CGFloat, end: CGFloat = .infinity) -> Int {
         guard header > 0, name > 0 else { return 0 }
-        func part(_ from: CGFloat) -> Int { Int((max(0, min(1, (y - from) / band)) * 8).rounded()) }
+        // A band the settings end inside ends with them: a window that scrolls only a little further than its header rested with Play half come into the bar,
+        // pale, and read as disabled
+        func part(_ from: CGFloat) -> Int { Int((max(0, min(1, (y - from) / min(band, max(end - from, 0.5)))) * 8).rounded()) }
         return (y > 0.5 ? 100 : 0) + part(name) * 10 + part(header - playBelow)
     }
     static let band: CGFloat = 14
@@ -210,7 +212,8 @@ struct LauncherView: View {
             .scrollDisabled(closing)
             .scrollBounceBehavior(.basedOnSize)
             .onScrollGeometryChange(for: Int.self) {
-                Self.scrolled($0.contentOffset.y + $0.contentInsets.top, header: heights.header, name: heights.name)
+                Self.scrolled($0.contentOffset.y + $0.contentInsets.top, header: heights.header, name: heights.name,
+                              end: $0.contentSize.height - $0.containerSize.height + $0.contentInsets.bottom)   // the container is under the bar already
             } action: { _, now in
                 scroll.parts = now
             }

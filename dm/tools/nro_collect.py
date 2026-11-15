@@ -80,7 +80,8 @@ def scan(job):
 # Online SDKs the host never loads, by what the module exports, whatever the game: Epic Online Services (Hades and Hades II load rom:/nro/EOSSDK-Switch-Shipping.nro; Hades' main
 # imports only EOS Auth, Connect and PlayerDataStorage, Epic-account cross-save the host cannot serve). Running it would at best fail its login, at worst wait on time-outs or contact
 # Epic's servers with a console identity the host makes up; refused, the game plays offline with local saves, as before the host loaded NROs
-ONLINE_SDKS = {'EOS_Platform_Create': 'Epic Online Services SDK'}
+ONLINE_SDKS = {'EOS_Platform_Create': 'Epic Online Services SDK',
+               'nx_matchmaking_session_set_description': 'Nintendo Switch Matchmaking SDK'}
 
 
 def online_sdk(body):   # the online SDK an NRO is (by its exports), or None

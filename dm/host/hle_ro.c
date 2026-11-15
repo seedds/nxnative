@@ -71,15 +71,14 @@ HLE_FORCE_DIRECT("_ZN2nn2ro10LoadModuleEPNS0_6ModuleEPKvPvmi", "load an NRO rewr
     uint32_t n = *(const uint32_t *)(h + 0x18);
     uint8_t sha[32]; CC_SHA256(h, n, sha);
     char hx[17]; for (int k = 0; k < 8; k++) snprintf(hx + 2 * k, 3, "%02x", sha[k]);
-    // Online SDKs are never loaded, whatever the game (dm/tools/nro_collect.py ONLINE_SDKS: Epic Online Services, known by its export EOS_Platform_Create). Hades and Hades II load
-    // rom:/nro/EOSSDK-Switch-Shipping.nro for Epic-account cross-save (Auth, Connect, PlayerDataStorage), which the host cannot serve; the real SDK would at best fail its login and at
-    // worst wait on time-outs or contact Epic's servers. Refused, the game's EOS_Platform_Create stays a stub, it logs "[EOS] Failed to create platform" and plays offline with local
-    // saves, as before the host loaded NROs. The pack leaves such an NRO out (a "refused" row in nro.tsv); an older nro.tsv that has it is caught by the export below
-    if (nro_refused(sha)) { LOG("ro::LoadModule: refused %s… (%u bytes): an online SDK (Epic Online Services), not loaded; the game plays offline", hx, n); return RO_FAIL; }
+    // Online SDKs are never loaded, whatever the game (dm/tools/nro_collect.py ONLINE_SDKS: Epic Online Services, Nintendo Switch Matchmaking). Hades and Hades II load
+    // rom:/nro/EOSSDK-Switch-Shipping.nro for Epic-account cross-save, Risk of Rain Returns loads rom:/nro/RORRNXExt.nro for matchmaking, which the host cannot serve.
+    // Refused, the game plays offline with local saves, as before the host loaded NROs. The pack leaves such an NRO out (a "refused" row in nro.tsv); an older nro.tsv that has it is caught by the export below
+    if (nro_refused(sha)) { LOG("ro::LoadModule: refused %s… (%u bytes): an online SDK, not loaded; the game plays offline", hx, n); return RO_FAIL; }
     pthread_mutex_lock(&g_ro_mu);
     module_t *m = nro_find(sha);
     if (!m) { capture_nro(h, n, sha); pthread_mutex_unlock(&g_ro_mu); LOG("[RED] ro::LoadModule: no rewritten NRO with SHA-256 %s… (%u bytes): it is not in the patched modules' nro.tsv", hx, n); return RO_FAIL; }
-    if (module_sym(m, "EOS_Platform_Create")) { pthread_mutex_unlock(&g_ro_mu); LOG("ro::LoadModule: refused %s (%s…): an online SDK (Epic Online Services), not loaded; the game plays offline", m->name, hx); return RO_FAIL; }
+    if (module_sym(m, "EOS_Platform_Create") || module_sym(m, "nx_matchmaking_session_set_description")) { pthread_mutex_unlock(&g_ro_mu); LOG("ro::LoadModule: refused %s (%s…): an online SDK, not loaded; the game plays offline", m->name, hx); return RO_FAIL; }
     if (m->loaded) { pthread_mutex_unlock(&g_ro_mu); LOG("[RED] ro::LoadModule: %s (%s…) is loaded already", m->name, hx); return RO_FAIL; }
     if (m->nro_size != n) LOG("[RED] ro::LoadModule: %s is %u bytes, nro.tsv says %u", m->name, n, m->nro_size);
     nro_load(m);

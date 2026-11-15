@@ -121,6 +121,7 @@ typedef struct hostvk_dev {
         uint32_t sampler_minmax : 1;          // samplerFilterMinmax (1.2): NVN's min / max sampler reduction
         uint32_t mirror_clamp_to_edge : 1;    // samplerMirrorClampToEdge (1.2): NVN's MIRROR_CLAMP and MIRROR_CLAMP_TO_EDGE wrap modes
         uint32_t float64 : 1, int64 : 1, int16 : 1;   // shaderFloat64, shaderInt64, shaderInt16: capabilities the translator's modules may declare
+        uint32_t draw_parameters : 1;   // shaderDrawParameters (1.1): the translator's vertex shaders that read the base vertex or instance or the draw index declare DrawParameters
         uint32_t storage_without_format : 1;  // shaderStorageImageReadWithoutFormat and WriteWithoutFormat
         uint32_t multi_viewport : 1, depth_bounds : 1;
         uint32_t custom_border : 1;           // VK_EXT_custom_border_color with customBorderColors: exact border colours (design 5.4)

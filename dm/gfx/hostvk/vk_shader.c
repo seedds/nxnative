@@ -120,6 +120,7 @@ static int caps_missing(const uint32_t *w, size_t nw, char *why, size_t n) {
                 case 10: if (!hvk.dev.x.float64) need = "Float64"; break;
                 case 11: if (!hvk.dev.x.int64) need = "Int64"; break;
                 case 22: if (!hvk.dev.x.int16) need = "Int16"; break;
+                case 4427: if (!hvk.dev.x.draw_parameters) need = "DrawParameters (shaderDrawParameters)"; break;
                 case 55: case 56: if (!hvk.dev.x.storage_without_format) need = "StorageImage*WithoutFormat"; break;
                 case 57: if (!hvk.dev.x.multi_viewport) need = "MultiViewport"; break;
                 case 53: if (!hvk.dev.caps.xfb) need = "TransformFeedback"; break;

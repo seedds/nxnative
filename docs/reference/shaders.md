@@ -733,6 +733,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Found on:** [Mario vs. Donkey Kong](../../dm/games/0100B99019412000/README.md) (cartridge 1.0.0 packed for Linux): 24 compute shaders of 12,691, each writing a 2D image bound through a handle in the driver table c2 (`cp_i_cb2_48_` in the two looked at, `3d5516ca71d4679a` and `235b57c3b0928fb8`).
 - **Check:** `dm/gfx/tests/test_dmsh_vk.py`, `test_formatless_capabilities` (no tools needed) and `test_formatless_validates` (`spirv-as` and `spirv-val`: the module fails validation before the pass and passes after).
 
+### DrawParameters needs shaderDrawParameters on the Vulkan backend
+
+- **Symptom:** with the validation layer on (`DM_VK_VALIDATION=1`), `[RED] [hostvk] validation error (VUID-VkShaderModuleCreateInfo-pCode-08740) … SPIR-V Capability DrawParameters was declared, but … VkPhysicalDeviceVulkan11Features::shaderDrawParameters` at pipeline creation; drawn anyway on lavapipe, undefined on a stricter driver.
+- **Cause:** the translator declares `DrawParameters` in a vertex shader that reads the base vertex, the base instance or the draw index (the driver bank's draw parameters), and the backend made its device without the Vulkan 1.1 feature `shaderDrawParameters`, which that capability requires.
+- **Fix:** `vk_device.c` reads `VkPhysicalDeviceVulkan11Features` and enables `shaderDrawParameters` where the device has it (`hostvk_dev.x.draw_parameters`); `vk_shader.c` `caps_missing` refuses a module that declares `DrawParameters` on a device without it, naming the capability, as for the other capabilities.
+- **Found on:** [Mario vs. Donkey Kong](../../dm/games/0100B99019412000/README.md) on Linux: 146 such errors on the way from the title into level 1-1 under the validation layer (lavapipe offers the feature).
+- **Check:** `t_vk_draw_params` (a vertex shader reading `gl_BaseInstance`: drawn with base instances 0 and 2 at the depths it gives, and no validation message; with the feature left off, the validation check fails with that VUID).
+
 ## Shaders compiled at run time
 
 ### Built-in shaders compiled with the game's own GLSLC

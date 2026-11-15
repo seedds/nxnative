@@ -669,6 +669,27 @@ hvk_tex *hvk_tex_get(const tex_t *t) {
     pthread_mutex_unlock(&hvk.tex_mu);
     return x && x->made ? x : NULL;
 }
+// The dumps (vk_dump.c: DM_CTL texraw, texlist): a made texture by its serial, and the list of the made textures of an NVN target (-1: every target)
+hvk_tex *hvk_tex_by_serial(uint64_t serial) {
+    pthread_mutex_lock(&hvk.tex_mu);
+    hvk_tex *x = tex_find(serial);
+    pthread_mutex_unlock(&hvk.tex_mu);
+    return x && x->made ? x : NULL;
+}
+static void list_one(const hvk_tex *x, int target, unsigned *n) {
+    if (!x->made || (target >= 0 && x->t.d.target != target)) return;
+    ++*n;
+    hostvk_log("[hostvk] texlist: ser=%llu target %d NVN %s VkFormat %u %ux%ux%u layers %u levels %u samples %u flags %#x storage %#llx size %llu%s%s", (unsigned long long)x->serial,
+               x->t.d.target, nvn_fmt_name(x->t.d.format), (unsigned)x->fmt, x->w, x->h, x->d, x->layers, x->levels, (unsigned)x->samples, x->t.d.flags,
+               (unsigned long long)(uintptr_t)x->t.mem, (unsigned long long)x->t.L.size, x->gpu_written ? " gpu-written" : "", x->cpu_content ? " cpu-content" : "");
+}
+void hvk_tex_list(int target) {
+    unsigned n = 0;
+    pthread_mutex_lock(&hvk.tex_mu);
+    for (uint32_t i = 0; i < g_tex.cap; i++) if (g_tex.vals[i]) list_one(g_tex.vals[i], target, &n);
+    pthread_mutex_unlock(&hvk.tex_mu);
+    hostvk_log("[hostvk] texlist: %u textures of target %d", n, target);
+}
 
 // ---------- Views ----------
 static VkComponentSwizzle swz_vk(uint8_t s) {

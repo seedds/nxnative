@@ -1,8 +1,10 @@
 // Conditional rendering (nvnCommandBufferSetRenderEnable / SetRenderEnableConditional, docs/design/vulkan-backend.md 4.7): SetRenderEnable(false) skips draws and clears
 // and true restores them; the conditional forms compare the two 64-bit counters at addr and addr + 16 on the GPU (VK_EXT_conditional_rendering over a predicate the backend's
 // kernel writes, shaders/predicate.comp): mode 0 renders when they are equal, mode 1 when they differ, with counters the CPU wrote and with counters SAMPLES_PASSED reports wrote
-// earlier in the same submission (the predicate reads them after the reports, in GPU order); a clear under a false condition is skipped too. No Metal counterpart (the Metal
-// backend evaluates the profile key render_cond on the CPU). Checks: each case's pixels, and the validation check
+// earlier in the same submission (the predicate reads them after the reports, in GPU order); a clear under a false condition is skipped too; a target cleared once under a
+// condition on a counter a TIMESTAMP_TOP report then zeroes (the clear-once pattern of Mario vs. Donkey Kong and Tears of the Kingdom: rendering.md, "Timestamp reports count 0")
+// keeps the draw made after the first clear. No Metal counterpart (the Metal backend evaluates the profile key render_cond on the CPU). Checks: each case's pixels, the report's
+// fields, and the validation check
 #include "t_vk_harness.h"
 #include "shaders/gen/fullscreen_vert.h"
 #include "shaders/gen/red_frag.h"
@@ -46,6 +48,30 @@ static void reports(void) {   // SAMPLES_PASSED reports in this submission: 0 (r
     a[1] = (uint64_t)(uintptr_t)(g_cnt + 2); hv_emit(&g_c, OP_REPORT_COUNTER, a, 16);
     cond(1, g_cnt);
 }
+// The clear-once pattern: the CPU sets rec's counter to 1 when the target needs a clear; each clear runs under SetRenderEnableConditional(RENDER_IF_NOT_EQUAL, rec) and is
+// followed by ReportCounter(TIMESTAMP_TOP, rec); rec + 16 is never written. A timestamp report's counter field is 0, so the first clear runs and the second, after the scene's
+// draw in the same submission, does not: the target keeps the draw (red). With the time in the counter field the second clear ran (blue): the black 3D scenes of Mario vs.
+// Donkey Kong on the Vulkan backend
+static void clear_once(void) {
+    tex_t target = hv_tex(NVN_TEXTURE_TARGET_2D, NVN_FORMAT_RGBA8, 8, 8, 1, 1, 0);
+    const tex_t *rt[1] = {&target};
+    g_cnt[0] = 1; g_cnt[1] = 0; g_cnt[2] = 0; g_cnt[3] = 0;
+    uint64_t a[2] = {NVN_COUNTER_TYPE_TIMESTAMP_TOP, (uint64_t)(uintptr_t)g_cnt};
+    cond(2, NULL);
+    hv_rt(&g_c, 1, rt, NULL);
+    hv_bind(&g_c, &g_prog, 3); hv_depth(&g_c, 0, 0, NVN_DEPTH_FUNC_ALWAYS); hv_cull(&g_c, NVN_FACE_NONE);
+    for (int i = 0; i < 2; i++) {
+        cond(1, g_cnt); hv_clear_color(&g_c, 0, 15, 0, 0, 1, 1);   // blue, while rec's counter differs from rec + 16's
+        cond(2, NULL); hv_emit(&g_c, OP_REPORT_COUNTER, a, 16);
+        if (!i) hv_draw(&g_c, NVN_DRAW_PRIMITIVE_TRIANGLES, 0, 3, 1);   // the scene: red
+    }
+    hv_submit(&g_q, &g_c);
+    uint8_t px[256]; int ok = hv_read(&target, VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 0, 0, 8, 8, 4, px);
+    for (int i = 0; ok && i < 64; i++) ok &= px[4 * i] == 255 && px[4 * i + 1] == 0 && px[4 * i + 2] == 0;
+    if (!ok) fprintf(stderr, "clear once: pixel 0 = %u %u %u %u, expected 255 0 0 255 (blue: the second conditional clear ran)\n", px[0], px[1], px[2], px[3]);
+    t("a clear under RENDER_IF_NOT_EQUAL on a counter a TIMESTAMP_TOP report zeroed is skipped: the draw after the first clear stays", ok);
+    t("the TIMESTAMP_TOP report wrote counter 0 and a time", g_cnt[0] == 0 && g_cnt[1] != 0);
+}
 
 int main(void) {
     hv_up("t_vk_cond_render");
@@ -66,6 +92,7 @@ int main(void) {
     run(ne_cpu_m1, 1, "mode 1 (not equal) with different counters draws and clears", 0, 1);
     run(hi_word, 0, "counters that differ in their upper 32 bits are different", 0, 0);
     run(reports, 0, "counters SAMPLES_PASSED reports wrote earlier in the submission are compared on the GPU, after the reports", 1, 0);
+    clear_once();
     hv_pool_free(&g_p);
     return hv_finish();
 }

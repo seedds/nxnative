@@ -289,6 +289,9 @@ static VkImageView tex_view_of(int st, int tid, const hvk_binding *d, const nvn_
         hvk_view hv;
         if (x && hvk_tex_view_typed(x, has_v ? &v : NULL, storage ? HVK_VIEW_STORAGE : HVK_VIEW_SAMPLED, d->dim, d->cls, &hv)) {
             if (write) hvk_tex_gpu_written(x);
+            if (storage && write) hvk_dump_note_write(&hv);   // texdump: snapshotted after its dispatch (vk_dump.c)
+            if (hvk_dump_passes()) hvk_dump_line("B %d st%d set%u b%u %s tid=%d ser=%llu fmt%u %ux%u l%u+%u s%u+%u%s", hvk_dump_pass_no(), st, d->set, d->binding, storage ? "image" : "tex", tid,
+                                                 (unsigned long long)t.serial, (unsigned)hv.format, hv.w, hv.h, hv.level, hv.levels, hv.layer0, hv.layers, write ? " written" : "");
             hvk_feedback_note(&hv);   // an attachment of the open pass read by this draw (design 5.5, vk_commands.c)
             if (hv.cls != d->cls && !(hv.cls == NVN_VK_DS && d->cls == NVN_VK_FLOAT) && !storage)
                 HVK_RED_ONCE("stage %d binding %u: a texture of numeric class %d read through a declaration of class %d (first case, texture ID %d): bound as it is (the census of design 2.2)",
@@ -297,7 +300,13 @@ static VkImageView tex_view_of(int st, int tid, const hvk_binding *d, const nvn_
             return hv.view;
         }
         if (x) HVK_RED_ONCE("stage %d binding %u: no view of texture ID %d fits the declared type %d (first case): the dummy is bound", st, d->binding, tid, d->dim);
-    } else if (tid > 0 && !ok) HVK_NOTE_ONCE("texture ID %d is not registered (first case): an unbound slot, the dummy is read", tid);
+        if (hvk_dump_passes()) hvk_dump_line("B %d st%d set%u b%u %s tid=%d ser=%llu: dummy (%s)", hvk_dump_pass_no(), st, d->set, d->binding, storage ? "image" : "tex", tid,
+                                             (unsigned long long)t.serial, x ? "no view fits the declared type or use" : "texture not made");
+    } else {
+        if (tid > 0 && !ok) HVK_NOTE_ONCE("texture ID %d is not registered (first case): an unbound slot, the dummy is read", tid);
+        if (hvk_dump_passes()) hvk_dump_line("B %d st%d set%u b%u %s tid=%d: dummy (%s)", hvk_dump_pass_no(), st, d->set, d->binding, storage ? "image" : "tex", tid,
+                                             tid <= 0 ? "no ID" : !ok ? "not registered" : "a buffer texture");
+    }
     return hvk_dummy_view(rb ? rb->dtt : NVN_DTT_2D, rb ? rb->dpf : NVN_DPF_FLOAT, storage);
 }
 static int samp_id(int st, const nvn_rbind *s) {
@@ -412,6 +421,11 @@ static int build_set(set_build *b, const hvk_layout *l, int k, hvk_shader *const
                             buf = g_zero; off = 0; range = 65536 < ubo_max ? 65536 : ubo_max;
                         }
                     } else { buf = g_zero; off = 0; if (u && u->addr) HVK_RED_ONCE("stage %d uniform slot %u: its address %#llx is in no memory pool (first case): the zero bank is read", st, rt->reg, (unsigned long long)u->addr); }
+                    if (hvk_dump_passes()) {
+                        float f4[4] = {0}; if (u && u->addr) nvn_ubo_read(st, (int)rt->reg, 0, sizeof f4, f4);
+                        hvk_dump_line("B %d st%d set%u b%u ubo%u addr=%#llx size %llu%s: %g %g %g %g", hvk_dump_pass_no(), st, d->set, d->binding, rt->reg, (unsigned long long)(u ? u->addr : 0),
+                                      (unsigned long long)(u ? u->size : 0), buf == g_zero ? " (zero bank)" : "", f4[0], f4[1], f4[2], f4[3]);
+                    }
                 } else if (rt && (rt->kind == NVN_RB_DRV0 || rt->kind == NVN_RB_DRV2)) {   // a driver bank the layout holds as a plain uniform buffer (past the dynamic budget): written per draw
                     hvk_alloc a; if (!bank_alloc(st, rt->kind == NVN_RB_DRV2 ? 2 : 0, sh[st], base_instance, dispatch, &a)) return 0;
                     buf = a.buf; off = a.off; range = DRV_SIZE;
@@ -431,6 +445,8 @@ static int build_set(set_build *b, const hvk_layout *l, int k, hvk_shader *const
                     range = want;
                     if (rt->rw && rt->kind != NVN_RB_UBOP) nvn_gw_sbw_note(addr, size, SBW_GPU);
                 } else dummy_ssbo(&buf, &off, &range);
+                if (hvk_dump_passes()) hvk_dump_line("B %d st%d set%u b%u ssbo addr=%#llx size %llu range %llu%s%s", hvk_dump_pass_no(), st, d->set, d->binding, (unsigned long long)addr,
+                                                     (unsigned long long)size, (unsigned long long)range, buf == g_zero ? " (zero bank)" : "", rt && rt->rw ? " written" : "");
                 if (!w_buffer(b, d->binding, x->type, buf, off, range)) return 0;
                 break;
             }
@@ -462,6 +478,7 @@ static int build_set(set_build *b, const hvk_layout *l, int k, hvk_shader *const
 }
 int hvk_bind_resources(VkCommandBuffer cb, hvk_layout *l, hvk_shader *const sh[6], VkPipelineBindPoint bp, uint32_t base_instance, const uint32_t dispatch[3]) {
     if (!static_buffers()) return 0;
+    hvk_dump_note_reset();
     slot_sets *ss = &g_slots[hvk_slot_index() & 15];
     if (!ss->cache.klen) nvn_hm_init(&ss->cache, sizeof(set_key));
     VkDeviceSize ubo_max = hvk.lim.maxUniformBufferRange ? hvk.lim.maxUniformBufferRange : 16384;

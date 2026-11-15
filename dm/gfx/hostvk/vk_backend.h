@@ -230,6 +230,24 @@ int hvk_slot_index(void);             // the open submission's slot
 void hvk_commands_shutdown(void);
 int hvk_commands_init(void);
 
+// ---------- Dumps (vk_dump.c: DM_CTL passdump, texdump, texraw, texlist; the Metal backend's counterparts) ----------
+int hvk_dump_passes(void);            // this frame's commands are logged ("[pass] F<frame> ..." lines)
+int hvk_dump_snaps(void);             // this frame's attachments and storage writes are snapshotted
+void hvk_dump_line(const char *fmt, ...) __attribute__((format(printf, 1, 2)));   // a "[pass]" line when hvk_dump_passes()
+int hvk_dump_pass_no(void);           // the number of the frame's current pass (the last one begun), and of the next one
+int hvk_dump_pass_next(void);
+int hvk_dump_split_pass(void);        // texdump ... draws <pass>: the pass whose draws each end their pass (and the passes into its targets after it), -1 for none
+int hvk_dump_split_slot(void);        // and the one attachment slot snapshotted then (8 depth), -1 for every slot
+// Copy view v's subresource (its level and first layer; a depth-stencil view's depth) into a readback buffer at this point of cb, outside any pass; written as a PNG with a
+// statistics line once the submission completed (hvk_dump_collect, from the completion thread)
+void hvk_dump_snap(VkCommandBuffer cb, const hvk_view *v, int pass, int slot, const char *what);
+void hvk_dump_collect(uint64_t done);
+void hvk_dump_note_reset(void);                // a draw's or dispatch's descriptors are being built: the storage images noted below are its own
+void hvk_dump_note_write(const hvk_view *v);   // a storage image it writes
+void hvk_dump_storage_writes(VkCommandBuffer cb, int pass);   // after a dispatch: snapshots of the storage images it wrote
+hvk_tex *hvk_tex_by_serial(uint64_t serial);   // vk_texture.c: a made texture by its serial, NULL for none
+void hvk_tex_list(int target);                 // vk_texture.c: a log line per made texture of that NVN target (-1: all)
+
 // ---------- The backend's state ----------
 typedef struct {
     int on;                    // the device is up: every be_* works on it (0: the null forms of vk_backend.c)

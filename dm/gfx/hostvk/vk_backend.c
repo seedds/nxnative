@@ -10,9 +10,9 @@
 // one [RED] line per function on its first call, a GPU that has finished everything, events and syncs written at once, the pool table kept), so a host without Vulkan still runs
 // its CPU side. The two forms live in this one library: a host binary links exactly one backend (dm/host/CMakeLists.txt: nxhost links hostvk; nvn_null.c stays the backend of the
 // CMake targets that do not link hostvk, t_frontend).
-// Declared here, with a red line and the phase that brings them: be_report's statistics lines (the per-frame statistics answer zero or what the backend counts), the DM_CTL
-// diagnostics of the Metal backend (dm_gfx_shot_at and the texture and pass dumps, nvn_mtl.m). Presentation and the vsync source: vk_present.c in a window (step P4a), the
-// headless presenter below without one.
+// Declared here, with a red line and the phase that brings them: be_report's statistics lines (the per-frame statistics answer zero or what the backend counts). The DM_CTL
+// diagnostics: "shot" here (dm_gfx_shot_at, the headless presenter's next frame), the texture and pass dumps in vk_dump.c. Presentation and the vsync source: vk_present.c in a
+// window (step P4a), the headless presenter below without one.
 #include "plat/plat.h"
 #include "vk_backend.h"
 #include "vk_pso.h"
@@ -126,7 +126,6 @@ static void null_reached(_Atomic int *once, const char *fn) {
     fprintf(stderr, "[dm] [RED] null graphics backend (no Vulkan device: %s): %s called, and no GPU work is done for it\n", g_why[0] ? g_why : "not brought up", fn);
 }
 #define NULLRED() do { static _Atomic int once_; null_reached(&once_, __func__); } while (0)
-#define DECLARED(...) do { static _Atomic int once_; if (!atomic_exchange(&once_, 1)) hostvk_log("[RED] [hostvk] " __VA_ARGS__); } while (0)
 static _Atomic uint64_t g_null_fence;
 
 // ---------- Device ----------
@@ -264,17 +263,8 @@ int be_fps_target(void) {
 }
 int be_vsync_active(void) { return hvk_vsync_active(); }
 int be_vsync_wait(int vsyncs, uint64_t timeout_ns) { return hvk_vsync_wait(vsyncs, timeout_ns); }
-// The Metal backend's DM_CTL diagnostics (hle_hid.c "texlist", "texraw", "texdump", "passdump"; nvn_mtl.m): not on Vulkan yet, each a red line on its first call. "shot" is the
-// headless presenter's (below)
+// The DM_CTL diagnostics (hle_hid.c): "texlist", "texraw", "texdump" and "passdump" are vk_dump.c's; "shot" is the headless presenter's (below)
 void dm_gfx_shot_at(long k, const char *path);
-void dm_gfx_texlist(int target);
-void dm_gfx_texraw(uint64_t serial, const char *path);
-void dm_gfx_texdump_next(const char *path);
-void dm_gfx_passdump_next(long n);
-void dm_gfx_texlist(int target) { (void)target; DECLARED("DM_CTL texlist: the Metal backend's texture list (nvn_mtl.m), not on Vulkan yet"); }
-void dm_gfx_texraw(uint64_t serial, const char *path) { (void)serial; (void)path; DECLARED("DM_CTL texraw: the Metal backend's raw texture dump (nvn_mtl.m), not on Vulkan yet"); }
-void dm_gfx_texdump_next(const char *path) { (void)path; DECLARED("DM_CTL texdump: the Metal backend's render-target dump (nvn_mtl.m), not on Vulkan yet"); }
-void dm_gfx_passdump_next(long n) { (void)n; DECLARED("DM_CTL passdump: the Metal backend's pass dump (nvn_mtl.m), not on Vulkan yet"); }
 // ---------- External producers (the guest Vulkan layer, guest_vk.c; step P9a) and the headless presenter ----------
 // The shared device record is the backend's device layer (hostvk_dev). be_ext_tex registers an image (hvk_ext_image, guest_vk.h) under a serial; be_present_ext presents one, through
 // the window presenter when it is on (vk_present.c), else through the headless presenter here, which also takes be_present's NVN frames without a window (DM_VK_HEADLESS=1, no

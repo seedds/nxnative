@@ -1,7 +1,8 @@
 // A counter report written by the GPU, in order (docs/design/vulkan-backend.md 4.6; vk_commands.c report_run): the samples passed since the counter's reset (the accumulator of
 // earlier segments plus this segment's occlusion query results) and the timestamp converted to NVN's 614.4 MHz ticks on the guest clock, as the 16 bytes {count, timestamp} at the
 // report's guest address. All addresses are buffer device addresses; 64-bit arithmetic in pairs of 32-bit words (no shaderInt64 needed).
-// flags: 1 sum the queries, 2 start from the accumulator (else 0), 4 store the sum into the accumulator, 8 the count field is the timestamp (a timestamp report), 16 a timestamp is given.
+// flags: 1 sum the queries, 2 start from the accumulator (else 0), 4 store the sum into the accumulator, 16 a timestamp is given. A timestamp report sums nothing: its count field
+// is 0, as the GPU writes it (docs/reference/rendering.md, "Timestamp reports count 0").
 // Step P8: every counter kind (pipeline statistics, primitives generated, transform feedback primitives written): the summed value is field `field` of each query's results,
 // which are `stride` 64-bit values apart (1 and 0 for the occlusion queries); acc is the counter type's own accumulator
 #version 460
@@ -28,6 +29,5 @@ void main() {
     }
     uvec2 t = uvec2(0u);
     if ((p.flags & 16u) != 0u) t = add64(p.n0, mulshr32(sub64(Q(p.ts).v[0], p.g0), p.mul));
-    if ((p.flags & 8u) != 0u) sum = t;
     if (p.dst != uvec2(0u)) { Q(p.dst).v[0] = sum; Q(p.dst).v[1] = t; }
 }

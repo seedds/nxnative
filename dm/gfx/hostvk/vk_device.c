@@ -110,6 +110,7 @@ typedef struct {
     VkPhysicalDeviceProvokingVertexPropertiesEXT ppv;
     VkPhysicalDeviceTransformFeedbackPropertiesEXT pxfb;
     VkPhysicalDeviceFeatures2 f;
+    VkPhysicalDeviceVulkan11Features f11;
     VkPhysicalDeviceVulkan12Features f12;
     VkPhysicalDeviceVulkan13Features f13;
     VkPhysicalDeviceTransformFeedbackFeaturesEXT fxfb;
@@ -179,6 +180,7 @@ static void devq_query(VkPhysicalDevice p, devq *q) {
     if (q->p.properties.apiVersion < VK_API_VERSION_1_3) return;   // below the baseline: the 1.2 / 1.3 structures may not be chained
     void **next = &q->f.pNext;
     q->f.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+    q->f11.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES; *next = &q->f11; next = &q->f11.pNext;
     q->f12.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES; *next = &q->f12; next = &q->f12.pNext;
     q->f13.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES; *next = &q->f13; next = &q->f13.pNext;
     if (q->xfb) { q->fxfb.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TRANSFORM_FEEDBACK_FEATURES_EXT; *next = &q->fxfb; next = &q->fxfb.pNext; }
@@ -537,6 +539,7 @@ static int make_device(const hostvk_opts *o, const devq *q, hostvk_dev *d, char 
     d->x.provoking_per_pipeline = d->x.provoking_last && q->ppv.provokingVertexModePerPipeline;
     if (d->x.provoking_last) ext[ne++] = VK_EXT_PROVOKING_VERTEX_EXTENSION_NAME;
     d->x.float64 = cf->shaderFloat64 != 0; d->x.int64 = cf->shaderInt64 != 0; d->x.int16 = cf->shaderInt16 != 0;
+    d->x.draw_parameters = q->f11.shaderDrawParameters != 0;   // enabled below: a module declaring DrawParameters without it fails validation (VUID-VkShaderModuleCreateInfo-pCode-08740)
     d->x.storage_without_format = cf->shaderStorageImageReadWithoutFormat && cf->shaderStorageImageWriteWithoutFormat;
     d->x.multi_viewport = cf->multiViewport != 0; d->x.depth_bounds = cf->depthBounds != 0;
     d->x.host_query_reset = q->f12.hostQueryReset != 0; d->x.sampler_minmax = q->f12.samplerFilterMinmax != 0; d->x.mirror_clamp_to_edge = q->f12.samplerMirrorClampToEdge != 0;
@@ -557,6 +560,8 @@ static int make_device(const hostvk_opts *o, const devq *q, hostvk_dev *d, char 
     f.features.shaderStorageBufferArrayDynamicIndexing = cf->shaderStorageBufferArrayDynamicIndexing;
     f.features.shaderStorageImageArrayDynamicIndexing = cf->shaderStorageImageArrayDynamicIndexing;
     d->enabled = f.features;
+    VkPhysicalDeviceVulkan11Features f11 = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES};
+    f11.shaderDrawParameters = d->x.draw_parameters;
     VkPhysicalDeviceVulkan12Features f12 = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES};
     f12.drawIndirectCount = VK_TRUE; f12.timelineSemaphore = VK_TRUE; f12.bufferDeviceAddress = d->caps.buffer_device_address ? VK_TRUE : VK_FALSE;
     f12.hostQueryReset = d->x.host_query_reset; f12.samplerFilterMinmax = d->x.sampler_minmax; f12.samplerMirrorClampToEdge = d->x.mirror_clamp_to_edge;
@@ -593,6 +598,7 @@ static int make_device(const hostvk_opts *o, const devq *q, hostvk_dev *d, char 
     VkPhysicalDevicePrimitivesGeneratedQueryFeaturesEXT fpgq = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRIMITIVES_GENERATED_QUERY_FEATURES_EXT, NULL, VK_TRUE, d->x.prim_gen_discard, VK_FALSE};
     VkPhysicalDevicePrimitiveTopologyListRestartFeaturesEXT flr = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRIMITIVE_TOPOLOGY_LIST_RESTART_FEATURES_EXT, NULL, VK_TRUE, VK_FALSE};
     void **next = &f.pNext;
+    *next = &f11; next = &f11.pNext;
     *next = &f12; next = &f12.pNext;
     *next = &f13; next = &f13.pNext;
     *next = &fxfb; next = &fxfb.pNext;

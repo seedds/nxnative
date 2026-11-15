@@ -1,6 +1,7 @@
 // Counter reports (nvnCommandBufferReportCounter / ResetCounter, docs/design/vulkan-backend.md 4.6) as the GPU writes them into guest memory: SAMPLES_PASSED counts the samples
 // of every draw since the last reset, across passes, a culled draw and a submission boundary, and reads 0 right after a reset; TIMESTAMP and TIMESTAMP_TOP write NVN ticks
-// (614.4 MHz, nvn_timestamp.h) on the host clock, ordered, inside the CPU's window around the submission, with the counter field holding the timestamp (the Metal backend's form);
+// (614.4 MHz, nvn_timestamp.h) on the host clock, ordered, inside the CPU's window around the submission, with a counter field of 0, as the GPU writes it (rendering.md, "Timestamp
+// reports count 0": a game's conditional clears compare it);
 // every report carries a timestamp; a counter type Vulkan has no counter for (TESS_EVALUATION_SHADER_PRIMITIVES, ZCULL_STATS) is still written, with a zero count, and said once.
 // Step P8, the other counter types (stats): the pipeline statistics (input vertices and primitives, vertex shader and fragment shader invocations, clipper input and output
 // primitives), PRIMITIVES_GENERATED (VK_EXT_primitives_generated_query, under rasterizer discard) and TRANSFORM_FEEDBACK_PRIMITIVES_WRITTEN (a transform feedback stream query:
@@ -118,8 +119,8 @@ int main(void) {
                          (unsigned long long)cpu0, (unsigned long long)cpu1);
     t("every report's timestamp lies in the CPU's window around the submissions (host clock, NVN ticks)", inside);
     t("the timestamps follow the reports' order", ordered);
-    t("TIMESTAMP: the counter field holds the timestamp", r[5].counter == r[5].timestamp && r[5].timestamp >= r[4].timestamp);
-    t("TIMESTAMP_TOP is written in order", r[6].counter == r[6].timestamp && r[6].timestamp >= cpu0 && r[6].timestamp <= cpu1);
+    t("TIMESTAMP: the counter field is 0, the timestamp field the time, in order", r[5].counter == 0 && r[5].timestamp >= r[4].timestamp);
+    t("TIMESTAMP_TOP: the counter field is 0, the time in the CPU's window", r[6].counter == 0 && r[6].timestamp >= cpu0 && r[6].timestamp <= cpu1);
     t("a counter type Vulkan has no counter for (TESS_EVALUATION_SHADER_PRIMITIVES) is written with a zero count (declared)", r[7].counter == 0 && r[7].timestamp != 0xEEEEEEEEEEEEEEEEull);
     stats(&queue, &mp, &c, &prog, &xfbp);
     hv_pool_free(&mp);

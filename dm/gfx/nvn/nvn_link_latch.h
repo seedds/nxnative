@@ -11,16 +11,20 @@
 #include <stdint.h>
 
 #define LINK_LATCH_GIVE_UP 8   // latches in a row that found no present before the callback stops waiting on every tick
-#define LINK_LATCH_PROBE 64    // ticks between tries once it stopped (a game that presents late after its wake, or a scene that changed)
+#define LINK_LATCH_PROBE 64    // woken callbacks between tries once it stopped (a game that presents late after its wake, or a scene that changed)
 #define LINK_LATCH_GATE 120    // frames in a row whose present came early enough before the latch is entered (2 s at 60 fps)
 
 // Seconds the callback waits for the woken acquire's present (cb the callback's time, target_ts the update's targetTimestamp, by which the frame's work should be committed,
-// both CACurrentMediaTime seconds; period the link's; misses the latches in a row that timed out; tick the callback's number); 0 = take the queued frame at once.
-// Up to an eighth of a period before targetTimestamp, so the present still has time to be encoded and committed. The callback waits only when no frame stands in the queue, so
-// the wait delays no frame: the tick would be empty without it
-static inline double nvn_link_latch_wait(double cb, double target_ts, double period, unsigned misses, uint64_t tick) {
-    if (period <= 0 || (misses >= LINK_LATCH_GIVE_UP && tick % LINK_LATCH_PROBE)) return 0;
-    double until = target_ts - period / 8;
+// both CACurrentMediaTime seconds; period the link's; misses the latches in a row that timed out; woken the callbacks that woke an acquire so far, this one included;
+// gate_end: this callback ends the gate's drain); 0 = take the queued frame at once.
+// Up to an eighth of a period before targetTimestamp, so the present still has time to be encoded and committed, and never past an eighth of a period before the next
+// callback (cb + period), so a present that does not come cannot hold the callback thread past the next tick where the room is longer than a period (frame latency 2).
+// The callback waits only when no frame stands in the queue, so the wait delays no frame: the tick would be empty without it. After LINK_LATCH_GIVE_UP timeouts in a row it
+// waits only on every LINK_LATCH_PROBE-th woken callback (counted in woken callbacks, so an acquire of two ticks probes too) and on the end of the gate's drain
+static inline double nvn_link_latch_wait(double cb, double target_ts, double period, unsigned misses, uint64_t woken, int gate_end) {
+    if (period <= 0 || (misses >= LINK_LATCH_GIVE_UP && !gate_end && woken % LINK_LATCH_PROBE)) return 0;
+    double until = target_ts - period / 8, cap = cb + period - period / 8;
+    if (until > cap) until = cap;
     return until > cb ? until - cb : 0;
 }
 

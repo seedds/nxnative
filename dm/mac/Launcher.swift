@@ -232,7 +232,7 @@ struct LauncherView: View {
                     .lineLimit(1)
                     .transition(.opacity)
                 } else {
-                    Text("Version \(info("CFBundleShortVersionString") ?? "1.0")").foregroundStyle(.secondary)
+                    Text("Ver. \(info("CFBundleShortVersionString") ?? "1.0")").foregroundStyle(.secondary)
                         .transition(.opacity)
                 }
             }
@@ -241,7 +241,7 @@ struct LauncherView: View {
             Button { start() } label: {
                 Label("Play", systemImage: "play.fill").font(.system(.title3, design: .rounded).weight(.semibold)).padding(.horizontal, 30)
             }
-            .buttonStyle(.borderedProminent)
+            .buttonStyle(.glassProminent)
             .controlSize(.extraLarge)
             .keyboardShortcut(.defaultAction)
             .disabled(checking)
@@ -366,7 +366,7 @@ private struct TitleBar: View {
                 Button(action: play) {
                     Label("Play", systemImage: "play.fill").font(.system(.body, design: .rounded).weight(.semibold)).padding(.horizontal, 8)
                 }
-                .buttonStyle(.borderedProminent).buttonBorderShape(.capsule).controlSize(.large)   // the header's Play, a size down
+                .buttonStyle(.glassProminent).buttonBorderShape(.capsule).controlSize(.large)   // the header's Play, a size down
                 .disabled(checking || button == 0)   // out of the key view loop while it is out of sight; not while it comes, when it would be drawn as a disabled button
                 .fixedSize()
                 .modifier(Arriving(by: button, still: still))

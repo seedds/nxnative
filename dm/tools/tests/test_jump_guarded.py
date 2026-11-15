@@ -43,7 +43,7 @@ class Recognizer(unittest.TestCase):
         self.scope: dict[str, Any] = dict(re=re, struct=struct, IMG=self.img, tabjumps={}, jumps={})
         tree = ast.parse((TOOLS / 'patch_nso.py').read_text())
         names = {'num', 'written_w', 'writes_reg', 'copied_base', 'jump_offsets', 'guarded_count', 'null_base', 'writes_reg_any', 'check_before_copy', 'table_base', 'forward_table_base',
-                 'jump_guarded_tail'}
+                 'guarded_run', 'jump_guarded_tail'}
         exec(compile(ast.Module(body=[n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in names], type_ignores=[]), str(TOOLS / 'patch_nso.py'), 'exec'), self.scope)
 
     def table(self, targets, poison):

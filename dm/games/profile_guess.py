@@ -45,6 +45,14 @@ def gl_name_count(img, imports):
 
 
 GL_FILES = ('.mvgl', '.vert', '.frag', '.glsl')   # formats detected from file names alone, including in the survey manifest
+# OpenGL 1.x fixed-function entry points: a main that names them, and no glShaderSource, draws with the fixed pipeline and has no shaders at all (UnMetal: its loader
+# asks eglGetProcAddress for 26 GL names, client arrays, the matrix stack and glTexEnv among them; dm/tools/loader_census.py)
+GL_FIXED = (b'glVertexPointer\0', b'glMatrixMode\0', b'glEnableClientState\0')
+
+
+def gl_fixed_names(img): return sum(img.count(n) for n in GL_FIXED)
+
+
 APP_POOL = 0xCD500000               # the application memory pool of a 4 GB Switch (3285 MiB), what every profile but Engage's reports
 OUNCE_POOL = 0x240000000            # a Switch 2 game's (9 GB of 12 GB, not measured; Donkey Kong Bananza's heaps do not fit in a Switch 1 pool)
 MiB = 1 << 20
@@ -107,7 +115,7 @@ def aarch64(path):   # main.npdm's flags (META +0xc) bit 0, Is64BitInstruction; 
 def facts_of(exefs, romfs):
     """What the profile rules (and the survey report) need from a game's code modules and RomFS"""
     exefs = Path(exefs)
-    F = {'mods': {}, 'ounce': False, 'markers': {}, 'sdkver': set(), 'comps': set(), 'unity': set(), 'glslc': 0, 'glsl_src': 0, 'gl_names': 0, 'gl_src': 0, 'sysres': 0, 'program': None}
+    F = {'mods': {}, 'ounce': False, 'markers': {}, 'sdkver': set(), 'comps': set(), 'unity': set(), 'glslc': 0, 'glsl_src': 0, 'gl_names': 0, 'gl_fixed': 0, 'gl_src': 0, 'sysres': 0, 'program': None}
     for p in sorted(exefs.iterdir()):
         with open(p, 'rb') as f:
             if f.read(4) != b'NSO0': continue
@@ -126,6 +134,7 @@ def facts_of(exefs, romfs):
             F['unity'] = {v.decode() for v in re.findall(rb'20[12][0-9]\.[0-9]+\.[0-9]+f[0-9]', img)}
             F['glslc'], F['glsl_src'], F['gl_names'] = img.count(GLSLC_MAGIC), glsl_sources(img), gl_name_count(img, m['imports'])
             F['gl_src'] = gl_sources(img)
+            F['gl_fixed'] = gl_fixed_names(img)
             F['main_markers'] = {name for pat, name in MARKERS if pat in img}
         m['kind'] = {'main': 'the game', 'sdk': 'nnSdk', 'rtld': 'rtld'}.get(p.name) or kind(m)
     F['sysres'], F['program'] = npdm(exefs / 'main.npdm')
@@ -257,9 +266,10 @@ def modules_supplying(exefs, want, modules, hooks=None):   # the modules left ou
 
 
 # ---- Shader sources: decided from the game files at every build, not kept in the profile (scripts/build_ipa_from_nsp.py; shader_split.py reads what those steps write) ----
-def shader_sources(imports, glsl_src, glslc_mods, spirv, unreal_paks, trinity_packs=0, legacy_paks=0, gl_names=0, gl_src=0, gl_files=0, oodle_pkz=0, nro_imports=frozenset(), oodle_gfpak=0, oodle_ue3=0, frostbite=False, romfs_glsl=0, oodle_ttdat=0):
+def shader_sources(imports, glsl_src, glslc_mods, spirv, unreal_paks, trinity_packs=0, legacy_paks=0, gl_names=0, gl_src=0, gl_files=0, oodle_pkz=0, nro_imports=frozenset(), oodle_gfpak=0, oodle_ue3=0, frostbite=False, romfs_glsl=0, oodle_ttdat=0, gl_fixed=0):
     """{name: (value, reason)}: graphics (vulkan when main imports Vulkan functions and not nvnBootstrapLoader; gl when it imports eglCreateWindowSurface and names glShaderSource, so it compiles
-    GLSL through OpenGL (gl_names: how often main has that name; Absolum imports the same EGL functions for SDL3 but renders with NVN and names no GL function); else nvn; vkGetInstanceProcAddr
+    GLSL through OpenGL (gl_names: how often main has that name; Absolum imports the same EGL functions for SDL3 but renders with NVN and names no GL function), or names OpenGL 1.x
+    fixed-function entry points (gl_fixed, GL_FIXED) and imports no nvnBootstrapLoader: it draws with the fixed pipeline, no shaders at all (UnMetal); else nvn; vkGetInstanceProcAddr
     alone is SDL's Vulkan loader, which Balatro's LÖVE links and never uses), vk_capture (a Vulkan game without SPIR-V files generates its shaders at run time), gl_capture (an OpenGL game with no
     GLSL source where gl_shaders.py looks, gl_src strings in main and gl_files files in the RomFS: it puts its shaders together at run time, LÖVE from its Lua), glslc_capture (main holds GLSL sources and calls glslcCompile in a module the game loads: it compiles some shaders at run time), ue_decode (prepare shared Unreal shader code
     archives for the split), oodle_packs (Trinity packs, oodle_pkz PlatinumGames PKZ archives, oodle_gfpak Game Freak GFPAK archives with Oodle Kraken entries, oodle_ue3 Unreal Engine 3 packages with Oodle chunks
@@ -278,15 +288,21 @@ def shader_sources(imports, glsl_src, glslc_mods, spirv, unreal_paks, trinity_pa
     # Edition (Digital Eclipse, SDK 20) links both paths, never calls EGL on the Mac, and compiles the GLSL in its .shader files with subsdk2's glslcCompile; taken for OpenGL, it
     # got no GLSLC capture and drew nothing (black screen, sound and input working)
     own_glslc = 'nvnBootstrapLoader' in imports and 'glslcCompile' in imports and bool(glsl_src) and bool(glslc_mods)
-    gl = not vulkan and not nro_nvn and 'eglCreateWindowSurface' in imports and bool(gl_names) and not own_glslc
+    # A main with EGL, no NVN loader and no glShaderSource that names glVertexPointer / glMatrixMode draws with OpenGL 1.x's fixed pipeline: no shader exists to find (UnMetal);
+    # taken for NVN, its shader split found none and the build stopped there
+    fixed = not vulkan and not nro_nvn and 'eglCreateWindowSurface' in imports and not gl_names and bool(gl_fixed) and 'nvnBootstrapLoader' not in imports
+    gl = not vulkan and not nro_nvn and 'eglCreateWindowSurface' in imports and bool(gl_names) and not own_glslc or fixed
     nro_glslc = not vulkan and not gl and 'glslcCompile' in nro_imports and bool(glslc_mods)
     return {'graphics': ('vulkan', f'main imports {vk} Vulkan functions and not nvnBootstrapLoader: the host\'s Vulkan layer (dm/gfx/vk/hle_vk.m)') if vulkan else
+                        ('gl', 'main imports EGL and names OpenGL 1.x fixed-function calls (glVertexPointer, glMatrixMode) but no glShaderSource: it draws with the fixed pipeline, no shaders, '
+                               'the host\'s GL layer (dm/gfx/gl/hle_gl.m, its fixed-function path)') if fixed else
                         ('gl', 'main imports EGL and names glShaderSource: it renders with OpenGL and compiles GLSL, the host\'s GL layer (dm/gfx/gl/hle_gl.m)') if gl else
                         ('nvn', 'the NROs the game loads import nvnBootstrapLoader' if nro_nvn and 'nvnBootstrapLoader' not in imports else
                                 'main imports nvnBootstrapLoader and compiles its GLSL with GLSLC; its EGL and glShaderSource are left unused (Rayman 30th Anniversary Edition)' if own_glslc and 'eglCreateWindowSurface' in imports and gl_names else
                                 'main imports nvnBootstrapLoader'),
             'vk_capture': (vulkan and not spirv, 'no SPIR-V file in the RomFS: the game generates its shaders at run time (Super Mario Galaxy), captured by booting it on the Mac'),
-            'gl_capture': (gl and not gl_src and not gl_files, 'no GLSL source in the RomFS or main: the game puts its shaders together at run time (LÖVE: Balatro), captured by booting it on the Mac'),
+            'gl_fixed': (fixed, 'no shaders: OpenGL 1.x\'s fixed pipeline, which the host\'s GL layer draws with its own (dm/gfx/msl/gl_ff.metal); gl_shaders.py makes an empty library'),
+            'gl_capture': (gl and not fixed and not gl_src and not gl_files, 'no GLSL source in the RomFS or main: the game puts its shaders together at run time (LÖVE: Balatro), captured by booting it on the Mac'),
             'glslc_capture': (not vulkan and not gl and bool(glsl_src or romfs_glsl) and 'glslcCompile' in imports and bool(glslc_mods) or nro_glslc,
                               f'the NROs the game loads call glslcCompile in {", ".join(glslc_mods)}: shaders compiled at run time (Portal), captured by booting it on the Mac' if nro_glslc and not ((glsl_src or romfs_glsl) and 'glslcCompile' in imports) else
                               f'the RomFS holds {romfs_glsl} GLSL source files and main calls glslcCompile in {", ".join(glslc_mods) or "no module it loads"}: shaders compiled at run time (Turrican Anthology Vol. I), captured by booting it on the Mac' if romfs_glsl and not glsl_src else
@@ -329,6 +345,7 @@ def build_sources(exefs, romfs, modules):
     """shader_sources from an extraction (its ExeFS and RomFS folders) and the modules the profile loads"""
     exefs = Path(exefs); main = nso(exefs / 'main')[0]
     imports = {s for s, defined, _ in nso_syms.dynsyms(main) if not defined}; glsl_src = glsl_sources(main); gl_names = gl_name_count(main, imports); gl_src = gl_sources(main)
+    gl_fixed = gl_fixed_names(main)
     nro_imp = romfs_nro_imports(romfs)
     defines = lambda m: (exefs / m).exists() and any(s == 'glslcCompile' and defined for s, defined, _ in nso_syms.dynsyms(nso(exefs / m)[0]))
     # GLSL source files in the RomFS that the game compiles itself with GLSLC (Turrican Anthology Vol. I: shaders/*.vert / *.frag, no GLSL string in main)
@@ -380,7 +397,7 @@ def build_sources(exefs, romfs, modules):
     oodle_ttdat = sum(ttdat.needs_oodle(os.path.join(d, n)) for d, _, names in os.walk(romfs) for n in names if n.lower().endswith('.dat'))
     import frostbite   # Frostbite's superbundles (EA SPORTS FC 27): every item of the cas files is Oodle Leviathan, decoded with the game's own decoder
     return shader_sources(imports, glsl_src, glslc_mods, spirv, len(uepak.unreal_paks(str(romfs), inline=False, mains=[exefs / 'main'])), trinity, len(uepak.unreal_paks(str(romfs), inline=True, mains=[exefs / 'main'])), gl_names, gl_src, gl_files, oodle_pkz, nro_imp,
-                          oodle_gfpak=oodle_gfpak, oodle_ue3=oodle_ue3, frostbite=frostbite.is_frostbite(str(romfs)), romfs_glsl=romfs_glsl, oodle_ttdat=oodle_ttdat)
+                          oodle_gfpak=oodle_gfpak, oodle_ue3=oodle_ue3, frostbite=frostbite.is_frostbite(str(romfs)), romfs_glsl=romfs_glsl, oodle_ttdat=oodle_ttdat, gl_fixed=gl_fixed)
 
 
 def va_heap(sysres, imports):   # virtual address memory (an NPDM system resource) and a heap: the alias / heap split is a starting point the heap check corrects (Wonder, Tears of the Kingdom; Engage's pool is its own measurement)

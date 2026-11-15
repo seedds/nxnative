@@ -25,7 +25,9 @@
 #   t:<name>=<texture id>:<sampler id>:<type>     a combined sampler (-1 sampler ID if MSL omits it)
 #   o:<name>=<location>                          a fragment output, [[color(location)]]
 # <TAB> where it came from
-# Usage: gl_shaders.py <input path>... <out dir> [--ios <dir>]   (input paths: the RomFS, the main NSO, capture folders)
+# Usage: gl_shaders.py <input path>... <out dir> [--ios <dir>] [--fixed-function]   (input paths: the RomFS, the main NSO, capture folders)
+# --fixed-function: a game on OpenGL 1.x's fixed pipeline (UnMetal) has no GLSL; it gets an empty table and a library with no function, which the packing takes as any other
+#   (the host's GL layer draws it with its own shaders, dm/gfx/msl/gl_ff.metal)
 import concurrent.futures as cf, hashlib, json, os, re, struct, subprocess, sys, tempfile
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../tools'))
 from romfs import os, open
@@ -341,13 +343,15 @@ def main():
     a = sys.argv[1:]
     ios = None
     if '--ios' in a: i = a.index('--ios'); ios = a[i + 1]; del a[i:i + 2]
-    if len(a) < 2: sys.exit('usage: gl_shaders.py <input path>... <out dir> [--ios <dir>]')
+    fixed = '--fixed-function' in a; a = [x for x in a if x != '--fixed-function']
+    if len(a) < 2: sys.exit('usage: gl_shaders.py <input path>... <out dir> [--ios <dir>] [--fixed-function]')
     roots, out = a[:-1], a[-1]
     items, seen_src = [], set()
     for s, st, where in sources(roots):
         if (s, st) in seen_src: continue
         seen_src.add((s, st)); items.append((s, st, where))
-    if not items: red(f'no GLSL shaders in {" ".join(roots)}')
+    if not items and not fixed: red(f'no GLSL shaders in {" ".join(roots)}')
+    if items and fixed: print(f'[RED] --fixed-function, but {len(items)} GLSL sources were found: translated as usual')
     with tempfile.TemporaryDirectory() as tmp:
         with cf.ThreadPoolExecutor(os.cpu_count()) as ex: rows = [r for rs in ex.map(lambda it: one(it, tmp), items) for r in rs]
         seen, failed = {}, []
@@ -356,7 +360,7 @@ def main():
             if (key, stage) not in seen: seen[(key, stage)] = (stage, f, msl, where)
         for key, where, errs in failed:
             if not any(k == key for k, _ in seen): print(f'[RED] {where} ({key}) does not translate: {" / ".join(errs)}')
-        tsv = [TABLE_ABI, '# GL shaders (dm/gfx/tools/gl_shaders.py): key = sha256(GLSL source)[:16], Metal function gl_<key>_v / gl_<key>_f; a: vertex inputs, u: default uniform block members '
+        tsv: list[str] = [TABLE_ABI, '# GL shaders (dm/gfx/tools/gl_shaders.py): key = sha256(GLSL source)[:16], Metal function gl_<key>_v / gl_<key>_f; a: vertex inputs, u: default uniform block members '
                '(offset:type:count:stride), r: argument buffer (slot:count), b: the block (id:size), n: named blocks (name=id:size), t: combined samplers (texture-id:sampler-id:type), o: fragment outputs',
                '# ' + ' '.join(subprocess.run(['glslangValidator', '--version'], capture_output=True, text=True).stdout.split()[:3]) + '; spirv-cross '
                + ' '.join((lambda r: r.stdout + r.stderr)(subprocess.run([SPIRV_CROSS, '--revision'], capture_output=True, text=True)).split())]
@@ -364,6 +368,9 @@ def main():
         dirs = [(os.path.join(out, 'gl'), 'macosx', [MAC_MIN_FLAG])]   # the Mac host's minimum macOS, as the NVN chain's libraries (dmsh_chain.py MAC_MIN)
         if ios: dirs.append((os.path.join(ios, 'gl'), 'iphoneos', list(IOS_FLAGS)))   # relaxed as in vk_shaders.py and ios_metal.py: no NaN / Inf assumption on the iPhone's GPU compiler
         msls = [v[2] for v in seen.values()]
+        if not msls:   # --fixed-function: metallib takes no empty list, so one translation unit without a function
+            msls = [os.path.join(tmp, 'none.metal')]; open(msls[0], 'w').write('// no GLSL shaders: a fixed-function game (gl_shaders.py --fixed-function)\n#include <metal_stdlib>\n')
+            tsv.insert(2, '# no GLSL shaders: OpenGL 1.x fixed-function (the host draws with dm/gfx/msl/gl_ff.metal)')
         for d, sdk, extra in dirs:
             lib = metallib(msls, d, sdk, extra)
             open(os.path.join(d, 'gl_shaders.tsv'), 'w').write('\n'.join(tsv) + '\n')

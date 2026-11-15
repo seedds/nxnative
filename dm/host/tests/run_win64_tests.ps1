@@ -1,6 +1,7 @@
 # Runs the host unit tests of a Windows build folder on this PC and records the run in the repository: one log per test and summary.txt in logs\win64\
 # (logs\README.md). The tree is cross-built in Docker with llvm-mingw (docker\README.md); this script only runs what was built. From the repository root:
 #   powershell -NoProfile -ExecutionPolicy Bypass -File dm\host\tests\run_win64_tests.ps1 [-BuildDir build\win64] [-LogDir logs\win64] [-TimeoutSeconds 120] [-Packs build\packs\win64]
+#     [-PortTools build\port_tools\win-x64]
 # The runs come from <BuildDir>\host_tests.tsv (written by dm\host\CMakeLists.txt), then the script tests of <BuildDir>\host_scripts.tsv that run on Windows (t_second_pack,
 # with Python: $env:PYTHON, else py -3; t_vk_spirv is Linux only, and summary.txt lists it as "not run on Windows" with the reason); the old *.log files and summary.txt in
 # <LogDir> are removed first.
@@ -8,13 +9,18 @@
 # prebuilt for it in <packs>\second_pack) run the recompiled packs of NXAOT_PACKS: -Packs, else the environment's NXAOT_PACKS, else
 # build\packs\win64 when it exists (the Windows packs dm/tools/aot/tests/build_packs.sh writes into <out>\win64: docker\README.md); t_aot_host also gets the corpus of the
 # checkout (--corpus dm\tools\aot\corpus: the one compiled in is the container's path). Without packs those tests pass with a note (t_second_pack is a SKIP).
-# Exit status: 0 when every run passed, 1 when one did not, 2 when the build folder or its test list (or a given packs folder) is missing. Windows PowerShell 5.1 (stock on
+# The port's prebuilt tools (dm/tools/publish_port_tools.sh windows: nx_extract.exe and dmsh_xlate_vk.exe, which a player's bundle carries; docker\README.md, "The port's
+# tools") of -PortTools, else build\port_tools\win-x64 when it exists, run as two more script tests with the same Python: port_nx_extract (dm/tools/tests/test_nx_extract.py
+# with NX_EXTRACT: the usage, a synthetic NSP extracted, a damaged one reported) and port_dmsh_xlate_vk (dm/gfx/tests/test_dmsh_vk.py with XLATE_VK: its Published class,
+# the lock's win-x64 row, the embedded source and three shapes translated; the classes that need SPIRV-Tools or SPIRV-Cross skip without them).
+# Exit status: 0 when every run passed, 1 when one did not, 2 when the build folder or its test list (or a given packs or port tools folder) is missing. Windows PowerShell 5.1 (stock on
 # Windows 10) or PowerShell 7. dm/host/tests/run_host_tests.sh does the same from Git Bash (and on Linux), with NXAOT_PACKS from the environment
 param(
     [string]$BuildDir = '',
     [string]$LogDir = '',
     [int]$TimeoutSeconds = 120,
-    [string]$Packs = ''
+    [string]$Packs = '',
+    [string]$PortTools = ''
 )
 Set-StrictMode -Version 2
 $ErrorActionPreference = 'Stop'
@@ -52,6 +58,16 @@ if ($Packs) {
 $corpus = Join-Path (Join-Path (Join-Path (Join-Path $repo 'dm') 'tools') 'aot') 'corpus'
 
 $onWindows = $env:OS -eq 'Windows_NT'
+# The port's prebuilt tools (the two script tests after host_scripts.tsv's)
+if (-not $PortTools -and $onWindows) {
+    $defaultTools = Join-Path (Join-Path (Join-Path $repo 'build') 'port_tools') 'win-x64'
+    if (Test-Path -LiteralPath $defaultTools -PathType Container) { $PortTools = $defaultTools }
+}
+if ($PortTools) {
+    if (-not (Test-Path -LiteralPath $PortTools -PathType Container)) { Write-Host "no port tools folder: $PortTools (dm/tools/publish_port_tools.sh writes it: docker\README.md)"; exit 2 }
+    $PortTools = (Resolve-Path -LiteralPath $PortTools).Path
+    Write-Host "port tools: $PortTools (nx_extract and dmsh_xlate_vk, run by two script tests)"
+}
 if ($onWindows) {
     # A crashing test ends at once with its exception code instead of waiting on a Windows Error Reporting dialog: child processes inherit the error mode
     try {
@@ -241,6 +257,61 @@ if (-not (Test-Path -LiteralPath $scriptsFile -PathType Leaf)) {
     }
 }
 
+# The port's prebuilt tools: each test module through Python's unittest from the repository root, with the program in its variable; PASS when unittest exits 0 (skips included)
+if ($PortTools) {
+    $exeSuffix = ''; if ($onWindows) { $exeSuffix = '.exe' }
+    $py = @(Find-Interpreter 'python3')
+    $toolTests = @(@('port_nx_extract', 'NX_EXTRACT', "nx_extract$exeSuffix", 'dm/tools/tests/test_nx_extract.py'),
+                   @('port_dmsh_xlate_vk', 'XLATE_VK', "dmsh_xlate_vk$exeSuffix", 'dm/gfx/tests/test_dmsh_vk.py'))
+    foreach ($t in $toolTests) {
+        $name = $t[0]; $var = $t[1]; $prog = Join-Path $PortTools $t[2]; $test = $t[3]
+        $sTotal++
+        $log = Join-Path $LogDir "$name.log"
+        $why = ''
+        if ($py.Count -eq 0) { $why = 'no python3 interpreter found on PATH' } elseif (-not (Test-Path -LiteralPath $prog -PathType Leaf)) { $why = "no $prog" }
+        if ($why) {
+            [System.IO.File]::WriteAllText($log, "date: $(Now)`ncommit: $commit`ncommand: (none: $why)`n`n`nexit: none`n", $utf8)
+            $line = "FAIL $name ($why; see $name.log)"; $sFailed++
+            Write-Host $line; $results.Add($line); continue
+        }
+        $progText = (Quote-Arg $py[0])
+        foreach ($a in ($py | Select-Object -Skip 1)) { $progText += ' ' + $a }
+        $progText += " -m unittest -v $test"
+        if ($onWindows) {
+            $cmdline = "cd /d `"$repo`" && set $var=$prog&& $progText"
+            $inner = "$progText >> `"$log`" 2>&1"
+        } else {
+            $cmdline = "cd $repo && $var=$prog $progText"
+            $inner = "$progText >> '$log' 2>&1"
+        }
+        [System.IO.File]::WriteAllText($log, "date: $(Now)`ncommit: $commit`ncommand: $cmdline`n`n", $utf8)
+        $psi = New-Object System.Diagnostics.ProcessStartInfo
+        $psi.UseShellExecute = $false
+        $psi.WorkingDirectory = $repo
+        $psi.EnvironmentVariables[$var] = $prog
+        $psi.EnvironmentVariables['PYTHONDONTWRITEBYTECODE'] = '1'   # no __pycache__ in the checkout
+        if ($onWindows) { $psi.FileName = $env:ComSpec; $psi.Arguments = "/d /s /c `"$inner`"" }
+        else { $psi.FileName = '/bin/sh'; $psi.ArgumentList.Add('-c'); $psi.ArgumentList.Add($inner) }
+        $watch = [System.Diagnostics.Stopwatch]::StartNew()
+        $p = [System.Diagnostics.Process]::Start($psi)
+        $timedOut = -not $p.WaitForExit($TimeoutSeconds * 1000)
+        if ($timedOut) {
+            if ($onWindows) { Start-Process -FilePath "$env:SystemRoot\System32\taskkill.exe" -ArgumentList '/T', '/F', '/PID', $p.Id -NoNewWindow -Wait }
+            else { $p.Kill($true) }
+            $p.WaitForExit()
+        }
+        $secs = [math]::Round($watch.Elapsed.TotalSeconds, 1)
+        $rc = $p.ExitCode
+        $hex = '0x{0:X8}' -f $rc
+        [System.IO.File]::AppendAllText($log, "`nexit: $rc ($hex, $secs s)$(if ($timedOut) { ', killed after the time limit' })`n", $utf8)
+        if ($timedOut) { $line = "TIMEOUT $name (killed after $TimeoutSeconds s; see $name.log)"; $sFailed++ }
+        elseif ($rc -eq 0) { $line = "PASS $name ($secs s)"; $sPassed++ }
+        else { $line = "FAIL $name (exit $rc = $hex, $secs s; see $name.log)"; $sFailed++ }
+        Write-Host $line
+        $results.Add($line)
+    }
+}
+
 $totalLine = "$total runs: $passed passed, $failed failed"
 $scriptsLine = "$sTotal script tests: $sPassed passed, $sFailed failed, $sSkipped skipped"
 $os = [Environment]::OSVersion.VersionString
@@ -249,6 +320,7 @@ $sb = New-Object System.Text.StringBuilder
 [void]$sb.Append("date: $started`ncommit: $commit`ncommand: $invoked`ndirectory: $startedIn`nhost: $os`nbuild folder: $BuildDir`n")
 [void]$sb.Append("PowerShell: $($PSVersionTable.PSVersion)`n")
 if ($Packs) { [void]$sb.Append("packs: $Packs`n") } else { [void]$sb.Append("packs: none (the AOT tests ran without packs)`n") }
+if ($PortTools) { [void]$sb.Append("port tools: $PortTools`n") } else { [void]$sb.Append("port tools: none (-PortTools, or build\port_tools\win-x64 from dm/tools/publish_port_tools.sh)`n") }
 if ($sReads.Count -gt 0) { [void]$sb.Append("script tests' environment: $($sReads -join ' ')`n") }
 foreach ($l in ($lines | Select-Object -Skip 1)) { if ($l.StartsWith('# ')) { [void]$sb.Append($l.Substring(2) + "`n") } }
 [void]$sb.Append("`n")

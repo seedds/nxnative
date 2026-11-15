@@ -249,11 +249,14 @@ static class SwshXlateVk
             ["cbufs"] = new JsonArray(), ["sbufs"] = new JsonArray(), ["textures"] = new JsonArray(), ["images"] = new JsonArray(),
             ["uses_frag_coord"] = p.Info.UsesFragCoord, ["frag_out_map"] = p.Info.FragmentOutputMap, ["sbuf_align"] = SbufAlign,
         };
-        foreach (var b in p.Info.CBuffers) res["cbufs"].AsArray().Add(new JsonObject { ["set"] = b.Set, ["binding"] = b.Binding, ["slot"] = b.Slot });
-        foreach (var b in p.Info.SBuffers) res["sbufs"].AsArray().Add(new JsonObject { ["set"] = b.Set, ["binding"] = b.Binding, ["slot"] = b.Slot, ["cb_slot"] = b.SbCbSlot, ["cb_offset"] = b.SbCbOffset, ["flags"] = (int)b.Flags });
+        // Every element is added as a JsonNode, through JsonArray.Add(JsonNode): the generic Add<T> that a JsonObject or an int argument binds to otherwise makes its JsonValue
+        // through reflection-based serialization metadata, which a Native AOT or trimmed publish (dm/tools/publish_port_tools.sh) does not have: Add<int> threw there for a
+        // shader with fetch1d slots (IL2026 / IL3050). The JSON written is the same
+        foreach (var b in p.Info.CBuffers) res["cbufs"].AsArray().Add((JsonNode)new JsonObject { ["set"] = b.Set, ["binding"] = b.Binding, ["slot"] = b.Slot });
+        foreach (var b in p.Info.SBuffers) res["sbufs"].AsArray().Add((JsonNode)new JsonObject { ["set"] = b.Set, ["binding"] = b.Binding, ["slot"] = b.Slot, ["cb_slot"] = b.SbCbSlot, ["cb_offset"] = b.SbCbOffset, ["flags"] = (int)b.Flags });
         foreach (var (list, field) in new[] { (p.Info.Textures, "textures"), (p.Info.Images, "images") })
-            foreach (var t in list) res[field].AsArray().Add(new JsonObject { ["set"] = t.Set, ["binding"] = Final(t), ["type"] = (int)t.Type, ["format"] = t.Format.ToString(), ["cbuf_slot"] = t.CbufSlot, ["handle"] = t.HandleIndex, ["array"] = t.ArrayLength, ["separate"] = t.Separate, ["flags"] = (int)t.Flags });
-        if (acc.Fetch1D.Count > 0) { var f1 = new JsonArray(); foreach (int h in acc.Fetch1D) f1.Add(h); res["fetch1d"] = f1; }
+            foreach (var t in list) res[field].AsArray().Add((JsonNode)new JsonObject { ["set"] = t.Set, ["binding"] = Final(t), ["type"] = (int)t.Type, ["format"] = t.Format.ToString(), ["cbuf_slot"] = t.CbufSlot, ["handle"] = t.HandleIndex, ["array"] = t.ArrayLength, ["separate"] = t.Separate, ["flags"] = (int)t.Flags });
+        if (acc.Fetch1D.Count > 0) { var f1 = new JsonArray(); foreach (int h in acc.Fetch1D) f1.Add((JsonNode)h); res["fetch1d"] = f1; }
         File.WriteAllText(Path.Combine(outDir, name + ".res.json"), res.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
     }
 

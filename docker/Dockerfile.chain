@@ -28,9 +28,10 @@ RUN git clone --quiet --depth 1 --branch "$SPIRV_CROSS_TAG" https://github.com/K
  && rm -rf /tmp/src /tmp/build /tmp/*.log \
  && /out/spirv-cross --revision
 
-# The .NET SDK 10.0.402 (runtime 10.0.13, released on 2026-10-13) on Ubuntu 24.04, pinned by the digest of its multi-architecture index (the image's rebuild of 2026-10-21).
+# The .NET SDK 10.0.404 (runtime 10.0.15) on Ubuntu 24.04, pinned by the digest of its multi-architecture index (the image of 2026-11-10, the newest 10.0 patch on
+# 2026-11-15). Runtime 10.0.14 and later fix GHSA-p3jp-9v83-76w9 (the Brotli decoder), which 10.0.402's runtime 10.0.13 had and the published tools carried.
 # The translator targets net10.0 and is framework-dependent, as dmsh_xlate_bin is
-FROM mcr.microsoft.com/dotnet/sdk:10.0.402-noble@sha256:747cbade5bfd918a175ac32f8f1d931edec2c7d0d5397a3de72eaef1ac1f66d2
+FROM mcr.microsoft.com/dotnet/sdk:10.0.404-noble@sha256:fe0fd4e93bd2fbb47c883b7a6369e5c8d3db8bf01cdc5981f6ee35fbdf3ff4fb
 ENV DEBIAN_FRONTEND=noninteractive DOTNET_CLI_TELEMETRY_OPTOUT=1 DOTNET_NOLOGO=1 DOTNET_SKIP_FIRST_TIME_EXPERIENCE=1
 # Python 3.12 (and PyYAML, which reads the workflow files), SPIRV-Tools and glslang from Ubuntu 24.04's archive, the same packages as Dockerfile.build's Vulkan layer; apt
 # resolves them when the image is built, so the versions are printed (dmsh_chain_vk.lock records spirv-val's and glslang's)
@@ -39,6 +40,15 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/* \
  && dpkg-query -W -f '${Package} ${Version}\n' python3 python3-yaml spirv-tools glslang-tools \
  && dotnet --version
+# Native AOT, for the port's prebuilt tools (dm/tools/publish_port_tools.sh: nx_extract and dmsh_xlate_vk for linux-x64, so that a player packs without .NET): the ILCompiler
+# package compiles the program to object code, which clang links (with binutils' ld and objcopy, which strips the symbols into a .dbg file). clang 18 from Ubuntu 24.04, as the
+# build image has it; the layer is 382 MB (the image 1.93 GB). dotnet build and the chain's tests do not use it. Its own layer, so the layers above stay cached
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends clang-18 \
+ && rm -rf /var/lib/apt/lists/* \
+ && update-alternatives --install /usr/bin/clang clang /usr/bin/clang-18 100 \
+ && dpkg-query -W -f '${Package} ${Version}\n' clang-18 libllvm18 binutils libc6-dev \
+ && clang --version | head -1
 COPY --from=spirv-cross /out/ /opt/spirv-cross/
 ENV PATH=/opt/spirv-cross:$PATH
 # The worktree is mounted at /src and the container runs as the caller's user (HOME=/tmp): git refuses a repository owned by another user without this

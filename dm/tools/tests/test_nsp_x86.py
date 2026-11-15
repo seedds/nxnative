@@ -30,6 +30,7 @@ TID = 0x0100AAAA00000000
 ID = f'{TID:016X}'
 BID, BID2 = 'ab' * 16, 'cd' * 16
 REAL_POPEN, REAL_RUN, TRUE = subprocess.Popen, nsp.run, shutil.which('true')   # TRUE: what every tool the script looks for on PATH is found as
+REAL_BUILD_NX_EXTRACT, REAL_BUNDLED_TOOL = nsp.build_nx_extract, nsp.bundled_tool
 NXAOT ='''#!{py}
 # a stand-in for nxaot: `nxaot build` with no input prints the usage (exit 2); a build writes the object and the pack (a DLL with --target windows)
 import os, sys
@@ -144,7 +145,7 @@ class Pack(unittest.TestCase):
         self.nro = b'\0' * 0x10 + b'NRO0' + bytes(0x6c)   # the module the game loads at run time, collected by nro_collect.py (mocked)
         self.nxaot = self.tmp / 'bin/nxaot'; self.nxaot.parent.mkdir(); self.nxaot.write_text(NXAOT.format(py=sys.executable)); self.nxaot.chmod(0o755)
         self.dll = self.tmp / 'xlate_vk/dmsh_xlate_vk.dll'; self.dll.parent.mkdir(); self.dll.write_bytes(b'translator')
-        self.said, self.ran, self.rewrites, self.targets_switch = [], [], [], []
+        self.said, self.ran, self.rewrites, self.targets_switch, self.tool_env, self.vk_tools_bad = [], [], [], [], {}, False
         self.gfx = 'nvn'
         fam = {'base': self.nsp_dir / 'base.nsp', 'updates': [], 'dlc': []}
         for cm in (mock.patch.dict(os.environ, {'DM_GAMES_DIR': str(self.tmp / 'games'), 'XLATE_VK': str(self.dll)}), mock.patch.dict(sys.modules, {'capstone': types.SimpleNamespace(__version__='test')}),
@@ -174,7 +175,7 @@ class Pack(unittest.TestCase):
     def fake_run(self, cmd, log, env=None, cwd=None, on_line=None, ok=(0,)):
         cmd = [str(c) for c in cmd]; log = Path(log); log.parent.mkdir(parents=True, exist_ok=True)
         tool = Path(cmd[1] if cmd[0] == sys.executable else cmd[0]).name
-        self.ran.append((tool, cmd))
+        self.ran.append((tool, cmd)); self.tool_env[tool] = dict(env or {})
         if tool == 'nxaot':   # the fake nxaot, run for real; whether the packer kept the targets file from it (NXAOT_PROFILE_TARGETS)
             self.targets_switch.append((env or os.environ).get('NXAOT_PROFILE_TARGETS'))
             return REAL_RUN(cmd, log, env=env, cwd=cwd, on_line=on_line, ok=ok)
@@ -187,7 +188,9 @@ class Pack(unittest.TestCase):
             out = Path(cmd[3]); out.mkdir(parents=True); (out / 'nro0.nro').write_bytes(self.nro)
             (out / 'nro.tsv').write_text('# name\tsha256\tsize\tnrr\twhere\n' + f'nro0\t{hashlib.sha256(self.nro).hexdigest()}\t{len(self.nro)}\tgame.nrr\tloose a.nro\n'
                                          + f'refused\t{"ef" * 32}\t256\tgame.nrr\tloose eos.nro (EOS_Platform_Create)\n')
-        elif tool in ('dmsh_chain.py', 'dmsh_chain_vk.py'): pass   # --header: the repository's headers are not written by a test
+        elif tool in ('dmsh_chain.py', 'dmsh_chain_vk.py'):   # --header: the repository's headers are not written by a test; --check-tools: the tools match the lock, unless vk_tools_bad
+            if '--check-tools' in cmd and self.vk_tools_bad:
+                log.write_text('[RED] Vulkan translation chain tools do not match the lock file: spirv-cross_linux-x64: lock vulkan-sdk-1.4.363.0 / actual missing\n'); return 1
         elif tool == 'dmsh_build_vk.py':   # a full build: the library, its stamp and the profile's tables naming it
             lib = Path(cmd[3]) / f'vk-{nsp.chain_vk_of(REPO)}'; lib.mkdir(parents=True, exist_ok=True); (lib / '0123456789abcdef.spv').write_bytes(b'spv')
             (lib / 'inputs.tsv').write_text(f'# stamp\ngame\t{ID}\ninputs\tdigest\n')
@@ -495,8 +498,13 @@ class Linux(Pack):
         with self.assertRaisesRegex(nsp.BuildError, r'nxaot is not built .*docker build -t nxnative-aot .*--target nxaot'): nsp.find_nxaot(repo)
         (repo / 'build/aot').mkdir(parents=True); (repo / 'build/aot/nxaot').write_text('')
         self.assertEqual(nsp.find_nxaot(repo), repo / 'build/aot/nxaot')
+        # on Windows: the cross-build of dm/tools/aot/README.md ("Building nxaot for Windows"), build/aot-win64/nxaot.exe, never the Linux build/aot/nxaot
+        with self.assertRaisesRegex(nsp.BuildError, r'nxaot.exe is not built .*aot-win64.*Building nxaot for Windows'): nsp.find_nxaot(repo, win=True)
+        (repo / 'build/aot-win64').mkdir(parents=True); (repo / 'build/aot-win64/nxaot.exe').write_text('')
+        self.assertEqual(nsp.find_nxaot(repo, win=True), repo / 'build/aot-win64/nxaot.exe')
         (repo / 'bin').mkdir(); (repo / 'bin/nxaot').write_text('')   # the port's bundle (scripts/package_port.py): its bin/nxaot first
         self.assertEqual(nsp.find_nxaot(repo), repo / 'bin/nxaot')
+        (repo / 'bin/nxaot.exe').write_text(''); self.assertEqual(nsp.find_nxaot(repo, win=True), repo / 'bin/nxaot.exe')
         with self.assertRaisesRegex(nsp.BuildError, 'no such file'): nsp.find_nxaot(repo, str(self.tmp / 'none'))
         broken = self.tmp / 'bin/broken'; broken.write_text('#!/bin/sh\necho "error while loading shared libraries: libLLVM-18.so" >&2; exit 127\n'); broken.chmod(0o755)
         with self.assertRaisesRegex(nsp.BuildError, 'libLLVM-18.so.*NXAOT_LLVM_STATIC'): nsp.nxaot_options(broken, dict(os.environ))
@@ -514,6 +522,35 @@ class Linux(Pack):
         self.assertTrue((self.aot / 'main.aot.so').is_file())
         self.pack()   # with it: the step runs
         self.assertEqual(len(self.tools('dmsh_build_vk.py')), 1)
+
+    def test_vulkan_tools_not_matching_the_lock(self):   # dmsh_chain_vk.py --check-tools fails (a SPIR-V tool missing or of another version): not run, its reasons in the summary
+        self.vk_tools_bad = True; self.pack()
+        self.assertEqual(self.tools('dmsh_build_vk.py'), [])
+        self.assertEqual([c[2:] for c in self.tools('dmsh_chain_vk.py') if '--check-tools' in c], [['--check-tools']])
+        self.assertIn('[RED] not run on this system: the NVN shaders for Vulkan (the tools here do not match dm/gfx/tools/dmsh_chain_vk.lock: spirv-cross_linux-x64: lock '
+                      'vulkan-sdk-1.4.363.0 / actual missing)', self.said)
+        self.assertTrue((self.aot / 'main.aot.so').is_file())
+
+    def test_bundle_tools(self):   # packed from the port's bundle (scripts/package_port.py --tools): its published bin/nx_extract and bin/dmsh_xlate_vk, and no dotnet anywhere
+        bundle = self.tmp / 'bundle'
+        for rel in (nsp.BUNDLE_NX_EXTRACT, nsp.BUNDLE_XLATE_VK): (bundle / rel).parent.mkdir(parents=True, exist_ok=True); (bundle / rel).write_text('')
+        self.assertEqual(REAL_BUNDLED_TOOL(bundle, nsp.BUNDLE_XLATE_VK), bundle / 'bin/dmsh_xlate_vk')
+        self.assertIsNone(REAL_BUNDLED_TOOL(self.tmp / 'checkout', nsp.BUNDLE_NX_EXTRACT))
+        no_dotnet = lambda name, **kw: None if name == 'dotnet' else TRUE
+        with mock.patch.object(nsp.shutil, 'which', side_effect=no_dotnet):   # a checkout without dotnet stops before the long steps
+            with self.assertRaisesRegex(nsp.BuildError, r"dotnet \(\.NET SDK 10, which builds nx_extract; the port's bundle carries it prebuilt as bin/nx_extract\)"):
+                nsp.check_prereqs_port({'PATH': ''}, self.tmp / 'checkout')
+        env = {k: v for k, v in os.environ.items() if k != 'XLATE_VK'}
+        with mock.patch.object(nsp, 'bundled_tool', side_effect=lambda repo, rel: REAL_BUNDLED_TOOL(bundle, rel)), mock.patch.object(nsp, 'build_nx_extract', REAL_BUILD_NX_EXTRACT), \
+                mock.patch.object(nsp.shutil, 'which', side_effect=no_dotnet), mock.patch.dict(os.environ, env, clear=True):
+            self.pack()
+            self.assertEqual(nsp.extract.call_args.args[0], bundle / 'bin/nx_extract')
+        self.assertIn(f"nx_extract: {bundle / 'bin/nx_extract'} (the bundle's, published: no .NET needed)", self.said)
+        self.assertEqual(self.tool_env['dmsh_chain_vk.py']['XLATE_VK'], str(bundle / 'bin/dmsh_xlate_vk'))   # --check-tools, then the build, with the bundle's translator
+        self.assertEqual(self.tool_env['dmsh_build_vk.py']['XLATE_VK'], str(bundle / 'bin/dmsh_xlate_vk'))
+        self.assertEqual(len(self.tools('dmsh_build_vk.py')), 1)
+        self.assertFalse([c for t, c in self.ran if 'dotnet' in c])
+        self.assertFalse(any(m.startswith('[RED] not run on this system') for m in self.said))
 
     def test_stale_vulkan_tables_build_again(self):
         self.pack()

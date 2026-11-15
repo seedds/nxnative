@@ -17,7 +17,7 @@
 #   integer format. The host decides per slot later (a translator answer, or a second entry point).
 # The job model is dmsh_build.py's: shader keys (with the target added), the content-addressed cache (DMSH_CAS, default <output cache dir>/cas; outputs under cas/vk/), a translator
 #   process per batch of J keys, pixel shaders before the vertex shaders paired with them (vs_pad reads their inputs).
-# Environment: DM_GAME (required), XLATE_VK, SPIRV_CROSS_VK, DOTNET (dmsh_chain_vk.py), DMSH_CAS, J (concurrency, default 8), WORK (the temporary folder's parent), XLATE_DEBUG /
+# Environment: DM_GAME (required), XLATE_VK (a dll or a published translator), SPIRV_CROSS_VK, DOTNET (dmsh_chain_vk.py), DMSH_CAS, J (concurrency, default 8), WORK (the temporary folder's parent), XLATE_DEBUG /
 #   XLATE_REDUCED (dmsh_chain.py options)
 import ast, collections, concurrent.futures as cf, hashlib, json, os, re, shutil, struct, subprocess, sys, tempfile, threading
 HERE = os.path.dirname(os.path.abspath(__file__)); sys.path.insert(0, HERE)
@@ -96,7 +96,7 @@ class Build:
         self.out = os.path.join(cache_root, dmsh_chain_vk.PREFIX + self.chain); os.makedirs(self.out, exist_ok=True)
         g = dmsh_chain.read_stamp(self.out).get('game')
         if g and g != self.game.id: sys.exit(f'[RED] {self.out} holds the shader libraries of game {g}, not {self.game.id}: give each game its own output directory')
-        self.xlate = [os.environ.get('DOTNET', 'dotnet'), dmsh_chain_vk.XLATE_VK]
+        self.xlate = dmsh_chain_vk.xlate_cmd()   # the dll of a dotnet build with dotnet, or a published translator (dm/tools/publish_port_tools.sh) as it is
         self.cross = dmsh_chain_vk.spirv_cross()
         self.cas = os.path.join(os.environ.get('DMSH_CAS', os.path.join(cache_root, 'cas')), 'vk')
         self.nj = int(os.environ.get('J', '8'))

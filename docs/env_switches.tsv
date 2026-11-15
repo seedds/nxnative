@@ -314,7 +314,7 @@ DM_XCODE_DERIVED_DATA	path	Xcode derived data folder for `build_ipa.sh` (default
 DM_XCODE_PROJECT_DIR	path	Folder of the per-game Xcode project that `build_ipa.sh --prepare-xcode` makes (default `$W/xcode`); the NSP script sets it
 DM_XV_FILE	path	File where the attachment validity ledger keeps the keys it disabled after a violation, read at the next launch
 DM_YIELD_BACKOFF	switch	`0` turns off the yield back-off; `=<cap µs>[:<start µs>]` sets its sleep cap and the run of yields after which it starts (default 250:2000)
-DOTNET	path	The `dotnet` program that runs the Vulkan shader translator `dmsh_xlate_vk.dll` (`dmsh_chain_vk.py`, `dmsh_build_vk.py`, `test_dmsh_vk.py`; the NSP script's Vulkan layer check reads it too); default `dotnet` on `PATH`
+DOTNET	path	The `dotnet` program that runs the Vulkan shader translator `dmsh_xlate_vk.dll` (not a published one; `dmsh_chain_vk.py`, `dmsh_build_vk.py`, `test_dmsh_vk.py`; the NSP script's Vulkan layer check reads it too); default `dotnet` on `PATH`
 FAKE_BUILD_FAIL	test	When set, `test_port_docker.py`'s stand-in `docker build` fails
 FAKE_DIR	test	The folder in which `test_measure_packs.py`'s stand-in nxaot_host keeps its per-variant run counters
 FAKE_EXIT_	test	`FAKE_EXIT_<output>=<status>`: the exit status of `test_measure_packs.py`'s stand-in nxaot_host for the pack whose guest output is `<output>` (default 0)
@@ -350,6 +350,7 @@ NXL_FAKE_HOST	test	When set, the launcher tests (`t_launcher_model.cpp`, `t_laun
 NXL_FAKE_STATUS	test	`=<n>`: the exit status of the launcher tests' stand-in nxhost-run (`NXL_FAKE_HOST`); default 0
 NXNATIVE_TEST_ROOT	test	The folder `test_nsp_mac_app.py` makes its temporary folders in; default the system's temporary folder
 NXPACK	switch	`balanced` or `max`: the pack mode `run.sh` and `run.cmd` (written by `scripts/build_ipa_from_nsp.py`) start, from the launch file's `pack` rows; unset, the first row (the launcher picks the mode in its window instead)
+NX_EXTRACT	test	The `nx_extract` program `dm/tools/tests/test_nx_extract.py` runs on its synthetic NSP: a published one (`dm/tools/publish_port_tools.sh`) or a bundle's `bin/nx_extract`; unset, the test builds `nx_extract` with `dotnet` and skips where there is none
 PYTHON	switch	The Python 3.12 or later that a port bundle's `pack.sh` and `pack.cmd` (written by `scripts/package_port.py`) run the NSP script with; default `python3` (`pack.sh`), `py -3` or `python` (`pack.cmd`)
 REGRESS_GAMES	path	The folder of the games' NSP folders with their Mac builds for `scripts/regress.py` (`--games-dir` overrides it); no default
 REGRESS_ROOT	path	The folder of `scripts/regress.py`'s source trees and reports (`--root` overrides it); no default
@@ -371,4 +372,5 @@ WORK	path	The parent folder of `dmsh_build.py`'s and `dmsh_build_vk.py`'s tempor
 XLATE	path	The NVN shader translator `dmsh_build.py` runs; `dmsh_chain.py` fingerprints its folder for the chain version; default the in-repo `dm/gfx/tools/dmsh_xlate_bin/dmsh_xlate`, the build `dmsh_chain.lock` names
 XLATE_DEBUG	switch	`0` turns the shader translator's debug mode off (the AST optimizer runs; `dmsh_build.py`); default `1`. A part of the chain version (`dmsh_chain.py`), so libraries built with another value are not the host's
 XLATE_REDUCED	switch	`1` (the default) lets the shader translator use relaxed precision (`dmsh_build.py`); another value turns it off. A part of the chain version (`dmsh_chain.py`), so libraries built with another value are not the host's
-XLATE_VK	path	The Vulkan shader translator `dmsh_xlate_vk.dll` (`dmsh_chain_vk.py`; the NSP script reads it too); default `build/xlate_vk/bin/dmsh_xlate_vk/release/dmsh_xlate_vk.dll`, the build of docker/README.md
+XLATE_VK	path	The Vulkan shader translator (`dmsh_chain_vk.py`; the NSP script sets it to a bundle's `bin/dmsh_xlate_vk`): the `dmsh_xlate_vk.dll` of a dotnet build, run with `dotnet`, or a published translator (`dmsh_xlate_vk`, `dmsh_xlate_vk.exe` of `dm/tools/publish_port_tools.sh`), run as it is; default `build/xlate_vk/bin/dmsh_xlate_vk/release/dmsh_xlate_vk.dll`, the build of docker/README.md
+XLATE_VK_PUBLISHED	path	`dmsh_chain_vk.py --update-lock`: the folder of the published translators it fingerprints into the lock, `<platform>/dmsh_xlate_vk[.exe]` for `linux-x64` and `win-x64` (`dm/tools/publish_port_tools.sh`'s outputs, `build/port_tools` in docker/README.md); `--update-lock` stops without it

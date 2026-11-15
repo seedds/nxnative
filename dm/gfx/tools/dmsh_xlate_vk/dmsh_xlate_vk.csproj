@@ -1,6 +1,8 @@
 <!-- Switch shader → SPIR-V translation tool for the Vulkan target (Program.cs says how it differs from dmsh_xlate). It references the same Ryujinx shader translator source as
-     dmsh_xlate (dm/third_party/ryujinx); -p:RyuSrc=<dir> points it at another copy. Built with dotnet build -c Release, framework-dependent and run with dotnet dmsh_xlate_vk.dll.
-     The built assemblies are not committed: dm/gfx/tools/dmsh_chain_vk.lock records their fingerprints, and the chain workflow builds them and checks the lock -->
+     dmsh_xlate (dm/third_party/ryujinx); -p:RyuSrc=<dir> points it at another copy. Built with dotnet build -c Release, framework-dependent and run with dotnet dmsh_xlate_vk.dll;
+     for players, dm/tools/publish_port_tools.sh publishes it as one program that needs no .NET (Native AOT on linux-x64; on win-x64, which Native AOT cannot target from
+     Linux, a self-contained, trimmed single file with ReadyToRun code), with the publish options on its command line. The built assemblies and programs are not committed:
+     dm/gfx/tools/dmsh_chain_vk.lock records their fingerprints, and the chain workflow builds them and checks the lock -->
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <OutputType>Exe</OutputType>
@@ -15,11 +17,16 @@
          generated regular expressions are file-local types, whose names hash the generated file's path under the artifacts folder, so without the map the assembly's bytes
          depended on the checkout's location. Build into build/xlate_vk (docker/README.md), the path dmsh_chain_vk.lock's fingerprints were made with -->
     <PathMap>$([System.IO.Path]::GetFullPath('$(MSBuildThisFileDirectory)../../../../'))=/_/</PathMap>
+    <!-- No commit in the assemblies: the SDK's Source Link appends the checkout's HEAD commit to every assembly's informational version (1.0.0+<sha>), so each commit gave
+         other bytes and the lock held only at the commit it was written at. Passed to the Ryujinx projects with the path map -->
+    <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
+    <!-- The culture of the PC that runs it plays no part, and the published translator (dm/tools/publish_port_tools.sh) needs no ICU library -->
+    <InvariantGlobalization>true</InvariantGlobalization>
     <RyuSrc Condition="'$(RyuSrc)' == ''">$(MSBuildThisFileDirectory)../../../third_party/ryujinx</RyuSrc>
   </PropertyGroup>
   <ItemGroup>
-    <ProjectReference Include="$(RyuSrc)/src/Ryujinx.Graphics.Shader/Ryujinx.Graphics.Shader.csproj" AdditionalProperties="PathMap=$(PathMap)" />
-    <ProjectReference Include="$(RyuSrc)/src/Ryujinx.Common/Ryujinx.Common.csproj" AdditionalProperties="PathMap=$(PathMap)" />
+    <ProjectReference Include="$(RyuSrc)/src/Ryujinx.Graphics.Shader/Ryujinx.Graphics.Shader.csproj" AdditionalProperties="PathMap=$(PathMap);IncludeSourceRevisionInInformationalVersion=false" />
+    <ProjectReference Include="$(RyuSrc)/src/Ryujinx.Common/Ryujinx.Common.csproj" AdditionalProperties="PathMap=$(PathMap);IncludeSourceRevisionInInformationalVersion=false" />
   </ItemGroup>
   <!-- Embeds its own source: the source-sha argument prints its hash, by which dmsh_chain_vk.py checks that the translator was built from the in-repo source -->
   <ItemGroup>

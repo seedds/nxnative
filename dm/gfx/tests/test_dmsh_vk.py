@@ -1,7 +1,7 @@
 """The shader chain for the Vulkan target (docs/design/vulkan-backend.md, section 2) on synthetic Maxwell shaders only, no game files: the Vulkan translator
 (dm/gfx/tools/dmsh_xlate_vk), the SPIR-V passes (dmsh_spv.py), the build and its census (dmsh_build_vk.py) and the version (dmsh_chain_vk.py).
-Run in the chain image (docker/README.md has the command): the translator built into build/xlate_vk (XLATE_VK selects another dmsh_xlate_vk.dll), dotnet, SPIRV-Tools (spirv-val,
-spirv-as, spirv-link) and spirv-cross on PATH (SPIRV_CROSS_VK selects another). Where one of them is missing, the tests that need it skip and say which; the portable checks still run.
+Run in the chain image (docker/README.md has the command): the translator built into build/xlate_vk (XLATE_VK selects another dmsh_xlate_vk.dll, or a published translator,
+dm/tools/publish_port_tools.sh, which runs without dotnet), dotnet, SPIRV-Tools (spirv-val, spirv-as, spirv-link) and spirv-cross on PATH (SPIRV_CROSS_VK selects another). Where one of them is missing, the tests that need it skip and say which; the portable checks still run.
 Each class prints its counts (shaders translated, entry points, validation results, bindings checked)."""
 import importlib.util
 import json
@@ -29,6 +29,7 @@ atomic_tests = importlib.util.module_from_spec(spec); spec.loader.exec_module(at
 
 DOTNET = os.environ.get('DOTNET', 'dotnet')
 XLATE = Path(dmsh_chain_vk.XLATE_VK)
+XLATE_CMD = dmsh_chain_vk.xlate_cmd()   # dotnet <dll>, or a published translator alone
 SPIRV_CROSS = dmsh_chain_vk.spirv_cross()
 
 
@@ -38,7 +39,7 @@ def missing(*tools):
     if 'xlate' in tools:
         gone.remove('xlate') if 'xlate' in gone else None
         if not XLATE.is_file(): gone.append(f'the Vulkan translator {XLATE} (build it as docker/README.md says)')
-        if not shutil.which(DOTNET): gone.append('dotnet')
+        if not dmsh_chain_vk.published() and not shutil.which(DOTNET): gone.append('dotnet')
     return ', '.join(gone)
 
 
@@ -190,7 +191,7 @@ class Portable(unittest.TestCase):   # no tools needed
 
     def test_lock_rows(self):   # the dlls and the source hash, and per-platform tool rows; no Metal compiler
         lock = dmsh_chain_vk.lock()
-        for k in dmsh_chain_vk.DLLS + ('xlate_source',): self.assertRegex(lock.get(k, ''), r'^[0-9a-f]{16}$', k)
+        for k in dmsh_chain_vk.DLLS + ('xlate_source',) + tuple('dmsh_xlate_vk_' + p for p in dmsh_chain_vk.PUBLISHED): self.assertRegex(lock.get(k, ''), r'^[0-9a-f]{16}$', k)
         self.assertEqual(lock['xlate_source'], dmsh_chain_vk.xlate_source_sha(), 'dmsh_chain_vk.lock holds another translator source: rebuild and run --update-lock in the chain image')
         self.assertTrue(any(k.startswith('spirv-tools_') for k in lock) and any(k.startswith('spirv-cross_') for k in lock) and any(k.startswith('glslang_') for k in lock))
         self.assertFalse([k for k in lock if 'metal' in k])
@@ -225,7 +226,7 @@ class Translator(unittest.TestCase):
         cls.tmp = tempfile.TemporaryDirectory(prefix='dm-vk-xlate-'); cls.work = Path(cls.tmp.name)
         cls.jobs = jobs_for(cls.work)
         (cls.work / 'jobs.json').write_text(json.dumps(cls.jobs))
-        cls.result = subprocess.run([DOTNET, str(XLATE), str(cls.work / 'jobs.json'), str(cls.work)], capture_output=True, text=True)
+        cls.result = subprocess.run([*XLATE_CMD, str(cls.work / 'jobs.json'), str(cls.work)], capture_output=True, text=True)
 
     @classmethod
     def tearDownClass(cls): cls.tmp.cleanup()
@@ -233,7 +234,7 @@ class Translator(unittest.TestCase):
     def module(self, key, sfx=''): return dmsh_spv.Module.read(self.work / f'{key}{sfx}.spv')
 
     def test_source_sha_matches_lock(self):
-        r = subprocess.run([DOTNET, str(XLATE), '--source-sha'], capture_output=True, text=True, check=True)
+        r = subprocess.run([*XLATE_CMD, '--source-sha'], capture_output=True, text=True, check=True)
         self.assertEqual(r.stdout.strip(), dmsh_chain_vk.xlate_source_sha())
         self.assertEqual(r.stdout.strip(), dmsh_chain_vk.lock()['xlate_source'])
 
@@ -357,7 +358,7 @@ class Translator(unittest.TestCase):
         job = next(j for j in self.jobs if j['key'] == 'vs_int')
         with tempfile.TemporaryDirectory() as d:
             j = dict(job, key='vs_int_u', attr={'1': 'uint'}); (Path(d) / 'j.json').write_text(json.dumps([j]))
-            subprocess.run([DOTNET, str(XLATE), str(Path(d) / 'j.json'), d], check=True, capture_output=True)
+            subprocess.run([*XLATE_CMD, str(Path(d) / 'j.json'), d], check=True, capture_output=True)
             m = dmsh_spv.Module.read(Path(d) / 'vs_int_u.spv'); dmsh_spv.apply(m, 'vs')
             ins = {x['location']: x['base'] for x in dmsh_spv.interface(m) if x['storage'] == 'in'}
             self.assertEqual(ins.get(1), 'uint')
@@ -367,6 +368,33 @@ class Translator(unittest.TestCase):
             ins = {x['location']: x['base'] for x in dmsh_spv.interface(m) if x['storage'] == 'in'}
             self.assertEqual((ins[16], ins[17]), ('float', 'sint'))
             self.assertEqual(dmsh_spv.shadow_inputs(dmsh_spv.Module.read(self.work / 'vs_basic.spv')), 'no integer input')
+
+
+def tlds1d(d, a, handle): return base('Tlds') | d | (a << 8) | (PT << 16) | (RZ << 20) | (RZ << 28) | (handle << 36) | (1 << 50)   # TLDS.1D.LZ Rd, Ra, slot handle (red)
+
+
+@unittest.skipUnless(dmsh_chain_vk.published() and XLATE.is_file(), 'XLATE_VK names no published translator (dm/tools/publish_port_tools.sh)')
+class Published(unittest.TestCase):
+    """A published translator where it runs, with no dotnet and no SPIR-V tools (the Windows PC's runner: run_win64_tests.ps1 -PortTools): the lock's row of this platform, the
+    source it embeds, and three shapes translated into SPIR-V modules and reflections, among them a 1D texel fetch, whose fetch1d slot a trimmed or AOT build once failed to write"""
+    def test_lock_row_and_source(self):
+        self.assertEqual(dmsh_chain.sha16(str(XLATE)), dmsh_chain_vk.lock().get('dmsh_xlate_vk_' + dmsh_chain_vk.plat()), 'not the translator dmsh_chain_vk.lock fingerprints')
+        r = subprocess.run([*XLATE_CMD, '--source-sha'], capture_output=True, text=True, timeout=60)
+        self.assertEqual(r.stdout.strip(), dmsh_chain_vk.xlate_source_sha())
+
+    def test_translates(self):
+        with tempfile.TemporaryDirectory() as d:
+            work = Path(d); jobs = [j for j in jobs_for(work) if j['key'] in ('vs_basic', 'ps_tex')]
+            (work / 'ps_fetch1d.bin').write_bytes(code([ipa(0, GENERIC0), tlds1d(0, 0, 8)], sph(5, omap=0xF, imap=[(0, FLAT)])))
+            jobs.append(dict(key='ps_fetch1d', stage='ps', code=str(work / 'ps_fetch1d.bin'), tex={'0': '1d'}, img={}, attr={}, fout={}, debug=True, reduced=True))
+            (work / 'jobs.json').write_text(json.dumps(jobs))
+            r = subprocess.run([*XLATE_CMD, str(work / 'jobs.json'), str(work)], capture_output=True, text=True, timeout=300)
+            self.assertEqual((r.returncode, r.stdout.strip()), (0, 'translated: 3 ok, 0 failed'), r.stderr)
+            for j in jobs:
+                self.assertEqual((work / f'{j["key"]}.spv').read_bytes()[:4], b'\x03\x02\x23\x07', j['key'])   # the SPIR-V magic
+                self.assertEqual(json.loads((work / f'{j["key"]}.res.json').read_text())['key'], j['key'])
+            self.assertEqual(json.loads((work / 'ps_fetch1d.res.json').read_text()).get('fetch1d'), [0])
+            print(f'\npublished translator {XLATE}: {len(jobs)} shapes translated without dotnet')
 
 
 GAME_ID = '0100FFFFFFFF0000'   # a title ID no game has: the synthetic profile

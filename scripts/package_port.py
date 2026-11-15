@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """The port's bundle: what a player downloads, unpacks and runs on Linux or Windows (docs/development.md, "The port's bundles").
 
-    python3 scripts/package_port.py --platform linux --build build/linux --aot build/aot --out build/bundle/nxnative-linux-x86_64 --archive --check
-    python3 scripts/package_port.py --platform windows --build build/win64 --aot build/aot-win64 --out build/bundle/nxnative-windows-x86_64 --archive --check
+    python3 scripts/package_port.py --platform linux --build build/linux --aot build/aot --tools build/port_tools/linux-x64 --out build/bundle/nxnative-linux-x86_64 --archive --check
+    python3 scripts/package_port.py --platform windows --build build/win64 --aot build/aot-win64 --tools build/port_tools/win-x64 --out build/bundle/nxnative-windows-x86_64 --archive --check
 
 It builds nothing: it assembles the bundle folder from build trees that CMake already made and from this checkout's tracked files, and fails with the missing file's name
 when something is not there.
@@ -13,11 +13,15 @@ when something is not there.
             /usr/share/doc/libllvm18/copyright there). Required on Linux. On Windows nxaot.exe, cross-built with llvm-mingw against the static LLVM of
             dm/tools/aot/tools/build_llvm_win64.sh (dm/tools/aot/README.md, "Building nxaot for Windows"), with that LLVM's LICENSE.TXT as licenses/LLVM.txt; the packer
             runs the bundle's bin/nxaot.exe. Without --aot a Windows bundle has no nxaot and its README.txt says how to pack
+  --tools   the port's prebuilt tools of dm/tools/publish_port_tools.sh for this platform: nx_extract and the Vulkan shader translator dmsh_xlate_vk (.exe on Windows), programs
+            that need no .NET, which go to bin/ (the packer runs them from there instead of building nx_extract with dotnet), and the licences of what is linked into them
+            (<tools>/licenses/, at least dotnet-runtime.txt), which go to licenses/. Without --tools the bundle has neither and its README.txt asks for the .NET SDK
   --out     the bundle folder, created (or replaced when it holds an earlier bundle: a VERSION file); its name is the archive's top folder
   --archive <out>.tar.gz (Linux: executable bits kept) or <out>.zip (Windows) beside it; the same inputs give the same bytes (sorted entries, the commit's time on every entry)
   --check   the bundle's own smoke test: no symlink, no file naming the build trees or this checkout, no ELF run path outside the bundle and no ELF that needs a shared library
             of NOT_NEEDED (a dynamic nxaot: build it with -DNXAOT_LLVM_STATIC=ON), the launcher's --list on an empty games folder and nxaot version (Linux only: a Windows bundle's executables are not run here), the packer's --help through the bundle's path, the shader chain versions the
-            bundle's sources give against its headers, a profile for every host
+            bundle's sources give against its headers, a profile for every host; with --tools, nx_extract's usage and the translator's source hash (Linux only), and the translator
+            against its row of the bundle's dm/gfx/tools/dmsh_chain_vk.lock (dmsh_xlate_vk_linux-x64 / dmsh_xlate_vk_win-x64), which the packer's shader step checks
 Exit status 0 when done, 1 on an error (the message says which file or check), 2 on a usage error."""
 import argparse
 import gzip
@@ -118,9 +122,10 @@ def need(path, why):
     return path
 
 
-def licence_files(platform, build, aot):
+def licence_files(platform, build, aot, tools=None):
     """[(name in licenses/, source)]: this project's licence, every third party vendored in dm/third_party (its LICENSE / COPYING, and libvpx's PATENTS), dynarmic's bundled
-    externals, SDL3 (fetched by the host's CMake), the LLVM and lld libraries linked into nxaot, and whatever the trees' licenses/ folders hold"""
+    externals, SDL3 (fetched by the host's CMake), the LLVM and lld libraries linked into nxaot, the .NET runtime of the prebuilt tools, and whatever the trees' licenses/
+    folders hold (a name already taken keeps its first source: the tools' ryujinx.txt is dm/third_party/ryujinx's licence)"""
     out = [('nxnative.txt', need(REPO / 'LICENSE', 'this project\'s licence'))]
     def first(d):
         found = sorted(p for p in d.iterdir() if p.is_file() and re.match(r'(LICEN[CS]E|COPYING)', p.name, re.I))
@@ -138,14 +143,15 @@ def licence_files(platform, build, aot):
     where = ('copy LICENSE.TXT from the prefix dm/tools/aot/tools/build_llvm_win64.sh built' if platform == 'windows'
              else 'copy /usr/share/doc/libllvm18/copyright from the nxnative-aot image')
     if aot: out.append(('LLVM.txt', need(aot / 'licenses/LLVM.txt', f'the licence of the LLVM and lld libraries linked into nxaot ({where})')))
-    for tree in (build, aot):
+    if tools: need(tools / 'licenses/dotnet-runtime.txt', 'the licence of the .NET runtime in the prebuilt tools (dm/tools/publish_port_tools.sh writes licenses/ beside them)')
+    for tree in (build, aot, tools):
         if tree and (tree / 'licenses').is_dir():
             for p in sorted((tree / 'licenses').iterdir()):
                 if p.is_file() and p.name not in {n for n, _ in out}: out.append((p.name, p))
     return out
 
 
-def readme(platform, sha, date, hosts, nxaot):
+def readme(platform, sha, date, hosts, nxaot, tools=False):
     win, lines = platform == 'windows', []
     exe, py, pack = ('.exe', 'py -3', 'pack.cmd') if win else ('', 'python3', './pack.sh')
     lines += [f'nxnative for {"Windows" if win else "Linux"} (x86-64), {sha} of {date}',
@@ -154,7 +160,11 @@ def readme(platform, sha, date, hosts, nxaot):
               '',
               'What this PC needs',
               f'  - {"Windows 10 or later" if win else "Linux with glibc 2.38 and the C++ library of GCC 13 or later (Ubuntu 24.04 or later, Debian 13)"} and a GPU driver with Vulkan 1.3.']
-    lines += [
+    if tools: lines += [
+              f'  - To pack a game: Python 3.12 or later with lz4, capstone and backports.zstd ({py} -m pip install lz4 capstone backports.zstd; backports.zstd only before',
+              '    Python 3.14). The packer\'s other tools are in bin/ and need no .NET. The Vulkan shaders of NVN games also need SPIRV-Tools, glslang and SPIRV-Cross,',
+              '    which this folder does not carry yet: until then the packer reports that step as not run (docs/development.md, "The port\'s bundles").']
+    else: lines += [
               f'  - To pack a game: Python 3.12 or later with lz4, capstone and backports.zstd ({py} -m pip install lz4 capstone backports.zstd; backports.zstd only before',
               '    Python 3.14), and the .NET SDK 10 (the packer builds its extraction tool, nx_extract, with it on the first pack; NVN games also need the Vulkan shader',
               '    translator, which this folder does not carry yet: docs/development.md, "The port\'s bundles").']
@@ -175,6 +185,8 @@ def readme(platform, sha, date, hosts, nxaot):
               f'  {"nxlauncher" + exe:<25} the launcher',
               f'  {"hosts/<title ID>/":<25} nxhost-run{exe}, the host built for each game profile (a game whose profile has no folder here cannot be played with this bundle)']
     if nxaot: lines += [f'  {"bin/nxaot" + exe:<25} the recompiler the packer runs']
+    if tools: lines += [f'  {"bin/nx_extract" + exe:<25} the NSP extraction tool the packer runs',
+                        f'  {"bin/dmsh_xlate_vk" + exe:<25} the Vulkan shader translator the packer runs for NVN games']
     lines += [f'  {pack:<25} the packer: scripts/ and dm/ hold it and the game profiles',
               f'  {"licenses/":<25} the licences of nxnative and of the third-party code in it',
               f'  {"VERSION":<25} the commit this bundle was built from',
@@ -213,7 +225,7 @@ exit /b %errorlevel%
 '''
 
 
-def assemble(platform, build, aot, out):
+def assemble(platform, build, aot, out, tools=None):
     """The bundle folder out: [(relative path, mode)] of every file it holds"""
     exe = PLATFORMS[platform]['exe']
     sha, ts, date, dirty = version_info()
@@ -228,7 +240,13 @@ def assemble(platform, build, aot, out):
         nxaot = need(aot / f'nxaot{exe}', f'the recompiler (cmake --build {aot} --target nxaot)')
     elif platform == 'linux': raise PackError('--aot is required on Linux: the packer needs the recompiler nxaot (dm/tools/aot)')
     else: say('no --aot: the Windows bundle has no nxaot (dm/tools/aot/README.md, "Building nxaot for Windows", builds nxaot.exe; README.txt says how to pack without it)')
-    lic = licence_files(platform, build, aot)
+    progs = []   # the prebuilt tools (--tools): [(name in bin/, source)]
+    if tools:
+        tools = tools.resolve()
+        if not tools.is_dir(): raise PackError(f'--tools: no such folder: {tools}')
+        for n in ('nx_extract', 'dmsh_xlate_vk'):
+            progs.append((f'{n}{exe}', need(tools / f'{n}{exe}', f'a prebuilt tool (sh dm/tools/publish_port_tools.sh {platform} <folder>, in the chain image: docker/README.md)')))
+    lic = licence_files(platform, build, aot, tools)
     files = tracked_files()
     if dirty: say('[RED] the packer\'s files differ from the commit: VERSION says so')
 
@@ -249,11 +267,12 @@ def assemble(platform, build, aot, out):
     put(f'nxlauncher{exe}', launcher, mode=0o755)
     for gid, p in hosts.items(): put(f'hosts/{gid}/nxhost-run{exe}', p, mode=0o755)
     if nxaot: put(f'bin/nxaot{exe}', nxaot, mode=0o755)
+    for name, src in progs: put(f'bin/{name}', src, mode=0o755)
     for rel, mode in files: put(rel, REPO / rel, mode=mode)
     for name, src in lic: put(f'licenses/{name}', src)
     if platform == 'linux': put('pack.sh', data=PACK_SH.encode(), mode=0o755)
     else: put('pack.cmd', data=(PACK_CMD_NXAOT if nxaot else PACK_CMD).replace('\n', '\r\n').encode())
-    put('README.txt', data=readme(platform, sha, date, hosts, bool(nxaot)).encode())
+    put('README.txt', data=readme(platform, sha, date, hosts, bool(nxaot), bool(progs)).encode())
     nl = '\r\n' if platform == 'windows' else '\n'
     put(MARKER, data=nl.join([f'nxnative {sha}{"-modified" if dirty else ""}', f'date {date}', f'platform {platform}-x86_64',
                               f'hosts {" ".join(hosts)}', f'nxaot {"yes" if nxaot else "no"}']).encode() + nl.encode())
@@ -262,7 +281,7 @@ def assemble(platform, build, aot, out):
     for d in sorted({p for rel, _ in held for p in Path(rel).parents if str(p) != '.'}, key=lambda p: -len(p.parts)):
         os.chmod(out / d, 0o755); os.utime(out / d, (ts, ts))
     say(f'{out}: {len(held)} files, {sum((out / r).stat().st_size for r, _ in held) / 1e6:.1f} MB; hosts for {len(hosts)} profile{"" if len(hosts) == 1 else "s"} ({" ".join(hosts)}); '
-        f'nxaot {"from " + str(nxaot) if nxaot else "none"}; {sha} of {date}')
+        f'nxaot {"from " + str(nxaot) if nxaot else "none"}; prebuilt tools {"from " + str(tools) if progs else "none"}; {sha} of {date}')
     return sorted(held), ts
 
 
@@ -361,11 +380,11 @@ def check(platform, out, inputs):
             say(f'check: {rel}: needs {" ".join(needed) or "no shared library"}' + (f'; run path {":".join(rpaths)}' if rpaths else ''))
     say(f'check: {len(rows)} files, no symbolic link, no path of the build trees or this checkout in the text files it wrote or copied from them' if not fails else f'check: {len(fails)} file problem(s)')
 
-    def run(argv, want, cwd=None, env=None):
+    def run(argv, want, cwd=None, env=None, codes=(0,)):
         try: r = subprocess.run([str(a) for a in argv], capture_output=True, text=True, errors='replace', timeout=120, cwd=cwd, env=env)
         except (OSError, subprocess.TimeoutExpired) as e: fails.append(f'{" ".join(map(str, argv))}: does not run ({e})'); return None
         text = r.stdout + r.stderr
-        ok = r.returncode == 0 and re.search(want, text, re.M)
+        ok = r.returncode in codes and re.search(want, text, re.M)
         shown = [str(a) if not str(a).startswith(str(out)) else Path(a).relative_to(out).as_posix() for a in argv]
         say(f'check: {" ".join(shown)}: exit {r.returncode}' + (f': {text.strip().splitlines()[0][:160]}' if text.strip() else ''))
         label = shown[2] if argv[0] == sys.executable else shown[0]   # the bundle's script a Python runs, else the program
@@ -382,7 +401,14 @@ def check(platform, out, inputs):
                 run([out / 'nxlauncher', '--list', games], r'^# title_id\t', env=env)   # the header line and no game; "0 games in <folder>" on standard error
                 if (out / 'bin/nxaot').is_file(): run([out / 'bin/nxaot', 'version'], r'^llvm\t', env=env)
                 else: fails.append('bin/nxaot is missing')
+                if (out / 'bin/nx_extract').is_file(): run([out / 'bin/nx_extract'], r'^usage: nx_extract', env=env, codes=(2,))   # its usage, exit 2
+                if (out / 'bin/dmsh_xlate_vk').is_file(): run([out / 'bin/dmsh_xlate_vk', '--source-sha'], r'^[0-9a-f]{16}$', env=env)
         else: say('check: skipped running nxlauncher.exe, nxhost-run.exe and nxaot.exe: a Windows bundle\'s executables run on Windows (open nxlauncher.exe there)')
+        # the prebuilt translator against its row of the bundle's lock: the packer's shader step (dmsh_chain_vk.py --check-tools) takes no other
+        xlate = out / f'bin/dmsh_xlate_vk{PLATFORMS[platform]["exe"]}'
+        if xlate.is_file():
+            rid = {'linux': 'linux-x64', 'windows': 'win-x64'}[platform]
+            run([sys.executable, '-I', out / 'dm/gfx/tools/dmsh_chain_vk.py', '--check-published', rid, xlate], r'as the lock', cwd=t, env=env)
         # the packer through the bundle's own path, from another folder, with a Python that does not see this checkout's files (-I)
         run([sys.executable, '-I', out / 'scripts/build_ipa_from_nsp.py', '--help'], r'--platform', cwd=t, env=env)
         # the shader chain versions the bundle's sources give, against the headers the hosts were compiled with: a difference would make the packer write the headers again
@@ -406,16 +432,17 @@ def main(argv=None):
     ap.add_argument('--platform', required=True, choices=sorted(PLATFORMS))
     ap.add_argument('--build', required=True, type=Path, help='the host\'s CMake tree: nxlauncher, nxhost-run per profile (hosts/<title ID>/ or the tree\'s own GAME), _deps/sdl3-src')
     ap.add_argument('--aot', type=Path, help='the recompiler\'s CMake tree: nxaot and licenses/LLVM.txt (required on Linux)')
+    ap.add_argument('--tools', type=Path, help='the prebuilt nx_extract and dmsh_xlate_vk of dm/tools/publish_port_tools.sh for this platform, with their licenses/ (bin/ in the bundle)')
     ap.add_argument('--out', required=True, type=Path, help='the bundle folder; its name is the archive\'s top folder')
     ap.add_argument('--archive', action='store_true', help='also write <out>.tar.gz (Linux) or <out>.zip (Windows) beside it')
     ap.add_argument('--check', action='store_true', help='run the bundle\'s smoke test')
     a = ap.parse_args(argv)
     try:
         out = a.out.resolve()
-        _, ts = assemble(a.platform, a.build, a.aot, out)
+        _, ts = assemble(a.platform, a.build, a.aot, out, a.tools)
         if a.archive: archive(a.platform, out, ts)
         if a.check:
-            fails = check(a.platform, out, [a.build, a.aot])
+            fails = check(a.platform, out, [a.build, a.aot, a.tools])
             if fails: raise PackError('the check failed:\n  ' + '\n  '.join(fails))
             say('check: passed')
     except PackError as e:

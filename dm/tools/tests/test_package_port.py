@@ -179,6 +179,57 @@ class Bundle(unittest.TestCase):
         rc, err, _ = self.package(platform='windows', build=win)
         self.assertEqual(rc, 1); self.assertRegex(err, r'missing .*nxaot.exe: the recompiler')
 
+    def tools(self, exe):   # stand-ins for dm/tools/publish_port_tools.sh's output: nx_extract (its usage, exit 2), dmsh_xlate_vk (--source-sha), their licences
+        tools = self.tmp / f'build/port_tools/{"win-x64" if exe else "linux-x64"}'
+        self.write(tools / f'nx_extract{exe}', 'MZ nx_extract' if exe else '#!/bin/sh\necho "usage: nx_extract <prod.keys> <base.nsp> <update.nsp|-> <out dir>" >&2; exit 2\n', 0o755)
+        self.write(tools / f'dmsh_xlate_vk{exe}', 'MZ dmsh_xlate_vk' if exe else '#!/bin/sh\n[ "$1" = --source-sha ] && { echo 0123456789abcdef; exit 0; }; exit 2\n', 0o755)
+        for n in ('dotnet-runtime.txt', 'dotnet-runtime-THIRD-PARTY-NOTICES.txt', 'LibHac.txt', 'ryujinx.txt'): self.write(tools / 'licenses' / n, f'{n} of the tools\n')
+        return tools
+
+    @unittest.skipUnless(sys.platform == 'linux', 'the Linux bundle\'s check runs its programs')
+    def test_tools(self):   # --tools: bin/nx_extract and bin/dmsh_xlate_vk with their licences; README.txt asks for no .NET; the check runs them and holds the translator to the lock
+        tools = self.tools('')
+        rc, err, out = self.package('--tools', str(tools))
+        self.assertEqual((rc, err), (0, ''))
+        files = dict(pp.bundle_files(out))
+        self.assertEqual((files['bin/nx_extract'], files['bin/dmsh_xlate_vk']), (0o755, 0o755))
+        self.assertEqual((out / 'licenses/dotnet-runtime.txt').read_text(), 'dotnet-runtime.txt of the tools\n')
+        self.assertEqual((out / 'licenses/LibHac.txt').read_text(), 'LibHac.txt of the tools\n')
+        self.assertEqual((out / 'licenses/ryujinx.txt').read_bytes(), (REPO / 'dm/third_party/ryujinx/LICENSE.txt').read_bytes())   # the name was taken: the vendored copy's
+        readme = (out / 'README.txt').read_text()
+        self.assertNotIn('.NET', readme.replace('need no .NET', '')); self.assertNotIn('does not carry yet: docs', readme)
+        self.assertIn('need no .NET', readme); self.assertIn('SPIRV-Tools, glslang and SPIRV-Cross', readme)
+        self.assertRegex(readme, r'\n  bin/nx_extract +the NSP extraction tool the packer runs\n  bin/dmsh_xlate_vk +the Vulkan shader translator the packer runs for NVN games\n')
+        # without --tools the text is the one before them, byte for byte
+        hosts = {g: None for g in GAMES}
+        for platform in ('linux', 'windows'):
+            for nxaot in (False, True):
+                self.assertEqual(pp.readme(platform, 'abc1234', '2026-11-15', hosts, nxaot), pp.readme(platform, 'abc1234', '2026-11-15', hosts, nxaot, False))
+        self.assertIn('and the .NET SDK 10 (the packer builds its extraction tool, nx_extract, with it on the first pack; NVN games also need the Vulkan shader\n'
+                      '    translator, which this folder does not carry yet', pp.readme('linux', 'abc1234', '2026-11-15', hosts, True))
+        # the check: the stand-ins run, and the translator is not the one the bundle's lock fingerprints
+        rc, err, out = self.package('--tools', str(tools), '--check')
+        self.assertEqual(rc, 1); self.assertIn('dm/gfx/tools/dmsh_chain_vk.py: exit 1', err); self.assertIn('does not match the lock: dmsh_xlate_vk_linux-x64', err)
+        # with the stand-in's fingerprint in the bundle's lock (and the bundle's header written again for it) the check passes
+        lock = out / 'dm/gfx/tools/dmsh_chain_vk.lock'
+        lock.write_text(lock.read_text().replace(dmsh_chain_vk.lock()['dmsh_xlate_vk_linux-x64'], dmsh_chain.sha16(out / 'bin/dmsh_xlate_vk')))
+        subprocess.run([sys.executable, '-I', out / 'dm/gfx/tools/dmsh_chain_vk.py', '--header'], check=True, capture_output=True)
+        with mock.patch.object(pp, 'say', lambda m: None): self.assertEqual(pp.check('linux', out, [self.build, self.aot, tools]), [])
+        # a tool or the runtime's licence missing
+        (tools / 'licenses/dotnet-runtime.txt').unlink()
+        rc, err, _ = self.package('--tools', str(tools)); self.assertEqual(rc, 1); self.assertRegex(err, r'missing .*dotnet-runtime.txt: the licence of the .NET runtime')
+        (tools / 'nx_extract').unlink()
+        rc, err, _ = self.package('--tools', str(tools)); self.assertEqual(rc, 1); self.assertRegex(err, r'missing .*nx_extract: a prebuilt tool')
+
+    def test_tools_windows(self):   # the .exe stand-ins in the zip's bin/; the check does not run them but holds the translator to the lock
+        win = self.tmp / 'build/win64'; self.fake_tree(win, '.exe')
+        tools = self.tools('.exe')
+        rc, err, out = self.package('--tools', str(tools), '--archive', '--check', platform='windows', build=win, aot=False)
+        self.assertEqual(rc, 1); self.assertIn('does not match the lock: dmsh_xlate_vk_win-x64', err)
+        with zipfile.ZipFile(out.parent / (out.name + '.zip')) as z:
+            self.assertIn('nxnative-windows-x86_64/bin/nx_extract.exe', z.namelist()); self.assertIn('nxnative-windows-x86_64/bin/dmsh_xlate_vk.exe', z.namelist())
+            self.assertIn(b'bin/nx_extract.exe', z.read('nxnative-windows-x86_64/README.txt'))
+
     @unittest.skipUnless(sys.platform == 'linux', 'the Linux bundle\'s check runs its programs')
     def test_check(self):
         rc, err, out = self.package('--check')

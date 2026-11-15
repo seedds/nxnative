@@ -15,15 +15,17 @@
 # PLATFORM = 'linux' / 'windows' (--platform linux / windows): a pack for the x86-64 host program nxhost-run (docker/README.md, "Running the host program"), run on that system. The same steps up to
 #   and including the rewrite, which also writes the recompiler's input (patch_nso.py --aot, one run for both outputs) into <id>_build/aot_<version>/: per module <name>.aot.tsv and
 #   <name>.image.bin, and nro.tsv (the NROs the game registers, Apple's rows). Then the shaders for the Vulkan backend: an NVN game's split and dmsh_build_vk.py into <id>_build/shader/cache/vk-<V>/
-#   (V = DMSH_CHAIN_VK; it needs the Vulkan translator built with .NET in the chain image, and is reported as not run without it), an OpenGL game's gl_shaders.py --vk into <id>_build/shader/gl-vk/,
+#   (V = DMSH_CHAIN_VK; it needs the Vulkan translator, a bundle's bin/dmsh_xlate_vk or the dll built with .NET in the chain image, and the SPIR-V tools of its lock, and is reported as not
+#   run without them), an OpenGL game's gl_shaders.py --vk into <id>_build/shader/gl-vk/,
 #   none for a guest Vulkan game (its SPIR-V goes to the driver); then <id>_build/run.sh (run.cmd on Windows) with the nxhost-run command line, its save in <NSP folder>/<id>-work/run/; last the
-#   packs: nxaot build (NXAOT / --nxaot, default bin/nxaot in the port's bundle, else build/aot/nxaot) of every module's manifest and every NRO into <name>.aot.so beside them (on Windows <name>.aot.dll, nxaot build --target
+#   packs: nxaot build (NXAOT / --nxaot, default bin/nxaot in the port's bundle, else build/aot/nxaot; bin\nxaot.exe and build\aot-win64\nxaot.exe on Windows) of every module's manifest and every NRO into <name>.aot.so beside them (on Windows <name>.aot.dll, nxaot build --target
 #   windows: dm/tools/aot/README.md, "Windows packs"), mode PACK_MODE / --pack-mode (balanced or max), with the per-function cache <NSP folder>/<id>-work/aot-cache/ when this nxaot has --cache,
 #   and a module's sample profile <NSP folder>/<id>-work/profile/<name>.tsv when there is one (nxhost-run writes it with DM_AOT_PROFILE; AOT_PROFILE / --no-profile ignores them), and the
 #   JIT misses beside it, <name>.misses.tsv (nxaot build --misses: the addresses the game ran in the JIT fallback become entries of the next pack), and the known targets <name>.targets.tsv
 #   (nxaot reads them beside the profile: an indirect call with a dominant target becomes a guarded direct call at tier H). The launch file names the NSP folder, this
 #   script and what it ran with, so that the launcher nxlauncher can pack the game again with what a session recorded ("Repack with profile").
-#   nxaot is a Linux program (its Docker image): on Windows, --nxaot names a script that runs it there. Steps that boot the game in the Mac host (run-time shader captures, Oodle
+#   On Windows nxaot is nxaot.exe (a Windows bundle's bin\nxaot.exe, or cross-built with llvm-mingw: dm/tools/aot/README.md, "Building nxaot for Windows"); --nxaot may name a
+#   script that runs the Linux nxaot (in WSL or its Docker image) instead. Steps that boot the game in the Mac host (run-time shader captures, Oodle
 #   decodes, a provisional profile's heap check) are not available there: their output is reused when a Mac run
 #   left it in the NSP folder, else the build stops (the heap check is skipped). No Mac host, Metal shaders, Xcode project or IPA; the extracted files are kept (the game runs from them).
 # Two ways to run it: open this file in Spyder and press F5 (it uses the values under "Settings" below; an empty NSP folder or prod.keys is asked for at run time);
@@ -60,7 +62,7 @@ PLATFORM = 'ios'                        # 'ios' = the IPA (or the Xcode project)
                                         #   Xcode project or IPA; keeps the extracted files and prints the command that runs the game (needs Apple silicon);
                                         #   'linux' / 'windows' = a pack for the x86-64 host program nxhost-run, made on that system: the recompiler's input and packs in <id>_build/aot_<version>/,
                                         #   the Vulkan shaders and <id>_build/run.sh (run.cmd); the packs are shared objects on Linux and DLLs on Windows
-NXAOT = ''                              # PLATFORM 'linux' / 'windows': the recompiler nxaot, or a script that runs it (empty = the port's bundle's bin/nxaot, else build/aot/nxaot in the repository; dm/tools/aot/README.md builds it)
+NXAOT = ''                              # PLATFORM 'linux' / 'windows': the recompiler nxaot, or a script that runs it (empty = the port's bundle's bin/nxaot, else build/aot/nxaot in the repository; on Windows bin\nxaot.exe, else build\aot-win64\nxaot.exe; dm/tools/aot/README.md builds them)
 PACK_MODE = 'balanced'                  # PLATFORM 'linux' / 'windows': nxaot's pack mode, 'balanced' (a faster pack) or 'max' (a faster game, a longer pack)
 AOT_WORKERS = 0                         # PLATFORM 'linux' / 'windows': nxaot's compile workers (0 = nxaot decides from the processors and the free memory)
 AOT_PROFILE = True                      # PLATFORM 'linux' / 'windows': pack each module with its sample profile <NSP folder>/<id>-work/profile/<module>.tsv when there is one (nxhost-run records it
@@ -389,9 +391,22 @@ def rmtree(p):
     elif p.exists(): shutil.rmtree(p)
 
 
+# The port's bundle (scripts/package_port.py --tools; docs/development.md, "The port's bundles") carries its tools published by dm/tools/publish_port_tools.sh, programs that need no .NET:
+# run from a bundle (find_repo stops at its root), the packer takes them; a repository checkout builds nx_extract with dotnet and runs the translator's dll with dotnet
+BUNDLE_NX_EXTRACT, BUNDLE_XLATE_VK = 'bin/nx_extract', 'bin/dmsh_xlate_vk'
+
+
+def bundled_tool(repo, rel):   # the bundle's program rel (.exe on Windows), or None outside a bundle
+    p = repo / (rel + ('.exe' if os.name == 'nt' else ''))
+    return p if p.is_file() else None
+
+
 def build_nx_extract(repo, work, logs, env):
-    """Build nx_extract into <work>/tools/nx_extract/. It is built in a temporary folder and copied over: with an apostrophe in the output path (e.g. "Bowser's Fury") MSBuild's conditions break,
-    LibHac.dll and the executable are not copied, and the build still reports success"""
+    """nx_extract: the port's bundle's bin/nx_extract when this script runs from one, else built into <work>/tools/nx_extract/. It is built in a temporary folder and copied over: with an
+    apostrophe in the output path (e.g. "Bowser's Fury") MSBuild's conditions break, LibHac.dll and the executable are not copied, and the build still reports success"""
+    bundled = bundled_tool(repo, BUNDLE_NX_EXTRACT)
+    if bundled:
+        say(f'nx_extract: {bundled} (the bundle\'s, published: no .NET needed)'); return bundled
     exe = 'nx_extract.exe' if os.name == 'nt' else 'nx_extract'   # the apphost .NET writes on Windows
     nx = work / 'tools/nx_extract' / exe
     with tempfile.TemporaryDirectory(prefix='nx_extract_') as t:
@@ -2018,8 +2033,8 @@ def port_notes(platform, S, ro=False):
     elif gfx == 'gl': out.append(f'on {platform} gl_shaders.py --vk translates its GLSL for the Vulkan backend (gl-vk/)'
                                  + (f'; the run-time capture boots the game in the Mac host, which {platform} does not have: only a capture a Mac run left in the NSP folder is used' if S['gl_capture'][0] else ''))
     else:
-        out.append(f'on {platform} dmsh_build_vk.py translates its shaders for the Vulkan backend (vk-<DMSH_CHAIN_VK>/) with the Vulkan translator built with .NET in the chain image (docker/README.md); '
-                   'without the translator the step is reported as not run')
+        out.append(f'on {platform} dmsh_build_vk.py translates its shaders for the Vulkan backend (vk-<DMSH_CHAIN_VK>/) with the Vulkan translator (the port\'s bundle\'s bin/dmsh_xlate_vk, or '
+                   'the dll built with .NET in the chain image: docker/README.md) and the SPIR-V tools of its lock; without them the step is reported as not run')
         mac = list(dict.fromkeys(w for k, w in (('glslc_capture', 'the GLSLC capture'), ('ue_decode', 'the Unreal shader decode'), ('oodle_packs', 'the Oodle decode of the shader split'),
                                                  ('ue_legacy', 'the Oodle decode of the shader split')) if S.get(k, (False,))[0]))
         if mac: out.append(f'{" and ".join(mac)} boot{"s" if len(mac) == 1 else ""} the game in the Mac host, which {platform} does not have: only what a Mac run left in the NSP folder is used, '
@@ -2027,22 +2042,27 @@ def port_notes(platform, S, ro=False):
     return out
 
 
-def check_prereqs_port(env):   # what a pack for Windows or Linux runs up to the rewrite and the shader split (Xcode, Metal, xcodegen, make and zstd build the Apple hosts and the app)
+def check_prereqs_port(env, repo):   # what a pack for Windows or Linux runs up to the rewrite and the shader split (Xcode, Metal, xcodegen, make and zstd build the Apple hosts and the app)
     missing = [m for m in ('lz4.block', 'capstone') if not _importable(m)] + ([] if _importable('compression.zstd') or _importable('backports.zstd') else ['backports.zstd'])
     if missing: raise BuildError(f'the current Python ({sys.executable}) is missing modules: {", ".join(missing)} (pip install lz4 capstone backports.zstd; backports.zstd only before Python 3.14)')
-    if not shutil.which('dotnet', path=env['PATH']): raise BuildError('tools not found: dotnet (.NET SDK 10, which builds nx_extract)')
+    if not bundled_tool(repo, BUNDLE_NX_EXTRACT) and not shutil.which('dotnet', path=env['PATH']):
+        raise BuildError('tools not found: dotnet (.NET SDK 10, which builds nx_extract; the port\'s bundle carries it prebuilt as bin/nx_extract)')
 
 
 BUNDLE_NXAOT = 'bin/nxaot'   # the recompiler in the port's bundle (scripts/package_port.py; docs/development.md, "The port's bundles"), whose root this script's repo is there
 
 
-def find_nxaot(repo, given=''):
+def find_nxaot(repo, given='', win=None):
     """The recompiler that makes the packs (PLATFORM 'linux' / 'windows'): given (NXAOT / --nxaot: the binary, or a script that runs it), else the port's bundle's bin/nxaot (bin/nxaot.exe
-    on Windows) when this script runs from a bundle, else build/aot/nxaot in the repository, where its Docker build puts it"""
-    bundled = repo / (BUNDLE_NXAOT + ('.exe' if os.name == 'nt' else ''))
-    p = Path(os.path.expanduser(given)).resolve() if given else bundled if bundled.is_file() else repo / 'build/aot/nxaot'
+    on Windows) when this script runs from a bundle, else the repository's build: build/aot/nxaot, where its Docker build puts it, and on Windows build/aot-win64/nxaot.exe, the
+    cross-build of dm/tools/aot/README.md, "Building nxaot for Windows". win: this system is Windows (default: os.name)"""
+    win = os.name == 'nt' if win is None else win
+    bundled = repo / (BUNDLE_NXAOT + ('.exe' if win else ''))
+    p = Path(os.path.expanduser(given)).resolve() if given else bundled if bundled.is_file() else repo / ('build/aot-win64/nxaot.exe' if win else 'build/aot/nxaot')
     if p.is_file(): return p
     if given: raise BuildError(f'--nxaot / NXAOT: no such file: {p}')
+    if win: raise BuildError(f'the recompiler nxaot.exe is not built ({p} does not exist). Cross-build it with llvm-mingw in Docker (dm/tools/aot/README.md, "Building nxaot for Windows"), '
+                             'take the bin\\nxaot.exe of a Windows bundle, or give --nxaot a script that runs the Linux nxaot (in WSL or its Docker image)')
     raise BuildError(f'the recompiler nxaot is not built ({p} does not exist). Build it from the repository root in its Docker image (dm/tools/aot/README.md, "Building and testing in Docker"): '
                      f'{NXAOT_DOCKER}; or give its path with --nxaot')
 
@@ -2094,23 +2114,34 @@ def vk_tables_current(lib, g):   # both Vulkan tables name the stamp of the libr
 def build_vk_chain(py, repo, sh, env, logs, g, chain, pkg_key=None, skipped=None):
     """An NVN game's shaders for the Vulkan backend (docs/design/vulkan-backend.md 2): dmsh_build_vk.py from the split's package (sh/pkg) into sh/cache/vk-<chain>/ (beside a Mac build's b-<V>/;
     one output folder per game), whose full run stamps the library (inputs.tsv) and writes the profile's c1_full_vk.tsv and cb_extent_vk.tsv naming that stamp. Returns the folder nxhost-run takes
-    them from (DM_MSL_DIR). It needs the Vulkan translator dmsh_xlate_vk, built with .NET in the chain image: without it the step is not run, a [RED] line says so and skipped gets an entry.
+    them from (DM_MSL_DIR). It needs the Vulkan translator dmsh_xlate_vk: XLATE_VK, else the port's bundle's bin/dmsh_xlate_vk (published: no .NET; dmsh_build_vk.py gets it as XLATE_VK),
+    else the dll that docker/README.md builds with .NET in the chain image, run with dotnet; and the SPIR-V tools of dm/gfx/tools/dmsh_chain_vk.lock (dmsh_chain_vk.py --check-tools).
+    Without them the step is not run, a [RED] line says why and skipped gets an entry.
     Reused when the package, the chain's tools and translator, the profile and the split's pairs are as at the last full build and both tables name its stamp; a table that does not runs the
     build again (dmsh_build_vk.py takes every shader from its cache then). Shaders that fail are reported, and the others are used (dmsh_build_vk.py's exit code 1), as the Metal build does"""
     PROG.stage('Vulkan shader libraries', step='checking the inputs')
     out, log = sh / 'cache', logs / 'dmsh_build_vk.log'
     lib, kf = out / f'vk-{chain}', sh / f'vk-{chain}.key'
-    dll = Path(env.get('XLATE_VK') or repo / XLATE_VK_DLL)
-    why = f'no Vulkan translator at {dll}' if not dll.is_file() else '' if shutil.which(env.get('DOTNET', 'dotnet'), path=env['PATH']) else 'dotnet not found'
+    bundled = None if env.get('XLATE_VK') else bundled_tool(repo, BUNDLE_XLATE_VK)
+    if bundled: env = dict(env, XLATE_VK=str(bundled))   # dmsh_build_vk.py and dmsh_chain_vk.py take the translator from XLATE_VK
+    xl = Path(env.get('XLATE_VK') or repo / XLATE_VK_DLL)
+    published = not xl.name.lower().endswith('.dll')   # a published translator runs as it is (dmsh_chain_vk.py xlate_cmd), a dll with dotnet
+    why = f'no Vulkan translator at {xl}' if not xl.is_file() else '' if published or shutil.which(env.get('DOTNET', 'dotnet'), path=env['PATH']) else 'dotnet not found'
+    if not why:   # the translator's identity and the SPIR-V tools against the lock, which dmsh_build_vk.py checks before anything: a mismatch is a step not run here, with its reasons
+        tools_log = logs / 'dmsh_chain_vk_tools.log'
+        if run([py, repo / 'dm/gfx/tools/dmsh_chain_vk.py', '--check-tools'], tools_log, env=env, ok=(0, 1)):
+            red = [l.split('do not match the lock file: ', 1)[-1].strip() for l in tools_log.read_text(errors='replace').splitlines() if l.startswith('[RED] ')]
+            why = 'the tools here do not match dm/gfx/tools/dmsh_chain_vk.lock: ' + '; '.join(red or ['see ' + str(tools_log)])
     if why:
         PROG.end(f'not run: {why}')
-        say(f'[RED] the NVN shaders were not translated for Vulkan ({why}): dmsh_build_vk.py needs the Vulkan translator dmsh_xlate_vk, built with .NET in the chain image (docker/README.md, '
-            f'"The shader chain for Vulkan"); build it and run this script again (the other steps are reused), or run dmsh_build_vk.py in that image on {sh / "pkg"} into {out}')
+        say(f'[RED] the NVN shaders were not translated for Vulkan ({why}): dmsh_build_vk.py needs the Vulkan translator dmsh_xlate_vk (the bundle\'s bin/dmsh_xlate_vk, or built with .NET in '
+            f'the chain image) and the SPIR-V tools its lock names (docker/README.md, "The shader chain for Vulkan"); then run this script again (the other steps are reused), or run '
+            f'dmsh_build_vk.py in that image on {sh / "pkg"} into {out}')
         if skipped is not None: skipped.append(f'the NVN shaders for Vulkan ({why})')
         return out
     pso_pairs = g.table('pso_pairs.tsv')
     if not pso_pairs.is_file(): pso_pairs = sh / 'pso_pairs.tsv'   # the split's copy is a shader input too (vs_pad)
-    key = fingerprint(pkg_key, chain, ('files', chain_files_vk(repo)), ('stat', dll.parent), ('files', profile_files(g)), ('files', [pso_pairs]),
+    key = fingerprint(pkg_key, chain, ('files', chain_files_vk(repo)), ('files', [xl]) if published else ('stat', xl.parent), ('files', profile_files(g)), ('files', [pso_pairs]),
                       {k: env.get(k) for k in ('XLATE_DEBUG', 'XLATE_REDUCED')}) if pkg_key else None
     note = reused(kf, key) if key else None
     if note is not None and next(lib.glob('*.spv'), None) and vk_tables_current(lib, g):
@@ -2735,8 +2766,9 @@ def parse_args(argv):
                     'Mac app of the game (default: <game name>.app in the NSP folder, -o names another); linux / windows = a pack for the x86-64 host program nxhost-run, made on that system: '
                     'the recompiler\'s input and packs in <id>_build/aot_<version>/ (shared objects on linux, DLLs on windows), the Vulkan shaders and <id>_build/run.sh (run.cmd) '
                     '(default: the PLATFORM setting, ios)')
-    ap.add_argument('--nxaot', help='--platform linux / windows: the recompiler nxaot, or a script that runs it (a Linux program: on Windows a script that runs it in its Docker image) '
-                    '(default: the NXAOT setting, else bin/nxaot in the port\'s bundle, else build/aot/nxaot in the repository)')
+    ap.add_argument('--nxaot', help='--platform linux / windows: the recompiler nxaot (nxaot.exe on Windows), or a script that runs it (on Windows also one that runs the Linux nxaot in WSL '
+                    'or its Docker image) (default: the NXAOT setting, else bin/nxaot in the port\'s bundle, else build/aot/nxaot in the repository; on Windows bin\\nxaot.exe, else '
+                    'build\\aot-win64\\nxaot.exe)')
     ap.add_argument('--pack-mode', choices=('balanced', 'max'), help='--platform linux / windows: nxaot\'s pack mode, balanced (a faster pack) or max (a faster game, a longer pack) (default: the PACK_MODE setting, balanced)')
     ap.add_argument('--no-profile', action='store_true', help='--platform linux / windows: ignore the sample profiles of the game\'s modules (<NSP folder>/<id>-work/profile/<module>.tsv, '
                     'recorded by nxhost-run with DM_AOT_PROFILE) and pack every function at the mode\'s one tier (default: the AOT_PROFILE setting, use them); the JIT misses recorded beside them '
@@ -2874,7 +2906,7 @@ def main(args=None):
     if g is None:   # no game profile: survey, then (unless --survey-only) a provisional profile outside the repository and a best-effort IPA
         missing = [m for m in ('lz4.block', 'capstone') if not _importable(m)]
         if missing: raise BuildError(f'the current Python ({sys.executable}) is missing modules: {", ".join(missing)}')
-        if not shutil.which('dotnet', path=env['PATH']): raise BuildError('dotnet not found (.NET SDK 10)')
+        if not bundled_tool(repo, BUNDLE_NX_EXTRACT) and not shutil.which('dotnet', path=env['PATH']): raise BuildError('dotnet not found (.NET SDK 10, which builds nx_extract)')
         pdir = Path(os.path.expanduser(args.profile_out or PROFILE_OUT)).resolve() if (args.profile_out or PROFILE_OUT) else nsp_dir / f'{app:016X}_build' / 'profile'
         if not (args.survey_only or SURVEY_ONLY): rmtree(derived_key(pdir / f'{app:016X}'))
         if (pdir / f'{app:016X}' / 'game.tsv').exists() and not (args.survey_only or SURVEY_ONLY):
@@ -2933,7 +2965,7 @@ def main(args=None):
     # DM_GAME picks the profile; DM_ROOT / WORK point at <id>_build: the tools' default paths and temporary directories all stay inside it
     env.update(DM_GAME=g.id, DM_ROOT=str(work), WORK=str(work / 'tmp'))
     logs = work / 'logs'
-    if port: check_prereqs_port(env)
+    if port: check_prereqs_port(env, repo)
     else: check_prereqs(env, xlate, mac)
     picks = pick_nsps(fam, have, versions)
 

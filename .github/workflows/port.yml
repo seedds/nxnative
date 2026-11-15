@@ -3,7 +3,9 @@
 # t_host_program runs nxhost-run (its usage here: the packs of a module are aot.yml's), t_launcher_window runs nxlauncher on SDL's dummy video driver. No game runs there yet.
 # On a push and on workflow_dispatch (not on pull requests) the port's bundles too (scripts/package_port.py; docs/development.md, "The port's bundles"):
 # nxnative-linux-x86_64.tar.gz (job bundle-linux: the Linux host job's launcher and hosts, the nxaot-bundle job's recompiler) and nxnative-windows-x86_64.zip (the
-# Windows cross-build job), each an artifact of that name, checked by the script's --check.
+# Windows cross-build job), each an artifact of that name, checked by the script's --check. Each bundle job publishes its platform's prebuilt nx_extract and Vulkan
+# translator in the chain image (dm/tools/publish_port_tools.sh: programs that need no .NET; docker/README.md, "The port's tools") and passes them with --tools; the
+# Windows ones are published on pull requests too, for the Windows test job, whose runner runs them.
 # The macOS jobs are in tests.yml and do not change.
 name: port
 
@@ -150,7 +152,7 @@ jobs:
     needs: [linux-host, nxaot-bundle]
     if: ${{ github.event_name != 'pull_request' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -166,8 +168,16 @@ jobs:
       - name: No LLVM on the runner (the bundle's nxaot is linked statically, and the check below proves it runs without one)
         run: |
           if ldconfig -p | grep -q 'libLLVM.so.18.1 '; then echo 'libLLVM 18 is installed on this runner: the check cannot prove the bundle needs none'; fi
+      # The prebuilt nx_extract and Vulkan translator (Native AOT), the translator checked against dm/gfx/tools/dmsh_chain_vk.lock (--check), then their tests with them
+      # and without dotnet: dm/tools/tests/test_nx_extract.py (a synthetic NSP) and dm/gfx/tests/test_dmsh_vk.py (every class, the build through dmsh_build_vk.py too)
+      - name: Build the chain image
+        run: docker build -t nxnative-chain -f docker/Dockerfile.chain docker
+      - name: Prebuilt tools (build/port_tools/linux-x64)
+        run: |
+          docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -e PYTHONDONTWRITEBYTECODE=1 -v "$(pwd):/src" -w /src nxnative-chain sh -c \
+            'sh dm/tools/publish_port_tools.sh linux build/port_tools/linux-x64 --check && NX_EXTRACT=/src/build/port_tools/linux-x64/nx_extract python3 -m unittest dm/tools/tests/test_nx_extract.py && XLATE_VK=/src/build/port_tools/linux-x64/dmsh_xlate_vk DOTNET=/nonexistent python3 -m unittest dm/gfx/tests/test_dmsh_vk.py'
       - name: Assemble, archive and check the bundle
-        run: python3 scripts/package_port.py --platform linux --build build/linux --aot build/aot --out build/bundle/nxnative-linux-x86_64 --archive --check
+        run: python3 scripts/package_port.py --platform linux --build build/linux --aot build/aot --tools build/port_tools/linux-x64 --out build/bundle/nxnative-linux-x86_64 --archive --check
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: nxnative-linux-x86_64
@@ -210,6 +220,20 @@ jobs:
             build/win64/*.exe
             build/win64/host_tests.tsv
             build/win64/host_scripts.tsv
+          if-no-files-found: error
+          retention-days: 7
+      # The prebuilt nx_extract.exe and dmsh_xlate_vk.exe (dm/tools/publish_port_tools.sh windows: self-contained, trimmed single files, since Native AOT cannot target Windows
+      # from Linux), published in the chain image with the translator checked against dm/gfx/tools/dmsh_chain_vk.lock (--check); the Windows test job runs them (the runner's
+      # port_nx_extract and port_dmsh_xlate_vk), and the Windows bundle carries them
+      - name: Build the chain image
+        run: docker build -t nxnative-chain -f docker/Dockerfile.chain docker
+      - name: Prebuilt tools (build/port_tools/win-x64)
+        run: |
+          docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -v "$(pwd):/src" -w /src nxnative-chain sh dm/tools/publish_port_tools.sh windows build/port_tools/win-x64 --check
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: port-tools-win-x64
+          path: build/port_tools/win-x64
           if-no-files-found: error
           retention-days: 7
       # The prefix build_llvm_win64.sh installs, keyed on what decides its bytes: the script (the release, its hashes, the components and options), the toolchain file
@@ -270,7 +294,7 @@ jobs:
           ls -l build/win64/hosts/*/nxhost-run.exe
       - name: Assemble, archive and check the bundle
         if: ${{ github.event_name != 'pull_request' }}
-        run: python3 scripts/package_port.py --platform windows --build build/win64 --aot build/aot-win64 --out build/bundle/nxnative-windows-x86_64 --archive --check
+        run: python3 scripts/package_port.py --platform windows --build build/win64 --aot build/aot-win64 --tools build/port_tools/win-x64 --out build/bundle/nxnative-windows-x86_64 --archive --check
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: ${{ github.event_name != 'pull_request' }}
         with:
@@ -303,10 +327,14 @@ jobs:
         with:
           name: win64-tests
           path: build/win64
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: port-tools-win-x64
+          path: build/port_tools/win-x64
       - name: Test runner (logs/win64)
         shell: pwsh
         run: |
-          powershell -NoProfile -ExecutionPolicy Bypass -File dm\host\tests\run_win64_tests.ps1 -BuildDir build\win64
+          powershell -NoProfile -ExecutionPolicy Bypass -File dm\host\tests\run_win64_tests.ps1 -BuildDir build\win64 -PortTools build\port_tools\win-x64
           exit $LASTEXITCODE
       # The AOT tests (t_aot_host, t_aot_module, t_aot_hostfn, t_host_program) find no packs here and pass with a note: the Windows packs are built by the
       # aot workflow (aot.yml, build_packs.sh) and uploaded there as the artifact win64-packs; the job summary says where they come from

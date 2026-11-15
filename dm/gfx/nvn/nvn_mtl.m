@@ -8171,10 +8171,20 @@ static int ix_range(const p_draw_idx *di, uint32_t *mn, uint32_t *mx) {
     return 1;
 }
 // The vertex ids a direct draw reads: [*lo, *hi]; 0 = not known (indirect, multi-draw, indices not known)
+// 2 = bounded without reading the indices: a direct indexed draw with 8- or 16-bit indices can address only the first
+// 256 / 65,536 vertices from its base vertex, whatever the indices say, so a conversion that cannot be narrowed by the
+// index range is still bounded by the index type instead of converting the whole bound stream (Metro 2033 Redux's laser
+// sight: a 6.2-million-vertex stream, a 140-vertex draw, and the indices not readable — the whole-range conversion
+// overflowed the staging budget below and the attribute was left unbound, so the draw collapsed to nothing)
 static int vc_draw_range(const p_draw *dw, const p_draw_idx *di, int64_t *lo, int64_t *hi) {
     if (dw) { if (dw->ind || dw->mdi_cnt || dw->count <= 0) return 0; *lo = dw->first; *hi = (int64_t)dw->first + dw->count - 1; return 1; }
-    uint32_t mn, mx; if (!di || !ix_range(di, &mn, &mx)) return 0;
-    *lo = (int64_t)mn + di->base_vertex; *hi = (int64_t)mx + di->base_vertex; return 1;
+    if (!di) return 0;
+    uint32_t mn, mx;
+    if (ix_range(di, &mn, &mx)) { *lo = (int64_t)mn + di->base_vertex; *hi = (int64_t)mx + di->base_vertex; return 1; }
+    if (di->ind || di->mdi_cnt) return 0;   // the record's base vertex is the GPU's, so the index type bounds nothing here
+    int isz = di->itype == 0 ? 1 : di->itype == 1 ? 2 : 4;
+    if (isz < 4) { *lo = (int64_t)di->base_vertex; *hi = (int64_t)di->base_vertex + (isz == 1 ? 255 : 65535); return 2; }
+    return 0;
 }
 // Kept conversions: a conversion whose source bytes have not changed is bound again in later submissions, not made again. A football stadium's streams (EA SPORTS FC 27, 8- and
 // 16-bit integers into float inputs) come to 7.65 million vertices a submission, 122 MB written every frame: 26.8 ms of the submitting thread on an M4. A key (range, format,
@@ -8298,8 +8308,9 @@ static void vconv_bind(id<MTL4RenderCommandEncoder> en, NvShader *vs, int tf, co
         int a = rf->v[v].nvn, st = S.attr[a].stream, f = S.attr[a].fmt; uint32_t off = S.attr[a].offset, stride = st < 16 ? S.stream[st].stride : 0;
         uint64_t addr = st < 16 ? S.vbuf[st].address : 0, size = st < 16 ? S.vbuf[st].size : 0, gpu = 0;
         uint64_t es = (uint64_t)vconv_size(f), v0 = 0, nv = size >= off + es ? stride == 0 ? 1 : (size - off - es) / stride + 1 : 0, whole = nv;
-        if (vc && nv && stride && !S.stream[st].divisor) {   // per-vertex stream: only the vertices the draw reads
+        if (nv && (vc || nv * 16 > (64u << 20)) && stride && !S.stream[st].divisor) {   // per-vertex stream: only the vertices the draw reads (or, without that, only when the whole bound range cannot be staged)
             if (rk < 0) rk = vc_draw_range(dw, di, &rlo, &rhi);
+            if (rk == 2 && di) { static int once; if (!once++) MLOG("vertex attribute conversion: the draw's index range is not readable; bounded by the index type, the %u vertices a %d-bit index can address from the base vertex (format %#x)", (unsigned)(di->itype == 0 ? 256u : 65536u), di->itype == 0 ? 8 : 16, f); }
             int64_t a0 = rlo < 0 ? 0 : rlo, a1 = rhi < (int64_t)nv - 1 ? rhi : (int64_t)nv - 1;
             if (rk && a0 <= a1) { v0 = (uint64_t)a0; nv = (uint64_t)(a1 - a0 + 1); }
         }

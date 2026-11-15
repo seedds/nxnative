@@ -43,6 +43,32 @@ static int sk_error(int error) { t_skerr = error; return -1; }
 static int sk_fail(void) { return sk_error(SK_ENETDOWN); }
 int dm_sk_errno(void) { return t_skerr; }
 #define SKF(m, cname, ...) HLE_FORCE(m, "local BSD descriptor service; remote networking unavailable", int, cname, __VA_ARGS__)
+// Link Play (pokopia-native's coop module, hle_coop_*.c; pokopia-native host/link-play-review.md): with co-op on (DM_COOP), the AF_INET datagram sockets the game makes while
+// nn::ldn is initialized are the module's virtual sockets (descriptors 0x100 and up on 169.254.S.0/24, hle_coop_vnet.c); every other descriptor is one of the host's own local
+// UDP / event descriptors below. A module result -errno comes back as -1 with the thread's last error set (FreeBSD values). hle_offline.c's overloads call these too
+#include "coop.h"
+coop_node *dm_coop(void);   // hle_offline.c: NULL with co-op off
+int dm_sk_socket(int family, int type, int protocol); int dm_sk_bind(int fd, const void *a, unsigned n); int dm_sk_close(int fd); int dm_sk_name(int fd, void *a, unsigned *n, int peer);
+int dm_sk_getopt(int fd, int level, int option, void *value, unsigned *size); int dm_sk_setopt(int fd, int level, int option, const void *value, unsigned size); int dm_sk_fcntl(int fd, int cmd, int value);
+long dm_sk_sendto(int fd, const void *data, unsigned long n, int flags, const void *a, unsigned al); long dm_sk_recvfrom(int fd, void *data, unsigned long n, int flags, void *a, unsigned *al);
+int mpsk_is(int s) { coop_node *c = dm_coop(); return c && coop_vnet_is(c, s); }
+static long mpsk_ret(int64_t r) { if (r >= 0) return (long)r; t_skerr = (int)-r; return -1; }
+int mpsk_errno(void) { return t_skerr; }
+int mpsk_socket(int fam, int type, int proto) {   // the module's virtual socket when it takes one (-errno otherwise), else the host's local socket
+    coop_node *c = dm_coop();
+    if (c) { int r = coop_vnet_socket(c, fam, type, proto); if (r >= 0) return r; }
+    return dm_sk_socket(fam, type, proto);
+}
+int mpsk_bind(int s, const void *a, unsigned n) { return mpsk_is(s) ? (int)mpsk_ret(coop_vnet_bind(dm_coop(), s, a, n)) : dm_sk_bind(s, a, n); }
+int mpsk_close(int s) { return mpsk_is(s) ? (int)mpsk_ret(coop_vnet_close(dm_coop(), s)) : dm_sk_close(s); }
+int mpsk_setopt(int s, int l, int o, const void *v, unsigned n) { return mpsk_is(s) ? (int)mpsk_ret(coop_vnet_setsockopt(dm_coop(), s, l, o, v, n)) : dm_sk_setopt(s, l, o, v, n); }
+int mpsk_getopt(int s, int l, int o, void *v, unsigned *n) { return mpsk_is(s) ? (int)mpsk_ret(coop_vnet_getsockopt(dm_coop(), s, l, o, v, n)) : dm_sk_getopt(s, l, o, v, n); }
+int mpsk_getname(int s, void *a, unsigned *n) { return mpsk_is(s) ? (int)mpsk_ret(coop_vnet_getsockname(dm_coop(), s, a, n)) : dm_sk_name(s, a, n, 0); }
+int mpsk_fcntl(int s, int cmd, int v) { return mpsk_is(s) ? (int)mpsk_ret(coop_vnet_fcntl(dm_coop(), s, cmd, v)) : dm_sk_fcntl(s, cmd, v); }
+long mpsk_sendto(int s, const void *b, unsigned long n, int f, const void *to, unsigned tl) { return mpsk_is(s) ? mpsk_ret(coop_vnet_sendto(dm_coop(), s, b, n, f, to, tl)) : dm_sk_sendto(s, b, n, f, to, tl); }
+long mpsk_send(int s, const void *b, unsigned long n, int f) { return mpsk_sendto(s, b, n, f, NULL, 0); }   // a virtual socket is never connected: DestAddrRequired from the module; a local one sends to its peer
+long mpsk_recvfrom(int s, void *b, unsigned long n, int f, void *from, unsigned *fl) { return mpsk_is(s) ? mpsk_ret(coop_vnet_recvfrom(dm_coop(), s, b, n, f, from, fl)) : dm_sk_recvfrom(s, b, n, f, from, fl); }
+long mpsk_recv(int s, void *b, unsigned long n, int f) { return mpsk_recvfrom(s, b, n, f, NULL, NULL); }
 void dm_guest_sleep_ns(int64_t ns);
 void dm_guest_cond_wait_ns(pthread_cond_t *c, pthread_mutex_t *m, int64_t ns);
 static int sk_idle(int64_t ms) { dm_guest_sleep_ns((ms < 0 ? 100 : ms) * 1000000); return 0; }
@@ -303,6 +329,10 @@ static int efd_ready(sk_pollfd *p, uint64_t n, uint64_t open, const uint64_t gen
 int dm_sk_poll(void *fds, uint64_t n, int ms) {
     sk_pollfd *p = fds; uint64_t open = 0, generation[EFD_MAX] = {0};
     if (!p && n) return sk_error(SK_EINVAL);
+    { int virt = 0, local = 0;   // Link Play: a set of the module's virtual sockets is waited on by the module (hle_coop_vnet.c); one that mixes them with local descriptors waits on the local ones
+      for (uint64_t i = 0; i < n; i++) if (p[i].fd >= 0) { if (mpsk_is(p[i].fd)) virt = 1; else local = 1; }
+      if (virt && !local) return (int)mpsk_ret(coop_vnet_poll(dm_coop(), (coop_pollfd *)fds, n, ms));
+      if (virt) { static int said; if (!said++) LOG("[coop] Poll over virtual and local descriptors together: the local ones are waited on"); } }
     dm_host_mutex_lock(&g_efd_m);
     for (uint64_t i = 0; i < n; i++) if (p[i].fd >= 0 && sk_used(p[i].fd)) { open |= 1ull << p[i].fd; generation[p[i].fd] = g_efd[p[i].fd].generation; }
     for (uint64_t i = 0; i < n; i++) p[i].revents = 0;
@@ -336,17 +366,17 @@ int dm_sk_select(int nfds, uint64_t *r, uint64_t *w, uint64_t *e, const int64_t 
     }
     return n;
 }
-SKF("_ZN2nn6socket6SocketENS0_6FamilyENS0_4TypeENS0_8ProtocolE", h_sk_Socket, int a, int b, int c) { return dm_sk_socket(a, b, c); }
-SKF("_ZN2nn6socket4BindEiPKNS0_8SockAddrEj", h_sk_Bind, int s, const void *a, unsigned n) { return dm_sk_bind(s, a, n); }
+SKF("_ZN2nn6socket6SocketENS0_6FamilyENS0_4TypeENS0_8ProtocolE", h_sk_Socket, int a, int b, int c) { return mpsk_socket(a, b, c); }
+SKF("_ZN2nn6socket4BindEiPKNS0_8SockAddrEj", h_sk_Bind, int s, const void *a, unsigned n) { return mpsk_bind(s, a, n); }
 SKF("_ZN2nn6socket7ConnectEiPKNS0_8SockAddrEj", h_sk_Connect, int s, const void *a, unsigned n) { return dm_sk_connect(s, a, n); }
 SKF("_ZN2nn6socket6ListenEii", h_sk_Listen, int s, int n) { (void)s; (void)n; return sk_fail(); }
 SKF("_ZN2nn6socket6AcceptEiPNS0_8SockAddrEPj", h_sk_Accept, int s, void *a, unsigned *n) { (void)s; (void)a; (void)n; return sk_fail(); }
-SKF("_ZN2nn6socket5CloseEi", h_sk_Close, int s) { return dm_sk_close(s); }
+SKF("_ZN2nn6socket5CloseEi", h_sk_Close, int s) { return mpsk_close(s); }
 SKF("_ZN2nn6socket11GetPeerNameEiPNS0_8SockAddrEPj", h_sk_GetPeerName, int s, void *a, unsigned *n) { return dm_sk_name(s, a, n, 1); }
-SKF("_ZN2nn6socket11GetSockNameEiPNS0_8SockAddrEPj", h_sk_GetSockName, int s, void *a, unsigned *n) { return dm_sk_name(s, a, n, 0); }
-SKF("_ZN2nn6socket10GetSockOptEiNS0_5LevelENS0_6OptionEPvPj", h_sk_GetSockOpt, int s, int l, int o, void *v, unsigned *n) { return dm_sk_getopt(s, l, o, v, n); }
-SKF("_ZN2nn6socket10SetSockOptEiNS0_5LevelENS0_6OptionEPKvj", h_sk_SetSockOpt, int s, int l, int o, const void *v, unsigned n) { return dm_sk_setopt(s, l, o, v, n); }
-SKF("_ZN2nn6socket5FcntlEiNS0_12FcntlCommandEz", h_sk_Fcntl, int s, int c, int v) { return dm_sk_fcntl(s, c, v); }
+SKF("_ZN2nn6socket11GetSockNameEiPNS0_8SockAddrEPj", h_sk_GetSockName, int s, void *a, unsigned *n) { return mpsk_getname(s, a, n); }
+SKF("_ZN2nn6socket10GetSockOptEiNS0_5LevelENS0_6OptionEPvPj", h_sk_GetSockOpt, int s, int l, int o, void *v, unsigned *n) { return mpsk_getopt(s, l, o, v, n); }
+SKF("_ZN2nn6socket10SetSockOptEiNS0_5LevelENS0_6OptionEPKvj", h_sk_SetSockOpt, int s, int l, int o, const void *v, unsigned n) { return mpsk_setopt(s, l, o, v, n); }
+SKF("_ZN2nn6socket5FcntlEiNS0_12FcntlCommandEz", h_sk_Fcntl, int s, int c, int v) { return mpsk_fcntl(s, c, v); }
 // SDK 21 overloads Star Fox imports: plain sockaddr, the ShutdownMethod enum, Read / Write and a name lookup without options; SetAllocator keeps nothing, as no session is created
 SKF("_ZN2nn6socket11GetPeerNameEiP8sockaddrPj", h_sk_GetPeerName21, int s, void *a, unsigned *n) { return dm_sk_name(s, a, n, 1); }
 SKF("_ZN2nn6socket8ShutdownEiNS0_14ShutdownMethodE", h_sk_Shutdown21, int s, int how) { return dm_sk_shutdown(s, how); }
@@ -364,9 +394,9 @@ HLE_FORCE("_ZN2nn6socket11EventFdReadEiPm", "reads the host counter", int, h_sk_
 HLE_FORCE("_ZN2nn6socket12EventFdWriteEim", "adds to the host counter and wakes its pollers", int, h_sk_EventFdWrite, int s, unsigned long v) { return efd_write(s, v); }
 SKF("_ZN2nn6socket17ResolverGetOptionEPNS0_14ResolverOptionENS0_17ResolverOptionKeyE", h_sk_ResGet, void *o, int k) { (void)o; (void)k; return sk_fail(); }
 SKF("_ZN2nn6socket17ResolverSetOptionERKNS0_14ResolverOptionE", h_sk_ResSet, const void *o) { (void)o; return sk_fail(); }
-HLE_FORCE("_ZN2nn6socket4RecvEiPvmNS0_7MsgFlagE", "local UDP (offline BSD service)", long, h_sk_Recv, int s, void *b, unsigned long n, int f) { return dm_sk_recvfrom(s, b, n, f, NULL, NULL); }
-HLE_FORCE("_ZN2nn6socket8RecvFromEiPvmNS0_7MsgFlagEPNS0_8SockAddrEPj", "local UDP (offline BSD service)", long, h_sk_RecvFrom, int s, void *b, unsigned long n, int f, void *a, unsigned *al) { return dm_sk_recvfrom(s, b, n, f, a, al); }
-HLE_FORCE("_ZN2nn6socket4SendEiPKvmNS0_7MsgFlagE", "local UDP (offline BSD service)", long, h_sk_Send, int s, const void *b, unsigned long n, int f) { return dm_sk_sendto(s, b, n, f, NULL, 0); }
+HLE_FORCE("_ZN2nn6socket4RecvEiPvmNS0_7MsgFlagE", "local UDP (offline BSD service)", long, h_sk_Recv, int s, void *b, unsigned long n, int f) { return mpsk_recv(s, b, n, f); }
+HLE_FORCE("_ZN2nn6socket8RecvFromEiPvmNS0_7MsgFlagEPNS0_8SockAddrEPj", "local UDP (offline BSD service)", long, h_sk_RecvFrom, int s, void *b, unsigned long n, int f, void *a, unsigned *al) { return mpsk_recvfrom(s, b, n, f, a, al); }
+HLE_FORCE("_ZN2nn6socket4SendEiPKvmNS0_7MsgFlagE", "local UDP (offline BSD service)", long, h_sk_Send, int s, const void *b, unsigned long n, int f) { return mpsk_send(s, b, n, f); }
 HLE_FORCE("_ZN2nn6socket11GetAddrInfoEPKcS2_PKNS0_8AddrInfoEPPS3_", "name resolution (cut): EAI_FAIL", int, h_sk_GetAddrInfo, const char *h, const char *s, const void *hint, void **res) {
     (void)h; (void)s; (void)hint; if (res) *res = NULL; return 4;   // EAI_FAIL
 }
@@ -374,22 +404,22 @@ HLE_FORCE("_ZN2nn6socket12FreeAddrInfoEPNS0_8AddrInfoE", "pairs with GetAddrInfo
 HLE_FORCE("_ZN2nn6socket16GetHostEntByNameEPKcPKNS0_14ResolverOptionEm", "name resolution (cut): NULL", void *, h_sk_GetHostEnt, const char *n, const void *o, unsigned long c) { (void)n; (void)o; (void)c; t_skerr = SK_ENETDOWN; return NULL; }
 HLE_FORCE("_ZN2nn6socket12GetLastErrorEv", "socket error code kept by the host", int, h_sk_GetLastError, void) { return t_skerr; }
 // C interface
-SKF("nnsocketSocket", h_nsk_Socket, int a, int b, int c) { return dm_sk_socket(a, b, c); }
-SKF("nnsocketBind", h_nsk_Bind, int s, const void *a, unsigned n) { return dm_sk_bind(s, a, n); }
+SKF("nnsocketSocket", h_nsk_Socket, int a, int b, int c) { return mpsk_socket(a, b, c); }
+SKF("nnsocketBind", h_nsk_Bind, int s, const void *a, unsigned n) { return mpsk_bind(s, a, n); }
 SKF("nnsocketConnect", h_nsk_Connect, int s, const void *a, unsigned n) { return dm_sk_connect(s, a, n); }
-SKF("nnsocketClose", h_nsk_Close, int s) { return dm_sk_close(s); }
+SKF("nnsocketClose", h_nsk_Close, int s) { return mpsk_close(s); }
 SKF("nnsocketGetPeerName", h_nsk_GetPeerName, int s, void *a, unsigned *n) { return dm_sk_name(s, a, n, 1); }
-SKF("nnsocketGetSockName", h_nsk_GetSockName, int s, void *a, unsigned *n) { return dm_sk_name(s, a, n, 0); }
-SKF("nnsocketGetSockOpt", h_nsk_GetSockOpt, int s, int l, int o, void *v, unsigned *n) { return dm_sk_getopt(s, l, o, v, n); }
-SKF("nnsocketSetSockOpt", h_nsk_SetSockOpt, int s, int l, int o, const void *v, unsigned n) { return dm_sk_setopt(s, l, o, v, n); }
-SKF("nnsocketFcntl", h_nsk_Fcntl, int s, int c, int v) { return dm_sk_fcntl(s, c, v); }
+SKF("nnsocketGetSockName", h_nsk_GetSockName, int s, void *a, unsigned *n) { return mpsk_getname(s, a, n); }
+SKF("nnsocketGetSockOpt", h_nsk_GetSockOpt, int s, int l, int o, void *v, unsigned *n) { return mpsk_getopt(s, l, o, v, n); }
+SKF("nnsocketSetSockOpt", h_nsk_SetSockOpt, int s, int l, int o, const void *v, unsigned n) { return mpsk_setopt(s, l, o, v, n); }
+SKF("nnsocketFcntl", h_nsk_Fcntl, int s, int c, int v) { return mpsk_fcntl(s, c, v); }
 SKF("nnsocketPoll", h_nsk_Poll, void *f, unsigned long n, int t) { return dm_sk_poll(f, n, t); }
 SKF("nnsocketResolverGetOption", h_nsk_ResGet, void *o, int k) { (void)o; (void)k; return sk_fail(); }
 SKF("nnsocketResolverSetOption", h_nsk_ResSet, const void *o) { (void)o; return sk_fail(); }
-HLE_FORCE("nnsocketRecv", "local UDP (offline BSD service)", long, h_nsk_Recv, int s, void *b, unsigned long n, int f) { return dm_sk_recvfrom(s, b, n, f, NULL, NULL); }
-HLE_FORCE("nnsocketSend", "local UDP (offline BSD service)", long, h_nsk_Send, int s, const void *b, unsigned long n, int f) { return dm_sk_sendto(s, b, n, f, NULL, 0); }
-HLE_FORCE("nnsocketSendTo", "local UDP (offline BSD service)", long, h_nsk_SendTo, int s, const void *b, unsigned long n, int f, const void *a, unsigned al) { return dm_sk_sendto(s, b, n, f, a, al); }
-HLE_FORCE("nnsocketRecvFrom", "local UDP (offline BSD service)", long, h_nsk_RecvFrom, int s, void *b, unsigned long n, int f, void *a, unsigned *al) { return dm_sk_recvfrom(s, b, n, f, a, al); }
+HLE_FORCE("nnsocketRecv", "local UDP (offline BSD service)", long, h_nsk_Recv, int s, void *b, unsigned long n, int f) { return mpsk_recv(s, b, n, f); }
+HLE_FORCE("nnsocketSend", "local UDP (offline BSD service)", long, h_nsk_Send, int s, const void *b, unsigned long n, int f) { return mpsk_send(s, b, n, f); }
+HLE_FORCE("nnsocketSendTo", "local UDP (offline BSD service)", long, h_nsk_SendTo, int s, const void *b, unsigned long n, int f, const void *a, unsigned al) { return mpsk_sendto(s, b, n, f, a, al); }
+HLE_FORCE("nnsocketRecvFrom", "local UDP (offline BSD service)", long, h_nsk_RecvFrom, int s, void *b, unsigned long n, int f, void *a, unsigned *al) { return mpsk_recvfrom(s, b, n, f, a, al); }
 HLE_FORCE("nnsocketRead", "local UDP/EventFd (offline BSD service)", long, h_nsk_Read, int s, void *b, unsigned long n) { return dm_sk_read(s, b, n); }
 HLE_FORCE("nnsocketWrite", "local UDP/EventFd (offline BSD service)", long, h_nsk_Write, int s, const void *b, unsigned long n) { return dm_sk_write(s, b, n); }
 HLE_FORCE("nnsocketGetHostByNameWithOptions", "name resolution (cut): NULL", void *, h_nsk_GetHost, const char *n, const void *o, unsigned long c) { (void)n; (void)o; (void)c; t_skerr = SK_ENETDOWN; return NULL; }

@@ -138,7 +138,9 @@ def key_ctl(ctl):
     """The control bytes in the key: ctl_len of them, with the profile's shader_key_skip range as zeros (the host's keys_hash does the same). Batman: Arkham Knight's engine shares one control section
     among shaders whose sections differ only in GLSLC's compile information (+0x778..+0x791, +0x7d0..+0x7e7; its shader_key_skip 0x770+0x78): masked, its 24,721 sections are 5,615"""
     c = ctl[:ctl_len(ctl)]
-    if nvn2_ctl(ctl): return c[:0x30] + bytes(4) + c[0x34:]
+    if nvn2_ctl(ctl):
+        c = c[:0x30] + bytes(4) + c[0x34:]
+        return c[:KEY_SKIP[0]] + bytes(KEY_SKIP[1]) + c[KEY_SKIP[0] + KEY_SKIP[1]:] if KEY_SKIP[1] and KEY_SKIP[0] + KEY_SKIP[1] <= len(c) else c   # the profile's range within the key bytes (Pokopia: 0x20+0x8, rewritten by its driver at run time)
     return c[:KEY_SKIP[0]] + bytes(KEY_SKIP[1]) + c[KEY_SKIP[0] + KEY_SKIP[1]:] if KEY_SKIP[1] and KEY_SKIP[0] + KEY_SKIP[1] <= len(c) else c
 
 def skey(ctl, code):

@@ -21,36 +21,93 @@ HLE_FORCE("_ZN2nn5prepo27AddInternetConnectionStatusEPNS0_10PlayReportEPKcS4_S4_
 HLE_FORCE("_ZN2nn5prepo28RequestImmediateTransmissionEv", "telemetry immediate upload; nothing is sent, reports success", Result, h_prepo_Tx, void) { return RES_OK; }
 HLE_FORCE("_ZN2nn5prepo21GetTransmissionStatusEPNS0_18TransmissionStatusE", "telemetry upload status: idle (nothing is queued)", Result, h_prepo_TxStatus, uint32_t *st) { if (st) *st = 0; return RES_OK; }
 
-// ---------- ldn: local wireless. Initialization fails, state is always "none" ----------
-HLE_FORCE("_ZN2nn3ldn10InitializeEv", "local wireless (cut): initialization fails", Result, h_ldn_Init, void) { return RES_FAIL; }
-HLE_FORCE("_ZN2nn3ldn8FinalizeEv", "local wireless (cut)", void, h_ldn_Fini, void) {}
-HLE_FORCE("_ZN2nn3ldn8GetStateEv", "local wireless (cut): state 0 (none)", int, h_ldn_State, void) { return 0; }
-HLE_FORCE("_ZN2nn3ldn22AttachStateChangeEventEPNS_2os15SystemEventTypeE", "local wireless state event: bound, never fires", void, h_ldn_Attach, void *ev) { hle_bind_system_event(ev, 0); (void)g_ev_ldn; }
-HLE_FORCE("_ZN2nn3ldn11OpenStationEv", "local wireless (cut)", Result, h_ldn_OpenSta, void) { return RES_FAIL; }
-HLE_FORCE("_ZN2nn3ldn12CloseStationEv", "local wireless (cut)", Result, h_ldn_CloseSta, void) { return RES_FAIL; }
-HLE_FORCE("_ZN2nn3ldn15OpenAccessPointEv", "local wireless (cut)", Result, h_ldn_OpenAp, void) { return RES_FAIL; }
-HLE_FORCE("_ZN2nn3ldn16CloseAccessPointEv", "local wireless (cut)", Result, h_ldn_CloseAp, void) { return RES_FAIL; }
-HLE_FORCE("_ZN2nn3ldn10DisconnectEv", "local wireless (cut)", Result, h_ldn_Disc, void) { return RES_FAIL; }
-HLE_FORCE("_ZN2nn3ldn14DestroyNetworkEv", "local wireless (cut)", Result, h_ldn_Destroy, void) { return RES_FAIL; }
-HLE_FORCE("_ZN2nn3ldn4ScanEPNS0_11NetworkInfoEPiiRKNS0_10ScanFilterEi", "local wireless scan (cut): 0 found", Result, h_ldn_Scan, void *out, int *n, int max, const void *f, int ch) { (void)out; (void)max; (void)f; (void)ch; if (n) *n = 0; return RES_FAIL; }
-HLE_FORCE("_ZN2nn3ldn11ScanPrivateEPNS0_11NetworkInfoEPiiRKNS0_10ScanFilterEi", "local wireless scan (cut): 0 found", Result, h_ldn_ScanP, void *out, int *n, int max, const void *f, int ch) { (void)out; (void)max; (void)f; (void)ch; if (n) *n = 0; return RES_FAIL; }
-HLE_FORCE("_ZN2nn3ldn13CreateNetworkERKNS0_13NetworkConfigERKNS0_14SecurityConfigERKNS0_10UserConfigE", "local wireless (cut)", Result, h_ldn_Create,
-          const void *a, const void *b, const void *c) { (void)a; (void)b; (void)c; return RES_FAIL; }
+// ---------- ldn: local wireless. Cut (initialization fails, state is always "none"), unless co-op is on: DM_COOP=auto (the launcher's Link Play switch) or
+// join:<IPv4>[:<port>] (env.txt). Then every call goes to the coop module (hle_coop_*.c, MIT: windows-native src/coop, docs/coop-step1c.md), Link Play "Local
+// connection" between our builds on the LAN. The state-change event is bound as before and signalled by the module ----------
+#include "coop.h"
+#include <stdatomic.h>
+static void *_Atomic g_ldn_attached;   // the game's own state-change event (AttachStateChangeEvent; Pokopia attaches none and polls)
+static void coop_hlog(void *u, const char *l) { (void)u; LOG("[coop] %s", l); }
+static void coop_hsleep(void *u, int64_t ns) { (void)u; void dm_guest_sleep_ns(int64_t ns); dm_guest_sleep_ns(ns); }
+static void coop_hstate(void *u, int st) { (void)u; (void)st; void *e = atomic_load(&g_ldn_attached); if (e) hle_signal_bound_system_event(e); }
+static const char *coop_hbuild(void *u) { (void)u; return dm_main_build(); }   // peers compare builds before a join
+// The cheats that are on (hle_cheats.c), "Interact everywhere" (DM_COOP_INTERACT, hle_coop_interact.c) and Story co-op (DM_COOP_STORY) as one fingerprint:
+// players meet only with the same set, since each changes what happens in the host's town. Without cheats it is the Windows build's fingerprint
+int dm_cheats_master(void); int dm_cheats_ncheats(void); int dm_cheat_on_at(int i); const char *dm_cheat_name_at(int i);
+static uint64_t coop_hmods(void *u, char *what, size_t n) {
+    (void)u; uint64_t h = 0; int k = 0; const coop_site *s;
+    for (int i = 0; dm_cheats_master() && i < dm_cheats_ncheats(); i++) {
+        if (!dm_cheat_on_at(i)) continue;
+        h = coop_mods_add(h, dm_cheat_name_at(i)); k++;
+    }
+    int ie = coop_interact_on() && coop_interact_sites(dm_main_build(), &s), st = ie && coop_story_on() && coop_story_sites(dm_main_build(), &s);
+    if (ie) h = coop_mods_add(h, COOP_INTERACT_MOD);
+    if (st) h = coop_mods_add(h, COOP_STORY_MOD);
+    const char *mods = st ? COOP_INTERACT_MOD ", " COOP_STORY_MOD : ie ? COOP_INTERACT_MOD : "";
+    if (k) snprintf(what, n, "%d cheat%s on%s%s", k, k == 1 ? "" : "s", ie ? ", " : "", mods);
+    else if (ie) snprintf(what, n, "%s", mods);
+    return h;
+}
+// "Interact everywhere" and Story co-op: the profile's observation gates (patches.py, OBS_COOP_INTERACT with the site's id in the gate number's upper bits)
+// call the shared callback while the switch is on, read when a gate fires (the iPhone's launcher sets it after the host's constructors have run)
+static void coop_interact_gate(uint64_t *regs, int param) {
+    static _Atomic int said, said_talk;
+    if (!coop_interact_on()) return;
+    uint64_t was13 = regs[13], was0 = regs[0]; coop_interact_site(param, regs);
+    if (regs[13] != was13 && !atomic_exchange(&said, 1)) LOG("[coop] Interact everywhere: this story area's Link Play session has Palette Town's permissions");
+    if (param == COOP_SITE_TALK && regs[0] != was0 && !atomic_exchange(&said_talk, 1)) LOG("[coop] Story co-op: a visitor's talk takes the host's path");
+}
+__attribute__((constructor)) static void coop_interact_attach(void) { gate_obs_set(OBS_COOP_INTERACT, coop_interact_gate); }
+coop_node *dm_coop(void) {   // the process's coop node when DM_COOP is set (and not off), else NULL (hle_net.c and hle_misc.c ask too)
+    static coop_node *_Atomic node; static _Atomic int done;
+    if (atomic_load(&done)) return atomic_load(&node);
+    static const coop_hooks h = {NULL, coop_hlog, coop_hsleep, coop_hstate, coop_hbuild, coop_hmods};
+    coop_node *n = coop_env_node(&h);
+    atomic_store(&node, n); atomic_store(&done, 1);
+    return n;
+}
+#define COOP(call) do { coop_node *c_ = dm_coop(); if (c_) return call; } while (0)
+HLE_FORCE("_ZN2nn3ldn10InitializeEv", "local wireless: the coop module (DM_COOP), else cut: initialization fails", Result, h_ldn_Init, void) { COOP(coop_ldn_initialize(c_)); return RES_FAIL; }
+HLE_FORCE("_ZN2nn3ldn8FinalizeEv", "local wireless (coop / cut)", void, h_ldn_Fini, void) { coop_node *c = dm_coop(); if (c) coop_ldn_finalize(c); }
+HLE_FORCE("_ZN2nn3ldn8GetStateEv", "local wireless (coop / cut): state 0 (none)", int, h_ldn_State, void) { COOP(coop_ldn_state(c_)); return 0; }
+HLE_FORCE("_ZN2nn3ldn22AttachStateChangeEventEPNS_2os15SystemEventTypeE", "local wireless state event: bound; the coop module fires it on every state or network change, else never",
+          void, h_ldn_Attach, void *ev) { hle_bind_system_event(ev, 0); atomic_store(&g_ldn_attached, ev); (void)g_ev_ldn; }
+HLE_FORCE("_ZN2nn3ldn11OpenStationEv", "local wireless (coop / cut)", Result, h_ldn_OpenSta, void) { COOP(coop_ldn_open_station(c_)); return RES_FAIL; }
+HLE_FORCE("_ZN2nn3ldn12CloseStationEv", "local wireless (coop / cut)", Result, h_ldn_CloseSta, void) { COOP(coop_ldn_close_station(c_)); return RES_FAIL; }
+HLE_FORCE("_ZN2nn3ldn15OpenAccessPointEv", "local wireless (coop / cut)", Result, h_ldn_OpenAp, void) { COOP(coop_ldn_open_ap(c_)); return RES_FAIL; }
+HLE_FORCE("_ZN2nn3ldn16CloseAccessPointEv", "local wireless (coop / cut)", Result, h_ldn_CloseAp, void) { COOP(coop_ldn_close_ap(c_)); return RES_FAIL; }
+HLE_FORCE("_ZN2nn3ldn10DisconnectEv", "local wireless (coop / cut)", Result, h_ldn_Disc, void) { COOP(coop_ldn_disconnect(c_)); return RES_FAIL; }
+HLE_FORCE("_ZN2nn3ldn14DestroyNetworkEv", "local wireless (coop / cut)", Result, h_ldn_Destroy, void) { COOP(coop_ldn_destroy_network(c_)); return RES_FAIL; }
+HLE_FORCE("_ZN2nn3ldn4ScanEPNS0_11NetworkInfoEPiiRKNS0_10ScanFilterEi", "local wireless scan (coop: asks the hosts it knows; cut: 0 found)", Result, h_ldn_Scan, void *out, int *n, int max, const void *f, int ch) {
+    COOP(coop_ldn_scan(c_, out, n, max, f, ch));
+    (void)out; (void)max; (void)f; (void)ch; if (n) *n = 0; return RES_FAIL;
+}
+HLE_FORCE("_ZN2nn3ldn11ScanPrivateEPNS0_11NetworkInfoEPiiRKNS0_10ScanFilterEi", "local wireless scan (coop: asks the hosts it knows; cut: 0 found)", Result, h_ldn_ScanP, void *out, int *n, int max, const void *f, int ch) {
+    COOP(coop_ldn_scan(c_, out, n, max, f, ch));
+    (void)out; (void)max; (void)f; (void)ch; if (n) *n = 0; return RES_FAIL;
+}
+HLE_FORCE("_ZN2nn3ldn13CreateNetworkERKNS0_13NetworkConfigERKNS0_14SecurityConfigERKNS0_10UserConfigE", "local wireless (coop / cut)", Result, h_ldn_Create,
+          const void *a, const void *b, const void *c) { COOP(coop_ldn_create_network(c_, a, b, c)); return RES_FAIL; }
 HLE_FORCE("_ZN2nn3ldn20CreateNetworkPrivateERKNS0_13NetworkConfigERKNS0_14SecurityConfigERKNS0_17SecurityParameterERKNS0_10UserConfigEiPKNS0_12AddressEntryE", "local wireless (cut)",
           Result, h_ldn_CreateP, const void *a, const void *b, const void *c, const void *d, int n, const void *e) { (void)a; (void)b; (void)c; (void)d; (void)n; (void)e; return RES_FAIL; }
-HLE_FORCE("_ZN2nn3ldn7ConnectERKNS0_11NetworkInfoERKNS0_14SecurityConfigERKNS0_10UserConfigEiNS0_13ConnectOptionE", "local wireless (cut)", Result, h_ldn_Connect,
-          const void *a, const void *b, const void *c, int v, int o) { (void)a; (void)b; (void)c; (void)v; (void)o; return RES_FAIL; }
+HLE_FORCE("_ZN2nn3ldn7ConnectERKNS0_11NetworkInfoERKNS0_14SecurityConfigERKNS0_10UserConfigEiNS0_13ConnectOptionE", "local wireless (coop / cut)", Result, h_ldn_Connect,
+          const void *a, const void *b, const void *c, int v, int o) { COOP(coop_ldn_connect(c_, a, b, c, v, o)); return RES_FAIL; }
 HLE_FORCE("_ZN2nn3ldn14ConnectPrivateERKNS0_13NetworkConfigERKNS0_14SecurityConfigERKNS0_17SecurityParameterERKNS0_10UserConfigEiNS0_13ConnectOptionE", "local wireless (cut)",
           Result, h_ldn_ConnectP, const void *a, const void *b, const void *c, const void *d, int v, int o) { (void)a; (void)b; (void)c; (void)d; (void)v; (void)o; return RES_FAIL; }
-HLE_FORCE("_ZN2nn3ldn14GetNetworkInfoEPNS0_11NetworkInfoE", "local wireless (cut)", Result, h_ldn_NetInfo, void *o) { (void)o; return RES_FAIL; }
-HLE_FORCE("_ZN2nn3ldn14GetIpv4AddressEPNS0_11Ipv4AddressEPNS0_10SubnetMaskE", "local wireless (cut)", Result, h_ldn_Ip, uint32_t *a, uint32_t *m) { if (a) *a = 0; if (m) *m = 0; return RES_FAIL; }
-HLE_FORCE("_ZN2nn3ldn20GetSecurityParameterEPNS0_17SecurityParameterE", "local wireless (cut)", Result, h_ldn_SecPrm, void *o) { (void)o; return RES_FAIL; }
-HLE_FORCE("_ZN2nn3ldn16SetAdvertiseDataEPKvm", "local wireless (cut)", Result, h_ldn_Adv, const void *d, uint64_t n) { (void)d; (void)n; return RES_FAIL; }
-HLE_FORCE("_ZN2nn3ldn19GetDisconnectReasonEv", "local wireless (cut): 0", int, h_ldn_DiscReason, void) { return 0; }
+HLE_FORCE("_ZN2nn3ldn14GetNetworkInfoEPNS0_11NetworkInfoE", "local wireless (coop / cut)", Result, h_ldn_NetInfo, void *o) { COOP(coop_ldn_network_info(c_, o)); return RES_FAIL; }
+HLE_FORCE("_ZN2nn3ldn14GetIpv4AddressEPNS0_11Ipv4AddressEPNS0_10SubnetMaskE", "local wireless (coop / cut)", Result, h_ldn_Ip, uint32_t *a, uint32_t *m) {
+    COOP(coop_ldn_ipv4(c_, a, m));
+    if (a) *a = 0;
+    if (m) *m = 0;
+    return RES_FAIL;
+}
+HLE_FORCE("_ZN2nn3ldn20GetSecurityParameterEPNS0_17SecurityParameterE", "local wireless (coop / cut)", Result, h_ldn_SecPrm, void *o) { COOP(coop_ldn_security_parameter(c_, o)); return RES_FAIL; }
+HLE_FORCE("_ZN2nn3ldn16SetAdvertiseDataEPKvm", "local wireless (coop / cut)", Result, h_ldn_Adv, const void *d, uint64_t n) { COOP(coop_ldn_set_advertise(c_, d, n)); return RES_FAIL; }
+HLE_FORCE("_ZN2nn3ldn19GetDisconnectReasonEv", "local wireless (coop / cut): 0", int, h_ldn_DiscReason, void) { COOP(coop_ldn_disconnect_reason(c_)); return 0; }
 HLE_FORCE("_ZN2nn3ldn20AddAcceptFilterEntryENS0_10MacAddressE", "local wireless (cut)", Result, h_ldn_Filter, uint64_t mac) { (void)mac; return RES_FAIL; }
-HLE_FORCE("_ZN2nn3ldn22SetStationAcceptPolicyENS0_12AcceptPolicyE", "local wireless (cut)", Result, h_ldn_Policy, int p) { (void)p; return RES_FAIL; }
-HLE_FORCE("_ZN2nn3ldn6RejectENS0_11Ipv4AddressE", "local wireless (cut)", Result, h_ldn_Reject, uint32_t a) { (void)a; return RES_FAIL; }
-HLE_FORCE("_ZN2nn3ldn16GetNetworkConfigEPNS0_13NetworkConfigE", "local wireless (cut)", Result, h_ldn_NetCfg, void *o) { (void)o; return RES_FAIL; }
+HLE_FORCE("_ZN2nn3ldn22SetStationAcceptPolicyENS0_12AcceptPolicyE", "local wireless (coop / cut)", Result, h_ldn_Policy, int p) { COOP(coop_ldn_set_accept_policy(c_, p & 0xFF)); return RES_FAIL; }
+HLE_FORCE("_ZN2nn3ldn6RejectENS0_11Ipv4AddressE", "local wireless (coop / cut)", Result, h_ldn_Reject, uint32_t a) { COOP(coop_ldn_reject(c_, a)); return RES_FAIL; }
+HLE_FORCE("_ZN2nn3ldn16GetNetworkConfigEPNS0_13NetworkConfigE", "local wireless (coop / cut)", Result, h_ldn_NetCfg, void *o) { COOP(coop_ldn_network_config(c_, o)); return RES_FAIL; }
 
 // ---------- bluetooth: BLE (Pokémon Violet 3.0.1 at boot, likely its Pokémon GO Plus + support). InitializeBle connects to bt and btm:u (an SDK abort without them); the host has no radio:
 // events never fire, scans find nothing, so the GATT calls after a connect are never reached ----------
@@ -69,30 +126,37 @@ HLE_FORCE("_ZN2nn9bluetooth19ConnectToGattServerERKNS0_7AddressE", "BLE connect 
 
 // ---------- socket: aliases of the offline BSD service, including its process-local UDP transport ----------
 enum { SK_ENETDOWN = 50, SK_EAI_FAIL = 4 };
+// Co-op on: the overloads the game's LDN data path can use go through hle_net.c's mpsk_* (the coop module's virtual UDP); a descriptor that is not virtual
+// still gets -1 / ENETDOWN. Co-op off: the offline answers, unchanged
+int mpsk_errno(void); int mpsk_socket(int fam, int type, int proto); int mpsk_bind(int s, const void *a, unsigned n);
+int mpsk_getname(int s, void *a, unsigned *n); int mpsk_getopt(int s, int l, int o, void *v, unsigned *n); int mpsk_setopt(int s, int l, int o, const void *v, unsigned n);
+int mpsk_fcntl(int s, int cmd, int v); long mpsk_sendto(int s, const void *b, unsigned long n, int f, const void *to, unsigned tl);
+long mpsk_recvfrom(int s, void *b, unsigned long n, int f, void *from, unsigned *fl); long mpsk_recv(int s, void *b, unsigned long n, int f); long mpsk_send(int s, const void *b, unsigned long n, int f);
+#define SKCOOP(call) do { if (dm_coop()) return call; } while (0)
 HLE_FORCE("_ZN2nn6socket10InitializeEPvmmi", "connects to the bsd socket service; offline, creates no session (cut)", Result, h_sk_Init4, void *mem, uint64_t sz, uint64_t alloc, int conc) { (void)mem; (void)sz; (void)alloc; (void)conc; return RES_OK; }
 HLE_FORCE("_ZN2nn6socket8FinalizeEv", "pairs with Initialize (cut)", Result, h_sk_Fini, void) { return RES_OK; }
-HLE_FORCE("_ZN2nn6socket12GetLastErrnoEv", "local UDP (offline BSD service)", int, h_sk_Errno, void) { return dm_sk_errno(); }
-HLE_FORCE("_ZN2nn6socket6SocketEiii", "local UDP (offline BSD service)", int, h_sk_Socket3i, int a, int b, int c) { return dm_sk_socket(a, b, c); }
+HLE_FORCE("_ZN2nn6socket12GetLastErrnoEv", "local UDP (offline BSD service)", int, h_sk_Errno, void) { return mpsk_errno(); }
+HLE_FORCE("_ZN2nn6socket6SocketEiii", "local UDP (offline BSD service)", int, h_sk_Socket3i, int a, int b, int c) { return mpsk_socket(a, b, c); }
 HLE_FORCE("_ZN2nn6socket8ShutdownEii", "local UDP (offline BSD service)", int, h_sk_Shutdown, int s, int h) { return dm_sk_shutdown(s, h); }
-HLE_FORCE("_ZN2nn6socket4BindEiPK8sockaddrj", "local UDP (offline BSD service)", int, h_sk_Bind, int s, const void *a, unsigned n) { return dm_sk_bind(s, a, n); }
+HLE_FORCE("_ZN2nn6socket4BindEiPK8sockaddrj", "local UDP (offline BSD service)", int, h_sk_Bind, int s, const void *a, unsigned n) { return mpsk_bind(s, a, n); }
 HLE_FORCE("_ZN2nn6socket4PollEP6pollfdmi", "waits on process-local UDP and event descriptors", int, h_sk_Poll, void *p, uint64_t n, int t) { return dm_sk_poll(p, n, t); }
 // SDK 4's Select with plain fd_set / timeval (Dark Souls Remastered)
 HLE_FORCE("_ZN2nn6socket6SelectEiP6fd_setS2_S2_P7timeval", "Poll over process-local UDP and event descriptor sets", int, h_sk_Select2, int n, void *r, void *w, void *e, void *t) { return dm_sk_select(n, r, w, e, t); }
-HLE_FORCE("_ZN2nn6socket6SendToEiPKvmiPK8sockaddrj", "local UDP (offline BSD service)", long, h_sk_SendTo, int s, const void *b, unsigned long n, int f, const void *a, unsigned al) { return dm_sk_sendto(s, b, n, f, a, al); }
-HLE_FORCE("_ZN2nn6socket6SendToEiPKvmNS0_7MsgFlagEPKNS0_8SockAddrEj", "local UDP (offline BSD service)", long, h_sk_SendTo2, int s, const void *b, unsigned long n, int f, const void *a, unsigned al) { return dm_sk_sendto(s, b, n, f, a, al); }
-HLE_FORCE("_ZN2nn6socket8RecvFromEiPvmiP8sockaddrPj", "local UDP (offline BSD service)", long, h_sk_RecvFrom2, int s, void *b, unsigned long n, int f, void *a, unsigned *al) { return dm_sk_recvfrom(s, b, n, f, a, al); }
+HLE_FORCE("_ZN2nn6socket6SendToEiPKvmiPK8sockaddrj", "local UDP (offline BSD service)", long, h_sk_SendTo, int s, const void *b, unsigned long n, int f, const void *a, unsigned al) { return mpsk_sendto(s, b, n, f, a, al); }
+HLE_FORCE("_ZN2nn6socket6SendToEiPKvmNS0_7MsgFlagEPKNS0_8SockAddrEj", "local UDP (offline BSD service)", long, h_sk_SendTo2, int s, const void *b, unsigned long n, int f, const void *a, unsigned al) { return mpsk_sendto(s, b, n, f, a, al); }
+HLE_FORCE("_ZN2nn6socket8RecvFromEiPvmiP8sockaddrPj", "local UDP (offline BSD service)", long, h_sk_RecvFrom2, int s, void *b, unsigned long n, int f, void *a, unsigned *al) { return mpsk_recvfrom(s, b, n, f, a, al); }
 HLE_FORCE("_ZN2nn6socket11GetAddrInfoEPKcS2_PK8addrinfoPPS3_", "name resolution (cut): EAI_FAIL", int, h_sk_Gai2, const char *h, const char *s, const void *hint, void **res) { (void)h; (void)s; (void)hint; if (res) *res = NULL; return SK_EAI_FAIL; }
 HLE_FORCE("_ZN2nn6socket12FreeAddrInfoEP8addrinfo", "pairs with GetAddrInfo (cut)", void, h_sk_FreeAi2, void *ai) { (void)ai; }
 HLE_FORCE("_ZN2nn6socket11GAIStrErrorENS0_7AiErrnoE", "resolver error text", const char *, h_sk_GaiStr, int e) { (void)e; return "network unavailable"; }
 // SDK 11's overloads with plain sockaddr / int arguments (Big Brain Academy: Brain vs. Brain, through Pia)
 HLE_FORCE("_ZN2nn6socket7ConnectEiPK8sockaddrj", "local UDP (offline BSD service)", int, h_sk_Connect2, int s, const void *a, unsigned n) { return dm_sk_connect(s, a, n); }
 HLE_FORCE("_ZN2nn6socket6AcceptEiP8sockaddrPj", "offline (cut)", int, h_sk_Accept2, int s, void *a, unsigned *n) { (void)s; (void)a; (void)n; return -1; }
-HLE_FORCE("_ZN2nn6socket11GetSockNameEiP8sockaddrPj", "local UDP (offline BSD service)", int, h_sk_GetSockName2, int s, void *a, unsigned *n) { return dm_sk_name(s, a, n, 0); }
-HLE_FORCE("_ZN2nn6socket10GetSockOptEiiiPvPj", "local UDP (offline BSD service)", int, h_sk_GetSockOpt2, int s, int l, int o, void *v, unsigned *n) { return dm_sk_getopt(s, l, o, v, n); }
-HLE_FORCE("_ZN2nn6socket10SetSockOptEiiiPKvj", "local UDP (offline BSD service)", int, h_sk_SetSockOpt2, int s, int l, int o, const void *v, unsigned n) { return dm_sk_setopt(s, l, o, v, n); }
-HLE_FORCE("_ZN2nn6socket5FcntlEiiz", "local UDP (offline BSD service)", int, h_sk_Fcntl2, int s, int c, int v) { return dm_sk_fcntl(s, c, v); }
-HLE_FORCE("_ZN2nn6socket4RecvEiPvmi", "local UDP (offline BSD service)", long, h_sk_Recv2, int s, void *b, unsigned long n, int f) { return dm_sk_recvfrom(s, b, n, f, NULL, NULL); }
-HLE_FORCE("_ZN2nn6socket4SendEiPKvmi", "local UDP (offline BSD service)", long, h_sk_Send2, int s, const void *b, unsigned long n, int f) { return dm_sk_sendto(s, b, n, f, NULL, 0); }
+HLE_FORCE("_ZN2nn6socket11GetSockNameEiP8sockaddrPj", "local UDP (offline BSD service)", int, h_sk_GetSockName2, int s, void *a, unsigned *n) { return mpsk_getname(s, a, n); }
+HLE_FORCE("_ZN2nn6socket10GetSockOptEiiiPvPj", "local UDP (offline BSD service)", int, h_sk_GetSockOpt2, int s, int l, int o, void *v, unsigned *n) { return mpsk_getopt(s, l, o, v, n); }
+HLE_FORCE("_ZN2nn6socket10SetSockOptEiiiPKvj", "local UDP (offline BSD service)", int, h_sk_SetSockOpt2, int s, int l, int o, const void *v, unsigned n) { return mpsk_setopt(s, l, o, v, n); }
+HLE_FORCE("_ZN2nn6socket5FcntlEiiz", "local UDP (offline BSD service)", int, h_sk_Fcntl2, int s, int c, int v) { return mpsk_fcntl(s, c, v); }
+HLE_FORCE("_ZN2nn6socket4RecvEiPvmi", "local UDP (offline BSD service)", long, h_sk_Recv2, int s, void *b, unsigned long n, int f) { return mpsk_recv(s, b, n, f); }
+HLE_FORCE("_ZN2nn6socket4SendEiPKvmi", "local UDP (offline BSD service)", long, h_sk_Send2, int s, const void *b, unsigned long n, int f) { return mpsk_send(s, b, n, f); }
 
 // ---------- irsensor: the Joy-Con IR camera (Big Brain Academy: Brain vs. Brain's input layer makes one per controller). The host has none: every camera is unconnected,
 // processors cannot run and report no states. The default-config getters and MakeRect only fill the game's structs and keep running in the SDK ----------
@@ -232,3 +296,37 @@ HLE_FORCE("nnsocketGAIStrError", "resolver error text", const char *, h_c_sk_Gai
 HLE_FORCE("_ZN2nn4bcat10InitializeEv", "data delivery init (connects to the bcat service); the host has none, no-op", void, h_bcat_Init, void) {}
 HLE_FORCE("_ZN2nn4bcat25MountDeliveryCacheStorageEv", "mount delivery cache: no delivery data, fails", Result, h_bcat_Mount, void) { return RES_FAIL; }
 HLE_FORCE("_ZN2nn4bcat27UnmountDeliveryCacheStorageEv", "unmount delivery cache", void, h_bcat_Unmount, void) {}
+
+// ---------- Pokopia (SDK 20.5.25): the Switch 2 calls nxnative main does not force yet (its hle_misc.c has nn::streamplay, its hle_hid.c the Joy-Con 2 mouse, sensor and vibration node) ----------
+HLE_FORCE("_ZN2nn10streamplay12CloseSessionEv", "SWITCH2 streamplay: close session; none open", Result, h_stpl_Close, void) { return RES_OK; }
+HLE_FORCE("_ZN2nn10streamplay14StartStreamingEv", "SWITCH2 streamplay: start streaming; reports success, nothing streams", Result, h_stpl_Start, void) { return RES_OK; }
+HLE_FORCE("_ZN2nn10streamplay21WriteGuestAudioStreamENS0_7GuestIdEPKvi", "SWITCH2 streamplay: guest audio; dropped", Result, h_stpl_GuestAudio, int guest, const void *p, int n) { (void)guest; (void)p; (void)n; return RES_OK; }
+HLE_FORCE("_ZN2nn10streamplay13GetGuestNsaIdEPNS_7account23NetworkServiceAccountIdENS0_7GuestIdE", "SWITCH2 streamplay: guest network account id; zero", Result, h_stpl_GuestNsa, uint64_t *out, int guest) { (void)guest; if (out) *out = 0; return RES_OK; }
+HLE_FORCE("_ZN2nn10streamplay16GetGuestNicknameEPNS_7account8NicknameENS0_7GuestIdE", "SWITCH2 streamplay: guest nickname; empty", Result, h_stpl_GuestNick, char *out, int guest) { (void)guest; if (out) *out = 0; return RES_OK; }
+HLE_FORCE("_ZN2nn10streamplay31OpenSessionWithMatchmakeSupportEPNS0_11SessionInfoERKNS0_15MatchmakeConfigE", "SWITCH2 streamplay: open a session; zeroed info, reports success", Result, h_stpl_OpenSess, uint8_t *info, const void *cfg) { (void)cfg; if (info) memset(info, 0, 0x40); return RES_OK; }
+static _Alignas(16) uint8_t g_stpl_ev[0x100];   // connection-state event that never fires (bound on the guest thread on first use, as hle_friends.c does)
+
+// ---------- SWITCH2 (private bring-up, Pokopia SDK 20.5.25): Switch 2 hid additions the host has no device for ----------
+// Nmouse is the Joy-Con 2 mouse mode, Jcms its sensor; the SDK connects to the hid service in InitializeNmouse (sm 0xe15 → abort). The host reports no mouse and no sensor.
+// The Switch 2 vibration graph (nodes, players, converters): the host plays no HD rumble 2 waveforms; every object is inert
+HLE_FORCE("_ZN2nn3hid13VibrationNode6UpdateEv", "SWITCH2 hid: vibration node update; inert", void, h_hid_VnUpdate, void *self) { (void)self; }
+HLE_FORCE("_ZN2nn3hid13VibrationNode15SetModulationToEPKS1_RKNS0_19VibrationModulationE", "SWITCH2 hid: vibration modulation; inert", void, h_hid_VnMod, void *self, const void *to, const void *m) { (void)self; (void)to; (void)m; }
+HLE_FORCE("_ZN2nn3hid23VibrationNodeConnectionC1Ev", "SWITCH2 hid: vibration connection ctor; inert", void, h_hid_VcCtor, void *self) { (void)self; }
+HLE_FORCE("_ZN2nn3hid23VibrationNodeConnectionD1Ev", "SWITCH2 hid: vibration connection dtor; inert", void, h_hid_VcDtor, void *self) { (void)self; }
+HLE_FORCE("_ZN2nn3hid23VibrationNodeConnection7ConnectEPNS0_13VibrationNodeES3_", "SWITCH2 hid: connect vibration nodes; reports success", Result, h_hid_VcConnect, void *self, void *a, void *b) { (void)self; (void)a; (void)b; return RES_OK; }
+HLE_FORCE("_ZN2nn3hid23VibrationNodeConnection10DisconnectEv", "SWITCH2 hid: disconnect vibration nodes; inert", void, h_hid_VcDisc, void *self) { (void)self; }
+HLE_FORCE("_ZN2nn3hid15VibrationPlayerC1Ev", "SWITCH2 hid: vibration player ctor; inert", void, h_hid_VpCtor, void *self) { (void)self; }
+HLE_FORCE("_ZN2nn3hid15VibrationPlayerD1Ev", "SWITCH2 hid: vibration player dtor; inert", void, h_hid_VpDtor, void *self) { (void)self; }
+HLE_FORCE("_ZN2nn3hid15VibrationPlayer4LoadEPKvm", "SWITCH2 hid: vibration player load; reports success", Result, h_hid_VpLoad, void *self, const void *p, uint64_t n) { (void)self; (void)p; (void)n; return RES_OK; }
+HLE_FORCE("_ZN2nn3hid15VibrationPlayer4PlayEv", "SWITCH2 hid: vibration player play; inert", void, h_hid_VpPlay, void *self) { (void)self; }
+HLE_FORCE("_ZN2nn3hid15VibrationPlayer4StopEv", "SWITCH2 hid: vibration player stop; inert", void, h_hid_VpStop, void *self) { (void)self; }
+HLE_FORCE("_ZN2nn3hid15VibrationPlayer7SetLoopEb", "SWITCH2 hid: vibration player loop; inert", void, h_hid_VpLoop, void *self, unsigned on) { (void)self; (void)on; }
+HLE_FORCE("_ZN2nn3hid15VibrationPlayer15SetLoopIntervalEi", "SWITCH2 hid: vibration player loop interval; inert", void, h_hid_VpLoopIv, void *self, int n) { (void)self; (void)n; }
+HLE_FORCE("_ZN2nn3hid15VibrationPlayer18SetCurrentPositionEi", "SWITCH2 hid: vibration player position; inert", void, h_hid_VpPos, void *self, int n) { (void)self; (void)n; }
+HLE_FORCE("_ZN2nn3hid15VibrationTargetC1Ev", "SWITCH2 hid: vibration target ctor; inert", void, h_hid_VtCtor, void *self) { (void)self; }
+HLE_FORCE("_ZN2nn3hid15VibrationTargetD1Ev", "SWITCH2 hid: vibration target dtor; inert", void, h_hid_VtDtor, void *self) { (void)self; }
+HLE_FORCE("_ZN2nn3hid15VibrationTarget24GetVibrationDeviceHandleEv", "SWITCH2 hid: vibration target device handle; 0", uint64_t, h_hid_VtGet, void *self) { (void)self; return 0; }
+HLE_FORCE("_ZN2nn3hid15VibrationTarget24SetVibrationDeviceHandleERKNS0_21VibrationDeviceHandleE", "SWITCH2 hid: vibration target device handle; ignored", void, h_hid_VtSet, void *self, const void *h) { (void)self; (void)h; }
+HLE_FORCE("_ZN2nn3hid18VibrationConverterC1Ei", "SWITCH2 hid: vibration converter ctor; inert", void, h_hid_VcvCtor, void *self, int rate) { (void)self; (void)rate; }
+HLE_FORCE("_ZN2nn3hid18VibrationConverterD1Ev", "SWITCH2 hid: vibration converter dtor; inert", void, h_hid_VcvDtor, void *self) { (void)self; }
+HLE_FORCE("_ZN2nn3hid18VibrationConverter12ProcessChunkEPNS0_14VibrationValueEPKsi", "SWITCH2 hid: vibration converter; 0 values", int, h_hid_VcvChunk, void *self, void *out, const short *pcm, int n) { (void)self; (void)out; (void)pcm; (void)n; return 0; }

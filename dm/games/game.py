@@ -4,7 +4,7 @@
 #   game.py modules <id> <folder of rewritten modules> (the modules to load from it: the build row of its main's build, else the profile's modules);
 #   game.py dir <id> (print the profile folder); game.py link <id> <link> (point a symlink at the profile folder: make cannot take paths with spaces)
 #   From Python: import game; g = game.load() (takes DM_GAME; there is no default game: unset is an error that lists the profiles); game.by_title(title ID); g.get / g.words / g.int / g.builds() / g.table(file name)
-# DM_GAMES_DIR (folders separated by ':') adds profile folders outside the repository, searched after dm/games: the NSP script writes a provisional profile for a game without one into
+# DM_GAMES_DIR (folders separated by os.pathsep: ':', or ';' on Windows, where ':' follows every drive letter) adds profile folders outside the repository, searched after dm/games: the NSP script writes a provisional profile for a game without one into
 #   <NSP folder>/<id>_build/profile/<id>/ and points DM_GAMES_DIR at <id>_build/profile, so the shader tools, the host build and build_ipa.sh all find it.
 #   DM_GAMES_FIRST=1 searches DM_GAMES_DIR before dm/games (the NSP script's --provisional: a provisional profile for a game that has one in dm/games, to test the guesses)
 import os, re, sys
@@ -60,7 +60,7 @@ class Game:
 
 
 def extra_dirs():   # profile folders outside the repository (DM_GAMES_DIR), searched after dm/games
-    return [Path(p) for p in os.environ.get('DM_GAMES_DIR', '').split(':') if p]
+    return [Path(p) for p in os.environ.get('DM_GAMES_DIR', '').split(os.pathsep) if p]
 
 
 def search_dirs():   # dm/games, then DM_GAMES_DIR; DM_GAMES_FIRST=1 the other way round
@@ -189,11 +189,16 @@ def header_one(g):
     sf = g.get('shared_font', 'bfttf')   # what the shared-font address points at (hle_sdk16.c): bfttf = 8-byte header + TTF, ttf = the TTF alone
     if sf not in ('bfttf', 'ttf'): sys.exit(f'{g.id}: shared_font must be bfttf or ttf: {sf}')
     pl = g.get('pad_layout', 'simple')   # the virtual gamepad's first layout (DmGamepad.m; afterwards whatever the player switched to in game is kept): simple = 2D, full = 3D (D-pad, right stick, L3 / R3),
-    if pl not in ('simple', 'full', 'touch'): sys.exit(f'{g.id}: pad_layout must be simple, full or touch: {pl}')   # touch = Tap (no control: every touch goes to the game's touch screen)
+    if pl not in ('simple', 'full', 'touch'): sys.exit(f'{g.id}: pad_layout must be simple, full or touch: {pl}')
+    lr = float(g.get('look_rate', '0'))   # pointer look (hle_hid.c dm_look_add): the camera's turn rate at full right-stick tilt, degrees per second; 0 = off (the pointer is not a look control)
+    ld = float(g.get('look_dead', '0.2'))   # pointer look: the right stick's deadzone for the camera, a fraction of full tilt (round)
+    if lr < 0 or not 0 <= ld < 1: sys.exit(f'{g.id}: look_rate must be >= 0 and look_dead in [0, 1): {lr} {ld}')
+    lc = g.get('look_cam', '')   # pointer look written into the camera (hle_hid.c look_cam): "<main build id> <slot> <pitch> <yaw> <pitch max> <pitch min> <lock>/<mask>", hex; one per build, ';' between
+    if lc and not re.fullmatch(r'[0-9a-f]{8,32}( [0-9a-f]+){6}/[0-9a-f]+(;[0-9a-f]{8,32}( [0-9a-f]+){6}/[0-9a-f]+)*', lc): sys.exit(f'{g.id}: look_cam takes <main build id> <slot> <pitch> <yaw> <pitch max> <pitch min> <lock>/<mask> in hex: {lc}')   # touch = Tap (no control: every touch goes to the game's touch screen)
     sks = g.get('shader_key_skip', '')   # control-section bytes the shader keys hash as zeros, <offset>+<length> (hle_nvn.c keys_hash, shader_split.py key_ctl; Batman: Arkham Knight: GLSLC's compile information, 0x770+0x78)
     m = re.fullmatch(r'(0x[0-9a-fA-F]+|\d+)\+(0x[0-9a-fA-F]+|\d+)', sks) if sks else None
-    if sks and (not m or not 0x30 <= int(m[1], 0) or not 0 < int(m[2], 0) or int(m[1], 0) + int(m[2], 0) > 0x880 or (int(m[1], 0) < 0x760 and int(m[1], 0) + int(m[2], 0) > 0x700)):   # not over +0x700..+0x75f, the code area and compute fields the tools read
-        sys.exit(f'{g.id}: shader_key_skip takes <offset>+<length> within the first 0x880 bytes of the control section, past its header (+0x30) and clear of +0x700..+0x75f: {sks}')
+    if sks and (not m or not 0x8 <= int(m[1], 0) or not 0 < int(m[2], 0) or int(m[1], 0) + int(m[2], 0) > 0x880 or (int(m[1], 0) < 0x760 and int(m[1], 0) + int(m[2], 0) > 0x700)):   # not over +0x700..+0x75f, the code area and compute fields the tools read; past the magic and version (+0x08: an NVN2 section's key bytes, +0x20..+0x27 for Pokopia, lie before +0x30)
+        sys.exit(f'{g.id}: shader_key_skip takes <offset>+<length> within the first 0x880 bytes of the control section, past its magic and version (+0x08) and clear of +0x700..+0x75f: {sks}')
     sko, skl = (int(m[1], 0), int(m[2], 0)) if m else (0, 0)
     if g.get('render_cond', ''): print(f'{g.id}: render_cond is ignored: the host evaluates NVN conditional rendering for every game', file=sys.stderr)   # a profile written before the key went (a build folder's derived one)
     tfu = g.get('tex_flush_upload', 'off')   # textures written by the CPU into a pool and published with nvnMemoryPoolFlushMappedRange are uploaded like packaged ones (hle_nvn.c): on / off
@@ -264,6 +269,9 @@ def header_one(g):
          f'#define DM_GAME_ENC_THREAD {int(et == "on")}',
          *([f'#define DM_GAME_SHARED_FONT_TTF {int(sf == "ttf")}'] if g.get('shared_font', '') else []),   # without the key the host decides by the SDK version (hle_sdk16.c)
          f'#define DM_GAME_PAD_LAYOUT {("simple", "full", "touch").index(pl)}',
+         f'#define DM_GAME_LOOK_RATE {lr!r}f',   # pointer look (hle_hid.c)
+         f'#define DM_GAME_LOOK_DEAD {ld!r}f',
+         f'#define DM_GAME_LOOK_CAM {q(lc)}',
          f'#define DM_GAME_OPMODE {int(om == "console")}',
          f'#define DM_GAME_PERF_BOOST {int(pm == "boost")}',
          f'#define DM_GAME_TEX_FLUSH_UPLOAD {int(tfu == "on")}',

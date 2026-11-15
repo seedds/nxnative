@@ -79,6 +79,174 @@ void dm_input_peek(uint64_t *buttons, int32_t axes[4]) {
     *buttons = b & 0xffffull;
 }
 void dm_pad_set(uint64_t buttons, int32_t lx, int32_t ly, int32_t rx, int32_t ry) { dm_pad_set_player(0, buttons, lx, ly, rx, ry); }
+
+// Pointer look (front.h dm_look_add): the Mac's captured mouse and the iPhone's look drags turn the camera by exactly how far they moved, through the right stick, the only
+// input the game turns its camera by. The game profile's look_rate is the camera's turn rate at full tilt (degrees per second) and look_dead its deadzone (a fraction of full
+// tilt, round); Pokopia, measured from its view matrix: 110 deg/s times the tilt above 0.51, frame-time based, no acceleration or smoothing. Each game frame (dm_guest_frame)
+// the host emits the tilt that turns the camera by what has gathered since, at most full tilt (the rest carries over to the next frames, up to LOOK_LAG seconds of turning; faster movement is dropped, so the camera stops when the input does), and
+// nothing while less than the deadzone's worth has gathered: then it fires once enough has (steps of look_dead x look_rate x frame time, about 1 degree at 60 fps). A remainder
+// smaller than a step that is left when the movement stops is rounded to the nearest step. DM_LOOK_RATE / DM_LOOK_DEAD override the profile (DM_LOOK_RATE=0: off), DM_LOOK_INVERT_Y=1 inverts up / down
+#define LOOK_LAG 0.1
+// Direct look (game profile look_cam): when the profile says where the game keeps its camera's angles, the pointer's degrees are written into them at player 1's
+// input read, before that frame's camera update: no stick, no deadzone, no turn rate. look_cam = main build id (a prefix), main+<slot> holding the camera's address, and
+// the camera's offsets of pitch, yaw (f32 radians; yaw in [0, 2pi) growing to the left, pitch growing downward), the pitch limits (clamped as the stick path does) and
+// a 16-bit lock word (no turning while lock & mask: the game's own stick turning is off then); one such entry per game build, ';' between them, the matching
+// one taken. Pokopia: the game applies a write in the same frame, with no smoothing.
+// The stick path stays for another build, before the camera exists and while it is locked. DM_LOOK_DIRECT=0 turns direct look off.
+// While the character moves sideways, Pokopia's follow camera sets the yaw itself and a written turn is lost (#31: left / right did nothing while walking
+// diagonally), but a right-stick turn wins: so while the left stick is held left or right the stick path turns the camera, and what a full tilt can't turn
+// that frame is written into the camera, which the stick's turn keeps (1.3.3 dropped it: the camera turned slower while moving sideways). DM_LOOK_STRAFE=0 writes then too.
+static struct { int state; uint8_t *slot; unsigned pitch, yaw, pmax, pmin, lock, mask, span; uint64_t seen; } g_lc;   // state 0 = not resolved yet, 1 = on, -1 = off
+static int g_look_direct;   // the last frame could write the camera (dm_look_add then gathers without the stick path's LOOK_LAG limit)
+static uint8_t *look_cam(void) {
+    if (!g_lc.state) {
+        const char *e = getenv("DM_LOOK_DIRECT"); g_lc.state = -1;
+        for (const char *c = DM_GAME_LOOK_CAM; *c && !(e && *e && !atoi(e)) && g_lc.state < 0; c = strchr(c, ';') ? strchr(c, ';') + 1 : "") {
+            char b[33]; unsigned long long s = 0;
+            if (sscanf(c, "%32s %llx %x %x %x %x %x/%x", b, &s, &g_lc.pitch, &g_lc.yaw, &g_lc.pmax, &g_lc.pmin, &g_lc.lock, &g_lc.mask) != 8) break;
+            for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, "main") && !strncmp(g_mod[i].build_id, b, strlen(b))) { g_lc.slot = (uint8_t *)g_mod[i].base + s; g_lc.state = 1; }
+        }
+        unsigned o[] = { g_lc.pitch, g_lc.yaw, g_lc.pmax, g_lc.pmin, g_lc.lock }; for (int i = 0; i < 5; i++) if (o[i] + 4 > g_lc.span) g_lc.span = o[i] + 4;
+        LOG("look: %s", g_lc.state > 0 ? "direct (written into the camera, game profile look_cam)" : "through the right stick");
+    }
+    if (g_lc.state < 0) return NULL;
+    uint64_t cam, hb; size_t hn; memcpy(&cam, g_lc.slot, sizeof cam); dm_guest_heap_range(&hb, &hn);
+    if (!cam || cam < hb || cam + g_lc.span > hb + hn) return NULL;
+    if (cam != g_lc.seen) { g_lc.seen = cam; LOG("look: camera at %#llx", (unsigned long long)cam); }
+    uint16_t lk; memcpy(&lk, (uint8_t *)(uintptr_t)cam + g_lc.lock, sizeof lk);
+    return lk & g_lc.mask ? NULL : (uint8_t *)(uintptr_t)cam;
+}
+static pthread_mutex_t g_look_mu = PTHREAD_MUTEX_INITIALIZER;
+static double g_look_acc[2], g_look_last;   // degrees still to turn (right, up); when movement last arrived (monotonic seconds)
+static uint64_t g_look_frame = ~0ull; static double g_look_t;
+static int32_t g_look_axes[2];              // this frame's tilt
+static double look_now(void) { struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); return (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9; }
+static float look_env(const char *k, float def) { const char *e = getenv(k); return e && *e ? (float)atof(e) : def; }
+static float look_rate(void) { static float r = -1; if (r < 0) { r = look_env("DM_LOOK_RATE", DM_GAME_LOOK_RATE); if (r < 0) r = 0; } return r; }
+static float look_dead(void) { static float d = -1; if (d < 0) { d = look_env("DM_LOOK_DEAD", DM_GAME_LOOK_DEAD); if (d < 0 || d >= 1) d = DM_GAME_LOOK_DEAD; } return d; }
+int dm_look_on(void) { return look_rate() > 0; }
+float dm_look_sens(float def) {   // DM_LOOK_SENS (degrees per point) else the front end's default, times DM_LOOK_SCALE (the launcher's Look sensitivity, 1 = 100 %)
+    float s = look_env("DM_LOOK_SENS", def), k = look_env("DM_LOOK_SCALE", 1.0f);
+    return (s > 0 ? s : def) * (k > 0 ? k : 1.0f);
+}
+// Look statistics (log, every 300 frames): while the pointer moves, how many dm_look_add calls each frame received (a front end that delivers input less often than the
+// game reads it, or out of step with it, leaves frames with none and then two), their spacing, and the frame ranges it moved in, to match against [longframe] lines
+static struct { unsigned nev, hist[6], on; uint64_t start, next; double last, gmax, gsum; unsigned ngap; char spans[200]; } g_ls;
+static void look_stats_ev(double t) {   // under g_look_mu
+    if (g_ls.last > 0 && t - g_ls.last <= 0.001) return;   // the same delivery (the iPhone's coalesced touches)
+    g_ls.nev++;
+    if (g_ls.last > 0 && t - g_ls.last < 0.2) { double g = t - g_ls.last; g_ls.gsum += g; g_ls.ngap++; if (g > g_ls.gmax) g_ls.gmax = g; }
+    g_ls.last = t;
+}
+static void look_stats_frame(uint64_t f, double now) {   // under g_look_mu, once per frame
+    int moving = g_ls.nev > 0 || (g_ls.last > 0 && now - g_ls.last < 0.1);
+    if (moving) { g_ls.hist[g_ls.nev < 5 ? g_ls.nev : 5]++; if (!g_ls.on) { g_ls.on = 1; g_ls.start = f; } }
+    if ((!moving || f >= g_ls.next) && g_ls.on) {
+        size_t n = strlen(g_ls.spans); if (n < sizeof g_ls.spans - 24) snprintf(g_ls.spans + n, sizeof g_ls.spans - n, "%s%llu-%llu", n ? " " : "", (unsigned long long)g_ls.start, (unsigned long long)(moving ? f : f - 1));
+        g_ls.on = moving; g_ls.start = f + 1;
+    }
+    g_ls.nev = 0;
+    if (f < g_ls.next) return;
+    unsigned m = 0; for (int i = 0; i < 6; i++) m += g_ls.hist[i];
+    if (m) LOG("look stats up to frame %llu: %u moving frames, movements per frame 0:%u 1:%u 2:%u 3:%u 4:%u 5+:%u, spacing mean %.1f / max %.1f ms; moved in frames %s",
+               (unsigned long long)f, m, g_ls.hist[0], g_ls.hist[1], g_ls.hist[2], g_ls.hist[3], g_ls.hist[4], g_ls.hist[5],
+               g_ls.ngap ? 1e3 * g_ls.gsum / g_ls.ngap : 0.0, 1e3 * g_ls.gmax, g_ls.spans);
+    memset(g_ls.hist, 0, sizeof g_ls.hist); g_ls.gsum = g_ls.gmax = 0; g_ls.ngap = 0; g_ls.spans[0] = 0; g_ls.next = f + 300;
+}
+// Direct look's samples: where the pointer was (the degrees gathered since the start) and when, so each frame turns by the movement up to a steady delay before its read.
+// Front ends deliver input in batches out of step with the game's frames (the iPhone: touches 60 times a second against 30 game frames; most frames got two deliveries, one in
+// ten got one and the next three, a visible stutter). Sampled at a steady delay, every frame gets the movement of its own 1/30 s. The delay is the deliveries' average spacing
+// plus 4 ms (about 21 ms on the iPhone), so the sample after it has nearly always arrived. A movement after a pause counts from one spacing before its sample
+#define LOOK_RING 128
+static struct look_smp { double t, x, y; } g_lr[LOOK_RING];
+static unsigned g_lr_n;                          // samples so far; the newest at (g_lr_n - 1) % LOOK_RING
+static double g_lr_x, g_lr_y, g_lr_ax, g_lr_ay;  // the pointer's position; the position the camera has been turned to
+static double g_lr_recv, g_lr_gap = 1.0 / 60;    // when the last delivery arrived; the deliveries' average spacing
+static void look_pos_at(double T, double *x, double *y) {   // under g_look_mu: the pointer's position at time T
+    unsigned n = g_lr_n < LOOK_RING ? g_lr_n : LOOK_RING;
+    *x = g_lr_x; *y = g_lr_y;
+    for (unsigned i = 1; i <= n; i++) {
+        const struct look_smp *a = &g_lr[(g_lr_n - i) % LOOK_RING];
+        if (a->t > T && i < n) continue;
+        if (i == 1) return;   // the newest sample is before T: all of it
+        const struct look_smp *b = &g_lr[(g_lr_n - i + 1) % LOOK_RING];
+        double t0 = fmax(a->t, b->t - g_lr_gap), k = a->t > T ? 0 : b->t > t0 ? fmin(fmax((T - t0) / (b->t - t0), 0), 1) : 1;
+        *x = a->x + (b->x - a->x) * k; *y = a->y + (b->y - a->y) * k;
+        return;
+    }
+}
+void dm_look_add_at(float right_deg, float up_deg, double age) {
+    if (!dm_look_on()) return;
+    static int inv = -1; if (inv < 0) { const char *e = getenv("DM_LOOK_INVERT_Y"); inv = e && atoi(e) ? 1 : 0; }
+    if (inv) up_deg = -up_deg;
+    pthread_mutex_lock(&g_look_mu);
+    double now = look_now(), t = now - (age > 0 && age < 0.25 ? age : 0);
+    g_look_acc[0] += right_deg; g_look_acc[1] += up_deg; g_look_last = now; look_stats_ev(now);
+    if (now - g_lr_recv > 0.001 && now - g_lr_recv < 0.1) g_lr_gap += (now - g_lr_recv - g_lr_gap) * 0.1;
+    if (now - g_lr_recv > 0.001) g_lr_recv = now;
+    if (g_lr_n && t < g_lr[(g_lr_n - 1) % LOOK_RING].t) t = g_lr[(g_lr_n - 1) % LOOK_RING].t;
+    g_lr_x += right_deg; g_lr_y += up_deg; g_lr[g_lr_n++ % LOOK_RING] = (struct look_smp){ t, g_lr_x, g_lr_y };
+    double n = hypot(g_look_acc[0], g_look_acc[1]), lim = g_look_direct ? 360.0 : look_rate() * LOOK_LAG; if (n > lim) { g_look_acc[0] *= lim / n; g_look_acc[1] *= lim / n; }
+    pthread_mutex_unlock(&g_look_mu);
+}
+void dm_look_add(float right_deg, float up_deg) { dm_look_add_at(right_deg, up_deg, 0); }
+static void look_write(uint8_t *cam, double dx, double dy) {   // turn the camera by dx degrees right and dy up, the pitch kept within its limits
+    float *py = (float *)(cam + g_lc.yaw), *pp = (float *)(cam + g_lc.pitch), a = *(float *)(cam + g_lc.pmax), b = *(float *)(cam + g_lc.pmin);
+    double y = fmod(*py - dx * (M_PI / 180), 2 * M_PI), p = fmin(fmax(*pp - dy * (M_PI / 180), fmin(a, b)), fmax(a, b));
+    if (y < 0) y += 2 * M_PI;
+    dm_guest_write_prepare(py, sizeof *py); *py = (float)y;
+    dm_guest_write_prepare(pp, sizeof *pp); *pp = (float)p;
+}
+// The game's follow camera ("Camera - Auto Follow" in its settings) turns the camera while the player moves sideways, over what direct look writes (#31). It counts as on
+// when the camera turned between two frames of moving sideways that had no stick turn of ours, and stays on for 600 frames after the last such turn: only then does moving
+// sideways take the stick path. With it off, direct look stays on while strafing, which the stick path's steps made stuttery (1.3.4)
+static struct { float yaw; uint64_t frame; int side, stick, left; } g_fw;
+static void look_follow_seen(const uint8_t *cam, uint64_t f, int side) {
+    int was = g_fw.left > 0;
+    double d = fabs(remainder((double)*(const float *)(cam + g_lc.yaw) - g_fw.yaw, 2 * M_PI));
+    if (g_fw.frame + 1 == f && g_fw.side && side && !g_fw.stick && d > 1e-5) g_fw.left = 600;
+    else if (g_fw.left > 0) g_fw.left--;
+    if (was != (g_fw.left > 0)) LOG("look: the game's follow camera %s: moving sideways uses %s", g_fw.left > 0 ? "turns the camera" : "has been still for 600 frames", g_fw.left > 0 ? "the stick path" : "direct look");
+}
+static void look_apply(int32_t *rx, int32_t *ry, int32_t lx) {   // player 1's read: this frame's look (the camera written directly, or a tilt that wins over a resting right stick)
+    if (!dm_look_on()) return;
+    pthread_mutex_lock(&g_look_mu);
+    uint64_t f = dm_guest_frame();
+    if (f != g_look_frame) {   // the first read of a new frame: what this frame turns
+        double now = look_now(), dt = g_look_t > 0 ? now - g_look_t : 1.0 / 60;
+        g_look_frame = f; g_look_t = now; look_stats_frame(f, now);
+        g_look_axes[0] = g_look_axes[1] = 0;
+        static int strafe = -1; if (strafe < 0) { const char *e = getenv("DM_LOOK_STRAFE"); strafe = !(e && *e && !atoi(e)); }
+        uint8_t *cam = look_cam(), *side = NULL, *seen;
+        int sideways = abs(lx) > DM_STICK_MAX / 5;
+        if (cam) look_follow_seen(cam, f, sideways);
+        if (cam && strafe && sideways && g_fw.left > 0) { side = cam; cam = NULL; }   // moving sideways while the follow camera turns it: the stick path, its overflow written (above)
+        g_look_direct = cam != NULL || side != NULL;
+        seen = cam ? cam : side;
+        if (cam) {   // direct: the pointer's movement up to a steady delay before this read (look_pos_at), in this frame's camera update
+            double mx, my; look_pos_at(now - fmin(g_lr_gap + 0.004, 0.04), &mx, &my);
+            double dx = mx - g_lr_ax, dy = my - g_lr_ay; g_lr_ax = mx; g_lr_ay = my; g_look_acc[0] = g_look_acc[1] = 0;
+            if (dx || dy) look_write(cam, dx, dy);
+        } else {
+        g_lr_ax = g_lr_x; g_lr_ay = g_lr_y;   // the stick path takes the movement from g_look_acc
+        dt = fmax(1.0, round(dt * 60.0)) / 60.0;   // the game steps its camera by whole 1/60 s ticks (measured: exactly 1.833 degrees a frame at full tilt at 60 fps, while frames took 16.85 ms)
+        if (dt > 0.05) dt = 0.05;   // and caps the step at 50 ms (measured: 5.5 degrees a frame at full tilt below 20 fps)
+        double ax = g_look_acc[0], ay = g_look_acc[1], need = hypot(ax, ay), cap = look_rate() * dt;
+        if (need > 0 && need >= look_dead() * cap) {
+            double m = fmin(need / cap, 1.0), ux = ax / need, uy = ay / need;
+            g_look_axes[0] = (int32_t)lrint(ux * m * DM_STICK_MAX); g_look_axes[1] = (int32_t)lrint(uy * m * DM_STICK_MAX);
+            g_look_acc[0] -= ux * m * cap; g_look_acc[1] -= uy * m * cap;
+            if (side && m >= 1.0) { look_write(side, g_look_acc[0], g_look_acc[1]); g_look_acc[0] = g_look_acc[1] = 0; }   // faster than a full tilt turns
+        } else if (need > 0 && now - g_look_last > 0.06) {   // the movement has stopped with less than one step left: rounded to the nearest step (one at the deadzone's tilt, or none)
+            if (need >= 0.5 * look_dead() * cap) { double m = look_dead() + 0.005; g_look_axes[0] = (int32_t)lrint(ax / need * m * DM_STICK_MAX); g_look_axes[1] = (int32_t)lrint(ay / need * m * DM_STICK_MAX); }
+            g_look_acc[0] = g_look_acc[1] = 0;
+        }
+        }
+        if (seen) { g_fw.yaw = *(float *)(seen + g_lc.yaw); g_fw.frame = f; g_fw.side = sideways; g_fw.stick = g_look_axes[0] || g_look_axes[1]; }   // the camera as this frame leaves it
+    }
+    if (g_look_axes[0] || g_look_axes[1]) { *rx = g_look_axes[0]; *ry = g_look_axes[1]; }
+    pthread_mutex_unlock(&g_look_mu);
+}
 static void script_set(uint64_t buttons, int32_t lx, int32_t ly, int32_t rx, int32_t ry) {
     uint64_t old = atomic_exchange(&g_sc_btn, buttons); atomic_fetch_or(&g_sc_latch, buttons & ~old); atomic_fetch_or(&g_peek_latch, buttons & ~old); atomic_store(&g_sc_axes, pack(lx, ly, rx, ry));
     shake_note();
@@ -265,6 +433,13 @@ static void *ctl_main(void *arg) {
                                                      if (!strncmp(line + 4, "DM_IMU_", 7) || !strcmp(line + 4, "DM_SIX_DELAY")) { void imu_env_reread(void); imu_env_reread(); } } continue; }   // the IMU's switches are read again
                 if (!strncmp(line, "texdump ", 8)) { void dm_gfx_texdump_next(const char *path); dm_gfx_texdump_next(line + 8); LOG("DM_CTL: colour targets of the next frame → %s (as DM_NVN_TEXDUMP)", line + 8); continue; }
                 if (!strncmp(line, "passdump ", 9)) { void dm_gfx_passdump_next(long n); dm_gfx_passdump_next(atol(line + 9)); LOG("DM_CTL: passes of the next %ld frames (as DM_NVN_PASSDUMP)", atol(line + 9)); continue; }
+                if (!strncmp(line, "look ", 5)) {   // pointer look as a front end feeds it: "look <right degrees> <up degrees> [seconds=0.3]", in steps every 4 ms
+                    float dx, dy, s = 0.3f; if (sscanf(line + 5, "%f %f %f", &dx, &dy, &s) < 2) { LOG("[RED] DM_CTL look wants right up [seconds]"); continue; }
+                    int n = (int)(s / 0.004f); if (n < 1) n = 1;
+                    LOG("DM_CTL: look %.2f right %.2f up over %.2f s%s", dx, dy, s, dm_look_on() ? "" : " (look is off: the game profile has no look_rate)");
+                    for (int i = 0; i < n; i++) { dm_look_add(dx / (float)n, dy / (float)n); usleep((useconds_t)(s * 1e6f / (float)n)); }
+                    continue;
+                }
                 if (!strncmp(line, "drag ", 5)) {   // one finger, a step every 8 ms
                     float x0, y0, x1, y1, s = 0.3f; if (sscanf(line + 5, "%f %f %f %f %f", &x0, &y0, &x1, &y1, &s) < 4) { LOG("[RED] DM_CTL drag wants x0 y0 x1 y1 [seconds]"); continue; }
                     int n = (int)(s / 0.008f); if (n < 2) n = 2;
@@ -658,6 +833,7 @@ static void fill(NpadState *s, uint32_t id, uint32_t style) {
         if (atomic_load_explicit(&g_rec_on, memory_order_relaxed)) rec_read((b & 0xffffull) | ((atomic_load(&g_btn) | atomic_load(&g_pad_btn[0])) & DM_BTN_SHAKE), a);
         b |= atomic_load(&g_sc_btn) | atomic_exchange(&g_sc_latch, 0);
         uint64_t c = atomic_load(&g_sc_axes); for (int i = 0; i < 4; i++) a[i] = pick(a[i], ax(c, i));
+        if (abs(a[2]) < DM_STICK_MAX / 5 && abs(a[3]) < DM_STICK_MAX / 5) look_apply(&a[2], &a[3], a[0]);   // pointer look, unless a right stick is in use
     }
     if (atomic_load(&g_hold)) { b = 0; memset(a, 0, sizeof a); }   // an applet is in front: the game reads nothing (the latches were taken all the same)
     b &= 0xffffull;

@@ -1,4 +1,7 @@
-// Memory accounting: when DM_MEMSTAT=<tsv path> is set, one line is logged per second (common to Mac / iOS).
+// Memory accounting: when DM_MEMSTAT=<tsv path>[,<N>] is set, one line is logged per second (common to Mac / iOS).
+//   ,<N>: the region walk below runs every N seconds (default 1); the lines between repeat its last class columns, while the totals (task_info) stay per second.
+//   The walk is the costly part: vm_region_recurse_64 over the whole address space, about 9.4 M cycles a frame on another core in OoT (Time Profiler), every second;
+//   a harness that reads only the footprint each second (a memory guard) and the classes now and then sets N (route4: 30).
 //   Totals: phys_footprint (task_info TASK_VM_INFO, which the iOS memory limit is based on), os_proc_available_memory (iOS only), Metal currentAllocatedSize
 //   Breakdown: walk this process's VM regions (vm_region_recurse_64, VM_REGION_SUBMAP_INFO_64), classify by region, and for each class record
 //         virtual = address space size (reserved-only counts too), resident = pages_resident, charged = dirty pages + compressed/swapped-out pages, deduplicated by VM object (≈ the part that goes into phys_footprint)
@@ -101,17 +104,18 @@ void dm_vm_census(FILE *f) {
     fputc('\n', f);
 }
 
-static void sample(FILE *f, double t, id<MTLDevice> dev) {
+static void sample(FILE *f, double t, id<MTLDevice> dev, int walk) {
     task_vm_info_data_t vi; mach_msg_type_number_t n = TASK_VM_INFO_COUNT;
     uint64_t fp = task_info(mach_task_self(), TASK_VM_INFO, (task_info_t)&vi, &n) == KERN_SUCCESS ? vi.phys_footprint : 0;
     uint64_t avail = 0;
 #if TARGET_OS_IPHONE
     avail = os_proc_available_memory();
 #endif
-    uint64_t virt[NC] = {0}, res[NC] = {0}, bill[NC] = {0};
+    static uint64_t virt[NC], res[NC], bill[NC];   // kept between walks: a line without a walk repeats the last one's classes
+    if (walk) { memset(virt, 0, sizeof virt); memset(res, 0, sizeof res); memset(bill, 0, sizeof bill); }
     static uint32_t seen[1 << 16]; static uint32_t gen; gen++; if (!gen) { memset(seen, 0, sizeof seen); gen = 1; }   // Objects already counted in this sample (open addressing)
     vm_address_t a = 0; vm_size_t sz; natural_t depth = 0; vm_size_t pg = vm_page_size;
-    for (;;) {
+    for (; walk;) {
         vm_region_submap_info_data_64_t in; mach_msg_type_number_t cnt = VM_REGION_SUBMAP_INFO_COUNT_64;
         if (vm_region_recurse_64(mach_task_self(), &a, &sz, &depth, (vm_region_recurse_info_t)&in, &cnt) != KERN_SUCCESS) break;
         if (in.is_submap) { depth++; continue; }
@@ -135,9 +139,12 @@ static void sample(FILE *f, double t, id<MTLDevice> dev) {
     fflush(f);
 }
 
+static int g_walk_every = 1;   // DM_MEMSTAT's ,<N>
 static void *memstat_thread(void *p) {
+    pthread_setname_np("memstat");   // named, so DM_THRCPU and a profile show its cost
     FILE *f = fopen((const char *)p, "w");
     if (!f) { LOG("memstat: cannot open %s", (const char *)p); return NULL; }
+    LOG("memstat: regions every %d s", g_walk_every);   // also the mark a harness finds in the binary before it passes ,<N> (an older host would open "<tsv>,<N>")
     fprintf(f, "# unit MiB; kernel accounting internal / compressed / graphics ledger / headroom to the limit; class columns = virtual/resident/charged (deduplicated per object); charged total = Σ private charged; unattributed = phys_footprint − charged total\nseconds\tphys_footprint\tavailable\tmetal_alloc\tinternal\tcompressed\tgraphics\theadroom");
     for (int c = 0; c < NC; c++) fprintf(f, "\t%s", k_cls[c]);
     fprintf(f, "\tcharged total\tunattributed\n");
@@ -145,7 +152,7 @@ static void *memstat_thread(void *p) {
     uint64_t t0 = now_ns();
     const char *ds = getenv("DM_MEMSTAT_DUMP"); int dump_at = ds ? atoi(ds) : -1;
     char dp[1100]; snprintf(dp, sizeof dp, "%s.regions", (const char *)p);
-    for (int sec = 0;; sec++) { sample(f, (now_ns() - t0) / 1e9, dev); if (sec == dump_at) dump_regions(dp); sleep(1); }
+    for (int sec = 0;; sec++) { sample(f, (now_ns() - t0) / 1e9, dev, sec % g_walk_every == 0); if (sec == dump_at) dump_regions(dp); sleep(1); }
     return NULL;
 }
 
@@ -153,6 +160,8 @@ __attribute__((constructor)) static void memstat_start(void) {
     const char *p = getenv("DM_MEMSTAT");
     if (!p || !*p) return;
     char *path = strdup(p);
+    char *cm = strrchr(path, ',');
+    if (cm && cm[1] >= '0' && cm[1] <= '9') { int n = atoi(cm + 1); if (n >= 1) g_walk_every = n; *cm = 0; }   // <tsv>,<N>: walk the regions every N seconds
 #if TARGET_OS_IPHONE
     if (*p != '/') { size_t n = strlen(getenv("HOME")) + strlen(p) + 16; path = malloc(n); snprintf(path, n, "%s/Documents/%s", getenv("HOME"), p); }   // Relative name → the container's Documents (the container path is not known before launch)
 #endif

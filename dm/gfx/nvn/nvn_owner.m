@@ -195,8 +195,20 @@ void own_alias_put_locked(const alias_key *k, id o, uint64_t seen) { alias_put(k
 int own_alias_del_locked(const alias_key *k) { return alias_del(k); }
 void own_alias_mark_gpu_written(const alias_key *k) {
     if (!k || !k->pool) return;
+    nvn_texlayout L; nvn_tex_layout(&k->d, &L);
+    if (!L.size) return;
+    int64_t lo = k->off, hi = lo + (int64_t)L.size;
     pthread_mutex_lock(&g_smu);
-    if (nvn_hm_get(&g_alias, k)) nvn_hm_put(&g_alias_dirty, k, (void *)(uintptr_t)1);
+    // A different NVN description can overlap these bytes. Mark every shared alias
+    // whose cached Metal contents a later lookup could otherwise rebuild from stale pool data.
+    for (int64_t c = lo >> ALIAS_CELL; c <= (hi - 1) >> ALIAS_CELL; c++) {
+        uint64_t ck[2] = {k->pool, (uint64_t)c}; const alias_cell *v = nvn_hm_get(&g_alias_cells, ck);
+        for (uint32_t i = 0; v && i < v->n; i++) {
+            const alias_key *a = &v->e[i].k;
+            if (c != MAX(lo >> ALIAS_CELL, a->off >> ALIAS_CELL) || a->off >= hi || v->e[i].end <= lo || !nvn_hm_get(&g_alias, a)) continue;
+            nvn_hm_put(&g_alias_dirty, a, (void *)(uintptr_t)1);
+        }
+    }
     pthread_mutex_unlock(&g_smu);
 }
 // On memory pool Finalize, the textures built on that pool leave the sharing table (the keys collected first, then deleted: deletion shifts entries back). The sharing table used not to

@@ -489,13 +489,20 @@ static void release_fallback(void) {
     fail_mmap = 0;
 }
 // A heap given back reads 0 when it grows again: a fresh mapping in anonymous memory, and SetHeapSize's zeroing with the guest in files (DM_GUEST_FILE), where the pages keep their bytes
-// The rule that puts the guest in files: the switch when it is set, otherwise a pool over a known room to the memory limit
+// The rule that puts the guest in files: the switch when it is set, otherwise a pool and the host's margin over a known room to the memory limit
 static void file_rule(void) {
-    const uint64_t G = 1ull << 30, pool9 = 9 * G, pool3 = 0xCD500000;
-    assert(guest_file_wanted(NULL, pool9, 8 * G) && guest_file_wanted("", pool9, 6 * G));   // Mario Kart World's pool on an 8 and a 6 GiB limit
-    assert(!guest_file_wanted(NULL, pool9, 12 * G) && !guest_file_wanted(NULL, pool3, 6 * G));   // it fits an iPad's 12 GiB; a Switch game's pool fits 6
-    assert(!guest_file_wanted(NULL, pool9, 0));   // no limit known: the Mac
-    assert(!guest_file_wanted("0", pool9, 8 * G) && guest_file_wanted("1", pool3, 12 * G) && guest_file_wanted("1", pool3, 0));
+    unsetenv("DM_GUEST_FILE_HOST");
+    const uint64_t G = 1ull << 30, M = 1ull << 20, pool9 = 9 * G, pool3 = 0xCD500000, h9 = guest_host_margin(pool9), h3 = guest_host_margin(pool3);
+    assert(h9 == pool9 / 2 && h3 == pool3 / 2);   // half the pool
+    assert(guest_file_wanted(NULL, pool9, h9, 8 * G) && guest_file_wanted("", pool9, h9, 6 * G));   // Mario Kart World's pool on an 8 and a 6 GiB limit
+    assert(guest_file_wanted(NULL, pool9, h9, 11 * G + 993 * M));   // and on the iPad of issue #1184, where the pool alone fitted and the host's memory did not
+    assert(!guest_file_wanted(NULL, pool9, 0, 11 * G + 993 * M));   // the rule before the margin
+    assert(!guest_file_wanted(NULL, pool3, h3, 7 * G + 993 * M) && !guest_file_wanted(NULL, pool3, h3, 5 * G + 819 * M));   // a Switch game's pool stays anonymous with 8 and 6 GiB limits
+    assert(!guest_file_wanted(NULL, pool9, h9, 0));   // no limit known: the Mac
+    assert(!guest_file_wanted("0", pool9, h9, 8 * G) && guest_file_wanted("1", pool3, h3, 12 * G) && guest_file_wanted("1", pool3, h3, 0));
+    setenv("DM_GUEST_FILE_HOST", "1G", 1); assert(guest_host_margin(pool9) == G);
+    setenv("DM_GUEST_FILE_HOST", "0", 1); assert(!guest_host_margin(pool9));
+    unsetenv("DM_GUEST_FILE_HOST");
 }
 // With the guest in files, what the game gives back in the alias region is punched out by the sweep once it has stayed given back over a whole sweep interval: a page mapped again in between keeps
 // its blocks, the rest give theirs back and read 0 when mapped again

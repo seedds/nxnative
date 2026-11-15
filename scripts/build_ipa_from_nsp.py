@@ -2306,12 +2306,28 @@ def split_shaders(py, repo, roms, mains, pkg, env, logs, g, provisional=False, o
     return key and package_key(pkg)
 
 
-def shader_keys(g):   # the base shaders dmsh_build.py builds, shared by progress and the stale-library event
+def map_keys(path):   # the base shaders of a shader_map.tsv
     keys = set()
-    for ln in g.table('shader_map.tsv').read_text(errors='replace').splitlines():
+    for ln in Path(path).read_text(errors='replace').splitlines():
         c = ln.rstrip('\n').split('\t')
         if len(c) > 4 and c[0].endswith('.bin'): keys.add(c[3])
     return keys
+
+
+def shader_keys(g):   # the base shaders dmsh_build.py builds, shared by progress and the stale-library event
+    return map_keys(g.table('shader_map.tsv'))
+
+
+def uncovered_shaders(py, repo, d, pkg, env, logs, g):
+    """The shaders of a registered version outside the profile's shader_versions (d: its extracted folder) that the profile's map lacks: split alone with the same splitter, compared by key.
+    Empty: the profile's tables serve it (Hades II's update is a subset of v0's). Else the build takes a shader-only derived profile (BotW 1.6.0 against 1.9.0's tables).
+    shortcut: splits again on every pack of such a version (not keyed for reuse); key it like split_shaders when such packs become frequent"""
+    tmp = pkg.with_name(pkg.name + '.cover'); rmtree(tmp); (tmp / 'tables').mkdir(parents=True)
+    names = ('shader_map.tsv', 'shader_facts.tsv', 'shader_pairs.tsv', 'pso_pairs.tsv')
+    run([py, repo / 'dm/gfx/tools/shader_split.py', str(rfs.source(d)), str(d / 'ExeFS/main'), tmp / 'pkg'] + [tmp / 'tables' / n for n in names], logs / 'shader_cover.log', env=env)
+    missing = map_keys(tmp / 'tables/shader_map.tsv') - shader_keys(g)
+    rmtree(tmp)
+    return missing
 
 
 SHADER_MISSING = re.compile(r'\[RED\] (?:shader ([0-9a-f]{16}) \([^)]*\) failed to load:|failed to load shader ([0-9a-f]{16})_b:)')   # what the host logs for a shader its library lacks (nvn_mtl.m)
@@ -3400,6 +3416,10 @@ def main(args=None):
             g = gamemod.load(g.id)
             say(f'{derived}: using a shader-only derived profile at {g.dir}; registered module fixes are preserved')
             return g
+        # a registered build whose files the tables were not made from: the profile serves it only when its map holds every shader of the packed version
+        if not own and pkg_ver not in sv and (missing := uncovered_shaders(py, repo, game, sh / 'pkg', dict(env, **oodle()) if oodle else env, logs, g)):
+            derive_shader_tables(f'{len(missing):,} shaders of {pkg_ver} are not in the shader map of game profile {g.id} (made from {", ".join(sv)})')
+            own, sv = True, [pkg_ver]
         derive_dlc = (lambda: derive_shader_tables('the installed DLC shader content differs from the registered tables')) if not own else None
         derive_compute = (lambda: derive_shader_tables('the reader decoded additional compute kernels from this registered build')) if not own else None
         pkey = split_shaders(py, repo, [rfs.source(dirs[v]) for v in sv], [dirs[v] / 'ExeFS/main' for v in sv], sh / 'pkg', env, logs, g, own, oodle, dlc_roms, derive_dlc, derive_compute)

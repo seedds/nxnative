@@ -93,23 +93,36 @@ def read_prefs(bundle_id):
     return {k: v for k, v in sorted(d.items()) if k.startswith('launcher.') or k == 'dataFolder'}
 
 
+def app_title_id(app):
+    """the DMTitleID of a Mac app the NSP script packed, or None"""
+    try: plist = plistlib.loads((app / 'Contents/Info.plist').read_bytes())
+    except Exception: return None
+    tid = str(plist.get('DMTitleID', '')).upper()
+    return tid if re.fullmatch(r'[0-9A-F]{16}', tid) else None
+
+
+def nsp_apps(nsp, tid):
+    """the Mac apps directly in the NSP folder (where the NSP script writes one) that carry this title ID"""
+    return sorted(d for d in nsp.iterdir() if d.suffix == '.app' and d.is_dir() and not d.is_symlink() and app_title_id(d) == tid)
+
+
 def resolve(target, base=None):
-    """the target as {title_id, app, nsp, build}; None when it is none of a title ID, an .app or an NSP folder"""
-    t: dict = {'title_id': None, 'app': None, 'nsp': None, 'build': None}
+    """the target as {title_id, app, nsp, build, nsp_apps}; None when it is none of a title ID, an .app or an NSP folder.
+    nsp_apps (an NSP folder only): its Mac apps of the title, whose stamps the report takes when there is exactly one."""
+    t: dict = {'title_id': None, 'app': None, 'nsp': None, 'build': None, 'nsp_apps': None}
     if re.fullmatch(r'(?i)[0-9a-f]{16}', target):
         t['title_id'] = target.upper(); return t
     p = Path(target).expanduser()
     if p.is_dir() and p.suffix == '.app':
-        try: plist = plistlib.loads((p / 'Contents/Info.plist').read_bytes())
-        except Exception: return None
-        tid = str(plist.get('DMTitleID', '')).upper()
-        if not re.fullmatch(r'[0-9A-F]{16}', tid): return None
+        tid = app_title_id(p)
+        if not tid: return None
         t.update(title_id=tid, app=p); return t
     if p.is_dir():
         builds = sorted(d for d in p.iterdir() if d.is_dir() and re.fullmatch(r'(?i)[0-9a-f]{16}_build', d.name))
         if p.name.endswith('_build') and re.fullmatch(r'(?i)[0-9a-f]{16}_build', p.name): builds, p = [p], p.parent
         if len(builds) != 1: return None
-        t.update(title_id=builds[0].name[:16].upper(), nsp=p, build=builds[0]); return t
+        tid = builds[0].name[:16].upper()
+        t.update(title_id=tid, nsp=p, build=builds[0], nsp_apps=nsp_apps(p, tid)); return t
     return None
 
 
@@ -193,6 +206,17 @@ def crash_reports(home, names, now=None):
     return sorted(items, key=lambda p: p.stat().st_mtime, reverse=True)[:CRASH_MAX]
 
 
+def info_plist(app, b):
+    try: return plistlib.loads((app / 'Contents/Info.plist').read_bytes())
+    except Exception: b.notes.append(f'Info.plist of {app.name}: cannot be read'); return {}
+
+
+def app_beside_note(tid, apps):
+    if len(apps) == 1: return f'Mac app in the NSP folder: {apps[0].name} (commit and shader chain from its Info.plist)'
+    if not apps: return f'Mac app in the NSP folder: none with title ID {tid}; commit and shader chain not recorded'
+    return f'Mac app in the NSP folder: {len(apps)} with title ID {tid} ({", ".join(a.name for a in apps)}); commit and shader chain left unknown, not guessed'
+
+
 def collect(target, ios_log=None, home=None, total_cap=TOTAL_CAP, file_cap=FILE_CAP):
     """the bundle for target: (Bundle, report.md text)"""
     home = home or str(Path.home())
@@ -200,11 +224,12 @@ def collect(target, ios_log=None, home=None, total_cap=TOTAL_CAP, file_cap=FILE_
     # report.md contains settings and preferences too. Reserve its maximum size before admitting logs, then account for its actual bytes below.
     report_cap = min(file_cap, total_cap)
     b.used = report_cap
-    tid, app, build = target['title_id'], target['app'], target['build']
-    plist = {}
-    if app:
-        try: plist = plistlib.loads((app / 'Contents/Info.plist').read_bytes())
-        except Exception: b.notes.append('Info.plist: cannot be read')
+    tid, app, build, beside = target['title_id'], target['app'], target['build'], target.get('nsp_apps')
+    if beside is not None: b.notes.append(app_beside_note(tid, beside))
+    # An NSP folder's one app of the title gives only its stamps: a build in that folder can be run without it, so its name, version and settings stay out.
+    stamped = beside[0] if beside and len(beside) == 1 else app
+    plist = info_plist(app, b) if app else {}
+    stamps = info_plist(stamped, b) if stamped and stamped != app else plist
     bundle_id = plist.get('CFBundleIdentifier') or f'org.nxnative.{tid.lower()}'
     pname, builds = profile_info(tid, build)
     name = plist.get('CFBundleDisplayName') or plist.get('CFBundleName') or pname or 'unknown'
@@ -235,13 +260,16 @@ def collect(target, ios_log=None, home=None, total_cap=TOTAL_CAP, file_cap=FILE_
     prefs = read_prefs(bundle_id)
     pl = [f'{k} = {v}' for k, v in prefs.items()]
     dm_env = [f'{k}={v}' for k, v in sorted(os.environ.items()) if k.startswith('DM_') and not SECRET_NAME.search(k)]
-    bdirs = shader_dirs(app, build)
-    source = 'app' if app else 'build' if build else 'target'
-    commit = plist.get('DMCommit') or f'unknown (not recorded by the {source})'
+    bdirs = shader_dirs(stamped, build)
+    source = 'app' if stamped else 'build' if build else 'target'
+    # An app found beside the build is named with its stamps: a later build in that folder need not have packed it again.
+    origin = f' (recorded by {stamped.name} in the NSP folder)' if stamped and stamped != app else ''
+    commit = stamps['DMCommit'] + origin if stamps.get('DMCommit') else f'unknown (not recorded by the {source})'
     # The collector's checkout need not be the checkout that built this app. A packaged app's sole b-<V> directory is its actual library chain.
-    chain = plist.get('DMChain') or (Path(bdirs[0]).name[2:] if app and len(bdirs) == 1 else None)
-    chain_text = chain or f'unknown (not recorded by the {source})'
-    if bdirs: chain_text += '\n\nAvailable shader folder(s): ' + ', '.join(bdirs)
+    chain = stamps.get('DMChain') or (Path(bdirs[0]).name[2:] if stamped and len(bdirs) == 1 else None)
+    chain_text = chain + origin if chain else f'unknown (not recorded by the {source})'
+    listed = bdirs + (shader_dirs(None, build) if stamped and build else [])   # the app's libraries, then the build's
+    if listed: chain_text += '\n\nAvailable shader folder(s): ' + ', '.join(listed)
     collector = f'Collector checkout: {git_state() or "unknown"}; shader chain: {chain_version() or "unknown"} (collector only; does not identify the build that ran).'
     dev = device()
 

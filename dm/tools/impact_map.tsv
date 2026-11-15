@@ -26,6 +26,7 @@ scripts/pack_nup.py	*:*	NUP packing: games built from NUP containers
 scripts/bench.py	-	the benchmark
 scripts/push_romfs.sh	*:*	RomFS transfer: every game's iOS build
 scripts/regress.py	-	the regression harness
+scripts/bug_report.py	-	the bug report collector (reads logs and stamps, runs no game)
 dm/tools/usage.py	-	the usage manifests
 dm/tools/il2cpp_sym.py	-	read-only IL2CPP address analysis; not part of a game build or the host
 dm/tools/impact_map.tsv	-	this map

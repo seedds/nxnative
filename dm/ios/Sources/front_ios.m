@@ -8,6 +8,7 @@
 #import <Metal/Metal.h>
 #import <AVFAudio/AVFAudio.h>
 #include <errno.h>
+#include <stdatomic.h>   // g_screen_hz: noted on the main thread, read from the render thread (front_screen_max_fps)
 #include "front.h"
 #include "hle.h"
 #include "dm.h"
@@ -316,7 +317,7 @@ static void front_ios_power_watch(void) {
         (void)n; LOG("front end: thermal state → %d (%.0f s after launch)", dm_thermal_now(), (now_ns() - g_t0_ns) / 1e9); }];
     [NSNotificationCenter.defaultCenter addObserverForName:NSProcessInfoPowerStateDidChangeNotification object:nil queue:nil usingBlock:^(NSNotification *n) {
         (void)n; LOG("front end: Low Power Mode → %s (%.0f s after launch)", dm_low_power_now() ? "on" : "off", (now_ns() - g_t0_ns) / 1e9); }];
-    LOG("front end: thermal state %d, brightness %.2f, Low Power Mode %s", dm_thermal_now(), g_brightness, dm_low_power_now() ? "on" : "off");
+    LOG("front end: thermal state %d, brightness %.2f, Low Power Mode %s, screen %d Hz", dm_thermal_now(), g_brightness, dm_low_power_now() ? "on" : "off", front_screen_max_fps());
 }
 
 // Frame-rate counter: the frames put on screen in the last second (nvn_mtl.m counts them for NVN and for the Vulkan layer alike; frames the display link merged away are not counted).
@@ -372,6 +373,23 @@ int front_display_pixels(int *w, int *h) {   // the screen in pixels, landscape 
     CGRect b = UIScreen.mainScreen.nativeBounds; int a = (int)b.size.width, c = (int)b.size.height;
     if (a <= 0 || c <= 0) return 0;
     *w = a > c ? a : c; *h = a > c ? c : a; return 1;
+}
+// The screen's highest frame rate (front.h). The 120 fps path needs 120 here: hle_nvn.c's fps_high caps at 60 on a screen below 120 Hz, and the display link
+// follows it (nvn_mtl.m link_range). The connected scenes' screens are read on the main thread and kept (UIScreen.main is deprecated in iOS 26, and a phone's or
+// an iPad's screen keeps its rate); a call from the render thread that comes first reads 60, the link's own default, until the boot line has noted it. With a TV
+// attached the picture is on the TV: 1080p60, whatever the phone's or iPad's own screen can do.
+static _Atomic int g_screen_hz;
+int front_screen_max_fps(void) {
+    if (g_tv) return 60;
+    int hz = atomic_load_explicit(&g_screen_hz, memory_order_relaxed);
+    if (hz || !NSThread.isMainThread) return hz ? hz : 60;
+    for (UIScene *s in UIApplication.sharedApplication.connectedScenes)
+        if ([s isKindOfClass:UIWindowScene.class]) {
+            int v = (int)((UIWindowScene *)s).screen.maximumFramesPerSecond;
+            if (v > hz) hz = v;
+        }
+    atomic_store_explicit(&g_screen_hz, hz, memory_order_relaxed);
+    return hz ? hz : 60;
 }
 // Offline HTML pages (web_apple.m): the page's view goes over the game view and under the gamepad, which lets touches on no control through to it while the page is
 // shown (DmGamepad.m hitTest); the page takes them as a click on what they land on, and the gamepad and controllers drive it as on the Switch

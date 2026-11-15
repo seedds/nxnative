@@ -1,6 +1,27 @@
 // One launcher setting as a row (a menu, a slider with its percentage, a toggle), shared by the iOS launcher (Launcher.swift) and the Mac app's settings window (dm/mac/Launcher.swift).
 // A row whose setting is fixed by an env file or by the launch environment is shown but disabled.
 import SwiftUI
+#if canImport(UIKit)
+import UIKit
+#endif
+
+// The highest of the connected screens' frame rates: what the launcher may offer. An iPhone or iPad that is not ProMotion shows 60.
+// Read from the scenes (UIScreen.main is deprecated in iOS 26); the settings screen and the in-game menu are on the main thread.
+#if canImport(UIKit)
+private func screenMaxFPS() -> Int {
+    let hz = UIApplication.shared.connectedScenes.compactMap { ($0 as? UIWindowScene)?.screen.maximumFramesPerSecond }.max()
+    return hz ?? 60
+}
+#else
+private func screenMaxFPS() -> Int { 120 }   // the Mac window keeps offering it: the display can change under the window
+#endif
+
+// A choice the screen cannot show is not offered (120 fps needs a 120 Hz screen; the host holds 60 below that, hle_nvn.c fps_high).
+// A saved value stays listed, so a choice made on another screen is never dropped from the menu.
+func offeredOptions(_ s: Setting, current: String?) -> [[String]] {
+    let limit = screenMaxFPS()
+    return (s.options ?? []).filter { $0[0] != "120" || $0[0] == current || limit >= 120 }
+}
 
 extension LauncherModel {
     func binding(_ s: Setting) -> Binding<String> { Binding(get: { self.values[s.env] ?? s.def }, set: { self.values[s.env] = $0 }) }
@@ -33,7 +54,7 @@ struct SettingRow: View {
             switch s.kind {
             case "choice":
                 Picker(selection: m.binding(s)) {
-                    ForEach(s.options ?? [], id: \.[0]) { Text($0[1]).tag($0[0]) }
+                    ForEach(offeredOptions(s, current: m.values[s.env]), id: \.[0]) { Text($0[1]).tag($0[0]) }
                 } label: {
                     settingLabel
                 }

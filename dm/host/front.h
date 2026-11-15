@@ -13,7 +13,8 @@ static inline void front_hud_env(void) {
 void front_run(void (*guest)(void));
 // The CAMetalLayer the graphics backend presents frames to (NULL when there is no window)
 void *front_metal_layer(void);
-// The highest refresh rate of the window's screen in Hz, 0 = not known (Mac front_mac.m; none on iOS, whose screens run at multiples of 60 Hz). Any thread
+// The highest refresh rate of the screen the picture is on, in Hz (front_mac.m; front_ios.m answers the game view's screen, so a ProMotion iPad or iPhone says 120 and
+// a 60 Hz one says 60). 0 = not known (no front end: the graphics unit tests). hle_nvn.c's 120 fps cap reads it (high_cap_tick) and nvn_mtl.m's display link range. Any thread
 int front_screen_max_fps(void);
 // The pixel size of the display the game is shown on: on the Mac the window's screen in its current mode (the main display before the window is up) (a scaled Retina mode's pixels), an iPhone's or iPad's screen (nativeBounds).
 // Returns 0 and leaves w, h alone when not known (no front end: graphics unit tests). Any thread

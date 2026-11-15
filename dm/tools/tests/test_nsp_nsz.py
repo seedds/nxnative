@@ -166,7 +166,7 @@ class Untagged(unittest.TestCase):   # a file that names no title: asked for its
         app, fam = nsp.scan_nsps(self.tmp, lambda p: asked.append(p) or APP)
         self.assertEqual((app, fam['base'], fam['updates'], fam['dlc'], asked), (APP, xci, [], [], [xci]))
         self.assertTrue(any('its own metadata says' in m for m in self.said))
-        with self.assertRaisesRegex(nsp.BuildError, r'nx_extract read none from them'): nsp.scan_nsps(self.tmp, lambda p: None)   # the wrong keys, a damaged file
+        with self.assertRaisesRegex(nsp.BuildError, r'nx_extract read no base game.s title from them'): nsp.scan_nsps(self.tmp, lambda p: None)   # the wrong keys, a damaged file
         with self.assertRaisesRegex(nsp.BuildError, r'no NSP with a readable title ID'): nsp.scan_nsps(self.tmp, lambda p: APP | 0x800)   # an update alone is no base game
 
     def test_tagged_files_are_not_asked(self):

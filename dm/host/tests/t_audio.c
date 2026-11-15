@@ -95,7 +95,33 @@ static int test_output_lifetime(void) {
     printf("AudioOut fields and lifetime (%s): %d guarded open / close / unmap / resume cycles, no consumer left\n", real_audio() ? "real output" : "silent sink", CYCLES);
     return 0;
 }
+// DM_AUDIO_DUMP: each output's blocks go to a file of their own (<file> for #0, <file>.<N> after it). One file for all interleaved Divinity's renderer blocks with its Wwise mix
+static int test_dump_per_output(void) {
+    char path[512]; snprintf(path, sizeof path, "%s/t_audio_dump.raw", getenv("TMPDIR") ? getenv("TMPDIR") : "/tmp");
+    setenv("DM_AUDIO_DUMP", path, 1);
+    char o1[64], o2[64], ev[64]; uint8_t prm[16]; gbuf b1[2], b2[2]; static int16_t p1[2][480], p2[2][480];
+    for (int i = 0; i < 2; i++) for (int j = 0; j < 480; j++) { p1[i][j] = 1; p2[i][j] = 2; }
+    h_au_InitParam(prm);
+    if (h_au_Open(o1, ev, NULL, prm) || h_au_Open(o2, ev, NULL, prm)) return 1;
+    int id1 = ao(o1)->id, id2 = ao(o2)->id;
+    for (int i = 0; i < 2; i++) {   // appended in turn, as Divinity's two outputs were
+        h_au_SetBuf(&b1[i], p1[i], sizeof p1[i], sizeof p1[i]); h_au_SetBuf(&b2[i], p2[i], sizeof p2[i], sizeof p2[i]);
+        if (!h_au_Append(o1, &b1[i]) || !h_au_Append(o2, &b2[i])) return 1;
+    }
+    h_au_Close(o1); h_au_Close(o2); unsetenv("DM_AUDIO_DUMP");
+    int ok = 1;
+    for (int k = 0; k < 2; k++) {
+        char p[600]; int id = k ? id2 : id1;
+        if (id) snprintf(p, sizeof p, "%s.%d", path, id); else snprintf(p, sizeof p, "%s", path);
+        FILE *f = fopen(p, "rb"); int16_t v[2000]; size_t n = f ? fread(v, 2, 2000, f) : 0; if (f) fclose(f); unlink(p);
+        int same = n == 960; for (size_t i = 0; i < n; i++) same &= v[i] == (k ? 2 : 1);
+        if (!same) { printf("FAIL DM_AUDIO_DUMP: output #%d's file %s holds %zu samples, not its own 960\n", id, p, n); ok = 0; }
+    }
+    if (ok) printf("DM_AUDIO_DUMP: outputs #%d and #%d each in a file of their own\n", id1, id2);
+    return !ok;
+}
 int main(void) {
+    if (test_dump_per_output()) return 1;
     if (test_surround_output() || test_output_lifetime()) return 1;
     char out[64], ev[64]; uint8_t prm[16]; gbuf b[3]; static int16_t pcm[3][4800 * 2];
     h_au_InitParam(prm);

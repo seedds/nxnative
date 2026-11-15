@@ -16618,11 +16618,14 @@ static MTLViewport present_viewport(double pw, double ph, double dw, double dh) 
 // The shape the picture is shown in, whatever part of the texture it comes from. The Switch's compositor stretches a buffer's crop to the layer, so a crop only picks texels: Super
 // Mario Galaxy 2 draws its storybook cutscenes anamorphically into 1200x960 of a 1920x1080 swapchain (800x640 handheld). The layer fills the display, 16:9, unless the game sized it
 // (vi::CreateLayer with a size, hle_vi.c). A screen taller than 16:9 (DM_SCREEN_ASPECT, loader.c) counts only for a texture of its shape: only builds with screen-shape stubs render it.
-static _Atomic uint64_t g_layer_shape, g_screen_shape;   // w | h << 32, 0 = none
+static _Atomic uint64_t g_layer_shape, g_screen_shape, g_center_crop_shape;   // w | h << 32, 0 = none
 void mtl_present_layer(uint32_t w, uint32_t h) { atomic_store(&g_layer_shape, (uint64_t)w | (uint64_t)h << 32); }
 void mtl_present_screen(uint32_t w, uint32_t h) { atomic_store(&g_screen_shape, (uint64_t)w | (uint64_t)h << 32); }
+void mtl_present_center_crop(uint32_t w, uint32_t h) { atomic_store(&g_center_crop_shape, w && h ? (uint64_t)w | (uint64_t)h << 32 : 0); }
 static void present_shape(id<MTLTexture> src, double *w, double *h) {
-    uint64_t v = atomic_load(&g_screen_shape);
+    uint64_t v = atomic_load(&g_center_crop_shape);
+    if(v) { *w=(uint32_t)v; *h=v>>32; return; }
+    v = atomic_load(&g_screen_shape);
     if (v && fabs(((double)src.width / src.height) / ((double)(uint32_t)v / (double)(v >> 32)) - 1) < 0.01) { *w = src.width; *h = src.height; return; }
     v = atomic_load(&g_layer_shape);
     *w = v ? (double)(uint32_t)v : 1920; *h = v ? (double)(v >> 32) : 1080;
@@ -16652,12 +16655,16 @@ static MTLViewport present_fit(id<MTLTexture> src, NSUInteger r[4], double dw, d
 // The valid source rectangle of a present (x, y, width, height; the crop of nvnWindowSetCrop, zero = the whole texture); 0 when it lies outside the texture
 static int present_crop_rect(id<MTLTexture> src, const int crop[4], NSUInteger r[4]) {
     r[0] = 0; r[1] = 0; r[2] = src.width; r[3] = src.height;
-    if (!crop || !(crop[2] || crop[3])) return 1;
-    if (crop[0] < 0 || crop[1] < 0 || crop[2] <= 0 || crop[3] <= 0 ||
-        (uint64_t)crop[0] + crop[2] > src.width || (uint64_t)crop[1] + crop[3] > src.height) {
-        MLOG("[RED] present crop out of bounds: %d,%d %dx%d / source texture %lux%lu", crop[0], crop[1], crop[2], crop[3], (unsigned long)src.width, (unsigned long)src.height); return 0;
+    if (crop && (crop[2] || crop[3])) {
+        if (crop[0] < 0 || crop[1] < 0 || crop[2] <= 0 || crop[3] <= 0 ||
+            (uint64_t)crop[0] + crop[2] > src.width || (uint64_t)crop[1] + crop[3] > src.height) {
+            MLOG("[RED] present crop out of bounds: %d,%d %dx%d / source texture %lux%lu", crop[0], crop[1], crop[2], crop[3], (unsigned long)src.width, (unsigned long)src.height); return 0;
+        }
+        r[0]=crop[0]; r[1]=crop[1]; r[2]=crop[2]; r[3]=crop[3];
     }
-    r[0] = crop[0]; r[1] = crop[1]; r[2] = crop[2]; r[3] = crop[3]; return 1;
+    uint64_t shape=atomic_load(&g_center_crop_shape);
+    if(shape) present_cover(r[2],r[3],r,(uint32_t)shape,shape>>32);
+    return 1;
 }
 static int present_encode(id<MTLCommandBuffer> cb, id<MTLTexture> src, id<MTLTexture> dst, const int crop[4]) {
     NSUInteger r[4]; if (!present_crop_rect(src, crop, r)) return 0;

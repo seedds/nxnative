@@ -809,6 +809,14 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Found on:** [Splatoon Raiders](../../dm/games/0400380020056000/README.md): its ink map (6400x6400 RG8 with a Depth32F-S8) got about 150 one-draw occlusion queries a frame, each after setting the map again: 150 passes of about 1 ms, 42 GB of attachment loads a frame, about 6 fps. Without the depth rules its water came out in grey blocks of tiles: the water reads the scene's depth, then the next draw writes the water's own.
 - **Check:** `make -C dm/gfx/tests GAME=<id> check_t_feedback` (the depth attachment read, then written).
 
+### Center cropping a square-pixel canvas without distortion
+
+- **Symptom:** world objects and HUD circles become ovals after a narrower output canvas is selected; cinematic layers leave exposed gaps when their viewport transforms differ.
+- **Cause:** changing raster dimensions without a corresponding camera/layout change resizes the picture anisotropically. Per-draw viewport changes can also disagree with scissors and with cinematic or HUD layers. Normal Switch crops can be anamorphic, so their existing layer-shape semantics must remain unchanged by default.
+- **Fix:** an opt-in `mtl_present_center_crop(w,h)` crops the completed square-pixel valid rectangle uniformly about its center, then reports the cropped picture's aspect to the front end. Metal, Metal 4, capture and MetalFX consume the same resulting rectangle. Zero disables it; existing window/layer cropping and anamorphic presentation keep their semantics unless a profile explicitly opts in. A 5120x2880 frame cropped to 16:10 retains x=256..4863, all 2880 rows, and square pixels. It intentionally clips edge content; safe-area HUD layout is separate work.
+- **Check:** `make -C dm/gfx/tests GAME=010019A01E2F2000 check_t_present_crop`: synthetic circle/bars/crop boundaries, both Metal APIs and both NVN origins, plus the unchanged ordinary/anamorphic presentation tests.
+- **Found on:** [Metroid Prime 4: Beyond](../../dm/games/010019A01E2F2000/README.md#1610-screens-2026-11-13), 16:10; the user accepts the shown gameplay HUD and pause menus with the separate profile HUD/menu layout options. Other unseen states remain untested.
+
 ### A render area for passes on very large targets
 
 - **Symptom:** a pass on a very large target costs about the same however little it draws; `DM_NVN_GPUPROF` shows time proportional to the target's area.

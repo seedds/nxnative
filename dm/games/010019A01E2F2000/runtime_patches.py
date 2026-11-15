@@ -58,8 +58,34 @@ def generate(module, patched, fixups):
     for off, before in OUTPUT_ABI:
         if module.image[off:off + len(before)] != before or patched[off:off + len(before)] != before:
             raise ValueError(f'output ABI mismatch at {off:#x}')
-    for choice, _, w, h in FULL_CHOICES:
+    for off, original in ((profile.window_extent_site, profile.window_extent_original),) + profile.window_extent_abi:
+        before = bytes.fromhex(original)
+        if module.image[off:off + len(before)] != before or patched[off:off + len(before)] != before:
+            raise ValueError(f'window extent ABI mismatch at {off:#x}')
+    for choice, export, w, h in FULL_CHOICES:
         writes += output_writes(choice, w, h)
+        stub = int(fixups.get('RUNTIME_WINDOW_' + export, '-1'), 0)
+        if stub < max(text, patch_off) or stub % 4 or stub + 16 > len(patched):
+            raise ValueError(f'missing/out-of-range/mismatched rewritten window extent stub for {choice}')
+        expected = b''.join(struct.pack('<I', word) for word in profile.window_extent_words(stub, w, h))
+        if patched[stub:stub + len(expected)] != expected:
+            raise ValueError(f'missing/out-of-range/mismatched rewritten window extent stub for {choice}')
+        writes.append((choice, profile.window_extent_site, bytes.fromhex(profile.window_extent_original),
+                       struct.pack('<I', B(profile.window_extent_site, stub))))
+    # The UI projection must be adjusted before the game builds its inverse,
+    # rather than moving individual draws or screen-space targeting coordinates.
+    for off, original in ((profile.ui_camera_site, profile.ui_camera_original),) + profile.ui_camera_abi:
+        before = bytes.fromhex(original)
+        if module.image[off:off + len(before)] != before or patched[off:off + len(before)] != before:
+            raise ValueError(f'UI camera ABI mismatch at {off:#x}')
+    stub = int(fixups.get('RUNTIME_UI_CAMERA_FIT_1610', '-1'), 0)
+    expected = b''.join(struct.pack('<I', word) for word in profile.ui_camera_words(stub))
+    if stub < max(text, patch_off) or stub % 4 or stub + len(expected) > len(patched) or patched[stub:stub + len(expected)] != expected:
+        raise ValueError('missing/out-of-range/mismatched rewritten UI camera stub')
+    for choice, *_ in FULL_CHOICES:
+        if choice.endswith('_1610'):
+            writes.append((choice, profile.ui_camera_site, bytes.fromhex(profile.ui_camera_original),
+                           struct.pack('<I', B(profile.ui_camera_site, stub))))
     return manifest(module, patched, fixups, BUILD, 'DM_INTERNAL_RESOLUTION', writes, variant='DM_SCREEN_RATIO')
 
 
@@ -75,9 +101,9 @@ CHOICES = (('1440p', 'SCENE_1440', 2560, 1440), ('2160p', 'SCENE_2160', 3840, 21
 # Full-output choices are separate from the preserved supersampling modes.
 FULL_CHOICES = (('1080p_full', 'SCENE_F1080', 1920, 1080), ('1440p_full', 'SCENE_F1440', 2560, 1440),
                 ('2160p_full', 'SCENE_F2160', 3840, 2160), ('2880p_full', 'SCENE_F2880', 5120, 2880), ('native_full', 'SCENE_FNATIVE', 1600, 900),
-                # 16:10 at the same height (DM_SCREEN_RATIO=1610, the manifest's variant variable: loader.c applies <choice>_1610 when the player picks 16:10)
-                ('native_full_1610', 'SCENE_FNATIVE_W', 1440, 900), ('1080p_full_1610', 'SCENE_F1080_W', 1728, 1080), ('1440p_full_1610', 'SCENE_F1440_W', 2304, 1440),
-                ('2160p_full_1610', 'SCENE_F2160_W', 3456, 2160), ('2880p_full_1610', 'SCENE_F2880_W', 4608, 2880))
+                # 16:10 retains the 16:9 projection/canvas and crops its sides uniformly at presentation.
+                ('native_full_1610', 'SCENE_FNATIVE_W', 1600, 900), ('1080p_full_1610', 'SCENE_F1080_W', 1920, 1080), ('1440p_full_1610', 'SCENE_F1440_W', 2560, 1440),
+                ('2160p_full_1610', 'SCENE_F2160_W', 3840, 2160), ('2880p_full_1610', 'SCENE_F2880_W', 5120, 2880))
 
 # Canvas allocation descriptors, traced into 134470/134ddc (not global floating
 # point HUD coordinates). Each pair is MOVZ Xr,#1600 / MOVK Xr,#900,LSL#32.
@@ -226,6 +252,69 @@ def generate_fog(module, patched, fixups):
     return manifest(module, patched, fixups, BUILD, 'DM_FOG_QUALITY', fog_writes(stubs))
 
 
+def generate_hud(module, patched, fixups):
+    if module.build_id.hex() != BUILD:
+        raise ValueError('Metroid Prime 4 HUD layout requires main v1.1.0 build ' + BUILD[:32])
+    spec = importlib.util.spec_from_file_location('mp4_hud_patch', Path(__file__).with_name('patches.py'))
+    profile = importlib.util.module_from_spec(spec); spec.loader.exec_module(profile)
+    for off, original in ((profile.hud_layout_site, profile.hud_layout_original),) + profile.hud_layout_abi + ((profile.scan_bootstrap, profile.scan_source_abi[1][1]),):
+        before = bytes.fromhex(original)
+        if module.image[off:off+len(before)] != before or patched[off:off+len(before)] != before:
+            raise ValueError(f'HUD layout ABI mismatch at {off:#x}')
+    stub = int(fixups.get('RUNTIME_HUD_LAYOUT_V1', '-1'), 0)
+    if stub < max(module.text_end, int(fixups['PATCH_OFF'], 0)) or stub % 4:
+        raise ValueError('missing/out-of-range HUD layout stub')
+    expected = b''.join(struct.pack('<I', w) for w in profile.hud_layout_words(stub))
+    if stub+len(expected) > len(patched) or patched[stub:stub+len(expected)] != expected:
+        raise ValueError('missing/out-of-range/mismatched HUD layout stub')
+    return manifest(module, patched, fixups, BUILD, 'DM_HUD_SCALE',
+                    [('85', profile.hud_layout_site, bytes.fromhex(profile.hud_layout_original), struct.pack('<I', B(profile.hud_layout_site, stub)))])
+
+
+def generate_pause(module, patched, fixups):
+    if module.build_id.hex() != BUILD:
+        raise ValueError('Metroid Prime 4 pause UI requires main v1.1.0 build ' + BUILD[:32])
+    spec=importlib.util.spec_from_file_location('mp4_pause_patch',Path(__file__).with_name('patches.py'))
+    profile=importlib.util.module_from_spec(spec);spec.loader.exec_module(profile)
+    for off,h in profile.pause_ui_sites+profile.pause_ui_abi+tuple((a,h) for a,h,_,_ in profile.menu_visual_hooks())+profile.menu_visual_abi()+(profile.scan_source_abi[1],):
+        before=bytes.fromhex(h)
+        if module.image[off:off+len(before)]!=before or patched[off:off+len(before)]!=before:
+            raise ValueError(f'pause UI ABI mismatch at {off:#x}')
+    writes=[]
+    for kind,(off,h) in zip(('bounds',),profile.pause_ui_sites[:1]):
+        stub=int(fixups.get('RUNTIME_PAUSE_UI_'+kind.upper(),'-1'),0)
+        if stub<max(module.text_end,int(fixups['PATCH_OFF'],0)) or stub%4:
+            raise ValueError('missing/out-of-range pause UI stub')
+        expected=b''.join(struct.pack('<I',w) for w in profile.pause_ui_words(stub,kind))
+        if stub+len(expected)>len(patched) or patched[stub:stub+len(expected)]!=expected:
+            raise ValueError('missing/out-of-range/mismatched pause UI stub')
+        writes.append(('1610',off,bytes.fromhex(h),struct.pack('<I',B(off,stub))))
+    for index,(off,h,_,_) in enumerate(profile.menu_visual_hooks()):
+        stub=int(fixups.get('RUNTIME_MENU_VISUAL_'+str(index),'-1'),0)
+        if stub<max(module.text_end,int(fixups['PATCH_OFF'],0)) or stub%4:
+            raise ValueError('missing/out-of-range pause UI stub')
+        expected=b''.join(struct.pack('<I',w) for w in profile.menu_visual_words(stub,index))
+        if stub+len(expected)>len(patched) or patched[stub:stub+len(expected)]!=expected:
+            raise ValueError('missing/out-of-range/mismatched pause UI stub')
+        writes.append(('1610',off,bytes.fromhex(h),struct.pack('<I',B(off,stub))))
+    return manifest(module,patched,fixups,BUILD,'DM_MENU_FIT',writes)
+
+
+def generate_menu_trace(module, patched, fixups):
+    if module.build_id.hex()!=BUILD: raise ValueError('menu trace requires main v1.1.0')
+    spec=importlib.util.spec_from_file_location('mp4_menu_trace_patch',Path(__file__).with_name('patches.py'))
+    profile=importlib.util.module_from_spec(spec);spec.loader.exec_module(profile)
+    for off,h in (profile.pause_panel_site,)+profile.pause_panel_abi+(profile.scan_source_abi[1],):
+        b=bytes.fromhex(h)
+        if module.image[off:off+len(b)]!=b or patched[off:off+len(b)]!=b: raise ValueError(f'menu trace ABI mismatch at {off:#x}')
+    stub=int(fixups.get('RUNTIME_PAUSE_UI_PANEL','-1'),0)
+    if stub<max(module.text_end,int(fixups['PATCH_OFF'],0)) or stub%4 or stub>=len(patched): raise ValueError('menu trace stub mismatch')
+    code=b''.join(struct.pack('<I',w) for w in profile.pause_ui_words(stub,'panel'))
+    if patched[stub:stub+len(code)]!=code: raise ValueError('menu trace stub mismatch')
+    off,h=profile.pause_panel_site
+    return manifest(module,patched,fixups,BUILD,'DM_MENU_TRACE',[('1',off,bytes.fromhex(h),struct.pack('<I',B(off,stub)))])
+
+
 def main(argv):
     original, rewritten, out = map(Path, argv)
     module, image, fixups = nso.load(original.read_bytes(), original.name), rewritten.read_bytes(), layout(rewritten.with_name('main.fixups.tsv'))
@@ -233,6 +322,9 @@ def main(argv):
     out.with_name('main.shadow.runtime.tsv').write_text(generate_shadow(module, image, fixups))   # a second variable, loaded beside main.runtime.tsv (loader.c)
     out.with_name('main.lod.runtime.tsv').write_text(generate_lod(module, image, fixups))
     out.with_name('main.fog.runtime.tsv').write_text(generate_fog(module, image, fixups))
+    out.with_name('main.hud.runtime.tsv').write_text(generate_hud(module, image, fixups))
+    out.with_name('main.menu.runtime.tsv').write_text(generate_pause(module, image, fixups))
+    out.with_name('main.menu_trace.runtime.tsv').write_text(generate_menu_trace(module, image, fixups))
     print('Runtime resolution: default (zero writes); preserved 1440p/1800p/2160p supersampling; experimental full-output 1080p/1440p/2160p/2880p; shadow resolution: default, 2x, 4x; model LOD: default, x2, x4, high; fog: default, high')
 
 

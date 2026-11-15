@@ -77,6 +77,55 @@ static uint64_t display_ticket(uint64_t receipt, uint64_t before) {
     return queued;
 }
 
+#ifndef CROP_LEGACY_HEADER
+// One square-pixel canvas for world, HUD and cinema. Test the production copy
+// on both Metal APIs, with both NVN origins; side poison must disappear, a circle
+// must stay circular, and cinematic bars must reach both sides without gaps.
+static void check_center_crop(void) {
+    mtl_present_layer(0,0); mtl_present_center_crop(16,10);
+    MTLTextureDescriptor *td=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:320 height:180 mipmapped:NO];
+    td.storageMode=MTLStorageModeShared; td.usage=MTLTextureUsageShaderRead;
+    id<MTLTexture> src=[g_dev newTextureWithDescriptor:td];
+    uint8_t *pixels=calloc(320*180,4);
+    for(int y=0;y<180;y++) for(int x=0;x<320;x++) {
+        uint8_t *p=pixels+4*(y*320+x); p[3]=255;
+        if(x<16 || x>=304) p[0]=255;
+        else if(y>=12 && y<168 && (x-160)*(x-160)+(y-90)*(y-90)<=30*30) p[1]=255;
+    }
+    [src replaceRegion:MTLRegionMake2D(0,0,320,180) mipmapLevel:0 withBytes:pixels bytesPerRow:1280];
+    double w,h; present_shape(src,&w,&h); EXPECT("crop shape 16:10",16*(int)h,10*(int)w);
+    NSUInteger rect[4]; int crop[4]={0,0,320,180};
+    EXPECT("center crop valid",1,present_crop_rect(src,crop,rect)); EXPECT("center x",16,rect[0]); EXPECT("center y",0,rect[1]); EXPECT("center width",288,rect[2]); EXPECT("center height",180,rect[3]);
+    // The rectangle comes from actual texels, not from drawable/window scaling.
+    int extent[][2]={{1600,900},{1920,1080},{2560,1440},{3840,2160},{5120,2880}};
+    for(int k=0;k<5;k++) {
+        NSUInteger rr[4]={0,0,extent[k][0],extent[k][1]};
+        present_cover(rr[2],rr[3],rr,16,10);
+        EXPECT("all resolution crops keep height",extent[k][1],rr[3]);
+        EXPECT("all resolution crops keep square pixels",rr[3]*16,rr[2]*10);
+        EXPECT("all resolution crops centered",extent[k][0],rr[0]*2+rr[2]);
+    }
+    for(int origin=0;origin<2;origin++) for(int api=0;api<2;api++) {
+        atomic_store(&g_origin_ll,origin);
+        MTLTextureDescriptor *od=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:288 height:180 mipmapped:NO];
+        od.storageMode=MTLStorageModeShared; od.usage=MTLTextureUsageRenderTarget;
+        id<MTLTexture> out=[g_dev newTextureWithDescriptor:od];
+        if(api) EXPECT("Metal 4 centered present",PRESENT_STANDARD,present_offscreen_wait(src,crop,out));
+        else { id<MTLCommandBuffer> cb=[g_q commandBuffer]; EXPECT("Metal centered present",1,present_encode(cb,src,out,crop)); [cb commit]; [cb waitUntilCompleted]; EXPECT("Metal centered GPU completes",MTLCommandBufferStatusCompleted,cb.status); }
+        uint8_t *got=malloc(288*180*4); [out getBytes:got bytesPerRow:288*4 fromRegion:MTLRegionMake2D(0,0,288,180) mipmapLevel:0];
+        int bad=0;
+        for(int y=0;y<180;y++) for(int x=0;x<288;x++) {
+            int sy=origin?179-y:y;
+            bad+=memcmp(got+4*(y*288+x),pixels+4*(sy*320+x+16),4)!=0;
+        }
+        EXPECT("circle, HUD alignment, side crop and full-width bars pixel exact",0,bad); free(got);
+    }
+    atomic_store(&g_origin_ll,0); mtl_present_center_crop(0,0);
+    present_shape(src,&w,&h); EXPECT("default shape restored",1920,(int)w);
+    EXPECT("default crop restored",1,present_crop_rect(src,crop,rect)); EXPECT("default width restored",320,rect[2]); free(pixels);
+}
+#endif
+
 int main(void) { @autoreleasepool {
     mtl_init();
 #ifndef CROP_LEGACY_HEADER
@@ -286,6 +335,9 @@ int main(void) { @autoreleasepool {
         EXPECT("the shape reported to the front end is the layer's, width",1920,g_shape_w);EXPECT("the shape reported to the front end is the layer's, height",1080,g_shape_h);
         res_remove(sw);
     }
+#endif
+#ifndef CROP_LEGACY_HEADER
+    check_center_crop();
 #endif
     h_nvnQueueFinalize(&queue);
     printf("== %d checks, %d failed ==\n",cases,failed);return failed!=0;

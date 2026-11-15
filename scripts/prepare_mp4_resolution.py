@@ -55,6 +55,8 @@ def main(argv=None):
     (patched / 'main.shadow.runtime.tsv').write_text(rt.generate_shadow(module, image.read_bytes(), runtime_patch.layout(patched / 'main.fixups.tsv')))
     (patched / 'main.lod.runtime.tsv').write_text(rt.generate_lod(module, image.read_bytes(), runtime_patch.layout(patched / 'main.fixups.tsv')))
     (patched / 'main.fog.runtime.tsv').write_text(rt.generate_fog(module, image.read_bytes(), runtime_patch.layout(patched / 'main.fixups.tsv')))
+    (patched / 'main.hud.runtime.tsv').write_text(rt.generate_hud(module, image.read_bytes(), runtime_patch.layout(patched / 'main.fixups.tsv')))
+    (patched / 'main.menu.runtime.tsv').write_text(rt.generate_pause(module, image.read_bytes(), runtime_patch.layout(patched / 'main.fixups.tsv')))
     listed = out / 'launcher.json'
     subprocess.run([sys.executable, str(REPO / 'dm/games/settings.py'), g.id, str(patched), str(control), str(listed)], env=env, check=True)
     data = json.loads(listed.read_text())

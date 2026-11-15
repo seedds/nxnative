@@ -9,26 +9,31 @@ static pthread_once_t mp4_quality_once=PTHREAD_ONCE_INIT;
 // The full-output choices (runtime_patches.py FULL_CHOICES), 16:9 and their 16:10 variants
 static const struct { const char *name;unsigned w,h; } mp4_sizes[]={
     {"native_full",1600,900},{"1080p_full",1920,1080},{"1440p_full",2560,1440},{"2160p_full",3840,2160},{"2880p_full",5120,2880},
-    {"native_full_1610",1440,900},{"1080p_full_1610",1728,1080},{"1440p_full_1610",2304,1440},{"2160p_full_1610",3456,2160},{"2880p_full_1610",4608,2880}};
-static int mp4_quality_dynamic;
+    {"native_full_1610",1600,900},{"1080p_full_1610",1920,1080},{"1440p_full_1610",2560,1440},{"2160p_full_1610",3840,2160},{"2880p_full_1610",5120,2880}};
+static int mp4_quality_dynamic,mp4_quality_ui_fit;
 static unsigned mp4_quality_max_width,mp4_quality_max_height;
 static void mp4_quality_init(void) {
     const char *d=getenv("DM_DYNAMIC_RESOLUTION"),*mode=getenv("DM_INTERNAL_RESOLUTION");
     if(d && strcmp(d,"0") && strcmp(d,"1")) LOG("[RED] MP4 dynamic resolution must be 0 or 1; keeping fixed scene size");
     mp4_quality_dynamic=d && !strcmp(d,"1");
-    // The choice loader.c applied: <mode>_<DM_SCREEN_RATIO> when the manifest has it (16:10 at the same height), else <mode>
+    // The choice loader.c applied: <mode>_<DM_SCREEN_RATIO> when the manifest has it (16:10 presentation crop), else <mode>
     const char *ratio=getenv("DM_SCREEN_RATIO"); char variant[64]="";
     if(mode && ratio && *ratio && strcmp(ratio,"default")) snprintf(variant,sizeof variant,"%s_%s",mode,ratio);
     for(unsigned i=0;i<sizeof mp4_sizes/sizeof *mp4_sizes;i++) if(variant[0] && !strcmp(variant,mp4_sizes[i].name)) {
         mp4_quality_max_width=mp4_sizes[i].w;mp4_quality_max_height=mp4_sizes[i].h;
+        mp4_quality_ui_fit=strstr(mp4_sizes[i].name,"_1610")!=NULL;
     }
     for(unsigned i=0;i<sizeof mp4_sizes/sizeof *mp4_sizes && !mp4_quality_max_width;i++) if(mode && !strcmp(mode,mp4_sizes[i].name)) {
         mp4_quality_max_width=mp4_sizes[i].w;mp4_quality_max_height=mp4_sizes[i].h;
+        mp4_quality_ui_fit=strstr(mp4_sizes[i].name,"_1610")!=NULL;
     }
-    // A canvas of another shape than 16:9 (a 16:10 variant, DM_SCREEN_RATIO=1610) is presented in its own shape, not fitted into the 16:9 layer (nvn_mtl.m present_shape)
-    if(mp4_quality_max_width && mp4_quality_max_width*9!=mp4_quality_max_height*16) {
-        extern void mtl_present_screen(uint32_t w,uint32_t h); mtl_present_screen(mp4_quality_max_width,mp4_quality_max_height);
-        LOG("MP4 output shape %ux%u (%.3f), presented in its own shape",mp4_quality_max_width,mp4_quality_max_height,(double)mp4_quality_max_width/mp4_quality_max_height);
+    // Retain the world/scan camera on a square-pixel 16:9 canvas and crop once.
+    // The matching manifest fits the native UI camera uniformly into that crop,
+    // before the game calculates its inverse. No pass-level viewport/scissor
+    // changes, stack classification or menu-state guesses.
+    if(mp4_quality_ui_fit) {
+        mtl_present_center_crop(16,10);
+        LOG("MP4 16:10: centered uniform crop of %ux%u; world 5%% cropped per side; native UI camera fit 90%%, square pixels",mp4_quality_max_width,mp4_quality_max_height);
     }
     if(!mp4_quality_max_width) mp4_quality_dynamic=0; // legacy/reference choices retain their confirmed behavior
     LOG("MP4 scene policy: %s; selected maximum %ux%u",mp4_quality_dynamic?"native dynamic controller":"fixed",mp4_quality_max_width,mp4_quality_max_height);
@@ -116,130 +121,108 @@ static void *mp4_scan_source_v1(NVNcommandBuffer *commands, const void *view) {
     return s->prefix;
 }
 
-// A 16:10 output (DM_SCREEN_RATIO=1610 with a full-output choice): the HUD, menus and movies keep 16:9. Every pass the game begins on a window texture (the swap chain's; RGBA8_SRGB
-// intermediates of the same size are left alone)
-// through its pass-begin helper (main+0x13003c, binding at main+0x1300b8; DM_NVN_RT_TRACE: the HUD at main+0x12e0e8, the radar at main+0x60860, the
-// front end and its movie at main+0x6c98c / 0x6cba0, the menus at main+0x58f520) is laid out in 16:9 and drawn into the middle band: viewports and
-// scissors keep their x and width, their y and height are scaled by k = (output ratio) / (16:9) about the centre. The scene's composite into the window
-// binds it elsewhere (main+0x145c8) and keeps the whole 16:10 picture.
-// Two calls right after the HUD's pass begins draw full-screen images, not HUD: 0x131d64 draws layer 0x14 with the brightness (s, s, s, 1) (called at
-// main+0x12e158: a glow over the whole picture, banded in the second 16:10 run it left the scene's glow outside the band), and the virtual call at
-// main+0x12e180 (into main+0xd31fd8, the code that allocates the 1600x900 scene canvas at 0xd315a4) draws the finished scene as a picture. Draws under
-// either keep the viewport the game set, so they fill the 16:10 window; everything else in the pass is banded.
-static _Thread_local const NVNcommandBuffer *mp4_band_cb; static _Thread_local float mp4_band_h, mp4_band_vp[4], mp4_full_vp[4]; static _Thread_local int mp4_band_has, mp4_band_bypass;
-static uintptr_t mp4_main_base(void) { for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, "main")) return (uintptr_t)g_mod[i].base; return 0; }
-static float mp4_band_k(void) {
-    pthread_once(&mp4_quality_once,mp4_quality_init);
-    if (!mp4_quality_max_width || mp4_quality_max_width * 9 >= mp4_quality_max_height * 16) return 0;   // 16:9 or wider: nothing to do
-    return (float)mp4_quality_max_width / (float)mp4_quality_max_height / (16.0f / 9.0f);
-}
-static int mp4_under(uintptr_t ra);
-static _Atomic int mp4_menu_seen, mp4_menu_last;   // a menu item drawn in this / the last frame (mp4_hud_item_full)
-static _Thread_local const NVNcommandBuffer *mp4_hud_cb;   // the HUD's pass, banded or not: its items are still looked at while a menu is open
-// The scene's own passes on the window (its final image and post effects: main+0x332fa0 into 0xca8b0, main+0x338d48 into 0x1360c8, DM_NVN_RT_TRACE
-// in the fourth 16:10 run) run under the frame's scene step, which returns to main+0x33194c; they keep the whole window. The HUD (main+0x12e0e8),
-// radar, menus and loading screens begin theirs elsewhere.
+// Initialize presentation before the first window pass (including the title movie).
+// All guest viewport/scissor and draw commands otherwise retain native semantics.
 static void nvn_profile_set_rt(const NVNcommandBuffer *c, int n, const NVNtexture *const *ct, uint64_t caller) {
-    const tex_t *t = n > 0 && ct ? (const tex_t *)ct[0] : NULL; uintptr_t base = mp4_main_base();
-    // A pass the game begins on the window itself (the game renders intermediates of its size and format too) through its pass-begin helper, outside the
-    // scene step and outside the front end (title movie and its menus, main+0x6c98c / 0x6cba0 / 0x58f520, stretched to 16:10 at the user's choice)
-    static _Atomic int scene_ran;   // a pass of the scene step (under main+0x33194c) since the last decision
-    if (base && mp4_band_k() > 0 && caller && mp4_under(base + 0x33194c)) atomic_store(&scene_ran, 1);
-    int band = base && mp4_band_k() > 0 && !strcmp(dm_main_build(),"8275fbe1ec5191c279f3a943ad8524f4") && caller == base + 0x1300b8
-        && t && t->magic == MAGIC('T','E','X',0) && nvn_is_window_tex(ct[0]) && !mp4_under(base + 0x33194c) && !mp4_under(base + 0xe2acb8);
-    mp4_band_has = 0;
-    // The HUD's first pass of a frame decides it. A menu is open when this frame drew no scene (the pause menu's pages stop the scene step: 2.8 ms of GPU
-    // time on the inventory page against 9-11 in play, eleventh run), or a menu item was drawn within the last 30 frames (they are drawn only when a page
-    // changes, and the map page draws its hologram through the scene step). The HUD's pass is begun twice a frame with the menu open and in the scan visor
-    // alike, so that count is only logged; as a menu sign it stretched the scan rings (tenth run).
-    static _Atomic uint64_t decided = ~0ull; static _Atomic int passes, last_passes = 1; uint64_t frame = atomic_load(&g_nvn_presents);
-    if (band && mp4_under(base + 0x12e0e8)) atomic_fetch_add(&passes, 1);
-    if (band && mp4_under(base + 0x12e0e8) && atomic_exchange(&decided, frame) != frame) {
-        int np = atomic_exchange(&passes, 1) - 1, lp = atomic_exchange(&last_passes, np);
-        if (np != lp) LOG("MP4 16:10: the HUD's pass begun %d time(s) in the last frame", np);
-        static int hold; int scene = atomic_exchange(&scene_ran, 0);
-        if (atomic_exchange(&mp4_menu_seen, 0)) hold = 30; else if (hold > 0) hold--;
-        static int last_scene = 1; if (scene != last_scene) { last_scene = scene; LOG("MP4 16:10: %s", scene ? "the scene is drawn again" : "no scene drawn in this frame"); }
-        int menu = hold > 0 || !scene, was = atomic_exchange(&mp4_menu_last, menu);
-        if (menu != was) LOG("MP4 16:10: %s", menu ? "a menu is open, the HUD is drawn over the whole window" : "no menu, the HUD is back in the 16:9 band");
+    (void)c; (void)n; (void)ct; (void)caller;
+    if(!strcmp(dm_main_build(),"8275fbe1ec5191c279f3a943ad8524f4")) pthread_once(&mp4_quality_once,mp4_quality_init);
+}
+
+// Deliberately opt-in and independent from world resolution / UI-menu fitting.
+// The rewriter invokes this only through main.hud.runtime.tsv (DM_HUD_SCALE=85).
+#include "hud_layout.inc"
+static void mp4_hud_layout_v1(const void *properties,void *transform) {
+    if(strcmp(dm_main_build(),"8275fbe1ec5191c279f3a943ad8524f4") || !properties || !transform) return;
+    const char *scale=getenv("DM_HUD_SCALE"),*ratio=getenv("DM_SCREEN_RATIO"),*mode=getenv("DM_INTERNAL_RESOLUTION");
+    if(!scale || strcmp(scale,"85") || !mode) return;
+    int full=0,wide=ratio && !strcmp(ratio,"1610");
+    for(unsigned i=0;i<sizeof mp4_sizes/sizeof *mp4_sizes;i++) if(!strcmp(mode,mp4_sizes[i].name)) {full=1;wide|=strstr(mode,"_1610")!=NULL;break;}
+    if(!full || !wide) return; // baseline, supersampling and 16:9 stay native
+    // Only the constructor's private stack record changes. Properties, original
+    // files, source template root, world entities and animation curves are not written.
+    int applied=mp4_hud_apply(properties,transform);
+    if(!applied) return;
+    int group=applied-1;
+    static _Atomic unsigned seen;
+    unsigned bit=1u<<group;
+    if(!(atomic_fetch_or(&seen,bit)&bit)) LOG("MP4 HUD layout: group %d, %s/%s anchor, scale 85%%; native template root retained (experimental)",group,mp4_hud_groups[group].side<0?"left":mp4_hud_groups[group].side>0?"right":"center",mp4_hud_groups[group].anchor>0?"top":"bottom");
+}
+
+// Independent opt-in pause-menu candidate. Owner identity is checked in the
+// original ROOM's template namespace, never inferred from frame history/draws.
+#include "pause_ui.inc"
+#include "menu_trace.inc"
+#include "menu_visual.inc"
+static pthread_mutex_t mp4_menu_visual_lock=PTHREAD_MUTEX_INITIALIZER;
+static mp4_menu_binding mp4_menu_visual_binding;
+#include "menu_provenance.inc"
+static void mp4_menu_trace(const void *component,const void *node) {
+    const char *trace=getenv("DM_MENU_TRACE");if(!trace || strcmp(trace,"1")) return;
+    mp4_menu_snapshot s;if(!mp4_menu_snapshot_read(component,node,&s)) return;
+    // At most 16 active caption instances, one sample each per 120 presents,
+    // 64 samples total. Mutex bounds concurrent component update callbacks.
+    static pthread_mutex_t lock=PTHREAD_MUTEX_INITIALIZER;
+    static uintptr_t panes[16];static uint64_t last[16];static mp4_menu_snapshot previous[16];static unsigned count;
+    uint64_t frame=atomic_load(&g_nvn_presents);
+    pthread_mutex_lock(&lock);
+    unsigned i;for(i=0;i<16 && panes[i] && panes[i]!=s.pane;i++);
+    if(i==16 || count>=64 || (panes[i] && frame-last[i]<120)) {pthread_mutex_unlock(&lock);return;}
+    if(panes[i] && !memcmp(previous[i].gui,s.gui,sizeof s.gui) && !memcmp(previous[i].world,s.world,sizeof s.world) && !memcmp(previous[i].source,s.source,sizeof s.source)) {pthread_mutex_unlock(&lock);return;}
+    panes[i]=s.pane;last[i]=frame;previous[i]=s;count++;
+    LOG("MP4 menu trace: F%llu pane=%p source=(%.6g %.6g %.6g) world=(%.6g %.6g %.6g) scale=(%.6g %.6g %.6g)",
+        (unsigned long long)frame,component,s.source[0],s.source[1],s.source[2],s.world[3],s.world[7],s.world[11],s.world[12],s.world[13],s.world[14]);
+    LOG("MP4 menu trace: F%llu pane=%p GUI=(%.6g %.6g %.6g %.6g; %.6g %.6g %.6g %.6g; %.6g %.6g %.6g %.6g)",
+        (unsigned long long)frame,component,s.gui[0],s.gui[1],s.gui[2],s.gui[3],s.gui[4],s.gui[5],s.gui[6],s.gui[7],s.gui[8],s.gui[9],s.gui[10],s.gui[11]);
+    pthread_mutex_unlock(&lock);
+}
+static void mp4_pause_ui_v2(const void *component,void *payload,unsigned event) {
+    if(strcmp(dm_main_build(),"8275fbe1ec5191c279f3a943ad8524f4")) return;
+    const char *fit=getenv("DM_MENU_FIT"),*mode=getenv("DM_INTERNAL_RESOLUTION"),*ratio=getenv("DM_SCREEN_RATIO");
+    if(!mode || (event!=2 && (!fit || strcmp(fit,"1610")))) return;
+    int full=0,wide=ratio && !strcmp(ratio,"1610");
+    for(unsigned i=0;i<sizeof mp4_sizes/sizeof *mp4_sizes;i++) if(!strcmp(mode,mp4_sizes[i].name)) {full=1;wide|=strstr(mode,"_1610")!=NULL;break;}
+    if(!full || !wide) return;
+    if(event==2) {mp4_menu_trace(component,payload);return;}
+    if(!mp4_pause_apply(component,payload,event)) return;
+    if(event==0) {
+        pthread_mutex_lock(&mp4_menu_visual_lock);
+        int bound=mp4_menu_bind(&mp4_menu_visual_binding,component);
+        pthread_mutex_unlock(&mp4_menu_visual_lock);
+        if(bound) LOG("MP4 menu visuals: bound exact pause-room GUI frame");
     }
-    // Menu pages bind the window again from inside the HUD's list (main+0x12f0c8): those passes follow the frame's decision too, and their items are still
-    // looked at, so the decision holds while the menu stays open
-    if (band) mp4_hud_cb = c; else if (mp4_hud_cb == c) mp4_hud_cb = NULL;
-    if (band && atomic_load(&mp4_menu_last)) band = 0;
-    if (band) { mp4_band_cb = c; mp4_band_h = 0;   // the band's frame: the pass's first viewport (the window rectangle: 1920x1080, the window crop)
-        static int once; if (!once++) LOG("MP4 16:10: HUD and menu passes drawn into the middle 16:9 band (y and height x %.3f)", mp4_band_k()); }
-    else if (mp4_band_cb == c) mp4_band_cb = NULL;
+    static _Atomic unsigned seen;unsigned bit=1u<<event;
+    if(!(atomic_fetch_or(&seen,bit)&bit)) LOG("MP4 pause UI: %s; exact pause-template match (candidate)",event?"perspective Camera fit 90%":"native 2D bounds restored");
 }
-static void nvn_profile_viewports(const NVNcommandBuffer *c, int n, float *v) {
-    if (mp4_band_cb != c || mp4_band_bypass) return;
-    if (!mp4_band_h) mp4_band_h = v[1] + v[3];
-    float k = mp4_band_k(), H = mp4_band_h;
-    memcpy(mp4_full_vp, v, sizeof mp4_full_vp);
-    for (int i = 0; i < n; i++) { v[4 * i + 1] = H * (1 - k) / 2 + v[4 * i + 1] * k; v[4 * i + 3] *= k; }
-    memcpy(mp4_band_vp, v, sizeof mp4_band_vp); mp4_band_has = 1;
-}
-static int mp4_under(uintptr_t ra) {   // whether the guest call chain of this draw passes return address ra (frame records: [fp] the caller's fp, [fp+8] its return address)
-    uintptr_t fp = (uintptr_t)__builtin_frame_address(0), top = fp + (8u << 20);
-    for (int i = 0; i < 24 && fp && !(fp & 7) && fp < top; i++) {
-        const uintptr_t *f = (const uintptr_t *)fp;
-        if (f[1] == ra) return 1;
-        if (f[0] <= fp) break;
-        fp = f[0];
+
+// Serialization follows all native animation/component updates. The camera
+// projection stays native; the exact backdrop is excluded by provenance.
+static void mp4_menu_visual_v2(const void *node,void *packet,unsigned event) {
+    if(strcmp(dm_main_build(),"8275fbe1ec5191c279f3a943ad8524f4")) return;
+    const char *fit=getenv("DM_MENU_FIT"),*mode=getenv("DM_INTERNAL_RESOLUTION"),*ratio=getenv("DM_SCREEN_RATIO");
+    if(!fit || strcmp(fit,"1610") || !mode) return;
+    int full=0,wide=ratio && !strcmp(ratio,"1610");
+    for(unsigned i=0;i<sizeof mp4_sizes/sizeof *mp4_sizes;i++) if(!strcmp(mode,mp4_sizes[i].name)){full=1;wide|=strstr(mode,"_1610")!=NULL;break;}
+    if(!full || !wide) return;
+    if(event==2){if(!mp4_menu_scope_push(node))LOG("[RED] MP4 menu provenance scope allocation failed");return;}
+    if(event==3){mp4_menu_scope_pop();return;}
+    pthread_mutex_lock(&mp4_menu_visual_lock);
+    int applied=0,scoped=0;
+    if(event==1) mp4_menu_unbind(&mp4_menu_visual_binding,node);
+    else if(event==4) {
+        if(!mp4_menu_node_register(node))LOG("[RED] MP4 menu GUI provenance allocation failed");
+    } else if(event==5) {
+        mp4_menu_node_forget(node);
+    } else if(event==6) {
+        applied=mp4_menu_compass_projection(&mp4_menu_visual_binding,packet);scoped=2;
+    } else if(event==0) {
+        mp4_menu_node_entry *p=*mp4_menu_node_slot(node);scoped=p!=NULL;
+        applied=mp4_menu_visual_scoped(&mp4_menu_visual_binding,node,packet,p?&p->scope:NULL);
     }
-    return 0;
-}
-// The HUD's render list (main+0x12f0c8 and main+0x12f074 call one item at a time) mixes 2D widgets with items drawn as 3D models through the scene's own
-// model code (main+0xdf304 into 0xe2268, main+0x8e778 into 0x10f38: in the fifth 16:10 run the scan outline of the ship stayed in the band, off the
-// ship): those fill the window, the rest stays in the band. An item is named by the return address inside it just below the list's call
-// (DM_MP4_HUD_FULL=<hex main offsets, comma-separated> or "none" replaces the default list; each item seen is logged once with where it went).
-// The pause menu's pages (map, inventory, ...) mix 3D tab frames with 2D icons, which the band pulled apart; stretched whole they looked right in the first
-// 16:10 run. While a menu item (DM_MP4_HUD_MENU, default main+0xf75724 and 0x118fdc, drawn only with the pause menu open in the seventh and eighth runs) was drawn in the last frame, the HUD's pass is not banded.
-static uintptr_t mp4_hud_full[16], mp4_hud_menu[16]; static int mp4_hud_nfull = -1, mp4_hud_nmenu;
-static int mp4_hex_list(const char *e, uintptr_t *out) {
-    int n = 0; if (!strcmp(e, "none")) return 0;
-    for (const char *p = e; *p && n < 16; ) { char *q; unsigned long v = strtoul(p, &q, 16); if (q == p) break; out[n++] = v; p = *q == ',' ? q + 1 : q; }
-    return n;
-}
-static void mp4_hud_full_init(void) {
-    const char *e = getenv("DM_MP4_HUD_FULL"), *m = getenv("DM_MP4_HUD_MENU");
-    if (e) mp4_hud_nfull = mp4_hex_list(e, mp4_hud_full); else { mp4_hud_full[0] = 0xdf304; mp4_hud_full[1] = 0x8e778; mp4_hud_nfull = 2; }
-    if (m) mp4_hud_nmenu = mp4_hex_list(m, mp4_hud_menu); else { mp4_hud_menu[0] = 0xf75724; mp4_hud_menu[1] = 0x118fdc; mp4_hud_nmenu = 2; }
-}
-static int mp4_hud_item_full(uintptr_t base) {   // whether this draw belongs to a HUD item drawn over the whole window
-    uintptr_t fp = (uintptr_t)__builtin_frame_address(0), top = fp + (8u << 20), prev = 0;
-    for (int i = 0; i < 24 && fp && !(fp & 7) && fp < top; i++) {
-        const uintptr_t *f = (const uintptr_t *)fp; uintptr_t ra = f[1];
-        if (ra == base + 0x12e15c || ra == base + 0x12e184) return 1;   // the glow and the scene picture
-        if ((ra == base + 0x12f0cc || ra == base + 0x12f078) && prev) {
-            if (mp4_hud_nfull < 0) mp4_hud_full_init();
-            int full = 0; for (int k = 0; k < mp4_hud_nfull; k++) if (prev - base == mp4_hud_full[k]) full = 1;
-            for (int k = 0; k < mp4_hud_nmenu; k++) if (prev - base == mp4_hud_menu[k]) atomic_store(&mp4_menu_seen, 1);
-            static uintptr_t seen[64]; static int ns; static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
-            pthread_mutex_lock(&mu); int fresh = ns < 64; for (int k = 0; k < ns && fresh; k++) if (seen[k] == prev) fresh = 0; if (fresh) seen[ns++] = prev; pthread_mutex_unlock(&mu);
-            if (fresh) LOG("MP4 16:10: HUD item main+%#lx (list call main+%#lx): %s", (unsigned long)(prev - base), (unsigned long)(ra - base - 4), full ? "whole window" : "16:9 band");
-            return full;
-        }
-        if (f[0] <= fp) break;
-        prev = ra; fp = f[0];
+    pthread_mutex_unlock(&mp4_menu_visual_lock);
+    if(applied) {
+        static _Atomic unsigned seen;unsigned bit=scoped==2?4:scoped?2:1;
+        if(!(atomic_fetch_or(&seen,bit)&bit)) LOG("MP4 menu visuals: %s fit 90%% applied; native source retained (candidate)",scoped==2?"map compass projection":scoped?"room-provenance GUI":"room-frame GUI");
     }
-    return 0;
-}
-static int nvn_profile_draw_begin(NVNcommandBuffer *c) {
-    if (mp4_hud_cb == c && mp4_band_cb != c) { mp4_hud_item_full(mp4_main_base()); return 0; }   // a menu frame: only notice whether the menu is still drawn
-    if (mp4_band_cb != c || !mp4_band_has) return 0;
-    uintptr_t base = mp4_main_base();
-    if (!mp4_hud_item_full(base)) return 0;
-    mp4_band_bypass = 1; h_nvnCommandBufferSetViewports(c, 0, 1, mp4_full_vp); mp4_band_bypass = 0;
-    return 1;
-}
-static void nvn_profile_draw_end(NVNcommandBuffer *c) { mp4_band_bypass = 1; h_nvnCommandBufferSetViewports(c, 0, 1, mp4_band_vp); mp4_band_bypass = 0; }
-static void nvn_profile_scissor(const NVNcommandBuffer *c, int *x, int *y, int *w, int *h) {
-    (void)x; (void)w;
-    if (mp4_band_cb != c || *h >= 16384 || !mp4_band_h) return;   // the game's "no scissor" (16384x16384) stays
-    float k = mp4_band_k(), H = mp4_band_h;
-    int y0 = (int)floorf(H * (1 - k) / 2 + (float)*y * k), y1 = (int)ceilf(H * (1 - k) / 2 + (float)(*y + *h) * k);
-    *y = y0; *h = y1 - y0;
 }
 
 // Profile-provided private entry lookup; no game IDs or engine offsets in the
@@ -248,5 +231,8 @@ static void *nvn_profile_runtime_lookup(const char *name) {
     if(strcmp(dm_main_build(),"8275fbe1ec5191c279f3a943ad8524f4")) return NULL;
     if(!strcmp(name,"nxnativeMp4ScanSourceV1")) return (void *)mp4_scan_source_v1;
     if(!strcmp(name,"nxnativeMp4SceneSizeV1")) return (void *)mp4_scene_size_v1;
+    if(!strcmp(name,"nxnativeMp4MenuVisualV2") || !strcmp(name,"nxnativeMp4MenuVisualV1")) return (void *)mp4_menu_visual_v2;
+    if(!strcmp(name,"nxnativeMp4PauseUiV2")) return (void *)mp4_pause_ui_v2;
+    if(!strcmp(name,"nxnativeMp4HudLayoutV1")) return (void *)mp4_hud_layout_v1;
     return NULL;
 }

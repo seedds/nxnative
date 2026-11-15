@@ -89,6 +89,24 @@ class LauncherSettingsTests(unittest.TestCase):
                 self.assertEqual((ios['DM_PSO_MTL4']['default'], ios['DM_NVN_ENC_THREAD']['default']), (ios_pso, '1'))
                 self.assertEqual((mac['DM_PSO_MTL4']['default'], mac['DM_NVN_ENC_THREAD']['default']), ('1', '0'))
 
+    def test_mp4_ratio_layout_options_require_matching_manifests_and_keep_ratio_selectable(self):
+        available = {'DM_SCREEN_RATIO': {'default', '1610'}, 'DM_HUD_SCALE': {'default', '85'}, 'DM_MENU_FIT': {'default', '1610'}}
+        with patch.object(settings.runtime_patch, 'choices', side_effect=lambda path, var: available.get(var, set())):
+            rows = build('010019A01E2F2000', 'nvn', 'mac')
+            self.assertEqual(rows['DM_SCREEN_RATIO']['default'], 'default')
+            self.assertEqual(rows['DM_SCREEN_RATIO']['options'], [['default', '16:9 (Switch)'], ['1610', '16:10']])
+            for var, default in [('DM_HUD_SCALE', '85'), ('DM_MENU_FIT', '1610')]:
+                self.assertEqual(rows[var]['default'], default)
+                self.assertEqual(rows[var]['needs'], 'DM_SCREEN_RATIO=1610')
+                available[var] = set()
+                self.assertNotIn(var, build('010019A01E2F2000', 'nvn', 'mac'))
+                available[var] = {'default', default}
+            ios = build('010019A01E2F2000', 'nvn', 'ios')
+            for var in available: self.assertNotIn(var, ios)
+        # Old/unknown rewritten builds must not offer unsupported layout writes.
+        rows = build('010019A01E2F2000', 'nvn', 'mac')
+        for var in available: self.assertNotIn(var, rows)
+
     def test_unknown_platform_is_rejected(self):
         with self.assertRaisesRegex(SystemExit, 'SETTINGS_PLATFORM must be ios or mac'):
             build(WONDER, 'nvn', 'mca')

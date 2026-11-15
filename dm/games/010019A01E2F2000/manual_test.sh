@@ -12,6 +12,7 @@ case $MODE in default|1440p|1800p|2160p|diag1792|native_full|1080p_full|1440p_fu
 REPO=$(cd "$(dirname "$0")/../../.." && pwd)
 IMG=${MP4_IMAGES:-"$HOME/Downloads/Nintendo Switch 1:2 — images"}
 NSP="$IMG/Metroid Prime 4 Beyond [NSZ]"; WORK="$NSP/010019A01E2F2000_build"
+ORIGINAL="$WORK/extract/v131072/ExeFS/main"
 PY=${PY:-$( [ -x "$HOME/games/venv/bin/python" ] && echo "$HOME/games/venv/bin/python" || echo /opt/homebrew/bin/python3.14 )}   # the tool venv (capstone, lz4, fonttools, zbic: a rewrite needs them); the images folder's name has a ":", where venv refuses to go
 OUT="$NSP/010019A01E2F2000-work/manual-test/$MODE-$(date +%m%d-%H%M%S)"; mkdir -p "$OUT"
 # DUMP=every:<n> sets the pass-dump interval (every:150 catches a scan held for a few seconds); input.rec is player 1's input as the game's reads saw it (DM_REC), replayable with DM_KEYS=@<file>
@@ -30,17 +31,31 @@ printf 'DM_INTERNAL_RESOLUTION=%s\nDM_PRESENT_UPSCALE=off\nDM_METAL_HUD=1\nDM_NV
 [ "${LIMITER:-}" = 0 ] && echo "DM_AUDIO_LIMITER=0" >> "$OUT/env.txt"
 # MEM=10G (or default): a 10 GB application pool instead of the Switch's 3.2 GB (DM_APP_POOL)
 [ -n "${MEM:-}" ] && echo "DM_APP_POOL=$MEM" >> "$OUT/env.txt"
-# RATIO=1610: a full-output choice at 16:10, the same height (DM_SCREEN_RATIO)
+# RATIO=1610: uniform 16:10 scene crop + native UI camera safe fit (DM_SCREEN_RATIO)
 [ -n "${RATIO:-}" ] && echo "DM_SCREEN_RATIO=$RATIO" >> "$OUT/env.txt"
-# RT_TRACE=1: in 16:10, the code that binds the 3200x2000 output target and sets its viewports and scissors and draws into it, once per site with backtraces
+# RT_TRACE=1: trace the selected output target, native viewports/scissors and draws, once per site with backtraces
 # (DM_NVN_RT_TRACE), to find the HUD's, the menus' and the movies' rectangles
 [ "${RT_TRACE:-}" = 1 ] && echo "DM_NVN_RT_TRACE=${RT_SIZE:-3456x2160}" >> "$OUT/env.txt"
-# HUD_FULL=<hex,...> or none: in 16:10, the HUD items drawn over the whole window instead of the 16:9 band (DM_MP4_HUD_FULL; the log names each item)
-[ -n "${HUD_FULL:-}" ] && echo "DM_MP4_HUD_FULL=$HUD_FULL" >> "$OUT/env.txt"
-# HUD_MENU=<hex,...>: the HUD items that mark a pause-menu page (DM_MP4_HUD_MENU)
-[ -n "${HUD_MENU:-}" ] && echo "DM_MP4_HUD_MENU=$HUD_MENU" >> "$OUT/env.txt"
 # FILL=1: the picture cropped to the window's shape instead of fitted with bars (DM_PICTURE_FIT=fill): 16:10 on a 16:10 screen in fullscreen
 [ "${FILL:-}" = 1 ] && echo "DM_PICTURE_FIT=fill" >> "$OUT/env.txt"
+# HUD_SCALE=85: experimental HUD visual children at 85%, with top/bottom anchors.
+# Separate runtime manifest; omitted/default retains the accepted HUD. Full 16:10 only.
+if [ -n "${HUD_SCALE:-}" ]; then
+    case "$HUD_SCALE" in default|85) ;; *) echo "HUD_SCALE must be default or 85" >&2; exit 2;; esac
+    if [ "$HUD_SCALE" = 85 ]; then
+        [ "${RATIO:-}" = 1610 ] && [[ "$MODE" = *_full ]] || { echo "HUD_SCALE=85 requires RATIO=1610 and a full-output mode" >&2; exit 2; }
+    fi
+    echo "DM_HUD_SCALE=$HUD_SCALE" >> "$OUT/env.txt"
+fi
+# MENU_FIT=1610: accepted pause canvas coverage + uniform foreground GUI render-copy fit.
+if [ -n "${MENU_FIT:-}" ]; then
+    case "$MENU_FIT" in default|1610) ;; *) echo "MENU_FIT must be default or 1610" >&2; exit 2;; esac
+    if [ "$MENU_FIT" = 1610 ]; then
+        [ "${HUD_LAYOUT_PROBE:-}" != 1 ] || { echo "MENU_FIT=1610 overlaps a camera probe; use the menu candidate without HUD_LAYOUT_PROBE" >&2; exit 2; }
+        [ "${RATIO:-}" = 1610 ] && [[ "$MODE" = *_full ]] || { echo "MENU_FIT=1610 requires RATIO=1610 and a full-output mode" >&2; exit 2; }
+    fi
+    echo "DM_MENU_FIT=$MENU_FIT" >> "$OUT/env.txt"
+fi
 # SHADOWS=2x or 4x: shadow tiles 2 or 4 times their size in a 4096 or 8192 atlas (DM_SHADOW_RESOLUTION, main.shadow.runtime.tsv)
 [ -n "${SHADOWS:-}" ] && echo "DM_SHADOW_RESOLUTION=$SHADOWS" >> "$OUT/env.txt"
 # LOD=x2, x4 or high: level switches 2 or 4 times as far away, or every model at its most detailed level (DM_MODEL_LOD, main.lod.runtime.tsv)
@@ -81,6 +96,20 @@ if [ "${SCAN_GPU_PROBE:-}" = 1 ]; then
     mkdir -p "$OUT/gpu"
     printf 'DM_NVN_KEYDUMP=388419dddeb1baac:96:120\nDM_NVN_KEYREADBACK=1\nDM_NVN_CBDUMP=%s\nDM_NVN_CBDUMP_KEY=388419dddeb1baac_b\n' "$OUT/gpu" >> "$OUT/env.txt"
 fi
+# HUD_LAYOUT_PROBE=1: bounded, read-only camera/layout data, no HUD size edit.
+if [ "${HUD_LAYOUT_PROBE:-}" = 1 ]; then
+    [ -z "${PROBE:-}${VIS_SCALE:-}" ] && [ "${SCAN_STATE_PROBE:-}" != 1 ] && [ "${SCAN_ACQUIRE_PROBE:-}" != 1 ] && [ "${SCAN_QUERY_PROBE:-}" != 1 ] || { echo "HUD observations must run without other CPU probes" >&2; exit 2; }
+    ORIGINAL="$WORK/extract/v131072/ExeFS/main"
+    "$PY" "$REPO/dm/games/010019A01E2F2000/hud_diag.py" env "$ORIGINAL" >> "$OUT/env.txt"
+fi
+# MENU_TRACE=1: read-only original inventory-caption transforms plus bounded
+# camera observations. Keep the current coverage/HUD settings for comparison.
+if [ "${MENU_TRACE:-}" = 1 ]; then
+    [ "${MENU_FIT:-}" = 1610 ] && [ "${RATIO:-}" = 1610 ] && [[ "$MODE" = *_full ]] || { echo "MENU_TRACE=1 requires MENU_FIT=1610 RATIO=1610 and a full-output mode" >&2; exit 2; }
+    [ -z "${PROBE:-}${VIS_SCALE:-}" ] && [ "${HUD_LAYOUT_PROBE:-}" != 1 ] && [ "${SCAN_STATE_PROBE:-}${SCAN_ACQUIRE_PROBE:-}${SCAN_QUERY_PROBE:-}" = "" ] || { echo "menu panel trace must run without other CPU probes" >&2; exit 2; }
+    echo "DM_MENU_TRACE=1" >> "$OUT/env.txt"
+    "$PY" "$REPO/dm/games/010019A01E2F2000/hud_diag.py" env-panels "$WORK/extract/v131072/ExeFS/main" >> "$OUT/env.txt"
+fi
 echo "== build (partial shaders; the first time a few thousand shaders compile) -> $OUT/build.log"
 "$PY" "$REPO/scripts/build_ipa_from_nsp.py" "$NSP" -k "$IMG/prod.keys" --package v131072 --platform mac \
     --seen-shaders --work-dir "$WORK" --env-file "$OUT/env.txt" --progress lines 2>&1 | tee "$OUT/build.log"
@@ -88,6 +117,9 @@ CMD=$(grep -E "^cd .*dmhost.* \| tee " "$OUT/build.log" | tail -1)
 [ -n "$CMD" ] || { echo "[RED] the build printed no run command: see $OUT/build.log" >&2; exit 1; }
 if [ "${SCAN_STATE_PROBE:-}" = 1 ] || [ "${SCAN_ACQUIRE_PROBE:-}" = 1 ] || [ "${SCAN_QUERY_PROBE:-}" = 1 ]; then
     "$PY" "$REPO/dm/games/010019A01E2F2000/scan_diag.py" "$DIAG_MODE" check "$ORIGINAL" "$WORK/patched_v131072/main.patched.bin"
+fi
+if [ "${HUD_LAYOUT_PROBE:-}" = 1 ] || [ "${MENU_TRACE:-}" = 1 ]; then
+    "$PY" "$REPO/dm/games/010019A01E2F2000/hud_diag.py" check "$ORIGINAL" "$WORK/patched_v131072/main.patched.bin"
 fi
 echo "== ONE game launch: $MODE. Play this mode, then quit the game window."
 bash -c "$CMD" || true
@@ -106,9 +138,10 @@ for f, keys, n in re.findall(r'f(\d+):([^~]*)~f(\d+)', rec):
     else: spans.append([f, f + n, 0])
 print(f'ZL holds seen by the game: {len(spans)}; longest {max((b - a for a, b, _ in spans), default=0)} frames; holds of 1 s or more: '
       + (', '.join(f'f{a}-f{b} ({(b - a) / 60:.1f} s, {g} short gaps)' for a, b, g in spans if b - a >= 60) or 'none') if rec else 'ZL holds: no input recording')
-for l in re.findall(r'^.*(?:runtime patches|DM_NVN_ANISO:).*$', log, re.M)[:5]: print(l)
+for l in re.findall(r'^.*(?:runtime patches|DM_NVN_ANISO:|WindowCrop|MP4 16:10|present crop).*$', log, re.M)[:12]: print(l)
 miss = {a or b for a, b in re.findall(r'\[RED\] (?:shader ([0-9a-f]{16}) \([^)]*\) failed to load:|failed to load shader ([0-9a-f]{16})_b:)', log)}   # the build's SHADER_MISSING: geometry shaders too
 print(f'missing shaders: {len(miss)} distinct (the next run of this script compiles them)')
+for l in re.findall(r'^.*(?:MP4 HUD layout:|MP4 pause UI:|MP4 menu visuals:).*$', log, re.M): print(l)
 att = collections.Counter(re.findall(r'^\[pass\] F\d+ P \d+ (c0|d) ser=\d+ fmt=(\d+) (\d+x\d+)', log, re.M))
 print('attachments (kind fmt size: passes):', ', '.join(f'{k} {f} {s}: {n}' for (k, f, s), n in att.most_common(10)))
 vp = collections.Counter(re.findall(r'vp\[0\] = 0,0,(\d+,\d+)', log))
@@ -156,5 +189,8 @@ for l in re.findall(r'^.*(?:SIGSEGV|SIGBUS|fault at|crash handler).*$', log, re.
 PYEOF
 if [ "${SCAN_STATE_PROBE:-}" = 1 ] || [ "${SCAN_ACQUIRE_PROBE:-}" = 1 ] || [ "${SCAN_QUERY_PROBE:-}" = 1 ]; then
     "$PY" "$REPO/dm/games/010019A01E2F2000/scan_diag.py" "$DIAG_MODE" summary "$OUT/host.log" | tee -a "$OUT/summary.txt"
+fi
+if [ "${HUD_LAYOUT_PROBE:-}" = 1 ] || [ "${MENU_TRACE:-}" = 1 ]; then
+    "$PY" "$REPO/dm/games/010019A01E2F2000/hud_diag.py" summary "$OUT/host.log" | tee -a "$OUT/summary.txt"
 fi
 echo "== summary: $OUT/summary.txt"

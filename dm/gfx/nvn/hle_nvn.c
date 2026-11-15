@@ -112,13 +112,9 @@ static void nvn_init_slots(void) {
 #if TARGET_OS_OSX && __has_include("nvn_runtime.inc")
 #define NVN_PROFILE_RUNTIME 1
 static void *nvn_profile_runtime_lookup(const char *);
-// A profile's hooks on the command stream (nvn_runtime.inc): told every render target binding with its caller, and able to change viewports and
-// scissors set while a target it chose is bound (Metroid Prime 4's HUD drawn into the middle 16:9 band of a 16:10 output)
+// A profile may initialize presentation when targets first bind. It cannot rewrite
+// individual draw viewports/scissors: those state changes must stay paired.
 static void nvn_profile_set_rt(const NVNcommandBuffer *c, int n, const NVNtexture *const *ct, uint64_t caller);
-static void nvn_profile_viewports(const NVNcommandBuffer *c, int n, float *v);
-static void nvn_profile_scissor(const NVNcommandBuffer *c, int *x, int *y, int *w, int *h);
-static int nvn_profile_draw_begin(NVNcommandBuffer *c);   // nonzero: the profile changed state for this draw, and nvn_profile_draw_end restores it
-static void nvn_profile_draw_end(NVNcommandBuffer *c);
 static int nvn_is_window_tex(const NVNtexture *t);   // a texture of the window's swap chain
 static _Atomic uint64_t g_nvn_presents;   // nvnQueuePresentTexture calls so far: the frame a profile's hook is in
 #endif
@@ -1342,20 +1338,11 @@ static void rec_draw_idx_(NVNcommandBuffer *c, p_draw_idx d) {
 full:;
     size_t n = d.ind || d.mdi_cnt ? sizeof d : offsetof(p_draw_idx, ind); memcpy(rec(c, OP_DRAW_IDX, n), &d, n);
 }
-// Every draw passes the profile's hooks (nvn_runtime.inc), which may set state for that draw alone
 static void rec_draw(NVNcommandBuffer *c, p_draw d) {
-#ifdef NVN_PROFILE_RUNTIME
-    int f = nvn_profile_draw_begin(c); if (g_rtt_cb == c) rt_trace(c, "draw", 0, NULL); rec_draw_(c, d); if (f) nvn_profile_draw_end(c);
-#else
     if (g_rtt_cb == c) rt_trace(c, "draw", 0, NULL); rec_draw_(c, d);
-#endif
 }
 static void rec_draw_idx(NVNcommandBuffer *c, p_draw_idx d) {
-#ifdef NVN_PROFILE_RUNTIME
-    int f = nvn_profile_draw_begin(c); if (g_rtt_cb == c) rt_trace(c, "draw", 0, NULL); rec_draw_idx_(c, d); if (f) nvn_profile_draw_end(c);
-#else
     if (g_rtt_cb == c) rt_trace(c, "draw", 0, NULL); rec_draw_idx_(c, d);
-#endif
 }
 // A compact record's canonical records, written to out (at least REC_EXPAND_MAX bytes); returns their bytes
 static uint8_t *xrec(uint8_t *out, size_t *n, uint32_t op, size_t payload) {
@@ -1553,9 +1540,6 @@ static int slots_bound(const char *what, int st, int first, int n, int slots) {
     return k;
 }
 NVN(nvnCommandBufferSetViewports, void, NVNcommandBuffer *c, int first, int n, const float *v) {
-#ifdef NVN_PROFILE_RUNTIME
-    float pv[64]; if (n > 0 && n <= 16) { memcpy(pv, v, 16 * (size_t)n); nvn_profile_viewports(c, n, pv); v = pv; }
-#endif
     if (n > 0 && !g_shadow_skip) { shadow_trace_vp(c, v, (uint64_t)(uintptr_t)__builtin_return_address(0)); if (g_rtt_cb == c) memcpy(g_rtt_vp, v, sizeof g_rtt_vp); rt_trace(c, "viewport", (uint64_t)(uintptr_t)__builtin_return_address(0), v); }
     if (slots_fit(0, first, n, 16) != n) { LOG("[RED] SetViewports first=%d n=%d", first, n); return; }
     if (g_rec_compact && first >= 0) { uint8_t *q = crec(c, OPC_VIEWPORTS, (uint32_t)first | (uint32_t)n << 8, 16 * (size_t)n); memcpy(q, v, 16 * (size_t)n); return; }
@@ -1563,9 +1547,6 @@ NVN(nvnCommandBufferSetViewports, void, NVNcommandBuffer *c, int first, int n, c
     for (int i = 0; i < n; i++) memcpy(r->v[i], v + 4 * i, 16);
 }
 NVN(nvnCommandBufferSetScissor, void, NVNcommandBuffer *c, int x, int y, int w, int h) {
-#ifdef NVN_PROFILE_RUNTIME
-    nvn_profile_scissor(c, &x, &y, &w, &h);
-#endif
     if (g_rtt_cb == c) { float f[4] = {(float)x, (float)y, (float)w, (float)h}; memcpy(g_rtt_sc, f, sizeof f); rt_trace(c, "scissor", (uint64_t)(uintptr_t)__builtin_return_address(0), f); }
     if (g_rec_compact && (unsigned)x < 0x10000 && (unsigned)y < 0x10000 && (unsigned)w < 0x10000 && (unsigned)h < 0x10000) {
         uint16_t v[4] = {(uint16_t)x, (uint16_t)y, (uint16_t)w, (uint16_t)h}; memcpy(crec(c, OPC_SCISSOR, 0, 8), v, 8); return;

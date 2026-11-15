@@ -127,9 +127,9 @@ class ScanSourcePatch(unittest.TestCase):
         # Synthetic legal layout; no game bytes besides explicitly checked ISA
         # instructions. Stub positions come from the production emitter.
         text, base = 0x138ee20, 0x2000000
-        original = bytearray(0x13c2000)  # include the verified RO format table
+        original = bytearray(0x1824000)  # include the RO format and Entity registry tables
         original[self.profile.scene_site:self.profile.scene_site + 4] = bytes.fromhex('358108aa')
-        for off, hexbytes in self.profile.scan_source_abi + self.profile.scene_control_abi:
+        for off, hexbytes in self.profile.scan_source_abi + self.profile.scene_control_abi + ((self.profile.window_extent_site, self.profile.window_extent_original),) + self.profile.window_extent_abi + ((self.profile.ui_camera_site, self.profile.ui_camera_original),) + self.profile.ui_camera_abi + ((self.profile.hud_layout_site, self.profile.hud_layout_original),) + self.profile.hud_layout_abi + self.profile.pause_ui_sites + self.profile.pause_ui_abi + (self.profile.pause_panel_site,) + self.profile.pause_panel_abi + tuple((a,h) for a,h,_,_ in self.profile.menu_visual_hooks()) + self.profile.menu_visual_abi():
             original[off:off + len(bytes.fromhex(hexbytes))] = bytes.fromhex(hexbytes)
         for off, before in self.runtime.OUTPUT_ABI:
             original[off:off + len(before)] = before
@@ -142,7 +142,7 @@ class ScanSourcePatch(unittest.TestCase):
             struct.pack_into('<I', original, off, before)
         struct.pack_into('<I', original, self.profile.lod_distance_site, 0xbd43c920)
         struct.pack_into('<I', original, self.profile.fog_scale_site, 0xbd41a280)
-        patched = bytearray(base + 16384)
+        patched = bytearray(base + 32768)
         patched[:len(original)] = original
         words, checked, exports = [], [], {}
         context = types.SimpleNamespace(here=lambda: base + 4 * len(words), emit=words.append,
@@ -193,7 +193,7 @@ class ScanSourcePatch(unittest.TestCase):
         rows = [r.split('\t') for r in self.runtime.generate(module, patched, fixups).splitlines() if r.startswith('write\t')]
         for choice, _, w, h in self.runtime.FULL_CHOICES:
             writes = {int(r[2], 16): bytes.fromhex(r[4]) for r in rows if r[1] == choice}
-            self.assertEqual(len(writes), 38)  # scene, scan bridge, 30 canvas and six scalar sites
+            self.assertEqual(len(writes), 40 if choice.endswith('_1610') else 39)  # 16:10 also fits the native UI camera
             self.assertEqual(next(md.disasm(writes[0x80be90], 0)).op_str, f'w0, #{hex(w)}')
             self.assertEqual(next(md.disasm(writes[0x80be98], 0)).op_str, f'w0, #{hex(h)}')
             for a, b, r in self.runtime.OUTPUT_PAIRS:
@@ -202,6 +202,292 @@ class ScanSourcePatch(unittest.TestCase):
             self.assertIn(0x33170c, writes); self.assertIn(0x336a8c, writes)
             self.assertFalse(any(0x336a90 <= off < 0x336ab0 for off in writes), 'native scan size guard remains intact')
         with self.assertRaises(ValueError): self.runtime.output_writes('2880p_full', 7680, 4320)
+
+    def test_window_extent_stub_and_aspect_variant_preserve_square_pixels(self):
+        from capstone import Cs, CS_ARCH_ARM64, CS_MODE_ARM
+        md = Cs(CS_ARCH_ARM64, CS_MODE_ARM)
+        module, patched, fixups = self.fixture()
+        rows = [r.split('\t') for r in self.runtime.generate(module, patched, fixups).splitlines() if r.startswith('write\t')]
+        for choice, export, w, h in self.runtime.FULL_CHOICES:
+            self.assertEqual(w * 9, h * 16, '16:10 must crop a genuine 16:9 render, not squeeze its camera')
+            stub = int(fixups['RUNTIME_WINDOW_' + export], 0)
+            words = struct.unpack_from('<4I', patched, stub)
+            ins = list(md.disasm(patched[stub:stub + 16], stub))
+            self.assertEqual([(i.mnemonic, i.op_str) for i in ins[:3]],
+                             [('mov', f'x0, #{hex(w)}'), ('movk', f'x0, #{hex(h)}, lsl #32'), ('mov', 'x1, x0')])
+            self.assertEqual(words[3], B(stub + 12, self.profile.window_extent_site + 4))
+            write, = [row for row in rows if row[1] == choice and int(row[2], 16) == self.profile.window_extent_site]
+            self.assertEqual(bytes.fromhex(write[4]), struct.pack('<I', B(self.profile.window_extent_site, stub)))
+        for off, _ in ((self.profile.window_extent_site, self.profile.window_extent_original),) + self.profile.window_extent_abi:
+            module.image[off] ^= 1
+            with self.assertRaisesRegex(ValueError, 'window extent ABI'): self.runtime.generate(module, patched, fixups)
+            module.image[off] ^= 1
+            patched[off] ^= 1
+            with self.assertRaisesRegex(ValueError, 'window extent ABI'): self.runtime.generate(module, patched, fixups)
+            patched[off] ^= 1
+        for addr in ('-1', '0x100', hex(len(patched) - 4)):
+            with self.assertRaisesRegex(ValueError, 'window extent stub'):
+                self.runtime.generate(module, patched, fixups | {'RUNTIME_WINDOW_SCENE_F2880_W': addr})
+        stub = int(fixups['RUNTIME_WINDOW_SCENE_F2880_W'], 0)
+        patched[stub + 8] ^= 1
+        with self.assertRaisesRegex(ValueError, 'window extent stub'): self.runtime.generate(module, patched, fixups)
+
+    def test_ui_camera_fit_is_only_selected_for_1610_and_rejects_bad_abi(self):
+        module, patched, fixups = self.fixture()
+        rows = [r.split('\t') for r in self.runtime.generate(module, patched, fixups).splitlines() if r.startswith('write\t')]
+        writes = [r for r in rows if int(r[2], 16) == self.profile.ui_camera_site]
+        self.assertEqual([r[1] for r in writes], [c for c, *_ in self.runtime.FULL_CHOICES if c.endswith('_1610')])
+        stub = int(fixups['RUNTIME_UI_CAMERA_FIT_1610'], 0)
+        self.assertTrue(all(bytes.fromhex(r[4]) == struct.pack('<I', B(self.profile.ui_camera_site, stub)) for r in writes))
+        for off, _ in ((self.profile.ui_camera_site, self.profile.ui_camera_original),) + self.profile.ui_camera_abi:
+            for image in (module.image, patched):
+                image[off] ^= 1
+                with self.assertRaisesRegex(ValueError, 'UI camera ABI'): self.runtime.generate(module, patched, fixups)
+                image[off] ^= 1
+        for addr in ('-1', '0x100', hex(len(patched) - 4), hex(stub + 1)):
+            with self.assertRaisesRegex(ValueError, 'UI camera stub'):
+                self.runtime.generate(module, patched, fixups | {'RUNTIME_UI_CAMERA_FIT_1610': addr})
+        patched[stub + 8] ^= 1
+        with self.assertRaisesRegex(ValueError, 'UI camera stub'): self.runtime.generate(module, patched, fixups)
+
+    def test_ui_camera_bounds_do_not_touch_depth_or_world_projection(self):
+        from capstone import Cs, CS_ARCH_ARM64, CS_MODE_ARM
+        code = b''.join(struct.pack('<I', w) for w in self.profile.ui_camera_words(0))
+        ins = list(Cs(CS_ARCH_ARM64, CS_MODE_ARM).disasm(code, 0))
+        # The single descriptor store covers +c..+1b, leaving mode/aspect and
+        # near/far (+1c/+20) unchanged. No call into the world/scan camera.
+        self.assertEqual([(i.mnemonic, i.op_str) for i in ins if i.mnemonic == 'stur'], [('stur', 'q0, [x8, #0xc]')])
+        self.assertFalse(any(i.mnemonic in ('bl', 'blr', 'b') for i in ins))
+        self.assertEqual([(i.mnemonic, i.op_str) for i in ins[-3:]], [('mov', 'w9, #2'), ('add', 'sp, sp, #0x30'), ('ret', '')])
+        self.assertEqual(ins[1].op_str, ins[-4].op_str)  # complete q0/q1 preservation
+        self.assertEqual(ins[2].op_str, ins[-5].op_str)  # complete q2 preservation
+
+    @unittest.skipUnless(sys.platform == 'darwin' and __import__('platform').machine() == 'arm64', 'native Apple Silicon test')
+    def test_ui_camera_native_execution_preserves_registers_and_fits_edges(self):
+        import subprocess
+        # Only verified ISA instructions, no proprietary assets/executable.
+        original = bytes.fromhex(self.profile.ui_camera_abi[0][1] + self.profile.ui_camera_original)
+        code = bytearray(256)
+        code[:len(original)] = original
+        code[128:128 + len(original)] = original
+        struct.pack_into('<I', code, 128 + len(original) - 4, B(128 + len(original) - 4, 256))
+        code += b''.join(struct.pack('<I', w) for w in self.profile.ui_camera_words(256))
+        with tempfile.TemporaryDirectory() as tmp:
+            binary = Path(tmp) / 'ui.bin'; binary.write_bytes(code)
+            test = Path(tmp) / 'ui-test'
+            subprocess.run(['xcrun', 'clang', '-O2', '-Wall', '-Wextra', str(ROOT / 'dm/tools/tests/t_mp4_ui_camera.c'), '-o', str(test)], check=True, capture_output=True)
+            result = subprocess.run([str(test), str(binary)], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn('native UICamera checks', result.stdout)
+
+    def test_hud_layout_is_independent_default_off_and_strictly_validated(self):
+        module, patched, fixups = self.fixture()
+        rows = [r.split('\t') for r in self.runtime.generate_hud(module, patched, fixups).splitlines()]
+        self.assertEqual(rows[0][3], 'DM_HUD_SCALE')
+        self.assertEqual([r[1] for r in rows if r[0] == 'choice'], ['default', '85'])
+        stub = int(fixups['RUNTIME_HUD_LAYOUT_V1'], 0)
+        self.assertEqual([r for r in rows if r[0] == 'write'],
+                         [['write', '85', '231240', self.profile.hud_layout_original,
+                           struct.pack('<I', B(self.profile.hud_layout_site, stub)).hex()]])
+        base = self.runtime.generate(module, patched, fixups)
+        self.assertNotIn('231240', base)  # baseline/scene manifests remain independent
+        abi = ((self.profile.hud_layout_site, self.profile.hud_layout_original),) + self.profile.hud_layout_abi + (self.profile.scan_source_abi[1],)
+        for off, _ in abi:
+            for image in (module.image, patched):
+                image[off] ^= 1
+                with self.assertRaisesRegex(ValueError, 'HUD layout ABI'):
+                    self.runtime.generate_hud(module, patched, fixups)
+                image[off] ^= 1
+        for addr in ('-1', '0x100', hex(stub+1), hex(len(patched)-4)):
+            with self.assertRaisesRegex(ValueError, 'HUD layout stub'):
+                self.runtime.generate_hud(module, patched, fixups | {'RUNTIME_HUD_LAYOUT_V1': addr})
+        patched[stub+8] ^= 1
+        with self.assertRaisesRegex(ValueError, 'HUD layout stub'): self.runtime.generate_hud(module, patched, fixups)
+        module.build_id = bytes(32)
+        with self.assertRaisesRegex(ValueError, 'requires main v1.1.0'): self.runtime.generate_hud(module, patched, fixups)
+
+    def test_hud_layout_stub_preserves_registers_and_native_constructor_arguments(self):
+        from capstone import Cs, CS_ARCH_ARM64, CS_MODE_ARM
+        start = 0x2000000
+        code = b''.join(struct.pack('<I', w) for w in self.profile.hud_layout_words(start))
+        code_end = code.index(self.profile.hud_layout_extension)
+        ins = list(Cs(CS_ARCH_ARM64, CS_MODE_ARM).disasm(code[:code_end], start))
+        text = [(i.mnemonic, i.op_str) for i in ins]
+        self.assertEqual(text[:2], [('add', 'x2, sp, #4'), ('sub', 'sp, sp, #0x2b0')])
+        self.assertIn(('ldr', 'x0, [x19, #0x58]'), text)
+        self.assertIn(('ldr', 'x1, [sp, #0x10]'), text)
+        self.assertIn(('mrs', 'x17, nzcv'), text); self.assertIn(('msr', 'nzcv, x17'), text)
+        self.assertEqual([i.op_str for i in ins if i.mnemonic == 'stp'], [i.op_str for i in ins if i.mnemonic == 'ldp'])
+        self.assertEqual([i.op_str for i in ins if i.mnemonic == 'str' and i.op_str.startswith('q')], [i.op_str for i in ins if i.mnemonic == 'ldr' and i.op_str.startswith('q')])
+        self.assertEqual(text[-2:], [('add', 'sp, sp, #0x2b0'), ('b', '#0x231244')])
+        restore = next(i.address for i in ins if (i.mnemonic, i.op_str) == ('ldr', 'q0, [sp, #0xb0]'))
+        self.assertIn(('cbz', f'x0, #{hex(restore)}'), text)
+
+    @unittest.skipUnless(sys.platform == 'darwin' and __import__('platform').machine() == 'arm64', 'native Apple Silicon test')
+    def test_hud_bridge_native_default_missing_and_enabled(self):
+        import subprocess
+        _, patched, fixups = self.fixture()
+        # Replace native constructor continuation with RET and use a mock
+        # bootstrap. Execute only our bridge; no assets, render loop or game.
+        struct.pack_into('<I', patched, self.profile.hud_layout_site+4, 0xd65f03c0)
+        with tempfile.TemporaryDirectory() as tmp:
+            binary = Path(tmp)/'bridge.bin'; binary.write_bytes(patched)
+            # Manifest must still validate against the unmodified fixture.
+            module, unmodified, _ = self.fixture()
+            manifest = Path(tmp)/'hud.runtime.tsv'
+            manifest.write_text(self.runtime.generate_hud(module, unmodified, fixups))
+            test = Path(tmp)/'bridge-test'
+            subprocess.run(['xcrun', 'clang', '-O2', '-Wall', '-Wextra', '-Werror',
+                            str(ROOT/'dm/tools/tests/t_mp4_hud_bridge.c'), '-o', str(test)], check=True, capture_output=True)
+            result = subprocess.run([str(test), str(binary), str(manifest)], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stdout+result.stderr)
+            self.assertIn('native HUD bridge checks', result.stdout)
+
+    def test_hud_layout_cpu_policy(self):
+        import subprocess
+        with tempfile.TemporaryDirectory() as tmp:
+            test = Path(tmp) / 'hud-test'
+            subprocess.run(['cc', '-std=c11', '-O2', '-Wall', '-Wextra', '-Werror', '-fsanitize=address,undefined',
+                            str(ROOT / 'dm/tools/tests/t_mp4_hud_layout.c'), '-lm', '-o', str(test)], check=True, capture_output=True)
+            result = subprocess.run([str(test)], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn('HUD layout checks', result.stdout)
+
+    def test_pause_ui_is_independent_default_off_and_validates_both_paths(self):
+        module, patched, fixups=self.fixture()
+        rows=[r.split('\t') for r in self.runtime.generate_pause(module,patched,fixups).splitlines()]
+        self.assertEqual(rows[0][3],'DM_MENU_FIT')
+        self.assertEqual([r[1] for r in rows if r[0]=='choice'],['default','1610'])
+        self.assertEqual([r[2] for r in rows if r[0]=='write'],['916c0c']+[f'{off:x}' for off,_,_,_ in self.profile.menu_visual_hooks()])
+        for off,_ in self.profile.pause_ui_sites+self.profile.pause_ui_abi+tuple((a,h) for a,h,_,_ in self.profile.menu_visual_hooks())+self.profile.menu_visual_abi()+(self.profile.scan_source_abi[1],):
+            for image in (module.image,patched):
+                image[off]^=1
+                with self.assertRaisesRegex(ValueError,'pause UI ABI'):self.runtime.generate_pause(module,patched,fixups)
+                image[off]^=1
+        for kind in ('BOUNDS',):
+            key='RUNTIME_PAUSE_UI_'+kind;stub=int(fixups[key],0)
+            for addr in ('-1','0x100',hex(stub+1),hex(len(patched)-4)):
+                with self.assertRaisesRegex(ValueError,'pause UI stub'):self.runtime.generate_pause(module,patched,fixups|{key:addr})
+            patched[stub+8]^=1
+            with self.assertRaisesRegex(ValueError,'pause UI stub'):self.runtime.generate_pause(module,patched,fixups)
+            patched[stub+8]^=1
+        module.build_id=bytes(32)
+        with self.assertRaisesRegex(ValueError,'requires main v1.1.0'):self.runtime.generate_pause(module,patched,fixups)
+
+    def test_menu_visual_guards_policy_and_native_bridges(self):
+        import subprocess
+        from capstone import Cs,CS_ARCH_ARM64,CS_MODE_ARM
+        module,patched,fixups=self.fixture()
+        manifest=self.runtime.generate_pause(module,patched,fixups)
+        for index,(off,h,event,argument) in enumerate(self.profile.menu_visual_hooks()):
+            key='RUNTIME_MENU_VISUAL_'+str(index);stub=int(fixups[key],0)
+            for addr in ('-1',hex(stub+1),hex(len(patched)-4)):
+                with self.assertRaisesRegex(ValueError,'pause UI stub'):self.runtime.generate_pause(module,patched,fixups|{key:addr})
+            patched[stub+12]^=1
+            with self.assertRaisesRegex(ValueError,'pause UI stub'):self.runtime.generate_pause(module,patched,fixups)
+            patched[stub+12]^=1
+            code=b''.join(struct.pack('<I',w) for w in self.profile.menu_visual_words(stub,index))
+            end=code.index(self.profile.menu_visual_extension)
+            ins=list(Cs(CS_ARCH_ARM64,CS_MODE_ARM).disasm(code[:end],stub));text=[(i.mnemonic,i.op_str) for i in ins]
+            self.assertIn(('mrs','x17, nzcv'),text);self.assertIn(('msr','nzcv, x17'),text)
+            self.assertEqual([i.op_str for i in ins if i.mnemonic=='str' and i.op_str.startswith('q')],[i.op_str for i in ins if i.mnemonic=='ldr' and i.op_str.startswith('q')])
+            self.assertEqual(len([i for i in ins if i.mnemonic=='str' and i.op_str.startswith('q')]),32)
+            self.assertEqual(text[-1],('b',f'#{off+4:#x}'))
+            if argument.startswith('inline'):
+                self.assertIn(('ldr','x1, [sp, #0x40]'),text)
+                self.assertIn(('ldr','x0, [sp]') if argument=='inline_original' else ('mov','x0, x19'),text)
+                self.assertEqual(text[-2],('ldrb','w9, [x0, #0x96]' if argument=='inline_original' else 'w9, [x19, #0x96]'))
+        for off,h,event,argument in self.profile.menu_visual_hooks():
+            if event in (1,5):
+                struct.pack_into('<II',patched,off+4,0xa8c27bfd,0xd65f03c0) # balance displaced STP, return
+            else:struct.pack_into('<I',patched,off+4,0xd65f03c0)
+        with tempfile.TemporaryDirectory() as tmp:
+            binary=Path(tmp)/'visual-policy'
+            subprocess.run(['cc','-std=c11','-Wall','-Wextra','-Werror','-fsanitize=address,undefined',str(ROOT/'dm/tools/tests/t_mp4_menu_visual.c'),'-o',str(binary)],check=True,capture_output=True)
+            result=subprocess.run([str(binary)],capture_output=True,text=True)
+            self.assertEqual(result.returncode,0,result.stdout+result.stderr)
+            if sys.platform=='darwin' and __import__('platform').machine()=='arm64':
+                image=Path(tmp)/'visual.bin';image.write_bytes(patched)
+                mf=Path(tmp)/'visual.runtime.tsv';mf.write_text(manifest)
+                sites=Path(tmp)/'sites.txt';sites.write_text('\n'.join(hex(off) for off,_,_,_ in self.profile.menu_visual_hooks()))
+                native=Path(tmp)/'visual-native'
+                subprocess.run(['xcrun','clang','-O2','-Wall','-Wextra','-Werror',str(ROOT/'dm/tools/tests/t_mp4_menu_visual_bridge.c'),'-o',str(native)],check=True,capture_output=True)
+                result=subprocess.run([str(native),str(image),str(mf),str(sites)],capture_output=True,text=True)
+                self.assertEqual(result.returncode,0,result.stdout+result.stderr)
+                self.assertIn('native menu visual bridge checks',result.stdout)
+
+    def test_menu_trace_is_separate_default_off_and_checks_exact_native_transform_abi(self):
+        module,patched,fixups=self.fixture()
+        rows=[r.split('\t') for r in self.runtime.generate_menu_trace(module,patched,fixups).splitlines()]
+        self.assertEqual(rows[0][3],'DM_MENU_TRACE')
+        self.assertEqual([r[1] for r in rows if r[0]=='choice'],['default','1'])
+        self.assertEqual([r[2] for r in rows if r[0]=='write'],['101fc14'])
+        for off,_ in (self.profile.pause_panel_site,)+self.profile.pause_panel_abi+(self.profile.scan_source_abi[1],):
+            for image in (module.image,patched):
+                image[off]^=1
+                with self.assertRaisesRegex(ValueError,'menu trace ABI'):self.runtime.generate_menu_trace(module,patched,fixups)
+                image[off]^=1
+        stub=int(fixups['RUNTIME_PAUSE_UI_PANEL'],0)
+        for value in ('-1',hex(stub+1),hex(len(patched))):
+            with self.assertRaisesRegex(ValueError,'menu trace stub'):self.runtime.generate_menu_trace(module,patched,fixups|{'RUNTIME_PAUSE_UI_PANEL':value})
+        patched[stub]^=1
+        with self.assertRaisesRegex(ValueError,'menu trace stub'):self.runtime.generate_menu_trace(module,patched,fixups)
+        module.build_id=bytes(32)
+        with self.assertRaisesRegex(ValueError,'main v1.1.0'):self.runtime.generate_menu_trace(module,patched,fixups)
+        import subprocess
+        with tempfile.TemporaryDirectory() as tmp:
+            binary=Path(tmp)/'menu-trace'
+            subprocess.run(['cc','-Wall','-Wextra','-Werror','-fsanitize=address,undefined',str(ROOT/'dm/tools/tests/t_mp4_menu_trace.c'),'-o',str(binary)],check=True,capture_output=True)
+            result=subprocess.run([str(binary)],capture_output=True,text=True)
+            self.assertEqual(result.returncode,0,result.stdout+result.stderr)
+            self.assertIn('all source bytes unchanged',result.stdout)
+
+    def test_pause_ui_policy_and_bridge_instruction_contracts(self):
+        import subprocess
+        from capstone import Cs,CS_ARCH_ARM64,CS_MODE_ARM
+        for kind in ('bounds','fov','panel'):
+            code=b''.join(struct.pack('<I',w) for w in self.profile.pause_ui_words(0x2000000,kind))
+            end=code.index(self.profile.pause_ui_extension)
+            ins=list(Cs(CS_ARCH_ARM64,CS_MODE_ARM).disasm(code[:end],0x2000000))
+            text=[(i.mnemonic,i.op_str) for i in ins]
+            self.assertIn(('mrs','x17, nzcv'),text);self.assertIn(('msr','nzcv, x17'),text)
+            self.assertEqual([i.op_str for i in ins if i.mnemonic=='str' and i.op_str.startswith('q')], [i.op_str for i in ins if i.mnemonic=='ldr' and i.op_str.startswith('q')])
+            if kind=='bounds':self.assertEqual(text[-2:],[('add','x0, x19, #0x8c'),('b','#0x916c10')])
+            elif kind=='panel':
+                self.assertIn(('mov','x0, x19'),text)
+                self.assertIn(('ldr','x1, [sp, #0x40]'),text)
+                self.assertEqual(text[-2:],[('ldrb','w8, [x19, #0x2fb]'),('b','#0x101fc18')])
+            else:
+                self.assertEqual(text[0],('strb','wzr, [sp, #0x32c]'))
+                self.assertIn(('mov','x0, x21'),text)
+                self.assertIn(('sub','x1, x29, #0xe8'),text)
+                self.assertEqual(text[-1],('b','#0x3fd50'))
+        with tempfile.TemporaryDirectory() as tmp:
+            test=Path(tmp)/'pause-test'
+            subprocess.run(['cc','-O2','-Wall','-Wextra','-Werror','-fsanitize=address,undefined',str(ROOT/'dm/tools/tests/t_mp4_pause_ui.c'),'-lm','-o',str(test)],check=True,capture_output=True)
+            result=subprocess.run([str(test)],capture_output=True,text=True)
+            self.assertEqual(result.returncode,0,result.stdout+result.stderr)
+            self.assertIn('pause UI policy checks',result.stdout)
+
+    @unittest.skipUnless(sys.platform=='darwin' and __import__('platform').machine()=='arm64','native Apple Silicon test')
+    def test_pause_native_bridges_default_scope_missing_and_enabled(self):
+        import subprocess
+        module,patched,fixups=self.fixture()
+        manifest=self.runtime.generate_pause(module,patched,fixups)
+        trace_manifest=self.runtime.generate_menu_trace(module,patched,fixups)
+        struct.pack_into('<I',patched,0x101fc18,0xd65f03c0)
+        # Stop after the borrowed-record site; no camera construction/game runs.
+        struct.pack_into('<I',patched,0x3fd50,0xd65f03c0)
+        struct.pack_into('<I',patched,0x916c10,0xd65f03c0)
+        with tempfile.TemporaryDirectory() as tmp:
+            binary=Path(tmp)/'pause.bin';binary.write_bytes(patched)
+            mf=Path(tmp)/'pause.runtime.tsv';mf.write_text(manifest)
+            tf=Path(tmp)/'trace.runtime.tsv';tf.write_text(trace_manifest)
+            test=Path(tmp)/'pause-bridge'
+            subprocess.run(['xcrun','clang','-O2','-Wall','-Wextra','-Werror',str(ROOT/'dm/tools/tests/t_mp4_pause_bridge.c'),'-o',str(test)],check=True,capture_output=True)
+            result=subprocess.run([str(test),str(binary),str(mf),str(tf)],capture_output=True,text=True)
+            self.assertEqual(result.returncode,0,result.stdout+result.stderr)
+            self.assertIn('native pause bridge checks',result.stdout)
 
     def test_scene_control_preserves_registers_flags_and_uses_original_stack_input(self):
         from capstone import Cs, CS_ARCH_ARM64, CS_MODE_ARM  # pyright: ignore[reportMissingImports]

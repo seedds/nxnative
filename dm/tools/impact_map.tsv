@@ -167,6 +167,7 @@ dm/host/pad_switch2_apple.m	hle:*hid*	Switch 2 controllers over Bluetooth LE (of
 dm/host/keymap.h	present:*	the Mac keyboard map (keyboard_mac.h; the launcher checks a saved one)
 dm/host/keyboard_mac.h	present:*	the Mac keyboard as player 1's controller
 dm/host/keymap_panel_mac.h	present:*	the Mac in-game Keyboard Map panel
+dm/host/mouselook_mac.h	hle:*SixAxisSensor*	the Mac mouse as a stick or the motion controls (dm_motion_set_switch)
 dm/host/front.h	present:*	the front end
 dm/ios/*	*:*	the iOS app
 dm/third_party/ryujinx/src/Ryujinx.Graphics.Shader/Translation/ResourceReservations.cs	shader:stage:gs	geometry compute varying slots

@@ -236,7 +236,7 @@ Turn off **Show this window at launch** to start the game at once with your choi
 
 ### Keyboard
 
-Below **Controls**: which key presses each button and stick direction. **Customize…** opens the map, every button and stick direction with its key; click one and press its key, or hold Shift, Control or Option and press a key for a chord such as ⇧↑ (Esc stops; right-click for **No Key**, or **Add Key…** for another key as well), or pick a layout under **Presets**. The map is kept for the game and also changes in the game itself, under **Window › Keyboard Map…** ([Keyboard](playing.md#keyboard-mac)). In an `env.txt`: `DM_KEYMAP`.
+Below **Controls**: which key or mouse button presses each button and stick direction, and what mouse movement moves. **Customize…** opens the map, every button and stick direction with its key; click one and press its key, or hold Shift, Control or Option and press a key for a chord such as ⇧↑ (a mouse button counts as a key; Esc stops; right-click for **No Key**, or **Add Key…** for another key as well), or pick a layout under **Presets**. Under **Mouse and trackpad**, each stick and the motion controls has a source: **None**, **Mouse**, or **Hold a Key or Button…** (only while it is held; one output at a time, a held key's first), with its **Speed** and **Invert Y** ([Mouse and trackpad](playing.md#mouse-and-trackpad-mac)). The map is kept for the game and also changes in the game itself, under **Window › Keyboard Map…** ([Keyboard](playing.md#keyboard-mac)). In an `env.txt`: `DM_KEYMAP`.
 
 ### Switch 2 controllers
 

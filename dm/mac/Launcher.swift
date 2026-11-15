@@ -6,7 +6,15 @@
 // opened in the background (open -g) keeps its window behind until the player switches to it
 import AppKit
 import QuartzCore
+import Compression
 import SwiftUI
+
+/// Raw deflate (RFC 1951) to exactly `size` bytes, or nil: a newer SDK's compressed title area in control.nacp (LauncherView.publisher)
+private func inflate(_ data: Data, to size: Int) -> Data? {
+    var out = [UInt8](repeating: 0, count: size + 1)
+    let n = data.withUnsafeBytes { src in compression_decode_buffer(&out, out.count, src.bindMemory(to: UInt8.self).baseAddress!, data.count, nil, COMPRESSION_ZLIB) }
+    return n == size ? Data(out.prefix(size)) : nil
+}
 
 private func info(_ key: String) -> String? { Bundle.main.object(forInfoDictionaryKey: key) as? String }
 
@@ -141,7 +149,24 @@ struct LauncherView: View {
     @State private var heights = Heights()
     @State private var position = ScrollPosition(edge: .top)
 
-    struct Heights: Equatable { var header: CGFloat = 0, basic: CGFloat = 0, advanced: CGFloat = 0, name: CGFloat = 0 }   // name: the bottom edge of the game's name in the header
+    struct Heights: Equatable { var header: CGFloat = 0, basic: CGFloat = 0, advanced: CGFloat = 0, name: CGFloat = 0, icon: CGFloat = 0 }   // name, icon: the bottom edges of the game's name and icon in the header
+
+    /// Who made the game, from its control data (Resources/control.nacp, pack_app.py) as nacp.py reads its name: the publisher beside the first language's
+    /// name. nil without the file (an app packed before it was copied, a dump), or with no publisher
+    static let publisher: String? = {
+        guard let url = Bundle.main.resourceURL?.appendingPathComponent("control.nacp"), var area = try? Data(contentsOf: url).prefix(0x3000) else { return nil }
+        if area.count >= 2 {   // newer SDKs deflate the title area: a u16 size, then raw deflate to 32 languages of 0x300 bytes
+            let size = Int(area[area.startIndex]) | Int(area[area.startIndex + 1]) << 8
+            if size > 0, size <= area.count - 2, let whole = try? Data(contentsOf: url), let z = inflate(whole.subdata(in: 2..<2 + size), to: 0x6000) { area = z }
+        }
+        let t = [UInt8](area)
+        for i in 0..<(t.count / 0x300) where t[i * 0x300] != 0 {
+            let p = t[(i * 0x300 + 0x200)..<(i * 0x300 + 0x300)].prefix { $0 != 0 }
+            guard let s = String(bytes: p, encoding: .utf8), !s.isEmpty, !s.unicodeScalars.contains(where: { $0.properties.generalCategory == .control }) else { return nil }
+            return s
+        }
+        return nil
+    }()
 
     /// The game's icon (pack_app.py's AppIcon.icns, from the game's control data or --icon); nil when the app has none (a dump or a NUP without one)
     static let art: NSImage? = info("CFBundleIconFile").flatMap { Bundle.main.image(forResource: $0) }
@@ -149,15 +174,16 @@ struct LauncherView: View {
 
     /// How far each part of the header has come into the bar (`Scrolled.parts`), from the distance scrolled and where the header's parts end (0 until they are
     /// measured). A part comes in over the `band` of scroll that follows its going under the bar, so none is in sight twice, and it comes with the scroll: the
-    /// number is its place in that band in eighths, the icon's in the hundreds, the name's in the tens, Play's in the units (888: the whole header is in the bar)
-    static func scrolled(_ y: CGFloat, header: CGFloat, name: CGFloat) -> Int {
-        guard header > 0, name > 0 else { return 0 }
+    /// number is its place in that band in eighths, the icon's in the hundreds, the name's in the tens, Play's in the units (888: the whole header is in the bar),
+    /// and a thousand once anything has scrolled at all: the bar's ground is there from then on, as a toolbar's edge comes when content goes under it
+    static func scrolled(_ y: CGFloat, header: CGFloat, name: CGFloat, icon: CGFloat) -> Int {
+        guard header > 0, name > 0, icon > 0 else { return 0 }
         func part(_ from: CGFloat) -> Int { Int((max(0, min(1, (y - from) / band)) * 8).rounded()) }
-        return part(iconTop + icon - 34) * 100 + part(name) * 10 + part(header - playBelow)
+        return (y > 0.5 ? 1000 : 0) + part(icon) * 100 + part(name) * 10 + part(header - playBelow)
     }
     static let band: CGFloat = 14
-    static let playBelow: CGFloat = 14   // from the header's Play to the header's bottom edge
-    static let iconTop: CGFloat = 34, icon: CGFloat = 96   // the header's icon: 34 pt under the window's top edge, beside the window's buttons and not under them
+    static let playBelow: CGFloat = 14   // from the header's Play to the header's bottom edge, less the room under the column when the icon is the taller
+    static let iconTop: CGFloat = 56, icon: CGFloat = 112   // the header's icon: 56 pt under the window's top edge, below the bar's 52, so nothing of the header is in the bar's height until it scrolls
 
     var body: some View {
         // The header scrolls with the settings: on a screen too short for the window (a laptop's, with Advanced settings open) it kept a quarter of the window for
@@ -183,7 +209,7 @@ struct LauncherView: View {
             .scrollDisabled(closing)
             .scrollBounceBehavior(.basedOnSize)
             .onScrollGeometryChange(for: Int.self) {
-                Self.scrolled($0.contentOffset.y + $0.contentInsets.top, header: heights.header, name: heights.name)
+                Self.scrolled($0.contentOffset.y + $0.contentInsets.top, header: heights.header, name: heights.name, icon: heights.icon)
             } action: { _, now in
                 scroll.parts = now
             }
@@ -211,15 +237,15 @@ struct LauncherView: View {
         }
     }
 
+    /// The game as the Switch's page for a game shows it: its tile on the left, and beside it its name, who made it and its version, and Play
     private var header: some View {
-        VStack(spacing: 0) {
+        HStack(alignment: .center, spacing: 20) {
             GameIcon(art: Self.art, side: Self.icon)
-                // The icon stands in the bar's height, so the bar's ground cannot come while it is in sight: it fades as its last third goes out under the window's
-                // top edge, and is gone when the ground comes
-                .visualEffect { icon, at in icon.opacity(Double(max(0, min(1, (at.frame(in: .global).maxY - 34) / 26)))) }
-            Text(info("CFBundleName") ?? "Game").font(.system(.title, design: .rounded).weight(.bold)).lineLimit(2).multilineTextAlignment(.center)
+                .onGeometryChange(for: CGFloat.self) { $0.frame(in: .named("header")).maxY } action: { heights.icon = $0 }
+            VStack(alignment: .leading, spacing: 0) {
+            Text(info("CFBundleName") ?? "Game").font(.system(.title, design: .rounded).weight(.bold)).lineLimit(3)
                 .fixedSize(horizontal: false, vertical: true)
-                .padding(.top, 14)
+                .help(info("CFBundleName") ?? "")
                 .onGeometryChange(for: CGFloat.self) { $0.frame(in: .named("header")).maxY } action: { heights.name = $0 }
             Group {
                 if checkingShown {
@@ -232,7 +258,8 @@ struct LauncherView: View {
                     .lineLimit(1)
                     .transition(.opacity)
                 } else {
-                    Text("Ver. \(info("CFBundleShortVersionString") ?? "1.0")").foregroundStyle(.secondary)
+                    Text(([Self.publisher] + ["Ver. \(info("CFBundleShortVersionString") ?? "1.0")"]).compactMap { $0 }.joined(separator: " · ")).foregroundStyle(.secondary)
+                        .lineLimit(1)
                         .transition(.opacity)
                 }
             }
@@ -245,11 +272,13 @@ struct LauncherView: View {
             .controlSize(.extraLarge)
             .keyboardShortcut(.defaultAction)
             .disabled(checking)
-            .padding(.top, 16)
+            .padding(.top, 12)
+            }
+            Spacer(minLength: 0)
         }
         .animation(.easeOut(duration: 0.15), value: checkingShown)
         .frame(maxWidth: .infinity)
-        .padding(.horizontal, 24).padding(.top, Self.iconTop - bar).padding(.bottom, Self.playBelow)
+        .padding(.horizontal, 20).padding(.top, Self.iconTop - bar).padding(.bottom, Self.playBelow + 6)   // the tile's left edge on the boxes'
         .coordinateSpace(.named("header"))
     }
 
@@ -268,8 +297,9 @@ struct LauncherView: View {
             // The window's last line while Advanced settings is closed. Open, the line is at the advanced settings' end, and this is the room between their row and
             // their first heading, which was there before: nothing moves when the row is clicked, and nothing of the advanced settings is seen under the window's
             // edge while it closes over them
+            // 38 pt from the Advanced box to the first heading, as between the sections: 12 + 16 (the line) + 20, less 10
             lastLine.opacity(advanced ? 0 : 1).disabled(advanced).accessibilityHidden(advanced)
-                .padding(.top, 2).padding(.bottom, -4)
+                .padding(.top, -2).padding(.bottom, -8)
         }
         .padding(20)
     }
@@ -290,7 +320,7 @@ struct LauncherView: View {
             ForEach(Array(m.sections(basic: false).enumerated()), id: \.element) { i, section in
                 let rows = m.rows(in: section, basic: false)
                 if !rows.isEmpty {
-                    // 38 pt from the box above to a heading, as a Form sets a headed section; the first has the window's last line above it (basicSettings), and its room
+                    // 38 pt from the box above to a heading, as a Form sets a headed section; the first has the window's last line's room above it (basicSettings), as tall
                     Text(section).font(.headline).padding(.leading, 10).padding(.top, i == 0 ? 0 : 38).padding(.bottom, 10)
                     Box { ForEach(rows) { SettingLine($0, m).equatable() } }
                 }
@@ -353,7 +383,7 @@ private struct TitleBar: View {
     static let leading: CGFloat = 92   // clear of the window's buttons
 
     var body: some View {
-        let parts = scroll.parts, icon = Double(parts / 100) / 8, name = Double(parts / 10 % 10) / 8, button = Double(parts % 10) / 8
+        let under = scroll.parts >= 1000, parts = scroll.parts % 1000, icon = Double(parts / 100) / 8, name = Double(parts / 10 % 10) / 8, button = Double(parts % 10) / 8
         GeometryReader { g in
             let height = g.safeAreaInsets.top   // the title bar's own
             HStack(spacing: 10) {
@@ -375,11 +405,11 @@ private struct TitleBar: View {
             .accessibilityHidden(button < 1)
             .frame(maxWidth: .infinity).frame(height: height)
             .overlay { WindowDrag(on: button < 1) }   // not allowsHitTesting, switched as the bar comes and goes: that cost the main thread 8 to 10 ms each time, a frame dropped in the middle of a scroll
-            // The ground is the window's own (Surface), there at once. Not a material: in the key window one lets the header's Play show through as a blue smear.
-            // Not faded in: a quick scroll brings the header's Play under the bar within the time of a fade, and it showed through. Nothing is under it when it
-            // comes (the header's icon has faded by then), so nothing is seen to be cut off
-            .background { Surface.ground.opacity(parts > 0 ? 1 : 0) }
-            .overlay(alignment: .bottom) { Divider().opacity(parts > 0 ? 1 : 0) }
+            // The ground is the window's own (Surface), there at once, from the first point scrolled: the header starts below the bar, so it comes over nothing, and
+            // the header's parts go up under a solid edge, not under the window's buttons. Not a material: in the key window one lets the header's Play show through
+            // as a blue smear. Not faded in: a quick scroll brings the header's Play under the bar within the time of a fade, and it showed through
+            .background { Surface.ground.opacity(under ? 1 : 0) }
+            .overlay(alignment: .bottom) { Divider().opacity(under ? 1 : 0) }
             .offset(y: -height)
         }
         .frame(height: 0)
@@ -420,7 +450,7 @@ private struct Box<Rows: View>: View {
             Group(subviews: rows) { subviews in
                 ForEach(Array(subviews.enumerated()), id: \.element.id) { i, row in
                     if i > 0 { Divider().padding(.horizontal, 10) }
-                    row.padding(.horizontal, inset ? 10 : 0).padding(.vertical, inset ? 8 : 0).frame(minHeight: inset ? 37 : 0)
+                    row.padding(.horizontal, inset ? 10 : 0).padding(.vertical, inset ? 8 : 0).frame(minHeight: inset ? 40 : 0)   // 40: a row with a choice side by side; every row as tall
                 }
             }
         }
@@ -917,13 +947,14 @@ private struct AdvancedRow: View {
                     .frame(width: 20)
                 Text("Advanced settings")
                 Spacer(minLength: 8)
-                if changed > 0 { Text(changed == 1 ? "1 changed" : "\(changed) changed").foregroundStyle(.secondary) }
+                if changed > 0 { Text(changed == 1 ? "1 changed" : "\(changed) changed").foregroundStyle(.secondary).contentTransition(.numericText(value: Double(changed))) }
             }
-            .padding(.horizontal, 10).padding(.vertical, 8).frame(minHeight: 37)
+            .padding(.horizontal, 10).padding(.vertical, 8).frame(minHeight: 40)
             .contentShape(.rect)
         }
         .buttonStyle(PressRow())
         .animation(.easeOut(duration: 0.18), value: expanded)
+        .animation(.snappy(duration: 0.2), value: changed)   // the count rolls to its new number
         .accessibilityValue(expanded ? "Expanded" : "Collapsed")
     }
 }
@@ -1153,12 +1184,19 @@ private final class Launcher: NSObject, NSApplicationDelegate, NSWindowDelegate 
         guard let w = window else { return }
         window = nil; self.play = play
         link?.invalidate(); link = nil
-        // The main thread blocks in launcher.c's waitpid once run() returns, so the window must leave the screen now: no fade-out (it runs on later run-loop passes),
-        // and dmMacLauncher flushes the order-out (AppKit commits it at the end of a pass). Without both, the window stayed on screen, not responding, until the game ended
+        // The main thread blocks in launcher.c's waitpid once run() returns, so the window must leave the screen before: AppKit's own fade-out runs on later run-loop
+        // passes, and dmMacLauncher flushes the order-out (AppKit commits it at the end of a pass). Without both, the window stayed on screen, not responding, until
+        // the game ended. Play fades it out first, in 0.15 s, and run() returns after: the window does not vanish in one frame while the game's comes up a moment later
         w.animationBehavior = .none
-        w.delegate = nil; w.orderOut(nil)
-        NSApp.stop(nil)
-        NSApp.postEvent(NSEvent.otherEvent(with: .applicationDefined, location: .zero, modifierFlags: [], timestamp: 0, windowNumber: 0, context: nil, subtype: 0, data1: 0, data2: 0)!, atStart: true)   // run returns at the next event
+        w.delegate = nil
+        w.ignoresMouseEvents = true   // nothing more is clicked in a window on its way out
+        let gone = {
+            w.orderOut(nil)
+            NSApp.stop(nil)
+            NSApp.postEvent(NSEvent.otherEvent(with: .applicationDefined, location: .zero, modifierFlags: [], timestamp: 0, windowNumber: 0, context: nil, subtype: 0, data1: 0, data2: 0)!, atStart: true)   // run returns at the next event
+        }
+        guard play else { gone(); return }
+        NSAnimationContext.runAnimationGroup({ $0.duration = 0.15; $0.timingFunction = CAMediaTimingFunction(name: .easeOut); w.animator().alphaValue = 0 }, completionHandler: gone)
     }
 }
 

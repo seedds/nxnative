@@ -52,13 +52,15 @@ func checkLauncherLayout(_ model: LauncherModel, defaults: UserDefaults) -> Int 
     let hinted = autoreleasepool { measure(false, width: 560) }
     defaults.removeObject(forKey: "window.show")
     expect(hinted > basic + 4 && hinted < basic + 30, "switched off, Show this window at launch adds its one line to the reported height (\(hinted) after \(basic))")
-    // The header scrolls with the settings and goes into the bar a part at a time (LauncherView.scrolled, TitleBar): its icon, then its name, then its Play, each
-    // over the 14 pt of scroll after it has gone under the bar, in eighths (the icon's in the hundreds, the name's in the tens, Play's in the units), and none
-    // before the header is measured
-    let at = { LauncherView.scrolled($0, header: 230, name: 150) }
-    expect(at(0) == 0 && at(96) == 0 && at(103) == 400 && at(110) == 800 && at(150) == 800 && at(157) == 840 && at(164) == 880 && at(216) == 880 && at(223) == 884 && at(230) == 888 && at(900) == 888,
-           "the bar takes the header's icon, then its name, then its Play, each with the scroll that follows its going under the bar")
-    expect(LauncherView.scrolled(500, header: 0, name: 0) == 0 && LauncherView.scrolled(500, header: 230, name: 0) == 0, "and nothing while the header is not measured")
+    // The header scrolls with the settings and goes into the bar a part at a time (LauncherView.scrolled, TitleBar): the bar's ground from the first point scrolled
+    // (the thousands), then each part over the 14 pt of scroll after it has gone under the bar, in eighths (the icon's in the hundreds, the name's in the tens,
+    // Play's in the units). Beside the tile, the name goes first, then the tile, then Play; nothing before the header is measured
+    let at = { LauncherView.scrolled($0, header: 230, name: 100, icon: 180) }
+    expect(at(0) == 0 && at(1) == 1000 && at(100) == 1000 && at(107) == 1040 && at(114) == 1080 && at(180) == 1080 && at(187) == 1480 && at(194) == 1880
+           && at(216) == 1880 && at(223) == 1884 && at(230) == 1888 && at(900) == 1888,
+           "the bar's ground comes with the first scroll, then the bar takes each part with the scroll that follows its going under the bar")
+    expect(LauncherView.scrolled(500, header: 0, name: 0, icon: 0) == 0 && LauncherView.scrolled(500, header: 230, name: 0, icon: 180) == 0 && LauncherView.scrolled(500, header: 230, name: 100, icon: 0) == 0,
+           "and nothing while the header is not measured")
     // Every row's symbol is a symbol of this system (a name it lacks draws nothing) or one drawn here, in rows of one length
     let missing = (Array(Symbols.rows.values) + ["gearshape"]).filter { Symbols.drawn[$0] == nil && NSImage(systemSymbolName: $0, accessibilityDescription: nil) == nil }
     expect(missing.isEmpty, "every row's symbol is one this system has, or is drawn (missing: \(missing))")

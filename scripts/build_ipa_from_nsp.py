@@ -2237,6 +2237,8 @@ def split_shaders(py, repo, roms, mains, pkg, env, logs, g, provisional=False, o
             capture = Path(env.get(setting) or r.parent / folder)
             inputs += [('stat', capture) if provisional else ('files', sorted(capture.glob(pattern)))]   # its files, not where it is: the same build reached through a moved folder or a link keeps its split
     if env.get('DM_NRO_DIR'): inputs += [('files', sorted(Path(env['DM_NRO_DIR']).glob('*.nro')))]   # NROs captured from a boot (capture_nro)
+    shd = Path(env.get('DM_NVN_SHDUMP') or (g.dir / 'shdump'))   # run-time shader dumps: a new session's pairs must invalidate the split's reuse key
+    if shd.is_dir(): inputs += [('files', sorted(shd.glob('*.ctl')) + sorted(shd.glob('*.code')))]
     inputs += [item for r in dlc_roms for item in (('dlc', Path(r).name), ('stat', r))]   # DLC has no registered module build to pin its contents: include its index and re-extraction times, even when file sizes stay the same
     if oodle:   # a host or rewriter fix can change what the game's decoder produces
         PROG.set(step='building the Mac host for the game\'s Oodle decoder'); env = dict(env, **oodle())
@@ -2275,6 +2277,9 @@ def split_shaders(py, repo, roms, mains, pkg, env, logs, g, provisional=False, o
         raise BuildError(f'{bad.group(0).removeprefix("[RED] ")}; the profile\'s tables hold every file\'s shaders (each file in {logs / "shader_split.log"})')
     if bad: say(f'{bad.group(0)}; the IPA goes without them (each file in {logs / "shader_split.log"})')
     if m and m.group(1) == '0':   # dmsh_build.py would make no library, and the iOS shader step stop with no word of why
+        cap = [t.rsplit('=', 1)[0] for t in g.words('shader_groups') if t.endswith('=capture')]
+        if cap:   # a port that builds its programs at load time (Batman: Arkham City): the files hold nothing to key, so say what to run instead
+            raise BuildError(f'the shader split found no shaders in main or the RomFS, and the profile\'s shaders are run-time dumps ({", ".join(cap)}): run the Mac host once with DM_NVN_SHDUMP=<dir> (the game note\'s route), put the <key>.ctl + <key>.code pairs in that folder or in {g.dir / "shdump"}, and build again')
         raise BuildError('the shader split found no shaders in main or the RomFS: the game keeps them in a form shader_split.py does not read; locate them (docs/agents) and add a reader')
     # pso_pairs.tsv (supplemental BAHS variations and legacy Unity pass-input covers): checked like the others where the profile has one; else kept beside the
     # package, where dmsh_build.py reads it too, so padding and the pipeline prebuild use the same pairs

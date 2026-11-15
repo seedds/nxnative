@@ -782,6 +782,20 @@ void nvn_ctl_lens(const void *control, uint32_t *nctl, uint32_t *ncode) {
     memcpy(&own, c + 0x20, 4);
     *nctl = own >= 0x760 && own < 0x880 ? own : 0x880;
 }
+// How much of a control section to keep in a run-time dump (DM_NVN_SHDUMP): its key bytes, and, for a section whose program parts lie past them, the bytes through the last part.
+// Batman: Arkham City's VTG vertex programs put VertexB at +0x890 and further parts at +0xa30 / +0xb50, past the 0x880 key bytes every one of its sections names at +0x20; the
+// translator needs those parts, the key does not (keys_hash still hashes nvn_ctl_lens bytes, which is what the profile's map holds). A part's length is not in the header, so 0x200
+// bytes past the last part offset are kept.
+uint32_t nvn_ctl_keep(const void *control) {
+    uint32_t nctl, ncode; nvn_ctl_lens(control, &nctl, &ncode);
+    const uint8_t *c = control; uint32_t end = nctl;
+    if (nvn2_ctl(c)) return nctl;
+    for (uint32_t o = 0x748; o <= 0x758; o += 4) {
+        uint32_t p; memcpy(&p, c + o, 4);
+        if (p > nctl && p < 0x2000 && p + 0x200 > end) end = p + 0x200;
+    }
+    return end > 0x2000 ? 0x2000 : end;
+}
 static int keys_hash(const NVNshaderData *sd, int mapped, uint8_t out[8]) {
     uint32_t ncode = 0, nctl;
     if (!sd->control) return 0;
@@ -827,7 +841,10 @@ NVN(nvnProgramSetShaders, NVNboolean, NVNprogram *p, int n, const NVNshaderData 
         // and its copies point at it, so it stays as long as the process, as the record does. nvn_ctl_lens reads it again: NVN's key bytes hold +0x20 and +0x704, NVN2's +0x44
         if (sd[i].control && (dump || !(k->ok >> i & 1))) {
             uint32_t nctl, ncode; nvn_ctl_lens(sd[i].control, &nctl, &ncode);
-            void *c = malloc(nctl); memcpy(c, sd[i].control, nctl); o->sd[i].control = c;
+            uint32_t keep = dump ? nvn_ctl_keep(sd[i].control) : nctl;   // a dump keeps the parts past the key bytes (nvn_ctl_keep)
+            void *c = calloc(1, keep); memcpy(c, sd[i].control, nctl);
+            if (keep > nctl) { vm_size_t got = 0; vm_read_overwrite(mach_task_self(), (vm_address_t)((uintptr_t)sd[i].control + nctl), keep - nctl, (vm_address_t)((uint8_t *)c + nctl), &got); }
+            o->sd[i].control = c;
         }
         // Diagnostic: trace the loader of selected shader keys (comma-separated hex).
         if (trace && (k->ok & (1u << i))) {
@@ -2359,7 +2376,7 @@ static int fps_high(void) {
     int v = __atomic_load_n(&g_fps_high, __ATOMIC_RELAXED);
     if (v < 0) {
         const char *e = getenv("DM_FPS_TARGET"); int t = e ? atoi(e) : DM_GAME_FPS_TARGET;
-        v = t == 120 && DM_GAME_FPS_MAX >= 120 && !dm_fps_state && dm_fps_lock_engine();
+        v = t == 120 && DM_GAME_FPS_MAX >= 120 && !dm_fps_state && (dm_fps_lock_engine() || DM_GAME_PRESENT_PACED);
         if (t == 120 && DM_GAME_FPS_MAX >= 120 && !v) LOG("[RED] [nvn] 120 fps: this main has %s, so it runs at 60", dm_fps_state ? "a frame step in whole vsyncs" : "no engine frame limit the host writes");
         __atomic_store_n(&g_fps_high, v, __ATOMIC_RELAXED);
     }
@@ -2532,7 +2549,7 @@ static void fstep_tick(const win_t *o, int c) {
     double shown = prev ? span / v : 0, gpu = 0; prev = st;
     for (uint64_t f = g_frame; f-- > 0 && g_frame - f <= 8;) { double g = mtl_gpu_ms(f); if (g >= 0) { gpu = g * 1e6 / v; break; } }
     double cpu = shown - pw / v, cost = cpu > gpu ? cpu : gpu;
-    int kmin = fstep_hz() / c, kmax = fps_high() ? 2 : !fstep_hold() ? kmin : kmin >= 2 ? 2 : FSTEP_MAX, k0 = g_fs.k,   // at 120 fps a late frame must step down whatever fps_hold says: the game steps by the target
+    int kmin = fstep_hz() / c, kmax = DM_GAME_PRESENT_PACED && !dm_fps_state ? kmin : fps_high() ? 2 : !fstep_hold() ? kmin : kmin >= 2 ? 2 : FSTEP_MAX, k0 = g_fs.k,   // at 120 fps a late frame must step down whatever fps_hold says: the game steps by the target. A present-paced engine keeps the cap's own hold (a heavy scene is fewer frames and it climbs back by itself): halving presents would halve its rate
          kmin0 = g_fs.kmin, probe0 = g_fs.probe;
     int fixed = dm_fps_state ? (int)__atomic_load_n((uint32_t *)(dm_fps_state + 0x24), __ATOMIC_RELAXED) : 0;
     uint64_t probes0 = g_fs.probes, failed0 = g_fs.failed;

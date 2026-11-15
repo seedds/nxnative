@@ -4,6 +4,16 @@ The SDK's movie library (`movie::Decoder`, `movie::Extractor`), which the host t
 
 ## Decoder lifecycle
 
+### Native texture buffers with zero capacity
+
+- **Symptom:** `[RED] movie: client buffer in native-texture mode is 0 bytes, needs 8 (a texture object)` and `movieStatus_ErrorBadValue`; opening logos or movies do not display.
+- **Cause:** the host required a byte capacity of at least eight even though native-texture output describes an opaque NVN object. The SDK's native consumer uses the buffer's pointer without checking its capacity. Mortal Kombat 11's `NX64Render_AsyncTexture::Internal_CreateRHI` (`main+0x1320df0`) explicitly calls `Buffer::SetDataAndCapacity(texture, 0)`; `InternalVideoDecode_ProcessOutput` passes a copy of that buffer to the decoder.
+- **Fix:** `md_out_tex` validates the data pointer and the NVN texture object through `nvn_host_write_texture`, without imposing a byte-buffer capacity. CPU byte-buffer output retains its capacity checks.
+- **Check:** `t_movie_avc` accepts native texture buffers of capacity zero (MK11) and eight (Dread), writes the decoded frame, and rejects null or invalid objects.
+- **Found on:** Mortal Kombat 11 (`0100F2200C984000`, v1703936, main build `4f7ab1a3eefc7eb20413936e8e37c2e9`), SDK 9, Apple M2 Mac.
+
+
+
 ### Movie extractor allocations need the SDK graphics allocator
 
 - **Symptom:** `CRASH sig=11 addr=0 pc=sdk+0x40ca1c lr=subsdk0+0x32455c` after `StoryEndOfMovieCallback`, while opening another MP4.

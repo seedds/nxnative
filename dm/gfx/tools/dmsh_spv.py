@@ -8,6 +8,10 @@
 #                   shaders and pipelines (dmsh_build.py -fpreserve-invariance; shaders.md "Position invariance across shaders")
 #   vs_init         a vertex shader stores (0, 0, 0, 1) into every generic output at entry, what an unwritten component reads on the hardware (dmsh_build.py vs_init)
 #   vs_pad          a vertex shader declares the generic outputs its paired pixel shaders read but it does not write, written with (0, 0, 0, 1) (dmsh_build.py vs_pad)
+#   formatless      the capabilities StorageImageReadWithoutFormat / StorageImageWriteWithoutFormat when the module reads or writes a storage image declared without a format. The
+#                   translator declares one so when the shader's instruction names no texel size and the device takes the format from the bound view (Ryujinx's
+#                   QueryHostSupportsImageLoadFormatted), but its SPIR-V generator never declares the capability SPIR-V requires for it; the Vulkan backend refuses the module
+#                   on a device without the two features (vk_shader.c caps_missing)
 #   float_controls  the SignedZeroInfNanPreserve execution mode for 32-bit floats, the counterpart of the Metal compile's NaN-preserving math (ios_metal.py). The build does not apply
 #                   it: a device without shaderSignedZeroInfNanPreserveFloat32 refuses such a module, so the Vulkan backend patches it in per device when it creates the module
 #   shadow_inputs   the <key>_bv variant: every integer vertex input also declared as a float4 and as the integer of the other sign at locations 16-30, ORed into the input the body
@@ -36,7 +40,8 @@ SC_UNIFORM_CONSTANT, SC_INPUT, SC_UNIFORM, SC_OUTPUT, SC_PRIVATE, SC_FUNCTION, S
 MODELS = {0: 'vs', 1: 'hs', 2: 'ds', 3: 'gs', 4: 'ps', 5: 'cs'}
 GLSL_N = {37: 79, 40: 80, 43: 81}   # FMin → NMin, FMax → NMax, FClamp → NClamp
 EM_SIGNED_ZERO_INF_NAN_PRESERVE, CAP_SIGNED_ZERO_INF_NAN_PRESERVE = 4461, 4466
-DIM_BUFFER = 5
+DIM_BUFFER, DIM_SUBPASS = 5, 6
+CAP_READ_WITHOUT_FORMAT, CAP_WRITE_WITHOUT_FORMAT = 55, 56
 DIMS = {0: '1d', 1: '2d', 2: '3d', 3: 'cube', 4: 'rect', 5: 'buffer', 6: 'subpass'}
 # Opcodes whose result id is word 1 (types, labels, imports, strings), and those with no result
 RESULT_ONLY = set(range(19, 40)) | {7, EXT_INST_IMPORT, 73, LABEL, 322}
@@ -336,9 +341,26 @@ def float_controls(m):
     return len(eps)
 
 
+def formatless(m):
+    """Declare the capability each read or write of a storage image without a format requires (see the file header); → the sorted list of 'read' / 'write' declared here"""
+    defs, need = m.defs(), set()
+    def unknown(value):   # the image value's type names no format (a subpass input never does, and needs no capability)
+        v = defs.get(value); t = defs.get(v[1]) if v and len(v) > 2 else None
+        return bool(t) and t[0] & 0xffff == T_IMAGE and len(t) > 8 and t[8] == 0 and t[3] != DIM_SUBPASS
+    for i in m.ins:
+        o = i[0] & 0xffff
+        if o == IMAGE_WRITE and unknown(i[1]): need.add('write')
+        elif READS.get(o) == 'read' and unknown(i[3]): need.add('read')
+    have = {i[1] for i in m.of(CAPABILITY)}
+    caps = {'read': CAP_READ_WITHOUT_FORMAT, 'write': CAP_WRITE_WITHOUT_FORMAT}
+    added = sorted(k for k in need if caps[k] not in have)
+    for k in added: m.add_capability(caps[k])
+    return added
+
+
 def apply(m, stage, pad=None, fp_controls=False):
     """The passes the build applies to a module of the given stage (see the file header); → {pass: what it did}"""
-    done = {'precise': precise(m), 'invariant': invariant(m) if stage in ('vs', 'ds', 'gs') else 0}
+    done = {'precise': precise(m), 'invariant': invariant(m) if stage in ('vs', 'ds', 'gs') else 0, 'formatless': formatless(m)}
     if stage == 'vs':
         done['vs_init'] = vs_init(m)
         done['vs_pad'] = vs_pad(m, pad) if pad else []

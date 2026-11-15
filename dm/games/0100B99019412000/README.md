@@ -53,6 +53,7 @@ General host changes first needed here; each applies to every game:
 - **32 outputs for AAC movie decoders and one AAC frame from `GetOutputBufferSize`** (`MD_NOUT_AAC` in `hle_movie.c`): [AAC decoders offer at most 32 outputs](../../../docs/reference/movies.md#aac-decoders-offer-at-most-32-outputs), [AAC output buffer size is one frame](../../../docs/reference/movies.md#aac-output-buffer-size-is-one-frame).
 - **Advanced blend modes** (`blend_st`, `adv_blend`): [Advanced blend modes as Porter-Duff factors](../../../docs/reference/rendering.md#advanced-blend-modes-as-porter-duff-factors).
 - **A value filter for `DM_PROBE_POLL`** (`=<value>`, for a word that changes often before the bad store): [05, Probes without a debugger](../../../docs/agents/05-debugging.md#probes-without-a-debugger-dm_probe).
+- **The capability for storage images without a format, on the Vulkan chain** (`formatless` in `dmsh_spv.py`; found packing the cartridge's 1.0.0 for Linux): [Storage images without a declared format on the Vulkan chain](../../../docs/reference/shaders.md#storage-images-without-a-declared-format-on-the-vulkan-chain).
 
 ## Open
 

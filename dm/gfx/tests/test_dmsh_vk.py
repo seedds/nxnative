@@ -217,6 +217,59 @@ class Portable(unittest.TestCase):   # no tools needed
             self.assertEqual(len(first_stores(m)), 2)
             self.assertEqual(dmsh_spv.interface(m)[-1]['location'], 3)
 
+    @staticmethod
+    def image_module(fmt, ops, caps=()):   # words only: a storage image of the given format (0: none), loaded, then written ('write') and read ('read')
+        I, S = dmsh_spv, dmsh_spv.SC_UNIFORM_CONSTANT
+        ins = [[2 << 16 | I.CAPABILITY, 1]] + [[2 << 16 | I.CAPABILITY, c] for c in caps] + [
+            [3 << 16 | I.T_FLOAT, 1, 32], [9 << 16 | I.T_IMAGE, 2, 1, 1, 0, 0, 0, 2, fmt], [4 << 16 | I.T_POINTER, 3, S, 2], [4 << 16 | I.VARIABLE, 3, 4, S],
+            [4 << 16 | I.LOAD, 2, 5, 4]] + [[4 << 16 | I.IMAGE_WRITE, 5, 6, 7] if o == 'write' else [5 << 16 | 98, 8, 9, 5, 6] for o in ops]
+        return dmsh_spv.Module(struct.pack('<%dI' % (5 + sum(map(len, ins))), dmsh_spv.MAGIC, 0x10600, 0, 10, 0, *[w for i in ins for w in i]))
+
+    def test_formatless_capabilities(self):   # a read or a write of a storage image without a format declares its capability, once; an image with a format declares none
+        caps = lambda m: [i[1] for i in m.of(dmsh_spv.CAPABILITY)]
+        for fmt, ops, before, added, after in ((0, ['write'], (), ['write'], [1, 56]), (0, ['read'], (), ['read'], [1, 55]), (0, ['read', 'write', 'write'], (), ['read', 'write'], [1, 55, 56]),
+                                               (33, ['read', 'write'], (), [], [1]), (0, ['write'], (56,), [], [1, 56]), (0, [], (), [], [1])):
+            m = self.image_module(fmt, ops, before)
+            self.assertEqual((dmsh_spv.formatless(m), caps(m)), (added, after), (fmt, ops, before))
+            self.assertEqual(dmsh_spv.formatless(m), [])   # nothing left to declare
+        m = self.image_module(0, ['write'])
+        self.assertEqual(dmsh_spv.apply(m, 'cs')['formatless'], ['write'])   # the build applies it
+        self.assertEqual([i[0] & 0xffff for i in m.ins[:2]], [dmsh_spv.CAPABILITY] * 2)   # among the capabilities, before the types
+
+    def test_formatless_validates(self):   # spirv-val refuses the write without the capability, and takes the module after the pass
+        if missing('spirv-as', 'spirv-val'): self.skipTest('needs ' + missing('spirv-as', 'spirv-val'))
+        asm = '''OpCapability Shader
+OpMemoryModel Logical GLSL450
+OpEntryPoint GLCompute %main "main" %img
+OpExecutionMode %main LocalSize 1 1 1
+OpDecorate %img DescriptorSet 3
+OpDecorate %img Binding 0
+%void = OpTypeVoid
+%fn = OpTypeFunction %void
+%float = OpTypeFloat 32
+%int = OpTypeInt 32 1
+%v2int = OpTypeVector %int 2
+%v4float = OpTypeVector %float 4
+%image = OpTypeImage %float 2D 0 0 0 2 Unknown
+%pimage = OpTypePointer UniformConstant %image
+%img = OpVariable %pimage UniformConstant
+%zero = OpConstant %int 0
+%at = OpConstantComposite %v2int %zero %zero
+%main = OpFunction %void None %fn
+%entry = OpLabel
+%i = OpLoad %image %img
+%texel = OpImageRead %v4float %i %at
+OpImageWrite %i %at %texel
+OpReturn
+OpFunctionEnd
+'''
+        with tempfile.TemporaryDirectory() as d:
+            src, spv = Path(d) / 'a.spvasm', Path(d) / 'a.spv'
+            src.write_text(asm); subprocess.run(['spirv-as', '--target-env', 'vulkan1.3', str(src), '-o', str(spv)], check=True, capture_output=True)
+            ok, why = dmsh_spv.validate(str(spv)); self.assertFalse(ok); self.assertIn('WithoutFormat', why)
+            m = dmsh_spv.Module.read(spv); self.assertEqual(dmsh_spv.apply(m, 'cs')['formatless'], ['read', 'write'])
+            m.write(str(spv)); ok, why = dmsh_spv.validate(str(spv)); self.assertTrue(ok, why)
+
 
 @unittest.skipIf(missing('xlate', 'spirv-val'), 'needs ' + missing('xlate', 'spirv-val'))
 class Translator(unittest.TestCase):

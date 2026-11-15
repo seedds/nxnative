@@ -2799,8 +2799,7 @@ def port_run_script(platform, repo, work, wdir, g, name, launch, host=None):
     prof = wdir / 'profile'   # aot_packs reads it on the next pack (the AOT_PROFILE setting, --no-profile)
     record = [f'A sample profile for the next pack (nxaot build --profile: the functions the game runs at tier H, the rest at tier C, a shorter pack): set DM_AOT_PROFILE as below, play,',
               f'quit the game by closing its window; nxhost-run writes {prof}/<module>.tsv and <module>.misses.tsv (the addresses its JIT fallback ran, entries of the next pack), and the',
-              'next pack of this game takes them. The launcher nxlauncher records them on every Play unless its "Record a profile while playing" is off, and offers the repack.'
-              + (' The Windows host does not sample yet: record it with run.sh on Linux (the same files serve both).' if win else '')]
+              'next pack of this game takes them. The launcher nxlauncher records them on every Play unless its "Record a profile while playing" is off, and offers the repack.']
     if win:
         cq = lambda v: str(v).replace('%', '%%')
         body = RUN_CMD.replace('@LAUNCH@', cq(launch))

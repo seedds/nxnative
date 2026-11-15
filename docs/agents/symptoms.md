@@ -458,6 +458,7 @@ One line per symptom in the [subsystem references](../reference/): what you see 
 
 ## Movies
 
+- `CRASH sig=11 addr=0 pc=sdk+0x40ca1c lr=subsdk0+0x32455c` after `StoryEndOfMovieCallback`, while opening another MP4. → [Movie extractor allocations need the SDK graphics allocator](../reference/movies.md#movie-extractor-allocations-need-the-sdk-graphics-allocator)
 - abort in NVIDIA's video path (`NvRmChannelOpen` → `NvOsDrvOpen`). → [The SDK's hardware decoder opens nvdrv](../reference/movies.md#the-sdks-hardware-decoder-opens-nvdrv)
 - constructing a movie decoder aborts with `FATAL movie: missing SDK symbol _ZNK5movie6Buffer4DataEv`. → [SDK 1 movie buffer getters](../reference/movies.md#sdk-1-movie-buffer-getters)
 - the game waits forever at a movie (Engage's 94 s opening `S01F.webm`; frames keep presenting, nothing happens). → [`movie::Decoder` taken over as a MediaCodec-style protocol](../reference/movies.md#moviedecoder-taken-over-as-a-mediacodec-style-protocol)

@@ -1,5 +1,6 @@
 // nv:: (the GPU driver glue layer beneath NVN: creates transfer memory, connects to the nvdrv service). NVN has been replaced wholesale with a host null device, so this layer has nothing to do.
 // The allocator callbacks are recorded in the host global g_nv_alloc; the graphics layer takes them from here later when it needs to allocate memory with the game's allocator.
+// Keep the SDK setter too: it installs the callbacks behind NvOsAlloc / Free, which the movie extractor still uses even with the host's NVN and decoder.
 #include "../host/hle.h"
 
 typedef void *(*nv_alloc_fn)(unsigned long size, unsigned long align, void *user);
@@ -12,9 +13,17 @@ static struct { void *mem; unsigned long size; int inited; } g_nv_pool;
 
 #define WHY "NVN has been replaced wholesale with a host null device, so the driver glue layer has nothing to do"
 HLE_FORCE("_ZN2nv20SetGraphicsAllocatorEPFPvmmS0_EPFvS0_S0_EPFS0_S0_mS0_ES0_", WHY "; allocator recorded in g_nv_alloc",
-          void, h_nv_SetAlloc, nv_alloc_fn a, nv_free_fn f, nv_realloc_fn r, void *u) { g_nv_alloc = (struct nv_allocator){a, f, r, u}; }
+          void, h_nv_SetAlloc, nv_alloc_fn a, nv_free_fn f, nv_realloc_fn r, void *u) {
+    void (*set)(nv_alloc_fn, nv_free_fn, nv_realloc_fn, void *) = guest_sym("_ZN2nv20SetGraphicsAllocatorEPFPvmmS0_EPFvS0_S0_EPFS0_S0_mS0_ES0_");
+    if (set) set(a, f, r, u);
+    g_nv_alloc = (struct nv_allocator){a, f, r, u};
+}
 HLE_FORCE("_ZN2nv28SetGraphicsDevtoolsAllocatorEPFPvmmS0_EPFvS0_S0_EPFS0_S0_mS0_ES0_", WHY "; allocator recorded in g_nv_devtools_alloc",
-          void, h_nv_SetDevAlloc, nv_alloc_fn a, nv_free_fn f, nv_realloc_fn r, void *u) { g_nv_devtools_alloc = (struct nv_allocator){a, f, r, u}; }
+          void, h_nv_SetDevAlloc, nv_alloc_fn a, nv_free_fn f, nv_realloc_fn r, void *u) {
+    void (*set)(nv_alloc_fn, nv_free_fn, nv_realloc_fn, void *) = guest_sym("_ZN2nv28SetGraphicsDevtoolsAllocatorEPFPvmmS0_EPFvS0_S0_EPFS0_S0_mS0_ES0_");
+    if (set) set(a, f, r, u);
+    g_nv_devtools_alloc = (struct nv_allocator){a, f, r, u};
+}
 HLE_FORCE("_ZN2nv18InitializeGraphicsEPvm", WHY "; pool recorded for nv::GetGraphicsMemoryInfo", void, h_nv_Init, void *mem, unsigned long size) {
     g_nv_pool = (typeof(g_nv_pool)){mem, size, 1};
     LOG("nv::InitializeGraphics: pool %.2f MB, recorded (the host's graphics layer allocates its own)", size / 1048576.0);

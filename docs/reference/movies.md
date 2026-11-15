@@ -4,6 +4,16 @@ The SDK's movie library (`movie::Decoder`, `movie::Extractor`), which the host t
 
 ## Decoder lifecycle
 
+### Movie extractor allocations need the SDK graphics allocator
+
+- **Symptom:** `CRASH sig=11 addr=0 pc=sdk+0x40ca1c lr=subsdk0+0x32455c` after `StoryEndOfMovieCallback`, while opening another MP4.
+- **Cause:** the host's `nv::SetGraphicsAllocator` takeover recorded the callbacks only in `g_nv_alloc`. The SDK setter also replaces the dispatch behind `NvOsAlloc`, `NvOsAllocAlign`, `NvOsRealloc` and `NvOsFree`. The movie extractor still uses these functions: `MPEG4Extractor::parseChunk` allocates a 224-byte `SampleTable` through `android::HeapObject::operator new` → `NvOsAlloc`. Without the SDK setter, it uses the SDK's 32 KB bootstrap heap and attempts to grow through `nn::os::AllocateMemoryBlock`, instead of the allocator the game supplied. That allocation returned null; `android::RefBase`'s constructor then stored its vtable through null.
+- **Fix:** `hle_nv.c` calls the SDK's own graphics allocator setters (ordinary and devtools, when defined), then records the callbacks for the host. This retains SDK dispatch and validation without restoring driver initialization or changing heap sizes. Resolve the original definition with `guest_sym`, not the forced host symbol.
+- **Check:** `dm/host/tests/t_nv.c` checks separate SDK and host dispatch tables, callback arguments and user pointers, allocation / reallocation / free, and the no-SDK-definition case, alongside the existing memory-info size checks. Passed with AddressSanitizer and UBSan; the owner subsequently reported working Mac gameplay (2026-11-15).
+- **Found on:** Mortal Kombat 11 (`0100F2200C984000`), 1.0.26, SDK 9 (`sdk` build `d145f1048fc57e03685da0441d823ce4`).
+
+
+
 ### The SDK's hardware decoder opens nvdrv
 
 - **Symptom:** abort in NVIDIA's video path (`NvRmChannelOpen` → `NvOsDrvOpen`).

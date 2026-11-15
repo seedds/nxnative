@@ -98,7 +98,11 @@ void own_alias_at_locked(const void *pool, int64_t off, void (^fn)(const alias_k
 void own_alias_each_locked(void (^fn)(const alias_key *k, id o));
 typedef struct { uint32_t n, cap, cells; uint64_t evicted, taken; } own_alias_stats;   // entries, capacity, index cells, evicted with pools / on takeover in total
 own_alias_stats own_alias_stats_locked(void);
-uint32_t own_alias_unref_locked(void);                        // entries no live or ghost entry resolves to (a walk: the memory report)
+// Cache-only entries lack a live or ghost serial. Bytes sums each distinct texture's allocatedSize once; age is from its last alias lookup.
+typedef struct { uint32_t entries; uint64_t bytes, oldest_idle_submissions; } own_alias_orphan_stats;
+own_alias_orphan_stats own_alias_orphans_locked(void);        // shared textures no live or ghost entry resolves to (the memory report)
+void own_alias_mark_gpu_written(const alias_key *k);           // a recorded GPU write makes a cache entry unsafe to reconstruct from its pool
+uint32_t own_alias_trim_locked(uint64_t now, uint64_t idle_submissions, uint64_t need_bytes, uint64_t *estimated_bytes); // pressure trim; caller holds g_smu
 
 // Retirement eligibility (see above). Caller holds g_smu
 int own_retire_locked(id o);    // a retired resource whose fence has passed: 1, it may leave the residency set; 0, an entry holds it: the owner keeps it (the caller drops only its reference)

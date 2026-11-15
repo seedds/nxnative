@@ -526,6 +526,9 @@ check_t_alias_takeover: RUN_ENV = MTL_DEBUG_LAYER=1
 # The resource owner alone: nvn_owner.m (and the texture layouts it sizes shared entries with) with this test's stand-ins for the replay layer's hooks, no nvn_mtl.m
 t_serial_owner: t_serial_owner.m ../nvn/nvn_owner.m ../nvn/nvn_owner.h ../nvn/nvn_tex.c ../nvn/nvn_tex.h ../nvn/nvn_hmap.h ../nvn/nvn_obj.h $(GAME_H)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_serial_owner.m ../nvn/nvn_owner.m ../nvn/nvn_tex.c -framework Metal -framework Foundation
+check_t_alias_trim: t_serial_owner
+	DM_TEST_ALIAS_TRIM_ONLY=1 ./t_serial_owner
+.PHONY: check_t_alias_trim
 t_partial_upload: t_partial_upload.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_partial_upload.m $(MTL_T_SRC) $(FW)
 check_t_partial_upload: RUN_ENV = MTL_DEBUG_LAYER=1

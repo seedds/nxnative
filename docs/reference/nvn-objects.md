@@ -218,6 +218,14 @@ A game may tell NVN objects apart by their bytes, without an NVN call. A host re
 - **Fix:** index descriptors by texture serial and retire their cached base, compatible-type and image views at `mtl_tex_release`, through deferred release behind the GPU fence. Preserve the descriptor metadata: a late read resolves it through `tex_mtl` and caches its views for that submission, then retires them at commit. `t_cpu_tex` checks multiple descriptors, ID replacement and pixel-correct recorded replay after finalization and API-object reuse.
 - **Found on:** [Xenoblade Chronicles: Definitive Edition](../../dm/games/0100FF500E34A000/README.md#memory).
 
+### Idle shared textures retained after a pool stays alive
+
+- **Symptom:** a long session approaches the Mac's unified-memory limit even though some shared texture entries no longer have a live or finalized serial; frame time can degrade without pipeline compilation.
+- **Cause:** `g_alias` intentionally keeps textures resident while their pool persists, so pool-finalize cleanup cannot reclaim entries left behind by a game that reuses long-lived pools.
+- **Fix:** on macOS, `mtl_mem_stat` asks `own_alias_trim_locked` to retire old cache-only aliases once process resident memory passes 75% of physical RAM, aiming back toward 65%. It considers entries idle for at least 4,096 submissions, with no live/ghost serial or pin, no render-target or shader-write usage, and no recorded GPU write. If multiple keys share one Metal texture, every alias must qualify and all are retired together. Release uses the existing deferred-release path, after in-flight GPU work completes. `mtl_tex_gpu_written` marks writes; pool finalization and storage takeover remove the markers.
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md), M3 Pro 18 GB; this change still needs long-session gameplay confirmation.
+- **Check:** `make -C dm/gfx/tests GAME=0400486024DEC000 check_t_alias_trim` covers old read-only eviction and preservation of recent, writable, GPU-written and serial-held textures, plus aliases sharing one Metal texture.
+
 ### Texture ID views revalidated only for the serials that changed
 
 - **Symptom:** the submit thread spends milliseconds a frame in `pool_gpu` → `tex_by_id` → `tex_mtl` / `tex_get` (a `sample` of the process), and the `[nvn-mtl] pool for handles traced to no slot … built in X ms` line shows a rebuild of the texture pool table every frame at about 2 ms. Fire Emblem Fortune's Weave's battle map: 1.9 ms a build, three builds a frame, about 14 % of the main thread.

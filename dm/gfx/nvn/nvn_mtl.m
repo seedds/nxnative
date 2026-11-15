@@ -4135,6 +4135,7 @@ static void gws_set(uintptr_t lo, uintptr_t hi) {   // [lo, hi) becomes one span
     atomic_store(&g_gws_new, 1);
 }
 void mtl_tex_gpu_written(const tex_t *t) {
+    if (t && t->pool) { alias_key k = tex_alias_key(t); own_alias_mark_gpu_written(&k); }
     if (!t || !t->mem || !t->L.size || !t->pool || (t->pool->flags & (NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS | NVN_MEMORY_POOL_FLAGS_VIRTUAL))) {
         return;
     }
@@ -4709,12 +4710,22 @@ static id<MTLTexture> tex_mtl_(const tex_t *ct, int *in_storage) {
 void mtl_mem_stat(unsigned long long frame, unsigned long long rss_mb) {
     static unsigned long long last_rss, last_gpu, last_frame; static int lines; unsigned long long gpu = (unsigned long long)(g_dev.currentAllocatedSize >> 20);
     unsigned long long dr = rss_mb > last_rss ? rss_mb - last_rss : last_rss - rss_mb, dg = gpu > last_gpu ? gpu - last_gpu : last_gpu - gpu;
+#if TARGET_OS_OSX
+    // macOS has no os_proc_available_memory(). When the process reaches 75% of physical RAM, retire old cache-only read textures until its footprint is back below 65%.
+    static uint64_t physical_mb; if (!physical_mb) { uint64_t b = 0; size_t z = sizeof b; if (!sysctlbyname("hw.memsize", &b, &z, NULL, 0)) physical_mb = b >> 20; }
+    if (physical_mb && rss_mb > physical_mb * 3 / 4) {
+        uint64_t target_mb = physical_mb * 13 / 20, retired_bytes = 0, need = (rss_mb - target_mb) << 20;
+        pthread_mutex_lock(&g_smu);
+        uint32_t ntrim = own_alias_trim_locked(own_hook_submission(), 4096, need, &retired_bytes);
+        pthread_mutex_unlock(&g_smu);
+        if (ntrim) MLOG("memory pressure: retired %u idle cache-only read textures (~%llu MB estimated); footprint %llu MB, target %llu MB", ntrim, (unsigned long long)(retired_bytes >> 20), rss_mb, (unsigned long long)target_mb);
+    }
+#endif
     if (lines >= 400 || (lines && dr < 64 && dg < 64 && frame - last_frame < 3000)) return; lines++; last_rss = rss_mb; last_gpu = gpu; last_frame = frame;
     pthread_mutex_lock(&g_deferred_mu); unsigned long nd = (unsigned long)g_deferred.count; pthread_mutex_unlock(&g_deferred_mu);
     pthread_mutex_lock(&g_res_mu); unsigned long nr = (unsigned long)g_res_objects.count; pthread_mutex_unlock(&g_res_mu);
     int live = 0, peak = 0, cap = 0; nvn_dirty_stat(&live, &peak, &cap);
-    pthread_mutex_lock(&g_smu); own_stats os = own_stats_locked(); own_alias_stats as = own_alias_stats_locked(); unsigned ns = os.live, ashared = as.n, nghost = os.ghost, nwait = os.retire_wait; uint64_t ghost_puts = os.ghost_puts;
-    unsigned aorph = own_alias_unref_locked();   // shared textures no live texture object or finalized serial resolves to: kept only until their storage is taken over or their pool goes
+    pthread_mutex_lock(&g_smu); own_stats os = own_stats_locked(); own_alias_stats as = own_alias_stats_locked(); own_alias_orphan_stats aorph = own_alias_orphans_locked(); unsigned ns = os.live, ashared = as.n, nghost = os.ghost, nwait = os.retire_wait; uint64_t ghost_puts = os.ghost_puts;
     pthread_mutex_unlock(&g_smu);
     unsigned long dead_n = 0; unsigned long long dead_mb = 0;
     // Objects read from a weak table come back retained + autoreleased: the frame hook runs on a guest thread with no autorelease pool that drains, so without this wrapper every buffer counted would be pinned for good (the readout creating the leak itself)
@@ -4725,7 +4736,7 @@ void mtl_mem_stat(unsigned long long frame, unsigned long long rss_mb) {
 #if TARGET_OS_IPHONE
     snprintf(avail, sizeof avail, "%llu MB", (unsigned long long)(os_proc_available_memory() >> 20));
 #endif
-    MLOG("memory up to frame %llu: resident %llu MB, GPU allocated %llu MB, deferred-release queue %lu, residency set %lu, serial objects %u, memory pools %d (resident %d; peak %d / tracking table capacity %d; freed but alive %lu, %llu MB), shared textures %u (%u of them unreferenced; evicted with pools %llu, on storage takeover %llu in total), texture re-uploads %llu in total, per-frame arena blocks created %llu in total, finalized textures still referenced %u (small table, %llu put in total), retired but held by a serial %u, recycled texture heaps made %llu, reused %llu, freed %llu, waiting %u (%llu MB); headroom to the system memory limit %s", frame, rss_mb, gpu, nd, nr, ns, live, pres, peak, cap, dead_n, dead_mb, ashared, aorph, (unsigned long long)as.evicted, (unsigned long long)as.taken, (unsigned long long)g_pkg_reuploads, (unsigned long long)g_arena_made, nghost, (unsigned long long)ghost_puts, nwait,
+    MLOG("memory up to frame %llu: resident %llu MB, GPU allocated %llu MB, deferred-release queue %lu, residency set %lu, serial objects %u, memory pools %d (resident %d; peak %d / tracking table capacity %d; freed but alive %lu, %llu MB), shared textures %u (%u without live/ghost serials, ~%llu MB summed texture allocation; oldest cache-only age %llu submissions; evicted with pools %llu, on storage takeover %llu in total), texture re-uploads %llu in total, per-frame arena blocks created %llu in total, finalized textures still referenced %u (small table, %llu put in total), retired but held by a serial %u, recycled texture heaps made %llu, reused %llu, freed %llu, waiting %u (%llu MB); headroom to the system memory limit %s", frame, rss_mb, gpu, nd, nr, ns, live, pres, peak, cap, dead_n, dead_mb, ashared, aorph.entries, (unsigned long long)(aorph.bytes >> 20), (unsigned long long)aorph.oldest_idle_submissions, (unsigned long long)as.evicted, (unsigned long long)as.taken, (unsigned long long)g_pkg_reuploads, (unsigned long long)g_arena_made, nghost, (unsigned long long)ghost_puts, nwait,
          (unsigned long long)g_rh_made, (unsigned long long)g_rh_reused, (unsigned long long)g_rh_trimmed, rh_n, (unsigned long long)(rh_bytes >> 20), avail);
     { void mtl_vc_stats(unsigned *, uint64_t *, uint64_t *), mtl_tb2_stats(uint64_t *, uint64_t *, uint64_t *, uint64_t *, uint64_t *); uint64_t mtl_tex_mis_count(void); unsigned vn; uint64_t vh, vm, tb, tm, tf, tc, tcb;
       mtl_vc_stats(&vn, &vh, &vm); mtl_tb2_stats(&tb, &tm, &tf, &tc, &tcb);

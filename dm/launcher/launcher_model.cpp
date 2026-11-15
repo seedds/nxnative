@@ -194,7 +194,8 @@ bool load_launch(const std::string &path, LaunchFile *out, std::string *err) {
             if (name == "title") out->title = value; else if (name == "title_id") out->title_id = value; else if (name == "version") out->version = value;
             else if (name == "package") out->package = value; else if (name == "platform") out->platform = value; else if (name == "graphics") out->graphics = value;
         } else if (kind == "path") {
-            if (name == "host") out->host = value; else if (name == "cwd") out->cwd = value; else if (name == "choices") out->choices = value;
+            if (name == "host") out->host = value; else if (name == "game_profile") out->game_profile = value;
+            else if (name == "cwd") out->cwd = value; else if (name == "choices") out->choices = value;
             else if (name == "log") out->log = value; else if (name == "settings") out->settings = value;
             else if (name == "profile") out->profile = value; else if (name == "package") out->package_dir = value; else if (name == "packer") out->packer = value;
             else if (name == "python") out->python = value; else if (name == "keys") out->keys = value; else if (name == "nxaot") out->nxaot = value;
@@ -255,7 +256,13 @@ static Found find_in_bundle(const std::string &what, const std::string &row, con
 Found find_host(const LaunchFile &l, const Env &env, const std::string &bundle) {
     std::string v;
     if (env.get("NXHOST", &v) && !v.empty()) { Found f; f.path = v; return f; }
-    return find_in_bundle("host", l.host, "hosts/" + l.title_id + "/nxhost-run" + kExeSuffix, bundle, "pack the game again or set NXHOST");
+    return find_in_bundle("host", l.host, std::string("bin/nxhost-run") + kExeSuffix, bundle, "pack the game again or set NXHOST");
+}
+
+std::string game_profile_problem(const LaunchFile &l) {
+    if (l.game_profile.empty()) return "the launch file names no game profile (a pack made before one nxhost-run served every game): pack the game again";
+    if (!is_file(l.game_profile)) return "the game profile " + l.game_profile + " is missing: pack the game again";
+    return "";
 }
 
 Found find_nxaot(const LaunchFile &l, const std::string &bundle) {
@@ -281,7 +288,10 @@ static void add_game(const fs::path &build, const std::string &platform, const s
     for (auto &p : g.launch.packs) p.complete = packs_complete(p.folder);
     if (g.launch.packs.empty()) g.problem = "no pack in " + g.launch_path + ": pack the game with scripts/build_ipa_from_nsp.py --platform " + platform;
     else if (g.modes().empty()) g.problem = "the packs in " + g.launch.packs[0].folder + " are incomplete: pack the game again";
-    else g.problem = find_host(g.launch, env, bundle).problem;   // shown only when neither the row's host nor the bundle's is there
+    else {
+        g.problem = find_host(g.launch, env, bundle).problem;   // shown only when neither the row's host nor the bundle's is there
+        if (g.problem.empty()) g.problem = game_profile_problem(g.launch);
+    }
     if (!g.launch.settings.empty() && !load_settings(g.launch.settings, &g.settings, &err)) g.settings_error = err;
     out->push_back(std::move(g));
 }
@@ -516,8 +526,10 @@ Command compose(const Game &g, const std::string &mode, const Env &env, bool rec
     if (!pack->complete) { c.error = "the " + pack->mode + " packs in " + pack->folder + " are incomplete: pack the game again (--pack-mode " + pack->mode + ")"; return c; }
     const Found host = find_host(g.launch, env, bundle);   // NXHOST, the host row, the bundle's
     if (!host.problem.empty()) { c.error = host.problem; return c; }
+    const std::string profile = game_profile_problem(g.launch);   // the game's constants: without the file the host would run another profile
+    if (!profile.empty()) { c.error = profile; return c; }
     if (!host.note.empty()) c.notes.push_back(host.note);
-    c.argv = {host.path, pack->folder};
+    c.argv = {host.path, "--profile", g.launch.game_profile, pack->folder};
     std::string v;
     std::set<std::string> have;
     auto add = [&](const KV &e) {

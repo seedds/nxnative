@@ -94,7 +94,8 @@ int main(int argc, char **argv) {
     CHECK(r.status == 5, "\"Show this window at launch\" off: the last game started at once, and its exit status returned");
     CHECK(has(r.out, "no window (\"Show this window at launch\" is off): Alpha Game starts at once"), "it says why");
     std::string game_log = fake::read(f.a_run / "log.txt");
-    CHECK(has(game_log, "fake host: argv " + a_aot + "\n") && has(game_log, "fake host: DM_OPMODE=0\n"), "nxhost-run with the pack folder and the saved choice: " + game_log);
+    CHECK(has(game_log, "fake host: argv --profile|" + fake::str(fake::profile_file(f.a)) + "|" + a_aot + "\n") && has(game_log, "fake host: DM_OPMODE=0\n"),
+          "nxhost-run with the game profile's file, the pack folder and the saved choice: " + game_log);
 
     r = run({"--frames", "2", "--games", games, "--window"}, {}, "show-off-window");
     CHECK(r.status == 0 && has(r.out, "nxlauncher: 2 frames drawn"), "--window shows it anyway");

@@ -845,8 +845,10 @@ endif()
 # --list says a better pack is possible, --repack runs a packer (tests/second_pack/packer.py: the real packer's pack stage and made rows) that packs with --misses, --list says it
 # no longer is, and the game runs again without the JIT fallback. It needs nxaot: this option, else NXAOT in the environment; without it, the packs build_packs.sh prebuilt for it
 # with nxaot (<NXAOT_PACKS>/second_pack: the option NXAOT_PACKS above, else NXAOT_PACKS in the environment; on Windows, where there is no nxaot, the win64-packs artifact); with
-# neither CTest reports it skipped (exit 77). A Python driver: host_scripts.tsv lists it for the runners, which pass NXAOT and NXAOT_PACKS from their environment. On Windows it
-# runs nxhost-run.exe and nxlauncher.exe with launch-windows.tsv, a .cmd host wrapper and main.aot.dll packs; a host without the JIT fallback (NXHOST_JIT off: the Windows
+# neither CTest reports it skipped (exit 77). A Python driver: host_scripts.tsv lists it for the runners, which pass NXAOT and NXAOT_PACKS from their environment. The game's
+# profile is a provisional one (this tree's default profile's game.tsv with the synthetic title ID and the module list "main"), whose file the packer writes and the launcher
+# passes to nxhost-run with --profile, as for any pack. On Windows it
+# runs nxhost-run.exe and nxlauncher.exe with launch-windows.tsv and main.aot.dll packs; a host without the JIT fallback (NXHOST_JIT off: the Windows
 # cross-build) stops the first session at the hidden function with status 3, its miss recorded, and the repack is what makes the second session run to its end
 set(NXAOT "" CACHE FILEPATH "nxaot (dm/tools/aot, the nxnative-aot image) for t_second_pack; empty: the environment variable NXAOT")
 if(NXHOST_PROGRAM AND NXHOST_LAUNCHER)

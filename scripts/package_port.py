@@ -6,8 +6,8 @@
 
 It builds nothing: it assembles the bundle folder from build trees that CMake already made and from this checkout's tracked files, and fails with the missing file's name
 when something is not there.
-  --build   the host's CMake tree (dm/host/CMakeLists.txt, with NXHOST_PROGRAM and NXHOST_LAUNCHER): nxlauncher, and the host nxhost-run built for each game profile, either as
-            <build>/hosts/<title ID>/nxhost-run (one per profile; the CI copies each build there) or as <build>/nxhost-run for the GAME of <build>/CMakeCache.txt; SDL3's licence
+  --build   the host's CMake tree (dm/host/CMakeLists.txt, with NXHOST_PROGRAM and NXHOST_LAUNCHER): nxlauncher, and the host <build>/nxhost-run, one program for every game
+            profile (it reads the profile at start: --profile <file> from the pack, dm/host/game_rt.c; the tree's GAME is only its default), which goes to bin/; SDL3's licence
             from <build>/_deps/sdl3-src/LICENSE.txt (FetchContent's copy); any file in <build>/licenses/ goes to the bundle's licenses/ too. On Windows the .exe names
   --aot     the CMake tree of the recompiler (dm/tools/aot): nxaot, and licenses/LLVM.txt (the licence of the LLVM and lld libraries linked into it; the CI copies the image's
             /usr/share/doc/libllvm18/copyright there). Required on Linux. On Windows nxaot.exe, cross-built with llvm-mingw against the static LLVM of
@@ -20,7 +20,8 @@ when something is not there.
   --archive <out>.tar.gz (Linux: executable bits kept) or <out>.zip (Windows) beside it; the same inputs give the same bytes (sorted entries, the commit's time on every entry)
   --check   the bundle's own smoke test: no symlink, no file naming the build trees or this checkout, no ELF run path outside the bundle and no ELF that needs a shared library
             of NOT_NEEDED (a dynamic nxaot: build it with -DNXAOT_LLVM_STATIC=ON), the launcher's --list on an empty games folder and nxaot version (Linux only: a Windows bundle's executables are not run here), the packer's --help through the bundle's path, the shader chain versions the
-            bundle's sources give against its headers, a profile for every host; with --tools, nx_extract's usage and the translator's source hash (Linux only), and the translator
+            bundle's sources give against its headers, the host for every game profile the bundle carries (Linux only: bin/nxhost-run started with --game <id> and with --profile
+            <the file the bundle's game.py runtime writes>, its profile line read); with --tools, nx_extract's usage and the translator's source hash (Linux only), and the translator
             against its row of the bundle's dm/gfx/tools/dmsh_chain_vk.lock (dmsh_xlate_vk_linux-x64 / dmsh_xlate_vk_win-x64), which the packer's shader step checks
 Exit status 0 when done, 1 on an error (the message says which file or check), 2 on a usage error."""
 import argparse
@@ -41,7 +42,7 @@ import zipfile
 REPO = Path(__file__).resolve().parents[1]
 PLATFORMS = {'linux': {'exe': '', 'archive': '.tar.gz'}, 'windows': {'exe': '.exe', 'archive': '.zip'}}
 # The packer and what it reads (scripts/build_ipa_from_nsp.py --platform linux / windows): this checkout's tracked files under these paths, at the same place in the bundle, so that
-# the packer's find_repo stops at the bundle's root and its defaults find the bundle's nxaot (bin/) and hosts (hosts/<title ID>/). dm/games: every profile and its tables; dm/tools:
+# the packer's find_repo stops at the bundle's root and its defaults find the bundle's nxaot and host (bin/). dm/games: every profile and its tables; dm/tools:
 # patch_nso.py and the rewriter, nx_extract's sources (built with .NET at the first pack); dm/gfx: the shader tools and the chain headers, whose versions follow from those files
 # (dmsh_chain.py, dmsh_chain_vk.py), with dm/ios/tools/ios_metal.py and Ryujinx's shader sources among their inputs; dm/host: the host's sources, which the survey of a game without
 # a profile reads (nso_syms.py)
@@ -91,30 +92,20 @@ def tracked_files():
     return sorted(rows)
 
 
-def cmake_game(build):   # the GAME a host tree was configured with (dm/host/CMakeLists.txt), from its CMakeCache.txt
-    try: text = (build / 'CMakeCache.txt').read_text(errors='replace')
-    except OSError: return None
-    m = re.search(r'^GAME:STRING=(\S+)$', text, re.M)
-    return m.group(1) if m else None
+HOST = 'bin/nxhost-run'   # the bundle's host program, beside its other programs (build_ipa_from_nsp.py BUNDLE_HOST, launcher_model.cpp find_host, run.sh / run.cmd)
 
 
-def find_hosts(build, exe):
-    """{title ID: path of its nxhost-run}: <build>/hosts/<id>/nxhost-run, and <build>/nxhost-run as the host of its tree's GAME (the hosts/ copy wins). Each title ID must be a
-    profile of this checkout (dm/games/<id>/game.tsv)"""
-    name, hosts = f'nxhost-run{exe}', {}
-    top, game = build / name, cmake_game(build)
-    if top.is_file():
-        if not game: raise PackError(f'{top} has no GAME in {build / "CMakeCache.txt"}: copy it to {build}/hosts/<title ID>/{name} for the profile it was built for')
-        hosts[game] = top
-    if (build / 'hosts').is_dir():
-        for d in sorted((build / 'hosts').iterdir()):
-            if not d.is_dir(): continue
-            if not (d / name).is_file(): raise PackError(f'no {name} in {d} (each hosts/<title ID>/ holds the host built for that profile)')
-            hosts[d.name] = d / name
-    if not hosts: raise PackError(f'no host in {build}: neither {top} nor {build}/hosts/<title ID>/{name} (cmake --build {build} --target nxhost-run, with -DGAME=<title ID>)')
-    for gid in hosts:
-        if not (REPO / 'dm/games' / gid / 'game.tsv').is_file(): raise PackError(f'{hosts[gid]} is built for {gid}, which is not a game profile here (dm/games/{gid}/game.tsv)')
-    return dict(sorted(hosts.items()))
+def find_host(build, exe):
+    """<build>/nxhost-run: the host program, one for every game profile (the tree's GAME is only the profile it starts with when it is given none; packs give theirs with
+    --profile). A tree of the layout before it (<build>/hosts/<title ID>/nxhost-run, one host per profile, copied there by an older CI) is named in the error"""
+    top = build / f'nxhost-run{exe}'
+    if top.is_file(): return top
+    old = f'; {build}/hosts/ holds the layout before it (one host per game profile), which a bundle no longer takes: every pack runs with the one host' if (build / 'hosts').is_dir() else ''
+    raise PackError(f'no host in {build}: no {top.name} (cmake --build {build} --target nxhost-run: one program for every game profile){old}')
+
+
+def bundle_profiles(files):   # the game profiles the bundle carries: dm/games/<id>/game.tsv among the packer's files
+    return sorted({Path(rel).parts[2] for rel, _ in files if re.fullmatch(r'dm/games/[^/]+/game\.tsv', rel)})
 
 
 def need(path, why):
@@ -151,7 +142,7 @@ def licence_files(platform, build, aot, tools=None):
     return out
 
 
-def readme(platform, sha, date, hosts, nxaot, tools=False):
+def readme(platform, sha, date, profiles, nxaot, tools=False):   # profiles: the game profiles the bundle carries (bundle_profiles)
     win, lines = platform == 'windows', []
     exe, py, pack = ('.exe', 'py -3', 'pack.cmd') if win else ('', 'python3', './pack.sh')
     lines += [f'nxnative for {"Windows" if win else "Linux"} (x86-64), {sha} of {date}',
@@ -175,7 +166,8 @@ def readme(platform, sha, date, hosts, nxaot, tools=False):
               f'  1. Put each game\'s NSP files (base game, update, DLC) in a folder of its own, outside this folder.',
               f'  2. {pack} "<the game\'s NSP folder>" -k "<your prod.keys>"',
               '     (pack.sh / pack.cmd run scripts/build_ipa_from_nsp.py --platform ' + platform + '; --pack-mode max packs a faster game more slowly; --help lists the options).',
-              '     It writes <NSP folder>/<title ID>_build/ (the packs, launch-' + platform + '.tsv, ' + ('run.cmd' if win else 'run.sh') + ') and <NSP folder>/<title ID>-work/ (the save).',
+              '     It writes <NSP folder>/<title ID>_build/ (the packs, game-profile-' + platform + '.tsv, launch-' + platform + '.tsv, ' + ('run.cmd' if win else 'run.sh')
+              + ') and <NSP folder>/<title ID>-work/ (the save).',
               '',
               'Playing',
               f'  Open nxlauncher{exe}. In Games folder, type the folder that holds your NSP folders and choose Open; pick a game and Play. The settings, the pack modes and',
@@ -183,7 +175,7 @@ def readme(platform, sha, date, hosts, nxaot, tools=False):
               '',
               'This folder',
               f'  {"nxlauncher" + exe:<25} the launcher',
-              f'  {"hosts/<title ID>/":<25} nxhost-run{exe}, the host built for each game profile (a game whose profile has no folder here cannot be played with this bundle)']
+              f'  {"bin/nxhost-run" + exe:<25} the host program the launcher starts, one for every game (each pack gives it its game profile)']
     if nxaot: lines += [f'  {"bin/nxaot" + exe:<25} the recompiler the packer runs']
     if tools: lines += [f'  {"bin/nx_extract" + exe:<25} the NSP extraction tool the packer runs',
                         f'  {"bin/dmsh_xlate_vk" + exe:<25} the Vulkan shader translator the packer runs for NVN games']
@@ -192,21 +184,22 @@ def readme(platform, sha, date, hosts, nxaot, tools=False):
               f'  {"VERSION":<25} the commit this bundle was built from',
               '',
               'Moving or replacing this folder: each pack names the host it runs with (its launch file\'s host row); the launcher run from the new folder',
-              'takes this folder\'s hosts/<title ID>/ instead, and so do run.sh and run.cmd when the NSP folder is inside it; otherwise set NXHOST or',
-              'pack the game again.',
-              f'Game profiles with a host here: {len(hosts)} ({" ".join(hosts)}).']
+              f'takes this folder\'s bin/nxhost-run{exe} instead, and so do run.sh and run.cmd when the NSP folder is inside it; otherwise set NXHOST or',
+              'pack the game again. The pack\'s game profile stays with it (<title ID>_build/game-profile-' + platform + '.tsv in the NSP folder).',
+              f'Game profiles in this folder: {len(profiles)}. A game packed from one of them, or from the profile the packer derives for another version of the game',
+              'or guesses for a game without one, runs with the same nxhost-run.']
     return '\r\n'.join(lines) + '\r\n' if win else '\n'.join(lines) + '\n'
 
 
 PACK_SH = '''#!/bin/sh
-# Packs a game for this bundle: scripts/build_ipa_from_nsp.py --platform linux with the bundle's recompiler (bin/nxaot) and hosts (hosts/<title ID>/), which the packer finds
+# Packs a game for this bundle: scripts/build_ipa_from_nsp.py --platform linux with the bundle's recompiler (bin/nxaot) and host (bin/nxhost-run), which the packer finds
 # beside itself. PYTHON names another Python 3.12 or later. Usage: ./pack.sh "<NSP folder>" -k "<prod.keys>" [options of build_ipa_from_nsp.py]
 here=$(cd "$(dirname "$0")" && pwd) || exit 1
 exec "${PYTHON:-python3}" "$here/scripts/build_ipa_from_nsp.py" --platform linux "$@"
 '''
 
 PACK_CMD = '''@echo off
-rem Packs a game for this bundle: scripts\\build_ipa_from_nsp.py --platform windows with the bundle's hosts (hosts\\<title ID>\\), which the packer finds beside itself. nxaot is
+rem Packs a game for this bundle: scripts\\build_ipa_from_nsp.py --platform windows with the bundle's host (bin\\nxhost-run.exe), which the packer finds beside itself. nxaot is
 rem a Linux program: give --nxaot a script that runs it (README.txt). PYTHON names another Python 3.12 or later. Usage: pack.cmd "<NSP folder>" -k "<prod.keys>" [options]
 setlocal
 if not defined PYTHON (where py > nul 2>&1 && set "PYTHON=py -3" || set "PYTHON=python")
@@ -216,7 +209,7 @@ exit /b %errorlevel%
 
 # pack.cmd of a bundle with nxaot.exe (--aot): the packer runs it from bin\ (build_ipa_from_nsp.py find_nxaot)
 PACK_CMD_NXAOT = '''@echo off
-rem Packs a game for this bundle: scripts\\build_ipa_from_nsp.py --platform windows with the bundle's recompiler (bin\\nxaot.exe) and hosts (hosts\\<title ID>\\), which the
+rem Packs a game for this bundle: scripts\\build_ipa_from_nsp.py --platform windows with the bundle's recompiler (bin\\nxaot.exe) and host (bin\\nxhost-run.exe), which the
 rem packer finds beside itself. PYTHON names another Python 3.12 or later. Usage: pack.cmd "<NSP folder>" -k "<prod.keys>" [options of build_ipa_from_nsp.py]
 setlocal
 if not defined PYTHON (where py > nul 2>&1 && set "PYTHON=py -3" || set "PYTHON=python")
@@ -231,7 +224,7 @@ def assemble(platform, build, aot, out, tools=None):
     sha, ts, date, dirty = version_info()
     build = build.resolve()
     if not build.is_dir(): raise PackError(f'--build: no such folder: {build}')
-    hosts = find_hosts(build, exe)
+    host = find_host(build, exe)
     launcher = need(build / f'nxlauncher{exe}', f'the launcher (cmake --build {build} --target nxlauncher)')
     nxaot = None
     if aot:
@@ -248,6 +241,8 @@ def assemble(platform, build, aot, out, tools=None):
             progs.append((f'{n}{exe}', need(tools / f'{n}{exe}', f'a prebuilt tool (sh dm/tools/publish_port_tools.sh {platform} <folder>, in the chain image: docker/README.md)')))
     lic = licence_files(platform, build, aot, tools)
     files = tracked_files()
+    profiles = bundle_profiles(files)
+    if not profiles: raise PackError('git lists no dm/games/<title ID>/game.tsv: a bundle carries the game profiles its host runs')
     if dirty: say('[RED] the packer\'s files differ from the commit: VERSION says so')
 
     if out.exists():
@@ -265,22 +260,22 @@ def assemble(platform, build, aot, out, tools=None):
         held.append((rel, mode))
 
     put(f'nxlauncher{exe}', launcher, mode=0o755)
-    for gid, p in hosts.items(): put(f'hosts/{gid}/nxhost-run{exe}', p, mode=0o755)
+    put(f'{HOST}{exe}', host, mode=0o755)
     if nxaot: put(f'bin/nxaot{exe}', nxaot, mode=0o755)
     for name, src in progs: put(f'bin/{name}', src, mode=0o755)
     for rel, mode in files: put(rel, REPO / rel, mode=mode)
     for name, src in lic: put(f'licenses/{name}', src)
     if platform == 'linux': put('pack.sh', data=PACK_SH.encode(), mode=0o755)
     else: put('pack.cmd', data=(PACK_CMD_NXAOT if nxaot else PACK_CMD).replace('\n', '\r\n').encode())
-    put('README.txt', data=readme(platform, sha, date, hosts, bool(nxaot), bool(progs)).encode())
+    put('README.txt', data=readme(platform, sha, date, profiles, bool(nxaot), bool(progs)).encode())
     nl = '\r\n' if platform == 'windows' else '\n'
     put(MARKER, data=nl.join([f'nxnative {sha}{"-modified" if dirty else ""}', f'date {date}', f'platform {platform}-x86_64',
-                              f'hosts {" ".join(hosts)}', f'nxaot {"yes" if nxaot else "no"}']).encode() + nl.encode())
+                              f'host {HOST}{exe}', f'profiles {len(profiles)}', f'nxaot {"yes" if nxaot else "no"}']).encode() + nl.encode())
     for rel, mode in held:
         os.chmod(out / rel, mode); os.utime(out / rel, (ts, ts))
     for d in sorted({p for rel, _ in held for p in Path(rel).parents if str(p) != '.'}, key=lambda p: -len(p.parts)):
         os.chmod(out / d, 0o755); os.utime(out / d, (ts, ts))
-    say(f'{out}: {len(held)} files, {sum((out / r).stat().st_size for r, _ in held) / 1e6:.1f} MB; hosts for {len(hosts)} profile{"" if len(hosts) == 1 else "s"} ({" ".join(hosts)}); '
+    say(f'{out}: {len(held)} files, {sum((out / r).stat().st_size for r, _ in held) / 1e6:.1f} MB; host {HOST}{exe} from {host} for {len(profiles)} game profiles; '
         f'nxaot {"from " + str(nxaot) if nxaot else "none"}; prebuilt tools {"from " + str(tools) if progs else "none"}; {sha} of {date}')
     return sorted(held), ts
 
@@ -300,7 +295,7 @@ def archive(platform, out, ts):
     top, rows = out.name, bundle_files(out)
     if platform == 'linux':
         dst = out.parent / f'{top}.tar.gz'
-        # streamed into gzip (no name, no time in its header), not held in memory: a bundle with a host for every profile is gigabytes
+        # streamed into gzip (no name, no time in its header), not held in memory: the bundle is hundreds of megabytes
         with open(dst, 'wb') as f, gzip.GzipFile(filename='', mode='wb', fileobj=f, mtime=0, compresslevel=9) as gz, \
                 tarfile.open(fileobj=gz, mode='w', format=tarfile.PAX_FORMAT) as tar:
             dirs = sorted({str(p) for rel, _ in rows for p in Path(rel).parents if str(p) != '.'})
@@ -411,26 +406,56 @@ def check(platform, out, inputs):
             run([sys.executable, '-I', out / 'dm/gfx/tools/dmsh_chain_vk.py', '--check-published', rid, xlate], r'as the lock', cwd=t, env=env)
         # the packer through the bundle's own path, from another folder, with a Python that does not see this checkout's files (-I)
         run([sys.executable, '-I', out / 'scripts/build_ipa_from_nsp.py', '--help'], r'--platform', cwd=t, env=env)
-        # the shader chain versions the bundle's sources give, against the headers the hosts were compiled with: a difference would make the packer write the headers again
-        # and translate shaders the hosts do not load
+        # the shader chain versions the bundle's sources give, against the headers the host was compiled with: a difference would make the packer write the headers again
+        # and translate shaders the host does not load
         for tool, header, macro in (('dmsh_chain.py', 'dmsh_chain.h', 'DMSH_CHAIN'), ('dmsh_chain_vk.py', 'dmsh_chain_vk.h', 'DMSH_CHAIN_VK')):
             r = run([sys.executable, '-I', out / 'dm/gfx/tools' / tool], r'\S', cwd=t, env=env)
             m = re.search(rf'#define {macro} "(.*)"', (out / 'dm/gfx/nvn' / header).read_text()) if (out / 'dm/gfx/nvn' / header).is_file() else None
             if r and r.returncode == 0 and (not m or r.stdout.split()[-1] != m.group(1)):
                 fails.append(f'{tool} in the bundle gives {r.stdout.split()[-1]}, its {header} holds {m.group(1) if m else "nothing"}: a file of the chain is missing from the bundle')
             elif r and r.returncode == 0: say(f'check: {macro} {m.group(1)}: the bundle\'s sources give the version its header holds')
-    hosts = sorted(p.parent.name for p in (out / 'hosts').glob('*/nxhost-run*'))
-    profiles = sorted(p.parent.name for p in (out / 'dm/games').glob('*/game.tsv'))
-    missing = [h for h in hosts if h not in profiles]
-    if missing: fails.append(f'hosts without a profile in dm/games: {" ".join(missing)}')
-    say(f'check: hosts for {len(hosts)} of the {len(profiles)} game profiles in the bundle')
+        check_host(platform, out, Path(t), env, fails)
     return fails
+
+
+def check_host(platform, out, tmp, env, fails):
+    """The bundle's one host for every game profile it carries (dm/games/<id>/game.tsv). On Linux bin/nxhost-run is started twice per profile: with --game <id> (the table of
+    profiles built into it, which must hold every profile the bundle's packer can pack from) and with --profile <file>, the file the bundle's own dm/games/game.py runtime writes
+    for it (what the packer writes beside every pack, and the only way a derived or provisional profile reaches the host: the two must agree on its keys). Its first lines name
+    the profile, its name and where it came from (dm/host/game_rt.c); with no module folder it then stops with its usage, status 2, before anything else starts (the arena, the
+    window, the engine), so each start is a few milliseconds. A Windows bundle's host is not run"""
+    exe = PLATFORMS[platform]['exe']
+    host = out / f'{HOST}{exe}'
+    profiles = sorted(p.parent.name for p in (out / 'dm/games').glob('*/game.tsv'))
+    if not host.is_file(): fails.append(f'{HOST}{exe} is missing'); return
+    if platform != 'linux' or sys.platform != 'linux':
+        say(f'check: {HOST}{exe} for the {len(profiles)} game profiles in the bundle: not run here (a Windows bundle\'s programs run on Windows)'); return
+    files = tmp / 'profiles'
+    r = subprocess.run([sys.executable, '-I', str(out / 'dm/games/game.py'), 'runtime', '--all', str(files)], capture_output=True, text=True, errors='replace', timeout=300, env=env)
+    if r.returncode: fails.append(f'dm/games/game.py runtime --all: exit {r.returncode}, output {(r.stdout + r.stderr).strip()[-300:]!r}'); return
+    henv = {k: v for k, v in env.items() if not k.startswith('DM_')}   # DM_GAME_PROFILE would be a second profile beside --game; DM_PRELOAD and the like start more than the selection
+    bad, t0 = [], time.monotonic()
+    for gid in profiles:
+        f = files / f'{gid}.tsv'
+        rows = dict(l.split('\t', 1) for l in f.read_text(encoding='utf-8').splitlines() if l and not l.startswith('#') and '\t' in l) if f.is_file() else {}
+        if rows.get('id') != gid: bad.append(f'{gid}: game.py runtime wrote no file of it ({f.name})'); continue
+        for args, source in ((['--game', gid], 'the table built into the program (--game)'), (['--profile', str(f)], f'the file {f} (--profile)')):
+            want = f'[dm] game profile {gid} ({rows.get("name", "")}): {source}'
+            try: p = subprocess.run([str(host), *args], capture_output=True, timeout=60, env=henv)
+            except (OSError, subprocess.TimeoutExpired) as e: bad.append(f'{HOST} {args[0]} {gid}: does not run ({e})'); continue
+            text = (p.stdout + p.stderr).decode('utf-8', 'replace')
+            if p.returncode != 2 or want not in text.splitlines():
+                bad.append(f'{HOST} {args[0]} {gid}: exit {p.returncode} (2 wanted: its usage), ' + ('no line ' + repr(want) if want not in text.splitlines() else 'its line')
+                           + f'; output {text.strip()[-300:]!r}')
+    if bad: fails += [f'the host does not start with every game profile of the bundle ({len(bad)} of {2 * len(profiles)} starts):'] + bad[:10]
+    say(f'check: {HOST}{exe} started with each of the {len(profiles)} game profiles in the bundle, from its table (--game) and from the file game.py runtime writes (--profile): '
+        f'{2 * len(profiles) - len(bad)} of {2 * len(profiles)} starts named the profile ({time.monotonic() - t0:.1f} s)')
 
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description='Assemble the port\'s bundle for Linux or Windows from the build trees (docs/development.md, "The port\'s bundles").')
     ap.add_argument('--platform', required=True, choices=sorted(PLATFORMS))
-    ap.add_argument('--build', required=True, type=Path, help='the host\'s CMake tree: nxlauncher, nxhost-run per profile (hosts/<title ID>/ or the tree\'s own GAME), _deps/sdl3-src')
+    ap.add_argument('--build', required=True, type=Path, help='the host\'s CMake tree: nxlauncher, nxhost-run (one program for every game profile), _deps/sdl3-src')
     ap.add_argument('--aot', type=Path, help='the recompiler\'s CMake tree: nxaot and licenses/LLVM.txt (required on Linux)')
     ap.add_argument('--tools', type=Path, help='the prebuilt nx_extract and dmsh_xlate_vk of dm/tools/publish_port_tools.sh for this platform, with their licenses/ (bin/ in the bundle)')
     ap.add_argument('--out', required=True, type=Path, help='the bundle folder; its name is the archive\'s top folder')

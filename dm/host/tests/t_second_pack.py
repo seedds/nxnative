@@ -5,14 +5,17 @@ launcher's "a better pack is possible" turns on from them and from the sample pr
 --profile --misses` (nxaot reads the targets beside the profile) and writes the launch file's made rows, the rule turns off, and the game runs again from the new pack without the JIT
 fallback. In a games folder of its own (TMPDIR/t_second_pack):
   0. the game: <NSP folder>/<id>_build/aot_v0/ with the module's behaviour image and manifest (aot_synth.py's, with synth_hidden set in the image: the entry calls the hidden function,
-     which has no symbol and no FDE, so nxaot's discovery does not compile it and only the JIT fallback can run it; t_aot_module sets the same word at run time), the launch file
-     (launch-linux.tsv: path host, cwd, choices, log, profile, package, packer, python, nxaot; the pack row; env rows: the save, DM_WINDOW, DM_AOT_RAW=1 since the module has no SDK);
-     the host row is a script that runs this build's nxhost-run with the module named (the launcher passes only the pack folder, and nxhost-run takes the module list from the game
-     profile it was built with: this tree's is another game's)
-  1. the first pack: the packer (dm/host/tests/second_pack/packer.py: the real packer's nxaot_options, aot_packs, made_rows, packs_ready on the prepared folder; no NSP, keys or
-     extraction) run with the arguments the launcher's repack passes: main.aot.so from the manifest alone (nxaot's [RED] line for the hidden function's gate, gate sites 2), the
-     made rows (made profile yes, made misses yes, no module rows); --list: the balanced pack, better_pack -
-  2. nxlauncher --play: the host runs the module to ExitProcess with DM_AOT_PROFILE set to the profile row's folder (Play records by default); the hidden function in the JIT
+     which has no symbol and no FDE, so nxaot's discovery does not compile it and only the JIT fallback can run it; t_aot_module sets the same word at run time), its game profile
+     where the real packer puts a provisional one, <id>_build/profile/<id>/game.tsv (a copy of this tree's default profile, host_tests.tsv's "# game:", with this title ID, the
+     name Synthetic Game and the module list "main"), the launch file (launch-linux.tsv: path host, game_profile, cwd, choices, log, profile, package, packer, python, nxaot; the
+     pack row; env rows: the save, DM_WINDOW, DM_AOT_RAW=1 since the module has no SDK); the host row is this build's nxhost-run itself, one program for every game, which the
+     launcher starts with --profile <the game_profile row's file> and the pack folder: the profile's module list names the module
+  1. the first pack: the packer (dm/host/tests/second_pack/packer.py: the real packer's port_game_profile, nxaot_options, aot_packs, made_rows, packs_ready on the prepared folder;
+     no NSP, keys or extraction) run with the arguments the launcher's repack passes: <id>_build/game-profile-linux.tsv written by game.py runtime from the provisional profile
+     (found through DM_GAMES_DIR, as the real packer finds it) and named by the launch file's game_profile row; main.aot.so from the manifest alone (nxaot's [RED] line for the
+     hidden function's gate, gate sites 2), the made rows (made profile yes, made misses yes, no module rows); --list: the balanced pack, better_pack -
+  2. nxlauncher --play: the host's profile line names the provisional profile and its file (--profile); it runs the module to ExitProcess with DM_AOT_PROFILE set to the profile
+     row's folder (Play records by default); the hidden function in the JIT
      fallback (its gate unserved by the pack: the loader's [RED] line, "1 not"); at exit <profile>/main.misses.tsv with the hidden function's row `<offset> indirect 1` under the header
      naming the image; and the sample profile <profile>/main.tsv under the header naming the image, most of its samples in synth_hot's loop (add, subs, b.ne: the entry's last
      call runs aot_synth.py's HOT_PASSES passes of it, tens of milliseconds of compiled code; the loop's range from aot_synth.py's labels), each sampled function's rows after
@@ -21,13 +24,14 @@ fallback. In a games folder of its own (TMPDIR/t_second_pack):
      (its target has no compiled entry: the JIT fallback's, the misses file has it)
   3. --list: better_pack names 1 new JIT miss, the profile's sampled functions and the known call target the packs were made without (made profile yes and made targets yes, no
      samples or targets row)
-  4. nxlauncher --repack: the packer again (the launcher's command, its output in repack.txt): `nxaot build --profile --misses` takes the profile (aot: profile ...: its samples, 0
+  4. nxlauncher --repack, after the profile's game.tsv changed its name (a newer bundle's profile): the packer again (the launcher's command, its output in repack.txt) writes the
+     game profile's file again with the new name; `nxaot build --profile --misses` takes the profile (aot: profile ...: its samples, 0
      outside every function; aot: profile weights: at least 1 function weighed; aot: tiers with synth_hot at H) and compiles the hidden function (aot: misses: 1 addresses, 1 new
      entries; gate sites 3; no [RED] line for its gate; aot: profile targets: the file's sites), a new main.aot.so, the made rows with `samples main <functions> <samples>
      <FNV-1a 64 of their entries>`, `misses main 1 <FNV-1a 64 of '<offset> indirect\n'>` and `targets main 1 <FNV-1a 64 of '<site>:<synth_observed>\n'>`, computed here from
      the files
   5. --list: better_pack - (the packs took the profile, the misses and the known targets)
-  6. nxlauncher --play again: the hidden function runs from the new pack, its gate served by it ("0 not"), 0 JIT addresses (its call through a pointer now binds an inline cache to
+  6. nxlauncher --play again: the host's profile line names the profile's new name; the hidden function runs from the new pack, its gate served by it ("0 not"), 0 JIT addresses (its call through a pointer now binds an inline cache to
      its standard entry: one dispatcher miss more than the first session's), no misses file written and the old one unchanged; main.tsv written again with this session's samples,
      most in the loop; main.targets.tsv merged with the first session's: the hidden function's call site now bound to it (a new site with a dominant target); --list: what
      profile_state's rule says of this profile and these targets against the samples and targets rows, computed here from the files (the new site is one more than the one the
@@ -35,9 +39,9 @@ fallback. In a games folder of its own (TMPDIR/t_second_pack):
      function lines), not rows: the entry runs the same loop, so the sampled functions are synth_hot's (and whichever others a sample happened to land in) again, however many
      of its instructions this session sampled: `-` when they are the same functions; a session that sampled 10 % more functions, or another set of functions with 25 % more
      samples, shows its reason
-That is the Linux run with nxaot and the JIT fallback (29 checks). What else it runs, the platform from sys.platform (PLATFORMS below holds every difference):
-  Windows  nxhost-run.exe and nxlauncher.exe, launch-windows.tsv, main.aot.dll packs, the packer with --platform windows; the host row a .cmd (the launcher's CreateProcess starts a
-           batch file through cmd.exe), APPDATA for the launcher's own settings
+That is the Linux run with nxaot and the JIT fallback (33 checks). What else it runs, the platform from sys.platform (PLATFORMS below holds every difference):
+  Windows  nxhost-run.exe and nxlauncher.exe, launch-windows.tsv and game-profile-windows.tsv, main.aot.dll packs, the packer with --platform windows, APPDATA for the launcher's
+           own settings
   no JIT   a host built without the JIT fallback (CMake NXHOST_JIT off: the Windows cross-build's image has no Boost), which the first session's log says: the hidden function
            stops the module with status 3 and the [RED] line that it needs the JIT fallback, its miss recorded all the same (aot_run.c note_jit), before synth_hot's loop (no
            profile to check); the repack is then what makes the game run to its end. The rule's answers are computed here from the files either way
@@ -47,8 +51,9 @@ That is the Linux run with nxaot and the JIT fallback (29 checks). What else it 
            repack too), but the packs took no profile (made profile unused), so `nxaot build --profile` is not checked and the rule names only misses (no profile and no
            known targets: made targets unused)
   t_second_pack.py --prebuild <folder>   writes that game for build_packs.sh: main.image.bin, main.aot.tsv and main.misses.tsv
-  t_second_pack.py --dry linux|windows   runs nothing: writes the platform's game, host wrapper and launch file into a temporary folder (the platform as sys.platform would give it),
-                                         prints them and compares the launch file with what the packer's port_launch_file writes for --platform <platform>
+  t_second_pack.py --dry linux|windows   runs nothing but game.py runtime: writes the platform's game, profile and launch file into a temporary folder (the platform as
+                                         sys.platform would give it), prints them and compares the launch file with what the packer's port_launch_file writes for --platform
+                                         <platform>, and the profile file with what its port_game_profile writes
 """
 import argparse
 import hashlib
@@ -73,16 +78,11 @@ TITLE = 'Synthetic Game'
 PREBUILT = 'second_pack'   # the folder of the prebuilt packs in the packs folder (build_packs.sh)
 
 # Every difference between the platforms: the programs' suffix, the launch file the launcher reads there (launcher_model.cpp find_games: launch-<kPlatform>.tsv), a pack's name
-# after its module's (kPackSuffix, aot.h DM_AOT_PACK_SUFFIX), the host row's wrapper (its file name and text: the launcher starts the host row with the pack folder alone, by
-# execve on Linux, by CreateProcess on Windows, which runs a .cmd through cmd.exe; {host} is this build's nxhost-run), the packer's --platform, and the variable that names the
-# launcher's own settings folder (launcher_model.cpp config_path)
+# after its module's (kPackSuffix, aot.h DM_AOT_PACK_SUFFIX), the packer's --platform (which names the game profile's file, game-profile-<platform>.tsv), and the variable that
+# names the launcher's own settings folder (launcher_model.cpp config_path)
 PLATFORMS = {
-    'linux': dict(exe='', launch='launch-linux.tsv', pack='.aot.so', packer='linux', config='XDG_CONFIG_HOME', wrapper='nxhost-run',
-                  text='#!/bin/sh\n# the launch file\'s host: this build\'s nxhost-run with the module named (its game profile lists another game\'s modules)\n'
-                       'dir=$1; shift\nexec \'{host}\' "$dir" main "$@"\n'),
-    'windows': dict(exe='.exe', launch='launch-windows.tsv', pack='.aot.dll', packer='windows', config='APPDATA', wrapper='nxhost-run.cmd',
-                    text='@echo off\r\nrem the launch file\'s host: this build\'s nxhost-run.exe with the module named (its game profile lists another game\'s modules); '
-                         'the launcher\'s CreateProcess runs it through cmd.exe\r\n"{host}" "%~1" main\r\nexit /b %ERRORLEVEL%\r\n'),
+    'linux': dict(exe='', launch='launch-linux.tsv', pack='.aot.so', packer='linux', config='XDG_CONFIG_HOME'),
+    'windows': dict(exe='.exe', launch='launch-windows.tsv', pack='.aot.dll', packer='windows', config='APPDATA'),
 }
 
 
@@ -286,18 +286,35 @@ def first_misses(g):   # the misses file a first session of the game records (th
             f'0x{g["hidden"]:x} indirect 1\n')
 
 
-def write_wrapper(folder, plat, host):   # the host row's file: this build's nxhost-run with the module named
-    path = folder / plat['wrapper']
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(plat['text'].format(host=host), newline='')
-    path.chmod(0o755)
-    return path
+def default_profile(build):   # the profile this tree was configured with (cmake -DGAME; host_tests.tsv's "# game:" line), which the synthetic module ran under before
+    head = (build / 'host_tests.tsv').read_text(encoding='utf-8') if (build / 'host_tests.tsv').is_file() else ''
+    return next((l.split(':', 1)[1].strip() for l in head.split('\n') if l.startswith('# game:')), None)
 
 
-def launch_rows(plat, wrapper, rd, prof, nsp_dir, nxaot, aot, work):
+def write_profile(work, default_id, name=TITLE):
+    """The game's profile where the real packer writes a provisional one (<id>_build/profile/<id>/game.tsv, found through DM_GAMES_DIR: build_ipa_from_nsp.py main): the default
+    profile's game.tsv (its memory layout and constants, which the synthetic module has always run under) with this title ID, name and the module list "main". Returns its folder"""
+    sys.path.insert(0, str(REPO / 'dm/games'))
+    import game
+    d = work / 'profile' / ID
+    d.mkdir(parents=True, exist_ok=True)
+    new, rows = {'title_id': ID, 'program_id': ID, 'name': name, 'modules': 'main'}, []
+    for line in (game.load(default_id).dir / 'game.tsv').read_text(encoding='utf-8').split('\n'):
+        k = line.split('\t', 1)[0].strip()
+        if k in new and not line.lstrip().startswith('#'): rows.append(f'{k}\t{new.pop(k)}')
+        elif line.strip(): rows.append(line)
+    (d / 'game.tsv').write_text('\n'.join(rows + [f'{k}\t{v}' for k, v in new.items()]) + '\n', encoding='utf-8', newline='\n')
+    return d.resolve()   # as game.py names a profile's folder (Game.dir), which the profile file's first line gives
+
+
+def profile_file(work, plat): return work / f'game-profile-{plat["packer"]}.tsv'   # build_ipa_from_nsp.py game_profile_file
+
+
+def launch_rows(plat, host, rd, prof, nsp_dir, nxaot, aot, work):
     return [('game', 'title', TITLE), ('game', 'title_id', ID), ('game', 'version', '1.0.0'), ('game', 'package', 'v0'), ('game', 'platform', plat['packer']),
             ('game', 'graphics', 'nvn'),
-            ('path', 'host', wrapper), ('path', 'cwd', rd), ('path', 'choices', rd / 'env.txt'), ('path', 'log', rd / 'log.txt'), ('path', 'profile', prof),
+            ('path', 'host', host), ('path', 'game_profile', profile_file(work, plat)), ('path', 'cwd', rd), ('path', 'choices', rd / 'env.txt'), ('path', 'log', rd / 'log.txt'),
+            ('path', 'profile', prof),
             ('path', 'package', nsp_dir), ('path', 'packer', PACKER), ('path', 'python', sys.executable)] + ([('path', 'nxaot', nxaot)] if nxaot else []) + \
            [('pack', 'balanced', aot),
             ('env', 'DM_ROOT', work), ('env', 'DM_SAVE', rd / 'save'), ('env', 'DM_TEMP', rd / 'temp'), ('env', 'DM_LANG', 'en-US'), ('env', 'DM_WINDOW', '1'),
@@ -317,13 +334,17 @@ def prebuild(folder):   # --prebuild: the game and its first session's misses, f
 
 
 def dry(name):
-    """--dry: the platform's game folder, wrapper and launch file as a run writes them, nothing run; the launch file against port_launch_file's for --platform <platform>"""
+    """--dry: the platform's game folder, profile and launch file as a run writes them, nothing run but game.py runtime; the launch file against port_launch_file's for --platform
+    <platform>, the profile file against what port_game_profile writes"""
     import importlib.util
     import types
     plat_name = platform_of({'windows': 'win32', 'linux': 'linux'}[name])   # as sys.platform gives it on that platform
     plat = PLATFORMS[plat_name]
     spec = importlib.util.spec_from_file_location('build_ipa_from_nsp', REPO / 'scripts/build_ipa_from_nsp.py')
     nsp = importlib.util.module_from_spec(spec); spec.loader.exec_module(nsp)
+    sys.path.insert(0, str(REPO / 'dm/games'))
+    import game
+    default_id = next(p.id for p in game.all_games() if p.dir.parent == game.HERE)   # a registered profile, as a tree's -DGAME is
     with tempfile.TemporaryDirectory(prefix='t_second_pack_dry_') as tmp:
         root = Path(tmp)
         build = root / 'build'
@@ -331,14 +352,17 @@ def dry(name):
         work, wdir = nsp_dir / f'{ID}_build', nsp_dir / f'{ID}-work'
         rd, prof, aot = wdir / 'run', wdir / 'profile', work / 'aot_v0'
         g = write_game(aot)
+        pdir = write_profile(work, default_id)
         host, launcher = build / f'nxhost-run{plat["exe"]}', build / f'nxlauncher{plat["exe"]}'
-        wrapper = write_wrapper(root / 'bin', plat, host)
         launch = work / plat['launch']
         nxaot = build / f'nxaot{plat["exe"]}'
-        rows = launch_rows(plat, wrapper, rd, prof, nsp_dir, nxaot, aot, work)
+        rows = launch_rows(plat, host, rd, prof, nsp_dir, nxaot, aot, work)
         write_launch(launch, rows)
+        # the game profile's file as the packer stand-in writes it: the real packer's port_game_profile, the provisional profile found through DM_GAMES_DIR
+        gprof = nsp.port_game_profile(sys.executable, REPO, work, types.SimpleNamespace(id=ID), plat_name, dict(os.environ, DM_GAMES_DIR=str(pdir.parent)), work / 'logs')
         print(f'--dry {name} (sys.platform {"win32" if name == "windows" else "linux"}: {plat_name}): host {host}, launcher {launcher}, pack {aot / ("main" + plat["pack"])}')
-        print(f'{wrapper.name}:\n' + ''.join(f'  | {line}\n' for line in wrapper.read_text().splitlines()), end='')
+        print(f'{pdir / "game.tsv"} (from {default_id}):\n' + ''.join(f'  | {line}\n' for line in (pdir / 'game.tsv').read_text().splitlines() if not line.startswith('#')), end='')
+        print(f'{gprof.name}:\n' + ''.join(f'  | {line}\n' for line in gprof.read_text().splitlines()), end='')
         print(f'{launch.name}:\n' + ''.join(f'  | {line}\n' for line in launch.read_text().splitlines()), end='')
         # The packer's own launch file for the platform (its rows for a pack of this folder, its paths under a stand-in repository)
         pw, pwork = root / 'port', root / 'port' / f'{ID}_build'
@@ -351,7 +375,7 @@ def dry(name):
         prow = rows_of(port)
         mine = rows_of(launch)
         names = lambda rs, k: [n for kk, n, _ in rs if kk == k]
-        port_host = nsp.port_host(root / 'repo', plat_name, ID)[0]
+        port_host = nsp.port_host(root / 'repo', plat_name)[0]
         check(port.name == launch.name, f'the launch file\'s name: {launch.name} (port_launch_file: {port.name})')
         check(port.read_text().split('\n', 1)[0] == launch.read_text().split('\n', 1)[0] == nsp.LAUNCH_HEAD, f'its first line: {nsp.LAUNCH_HEAD}')
         check(names(mine, 'game') == names(prow, 'game') and dict((n, v) for k, n, v in prow if k == 'game')['platform'] == plat['packer'] ==
@@ -365,13 +389,13 @@ def dry(name):
               'the rows\' order: game, path, (made: the packer stand-in puts them before the pack rows, as port_launch_file does), pack, env')
         check(plat['pack'] == nsp.PACK_SUFFIXES[plat_name] and plat['exe'] == port_host.suffix and host.name == port_host.name,
               f'the pack suffix {plat["pack"]} (PACK_SUFFIXES) and the host\'s name {host.name} (port_host: {port_host.name})')
-        if plat_name == 'windows':
-            text = wrapper.read_text()
-            check(wrapper.suffix == '.cmd' and f'"{host}" "%~1" main\r\n' in wrapper.read_bytes().decode() and 'exit /b %ERRORLEVEL%' in text,
-                  f'{wrapper.name}: a batch file that runs "{host.name}" with the pack folder and the module main, its status passed on')
-        else:
-            check(wrapper.read_text().startswith('#!/bin/sh\n') and f'exec \'{host}\' "$dir" main "$@"' in wrapper.read_text() and os.access(wrapper, os.X_OK),
-                  f'{wrapper.name}: an executable shell script that execs {host.name} with the pack folder and the module main')
+        pfile = dict((n, v) for k, n, v in prow if k == 'path')['game_profile']
+        prof_rows = dict(l.split('\t', 1) for l in gprof.read_text(encoding='utf-8').splitlines() if l and not l.startswith('#'))
+        check(gprof == profile_file(work, plat) == Path(dict((n, v) for k, n, v in mine if k == 'path')['game_profile']) and Path(pfile).name == gprof.name,
+              f'the game profile\'s file {gprof.name}: where port_game_profile writes it and the launch file\'s game_profile row names it (port_launch_file: {Path(pfile).name})')
+        check((prof_rows.get('id'), prof_rows.get('name'), prof_rows.get('modules')) == (ID, TITLE, 'main') and
+              gprof.read_text(encoding='utf-8') == game.runtime(game.Game(pdir)),
+              f'{gprof.name}: game.py runtime of the provisional profile {pdir} (id {ID}, name {TITLE}, modules main)')
         check((aot / 'main.aot.tsv').read_text().split('\n', 1)[0].split('\t')[3] == g['sha'], f'main.aot.tsv names the image\'s SHA-256 {g["sha"][:16]}...')
     print(f't_second_pack --dry {name}: {checks} checks, {fails} failed')
     return 1 if fails else 0
@@ -430,9 +454,13 @@ def main():
                                          (prebuilt / 'main.image.bin').read_bytes() == (aot / 'main.image.bin').read_bytes(),
                                          f'0. the prebuilt packs\' game ({prebuilt}) is this one: its manifest and image byte for byte (build_packs.sh of this commit)'):
         print(f't_second_pack: {checks} checks, {fails} failed'); return 1
-    wrapper = write_wrapper(root / 'bin', plat, host)
+    default_id = default_profile(build)
+    if not default_id: print(f'FAIL: no "# game:" line in {build / "host_tests.tsv"} (the profile the tree was configured with)'); return 1
+    pdir = write_profile(work, default_id)
+    gprof = profile_file(work, plat)
+    print(f'its game profile: {pdir / "game.tsv"} (a provisional profile where the packer puts one: {default_id}\'s with this title ID, {TITLE}, modules main)')
     launch = work / plat['launch']
-    write_launch(launch, launch_rows(plat, wrapper, rd, prof, nsp_dir, nxaot, aot, work))
+    write_launch(launch, launch_rows(plat, host, rd, prof, nsp_dir, nxaot, aot, work))
     env = {k: v for k, v in os.environ.items() if k.upper() not in ('NXHOST', 'NXPACK', 'DM_AOT_PROFILE', 'DM_AOT_PROFILE_HZ', 'DM_LAUNCHER', 'DM_SAVED_CHOICES',
                                                                      'T_SECOND_PACK_PREBUILT', plat['config'])}
     env.update(SDL_VIDEO_DRIVER='dummy', SDL_VIDEODRIVER='dummy', SDL_AUDIO_DRIVER='dummy', DM_VK_HEADLESS='1', PYTHONDONTWRITEBYTECODE='1')
@@ -449,6 +477,11 @@ def main():
     red_gate = f'the observation gate at main+{hidden:#x} is in no discovered function\'s code'
     show(nxlog, ['gate sites', red_gate, 'aot: misses'])
     check(r.returncode == 0 and (aot / pack_name).is_file(), f'1. the first pack: {pack_name} built by {made_by} from the manifest')
+    prow = dict(l.split('\t', 1) for l in gprof.read_text(encoding='utf-8').splitlines() if l and not l.startswith('#')) if gprof.is_file() else {}
+    print(f'      {gprof.name}: id {prow.get("id")}, name {prow.get("name")}, modules {prow.get("modules")}; {gprof.read_text(encoding="utf-8").splitlines()[0] if gprof.is_file() else ""}')
+    check((prow.get('id'), prow.get('name'), prow.get('modules')) == (ID, TITLE, 'main') and f'from {pdir}/game.tsv' in gprof.read_text(encoding='utf-8') and
+          ('path', 'game_profile', str(gprof)) in rows_of(launch),
+          f'1. {gprof.name}: written by the packer (game.py runtime) from the provisional profile {pdir} (DM_GAMES_DIR), named by the launch file\'s game_profile row')
     check('gate sites 2 (design 1.1)' in nxlog and red_gate in nxlog and 'aot: misses' not in nxlog,
           f'1. no misses yet: the hidden function main+{hidden:#x} is no discovered code, its gate not served (nxaot: gate sites 2 and its [RED] line)')
     made = made_of(launch)
@@ -468,8 +501,10 @@ def main():
     r = run([launcher, '--games', games, '--play', ID], env)
     print(r.stderr, end='')
     log = (rd / 'log.txt').read_text(errors='replace') if (rd / 'log.txt').is_file() else ''
-    show(log, ['nxhost-run: modules from', 'DM_AOT_PROFILE', 'gates (', 'that its pack does not call', 'needs the JIT fallback', '[guest]', 'guest code ended', 'aot: misses',
-               'aot: profile'])
+    show(log, ['game profile ', 'nxhost-run: modules from', 'DM_AOT_PROFILE', 'gates (', 'that its pack does not call', 'needs the JIT fallback', '[guest]', 'guest code ended',
+               'aot: misses', 'aot: profile'])
+    check(f'[dm] game profile {ID} ({TITLE}): the file {gprof} (--profile)' in log.splitlines(),
+          f'2. the host\'s profile line: {ID} ({TITLE}) from the file {gprof.name} (--profile, which the launcher passes from the game_profile row)')
     end = end1 = end_line(log)
     jit = 'with the JIT fallback' in log   # the host's engine, as its first line says (main_x86.c): a host built without it stops at the hidden function
     red_jit = f'at main+{hidden:#x} needs the JIT fallback (design section 11), which this host is built without'
@@ -529,7 +564,9 @@ def main():
     check(row.get('better_pack') == want and want.startswith('1 new JIT miss'),
           f'3. --list: better_pack says {want} (profile_state against the made rows: made profile {took}, no samples row)')
 
-    # 4. The repack, through the launcher
+    # 4. The repack, through the launcher, after the profile's game.tsv changed (a newer bundle's profile): the packer writes its file again
+    renamed = f'{TITLE} (repacked)'
+    write_profile(work, default_id, renamed)
     r = run([launcher, '--games', games, '--repack', ID], env, timeout=300)
     print(r.stderr, end='')
     rlog = (rd / 'repack.txt').read_text(errors='replace') if (rd / 'repack.txt').is_file() else ''
@@ -538,6 +575,8 @@ def main():
     check(r.returncode == 0 and 'the packer started for the balanced pack' in r.stderr and 'nxlauncher: the packer exited with status 0' in r.stderr and
           'packer stand-in: 1 packs built (balanced)' in rlog,
           f'4. --repack: the launcher ran the launch file\'s packer ({" ".join(argv)}) and waited: status 0')
+    check(gprof.is_file() and f'name\t{renamed}\n' in gprof.read_text(encoding='utf-8') and ('path', 'game_profile', str(gprof)) in rows_of(launch),
+          f'4. {gprof.name} written again from the changed profile (name {renamed}), the launch file\'s row unchanged')
     nxlog = (work / 'logs/nxaot_main.log').read_text(errors='replace') if (work / 'logs/nxaot_main.log').is_file() else ''
     show(nxlog, ['gate sites', red_gate, 'aot: misses'])
     check('aot: misses: 1 addresses, 1 new entries, 0 resume points, 0 still unserved (none)' in nxlog and 'gate sites 3 (design 1.1)' in nxlog and red_gate not in nxlog,
@@ -587,9 +626,10 @@ def main():
     r = run([launcher, '--games', games, '--play', ID], env)
     print(r.stderr, end='')
     log = (rd / 'log.txt').read_text(errors='replace') if (rd / 'log.txt').is_file() else ''
-    show(log, ['gates (', 'that its pack does not call', 'needs the JIT fallback', '[guest]', 'guest code ended', 'aot: misses', 'aot: profile'])
+    show(log, ['game profile ', 'gates (', 'that its pack does not call', 'needs the JIT fallback', '[guest]', 'guest code ended', 'aot: misses', 'aot: profile'])
     end = end_line(log)
     check(r.returncode == 0 and end and end[0] == 0 and '[guest] aot module: done' in log, '6. --play again: the module ran to ExitProcess, status 0')
+    check(f'[dm] game profile {ID} ({renamed}): the file {gprof} (--profile)' in log.splitlines(), f'6. the host\'s profile line: the repacked profile\'s name, {renamed}')
     check('aot: main: 3 gates (2 observation gates, 1 spin wait back-edges) called by its pack, 0 not' in log and 'that its pack does not call' not in log,
           '6. the loader: the new pack calls every gate, the hidden function\'s too (0 not, no [RED] line)')
     if jit:

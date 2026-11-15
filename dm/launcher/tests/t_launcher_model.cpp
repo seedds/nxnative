@@ -1,7 +1,8 @@
 // nxlauncher's model (dm/launcher/launcher_model.cpp) over a games folder this test writes (fake_games.h): the games found and their pack modes, the settings rows and their effective
 // values (saved choices, a value the pack does not offer, the pack's own defaults, what the environment fixes), what starts a game (the pack, the host, the environment in the order
 // run.sh gives it, DM_SAVED_CHOICES=0, NXHOST), the saved-choice round trip through the player's env.txt, the second pack (the profile folder, "Record a profile while playing",
-// whether the recorded profile, JIT misses and known targets make a better pack possible against what the launch file says the packs took, the repack's command), a moved bundle (the host, packer
+// whether the recorded profile, JIT misses and known targets make a better pack possible against what the launch file says the packs took, the repack's command), the game profile's
+// file (--profile with the game_profile row's file; the row missing or its file gone: the problem), a moved bundle (the host bin/nxhost-run, packer
 // and nxaot taken from the launcher's folder when the launch file's are gone; NXHOST over both; the problem when none is there), the launcher's own settings,
 // DM_LAUNCHER and "Show this window at launch", and a child process with its environment,
 // working folder, log and exit status (this program, which acts as nxhost-run and as the packer with NXL_FAKE_HOST=1).
@@ -133,12 +134,13 @@ static void command(const fake::Folder &f) {
     MapEnv none;
     Command cmd = compose(a, "", none);
     CHECK(cmd.error.empty() && cmd.mode == "balanced", "the first pack row by default");
-    CHECK_EQ(cmd.argv, (std::vector<std::string>{a.launch.host, fake::str(f.a / "aot_v131072")}), "nxhost-run and the pack folder");
+    CHECK_EQ(cmd.argv, (std::vector<std::string>{a.launch.host, "--profile", fake::str(fake::profile_file(f.a)), fake::str(f.a / "aot_v131072")}),
+             "nxhost-run, --profile with the game profile's file, and the pack folder");
     CHECK_EQ(cmd.cwd + "|" + cmd.log, fake::str(f.a_run) + "|" + fake::str(f.a_run / "log.txt"), "its working folder and log");
     CHECK_EQ(keys(cmd.set), (std::vector<std::string>{"DM_OPMODE", "DM_PRESENT_UPSCALE", "DM_DEBUG_LOG", "DM_RENDER_SCALE", "DM_MOTION", "DM_ROOT", "DM_ROMFS", "DM_SAVE", "DM_TEMP",
                                                       "DM_MSL_DIR", "DM_LANG", "DM_WINDOW", "DM_AUDIO"}), "env.txt's lines, then the env rows, as run.sh sets them");
     CHECK_EQ(value(cmd.set, "DM_PRESENT_UPSCALE"), std::string("metalfx"), "env.txt's lines go as they are, as run.sh passes them");
-    CHECK_EQ(compose(a, "max", none).argv[1], fake::str(f.a / "aot_v131072/max"), "the max pack");
+    CHECK_EQ(compose(a, "max", none).argv[3], fake::str(f.a / "aot_v131072/max"), "the max pack");
     MapEnv set; set.vars = {{"DM_LANG", "ja"}, {"DM_OPMODE", "1"}, {"NXHOST", "/opt/other/nxhost-run"}};
     Command cs = compose(a, "", set);
     CHECK(value(cs.set, "DM_LANG") == "<unset>" && value(cs.set, "DM_OPMODE") == "<unset>", "what the environment sets stays");
@@ -149,6 +151,46 @@ static void command(const fake::Folder &f) {
     CHECK(compose(c, "", none).error.find("incomplete") != std::string::npos, "an incomplete pack");
     Config cfg; cfg.set("pack.0100AAAA00000000", "max"); cfg.set("pack.0100BBBB00000000", "max");
     CHECK_EQ(chosen_mode(a, cfg) + " " + chosen_mode(b, cfg) + " " + chosen_mode(c, cfg), std::string("max balanced "), "the player's mode where it was packed, else the first");
+}
+
+// The game profile's file (launcher_model.h, "The programs a launch file names"): the path game_profile row read, passed with --profile whatever host runs (NXHOST too); a row
+// whose file is gone and a launch file without the row are each the game's problem and Play's error, in the launcher's words, NXHOST or not; a missing host is said first
+static void game_profile_rules(const fake::Folder &f, const fs::path &root) {
+    MapEnv none, nxhost; nxhost.vars = {{"NXHOST", "/opt/other/nxhost-run"}};
+    auto g = find_games(fake::str(f.games));
+    const std::string bprof = fake::str(fake::profile_file(f.b));
+    CHECK_EQ(g[0].launch.game_profile + "|" + g[1].launch.game_profile, fake::str(fake::profile_file(f.a)) + "|" + bprof, "the path game_profile row");
+    Command cn = compose(g[1], "", nxhost);
+    CHECK_EQ(cn.argv, (std::vector<std::string>{"/opt/other/nxhost-run", "--profile", bprof, fake::str(f.b / "aot_v0")}), "NXHOST's host gets the pack's --profile too");
+    // the file gone
+    fs::remove(fake::profile_file(f.b));
+    const std::string gone = "the game profile " + bprof + " is missing: pack the game again";
+    g = find_games(fake::str(f.games));
+    CHECK_EQ(g[1].problem, gone, "the file gone: the game's problem says so");
+    CHECK_EQ(compose(g[1], "", none).error, gone, "... and Play says so");
+    CHECK(find_games(fake::str(f.games), kPlatform, bundle_dir(), nxhost)[1].problem == gone && compose(g[1], "", nxhost).error == gone, "... NXHOST or not");
+    CHECK(g[0].problem.empty(), "another game's file is there: no problem");
+    fake::profile(f.b, "0100BBBB00000000");
+    CHECK(find_games(fake::str(f.games))[1].problem.empty(), "the file there again: no problem");
+    // a launch file without the row (a pack made before the one host)
+    const std::string id = "0100FFFF00000000";
+    const fs::path games = root / "no profile row/games", build = games / (id + "_build"), run = games / (id + "-work/run");
+    fake::packs(build / "aot_v0", false);
+    std::string text = fake::launch("Phi Game", id, build, run, self_path(), false, {{"balanced", build / "aot_v0"}});
+    const std::string row = "path\tgame_profile\t" + fake::str(fake::profile_file(build)) + "\n";
+    CHECK(text.find(row) != std::string::npos, "the fake launch file has the row to take out");
+    text.erase(text.find(row), row.size());
+    fake::write(build / ("launch-" + std::string(kPlatform) + ".tsv"), text);
+    const std::string none_row = "the launch file names no game profile (a pack made before one nxhost-run served every game): pack the game again";
+    auto h = find_games(fake::str(games));
+    CHECK(h.size() == 1 && h[0].launch.game_profile.empty() && h[0].problem == none_row, "no game_profile row: the game is listed with that problem: " + (h.empty() ? "" : h[0].problem));
+    if (h.size() == 1) CHECK_EQ(compose(h[0], "", nxhost).error, none_row, "... and Play says so, NXHOST or not");
+    // a missing host is said before a missing profile
+    text = fake::launch("Phi Game", id, build, run, fake::str(root / "no profile row/no host"), false, {{"balanced", build / "aot_v0"}});
+    text.erase(text.find(row), row.size());
+    fake::write(build / ("launch-" + std::string(kPlatform) + ".tsv"), text);
+    h = find_games(fake::str(games), kPlatform, fake::str(root / "no profile row/no bundle"), none);
+    CHECK(h.size() == 1 && h[0].problem.rfind("the host ", 0) == 0, "neither the host nor the profile: the host's problem first");
 }
 
 static void round_trip(const fake::Folder &f) {
@@ -485,11 +527,13 @@ static void second_pack(const fake::Folder &f) {
 }
 
 // A bundle moved or replaced (launcher_model.h, "The programs a launch file names"): the launch file's host, packer and nxaot are gone, and the launcher takes the bundle's (its own
-// folder's hosts/<title ID>/nxhost-run, scripts/build_ipa_from_nsp.py, bin/nxaot) when they are there; NXHOST wins over both; the problem only when none is there
+// folder's bin/nxhost-run, the one host of every game, scripts/build_ipa_from_nsp.py, bin/nxaot) when they are there; NXHOST wins over both; the problem only when none is there.
+// The game profile's file stays with the pack (in <id>_build), so the bundle's host gets it as the launch file's host would
 static void moved_bundle(const fs::path &root) {
     const std::string id = "0100EEEE00000000";
     const fs::path games = root / "moved/games", build = games / (id + "_build"), run = games / (id + "-work/run"), old = root / "moved/old bundle", bundle = root / "moved/bundle";
-    const std::string row = fake::str(old / "hosts" / id / (std::string("nxhost-run") + kExeSuffix)), own = fake::str(bundle / "hosts" / id / (std::string("nxhost-run") + kExeSuffix));
+    const std::string row = fake::str(old / "bin" / (std::string("nxhost-run") + kExeSuffix)), own = fake::str(bundle / "bin" / (std::string("nxhost-run") + kExeSuffix));
+    fake::profile(build, id);
     const std::string row_packer = fake::str(old / "scripts/build_ipa_from_nsp.py"), row_nxaot = fake::str(old / "bin" / (std::string("nxaot") + kExeSuffix));
     const std::string own_packer = fake::str(bundle / "scripts/build_ipa_from_nsp.py"), own_nxaot = fake::str(bundle / "bin" / (std::string("nxaot") + kExeSuffix));
     fake::packs(build / "aot_v0", false);
@@ -513,7 +557,8 @@ static void moved_bundle(const fs::path &root) {
     Game g = game(none);
     CHECK(g.problem.empty(), "the row's host is gone and the bundle's is there: no problem: " + g.problem);
     c = compose(g, "", none, false, fake::str(bundle));
-    CHECK(c.error.empty() && c.argv == (std::vector<std::string>{own, fake::str(build / "aot_v0")}), "the bundle's hosts/<title ID>/nxhost-run is started: " + c.error);
+    CHECK(c.error.empty() && c.argv == (std::vector<std::string>{own, "--profile", fake::str(fake::profile_file(build)), fake::str(build / "aot_v0")}),
+          "the bundle's bin/nxhost-run is started, with the pack's --profile: " + c.error);
     CHECK_EQ(c.notes, (std::vector<std::string>{"host: the bundle's " + own + " (the launch file's " + row + " is missing)"}), "... and the log says which host and why");
     Found h = find_host(g.launch, none, fake::str(bundle));
     CHECK(h.path == own && h.problem.empty(), "find_host: the bundle's");
@@ -625,6 +670,7 @@ int main(int argc, char **argv) {
     games(f);
     settings(f);
     command(f);
+    game_profile_rules(f, root);
     round_trip(f);
     second_pack(f);
     moved_bundle(root);

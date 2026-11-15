@@ -17,7 +17,8 @@
 #   <name>.image.bin, and nro.tsv (the NROs the game registers, Apple's rows). Then the shaders for the Vulkan backend: an NVN game's split and dmsh_build_vk.py into <id>_build/shader/cache/vk-<V>/
 #   (V = DMSH_CHAIN_VK; it needs the Vulkan translator, a bundle's bin/dmsh_xlate_vk or the dll built with .NET in the chain image, and the SPIR-V tools of its lock, and is reported as not
 #   run without them), an OpenGL game's gl_shaders.py --vk into <id>_build/shader/gl-vk/,
-#   none for a guest Vulkan game (its SPIR-V goes to the driver); then <id>_build/run.sh (run.cmd on Windows) with the nxhost-run command line, its save in <NSP folder>/<id>-work/run/; last the
+#   none for a guest Vulkan game (its SPIR-V goes to the driver); then <id>_build/run.sh (run.cmd on Windows) with the nxhost-run command line, its save in <NSP folder>/<id>-work/run/, and
+#   the game profile's file <id>_build/game-profile-<platform>.tsv (game.py runtime), which the one nxhost-run of every game takes with --profile; last the
 #   packs: nxaot build (NXAOT / --nxaot, default bin/nxaot in the port's bundle, else build/aot/nxaot; bin\nxaot.exe and build\aot-win64\nxaot.exe on Windows) of every module's manifest and every NRO into <name>.aot.so beside them (on Windows <name>.aot.dll, nxaot build --target
 #   windows: dm/tools/aot/README.md, "Windows packs"), mode PACK_MODE / --pack-mode (balanced or max), with the per-function cache <NSP folder>/<id>-work/aot-cache/ when this nxaot has --cache,
 #   and a module's sample profile <NSP folder>/<id>-work/profile/<name>.tsv when there is one (nxhost-run writes it with DM_AOT_PROFILE; AOT_PROFILE / --no-profile ignores them), and the
@@ -2554,18 +2555,44 @@ def port_settings(py, repo, work, game, patched, gfx, lang, g, platform, env, lo
     return out
 
 
-def port_host(repo, platform, gid, bundled=True):
-    """The nxhost-run a pack names (the launch file's path host row): the port's bundle's hosts/<title ID>/nxhost-run (nxhost-run.exe on Windows; scripts/package_port.py), built for
-    that game profile, when this script runs from a bundle that has it and the profile is the registered one (bundled: not a derived or provisional profile, whose host must be built
-    from the repository with DM_GAMES_DIR); else the repository's build tree, build/linux/nxhost-run or build/win64/nxhost-run.exe. Returns (path, whether it is the bundle's)"""
-    own = repo / 'hosts' / gid / ('nxhost-run.exe' if platform == 'windows' else 'nxhost-run')
-    if bundled and own.is_file(): return own, True
+BUNDLE_HOST = 'bin/nxhost-run'   # the port's bundle's host program (scripts/package_port.py), beside its other programs in bin/
+
+
+def port_host(repo, platform):
+    """The nxhost-run a pack names (the launch file's path host row): one program for every game profile, which takes the pack's profile at start (--profile <the pack's profile
+    file>: port_game_profile; dm/host/game_rt.c), so a registered, derived or provisional profile runs with the same host. Run from the port's bundle (scripts/package_port.py), the
+    bundle's bin/nxhost-run (nxhost-run.exe on Windows); from a checkout, its build tree's, build/linux/nxhost-run or build/win64/nxhost-run.exe (configured with any -DGAME).
+    Returns (path, whether it is the bundle's). A bundle of the layout before the one host (hosts/<title ID>/nxhost-run, one host per profile, and no bin/nxhost-run) stops the pack:
+    its hosts take no profile file"""
+    exe = '.exe' if platform == 'windows' else ''
+    own = repo / (BUNDLE_HOST + exe)
+    if own.is_file(): return own, True
+    if (repo / 'hosts').is_dir():
+        raise BuildError(f'{repo} is a bundle of the port\'s first layout (hosts/<title ID>/nxhost-run{exe}, one host per game profile) and has no {BUNDLE_HOST}{exe}, the one host for '
+                         f'every profile that this packer\'s packs need: unpack a newer bundle (docs/development.md, "The port\'s bundles") and pack the game with its pack.{"cmd" if exe else "sh"}')
     return repo / ('build/win64/nxhost-run.exe' if platform == 'windows' else 'build/linux/nxhost-run'), False
 
 
-def port_launch_file(platform, repo, work, wdir, aot, game, msl, aoc, gfx, lang, g, name, version, pkg_ver, modes, env_file='', settings=None, repack=None, made=(), host=None):
+def game_profile_file(work, platform):   # the pack's game profile file, beside its launch file (port_game_profile; the launch file's path game_profile row)
+    return work / f'game-profile-{platform}.tsv'
+
+
+def port_game_profile(py, repo, work, g, platform, env, logs):
+    """<id>_build/game-profile-<platform>.tsv: the constants of the game profile the pack is made from, as nxhost-run reads them with --profile <file> (dm/games/game.py runtime <id>
+    <file>; dm/host/game_rt.c): the one host of every game takes its profile from this file, so a derived or provisional profile, found through DM_GAMES_DIR in env as the packer's
+    other tools find it, runs as a registered one does. The launch file's path game_profile row names it; run.sh, run.cmd and the launcher pass it to nxhost-run. game.py writes it
+    on every run (the bytes only when they change), as the launch file and the settings are written, so a repack takes the profile's game.tsv as it is then. Returns its path"""
+    out = game_profile_file(work, platform)
+    run([py, repo / 'dm/games/game.py', 'runtime', g.id, out], logs / f'game_profile_{platform}.log', env=env)
+    if not out.is_file(): raise BuildError(f'game.py runtime wrote no {out} (output: {logs / f"game_profile_{platform}.log"})')
+    return out
+
+
+def port_launch_file(platform, repo, work, wdir, aot, game, msl, aoc, gfx, lang, g, name, version, pkg_ver, modes, env_file='', settings=None, repack=None, made=(), host=None,
+                     game_profile=None):
     """<id>_build/launch-<platform>.tsv: what starts this pack, the one source that run.sh (run.cmd) and the launcher nxlauncher (dm/launcher) both read (docs/settings.md, On Windows and Linux).
-    Tab-separated rows <kind> <name> <value> under '#' lines: game (title, title_id, version, package, platform, graphics), path (host: the nxhost-run built for the game's profile; cwd: its
+    Tab-separated rows <kind> <name> <value> under '#' lines: game (title, title_id, version, package, platform, graphics), path (host: nxhost-run, one program for every game; game_profile:
+    the file of the game profile the pack is made from, which the host takes with --profile (port_game_profile); cwd: its
     working folder <NSP folder>/<id>-work/run/, kept from run to run; choices: the player's env.txt there, KEY=VALUE lines the launcher writes; log: where the launcher keeps nxhost-run's
     output; settings: launcher-<platform>.json; profile: <NSP folder>/<id>-work/profile/, where DM_AOT_PROFILE records the sample profiles, JIT misses and known targets the next pack takes; and, from
     repack, what packs the game again as this run did, for the launcher's "Repack with profile": package, the NSP folder; packer and python, this script and the Python running it; keys,
@@ -2573,7 +2600,8 @@ def port_launch_file(platform, repo, work, wdir, aot, game, msl, aoc, gfx, lang,
     what the profile folder holds now), pack (one row per mode in modes, whose packs are complete: the folder nxhost-run is given, the first the default) and env (the environment
     nxhost-run gets: an environment file's switches (DM_ENV_FILE / --env-file), then the pack's layout as mac_run gives the Mac host: the recompiler's input, the RomFS image, the save and
     temporary storage, the shader libraries (msl, DM_MSL_DIR), the DLC, an NVN game's shader map, the game language, a window and sound). A reader sets each env row only when the
-    environment and the player's env.txt have not set it, first row first. host: the nxhost-run to name (port_host's by default). Returns its path"""
+    environment and the player's env.txt have not set it, first row first. host: the nxhost-run to name (port_host's by default); game_profile: the profile file to name
+    (game_profile_file's by default, the file port_game_profile writes). Returns its path"""
     rd, win = wdir / 'run', platform == 'windows'
     for d in ('save', 'temp'): (rd / d).mkdir(parents=True, exist_ok=True)
     renv = {'DM_ROOT': work, 'DM_ROMFS': rfs.source(game), 'DM_SAVE': rd / 'save', 'DM_TEMP': rd / 'temp', 'DM_MSL_DIR': msl}
@@ -2584,9 +2612,10 @@ def port_launch_file(platform, repo, work, wdir, aot, game, msl, aoc, gfx, lang,
     for k, v in renv.items(): envs.setdefault(k, v)
     for k in envs:
         if not ENV_NAME.fullmatch(k): raise BuildError(f'the environment file (--env-file / DM_ENV_FILE) sets {k!r}, which is not a variable name a shell can export')
-    host = host or port_host(repo, platform, g.id)[0]
+    host = host or port_host(repo, platform)[0]
     rows = [('game', 'title', name), ('game', 'title_id', g.id), ('game', 'version', version or pkg_ver), ('game', 'package', pkg_ver), ('game', 'platform', platform), ('game', 'graphics', gfx),
-            ('path', 'host', host), ('path', 'cwd', rd), ('path', 'choices', rd / 'env.txt'), ('path', 'log', rd / 'log.txt')]
+            ('path', 'host', host), ('path', 'game_profile', game_profile or game_profile_file(work, platform)), ('path', 'cwd', rd), ('path', 'choices', rd / 'env.txt'),
+            ('path', 'log', rd / 'log.txt')]
     if settings: rows.append(('path', 'settings', settings))
     rows.append(('path', 'profile', wdir / 'profile'))
     rows += [('path', k, v) for k, v in (repack or {}).items() if v]
@@ -2597,7 +2626,8 @@ def port_launch_file(platform, repo, work, wdir, aot, game, msl, aoc, gfx, lang,
             f'{"run.cmd" if win else "run.sh"} and the launcher nxlauncher (dm/launcher) both read it, so both start nxhost-run the same way (docs/settings.md, On Windows and Linux).',
             '# Tab-separated rows <kind> <name> <value>; a reader skips # lines and the kinds it does not know.',
             '#   game  title, title_id, version (the display version), package (the version tag), platform, graphics',
-            '#   path  host (nxhost-run; NXHOST in the environment names another; when it is gone, a bundle\'s hosts/<title ID>/nxhost-run: the launcher\'s folder\'s, or one above the run script),',
+            '#   path  host (nxhost-run, one program for every game; NXHOST in the environment names another; when it is gone, a bundle\'s bin/nxhost-run: the launcher\'s folder\'s, or',
+            '#         that of a bundle above the run script), game_profile (the game profile\'s file, which the host takes with --profile <file>: dm/games/game.py runtime wrote it),',
             '#         cwd (its working folder), choices (the player\'s env.txt: KEY=VALUE lines, read unless DM_SAVED_CHOICES=0),',
             '#         log (the launcher\'s copy of the output), settings (the settings the launcher shows), profile (DM_AOT_PROFILE\'s folder: the sample profiles, JIT misses and known targets the next pack takes),',
             '#         package, packer, python, keys, nxaot (what packs the game again: the NSP folder, this script, its Python, the prod.keys file\'s path, the recompiler)',
@@ -2617,17 +2647,18 @@ def port_launch_file(platform, repo, work, wdir, aot, game, msl, aoc, gfx, lang,
 # The run scripts read the launch file at every start. sh: the first pass takes the path and pack rows, the player's env.txt is turned into commands by awk (KEY=VALUE lines read as
 # dm/mac/launcher.c's env_file reads them: blanks around the line and before the =, # comments, CR line ends; names a shell cannot export skipped) and run through eval with each value
 # single-quoted, so no value is expanded; the second pass sets the env rows. run.cmd does the same with for /f (UTF-8 through chcp 65001, the code page restored at the end).
-# The host: NXHOST if set; else the host row if that file exists; else hosts/<title ID>/nxhost-run of the first folder above the script that has one (the launcher's rule, which
-# looks in its own folder: dm/launcher/launcher_model.h find_host). The scripts walk up rather than keep a bundle path relative to <id>_build: the launch file's other rows (cwd,
-# pack, env) are absolute, so a pack only runs while its NSP folder stays where it was packed, and from there a path fixed at pack time names the place the host row names.
+# The host: NXHOST if set; else the host row if that file exists; else bin/nxhost-run of the first folder above the script that is a bundle (nxlauncher beside bin/nxhost-run: the
+# launcher's rule, which looks in its own folder: dm/launcher/launcher_model.h find_host). The scripts walk up rather than keep a bundle path relative to <id>_build: the launch file's
+# other rows (cwd, pack, env) are absolute, so a pack only runs while its NSP folder stays where it was packed, and from there a path fixed at pack time names the place the host row
+# names. The host is one program for every game: it gets the pack's game profile file (the game_profile row) with --profile, on the command line, where neither the environment's
+# DM_GAME_PROFILE nor the player's env.txt can override it (dm/host/game_rt.c); a launch file without the row, or a row whose file is gone, stops the script (pack the game again).
 RUN_SH = r'''launch=@LAUNCH@
 if [ ! -f "$launch" ]; then echo "[RED] run.sh: no launch file $launch: pack the game again (scripts/build_ipa_from_nsp.py --platform linux)" >&2; exit 1; fi
 tab=$(printf '\t')
-host= cwd= choices= aot= id=
+host= gprof= cwd= choices= aot=
 while IFS=$tab read -r kind name value; do
     case $kind in
-        game) if [ "$name" = title_id ]; then id=$value; fi ;;
-        path) case $name in host) host=$value ;; cwd) cwd=$value ;; choices) choices=$value ;; esac ;;
+        path) case $name in host) host=$value ;; game_profile) gprof=$value ;; cwd) cwd=$value ;; choices) choices=$value ;; esac ;;
         pack) if [ -z "$aot" ] && { [ -z "${NXPACK:-}" ] || [ "$NXPACK" = "$name" ]; }; then aot=$value; fi ;;
     esac
 done < "$launch"
@@ -2637,18 +2668,19 @@ fi
 while IFS=$tab read -r kind name value; do
     if [ "$kind" = env ] && ! printenv "$name" > /dev/null; then export "$name=$value"; fi
 done < "$launch"
-if [ -z "$host" ] || [ -z "$cwd" ] || [ -z "$aot" ]; then
-    echo "[RED] run.sh: $launch names no host, working folder or pack${NXPACK:+ of the mode $NXPACK}: pack the game again (scripts/build_ipa_from_nsp.py --platform linux${NXPACK:+ --pack-mode $NXPACK})" >&2; exit 1
+if [ -z "$host" ] || [ -z "$gprof" ] || [ -z "$cwd" ] || [ -z "$aot" ]; then
+    echo "[RED] run.sh: $launch names no host, game profile, working folder or pack${NXPACK:+ of the mode $NXPACK}: pack the game again (scripts/build_ipa_from_nsp.py --platform linux${NXPACK:+ --pack-mode $NXPACK})" >&2; exit 1
 fi
 if [ -z "${NXHOST:-}" ] && [ ! -f "$host" ]; then
     dir=$(cd "$(dirname "$0")" && pwd) || exit 1
-    while [ ! -f "$dir/hosts/$id/nxhost-run" ]; do
+    while [ ! -f "$dir/bin/nxhost-run" ] || [ ! -f "$dir/nxlauncher" ]; do
         if [ "$dir" = / ]; then echo "[RED] run.sh: the host $host is missing: pack the game again or set NXHOST" >&2; exit 1; fi
         dir=$(dirname "$dir")
     done
-    echo "run.sh: host: the bundle's $dir/hosts/$id/nxhost-run (the launch file's $host is missing)" >&2
-    host=$dir/hosts/$id/nxhost-run
+    echo "run.sh: host: the bundle's $dir/bin/nxhost-run (the launch file's $host is missing)" >&2
+    host=$dir/bin/nxhost-run
 fi
+if [ ! -f "$gprof" ]; then echo "[RED] run.sh: the game profile $gprof is missing: pack the game again" >&2; exit 1; fi
 for d in "$cwd" "${DM_SAVE:-}" "${DM_TEMP:-}"; do if [ -n "$d" ]; then mkdir -p "$d" || exit 1; fi; done
 cd "$cwd" || exit 1'''
 
@@ -2660,6 +2692,7 @@ chcp 65001 > nul
 set "NXRUN_LAUNCH=@LAUNCH@"
 set "NXRUN_AOT="
 set "NXRUN_host="
+set "NXRUN_game_profile="
 set "NXRUN_cwd="
 set "NXRUN_choices="
 if not exist "%NXRUN_LAUNCH%" (
@@ -2668,7 +2701,6 @@ if not exist "%NXRUN_LAUNCH%" (
 )
 for /f "usebackq eol=# tokens=1,2,* delims=\t" %%a in ("%NXRUN_LAUNCH%") do (
     if "%%a"=="path" set "NXRUN_%%b=%%c"
-    if "%%a"=="game" if "%%b"=="title_id" set "NXRUN_ID=%%c"
     if "%%a"=="pack" if not defined NXRUN_AOT if "%NXPACK%"=="" (set "NXRUN_AOT=%%c") else if "%NXPACK%"=="%%b" set "NXRUN_AOT=%%c"
 )
 if not "%DM_SAVED_CHOICES%"=="0" if defined NXRUN_choices if exist "%NXRUN_choices%" (
@@ -2679,12 +2711,16 @@ if not defined NXRUN_AOT (
     echo [RED] run.cmd: "%NXRUN_LAUNCH%" names no pack of the mode NXPACK asks for, or none at all: pack the game again with scripts/build_ipa_from_nsp.py --platform windows 1>&2
     goto nxrun_end
 )
+if not defined NXRUN_game_profile (
+    echo [RED] run.cmd: "%NXRUN_LAUNCH%" names no game profile: pack the game again with scripts/build_ipa_from_nsp.py --platform windows 1>&2
+    goto nxrun_end
+)
 if defined NXHOST set "NXRUN_host=%NXHOST%"
 if defined NXHOST goto nxrun_host_ok
 if exist "%NXRUN_host%" goto nxrun_host_ok
 set "NXRUN_DIR=%~dp0"
 :nxrun_up
-if exist "%NXRUN_DIR%hosts\\%NXRUN_ID%\\nxhost-run.exe" goto nxrun_bundle_host
+if exist "%NXRUN_DIR%bin\\nxhost-run.exe" if exist "%NXRUN_DIR%nxlauncher.exe" goto nxrun_bundle_host
 for %%d in ("%NXRUN_DIR%..") do set "NXRUN_UP=%%~fd"
 if not "%NXRUN_UP:~-1%"=="\\" set "NXRUN_UP=%NXRUN_UP%\\"
 if /i "%NXRUN_UP%"=="%NXRUN_DIR%" goto nxrun_no_host
@@ -2694,33 +2730,37 @@ goto nxrun_up
 echo [RED] run.cmd: the host "%NXRUN_host%" is missing: pack the game again or set NXHOST 1>&2
 goto nxrun_end
 :nxrun_bundle_host
-echo run.cmd: host: the bundle's "%NXRUN_DIR%hosts\\%NXRUN_ID%\\nxhost-run.exe" ^(the launch file's "%NXRUN_host%" is missing^) 1>&2
-set "NXRUN_host=%NXRUN_DIR%hosts\\%NXRUN_ID%\\nxhost-run.exe"
+echo run.cmd: host: the bundle's "%NXRUN_DIR%bin\\nxhost-run.exe" ^(the launch file's "%NXRUN_host%" is missing^) 1>&2
+set "NXRUN_host=%NXRUN_DIR%bin\\nxhost-run.exe"
 :nxrun_host_ok
+if not exist "%NXRUN_game_profile%" (
+    echo [RED] run.cmd: the game profile "%NXRUN_game_profile%" is missing: pack the game again 1>&2
+    goto nxrun_end
+)
 if not exist "%NXRUN_cwd%" mkdir "%NXRUN_cwd%"
 if defined DM_SAVE if not exist "%DM_SAVE%" mkdir "%DM_SAVE%"
 if defined DM_TEMP if not exist "%DM_TEMP%" mkdir "%DM_TEMP%"
 cd /d "%NXRUN_cwd%"'''
 
 
-def port_run_script(platform, repo, work, wdir, g, name, launch, profile_dir=None, host=None):
-    """<id>_build/run.sh (Linux) or run.cmd (Windows): starts nxhost-run as the launch file says (port_launch_file, read at every start: the pack, then the environment, then the player's
-    env.txt, then its env rows, each only where nothing set it before), the command line of docker/README.md ("Running the host program"), as the launcher nxlauncher does. NXHOST in the
-    environment names another nxhost-run, NXPACK=<mode> another pack mode; the script's arguments go to nxhost-run ([module...] [-- game arguments]). profile_dir: the folder of a derived or
-    provisional profile, which nxhost-run must be configured with. host: the port's bundle's nxhost-run when the launch file names it (port_host), said here. Returns its path"""
+def port_run_script(platform, repo, work, wdir, g, name, launch, host=None):
+    """<id>_build/run.sh (Linux) or run.cmd (Windows): starts nxhost-run as the launch file says (port_launch_file, read at every start: the host and the game profile's file, which it
+    gets with --profile, the pack, then the environment, then the player's env.txt, then its env rows, each only where nothing set it before), the command line of docker/README.md
+    ("Running the host program"), as the launcher nxlauncher does. NXHOST in the environment names another nxhost-run, NXPACK=<mode> another pack mode; the script's arguments go to
+    nxhost-run ([module...] [-- game arguments]). host: the port's bundle's nxhost-run when the launch file names it (port_host), said here. Returns its path"""
     rd, win = wdir / 'run', platform == 'windows'
-    tree = 'build/win64' if win else 'build/linux'
-    about = [f'{name} ({g.id}): packed by scripts/build_ipa_from_nsp.py --platform {platform}; runs it in the host program nxhost-run (docker/README.md, "Running the host program").']
-    if host: about.append(f'nxhost-run is the port\'s bundle\'s host for game profile {g.id}: {host}')
-    else: about.append(f'nxhost-run is built for game profile {g.id}: cmake -S dm/host -B {tree} -G Ninja -DGAME={g.id}' + (' -DCMAKE_TOOLCHAIN_FILE=/src/dm/host/cmake/x86_64-w64-mingw32.cmake' if win else '')
-                       + f' && cmake --build {tree} (docker/README.md, "From a Linux host"' + (', in the llvm-mingw image)' if win else ')'))
-    if profile_dir: about.append(f'  with DM_GAMES_DIR={profile_dir} and DM_GAMES_FIRST=1 in its environment: the game profile is a derived or provisional one, outside the repository')
+    tree, exe = ('build/win64', 'nxhost-run.exe') if win else ('build/linux', 'nxhost-run')
+    about = [f'{name} ({g.id}): packed by scripts/build_ipa_from_nsp.py --platform {platform}; runs it in the host program nxhost-run (docker/README.md, "Running the host program"),',
+             f'one program for every game, which takes this game\'s profile from {game_profile_file(work, platform).name} beside this script (--profile; the launch file\'s game_profile row).']
+    if host: about.append(f'nxhost-run is the port\'s bundle\'s: {host}')
+    else: about.append(f'nxhost-run is this checkout\'s build: cmake -S dm/host -B {tree} -G Ninja -DGAME=<any title ID of dm/games>' + (' -DCMAKE_TOOLCHAIN_FILE=/src/dm/host/cmake/x86_64-w64-mingw32.cmake' if win else '')
+                       + f' && cmake --build {tree} --target nxhost-run (docker/README.md, "From a Linux host"' + (', in the llvm-mingw image)' if win else ')'))
     about += [f'What it starts comes from {launch.name} beside this script, which the launcher nxlauncher (dm/launcher) reads too, so both start the game the same way: the pack (the first',
               'pack row, or NXPACK=balanced / max), and the environment: what is already set stays, then the player\'s saved choices (the choices row: env.txt, KEY=VALUE lines, # comments;',
               'not read with DM_SAVED_CHOICES=0), then the env rows, each only where nothing set it before.',
               f'NXHOST=<path> runs another build; the arguments go to nxhost-run: [module...] [-- game arguments]. The save stays in {rd / "save"} from run to run.',
-              'When the launch file\'s host is gone (a bundle moved or replaced) and NXHOST is not set, it takes hosts/<title ID>/nxhost-run' + ('.exe' if win else '')
-              + ' of the first folder above this script that has one (a bundle that holds this NSP folder), and says so.']
+              f'When the launch file\'s host is gone (a bundle moved or replaced) and NXHOST is not set, it takes bin/{exe} of the first folder above this script that is a',
+              f'bundle (nxlauncher{".exe" if win else ""} beside bin/{exe}: a bundle that holds this NSP folder), and says so.']
     prof = wdir / 'profile'   # aot_packs reads it on the next pack (the AOT_PROFILE setting, --no-profile)
     record = [f'A sample profile for the next pack (nxaot build --profile: the functions the game runs at tier H, the rest at tier C, a shorter pack): set DM_AOT_PROFILE as below, play,',
               f'quit the game by closing its window; nxhost-run writes {prof}/<module>.tsv and <module>.misses.tsv (the addresses its JIT fallback ran, entries of the next pack), and the',
@@ -2730,12 +2770,12 @@ def port_run_script(platform, repo, work, wdir, g, name, launch, profile_dir=Non
         cq = lambda v: str(v).replace('%', '%%')
         body = RUN_CMD.replace('@LAUNCH@', cq(launch))
         lines = ['@echo off', *[f'rem {a}' for a in about], *body.split('\n'), *[f'rem {a}' for a in record], f'rem set "DM_AOT_PROFILE={cq(prof)}"',
-                 '"%NXRUN_host%" "%NXRUN_AOT%" %*', 'set "NXRUN_RC=%errorlevel%"', ':nxrun_end', 'if defined NXRUN_CP chcp %NXRUN_CP% > nul', 'exit /b %NXRUN_RC%']
+                 '"%NXRUN_host%" --profile "%NXRUN_game_profile%" "%NXRUN_AOT%" %*', 'set "NXRUN_RC=%errorlevel%"', ':nxrun_end', 'if defined NXRUN_CP chcp %NXRUN_CP% > nul', 'exit /b %NXRUN_RC%']
         path, text = work / 'run.cmd', '\r\n'.join(lines) + '\r\n'
     else:
         q = lambda v: shlex.quote(str(v))
         lines = ['#!/bin/sh', *[f'# {a}' for a in about], *RUN_SH.replace('@LAUNCH@', q(launch)).split('\n'), *[f'# {a}' for a in record], f'# export DM_AOT_PROFILE={q(prof)}',
-                 'exec "${NXHOST:-$host}" "$aot" "$@"']
+                 'exec "${NXHOST:-$host}" --profile "$gprof" "$aot" "$@"']
         path, text = work / 'run.sh', '\n'.join(lines) + '\n'
     path.write_bytes(text.encode('utf-8'))
     if not win: path.chmod(0o755)
@@ -2896,6 +2936,10 @@ def main(args=None):
             raise BuildError(f'{nxaot} writes no Windows packs (its `nxaot build` usage has no --target option): build nxaot again from this repository (dm/tools/aot/README.md)')
         say(f'recompiler: {nxaot} (pack mode {pack_mode}' + (f'; {", ".join(sorted(nxaot_opts - {"--target"}))}' if nxaot_opts - {'--target'} else '; no --cache or --workers option yet')
             + (', DLLs: --target windows' if platform == 'windows' else '') + ')')
+        # the host the launch file names, one program for every game profile: the bundle's, else this checkout's build tree (an old bundle's hosts/<title ID>/ stop the pack here)
+        host, bundled = port_host(repo, platform)
+        say(f'host program: {host} (' + ('the bundle\'s' if bundled else 'this checkout\'s build tree') + ('' if host.is_file() else
+            f'; not built yet: cmake --build {host.parent.relative_to(repo)} --target nxhost-run, docker/README.md') + ')')
     app, fam = scan_nsps(nsp_dir)
     fam = decompress_nsz(nsp_dir, app, fam, keys, env)
     force =args.provisional or PROVISIONAL   # a provisional profile even when dm/games has one (testing the guesses)
@@ -3090,23 +3134,26 @@ def main(args=None):
             if any(p for p in profiles.glob('*.tsv') if not p.name.endswith(('.misses.tsv', '.targets.tsv'))): say(f'--no-profile: the sample profiles in {profiles} are not used')   # the misses are; the targets go with the profiles
             profiles = None
         settings = port_settings(py, repo, work, game, patched, gfx, lang, g, platform, env, logs)
+        # the game profile the pack is made from (registered, derived or provisional, as this run found it) as the file the one host of every game takes with --profile
+        gprof = port_game_profile(py, repo, work, g, platform, env, logs)
         # what packs the game again as this run does, for the launcher's "Repack with profile" (dm/launcher): the NSP folder, this script and its Python, the keys' path, the recompiler
         repack = {'package': nsp_dir, 'packer': here, 'python': sys.executable, 'keys': keys, 'nxaot': nxaot}
         made = made_rows(nxaot_opts, aot, mods, profiles, misses, args.no_profile)   # what the packs are made with: the launcher's "a better pack is possible" compares the profile folder with it
-        host, bundled = port_host(repo, platform, g.id, not (provisional or derived))   # the bundle's host for a registered profile, else the repository's build tree
         def launch_file(modes):   # the launch file offering those pack modes
-            return port_launch_file(platform, repo, work, wdir, aot, game, ios, aoc, gfx, lang, g, title, app_version, pkg_ver, modes, env_file, settings, repack, made, host)
+            return port_launch_file(platform, repo, work, wdir, aot, game, ios, aoc, gfx, lang, g, title, app_version, pkg_ver, modes, env_file, settings, repack, made, host, gprof)
         # the mode about to be packed is not offered while its packs are made (an interrupted pack leaves a mix); the other mode's complete packs stay offered
         launch = launch_file([m for m in packs_ready(nxaot, nxaot_opts, aot, nro_dir, mods, platform, profiles, misses) if m != pack_mode])
-        script = port_run_script(platform, repo, work, wdir, g, title, launch, g.dir.parent if provisional or derived else None, host if bundled else None)
+        script = port_run_script(platform, repo, work, wdir, g, title, launch, host if bundled else None)
         nros = [l.split()[0] for l in ((aot / 'nro.tsv').read_text().splitlines() if (aot / 'nro.tsv').is_file() else []) if l.strip() and not l.startswith('#') and l.split()[0] != 'refused']
-        say(f'recompiler\'s input: {aot} ({", ".join(mods)}' + (f'; nro.tsv lists {len(nros)} NRO{"" if len(nros) == 1 else "s"}' if nros else '') + f'); shaders: {ios}; run script: {script}; launch file: {launch}')
+        say(f'recompiler\'s input: {aot} ({", ".join(mods)}' + (f'; nro.tsv lists {len(nros)} NRO{"" if len(nros) == 1 else "s"}' if nros else '') + f'); shaders: {ios}; run script: {script}; '
+            f'launch file: {launch}; game profile file: {gprof}')
         aot_packs(nxaot, nxaot_opts, pack_mode, aot_workers, wdir / 'aot-cache', aot, nro_dir, mods, env, logs, work / 'tmp/aot', platform, profiles, misses)
         ready = sorted(packs_ready(nxaot, nxaot_opts, aot, nro_dir, mods, platform, profiles, misses), key=lambda m: m != pack_mode)   # the mode just packed first: run.sh's default
         launch_file(ready)
         rmtree(work / 'tmp')
         say(f'done: the {platform} pack of {app_name or g.id} ({pkg_ver}; pack modes: {", ".join(ready) or "none"}) runs with {script} or in the launcher nxlauncher (dm/launcher; '
-            f'nxhost-run built for game profile {g.id}: docker/README.md); its save in {wdir / "run/save"}, the player\'s choices in {wdir / "run/env.txt"}')
+            f'nxhost-run {host}' + ('' if host.is_file() else ', not built yet: docker/README.md') + f', with --profile {gprof.name}); its save in {wdir / "run/save"}, the player\'s '
+            f'choices in {wdir / "run/env.txt"}')
         if skipped: say(f'[RED] not run on this system: {"; ".join(skipped)}')
         report_profile_status(g, reg, pkg_ver, derived, provisional, f'{platform} pack', patched)
         return

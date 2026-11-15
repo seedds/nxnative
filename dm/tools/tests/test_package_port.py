@@ -1,6 +1,7 @@
 """The port's bundle (scripts/package_port.py; docs/development.md, "The port's bundles"): assembled from a fake build tree (stand-ins for nxlauncher, nxhost-run and nxaot,
 SDL3's and LLVM's licences where the build trees keep them) and a few of this checkout's files, the missing-file errors, the archives' determinism (two runs give the same bytes,
-whatever the inputs' times), and the bundle's own check where it can run (Linux: the stand-ins are run as the real programs would be). No Docker, game files or keys."""
+whatever the inputs' times), and the bundle's own check where it can run (Linux: the stand-ins are run as the real programs would be; the host's stand-in answers --game and
+--profile with dm/host/game_rt.c's profile line, from a table of profiles it is made with). No Docker, game files or keys."""
 import importlib.util
 import io
 import os
@@ -22,9 +23,22 @@ import dmsh_chain, dmsh_chain_vk   # noqa: E402
 
 GAMES = ('010015100B514000', '0100000000010000')   # two profiles of dm/games
 # A few of the packer's files instead of all of them (about 220 MB): the packer and what its --help imports, the chain tools with every file their versions hash and the headers,
-# the two profiles' game.tsv; the bundle's check runs on these as on the whole set
+# the two profiles' game.tsv and game.py (which writes their files for the host's check); the bundle's check runs on these as on the whole set
 CHAIN = sorted({os.path.normpath(f'dm/gfx/{f}') for f in dmsh_chain.FILES + dmsh_chain_vk.FILES})
-TREES = ('scripts/build_ipa_from_nsp.py', 'dm/tools/romfs.py', 'dm/gfx/nvn/dmsh_chain.h', 'dm/gfx/nvn/dmsh_chain_vk.h', *CHAIN, *(f'dm/games/{g}/game.tsv' for g in GAMES))
+TREES = ('scripts/build_ipa_from_nsp.py', 'dm/tools/romfs.py', 'dm/gfx/nvn/dmsh_chain.h', 'dm/gfx/nvn/dmsh_chain_vk.h', *CHAIN, 'dm/games/game.py',
+         *(f'dm/games/{g}/game.tsv' for g in GAMES))
+# a stand-in for nxhost-run (dm/host/game_rt.c, main_x86.c): --game <id> of its table (@TABLE@: the profiles it was built with) or --profile <file> prints the profile line, the
+# name from the bundle's game.tsv or the file's name row; an unknown title ID is refused with a [RED] line; then the usage (no module folder), status 2
+HOST = '''#!/bin/sh
+here=$(cd "$(dirname "$0")" && pwd); tab=$(printf '\\t')
+case $1 in
+  --game) case " @TABLE@ " in *" $2 "*) ;; *) echo "[dm] [RED] --game $2: no such game profile among the ones built into this program" >&2; exit 2 ;; esac
+          echo "[dm] game profile $2 ($(sed -n "s/^name$tab//p" "$here/../dm/games/$2/game.tsv")): the table built into the program (--game)" >&2 ;;
+  --profile) echo "[dm] game profile $(sed -n "s/^id$tab//p" "$2") ($(sed -n "s/^name$tab//p" "$2")): the file $2 (--profile)" >&2 ;;
+esac
+echo "usage: nxhost-run <dir> [module...] [-- game arguments...]" >&2
+exit 2
+'''
 LAUNCHER = '''#!/bin/sh
 # a stand-in for nxlauncher: --list prints its header line, as on an empty games folder
 if [ "$1" = --list ]; then echo "nxlauncher: 0 games in $2" >&2; printf '# title_id\\ttitle\\tversion\\tpacks\\tlast_played\\tfolder\\tproblem\\tbetter_pack\\n'; exit 0; fi
@@ -49,19 +63,18 @@ class Bundle(unittest.TestCase):
     def write(self, path, text, mode=0o644):
         path.parent.mkdir(parents=True, exist_ok=True); path.write_text(text); path.chmod(mode)
 
-    def fake_tree(self, build, exe):
-        """A host tree as the CI leaves it: the tree's own nxhost-run for its GAME (CMakeCache.txt), another profile's in hosts/<id>/, the launcher, SDL3's licence"""
+    def fake_tree(self, build, exe, table=GAMES):
+        """A host tree as the CI leaves it: nxhost-run (its table: the profiles of table), the launcher, SDL3's licence"""
         self.write(build / 'CMakeCache.txt', f'CMAKE_BUILD_TYPE:STRING=\nGAME:STRING={GAMES[0]}\n')
-        self.write(build / f'nxhost-run{exe}', '', 0o755)
-        self.write(build / f'hosts/{GAMES[1]}/nxhost-run{exe}', '', 0o755)
+        self.write(build / f'nxhost-run{exe}', HOST.replace('@TABLE@', ' '.join(table)) if not exe else 'MZ host', 0o755)
         self.write(build / f'nxlauncher{exe}', LAUNCHER if not exe else 'MZ launcher', 0o755)
         self.write(build / '_deps/sdl3-src/LICENSE.txt', 'SDL3 licence\n')
 
-    def package(self, *args, platform='linux', out=None, build=None, aot=True):
+    def package(self, *args, platform='linux', out=None, build=None, aot=True, said=None):   # said: a list that gets what the script says
         out = out or self.tmp / 'out' / f'nxnative-{platform}-x86_64'
         argv = ['--platform', platform, '--build', str(build or self.build), '--out', str(out)] + (['--aot', str(self.aot)] if aot else []) + list(args)
         err = io.StringIO()
-        with mock.patch.object(sys, 'stderr', err), mock.patch.object(pp, 'say', lambda m: None):
+        with mock.patch.object(sys, 'stderr', err), mock.patch.object(pp, 'say', said.append if said is not None else lambda m: None):
             rc = pp.main(argv)
         return rc, err.getvalue(), out
 
@@ -69,8 +82,10 @@ class Bundle(unittest.TestCase):
         rc, err, out = self.package()
         self.assertEqual((rc, err), (0, ''))
         files = dict(pp.bundle_files(out))
-        for rel in ('nxlauncher', f'hosts/{GAMES[0]}/nxhost-run', f'hosts/{GAMES[1]}/nxhost-run', 'bin/nxaot', 'pack.sh'):
+        for rel in ('nxlauncher', 'bin/nxhost-run', 'bin/nxaot', 'pack.sh'):
             self.assertEqual(files.pop(rel), 0o755, rel)
+        self.assertEqual((out / 'bin/nxhost-run').read_bytes(), (self.build / 'nxhost-run').read_bytes())   # the one host, whatever the tree's GAME
+        self.assertFalse((out / 'hosts').exists())
         self.assertEqual(files.pop('scripts/build_ipa_from_nsp.py'), 0o755)   # git's executable bit
         for rel in ('README.txt', 'VERSION', 'licenses/nxnative.txt', 'licenses/SDL3.txt', 'licenses/LLVM.txt', 'licenses/imgui.txt', 'licenses/dynarmic.txt',
                     'licenses/dynarmic-fmt.txt', 'licenses/libvpx-PATENTS.txt', 'licenses/fsr1.txt', 'dm/tools/romfs.py', 'dm/gfx/nvn/dmsh_chain_vk.h', f'dm/games/{GAMES[0]}/game.tsv'):
@@ -81,9 +96,12 @@ class Bundle(unittest.TestCase):
         sha = subprocess.run(['git', '-C', str(REPO), 'log', '-1', '--format=%h'], capture_output=True, text=True).stdout.strip()
         version = (out / 'VERSION').read_text().splitlines()
         self.assertTrue(version[0].startswith(f'nxnative {sha}'), version)
-        self.assertIn(f'hosts {GAMES[1]} {GAMES[0]}', version); self.assertIn('platform linux-x86_64', version)
+        self.assertIn('host bin/nxhost-run', version); self.assertIn('profiles 2', version); self.assertIn('platform linux-x86_64', version)
+        self.assertFalse([l for l in version if l.startswith('hosts')])
         readme = (out / 'README.txt').read_text()
         self.assertIn('./pack.sh "<the game\'s NSP folder>" -k "<your prod.keys>"', readme); self.assertIn('pip install lz4 capstone backports.zstd', readme)
+        self.assertRegex(readme, r'\n  bin/nxhost-run +the host program the launcher starts, one for every game'); self.assertIn('Game profiles in this folder: 2.', readme)
+        self.assertNotIn('hosts/', readme + (out / 'pack.sh').read_text())
         self.assertIn('exec "${PYTHON:-python3}" "$here/scripts/build_ipa_from_nsp.py" --platform linux "$@"', (out / 'pack.sh').read_text())
         # a second run replaces the earlier bundle; a folder that is not one is refused
         (out / 'stale.txt').write_text('old')
@@ -109,14 +127,13 @@ class Bundle(unittest.TestCase):
         (self.aot / 'nxaot').unlink()
         fails(r'missing .*nxaot: the recompiler')
         self.write(self.aot / 'nxaot', NXAOT, 0o755)
-        (self.build / f'hosts/{GAMES[1]}/nxhost-run').unlink()
-        fails(rf'no nxhost-run in .*hosts/{GAMES[1]}')
-        self.write(self.build / 'hosts/0100FFFFFFFF0000/nxhost-run', '', 0o755); shutil.rmtree(self.build / f'hosts/{GAMES[1]}')
-        fails(r'built for 0100FFFFFFFF0000, which is not a game profile')
-        shutil.rmtree(self.build / 'hosts'); (self.build / 'CMakeCache.txt').unlink()
-        fails(r'has no GAME in')
+        (self.build / 'CMakeCache.txt').unlink()
+        self.assertEqual(self.package()[0], 0)   # the tree's GAME is only the host's default: not needed
         (self.build / 'nxhost-run').unlink()
-        fails(r'no host in')
+        fails(r'no host in .*: no nxhost-run \(cmake --build .* --target nxhost-run: one program for every game profile\)$')
+        # a tree of the layout before the one host (hosts/<title ID>/nxhost-run): named in the error, not taken
+        self.write(self.build / f'hosts/{GAMES[1]}/nxhost-run', HOST, 0o755)
+        fails(r'no host in .*: no nxhost-run .*hosts/ holds the layout before it \(one host per game profile\), which a bundle no longer takes')
         self.assertEqual(self.package(build=self.tmp / 'none')[0], 1)
 
     def test_archives_are_deterministic(self):
@@ -139,7 +156,8 @@ class Bundle(unittest.TestCase):
             self.assertEqual({(m.mtime, m.uid, m.gid, m.uname, m.gname) for m in members}, {(ts, 0, 0, '', '')})
             modes = {m.name: m.mode for m in members}
             self.assertEqual(modes['nxnative-linux-x86_64/nxlauncher'], 0o755); self.assertEqual(modes['nxnative-linux-x86_64/bin/nxaot'], 0o755)
-            self.assertEqual(modes['nxnative-linux-x86_64/README.txt'], 0o644); self.assertEqual(modes['nxnative-linux-x86_64/hosts'], 0o755)
+            self.assertEqual(modes['nxnative-linux-x86_64/README.txt'], 0o644); self.assertEqual(modes['nxnative-linux-x86_64/bin'], 0o755)
+            self.assertEqual(modes['nxnative-linux-x86_64/bin/nxhost-run'], 0o755)
             self.assertFalse([m for m in members if not (m.isfile() or m.isdir())])   # no link
             self.assertEqual({n[len('nxnative-linux-x86_64/'):] for n in names if tar.getmember(n).isfile()}, {r for r, _ in pp.bundle_files(out)})
         # Windows: the .exe stand-ins, no nxaot, a zip
@@ -149,7 +167,10 @@ class Bundle(unittest.TestCase):
         with zipfile.ZipFile(zp) as z:
             infos = z.infolist(); names = [i.filename for i in infos]
             self.assertEqual(names, sorted(names))
-            self.assertIn('nxnative-windows-x86_64/nxlauncher.exe', names); self.assertIn(f'nxnative-windows-x86_64/hosts/{GAMES[0]}/nxhost-run.exe', names)
+            self.assertIn('nxnative-windows-x86_64/nxlauncher.exe', names); self.assertIn('nxnative-windows-x86_64/bin/nxhost-run.exe', names)
+            self.assertFalse([n for n in names if '/hosts/' in n])
+            self.assertIn(b'host bin/nxhost-run.exe\r\n', z.read('nxnative-windows-x86_64/VERSION'))
+            self.assertIn(b'bin\\nxhost-run.exe', z.read('nxnative-windows-x86_64/pack.cmd'))
             self.assertIn('nxnative-windows-x86_64/pack.cmd', names); self.assertNotIn('nxnative-windows-x86_64/bin/nxaot.exe', names)
             self.assertEqual(len({i.date_time for i in infos}), 1)
             self.assertIn(b'\r\n', z.read('nxnative-windows-x86_64/pack.cmd')); self.assertIn(b'nxaot no', z.read('nxnative-windows-x86_64/VERSION'))
@@ -201,12 +222,12 @@ class Bundle(unittest.TestCase):
         self.assertIn('need no .NET', readme); self.assertIn('SPIRV-Tools, glslang and SPIRV-Cross', readme)
         self.assertRegex(readme, r'\n  bin/nx_extract +the NSP extraction tool the packer runs\n  bin/dmsh_xlate_vk +the Vulkan shader translator the packer runs for NVN games\n')
         # without --tools the text is the one before them, byte for byte
-        hosts = {g: None for g in GAMES}
+        profiles = list(GAMES)
         for platform in ('linux', 'windows'):
             for nxaot in (False, True):
-                self.assertEqual(pp.readme(platform, 'abc1234', '2026-11-15', hosts, nxaot), pp.readme(platform, 'abc1234', '2026-11-15', hosts, nxaot, False))
+                self.assertEqual(pp.readme(platform, 'abc1234', '2026-11-15', profiles, nxaot), pp.readme(platform, 'abc1234', '2026-11-15', profiles, nxaot, False))
         self.assertIn('and the .NET SDK 10 (the packer builds its extraction tool, nx_extract, with it on the first pack; NVN games also need the Vulkan shader\n'
-                      '    translator, which this folder does not carry yet', pp.readme('linux', 'abc1234', '2026-11-15', hosts, True))
+                      '    translator, which this folder does not carry yet', pp.readme('linux', 'abc1234', '2026-11-15', profiles, True))
         # the check: the stand-ins run, and the translator is not the one the bundle's lock fingerprints
         rc, err, out = self.package('--tools', str(tools), '--check')
         self.assertEqual(rc, 1); self.assertIn('dm/gfx/tools/dmsh_chain_vk.py: exit 1', err); self.assertIn('does not match the lock: dmsh_xlate_vk_linux-x64', err)
@@ -232,18 +253,32 @@ class Bundle(unittest.TestCase):
 
     @unittest.skipUnless(sys.platform == 'linux', 'the Linux bundle\'s check runs its programs')
     def test_check(self):
-        rc, err, out = self.package('--check')
+        said = []
+        rc, err, out = self.package('--check', said=said)
         self.assertEqual((rc, err), (0, ''))
-        # a file that names the build tree, a link and a host without a profile fail it
+        self.assertTrue([s for s in said if s.startswith('check: bin/nxhost-run started with each of the 2 game profiles in the bundle') and '4 of 4 starts' in s], said)
+        # a file that names the build tree, a link fail it
         self.write(self.build / 'licenses/notes.txt', f'built in {self.build}\n')
         rc, err, out = self.package('--check')
         self.assertEqual(rc, 1); self.assertIn(f'licenses/notes.txt names {self.build}', err)
         (self.build / 'licenses/notes.txt').unlink(); self.assertEqual(self.package()[0], 0)
-        (out / 'link').symlink_to('README.txt'); shutil.rmtree(out / 'dm/games' / GAMES[1])
+        (out / 'link').symlink_to('README.txt')
         with mock.patch.object(pp, 'say', lambda m: None): fails = pp.check('linux', out, [self.build, self.aot])
-        self.assertIn('link is a symbolic link', fails); self.assertIn(f'hosts without a profile in dm/games: {GAMES[1]}', fails)
+        self.assertEqual(fails, ['link is a symbolic link'])
+        (out / 'link').unlink()
+        # a host built from a checkout that lacks one of the bundle's profiles: its --game start is refused, and the check says which
+        self.fake_tree(self.build, '', table=GAMES[:1])
+        rc, err, out = self.package('--check')
+        self.assertEqual(rc, 1); self.assertIn('the host does not start with every game profile of the bundle (1 of 4 starts):', err)
+        self.assertIn(f'bin/nxhost-run --game {GAMES[1]}: exit 2 (2 wanted: its usage), no line \'[dm] game profile {GAMES[1]} (Super Mario Odyssey): the table built into the program (--game)\'', err)
+        self.assertIn(f'[RED] --game {GAMES[1]}: no such game profile', err)
+        # a host that does not read the bundle's profile files (another key list): its --profile starts fail
+        self.fake_tree(self.build, '')
+        (self.build / 'nxhost-run').write_text(HOST.replace('@TABLE@', ' '.join(GAMES)).replace('--profile) echo', '--profile) echo "[dm] [RED] game profile file $2 (--profile): unknown key" >&2; exit 2; echo'))
+        rc, err, out = self.package('--check')
+        self.assertEqual(rc, 1); self.assertIn('(2 of 4 starts):', err); self.assertIn(f'bin/nxhost-run --profile {GAMES[0]}: exit 2', err)
         # a broken launcher and a chain file missing from the bundle
-        (out / 'link').unlink(); self.assertEqual(self.package()[0], 0)
+        self.fake_tree(self.build, ''); self.assertEqual(self.package()[0], 0)
         self.write(out / 'nxlauncher', '#!/bin/sh\nexit 1\n', 0o755); (out / 'dm/gfx/tools/dmsh_spv.py').unlink()
         with mock.patch.object(pp, 'say', lambda m: None): fails = pp.check('linux', out, [self.build, self.aot])
         self.assertTrue(any(f.startswith('nxlauncher: exit 1') for f in fails), fails)

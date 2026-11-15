@@ -345,7 +345,7 @@ NXAOT_PROFILE_WEIGHTS	switch	`0`: a test switch: with `--profile`, nxaot (`build
 NXAOT_TABLES_IR	switch	When set (any value), a test switch: nxaot (`build/pack.cpp`) builds the tables' object through LLVM IR instead of the MC layer (the object is the same either way; CTest `tables` compares them)
 NXAOT_TABLES_OBJECT	diagnostic	`=<file>`: nxaot (`build/pack.cpp`) also writes a copy of the tables' object there, for CTest `tables` to compare with the `NXAOT_TABLES_IR` build's
 NXAOT_TRACE	diagnostic	When set (any value), nxaot (`build/pack.cpp`) prints each unit's entry on standard error before it compiles it
-NXHOST	switch	Path of another nxhost-run for a port pack: `run.sh` and `run.cmd` (written by `scripts/build_ipa_from_nsp.py`) and the launcher nxlauncher (`dm/launcher/launcher_model.cpp`, `find_host`) start it in place of the launch file's host row or the bundle's `hosts/<title ID>/nxhost-run`
+NXHOST	switch	Path of another nxhost-run for a port pack: `run.sh` and `run.cmd` (written by `scripts/build_ipa_from_nsp.py`) and the launcher nxlauncher (`dm/launcher/launcher_model.cpp`, `find_host`) start it in place of the launch file's host row or the bundle's `bin/nxhost-run`, with the pack's `--profile <file>` (the launch file's `game_profile` row) as they give those
 NXL_FAKE_HOST	test	When set, the launcher tests (`t_launcher_model.cpp`, `t_launcher_window.cpp`) act as nxhost-run (and the packer): they print what they were started with and exit with `NXL_FAKE_STATUS`
 NXL_FAKE_STATUS	test	`=<n>`: the exit status of the launcher tests' stand-in nxhost-run (`NXL_FAKE_HOST`); default 0
 NXNATIVE_TEST_ROOT	test	The folder `test_nsp_mac_app.py` makes its temporary folders in; default the system's temporary folder

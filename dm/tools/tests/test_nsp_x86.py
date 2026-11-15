@@ -1,8 +1,10 @@
 """NSP script packs for Windows and Linux (scripts/build_ipa_from_nsp.py --platform linux / windows): the recompiler's input (patch_nso.py --aot, one run beside Apple's outputs) and nro.tsv in
 <id>_build/aot_<version>/, nxaot build of every module and NRO into <name>.aot.so (Linux) or with --target windows into <name>.aot.dll (Windows), both pack modes side by side (max in
 aot_<version>/max/), the Vulkan shader steps (dmsh_build_vk.py, gl_shaders.py --vk, none for a guest Vulkan game), the launcher's settings (launcher-<platform>.json: settings.py's call; test_settings_platforms.py tests the lists),
-the launch file (launch-<platform>.tsv) and the run script that reads it: run.sh is run with a stand-in for nxhost-run and checked against the launch file's rules (the environment, then the
-player's env.txt, then the env rows), an nxaot without --target stopping a Windows pack at the start, and the reuse of every step on a second run. Real fingerprints, a fake nxaot that
+the game profile's file (game-profile-<platform>.tsv: the real game.py runtime, of the registered and of a derived profile, refreshed when the profile changes), the launch file
+(launch-<platform>.tsv) and the run script that reads it: run.sh is run with a stand-in for nxhost-run and checked against the launch file's rules (--profile with the game profile's
+file, the environment, then the player's env.txt, then the env rows; the bundle's one host bin/nxhost-run), an nxaot without --target stopping a Windows pack at the start, and the
+reuse of every step on a second run. Real fingerprints, a fake nxaot that
 writes its pack, mock runs of the other tools; synthetic NSO headers, a fake NRO in a fake RomFS and a synthetic control.nacp: no game files, keys, .NET, Docker or Xcode needed
 (temporary files only)."""
 import hashlib
@@ -105,8 +107,8 @@ def env_txt(path):
 
 
 def compose(launch, environ, nxpack=None):
-    """What a reader of the launch file starts, by its rules: (host, pack folder, working folder, the variables it sets). The environment first, then the player's env.txt unless
-    DM_SAVED_CHOICES=0, then the env rows, each only where nothing set it before"""
+    """What a reader of the launch file starts, by its rules: (host, its arguments before the script's: --profile <the game profile's file> <pack folder>, working folder, the
+    variables it sets). The environment first, then the player's env.txt unless DM_SAVED_CHOICES=0, then the env rows, each only where nothing set it before"""
     rows = launch_rows(launch)
     paths = {n: v for k, n, v in rows if k == 'path'}
     aot = next((v for k, n, v in rows if k == 'pack' and (not nxpack or n == nxpack)), None)
@@ -114,7 +116,7 @@ def compose(launch, environ, nxpack=None):
     pairs = env_txt(Path(paths['choices'])) if environ.get('DM_SAVED_CHOICES') != '0' else []
     for k, v in pairs + [(n, v) for k, n, v in rows if k == 'env']:
         if k not in have: have[k] = added[k] = v
-    return paths['host'], aot, paths['cwd'], added
+    return paths['host'], ['--profile', paths['game_profile'], aot], paths['cwd'], added
 
 
 def loader_rows(text):
@@ -133,6 +135,7 @@ class Pack(unittest.TestCase):
         self.tmp = Path(tempfile.mkdtemp()).resolve(); self.addCleanup(shutil.rmtree, self.tmp)
         self.prof = self.tmp / 'games' / ID; self.prof.mkdir(parents=True)
         (self.prof / 'game.tsv').write_text('\n'.join([f'title_id\t{ID}', f'program_id\t{ID}', 'name\tTest Game', 'ipa\tTestGame.ipa', 'modules\tmain', 'romfs_marker\ta.bin',
+                                                       'mem_reserve\t0x180000000', 'mem_alias\t0x100000000', 'mem_stack\t0x100000', 'app_pool\t0xcd500000',   # game.py's constants
                                                        f'build\tv0\t1.0.0\tmain={BID}', 'package\tv0', 'shader_versions\tv0']) + '\n')
         for n in ('shader_map.tsv', 'shader_facts.tsv', 'shader_pairs.tsv'): (self.prof / n).write_text('# registered\n')
         self.nsp_dir = self.tmp / 'nsp'; self.nsp_dir.mkdir(); (self.nsp_dir / 'base.nsp').write_bytes(b'PFS0' + bytes(60))
@@ -179,6 +182,8 @@ class Pack(unittest.TestCase):
         if tool == 'nxaot':   # the fake nxaot, run for real; whether the packer kept the targets file from it (NXAOT_PROFILE_TARGETS)
             self.targets_switch.append((env or os.environ).get('NXAOT_PROFILE_TARGETS'))
             return REAL_RUN(cmd, log, env=env, cwd=cwd, on_line=on_line, ok=ok)
+        if tool == 'game.py':   # game.py runtime, run for real: the profile file of the profile DM_GAMES_DIR (and DM_GAMES_FIRST, a derived one) in env finds
+            return REAL_RUN(cmd, log, env=env, cwd=cwd, on_line=on_line, ok=ok)
         if tool == 'settings.py':   # the launcher's settings (test_settings_platforms.py tests the lists): what it was asked for, and a list of one row
             self.settings_env = {k: env.get(k) for k in ('SETTINGS_PLATFORM', 'GFXAPI', 'DM_LANG')}
             Path(cmd[-1]).write_text(json.dumps({'schema': 1, 'game': cmd[2], 'settings': [{'env': 'DM_RUMBLE', 'kind': 'toggle', 'section': 'Controls', 'label': 'Game rumble', 'note': '',
@@ -220,8 +225,8 @@ class Pack(unittest.TestCase):
 
     def run_sh(self, *args, **env):
         """run.sh with a stand-in for nxhost-run (NXHOST) and only PATH besides env in its environment: (exit status, stderr, what the stand-in was started with or None)"""
-        host, out = self.tmp / 'bin/nxhost-run', self.tmp / 'host.json'
-        if not host.is_file(): host.write_text(FAKE_HOST.format(py=sys.executable)); host.chmod(0o755)
+        host, out = self.tmp / 'nxhost/nxhost-run', self.tmp / 'host.json'
+        if not host.is_file(): host.parent.mkdir(exist_ok=True); host.write_text(FAKE_HOST.format(py=sys.executable)); host.chmod(0o755)
         out.unlink(missing_ok=True)
         r = subprocess.run(['sh', str(self.work / 'run.sh'), *args], env={'PATH': os.environ['PATH'], 'NXHOST': str(host), 'FAKE_OUT': str(out), **env},
                            capture_output=True, text=True, timeout=60)
@@ -231,8 +236,8 @@ class Pack(unittest.TestCase):
         """run.sh starts nxhost-run as the launch file's rules say (compose): the host, the pack folder, the working folder, every DM_ variable"""
         rc, err, got = self.run_sh('main', '--', 'arg', **env, **({'NXPACK': nxpack} if nxpack else {}))
         self.assertEqual((rc, err), (0, ''))
-        host, aot, cwd, added = compose(self.work / 'launch-linux.tsv', env, nxpack)
-        self.assertEqual((got['argv'], got['cwd']), ([aot, 'main', '--', 'arg'], cwd))
+        host, args, cwd, added = compose(self.work / 'launch-linux.tsv', env, nxpack)
+        self.assertEqual((got['argv'], got['cwd']), (args + ['main', '--', 'arg'], cwd))
         self.assertEqual({k: v for k, v in got['env'].items() if k.startswith('DM_')}, {**{k: v for k, v in env.items() if k.startswith('DM_')}, **added})
         return got
 
@@ -263,7 +268,8 @@ class Linux(Pack):
         # the launch file: what run.sh and the launcher nxlauncher both read
         rows = launch_rows(self.work / 'launch-linux.tsv')
         self.assertEqual({n: v for k, n, v in rows if k == 'game'}, {'title': 'Test Game', 'title_id': ID, 'version': '1.0.0', 'package': 'v0', 'platform': 'linux', 'graphics': 'nvn'})
-        self.assertEqual({n: v for k, n, v in rows if k == 'path'}, {'host': str(REPO / 'build/linux/nxhost-run'), 'cwd': str(self.wdir / 'run'), 'choices': str(self.wdir / 'run/env.txt'),
+        self.assertEqual({n: v for k, n, v in rows if k == 'path'}, {'host': str(REPO / 'build/linux/nxhost-run'), 'game_profile': str(self.work / 'game-profile-linux.tsv'),
+                                                                    'cwd': str(self.wdir / 'run'), 'choices': str(self.wdir / 'run/env.txt'),
                                                                     'log': str(self.wdir / 'run/log.txt'), 'settings': str(self.work / 'launcher-linux.json'),
                                                                     'profile': str(self.wdir / 'profile'),   # DM_AOT_PROFILE's folder, and what packs the game again (the launcher's repack)
                                                                     'package': str(self.nsp_dir), 'packer': str(REPO / 'scripts/build_ipa_from_nsp.py'), 'python': sys.executable,
@@ -281,8 +287,11 @@ class Linux(Pack):
         sh = (self.work / 'run.sh').read_text()
         self.assertTrue(os.access(self.work / 'run.sh', os.X_OK))
         self.assertIn(f'\nlaunch={self.work / "launch-linux.tsv"}\n', sh)
-        self.assertTrue(sh.endswith('\nexec "${NXHOST:-$host}" "$aot" "$@"\n'))
-        self.assertIn(f'-DGAME={ID}', sh); self.assertNotIn('DM_GAMES_DIR', sh)   # a registered profile
+        self.assertTrue(sh.endswith('\nexec "${NXHOST:-$host}" --profile "$gprof" "$aot" "$@"\n'))
+        self.assertIn('-DGAME=<any title ID of dm/games>', sh); self.assertNotIn('DM_GAMES_DIR', sh); self.assertNotIn('hosts/', sh)   # one host for every profile
+        # the game profile's file: game.py runtime of the profile, beside the launch file
+        self.assertEqual(self.tools('game.py'), [[sys.executable, str(REPO / 'dm/games/game.py'), 'runtime', ID, str(self.work / 'game-profile-linux.tsv')]])
+        self.assertEqual((self.work / 'game-profile-linux.tsv').read_text(encoding='utf-8'), game.runtime(game.load(ID)))
         self.assertTrue((self.wdir / 'run/save').is_dir())
         self.assertFalse((self.work / 'tmp').exists())
         got = self.check_run_sh()
@@ -316,8 +325,8 @@ class Linux(Pack):
         self.assertEqual(sorted(p.name for p in (aot / 'max').iterdir()), ['.keys', 'main.aot.so', 'main.aot.tsv', 'main.image.bin', 'nro.tsv', 'nro0.aot.so'])
         for n in ('main.aot.tsv', 'main.image.bin', 'nro.tsv'): self.assertTrue(os.path.samefile(aot / n, aot / 'max' / n), n)
         self.assertEqual([(n, v) for k, n, v in launch_rows(self.work / 'launch-linux.tsv') if k == 'pack'], [('max', str(aot / 'max')), ('balanced', str(aot))])
-        self.assertEqual(self.check_run_sh()['argv'][0], str(aot / 'max'))   # run.sh: the first pack row, or NXPACK
-        self.assertEqual(self.check_run_sh('balanced')['argv'][0], str(aot))
+        self.assertEqual(self.check_run_sh()['argv'][2], str(aot / 'max'))   # run.sh: the first pack row, or NXPACK
+        self.assertEqual(self.check_run_sh('balanced')['argv'][2], str(aot))
         self.pack('linux'); self.assertEqual(self.tools('nxaot'), [])   # each mode keeps its own keys
         self.assertEqual([n for k, n, v in launch_rows(self.work / 'launch-linux.tsv') if k == 'pack'], ['balanced', 'max'])
         # a new image of main: the next pack of one mode makes its packs again and the other mode is no longer offered (its packs are of the old image)
@@ -326,6 +335,35 @@ class Linux(Pack):
         self.assertEqual([Path(c[2]).name for c in self.tools('nxaot')], ['main.aot.tsv'])
         self.assertEqual([n for k, n, v in launch_rows(self.work / 'launch-linux.tsv') if k == 'pack'], ['max'])
         self.assertEqual((aot / 'max/main.image.bin').read_bytes(), (aot / 'main.image.bin').read_bytes())   # linked again to the new input
+
+    def test_game_profile_file(self):   # <id>_build/game-profile-linux.tsv: what the one host of every game takes with --profile; refreshed by a repack; run.sh refuses to start without it
+        self.pack()
+        gprof = self.work / 'game-profile-linux.tsv'
+        self.assertIn(('path', 'game_profile', str(gprof)), launch_rows(self.work / 'launch-linux.tsv'))
+        rows = dict(l.split('\t', 1) for l in gprof.read_text(encoding='utf-8').splitlines() if l and not l.startswith('#'))
+        self.assertEqual((rows['id'], rows['name'], rows['modules'], rows['display_versions'], rows['fps_target']), (ID, 'Test Game', 'main', f'{BID}=1.0.0', '0'))
+        self.assertEqual(self.check_run_sh()['argv'][:2], ['--profile', str(gprof)])
+        # the environment's DM_GAME_PROFILE does not replace it: the command line names the pack's file (game_rt.c: --profile wins over the switch)
+        self.assertEqual(self.check_run_sh(DM_GAME_PROFILE='/elsewhere.tsv')['argv'][:2], ['--profile', str(gprof)])
+        # the profile's game.tsv changes: the next pack (a repack) writes the file again, and the packs, which do not depend on it, are reused
+        (self.prof / 'game.tsv').write_text((self.prof / 'game.tsv').read_text() + 'fps_target\t30\n')
+        self.pack()
+        self.assertEqual(self.tools('nxaot'), [])
+        self.assertIn('fps_target\t30\n', gprof.read_text(encoding='utf-8'))
+        self.assertEqual(gprof.read_text(encoding='utf-8'), game.runtime(game.load(ID)))
+        # the file gone: run.sh says so in a red line and starts nothing (the host would run another game's profile)
+        gprof.unlink()
+        rc, err, got = self.run_sh('main')
+        self.assertEqual((rc, err, got), (1, f'[RED] run.sh: the game profile {gprof} is missing: pack the game again\n', None))
+        # a launch file without the row (a pack made before the one host): the same
+        launch = self.work / 'launch-linux.tsv'
+        launch.write_text(''.join(l for l in launch.read_text(encoding='utf-8').splitlines(True) if not l.startswith('path\tgame_profile\t')), encoding='utf-8')
+        rc, err, got = self.run_sh('main')
+        self.assertEqual((rc, got), (1, None)); self.assertIn('[RED] run.sh: ', err); self.assertIn('names no host, game profile, working folder or pack', err)
+        # a profile game.py refuses stops the pack with game.py's own words, before the packs
+        (self.prof / 'game.tsv').write_text((self.prof / 'game.tsv').read_text().replace('fps_target\t30\n', 'fps_target\t45\n'))
+        with self.assertRaisesRegex(nsp.BuildError, r'game\.py exit code 1 \(full output: .*game_profile_linux\.log\)'): self.pack()
+        self.assertIn('fps_target must be 0, 30 or 60: 45', (self.work / 'logs/game_profile_linux.log').read_text())
 
     def test_sample_profiles(self):   # <NSP folder>/<id>-work/profile/<module>.tsv (dm/host/aot_profile.c writes them): nxaot build --profile, part of the pack's key; --no-profile
         self.pack()
@@ -575,59 +613,82 @@ class Linux(Pack):
         self.assertTrue(any('no shader step on this platform' in m for m in self.said))
         self.assertTrue((self.aot / 'main.aot.so').is_file())
 
-    def test_bundle_host(self):   # packed from the port's bundle (scripts/package_port.py): the launch file names its hosts/<title ID>/nxhost-run, built for the registered profile
+    def test_bundle_host(self):   # packed from the port's bundle (scripts/package_port.py): the launch file names its bin/nxhost-run, the one host, for a registered and a derived profile
         bundle, real = self.tmp / 'bundle', nsp.port_host
-        host = bundle / 'hosts' / ID / 'nxhost-run'; host.parent.mkdir(parents=True); host.write_text('')
-        self.assertEqual(real(bundle, 'linux', ID), (host, True)); self.assertEqual(real(bundle, 'linux', ID, False), (bundle / 'build/linux/nxhost-run', False))
-        self.assertEqual(real(bundle, 'windows', ID), (bundle / 'build/win64/nxhost-run.exe', False))   # a Windows bundle's is nxhost-run.exe
-        with mock.patch.object(nsp, 'port_host', side_effect=lambda repo, platform, gid, bundled=True: real(bundle, platform, gid, bundled)):
+        host = bundle / 'bin/nxhost-run'; host.parent.mkdir(parents=True); host.write_text('')
+        self.assertEqual(real(bundle, 'linux'), (host, True))
+        self.assertEqual(real(bundle, 'windows'), (bundle / 'build/win64/nxhost-run.exe', False))   # a Windows bundle's is bin/nxhost-run.exe
+        (bundle / 'bin/nxhost-run.exe').write_text(''); self.assertEqual(real(bundle, 'windows'), (bundle / 'bin/nxhost-run.exe', True))
+        self.assertEqual(real(self.tmp / 'checkout', 'linux'), (self.tmp / 'checkout/build/linux/nxhost-run', False))   # a checkout: its build tree's, built or not
+        with mock.patch.object(nsp, 'port_host', side_effect=lambda repo, platform: real(bundle, platform)):
             self.pack()
             self.assertIn(('path', 'host', str(host)), launch_rows(self.work / 'launch-linux.tsv'))
-            self.assertIn(f"nxhost-run is the port's bundle's host for game profile {ID}: {host}", (self.work / 'run.sh').read_text())
+            self.assertIn(f"nxhost-run is the port's bundle's: {host}", (self.work / 'run.sh').read_text())
             self.check_run_sh()
-            nso(self.game / 'ExeFS/main', BID2); self.pack()   # a derived profile: the bundle's host was built for the registered one, so the repository's build is named
-            self.assertIn(('path', 'host', str(bundle / 'build/linux/nxhost-run')), launch_rows(self.work / 'launch-linux.tsv'))
-            self.assertIn(f'nxhost-run is built for game profile {ID}: cmake', (self.work / 'run.sh').read_text())
+            nso(self.game / 'ExeFS/main', BID2); self.pack()   # a derived profile: the same host, given the derived profile's file
+            self.assertIn(('path', 'host', str(host)), launch_rows(self.work / 'launch-linux.tsv'))
+            self.assertIn(f"nxhost-run is the port's bundle's: {host}", (self.work / 'run.sh').read_text())
+            self.assertIn(f'display_versions\t{BID2}=1.0.0\n', (self.work / 'game-profile-linux.tsv').read_text(encoding='utf-8'))
+            self.check_run_sh()
 
-    def test_moved_bundle_host(self):   # the launch file's host is gone (a bundle moved or replaced): run.sh takes hosts/<title ID>/nxhost-run of the first folder above it that has one
+    def test_old_bundle_layout(self):   # run from a bundle of the layout before the one host (hosts/<title ID>/nxhost-run, no bin/nxhost-run): a clear error at the start, no traceback
+        old = self.tmp / 'old bundle'
+        (old / 'hosts' / ID).mkdir(parents=True); (old / 'hosts' / ID / 'nxhost-run').write_text('')
+        with self.assertRaisesRegex(nsp.BuildError, r'first layout \(hosts/<title ID>/nxhost-run, one host per game profile\) and has no bin/nxhost-run, the one host for every '
+                                                    r'profile that this packer\'s packs need: unpack a newer bundle'):
+            nsp.port_host(old, 'linux')
+        with mock.patch.object(nsp, 'find_repo', return_value=old):
+            with self.assertRaisesRegex(nsp.BuildError, 'unpack a newer bundle'): self.pack()
+        self.assertEqual((self.rewrites, [t for t, _ in self.ran]), ([], []))   # before any step
+        self.assertFalse((self.work / 'launch-linux.tsv').exists())
+        self.pack(); self.assertIn(('path', 'host', str(REPO / 'build/linux/nxhost-run')), launch_rows(self.work / 'launch-linux.tsv'))   # from the checkout: packed
+
+    def test_moved_bundle_host(self):   # the launch file's host is gone (a bundle moved or replaced): run.sh takes bin/nxhost-run of the first folder above it that is a bundle
         old, real = self.tmp / 'old bundle', nsp.port_host
-        with mock.patch.object(nsp, 'port_host', side_effect=lambda repo, platform, gid, bundled=True: real(old, platform, gid, bundled)):
-            row = old / 'hosts' / ID / 'nxhost-run'; row.parent.mkdir(parents=True); row.write_text('')
+        with mock.patch.object(nsp, 'port_host', side_effect=lambda repo, platform: real(old, platform)):
+            row = old / 'bin/nxhost-run'; row.parent.mkdir(parents=True); row.write_text('')
             self.pack()   # packed from a bundle in 'old bundle', which is then removed
         self.assertIn(('path', 'host', str(row)), launch_rows(self.work / 'launch-linux.tsv'))
         shutil.rmtree(old)
         sh = (self.work / 'run.sh').read_text()
         self.assertIn('a bundle that holds this NSP folder', sh)
-        # the NSP folder sits in the new bundle (self.tmp, two folders above run.sh): its host is the one started, and run.sh says so
-        own = self.tmp / 'hosts' / ID / 'nxhost-run'; own.parent.mkdir(parents=True); own.write_text(FAKE_HOST.format(py=sys.executable)); own.chmod(0o755)
+        # the NSP folder sits in the new bundle (self.tmp, two folders above run.sh: nxlauncher beside bin/nxhost-run): its host is the one started, and run.sh says so
+        own = self.tmp / 'bin/nxhost-run'; own.write_text(FAKE_HOST.format(py=sys.executable)); own.chmod(0o755)
         out = self.tmp / 'host.json'
         def run(**env):
             out.unlink(missing_ok=True)
             r = subprocess.run(['sh', str(self.work / 'run.sh'), 'main'], env={'PATH': os.environ['PATH'], 'FAKE_OUT': str(out), **env}, capture_output=True, text=True, timeout=60)
             return r.returncode, r.stderr, json.loads(out.read_text()) if out.is_file() else None
+        missing = (1, f'[RED] run.sh: the host {row} is missing: pack the game again or set NXHOST\n', None)
+        self.assertEqual(run(), missing)   # bin/nxhost-run without nxlauncher beside it is no bundle (a ~/bin of one's own): not taken
+        (self.tmp / 'nxlauncher').write_text('')
         rc, err, got = run()
         self.assertEqual((rc, err), (0, f"run.sh: host: the bundle's {own} (the launch file's {row} is missing)\n"))
-        self.assertEqual((got['self'], got['argv']), (str(own), [str(self.aot), 'main']))
+        self.assertEqual((got['self'], got['argv']), (str(own), ['--profile', str(self.work / 'game-profile-linux.tsv'), str(self.aot), 'main']))
         # NXHOST wins over the bundle's
         rc, err, got = self.run_sh('main')
-        self.assertEqual((rc, err, got['self']), (0, '', str(self.tmp / 'bin/nxhost-run')))
+        self.assertEqual((rc, err, got['self']), (0, '', str(self.tmp / 'nxhost/nxhost-run')))
         # the row's host, there again, wins over the bundle's: nothing said
         row.parent.mkdir(parents=True); shutil.copy(own, row)
         rc, err, got = run()
         self.assertEqual((rc, err, got['self']), (0, '', str(row)))
         shutil.rmtree(old)
         # neither: the red line, and nothing started
-        shutil.rmtree(self.tmp / 'hosts')
-        rc, err, got = run()
-        self.assertEqual((rc, err, got), (1, f'[RED] run.sh: the host {row} is missing: pack the game again or set NXHOST\n', None))
+        own.unlink()
+        self.assertEqual(run(), missing)
 
-    def test_derived_profile(self):   # files of another build under the registered tag: packed from a derived profile, which nxhost-run must be configured with
+    def test_derived_profile(self):   # files of another build under the registered tag: packed from a derived profile, whose file the one host takes (no host to configure)
         nso(self.game / 'ExeFS/main', BID2); self.pack()
         pdir = self.work / 'profile'
         self.assertEqual(game.Game(pdir / ID).builds()['v0']['main'], BID2)
         sh = (self.work / 'run.sh').read_text()
-        self.assertIn(f'with DM_GAMES_DIR={pdir} and DM_GAMES_FIRST=1', sh)
+        self.assertNotIn('DM_GAMES_DIR', sh); self.assertIn('-DGAME=<any title ID of dm/games>', sh)
         self.assertIn(('env', 'DM_NVN_SHMAP', str(pdir / ID / 'shader_map.tsv')), launch_rows(self.work / 'launch-linux.tsv'))
+        # the profile file: the derived profile's (DM_GAMES_DIR and DM_GAMES_FIRST in game.py's environment), not the registered one's
+        gprof = (self.work / 'game-profile-linux.tsv').read_text(encoding='utf-8')
+        self.assertEqual(self.tool_env['game.py'].get('DM_GAMES_FIRST'), '1'); self.assertTrue(self.tool_env['game.py']['DM_GAMES_DIR'].startswith(str(pdir)))
+        self.assertIn(f'from {pdir / ID}/game.tsv', gprof.splitlines()[0]); self.assertIn(f'display_versions\t{BID2}=1.0.0\n', gprof)
+        self.assertEqual(self.check_run_sh()['argv'][:2], ['--profile', str(self.work / 'game-profile-linux.tsv')])
         self.pack()
         self.assertEqual((self.rewrites, self.tools('nxaot')), ([], []))
 
@@ -672,6 +733,8 @@ class Windows(Pack):
         # the launch file: the Windows host program, the DLL packs' folder; settings.py's list for Windows
         rows = launch_rows(self.work / 'launch-windows.tsv')
         self.assertIn(('path', 'host', str(REPO / 'build/win64/nxhost-run.exe')), rows); self.assertIn(('game', 'platform', 'windows'), rows)
+        self.assertIn(('path', 'game_profile', str(self.work / 'game-profile-windows.tsv')), rows)   # its own file beside the Linux pack's (another version may be packed for each)
+        self.assertEqual((self.work / 'game-profile-windows.tsv').read_text(encoding='utf-8'), game.runtime(game.load(ID)))
         self.assertEqual([r for r in rows if r[0] == 'pack'], [('pack', 'balanced', str(aot))])
         self.assertIn(('env', 'DM_SAVE', str(self.wdir / 'run/save')), rows)
         self.assertEqual(self.settings_env['SETTINGS_PLATFORM'], 'windows')
@@ -682,14 +745,24 @@ class Windows(Pack):
         self.assertIn(f'\r\nset "NXRUN_LAUNCH={self.work / "launch-windows.tsv"}"\r\n', cmd)
         self.assertEqual(cmd.count('for /f "usebackq eol=# tokens=1,2,* delims=\t" %%a in ("%NXRUN_LAUNCH%") do'), 2)
         self.assertIn('\r\nif defined NXHOST set "NXRUN_host=%NXHOST%"\r\n', cmd)
-        # the launch file's host gone and no NXHOST: hosts\<title ID>\nxhost-run.exe of the first folder above run.cmd that has one, as run.sh walks up (cmd.exe is not run here)
+        # the launch file's host gone and no NXHOST: bin\nxhost-run.exe of the first folder above run.cmd that is a bundle (nxlauncher.exe beside it), as run.sh walks up (cmd.exe
+        # is not run here)
         self.assertIn('\r\nif defined NXHOST goto nxrun_host_ok\r\nif exist "%NXRUN_host%" goto nxrun_host_ok\r\nset "NXRUN_DIR=%~dp0"\r\n:nxrun_up\r\n'
-                      'if exist "%NXRUN_DIR%hosts\\%NXRUN_ID%\\nxhost-run.exe" goto nxrun_bundle_host\r\n', cmd)
-        self.assertIn('\r\n    if "%%a"=="game" if "%%b"=="title_id" set "NXRUN_ID=%%c"\r\n', cmd)
+                      'if exist "%NXRUN_DIR%bin\\nxhost-run.exe" if exist "%NXRUN_DIR%nxlauncher.exe" goto nxrun_bundle_host\r\n', cmd)
+        self.assertIn('\r\nset "NXRUN_host=%NXRUN_DIR%bin\\nxhost-run.exe"\r\n:nxrun_host_ok\r\n', cmd)
+        self.assertNotIn('NXRUN_ID', cmd); self.assertNotIn('hosts\\', cmd)
         self.assertIn('\r\necho [RED] run.cmd: the host "%NXRUN_host%" is missing: pack the game again or set NXHOST 1>&2\r\ngoto nxrun_end\r\n', cmd)
-        self.assertLess(cmd.index(':nxrun_host_ok\r\n'), cmd.index('\r\n"%NXRUN_host%" "%NXRUN_AOT%" %*\r\n'))
-        self.assertIn('\r\n"%NXRUN_host%" "%NXRUN_AOT%" %*\r\nset "NXRUN_RC=%errorlevel%"\r\n:nxrun_end\r\nif defined NXRUN_CP chcp %NXRUN_CP% > nul\r\nexit /b %NXRUN_RC%\r\n', cmd)
+        # the game profile's file: the path row (cleared first, as the other path rows), its absence and a file that is gone each a red line, then --profile on the command line
+        self.assertIn('\r\nset "NXRUN_game_profile="\r\n', cmd)
+        self.assertIn('\r\nif not defined NXRUN_game_profile (\r\n    echo [RED] run.cmd: "%NXRUN_LAUNCH%" names no game profile: pack the game again with '
+                      'scripts/build_ipa_from_nsp.py --platform windows 1>&2\r\n    goto nxrun_end\r\n)\r\n', cmd)
+        self.assertIn('\r\n:nxrun_host_ok\r\nif not exist "%NXRUN_game_profile%" (\r\n    echo [RED] run.cmd: the game profile "%NXRUN_game_profile%" is missing: pack the game again '
+                      '1>&2\r\n    goto nxrun_end\r\n)\r\n', cmd)
+        self.assertLess(cmd.index(':nxrun_host_ok\r\n'), cmd.index('\r\n"%NXRUN_host%" --profile "%NXRUN_game_profile%" "%NXRUN_AOT%" %*\r\n'))
+        self.assertIn('\r\n"%NXRUN_host%" --profile "%NXRUN_game_profile%" "%NXRUN_AOT%" %*\r\nset "NXRUN_RC=%errorlevel%"\r\n:nxrun_end\r\nif defined NXRUN_CP chcp %NXRUN_CP% > nul\r\n'
+                      'exit /b %NXRUN_RC%\r\n', cmd)
         self.assertIn('x86_64-w64-mingw32.cmake', cmd)
+        self.assertNotRegex(cmd, r'\([^)\r\n]*\r\n[^)]*echo [^\r\n]*\([^\r\n]*\)')   # no parenthesis inside an echo of a parenthesized block (it would close the block)
         self.assertIn(f'\r\nrem set "DM_AOT_PROFILE={self.wdir / "profile"}"\r\n', cmd)
         # a second run reuses every step
         first = {p.name: p.read_bytes() for p in aot.iterdir() if p.is_file()}

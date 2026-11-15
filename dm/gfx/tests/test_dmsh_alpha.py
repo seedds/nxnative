@@ -98,9 +98,9 @@ class AlphaVariant(unittest.TestCase):
                         except subprocess.CalledProcessError as e: self.fail(e.stderr)
 
 
-def fixture(out):   # t_alpha.m's shaders: <name>.metal (the base, compiled by the test) and <key>_bx.metallib (the side library the host loads), for key 0 and 1
+def fixture(out):   # t_alpha.m's shaders: <name>.metal (base) and <key>_bx.metallib (side library), keys 0/1 for RGBA and key 2 for an RGB-only export with MSL padding
     out = pathlib.Path(out); out.mkdir(parents=True, exist_ok=True)
-    for i, src in enumerate((MAIN, ARGS)):
+    for i, src in enumerate((MAIN, ARGS, MAIN)):
         (out / f'base{i}.metal').write_text(src + VERTEX)
         u, info = dmsh_side.unit(src)
         lib = compile_lib(u + VERTEX, out, f'a{i}')

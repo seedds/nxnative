@@ -509,11 +509,22 @@ void own_prog_pin(uint64_t serial) {
     pin->refs++;
 }
 
-uint32_t own_alias_unref_locked(void) {
-    CFMutableSetRef held = CFSetCreateMutable(NULL, 0, NULL); uint32_t n = 0;
-    own_each_locked(^(uint64_t serial, id o, int ghost) { (void)serial; (void)ghost; CFSetAddValue(held, (__bridge const void *)o); });
-    for (uint32_t i = 0; i < g_alias.cap; i++) if (g_alias.vals[i] && !CFSetContainsValue(held, g_alias.vals[i])) n++;
-    CFRelease(held); return n;
+own_alias_unheld own_alias_unheld_locked(void) {
+    own_alias_unheld s = {0}; uint64_t now = own_hook_submission();
+    CFMutableSetRef sized = CFSetCreateMutable(NULL, 0, NULL);   // the textures counted
+    for (uint32_t i = 0; i < g_alias.cap; i++) {
+        void *v = g_alias.vals[i]; id o = (__bridge id)v;
+        if (!v || entry_holds(v) || tex_object_pinned(o)) continue;
+        s.entries++;
+        alias_key k; memcpy(&k, g_alias.keys + (size_t)i * g_alias.klen, sizeof k);
+        uint64_t seen = (uint64_t)(uintptr_t)nvn_hm_get(&g_alias_seen, &k);
+        if (seen && now > seen && now - seen > s.oldest_idle) s.oldest_idle = now - seen;
+        if (CFSetContainsValue(sized, v) || ![o respondsToSelector:@selector(allocatedSize)]) continue;
+        CFSetAddValue(sized, v);
+        uint64_t b = ((id<MTLResource>)o).allocatedSize; s.bytes += b;
+        if ([o respondsToSelector:@selector(usage)] && (((id<MTLTexture>)o).usage & (MTLTextureUsageRenderTarget | MTLTextureUsageShaderWrite))) s.writable_bytes += b;
+    }
+    CFRelease(sized); return s;
 }
 own_stats own_stats_locked(void) { return (own_stats){.live = g_by_serial.n, .live_cap = g_by_serial.cap, .ghost = g_ghost.n, .retire_wait = g_retire_wait.n, .ghost_puts = g_ghost_puts}; }
 void own_each_locked(void (^fn)(uint64_t serial, id o, int ghost)) {

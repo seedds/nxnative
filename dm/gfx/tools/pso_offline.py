@@ -48,6 +48,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import romfs, shader_lib   # the libraries may be one file (shader_lib.py), read in place; metal-tt alone needs files of its own (real_libraries)
 import dmsh_abi as abi, dmsh_side
+import vol_space   # the space metal-tt may write, with what APFS frees on demand
 
 # The function constants the host's prebuild sets in a base's functions (nvn_mtl.m pre_fn), by name: (index, bool value). A pair whose functions declare another constant is left to the
 # device: the host leaves it at its default, which metal-tt can do too, but no other constant was tried there, and one function metal-tt fails fails its whole group
@@ -311,14 +312,14 @@ def compile_archive(js, part, work, arch, platform, osmin, count):
     """One compiler invocation, with its temporaries on the work volume. Never publish a failed output."""
     part.unlink(missing_ok=True)
     clear_temporaries(work)
-    need, free = space_needed(count), shutil.disk_usage(work).free
+    need, free = space_needed(count), vol_space.free_bytes(work)
     if free < need: sys.exit(f'[RED] pso_offline: {free / 2**30:.1f} GB free on the volume of {work}, metal-tt needs about {need / 2**30:.0f} GB for {count} bases: free some space and run again')
     cmd = ['xcrun', '-sdk', sdk(platform), 'metal-tt', '-arch', arch, f'-{platform}-version-min', osmin, str(js), '-o', str(part)]
     log_path = work / f'metal-tt.{arch}.log'
     with log_path.open('w') as log:
         r = subprocess.run(cmd, stdout=log, stderr=subprocess.STDOUT, env=dict(os.environ, TMPDIR=str(work)))
     if r.returncode or not part.is_file() or not part.stat().st_size:
-        free = shutil.disk_usage(work).free
+        free = shutil.disk_usage(work).free   # what was really left as it failed, not what APFS could still free
         clear_temporaries(work); part.unlink(missing_ok=True)
         text = f'[RED] pso_offline: metal-tt failed for {arch} (exit {r.returncode})'
         if free < 1 << 30: sys.exit(f'{text} ({free / 2**30:.1f} GB free on the volume of {work} when it failed: likely out of disk space): {log_path.read_text()[-2000:]}')
@@ -459,7 +460,7 @@ def compile_batches(lib_dir, bases, work, part, arch, platform, osmin, toolchain
         futures = [pool.submit(one, i, *g) for i, g in enumerate(groups, 1) if not g[1]]
         pieces += [f.result() for f in futures]
     part.unlink(missing_ok=True)
-    need, free = max(2 << 30, sum(p.stat().st_size for p in pieces)), shutil.disk_usage(work).free
+    need, free = max(2 << 30, sum(p.stat().st_size for p in pieces)), vol_space.free_bytes(work)
     if free < need: sys.exit(f'[RED] pso_offline: {free / 2**30:.1f} GB free before merging; need at least {need / 2**30:.1f} GB')
     print(f'pso_offline: {arch}: merging {total} batches', flush=True)
     cmd = ['xcrun', '-sdk', sdk(platform), 'metal-pack', '-nthreads', '1', *map(str, pieces), '-o', str(part)]

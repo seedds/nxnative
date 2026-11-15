@@ -506,6 +506,38 @@ int main(void) { @autoreleasepool {
         }
     }
 
+    {   // The memory report's count of what only the sharing table keeps (issue #2629): each texture's bytes once, however many keys name it; the part made to be drawn into;
+        // the longest any has gone without a lookup; textures a serial, a view's serial or a pin holds are left out
+        id<MTLDevice> dev = MTLCreateSystemDefaultDevice();
+        if (dev) {
+            MTLTextureDescriptor *d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:64 height:64 mipmapped:NO];
+            d.usage = MTLTextureUsageShaderRead; id<MTLTexture> rd = [dev newTextureWithDescriptor:d], held = [dev newTextureWithDescriptor:d], parent = [dev newTextureWithDescriptor:d];
+            d.usage = MTLTextureUsageShaderRead | MTLTextureUsageRenderTarget; id<MTLTexture> rt = [dev newTextureWithDescriptor:d];
+            id<MTLTexture> view = [parent newTextureViewWithPixelFormat:MTLPixelFormatRGBA8Unorm_sRGB];
+            alias_key k1 = akey(0x7000, 0, NVN_FORMAT_RGBA8), k2 = akey(0x7000, 1ll << ALIAS_CELL, NVN_FORMAT_RGBA8), k3 = akey(0x7000, 2ll << ALIAS_CELL, NVN_FORMAT_RGBA8),
+                      k4 = akey(0x7000, 3ll << ALIAS_CELL, NVN_FORMAT_RGBA8), k5 = akey(0x7000, 4ll << ALIAS_CELL, NVN_FORMAT_RGBA8);
+            uint64_t t0 = g_sub;
+            pthread_mutex_lock(&g_smu);
+            own_alias_put_locked(&k1, rd, t0); own_alias_put_locked(&k2, rd, t0 + 50); own_alias_put_locked(&k3, rt, t0 + 70);
+            own_alias_put_locked(&k4, held, t0); own_alias_put_locked(&k5, parent, t0);
+            pthread_mutex_unlock(&g_smu);
+            serial_put(970001, held); serial_put(970002, view);
+            g_sub = t0 + 100;
+            pthread_mutex_lock(&g_smu); own_alias_unheld u = own_alias_unheld_locked(); pthread_mutex_unlock(&g_smu);
+            CHECK(u.entries == 3, "the unheld count takes the sharing table's entries no serial, view or pin holds (two keys of one texture, a render target)");
+            CHECK(u.bytes == rd.allocatedSize + rt.allocatedSize, "their bytes count each texture once, leaving out the serial-held one and the parent of a held view");
+            CHECK(u.writable_bytes == rt.allocatedSize, "the part made to be drawn into is the render target's");
+            CHECK(u.oldest_idle == 100, "the oldest idle age is the longest since any unheld entry's last lookup");
+            serial_del(970001); serial_del(970002);
+            pthread_mutex_lock(&g_smu); u = own_alias_unheld_locked(); pthread_mutex_unlock(&g_smu);
+            CHECK(u.entries == 5 && u.bytes == rd.allocatedSize + rt.allocatedSize + held.allocatedSize + parent.allocatedSize, "once their serials go, the held texture and the view's parent count too");
+            pthread_mutex_lock(&g_smu); own_alias_del_locked(&k1); own_alias_del_locked(&k2); own_alias_del_locked(&k3); own_alias_del_locked(&k4); own_alias_del_locked(&k5); pthread_mutex_unlock(&g_smu);
+            pthread_mutex_lock(&g_smu); u = own_alias_unheld_locked(); pthread_mutex_unlock(&g_smu);
+            CHECK(u.entries == 0 && u.bytes == 0 && u.oldest_idle == 0, "an empty sharing table reports nothing unheld");
+            step("unheld report");
+        }
+    }
+
     printf("serial owner: %d checks, %d failed\n", checks, failed);
     return failed != 0;
 } }

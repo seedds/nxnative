@@ -61,6 +61,7 @@ static int rt_view_into(int nvn_format, MTLPixelFormat want_base, uint64_t seria
         id<MTLRenderCommandEncoder> en = [cb renderCommandEncoderWithDescriptor:rp];
         [en setRenderPipelineState:ps]; [en drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3]; [en endEncoding];
         id<MTLBuffer> out = [g_dev newBufferWithLength:16 options:MTLResourceStorageModeShared];
+        if (!out) abort();
         id<MTLBlitCommandEncoder> b = [cb blitCommandEncoder];
         [b copyFromTexture:base sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(4, 1, 1) toBuffer:out destinationOffset:0 destinationBytesPerRow:16 destinationBytesPerImage:16];
         [b endEncoding]; [cb commit]; [cb waitUntilCompleted];
@@ -180,6 +181,7 @@ int main(void) {
     if (g_blit) { enc_b_end(g_blit); g_blit = nil; }
     id<MTLTexture> view = [upgraded newTextureViewWithPixelFormat:MTLPixelFormatR32Uint];
     id<MTLBuffer> dst = [g_dev newBufferWithLength:sizeof bytes options:MTLResourceStorageModeShared];
+    if (!dst) abort();
     res_add(dst);
     id read = blit();
     [read copyFromTexture:view sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(4, 1, 1)

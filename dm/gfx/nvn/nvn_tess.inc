@@ -242,7 +242,6 @@ static void tess_draw(NvProg *pr, const p_draw *dw0, const p_draw_idx *di0) {
         if (!lcap) { tess_refuse(pr, dw, di, "geometry shader after the domain: scratch"); return; }
     }
     uint32_t binst = (uint32_t)(dw ? dw->base_instance : di->base_instance);
-    if (defer_has_active()) defer_fallback();
     lc_land(); rp_flush(); rp_end(); ubd_land();
     uint32_t *cpi = malloc((size_t)ncp * 4); if (!cpi) { tess_refuse(pr, dw, di, "no memory"); return; }
     uint32_t lo = UINT32_MAX, hi = 0;

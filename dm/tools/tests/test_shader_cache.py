@@ -164,8 +164,8 @@ class ReadOnly(Base):
         self.assertEqual(s.get('metallib/mac/a.metallib'), b'local')
         self.assertEqual(s.names('metallib/mac/'), {'metallib/mac/a.metallib', 'metallib/mac/new.metallib'})
         s.delete_prefix('variant/'); self.assertEqual(s.get('variant/v/mac.metallib'), b'variant')
-        assert s.readonly is not None and s.readonly.db is not None   # the store opened over a read-only one, open
-        with self.assertRaises(shader_cache.sqlite3.OperationalError): s.readonly.db.execute('DELETE FROM entry')
+        assert s.readonly is not None and len(s.readonly.dbs) == 1   # the store opened over a read-only one, open
+        with self.assertRaises(shader_cache.sqlite3.OperationalError): s.readonly.dbs[0][1].execute('DELETE FROM entry')
         s.close()
         self.assertEqual(self.path.read_bytes(), before); self.assertEqual(self.path.stat().st_mtime_ns, stamp)
 
@@ -412,6 +412,56 @@ class Prune(Base):
         self.assertEqual(self.store.prune_shaders(set(), now)[0], 40)
         self.store.db.execute('PRAGMA wal_checkpoint(TRUNCATE)')
         self.assertLess(self.path.stat().st_size, big // 4)
+
+
+class Generations(unittest.TestCase):   # one file per chain: a build writes its own, copies the Metal compiles it reads from older ones, and the older ones go whole after it
+    A, B, C = '0123456789ab', 'bbbbbbbbbbbb', 'cccccccccccc'
+
+    def setUp(self):
+        t = tempfile.TemporaryDirectory(); self.addCleanup(t.cleanup)
+        self.d = Path(t.name); self.said = []
+
+    def file(self, name, entries, when):   # a generation holding entries, last written at when
+        s = shader_cache.Store(self.d / name)
+        for n, data in entries.items(): s.put(n, data)
+        s.close(); os.utime(self.d / name, (when, when))
+
+    def names(self, path):
+        s = shader_cache.Store(path); self.addCleanup(s.close)
+        return set(s.names(''))
+
+    def test_older_compiles_are_copied_on_read(self):
+        now = time.time()
+        self.file('cas.db', {'metallib/mac/old.metallib': b'legacy', f'shader/{D1}/mac/k_b.metal': b'old chain'}, now - 300)
+        self.file(f'cas-{self.B}.db', {'metallib/mac/m.metallib': b'B', 'metallib/mac/old.metallib': b'newer'}, now - 100)
+        self.assertEqual([Path(p).name for p in shader_cache.generations(self.d)], [f'cas-{self.B}.db', 'cas.db'])   # newest first, the one file last
+        s = shader_cache.for_chain(self.d, self.A)
+        self.assertEqual(s.path, str(self.d / f'cas-{self.A}.db'))
+        self.assertTrue(s.has('metallib/mac/m.metallib'))
+        self.assertEqual(s.get('metallib/mac/old.metallib'), b'newer')   # the newest generation answers
+        self.assertIsNone(s.get(f'shader/{D1}/mac/k_b.metal')); self.assertFalse(s.has(f'shader/{D1}/mac/k_b.metal'))   # another chain's shader never hits
+        s.close()
+        self.assertEqual(self.names(self.d / f'cas-{self.A}.db'), {'metallib/mac/old.metallib'})   # what it read is its own now; what it only saw is not
+
+    def test_older_generations_go_after_a_build(self):
+        now = time.time()
+        self.file('cas.db', {'metallib/ios/i.metallib': b'ios', 'metallib/mac/x.metallib': b'old mac', f'shader/{D1}/mac/k_b.metal': b'm'}, now - 300)
+        self.file(f'cas-{self.B}.db', {'metallib/mac/b.metallib': b'B'}, now - 100)
+        self.assertEqual(shader_cache.drop_generations(self.d, self.A, self.said.append), [])   # no file of its own: nothing goes
+        self.file(f'cas-{self.A}.db', {'metallib/mac/a.metallib': b'A', f'shader/{D2}/mac/k_b.metal': b'a'}, now)
+        open(self.d / 'cas.db.lock', 'w').close()
+        self.assertEqual(sorted(shader_cache.drop_generations(self.d, self.A, self.said.append)), [f'cas-{self.B}.db', 'cas.db'])
+        self.assertEqual(sorted(p.name for p in self.d.iterdir()), [f'cas-{self.A}.db'])
+        self.assertEqual(self.names(self.d / f'cas-{self.A}.db'), {'metallib/mac/a.metallib', 'metallib/ios/i.metallib', f'shader/{D2}/mac/k_b.metal'})   # iOS, which it compiled none of, kept
+        self.assertIn('kept 1 ios Metal compiles of cas.db: this build compiled none for ios', self.said)
+        self.assertEqual(shader_cache.drop_generations(self.d, self.A, self.said.append), [])
+
+    def test_a_folder_as_the_read_only_cache(self):   # regress.py's fallback reads the player's generations, never copying them
+        now = time.time()
+        self.file(f'cas-{self.B}.db', {'metallib/mac/m.metallib': b'B'}, now - 100); self.file('cas.db', {'variant/v/x': b'v'}, now - 300)
+        s = shader_cache.Store(self.d / 'regress/cas.db', readonly=self.d); self.addCleanup(s.close)
+        self.assertEqual((s.get('metallib/mac/m.metallib'), s.get('variant/v/x')), (b'B', b'v'))
+        self.assertEqual(s._run('SELECT count(*) FROM entry')[0][0], 0)
 
 
 class Adopt(unittest.TestCase):

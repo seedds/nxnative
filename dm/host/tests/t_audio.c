@@ -18,11 +18,11 @@ void dm_host_helper_qos(qos_class_t q) { (void)q; }   // hle_thread.c: the helpe
 
 // A callback can finish several buffers, and the notifier can combine pending wakes.
 // Only inspect the released queue after an event, then take everything it announced.
-static int drain_signaled(void *out, gbuf *buffers, int count, int *got, int *seen) {
+static int drain_signaled(void *out, aout_buf *buffers, int count, int *got, int *seen) {
     int signals = atomic_load_explicit(&g_sig, memory_order_acquire);
     if (signals == *seen) return 1;
     *seen = signals;
-    gbuf *r;
+    aout_buf *r;
     while ((r = h_au_Released(out))) {
         if (*got >= count || r != &buffers[*got]) {
             fprintf(stderr, "unexpected released buffer at index %d of %d\n", *got, count);
@@ -47,7 +47,7 @@ static int test_surround_output(void) {
         for (int f = 0; f < FRAMES; f++) for (int ch = 0; ch < 6; ch++)
             in[f * 6 + ch] = test < 6 ? (test == ch ? 10000 : 0) : test == 6 ? 32767 : -32768;
         memset(out, 0xa5, sizeof out);
-        gbuf b[2] = {{in, SPLIT * 12, SPLIT * 12}, {in + SPLIT * 6, (FRAMES - SPLIT) * 12, (FRAMES - SPLIT) * 12}};
+        aout_buf b[2] = {{.ptr = in, .cap = SPLIT * 12, .size = SPLIT * 12}, {.ptr = in + SPLIT * 6, .cap = (FRAMES - SPLIT) * 12, .size = (FRAMES - SPLIT) * 12}};
         aout a = {.ch = 6};
         atomic_init(&a.state, STATE_STARTED); atomic_init(&a.vol, 0x3f800000u);
         a.q[0] = b; a.q[1] = b + 1; atomic_init(&a.q_tail, 2);
@@ -65,13 +65,37 @@ static int test_surround_output(void) {
     puts("surround callback: all six channels audible, saturation and split-buffer release verified");
     return 0;
 }
+// What the sdk's SetAudioOutBufferInfo does (Hades's sdk+0x142ab0, Metro 2033 Redux's sdk+0x80f80, the same in SDK 8 to Switch 2's): the host leaves it and the other descriptor
+// functions to the sdk and reads the guest's AudioOutBuffer itself
+static void set_buf(aout_buf *b, void *p, uint64_t cap, uint64_t size) { b->ptr = p; b->cap = cap; b->size = size; }
+// The host plays a buffer as the SDK describes it: the object spelled out as the SDK has it (not as aout_buf has it, so the check is about the ABI and not about our own names),
+// next linked as AudioBufferList links it, the data size 4 bytes short of the capacity. The callback must play exactly the data size from the data pointer and release the buffer.
+// The host's old private layout (data +0x00, capacity +0x08, data size +0x10) read next as the data and the capacity as the data size (Metro 2033 Redux)
+static int test_buffer_layout(void) {
+    enum { FRAMES = 64 };
+    static int16_t pcm[FRAMES * 2 + 2], other[4];
+    for (int i = 0; i < FRAMES * 2 + 2; i++) pcm[i] = (int16_t)(i < FRAMES * 2 ? 100 + i : -1);
+    struct { void *next; void *data; uint64_t buffer_size, data_size, data_offset; } sdk = {other, pcm, sizeof pcm, FRAMES * 4, 0};
+    _Static_assert(sizeof sdk == sizeof(aout_buf), "nn::audio::AudioOutBuffer size");
+    int16_t out[(FRAMES + 1) * 2]; memset(out, 0x5a, sizeof out);
+    aout a = {.ch = 2};
+    atomic_init(&a.state, STATE_STARTED); atomic_init(&a.vol, 0x3f800000u);
+    a.q[0] = (aout_buf *)&sdk; atomic_init(&a.q_tail, 1);
+    AudioBufferList bl = {.mNumberBuffers = 1, .mBuffers = {{2, sizeof out, out}}};
+    au_render(&a, NULL, NULL, 0, FRAMES + 1, &bl);
+    for (int i = 0; i < FRAMES * 2; i++) if (out[i] != 100 + i) { printf("FAIL buffer layout: sample %d is %d, want %d (the data the SDK described)\n", i, out[i], 100 + i); return 1; }
+    if (out[FRAMES * 2] || out[FRAMES * 2 + 1]) { puts("FAIL buffer layout: played past the data size"); return 1; }
+    if (atomic_load(&a.rel_tail) != 1 || a.rel[0] != (aout_buf *)&sdk || sdk.next != other) { puts("FAIL buffer layout: the buffer was not released whole, or its next was touched"); return 1; }
+    puts("buffer layout: the data at +0x08 played for the data size at +0x18, next at +0x00 left as the game linked it");
+    return 0;
+}
 // The guest AudioOut's front as the SDK fills it (au_info), and its lifetime under a guard like the middleware's: open, play, go to the background, close only if the first word says open,
 // make the PCM inaccessible (a consumer left running would fault on it) and come back, 12 times (PR #109). Old pages stay mapped PROT_NONE, so no new buffer lands at a stale address
 static int test_output_lifetime(void) {
     enum { CYCLES = 12 };
     uint32_t out[16] = {0}; uint8_t prm[16];
     size_t page = (size_t)getpagesize(), bytes = page * 4;
-    void *pcm[CYCLES]; gbuf *buf[CYCLES];
+    void *pcm[CYCLES]; aout_buf *buf[CYCLES];
     h_au_InitParam(prm);
     for (int i = 0; i < CYCLES; i++) {
         pcm[i] = mmap(NULL, bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
@@ -82,7 +106,7 @@ static int test_output_lifetime(void) {
         if (out[0] != RATE || out[1] != 2 || out[2] != FMT_PCM16 || out[3] != STATE_STOPPED) {
             printf("FAIL AudioOut open: guest fields %u %u %u %u, expected %u 2 %u %u as the SDK writes them\n", out[0], out[1], out[2], out[3], RATE, FMT_PCM16, STATE_STOPPED); return 1;
         }
-        h_au_SetBuf(buf[i], pcm[i], bytes, bytes);
+        set_buf(buf[i], pcm[i], bytes, bytes);
         if (!h_au_Append(out, buf[i])) return 1;
         h_au_Start(out); usleep(1000); dm_audio_suspend(1);
         if (out[0]) { if (h_au_State(out) == STATE_STARTED) h_au_Stop(out); h_au_Close(out); }
@@ -96,12 +120,12 @@ static int test_output_lifetime(void) {
     return 0;
 }
 int main(void) {
-    if (test_surround_output() || test_output_lifetime()) return 1;
-    char out[64], ev[64]; uint8_t prm[16]; gbuf b[3]; static int16_t pcm[3][4800 * 2];
+    if (test_buffer_layout() || test_surround_output() || test_output_lifetime()) return 1;
+    char out[64], ev[64]; uint8_t prm[16]; aout_buf b[3]; static int16_t pcm[3][4800 * 2];
     h_au_InitParam(prm);
     if (h_au_Open(out, ev, NULL, prm)) return 1;
     if (h_au_Ch(out) != 2 || h_au_Rate(out) != 48000 || h_au_State(out) != STATE_STOPPED) { puts("FAIL parameters"); return 1; }
-    for (int i = 0; i < 3; i++) { h_au_SetBuf(&b[i], pcm[i], sizeof pcm[i], sizeof pcm[i]); if (!h_au_Append(out, &b[i])) return 1; }
+    for (int i = 0; i < 3; i++) { set_buf(&b[i], pcm[i], sizeof pcm[i], sizeof pcm[i]); if (!h_au_Append(out, &b[i])) return 1; }
     if (h_au_Released(out)) { puts("FAIL buffers released before start"); return 1; }
     uint64_t t0 = now_ns(); h_au_Start(out);
     int got = 0, seen = 0, order_ok = 1;
@@ -118,9 +142,9 @@ int main(void) {
     // During the pause the silent sink takes over. Release events must let the reader reclaim all six blocks in order at real-time pace.
     setenv("DM_AUDIO", "1", 1);
     if (test_output_lifetime()) return 1;
-    char out2[64]; gbuf b2[6]; static int16_t pcm2[6][4800 * 2]; g_sig = 0;
+    char out2[64]; aout_buf b2[6]; static int16_t pcm2[6][4800 * 2]; g_sig = 0;
     if (h_au_Open(out2, ev, NULL, prm)) return 1;
-    for (int i = 0; i < 6; i++) { h_au_SetBuf(&b2[i], pcm2[i], sizeof pcm2[i], sizeof pcm2[i]); h_au_Append(out2, &b2[i]); }
+    for (int i = 0; i < 6; i++) { set_buf(&b2[i], pcm2[i], sizeof pcm2[i], sizeof pcm2[i]); h_au_Append(out2, &b2[i]); }
     t0 = now_ns(); h_au_Start(out2);
     int got2 = 0, seen2 = 0, susp = 0, resumed = 0;
     while (got2 < 6 && now_ns() - t0 < 10000000000ull) {
@@ -143,9 +167,9 @@ int main(void) {
     // The virtual output of a CI Mac can also pause by itself for more than 200 ms after the restart: the watchdog then rightly stands the silent sink in again and retries 1 s later, which can fall after the
     // last release (CI: "AudioUnit restarted", a second "has not called back for 204 ms", then Close 1 s later, "calling back again=0"). So the backend is followed on every poll until a restarted AudioUnit
     // has called back, up to 20 s (the watchdog's back-off of 1, 2, 4 s fits), instead of being read once 100 ms after the last release; it still fails when no restarted AudioUnit ever calls back
-    char out3[64]; gbuf b3[20]; static int16_t pcm3[20][4800 * 2]; g_sig = 0;
+    char out3[64]; aout_buf b3[20]; static int16_t pcm3[20][4800 * 2]; g_sig = 0;
     if (h_au_Open(out3, ev, NULL, prm)) return 1;
-    for (int i = 0; i < 20; i++) h_au_SetBuf(&b3[i], pcm3[i], sizeof pcm3[i], sizeof pcm3[i]);
+    for (int i = 0; i < 20; i++) set_buf(&b3[i], pcm3[i], sizeof pcm3[i], sizeof pcm3[i]);
     int app3 = 0; for (; app3 < 20 && h_au_Append(out3, &b3[app3]); app3++) ;
     aout *a3 = ao(out3); t0 = now_ns(); h_au_Start(out3);
     int got3 = 0, order3 = 1, cut = 0, standins = 0, sink = 0, restarted = 0, back = 0; uint64_t cb_restart = 0; double total3 = 0;
@@ -160,7 +184,7 @@ int main(void) {
             if (!restarted) { restarted = 1; cb_restart = n; } else if (n > cb_restart) back = 1;   // callbacks counted after the restart was seen
         }
         pthread_mutex_unlock(&g_aos_lock);
-        gbuf *r = got3 < 20 ? h_au_Released(out3) : NULL;
+        aout_buf *r = got3 < 20 ? h_au_Released(out3) : NULL;
         if (!r) { usleep(1000); continue; }
         order3 &= r == &b3[got3];
         if (++got3 == 20) total3 = (now_ns() - t0) / 1e6;

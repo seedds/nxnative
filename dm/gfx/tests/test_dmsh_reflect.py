@@ -73,6 +73,17 @@ class BufferImageOffsets(unittest.TestCase):
         self.assertIsNone(dmsh_reflect.buffer_image_bias('cp_i_tcb_48_r32ui', res))
         self.assertEqual(dmsh_reflect.buffer_image_bias('cp_i_cb3_48_r32ui', res), 0)
 
+    def test_buffer_texture_keeps_both_words_of_a_separate_handle(self):
+        source = ('struct spvDescriptorSetBuffer0\n{\n'
+                  '    texture_buffer<float> vp_t_cb1114127_10030000 [[id(0)]];\n'
+                  '    texture_buffer<float> vp_t_cb15_0 [[id(1)]];\n'
+                  '};\n')
+        got = REFLECT('synthetic', 'vs', source, {'sbufs': []})
+        self.assertEqual((got[0]['kind'], got[0]['reg'], got[0]['off'], got[0]['sreg'], got[0]['soff']),
+                         ('tbuf_ubo', 12, 0, 13, 48))
+        self.assertEqual((got[1]['kind'], got[1]['reg'], got[1]['off']), ('tbuf_ubo', 12, 0))
+        self.assertNotIn('soff', got[1])
+
     def test_buffer_texture_indices(self):
         # A buffer texture read through a texture slot (c2 word 8: slot 0) or through a handle in a uniform buffer gets its index from the translator's textures, never from an
         # image with the same handle

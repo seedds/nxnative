@@ -3,6 +3,7 @@
 // Basis: both are implementations of nn::codec::IOpusDecoder, with the 10 vtable slots identical one by one in order and signature (destructor×2, GetWorkBufferSize, IsInitialized,
 // Initialize, Finalize, GetSampleRate, GetChannelCount, Reset, DecodeInterleaved); the game allocates 0x40 bytes and the software object is 0x30 bytes.
 #include "hle.h"
+#include <stdatomic.h>
 
 HLE_FORCE("_ZN2nn5codec19HardwareOpusDecoderC1Ei", "hwopus service; replaced by the SDK software OpusDecoder (same IOpusDecoder virtual interface)",
           void, h_codec_HwOpusCtor, void *self, int option) {
@@ -10,6 +11,72 @@ HLE_FORCE("_ZN2nn5codec19HardwareOpusDecoderC1Ei", "hwopus service; replaced by 
     static void (*soft_ctor)(void *);
     if (!soft_ctor && !(soft_ctor = guest_sym("_ZN2nn5codec11OpusDecoderC1Ev"))) die("missing the OpusDecoder constructor");
     soft_ctor(self);
+}
+HLE_FORCE("_ZN2nn5codec19HardwareOpusDecoderC2Ei", "hwopus service; replaced by the SDK software OpusDecoder",
+          void, h_codec_HwOpusCtor2, void *self, int option) {
+    h_codec_HwOpusCtor(self, option);
+}
+#define OPUS_CACHED(var, decl, sym) static _Atomic(void *) var##_p; decl = atomic_load_explicit(&var##_p, memory_order_acquire); if (!var) { if (!(var = guest_sym(sym))) die("sdk lacks %s", sym); atomic_store_explicit(&var##_p, (void *)var, memory_order_release); }
+HLE_FORCE("_ZN2nn5codec19HardwareOpusDecoderD1Ev", "hwopus service; non-virtual destructor forwarded to OpusDecoder",
+          void, h_codec_HwOpusDtor1, void *self) {
+    OPUS_CACHED(f, void (*f)(void *), "_ZN2nn5codec11OpusDecoderD1Ev"); f(self);
+}
+HLE_FORCE("_ZN2nn5codec19HardwareOpusDecoderD2Ev", "hwopus service; non-virtual base destructor forwarded to OpusDecoder",
+          void, h_codec_HwOpusDtor2, void *self) {
+    h_codec_HwOpusDtor1(self);
+}
+HLE_FORCE("_ZN2nn5codec19HardwareOpusDecoderD0Ev", "hwopus service; deleting destructor forwarded to OpusDecoder",
+          void, h_codec_HwOpusDtor0, void *self) {
+    OPUS_CACHED(f, void (*f)(void *), "_ZN2nn5codec11OpusDecoderD0Ev"); f(self);
+}
+HLE_FORCE("_ZN2nn5codec19HardwareOpusDecoder8FinalizeEv", "hwopus service; non-virtual Finalize forwarded to OpusDecoder",
+          void, h_codec_HwOpusClassFini, void *self) {
+    OPUS_CACHED(f, void (*f)(void *), "_ZN2nn5codec11OpusDecoder8FinalizeEv"); f(self);
+}
+HLE_FORCE("_ZN2nn5codec19HardwareOpusDecoder10InitializeEiiPvm", "hwopus service; non-virtual Initialize forwarded to OpusDecoder",
+          Result, h_codec_HwOpusClassInit, void *self, int rate, int ch, void *buf, size_t size) {
+    OPUS_CACHED(f, Result (*f)(void *, int, int, void *, size_t), "_ZN2nn5codec11OpusDecoder10InitializeEiiPvm");
+    return f(self, rate, ch, buf, size);
+}
+HLE_FORCE("_ZNK2nn5codec19HardwareOpusDecoder17GetWorkBufferSizeEii", "hwopus service; non-virtual GetWorkBufferSize forwarded to OpusDecoder",
+          size_t, h_codec_HwOpusClassWorkSize, const void *self, int rate, int ch) {
+    OPUS_CACHED(f, size_t (*f)(const void *, int, int), "_ZNK2nn5codec11OpusDecoder17GetWorkBufferSizeEii");
+    return f(self, rate, ch);
+}
+HLE_FORCE("_ZNK2nn5codec19HardwareOpusDecoder13IsInitializedEv", "hwopus service; non-virtual IsInitialized forwarded to OpusDecoder",
+          int, h_codec_HwOpusClassIsInit, const void *self) {
+    OPUS_CACHED(f, int (*f)(const void *), "_ZNK2nn5codec11OpusDecoder13IsInitializedEv");
+    return f(self) & 1;
+}
+HLE_FORCE("_ZNK2nn5codec19HardwareOpusDecoder13GetSampleRateEv", "hwopus service; non-virtual GetSampleRate forwarded to OpusDecoder",
+          int, h_codec_HwOpusClassRate, const void *self) {
+    OPUS_CACHED(f, int (*f)(const void *), "_ZNK2nn5codec11OpusDecoder13GetSampleRateEv");
+    return f(self);
+}
+HLE_FORCE("_ZNK2nn5codec19HardwareOpusDecoder15GetChannelCountEv", "hwopus service; non-virtual GetChannelCount forwarded to OpusDecoder",
+          int, h_codec_HwOpusClassCh, const void *self) {
+    OPUS_CACHED(f, int (*f)(const void *), "_ZNK2nn5codec11OpusDecoder15GetChannelCountEv");
+    return f(self);
+}
+HLE_FORCE("_ZN2nn5codec19HardwareOpusDecoder5ResetEv", "hwopus service; non-virtual Reset forwarded to OpusDecoder",
+          void, h_codec_HwOpusClassReset, void *self) {
+    OPUS_CACHED(f, void (*f)(void *), "_ZN2nn5codec11OpusDecoder5ResetEv");
+    f(self);
+}
+HLE_FORCE("_ZN2nn5codec19HardwareOpusDecoder17DecodeInterleavedEPmPiPsmPKvm", "hwopus service; non-virtual DecodeInterleaved forwarded to OpusDecoder",
+          Result, h_codec_HwOpusClassDecode, void *self, size_t *consumed, int *samples, int16_t *out, size_t out_size, const void *in, size_t in_size) {
+    OPUS_CACHED(f, Result (*f)(void *, size_t *, int *, int16_t *, size_t, const void *, size_t), "_ZN2nn5codec11OpusDecoder17DecodeInterleavedEPmPiPsmPKvm");
+    return f(self, consumed, samples, out, out_size, in, in_size);
+}
+HLE_FORCE("_ZN2nn5codec19HardwareOpusDecoder6DecodeEPmPiPPsimPKvm", "hwopus service; non-virtual Decode forwarded to OpusDecoder",
+          Result, h_codec_HwOpusClassDecodeP, void *self, size_t *consumed, int *samples, int16_t **out, int nout, size_t out_size, const void *in, size_t in_size) {
+    OPUS_CACHED(f, Result (*f)(void *, size_t *, int *, int16_t **, int, size_t, const void *, size_t), "_ZN2nn5codec11OpusDecoder6DecodeEPmPiPPsimPKvm");
+    return f(self, consumed, samples, out, nout, out_size, in, in_size);
+}
+HLE_FORCE("_ZN2nn5codec19HardwareOpusDecoder10SetContextEPKvm", "hwopus service; non-virtual SetContext forwarded to OpusDecoder",
+          Result, h_codec_HwOpusClassCtx, void *self, const void *ctx, size_t n) {
+    OPUS_CACHED(f, Result (*f)(void *, const void *, size_t), "_ZN2nn5codec11OpusDecoder10SetContextEPKvm");
+    return f(self, ctx, n);
 }
 
 // The C interface to the same hardware decoder (Tears of the Kingdom, SDK 20.5.22: GetHardwareOpusDecoderWorkBufferSize opens hwopus and aborts in sm::Initialize).

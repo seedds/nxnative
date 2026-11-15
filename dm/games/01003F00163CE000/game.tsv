@@ -1,0 +1,52 @@
+# Batman: Arkham City (Switch, update 1.0.2 = v131072; the base NSP is a 13 MB stub). Brought up on the Mac.
+# Format: see dm/games/README.md; the bring-up and its measurements are in this profile's README.md
+# Rocksteady's Unreal Engine 3 (package version 864, licensee 0x80e3) on NVN, with Wwise for the sound, CRI Sofdec for the movies and Scaleform for the menus. SDK 14.3.0.
+# The port compiles its NVN programs at load time: the containers (BMSG GlobalShaderCache-Switch.bin, the .xxx packages) hold the code areas but no control section to key
+# them with, so the profile's shaders are run-time dumps of this build (DM_NVN_SHDUMP, shdump/) — see README.md, Shaders.
+
+# ---- Identity ----
+title_id	01003F00163CE000
+program_id	01003F00163CE000
+
+# ---- App ----
+# Game name: only a label for profile listings and the Mac window title; the iOS app name is the game name in the base NSP, and the bundle ID comes from the base game title ID
+name	Batman: Arkham City
+ipa	BatmanArkhamCity.ipa
+app_category	public.app-category.games
+
+# ---- Versions ----
+build	v131072	1.0.2	main=8983c5a34b178e5cbdb188902308ad50	sdk=2aef2cffb104ee7c9e212fd2f4c731e9
+package	v131072
+shader_versions	v131072
+
+# ---- Files ----
+# every module main imports from
+modules	main sdk
+romfs_marker	BmGame/CookedSwitch/Textures.tfc
+zip_store	.bin:.tfc:.upk:.usm:.wad:.xxx:.metallib
+
+# ---- Memory ----
+# main sets a heap of at most the pool − 64 MB (profile_guess.py: a 3328 MB heap region); the NPDM declares 0 MB of system resource, so IsVirtualAddressMemoryEnabled
+# is false as on Horizon. The first boot ran to frame 900 at this block with the host heap unmoved (README.md, What it needs)
+mem_reserve	0x100000000
+mem_alias	0x10000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+sys_resource	0x0
+
+# ---- Graphics ----
+# the game calls nvnDeviceSetDepthMode with near = 0 (the host logged "depth mode: near=0, vertex shaders use the main0_z entry" at boot)
+depth_mode	zero
+
+# ---- Shader split ----
+shader_groups	/shdump/=capture
+shader_note	Batman: Arkham City shaders (run-time programs dumped from this build)
+
+# ---- Frame rate ----
+# The game asks for present interval 2 (30 fps, as on the Switch). present_interval display presents every vsync whatever the game asks for. The engine has no frame limit of its own:
+# uncapped (DM_PRESENT_HZ=0 DM_FPS_TARGET=0) this build runs 632-746 fps and holds whatever the present tick gives (60.0 at 60 Hz), so present_paced tells the host 120 needs no limiter write.
+fps_target	60
+fps_max	120
+present_interval	display
+# an engine with no frame limit of its own, stepping by the time that passed: presenting at the target is all it needs (fps_high accepts 120 with no limiter to write)
+present_paced	on

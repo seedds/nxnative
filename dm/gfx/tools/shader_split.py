@@ -2586,6 +2586,28 @@ def ue3_shaders(d, label):
         out.append((f'{label}#UE3@{c:x}', st, ctl, code))
     return out
 
+def dumped_shaders():
+    """Run-time programs the host saved (DM_NVN_SHDUMP, or the profile's shdump/): <key>.ctl + <key>.code pairs, written where the game hands a program to nvnProgramSetShaders.
+    A port that compiles its programs at load time stores a pre-driver form in its containers — Batman: Arkham City's BMSG global cache and .xxx packages hold the code area but no control
+    section to key it with (docs/reference/shaders.md, the runtime-only case) — so the dumps are the only source of (control section, code area) the host can translate. Each pair is refused
+    unless its bytes hash to its own file name (a dump taken at draw time can read a recycled pool), and every row is labelled /shdump/<key>#RAW@0x0: a fixed label, so the tables do not depend
+    on the folder's name."""
+    d = os.environ.get('DM_NVN_SHDUMP') or str(GAME.dir / 'shdump')
+    if not os.path.isdir(d): return {}
+    out = {}
+    for fn in sorted(os.listdir(d)):
+        if not fn.endswith('.ctl') or fn.startswith('._'): continue   # AppleDouble metadata beside captures on external drives
+        key = fn[:-4]
+        codep = os.path.join(d, key + '.code')
+        if not os.path.exists(codep): continue
+        ctl = open(os.path.join(d, fn), 'rb').read(); code = open(codep, 'rb').read()
+        if not code or len(ctl) < 0x24: print(f'[RED] /shdump/{key}: no code area or a short control section; left out', flush=True); continue
+        if skey(ctl, code) != key: print(f'[RED] /shdump/{key}: the dump is not the key of its own bytes; left out', flush=True); continue
+        st = 'cs' if code[:4] == CS_MAGIC else sph_stage(code)
+        if not st: print(f'[RED] /shdump/{key}: no stage in the code header; left out', flush=True); continue
+        out[key] = (f'/shdump/{key}#RAW@0x0', st, ctl, code)
+    return out
+
 UE_LEGACY, UE_IO = 'UE legacy pak', 'UE IoStore'
 def ue_legacy_jobs(files, parts=64, mains=()):
     """Unreal paks whose shaders are inline in the cooked packages (uepak.inline_shaders): legacy paks (version 4, DRAGON QUEST XI S: pakchunk0-Switch.pak and pakchunk1-Switch.pak, 13.8 GB,
@@ -3664,6 +3686,13 @@ def main():
     if bad: print(f'[RED] {sum(e[2] for e in bad)} file(s) could not be read, their shaders are left out (first: {bad[0][1]})', flush=True)   # build_ipa_from_nsp.py reads this line
     keys, pairs, per_src = merge_keys(results)
     prog = {(a, b) for a, b, *t in pairs if t} - pairs; pairs = {x for x in pairs if len(x) == 2}
+    dumped = dumped_shaders()   # run-time programs of a port that compiles them at load (DM_NVN_SHDUMP, or the profile's shdump/)
+    if dumped: print(f'dumped shaders: {len(dumped)} pairs read from {os.environ.get("DM_NVN_SHDUMP") or str(GAME.dir / "shdump")}', flush=True)
+    for key, v in dumped.items():
+        if key in keys:
+            if not same_shader(keys[key][2:4], v[2:4]): red(f'key {key} is the same but the control section or code area differs ({v[0]} / {keys[key][0]})')
+            continue
+        keys[key] = v; per_src[group(v[0])] += 1
     sp, cover = separable_pairs(keys); pairs |= sp
     if cover: print(f'single-stage programs: {len({v for v, _ in sp}):,} vertex shaders are paired with a cover of {len(cover)} pixel shader(s) ({" ".join(cover)})')
     os.makedirs(pkg, exist_ok=True)
@@ -3695,7 +3724,7 @@ def main():
                                             ('Larian BSHD', any('#BSHD#' in r[4] for r in rows)),
                                             ('Needle', any('#NEEDLE@' in r[4] for r in rows)),
                                             ('Unreal Engine shader code archives', any('#UE' in r[4] for r in rows))) if hit)
-        f.write(f'# kind: evidence  {NOTE} ({kinds} in RomFS + main) → control section + code area keys (dm/gfx/tools/shader_split.py)\n')
+        f.write(f'# kind: {"capture" if all("#RAW@" in r[4] for r in rows) else "evidence"}  {NOTE} ({kinds} in RomFS + main) → control section + code area keys (dm/gfx/tools/shader_split.py)\n')
         f.write('# column 5 records where each key first appears, a copy in the game before one in an add-on; no PC shader pairing supplied\n')
         f.write('package\tindex\tstage\tdm_ctl_sha16\tsource\n')
         for r in rows: f.write('\t'.join(map(str, r)) + '\n')

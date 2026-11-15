@@ -21,10 +21,13 @@ class ResolutionSetting(unittest.TestCase):
                 self.assertEqual(fps['options'],[['30','30 fps'],['60','60 fps']])
 
 class FrameRateOption(unittest.TestCase):
-    def test_120_only_on_the_mac_for_a_game_checked_at_that_speed(self):
+    def test_120_wherever_the_game_was_checked_at_that_speed(self):
         with tempfile.TemporaryDirectory() as tmp,patch.object(settings.nacp,'languages',return_value=['en-US']):
             (Path(tmp)/'main.fixups.tsv').write_text('')
-            for gid,platform,has in [('04007EF01F8AE000','mac',True),('04007EF01F8AE000','ios',False),('010056B015FE8000','mac',False)]:   # Fortune's Weave (fps_max 120), NieR:Automata (none)
+            # Fortune's Weave (fps_max 120) offers 120 on the Mac and on the iPhone: the IPA sets
+            # CADisableMinimumFrameDurationOnPhone, so a ProMotion phone really runs it (Batman: Arkham City).
+            # NieR:Automata (no fps_max) offers 30/60 only.
+            for gid,platform,has in [('04007EF01F8AE000','mac',True),('04007EF01F8AE000','ios',True),('010056B015FE8000','mac',False)]:   # Fortune's Weave (fps_max 120), NieR:Automata (none)
                 with patch.dict(settings.os.environ,{'SETTINGS_PLATFORM':platform}):
                     fps=next(s for s in settings.build(gid,tmp,'unused')['settings'] if s['env']=='DM_FPS_TARGET')
                 self.assertEqual(fps['default'],'60',gid)

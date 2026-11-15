@@ -78,8 +78,13 @@ def build(gid, patched, control):
         if cond.startswith('fixups:'): return cond[7:] in keys
         if cond.startswith('gfxapi:'): return os.environ.get('GFXAPI', '') == cond[7:]
         if cond.startswith('platform:'): return platform == cond[9:]
-        m = re.fullmatch(r'(DM_GAME_\w+)(!=|==)(.*)', cond)
-        if m: return (macro(m[1], n) == m[3]) == (m[2] == '==')
+        parts = cond.split('&')
+        if all(p.startswith('DM_GAME_') for p in parts):   # one condition, or several that must all hold
+            for p in parts:
+                m = re.fullmatch(r'(DM_GAME_\w+)(!=|==)(.*)', p)
+                if not m: sys.exit(f'settings.tsv:{n}: unknown condition {p}')
+                if (macro(m[1], n) == m[3]) != (m[2] == '=='): return False
+            return True
         sys.exit(f'settings.tsv:{n}: unknown condition {cond}')
 
     def value(d, n):

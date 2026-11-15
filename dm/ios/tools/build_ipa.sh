@@ -259,7 +259,7 @@ if [ -n "${DM_ENTITLEMENTS-default}" ]; then
   t "entitlements in the executable's ad-hoc signature (the install tool re-signs and keeps them)"
 fi
 P=Payload/DmIOS.app
-SKIP=(--skip $P/_CodeSignature --skip $P/embedded.mobileprovision --skip $P/msl --skip $P/aoc --skip $P/romfs --skip $P/romfs.img --skip $P/romfs.id --skip $P/html --skip $P/jit --skip $P/romfs_programs)
+SKIP=(--skip $P/_CodeSignature --skip $P/embedded.mobileprovision --skip $P/msl --skip $P/aoc --skip $P/romfs --skip $P/romfs.img --skip $P/romfs.id --skip $P/html --skip $P/jit --skip $P/romfs_programs --skip $P/overlay_playstation --skip $P/overlay_xbox)
 if [ -n "${PROGRAMS_TSV:-}" ]; then   # each program's shader libraries, RomFS, offline HTML pages and nn::jit image under its own folder
   [ "${DM_COPY_ROMFS:-YES}" != NO ] || die "DM_COPY_ROMFS=NO: a game of several programs keeps its programs' files in the app"
   MAPS=("$P=$APP")
@@ -289,6 +289,12 @@ MAPS+=("$P/msl/$MSLDIR=$MSL_IOS/$MSLDIR" "$P=$APP")
   if [ -d "$(dirname "$ROMFS")/jit" ]; then MAPS+=("$P/jit=$(dirname "$ROMFS")/jit"); t "nn::jit image: $(dirname "$ROMFS")/jit"; fi
   # the RomFS of the application's other programs (scripts/pack_nup.py: a Switch 2 Edition's Switch 1 program), which the game mounts by program index; in the app also with DM_COPY_ROMFS=NO (main.m)
   if [ -d "$(dirname "$ROMFS")/romfs_programs" ]; then MAPS+=("$P/romfs_programs=$(dirname "$ROMFS")/romfs_programs"); t "other programs' RomFS: $(ls "$(dirname "$ROMFS")/romfs_programs" | grep '\.img$' | tr '\n' ' ')"; fi
+  if [ "$GAME" = "0400486024DEC000" ] && [ -e "$ROMFS" ] && [ -f "$ROOT/scripts/oot_pad_overlay.py" ]; then
+    if [ ! -d "$O/overlays/overlay_playstation" ] || [ ! -d "$O/overlays/overlay_xbox" ]; then
+      mkdir -p "$O/overlays" && "$FONT_PY" "$ROOT/scripts/oot_pad_overlay.py" "$ROMFS" "$O/overlays" || die "oot_pad_overlay"
+    fi
+    MAPS+=("$P/overlay_playstation=$O/overlays/overlay_playstation" "$P/overlay_xbox=$O/overlays/overlay_xbox")
+  fi
 fi
 t "pack IPA (already-compressed game files stored, everything else deflated)"
 # The device can enable Metal 4/prebuild at run time even when the profile defaults it off. Without an offline archive, its prebuild needs these pulling vertex libraries just as the hybrid pipelines do.

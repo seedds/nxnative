@@ -36,6 +36,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Check:** `dm/tools/tests/test_split_narc.py`: synthetic files with every packing and BNSH hidden in the file's bytes give the same keys and pairs as plain ones.
 - **Found on:** Mario Tennis Aces, no profile yet ([issue #1131](https://github.com/seedds/nxnative/issues/1131), diagnosed by PikaMan80, who counted 1,388 shaders from the loose `.nsb` files and 21,703 with the archives read). Not run on the game's files here. Open: that report says kind `0x50` wraps a zlib stream, and `cra.undo` does not unwrap one, so such members would give no shaders and no red line.
 
+### Malformed NARC archives fail outside the reader's rejection contract
+
+- **Symptom:** the shader-split fuzz harness fails with `cra.Error: /fuzz: no BTAF or GMIF`, or `struct.error` on a truncated NARC header or member table.
+- **Cause:** `scan_blob` did not translate `cra.Error` into its declared `[RED]` rejection. `cra.narc_members` also read the header and BTAF table before checking their bounds, and bounded members by the whole file rather than their GMIF section.
+- **Fix:** the NARC reader validates its header, section sizes, member count and GMIF ranges before reading them. The scanner preserves its layout diagnosis, including a member's path for decompression errors, through `red()`.
+- **Check:** `test_split_narc.py` checks malformed headers, sections, tables and members, alongside the valid packed shader banks. `test_fuzz_corpus.py` replays the minimized synthetic CI input and its truncated header.
+- **Found on:** the [nightly fuzz run of November 14, 2026](https://github.com/seedds/nxnative/actions/runs/43584958990); no game files.
+
 ### Sumo Ninty_NX shaders and MuxFDMR streams
 
 - **Symptom:** the split finds no shaders in `main` or RomFS, while reporting control sections in `main` with no code area. The game has `.sp4` resources and loose `.nvnbin` files rather than BNSH archives or whole GLSLC outputs.

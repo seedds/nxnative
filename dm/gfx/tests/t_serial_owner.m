@@ -108,16 +108,19 @@ static void check_pressure_trim(void) {
     // A GPU write through another NVN view can overlap a cache-only read texture.
     // The read texture must not be retired if it would later be rebuilt from stale pool bytes.
     alias_key overlap_read = akey(0x6900, 0, NVN_FORMAT_RGBA8), overlap_write = akey(0x6900, 16, NVN_FORMAT_RGBA8);
+    alias_key unrelated_key = akey(0x6901, 0, NVN_FORMAT_RGBA8);
     id<MTLTexture> read_texture = cache_texture(MTLTextureUsageShaderRead);
     id<MTLTexture> write_texture = cache_texture(MTLTextureUsageShaderRead | MTLTextureUsageRenderTarget);
+    id<MTLTexture> unrelated = cache_texture(MTLTextureUsageShaderRead);
     pthread_mutex_lock(&g_smu);
-    own_alias_put_locked(&overlap_read, read_texture, 1); own_alias_put_locked(&overlap_write, write_texture, 1);
+    own_alias_put_locked(&overlap_read, read_texture, 1); own_alias_put_locked(&overlap_write, write_texture, 1); own_alias_put_locked(&unrelated_key, unrelated, 1);
     pthread_mutex_unlock(&g_smu);
     own_alias_mark_gpu_written(&overlap_write);
     pthread_mutex_lock(&g_smu);
-    n = own_alias_trim_locked(trim_now, 4096, read_texture.allocatedSize, &estimated);
-    CHECK(n == 0 && own_alias_get_locked(&overlap_read) == read_texture && own_alias_get_locked(&overlap_write) == write_texture,
-          "a GPU write protects overlapping read aliases from rebuilding stale pool contents");
+    n = own_alias_trim_locked(trim_now, 4096, unrelated.allocatedSize, &estimated);
+    CHECK(n == 1 && estimated == unrelated.allocatedSize && own_alias_get_locked(&overlap_read) == read_texture &&
+          own_alias_get_locked(&overlap_write) == write_texture && !own_alias_get_locked(&unrelated_key),
+          "a GPU write protects overlapping read aliases but still trims unrelated cache entries");
     own_alias_del_locked(&overlap_read); own_alias_del_locked(&overlap_write);
     pthread_mutex_unlock(&g_smu);
 

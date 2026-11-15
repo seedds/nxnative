@@ -92,7 +92,7 @@ Binding conventions followed during translation (the NVN driver's layout, the sa
 | `nvn/nvn_tex.c`, `nvn/nvn_tex.h` | Storage size, alignment and per-level offsets of block-linear textures (ported from deko3d) |
 | `nvn/nvn_dirty.c`, `nvn/nvn_dirty.h` | Tracks dirty pages of game memory with write protection, to decide whether texture contents have changed and need re-uploading |
 | `nvn/nvn_refl.m`, `nvn/nvn_refl.h` | Converts shader reflection json into fixed-length C arrays, so that drawing only walks arrays |
-| `nvn/nvn_hmap.h`, `nvn/nvn_cover.h`, `nvn/nvn_pace.h`, `nvn/nvn_pso_skey.h`, `nvn/nvn_primitive.h` | Hash table, geometric proof of full-coverage draws, presentation pacer, pipeline manifest key, indexed triangle fans and quads as triangle lists (primitive restart kept) |
+| `nvn/nvn_hmap.h`, `nvn/nvn_pace.h`, `nvn/nvn_pso_skey.h`, `nvn/nvn_primitive.h` | Hash table, presentation pacer, pipeline manifest key, indexed triangle fans and quads as triangle lists (primitive restart kept) |
 | `nvn/nvn_builtin.h` | Hand-written MSL for the 4 compute shaders embedded in the main program |
 | `nvn/include/nvn.h` | NVN interface declarations (third party; for the license see the file header) |
 | `nvn/names.txt` | The NVN API name list. The per-game tables described above live in the game profile `dm/games/<id>/` (named after the base game's title ID; tools pick it with `DM_GAME`, make with `GAME`; there is no default game) |
@@ -153,7 +153,7 @@ The tests in `dm/gfx/tests` compile the production code in directly and need a M
 | `t_present_crop` | Presentation cropping |
 | `t_mip_extent` | Effective size when rendering to a mip level other than level 0 |
 | `t_serial_owner` | The resource owner alone (`nvn_owner.m` with stand-ins for the replay layer's hooks): registration, replacement, removal, finalize, the ghost ring, pins, views and renames, the held counts, the ghost ring's slots and the sharing table's index and set after every step; sRGB / linear views: the old publish-then-`serial_del` sequence (the evidence), `own_view_put` and `own_view_drop_stale` in each order of finalize, publish, eviction and resolution; the sharing table: lookups, registrations (a second under one key takes the first), the takeover's spared and taken entries, pool drops, a twin refused after its parent's pool drop or upgrade, `own_upgrade` and the generations it and a pool drop make; retirement: eligibility for live, ghost, pinned, view-parent and shared holders, the hand-back, `own_object_free` |
-| `t_fuse_check`, `t_reorder_chain`, `t_defer_chain`, `t_zskip`, `t_xv`, `t_ub`, `t_pfv`, `t_rt_range`, `t_rt_range_shape`, `t_rt_range_ro`, `t_rt_depth_ro` | Compile the replay layer `nvn_mtl.m` in directly and check the various optimization and diagnostic logic inside the replay layer |
+| `t_reorder_chain`, `t_ub`, `t_pfv` | Compile the replay layer `nvn_mtl.m` in directly and check the various optimization and diagnostic logic inside the replay layer |
 | `test_tbdr_budget.py` | The parsing in `tools/tbdr_budget.py` |
 
 ## Common run-time switches
@@ -198,9 +198,7 @@ Comparison and testing:
 
 | Switch | Effect |
 |---|---|
-| `DM_NVN_TBDR=1` | Turns on the pass optimizations of the replay layer (store / load elision, pass merging). They are off by default: they infer which textures a draw reads from its bound slots, which bindless textures defeat ([docs/agents/04-graphics.md](../../docs/agents/04-graphics.md) section 4) |
-| `DM_NVN_UNWRITTEN_DC=0` | With `DM_NVN_TBDR=1`, turns off the single item "attachments not written in this pass are not stored" |
-| `DM_NVN_FUSE_CHECK=1` | Same-frame check of pass merging; logs the comparison result every time |
+| `DM_NVN_UNWRITTEN_DC=0` | Turns off "attachments not written in this pass are not stored" (for picture comparisons) |
 | `DM_NVN_CS_HOIST=0` | A compute dispatch between the draws of a pass ends it (by default it runs ahead of the pass when that changes nothing the draws before it read: [reference](../../docs/reference/rendering.md#compute-dispatches-between-the-draws-of-a-pass-run-ahead-of-it)) |
 | `DM_NVN_SLICE_MERGE=0` | Passes into other layers of one array or cube texture level stay apart (by default they run as one layered pass: [reference](../../docs/reference/rendering.md#passes-into-other-layers-of-one-texture-level-run-as-one-layered-pass)) |
 | `DM_FPS=30` or `60` | Pins the target frame rate |

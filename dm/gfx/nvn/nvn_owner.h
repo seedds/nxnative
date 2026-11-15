@@ -107,7 +107,11 @@ void own_alias_at_locked(const void *pool, int64_t off, void (^fn)(const alias_k
 void own_alias_each_locked(void (^fn)(const alias_key *k, id o));
 typedef struct { uint32_t n, cap, cells; uint64_t evicted, taken; } own_alias_stats;   // entries, capacity, index cells, evicted with pools / on takeover in total
 own_alias_stats own_alias_stats_locked(void);
-uint32_t own_alias_unref_locked(void);                        // entries no live or ghost entry resolves to (a walk: the memory report)
+// The entries only the sharing table keeps: no live or finalized serial, view or pin holds their texture (entry_holds, tex_object_pinned). Bytes count each texture once
+// (allocatedSize, several keys can name one); writable_bytes is the part made to be drawn into or written by shaders, whose content the pool may not have; oldest_idle is the
+// longest any of them has gone without a lookup, in submissions (issue #2629: how much of a long session's memory growth they are). A walk: the memory report
+typedef struct { uint32_t entries; uint64_t bytes, writable_bytes, oldest_idle; } own_alias_unheld;
+own_alias_unheld own_alias_unheld_locked(void);
 
 // Retirement eligibility (see above). Caller holds g_smu
 int own_retire_locked(id o);    // a retired resource whose fence has passed: 1, it may leave the residency set; 0, an entry holds it: the owner keeps it (the caller drops only its reference)

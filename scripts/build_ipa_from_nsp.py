@@ -43,6 +43,7 @@ import nso   # the code module loader: nso.Error is a damaged module (its file c
 import tree_tar   # one file in place of a build's folders of many small files
 import shader_lib   # the shader libraries as one file, read in place
 import shader_cache   # the compile cache as one file, read in place
+import vol_space   # the space a build may write, with what APFS frees on demand
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import pack_dump   # a folder of a game's files instead of NSPs
 import pack_nup   # a game in a NUP container instead of NSPs
@@ -466,9 +467,7 @@ def swap_in(tmp, dst):
     rmtree(old)
 
 
-def free_gb(p):
-    while not p.exists(): p = p.parent
-    return shutil.disk_usage(p).free / 2**30
+def free_gb(p): return vol_space.free_bytes(p) / 2**30
 
 
 def tool_env(environ=os.environ):
@@ -1517,7 +1516,7 @@ def rewrite(py, repo, exe_dir, out, env, logs, g, provisional=False):
     # the repository profile's build rows decide which builds the rewriter treats as the game's own (SDK-wide function patches skip those), and its snowdrop_pools the sizes of those cuts, so they are inputs too
     try: own = [l for l in (repo / 'dm/games' / Path(env.get('DM_GAME') or '-').name / 'game.tsv').read_text(encoding='utf-8').splitlines() if l.startswith(('build\t', 'snowdrop_pools\t'))]
     except OSError: own = []
-    key = fingerprint(('files', [repo / 'dm/tools' / f for f in ('patch_nso.py', 'nso.py', 'nso_code.py', 'nso_asm.py', 'nso_match.py', 'ue_cvar.py', 'ue_malloc.py', 'ue_region.py', 'ue_ring.py', 'snowdrop_pools.py', 'loader_census.py', 'fps_target.py', 'ue_fixed_rate.py', 'unity_fps.py', 'unity_bucket.py')] + patch_files(repo, exe_dir, mods, env.get('DM_GAME')) + list(src.values()) + ([manifest] if manifest.is_file() else [])), names, capstone.__version__,
+    key = fingerprint(('files', [repo / 'dm/tools' / f for f in ('patch_nso.py', 'nso.py', 'nso_code.py', 'nso_asm.py', 'nso_match.py', 'ue_cvar.py', 'ue_malloc.py', 'ue_region.py', 'ue_ring.py', 'snowdrop_pools.py', 'loader_census.py', 'fps_target.py', 'monolith_fps.py', 'ue_fixed_rate.py', 'unity_fps.py', 'unity_bucket.py')] + patch_files(repo, exe_dir, mods, env.get('DM_GAME')) + list(src.values()) + ([manifest] if manifest.is_file() else [])), names, capstone.__version__,
                       {k: env.get(k) for k in ('DM_PATCH_FRONT', 'DM_GAME')}, own)
     if all((out / f'{m}.patched.bin').is_file() for m in names) and reused(kf, key) is not None:
         PROG.end(f'{", ".join(mods)}{f" and {len(nros)} NROs" if nros else ""}, reused (inputs unchanged)')
@@ -2223,7 +2222,7 @@ def compute_reader_additions(g, tables, split_log):
 
 def split_shaders(py, repo, roms, mains, pkg, env, logs, g, provisional=False, oodle=None, dlc_roms=(), derive_dlc=None, derive_compute=None):
     """The shader split into pkg, checked against the profile's tables. The package is reused when the extractor and the modules it imports, the profile settings and tables it reads or is checked against,
-    the DLC RomFS roots, each version's modules, RomFS (paths and sizes) and run-time capture, and the package's own contents are as at the last successful split. Returns the package's content key, the shader build's input (None for damaged files, which never reuse them): a split that runs
+    the DLC RomFS roots, each version's modules, RomFS (paths and sizes) and run-time capture, and the package's own contents are as at the last successful split. Returns the package's content key, the shader build's input (a damaged copy, ALLOW_DAMAGED, is keyed by its RomFS files' times and its damage list, so only the same extraction reuses it): a split that runs
     again because a reader of another engine changed writes the same package, and the iOS shaders stay reused.
     oodle: for decoder-backed packs, builds or reuses the Mac host and returns DM_OODLE_HOST / DM_OODLE_MODULES. Verified host provenance ignores only its chain label;
     unknown hosts use their bytes, and rewritten modules are always content inputs. Both macOS and iOS builds share this extraction cache."""
@@ -2232,7 +2231,8 @@ def split_shaders(py, repo, roms, mains, pkg, env, logs, g, provisional=False, o
     kf, outputkf = pkg.with_name(pkg.name + '.key'), pkg.with_name(pkg.name + '.outputs.key')
     inputs = [('files', python_tool_files(repo, 'dm/gfx/tools/shader_split.py', ('dm/gfx/tools', 'dm/tools', 'dm/games'))), bool(provisional), 'split-v2']
     for r, m in zip(roms, mains):
-        inputs += [('files', [m] + [m.parent / n for n in g.modules_in(m.parent) if n != 'main']), ('stat' if provisional else 'tree', r)]
+        inputs += [('files', [m] + [m.parent / n for n in g.modules_in(m.parent) if n != 'main']), ('stat' if provisional or ALLOW_DAMAGED else 'tree', r)]
+        if ALLOW_DAMAGED: inputs += [('files', [rfs.Path(r).with_name('RomFS.img.formats')])]   # check_formats' list of the damaged files
         for setting, folder, pattern in (('DM_GLSLC_CAPTURE', 'glslc_capture', '*.glslc'), ('DM_UE_SHADERS', 'ue_shaders', '*.ushaderbytecode')):
             capture = Path(env.get(setting) or r.parent / folder)
             inputs += [('stat', capture) if provisional else ('files', sorted(capture.glob(pattern)))]   # its files, not where it is: the same build reached through a moved folder or a link keeps its split
@@ -2242,7 +2242,10 @@ def split_shaders(py, repo, roms, mains, pkg, env, logs, g, provisional=False, o
         PROG.set(step='building the Mac host for the game\'s Oodle decoder'); env = dict(env, **oodle())
         host = Path(env['DM_OODLE_HOST'])
         inputs += [('decoder', decoder_host_key(host) or fingerprint(('files', [host]))), ('modules', package_key(Path(env['DM_OODLE_MODULES'])))]
-    key = None if ALLOW_DAMAGED else fingerprint(*inputs, *split_profile_inputs(g))
+    # A damaged copy (ALLOW_DAMAGED) is reused too, but only as the same extraction: a repaired copy keeps every path and size, all 'tree' sees, so its RomFS is keyed by 'stat' (the
+    # files' times, which an extraction writes again; inside RomFS.img, the image's) and by the damage list. Its key was None before, which kept the shader step from reusing as well:
+    # Ocarina of Time's three damaged textures cost every build the split and all 42,848 shaders restored from the cache, about eleven minutes
+    key = fingerprint(*inputs, *split_profile_inputs(g))
     dlckf, dlckey = pkg.with_name(pkg.name + '.dlc.key'), None
     cskf, cskey, promoted = pkg.with_name(pkg.name + '.compute.key'), None, None
     def promote(derive, kind):
@@ -2705,15 +2708,17 @@ def build_env_file(work, env_file, motion):
 def mac_host(py, repo, work, env, logs, g):
     """The stage "Mac host" of a Mac-only build or a Mac app (PLATFORM 'mac', 'mac-app'): the Mac host for the profile (build_mac_host, into <id>_build/tools/dmhost, where the run-time captures
     build it too; DM_GAMES_DIR / DM_GAMES_FIRST in env pick a provisional or derived profile) and the button-icon font the host gives a game for the Nintendo extension shared font
-    (make_ext_font.py, into <id>_build/font, made again when the tool changed). Returns (host, font folder)"""
+    and the shared-font stand-ins (make_shared_fonts.py: one per type, into <id>_build/font, made again when the tools or the source font changed). Returns (host, font folder)"""
     PROG.stage('Mac host', step='building')
     host = build_mac_host(repo, work / 'tools/dmhost', env, logs, g)
-    PROG.set(step='button-icon font')
-    font = work / 'font'; ttf, kf = font / 'nintendo_ext.ttf', font / 'nintendo_ext.key'
-    key = fingerprint(('files', [repo / 'dm/tools/make_ext_font.py']))
-    if not (ttf.is_file() and reused(kf, key) is not None):
-        rmtree(kf); font.mkdir(parents=True, exist_ok=True)
-        run([py, repo / 'dm/tools/make_ext_font.py', ttf], logs / 'make_ext_font.log', env=env)
+    PROG.set(step='shared fonts')
+    font, kf = work / 'font', work / 'font.key'
+    src = Path(os.environ.get('STD_FONT') or '/System/Library/Fonts/Supplemental/Arial Unicode.ttf')
+    st = src.stat() if src.is_file() else None
+    key = fingerprint(('files', [repo / 'dm/tools/make_shared_fonts.py', repo / 'dm/tools/make_ext_font.py']), ('font', str(src), st and st.st_size, st and int(st.st_mtime)))
+    if not ((font / 'korean.ttf').is_file() and reused(kf, key) is not None):
+        rmtree(kf); rmtree(font); font.mkdir(parents=True, exist_ok=True)
+        run([py, repo / 'dm/tools/make_shared_fonts.py', font, src], logs / 'make_shared_fonts.log', env=env)
         kf.write_text(f'{key}\n')
     PROG.end(str(host))
     return host, font
@@ -2888,7 +2893,7 @@ def mac_prebake(py, repo, work, msl, g, host, pso, env, logs):
     out, stage = work / 'pso/mac-prewarm', work / 'pso/mac-prewarm-work'
     zero = g.get('depth_mode', 'gl') == 'zero'
     others = sorted(f.stem for f in pso.glob('applegpu_*.mtl4a') if '-prewarm-' not in f.name and f.stem != arch)   # the other GPUs --gpu named: their pipelines come from the scripts (metal-tt)
-    lib = msl / f'b-{chain_of(repo)}'
+    lib = shader_lib.view(msl / f'b-{chain_of(repo)}')   # the full build packs this folder: its input stamp remains inside the image
     digest = hashlib.sha256()
     for part in (arch, chain_of(repo), 'zero' if zero else 'gl', text, Path(host).read_bytes() if Path(host).is_file() else str(host),
                  (lib / 'inputs.tsv').read_text() if (lib / 'inputs.tsv').is_file() else '',
@@ -3421,12 +3426,12 @@ def main(args=None):
     observed_glslc = capture_glslc(repo, {v: dirs[v] for v in sv}, pkg_ver, patched, work, env, logs, g) if glslc else None
     if uedec: decode_ue_shaders(repo, {v: dirs[v] for v in sv}, pkg_ver, patched, work, env, logs, g)
     sh = work / 'shader'
-    if gfx == 'vulkan':   # the packed version's merged RomFS holds the SPIR-V files the game loads; a capture holds those it generates
+    if gfx == 'vulkan':   # the packed version's merged RomFS holds the SPIR-V files the game loads; a capture holds those it generates. A damaged copy (ALLOW_DAMAGED) is keyed by its files' times, as split_shaders keys it
         cap = capture_shaders(repo, game, patched, work, env, logs, g, 'vk') if vkcap else None
-        ios = build_vk_shaders(py, repo, [rfs.source(game)] + dlc_roms + ([cap] if cap else []), sh, env, logs, g, reuse=not ALLOW_DAMAGED, mac=mac, provisional=bool(provisional or derived))
+        ios = build_vk_shaders(py, repo, [rfs.source(game)] + dlc_roms + ([cap] if cap else []), sh, env, logs, g, mac=mac, provisional=bool(provisional or derived or ALLOW_DAMAGED))
     elif gfx == 'gl':   # the GLSL sources in the packed version's archives and in its main (the game compiles them at run time; the host finds each by the hash of its text), and a capture of those it puts together
         cap = capture_shaders(repo, game, patched, work, env, logs, g, 'gl') if glcap else None
-        ios = build_gl_shaders(py, repo, [rfs.source(game), game / 'ExeFS/main'] + dlc_roms + ([cap] if cap else []), sh, env, logs, g, reuse=not ALLOW_DAMAGED, mac=mac, provisional=bool(provisional or derived))
+        ios = build_gl_shaders(py, repo, [rfs.source(game), game / 'ExeFS/main'] + dlc_roms + ([cap] if cap else []), sh, env, logs, g, mac=mac, provisional=bool(provisional or derived or ALLOW_DAMAGED))
     else:
         # Trinity packs and legacy Unreal paks: the split decodes them with the packed version's own decoder (Oodle, LZ5), in the Mac host built for the profile
         oodle = (lambda: {'DM_OODLE_HOST': str(build_mac_host(repo, work / 'tools/dmhost', env, logs, g)), 'DM_OODLE_MODULES': str(patched)}) if src['oodle_packs'][0] or src['ue_legacy'][0] else None

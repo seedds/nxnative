@@ -104,7 +104,7 @@ class XcodePipelineTests(unittest.TestCase):
                 self.assertEqual(mocks['split_shaders'].call_args.args[8], derived)
             else:
                 builder = mocks['build_vk_shaders' if graphics == 'vulkan' else 'build_gl_shaders']
-                self.assertTrue(builder.call_args.kwargs['reuse'])
+                self.assertTrue(builder.call_args.kwargs.get('reuse', True))   # reused (the default): a damaged copy is keyed by its files' times, not refused
             warnings = [event.get('msg', '') for event in events]
             self.assertEqual(any('this Xcode project uses' in message for message in warnings), derived)
             if derived:

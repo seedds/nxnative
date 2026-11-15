@@ -71,7 +71,7 @@ int main(int argc, char **argv) { @autoreleasepool {
     op_hdr end = {OP_END, 8}; memcpy(commands + used, &end, 8);
     #undef EMIT
     state_reset();
-    memset(&R, 0, sizeof R); mtl_sub_begin(); uint64_t handle = (uint64_t)commands; mtl_sub_index(&handle, 1); mtl_exec(commands);
+    memset(&R, 0, sizeof R); mtl_sub_begin(); mtl_exec(commands);
     id<MTLBuffer> pixels[NFMT];
     for (int f = 0; f < NFMT; f++) {
         pixels[f] = [g_dev newBufferWithLength:W * 8 * NROWS options:MTLResourceStorageModeShared];

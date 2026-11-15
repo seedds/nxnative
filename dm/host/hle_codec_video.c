@@ -284,8 +284,9 @@ static void cv_open(cv_dec *d) {   // (re)creates the codec state: a new stream 
     }
     if (d->codec == CV_H264) { if (!d->avc) d->avc = mavc_new(); else mavc_drop(d->avc); if (d->csd_n) mavc_param_sets(d->avc, d->csd, d->csd_n); d->vpx_ok = 1; return; }
     if (d->vpx_ok) vpx_codec_destroy(&d->vpx);
-    vpx_codec_dec_cfg_t cfg = {.threads = 2, .w = d->w, .h = d->h};
-    d->vpx_ok = vpx_codec_dec_init(&d->vpx, d->codec == CV_VP8 ? vpx_codec_vp8_dx() : vpx_codec_vp9_dx(), &cfg, 0) == VPX_CODEC_OK;
+    // Made as hle_movie.c makes its own (md_vpx_open). With 2 threads and no row threading, Mario Tennis Fever's 2560x1440 60 fps opening decoded too slowly for its player,
+    // which stopped the sound for 60-80 ms at a time whenever the picture fell behind
+    d->vpx_ok = md_vpx_open(&d->vpx, d->codec == CV_VP9, d->w, d->h) == VPX_CODEC_OK;
     if (!d->vpx_ok) LOG("[RED] nn::codec %s decoder: libvpx init failed", k_cv_name[d->codec]);
 }
 static void *cv_worker(void *arg);

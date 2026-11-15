@@ -826,12 +826,22 @@ class SplitShaders(Base):
         with self.assertRaisesRegex(nsp.BuildError, 'differ from game profile'): self.go(g, own=False)   # a failed check is not reused
         self.assertEqual(self.splits, 3)
 
-    def test_damaged_never_reuses(self):
+    def test_damaged_reuses_only_the_same_extraction(self):
+        # --allow-damaged: a repaired copy keeps every path and size, which is all 'tree' sees, so a damaged RomFS is keyed by its files' times as well ('stat': an extraction writes
+        # them again) and by the damage check's list. Before, a damaged build never reused, and its None key kept the shader step from reusing too: Ocarina of Time's three damaged
+        # textures cost every build the split (56 s) and all 42,848 shaders restored from the cache (about ten minutes)
         g = self.own()
         with mock.patch.object(nsp, 'ALLOW_DAMAGED', True):
-            self.assertIsNone(self.go(g)); self.assertIsNone(self.go(g))
-        self.assertEqual(self.splits, 2)
-        self.go(g); self.assertEqual(self.splits, 3)   # a damaged run leaves no key behind
+            k = self.go(g); self.assertEqual(k, nsp.package_key(self.pkg))   # the shader step's key: its libraries are reused while the package is the same
+            self.assertEqual(self.go(g), k); self.assertEqual(self.splits, 1)
+            self.redump(self.ex / 'RomFS/a.bin')   # a repaired copy: the same size, extracted again
+            self.go(g); self.assertEqual(self.splits, 2)
+            self.go(g); self.assertEqual(self.splits, 2)
+            (self.ex / 'RomFS.img.formats').write_text('1 2\nTex/a.bntx.zs\t10\t00000000\n')   # check_formats' list beside the image
+            self.go(g); self.assertEqual(self.splits, 3)
+        self.go(g); self.assertEqual(self.splits, 4)   # an undamaged run takes nothing a damaged one keyed, and the other way round
+        with mock.patch.object(nsp, 'ALLOW_DAMAGED', True): self.go(g)
+        self.assertEqual(self.splits, 5)
 
     def test_missing_split_pairs_are_generated_again(self):
         for n in self.NAMES[:3]: (self.src / n).write_text(self.table(n))

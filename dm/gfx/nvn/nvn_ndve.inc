@@ -64,10 +64,14 @@ static int ndve_mode(void) { static int m = -1; if (m < 0) m = sw_mode("DM_NDVE_
 // DM_NDVE_ENGINE=check: the game's dispatches run, and the engine computes the same frame beside them into images of its own, compared with the game's (logged every 300 frames)
 static int ndve_check(void) { static int c = -1; if (c < 0) { const char *e = getenv("DM_NDVE_ENGINE"); c = e && !strcmp(e, "check"); if (c) MLOG("DM_NDVE_ENGINE=check: the game's movie network runs, and the host's beside it, compared"); } return c; }
 static int ndve_index(NvShader *cs, int from) { for (int i = from; i < NDVE_N; i++) if (!strncmp(cs->key, k_ndve_keys[i], 16)) return i; return -1; }
-// Pipelines and tensors, made once in the background; the game's dispatches run until they are ready
-static void ndve_build(void) {
-    int z = 0; if (!atomic_compare_exchange_strong(&g_nd.state, &z, 1)) return;
-    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{ @autoreleasepool {
+static dispatch_group_t g_nd_ready;
+static _Atomic int g_nd_waited;
+// Prepare in the background, but give the first network a bounded chance to use
+// these kernels instead of cold-compiling the much larger translated network.
+static void ndve_build_once(void) {
+    g_nd_ready = dispatch_group_create();
+    g_nd.state = 1;
+    dispatch_group_async(g_nd_ready, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{ @autoreleasepool {
         if (!ndve_offsets()) { MLOG("[RED] NDVE engine: the layer table does not add up to the model's weights; the game's network runs"); g_nd.state = -1; return; }
         NSError *e = nil; id<MTLLibrary> lib = host_lib("ndve_engine", &e);
         if (!lib) { MLOG("[RED] NDVE engine: no library (%s); the game's network runs", e.localizedDescription.UTF8String); g_nd.state = -1; return; }
@@ -101,6 +105,15 @@ static void ndve_build(void) {
         g_nd.state = 2;
         MLOG("NDVE engine ready: nn::ndve's movie network (12 dispatches after the colour conversion) runs as the host's kernels (DM_NDVE_ENGINE=0 runs the game's)");
     } });
+}
+static void ndve_build(void) { static dispatch_once_t once; dispatch_once(&once, ^{ ndve_build_once(); }); }
+// Called only before the first layer, never after skipping part of a network.
+// A failed or timed-out initialization keeps the original fallback. Wait once,
+// so a slow compiler cannot impose this delay again on every movie frame.
+static int ndve_ready_for_network(int check, uint64_t wait_ns) {
+    if (!check && g_nd.state == 1 && !atomic_exchange(&g_nd_waited, 1))
+        dispatch_group_wait(g_nd_ready, dispatch_time(DISPATCH_TIME_NOW, (int64_t)wait_ns));
+    return g_nd.state == 2;
 }
 static int ndve_fail(NvShader *cs, const char *why) {
     if (g_nd.pos > 1) { g_nd.off = 1; MLOG("[RED] NDVE engine: %s at %s after %d of the network's dispatches were skipped; the engine is off from now on (this frame's movie picture is not updated)", why, cs->key, g_nd.pos - 1); }
@@ -208,7 +221,7 @@ static int ndve_engine_dispatch(NvShader *cs, const p_dispatch *dp) {
     const int chk = ndve_check();
     if ((!ndve_mode() && !chk) || g_nd.off) return 0;
     int i = ndve_index(cs, 0); if (i < 0) return 0;
-    if (g_nd.state == 0) ndve_build();
+    ndve_build();   // dispatch_once publishes the entered readiness group before a caller can wait
     if (!chk && !g_nd.pos && !sw_on(ndve_mode())) return 0;   // an A/B phase changes only between sequences
     if (i == 0) {   // the colour conversion runs; a new frame's sequence may start. Under check, the game's resampled picture of the last frame is there now
         if (chk && g_nd.game_rs && g_nd.state == 2) ndve_compare(g_nd.game_rs, g_nd.shadow_rs, 1);
@@ -227,7 +240,7 @@ static int ndve_engine_dispatch(NvShader *cs, const p_dispatch *dp) {
         return !chk;
     }
     // dispatch i of the sequence: the keys repeat (a8b4, e6be, 0a56 twice), so position decides
-    if (g_nd.pos == 0) { if (i != 1) return 0; if (g_nd.state != 2) return 0; }
+    if (g_nd.pos == 0) { if (i != 1) return 0; if (!ndve_ready_for_network(chk, 10ull * NSEC_PER_SEC)) return 0; }
     else if (ndve_index(cs, g_nd.pos) != g_nd.pos) return ndve_fail(cs, "a dispatch out of the network's order");
     const int p = g_nd.pos ? g_nd.pos : 1;
     const p_bind_buf *w = &S.ssbo[5][2], *b = &S.ssbo[5][3];

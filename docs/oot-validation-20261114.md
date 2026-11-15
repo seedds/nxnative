@@ -63,3 +63,26 @@ Fresh validation on the M4 Pro private mirror passed:
 These are integration checks, not a new game-performance result. The installed application and player saves were not replaced. The full-game, portable-package and other-game validation boundaries remain open.
 
 The first expanded Python invocation exposed harness prerequisites: the private rsync mirror has no Git metadata for the generated-doc index test, and the shader-pair import needs `DM_GAME`. Documentation checks passed in the real Git checkout; macOS-specific build and shader tests were rerun successfully with the explicit profile. No product or test assertion was weakened.
+
+## NDVE first-network startup — November 15
+
+A current-chain cold start exposed a race between asynchronous host-network preparation and the first movie frame. The first layer could see initialization still pending and fall back to the translated network. Even when the host kernels became ready later in that frame, sequence tracking correctly refused to start in its middle. The replay then synchronously compiled `d15370a382630d4e_b`, a 1.83 MB translated movie kernel, instead of reaching the next frame. A sampled replay stack was inside Metal's compute-pipeline compiler, not waiting for an application GPU fence.
+
+The fix publishes the initialization group through `dispatch_once` and gives only the first network layer one bounded readiness wait. Comparison mode and inactive AB phases keep their existing paths. Initialization failure or timeout preserves the original fallback; a timeout cannot add the same wait to every later frame. No network arithmetic, shaders, NSO patches or image-quality settings change.
+
+- The actual production readiness gate passes 13 CPU checks on the M4 Pro: deferred success/failure, comparison-mode bypass, timeout, one-shot behavior and late availability. The new fixture is included in the CPU-only GitHub test job.
+- The complete host builds successfully. The existing counter-clock and timestamp fixtures also pass.
+- The existing NDVE source-contract checks and documentation/profile/chain tests pass: 43 Python tests.
+- A real current-chain startup now logs the first network frame and resampler running through the host engine, and proceeds into level loading without requesting the blocking original compute pipeline. This is startup evidence, not a new Field FPS certification.
+
+The private reduced shader profile used to qualify the current renderer proved insufficient once Field loaded additional variants. Those partial-render runs are invalid as performance measurements and were not promoted to the player installation. The installed player's full-cache native-60 controls are tracked separately. Completing current-chain full-game shader and gameplay qualification remains open.
+
+## Installed player: bounded native-60 Field qualification — November 15
+
+This is a separate qualification of the installed player's unchanged `158a3306e175e6dd5c50cb495263238034e4e2cb6503c8f786724e98054027d9` host and complete `bc8830d4ba5a` shader library. It does not qualify the current merged renderer or establish a new code speedup.
+
+On the M4 Pro, with a 2560×1440 output through MetalFX, a 60-native target, interpolation off, HDR off and the existing GPU-clock guard, a short test measured 2,340 actual native presentations: 15 seconds static and two 12-second camera rotations. Every phase sustained 59.9998 frames/s; the largest interval was 16.676625 ms, with zero intervals above 20 ms and zero generated frames. Timed windows showed no pipeline or shader-library compilation and no GPU errors. The game clock remained at real-time speed.
+
+The test established actual fullscreen using the window's accessibility state, its Exit Full Screen menu item and display-sized window bounds. Game Mode and Direct presentation were not independently verified. Living gameplay was positively checked before and after the timed windows; the final image still showed Link alive while enemies attacked. No further A inputs or walking occurred after the world-ready marker. The player application and protected save were unchanged.
+
+Earlier longer trials ended in Game Over, including one with camera input only. Their later frame rates are not accepted as Field performance. This corrected short run establishes native-60 capability at the tested Field location and camera rotations; it is not a guarantee for every region, encounter or long session, nor evidence of 2K/4K120.

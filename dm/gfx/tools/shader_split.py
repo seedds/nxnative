@@ -2332,13 +2332,22 @@ def raw_shaders(d, label, known=()):
     Of 25 mains on hand only that one has such control sections, so the tables of every other game stay as they were.
     Diablo II: Resurrected's main holds 10 (3 vertex, 3 pixel, 4 compute; 9 distinct) in the record its SHAD containers hold (shad_record: a 0x14-byte header, the code area, the control section): the code points at
     the record's start, not at either section (main+0x88d270 builds the first with adrp + add; four are relocated pointers at main+0x20ff410 + 0x28 i), so a record whose header gives
-    exactly this control section and the code area before it, referenced either way, gives that code area"""
+    exactly this control section and the code area before it, referenced either way, gives that code area.
+    A control section nothing references takes the code area that ends right at it, when that area has a header and exactly the length the control section gives (+0x704): the form Phyre's
+    effects use (phyre_shaders), labelled as theirs. FINAL FANTASY XII THE ZODIAC AGE's main holds 23 PhyreEngine built-in programs so (main+0xfc3e13 to +0xfd5d88, among them the UI's and the
+    cutscenes' composite passes), outside any RYHP container, 16 of them at unaligned addresses, and nothing in its code or data points at either part; without them its menus, dialogue icons and
+    cutscene backgrounds drew nothing. An unaligned control section is taken in this form only. References still decide first, so a neighbour that only looks right (Advance Wars above) is not taken"""
+    def adjacent(c):   # the start of the headed code area of the control section's length that ends right at it, else None
+        nctl, n = struct.unpack_from('<I', d, c + 0x20)[0], struct.unpack_from('<I', d, c + 0x704)[0]
+        k = c - n
+        return k if n >= 0x80 and nctl >= 0x760 and c + nctl <= len(d) and k >= 0 and d[k:k + 4] in (GFX_MAGIC, CS_MAGIC) and CTL_MAGIC not in d[k:c] else None
     skip = []
     for m in re.finditer(b'\x91\x68\x86\x19', d):
         size, _, first, _ = glslc_layout(d, m.start())
         if (0 if first == 0xa8 else 0x760) < size <= len(d) - m.start(): skip.append((m.start(), m.start() + size))
     for m in re.finditer(b'BNSH\0\0\0\0', d): skip.append((m.start(), m.start() + struct.unpack_from('<I', d, m.start() + 0x1c)[0]))
-    ctls = [c for m in re.finditer(re.escape(CTL_MAGIC), d) if not (c := m.start()) & 3 and not any(a <= c < b for a, b in skip) and d[c:c + struct.unpack_from('<I', d, c + 0x20)[0]] not in known]
+    ctls = [c for m in re.finditer(re.escape(CTL_MAGIC), d) if (c := m.start()) + 0x708 <= len(d) and not any(a <= c < b for a, b in skip) and (not c & 3 or adjacent(c) is not None)
+            and d[c:c + struct.unpack_from('<I', d, c + 0x20)[0]] not in known]
     if not ctls: return []
     rel, code_of, cset = rel_targets(d), {}, set(ctls)
     for s, c in rel.items():
@@ -2350,11 +2359,14 @@ def raw_shaders(d, label, known=()):
         nctl, n = struct.unpack_from('<I', d, c + 0x20)[0], struct.unpack_from('<I', d, c + 0x704)[0]
         r = c - n - 0x14   # a SHAD record's start (shad_record), when this control section ends one
         if c not in code_of and r >= 0 and (r in targets or r in built) and shad_record(d, r, r + 0x14 + n + struct.unpack_from('<I', d, r + 4)[0]): code_of[c] = c - n
-        ctl, why = d[c:c + nctl], 'no code area: no data record points at one, and the code builds the address of none right after or right before it'
+        ctl, why = d[c:c + nctl], 'no code area: no data record points at one, the code builds the address of none right after or right before it, and none of its length ends at it'
         near = lambda k: min(abs(a - b) for a in built[k] for b in built[c])   # how close the code builds this code area's address to the control section's
         for k in ([code_of[c]] if c in code_of else sorted((k for k in ((c + nctl + 15) & ~15, c - n) if k in built and c in built and near(k) < 0x400), key=near)):
             code = d[k:k + n]; st = glslc_stage(ctl, code) if k >= 0 and CTL_MAGIC not in code else None
             if st and not check(label, st, ctl, code): out.append((f'{label}#RAW@{c:#x}', st, ctl, code)); why = None; break
+        if why and c not in code_of and (k := adjacent(c)) is not None:   # nothing references it: the code area that ends right at it (Phyre's form)
+            code = d[k:c]; st = glslc_stage(ctl, code)
+            if st and not check(label, st, ctl, code): out.append((f'{label}#PHYRE@{k:#x}', st, ctl, code)); why = None
         if why: print(f'[RED] {label} control section @{c:#x}: {why}; left out', flush=True)
     return out
 

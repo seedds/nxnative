@@ -168,6 +168,7 @@ struct LauncherView: View {
                 if m.values["DM_MIC"] == "1" { MicrophoneDevicePicker() }
                 CloudSavesSection()
                 PrewarmUploadSetting()
+                if !m.sections(basic: true).contains("Controls") { KeyboardSection() }   // below Controls (settingSections), else here
                 Section {
                     // a Button, not an empty DisclosureGroup: the sections below live outside it, and in a grouped Form a DisclosureGroup does not toggle on row/label clicks (and failed to open on macOS 27)
                     Button { advanced.toggle() } label: {
@@ -241,6 +242,7 @@ struct LauncherView: View {
                     ForEach(rows) { SettingRow(s: $0, m: m) }
                 }
             }
+            if basic && section == "Controls" { KeyboardSection() }   // the keyboard map, right below the controls
         }
     }
 }
@@ -521,4 +523,246 @@ public func dmMacLauncher(_ showWindow: Int32) -> Int32 {
     guard launcher.play else { fputs("launcher: quit without starting the game\n", stderr); return 0 }
     model.apply(persist: true)
     return 1
+}
+
+// The keyboard map in the Mac settings window: the Keyboard section (default or custom, and a button that opens the map) and the map's sheet, where each button and stick direction
+// of the controller shows its key; click one and press a key to bind it, or hold Shift, Control or Option and press a key for a chord (Esc stops without a change). The map itself is the host's (dm/host/keymap.h, reached through launcher.c's
+// dm_km_* functions: this launcher imports no C header). It is kept as the saved choice launcher.DM_KEYMAP in keymap.h's full form, absent while it is the default (docs/frontends.md, Saved choices);
+// launcher.c checks it with the host's parser and makes it DM_KEYMAP before the host starts, with or without this window. A DM_KEYMAP the launch environment or an env file set wins, and is shown here as fixed.
+
+@_silgen_name("dm_km_target_label") private func dm_km_target_label(_ t: Int32) -> UnsafePointer<CChar>
+@_silgen_name("dm_km_slot_label") private func dm_km_slot_label(_ slot: Int32) -> UnsafePointer<CChar>
+@_silgen_name("dm_km_slots") private func dm_km_slots() -> Int32
+@_silgen_name("dm_km_format_max") private func dm_km_format_max() -> Int32
+@_silgen_name("dm_km_bind") private func dm_km_bind(_ key: UnsafeMutablePointer<UInt8>, _ target: Int32, _ slot: Int32, _ add: Int32) -> Int32
+@_silgen_name("dm_km_slot") private func dm_km_slot(_ code: Int32, _ mods: Int32) -> Int32
+@_silgen_name("dm_km_groups") private func dm_km_groups() -> Int32
+@_silgen_name("dm_km_group_title") private func dm_km_group_title(_ g: Int32) -> UnsafePointer<CChar>
+@_silgen_name("dm_km_group_size") private func dm_km_group_size(_ g: Int32) -> Int32
+@_silgen_name("dm_km_group_target") private func dm_km_group_target(_ g: Int32, _ i: Int32) -> Int32
+@_silgen_name("dm_km_keys") private func dm_km_keys() -> Int32
+@_silgen_name("dm_km_bindable") private func dm_km_bindable(_ code: Int32) -> Int32
+@_silgen_name("dm_km_read") private func dm_km_read(_ map: UnsafePointer<CChar>?, _ key: UnsafeMutablePointer<UInt8>) -> Int32
+@_silgen_name("dm_km_presets_load") private func dm_km_presets_load() -> Int32
+@_silgen_name("dm_km_preset_save") private func dm_km_preset_save(_ key: UnsafePointer<UInt8>, _ name: UnsafePointer<CChar>, _ path: UnsafeMutablePointer<CChar>, _ n: Int) -> Int32
+@_silgen_name("dm_km_preset_dir") private func dm_km_preset_dir() -> UnsafePointer<CChar>
+@_silgen_name("dm_km_preset_name") private func dm_km_preset_name(_ i: Int32) -> UnsafePointer<CChar>
+@_silgen_name("dm_km_preset_map") private func dm_km_preset_map(_ i: Int32) -> UnsafePointer<CChar>
+@_silgen_name("dm_km_write") private func dm_km_write(_ key: UnsafePointer<UInt8>, _ out: UnsafeMutablePointer<CChar>, _ n: Int) -> Int32
+
+/// A keyboard map: the target each binding presses (keymap.h: a binding is layer * keys + key code, the layers plain, Shift, Control, Option; 0xff none)
+struct KeyMap: Equatable {
+    static let none: UInt8 = 0xff
+    static let slots = Int(dm_km_slots()), keyCount = Int(dm_km_keys())
+    var key = [UInt8](repeating: KeyMap.none, count: KeyMap.slots)
+
+    /// keymap.h's DM_KEYMAP over the default map (an empty string: the default)
+    init(_ map: String = "") { _ = map.withCString { s in key.withUnsafeMutableBufferPointer { dm_km_read(s, $0.baseAddress!) } } }
+
+    /// The full form ("A=j B=k ... SHAKE=space"), as launcher.DM_KEYMAP keeps it
+    var string: String {
+        var out = [CChar](repeating: 0, count: Int(dm_km_format_max()))   // any map's full form fits
+        _ = key.withUnsafeBufferPointer { dm_km_write($0.baseAddress!, &out, out.count) }
+        return String(cString: out)
+    }
+    func keys(_ target: Int) -> [Int] { (0..<KeyMap.slots).filter { key[$0] == UInt8(target) } }
+    /// The binding (a key or a chord) presses target, which keeps no other unless add; returns the target that had the key before, if another (keymap.h km_bind)
+    @discardableResult mutating func bind(_ target: Int, _ code: Int, add: Bool = false) -> Int? {
+        let was = key.withUnsafeMutableBufferPointer { dm_km_bind($0.baseAddress!, Int32(target), Int32(code), add ? 1 : 0) }
+        return was < 0 ? nil : Int(was)
+    }
+    mutating func clear(_ target: Int) { _ = key.withUnsafeMutableBufferPointer { dm_km_bind($0.baseAddress!, Int32(target), -1, 0) } }
+
+    static let standard = KeyMap()
+    /// The presets, the in-game panel's too: Default and the keymap files of the presets folder (keymap.h), read now: (name, map)
+    static func presets() -> [(String, KeyMap)] {
+        (0..<Int(dm_km_presets_load())).map { (String(cString: dm_km_preset_name(Int32($0))), KeyMap(String(cString: dm_km_preset_map(Int32($0))))) }
+    }
+    static var presetsFolder: URL { URL(fileURLWithPath: String(cString: dm_km_preset_dir())) }
+    /// Saved as a keymap file named name (one of that name replaced); the file's path, or nil
+    func savePreset(_ name: String) -> String? {
+        var path = [CChar](repeating: 0, count: 1024)
+        let r = key.withUnsafeBufferPointer { k in name.withCString { dm_km_preset_save(k.baseAddress!, $0, &path, path.count) } }
+        return r == 0 ? String(cString: path) : nil
+    }
+
+    static func label(target: Int) -> String { String(cString: dm_km_target_label(Int32(target))) }
+    static func label(key slot: Int) -> String { String(cString: dm_km_slot_label(Int32(slot))) }   // ⇧↑ for a chord
+    static func bindable(_ code: Int) -> Bool { dm_km_bindable(Int32(code)) != 0 }
+
+    /// The sheet's groups: keymap.h's (km_groups), the panel's and the keymap files' order
+    static let groups: [(String, [Int])] = (0..<dm_km_groups()).map { g in
+        (String(cString: dm_km_group_title(g)), (0..<dm_km_group_size(g)).map { Int(dm_km_group_target(g, $0)) })
+    }
+    /// A key pressed with the event's modifiers as a binding: the chord of a modifier held (keymap.h km_layer), else the key
+    static func slot(_ code: Int, _ f: NSEvent.ModifierFlags) -> Int {
+        Int(dm_km_slot(Int32(code), (f.contains(.shift) ? 1 : 0) | (f.contains(.control) ? 2 : 0) | (f.contains(.option) ? 4 : 0)))
+    }
+}
+
+/// The section in the settings window: what the map is, and the button that opens it
+struct KeyboardSection: View {
+    @AppStorage("launcher.DM_KEYMAP") private var saved = ""
+    @State private var editing = false
+    @State private var presets: [(String, KeyMap)] = []
+    private let fixed: String? = {
+        let env = ProcessInfo.processInfo.environment
+        let keys = ((env["DM_ENV_FILE_KEYS"] ?? "") + " " + (env["DM_ENV_LAUNCH_KEYS"] ?? "")).split(separator: " ")
+        return keys.contains("DM_KEYMAP") || env["DM_KEYMAP"] != nil ? env["DM_KEYMAP"] : nil
+    }()
+
+    private var summary: String {
+        if fixed != nil { return "Set by an env file" }
+        let m = KeyMap(saved)
+        return presets.first { $0.1 == m }?.0 ?? "Custom"
+    }
+
+    var body: some View {
+        Section {
+            LabeledContent("Keyboard") {
+                HStack {
+                    Text(summary).foregroundStyle(.secondary)
+                    Button("Customize…") { editing = true }.disabled(fixed != nil)
+                }
+            }
+        } footer: {
+            Text("Choose which key presses each button and stick direction. Keys are kept by their place on the keyboard.")
+        }
+        .sheet(isPresented: $editing, onDismiss: { presets = KeyMap.presets() }) { KeyMapSheet(saved: $saved) }
+        .onAppear { presets = KeyMap.presets() }
+    }
+}
+
+/// The map: one row per target, its key on a button; click it, then press a key
+struct KeyMapSheet: View {
+    @Binding var saved: String
+    @Environment(\.dismiss) private var dismiss
+    @State private var map = KeyMap()
+    @State private var capturing: Int?
+    @State private var adding = false   // the key awaited joins the target's (Add Key…)
+    @State private var status = ""
+    @State private var monitor: Any?
+    @State private var presets: [(String, KeyMap)] = []
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack {   // the preset the map is, always shown (as emulators show their profile), and the presets to pick
+                Text("Preset:")
+                Menu(activePreset) {
+                    ForEach(presets.indices, id: \.self) { i in
+                        Toggle(presets[i].0, isOn: Binding(get: { presets[i].1 == map }, set: { _ in use(presets[i].1, "\(presets[i].0) map.") }))
+                    }
+                    Divider()
+                    Button("Save as Preset…") { savePreset() }
+                    Button("Show Presets Folder") {
+                        try? FileManager.default.createDirectory(at: KeyMap.presetsFolder, withIntermediateDirectories: true)
+                        NSWorkspace.shared.open(KeyMap.presetsFolder)
+                    }
+                }
+                .fixedSize()
+                Spacer()
+            }
+            .padding(.horizontal, 20).padding(.top, 16)
+            Form {
+                ForEach(KeyMap.groups, id: \.0) { group in
+                    Section(group.0) {
+                        ForEach(group.1, id: \.self) { t in row(t) }
+                    }
+                }
+            }
+            .formStyle(.grouped)
+            Text(status.isEmpty ? footnote : status)
+                .font(.footnote).foregroundStyle(status.isEmpty ? .secondary : .primary)
+                .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 20).padding(.top, 8)
+            HStack {
+                Spacer()
+                Button("Done") { stop(); dismiss() }.keyboardShortcut(.defaultAction).disabled(capturing != nil)
+            }
+            .padding(20)
+        }
+        .frame(width: 460, height: 640)
+        .onAppear { map = KeyMap(saved); presets = KeyMap.presets() }
+        .onDisappear { stop() }
+    }
+
+    private var activePreset: String { presets.first { $0.1 == map }?.0 ?? "Custom" }   // as the settings window's Keyboard row names it
+
+    private var footnote: String { "Click a button, then press its key, or hold Shift, Control or Option and press a key; right-click for No Key, or Add Key… for another key." }
+
+    private func row(_ t: Int) -> some View {
+        LabeledContent(KeyMap.label(target: t)) {
+            let keys = map.keys(t)
+            Button(capturing == t ? "Press a key…" : keys.isEmpty ? "None" : keys.map { KeyMap.label(key: $0) }.joined(separator: ", ")) {
+                capturing == t ? stop() : start(t)
+            }
+            .frame(minWidth: 140)
+            .foregroundStyle(keys.isEmpty && capturing != t ? .secondary : .primary)
+            .contextMenu {
+                Button("No Key") { map.clear(t); save("\(KeyMap.label(target: t)) has no key.") }
+                Button("Add Key…") { start(t, add: true) }
+            }
+        }
+    }
+
+    private func use(_ m: KeyMap, _ note: String) { stop(); map = m; save(note) }
+
+    /// The map as a keymap file in the presets folder, under a name the player types
+    private func savePreset() {
+        stop()
+        let a = NSAlert()
+        a.messageText = "Save as Preset"; a.informativeText = "A keymap file in the presets folder, for every game. A preset of the same name is replaced."
+        let f = NSTextField(frame: NSRect(x: 0, y: 0, width: 260, height: 24)); f.placeholderString = "Name"
+        a.accessoryView = f; a.addButton(withTitle: "Save"); a.addButton(withTitle: "Cancel")
+        a.window.initialFirstResponder = f
+        guard a.runModal() == .alertFirstButtonReturn else { return }
+        let typed = f.stringValue.trimmingCharacters(in: .whitespaces)
+        guard !typed.isEmpty else { return }
+        if let path = map.savePreset(typed) { status = "Saved as \(typed) (\((path as NSString).lastPathComponent))."; presets = KeyMap.presets() }
+        else { status = "Could not save the preset." }
+    }
+
+    /// The map as launcher.DM_KEYMAP: removed while it is the default, so the default of a later build applies
+    private func save(_ note: String) {
+        saved = map == .standard ? "" : map.string
+        status = note
+    }
+
+    private func start(_ t: Int, add: Bool = false) {
+        stop()
+        capturing = t; adding = add; status = "Press \(add ? "another" : "a") key for \(KeyMap.label(target: t)) (Esc stops)."
+        var pending: Int?   // a modifier pressed: bound alone if let go before a key
+        monitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .flagsChanged]) { e in
+            guard let t = capturing else { return e }
+            let code = Int(e.keyCode), f = e.modifierFlags
+            if e.type == .flagsChanged {
+                // a Shift, Control or Option key: down, it may start a chord; up with no key between, it is the binding. ⌘, Caps Lock and fn are not bindable
+                // that very key, left or right: the device-dependent bits (NX_DEVICE*KEYMASK), as keyboard_mac.h's kb_modifier_down
+                let bits: [Int: UInt] = [56: 0x2, 60: 0x4, 59: 0x1, 62: 0x2000, 58: 0x20, 61: 0x40]
+                guard let bit = bits[code] else { return e }
+                let down = f.rawValue & bit != 0
+                if down { pending = code } else if pending == code { pending = nil; bind(t, code) }
+                return nil
+            }
+            pending = nil
+            if e.isARepeat { return nil }
+            if f.contains(.command) { return e }   // ⌘ shortcuts stay the menus'
+            if code == 53 && !f.contains(.shift) && !f.contains(.control) && !f.contains(.option) { stop(); status = ""; return nil }   // Esc: no change
+            let slot = KeyMap.slot(code, f)
+            if KeyMap.bindable(slot) { bind(t, slot) } else { NSSound.beep() }
+            return nil
+        }
+    }
+
+    private func bind(_ t: Int, _ code: Int, add: Bool? = nil) {
+        let also = add ?? adding
+        let was = map.bind(t, code, add: also)
+        stop()
+        let key = KeyMap.label(key: code), name = KeyMap.label(target: t)
+        save(was.map { "\(key) is \(name)\(also ? " too" : "") now; \(KeyMap.label(target: $0)) \(map.keys($0).isEmpty ? "has no key" : "keeps its other keys")." } ?? "\(key) is \(name)\(also ? " too" : "").")
+    }
+
+    private func stop() {
+        if let m = monitor { NSEvent.removeMonitor(m) }
+        monitor = nil; capturing = nil; adding = false
+    }
 }

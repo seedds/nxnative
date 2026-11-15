@@ -86,7 +86,6 @@ typedef struct {
     PFNNVNCOMMANDBUFFERMEMORYCALLBACKPROC cb; void *cb_data;
     NVNdevice *dev;
     uint64_t used;                       // Record bytes written since the game last added command memory, across recordings and host segments (returned by GetCommandMemoryUsed)
-    int32_t tex_base, samp_base;         // Host-table bases of the texture / sampler pool this command buffer last bound (hle_nvn.c dpool_add; 0 = the first pool of its kind)
     int64_t copy_row, copy_image;        // SetCopyRowStride / SetCopyImageStride: state of the command buffer, written into each buffer <-> texture copy (p_copy_strides), not recorded
     size_t cmd_size;                     // GetCommandMemorySize: the bytes the game last passed to AddCommandMemory, as in NVN; a host-lent segment leaves it (see there)
     uint8_t *ctl_mem;                    // The control memory block the game last added (aligned to 8), or a host-lent one when the game gave none (hle_nvn.c ctl_put)
@@ -222,17 +221,14 @@ typedef struct { int32_t stage, first, n, defer; uint64_t src; uint64_t h[32]; }
 // nvnCommandBufferBindTexture (one combined handle) is laid out as the hardware's command: the handle 16 bytes from the start of the record, where an engine that patches its recorded commands
 // in place writes a new one. Luigi's Mansion 3 takes the command memory base + GetCommandMemoryUsed before each such bind (main+0x7c8964) and stores a handle there + 0x10 every frame
 // (main+0xb7d0d4); in a p_bind_handles record that word is the count, and the replay read a handle as a count of 535 million. h is the handle as the game gives it (32 bits: texture ID |
-// sampler ID << 20, all a patch writes); tbase / sbase are the numbering bases of the descriptor pools the command buffer had bound (hle_nvn.c bind_handles), added when it is read.
-// With both bases 0 (the first pools, nearly always) the record ends after h, 24 bytes with the header, and stage carries BIND_TEX1_NOBASE (see p_bind_state for why the size counts).
+// sampler ID << 20, all a patch writes). All recorded handles remain relative to the pools active at execution, so this record is always 24 bytes with its header.
 // Read it with bind_rec, which gives a p_bind_handles
-typedef struct { int32_t stage, slot; uint64_t h; int32_t tbase, sbase; } p_bind_tex1;
-#define BIND_TEX1_NOBASE 0x100
+typedef struct { int32_t stage, slot; uint64_t h; } p_bind_tex1;
 static inline const p_bind_handles *bind_rec(uint32_t op, const void *a, p_bind_handles *t) {
     if (op != OP_BIND_TEX1) return a;
-    const p_bind_tex1 *b = a; uint64_t tid = b->h & 0xfffff, sid = (uint32_t)b->h >> 20;
-    int nobase = b->stage & BIND_TEX1_NOBASE; int32_t tb = nobase ? 0 : b->tbase, sb = nobase ? 0 : b->sbase;
-    t->stage = b->stage & ~BIND_TEX1_NOBASE; t->first = b->slot; t->n = 1; t->defer = 0; t->src = 0;
-    t->h[0] = (tid ? tid + (uint64_t)tb : 0) | (sid ? sid + (uint64_t)sb : 0) << 20; return t;
+    const p_bind_tex1 *b = a;
+    t->stage = b->stage; t->first = b->slot; t->n = 1; t->defer = 0; t->src = 0;
+    t->h[0] = (uint32_t)b->h; return t;
 }
 // Texture slots of a stage: 0-127 nvnCommandBufferBindTexture's (combined handles), 128-255 the separate texture binds. The driver keeps the two in tables of their own (c2 DMSH_C2_TEX + 8 r and
 // DMSH_C2_SEPTEX + 8 r, dmsh_abi.h), which the shaders' reflection names as these slots, so a game may bind both kinds in the same frame (Monster Hunter Rise: BindTexture slot 0 beside separate slots 0-4)

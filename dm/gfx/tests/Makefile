@@ -581,6 +581,9 @@ check_t_buffer_image_bias: RUN_ENV = MTL_DEBUG_LAYER=1
 t_tbuf_handle: t_tbuf_handle.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_tbuf_handle.m $(MTL_T_SRC) $(FW)
 check_t_tbuf_handle: RUN_ENV = MTL_DEBUG_LAYER=1
+t_descriptor_pools: t_descriptor_pools.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_descriptor_pools.m $(filter-out ../nvn/hle_nvn.c,$(MTL_T_SRC)) $(FW)
+check_t_descriptor_pools: RUN_ENV = MTL_DEBUG_LAYER=1
 t_image_usage: t_image_usage.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_image_usage.m $(MTL_T_SRC) $(FW)
 check_t_image_usage: RUN_ENV = MTL_DEBUG_LAYER=1

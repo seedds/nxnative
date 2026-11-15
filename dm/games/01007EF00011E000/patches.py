@@ -117,7 +117,15 @@ def frame_step(ctx):
     # 3D views (1600 wide docked, scaled from the output size) grow in height too. x16 is free at every site: nnMain's sites follow a call through the PLT
     def taller(site, orig, load, apply, why):
         fs_site(site, orig)
-        start = here(); emit(struct.unpack('<I', bytes.fromhex(orig))[0])   # the original instruction
+        start = here()
+        if site in (0xc61ef4, 0xc61f28, 0x12618c4, 0x12660d4):
+            dest = 8 if site == 0x12660d4 else 9
+            emit(ADRP(16, here(), FS_STATE_OFF))
+            emit(0xf9405a10)  # ldr x16,[x16,#0xb0]: optional packed output dimensions
+            emit(0xb4000070)  # cbz x16,+12: original screen-shape path
+            emit(0xaa1003e0 | dest)  # mov xDest,x16
+            emit(B(here(), site + 4))
+        emit(struct.unpack('<I', bytes.fromhex(orig))[0])   # the original instruction
         emit(ADRP(16, here(), FS_STATE_OFF))
         for w in (load, 0x34000050, apply):   # ldr w16,[x16,#off]; cbz w16,+8 (0: the game's size); the host's height
             emit(w)
@@ -470,9 +478,101 @@ def frame_step(ctx):
         emit(w)
     emit(B(here(), 0xed81f4))
     fs_put(0xf75ba4, [B(0xf75ba4, start) | 0x80000000], 'screen copy into a 16:9 picture (camera photo): the screen\'s middle 16:9 band, not the whole taller screen squashed into it')
+    camera_aspect(ctx)
+    render_resolution(ctx)
+
+
+
+def render_resolution(ctx):
+    # Resolution sites adapted from v0lumehi/nxnative PR #76 (MIT).
+    # Fields +0xb0 output size, +0xb8 output/base widths, +0xc0 pool factor,
+    # +0xc8 heap allowance. Zero preserves each original instruction.
+    start = ctx.here()
+    ctx.site(0x12660cc, '680a09f9')
+    ctx.emit(0xf9090a68)  # original output/base widths
+    ctx.emit(ADRP(8, ctx.here(), ctx.state))
+    for w in (0xf9405d08, 0xb4000048, 0xf9090a68): ctx.emit(w)
+    ctx.emit(B(ctx.here(), 0x12660d0))
+    ctx.put(0x12660cc, [B(0x12660cc, start)], 'optional docked output and view widths (+0xb8)')
+
+    start = ctx.here()
+    ctx.site(0x1266104, '03f08052')
+    ctx.emit(ADRP(3, ctx.here(), ctx.state))
+    for w in (0xf9405863, 0xb4000083, 0xd360fc64, 0x2a0303e3): ctx.emit(w)
+    ctx.emit(B(ctx.here(), 0x1266108))
+    ctx.emit(0x5280f003)
+    ctx.emit(B(ctx.here(), 0x1266108))
+    ctx.put(0x1266104, [B(0x1266104, start)], 'optional docked crop (+0xb0)')
+
+    start = ctx.here()
+    ctx.site(0x106d328, '686e42f9')
+    ctx.emit(ADRP(10, ctx.here(), ctx.state))
+    for w in (0xb940c14b, 0xf9426e68, 0x3400004b, 0x9b0b7d08): ctx.emit(w)
+    ctx.emit(B(ctx.here(), 0x106d32c))
+    ctx.put(0x106d328, [B(0x106d328, start)], 'optional render pool factor (+0xc0)')
+
+    for site, original, reg, load, original_word, add in (
+        (0x71c, '0060b852', 16, 0xf9406610, 0x52b86000, 0x8b100000),
+        (0xc617c0, '0820b852', 9, 0xf9406529, 0x52b82008, 0x8b090108),
+    ):
+        start = ctx.here()
+        ctx.site(site, original)
+        ctx.emit(ADRP(reg, ctx.here(), ctx.state))
+        for w in (load, original_word, add): ctx.emit(w)
+        ctx.emit(B(ctx.here(), site + 4))
+        ctx.put(site, [B(site, start)], 'optional render heap allowance (+0xc8)')
+
+
+def camera_aspect(ctx):
+    # Adapted from MacNativeGames games/totk/runtime/game_patches_botw.c:
+    # https://github.com/ly05010419/MacNativeGames (MIT).
+    # Copyright (c) 2026 MacNativeGames contributors
+    #
+    # Permission is hereby granted, free of charge, to any person obtaining a copy
+    # of this software and associated documentation files (the "Software"), to deal
+    # in the Software without restriction, including without limitation the rights
+    # to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+    # copies of the Software, and to permit persons to whom the Software is
+    # furnished to do so, subject to the following conditions:
+    #
+    # The above copyright notice and this permission notice shall be included in all
+    # copies or substantial portions of the Software.
+    #
+    # THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+    # IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+    # FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+    # AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+    # LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+    # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+    # SOFTWARE.
+    #
+    # Camera update main+0x10eda5c rewrites the aspect each world frame. x19+0x10
+    # is its PerspectiveProjection (dirty +8, near/far +0x98/+0x9c, aspect +0xb0).
+    # Replay all original dirty/near/far/rectangle operations, then replace only
+    # the aspect. x8/x9 are dead here; NZCV and the other registers stay intact.
+    original = (0xbd406e80, 0x39006276, 0xbd00aa60, 0xbd407280, 0x39006276,
+                0xbd00ae60, 0x2d4806a0, 0x2d470ea2, 0x39006276, 0x1e233821,
+                0x1e223800, 0x1e211800, 0xbd00c260)
+    site = 0x10edae0
+    ctx.site(site, struct.pack('<13I', *original).hex())
+    start = ctx.here()
+    for w in original[:-1]: ctx.emit(w)
+    ctx.emit(ADRP(8, ctx.here(), ctx.state))
+    for w in (0x91028108,   # add x8,x8,#0xa0      desired ratio, 0 = original
+              0x88dffd09,   # ldar w9,[x8]         acquire host's desired float bits
+              0x34000049,   # cbz w9,store (+2)    also acknowledges disabling
+              0x1e270120,   # fmov s0,w9
+              original[-1], # store: str s0,[x19,#0xc0]
+              0x91001108,   # add x8,x8,#4         effective acknowledgement +0xa4
+              0x889ffd09):  # stlr w9,[x8]         publish only after the aspect write
+        ctx.emit(w)
+    ctx.emit(B(ctx.here(), site + 4 * len(original)))
+    ctx.put(site, [B(site, start)] + [0xd503201f] * (len(original) - 1),
+            'camera aspect = host drawable ratio (state +0xa0; 0 = original), acknowledged at +0xa4')
 
 
 FRAME_STEP = {'cd57b23fa4bbad65803d9788c01821ee': frame_step}
+CAPABILITIES = {'cd57b23fa4bbad65803d9788c01821ee': ('CAMERA_ASPECT', 'RENDER_RESOLUTION')}
 
 # How general each patch is and could be (dm/tools/docs_patches.py "Binding", listed in docs/agents/game-patches.md): what, its binding now, the loosest it could have (goal),
 # purpose, why; blocked or kept: why the gap stays open (cannot close yet, or left open on purpose); checked: what was checked on game files (else a judgement)
@@ -485,4 +585,8 @@ BINDING = [
             'functions recur)',
      'checked': 'nso_fnmap of its 44 sites into those 13 mains (2026-11-09)',
      'kept': '44 sites in 34 functions to fingerprint for an update that may not come (1.9.0, the Switch 2 Edition release); convert when a new build appears'},
+    {'what': 'BOTW perspective camera aspect and projection acknowledgement', 'now': 'build', 'goal': 'game', 'purpose': 'rendering',
+     'why': "the game's camera update and projection-object layout; drawable publication and presentation are general host behavior",
+     'blocked': 'camera update has no reviewed function fingerprint yet',
+     'checked': 'all 13 original words checked in main cd57b23fa4bbad65803d9788c01821ee; pre-refresh native/wide outdoor Mac gameplay and camera acknowledgement (chain fda42ce035db); exact-branch runtime unrun'},
 ]

@@ -39,8 +39,11 @@
 #include "nvn_link_drain.h"
 #include "nvn_timestamp.h"
 #include "msl_image.h"
+#include "nvn_aspect.h"
 #include "dmsh_chain.h"   // DMSH_CHAIN: the translation chain version of the B shader library expected by this source tree, one for every game (beside this file, tools/dmsh_chain.py --header)
 #include "game_profile.h"   // game profile constants (profile id, the profile's switches)
+static const char g_aspect_ui_prefixes[][9] = DM_GAME_ASPECT_UI_PREFIXES;
+static const char g_aspect_ui_rect_prefixes[][9] = DM_GAME_ASPECT_UI_RECT_PREFIXES;
 // Texture slot table per stage: 0-127 the combined handles (nvnCommandBufferBindTexture), 128-255 the separate texture binds (NVN_SEPTEX_SLOT0, nvn_obj.h)
 #define NTEX 256
 // The NVN driver's constant segments c0 and c2 (byte offsets, slot counts) and the binding kinds of the shader reflection have one definition, which the shader build reads too (dmsh_build.py through dmsh_abi.py)
@@ -2790,6 +2793,8 @@ void mtl_drain(void) { present_drop_for_suspend(); mtl_present_flush(); snap_dra
 
 // ================= Render replay =================
 #include "../../host/front.h"
+__attribute__((weak)) void dm_game_aspect_drawable(double width, double height) { (void)width; (void)height; }
+__attribute__((weak)) float dm_game_aspect(void) { return 0; }   // Graphics tests do not link the loader's supported-build / camera acknowledgement gate.
 static int g_red_once[174];   // one past the highest key: a new key raises this, and the macro refuses to compile otherwise
 #define RED_ONCE(k, ...) do { _Static_assert((k) < sizeof g_red_once / sizeof *g_red_once, "a RED_ONCE key past g_red_once: raise its size"); if (!g_red_once[k]++) MLOG("[RED] " __VA_ARGS__); } while (0)
 // NVN vertex streams 0–15 → Metal vertex buffer slots: 0–13 go to 16–29 (30 is the constant fallback buffer), 14 and 15 to 14 and 15. Metal has only the 31 slots 0–30; translated shaders use only buffer(0) (the argument buffer),
@@ -5369,6 +5374,37 @@ void mtl_ab_gpu(uint64_t f, double gpu_ms, double frame_ms) {
 }
 
 static uint64_t g_sd_dead_bytes, g_sd_n_dead, g_sd_n_all;
+// Final UI canvas: the last depth-free 16:9 packed (BOTW) or float (TOTK)
+// target before a draw to a registered swapchain image. Adapted from
+// MacNativeGames (MIT; nvn_aspect.h). Remember confirmed geometry too:
+// transient targets must be recognized before their UI, not at the later
+// swapchain pass. Only camera acknowledgement gates this shared mechanism.
+static _Atomic uint64_t g_aspect_present[8];
+static _Atomic unsigned g_aspect_next;
+static int aspect_is_present(uint64_t serial) {
+    for (unsigned i = 0; i < 8; i++)
+        if (atomic_load(&g_aspect_present[i]) == serial) return 1;
+    return 0;
+}
+static uint64_t g_aspect_canvas, g_aspect_last_canvas;
+static NSUInteger g_aspect_canvas_w, g_aspect_canvas_h, g_aspect_last_w, g_aspect_last_h;
+static int pf_is_float(MTLPixelFormat f);
+static void aspect_canvas_learn(MTL4RenderPassDescriptor *pd) {
+    if (!(dm_game_aspect() > 0) || R.rt.n < 1 || !R.rt.color[0]) return;
+    const tex_t *t = R.rt.color[0];
+    id<MTLTexture> c = pd.colorAttachments[0].texture;
+    if (aspect_is_present(t->serial)) {
+        if (g_aspect_last_canvas) {
+            g_aspect_canvas = g_aspect_last_canvas;
+            g_aspect_canvas_w = g_aspect_last_w; g_aspect_canvas_h = g_aspect_last_h;
+        }
+    } else if (c && nvn_aspect_canvas_candidate(c.width, c.height, pd.colorAttachments[0].level,
+               pd.depthAttachment.texture != nil, c.pixelFormat == MTLPixelFormatRGB10A2Unorm || pf_is_float(c.pixelFormat))) {
+        g_aspect_last_canvas = t->serial; g_aspect_last_w = c.width; g_aspect_last_h = c.height;
+        if (c.width == g_aspect_canvas_w && c.height == g_aspect_canvas_h)
+            g_aspect_canvas = t->serial;
+    }
+}
 static void sd_finish(void);
 static int pf_is_float(MTLPixelFormat f) {   // Float color formats that can store NaN (sentinel choice for the load-elision probe; RGB9E5 cannot store NaN and does not count)
     switch (f) { case MTLPixelFormatR16Float: case MTLPixelFormatRG16Float: case MTLPixelFormatRGBA16Float: case MTLPixelFormatR32Float:
@@ -5842,6 +5878,7 @@ static id<MTL4RenderCommandEncoder> rp_begin_ex_(int clear_only) {
         NSUInteger tw = 0, th = 0; if (!cl) rt_dims(&tw, &th);
         if (tw * th >= (1u << 24)) { NSUInteger w = MIN(tw, (NSUInteger)MAX((long)R.sc.x + R.sc.w, 1)), h = MIN(th, (NSUInteger)MAX((long)R.sc.y + R.sc.h, 1));
             if (w * h * 2 <= tw * th) { pd.renderTargetWidth = w; pd.renderTargetHeight = h; g_rp_aw = w; g_rp_ah = h; } } }
+    aspect_canvas_learn(pd);
     // A pass covers only the smallest of its attachments, and so does a clear folded into its load action, while NVN clears the whole target. Bayonetta 2 (SDK 3.6) starts every frame with a
     // 32x32 or 256x256 colour target beside its 1280x720 depth buffer and clears the depth there: only that corner was cleared, the scene behind failed the depth test against the
     // previous frames' depth everywhere else, and its story narration showed in the top-left corner of a black screen. A cleared attachment larger than the pass is cleared in a pass of its own first.
@@ -6102,6 +6139,7 @@ static void shmap_read(void) {
 
 @interface NvShader : NSObject { @public id<MTLFunction> fn, tf_fn, discard_fn, fn_u, fn_d, geo_fn; id<MTLLibrary> ulib; NSMutableDictionary *ufn;   // fn_u: the integer-output entry point (dmsh_entry.py fs_uint) as the library holds it, unspecialized: ufn holds it specialized per pipeline's integer targets (uint_fn; ulib: its library); fn_d: the dual-source one (dmsh_entry.py fs_dual)
     uint16_t tf_stride[4]; uint32_t cb_ext[16], sb_ro; nvn_refl rf; id<MTLArgumentEncoder> ae; NSUInteger arg_len; int stage, layer_out; const char *builtin; uint64_t logged; char key[24]; id<MTLBuffer> c1buf; uint64_t c1_gpu; size_t c1off;
+    int aspect_ui_layout, aspect_ui_rect;
     uint32_t geo_vertices, geo_invocations, geo_output, geo_stride, geo_index_stride;
     uint8_t mesh_kind, mesh_notask; uint16_t mesh_threads, mesh_payload;   // an NVN2 task (1) or mesh (2) shader, a mesh shader with no task, its workgroup's threads, its payload's bytes (dmsh_meshstage.py)
     id<MTLFunction> mesh_obj;   // a mesh shader with no task: the object function that launches its workgroups in blocks of DMSH_MESH_GRID (dmsh_meshstage.py main0_o)
@@ -6454,6 +6492,8 @@ static NvShader *shader_load(NSString *pc, int stage, int layer) {
         MLOG("[RED] mesh shader %s: no object entry point (entry_object) in its library: its draws are skipped", pc.UTF8String);
     // writes the layer: its passes are layered and its pipelines get an input class (pso_desc). main0 / main0_z by the reflection's layer_out (dmsh_entry.py layer_out), the layer entry points always
     if (stage == 0) o->layer_out = layer || [j[@"layer_out"] boolValue];
+    if (stage == 0) o->aspect_ui_layout = nvn_aspect_ui_prefix(o->key, g_aspect_ui_prefixes, DM_GAME_ASPECT_UI_PREFIX_COUNT);
+    if (stage == 0) o->aspect_ui_rect = nvn_aspect_ui_prefix(o->key, g_aspect_ui_rect_prefixes, DM_GAME_ASPECT_UI_RECT_PREFIX_COUNT);
     if (stage == 0 && !layer) o->has_pull = [j[@"pull"] isKindOfClass:[NSDictionary class]];
     if (stage == 1) o->has_alpha = [j[@"alpha"] isKindOfClass:[NSDictionary class]];
     if (stage == 1) o->has_bz = [j[@"blend_zero"] boolValue];
@@ -14168,7 +14208,10 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) {
     if (g_enc && g_vis_counting && g_vis_n >= VIS_SLOTS) rp_end();   // this draw's query needs a slot and the buffer is bound for the whole pass: the next pass begins with a new one (rp_begin_ex)
     if (g_enc && g_rp_aw && (!R.has_sc || (long)R.sc.x + R.sc.w > (long)g_rp_aw || (long)R.sc.y + R.sc.h > (long)g_rp_ah)) rp_end();   // leaves the pass's render area
     fb_prepare(pr);   // same-pass feedback sampling: copy the snapshot first (see fb_prepare)
-    if (R.has_sc && !g_enc && !S.rast_discard) {
+    // Canvas UI scissors are transformed below; an originally off-canvas
+    // rectangle can become visible after squeezing and cannot be rejected here.
+    if (R.has_sc && !g_enc && !S.rast_discard &&
+        !(dm_game_aspect() > 0 && R.rt.n > 0 && R.rt.color[0] && R.rt.color[0]->serial == g_aspect_canvas)) {
         NSUInteger tw0 = 0, th0 = 0; rt_dims(&tw0, &th0);
         long x0 = R.sc.x < 0 ? 0 : R.sc.x, y0 = R.sc.y < 0 ? 0 : R.sc.y, x1 = (long)R.sc.x + R.sc.w, y1 = (long)R.sc.y + R.sc.h;
         if (x1 > (long)tw0) x1 = tw0; if (y1 > (long)th0) y1 = th0;
@@ -14227,7 +14270,49 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) {
       if (!(g_ed.ok & ED_SREF) || g_ed.sref != sr || g_ed.sref_b != sb) { enc_r_stencil_ref(en, sr, sb); g_ed.sref = sr; g_ed.sref_b = sb; g_ed.ok |= ED_SREF; } }
     // Viewport / scissor (clamped within the target size)
     NSUInteger tw = g_pass.tw, th = g_pass.th;
+    double aspect_x = 1, aspect_y = 1;
+    double effective_aspect = dm_game_aspect();
+    if (effective_aspect > 0 && R.rt.n > 0 && R.rt.color[0] && R.rt.color[0]->serial == g_aspect_canvas) {
+        // The menus' blurred scene is a quad too: its first fragment texture
+        // is a GPU-rendered 16:9 picture, not a layout image. Keep it full width.
+        int full_width = 0, have_bounds = 0;
+        nvn_aspect_rect bounds;
+        if (pr->sh[0] && pr->sh[0]->aspect_ui_rect && S.ubo[0][0].size >= 560) {
+            float uniforms[140];
+            ubo_read(0, 0, 0, sizeof uniforms, uniforms);
+            have_bounds = nvn_aspect_layout_bounds(uniforms, &bounds);
+            full_width = have_bounds && nvn_aspect_full_width(bounds);
+        }
+        // A full-width textured layout can be the map. Expanding it while
+        // centering its markers gives them different coordinate systems.
+        // Only texture-free full-width backing rectangles expand to the sides.
+        // GPU scene captures retain the exemption below: removing it duplicates
+        // inventory layers. Distinguishing the portrait camera remains open.
+        int textured = 0;
+        if (pr->sh[1]) for (int i = 0; i < pr->sh[1]->rf.nb; i++) {
+            int kind = pr->sh[1]->rf.b[i].kind;
+            if (kind == NVN_RB_TEX || kind == NVN_RB_TEXU || kind == NVN_RB_TEXD ||
+                kind == NVN_RB_TEXA || kind == NVN_RB_TEXP || kind == NVN_RB_TEXH)
+                textured = 1;
+        }
+        int scene_picture = 0, tid = (int)(S.tex[1][0] & 0xfffff);
+        os_unfair_lock_lock(&g_rmu);
+        if (tid > 0 && tid < g_ntreg && g_treg[tid].ok) {
+            const tex_t *t = &g_treg[tid].t;
+            scene_picture = t->d.width >= 320 && t->d.height &&
+                fabs((double)t->d.width / t->d.height * 9 / 16 - 1) < 0.02 && mtl_tex_gpu_owned(t->serial);
+        }
+        os_unfair_lock_unlock(&g_rmu);
+        if (!nvn_aspect_expand_backing(full_width, textured) && nvn_aspect_ui_draw(1, dw ? dw->count : di ? di->count : 0, scene_picture) &&
+            nvn_aspect_ui_shader(pf_is_float(g_pass.cfmt[0]), pr->sh[0] && pr->sh[0]->aspect_ui_layout))
+            nvn_aspect_ui_scale(effective_aspect, &aspect_x, &aspect_y);
+
+    }
     { MTLViewport v = S.has_vp ? (MTLViewport){S.vp[0][0], S.vp[0][1], S.vp[0][2], S.vp[0][3], S.dr[0], S.dr[1]} : (MTLViewport){0, 0, tw, th, 0, 1};
+      if (aspect_x != 1 || aspect_y != 1) {
+          nvn_aspect_rect a = nvn_aspect_ui_rect((nvn_aspect_rect){v.originX, v.originY, v.width, v.height}, tw, th, aspect_x, aspect_y);
+          v.originX = a.x; v.originY = a.y; v.width = a.w; v.height = a.h;
+      }
       if (atomic_load_explicit(&g_origin_ll, memory_order_relaxed)) { v.originY += v.height; v.height = -v.height; }   // lower-left origin (see g_origin_ll)
       // Viewport swizzle: NEGATIVE_Y negates clip y, the same as the viewport flipped about its centre; facing is decided after it on the GPU as in Metal, so the winding stays.
       // Other swizzles (axis exchanges, negated x / z / w) are no viewport change and are drawn unswizzled
@@ -14237,7 +14322,10 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) {
       if (!(g_ed.ok & ED_VP) || memcmp(&g_ed.vp, &v, sizeof v)) { enc_r_viewport(en, v); g_ed.vp = v; g_ed.ok |= ED_VP; } }
     MTLScissorRect sc = {0, 0, tw, th};
     if (R.has_sc && !S.rast_discard) {   // raster state cannot suppress vertex storage writes
-        long x0 = R.sc.x < 0 ? 0 : R.sc.x, y0 = R.sc.y <= 0 ? 0 : R.sc.y, x1 = (long)R.sc.x + R.sc.w, y1 = (long)R.sc.y + R.sc.h;
+        long sx0 = R.sc.x, sy0 = R.sc.y, sx1 = (long)R.sc.x + R.sc.w, sy1 = (long)R.sc.y + R.sc.h;
+        if (aspect_x != 1) { sx0 = lround(tw / 2.0 + (sx0 - tw / 2.0) * aspect_x); sx1 = lround(tw / 2.0 + (sx1 - tw / 2.0) * aspect_x); }
+        if (aspect_y != 1) { sy0 = lround(th / 2.0 + (sy0 - th / 2.0) * aspect_y); sy1 = lround(th / 2.0 + (sy1 - th / 2.0) * aspect_y); }
+        long x0 = MAX(sx0, 0), y0 = MAX(sy0, 0), x1 = sx1, y1 = sy1;
         if (x1 > (long)tw) x1 = tw; if (y1 > (long)th) y1 = th;
         if (x1 <= x0 || y1 <= y0) { PD("Z %llu draw skipped: empty scissor (%d,%d %dx%d, target %lux%lu)", g_stat_pass, R.sc.x, R.sc.y, R.sc.w, R.sc.h, (unsigned long)tw, (unsigned long)th); return; }
         sc = (MTLScissorRect){(NSUInteger)x0, (NSUInteger)y0, (NSUInteger)(x1 - x0), (NSUInteger)(y1 - y0)};
@@ -16216,14 +16304,12 @@ static id<MTLTexture> present_raw_src(id<MTLTexture> src) {
     if (!v) { RED_ONCE(69, "present: cannot create a non-sRGB view of the sRGB swapchain texture (format %lu); presenting the decoded values", (unsigned long)src.pixelFormat); return src; }
     return v;
 }
-// The rectangle of the canvas (dw x dh) the picture (pw x ph) is drawn into: the picture's aspect ratio kept and centred, black bars in the rest (no stretching when the screen's ratio
-// differs from the game's, e.g. iPhone about 19.5:9 against the game's 16:9); when the ratios differ by under 1 % (the remainder from a game width that is a multiple of 8 in the
-// full-screen setup, e.g. 1952x900 against 2868x1320 differs by 0.17 %) the whole canvas, leaving no border of a few pixels
-static MTLViewport present_viewport(double pw, double ph, double dw, double dh) {
-    double s = fmin(dw / pw, dh / ph);
-    MTLViewport vp = {floor((dw - pw * s) / 2), floor((dh - ph * s) / 2), round(pw * s), round(ph * s), 0, 1};
-    if (fabs((dw / dh) / (pw / ph) - 1) < 0.01) vp = (MTLViewport){0, 0, dw, dh, 0, 1};
-    return vp;
+// Both present encoders (including MetalFX and offscreen captures) use this
+// geometry. The acknowledged camera aspect describes the anamorphic source;
+// unsupported games retain aspect-fit using the valid crop, exactly as before.
+static MTLViewport present_viewport(double cw, double ch, double dw, double dh) {
+    nvn_aspect_rect r = nvn_aspect_present(cw, ch, dw, dh, dm_game_aspect());
+    return (MTLViewport){r.x, r.y, r.w, r.h, 0, 1};
 }
 // The shape the picture is shown in, whatever part of the texture it comes from. The Switch's compositor stretches a buffer's crop to the layer, so a crop only picks texels: Super
 // Mario Galaxy 2 draws its storybook cutscenes anamorphically into 1200x960 of a 1920x1080 swapchain (800x640 handheld). The layer fills the display, 16:9, unless the game sized it
@@ -16717,7 +16803,7 @@ static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t t
     if (!layer) return 0;
     if (g_present_layer_resident != layer) { [g_q4 addResidencySet:layer.residencySet]; g_present_layer_resident = layer; }
 #if TARGET_OS_OSX
-    if (!layer.displaySyncEnabled) layer.displaySyncEnabled = YES;   // Windowed mode follows the display's vsync to prevent tearing
+    if (!layer.displaySyncEnabled) layer.displaySyncEnabled = YES;
 #endif
     present_pipeline(layer.pixelFormat);   // Same as the original path: the first frame compiles the pipeline before taking the drawable
     if (g_grab_cb) grab_present(src, crop, layer.drawableSize);   // Game picture needed by the whole-window screenshot (peek without the lock first; the real take locks inside the function)
@@ -17048,7 +17134,10 @@ void mtl_link_pause(int on);
 // (hle_nvn.c nvnWindowAcquireTexture -> mtl_present_wait). Without clearing, the game cannot advance a single tick during those 2.5 seconds of waiting for the save, and the save is not written (the same pattern three times in player logs: 3 frames queued, 0 submits)
 void mtl_present_discard(int on) { atomic_store(&g_present_discard, on != 0); if (on) present_drop_for_suspend(); }
 static uint64_t present_enqueue(const tex_t *t, double period, const int crop[4], uint64_t ev_val, uint64_t *copy);
-uint64_t mtl_present(const tex_t *t, double period, const int crop[4], uint64_t *copy) { return present_enqueue(t, period, crop, 0, copy); }
+uint64_t mtl_present(const tex_t *t, double period, const int crop[4], uint64_t *copy) {
+    if (dm_game_aspect() > 0 && !aspect_is_present(t->serial))
+        atomic_store(&g_aspect_present[atomic_fetch_add(&g_aspect_next, 1) % 8], t->serial);
+ return present_enqueue(t, period, crop, 0, copy); }
 void *mtl_device(void) { mtl_init(); return (__bridge void *)g_dev; }
 void *mtl_device_classic(void) { g_classic_ok = 1; return mtl_device(); }   // the GL and Vulkan layers: a device without Metal 4 is taken too, with presents dropped (mtl_init)
 // An external producer's texture (the Vulkan layer's swapchain images, the GL layer's window surface): a serial the present path resolves (serial_put), resident for the Metal 4

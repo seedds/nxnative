@@ -278,3 +278,36 @@ General host changes first needed here; each applies to every game:
 - `game.tsv` still says "In bring-up", and its memory comment "until measured".
 - 05's `DM_PROBE_POLL` paragraph cites `PlacementMgr` in `main+0x5aaac0` as the one thread in guest code "for that flag" without naming the game; `PlacementMgr` is this game's.
 - Motion on iOS (a controller's gyro, and the phone's own while no controller supplies fresh samples) has not been tested on a device. Source arbitration, concurrent startup and upright orientation were corrected during review and are covered by unit tests; see [Live controller motion](../../../docs/reference/services.md#live-controller-motion). Motion shrines from issue #389 still need a device gameplay check.
+
+
+## Optional Mac display settings
+
+The exact 1.9.0 build exposes CAMERA_ASPECT and RENDER_RESOLUTION capabilities. Original 16:9 and the game's original resolution remain the defaults. The camera implementation is adapted from ComicBit's zelda-native-widescreen branch, which credits MacNativeGames. The resolution and render-pool sites are adapted from v0lumehi's PR #76.
+
+Camera state uses +0xa0 for the requested ratio and +0xa4 for the game-camera acknowledgement. Optional output dimensions, docked width pair, render-pool factor and heap allowance use +0xb0, +0xb8, +0xc0 and +0xc8. This avoids the existing dynamic-resolution and taller-screen fields. A zero field preserves the original instruction path.
+
+The renderer identifies layout quads through profile-owned shader prefixes. Their uniform transforms distinguish full-width backing rectangles from centered controls. Full-width backgrounds and fades retain their screen coverage. This classification requires menu, loading, dialogue and map regression checks before publication.
+
+Local checks passed for the camera, resolution state, layout math, settings and patch documentation. The game booted with real audio and the loading fade covered the full output. Inventory, System and Adventure Log were exercised on a copied save. L/R transition polish remains under review. Full-game compatibility and other game versions are unverified.
+
+### Widescreen follow-up (Mac, 2026-11-16; experimental)
+
+The map background used the full-width-layout exemption while its markers used
+the centered viewport. Only texture-free full-width backings now expand; textured
+map layers and icons share the centered 16:9 region. Checked with panning, zooming,
+recentring, and the Album tab at a 1290x540 drawable on an M4 Pro. This intentionally
+uses black side margins for the Slate rather than distorting its decoration.
+
+Decoded movies retain their source aspect: the existing movie-pacing flag at
+frame state +4 suppresses the anamorphic present/UI correction. Verified by
+replaying Return of Calamity Ganon (memory 15), which previously filled 21:9
+stretched and now presents 16:9. In-engine event cameras are not covered by the
+decoder flag and remain unverified.
+
+**Open:** inventory Link uses a separate camera, and captured pause-menu layers
+still show L/R transition/compositing defects. Treating every GPU-rendered picture
+as ordinary UI improved portrait proportions but introduced duplicate layers;
+that experiment was rejected. The GPU-picture exemption is retained. A robust
+fix needs explicit provenance of scene, portrait and captured UI textures, rather
+than inferring their semantics from size alone. Widescreen remains experimental;
+the original-ratio setting avoids these optional-path defects.

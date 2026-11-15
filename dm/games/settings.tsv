@@ -5,6 +5,7 @@
 #   variable  the environment variable the setting sets
 #   kind      choice: values value=label,..., an option only some games have with ?<shown>&<shown> after its label (languages: the game's own, from its control data; every language when it has none, with a note); range: values low:high:step, shown as a percentage;
 #             toggle: values - (on sets 1, off 0) or <on>/<off>, the two values the variable takes (on/off)
+#   shown conditions can be combined with &.
 #   default   a value (a toggle's: 1 on, 0 off); DM_GAME_<NAME>: the host's own default from the game profile (game_profile.h, game.py); build:<VAR>: the IPA build's setting (build_ipa.sh)
 #             <ios>|<mac> selects the platform's default before resolving a profile macro or build variable
 #   shown     always; DM_GAME_<NAME>!=<value> or ==<value>; fixups:<KEY>: main's rewriter table has that key (a stub in the game's build, patch_nso.py); languages>1 (more than one to pick, so also when the control data lists none); gfxapi:<API>: the packer's GFXAPI;
@@ -37,3 +38,6 @@ DM_PSO_PREBUILD	toggle	-	1	gfxapi:nvn	Performance	Pipeline prebuild	The first st
 DM_NVN_ENC_THREAD	toggle	-	1|DM_GAME_ENC_THREAD	gfxapi:nvn	Performance	Encode thread
 DM_FPS_HOLD	toggle	on/off	DM_GAME_FPS_HOLD	DM_GAME_FPS_TARGET!=0	Performance	Hold frames when late
 DM_METAL_HUD	toggle	-	0	always	Performance	Performance HUD
+
+DM_WIDESCREEN	choice	0=Original (16:9),1=Match window (ultrawide)	0	fixups:CAMERA_ASPECT&platform:mac	Game	Aspect ratio	Wider camera view with a centered HUD.	level=basic
+DM_RENDER_RESOLUTION	choice	0=Original (1600 x 900),1080=1920 x 1080,1200=2133 x 1200,1440=2560 x 1440	0	fixups:RENDER_RESOLUTION&platform:mac	Game	3D resolution	Docked mode. Higher resolutions use more GPU time and memory.	level=basic

@@ -14593,6 +14593,7 @@ static id<MTL4ComputeCommandEncoder> dispatch_enc_cs(NvShader *cs, uint64_t ind)
     args_dirty_all();
     return e;
 }
+static void bc_alias_images(NvShader *cs);
 static void dispatch(const p_dispatch *dp) {
     g_wr_epoch++; g_mdx_epoch++;
     if (!S.cprog) { RED_ONCE(27, "no program bound before the dispatch"); return; }
@@ -14687,6 +14688,7 @@ static void dispatch(const p_dispatch *dp) {
     } else enc_c_dispatch(ce, MTLSizeMake(dp->x, dp->y, dp->z), MTLSizeMake(tg[0], tg[1], tg[2]));
     bufsnap_after(cs, ce);
     if (own) enc_c_end(ce);
+    if (dp->ind || (dp->x && dp->y && dp->z)) bc_alias_images(cs);
 }
 // GPU: texture -> buffer (row stride taken from SetCopyRowStride, layer stride from SetCopyImageStride, 0 = tightly packed)
 // A copy at a level the host texture lacks (more levels declared than its size holds, tex_desc) is skipped: Metal does not check the level of a blit
@@ -15074,6 +15076,38 @@ static int bc_alias_copy(const p_copy_t2t *c, id<MTLTexture> s, unsigned sl, uns
                               (unsigned long long)bser, (unsigned long)bc.pixelFormat, dl);
     PD("t compressed alias: dst=%llu → ser=%llu at %lu,%lu size %lux%lu", dt->serial, bser, (unsigned long)x, (unsigned long)y, (unsigned long)w, (unsigned long)h);
     return 1;
+}
+// Compute compressors also write through an integer image aliased over BC storage.
+// MK11's BC3CompressTexture writes 320x270 RGBA32UI blocks over the same storage
+// as a 1280x1080 BC3 image. The separate Metal textures must see the same bytes:
+// otherwise the sampled BC image keeps the pool's uninitialized initial content.
+// Reuse the GPU-only block copy and its encoder barriers; no CPU readback is needed.
+static void bc_alias_images(NvShader *cs) {
+    if (!cs) return;
+    for (int i = 0; i < cs->rf.nb; i++) {
+        const nvn_rbind *b = &cs->rf.b[i];
+        if ((!b->rw && !b->atom) || (b->kind != NVN_RB_IMGU && (b->kind != NVN_RB_IMG || b->reg >= 32))) continue;
+        int tid = b->kind == NVN_RB_IMGU ? ubo_tex_id(ubo_handle(5, b->reg, b->off)) : (int)(bound_img(5, b->reg) & 0xfffff);
+        tex_t t; id<MTLTexture> image = nil;
+        os_unfair_lock_lock(&g_rmu);
+        if (tid > 0 && tid < g_ntreg && g_treg[tid].ok && !g_treg[tid].gone) {
+            treg_t *r = &g_treg[tid];
+            // This path handles one full 2D level. Other views keep their own
+            // semantics rather than copying unwritten layers or mip levels.
+            if (r->t.d.target == NVN_TEXTURE_TARGET_2D && r->t.d.levels == 1 &&
+                (!r->has_v || (!r->v.base_level && !r->v.min_layer))) {
+                t = r->t;
+                image = tex_made(&t);
+                while (image.parentTexture) image = image.parentTexture;
+            }
+        }
+        os_unfair_lock_unlock(&g_rmu);
+        if (!image || !mtl_fmt_uint(image.pixelFormat) || (mtl_pf_bytes(image.pixelFormat) != 8 && mtl_pf_bytes(image.pixelFormat) != 16)) continue;
+        p_copy_t2t c = {.src = &t, .dst = &t,
+                       .sr = {0, 0, 0, (int)t.d.width, (int)t.d.height, 1},
+                       .dr = {0, 0, 0, (int)t.d.width, (int)t.d.height, 1}};
+        bc_alias_copy(&c, image, 0, 0, 0, 0);
+    }
 }
 // GPU: texture -> texture (previously mislisted as a no-op, 3 times per frame on the character select page). Same size, not mirrored, same format -> blit layer by layer; the other semantics (scaling with filtering, mirroring, format change) cannot be expressed by blit: report a failure, to be implemented
 static id<MTLTexture> copy_t2t_enc(const p_copy_t2t *c) {

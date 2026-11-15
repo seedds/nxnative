@@ -79,6 +79,35 @@ int main(void) { @autoreleasepool {
     CHECK(!memcmp(third.contents, want2.contents, third.length), "a second copy into the alias lands too");
     CHECK(g_bc_alias_n == 2, "and is counted");
 
+    // A compressor writes the integer alias directly, without CopyTextureToTexture.
+    // Its GPU result must become the sampled BC blocks, even if that BC backing
+    // already existed before the dispatch (MK11's character-selection images).
+    id<MTLTexture> malias = tex_mtl(&alias);
+    fill(malias, 37);
+    NvShader *cs = [NvShader new];
+    cs->rf.nb = 1; cs->rf.b[0] = (nvn_rbind){.kind = NVN_RB_IMG, .reg = 0, .rw = 1};
+    S.img[5][0] = 2;
+    mtl_sub_begin(); bc_alias_images(cs);
+    CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull), "image alias propagation completes");
+    id<MTLBuffer> from_image = blocks_of(mbc), expected_image = buffer(BLOCKS * BLOCKS * BLOCK);
+    for (NSUInteger i = 0; i < expected_image.length; i++) ((uint8_t *)expected_image.contents)[i] = (uint8_t)(37 + i * 7);
+    CHECK(!memcmp(from_image.contents, expected_image.contents, from_image.length), "direct image writes reach the compressed alias bit for bit");
+    fill(malias, 93); cs->rf.b[0].rw = 0;
+    mtl_sub_begin(); bc_alias_images(cs);
+    CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull), "read-only image submission completes");
+    id<MTLBuffer> read_only = blocks_of(mbc);
+    CHECK(!memcmp(read_only.contents, from_image.contents, read_only.length), "a read-only image binding does not overwrite compressed storage");
+
+    // Image handles are relative to the execution pool, as encode_args reads
+    // them. Raw slot 1 with pool base 1 must still resolve registered alias 2.
+    cs->rf.b[0].rw = 1; S.tex_base = 1; S.img[5][0] = 1;
+    mtl_sub_begin(); bc_alias_images(cs);
+    CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull), "image alias with a pool offset completes");
+    id<MTLBuffer> shifted = blocks_of(mbc);
+    for (NSUInteger i = 0; i < expected_image.length; i++) ((uint8_t *)expected_image.contents)[i] = (uint8_t)(93 + i * 7);
+    CHECK(!memcmp(shifted.contents, expected_image.contents, shifted.length), "image alias uses the execution pool base");
+    S.tex_base = 0; S.img[5][0] = 2;
+
     printf("t_bc_alias: %d checks, %d failed\n", checks, failed);
     return failed != 0;
 } }

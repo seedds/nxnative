@@ -40,6 +40,9 @@
 //   guestbt, with nxaot (it packs it): a module this test writes word by word whose third function, two calls deep, aborts through a host function, through svcBreak,
 //     or faults on an address no page backs: the host's lines name the call site and the guest's frames exactly (aot.h dm_aot_guest_backtrace, hle_svc.c Break,
 //     aot_fault.c dm_aot_fault_backtrace), through compiled code and with the JIT built in through the JIT fallback alone (DM_AOT_JIT_ALL)
+//   polls, with nxaot (it packs it, at tier H, with the polls of loops bounded by a constant left out and with every poll): a module this test writes word by
+//     word whose thread runs, by turns, loops left without a poll and loops that look bounded and must keep theirs; a tester pauses it at random intervals: every
+//     loop stopped in, the worst CPU time from request to stop bounded, nxaot's counts exact (polls_rows below; dm/tools/aot/README.md, "Threads and safepoints")
 //   t_aot_host [--packs <dir>] [--corpus <dir>] [--nro <name>]... [--nxaot <nxaot>]
 //     the packs: --packs, else the environment variable NXAOT_PACKS, else the CMake option NXAOT_PACKS; with none, a note and exit 0 (CTest stays green where
 //     no packs exist: the Windows runner, a build without the aot image)
@@ -116,8 +119,14 @@ static uint64_t svc(int n, uint64_t a0, uint64_t a1) {   // an SVC from host cod
 static uint64_t rng(uint64_t *s) { *s ^= *s << 13; *s ^= *s >> 7; *s ^= *s << 17; return *s; }
 
 static void bt_host_abort(void);
+// The polls row (polls_rows, below): its child's options, its tester, its start
+static int lat_on(void);
+static void lat_option(unsigned min_per_shape);
+static void lat_body(void);
+static int lat_start(const module_t *m);
 void t_aot_pause_body(uint64_t arg) {
     if (arg == T_BT_ABORT) bt_host_abort();   // the guestbt row's host function (its mode 1), not a pause tester
+    if (lat_on()) lat_body();   // the polls row's tester (--latency, below); it does not return
     g_pt.self = thr_cur_handle();
     uint64_t seed = 0x9E3779B97F4A7C15ull * (g_pt.seed + 1);
     uint32_t hs[64];
@@ -261,6 +270,7 @@ static void *guest_main(void *p) {
         uint64_t s[32] = {r[1]};
         svc_dispatch(0x09, s, 0);
     }
+    if (lat_on() && !lat_start(m)) return NULL;   // the polls row's tester (--latency)
 #if NXHOST_JIT
     if (a->jit_ready) {   // as a game's boot gives the helper time before its first miss: the run starts once the JIT's instance made ahead is ready (10 s at most)
         for (int i = 0; i < 10000 && !dm_jit_get_pool_stats().spare; i++) plat_sleep_ns(1000000);
@@ -389,6 +399,7 @@ static int child(int argc, char **argv) {
         else if (!strcmp(argv[i], "--bt") && i + 1 < argc) a.bt = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--pause") && i + 1 < argc) a.pause = (unsigned)atoi(argv[++i]);
         else if (!strcmp(argv[i], "--seed") && i + 1 < argc) a.seed = (unsigned)atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--latency") && i + 1 < argc) lat_option((unsigned)atoi(argv[++i]));
         else { fprintf(stderr, "t_aot_host: unknown option %s\n", argv[i]); return DM_AOT_USAGE; }
     }
     g_flag.dbg = 1;   // hle_svc.c prints every svcOutputDebugString as a "[guest] " line
@@ -981,6 +992,343 @@ static void guestbt_rows(const char *self, const char *nxaot) {
     set_env("DM_AOT_JIT_ALL", NULL);
 }
 
+// ---------- Safepoint polls left out of loops bounded by a constant (dm/tools/aot/README.md, "Threads and safepoints"; design 6.2) ----------
+// The NRO polls, written here word by word: start runs five shapes in turn, forever; nothing in it ends the process. The two whose polls nxaot leaves out
+// (at tier H, where it leaves out the polls of loops bounded by a constant): (0) a loop of 2^17 passes around an inner loop of 100 passes (the inner loop's
+// poll left out, the outer's kept), (1) a loop of 2^18 calls of a leaf whose own loop of 50 passes has no poll (the calling loop keeps its own, and the leaf,
+// which calls nothing, has none at its entry). Three that look bounded and are not, which must keep theirs, each with a store to guest memory in every pass
+// (volatile, so that no pass of LLVM's computes the loop away once its poll is gone) and some 2^28 passes, a quarter of a second or more: (2) a loop bounded by a
+// register (loaded from data: 2^28), (3) a loop whose counter goes up on one path through its body and back down on the other (up once every 65,536 passes, to
+// 4,095), (4) a loop with two back edges, one of which leaves its counter as it was (up once every 2^20 passes, to 256). The child (--latency N): a guest thread
+// whose entry is a host function (the pause tester's) pauses the main thread at random intervals of 10 to 100 us until every shape has been stopped in N times
+// (or 20,000 pauses, or 30 s), and for each pause measures the main thread's CPU time from the request to its stop (the code it ran before it reached a
+// safepoint: what a missing poll would make long, and what the machine's load changes little: a vCPU the hypervisor takes away still counts, a few
+// milliseconds at worst here) and the wall time; the stop's pc (where it polled) names the shape (the leaf's code counts for shape 1); then svcExitProcess,
+// which the main thread obeys at its next poll. A loop that lost its poll is never stopped in (its pauses wait for its end, and stop in the next shape after up
+// to a quarter of a second). The parent packs the NRO at tier H twice, with the polls left out and with NXAOT_POLL_ELISION=0 (every poll, the old pack), checks
+// nxaot's poll counts (exactly the two loops above left out), and runs each: every shape stopped in LAT_MIN times, no inconsistent context, the worst CPU time
+// from request to stop under LAT_BOUND_US, in both packs (the median is printed)
+enum { LAT_SHAPES = 5, LAT_MIN = 100, LAT_MAX_PAUSES = 20000, LAT_BOUND_US = 50000 };
+static const char *const LAT_NAMES[LAT_SHAPES] = {"bounded-inner", "calls", "register-bound", "counter-in-body", "two-back-edges"};
+static struct {
+    int on; unsigned min;
+    uint64_t lo[LAT_SHAPES + 3];   // shape i's code: guest addresses [lo[i], lo[i + 1]); the leaf's [lo[LAT_SHAPES + 1], lo[LAT_SHAPES + 2]), shape 1's
+    unsigned n[LAT_SHAPES], pauses, elsewhere, inconsistent;
+    uint64_t cpu_max[LAT_SHAPES], wall_max[LAT_SHAPES];
+    uint32_t cpu_us[LAT_SHAPES][LAT_MAX_PAUSES];   // each stop's CPU time from request to stop, in microseconds (the medians printed)
+    char bad[200];
+#if !defined(_WIN32)
+    clockid_t clk; int have_clk;   // the main guest thread's CPU clock
+#endif
+} g_lat;
+static int lat_on(void) { return g_lat.on; }
+static void lat_option(unsigned min_per_shape) { g_lat.on = 1; g_lat.min = min_per_shape ? min_per_shape : 1; }
+
+static uint32_t a_movzw(unsigned rd, unsigned imm) { return 0x52800000u | imm << 5 | rd; }
+static uint32_t a_movz16(unsigned rd, unsigned imm) { return 0xD2A00000u | imm << 5 | rd; }                          // movz xd, #imm, lsl #16
+static uint32_t a_addwi(unsigned rd, unsigned rn, unsigned imm) { return 0x11000000u | imm << 10 | rn << 5 | rd; }
+static uint32_t a_subwi(unsigned rd, unsigned rn, unsigned imm) { return 0x51000000u | imm << 10 | rn << 5 | rd; }
+static uint32_t a_addr(unsigned rd, unsigned rn, unsigned rm, unsigned lsl) { return 0x8B000000u | rm << 16 | lsl << 10 | rn << 5 | rd; }
+static uint32_t a_eor(unsigned rd, unsigned rn, unsigned rm) { return 0xCA000000u | rm << 16 | rn << 5 | rd; }
+static uint32_t a_cmpwi(unsigned rn, unsigned imm) { return 0x7100001Fu | imm << 10 | rn << 5; }
+static uint32_t a_cmpi(unsigned rn, unsigned imm) { return 0xF100001Fu | imm << 10 | rn << 5; }
+static uint32_t a_cmp(unsigned rn, unsigned rm) { return 0xEB00001Fu | rm << 16 | rn << 5; }
+static uint32_t a_tst_low(unsigned rn, unsigned ones) { return 0xF240001Fu | (ones - 1) << 10 | rn << 5; }          // tst xn, #(2^ones - 1)
+static uint32_t a_mov(unsigned rd, unsigned rm) { return 0xAA0003E0u | rm << 16 | rd; }
+static const uint32_t A_STR_X10_X28_8 = 0xF900078Au;   // str x10, [x28, #8]
+enum { A_EQ = 0, A_NE = 1, A_LO = 3 };
+
+// The NRO (layout as lrtail_nro's: text from 0, read-only data at 0x1000, data at 0x2000 holding shape 2's bound and the word shapes 2 to 4 store to, a page
+// of bss); lo[] gets the shapes' module offsets, lo[LAT_SHAPES] the end of the last, then the leaf's start and end
+static size_t polls_nro(uint8_t *img, size_t cap, uint64_t lo[LAT_SHAPES + 3]) {
+    enum { RO = 0x1000, DATA = 0x2000, SIZE = 0x3000, BSS = 0x1000 };
+    if (cap < SIZE) return 0;
+    memset(img, 0, SIZE);
+    uint32_t w[256] = {0};
+    size_t n = 0x80 / 4;
+    const size_t start = n;
+    w[n] = a_adr(28, (int64_t)DATA - (int64_t)n * 4); n++;
+    w[n++] = 0xF9400382u;               // ldr x2, [x28]: shape 2's bound
+    const size_t outer = n;
+    // 0: an outer loop of 2^17 passes around an inner loop of 100
+    lo[0] = n * 4;
+    w[n++] = a_movz(12, 0);
+    const size_t a_outer = n;
+    w[n++] = a_movzw(9, 0);
+    const size_t a_inner = n;
+    w[n++] = a_eor(10, 10, 9);
+    w[n++] = a_addr(10, 10, 10, 1);     // x10 = 3 * x10
+    w[n++] = a_addwi(9, 9, 1);
+    w[n++] = a_cmpwi(9, 100);
+    w[n] = a_bcond(A_LO, (int64_t)(a_inner - n) * 4); n++;
+    w[n++] = a_addi(12, 12, 1);
+    w[n++] = a_movz16(13, 2);           // 2^17
+    w[n++] = a_cmp(12, 13);
+    w[n] = a_bcond(A_LO, (int64_t)(a_outer - n) * 4); n++;
+    // 1: a loop of 2^18 calls of leaf
+    lo[1] = n * 4;
+    w[n++] = a_movz(12, 0);
+    const size_t b_loop = n;
+    w[n++] = a_mov(0, 10);
+    const size_t call_leaf = n++;       // bl leaf
+    w[n++] = a_addr(10, 10, 0, 0);
+    w[n++] = a_addi(12, 12, 1);
+    w[n++] = a_movz16(13, 4);           // 2^18
+    w[n++] = a_cmp(12, 13);
+    w[n] = a_bcond(A_LO, (int64_t)(b_loop - n) * 4); n++;
+    // 2: bounded by a register
+    lo[2] = n * 4;
+    w[n++] = a_movz(9, 0);
+    const size_t c1 = n;
+    w[n++] = a_addr(10, 10, 9, 0);
+    w[n++] = A_STR_X10_X28_8;
+    w[n++] = a_addi(9, 9, 1);
+    w[n++] = a_cmp(9, 2);
+    w[n] = a_bcond(A_LO, (int64_t)(c1 - n) * 4); n++;
+    // 3: the counter goes up, and on most passes back down
+    lo[3] = n * 4;
+    w[n++] = a_movzw(9, 0);
+    w[n++] = a_movz(11, 0);
+    const size_t c2 = n;
+    w[n++] = a_addi(11, 11, 1);
+    w[n++] = a_addwi(9, 9, 1);
+    w[n++] = A_STR_X10_X28_8;
+    w[n++] = a_tst_low(11, 16);
+    const size_t to_keep = n++;         // b.eq keep
+    w[n++] = a_subwi(9, 9, 1);
+    w[to_keep] = a_bcond(A_EQ, (int64_t)(n - to_keep) * 4);
+    w[n++] = a_cmpwi(9, 4095);
+    w[n] = a_bcond(A_LO, (int64_t)(c2 - n) * 4); n++;
+    // 4: two back edges, the second leaving the counter as it was
+    lo[4] = n * 4;
+    w[n++] = a_movz(9, 0);
+    w[n++] = a_movz(11, 0);
+    const size_t c3 = n;
+    w[n++] = a_addi(11, 11, 1);
+    w[n++] = A_STR_X10_X28_8;
+    w[n++] = a_tst_low(11, 20);
+    const size_t to_down = n++;         // b.ne down
+    w[n++] = a_addi(9, 9, 1);
+    w[n++] = a_cmpi(9, 256);
+    w[n] = a_bcond(A_LO, (int64_t)(c3 - n) * 4); n++;   // the first back edge
+    const size_t to_done = n++;         // b done
+    w[to_down] = a_bcond(A_NE, (int64_t)(n - to_down) * 4);
+    w[n++] = a_eor(10, 10, 11);
+    w[n] = a_b((int64_t)(c3 - n) * 4); n++;             // the second
+    w[to_done] = a_b((int64_t)(n - to_done) * 4);
+    lo[5] = n * 4;
+    w[n] = a_b((int64_t)(outer - n) * 4); n++;
+    // leaf(x0): 50 passes, no call
+    const size_t leaf = n;
+    lo[6] = n * 4;
+    w[call_leaf] = a_bl((int64_t)(leaf - call_leaf) * 4);
+    w[n++] = a_movzw(9, 0);
+    w[n++] = a_movz(1, 0);
+    const size_t l_loop = n;
+    w[n++] = a_addr(1, 1, 0, 0);
+    w[n++] = a_eor(1, 1, 9);
+    w[n++] = a_addwi(9, 9, 1);
+    w[n++] = a_cmpwi(9, 50);
+    w[n] = a_bcond(A_LO, (int64_t)(l_loop - n) * 4); n++;
+    w[n++] = a_mov(0, 1);
+    w[n++] = 0xD65F03C0u;               // ret
+    lo[7] = n * 4;
+    w[0] = a_b((int64_t)start * 4);
+    w[1] = RO;                          // MOD0's offset
+    memcpy(img, w, n * 4);
+    memcpy(img + 0x10, "NRO0", 4);
+    const uint32_t hdr[] = {0, SIZE, 0, 0, 0x1000, RO, DATA - RO, DATA, SIZE - DATA, BSS};
+    memcpy(img + 0x14, hdr, sizeof hdr);
+    memcpy(img + RO, "MOD0", 4);
+    const int32_t mod0[] = {0x20, SIZE - RO, SIZE + BSS - RO, 0x40, 0x40, SIZE - RO};
+    memcpy(img + RO + 4, mod0, sizeof mod0);
+    const uint64_t bound = 1ull << 28;
+    memcpy(img + DATA, &bound, 8);
+    return SIZE;
+}
+
+// The child's side: the shapes' guest addresses, the main thread's CPU clock (this runs on it), then the tester as the pause test starts its own
+static int lat_start(const module_t *m) {
+    static uint8_t img[0x3000];
+    uint64_t lo[LAT_SHAPES + 3];
+    if (!polls_nro(img, sizeof img, lo)) return 0;
+    for (int i = 0; i < LAT_SHAPES + 3; i++) g_lat.lo[i] = (uint64_t)(uintptr_t)m->base + lo[i];
+#if !defined(_WIN32)
+    g_lat.have_clk = pthread_getcpuclockid(pthread_self(), &g_lat.clk) == 0;
+#endif
+    g_pt.text_lo = (uint64_t)(uintptr_t)m->base; g_pt.text_hi = g_pt.text_lo + 0x1000;
+    const uint64_t stack = (uint64_t)(uintptr_t)dm_guest_alloc(0x10000);
+    uint64_t r[32] = {0, dm_guest_fn((const void *)t_aot_pause_tester), 0, stack + 0x10000, 44, (uint64_t)-2};
+    svc_dispatch(0x08, r, 0);
+    if (r[0]) { printf("[RED] t_aot_host: svcCreateThread for the polls tester: %#llx\n", (unsigned long long)r[0]); return 0; }
+    uint64_t s[32] = {r[1]};
+    svc_dispatch(0x09, s, 0);
+    return 1;
+}
+static uint64_t lat_cpu_ns(void) {
+#if !defined(_WIN32)
+    struct timespec ts;
+    if (g_lat.have_clk && !clock_gettime(g_lat.clk, &ts)) return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+#endif
+    return plat_now_ns();   // no thread CPU clock: the wall clock (an upper bound)
+}
+static int lat_u32_cmp(const void *a, const void *b) { const uint32_t x = *(const uint32_t *)a, y = *(const uint32_t *)b; return x < y ? -1 : x > y; }
+static unsigned lat_median(int shape) {
+    const unsigned n = g_lat.n[shape];
+    if (!n) return 0;
+    qsort(g_lat.cpu_us[shape], n, sizeof g_lat.cpu_us[shape][0], lat_u32_cmp);
+    return g_lat.cpu_us[shape][n / 2];
+}
+static void lat_body(void) {
+    const uint32_t self = thr_cur_handle();
+    uint64_t seed = 0x2545F4914F6CDD1Dull;
+    const uint64_t give_up = plat_now_ns() + 30000000000ull;
+    for (;;) {
+        int done = g_lat.pauses >= LAT_MAX_PAUSES || plat_now_ns() > give_up || dm_aot_stop_status() >= 0;
+        int all = 1;
+        for (int i = 0; i < LAT_SHAPES; i++) all &= g_lat.n[i] >= g_lat.min;
+        if (done || all) break;
+        plat_sleep_ns((10 + rng(&seed) % 91) * 1000);
+        uint32_t hs[8];
+        if (thr_handles(hs, 8, self) < 1) continue;
+        const uint64_t c0 = lat_cpu_ns(), w0 = plat_now_ns();
+        const int paused = svc(0x32, hs[0], 1) == 0;   // returns once the thread stopped
+        const uint64_t w1 = plat_now_ns(), c1 = lat_cpu_ns();
+        if (!paused) continue;
+        g_lat.pauses++;
+        hz_ctx c;
+        memset(&c, 0, sizeof c);
+        const char *why = NULL;
+        if (svc(0x33, (uint64_t)(uintptr_t)&c, hs[0])) why = "GetThreadContext3 failed";
+        else if (c.pc < g_pt.text_lo || c.pc >= g_pt.text_hi || (c.pc & 3)) why = "pc is no guest instruction";
+        else if (!dm_aot_in_arena(c.sp, 1) || (c.sp & 15)) why = "sp is no 16-byte aligned guest stack address";
+        if (why) {
+            if (!g_lat.inconsistent++) snprintf(g_lat.bad, sizeof g_lat.bad, "%s (pc %#llx sp %#llx)", why, (unsigned long long)c.pc, (unsigned long long)c.sp);
+        } else {
+            int shape = -1;
+            for (int i = 0; i < LAT_SHAPES; i++) if (c.pc >= g_lat.lo[i] && c.pc < g_lat.lo[i + 1]) shape = i;
+            if (c.pc >= g_lat.lo[LAT_SHAPES + 1] && c.pc < g_lat.lo[LAT_SHAPES + 2]) shape = 1;   // the leaf's loop (with every poll)
+            if (shape < 0) g_lat.elsewhere++;
+            else {
+                g_lat.n[shape]++;
+                if (c1 - c0 > g_lat.cpu_max[shape]) g_lat.cpu_max[shape] = c1 - c0;
+                const uint64_t us = (c1 - c0) / 1000;
+                g_lat.cpu_us[shape][g_lat.n[shape] - 1] = us > UINT32_MAX ? UINT32_MAX : (uint32_t)us;
+                if (w1 - w0 > g_lat.wall_max[shape]) g_lat.wall_max[shape] = w1 - w0;
+            }
+        }
+        svc(0x32, hs[0], 0);   // resume
+    }
+    for (int i = 0; i < LAT_SHAPES; i++)
+        printf("t_aot_host: latency %s: %u stops, median %u us, worst %.1f us of its CPU time, %.1f us wall\n", LAT_NAMES[i], g_lat.n[i], lat_median(i),
+               (double)g_lat.cpu_max[i] * 1e-3,
+               (double)g_lat.wall_max[i] * 1e-3);
+    printf("t_aot_host: latency: %u pauses, %u elsewhere, %u inconsistent%s%s\n", g_lat.pauses, g_lat.elsewhere, g_lat.inconsistent, g_lat.inconsistent ? "; first: " : "",
+           g_lat.bad);
+    fflush(stdout);
+    dm_aot_svc(dm_aot_self_state(), 0x07);   // svcExitProcess: the main thread leaves at its next poll
+    dm_aot_svc(dm_aot_self_state(), 0x0A);   // and this thread here
+}
+
+// nxaot build <nro> --shared <out> --tier H, with NXAOT_POLL_ELISION=0 when every poll is wanted: its exit status, its `aot: safepoint polls:` line into line
+static int nxaot_polls_build(const char *nxaot, const char *nro, const char *out, int every, char *line, size_t n) {
+    char cmd[4096], buf[4096];
+#if defined(_WIN32)
+    snprintf(cmd, sizeof cmd, "\"\"%s\" build \"%s\" --shared \"%s\" --tier H 2>&1\"", nxaot, nro, out);
+#else
+    snprintf(cmd, sizeof cmd, "'%s' build '%s' --shared '%s' --tier H 2>&1", nxaot, nro, out);
+#endif
+    set_env("NXAOT_POLL_ELISION", every ? "0" : NULL);
+    line[0] = 0;
+    FILE *f = popen(cmd, "r");
+    if (!f) { set_env("NXAOT_POLL_ELISION", NULL); return -1; }
+    while (fgets(buf, sizeof buf, f)) if (!strncmp(buf, "aot: safepoint polls:", 21)) { snprintf(line, n, "%s", buf); line[strcspn(line, "\n")] = 0; }
+    const int st = pclose(f);
+    set_env("NXAOT_POLL_ELISION", NULL);
+    return st;
+}
+
+// The rows: the NRO packed with the polls left out and with every poll, the counts, and each pack's run under the tester
+static void polls_rows(const char *self, const char *nxaot) {
+    if (!nxaot || !*nxaot) { printf("%-14s %-9s note: no nxaot (--nxaot, NXAOT): polls is not packed here\n", "polls", "latency"); return; }
+    static uint8_t img[0x3000];
+    uint64_t lo[LAT_SHAPES + 3];
+    const size_t len = polls_nro(img, sizeof img, lo);
+    char nro[200];
+    mkdir("t_aot_host.tmp", 0755);
+    mkdir("t_aot_host.tmp/polls", 0755);
+    snprintf(nro, sizeof nro, "t_aot_host.tmp/polls/polls.nro");
+    FILE *f = fopen(nro, "wb");
+    const int wrote = len && f && fwrite(img, 1, len, f) == len;
+    if (f) fclose(f);
+    unsigned long long total[2] = {0}, left_bounded[2] = {0};
+    for (int every = 0; every < 2; every++) {
+        // One file name in two folders: the name is the pack's soname, part of its bytes
+        char dir[200], pack[300], line[1000] = "", note[2400], buf[1000];
+        snprintf(dir, sizeof dir, "t_aot_host.tmp/polls/%s", every ? "every" : "elided");
+        mkdir(dir, 0755);
+        snprintf(pack, sizeof pack, "%s/polls%s", dir, PACK_EXT);
+        result r;
+        memset(&r, 0, sizeof r);
+        static char no_lines[1];
+        r.guest = no_lines;
+        const int built = wrote && nxaot_polls_build(nxaot, nro, pack, every, line, sizeof line) == 0;
+        unsigned long long entries = 0, kept = 0;
+        const int counted = built && sscanf(line, "aot: safepoint polls: %llu at function entries, %llu at backward branches of %llu (%llu left out closing",
+                                            &entries, &kept, &total[every], &left_bounded[every]) == 4;
+        // Exactly the two bounded loops' polls left out (the other three shapes' and the calling loops' kept); every poll in the old pack
+        const int counts_ok = counted && left_bounded[every] == (every ? 0u : 2u) && kept + left_bounded[every] == total[every] && (!every || total[1] == total[0]);
+        if (!counts_ok) {
+            snprintf(note, sizeof note, "%s: %s", built ? "the poll counts are not the expected ones (want 2 left out in loops bounded by a constant; 0 with every poll)"
+                                                        : wrote ? "nxaot build failed" : "cannot write the NRO", line[0] ? line : "no safepoint polls line");
+            row("polls", every ? "every" : "elided", 0, &r, note);
+            continue;
+        }
+        // The run: the child's own lines (its latency lines, its status line, a [RED] line)
+        char cmd[1200];
+#if defined(_WIN32)
+        snprintf(cmd, sizeof cmd, "\"\"%s\" --run \"%s\" \"%s\" --latency %d 2>&1\"", self, pack, nro, LAT_MIN);
+#else
+        snprintf(cmd, sizeof cmd, "'%s' --run '%s' '%s' --latency %d 2>&1", self, pack, nro, LAT_MIN);
+#endif
+        unsigned n[LAT_SHAPES] = {0}, pauses = 0, elsewhere = 0, inconsistent = 1;
+        double cpu[LAT_SHAPES] = {0}, wall[LAT_SHAPES] = {0};
+        unsigned median[LAT_SHAPES] = {0};
+        int have_sum = 0, have[LAT_SHAPES] = {0};
+        FILE *p = popen(cmd, "r");
+        while (p && fgets(buf, sizeof buf, p)) {
+            for (int i = 0; i < LAT_SHAPES; i++) {
+                char head[80];
+                snprintf(head, sizeof head, "t_aot_host: latency %s: ", LAT_NAMES[i]);
+                if (!strncmp(buf, head, strlen(head)))
+                    have[i] = sscanf(buf + strlen(head), "%u stops, median %u us, worst %lf us of its CPU time, %lf us wall", &n[i], &median[i], &cpu[i], &wall[i]) == 4;
+            }
+            if (!strncmp(buf, "t_aot_host: latency: ", 21)) have_sum = sscanf(buf, "t_aot_host: latency: %u pauses, %u elsewhere, %u inconsistent", &pauses, &elsewhere, &inconsistent) == 3;
+            if (!strncmp(buf, "t_aot_host: status ", 19)) sscanf(buf, "t_aot_host: status %*d after %lf s", &r.secs);
+            if (strstr(buf, "[RED]") && !r.red[0]) { snprintf(r.red, sizeof r.red, "%s", strstr(buf, "[RED]")); r.red[strcspn(r.red, "\n")] = 0; }
+        }
+        const int st = p ? pclose(p) : -1;
+#if defined(_WIN32)
+        r.status = st;
+#else
+        r.status = st >= 0 && WIFEXITED(st) ? WEXITSTATUS(st) : 128;
+#endif
+        int ok = r.status == 0 && have_sum && inconsistent == 0;
+        double worst_cpu = 0, worst_wall = 0;
+        size_t o = (size_t)snprintf(note, sizeof note, "%s; %u pauses", line + 5, pauses);
+        for (int i = 0; i < LAT_SHAPES; i++) {
+            ok = ok && have[i] && n[i] >= LAT_MIN && cpu[i] < LAT_BOUND_US;
+            if (cpu[i] > worst_cpu) worst_cpu = cpu[i];
+            if (wall[i] > worst_wall) worst_wall = wall[i];
+            if (o < sizeof note) o += (size_t)snprintf(note + o, sizeof note - o, "; %s: %u stops, median %u us CPU, worst %.1f us CPU, %.1f us wall", LAT_NAMES[i], n[i], median[i], cpu[i], wall[i]);
+        }
+        if (o < sizeof note)
+            snprintf(note + o, sizeof note - o, "; worst %.1f us of the thread's CPU time from request to stop (bound %d us), %.1f us wall; %u inconsistent, %u elsewhere%s%s",
+                     worst_cpu, LAT_BOUND_US, worst_wall, inconsistent, elsewhere, r.red[0] ? "; " : "", r.red);
+        row("polls", every ? "every" : "elided", ok, &r, note);
+    }
+}
+
 // int_ops under the sampler: the child's run and checks (--positions), the profile's rows of the hot function, and with nxaot the round trip (the header's list)
 static void positions_rows(const char *self, const char *name, const char *pack, const char *nrop, const char *corpus, const char *expected, const char *nxaot) {
     char dir[300], prof[400] = "", entries[400] = "", module[64] = "", note[2000];
@@ -1250,6 +1598,9 @@ int main(int argc, char **argv) {
     int guestbt = !nonly;
     for (int i = 0; i < nonly; i++) guestbt |= !strcmp(only[i], "guestbt");
     if (guestbt) guestbt_rows(argv[0], nxaot);   // 8. The guest's call site and backtrace in an abort, an svcBreak and a fault
+    int polls = !nonly;
+    for (int i = 0; i < nonly; i++) polls |= !strcmp(only[i], "polls");
+    if (polls) polls_rows(argv[0], nxaot);    // 9. The polls left out of bounded loops, and the loops that must keep theirs: every pause prompt
     printf("t_aot_host: %d checks, %d failed\n", checks, fails);
     return fails != 0;
 }

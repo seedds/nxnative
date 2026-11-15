@@ -354,7 +354,19 @@ public:
     void FnTailLr(Value* target, uint32_t reason);
     // A safepoint poll (section 6.2): one compare and branch on st->poll; the cold path stores the dirty registers and pc (the block then holds
     // the whole register file) and calls plan->rt_safepoint
-    void FnPoll(Value* pc, const Regs& dirty);
+    enum class PollKind : uint8_t { Entry, Back, Table, Split };
+    void FnPoll(Value* pc, const Regs& dirty, PollKind kind, uint64_t site = 0, uint64_t target = 0);
+    struct PollSite {
+        PollKind kind;
+        uint64_t site = 0, target = 0;     // Back: the branch's guest offset and the block it goes back to
+        llvm::LoadInst* flag = nullptr;    // the load of st->poll
+        llvm::BranchInst* br = nullptr;    // the compare's branch: to cold (the flag set) or cont
+        BasicBlock* cold = nullptr;        // the stores, pc and the call of rt_safepoint
+        BasicBlock* cont = nullptr;        // where both go on
+    };
+    std::vector<PollSite> polls;
+    // After the body (Run): the polls of backward branches whose loop needs none, left out (lower_calls.cpp: the rule and its proof)
+    void FnElidePolls();
     // A gate of design 1.1 (FunctionPlan::obs_gates, spin_gates): the dirty registers and pc to the block (it then holds the whole register file),
     // plan->rt_gate(st, site), and with reload x0..x29 from the block again (an observer may change them)
     void FnGate(uint64_t site, Value* pc, const Regs& dirty, bool reload);

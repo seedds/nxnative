@@ -132,8 +132,9 @@ constexpr uint64_t kAnalysisPerWord = 64, kAnalysisFixed = 128ull << 20;
 // registers forwarded within blocks and NZCV made lazily, rotates by a constant as shifts, the tier pipelines of 5d and tier C's code for
 // FastISel (an object of format 3 under the same key would hold its own helpers, which the tables' object now defines too). 5: the code of
 // "Against native" (README.md): sbfm as a shift pair, the stores of a loop whose iterations call on the edges into it, NZCV stored at a call
-// only where the caller may read it after the call or the callee may read it (a callee's reads.nzcv in "callees" and "targets")
-constexpr const char* kUnitKeyFormat = "nxaot-unit 5";
+// only where the caller may read it after the call or the callee may read it (a callee's reads.nzcv in "callees" and "targets"). 6: the polls of
+// loops bounded by a constant left out at H and H+ (README.md, "Threads and safepoints"), the test switch NXAOT_POLL_ELISION in the key
+constexpr const char* kUnitKeyFormat = "nxaot-unit 6";
 
 // The section each unit's !pcsections marks go to (the line table, "The line table" below): read back after code generation and kept out of
 // the link (SHF_EXCLUDE)
@@ -781,6 +782,9 @@ struct Common {
     // The hot indirect targets (design 12; README.md, "Hot indirect targets"): the guarded sites, site -> target (module offsets), from the targets file beside the profile
     // (TargetsFromProfile); empty without one, and with the test switch NXAOT_PROFILE_TARGETS=0
     std::map<uint64_t, uint64_t> guards;
+    // The polls of loops bounded by a constant left out at tiers H and H+ (design 6.2; lift::FunctionPlan::elide_polls),
+    // unless the test switch NXAOT_POLL_ELISION=0 says not (every poll, as before: for A / B measurements and bisecting)
+    bool poll_elision = true;
 
     std::vector<nxaot_gate_site> SitesOf(uint64_t entry) const {
         const auto it = sites.find(entry);
@@ -832,6 +836,9 @@ struct UnitStats {
     // functions (or parts) with samples profi found no flow for
     uint64_t weighted = 0, weighted_branches = 0, entry_counts = 0, weighted_calls = 0, no_flow = 0;
     uint64_t guarded = 0;  // indirect sites lowered with a guard (the hot indirect targets: Common::guards)
+    // The safepoint polls (lift::Lifted): at entries, at backward branches, those left out (a bounded loop's), before jump tables, at transfers
+    // between parts
+    uint64_t polls_entry = 0, polls_back = 0, polls_bounded = 0, polls_table = 0, polls_split = 0;
     double t_lift = 0, t_verify = 0, t_opt = 0, t_codegen = 0;
     std::vector<std::string> notes;
     // --isel-misses: FastISel's misses by kind (IselMissKind): how many, and the IR instructions they handed to SelectionDAG; not cached
@@ -842,7 +849,8 @@ struct UnitStats {
         f.counts = {{"blocks", blocks}, {"calls", calls}, {"indirect_calls", indirect_calls}, {"tail_calls", tail_calls},
                     {"indirect_tails", indirect_tails}, {"returns", returns}, {"svcs", svcs}, {"traps", traps}, {"refused", refused},
                     {"lines_lost", lines_lost}, {"text_bytes", text_bytes}, {"object_bytes", object_bytes}, {"gates", gates},
-                    {"splits", splits}};
+                    {"splits", splits}, {"polls_entry", polls_entry}, {"polls_back", polls_back}, {"polls_bounded", polls_bounded},
+                    {"polls_table", polls_table}, {"polls_split", polls_split}};
         if (weighted || no_flow) {  // a unit with samples to weigh by only: the facts of the others are as before
             f.counts.insert({{"weighted", weighted}, {"weighted_branches", weighted_branches}, {"entry_counts", entry_counts},
                              {"weighted_calls", weighted_calls}, {"no_flow", no_flow}});
@@ -873,6 +881,11 @@ struct UnitStats {
         u.object_bytes = get("object_bytes");
         u.gates = get("gates");
         u.splits = get("splits");
+        u.polls_entry = get("polls_entry");
+        u.polls_back = get("polls_back");
+        u.polls_bounded = get("polls_bounded");
+        u.polls_table = get("polls_table");
+        u.polls_split = get("polls_split");
         u.weighted = get("weighted");
         u.weighted_branches = get("weighted_branches");
         u.entry_counts = get("entry_counts");
@@ -2215,6 +2228,9 @@ bool CompileUnit(const Common& c, llvm::TargetMachine& tm, const Unit& u, std::s
         fp.rt_safepoint = k.safepoint;
         fp.jit_entry = k.jit_entry;
         fp.safepoints = o.safepoints;
+        // Loops bounded by a constant without their polls at H and H+ (lower_calls.cpp, FnElidePolls), where the loop passes then unroll them;
+        // at W (measured: README.md, "Threads and safepoints") and C every poll stays
+        fp.elide_polls = c.poll_elision && (u.tier == Tier::H || u.tier == Tier::HPlus);
         fp.ic_empty = k.ic_empty;
         fp.ic_prefix = "nxaot.ic." + llvm::utohexstr(part ? part->lo : entry) + ".";
         fp.debug = k.Subprogram(body, part ? part->lo : entry);
@@ -2306,6 +2322,13 @@ bool CompileUnit(const Common& c, llvm::TargetMachine& tm, const Unit& u, std::s
         st->traps += l.traps;
         st->splits += l.splits;
         st->guarded += l.guarded.size();
+        if (l.function) {  // a refused function's body is the JIT's stub below: its code polls nothing
+            st->polls_entry += l.polls_entry;
+            st->polls_back += l.polls_back;
+            st->polls_bounded += l.polls_bounded;
+            st->polls_table += l.polls_table;
+            st->polls_split += l.polls_split;
+        }
         if (!l.function) {
             // Refused (an opcode the lowering does not cover, an internal error): a body that hands the function to the JIT fallback (section 11,
             // case 4), so that the rest of the module still runs: what it is passed to the block, the JIT from its entry until it returns to lr,
@@ -3012,6 +3035,7 @@ std::string UnitKey(const Common& c, uint64_t entry) {
     k.Add("format", kUnitKeyFormat).Add("tool", c.tool).Add("target", c.triple + " " + c.cpu + " " + c.features);
     k.Add("tier", TierName(c.TierOf(entry))).Add("cc", lift::CallConvName(o.cc)).Add("correctness", o.correctness).Add("debug_info", o.debug_info);
     k.Add("line_table", o.line_table).Add("safepoints", o.safepoints).Add("no_inline", o.no_inline).Add("fpsr", c.fpsr).Add("fpcr", uint64_t{0});
+    k.Add("poll_elision", c.poll_elision);
     k.Add("prefix", c.prefix);
     if (o.windows) {
         k.Add("host", "windows: win64cc run-time calls, no red zone");  // a Windows pack's units (AdaptForWindows); a Linux pack's keys are as before
@@ -3788,7 +3812,7 @@ bool BuildObjects(const module::Image& image, const BuildOptions& o, const std::
     // The gates (design 1.1): the manifest's obs and spin rows the functions' code holds are served (the units call them, CompileUnit checks
     // it); a row no discovered code holds is not, and the host, which checks every row against the descriptor, says so as well
     Common c{image, o, d, plan, conv, Sanitize(image.name), fpsr, tm0->getTargetTriple().str(), s.cpu, s.features, TargetOf(*tm0), "",
-             GatesOf(image), {}, {}, {}, {}, {}, {}, false, {}};
+             GatesOf(image), {}, {}, {}, {}, {}, {}, false, {}, true};
     if (o.split) {
         for (const auto& [entry, ff] : plan.fns) {
             std::vector<Part> parts = SplitParts(d.functions.at(entry), ff, o.split_above);
@@ -3808,6 +3832,13 @@ bool BuildObjects(const module::Image& image, const BuildOptions& o, const std::
         const char* sw = std::getenv("NXAOT_PROFILE_WEIGHTS");
         c.weights = !(sw && std::string_view(sw) == "0");
         s.profile_weights = c.weights;
+    }
+    // The polls of loops bounded by a constant are left out at tiers H and H+ (design 6.2) unless the test switch
+    // NXAOT_POLL_ELISION=0 says not
+    {
+        const char* sw = std::getenv("NXAOT_POLL_ELISION");
+        c.poll_elision = !(sw && std::string_view(sw) == "0");
+        s.poll_elision = c.poll_elision;
     }
     GapTiers(o, d, plan, &c.tiers, &s);
     for (const auto& [entry, ff] : plan.fns) s.entry_only_functions += c.SampledAtEntryOnly(entry);
@@ -4099,6 +4130,11 @@ bool BuildObjects(const module::Image& image, const BuildOptions& o, const std::
         s.svcs += u.svcs;
         s.traps += u.traps;
         s.splits += u.splits;
+        s.polls_entry += u.polls_entry;
+        s.polls_back += u.polls_back;
+        s.polls_bounded += u.polls_bounded;
+        s.polls_table += u.polls_table;
+        s.polls_split += u.polls_split;
         s.weighted_functions += u.weighted;
         s.weighted_branches += u.weighted_branches;
         s.entry_counts += u.entry_counts;

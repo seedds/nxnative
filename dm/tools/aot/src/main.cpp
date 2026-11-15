@@ -794,6 +794,18 @@ int Build(int argc, char** argv) {
     std::printf("aot: split functions %llu into %llu parts, %llu transfers between parts, joined in %.3f s (design 9.3)\n",
                 static_cast<unsigned long long>(s.split_functions), static_cast<unsigned long long>(s.split_parts),
                 static_cast<unsigned long long>(s.splits), s.t_join);
+    // The safepoint polls (design 6.2; README.md, "Threads and safepoints"): emitted, and the backward branches' left out (closing a loop bounded by a
+    // constant, at tiers H and H+); all of them with the test switch NXAOT_POLL_ELISION=0
+    if (!o.safepoints) {
+        std::printf("aot: safepoint polls: none (--no-safepoints)\n");
+    } else {
+        std::printf("aot: safepoint polls: %llu at function entries, %llu at backward branches of %llu (%llu left out closing loops bounded by a "
+                    "constant at tiers H and H+%s), %llu before jump tables, %llu at backward transfers between parts\n",
+                    static_cast<unsigned long long>(s.polls_entry), static_cast<unsigned long long>(s.polls_back - s.polls_bounded),
+                    static_cast<unsigned long long>(s.polls_back), static_cast<unsigned long long>(s.polls_bounded),
+                    s.poll_elision ? "" : "; off: NXAOT_POLL_ELISION=0", static_cast<unsigned long long>(s.polls_table),
+                    static_cast<unsigned long long>(s.polls_split));
+    }
     if (!o.profile_path.empty()) {
         std::printf("aot: profile %s: %llu samples at %llu offsets, %llu outside every function\n", o.profile_path.c_str(),
                     static_cast<unsigned long long>(s.profile_samples), static_cast<unsigned long long>(s.profile_offsets),

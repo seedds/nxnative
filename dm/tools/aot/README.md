@@ -905,6 +905,93 @@ at once, the block having been complete when the SVC was entered; such a thread 
 holds x0..x30, SP, pc, NZCV, v0..v31, FPCR, FPSR and the TLS registers; x0..x8 of a thread stopped inside an SVC may still change as the SVC writes
 its results. The resume clears the requests and the poll bytes and wakes every waiter.
 
+**Polls a loop bounded by a constant does not need** (6.2; [src/lift/lower_calls.cpp](src/lift/lower_calls.cpp), `FnElidePolls`). What 6.2 asks
+of the polls is a bound on how long a thread runs between two safepoints, not a poll on every edge. Measured first, per kind
+(`measure_packs.py --rounds 12 --layouts 3`, the base binary against one with that kind of poll removed: builds for the measurement only,
+unsound; per-layout medians, the load 4 to 20): the entry polls cost nothing measurable (tier W: int_ops-gcc +0.6 %, int_ops-clang −0.9 %,
+switch-gcc +1.5 %, switch-clang −1.0 %, simd 0 and 0, the benchmark −1.1 %; tier H: −1.7 to 0 %), the backward branches' polls are the cost
+(W: switch-gcc −8.2 %, switch-clang −10.6 %, simd-gcc −9.3 %, simd-clang −2.7 %, the benchmark −3.6 %, int_ops ±0.9 %; H: int_ops-gcc
+−29.0 %, int_ops-clang −11.7 %, switch-gcc −6.6 %, switch-clang −9.2 %, simd-gcc −13.2 %, the benchmark +0.2 %: at H a poll also keeps LLVM's
+loop passes from unrolling a loop or computing it away). The entry polls stay, and with them a poll on every cycle of the call graph.
+
+The rule: the branch back to the head h of an innermost natural loop L (no inner loop) that calls nothing but intrinsics and the run time's
+floating-point and AES helpers (no guest code, no host call, no gate) and whose trip count ScalarEvolution bounds by a constant has no poll
+when N × P ≤ 4,096, N the passes through h per entry into L (its constant maximum backedge-taken count plus one) and P the longest path from
+h over L's blocks in lifted-IR operations (cold paths left out, a helper call counted 256, the sum of all of L's blocks when a cycle inside L
+avoids h). Why it keeps the bound (the comment in lower_calls.cpp has it whole): every pass through h but the first comes over a back edge,
+and between two passes no block repeats without a poll (a cycle inside L that avoids h is no natural loop's: it holds a backward branch to
+another block, which keeps its poll), so one entry into L runs at most 4,096 operations without a poll; a cycle through the branch stays in L
+(leaving L it would enter again at h, which a simple cycle passes once), and a cycle that leaves L holds a backward branch the rule does not
+cover (the innermost loop containing h is L itself), which polls: a stretch without a poll enters each such loop at most once and grows by at
+most 4,096 operations there, as straight-line code of that length would. 4,096 operations are about as many x86 instructions, a few thousand
+guest instructions, about a microsecond (a few hundred if every one were a cache miss); the requester (hle_thread.c `SetThreadActivity`) waits
+on a condition variable it checks again every 100 µs and warns after a second, and its own wake-up of the paused thread takes microseconds.
+The lifter decides on a copy of the function: mem2reg, InstCombine (a 32-bit counter kept in a 64-bit register becomes a narrow induction
+variable ScalarEvolution can count) and LoopSimplify (a preheader for every loop, its back edges joined in one empty block), which keep the
+meaning and only split or join edges, so a bound on the copy's runs between polls is one on the function's; then the function itself loses the
+poll (compare, branch, cold path) before the tier's passes. Kept: a loop bounded by a register or by a value loaded from guest memory (no
+constant bound), whose counter changes on some paths only, with back edges that change its counter differently, with a call or an inner loop,
+or over the budget; the polls before jump tables, at transfers between parts and at entries; the spin gates' and observation gates' loops
+(gates are calls). Every poll left is as it was, its cold path storing what the block needs.
+
+At tiers H and H+ only (`fp.elide_polls`, [src/build/pack.cpp](src/build/pack.cpp)). Measured at W as well (the rule at every tier, with the
+polls of backward branches on no cycle left out too, an earlier version): simd-gcc −4.65 %, switch-clang −4.8 %, the benchmark −4.2 % faster
+in every layout, int_ops-gcc +0.8 %, int_ops-clang +1.2 % and switch-gcc +3.0 % slower in every layout. W has no loop passes: what a loop
+loses there is the poll's few instructions, and what LLVM then makes of the rest moved other code: int_ops-clang's `ref_udiv` (64 passes
+around a data-dependent branch, laid out otherwise once the cold path is gone: with that loop's poll kept, int_ops-clang is −0.95 %),
+int_ops-gcc's `ref_udiv` (without the cold path's use of `r - d`, InstCombine turned `select(c, r - d, r)` into `r - select(c, d, 0)`, one
+more operation on the loop's carried path: +4.6 % until the removal was moved after W's passes, +0.8 % then), switch-gcc's `main` (3,000
+instructions: the register allocator spills two more values in the loop around the call at 0x434 once inner loops' cold paths are gone).
+The branches on no cycle (a backward branch to a shared exit, taken once per call) moved switch-clang −4.8 % and switch-gcc +2.2 % with none
+in the hot code (rt_relocate's, rt_check's): layout, not polls; that rule was dropped.
+
+Left out at tier H (`aot: safepoint polls:` in nxaot's log; `NXAOT_POLL_LOG=1` writes the decision for every backward branch, with the trips and
+operations or the reason it is kept): the 4,000-function benchmark 1,099 of its 1,439 backward branches' polls; int_ops-gcc 16 of 169,
+int_ops-clang 3 of 92, switch-gcc 29 of 267, switch-clang 1 of 164, simd-gcc 109 of 292, simd-clang 5 of 94, fnptr-gcc 4 of 137, excl-gcc 4 of 184,
+except-gcc 11 of 232, fiber-gcc 15 of 153, fp-gcc 5 of 222, sjlj-gcc 13 of 144, and 0 or 1 in the other clang builds (clang unrolls such loops in
+the guest code itself). Kept, in the benchmark: 101 with no constant bound (a counter stepped by 2 towards a bound ScalarEvolution cannot prove
+even, a register bound), 97 with at most 2^33 or more trips, 75 in no natural loop (a backward branch to a shared exit), 41 not a branch to their
+loop's head, 14 with inner loops, 4 over the budget, 2 that call (through the dispatcher). The test switch `NXAOT_POLL_ELISION=0` keeps every poll
+(then H's packs are the base's: A / B measurements, bisecting); the unit key's format is `nxaot-unit 6` and holds the switch. The cost at H on the
+benchmark: lifting 3.9 → 7.7 s of CPU (the copies), the pack 21.5 → 23.1 s wall with 4 workers, its peak 267 → 313 MiB.
+
+Measured, the base binary (A) against this one (B) at tier H, `measure_packs.py --rounds 12 --layouts 3 --cpu 7` (the load 16 to 21):
+
+| Program | A | B | change | per layout A / B | `.text` A → B (bytes) | pack time, peak A → B |
+|---|---:|---:|---:|---|---:|---:|
+| int_ops-gcc (`int_ops_rounds = 20`, 20 runs) | 5.024 ms | 5.051 ms | +0.5 % | 5.024, 5.024, 5.024 / 5.045, 5.054, 5.051 ms | 65,580 → 58,412 | 0.96 → 0.95 s, 84 → 83 MiB |
+| int_ops-clang | 5.139 ms | 4.681 ms | −8.9 % | 5.139, 5.140, 5.136 / 4.681, 4.672, 4.688 ms | 55,624 → 55,256 | 0.87 → 0.87 s, 81 → 82 MiB |
+| switch-gcc (1,500 runs) | 137.0 µs | 133.0 µs | −2.9 % | 137, 137, 137 / 133, 133, 133 µs | 368,316 → 359,484 | 1.73 → 1.62 s, 138 → 139 MiB |
+| switch-clang | 109.0 µs | 110.0 µs | +0.9 % | 109, 109, 110 / 110, 109.5, 110 µs | 79,656 → 79,656 | 1.26 → 1.27 s, 90 → 91 MiB |
+| simd-gcc | 38.0 µs | 35.0 µs | −7.9 % | 38, 38, 38 / 35, 35, 35 µs | 128,260 → 90,532 | 1.92 → 1.66 s, 112 → 98 MiB |
+| simd-clang | 34.0 µs | 33.0 µs | −2.9 % | 34, 34, 34 / 33, 33, 33 µs | 105,964 → 105,772 | 1.74 → 1.89 s, 104 → 109 MiB |
+| fnptr-gcc | 6 µs | 6 µs | 0 (1 µs resolution) | | 55,980 → 54,876 | 0.81 → 0.83 s, 77 → 78 MiB |
+| fnptr-clang | | | the same pack | | 48,940 | |
+| benchmark, 4,000 functions (300 runs) | 688.0 µs | 689.5 µs | +0.2 % | 687, 695.5, 688 / 689.5, 685, 695.5 µs | 6,315,824 → 6,288,080 | 22.65 → 24.14 s, 264 → 308 MiB |
+
+Faster in every layout: int_ops-clang, switch-gcc, simd-gcc, simd-clang (int_ops-clang's `ref_udiv`, `ref_rbit64` and `ref_ror` and
+simd's 16-pass checks unrolled once their polls are gone). Within a percent either way, which a pack's layout alone moves ("The sample
+profile at tier H": 1 to 3 %; see W above for what such moves are made of): int_ops-gcc +0.5 % in every layout, switch-clang +0.9 % in two
+of three, the benchmark +0.2 % in two of three (its short loops of 3 to 22 passes gain nothing at H, as without every backward poll: +0.2 %).
+The rule with the branches on no cycle left out too measured int_ops-gcc −0.7 %, int_ops-clang −12.2 %, switch-gcc −0.7 %, switch-clang
+−3.2 %, simd as here and the benchmark +1.1 % at H: the same order, other programs moved by layout.
+
+**The polls rows** (CTest `t_aot_host`, dm/host/tests/t_aot_host.c `polls_rows`, written in the manner of `lrtail_nro`): an NRO written word by
+word whose start runs five shapes in turn, forever: (0) a loop of 2^17 passes around an inner loop of 100 (the inner loop's poll left out), (1) a
+loop of 2^18 calls of a leaf whose loop of 50 passes has none (the calling loop keeps its own; the leaf, which calls nothing, has no entry poll),
+and three that look bounded and must keep theirs, each with a store to guest memory per pass so that nothing computes it away and 2^28 passes, a
+quarter of a second or more: (2) bounded by a register (loaded from data), (3) a counter that goes up on one path through the body and back down on
+the other, (4) two back edges, one leaving the counter as it was. Packed at H twice (the polls left out, and with `NXAOT_POLL_ELISION=0`), nxaot's
+counts checked (exactly the two loops left out, 10 backward branches); each run under a tester thread that pauses the main thread at random
+intervals of 10 to 100 µs until every shape has been stopped in 100 times, measuring for each pause the main thread's CPU time from the request to
+its stop (what a missing poll makes long, and what the machine's load changes little: a vCPU the hypervisor takes away still counts) and the wall
+time, the stop's pc naming the shape; then svcExitProcess, which the main thread obeys at its next poll. Required: every shape stopped in 100
+times, no inconsistent context, the worst CPU time under 50 ms. In CTest (the `DM_AOT_ARENA_CHECK=1` run, the load 16 to 22): with the polls left
+out 4,887 pauses, every shape stopped in 100 to 1,961 times, the median CPU time from request to stop 3 to 5 µs in every shape and the worst 81 µs
+(6.6 ms wall); with every poll 3,948 pauses, medians 4 to 5 µs, the worst 354 µs (2.0 ms wall); in two other runs the worst went to 0.73 and 1.88
+ms of CPU time (a vCPU the hypervisor took away). An nxaot that skips the trip-count check (an unsound build, for this check only) leaves out a
+third poll, the register-bound loop's: the counts fail the row, and its run stops that shape 0 times and one pause 138 ms of CPU time late.
+
 **The pause test** (CTest `safepoints`, [tests/test_safepoints.py](tests/test_safepoints.py); `nxaot_host --pause-test N`, in the manner of
 dm/host's `tests/t_preempt.c`): a host thread beside the guest's stops every guest thread N times at random intervals while more than one runs,
 reads every state block while the world is stopped, checks it (pc a guest instruction, SP in the arena and 16-byte aligned at a poll, and at the
@@ -1400,6 +1487,14 @@ At the fast speed (fewer samples: 1 to 8 per variant, the native benchmark's one
 | fnptr-gcc, fnptr-clang | 1.3 µs | 3.08 → 3.07 (4.0 µs) | 5.39 → 5.38 (7.0 µs) | 3.08 → 3.07, 2.31 (4.0, 3.0 µs) | 3.08 → 3.07 (4.0 µs) |
 | benchmark | 162.7 µs | 2.26 → **2.02** (328.0 µs) | 6.06 → 5.50 (894.0 µs) | 2.41 → 2.23 (362.0 µs) | 2.35 → 2.15 (350.0 µs) |
 
+With the polls of loops bounded by a constant left out at H and H+ ("Threads and safepoints"; W's packs unchanged), `native_ratio.py --tiers
+W,H,H+ --cpu 7`, the base binary (38293f9) then this one, 8 rounds each, the load 18 falling to 4 during the first and 4 to 14 during the
+second; at the slow speed, base → now: int_ops-gcc H 1.17 → 1.17, int_ops-clang H 1.20 → 1.09, switch-gcc H 2.33 → 2.24 and H+ 2.23 → 2.19,
+switch-clang H 1.87 → 1.86 and H+ 1.71 → 1.70, the benchmark H 2.49 → 2.53 and H+ 2.44 → 2.47; but W, whose code is the same in both, moved
+the benchmark 2.30 → 2.44 between the two runs, and several variants had all their samples at one speed (the split then puts them in the
+fast group whatever their speed: int_ops-gcc's H+ and W): two runs minutes apart differ by that much here. measure_packs.py's alternating
+rounds ("Threads and safepoints") are the comparison to go by.
+
 So at tier W, without a profile, the recompiled code takes 1.2 to 1.3 times native's time on int_ops, 1.8 to 2.8 times on switch and 2.0
 to 2.4 times on the game-shaped benchmark; the GCC builds are the farther (their code is not native's compiler's, and GCC's switch code is
 8 times native's size). At H+ int_ops-clang comes to native's time (0.9 to 1.0) and int_ops-gcc to 1.15: H and H+ inline the guest's
@@ -1449,7 +1544,7 @@ programs). "Changed" are the three changes below; "left" is what the experiments
 | sbfm lowered as dynarmic writes it | 43.8 % | 37.9 % | 0 (no sbfm in its hot code) | 0 | 0 | yes: changed (1) |
 | registers set before a loop stored at its call on every iteration | 0 | 0 | 10.8 % | 5.9 % | 0 | yes: changed (2) |
 | NZCV packed and stored at every call | 10.6 % | 11.0 % | 4.3 % | 17.6 % | 0.8 % (not in every layout) | yes (a dead NZCV, design 6.2's rule): changed (3) |
-| safepoint polls | 0 | 1.0 % | 10.8 % | 18.6 % | 8.5 % | no (6.2); a bounded loop's: possibly, not done |
+| safepoint polls | 0 | 1.0 % | 10.8 % | 18.6 % | 8.5 % | the entry polls cost nothing; a loop's bounded by a constant: left out at H and H+ ("Threads and safepoints"), not at W (it moved other code there, both ways) |
 | the pending check after each call | 1.9 % | 2.0 % | 0 | 2.0 % | 3.2 % | no (3.3) |
 | guest memory volatile | 0 | 0 | (hangs) | (hangs) | (hangs) | no (6.4) |
 | FnTailLr's compare | 0 | 2.0 % | 0 | 7.8 % | (mixed) | no (3.3) |
@@ -1556,11 +1651,13 @@ tier H": 1 to 3 %).
 - **The pending check after every call** (3.3: `cmpq $0, 0x350(%r13); jne`): 0 to 2.7 % by its removal. A return to a frame that waits for
   a non-local transfer cannot be told apart otherwise without another way back from a callee (a second return address, or unwinding to the
   resume points), a change of 3.3.
-- **The safepoint polls** (6.2): 3 to 9 % of switch, simd and the benchmark, nothing on int_ops (there a load, a test and a predicted
-  branch beside the loop's own work). A loop whose trip count a constant
-  bounds would need none (it runs a bounded time between the polls of the code around it, as a function that neither calls nor loops does:
-  int_ops-gcc's 8-iteration bit loop polls 8 times per byte); that needs the bound on the lifted IR (the induction register's compare
-  against a constant), not done, and int_ops shows it would buy little there.
+- **The safepoint polls** (6.2): 3 to 9 % of switch, simd and the benchmark at W, nothing on int_ops (there a load, a test and a predicted
+  branch beside the loop's own work); measured by kind since ("Threads and safepoints"): the backward branches' polls are the cost, the
+  entries' cost nothing, and at H a poll also keeps the loop passes from unrolling a loop (int_ops-gcc −29 % without them at H). The polls of
+  loops bounded by a constant are left out at H and H+ now; at W the same rule was faster on simd-gcc, switch-clang and the benchmark and
+  slower on int_ops and switch-gcc (code moved by what LLVM made of the loops without their cold paths), and is not applied. What polls
+  remain: unbounded loops (a register or memory bound, the state machines' 1,000 steps of a whole switch, over the budget), loops that call,
+  and the entries.
 - **Guest memory as volatile** (6.4): every plain access made non-volatile, an unsound experiment, changed int_ops, simd and fnptr by at most
   0.4 % and made switch and the benchmark hang: on this code the guest compilers left LLVM nothing to merge; nothing here argues for
   revisiting 6.4 for speed.

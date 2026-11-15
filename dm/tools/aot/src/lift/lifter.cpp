@@ -382,6 +382,7 @@ Lifted FunctionLifter::Run(const std::string& name) {
     if (error.empty() && Fn()) {
         FnInitRegisters();
         FnCleanup();
+        FnElidePolls();  // the polls of loops bounded by a constant (section 6.2), when the plan asks for it
     }
     if (error.empty() && !Fn()) {
         Epilogue();

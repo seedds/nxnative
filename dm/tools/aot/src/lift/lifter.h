@@ -164,6 +164,10 @@ struct FunctionPlan {
     llvm::Function* jit_entry = nullptr;       // the JIT fallback with the standard entries' signature: calls and tail calls to a target with
                                                // no compiled entry (st->pc = the target)
     bool safepoints = true;                    // polls at the function's entry and at every branch to a block at or before its own start
+    // The polls of loops bounded by a constant left out (section 6.2; lower_calls.cpp, FnElidePolls): a branch back to the head of an innermost
+    // loop that calls nothing and whose every entry runs at most kPollBudget operations has no poll. src/build sets it at tiers H and H+ (unless
+    // NXAOT_POLL_ELISION=0); false: every poll
+    bool elide_polls = false;
     llvm::GlobalVariable* ic_empty = nullptr;  // the descriptor every inline cache starts with (it matches no guest address)
     std::string ic_prefix;                     // inline-cache slots are named <prefix><site offset>
     llvm::DISubprogram* debug = nullptr;       // debug locations, line = guest offset (section 9.2); null: none
@@ -256,6 +260,10 @@ struct Lifted {
     // Function mode: the sites lowered
     size_t calls = 0, indirect_calls = 0, tail_calls = 0, indirect_tails = 0, returns = 0, svcs = 0, traps = 0;
     size_t splits = 0;                     // transfers to another part of a split function (FunctionPlan::part_of)
+    // The safepoint polls (section 6.2) lowered: at the entry, at branches to a block at or before their own (before FnElidePolls), before jump
+    // tables that can branch back, at backward transfers between parts; and the backward branches' polls FnElidePolls left out (closing a loop
+    // bounded by a constant)
+    size_t polls_entry = 0, polls_back = 0, polls_table = 0, polls_split = 0, polls_bounded = 0;
     std::vector<uint64_t> gates;           // the gate sites (FunctionPlan::obs_gates, spin_gates) the function's code calls, sorted, each once
     std::vector<uint64_t> guarded;         // the sites lowered with a guard (FunctionPlan::guarded), sorted, each once
     // The guest blocks the function was lowered from (the sample profile at tier H, src/build/pack.cpp: samples at guest offsets become the

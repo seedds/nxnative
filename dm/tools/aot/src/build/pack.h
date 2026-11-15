@@ -84,6 +84,11 @@ struct BuildStats {
     uint64_t tier_functions[4] = {};          // functions compiled per tier (C, W, H, H+)
     uint64_t split_functions = 0, split_parts = 0, splits = 0;  // functions split for size, their parts, the transfers between parts
     double t_join = 0;                        // joining each split function's parts (ld.lld -r): wall clock
+    // The safepoint polls (design 6.2; lift::Lifted): at function entries, at backward branches (those left out: closing a loop bounded by a
+    // constant, at tiers H and H+), before jump tables, at backward transfers between parts; poll_elision off with the test switch
+    // NXAOT_POLL_ELISION=0
+    bool poll_elision = true;
+    uint64_t polls_entry = 0, polls_back = 0, polls_bounded = 0, polls_table = 0, polls_split = 0;
     uint64_t profile_samples = 0, profile_offsets = 0, profile_outside = 0;  // --profile: samples read, distinct offsets, offsets in no function
     // --profile: the samples' weights at tiers H and H+ (README.md, "The sample profile at tier H"): on (off with the test switch
     // NXAOT_PROFILE_WEIGHTS=0); the functions weighed, the branches given weights, the entry counts and the call sites given counts; and,

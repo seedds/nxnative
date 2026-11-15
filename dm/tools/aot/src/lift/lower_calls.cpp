@@ -16,17 +16,37 @@
 // arguments or return values: the reference the differential tests compare the summary-driven mode with.
 #include <algorithm>
 #include <bit>
+#include <cstdio>
+#include <cstdlib>
 #include <map>
+#include <optional>
+#include <set>
+#include <string>
+#include <vector>
 
 #include <llvm/ADT/StringExtras.h>
+#include <llvm/Analysis/LoopInfo.h>
+#include <llvm/Analysis/ScalarEvolution.h>
+#include <llvm/Analysis/ScalarEvolutionExpressions.h>
+#include <llvm/IR/CFG.h>
 #include <llvm/IR/CallingConv.h>
 #include <llvm/IR/Constants.h>
+#include <llvm/IR/DebugInfo.h>
 #include <llvm/IR/DebugInfoMetadata.h>
+#include <llvm/IR/Dominators.h>
 #include <llvm/IR/Function.h>
 #include <llvm/IR/GlobalVariable.h>
 #include <llvm/IR/IRBuilder.h>
 #include <llvm/IR/MDBuilder.h>
 #include <llvm/IR/Module.h>
+#include <llvm/Passes/PassBuilder.h>
+#include <llvm/Transforms/InstCombine/InstCombine.h>
+#include <llvm/Transforms/Utils/BasicBlockUtils.h>
+#include <llvm/Transforms/Utils/Cloning.h>
+#include <llvm/Transforms/Utils/Local.h>
+#include <llvm/Transforms/Utils/LoopSimplify.h>
+#include <llvm/Transforms/Utils/Mem2Reg.h>
+#include <llvm/Transforms/Utils/ValueMapper.h>
 
 #include "dynarmic/frontend/A64/a64_location_descriptor.h"
 #include "dynarmic/ir/basic_block.h"
@@ -759,7 +779,7 @@ void FunctionLifter::FnPrologue() {
         }
     }
     if (calls) {
-        FnPoll(Rel(plan->entry), plan->self.pass | kSpLr);
+        FnPoll(Rel(plan->entry), plan->self.pass | kSpLr, PollKind::Entry);
     }
     B.CreateBr(bbs.at(plan->entry));
 }
@@ -824,9 +844,15 @@ void FunctionLifter::FnInitRegisters() {
 
 // ---- Safepoints (section 6.2) ----
 
-void FunctionLifter::FnPoll(Value* pc, const Regs& dirty) {
+void FunctionLifter::FnPoll(Value* pc, const Regs& dirty, PollKind kind, uint64_t site, uint64_t target) {
     if (!plan->safepoints || !plan->rt_safepoint) {
         return;
+    }
+    switch (kind) {
+    case PollKind::Entry: ++stats->polls_entry; break;
+    case PollKind::Back: ++stats->polls_back; break;
+    case PollKind::Table: ++stats->polls_table; break;
+    case PollKind::Split: ++stats->polls_split; break;
     }
     // One compare and branch: the flag is read as a monotonic atomic, so that LLVM neither hoists it out of a loop nor merges two reads (the
     // requester writes it from another thread); on x86 it is a plain cmpb
@@ -835,7 +861,8 @@ void FunctionLifter::FnPoll(Value* pc, const Regs& dirty) {
     auto* cold = BasicBlock::Create(C, "safepoint", F);
     auto* cont = BasicBlock::Create(C, "polled", F);
     llvm::MDBuilder md{C};
-    B.CreateCondBr(B.CreateICmpNE(flag, B.getInt8(0)), cold, cont, md.createBranchWeights(1, 1u << 20));
+    auto* br = B.CreateCondBr(B.CreateICmpNE(flag, B.getInt8(0)), cold, cont, md.createBranchWeights(1, 1u << 20));
+    polls.push_back({kind, site, target, flag, br, cold, cont});
     B.SetInsertPoint(cold);
     // The registers newer than their block copy, then pc: the block holds the whole register file at a safepoint (a paused thread's context)
     StoreRegs(plan->correctness ? Regs::All() : dirty);
@@ -845,6 +872,277 @@ void FunctionLifter::FnPoll(Value* pc, const Regs& dirty) {
     call->setCallingConv(plan->rt_safepoint->getCallingConv());
     B.CreateBr(cont);
     B.SetInsertPoint(cont);
+}
+
+// ---- The polls a loop bounded by a constant does not need (section 6.2) ----
+//
+// What 6.2 needs is a bound on how long a thread runs between two safepoints, not a poll on every backward branch. The polls bound it so: every
+// cycle of a function's blocks holds a branch to a block at or before its own start (FnGoto; addresses cannot only grow around a cycle) and
+// every such branch polls, every cycle of the call graph passes a function entry that polls (FnPrologue), and a stretch without a poll is
+// therefore a path through each frame's code that repeats no block. This pass leaves out the poll of a backward branch that goes back to the
+// head h of a loop L (LLVM's natural loops) that has no inner loop, no call but intrinsics and the run time's floating-point and AES helpers
+// (no guest code, no host call, no gate), and that ScalarEvolution bounds by a constant: the header runs at most N = (constant maximum
+// backedge-taken count + 1) times per entry into L, and N x P <= kPollBudget, P the longest path from h over L's blocks in operations (cold
+// paths left out: they poll; a helper call counts kHelperCost; the sum of L's blocks when a cycle avoids h). Every pass through h but the first
+// comes over a back edge, and between two passes through h no block repeats without a poll (a cycle inside L that avoids h is no natural
+// loop's, so it holds a backward branch that does not go to h, which keeps its poll), so one entry into L runs at most kPollBudget operations
+// without a poll. A cycle through the branch that leaves L would have to enter L again at h, which it passes once: so every cycle through the
+// branch is inside L, and every cycle that leaves L holds a backward branch outside this rule (an innermost loop that contains h is L itself),
+// which polls: a stretch without a poll enters each such loop at most once, and grows by at most kPollBudget operations at each, as
+// straight-line code of that length would. The decision is made on a copy of the function after mem2reg (registers in SSA), InstCombine (a
+// 32-bit counter kept in a 64-bit register becomes a narrow induction variable) and LoopSimplify (a preheader for every loop, and its back edges
+// joined in one empty block, so that ScalarEvolution counts the passes through h and the values L is entered with are its own): transformations
+// that keep the function's meaning and only split or join edges with empty blocks, so a run of the copy is a run of the function with the same
+// polls and a bound on the copy's runs between polls is one on the function's. The function itself then loses the poll (its compare, branch and
+// cold path), before the tier's passes, which then see the loop without it.
+// The budget: 4,096 operations of the lifted IR (about as many x86 instructions; 1 to 3 per guest instruction: a few thousand guest
+// instructions, about a microsecond at one instruction per nanosecond, a few hundred microseconds if every one were a cache miss). The
+// requester of a pause (hle_thread.c SetThreadActivity) waits on a condition variable re-checked every 100 us and warns after a second; its own
+// wake-up of the paused thread costs microseconds, and a stretch of straight-line code or a chain of leaf calls is already that long.
+// Jump-table polls, transfers between parts and the function's entry poll stay. At every poll left, its cold path is as it was: the block holds
+// the whole register file there. The spin gates and observation gates are calls (rt_gate): their loops keep their polls. A loop whose bound is
+// a register, whose counter changes on some paths only, or that has a call keeps its poll (no constant bound, or the call). src/build asks for
+// it at tiers H and H+ only (FunctionPlan::elide_polls; README.md, "Threads and safepoints": at W, measured, it made programs slower as well
+// as faster)
+namespace {
+
+constexpr uint64_t kPollBudget = 4096;
+constexpr uint64_t kHelperCost = 256;
+
+// A call a loop without a poll may make: one that returns in bounded time and runs no guest code (or a trap, which does not return)
+std::optional<uint64_t> BoundedCallCost(const llvm::CallBase& call, const FunctionPlan& plan) {
+    const llvm::Function* f = call.getCalledFunction();
+    if (!f) {
+        return std::nullopt;
+    }
+    if (f->isIntrinsic()) {
+        return 1;
+    }
+    if (f == plan.rt_trap) {
+        return 1;
+    }
+    const llvm::StringRef n = f->getName();
+    if (n.starts_with("nxaot_rt_fp_") || n == "nxaot_rt_aes" || n.starts_with("nxaot.nan")) {
+        return kHelperCost;
+    }
+    return std::nullopt;
+}
+
+}  // namespace
+
+void FunctionLifter::FnElidePolls() {
+    static const bool log = std::getenv("NXAOT_POLL_LOG") != nullptr;  // a line per backward branch's poll: left out or kept, and why
+    std::vector<size_t> back;
+    for (size_t i = 0; i < polls.size(); ++i) {
+        if (polls[i].kind == PollKind::Back) back.push_back(i);
+    }
+    if (back.empty() || !plan->elide_polls) {
+        return;
+    }
+    std::vector<std::string> verdict(polls.size());
+    std::vector<bool> elide(polls.size(), false);
+    // First on the function itself (its control flow is the copy's): the loops that cannot qualify (no natural loop, inner loops, a call:
+    // LoopSimplify only adds nesting and keeps the calls), so that a function with no other candidate is not copied
+    const auto loop_call = [this](const llvm::Loop* loop, const std::set<const BasicBlock*>& colds) -> std::string {
+        for (const BasicBlock* b : loop->blocks()) {
+            if (colds.count(b)) continue;
+            for (const llvm::Instruction& inst : *b) {
+                const auto* cb = llvm::dyn_cast<llvm::CallBase>(&inst);
+                if (cb && !BoundedCallCost(*cb, *plan)) {
+                    const llvm::Function* f = cb->getCalledFunction();
+                    return f ? f->getName().str() : "an indirect target";
+                }
+            }
+        }
+        return {};
+    };
+    std::vector<size_t> pending;
+    {
+        llvm::DominatorTree dt{*F};
+        llvm::LoopInfo li{dt};
+        std::set<const BasicBlock*> colds;
+        for (const PollSite& p : polls) colds.insert(p.cold);
+        for (const size_t i : back) {
+            const llvm::Loop* loop = li.getLoopFor(polls[i].br->getParent());
+            if (!loop) {
+                verdict[i] = "kept: in no natural loop";
+            } else if (!loop->getSubLoops().empty()) {
+                verdict[i] = "kept: its loop has inner loops";
+            } else if (const std::string call = loop_call(loop, colds); !call.empty()) {
+                verdict[i] = "kept: its loop calls " + call;
+            } else {
+                pending.push_back(i);
+            }
+        }
+    }
+    // The copy, for the loops left
+    if (!pending.empty()) {
+        llvm::ValueToValueMapTy vmap;
+        llvm::Function* copy = llvm::CloneFunction(F, vmap);
+        llvm::stripDebugInfo(*copy);  // which would name F's subprogram twice
+        const auto in_copy = [&](BasicBlock* b) { return llvm::dyn_cast_or_null<BasicBlock>(static_cast<Value*>(vmap.lookup(b))); };
+        llvm::PassBuilder pb;
+        llvm::LoopAnalysisManager lam;
+        llvm::FunctionAnalysisManager fam;
+        llvm::CGSCCAnalysisManager cgam;
+        llvm::ModuleAnalysisManager mam;
+        pb.registerModuleAnalyses(mam);
+        pb.registerCGSCCAnalyses(cgam);
+        pb.registerFunctionAnalyses(fam);
+        pb.registerLoopAnalyses(lam);
+        pb.crossRegisterProxies(lam, fam, cgam, mam);
+        llvm::FunctionPassManager fpm;
+        fpm.addPass(llvm::PromotePass());
+        fpm.addPass(llvm::InstCombinePass());
+        fpm.addPass(llvm::LoopSimplifyPass());
+        fpm.run(*copy, fam);
+        llvm::LoopInfo& li = fam.getResult<llvm::LoopAnalysis>(*copy);
+        llvm::ScalarEvolution& se = fam.getResult<llvm::ScalarEvolutionAnalysis>(*copy);
+        std::set<const BasicBlock*> colds;  // every poll's cold path, in the copy
+        for (const PollSite& p : polls) {
+            if (BasicBlock* c = in_copy(p.cold)) colds.insert(c);
+        }
+        for (const size_t i : pending) {
+            const PollSite& p = polls[i];
+            BasicBlock* at = in_copy(p.br->getParent());
+            BasicBlock* cont = in_copy(p.cont);
+            if (!at || !cont) {
+                verdict[i] = "kept: its blocks were folded in the copy";
+                continue;
+            }
+            const llvm::Loop* loop = li.getLoopFor(at);
+            if (!loop) {
+                verdict[i] = "kept: in no natural loop";
+                continue;
+            }
+            if (!loop->getSubLoops().empty()) {
+                verdict[i] = "kept: its loop has inner loops";
+                continue;
+            }
+            // The branch goes back to the loop's head: straight there, or through the block LoopSimplify joined the back edges in
+            const BasicBlock* head = loop->getHeader();
+            const BasicBlock* latch = loop->getLoopLatch();
+            const BasicBlock* to = cont->getSingleSuccessor();
+            const bool joined = to && to == latch && latch->getSingleSuccessor() == head && latch->getFirstNonPHI() == latch->getTerminator();
+            if (!latch || !loop->contains(cont) || (to != head && !joined)) {
+                verdict[i] = "kept: not a branch back to its loop's head";
+                continue;
+            }
+            // What one pass through the loop costs at most: the longest path from the head over the loop's blocks (cold paths left out: they
+            // poll), with the operations of each block (a helper call kHelperCost); a call of anything else keeps the poll
+            std::map<const BasicBlock*, uint64_t> weight;
+            std::string call;
+            for (const BasicBlock* b : loop->blocks()) {
+                if (colds.count(b)) continue;
+                uint64_t w = 0;
+                for (const llvm::Instruction& inst : *b) {
+                    if (llvm::isa<llvm::PHINode>(inst)) continue;
+                    uint64_t cost = 1;
+                    if (const auto* cb = llvm::dyn_cast<llvm::CallBase>(&inst)) {
+                        const auto c = BoundedCallCost(*cb, *plan);
+                        if (!c) {
+                            const llvm::Function* f = cb->getCalledFunction();
+                            call = f ? f->getName().str() : "an indirect target";
+                            break;
+                        }
+                        cost = *c;
+                    }
+                    w += cost;
+                }
+                if (!call.empty()) break;
+                weight[b] = w;
+            }
+            if (!call.empty()) {
+                verdict[i] = "kept: its loop calls " + call;
+                continue;
+            }
+            uint64_t path = 0;
+            {
+                // Depth first from the head over the loop's edges but those back to it: postorder, and whether some edge closes a cycle (one
+                // that avoids the head polls on it: then each block counts once per pass, the sum of all)
+                std::map<const BasicBlock*, int> state;  // 1 on the stack, 2 done
+                std::vector<const BasicBlock*> post;
+                std::vector<std::pair<const BasicBlock*, llvm::const_succ_iterator>> stack;
+                bool acyclic = true;
+                state[head] = 1;
+                stack.push_back({head, llvm::succ_begin(head)});
+                while (!stack.empty()) {
+                    auto& [b, it] = stack.back();
+                    if (it == llvm::succ_end(b)) {
+                        state[b] = 2;
+                        post.push_back(b);
+                        stack.pop_back();
+                        continue;
+                    }
+                    const BasicBlock* s = *it++;
+                    if (s == head || !weight.count(s)) continue;
+                    if (state[s] == 1) acyclic = false;
+                    if (state[s] == 0) {
+                        state[s] = 1;
+                        stack.push_back({s, llvm::succ_begin(s)});
+                    }
+                }
+                if (acyclic) {
+                    std::map<const BasicBlock*, uint64_t> longest;
+                    for (auto b = post.rbegin(); b != post.rend(); ++b) {
+                        uint64_t in = 0;
+                        for (const BasicBlock* q : llvm::predecessors(*b)) {
+                            if (*b != head && longest.count(q)) in = std::max(in, longest[q]);
+                        }
+                        longest[*b] = in + weight[*b];
+                        path = std::max(path, longest[*b]);
+                    }
+                } else {
+                    for (const auto& [b, w] : weight) path += w;
+                }
+            }
+            const auto* k = llvm::dyn_cast<llvm::SCEVConstant>(se.getConstantMaxBackedgeTakenCount(loop));
+            if (!k) {
+                verdict[i] = "kept: no constant bound on its trip count";
+                continue;
+            }
+            const llvm::APInt& n = k->getAPInt();
+            if (n.getActiveBits() > 32) {
+                verdict[i] = "kept: at most 2^" + std::to_string(n.getActiveBits()) + " trips";
+                continue;
+            }
+            const uint64_t trips = n.getZExtValue() + 1;
+            const std::string bound = std::to_string(trips) + " trips x " + std::to_string(path) + " operations";
+            if (trips * path > kPollBudget) {
+                verdict[i] = "kept: " + bound + " over the budget of " + std::to_string(kPollBudget);
+                continue;
+            }
+            elide[i] = true;
+            verdict[i] = "left out: " + bound;
+        }
+        fam.clear();
+        copy->eraseFromParent();
+    }
+    for (const size_t i : back) {
+        if (log) {
+            std::fprintf(stderr, "aot: poll of the branch at %#llx back to %#llx (function %#llx): %s\n", static_cast<unsigned long long>(polls[i].site),
+                         static_cast<unsigned long long>(polls[i].target), static_cast<unsigned long long>(plan->entry), verdict[i].c_str());
+        }
+        if (!elide[i]) continue;
+        // The branch to the continuation alone, the compare and the flag's load gone, the cold path deleted (no predecessor is left)
+        PollSite& p = polls[i];
+        llvm::BranchInst::Create(p.cont, p.br);
+        auto* cmp = llvm::dyn_cast<llvm::Instruction>(p.br->getCondition());
+        p.br->eraseFromParent();
+        p.br = nullptr;
+        if (cmp && cmp->use_empty()) {
+            cmp->eraseFromParent();
+        }
+        if (p.flag->use_empty()) {
+            auto* addr = llvm::dyn_cast<llvm::Instruction>(p.flag->getPointerOperand());
+            p.flag->eraseFromParent();
+            p.flag = nullptr;
+            if (addr) llvm::RecursivelyDeleteTriviallyDeadInstructions(addr);
+        }
+        llvm::DeleteDeadBlock(p.cold);
+        p.cold = nullptr;
+        ++stats->polls_bounded;
+    }
 }
 
 // ---- The gates of design 1.1: observation gates and spin waits' back-edges ----
@@ -1182,7 +1480,7 @@ void FunctionLifter::FnSplit(uint64_t target, bool store) {
         FlushFpsr();
     }
     if (target <= cur_start) {
-        FnPoll(Rel(target), Regs{});
+        FnPoll(Rel(target), Regs{}, PollKind::Split);
     }
     llvm::FunctionType* type = part->getFunctionType();
     std::vector<Value*> args(type->getNumParams());
@@ -1353,7 +1651,7 @@ void FunctionLifter::FnGoto(Value* target) {
                 // only grow around a cycle), so a poll here bounds the time between polls in any loop (section 6.2)
                 Regs dirty = cur_dirty;
                 dirty.nzcv = dirty.nzcv && nzcv_live.count(*off);
-                FnPoll(Rel(*off), dirty);
+                FnPoll(Rel(*off), dirty, PollKind::Back, cur_end - 4, *off);
             }
             const auto loop = entry_stores.find(*off);
             if (loop != entry_stores.end()) {
@@ -1376,7 +1674,7 @@ void FunctionLifter::FnGoto(Value* target) {
         // A recovered jump table: an LLVM switch over the module offsets of its targets (section 4); another value goes to the dispatcher.
         // A case at or before this block closes a loop through the table: the poll comes before the switch, at the br itself
         if (std::any_of(cur_table->begin(), cur_table->end(), [&](uint64_t t) { return t <= cur_start && bbs.count(t); })) {
-            FnPoll(Rel(site), cur_dirty);
+            FnPoll(Rel(site), cur_dirty, PollKind::Table);
         }
         auto* other = BasicBlock::Create(C, "table_miss", F);
         auto* sw = B.CreateSwitch(B.CreateSub(target, base), other, static_cast<unsigned>(cur_table->size()));

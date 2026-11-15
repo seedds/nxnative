@@ -22,6 +22,10 @@ int main(void) {
     CHECK(h_sf_Connect(&h, "olsc:u") == RES_OK && h, "olsc:u is served");
     CHECK(request(h, m, 0) == RES_OK, "olsc:u request");
     CHECK(!(m[1] >> 31) && m[4] == 0x4f434653 && m[6] == RES_OK, "olsc:u: success, no special header, SFCO at +0x10");
+    uint32_t mn = 0;
+    CHECK(h_sf_Connect(&mn, "mnpp:app") == RES_OK && mn && mn != h, "mnpp:app is served");
+    CHECK(request(mn, m, 1) == RES_OK && m[4] == 0x4f434653 && m[6] == RES_OK && !(m[1] >> 31), "a mission event: success, no output");
+    h_sf_Close(mn);
     CHECK(h_sf_Connect(&h, "chat:u") == 0xe15u, "a service the host does not serve is not registered");
 
     uint32_t cam = 0;

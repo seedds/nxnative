@@ -178,6 +178,23 @@ static int img_path(const char *p, int *mi, int64_t *k) {
     return 0;
 }
 static void save_old_names(const char *from, const char *to);
+// Called with the path lock held, after Gothic II has mounted its RomFS.
+static int gothic_has_file(const char *relative) {
+    for (int i = 0; i < g_nmnt; i++) {
+        const mount_t *mount = &g_mnt[i];
+        if (!mnt_named(mount, "rom")) continue;
+        char path[1024];
+        struct stat st;
+        if (rom_overlay_path(mount, relative, path, sizeof path))
+            return !stat(path, &st) && S_ISREG(st.st_mode);
+        if (!mount->img) return 0;
+        int64_t entry = img_find(mount->img, relative);
+        return entry >= 0 && mount->img->e[entry].type;
+    }
+    return 0;
+}
+#include "hle_fs_gothic.h"
+
 static Result mount_ex(const char *name, const char *dir, int ro, int txn) {
     pthread_once(&g_txn_lock_once, txn_locks_init);
     PATH_LOCK(); pthread_mutex_lock(&g_lock);
@@ -216,6 +233,7 @@ static Result mount_ex(const char *name, const char *dir, int ro, int txn) {
         if (why) { txn_err = errno ? errno : EIO; g_mnt[g_nmnt].ro = 1; strlcpy(g_mnt[g_nmnt].dir, dir, sizeof g_mnt[0].dir);
             LOG("[RED] save transaction: %s (%s, errno=%d) -- mounting the committed directory %s read-only instead: saves cannot be written this session, the committed version is unchanged", why, work, txn_err, dir); }
         else {
+            gothic_apply_language(name, work);
             strlcpy(g_mnt[g_nmnt].commit, dir, sizeof g_mnt[0].commit);
             g_mnt[g_nmnt].txn_root = g_nmnt;
             atomic_store(&g_mnt[g_nmnt].poison, 0);

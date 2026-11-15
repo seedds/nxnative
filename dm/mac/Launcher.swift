@@ -476,7 +476,6 @@ private struct SettingLine: View, Equatable {
         let room = SlidingChoice.width / CGFloat(o.count) - 16, font = NSFont.systemFont(ofSize: NSFont.systemFontSize)
         return o.allSatisfy { ($0[1] as NSString).size(withAttributes: [.font: font]).width <= room }
     }
-    private var text: Binding<String> { Binding(get: { value }, set: set) }
     // A stepped slider is drawn with a tick for every step (20 dots under a 5 % step), so the slider is continuous and the value snaps to the step here
     private var number: Binding<Double> {
         Binding(get: { Double(value) ?? s.max ?? 1 },
@@ -518,10 +517,7 @@ private struct SettingLine: View, Equatable {
             if segmented {
                 SlidingChoice(title: s.label, options: s.options ?? [], value: value, set: set)
             } else {
-                Picker(s.label, selection: text) {
-                    ForEach(s.options ?? [], id: \.[0]) { Text($0[1]).tag($0[0]) }
-                }
-                .labelsHidden().pickerStyle(.menu).buttonStyle(.borderless).fixedSize()   // borderless: the value and its chevrons, as a Form draws a menu
+                MenuChoice(title: s.label, options: s.options ?? [], value: value, set: set)
             }
         case "range":
             let label = LauncherModel.rangeLabel(s, number.wrappedValue, handheld: handheld)
@@ -641,6 +637,117 @@ private struct InfoPopover: NSViewRepresentable {
                 popover.close()
             }
             didClose()
+        }
+    }
+}
+
+/// A longer choice as a menu, drawn as System Settings draws one: the chosen option, then the menu's chevrons in a small circle. Under the pointer the circle grows
+/// into a rounded box around the option and the chevrons, and a click anywhere in that box opens the menu. An AppKit pop-up button draws the option and opens the
+/// menu over it, at the chosen option; SwiftUI's menu picker is that button too, but gives no way to open it from the chevrons
+private struct MenuChoice: View {
+    let title: String
+    let options: [[String]]   // [value, label]
+    let value: String
+    let set: (String) -> Void
+    @State private var button = Weak()   // the pop-up button, which a click on the box opens
+    @State private var over = false
+    @Environment(\.isEnabled) private var enabled
+
+    var body: some View {
+        let lit = over && enabled
+        HStack(spacing: 6) {
+            PopUp(title: title, options: options, value: value, set: set, button: button)
+            Image(systemName: "chevron.up.chevron.down").font(.system(size: 9, weight: .bold))
+                .foregroundStyle(.secondary)
+                .frame(width: 20, height: 20)
+                .background(Circle().fill(Color.primary.opacity(lit ? 0 : 0.07)))
+                .opacity(enabled ? 1 : 0.5)
+                .allowsHitTesting(false)   // a click on the chevrons is the box's
+                .accessibilityHidden(true)
+        }
+        // The box reaches past the option and the circle without moving them: 10 pt before the option, 2 pt around the circle
+        .padding(.leading, 10).padding([.trailing, .vertical], 2)
+        .background {
+            ZStack {
+                PointerOver { over = $0 }
+                Button { button.view?.performClick(nil) } label: {
+                    RoundedRectangle(cornerRadius: 6, style: .continuous).fill(Color.primary.opacity(lit ? 0.07 : 0)).contentShape(.rect)
+                }
+                .buttonStyle(.plain).focusable(false).accessibilityHidden(true)
+            }
+        }
+        .padding(.leading, -10).padding([.trailing, .vertical], -2)
+    }
+
+    final class Weak { weak var view: NSPopUpButton? }
+
+    private struct PopUp: NSViewRepresentable {
+        let title: String
+        let options: [[String]]
+        let value: String
+        let set: (String) -> Void
+        let button: Weak
+
+        /// Takes no click itself: the box under it does, and opens it
+        final class Button: NSPopUpButton { override func hitTest(_ point: NSPoint) -> NSView? { nil } }
+
+        func makeCoordinator() -> Coordinator { Coordinator() }
+        func makeNSView(context: Context) -> Button {
+            let b = Button(frame: .zero, pullsDown: false)
+            b.isBordered = false
+            (b.cell as? NSPopUpButtonCell)?.arrowPosition = .noArrow   // the chevrons are MenuChoice's, in their circle
+            b.target = context.coordinator
+            b.action = #selector(Coordinator.chose(_:))
+            b.setAccessibilityLabel(title)
+            return b
+        }
+        func updateNSView(_ b: Button, context: Context) {
+            context.coordinator.set = set
+            button.view = b
+            if b.itemArray.map(\.title) != options.map({ $0[1] }) {
+                b.removeAllItems()
+                for o in options {   // one by one: addItems(withTitles:) drops a title that is there already
+                    let item = NSMenuItem(title: o[1], action: nil, keyEquivalent: "")
+                    item.representedObject = o[0]
+                    b.menu?.addItem(item)
+                }
+            }
+            if let i = options.firstIndex(where: { $0[0] == value }), b.indexOfSelectedItem != i { b.selectItem(at: i) }
+            b.isEnabled = context.environment.isEnabled
+        }
+        func sizeThatFits(_ proposal: ProposedViewSize, nsView b: Button, context: Context) -> CGSize? { b.intrinsicContentSize }
+
+        final class Coordinator: NSObject {
+            var set: (String) -> Void = { _ in }
+            @objc func chose(_ b: NSPopUpButton) { if let v = b.selectedItem?.representedObject as? String { set(v) } }
+        }
+    }
+}
+
+/// Whether the pointer is over a view's rectangle: an AppKit tracking area. SwiftUI's hover counts only what takes clicks, and a menu's box went dark over its
+/// chevrons, which let clicks through to the box. A menu tracks the pointer itself while it is open, and the app can go to the back with the pointer on the
+/// view: the area looks again then
+private struct PointerOver: NSViewRepresentable {
+    let changed: (Bool) -> Void
+    func makeNSView(context: Context) -> Area { Area() }
+    func updateNSView(_ area: Area, context: Context) { area.changed = changed }
+
+    final class Area: NSView {
+        var changed: (Bool) -> Void = { _ in }
+        private var inside = false { didSet { if inside != oldValue { changed(inside) } } }
+        override init(frame: NSRect) {
+            super.init(frame: frame)
+            addTrackingArea(NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .activeInActiveApp, .inVisibleRect], owner: self))
+            NotificationCenter.default.addObserver(self, selector: #selector(look), name: NSMenu.didEndTrackingNotification, object: nil)
+            NotificationCenter.default.addObserver(self, selector: #selector(look), name: NSApplication.didResignActiveNotification, object: nil)
+        }
+        required init?(coder: NSCoder) { nil }
+        override func hitTest(_ point: NSPoint) -> NSView? { nil }   // a click is for what is under it
+        override func mouseEntered(with event: NSEvent) { inside = true }
+        override func mouseExited(with event: NSEvent) { inside = false }
+        @objc private func look() {
+            guard let w = window, NSApp.isActive else { inside = false; return }
+            inside = visibleRect.contains(convert(w.mouseLocationOutsideOfEventStream, from: nil))
         }
     }
 }

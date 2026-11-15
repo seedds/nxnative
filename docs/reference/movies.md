@@ -4,6 +4,16 @@ The SDK's movie library (`movie::Decoder`, `movie::Extractor`), which the host t
 
 ## Decoder lifecycle
 
+### Audio decoder history survives a movie seek
+
+- **Symptom:** AAC samples after a seek or loop differ from a fresh decode of the same packets; the old position's overlap can contaminate the beginning of the new position.
+- **Cause:** `md_reset` cleared packet/output queues but kept AudioToolbox's AAC converter history. `AudioConverterReset` is required at a source discontinuity. Vorbis was reopened separately after releasing the decode lock, leaving a window in which a new packet could decode with old history before the reopen.
+- **Fix:** reset the AAC converter and clear its input pointer while `dmu` excludes packet decoding. If the converter cannot reset, dispose it and reopen from the configuration on the next packet. Close Vorbis in the same locked reset, rather than after it. Stop/destruction still close the codecs normally; packet times and playback buffering are unchanged.
+- **Check:** `t_movie_vpx.c` generates stereo and six-channel AAC with the system encoder. Replaying packet zero without a reset produces different PCM (negative control); after Flush, including repeated Flush, the original PCM and 1,024-sample frame count return exactly. Passed with AddressSanitizer and UBSan, alongside the Vorbis flush/window and VP8/VP9 checks. The encoder requires access to macOS's codec service.
+- **Found on:** focused regression during Mortal Kombat 11's movie audio investigation (`0100F2200C984000`). The saved game run had no audio-device underruns; the owner subsequently reported working playback. No quantitative steady-playback lip-sync or stutter benchmark was recorded.
+
+
+
 ### Native texture buffers with zero capacity
 
 - **Symptom:** `[RED] movie: client buffer in native-texture mode is 0 bytes, needs 8 (a texture object)` and `movieStatus_ErrorBadValue`; opening logos or movies do not display.

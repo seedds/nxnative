@@ -195,7 +195,7 @@ if [ "${DM_METAL_CAPTURE:-0}" = 1 ]; then /usr/libexec/PlistBuddy -c "Add :Metal
 RP=; if [ -n "${PROGRAMS_TSV:-}" ]; then   # a game of several programs: each program's files, which the Xcode build phase copies under p<index> as the IPA has them (stage_resources.sh)
   RP=Gen/resources_programs.tsv; printf '# program\tRomFS\tmarker\tiOS shaders\tshader folder (build_ipa.sh)\n' > "$RP"
   M0=$MSLDIR; while IFS= read -r row; do prog_set "$row"; printf '%s\t%s\t%s\t%s\t%s\n' "$PN" "$ROMFS" "$MARKER" "$(lib_path "$MSL_IOS/$MSLDIR")" "$MSLDIR" >> "$RP"; done < <(prog_rows); prog_back; MSLDIR=$M0; fi
-DM_RESOURCE_BUILD=${PKG:-} GAME=$GAME python3 tools/gen_resources.py "$IOS" "$ROMFS" "$MARKER" "$(lib_path "$MSL_IOS/$MSLDIR")" "$MSLDIR" "$AOC" "$XCODE_DD" "$DM/gfx/nvn/dmsh_chain.h" "$PSO" $RP || die "generate Xcode resource paths"
+DM_RESOURCE_BUILD=${PKG:-} GAME=$GAME DM_RESOURCE_GL=$( [ "$GFXAPI" = nvn ] && [ -d "$MSL_IOS/gl" ] && echo "$MSL_IOS/gl" || echo "" ) python3 tools/gen_resources.py "$IOS" "$ROMFS" "$MARKER" "$(lib_path "$MSL_IOS/$MSLDIR")" "$MSLDIR" "$AOC" "$XCODE_DD" "$DM/gfx/nvn/dmsh_chain.h" "$PSO" $RP || die "generate Xcode resource paths"
 if [ "$PREPARE_XCODE" = YES ]; then
   t "Xcode project: $IOS/DmIOS.xcodeproj"
   t "Xcode derived data: $XCODE_DD"
@@ -259,6 +259,7 @@ elif [ -f "$ROMFS" ]; then MAPS=("$P/romfs.img=$ROMFS"); else MAPS=("$P/romfs=$R
 if [ -n "$AOC" ] && [ -d "$AOC" ]; then MAPS+=("$P/aoc=$AOC"); t "add-on content: $(ls "$AOC" | tr '\n' ' ')"; fi
 if [ -n "${PSO:-}" ]; then MAPS+=("$P/pso=$PSO"); fi
 MAPS+=("$P/msl/$MSLDIR=$MSL_IOS/$MSLDIR" "$P=$APP")
+if [ "$GFXAPI" = nvn ] && [ -d "$MSL_IOS/gl" ]; then MAPS+=("$P/msl/gl=$MSL_IOS/gl"); t "GL shader libraries (the game draws through the GL layer too): $MSL_IOS/gl"; fi
   if [ -d "$(dirname "$ROMFS")/html" ]; then MAPS+=("$P/html=$(dirname "$ROMFS")/html"); t "offline HTML pages: $(dirname "$ROMFS")/html"; fi   # beside its RomFS, where the host finds them (hle_web.c)
   if [ -d "$(dirname "$ROMFS")/jit" ]; then MAPS+=("$P/jit=$(dirname "$ROMFS")/jit"); t "nn::jit image: $(dirname "$ROMFS")/jit"; fi
 fi

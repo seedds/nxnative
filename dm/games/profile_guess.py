@@ -264,13 +264,18 @@ def shader_sources(imports, glsl_src, glslc_mods, spirv, unreal_paks, trinity_pa
     # Edition (Digital Eclipse, SDK 20) links both paths, never calls EGL on the Mac, and compiles the GLSL in its .shader files with subsdk2's glslcCompile; taken for OpenGL, it
     # got no GLSLC capture and drew nothing (black screen, sound and input working)
     own_glslc = 'nvnBootstrapLoader' in imports and 'glslcCompile' in imports and bool(glsl_src) and bool(glslc_mods)
+    # A game of Rayman's class may still render through the GL names: Xuan Yuan Sword: Mists Beyond the Mountains draws with SDL's GLES2 renderer
+    # through those EGL entry points, and its every GL draw skipped without the GL shader libraries beside the NVN ones (black screen on the iPhone). A static
+    # guess cannot tell it from Rayman, which never calls EGL: the GL libraries are built beside the NVN chain, and skipped when the game compiles no GLSL
+    gl_too = own_glslc and 'eglCreateWindowSurface' in imports and bool(gl_names)
     gl = not vulkan and not nro_nvn and 'eglCreateWindowSurface' in imports and bool(gl_names) and not own_glslc
     nro_glslc = not vulkan and not gl and 'glslcCompile' in nro_imports and bool(glslc_mods)
     return {'graphics': ('vulkan', (f'main imports {vk} Vulkan functions' if vk else f'the NROs the game loads reference {nro_vk} Vulkan names (a statically linked runtime)') + ' and not nvnBootstrapLoader: the host\'s Vulkan layer (dm/gfx/vk/hle_vk.m)') if vulkan else
                         ('gl', 'main imports EGL and names glShaderSource: it renders with OpenGL and compiles GLSL, the host\'s GL layer (dm/gfx/gl/hle_gl.m)') if gl else
                         ('nvn', 'the NROs the game loads import nvnBootstrapLoader' if nro_nvn and 'nvnBootstrapLoader' not in imports else
-                                'main imports nvnBootstrapLoader and compiles its GLSL with GLSLC; its EGL and glShaderSource are left unused (Rayman 30th Anniversary Edition)' if own_glslc and 'eglCreateWindowSurface' in imports and gl_names else
+                                'main imports nvnBootstrapLoader and compiles its GLSL with GLSLC; it may also render through its EGL and glShaderSource (Xuan Yuan Sword: Mists Beyond the Mountains), or leaves them unused (Rayman 30th Anniversary Edition)' if own_glslc and 'eglCreateWindowSurface' in imports and gl_names else
                                 'main imports nvnBootstrapLoader'),
+            'gl_too': (gl_too, 'main names glShaderSource and may draw through SDL\'s GLES2 renderer as well as NVN (Xuan Yuan Sword: Mists Beyond the Mountains): the GL shader libraries are built beside the NVN ones, and skipped when the game compiles no GLSL (Rayman 30th Anniversary Edition)'),
             'vk_capture': (vulkan and not spirv, 'no SPIR-V file in the RomFS: the game generates its shaders at run time (Super Mario Galaxy), captured by booting it on the Mac'),
             'gl_capture': (gl and not gl_src and not gl_files, 'no GLSL source in the RomFS or main: the game puts its shaders together at run time (LÖVE: Balatro), captured by booting it on the Mac'),
             'glslc_capture': (not vulkan and not gl and bool(glsl_src or romfs_glsl) and 'glslcCompile' in imports and bool(glslc_mods) or nro_glslc,

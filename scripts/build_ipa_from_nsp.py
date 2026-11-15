@@ -3148,6 +3148,13 @@ def main(args=None):
         derive_compute = (lambda: derive_shader_tables('the reader decoded additional compute kernels from this registered build')) if not own else None
         pkey = split_shaders(py, repo, [rfs.source(dirs[v]) for v in sv], [dirs[v] / 'ExeFS/main' for v in sv], sh / 'pkg', env, logs, g, own, oodle, dlc_roms, derive_dlc, derive_compute)
         if observed_glslc is not None: check_glslc_coverage(observed_glslc, g)
+        if src['gl_too'][0]:   # a game that may also draw through the host's GL layer (Xuan Yuan Sword: SDL's GLES2 renderer): its GL libraries go beside the NVN ones in the app's msl (build_ipa.sh, stage_resources.sh)
+            say(f'GL too ({src["gl_too"][1]})')
+            glcap = capture_shaders(repo, game, patched, work, env, logs, g, 'gl')
+            try: build_gl_shaders(py, repo, [rfs.source(game), game / 'ExeFS/main'] + dlc_roms + [glcap], sh, env, logs, g, reuse=not ALLOW_DAMAGED, mac=mac, provisional=bool(provisional or derived))
+            except BuildError as e:
+                if 'shader library' not in str(e): raise
+                say(f'no GLSL: the game never renders through GL, the GL libraries are skipped ({e})')
         seen = seen_keys(g, sh, seen_logs(work, app)) if seen_shaders else None
         ios = build_shaders(py, repo, sh, xlate, env, logs, g, pkey, mac, seen, None if mac else ios_wants_pulling(g, ios_gpus((args.gpu or PSO_GPUS).strip(), g), prepare_xcode, env))
     motion = MOTION if args.motion is None else args.motion

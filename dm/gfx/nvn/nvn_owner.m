@@ -166,7 +166,7 @@ static void alias_index(const alias_key *k, int add) {
 }
 static nvn_hmap g_alias_seen = {.klen = sizeof(alias_key)};   // key → the submission of its last lookup or creation (own_hook_submission; alias_take_over spares entries looked up lately)
 static CFMutableSetRef g_alias_set;                           // the textures in the sharing table (non-owning; "is this shared")
-static uint64_t g_alias_evicted, g_alias_taken;               // shared textures evicted on pool Finalize / when another texture took over their storage, in total (the memory report)
+static uint64_t g_alias_evicted, g_alias_taken, g_alias_pool_entries;               // shared textures evicted on pool Finalize / when another texture took over their storage, in total (the memory report)
 int own_shared_locked(id o) { return g_alias_set && o && CFSetContainsValue(g_alias_set, (__bridge const void *)o); }
 int own_keeps_locked(id o) { return tex_object_pinned(o) || own_shared_locked(o); }
 static void obj_drop(id o) { own_hook_drop(o, own_keeps_locked(o)); }   // caller holds g_smu
@@ -196,7 +196,14 @@ int own_alias_del_locked(const alias_key *k) { return alias_del(k); }
 // evict: Mario's pools stay for good, so entries are bounded; Engage frees pools on scene changes and rebuilds on new ones, so the old pools' render targets and other private textures
 // stayed in the table forever (about 0.8 GB more GPU memory over 850 s of the title demo), and linear textures built directly on a pool also kept the whole pool buffer alive. Also, when a
 // pool object's address is reused, old entries would hand a texture on the old storage to the new pool's texture at the same offset and description. Evicted textures go through deferred
-// release; if a serial entry still holds one, that is just one more reference
+// release.
+// The serial entries, live and finalized, that name an evicted texture or a view of one go with it (drop_entries_naming_locked): on NVN a pool's Finalize ends its memory, and a
+// texture object the game finalizes later names storage that is no longer there. Kept until that later Finalize, the entry held the Metal texture and its memory: Ocarina of Time
+// finalizes its 12288x12288 Depth16 shadow target's 288 MB pool at the load into Hyrule Field and the texture object only at the load back into Kakariko Village, after it has made the
+// target again, so the old 300 MB heap stayed resident through the whole field and beside the new one at the village load (docs/reference/memory.md, An area load holds its largest
+// target twice). The work encoded before the Finalize still has it: the release waits for the submission in flight (own_hook_drop), and a pin (a queued descriptor, a saved binding)
+// still holds it. A later lookup of such a serial finds no host texture (nvn_mtl.m's tex_mtl_: a texture of a pool that is gone makes nothing)
+static void drop_entries_naming_locked(CFSetRef gone, uint64_t **serials, uint32_t *nserials);
 uint32_t own_alias_drop_pool_locked(const void *pool) {
     uint32_t n = 0; alias_key *ks = NULL;
     for (uint32_t i = 0; i < g_alias.cap; i++) {
@@ -204,6 +211,12 @@ uint32_t own_alias_drop_pool_locked(const void *pool) {
         alias_key k; memcpy(&k, g_alias.keys + (size_t)i * g_alias.klen, sizeof k);
         if (k.pool != (uint64_t)(uintptr_t)pool) continue;
         alias_key *nk = realloc(ks, (n + 1) * sizeof *ks); if (!nk) break; ks = nk; ks[n++] = k;
+    }
+    if (n) {
+        CFMutableSetRef gone = CFSetCreateMutable(NULL, 0, NULL);
+        for (uint32_t j = 0; j < n; j++) { void *o = nvn_hm_get(&g_alias, &ks[j]); if (o) CFSetAddValue(gone, o); }
+        uint64_t *sers = NULL; uint32_t nsers = 0; drop_entries_naming_locked(gone, &sers, &nsers); free(sers); g_alias_pool_entries += nsers;
+        CFRelease(gone);
     }
     for (uint32_t j = 0; j < n; j++) alias_del(&ks[j]);
     free(ks); g_alias_evicted += n;
@@ -255,7 +268,7 @@ void own_alias_at_locked(const void *pool, int64_t off, void (^fn)(const alias_k
 void own_alias_each_locked(void (^fn)(const alias_key *k, id o)) {
     for (uint32_t i = 0; i < g_alias.cap; i++) if (g_alias.vals[i]) fn((const alias_key *)(const void *)(g_alias.keys + (size_t)i * g_alias.klen), (__bridge id)g_alias.vals[i]);
 }
-own_alias_stats own_alias_stats_locked(void) { return (own_alias_stats){.n = g_alias.n, .cap = g_alias.cap, .cells = g_alias_cells.n, .evicted = g_alias_evicted, .taken = g_alias_taken}; }
+own_alias_stats own_alias_stats_locked(void) { return (own_alias_stats){.n = g_alias.n, .cap = g_alias.cap, .cells = g_alias_cells.n, .evicted = g_alias_evicted, .taken = g_alias_taken, .pool_entries = g_alias_pool_entries}; }
 
 const void *own_live_ref_locked(uint64_t k) { return nvn_hm_get(&g_by_serial, &k); }
 const void *own_live_ref(uint64_t k) { pthread_mutex_lock(&g_smu); const void *o = nvn_hm_get(&g_by_serial, &k); pthread_mutex_unlock(&g_smu); return o; }
@@ -436,6 +449,23 @@ int own_upgrade(id from, id to, uint64_t serial, id put) {
 // its pool wrote its bytes after that use: the content is dead on the console as well. The idle time keeps a texture whose bytes lie in a part of a larger one that the larger one's
 // writes leave alone (a smaller resolution's target in a dynamic-resolution buffer, PR #1453): it is read every frame. Its serial entries go with it, live and ghost, and the next use
 // makes it again (tex_mtl_), as after a finalize; a pin (a queued descriptor or a saved binding) keeps it. Caller holds g_smu
+// The serial entries, live and ghost, that name a texture of `gone` or a view of one (an sRGB / linear twin) go, each a note; collected first, as a removal shifts the table's entries.
+// *serials (malloc'ed, the caller frees it; NULL when none) lists them, *nserials of them. A pin is not an entry: it keeps its object. Caller holds g_smu
+static void drop_entries_naming_locked(CFSetRef gone, uint64_t **serials, uint32_t *nserials) {
+    nvn_hmap *tables[] = {&g_by_serial, &g_ghost}; uint64_t *ks = NULL; uint32_t nk = 0, kcap = 0, nlive = 0;
+    for (unsigned t = 0; t < 2; t++) {
+        for (uint32_t i = 0; i < tables[t]->cap; i++) {
+            void *o = tables[t]->vals[i]; if (!o) continue;
+            int hit = 0; for (id x = (__bridge id)o; x && !hit; x = view_parent(x)) hit = CFSetContainsValue(gone, (__bridge const void *)x);
+            if (!hit) continue;
+            if (nk == kcap) { kcap = kcap ? kcap * 2 : 64; uint64_t *n = realloc(ks, kcap * sizeof *ks); if (!n) ODIE("the released shared textures' serials"); ks = n; }
+            memcpy(&ks[nk++], tables[t]->keys + (size_t)i * tables[t]->klen, sizeof *ks);
+        }
+        if (!t) nlive = nk;
+    }
+    for (uint32_t i = 0; i < nk; i++) { if (i < nlive) live_del_locked(ks[i]); else ghost_del_locked(ks[i]); }   // each a note
+    *serials = ks; *nserials = nk;
+}
 own_dead_stats own_alias_dead_locked(uint32_t now, uint32_t idle, own_use_fn use_of, uint32_t max, uint64_t **serials, uint32_t *nserials) {
     own_dead_stats st = {0}; *serials = NULL; *nserials = 0;
     if (!g_alias.n) return st;
@@ -466,19 +496,7 @@ own_dead_stats own_alias_dead_locked(uint32_t now, uint32_t idle, own_use_fn use
     }
     CFRelease(pinned);
     if (nv) {
-        // The serial entries that name one of them or a view of one (an sRGB / linear twin), collected first: a removal shifts the table's entries
-        nvn_hmap *tables[] = {&g_by_serial, &g_ghost}; uint64_t *ks = NULL; uint32_t nk = 0, kcap = 0, nlive = 0;
-        for (unsigned t = 0; t < 2; t++) {
-            for (uint32_t i = 0; i < tables[t]->cap; i++) {
-                void *o = tables[t]->vals[i]; if (!o) continue;
-                int hit = 0; for (id x = (__bridge id)o; x && !hit; x = [x respondsToSelector:@selector(parentTexture)] ? ((id<MTLTexture>)x).parentTexture : nil) hit = CFSetContainsValue(dead, (__bridge const void *)x);
-                if (!hit) continue;
-                if (nk == kcap) { kcap = kcap ? kcap * 2 : 64; uint64_t *n = realloc(ks, kcap * sizeof *ks); if (!n) ODIE("the released shared textures' serials"); ks = n; }
-                memcpy(&ks[nk++], tables[t]->keys + (size_t)i * tables[t]->klen, sizeof *ks);
-            }
-            if (!t) nlive = nk;
-        }
-        for (uint32_t i = 0; i < nk; i++) { if (i < nlive) live_del_locked(ks[i]); else ghost_del_locked(ks[i]); }   // each a note
+        uint64_t *ks = NULL; uint32_t nk = 0; drop_entries_naming_locked(dead, &ks, &nk);
         for (uint32_t j = 0; j < nv; j++) {
             id o = hm_get_id(&g_alias, &vk[j]);
             if ([o respondsToSelector:@selector(allocatedSize)]) st.bytes += ((id<MTLTexture>)o).allocatedSize;

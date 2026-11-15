@@ -396,16 +396,19 @@ int main(void) { @autoreleasepool {
             CHECK(del && !again && !shared(x2), "removal: once");
             step("removal");
         }
-        // a pool drop: that pool's entries go, another pool's stay; a lookup after it finds nothing, and the serial it had published keeps its texture (held)
+        // a pool drop: that pool's entries go, another pool's stay, and so do the serial entries that named their textures (each a note; the pool's memory is gone on NVN, so a
+        // texture object finalized after its pool keeps nothing: Ocarina of Time's shadow target, docs/reference/memory.md); a lookup after it finds nothing
         id q = [NSObject new]; tex_t s8 = texture(97009); tex_live(&s8);
         own_alias_publish(s8.serial, &kq, q);
         own_alias_stats before = ast();
         uint64_t g0 = atomic_load(&g_ser_gen), noted = 0;
         pthread_mutex_lock(&g_smu); uint32_t gone = own_alias_drop_pool_locked((const void *)(uintptr_t)P); pthread_mutex_unlock(&g_smu);
-        CHECK(atomic_load(&g_ser_gen) == g0 + 1 && !own_note_at(g0 + 1, &noted), "a pool drop is one change no serial is noted for (a new epoch)");
+        uint64_t g1 = atomic_load(&g_ser_gen); int s7_noted = 0;
+        for (uint64_t g = g0 + 1; g < g1; g++) if (own_note_at(g, &noted) && noted == s7.serial) s7_noted = 1;
+        CHECK(g1 > g0 + 1 && s7_noted && !own_note_at(g1, &noted), "a pool drop notes each serial whose entry went with a texture of the pool, then makes a new epoch");
         own_alias_stats after = ast();
         CHECK(gone == before.n - 1 && after.n == 1 && has(&kq) && after.evicted == before.evicted + gone, "a pool drop takes the pool's entries, counted, and leaves another pool's");
-        CHECK(!own_alias_take(s7.serial + 100, &ka) && serial_get(s7.serial) == a3 && live_holds(a3) && !shared(a3), "after it a lookup finds nothing; a serial keeps the texture it had, no longer shared");
+        CHECK(!own_alias_take(s7.serial + 100, &ka) && !serial_get(s7.serial) && !live_holds(a3) && !shared(a3) && after.pool_entries > before.pool_entries, "after it a lookup finds nothing, and the serial that held a texture of the pool holds it no more");
         step("pool drop");
         // a twin's lookup (peek), then its parent's pool goes, then the publication: refused
         id<MTLDevice> dev = MTLCreateSystemDefaultDevice();

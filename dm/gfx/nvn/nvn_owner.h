@@ -13,7 +13,8 @@
 //   prog pins   serial → pins on a program a queued descriptor or saved binding holds: its release waits for the last unpin (under the submission lock, not g_smu)
 //   sharing     alias_key (pool, offset, description) → the texture that holds those bytes (own_alias_*): NVN textures over the same storage with the same description are one
 //               texture. Kept resident by the table; an entry goes when its pool is finalized (own_alias_drop_pool_locked), a new texture takes its bytes over (own_alias_publish)
-//               or another texture drew over them and it has not been used since (own_alias_dead_locked).
+//               or another texture drew over them and it has not been used since (own_alias_dead_locked). The first and the last take the serial entries that name the
+//               texture with it: its storage is gone, or another texture's.
 //               With it: an index by pool and 64 KB cell (the takeover's candidates, the image families' lookup), the submission of each key's last lookup, and the set of its textures
 //   waiting     retired objects an entry still holds (own_retire_locked), retained until the last entry lets them go
 // Every live entry and every texture pin counts its object, and each parent of a view, in the live held count; every ghost entry in the ghost held count. The sharing table holds its
@@ -102,10 +103,11 @@ typedef struct { uint32_t n, serials, pinned; uint64_t bytes; } own_dead_stats; 
 // (retired). use_of is asked of every entry. *serials (malloc'ed, the caller frees it; NULL when none) lists the serials whose entries went, *nserials of them. Caller holds g_smu
 own_dead_stats own_alias_dead_locked(uint32_t now, uint32_t idle, own_use_fn use_of, uint32_t max, uint64_t **serials, uint32_t *nserials);
 // Caller holds g_smu
-uint32_t own_alias_drop_pool_locked(const void *pool);        // a pool's Finalize: its entries go (retired, own_hook_drop; a new epoch). → how many
+uint32_t own_alias_drop_pool_locked(const void *pool);        // a pool's Finalize: its entries go (retired, own_hook_drop; a new epoch), and so do the serial entries, live and ghost,
+                                                              // that name one of their textures or a view of one (each a note). → how many sharing-table entries
 void own_alias_at_locked(const void *pool, int64_t off, void (^fn)(const alias_key *k, id o));   // the entries that start at off in the pool (its cell of the index)
 void own_alias_each_locked(void (^fn)(const alias_key *k, id o));
-typedef struct { uint32_t n, cap, cells; uint64_t evicted, taken; } own_alias_stats;   // entries, capacity, index cells, evicted with pools / on takeover in total
+typedef struct { uint32_t n, cap, cells; uint64_t evicted, taken, pool_entries; } own_alias_stats;   // entries, capacity, index cells, evicted with pools / on takeover in total, serial entries that went with their pool
 own_alias_stats own_alias_stats_locked(void);
 uint32_t own_alias_unref_locked(void);                        // entries no live or ghost entry resolves to (a walk: the memory report)
 

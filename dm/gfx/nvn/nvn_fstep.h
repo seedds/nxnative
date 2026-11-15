@@ -178,18 +178,66 @@ static inline int nvn_fstep_next(nvn_fstep *s, double shown, double cost, int km
 // FSTEP_GPU_SLOW times its time at kmin and it alone does not fit k − 1 (a GPU at 3 ms of 17, 6 times its time on a loading screen, is not what holds a frame back).
 // The reference is not updated during a probe's trial (its frames run while the clock is still rising), so a failed probe leaves it as it was. It is kept for each kmin: one
 // learned at a 30 fps cap is the GPU time at the clock that cap left (lowered for 30 fps, and under the thermal cap for the heat), and taken as hold 1's after the cap rose it
-// made the same work at hold 2 look not slowed
+// made the same work at hold 2 look not slowed.
+// The reference is another scene's time, though: the title screen's, or the light view's before a heavy one stepped up. A scene whose GPU time at kmin's own clock does not fit
+// kmin was called slowed against it, and each probe failed after its grace (Ocarina of Time: 22 failed probes a minute in Hyrule Field at night on an M2 Pro, 159 frames at
+// 20 fps, with the title screen's reference; Kokiri Forest at every turn of the camera on an Android port). A failed probe measures what the reference cannot: the scene's
+// GPU time at kmin once the clock rose for it (post: the frames from the second half of its grace on, which nvn_fstep.ramp keeps while they still get cheaper), against its
+// time at the longer hold before the probe and again after it: how much the longer hold slows the GPU here (ratio_at, for kmin and each hold). That time is the smaller of the
+// running means of 8 and of 32 frames, and of the two where both are the same hold: a turn of the camera to or from a heavy view makes one of them another scene's (Kokiri
+// Forest at 1.6 times the GPU time at hold 3: a ratio of 2.15 where the hold-3 stretch began in the heavy view, and the light view's 2.0 at hold 3 started a probe again). Once FSTEP_GPU_FAILS failed probes have given a hold's ratio, the GPU counts as slowed there when cur over it, the scene's time at kmin, fits kmin, in place
+// of the reference: the scene that failed starts no probe while it costs what it did, and a lighter one starts one even when its cur is not FSTEP_GPU_SLOW times a reference
+// learned in a heavier scene (a gate on the reference itself, which kmin's frames relearn only after a probe, would keep that lighter scene at the longer hold).
+// The ratio is the largest the failed probes gave, and one probe alone does not set it: a probe can fail before the clock is at its top (the iOS thermal cap's end, where it
+// took 1 s), which reads as a ratio too small, and one too small keeps a scene that fits kmin at the longer hold, where one too large costs a failed probe now and then, as
+// before the ratio, spaced out by the hold's doubling. A probe that holds gives none: it needs no gate, and its frames may be a lighter scene (a menu) than the hold's
 #define FSTEP_GPU_SLOW 1.3    // GPU time at the longer hold against its time at kmin
 #define FSTEP_GPU_N 30        // frames at the longer hold before the comparison counts
-typedef struct { double ref, cur; int n, k; double ref_at[FSTEP_MAX + 1]; } nvn_fgpu;   // GPU time at kmin (running mean; of every kmin in ref_at); at the current hold k and its frame count
-static inline int nvn_fgpu_slow(const nvn_fgpu *g) { return g->n >= FSTEP_GPU_N && g->ref > 0 && g->cur >= FSTEP_GPU_SLOW * g->ref && g->cur > FSTEP_FIT * (g->k - 1); }
-// Once per frame, with the frame's GPU time (vsyncs; 0 = none finished yet) and the hold and probe state (nvn_fstep.probe) it ran under
-static inline int nvn_fstep_gpu_slowed(nvn_fgpu *g, double gpu, int k, int kmin, int probe) {
+#define FSTEP_GPU_PN 3        // a probe's frames at kmin after the first half of its grace before it gives a ratio
+#define FSTEP_GPU_FAILS 2     // failed probes whose ratio a hold needs before the ratio decides
+#define FSTEP_GPU_RMIN 0.75   // the smallest ratio a probe gives: hold 1 can take a little longer than the longer hold (Ocarina of Time on an M4 Pro, whose clock barely moves:
+                              // 1.03–1.09 vsyncs at hold 1 after the grace, 0.99–1.00 at hold 2; with the ratio taken as 1 the estimate, 1.00, kept starting probes). Below it the
+                              // probe's frames were another scene or a stall, and it gives none (a load's stall failed probes there at GPU 4.4 and 5.7 vsyncs, a ratio of 0.15)
+typedef struct {
+    double ref, cur, avg; int n, k, kmin; double ref_at[FSTEP_MAX + 1];   // GPU time at kmin (running mean; of every kmin in ref_at); at the current hold k (of 8 frames, of 32) and its frame count; kmin of the last frame
+    double pre, post; int pre_k, pn, was, fail;   // the last probe: the time at the hold pre_k it started from (0: none to compare), its frames' GPU time at kmin and their count; nvn_fstep.probe last
+                                                  // frame; it failed, and its ratio waits for FSTEP_GPU_N frames at the hold after it
+    double ratio_at[FSTEP_MAX + 1][FSTEP_MAX + 1]; int ratio_n[FSTEP_MAX + 1][FSTEP_MAX + 1];   // [kmin][k]: GPU time at hold k against kmin's, the largest of the failed probes', and their count
+} nvn_fgpu;
+// The hold's ratio when it decides (0: the reference does)
+static inline double nvn_fgpu_ratio(const nvn_fgpu *g) {
+    return g->kmin >= 1 && g->kmin <= FSTEP_MAX && g->k >= 1 && g->k <= FSTEP_MAX && g->ratio_n[g->kmin][g->k] >= FSTEP_GPU_FAILS ? g->ratio_at[g->kmin][g->k] : 0;
+}
+static inline int nvn_fgpu_slow(const nvn_fgpu *g) {
+    if (g->n < FSTEP_GPU_N || g->cur <= FSTEP_FIT * (g->k - 1)) return 0;
+    double r = nvn_fgpu_ratio(g);
+    return r > 0 ? g->cur / r <= g->kmin : g->ref > 0 && g->cur >= FSTEP_GPU_SLOW * g->ref;
+}
+static inline void nvn_fgpu_learn(nvn_fgpu *g, int kmin, int k, double t) {
+    double r = t / g->post, *at = &g->ratio_at[kmin][k];
+    if (r < FSTEP_GPU_RMIN) return;
+    if (r > *at) *at = r;
+    g->ratio_n[kmin][k]++;
+}
+// Once per frame, with the frame's GPU time (vsyncs; 0 = none finished yet) and the step's state the frame ran under (its hold, probe and grace)
+static inline int nvn_fstep_gpu_slowed(nvn_fgpu *g, double gpu, const nvn_fstep *s, int kmin) {
     if (kmin < 1 || kmin > FSTEP_MAX) return 0;   // no reference slot for it (hle_nvn.c passes 1 or 2)
-    g->ref = g->ref_at[kmin];
+    int k = s->k ? s->k : kmin, probe = s->probe;
+    if (kmin != g->kmin) g->fail = 0;   // another cap: the clocks the probe measured are not this one's
+    if (probe == 1 && g->was != 1) { g->pre_k = g->kmin == kmin && g->k > kmin && g->k <= FSTEP_MAX && g->n >= FSTEP_GPU_N ? g->k : 0; g->pre = g->cur < g->avg ? g->cur : g->avg; g->post = 0; g->pn = 0; g->fail = 0; }   // a probe from hold g->k
+    else if (probe != 1 && g->was == 1) g->fail = !probe && k > kmin && g->pn >= FSTEP_GPU_PN;   // it ended: failed when the hold went up again
+    g->was = probe;
+    if (probe == 1 && k <= kmin && gpu > 0 && s->grace <= FSTEP_GRACE / 2) { g->post = g->pn ? g->post + (gpu - g->post) / 4 : gpu; g->pn++; }   // weighted to the last frames: the clock at its highest
+    g->ref = g->ref_at[kmin]; g->kmin = kmin;
     if (gpu <= 0) return nvn_fgpu_slow(g);
-    if (k <= kmin) { if (probe != 1) g->ref = g->ref_at[kmin] = g->ref > 0 ? g->ref + (gpu - g->ref) / 32 : gpu; g->n = 0; g->k = k; return 0; }
+    if (k <= kmin) { if (probe != 1) g->ref = g->ref_at[kmin] = g->ref > 0 ? g->ref + (gpu - g->ref) / 32 : gpu; g->n = 0; g->k = k; g->fail = 0; return 0; }
     if (k != g->k) { g->k = k; g->n = 0; }
-    g->cur = g->n ? g->cur + (gpu - g->cur) / 8 : gpu; g->n++;
+    g->n++; g->cur = g->n > 1 ? g->cur + (gpu - g->cur) / 8 : gpu; g->avg = g->n > 1 ? g->avg + (gpu - g->avg) / (g->n < 32 ? g->n : 32) : gpu;
+    if (g->fail && g->n >= FSTEP_GPU_N && k <= FSTEP_MAX) {   // the failed probe's ratios: this hold's after it, and the hold it started from (the smaller time where they are one)
+        double t = g->cur < g->avg ? g->cur : g->avg;
+        if (k == g->pre_k) nvn_fgpu_learn(g, kmin, k, g->pre < t ? g->pre : t);
+        else { nvn_fgpu_learn(g, kmin, k, t); if (g->pre_k) nvn_fgpu_learn(g, kmin, g->pre_k, g->pre); }
+        g->fail = 0;
+    }
     return nvn_fgpu_slow(g);
 }

@@ -102,3 +102,11 @@ Actual final-source checks on the M4 Pro:
 - Scoped LLVM 23.1.5 analysis of the renderer and included code: passed the existing ratchet, with zero file/check pairs above baseline. Source-input hashes were checked before validation and after analysis.
 
 This is build and targeted correctness evidence. No new gameplay performance run, full graphics run, five-game gameplay regression or portable-package qualification is claimed for this merged renderer. Those existing draft-PR limits remain open. The installed player, its cache, settings and saves were not changed during this maintenance pass.
+
+## Main frame-step and command-memory refresh — November 15
+
+Merged upstream `b1ba6570fc334a1142d8d89ac628161e58e5b99e`. The only textual conflict was the OOT note's findings list; both sets of findings are preserved. The command-recording ownership, frame-step GPU-probe and save-mutation fixes merge without changing this fork's MetalFX snapshot/presentation, integer timestamp conversion or NDVE readiness implementation.
+
+Fresh M4 Pro checks passed: full host build (6.99 seconds); ten selected targets (28.60 seconds): `t_nvn`, `t_fstep`, `t_counter_clock`, `t_ndve_ready`, `t_queue_lifetime`, `t_uniform_padding`, `t_temporal_snapshot`, `t_present_classic_pair`, `t_dispatch_replacement`, `t_wait_event`; complete host CPU suite including `t_fs_mutation` (64.74 seconds); both yield modes; selector build and self-test. Scoped LLVM analysis of `hle_nvn.c` and `hle_fs.c` passed the existing ratchet. Critical source hashes matched before and after validation. Documentation/profile/chain/NDVE Python checks passed all 43 cases.
+
+These are build and targeted regression checks, not a new gameplay qualification of upstream's frame-step improvement. Full graphics, multi-game gameplay and newest-chain full-game qualification remain open. No installed player, shader cache, settings or saves were modified.

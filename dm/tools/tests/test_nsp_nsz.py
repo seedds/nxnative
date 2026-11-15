@@ -153,5 +153,40 @@ class Nsz(unittest.TestCase):
         self.assertEqual(fam['base'].read_bytes(), b'converted')
         self.assertEqual(fam['updates'][0][1].read_bytes(), b'converted')
 
+class Untagged(unittest.TestCase):   # a file that names no title: asked for its own (title_by_extractor in the script); what the shader split's log says this PC lacks
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp()); self.addCleanup(shutil.rmtree, self.tmp)
+        self.said = []
+        p = mock.patch.object(nsp, 'say', self.said.append); p.start(); self.addCleanup(p.stop)
+
+    def test_untagged_cartridge_dump(self):
+        xci = self.tmp / 'Mario-vs-Donkey-Kong.xci'; xci.write_bytes(b'HEAD' * 64)   # no PFS0, no ticket, no tag
+        with self.assertRaisesRegex(nsp.BuildError, r'no NSP with a readable title ID.*Mario-vs-Donkey-Kong\.xci name no title.*add the tag'): nsp.scan_nsps(self.tmp)
+        asked = []
+        app, fam = nsp.scan_nsps(self.tmp, lambda p: asked.append(p) or APP)
+        self.assertEqual((app, fam['base'], fam['updates'], fam['dlc'], asked), (APP, xci, [], [], [xci]))
+        self.assertTrue(any('its own metadata says' in m for m in self.said))
+        with self.assertRaisesRegex(nsp.BuildError, r'nx_extract read none from them'): nsp.scan_nsps(self.tmp, lambda p: None)   # the wrong keys, a damaged file
+        with self.assertRaisesRegex(nsp.BuildError, r'no NSP with a readable title ID'): nsp.scan_nsps(self.tmp, lambda p: APP | 0x800)   # an update alone is no base game
+
+    def test_tagged_files_are_not_asked(self):
+        base = self.tmp / f'Game [{APP:016X}][v0].xci'; base.write_bytes(b'HEAD')
+        app, fam = nsp.scan_nsps(self.tmp, lambda p: self.fail(f'asked for {p}'))
+        self.assertEqual((app, fam['base']), (APP, base))
+
+    def test_compressed_files_are_not_asked(self):   # nsz -D converts an XCZ first; nx_extract does not read one
+        (self.tmp / 'Game.xcz').write_bytes(b'HEAD')
+        with self.assertRaisesRegex(nsp.BuildError, r'no NSP with a readable title ID'): nsp.scan_nsps(self.tmp, lambda p: self.fail(f'asked for {p}'))
+
+    def test_split_lacks(self):
+        log = ("[RED] Banc/World05-01b.bcett.byml.zs: FileNotFoundError: [Errno 2] No such file or directory: 'zstd' (its shaders are left out)\n"
+               "[RED] Banc/World08-01d.bcett.byml.zs: FileNotFoundError: [Errno 2] No such file or directory: 'zstd' (its shaders are left out)\n"
+               "[RED] Pack/A.pack: ModuleNotFoundError: No module named 'lz4' (its shaders are left out)\n"
+               "[RED] 3 file(s) could not be read, their shaders are left out\n")
+        self.assertEqual(nsp.split_lacks(log), ['lz4', 'zstd'])
+        # a file the game's own data makes unreadable, and a missing file given by its path, are not this PC's lack
+        self.assertEqual(nsp.split_lacks("[RED] Model/x.bfres: ValueError: not a BFRES (its shaders are left out)\n"
+                                         "[RED] a.zs: FileNotFoundError: [Errno 2] No such file or directory: '/nsp/extract/a.zs' (its shaders are left out)\n"), [])
+
 if __name__ == '__main__':
     unittest.main()

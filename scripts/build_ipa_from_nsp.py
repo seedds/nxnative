@@ -468,9 +468,31 @@ def version_of(path):
 COMPRESSED = {'.nsz': '.nsp', '.xcz': '.xci'}   # nsz's compressed NSP / XCI and what nsz -D makes of them
 
 
-def scan_nsps(nsp_dir):
+def split_lacks(log):
+    """What this PC lacks that left files unread in a shader split (its log's per-file [RED] lines): the programs a reader could not start (FileNotFoundError of a bare
+    command name, not of a path) and the Python modules it could not import, sorted. Empty when the files were unreadable for the game's own reasons"""
+    return sorted({m.group(1) or m.group(2) for m in re.finditer(
+        r"^\[RED\] .*: (?:FileNotFoundError: \[Errno 2\] No such file or directory: '([^'/\\]+)'|(?:ModuleNotFoundError|ImportError): No module named '([^']+)')", log, re.M)})
+
+
+def title_by_extractor(path, keys, repo, env):
+    """The title ID of an NSP or XCI that has neither a ticket nor a [title ID] tag in its name (a cartridge dump named after the game: the first game packed on Linux was
+    Mario-vs-Donkey-Kong.xci), from its own metadata: nx_extract prints `title <id>` before it writes anything large (it needs the keys; --manifest writes the ExeFS and the
+    RomFS's file list only, a few seconds, into a temporary folder). None when nx_extract does not name one (a damaged file, the wrong keys: its message is in the build's
+    first error then)"""
+    with tempfile.TemporaryDirectory(prefix='nx_title_') as t:
+        try:
+            nx = build_nx_extract(repo, Path(t) / 'work', Path(t) / 'logs', env)
+            r = subprocess.run([str(nx), str(keys), str(path), '-', str(Path(t) / 'out'), '--manifest'], env=env, capture_output=True, text=True, errors='replace', timeout=600)
+        except (BuildError, OSError, subprocess.SubprocessError): return None
+    m = re.search(r'^title ([0-9A-Fa-f]{16})$', r.stdout, re.M)
+    return int(m.group(1), 16) if m else None
+
+
+def scan_nsps(nsp_dir, identify=None):
     """Group by game: {application title ID: {'base': path, 'updates': [(version, path)], 'dlc': [(title ID, version, path)]}}. An NSZ / XCZ is listed as it is (its ticket names
-    the title as an NSP's does) and converted afterwards (decompress_nsz)"""
+    the title as an NSP's does) and converted afterwards (decompress_nsz). identify(path): asked for the title of a file that names none (title_by_extractor), when no file of
+    the folder names one"""
     fams, unknown = {}, []
     for p in sorted([*nsp_dir.glob('*.nsp'), *nsp_dir.glob('*.xci'), *nsp_dir.glob('*.nsz'), *nsp_dir.glob('*.xcz')]):   # a base game may be a cartridge dump (.xci: Monster Hunter Rise); nx_extract reads its secure partition
         if p.stat().st_size == 0:   # an empty file left by an incomplete download (the Zelda BotW folder holds a 0-byte DLC NSP next to the complete (1).nsp)
@@ -487,7 +509,16 @@ def scan_nsps(nsp_dir):
         else: f['dlc'].append((tid, version_of(p), p))
     if len(fams) == 1 and len(unknown) == 1 and next(iter(fams.values()))['base'] is None:   # a base game converted from a cartridge may have neither tags nor a ticket; build IDs are checked afterwards
         next(iter(fams.values()))['base'] = unknown[0]
-    if not fams: raise BuildError(f'no NSP with a readable title ID in {nsp_dir}')
+    if not fams and identify:   # no file names a title: an NSP or XCI without a ticket or a tag is asked for its own (a compressed one is not: nsz -D converts it first)
+        for p in [u for u in unknown if u.suffix not in COMPRESSED]:
+            tid = identify(p)
+            if tid is not None and tid & 0xFFF == 0:
+                say(f'{p.name} names no title (no ticket, no [title ID] in its name): its own metadata says {tid:016X}')
+                fams.setdefault(tid, {'base': None, 'updates': [], 'dlc': []})['base'] = p
+    if not fams:
+        raise BuildError(f'no NSP with a readable title ID in {nsp_dir}' + (f': {", ".join(u.name for u in unknown)} name no title (no ticket inside, no [title ID] tag in the '
+                         'file name)' + (' and nx_extract read no base game\'s title from them with these keys' if identify else '') +
+                         '; add the tag to the base game\'s file name, e.g. "Game [0100000000010000][v0].xci"' if unknown else ''))
     if len(fams) > 1: raise BuildError('more than one game in the folder, keep one game per folder: ' + ', '.join(f'{t:016X}' for t in fams))
     app, fam = next(iter(fams.items()))
     if fam['base'] is None: raise BuildError(f'no base game NSP found in {nsp_dir} (title ID {app:016X})')
@@ -1610,6 +1641,10 @@ def split_shaders(py, repo, roms, mains, pkg, env, logs, g, provisional=False, o
     text = (logs / 'shader_split.log').read_text(errors='replace')
     m = re.search(r'shaders: (\d+) \(', text)
     bad = re.search(r'^\[RED\] (\d+) file\(s\) could not be read.*$', text, re.M)   # the split leaves out a file no reader reads (its own red line per file in the log) and goes on
+    if bad:   # unreadable because this PC lacks a program or a Python module: not the game's doing. Stop: going on would pack without those shaders and the next pack reuse this split
+        lack = split_lacks(text)
+        if lack: raise BuildError(f'{bad.group(1)} file(s) could not be read because this PC lacks {", ".join(lack)} (a program or a Python module the shader split runs): install it and '
+                                  f'pack again (each file in {logs / "shader_split.log"})')
     if bad and not provisional:   # the profile's tables were split from every file: one that does not read now is a reader change
         raise BuildError(f'{bad.group(0).removeprefix("[RED] ")}; the profile\'s tables hold every file\'s shaders (each file in {logs / "shader_split.log"})')
     if bad: say(f'{bad.group(0)}; the IPA goes without them (each file in {logs / "shader_split.log"})')
@@ -2940,7 +2975,7 @@ def main(args=None):
         host, bundled = port_host(repo, platform)
         say(f'host program: {host} (' + ('the bundle\'s' if bundled else 'this checkout\'s build tree') + ('' if host.is_file() else
             f'; not built yet: cmake --build {host.parent.relative_to(repo)} --target nxhost-run, docker/README.md') + ')')
-    app, fam = scan_nsps(nsp_dir)
+    app, fam = scan_nsps(nsp_dir, lambda p: title_by_extractor(p, keys, repo, env))
     fam = decompress_nsz(nsp_dir, app, fam, keys, env)
     force =args.provisional or PROVISIONAL   # a provisional profile even when dm/games has one (testing the guesses)
     g, provisional, shadowed = None if force else gamemod.by_title(app), False, False

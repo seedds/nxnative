@@ -60,14 +60,14 @@ typedef struct { const char *name; void *fn; const char *why; const char *to; } 
             "    adrp x16, _" #cname "@PAGE\n    add x16, x16, _" #cname "@PAGEOFF\n"              \
             ".if " HLE_STR(HLE_NARG(__VA_ARGS__)) " > 8\n    mov x17, #(((" HLE_STR(HLE_NARG(__VA_ARGS__)) " - 8) * 8 + 15) & ~15)\n" \
             "    b _dm_bigstack_enter_n\n.else\n    b _dm_bigstack_enter\n.endif\n");           \
-    __attribute__((used, section("__DATA,swforce"))) static const hle_force_ent hle_force_##cname = {mangled, (void *)(uintptr_t)cname##_bs, why}; \
+    __attribute__((used, section("__DATA,swforce"))) static const hle_force_ent hle_force_##cname = {mangled, (void *)(uintptr_t)cname##_bs, why, NULL}; \
     static ret cname(__VA_ARGS__)
 // Same as above, but the implementation runs on the caller's stack. Only for a take-over that runs the game's own code (an NRO's init and fini, a JIT plugin): that code's stack
 // use is the game's, sized for the thread's own stack (which can be larger than the 512 KB host stack), and it may switch stacks itself (a coroutine), which would reuse the
 // host stack the take-over is on. A short call into the SDK (fs::IsMounted, the audio renderer's command generation) is no reason. Say why beside it
 #define HLE_FORCE_DIRECT(mangled, why, ret, cname, ...)                                            \
     static ret cname(__VA_ARGS__);                                                                \
-    __attribute__((used, section("__DATA,swforce"))) static const hle_force_ent hle_force_##cname = {mangled, (void *)cname, why}; \
+    __attribute__((used, section("__DATA,swforce"))) static const hle_force_ent hle_force_##cname = {mangled, (void *)cname, why, NULL}; \
     static ret cname(__VA_ARGS__)
 // A guest alias: every reference to mangled binds to the loaded modules' own definition of target instead, as if the module had imported target. No host code runs and no
 // signature is restated, so the alias holds for every SDK that defines both. For a hardware class whose constructor the host takes over to build the SDK's software class in the
@@ -94,7 +94,7 @@ __attribute__((weak, visibility("hidden"))) void *dm_bigstack_caller(void *ra) {
     extern const char cname##_wait[];                                                             \
     __asm__(".text\n.p2align 2\n.globl _" #cname "_wait\n.private_extern _" #cname "_wait\n_" #cname "_wait:\n" \
             "    stp x16, x17, [sp, #-32]!\n    str x30, [sp, #16]\n    adrp x16, _" #cname "@PAGE\n    add x16, x16, _" #cname "@PAGEOFF\n    b _dm_hle_wait_enter\n"); \
-    __attribute__((used, section("__DATA,swforce"))) static const hle_force_ent hle_force_##cname = {mangled, (void *)(uintptr_t)cname##_wait, why}; \
+    __attribute__((used, section("__DATA,swforce"))) static const hle_force_ent hle_force_##cname = {mangled, (void *)(uintptr_t)cname##_wait, why, NULL}; \
     static ret cname(__VA_ARGS__)
 
 // Host service sessions (hle_sf.c): a request on a session the host serves, as its service sees it, and the answer it fills in. The input is the raw CMIF data after the "SFCI"

@@ -18,9 +18,9 @@ static void run(sim *m, int n, double w, int kmin, int kmax, int fixed) {
     }
 }
 
-// A hitch that steps hold 1 up: six frames of 1.6 vsyncs (pipeline compiles), 3.6 vsyncs behind in the last 30 frames, more than FSTEP_LATE a frame on average. Three such
+// A hitch that steps hold 1 up: seven frames of 1.6 vsyncs (pipeline compiles), 4.2 vsyncs behind in the last 30 frames and 3.6 without the longest, more than FSTEP_LATE a frame on average. Three such
 // frames among frames on time are paid back by the step and keep hold 1 (below)
-static void hitch(sim *m) { run(m, 6, 1.6, 1, 3, 0); }
+static void hitch(sim *m) { run(m, 7, 1.6, 1, 3, 0); }
 
 int main(void) {
     {   // 120 fps (hle_nvn.c fps_high): kmin 1, kmax 2, in ticks of 1/120 s. The target follows the hold, so a hold above what frames take is the game at the right speed
@@ -56,9 +56,26 @@ int main(void) {
         sim h = {0}; run(&h, 120, 0.5, 1, 3, 0); run(&h, 600, 0.9, 1, 3, 0); run(&h, 3, 1.6, 1, 3, 0); run(&h, 60, 0.9, 1, 3, 0);
         check(h.s.k == 1 && h.s.ups == 0, "  a hitch of three 27 ms frames among frames on time: hold 1");
     }
-    {   // a scene at 1.3 vsyncs whose eleventh late frame is a 50 ms hitch: the step goes to the cheapest of the last three (2), not to the hitch (3)
-        sim m = {0}; run(&m, 120, 0.5, 1, 3, 0); run(&m, 10, 1.3, 1, 3, 0);
-        check(m.s.k == 1, "scene at 1.3 vsyncs: ten late frames are 3 vsyncs behind, not yet short of hold 1");
+    {   // Lone stalls among near-misses (issue #1823, the reporter's M4 Max retest of 2026-11-12, defaults): every frame costs 0.45 vsyncs (GPU 6.7-7.8 ms) and the screen
+        // shows three in a row 5 ms late once every 20 (15% late, 57.4 fps over 30 frames, 1.35 vsyncs short of the hold there), which keeps hold 1. Then one long frame
+        // at each present of the report: 67.7 ms (693 first texture uploads), 57.7 and 43.1 ms (shader libraries, a hybrid pipeline), 54.9 and 65.4 ms (nothing listed).
+        // Each counted FSTEP_SHORT_MAX (2) of the 30 frames' limit of 3, so the next three late frames stepped to 30 for 30 presents, 60 once (the probe's run before it
+        // had not lasted 8 s). The step pays a stall back (game time = real time either way): one long frame is not a rate, so hold 1 throughout
+        static const struct { int at; double ms; } st[] = {{1913, 67.7}, {10267, 57.7}, {10286, 43.1}, {10454, 54.9}, {11396, 65.4}};
+        nvn_fstep s = {0}; s.smax = 2; int next = 1, at2 = 0; double real = 0, game = 0;
+        for (int p = 0; p < 12000; p++) {
+            int k = s.k ? s.k : 1; double shown = k == 1 && p % 20 >= 5 && p % 20 < 8 ? 1.3 : k;
+            for (unsigned i = 0; i < sizeof st / sizeof *st; i++) if (p == st[i].at) shown = st[i].ms / (1000.0 / 60);
+            real += shown; game += next; next = nvn_fstep_next(&s, shown, 0.45, 1, 3, 0, 0); at2 += s.k > 1;
+        }
+        snprintf(b, sizeof b, "lone stalls of 43-68 ms among near-misses (MKW, M4 Max): hold 1 (ups %llu, %d frames at hold 2)", (unsigned long long)s.ups, at2);
+        check(s.ups == 0 && at2 == 0, b);
+        snprintf(b, sizeof b, "  game time %.0f against real time %.2f (debt %.2f)", game, real, s.debt);
+        check(real - game - s.debt > -1.01 && real - game - s.debt < 1.01, b);
+    }
+    {   // a scene at 1.3 vsyncs whose twelfth late frame is a 50 ms hitch: the step goes to the cheapest of the last three (2), not to the hitch (3)
+        sim m = {0}; run(&m, 120, 0.5, 1, 3, 0); run(&m, 11, 1.3, 1, 3, 0);
+        check(m.s.k == 1, "scene at 1.3 vsyncs: eleven late frames are 3 vsyncs behind without the longest, not yet short of hold 1");
         run(&m, 1, 3.0, 1, 3, 0);
         snprintf(b, sizeof b, "  a 3-vsync frame then: hold 2, not 3 (k %d)", m.s.k);
         check(m.s.k == 2 && m.s.ups == 1, b);

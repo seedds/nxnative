@@ -9509,6 +9509,7 @@ enum { FN_BUSY_MAX = 256, FN_WAIT_MS = 2000 };
 static int g_fn_wait_ms = FN_WAIT_MS;
 static pthread_mutex_t g_fn_mu = PTHREAD_MUTEX_INITIALIZER; static pthread_cond_t g_fn_cv = PTHREAD_COND_INITIALIZER;
 static uint64_t g_fn_busy[FN_BUSY_MAX]; static int g_fn_nbusy;   // the functions of the captures under way, one entry per capture
+static _Atomic int g_fn_waits;   // captures that found one of their functions under way (the prebuild's last line)
 static uint64_t fn_id(MTL4FunctionDescriptor *fd) {
     MTL4FunctionDescriptor *f = fd;
     while ([f isKindOfClass:MTL4SpecializedFunctionDescriptor.class]) f = ((MTL4SpecializedFunctionDescriptor *)f).functionDescriptor;
@@ -9533,6 +9534,7 @@ static int fn_claim(const uint64_t *k, int n) {   // waits until no capture unde
     pthread_mutex_lock(&g_fn_mu);
     struct timespec until; clock_gettime(CLOCK_REALTIME, &until); until.tv_sec += g_fn_wait_ms / 1000; until.tv_nsec += (long)(g_fn_wait_ms % 1000) * 1000000;
     if (until.tv_nsec >= 1000000000) { until.tv_sec++; until.tv_nsec -= 1000000000; }
+    if (fn_busy(k, n)) atomic_fetch_add(&g_fn_waits, 1);
     while ((fn_busy(k, n) || g_fn_nbusy + n > FN_BUSY_MAX) && pthread_cond_timedwait(&g_fn_cv, &g_fn_mu, &until) != ETIMEDOUT) {}
     int took = g_fn_nbusy + n <= FN_BUSY_MAX ? n : 0;
     for (int i = 0; i < took; i++) g_fn_busy[g_fn_nbusy++] = k[i];
@@ -10443,7 +10445,8 @@ static int pso_prebuild(int threads, int wait, dispatch_qos_class_t qos) {
                             pre_fail_head(want), [fails componentsJoinedByString:@"\n"]] writeToFile:failp atomically:YES encoding:NSUTF8StringEncoding error:nil];
         else unlink(failp.fileSystemRepresentation);
         [pre_device_stamp(want) writeToFile:stamp atomically:YES encoding:NSUTF8StringEncoding error:nil];
-        MLOG("pipeline prebuild done: %d pairs, %d bases built, %d already archived, %d left to the draws, %d failed, %.1f s", n, (int)g_pre_built, (int)g_pre_archived, (int)g_pre_skipped, (int)g_pre_failed, (bp_now() - t0) / 1e9);
+        MLOG("pipeline prebuild done: %d pairs, %d bases built, %d already archived, %d left to the draws, %d failed, %.1f s; %d captures waited for another of the same shader (fn_claim)",
+             n, (int)g_pre_built, (int)g_pre_archived, (int)g_pre_skipped, (int)g_pre_failed, (bp_now() - t0) / 1e9, (int)atomic_load(&g_fn_waits));
         if (g_pre_nolib) MLOG("[RED] pipeline prebuild: %d pairs need a library file this app does not carry (first: %s), left to the draws until a package with them is installed (the pulling libraries <key>_bp.metallib: an IPA packed with IOS_PULL=0 leaves them out)", (int)g_pre_nolib, g_pre_nolib_file.UTF8String);
         if (fails.count) MLOG("pipeline prebuild: %lu pairs whose base failed are left to the draws (%s; %d of them failed on an earlier start of this system build, not built again); another system build tries them again",
                               (unsigned long)fails.count, failp.UTF8String, (int)g_pre_known_n);

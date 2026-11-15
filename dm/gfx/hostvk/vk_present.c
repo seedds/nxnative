@@ -47,6 +47,8 @@ static struct {
     VkCommandPool pool;                            // the snapshots' and the present thread's command buffers (g_mu for the snapshots', the present thread alone for its own)
     snap_t snap[SNAP_N]; uint64_t wr, rd;          // snapshots queued and taken
     uint64_t present_n, last_ticket, dropped;
+    uint64_t stalls_busy, stalls_idle;             // frames a present dropped after SNAP_WAIT_NS: the present thread inside a step of an earlier frame, or waiting for a frame
+    uint64_t ep_drops, shown_t;                    // the drops since the present thread last showed a frame (its line once frames are shown again); when it last showed one, or started
     pthread_t th, tick_th, wait_th; int th_on, tick_on, wait_on;
     // the present thread's
     VkCommandPool fpool; VkSwapchainKHR sc; uint64_t sc_gen; VkFormat fmt; VkColorSpaceKHR cs; VkPresentModeKHR mode; VkExtent2D ext; uint32_t nimg;
@@ -83,6 +85,30 @@ static struct {
     int on, stop;
 } V;
 
+// What the present thread is doing, and since when: a present that finds no snapshot free for SNAP_WAIT_NS names it when it drops its frame (hvk_win_present). Written by the
+// present thread alone at each step, the step last (release; the drop reads it first: a diagnostic, read by the game's thread only at such a drop)
+enum { PS_OFF, PS_START, PS_IDLE, PS_LOCK, PS_PREV, PS_SWAPCHAIN, PS_ACQUIRE, PS_RECORD, PS_SUBMIT, PS_PRESENT, PS_AFTER };
+static _Atomic int g_ps; static _Atomic uint64_t g_ps_t0, g_ps_n;
+static void ps_set(int step, uint64_t n) {
+    atomic_store_explicit(&g_ps_n, n, memory_order_relaxed); atomic_store_explicit(&g_ps_t0, plat_now_ns(), memory_order_relaxed);
+    atomic_store_explicit(&g_ps, step, memory_order_release);
+}
+// The step as the drop's line gives it: "the present thread <what> [present n] for <ms> ms<note>"
+static const char *ps_what(int step, const char **note) {
+    *note = "";
+    switch (step) {
+    case PS_START: return "has been making the surface and the first swapchain";
+    case PS_IDLE: *note = ": a frame was ready, so its wakeup was lost or the thread was not scheduled"; return "has waited for a frame";
+    case PS_LOCK: *note = " (a resize, a switch or the present-wait thread holds it)"; return "has waited for the swapchain lock to show present";
+    case PS_PREV: *note = " (the GPU is behind)"; return "has waited for an earlier blit on the GPU to show present";
+    case PS_SWAPCHAIN: return "has been making the swapchain to show present";
+    case PS_ACQUIRE: *note = " (the presentation engine holds every image: a hidden window?)"; return "has been in vkAcquireNextImageKHR to show present";
+    case PS_RECORD: return "has been recording the blit of present";
+    case PS_SUBMIT: *note = " (the queue lock or the driver)"; return "has been submitting the blit of present";
+    case PS_PRESENT: *note = " (the driver; a software device such as lavapipe runs the blit there)"; return "has been in vkQueuePresentKHR of present";
+    default: return "has been finishing present";
+    }
+}
 void hvk_present_set_window(hvk_surface_fn make_surface, hvk_pixel_size_fn pixel_size) { g_make_surface = make_surface; g_pixel_size = pixel_size; }
 
 // ---------- Small helpers ----------
@@ -594,6 +620,7 @@ static void drop_snapshot(snap_t *s) {   // a frame that is not shown: its prese
 }
 // One snapshot onto the screen. 1 shown, 0 dropped, -1 the presenter cannot go on
 static int show(snap_t *s) {
+    ps_set(PS_LOCK, s->n);
     pthread_mutex_lock(&g_sc_mu);
     int pw = 0, ph = 0;
     // A surface with a current extent reports a new size itself (OUT_OF_DATE, SUBOPTIMAL); one without (Wayland, a headless surface) takes the front end's: a new one remakes it
@@ -609,13 +636,16 @@ static int show(snap_t *s) {
         }
     }
     uint32_t idx = 0; uint32_t f = (uint32_t)(W.frame % FRAME_N);
+    ps_set(PS_PREV, s->n);
     tl_wait(W.fval[f]);   // its acquire semaphore and command buffer are free
     VkResult r = VK_ERROR_OUT_OF_DATE_KHR;
     for (int tries = 0; tries < 2; tries++) {
         if (!W.sc || W.recreate) {
+            ps_set(PS_SWAPCHAIN, s->n);
             int k = sc_make(s->textures);
             if (k <= 0) { pthread_mutex_unlock(&g_sc_mu); return k; }
         }
+        ps_set(PS_ACQUIRE, s->n);
         uint64_t t0 = plat_now_ns();
         r = vkAcquireNextImageKHR(hvk.d, W.sc, ACQUIRE_NS, W.acq[f], VK_NULL_HANDLE, &idx);
         uint64_t t1 = plat_now_ns();
@@ -631,6 +661,7 @@ static int show(snap_t *s) {
         return -1;
     }
     if (r != VK_SUCCESS && r != VK_SUBOPTIMAL_KHR) { pthread_mutex_unlock(&g_sc_mu); return 0; }   // out of date twice
+    ps_set(PS_RECORD, s->n);
     VkImage dst = W.img[idx];
     int32_t rect[4]; int how = scale_plan(s, idx, rect);
     int linear = how == SCALE_BLIT && !(rect[2] == (int32_t)s->w && rect[3] == (int32_t)s->h);   // one to one: nearest, the bytes copied as they are
@@ -695,6 +726,7 @@ static int show(snap_t *s) {
     vkEndCommandBuffer(cb);
     VkSemaphoreSubmitInfo wait = {VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO, NULL, W.acq[f], 0, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, 0};
     VkResult rs;
+    ps_set(PS_SUBMIT, s->n);
     uint64_t v = tl_submit(cb, &wait, 1, W.done[idx], &rs);
     if (!v) { pthread_mutex_unlock(&g_sc_mu); hostvk_log("[RED] [hostvk] window presenter: the blit's (or the upscaler's) submission failed (VkResult %d): frames are no longer shown", rs); return -1; }
     W.fval[f] = v; W.frame++;
@@ -705,9 +737,11 @@ static int show(snap_t *s) {
     VkPresentTimesInfoGOOGLE pti = {VK_STRUCTURE_TYPE_PRESENT_TIMES_INFO_GOOGLE, NULL, 1, &ptime};
     const void *chain = hvk.dev.x.present_wait ? (const void *)&pid : hvk.dev.x.display_timing ? (const void *)&pti : NULL;
     VkPresentInfoKHR pi = {VK_STRUCTURE_TYPE_PRESENT_INFO_KHR, chain, 1, &W.done[idx], 1, &W.sc, &idx, NULL};
+    ps_set(PS_PRESENT, s->n);
     pthread_mutex_lock(&hvk.queue_mu);
     VkResult pr = vkQueuePresentKHR(hvk.dev.queue, &pi);
     pthread_mutex_unlock(&hvk.queue_mu);
+    ps_set(PS_AFTER, s->n);
     if (pr == VK_SUBOPTIMAL_KHR || pr == VK_ERROR_OUT_OF_DATE_KHR) W.recreate = 1;
     else if (pr != VK_SUCCESS) { pthread_mutex_unlock(&g_sc_mu); hostvk_log("[RED] [hostvk] window presenter: vkQueuePresentKHR failed (VkResult %d): frames are no longer shown", pr); return -1; }
     // When it reaches the screen: the waiter's queue (present wait), or the past timings so far (display timing; the time base is CLOCK_MONOTONIC, plat_now_ns's on Linux)
@@ -733,10 +767,16 @@ static int show(snap_t *s) {
     pthread_mutex_lock(&g_mu);
     W.shown++;
     W.last = (hvk_win_info){W.shown, s->copied, W.swapchains, W.dropped, W.ext.width, W.ext.height, W.nimg, W.fmt, W.mode, {rect[0], rect[1], rect[2], rect[3]},
-                            s->w, s->h, s->flip, linear, kind, how, W.sc_textures, W.sc_asked, W.min_ic, W.max_ic, W.low, s->n};
+                            s->w, s->h, s->flip, linear, kind, how, W.sc_textures, W.sc_asked, W.min_ic, W.max_ic, W.low, s->n, W.stalls_busy, W.stalls_idle};
     W.last_val = v;
+    uint64_t now = plat_now_ns(), ep = W.ep_drops, gap_ms = W.shown_t && now > W.shown_t ? (now - W.shown_t) / 1000000ull : 0, dropped = W.dropped;
+    int was_first = W.shown == 1;
+    W.ep_drops = 0; W.shown_t = now;
     pthread_mutex_unlock(&g_mu);
     pthread_mutex_unlock(&g_sc_mu);
+    if (ep) hostvk_log("[hostvk] window presenter: frames shown again with present %llu, %llu ms after the %s: %llu dropped while the present thread was held (%llu dropped so far)",
+                       (unsigned long long)s->n, (unsigned long long)gap_ms, was_first ? "present thread started" : "frame shown before it", (unsigned long long)ep,
+                       (unsigned long long)dropped);
     return 1;
 }
 // The waiter (VK_KHR_present_wait): when each present reached the screen. vkWaitForPresentKHR needs the swapchain's host access to itself, so it is polled under g_sc_mu, without
@@ -777,6 +817,8 @@ static void *present_main(void *arg) {
     (void)arg;
     plat_thread_set_name("present");
     plat_qos_set_self(PLAT_QOS_USER_INTERACTIVE);
+    ps_set(PS_START, 0);
+    pthread_mutex_lock(&g_mu); W.shown_t = plat_now_ns(); pthread_mutex_unlock(&g_mu);
     // The surface: the front end makes it on its main thread (front_sdl.c stops drawing its progress screen into the window first)
     void *surf = NULL;
     if (!g_make_surface || g_make_surface((void *)hvk.dev.instance, &surf) || !surf) { hostvk_log("[RED] [hostvk] window presenter: the front end made no Vulkan surface: frames are not shown in the window"); win_fail(); return NULL; }
@@ -806,6 +848,7 @@ static void *present_main(void *arg) {
     if (hvk.dev.x.present_wait && !pthread_create(&W.wait_th, NULL, wait_main, NULL)) W.wait_on = 1;
     for (;;) {
         pthread_mutex_lock(&g_mu);
+        if (!W.stop && W.rd == W.wr) ps_set(PS_IDLE, 0);   // set under g_mu, so a present that queues a frame after this finds it idle only until the wakeup is taken
         while (!W.stop && W.rd == W.wr) pthread_cond_wait(&g_cv, &g_mu);
         if (W.stop) { pthread_mutex_unlock(&g_mu); break; }
         snap_t *s = &W.snap[W.rd % SNAP_N];
@@ -861,14 +904,27 @@ uint64_t hvk_win_present(VkImage image, VkFormat fmt, VkImageLayout layout, uint
     if (W.tex_open) { W.tex_open = 0; W.textures = W.tex_n; }   // the textures registered since the last present: this window's count (decision D12)
     if (!start()) { pthread_mutex_unlock(&g_mu); win_fail(); hostvk_log("[RED] [hostvk] window presenter: its timeline, command pool or thread could not be made: frames go to the headless presenter"); return 0; }
     uint64_t n = ++W.present_n;
-    // A free snapshot: the present thread has taken the oldest; a present thread stuck for SNAP_WAIT_NS (a hidden window, a surface gone) drops this frame instead of holding the game
+    // A free snapshot: the present thread has taken the oldest; a present thread held for SNAP_WAIT_NS (a hidden window, a surface gone, a driver call that does not return)
+    // drops this frame instead of holding the game longer: a 100 ms hitch and a frame lost, so a red line. It names what held the thread (ps_what): counted, one line per run of
+    // drops (show logs when frames are shown again)
     uint64_t limit = plat_now_ns() + SNAP_WAIT_NS;
     while (!W.failed && W.wr - W.rd >= SNAP_N) {
         uint64_t now = plat_now_ns();
         if (now >= limit) {
+            int st = atomic_load_explicit(&g_ps, memory_order_acquire);
+            uint64_t st_n = atomic_load_explicit(&g_ps_n, memory_order_relaxed), st_t0 = atomic_load_explicit(&g_ps_t0, memory_order_relaxed);
+            int idle = st == PS_IDLE;   // waiting for a frame while SNAP_N are queued: a wakeup lost, or the thread not scheduled since it was woken
             W.dropped++; ring_put(n, -1);
+            if (idle) W.stalls_idle++; else W.stalls_busy++;
+            int first = !W.ep_drops++;
+            uint64_t queued = W.wr - W.rd, dropped = W.dropped;
             pthread_mutex_unlock(&g_mu);
-            HVK_RED_ONCE("window presenter: the present thread took no frame for %llu ms: frames are dropped until it does", SNAP_WAIT_NS / 1000000ull);
+            double ms = st_t0 && now > st_t0 ? (now - st_t0) / 1e6 : 0;
+            char at[32] = ""; if (st_n) snprintf(at, sizeof at, " %llu", (unsigned long long)st_n);
+            const char *note, *what = ps_what(st, &note);
+            if (first || idle)   // a run of drops once; a lost wakeup every time
+                hostvk_log("[RED] [hostvk] window presenter: present %llu dropped: no snapshot free for %llu ms (%llu queued); the present thread %s%s for %.1f ms%s (%llu dropped so far)",
+                           (unsigned long long)n, SNAP_WAIT_NS / 1000000ull, (unsigned long long)queued, what, at, ms, note, (unsigned long long)dropped);
             return 0;
         }
         struct timespec ts; clock_gettime(CLOCK_REALTIME, &ts);
@@ -930,6 +986,7 @@ void hvk_win_shutdown(void) {
     if (W.th_on) { pthread_join(W.th, NULL); W.th_on = 0; }
     if (W.tick_on) { pthread_join(W.tick_th, NULL); W.tick_on = 0; }
     if (W.wait_on) { pthread_join(W.wait_th, NULL); W.wait_on = 0; }
+    ps_set(PS_OFF, 0);
     if (!hvk.d) return;
     tl_wait(tl_last());
     pthread_mutex_lock(&g_sc_mu); sc_destroy(); pthread_mutex_unlock(&g_sc_mu);
@@ -947,6 +1004,8 @@ void hvk_win_shutdown(void) {
 
 // ---------- Test hooks ----------
 void hvk_win_readback(int on) { pthread_mutex_lock(&g_sc_mu); W.readback = on; pthread_mutex_unlock(&g_sc_mu); }
+void hvk_win_hold(int on) { if (on) pthread_mutex_lock(&g_sc_mu); else pthread_mutex_unlock(&g_sc_mu); }
+int hvk_win_held(void) { return atomic_load_explicit(&g_ps, memory_order_relaxed) == PS_LOCK; }
 void hvk_win_upscale(const char *mode, const char *sharpen, int no_direct) {
     pthread_mutex_lock(&g_sc_mu);
     up_parse(mode, sharpen); W.up_no_direct = no_direct;

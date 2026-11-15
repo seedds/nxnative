@@ -4,7 +4,10 @@
 //   The present (game thread): the frame's region (the layer crop, else the whole image) is copied raw into a snapshot image of the presenter, on the backend's queue, after the
 //     producer's work (queue order and a full barrier; an external producer's timeline value is waited for too). The ticket is that copy's value on the presenter's timeline, so
 //     be_present_wait returns once the copy is done: the game's texture is free then, as Apple's present snapshots make it (design 7.2). An sRGB frame is copied into its UNORM
-//     twin, so its stored bytes reach the screen unchanged (the Switch scans the bytes out; Metal's present_raw_src).
+//     twin, so its stored bytes reach the screen unchanged (the Switch scans the bytes out; Metal's present_raw_src). Three snapshots queue; a present that finds all three
+//     queued waits for the present thread to take one, and after 100 ms drops its frame instead of holding the game longer: one red line per run of drops names what held the
+//     present thread (vkQueuePresentKHR, the acquire, the swapchain, the GPU, ...) and for how long, and one when frames are shown again; a drop while the present thread
+//     waited for a frame although one was queued would be a lost wakeup, logged every time.
 //   The present thread: takes the snapshots in order, acquires a swapchain image, clears it black (the letterbox bars), blits the snapshot into the centred rectangle of the window
 //     that keeps the frame's aspect (bilinear, nearest at one to one; the lower-left origin flipped), and presents it. DM_PRESENT_UPSCALE (design 7.4, decision D4; vk_present.c
 //     "Scaling") changes the scaling: `fsr` runs AMD FidelityFX Super Resolution 1.0 (EASU then RCAS, two compute passes in the same command buffer) where the picture is shown
@@ -75,9 +78,15 @@ typedef struct {
     uint32_t asked, min_images, max_images;           // the image count asked for (the rule's), the surface's minImageCount and maxImageCount (0: no maximum)
     int low;                                          // DM_VK_LATENCY=low
     uint64_t shown_n;                                 // the present number (1 = the first) of the frame shown last
+    uint64_t stalls_busy, stalls_idle;                // frames a present dropped after waiting 100 ms for a snapshot (counted in dropped too): the present thread inside a step of an
+                                                      // earlier frame the whole time (a driver call, the swapchain, the GPU), or waiting for a frame although one was queued (must be 0)
 } hvk_win_info;
 void hvk_win_readback(int on);
 int hvk_win_last(void *texels, size_t n, hvk_win_info *info);
+// Hold the present thread (on 1: the calling thread takes the swapchain lock, so the present thread stops at its next frame; on 0, the same thread, releases it) and whether it
+// now waits for that lock: a held present thread for the drop's checks
+void hvk_win_hold(int on);
+int hvk_win_held(void);
 // The upscaler's settings as DM_PRESENT_UPSCALE and DM_PRESENT_SHARPEN would give them (NULL: unset), from the next frame shown on; no_direct 1 keeps FSR's RCAS off the
 // swapchain image (the second intermediate image, as on a surface without storage). After the first present; the swapchain is made again for its usage
 void hvk_win_upscale(const char *mode, const char *sharpen, int no_direct);

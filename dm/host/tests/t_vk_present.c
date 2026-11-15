@@ -2,7 +2,9 @@
 // VK_EXT_headless_surface, made by this test where the host program registers front_sdl.c's window (hvk_present_set_window), with front_vk_instance_extensions asking for it.
 // A frame of a known picture (an R8G8B8A8_SRGB image on the backend's device, as the guest Vulkan layer registers its swapchain images) goes through be_present_ext, and the
 // presenter reads back each swapchain image as it hands it to the presentation engine (hvk_win_readback). Checked:
-//   ten frames presented, FIFO, at least three images, the swapchain's format a UNORM one;
+//   ten frames presented as fast as the copies go, each shown or, only while the present thread was held inside an earlier frame for 100 ms (lavapipe's first blit under load),
+//     dropped and counted, never while it waited idle with a frame queued; FIFO, at least three images, the swapchain's format a UNORM one;
+//   a held present thread (hvk_win_hold: the swapchain lock): the fourth present waits 100 ms and drops its frame, its line naming the lock, the three before it shown in order;
 //   the picture: the layer crop's region only (the band outside it is magenta and must not show), its stored bytes unchanged (an sRGB frame through the UNORM twin), the four
 //     quadrants where they belong, scaled bilinearly to a 16:9 window that it fills;
 //   one to one (a window of the region's size): nearest, every byte as stored, the quadrant edges exact;
@@ -70,14 +72,18 @@ static int g_total, g_fail;
 static void t(const char *name, int ok) { g_total++; g_fail += !ok; printf("%-120s %s\n", name, ok ? "ok" : "FAIL"); }
 // The backend's log, as hostvk_log prints it, with the newest swapchain-count and present-mode lines kept for the checks of decision D12 (the present thread logs them)
 static pthread_mutex_t g_log_mu = PTHREAD_MUTEX_INITIALIZER;
-static char g_count_line[512], g_mode_line[512];
+static char g_count_line[512], g_mode_line[512], g_drop_line[512], g_again_line[512];
 static void on_log(const char *line) {
     fprintf(stderr, "[dm] %s\n", line);
     pthread_mutex_lock(&g_log_mu);
     if (!strncmp(line, "[hostvk] swapchain: ", 20)) snprintf(g_count_line, sizeof g_count_line, "%s", line);
     if (!strncmp(line, "[hostvk] window presenter: present mode ", 40)) snprintf(g_mode_line, sizeof g_mode_line, "%s", line);
+    if (strstr(line, "[hostvk] window presenter: present ") && strstr(line, " dropped: ")) snprintf(g_drop_line, sizeof g_drop_line, "%s", line);   // a present that dropped its frame
+    if (!strncmp(line, "[hostvk] window presenter: frames shown again ", 46)) snprintf(g_again_line, sizeof g_again_line, "%s", line);
     pthread_mutex_unlock(&g_log_mu);
 }
+static void log_drop(char *out) { pthread_mutex_lock(&g_log_mu); snprintf(out, 512, "%s", g_drop_line); g_drop_line[0] = 0; pthread_mutex_unlock(&g_log_mu); }
+static void log_again(char *out) { pthread_mutex_lock(&g_log_mu); snprintf(out, 512, "%s", g_again_line); g_again_line[0] = 0; pthread_mutex_unlock(&g_log_mu); }
 static void log_take(char *count, char *mode) {   // the lines logged since the last call ("" for none)
     pthread_mutex_lock(&g_log_mu);
     if (count) snprintf(count, 512, "%s", g_count_line);
@@ -390,14 +396,41 @@ int main(int argc, char **argv) {
     char why[2048], name[2600];
     if (win) {
         hvk_win_readback(1);
-        uint64_t tk = 0; int ok = 1;
-        for (int i = 0; i < 10; i++) { tk = be_present_ext(serial, 1.0 / 60, NULL, 0, crop); ok &= tk != 0; be_present_wait(tk); }
-        t("ten frames presented through be_present_ext, each with a ticket be_present_wait returns on", ok);
-        t("the frames go to the window presenter, which made the surface once", hvk_win_on() && be_has_window() && g_surfaces == 1);
+        // Ten frames as fast as the copies go, so the three snapshots fill and each present waits for the present thread to take one. On a software device its first frame
+        // can take over 100 ms (lavapipe runs the blit inside vkQueuePresentKHR, and compiles the blit at its first use): the presenter then drops the frame that waited (vk_present.h)
+        // rather than hold the game, and names what held it. What it guarantees, checked here: every frame is shown or dropped and counted, and dropped only while the present
+        // thread was inside an earlier frame the whole time, never while it waited for a frame with one queued (a lost wakeup); the frames shown, in order, the newest last
+        uint64_t tk = 0, last_n = 0; int with = 0;
+        for (int i = 0; i < 10; i++) { tk = be_present_ext(serial, 1.0 / 60, NULL, 0, crop); if (tk) { with++; last_n = (uint64_t)i + 1; be_present_wait(tk); } }
         int got = shot();
+        char drop_line[512]; log_drop(drop_line);
+        snprintf(name, sizeof name, "ten frames through be_present_ext: %d with a ticket be_present_wait returns on, %llu dropped while the present thread was held (%llu while it was idle), "
+                 "the newest shown last", with, (unsigned long long)g_info.dropped, (unsigned long long)g_info.stalls_idle);
+        t(name, got && with + g_info.dropped == 10 && g_info.dropped == g_info.stalls_busy && !g_info.stalls_idle && g_info.shown_n == last_n);
+        if (g_info.dropped || drop_line[0]) printf("     the presenter: \"%s\"\n", drop_line);
+        t("the frames go to the window presenter, which made the surface once", hvk_win_on() && be_has_window() && g_surfaces == 1);
         snprintf(name, sizeof name, "the newest frame read back from the swapchain image: %ux%u, %u images, format %d, mode %d, %llu presented, %llu dropped", g_info.width, g_info.height,
                  g_info.images, g_info.format, g_info.mode, (unsigned long long)g_info.presents, (unsigned long long)g_info.dropped);
-        t(name, got && g_info.width == 1600 && g_info.height == 900 && g_info.presents >= 10 && g_info.dropped == 0);
+        t(name, got && g_info.width == 1600 && g_info.height == 900 && g_info.presents == (uint64_t)with && g_info.presents + g_info.dropped == 10);
+        // A held present thread (the test takes the swapchain lock, as a resize would hold it): the first frame is taken and waits for the lock, two more queue, the fourth waits
+        // 100 ms for a snapshot and is dropped, the line naming the lock and the frame it holds up; released, the three are shown in order and a line says so
+        {
+            hvk_win_info b = g_info; const uint64_t n0 = 10; uint64_t tks[4] = {0}; int held = 0;   // n0: the presents so far (the ten above, dropped ones included)
+            char line[512], again[512]; log_drop(line); log_again(again);   // the burst's lines, if it dropped one
+            hvk_win_hold(1);
+            tks[0] = be_present_ext(serial, 1.0 / 60, NULL, 0, crop); be_present_wait(tks[0]);
+            for (uint64_t t0 = plat_now_ns(); !(held = hvk_win_held()) && plat_now_ns() - t0 < 5000000000ull;) plat_sleep_ns(1000000);   // the present thread at the lock
+            for (int i = 1; i < 4; i++) { tks[i] = be_present_ext(serial, 1.0 / 60, NULL, 0, crop); if (tks[i]) be_present_wait(tks[i]); }
+            hvk_win_hold(0);
+            got = shot();
+            log_drop(line); log_again(again);
+            char want[160]; snprintf(want, sizeof want, "the present thread has waited for the swapchain lock to show present %llu for ", (unsigned long long)n0 + 1);
+            snprintf(name, sizeof name, "a held present thread: present %llu dropped after 100 ms (tickets %d%d%d%d), the three before it shown in order, the line names the lock",
+                     (unsigned long long)n0 + 4, !!tks[0], !!tks[1], !!tks[2], !!tks[3]);
+            t(name, held && got && tks[0] && tks[1] && tks[2] && !tks[3] && g_info.dropped == b.dropped + 1 && g_info.stalls_busy == b.stalls_busy + 1 && g_info.stalls_idle == b.stalls_idle
+                    && g_info.shown_n == n0 + 3 && g_info.presents == b.presents + 3 && strstr(line, want) && strstr(again, "frames shown again with present "));
+            printf("     \"%s\"\n     \"%s\"\n", line, again);
+        }
         t("at least three swapchain images, in a UNORM format (the stored bytes reach the screen unchanged)", g_info.images >= 3 && (g_info.format == VK_FORMAT_B8G8R8A8_UNORM || g_info.format == VK_FORMAT_R8G8B8A8_UNORM));
         t(mailbox ? "DM_VK_PRESENT_MODE=mailbox: MAILBOX" : "FIFO by default (decision D12)", g_info.mode == (mailbox ? VK_PRESENT_MODE_MAILBOX_KHR : VK_PRESENT_MODE_FIFO_KHR));
         snprintf(name, sizeof name, "the crop's %dx%d region fills the 16:9 window (%d,%d %dx%d), scaled bilinearly", CW, CH, g_info.dst[0], g_info.dst[1], g_info.dst[2], g_info.dst[3]);

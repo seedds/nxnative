@@ -42,7 +42,7 @@ extern __thread uint64_t dm_clock_reads;   // the calling thread's guest reads o
 // and the first 64 bytes of stack arguments are carried over, so at most 16 parameters (8 in registers, 8 stack slots; a struct passed by value counts as the registers it takes);
 // not for variadic functions. Each take-over moved here one by one after it crashed on a small stack (the file system on Super Mario 3D World's save thread, add-on content,
 // AudioOut, the controller applet on Drag x Drive, Mario Kart 8 Deluxe's offline page) before this became the default (memory.md, Host calls on small guest stacks)
-typedef struct { const char *name; void *fn; const char *why; } hle_force_ent;
+typedef struct { const char *name; void *fn; const char *why; const char *to; } hle_force_ent;   // to: a guest alias (HLE_FORCE_ALIAS below), fn NULL
 #define HLE_NARG(...) HLE_NARG_(__VA_ARGS__, 24, 23, 22, 21, 20, 19, 18, 17, 16, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0)
 #define HLE_NARG_(a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15, a16, a17, a18, a19, a20, a21, a22, a23, a24, n, ...) n
 #define HLE_STR(x) HLE_STR_(x)
@@ -65,6 +65,14 @@ typedef struct { const char *name; void *fn; const char *why; } hle_force_ent;
     static ret cname(__VA_ARGS__);                                                                \
     __attribute__((used, section("__DATA,swforce"))) static const hle_force_ent hle_force_##cname = {mangled, (void *)cname, why}; \
     static ret cname(__VA_ARGS__)
+// A guest alias: every reference to mangled binds to the loaded modules' own definition of target instead, as if the module had imported target. No host code runs and no
+// signature is restated, so the alias holds for every SDK that defines both. For a hardware class whose constructor the host takes over to build the SDK's software class in the
+// same memory: its members, called directly rather than through the vtable, go to the software class's members of the same signature (hle_codec.c). A target no loaded module
+// defines leaves the reference bound as it would be without the entry, with a red line; a target that is itself taken over stops loading (force_init)
+#define HLE_FORCE_ALIAS(mangled, target, why) HLE_FORCE_ALIAS_(mangled, target, why, __COUNTER__)
+#define HLE_FORCE_ALIAS_(mangled, target, why, n) HLE_FORCE_ALIAS__(mangled, target, why, n)
+#define HLE_FORCE_ALIAS__(mangled, target, why, n) \
+    __attribute__((used, section("__DATA,swforce"))) static const hle_force_ent hle_force_alias_##n = {mangled, NULL, why, target}
 // Programs that do not link hle_bigstack.c (unit tests, whose stacks are host stacks) get this pass-through: the implementation runs on the caller's stack, as dm.h's weak dm_log
 // writes there. The host's entry (hle_bigstack.c) replaces it at link time
 __attribute__((weak, naked, visibility("hidden"))) void dm_bigstack_enter(void) { __asm__ volatile("br x16"); }

@@ -700,9 +700,53 @@ static id<MTLRenderPipelineState> mtk_pso(NvProg *raster) {
          elapsed / 1e6, archived ? " (from the pipeline archive)" : "", (unsigned long long)atomic_load(&g_cur_frame));
     return ps;
 }
+// The scratch buffer of the mesh shaders whose stage array is a device slice (reflection mesh_spill, dmsh_meshstage.py to_stage, DMSH_MESH_SCRATCH_* in dmsh_abi.h): one buffer for every draw,
+// made on first use, in shared storage so that the host writes the head's words and reads the overflow count. Its slices must outnumber the groups the GPU runs at once: with the stage array out of
+// threadgroup memory an Apple GPU core holds 3072 threads, 96 groups of 32, and twice that keeps a claim to about two tickets. The Mac reads its GPU's cores (gpu-core-count); iOS GPUs have at
+// most 10 (2048 slices). The flags start 0 as a new buffer's bytes do, and a group zeroes its own slice, so nothing clears the buffer between draws
+static unsigned gpu_cores(void) {
+    unsigned n = 0;
+#if TARGET_OS_OSX
+    io_iterator_t it;
+    if (IOServiceGetMatchingServices(kIOMainPortDefault, IOServiceMatching("AGXAccelerator"), &it) != KERN_SUCCESS) return 0;   // takes the matching dictionary
+    for (io_object_t s; !n && (s = IOIteratorNext(it)); IOObjectRelease(s)) {
+        CFTypeRef v = IORegistryEntryCreateCFProperty(s, CFSTR("gpu-core-count"), kCFAllocatorDefault, 0);
+        if (v && CFGetTypeID(v) == CFNumberGetTypeID()) CFNumberGetValue((CFNumberRef)v, kCFNumberIntType, &n);
+        if (v) CFRelease(v);
+    }
+    IOObjectRelease(it);
+#endif
+    return n;
+}
+static uint32_t *mesh_scratch(uint64_t *gpu) {
+    static uint64_t addr; static uint32_t *head; static __strong id<MTLBuffer> buf; static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        unsigned cores = gpu_cores(), want = cores ? cores * 96 * 2 : TARGET_OS_OSX ? 8192 : 2048, n = 1024;
+        while (n < want && n < DMSH_MESH_SCRATCH_SLICES) n <<= 1;
+        buf = [g_dev newBufferWithLength:DMSH_MESH_SCRATCH_HEAD + (size_t)n * DMSH_MESH_SCRATCH_STRIDE options:MTLResourceStorageModeShared];
+        if (!buf) MDIE("failed to create the mesh scratch buffer (%u slices)", n);
+        head = buf.contents; head[DMSH_MESH_SCRATCH_MASK] = n - 1; head[DMSH_MESH_SCRATCH_DONE] = (uint32_t)atomic_load(&g_done);
+        res_add(buf); res_commit(); addr = buf.gpuAddress;
+        atomic_store(&g_mesh_scr, head);   // post_complete keeps DONE from now on (one it missed before this is only a later reclaim)
+        MLOG("mesh scratch: %u slices of %u bytes for the mesh shaders whose stage memory is a device slice (%u GPU cores%s)", n, DMSH_MESH_SCRATCH_STRIDE, cores, cores ? "" : ", not read");
+    });
+    *gpu = addr;
+    return head;
+}
+// Before a draw of a spilled mesh shader: the tag its groups claim slices with, the fence of the submission being encoded (or the next one), so that no tag a running group holds is DONE or
+// older (the commit comes after this store, and the tag only grows); a tag is never 0, a free flag. The groups that found no free slice drew nothing: a red line, the pool is too small
+static void mesh_scratch_bind(id<MTL4RenderCommandEncoder> en) {
+    uint64_t gpu; uint32_t *head = mesh_scratch(&gpu);
+    uint64_t f = atomic_load(&g_sub_open); if (!f) f = atomic_load(&g_fence) + 1;
+    __atomic_store_n(head + DMSH_MESH_SCRATCH_TAG, (uint32_t)f ? (uint32_t)f : 1u, __ATOMIC_RELAXED);
+    uint32_t over = __atomic_load_n(head + DMSH_MESH_SCRATCH_OVER, __ATOMIC_RELAXED);
+    if (over) RED_ONCE(173, "mesh scratch: %u mesh groups found none of the %u slices free and drew nothing (dmsh_abi.h DMSH_MESH_SCRATCH_*: the GPU ran more groups at once than the pool was sized for)", over, head[DMSH_MESH_SCRATCH_MASK] + 1);
+    enc_r_vbuf(en, DMSH_MESH_SCRATCH_SLOT, gpu);   // the mesh function's stage array (the table persists; enc_r_vbuf skips an unchanged address)
+}
 static void mtk_encode(id<MTLRenderCommandEncoder> en_) {
     id<MTL4RenderCommandEncoder> en = (id<MTL4RenderCommandEncoder>)en_; NvShader *ts = g_mtk.ts, *ms = g_mtk.ms;
     [en setArgumentTable:g_vt atStages:MTLRenderStageMesh];
+    if (ms->rf.mesh_spill) mesh_scratch_bind(en);
     uint64_t draw_gpu = g_mtk.ind_rec;
     if (!g_mtk.ind) { id<MTLBuffer> b; size_t o = arena_alloc(16, &b); uint32_t rec[2] = {g_mtk.count, g_mtk.first}; memcpy((uint8_t *)b.contents + o, rec, 8); draw_gpu = b.gpuAddress + o; }
     [en setArgumentTable:g_ot atStages:MTLRenderStageObject];

@@ -26,6 +26,7 @@
 #include <unistd.h>
 #include "romfs_image.h"
 #include "save_sync.h"
+#include "keymap.h"
 
 extern char **environ;
 int dm_mac_launcher(void);   // Launcher.swift: 1 = Play (the settings are in the environment), 0 = the player quit, 2 = no window (apply the saved choices here)
@@ -167,6 +168,22 @@ static void microphone_at_launch(void) {
     if (value) CFRelease(value);
 }
 
+// The keyboard map: a saved choice as the others (launcher.DM_KEYMAP in the app's preferences, keymap.h's full form, written by the settings window's Keyboard section and the
+// in-game Keyboard Map panel), in the same order and with DM_SAVED_CHOICES=0. It has no launcher.json row, so DMSettings cannot check it: the host's own parser does, and a value
+// it would not take whole is ignored. Read whether or not the settings window ran, since the window applies only launcher.json's settings
+static void saved_keymap(void) {
+    CFStringRef domain = CFBundleGetIdentifier(CFBundleGetMainBundle());
+    const char *off = getenv("DM_SAVED_CHOICES");
+    if (!domain || (off && !strcmp(off, "0"))) return;
+    CFPropertyListRef v = CFPreferencesCopyAppValue(CFSTR("launcher.DM_KEYMAP"), domain); static char s[KM_FORMAT_MAX]; keymap m;
+    if (!v) return;
+    if (CFGetTypeID(v) != CFStringGetTypeID() || !CFStringGetCString(v, s, sizeof s, kCFStringEncodingUTF8)) fprintf(stderr, "launcher: saved choice for DM_KEYMAP ignored: not a string of at most %zu bytes\n", sizeof s - 1);
+    else if (km_parse(&m, s, NULL, 0)) fprintf(stderr, "launcher: saved choice DM_KEYMAP=%s ignored: the host does not take it\n", s);
+    else if (getenv("DM_KEYMAP")) fprintf(stderr, "launcher: saved choice DM_KEYMAP=%s not used: DM_KEYMAP=%s is set (environment or env.txt)\n", s, getenv("DM_KEYMAP"));
+    else { setenv("DM_KEYMAP", s, 0); fprintf(stderr, "launcher: env DM_KEYMAP=%s (saved choice)\n", s); }
+    CFRelease(v);
+}
+
 // A game of several programs (Super Mario 3D All-Stars): pack_app.py's table of them, with this app's paths filled in (it may move), for oe::ExecuteProgram (DM_PROGRAMS, hle_oe.c)
 static void programs_table(const char *contents, const char *res, const char *sup) {
     char in[PATH_MAX], out[PATH_MAX]; snprintf(in, sizeof in, "%s/dm/programs.tsv", res); snprintf(out, sizeof out, "%s/programs.tsv", sup);
@@ -227,6 +244,7 @@ int main(int argc, char **argv) {
     if (!shown) return 0;   // Quit: no game
     if (shown == 2) saved_choices();
     cloud_saves_folder();
+    saved_keymap();
     microphone_at_launch();
     setenv("DM_ROOT", sup, 0); setenv("DM_ROMFS", romfs, 0); setenv("DM_TEMP", temp, 0);
     snprintf(p, sizeof p, "%s/Library/Application Support/nxnative/system", home); setenv("DM_SYSTEM_DIR", p, 0);   // the player's own console files, for every game

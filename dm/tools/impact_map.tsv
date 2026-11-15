@@ -128,6 +128,7 @@ dm/tools/nx_extract/*	*:*	NSP extraction: every game's resource inputs
 dm/tools/nx_extract_bin/*	*:*	fallback: the extractor binary, when its sources are not in the range
 dm/mac/launcher.c	*:*	Mac app resource discovery and host launch
 dm/mac/Launcher.swift	*:*	the Mac settings window, linked into every Mac app
+dm/mac/keymap_bridge.c	*:*	the keyboard map's calls from the Mac settings window, linked into every Mac app
 dm/mac/pack_app.py	*:*	Mac app packaging: every game's bundled resources
 dm/gfx/tools/cpk.py	shader:stage:*	CRI archive input to shader scanning
 dm/gfx/tools/vbf.py	shader:stage:*	Virtuos archive input to shader scanning
@@ -163,6 +164,9 @@ dm/host/motion_pro_mac.h	hle:*SixAxisSensor*	Mac Pro Controller and DualShock 4 
 dm/host/switch2_proto.h	hle:*hid*	Switch 2 controller protocol: reports, sticks, buttons, motion maps
 dm/host/pad_switch2_apple.h	hle:*hid*	Switch 2 controllers over Bluetooth LE (off unless DM_SW2=1)
 dm/host/pad_switch2_apple.m	hle:*hid*	Switch 2 controllers over Bluetooth LE (off unless DM_SW2=1)
+dm/host/keymap.h	present:*	the Mac keyboard map (keyboard_mac.h; the launcher checks a saved one)
+dm/host/keyboard_mac.h	present:*	the Mac keyboard as player 1's controller
+dm/host/keymap_panel_mac.h	present:*	the Mac in-game Keyboard Map panel
 dm/host/front.h	present:*	the front end
 dm/ios/*	*:*	the iOS app
 dm/third_party/ryujinx/src/Ryujinx.Graphics.Shader/Translation/ResourceReservations.cs	shader:stage:gs	geometry compute varying slots

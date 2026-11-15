@@ -2274,7 +2274,9 @@ def fzlc_unchunk(d, label):
     if 8 + 12 * n > len(d): red(f'{label}: FZLC chunk table of {n} entries lies outside the file')
     for i in range(n):
         off, cs, us = struct.unpack_from('<3I', d, 8 + 12 * i)
-        if off + cs > len(d) or d[off:off + 4] != ZSTD_MAGIC: red(f'{label}: FZLC chunk {i} @{off:#x} is not a zstd frame')
+        if off + cs > len(d): red(f'{label}: FZLC chunk {i} @{off:#x} lies outside the file')
+        if cs == us: out.append(d[off:off + cs]); continue   # a chunk kept stored (the DLCs' staticshadernx.cache stubs: one short uncompressed chunk each)
+        if d[off:off + 4] != ZSTD_MAGIC: red(f'{label}: FZLC chunk {i} @{off:#x} is not a zstd frame')
         b = zstd.decompress(d[off:off + cs])
         if len(b) != us: red(f'{label}: FZLC chunk {i} is {len(b):#x} bytes, its entry says {us:#x}')
         out.append(b)

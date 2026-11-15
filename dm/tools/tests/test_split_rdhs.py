@@ -107,6 +107,15 @@ class Fzlc(unittest.TestCase):
         with self.assertRaisesRegex(SystemExit, 'not a zstd frame'):
             ss.fzlc_shaders(bytes(d), '/bad')
 
+    def test_stored_chunk(self):
+        """The DLCs' staticshadernx.cache stubs keep their one short chunk uncompressed (stored length == raw length)"""
+        payload = static_records(fz.glslc([fz.VS]))
+        d = b'FZLC' + struct.pack('<I', 1) + struct.pack('<3I', 0x14, len(payload), len(payload)) + payload
+        (rel, keys, pairs, extra), log = self.scan(d)
+        self.assertEqual(log, '')
+        self.assertEqual(len(keys), 1)
+        self.assertEqual(list(keys.values())[0][1], 'vs')
+
 
 if __name__ == '__main__':
     unittest.main()

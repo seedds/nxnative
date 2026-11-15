@@ -27,6 +27,12 @@ class Usage(unittest.TestCase):
         self.assertEqual([n for n, _, _ in usage.functions('x.c', src)], ['a', 'nvnQueueFinish', 'h_open'])
         self.assertEqual([(n, a, b) for n, a, b in usage.functions('x.py', 'import os\ndef f():\n    pass\nclass C:\n    pass\n')], [('f', 2, 3), ('C', 4, 5)])
 
+    def test_functions_macro_call_before_many_lines(self):   # a macro call after a word at column 0 and then lines with no ";" or brace: no definition (the old pattern took 2^lines steps)
+        src = 'INLINE DECLARE_COMPARISON(equals_pointer, void *)\n\n/**\n' + ''.join(f' * line {i}\n' for i in range(60)) + ' */\ntypedef int t;\nint z(int a,\n      int b)\n{\n    return a + b;\n}\n'
+        r = subprocess.run([sys.executable, '-c', 'import sys; sys.path.insert(0, sys.argv[1]); import usage; print([n for n, _, _ in usage.functions("x.h", sys.stdin.read())])',
+                            str(Path(usage.__file__).parent)], input=src, capture_output=True, text=True, timeout=20)
+        self.assertEqual(r.stdout.strip(), "['z']", r.stderr)
+
     def test_changed_functions_and_headers(self):   # a hunk maps to every function it spans; a header's static inline function reaches the entry points of its includers
         with tempfile.TemporaryDirectory() as d:
             run = lambda *c: subprocess.run(['git', '-c', 'user.name=t', '-c', 'user.email=t@t', *c], cwd=d, check=True, capture_output=True)

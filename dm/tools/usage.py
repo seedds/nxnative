@@ -136,7 +136,9 @@ def read_manifest(path):
 
 # ---------------------------------------------------------------- the host's call graph (a scanner, not a compiler)
 
-DEF = re.compile(r'^(?:static\s+|inline\s+|__attribute__\(\([^)]*\)\)\s+)*[A-Za-z_][\w\s\*]*?\b([A-Za-z_]\w*)\s*\(([^;{}]|\n)*?\)\s*\{', re.M)
+# The parameter list is one class ([^;{}] already takes a newline): with the newline as a second alternative every line break doubled the ways to match, and a file with a long
+# parenthesised run that is no definition (stb's headers, zycore's Comparison.h) never finished: `regress.py impact` on a range that touched one ran for hours
+DEF = re.compile(r'^(?:static\s+|inline\s+|__attribute__\(\([^)]*\)\)\s+)*[A-Za-z_][\w\s\*]*?\b([A-Za-z_]\w*)\s*\([^;{}]*?\)\s*\{', re.M)
 NVN_DEF = re.compile(r'^NVN(?:_NOPROTO)?\((nvn\w+)\s*,', re.M)
 HLE_DEF = re.compile(r'^HLE\(\s*"([^"]+)"\s*,\s*[^,]+,\s*(\w+)', re.M)   # HLE("symbol", ret, cname, ...) and HLE_FORCE("symbol", "why", ret, cname, ...) in dm/host/hle.h
 HLE_FORCE_DEF = re.compile(r'^HLE_FORCE(?:_BIG)?\(\s*"([^"]+)"\s*,\s*"(?:[^"\\]|\\.)*"\s*,\s*[^,]+,\s*(\w+)', re.M)

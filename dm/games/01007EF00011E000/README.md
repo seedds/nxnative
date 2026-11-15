@@ -209,6 +209,7 @@ Before publishing, the fixes were integrated with main's pipeline archive and GP
 
 ## Found on this game
 
+- [Wakes signalled after the scheduler lock is let go](../../../docs/reference/threads.md#wakes-signalled-after-the-scheduler-lock-is-let-go) ([PR #1466](https://github.com/seedds/nxnative/pull/1466)): the main thread slept again on the host's thread lock after each wake; M4 Max, guest threads 503–512 → 494–498 ms/s, CPU energy 1.21 → 1.18 W.
 - [A long render pass split while the GPU has nothing](../../../docs/reference/frame-rate.md#a-long-render-pass-split-while-the-gpu-has-nothing) ([PR #1468](https://github.com/seedds/nxnative/pull/1468)): the G-buffer pass (2,700 of 4,100 draws) reaches the GPU in up to three parts; M4 Max at 120 fps, frame p50 8.75 → 8.34 ms.
 - [A library that depends on its source's file name](../../../docs/reference/shaders.md#a-library-that-depends-on-its-sources-file-name): 3,936 of its 10,560 pixel shaders share their `_bl` source.
 - **Resolved in the host: the taller picture was drawn smaller than the 16:9 one on the phone** (`DM_SCREEN_ASPECT=1.43`, Fit): [The picture laid out in the shape the game presents](../../../docs/reference/rendering.md#the-picture-laid-out-in-the-shape-the-game-presents).

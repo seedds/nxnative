@@ -41,16 +41,17 @@ RUN apt-get update \
  && dpkg-query -W -f '${Package} ${Version}\n' clang-18 libllvm18 binutils libc6-dev \
  && clang --version | head -1
 # What the packer itself imports (scripts/build_ipa_from_nsp.py --platform linux: check_prereqs_port), so that this image packs a game from its NSP folder: lz4 (the NSOs'
-# segments) and capstone (the rewriter's disassembly) from Ubuntu 24.04's archive, and backports.zstd from PyPI (Python 3.12 has no compression.zstd; the version is
-# pinned). No zstd program, on purpose: a player's PC need not have one, and the packer's tools read .zs files with the module there (shader_split.py unzs). The recompiler built in the nxnative-aot image runs here too (libLLVM-18 came with clang-18). Its own layer, so the layers above stay cached.
+# segments) from Ubuntu 24.04's archive, and from PyPI, pinned: capstone (the rewriter's disassembly) and backports.zstd (Python 3.12 has no compression.zstd). capstone
+# 5.0.9, the bundles' (dm/tools/publish_port_python.py), not Ubuntu's python3-capstone 4.0.2, which the rewriter refuses: it decodes no udf and rewrites a module differently
+# (dm/tools/capstone_version.py; docs/reference/rewriter.md, "The capstone version"). No zstd program, on purpose: a player's PC need not have one, and the packer's tools read .zs files with the module there (shader_split.py unzs). The recompiler built in the nxnative-aot image runs here too (libLLVM-18 came with clang-18). Its own layer, so the layers above stay cached.
 # fontTools (from PyPI, pinned: Ubuntu's python3-fonttools brings numpy and scipy, 370 MB) and DejaVu Sans for the pack's button-icon font (make_ext_font.py takes its
 # letters from DejaVu Sans Bold, as on a desktop Linux)
 RUN apt-get update \
- && apt-get install -y --no-install-recommends python3-lz4 python3-capstone fonts-dejavu-core python3-pip \
+ && apt-get install -y --no-install-recommends python3-lz4 fonts-dejavu-core python3-pip \
  && rm -rf /var/lib/apt/lists/* \
- && pip install --break-system-packages --no-cache-dir backports.zstd==1.7.0 fonttools==4.68.0 \
- && dpkg-query -W -f '${Package} ${Version}\n' python3-lz4 python3-capstone fonts-dejavu-core \
- && python3 -c "import lz4.block, capstone, backports.zstd, fontTools; print('lz4', lz4.__version__, 'capstone', capstone.__version__, 'fontTools', fontTools.version)"
+ && pip install --break-system-packages --no-cache-dir capstone==5.0.9 backports.zstd==1.7.0 fonttools==4.68.0 \
+ && dpkg-query -W -f '${Package} ${Version}\n' python3-lz4 fonts-dejavu-core \
+ && python3 -c "import lz4.block, capstone, backports.zstd, fontTools, importlib.metadata as m; print('lz4', lz4.__version__, 'capstone', m.version('capstone'), 'fontTools', fontTools.version)"
 COPY --from=spirv-tools /out/ /opt/spirv-tools/
 ENV PATH=/opt/spirv-tools:$PATH
 # The worktree is mounted at /src and the container runs as the caller's user (HOME=/tmp): git refuses a repository owned by another user without this

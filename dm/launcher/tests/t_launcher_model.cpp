@@ -533,8 +533,9 @@ static void second_pack(const fake::Folder &f) {
     CHECK(log.find("fake host: argv " + r.argv[1] + "|" + fake::str(f.games) + "|--platform|" + kPlatform + "|--pack-mode|max|-k|") != std::string::npos, "its arguments: " + log);
 }
 
-// A bundle moved or replaced (launcher_model.h, "The programs a launch file names"): the launch file's host, packer and nxaot are gone, and the launcher takes the bundle's (its own
-// folder's bin/nxhost-run, the one host of every game, scripts/build_ipa_from_nsp.py, bin/nxaot) when they are there; NXHOST wins over both; the problem only when none is there.
+// A bundle moved or replaced (launcher_model.h, "The programs a launch file names"): the launch file's host, Python, packer and nxaot are gone, and the launcher takes the bundle's
+// (its own folder's bin/nxhost-run, the one host of every game, the Python its VERSION names, scripts/build_ipa_from_nsp.py, bin/nxaot) when they are there; NXHOST wins over both
+// hosts; the problem only when none is there.
 // The game profile's file stays with the pack (in <id>_build), so the bundle's host gets it as the launch file's host would
 static void moved_bundle(const fs::path &root) {
     const std::string id = "0100EEEE00000000";
@@ -543,8 +544,12 @@ static void moved_bundle(const fs::path &root) {
     fake::profile(build, id);
     const std::string row_packer = fake::str(old / "scripts/build_ipa_from_nsp.py"), row_nxaot = fake::str(old / "bin" / (std::string("nxaot") + kExeSuffix));
     const std::string own_packer = fake::str(bundle / "scripts" / "build_ipa_from_nsp.py"), own_nxaot = fake::str(bundle / "bin" / (std::string("nxaot") + kExeSuffix));
+    // the bundle's Python where scripts/package_port.py --python puts it (python/bin/python3.14 on Linux, python\python.exe on Windows), named by its VERSION file
+    const std::string py_rel = std::string(kPlatform) == "windows" ? "python/python.exe" : "python/bin/python3.14";
+    const std::string row_python = fake::str(old / fs::u8path(py_rel).make_preferred()), own_python = fake::str(bundle / fs::u8path(py_rel).make_preferred());
+    fake::write(row_python, "old python");
     fake::packs(build / "aot_v0", false);
-    const std::string repack = "path\tpackage\t" + fake::str(games) + "\npath\tpacker\t" + row_packer + "\npath\tpython\t/usr/bin/python3\npath\tnxaot\t" + row_nxaot + "\n";
+    const std::string repack = "path\tpackage\t" + fake::str(games) + "\npath\tpacker\t" + row_packer + "\npath\tpython\t" + row_python + "\npath\tnxaot\t" + row_nxaot + "\n";
     const fs::path launch = build / ("launch-" + std::string(kPlatform) + ".tsv");
     fake::write(launch, fake::launch("Epsilon Game", id, build, run, row, false, {{"balanced", build / "aot_v0"}}, repack));
     fs::create_directories(bundle);
@@ -590,7 +595,7 @@ static void moved_bundle(const fs::path &root) {
     CHECK_EQ(r.error, "the recompiler " + row_nxaot + " is missing: pack the game once more by hand with --nxaot <the recompiler>", "neither nxaot is there: said");
     fake::write(own_nxaot, "nxaot");
     r = repack_command(g, "balanced", fake::str(bundle));
-    CHECK(r.error.empty() && r.argv == (std::vector<std::string>{"/usr/bin/python3", own_packer, fake::str(games), "--platform", kPlatform, "--pack-mode", "balanced", "--nxaot", own_nxaot}),
+    CHECK(r.error.empty() && r.argv == (std::vector<std::string>{row_python, own_packer, fake::str(games), "--platform", kPlatform, "--pack-mode", "balanced", "--nxaot", own_nxaot}),
           "the bundle's packer and nxaot: " + r.error);
     CHECK_EQ(r.notes, (std::vector<std::string>{"packer: the bundle's " + own_packer + " (the launch file's " + row_packer + " is missing)",
                                                 "recompiler: the bundle's " + own_nxaot + " (the launch file's " + row_nxaot + " is missing)"}), "... both logged");
@@ -600,6 +605,23 @@ static void moved_bundle(const fs::path &root) {
     g.launch.nxaot.clear();
     r = repack_command(g, "balanced", fake::str(bundle));
     CHECK(r.error.empty() && std::find(r.argv.begin(), r.argv.end(), "--nxaot") == r.argv.end(), "no nxaot row: no --nxaot (the packer finds its own), the bundle's not taken");
+
+    // the python row's Python, else the bundle's own (its VERSION's python line); a bundle without its own Python ("python no") or without VERSION: the problem
+    fs::remove(row_python);
+    const std::string py_missing = "the Python " + row_python + " is missing: pack the game once more by hand with the bundle's " +
+                                   (std::string(kPlatform) == "windows" ? "pack.cmd" : "pack.sh");
+    CHECK_EQ(repack_command(g, "balanced", fake::str(bundle)).error, py_missing, "the row's Python is gone and the bundle has no VERSION: said");
+    fake::write(bundle / "VERSION", "nxnative 0123456\ndate 2026-11-15\nplatform linux-x86_64\npython no\nspirv yes\n");
+    CHECK_EQ(repack_command(g, "balanced", fake::str(bundle)).error, py_missing, "... a bundle without its own Python (python no): said");
+    fake::write(bundle / "VERSION", "nxnative 0123456\r\ndate 2026-11-15\r\npython 3.14.10 " + py_rel + "\r\nspirv yes\r\n");   // a Windows bundle's CRLF lines
+    CHECK_EQ(repack_command(g, "balanced", fake::str(bundle)).error, py_missing, "... VERSION names a Python the bundle does not hold: said");
+    fake::write(own_python, "bundle python");
+    r = repack_command(g, "balanced", fake::str(bundle));
+    CHECK(r.error.empty() && r.argv.size() > 2 && r.argv[0] == own_python && r.argv[1] == row_packer, "the bundle's own Python, the one its VERSION names: " + r.error);
+    CHECK_EQ(r.notes, (std::vector<std::string>{"Python: the bundle's " + own_python + " (the launch file's " + row_python + " is missing)"}), "... logged");
+    fake::write(row_python, "old python");
+    r = repack_command(g, "balanced", fake::str(bundle));
+    CHECK(r.argv[0] == row_python && r.notes.empty(), "the row's Python when it is there, nothing logged");
 }
 
 static void config(const fs::path &root) {

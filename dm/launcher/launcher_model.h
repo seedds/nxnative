@@ -98,6 +98,8 @@ bool packs_complete(const std::string &folder);   // per manifest <name>.aot.tsv
 //           missing: pack the game again or set NXHOST"
 //   nxaot   the nxaot row if that file exists (no row: no --nxaot, the packer finds its own); else <bundle>/bin/nxaot[.exe] if it exists; else a problem
 //   packer  the packer row if that file exists; else <bundle>/scripts/build_ipa_from_nsp.py if it exists; else a problem
+//   python  the python row if that file exists; else the bundle's own Python, the program its VERSION file names ("python <version> <program>", the path relative to the
+//           bundle: scripts/package_port.py --python), if it exists; else a problem (a bundle without its own Python, "python no": the player's Python, which the row named)
 // The game profile's file (the game_profile row, in <id>_build beside the launch file) has no such fallback: it belongs to the pack, not to the bundle, and nxhost-run takes the
 // game's constants from it (--profile <file>), so without it the host would run another game's profile. A launch file without the row (packed before the one host) and a row
 // whose file is gone are each a problem (game_profile_problem): "the launch file names no game profile: pack the game again", "the game profile <file> is missing: pack the game
@@ -111,6 +113,7 @@ struct Found {
 Found find_host(const LaunchFile &l, const Env &env, const std::string &bundle);
 Found find_nxaot(const LaunchFile &l, const std::string &bundle);
 Found find_packer(const LaunchFile &l, const std::string &bundle);
+Found find_python(const LaunchFile &l, const std::string &bundle);
 std::string game_profile_problem(const LaunchFile &l);   // '' when the game_profile row names a file that is there, else the problem (above)
 
 struct Game {
@@ -245,7 +248,7 @@ struct ProfileState {
 ProfileState profile_state(const Game &g, const std::string &mode);
 // The repack ("Repack with profile", nxlauncher --repack): <python> <packer> <package_dir> --platform <this system> --pack-mode <mode> [-k <keys>] [--nxaot <nxaot>], in the NSP
 // folder, its output in repack.txt beside the game's log (PYTHONUNBUFFERED=1: the log pane follows it as it goes); error when the launch file names no package, packer or python
-// (a pack made before those rows: pack the game once more by hand, which writes them). The packer and nxaot as find_packer and find_nxaot find them in bundle
+// (a pack made before those rows: pack the game once more by hand, which writes them). The Python, the packer and nxaot as find_python, find_packer and find_nxaot find them in bundle
 Command repack_command(const Game &g, const std::string &mode, const std::string &bundle = bundle_dir());
 
 }   // namespace nxl

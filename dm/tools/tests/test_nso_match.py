@@ -24,8 +24,9 @@ from nso_asm import ADRP, ADDI, B, NOP
 from nso_match import Image, MatchError, resolve, validate
 
 # nso_match.Image and nso_code.out_store decode with Capstone: without the module those tests skip (the CI installs it, tests.yml); the symbol table test needs none
-HAVE_CAPSTONE = importlib.util.find_spec('capstone') is not None
-NO_CAPSTONE = 'needs the capstone Python module (pip install capstone), which this Python cannot import'
+import capstone_version  # noqa: E402
+NO_CAPSTONE = capstone_version.unusable()   # none, or one the rewriter refuses (capstone_version.py): the tests that decode skip with the reason
+HAVE_CAPSTONE = not NO_CAPSTONE
 
 MOV =0xaa1703e0  # mov x0, x23
 ADD = 0x914012e0  # add x0, x23, #0x4000
@@ -176,6 +177,8 @@ class Matching(unittest.TestCase):
         self.assertIn('2 implementations match', messages[0])
 
     def test_registry_scopes_rules_and_preserves_known_builds(self):
+        # patch_nso.py from PATCH_FILES up to KEYS: the registry, the cuts applied, and the --aot behaviour image copied after them. The namespace holds the module-level
+        # names that code reads (the NSO header d, IMG, TEXT_END, NAME, outdir, and AOT_DIR: None, a run without --aot)
         source = TOOLS / 'patch_nso.py'; tree = ast.parse(source.read_text())
         start = next(i for i, n in enumerate(tree.body) if isinstance(n, ast.Assign) and ast.unparse(n.targets[0]) == 'PATCH_FILES')
         end = next(i for i, n in enumerate(tree.body[start:], start) if isinstance(n, ast.Assign) and ast.unparse(n.targets[0]) == 'KEYS')
@@ -198,7 +201,7 @@ class Matching(unittest.TestCase):
                 with self.subTest(game=gid, module=name, build=bid):
                     img = bytearray(self.original)
                     out = root / 'out' / gid / name / bid; out.mkdir(parents=True)
-                    ns = dict(__file__=str(root / 'tools/patch_nso.py'), os=os, glob=glob, importlib=importlib,
+                    ns = dict(__file__=str(root / 'tools/patch_nso.py'), os=os, glob=glob, importlib=importlib, AOT_DIR=None,
                               d=bytes(0x40) + bytes.fromhex(bid), IMG=img, TEXT_END=0x2000, NAME=name, outdir=str(out))
                     with patch.dict(os.environ, DM_GAME=gid, DM_GAMES_DIR='/derived/profile', DM_GAMES_FIRST='1'):
                         exec(code, ns)
@@ -221,7 +224,7 @@ class Matching(unittest.TestCase):
             (g / 'patches.py').write_text("CUTS = {'" + known + "': [(0x108, 'e00317aa', '1f2003d5', 'a'), (0x10c, '1f2003d5', '1f2003d5', 'b')]}\n")
             (g / 'game.tsv').write_text(f'build\tv65536\t1.0.1\tmain={known}\tsdk={"cd" * 16}\n')
             img = bytearray(self.original)
-            ns = dict(__file__=str(root / 'tools/patch_nso.py'), os=os, glob=glob, importlib=importlib,
+            ns = dict(__file__=str(root / 'tools/patch_nso.py'), os=os, glob=glob, importlib=importlib, AOT_DIR=None,
                       d=bytes(0x40) + bytes(16), IMG=img, TEXT_END=0x2000, NAME='main', outdir=str(root / 'out'))
             with patch.dict(os.environ, DM_GAME=gid): exec(code, ns)
             self.assertEqual(bytes(img), bytes(self.original))
@@ -247,7 +250,7 @@ class Matching(unittest.TestCase):
             for name, bid, gamed, expected in (('sdk', '00' * 16, gid, ADD), ('sdk', own, gid, MOV), ('sdk', own, '0100000000000002', ADD), ('main', '00' * 16, gid, MOV)):
                 with self.subTest(module=name, build=bid, game=gamed):
                     img, out = bytearray(self.original), root / 'out' / f'{name}{bid}{gamed}'
-                    ns = dict(__file__=str(root / 'tools/patch_nso.py'), os=os, glob=glob, importlib=importlib,
+                    ns = dict(__file__=str(root / 'tools/patch_nso.py'), os=os, glob=glob, importlib=importlib, AOT_DIR=None,
                               d=bytes(0x40) + bytes.fromhex(bid), IMG=img, TEXT_END=0x2000, NAME=name, outdir=str(out))
                     with patch.dict(os.environ, DM_GAME=gamed): exec(code, ns)
                     self.assertEqual(struct.unpack_from('<I', img, 0x108)[0], expected)
@@ -255,7 +258,7 @@ class Matching(unittest.TestCase):
                         self.assertEqual([l.split('\t')[:3] for l in (out / 'sdk.match.tsv').read_text().splitlines()[1:]], [['sdk', 'heap', '0x108']])
             printed = io.StringIO()
             with contextlib.redirect_stdout(printed):
-                ns = dict(__file__=str(root / 'tools/patch_nso.py'), os=os, glob=glob, importlib=importlib,
+                ns = dict(__file__=str(root / 'tools/patch_nso.py'), os=os, glob=glob, importlib=importlib, AOT_DIR=None,
                           d=bytes(0x40) + bytes(16), IMG=bytearray(image({0x100: [RET]})), TEXT_END=0x2000, NAME='sdk', outdir=str(root / 'miss'))
                 with patch.dict(os.environ, DM_GAME=gid): exec(code, ns)
             self.assertIn("function patch 'heap' skipped", printed.getvalue())

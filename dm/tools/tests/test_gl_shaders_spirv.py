@@ -37,6 +37,8 @@ EXPECTED = {
     'coord.frag': ['o:fragColor=0', 'b:*:8', 'u:uSize=0:vec2:0:0'],
     'stream.vert': ['a:VertexColor=0:vec4', 'a:VertexPosition=1:vec2', 'b:*:96', 'u:uTransform=0:mat4:0:0', 'u:uScale=64:float:2:16'],
     'stream.frag': ['o:fragColor=0', 'b:*:4', 'u:uInvert=0:bool:0:0'],
+    'flat.vert': ['a:aPos=0:vec2', 'a:aColor=1:vec4'],   # no uniform: no block, no descriptor set
+    'flat.frag': ['o:fragColor=0'],
 }
 
 
@@ -72,7 +74,7 @@ class VkLibrary(unittest.TestCase):
 
     def test_runs(self):
         self.assertEqual(self.run_.returncode, 0, self.run_.stdout + self.run_.stderr)
-        self.assertIn('vk: 5 shaders (2 vertex)', self.run_.stdout)
+        self.assertIn(f'vk: {len(EXPECTED)} shaders ({sum(n.endswith(".vert") for n in EXPECTED)} vertex)', self.run_.stdout)
         self.assertFalse((self.out / 'gl').exists(), 'no Metal library with --vk')
 
     def test_table(self):
@@ -96,8 +98,10 @@ class VkLibrary(unittest.TestCase):
             with self.subTest(shader=name):
                 m = words(path)
                 sets = [i[3] for i in m.of(dmsh_spv.DECORATE) if i[2] == dmsh_spv.D_DESCRIPTOR_SET]
-                self.assertTrue(sets, 'every sample has a default uniform block')
-                self.assertEqual(set(sets), {1 if stage == 'frag' else 0})
+                # a resource of each sample's table (its block, its samplers) is decorated with its stage's set; a sample without any (flat.vert, flat.frag) has none
+                resources = [f for f in EXPECTED[name] if f.startswith(('b:', 't:'))]
+                self.assertEqual(bool(sets), bool(resources))
+                self.assertLessEqual(set(sets), {1 if stage == 'frag' else 0})
 
     def test_clip_z(self):   # before each return of a vertex shader: the position's z set to (z + w) * 0.5
         for name, stage, path in self.modules():

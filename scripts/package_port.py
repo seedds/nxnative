@@ -10,7 +10,9 @@ It builds nothing: it assembles the bundle folder from build trees that CMake al
 when something is not there.
   --build   the host's CMake tree (dm/host/CMakeLists.txt, with NXHOST_PROGRAM and NXHOST_LAUNCHER): nxlauncher, and the host <build>/nxhost-run, one program for every game
             profile (it reads the profile at start: --profile <file> from the pack, dm/host/game_rt.c; the tree's GAME is only its default), which goes to bin/; SDL3's licence
-            from <build>/_deps/sdl3-src/LICENSE.txt (FetchContent's copy); any file in <build>/licenses/ goes to the bundle's licenses/ too. On Windows the .exe names
+            from <build>/_deps/sdl3-src/LICENSE.txt (FetchContent's copy); any file in <build>/licenses/ goes to the bundle's licenses/ too. On Windows the .exe names, and the
+            licences of what llvm-mingw links into every .exe (MINGW_LICENCES: dm/tools/mingw_licences.sh copies them from the toolchain into a tree's licenses/; --check
+            fails a Windows bundle without them)
   --aot     the CMake tree of the recompiler (dm/tools/aot): nxaot, and licenses/LLVM.txt (the licence of the LLVM and lld libraries linked into it; the CI copies the image's
             /usr/share/doc/libllvm18/copyright there). Required on Linux. On Windows nxaot.exe, cross-built with llvm-mingw against the static LLVM of
             dm/tools/aot/tools/build_llvm_win64.sh (dm/tools/aot/README.md, "Building nxaot for Windows"), with that LLVM's LICENSE.TXT as licenses/LLVM.txt; the packer
@@ -74,6 +76,10 @@ SPIRV_LICENCES = ('SPIRV-Tools.txt', 'SPIRV-Headers.txt', 'glslang.txt', 'SPIRV-
 SPIRV_ROWS = (('spirv-tools', 'spirv-val', '--version'), ('spirv-tools', 'spirv-link', '--version'), ('glslang', 'glslangValidator', '--version'),
               ('spirv-cross', 'spirv-cross', '--revision'))
 RID = {'linux': 'linux-x64', 'windows': 'win-x64'}   # the platform suffix of the lock's rows
+# What llvm-mingw links statically into every Windows program of the bundle (nxhost-run.exe, nxlauncher.exe, nxaot.exe, the SPIR-V tools): libc++, libc++abi, libunwind and
+# compiler-rt (the LLVM project's licence), mingw-w64's runtime (the CRT) and winpthreads. dm/tools/mingw_licences.sh copies their texts from the toolchain the trees were built
+# with into a tree's licenses/, which assemble() takes; a Windows bundle without them fails --check
+MINGW_LICENCES = ('llvm-mingw-LLVM.txt', 'llvm-mingw-mingw-w64.txt', 'llvm-mingw-winpthreads.txt')
 
 
 class PackError(Exception):
@@ -184,7 +190,7 @@ def readme(platform, sha, date, profiles, nxaot, tools=False, python=None, spirv
                     'with Vulkan 1.3.' + ('' if win else ' Games are given a font of the system as their standard font, and the packer draws the button icons with its '
                                           'letters: DejaVu Sans, Liberation Sans, Noto Sans or FreeSans (every desktop distribution installs one of them).'))
     need = []   # what packing needs that this folder does not carry
-    if not python: need.append(f'Python 3.12 or later with lz4, capstone, fonttools and backports.zstd ({py} -m pip install lz4 capstone fonttools backports.zstd; '
+    if not python: need.append(f'Python 3.12 or later with lz4, capstone 5.0.2 or a later 5.0.x, fonttools and backports.zstd ({py} -m pip install lz4 "capstone>=5.0.2,<6" fonttools backports.zstd; '
                                'backports.zstd only before Python 3.14; without fonttools the button icons show as \'?\')')
     if not tools: need.append('the .NET SDK 10 (the packer builds its extraction tool, nx_extract, with it on the first pack)')
     has = []    # what it carries for packing
@@ -229,8 +235,8 @@ def readme(platform, sha, date, profiles, nxaot, tools=False, python=None, spirv
               'Moving or replacing this folder: each pack names the host it runs with (its launch file\'s host row); the launcher run from the new folder',
               f'takes this folder\'s bin/nxhost-run{exe} instead, and so do run.sh and run.cmd when the NSP folder is inside it; otherwise set NXHOST or',
               'pack the game again. The pack\'s game profile stays with it (<title ID>_build/game-profile-' + platform + '.tsv in the NSP folder).']
-    if python: lines += [f'The launcher\'s "Repack with profile" runs the Python the game was packed with (its launch file\'s python row): after a move, pack the game',
-                         f'once more with this folder\'s {pack}.']
+    if python: lines += [f'The launcher\'s "Repack with profile" runs the Python the game was packed with (its launch file\'s python row), and this folder\'s own python/',
+                         f'when that one is gone, with this folder\'s packer and nxaot.']
     lines += [f'Game profiles in this folder: {len(profiles)}. A game packed from one of them, or from the profile the packer derives for another version of the game',
               'or guesses for a game without one, runs with the same nxhost-run.']
     return '\r\n'.join(lines) + '\r\n' if win else '\n'.join(lines) + '\n'
@@ -485,6 +491,13 @@ def check(platform, out, inputs):
                                     '-DNXAOT_LLVM_STATIC=ON (dm/tools/aot/README.md)' if rel.startswith('bin/nxaot') else ''))
             say(f'check: {rel}: needs {" ".join(needed) or "no shared library"}' + (f'; run path {":".join(rpaths)}' if rpaths else ''))
     say(f'check: {len(rows)} files, no symbolic link, no path of the build trees or this checkout in the text files it wrote or copied from them' if not fails else f'check: {len(fails)} file problem(s)')
+    if platform == 'windows':
+        held = {rel for rel, _ in rows}
+        for n in MINGW_LICENCES:
+            if f'licenses/{n}' not in held:
+                fails.append(f'licenses/{n} is missing: a licence of what llvm-mingw links into the bundle\'s .exe programs (sh dm/tools/mingw_licences.sh <tree>, in the '
+                             'llvm-mingw image after the build, copies it into the Windows build trees\' licenses/)')
+        if all(f'licenses/{n}' in held for n in MINGW_LICENCES): say(f'check: the licences of llvm-mingw\'s static runtime: {", ".join(MINGW_LICENCES)}')
 
     def run(argv, want, cwd=None, env=None, codes=(0,)):
         try: r = subprocess.run([str(a) for a in argv], capture_output=True, text=True, errors='replace', timeout=120, cwd=cwd, env=env)

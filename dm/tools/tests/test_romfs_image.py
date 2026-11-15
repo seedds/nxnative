@@ -19,6 +19,11 @@ spec = importlib.util.spec_from_file_location('romfs', REPO / 'dm/tools/romfs.py
 assert spec is not None and spec.loader is not None
 romfs = importlib.util.module_from_spec(spec); spec.loader.exec_module(romfs)
 
+# The validator is the host's own reader (dm/host/romfs_image.h) built as a program, with the first of cc, clang and gcc on PATH (the chain image has clang only).
+# Without one the checks that run it skip; the packer's own round trips still run
+C_COMPILER = next((c for c in ('cc', 'clang', 'gcc') if shutil.which(c)), None)
+NO_C_COMPILER = 'no C compiler (cc, clang or gcc on PATH) to build the host\'s romfs_image.h validator'
+
 
 class Images(unittest.TestCase):
     @classmethod
@@ -31,7 +36,8 @@ class Images(unittest.TestCase):
                           '    if (argc != 2) return 2;\n    romfs_img *m = romfs_image_open(argv[1]);\n'
                           '    if (!m) return 1;\n    romfs_image_close(m);\n    return 0;\n}\n')
         cls.validator = root / 'validate'
-        subprocess.run(['cc', '-std=gnu11', '-Wall', '-Wextra', '-Werror', '-I', str(REPO / 'dm/host'),
+        if not C_COMPILER: cls.validator = None; return
+        subprocess.run([C_COMPILER, '-std=gnu11', '-Wall', '-Wextra', '-Werror', '-I', str(REPO / 'dm/host'),
                         str(source), '-o', str(cls.validator)], check=True)
 
     def setUp(self):
@@ -41,6 +47,7 @@ class Images(unittest.TestCase):
         self.dst = self.root / 'romfs.img'
 
     def valid(self):
+        if not self.validator: self.skipTest(NO_C_COMPILER)
         return subprocess.run([str(self.validator), str(self.dst)]).returncode == 0
 
     def content(self, name):

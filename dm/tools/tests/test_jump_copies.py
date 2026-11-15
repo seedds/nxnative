@@ -7,9 +7,12 @@ import struct
 import sys
 import unittest
 
-# Every test decodes with Capstone: without the module they skip (the CI installs it, tests.yml), the rest of the file still loads
-HAVE_CAPSTONE = importlib.util.find_spec('capstone') is not None
-NO_CAPSTONE = 'needs the capstone Python module (pip install capstone), which this Python cannot import'
+# Every test decodes with Capstone (the CI installs it, tests.yml)
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import capstone_version  # noqa: E402
+# Without capstone, or with one the rewriter refuses (capstone_version.py: an older one decodes differently), the tests skip with the reason; the rest of the file still loads
+NO_CAPSTONE = capstone_version.unusable()
+HAVE_CAPSTONE = not NO_CAPSTONE
 if HAVE_CAPSTONE:
     from capstone import Cs, CS_ARCH_ARM64, CS_MODE_ARM
     from capstone.arm64 import ARM64_OP_IMM

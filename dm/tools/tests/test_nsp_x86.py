@@ -152,7 +152,8 @@ class Pack(unittest.TestCase):
         self.gfx = 'nvn'
         self.letters = self.tmp / 'fonts/Letters-Bold.ttf'; self.letters.parent.mkdir(); self.letters.write_bytes(b'letter font')   # the system's letter font (make_ext_font.letter_font)
         fam = {'base': self.nsp_dir / 'base.nsp', 'updates': [], 'dlc': []}
-        for cm in (mock.patch.dict(os.environ, {'DM_GAMES_DIR': str(self.tmp / 'games'), 'XLATE_VK': str(self.dll)}), mock.patch.dict(sys.modules, {'capstone': types.SimpleNamespace(__version__='test')}),
+        # capstone: a stand-in of a version the packer takes (dm/tools/capstone_version.py; its prerequisite check reads the version), whatever this Python has
+        for cm in (mock.patch.dict(os.environ, {'DM_GAMES_DIR': str(self.tmp / 'games'), 'XLATE_VK': str(self.dll)}), mock.patch.dict(sys.modules, {'capstone': types.SimpleNamespace(__version__='5.0.9')}),
                    mock.patch.object(make_ext_font, 'letter_font', side_effect=lambda *a: str(self.letters) if self.letters.is_file() else None),
                    mock.patch.object(nsp, 'PROG', mock.Mock()), mock.patch.object(nsp, 'say', self.said.append),
                    mock.patch.object(nsp, 'find_repo', return_value=REPO), mock.patch.object(nsp, '_importable', return_value=True),

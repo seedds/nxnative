@@ -943,6 +943,7 @@ def profile_files(g):   # every file of the game profile (game.tsv and its table
 def check_prereqs(env, xlate, mac=False):   # mac: a Mac-only build (PLATFORM 'mac'), which needs no xcodegen and compiles shaders only for macOS
     missing = [m for m in ('lz4.block', 'capstone', 'fontTools') if not _importable(m)] + ([] if _importable('compression.zstd') or _importable('backports.zstd') else ['backports.zstd'])   # zstd: built in from Python 3.14
     if missing: raise BuildError(f'the current Python ({sys.executable}) is missing modules: {", ".join(missing)} (pip install lz4 capstone fonttools backports.zstd; backports.zstd only before Python 3.14)')
+    capstone_ok(sys.executable)
     tools = {'xcodebuild': 'Xcode', 'xcodegen': 'brew install xcodegen', 'dotnet': '.NET SDK 10', 'zstd': 'brew install zstd', 'make': 'Xcode'}
     if mac: del tools['xcodegen']
     gone = [f'{t} ({how})' for t, how in tools.items() if not shutil.which(t, path=env['PATH'])]
@@ -952,6 +953,13 @@ def check_prereqs(env, xlate, mac=False):   # mac: a Mac-only build (PLATFORM 'm
     if not xlate.exists(): raise BuildError(f'the shader translator is missing from the repository: {xlate}')
     sc = env.get('SPIRV_CROSS', str(xlate.parent.parent / 'spirv_cross_bin/spirv-cross'))
     if not shutil.which(sc, path=env.get('PATH')): raise BuildError(f'spirv-cross is missing or not executable: {sc}')
+
+
+def capstone_ok(py, own=False):
+    """Stop before anything runs when this Python's capstone is not one the rewriter takes (dm/tools/capstone_version.py: an older one rewrites a module differently)"""
+    import capstone_version   # dm/tools, on sys.path
+    p = capstone_version.problem()
+    if p: raise BuildError(f'{p}, for the Python running this script ({py})' + (f'; this bundle\'s pack.{"cmd" if os.name == "nt" else "sh"} runs its own Python, python/, which has one' if own else ''))
 
 
 def _importable(m):
@@ -2116,6 +2124,7 @@ def check_prereqs_port(env, repo):   # what a pack for Windows or Linux runs up 
     if missing: raise BuildError(f'the current Python ({sys.executable}) is missing modules: {", ".join(missing)} ('
                                  + (f'this bundle\'s pack.{"cmd" if os.name == "nt" else "sh"} runs its own Python, python/, which has them; or ' if own else '')
                                  + 'pip install lz4 capstone backports.zstd; backports.zstd only before Python 3.14)')
+    capstone_ok(sys.executable, own)
     if not bundled_tool(repo, BUNDLE_NX_EXTRACT) and not shutil.which('dotnet', path=env['PATH']):
         raise BuildError('tools not found: dotnet (.NET SDK 10, which builds nx_extract; the port\'s bundle carries it prebuilt as bin/nx_extract)')
 

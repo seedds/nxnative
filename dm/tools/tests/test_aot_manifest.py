@@ -171,7 +171,14 @@ def importable(name):
     except ModuleNotFoundError: return False
 
 
+def refused():   # a capstone patch_nso.py refuses (capstone_version.py): it stops at its top, before any output
+    if not importable('capstone'): return ''
+    sys.path.insert(0, str(TOOLS)); import capstone_version
+    return capstone_version.problem()
+
+
 @unittest.skipUnless(importable('capstone') and importable('lz4'), 'patch_nso.py imports capstone and lz4 (CI\'s tool tests install them)')
+@unittest.skipIf(refused(), refused())
 class RewriterAot(unittest.TestCase):
     def test_aot_is_additive_and_exact(self):
         tmp = Path(tempfile.mkdtemp()); self.addCleanup(shutil.rmtree, tmp)
@@ -193,7 +200,7 @@ class RewriterAot(unittest.TestCase):
         # The oracle rows are sites.tsv's T, J and W rows
         sites = [ln.split('\t') for ln in (tmp / 'aot' / 'main.sites.tsv').read_text().splitlines()]
         _, rows = rows_of((tmp / 'main.aot.tsv').read_text())
-        self.assertEqual({(int(s[0], 16), int(s[2], 16)) for s in sites if s[1] == 'W'}, {(int(a, 16), int(b, 16)) for k, (a, b) in rows if k == 'oracle-W'})
+        self.assertEqual({(int(s[0], 16), int(s[2], 16)) for s in sites if s[1] == 'W'}, {(int(f[0], 16), int(f[1], 16)) for k, f in rows if k == 'oracle-W'})
         self.assertEqual({int(s[0], 16): int(s[2], 16) for s in sites if s[1] == 'J'}, {int(f[0], 16): int(f[1], 16) for k, f in rows if k == 'oracle-J'})
         self.assertEqual({int(s[0], 16): [int(x, 16) for x in s[2].split()] for s in sites if s[1] == 'T'},
                          {int(f[0], 16): [int(x, 16) for x in f[1].split(',')] for k, f in rows if k == 'oracle-T'})

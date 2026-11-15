@@ -16,6 +16,7 @@
 # "The recompiler's input" below): <aot dir>/<name>.image.bin, the behaviour image (the module with its cuts and frame step, none of Apple's rewrites), and <aot dir>/<name>.aot.tsv, its manifest
 import struct, re, sys, os, glob, types, importlib.util
 from itertools import combinations
+import capstone_version; capstone_version.require()   # a capstone the rewrite is known to come out the same with, else a [RED] line (capstone_version.py: 4.0.2 rewrites less)
 import lz4.block
 from capstone import *
 from capstone.arm64 import ARM64_OP_IMM, ARM64_OP_MEM, ARM64_OP_REG

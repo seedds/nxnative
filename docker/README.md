@@ -94,6 +94,10 @@ docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -v "$(pwd):/src" -w /src
 # Windows: cross-build every target into build/win64 (the tests run on a Windows PC, below)
 docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -v "$(pwd):/src" -w /src mstorsjo/llvm-mingw:20261020 sh -c \
   'cmake -S dm/host -B build/win64 -G Ninja -DGAME=010015100B514000 -DCMAKE_TOOLCHAIN_FILE=/src/dm/host/cmake/x86_64-w64-mingw32.cmake && cmake --build build/win64'
+
+# for a bundle: the licences of what llvm-mingw links into every .exe (libc++, libunwind, compiler-rt, mingw-w64's runtime, winpthreads), from the toolchain into
+# build/win64/licenses/, where scripts/package_port.py takes them (a Windows bundle without them fails its --check); the same for build/aot-win64 and build/port_spirv/win-x64
+docker run --rm --user "$(id -u):$(id -g)" -v "$(pwd):/src" -w /src mstorsjo/llvm-mingw:20261020 sh dm/tools/mingw_licences.sh build/win64
 ```
 
 `run_host_tests.sh` runs the test programs of `build/linux/host_tests.tsv`, then the tests that are scripts, which `dm/host/CMakeLists.txt` (`host_script_test`) lists in `build/linux/host_scripts.tsv` from the same arguments it registers with CTest: `t_vk_spirv` (`gen_spirv.sh --check`) and `t_second_pack` (the Python driver `dm/host/tests/t_second_pack.py`, registered when `NXHOST_PROGRAM` and `NXHOST_LAUNCHER` are on). Each gets its own log; one that exits with 77 is reported `SKIP` with its own skip line and does not fail the run. `t_second_pack` needs `nxaot` (`-e NXAOT=<path inside the container>` on `docker run`, which the runner passes through, or the CMake option `NXAOT`) and the programs `nxhost-run` and `nxlauncher` built (`cmake --build build/linux --target all nxhost-run nxlauncher`); without `NXAOT` it takes the packs `build_packs.sh` prebuilt for it with `nxaot` (`<packs>/second_pack`, through `NXAOT_PACKS`: the option or the environment), and with neither it is a `SKIP` and `summary.txt` says `NXAOT not set` and `NXAOT_PACKS not set`.
@@ -213,6 +217,16 @@ docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -v "$(pwd):/src" -w /src
    sh dm/tools/publish_port_tools.sh windows build/port_tools/win-x64 && XLATE_VK_PUBLISHED=build/port_tools python3 dm/gfx/tools/dmsh_chain_vk.py --update-lock &&
    python3 dm/gfx/tools/dmsh_chain_vk.py --header'
 ```
+
+### The packer's Python tests in this image
+
+`python3 -m unittest discover -s dm/tools/tests` on a machine whose Python has no `capstone` and no `lz4` (this one's) skips every test that decodes AArch64 or runs `patch_nso.py`, about 150 of them: the rewriter's tail calls, spin waits, jump tables, function-matched cuts, its `--aot` output and the NRO header. This image has both (capstone 5.0.9 from PyPI, which the rewriter takes: [rewriter.md, The capstone version](../docs/reference/rewriter.md#the-capstone-version)), and glslang and SPIRV-Cross for `test_gl_shaders_spirv.py`, so run the suite here too after a change to the packer or its tools:
+
+```sh
+docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -v "$(pwd):/src" -w /src nxnative-chain python3 -m unittest discover -s dm/tools/tests
+```
+
+Some tests call git (`test_package_port.py`, `test_env_switches.py`, `test_regress.py`, `test_docs.py`). Mounted from a git worktree, whose `.git` file names the main checkout's `.git` folder outside the mount, those fail on git alone (`fatal: not a git repository`); they need neither capstone nor lz4, so run them on the host there.
 
 ## The port's tools
 

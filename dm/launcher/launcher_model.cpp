@@ -270,9 +270,27 @@ Found find_nxaot(const LaunchFile &l, const std::string &bundle) {
     return find_in_bundle("recompiler", l.nxaot, std::string("bin/nxaot") + kExeSuffix, bundle, "pack the game once more by hand with --nxaot <the recompiler>");
 }
 
+static std::string pack_by_hand() { return std::string("pack the game once more by hand with the bundle's ") + (std::string(kPlatform) == "windows" ? "pack.cmd" : "pack.sh"); }
+
 Found find_packer(const LaunchFile &l, const std::string &bundle) {
-    return find_in_bundle("packer", l.packer, "scripts/build_ipa_from_nsp.py", bundle,
-                          std::string("pack the game once more by hand with the bundle's ") + (std::string(kPlatform) == "windows" ? "pack.cmd" : "pack.sh"));
+    return find_in_bundle("packer", l.packer, "scripts/build_ipa_from_nsp.py", bundle, pack_by_hand());
+}
+
+// The bundle's own Python: VERSION's "python <version> <program>" line (scripts/package_port.py; "python no" in a bundle without one), the program's path relative to the bundle
+static std::string bundle_python(const std::string &bundle) {
+    std::string text;
+    if (bundle.empty() || !read_file(S(P(bundle) / "VERSION"), &text)) return "";
+    for (auto line : lines_of(text)) {
+        if (!line.empty() && line.back() == '\r') line.pop_back();   // a Windows bundle's VERSION has CRLF lines
+        std::istringstream ss(line); std::string key, version, program;
+        if (ss >> key >> version >> program && key == "python") return program;
+    }
+    return "";
+}
+
+Found find_python(const LaunchFile &l, const std::string &bundle) {
+    const std::string rel = bundle_python(bundle);   // '' (no VERSION line): the bundle's folder itself, never a file, so the row or the problem
+    return find_in_bundle("Python", l.python, rel, bundle, pack_by_hand());
 }
 
 static void add_game(const fs::path &build, const std::string &platform, const std::string &bundle, const Env &env, std::vector<Game> *out) {
@@ -1019,12 +1037,12 @@ Command repack_command(const Game &g, const std::string &mode, const std::string
                   "scripts/build_ipa_from_nsp.py <NSP folder> -k <prod.keys> --platform " + std::string(kPlatform) + ", which writes them";
         return c;
     }
-    const Found packer = find_packer(l, bundle), nxaot = find_nxaot(l, bundle);   // the rows', else the bundle's
-    for (const Found *f : {&packer, &nxaot}) {
+    const Found python = find_python(l, bundle), packer = find_packer(l, bundle), nxaot = find_nxaot(l, bundle);   // the rows', else the bundle's
+    for (const Found *f : {&python, &packer, &nxaot}) {
         if (!f->problem.empty()) { c.error = f->problem; return c; }
         if (!f->note.empty()) c.notes.push_back(f->note);
     }
-    c.argv = {l.python, packer.path, l.package_dir, "--platform", kPlatform, "--pack-mode", c.mode};
+    c.argv = {python.path, packer.path, l.package_dir, "--platform", kPlatform, "--pack-mode", c.mode};
     if (!l.keys.empty()) { c.argv.push_back("-k"); c.argv.push_back(l.keys); }
     if (!nxaot.path.empty()) { c.argv.push_back("--nxaot"); c.argv.push_back(nxaot.path); }
     c.cwd = l.package_dir;

@@ -59,7 +59,7 @@ static void attach_console() {}
 
 static std::string played(const Config &c, const Game &g) { return now_text(std::atoll(c.get("played." + g.launch.title_id, "0").c_str())); }
 
-// A program taken from the bundle because the launch file's is gone (find_host, find_nxaot, find_packer): said in the log; the Problem column says only that none is there
+// A program taken from the bundle because the launch file's is gone (find_host, find_python, find_nxaot, find_packer): said in the log; the Problem column says only that none is there
 static void say_notes(const Command &c) {
     for (const auto &n : c.notes) std::fprintf(stderr, "nxlauncher: %s\n", n.c_str());
 }

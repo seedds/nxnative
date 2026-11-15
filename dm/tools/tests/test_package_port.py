@@ -78,11 +78,13 @@ class Bundle(unittest.TestCase):
         path.parent.mkdir(parents=True, exist_ok=True); path.write_text(text); path.chmod(mode)
 
     def fake_tree(self, build, exe, table=GAMES):
-        """A host tree as the CI leaves it: nxhost-run (its table: the profiles of table), the launcher, SDL3's licence"""
+        """A host tree as the CI leaves it: nxhost-run (its table: the profiles of table), the launcher, SDL3's licence; a Windows tree (exe) with the licences of
+        llvm-mingw's static runtime that dm/tools/mingw_licences.sh copies into its licenses/"""
         self.write(build / 'CMakeCache.txt', f'CMAKE_BUILD_TYPE:STRING=\nGAME:STRING={GAMES[0]}\n')
         self.write(build / f'nxhost-run{exe}', HOST.replace('@TABLE@', ' '.join(table)) if not exe else 'MZ host', 0o755)
         self.write(build / f'nxlauncher{exe}', LAUNCHER if not exe else 'MZ launcher', 0o755)
         self.write(build / '_deps/sdl3-src/LICENSE.txt', 'SDL3 licence\n')
+        for n in pp.MINGW_LICENCES if exe else (): self.write(build / 'licenses' / n, f'{n} of llvm-mingw\n')
 
     def package(self, *args, platform='linux', out=None, build=None, aot=True, said=None):   # said: a list that gets what the script says
         out = out or self.tmp / 'out' / f'nxnative-{platform}-x86_64'
@@ -114,7 +116,7 @@ class Bundle(unittest.TestCase):
         self.assertFalse([l for l in version if l.startswith('hosts')])
         self.assertIn('python no', version); self.assertIn('spirv no', version)
         readme = (out / 'README.txt').read_text()
-        self.assertIn('./pack.sh "<the game\'s NSP folder>" -k "<your prod.keys>"', readme); self.assertIn('pip install lz4 capstone fonttools backports.zstd', flat(readme))
+        self.assertIn('./pack.sh "<the game\'s NSP folder>" -k "<your prod.keys>"', readme); self.assertIn('pip install lz4 "capstone>=5.0.2,<6" fonttools backports.zstd', flat(readme))
         self.assertIn('which this folder does not carry: without them the packer reports the NVN shaders as not run', flat(readme))   # no --spirv: said
         self.assertNotIn('nothing to install', readme); self.assertNotIn('python/', readme)
         self.assertRegex(readme, r'\n  bin/nxhost-run +the host program the launcher starts, one for every game'); self.assertIn('Game profiles in this folder: 2.', readme)
@@ -359,7 +361,7 @@ class Bundle(unittest.TestCase):
         for absent in ('pip install', '.NET SDK', 'does not carry'): self.assertNotIn(absent, readme)
         self.assertRegex((out / 'README.txt').read_text(), r'\n  bin/spirv-val +the SPIR-V validator .*\n  bin/spirv-link .*\n  bin/spirv-cross .*\n  bin/glslangValidator +glslang, .*\n'
                                                            r'  python/ +the packer\'s Python 3\.14\.10 with lz4, capstone and fontTools\n')
-        self.assertIn('runs the Python the game was packed with (its launch file\'s python row): after a move, pack the game once more with this folder\'s ./pack.sh.', readme)
+        self.assertIn('runs the Python the game was packed with (its launch file\'s python row), and this folder\'s own python/ when that one is gone, with this folder\'s packer and nxaot.', readme)
         # the check: with the stand-in translator's fingerprint in the bundle's lock (and its header written again), everything passes, dmsh_chain_vk.py --check-tools with bin/ only
         lock = out / 'dm/gfx/tools/dmsh_chain_vk.lock'
         lock.write_text(lock.read_text().replace(dmsh_chain_vk.lock()['dmsh_xlate_vk_linux-x64'], dmsh_chain.sha16(out / 'bin/dmsh_xlate_vk')))
@@ -396,7 +398,7 @@ class Bundle(unittest.TestCase):
         no_spirv = flat(pp.readme('linux', 'abc1234', '2026-11-15', profiles, True, True, '3.14.10', False))
         self.assertIn('To pack a game: nothing to install.', no_spirv); self.assertIn('SPIRV-Cross of the versions dm/gfx/tools/dmsh_chain_vk.lock records, which this folder does not carry', no_spirv)
         no_python = flat(pp.readme('windows', 'abc1234', '2026-11-15', profiles, True, True, None, True))
-        self.assertIn('To pack a game: Python 3.12 or later with lz4, capstone, fonttools and backports.zstd (py -3 -m pip install lz4 capstone fonttools backports.zstd;', no_python)
+        self.assertIn('To pack a game: Python 3.12 or later with lz4, capstone 5.0.2 or a later 5.0.x, fonttools and backports.zstd (py -3 -m pip install lz4 "capstone>=5.0.2,<6" fonttools backports.zstd;', no_python)
         self.assertIn("The packer's extraction tool and Vulkan shader translator and SPIR-V tools (SPIRV-Tools, glslang, SPIRV-Cross) are in bin/", no_python)
         self.assertNotIn('does not carry', no_python); self.assertNotIn('DejaVu', no_python)   # Windows has Arial
         everything = pp.readme('windows', 'abc1234', '2026-11-15', profiles, True, True, '3.14.10', True)
@@ -436,6 +438,14 @@ class Bundle(unittest.TestCase):
         win = self.tmp / 'build/win64'; self.fake_tree(win, '.exe')
         rc, err, out = self.package('--check', platform='windows', build=win, aot=False)
         self.assertEqual((rc, err), (0, ''))
+        for n in pp.MINGW_LICENCES: self.assertEqual((out / 'licenses' / n).read_text(), f'{n} of llvm-mingw\n', n)
+        # a Windows bundle without a licence of llvm-mingw's static runtime fails its check, naming the file; a Linux bundle needs none (its programs link the system's)
+        for n in pp.MINGW_LICENCES:
+            with self.subTest(missing=n):
+                (win / 'licenses' / n).unlink()
+                rc, err, _ = self.package('--check', platform='windows', build=win, aot=False)
+                self.assertEqual(rc, 1, err); self.assertIn(f'licenses/{n} is missing: a licence of what llvm-mingw links into the bundle\'s .exe programs', err)
+                self.write(win / 'licenses' / n, f'{n} of llvm-mingw\n')
 
     def test_elf_dynamic(self):   # the run path check reads an ELF's dynamic section: a real program of this system (when it is ELF)
         exe = Path(os.path.realpath(sys.executable))

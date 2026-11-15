@@ -17952,6 +17952,8 @@ static pq_item g_pq[PQ];
 static uint64_t g_pq_in;
 static int present_now(const tex_t *, double, uint64_t, uint64_t, const int[4], id<CAMetalDrawable>, double);
 static double g_link_vperiod, g_link_vhalf;   // virtual ticks (link_range): seconds per counted tick (0 = every callback is a tick) and half a refresh of the screen
+static _Atomic double g_link_hz;   // the link's measured callback rate in Hz (0 = not measured yet): a frame-rate range with 60 as its minimum can settle at 60 Hz
+static double mtl_link_hz(void) { return atomic_load(&g_link_hz); }
 
 @interface NvMetalDisplayLinkDelegate : NSObject <CAMetalDisplayLinkDelegate>
 @end
@@ -17996,6 +17998,9 @@ static void link_drain_note(double cb, double age, int dropped) {
 - (void)metalDisplayLink:(CAMetalDisplayLink *)link needsUpdate:(CAMetalDisplayLinkUpdate *)update {
     (void)link;
     double cb = CACurrentMediaTime();
+    // The link's real callback rate (mtl_link_hz): a frame-rate range with 60 as its minimum lets the system settle at 60 Hz, where the 120 Hz link's two-tick
+    // wait would pace a 60 fps target to 30 (link_sync, vrr_120_ok). Physical callbacks: counted before the virtual-tick filter below
+    { static double t0; static int n; if (!t0) t0 = cb; if (cb - t0 >= 0.5) { atomic_store(&g_link_hz, n / (cb - t0)); t0 = cb; n = 0; } n++; }
     pthread_mutex_lock(&g_pq_mu);
     if (g_stall_t0) { uint64_t since = dm_focus_in_since(), t = now_ns();
         MLOG("display link recovered: stalled %.0f ms (%.0f ms of it active), fallback dropped %llu frames (stall #%llu)", (t - g_stall_t0) / 1e6, (t - (g_stall_t0 > since ? g_stall_t0 : since)) / 1e6, (unsigned long long)g_stall_drop, (unsigned long long)g_stall_n); g_stall_t0 = 0; }
@@ -18054,12 +18059,17 @@ static int link_on(void) { return g_dm_present_link && !atomic_load(&g_rescue_mo
 // 55 Hz, and a game paced by the link runs at 55 fps (27.5 at 30). There the link runs at the screen's rate and only the refreshes nearest a steady clock of the wanted rate count as
 // ticks (g_link_vperiod, NvMetalDisplayLinkDelegate): 60 a second on average, each frame shown on the refreshes nearest its 1/60 s slot. DM_LINK_VTICK=0 keeps the system's choice.
 // In fullscreen the Mac front end switches such a screen to a rate that is a multiple where it has one (front_screen_match), and the range is set again for it (link_sync)
-__attribute__((weak)) int front_screen_max_fps(void) { return 0; }   // front_mac.m; graphics unit tests and iOS have none
+__attribute__((weak)) int front_screen_max_fps(void) { return 0; }   // front_mac.m, front_ios.m; graphics unit tests have neither
 __attribute__((weak)) void front_screen_match(int fps) { (void)fps; }   // front_mac.m; graphics unit tests and iOS have none
 __attribute__((weak)) void front_picture_shape(int w, int h) { (void)w; (void)h; }   // front_mac.m, front_ios.m; graphics unit tests have none
 static CAFrameRateRange link_range(int mode) {
     static int on = -1; if (on < 0) { const char *e = getenv("DM_LINK_VTICK"); on = !(e && !strcmp(e, "0")); }
     int rate = mode == 3 ? 30 : mode == 2 ? 120 : 60, hz = on ? front_screen_max_fps() : 0;
+    if (mode == 4) {   // uncapped: the screen's own maximum, every refresh a tick — no 1/120 s slots, so 144 / 165 Hz screens show what they can and a frame beyond that is dropped
+        int top = hz > 0 ? hz : 60;
+        g_link_vperiod = 0;
+        return CAFrameRateRangeMake(top, top, top);
+    }
     if (hz > rate && hz % rate) {   // at 120 fps too: a game stepping by its target must not get 144 ticks a second
         if (g_link_vperiod != 1.0 / rate) MLOG("display link at the screen's %d Hz, counting a tick every 1/%d s (the screen's rate is not a multiple of it)", hz, rate);
         g_link_vhalf = 0.5 / hz; g_link_vperiod = 1.0 / rate;
@@ -18068,17 +18078,42 @@ static CAFrameRateRange link_range(int mode) {
     g_link_vperiod = 0;
     return mode == 3 ? CAFrameRateRangeMake(30, 30, 30) : mode == 2 ? CAFrameRateRangeMake(60, 120, 120) : CAFrameRateRangeMake(60, 60, 60);
 }
-// The display link's frame latency: 2 in variable-refresh fullscreen, 1 otherwise (DM_PRESENT_LATENCY overrides both). In a window the system calls back about 50 ms before the target display
+// The display link's frame latency: 1 or 2 (DM_PRESENT_LATENCY overrides both). In a window the system calls back about 50 ms before the target display
 // time; in fullscreen it shows the layer directly and, at latency 1, calls back only one 60 Hz period (16 ms) ahead. There, on ProMotion screens (M4 Pro, M5 Max), it shows some
 // presents one 120 Hz refresh late and the link skips its next tick, though the callbacks run on time and no GPU work is in the way; the frame step read the late frames as load
 // and stepped to 20 fps on frames costing 0.1-0.6 vsyncs, and the game presented 15 frames a second (issues #347, #348). Latency 2 gives 33 ms and removed most of the misses on
 // both machines, for one more frame of input lag in variable-refresh fullscreen only. Fixed-rate screens do not need this workaround (#822). Why the system misses at 16 ms,
 // and why a fixed-rate screen still has about 20 ms more presentation delay with the link at either latency, remain open (docs/reference/frame-rate.md)
-__attribute__((weak)) int front_fullscreen(void) { return 0; }   // front_mac.m; graphics unit tests and iOS have none
-__attribute__((weak)) int front_screen_variable_refresh(void) { return 0; }   // front_mac.m; graphics unit tests and iOS have none
-// CAMetalDisplayLink accepts only 1 or 2. Compare its readback with the supported request, or an oversized override rewrites and logs every frame.
-static int link_latency(void) { return g_present_latency > 0 ? MIN(g_present_latency, 2) : front_fullscreen() && front_screen_variable_refresh() ? 2 : 1; }
-static const char *link_latency_why(void) { return g_present_latency > 0 ? "DM_PRESENT_LATENCY" : !front_fullscreen() ? "window" : front_screen_variable_refresh() ? "fullscreen, variable refresh" : "fullscreen, fixed refresh"; }
+__attribute__((weak)) int front_fullscreen(void) { return 0; }   // front_mac.m, front_ios.m; graphics unit tests have neither
+__attribute__((weak)) int front_screen_variable_refresh(void) { return 0; }   // front_mac.m, front_ios.m; graphics unit tests have neither
+static int g_link_mode = 1;   // Current mode of the display link object: 1 / 2 same as g_dm_present_link, 3 = power-saving mode 30 Hz, 4 = the screen's own rate every refresh (uncapped)
+static int g_vrr120;   // vrr_120_ok's measurement of the link a 60 fps target got: 0 not measured yet, 1 the screen runs it at 120 Hz, 2 it does not
+// The latency follows the rate the link really runs at, not the rate its range asked for. On iOS, latency 2 on the 60 Hz link held every frame two 60 Hz refreshes — 33.3 ms,
+// 30 fps at a 60 fps target, measured on an M4 iPad Pro and an iPhone 15 Pro — because a display link with two frames in flight there calls back every other refresh. That link
+// is what vrr_120_ok falls back to when the screen will not run the 120 Hz link, so the latency has to be re-evaluated when it flips: link_sync passes the mode it is about to
+// apply. The 30 Hz link (mode 3) keeps latency 2, and the Mac keeps this policy as it is: latency 2 at 60 Hz is its workaround for presents the system shows a refresh late
+// (issues #347, #348), and front_screen_match takes a variable-refresh screen to a fixed 60 Hz mode, where latency 1 holds every present on its target
+static int link_latency_for(int mode) {
+    if (g_present_latency > 0) return MIN(g_present_latency, 2);
+#if TARGET_OS_IPHONE
+    if (mode == 4) return 1;                       // the screen's own rate, a frame a refresh (the Mac's uncapped link; high_cap_tick keeps mode 2 here)
+    if (mode == 2) return g_vrr120 != 2 ? 2 : 1;   // 2 only while the link really runs at 120 Hz (a frame every other 8.33 ms tick)
+    if (mode == 0 || mode == 1) return 1;          // the 60 Hz link: a frame a refresh, paced by the link's ticks (mtl_link_wait_tick)
+    return 2;                                      // the 30 Hz link, as before
+#else
+    (void)mode;
+    return front_fullscreen() && front_screen_variable_refresh() ? 2 : 1;
+#endif
+}
+static int link_latency(void) { return link_latency_for(g_link_mode); }
+static const char *link_latency_why(int mode) {
+    if (g_present_latency > 0) return "DM_PRESENT_LATENCY";
+#if TARGET_OS_IPHONE
+    (void)mode; return "iOS: 2 on the 120 Hz link only, 1 on the 60 Hz one";
+#else
+    (void)mode; return !front_fullscreen() ? "window" : front_screen_variable_refresh() ? "fullscreen, variable refresh" : "fullscreen, fixed refresh";
+#endif
+}
 // The 30 Hz link at a 30 fps target, except in fullscreen on a fixed-rate screen. There the link skipped ticks: Ocarina of Time at a 30 fps cap on a MacBook Air M4 (60 Hz) got
 // 16.5-25 callbacks a second over stretches of 300 frames, also on frames with under 1 ms of GPU, and each skipped tick kept a frame on screen 66.7 ms (a 180 s walk: 388 and 996
 // frames over 50 ms; 3-4 in a window, where the same link held 30.0). Why is open (docs/reference/frame-rate.md). The 60 Hz link paces the 30 through the present interval, as it
@@ -18096,7 +18131,6 @@ static int link_30hz(void) { return front_fullscreen() ? front_screen_variable_r
 // no such mode or with DM_SCREEN_MATCH=0: the 120 Hz link held 59.2 fps, about 2% of frames up 25 ms. A window keeps the 60 Hz link, where every present lands on its
 // target (docs/reference/frame-rate.md)
 static int link_vrr_120(void) { int hz = front_screen_max_fps(); return !g_present_link_env && front_fullscreen() && front_screen_variable_refresh() && hz >= 120 && hz % 120 == 0; }
-static int g_link_mode = 1;   // Current mode of the display link object: 1 / 2 same as g_dm_present_link, 3 = power-saving mode 30 Hz
 static void *link_main(void *arg) {   // Display link thread: started when switching to display-link mode, exits when switching back to 0
     (void)arg;
     pthread_setname_np("nvn-present-link");
@@ -18106,7 +18140,7 @@ static void *link_main(void *arg) {   // Display link thread: started when switc
     NvMetalDisplayLinkDelegate *delegate = [NvMetalDisplayLinkDelegate new];
     CAMetalDisplayLink *link = [[CAMetalDisplayLink alloc] initWithMetalLayer:layer];
     link.preferredFrameRateRange = link_range(g_link_mode);
-    link.preferredFrameLatency = link_latency(); MLOG("display link: frame latency %d (%s)", link_latency(), link_latency_why());
+    link.preferredFrameLatency = link_latency(); MLOG("display link: frame latency %d (%s)", link_latency(), link_latency_why(g_link_mode));
     link.delegate = delegate;
     [link addToRunLoop:[NSRunLoop currentRunLoop] forMode:NSDefaultRunLoopMode];
     g_link_rl = CFRunLoopGetCurrent(); g_link = link;
@@ -18114,11 +18148,24 @@ static void *link_main(void *arg) {   // Display link thread: started when switc
     g_link_started = 0;
     return NULL;
 }
+// The 120 Hz link at a 60 fps target (link_vrr_120) is worth its two-tick wait only if the screen really ticks at 120 Hz: the range asked for starts at 60, and
+// a system that settles on 60 would make two ticks 33.3 ms, pacing the game to 30 fps. The measured callback rate decides once, about a second in; a screen that
+// keeps 60 Hz gets the 60 Hz link back (a tick a frame, as before), with the reason in the log.
+static int vrr_120_ok(void) {
+    static int n;
+    int state = g_vrr120;   // 0: not measured yet, 1: the screen runs it at 120 Hz, 2: it does not
+    if (state == 2) return 0;
+    if (state == 1 || g_link_mode != 2) return 1;
+    double hz = mtl_link_hz();
+    if (++n < 90 || hz <= 0) return 1;
+    if (hz >= 90) { g_vrr120 = 1; MLOG("display link: the screen runs the 120 Hz link at %.0f Hz, a 60 fps frame every other tick", hz); return 1; }
+    g_vrr120 = 2; MLOG("display link: the screen kept the link at %.0f Hz, not 120: the 60 Hz link stays at frame latency 1 (two ticks there would pace a 60 fps target to 30)", hz); return 0;
+}
 static void link_sync(void) {   // Called every frame by the game's present thread: aligns the display link object's state to g_dm_present_link and the power-saving mode (can change at run time)
     static int applied;
     pthread_mutex_lock(&g_pq_mu);
     int want = g_dm_present_link;
-    if (want < 0 || want > 2) { g_dm_present_link = applied == 3 ? 1 : applied; pthread_mutex_unlock(&g_pq_mu); return; }
+    if (want < 0 || want > 4) { g_dm_present_link = applied == 3 ? 1 : applied; pthread_mutex_unlock(&g_pq_mu); return; }   // 4: uncapped, the screen's own rate (hle_nvn.c high_cap_tick)
     if (g_rescue_mode && (want != g_rescue_mode || now_ns() >= g_rescue_back_at)) {
         g_rescue_mode = 0; g_stall_t0 = 0; __atomic_store_n(&g_link_tick_ns, now_ns(), __ATOMIC_RELAXED);
         MLOG("display link: rescue ended, trying pacing mode %d (frame %llu)", want, (unsigned long long)atomic_load(&g_cur_frame));
@@ -18126,16 +18173,16 @@ static void link_sync(void) {   // Called every frame by the game's present thre
     if (g_rescue_mode) want = 0;
     pthread_mutex_unlock(&g_pq_mu);
     if (want && mtl_fps_target() == 30 && link_30hz()) want = 3;   // Power-saving mode: display link at 30 Hz
-    if (want) front_screen_match(want == 3 ? 30 : want == 2 ? 120 : 60);   // the game's rate: a variable-refresh screen goes to a fixed-rate mode at a multiple where it has one
-    static int vrr_was; int vrr = want == 1 && link_vrr_120();   // variable-refresh fullscreen that kept its mode: the 120 Hz link paces the 60 (link_vrr_120)
+    if (want) front_screen_match(want == 3 ? 30 : want == 4 ? 0 : want == 2 ? 120 : 60);   // the game's rate: a variable-refresh screen goes to a fixed-rate mode at a multiple where it has one; mode 4 (uncapped) keeps the screen's own mode (0: back to it)
+    static int vrr_was; int vrr = want == 1 && link_vrr_120() && vrr_120_ok();   // variable-refresh fullscreen that kept its mode: the 120 Hz link paces the 60 (link_vrr_120)
     if (vrr != vrr_was) { vrr_was = vrr; MLOG("display link: %s (frame %llu)", vrr ? "120 Hz in fullscreen on a variable-refresh screen, a frame every other tick (DM_PRESENT_LINK=1 keeps 60 Hz)" : "60 Hz again (window, fixed-rate screen or another frame rate)", (unsigned long long)atomic_load(&g_cur_frame)); }
     if (vrr) want = 2;
     // The screen's rate changed (switched by front_screen_match, or another screen): the range again, virtual ticks or none. Taken only once the link object exists, so a change
     // while its thread starts (after link_main read the rate) is not lost
     static int hz_was; int hz = front_screen_max_fps(); CAMetalDisplayLink *lk = g_link;
     if (lk && hz != hz_was) { hz_was = hz; if (want && want == applied) { lk.preferredFrameRateRange = link_range(want); MLOG("display link: the screen runs at %d Hz now, range set again (frame %llu)", hz, (unsigned long long)atomic_load(&g_cur_frame)); } }
-    int lat = link_latency();   // fullscreen, screen or refresh mode changed: a link created since took the current policy
-    if (lk && lk.preferredFrameLatency != lat) { lk.preferredFrameLatency = lat; MLOG("display link: frame latency %d (%s; frame %llu)", lat, link_latency_why(), (unsigned long long)atomic_load(&g_cur_frame)); }
+    int lat = link_latency_for(want);   // the mode about to be applied: on iOS the latency follows the link's rate, so it moves when vrr_120_ok gives the 120 Hz link up
+    if (lk && lk.preferredFrameLatency != lat) { lk.preferredFrameLatency = lat; MLOG("display link: frame latency %d (%s; frame %llu)", lat, link_latency_why(want), (unsigned long long)atomic_load(&g_cur_frame)); }
     if (want == applied) return;
     g_link_mode = want;
     if (!g_link_started) {
@@ -18267,7 +18314,12 @@ static void snap_drain(void) {
     snap_commit_wait(v);
     if (![g_snap_ev waitUntilSignaledValue:v timeoutMS:10000]) MDIE("present snapshots: GPU did not drain within 10 s");
 }
-uint64_t mtl_snap_acquire_wait(void) {
+uint64_t mtl_snap_acquire_wait(int free_run) {
+    static int told;   // uncapped: the ring would hold the game at the display link's rate (one slot freed per tick), which is the 120 rung's number, not "no cap"
+    if (free_run) {
+        if (!told++) MLOG("present snapshots: uncapped, so the ring does not pace the game; a present that finds its slot still on screen shows the game's own texture");
+        return 0;
+    }
     if (!mtl_snap_on() || atomic_load(&g_present_discard)) return 0;
     int k = (int)(atomic_load(&g_snap_next) % (uint64_t)g_snap_n);
     uint64_t ticket = atomic_load(&g_snap[k].ticket), ev = atomic_load(&g_snap[k].ev), w0 = ws_t0();
@@ -18503,7 +18555,9 @@ int mtl_link_wait_tick(int vsyncs, uint64_t timeout_ns) {
 }
 // The display link's rate: 120 Hz (DM_PRESENT_LINK=2), 60, or 30 in power-saving mode
 void mtl_link_mode_set(int mode) { pthread_mutex_lock(&g_pq_mu); g_dm_present_link = mode; pthread_mutex_unlock(&g_pq_mu); }   // 120 fps follows the screen: link_sync applies it
-int mtl_link_rate(void) { return g_link_mode == 3 ? 30 : g_link_mode == 2 ? 120 : 60; }
+int mtl_link_rate(void) { return g_link_mode == 3 ? 30 : g_link_mode == 4 ? (front_screen_max_fps() > 0 ? front_screen_max_fps() : 60) : g_link_mode == 2 ? 120 : 60; }
+double mtl_link_cb_hz(void) { return mtl_link_hz(); }   // the callback rate the link really runs at (hle_nvn.c: the 'frame budget' line)
+uint64_t mtl_link_empty_ticks(void) { return g_link_empty; }   // ticks the link called back on with no new frame queued (hle_nvn.c: the 'frame budget' line)
 // The same wait counted in the display link's own ticks: one per frame for a frame rate as high as the link's (present_interval display at DM_PRESENT_HZ=120 on a 120 Hz link)
 // The absolute time (CLOCK_REALTIME, as pthread_cond_timedwait takes it) ns nanoseconds from now
 static struct timespec link_deadline(uint64_t ns) {

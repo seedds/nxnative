@@ -33,6 +33,22 @@ def package(body, block=0x40, compress=None):
     return summary + chunk + b''.join(stored), summary
 
 
+def package_v579(body, block=0x40, compress=zlib.compress):
+    """An Unreal Engine 3 package of file version 579, licensee 21 (Batman: Arkham Asylum): a summary carrying its chunk table, then the chunks' blocks at the raw offsets the table gives.
+    Layout read by uepak.ue3_summary: tag, u16 version, u16 licensee, i32 header size, folder FString, u32 flags, six count/offset words, the depends offset, a GUID, no generations,
+    engine and cooker versions, u32 compression flags (1: zlib, as ue3_image inflates it), i32 chunk count, then {raw offset, raw size, stored offset, stored size}"""
+    blocks = [body[i:i + block] for i in range(0, len(body), block)]
+    stored = [compress(b) for b in blocks]
+    blk = b''.join(struct.pack('<II', len(s), len(b)) for s, b in zip(stored, blocks))
+    folder = b'\x05\0\0\0BmGm\0'
+    head = (shader_split.UE3_TAG + struct.pack('<HH', 579, 21) + struct.pack('<i', 0x40 + len(folder)) + folder + struct.pack('<I', 0)
+            + b'\0' * (4 * 7 + 16) + struct.pack('<i', 0) + struct.pack('<II', 0x11d2, 0x10) + struct.pack('<Ii', 1, 1)
+            + struct.pack('<4I', 0, len(body), 0, 0))
+    head = head[:-16] + struct.pack('<4I', len(head), len(body), len(head), 0)   # the summary stored, then the chunk: raw and stored offset both after it
+    chunk = head + shader_split.UE3_TAG + struct.pack('<III', block, sum(map(len, stored)), len(body)) + blk + b''.join(stored)
+    return chunk, head
+
+
 class Ue3CacheTests(unittest.TestCase):
     def setUp(self):
         self.real_oodle, self.real_skip = shader_split.oodle, shader_split.KEY_SKIP
@@ -68,6 +84,20 @@ class Ue3CacheTests(unittest.TestCase):
         got = shader_split.ue3_shaders(d, 'g.bin')
         self.assertEqual([(st, ctl, code) for _, st, ctl, code in got], [('ps', k, c) for c, k in shaders])
         self.assertTrue(all('#UE3@' in w for w, *_ in got))   # single-stage programs (separable_pairs)
+
+    def test_arkham_asylums_summary_and_record_form(self):
+        # Batman: Arkham Asylum's package: version 579, its chunk table in the summary, and each shader u8 platform, u8 frequency, then the code as a byte array
+        c, k = shader(7)
+        body = b''.join([bytes([5, 5]) + struct.pack('<i', len(c) + len(k) + 0x0c) + struct.pack('<III', len(c), len(k), 0) + c + k + bytes(4)])
+        d, head = package_v579(body)
+        self.assertEqual(head, d[:len(head)])
+        s = shader_split.uepak.ue3_summary(d)
+        assert s is not None
+        self.assertEqual((s['version'], s['licensee'], s['compression'], len(s['chunks'])), (579, 21, 1, 1))
+        self.assertTrue(shader_split.uepak.ue3_oodle(d) is False)   # zlib here, not Oodle
+        self.assertEqual(shader_split.ue3_body(d, 'p.xxx'), d[:len(head)] + body)
+        got = shader_split.ue3_shaders(shader_split.ue3_body(d, 'p.xxx'), 'p.xxx')
+        self.assertEqual([(st, ctl, code) for _, st, ctl, code in got], [('ps', k, c)])
 
     def test_key_skip_masks_the_compile_information(self):
         (c1, k1), (_, k2) = shader(1), shader(2)

@@ -1890,6 +1890,7 @@ static uint64_t rt_period_ns(const win_t *o, uint64_t period);
 static int present_itv(const win_t *o);
 static int present_unpaced(const win_t *o);
 static int link_wait(const win_t *o, uint64_t timeout_ns);
+static int fps_uncapped(void);
 __attribute__((weak)) void dm_main_yield_stats(uint64_t *n, uint64_t *ns) { *n = 0; *ns = 0; }   // The host's hle_thread.c provides the ground truth; 0 in graphics unit tests
 __attribute__((weak)) uint32_t dm_guest_work_qos(unsigned *count) { if (count) *count = 0; return QOS_CLASS_UNSPECIFIED; }
 int mtl_probe_ramp_on(void);   // nvn_mtl.m: DM_FSTEP_PROBE_RAMP (default on; ab with DM_AB)
@@ -1898,8 +1899,14 @@ __attribute__((weak)) void dm_thread_cpu(char *out, size_t n, double secs) { (vo
 void mtl_res_stats(char *out, size_t n);
 void mtl_barrier_stats(uint64_t *skip, uint64_t *full);
 extern uint32_t mtl_present_qos(void);
+// nvn_mtl.m: the display link's measured callback rate and the ticks no queued frame filled (the 'frame budget' line). 0 in graphics unit tests
+__attribute__((weak)) double mtl_link_cb_hz(void) { return 0; }
+__attribute__((weak)) uint64_t mtl_link_empty_ticks(void) { return 0; }
 static _Atomic uint64_t g_frame;
-static uint64_t g_acq_wait_ns, g_pq_wait_ns;   // Accumulated display-link wait / wait for the present queue to return inside acquire, recorded per frame at present (there can be several acquires within one frame)
+static uint64_t g_acq_wait_ns, g_pq_wait_ns, g_snap_wait_ns;   // The time the acquire held a frame back (the display-link tick it waited for, else a slot not yet free) / the wait for the present queue to return, recorded per frame at present (there can be several acquires within one frame); g_snap_wait_ns: how much of the first is the present snapshot ring's slot
+// Frame budget (the 'frame budget up to frame' line): the presents of the last window and the time the host waited away in them — the acquire's display-link tick wait, the
+// present queue's hand-back and the drawable — so one run says whether a rate below the target is the guest's work, the GPU or this host's pacing.
+static uint64_t g_bud_n, g_bud_aw, g_bud_pq, g_bud_dr, g_bud_snap;
 static uint64_t g_fs_start, g_fs_wait;   // frame step (fstep_tick): when the first acquire after a present returned (the frame's start, 0 = none yet), and its pacing wait
 // The acquire's two waits for the screen, which the frame step and the pacer read differently:
 // - a drain of frames standing in the display link's queue (nvn_mtl.m mtl_link_drain_take_ns, nvn_link_drain.h) is extra: the screen showed every queued frame for its hold
@@ -1940,8 +1947,14 @@ NVN(nvnWindowAcquireTexture, NVNwindowAcquireTextureResult, NVNwindow *w, NVNsyn
         if (pace < 0) { const char *e = getenv("DM_DETCLOCK_PACE"), *d = getenv("DM_DETCLOCK"); step = d ? strtoull(d, 0, 0) : 0; pace = e && atoi(e) && step; }
         if (pace) { if (last && now_ns() < last + step) sleep_until_ns(last + step); last = now_ns(); }
     }
-    pace_ns += mtl_snap_acquire_wait();   // ring capacity is waited for at acquire, where the game does not hold its present lock
-    g_acq_wait_ns += wait; trow(g_frame, "@late_ms", wait ? (now_ns() - at) / 1e6 : 0);
+    // Ring capacity is waited for at acquire, where the game does not hold its present lock. Uncapped passes 1: the ring frees one slot per display-link tick (the screen
+    // samples the copy, so a slot cannot be reused before the link has taken it), so its wait would hold the game at exactly the display's rate — 120.0 fps on a 120 Hz
+    // screen, which is what Uncapped looked like on the Mac (the 120 rung's own number). A present that finds its slot still on screen keeps the game's own texture
+    // (nvn_mtl.m snap_take), which the queue orders after that frame's copy, and the display link drops the frames it cannot show
+    { uint64_t sw = mtl_snap_acquire_wait(fps_uncapped()); pace_ns += sw; g_snap_wait_ns += sw; }
+    // The wait for the display link happens inside the branch above (link_wait blocks until a tick), while `wait` is only how late the frame's slot was: the larger of the two
+    // is the time the acquire held this frame back. Not their sum: where the fallback sleeps until the slot time, that time is in both and would print twice.
+    g_acq_wait_ns += wait > pace_ns ? wait : pace_ns; trow(g_frame, "@late_ms", wait ? (now_ns() - at) / 1e6 : 0);
     // The previous present of this texture has not yet been processed by the present thread (display cannot keep up, a whole swapchain round behind): wait for it to be returned, then hand it to the game to draw
     uint64_t tk = *idx < 4 ? o->ticket[*idx] : 0;
     if (tk) { uint64_t w0 = now_ns(); nvn_queue_present_wait(tk); nvn_queue_present_release(tk); o->ticket[*idx]=0; g_pq_wait_ns += now_ns() - w0; }
@@ -2103,10 +2116,12 @@ static void power_line(uint64_t frame) {
 }
 static void tsummary(uint64_t frame) {
     char line[1024]; size_t o = 0;
+    double p50[6] = {-1, -1, -1, -1, -1, -1}, p95[6] = {-1, -1, -1, -1, -1, -1};
     for (int k = 0; k < 6; k++) {
         unsigned n = g_tn[k] < TWIN ? g_tn[k] : TWIN; if (!n) continue;
         double v[TWIN]; memcpy(v, g_tw[k], n * sizeof *v); qsort(v, n, sizeof *v, dcmp);
-        o += snprintf(line + o, sizeof line - o, " %s p50 %.2f / p95 %.2f / max %.2f ms (%u frames);", g_tname[k], v[n / 2], v[(n * 95) / 100 < n ? (n * 95) / 100 : n - 1], v[n - 1], n);
+        p50[k] = v[n / 2]; p95[k] = v[(n * 95) / 100 < n ? (n * 95) / 100 : n - 1];
+        o += snprintf(line + o, sizeof line - o, " %s p50 %.2f / p95 %.2f / max %.2f ms (%u frames);", g_tname[k], p50[k], p95[k], v[n - 1], n);
     }
     LOG("[nvn] timing up to frame %llu:%s", frame, line);
     { void mtl_pso_line(char *, size_t); char pl[1024]; mtl_pso_line(pl, sizeof pl); LOG("[nvn] pipelines up to frame %llu: %s", frame, pl); }
@@ -2118,7 +2133,27 @@ static void tsummary(uint64_t frame) {
       for (unsigned i = 0; i < n; i++) { double x = g_pres_iv[i]; if (x < 0) { drop++; discard++; } else if (x > 0) { v[k++] = x; drop += x > g_pres_exp[i] * 1.5; } }
       task_vm_info_data_t vi; mach_msg_type_number_t vc = TASK_VM_INFO_COUNT; double fp = task_info(mach_task_self(), TASK_VM_INFO, (task_info_t)&vi, &vc) == KERN_SUCCESS ? vi.phys_footprint / 1048576.0 : -1;
       double br = dm_brightness_now();   // footprint / brightness are carried on the on-screen present row: does not depend on the tick-entry observation gate (camp runs have it too)
-      if (k) { qsort(v, k, sizeof *v, dcmp); LOG("[nvn] on-screen up to frame %llu: %u frames, dropped %u (discarded %u), p99 %.2f ms; footprint %.0f MiB; brightness %.2f; thermal %d", frame, k + discard, drop, discard, v[(k * 99) / 100 < k ? (k * 99) / 100 : k - 1], fp, br, dm_thermal_now()); }
+      if (k) { qsort(v, k, sizeof *v, dcmp); double q50 = v[k / 2], q95 = v[(k * 95) / 100 < k ? (k * 95) / 100 : k - 1], q99 = v[(k * 99) / 100 < k ? (k * 99) / 100 : k - 1];
+        LOG("[nvn] on-screen up to frame %llu: %u frames, dropped %u (discarded %u), p99 %.2f ms; footprint %.0f MiB; brightness %.2f; thermal %d", frame, k + discard, drop, discard, q99, fp, br, dm_thermal_now());
+        // Frame budget: what the frame rate is made of, in one line — the interval a frame is on screen against the guest's work behind it, the GPU, and the time
+        // this host waited away (the acquire's display-link tick wait, the present queue's hand-back, the drawable). The last token names the limit the numbers point at.
+        double tgt = 1000.0 / (mtl_fps_target() > 0 ? mtl_fps_target() : 60.0), nf = g_bud_n ? (double)g_bud_n : 1;
+        double aw = g_bud_aw / nf / 1e6, pqw = g_bud_pq / nf / 1e6, drw = g_bud_dr / nf / 1e6, sww = g_bud_snap / nf / 1e6;
+        // The rate the game produced (presents a second) against the interval they were on screen: at uncapped the two differ by the frames the display link dropped, and
+        // a produced rate equal to the link's, with the snapshot ring's wait on every frame, is the ring pacing the game rather than the screen's rate
+        static uint64_t bud_prev; uint64_t bud_now = now_ns();
+        double made = bud_prev && bud_now > bud_prev ? (double)g_bud_n * 1e9 / (double)(bud_now - bud_prev) : 0; bud_prev = bud_now;
+        const char *lim = "-";
+        if (p50[1] >= 0) {
+            if (p50[1] >= 0.85 * tgt) lim = "the guest's frame work";
+            else if (p50[3] >= 0.85 * tgt) lim = "the GPU";
+            else if (q50 >= 1.25 * tgt) lim = aw >= 0.5 * tgt ? "the host's pacing (the acquire waits for display-link ticks)" : "the host's pacing (a frame waits past its work)";
+            else if (q50 > 0) lim = "nothing at the target period";
+        }
+        LOG("[nvn] frame budget up to frame %llu: target %.2f ms; on-screen interval p50 %.2f / p95 %.2f ms (%.1f fps), frames produced %.0f/s; frame work p50 %.2f / p95 %.2f; GPU p50 %.2f / p95 %.2f ms; per frame: acquire tick wait %.2f ms (snapshot ring %.2f), present queue %.2f, drawable %.2f; display link %d Hz of the screen's %d Hz (window %d Hz), %.0f callbacks/s, %llu empty ticks; limit: %s",
+            frame, tgt, q50, q95, q50 > 0 ? 1000.0 / q50 : 0.0, made, p50[1], p95[1], p50[3], p95[3], aw, sww, pqw, drw, mtl_link_rate(), front_screen_max_fps(), mtl_display_hz(), mtl_link_cb_hz(), (unsigned long long)mtl_link_empty_ticks(), lim);
+      }
+      g_bud_n = 0; g_bud_aw = g_bud_pq = g_bud_dr = g_bud_snap = 0;
       g_presn = 0; }
     power_line(frame);
     { static uint64_t prev[6], pf; uint64_t v[6]; mtl_vbuf_stats(&v[0], &v[1], &v[2], &v[3], &v[4], &v[5]);
@@ -2305,9 +2340,11 @@ static void sleep_until_ns(uint64_t dl) {   // absolute time on the monotonic cl
 // Present is fixed at 60 Hz: the adaptive mechanism stepped down at frame 60 in 24/24 real-device logs and never came back up, so for this phase 60 fps is the hard floor.
 // DM_PRESENT_HZ=0 (uncapped frame rate) serves only as an explicit performance profiling switch: some of the game's UI logic counts frames (with the same save, uncapped gives
 // 4181 SaveIndicatorPanel entries and capped at 60 fps gives 0, which matches the ground truth), so uncapped is a semantically wrong way to run and must not be used as a criterion / cross-check / default. Unit tests set it directly with nvn_present_config
-static int g_hz = -1, g_display_mode;
+// DM_FPS_TARGET=unlimited (the launchers' Uncapped): presentation free-runs, as DM_PRESENT_HZ=0 does, and the host writes the engine's own limit out of the way (hle_fpslock.c
+// FPS_UNLIMITED). A value of its own: 0 still means the game's own limit
+static int g_hz = -1, g_display_mode, g_uncapped = -1;   // g_uncapped: DM_FPS_TARGET=unlimited, read once (-1: not yet); nvn_present_config resets it for the tests
 static _Atomic int g_game_itv = 1;   // when pacing by the game's interval, the interval the game currently sets (in game mode 2 = 30 fps; nvn_game_fps reports it to the graphics layer, which sets the display link from it)
-void nvn_present_config(int hz, int display_mode) { g_hz = hz; g_display_mode = display_mode; }
+void nvn_present_config(int hz, int display_mode) { g_hz = hz; g_display_mode = display_mode; g_uncapped = -1; }
 static _Atomic uint64_t g_itv2_since;   // start of the game's current run of even intervals >= 2 (now_ns; 0 = it is 1 or odd now)
 // The frame rate the game itself asks for: 30 in game mode when the present interval has been 2 (or another even interval) for a full second (the display link follows at 30 Hz, mtl_fps_target), otherwise 60; back to 60 at once when the interval returns to 1 or turns odd.
 // An odd interval has no whole number of 30 Hz ticks: interval 3 took (3 + 1) / 2 = 2 ticks (mtl_link_wait_tick), 66.7 ms a frame where the game asked for 50 (Donkey Kong Bananza, which steps 2 → 3 when its GPU
@@ -2352,7 +2389,8 @@ static int thermal_capped(void) {
 // A game may step by its target whatever the frames really take (Fire Emblem Fortune's Weave: 60.0 / target a frame), so a target of 120 at 70 frames a second is a game at 58% speed, and
 // on a 60 Hz screen at half speed: late frames step the hold up (nvn_fstep.h), the target follows the hold, and the game's step stays what the screen shows. The cap is 60 on a screen
 // below 120 Hz, while a movie plays (its pictures are paced for the Switch's 30 and 60) and under the thermal cap. No window (headless): nothing limits the rate but the pacer's clock.
-// A game with a frame step state page is out: its stubs hand the game whole vsyncs of 1/60 s
+// A game with a frame step state page is out, as for 120 fps: its stubs hand it whole vsyncs of 1/60 s, and hle_fpslock.c refuses uncapped there too
+static int fps_uncapped(void) { if (g_uncapped < 0) { const char *e = getenv("DM_FPS_TARGET"); g_uncapped = e && !strcmp(e, "unlimited") && !dm_fps_state; } return g_uncapped; }
 static int g_fps_high = -1;
 static _Atomic int g_high_cap = 60;
 static int fps_high(void) {
@@ -2371,9 +2409,22 @@ static void high_cap_tick(void) {
     static int win = -1, link_env = -1;
     if (win < 0) { win = mtl_display_hz() != 0; link_env = getenv("DM_PRESENT_LINK") != NULL; }
     int ok = !win || front_screen_max_fps() >= 120, movie = dm_movie_hz(), cap = ok && !movie && !thermal_capped() ? 120 : 60;
-    static int was; if (cap != was) { LOG("[nvn] 120 fps: cap %d → %d fps (%s)", was, cap, cap == 120 ? "the screen shows it" : !ok ? "the screen is below 120 Hz" : movie ? "movie playing" : "thermal state serious"); was = cap; }
+    int unc = fps_uncapped();   // uncapped: the game's rate is its own, and the link asks for the screen's own rate (mode 4 below), so a frame beyond it is dropped by the link
+    static int was; if (cap != was) {
+        const char *why = cap == 120 ? "the screen shows it" : !ok ? "the screen is below 120 Hz" : movie ? "movie playing" : "thermal state serious";
+        if (unc) LOG("[nvn] uncapped: the display link %s (%s)", ok ? "runs at the screen's own rate, a tick every refresh" : "holds 60 Hz", why);
+        else LOG("[nvn] 120 fps: cap %d → %d fps (%s)", was, cap, why);
+        was = cap;
+    }
     atomic_store(&g_high_cap, cap);
+    // Uncapped takes link mode 4: the screen's own maximum, every refresh a tick — a 144 / 165 Hz screen has no 120 Hz grid, and mode 2 (a 120 Hz range, 1/120 s
+    // virtual ticks) held every frame to 120 there, which is what Uncapped looked like on the Mac. The 120 rung keeps mode 2, and front_screen_match may switch a
+    // fullscreen screen to a 120 Hz mode for it. iOS keeps mode 2: link_latency_for defines its 1 and 2 for the 60 / 120 / 30 links only
+#if TARGET_OS_IPHONE
     if (!link_env) mtl_link_mode_set(ok ? 2 : 1);
+#else
+    if (!link_env) mtl_link_mode_set(ok ? (unc ? 4 : 2) : 1);
+#endif
 }
 static int fps_step_cap(void) {
     if (!dm_fps_state) return fps_high() ? atomic_load(&g_high_cap) : 0;
@@ -2421,21 +2472,29 @@ int nvn_fps_high_now(void) { return atomic_load(&g_fs_k) == 1 ? 120 : 60; }   //
 // The rate of vi::GetDisplayVsyncEvent (hle_sdk16.c, nvn_mtl.m mtl_link_wait_vsync): the Switch's 60 Hz, or 120 while 120 fps is on and its hold is one tick of 1/120 s. A game that
 // waits for the next vblank each frame is held to the event's rate whatever the present cap: Unity's NVN device waits until its vblank time (set from the event) passes
 // (The Rogue Prince of Persia: main+0x14f65f0), so at 120 every frame came two ticks late and the hold fell back to 60. The hold's trial at 120 must already have the event at 120
-int nvn_vsync_hz(void) { return fps_high() && atomic_load(&g_fs_k) == 1 && atomic_load(&g_high_cap) == 120 ? 120 : 60; }
-int nvn_game_fps(void) { int c = fps_present_cap(); if (c) return c == 30 && atomic_load(&g_fs_k) == 1 && fstep_on() ? 60 : c; uint64_t s = atomic_load(&g_itv2_since); return g_hz > 0 && !g_display_mode && s && now_ns() >= s + 1000000000ull ? 30 : 60; }
+int nvn_vsync_hz(void) { if (fps_uncapped()) return 0;   // uncapped: no display rate to hold the game to (hle_sdk16.c signals it as fast as it asks)
+    return fps_high() && atomic_load(&g_fs_k) == 1 && atomic_load(&g_high_cap) == 120 ? 120 : 60; }
+int nvn_game_fps(void) { if (fps_uncapped()) return 0;   // uncapped: no display rate at all — nothing may pace the game or the link from a fixed number (the link runs at the screen's own rate, nvn_mtl.m mode 4, and the frames the screen cannot show are dropped)
+    int c = fps_present_cap(); if (c) return c == 30 && atomic_load(&g_fs_k) == 1 && fstep_on() ? 60 : c; uint64_t s = atomic_load(&g_itv2_since); return g_hz > 0 && !g_display_mode && s && now_ns() >= s + 1000000000ull ? 30 : 60; }
 static void present_cfg(const win_t *o) {
     if (g_hz >= 0) return;
     // The interval mode comes from the game profile (present_interval, default game): whether frames follow the present interval the game sets depends on whether the game's logic counts frames, which differs per game. Environment variables override it, and can override the fixed 60 Hz.
     int scr = mtl_display_hz();
     const char *e = getenv("DM_PRESENT_HZ"); g_hz = e ? atoi(e) : fstep_hz();
-    if (!g_hz) LOG("[nvn] [WARNING] DM_PRESENT_HZ=0: frame rate uncapped, frame pacing unlike the device, UI logic may drift (for profiling only, not for verdicts / cross-checks)");
+    if (!e && fps_uncapped()) {
+        g_hz = 0;   // no pacer deadline: the game runs as fast as it can, and the display link shows the newest frame, dropping the rest
+        LOG("[nvn] frame rate uncapped (DM_FPS_TARGET=unlimited): presentation free-runs at no set rate, the display link shows the newest frame and drops the others%s",
+            dm_fps_state ? "; a frame step state page wins, at 60" : "");
+        if (dm_fps_state) g_hz = fstep_hz();
+    }
+    else if (!g_hz) LOG("[nvn] [WARNING] DM_PRESENT_HZ=0: frame rate uncapped, frame pacing unlike the device, UI logic may drift (for profiling only, not for verdicts / cross-checks)");
     // Cut (intentional deviation from the original game's behavior): with DM_PRESENT_INTERVAL=display the present interval set by the game is not followed and one frame is presented per display-link tick,
     // with a fixed hard floor of 60 fps; the logic stays at 25 ticks, and the client's frame-counted UI logic is unaffected -
     // with the same save and the same input, the UI message streams of the two modes match message by message. Proof (before character select): r9 game / display 60 ×3 / display 120 ×2, 6 groups in total, uicmp consistent
     // (the save indicator is exempted as a timing race), and the timing differences of key messages are within game mode's own noise band; proof after entering a run is still missing, pending action script coverage
     const char *m = getenv("DM_PRESENT_INTERVAL"); g_display_mode = m ? !strcmp(m, "display") : DM_GAME_PRESENT_DISPLAY;
-    LOG("[nvn] present tick %d Hz, interval mode %s (%s; present interval set by the game %d; %s)", g_hz, g_display_mode ? "display (one frame per tick, a cut)" : "game (original semantics)",
-        m ? "DM_PRESENT_INTERVAL" : "game profile present_interval", o->interval, scr > 0 ? "window" : "no window");
+    LOG("[nvn] present tick %d Hz, interval mode %s (%s; present interval set by the game %d; display %d Hz, %s)", g_hz, g_display_mode ? "display (one frame per tick, a cut)" : "game (original semantics)",
+        m ? "DM_PRESENT_INTERVAL" : "game profile present_interval", o->interval, scr, scr > 0 ? "window" : "no window");
 }
 static int present_itv(const win_t *o) { int c = fps_present_cap(), k = atomic_load(&g_fs_k); return c ? (k && fstep_on() ? k : fstep_hz() / c) : g_display_mode ? 1 : o->interval > 0 ? o->interval : 1; }   // vsyncs per frame that presentation follows
 // Present interval 0 swaps without waiting for a vsync on Horizon: the window's acquire waits only for a texture the display has let go of, the display shows the newest frame at each
@@ -2445,7 +2504,7 @@ static int present_itv(const win_t *o) { int c = fps_present_cap(), k = atomic_l
 // wait, so the loading screen took about 5 minutes. Presentation keeps one frame per display tick (the display link drops the older frames waiting, nvn_mtl.m: there Ori made
 // 446 frames in 315 ticks, 146 dropped), and the acquire's ticket wait still holds a texture until the frame it showed is taken or dropped. A host frame cap (fps_target, the
 // frame step) or display mode decides the pacing itself and keeps it
-static int present_unpaced(const win_t *o) { present_cfg(o); return o->interval == 0 && !g_display_mode && !fps_present_cap(); }
+static int present_unpaced(const win_t *o) { present_cfg(o); return fps_uncapped() || (o->interval == 0 && !g_display_mode && !fps_present_cap()); }   // uncapped: no vsync wait either, the display link only takes the newest frame
 // The present interval the game reads back (nvnWindowGetPresentInterval): the one it set, except in display mode, where the window presents at the interval above (1, or the cap's)
 // whatever the game set, and answering the game's own let it pace for that interval itself. Luigi's Mansion 3 (30 fps on the Switch, interval 2) reads the newest frame-history entry
 // and the interval before each present (main+0xb7a4b8): while that frame is not shown it sleeps 16.67 ms per vsync of the interval, and once shown it waits until (interval - 1)
@@ -2518,6 +2577,10 @@ static int fstep_hold(void) {
 }
 // Once per present, before this frame's period is taken: the time since the previous frame's start (shown) and the frame's cost decide this frame's hold and the next frame's step.
 // Cost = max(CPU: the time between the frames' starts without the pacing wait, GPU: the latest finished frame's GPU time), in vsyncs
+// At 120 fps the hold stays at one 1/120 s tick: every frame is presented as soon as it is ready, on the 120 Hz grid, and a late one shows on the next tick, so the rate floats
+// between 60 and 120 instead of latching at 60. A raised hold kept every frame 16.67 ms and (nvn_fps_high_now) wrote 60 into the engine's own limit, so a title that steps by the
+// time that passed (Batman: Arkham Asylum, GUseFixedTimeStep 0) showed the 120 fps setting as a 60 fps lock — where 120 means "up to 120". A cap of 60 (a screen below 120 Hz,
+// a movie, the thermal cap) is kmin 2 and stays a locked 60, and the 30 rung is the frame step's own (dm_fps_state)
 static void fstep_tick(const win_t *o, int c) {
     static uint64_t prev, t0, v0, fixed_sum, held[FSTEP_MAX + 1]; static int nlog;
     const double v = 1e9 / fstep_hz();
@@ -2532,7 +2595,7 @@ static void fstep_tick(const win_t *o, int c) {
     double shown = prev ? span / v : 0, gpu = 0; prev = st;
     for (uint64_t f = g_frame; f-- > 0 && g_frame - f <= 8;) { double g = mtl_gpu_ms(f); if (g >= 0) { gpu = g * 1e6 / v; break; } }
     double cpu = shown - pw / v, cost = cpu > gpu ? cpu : gpu;
-    int kmin = fstep_hz() / c, kmax = fps_high() ? 2 : !fstep_hold() ? kmin : kmin >= 2 ? 2 : FSTEP_MAX, k0 = g_fs.k,   // at 120 fps a late frame must step down whatever fps_hold says: the game steps by the target
+    int kmin = fstep_hz() / c, kmax = fps_high() ? kmin : !fstep_hold() ? kmin : kmin >= 2 ? 2 : FSTEP_MAX, k0 = g_fs.k,   // at 120 fps the hold never rises: see below
          kmin0 = g_fs.kmin, probe0 = g_fs.probe;
     int fixed = dm_fps_state ? (int)__atomic_load_n((uint32_t *)(dm_fps_state + 0x24), __ATOMIC_RELAXED) : 0;
     uint64_t probes0 = g_fs.probes, failed0 = g_fs.failed;
@@ -2612,7 +2675,7 @@ static const int *present_crop(const int win[4], int tw, int th, int lc[4]) {
 NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
     (void)q; win_t *o = (win_t *)w; o->presents++;
     dm_ue_cvar_tick();
-    if (fps_high()) high_cap_tick();
+    if (fps_high() || fps_uncapped()) high_cap_tick();
     int movie = dm_movie_hz();
     if (dm_fps_state) __atomic_store_n((uint32_t *)(dm_fps_state + 4), (uint32_t)(movie != 0), __ATOMIC_RELAXED);   // the stubs' copy of the movie state (hle.h)
     int c = fps_step_cap();
@@ -2673,6 +2736,7 @@ NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
         trow(f, "@frame_ms", fr); trow(f, "@work_ms", wk); trow(f, "@nvn_ms", nv); trow(f, "@sync_ms", atomic_exchange(&g_sync_ns, 0) / 1e6); trow(f, "@itv", (double)present_itv(o));
         // Slow-frame attribution (taken only when DM_NVN_TSV is on): this frame's present-thread CPU time (−1 if the thread changed), CPU of all threads in the process, acquire wait accumulated per frame, present call time (same base as the GPU / on-screen present times: ms since process start)
         trow(f, "@wait_ms", g_acq_wait_ns / 1e6); trow(f, "@pq_wait_ms", g_pq_wait_ns / 1e6);
+        g_bud_n++; g_bud_aw += g_acq_wait_ns; g_bud_pq += g_pq_wait_ns; g_bud_snap += g_snap_wait_ns;
         if (frame_rec()) {
             static pthread_t pth; static uint64_t pcpu, pproc;
             uint64_t c = clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID); pthread_t th = pthread_self();
@@ -2709,10 +2773,10 @@ NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
         }
         plib = lib_; ppso = pso_;
         trow(f, "@t_s", (now_ns() - g_t0_ns) / 1e9);
-        trow(f, "@drawable_ms", mtl_drawable_ns_take() / 1e6);
+        { uint64_t dw = mtl_drawable_ns_take(); trow(f, "@drawable_ms", dw / 1e6); g_bud_dr += dw; }
         trow(f, "@sub_wall_ms", atomic_exchange(&g_sub_wall_ns, 0) / 1e6); trow(f, "@sub_cpu_ms", atomic_exchange(&g_sub_cpu_ns, 0) / 1e6); trow(f, "@sub_instr", (double)atomic_exchange(&g_sub_instr, 0));
     } else atomic_store(&g_nvn_ns, 0);
-    g_acq_wait_ns = g_pq_wait_ns = 0;
+    g_acq_wait_ns = g_pq_wait_ns = g_snap_wait_ns = 0;
     if (f >= 8) { double g = mtl_gpu_ms(f - 8); if (g >= 0) { tpush(3, g); trow(f - 8, "@gpu_ms", g); g_hr[g_hn++ % HRN] = g; }   // GPU time is taken 8 frames late (already completed)
         { lf_rec *r = &g_lf[(f - 8) % LFN]; if (g >= 0 && r->f == f - 8) mtl_ab_gpu(f - 8, g, r->fr); }   // DM_AB phases
         { lf_rec *r = &g_lf[(f - 8) % LFN];   // long-frame log (on by default, DM_LONGFRAME=0 turns it off): a line is printed only when the whole frame > 20 ms or GPU > 16.7 ms, and it is clearly above recent conditions

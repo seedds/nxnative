@@ -1,6 +1,8 @@
 // Exercise production memory policy with native/old/wrong-build images, at
 // every FPS choice. No game assets or executable guest code are needed.
 #include "../hle_fpslock.c"
+int nvn_fps_high_now(void) { return 60; }   // hle_nvn.c's frame step hold: these mains have no target that follows it (120 is t_fpslock's)
+uint8_t *dm_fps_state;                      // loader.c: a main's frame step state page; none of these has one
 static module_t modules[1];
 module_t *g_mod = modules; int g_nmod = 1;
 static int writes;

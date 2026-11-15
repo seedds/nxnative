@@ -19,8 +19,12 @@ static int test_pthread_cond_timedwait(pthread_cond_t *, pthread_mutex_t *, cons
 #define clock_gettime test_clock_gettime
 #define pthread_cond_timedwait test_pthread_cond_timedwait
 #define nvn_game_fps nvn_game_fps_mtl_default
+#define mtl_link_cb_hz mtl_link_cb_hz_mtl   // hle_nvn.c defaults these two weakly and nvn_mtl.m defines them: one translation unit is a redefinition
+#define mtl_link_empty_ticks mtl_link_empty_ticks_mtl
 #include "../nvn/nvn_mtl.m"
 #undef nvn_game_fps
+#undef mtl_link_cb_hz
+#undef mtl_link_empty_ticks
 #undef pthread_cond_timedwait
 #undef clock_gettime
 #define g_ft g_ft_hle
@@ -78,6 +82,9 @@ static int snap_case(void) {
     g_stall_t0 = 1;
     acquire_ticks(60, 0, 2, 0, "snapshots with the link stalled: no link wait");
     g_stall_t0 = 0;
+    // Uncapped: nothing paces the presents, the ring included — one slot is freed per display-link tick, so its wait would hold the game at exactly the link's rate
+    // (120.0 fps on a 120 Hz screen, which is what Uncapped looked like on the Mac). A present that finds its slot still on screen keeps the game's own texture
+    CHECK(mtl_snap_acquire_wait(1) == 0, "uncapped: the acquire takes no ring slot wait");
     printf("t_link_ticks snap: %d checks, %d failed\n", checks, failed); return failed != 0;
 }
 int main(int argc, char **argv) { @autoreleasepool {
@@ -140,6 +147,10 @@ int main(int argc, char **argv) { @autoreleasepool {
     acquire_ticks(120, 1, 1, 1, "a 60 Hz link limits display 120 Hz to one tick");
     g_link_mode = 3;
     CHECK(mtl_link_rate() == 30, "the 30 Hz power-saving link reports 30");
+    g_link_mode = 4;   // uncapped: the screen's own rate every refresh, no 1/120 s slots (no window here: 60, and the rate follows the range)
+    CAFrameRateRange r4 = link_range(4);
+    CHECK(r4.maximum == r4.preferred && g_link_vperiod == 0 && mtl_link_rate() == (int)r4.maximum, "mode 4: the screen's rate every refresh, no virtual ticks");
+    g_link_mode = 3;
     acquire_ticks(120, 1, 1, 1, "a 30 Hz link limits display 120 Hz to one tick");
     acquire_ticks(60, 0, 2, 1, "a 30 Hz link keeps game interval 2 at one tick");
     acquire_ticks(60, 0, 3, 2, "a 30 Hz link rounds game interval 3 up to two ticks");

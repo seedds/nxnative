@@ -1,5 +1,8 @@
 // NVN null device unit tests: look up addresses from nvnBootstrapLoader the way the game does and go all the way to present; all expected values are hand-calculated, without calling the implementation under test.
 // For build and run see dm/gfx/tests/Makefile (make -C dm/gfx/tests).
+#include "game_profile.h"   // the profile's macros first (its #pragma once keeps the two below): the 120 fps checks are about this host's pacing, not the game, so they pin the rate they need
+#undef DM_GAME_FPS_MAX
+#define DM_GAME_FPS_MAX 120
 #include "../nvn/hle_nvn.c"
 #include "../tex/nvn_deswizzle.h"
 #include <time.h>
@@ -157,6 +160,14 @@ int main(void) {
       setenv("DM_FPS_TARGET","0",1);g_present_cap=-1;nvn_present_config(60,0);
       EXPECT("no cap preserves game pacing",2,present_itv(&w));
       EXPECT("game mode: the game reads back the interval it set",2,window_interval(&w));
+      // uncapped (DM_FPS_TARGET=unlimited): no pacer deadline and no display-link wait; 0 above is still the game's own limit
+      setenv("DM_PRESENT_INTERVAL","display",1);setenv("DM_FPS_TARGET","unlimited",1);unsetenv("DM_PRESENT_HZ");nvn_present_config(-1,1);g_present_cap=-1;
+      EXPECT("uncapped: no pacer deadline",0,present_period(&w));
+      EXPECT("uncapped: the acquire waits for no display-link tick",1,present_unpaced(&w));
+      EXPECT("uncapped: display mode presents one frame a tick",1,present_itv(&w));
+      EXPECT("uncapped: no display rate is reported (nothing paces the game)",0,nvn_game_fps());
+      unsetenv("DM_PRESENT_INTERVAL");setenv("DM_FPS_TARGET","0",1);nvn_present_config(60,0);g_present_cap=-1;
+      EXPECT("0 is not uncapped: the acquire still paces by the game's interval",0,present_unpaced(&w));
       // the 30 Hz link only for even intervals: interval 3 (20 fps) has no whole number of 30 Hz ticks and stays on the 60 Hz link
       w.interval=1;present_period(&w);w.interval=2;present_period(&w);g_itv2_since=(now_ns()-2000000000ull)|1;
       EXPECT("interval 2 held a second: 30 Hz link",30,nvn_game_fps());
@@ -173,6 +184,24 @@ int main(void) {
       *(uint32_t *)(state+4)=1;
       EXPECT("the state page's movie flag is the host's copy, not read for the cap",60,fps_present_cap());
       dm_fps_state=NULL;unsetenv("DM_FPS_TARGET");g_present_cap=-1;nvn_present_config(0,0);
+    }
+    // 120 fps on a 120 Hz screen: the hold stays one tick of 1/120 s, so every frame is presented as it comes and a late one shows on the next tick (the rate floats
+    // between 60 and 120). Three late frames used to raise the hold to 2, and nvn_fps_high_now then wrote 60 into the engine's own limit (62 in the CAP_F32 row) — on a
+    // title that steps by the time that passed that is a 60 fps lock, which is what Batman: Arkham Asylum's 120 fps setting looked like. A cap of 60 (a movie, a screen
+    // below 120 Hz, the thermal cap) is kmin 2 and keeps its locked 60
+    { win_t w={.interval=2};nvn_present_config(120,1);dm_fps_state=NULL;g_engine_stub=1;
+      setenv("DM_FPS_TARGET","120",1);unsetenv("DM_FPS_HOLD");g_present_cap=-1;g_fps_high=-1;
+      atomic_store(&g_high_cap,120);atomic_store(&g_fs_k,0);memset(&g_fs,0,sizeof g_fs);
+      EXPECT("120 fps: the frame step's cap is 120",120,fps_step_cap());
+      for (int i=0;i<6;i++){usleep(12000);fstep_tick(&w,120);}   // 12 ms frames: late for a 1/120 s tick, three of them in a row
+      EXPECT("120 fps: late frames leave the hold at one tick",1,atomic_load(&g_fs_k));
+      EXPECT("120 fps: the engine's target stays 120",120,nvn_fps_high_now());
+      EXPECT("120 fps: one present interval, every frame",1,present_itv(&w));
+      atomic_store(&g_high_cap,60);atomic_store(&g_fs_k,0);memset(&g_fs,0,sizeof g_fs);
+      for (int i=0;i<6;i++){usleep(20000);fstep_tick(&w,60);}
+      EXPECT("120 fps with a 60 Hz cap (a movie): the hold is two ticks",2,atomic_load(&g_fs_k));
+      EXPECT("120 fps with a 60 Hz cap: the engine's target is 60",60,nvn_fps_high_now());
+      unsetenv("DM_FPS_TARGET");g_present_cap=-1;g_fps_high=-1;nvn_present_config(0,0);memset(&g_fs,0,sizeof g_fs);atomic_store(&g_high_cap,60);atomic_store(&g_fs_k,0);
     }
     // No frame step page and no engine limiter the host writes (a main the profile's
     // stubs or limiter rows do not know): nothing makes the game follow the cap, so

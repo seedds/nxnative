@@ -23,17 +23,18 @@ static void run(sim *m, int n, double w, int kmin, int kmax, int fixed) {
 static void hitch(sim *m) { run(m, 6, 1.6, 1, 3, 0); }
 
 int main(void) {
-    {   // 120 fps (hle_nvn.c fps_high): kmin 1, kmax 2, in ticks of 1/120 s. The target follows the hold, so a hold above what frames take is the game at the right speed
+    {   // 120 fps (hle_nvn.c fps_high): kmin 1 and kmax 1 — the host never raises the hold there, so a late frame shows on the next 1/120 s tick and the rate floats
+        // between 60 and 120 (a raised hold also wrote 62 into the engine's limit, nvn_fps_high_now). A cap of 60 on the 120 rung (a movie, a screen below 120 Hz, the
+        // thermal cap) is kmin 2, and the frame step can still raise the hold wherever a caller allows it (the 60 fps rungs, kmax 2)
         sim m = {0}; m.s.per_vsync = 2; m.s.no_payback = 1;
-        run(&m, 120, 0.7, 1, 2, 0); check(m.s.k == 1, "120 fps: frames of 5.8 ms hold 120");
+        run(&m, 120, 0.7, 1, 1, 0); check(m.s.k == 1, "120 fps: frames of 5.8 ms hold 120");
         check(m.s.hold == FSTEP_HOLD0 * 2, "120 fps: the wait before a trial is the same real time");
-        run(&m, 10, 1.6, 1, 2, 0); check(m.s.k == 2, "120 fps: frames of 13 ms step down to 60");
-        run(&m, 600, 1.6, 1, 2, 0); check(m.s.k == 2, "120 fps: they stay at 60 while they do not fit");
-        run(&m, 60, 4.0, 1, 2, 0); check(m.s.k == 2, "120 fps: 33 ms frames stop at 60, never a longer hold");
-        run(&m, 1200, 0.7, 1, 2, 0); check(m.s.k == 1, "120 fps: frames that fit return to 120");
+        run(&m, 600, 1.6, 1, 1, 0); check(m.s.k == 1 && m.s.ups == 0, "120 fps: frames of 13 ms cannot raise the hold (kmax is the hold)");
+        run(&m, 60, 4.0, 1, 1, 0); check(m.s.k == 1, "120 fps: 33 ms frames still present every frame as it comes");
         sim c = {0}; c.s.per_vsync = 2; c.s.no_payback = 1;
-        run(&c, 120, 0.7, 1, 2, 0); run(&c, 30, 0.7, 2, 2, 0); check(c.s.k == 2, "120 fps: a cap of 60 (a movie, a 60 Hz screen) holds two ticks");
-        run(&c, 120, 0.7, 1, 2, 0); check(c.s.k == 1, "120 fps: the cap's end returns to 120");
+        run(&c, 120, 0.7, 2, 2, 0); check(c.s.k == 2, "120 fps: a cap of 60 (a movie, a 60 Hz screen) holds two ticks");
+        sim g = {0}; g.s.per_vsync = 2; g.s.no_payback = 1;   // the state machine's own step up, where the caller allows it
+        run(&g, 120, 0.7, 1, 2, 0); run(&g, 10, 1.6, 1, 2, 0); check(g.s.k == 2, "a caller that allows kmax 2 still steps up (the 60 fps rungs)");
     }
     char b[160];
     {   sim m = {0}; run(&m, 600, 0.5, 1, 3, 0);

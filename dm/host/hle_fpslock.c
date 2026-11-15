@@ -21,11 +21,14 @@
 // (the acquire waits): Luigi's Mansion 3's display interval p99 18.69 → 16.67 ms, 60.0 fps. Not at 30: with present_interval display the presents follow every vsync and hold no
 // frame for two, so a shorter time showed some frames for one (30.4 fps); 30 writes the game's own 33.333 ms
 // Also: a frame time in ticks as a uint32 (scale / frame rate: 19,200,000 for the Switch's 19.2 MHz system tick), a frame step in seconds as a float (1 / frame rate), and a mode
-// switch an engine reads before it takes those fields at all (written 1 at any target)
-enum { FPS_F32, VSYNCS_I32, MS_F32, FPS_I32, TICKS_U32, SECS_F32, MODE_U32, FPS_F64 };
+// switch an engine reads before it takes those fields at all (written 1 at any target).
+// A screen percentage (PCT_F32) is no frame limit: it holds DM_RENDER_SCALE x 100 (the launchers' Render scale, 0.5 to 1.0) and is written at any frame rate target, including none.
+// A row with ptr2 follows one pointer more: the object's +ptr2 holds the pointer to the object the field is in (Unreal Engine 3's FDynamicResolution hangs off GEngine)
+enum { FPS_F32, VSYNCS_I32, MS_F32, FPS_I32, TICKS_U32, SECS_F32, MODE_U32, FPS_F64, PCT_F32, CAP_F32 };
 #define MS_MARGIN 0.5f
+#define FPS_UNLIMITED 1000   // DM_FPS_TARGET=unlimited: the frame rate written into an engine's own limit, too high to bind at any real frame time (1 ms a frame)
 static float ms_want(int fps) { return 1000.0f / (float)fps - (fps == 60 ? MS_MARGIN : 0); }
-typedef struct { const char *build, *what; uint64_t ptr_off; uint32_t field; uint8_t kind, copies; uint32_t scale; uint32_t flag; } lock_t;   // flag: byte offset << 8 | bit mask the object must have set for the write (0: none)
+typedef struct { const char *build, *what; uint64_t ptr_off; uint32_t field; uint8_t kind, copies; uint32_t scale; uint32_t flag; uint32_t ptr2; } lock_t;   // flag: byte offset << 8 | bit mask the object must have set for the write (0: none)
 static const lock_t k_locks[] = {
     // Monster Hunter Rise 16.0.2: RE Engine's frame limit, a float at [main+0x1295b3f0]+0x434 (the pointer is a global in main's bss). The frame loop (main+0x6b106c8) sleeps until
     // [+0x430] / [+0x434] sixtieths of a second have passed ([+0x430] = 60) and steps the game by the time that really passed (+0x41c), so a higher limit runs the game faster in frames
@@ -51,6 +54,18 @@ static const lock_t k_locks[] = {
     // this row the game keeps 30 fps at the right speed (the simulation at 60 and the regulator at 30: match clock as at 30). The game asks for present interval 2
     // (BaseDisplaySettings.PresentInterval), which the profile's present_interval display ignores
     { "a48c0de3bc353efa0e4d359bde05ef24", "FIFA frame regulator", 0xda20e38, 0x8, FPS_F64, 2, 0 },
+    // Batman: Arkham Asylum 1.0.0: Unreal Engine 3's tick limit. appUpdateTimeAndHandleMaxTickRate (main+0xe9fd40) sleeps until 1 / GEngine->GetMaxTickRate() has passed and steps the
+    // game by the time that really passed (GUseFixedTimeStep, main+0x2438394, is 0); UGameEngine::GetMaxTickRate (main+0x71f104) returns the float at +0x758 of the engine object
+    // (MaxSmoothedFrameRate, 30 from the game's config; +0x75c holds the minimum, 24) while the smoothing flag at main+0x249ba4c is set. GEngine is the pointer at main+0x249f530.
+    // The RHI builds its window with present interval 2 (FNVN11Viewport's constructor, main+0xe7901c) and never changes it (RHISetPresentInterval is an empty stub), which the
+    // profile's present_interval display ignores; both are needed
+    { "adc8fed84d846ee84f174351c9584d52", "UE3 GEngine MaxSmoothedFrameRate", 0x249f530, 0x758, CAP_F32, 1, 0, 0 },
+    // Its dynamic resolution (FDynamicResolution at [GEngine]+0x4e8, made in FEngineLoop::Init, main+0xea1a64; its config read from [DynamicResolution] by FDynamicResolution::Init,
+    // main+0xe5b774): +0 bEnable (1), +4 MinScreenPercentage (85), +8 MaxScreenPercentage (100), +0xc FrameTimeBudget (33.3 ms), read again every frame by
+    // RefreshCurentFrameResolutionFraction (main+0xe5bd30). The render scale sets min and max alike, a fixed share of the 1920x1080 (docked) or 1280x720 (handheld) view; the budget
+    // follows the frame rate target, so the engine lowers the resolution where the GPU cannot hold it. The profile's render_scale key is what makes the launchers offer Render scale
+    { "adc8fed84d846ee84f174351c9584d52", "UE3 dynamic resolution Min/MaxScreenPercentage", 0x249f530, 4, PCT_F32, 2, 0, 0, 0x4e8 },
+    { "adc8fed84d846ee84f174351c9584d52", "UE3 dynamic resolution FrameTimeBudget", 0x249f530, 0xc, MS_F32, 1, 0, 0, 0x4e8 },
 };
 #define NLOCKS ((int)(sizeof k_locks / sizeof k_locks[0]))
 
@@ -252,22 +267,35 @@ int dm_fps_lock_engine(void) { pthread_once(&g_found, lock_find); return nrow ||
 int nvn_fps_high_now(void);   // hle_nvn.c
 void dm_fps_lock_tick(void) {
     dynamic_resolution_tick();   // separate from the FPS cap
-    static int state = -2, nlog[NLOCKS + 5], target, high; static const char *src;
+    static int state = -2, nlog[NLOCKS + 5], target, high; static float pct; static const char *src;
     if (state == -1) return;
     if (state == -2) {
         state = -1; pthread_once(&g_found, lock_find);
         if (!nrow && !nier && !fb.n && !uq.base && !ue_missing) return;
         const char *e = getenv("DM_FPS_TARGET"); int t = e ? atoi(e) : DM_GAME_FPS_TARGET; src = e ? "DM_FPS_TARGET" : "game profile fps_target";
-        if (t != 0 && t != 30 && t != 60 && t != 120) { LOG("[RED] DM_FPS_TARGET=%s: must be 0, 30, 60 or 120; leaving the game's frame limit", e); t = 0; }
+        // DM_FPS_TARGET=unlimited is a value of its own, never a meaning of 0 (which leaves every game's own limit): the engine's limit is written too high to bind (FPS_UNLIMITED) and the
+        // graphics layer free-runs presentation (hle_nvn.c), the DM_PRESENT_HZ=0 path, for a game whose limit is an engine one the host writes
+        int unl = e && !strcmp(e, "unlimited");
+        if (!unl && t != 0 && t != 30 && t != 60 && t != 120) { LOG("[RED] DM_FPS_TARGET=%s: must be 0, 30, 60, 120 or unlimited; leaving the game's frame limit", e); t = 0; }
         if (t == 120 && DM_GAME_FPS_MAX < 120) { LOG("[RED] DM_FPS_TARGET=120: this game's speed at 120 fps is not checked (profile fps_max); running at 60"); t = 60; }
+        if (unl && dm_fps_state) { LOG("[RED] DM_FPS_TARGET=unlimited: this main steps frames in whole vsyncs (its profile has frame step stubs), which cannot free-run; leaving the game's frame limit"); unl = 0; t = 0; }
+        if (unl) { t = FPS_UNLIMITED; src = "DM_FPS_TARGET=unlimited"; LOG("main: frame rate uncapped: the engine's own limit is written out of the way (%d fps) and presentation free-runs (hle_nvn.c)", FPS_UNLIMITED); }
         high = t == 120;
         if (t && ue_missing) LOG("[RED] main: Unreal %s not found by the rewriter (ue_cvar.py NAMES; game profile ue_fps_cvar): the game's own frame limit stays", DM_GAME_UE_FPS_CVAR);
         if (!nrow && !nier && !fb.n && !uq.base) return;
-        if (!t) { for (int r = 0; r < nrow; r++) LOG("main: %s left as the game sets it (%s)", rows[r]->what, src); if (nier) LOG("main: NieR frame interval left as the game sets it (%s)", src);
-                  if (fb.n) LOG("main: Frostbite simulation rate left as the game sets it (%s)", src); if (uq.base) LOG("main: Unity vSyncCount left as the game sets it (%s)", src); return; }
+        const char *rs = getenv("DM_RENDER_SCALE"); float sc = 0;   // the same range as the rewriter's render-scale stubs (loader.c)
+        if (rs) { char *end; sc = strtof(rs, &end); if (end == rs || *end || !(sc >= 0.5f && sc <= 1.0f)) { LOG("[RED] DM_RENDER_SCALE=%s: must be 0.5 to 1.0; keeping the game's size", rs); sc = 0; } }
+        pct = sc * 100;
+        for (int r = 0; r < nrow; r++) {
+            if (rows[r]->kind == PCT_F32 ? !pct : !t) LOG("main: %s left as the game sets it (%s)", rows[r]->what, rows[r]->kind == PCT_F32 ? "no DM_RENDER_SCALE" : src);
+        }
+        if (!t) { if (nier) LOG("main: NieR frame interval left as the game sets it (%s)", src);
+                  if (fb.n) LOG("main: Frostbite simulation rate left as the game sets it (%s)", src); if (uq.base) LOG("main: Unity vSyncCount left as the game sets it (%s)", src); }
+        if (!t && !pct) return;
         target = t; state = 0;
     }
     if (high) target = nvn_fps_high_now();   // 120 while frames fit, else 60: the game's step stays what the screen shows (hle_nvn.c fps_high)
+    if (target) {
     if (nier) {
         // NieR:Automata US/EU 1.0.3 (3c10ec35c5ef4c3686b4053afb0e58e7):
         // - [base + 0x192be00] points to the NVN graphics device object whose +0x9c160 holds the present interval (1 = 60 FPS, 2 = 30 FPS),
@@ -292,9 +320,12 @@ void dm_fps_lock_tick(void) {
     }
     if (fb.n) fb_tick(target, src);
     if (uq.base) unity_vsync_tick(target, src);
+    }
     for (int r = 0; r < nrow; r++) {
-        const lock_t *L = rows[r]; uint64_t obj = (uint64_t)(uintptr_t)base;
+        const lock_t *L = rows[r]; uint64_t obj = (uint64_t)(uintptr_t)base; int pct_row = L->kind == PCT_F32;
+        if (pct_row ? !pct : !target) continue;
         if (L->ptr_off && (!rd((uint64_t)(uintptr_t)(base + L->ptr_off), &obj, sizeof obj) || !obj)) continue;   // not created yet
+        if (L->ptr2 && (!rd(obj + L->ptr2, &obj, sizeof obj) || !obj)) continue;   // the object the field is in, not created yet
         if (L->flag) { uint8_t b; if (!rd(obj + (L->flag >> 8), &b, 1) || !(b & (L->flag & 0xff))) continue; }   // the object's flag is off (Unreal: no fixed frame rate in use)
         if (L->kind == FPS_F64) {
             for (int c = 0; c < L->copies; c++) {
@@ -308,11 +339,17 @@ void dm_fps_lock_tick(void) {
             continue;
         }
         for (int c = 0; c < L->copies; c++) {
-            uint64_t a = obj + L->field + 4 * (uint64_t)c; uint32_t cur, want; char was[16];
+            uint64_t a = obj + L->field + 4 * (uint64_t)c; uint32_t cur, want; char was[16]; int cap_rate = 0;
             if (!rd(a, &cur, sizeof cur)) break;
-            if (L->kind == FPS_F32 || L->kind == MS_F32) {
-                int ms = L->kind == MS_F32; float f, w = ms ? ms_want(target) : (float)target; memcpy(&f, &cur, sizeof f); memcpy(&want, &w, sizeof want);
-                if (cur == want || !(ms ? f >= 8 && f <= 100 : f >= 10 && f <= 120)) continue;   // already set, or not set yet (RE Engine: 6000 at boot; Unreal: 0 = no limit until the config sets it)
+            if (L->kind == PCT_F32) {
+                float f, w = pct; memcpy(&f, &cur, sizeof f); memcpy(&want, &w, sizeof want);
+                if (cur == want || !(f >= 10 && f <= 100)) continue;   // already set, or not a percentage yet (the engine makes it 85/100 at boot)
+                snprintf(was, sizeof was, "%g %%", f);
+            } else if (L->kind == FPS_F32 || L->kind == MS_F32 || L->kind == CAP_F32) {
+                int ms = L->kind == MS_F32, cap = L->kind == CAP_F32;
+                int rate = cap ? (target >= FPS_UNLIMITED ? FPS_UNLIMITED : target + 2) : target; cap_rate = rate;   // CAP_F32: +2, because this limiter sleeps from the frame's start and a cap at the target itself then shows frames late (the engine's own 62 for 60)
+                float f, w = ms ? ms_want(target) : (float)rate; memcpy(&f, &cur, sizeof f); memcpy(&want, &w, sizeof want);
+                if (cur == want || !(ms ? f >= 8 && f <= 100 : f >= 10 && (cap ? f <= 200 : f <= 120))) continue;   // already set, or not set yet (RE Engine: 6000 at boot; Unreal: 0 = no limit until the config sets it)
                 snprintf(was, sizeof was, ms ? "%.3f ms" : "%g", f);
             } else if (L->kind == SECS_F32) {
                 float f, w = 1.0f / (float)target; memcpy(&f, &cur, sizeof f); memcpy(&want, &w, sizeof want);
@@ -335,12 +372,15 @@ void dm_fps_lock_tick(void) {
             uint32_t *p = (uint32_t *)(uintptr_t)a;
             dm_guest_write_prepare(p, sizeof *p); __atomic_store_n(p, want, __ATOMIC_RELAXED);
             if (nlog[r] < 8) { nlog[r]++; char now[24];
-                if (L->kind == MS_F32) snprintf(now, sizeof now, "%.3f ms (%d fps)", ms_want(target), target);
+                if (L->kind == PCT_F32) snprintf(now, sizeof now, "%g %%", pct);
+                else if (L->kind == MS_F32) snprintf(now, sizeof now, "%.3f ms (%d fps)", ms_want(target), target);
                 else if (L->kind == SECS_F32) snprintf(now, sizeof now, "%.5f s (%d fps)", 1.0 / target, target);
                 else if (L->kind == TICKS_U32) snprintf(now, sizeof now, "%u (%d fps)", want, target);
                 else if (L->kind == MODE_U32) snprintf(now, sizeof now, "1 (%d fps)", target);
+                else if (L->kind == CAP_F32) snprintf(now, sizeof now, "%d fps", cap_rate);
                 else snprintf(now, sizeof now, "%u%s", L->kind == FPS_F32 ? (unsigned)target : want, L->kind == FPS_F32 || L->kind == FPS_I32 ? " fps" : " vsyncs");
-                LOG("main: %s%s %s → %s (%s)", L->what, L->copies > 1 ? (c ? " (render thread)" : " (game thread)") : "", was, now, src); }
+                LOG("main: %s%s %s → %s (%s)", L->what, L->copies > 1 ? (L->kind == PCT_F32 ? (c ? " (max)" : " (min)") : (c ? " (render thread)" : " (game thread)")) : "",
+                    was, now, L->kind == PCT_F32 ? "DM_RENDER_SCALE" : src); }
         }
     }
 }

@@ -34,6 +34,8 @@
 #define FSTEP_LATE 0.1        // a frame is late when it or its GPU work took this many vsyncs (1.7 ms) more than k: 53 fps is not 60 (start-to-start jitter on time is well below)
 #define FSTEP_SHORT_MAX 2.0  // a frame counts at most this many vsyncs past its hold toward the average (a load's stall is one long frame, not a rate)
 #define FSTEP_FIT 0.85        // a frame would fit k − 1 when its cost is at most this share of it
+#define FSTEP_FIT_120 0.98    // the same at 120 fps, where the deadline is the tick itself: a game that holds 120 runs its frames at very nearly one 1/120 s (the engine cap's +2 absorbs the rest), so 0.85 never qualified and a drop to 60 was final
+#define FSTEP_BACK_120 4.0    // hold-off ceiling at 120 fps, in hold0 units: a failed probe there costs ~30 frames at 60, so it retries within seconds instead of waiting 8
 #define FSTEP_RUN 30          // frames in a row that fit k − 1 before a trial, and frames a trial must hold
 #define FSTEP_DEBT_MAX 15.0   // debt kept at most (0.25 s): the rest of a long stall (a load) is dropped, not replayed
 #define FSTEP_HOLD0 60.0      // vsyncs since the last step up before a trial: 1 s, doubled after each failed trial up to 8 s
@@ -154,7 +156,8 @@ static inline int nvn_fstep_next(nvn_fstep *s, double shown, double cost, int km
         int want = (int)ceil(c3 - 0.05);
         if (want < s->k + 1) want = s->k + 1;
         if (want > kmax) want = kmax;
-        if (s->trial || (s->probe == 2 && s->since < hold_max)) { s->failed++; s->trial = 0; s->hold = s->hold * 2 < hold_max ? s->hold * 2 : hold_max; }
+        const double back_max = s->no_payback ? FSTEP_BACK_120 * hold0 : hold_max;   // 120 fps: short back-off (FSTEP_BACK_120)
+        if (s->trial || (s->probe == 2 && s->since < hold_max)) { s->failed++; s->trial = 0; s->hold = s->hold * 2 < back_max ? s->hold * 2 : back_max; }
         else if (s->probe == 2) s->hold = hold0;   // the probe's run at kmin lasted
         if (held == kmin && s->run >= hold_max) s->cref = s->crun;   // kmin held 8 s at this cost
         s->k = want; s->ups++; s->late_run = s->fit_run = 0; s->since = 0; s->probe = 0;
@@ -163,7 +166,8 @@ static inline int nvn_fstep_next(nvn_fstep *s, double shown, double cost, int km
     // what the shorter hold absorbs, and they kept the trial from ever starting (Ocarina of Time on a Mac after a load's late frames: 13.4 ms of GPU work at hold 2 with one
     // frame in 20 over 14.2 ms, 30 fps for the rest of the scene where 60 had held; 22 ms at hold 3 under a lowered GPU clock with frames of 29–44 ms, 20 fps for 25 s)
     double fitc = s->ck == s->k && s->cn && s->ccur < cost ? s->ccur : cost;
-    if (!late) s->fit_run = s->k > kmin && fitc <= FSTEP_FIT * (s->k - 1) ? s->fit_run + 1 : 0;
+    const double fit_share = s->no_payback ? FSTEP_FIT_120 : FSTEP_FIT;   // 120 fps: the tick is the deadline (see FSTEP_FIT_120)
+    if (!late) s->fit_run = s->k > kmin && fitc <= fit_share * (s->k - 1) ? s->fit_run + 1 : 0;
     if (s->fit_run >= FSTEP_RUN && s->since >= s->hold && !s->trial) { s->k--; s->downs++; s->trial = FSTEP_RUN; s->fit_run = 0; }
     else if ((slow || nvn_fstep_same(s)) && s->k > kmin && s->since >= s->hold && !s->trial) {   // probe: straight to kmin, so the controller sees the whole deadline
         s->k = kmin; s->downs++; s->probes++; s->trial = FSTEP_RUN; s->probe = 1; s->grace = FSTEP_GRACE; s->fit_run = s->late_run = 0; s->pa = s->pb = 0; s->plate = s->ptotal = 0;

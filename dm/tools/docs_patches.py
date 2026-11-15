@@ -96,8 +96,6 @@ SHADER_BINDING = [
 # Profile switches: (key, the start of its value ('' = any), entry). A key is per-game data, so `game`; its goal is `host` where it is the semantics every game should get
 DEFAULT_SOON = 'a default for every game after `regress.py check` on the games'
 SWITCH_BINDING = [
-    ('render_cond', '', {'what': 'NVN conditional rendering', 'now': 'game', 'goal': 'host', 'purpose': 'rendering',
-     'why': f'what the GPU does; off by default only because other games drew everything before: {DEFAULT_SOON}'}),
     ('draw_barriers', '', {'what': 'draw passes ordered by the game\'s own barriers', 'now': 'game', 'goal': 'host', 'purpose': 'frame rate', 'why': f'what NVN specifies: {DEFAULT_SOON}'}),
     ('mem_map_limit', '', {'what': 'MapPhysicalMemory limited to the application pool', 'now': 'game', 'goal': 'host', 'purpose': 'memory',
      'why': "Horizon's limit; off by default because Ace Attorney Investigations Collection maps a little more than its profile's 1 GB pool, which is the thing to fix"}),
@@ -183,8 +181,8 @@ def frame_step_sites(fn, base=0, others=(), found=None):   # (offset, reason) of
     pos, puts = [0x6000000], []                    # render-scale stub, the sites in each of the rule's other functions ({label: [(offset, reason)]}) and the capabilities it declares
     def emit(w): pos[0] += 4
     at = {label: OTHER_BASE + i * 0x1000000 for i, label in enumerate(others)}
-    ctx = types.SimpleNamespace(here=lambda: pos[0], emit=emit, site=lambda off, orig: None, put=lambda off, words, why: puts.append((off, why)), state=0x9000000, render_scale=0, base=base,
-                                others=at, found=found, capabilities=set(), address=lambda off: 0)
+    ctx = types.SimpleNamespace(here=lambda: pos[0], emit=emit, site=lambda off, orig: None, put=lambda off, words, why: puts.append((off, why)), state=0x9000000, render_scale=0, step_max=0, base=base,
+                                others=at, found=found, capabilities=set(), fps_ready=False, address=lambda off, lo_off=None: 0)
     fn(ctx)
     in_others = {label: sorted((off - a, why) for off, why in puts if a <= off < a + 0x1000000) for label, a in at.items()}
     return sorted((off, why) for off, why in puts if off < OTHER_BASE), ctx.render_scale, in_others, sorted(ctx.capabilities)
@@ -284,7 +282,7 @@ def page():
         m = mods.get(g.id)
         if not m and g.id not in host_games: continue
         text = files[g.id].read_text() if m else ''
-        cuts, obs, fs, st, mc, mfs, caps = (getattr(m, k, {}) for k in ('CUTS', 'OBS', 'FRAME_STEP', 'STUBS', 'MATCH_CUTS', 'MATCH_FRAME_STEP', 'CAPABILITIES'))
+        cuts, obs, fs, st, mc, mfs, mst, caps = (getattr(m, k, {}) for k in ('CUTS', 'OBS', 'FRAME_STEP', 'STUBS', 'MATCH_CUTS', 'MATCH_FRAME_STEP', 'MATCH_STUBS', 'CAPABILITIES'))
         bids = list(dict.fromkeys([*cuts, *obs, *fs, *st, *caps, *sorted(host_games.get(g.id, ()))]))
         n_fs = 0; lines = [f'### {name(g)}', '', f'{note(g)}, `{g.id}`' + (f', {link(files[g.id])}' if m else '') + '.', '']
         es = list(bound(m, rel(files[g.id]), own=True)) if m else []
@@ -331,6 +329,19 @@ def page():
                              + ''.join(f'; {label}, a function of {r["others"][label]["size"]:#x} bytes, ' + ', '.join(f'`+{off:#x}`' for off, _ in got) + ' in it'
                                        for label, got in in_others.items())
                              + (f'; launcher capabilities: {", ".join(fs_caps)}' if fs_caps else ''))
+        for module, rules in mst.items():
+            for i, r in enumerate(rules):
+                if 'calls' in r:
+                    got = [frame_step_sites(r['stub'], found=f) for f in r['reviewed']]
+                    n_fs += len(got[0][0]) * (i == 0)
+                    lines.append(f'- **anchored stub** (`{module}` of builds without STUBS): {r["name"]}: the one function that calls `{r["calls"]}`, '
+                                 + 'on the reviewed builds ' + '; '.join(', '.join(f'`+{off:#x}`' for off, _ in g[0]) for g in got) + ' in it')
+                    continue
+                sites, _, in_others, _ = frame_step_sites(r['stub'], others=r.get('others', {}))
+                n_fs += (len(sites) + sum(map(len, in_others.values()))) * (i == 0)
+                lines.append(f'- **function-matched stub** (`{module}` of builds without STUBS): {r["name"]}: a function of {r["size"]:#x} bytes, '
+                             + ', '.join(f'`+{off:#x}`' for off, _ in sites) + ' in it'
+                             + ('; native frame targets require the complete correction' if r.get('fps_required') else ''))
         sections += lines + ['']
         n_host = sum(len(host.get(b, [])) for b in bids)
         kinds = {}

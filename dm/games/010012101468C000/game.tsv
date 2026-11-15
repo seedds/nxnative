@@ -36,8 +36,8 @@ app_pool	0xCD500000
 sys_resource	0x0
 
 # ---- Shader split ----
-# 40,483 shaders (20,233 vertex, 20,233 pixel, 12 geometry, 5 compute): MaterialArchive.arc, the MTRL resources of the world, preload and UI packs, and the startup archive in main;
-# 20,233 vertex / pixel pairs
+# 68,962 shaders (34,472 vertex, 34,472 pixel, 12 geometry, 6 compute): MaterialArchive.arc, the MTRL resources of the world, preload and UI packs, and the startup archive in main;
+# 34,472 vertex / pixel pairs
 shader_groups	/Worlds/=worlds /Preload/=preload /UI/=ui
 shader_note	Metroid Prime Remastered shaders
 

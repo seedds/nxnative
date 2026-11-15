@@ -89,6 +89,19 @@ int main(void) {
     CHECK(listed("save:/", "plain", ENT_FILE) && !listed("save:/", "legacy", ENT_FILE), "rename updates the listing, the old name is gone");
     CHECK(mount("rom", save, 1) == RES_OK && content("rom:/LEGACY", "old"), "a read-only mount reads mapped names");
     CHECK(h_fs_GetEntryType(&type, "rom:/Legacy") == RES_PATH_NOT_FOUND, "a read-only mount also looks up by exact case");
+    // MountSaveDataReadOnly: this game's own save data is its committed save (Nintendo Switch Sports Resort mounts it as SaveReadOnly), another program's has none
+    CHECK(h_fs_MountSaveRO("SaveReadOnly", DM_GAME_PROGRAM_ID, NULL) == RES_OK, "this game's own save data mounts read-only");
+    CHECK(content("SaveReadOnly:/LEGACY", "old") && h_fs_GetEntryType(&type, "SaveReadOnly:/plain") == RES_PATH_NOT_FOUND, "it reads the committed save, not the work directory's uncommitted files");
+    CHECK(h_fs_CreateFile("SaveReadOnly:/new", 0) != RES_OK && h_fs_GetEntryType(&type, "save:/new") == RES_PATH_NOT_FOUND, "it refuses writes");
+    CHECK(h_fs_MountSaveRO("OtherRO", DM_GAME_PROGRAM_ID ^ 0x1000, NULL) == 0x7d402u, "another program's save data: TargetNotFound");
+    snprintf(p, sizeof p, "%s/fresh", root); setenv("DM_SAVE", p, 1);
+    CHECK(h_fs_MountSaveRO("FreshRO", DM_GAME_PROGRAM_ID, NULL) == RES_OK && h_fs_GetEntryType(&type, "FreshRO:/") == RES_OK && type == ENT_DIR,
+          "a first launch with no committed save mounts an empty one");
+    unsetenv("DM_SAVE");
+    CHECK(h_fs_MountSaveRO("NoSaveRO", DM_GAME_PROGRAM_ID, NULL) == 0x7d402u, "no save folder (DM_SAVE unset): TargetNotFound, no exit");
+    snprintf(p, sizeof p, "%s/afile", root); FILE *af = fopen(p, "w"); if (af) fclose(af); setenv("DM_SAVE", p, 1);   // a file, not a folder
+    CHECK(h_fs_MountSaveRO("FileRO", DM_GAME_PROGRAM_ID, NULL) == 0x7d402u, "a save path that is a file: TargetNotFound, no exit");
+    setenv("DM_SAVE", save, 1);
     CHECK(h_fs_CreateDirectory("save:/Trail/") == RES_OK && listed("save:/", "Trail", ENT_DIR), "a trailing slash on create directory does not become an empty name");
     CHECK(h_fs_CreateFile("save:/.dm-case-1", 0) == RES_OK && write_text("save:/.dm-case-1", "real"), "a real guest name with the alias prefix can be created");
     CHECK(content("save:/.dm-case-1", "real") && content("save:/LEGACY", "old"), "a physical alias does not pose as a real guest name");

@@ -9,8 +9,9 @@ A Switch 2 game: update v65536 over the base game, SDK 21.4.4 built for the Swit
 | `mem_alias 0x400000000`, `mem_reserve 0x550000000` | [`game.tsv`](game.tsv) | with the 4.5 GB of an earlier profile the region ran out at the first level: [An SDK 21 Switch 2 game with a 4.5 GB alias region](../../../docs/reference/memory.md#an-sdk-21-switch-2-game-with-a-45-gb-alias-region) |
 | `mem_stack 0x10000000`, `app_pool 0x240000000` | `game.tsv` | as Donkey Kong Bananza, the Switch 2's 9 GB |
 | `sys_resource 0x2000000` | `game.tsv` | the NPDM declares 32 MB, so virtual address memory is on |
-| `render_cond on` | `game.tsv` | agl wraps its clears in render conditions; when those clears ran, the lit scene was wiped: the black dialogue scene ([Report tables that dropped entries](../../../docs/reference/rendering.md#report-tables-that-dropped-entries)) |
 | `pad_layout full` | `game.tsv` | the game asks for most of the controller at once |
+
+Render conditions, which the host evaluates for every game ([Conditional rendering evaluated at replay](../../../docs/reference/rendering.md#conditional-rendering-evaluated-at-replay); until 2026-11-12 the profile key `render_cond`): agl wraps its clears in render conditions; when those clears ran, the lit scene was wiped: the black dialogue scene ([Report tables that dropped entries](../../../docs/reference/rendering.md#report-tables-that-dropped-entries)).
 
 ## Files
 
@@ -20,7 +21,7 @@ A Switch 2 game: update v65536 over the base game, SDK 21.4.4 built for the Swit
 
 ## Shaders
 
-27,192 of 27,195 built on chain `9bb5d8678204`. Of the 3 that did not, the one on instruction 0x481 was a false row, gone from the tables since they were split again (resolved, below); the other 2, compute shaders of `agl_technique_pfx` that Metal refused (`bracket nesting level exceeded`), have not been built since 04df08d4 raised Metal's bracket depth (unchecked). `fa072659664b2d38` in `agl_common`, which the game asks for at boot, builds now.
+27,192 of 27,192 built on chain `b6aa8fd968b7`, a full rebuild from scratch on the M4 Pro (31:24, nothing from the Metal cache), and so did the chain before it (`6832d4cf829f`, 35:53): the false row on instruction 0x481 is gone since the tables were split again, and the two compute shaders of `agl_technique_pfx` that Metal refused (`bracket nesting level exceeded`) build now that Metal's bracket depth is raised. `fa072659664b2d38` in `agl_common`, which the game asks for at boot, builds.
 
 ## Rendering
 
@@ -34,6 +35,10 @@ A Switch 2 game: update v65536 over the base game, SDK 21.4.4 built for the Swit
 ## Dynamic resolution
 
 The game writes 29 `ReportCounter(TIMESTAMP_TOP)` reports a frame and steers its dynamic resolution by the GPU time between them ([issue #1064](https://github.com/seedds/nxnative/issues/1064), M2 Air, 1920x1080 handheld). With one time for the whole submission it read about 0 and kept the 3D view at 1440x810 (render scale 0.75) at 26 ms of GPU a frame; with segment times it scaled between 0.39 and 1.0 of the render-scale size. With the GPU's idle gaps between command buffers counted it read about 16 ms where the GPU worked about 8 and held 0.50–0.57 of full size; without them its width median went to 0.94, and dropped frames from 4 to 35 per 300 ([issue #1290](https://github.com/seedds/nxnative/issues/1290)). Both are the host's default now ([GPU timestamps per submission segment](../../../docs/reference/frame-rate.md#gpu-timestamps-per-submission-segment)); not rerun on main.
+
+## Motion controls
+
+Motion aiming works with a pair of original (Switch 1) Joy-Cons, clean and 1 to 1 by the player's account, and this is the second game that proves the Mac transport (`pad_jc1.h`; [the reference entry](../../../docs/reference/services.md#an-original-joy-cons-sensors-are-read-by-the-host)). A 7 minute session reached frame 26,100 with no `[RED]` line and called `GetSixAxisSensorStates` 30,400 times, 1.16 a frame, and never the npad IMU API (`GetNpadImuSamples` 0), so the game reads the six-axis sensors itself and the SDK's fusion, which over-samples them in Sports Resort, is not in this path. The stream carried the motion: 444 deg/s peak from the left half and 484 from the right, against 1.27 rev/s handed to player 1. Both halves report their own gravity at rest (left −1.02, right −1.01 G, rotation under 0.2 deg/s) and the factory gyro scale normalizes to 0.0611 deg/s per count on both. The game supports FullKey | Handheld | JoyDual (0x7), so the pair is shown as one full-key controller with one six-axis handle, fed by the player's merged stream, which is the right half (`DM_JC1_SIDE=L` picks the other; the left half's own stream goes unread here). Frame p50 16.8-21.2 ms and GPU p50 9.2-13.3 ms in the last windows of that session.
 
 ## Driving it on the Mac
 
@@ -54,6 +59,7 @@ The work folder's `run/drive.sh <name> <secs> "<sec> <control line>"…` boots i
 - [The split shader tables differ from a game profile's](../../../docs/reference/packing.md#the-split-shader-tables-differ-from-a-game-profiles): NigoProc's `800215a0f8d0c44d` is a mesh shader, and every pack stopped until its row was split again ([issue #1263](https://github.com/seedds/nxnative/issues/1263)).
 - [A control section's words read as a BAHS entry](../../../docs/reference/shaders.md#a-control-sections-words-read-as-a-bahs-entry): resolved, 2026-11-10. Three rows of `agl_resource.Nin_Ounce_NVN2.debug.sarc.zs` were no shaders (`cs_other` `68bbe98b3bfd9876` in `agl_common`, `ps_other` `18be578dfdaaffa0` in `agl_technique`, `vs_other` `7a4936fccf82094e` in `agl_technique_pfx`), and every NSP build stopped at the table check after 04df08d4 ([issue #1613](https://github.com/seedds/nxnative/issues/1613)). The tables were split again from the update: those rows and one fact went, the later rows of each package moved down one index, and nothing else changed.
 - [Storage words read one by one](../../../docs/reference/shaders.md#storage-words-read-one-by-one): the lit pass on an M1, 70 → 16 ms.
+- [A command memory grant over a list whose tail is lent](../../../docs/reference/nvn-objects.md#a-command-memory-grant-over-a-list-whose-tail-is-lent): the game grants more command memory than it writes; this host lends Raiders no command memory, so the bug never showed here.
 - [A blocked audio device start freezes the game](../../../docs/reference/audio.md#a-blocked-audio-device-start-freezes-the-game) when the selected HDMI device refuses to play.
 
 - [Goto elimination forcing loops around a whole program](../../../docs/reference/shaders.md#goto-elimination-forcing-loops-around-a-whole-program): the first shader build stalled for 5 h 40.
@@ -69,3 +75,4 @@ The work folder's `run/drive.sh <name> <secs> "<sec> <control line>"…` boots i
 - [A submission past 8,192 queued writes counted as writing everywhere](../../../docs/reference/rendering.md#a-submission-past-8192-queued-writes-counted-as-writing-everywhere): the first boss fight's third stage at 1-2 fps.
 - [Same-pass feedback read from the tile](../../../docs/reference/rendering.md#same-pass-feedback-read-from-the-tile): each ink stamp's one-draw pass and whole-map snapshot ([#1063](https://github.com/seedds/nxnative/issues/1063)).
 - [An upscaler's colour read from its code](../../../docs/reference/rendering.md#an-upscalers-colour-read-from-its-code): the washed-out picture with `DM_UPSCALER=metalfx` ([#1156](https://github.com/seedds/nxnative/issues/1156)).
+- [Unused border corrections retain sample registers](../../../docs/reference/rendering.md#unused-border-corrections-retain-sample-registers): after the first cutscene a 236-draw 1920x1080 pass took 20-21 ms of a 31.6 ms frame on an M1 in handheld, its pixel shaders spilling 592-720 bytes a thread for a correction none of its samplers needs; 9.3 ms and 19.8 ms with the corrections taken out at build time (PR #1203). Open: not measured again with the function constant that landed.

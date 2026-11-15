@@ -12,6 +12,7 @@ import unittest
 REPO = Path(__file__).resolve().parents[3]
 TOOLS = REPO / 'dm/gfx/tools'
 sys.path.insert(0, str(TOOLS))
+import dmsh_abi  # noqa: E402
 import dmsh_atomic  # noqa: E402
 import dmsh_entry  # noqa: E402
 import dmsh_fetch  # noqa: E402
@@ -112,19 +113,57 @@ class IntegerOutputs(unittest.TestCase):
         return f'struct main0_out\n{{\n    float4 m_0 [[color(0)]];\n}};\n\n{extra}fragment main0_out main0(main0_in in [[stage_in]])\n{{\n    main0_out out = {{}};\n{body}\n    return out;\n}}\n'
 
     def test_an_output_from_integer_bits(self):
-        self.assertIsNotNone(fs_uint(self.source('    out.m_0.x = as_type<float>(1u);'))[0])
+        self.assertIsNotNone(fs_uint(self.source('    out.m_0.x = as_type<float>(1u);')))
 
     def test_a_computed_float_output_gets_none(self):
-        self.assertIsNone(fs_uint(self.source('    out.m_0 = in.m_1 * 2.0;'))[0])
+        self.assertIsNone(fs_uint(self.source('    out.m_0 = in.m_1 * 2.0;')))
 
     def test_a_longer_name_is_not_the_output(self):
-        self.assertIsNone(fs_uint(self.source('    xout.m_0.x = as_type<float>(1u);\n    out.m_0 = in.m_1 * 2.0;'))[0])
+        self.assertIsNone(fs_uint(self.source('    xout.m_0.x = as_type<float>(1u);\n    out.m_0 = in.m_1 * 2.0;')))
 
     def test_a_flat_input_passed_through(self):
         src = self.source('    out.m_0 = in.m_1;', 'struct main0_in\n{\n    float4 m_1 [[user(locn1), flat]];\n};\n\n')
-        self.assertIsNotNone(fs_uint(src)[0])
-        self.assertIsNone(fs_uint(src.replace(', flat]]', ']]'))[0])
+        self.assertIsNotNone(fs_uint(src))
+        self.assertIsNone(fs_uint(src.replace(', flat]]', ']]')))
 
+    def test_a_float_local_holding_integer_bits(self):   # PRAGMATA's visibility shaders: the primitive id's bits and the depth into an RG32Uint target
+        body = '    float _439 = as_type<float>(int(gl_PrimitiveID));\n    float _437 = gl_FragCoord.z;\n    out.m_0.x = _439;\n    out.m_0.y = _437;'
+        self.assertIsNotNone(fs_uint(self.source(body)))
+        self.assertIsNone(fs_uint(self.source(body.replace('as_type<float>(int(gl_PrimitiveID))', 'gl_FragCoord.w'))))
+
+    def test_writes_after_an_early_return(self):   # a9c1f9ea0c76a54c: a discard's branch returns zeros first; the integer bits are written after it
+        early = '    if (!_435)\n    {\n        discard_fragment();\n    }\n    if (!_435)\n    {\n        out.m_0.x = 0.0;\n        out.m_0.y = 0.0;\n        return out;\n    }\n'
+        body = early + '    float _439 = as_type<float>(int(gl_PrimitiveID));\n    float _437 = gl_FragCoord.z;\n    out.m_0.x = _439;\n    out.m_0.y = _437;'
+        self.assertIsNotNone(fs_uint(self.source(body)))
+        self.assertIsNone(fs_uint(self.source(body.replace('as_type<float>(int(gl_PrimitiveID))', 'gl_FragCoord.w'))))
+
+    def test_a_flat_input_passed_through_beside_constants(self):   # Unreal's virtual texture page table update (Sparking! ZERO's 17eda07e4bac39f8)
+        flat = 'struct main0_in\n{\n    float4 m_1 [[user(locn0), flat]];\n};\n\n'
+        src = self.source('    float _26 = in.m_1.x;\n    out.m_0.x = _26;\n    out.m_0.y = 0.0;\n    out.m_0.z = 0.0;\n    out.m_0.w = 0.0;', flat)
+        self.assertIsNotNone(fs_uint(src))
+        self.assertIsNone(fs_uint(src.replace(', flat]]', ']]')))
+        self.assertIsNone(fs_uint(self.source('    out.m_0.x = in.m_1.x * 2.0;\n    out.m_0.y = 0.0;', flat)))
+
+    def test_each_colour_switched_by_its_constant(self):   # Trails in the Sky 2nd Chapter's G-buffer: float at colour 0, integer at 1 to 3, whatever each shader writes there
+        four = ''.join(f'    float4 m_{n} [[color({n})]];\n' for n in range(4)) + '    float gl_FragDepth [[depth(any)]];\n'
+        body = ('    uint _342 = uint(_341);\n    out.m_0 = in.m_9 * 2.0;\n    out.m_1.x = as_type<float>(_342);\n    out.m_2.x = 0.0;\n'
+                '    out.m_3.x = (*spvDescriptorSet0.fp_c8)._m0[2].w;\n    out.gl_FragDepth = 0.5;')
+        src = f'struct main0_out\n{{\n{four}}};\n\nfragment main0_out main0(main0_in in [[stage_in]])\n{{\n    main0_out out = {{}};\n{body}\n    return out;\n}}\n'
+        u = fs_uint(src)
+        for n in range(4):
+            self.assertIn(f'constant bool dm_ui{n} [[function_constant({dmsh_abi.UINT_FC + n})]];\nconstant bool dm_uf{n} = !dm_ui{n};\n', u)
+            self.assertIn(f'    float4 m_{n} [[color({n}), function_constant(dm_uf{n})]];\n    uint4 m_{n}_ui [[color({n}), function_constant(dm_ui{n})]];\n', u)
+            self.assertIn(f'    if (dm_ui{n}) r.m_{n}_ui = as_type<uint4>(out.m_{n}); else r.m_{n} = out.m_{n};\n', u)   # the bits as they are, nothing converted
+        self.assertIn('    float gl_FragDepth [[depth(any)]];\n};', u); self.assertIn('    r.gl_FragDepth = out.gl_FragDepth;\n', u)   # not a colour: as main0 has it
+        self.assertIn('fragment main0_out_u main0_u(main0_in in [[stage_in]])\n{\n    main0_out out = dm_body_main0(in);\n', u)
+        self.assertEqual(u.count('main0_out_m'), 0)
+
+    def test_narrow_and_integer_colours(self):   # a narrow float colour takes the integer vector of its width; one main0 already declares an integer stays as it is
+        src = ('struct main0_out\n{\n    float2 m_0 [[color(0)]];\n    uint4 m_1 [[color(1)]];\n};\n\nfragment main0_out main0(main0_in in [[stage_in]])\n{\n    main0_out out = {};\n'
+               '    out.m_0.x = as_type<float>(1u);\n    out.m_1 = uint4(2u);\n    return out;\n}\n')
+        u = fs_uint(src)
+        self.assertIn('    uint2 m_0_ui [[color(0), function_constant(dm_ui0)]];\n    uint4 m_1 [[color(1)]];\n', u)
+        self.assertNotIn('dm_ui1', u)
 
 class ImageAtomics(unittest.TestCase):
     MAGIC = [0x07230203, 0x10000, 0, 8, 0]

@@ -15,7 +15,7 @@ static void emit(unsigned op, const void *p, size_t n) {
 static void discard(int on) { p_rast_discard d = {.on=on}; emit(OP_RAST_DISCARD,&d,sizeof d); }
 static void clear_blue(void) { p_clear_color c = {.rgba={0,0,1,1},.mask=15}; emit(OP_CLEAR_COLOR,&c,sizeof c); }
 static void execute(void) {
-    emit(OP_END,NULL,0); mtl_sub_begin(); uint64_t handle=(uint64_t)cmd; mtl_sub_index(&handle,1); mtl_exec(cmd);
+    emit(OP_END,NULL,0); mtl_sub_begin(); mtl_exec(cmd);
     uint64_t fence=mtl_sub_commit(); CHECK(mtl_wait(fence,5000000000ull),"GPU submission completes");
     CHECK(!mtl_last_commit_error(),"GPU reports no error"); used=0;
 }
@@ -28,7 +28,7 @@ static void pixels(const tex_t *t, int red) {
     CHECK(good,red?"normal draw rasterizes every pixel red":"discard leaves every pixel at the blue clear");
 }
 int main(void) { @autoreleasepool {
-    setenv("DM_NVN_TBDR","0",1); mtl_init();
+    mtl_init();
     void *memory=NULL; if(posix_memalign(&memory,getpagesize(),65536))abort(); memset(memory,0,65536); mtl_pool_add(memory,65536);
     cmd=memory; uint32_t *output=(uint32_t *)((uint8_t *)memory+32768);
     uint32_t *indices=(uint32_t *)((uint8_t *)memory+36864); indices[0]=7;indices[1]=8;indices[2]=9;

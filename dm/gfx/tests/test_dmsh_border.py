@@ -117,6 +117,14 @@ class Rewrite(unittest.TestCase):
         inner = 'dm_bs(spvDescriptorSet0.fp_t_tcb_8.sample(spvDescriptorSet0.fp_t_tcb_8Smplr, _182, level(0.0)), spvDescriptorSet0.dm_border, 0u, spvDescriptorSet0.fp_t_tcb_8, spvDescriptorSet0.fp_t_tcb_8Smplr_w, _182, level(0.0))'
         self.assertEqual(out.count(inner), 2, 'the inner sample, rewritten, in both of the outer one\'s samples')
 
+    def test_stages_and_the_function_constant(self):
+        frag, kern = border_emu(GRASS), border_emu(KERNEL)
+        self.assertIn(f'constant bool dm_border_off [[function_constant({abi.BORDER_FC})]];', frag, 'a fragment shader takes the host\'s specialization (nvn_mtl.m fn_off)')
+        self.assertIn('#define DM_BORDER_LIVE dm_border_live', frag)
+        self.assertIn('if (DM_BORDER_LIVE && (b->mask >> i & 1u))', frag)
+        self.assertIn(f'constant bool dm_border_off [[function_constant({abi.BORDER_FC})]];', kern, 'a kernel too (nvn_mtl.m cps_new_b, by its specialized descriptor)')
+        self.assertIn('#define DM_BORDER_LIVE dm_border_live', kern)
+
     def test_integer_textures_keep_their_samples(self):
         out = border_emu(INTEGER)
         self.assertIn('uint4 _10 = spvDescriptorSet0.fp_t_tcb_8.sample(spvDescriptorSet0.fp_t_tcb_8Smplr, float2(0.5), level(0.0));', out, 'an integer sample is not wrapped')

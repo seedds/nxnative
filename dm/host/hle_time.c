@@ -28,8 +28,17 @@ HLE_FORCE("_ZN2nn4time23StandardUserSystemClock14GetCurrentTimeEPNS0_9PosixTimeE
 }
 // The adjustable user clock (Animal Crossing: New Horizons 3.0.3, whose days follow it): the SDK keeps it in a MonotonicSystemClock that Adjust sets from the user clock's context, and its
 // GetCurrentTime reads the time service's shared memory, which the host never maps (an abort in MonotonicSystemClock::GetCurrentTime, sdk+0x4421cc on that build). On the host the user clock
-// is the host's own clock, so it is this one too; Adjust runs natively (it reads the user clock context, a host take-over) and only sets the SDK's copy
+// is the host's own clock, so it is this one too; Adjust runs natively (it reads the user clock context, a host take-over) and only sets the SDK's copy. Its other readers and the
+// adjustable network clock's follow the user clock context below
 HLE_FORCE("_ZN2nn4time25AdjustableUserSystemClock14GetCurrentTimeEPNS0_9PosixTimeE", "adjustable user clock → host time(), as the user clock", Result, h_time_AdjGetCurrentTime, int64_t *out) { return h_time_GetCurrentTime(out); }
+// The network clock: a Switch keeps it from its last time sync, so one that has ever been online reads it offline too. The host's clock is set from the network, so on the host the
+// network clock is the user clock, in every reader: GetCurrentTime here, now() below and the clock snapshot's network fields. Games date their saves by it: Divinity: Original Sin 2
+// failed its read here, kept its PosixTime 2, and showed every save as 18:00:02 31/12/1969, so Continue, which takes the newest, loaded an older save (PR #2359)
+HLE_FORCE("_ZN2nn4time26StandardNetworkSystemClock14GetCurrentTimeEPNS0_9PosixTimeE", "network clock → host time(), as the user clock (the host's clock is network-set)", Result, h_time_NetNow, int64_t *out) {
+    Result r = h_time_GetCurrentTime(out);
+    static _Atomic int once; if (!atomic_exchange(&once, 1)) LOG("time: the network clock's first read: %lld (the host's clock)", (long long)*out);
+    return r;
+}
 // The C library's real-time clock (SDK 17): clock_gettime(CLOCK_REALTIME) calls the source that nntimeStartup selects once time::Initialize succeeds (sdk+0x8e414: 1 = the standard user clock,
 // 2 = the adjustable one; 0, the system tick, before that), and std::chrono::system_clock::now() throws on its failure. The SDK's getters ask the time service: Ace Attorney Investigations
 // Collection called std::terminate at its first real-time read, right after the first-boot language dialog (main+0x3f3f68; found by armyja, GitHub issue #18). The host user clock, to the nanosecond
@@ -70,6 +79,27 @@ HLE_FORCE("_ZN2nn4time23StandardUserSystemClock3nowEv", "user clock → host tim
     int64_t ft = fixed_time(); return ft >= 0 ? ft : time(NULL); }
 HLE_FORCE("_ZN2nn4time23StandardUserSystemClock9to_time_tERKNSt3__16chrono10time_pointINS0_17SystemClockTraitsENS3_8durationIlNS2_5ratioILl1ELl1EEEEEEE",
           "the SDK implementation pairs with now(), taken over with it", int64_t, h_time_to_time_t, const int64_t *tp) { return *tp; }
+// The network clock's now(), as the user clock's: the SDK's never calls GetCurrentTime, it reads the time service once its own initialized flag is set, which the host's Initialize
+// take-over never sets, and returns 0 (1970) otherwise (Ocarina of Time's sdk+0x5d8490; its main imports it). Its to_time_t only reads the time point and needs nothing
+HLE_FORCE("_ZN2nn4time26StandardNetworkSystemClock3nowEv", "network clock → host time(), as the user clock", int64_t, h_time_net_now, void) { return h_time_now(); }
+// The network clock's context, as the user clock's (the snapshot's +0x20 carries the same). The SDK asks the time service, which the host never opens, and gets 0x74;
+// AdjustableNetworkSystemClock::Adjust aborts on that (METAL GEAR SOLID: Peace Walker - Master Collection Version 1.3.1, SDK 19, sdk+0x42c514, PR #1875)
+HLE_FORCE("_ZN2nn4time26StandardNetworkSystemClock21GetSystemClockContextEPNS0_18SystemClockContextE", "network clock context, as the user clock's (the host's clock is network-set)",
+          Result, h_time_NetContext, uint8_t *out) { return h_time_GetContext(out); }
+// The adjustable clocks (user and network) keep a copy of their standard clock's context in the SDK's detail::MonotonicSystemClock, which Adjust sets and the readers turn into a
+// time through the time service's shared memory, which the host never maps: MonotonicSystemClock::IsAdjusted, GetCurrentTime and GetCurrentTimespec abort (diag::detail::AbortImpl)
+// when it is not mapped. Every adjustable network reader asks IsAdjusted first; the adjustable user clock's now() reads GetCurrentTime. On the host each adjustable clock is its standard
+// clock, which is the host's clock, in every reader. Adjust itself runs as is: it reads the standard clock's context (a take-over) and only sets the SDK's copy
+HLE_FORCE("_ZN2nn4time25AdjustableUserSystemClock3nowEv", "adjustable user clock now() → host time(), as the user clock", int64_t, h_time_adj_now, void) { return h_time_now(); }
+HLE_FORCE("_ZN2nn4time25AdjustableUserSystemClock21GetSystemClockContextEPNS0_18SystemClockContextE", "adjustable user clock context, as the user clock's",
+          Result, h_time_AdjContext, uint8_t *out) { return h_time_GetContext(out); }
+HLE_FORCE("_ZN2nn4time28AdjustableNetworkSystemClock14GetCurrentTimeEPNS0_9PosixTimeE", "adjustable network clock → host time(), as the network clock", Result, h_time_AdjNetNow, int64_t *out) { return h_time_NetNow(out); }
+HLE_FORCE("_ZN2nn4time28AdjustableNetworkSystemClock3nowEv", "adjustable network clock now() → host time(), as the network clock", int64_t, h_time_adj_net_now, void) { return h_time_now(); }
+HLE_FORCE("_ZN2nn4time28AdjustableNetworkSystemClock21GetSystemClockContextEPNS0_18SystemClockContextE", "adjustable network clock context, as the network clock's",
+          Result, h_time_AdjNetContext, uint8_t *out) { return h_time_GetContext(out); }
+// The C library's real-time getters over the network clocks (SDK 17): the standard one reads the time service's shared memory (0x74 without it), the adjustable one its MonotonicSystemClock
+HLE_FORCE("_ZN2nn4time44GetStandardNetworkSystemClockCurrentTimespecEP8timespec", "real time from the network clock → host real time, as the user clock", int, h_time_NetTimespec, int64_t *ts) { return h_time_timespec(ts); }
+HLE_FORCE("_ZN2nn4time46GetAdjustableNetworkSystemClockCurrentTimespecEP8timespec", "real time from the adjustable network clock → host real time, as the user clock", int, h_time_AdjNetTimespec, int64_t *ts) { return h_time_timespec(ts); }
 HLE_FORCE("_ZN2nn4time14ToCalendarTimeEPNS0_12CalendarTimeEPNS0_22CalendarAdditionalInfoERKNS0_9PosixTimeE",
           "time zone rules of the time service; uses the host localtime_r instead", Result, h_time_ToCalendarTime, CalendarTime *ct, CalendarAdditionalInfo *ai, const int64_t *pt) {
     time_t t = *pt; struct tm tm; localtime_r(&t, &tm);
@@ -84,19 +114,23 @@ HLE_FORCE("_ZN2nn4time16LoadTimeZoneRuleEPNS0_12TimeZoneRuleERKNS0_12LocationNam
           void *rule, const char *name) { (void)rule; LOG("time::LoadTimeZoneRule %.36s (host time zone used instead)", name ? name : "?"); return RES_OK; }
 HLE_FORCE("_ZN2nn4time14ToCalendarTimeEPNS0_12CalendarTimeEPNS0_22CalendarAdditionalInfoERKNS0_9PosixTimeERKNS0_12TimeZoneRuleE", "conversion with an explicit time zone rule; same as the device zone (host localtime_r)",
           Result, h_time_ToCalendarTimeRule, CalendarTime *ct, CalendarAdditionalInfo *ai, const int64_t *pt, const void *rule) { (void)rule; return h_time_ToCalendarTime(ct, ai, pt); }
-HLE_FORCE("_ZN2nn4time26StandardNetworkSystemClock20IsAccuracySufficientEv", "network clock accuracy (time service): offline, never sufficient", unsigned, h_time_NetAccurate, void) { return 0; }
+// Whether the network clock's last sync is recent enough (the service compares the steady time point of its context with now). The host does not know when its clock last synced,
+// so it never claims it: the answer a Switch gives when its last sync is old
+HLE_FORCE("_ZN2nn4time26StandardNetworkSystemClock20IsAccuracySufficientEv", "network clock accuracy (time service): the host does not know its last sync, never sufficient", unsigned, h_time_NetAccurate, void) { return 0; }
 // Clock snapshot (Tears of the Kingdom: CreateWithStandardSystemClock asks the time service, which the host never opens → abort in sm::Initialize). 0xD0 bytes, laid out
 // as Ryujinx lays out the service's ClockSnapshot and as this SDK's constructor clears it (its last store is the byte at +0xcd): +0x00 user clock context {offset,
 // steady time point}, +0x20 network clock context, +0x40 user time, +0x48 network time, +0x50 / +0x58 user / network calendar, +0x60 / +0x78 their additional info,
 // +0x90 steady time point, +0xa8 location name (0x24), +0xcc automatic correction, +0xcd type. A steady time point is {int64 seconds, 16-byte source ID} (h_time_SteadyNow).
-// Offline, the network fields stay 0, so CalculateSpanBetween (below) uses the steady time points (same source ID)
-HLE_FORCE("_ZN2nn4time13ClockSnapshot29CreateWithStandardSystemClockEPS1_", "snapshot from the time service; the host fills it on the spot (offline: network clock 0)", Result, h_time_Snapshot, uint8_t *s) {
+// The network fields are the user clock's, as the network clock is (h_time_NetNow): a Switch fills them whenever its network clock reads. Two host snapshots share their steady clock's
+// source ID, so CalculateSpanBetween (below) takes their steady time points; one made on a Switch (a save brought over) has another, and the span comes from the network times
+HLE_FORCE("_ZN2nn4time13ClockSnapshot29CreateWithStandardSystemClockEPS1_", "snapshot from the time service; the host fills it on the spot (network clock = user clock)", Result, h_time_Snapshot, uint8_t *s) {
     memset(s, 0, 0xd0);
     uint8_t tp[0x18]; h_time_SteadyNow(tp);
     int64_t now; h_time_GetCurrentTime(&now);
     h_time_GetContext(s);   // +0x00: the user clock context, the same in every snapshot until the host clock is set (worked out per snapshot it moved by a second at random, a "clock change" to the user difference below)
     memcpy(s + 0x40, &now, 8);
     h_time_ToCalendarTime((CalendarTime *)(s + 0x50), (CalendarAdditionalInfo *)(s + 0x60), &now);
+    memcpy(s + 0x20, s, 0x20); memcpy(s + 0x48, &now, 8); memcpy(s + 0x58, s + 0x50, 8); memcpy(s + 0x78, s + 0x60, 0x18);   // the network clock's context, time, calendar and its info
     memcpy(s + 0x90, tp, 0x18);
     tzset(); strlcpy((char *)s + 0xa8, tzname[0] && *tzname[0] ? tzname[0] : "UTC", 0x24);
     s[0xcd] = 1;   // The SDK passes type 1 for standard snapshots, 2 for adjustable snapshots; 0 is uninitialized.

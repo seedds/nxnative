@@ -4,6 +4,8 @@ void dm_thread_service_connect(void) {}   // threads started so far have nothing
 #include "../hle_ro.c"
 #include <assert.h>
 #include <stddef.h>
+#include <sys/wait.h>
+#include <unistd.h>
 void mtl_present_screen(uint32_t w, uint32_t h) { (void)w; (void)h; }   // loader.c: a screen taller than 16:9; no renderer here
 
 struct dm_flags g_flag;
@@ -104,8 +106,45 @@ int main(void) {
     memcpy(nrr + 0x350, g_mod[1].sha256, 32);
     assert(h_ro_RegisterModuleInfo(NULL, nrr) != 0);
     assert(h_ro_LoadModule(&handles[0], raw[0], NULL, 32, 1) != 0 && !g_mod[1].loaded);
+
+    // A JIT plugin is loaded alone (hle_jit.c), and a second CreateJitEnvironment after DestroyJitEnvironment loads it again: from its data as rewritten and a zero bss,
+    // relocated against itself only. Start from a module never loaded, as the plugin is.
+    module_t *alone = &g_mod[1]; free(alone->pristine); alone->pristine = NULL; alone->loads = 0; alone->loaded = 0;
+    memset(images[1].slots, 0, sizeof images[1].slots); images[1].value = 123; images[1].bss = 0;
+    uint64_t own = (uint64_t)&images[1].value;
+    nro_load_alone(alone);
+    assert(alone->pristine && alone->loads == 1 && alone->loaded);
+    assert(images[1].slots[0] == own + 8 && images[1].slots[1] == own && images[1].slots[2] == 0);
+    assert(!guest_sym("shared") && alone->alone);
+    // Not linked with the game: a linked NRO loaded and unloaded meanwhile binds nothing into it, even a weak import the NRO defines (the main module's import is bound)
+    image *lk = &images[2]; module_t *linked = &g_mod[last];
+    lk->sym[3] = (Elf64_Sym){.st_name = 13, .st_info = STB_WEAK << 4, .st_shndx = 1, .st_value = offsetof(image, value)}; free(linked->symh); build_symhash(linked);
+    load(2);
+    assert(images[0].slots[2] == (uint64_t)&images[2].value && images[1].slots[2] == 0);
+    h_ro_UnloadModule(&handles[1]);
+    assert(images[0].slots[2] == 0 && images[1].slots[2] == 0 && alone->loaded);
+    // Loaded again while it is loaded (a second environment of the plugin before the first is destroyed): refused, its state not reset under it
+    fflush(stdout); fflush(stderr);
+    pid_t child = fork();
+    if (!child) { nro_load_alone(alone); _exit(0); }
+    int st; waitpid(child, &st, 0); assert(WIFSIGNALED(st) && images[1].value == 123);
+    images[1].value = 999; images[1].bss = 456; images[1].slots[0] = images[1].slots[1] = images[1].slots[2] = 7;
+    nro_unload_alone(alone);   // as h_jit_Destroy ends it, after the plugin's fini
+    assert(!alone->loaded && !alone->alone);
+    nro_load_alone(alone);
+    assert(alone->loads == 2 && images[1].value == 123 && images[1].bss == 0);
+    assert(images[1].slots[0] == own + 8 && images[1].slots[1] == own && images[1].slots[2] == 0);
+    assert(!guest_sym("shared"));
+    nro_unload_alone(alone);
+    // No initialized data at all: the first load snapshots nothing, a reload zeroes the bss
+    size_t data_off = alone->data_off, plen = alone->pristine_len; free(alone->pristine); alone->pristine = NULL;
+    alone->data_off = offsetof(image, bss); alone->pristine_len = 0;
+    nro_load_alone(alone); images[1].bss = 5; nro_unload_alone(alone);
+    nro_load_alone(alone); assert(images[1].bss == 0 && alone->pristine); nro_unload_alone(alone);
+    alone->data_off = data_off; alone->pristine_len = plen;
+
     for (int i = 0; i < g_nmod; i++) { free(g_mod[i].symh); free(g_mod[i].pristine); }
     free(g_mod); free(g_loaded);
-    puts("NRO relocation, load order, lifecycle, weak symbols and refusal: OK");
+    puts("NRO relocation, load order, lifecycle, weak symbols, refusal and loading alone (reload, isolation from linked loads, no second load, no initialized data): OK");
     return 0;
 }

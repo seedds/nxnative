@@ -14,6 +14,7 @@ static int observed_wait(pthread_cond_t *, pthread_mutex_t *);
 #include HLE_OE_SOURCE
 void dm_host_shutdown_then(const char *why, void (*then)(void *), void *arg) { (void)why; (void)then; (void)arg; }   // oe::ExecuteProgram: not exercised here
 void dm_host_shutdown(const char *why) { (void)why; }
+void dm_hid_opmode_changed(void) {}   // hle_hid.c: the npads follow the mode; not exercised here
 #undef pthread_cond_wait
 static _Atomic int waiting, resumed, finish;
 static uint32_t message;
@@ -25,15 +26,16 @@ static int observed_wait(pthread_cond_t *cv, pthread_mutex_t *mu) {
 void dm_audio_suspend(int on) { (void)on; }
 void guest_clock_freeze_for(int reason, int on) { (void)reason; (void)on; }
 void dm_gfx_suspend(int on) { (void)on; }
+void dm_gfx_quit_begin(void) {}
 static void timeout(int sig) { (void)sig; const char message[] = "[RED] notification scheduler test timed out\n"; write(2, message, sizeof message - 1); _exit(99); }
 static void notify(uint64_t unused) {
     (void)unused;
     // Exercise the real gate's deferred QoS update after a priority change before StartThread.
     uint64_t regs[32] = {0}; thr_svc_enter(regs, 0); thr_svc_leave();
-    pthread_mutex_lock(&G);
+    g_lock();
     assert(cur()->host_work == &dm_host_work && cur()->mport == pthread_mach_thread_np(pthread_self()));
     assert(!atomic_load(&cur()->qos_pending));
-    pthread_mutex_unlock(&G);
+    g_unlock();
     message=h_oe_PopMsg();
     atomic_store(&resumed, 1);
     while (!atomic_load(&finish)) sched_yield();
@@ -51,10 +53,10 @@ static void until_waiting(int count) {
     // observed_wait publishes while holding the queue mutex: acquiring it
     // here guarantees the notifier has entered pthread_cond_wait.
     pthread_mutex_lock(&g_mq_lock); pthread_mutex_unlock(&g_mq_lock);
-    pthread_mutex_lock(&G);
+    g_lock();
     assert(!thr_runnable(notifier));
     assert(notifier->nhand == 0);
-    pthread_mutex_unlock(&G);
+    g_unlock();
 }
 int main(int argc, char **argv) {
     (void)argv;
@@ -66,7 +68,7 @@ int main(int argc, char **argv) {
     uint64_t r[32] = {0, (uint64_t)notify, 0, 0, 28, 0};
     assert(svc_thread(0x08, r) && r[0] == 0);
     uint32_t handle = (uint32_t)r[1];
-    pthread_mutex_lock(&G); notifier = h_get(handle, O_THREAD); pthread_mutex_unlock(&G);
+    g_lock(); notifier = h_get(handle, O_THREAD); g_unlock();
     r[0] = handle; r[1] = 26;
     assert(svc_thread(0x0D, r) && r[0] == 0);
     r[1] = handle;
@@ -88,10 +90,10 @@ int main(int argc, char **argv) {
     dm_yield_to_core_peers(1);
     dm_focus_set(2);
     while (!atomic_load(&resumed)) sched_yield();
-    pthread_mutex_lock(&G);
+    g_lock();
     assert(notifier->native_wait == 0 && thr_runnable(notifier));
     assert(notifier->nhand == 0);
-    pthread_mutex_unlock(&G);
+    g_unlock();
     atomic_store(&finish, 1);
     r[1] = (uint64_t)&handle; r[2] = 1; r[3] = (uint64_t)-1;
     assert(svc_thread(0x18, r) && r[0] == 0);

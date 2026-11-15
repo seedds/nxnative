@@ -44,6 +44,9 @@ class FeedbackTests(unittest.TestCase):
             Path(str(source) + '.split').write_text(SOURCE + scope['vs_tf'](SOURCE, SPLIT_LAYOUT))
             result = subprocess.run([os.environ['DM_TEST_TRANSFORM_FEEDBACK'], str(source)], capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            # the same replay with every capture through tf_prepare in a pass of its own
+            result = subprocess.run([os.environ['DM_TEST_TRANSFORM_FEEDBACK'], str(source)], capture_output=True, text=True, env=dict(os.environ, DM_NVN_TF_CPU='0'))
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
     def test_component_counts_are_bytes_and_stream_order_is_preserved(self):
         control = bytearray(0x880)
         struct.pack_into('<H', control, 0x6dc, 20)

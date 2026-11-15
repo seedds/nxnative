@@ -443,7 +443,7 @@ static void replay(int mode) {
     p_draw d={.prim=0,.first=7,.count=kind==6?9000:3,.instances=2,.base_instance=5};
     if((kind>=1&&kind<=3)||kind==5) {
         int type=kind==5?1:kind-1;uint32_t ix[]={12,10,UINT32_MAX,11};
-        for(int i=0;i<4;i++)memcpy(commands+8192+(i<<type),ix+i,1<<type);
+        for(int i=0;i<4;i++)memcpy(commands+8192+(i<<type),ix+i,1<<type);   // NOLINT(clang-analyzer-unix.cstring.UninitializedRead): 1 << type is 1, 2 or 4 bytes of an initialized uint32_t (type 0 to 2), never 0
         p_prim_restart restart={1,UINT32_MAX};EMIT(OP_PRIM_RESTART,restart);
         p_draw_idx di={.prim=0,.itype=type,.count=4,.instances=2,.base_vertex=-3,.base_instance=5,.ibuf=(uint64_t)(commands+8192)};
         if(kind==5){uint32_t args[]={4,2,mode==17?16:0,(uint32_t)-3,5};memcpy(commands+16384,args,sizeof args);di.ind=(uint64_t)(commands+16384);if(mode==17)di.ibuf-=32;}
@@ -483,7 +483,7 @@ static void replay(int mode) {
     }
     if(mode==14)g_sbw_over=1;
     if(mode==15)g_pend_over=1;
-    uint64_t h=(uint64_t)commands;mtl_sub_index(&h,1);mtl_exec(commands);
+    mtl_exec(commands);
     char wait_name[80];snprintf(wait_name,sizeof wait_name,"geometry CPU snapshot wait mode %d",mode);
     EXPECT(wait_name,mode==7||mode==8||mode==9||mode==13||mode>=14,g_mdi_v-waits);
     if(conversion) {
@@ -543,7 +543,7 @@ static void replay_local(int mode) {
     if((mode>=1&&mode<=3)||mode==5||mode>=7) {
         int type=mode>=7||mode==5?1:mode-1;uint32_t ix[]={mode==10?80:12,10,UINT32_MAX,11,mode==10?80:12,10};
         int index_count=mode>=9?6:4;
-        for(int i=0;i<index_count;i++)memcpy(commands+8192+(i<<type),ix+i,1<<type);
+        for(int i=0;i<index_count;i++)memcpy(commands+8192+(i<<type),ix+i,1<<type);   // NOLINT(clang-analyzer-unix.cstring.UninitializedRead): 1 << type is 1, 2 or 4 bytes of an initialized uint32_t (type 0 to 2), never 0
         if(mode==7||mode==8) {
             memcpy(commands+32768,commands+8192,8); memset(commands+8192,0,8);
             if(mode==7) { struct {uint64_t src,dst,n;} copy={(uint64_t)(commands+32768),(uint64_t)(commands+8192),8};EMIT(OP_COPY_B2B,copy); }
@@ -582,7 +582,7 @@ static void replay_local(int mode) {
     uint64_t waits=g_mdi_waits,omits=g_geo_color_omits,passes=g_stat_pass;
     uint64_t small_before=g_geo_pack_small,large_before=g_geo_pack_large;
     int full=g_geo_full_colors;if(mode>=11)g_geo_full_colors=mode==13;
-    mtl_sub_begin();uint64_t h=(uint64_t)commands;mtl_sub_index(&h,1);mtl_exec(commands);
+    mtl_sub_begin();mtl_exec(commands);
     if(mode==0||mode==6){int use_small=mode==0&&!geo_pack_legacy();EXPECT("production draw selects bounded fused path",use_small,g_geo_pack_small-small_before);EXPECT("production large draw retains multi-stage path",!use_small,g_geo_pack_large-large_before);}
     if(mode>=11)EXPECT("only bounded masked geometry omits color",mode>=16?2:mode==11||mode==12?1:0,g_geo_color_omits-omits);
     if(mode>=16) { const char *policy=getenv("DM_NVN_GEOMETRY_WAIT"); if(!(policy&&!strcmp(policy,"always"))) { int split=mode==17&&!geo_query_run();EXPECT("geometry run batches consecutive draws",split?1:2,g_geo_nrun); EXPECT("geometry run shares depth pass before cover pass",split?4:3,g_stat_pass-passes); } }
@@ -609,7 +609,7 @@ static void replay_local(int mode) {
         if(step==1){uint16_t value=80;dm_guest_write_prepare(commands+8192,12);memcpy(commands+8192,&value,2);memcpy(commands+8200,&value,2);}
         if(step==2){uint16_t original[]={12,10,65535,11,12,10};dm_guest_write_prepare(commands+32768,12);memcpy(commands+32768,original,12);}
         state_reset();memset(&R,0,sizeof R);mtl_sub_begin();if(step==2)mtl_sub_copy((uint64_t)(commands+32768),(uint64_t)(commands+8192),12);
-        mtl_sub_index(&h,1);mtl_exec(commands);
+        mtl_exec(commands);
         [blit() copyFromTexture:tex_mtl(&target) sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0,0,0) sourceSize:MTLSizeMake(32,32,1) toBuffer:b destinationOffset:0 destinationBytesPerRow:128 destinationBytesPerImage:4096];finish();
         int count=0;uint8_t *p=b.contents;for(int i=0;i<1024;i++)count+=p[i*4]>200;
         EXPECT("warm/edit/GPU-copy geometry pixel oracle",step==1?144:216,count);

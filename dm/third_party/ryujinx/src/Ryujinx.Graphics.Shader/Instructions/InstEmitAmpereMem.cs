@@ -1,6 +1,7 @@
 using Ryujinx.Graphics.Shader.Decoders;
 using Ryujinx.Graphics.Shader.IntermediateRepresentation;
 using Ryujinx.Graphics.Shader.Translation;
+using System;
 using System.Collections.Generic;
 using System.Numerics;
 using static Ryujinx.Graphics.Shader.Instructions.InstEmitAluHelper;
@@ -18,6 +19,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
 
             x(AmpereOpcodes.Ipa, InstName.Ipa, AIpa, N);
             x(AmpereOpcodes.IpaIdx, InstName.Ipa, AIpa, N);
+            x(0x3ad, InstName.Ipa, ALdTram, N);
             x(AmpereOpcodes.Ald, InstName.Ald, AAld, N);
             x(AmpereOpcodes.Ast, InstName.Ast, AAst, N, writesRd: false);
 
@@ -47,6 +49,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
             x(0x367, InstName.Tld, ATex, InstProps.Tex);
             x(0xf60, InstName.Tex, ATex, InstProps.Tex);
             x(0xf63, InstName.Tld4, ATex, InstProps.Tex);
+            x(0xf66, InstName.Tld, ATex, InstProps.Tex);
             x(0xf6c, InstName.Txd, ATex, InstProps.Tex);
             x(0xf69, InstName.Tmml, ATex, InstProps.Tex);
             x(0x36a, InstName.Tmml, ATex, InstProps.Tex);
@@ -54,14 +57,26 @@ namespace Ryujinx.Graphics.Shader.Instructions
             x(0xb63, InstName.Tld4, ATex, InstProps.Tex);
             x(0xb69, InstName.Tmml, ATex, InstProps.Tex);
             x(0xb6c, InstName.Txd, ATex, InstProps.Tex);
+            x(0x36d, InstName.Txd, ATex, InstProps.Tex);
             x(0xb6f, InstName.Txq, ATxq, InstProps.Tex);
             x(0x370, InstName.Txq, ATxq, InstProps.Tex);
+            x(0xf6f, InstName.Txq, ATxq, InstProps.Tex);
             x(0xb97, InstName.Suld, ASurface, N);
             x(0xb99, InstName.Suld, ASurface, N);
             x(0xb9b, InstName.Sust, ASurface, N, writesRd: false);
             x(0xb9d, InstName.Sust, ASurface, N, writesRd: false);
             x(0x593, InstName.Suatom, ASuatom, N);
+            x(0x595, InstName.Suatom, ASuatomCas, N);
             x(0x59f, InstName.Sured, ASured, N, writesRd: false);
+            // The same seven with the handle in a register (64..72) instead of a constant buffer word: each 0x1ff below its bound form (Mesa NAK encodes only these, its
+            // sm70_encode OpSuLd 0x998 / 0x99a, OpSuSt 0x99c / 0x99e, OpSuAtom 0x394 / 0x396 and 0x3a0), its other fields the bound form's (ASurfaceHandle)
+            x(0x998, InstName.Suld, ASurface, N);
+            x(0x99a, InstName.Suld, ASurface, N);
+            x(0x99c, InstName.Sust, ASurface, N, writesRd: false);
+            x(0x99e, InstName.Sust, ASurface, N, writesRd: false);
+            x(0x394, InstName.Suatom, ASuatom, N);
+            x(0x396, InstName.Suatom, ASuatomCas, N);
+            x(0x3a0, InstName.Sured, ASured, N, writesRd: false);
             x(0xb1d, InstName.Bar, ABar, N, writesRd: false);
         }
 
@@ -75,10 +90,8 @@ namespace Ryujinx.Graphics.Shader.Instructions
             AmpereOp x = new(context.CurrOp);
             int addr = x.Bits(64, 72) << 2;
 
-            if (x.Bits(76, 78) == 2)
-            {
-                throw AFail(context, "IPA at an offset");
-            }
+            // At an offset (location 2): the offset word is in the second source register (Mesa NAK's OpIpa, 32..40)
+            Operand at = x.Bits(76, 78) == 2 ? Register(x.Bits(32, 40), RegisterType.Gpr) : null;
 
             Operand idxAddress = null;
 
@@ -89,7 +102,38 @@ namespace Ryujinx.Graphics.Shader.Instructions
 
             IpaOp ipaOp = x.Bits(78, 80) == 1 ? IpaOp.Constant : IpaOp.Pass;
 
-            EmitIpa(context, idxAddress, addr, ipaOp, RegisterConsts.RegisterZeroIndex, false, x.Rd);
+            EmitIpa(context, idxAddress, addr, ipaOp, RegisterConsts.RegisterZeroIndex, false, x.Rd, at);
+        }
+
+        // LDTRAM Rd, a[addr] (0x3ad): a user attribute word as the triangle's vertices hold it, not interpolated (Mesa NAK's OpLdTram, which lowers load_input_vertex with it): addr 64..72
+        // in words; with 72 clear (.AB) Rd gets vertex 0's word and Rd + 1 vertex 1's, with it set (.C) Rd gets vertex 2's. The vertices are those the barycentric coordinates
+        // (a[0x3a8] / a[0x3b4], x y z) weigh. Resident Evil 4 (v131072) reads generic attribute 1, 2 or 3 this way in 7,225 of its 18,248 pixel shaders, never one it also interpolates.
+        // Each read is an input of its own (UserDefinedPerVertex, a flat vec4 named dm_pv<location>_<vertex>), which dmsh_rewrite.per_vertex turns into MSL's vertex_value<float4>
+        public static void ALdTram(EmitterContext context)
+        {
+            AmpereOp x = new(context.CurrOp);
+            int addr = x.Bits(64, 72) << 2;
+            bool vertexC = x.Bits(72, 73) != 0;
+
+            if (addr is < AttributeConsts.UserAttributeBase or >= AttributeConsts.UserAttributeEnd)
+            {
+                throw new NotSupportedException($"LDTRAM of a[0x{addr:x}], not a user attribute");
+            }
+
+            int location = (addr - AttributeConsts.UserAttributeBase) >> 4;
+            int component = (addr >> 2) & 3;
+
+            for (int i = 0; i < (vertexC ? 1 : 2); i++)
+            {
+                if (x.Rd + i >= RegisterConsts.RegisterZeroIndex)
+                {
+                    break;
+                }
+
+                Operand value = context.Load(StorageKind.Input, IoVariable.UserDefinedPerVertex, null, Const(location * 3 + (vertexC ? 2 : i)), Const(component));
+
+                context.Copy(Register(x.Rd + i, RegisterType.Gpr), value);
+            }
         }
 
         // Geometry and tessellation stages. OUT (opcode 0x124 in the ALU forms): Rd = the new output handle, Ra the old, the stream in the second source; 78..80 emit (1),
@@ -133,17 +177,28 @@ namespace Ryujinx.Graphics.Shader.Instructions
 
             if (stage != null)
             {
-                // A task or mesh shader's stage input (QueryAmpereStageMemory). Mode 0x78: its workgroup's number; 0x38: a word of the payload its task wrote, [Ra + offset];
-                // 0xb8: a word it wrote itself with 0x927's mode 0xb8 (Ocarina of Time's task shader 5d3a096025e375a1 reads its payload back in a later thread)
+                // A task or mesh shader's stage input (QueryAmpereStageMemory). Mode 0x78: its workgroup's number; 0x38: a word of the payload its task wrote, [Ra + offset].
+                // The mode's bits as nvdisasm names them: 0x80 .O (the output area), 0x40 .SKEW, 0x30 .ATTR, 0x08 .32. So 0xf8 (ISBERD.O.ATTR.SKEW.32) and 0xb8 (.O.ATTR.32)
+                // read back a word the shader's own ISBEWR of the same mode wrote: a mesh shader's attributes (0xb8 through its vertex records, AosToSoa), a task's payload
+                // (AStageOut). PRAGMATA's mesh shaders 5aab38bb5ba67ef7 and 28ef097c07ceb429 (the title's lunar terrain) read the x, y and w of each triangle's three positions
+                // back this way and swap two of its indices by the sign of their determinant (a mirrored instance's winding). Ocarina of Time's task shader 5d3a096025e375a1
+                // reads its payload back with 0xb8 in a later thread. From uncraftablexd's PRAGMATA bring-up (PR #1407)
                 int mode = x.Bits(72, 80);
+                int area = mode & ~0x0c;
+                int width = mode & 0x0c;
 
-                if (mode != 0x78 && mode != 0x38 && mode != 0xb8)
+                if (mode != 0x78 && (width == 0x0c || (area != 0x30 && area != 0xb0 && area != 0xf0)))
                 {
                     throw AFail(context, $"ISBERD mode {mode:x2} in a task or mesh shader");
                 }
 
-                Operand addr = mode == 0x78 ? Const(stage[0]) : context.IAdd(AGpr(x.Ra), Const(stage[mode == 0xb8 ? 2 : 1] + (int)x.SignedField(40, 64)));
-                EmitLoad(context, StorageKind.SharedMemory, LsSize2.B32, addr, x.Rd, 0);
+                // Bits 74..75 select U8/U16/B32 (Mesa NAK sm70_encode.rs OpIsberd/OpIsbewr). Fast Fusion's task/mesh pair reads U16 payload entries (mode 0x34).
+                LsSize2 size = width switch { 0 => LsSize2.U8, 4 => LsSize2.U16, _ => LsSize2.B32 };
+                int baseOffset = area == 0x30 ? stage[1] : stage[2];
+                Operand addr = mode == 0x78 ? Const(stage[0])
+                    : area == 0xb0 && stage.Length >= 7 ? context.IAdd(Const(stage[2]), AosToSoa(context, context.IAdd(AGpr(x.Ra), Const((int)x.SignedField(40, 64))), stage, size != LsSize2.B32))
+                    : context.IAdd(AGpr(x.Ra), Const(baseOffset + (int)x.SignedField(40, 64)));
+                EmitLoad(context, StorageKind.SharedMemory, size, addr, x.Rd, 0);
                 return;
             }
 
@@ -163,8 +218,10 @@ namespace Ryujinx.Graphics.Shader.Instructions
             AmpereOp x = new(context.CurrOp);
             int[] stage = context.TranslatorContext.GpuAccessor.QueryAmpereStageMemory();
             int mode = x.Bits(72, 80);
+            int area = mode & ~0x0c;
+            int width = mode & 0x0c;
 
-            if (stage == null || (mode != 0xb8 && mode != 0xf8 && mode != 0x88 && mode != 0x80))
+            if (stage == null || (mode != 0x88 && mode != 0x80 && (width == 0x0c || (area != 0xb0 && area != 0xf0))))
             {
                 throw AFail(context, $"stage output store mode {mode:x2} outside a task or mesh shader");
             }
@@ -174,9 +231,50 @@ namespace Ryujinx.Graphics.Shader.Instructions
                 return;
             }
 
-            bool word = mode == 0xb8 || mode == 0xf8;
-            Operand addr = context.IAdd(AGpr(x.Ra), Const((word ? stage[2] : stage[3]) + (int)x.SignedField(40, 64)));
-            EmitStore(context, StorageKind.SharedMemory, word ? LsSize2.B32 : LsSize2.U8, addr, x.Rb, 0);
+            bool attr = area == 0xb0 || area == 0xf0;
+            LsSize2 size = attr ? width switch { 0 => LsSize2.U8, 4 => LsSize2.U16, _ => LsSize2.B32 } : LsSize2.U8;
+            Operand addr = area == 0xb0 && stage.Length >= 7
+                ? context.IAdd(Const(stage[2]), AosToSoa(context, context.IAdd(AGpr(x.Ra), Const((int)x.SignedField(40, 64))), stage, size != LsSize2.B32))
+                : context.IAdd(AGpr(x.Ra), Const((attr ? stage[2] : stage[3]) + (int)x.SignedField(40, 64)));
+            EmitStore(context, StorageKind.SharedMemory, size, addr, x.Rb, 0);
+        }
+
+        // A mesh shader's attribute word by its non-skew address (ISBEWR / ISBERD .O.ATTR.32, mode 0xb8 in a mesh shader; in a task shader it is the payload). Besides the
+        // SoA blocks (.SKEW, mode 0xf8: per component 0x80 bytes for 32 vertices or primitives), a mesh shader may address its vertices as records: vertex v's n enabled
+        // components at aos + 4n * v + 4c, aos being the end of the SoA area. PRAGMATA's 6adf14e9a4100082, 4fcffc73d65dc1ed and c0e44513c35d209a write every vertex both
+        // ways, with the same values. A record word is the SoA word of vertex v, component c, so it goes there: the two writes coincide. Before, the record addresses ran past
+        // the SoA area over the primitive count and index bytes (stage[3]) and drew garbage triangles (white streaks over PRAGMATA's cockpit window). stage[4] = aos,
+        // stage[5] = n, stage[6] = the records' size (max vertices * 4n), from dmsh_meshstage.memory(); other addresses stay as they are. v = w / n as
+        // w * ceil(2^18 / n) >> 18 where that is exact for every word of the records (AosVertex checks it: it is for n up to 42, not for every n above, e.g. 51
+        // components and 160 vertices give vertex 109 for word 5609), else as an integer division
+        private static Operand AosToSoa(EmitterContext context, Operand off, int[] stage, bool subword = false)
+        {
+            int n = Math.Max(stage[5], 1);
+            Operand rel = context.ISubtract(off, Const(stage[4]));
+            Operand inside = context.ICompareLessUnsigned(rel, Const(stage[6]));
+            Operand w = context.ShiftRightU32(rel, Const(2));
+            Operand v = AosVertex(context, w, n, (uint)Math.Max(stage[6], 0) / 4);
+            Operand c = context.ISubtract(w, context.IMultiply(v, Const(n)));
+            Operand soa = context.IAdd(context.IAdd(context.IMultiply(context.ShiftRightU32(v, Const(5)), Const(n * 0x80)), context.ShiftLeft(context.BitwiseAnd(v, Const(31)), Const(2))), context.ShiftLeft(c, Const(7)));
+            if (subword)
+            {
+                soa = context.IAdd(soa, context.BitwiseAnd(rel, Const(3)));
+            }
+            return context.ConditionalSelect(inside, soa, off);
+        }
+
+        // w / n for every w below words: by the reciprocal when it gives the quotient for all of them (and w * m stays within 32 bits), else by a division
+        internal static Operand AosVertex(EmitterContext context, Operand w, int n, uint words)
+        {
+            uint m = ((1u << 18) + (uint)n - 1) / (uint)n;
+            bool exact = (ulong)words * m < (1ul << 32);
+
+            for (uint k = 0; exact && k < words; k++)
+            {
+                exact = (k * m) >> 18 == k / (uint)n;
+            }
+
+            return exact ? context.ShiftRightU32(context.IMultiply(w, Const((int)m)), Const(18)) : context.Add(Instruction.Divide, Local(), w, Const(n));
         }
 
         public static void ALepc(EmitterContext context)
@@ -549,24 +647,40 @@ namespace Ryujinx.Graphics.Shader.Instructions
 
         // ---- surfaces ----
 
+        // A surface instruction's handle. The bound forms (0xb97..0xb9d, 0x593, 0x595, 0x59f) name its constant buffer word as a texture's (40..59). The register
+        // forms, 0x1ff below them, hold it in the register at 64..72 (Rc), and bindless elimination finds the word the register was loaded from, as for TEX through
+        // a register. Orbitals' (Unreal Engine 5.6) global compute shaders take an Unreal ShaderPrint counter with SUATOM.ADD.U32 on a 1D buffer image whose handle a MOV
+        // read from c[3][0] (45389d82b79dbf0c +0x1850: MOV R12, c[3][0]; MOV R20, R12; SUATOM R12, [R12], R24, R20); 5 shaders stopped at the opcode.
+        private static (int Handle, int CbufSlot, bool Bindless) ASurfaceHandle(EmitterContext context, AmpereOp x)
+        {
+            if (x.Opcode is 0x394 or 0x396 or 0x3a0 or 0x998 or 0x99a or 0x99c or 0x99e)
+            {
+                return (0, TextureOperation.DefaultCbufSlot, true);
+            }
+
+            (int handle, int cbufSlot) = ATexHandle(context, x);
+
+            return (handle, cbufSlot, false);
+        }
+
         // SULD Rd, [Ra] (0xb97 formatted with a channel mask at 72..76, 0xb99 binary with a size at 73..76) and SUST [Ra], Rb (0xb9b, 0xb9d): the handle as
-        // a texture's (40..59), the dimension at 61..64 (1D, 1D buffer, 1D array, 2D, 2D array, 3D: Maxwell's SuDim)
+        // a texture's (40..59), the dimension at 61..64 (1D, 1D buffer, 1D array, 2D, 2D array, 3D: Maxwell's SuDim). 0x998..0x99e: the same with the handle in Rc
         public static void ASurface(EmitterContext context)
         {
             AmpereOp x = new(context.CurrOp);
-            (int handle, int cbufSlot) = ATexHandle(context, x);
-            bool formatted = x.Opcode is 0xb97 or 0xb9b;
+            (int handle, int cbufSlot, bool bindless) = ASurfaceHandle(context, x);
+            bool formatted = x.Opcode is 0xb97 or 0xb9b or 0x998 or 0x99c;
             SuDim dim = (SuDim)x.Bits(61, 64);
             SuSize size = formatted ? 0 : (SuSize)x.Bits(73, 76);
             SuRgba mask = formatted ? (SuRgba)x.Bits(72, 76) : 0;
 
-            if (x.Opcode is 0xb97 or 0xb99)
+            if (x.Opcode is 0xb97 or 0xb99 or 0x998 or 0x99a)
             {
-                EmitSuld(context, CacheOpLd.Ca, dim, size, handle, mask, x.Ra, x.Rd, 0, formatted, false, false, cbufSlot);
+                EmitSuld(context, CacheOpLd.Ca, dim, size, handle, mask, x.Ra, x.Rd, x.Rc, formatted, false, bindless, cbufSlot);
             }
             else
             {
-                EmitSust(context, CacheOpSt.Wb, dim, size, handle, mask, x.Ra, x.Rb, 0, formatted, false, false, cbufSlot);
+                EmitSust(context, CacheOpSt.Wb, dim, size, handle, mask, x.Ra, x.Rb, x.Rc, formatted, false, bindless, cbufSlot);
             }
         }
 
@@ -577,31 +691,43 @@ namespace Ryujinx.Graphics.Shader.Instructions
         public static void ASured(EmitterContext context)
         {
             AmpereOp x = new(context.CurrOp);
+            int size = x.Bits(73, 76);   // 0 U32, 2 U64 (SuatomSize)
 
-            if ((x.Bits(64, 96) & ~(0xf << 23)) != 0x0010e000 || x.Bits(59, 61) != 0)
+            int handleReg = x.Opcode == 0x3a0 ? 0xff : 0;   // 64..72: the register form's handle
+
+            if ((x.Bits(64, 96) & ~(0xf << 23) & ~(0x7 << 9) & ~handleReg) != 0x0010e000 || x.Bits(59, 61) != 0 || (size != 0 && size != (int)SuatomSize.U64))
             {
                 throw AFail(context, $"SURED form {x.Bits(64, 96):x8}");
             }
 
-            (int handle, int cbufSlot) = ATexHandle(context, x);
+            (int handle, int cbufSlot, bool bindless) = ASurfaceHandle(context, x);
 
-            EmitSured(context, (SuDim)x.Bits(61, 64), 0, (RedOp)x.Bits(87, 91), SuatomSize.U32, handle, x.Ra, x.Rb, 0, false, isBindless: false, cbufSlot: cbufSlot);
+            // U64 (PRAGMATA's visibility buffer, SURED.D.2D.MAX.U64: depth << 32 | primitive id, 336 compute shaders): a 64-bit max / min with no result, which EmitSuatom writes as Metal's
+            // 64-bit texture atomics (it refuses every other 64-bit form). The value is the pair Rb (low word), Rb + 1. After uncraftablexd's PRAGMATA bring-up (PR #1801)
+            if (size == (int)SuatomSize.U64)
+            {
+                EmitSuatom(context, (SuDim)x.Bits(61, 64), 0, (SuatomOp)x.Bits(87, 91), SuatomSize.U64, handle, x.Ra, x.Rb, x.Rc, RegisterConsts.RegisterZeroIndex, false, isBindless: bindless, compareAndSwap: false, cbufSlot: cbufSlot);
+                return;
+            }
+
+            EmitSured(context, (SuDim)x.Bits(61, 64), 0, (RedOp)x.Bits(87, 91), SuatomSize.U32, handle, x.Ra, x.Rb, x.Rc, false, isBindless: bindless, cbufSlot: cbufSlot);
         }
 
         // SUATOM Rd, [Ra], Rb (0x593): an atomic on an image through a handle, laid out as SUST's (handle 40..59, dimension 61..64) and as ATOMG's (operation
         // 87..91, size 73..76, Pu 81..83). Donkey Kong Bananza's append compute shaders take a counter with it (SUATOM.ADD.U32 on a 1D image, the old value
         // shuffled to the warp) before their SUST. The handle may be in the game's own uniform buffer, as a texture's. A predicate result is not met in a game: refused.
+        // 0x394: the handle in Rc (ASurfaceHandle)
         public static void ASuatom(EmitterContext context)
         {
             AmpereOp x = new(context.CurrOp);
-            (int handle, int cbufSlot) = ATexHandle(context, x);
+            (int handle, int cbufSlot, bool bindless) = ASurfaceHandle(context, x);
 
             if (x.Bits(81, 84) != 7)
             {
                 throw AFail(context, "SUATOM with a predicate result");
             }
 
-            EmitSuatom(context, (SuDim)x.Bits(61, 64), 0, (SuatomOp)x.Bits(87, 91), (SuatomSize)x.Bits(73, 76), handle, x.Ra, x.Rb, 0, x.Rd, false, isBindless: false, compareAndSwap: false, cbufSlot: cbufSlot);
+            EmitSuatom(context, (SuDim)x.Bits(61, 64), 0, (SuatomOp)x.Bits(87, 91), (SuatomSize)x.Bits(73, 76), handle, x.Ra, x.Rb, x.Rc, x.Rd, false, isBindless: bindless, compareAndSwap: false, cbufSlot: cbufSlot);
         }
 
         // BAR.SYNC: the workgroup barrier
@@ -618,6 +744,22 @@ namespace Ryujinx.Graphics.Shader.Instructions
         }
 
         // ---- textures ----
+
+        // SUATOM.CAS Rd, [Ra], Rb (0x595): the compare-and-swap of an image through a handle, 0x593's layout with no operation field. Rb is the value compared with and
+        // Rb + 1 the new value (Mesa NAK: opcode 0x396 for AtomOp::CmpExch beside 0x394, as 0x593 is beside 0x394 with the handle bound; its data source is the pair
+        // {compare, new value}), which is the order EmitSuatom reads them in. Rd is the old value (PRAGMATA: compute shader 50fece0d891feba4, Rd = RZ). 0x396: the handle in Rc
+        public static void ASuatomCas(EmitterContext context)
+        {
+            AmpereOp x = new(context.CurrOp);
+            (int handle, int cbufSlot, bool bindless) = ASurfaceHandle(context, x);
+
+            if (x.Bits(81, 84) != 7)
+            {
+                throw AFail(context, "SUATOM.CAS with a predicate result");
+            }
+
+            EmitSuatom(context, (SuDim)x.Bits(61, 64), 0, 0, (SuatomSize)x.Bits(73, 76), handle, x.Ra, x.Rb, x.Rc, x.Rd, false, isBindless: bindless, compareAndSwap: true, cbufSlot: cbufSlot);
+        }
 
         // Texture dimension (61..64) → Maxwell's TexDim
         private static TexDim ATexDim(EmitterContext context, int dim)
@@ -737,9 +879,14 @@ namespace Ryujinx.Graphics.Shader.Instructions
             Operand boundHandle = null;
             // 0xf69 and 0x36a are TMML the same way (0xb69's other fields; Kirby Air Riders: 4,776 pixel shaders).
             bool handleInB = opcode is 0x361 or 0x364 or 0x367 or 0x36a;
-            bool bindless = handleInB || opcode is 0xf60 or 0xf63 or 0xf6c or 0xf69;
+            // 0x36d is TXD the same way (0xb6c's other fields), but its handle leads the first block, the coordinates after it: the second holds only the derivatives
+            // (PRAGMATA's pixel shader b8246ccc36f8d648: Ra = R0, the texture word ORed with c[2] + 0x568, a separate sampler; R1, R2 the coordinates; Rb = R20..R23, four
+            // products of the screen-space gradients; 84 of 164 shaders of a sample of its shaders stopped here)
+            bool handleInA = opcode == 0x36d;
+            // 0xf66 is TLD the same way (0xb66's other fields), by the family's pattern: uniform-register forms at 0xf60 + 3n beside 0xb60 + 3n (PRAGMATA: 17 shaders)
+            bool bindless = handleInB || handleInA || opcode is 0xf60 or 0xf63 or 0xf66 or 0xf6c or 0xf69;
 
-            if (opcode is 0xf60 or 0xf63 or 0xf6c or 0xf69)
+            if (opcode is 0xf60 or 0xf63 or 0xf66 or 0xf6c or 0xf69)
             {
                 int ur = x.Bits(40, 46);
 
@@ -748,7 +895,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
 
             if (bindless)
             {
-                opcode = opcode is 0xf63 or 0xf6c or 0xf69 ? opcode - 0x400 : opcode is 0x364 or 0x367 or 0x36a ? opcode + 0x7ff : 0xb60;
+                opcode = opcode is 0xf63 or 0xf66 or 0xf6c or 0xf69 ? opcode - 0x400 : opcode is 0x364 or 0x367 or 0x36a or 0x36d ? opcode + 0x7ff : 0xb60;
             }
 
             TexDim dim = ATexDim(context, x.Bits(61, 64));
@@ -825,7 +972,13 @@ namespace Ryujinx.Graphics.Shader.Instructions
             if (opcode == 0xb6c)
             {
                 int n0 = coords + (isArray || offset ? 1 : 0);
-                (List<Operand> a, List<Operand> b) = ATexBlocks(context, x, n0, 2 * coords);
+                (List<Operand> a, List<Operand> b) = ATexBlocks(context, x, n0 + (handleInA ? 1 : 0), 2 * coords);
+
+                if (handleInA)
+                {
+                    boundHandle = a[0];
+                    a = a.GetRange(1, a.Count - 1);
+                }
 
                 if (bindless)
                 {
@@ -1071,7 +1224,9 @@ namespace Ryujinx.Graphics.Shader.Instructions
             int mask = x.Bits(72, 76);
             // 0x370 is to 0xb6f as 0x361 to 0xb60: the handle in a register, Ra, with the LOD after it (Fire Emblem Fortune's Weave's lighting: MOV R1c, R64; MOV R1d, RZ; TXQ R1d, R1c). The shape
             // has no field here and the size query does not depend on it, so 2D, as Maxwell's bindless TXQ
-            bool bindless = x.Opcode == 0x370;
+            // 0xf6f is to 0xb6f as 0xf60 to 0xb60: the handle in a uniform register at 40..46, Ra the LOD (PRAGMATA: 12 shaders, the size of a texture whose handle a ULDC read)
+            bool inUniform = x.Opcode == 0xf6f;
+            bool bindless = x.Opcode == 0x370 || inUniform;
             (int handle, int cbufSlot) = bindless ? (0, TextureOperation.DefaultCbufSlot) : ATexHandle(context, x);
             SamplerType type = bindless ? SamplerType.Texture2D : context.TranslatorContext.GpuAccessor.QuerySamplerType(handle);
             TextureFlags flags = bindless ? TextureFlags.Bindless : TextureFlags.None;
@@ -1086,7 +1241,9 @@ namespace Ryujinx.Graphics.Shader.Instructions
 
             Operand Src(int reg) => reg >= RegisterConsts.RegisterZeroIndex ? Const(0) : context.Copy(Register(reg, RegisterType.Gpr));
 
-            Operand[] sources = bindless ? [Src(x.Ra), Src(x.Ra + 1)] : [Src(x.Ra)];
+            Operand Ur(int ur) => ur == RegisterConsts.UniformZeroIndex ? Const(0) : context.Copy(Register(ur, RegisterType.Uniform));
+
+            Operand[] sources = inUniform ? [Ur(x.Bits(40, 46)), Src(x.Ra)] : bindless ? [Src(x.Ra), Src(x.Ra + 1)] : [Src(x.Ra)];
 
             if (query == 0)
             {

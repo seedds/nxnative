@@ -1,6 +1,6 @@
 // hle_audio.c unit test (silent sink): SDK 21's OutputStream on the host's AudioOut. A write of interleaved float frames becomes one 16-bit interleaved block,
 // the free frame count is the capacity less the frames queued, played blocks come back (the release event fires) and the count recovers; a purge after a stop
-// drops what was queued; the states are 0 not open, 1 stopped, 2 started.
+// drops what was queued; the states are 0 not open, 1 stopped, 2 started. The default virtual device's properties name it, and the overload without flags opens too.
 #include "../hle_audio.c"
 #include <time.h>
 __thread _Atomic int dm_host_work;   // defined by the graphics host in a full build
@@ -26,6 +26,16 @@ int main(void) {
     int32_t fmt[3] = {OS_FLOAT, 2, 48000};
     if (h_os_Open(stream, ev, NULL, 0, name, fmt, CAP, CAP - FRAMES, 0)) FAIL("open");
     if (h_os_State(stream) != OS_STOPPED || h_os_Free(stream) != CAP) FAIL("after open: state %d, free %d", h_os_State(stream), h_os_Free(stream));
+    // the properties of the host's one virtual output device (Nintendo Switch Sports Resort reads them before each open, main+0x5eda90): its name, the shortest stream
+    // as a duration and the unidentified word; any other name is no device of the host's
+    vdev_props p; memset(&p, 0xee, sizeof p);
+    if (sizeof p != 0x110 || h_os_Props(&p, name) || strcmp(p.name, name) || p.min_ns != OS_MIN_NS || p.word_108 != 0)
+        FAIL("properties: size %zu, name %.16s, shortest %lld ns, +0x108 %u", sizeof p, p.name, (long long)p.min_ns, p.word_108);
+    if (!h_os_Props(&p, "AudioExternalOutput")) FAIL("properties of a device the host does not have");
+    char nf[0x350] = {0};   // the overload without flags (Nintendo Switch Sports Resort, main+0x5edb34)
+    if (h_os_OpenNoFlags(nf, ev, NULL, 0, name, fmt, CAP, CAP - FRAMES) || h_os_State(nf) != OS_STOPPED || h_os_Free(nf) != CAP) FAIL("open without flags");   // NOLINT(clang-analyzer-core.StackAddressEscape): the host keeps the stream only while it is open, and it is closed below before this returns
+    h_os_Close(nf);
+    if (h_os_State(nf) != OS_NONE) FAIL("state after closing the stream opened without flags");
     int32_t bad[3] = {OS_FLOAT, 2, 44100};
     char other[0x350] = {0};
     if (!h_os_Open(other, NULL, NULL, 0, name, bad, CAP, 0, 0) || h_os_State(other) != OS_NONE) FAIL("a 44.1 kHz stream opened");

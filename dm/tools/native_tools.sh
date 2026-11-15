@@ -19,6 +19,10 @@ build() {   # <name> <csproj> <output executable>
     for rid in osx-arm64 osx-x64; do   # NativeAOT compiles one architecture per publish; the SDK cross-compiles the other
         dotnet publish "$2" -c Release -r "$rid" -nologo -v quiet --artifacts-path "$WORK/$1-artifacts" -o "$WORK/$1-$rid" > "$WORK/$1-$rid.log" 2>&1 \
             || { tail -20 "$WORK/$1-$rid.log" >&2; echo "[RED] $1 did not build for $rid (log: $WORK/$1-$rid.log)" >&2; exit 1; }
+        # A weak import is a libSystem function newer than the executable's minimum macOS: it binds to 0 on a Mac without it, and the runtime calls it unchecked. A .NET whose native
+        # libraries were configured against the current SDK (a source-built one, such as Homebrew's formula) gives these; Microsoft's SDK (the cask) does not (GitHub issue #2190: pipe2)
+        weak=$(nm -m -u "$WORK/$1-$rid/$1" | grep -w weak || true)
+        [ -z "$weak" ] || { echo "$weak" >&2; echo "[RED] $1 ($rid) imports functions its minimum macOS does not have, and would crash at address 0 there: build with Microsoft's .NET SDK (brew install --cask dotnet-sdk), not a source-built one" >&2; exit 1; }
     done
     lipo -create "$WORK/$1-osx-arm64/$1" "$WORK/$1-osx-x64/$1" -output "$3"
     for a in arm64 x86_64; do sha=$(arch -"$a" "$3" --source-sha); echo "$1 ($a): source $sha"; done

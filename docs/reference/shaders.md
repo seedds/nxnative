@@ -2435,6 +2435,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md), M1 Pro with 16 GB, after updating macOS 26.6.2 to 27.2.1: 57 refused files (1.68 GB of 3.1 GB), 7 of them prebuild files, and no prebuild in a 24-minute session, which had 53 stalls of 100 ms or more on new pipelines (39 s in all). On a copy of that archive the fixed host removed the 57 files and `prebuilt.tsv` and ran the prebuild; on main with an empty archive the whole prebuild took 13.4 minutes for 34,649 pairs (10 workers) and 2.7 more for the prewarm lists, once.
 - **Check:** `t_pso_archive` (`test_unusable_file_removed`): a prebuild file Metal will not open, its index and `prebuilt.tsv` are removed on the next start, and the other files still give every base. It fails without the fix.
 
+### Mac prewarm pipelines reused after a packed shader library changes
+
+- **Symptom:** after a shader input changes, the Mac app build recompiles the affected library but reports `prewarm pipelines: reused (inputs unchanged)`, retaining pipelines made with the previous shader functions.
+- **Cause:** the prewarm cache key read `b-<chain>/inputs.tsv` with a normal filesystem path. A full shader build packs that directory into `b-<chain>.img`, so the stamp was silently replaced with an empty string in the key. A profile input such as `dual_want.tsv` changes functions without changing the chain, shader keys or recorded pipeline list.
+- **Fix:** `build_ipa_from_nsp.py` reads the stamp through `shader_lib.view`, as other library readers do. Both folder and image stamps invalidate the captured prewarm pipelines when shader inputs change; identical inputs still reuse them.
+- **Check:** `test_nsp_mac_app.py` exercises unchanged and changed stamps in both storage forms. Its image case reproduced reuse before the fix.
+- **Found on:** [Sid Meier's Civilization VII](../../dm/games/0100C3601518C000/README.md), adding the second dual-source shader during bring-up.
+
 ### Python memory during offline pipeline archive preparation
 
 - **Symptom:** `pso_offline.py` holds about 1.8 GB while `metal-tt` builds an archive of 140,036 bases, and the system's memory view shows the build far larger than that (180.5 GB) before `metal-tt` fails or is stopped.

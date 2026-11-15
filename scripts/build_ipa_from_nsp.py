@@ -2856,7 +2856,7 @@ def mac_prebake(py, repo, work, msl, g, host, pso, env, logs):
     out, stage = work / 'pso/mac-prewarm', work / 'pso/mac-prewarm-work'
     zero = g.get('depth_mode', 'gl') == 'zero'
     others = sorted(f.stem for f in pso.glob('applegpu_*.mtl4a') if '-prewarm-' not in f.name and f.stem != arch)   # the other GPUs --gpu named: their pipelines come from the scripts (metal-tt)
-    lib = msl / f'b-{chain_of(repo)}'
+    lib = shader_lib.view(msl / f'b-{chain_of(repo)}')   # the full build packs this folder: its input stamp remains inside the image
     digest = hashlib.sha256()
     for part in (arch, chain_of(repo), 'zero' if zero else 'gl', text, Path(host).read_bytes() if Path(host).is_file() else str(host),
                  (lib / 'inputs.tsv').read_text() if (lib / 'inputs.tsv').is_file() else '',

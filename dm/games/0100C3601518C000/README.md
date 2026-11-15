@@ -45,6 +45,7 @@ The supplied folder has 42 licence-only DLC packages; the game displayed owned c
 ## Found on this game
 
 - [Firaxis CIVBSF shader libraries](../../../docs/reference/shaders.md#firaxis-civbsf-shader-libraries).
+- [Mac prewarm pipelines reused after a packed shader library changes](../../../docs/reference/shaders.md#mac-prewarm-pipelines-reused-after-a-packed-shader-library-changes): stamp lookup now follows the packed library.
 - [Stack frames of an odd size](../../../docs/reference/rewriter.md#stack-frames-of-an-odd-size-sub-sp-sp-imm): existing general rule, no new cut in this port.
 - [A written secondary blend source](../../../docs/reference/rendering.md#a-written-secondary-blend-source-nvn-dual-source-blending): two measured shaders in `dual_want.tsv`.
 

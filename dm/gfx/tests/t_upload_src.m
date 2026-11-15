@@ -33,6 +33,7 @@ static void make(upl *u, uint8_t *pool_mem, pool_t *pool, size_t off, unsigned w
 static int same_texels(id<MTLTexture> tex, const upl *u) {
     unsigned w = u->t.d.width, h = u->t.d.height;
     id<MTLBuffer> rb = [g_dev newBufferWithLength:u->bytes options:MTLResourceStorageModeShared];
+    if (!rb) return 0;
     id<MTLCommandBuffer> cb = q_cb(); id<MTLBlitCommandEncoder> ce = [cb blitCommandEncoder];
     [ce copyFromTexture:tex sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(w, h, 1) toBuffer:rb destinationOffset:0 destinationBytesPerRow:w * 4 destinationBytesPerImage:u->bytes];
     [ce endEncoding]; [cb commit]; [cb waitUntilCompleted];

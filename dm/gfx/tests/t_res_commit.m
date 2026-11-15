@@ -42,7 +42,15 @@ int main(void) { @autoreleasepool {
     });
     dispatch_semaphore_wait(held, DISPATCH_TIME_FOREVER);
     uint64_t worst = 0, t_all = bp_now();
-    for (int i = 0; i < 200; i++) { id<MTLBuffer> s = buf(4096); [small addObject:s]; uint64_t t0 = bp_now(); res_add(s); res_remove(s); res_add(s); uint64_t d = bp_now() - t0; if (d > worst) worst = d; }
+    for (int i = 0; i < 200; i++) {
+        id<MTLBuffer> s = buf(4096);
+        if (!s) { fprintf(stderr, "could not allocate test buffer\n"); return 1; }
+        [small addObject:s];
+        uint64_t t0 = bp_now();
+        res_add(s); res_remove(s); res_add(s);
+        uint64_t d = bp_now() - t0;
+        if (d > worst) worst = d;
+    }
     uint64_t adds = bp_now() - t_all;
     printf("200 res_add / res_remove while a commit holds its lock: %.2f ms in all, the slowest %.3f ms\n", adds / 1e6, worst / 1e6);
     CHECK("res_add and res_remove do not wait for a commit under way", adds < 50000000ull);

@@ -50,8 +50,12 @@ int main(void) { @autoreleasepool {
     char dir[] = "/tmp/t_wline.XXXXXX"; if (!mkdtemp(dir)) return 1;
     NSString *in = [@(dir) stringByAppendingPathComponent:@"v.metal"], *out = [@(dir) stringByAppendingPathComponent:@"vp.metal"];
     [k_vs writeToFile:in atomically:NO encoding:NSUTF8StringEncoding error:nil];
-    char cmd[2048]; snprintf(cmd, sizeof cmd, "python3 -c \"import sys; sys.path.insert(0, '../tools'); import dmsh_pull; v, i = dmsh_pull.variant(open(sys.argv[1]).read()); assert i['entry_wl'] == 'main0_wl', i; open(sys.argv[2], 'w').write(v)\" '%s' '%s'", in.UTF8String, out.UTF8String);
-    if (system(cmd)) { fprintf(stderr, "dmsh_pull.variant failed\n"); return 1; }
+    NSTask *task = [NSTask new];
+    task.executableURL = [NSURL fileURLWithPath:@"/usr/bin/env"];
+    task.arguments = @[@"python3", @"-c", @"import sys; sys.path.insert(0, '../tools'); import dmsh_pull; v, i = dmsh_pull.variant(open(sys.argv[1]).read()); assert i['entry_wl'] == 'main0_wl', i; open(sys.argv[2], 'w').write(v)", in, out];
+    if (![task launchAndReturnError:&e]) { fprintf(stderr, "%s\n", e.localizedDescription.UTF8String); return 1; }
+    [task waitUntilExit];
+    if (task.terminationStatus) { fprintf(stderr, "dmsh_pull.variant failed\n"); return 1; }
     NSString *pull = [NSString stringWithContentsOfFile:out encoding:NSUTF8StringEncoding error:nil];
     [NSFileManager.defaultManager removeItemAtPath:@(dir) error:nil];
     MTLCompileOptions *o = [MTLCompileOptions new]; o.preserveInvariance = YES;

@@ -31,7 +31,10 @@ static void copy_in(pool_t *cpool, NVNtexture *tx, unsigned level, unsigned w, c
     NVNcopyRegion r = {0, 0, 0, (int)w, (int)w, 1};
     h_nvnCommandBufferCopyBufferToTexture(&cmd, (NVNbufferAddress)src, tx, &v, &r, 0);
     NVNcommandHandle h = h_nvnCommandBufferEndRecording(&cmd);
-    state_reset(); memset(&R, 0, sizeof R); mtl_exec(nvn_rec_linear(h, NULL));
+    state_reset(); memset(&R, 0, sizeof R);
+    uint8_t *records = nvn_rec_linear(h, NULL);
+    mtl_exec(records);
+    free(records);
 }
 static int words_not(const uint8_t *p, uint64_t n, uint32_t want) { int bad = 0; for (uint64_t i = 0; i < n; i += 4) bad += *(const uint32_t *)(p + i) != want; return bad; }
 // Texels of level `level` (w x w) of the host texture other than want: the texture is looked up (and uploaded if its pages changed) in this submission, and read after it

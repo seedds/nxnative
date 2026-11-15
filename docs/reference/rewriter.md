@@ -54,6 +54,13 @@ To enroll a cut for any game's own module:
 - **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md#frame-rate) and [Mario Kart World](../../dm/games/0400C3F00006E000/README.md#frame-rate), the first frame steps with a `game` binding; [The Legend of Zelda: Tears of the Kingdom](../../dm/games/0100F2C0115B6000/README.md#frame-rate) and [Hyrule Warriors: Age of Calamity](../../dm/games/01002B00111A2000/README.md#frame-rate), the first with several functions (2026-11-09).
 - **Check:** `test_nso_match.py` (`test_frame_step_rule_locates_its_function_or_nothing`: a moved function, two matches, none, malformed rules); `test_patches.py` (each rule's sites lie inside its function; the registry scopes the rules as `MATCH_CUTS`). Both mains rewritten (2026-11-08): the stub at the reviewed site, its branches back into the function, the state page the fixups name.
 
+### Function-matched ordinary stubs
+
+- **Symptom:** a local timing correction needs extra instructions, but declaring a frame-step state page would also change the host's pacing for a game with a native engine frame-rate setting.
+- **Fix:** `MATCH_STUBS = {module: [rule, ...]}` in a profile's `patches.py` uses the same complete-function or import-anchored matching as `MATCH_FRAME_STEP`, with `ctx.base`, `others` and `found`, and the ordinary `STUBS` emit/site/put/address operations. It allocates no frame-step state page. `ctx.address(adrp, low=None)` derives a data address from the original instructions, accepting an explicit low-instruction offset for interleaved ADRP/load pairs and checking their register relationship. Missing or ambiguous matches install no stub. A rule's optional `fps_required=True` keeps native engine frame targets disabled unless the stub sets `ctx.fps_ready=True` after installing its complete correction: fixups record `NATIVE_FPS_BLOCKED`, and `hle_fpslock.c` leaves the game's own limits. This also applies when a required companion function cannot be found.
+- **Found on:** [Xenoblade Chronicles X: Definitive Edition](../../dm/games/0100453019AA8000/README.md#frame-rate): its camera's per-update angular gain must use elapsed time before its native interval can safely select 60 fps.
+- **Check:** patch registry/site checks, interleaved address decoding, the native frame-limit block test, and the game's matched base/update rewrites.
+
 ### A frame step state page where the patch area starts
 
 - **Symptom:** the rewrite of a main that gets frame step stubs (`FRAME_STEP` or a `MATCH_FRAME_STEP` match) stops with `AssertionError: frame step state page`; the same main rewrites without the stubs.

@@ -37,6 +37,9 @@ mem_map_limit	on
 # Observed at boot: nvnDeviceSetDepthMode near=-w.
 depth_mode	gl
 
+# The engine's native interval controls its wait and elapsed-time simulation step.
+fps_target	60
+
 # ---- Shader split ----
 shader_groups	/movie/=movie /sound/=sound
 shader_note	Xenoblade Chronicles X: Definitive Edition shaders

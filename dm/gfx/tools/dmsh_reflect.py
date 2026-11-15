@@ -53,6 +53,18 @@ def far_plane(body):
     if re.fullmatch(r'_\d+', v): return len(re.findall(r'(?<![\w.])%s\s*=[^=]' % re.escape(v), body)) == 1
     return re.fullmatch(r'-?\d+\.\d*(?:e[+-]?\d+)?', v) is not None
 
+_FETCH_ARR = re.compile(r'\s*\[(?:[^\[\]]|\[[^\[\]]*\])*\]\s*\.(?:read|get_width|get_height)\s*\(')   # the index may itself hold one nested bracket (nm[cb0[i]].read(, nm[idx[0]].read(): a plain [^\]]* stops at the inner ])
+
+def has_texel_fetch(src, nm, array):
+    """Whether the shader reads texture member nm by integer texel coordinates (a txl fetch, or a TXQ size query it sizes a step from): nm.read( / .get_width( / .get_height(, or nm[i].read( ... for an array member. The array form finds the literal nm[ first, so it skips like has_word"""
+    if array:
+        i = src.find(nm + '[')
+        while i >= 0:
+            if not in_word(src, i) and _FETCH_ARR.match(src, i + len(nm)): return True
+            i = src.find(nm + '[', i + 1)
+        return False
+    return has_word(src, nm + '.read(') or has_word(src, nm + '.get_width(') or has_word(src, nm + '.get_height(')
+
 def raster_facts(stage, src):
     """Static facts needed for the runtime proof that the load can be skipped (full-coverage first draw) (nvn_mtl.m first_draw_covers):
         Vertex: whether position x / y / z are taken unchanged from the .x / .y / .z of one and the same vertex attribute (w is the constant 1 or the same attribute's .w), with no branches and no clip distances in the main function - if so, pos_attr = attribute slot;
@@ -322,6 +334,9 @@ def reflect(key, stage, msl, res):
             if e.get('kind') == abi.KIND_TEX and e.get('reg') in res.get('fetch1d', ()):
                 e['fetch1d'] = True
                 if has_word(msl, nm + '.get_width('): e['fetch1d_size'] = True   # also size-queried: a texture buffer of more than 16384 elements reports 16384 there
+        # An integer texel read of a sampled texture (a txl fetch, or a TXQ size query): such a texture must stay whole when the host drops the top mip level of the rest,
+        # so the reflection marks it. Only the sampled kinds the host restores per slot; a pool or a table has no per-element binding loop, and a buffer texture is never dropped
+        if e.get('kind') in (abi.KIND_TEX, abi.KIND_TEX_UBO, abi.KIND_TEX_C2A) and has_texel_fetch(msl, nm, ty.startswith('array<')): e['fetch'] = True
         binds.append(e)
     # Storage buffers: SPIR-V binding number → c0 offset → NVN storage buffer slot (c0 base SSBO[stage], C0_ROW bytes per slot)
     base = SSBO.get(stage)   # storage buffer base for the hull / domain stages has not been measured: a storage buffer there is reported with no slot

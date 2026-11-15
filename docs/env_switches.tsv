@@ -46,6 +46,17 @@ DM_FORCE_STRICT	diagnostic	`=1` makes the loader fail on forced-hook entries no 
 DM_FPS	switch	`30` or `60` pins the frame rate the display link and frame pacing aim for; otherwise it follows the game's present interval (60, or 30 when the game asks for 30)
 DM_FPS_HOLD	player	`on` / `off` overrides the profile's `fps_hold`: whether late frames may raise the hold above the frame cap's vsyncs (on by default)
 DM_FPS_TARGET	player	Frame-rate cap: `30` or `60`, `120` for a game whose profile has `fps_max 120` (60 otherwise), or `0` for the game's own limit; overrides the profile's `fps_target`
+DM_FRAMEGEN	switch	`1` turns on the scratch frame generation for Ocarina of Time (off by default; seedds/nxnative#2279): a game held at 30 fps is shown at 60, the frame between two real ones made by MetalFX's frame interpolator from the scene before the HUD, its depth and the game's camera. Needs DM_UPSCALER=metalfx, DM_PRESENT_LINK=0 and DM_NVN_ENC_THREAD=0; `0` only logs the shown-frame statistics
+DM_FRAMEGEN_CAM	diagnostic	`1` gives the frame interpolator the camera's view and projection matrices (DM_FRAMEGEN), `2` also zero motion vectors in place of the reprojection
+DM_FRAMEGEN_DT	diagnostic	`1` gives the frame interpolator the measured time between real frames instead of 1/30 s (DM_FRAMEGEN)
+DM_FRAMEGEN_FLIP	diagnostic	`1` flips the canvas rows against the window's when the generated frame's picture is composed (DM_FRAMEGEN)
+DM_FRAMEGEN_GATE	switch	`0` lets the generator work on every frame (DM_FRAMEGEN); by default it does no work after a real frame missed its period, and starts again once the frame's GPU time leaves room for it; `ab` alternates with DM_AB
+DM_FRAMEGEN_OVERLAP	switch	`1` runs the generator on a Metal 4 queue of its own, beside the game's next frame, instead of in the frame's command buffer (DM_FRAMEGEN)
+DM_FRAMEGEN_OWNPREV	switch	`0` reprojects through the game's own previous view instead of the host's record of the last frame's view-projection (DM_FRAMEGEN)
+DM_FRAMEGEN_PAUSE	diagnostic	`0` shows every generated frame, late or not (DM_FRAMEGEN); by default generated frames pause while real frames come late
+DM_FRAMEGEN_SHOT	path	`=<dir>:<a>-<b>` saves the generated and the real picture of frames a to b (DM_FRAMEGEN; slow, it waits for the GPU)
+DM_FRAMEGEN_UPTO	diagnostic	`=<n>` stops the generator after stage n to split its cost (DM_FRAMEGEN): 0 nothing, 1 the copies, 2 the motion pass, 3 the interpolation, 4 the second upscale, 5 the window picture (not shown), 9 all
+DM_FRAMEGEN_VIEW	diagnostic	`1` shows the generated scene without the HUD split, `2` paints HUD pixels magenta (DM_FRAMEGEN)
 DM_FS	diagnostic	When set, logs file opens, paths not found or not mounted, and a read summary every 64 MiB or 1000 reads
 DM_FSLOG	diagnostic	`=<file>` writes one TSV line per ReadFile: seconds since boot, guest path, offset, length and guest buffer address
 DM_FSLOG_HASH	diagnostic	With `DM_FSLOG`, adds a column with the FNV-1a 64 hash of the bytes read

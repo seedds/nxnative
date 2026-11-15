@@ -100,6 +100,15 @@ Measured on an M6 Mac with 16 GB, headless, on one walk with camera turns (`walk
 - With a window, the first start on a new chain runs the pipeline prebuild first: 33,190 shader pairs, 691 s on this Mac. A run with no window skips it.
 - The opening movie runs at the movie's own 24 fps pace during the story section and cannot be skipped: about 8 minutes on a new file.
 - Resolved: at a 30 fps cap (`DM_FPS_TARGET=30`) the title and opening movies played at half speed: the player takes one picture per game frame, and the movies are 60 pictures a second (their times whole milliseconds, also through the opening's story section). The frame step now follows the movie's picture rate: [The frame step follows a movie's picture rate](../../../docs/reference/frame-rate.md#the-frame-step-follows-a-movies-picture-rate) ([PR #2622](https://github.com/seedds/nxnative/pull/2622)). On an M6 at the 30 cap: 10 s of movie in 20.0-24.2 s before, 10.0-10.4 s after, the step 60 while a movie plays and 30 again when its decoder is finalized. Open: where the frames cannot hold 60 (an M1 with the movie network on), the step falls to 30 for late frames, and the thermal cap holds movies at 30; the player's own two-picture mode covers those frames ([A player limited to one picture a frame falls behind its sound](../../../docs/reference/movies.md#a-player-limited-to-one-picture-a-frame-falls-behind-its-sound), the bullet on issue 1501 above).
+- Current on an iPhone 17 (iOS 27.2.1, 30 fps cap, dynamic resolution, MetalFX; 2026-11-15, unattended): 24 runs of 7 minutes on the drive script's route (Kakariko from the test save), 8 each of three builds from the branch `oot-build-final`, interleaved in blocks of 4. The builds were fix2 (be8db251), a2 (fix2 + the base-archive host work) and all1 (a2 + five more fixes). Thermal state was 2 in every window. Fps over each run's second half:
+
+  | build | runs stuck below 24 fps | median fps of the others | median fps of the stuck ones |
+  |---|---|---|---|
+  | fix2 | 1 of 8 | 28.9 (7 runs, 27.7-29.7) | 16.3 |
+  | a2 | 4 of 8 | 29.2 (4 runs, 26.4-29.4) | 15.4 |
+  | all1 | 3 of 8 | 28.9 (5 runs, 27.3-29.5) | 14.2 |
+
+  Outside the stuck state every build holds the cap, so this route cannot rank them, and a2 and all1 had fewer than 6 runs that were not stuck: that either is slower than fix2 is not established. Fix2's 1 stuck run in 8, against 7 in 16 for the other two, is not significant either (Fisher's exact test, p = 0.19). In every run the title and menu ran at 18-25 fps with the GPU at 40-55 ms. Each run then either held 27-29 fps after the load into Kakariko or stuck there for good, on all three builds: 8 of 24 stuck.
 
 ### Prediction time on current main
 

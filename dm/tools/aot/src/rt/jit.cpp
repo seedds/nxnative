@@ -76,7 +76,8 @@ void SetCode(const dm_jit_range* code, unsigned count) {
     g_code_gen.fetch_add(1, std::memory_order_release);
 }
 
-// The guest access a memory callback is making on this thread (a fault there is reported at it: src/rt/host.cpp, dm/host/aot_run.c)
+// The guest access a memory callback is making on this thread (a fault there is reported at it, with the guest's registers there: src/rt/host.cpp,
+// dm/host/aot_run.c, dm_jit_fault_state)
 thread_local uint64_t t_access_pc = 0, t_access_address = 0;
 thread_local int t_access_exact = 0;
 
@@ -706,6 +707,20 @@ uint64_t dm_jit_access_address(void) {
 
 int dm_jit_access_exact(void) {
     return t_access_exact;
+}
+
+int dm_jit_fault_state(dm_jit* j) {
+    // Called from the host's fault report after the fault left the run (no callback returns to dynarmic, nothing changes its state any more): dynarmic's
+    // state is only read, the block written
+    if (!j || !j->st || !t_access_pc) {
+        return 0;
+    }
+    const std::array<uint64_t, 31> x = j->jit->GetRegisters();
+    std::memcpy(j->st->x, x.data(), sizeof j->st->x);
+    j->st->sp = j->jit->GetSP();
+    j->st->nzcv = j->jit->GetPstate() & 0xF0000000u;
+    j->st->pc = t_access_pc;
+    return 1;
 }
 
 }  // extern "C"

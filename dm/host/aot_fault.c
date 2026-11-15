@@ -5,8 +5,8 @@
 // faulting instruction runs again, which is safe because every guest access is one x86 instruction, 6.4), then, with the JIT built in (NXHOST_JIT),
 // dynarmic's fastmem handler (a fault in its code cache falls back to its memory callbacks), then the report. A fault in a pack's code, or in a memory access
 // the JIT's callbacks make, is a guest fault: the thread leaves its guest code and the report names the guest instruction the pack's line table gives (3.5),
-// as a [RED] line, and the process stops (status DM_AOT_FAULT). Anything else is a host crash, reported and ended with exit status 128 + the signal, as crash.c
-// ends one on Apple.
+// or the JIT's access was made for, as a [RED] line with the guest's frames, and the process stops (status DM_AOT_FAULT). Anything else is a host crash, reported
+// and ended with exit status 128 + the signal, as crash.c ends one on Apple.
 // Linux: sigaction on the thread's alternate stack. Windows: a vectored exception handler, which redirects a guest fault to an ordinary frame that leaves; it
 // passes every other exception on, dynarmic's fastmem faults included, whose handler is frame-based (below) (written, not run here: no Windows machine)
 #include "aot.h"
@@ -174,21 +174,52 @@ static int guest_is_call(uint64_t a) {
     if (plat_mem_read(a, &w, sizeof w, &got) || got != sizeof w) return 0;
     return (w & 0xFC000000u) == 0x94000000u || (w & 0xFFFFFC1Fu) == 0xD63F0000u;
 }
+// The guest frames the JIT fallback had made when its driver called compiled code (aot.h dm_aot_jitcall), appended to line: its x30 at the call (the return
+// into the JIT's code; not when it is the level's lr, a tail call into the compiled entry), then the x29 chain from its x29 there, down to the record whose return
+// address is the level's lr or a record at or above the SP the level began with (a frame of the code further out), then, for a level compiled code entered, that lr:
+// the return into the frame further out, whose own native frame a compiled code's walk meets next. dup: an address not to print first (0 for none)
+static void jit_frames(char *line, int *p, size_t cap, const dm_aot_jitcall *c, uint64_t dup) {
+    char nm[64];
+    if (c->x30 != c->lr && c->x30 != dup) {
+        dm_aot_guest_name(c->x30, nm, sizeof nm);
+        *p += snprintf(line + *p, cap - (size_t)*p, " %s", nm);
+    }
+    uint64_t fp = c->x29;
+    for (int i = 0; i < 32 && fp && !(fp & 7) && fp < c->sp && dm_aot_in_arena(fp, 16) && *p < (int)cap - 64; i++) {
+        uint64_t w[2]; size_t got = 0;
+        if (plat_mem_read(fp, w, sizeof w, &got) || got != sizeof w) break;
+        if (w[1] == c->lr || w[1] == DM_AOT_HOST_RETURN) break;
+        dm_aot_guest_name(w[1], nm, sizeof nm);
+        *p += snprintf(line + *p, cap - (size_t)*p, " %s", nm);
+        if (w[0] <= fp) break;
+        fp = w[0];
+    }
+    if (c->entered && c->lr != DM_AOT_HOST_RETURN) {
+        dm_aot_guest_name(c->lr, nm, sizeof nm);
+        *p += snprintf(line + *p, cap - (size_t)*p, " %s", nm);
+    }
+}
 // A guest fault's backtrace (aot_run.c fault_report, after its [RED] line), the frames above the faulting instruction:
 //   compiled code with its native frames taken (Linux): compiled code keeps x29 in a host register between the calls it makes (2.3: the block holds it only at a
 //     call or an escape), so the x29 chain from the block may start a frame or more too far out; the native frames hold every compiled frame instead (3.5). Each
 //     native return address in a pack's function is its call's guest return address (the call instruction's position, the outermost one in inlined code, + 4), and
-//     the faulting instruction's own position, when it is a call other than the instruction (code inlined there), comes first. "host" marks host frames between
-//     compiled ones (the run time, the JIT fallback, a host function a nested guest call came from)
-//   the JIT fallback: its registers are not in the block until its run ends (dm/tools/aot/src/rt/jit.h), so the walk starts from the x29 the block held when the run
-//     began, or at its last SVC: "(JIT from <pc>)" names that guest pc, and the frames the JIT made since are not shown
+//     the faulting instruction's own position, when it is a call other than the instruction (code inlined there), comes first. Where the JIT fallback's driver
+//     called the compiled code (its native_call frame, met by its return address), the guest frames the JIT had made come next (jit_frames), and the frames of
+//     the driver up to the compiled code that handed over to the JIT are no host gap; the function that handed the rest of itself over (no call at its position:
+//     msr fpcr, an encoding the lifter leaves, a branch to no entry) is the JIT's outermost frame, already named. "host" marks host frames between compiled ones
+//     (a host function a nested guest call came from, a guest call's outermost JIT level)
+//   the JIT fallback: the walk from the guest's own x29 at the faulting access, which fault_report took from the JIT instance into the block (dynarmic keeps the
+//     guest's registers in its own state during a run, current at every memory callback: dm/tools/aot/src/rt/jit.h dm_jit_fault_state), as Apple's crash.c walks
+//     from the fp of the faulting thread. Were they not there (fault_jit_regs 0), the block would hold the x29 of the run's start or its last SVC: "(JIT from
+//     <pc>)" then names that guest pc, and the frames the JIT made since are not shown
 //   no native frames (Windows: a pack has no unwind tables there, design 3.5; an unwinder that found none): the walk from the last x29 written back
 void dm_aot_fault_backtrace(const dm_aot_thread *t) {
     char line[1024], nm[64];
     int p = snprintf(line, sizeof line, "[dm] bt:");
     int i = 0, n = t->fault_nbt;
     while (i < n && t->fault_bt[i] != t->fault_pc) i++;   // the faulting frame (the unwinder's frames before it are the handler's)
-    if (t->fault_jit_pc) {
+    if (t->fault_jit_pc && t->fault_jit_regs) bt_walk(line, &p, sizeof line, t->st.x[29]);
+    else if (t->fault_jit_pc) {
         dm_aot_guest_name(t->st.pc, nm, sizeof nm);
         p += snprintf(line + p, sizeof line - (size_t)p, " (JIT from %s)", nm);
         bt_walk(line, &p, sizeof line, t->st.x[29]);
@@ -201,13 +232,33 @@ void dm_aot_fault_backtrace(const dm_aot_thread *t) {
             dm_aot_guest_name(dm_aot_pack_base(pp) + (uint64_t)at + 4, nm, sizeof nm);
             p += snprintf(line + p, sizeof line - (size_t)p, " %s", nm);
         }
-        int any = 0, gap = 0;
+        // after: 1 once the JIT's frames of a level compiled code entered are named (they end with its lr), until the compiled frame that entered it; 2 after that
+        // frame, when it was the function that handed the rest of itself over, until the next frame, which returns to dup (the lr already named) when it is its caller
+        int any = 0, gap = 0, after = 0, jn = 0;
+        uint64_t dup = 0;
         for (i++; i < n && p < (int)sizeof line - 64; i++) {
+            if (jn < t->fault_njit && t->fault_bt[i] == t->fault_jit[jn].ra) {
+                // The driver's call of the compiled frame below it (the frames between are that call's: the pack's enter, native_call), so no host gap here
+                const dm_aot_jitcall *c = &t->fault_jit[jn++];
+                jit_frames(line, &p, sizeof line, c, after == 2 && !gap ? dup : 0);
+                after = c->entered; dup = c->lr;
+                any = 1; gap = 0;
+                continue;
+            }
             const uint64_t ra = t->fault_bt[i] - 1;   // inside the call instruction
-            if ((fn = dm_aot_fn_of_code(ra, &pk)) < 0 || !(pp = dm_aot_pack_at(pk))) { gap = any; continue; }
+            if ((fn = dm_aot_fn_of_code(ra, &pk)) < 0 || !(pp = dm_aot_pack_at(pk))) { if (after != 1) gap = any; continue; }   // after 1: the driver's own frames
             const int64_t off = dm_aot_offset_of_code(ra, pk, fn);
             const uint64_t base = dm_aot_pack_base(pp);
-            if (off >= 0 && guest_is_call(base + (uint64_t)off)) dm_aot_guest_name(base + (uint64_t)off + 4, nm, sizeof nm);
+            const int call = off >= 0 && guest_is_call(base + (uint64_t)off);
+            const uint64_t at = call ? base + (uint64_t)off + 4 : 0;   // the guest return address this frame names (0: none, its function is named)
+            if (after == 1) {
+                // The frame that entered the level: a call of the JIT's code returning to lr (named), or the function that handed the rest of itself over at an
+                // instruction that is no call (msr fpcr, an encoding the lifter leaves, a br or b to no entry), which the JIT's frames named as theirs
+                after = at == dup ? 0 : 2;
+                continue;
+            }
+            if (after == 2) { after = 0; if (at == dup && !gap) continue; }   // its caller, whose call the level's lr named
+            if (call) dm_aot_guest_name(at, nm, sizeof nm);
             else { dm_aot_guest_name(base + dm_aot_pack_fn(pp, (size_t)fn), nm, sizeof nm); snprintf(nm + strlen(nm), sizeof nm - strlen(nm), "(fn)"); }   // no position: the function
             p += snprintf(line + p, sizeof line - (size_t)p, "%s %s", gap ? " host" : "", nm);
             any = 1; gap = 0;
@@ -264,13 +315,15 @@ static void on_fault(int sig, siginfo_t *si, void *ucv) {
     if (t && t->depth && (dm_aot_pack_of_code(pc) || jit_pc)) {
         // A guest fault: the facts only, the report is made after the jump (aot_run.c fault_report). In compiled code its native frames too, which the jump discards:
         // the unwinder goes through this handler's frame and the signal frame (glibc's __restore_rt has unwind tables) into the pack's code (async unwind tables, 3.5)
-        t->fault_nbt = 0;
+        t->fault_nbt = 0; t->fault_njit = 0;
 #if defined(__GLIBC__)
         if (!jit_pc) {
             void *bt[sizeof t->fault_bt / sizeof *t->fault_bt];
             const int n = backtrace(bt, (int)(sizeof bt / sizeof *bt));
             for (int i = 0; i < n; i++) t->fault_bt[i] = (uint64_t)(uintptr_t)bt[i];
             t->fault_nbt = n > 0 ? n : 0;
+            // The JIT driver's calls into compiled code in progress (aot.h dm_aot_jitcall), copied: they live in the native frames the jump discards
+            for (const dm_aot_jitcall *c = t->jit_calls; c && t->fault_njit < DM_AOT_FAULT_JITCALLS; c = c->outer) t->fault_jit[t->fault_njit++] = *c;
         }
 #endif
         t->fault_signal = sig; t->fault_address = (uint64_t)(uintptr_t)si->si_addr; t->fault_pc = pc; t->fault_jit_pc = jit_pc;
@@ -362,7 +415,8 @@ static void alt_own(void) {
 // dm_jit_access_pc) leaves through fault_leave; anything else goes on. dynarmic's handler is frame-based: each JIT instance registers a function table over its code
 // cache with an exception handler of its own (RtlAddFunctionTable; third_party/dynarmic backend/x64/exception_handler_windows.cpp), which the dispatcher reaches only
 // when this handler passed the fault on and the faulting rip lies in that cache: a fastmem access the arena does not back, which it sends to the JIT's memory
-// callbacks (jit.cpp halts there and steps the instruction again with the access made by a callback: a fault then is this handler's, at dm_jit_access_pc). A write to
+// callbacks (jit.cpp halts there and steps the instruction again with the access made by a callback: a fault then is this handler's, at dm_jit_access_pc, and
+// fault_report, after fault_leave's jump, takes the guest's registers there from the instance as on Linux: jit.h dm_jit_fault_state). A write to
 // a page the dirty tracker protects reaches the hooks here first, from JIT code too, as on Linux. The frame-based search walks the thread's own stack within its TEB
 // limits, which the JIT's frames are on (guest threads run on their host thread's native stack, aot_thread.c). Written from the Windows documentation, not run here
 // (no Windows machine): dm/host/tests/run_win64_tests.ps1's AOT tests are the check (t_aot_host's corpus programs that need the JIT, t_aot_module's JIT-forced runs)

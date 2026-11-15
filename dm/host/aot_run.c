@@ -206,11 +206,18 @@ static void stub_call(dm_aot_thread *t, long k) {
     t->st.pc = t->st.x[30];
 }
 
-// A compiled entry the JIT loop reached: its standard entry with the block's registers (2.5), under the MXCSR of the thread's FPCR
-static void native_call(dm_aot_thread *t, const dm_aot_pack *p, const void *entry) {
+// A compiled entry the JIT loop reached: its standard entry with the block's registers (2.5), under the MXCSR of the thread's FPCR. lr, sp and entered: the JIT loop's
+// level (jit_loop's lr and sp, and whether compiled code entered it). While it runs, the call is on the thread's list (aot.h dm_aot_jitcall): the guest's x29 and x30
+// the JIT left, which a fault in the compiled code below needs to name the frames the JIT made (aot_fault.c dm_aot_fault_backtrace), and this frame's return address,
+// where the native frames meet them. Not inlined, so that the return address is a frame of its own in a walk (a few stores per call, beside the hand-over's hundred
+// nanoseconds)
+static __attribute__((noinline)) void native_call(dm_aot_thread *t, const dm_aot_pack *p, const void *entry, uint64_t lr, uint64_t sp, int entered) {
+    dm_aot_jitcall c = {(uint64_t)(uintptr_t)__builtin_return_address(0), t->st.x[29], t->st.x[30], lr, sp, entered, t->jit_calls};
+    t->jit_calls = &c;
     _mm_setcsr(dm_aot_guest_mxcsr(t->st.fpcr));
     t->st.pending = 0;
     dm_aot_pack_desc(p)->enter(&t->st, entry);
+    t->jit_calls = c.outer;
 }
 
 // ---------- The JIT fallback (11) ----------
@@ -506,7 +513,7 @@ static void jit_loop(dm_aot_thread *t, uint64_t lr, uint64_t sp, int outermost, 
             const nxaot_lookup_entry *e = dm_aot_find(pc, &p);
             if (e) {
                 const uint64_t ret = st->x[30], sp_at_call = st->sp;
-                native_call(t, p, dm_aot_entry_of(e));
+                native_call(t, p, dm_aot_entry_of(e), lr, sp, !outermost);
                 if (st->pending) { st->pc = st->pending; st->pending = 0; why = REASON_NONLOCAL; }   // a non-local transfer: the block holds the whole register file
                 else {
                     // a normal return is a ret to the lr the entry was called with; SP is the call's unless the function may change it (NXAOT_LOOKUP_SP_KEPT)
@@ -559,15 +566,31 @@ static void run_guest(dm_aot_thread *t, uint64_t pc) {
 // A fault in guest code (aot_fault.c jumped to the thread's base with the facts): the report and the process stop
 static void fault_report(dm_aot_thread *t) {
     if (!t->fault_signal) return;   // reported at a nested level already
-    char where[200], msg[400];
+    char where[240], msg[440];
     int exact = 0;
+    t->fault_jit_regs = 0;
 #if NXHOST_JIT
     exact = dm_jit_access_exact();   // this thread's last JIT callback access, the one that faulted (jit.h): its exact instruction, or its block's start (dc zva)
+    // The guest's registers at that access, into the block: during a run they are in the JIT instance's own state, which the fault left at the access (jit.h
+    // dm_jit_fault_state), while the block still held what it held when the run began. The backtrace below walks the frames from the guest's x29 there
+    if (t->fault_jit_pc && t->jit) t->fault_jit_regs = dm_jit_fault_state(t->jit);
 #endif
     if (t->fault_jit_pc) {
-        char g[64];
+        // The function: the pack's whose guest code holds the instruction (its function map, as compiled code's line names it), when the JIT ran code a pack
+        // holds (DM_AOT_JIT_ALL, a refused function's body, a continuation inside a compiled function); none for code no pack holds, nor for dc zva's pc,
+        // which is only near the access
+        char g[64], fn[96] = "";
         dm_aot_guest_name(t->fault_jit_pc, g, sizeof g);
-        snprintf(where, sizeof where, exact ? "a memory access of the JIT fallback, guest instruction %s" : "a memory access of the JIT fallback near guest %s", g);
+        int pk = -1;
+        const long f = exact ? dm_aot_fn_of_guest(t->fault_jit_pc, &pk) : -1;
+        const dm_aot_pack *pp = f >= 0 ? dm_aot_pack_at(pk) : NULL;
+        if (pp) {
+            char e[64];
+            dm_aot_guest_name(dm_aot_pack_base(pp) + dm_aot_pack_fn(pp, (size_t)f), e, sizeof e);
+            snprintf(fn, sizeof fn, ", in the function at %s", e);
+        }
+        if (exact) snprintf(where, sizeof where, "a memory access of the JIT fallback%s, guest instruction %s", fn, g);
+        else snprintf(where, sizeof where, "a memory access of the JIT fallback near guest %s", g);
     }
     else if (!dm_aot_where(t->fault_pc, where, sizeof where)) snprintf(where, sizeof where, "host pc %#llx", (unsigned long long)t->fault_pc);
     const char *sig = t->fault_signal == 11 ? "SIGSEGV" : t->fault_signal == 7 ? "SIGBUS" : t->fault_signal == 4 ? "SIGILL" : t->fault_signal == 8 ? "SIGFPE" : "an exception";
@@ -589,6 +612,7 @@ static uint64_t guest_vcall(dm_guest_state *st, uint64_t addr, int nargs, va_lis
     // What the guest code around this call keeps (AAPCS64 lets the callee change the rest): x19..x30, SP, pc, a pending transfer
     uint64_t keep[12], keep_sp = st->sp, keep_pc = st->pc, keep_pending = st->pending, keep_prof = t->prof_at;   // prof_at: the sampler's (guest code runs below)
     const uint32_t keep_reason = st->exit_reason, host_mxcsr = _mm_getcsr();
+    dm_aot_jitcall *const keep_jit_calls = t->jit_calls;   // the JIT driver's calls in progress around this one (aot.h): a jump out of the calls below discards theirs
     memcpy(keep, &st->x[19], sizeof keep);
     // Each level is a base: the one around it (a nested call's) is kept here and put back when this one returns or is left
     dm_aot_jmp_buf outer;
@@ -599,6 +623,7 @@ static uint64_t guest_vcall(dm_guest_state *st, uint64_t addr, int nargs, va_lis
         t->depth = depth0;
         if (depth0) memcpy(&t->base, &outer, sizeof outer);
         t->prof_at = keep_prof;
+        t->jit_calls = keep_jit_calls;
         _mm_setcsr(host_mxcsr);
         if (t->left == DM_AOT_LEFT_FAULT) fault_report(t);
         return 0;

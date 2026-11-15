@@ -188,6 +188,17 @@ typedef sigjmp_buf dm_aot_jmp_buf;
 #define dm_aot_longjmp(b) siglongjmp((b), 1)
 #endif
 enum { DM_AOT_LEFT_NONE, DM_AOT_LEFT_EXIT, DM_AOT_LEFT_STOP, DM_AOT_LEFT_FAULT };   // why a thread's guest code left (dm_aot_thread.left)
+// A call the JIT fallback's driver makes into compiled code (aot_run.c jit_loop's native_call), while it runs: the guest frames the JIT had made when it stopped at the
+// compiled entry, which compiled code's native frames do not show. A fault in the compiled code it called names them between the compiled frames around them
+// (aot_fault.c dm_aot_fault_backtrace). On the native stack of the call, innermost first (dm_aot_thread.jit_calls); each guest call level puts back the list it began with
+typedef struct dm_aot_jitcall {
+    uint64_t ra;                       // the native return address into the driver after this call: the native frame where a walk outward meets it
+    uint64_t x29, x30;                 // the guest's x29 and x30 at the call (the JIT wrote them back when it stopped at the compiled entry)
+    uint64_t lr, sp;                   // the driver level's: the guest return address it runs until (the frame further out returns there), its SP when it began
+    int entered;                       // the level was entered from compiled code (nxaot_rt_jit), not a guest call's outermost level
+    struct dm_aot_jitcall *outer;
+} dm_aot_jitcall;
+#define DM_AOT_FAULT_JITCALLS 8
 typedef struct dm_aot_thread {
     dm_guest_state st;                 // first: (dm_aot_thread *)st is its thread
     dm_aot_jmp_buf base;               // the innermost dm_guest_call on this thread: each level keeps the one around it and puts it back when it returns
@@ -196,8 +207,9 @@ typedef struct dm_aot_thread {
     _Atomic int exiting;               // ExitThread was answered (hle_thread.c thread_exit): the thread leaves when the SVC returns
     void *jit;                         // its dm_jit instance (NXHOST_JIT), made at its first use
     uint64_t stack_lo, stack_size;     // a guest stack the host made for it (the main thread's: hle_svc.c QueryMemory reports it), 0 when none
-    // A fault in guest code (aot_fault.c): the facts, reported after the jump to base
-    int fault_signal;
+    // A fault in guest code (aot_fault.c): the facts, reported after the jump to base. fault_jit_regs: in a memory access of the JIT fallback (fault_jit_pc),
+    // the guest's registers at that access are in st (aot_run.c fault_report, rt/jit.h dm_jit_fault_state)
+    int fault_signal, fault_jit_regs;
     uint64_t fault_address, fault_pc, fault_jit_pc;
     struct dm_aot_thread *next;        // the live threads (process stop)
     void *mem;                         // the allocation that holds this struct
@@ -206,9 +218,12 @@ typedef struct dm_aot_thread {
     // else the guest address whose host code runs (a host call's return address, an SVC's instruction). Written by aot_run.c on this thread, read by its signal handler
     volatile uint64_t prof_at;
     // A guest fault's native frames (aot_fault.c, Linux): the return addresses the unwinder found above the faulting instruction, taken in the signal handler before the jump
-    // to base (the frames are gone after it); fault_report names the compiled ones as guest call sites. fault_nbt 0: none taken (Windows, the JIT fallback, no unwinder)
-    int fault_nbt;
+    // to base (the frames are gone after it); fault_report names the compiled ones as guest call sites. fault_nbt 0: none taken (Windows, the JIT fallback, no unwinder).
+    // With them, the JIT driver's calls into compiled code then in progress (jit_calls, copied: they are on the frames the jump discards), innermost first
+    int fault_nbt, fault_njit;
     uint64_t fault_bt[48];
+    dm_aot_jitcall fault_jit[DM_AOT_FAULT_JITCALLS];
+    dm_aot_jitcall *jit_calls;         // the JIT driver's calls into compiled code in progress on this thread, innermost first (NULL: none)
 } dm_aot_thread;
 dm_aot_thread *dm_aot_self(void);          // the calling thread's, NULL when it never ran guest code
 dm_guest_state *dm_aot_thread_begin(void); // the calling thread's state block, made at its first call (x30 the host-return address, FPCR the packs')
@@ -460,7 +475,7 @@ const char *dm_aot_miss_word(uint32_t reason);   // a reason's word in the misse
 uint64_t dm_aot_guest_lr(void);
 void dm_aot_guest_backtrace(void);
 // A guest fault's "[dm] bt:" line (aot_run.c fault_report, after its [RED] line): the frames above the faulting instruction, from its native frames in compiled code
-// (Linux), from the x29 the block held when the JIT fallback's run began, or from the last x29 written back (aot_fault.c has the cases)
+// (Linux), from the guest's own x29 at the faulting access in the JIT fallback, or from the last x29 written back (aot_fault.c has the cases)
 void dm_aot_fault_backtrace(const dm_aot_thread *t);
 
 // ---------- Faults (aot_fault.c) ----------

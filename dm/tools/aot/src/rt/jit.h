@@ -23,7 +23,8 @@
 //
 // Faults (design 5.4): a fastmem access that faults takes dynarmic's fallback to the memory callbacks; with check_halt_on_memory_access the
 // callback halts with MemoryAbort instead of touching the memory, so dynarmic leaves at the exact guest instruction, which dm_jit_run then single-
-// steps with the access made for real: a fault there is reported at that instruction (dm_jit_access_pc, dm_jit_access_exact).
+// steps with the access made for real: a fault there is reported at that instruction (dm_jit_access_pc, dm_jit_access_exact), with the guest's
+// registers there (dm_jit_fault_state: the frames the JIT made since its run began).
 //
 // The hand-over (2.5, 11): dm_jit_run copies the 31 general registers, SP, PC, the 32 vector registers, NZCV, FPCR and FPSR (with the
 // cumulative flags compiled code left in MXCSR) into the JIT, and back into the block when it returns; the exclusive monitor is cleared both
@@ -136,6 +137,17 @@ double dm_jit_measure_handover(dm_jit *j, unsigned n);
 uint64_t dm_jit_access_pc(void);
 uint64_t dm_jit_access_address(void);
 int dm_jit_access_exact(void);
+// After a fault in one of j's memory callbacks on this thread (dm_jit_access_pc nonzero; the host's handler left the run there): the guest's general
+// registers at that access into j's block (x0..x30, SP and NZCV), st->pc the access's guest instruction (dm_jit_access_pc), so that the host walks the
+// guest's frames from its own x29 there. During a run dynarmic keeps the guest's registers in its own state (dm_jit_run copies them to the block only
+// when the run stops), and that state is current at every callback: each A64 register write is a store to it (the x64 backend's EmitA64SetX, SetW,
+// SetSP, SetNZCV), as dynarmic leaves out A64GetSetElimination, which would keep values in host registers, when check_halt_on_memory_access is on.
+// An access Retry steps (the exact case) holds the general registers and SP as they were before the instruction: an A64 load or store writes its
+// destinations and its base only after its accesses. In dc zva's case (not exact) they are the registers at the dc zva, pc its block's start.
+// The vector registers, FPCR and FPSR keep what the block held when the run began (a multi-register ld1..ld4 writes some of its vectors before the
+// access of the next; FPSR's cumulative flags are in MXCSR during a run). Nothing is read or written on any other path: a run that does not fault
+// costs nothing more. 0, with nothing written, when no access of this thread faulted
+int dm_jit_fault_state(dm_jit *j);
 
 #ifdef __cplusplus
 }

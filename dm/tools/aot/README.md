@@ -627,7 +627,14 @@ path, the counter. `dm_jit_run_past` goes on after a gate the host served, `dm_j
   callback does not touch memory but halts with `MemoryAbort`, so dynarmic leaves at the exact instruction (it checks that halt only after a
   callback: fastmem accesses cost nothing more); `dm_jit_run` steps that instruction again with its callback accesses made, and a fault there is
   reported as a guest fault at that instruction (`nxaot_host`: "in a memory access of the JIT fallback near guest 0x...", now exact; the host:
-  "a memory access of the JIT fallback, guest instruction main+0x..."; `dc zva`, whose hook has no such check, keeps "near").
+  "a memory access of the JIT fallback, in the function at main+0x..., guest instruction main+0x...", the function being the pack's whose guest
+  range holds the instruction, when one does; `dc zva`, whose hook has no such check, keeps "near"). The host's `[dm] bt:` after it walks the guest's
+  frames from the JIT's own registers at the access (`dm_jit_fault_state`): during a run dynarmic keeps them in its state, not in the block, and
+  that state is current at every callback (each A64 register write is a store to it; dynarmic leaves out `A64GetSetElimination` when
+  `check_halt_on_memory_access` is on), so the copy is made only when a fault is reported and costs a run that does not fault nothing. Before,
+  the walk started from the x29 the block held when the run began (`(JIT from main+0x...)`, none of the frames made since). A fault in compiled
+  code the JIT called names the JIT's frames too: the driver keeps the JIT's x29 and x30 for each such call while it runs (dm/host `aot.h`
+  `dm_aot_jitcall`). Checked by `t_aot_host`'s `guestbt` rows (dm/host/tests), with frames in each engine.
 - **The first use** ([docs/reference/threads.md](../../../docs/reference/threads.md#a-thread-stops-for-100-to-250-ms-the-first-time-it-reaches-code-no-pack-holds)).
   A thread's first JIT run cost two one-time steps on that thread: its instance (33 to 37 ms, 5,192 page faults: dynarmic's emitter writes a 16 MiB
   fast-dispatch table whose entries have member initializers, `a64_emit_x64.h` `FastDispatchEntry`, and emits its prelude) and, the process's first,

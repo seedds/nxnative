@@ -2352,11 +2352,13 @@ static int ts_mode(void) {   // 0 submission, 1 segment (the default), 2 segment
 }
 static int seg_ts(void) { return ts_mode() > 0; }
 static void seg_clk_put(seg_clk *c) { if (c && atomic_fetch_sub(&c->refs, 1) == 1) free(c); }
-static uint64_t gpu_s_guest_ns(double s) {   // a feedback GPU time (seconds on the mach absolute time base) on the guest clock; 0 when unknown
-    uint64_t now = now_ns();
-    uint64_t g = guest_ns_at_host_time(now);
-    double age = (double)now - s * 1e9;
-    return s > 0 && age >= 0 && age < (double)g ? g - (uint64_t)age : 0;
+static uint64_t gpu_s_guest_ns(double s) {   // feedback seconds on the Mach absolute clock, projected on the guest clock; 0 when unknown
+    double ns = s * 1e9;
+    if (!(ns > 0 && ns < 0x1p64)) return 0;   // reject invalid / overflowing timestamps before the integer conversion
+    uint64_t at = (uint64_t)ns, now = now_ns(), g = guest_ns_at_host_time(now);
+    // Quantize before subtracting: a fused floating-point subtraction can read a
+    // valid sample as a fraction of a nanosecond in the future on the same tick.
+    return at <= now && now - at < g ? g - (now - at) : 0;
 }
 // The GPU timeline counter reports read (DM_NVN_GPU_TS=segment, the default): where a Switch GPU would have run each command buffer. A Switch GPU runs a submission's commands back to
 // back, and starts a submission as soon as the one before it ends, or once it is ready if that is later: the game's nvnQueueSubmitCommands, or the passing of a queue wait it was held

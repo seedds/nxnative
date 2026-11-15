@@ -1,5 +1,11 @@
 // Feed a delayed CPU/GPU sample to the production counter replay without a Metal device.
+#include "../../host/dm.h"
+// Hold only the renderer's read at one exact Mach tick; the host clock remains real.
+static uint64_t test_host_now;
+static uint64_t test_now_ns(void) { return test_host_now ? test_host_now : now_ns(); }
+#define now_ns test_now_ns
 #include "../nvn/nvn_mtl.m"
+#undef now_ns
 
 module_t *g_mod;
 int g_nmod;
@@ -144,6 +150,13 @@ int main(void) {
         CHECK("projection subtracts the time spent frozen", guest < host && guest >= frozen);
         CHECK("a host sample older than the pause offset cannot underflow", guest_ns_at_host_time(1) == 0);
         CHECK("feedback conversion uses the resumed guest epoch", llabs((int64_t)gpu_s_guest_ns(host / 1e9) - (int64_t)guest) <= 2);
+        // The seconds roundtrip is fractionally later than this exact Mach tick.
+        // Keeping the subtraction in floating point rejected the valid sample.
+        test_host_now = 57884338641750ull;
+        uint64_t projected = guest_ns_at_host_time(test_host_now);
+        CHECK("same-tick feedback survives sub-nanosecond roundoff", llabs((int64_t)gpu_s_guest_ns(test_host_now / 1e9) - (int64_t)projected) <= 2);
+        test_host_now = 0;
+        CHECK("overflowing feedback is rejected before conversion", gpu_s_guest_ns(0x1p64) == 0);
         CHECK("future feedback is rejected", gpu_s_guest_ns(host / 1e9 + 1) == 0);
         CHECK("invalid feedback is rejected", gpu_s_guest_ns(NAN) == 0 && gpu_s_guest_ns(INFINITY) == 0);
 

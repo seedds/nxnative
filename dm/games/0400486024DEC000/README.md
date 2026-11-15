@@ -159,6 +159,8 @@ Its 37 kernels that correct samples, NDSR's network among them, gave about 0.25 
 
 ## Found on this game
 
+- [Valid GPU feedback rejected on the current clock tick](../../../docs/reference/frame-rate.md#valid-gpu-feedback-rejected-on-the-current-clock-tick): found by the synthetic clock regression during the November 15 integration; the old conversion fails its fixed-tick check and the corrected conversion passes. Gameplay performance impact is unmeasured.
+
 - Experimental lifetime backports, 13 November 2026: [pool registration epochs](../../../docs/reference/nvn-objects.md#texture-data-changed-between-registrations-of-the-same-pool-memory) and [cached ghost-texture views](../../../docs/reference/nvn-objects.md#rebuilding-views-of-finalized-textures-still-used-by-registered-ids). Sixteen targeted fixtures compile and pass on M4 Pro, including the original dirty implementation failing the three new regression checks. A private host containing these exact source fixes completed a 131-second Castle Town SDR MetalFX/interpolation diagnostic without GPU errors. The normal installed host is unchanged; other games and long-session validation are pending. No FPS improvement or fix for the reported light-beam/transparency artifacts is established by this test.
 
 - [Residency changes waiting for a slow commit](../../../docs/reference/memory.md#residency-changes-can-wait-for-a-slow-commit): queued allocation changes preserve HDR/FI and the texture-cache lifetime checks. The M4 Pro contention fixture falls from 112.41 to 0.74 ms for 200 operations while a commit lock is held for 100 ms. A copied-save forest/dialogue run passes HDR native-copy fidelity and interpolation; this is not a measured gameplay speedup or sustained-120 result.

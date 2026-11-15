@@ -86,3 +86,19 @@ On the M4 Pro, with a 2560×1440 output through MetalFX, a 60-native target, int
 The test established actual fullscreen using the window's accessibility state, its Exit Full Screen menu item and display-sized window bounds. Game Mode and Direct presentation were not independently verified. Living gameplay was positively checked before and after the timed windows; the final image still showed Link alive while enemies attacked. No further A inputs or walking occurred after the world-ready marker. The player application and protected save were unchanged.
 
 Earlier longer trials ended in Game Over, including one with camera input only. Their later frame rates are not accepted as Field performance. This corrected short run establishes native-60 capability at the tested Field location and camera rotations; it is not a guarantee for every region, encounter or long session, nor evidence of 2K/4K120.
+
+## Main submission-scheduling integration — November 15
+
+Upstream `b2ae958f296c0015df47800d0fcaf0d93202af24` is merged. Its held-submission batching and per-submission feedback are retained. Both classic and display-link presentation retain the new guest-texture commit wait as well as this fork's generated/native phases, immutable crops and HDR state. Flow diagnostics wrap actual queue commits, including batched work and uploads. The NDVE first-network readiness fix and its CPU-only CI entry remain intact. An independent source review found no blocking ordering or ownership defect in this integration.
+
+The expanded Mac tests first exposed an inherited counter-clock failure. A probe reproduced 7,995 rejected valid samples in 100,000 calls; the root cause is documented in [Valid GPU feedback rejected on the current clock tick](reference/frame-rate.md#valid-gpu-feedback-rejected-on-the-current-clock-tick). The correction is separate from the merge: quantize feedback seconds to integer nanoseconds before subtracting, with explicit invalid/overflow/future guards. A fixed-tick regression fails against the old production function and passes against the corrected function, without changing its two-nanosecond tolerance. All 39 clock checks pass.
+
+Actual final-source checks on the M4 Pro:
+
+- Full host build: passed, 6.37 seconds.
+- All 27 selected renderer targets: passed, 68.94 seconds. The previous 20-target set is extended with `t_rec_draws`, `t_sub_overlap`, `t_counter_clock`, `t_ndve_ready`, `t_gmem_words`, `t_linear_readback` and `t_alpha`; this is not the full graphics suite. The new submission wait passes all 8 checks, NDVE readiness all 13, linear readback all 65 and alpha replay all 1,216.
+- Complete host CPU suite: passed, 64.64 seconds. Both yield modes, selector build and selector self-test passed.
+- Portable Python tests: 61 cases, 60 passed and one Metal-compiler-only case skipped on Linux. The Mac alpha target separately compiles and runs its Metal fixture.
+- Scoped LLVM 23.1.5 analysis of the renderer and included code: passed the existing ratchet, with zero file/check pairs above baseline. Source-input hashes were checked before validation and after analysis.
+
+This is build and targeted correctness evidence. No new gameplay performance run, full graphics run, five-game gameplay regression or portable-package qualification is claimed for this merged renderer. Those existing draft-PR limits remain open. The installed player, its cache, settings and saves were not changed during this maintenance pass.

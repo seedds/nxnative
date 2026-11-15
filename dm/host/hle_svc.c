@@ -1030,6 +1030,13 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
           if (before >> 28 != after >> 28) LOG("[mem] alias region mapped %.2f GB (application pool %.2f GB)", after / 1073741824.0, APP_POOL / 1073741824.0); }
         regs[0] = 0; return 0;
     }
+    case 0x15: {  // CreateTransferMemory(→w1 handle; x1 address, x2 size, w3 permission): the memory stays where it is in this one address space, and the only receivers are host services
+        // (audren:u, hle_audren_sv.c), which read nothing through it. A handle outside the kernel handle table: CloseHandle passes over it. The placeholder answer left the address in w1
+        // as the handle, and a CloseHandle of an address whose low word fell in the table would have closed another object
+        static _Atomic uint32_t next;
+        { static int once; if (!once++) LOG("svc CreateTransferMemory %#llx+%#llx: a handle outside the kernel table (host services only)", regs[1], regs[2]); }
+        regs[0] = 0; regs[1] = 0xd1000000u | (atomic_fetch_add(&next, 1) & 0xffffu); return 0;
+    }
     case 0x26: {  // Break(reason, ptr, size): SDK fatal abort
         uint32_t res = (regs[1] && regs[2] >= 4) ? *(uint32_t *)regs[1] : 0;
         module_t *mm = module_of((void *)regs[30]);

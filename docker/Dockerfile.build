@@ -34,6 +34,13 @@ RUN apt-get update \
  && update-alternatives --install /usr/bin/c++ c++ /usr/bin/clang++-18 100 \
  && dpkg-query -W -f '${db:Status-Abbrev}${Package} ${Version}\n' 'libboost*' clang-18 libstdc++-13-dev | sed -n 's/^ii *//p'
 ENV CXX=clang++
+# A system font, which the port's host gives a game as its standard shared font (dm/host/hle_sdk16.c font_system: DejaVu Sans first) and the packer draws the button icons'
+# letters with (dm/tools/make_ext_font.py letter_font: DejaVu Sans Bold), so that a game runs and packs in this image as on a desktop Linux. A layer of its own at the end, so
+# the layers above stay cached; the version apt resolved is printed
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends fonts-dejavu-core \
+ && rm -rf /var/lib/apt/lists/* \
+ && dpkg-query -W -f '${Package} ${Version}\n' fonts-dejavu-core
 # The worktree is mounted at /src; git refuses repositories owned by another user without this (system-wide: the container also runs as the caller's user, HOME=/tmp,
 # and the test runner reads the commit with git)
 RUN git config --system --add safe.directory '*'

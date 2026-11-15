@@ -23,7 +23,7 @@ from unittest import mock
 
 REPO = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO / 'dm/games')); sys.path.insert(0, str(REPO / 'dm/tools'))
-import game, nacp, profile_guess
+import game, make_ext_font, nacp, profile_guess
 spec = importlib.util.spec_from_file_location('build_ipa_from_nsp', REPO / 'scripts/build_ipa_from_nsp.py')
 nsp = importlib.util.module_from_spec(spec); spec.loader.exec_module(nsp)
 nsp.pg, nsp.nacp = profile_guess, nacp   # main sets them
@@ -150,8 +150,10 @@ class Pack(unittest.TestCase):
         self.dll = self.tmp / 'xlate_vk/dmsh_xlate_vk.dll'; self.dll.parent.mkdir(); self.dll.write_bytes(b'translator')
         self.said, self.ran, self.rewrites, self.targets_switch, self.tool_env, self.vk_tools_bad = [], [], [], [], {}, False
         self.gfx = 'nvn'
+        self.letters = self.tmp / 'fonts/Letters-Bold.ttf'; self.letters.parent.mkdir(); self.letters.write_bytes(b'letter font')   # the system's letter font (make_ext_font.letter_font)
         fam = {'base': self.nsp_dir / 'base.nsp', 'updates': [], 'dlc': []}
         for cm in (mock.patch.dict(os.environ, {'DM_GAMES_DIR': str(self.tmp / 'games'), 'XLATE_VK': str(self.dll)}), mock.patch.dict(sys.modules, {'capstone': types.SimpleNamespace(__version__='test')}),
+                   mock.patch.object(make_ext_font, 'letter_font', side_effect=lambda *a: str(self.letters) if self.letters.is_file() else None),
                    mock.patch.object(nsp, 'PROG', mock.Mock()), mock.patch.object(nsp, 'say', self.said.append),
                    mock.patch.object(nsp, 'find_repo', return_value=REPO), mock.patch.object(nsp, '_importable', return_value=True),
                    mock.patch.object(nsp.shutil, 'which', side_effect=lambda name, **kw: TRUE),
@@ -202,6 +204,8 @@ class Pack(unittest.TestCase):
             for n in nsp.CHAIN_TABLES_VK:   # into the profile DM_GAME names now (a derived one comes first)
                 (game.load(ID).dir / n).write_text(f'# chain {lib.name} inputs digest 2026-11-01T00:00:00+00:00\n')
             log.write_text('shaders 1: ok 1\nshader cache: hit 0, built 1\n')
+        elif tool == 'make_ext_font.py':   # the button-icon font, from the letter font given
+            Path(cmd[2]).write_bytes(b'ttf with letters of ' + Path(cmd[3]).read_bytes())
         elif tool == 'gl_shaders.py':
             assert cmd[-1] == '--vk', cmd
             out = Path(cmd[-2]) / 'gl-vk'; out.mkdir(parents=True, exist_ok=True); (out / 'gl_shaders.tsv').write_text('# GL shaders for Vulkan\n')
@@ -277,7 +281,12 @@ class Linux(Pack):
         self.assertEqual([(n, v) for k, n, v in rows if k == 'pack'], [('balanced', str(aot))])
         self.assertEqual([(n, v) for k, n, v in rows if k == 'env'], [
             ('DM_ROOT', str(self.work)), ('DM_ROMFS', str(self.game / 'RomFS')), ('DM_SAVE', str(self.wdir / 'run/save')), ('DM_TEMP', str(self.wdir / 'run/temp')),
-            ('DM_MSL_DIR', str(self.work / 'shader/cache')), ('DM_NVN_SHMAP', str(self.prof / 'shader_map.tsv')), ('DM_LANG', 'en-US'), ('DM_WINDOW', '1'), ('DM_AUDIO', '1')])
+            ('DM_MSL_DIR', str(self.work / 'shader/cache')), ('DM_FONT_DIR', str(self.work / 'font')), ('DM_NVN_SHMAP', str(self.prof / 'shader_map.tsv')), ('DM_LANG', 'en-US'),
+            ('DM_WINDOW', '1'), ('DM_AUDIO', '1')])
+        # the button-icon font: make_ext_font.py with the system's letter font, into <id>_build/font, which DM_FONT_DIR names
+        self.assertEqual(self.tools('make_ext_font.py'), [[sys.executable, str(REPO / 'dm/tools/make_ext_font.py'), str(self.work / 'font/nintendo_ext.ttf'), str(self.letters)]])
+        self.assertEqual((self.work / 'font/nintendo_ext.ttf').read_bytes(), b'ttf with letters of letter font')
+        self.assertIn(f'button-icon font: {self.work / "font/nintendo_ext.ttf"} (letters from {self.letters})', self.said)
         # the launcher's settings: settings.py's list for Linux, for this game's graphics API and packed language
         self.assertEqual(self.tools('settings.py'), [[sys.executable, str(REPO / 'dm/games/settings.py'), ID, str(self.work / 'patched_v0'), str(self.game / 'control.nacp'),
                                                       str(self.work / 'launcher-linux.json')]])
@@ -305,11 +314,13 @@ class Linux(Pack):
         self.assertEqual(self.check_run_sh(DM_ROMFS='/elsewhere')['env']['DM_ROMFS'], '/elsewhere')
         rc, err, got = self.run_sh(NXPACK='max')   # no max pack yet
         self.assertEqual((rc, got), (1, None)); self.assertIn('[RED] run.sh: ', err); self.assertIn('--pack-mode max', err)
-        # a second run reuses every step: no rewrite, no pack, no shader build
+        # a second run reuses every step: no rewrite, no pack, no shader build, no font
         first = {p.name: p.read_bytes() for p in aot.iterdir() if p.is_file()}
         self.pack()
-        self.assertEqual((self.rewrites, self.tools('nxaot'), self.tools('dmsh_build_vk.py')), ([], [], []))
+        self.assertEqual((self.rewrites, self.tools('nxaot'), self.tools('dmsh_build_vk.py'), self.tools('make_ext_font.py')), ([], [], [], []))
         self.assertEqual({p.name: p.read_bytes() for p in aot.iterdir() if p.is_file()}, first)
+        self.letters.write_bytes(b'another letter font'); self.pack()   # the letter font changed: the font is made again, and only it
+        self.assertEqual((len(self.tools('make_ext_font.py')), self.rewrites, self.tools('nxaot')), (1, [], []))
         # a new NRO: the rewrite runs again, and only the NRO's pack is made again (main's manifest is the same)
         self.nro = self.nro[:-4] + b'new!'; (self.game / 'RomFS/.nrr/game.nrr').write_bytes(b'NRR0 registered again')
         self.pack()
@@ -569,11 +580,43 @@ class Linux(Pack):
                       'vulkan-sdk-1.4.363.0 / actual missing)', self.said)
         self.assertTrue((self.aot / 'main.aot.so').is_file())
 
+    def test_without_a_letter_font(self):   # no letter font on this system (or no fontTools): the font step is not run, no DM_FONT_DIR row; the rest is packed
+        self.letters.unlink(); self.pack()
+        self.assertEqual(self.tools('make_ext_font.py'), [])
+        self.assertNotIn('DM_FONT_DIR', [n for k, n, v in launch_rows(self.work / 'launch-linux.tsv') if k == 'env'])
+        self.assertTrue(any(m.startswith('[RED] not run on this system: ') and 'the button-icon font (no letter font on this system (make_ext_font.py looks for ' in m
+                            for m in self.said), self.said)
+        self.assertTrue((self.aot / 'main.aot.so').is_file())
+        with mock.patch.object(nsp, '_importable', side_effect=lambda m: m != 'fontTools'): self.letters.write_bytes(b'letters'); self.pack()
+        self.assertEqual(self.tools('make_ext_font.py'), [])
+        self.assertTrue(any('the button-icon font (the current Python (' in m and ') has no fontTools (pip install fonttools))' in m for m in self.said), self.said)
+        self.pack(); self.assertEqual(len(self.tools('make_ext_font.py')), 1)   # both there: the font is made, and named
+        self.assertIn(('env', 'DM_FONT_DIR', str(self.work / 'font')), launch_rows(self.work / 'launch-linux.tsv'))
+
+    def test_bundle_spirv_tools_on_path(self):   # packed from a bundle with the SPIR-V tools (scripts/package_port.py --spirv): its bin/ first on PATH, for this process and its tools
+        bundle = self.tmp / 'bundle'
+        for rel in nsp.BUNDLE_SPIRV: (bundle / rel).parent.mkdir(parents=True, exist_ok=True); (bundle / rel).write_text('')
+        self.assertEqual(nsp.bundled_spirv(bundle), bundle / 'bin')
+        (bundle / 'bin/spirv-cross').unlink(); self.assertIsNone(nsp.bundled_spirv(bundle))   # all four, or none
+        (bundle / 'bin/spirv-cross').write_text('')
+        seen = []
+        with mock.patch.object(nsp, 'bundled_spirv', return_value=bundle / 'bin'), mock.patch.object(nsp, 'port_font', side_effect=lambda *a: seen.append(os.environ['PATH'])):
+            self.pack()
+        self.assertEqual(self.tool_env['dmsh_chain_vk.py']['PATH'].split(os.pathsep)[0], str(bundle / 'bin'))
+        self.assertEqual(self.tool_env['dmsh_build_vk.py']['PATH'].split(os.pathsep)[0], str(bundle / 'bin'))
+        self.assertEqual(seen[0].split(os.pathsep)[0], str(bundle / 'bin'))   # this process's own PATH too, during the run (Windows looks programs up on it)
+        self.assertIn(f"SPIR-V tools: the bundle's, in {bundle / 'bin'} (spirv-val, spirv-link, spirv-cross, glslangValidator)", self.said)
+        self.pack(); self.assertNotEqual(self.tool_env.get('dmsh_chain_vk.py', {}).get('PATH', '').split(os.pathsep)[0], str(bundle / 'bin'))   # a checkout's run: PATH as it is
+
     def test_bundle_tools(self):   # packed from the port's bundle (scripts/package_port.py --tools): its published bin/nx_extract and bin/dmsh_xlate_vk, and no dotnet anywhere
         bundle = self.tmp / 'bundle'
         for rel in (nsp.BUNDLE_NX_EXTRACT, nsp.BUNDLE_XLATE_VK): (bundle / rel).parent.mkdir(parents=True, exist_ok=True); (bundle / rel).write_text('')
         self.assertEqual(REAL_BUNDLED_TOOL(bundle, nsp.BUNDLE_XLATE_VK), bundle / 'bin/dmsh_xlate_vk')
         self.assertIsNone(REAL_BUNDLED_TOOL(self.tmp / 'checkout', nsp.BUNDLE_NX_EXTRACT))
+        (bundle / 'python').mkdir()   # a bundle with its own Python: a Python without the modules is told about pack.sh
+        with mock.patch.object(nsp, '_importable', return_value=False), \
+                self.assertRaisesRegex(nsp.BuildError, r"is missing modules: lz4\.block, capstone, backports\.zstd \(this bundle's pack\.sh runs its own Python, python/"):
+            nsp.check_prereqs_port({'PATH': ''}, bundle)
         no_dotnet = lambda name, **kw: None if name == 'dotnet' else TRUE
         with mock.patch.object(nsp.shutil, 'which', side_effect=no_dotnet):   # a checkout without dotnet stops before the long steps
             with self.assertRaisesRegex(nsp.BuildError, r"dotnet \(\.NET SDK 10, which builds nx_extract; the port's bundle carries it prebuilt as bin/nx_extract\)"):

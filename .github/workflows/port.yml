@@ -165,8 +165,19 @@ jobs:
         run: |
           docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -e PYTHONDONTWRITEBYTECODE=1 -v "$(pwd):/src" -w /src nxnative-chain sh -c \
             'sh dm/tools/publish_port_tools.sh linux build/port_tools/linux-x64 --check && NX_EXTRACT=/src/build/port_tools/linux-x64/nx_extract python3 -m unittest dm/tools/tests/test_nx_extract.py && XLATE_VK=/src/build/port_tools/linux-x64/dmsh_xlate_vk DOTNET=/nonexistent python3 -m unittest dm/gfx/tests/test_dmsh_vk.py'
+      # What packing needs beyond those, so that a player installs nothing: the packer's own Python (dm/tools/publish_port_python.py: CPython 3.14 with lz4, capstone and
+      # fontTools, every download pinned by SHA-256) and the SPIR-V tools of dmsh_chain_vk.lock, which docker/build_spirv_tools.sh built from pinned source in the chain
+      # image's stage (/opt/spirv-tools: the bundle takes the four the packer runs, and their licences)
+      - name: The packer's Python (build/port_python/linux-x64) and the SPIR-V tools (build/port_spirv/linux-x64)
+        run: |
+          docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -e PYTHONDONTWRITEBYTECODE=1 -v "$(pwd):/src" -w /src nxnative-chain sh -c \
+            'python3 dm/tools/publish_port_python.py linux build/port_python/linux-x64 --check && mkdir -p build/port_spirv/linux-x64 &&
+             cp /opt/spirv-tools/spirv-val /opt/spirv-tools/spirv-link /opt/spirv-tools/spirv-cross /opt/spirv-tools/glslangValidator build/port_spirv/linux-x64/ &&
+             cp -R /opt/spirv-tools/licenses build/port_spirv/linux-x64/'
       - name: Assemble, archive and check the bundle
-        run: python3 scripts/package_port.py --platform linux --build build/linux --aot build/aot --tools build/port_tools/linux-x64 --out build/bundle/nxnative-linux-x86_64 --archive --check
+        run: |
+          python3 scripts/package_port.py --platform linux --build build/linux --aot build/aot --tools build/port_tools/linux-x64 --python build/port_python/linux-x64 \
+            --spirv build/port_spirv/linux-x64 --out build/bundle/nxnative-linux-x86_64 --archive --check
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: nxnative-linux-x86_64
@@ -270,9 +281,18 @@ jobs:
           retention-days: 7
       # The Windows bundle: scripts/package_port.py with its zip and its check (the .exe files are not run here; nxlauncher.exe opens on Windows), with the tree's
       # nxhost-run.exe, the one host of every game profile (bin\nxhost-run.exe), and the recompiler nxaot.exe of build/aot-win64 (bin\nxaot.exe, which the packer runs)
+      # The packer's own Python for Windows (python.org's embeddable package with the wheels: dm/tools/publish_port_python.py) and the SPIR-V tools cross-built with llvm-mingw
+      # from the pinned sources of docker/build_spirv_tools.sh (static: Windows' own DLLs and the UCRT only, which its --check lists)
+      - name: The packer's Python (build/port_python/win-x64) and the SPIR-V tools (build/port_spirv/win-x64)
+        if: ${{ github.event_name != 'pull_request' }}
+        run: |
+          docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -v "$(pwd):/src" -w /src nxnative-chain python3 dm/tools/publish_port_python.py windows build/port_python/win-x64 --check
+          docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -v "$(pwd):/src" -w /src "$MINGW_IMAGE" sh docker/build_spirv_tools.sh windows build/port_spirv/win-x64 --check
       - name: Assemble, archive and check the bundle
         if: ${{ github.event_name != 'pull_request' }}
-        run: python3 scripts/package_port.py --platform windows --build build/win64 --aot build/aot-win64 --tools build/port_tools/win-x64 --out build/bundle/nxnative-windows-x86_64 --archive --check
+        run: |
+          python3 scripts/package_port.py --platform windows --build build/win64 --aot build/aot-win64 --tools build/port_tools/win-x64 --python build/port_python/win-x64 \
+            --spirv build/port_spirv/win-x64 --out build/bundle/nxnative-windows-x86_64 --archive --check
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: ${{ github.event_name != 'pull_request' }}
         with:

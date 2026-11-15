@@ -1,15 +1,50 @@
 #!/usr/bin/env python3
 # Generate a stand-in for the "Nintendo extension" shared font (nintendo_ext.ttf): controller-button icons at the original private-use code points (A/B/X/Y, L/R/ZL/ZR/SL/SR, +/−, D-pad, stick direction arrows).
-# The host has no original system fonts; button icons in game text (e.g. Mario's GameMsg/Key.msbt: U+E0E0 = A button) render as "?" when the glyph is missing. Letters come from macOS's Arial Rounded Bold, knocked out of a solid plate.
-# Usage: make_ext_font.py out.ttf [letter-font.ttf]; needs fontTools (pip install fonttools)
-import math, sys
-from fontTools.ttLib import TTFont
-from fontTools.fontBuilder import FontBuilder
-from fontTools.pens.ttGlyphPen import TTGlyphPen
-from fontTools.pens.transformPen import TransformPen
-from fontTools.pens.reverseContourPen import ReverseContourPen
-from fontTools.pens.boundsPen import BoundsPen
-from fontTools.pens.recordingPen import RecordingPen
+# The host has no original system fonts; button icons in game text (e.g. Mario's GameMsg/Key.msbt: U+E0E0 = A button) render as "?" when the glyph is missing. The letters are a font's
+# of this system (letter_font), knocked out of a solid plate: macOS's Arial Rounded Bold on a Mac; on Windows Arial Bold (every Windows has it), then Segoe UI or Tahoma Bold; on
+# Linux the bold of the families the port's host takes the standard shared font from (dm/host/hle_sdk16.c font_system: DejaVu Sans, Liberation Sans, Noto Sans, FreeSans, in
+# the XDG data folders' fonts/ at the paths the distributions install them to), then their regular weight.
+# Usage: make_ext_font.py out.ttf [letter-font.ttf]; needs fontTools (pip install fonttools; the port's bundles carry it in their own Python). Exit 2 when no letter font is found.
+import math, os, sys
+
+# The letter fonts by platform, the first that exists taken (letter_font): paths, or names under the platform's font folders (font_dirs)
+LETTER_FONTS = {
+    'darwin': ['/System/Library/Fonts/Supplemental/Arial Rounded Bold.ttf'],
+    'win32': ['arialbd.ttf', 'segoeuib.ttf', 'tahomabd.ttf', 'arial.ttf', 'segoeui.ttf', 'tahoma.ttf'],
+    'linux': [f'{d}/{f}' for w in ('Bold', '') for d, f in (
+        ('truetype/dejavu', f'DejaVuSans{"-" + w if w else ""}.ttf'), ('dejavu-sans-fonts', f'DejaVuSans{"-" + w if w else ""}.ttf'),
+        ('dejavu', f'DejaVuSans{"-" + w if w else ""}.ttf'), ('TTF', f'DejaVuSans{"-" + w if w else ""}.ttf'),
+        ('truetype/liberation', f'LiberationSans-{w or "Regular"}.ttf'), ('liberation-sans', f'LiberationSans-{w or "Regular"}.ttf'),
+        ('liberation', f'LiberationSans-{w or "Regular"}.ttf'), ('TTF', f'LiberationSans-{w or "Regular"}.ttf'),
+        ('truetype/noto', f'NotoSans-{w or "Regular"}.ttf'), ('noto', f'NotoSans-{w or "Regular"}.ttf'), ('google-noto', f'NotoSans-{w or "Regular"}.ttf'),
+        ('TTF', f'NotoSans-{w or "Regular"}.ttf'), ('truetype/freefont', f'FreeSans{w}.ttf'), ('gnu-free', f'FreeSans{w}.ttf'))],
+}
+
+
+def font_dirs(platform=None, environ=None):
+    """The folders a letter font's name is looked up in: Windows' %SystemRoot%\\Fonts; on Linux the XDG data folders' fonts/ ($XDG_DATA_HOME, default ~/.local/share,
+    then $XDG_DATA_DIRS, default /usr/local/share:/usr/share), as the port's host looks for the standard font; none on a Mac (its entry is a path)"""
+    platform, environ = platform or sys.platform, os.environ if environ is None else environ
+    if platform == 'win32': return [os.path.join(environ.get('SystemRoot') or 'C:\\Windows', 'Fonts')]
+    if platform != 'linux': return []
+    home = environ.get('XDG_DATA_HOME') or (os.path.join(environ['HOME'], '.local/share') if environ.get('HOME') else '')
+    return [os.path.join(d, 'fonts') for d in [home] + (environ.get('XDG_DATA_DIRS') or '/usr/local/share:/usr/share').split(':') if d]
+
+
+def letter_font(platform=None, environ=None):
+    """The letter font of this system (LETTER_FONTS, the first that exists), or None"""
+    platform = platform or sys.platform
+    names, dirs = LETTER_FONTS.get(platform, []), font_dirs(platform, environ)
+    for n in names:
+        for p in [n] if os.path.isabs(n) or not dirs else [os.path.join(d, n) for d in dirs]:
+            if os.path.isfile(p): return p
+    return None
+
+
+def where(platform=None, environ=None):   # the places letter_font looks, for a message
+    platform = platform or sys.platform
+    dirs = font_dirs(platform, environ)
+    return ', '.join(LETTER_FONTS.get(platform, [])[:4]) + (' ... in ' + ', '.join(dirs) if dirs else '')
 
 EM, ASC, DESC = 1000, 880, -120
 CY, R = 350, 450          # icon centre height and circle radius: -100 to 800, sitting on the baseline
@@ -41,6 +76,16 @@ def rot(pts, cx, cy, deg):
     a = math.radians(deg); c, s = math.cos(a), math.sin(a)
     return [(round(cx + (x - cx) * c - (y - cy) * s), round(cy + (x - cx) * s + (y - cy) * c), on) for x, y, on in pts]
 
+def _fonttools():   # fontTools, imported when a font is built: letter_font is imported by the packer (build_ipa_from_nsp.py port_font), whose Python may lack it
+    global TTFont, FontBuilder, TTGlyphPen, TransformPen, ReverseContourPen, BoundsPen, RecordingPen
+    from fontTools.ttLib import TTFont
+    from fontTools.fontBuilder import FontBuilder
+    from fontTools.pens.ttGlyphPen import TTGlyphPen
+    from fontTools.pens.transformPen import TransformPen
+    from fontTools.pens.reverseContourPen import ReverseContourPen
+    from fontTools.pens.boundsPen import BoundsPen
+    from fontTools.pens.recordingPen import RecordingPen
+
 class Letters:
     def __init__(self, path):
         self.f = TTFont(path); self.gs = self.f.getGlyphSet(); self.cmap = self.f.getBestCmap()
@@ -68,6 +113,7 @@ def cross(cx, cy, half, arm):   # D-pad outline (one closed ring)
             (cx + a, cy - h, 1), (cx - a, cy - h, 1), (cx - a, cy - a, 1), (cx - h, cy - a, 1), (cx - h, cy + a, 1), (cx - a, cy + a, 1)]
 
 def build(out, letter_font):
+    _fonttools()
     L = Letters(letter_font); glyphs = {}; adv = {}; cmap = {}
     def glyph(name, codes, width, draw):
         pen = TTGlyphPen(None); draw(pen, width / 2); glyphs[name] = pen.glyph(); adv[name] = width
@@ -124,8 +170,11 @@ def build(out, letter_font):
     fb.setupNameTable({'familyName': 'DM Nintendo Extension Stand-in', 'styleName': 'Regular'})
     fb.setupOS2(sTypoAscender=ASC, sTypoDescender=DESC, sTypoLineGap=0, usWinAscent=ASC, usWinDescent=-DESC)
     fb.setupPost(); fb.save(out)
-    print('%s: %d glyphs, %d code points' % (out, len(order), len(cmap)))
+    print('%s: %d glyphs, %d code points, letters from %s' % (out, len(order), len(cmap), letter_font))
 
 if __name__ == '__main__':
     if len(sys.argv) < 2: sys.exit(__doc__ or 'usage: make_ext_font.py out.ttf [letter-font.ttf]')
-    build(sys.argv[1], sys.argv[2] if len(sys.argv) > 2 else '/System/Library/Fonts/Supplemental/Arial Rounded Bold.ttf')
+    letters = sys.argv[2] if len(sys.argv) > 2 else letter_font()
+    if not letters:
+        print(f'[RED] make_ext_font.py: no letter font on this system (looked for {where()}): give one as the second argument', file=sys.stderr); sys.exit(2)
+    build(sys.argv[1], letters)

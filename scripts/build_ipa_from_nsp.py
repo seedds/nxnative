@@ -15,9 +15,10 @@
 # PLATFORM = 'linux' / 'windows' (--platform linux / windows): a pack for the x86-64 host program nxhost-run (docker/README.md, "Running the host program"), run on that system. The same steps up to
 #   and including the rewrite, which also writes the recompiler's input (patch_nso.py --aot, one run for both outputs) into <id>_build/aot_<version>/: per module <name>.aot.tsv and
 #   <name>.image.bin, and nro.tsv (the NROs the game registers, Apple's rows). Then the shaders for the Vulkan backend: an NVN game's split and dmsh_build_vk.py into <id>_build/shader/cache/vk-<V>/
-#   (V = DMSH_CHAIN_VK; it needs the Vulkan translator, a bundle's bin/dmsh_xlate_vk or the dll built with .NET in the chain image, and the SPIR-V tools of its lock, and is reported as not
-#   run without them), an OpenGL game's gl_shaders.py --vk into <id>_build/shader/gl-vk/,
-#   none for a guest Vulkan game (its SPIR-V goes to the driver); then <id>_build/run.sh (run.cmd on Windows) with the nxhost-run command line, its save in <NSP folder>/<id>-work/run/, and
+#   (V = DMSH_CHAIN_VK; it needs the Vulkan translator, a bundle's bin/dmsh_xlate_vk or the dll built with .NET in the chain image, and the SPIR-V tools of its lock, a bundle's bin/, which
+#   this script puts first on PATH, else PATH's (the chain image's), and is reported as not run without them), an OpenGL game's gl_shaders.py --vk into <id>_build/shader/gl-vk/ (glslang),
+#   none for a guest Vulkan game (its SPIR-V goes to the driver); the button-icon font <id>_build/font/nintendo_ext.ttf (make_ext_font.py with a letter font of this system and
+#   fontTools; reported as not run without them); then <id>_build/run.sh (run.cmd on Windows) with the nxhost-run command line, its save in <NSP folder>/<id>-work/run/, and
 #   the game profile's file <id>_build/game-profile-<platform>.tsv (game.py runtime), which the one nxhost-run of every game takes with --profile; last the
 #   packs: nxaot build (NXAOT / --nxaot, default bin/nxaot in the port's bundle, else build/aot/nxaot; bin\nxaot.exe and build\aot-win64\nxaot.exe on Windows) of every module's manifest and every NRO into <name>.aot.so beside them (on Windows <name>.aot.dll, nxaot build --target
 #   windows: dm/tools/aot/README.md, "Windows packs"), mode PACK_MODE / --pack-mode (balanced or max), with the per-function cache <NSP folder>/<id>-work/aot-cache/ when this nxaot has --cache,
@@ -395,11 +396,18 @@ def rmtree(p):
 # The port's bundle (scripts/package_port.py --tools; docs/development.md, "The port's bundles") carries its tools published by dm/tools/publish_port_tools.sh, programs that need no .NET:
 # run from a bundle (find_repo stops at its root), the packer takes them; a repository checkout builds nx_extract with dotnet and runs the translator's dll with dotnet
 BUNDLE_NX_EXTRACT, BUNDLE_XLATE_VK = 'bin/nx_extract', 'bin/dmsh_xlate_vk'
+# ... and the SPIR-V tools of the Vulkan shader chain (scripts/package_port.py --spirv: docker/build_spirv_tools.sh, built from the sources dmsh_chain_vk.lock's rows name), which
+# dmsh_chain_vk.py, dmsh_build_vk.py, dmsh_spv.py and gl_shaders.py run by their names: run from a bundle that has them, the packer puts its bin/ first on PATH (bundled_spirv)
+BUNDLE_SPIRV = ('bin/spirv-val', 'bin/spirv-link', 'bin/spirv-cross', 'bin/glslangValidator')
 
 
 def bundled_tool(repo, rel):   # the bundle's program rel (.exe on Windows), or None outside a bundle
     p = repo / (rel + ('.exe' if os.name == 'nt' else ''))
     return p if p.is_file() else None
+
+
+def bundled_spirv(repo):   # the bundle's bin/ when it holds every SPIR-V tool of BUNDLE_SPIRV, else None
+    return repo / 'bin' if all(bundled_tool(repo, t) for t in BUNDLE_SPIRV) else None
 
 
 def build_nx_extract(repo, work, logs, env):
@@ -1940,14 +1948,38 @@ def mac_host(py, repo, work, env, logs, g):
     PROG.stage('Mac host', step='building')
     host = build_mac_host(repo, work / 'tools/dmhost', env, logs, g)
     PROG.set(step='button-icon font')
-    font = work / 'font'; ttf, kf = font / 'nintendo_ext.ttf', font / 'nintendo_ext.key'
-    key = fingerprint(('files', [repo / 'dm/tools/make_ext_font.py']))
-    if not (ttf.is_file() and reused(kf, key) is not None):
-        rmtree(kf); font.mkdir(parents=True, exist_ok=True)
-        run([py, repo / 'dm/tools/make_ext_font.py', ttf], logs / 'make_ext_font.log', env=env)
-        kf.write_text(f'{key}\n')
+    font = ext_font(py, repo, work, env, logs)
     PROG.end(str(host))
     return host, font
+
+
+def ext_font(py, repo, work, env, logs, letters=None):
+    """The button-icon font the host gives a game for the Nintendo extension shared font: make_ext_font.py into <id>_build/font/nintendo_ext.ttf, made again when the tool or
+    the letter font changed (letters: the letter font's path; None, make_ext_font.py's own choice, the Mac's Arial Rounded Bold). Returns the folder (DM_FONT_DIR)"""
+    font = work / 'font'; ttf, kf = font / 'nintendo_ext.ttf', font / 'nintendo_ext.key'
+    key = fingerprint(('files', [repo / 'dm/tools/make_ext_font.py'] + ([letters] if letters else [])))
+    if not (ttf.is_file() and reused(kf, key) is not None):
+        rmtree(kf); font.mkdir(parents=True, exist_ok=True)
+        run([py, repo / 'dm/tools/make_ext_font.py', ttf] + ([letters] if letters else []), logs / 'make_ext_font.log', env=env)
+        kf.write_text(f'{key}\n')
+    return font
+
+
+def port_font(py, repo, work, env, logs, skipped):
+    """The button-icon font of a pack for Windows or Linux (ext_font), with a letter font of this system (make_ext_font.py letter_font: Arial Bold on Windows, DejaVu, Liberation,
+    Noto or FreeSans on Linux, the families the port's host takes the standard shared font from), for the launch file's DM_FONT_DIR. Without fontTools in this Python or a letter
+    font the step is not run: a [RED] line, an entry in skipped, and the game draws its button icons as '?'. Returns the font folder or None"""
+    import make_ext_font   # dm/tools, on sys.path; it imports fontTools only to build
+    letters = make_ext_font.letter_font()
+    why = (f'the current Python ({sys.executable}) has no fontTools (pip install fonttools)' if not _importable('fontTools')
+           else '' if letters else f'no letter font on this system (make_ext_font.py looks for {make_ext_font.where()})')
+    if why:
+        say(f'[RED] no button-icon font ({why}): the game draws its button icons as \'?\'')
+        skipped.append(f'the button-icon font ({why})')
+        return None
+    font = ext_font(py, repo, work, env, logs, letters)
+    say(f'button-icon font: {font / "nintendo_ext.ttf"} (letters from {letters})')
+    return font
 
 
 def mac_run(work, game, patched, host, font, msl, aoc, gfx, lang, env, logs, g, env_file=''):
@@ -2080,7 +2112,10 @@ def port_notes(platform, S, ro=False):
 
 def check_prereqs_port(env, repo):   # what a pack for Windows or Linux runs up to the rewrite and the shader split (Xcode, Metal, xcodegen, make and zstd build the Apple hosts and the app)
     missing = [m for m in ('lz4.block', 'capstone') if not _importable(m)] + ([] if _importable('compression.zstd') or _importable('backports.zstd') else ['backports.zstd'])
-    if missing: raise BuildError(f'the current Python ({sys.executable}) is missing modules: {", ".join(missing)} (pip install lz4 capstone backports.zstd; backports.zstd only before Python 3.14)')
+    own = (repo / 'python').is_dir()   # a bundle with its own Python (scripts/package_port.py --python), which its pack.sh / pack.cmd run
+    if missing: raise BuildError(f'the current Python ({sys.executable}) is missing modules: {", ".join(missing)} ('
+                                 + (f'this bundle\'s pack.{"cmd" if os.name == "nt" else "sh"} runs its own Python, python/, which has them; or ' if own else '')
+                                 + 'pip install lz4 capstone backports.zstd; backports.zstd only before Python 3.14)')
     if not bundled_tool(repo, BUNDLE_NX_EXTRACT) and not shutil.which('dotnet', path=env['PATH']):
         raise BuildError('tools not found: dotnet (.NET SDK 10, which builds nx_extract; the port\'s bundle carries it prebuilt as bin/nx_extract)')
 
@@ -2624,7 +2659,7 @@ def port_game_profile(py, repo, work, g, platform, env, logs):
 
 
 def port_launch_file(platform, repo, work, wdir, aot, game, msl, aoc, gfx, lang, g, name, version, pkg_ver, modes, env_file='', settings=None, repack=None, made=(), host=None,
-                     game_profile=None):
+                     game_profile=None, font=None):
     """<id>_build/launch-<platform>.tsv: what starts this pack, the one source that run.sh (run.cmd) and the launcher nxlauncher (dm/launcher) both read (docs/settings.md, On Windows and Linux).
     Tab-separated rows <kind> <name> <value> under '#' lines: game (title, title_id, version, package, platform, graphics), path (host: nxhost-run, one program for every game; game_profile:
     the file of the game profile the pack is made from, which the host takes with --profile (port_game_profile); cwd: its
@@ -2634,12 +2669,14 @@ def port_launch_file(platform, repo, work, wdir, aot, game, msl, aoc, gfx, lang,
     the prod.keys file it read (its path only); nxaot, the recompiler), made, samples, misses and targets (made: what the packs were made with, made_rows: the launcher compares them with
     what the profile folder holds now), pack (one row per mode in modes, whose packs are complete: the folder nxhost-run is given, the first the default) and env (the environment
     nxhost-run gets: an environment file's switches (DM_ENV_FILE / --env-file), then the pack's layout as mac_run gives the Mac host: the recompiler's input, the RomFS image, the save and
-    temporary storage, the shader libraries (msl, DM_MSL_DIR), the DLC, an NVN game's shader map, the game language, a window and sound). A reader sets each env row only when the
+    temporary storage, the shader libraries (msl, DM_MSL_DIR), the button-icon font (font, DM_FONT_DIR: port_font's folder, when it made one), the DLC, an NVN game's shader map, the
+    game language, a window and sound). A reader sets each env row only when the
     environment and the player's env.txt have not set it, first row first. host: the nxhost-run to name (port_host's by default); game_profile: the profile file to name
     (game_profile_file's by default, the file port_game_profile writes). Returns its path"""
     rd, win = wdir / 'run', platform == 'windows'
     for d in ('save', 'temp'): (rd / d).mkdir(parents=True, exist_ok=True)
     renv = {'DM_ROOT': work, 'DM_ROMFS': rfs.source(game), 'DM_SAVE': rd / 'save', 'DM_TEMP': rd / 'temp', 'DM_MSL_DIR': msl}
+    if font: renv['DM_FONT_DIR'] = font
     if aoc: renv['DM_AOC_DIR'] = aoc
     if gfx == 'nvn': renv['DM_NVN_SHMAP'] = g.table('shader_map.tsv')
     renv.update(DM_LANG=lang, DM_WINDOW=1, DM_AUDIO=1)
@@ -2960,6 +2997,11 @@ def main(args=None):
     want_lang = language_code(lang_in) if lang_in else 'en-US'
     if not want_lang: raise BuildError(f'unknown game language {lang_in!r}; give one of {language_list([c for c, _ in nacp.LANGUAGES])}, by code or by name')
     env = dict(os.environ, PATH=os.pathsep.join(TOOL_PATHS + [os.environ.get('PATH', '/usr/bin:/bin:/usr/sbin:/sbin')]))
+    spirv = bundled_spirv(repo)   # the port's bundle's SPIR-V tools, first on PATH for the shader tools that run them by name (bundled_spirv)
+    if spirv:
+        env['PATH'] = os.pathsep.join([str(spirv), env['PATH']])
+        os.environ['PATH'] = os.pathsep.join([str(spirv), os.environ.get('PATH', '')])   # Windows looks a program up on this process's PATH, not on the one a child gets
+        say(f'SPIR-V tools: the bundle\'s, in {spirv} ({", ".join(Path(t).name for t in BUNDLE_SPIRV)})')
     env.setdefault('USER', getpass.getuser())   # xcodegen fails without USER (Couldn't find current username)
     configure_dotnet(env)
     env.setdefault('J', str(os.cpu_count() or 8))   # shader_split.py's and dmsh_build.py's workers (their default is 8)
@@ -3168,13 +3210,15 @@ def main(args=None):
             if any(p for p in profiles.glob('*.tsv') if not p.name.endswith(('.misses.tsv', '.targets.tsv'))): say(f'--no-profile: the sample profiles in {profiles} are not used')   # the misses are; the targets go with the profiles
             profiles = None
         settings = port_settings(py, repo, work, game, patched, gfx, lang, g, platform, env, logs)
+        font = port_font(py, repo, work, env, logs, skipped)   # the button-icon font (DM_FONT_DIR), with a letter font of this system
         # the game profile the pack is made from (registered, derived or provisional, as this run found it) as the file the one host of every game takes with --profile
         gprof = port_game_profile(py, repo, work, g, platform, env, logs)
         # what packs the game again as this run does, for the launcher's "Repack with profile" (dm/launcher): the NSP folder, this script and its Python, the keys' path, the recompiler
         repack = {'package': nsp_dir, 'packer': here, 'python': sys.executable, 'keys': keys, 'nxaot': nxaot}
         made = made_rows(nxaot_opts, aot, mods, profiles, misses, args.no_profile)   # what the packs are made with: the launcher's "a better pack is possible" compares the profile folder with it
         def launch_file(modes):   # the launch file offering those pack modes
-            return port_launch_file(platform, repo, work, wdir, aot, game, ios, aoc, gfx, lang, g, title, app_version, pkg_ver, modes, env_file, settings, repack, made, host, gprof)
+            return port_launch_file(platform, repo, work, wdir, aot, game, ios, aoc, gfx, lang, g, title, app_version, pkg_ver, modes, env_file, settings, repack, made, host, gprof,
+                                    font)
         # the mode about to be packed is not offered while its packs are made (an interrupted pack leaves a mix); the other mode's complete packs stay offered
         launch = launch_file([m for m in packs_ready(nxaot, nxaot_opts, aot, nro_dir, mods, platform, profiles, misses) if m != pack_mode])
         script = port_run_script(platform, repo, work, wdir, g, title, launch, host if bundled else None)

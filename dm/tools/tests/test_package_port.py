@@ -6,7 +6,9 @@ import importlib.util
 import io
 import os
 from pathlib import Path
+import re
 import shutil
+import stat
 import subprocess
 import sys
 import tarfile
@@ -49,6 +51,18 @@ NXAOT = '''#!/bin/sh
 if [ "$1" = version ]; then printf 'llvm\\t18.1.3\\ndynarmic\\ta466015\\n'; exit 0; fi
 exit 2
 '''
+# a stand-in for the bundle's Python (dm/tools/publish_port_python.py): -c (the check's probe) prints what the real one prints, its sys.path in the bundle (@MORE@: other lines);
+# anything else runs this machine's Python on it (the packer's --help, dmsh_chain_vk.py --check-tools). No external command: the check runs it with PATH holding only bin/
+PYTHON = '''#!/bin/sh
+here=${0%/*}/..
+if [ "$1" = -c ]; then echo "python 3.14.10, lz4 4.4.5, capstone 5.0.7, fontTools 4.68.0, zstd 1.5.7"; echo "path $here/lib/python3.14"; @MORE@ exit 0; fi
+exec @PY@ -I "$@"
+'''
+PE = b'MZ' + bytes(0x3a) + (0x40).to_bytes(4, 'little') + b'PE\0\0' + (0x8664).to_bytes(2, 'little') + bytes(18) + (0x20b).to_bytes(2, 'little') + bytes(0x100)   # a PE32+ x86-64 header
+
+
+def flat(text):   # README.txt's text with its line breaks and indents as single spaces (a sentence is found whatever the wrapping)
+    return ' '.join(text.split())
 
 
 class Bundle(unittest.TestCase):
@@ -98,8 +112,11 @@ class Bundle(unittest.TestCase):
         self.assertTrue(version[0].startswith(f'nxnative {sha}'), version)
         self.assertIn('host bin/nxhost-run', version); self.assertIn('profiles 2', version); self.assertIn('platform linux-x86_64', version)
         self.assertFalse([l for l in version if l.startswith('hosts')])
+        self.assertIn('python no', version); self.assertIn('spirv no', version)
         readme = (out / 'README.txt').read_text()
-        self.assertIn('./pack.sh "<the game\'s NSP folder>" -k "<your prod.keys>"', readme); self.assertIn('pip install lz4 capstone backports.zstd', readme)
+        self.assertIn('./pack.sh "<the game\'s NSP folder>" -k "<your prod.keys>"', readme); self.assertIn('pip install lz4 capstone fonttools backports.zstd', flat(readme))
+        self.assertIn('which this folder does not carry: without them the packer reports the NVN shaders as not run', flat(readme))   # no --spirv: said
+        self.assertNotIn('nothing to install', readme); self.assertNotIn('python/', readme)
         self.assertRegex(readme, r'\n  bin/nxhost-run +the host program the launcher starts, one for every game'); self.assertIn('Game profiles in this folder: 2.', readme)
         self.assertNotIn('hosts/', readme + (out / 'pack.sh').read_text())
         self.assertIn('exec "${PYTHON:-python3}" "$here/scripts/build_ipa_from_nsp.py" --platform linux "$@"', (out / 'pack.sh').read_text())
@@ -217,17 +234,18 @@ class Bundle(unittest.TestCase):
         self.assertEqual((out / 'licenses/dotnet-runtime.txt').read_text(), 'dotnet-runtime.txt of the tools\n')
         self.assertEqual((out / 'licenses/LibHac.txt').read_text(), 'LibHac.txt of the tools\n')
         self.assertEqual((out / 'licenses/ryujinx.txt').read_bytes(), (REPO / 'dm/third_party/ryujinx/LICENSE.txt').read_bytes())   # the name was taken: the vendored copy's
-        readme = (out / 'README.txt').read_text()
-        self.assertNotIn('.NET', readme.replace('need no .NET', '')); self.assertNotIn('does not carry yet: docs', readme)
-        self.assertIn('need no .NET', readme); self.assertIn('SPIRV-Tools, glslang and SPIRV-Cross', readme)
-        self.assertRegex(readme, r'\n  bin/nx_extract +the NSP extraction tool the packer runs\n  bin/dmsh_xlate_vk +the Vulkan shader translator the packer runs for NVN games\n')
-        # without --tools the text is the one before them, byte for byte
+        readme = flat((out / 'README.txt').read_text())
+        self.assertNotIn('.NET', readme.replace('none of them needs .NET', '')); self.assertNotIn('Vulkan shader translator, which this folder does not carry', readme)
+        self.assertIn("The packer's extraction tool and Vulkan shader translator are in bin/, and none of them needs .NET.", readme)
+        self.assertIn('SPIRV-Tools, glslang and SPIRV-Cross of the versions dm/gfx/tools/dmsh_chain_vk.lock records, which this folder does not carry', readme)
+        self.assertRegex((out / 'README.txt').read_text(), r'\n  bin/nx_extract +the NSP extraction tool the packer runs\n  bin/dmsh_xlate_vk +the Vulkan shader translator the packer runs for NVN games\n')
+        # without --tools: the .NET SDK and the translator are asked for
         profiles = list(GAMES)
         for platform in ('linux', 'windows'):
             for nxaot in (False, True):
                 self.assertEqual(pp.readme(platform, 'abc1234', '2026-11-15', profiles, nxaot), pp.readme(platform, 'abc1234', '2026-11-15', profiles, nxaot, False))
-        self.assertIn('and the .NET SDK 10 (the packer builds its extraction tool, nx_extract, with it on the first pack; NVN games also need the Vulkan shader\n'
-                      '    translator, which this folder does not carry yet', pp.readme('linux', 'abc1234', '2026-11-15', profiles, True))
+        self.assertIn('and the .NET SDK 10 (the packer builds its extraction tool, nx_extract, with it on the first pack). NVN games also need the Vulkan shader translator, '
+                      'which this folder does not carry', flat(pp.readme('linux', 'abc1234', '2026-11-15', profiles, True)))
         # the check: the stand-ins run, and the translator is not the one the bundle's lock fingerprints
         rc, err, out = self.package('--tools', str(tools), '--check')
         self.assertEqual(rc, 1); self.assertIn('dm/gfx/tools/dmsh_chain_vk.py: exit 1', err); self.assertIn('does not match the lock: dmsh_xlate_vk_linux-x64', err)
@@ -297,6 +315,123 @@ class Bundle(unittest.TestCase):
                          ['bin/nxaot needs libLLVM.so.18.1 libxml2.so.2, which a player\'s PC need not have: it was linked with the shared LLVM; build nxaot with '
                           '-DNXAOT_LLVM_STATIC=ON (dm/tools/aot/README.md)'])
 
+    def spirv(self, exe):   # stand-ins for docker/build_spirv_tools.sh's output: the four tools (Linux: each prints its row's line of the lock; Windows: a PE header), their licences
+        d, lock = self.tmp / f'build/port_spirv/{"win-x64" if exe else "linux-x64"}', dmsh_chain_vk.lock()
+        for row, t, opt in pp.SPIRV_ROWS:
+            if exe: (d / f'{t}{exe}').parent.mkdir(parents=True, exist_ok=True); (d / f'{t}{exe}').write_bytes(PE); (d / f'{t}{exe}').chmod(0o755)
+            else: self.write(d / t, f"#!/bin/sh\necho '{lock[row + '_linux-x64']}'\n", 0o755)
+        for n in pp.SPIRV_LICENCES: self.write(d / 'licenses' / n, f'{n} of the SPIR-V tools\n')
+        return d
+
+    def python(self, exe, more=''):   # a stand-in for dm/tools/publish_port_python.py's output: the runtime (PYTHON on Linux; the files the check looks for on Windows), python.tsv, licences
+        d = self.tmp / f'build/port_python/{"win-x64" if exe else "linux-x64"}'
+        program = 'python/python.exe' if exe else 'python/bin/python3.14'
+        if exe:
+            for rel in ('python.exe', 'python314.dll', 'python314.zip', 'Lib/site-packages/lz4/block/_block.cp314-win_amd64.pyd', 'Lib/site-packages/capstone/lib/capstone.dll',
+                        'Lib/site-packages/fontTools/ttLib/__init__.py'):
+                self.write(d / 'python' / rel, f'{rel}\n', 0o755 if rel.endswith(('.exe', '.dll', '.pyd')) else 0o644)
+        else:
+            self.write(d / program, PYTHON.replace('@PY@', sys.executable).replace('@MORE@', more), 0o755)
+            self.write(d / 'python/lib/python3.14/os.py', '# the standard library\n')
+        self.write(d / 'python.tsv', f'# the packer\'s Python\nprogram\t{program}\npython\t3.14.10\nlz4\t4.4.5\n')
+        for n in ('CPython.txt', 'lz4.txt', 'capstone.txt', 'fontTools.txt'): self.write(d / 'licenses' / n, f'{n} of the Python\n')
+        return d
+
+    @unittest.skipUnless(sys.platform == 'linux', 'the Linux bundle\'s check runs its programs')
+    def test_python_and_spirv(self):   # --python and --spirv: python/ and bin/ in the bundle, pack.sh runs the bundle's Python, README.txt asks for nothing; the check holds them to the lock
+        tools, py, spv = self.tools(''), self.python(''), self.spirv('')
+        self.write(tools / 'dmsh_xlate_vk', f'#!/bin/sh\n[ "$1" = --source-sha ] && {{ echo {dmsh_chain_vk.xlate_source_sha()}; exit 0; }}; exit 2\n', 0o755)
+        rc, err, out = self.package('--tools', str(tools), '--python', str(py), '--spirv', str(spv))
+        self.assertEqual((rc, err), (0, ''))
+        files = dict(pp.bundle_files(out))
+        for t in pp.SPIRV_TOOLS: self.assertEqual(files[f'bin/{t}'], 0o755, t)
+        self.assertEqual((files['python/bin/python3.14'], files['python/lib/python3.14/os.py']), (0o755, 0o644))
+        self.assertNotIn('python.tsv', [Path(r).name for r in files])
+        for n in pp.SPIRV_LICENCES + ('CPython.txt', 'lz4.txt', 'fontTools.txt'): self.assertIn(f'licenses/{n}', files, n)
+        version = (out / 'VERSION').read_text().splitlines()
+        self.assertIn('python 3.14.10 python/bin/python3.14', version); self.assertIn('spirv yes', version)
+        sh = (out / 'pack.sh').read_text()
+        self.assertIn('    unset PYTHONHOME PYTHONPATH; export PYTHONNOUSERSITE=1', sh); self.assertIn('    PYTHON=$here/python/bin/python3.14\n', sh)
+        self.assertIn('exec "$PYTHON" "$here/scripts/build_ipa_from_nsp.py" --platform linux "$@"', sh)
+        readme = flat((out / 'README.txt').read_text())
+        self.assertIn('To pack a game: nothing to install. The packer runs with this folder\'s own Python 3.14.10 (python/, with the modules it needs; PYTHON=<path> names '
+                      'another); its extraction tool and Vulkan shader translator and SPIR-V tools (SPIRV-Tools, glslang, SPIRV-Cross) are in bin/, and none of them needs .NET.', readme)
+        for absent in ('pip install', '.NET SDK', 'does not carry'): self.assertNotIn(absent, readme)
+        self.assertRegex((out / 'README.txt').read_text(), r'\n  bin/spirv-val +the SPIR-V validator .*\n  bin/spirv-link .*\n  bin/spirv-cross .*\n  bin/glslangValidator +glslang, .*\n'
+                                                           r'  python/ +the packer\'s Python 3\.14\.10 with lz4, capstone and fontTools\n')
+        self.assertIn('runs the Python the game was packed with (its launch file\'s python row): after a move, pack the game once more with this folder\'s ./pack.sh.', readme)
+        # the check: with the stand-in translator's fingerprint in the bundle's lock (and its header written again), everything passes, dmsh_chain_vk.py --check-tools with bin/ only
+        lock = out / 'dm/gfx/tools/dmsh_chain_vk.lock'
+        lock.write_text(lock.read_text().replace(dmsh_chain_vk.lock()['dmsh_xlate_vk_linux-x64'], dmsh_chain.sha16(out / 'bin/dmsh_xlate_vk')))
+        subprocess.run([sys.executable, '-I', out / 'dm/gfx/tools/dmsh_chain_vk.py', '--header'], check=True, capture_output=True)
+        said = []
+        with mock.patch.object(pp, 'say', said.append): self.assertEqual(pp.check('linux', out, [self.build, self.aot, tools, py, spv]), [])
+        for line in ('check: the bundle\'s Python: every sys.path entry is inside the bundle (or the current folder)',
+                     'check: dm/gfx/tools/dmsh_chain_vk.py --check-tools (python3.14): passed with PATH holding only the bundle\'s bin/ and XLATE_VK its translator'):
+            self.assertIn(line, said)
+        self.assertTrue([s for s in said if s.startswith('check: sh pack.sh --help: exit 0: usage: build_ipa_from_nsp.py')], said)
+        self.assertTrue([s for s in said if s.startswith('check: bin/spirv-cross --revision: exit 0: Git commit: vulkan-sdk-1.4.363.0')], said)
+        # a tool of another version, a Python whose sys.path leaves the bundle
+        self.write(out / 'bin/spirv-val', "#!/bin/sh\necho 'SPIRV-Tools v2024.4 unknown hash'\n", 0o755)
+        self.write(out / 'python/bin/python3.14', PYTHON.replace('@PY@', sys.executable).replace('@MORE@', 'echo "path /usr/lib/python3/dist-packages";'), 0o755)
+        with mock.patch.object(pp, 'say', lambda m: None): fails = pp.check('linux', out, [self.build, self.aot, tools, py, spv])
+        self.assertIn("bin/spirv-val --version prints 'SPIRV-Tools v2024.4 unknown hash', not the spirv-tools_linux-x64 row of the bundle's lock, "
+                      f"'{dmsh_chain_vk.lock()['spirv-tools_linux-x64']}'", fails)
+        self.assertIn("the bundle's Python has sys.path entries outside the bundle: ['/usr/lib/python3/dist-packages']", fails)
+        self.assertTrue([f for f in fails if f.startswith(f'dm/gfx/tools/dmsh_chain_vk.py --check-tools with PATH={out / "bin"}: exit 1') and 'spirv-tools_linux-x64' in f], fails)
+        # what each input must hold
+        (spv / 'licenses/glslang.txt').unlink()
+        rc, err, _ = self.package('--python', str(py), '--spirv', str(spv)); self.assertEqual(rc, 1); self.assertRegex(err, r'missing .*glslang.txt: a licence of the SPIR-V tools')
+        (spv / 'spirv-cross').unlink()
+        rc, err, _ = self.package('--spirv', str(spv)); self.assertEqual(rc, 1); self.assertRegex(err, r'missing .*spirv-cross: a SPIR-V tool \(sh docker/build_spirv_tools.sh linux')
+        (py / 'licenses/CPython.txt').unlink()
+        rc, err, _ = self.package('--python', str(py)); self.assertEqual(rc, 1); self.assertRegex(err, r'missing .*CPython.txt: the licence of the packer\'s Python')
+        (py / 'python.tsv').unlink()
+        rc, err, _ = self.package('--python', str(py)); self.assertEqual(rc, 1); self.assertRegex(err, r'missing .*python.tsv: what the packer\'s Python holds')
+        (py / 'python/bin/link').symlink_to('python3.14'); self.write(py / 'python.tsv', 'program\tpython/bin/python3.14\npython\t3.14.10\n'); self.write(py / 'licenses/CPython.txt', 'x\n')
+        rc, err, _ = self.package('--python', str(py)); self.assertEqual(rc, 1); self.assertRegex(err, r'python/bin/link is a symbolic link: a bundle holds none')
+
+    def test_readme_says_what_is_missing(self):   # each input left out is named in "What this PC needs", and only those
+        profiles = list(GAMES)
+        no_spirv = flat(pp.readme('linux', 'abc1234', '2026-11-15', profiles, True, True, '3.14.10', False))
+        self.assertIn('To pack a game: nothing to install.', no_spirv); self.assertIn('SPIRV-Cross of the versions dm/gfx/tools/dmsh_chain_vk.lock records, which this folder does not carry', no_spirv)
+        no_python = flat(pp.readme('windows', 'abc1234', '2026-11-15', profiles, True, True, None, True))
+        self.assertIn('To pack a game: Python 3.12 or later with lz4, capstone, fonttools and backports.zstd (py -3 -m pip install lz4 capstone fonttools backports.zstd;', no_python)
+        self.assertIn("The packer's extraction tool and Vulkan shader translator and SPIR-V tools (SPIRV-Tools, glslang, SPIRV-Cross) are in bin/", no_python)
+        self.assertNotIn('does not carry', no_python); self.assertNotIn('DejaVu', no_python)   # Windows has Arial
+        everything = pp.readme('windows', 'abc1234', '2026-11-15', profiles, True, True, '3.14.10', True)
+        self.assertIn('nothing to install', flat(everything)); self.assertNotIn('pip', everything); self.assertIn('\r\n', everything)
+        self.assertNotIn('Linux program', everything)
+        self.assertIn('The recompiler nxaot is a Linux program: this folder has none', flat(pp.readme('windows', 'abc1234', '2026-11-15', profiles, False, True, '3.14.10', True)))
+        self.assertTrue(all(len(l) <= 172 for l in everything.splitlines()), [l for l in everything.splitlines() if len(l) > 172])
+
+    def test_python_and_spirv_windows(self):   # the .exe files in the zip; pack.cmd runs python\python.exe; the check finds the runtime's files and PE headers, refuses a ._pth file
+        win = self.tmp / 'build/win64'; self.fake_tree(win, '.exe')
+        py, spv = self.python('.exe'), self.spirv('.exe')
+        rc, err, out = self.package('--python', str(py), '--spirv', str(spv), '--archive', '--check', platform='windows', build=win, aot=False)
+        self.assertEqual((rc, err), (0, ''))
+        with zipfile.ZipFile(out.parent / (out.name + '.zip')) as z:
+            names = z.namelist()
+            for n in ('python/python.exe', 'python/Lib/site-packages/capstone/lib/capstone.dll', 'bin/spirv-val.exe', 'bin/glslangValidator.exe', 'licenses/SPIRV-Cross.txt'):
+                self.assertIn(f'nxnative-windows-x86_64/{n}', names)
+            cmd = z.read('nxnative-windows-x86_64/pack.cmd')
+        self.assertIn(b'set PYTHON="%~dp0python\\python.exe"\r\n', cmd); self.assertIn(b'set "PYTHONNOUSERSITE=1"\r\n', cmd); self.assertIn(b'if defined PYTHON goto nxpack_run', cmd)
+        self.assertIn(b'nxaot is a Linux program', cmd)   # no --aot
+        self.assertIn('python 3.14.10 python/python.exe', (out / 'VERSION').read_text().splitlines())
+        self.write(out / 'python/python314._pth', 'python314.zip\n.\n')
+        (out / 'bin/spirv-link.exe').write_bytes(b'MZ not a program')
+        with mock.patch.object(pp, 'say', lambda m: None): fails = pp.check('windows', out, [win, py, spv])
+        self.assertEqual(fails, ['python/ holds a ._pth file: Python would run isolated, without a script\'s folder on sys.path (the packer\'s tools need it)',
+                                 'bin/spirv-link.exe is not a PE32+ x86-64 program'])
+
+    def test_spirv_versions_agree(self):   # the lines docker/build_spirv_tools.sh builds its tools to print are the lock's rows, for both platforms (one source for both)
+        text = (REPO / 'docker/build_spirv_tools.sh').read_text()
+        versions = dict(l.split('\t', 1) for l in re.search(r'^VERSIONS="(.*?)"$', text, re.M | re.S).group(1).splitlines())
+        self.assertEqual(set(versions), {r for r, _, _ in pp.SPIRV_ROWS})
+        lock = dmsh_chain_vk.lock()
+        for row, line in versions.items():
+            for rid in ('linux-x64', 'win-x64'): self.assertEqual(lock[f'{row}_{rid}'], line, f'{row}_{rid}')
+
     def test_check_windows(self):   # the executables are not run; the packer and the chain versions are
         win = self.tmp / 'build/win64'; self.fake_tree(win, '.exe')
         rc, err, out = self.package('--check', platform='windows', build=win, aot=False)
@@ -308,6 +443,59 @@ class Bundle(unittest.TestCase):
         if dyn is None: self.skipTest(f'{exe} is not a 64-bit ELF file')
         self.assertTrue(any(n.startswith('libc.so') for n in dyn[0]) or dyn == ([], []), dyn)
         self.assertIsNone(pp.elf_dynamic(REPO / 'LICENSE'))
+
+
+spec = importlib.util.spec_from_file_location('publish_port_python', REPO / 'dm/tools/publish_port_python.py')
+ppy = importlib.util.module_from_spec(spec); spec.loader.exec_module(ppy)
+
+
+class PublishPython(unittest.TestCase):   # dm/tools/publish_port_python.py without its downloads: the pins, a wheel unpacked as pip installs it, a runtime archive without links
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp()).resolve(); self.addCleanup(shutil.rmtree, self.tmp)
+
+    def test_pins(self):   # every file a platform takes is pinned by an https URL and a SHA-256; both platforms take the same modules
+        for platform, p in ppy.PLATFORMS.items():
+            for name in [p['runtime'], *p['wheels'], *([p['licences']] if 'licences' in p else [])]:
+                url, sha = ppy.DOWNLOADS[name]
+                self.assertTrue(url.startswith('https://'), url); self.assertRegex(sha, r'^[0-9a-f]{64}$')
+                self.assertIn(ppy.VERSION if not name.endswith('.whl') else name.split('-')[1], url.replace('%2B', '+'))
+            self.assertEqual(sorted(w.split('-')[:2] for w in p['wheels']), [['capstone', '5.0.9'], ['fonttools', '4.68.0'], ['lz4', '4.4.5']])
+        self.assertTrue(all('cp314' in w or 'py3-none' in w for p in ppy.PLATFORMS.values() for w in p['wheels']))   # wheels for the runtime's CPython 3.14
+
+    def test_wheel(self):   # the package and its .data folder's purelib / platlib into site-packages; scripts and data left out; the dist-info's licences returned
+        whl = self.tmp / 'demo-1.0-py3-none-any.whl'
+        with zipfile.ZipFile(whl, 'w') as z:
+            z.writestr('demo/__init__.py', 'x = 1\n')
+            i = zipfile.ZipInfo('demo/_native.so'); i.external_attr = 0o100755 << 16; z.writestr(i, b'\x7fELF')
+            z.writestr('demo-1.0.data/purelib/demo_extra.py', 'y = 2\n')
+            z.writestr('demo-1.0.data/scripts/demo-cli', '#!python\n')
+            z.writestr('demo-1.0.data/data/share/man/man1/demo.1', '.TH demo\n')
+            z.writestr('demo-1.0.dist-info/licenses/LICENSE', 'MIT\n'); z.writestr('demo-1.0.dist-info/METADATA', 'Name: demo\n')
+        site = self.tmp / 'site'
+        project, version, lic = ppy.install_wheel(whl, site)
+        self.assertEqual((project, version, lic), ('demo', '1.0', [site / 'demo-1.0.dist-info/licenses/LICENSE']))
+        got = sorted(p.relative_to(site).as_posix() for p in site.rglob('*') if p.is_file())
+        self.assertEqual(got, ['demo-1.0.dist-info/METADATA', 'demo-1.0.dist-info/licenses/LICENSE', 'demo/__init__.py', 'demo/_native.so', 'demo_extra.py'])
+        self.assertEqual(stat.S_IMODE((site / 'demo/_native.so').stat().st_mode), 0o755); self.assertEqual(stat.S_IMODE((site / 'demo/__init__.py').stat().st_mode), 0o644)
+        bad = self.tmp / 'bad-1.0-py3-none-any.whl'
+        with zipfile.ZipFile(bad, 'w') as z: z.writestr('../evil.py', 'x\n'); z.writestr('bad-1.0.dist-info/LICENSE', 'x\n')
+        with self.assertRaisesRegex(ppy.PublishError, 'leaves its folder'): ppy.install_wheel(bad, site)
+
+    def test_linux_runtime(self):   # python-build-standalone's tree: the interpreter and the standard library kept; links, tkinter, pip and the other left-out parts not
+        arc = self.tmp / 'pbs.tar.gz'
+        with tarfile.open(arc, 'w:gz') as t:
+            def add(name, data=b'x', mode=0o644, link=None):
+                ti = tarfile.TarInfo(name); ti.mode = mode
+                if link: ti.type, ti.linkname = tarfile.SYMTYPE, link; t.addfile(ti)
+                else: ti.size = len(data); t.addfile(ti, io.BytesIO(data))
+            add('python/bin/python3.14', mode=0o755); add('python/bin/python3', link='python3.14'); add('python/bin/pip3', mode=0o755)
+            add('python/lib/python3.14/os.py'); add('python/lib/python3.14/tkinter/__init__.py'); add('python/lib/python3.14/site-packages/pip/__init__.py')
+            add('python/lib/python3.14/site-packages/README.txt'); add('python/lib/libpython3.14.so.1.0'); add('python/share/terminfo/x/xterm')
+        out = self.tmp / 'out'
+        with mock.patch.object(ppy, 'say', lambda m: None): ppy.linux_runtime(arc, out)
+        got = sorted(p.relative_to(out).as_posix() for p in out.rglob('*') if p.is_file() or p.is_symlink())
+        self.assertEqual(got, ['python/bin/python3.14', 'python/lib/python3.14/os.py', 'python/lib/python3.14/site-packages/README.txt'])
+        self.assertEqual(stat.S_IMODE((out / 'python/bin/python3.14').stat().st_mode), 0o755)
 
 
 if __name__ == '__main__':

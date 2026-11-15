@@ -22,6 +22,7 @@ on:
       - 'dm/games/game.py'
       - 'scripts/build_ipa_from_nsp.py'
       - 'docker/Dockerfile.chain'
+      - 'docker/build_spirv_tools.sh'
       - '.github/workflows/chain.yml'
       - '.gitattributes'
   push:
@@ -43,6 +44,7 @@ on:
       - 'dm/games/game.py'
       - 'scripts/build_ipa_from_nsp.py'
       - 'docker/Dockerfile.chain'
+      - 'docker/build_spirv_tools.sh'
       - '.github/workflows/chain.yml'
       - '.gitattributes'
   workflow_dispatch:

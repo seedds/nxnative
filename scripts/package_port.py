@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """The port's bundle: what a player downloads, unpacks and runs on Linux or Windows (docs/development.md, "The port's bundles").
 
-    python3 scripts/package_port.py --platform linux --build build/linux --aot build/aot --tools build/port_tools/linux-x64 --out build/bundle/nxnative-linux-x86_64 --archive --check
-    python3 scripts/package_port.py --platform windows --build build/win64 --aot build/aot-win64 --tools build/port_tools/win-x64 --out build/bundle/nxnative-windows-x86_64 --archive --check
+    python3 scripts/package_port.py --platform linux --build build/linux --aot build/aot --tools build/port_tools/linux-x64 --python build/port_python/linux-x64 \
+        --spirv build/port_spirv/linux-x64 --out build/bundle/nxnative-linux-x86_64 --archive --check
+    python3 scripts/package_port.py --platform windows --build build/win64 --aot build/aot-win64 --tools build/port_tools/win-x64 --python build/port_python/win-x64 \
+        --spirv build/port_spirv/win-x64 --out build/bundle/nxnative-windows-x86_64 --archive --check
 
 It builds nothing: it assembles the bundle folder from build trees that CMake already made and from this checkout's tracked files, and fails with the missing file's name
 when something is not there.
@@ -16,13 +18,23 @@ when something is not there.
   --tools   the port's prebuilt tools of dm/tools/publish_port_tools.sh for this platform: nx_extract and the Vulkan shader translator dmsh_xlate_vk (.exe on Windows), programs
             that need no .NET, which go to bin/ (the packer runs them from there instead of building nx_extract with dotnet), and the licences of what is linked into them
             (<tools>/licenses/, at least dotnet-runtime.txt), which go to licenses/. Without --tools the bundle has neither and its README.txt asks for the .NET SDK
+  --python  the packer's own Python of dm/tools/publish_port_python.py for this platform: <python>/python/ (CPython 3.14 with lz4, capstone and fontTools) goes to the bundle's
+            python/, which pack.sh / pack.cmd run the packer with (the program its python.tsv names; PYTHON names another), and <python>/licenses/ (at least CPython.txt) to
+            licenses/. Without --python README.txt asks for a Python with those modules
+  --spirv   the SPIR-V tools of docker/build_spirv_tools.sh for this platform: spirv-val, spirv-link, spirv-cross and glslangValidator (.exe on Windows), which go to bin/ (the
+            packer puts it first on PATH: build_ipa_from_nsp.py bundled_spirv), and their licences (<spirv>/licenses/: SPIRV-Tools, SPIRV-Headers, glslang, SPIRV-Cross).
+            Without --spirv README.txt says that the shaders of NVN and OpenGL games need them
   --out     the bundle folder, created (or replaced when it holds an earlier bundle: a VERSION file); its name is the archive's top folder
   --archive <out>.tar.gz (Linux: executable bits kept) or <out>.zip (Windows) beside it; the same inputs give the same bytes (sorted entries, the commit's time on every entry)
   --check   the bundle's own smoke test: no symlink, no file naming the build trees or this checkout, no ELF run path outside the bundle and no ELF that needs a shared library
             of NOT_NEEDED (a dynamic nxaot: build it with -DNXAOT_LLVM_STATIC=ON), the launcher's --list on an empty games folder and nxaot version (Linux only: a Windows bundle's executables are not run here), the packer's --help through the bundle's path, the shader chain versions the
             bundle's sources give against its headers, the host for every game profile the bundle carries (Linux only: bin/nxhost-run started with --game <id> and with --profile
             <the file the bundle's game.py runtime writes>, its profile line read); with --tools, nx_extract's usage and the translator's source hash (Linux only), and the translator
-            against its row of the bundle's dm/gfx/tools/dmsh_chain_vk.lock (dmsh_xlate_vk_linux-x64 / dmsh_xlate_vk_win-x64), which the packer's shader step checks
+            against its row of the bundle's dm/gfx/tools/dmsh_chain_vk.lock (dmsh_xlate_vk_linux-x64 / dmsh_xlate_vk_win-x64), which the packer's shader step checks; with
+            --python, Linux: the bundle's Python, with none of this machine's Python environment, imports lz4.block, capstone, fontTools and compression.zstd (a round trip each)
+            and has no sys.path entry outside the bundle, and pack.sh --help prints the packer's help with it; Windows: the files it needs, and no python314._pth; with --spirv,
+            Linux: each tool prints the version line of its row of the bundle's lock (spirv-tools_linux-x64, glslang_linux-x64, spirv-cross_linux-x64), and with --tools too
+            dmsh_chain_vk.py --check-tools passes with PATH holding only the bundle's bin/; Windows: each is a PE32+ x86-64 program and the lock has its win-x64 row
 Exit status 0 when done, 1 on an error (the message says which file or check), 2 on a usage error."""
 import argparse
 import gzip
@@ -36,6 +48,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import textwrap
 import time
 import zipfile
 
@@ -54,6 +67,13 @@ MARKER = 'VERSION'
 # change between the distributions' releases (libxml2.so.2 is libxml2.so.16 from libxml2 2.14; ICU's carry its version). The bundle's nxaot is linked statically
 # (-DNXAOT_LLVM_STATIC=ON: dm/tools/aot/README.md, "Building and testing in Docker") and needs only libc, libm, libstdc++, libgcc_s, libz, libzstd, libtinfo and liblzma
 NOT_NEEDED = ('libLLVM', 'libclang', 'liblld', 'libxml2', 'libicu', 'libffi', 'libedit')
+# The SPIR-V tools of docker/build_spirv_tools.sh the packer runs from bin/ (--spirv; build_ipa_from_nsp.py BUNDLE_SPIRV), their licences, and the row of dmsh_chain_vk.lock each
+# version line is held to (with the platform's suffix) and the option that prints it
+SPIRV_TOOLS = ('spirv-val', 'spirv-link', 'spirv-cross', 'glslangValidator')
+SPIRV_LICENCES = ('SPIRV-Tools.txt', 'SPIRV-Headers.txt', 'glslang.txt', 'SPIRV-Cross.txt')
+SPIRV_ROWS = (('spirv-tools', 'spirv-val', '--version'), ('spirv-tools', 'spirv-link', '--version'), ('glslang', 'glslangValidator', '--version'),
+              ('spirv-cross', 'spirv-cross', '--revision'))
+RID = {'linux': 'linux-x64', 'windows': 'win-x64'}   # the platform suffix of the lock's rows
 
 
 class PackError(Exception):
@@ -113,10 +133,11 @@ def need(path, why):
     return path
 
 
-def licence_files(platform, build, aot, tools=None):
+def licence_files(platform, build, aot, tools=None, python=None, spirv=None):
     """[(name in licenses/, source)]: this project's licence, every third party vendored in dm/third_party (its LICENSE / COPYING, and libvpx's PATENTS), dynarmic's bundled
-    externals, SDL3 (fetched by the host's CMake), the LLVM and lld libraries linked into nxaot, the .NET runtime of the prebuilt tools, and whatever the trees' licenses/
-    folders hold (a name already taken keeps its first source: the tools' ryujinx.txt is dm/third_party/ryujinx's licence)"""
+    externals, SDL3 (fetched by the host's CMake), the LLVM and lld libraries linked into nxaot, the .NET runtime of the prebuilt tools, CPython and the modules of the packer's
+    Python, the SPIR-V tools' projects, and whatever the trees' licenses/ folders hold (a name already taken keeps its first source: the tools' ryujinx.txt is
+    dm/third_party/ryujinx's licence)"""
     out = [('nxnative.txt', need(REPO / 'LICENSE', 'this project\'s licence'))]
     def first(d):
         found = sorted(p for p in d.iterdir() if p.is_file() and re.match(r'(LICEN[CS]E|COPYING)', p.name, re.I))
@@ -135,32 +156,49 @@ def licence_files(platform, build, aot, tools=None):
              else 'copy /usr/share/doc/libllvm18/copyright from the nxnative-aot image')
     if aot: out.append(('LLVM.txt', need(aot / 'licenses/LLVM.txt', f'the licence of the LLVM and lld libraries linked into nxaot ({where})')))
     if tools: need(tools / 'licenses/dotnet-runtime.txt', 'the licence of the .NET runtime in the prebuilt tools (dm/tools/publish_port_tools.sh writes licenses/ beside them)')
-    for tree in (build, aot, tools):
+    if python: need(python / 'licenses/CPython.txt', 'the licence of the packer\'s Python (dm/tools/publish_port_python.py writes licenses/ beside it)')
+    for n in SPIRV_LICENCES if spirv else ():
+        need(spirv / 'licenses' / n, 'a licence of the SPIR-V tools (docker/build_spirv_tools.sh writes licenses/ beside them)')
+    for tree in (build, aot, tools, python, spirv):
         if tree and (tree / 'licenses').is_dir():
             for p in sorted((tree / 'licenses').iterdir()):
                 if p.is_file() and p.name not in {n for n, _ in out}: out.append((p.name, p))
     return out
 
 
-def readme(platform, sha, date, profiles, nxaot, tools=False):   # profiles: the game profiles the bundle carries (bundle_profiles)
+def bullet(text, width=168):   # a README.txt list item: '  - ' and the text, wrapped at width with its later lines under the text
+    return textwrap.wrap(text, width=width, initial_indent='  - ', subsequent_indent='    ', break_long_words=False, break_on_hyphens=False)
+
+
+def readme(platform, sha, date, profiles, nxaot, tools=False, python=None, spirv=False):
+    """README.txt. profiles: the game profiles the bundle carries (bundle_profiles); nxaot, tools, spirv: whether it carries the recompiler, the prebuilt tools (--tools) and the
+    SPIR-V tools (--spirv); python: the version of its own Python (--python), None without one. "What this PC needs" names what the bundle does not carry, and only that"""
     win, lines = platform == 'windows', []
     exe, py, pack = ('.exe', 'py -3', 'pack.cmd') if win else ('', 'python3', './pack.sh')
     lines += [f'nxnative for {"Windows" if win else "Linux"} (x86-64), {sha} of {date}',
               '',
               'Nintendo Switch games you own, packed on this PC from your own dumps and keys, and played with the host program nxhost-run. No game files or keys are in this folder.',
               '',
-              'What this PC needs',
-              f'  - {"Windows 10 or later" if win else "Linux with glibc 2.38 and the C++ library of GCC 13 or later (Ubuntu 24.04 or later, Debian 13)"} and a GPU driver with Vulkan 1.3.']
-    if tools: lines += [
-              f'  - To pack a game: Python 3.12 or later with lz4, capstone and backports.zstd ({py} -m pip install lz4 capstone backports.zstd; backports.zstd only before',
-              '    Python 3.14). The packer\'s other tools are in bin/ and need no .NET. The Vulkan shaders of NVN games also need SPIRV-Tools, glslang and SPIRV-Cross,',
-              '    which this folder does not carry yet: until then the packer reports that step as not run (docs/development.md, "The port\'s bundles").']
-    else: lines += [
-              f'  - To pack a game: Python 3.12 or later with lz4, capstone and backports.zstd ({py} -m pip install lz4 capstone backports.zstd; backports.zstd only before',
-              '    Python 3.14), and the .NET SDK 10 (the packer builds its extraction tool, nx_extract, with it on the first pack; NVN games also need the Vulkan shader',
-              '    translator, which this folder does not carry yet: docs/development.md, "The port\'s bundles").']
-    if win and not nxaot: lines += ['  - The recompiler nxaot is a Linux program: this folder has none. Pack with --nxaot naming a script that runs the Linux nxaot (in WSL or Docker), or pack',
-                                    '    on Linux.']
+              'What this PC needs']
+    lines += bullet(f'{"Windows 10 or later" if win else "Linux with glibc 2.38 and the C++ library of GCC 13 or later (Ubuntu 24.04 or later, Debian 13)"} and a GPU driver '
+                    'with Vulkan 1.3.' + ('' if win else ' Games are given a font of the system as their standard font, and the packer draws the button icons with its '
+                                          'letters: DejaVu Sans, Liberation Sans, Noto Sans or FreeSans (every desktop distribution installs one of them).'))
+    need = []   # what packing needs that this folder does not carry
+    if not python: need.append(f'Python 3.12 or later with lz4, capstone, fonttools and backports.zstd ({py} -m pip install lz4 capstone fonttools backports.zstd; '
+                               'backports.zstd only before Python 3.14; without fonttools the button icons show as \'?\')')
+    if not tools: need.append('the .NET SDK 10 (the packer builds its extraction tool, nx_extract, with it on the first pack)')
+    has = []    # what it carries for packing
+    if python: has.append(f'the packer runs with this folder\'s own Python {python} (python/, with the modules it needs; PYTHON=<path> names another)')
+    progs = (['extraction tool and Vulkan shader translator'] if tools else []) + (['SPIR-V tools (SPIRV-Tools, glslang, SPIRV-Cross)'] if spirv else [])
+    if progs: has.append(('its ' if python else 'the packer\'s ') + ' and '.join(progs) + ' are in bin/' + (', and none of them needs .NET' if tools else ''))
+    text = 'To pack a game: ' + ('nothing to install' if not need else ', and '.join(need)) + '.'
+    if has: text += ' ' + '; '.join(has)[:1].upper() + '; '.join(has)[1:] + '.'
+    if not tools: text += ' NVN games also need the Vulkan shader translator, which this folder does not carry (docs/development.md, "The port\'s bundles").'
+    if not spirv: text += (' The shaders of NVN and OpenGL games also need SPIRV-Tools, glslang and SPIRV-Cross of the versions dm/gfx/tools/dmsh_chain_vk.lock records, which '
+                           'this folder does not carry: without them the packer reports the NVN shaders as not run and stops at an OpenGL game\'s.')
+    lines += bullet(text)
+    if win and not nxaot: lines += bullet('The recompiler nxaot is a Linux program: this folder has none. Pack with --nxaot naming a script that runs the Linux nxaot (in WSL or Docker), '
+                                          'or pack on Linux.')
     lines += ['',
               'Packing a game',
               f'  1. Put each game\'s NSP files (base game, update, DLC) in a folder of its own, outside this folder.',
@@ -179,14 +217,21 @@ def readme(platform, sha, date, profiles, nxaot, tools=False):   # profiles: the
     if nxaot: lines += [f'  {"bin/nxaot" + exe:<25} the recompiler the packer runs']
     if tools: lines += [f'  {"bin/nx_extract" + exe:<25} the NSP extraction tool the packer runs',
                         f'  {"bin/dmsh_xlate_vk" + exe:<25} the Vulkan shader translator the packer runs for NVN games']
+    if spirv: lines += [f'  {"bin/spirv-val" + exe:<25} the SPIR-V validator (SPIRV-Tools) the packer runs for the Vulkan shaders',
+                        f'  {"bin/spirv-link" + exe:<25} the SPIR-V linker (SPIRV-Tools) the packer runs for the Vulkan shaders of NVN games',
+                        f'  {"bin/spirv-cross" + exe:<25} SPIRV-Cross, which the packer runs for the analysis of the Vulkan shaders of NVN games',
+                        f'  {"bin/glslangValidator" + exe:<25} glslang, which the packer runs for the shaders of OpenGL games']
+    if python: lines += [f'  {"python/":<25} the packer\'s Python {python} with lz4, capstone and fontTools']
     lines += [f'  {pack:<25} the packer: scripts/ and dm/ hold it and the game profiles',
               f'  {"licenses/":<25} the licences of nxnative and of the third-party code in it',
               f'  {"VERSION":<25} the commit this bundle was built from',
               '',
               'Moving or replacing this folder: each pack names the host it runs with (its launch file\'s host row); the launcher run from the new folder',
               f'takes this folder\'s bin/nxhost-run{exe} instead, and so do run.sh and run.cmd when the NSP folder is inside it; otherwise set NXHOST or',
-              'pack the game again. The pack\'s game profile stays with it (<title ID>_build/game-profile-' + platform + '.tsv in the NSP folder).',
-              f'Game profiles in this folder: {len(profiles)}. A game packed from one of them, or from the profile the packer derives for another version of the game',
+              'pack the game again. The pack\'s game profile stays with it (<title ID>_build/game-profile-' + platform + '.tsv in the NSP folder).']
+    if python: lines += [f'The launcher\'s "Repack with profile" runs the Python the game was packed with (its launch file\'s python row): after a move, pack the game',
+                         f'once more with this folder\'s {pack}.']
+    lines += [f'Game profiles in this folder: {len(profiles)}. A game packed from one of them, or from the profile the packer derives for another version of the game',
               'or guesses for a game without one, runs with the same nxhost-run.']
     return '\r\n'.join(lines) + '\r\n' if win else '\n'.join(lines) + '\n'
 
@@ -217,8 +262,54 @@ if not defined PYTHON (where py > nul 2>&1 && set "PYTHON=py -3" || set "PYTHON=
 exit /b %errorlevel%
 '''
 
+# pack.sh and pack.cmd of a bundle with its own Python (--python; @PROGRAM@: its program, python.tsv's row): the packer and every Python tool it starts (sys.executable) run
+# with it, with none of the PC's PYTHONHOME, PYTHONPATH or user site-packages, which could put another lz4 or capstone first; PYTHON names another Python as before
+PACK_SH_PYTHON = '''#!/bin/sh
+# Packs a game for this bundle: scripts/build_ipa_from_nsp.py --platform linux with the bundle's own Python (@PROGRAM@), recompiler (bin/nxaot), host (bin/nxhost-run) and
+# shader tools (bin/), which the packer finds beside itself. PYTHON names another Python 3.12 or later. Usage: ./pack.sh "<NSP folder>" -k "<prod.keys>" [options of
+# build_ipa_from_nsp.py]
+here=$(cd "$(dirname "$0")" && pwd) || exit 1
+if [ -z "${PYTHON:-}" ]; then
+    unset PYTHONHOME PYTHONPATH; export PYTHONNOUSERSITE=1   # the bundle's Python with its own modules only
+    PYTHON=$here/@PROGRAM@
+fi
+exec "$PYTHON" "$here/scripts/build_ipa_from_nsp.py" --platform linux "$@"
+'''
 
-def assemble(platform, build, aot, out, tools=None):
+PACK_CMD_PYTHON = '''@echo off
+rem Packs a game for this bundle: scripts\\build_ipa_from_nsp.py --platform windows with the bundle's own Python (@PROGRAM@), @TOOLS@,
+rem which the packer finds beside itself. PYTHON names another Python 3.12 or later. Usage: pack.cmd "<NSP folder>" -k "<prod.keys>" [options of build_ipa_from_nsp.py]
+setlocal
+if defined PYTHON goto nxpack_run
+rem the bundle's Python with its own modules only
+set "PYTHONHOME="
+set "PYTHONPATH="
+set "PYTHONNOUSERSITE=1"
+set PYTHON="%~dp0@PROGRAM@"
+:nxpack_run
+%PYTHON% "%~dp0scripts\\build_ipa_from_nsp.py" --platform windows %*
+exit /b %errorlevel%
+'''
+
+
+def pack_script(platform, nxaot, program=None):   # pack.sh or pack.cmd (its text, CR LF on Windows); program: the bundle's Python (--python), None without one
+    if platform == 'linux': return (PACK_SH_PYTHON.replace('@PROGRAM@', program) if program else PACK_SH).encode()
+    if not program: return (PACK_CMD_NXAOT if nxaot else PACK_CMD).replace('\n', '\r\n').encode()
+    tools = 'recompiler (bin\\nxaot.exe), host (bin\\nxhost-run.exe) and shader tools (bin\\)' if nxaot else ('host (bin\\nxhost-run.exe) and shader tools (bin\\); nxaot is a '
+                                                                                                         'Linux program: give --nxaot a script that runs it (README.txt)')
+    return PACK_CMD_PYTHON.replace('@PROGRAM@', program.replace('/', '\\')).replace('@TOOLS@', tools).replace('\n', '\r\n').encode()
+
+
+def python_info(python):
+    """(program, version) of dm/tools/publish_port_python.py's folder: its python.tsv's program row (the path in the bundle) and python row"""
+    rows = dict(l.split('\t', 1) for l in need(python / 'python.tsv', 'what the packer\'s Python holds (dm/tools/publish_port_python.py writes it)').read_text(encoding='utf-8')
+                .splitlines() if l and not l.startswith('#') and '\t' in l)
+    if not rows.get('program', '').startswith('python/') or not rows.get('python'): raise PackError(f'{python / "python.tsv"} names no program under python/ or no version')
+    need(python / rows['program'], 'the packer\'s Python, which python.tsv names')
+    return rows['program'], rows['python']
+
+
+def assemble(platform, build, aot, out, tools=None, python=None, spirv=None):
     """The bundle folder out: [(relative path, mode)] of every file it holds"""
     exe = PLATFORMS[platform]['exe']
     sha, ts, date, dirty = version_info()
@@ -239,7 +330,24 @@ def assemble(platform, build, aot, out, tools=None):
         if not tools.is_dir(): raise PackError(f'--tools: no such folder: {tools}')
         for n in ('nx_extract', 'dmsh_xlate_vk'):
             progs.append((f'{n}{exe}', need(tools / f'{n}{exe}', f'a prebuilt tool (sh dm/tools/publish_port_tools.sh {platform} <folder>, in the chain image: docker/README.md)')))
-    lic = licence_files(platform, build, aot, tools)
+    shaders = []   # the SPIR-V tools (--spirv): [(name in bin/, source)]
+    if spirv:
+        spirv = spirv.resolve()
+        if not spirv.is_dir(): raise PackError(f'--spirv: no such folder: {spirv}')
+        for n in SPIRV_TOOLS:
+            shaders.append((f'{n}{exe}', need(spirv / f'{n}{exe}', f'a SPIR-V tool (sh docker/build_spirv_tools.sh {platform} <folder>, in its image: docker/README.md)')))
+    runtime, program, pyver = [], None, None   # the packer's Python (--python): [(path under python/, source, mode)], its program and version
+    if python:
+        python = python.resolve()
+        if not python.is_dir(): raise PackError(f'--python: no such folder: {python}')
+        program, pyver = python_info(python)
+        for d, dirs, names in os.walk(python / 'python'):
+            dirs.sort()
+            for n in sorted(names):
+                p = Path(d) / n
+                if p.is_symlink(): raise PackError(f'{p} is a symbolic link: a bundle holds none (dm/tools/publish_port_python.py leaves them out)')
+                runtime.append((p.relative_to(python).as_posix(), p, 0o755 if p.stat().st_mode & 0o111 else 0o644))
+    lic = licence_files(platform, build, aot, tools, python, spirv)
     files = tracked_files()
     profiles = bundle_profiles(files)
     if not profiles: raise PackError('git lists no dm/games/<title ID>/game.tsv: a bundle carries the game profiles its host runs')
@@ -262,21 +370,24 @@ def assemble(platform, build, aot, out, tools=None):
     put(f'nxlauncher{exe}', launcher, mode=0o755)
     put(f'{HOST}{exe}', host, mode=0o755)
     if nxaot: put(f'bin/nxaot{exe}', nxaot, mode=0o755)
-    for name, src in progs: put(f'bin/{name}', src, mode=0o755)
+    for name, src in progs + shaders: put(f'bin/{name}', src, mode=0o755)
+    for rel, src, mode in runtime: put(rel, src, mode=mode)
     for rel, mode in files: put(rel, REPO / rel, mode=mode)
     for name, src in lic: put(f'licenses/{name}', src)
-    if platform == 'linux': put('pack.sh', data=PACK_SH.encode(), mode=0o755)
-    else: put('pack.cmd', data=(PACK_CMD_NXAOT if nxaot else PACK_CMD).replace('\n', '\r\n').encode())
-    put('README.txt', data=readme(platform, sha, date, profiles, bool(nxaot), bool(progs)).encode())
+    if platform == 'linux': put('pack.sh', data=pack_script(platform, nxaot, program), mode=0o755)
+    else: put('pack.cmd', data=pack_script(platform, nxaot, program))
+    put('README.txt', data=readme(platform, sha, date, profiles, bool(nxaot), bool(progs), pyver, bool(shaders)).encode())
     nl = '\r\n' if platform == 'windows' else '\n'
     put(MARKER, data=nl.join([f'nxnative {sha}{"-modified" if dirty else ""}', f'date {date}', f'platform {platform}-x86_64',
-                              f'host {HOST}{exe}', f'profiles {len(profiles)}', f'nxaot {"yes" if nxaot else "no"}']).encode() + nl.encode())
+                              f'host {HOST}{exe}', f'profiles {len(profiles)}', f'nxaot {"yes" if nxaot else "no"}',
+                              f'python {pyver} {program}' if program else 'python no', f'spirv {"yes" if shaders else "no"}']).encode() + nl.encode())
     for rel, mode in held:
         os.chmod(out / rel, mode); os.utime(out / rel, (ts, ts))
     for d in sorted({p for rel, _ in held for p in Path(rel).parents if str(p) != '.'}, key=lambda p: -len(p.parts)):
         os.chmod(out / d, 0o755); os.utime(out / d, (ts, ts))
     say(f'{out}: {len(held)} files, {sum((out / r).stat().st_size for r, _ in held) / 1e6:.1f} MB; host {HOST}{exe} from {host} for {len(profiles)} game profiles; '
-        f'nxaot {"from " + str(nxaot) if nxaot else "none"}; prebuilt tools {"from " + str(tools) if progs else "none"}; {sha} of {date}')
+        f'nxaot {"from " + str(nxaot) if nxaot else "none"}; prebuilt tools {"from " + str(tools) if progs else "none"}; '
+        f'Python {pyver + " (" + program + ") from " + str(python) if program else "none"}; SPIR-V tools {"from " + str(spirv) if shaders else "none"}; {sha} of {date}')
     return sorted(held), ts
 
 
@@ -380,7 +491,7 @@ def check(platform, out, inputs):
         except (OSError, subprocess.TimeoutExpired) as e: fails.append(f'{" ".join(map(str, argv))}: does not run ({e})'); return None
         text = r.stdout + r.stderr
         ok = r.returncode in codes and re.search(want, text, re.M)
-        shown = [str(a) if not str(a).startswith(str(out)) else Path(a).relative_to(out).as_posix() for a in argv]
+        shown = ['<code>' if '\n' in str(a) else str(a) if not str(a).startswith(str(out)) else Path(a).relative_to(out).as_posix() for a in argv]
         say(f'check: {" ".join(shown)}: exit {r.returncode}' + (f': {text.strip().splitlines()[0][:160]}' if text.strip() else ''))
         label = shown[2] if argv[0] == sys.executable else shown[0]   # the bundle's script a Python runs, else the program
         if not ok: fails.append(f'{label}: exit {r.returncode}, output {text.strip()[-300:]!r} (wanted {want!r})')
@@ -414,8 +525,80 @@ def check(platform, out, inputs):
             if r and r.returncode == 0 and (not m or r.stdout.split()[-1] != m.group(1)):
                 fails.append(f'{tool} in the bundle gives {r.stdout.split()[-1]}, its {header} holds {m.group(1) if m else "nothing"}: a file of the chain is missing from the bundle')
             elif r and r.returncode == 0: say(f'check: {macro} {m.group(1)}: the bundle\'s sources give the version its header holds')
+        check_packing(platform, out, Path(t), env, run, fails)
         check_host(platform, out, Path(t), env, fails)
     return fails
+
+
+# The bundle's Python on Linux: the modules the packer imports, a round trip each, and where its sys.path points (every entry inside the bundle, or '' for the current folder)
+PYTHON_PROBE = '''import sys
+import lz4, lz4.block, capstone, fontTools, fontTools.ttLib, compression.zstd
+data = bytes(range(256)) * 64
+assert lz4.block.decompress(lz4.block.compress(data)) == data and compression.zstd.decompress(compression.zstd.compress(data)) == data
+md = capstone.Cs(capstone.CS_ARCH_ARM64, capstone.CS_MODE_ARM)
+assert [i.mnemonic for i in md.disasm(bytes.fromhex("1f2003d5c0035fd6"), 0)] == ["nop", "ret"]
+print(f"python {sys.version.split()[0]}, lz4 {lz4.__version__}, capstone {capstone.__version__}, fontTools {fontTools.version}, zstd {compression.zstd.zstd_version}")
+for p in sys.path: print("path", p)
+'''
+
+
+def bundle_rows(out):   # VERSION's rows: {name: value}
+    p = out / MARKER
+    return dict(l.split(' ', 1) for l in p.read_text(encoding='utf-8').splitlines() if ' ' in l) if p.is_file() else {}
+
+
+def check_packing(platform, out, tmp, env, run, fails):
+    """What packing runs beyond the packer's own files: the bundle's Python (VERSION's python row) and its SPIR-V tools (bin/), each against what it must be. Linux runs them:
+    the Python with no environment of this machine's Python (no PYTHON* variable; user site-packages off) on PYTHON_PROBE and on pack.sh --help, the SPIR-V tools' version lines
+    against the bundle's lock, and dmsh_chain_vk.py --check-tools with PATH holding only the bundle's bin/ (with the translator of --tools). Windows: the files, and the lock's rows"""
+    exe, rid, rows = PLATFORMS[platform]['exe'], RID[platform], bundle_rows(out)
+    program = rows.get('python', 'no').split(' ', 1)[1] if rows.get('python', 'no') != 'no' else None
+    lock = {}
+    try: lock = dict(l.rstrip('\n').split('\t', 1) for l in (out / 'dm/gfx/tools/dmsh_chain_vk.lock').read_text().splitlines() if '\t' in l and not l.startswith('#'))
+    except OSError: fails.append('dm/gfx/tools/dmsh_chain_vk.lock is missing')
+    tools = [t for t in SPIRV_TOOLS if (out / f'bin/{t}{exe}').is_file()]
+    if tools and len(tools) != len(SPIRV_TOOLS): fails.append(f'bin/ holds {", ".join(tools)} but not every SPIR-V tool of {", ".join(SPIRV_TOOLS)}')
+    for row in sorted({r for r, _, _ in SPIRV_ROWS}) if tools else ():
+        if not lock.get(f'{row}_{rid}'): fails.append(f'dm/gfx/tools/dmsh_chain_vk.lock has no {row}_{rid} row for the bundle\'s SPIR-V tools')
+    penv = {k: v for k, v in env.items() if not k.startswith('PYTHON')}
+    penv['PYTHONNOUSERSITE'] = '1'
+    if platform == 'windows' or sys.platform != 'linux':
+        if program:
+            base = out / Path(program).parent
+            want = [out / program, *sorted(base.glob('python3*.dll'))[:1], *sorted(base.glob('python3*.zip'))[:1], base / 'Lib/site-packages/lz4/block',
+                    base / 'Lib/site-packages/capstone/lib', base / 'Lib/site-packages/fontTools/ttLib']
+            missing = [p.relative_to(out).as_posix() for p in want if not p.exists()] + ([] if any(base.glob('python3*.zip')) else ['python/python3XY.zip'])
+            if missing: fails.append('the bundle\'s Python lacks ' + ', '.join(missing))
+            if any(base.glob('python3*._pth')): fails.append('python/ holds a ._pth file: Python would run isolated, without a script\'s folder on sys.path (the packer\'s tools need it)')
+            say(f'check: the bundle\'s Python {program}: its runtime, lz4, capstone and fontTools are there, no ._pth file (not run here: a Windows program)')
+        for t in tools:
+            with open(out / f'bin/{t}{exe}', 'rb') as f: head = f.read(4096)
+            pe = struct.unpack_from('<I', head, 0x3c)[0] if len(head) >= 0x40 else 0
+            if not (head[:2] == b'MZ' and head[pe:pe + 4] == b'PE\0\0' and struct.unpack_from('<H', head, pe + 4)[0] == 0x8664 and struct.unpack_from('<H', head, pe + 24)[0] == 0x20b):
+                fails.append(f'bin/{t}{exe} is not a PE32+ x86-64 program')
+        if tools: say(f'check: the SPIR-V tools {", ".join(t + exe for t in tools)}: PE32+ x86-64 programs, the lock has their {rid} rows (not run here)')
+        return
+    if program:
+        py = out / program
+        r = run([py, '-c', PYTHON_PROBE], r'^python ', cwd=tmp, env=penv)
+        outside = [l[5:] for l in (r.stdout.splitlines() if r else []) if l.startswith('path ') and l[5:] and not Path(l[5:]).resolve().is_relative_to(out.resolve())]
+        if outside: fails.append(f'the bundle\'s Python has sys.path entries outside the bundle: {outside}')
+        elif r and r.returncode == 0: say(f'check: the bundle\'s Python: every sys.path entry is inside the bundle (or the current folder)')
+        run(['sh', out / 'pack.sh', '--help'], r'--platform', cwd=tmp, env=penv)   # what a player runs: pack.sh with the bundle's Python (no PYTHON set)
+    for row, t, opt in SPIRV_ROWS if tools else ():
+        want = lock.get(f'{row}_{rid}')
+        r = run([out / f'bin/{t}', opt], r'\S', cwd=tmp, env=env)
+        got = (r.stdout or r.stderr).strip().splitlines()[0].strip() if r and (r.stdout or r.stderr).strip() else 'nothing'
+        if r and want and got != want: fails.append(f'bin/{t} {opt} prints {got!r}, not the {row}_{rid} row of the bundle\'s lock, {want!r}')
+    xlate = out / 'bin/dmsh_xlate_vk'
+    if tools and xlate.is_file():   # the packer's shader step's own check, with nothing of this machine's on PATH: the bundle's tools and translator only
+        argv = [out / program if program else sys.executable, *([] if program else ['-I']), out / 'dm/gfx/tools/dmsh_chain_vk.py', '--check-tools']
+        try: r = subprocess.run([str(a) for a in argv], capture_output=True, text=True, errors='replace', timeout=120, cwd=tmp,
+                                env=dict(penv, PATH=str(out / 'bin'), XLATE_VK=str(xlate), DOTNET='/nonexistent'))
+        except (OSError, subprocess.TimeoutExpired) as e: r = subprocess.CompletedProcess(argv, -1, '', str(e))
+        if r.returncode: fails.append(f'dm/gfx/tools/dmsh_chain_vk.py --check-tools with PATH={out / "bin"}: exit {r.returncode}, {(r.stdout + r.stderr).strip()[-600:]!r}')
+        else: say(f'check: dm/gfx/tools/dmsh_chain_vk.py --check-tools ({Path(argv[0]).name}): passed with PATH holding only the bundle\'s bin/ and XLATE_VK its translator')
+    elif tools: say('check: dmsh_chain_vk.py --check-tools not run: the bundle has no translator (--tools)')
 
 
 def check_host(platform, out, tmp, env, fails):
@@ -458,16 +641,18 @@ def main(argv=None):
     ap.add_argument('--build', required=True, type=Path, help='the host\'s CMake tree: nxlauncher, nxhost-run (one program for every game profile), _deps/sdl3-src')
     ap.add_argument('--aot', type=Path, help='the recompiler\'s CMake tree: nxaot and licenses/LLVM.txt (required on Linux)')
     ap.add_argument('--tools', type=Path, help='the prebuilt nx_extract and dmsh_xlate_vk of dm/tools/publish_port_tools.sh for this platform, with their licenses/ (bin/ in the bundle)')
+    ap.add_argument('--python', type=Path, help='the packer\'s own Python of dm/tools/publish_port_python.py for this platform: its python/ and licenses/ (python/ in the bundle)')
+    ap.add_argument('--spirv', type=Path, help='the SPIR-V tools of docker/build_spirv_tools.sh for this platform, with their licenses/ (bin/ in the bundle)')
     ap.add_argument('--out', required=True, type=Path, help='the bundle folder; its name is the archive\'s top folder')
     ap.add_argument('--archive', action='store_true', help='also write <out>.tar.gz (Linux) or <out>.zip (Windows) beside it')
     ap.add_argument('--check', action='store_true', help='run the bundle\'s smoke test')
     a = ap.parse_args(argv)
     try:
         out = a.out.resolve()
-        _, ts = assemble(a.platform, a.build, a.aot, out, a.tools)
+        _, ts = assemble(a.platform, a.build, a.aot, out, a.tools, a.python, a.spirv)
         if a.archive: archive(a.platform, out, ts)
         if a.check:
-            fails = check(a.platform, out, [a.build, a.aot, a.tools])
+            fails = check(a.platform, out, [a.build, a.aot, a.tools, a.python, a.spirv])
             if fails: raise PackError('the check failed:\n  ' + '\n  '.join(fails))
             say('check: passed')
     except PackError as e:

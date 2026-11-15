@@ -942,6 +942,13 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Fix:** a screenshot of a window the game crops is the picture as presented: the present pass draws the crop at the window texture's own size (as `DM_NVN_SHOT_OUT` draws it at a size of its own), so its size stays the same when a dynamic resolution moves the crop. An uncropped window is still saved as its texture's own pixels. Until a regression baseline includes this, a check of a cropping game against an older revision compares two kinds of shot.
 - **Found on:** [Bastion](../../dm/games/010038600B27E000/README.md), in regression checks of the review's steps (step 15's audit).
 
+### Screenshots of a GL or Vulkan frame wait for its producer
+
+- **Symptom:** a burst of `DM_NVN_SHOT` screenshots of a GL game came out mostly black (82 of 86 frames, at 20-frame steps), while the screen and a dump of the same frame's targets (`DM_GL_TEXDUMP`) showed the picture whole.
+- **Cause:** the GL and Vulkan layers render on their own queue and present through `mtl_present_ext`, which hands the present the layer's event value for the frame. The present waits for it on its own Metal queue (`ext_wait`, `waitForEvent` encoded on the queue), which orders that queue's GPU work only; the screenshot reads the window texture through another queue and waited only for the NVN side (`mtl_finish_gpu`). So it could copy the texture before the GL queue had drawn the frame.
+- **Fix:** the present records the event value it is processing (`g_present_ev`), and a screenshot waits on the CPU for that value first (`shot_src_wait` in `dm/gfx/nvn/nvn_mtl.m`, 5 s, `[RED]` on timeout).
+- **Found on:** UnMetal (`01008F4014A74000`): 0 of 86 black after the fix, over the same frames.
+
 ## Blend, depth and stencil
 
 ### Ten attachment records for eight colors and depth-stencil

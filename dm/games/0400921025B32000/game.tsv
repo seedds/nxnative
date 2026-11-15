@@ -1,0 +1,47 @@
+# Sonic Frontiers Definitive Edition (SEGA / Sonic Team, Switch 2), v65536 = 1.0.0 on the title screen, SDK 21.4.1 (Ounce), NVN2, Hedgehog Engine 2, CRIWARE.
+# From the NSP script's provisional profile, with depth_mode added (README.md).
+
+# ---- Identity ----
+title_id	0400921025B32000
+program_id	0400921025B32000
+
+# ---- App ----
+name	Sonic Frontiers Definitive Edition
+ipa	SonicFrontiersDefinitiveEdition.ipa
+app_category	public.app-category.action-games
+
+# ---- Versions ----
+# the dump holds the whole game as update v65536 (its base folder has the same code modules)
+build	v65536	1.0.0	main=38151dd9103a9d4b9e2479a8e2b04e59	sdk=31945f745022d0232d2562252641b3d3
+package	v65536
+shader_versions	v65536
+
+# ---- Files ----
+# not loaded, main takes nothing from them the host does not supply: subsdk0 (NintendoSDK_movie)
+modules	main sdk
+romfs_marker	raw/texture_streaming/w3_stage.ntsp
+zip_store	.acb:.awb:.dds:.ntsp:.pac:.usm:.metallib
+
+# ---- Memory ----
+# main sets a heap of at most the pool − 64 MB: a 9216 MB heap region
+mem_reserve	0x270000000
+mem_alias	0x10000000
+mem_stack	0x10000000
+# the sdk is built for the Switch 2 (spec: Ounce): its 9 GB pool
+app_pool	0x240000000
+# the NPDM declares 0 MB of system resource: IsVirtualAddressMemoryEnabled is false, as on Horizon
+sys_resource	0x0
+
+# ---- Shader split ----
+# 1,554 shaders in Needle containers (NVN2 records) in main and 3,404 more in raw/NeedleShader.pac (a PACx 403 archive); the game's other 1,434 archives hold none
+shader_groups	/raw/=raw
+shader_note	Sonic Frontiers Definitive Edition shaders
+
+# ---- Graphics ----
+# the game sets near = 0 at boot ("depth mode near=0" in the log): the pipeline bases made before it runs take the main0_z vertex entries. Without the key the NSP script's prebuild made
+# them for near = -w and the first start built all 2,576 pairs again, 25 s before its first frame
+depth_mode	zero
+
+# ---- After the rewrite ----
+# used memory for the current rewritten modules, at least the default 64 MB
+mem_used	0x5600000

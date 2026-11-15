@@ -26,7 +26,7 @@ int main(void) { @autoreleasepool {
     CHECK(base && base.textureType == MTLTextureType2DArray && base.arrayLength == LAYERS && (base.usage & MTLTextureUsageShaderWrite), "a writable R8 2D array");
     serial_put(t.serial, base);
     view_t one = {.set_levels=1, .base_level=LEVEL, .nlevels=1, .set_layers=1, .min_layer=LAYER, .nlayers=1, .set_target=1, .target=NVN_TEXTURE_TARGET_2D_ARRAY};   // one layer, one level, as an array
-    mtl_reg_tex(TID, &t, &one);   // NOLINT(clang-analyzer-osx.cocoa.RetainCount): base is held by the serial table (serial_put), which the analyzer does not follow
+    mtl_reg_tex(TID, &t, &one);
     nvn_rbind b2d = {.kind=NVN_RB_IMG, .dtt=MTLTextureType2D, .dpf=NVN_DPF_FLOAT, .rw=1}, barr = b2d, b3d = b2d;
     barr.dtt = MTLTextureType2DArray; b3d.dtt = MTLTextureType3D;
     os_unfair_lock_lock(&g_rmu);

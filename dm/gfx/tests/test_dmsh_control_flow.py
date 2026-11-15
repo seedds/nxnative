@@ -96,6 +96,16 @@ class ControlFlow(unittest.TestCase):
         msl = self.translate(program, struct.pack('<2i', *words))
         self.assertEqual(len(re.findall(r'== (?:\w+\()?\d+', msl)), 1, msl)
 
+    def test_table_loaded_in_a_block_split_later(self):
+        # 0: work; 1: LDC R1, c1[R2 + 0]; 2: if (P0) jump to 5; 3: if (P1) jump back to 1; 4: exit; 5: BRX R1 to 6 or 7; 6: jump to 8; 7: work; 8: exit.
+        # Block 0..2 is decoded whole before the jump back splits it at 1, and the split left the BRX's predecessor naming 0..0, which has no LDC: "BRX with no
+        # target found in the c1 jump table" (16 pixel shaders of Pokémon Pokopia)
+        anchor = 6 * SIZE
+        program = [WORK, ldc(1, 2, 0), bra(2, 5, pred=0), bra(3, 1, pred=1), EXIT, branch(0x949, 0, ra=1), bra(6, 8), WORK, EXIT]
+        words = [t * SIZE - anchor for t in (6, 7)]
+        msl = self.translate(program, struct.pack('<2i', *words))
+        self.assertEqual(len(re.findall(r'== (?:\w+\()?\d+', msl)), 1, msl)
+
     def test_word_past_the_code_ends_the_table(self):
         # What follows a table in c1 is data, and may lead past the code's end: the translator took that as a failure (ArgumentOutOfRangeException, two compute shaders of Yoshi and the Mysterious Book)
         anchor = 2 * SIZE
@@ -109,6 +119,52 @@ class ControlFlow(unittest.TestCase):
         msl = self.translate(*self.two_switches(second_extra=(0, 0, 0)))
         self.assert_no_loop(msl)
         self.assertEqual(len(re.findall(r'== (?:\w+\()?\d+', msl)), 2, msl)
+
+
+    def loop_exit(self, target):
+        # A warp-aggregated atomic, as PRAGMATA's 607ceeefb9478700 does it with SURED.MIN in BSSY B3: in a loop, the lanes whose key matches the leader's branch out
+        # (@!P0 BRA) to a block that reduces with subgroup operations, as one cohort, then join the others. GotoElimination.MoveOutward made it `if (f) break;` and ran
+        # the block after the loop as `if (false || f)`, where the lanes of every iteration vote together: the ballot mixed keys and only one leader's atomic landed
+        # (found by an offline differential check against a SASS reference model). LoopExitCohort moves the block into the loop, before the break.
+        # 0: S2R R13, SR_TID.X; 1: VOTEU.ALL UR4 (the loop); 2: ISETP.NE.U32 P0, R13, RZ; 3: @!P0 BRA 9; 4: IADD3 R12 += 1; 5: ISETP.GE P0, R12, 0x100; 6: @!P0 BRA 1;
+        # 7: work; 8: BRA past the target; 9..: the target (two instructions in the first test); then work (the join) and exit
+        def gbra(at, to, pred=PT):   # the game's encoding: Ra = R0, bit 15 negates the predicate
+            hi, lo = bits((0, 12, 0x947), (12, 4, pred), (34, 48, (to - at - 1) * SIZE // 4), (87, 3, PT))
+            return hi | 0x000fea0000000000, lo
+        wait = lambda i: (i[0] | 0x3f << 52, i[1])   # waits on every scoreboard: reads what the S2R wrote
+        s2r = (0x000e260000002100, 0x00000000000d7919)
+        voteu = (0x000fe400038e0000, 0x0000000000047886)   # VOTEU.ALL UR4, UPT, PT: the game's +0x0bc0 (and +0x0cc0, after the reduction's CALL)
+        iadd = (0x000fc80007ffe0ff, 0x000000010c0c7810)    # IADD3 R12, R12, 0x1, RZ (the game's +0x0c20)
+        program = [s2r, voteu, wait((0x001fda0003f05070, 0x000000ff0d00720c)), gbra(3, 9, pred=8 | 0), iadd,
+                   (0x000fda0003f06270, 0x000001000c00780c), gbra(6, 1, pred=8 | 0), WORK, gbra(8, 9 + len(target)), *target, WORK, EXIT]
+        return self.translate(program)
+
+    def test_loop_exit_target_with_subgroup_ops_stays_in_the_iteration(self):
+        msl = self.loop_exit(((0x000fe400038e0000, 0x0000000000047886), (0x000fe20008000f00, 0x00000004000c7c02)))   # VOTEU.ALL UR4; MOV R12, UR4
+        main = msl[msl.index('kernel void main0'):]
+        self.assertNotRegex(main, r'if \(false \|\| _\d+\)', main)
+        loop = main[re.search(r'\bdo\b', main).start():]
+        loop = loop[:loop.index('while')]
+        # the target's ballot runs in the loop, under the exit's flag, right before the break
+        self.assertRegex(loop, r'if \((_\d+)\)\s*\{[^{}]*spvSubgroupBallot[^{}]*break;\s*\}', main)
+        self.assertEqual(msl.count('atomic_fetch_add'), 2, msl)   # the skipped work and the join, once each
+
+    def test_loop_exit_target_that_exits_has_no_break_after_it(self):
+        # A target that ends the program (EXIT): moved into the loop it must not be followed by the break, or the SPIR-V has a branch outside any block and SPIRV-Cross
+        # stops ("Trying to end a non-existing block"; Sonic Frontiers' compute shader 0e6f8156033ae07e)
+        msl = self.loop_exit(((0x000fe400038e0000, 0x0000000000047886), (0x000fe20008000f00, 0x00000004000c7c02), WORK, EXIT))   # VOTEU.ALL UR4; MOV R12, UR4; work; EXIT
+        main = msl[msl.index('kernel void main0'):]
+        self.assertNotRegex(main, r'if \(false \|\| _\d+\)', main)
+        loop = main[re.search(r'\bdo\b', main).start():]
+        loop = loop[:loop.index('while')]
+        self.assertIn('spvSubgroupBallot', loop, main)   # the target, ballot and return, runs in the loop
+        self.assertRegex(loop, r'return;\s*\}', main)
+        self.assertNotRegex(loop, r'return;\s*break;', main)
+
+    def test_loop_exit_target_without_subgroup_ops_stays_after_the_loop(self):
+        # The move is only for targets with subgroup operations: other code keeps GotoElimination's form
+        iadd = (0x000fc80007ffe0ff, 0x000000010c0c7810)
+        self.assertRegex(self.loop_exit((iadd, iadd)), r'if \(false \|\| _\d+\)')
 
 
 if __name__ == '__main__':

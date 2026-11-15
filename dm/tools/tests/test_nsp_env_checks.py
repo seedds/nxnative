@@ -47,8 +47,8 @@ class ToolPath(unittest.TestCase):   # issue #1474: TOOL_PATHS are fallbacks, so
                 directory.mkdir()
                 for name in names: tool = directory / name; tool.write_text('#!/bin/sh\n'); tool.chmod(0o755)
             with mock.patch.object(nsp, 'TOOL_PATHS', [str(fallback)]):
-                env = nsp.tool_env({'PATH': str(caller), 'HOME': '/h'})
-            self.assertEqual(env, {'PATH': os.pathsep.join([str(caller), str(fallback)]), 'HOME': '/h'})
+                env = nsp.tool_env({'PATH': str(caller), 'HOME': '/h', 'DM_SAVE_SYNC': '/cloud', 'DM_SAVE_SYNC_CHOICE': 'cloud'})   # the build's host runs play on scratch saves: never the player's cloud (docs/reference/services.md)
+            self.assertEqual(env, {'PATH': os.pathsep.join([str(caller), str(fallback)]), 'HOME': '/h', 'DM_SAVE_SYNC': '0'})
             for name in ('zstd', 'make'): self.assertEqual(shutil.which(name, path=env['PATH']), str(caller / name))
             self.assertEqual(shutil.which('xcodegen', path=env['PATH']), str(fallback / 'xcodegen'))
 

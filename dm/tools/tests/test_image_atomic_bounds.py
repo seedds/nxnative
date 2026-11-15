@@ -21,6 +21,7 @@ import re
 import shutil
 import struct
 import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -28,6 +29,10 @@ ROOT = Path(__file__).resolve().parents[3]
 RYU = ROOT / 'dm/third_party/ryujinx/src/Ryujinx.Graphics.Shader'
 spec = importlib.util.spec_from_file_location('dmsh_atomic', ROOT / 'dm/gfx/tools/dmsh_atomic.py')
 atomic = importlib.util.module_from_spec(spec); spec.loader.exec_module(atomic)
+sys.path[:0] = [str(ROOT / 'dm/gfx/tools'), str(ROOT / 'dm/ios/tools')]
+import dmsh_chain, ios_metal   # noqa: E402  (the builds' Metal compiles)
+import dmsh_abi   # noqa: E402
+TBIAS_BANK = dmsh_abi.TBIAS_BANK
 SPIRV_CROSS = ROOT / 'dm/gfx/tools/spirv_cross_bin/spirv-cross'   # the build dmsh_build.py runs (dmsh_chain.SPIRV_CROSS)
 XC = ['--msl', '--msl-version', '20300', '--msl-argument-buffers', '--msl-texture-buffer-native']  # dmsh_build.XC without fragment padding
 
@@ -36,7 +41,7 @@ def cross(spv, msl):
     """spirv-cross as dmsh_build runs it: MSL 3.1 for a module with image atomics, which must come out as native texture atomics"""
     subprocess.run([str(SPIRV_CROSS), *atomic.cross_args(XC, str(spv)), str(spv), '--output', str(msl)], check=True)
     source = atomic.check_msl(msl.read_text())
-    assert '.atomic_fetch_' in source and 'access::read_write' in source, msl
+    assert ('.atomic_fetch_' in source or re.search(r'<ulong, access::read_write>.*\.atomic_(max|min)\(', source, re.S)) and 'access::read_write' in source, msl
     return source
 
 
@@ -103,12 +108,27 @@ def instructions(path):
     return result
 
 
+def buffer_image_bias(defs, coord_id):
+    """A buffer image's coordinate as the translator moves it (TranslationFlags.MetalBufferImageBias; Instructions.cs BiasBufferImageCoordinate): s32(before ? c : c + bias),
+    before = c + bias < bias (unsigned), bias a u32 of the offset table (dmsh_abi.h DMSH_TBIAS_BANK). Checks that dataflow and returns the constant c"""
+    op, cast = defs[coord_id]; assert op == 124  # OpBitcast to s32
+    op, select = defs[cast[2]]; assert op == 169  # OpSelect(before, c, moved)
+    op, before = defs[select[2]]; assert op == 176  # OpULessThan(moved, bias)
+    op, original = defs[select[3]]; assert op == 124
+    op, moved = defs[select[4]]; assert op == 128 and moved[2] == select[3]  # OpIAdd(c, bias)
+    assert before[2] == select[4] and before[3] == moved[3]
+    op, load = defs[moved[3]]; assert op == 61  # the bias: a load of the table
+    op, chain = defs[load[2]]; assert op == 65 and len(chain) == 6  # OpAccessChain table, 0, index / 4, index % 4
+    op, constant = defs[original[2]]; assert op == 43
+    return constant[2]
+
+
 def check_coordinate_guard(ops, expected):
     """Verify actual emitted dataflow, not merely a guard-opcode census."""
     defs, blocks, predecessors, branches, pointers = {}, {}, {}, [], []
     current = None
     for op, args in ops:
-        if op in (43, 80, 124, 61, 104, 176, 155, 60): defs[args[1]] = (op, args)
+        if op in (43, 80, 124, 61, 104, 176, 155, 60, 65, 128, 169): defs[args[1]] = (op, args)
         if op == 248:
             current = args[0]; blocks[current] = []; predecessors.setdefault(current, set())
         if current is not None: blocks[current].append((op, args))
@@ -121,8 +141,8 @@ def check_coordinate_guard(ops, expected):
     pointer_block, pointer = pointers[0]
     coord_id = pointer[3]
     op, coord = defs[coord_id]
-    if len(expected) == 1:  # Native texture-buffer indexing keeps a scalar coordinate.
-        assert op == 43 and coord[2] == (expected[0] & 0xffffffff)
+    if len(expected) == 1:  # Native texture-buffer indexing keeps a scalar coordinate, moved by the image's offset (buffer_image_bias)
+        assert buffer_image_bias(defs, coord_id) == (expected[0] & 0xffffffff)
     else:
         assert op == 80
         assert tuple(defs[c][1][2] for c in coord[2:]) == tuple(v & 0xffffffff for v in expected)
@@ -325,13 +345,10 @@ class Compiler(unittest.TestCase):
         self.assertTrue(metal_sdks and all(sdk in ('macosx', 'iphoneos') for sdk in metal_sdks),
                         'DMSH_TEST_METAL_SDKS must be macosx, iphoneos or macosx,iphoneos')
         for sdk in metal_sdks:
-            # Match dmsh_build.MAC_METAL and ios_metal.METAL;
-            # the latter needs relaxed NaN-aware arithmetic.
-            flags = ['-fpreserve-invariance'] if sdk == 'macosx' else [
-                '-mios-version-min=18.0', '-fmetal-math-mode=relaxed', '-fpreserve-invariance']
+            metal = dmsh_chain.MAC_METAL if sdk == 'macosx' else ios_metal.METAL   # the builds' own compiles
             air = work / (key + '.' + sdk + '.air')
             library = work / (key + '.' + sdk + '.metallib')
-            subprocess.run(['xcrun','-sdk',sdk,'metal','-c',*flags,str(msl),'-o',str(air)],check=True)
+            subprocess.run([*metal,str(msl),'-o',str(air)],check=True)
             subprocess.run(['xcrun','-sdk',sdk,'metallib',str(air),'-o',str(library)],check=True)
             self.assertGreater(air.stat().st_size, 0)
             self.assertGreater(library.stat().st_size, 0)
@@ -343,8 +360,13 @@ class Compiler(unittest.TestCase):
                         str(ROOT / 'dm/gfx/tests/t_atomic_return.m'), '-framework', 'Foundation',
                         '-framework', 'Metal', '-o', str(executable)], check=True)
                 shape, expected = gpu
-                subprocess.run([str(executable), str(library), str(expected), shape], check=True,
-                               env=dict(os.environ, MTL_DEBUG_LAYER='1'))
+                table = re.search(r'_c%d\s*\[\[id\((\d+)\)\]\]' % TBIAS_BANK, msl.read_text())   # a buffer image's offset table (buffer_image_bias)
+                image = re.search(r'texture_buffer<[^>]*>\s+\w+\s*\[\[id\((\d+)\)\]\]', msl.read_text())
+                self.assertEqual(table is not None, shape == 'buffer', key)
+                self.assertEqual(image is not None, shape == 'buffer', key)
+                for bias in ((0, 2) if table else (None,)):   # 2: the image at word 2 of its view, as the host binds one at a pool offset 8 mod 16
+                    subprocess.run([str(executable), str(library), str(expected), shape, *([str(bias), table.group(1), image.group(1)] if table and image else [])], check=True,
+                                   env=dict(os.environ, MTL_DEBUG_LAYER='1'))
 
     def test_dimension_routes(self):
         # 1D routes retain the existing y=0 normalization; buffer images stay
@@ -391,10 +413,105 @@ class Compiler(unittest.TestCase):
                         msl = work / (key + '.metal')
                         cross(spv, msl)
                         self.compile_metal(msl, work, key)
-                    else:  # U64, S64, descriptor-sized64, float and half2.
+                    elif size == 2:  # U64: a max with no result is Metal's 64-bit texture atomic (dmsh_atomic.wide_atomics); every other form is refused (PR #1801)
+                        if result.returncode == 0:
+                            # Universal SPIR-V, not Vulkan: the 32-bit atomic pair on the rg32ui texel is a marker for the Metal rewrite, which Vulkan's
+                            # texel-pointer format rule (R32 / R64 only) refuses; it never reaches a Vulkan driver.
+                            subprocess.run(['spirv-val', '--target-env', 'spv1.3', str(spv)], check=True)
+                            msl = work / (key + '.metal')
+                            self.assertIn('texture2d_array<ulong, access::read_write>', cross(spv, msl))
+                            self.compile_metal(msl, work, key)
+                        else:  # Maxwell's SURED (InstEmitSurface.EmitSured) keeps the 32-bit gate; SUATOM forms other than a max / min with no result name the 64-bit rule
+                            self.assertRegex(result.stderr, 'Metal 64-bit image atomics|require a 32-bit integer source size')
+                            self.assertFalse(spv.exists())
+                    else:  # S64, descriptor-sized64, float and half2.
                         self.assertNotEqual(result.returncode, 0, key)
                         self.assertIn('require a 32-bit integer source size', result.stderr)
                         self.assertFalse(spv.exists())
+
+    def test_buffer_image_load_store_moved(self):
+        # SULD.D R4, [R0] of buffer image slot 0, then SUST.D [R1], R4: both coordinates move by the image's element offset (buffer_image_bias), from one table entry
+        table = (RYU / 'Decoders/InstTable.cs').read_text()
+        def base(name):
+            m = re.search(r'Add\("([01x]{64})", InstName\.' + name + r'\s*,', table); assert m, name
+            return int(m[1].replace('x', '0'), 2)
+        def mov(reg, value): return base('Mov32i') | ((value & 0xffffffff) << 20) | (7 << 16) | (15 << 12) | reg
+        surface = (0x48 << 36) | (1 << 33) | (4 << 20) | (7 << 16)   # image slot 0 (c2 byte 0x120), a 1D buffer (SuDim 1), 32 bits
+        program = [mov(0, 5), mov(1, 6), base('SuldD') | surface | (0 << 8) | 4, base('SustD') | surface | (1 << 8) | 4, base('Exit') | (7 << 16) | 15]
+        words = []
+        for i, instruction in enumerate(program):
+            if i % 3 == 0: words.append(0)
+            words.append(instruction)
+        with tempfile.TemporaryDirectory(prefix='dm-buffer-image-') as temp:
+            work = Path(temp); code = work / 'ldst.bin'; code.write_bytes(struct.pack('<%dQ' % len(words), *words))
+            jp = work / 'jobs.json'
+            jp.write_text(json.dumps([dict(key='ldst', stage='cs', code=str(code), img={'0': dict(type='buffer', fmt='R32Uint')}, local=[1, 1, 1], debug=True)]))
+            subprocess.run([os.environ['DMSH_TEST_XLATE'], str(jp), str(work)], check=True)
+            spv = work / 'ldst.spv'
+            subprocess.run(['spirv-val', '--target-env', 'vulkan1.1', str(spv)], check=True)
+            ops = instructions(spv)
+            defs = {args[1]: (op, args) for op, args in ops if op in (43, 61, 65, 124, 128, 169, 176)}
+            reads = [args for op, args in ops if op == 98]; writes = [args for op, args in ops if op == 99]   # OpImageRead, OpImageWrite
+            self.assertEqual((len(reads), len(writes)), (1, 1))
+            self.assertEqual(buffer_image_bias(defs, reads[0][3]), 5)
+            self.assertEqual(buffer_image_bias(defs, writes[0][1]), 6)
+            res = json.loads((work / 'ldst.res.json').read_text())
+            self.assertEqual([i.get('tbx') for i in res['images']], [0])   # Program.cs: the image's index in the offset table
+            msl = work / 'ldst.metal'
+            subprocess.run([str(SPIRV_CROSS), *XC, str(spv), '--output', str(msl)], check=True)
+            source = msl.read_text()
+            self.assertRegex(source, r'_c%d\s*\[\[id\(\d+\)\]\]' % TBIAS_BANK)
+            self.assertEqual(len(re.findall(r'_c%d\)\._m0\[0\]\.x' % TBIAS_BANK, source)), 4, source)   # entry 0, read in each access's sum and again in its comparison (spirv-cross inlines the load)
+            self.compile_metal(msl, work, 'ldst')
+
+    def test_buffer_texture_fetch_and_size_moved(self):
+        # TLD R4, R0 of a buffer texture in texture slot 0 (c2 byte 0x20), TXQ R5 of its size, then SUST.D of each to buffer image slot 0: the fetch's coordinate moves by the
+        # texture's table entry (taken first: 0), the size query gives the view's width less it, and the stores' coordinates move by the image's (1)
+        table = (RYU / 'Decoders/InstTable.cs').read_text()
+        def base(name):
+            m = re.search(r'Add\("([01x]{64})", InstName\.' + name + r'\s*,', table); assert m, name
+            return int(m[1].replace('x', '0'), 2)
+        def mov(reg, value): return base('Mov32i') | ((value & 0xffffffff) << 20) | (7 << 16) | (15 << 12) | reg
+        texture = (0x8 << 36) | (1 << 31) | (7 << 16)   # texture slot 0 (c2 word 8), 1D (TexDim 0), component x
+        surface = (0x48 << 36) | (1 << 33) | (4 << 20) | (7 << 16)   # image slot 0 (c2 byte 0x120), a 1D buffer (SuDim 1), 32 bits
+        program = [mov(0, 5), mov(1, 6), mov(2, 7), base('Tld') | texture | (255 << 20) | (0 << 8) | 4, base('Txq') | texture | (1 << 22) | (255 << 8) | 5,
+                   base('SustD') | surface | (1 << 8) | 4, base('SustD') | surface | (2 << 8) | 5, base('Exit') | (7 << 16) | 15]
+        words = []
+        for i, instruction in enumerate(program):
+            if i % 3 == 0: words.append(0)
+            words.append(instruction)
+        with tempfile.TemporaryDirectory(prefix='dm-buffer-texture-') as temp:
+            work = Path(temp); code = work / 'tbuf.bin'; code.write_bytes(struct.pack('<%dQ' % len(words), *words))
+            jp = work / 'jobs.json'
+            jp.write_text(json.dumps([dict(key='tbuf', stage='cs', code=str(code), tex={'0': 'buffer'}, img={'0': dict(type='buffer', fmt='R32Uint')}, local=[1, 1, 1], debug=True)]))
+            subprocess.run([os.environ['DMSH_TEST_XLATE'], str(jp), str(work)], check=True)
+            spv = work / 'tbuf.spv'
+            subprocess.run(['spirv-val', '--target-env', 'vulkan1.1', str(spv)], check=True)
+            ops = instructions(spv)
+            defs = {args[1]: (op, args) for op, args in ops if op in (43, 61, 65, 95, 104, 124, 128, 130, 169, 176)}
+            fetches = [args for op, args in ops if op == 95]; sizes = [args for op, args in ops if op == 104]; writes = [args for op, args in ops if op == 99]   # OpImageFetch, OpImageQuerySize, OpImageWrite
+            self.assertEqual((len(fetches), len(sizes), len(writes)), (1, 1, 2))
+            self.assertEqual(buffer_image_bias(defs, fetches[0][3]), 5)
+            def entry(load_id):   # the table entry a bias load reads: OpAccessChain table, 0, index / 4, index % 4
+                op, load = defs[load_id]; self.assertEqual(op, 61)
+                op, chain = defs[load[2]]; self.assertEqual(op, 65)
+                return 4 * defs[chain[4]][1][2] + defs[chain[5]][1][2]
+            op, fetch_cast = defs[fetches[0][3]]; op, select = defs[fetch_cast[2]]; op, moved = defs[select[4]]
+            self.assertEqual(entry(moved[3]), 0)
+            less = [args for op, args in ops if op == 130 and args[2] == sizes[0][1]]   # OpISub(size, bitcast(bias))
+            self.assertEqual(len(less), 1)
+            op, bias_cast = defs[less[0][3]]; self.assertEqual(op, 124)
+            self.assertEqual(entry(bias_cast[2]), 0)
+            self.assertEqual(buffer_image_bias(defs, writes[0][1]), 6)
+            op, write_cast = defs[writes[0][1]]; op, select = defs[write_cast[2]]; op, moved = defs[select[4]]
+            self.assertEqual(entry(moved[3]), 1)
+            res = json.loads((work / 'tbuf.res.json').read_text())
+            self.assertEqual([t.get('tbx') for t in res['textures']], [0])   # Program.cs: each one's index in the offset table
+            self.assertEqual([i.get('tbx') for i in res['images']], [1])
+            msl = work / 'tbuf.metal'
+            subprocess.run([str(SPIRV_CROSS), *XC, str(spv), '--output', str(msl)], check=True)
+            self.assertRegex(msl.read_text(), r'_c%d\s*\[\[id\(\d+\)\]\]' % TBIAS_BANK)
+            self.compile_metal(msl, work, 'tbuf')
 
     def test_real_translation_and_cross(self):
         self.assertTrue(os.access(SPIRV_CROSS, os.X_OK), f'{SPIRV_CROSS} required for compiler acceptance')

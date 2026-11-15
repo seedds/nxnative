@@ -1,0 +1,22 @@
+# kind: evidence  The Binding of Isaac: Rebirth shaders (GLSLC in RomFS + main) → control section + code area keys (dm/gfx/tools/shader_split.py)
+# column 5 records where each key first appears; no PC shader pairing supplied
+package	index	stage	dm_ctl_sha16	source
+ps_other.bin	0	pixel	8b6227e68ba96e1b	/glslc_capture/1881ecf4c29656d4.glslc#GLSLC@0x0
+ps_other.bin	1	pixel	d48a29200efe0442	/glslc_capture/1b930ec1200a9f7b.glslc#GLSLC@0x0
+ps_other.bin	2	pixel	94d3a46798b91027	/glslc_capture/2607998f9867a42f.glslc#GLSLC@0x0
+vs_other.bin	0	vertex	2f40d0d204672252	/glslc_capture/3cbe9421aa41d805.glslc#GLSLC@0x0
+vs_other.bin	1	vertex	1554a979ff3249c7	/glslc_capture/415a9ae028cba582.glslc#GLSLC@0x0
+ps_other.bin	3	pixel	41e078ba80c2b223	/glslc_capture/41a72744086e3ffb.glslc#GLSLC@0x0
+ps_other.bin	4	pixel	196fa5ee57a17cbb	/glslc_capture/5b93d4dc15a7719d.glslc#GLSLC@0x0
+vs_other.bin	2	vertex	d6b297d6e00900bc	/glslc_capture/661aa947b5179be7.glslc#GLSLC@0x0
+ps_other.bin	5	pixel	ab064f1c8b317af2	/glslc_capture/838be4b64368f698.glslc#GLSLC@0x0
+vs_other.bin	3	vertex	c8d4c2fff8a91023	/glslc_capture/972303a3585fdcbd.glslc#GLSLC@0x0
+ps_other.bin	6	pixel	839563c8e270b794	/glslc_capture/977cde09a59d2a6e.glslc#GLSLC@0x0
+ps_other.bin	7	pixel	a61a82830c29ff06	/glslc_capture/bff66df774ce92ad.glslc#GLSLC@0x0
+vs_other.bin	4	vertex	085d495fbd125c79	/glslc_capture/c3c5b1959cc52017.glslc#GLSLC@0x0
+ps_other.bin	8	pixel	f8c8d55af8d5324a	/glslc_capture/cb294501cb3a07fa.glslc#GLSLC@0x0
+vs_other.bin	5	vertex	4b10090ca4947349	/glslc_capture/cd85c2b66cd39a15.glslc#GLSLC@0x0
+vs_other.bin	6	vertex	9f6d3b3a0024581c	/glslc_capture/e080a961a09b4f8b.glslc#GLSLC@0x0
+vs_other.bin	7	vertex	f1fe2d6932030220	/glslc_capture/eae8bc3f8a4ae2cd.glslc#GLSLC@0x0
+ps_other.bin	9	pixel	eb35ddc4c04b0e39	/glslc_capture/f6e1cbc22ed74d25.glslc#GLSLC@0x0
+vs_other.bin	8	vertex	8062ae7b88cef0c0	/glslc_capture/fc7996e13dfdf8e8.glslc#GLSLC@0x0

@@ -378,11 +378,11 @@ static void copy_stream(void) { @autoreleasepool {
     NVNcopyRegion r1v = {0, 0, 0, W / 2, W / 2, 1};
     enc_b_copy_buffer_texture(blit(), (__bridge id<MTLBuffer>)sb, sbo, (W / 2) * 4, (W / 2) * (W / 2) * 4, MTLSizeMake(W / 2, W / 2, 1), host, 0, 1, MTLOriginMake(0, 0, 0));
     gsb_store_buf(t, 1, 0, 1, &r1v, sgpu, (W / 2) * 4, (W / 2) * (W / 2) * 4);
-    EXPECT("the store holds the texture for the command buffer being encoded", 1, gsb_held(t->serial));
+    EXPECT("the store holds the texture for the command buffer being encoded", 1, gsb_held(t->mem, t->L.size));
     uint64_t r2 = g_pkg_reuploads; m[OFF + lo[2][0] + 3] = 0x66;
     EXPECT("a CPU write while it is held: the texture keeps its host texture", 1, tex_mtl(t) == host && g_pkg_reuploads == r2);
     mtl_wait(mtl_sub_commit(), 5000000000ull); EXPECT("held store GPU success", 0, mtl_last_commit_error());
-    EXPECT("committed: no longer held", 0, gsb_held(t->serial));
+    EXPECT("committed: no longer held", 0, gsb_held(t->mem, t->L.size));
     id<MTLTexture> again = tex_mtl(t); EXPECT("... and the CPU write is uploaded at the next use", 1, (int)(g_pkg_reuploads - r2));
     bad = 0; for (uint64_t i = lo[0][1]; i < hi[0][1]; i++) bad += m[OFF + i] != 0x55;
     EXPECT("the store is in the storage, every byte of the level", 0, bad);
@@ -421,6 +421,85 @@ static void copy_stream(void) { @autoreleasepool {
         tex_mtl(t); EXPECT("a CPU write into its bytes in the shared page: uploaded again", 1, (int)(g_pkg_reuploads - r3));
     }
     h_nvnTextureFinalize(&arr); nvn_dirty_remove_range(mem); mtl_pool_del(mem); free(mem);
+} }
+
+// Two texture objects over the same storage, the second of format fb: the same format shares the first's package (pkg_shared), sRGB has a package of its own. A store
+// through the first holds the storage until its command buffer is committed: an upload batch runs before the main command buffer being encoded, so an upload through
+// either object would read the storage before the store, and the page tracking never sees the store come in after. As in copy_stream, the CPU writes a different layer
+// while that buffer is open. Every layer and level of both is read back on the GPU against literal bytes (no swizzle logic in the expected values), except the stored image of
+// the sRGB object: its package never learns of a store through another package (open, docs/reference/nvn-objects.md "A pending storage write through one alias is lost ...")
+static void copy_stream_alias(NVNformat fb) { @autoreleasepool {
+    const int shared = fb == NVN_FORMAT_RGBA8;
+    enum { W = 64, LAYERS = 4, LEVELS = 3, POOL = 1 << 20, OFF = 0x11000, SRC = 0x80000 };
+    void *mem = NULL; if (posix_memalign(&mem, getpagesize(), POOL)) abort(); memset(mem, 0, POOL);
+    uint8_t *m = mem;
+    pool_t pool = {.magic=MAGIC('P','O','O','L'), .mem=mem, .size=POOL};
+    mtl_pool_add(mem, POOL); nvn_dirty_add_range(mem, POOL);
+    NVNtextureBuilder tb; h_nvnTextureBuilderSetDefaults(&tb); h_nvnTextureBuilderSetTarget(&tb, NVN_TEXTURE_TARGET_2D_ARRAY);
+    h_nvnTextureBuilderSetWidth(&tb, W); h_nvnTextureBuilderSetHeight(&tb, W);
+    h_nvnTextureBuilderSetDepth(&tb, LAYERS); h_nvnTextureBuilderSetLevels(&tb, LEVELS);
+    h_nvnTextureBuilderSetFormat(&tb, NVN_FORMAT_RGBA8);
+    NVNpackagedTextureLayout lay = {{1, 0, 0, 0, 7, 0, 1, 0}};
+    h_nvnTextureBuilderSetPackagedTextureLayout(&tb, &lay);
+    h_nvnTextureBuilderSetStorage(&tb, (NVNmemoryPool *)&pool, OFF);
+    NVNtexture a, b;
+    if (!h_nvnTextureInitialize(&a, &tb)) abort();
+    h_nvnTextureBuilderSetFormat(&tb, fb);
+    if (!h_nvnTextureInitialize(&b, &tb)) abort();
+    const tex_t *ta = (const tex_t *)&a, *tbx = (const tex_t *)&b;
+    if (OFF + ta->L.size > SRC) abort();
+    memset(m + OFF, 0x11, ta->L.size);
+    id<MTLTexture> host = tex_mtl(ta);
+    if (!host) abort();
+    EXPECT("alias: distinct serials", 1, ta->serial != tbx->serial);
+    id<MTLTexture> host_b = tex_mtl(tbx);
+    EXPECT("alias: the second object's first look shares the host texture as its package does (or not)", shared, host_b == host);
+    EXPECT("alias: the same format shares one package, sRGB has its own", shared, tex_get(ta->serial) == tex_get(tbx->serial));
+    EXPECT("alias: both packaged", 1, [tex_get(ta->serial) isKindOfClass:[NvPkg class]] && [tex_get(tbx->serial) isKindOfClass:[NvPkg class]]);
+    mtl_finish_gpu();
+
+    memset(m + SRC, 0x55, (W / 2) * (W / 2) * 4);
+    state_reset(); memset(&R, 0, sizeof R); mtl_sub_begin();
+    void *sb; uint64_t sbo, sgpu;
+    if (!mtl_gpu_addr((uint64_t)(uintptr_t)(m + SRC), (W / 2) * (W / 2) * 4, &sb, &sbo, &sgpu)) abort();
+    enc_b_copy_buffer_texture(blit(), (__bridge id<MTLBuffer>)sb, sbo, (W / 2) * 4, (W / 2) * (W / 2) * 4,
+                             MTLSizeMake(W / 2, W / 2, 1), host, 0, 1, MTLOriginMake(0, 0, 0));
+    NVNcopyRegion region = {0, 0, 0, W / 2, W / 2, 1};
+    gsb_store_buf(ta, 1, 0, 1, &region, sgpu, (W / 2) * 4, (W / 2) * (W / 2) * 4);
+    uint64_t lo, hi; nvn_tex_level_range(ta, 0, 2, &lo, &hi);
+    memset(m + OFF + lo, 0x66, hi - lo);   // disjoint from the queued GPU write
+    uint64_t reuploads = g_pkg_reuploads;
+    EXPECT("alias: the other object keeps its host texture while a store into its storage is pending", 1, tex_mtl(tbx) == host_b);
+    EXPECT("alias: no early upload through the other object", 0, (int)(g_pkg_reuploads - reuploads));
+    int completed = mtl_wait(mtl_sub_commit(), 5000000000ull);
+    EXPECT("alias: store fence completed before final lookup", 1, completed);
+    if (!completed) exit(1);   // Do not inspect or free storage still owned by the GPU.
+    EXPECT("alias: store command buffer succeeded", 0, mtl_last_commit_error());
+    id<MTLTexture> resolved[2] = {tex_mtl(ta), tex_mtl(tbx)};
+    EXPECT("alias: one upload per package takes the CPU write", shared ? 1 : 2, (int)(g_pkg_reuploads - reuploads));
+    EXPECT("alias: both objects see the shared replacement (or each its own)", shared, resolved[0] == resolved[1]);
+    mtl_finish_gpu();
+    id<MTLBuffer> rb = [g_dev newBufferWithLength:W * W * 4 options:MTLResourceStorageModeShared];
+    if (!rb) abort();
+    for (int alias = 0; alias < 2; alias++) for (int z = 0; z < LAYERS; z++) for (int l = 0; l < LEVELS; l++) {
+        if (!resolved[alias]) abort();
+        int w = W >> l;
+        id<MTLCommandBuffer> cb = [g_q commandBuffer]; id<MTLBlitCommandEncoder> be = [cb blitCommandEncoder];
+        [be copyFromTexture:resolved[alias] sourceSlice:z sourceLevel:l sourceOrigin:MTLOriginMake(0, 0, 0)
+                sourceSize:MTLSizeMake(w, w, 1) toBuffer:rb destinationOffset:0 destinationBytesPerRow:w * 4 destinationBytesPerImage:w * w * 4];
+        [be endEncoding]; [cb commit]; [cb waitUntilCompleted];
+        EXPECT("alias: independent readback succeeded", MTLCommandBufferStatusCompleted, cb.status);
+        if (!shared && alias == 1 && z == 0 && l == 1) continue;   // open: see above
+        uint8_t want = z == 0 && l == 1 ? 0x55 : z == 2 && l == 0 ? 0x66 : 0x11;
+        int bad = 0; for (int i = 0; i < w * w * 4; i++) bad += ((uint8_t *)rb.contents)[i] != want;
+        char label[100]; snprintf(label, sizeof label, "alias %c%s layer %d mip %d has GPU copy, CPU write or unchanged bytes", 'A' + alias, shared ? "" : " (sRGB)", z, l);
+        EXPECT(label, 0, bad);
+    }
+    nvn_tex_level_range(ta, 1, 0, &lo, &hi);
+    int bad = 0; for (uint64_t i = lo; i < hi; i++) bad += m[OFF + i] != 0x55;
+    EXPECT("alias: queued store reached guest storage", 0, bad);
+    h_nvnTextureFinalize(&b); h_nvnTextureFinalize(&a);
+    nvn_dirty_remove_range(mem); mtl_pool_del(mem); free(mem);
 } }
 
 // The same into a 3D texture, a slice per copy, as LEGO Star Wars fills its light-probe volumes (GitHub #1856): each slice is stored into its plane of the level's block-linear order
@@ -514,7 +593,7 @@ static void gpu_storage(void) {
     nvn_ft_poll(); mtl_sub_begin(); id<MTLTexture> host = tex_mtl(td); tex_mtl(tc); tex_mtl(tl); tex_mtl(tp); mtl_wait(mtl_sub_commit(), 5000000000ull); mtl_pkg_stats(&up2, &reup2);
     EXPECT("they stay GPU textures: nothing is uploaded from the storage the host wrote", 1, host && up == up2 && reup == reup2 && mtl_tex_gpu_owned(td->serial) && mtl_tex_gpu_owned(tc->serial) && mtl_tex_gpu_owned(tl->serial)
            && !tex_cpu_written(td->serial) && !tex_cpu_written(tc->serial) && !tex_cpu_written(tl->serial) && gws_owned((uintptr_t)td->mem, (uintptr_t)td->mem + td->L.size));
-    EXPECT("nothing held once committed", 1, !gsb_held(td->serial) && !gsb_held(tp->serial));
+    EXPECT("nothing held once committed", 1, !gsb_held(td->mem, td->L.size) && !gsb_held(tp->mem, tp->L.size));
     memcpy((uint8_t *)mem + 0xa0000, td->mem, td->L.size);
     h_nvnTextureBuilderSetStorage(&tb, (const NVNmemoryPool *)&pool, 0xa0000); EXPECT("moved texture init", 1, h_nvnTextureInitialize(&moved, &tb));
     memset(lin, 0xEE, W * W * 4); h_nvnTextureReadTexels(&moved, NULL, &region, lin); bad = 0; for (int i = 0; i < W * W; i++) bad += memcmp(lin + i * 4, expected, 4) != 0;
@@ -717,6 +796,7 @@ int main(void) { @autoreleasepool {
     packed_copies(NVN_FORMAT_RGB565, 500); packed_copies(NVN_FORMAT_RGB5A1, 501); packed_copies(NVN_FORMAT_RGB5, 502); packed_copies(NVN_FORMAT_RGBA4, 503);
     store_completion();
     copy_stream();
+    copy_stream_alias(NVN_FORMAT_RGBA8); copy_stream_alias(NVN_FORMAT_RGBA8_SRGB);
     copy_stream_3d();
     gpu_storage();
     store_kinds();

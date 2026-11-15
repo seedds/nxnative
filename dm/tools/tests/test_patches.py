@@ -43,8 +43,20 @@ def builds_of(g):   # {build ID: module name} of a profile's build rows (a profi
 
 
 class Registry(unittest.TestCase):
+    def test_stub_data_address_accepts_interleaved_low_instruction(self):
+        import struct
+        from nso_asm import ADRP, LDRX
+        fn = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == 'stub_address')
+        code = compile(ast.Module(body=[fn], type_ignores=[]), str(source), 'exec')
+        words = [ADRP(8, 0, 0x123450), ADRP(9, 4, 0x456700), LDRX(8, 8, 0x450 // 8)]
+        env = {'struct': struct, 'ORIG_TEXT': struct.pack('<3I', *words)}
+        exec(code, env)
+        self.assertEqual(env['stub_address'](0, 'test', 8), 0x123450)
+        with self.assertRaisesRegex(AssertionError, 'adrp register'): env['stub_address'](4, 'test', 8)
+        with self.assertRaisesRegex(AssertionError, 'invalid address'): env['stub_address'](0, 'test', 0)
+
     def test_no_build_claimed_twice(self):
-        for kind in ('CUTS', 'OBS', 'FRAME_STEP', 'CAPABILITIES'):
+        for kind in ('CUTS', 'OBS', 'FRAME_STEP', 'STUBS', 'CAPABILITIES'):
             seen = {}
             for p, m in MODS.items():
                 for bid in getattr(m, kind, {}):
@@ -59,13 +71,14 @@ class Registry(unittest.TestCase):
             for bid, gates in getattr(m, 'OBS', {}).items():
                 for off, oid, word, why in gates:
                     self.assertTrue(isinstance(off, int) and isinstance(oid, int) and HEX.match(word) and len(word) == 8 and why, f'{p} {bid} {off:#x}')
-            for bid, fn in getattr(m, 'FRAME_STEP', {}).items():
-                self.assertTrue(callable(fn), f'{p} {bid}')
+            for kind in ('FRAME_STEP', 'STUBS'):
+                for bid, fn in getattr(m, kind, {}).items():
+                    self.assertTrue(callable(fn), f'{p} {kind} {bid}')
             for bid, names in getattr(m, 'CAPABILITIES', {}).items():
                 self.assertRegex(bid, r'^[0-9a-f]{32}$')
                 self.assertEqual(len(names), len(set(names)))
                 for name in names: self.assertRegex(name, r'^[A-Z][A-Z0-9_]*$')
-            self.assertFalse({k for k in vars(m) if k.isupper() and k not in ('CUTS', 'OBS', 'FRAME_STEP', 'CAPABILITIES', 'MATCH_CUTS', 'MATCH_FRAME_STEP', 'BINDING')} - set(dir(__import__('nso_asm'))),
+            self.assertFalse({k for k in vars(m) if k.isupper() and k not in ('CUTS', 'OBS', 'FRAME_STEP', 'STUBS', 'CAPABILITIES', 'MATCH_CUTS', 'MATCH_FRAME_STEP', 'MATCH_STUBS', 'BINDING')} - set(dir(__import__('nso_asm'))),
                              f'{p}: a table patch_nso.py does not read')
             # every patch file states each patch's binding (docs_patches.py "Binding"), and no goal is tighter than the binding now
             self.assertTrue(getattr(m, 'BINDING', None), f'{p}: no BINDING (docs/agents/game-patches.md, "Binding")')
@@ -109,11 +122,13 @@ class Registry(unittest.TestCase):
         # with that base), and writes no site in another function it could not find (ctx.others[label] None)
         from nso_match import validate_stub
         for p, m in MODS.items():
-            for module, rules in getattr(m, 'MATCH_FRAME_STEP', {}).items():
+            for kind, module, rules in ((table_kind, mod_name, entries) for table_kind in ('MATCH_FRAME_STEP', 'MATCH_STUBS') for mod_name, entries in getattr(m, table_kind, {}).items()):
                 self.assertEqual((p.name, module), ('patches.py', 'main'), f'{p}')
                 self.assertTrue(rules); self.assertEqual(len({r['name'] for r in rules}), 1, f'{p}: a main has one frame step')
                 for rule in rules:
-                    validate_stub(rule)
+                    if 'fps_required' in rule:
+                        self.assertEqual(kind, 'MATCH_STUBS'); self.assertIsInstance(rule['fps_required'], bool)
+                    validate_stub({k: v for k, v in rule.items() if k != 'fps_required'})
                     if 'calls' in rule:   # anchored: with each reviewed result of its find, the stub writes at the function's start plus the offset it found
                         for found in rule['reviewed']:
                             sites, _, _, _ = docs_patches.frame_step_sites(rule['stub'], base=0x100000, found=found)
@@ -128,9 +143,21 @@ class Registry(unittest.TestCase):
                     if rule.get('others'):   # none found: the stub leaves those parts out
                         rest = []
                         ctx = docs_patches.types.SimpleNamespace(here=lambda: 0x8000000, emit=lambda w: None, site=lambda off, orig: None, put=lambda off, words, why, rest=rest: rest.append(off),
-                                                                 state=0x9000000, render_scale=0, base=0x100000, others={label: None for label in rule['others']}, capabilities=set())
+                                                                 state=0x9000000, render_scale=0, step_max=0, base=0x100000, others={label: None for label in rule['others']}, capabilities=set(), fps_ready=False)
                         rule['stub'](ctx)
                         self.assertTrue(all(0x100000 <= off < 0x100000 + rule['size'] for off in rest), f'{p}: {rule["name"]} writes outside its function without its others')
+                        if rule.get('fps_required'): self.assertFalse(ctx.fps_ready, f'{p}: incomplete correction enables a native frame target')
+
+    def test_mario_kart_world_declares_its_largest_step(self):
+        # its stub caps the step it gives the game at 2 (mov w8,#2; csel ls), the game's own intervals, and says so (ctx.step_max), or the host holds frames 3 vsyncs while the game
+        # steps 2 (slow motion) and loses the debt it pays back with a step of 3
+        m = MODS[REPO / 'dm/games/0400C3F00006E000/patches.py']
+        words = []
+        ctx = docs_patches.types.SimpleNamespace(here=lambda: 0x8000000, emit=words.append, site=lambda off, orig: None, put=lambda off, words, why: None, state=0x9000000,
+                                                 render_scale=0, step_max=0, base=0x100000, others={}, found=None, capabilities=set(), address=lambda off: 0)
+        m.MATCH_FRAME_STEP['main'][0]['stub'](ctx)
+        self.assertIn(0x52800048, words)   # mov w8,#2: the cap
+        self.assertEqual(ctx.step_max, 2)
 
     def test_sdk_wide_rules_change_what_their_names_say(self):
         # the rules were taken from registered SDK cuts, and the builds they reproduce exactly have no row any more: each cut replaces the constant its rule names (0x3fe00000, the node
@@ -148,7 +175,7 @@ class Registry(unittest.TestCase):
         for p, m in MODS.items():
             if p.name != 'patches.py' or not (p.parent / 'game.tsv').is_file(): continue
             own = builds_of(p.parent.name)
-            for kind in ('CUTS', 'OBS', 'FRAME_STEP', 'CAPABILITIES'):
+            for kind in ('CUTS', 'OBS', 'FRAME_STEP', 'STUBS', 'CAPABILITIES'):
                 for bid in getattr(m, kind, {}):
                     self.assertIn(bid, own, f'{p}: {kind} of {bid}, which is no build of profile {p.parent.name}')
                     self.assertNotEqual(own[bid], 'sdk', f'{p}: {bid} is an sdk build; its patches go in dm/tools/sdk_patches.py')
@@ -156,7 +183,7 @@ class Registry(unittest.TestCase):
     def test_sdk_file_names_sdk_builds(self):
         sdk = {bid for g in game.all_games() for bid, m in builds_of(g).items() if m == 'sdk'}
         m = MODS[REPO / 'dm/tools/sdk_patches.py']
-        self.assertFalse(getattr(m, 'OBS', {}) or getattr(m, 'FRAME_STEP', {}))
+        self.assertFalse(getattr(m, 'OBS', {}) or getattr(m, 'FRAME_STEP', {}) or getattr(m, 'STUBS', {}))
         for bid in m.CUTS: self.assertIn(bid, sdk, f'sdk_patches.py: {bid} is no sdk build of any profile')
 
 
@@ -213,6 +240,12 @@ class ExternalRegistry(unittest.TestCase):
         self.patch_file(self.external, "MATCH_FRAME_STEP = {'main': ['external']}\n")
         tables, _ = self.registry()
         self.assertEqual(tables['MATCH_FRAME_STEP'][self.gid], {'main': ['repository']})
+
+    def test_native_stub_rules_are_scoped_like_match_rules(self):
+        self.patch_file(self.tools.parent / 'games', "MATCH_STUBS = {'main': ['repository']}\n")
+        self.patch_file(self.external, "MATCH_STUBS = {'main': ['external']}\n")
+        tables, _ = self.registry()
+        self.assertEqual(tables['MATCH_STUBS'][self.gid], {'main': ['repository']})
 
     def test_external_rules_cannot_enroll_a_repository_profile(self):
         (self.tools.parent / 'games' / self.gid).mkdir(parents=True)

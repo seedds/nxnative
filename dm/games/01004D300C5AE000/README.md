@@ -62,3 +62,4 @@ No code of the game is cut, and no run-time key is set. The game asks for presen
 
 - [HAL's `.cmp` containers: a size-prefixed frame](../../../docs/reference/shaders.md#hals-cmp-containers-a-size-prefixed-frame).
 - [A host lock held across a same-core handoff](../../../docs/reference/threads.md#a-host-lock-held-across-a-same-core-handoff).
+- [Built-in fonts and the audio device notification of SDK 21](../../../docs/reference/services.md#built-in-fonts-and-the-audio-device-notification-of-sdk-21): its Nintendo Switch 2 Edition (program `04004D300C5AE001`) asks for its fonts with `GetBuiltInFontDataSet` at boot.

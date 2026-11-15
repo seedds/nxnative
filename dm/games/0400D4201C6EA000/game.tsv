@@ -34,7 +34,3 @@ sys_resource	0x2000000
 # ---- Shader split (shader_split.py) ----
 shader_groups	/shader/=shader /model/=model /effect/=effect /layout/=layout /ssg_system/=system
 shader_note	Mario Tennis Fever shaders
-
-# ---- Graphics ----
-# As the console does; the game uses them a little, with no visible difference, and in a rally they save about 0.7 of 9.5 ms of GPU
-render_cond	on

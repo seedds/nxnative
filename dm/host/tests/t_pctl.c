@@ -13,8 +13,6 @@ void hle_bind_system_event(void *g, int autoclear) { (void)g; (void)autoclear; u
 static int blanks_live, blank_w, blank_h; static uint32_t blank_next = 0x80000000u;
 uint32_t dm_native_image_blank(uint32_t w, uint32_t h) { blanks_live++; blank_w = (int)w; blank_h = (int)h; return ++blank_next; }
 void dm_native_image_blank_free(uint32_t handle) { if (handle >> 31) blanks_live--; }
-// The big-stack take-overs' stubs (HLE_FORCE_BIG) jump here with the implementation in x16; off a guest stack the real entry calls it straight
-__asm__(".text\n.p2align 2\n.globl _dm_bigstack_enter\n_dm_bigstack_enter:\n    br x16\n");
 extern const struct mach_header_64 _mh_execute_header;
 #define CHECK(c, msg) do { checks++; if (!(c)) { fails++; fprintf(stderr, "FAIL: %s\n", msg); } } while (0)
 static void *hook(const char *name) {

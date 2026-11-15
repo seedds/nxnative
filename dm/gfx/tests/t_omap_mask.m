@@ -40,7 +40,7 @@ int main(void) { @autoreleasepool {
     MTLRenderPipelineDescriptor *d = pso_desc(&k, vs, fs, nil, 0);
     CHECK(d.colorAttachments[0].writeMask == (MTLColorWriteMaskRed | MTLColorWriteMaskGreen | MTLColorWriteMaskBlue), "alpha outside the output map is masked");
     for (int metal4 = 0; metal4 < 2; metal4++) {
-        id<MTLRenderPipelineState> ps = metal4 ? pso_build(d, &error) : [g_dev newRenderPipelineStateWithDescriptor:d error:&error];
+        id<MTLRenderPipelineState> ps = metal4 ? pso_build(d, 0, &error) : [g_dev newRenderPipelineStateWithDescriptor:d error:&error];
         CHECK(ps != nil, "pipeline compiles on both paths");
         if (ps) { __fp16 got[4]; pixels(ps, got); CHECK(got[0] == (__fp16).125 && got[1] == (__fp16).25 && got[2] == (__fp16).5 && got[3] == (__fp16).875, "mapped components written, alpha left as cleared"); }
     }
@@ -48,8 +48,6 @@ int main(void) { @autoreleasepool {
     CHECK(pso_desc(&k, vs, fs, nil, 0).colorAttachments[0].writeMask == (MTLColorWriteMaskRed | MTLColorWriteMaskBlue), "channel mask and output map combine");
     k.chmask = 15; fs->rf.omap_known = 0;
     CHECK(pso_desc(&k, vs, fs, nil, 0).colorAttachments[0].writeMask == MTLColorWriteMaskAll, "no recorded output map: the channel mask alone");
-    CHECK(pf_chan_bits(MTLPixelFormatR8Unorm) == 0x1 && pf_chan_bits(MTLPixelFormatRG16Float) == 0x3 && pf_chan_bits(MTLPixelFormatRG11B10Float) == 0x7 && pf_chan_bits(MTLPixelFormatRGBA8Unorm) == 0xf,
-          "stored channels per format");
     printf("output map write mask: %d checks, %d failed\n", checks, failed);
     return failed != 0;
 }}

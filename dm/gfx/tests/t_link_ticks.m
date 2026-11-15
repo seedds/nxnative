@@ -152,6 +152,19 @@ int main(int argc, char **argv) { @autoreleasepool {
     CHECK(g_link_tick_n == tick && test_now - start == 5000000ull, "timeout reaches its deadline without inventing ticks");
     test_silent = 0;
     CHECK(mtl_link_wait_ticks(2, 10000000ull) && g_link_tick_n - tick == 2, "ticks resume from the last successful wait after timeout");
+    // A drain of standing frames the display-link callback asked for (nvn_link_drain.h): one wait takes the extra ticks, once, and reports them as pacing
+    atomic_store(&g_link_drain_req, 1); tick = g_link_tick_n;
+    CHECK(mtl_link_wait_ticks(1, 100000000ull) && g_link_tick_n - tick == 2, "a drain request makes one wait a tick longer");
+    CHECK(atomic_load(&g_link_drained) == 1 && !atomic_load(&g_link_drain_req), "the drain is counted and its request used up");
+    (void)mtl_link_drain_take_ns();
+    CHECK(mtl_link_drain_take_ns() == 0, "the drain's time is handed out once");
+    tick = g_link_tick_n;
+    CHECK(mtl_link_wait_ticks(1, 100000000ull) && g_link_tick_n - tick == 1, "the wait after a drain is one tick again");
+    atomic_store(&g_link_drain_req, 2); tick = g_link_tick_n;
+    CHECK(mtl_link_wait_ticks(1, 100000000ull) && g_link_tick_n - tick == 3 && atomic_load(&g_link_drained) == 2, "a drain of two ticks");
+    atomic_store(&g_link_drain_req, 1); g_link_tick_n += 4; waits = test_waits;
+    CHECK(mtl_link_wait_ticks(1, 100000000ull) && test_waits == waits, "a game that fell behind does not wait for a drain");
+    CHECK(atomic_load(&g_link_drained) == 2 && !atomic_load(&g_link_drain_req) && atomic_load(&g_link_blocked_ns) == 0, "and the request is dropped, with no acquire wait reported");
     pid_t pid; int st = 1; extern char **environ;   // the snapshot cases in a process of their own (mtl_snap_on is decided once)
     CHECK(!posix_spawn(&pid, argv[0], NULL, NULL, (char *[]){argv[0], "snap", NULL}, environ) && waitpid(pid, &st, 0) == pid && WIFEXITED(st) && !WEXITSTATUS(st), "the snapshot cases pass");
     printf("t_link_ticks: %d checks, %d failed\n", checks, failed); return failed != 0;

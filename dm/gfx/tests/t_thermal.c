@@ -30,8 +30,8 @@ static void target(float fps) {
     __atomic_store_n((uint32_t *)fps_state, bits, __ATOMIC_RELAXED);
 }
 static _Atomic int test_movie;
-int dm_movie_playing(void) { return atomic_load(&test_movie); }   // hle_movie.c: a movie's pictures are being handed out
-static void movie(int on) { atomic_store(&test_movie, on); }
+int dm_movie_hz(void) { return atomic_load(&test_movie); }   // hle_movie.c: the picture rate of the movie playing, 0 when none
+static void movie(int hz) { atomic_store(&test_movie, hz); }
 
 static _Atomic int ready, start;
 static void *reader(void *unused) {
@@ -49,7 +49,7 @@ int main(void) {
     const char *enabled = getenv("DM_THERMAL_CAP");
     if (enabled && !strcmp(enabled, "0")) {
         at(10, 3); CHECK("disabled: a critical device keeps the configured cap", nvn_game_fps() == 60);
-        movie(1); CHECK("disabled: the movie cap still applies", nvn_game_fps() == 30);
+        movie(30); CHECK("disabled: the movie cap still applies", nvn_game_fps() == 30);
         CHECK("disabled: thermal state is never read", atomic_load(&thermal_reads) == 0);
     } else {
         dm_fps_state = NULL; at(1, 2);
@@ -63,7 +63,7 @@ int main(void) {
         int reads = atomic_load(&thermal_reads);
         at(12, 0); CHECK("a second call uses the cached thermal sample", nvn_game_fps() == 30 && atomic_load(&thermal_reads) == reads);
         at(13, 1); CHECK("fair starts recovery while keeping 30 fps", nvn_game_fps() == 30);
-        movie(1); at(14, 2); CHECK("a serious movie keeps 30 fps", nvn_game_fps() == 30);
+        movie(30); at(14, 2); CHECK("a serious movie keeps 30 fps", nvn_game_fps() == 30);
         CHECK("a movie still samples thermal state", atomic_load(&thermal_reads) == reads + 2);
         at(44, 2); (void)nvn_game_fps();
         movie(0); at(45, 1);
@@ -72,7 +72,7 @@ int main(void) {
         at(75, 1); CHECK("30 calm seconds restore 60 fps", nvn_game_fps() == 60);
 
         at(76, 3); CHECK("critical also holds 30 fps", nvn_game_fps() == 30);
-        movie(1); at(77, 1); (void)nvn_game_fps();
+        movie(30); at(77, 1); (void)nvn_game_fps();
         at(107, 1); CHECK("a calm movie keeps its own 30 fps cap", nvn_game_fps() == 30);
         movie(0); CHECK("cooling during a movie needs no additional recovery hold", nvn_game_fps() == 60);
 
@@ -87,6 +87,13 @@ int main(void) {
         at(171, 0); (void)nvn_game_fps();
         at(200, 0); CHECK("the restarted recovery lasts all 30 seconds", nvn_game_fps() == 30);
         at(201, 0); CHECK("recovery also completes at nominal", nvn_game_fps() == 60);
+
+        target(30); movie(60); at(201, 0); CHECK("a 60-picture movie lifts a 30 fps target to 60", nvn_game_fps() == 60);
+        movie(24); CHECK("a 24-picture movie holds 30", nvn_game_fps() == 30);
+        movie(0); CHECK("the 30 fps target again once the movie ends", nvn_game_fps() == 30);
+        target(60); movie(60); CHECK("a 60-picture movie at a 60 fps target keeps 60", nvn_game_fps() == 60);
+        at(202, 2); CHECK("a serious device holds 30 during a 60-picture movie", nvn_game_fps() == 30);
+        movie(0);
 
         at(202, 2);
         pthread_t threads[4];

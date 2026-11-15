@@ -54,6 +54,7 @@ static int detclock_cfg(void) {
 }
 static uint64_t wall_guest_ns(void) { return atomic_load(&g_gfz) ? atomic_load(&g_gfrozen) : now_ns() - atomic_load(&g_glag); }
 uint64_t guest_ns(void) { return atomic_load(&g_gdet_on) ? atomic_load(&g_gdet) : wall_guest_ns(); }
+int guest_clock_pinned(void) { return atomic_load(&g_gdet_on) || atomic_load(&g_gfz); }
 uint64_t guest_ns_at_host_time(uint64_t host_ns) {
     if (atomic_load(&g_gdet_on)) return atomic_load(&g_gdet);
     if (atomic_load(&g_gfz)) return atomic_load(&g_gfrozen);

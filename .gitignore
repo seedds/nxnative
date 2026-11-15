@@ -21,3 +21,5 @@ dm/games/*/cb_extent_vk.tsv
 /.claude/worktrees/
 
 Mario-vs-Donkey-Kong.xci
+
+/prod_keys_firmware/

@@ -21,7 +21,7 @@ from nso_asm import ADRP, ADDI, ADDR, B, BEQ, BLR, BR, NOP
 tree = ast.parse((TOOLS / 'patch_nso.py').read_text())
 IMG = bytearray(0x5000); tabjumps = {}; jumps = {}   # the globals the recognizers read: the module image and the jump tables resolved so far in the function
 scope = {'re': re, 'struct': struct, 'ARM64_OP_IMM': ARM64_OP_IMM, 'IMG': IMG, 'tabjumps': tabjumps, 'jumps': jumps}
-exec(compile(ast.Module(body=[n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in ('num', 'written_w', 'writes_reg', 'null_base', 'writes_reg_any', 'half_count', 'copied_base', 'table_base', 'table_cands', 'forward_table_base', 'guarded_count', 'check_before_copy', 'jump_offsets', 'jump_adr_offsets', 'jump_zero_extended', 'jump_masked_pred', 'jump_masked_not')], type_ignores=[]), str(TOOLS / 'patch_nso.py'), 'exec'), scope)
+exec(compile(ast.Module(body=[n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in ('num', 'written_w', 'writes_reg', 'null_base', 'writes_reg_any', 'half_count', 'copied_base', 'table_base', 'table_cands', 'forward_table_base', 'guarded_count', 'check_before_copy', 'jump_offsets', 'jump_adr_offsets', 'jump_masked_pred', 'jump_guarded_tail')], type_ignores=[]), str(TOOLS / 'patch_nso.py'), 'exec'), scope)
 
 
 def mov(dst, src, wide=True): return (0xaa0003e0 if wide else 0x2a0003e0) | src << 16 | dst
@@ -445,7 +445,7 @@ class ZeroExtendedIndex(unittest.TestCase):
 
     def run_site(self, words):
         ins = self.decode(words)
-        return scope['jump_zero_extended'](ins, next(i for i, p in enumerate(ins) if p.address == 44))
+        r = scope['jump_guarded_tail'](ins, next(i for i, p in enumerate(ins) if p.address == 44)); return r and r[0]
 
     def test_exact_five_targets_and_unrelated_writes(self):
         self.assertEqual(self.run_site(self.words()), self.TARGETS)
@@ -691,7 +691,7 @@ class MaskedComplement(unittest.TestCase):
     def run_site(self, words):
         md = Cs(CS_ARCH_ARM64, CS_MODE_ARM); md.detail = True
         ins = [p for i, word in enumerate(words) for p in md.disasm(struct.pack('<I', word), 4 * i)]
-        return scope['jump_masked_not'](ins, next(i for i, p in enumerate(ins) if p.mnemonic == 'br' and p.op_str == 'x18'))
+        r = scope['jump_guarded_tail'](ins, next(i for i, p in enumerate(ins) if p.mnemonic == 'br' and p.op_str == 'x18')); return r and r[0]
 
     def test_reads_exactly_seven_entries(self):
         self.assertEqual(self.run_site(self.words()), self.TARGETS)

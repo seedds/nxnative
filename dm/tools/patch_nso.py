@@ -954,6 +954,7 @@ def func_of(a):
     if i >= 0: return (starts[i], starts[i + 1] if i + 1 < len(starts) else TEXT_END)
     return (max((e for s, e in DATA_BLOCKS if e <= a), default=0), starts[0]) if starts else (a, a + 4)
 done = set(); windows = []; jumps = {}; tabjumps = {}; tailcalls = set(); retries = []
+guarded_tails = []   # (guard, br) of each table jump_guarded_tail resolved: nothing may land past the guard
 def guarded_count(ctx, kc, kl):
     """How many entries the compare ctx[kc] (cmp index,#N) lets the table load ctx[kl] read, or None when no branch on its flags guards the load. A compare bounds the index only
     through the branch that acts on it: cmp w18,#4; b.hi exit; cmp w18,#1; ldrsw x18,[x4,x18,lsl #2] has a nearer compare that bounds nothing, and taking it read 2 entries of a table of 5
@@ -1081,45 +1082,6 @@ def jump_offsets(insl, j, copy_first=False, far_base=False, forward_base=False):
     if page is None: return None
     tb = page + lo
     return [tb + struct.unpack_from('<i', IMG, tb + 4 * i)[0] for i in range(n)]
-def jump_zero_extended(insl, j):
-    """cmp wS,#N; b.hi exit; and xI,xS,#0xffffffff; ldrsw xE,[xB,xI,lsl #2]; add x18,xE,xB; br x18.
-    Mario Tennis Aces 1.0.0 main+0x35837c zero-extends the checked value rather than checking another masked copy. Require straight-line data flow from the guard to the br,
-    with no entry past the check, and decoded targets outside that run. Tried after every older recognizer, so previously recognized tables keep their targets."""
-    ctx = insl[max(0, j - 16):j + 1]
-    add = next((p for p in reversed(ctx[:-1]) if p.mnemonic == 'add' and re.fullmatch(r'x18, x\d+, x\d+', p.op_str)), None)
-    if not add: return None
-    _, ent, base = add.op_str.split(', '); ka = ctx.index(add)
-    ld = next((p for p in reversed(ctx[:ka]) if p.mnemonic == 'ldrsw' and re.fullmatch(rf'{ent}, \[{base}, x\d+, lsl #2\]', p.op_str)), None)
-    if not ld: return None
-    kl = ctx.index(ld); idx = ld.op_str.split(', ')[2]
-    if base in (ent, idx): return None
-    mask = next((p for p in reversed(ctx[:kl]) if p.mnemonic == 'and' and re.fullmatch(rf'{idx}, x\d+, #0xffffffff', p.op_str)), None)
-    if not mask: return None
-    km = ctx.index(mask); src = mask.op_str.split(', ')[1]
-    check = next((p for p in reversed(ctx[:km]) if p.mnemonic == 'cmp' and re.fullmatch(rf'w{src[1:]}, #(0x[0-9a-f]+|\d+)', p.op_str)), None)
-    if not check: return None
-    kc = ctx.index(check); branch = ctx[kc + 1]
-    if branch.mnemonic != 'b.hi': return None
-    run = ctx[kc:]; head, end = check.address, insl[j].address
-    if any(b.address != a.address + 4 for a, b in zip(run, run[1:])): return None
-    if head <= branch.operands[0].imm <= end: return None
-    # Calls and system calls can overwrite registers without appearing in Capstone's register writes. Reject control flow and traps after the guard.
-    if any(p.mnemonic in ('b', 'bl', 'br', 'blr', 'ret', 'cbz', 'cbnz', 'tbz', 'tbnz', 'svc', 'hvc', 'smc', 'brk', 'hlt', 'eret', 'drps') or p.mnemonic.startswith('b.') for p in ctx[kc + 2:-1]): return None
-    def writes(p, reg):   # Capstone lists a compare's first operand as written; only its flags change.
-        names = [p.reg_name(r) for r in p.regs_access()[1]]
-        return p.mnemonic not in ('cmp', 'cmn', 'tst') and any(name is None or name in (reg, 'w' + reg[1:], {'x29': 'fp', 'x30': 'lr'}.get(reg)) for name in names)
-    if any(writes(p, src) for p in ctx[kc + 2:km]) or any(writes(p, idx) for p in ctx[km + 1:kl]) or \
-       any(writes(p, ent) or writes(p, base) for p in ctx[kl + 1:ka]) or any(writes(p, 'x18') for p in ctx[ka + 1:-1]): return None
-    for p in insl:
-        if p.mnemonic in ('b', 'bl', 'cbz', 'cbnz', 'tbz', 'tbnz') or p.mnemonic.startswith('b.'):
-            if head < p.operands[-1].imm <= end: return None
-    if any(head < t <= end for targets in tabjumps.values() for t in targets): return None
-    if any(b <= end and b + 4 * width > head + 4 for b, width in jumps.values()): return None
-    tb = copied_base(insl, insl.index(ld), base); n = int(check.op_str.split('#')[1], 0) + 1
-    if tb is None or tb < 0 or tb + 4 * n > len(IMG): return None
-    targets = [tb + struct.unpack_from('<i', IMG, tb + 4 * i)[0] for i in range(n)]
-    addresses = {p.address for p in insl}
-    return targets if all(t in addresses and not head < t <= end for t in targets) else None
 def forward_table_base(insl, k, rb, n):
     """A loop's base initialized after its dispatch in address order (Blasphemous 1.0.8 main+0xae95f8: x17 is set at +0xae96dc, then the block branches backward).
     Used only after every older recognizer failed. Require exactly two writers of the full base in the function, an adjacent adrp + add after the load, no call that can clobber it,
@@ -1180,11 +1142,22 @@ def copied_base(insl, k, rb):
         if lo is not None and p.mnemonic == 'adrp' and ops[0] == r: return p.operands[1].imm + lo
         return None
     return None
-def jump_masked_not(insl, j):
-    """A zero-guarded complemented index: tst wS,#M; b.eq exit; mvn wS,wS; and xI,xS,#M; ldrsw xE,[xB,xI,lsl #2]; add x18,xE,xB; br x18.
-    Return of the Obra Dinn 1.0.1 main+0x6eea88 / +0x6eeac0 (Unity 2017.4) has seven entries, not eight: M is 7, the tst excludes zero, and the complement maps 1..7 to 6..0.
-    Read exactly M entries for a contiguous low-bit mask, only after the older recognizers fail. Straight-line data flow and no entry past the guard are required."""
-    ctx = insl[max(0, j - 16):j + 1]
+def jump_guarded_tail(insl, j):
+    """A dispatch tail whose index is bounded by a guard on one straight run to the br, at most 32 instructions:
+      guard; ...; [and xI,xS,#M; ...;] ldrsw xE,[xB,xI,lsl #2]; ...; add x18,xE,xB; ...; br x18, with M a low-bit mask.
+    The guard (and the mask) give the number of entries, one of four forms, each found on a game where no older recognizer matched:
+      cmp wI,#N; b.hi exit on the index itself, no mask: N + 1. The form jump_offsets reads, further back than its 16 instructions: ULTRA STREET FIGHTER II 1.1.1 main+0x63607c has its cmp
+        24 instructions before the br, with the base, the load and nine constants moved into registers between them.
+      cmp wS,#N; b.hi exit, then M = 0xffffffff (the checked value zero-extended): N + 1. Mario Tennis Aces 1.0.0 main+0x35837c, 5 entries.
+      tst wS,#M; b.eq exit; mvn wS,wS right before the and: the zero case is gone and the complement maps 1..M to M - 1..0, so M. Return of the Obra Dinn 1.0.1 main+0x6eea88 / +0x6eeac0
+        (Unity 2017.4): 7 entries, where the mask alone would read an eighth word from the next table.
+      tbnz wS,#B,exit with M = 2^(B + 1) - 1: bit B is clear on the fall-through, so 2^B, not M + 1. ULTRA STREET FIGHTER II 1.1.1 main+0x590ee8: tbnz w17,#3; and x18,x17,#0xf, 8 entries.
+    One proof for the three: no gap in the run from the guard to the br, the guard's branch leaves the run, no control flow or trap after it (calls and system calls write registers Capstone
+    does not list), S unchanged from the guard to the and (the complement apart), I to the load, E and B to the add, x18 to the br, and no direct branch of the function or jump table resolved
+    so far landing past the guard (the driver keeps the run in guarded_tails, for tables resolved later and branches from other functions). The base is found by copied_base: adrp + add,
+    then only register copies, in address order (ULTRA STREET FIGHTER II builds x13 before the two loops around its dispatch, whose back edges land before the guard). Every target must be a
+    decoded instruction of the function outside the run. Tried after every older recognizer, so tables they resolve keep their targets. Returns (targets, guard address), or None"""
+    ctx = insl[max(0, j - 32):j + 1]
     add = next((p for p in reversed(ctx[:-1]) if p.mnemonic == 'add' and re.fullmatch(r'x18, x\d+, x\d+', p.op_str)), None)
     if not add: return None
     _, ent, base = add.op_str.split(', '); ka = ctx.index(add)
@@ -1192,25 +1165,35 @@ def jump_masked_not(insl, j):
     if not ld: return None
     kl = ctx.index(ld); idx = ld.op_str.split(', ')[2]
     if base in (ent, idx): return None
+    def bound(k, ws):   # cmp wS,#N; b.hi at k → (k, k + 1, k + 2, N + 1)
+        m = re.fullmatch(rf'{ws}, #(0x[0-9a-f]+|\d+)', ctx[k].op_str) if ctx[k].mnemonic == 'cmp' else None
+        return (k, k + 1, k + 2, int(m.group(1), 0) + 1) if m and ctx[k + 1].mnemonic == 'b.hi' else None
+    guard = None   # (its first instruction, its branch, the first instruction S may not change at, the entries)
     mask = next((p for p in reversed(ctx[:kl]) if p.mnemonic == 'and' and re.fullmatch(rf'{idx}, x\d+, #(0x[0-9a-f]+|\d+)', p.op_str)), None)
-    if not mask: return None
-    km = ctx.index(mask)
-    if km < 3: return None
-    _, src, imm = mask.op_str.split(', '); n = int(imm[1:], 0)
-    if not n or n & (n + 1) or n > 0xffffffff: return None
-    test, branch, invert = ctx[km - 3:km]
-    if test.mnemonic != 'tst' or test.op_str != f'w{src[1:]}, {imm}' or branch.mnemonic != 'b.eq' or \
-       invert.mnemonic != 'mvn' or invert.op_str != f'w{src[1:]}, w{src[1:]}': return None
-    run = ctx[km - 3:]
-    if any(b.address != a.address + 4 for a, b in zip(run, run[1:])): return None
-    head, end = test.address, insl[j].address
-    if head <= branch.operands[0].imm <= end: return None
-    def writes(p, reg):
-        if p.mnemonic in ('bl', 'blr') and int(reg[1:]) <= 18: return True
-        return writes_reg(p, reg)
-    if any(writes(p, idx) for p in ctx[km + 1:kl]) or any(writes(p, ent) for p in ctx[kl + 1:ka]) or \
-       any(writes(p, base) for p in ctx[kl + 1:ka + 1]) or any(writes(p, 'x18') for p in ctx[ka + 1:-1]): return None
-    if any(p.mnemonic in ('b', 'bl', 'br', 'blr', 'ret', 'cbz', 'cbnz', 'tbz', 'tbnz') or p.mnemonic.startswith('b.') for p in ctx[km + 1:-1]): return None
+    if mask:
+        km = ctx.index(mask); _, src, imm = mask.op_str.split(', '); m = int(imm[1:], 0); ws = 'w' + src[1:]
+        if not m or m & (m + 1) or m > 0xffffffff: return None
+        if m == 0xffffffff:
+            kc = next((k for k in range(km - 1, -1, -1) if ctx[k].mnemonic == 'cmp' and ctx[k].op_str.startswith(ws + ',')), None)
+            guard = bound(kc, ws) if kc is not None else None
+        elif km >= 3 and [p.mnemonic for p in ctx[km - 3:km]] == ['tst', 'b.eq', 'mvn'] and ctx[km - 3].op_str == f'{ws}, {imm}' and ctx[km - 1].op_str == f'{ws}, {ws}':
+            guard = (km - 3, km - 2, km, m)
+        else:
+            kt = next((k for k in range(km - 1, -1, -1) if ctx[k].mnemonic == 'tbnz'), None)
+            t = re.fullmatch(rf'{ws}, #(0x[0-9a-f]+|\d+), #(0x[0-9a-f]+|\d+)', ctx[kt].op_str) if kt is not None else None
+            if kt is not None and t and m == (2 << int(t.group(1), 0)) - 1: guard = (kt, kt, kt + 1, (m + 1) // 2)
+    else:   # the index checked itself: unchanged from the check to the load
+        km, src = kl, idx
+        kc = next((k for k in range(kl - 1, -1, -1) if writes_reg(ctx[k], idx) or ctx[k].mnemonic == 'cmp' and ctx[k].op_str.startswith(f'w{idx[1:]},')), None)
+        guard = bound(kc, 'w' + idx[1:]) if kc is not None else None
+    if guard is None: return None
+    kg, kb, kfree, n = guard
+    run = ctx[kg:]; head, end = ctx[kg].address, insl[j].address
+    if any(q.address != p.address + 4 for p, q in zip(run, run[1:])): return None
+    if head <= ctx[kb].operands[-1].imm <= end: return None
+    if any(p.mnemonic in ('b', 'bl', 'br', 'blr', 'ret', 'cbz', 'cbnz', 'tbz', 'tbnz', 'svc', 'hvc', 'smc', 'brk', 'hlt', 'eret', 'drps') or p.mnemonic.startswith('b.') for p in ctx[kb + 1:-1]): return None
+    if any(writes_reg(p, src) for p in ctx[kfree:km]) or any(writes_reg(p, idx) for p in ctx[km + 1:kl]) or \
+       any(writes_reg(p, ent) or writes_reg(p, base) for p in ctx[kl + 1:ka]) or any(writes_reg(p, 'x18') for p in ctx[ka + 1:-1]): return None
     for p in insl:
         if p.mnemonic in ('b', 'bl', 'cbz', 'cbnz', 'tbz', 'tbnz') or p.mnemonic.startswith('b.'):
             if head < p.operands[-1].imm <= end: return None
@@ -1220,7 +1203,7 @@ def jump_masked_not(insl, j):
     if tb is None or tb < 0 or tb + 4 * n > len(IMG): return None
     targets = [tb + struct.unpack_from('<i', IMG, tb + 4 * i)[0] for i in range(n)]
     addresses = {p.address for p in insl}
-    return targets if all(t in addresses and not head < t <= end for t in targets) else None
+    return (targets, head) if all(t in addresses and not head < t <= end for t in targets) else None
 def jump_adr_offsets(insl, j):
     """Entries relative to an adr rather than to the table (Tears of the Kingdom main+0x393bb0): cmp w0,#5; b.hi; ...; adr x18,#L; ldrsw x1,[x17,x0,lsl #2];
     add x18,x18,x1; br x18 → target = L + entry, with the table base x17 from adrp + add. Tried only where jump_offsets finds nothing. Returns all targets, or None if not recognized"""
@@ -1554,9 +1537,8 @@ for fa, fb in funcs:
                 if not tgt and (far := jump_bytes_far(insl, j)): jumps[ins.address] = far; continue
                 if not tgt: tgt = jump_offsets(insl, j, copy_first=True, far_base=True)   # the index copied before the check (check_before_copy) or the base set far back, only where every other form failed
                 if not tgt: tgt = jump_masked_pred(insl, j)   # the check on a masked copy made in the block, the index masked in the block that branches to it
-                if not tgt: tgt = jump_masked_not(insl, j)   # a complemented low-bit index with its zero case branched away: exactly mask entries
                 if not tgt: tgt = jump_offsets(insl, j, copy_first=True, far_base=True, forward_base=True)   # a unique base initialized in a later block that branches backward
-                if not tgt: tgt = jump_zero_extended(insl, j)   # a 32-bit checked value zero-extended into the index, with its full path to the br verified
+                if not tgt and (g := jump_guarded_tail(insl, j)): tgt = g[0]; guarded_tails.append((g[1], ins.address))   # the index a mask of a value another guard bounds
                 assert tgt, f'jump table {ins.address:x}'
                 tabjumps[ins.address] = tgt; continue
             jumps[ins.address] = (base, width)
@@ -1597,7 +1579,11 @@ for w in windows:
     if w[0].address in newly_accepted:
         assert all(b.address == a.address + 4 for a, b in zip(w, w[1:])), f'noncontiguous window {w[0].address:x}'
 new_mid = {x.address for w in windows if w[0].address in newly_accepted for x in w[1:]}
-if new_mid:
+# jump_guarded_tail saw the direct branches of its own function (or piece) and the tables resolved before it; tables resolved later and branches from anywhere else are checked here
+past_guard = {a for head, end in guarded_tails for a in range(head + 4, end + 4, 4)}
+for at, tgt in tabjumps.items(): assert not past_guard.intersection(tgt), f'jump table past a guard {at:x}'
+for at, (b, width) in jumps.items(): assert not any(b <= a < b + 4 * width for a in past_guard), f'jump table past a guard {at:x}'
+if new_mid or past_guard:
     for start, end in CODE_RANGES:
         for at in range(start, end - 3, 4):
             w = struct.unpack_from('<I', IMG, at)[0]; t = w >> 24
@@ -1606,6 +1592,7 @@ if new_mid:
             elif t & 0x7C == 0x14: d = w & 0x3FFFFFF; d -= (d & 0x2000000) << 1
             else: continue
             dest = at + 4 * d
+            assert dest not in past_guard, f'branch past a guard {at:x}'
             if dest in new_mid: assert func_of(at) == func_of(dest), f'branch into window from another function {at:x}'
 
 def put_branch(at, to): struct.pack_into('<I', IMG, at, BX(at, to))

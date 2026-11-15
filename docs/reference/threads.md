@@ -130,6 +130,26 @@ Guest threads, their synchronization and how the host schedules them. Each entry
 - **Check:** `t_aot_host`'s `jit-start` rows (fp-gcc, fp-clang): run once the instance is ready (`--jit-ready`), the first use takes it, makes none and waits for none, in 0.03 to 0.07 ms (bound 20 ms), against 200 to 233 ms before; in the plain run, whose miss comes a millisecond after the load, the first use waited for the helper (193 to 265 ms here, the same as before) instead of making its own. Numbers: [dm/tools/aot/README.md](../../dm/tools/aot/README.md#the-jit-fallback).
 - **Found on:** the corpus (fp-gcc, fiber-gcc) and the 4,000-function benchmark, whose JIT samples kept about 200 after the tail-call fix; no game has run on the x86-64 engine yet.
 
+## The x86-64 engine on Windows
+
+Both found by running the cross-built test programs under Wine 9.0 ([docker/README.md](../../docker/README.md#running-the-windows-tests-under-wine)); neither has run on Windows yet.
+
+### Every leave of guest code crashes on Windows
+
+- **Symptom:** in a Windows build, any program that runs guest code crashes when the guest leaves it (an exit, a stop, a fault): an access violation in `guest_vcall`'s landing code, `mov %eax,0x3a8(%r12)` with r12 = 0; under Wine, `t_aot_host`, `t_aot_module`, `t_aot_hostfn`, `t_aot_targets`, `t_host_program` and `t_host_profile` crash or time out.
+- **Cause:** the engine left guest code with `__builtin_setjmp` / `__builtin_longjmp`. On x86-64 Windows clang stores the frame address in the buffer, which is the frame pointer less its prologue's offset (`lea 0x80(%rsp),%rbp` in `guest_vcall`), while the landing code addresses the frame through rbp unchanged: the jump landed with rbp 0x80 bytes low and read the frame's saved values wrong.
+- **Fix:** `dm_aot_setjmp` / `dm_aot_longjmp` (`dm/host/aot.h`) are the C runtime's `_setjmp(buf, NULL)` and `longjmp` on Windows: with no frame given, `longjmp` restores the registers without an SEH unwind, which is what the engine needs (guest frames hold nothing to run, as `siglongjmp` skips them on POSIX).
+- **Check:** the Windows test programs under Wine (`dm/host/tests/run_wine_tests.sh`): the six tests above pass or differ only by a row of `wine_differences.tsv`. Not run on Windows.
+- **Found on:** the port's host tests under Wine; no game.
+
+### A Windows program that ends within 0.2 s of its start hangs at exit
+
+- **Symptom:** a Windows build's process never ends when it exits soon after its first pack loads: `t_aot_targets`, `t_host_program` and `t_host_profile` time out under Wine, the main thread in `exit()` and a helper thread in `RtlpWaitForCriticalSection`.
+- **Cause:** `dm_jit_prepare` registers `AtExit` (it waits for the helper thread that makes the JIT's spare instance) and starts the helper, whose first step built dynarmic's decoder table: a static object, whose destructor the C runtime registers with `_crt_atexit`. Windows' C runtime holds its exit lock while it runs the atexit functions: `exit()` held the lock in `AtExit`, waiting for the helper, and the helper waited for the lock to register the destructor.
+- **Fix:** on Windows `dm_jit_prepare` builds the decoder table itself, before it starts the helper (`dm/tools/aot/src/rt/jit.cpp`; 63 to 197 ms at the host's start there). Elsewhere `exit()` runs its functions without holding a lock a registration needs, and the helper still builds the table. Open: another static object with a destructor first used in the helper would wait the same way; none hung in the Wine runs.
+- **Check:** the three tests above pass under Wine. Not run on Windows (taken from the UCRT's documented behaviour, which Wine's shows too).
+- **Found on:** the port's host tests under Wine; no game.
+
 ## Synchronization and address arbitration
 
 ### `SignalToAddress` type 2 with count ≤ 0

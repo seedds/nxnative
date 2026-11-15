@@ -20,9 +20,14 @@
 // Narrow paths are UTF-8 in the C runtime as in wide() below: the manifest's UTF-8 code page does that from Windows 10 1903. Windows 10 1803 and 1809 ignore it (the ANSI code page stays, e.g. 1252,
 // where the guest name U+00C4 is stored through open as the two characters U+00C3 U+201E, and through mkdir / plat_xattr_* as U+00C4), so there the C runtime's own code page is switched to UTF-8
 // (the UCRT's UTF-8 locale, 1803 and later; LC_CTYPE only: number formatting stays "C"). Open there: the narrow environment block is converted from the ANSI code page before this runs, so getenv
-// still returns a non-ASCII value (a user folder in APPDATA, TMPDIR) in that code page on those two versions
+// still returns a non-ASCII value (a user folder in APPDATA, TMPDIR) in that code page on those two versions.
+// _fmode is only the default of the files opened after it is set: the C runtime opened the standard streams before this constructor ran, in text mode, where every "\n"
+// of the host's log lines and of a program's output becomes "\r\n" in a pipe or a file (t_aot_host compares its children's output with the corpus's expected lines byte for
+// byte). So the standard streams are made binary too, each one that is open (a GUI program started without them has none: _fileno gives -2)
 __attribute__((constructor)) static void plat_win32_init(void) {
     _set_fmode(_O_BINARY);
+    FILE *std[3] = {stdin, stdout, stderr};
+    for (int i = 0; i < 3; i++) if (_fileno(std[i]) >= 0) _setmode(_fileno(std[i]), _O_BINARY);
     if (GetACP() != CP_UTF8) setlocale(LC_CTYPE, ".UTF8");
 }
 

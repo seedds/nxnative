@@ -170,12 +170,16 @@ llvm::CodeGenOptLevel CodegenLevel(Tier t) {
     }
 }
 
+// The triple every pack is compiled for, on every host: x86-64 ELF objects (a Windows pack converts them: build/coff.cpp). nxaot.exe's process triple
+// (x86_64-w64-windows-gnu) made LLVM compile for Win64, which has no guaranteed tail calls nor !pcsections sections
+constexpr const char* kCodegenTriple = "x86_64-pc-linux-gnu";
+
 std::unique_ptr<llvm::TargetMachine> MakeTarget(const std::string& cpu_name, Tier tier, std::string* cpu_out, std::string* features_out,
                                                 std::string* error) {
     llvm::InitializeNativeTarget();
     llvm::InitializeNativeTargetAsmPrinter();
     llvm::InitializeNativeTargetAsmParser();
-    const std::string triple = llvm::sys::getProcessTriple();
+    const std::string triple = kCodegenTriple;
     std::string err;
     const llvm::Target* target = llvm::TargetRegistry::lookupTarget(triple, err);
     if (!target) {
@@ -3354,7 +3358,7 @@ unsigned CompileWorkers(const BuildOptions& o, size_t units, const std::set<Tier
     } else {
         uint64_t each = 0;
         for (const Tier t : tiers) each = std::max(each, kWorkerPeak[static_cast<size_t>(t)]);
-        const bool mc = TablesThroughMC(o, llvm::Triple(llvm::sys::getProcessTriple()));  // MakeTarget's triple
+        const bool mc = TablesThroughMC(o, llvm::Triple(kCodegenTriple));  // MakeTarget's triple
         const uint64_t tables = kTablesFixed + (mc ? kTablesPerFunctionMC : kTablesPerFunctionIR) * functions;
         const uint64_t available = MemoryAvailable();
         n = !available ? cpus : available > tables ? static_cast<unsigned>(std::min<uint64_t>(cpus, (available - tables) / each)) : 0;

@@ -120,6 +120,12 @@ docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -v "$(pwd):/src" -v <wor
    cmake --build build/aot-win64 --target nxaot'
 ```
 
+- **The triple of the code** (`build/pack.cpp` `kCodegenTriple`): every pack is compiled for `x86_64-pc-linux-gnu` on every host, since a pack's
+  units are x86-64 ELF objects (a Windows pack converts them, `build/coff.cpp`). nxaot took the process's triple, which in `nxaot.exe` is
+  `x86_64-w64-windows-gnu`: LLVM then compiled for Win64, which has no guaranteed tail calls (`LLVM ERROR: Can't handle guaranteed tail call under
+  win64 yet`, fp-gcc) and no `!pcsections` sections (a crash in `AsmPrinter::emitPCSections`, fnptr-gcc), so `nxaot.exe` built no pack. Found by
+  running it under Wine 9.0; with the fixed triple its Windows packs of the corpus are the bytes the Linux nxaot writes (compared under Wine, not on
+  Windows).
 - **LLVM** ([tools/build_llvm_win64.sh](tools/build_llvm_win64.sh), whose header lists its steps): the `llvm`, `lld` and `cmake` tarballs of
   `llvmorg-18.1.3` with their SHA-256 pinned in the script (the release's GPG signatures, by the LLVM release key `474E22316ABF4785A88C6E8EA2C794A986419D8A`,
   were checked when they were written down); the image's gcc builds the native `llvm-tblgen` and `llvm-min-tblgen` the cross build runs; then LLVM with

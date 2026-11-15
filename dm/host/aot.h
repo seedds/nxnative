@@ -179,9 +179,13 @@ void *dm_guest_fnptr_named(const void *fn, const char *name);
 // A guest thread's engine state: the state block (64-byte aligned, outside the arena, at offset 0 so that a block names its thread), the base its guest code
 // leaves through, its JIT instance. One per host thread that runs guest code, made at its first use
 #if defined(_WIN32)
-typedef void *dm_aot_jmp_buf[5];
-#define dm_aot_setjmp(b) __builtin_setjmp(b)          // no SEH unwind on the way out: guest frames hold nothing to run, as siglongjmp skips them on POSIX
-#define dm_aot_longjmp(b) __builtin_longjmp((b), 1)
+// The C runtime's _setjmp with no frame (as mingw-w64's __USE_MINGW_SETJMP_NON_SEH): its longjmp then restores the registers with no SEH unwind on the way out (guest frames
+// hold nothing to run, as siglongjmp skips them on POSIX). Not __builtin_setjmp: on x86-64 Windows clang stores the frame address in the buffer, which is the frame pointer
+// less its prologue's offset (rbp = rsp + 0x80 in guest_vcall), while the landing code addresses the frame through rbp unchanged, so a __builtin_longjmp landed with rbp
+// 0x80 bytes low and read the frame's saved values wrong (every leave of guest code: an exit, a stop, a fault)
+typedef jmp_buf dm_aot_jmp_buf;
+#define dm_aot_setjmp(b) _setjmp((b), NULL)
+#define dm_aot_longjmp(b) longjmp((b), 1)
 #else
 typedef sigjmp_buf dm_aot_jmp_buf;
 #define dm_aot_setjmp(b) sigsetjmp((b), 1)            // the signal mask too: the fault path leaves from a signal handler

@@ -11,6 +11,10 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
+#if defined(_WIN32)
+#include <fcntl.h>
+#include <io.h>
+#endif
 #include <cstdlib>
 #include <cstring>
 #include <string>
@@ -28,6 +32,9 @@ static int checks, fails;
 #define CHECK_EQ(a, b, msg) do { checks++; auto _a = (a); auto _b = (b); if (!(_a == _b)) { fails++; std::fprintf(stderr, "FAIL: %s (line %d)\n", std::string(msg).c_str(), __LINE__); } } while (0)
 
 static int fake_host(int argc, char **argv) {   // nxhost-run's stand-in: what it was started with, on its standard output (the launcher's log)
+#if defined(_WIN32)
+    _setmode(_fileno(stdout), _O_BINARY);   // "\n" as written, as on Linux: the launcher's log is read back byte for byte
+#endif
     std::error_code ec;
     std::printf("fake host: cwd %s\n", fs::current_path(ec).u8string().c_str());
     std::string args;
@@ -140,7 +147,7 @@ static void command(const fake::Folder &f) {
     CHECK_EQ(keys(cmd.set), (std::vector<std::string>{"DM_OPMODE", "DM_PRESENT_UPSCALE", "DM_DEBUG_LOG", "DM_RENDER_SCALE", "DM_MOTION", "DM_ROOT", "DM_ROMFS", "DM_SAVE", "DM_TEMP",
                                                       "DM_MSL_DIR", "DM_LANG", "DM_WINDOW", "DM_AUDIO"}), "env.txt's lines, then the env rows, as run.sh sets them");
     CHECK_EQ(value(cmd.set, "DM_PRESENT_UPSCALE"), std::string("metalfx"), "env.txt's lines go as they are, as run.sh passes them");
-    CHECK_EQ(compose(a, "max", none).argv[3], fake::str(f.a / "aot_v131072/max"), "the max pack");
+    CHECK_EQ(compose(a, "max", none).argv[3], fake::str(f.a / "aot_v131072" / "max"), "the max pack");
     MapEnv set; set.vars = {{"DM_LANG", "ja"}, {"DM_OPMODE", "1"}, {"NXHOST", "/opt/other/nxhost-run"}};
     Command cs = compose(a, "", set);
     CHECK(value(cs.set, "DM_LANG") == "<unset>" && value(cs.set, "DM_OPMODE") == "<unset>", "what the environment sets stays");
@@ -535,7 +542,7 @@ static void moved_bundle(const fs::path &root) {
     const std::string row = fake::str(old / "bin" / (std::string("nxhost-run") + kExeSuffix)), own = fake::str(bundle / "bin" / (std::string("nxhost-run") + kExeSuffix));
     fake::profile(build, id);
     const std::string row_packer = fake::str(old / "scripts/build_ipa_from_nsp.py"), row_nxaot = fake::str(old / "bin" / (std::string("nxaot") + kExeSuffix));
-    const std::string own_packer = fake::str(bundle / "scripts/build_ipa_from_nsp.py"), own_nxaot = fake::str(bundle / "bin" / (std::string("nxaot") + kExeSuffix));
+    const std::string own_packer = fake::str(bundle / "scripts" / "build_ipa_from_nsp.py"), own_nxaot = fake::str(bundle / "bin" / (std::string("nxaot") + kExeSuffix));
     fake::packs(build / "aot_v0", false);
     const std::string repack = "path\tpackage\t" + fake::str(games) + "\npath\tpacker\t" + row_packer + "\npath\tpython\t/usr/bin/python3\npath\tnxaot\t" + row_nxaot + "\n";
     const fs::path launch = build / ("launch-" + std::string(kPlatform) + ".tsv");

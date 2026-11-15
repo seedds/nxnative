@@ -247,7 +247,7 @@ static bool is_file(const std::string &path) { std::error_code ec; return !path.
 static Found find_in_bundle(const std::string &what, const std::string &row, const std::string &rel, const std::string &bundle, const std::string &fix) {
     Found f;
     if (is_file(row)) { f.path = row; return f; }
-    const std::string own = bundle.empty() ? std::string() : S(P(bundle) / P(rel));
+    const std::string own = bundle.empty() ? std::string() : S(P(bundle) / P(rel).make_preferred());
     if (is_file(own)) { f.path = own; f.note = what + ": the bundle's " + own + " (the launch file's " + row + " is missing)"; return f; }
     f.problem = "the " + what + " " + row + " is missing: " + fix;
     return f;

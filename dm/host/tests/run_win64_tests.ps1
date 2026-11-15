@@ -101,7 +101,7 @@ foreach ($l in $lines) {
     $log = Join-Path $LogDir "$name.log"
     $exePath = Join-Path $BuildDir $exe
     $argText = ''; if ($targs -ne '-') { $argText = ' ' + $targs }
-    if ($Packs -and $name -eq 't_aot_host') { $argText += " --corpus `"$corpus`"" }   # the checkout's corpus: the compiled-in path is the container's
+    if ($Packs -and ($name -eq 't_aot_host' -or $name -eq 't_aot_targets')) { $argText += " --corpus `"$corpus`"" }   # the checkout's corpus: the compiled-in path is the container's
     # The test runs through the shell with stdout and stderr redirected to the log together, so the log keeps the order in which the test wrote them
     if ($onWindows) {
         $envText = ''; if ($needTmp) { $envText = "set TMPDIR=$tmpDir&& " }

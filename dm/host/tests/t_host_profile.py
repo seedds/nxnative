@@ -47,7 +47,10 @@ def main():
     ap.add_argument('--packs', default='')
     a = ap.parse_args()
     build = Path(a.build).resolve()
-    exe = build / ('nxhost-run.exe' if os.name == 'nt' else 'nxhost-run')
+    # Under Wine (run_host_tests.sh with WINE=<the wine loader>: a Windows tree on Linux) the program is the .exe, run through that loader; it takes this script's Unix paths
+    # as paths on Wine's Z: drive (Z: is /), its working folder's drive
+    wine = os.environ.get('WINE', '') if os.name != 'nt' else ''
+    exe = build / ('nxhost-run.exe' if os.name == 'nt' or wine else 'nxhost-run')
     if not exe.is_file(): print(f'FAIL: no host program at {exe} (the CMake target nxhost-run, NXHOST_PROGRAM)'); return 1
     head = (build / 'host_tests.tsv').read_text(encoding='utf-8')
     default_id = next(l.split(':', 1)[1].strip() for l in head.split('\n') if l.startswith('# game:'))
@@ -57,7 +60,7 @@ def main():
     env.update(SDL_VIDEO_DRIVER='dummy', SDL_AUDIO_DRIVER='dummy', DM_VK_HEADLESS='1', DM_DBG='1', DM_AOT_RAW='1')
 
     def run(args, extra=None):
-        r = subprocess.run([str(exe)] + args, env=dict(env, **(extra or {})), stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=240)
+        r = subprocess.run(([wine] if wine else []) + [str(exe)] + args, env=dict(env, **(extra or {})), stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=240)
         return r.returncode, r.stdout.decode('utf-8', 'replace')
 
     tmp = Path(tempfile.mkdtemp(prefix='t_host_profile.'))

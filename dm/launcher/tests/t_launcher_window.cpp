@@ -8,6 +8,10 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
+#if defined(_WIN32)
+#include <fcntl.h>
+#include <io.h>
+#endif
 #include <cstdlib>
 #include <cstring>
 #include <sstream>
@@ -21,6 +25,9 @@ static int checks, fails;
 #define CHECK(c, msg) do { checks++; if (!(c)) { fails++; std::fprintf(stderr, "FAIL: %s (line %d)\n", std::string(msg).c_str(), __LINE__); } } while (0)
 
 static int fake_host(int argc, char **argv) {   // nxhost-run's stand-in: its arguments and two of its variables, on its standard output (the game's log.txt)
+#if defined(_WIN32)
+    _setmode(_fileno(stdout), _O_BINARY);   // "\n" as written, as on Linux: the launcher's log is read back byte for byte
+#endif
     std::string args;
     for (int i = 1; i < argc; i++) args += std::string(i > 1 ? "|" : "") + argv[i];
     const char *op = std::getenv("DM_OPMODE"), *st = std::getenv("NXL_FAKE_STATUS");

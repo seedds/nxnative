@@ -590,6 +590,14 @@ void dm_jit_prepare(const dm_jit_ahead* a) {
     p.code_cache = a->code_cache ? a->code_cache : p.code_cache;
     p.made = a->made;
     std::atexit(AtExit);
+#if defined(_WIN32)
+    // On Windows the decoder table is built here, not first in the helper: building it registers its destructor with atexit, and Windows' C runtime holds its exit
+    // lock while it runs the atexit functions, AtExit among them. A helper that registered one while the process exited waited for that lock while AtExit waited for
+    // the helper: a program that ended within the table's build time (63 to 197 ms: README.md, "The first use") hung at exit. The cost is that time at the
+    // host's start, on Windows only: elsewhere exit() runs its functions without holding a lock a registration needs, and the helper builds the table.
+    // Open: another first use in the helper of a static object with a destructor (MakeInstance) would wait the same way; none hung in the Wine runs
+    WarmDecoder();
+#endif
     Refill(p);
 }
 

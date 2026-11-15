@@ -18,6 +18,10 @@
 #include <cfloat>
 #include <cmath>
 #include <cstdio>
+#if defined(_WIN32)
+#include <fcntl.h>
+#include <io.h>
+#endif
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
@@ -45,6 +49,9 @@ static void attach_console() {
         FILE *f;
         freopen_s(&f, "CONOUT$", "w", stdout); freopen_s(&f, "CONOUT$", "w", stderr);
     }
+    // Binary, as on Linux: --list's TSV and --command's lines end in "\n" in a pipe or a file the caller reads, not "\r\n" (a console shows them the same)
+    if (_fileno(stdout) >= 0) _setmode(_fileno(stdout), _O_BINARY);
+    if (_fileno(stderr) >= 0) _setmode(_fileno(stderr), _O_BINARY);
 }
 #else
 static void attach_console() {}

@@ -11,6 +11,7 @@ The build is [dm/host/CMakeLists.txt](../dm/host/CMakeLists.txt). It needs a gam
 | Linux build and tests | `nxnative-build`, built from [Dockerfile.build](Dockerfile.build) | Ubuntu 24.04 pinned by digest; clang and lld 18.1.3, CMake 3.28, Ninja, Python 3.12, git, and the development headers SDL3's Linux drivers compile against (X11, Wayland, libdecor, xkbcommon, EGL, ALSA, PulseAudio, PipeWire, D-Bus, udev, IBus), Vulkan without a GPU ([below](#vulkan)): Mesa's lavapipe, the Vulkan loader, the validation layer, glslang and SPIRV-Tools, and what the engine's JIT fallback needs ([below](#the-jit-fallback)): Boost's headers and clang++ 18 |
 | Windows cross-build | `mstorsjo/llvm-mingw:20261020` (digest `sha256:dadd757c364edee190c53d8e71a135892a6986182e873205d3611f85e26f290b`) | llvm-mingw: clang 23.1.4 for `x86_64-w64-mingw32` with the UCRT and winpthreads, CMake 3.28.3, Ninja 1.11.1, Python 3.12.3, git; no Boost: the JIT fallback takes the headers of [dm/third_party/boost](../dm/third_party/boost/VENDOR.md) ([below](#the-jit-fallback)) |
 | Shader chain for Vulkan ([below](#the-shader-chain-for-vulkan)) and the port's prebuilt tools ([below](#the-ports-tools)) | `nxnative-chain`, built from [Dockerfile.chain](Dockerfile.chain) | the .NET SDK 10.0.404 image (`mcr.microsoft.com/dotnet/sdk:10.0.404-noble`, Ubuntu 24.04) pinned by digest; Python 3.12 with PyYAML, SPIRV-Tools and glslang from Ubuntu 24.04, SPIRV-Cross built for linux-x64 from the tag `dm/gfx/tools/spirv_cross_bin/build.sh` pins, and clang 18 for Native AOT |
+| The Windows tests under Wine ([below](#running-the-windows-tests-under-wine)): not Windows | `nxnative-wine`, built from [Dockerfile.wine](Dockerfile.wine) | Ubuntu 24.04 pinned by digest; its Wine 9.0 (`9.0~repack-4build3`), 64-bit only, without Mono, Gecko or fonts, its PE DLLs stripped of their debug sections; Xvfb and the X11 libraries Wine's X11 driver loads; Mesa's lavapipe (25.2.8) and the Vulkan loader; Python 3.12 and git. About 1.07 GB |
 
 The Linux image takes about 1.8 GB on disk (the SDL3 headers are a layer of their own, about 340 MB, the Vulkan packages another, about 190 MB, and Boost's headers a third, about 160 MB); the llvm-mingw image about 1.6 GB (350 MB to download: it carries toolchains for four architectures). The Windows programs it makes are linked statically (`-static`, SDL3 and libc++ included): they need only the system's own DLLs (`KERNEL32.dll`, `bcrypt.dll` and the UCRT, which every Windows 10 has; the programs with SDL3 also `USER32`, `GDI32`, `IMM32`, `ole32`, `OLEAUT32`, `SETUPAPI`, `SHELL32`, `VERSION`, `WINMM` and `ADVAPI32`), so the test `.exe` files run on a stock Windows 10 or 11. The JIT fallback (dynarmic and its externals, linked into `nxhost-run.exe` and the AOT tests) adds no DLL to that set: on 2026-11-14 the 84 programs imported 26 DLLs in all with it as without it (`-DNXHOST_JIT=OFF`), and the four that link it import one more of the UCRT's, `api-ms-win-crt-multibyte-l1-1-0.dll` (`_mbtowc_l`, for libc++'s locale code), which `nxlauncher.exe` imports anyway. To check a program: `llvm-readobj --coff-imports build/win64/t_front_sdl.exe | grep -i '\.dll'` in the llvm-mingw image.
 
@@ -147,6 +148,29 @@ git push
 ```
 
 Each log starts with the date, the commit the run was built from (`git rev-parse HEAD`, marked when the working tree had uncommitted changes) and the exact command; `summary.txt` adds the Windows version, the runner and the toolchain that built the tree. [logs/README.md](../logs/README.md) has the convention. The Linux runs in Docker write `logs/linux/` the same way.
+
+## Running the Windows tests under Wine
+
+The closest check of the Windows programs a Linux machine gives, and only that: a run under Wine is not a run on Windows. [dm/host/tests/run_wine_tests.sh](../dm/host/tests/run_wine_tests.sh) runs the test programs of a cross-built tree under Wine 9.0 in the `nxnative-wine` image and writes `logs/wine/` (a folder of its own: `logs/win64/` is a real PC's). From the repository root, after the Windows cross-build and, for the AOT tests, the packs of [The recompiled corpus in the host](#the-recompiled-corpus-in-the-host):
+
+```sh
+docker build -t nxnative-wine -f docker/Dockerfile.wine docker
+sh dm/host/tests/run_wine_tests.sh --packs build/packs/win64 build/win64
+```
+
+It runs on the host (it starts the container itself, as your user, with every folder at its own path) and reuses `run_host_tests.sh` inside the image: the same lists (`host_tests.tsv`, `host_scripts.tsv`), logs and environment, with two switches that change nothing when unset: `WINE=/usr/lib/wine/wine64` runs each program through Wine and gives the programs Z:/ paths (Wine's drive for `/`; the script tests, whose Python is then Linux's, get the Unix paths and run `nxhost-run.exe` through `WINE`), and `NOT_RUN=<file>` names the runs not to start. `--packs` (else `NXAOT_PACKS`, else `<build>/packs/win64`) is mounted read-only; `TIMEOUT=<seconds>` per test (default 120). Exit status 0 when nothing failed, 1 when a run failed, 2 on a usage error or a missing tree or image.
+
+`summary.txt` starts with `Wine, not Windows` and the Wine version, then `run_host_tests.sh`'s summary with four kinds of lines besides `PASS`, `FAIL` and `TIMEOUT`: `DIFFERS` (a failure that [dm/host/tests/wine_differences.tsv](../dm/host/tests/wine_differences.tsv) explains as Wine's behaviour, not the port's: every failed check of the log must be one a row names, with that row's evidence in the log, so a new failure in the same test stays a `FAIL`), `SKIP` (a program that passed by skipping its checks: its last line says `skipped`, as the `t_vk_*` programs do when no Vulkan device meets the baseline), and `NOT RUN` (a row of kind `not-run`: `t_second_pack`, whose Python driver needs a Windows Python). A row is added only with its evidence: the Windows API, what Wine does instead, a reproduction or Wine's own `fixme:` line.
+
+What the image and the runner do for Wine, and why:
+
+- **Xvfb.** Wine's Vulkan (`winevulkan.dll`, over the image's lavapipe) needs a graphics driver that supports Vulkan; without a display Wine has none (`Failed to load Wine graphics driver supporting Vulkan`) and every `t_vk_*` program sees no device. The programs themselves draw on SDL's dummy drivers.
+- **A tmpfs at `/run/user/<uid>`.** Wine 9.0 keeps its server directory there; without it, it falls back to a path built from `TMPDIR`, and with `TMPDIR` set (the tmpdir tests) it aborts at start in glibc (`free(): invalid pointer`), before any trace.
+- **`LANG=C.UTF-8`.** Wine writes a Windows file name to the Unix file system in the locale's character set; in the image's default C locale, creating a file with any non-ASCII name fails (`STATUS_OBJECT_NAME_NOT_FOUND`), which NTFS never does (`t_fs_case`'s non-ASCII saves).
+- **`DM_REPO`.** `t_pipe` looks for the checkout above the build folder; a tree built outside the checkout has none there.
+- **Crashes.** Wine's crash dialog is off: a crash prints winedbg's backtrace into the test's log and ends the test. The exit code is the low byte of the NTSTATUS (an access violation, `0xC0000005`, is `5`).
+
+No game files are involved; the logs hold test output only ([logs/README.md](../logs/README.md)).
 
 ## The shader chain for Vulkan
 

@@ -1,0 +1,28 @@
+# Wine environment that runs the cross-built Windows test programs (build/win64) on Linux: dm/host/tests/run_wine_tests.sh and docker/README.md ("Running the Windows
+# tests under Wine"). A run under Wine is not a run on Windows: the runner says so on the first lines of its summary.
+# Ubuntu 24.04, pinned by the same digest as the other images, and its Wine 9.0. 64-bit Wine only: every program is x86-64, so no i386 architecture and no wine32 (Wine
+# starts without it; Ubuntu's /usr/bin/wine wrapper prints a hint about wine32, which the runner avoids by starting /usr/lib/wine/wine64 itself). No recommended packages:
+# no wine-mono, wine-gecko, fonts or GStreamer plugins
+# - Xvfb and the X11 libraries Wine's X11 driver (winex11) loads: Wine's Vulkan (winevulkan.dll) needs a graphics driver that supports Vulkan, and without a display Wine
+#   has none ("Failed to load Wine graphics driver supporting Vulkan"), so the t_vk_* tests would see no device. The programs themselves draw nothing on it (SDL's dummy
+#   drivers: run_host_tests.sh)
+# - Mesa's lavapipe and the Vulkan loader (libvulkan.so.1, which winevulkan loads), for the t_vk_* tests on the CPU, as in the Linux image
+# - Python 3 for the script tests (t_host_profile, t_second_pack), git for the logs' commit: line
+# Wine's own PE DLLs ship with their DWARF debug sections (634 MB); they are stripped of them (strip --strip-debug, which keeps the "Wine builtin DLL" mark of their DOS
+# header) with binutils, which is removed again in the same layer. The versions apt resolved are printed at the end (docker/README.md records them)
+FROM ubuntu:24.04@sha256:24737cef17f4e22b1977df7d9a05e77c4e28b7da5b8911f8d8ccda136bf3573c
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends wine wine64 xvfb xauth libxrandr2 libxrender1 libxi6 libxcursor1 libxfixes3 libxcomposite1 libxinerama1 \
+    mesa-vulkan-drivers libvulkan1 python3 git ca-certificates binutils \
+ && find /usr/lib/x86_64-linux-gnu/wine/x86_64-windows -type f \( -name '*.dll' -o -name '*.exe' -o -name '*.drv' -o -name '*.sys' -o -name '*.ocx' -o -name '*.cpl' \
+    -o -name '*.acm' -o -name '*.ax' -o -name '*.com' -o -name '*.ds' -o -name '*.tlb' \) -exec strip --strip-debug {} + \
+ && apt-get purge -y --auto-remove binutils \
+ && rm -rf /var/lib/apt/lists/* \
+ && dpkg-query -W -f '${db:Status-Abbrev}${Package} ${Version}\n' wine wine64 libwine xvfb mesa-vulkan-drivers libvulkan1 python3 | sed -n 's/^ii *//p'
+# No Mono or Gecko install prompt when a prefix is made. A UTF-8 Unix locale: Wine writes a Windows file name to the Unix file system in the locale's character set, and
+# in the image's default C locale (ASCII) creating a file named with any non-ASCII character fails with STATUS_OBJECT_NAME_NOT_FOUND, where NTFS takes any Unicode name
+ENV WINEDLLOVERRIDES="mscoree,mshtml=" WINEARCH=win64 LANG=C.UTF-8
+# The checkout is mounted at /src; git refuses repositories owned by another user without this (the container runs as the caller's user, HOME=/tmp)
+RUN git config --system --add safe.directory '*'
+WORKDIR /src

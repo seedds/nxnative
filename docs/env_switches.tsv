@@ -322,8 +322,10 @@ FAKE_FAIL_STEP	test	The `verify` step that fails in `test_port_docker.py`'s stan
 FAKE_IMAGE_MB	test	`=<MiB>` (default 1800): the size of an image `test_port_docker.py`'s stand-in `docker build` makes, taken from the stand-in `df`'s free space
 FAKE_LIBLLVM	test	`1`: `test_port_docker.py`'s stand-in build image has `libLLVM.so.18.1` (the shared nxaot is kept); otherwise the script builds nxaot statically
 FAKE_LOG	test	The file `test_measure_packs.py`'s stand-in nxaot_host appends each call to (variant and pack file), from which the test reads the order of the runs
+FAKE_NO_IMAGE	test	When set, `test_run_wine_tests.py`'s stand-in `docker image inspect` finds no image (the runner stops with exit status 2 and the build command)
 FAKE_NXAOT_OLD	test	When set, `test_nsp_x86.py`'s stand-in nxaot prints the usage of an nxaot without `--workers`, `--cache`, `--target`, `--profile` and `--misses`
 FAKE_OUT	test	The JSON file `test_nsp_x86.py`'s stand-in for nxhost-run writes what it was started with into (environment, arguments, working folder)
+FAKE_SCENARIO	test	The JSON file of the runs `test_run_wine_tests.py`'s stand-in `docker run` writes as run_host_tests.sh would (each run's summary line and log), for `run_wine_tests.sh` to classify
 FAKE_SPEED	test	`=<seconds>`: the time `test_measure_packs.py`'s stand-in nxaot bakes into a pack, over its `--fake-speed` argument (a variant's environment in the tool's `--b-env`)
 FAKE_STATE	test	The folder holding the state of `test_port_docker.py`'s stand-in `docker` and `df` (the images as JSON, the call log, the free space)
 GAME	switch	The base game title ID for `dm/ios/tools/compile_check.py` and `build_smoke.py` when `DM_GAME` is not set (as `make -C dm/host` and `build_ipa.sh` take it)
@@ -368,6 +370,7 @@ T_VK_FORMATS_QUIET	test	When set, `t_vk_formats` does not print each texel compo
 T_VK_PCACHE_DIR	test	The folder `t_vk_pipeline_cache`'s child processes write their `<case>.res` result files into; the parent sets it
 T_VK_PRESENT_DUMP	test	`=<folder>`: `t_vk_present` writes each picture it reads back there as `<n>.ppm`, to look at
 T_VK_PREWARM_DIR	test	The folder `t_vk_prewarm`'s child processes write their `<case>.res` result files into; the parent sets it
+WINE	test	`=<the wine loader>`: `dm/host/tests/run_host_tests.sh` runs each program of a Windows tree through it (`run_wine_tests.sh` sets `/usr/lib/wine/wine64` in the `nxnative-wine` image), and `t_host_profile.py` runs `nxhost-run.exe` through it; unset (a PC, Linux), they run the programs directly
 WORK	path	The parent folder of `dmsh_build.py`'s and `dmsh_build_vk.py`'s temporary folders; default the system's temporary folder (the NSP script sets it to its work folder)
 XLATE	path	The NVN shader translator `dmsh_build.py` runs; `dmsh_chain.py` fingerprints its folder for the chain version; default the in-repo `dm/gfx/tools/dmsh_xlate_bin/dmsh_xlate`, the build `dmsh_chain.lock` names
 XLATE_DEBUG	switch	`0` turns the shader translator's debug mode off (the AST optimizer runs; `dmsh_build.py`); default `1`. A part of the chain version (`dmsh_chain.py`), so libraries built with another value are not the host's

@@ -1,5 +1,9 @@
 // Read back all three attachment planes after production replay, with lookahead disabled.
 // Compare store elision against an interleaved store-all control and literal pixel values.
+// Mode 8: the shader has colour output 0 but the channel mask for it is 0 (a depth-only draw, Ocarina of Time's prepass): with DM_NVN_CMASK_EXACT at its default (1) the colour plane is unwritten and
+// its store elided; the colour must still read back as the seed's clear.
+// Remapped slot: where a merged pipeline maps an attachment to another game slot (g_pso_lmap: deferred-pass replay, same-pass feedback read from the tile), the exact rule follows the
+// pipeline's mapping (draw_color_writes): attachment 0 drawn through game slot 1 is written even though slot 0's channel mask is 0.
 #include "../nvn/nvn_mtl.m"
 void *front_metal_layer(void) { return NULL; }
 module_t *module_of(const void *p) { (void)p; return NULL; }
@@ -29,11 +33,12 @@ static result run(int enabled, int mode) {
     static uint64_t frame; uint64_t started=bp_now(); mtl_set_frame(++frame);
     g_udc=enabled;
     state_reset(); memset(&R,0,sizeof R); mtl_sub_begin(); seed();
-    S.ds=(ds_st){.dt=1,.dw=mode==1||mode==7,.df=NVN_DEPTH_FUNC_LESS,.st=mode==2,
+    S.ds=(ds_st){.dt=1,.dw=mode==1||mode==7||mode==8,.df=NVN_DEPTH_FUNC_LESS,.st=mode==2,
         .sf_f=NVN_STENCIL_FUNC_ALWAYS,.sf_b=NVN_STENCIL_FUNC_ALWAYS,
         .fail_f=NVN_STENCIL_OP_KEEP,.zfail_f=NVN_STENCIL_OP_KEEP,.zpass_f=NVN_STENCIL_OP_REPLACE,
         .fail_b=NVN_STENCIL_OP_KEEP,.zfail_b=NVN_STENCIL_OP_KEEP,.zpass_b=NVN_STENCIL_OP_REPLACE};
     S.st_ref[0]=S.st_ref[1]=0x36;
+    if (mode==8) S.chmask.mask=0xfffffff0u;   // slot 0 masked off: the draw writes depth only
     S.st_vmask[0]=S.st_vmask[1]=S.st_wmask[0]=S.st_wmask[1]=255;
     struct { op_hdr rt_h; p_set_rt rt; op_hdr pr_h; p_bind_program pr; op_hdr draw_h; p_draw draw; op_hdr end; } code={0};
     code.rt_h=(op_hdr){OP_SET_RT,sizeof(op_hdr)+sizeof(p_set_rt)};
@@ -49,7 +54,7 @@ static result run(int enabled, int mode) {
     }
     for (unsigned i=0;i<repeats;i++) {
     mtl_exec((const uint8_t *)&code);
-    if (mode>=4) { // Unknown writable aliases must force stores, even with read-only depth state.
+    if (mode>=4 && mode<=7) { // Unknown writable aliases must force stores, even with read-only depth state.
         NvProg *alias=[NvProg new]; alias->sh[1]=[NvShader new];
         alias->sh[1]->rf.color_mask=1; alias->sh[1]->rf.nb=1;
         int kinds[]={NVN_RB_IMG,NVN_RB_SBUFP,NVN_RB_SBUFU};
@@ -69,9 +74,22 @@ static result run(int enabled, int mode) {
     result r={0}; memcpy(r.color,b[0].contents,256); memcpy(r.depth,b[1].contents,256); memcpy(r.stencil,b[2].contents,64);
     r.saved=g_udc_saved_bytes-before; r.gpu_ms=mtl_gpu_ms(frame); r.wall_ms=(bp_now()-started)/1e6; return r;
 }
+static void remapped_slot(void) {
+    NvProg *p=[NvProg new]; p->sh[1]=[NvShader new]; p->sh[1]->stage=1; p->sh[1]->rf.color_known=1; p->sh[1]->rf.color_mask=2;   // the shader writes game slot 1 only
+    memset(&R,0,sizeof R); S.rast_discard=0; S.chmask.mask=0xfffffff0u;                           // game slot 0 masked off, slot 1 on
+    static const uint8_t lm[8]={1,0xff,0xff,0xff,0xff,0xff,0xff,0xff};                             // attachment 0 draws game slot 1
+    g_pso_lmap=lm; uint32_t rm=draw_color_writes(p); g_pso_lmap=NULL;
+    CHECK(rm==1,"draw_color_writes: attachment 0 is written through game slot 1");
+    g_nsd=1; g_sd[0]=(sd_att){.idx=0,.depth=0}; udc_note_draw(p,rm);
+    CHECK(g_sd[0].wrote,"remapped slot: the exact rule counts attachment 0 as written (its store is kept)");
+    NvProg *q=[NvProg new]; q->sh[1]=[NvShader new]; q->sh[1]->stage=1; q->sh[1]->rf.color_known=1; q->sh[1]->rf.color_mask=1;   // unmapped, slot 0 masked: depth only
+    rm=draw_color_writes(q); g_sd[0]=(sd_att){.idx=0,.depth=0}; udc_note_draw(q,rm);
+    CHECK(rm==0 && !g_sd[0].wrote,"unmapped slot 0 masked off: not written");
+    g_nsd=0; S.chmask.mask=0xffffffffu;
+}
 int main(int argc,char **argv) { @autoreleasepool {
     int bench=argc>1&&!strcmp(argv[1],"--bench"); if(bench) { width=1920; height=1080; repeats=32; }
-    mtl_init();
+    unsetenv("DM_NVN_CMASK_EXACT"); mtl_init();   // DM_NVN_CMASK_EXACT unset: mode 8 checks the default (on)
     color.d=(nvn_texdesc){.target=NVN_TEXTURE_TARGET_2D,.format=NVN_FORMAT_RGBA8,.width=width,.height=height,.depth=1,.levels=1,.samples=1};
     depth.d=color.d; depth.d.format=NVN_FORMAT_DEPTH32F_STENCIL8;
     NSError *error=nil;
@@ -80,23 +98,24 @@ int main(int argc,char **argv) { @autoreleasepool {
     NvProg *pr=[NvProg new]; pr->sh[0]=[NvShader new]; pr->sh[1]=[NvShader new];
     pr->sh[0]->fn=[lib newFunctionWithName:@"v"]; pr->sh[1]->fn=[lib newFunctionWithName:@"f"];
     pr->sh[1]->stage=1; pr->sh[1]->rf.color_mask=1; serial_put(program.serial,pr);
-    for (int case_id=0;case_id<(bench?12:8);case_id++) {
+    for (int case_id=0;case_id<(bench?12:9);case_id++) {
         int mode=bench?0:case_id;
         result off,on;
         if(case_id&1) { on=run(1,mode); off=run(0,mode); }
         else { off=run(0,mode); on=run(1,mode); }
         CHECK(!memcmp(off.color,on.color,256)&&!memcmp(off.depth,on.depth,256)&&!memcmp(off.stencil,on.stencil,64),"store-all and elided planes match byte for byte");
         int good=1; for(int i=0;i<64;i++) {
-            uint8_t red[4]={255,0,0,255}; good &= !memcmp(on.color+4*i,red,4);
-            good &= on.depth[i]==(mode==1||mode==7?.5f:mode==3?.625f:.75f);
+            uint8_t red[4]={255,0,0,255}, black[4]={0,0,0,255}; good &= !memcmp(on.color+4*i,mode==8?black:red,4);
+            good &= on.depth[i]==(mode==1||mode==7||mode==8?.5f:mode==3?.625f:.75f);
             good &= on.stencil[i]==(mode==2?0x36:mode==3?0x63:0x2d);
         }
         CHECK(good,"all 64 pixels match hand-computed color/depth/stencil");
         CHECK(off.saved==0,"disabled control always stores");
-        uint64_t want=(uint64_t)width*height*repeats*(mode==0?5:mode==1?1:mode==2?4:0);
+        uint64_t want=(uint64_t)width*height*repeats*(mode==0?5:mode==1?1:mode==2?4:mode==8?5:0);
         CHECK(on.saved==want,"only provably unchanged planes skip their store");
         printf("mode %d: saved %llu bytes, expected %llu\n",mode,(unsigned long long)on.saved,(unsigned long long)want);
         if(bench) printf("BENCH trial %d off_gpu_ms %.6f on_gpu_ms %.6f off_wall_ms %.6f on_wall_ms %.6f saved_mb %.3f\n",case_id,off.gpu_ms,on.gpu_ms,off.wall_ms,on.wall_ms,on.saved/1e6);
     }
+    if(!bench) remapped_slot();
     printf("UNWRITTEN_STORE %d checks, %d failed\n",checks,failed); return failed!=0;
 } }

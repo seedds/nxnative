@@ -7705,6 +7705,16 @@ static void udc_note_draw(NvProg *pr, uint32_t raster_mask) {
     int image_write = pr && pr->c_iw ? pr->c_iw - 1 : 0;
     __unsafe_unretained NvShader *fs = pr ? pr->sh[1] : nil;
     uint32_t shader_color_mask = fs ? (fs->rf.color_known ? fs->rf.color_mask : UINT32_MAX) : 0;
+    // A colour slot whose channel mask is 0 is not written by this draw, whatever the shader outputs: the pipeline's write mask is the channel mask (and the shader's output map, pso
+    // colour attachments), so a masked output never reaches the tile. Counting the shader's output as a write kept the store of a loaded colour target in every depth-only pass
+    // (Ocarina of Time's depth prepass: 8 passes a frame, colour 1440x810 RG11B10F); unwritten, its store becomes DontCare (udc_on, sd_finish).
+    // On by default (Ocarina of Time on an M2 Air, in-run A/B: attachment stores -35.5 MB a frame, the same picture). DM_NVN_CMASK_EXACT=0 keeps the old rule (the shader's output
+    // counts as a write), ab alternates with DM_AB for measuring
+    // The exact rule asks the pipeline's own question, per physical attachment: raster_mask (draw_color_writes, taken before the merged pipeline state is reset) maps each attachment
+    // to the game slot it draws (g_pso_lmap: same-pass feedback read from the tile) and tests that slot's channel mask and output. Testing S.chmask at the
+    // attachment's own index read another slot's mask wherever the map is not the identity, so a written attachment could be judged unwritten and lose its store
+    static int cmask_mode = -1; if (cmask_mode < 0) cmask_mode = sw_mode("DM_NVN_CMASK_EXACT", 1);
+    int cmask_exact = sw_on(cmask_mode);
     if (pr && !pr->c_iw) for (int st = 0; st < 6; st++) { __unsafe_unretained NvShader *sh = pr->sh[st]; if (!sh) continue;
         // A writable image, atomic image pointer or storage pointer may alias an attachment. Do not infer its identity from bound texture slots (bindless shaders need not use them).
         for (int i = 0; i < sh->rf.nb; i++) { const nvn_rbind *b = &sh->rf.b[i];
@@ -7720,7 +7730,7 @@ static void udc_note_draw(NvProg *pr, uint32_t raster_mask) {
         if (image_write) t->img = 1;
         if (t->depth == 0 && t->idx >= 0 && (raster_mask >> t->idx & 1)) t->rast = 1;
         if (image_write) { t->wrote = 1; t->wwhy = 1; }
-        else if (t->depth == 0 && t->idx >= 0 && (((S.chmask.mask >> (4 * t->idx)) & 0xf) || (shader_color_mask >> t->idx & 1))) { t->wrote = 1; t->wwhy = (S.chmask.mask >> (4 * t->idx)) & 0xf ? 2 : 3; }
+        else if (t->depth == 0 && t->idx >= 0 && (cmask_exact ? (raster_mask >> t->idx & 1) : (((S.chmask.mask >> (4 * t->idx)) & 0xf) || (shader_color_mask >> t->idx & 1)))) { t->wrote = 1; t->wwhy = cmask_exact || (S.chmask.mask >> (4 * t->idx)) & 0xf ? 2 : 3; }
         else if (t->depth == 1 && S.ds.dw) { t->wrote = 1; t->wwhy = 4; }
         else if (t->depth == 2 && S.ds.st && (S.st_wmask[0] || S.st_wmask[1])
                 && (S.ds.fail_f != NVN_STENCIL_OP_KEEP || S.ds.zfail_f != NVN_STENCIL_OP_KEEP || S.ds.zpass_f != NVN_STENCIL_OP_KEEP

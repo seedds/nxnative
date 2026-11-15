@@ -832,6 +832,14 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Found on:** [Splatoon Raiders](../../dm/games/0400380020056000/README.md): its ink map (6400x6400 RG8 with a Depth32F-S8) got about 150 one-draw occlusion queries a frame, each after setting the map again: 150 passes of about 1 ms, 42 GB of attachment loads a frame, about 6 fps. Without the depth rules its water came out in grey blocks of tiles: the water reads the scene's depth, then the next draw writes the water's own.
 - **Check:** `make -C dm/gfx/tests GAME=<id> check_t_feedback` (the depth attachment read, then written).
 
+### A colour target masked off in a depth-only pass stored back
+
+- **Symptom:** a depth-only pass (a depth prepass, a shadow pass) that keeps a colour target attached with its channel mask at 0 still stores that colour target at the pass end: in a `DM_NVN_GPUPROF` frame its line shows a `store` of the colour target although no draw of the pass wrote it; attachment stores per frame follow the colour target's size and the number of such passes.
+- **Cause:** `udc_note_draw` counted a colour attachment as written when the draw's channel mask for it was non-zero, or when the fragment shader had that output. The pipeline's colour write mask is the channel mask, so a masked output never reaches the tile; the second clause marked the target written, and the store of a loaded colour target was kept.
+- **Fix:** an attachment counts as written only when the draw's pipeline writes it (`draw_color_writes`: the channel mask and output of the game slot the attachment draws, through a merged pipeline's slot map, `g_pso_lmap`); the existing unwritten-store rule makes the store DontCare. `DM_NVN_CMASK_EXACT`, default 1; `0` keeps the old rule; `ab` alternates with `DM_AB`. Testing the channel mask at the attachment's own index would read another slot's mask under same-pass feedback read from the tile, and drop a written attachment's store.
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md): its depth prepass, 8 passes a frame, each with its 1440x810 RG11B10F colour target loaded and masked off. In-run A/B on an M2 Air: attachment stores -35.5 MB a frame, the same picture.
+- **Check:** `make -C dm/gfx/tests GAME=<id> check_t_unwritten_store` (mode 8: a depth-only draw with colour masked off elides the colour store and reads back as the store-all control).
+
 ### A render area for passes on very large targets
 
 - **Symptom:** a pass on a very large target costs about the same however little it draws; `DM_NVN_GPUPROF` shows time proportional to the target's area.

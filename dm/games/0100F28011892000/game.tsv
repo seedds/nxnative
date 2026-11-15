@@ -36,5 +36,8 @@ shader_groups	/Data/=data
 shader_note	Overcooked! All You Can Eat shaders
 
 # ---- Graphics ----
+# Unity's shared internal-call reader locates its frame-rate settings without build IDs.
+# The shared engine limiter and present cap keep vSyncCount and presentation at 60.
+fps_target	60
 # the game calls nvnDeviceSetDepthMode with near = 0 in the check boot: the pipeline bases made before it runs are made for that mode
 depth_mode	zero

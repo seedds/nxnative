@@ -116,32 +116,87 @@ HLE_FORCE("_ZN2nn6fontll18ScalableFontEngine8LoadFontEPcPKvjj", "shared font BFT
 //   cache keeps one per glyph thread), so FSS_load_font ran out of memory (error 201), SetFont failed with 301, every lookup of the "?" glyph missed and nro0+0xaef8a8 crashed on a null pointer. An engine
 //   gets at least FONT_WORK_MIN of host memory then; the game's buffer stays unused, and GetPointerToWorkBuffer still gives it back, which is what the game frees
 #define FONT_WORK_MIN 0x80000   // what the same game's first engine gets, in which that font loads
-#define FONT_ENGINES 16
-static struct { void *self, *game, *host; } font_work[FONT_ENGINES];
-HLE_FORCE("_ZN2nn6fontll18ScalableFontEngine10InitializeEPvj", "a work buffer the stand-in font fits in; the engine itself stays in the SDK", void, h_font_Initialize, void *self, void *buf, unsigned size) {
-    static void (*init)(void *, void *, unsigned);
-    if (!init) init = guest_sym("_ZN2nn6fontll18ScalableFontEngine10InitializeEPvj");
+// Finalize leaves the SDK's work-pointer accessor intact. Keep the small pointer record after
+// releasing its backing allocation, so a later getter still returns game-owned memory. A new
+// Initialize replaces it (a large-buffer initialization removes it). No SDK object layout is assumed.
+typedef struct font_work { void *self, *game, *host; struct font_work *next; } font_work_t;
+static font_work_t *font_work;
+static font_work_t **font_work_link(void *self) {   // font_mu held; each engine's calls remain caller-serialized
+    font_work_t **link = &font_work;
+    while (*link && (*link)->self != self) link = &(*link)->next;
+    return link;
+}
+static int (*font_initialize)(void *, void *, unsigned);
+static int (*font_finalize)(void *);
+static void *(*font_workbuffer)(void *);
+static pthread_once_t font_initialize_once = PTHREAD_ONCE_INIT;
+static pthread_once_t font_finalize_once = PTHREAD_ONCE_INIT;
+static pthread_once_t font_workbuffer_once = PTHREAD_ONCE_INIT;
+static void font_initialize_init(void) {
+    font_initialize = guest_sym("_ZN2nn6fontll18ScalableFontEngine10InitializeEPvj");
+    if (!font_initialize) die("ScalableFontEngine::Initialize not found in the guest");
+}
+static void font_finalize_init(void) {
+    font_finalize = guest_sym("_ZN2nn6fontll18ScalableFontEngine8FinalizeEv");
+    if (!font_finalize) die("ScalableFontEngine::Finalize not found in the guest");
+}
+static void font_workbuffer_init(void) {
+    font_workbuffer = guest_sym("_ZN2nn6fontll18ScalableFontEngine22GetPointerToWorkBufferEv");
+    if (!font_workbuffer) die("ScalableFontEngine::GetPointerToWorkBuffer not found in the guest");
+}
+HLE_FORCE("_ZN2nn6fontll18ScalableFontEngine10InitializeEPvj", "a work buffer the stand-in font fits in; the engine itself stays in the SDK", int, h_font_Initialize, void *self, void *buf, unsigned size) {
+    pthread_once(&font_initialize_once, font_initialize_init);
+    font_work_t *retired = NULL;
+    pthread_mutex_lock(&font_mu);
+    font_work_t **link = font_work_link(self), *e = *link;
     if (size < FONT_WORK_MIN) {
+        if (!e) {
+            e = malloc(sizeof *e);
+            if (!e) { pthread_mutex_unlock(&font_mu); die("font engine work record"); }
+            *e = (font_work_t){.self = self};
+        }
+        if (!e->host) {
+            e->host = malloc(FONT_WORK_MIN);
+            if (!e->host) {
+                if (!*link) free(e);
+                pthread_mutex_unlock(&font_mu); die("font engine work memory");
+            }
+        }
+        *link = e; e->game = buf;
+        buf = e->host; size = FONT_WORK_MIN;
+    } else if (e) {
+        e->game = buf; retired = e;
+    }
+    pthread_mutex_unlock(&font_mu);
+    // The SDK stores the buffer even on failure; retain it until its successful Finalize or
+    // successful replacement Initialize. A failed replacement may retain old SDK state.
+    int result = font_initialize(self, buf, size);
+    if (retired && !result) {
         pthread_mutex_lock(&font_mu);
-        int i = 0;
-        while (i < FONT_ENGINES && font_work[i].self && font_work[i].self != self) i++;
-        if (i < FONT_ENGINES) {
-            if (!font_work[i].host && !(font_work[i].host = malloc(FONT_WORK_MIN))) die("font engine work memory");
-            font_work[i].self = self; font_work[i].game = buf;
-            buf = font_work[i].host; size = FONT_WORK_MIN;
-        } else LOG("[RED] more than %d font engines with a small work buffer: this one keeps the game's", FONT_ENGINES);
+        *font_work_link(self) = retired->next;
+        pthread_mutex_unlock(&font_mu);
+        free(retired->host); free(retired);
+    }
+    return result;
+}
+HLE_FORCE("_ZN2nn6fontll18ScalableFontEngine8FinalizeEv", "SDK font finalization, then release the enlarged host work memory", int, h_font_Finalize, void *self) {
+    pthread_once(&font_finalize_once, font_finalize_init);
+    int result = font_finalize(self);
+    if (!result) {
+        pthread_mutex_lock(&font_mu);
+        font_work_t *e = *font_work_link(self);
+        if (e) { free(e->host); e->host = NULL; }
         pthread_mutex_unlock(&font_mu);
     }
-    init(self, buf, size);
+    return result;
 }
 HLE_FORCE("_ZN2nn6fontll18ScalableFontEngine22GetPointerToWorkBufferEv", "the game's own buffer, also when the engine runs on host memory", void *, h_font_WorkBuffer, void *self) {
-    static void *(*get)(void *);
-    if (!get) get = guest_sym("_ZN2nn6fontll18ScalableFontEngine22GetPointerToWorkBufferEv");
-    void *game = NULL;
     pthread_mutex_lock(&font_mu);
-    for (int i = 0; i < FONT_ENGINES && font_work[i].self; i++) if (font_work[i].self == self) game = font_work[i].game;
+    font_work_t *e = *font_work_link(self);
+    if (e) { void *game = e->game; pthread_mutex_unlock(&font_mu); return game; }
     pthread_mutex_unlock(&font_mu);
-    return game ? game : get(self);
+    pthread_once(&font_workbuffer_once, font_workbuffer_init);
+    return font_workbuffer(self);
 }
 // The address points straight at the TTF (past the 8-byte header) and the size excludes the header, except for a game on SDK 11 or later whose main imports ScalableFontEngineHelper::Decode
 //   (dm_sdk_major, dm_game_imports; the profile's shared_font overrides). Super Mario 3D World + Bowser's Fury (SDK 10) records shared fonts as type 0 (main+0x975658), calls no Decode and hands the address

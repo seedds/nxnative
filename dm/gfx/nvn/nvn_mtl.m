@@ -8977,8 +8977,16 @@ static int pso4_on(void) {
         if (!v) MLOG("DM_PSO_MTL4=0: render pipelines are built through the MTLDevice (no bases, no pipeline archive)");
 #endif
         // Metal cannot capture pipelines made from bases ("Capturing Render pipeline specialization is not supported"), and its Metal 4 → 3 conversion for the capture layer
-        // crashes on the archives: a run that may capture GPU frames (DM_GPU_CAPTURE, MTL_CAPTURE_ENABLED) builds its pipelines through the MTLDevice
-        if (v && (getenv("DM_GPU_CAPTURE") || getenv("MTL_CAPTURE_ENABLED"))) { v = 0; MLOG("render pipelines through the MTLDevice in a run that may capture GPU frames (DM_GPU_CAPTURE / MTL_CAPTURE_ENABLED)"); }
+        // crashes on the archives: a run that Metal lets capture GPU frames builds its pipelines through the MTLDevice. Metal answers that itself: a trace document on the Mac
+        // when MTL_CAPTURE_ENABLED reads as a non-zero number (1 or 2; unset, empty, 0, "true" or "YES" do not), on iOS in a build with MetalCaptureEnabled (DM_METAL_CAPTURE=1),
+        // and the developer tools when Xcode started the run for capture. DM_GPU_CAPTURE alone cannot capture (gpu_capture_frame's [RED] line), and DM_CTL can set it later in
+        // a run that can, so it does not decide this. Asked once: the capture manager's answer does not change during a run
+        if (v) {
+            MTLCaptureManager *m = [MTLCaptureManager sharedCaptureManager];
+            int trace = [m supportsDestination:MTLCaptureDestinationGPUTraceDocument], tools = [m supportsDestination:MTLCaptureDestinationDeveloperTools];
+            if (trace || tools) { v = 0; MLOG("render pipelines through the MTLDevice: Metal may capture GPU frames in this run (%s)", tools ? "Xcode" : TARGET_OS_IPHONE ? "MetalCaptureEnabled" : "MTL_CAPTURE_ENABLED"); }
+            else MLOG("render pipelines from Metal 4 bases and the pipeline archive (Metal cannot capture GPU frames in this run)");
+        }
     }
     return v;
 }

@@ -149,7 +149,7 @@ struct LauncherView: View {
     @State private var heights = Heights()
     @State private var position = ScrollPosition(edge: .top)
 
-    struct Heights: Equatable { var header: CGFloat = 0, basic: CGFloat = 0, advanced: CGFloat = 0, name: CGFloat = 0, icon: CGFloat = 0 }   // name, icon: the bottom edges of the game's name and icon in the header
+    struct Heights: Equatable { var header: CGFloat = 0, basic: CGFloat = 0, advanced: CGFloat = 0, name: CGFloat = 0 }   // name: the bottom edge of the game's name in the header
 
     /// Who made the game, from its control data (Resources/control.nacp, pack_app.py) as nacp.py reads its name: the publisher beside the first language's
     /// name. nil without the file (an app packed before it was copied, a dump), or with no publisher
@@ -174,12 +174,13 @@ struct LauncherView: View {
 
     /// How far each part of the header has come into the bar (`Scrolled.parts`), from the distance scrolled and where the header's parts end (0 until they are
     /// measured). A part comes in over the `band` of scroll that follows its going under the bar, so none is in sight twice, and it comes with the scroll: the
-    /// number is its place in that band in eighths, the icon's in the hundreds, the name's in the tens, Play's in the units (888: the whole header is in the bar),
-    /// and a thousand once anything has scrolled at all: the bar's ground is there from then on, as a toolbar's edge comes when content goes under it
-    static func scrolled(_ y: CGFloat, header: CGFloat, name: CGFloat, icon: CGFloat) -> Int {
-        guard header > 0, name > 0, icon > 0 else { return 0 }
+    /// number is its place in that band in eighths, the name's in the tens, Play's in the units (88: the header's name and Play are in the bar), and a hundred
+    /// once anything has scrolled at all: the bar's ground is there from then on, as a toolbar's edge comes when content goes under it. The icon does not go into
+    /// the bar: at a toolbar's size a game's art cannot be read, and the name says which game it is
+    static func scrolled(_ y: CGFloat, header: CGFloat, name: CGFloat) -> Int {
+        guard header > 0, name > 0 else { return 0 }
         func part(_ from: CGFloat) -> Int { Int((max(0, min(1, (y - from) / band)) * 8).rounded()) }
-        return (y > 0.5 ? 1000 : 0) + part(icon) * 100 + part(name) * 10 + part(header - playBelow)
+        return (y > 0.5 ? 100 : 0) + part(name) * 10 + part(header - playBelow)
     }
     static let band: CGFloat = 14
     static let playBelow: CGFloat = 14   // from the header's Play to the header's bottom edge, less the room under the column when the icon is the taller
@@ -209,7 +210,7 @@ struct LauncherView: View {
             .scrollDisabled(closing)
             .scrollBounceBehavior(.basedOnSize)
             .onScrollGeometryChange(for: Int.self) {
-                Self.scrolled($0.contentOffset.y + $0.contentInsets.top, header: heights.header, name: heights.name, icon: heights.icon)
+                Self.scrolled($0.contentOffset.y + $0.contentInsets.top, header: heights.header, name: heights.name)
             } action: { _, now in
                 scroll.parts = now
             }
@@ -241,7 +242,6 @@ struct LauncherView: View {
     private var header: some View {
         HStack(alignment: .center, spacing: 20) {
             GameIcon(art: Self.art, side: Self.icon)
-                .onGeometryChange(for: CGFloat.self) { $0.frame(in: .named("header")).maxY } action: { heights.icon = $0 }
             VStack(alignment: .leading, spacing: 0) {
             Text(info("CFBundleName") ?? "Game").font(.system(.title, design: .rounded).weight(.bold)).lineLimit(3)
                 .fixedSize(horizontal: false, vertical: true)
@@ -395,13 +395,13 @@ final class Scrolled: ObservableObject {
     @Published var parts = 0
 }
 
-/// The title bar over scrolled settings. The header goes into it a part at a time: as the icon, then the name, then Play scrolls under the bar, each is shown in the
-/// bar at a toolbar's size, the icon and the name beside the window's buttons and Play at the other end. The bar is a toolbar's height (Launcher gives the window
-/// an empty one), not a title bar's: in a title bar the icon was 16 pt and Play the smallest button in the window.
+/// The title bar over scrolled settings. The header goes into it a part at a time: as the name, then Play scrolls under the bar, each is shown in the bar at a
+/// toolbar's size, the name beside the window's buttons and Play at the other end. The icon is not: at that size a game's art cannot be read, and it crowded
+/// the bar. The bar is a toolbar's height (Launcher gives the window an empty one), not a title bar's: in a title bar Play was the smallest button in the window.
 /// - A part comes in with the scroll, not in a time of its own: its opacity is its place in the 14 pt of scroll after its large self has gone (Scrolled.parts).
 ///   Faded in over 0.18 s instead, each part's animation ran while the settings scrolled, and a SwiftUI animation running during a scroll makes every fifth frame
 ///   of a 120 Hz screen late (a small label pulsing over a plain scrolling list does the same: 64 late frames of 312, 1 without it), which is seen as a judder.
-/// - The bar has a ground from the first part on, which covers what passes under it: the header's parts go under an edge, and none is seen through another.
+/// - The bar has a ground from the first point scrolled, which covers what passes under it: the header's parts go under an edge, and none is seen through another.
 ///   (Under a ground that thinned out the header's Play showed through, pale, beside the bar's.)
 private struct TitleBar: View {
     @ObservedObject var scroll: Scrolled
@@ -409,16 +409,13 @@ private struct TitleBar: View {
     let play: () -> Void
     @Environment(\.accessibilityReduceMotion) private var still
 
-    static let icon: CGFloat = 30
     static let leading: CGFloat = 92   // clear of the window's buttons
 
     var body: some View {
-        let under = scroll.parts >= 1000, parts = scroll.parts % 1000, icon = Double(parts / 100) / 8, name = Double(parts / 10 % 10) / 8, button = Double(parts % 10) / 8
+        let under = scroll.parts >= 100, parts = scroll.parts % 100, name = Double(parts / 10) / 8, button = Double(parts % 10) / 8
         GeometryReader { g in
             let height = g.safeAreaInsets.top   // the title bar's own
             HStack(spacing: 10) {
-                GameIcon(art: LauncherView.art, side: Self.icon)
-                    .modifier(Arriving(by: icon, still: still))
                 Text(info("CFBundleName") ?? "Game").font(.system(.title3, design: .rounded).weight(.semibold)).lineLimit(1).truncationMode(.tail)
                     .help(info("CFBundleName") ?? "")
                     .modifier(Arriving(by: name, still: still))
@@ -1092,9 +1089,9 @@ enum EnvFiles {
         }
     }()
 
-    /// The player's file under ~, the app's inside the app
+    /// The player's file under ~; the app's as the file packed into it when it was built
     static func shown(_ path: String) -> String {
-        if let res = Bundle.main.resourcePath, path.hasPrefix(res + "/") { return "In the app: Resources" + path.dropFirst(res.count) }
+        if let res = Bundle.main.resourcePath, path.hasPrefix(res + "/") { return "Packed into the app (Contents/Resources" + path.dropFirst(res.count) + ")" }
         return path.hasPrefix(NSHomeDirectory() + "/") ? "~" + path.dropFirst(NSHomeDirectory().count) : path
     }
 }

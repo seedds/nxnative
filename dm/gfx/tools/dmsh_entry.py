@@ -214,3 +214,56 @@ def fs_dual(src):
     if sorted(at for _, _, at in mem if 'color(' in at) != ['[[color(0)]]', '[[color(1)]]']: return None
     struct = 'struct main0_out_d\n{\n' + ''.join(f'    {ty} {nm} {"[[color(0), index(1)]]" if at == "[[color(1)]]" else at};\n' for ty, nm, at in mem) + '};\n\n'
     return '\n' + struct + dmsh_side.calling(e, 'main0_d', 'main0_out_d', 'return main0_out_d{' + ', '.join(f'out.{nm}' for _, nm, _ in mem) + '};')
+
+
+def typed_outputs(src):
+    """The original 32-bit colour declarations, or None for an unknown output shape.
+    Maxwell exports register bits; the render target selects their numeric class.
+    """
+    st = re.search(r'struct main0_out\s*\{(.*?)\};', src, re.S)
+    if not st: return None
+    mem = []
+    for line in st[1].split(';'):
+        line = line.strip()
+        if not line: continue
+        m = re.fullmatch(r'(\w+)\s+(\w+)\s*(\[\[[^\]]*\]\])?', line)
+        if not m: return None
+        ty, name, attr = m.groups(); attr = attr or ''
+        col = re.fullmatch(r'\[\[color\(([0-7])\)\]\]', attr)
+        if 'color' in attr and not col: return None
+        if col and not re.fullmatch(r'(float|uint|int)[234]?', ty): return None
+        mem.append((ty, name, attr, int(col[1]) if col else None))
+    colors = [c for _, _, _, c in mem if c is not None]
+    return mem if colors and len(colors) == len(set(colors)) else None
+
+def typed_metadata(src):
+    mem = typed_outputs(src)
+    if not mem or not re.search(r'fragment\s+main0_out_t\s+main0_t\s*\(', src): return None
+    mask = lambda prefix: sum(1 << c for ty, _, _, c in mem if c is not None and (not prefix or ty.startswith(prefix)))
+    return {'entry': 'main0_t', 'mask': mask(''), 'uint': mask('uint'), 'sint': mask('int')}
+
+def fs_typed(src):
+    """One offline entry specialized by the actual attachment classes, with optional
+    float/uint/int fields. Unattached outputs disappear; conversion preserves bits.
+    The base entry has no function constants and retains its existing fast path.
+    """
+    mem = typed_outputs(src)
+    try: e = dmsh_side.entry(src, 'main0')
+    except ValueError: return None
+    if not mem or not e or e['ret'] != 'main0_out': return None
+    constants = ''.join(f'constant uint dm_to_{n} [[function_constant({i})]];\n' for n, i in (
+        ('uint', dmsh_abi.FOUT_UINT_FC), ('sint', dmsh_abi.FOUT_SINT_FC), ('active', dmsh_abi.FOUT_ACTIVE_FC)))
+    fields, stores = [], []
+    for ty, name, attr, c in mem:
+        if c is None:
+            fields.append(f'    {ty} {name} {attr};\n'); stores.append(f'    out.{name} = raw.{name};\n'); continue
+        suffix = re.sub(r'^(float|uint|int)', '', ty)
+        for kind, test in (('float', f'!((dm_to_uint | dm_to_sint) & {1 << c}u)'), ('uint', f'(dm_to_uint & {1 << c}u)'), ('int', f'(dm_to_sint & {1 << c}u)')):
+            flag = f'dm_to_{kind}{c}'; field = f'dm_{kind}{c}'; target = kind + suffix
+            constants += f'constant bool {flag} = (dm_to_active & {1 << c}u) && {test};\n'
+            fields.append(f'    {target} {field} [[color({c}), function_constant({flag})]];\n')
+            value = f'raw.{name}' if target == ty else f'as_type<{target}>(raw.{name})'
+            stores.append(f'    if ({flag}) out.{field} = {value};\n')
+    return ('\n' + constants + 'struct main0_out_t\n{\n' + ''.join(fields) + '};\n'
+            'static inline main0_out_t dm_typed_convert(main0_out raw)\n{\n    main0_out_t out = {};\n' + ''.join(stores) + '    return out;\n}\n'
+            + dmsh_side.calling(e, 'main0_t', 'main0_out_t', 'return dm_typed_convert(out);'))

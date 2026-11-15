@@ -316,7 +316,8 @@ def ps_libraries(key, msl, full, bindings):
     version was a source and a Metal compile of its own (13,666 of Mario Kart 8 Deluxe's 29,651 shaders). msl: the file of its plain source, full; bindings: its reflection's.
     What does not build is left out, and only that: a unit whose readable-tile version does not build is compiled again without it, one that does not build at all gives <key>_b from the
     plain source, each with a red line. A library a shader does not get is removed (a stale one of an earlier build), and the host draws without it. → what the reflection says of them.
-    Raises CalledProcessError when the plain source does not compile"""
+    Typed colour exports (main0_t and its alpha form) live in <key>_bt, loaded only when attachments require them.
+    Raises CalledProcessError when the plain source or its required typed exports do not compile"""
     targets = [(t, d) for t, d in (('mac', out), ('ios', IOSOUT)) if d and t in TARGETS]
     def drop(*suffixes):
         for _, d in targets:
@@ -324,26 +325,33 @@ def ps_libraries(key, msl, full, bindings):
                 try: os.unlink(os.path.join(d, key + s + '.metallib'))
                 except FileNotFoundError: pass
     src, info = dmsh_side.unit(full)
-    side = set(info['alpha'] + info['logic']) if src else set()
+    typed = dmsh_entry.typed_metadata(full)
+    tnames = ({'main0_t'} | ({'main0_t_a'} if src and 'main0_t_a' in info['alpha'] else set())) if typed else set()
+    side = set(info['alpha'] + info['logic']) - tnames if src else set()
     folded, fmeta = dmsh_fetch.fold(src or full, bindings, om_only_ok=key in BF_WANT)   # also without side entry points: main0_f then shares the compile with main0 alone
-    for unit, fetch in ([(folded, fmeta)] if folded else []) + ([(src, None)] if src else []):
-        names = ['_b'] + (['_bx'] if side else []) + (['_bf'] if fetch else [])
-        groups = ([side] if side else []) + ([{'main0_f'}] if fetch else [])
+    failure = None
+    for unit, fetch in ([(folded, fmeta)] if folded else []) + ([(src, None)] if src else []) + [(full, None)]:
+        current_side = side if unit != full else set()
+        names = ['_b'] + (['_bx'] if current_side else []) + (['_bf'] if fetch else []) + (['_bt'] if typed else [])
+        groups = ([current_side] if current_side else []) + ([{'main0_f'}] if fetch else []) + ([tnames if unit != full else {'main0_t'}] if typed else [])
         u = os.path.join(w, key + '_bu.metal'); open(u, 'w').write(unit)
         try:
             for t, d in targets: MTL.compile_split(t, u, [os.path.join(d, key + n + '.metallib') for n in names], lambda lib, groups=groups: dmsh_side.cut(lib, *groups))
         except (subprocess.CalledProcessError, ValueError) as e:
+            failure = e
+            if unit == full: break
             if fetch: BF_STATS['failed'] += 1; print(f'[RED] {key}: the readable-tile version does not build ({str(e)[:120]}): its draws go without the tile read', flush=True)
             else: SIDE_STATS['failed'] += 1; print(f'[RED] {key}: the alpha test and logic operation entry points do not build ({str(e)[:120]}): its draws go without them', flush=True)
             continue
         finally:
             try: os.unlink(u)
             except FileNotFoundError: pass
-        drop(*{'_bx', '_bf'} - set(names))
-        SIDE_STATS['generated'] += bool(side); BF_STATS['generated'] += bool(fetch)
-        return {**{f: {'entries': info[f]} for f in ('alpha', 'logic') if side and info[f]}, **({'fetch': fetch} if fetch else {})}
+        drop(*{'_bx', '_bf', '_bt'} - set(names))
+        SIDE_STATS['generated'] += bool(current_side); BF_STATS['generated'] += bool(fetch)
+        return {**{f: {'entries': [n for n in info[f] if n not in tnames]} for f in ('alpha', 'logic') if current_side and any(n not in tnames for n in info[f])}, **({'fetch': fetch} if fetch else {}), **({'typed_outputs': {**typed, 'library': key + '_bt.metallib', **({'alpha': 'main0_t_a'} if unit != full and 'main0_t_a' in tnames else {})}} if typed else {})}
     SIDE_STATS['not generated'] += not src
-    drop('_bx', '_bf')
+    drop('_bx', '_bf', '_bt')
+    if typed: raise subprocess.CalledProcessError(1, ['typed fragment library'], stderr=str(failure))
     for t, d in targets: MTL.compile(t, msl, os.path.join(d, key + '_b.metallib'))
     return {}
 
@@ -831,9 +839,10 @@ def finish(key, w, j, c1):
         src, full = dmsh_entry.vs_depth(src); open(msl, 'w').write(full + capture)
     fu = dmsh_entry.fs_uint(src) if j['stage'] == 'ps' else None   # the integer-output entry point (see fs_uint); the analysis below uses the source with only main0
     fd = dmsh_entry.fs_dual(src) if j['stage'] == 'ps' and key in DUAL_WANT else None   # the dual-source entry point (see fs_dual), from the source with only main0
-    shared = dmsh_side.shared_body(src) if fu or fd else None   # they call main0's body; fs_uint and fs_dual give none for a main0 whose shape it does not know
-    if shared: plain = src; open(msl, 'w').write(shared + (fu or '') + (fd or ''))
-    else: fu = fd = None
+    ft = dmsh_entry.fs_typed(src) if j['stage'] == 'ps' else None
+    shared = dmsh_side.shared_body(src) if fu or fd or ft else None   # they call main0's body; fs_uint and fs_dual give none for a main0 whose shape it does not know
+    if shared: plain = src; open(msl, 'w').write(shared + (fu or '') + (fd or '') + (ft or ''))
+    else: fu = fd = ft = None
     try: binds = dmsh_reflect.reflect(key, mesh['kind'] if mesh else j['stage'], src, res)   # before the compile: a pixel shader's readable-tile version needs its texture slots (ps_libraries)
     except ValueError as e: return 'reflection failed', str(e)[:160], None
     side, lost = {}, []

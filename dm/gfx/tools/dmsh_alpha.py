@@ -43,6 +43,14 @@ def refused(msl):
 
 
 def entry(msl, e):
+    if e['name'] == 'main0_t':
+        cols = _colour0(msl, 'main0_out')
+        if not cols: return None
+        ty, name, _ = cols[0]
+        alpha = f'as_type<float>(dm_r.{name}.w)' if ty == 'uint4' else f'float(dm_r.{name}.w)'
+        params = ', '.join(e['params'] + [f'constant dm_alpha_state& dm_alpha [[buffer({dmsh_abi.ALPHA_BUFFER})]]'])
+        return (f'{e["attr"]}fragment {e["ret"]} {e["name"]}_a({params})\n{{\n    main0_out dm_r = dm_body_main0({e["args"]});\n'
+                f'    if (!dm_alpha_pass({alpha}, dm_alpha)) discard_fragment();\n    return dm_typed_convert(dm_r);\n}}\n')
     cols = _colour0(msl, e['ret'])
     if not cols: return None
     # main0_u writes colour 0 as a float or as the integer vector of the float's bits, each member present by its function constant (dmsh_entry.py fs_uint): the test reads the float

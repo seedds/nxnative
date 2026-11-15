@@ -181,3 +181,8 @@
 // buffer index, one slice of the reflection's tg_spill bytes per workgroup, at the workgroup's index in the whole grid (nvn_mtl.m dispatch binds a slice for every workgroup of the dispatch)
 #define DMSH_TG_SLOT 30
 #define DMSH_TG_MAX 0x8000
+
+// Optional typed fragment exports: actual attachment classes and active outputs.
+#define DMSH_FOUT_UINT_FC 224
+#define DMSH_FOUT_SINT_FC 225
+#define DMSH_FOUT_ACTIVE_FC 226

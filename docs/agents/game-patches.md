@@ -43,6 +43,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 | `build` → `engine` | RE Engine's frame limit at a fixed pointer | frame rate | blocked: one RE Engine game here | judgement | 1 | [Monster Hunter Rise](../../dm/games/0100B04011742000/README.md) | engine code other RE Engine games ship |
 | `build` → `engine` | Unity's constant-buffer table locked on the shared device | race | blocked: the stubs have no function-matched form yet, and no other Unity 2018.4 main on the drive shares these functions (Ori and the Blind Forest 1.0.2: no fingerprint match) | checked: probes of both threads inserting the same key and of the table API's callers by thread; Blind Forest main compared with nso_fnmap | 1 | [Ori and the Will of the Wisps](../../dm/games/01008DD013200000/README.md) | Unity 2018.4's threaded GfxDevice: the main thread registers layouts on the real device while the render thread uses the same table; any Unity 2018.4 build with this code has the race |
 | `build` → `game` | 60 fps frame step on 1.3.0 (the same stub at its known addresses) | frame rate | blocked: 1.3.0's main is on neither drive to fingerprint (v458752 is the update on them) | judgement | 1 | [Hyrule Warriors: Age of Calamity](../../dm/games/01002B00111A2000/README.md) | the stub above, placed at 1.3.0's addresses: the matched rule would serve it once its functions are fingerprinted |
+| `build` → `game` | BOTW perspective camera aspect and projection acknowledgement | rendering | blocked: camera update has no reviewed function fingerprint yet | checked: all 13 original words checked in main cd57b23fa4bbad65803d9788c01821ee; pre-refresh native/wide outdoor Mac gameplay and camera acknowledgement (chain fda42ce035db); exact-branch runtime unrun | 1 | [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md) | the game's camera update and projection-object layout; drawable publication and presentation are general host behavior |
 | `build` → `game` | screen shape: the sizes, the view, the layouts' projection and their edge widgets (DM_SCREEN_ASPECT) | rendering | blocked: the stubs have no function-matched form yet | judgement | 1 | [Animal Crossing: New Horizons](../../dm/games/01006F8002326000/README.md) | the output size is the host's, but where the game takes its sizes, its cameras and its layouts are this build's code |
 | `build` → `game` | 60 fps intervals and dynamic-resolution constants | frame rate | kept: 1.0.3 (v131072) is the newest update of both releases and likely their last: a function match would serve no other build; the rewriter would also need matched rules that write fixups and declare capabilities, a new mechanism (2026-11-09) | checked: both releases' mains, where the host's rows for them were found; the global main's sites mapped into ASTRAL CHAIN and Bayonetta 1-3 (2026-11-09) | 2 | [NieR:Automata The End of YoRHa Edition (010056B015FE8000)](../../dm/games/010056B015FE8000/README.md); [NieR:Automata The End of YoRHa Edition (0100B8E016F76000)](../../dm/games/0100B8E016F76000/README.md) | the game's own constants; the Asian release's function is the global one's 0x13c0 further on, so one function-matched rule could serve both releases. No PlatinumGames sibling shares the code: none of its sites has an exact match in ASTRAL CHAIN or Bayonetta 1-3 (nso_fnmap, 2026-11-09) |
 | `build` → `game` | NieR's frame interval and dynamic-resolution floor at fixed addresses | frame rate | kept: 1.0.3 (v131072) is the newest update of both releases and likely their last: a function match would serve no other build; the rewriter would also need matched rules that write fixups and declare capabilities, a new mechanism (2026-11-09) | checked: both releases' mains, where these rows were found; the global main's sites mapped into ASTRAL CHAIN and Bayonetta 1-3 (2026-11-09) | 2 | [NieR:Automata The End of YoRHa Edition (010056B015FE8000)](../../dm/games/010056B015FE8000/README.md); [NieR:Automata The End of YoRHa Edition (0100B8E016F76000)](../../dm/games/0100B8E016F76000/README.md) | the game's own display object; the Asian release's function is the global one's 0x13c0 further on, so the rewriter's function match could give the host both releases' addresses. No PlatinumGames sibling shares the code: none of its sites has an exact match in ASTRAL CHAIN or Bayonetta 1-3 (nso_fnmap, 2026-11-09) |
@@ -78,7 +79,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 | [Super Mario 3D All-Stars: Super Mario Sunshine](#super-mario-3d-all-stars-super-mario-sunshine) | 2 | 0 | 0 | 0 | 0 | `build` → `game` |
 | [Super Smash Bros. Ultimate](#super-smash-bros-ultimate) | 11 | 0 | 0 | 1 | 0 | `game` |
 | [Taiko Risshiden V DX](#taiko-risshiden-v-dx) | 1 | 0 | 0 | 2 | 0 | `game` |
-| [The Legend of Zelda: Breath of the Wild](#the-legend-of-zelda-breath-of-the-wild) | 7 | 0 | 43 | 0 | 0 | `build` → `game` ×2 |
+| [The Legend of Zelda: Breath of the Wild](#the-legend-of-zelda-breath-of-the-wild) | 7 | 0 | 49 | 0 | 0 | `build` → `game` ×3 |
 | [The Legend of Zelda: Link's Awakening](#the-legend-of-zelda-links-awakening) | 1 | 0 | 0 | 0 | 0 | `build` → `game` |
 | [The Legend of Zelda: Ocarina of Time](#the-legend-of-zelda-ocarina-of-time) | 0 | 0 | 2 | 0 | 0 | `game` ×2 |
 | [The Legend of Zelda: Tears of the Kingdom](#the-legend-of-zelda-tears-of-the-kingdom) | 0 | 0 | 9 | 0 | 0 | `game` |
@@ -507,6 +508,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 
 - **`build` → `game`**, frame rate, gap, judgement: interval controller: the lower bound and the GPU-time path. Sead::GameFrameworkNx's interval controller in this build; Tears of the Kingdom shares sead but not this code
 - **`build` → `game`**, frame rate, kept: 44 sites in 34 functions to fingerprint for an update that may not come (1.9.0, the Switch 2 Edition release); convert when a new build appears, checked: nso_fnmap of its 44 sites into those 13 mains (2026-11-09): 60 fps frame step and render scale (ksys::VFR). The game's own frame code; the frame-step state page is general. No engine sibling shares it: none of its 34 functions has an exact match in Tears of the Kingdom, SMO, MK8D, ACNH, Splatoon 2 / 3, Kirby, Mario Party, Ocarina, Smash, Metroid Dread or Origami King (only the widescreen stubs' sead::PerspectiveProjection functions recur)
+- **`build` → `game`**, rendering, blocked: camera update has no reviewed function fingerprint yet, checked: all 13 original words checked in main cd57b23fa4bbad65803d9788c01821ee; pre-refresh native/wide outdoor Mac gameplay and camera acknowledgement (chain fda42ce035db); exact-branch runtime unrun: BOTW perspective camera aspect and projection acknowledgement. The game's camera update and projection-object layout; drawable publication and presentation are general host behavior
 
 - **1.9.0 `main`** `cd57b23f…` ([patches.py:14](../../dm/games/01007EF00011E000/patches.py#L14))
   - cut `+0x112670c`: lower bound of the candidate interval: fmov s0,s11 (2.0) → fmov s0,s10 (1.0)
@@ -516,10 +518,12 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
   - cut `+0x1126794`: stepping down stops at < 3 → at < 2: cmp w9,#3 → cmp w9,#2
   - cut `+0x112691c`: interval controller always takes the GPU time path (CPU span timing): cbz x0,#0x1126934 → b #0x1126928
   - cut `+0x1126974`: interval controller always takes the GPU time path (takes max(CPU span, GPU time)): cbz x0,#0x112698c → b #0x1126980
-  <details><summary>43 frame-step sites</summary>
+  <details><summary>49 frame-step sites</summary>
 
+  - frame step `+0x71c`: optional render heap allowance (+0xc8)
   - frame step `+0x27ae0`: Pane::Calculate: a HUD widget at the edge moved to the taller screen's edge with its children, full-screen backgrounds stretched (duo_anchor.c)
   - frame step `+0x2df28`: projected texture fitted to the layout: a pane as tall as the taller screen maps its whole height
+  - frame step `+0xc617c0`: optional render heap allowance (+0xc8)
   - frame step `+0xc61ef4`: output size static, nnMain: 1920x1080 → the host's height
   - frame step `+0xc61f28`: output size static, nnMain (second path)
   - frame step `+0xc61f5c`: layout size static, nnMain: 1280x720 → the host's layout height
@@ -545,13 +549,17 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
   - frame step `+0x100817c`: 720.0 with 1280.0 passed as a layout size
   - frame step `+0x1059730`: 1280x720 layout size of an object
   - frame step `+0x106bb6c`: 1280x720 default sizes of a layer
+  - frame step `+0x106d328`: optional render pool factor (+0xc0)
+  - frame step `+0x10edae0`: camera aspect = host drawable ratio (state +0xa0; 0 = original), acknowledged at +0xa4
   - frame step `+0x10ee094`: main camera fovy getter: widened like the projection (culling tests)
   - frame step `+0x10ee0cc`: main camera fovy getter in degrees: widened like the projection
   - frame step `+0x11269b8`: setWaitVsyncInterval: the host's step unless the VFR override is set (state page target fps; 0 = the game's interval)
   - frame step `+0x12618c4`: output size static, its getter
   - frame step `+0x1261920`: layout size static, its getter
+  - frame step `+0x12660cc`: optional docked output and view widths (+0xb8)
   - frame step `+0x12660d4`: docked display size 1920x1080
   - frame step `+0x12660f0`: docked viewport height 1080
+  - frame step `+0x1266104`: optional docked crop (+0xb0)
   - frame step `+0x1266124`: handheld display size 1280x720
   - frame step `+0x1266134`: scaled display height 720.0
   - frame step `+0x1266188`: handheld viewport height 720
@@ -565,6 +573,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
   </details>
 
   - render scale stub (the launcher offers DM_RENDER_SCALE)
+  - launcher capabilities: CAMERA_ASPECT, RENDER_RESOLUTION
 
 ### The Legend of Zelda: Link's Awakening
 

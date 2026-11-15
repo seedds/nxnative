@@ -310,3 +310,5 @@ These are not profile keys: the tools read them from the game files each time, b
 4. **Shaders.** `DM_GAME=<id> [IOSOUT=…] dmsh_build.py <pkg> <cache>`, with a cache directory of the game's own. A full build also writes `c1_full.tsv` and `cb_extent.tsv` (local files, not committed). The chain version needs nothing: it is the same for every game.
 5. **Host bring-up.** Run `make -C dm/host GAME=<id>`, then work through the bring-up loop in docs/agents. Code that only fits one game is gated by its build ID (`dm_main_build()`), never left to run on every game.
 6. **IPA.** Use `GAME=<id> dm/ios/tools/build_ipa.sh`, or the NSP script, which now finds the profile.
+
+Optional display-profile fields render_dimensions (view width/height, output width/height, each pool size), aspect_ui_prefixes (float-canvas UI shader prefixes) and aspect_ui_rect_prefixes (unit layout-quad shader prefixes) support the exact-build display capabilities. Empty fields preserve existing behavior.

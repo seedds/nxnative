@@ -37,6 +37,15 @@ The size of the 3D picture, from 50 to 100 %. Below 100 % the size is fixed ther
 
 Hades II goes up to 300 %: it renders its whole picture, the HUD and text included, at 1280x720 docked and handheld, and above 100 % it renders larger instead of being scaled up: 150 % is 1920x1080, 200 % 2560x1440, 300 % 3840x2160. Sharper on a large screen or window, at more GPU time (about 2.5 times the GPU time at 200 % on an Apple M6); on a small screen the difference is slight. [Its note](../dm/games/0100A00019DE0000/README.md#rendering) has the measurements.
 
+
+### Aspect ratio and 3D resolution
+
+Mac builds of Breath of the Wild 1.9.0 with the corresponding patches offer two independent settings. **Aspect ratio** defaults to **Original (16:9)**. **Match window (ultrawide)** widens the camera for a wider window and keeps the HUD centered. Menu backgrounds and loading fades cover the full picture. The map retains its original framing.
+
+**3D resolution** defaults to **Original (1600 x 900)** in docked mode. The optional heights 1080, 1200 and 1440 increase both the game's 3D targets and its output buffer. Higher settings use more GPU time and memory. Render scale applies to the selected size. Handheld mode and the taller-screen picture shape use the original resolution.
+
+Choose the two original options to restore the game's original camera, resolution and memory budget. Changes take effect at the next launch.
+
 ### Console mode
 
 **Docked** renders at the Switch's TV resolution, **Handheld** at its lower handheld resolution, which is lighter on the phone and can give a higher frame rate.

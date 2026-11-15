@@ -196,6 +196,16 @@ def header_one(g):
         sys.exit(f'{g.id}: shader_key_skip takes <offset>+<length> within the first 0x880 bytes of the control section, past its header (+0x30) and clear of +0x700..+0x75f: {sks}')
     sko, skl = (int(m[1], 0), int(m[2], 0)) if m else (0, 0)
     if g.get('render_cond', ''): print(f'{g.id}: render_cond is ignored: the host evaluates NVN conditional rendering for every game', file=sys.stderr)   # a profile written before the key went (a build folder's derived one)
+    rd = g.words('render_dimensions', '0 0 0 0 0')
+    if len(rd) != 5 or any(not re.fullmatch(r'(?:0x[0-9a-fA-F]+|[0-9]+)', v) for v in rd):
+        sys.exit(f'{g.id}: render_dimensions needs view W H, output W H, pool bytes')
+    rd = [int(v, 0) for v in rd]
+    aur = g.words('aspect_ui_rect_prefixes', '')
+    if any(not re.fullmatch(r'[0-9a-f]{8}', p) for p in aur):
+        sys.exit(f'{g.id}: aspect_ui_rect_prefixes takes eight lowercase hexadecimal characters')
+    aui = g.words('aspect_ui_prefixes', '')   # float-canvas layout vertex identities; prefix matching is fixed at eight characters
+    if any(not re.fullmatch(r'[0-9a-f]{8}', p) for p in aui):
+        sys.exit(f'{g.id}: aspect_ui_prefixes takes eight lowercase hexadecimal characters per prefix')
     tfu = g.get('tex_flush_upload', 'off')   # textures written by the CPU into a pool and published with nvnMemoryPoolFlushMappedRange are uploaded like packaged ones (hle_nvn.c): on / off
     if tfu not in ('on', 'off'): sys.exit(f'{g.id}: tex_flush_upload must be on or off: {tfu}')
     tdu = g.get('tex_dirty_upload', 'off')   # with tex_flush_upload: a registered texture the CPU writes after init without any flush is uploaded too (dirty pages, hle_nvn.c nvn_ft_written): on / off
@@ -259,6 +269,17 @@ def header_one(g):
          f'#define DM_GAME_PERF_BOOST {int(pm == "boost")}',
          f'#define DM_GAME_TEX_FLUSH_UPLOAD {int(tfu == "on")}',
          f'#define DM_GAME_SHADER_KEY_SKIP_OFF {sko:#x}', f'#define DM_GAME_SHADER_KEY_SKIP_LEN {skl:#x}',
+         f'#define DM_GAME_ASPECT_UI_PREFIXES {{{", ".join(map(q, aui)) if aui else q("")}}}',
+         f'#define DM_GAME_ASPECT_UI_PREFIX_COUNT {len(aui)}',
+         f'#define DM_GAME_ASPECT_UI_RECT_PREFIXES {{{", ".join(map(q, aur)) if aur else q("")}}}',
+         f'#define DM_GAME_ASPECT_UI_RECT_PREFIX_COUNT {len(aur)}',
+
+         f'#define DM_GAME_RENDER_VIEW_W {rd[0]}',
+         f'#define DM_GAME_RENDER_VIEW_H {rd[1]}',
+         f'#define DM_GAME_RENDER_OUTPUT_W {rd[2]}',
+         f'#define DM_GAME_RENDER_OUTPUT_H {rd[3]}',
+         f'#define DM_GAME_RENDER_POOL_BYTES {rd[4]}',
+
          f'#define DM_GAME_TEX_DIRTY_UPLOAD {int(tdu == "on")}',
          f'#define DM_GAME_TEX_DYN_SLOTS {int(tds == "on")}',
          f'#define DM_GAME_DRAW_BARRIERS_GAME {int(dbr == "game")}',

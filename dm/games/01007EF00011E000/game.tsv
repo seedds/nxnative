@@ -52,3 +52,9 @@ app_pool	0xCD500000
 # ---- Shader split (shader_split.py) ----
 shader_groups	/Shader/=shader /Effect/=effect /Layout/=layout /System/=gsys /Terrain/=terrain
 shader_note	Breath of the Wild shaders
+
+# Optional docked resolution stubs: original view, output, and each render pool.
+render_dimensions	1600 900 1920 1080 0x7300000
+
+# Unit layout quads with projection/model/rectangle in vertex uniform slot 0.
+aspect_ui_rect_prefixes	9f8de486 71018be4 5275c47b 86208e96 51deaed0 4fb3d55c 78a4ace2 a983fef9

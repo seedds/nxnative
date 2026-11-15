@@ -80,9 +80,12 @@ final class LauncherModel: ObservableObject {
     func rangeLabel(_ s: Setting, _ v: Double) -> String {
         let p = "\(Int((v * 100).rounded())) %"
         guard let b = s.base else { return p }
-        let size = (values["DM_OPMODE"] ?? "1") == "0" ? b.handheld : b.docked
+        let docked = (values["DM_OPMODE"] ?? "1") != "0"
+        let size = docked ? b.docked : b.handheld
         guard size.count == 2 else { return p }
-        return "\(Int((Double(size[0]) * v).rounded())) × \(Int((Double(size[1]) * v).rounded())) (\(p))"
+        let height = docked ? Double(values["DM_RENDER_RESOLUTION"] ?? "0") ?? 0 : 0
+        let factor = height > 0 && size[1] > 0 ? height / Double(size[1]) : 1
+        return "\(Int((Double(size[0]) * factor * v).rounded())) × \(Int((Double(size[1]) * factor * v).rounded())) (\(p))"
     }
     var changed: Bool { settings.contains { !fixed.contains($0.env) && !$0.isDefault(values[$0.env] ?? $0.def) } }
 

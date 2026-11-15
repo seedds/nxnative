@@ -748,3 +748,9 @@ check_t_sparse_pool_cache: RUN_ENV = MTL_DEBUG_LAYER=1
 t_sparse_copy: t_sparse_copy.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_sparse_copy.m $(filter-out ../nvn/hle_nvn.c,$(MTL_T_SRC)) $(FW)
 check_t_sparse_copy: RUN_ENV = MTL_DEBUG_LAYER=1
+
+t_aspect: t_aspect.c ../nvn/nvn_aspect.h
+	$(CC) -std=c11 -O2 -g -Wall -Wextra -Werror -o $@ $<
+
+check_t_aspect: t_aspect
+	./t_aspect

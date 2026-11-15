@@ -21,7 +21,7 @@ Render conditions, which the host evaluates for every game ([Conditional renderi
 
 ## Shaders
 
-27,192 of 27,195 built on chain `9bb5d8678204`. Of the 3 that did not, the one on instruction 0x481 was a false row, gone from the tables since they were split again (resolved, below); the other 2, compute shaders of `agl_technique_pfx` that Metal refused (`bracket nesting level exceeded`), have not been built since 04df08d4 raised Metal's bracket depth (unchecked). `fa072659664b2d38` in `agl_common`, which the game asks for at boot, builds now.
+27,192 of 27,192 built on chain `b6aa8fd968b7`, a full rebuild from scratch on the M4 Pro (31:24, nothing from the Metal cache), and so did the chain before it (`6832d4cf829f`, 35:53): the false row on instruction 0x481 is gone since the tables were split again, and the two compute shaders of `agl_technique_pfx` that Metal refused (`bracket nesting level exceeded`) build now that Metal's bracket depth is raised. `fa072659664b2d38` in `agl_common`, which the game asks for at boot, builds.
 
 ## Rendering
 
@@ -35,6 +35,10 @@ Render conditions, which the host evaluates for every game ([Conditional renderi
 ## Dynamic resolution
 
 The game writes 29 `ReportCounter(TIMESTAMP_TOP)` reports a frame and steers its dynamic resolution by the GPU time between them ([issue #1064](https://github.com/seedds/nxnative/issues/1064), M2 Air, 1920x1080 handheld). With one time for the whole submission it read about 0 and kept the 3D view at 1440x810 (render scale 0.75) at 26 ms of GPU a frame; with segment times it scaled between 0.39 and 1.0 of the render-scale size. With the GPU's idle gaps between command buffers counted it read about 16 ms where the GPU worked about 8 and held 0.50–0.57 of full size; without them its width median went to 0.94, and dropped frames from 4 to 35 per 300 ([issue #1290](https://github.com/seedds/nxnative/issues/1290)). Both are the host's default now ([GPU timestamps per submission segment](../../../docs/reference/frame-rate.md#gpu-timestamps-per-submission-segment)); not rerun on main.
+
+## Motion controls
+
+Motion aiming works with a pair of original (Switch 1) Joy-Cons, clean and 1 to 1 by the player's account, and this is the second game that proves the Mac transport (`pad_jc1.h`; [the reference entry](../../../docs/reference/services.md#an-original-joy-cons-sensors-are-read-by-the-host)). A 7 minute session reached frame 26,100 with no `[RED]` line and called `GetSixAxisSensorStates` 30,400 times, 1.16 a frame, and never the npad IMU API (`GetNpadImuSamples` 0), so the game reads the six-axis sensors itself and the SDK's fusion, which over-samples them in Sports Resort, is not in this path. The stream carried the motion: 444 deg/s peak from the left half and 484 from the right, against 1.27 rev/s handed to player 1. Both halves report their own gravity at rest (left −1.02, right −1.01 G, rotation under 0.2 deg/s) and the factory gyro scale normalizes to 0.0611 deg/s per count on both. The game supports FullKey | Handheld | JoyDual (0x7), so the pair is shown as one full-key controller with one six-axis handle, fed by the player's merged stream, which is the right half (`DM_JC1_SIDE=L` picks the other; the left half's own stream goes unread here). Frame p50 16.8-21.2 ms and GPU p50 9.2-13.3 ms in the last windows of that session.
 
 ## Driving it on the Mac
 

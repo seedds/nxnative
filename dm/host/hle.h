@@ -3,6 +3,7 @@
 // such parameters are always declared as int/unsigned and truncated by ourselves. Variadic arguments go on the stack on Apple and in registers on Switch ⇒ variadic functions cannot use C's "..." directly.
 #pragma once
 #include "dm.h"
+#include <stddef.h>
 typedef struct { const char *name; void *fn; } hle_ent;
 #define HLE(mangled, ret, cname, ...)                                                             \
     static ret cname(__VA_ARGS__);                                                                \
@@ -95,3 +96,10 @@ void dm_movie_stopped(const void *dec);   // hle_movie.c: dec was stopped or des
 void dm_audio_suspend(int on);
 uint64_t dm_audio_render_calls(void);   // Cumulative sound card callback count (the silent sink is not counted)
 void dm_audio_reset(void);   // iOS media services reset: recreate the AudioUnits (hle_audio.c)
+// nn::audio::AudioOutBuffer in the SDK's own layout, the audout service's buffer format (the same from SDK 8 to Switch 2's). The game fills and reads it through the SDK's own
+// descriptor functions, which the host leaves to the sdk: SetAudioOutBufferInfo stores the data at +0x08, the buffer size at +0x10 and the data size at +0x18, the getters load the
+// same offsets, and AudioBufferList links buffers through next (Hades's sdk+0x142ab0..0x142ae0). hle_audio.c's AudioOut queues and plays these; hle_audren.c hands it its rendered
+// blocks in the same form. Until 2026-11 the host took three of those functions over to keep a private 24-byte layout, and the ones it left read it wrong (docs/reference/audio.md)
+typedef struct { void *next; void *ptr; uint64_t cap, size, offset; } aout_buf;   // next, data, buffer_size, data_size, data_offset
+_Static_assert(sizeof(aout_buf) == 40 && offsetof(aout_buf, ptr) == 0x08 && offsetof(aout_buf, cap) == 0x10 && offsetof(aout_buf, size) == 0x18 && offsetof(aout_buf, offset) == 0x20,
+               "nn::audio::AudioOutBuffer layout");

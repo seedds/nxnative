@@ -353,6 +353,14 @@ For a replaced DSP renderer the size query keeps the service's work-buffer contr
 - **Open:** what the +0x108 word means; no caller seen reads it.
 - **Found on:** [Nintendo Switch Sports Resort](../../dm/games/04008E001F098000/README.md) (`04008E001F098000`; SDK 20+).
 
+### The AudioOutBuffer handed to the SDK is its own 40-byte object
+
+- **Symptom:** a game that resamples its own audio plays, in one block of every four, the sound of four blocks earlier: Metro 2033 Redux (44.1 kHz to 48 kHz in the game's own resampler) re-appended 518 of its 2,095 loud 8192-byte blocks (24.7 %) still holding the contents of the block 4 appends back, so that audio left 170.6 ms behind; after the fix 0 of 1,989, with no block appended twice or lost and no underruns.
+- **Cause:** the host declared `nn::audio::AudioOutBuffer` as 24 bytes, data at +0x00, capacity at +0x08, data size at +0x10. The SDK's object is 40 bytes, `{next, buffer, buffer_size, data_size, data_offset}`, the audout service's own buffer format: data at +0x08, capacity at +0x10, data size at +0x18 (`SetAudioOutBufferInfo`, `sdk+0x80f80`; the same in Hades's SDK, `sdk+0x142ab0`). The SDK's `AudioBufferList` links buffers through `next` at +0x00, where the old layout wrote the data pointer. The host does not take `GetAudioOutBufferBufferSize` over, so the SDK's own (`sdk+0x80fb0`) read the host's data-size field as the capacity and answered with the previous block's: 2047 frames of the 2048 the resampler had room for. On every fourth block the resampler then wrote nothing, and the game appended that block at full length holding the earlier contents.
+- **Fix:** the host's buffer description is the SDK's object: one definition, `aout_buf` in `dm/host/hle.h`, five fields at the SDK's offsets with a `_Static_assert` on them, which `hle_audio.c`'s AudioOut and the blocks `hle_audren.c` appends to it both use. The descriptor functions (`SetAudioOutBufferInfo` in both overloads, `GetAudioOutBufferDataPointer`, `GetAudioOutBufferBufferSize`, `GetAudioOutBufferDataSize`) run in the sdk, as AudioIn's do, so no accessor can read a layout of the host's; they are the same plain stores and loads in the SDKs of Metro 2033 Redux (SDK 8.2.0), Hades, Fire Emblem: Three Houses (which also has the overload without a buffer size, storing only +0x08 and +0x18) and PRAGMATA (Switch 2). `GetAudioOutBufferBufferSize` answers 8192 on every block.
+- **Found on:** Metro 2033 Redux (SDK 8.2.0, 4A Engine).
+- **Check:** `t_audio`'s buffer-layout case hands the device callback an object written at the SDK's own offsets, its `next` linked and its data size 4 bytes short of its capacity: the callback must play exactly the data size from the data pointer, release the buffer and leave `next` alone. Under the 24-byte layout it would read `next` as the data.
+
 ## Codecs
 
 ### Hardware Opus decoders built on the SDK's software decoders

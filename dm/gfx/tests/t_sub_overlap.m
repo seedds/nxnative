@@ -23,7 +23,7 @@ static void *submit_thread(void *arg) {   // one submission whose encoding the g
 static void *present_wait_thread(void *arg) { sub_commit_wait((uint64_t)(uintptr_t)arg); dispatch_semaphore_signal(g_wait_done); return NULL; }
 
 int main(void) { @autoreleasepool {
-    alarm(20); setbuf(stdout, NULL);
+    alarm(20); if (setvbuf(stdout, NULL, _IONBF, 0)) abort();
     setenv("DM_NVN_ENC_THREAD", "1", 1); setenv("DM_PRESENT_SNAP", "0", 1);
     mtl_init();
     state_reset(); memset(&R, 0, sizeof R); mtl_sub_begin(); uint64_t f0 = mtl_sub_commit();

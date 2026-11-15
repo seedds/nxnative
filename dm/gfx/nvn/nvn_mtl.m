@@ -14810,6 +14810,13 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) {
       { uint32_t sw; memcpy(&sw, S.vp_sw[0], 4);
         if (sw == 0x100) { v.originY += v.height; v.height = -v.height; }
         else if (sw) RED_ONCE(108, "viewport swizzle %d,%d,%d,%d not implemented (drawn unswizzled)", S.vp_sw[0][0], S.vp_sw[0][1] ^ 2, S.vp_sw[0][2] ^ 4, S.vp_sw[0][3] ^ 6); }
+      if (pr->sh[0] && !strncmp(pr->sh[0]->key, "8f9728d9b2b88600", 16)) {
+          if (th * 16 > tw * 9) {
+              double h_16_9 = (double)tw * 9.0 / 16.0;
+              double y_off = ((double)th - h_16_9) * 0.5;
+              v = (MTLViewport){0, y_off, (double)tw, h_16_9, 0, 1};
+          }
+      }
       if (!(g_ed.ok & ED_VP) || memcmp(&g_ed.vp, &v, sizeof v)) { enc_r_viewport(en, v); g_ed.vp = v; g_ed.ok |= ED_VP; } }
     MTLScissorRect sc = {0, 0, tw, th};
     if (R.has_sc && !S.rast_discard) {   // raster state cannot suppress vertex storage writes
@@ -14817,6 +14824,13 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) {
         if (x1 > (long)tw) x1 = tw; if (y1 > (long)th) y1 = th;
         if (x1 <= x0 || y1 <= y0) { PD("Z %llu draw skipped: empty scissor (%d,%d %dx%d, target %lux%lu)", g_stat_pass, R.sc.x, R.sc.y, R.sc.w, R.sc.h, (unsigned long)tw, (unsigned long)th); return; }
         sc = (MTLScissorRect){(NSUInteger)x0, (NSUInteger)y0, (NSUInteger)(x1 - x0), (NSUInteger)(y1 - y0)};
+    }
+    if (pr->sh[0] && !strncmp(pr->sh[0]->key, "8f9728d9b2b88600", 16)) {
+        if (th * 16 > tw * 9) {
+            double h_16_9 = (double)tw * 9.0 / 16.0;
+            double y_off = ((double)th - h_16_9) * 0.5;
+            sc = (MTLScissorRect){0, (NSUInteger)y_off, (NSUInteger)tw, (NSUInteger)h_16_9};
+        }
     }
     if (!(g_ed.ok & ED_SC) || memcmp(&g_ed.sc, &sc, sizeof sc)) { enc_r_scissor(en, sc); g_ed.sc = sc; g_ed.ok |= ED_SC; }
     if (S.poly.cull == NVN_FACE_FRONT_AND_BACK && !S.rast_discard && !g_wl.on) { PD("Z %llu draw skipped: both faces culled", g_stat_pass); return; }

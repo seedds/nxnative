@@ -2255,6 +2255,13 @@ Digimon Story Cyber Sleuth: Complete Edition (Media.Vision's MVGL engine, SDK 6.
 - **Fix:** `profile_guess.py` `shader_sources`: a `main` that imports `nvnBootstrapLoader` and `glslcCompile`, holds GLSL sources, and loads a module that defines `glslcCompile` is an NVN game whatever else it links, and gets the GLSLC capture as Three Houses does. Digimon keeps the GL rule (no GLSLC compile of its own); of 16 games extracted here (Super Mario Odyssey, Super Smash Bros. Ultimate, Metroid Dread, Hollow Knight: Silksong, Cuphead, DRAGON BALL FighterZ and others), only Rayman's decision changes. `test_nro_graphics.py` has both cases.
 - **Found on:** Rayman 30th Anniversary Edition (`01007C6025688000`, 1.0.0, SDK 20.5.15, Digital Eclipse): the capture gets 21 shaders in 30 s, the split makes 42, and it plays with picture and sound at 60 fps.
 
+### OpenGL 1.x fixed function
+
+- **Symptom:** A game that draws with no program bound got nothing drawn: the layer dropped each such draw (`[RED] draw with no usable program (0)`, counted as `no program`).
+- **Cause:** the game draws with OpenGL 1.x's fixed pipeline: client-state arrays (`glVertexPointer`, `glColorPointer`, `glTexCoordPointer`, `glEnableClientState`), the matrix stacks (`glMatrixMode`, `glLoadIdentity`, `glRotatef`), `glTexEnv` and `EXT_framebuffer_object`, and compiles no shader. The GL layer drew only with a program bound and had none of the fixed-function calls.
+- **Fix:** the GL layer (`dm/gfx/gl/hle_gl.m`, "Fixed function") keeps the fixed state (matrix stacks 32 deep, the current colour, client arrays at NVIDIA's aliased attribute numbers: 0 the vertex, 2 the normal, 3 the colour, 8 + unit the texture coordinates; `GL_TEXTURE_2D` per unit, each unit's environment and colour, the alpha test) and draws with a built-in program (`dm/gfx/msl/gl_ff.metal`) when no program is bound in a context that has the fixed pipeline (`eglCreateContext` below OpenGL 3.2, where the profile does not apply, or with the compatibility profile bit; in a core context such a draw stays dropped as `no program`): projection × modelview, texture unit 0's matrix, and the GL 1.5 texture environment table (`MODULATE`, `REPLACE`, `DECAL`, `BLEND`, `ADD`) by the texture's base format, which `glTexImage2D` records. Texturing on a unit other than 0, lighting and fog are not implemented and log `[RED]`. The `EXT` framebuffer and renderbuffer names are the core functions.
+- **Found on:** UnMetal (`01008F4014A74000`): 26 GL functions called (`loader_census.py`), all of them OpenGL 1.x and `EXT_framebuffer_object`.
+
 ### Which GL functions a game calls
 
 - **Symptom:** a jump to address 0 right after `glGetFloatv(0xb12)` (`lr=main+0x2d58c4`).

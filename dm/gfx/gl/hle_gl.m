@@ -23,6 +23,7 @@
 #include "../nvn/host_msl.h"
 #include "gl_aliases.h"
 #import <Metal/Metal.h>
+#import <ImageIO/ImageIO.h>
 #include <CommonCrypto/CommonDigest.h>
 #include <mach/mach.h>
 #include <mach-o/getsect.h>
@@ -333,6 +334,7 @@ typedef struct {
     level_t pend[6][MAXLV]; int defined;   // defined: bit per level whose face(s) were given
     __strong id<MTLTexture> tex; __strong id<MTLSamplerState> smp;   // smp: the Metal sampler of its own parameters, made again when smp_dirty
     samp_p sp; GLint maxlv, swz[4]; int smp_dirty;
+    uint8_t base;   // the base format of level 0's internal format (FB_*: the fixed pipeline's texture environment reads it)
 } tex_t;
 NAMES(tex_t, g_texs, g_ntexs, g_captexs)
 static tex_t *tex_of(GLuint n) { return n && n < g_ntexs ? g_texs[n] : NULL; }
@@ -984,6 +986,87 @@ static id<MTLDepthStencilState> dss_get(void) {
     return st;
 }
 
+// ---------- Fixed function ----------
+// OpenGL 1.x draws with no program current. UnMetal (Unepic Games' engine, SDK 14.3) does nothing else: its loader asks eglGetProcAddress for 26 GL names, and its code calls
+// glVertexPointer / glColorPointer / glTexCoordPointer on client arrays, glMatrixMode / glLoadIdentity / glRotatef, glTexEnvi / glTexEnvf and glDrawArrays, and never
+// glCreateShader (dm/tools/loader_census.py). The arrays are attributes of the vertex array at NVIDIA's aliased numbers (0 the vertex, 2 the normal, 3 the colour, 8 + n texture
+// unit n's coordinates), as its compatibility driver keeps them, so a draw reads them as it reads any attribute (client memory copied per draw, a buffer bound as it is), and a
+// disabled one reads its current value (glColor*: white at start; texture coordinates (0, 0, 0, 1)). The program is the layer's own (dm/gfx/msl/gl_ff.metal), its two uniform
+// blocks written before each draw from the matrix stacks, the texture environment and the alpha test. Implemented: texture unit 0, no lighting, no fog, no texture coordinate
+// generation; a game that turns one of those on gets a red line
+enum { GL_MODELVIEW = 0x1700, GL_PROJECTION, GL_TEXTURE, GL_VERTEX_ARRAY = 0x8074, GL_NORMAL_ARRAY, GL_COLOR_ARRAY, GL_INDEX_ARRAY, GL_TEXTURE_COORD_ARRAY,
+       GL_ALPHA_TEST = 0xbc0, GL_LIGHTING = 0xb50, GL_FOG = 0xb60, GL_TEXTURE_ENV = 0x2300, GL_TEXTURE_ENV_MODE = 0x2200, GL_TEXTURE_ENV_COLOR = 0x2201,
+       GL_MODULATE = 0x2100, GL_DECAL = 0x2101, GL_ADD = 0x104, GL_DOUBLE = 0x140a };
+enum { FF_DEPTH = 32, FF_UNITS = 8 };   // stack depth (GL's minimum for the modelview stack), texture units with an environment and coordinates
+enum { FB_RGBA, FB_RGB, FB_ALPHA, FB_LUM, FB_LUMA };   // a texture's base format, which the texture environment reads (tex_t base)
+static struct {
+    float m[3][FF_DEPTH][16]; int top[3], mode;   // the modelview, projection and texture (unit 0) stacks, column-major; mode: glMatrixMode − GL_MODELVIEW
+    float color[4];                               // the current colour (glColor*)
+    int client_unit;                              // glClientActiveTexture
+    uint32_t tex2d;                               // GL_TEXTURE_2D, a bit per texture unit
+    GLenum env[FF_UNITS]; float envc[FF_UNITS][4];
+    uint8_t atest; GLenum afunc; float aref;      // GL_ALPHA_TEST, glAlphaFunc
+} F = {.color = {1, 1, 1, 1}, .env = {GL_MODULATE, GL_MODULATE, GL_MODULATE, GL_MODULATE, GL_MODULATE, GL_MODULATE, GL_MODULATE, GL_MODULATE}, .afunc = 0x207};
+static void m_ident(float *m) { memset(m, 0, 64); m[0] = m[5] = m[10] = m[15] = 1; }
+static void ff_init_stacks(void) { static int done; if (done) return; done = 1; for (int s = 0; s < 3; s++) m_ident(F.m[s][0]); }
+static float *m_cur(void) { ff_init_stacks(); return F.m[F.mode][F.top[F.mode]]; }
+static void m_mul(float *o, const float *a, const float *b) {   // o = a × b (column-major; o may be a or b)
+    float r[16];
+    for (int c = 0; c < 4; c++) for (int k = 0; k < 4; k++) r[c * 4 + k] = a[k] * b[c * 4] + a[4 + k] * b[c * 4 + 1] + a[8 + k] * b[c * 4 + 2] + a[12 + k] * b[c * 4 + 3];
+    memcpy(o, r, sizeof r);
+}
+static void m_apply(const float *b) { float *m = m_cur(); m_mul(m, m, b); }   // the current matrix × b, as glMultMatrix and the matrix builders do
+// The layer's program: two uniform blocks (gl_ff.metal ff_vu / ff_fu) and one sampler, texture unit 0's GL_TEXTURE_2D
+typedef struct { float mvp[16], tm[16]; } ff_vu;
+typedef struct { int32_t tex, env, has_c, has_a, atest, afunc; float aref, pad; float envc[4]; } ff_fu;
+static prog_t g_ffp; static shinfo g_ffsi[2]; static ff_vu g_ffv; static ff_fu g_fff;
+static shattr g_ffa[3] = {{"gl_Vertex", 0, T_VEC4}, {"gl_Color", 3, T_VEC4}, {"gl_MultiTexCoord0", 8, T_VEC4}};
+static puni_t g_ffu = {"texture0", T_SAMP2D, 0, {-1, -1}, {0, 0}, {-1, 1}, {-1, 2}, 0};   // the fragment argument buffer's texture and sampler IDs (gl_ff.metal ff_fa)
+static id<MTLLibrary> g_fflib;
+// Whether the context has the fixed pipeline (eglCreateContext): OpenGL below 3.2, where EGL ignores the profile (UnMetal asks for no version: 1.0), or a compatibility profile.
+// A core context has none, and a draw there with no program current stays dropped (counted as "no program"), as before
+static int g_ctx_fixed;
+static const float g_ff_va0[4] = {0, 0, 0, 1};
+static const float *ff_current(int attr) { return attr == 3 ? F.color : g_ff_va0; }   // what a disabled array reads
+static void ff_update(void) {
+    ff_init_stacks();
+    ff_vu v; m_mul(v.mvp, F.m[1][F.top[1]], F.m[0][F.top[0]]); memcpy(v.tm, F.m[2][F.top[2]], 64);
+    // texturing as GL 1.x has it: on for a unit whose GL_TEXTURE_2D is enabled and whose texture is complete, else as if disabled (a texture never given an image draws untextured)
+    ff_fu f; memset(&f, 0, sizeof f);
+    tex_t *t = tex_of(S.units[0].t2d);
+    if ((F.tex2d & 1) && t && t->fmt >= 0 && (t->made || t->defined)) {
+        GLenum e = F.env[0];
+        f.tex = 1; f.env = e == GL_MODULATE ? 0 : e == GL_REPLACE ? 1 : e == GL_DECAL ? 2 : e == GL_BLEND ? 3 : e == GL_ADD ? 4 : 0;
+        if (e != GL_MODULATE && e != GL_REPLACE && e != GL_DECAL && e != GL_BLEND && e != GL_ADD) RED1("texture environment mode %#x not implemented (modulate)", e);
+        f.has_c = t->base != FB_ALPHA; f.has_a = t->base != FB_RGB && t->base != FB_LUM;
+        memcpy(f.envc, F.envc[0], sizeof f.envc);
+    }
+    if (F.tex2d & ~1u) RED1("GL_TEXTURE_2D enabled on texture unit %d: the fixed pipeline textures from unit 0 only", __builtin_ctz(F.tex2d & ~1u));
+    if (F.atest) { f.atest = 1; f.afunc = (int32_t)(F.afunc - GL_NEVER); f.aref = F.aref; }
+    if (memcmp(&v, &g_ffv, sizeof v)) { g_ffv = v; g_ffp.ub_gen[0]++; }
+    if (memcmp(&f, &g_fff, sizeof f)) { g_fff = f; g_ffp.ub_gen[1]++; }
+}
+static prog_t *ff_prog(void) {
+    if (!g_ffp.linked) {
+        static int failed; if (failed) return NULL;
+        NSError *err = nil;
+        g_fflib = host_msl_lib(g_dev, nil, "gl_ff", &err);
+        id<MTLFunction> vs = [g_fflib newFunctionWithName:@"ff_vs"], fs = [g_fflib newFunctionWithName:@"ff_fs"];
+        if (!vs || !fs) { failed = 1; GLOG("[RED] the fixed pipeline's shaders (gl_ff) do not load: %s", err.localizedDescription.UTF8String); return NULL; }
+        for (int st = 0; st < 2; st++) { strlcpy(g_ffsi[st].key, "fixed-function", sizeof g_ffsi[st].key); g_ffsi[st].frag = st; g_ffsi[st].ub_slot = 0; g_ffsi[st].arg_slot = 0; g_ffsi[st].nargs = st ? 3 : 1; }
+        g_ffsi[0].ub_size = sizeof(ff_vu); g_ffsi[0].na = 3; g_ffsi[0].a = g_ffa; g_ffsi[1].ub_size = sizeof(ff_fu);
+        g_ffp.si[0] = &g_ffsi[0]; g_ffp.si[1] = &g_ffsi[1]; g_ffp.fn[0] = vs; g_ffp.fn[1] = fs;
+        for (int st = 0; st < 2; st++) g_ffp.ae[st] = [g_ffp.fn[st] newArgumentEncoderWithBufferIndex:0];   // its uniforms and texture go through argument buffers, as a linked program's
+        g_ffp.nu = 1; g_ffp.u = &g_ffu; g_ffp.ub[0] = (uint8_t *)&g_ffv; g_ffp.ub[1] = (uint8_t *)&g_fff;
+        for (int i = 0; i < 16; i++) g_ffp.amap[i] = (int8_t)i;
+        g_ffp.serial = 0xffffffffu;   // programs count up from 1 (glLinkProgram)
+        g_ffp.linked = 1;
+        GLOG("fixed pipeline: the first draw with no program current");
+    }
+    ff_update();
+    return &g_ffp;
+}
+
 // ---------- Drawing ----------
 static void enc_state(void) {
     id<MTLRenderCommandEncoder> e = g_enc;
@@ -1098,7 +1181,7 @@ static void draw_span(void) {
 // Everything a draw needs; 0 = skip it
 static id<MTLTexture> fb_color(GLuint fb, int *level, int *slice);
 static int draw_setup(void) {
-    prog_t *p = prog_of(S.prog);
+    prog_t *p = S.prog ? prog_of(S.prog) : g_ctx_fixed ? ff_prog() : NULL;   // no program current: OpenGL 1.x's fixed pipeline (Fixed function), where the context has it
     if (!p || !p->linked) { g_sk_prog++; RED1("draw with no usable program (%u)", S.prog); return 0; }
     if (!pass_ensure()) { g_sk_pass++; return 0; }
     pkey_t k; memset(&k, 0, sizeof k);
@@ -1138,7 +1221,7 @@ static int draw_setup(void) {
         int s = vs->a[i].slot, gi = p->amap[s]; vattr_t *a = &v->a[gi];
         if (a->on && cbuf[s]) [e setVertexBuffer:cbuf[s] offset:coff[s] atIndex:30 - s];
         else if (a->on) { const vbind_t *vb = vb_of(v, gi); buf_t *b = buf_of(vb->buf); b->use = g_serial; [e setVertexBuffer:b->mb offset:vb->off + a->rel atIndex:30 - s]; }
-        else [e setVertexBytes:S.va[gi] length:16 atIndex:30 - s];
+        else [e setVertexBytes:p == &g_ffp ? ff_current(gi) : S.va[gi] length:16 atIndex:30 - s];
     }
     bind_uniforms_textures(p);
     g_n_draw++;
@@ -1325,8 +1408,12 @@ static void cap_set(GLenum cap, int on) {
     uint8_t *c = cap_of(cap);
     if (c) { *c = on; return; }
     if (cap == GL_COLOR_TABLE) { S.color_table = on; return; }
+    // the fixed pipeline's (Fixed function): texturing per texture unit, the alpha test; lighting and fog are not implemented
+    if (cap == GL_TEXTURE_2D) { if (S.unit < 32) F.tex2d = on ? F.tex2d | 1u << S.unit : F.tex2d & ~(1u << S.unit); return; }
+    if (cap == GL_ALPHA_TEST) { F.atest = (uint8_t)on; return; }
+    if ((cap == GL_LIGHTING || cap == GL_FOG) && !on) return;
     if (cap == GL_FRAMEBUFFER_SRGB) { if (on && !S.srgb) RED1("GL_FRAMEBUFFER_SRGB: writes into sRGB attachments are not converted"); S.srgb = on; return; }
-    if (cap == GL_TEXTURE_2D || cap == 0x809d /* MULTISAMPLE */ || cap == 0x8642 /* PROGRAM_POINT_SIZE */ || cap == 0x8d69 /* PRIMITIVE_RESTART_FIXED_INDEX */ || cap == 0x884f /* TEXTURE_CUBE_MAP_SEAMLESS */
+    if (cap == 0x809d /* MULTISAMPLE */ || cap == 0x8642 /* PROGRAM_POINT_SIZE */ || cap == 0x8d69 /* PRIMITIVE_RESTART_FIXED_INDEX */ || cap == 0x884f /* TEXTURE_CUBE_MAP_SEAMLESS */
         || cap == 0x864f /* DEPTH_CLAMP: Metal clamps to the depth range already */
         || cap == 0x92e0 /* DEBUG_OUTPUT */ || cap == 0x8242 /* DEBUG_OUTPUT_SYNCHRONOUS */) return;
     static GLenum seen[32]; static int n;
@@ -1387,7 +1474,7 @@ GL(glPixelStorei, void, GLenum p, GLint v) {
     else RED1("glPixelStorei(%#x, %d) not implemented", p, v);
 }
 // Colour-index images through a palette (GL's compatibility pixel transfer: glColorTable, GL_INDEX_SHIFT / GL_INDEX_OFFSET); the game's texture loader sets a palette for its
-// paletted images. glTexEnvi is fixed-function texturing, which programs replace
+// paletted images
 GL(glPixelTransferi, void, GLenum p, GLint v) { if (p == GL_INDEX_SHIFT) S.index_shift = v; else if (p == GL_INDEX_OFFSET) S.index_offset = v; else RED1("glPixelTransferi(%#x) not implemented", p); }
 GL(glColorTable, void, GLenum target, GLenum ifmt, GLsizei w, GLenum format, GLenum type, const void *table) {
     if (target != GL_COLOR_TABLE || type != GL_UNSIGNED_BYTE || (format != GL_RGBA && format != GL_RGB) || w <= 0 || !table) { RED1("glColorTable(%#x, %#x, %d, %#x, %#x) not implemented", target, ifmt, w, format, type); return; }
@@ -1395,7 +1482,6 @@ GL(glColorTable, void, GLenum target, GLenum ifmt, GLsizei w, GLenum format, GLe
     for (int i = 0; i < S.npalette; i++) S.palette[i] = format == GL_RGBA ? (uint32_t)s[4 * i] | s[4 * i + 1] << 8 | s[4 * i + 2] << 16 | (uint32_t)s[4 * i + 3] << 24 : (uint32_t)s[3 * i] | s[3 * i + 1] << 8 | s[3 * i + 2] << 16 | 0xff000000u;
     RED1("paletted texture (glColorTable, %d entries): palette lookup at upload, the index shift is %d", w, S.index_shift);
 }
-GL(glTexEnvi, void, GLenum t, GLenum p, GLint v) { (void)t; (void)p; (void)v; }
 GL(glGetError, GLenum, void) { GLenum e = g_gl_error; g_gl_error = GL_NO_ERROR; return e; }   // the flag above, read and cleared
 // Everything recorded so far runs to its end (LÖVE when the window changes)
 // glFlush: hand the commands encoded so far to the GPU without waiting. The layer commits at the frame's end, so a game that flushes in the middle of a frame
@@ -1633,6 +1719,90 @@ GL(glVertexBindingDivisor, void, GLuint bi, GLuint d) {
 GL(glVertexAttrib4f, void, GLuint i, GLfloat x, GLfloat y, GLfloat z, GLfloat w) { if (i < 16) { S.va[i][0] = x; S.va[i][1] = y; S.va[i][2] = z; S.va[i][3] = w; } }
 GL(glVertexAttrib4fv, void, GLuint i, const GLfloat *v) { if (i < 16) memcpy(S.va[i], v, sizeof S.va[i]); }
 
+// ---------- Fixed function: arrays, the current colour, matrices, the texture environment ----------
+// An array of the fixed pipeline: the vertex array's attribute at its aliased number (Fixed function), set as glVertexAttribPointer sets one; norm: integer colours and normals
+// are normalized, vertices and texture coordinates are not
+static void ff_pointer(int i, GLint size, GLenum type, GLsizei stride, const void *ptr, int norm, const char *fn) {
+    if (stride < 0 || size < 1 || (size > 4 && size != 0x80e1)) { gl_error_at(GL_INVALID_VALUE, fn); return; }
+    if (size == 0x80e1) RED1("%s with GL_BGRA components: read as RGBA", fn);
+    if (type == GL_DOUBLE) RED1("%s of doubles: Metal reads no double vertex attribute", fn);
+    vao_t *v = cur_vao(); vattr_t *a = &v->a[i]; vbind_t *b = &v->b[i];
+    va_format(a, size, type, (uint32_t)norm, 0); a->bind = 0;
+    b->buf = S.array_buf; b->client = !S.array_buf; b->off = (uintptr_t)ptr; b->stride = stride ? stride : a->size * vtype_bytes(type);
+}
+GL(glVertexPointer, void, GLint size, GLenum type, GLsizei stride, const void *ptr) { ff_pointer(0, size, type, stride, ptr, 0, __func__); }
+GL(glColorPointer, void, GLint size, GLenum type, GLsizei stride, const void *ptr) { ff_pointer(3, size, type, stride, ptr, type != GL_FLOAT && type != GL_HALF_FLOAT && type != GL_DOUBLE, __func__); }
+GL(glNormalPointer, void, GLenum type, GLsizei stride, const void *ptr) { ff_pointer(2, 3, type, stride, ptr, type != GL_FLOAT && type != GL_HALF_FLOAT && type != GL_DOUBLE, __func__); }
+GL(glTexCoordPointer, void, GLint size, GLenum type, GLsizei stride, const void *ptr) {
+    if (F.client_unit >= FF_UNITS) { RED1("glTexCoordPointer for texture unit %d", F.client_unit); return; }
+    ff_pointer(8 + F.client_unit, size, type, stride, ptr, 0, __func__);
+}
+GL(glClientActiveTexture, void, GLenum u) { if (u >= GL_TEXTURE0 && u < GL_TEXTURE0 + FF_UNITS) F.client_unit = (int)(u - GL_TEXTURE0); else gl_error(GL_INVALID_ENUM); }
+static void client_state(GLenum a, int on) {
+    int i = a == GL_VERTEX_ARRAY ? 0 : a == GL_NORMAL_ARRAY ? 2 : a == GL_COLOR_ARRAY ? 3 : a == GL_TEXTURE_COORD_ARRAY ? 8 + F.client_unit : -1;
+    if (i < 0 || i >= 16) { RED1("gl%sClientState(%#x) not implemented", on ? "Enable" : "Disable", a); return; }
+    cur_vao()->a[i].on = (uint8_t)on;
+}
+GL(glEnableClientState, void, GLenum a) { client_state(a, 1); }
+GL(glDisableClientState, void, GLenum a) { client_state(a, 0); }
+GL(glColor4f, void, GLfloat r, GLfloat g, GLfloat b, GLfloat a) { F.color[0] = r; F.color[1] = g; F.color[2] = b; F.color[3] = a; }
+GL(glColor3f, void, GLfloat r, GLfloat g, GLfloat b) { F.color[0] = r; F.color[1] = g; F.color[2] = b; F.color[3] = 1; }
+GL(glColor4fv, void, const GLfloat *v) { memcpy(F.color, v, sizeof F.color); }
+GL(glColor4ub, void, uint32_t r, uint32_t g, uint32_t b, uint32_t a) { F.color[0] = (r & 0xff) / 255.f; F.color[1] = (g & 0xff) / 255.f; F.color[2] = (b & 0xff) / 255.f; F.color[3] = (a & 0xff) / 255.f; }
+GL(glMatrixMode, void, GLenum m) { if (m >= GL_MODELVIEW && m <= GL_TEXTURE) F.mode = (int)(m - GL_MODELVIEW); else gl_error(GL_INVALID_ENUM); }
+GL(glLoadIdentity, void, void) { m_ident(m_cur()); }
+GL(glLoadMatrixf, void, const GLfloat *m) { memcpy(m_cur(), m, 64); }
+GL(glMultMatrixf, void, const GLfloat *m) { m_apply(m); }
+GL(glPushMatrix, void, void) {
+    ff_init_stacks();
+    if (F.top[F.mode] + 1 >= FF_DEPTH) { gl_error(0x503); return; }   // STACK_OVERFLOW
+    memcpy(F.m[F.mode][F.top[F.mode] + 1], F.m[F.mode][F.top[F.mode]], 64); F.top[F.mode]++;
+}
+GL(glPopMatrix, void, void) { if (!F.top[F.mode]) { gl_error(0x504); return; } F.top[F.mode]--; }   // STACK_UNDERFLOW
+static void m_rotate(float deg, float x, float y, float z) {   // glRotate: deg degrees about (x, y, z), counter-clockwise looking down the axis
+    float l = sqrtf(x * x + y * y + z * z); if (l == 0) return;
+    x /= l; y /= l; z /= l;
+    float c = cosf(deg * (float)M_PI / 180), s = sinf(deg * (float)M_PI / 180), k = 1 - c;
+    float r[16] = {x * x * k + c, y * x * k + z * s, x * z * k - y * s, 0,   x * y * k - z * s, y * y * k + c, y * z * k + x * s, 0,
+                   x * z * k + y * s, y * z * k - x * s, z * z * k + c, 0,   0, 0, 0, 1};
+    m_apply(r);
+}
+GL(glRotatef, void, GLfloat a, GLfloat x, GLfloat y, GLfloat z) { m_rotate(a, x, y, z); }
+GL(glTranslatef, void, GLfloat x, GLfloat y, GLfloat z) { float t[16]; m_ident(t); t[12] = x; t[13] = y; t[14] = z; m_apply(t); }
+GL(glScalef, void, GLfloat x, GLfloat y, GLfloat z) { float t[16]; m_ident(t); t[0] = x; t[5] = y; t[10] = z; m_apply(t); }
+static void m_ortho(double l, double r, double b, double t, double n, double f) {
+    if (l == r || b == t || n == f) { gl_error(GL_INVALID_VALUE); return; }
+    float o[16]; m_ident(o);
+    o[0] = (float)(2 / (r - l)); o[5] = (float)(2 / (t - b)); o[10] = (float)(-2 / (f - n));
+    o[12] = (float)(-(r + l) / (r - l)); o[13] = (float)(-(t + b) / (t - b)); o[14] = (float)(-(f + n) / (f - n));
+    m_apply(o);
+}
+GL(glOrtho, void, GLdouble l, GLdouble r, GLdouble b, GLdouble t, GLdouble n, GLdouble f) { m_ortho(l, r, b, t, n, f); }
+GL(glOrthof, void, GLfloat l, GLfloat r, GLfloat b, GLfloat t, GLfloat n, GLfloat f) { m_ortho(l, r, b, t, n, f); }
+GL(glFrustum, void, GLdouble l, GLdouble r, GLdouble b, GLdouble t, GLdouble n, GLdouble f) {
+    if (n <= 0 || f <= 0 || l == r || b == t || n == f) { gl_error(GL_INVALID_VALUE); return; }
+    float o[16]; memset(o, 0, sizeof o);
+    o[0] = (float)(2 * n / (r - l)); o[5] = (float)(2 * n / (t - b)); o[8] = (float)((r + l) / (r - l)); o[9] = (float)((t + b) / (t - b));
+    o[10] = (float)(-(f + n) / (f - n)); o[11] = -1; o[14] = (float)(-2 * f * n / (f - n));
+    m_apply(o);
+}
+// glTexEnv: the active texture unit's GL_TEXTURE_ENV_MODE and GL_TEXTURE_ENV_COLOR (GL_COMBINE and point sprites are not implemented)
+static void tex_env(GLenum target, GLenum p, const GLfloat *v, GLint i, int is_int) {
+    if (target != GL_TEXTURE_ENV) { RED1("glTexEnv target %#x not implemented", target); return; }
+    if (S.unit >= FF_UNITS) { RED1("glTexEnv on texture unit %d", S.unit); return; }
+    if (p == GL_TEXTURE_ENV_MODE) {
+        GLenum m = is_int ? (GLenum)i : (GLenum)v[0];
+        if (m != F.env[S.unit]) OLOG("texture unit %d environment %#x → %#x", S.unit, F.env[S.unit], m);
+        F.env[S.unit] = m;
+    }
+    else if (p == GL_TEXTURE_ENV_COLOR) memcpy(F.envc[S.unit], v, sizeof F.envc[S.unit]);
+    else RED1("glTexEnv(%#x) not implemented", p);
+}
+GL(glTexEnvf, void, GLenum t, GLenum p, GLfloat v) { tex_env(t, p, &v, (GLint)v, 0); }
+GL(glTexEnvi, void, GLenum t, GLenum p, GLint v) { float f = (float)v; tex_env(t, p, &f, v, 1); }
+GL(glTexEnvfv, void, GLenum t, GLenum p, const GLfloat *v) { tex_env(t, p, v, (GLint)v[0], 0); }
+GL(glAlphaFunc, void, GLenum f, GLfloat ref) { if (f >= GL_NEVER && f <= GL_NEVER + 7) { F.afunc = f; F.aref = ref < 0 ? 0 : ref > 1 ? 1 : ref; } else gl_error(GL_INVALID_ENUM); }
+
 // ---------- Textures ----------
 GL(glGenTextures, void, GLsizei n, GLuint *out) { for (GLsizei i = 0; i < n; i++) out[i] = name_new((void ***)&g_texs, &g_ntexs, &g_captexs, sizeof(tex_t)); }
 GL(glDeleteTextures, void, GLsizei n, const GLuint *t) {
@@ -1646,8 +1816,6 @@ GL(glDeleteTextures, void, GLsizei n, const GLuint *t) {
     }
 }
 GL(glActiveTexture, void, GLenum u) { if (u >= GL_TEXTURE0 && u < GL_TEXTURE0 + NUNITS) S.unit = u - GL_TEXTURE0; }
-// The unit the compatibility profile's texture coordinate array (glTexCoordPointer) goes to: no fixed-pipeline arrays here, so nothing reads it (DOOM 3 sets unit 0 at start)
-GL(glClientActiveTexture, void, GLenum u) { if (u != GL_TEXTURE0) RED1("glClientActiveTexture(%#x): fixed-pipeline texture coordinate arrays are not implemented", u); }
 GL(glBindTexture, void, GLenum target, GLuint t) {
     GLuint *slot = target == GL_TEXTURE_2D || target == GL_TEXTURE_CUBE_MAP || target == GL_TEXTURE_3D || target == GL_TEXTURE_2D_ARRAY ? unit_slot(S.unit, target) : NULL;
     if (!slot) { RED1("texture target %#x not implemented", target); return; }
@@ -1767,6 +1935,12 @@ static void teximg_impl(const teximg_args *a) {
             conv = pixels_convert(a->pixels, a->w, a->h, 0, 0, f, CV_COPY, &pitch);
         } else conv = pixels_convert(cv == CV_NONE ? NULL : a->pixels, a->w, a->h, a->format, a->type, f, cv, &pitch);
         tex_image(a->target, a->level, f, cv, a->w, a->h, 1, a->pixels || a->compressed ? conv : (free(conv), (void *)NULL), pitch);
+        tex_t *t = bound_tex(a->target);
+        if (t && a->level == 0) {   // what the fixed pipeline's texture environment takes from the image: GL 1.x's base formats, by the internal format
+            GLint i = a->ifmt;
+            t->base = i == GL_ALPHA || i == 0x803c ? FB_ALPHA : i == GL_LUMINANCE || i == 1 || i == 0x8040 ? FB_LUM : i == GL_LUMINANCE_ALPHA || i == 2 || i == 0x8045 ? FB_LUMA :
+                      i == GL_RGB || i == 3 || i == GL_RGB8 || i == GL_RGB565 || i == GL_COMPRESSED_RGB_S3TC_DXT1 || i == GL_COMPRESSED_SRGB_S3TC_DXT1 ? FB_RGB : FB_RGBA;
+        }
     }
 }
 GL(glTexImage2D, void, GLenum target, GLint level, GLint ifmt, GLsizei w, GLsizei h, GLint border, GLenum format, GLenum type, const void *pixels) {
@@ -2109,6 +2283,19 @@ GL(glFramebufferTexture2D, void, GLenum target, GLenum att, GLenum textarget, GL
 GL(glFramebufferTextureLayer, void, GLenum target, GLenum att, GLuint t, GLint level, GLint layer) { fb_attach(target, att, 1, t, level, layer); }
 GL(glFramebufferTexture3D, void, GLenum target, GLenum att, GLenum textarget, GLuint t, GLint level, GLint z) { (void)textarget; fb_attach(target, att, 1, t, level, z); }
 GL(glFramebufferRenderbuffer, void, GLenum target, GLenum att, GLenum rbt, GLuint r) { (void)rbt; fb_attach(target, att, 2, r, 0, 0); }
+// GL_EXT_framebuffer_object's names for the same functions, with the same enums (UnMetal's loader asks for glGenFramebuffersEXT, glBindFramebufferEXT and
+// glFramebufferTexture2DEXT)
+#define GL_ALIAS(alias, fn) __attribute__((used, section("__DATA,swhle"))) static const hle_ent e_##alias = {#alias, (void *)fn};
+GL_ALIAS(glGenFramebuffersEXT, h_glGenFramebuffers)
+GL_ALIAS(glDeleteFramebuffersEXT, h_glDeleteFramebuffers_bs)
+GL_ALIAS(glBindFramebufferEXT, h_glBindFramebuffer_bs)
+GL_ALIAS(glCheckFramebufferStatusEXT, h_glCheckFramebufferStatus)
+GL_ALIAS(glFramebufferTexture2DEXT, h_glFramebufferTexture2D)
+GL_ALIAS(glFramebufferRenderbufferEXT, h_glFramebufferRenderbuffer)
+GL_ALIAS(glGenRenderbuffersEXT, h_glGenRenderbuffers)
+GL_ALIAS(glDeleteRenderbuffersEXT, h_glDeleteRenderbuffers)
+GL_ALIAS(glBindRenderbufferEXT, h_glBindRenderbuffer)
+GL_ALIAS(glRenderbufferStorageEXT, h_glRenderbufferStorage_bs)
 // A framebuffer's colour image: the texture, its level and its slice (a cube face or an array layer) or 3D slice
 static id<MTLTexture> fb_color(GLuint fb, int *level, int *slice) {
     *level = *slice = 0;
@@ -2666,9 +2853,11 @@ EGL(eglDestroyContext, EGLBoolean, EGLDisplay d, EGLContext c) { (void)d; (void)
 EGL(eglCreatePbufferSurface, EGLSurface, EGLDisplay d, EGLConfig cfg, const EGLint *attr) { (void)d; (void)cfg; (void)attr; RED1("eglCreatePbufferSurface: drawing into it is not implemented"); return (EGLSurface)(uintptr_t)4; }
 EGL(eglCreateContext, EGLContext, EGLDisplay d, EGLConfig cfg, EGLContext share, const EGLint *attr) {
     (void)d; (void)cfg;
-    int major = 0, minor = 0; for (int i = 0; attr && attr[i] != 0x3038 && i < 32; i += 2) { if (attr[i] == 0x3098) major = attr[i + 1]; else if (attr[i] == 0x30fb) minor = attr[i + 1]; }
+    int major = 0, minor = 0, mask = 1;   // MAJOR_VERSION, MINOR_VERSION, OPENGL_PROFILE_MASK (default CORE_PROFILE_BIT)
+    for (int i = 0; attr && attr[i] != 0x3038 && i < 32; i += 2) { if (attr[i] == 0x3098) major = attr[i + 1]; else if (attr[i] == 0x30fb) minor = attr[i + 1]; else if (attr[i] == 0x30fd) mask = attr[i + 1]; }
     if (share) RED1("shared EGL contexts are not implemented (one context)");
-    GLOG("EGL context: OpenGL %d.%d", major, minor);
+    g_ctx_fixed = major * 10 + minor < 32 || (mask & 2);   // below 3.2 the profile does not apply; COMPATIBILITY_PROFILE_BIT
+    GLOG("EGL context: OpenGL %d.%d%s", major, minor, g_ctx_fixed ? " (with the fixed pipeline)" : "");
     return (EGLContext)(uintptr_t)2;
 }
 EGL(eglCreateWindowSurface, EGLSurface, EGLDisplay d, EGLConfig cfg, void *win, const EGLint *attr) {
@@ -2737,6 +2926,44 @@ static void renderprogs_job(void) {
     GLOG("render programs: the game converted %d vertex and %d fragment programs (DM_GL_RENDERPROGS, manager %p)", nv, nf, mgr);
 }
 static uint64_t g_next_swap;   // pacing without the display link: the earliest time of the next swap
+// DM_GL_TEXDUMP=<frame>[,<frame>...]:<path with %u [and %llu]>: at those frames' swaps, once the GPU is done with them, the colour image of every framebuffer (level 0,
+// slice 0) as PNG, %u the framebuffer's name (0 = the window image), %llu the frame, top row first. Where a black or wrong picture comes from when the draws look right
+// (DM_GL_DRAWLOG): which target holds what
+static void texdump_png(id<MTLTexture> t, const char *path) {
+    if (t.pixelFormat != MTLPixelFormatRGBA8Unorm && t.pixelFormat != MTLPixelFormatBGRA8Unorm) { GLOG("[RED] texture dump %s: format %lu not written", path, (unsigned long)t.pixelFormat); return; }
+    size_t w = t.width, h = t.height, row = w * 4;
+    id<MTLBuffer> buf = [g_dev newBufferWithLength:row * h options:MTLResourceStorageModeShared];
+    id<MTLCommandBuffer> cb = [g_q commandBuffer]; id<MTLBlitCommandEncoder> b = [cb blitCommandEncoder];
+    [b copyFromTexture:t sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(w, h, 1) toBuffer:buf destinationOffset:0 destinationBytesPerRow:row destinationBytesPerImage:row * h];
+    [b endEncoding]; [cb commit]; [cb waitUntilCompleted];
+    uint8_t *px = buf.contents, *tmp = malloc(row);   // stored bottom row first (GL's orientation): flipped for the file
+    for (size_t y = 0; tmp && y < h / 2; y++) { memcpy(tmp, px + y * row, row); memcpy(px + y * row, px + (h - 1 - y) * row, row); memcpy(px + (h - 1 - y) * row, tmp, row); }
+    free(tmp);
+    CGColorSpaceRef cs = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
+    CGContextRef ctx = CGBitmapContextCreate(px, w, h, 8, row, cs, t.pixelFormat == MTLPixelFormatBGRA8Unorm ? (kCGImageAlphaNoneSkipFirst | kCGBitmapByteOrder32Little) : (CGBitmapInfo)kCGImageAlphaNoneSkipLast);
+    CGImageRef img = ctx ? CGBitmapContextCreateImage(ctx) : NULL;
+    CFURLRef url = CFURLCreateFromFileSystemRepresentation(NULL, (const UInt8 *)path, (CFIndex)strlen(path), false);
+    CGImageDestinationRef dst = url ? CGImageDestinationCreateWithURL(url, CFSTR("public.png"), 1, NULL) : NULL;
+    int ok = 0; if (img && dst) { CGImageDestinationAddImage(dst, img, NULL); ok = CGImageDestinationFinalize(dst); }
+    if (dst) CFRelease(dst); if (url) CFRelease(url); CGImageRelease(img); CGContextRelease(ctx); CGColorSpaceRelease(cs);
+    GLOG("texture dump %zux%zu → %s %s", w, h, path, ok ? "ok" : "[RED] failed");
+}
+static void texdump(uint64_t frame, uint64_t serial) {
+    static int n = -1; static long at[256]; static const char *path;
+    if (n < 0) {
+        const char *e = getenv("DM_GL_TEXDUMP"); n = 0;
+        if (e && strchr(e, ':')) { path = strchr(e, ':') + 1; for (const char *c = e; c < path && n < 256; c = strchr(c, ',') ? strchr(c, ',') + 1 : path) at[n++] = atol(c); }
+    }
+    int hit = 0; for (int i = 0; i < n; i++) hit |= at[i] == (long)frame;
+    if (!hit) return;
+    [g_ev waitUntilSignaledValue:serial timeoutMS:5000];
+    char p[1024];
+    for (GLuint k = 0; k < g_nfbs || k == 0; k++) {
+        int lv, sl; id<MTLTexture> t = k ? (fb_of(k) ? fb_color(k, &lv, &sl) : nil) : g_win.col[g_win.cur];
+        if (!t) continue;
+        snprintf(p, sizeof p, path, (unsigned)k, (unsigned long long)frame); texdump_png(t, p);
+    }
+}
 EGL(eglSwapBuffers, EGLBoolean, EGLDisplay d, EGLSurface s) {
     (void)d; (void)s;
     dm_gfx_enter();
@@ -2744,6 +2971,7 @@ EGL(eglSwapBuffers, EGLBoolean, EGLDisplay d, EGLSurface s) {
         if (!g_win.made) { int w, h; dm_vi_layer_size(&w, &h); win_make(w > 0 ? w : 1280, h > 0 ? h : 720); }
         if (g_pend_clear.bits) clears_flush();
         uint64_t v = cb_commit();
+        texdump(g_frames + 1, v);
         int vs = S.swap_interval < 1 ? 1 : S.swap_interval > 4 ? 4 : S.swap_interval;
         int k = g_win.cur;
         g_win.ticket[k] = mtl_present_ext(g_win.serial[k], vs / 60.0, (__bridge void *)g_ev, v, NULL);

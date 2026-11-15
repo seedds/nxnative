@@ -140,8 +140,8 @@ static uint64_t g_link_empty;   // Under g_pq_mu: ticks that found no new frame 
 static nvn_link_drain g_link_drain;   // display-link callback thread only
 static _Atomic int g_link_drain_req; static _Atomic uint64_t g_link_blocked_ns, g_link_drain_ns, g_link_drained;
 // The late latch (nvn_link_latch.h): g_link_waiter, under g_link_mu, the tick an acquire blocks for in mtl_link_wait_ticks (0 = none), so the callback knows it woke one;
-// on the callback thread: latches that took the woken acquire's present, latches that timed out, and the timeouts in a row
-static uint64_t g_link_waiter, g_link_latched, g_link_latch_out; static unsigned g_link_latch_misses;
+// on the callback thread: latches that took the woken acquire's present, latches that timed out, entries into the latch through its gate, and the timeouts in a row
+static uint64_t g_link_waiter, g_link_latched, g_link_latch_out, g_link_caught_up; static unsigned g_link_latch_misses;
 static double g_link_hold_until; static uint64_t g_link_held;   // Changed only on the display-link callback thread: the time the previous frame must stay on screen until by its present interval (0 = no hold), and the ticks that took no new frame because of it
 static int g_pq_inflight;   // Under g_pq_mu: number of presents committed to the GPU whose completion callback has not arrived yet
 static NSMutableArray *g_ext_retire;   // Under g_pq_mu: released external textures (mtl_ext_tex_release) waiting for the presents in flight; retired when g_pq_inflight reaches 0
@@ -17985,20 +17985,24 @@ static struct timespec link_deadline(uint64_t ns);
     //   before, every tick took the newest frame, so that frame, carrying the extra time step the game advanced for it, was shown for only 16.7 ms and the game looked like it jumped ahead
     const int hold = g_link_hold_until > 0 && update.targetPresentationTimestamp < g_link_hold_until - tol;
     // The late latch (nvn_link_latch.h): wait briefly for the woken acquire's present (g_pq_mu is released while waiting, so present_enqueue can queue it; a present that
-    // finds the queue full waits for this callback, and the wait is bounded). Not with present snapshots, which run the game a frame ahead of the screen on purpose
-    uint64_t latched = 0;
+    // finds the queue full waits for this callback, and the wait is bounded). Not with present snapshots, which run the game a frame ahead of the screen on purpose.
+    // Only into an empty queue: a frame that stands (one that missed the previous tick) goes out first, in order as without the latch, until the gate below lets the queue run
+    // empty again. Taking the latched present over it dropped that frame: about 3 a second on a built-in ProMotion screen, where presents came late more often
     {   // the room the latch has: the time from the callback to its targetTimestamp, logged every 300 ticks
         static double rmin = 1e9, rsum; static int rn; double r = update.targetTimestamp - cb;
         if (r < rmin) rmin = r;
         rsum += r;
-        if (++rn == 300) { MLOG("display link: from the callback to its targetTimestamp over 300 ticks: min %.2f ms, mean %.2f ms (late latch: %llu presents taken, %llu timeouts)", rmin * 1e3, rsum / rn * 1e3, (unsigned long long)g_link_latched, (unsigned long long)g_link_latch_out); rmin = 1e9; rsum = 0; rn = 0; }
+        if (++rn == 300) { MLOG("display link: from the callback to its targetTimestamp over 300 ticks: min %.2f ms, mean %.2f ms (late latch: %llu presents taken, %llu timeouts, entered %llu times)", rmin * 1e3, rsum / rn * 1e3, (unsigned long long)g_link_latched, (unsigned long long)g_link_latch_out, (unsigned long long)g_link_caught_up); rmin = 1e9; rsum = 0; rn = 0; }
     }
-    if (woke && !hold && link_latch_on() && !mtl_snap_on()) {
+    // The gate's clock (nvn_link_latch.h): the last two callbacks that woke an acquire and their room to targetTimestamp, so each frame taken is timed from the wake before it
+    static double wk_cb[2] = {-1, -1}, wk_room[2];
+    if (woke) { wk_cb[1] = wk_cb[0]; wk_room[1] = wk_room[0]; wk_cb[0] = cb; wk_room[0] = update.targetTimestamp - cb; }
+    if (woke && !hold && g_pq_read == g_pq_in && link_latch_on() && !mtl_snap_on()) {
         double w = nvn_link_latch_wait(cb, update.targetTimestamp, vp > 0 ? vp : 1.0 / mtl_link_rate(), g_link_latch_misses, tick);
         if (w > 0) {
             const uint64_t in0 = g_pq_in; struct timespec ts = link_deadline((uint64_t)(w * 1e9));
             while (g_pq_in == in0) if (pthread_cond_timedwait(&g_pq_cv, &g_pq_mu, &ts) == ETIMEDOUT) break;
-            if (g_pq_in > in0) { latched = g_pq_in; g_link_latched++; g_link_latch_misses = 0; } else { g_link_latch_out++; g_link_latch_misses++; }
+            if (g_pq_in > in0) { g_link_latched++; g_link_latch_misses = 0; } else { g_link_latch_out++; g_link_latch_misses++; }
         }
     }
     if (g_pq_read == g_pq_in) { g_link_empty++; pthread_mutex_unlock(&g_pq_mu); return; }
@@ -18009,9 +18013,6 @@ static struct timespec link_deadline(uint64_t ns);
     // (Dark Souls Remastered, from PR #31: presents within 14.7-18.7 ms 98.2 -> 99.98 %, about 2 ms more from enqueue to display). DM_PRESENT_FIFO=0 takes the newest, as before
     static int fifo = -1; if (fifo < 0) { const char *e = getenv("DM_PRESENT_FIFO"); fifo = !(e && !strcmp(e, "0")); MLOG("display link: %s", fifo ? "frames in order, at most one behind" : "the newest frame each tick (DM_PRESENT_FIFO=0)"); }
     if (fifo && ticket > first) ticket = ticket - first >= 2 ? g_pq_in - 1 : first;
-    // A latched present goes out on the tick that woke it. A frame queued before it (one that missed the previous tick) is dropped, once: taken in order, it would keep every
-    // later frame a period behind for good, as before the latch
-    if (latched) ticket = latched;
     pq_item it = g_pq[(ticket - 1) % PQ]; g_link_it_tin = it.t_in;
     g_pq_read = ticket;
     if (ticket > first) { g_link_dropped += ticket - first; for (uint64_t k = first; k < ticket; k++) { g_pres[k % PRING] = (pres_ent){k, -1}; mtl_tex_unpin(g_pq[(k-1)%PQ].t.serial); } }   // Old frames merged and dropped are recorded as "not presented", so the present statistics honestly count them as dropped frames
@@ -18020,6 +18021,16 @@ static struct timespec link_deadline(uint64_t ns);
     pthread_cond_broadcast(&g_pq_cv);
     pthread_mutex_unlock(&g_pq_mu);
     link_drain_note(cb, cb - it.t_in, ticket > first);
+    {   // The gate (nvn_link_latch.h). While it is open, a callback that woke an acquire and took a frame that stood since the previous tick asks the next acquire to wait one
+        // tick more (a drain of one tick, which wakes the latch at its end): the callback shows the standing frames meanwhile, so the screen repeats and drops nothing, the
+        // queue runs empty, and from then on each woken callback latches its own present. A frame that comes late after that stands again: the callback goes back to taking
+        // frames in order, and the gate closes. Not on the 120 Hz link, where the drain does not run (link_drain_note)
+        static nvn_link_gate gate; const int k = it.t_in >= wk_cb[0] ? 0 : it.t_in >= wk_cb[1] ? 1 : -1;
+        nvn_link_gate_note(&gate, k < 0 || wk_cb[k] < 0 ? -1 : it.t_in - wk_cb[k], k < 0 ? 0 : wk_room[k]);
+        if (woke && ticket == first && it.t_in < cb && nvn_link_gate_open(&gate) && mtl_link_rate() != 120 && link_latch_on() && !mtl_snap_on()) {
+            atomic_store(&g_link_drain_req, 1); g_link_caught_up++; gate.early = 0;
+        }
+    }
     int submitted;
     ext_wait(it.ev_val); snap_commit_wait(it.snap_v); sub_commit_wait(it.sub_v);
     @autoreleasepool { submitted = present_now(&it.t, it.period, it.frame, ticket, it.crop, update.drawable, update.targetPresentationTimestamp); mtl_tex_unpin(it.t.serial); }
@@ -18507,7 +18518,7 @@ int mtl_link_wait_ticks(int ticks, uint64_t timeout_ns) {
     if (g_link_tick_n >= started_tick + step) { started_tick = g_link_tick_n; pthread_mutex_unlock(&g_link_mu); atomic_store(&g_link_blocked_ns, 0); return 1; }
     uint64_t w0 = now_ns();
     struct timespec ts = link_deadline(timeout_ns);
-    g_link_waiter = drain > 0 ? 0 : started_tick + step;   // the callback of this tick waits for this frame's present (not when a drain holds the frame back further)
+    g_link_waiter = drain > 0 ? 0 : started_tick + step;   // the callback of this tick waits for this frame's present (with a drain, the tick that ends it, below)
     while (g_link_tick_n < started_tick + step) if (pthread_cond_timedwait(&g_link_cv, &g_link_mu, &ts) == ETIMEDOUT) { g_link_waiter = 0; pthread_mutex_unlock(&g_link_mu); atomic_store(&g_link_blocked_ns, 0); return 0; }
     g_link_waiter = 0;
     uint64_t w1 = now_ns(), drained = 0;
@@ -18515,7 +18526,9 @@ int mtl_link_wait_ticks(int ticks, uint64_t timeout_ns) {
     if (drain > 0) {   // the standing frames go to the screen on these ticks; a link that goes silent meanwhile ends the drain after two tick periods each
         const uint64_t until = g_link_tick_n + (uint64_t)drain;
         ts = link_deadline((uint64_t)drain * 2000000000ull / (uint64_t)mtl_link_rate());
+        g_link_waiter = until;   // the tick that ends the drain wakes this acquire: by then the queue has run empty, and its callback latches this frame's present
         while (g_link_tick_n < until) if (pthread_cond_timedwait(&g_link_cv, &g_link_mu, &ts) == ETIMEDOUT) break;
+        g_link_waiter = 0;
         drained = now_ns() - w1;
     }
     started_tick = g_link_tick_n;

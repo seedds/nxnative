@@ -97,6 +97,63 @@ class ArchiveRestartTests(unittest.TestCase):
                 self.assertEqual(len(list(Path(folder).glob('*.mtl4a'))), files, phase)
                 self.assertTrue((Path(folder) / 'compacting').exists(), phase)
 
+    def _end_in_prewarm(self, mode, extra, seed_files, after_files=None):
+        with tempfile.TemporaryDirectory(prefix='pso-' + mode + '-') as folder:
+            env = dict(os.environ, DM_PSO_MTL4='1', MTL_DEBUG_LAYER='1', **extra)
+            for name in ('DM_GPU_CAPTURE', 'MTL_CAPTURE_ENABLED', 'DM_TEST_ARCHIVE_CONSTANTS', 'DM_TEST_ARCHIVE_MIXED'):
+                env.pop(name, None)
+            if 'DM_TEST_STUCK_DRAW' not in extra:
+                env.pop('DM_TEST_STUCK_DRAW', None)
+            for phase, files in (('seed', seed_files), ('after', seed_files if after_files is None else after_files)):
+                result = subprocess.run([executable, '--' + mode + '-' + phase, folder],
+                                        env=env, capture_output=True, text=True, timeout=60)
+                self.assertEqual(result.returncode, 0, phase + '\n' + result.stdout + result.stderr)
+                self.assertEqual(len(list(Path(folder).glob('*.mtl4a'))), files, phase + '\n' + result.stderr)
+                self.assertEqual(list(Path(folder).glob('*.tmp')), [], phase)
+                if phase == 'seed' and mode == 'exec':
+                    # the next program started after the write: the file was there when it did
+                    self.assertEqual((Path(folder) / 'exec.txt').read_text().strip(), '1', result.stdout + result.stderr)
+
+    def test_prewarm_timer_flush_then_killed(self):
+        # five new bases in a prewarm, the timer's flush after DM_PSO_ARCH_WARM_FLUSH_MS, then _exit: one file, and the next start compiles none
+        self._end_in_prewarm('warmflush', {'DM_PSO_ARCH_WARM_FLUSH_MS': '300'}, 1)
+
+    def test_prepare_step_timer_flush_waits(self):
+        # the same in the prepare step (before the first frame): the timer's flush hands nothing over, and the run killed meanwhile left no file
+        self._end_in_prewarm('warmprep', {'DM_PSO_ARCH_WARM_FLUSH_MS': '300'}, 0, 1)
+
+    def test_sigterm_in_prewarm(self):
+        # SIGTERM in the prewarm: the graceful exit writes the five bases
+        self._end_in_prewarm('term', {'DM_PSO_ARCH_WARM_FLUSH_MS': '0'}, 1)
+
+    def test_sigterm_with_a_draw_under_way(self):
+        # SIGTERM while a draw holds the graphics layer (its suspend never returns): the five bases are written all the same
+        self._end_in_prewarm('term', {'DM_PSO_ARCH_WARM_FLUSH_MS': '0', 'DM_TEST_STUCK_DRAW': '1'}, 1)
+
+    def test_hand_over_with_a_draw_under_way(self):
+        # oe::ExecuteProgram's hand-over while a draw holds the graphics layer: the next program starts after the five bases are written
+        self._end_in_prewarm('exec', {'DM_PSO_ARCH_WARM_FLUSH_MS': '0', 'DM_TEST_STUCK_DRAW': '1'}, 1)
+
+    def test_write_cut_short_keeps_the_archive(self):
+        # a write a killed run left (its .tmp, its index without the file) and a file that is not an archive: the next start removes the leftovers, skips the bad file and
+        # takes every base from the good one
+        with tempfile.TemporaryDirectory(prefix='pso-torn-') as folder:
+            env = dict(os.environ, DM_PSO_MTL4='1', MTL_DEBUG_LAYER='1', DM_PSO_ARCH_WARM_FLUSH_MS='0')
+            for name in ('DM_GPU_CAPTURE', 'MTL_CAPTURE_ENABLED', 'DM_TEST_ARCHIVE_CONSTANTS', 'DM_TEST_ARCHIVE_MIXED', 'DM_TEST_STUCK_DRAW'):
+                env.pop(name, None)
+            result = subprocess.run([executable, '--term-seed', folder], env=env, capture_output=True, text=True, timeout=60)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            good = list(Path(folder).glob('*.mtl4a'))
+            self.assertEqual(len(good), 1)
+            data = good[0].read_bytes()
+            (Path(folder) / '00090-5.mtl4a.tmp').write_bytes(data[:len(data) // 2])
+            (Path(folder) / '00091-5.keys').write_bytes(b'\0' * 64)
+            (Path(folder) / '00092-5.mtl4a').write_bytes(data[:len(data) // 3])
+            result = subprocess.run([executable, '--term-after', folder], env=env, capture_output=True, text=True, timeout=60)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertFalse((Path(folder) / '00090-5.mtl4a.tmp').exists())
+            self.assertFalse((Path(folder) / '00091-5.keys').exists())
+
     def test_compaction_with_fresh_bases_and_restart(self):
         for constants in (False, True):
             with self.subTest(constants=constants), tempfile.TemporaryDirectory(prefix='pso-restart-') as folder:

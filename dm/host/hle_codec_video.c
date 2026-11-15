@@ -126,6 +126,7 @@ static void fill(cv_dec *d, int decoded) {
             b->w = (uint16_t)im->d_w; b->h = (uint16_t)im->d_h; b->ts = ts; b->eos = eos;
             if (b->pool && b->pidx < b->pool->count) { pool_native_write(b->pool, b->pidx, im); if (b->pool->img[b->pidx]) vpx_img_free(b->pool->img[b->pidx]); b->pool->img[b->pidx] = im; } else vpx_img_free(im);
             if (!d->pictures++) LOG("[codec] %s decoder %u: first picture %ux%u into buffer %u", k_cv_name[d->codec], d->id, b->w, b->h, i);
+            dm_movie_picture(d, "nn::codec", ts, 0);   // the frame step follows its rate (hle_movie.c); its times are in ns
             if (decoded) d->st.late++;
         } else { b->w = b->h = 0; b->ts = 0; b->eos = 1; d->eos_pending = 0; }
         if (b->eos) LOG("[codec] %s decoder %u: end of stream after %llu pictures", k_cv_name[d->codec], d->id, (unsigned long long)d->pictures);
@@ -310,6 +311,7 @@ static Result cv_dec_fin(void *t) {
     cv_dec *d = cv_of(t); if (!d) return 0;
     dm_host_mutex_lock(&g_cv_mu); g_cv[d->id - 1] = NULL; dm_host_mutex_lock(&d->mu); d->quit = 1; pthread_cond_signal(&d->work); pthread_mutex_unlock(&d->mu); pthread_mutex_unlock(&g_cv_mu);   // no sync handle lookup is still inside
     dm_host_thread_join(d->th, NULL);   // a packet it decodes ends first (a codec cannot be stopped inside one); its pictures are dropped
+    dm_movie_stopped(d);
     cv_stat_sum(d);
     if (d->all.n) cv_stat_line(d, &d->all, "");
     if (d->codec != CV_H264 && d->codec != CV_AV1 && d->vpx_ok) vpx_codec_destroy(&d->vpx);
@@ -349,9 +351,10 @@ static Result cv_dec_unreg(void *t, uint32_t i) {   // the buffer leaves the dec
 }
 // Stop / Flush: packets not yet decoded, pictures not yet given to a buffer and a pending end of stream are dropped, and the decoder starts over at the next key frame. The codec
 // state is the decoder's thread's: it makes the new one before its next packet (reopen), and drops the pictures of a packet it was decoding (epoch)
-static Result cv_dec_reset(void *t) {
+static Result cv_dec_reset(void *t, int stop) {
     cv_dec *d = cv_of(t); if (!d) return 0;
     dm_host_mutex_lock(&d->mu);
+    if (stop) dm_movie_stopped(d);   // its movie ends now (under the lock fill holds, so no picture of it renews it); a Flush (a seek, a loop) keeps the movie playing
     for (uint32_t k = 0; k < d->qcount; k++) free(d->q[(d->qhead + k) % CV_HOLD].data);
     d->qhead = d->qcount = 0;
     for (int i = 0; i < d->nheld; i++) vpx_img_free(d->held[i]);
@@ -544,8 +547,8 @@ static Result cv_dec_encrypted(void) { static int once; if (!once++) LOG("[RED] 
     HLE_FORCE(s_reg, "a buffer of the host decoder, acquirable at once", Result, h_cv_##tag##reg, void *t, uint32_t i, void *pool, uint32_t pidx) { return cv_dec_reg(t, i, pool, pidx); } \
     HLE_FORCE(s_unreg, "the buffer leaves the host decoder", Result, h_cv_##tag##unreg, void *t, uint32_t i) { return cv_dec_unreg(t, i); } \
     HLE_FORCE(s_start, "the host decoder takes packets from here on", Result, h_cv_##tag##start, void *t) { return cv_dec_start(t); } \
-    HLE_FORCE(s_stop, "drops undecoded packets and undelivered pictures", Result, h_cv_##tag##stop, void *t) { return cv_dec_reset(t); } \
-    HLE_FORCE(s_flush, "drops undecoded packets and undelivered pictures", Result, h_cv_##tag##flush, void *t) { return cv_dec_reset(t); } \
+    HLE_FORCE(s_stop, "drops undecoded packets and undelivered pictures", Result, h_cv_##tag##stop, void *t) { return cv_dec_reset(t, 1); } \
+    HLE_FORCE(s_flush, "drops undecoded packets and undelivered pictures", Result, h_cv_##tag##flush, void *t) { return cv_dec_reset(t, 0); } \
     HLE_FORCE(s_ev, "signalled while the host decoder takes packets", Result, h_cv_##tag##event, void **out, void *t) { return cv_dec_event(out, t); } \
     HLE_FORCE(s_sub, "queues the packet for the host decoder's thread", Result, h_cv_##tag##submit, uint64_t *out, void *t, const void *data, uint64_t size, int64_t ts, bool eos) { return cv_dec_submit(out, t, data, size, ts, eos); } \
     HLE_FORCE(s_enc, "protected streams are not served", Result, h_cv_##tag##enc, void) { return cv_dec_encrypted(); } \

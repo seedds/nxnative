@@ -13,6 +13,7 @@ The full [tested games table](dm/games/README.md#games) includes original Switch
 These Switch 2 games have passed Mac gameplay testing. Build them from a [`.nup` file or a dump folder](#switch-2-games):
 
 - [Donkey Kong Bananza](dm/games/040074A01BF12000/README.md)
+- [Fast Fusion](dm/games/040041E0212AE000/README.md)
 - [Fire Emblem Fortune's Weave](dm/games/04007EF01F8AE000/README.md) — up to 120 fps
 - [Hyrule Warriors: Age of Imprisonment](dm/games/04003F40232DE000/README.md)
 - [Kirby Air Riders](dm/games/040077201BE50000/README.md)

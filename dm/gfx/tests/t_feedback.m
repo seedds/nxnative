@@ -48,10 +48,12 @@ static void pixels(id<MTLBuffer> b, unsigned offset, const uint8_t want[4], cons
         valid &= !memcmp((const uint8_t *)b.contents + offset + y * 256 + x * 4, want, 4);
     CHECK(valid, label);
 }
+static uint32_t *g_ubo_words;   // a pool page: the uniform buffer that holds the handle of the TEXU case
+// slot: a texture or image slot, or for a TEXU binding the uniform-buffer slot whose word 0 holds the handle (encode_args and fb_prepare read it through ubo_bind_handle)
 static void slot_case(NvProg *pr, id<MTLRenderPipelineState> pipeline, int slot, int index) {
     int before = failed, tid = 600 + index;
     NvShader *fs = pr->sh[1]; fs->rf.b[0].reg = slot;
-    int image = fs->rf.b[0].kind == NVN_RB_IMG;
+    int image = fs->rf.b[0].kind == NVN_RB_IMG, texu = fs->rf.b[0].kind == NVN_RB_TEXU;
     tex_t source, output;
     id<MTLTexture> original = target_format(&source, 99700 + index * 2, image ? NVN_FORMAT_R32UI : NVN_FORMAT_RGBA8, 1);
     id<MTLTexture> destination = target(&output, 99701 + index * 2);
@@ -59,7 +61,9 @@ static void slot_case(NvProg *pr, id<MTLRenderPipelineState> pipeline, int slot,
     id<MTLBuffer> result = [g_dev newBufferWithLength:2048 options:MTLResourceStorageModeShared]; res_add(result);
     state_reset(); memset(&R, 0, sizeof R); mtl_sub_begin();
     R.has_rt = 1; R.rt.n = 1; R.rt.color[0] = &source;
-    if (image) S.img[1][slot] = tid; else S.tex[1][slot] = tid;
+    if (image) S.img[1][slot] = tid;
+    else if (texu) { g_ubo_words[0] = (uint32_t)tid; S.ubo[1][slot] = (p_bind_buf){.addr=(uint64_t)(uintptr_t)g_ubo_words, .size=16}; }
+    else S.tex[1][slot] = tid;
     clear(MTLClearColorMake(image ? 17 : 1, 0, 0, 1));
     if (image) {
         fs->rf.b[0].rw = 1; fb_prepare(pr);
@@ -103,7 +107,7 @@ static void slot_case(NvProg *pr, id<MTLRenderPipelineState> pipeline, int slot,
     CHECK(!mtl_last_commit_error(), "GPU submission has no error");
     pixels(result, 0, (const uint8_t[]){255, 0, 0, 255}, "first draw reads the red pre-overwrite snapshot");
     pixels(result, 1024, (const uint8_t[]){0, 255, 0, 255}, "following draw reads the green original attachment");
-    printf("feedback slot %d: %s\n", slot, before == failed ? "PASS" : "FAIL");
+    printf("feedback %s %d: %s\n", texu ? "handle in uniform slot" : "slot", slot, before == failed ? "PASS" : "FAIL");
     mtl_tex_release(&source); mtl_tex_release(&output);
 }
 // A registered image view names its own level. A shader that needs a different pixel class keeps its normal image binding.
@@ -788,6 +792,10 @@ int main(int argc, char **argv) { @autoreleasepool {
     shape_case();
     same_draw_case(0); same_draw_case(1);
     mip_chain_case(pr);
+    // A texture named by one handle in a uniform buffer (FINAL FANTASY XII THE ZODIAC AGE's limit-break echo): before fb_prepare took TEXU bindings, the draw read the attachment itself
+    if (posix_memalign((void **)&g_ubo_words, getpagesize(), getpagesize())) abort(); memset(g_ubo_words, 0, getpagesize()); mtl_pool_add(g_ubo_words, getpagesize());
+    fs->rf.b[0] = (nvn_rbind){.kind=NVN_RB_TEXU, .aid=0, .dtt=MTLTextureType2D}; slot_case(pr, pipeline, 2, 4);
+    fs->rf.b[0] = (nvn_rbind){.kind=NVN_RB_TEX, .aid=0, .dtt=MTLTextureType2D};
     fs->fn = [lib newFunctionWithName:@"mask"];
     fs->ae = [fs->fn newArgumentEncoderWithBufferIndex:0]; fs->arg_len = fs->ae.encodedLength;
     fs->rf.b[0] = (nvn_rbind){.kind=NVN_RB_IMG, .aid=0, .dtt=MTLTextureType2D, .dpf=NVN_DPF_UINT};

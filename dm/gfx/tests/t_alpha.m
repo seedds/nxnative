@@ -1,6 +1,7 @@
 // The alpha test through the replay: ColorStateSetAlphaTest and SetAlphaRef records, the pipeline from the shader's side library (<key>_bx, loaded by the host from the
 // library directory) and the state at its fragment buffer, drawn on the GPU. Every function against references 0, 0.3125, 0.5, 1, NaN and 0.5 again, over an alpha ramp,
-// for a shader without bindings and one with an argument buffer; a function or reference that changes keeps the pipeline; an integer colour 0 has no test (atest_key).
+// for a shader without bindings and one with an argument buffer; a function or reference that changes keeps the pipeline. Integer targets and an absent alpha export have no
+// comparison; NEVER still rejects every fragment. The RGB-only fixture's MSL float4 alpha must not become an alpha-test input.
 // make GAME=<id> check_t_alpha (the fixture comes from test_dmsh_alpha.py --fixture <dir>; ./t_alpha <dir>)
 #include "../nvn/nvn_mtl.m"
 void *front_metal_layer(void) { return NULL; }
@@ -13,7 +14,37 @@ static int checks, failed;
 static int accepts(int f, float a, float r) {
     switch (f) { case 1: return 0; case 2: return a < r; case 3: return a == r; case 4: return a <= r; case 5: return a > r; case 6: return a != r; case 7: return a >= r; default: return 1; }
 }
-static void run(NSString *dir, int mode) {   // mode 0: no bindings; 1: an argument buffer (a uniform holding the ramp's width)
+static void eligibility(void) {
+    NvShader *ps = [NvShader new]; snprintf(ps->key, sizeof ps->key, "no_alpha_b");
+    uint32_t cf[8] = {MTLPixelFormatRGBA8Unorm};
+    ps->rf.omap_known = 1;
+    int warned = g_red_once[128];
+    // A depth-only program, RGB-only output 0 and alpha at output 1 all lack the alpha that comparisons consume. No variant is missing there.
+    uint32_t maps[] = {0, 7, 0x80};
+    for (unsigned m = 0; m < sizeof maps / sizeof *maps; m++) {
+        ps->rf.omap = maps[m];
+        for (int f = NVN_ALPHA_FUNC_LESS; f <= NVN_ALPHA_FUNC_GEQUAL; f++) {
+            S.color.alpha_func = f; CHECK(atest_key(ps, cf, NULL) == 0);
+        }
+    }
+    CHECK(g_red_once[128] == warned);
+    ps->has_alpha = 1;
+    for (unsigned m = 0; m < sizeof maps / sizeof *maps; m++) {
+        ps->rf.omap = maps[m]; S.color.alpha_func = NVN_ALPHA_FUNC_GREATER;
+        CHECK(atest_key(ps, cf, NULL) == 0);   // an MSL float4's padding is not an alpha export
+    }
+    ps->rf.omap = 8;
+    for (int f = NVN_ALPHA_FUNC_LESS; f <= NVN_ALPHA_FUNC_GEQUAL; f++) {
+        S.color.alpha_func = f; CHECK(atest_key(ps, cf, NULL) == 1);
+    }
+    // NEVER consumes no alpha: an alpha entry is still needed even with no colour output. Unknown output maps retain the conservative path too.
+    ps->rf.omap = 0; S.color.alpha_func = NVN_ALPHA_FUNC_NEVER; CHECK(atest_key(ps, cf, NULL) == 1);
+    S.color.alpha_func = NVN_ALPHA_FUNC_GREATER; ps->rf.omap_known = 0; CHECK(atest_key(ps, cf, NULL) == 1);
+    // A genuine missing variant must still be diagnosed (the next red line is expected).
+    ps->has_alpha = 0; CHECK(atest_key(ps, cf, NULL) == 0); CHECK(g_red_once[128] == warned + 1);
+    ps->rf.omap_known = 1; ps->rf.omap = 8; CHECK(atest_key(ps, cf, NULL) == 0); CHECK(g_red_once[128] == warned + 2);
+}
+static void run(NSString *dir, int mode) {   // mode 0: no bindings; 1: a uniform holding the ramp's width; 2: output 0 exports RGB only (MSL's alpha is padding)
     NSError *error = nil; NSString *source = [NSString stringWithContentsOfFile:[dir stringByAppendingFormat:@"/base%d.metal", mode] encoding:NSUTF8StringEncoding error:&error];
     id<MTLLibrary> lib = [g_dev newLibraryWithSource:source options:nil error:&error];
     if (!lib) { fprintf(stderr, "%s\n", error.localizedDescription.UTF8String); abort(); }
@@ -21,9 +52,10 @@ static void run(NSString *dir, int mode) {   // mode 0: no bindings; 1: an argum
     pr->sh[0] = [NvShader new]; pr->sh[0]->fn = [lib newFunctionWithName:@"vertex_main"]; pr->sh[0]->stage = 0; snprintf(pr->sh[0]->key, sizeof pr->sh[0]->key, "v%d_b", mode);
     NvShader *ps = [NvShader new]; pr->sh[1] = ps;
     ps->fn = fn4_note([lib newFunctionWithName:@"main0"], lib, @"main0", nil); ps->stage = 1; ps->rf.may_discard = 1; ps->has_alpha = 1;
+    ps->rf.omap_known = 1; ps->rf.omap = mode == 2 ? 0xf7 : 0xff;
     memset(ps->key, '0' + mode, 16); memcpy(ps->key + 16, "_b", 3);   // the host loads <dir>/<16 digits>_bx.metallib
     if (mode == 1) { ps->ae = [ps->fn newArgumentEncoderWithBufferIndex:0]; ps->arg_len = ps->ae.encodedLength; ps->rf.nb = 1; ps->rf.b[0] = (nvn_rbind){.kind = NVN_RB_CBUF, .reg = 0, .aid = 0}; }
-    static prog_t program[2]; int pi = mode; program[pi].serial = 98000 + pi; serial_put(program[pi].serial, pr);
+    static prog_t program[3]; int pi = mode; program[pi].serial = 98000 + pi; serial_put(program[pi].serial, pr);
     static NSMutableArray *keep; if (!keep) keep = [NSMutableArray array]; [keep addObject:pr];
     tex_t target = {.magic = MAGIC('T', 'E', 'X', 0), .serial = 98100 + pi};
     target.d = (nvn_texdesc){.width = 8, .height = 48, .depth = 1, .samples = 1, .levels = 1, .target = NVN_TEXTURE_TARGET_2D, .format = NVN_FORMAT_RGBA8};
@@ -51,15 +83,15 @@ static void run(NSString *dir, int mode) {   // mode 0: no bindings; 1: an argum
     id<MTLBuffer> pixels = [g_dev newBufferWithLength:256 * 48 options:MTLResourceStorageModeShared];
     [blit() copyFromTexture:tex_mtl(&target) sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(8, 48, 1) toBuffer:pixels destinationOffset:0 destinationBytesPerRow:256 destinationBytesPerImage:256 * 48];
     CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull)); CHECK(!mtl_last_commit_error());
-    CHECK(g_pso.n - psos == 2u);   // the function and the reference are data: one pipeline with the test (functions 1-7), one without (ALWAYS)
+    CHECK(g_pso.n - psos == 2u);   // one pipeline with the test and one without; the RGB-only case needs the test only for NEVER
     CHECK(ps->afn_state == 1);
     uint32_t cf[8] = {MTLPixelFormatRGBA8Unorm}; S.color.alpha_func = NVN_ALPHA_FUNC_GREATER;
-    CHECK(atest_key(ps, cf, NULL) == 1); cf[0] = MTLPixelFormatRGBA8Uint; CHECK(atest_key(ps, cf, NULL) == 0);   // no test into an integer colour 0
-    uint8_t lmap[8] = {1, 0}; cf[1] = MTLPixelFormatRGBA8Unorm; CHECK(atest_key(ps, cf, lmap) == 1);   // a merged pass: colour 0 is physical target 1
+    CHECK(atest_key(ps, cf, NULL) == (mode != 2)); cf[0] = MTLPixelFormatRGBA8Uint; CHECK(atest_key(ps, cf, NULL) == 0);   // no test into an integer colour 0
+    uint8_t lmap[8] = {1, 0}; cf[1] = MTLPixelFormatRGBA8Unorm; CHECK(atest_key(ps, cf, lmap) == (mode != 2));   // a merged pass: colour 0 is physical target 1
     S.color.alpha_func = NVN_ALPHA_FUNC_ALWAYS; CHECK(atest_key(ps, cf, NULL) == 0);
     row = 0; uint8_t *px = pixels.contents;
     for (int f = 1; f <= 8; f++) for (int j = 0; j < 6; j++, row++) for (int x = 0; x < 8; x++) {
-        int want = accepts(f, (x + .5f) / 8, refs[j]), got = px[row * 256 + x * 4] > 200;
+        int want = mode == 2 ? f != NVN_ALPHA_FUNC_NEVER : accepts(f, (x + .5f) / 8, refs[j]), got = px[row * 256 + x * 4] > 200;
         if (got != want) fprintf(stderr, "mode %d function %d ref %g x %d: R %u\n", mode, f, refs[j], x, px[row * 256 + x * 4]);
         CHECK(got == want);
     }
@@ -69,7 +101,8 @@ int main(int argc, char **argv) { @autoreleasepool {
     if (argc != 2) return 2;
     setenv("DM_MSL_DIR", argv[1], 1);
     mtl_init(); g_msl_dir = @(argv[1]);   // the fixture is the library directory itself (no b-<chain> folder)
-    run(g_msl_dir, 0); run(g_msl_dir, 1);
+    eligibility();
+    run(g_msl_dir, 0); run(g_msl_dir, 1); run(g_msl_dir, 2);
     printf("alpha replay: %d checks, %d failed\n", checks, failed);
     return failed != 0;
 } }

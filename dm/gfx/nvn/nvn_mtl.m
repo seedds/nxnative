@@ -10386,11 +10386,23 @@ static int compile_tasks(void) {
     int c = 0; size_t sz = sizeof c; if (sysctlbyname("hw.activecpu", &c, &sz, NULL, 0) || c < 2) c = 2;
     return c;
 }
-// The prebuild's order: the i-th pair handed out is pair i * stride mod n, stride about n / workers and coprime to n, so each pair is built once, and the pairs under way at once come
-// from as many stretches of the list, and rarely share a vertex shader: in list order, the workers' captures waited for each other on one (fn_claim)
-static uint64_t pre_stride(int n, int workers) {
-    uint64_t s = workers > 1 && n / workers > 1 ? (uint64_t)(n / workers) : 1, a, b, t;
-    for (;; s++) { for (a = s, b = (uint64_t)MAX(n, 1); b; t = a % b, a = b, b = t) {} if (a == 1) return s; }   // gcd(s, n) == 1
+// The prebuild's order, as pair indices (an int each). The lists are sorted by vertex key, so in list order the workers' captures waited for each other on one vertex shader (fn_claim).
+// A run of pairs with one vertex key is spread out: its k-th pair goes at run start + k * 2 * workers, so the pairs of one run under way at once are few, while every pair stays near
+// its place in the list, and an archive period (about 2,000 consecutive captures) holds a stretch of the list as in list order. A pair i * stride mod n order (every stretch at once)
+// put each period's pairs all over the list, so a function went into many periods: Ocarina of Time's archive grew 12% (10.6 GB against 9.4). A run too long to end by the list's
+// end (Ocarina of Time's longest: 996 pairs) starts earlier, so it does not leave its pairs, which must take turns, to the end
+static int pre_order_cmp(const void *a, const void *b) { const int64_t *x = a, *y = b; return x[0] != y[0] ? (x[0] < y[0] ? -1 : 1) : (x[1] > y[1]) - (x[1] < y[1]); }
+static NSData *pre_order(NSArray<NSArray<NSString *> *> *pairs, int workers) {
+    int n = (int)pairs.count; int64_t gap = 2 * (int64_t)MAX(workers, 1), (*k)[2] = calloc((size_t)MAX(n, 1), sizeof *k);
+    for (int b = 0, e; b < n; b = e) {
+        for (e = b + 1; e < n && [pairs[e][0] isEqualToString:pairs[b][0]]; e++) {}
+        int64_t g = MAX(1, MIN(gap, n / (e - b))), at = MAX(0, MIN((int64_t)b, (int64_t)n - (e - b) * g));   // a run longer than n / gap: as far apart as the list allows
+        for (int j = b; j < e; j++) { k[j][0] = at + (j - b) * g; k[j][1] = j; }
+    }
+    qsort(k, (size_t)n, sizeof *k, pre_order_cmp);
+    NSMutableData *o = [NSMutableData dataWithLength:sizeof(int) * (size_t)n]; int *op = o.mutableBytes;
+    for (int i = 0; i < n; i++) op[i] = (int)k[i][1];
+    free(k); return o;
 }
 // threads: workers; wait: run on the calling thread until done (the tool), else in the background. Returns the number of pairs, -1 when there is nothing to do
 static int pso_prebuild(int threads, int wait, dispatch_qos_class_t qos) {
@@ -10421,7 +10433,7 @@ static int pso_prebuild(int threads, int wait, dispatch_qos_class_t qos) {
     int n = (int)pairs.count; uint64_t t0 = bp_now();
     MLOG("pipeline prebuild: %d shader pairs of %s%s%s, %d workers (%s)", n, pp.UTF8String, txt2 ? " and " : "", txt2 ? pp2.UTF8String : "", threads, wait ? "tool" : prepare_on() ? "prepare step, before the first frame" : "background");
     atomic_store(&g_pre_next, 0);
-    uint64_t stride = pre_stride(n, threads);
+    NSData *order = pre_order(pairs, threads);
     dispatch_group_t g = dispatch_group_create();
     for (int t = 0; t < threads; t++) dispatch_group_async(g, dispatch_get_global_queue(qos, 0), ^{
         for (;;) {
@@ -10429,7 +10441,7 @@ static int pso_prebuild(int threads, int wait, dispatch_qos_class_t qos) {
             // the first worker to find no pair left hands the period over: it is written once the compiles still under way in it return, not after the slowest of all
             if (i >= n) { if (i == n) arch_flush(); break; }
             if (atomic_load(&g_warm_stop)) break;   // the process is ending: the pairs left are built at the next start
-            NSUInteger p = (NSUInteger)((uint64_t)i * stride % (uint64_t)n);
+            NSUInteger p = (NSUInteger)((const int *)order.bytes)[i];
             pre_pair(pairs[p][0], pairs[p][1], zero);
             int d = ++g_pre_done;
             if (d % 1000 == 0) {

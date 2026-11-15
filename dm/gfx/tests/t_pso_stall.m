@@ -93,15 +93,35 @@ int main(void) { @autoreleasepool {
         EXPECT("fn: a capture held by one that does not return gives up waiting", 1, waited >= 150 * NSEC_PER_MSEC && waited < 1500 * NSEC_PER_MSEC);
         fn_release(kb, cb); fn_release(ka, ca); g_fn_wait_ms = FN_WAIT_MS;
         EXPECT("fn: nothing left under way", 0, g_fn_nbusy);
-        // the prebuild's order hands out every pair once, the pairs under way at once far apart in the list
+        // the prebuild's order (pre_order): every pair once; a run of one vertex key spread out, every pair near its place in the list
+        NSMutableArray<NSArray<NSString *> *> *(^list)(int, int, int) = ^(int n, int big, int at) {   // runs of 1 to 4 pairs, one run of big pairs at index at
+            NSMutableArray<NSArray<NSString *> *> *l = [NSMutableArray array]; unsigned r = 12345; int placed = 0;
+            for (int v = 0; (int)l.count < n; v++) {
+                int len = !placed && (int)l.count >= at ? (placed = 1, big) : (int)((r = r * 1103515245u + 12345u) >> 16) % 4 + 1;
+                for (int j = 0; j < len && (int)l.count < n; j++) [l addObject:@[[NSString stringWithFormat:@"v%d", v], [NSString stringWithFormat:@"f%lu", (unsigned long)l.count]]];
+            }
+            return l;
+        };
         int bij = 1;
-        for (int n = 1; n <= 300 && bij; n++) for (int t = 1; t <= 16 && bij; t++) {
-            uint64_t s = pre_stride(n, t); NSMutableIndexSet *seen = [NSMutableIndexSet indexSet];
-            for (int i = 0; i < n; i++) [seen addIndex:(NSUInteger)((uint64_t)i * s % (uint64_t)n)];
-            bij = seen.count == (NSUInteger)n;
+        for (int n = 0; n <= 300 && bij; n += 7) for (int t = 1; t <= 16 && bij; t++) for (int big = 1; big <= 200 && bij; big *= 5) {
+            NSData *o = pre_order(list(n, big, n / 3), t); NSMutableIndexSet *seen = [NSMutableIndexSet indexSet];
+            for (int i = 0; i < n; i++) [seen addIndex:(NSUInteger)((const int *)o.bytes)[i]];
+            bij = o.length == sizeof(int) * (size_t)n && seen.count == (NSUInteger)n;
         }
-        EXPECT("pre_stride: every pair once", 1, bij);
-        EXPECT("pre_stride: 14 workers over 33,365 pairs take them about 2,383 apart", 1, pre_stride(33365, 14) >= 2383 && pre_stride(33365, 14) < 2400);
+        EXPECT("pre_order: every pair once", 1, bij);
+        {
+            NSArray<NSArray<NSString *> *> *l = list(6000, 150, 4000); NSData *o = pre_order(l, 14); const int *op = o.bytes; int pos[6000], close = 0, next = 0, far = 0, inorder = 1, b0 = 4000;
+            while (![l[b0][0] isEqualToString:l[b0 + 149][0]]) b0++;   // where the long run begins
+            for (int i = 0; i < 6000; i++) pos[op[i]] = i;
+            for (int i = 1; i < 6000; i++) if ([l[i][0] isEqualToString:l[i - 1][0]]) { next++; close += pos[i] - pos[i - 1] < 14; inorder &= pos[i] > pos[i - 1]; }
+            for (int i = 0; i < 6000; i++) if (i < b0 || i >= b0 + 150) far = MAX(far, abs(pos[i] - i));
+            EXPECT("pre_order: a run's pairs in list order", 1, inorder);
+            // the long run's own place in the list is left nearly empty, so where its later pairs land there, they come closer together (17 of 3,651 here)
+            EXPECT("pre_order: 99 in 100 next pairs of a run at least 14 hand-outs apart (14 workers)", 1, next > 3000 && close * 100 < next);
+            EXPECT("pre_order: a pair of a short run within 500 hand-outs of its place (an archive period holds about 2,000)", 1, far <= 500);
+            int lo = 1 << 30, hi = 0; for (int i = b0; i < b0 + 150; i++) { lo = MIN(lo, pos[i]); hi = MAX(hi, pos[i]); }
+            EXPECT("pre_order: a run too long to end by the list's end starts earlier and ends with it", 1, lo < 4000 && hi >= 5900);
+        }
     }
 
     ArchEpoch *ep1 = g_ep; HoldCompiler *hold = [HoldCompiler new]; hold->compiler = ep1->comp;

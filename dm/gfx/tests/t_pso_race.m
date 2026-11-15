@@ -2,7 +2,7 @@
 // current flush period's compiler, with real Metal and one metallib made from MSL (no game shaders), bases as the prebuild makes them (pre_desc; --specialized: one BGRA8 target).
 // It measures what fn_claim and the prebuild's order cost: the time, and how many captures waited. It has not reproduced the crash (rendering.md, Two captures of one shader
 // function crash in Metal's binary cache): 0 of 30 unguarded runs on an M4 Pro across these options, with shaders this small. One run is one process, so a crash would be its exit status.
-//   t_pso_race [-n pairs] [--unguarded] [--order list|stride] [--pairs shader_pairs.tsv] [--run pairs] [--work statements] [--specialized]
+//   t_pso_race [-n pairs] [--unguarded] [--order prebuild|list|stride] [--pairs shader_pairs.tsv] [--run pairs] [--work statements] [--specialized]
 // --unguarded: fn_claim waits 0 ms, as before it existed. Without --pairs, every pair has the same vertex function and its own pixel function; with it, the list's pairs, each key
 // a function of its own. --run: a new vertex function each that many pairs; --work: statements in each vertex function, so it compiles longer. Prints one line: pairs, built, failed, seconds, captures that waited (g_fn_waits)
 #include "../nvn/nvn_mtl.m"
@@ -15,16 +15,16 @@ void svc_thread_dump(void) {}
 uint64_t now_ns(void) { return bp_now(); }
 
 int main(int argc, char **argv) { @autoreleasepool {
-    int n = 2000, stride_order = 0, run = 0, work = 0, unspec = 1; const char *list = NULL;
+    int n = 2000, run = 0, work = 0, unspec = 1; const char *list = NULL, *ord = "prebuild";
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "-n") && i + 1 < argc) n = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--specialized")) unspec = 0;
         else if (!strcmp(argv[i], "--unguarded")) g_fn_wait_ms = 0;
-        else if (!strcmp(argv[i], "--order") && i + 1 < argc) stride_order = !strcmp(argv[++i], "stride");
+        else if (!strcmp(argv[i], "--order") && i + 1 < argc) ord = argv[++i];
         else if (!strcmp(argv[i], "--pairs") && i + 1 < argc) list = argv[++i];
         else if (!strcmp(argv[i], "--run") && i + 1 < argc) run = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--work") && i + 1 < argc) work = atoi(argv[++i]);
-        else { fprintf(stderr, "usage: t_pso_race [-n pairs] [--unguarded] [--order list|stride] [--pairs shader_pairs.tsv] [--run pairs] [--work statements]\n"); return 2; }
+        else { fprintf(stderr, "usage: t_pso_race [-n pairs] [--unguarded] [--order prebuild|list|stride] [--pairs shader_pairs.tsv] [--run pairs] [--work statements]\n"); return 2; }
     }
     // the pairs, as function indices
     NSMutableArray<NSNumber *> *pv = [NSMutableArray array], *pf = [NSMutableArray array]; int nv = 1, nf = 0;
@@ -75,12 +75,18 @@ int main(int argc, char **argv) { @autoreleasepool {
     } else lib = [g_dev newLibraryWithSource:src options:nil error:&le];
     if (!lib) { fprintf(stderr, "t_pso_race: library: %s\n", le.localizedDescription.UTF8String); return 1; }
 
-    int workers = compile_tasks(); uint64_t stride = stride_order ? pre_stride(n, workers) : 1;
+    // the order: the prebuild's (pre_order), the list's, or pair i * stride mod n (stride about n / workers, coprime to n: the pairs under way at once from every stretch of the list)
+    int workers = compile_tasks(); NSMutableArray<NSArray<NSString *> *> *named = [NSMutableArray array];
+    for (int i = 0; i < n; i++) [named addObject:@[[NSString stringWithFormat:@"v%d", pv[i].intValue], [NSString stringWithFormat:@"f%d", pf[i].intValue]]];
+    NSMutableData *od = [NSMutableData dataWithLength:sizeof(int) * (size_t)n]; int *op = od.mutableBytes; uint64_t st = (uint64_t)MAX(1, n / MAX(workers, 1));
+    for (uint64_t a = st, b = (uint64_t)n, t; ; a = st = st + 1, b = (uint64_t)n) { while (b) { t = a % b; a = b; b = t; } if (a == 1) break; }   // gcd(stride, n) == 1
+    if (!strcmp(ord, "prebuild")) memcpy(op, pre_order(named, workers).bytes, od.length);
+    else for (int i = 0; i < n; i++) op[i] = !strcmp(ord, "stride") ? (int)((uint64_t)i * st % (uint64_t)n) : i;
     __block _Atomic int next = 0, built = 0, failed = 0; uint64_t t0 = bp_now();
     dispatch_group_t g = dispatch_group_create();
     for (int t = 0; t < workers; t++) dispatch_group_async(g, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
         for (int i; (i = atomic_fetch_add(&next, 1)) < n;) @autoreleasepool {
-            NSUInteger p = (NSUInteger)((uint64_t)i * stride % (uint64_t)n);
+            NSUInteger p = (NSUInteger)op[i];
             MTL4RenderPipelineDescriptor *d = [MTL4RenderPipelineDescriptor new];
             MTL4LibraryFunctionDescriptor *vf = [MTL4LibraryFunctionDescriptor new], *ff = [MTL4LibraryFunctionDescriptor new];
             vf.library = lib; vf.name = [NSString stringWithFormat:@"v%d", pv[p].intValue]; ff.library = lib; ff.name = [NSString stringWithFormat:@"f%d", pf[p].intValue];
@@ -99,8 +105,10 @@ int main(int argc, char **argv) { @autoreleasepool {
     dispatch_group_wait(g, DISPATCH_TIME_FOREVER);
     double s = (bp_now() - t0) / 1e9;
     arch_flush(); arch_flush_wait();
-    printf("t_pso_race: %s order, %s, %d workers, %d pairs (%d vertex, %d pixel functions): %d built, %d failed, %.1f s, %d captures waited\n", stride_order ? "stride" : "list",
-           g_fn_wait_ms ? "guarded" : "unguarded", workers, n, nv, nf, (int)built, (int)failed, s, (int)atomic_load(&g_fn_waits));
+    unsigned long long bytes = 0; NSString *ad = [root stringByAppendingPathComponent:@"archive"];
+    for (NSString *f in [NSFileManager.defaultManager subpathsAtPath:ad]) bytes += [NSFileManager.defaultManager attributesOfItemAtPath:[ad stringByAppendingPathComponent:f] error:nil].fileSize;
+    printf("t_pso_race: %s order, %s, %d workers, %d pairs (%d vertex, %d pixel functions): %d built, %d failed, %.1f s, %d captures waited, archive %.1f MB\n", ord,
+           g_fn_wait_ms ? "guarded" : "unguarded", workers, n, nv, nf, (int)built, (int)failed, s, (int)atomic_load(&g_fn_waits), bytes / 1e6);
     [NSFileManager.defaultManager removeItemAtPath:root error:nil];
     return built == n ? 0 : 1;
 } }

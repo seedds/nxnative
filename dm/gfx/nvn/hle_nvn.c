@@ -2768,9 +2768,9 @@ static void fstep_tick(const win_t *o, int c) {
         if (o->presents % 1800 == 0) { LOG("[nvn] 120 fps: held 1 / 2 ticks %llu / %llu frames, %llu late, %llu up / %llu down (%llu probes, %llu failed trials); standing-frame drains taken out of %llu frames (%.1f ticks)", (unsigned long long)held[1], (unsigned long long)held[2], (unsigned long long)g_fs.late, (unsigned long long)g_fs.ups, (unsigned long long)g_fs.downs, (unsigned long long)g_fs.probes, (unsigned long long)g_fs.failed, (unsigned long long)drain_n, drain_cut / v); memset(held, 0, sizeof held); drain_n = drain_cut = 0; }
     } else if (o->presents % 1800 == 0) {   // game time against real time (1.000 = normal speed; lower when a device cannot hold 20 fps or after long stalls)
         uint64_t vs = __atomic_load_n((uint64_t *)(dm_fps_state + 0x30), __ATOMIC_RELAXED) + fixed_sum, t = now_ns();
-        if (t0) LOG("[nvn] frame step: game time %.2f s in %.2f s (%.3f of real time); held 1 / 2 / 3 vsyncs %llu / %llu / %llu frames, %llu late, %llu vsyncs paid back, %.0f dropped, %llu up / %llu down (%llu probes, %llu failed trials); standing-frame drains taken out of %llu frames (%.1f vsyncs)",
+        if (t0) LOG("[nvn] frame step: game time %.2f s in %.2f s (%.3f of real time); held 1 / 2 / 3 vsyncs %llu / %llu / %llu frames, %llu late, %llu vsyncs paid back, %.0f dropped, %llu up / %llu down (%llu probes, %llu failed trials), %llu stalls; standing-frame drains taken out of %llu frames (%.1f vsyncs)",
                     (vs - v0) / 60.0, (t - t0) / 1e9, (vs - v0) / 60.0 / ((t - t0) / 1e9), (unsigned long long)held[1], (unsigned long long)held[2], (unsigned long long)held[3],
-                    (unsigned long long)g_fs.late, (unsigned long long)g_fs.paid, g_fs.dropped, (unsigned long long)g_fs.ups, (unsigned long long)g_fs.downs, (unsigned long long)g_fs.probes, (unsigned long long)g_fs.failed,
+                    (unsigned long long)g_fs.late, (unsigned long long)g_fs.paid, g_fs.dropped, (unsigned long long)g_fs.ups, (unsigned long long)g_fs.downs, (unsigned long long)g_fs.probes, (unsigned long long)g_fs.failed, (unsigned long long)g_fs.stalls,
                     (unsigned long long)drain_n, drain_cut / v);
         t0 = t; v0 = vs; memset(held, 0, sizeof held); drain_n = drain_cut = 0;
     }

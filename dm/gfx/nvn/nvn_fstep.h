@@ -52,12 +52,19 @@
 // second half cost at most 1 − FSTEP_RAMP of its first half, and had a late frame (a window on time is judged as a trial), starts another, up to FSTEP_PROBE_MAX frames in all
 #define FSTEP_RAMP 0.05       // the fall in cost from one half of a grace window to the next that shows the clock still rising (the per-frame noise of a 25 ms frame is 4%, of 15 frames 1%)
 #define FSTEP_PROBE_MAX 180   // grace frames a probe may take in all (3 s at 60 fps): a clock that keeps rising without reaching the hold is not waited for longer
+// A stall is a frame that stayed up longer than any hold could explain: the game paused (focus lost, the Home menu), the window covered, its screen changing mode (fullscreen),
+// a silent display link. What it took is not what the scene costs, and the frames after it run late for the host's reasons: the GPU clock fell while nothing was drawn (Ocarina
+// of Time on an M4 Pro: the first frame after a pause of 1.2–35 s took 26–67 ms of GPU time where the scene takes 15) and the display link is finding its ticks again. Counted,
+// they stepped the hold up to 3 after every pause and fullscreen switch, 20 then 30 fps for about a second in a scene that held 60 before and after. So a stall is not late, and
+// the FSTEP_GRACE frames after it do not count toward a step up, as after a probe (a stall in that grace starts it again)
+#define FSTEP_STALL 8.0       // vsyncs a frame was shown for that make it a stall (133 ms): more than twice the longest hold, so no step up would have made the frame fit
 
 typedef struct {
     int k, step;              // vsyncs each frame stays on screen; the step handed to the game for the next frame (k, or k + 1 while paying back)
     int kmin;                 // the last call's kmin (a lower one takes effect at once)
     double debt;              // real time the game is behind, in vsyncs
     int late_run, fit_run, trial;   // late frames in a row; frames in a row whose cost fits k − 1; frames left of a trial at k − 1 (0 = none)
+    int sgrace;               // frames left of the grace after a stall (FSTEP_STALL), whose lateness does not count toward a step up
     int probe, grace;         // 1: the trial in progress is a probe; 2: a probe held and its run at kmin has not ended yet; frames left of the probe's grace
     int ramp;                 // set by the caller (kept): 1 = a probe's grace is renewed while its frames keep getting cheaper (FSTEP_RAMP; the host's DM_FSTEP_PROBE_RAMP)
     double pa, pb; int plate, ptotal;   // the current grace window: the cost of its first and second halves (sums), its late frames; grace frames this probe has taken in all
@@ -76,7 +83,7 @@ typedef struct {
     double last_cost[3];      // the last three frames' costs, oldest first
     int smax;                 // set by the caller: the largest step the game takes (its stub's STEP_MAX; 0 = FSTEP_MAX)
     int no_payback;           // set by the caller: 1 = the game does not take the step (120 fps: it steps by its target), so three late frames raise the hold whatever the average
-    uint64_t late, paid, ups, downs, failed, probes; double dropped;   // statistics for the log
+    uint64_t late, paid, ups, downs, failed, probes, stalls; double dropped;   // statistics for the log
 } nvn_fstep;
 
 // A drain of frames standing in the display link's queue in a frame's time (hle_nvn.c fstep_tick, g_fs_drain; nvn_link_drain.h): the acquire waited extra link ticks while the
@@ -137,7 +144,9 @@ static inline int nvn_fstep_next(nvn_fstep *s, double shown, double cost, int km
         s->plate += late; s->ptotal++;
         if (!--s->grace && s->ramp && s->plate && s->ptotal + FSTEP_GRACE <= FSTEP_PROBE_MAX && s->pb <= (1 - FSTEP_RAMP) * s->pa) { s->grace = FSTEP_GRACE; s->pa = s->pb = 0; s->plate = 0; }   // still getting cheaper: another window
     }
-    if (late) { s->late++; s->late_run = grace ? 0 : s->late_run + 1; s->fit_run = 0; } else s->late_run = 0;
+    int stall = shown >= FSTEP_STALL * (s->per_vsync ? s->per_vsync : 1), sgrace = stall || s->sgrace > 0;   // a stall, or a frame in the grace after one
+    if (stall) { s->sgrace = FSTEP_GRACE; s->stalls++; } else if (s->sgrace) s->sgrace--;
+    if (late) { s->late++; s->late_run = grace || sgrace ? 0 : s->late_run + 1; s->fit_run = 0; } else s->late_run = 0;
     // The cost of the frames on time (a hitch is not what the scene costs): at kmin, and at the longer hold
     if (kmin != s->ckmin) {   // another cap: its run starts over, and what held it before comes back
         if (s->ckmin >= 1 && s->ckmin <= FSTEP_MAX) {

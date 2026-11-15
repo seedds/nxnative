@@ -547,6 +547,30 @@ int main(void) {
         pw = 3; check(nvn_fstep_drain_cut(40, 17, 9, 0, &pw) == 37 && pw == 0, "a drain counted no larger than the pacing wait it was part of");
         pw = 0; check(nvn_fstep_drain_cut(0, 17, 0, 5, &pw) == 0, "the first frame (no previous start): nothing to cut");
     }
+    {   // A stall (FSTEP_STALL): a pause, a covered window, a fullscreen switch. Ocarina of Time on an M4 Pro, GPU 0.9 vsyncs at hold 1: a pause of 1.9 s, then the first frames back
+        // at 2.3, 1.2 and 1.1 vsyncs (the GPU clock fell while nothing was drawn) stepped the hold to 3, about a second at 20 and 30 fps after every pause
+        sim m = {0}; run(&m, 600, 0.9, 1, 3, 0);
+        run(&m, 1, 114, 1, 3, 0); run(&m, 1, 2.3, 1, 3, 0); run(&m, 1, 1.2, 1, 3, 0); run(&m, 1, 1.1, 1, 3, 0); run(&m, 60, 0.9, 1, 3, 0);
+        snprintf(b, sizeof b, "stall: a pause and three late frames after it keep hold 1 (k %d, ups %llu, stalls %llu)", m.s.k, (unsigned long long)m.s.ups, (unsigned long long)m.s.stalls);
+        check(m.s.k == 1 && m.s.ups == 0 && m.s.stalls == 1, b);
+        check(m.s.crun < 0.95, "  the stall's time stays out of the cost that held hold 1");
+        // a fullscreen switch: the display link silent twice (10 and 17 vsyncs) with late frames between and after
+        run(&m, 2, 1.3, 1, 3, 0); run(&m, 1, 10, 1, 3, 0); run(&m, 3, 1.4, 1, 3, 0); run(&m, 1, 17, 1, 3, 0); run(&m, 6, 1.3, 1, 3, 0); run(&m, 120, 0.9, 1, 3, 0);
+        check(m.s.k == 1 && m.s.ups == 0 && m.s.stalls == 3, "  a fullscreen switch (two stalls, late frames around them) keeps hold 1");
+        // the scene after the stall really is heavier (a load into a heavy area): the grace only delays the step up
+        sim h = {0}; run(&h, 600, 0.9, 1, 3, 0); run(&h, 1, 114, 1, 3, 0);
+        int n = 0; while (h.s.k == 1 && n < 600) { run(&h, 1, 1.32, 1, 3, 0); n++; }
+        snprintf(b, sizeof b, "  22 ms frames after a stall step up once its grace is over (%d frames)", n);
+        check(h.s.k == 2 && n == FSTEP_GRACE + 3, b);
+        // long frames below a stall are judged as before
+        sim l = {0}; run(&l, 600, 0.9, 1, 3, 0); run(&l, 3, 5.0, 1, 3, 0);
+        check(l.s.k == 3 && l.s.ups == 1 && l.s.stalls == 0, "  three 83 ms frames in a row are not stalls: they step up as before");
+        // 120 fps counts in ticks of 1/120 s: the same 133 ms
+        sim f = {0}; f.s.per_vsync = 2; run(&f, 240, 0.7, 1, 2, 0); run(&f, 3, 10, 1, 2, 0);
+        check(f.s.k == 2 && f.s.stalls == 0, "  120 fps: 83 ms frames are not stalls");
+        sim g = {0}; g.s.per_vsync = 2; run(&g, 240, 0.7, 1, 2, 0); run(&g, 1, 200, 1, 2, 0); run(&g, 3, 1.5, 1, 2, 0); run(&g, 60, 0.7, 1, 2, 0);
+        check(g.s.k == 1 && g.s.stalls == 1, "  120 fps: a pause and three late frames keep 120");
+    }
     printf("== %d checks, %d failed ==\n", checks, fail);
     return fail != 0;
 }

@@ -374,6 +374,28 @@ def mshd_shaders(d, label):
     if len(out) % 2: red(f'{label} MSHD: {len(out)} stages, not in pairs')
     return out
 
+DBX = b'SHADERS\0'
+
+def dbx_shaders(d, label):
+    """DrinkBox's SHADERS container (the shaders.dat.nx in Guacamelee! STCE's and Guacamelee! 2's RomFS): the magic, a table of {source name, entry}
+    per shader, uniform metadata, then the blocks packed one after the other. Each block is {code area, control section}: the control section
+    follows the code area it describes (its +0x704 holds that code's length) and a small record follows the control section. The split's adjacency
+    scan looks for the code after its control section and its generic prefilter saw none of the known magics, so these files were never read.
+    ctl_len takes the control's own length at +0x20 (0x838 here). The name table is not needed: every block is self-checking. STCE v0: 165 blocks
+    (57 vertex, 108 pixel); Guacamelee! 2's update container: 444 (133 vertex, 311 pixel)"""
+    out, c = [], d.find(CTL_MAGIC)
+    while c >= 0:
+        ncode = field(d, '<I', c + 0x704, f'{label} SHADERS control section @{c:#x}')[0]
+        g = c - ncode
+        if ncode < 0x34 or g < 0 or d[g:g + 4] != GFX_MAGIC: red(f'{label} SHADERS control section @{c:#x}: code length {ncode:#x}, no code header at {g:#x}')
+        ctl, code = span(d, c, (nctl := ctl_len(d[c:c + 0x24])), f'{label} SHADERS @{c:#x} control section'), d[g:c]
+        st = sph_stage(code)
+        why = check(f'{label} SHADERS @{c:#x}', st, ctl, code) if st else 'no stage in the code area header'
+        if why: red(f'{label} SHADERS @{c:#x} {st}: {why}')
+        out.append((f'{label}#SHDR#{len(out)}', st, ctl, code))
+        c = d.find(CTL_MAGIC, c + nctl)
+    return out
+
 def glslc_stage(ctl, code):
     """A GLSLC output's stage, from its code area's header (graphics: the SPH's stage bits), or compute when the code has no header and the control's thread group (+0x748) is filled"""
     if nvn2_ctl(ctl): return nvn2_stage(ctl, code)
@@ -3298,6 +3320,7 @@ def scan_blob(d, label, out, depth=0, left=None):
     if d[:len(TFXO)] == TFXO: out.extend(tfxo_shaders(d, label)); return
     if d[:8] == SHAD: out.extend(shad_shaders(d, label)); return
     if d[:4] == b'MSHD': out.extend(mshd_shaders(d, label)); return
+    if d[:8] == DBX: out.extend(dbx_shaders(d, label)); return
     if d[:4] == PGDAT and len(d) >= 0x1c and (mem := pgdat_members(d, label)) is not None:   # PlatinumGames
         for nm, m in mem: scan_blob(m, f'{label}/{nm}', out, depth + 1, left)
         return
@@ -3624,6 +3647,9 @@ def scan_file_in(args):
                 # Compiled effects and loose GPU programs; texture and sound members carry no shader programs.
                 if '.fx' in entry[0] or '/shaders/' in entry[0] or entry[0].endswith(('.vs.bin', '.ps.bin', '.fs.bin')):
                     found += phyre_shaders(vbf.read(f, entry), f'/{rel}/{entry[0]}')
+        return rel, uniq_keys(found), var_pairs(found), trees
+    if head[:8] == DBX:   # DrinkBox's shader container (shaders.dat.nx): one whole-file format, blocks self-checking
+        with open(path, 'rb') as f: found += dbx_shaders(f.read(), '/' + rel)
         return rel, uniq_keys(found), var_pairs(found), trees
     if head[:4] == ZSTD_MAGIC: d = unzs(path)   # by the magic: Paper Mario: The Thousand-Year Door names its zstd files .zst (8,726, its shaders among them)
     else:

@@ -91,6 +91,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Found on:** [Diablo II: Resurrected](../../dm/games/0100726014352000/README.md) 1.0.34.0: 6,931 shaders (2,344 vertex, 4,559 pixel, 26 compute, 1 hull, 1 domain) from 132,413 files in 12 s, against none before; all 38 programs the game asked for up to its title are among them.
 - **Check:** `dm/tools/tests/test_split_casc.py`: shaders in `z`, `n` and BLTE files of a synthetic storage, another config key and a key naming another archive refused with a red line, a record whose lengths do not add up named, BLTE lengths checked, and main's records found through a relocation and an adrp + add while one nothing points at is named.
 
+### DrinkBox's SHADERS container
+
+- **Symptom:** the split finds no shaders (`[RED] the shader split found no shaders in main or the RomFS`) although the RomFS holds a `shaders.dat.nx` of 733 KiB (Guacamelee! STCE) or 2.8 MB (Guacamelee! 2's update), starting with `SHADERS\0`.
+- **Cause:** DrinkBox Studios' container: after the magic and a `{u32 version, u16, u16}` header, a name table of one NUL-terminated pair per shader (its `.vsh`/`.psh` source name and its entry, `main`), uniform metadata, and the blocks packed one after the other. Each block is `{code area, control section, a 24-byte record}`: the control section (0x838 bytes here) follows the code area it describes, and its +0x704 holds that code's length — the opposite adjacency from the NVN dump the split's scan walks, and no known magic opens the file, so the generic prefilter never passed it to `scan_blob` and no reader ran.
+- **Fix:** `shader_split.py` dispatches a file that starts with `SHADERS\0` to `dbx_shaders`: it walks the control sections (`ctl_len` at +0x20) and takes each code area at `ctl - field(ctl + 0x704)`, checked by its `78563412` header; the stage and the key come from the code area's header, as everywhere. The name table is not read: every block is self-checking.
+- **Found on:** Guacamelee! Super Turbo Championship Edition (0100BAE00B470000) and Guacamelee! 2 (01007E100456C000), no profile: 165 blocks (57 vertex, 108 pixel) and 444 (133 vertex, 311 pixel) read whole, both apps built and boot to their launcher (163 and 425 unique shaders after dedup).
+- **Check:** `dm/tools/tests/test_split_dbx.py`: a synthetic container read block by block in order with its stages, the file scanner's dispatch on the magic, and a control section whose code area is absent, wrong-sized or has no code header named in a red line; fuzz seed `dbx`.
+
 ### A file no reader reads
 
 - **Symptom:** the shader split stops on one archive with a Python traceback (an `IndexError` or `struct.error` naming no file), or a reader's `[RED]` line about a format it does not know, and nothing is written; the NSP script loses the build at the split.

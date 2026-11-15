@@ -3,7 +3,7 @@
 around them, and the others it recognizes by magic), then glslc_shaders when nothing was found, sdf_shaders for 'SDF\\0' (RE Engine) and arh_entries for 'arh1' (Monolith's
 index), and uniq_keys / var_pairs over what they return.
 Seeds: one synthetic shader pair (a 0x880-byte control section and a small code area per stage, vertex and pixel), wrapped as a BNSH, a BAHS with its binary and program arrays,
-an MSHD, a SARC of the BNSH compressed with Yaz0, a single-stage and a two-stage GLSLC output, an SDF definition, and an ARH1 index with one path.
+an MSHD, a SARC of the BNSH compressed with Yaz0, a single-stage and a two-stage GLSLC output, an SDF definition, an ARH index with one path, and a DrinkBox SHADERS container with the two stages.
 Clean rejection: red() (SystemExit with a '[RED] ' message naming the problem), or a result (an empty one included). Any other exception is a finding: scan_file's net still
 turns it into an 'unreadable' red line, but one that names no layout problem (test_split_unreadable.py: a reader names its layout, "not an IndexError"); a hang or an oversized
 allocation gets past that net. Usage: see fuzzlib.py"""
@@ -118,10 +118,19 @@ def rgxd():
     return bytes(d)
 
 
+def dbx():
+    # DrinkBox's SHADERS container: magic, a {source name, entry} table, uniform metadata, then one block per shader
+    # {code area, control section, a record}. VS and PS carry their stage bits; ctl+0x704 holds the length of the code before it.
+    d = bytearray(ss.DBX + struct.pack('<IHH', 1, 0, 2) + b'v.vsh\0main\0\0p.psh\0main\0\0' + b'\0' * 0x40)
+    for ctl, code in (VS, PS):
+        d += code + ctl + b'\0' * 0x18
+    return bytes(d)
+
+
 def seeds():
     b = bnsh()
     return {'bnsh': b, 'bahs': bahs(), 'mshd': mshd(), 'sarc-yaz0': yaz0(sarc([(b'shader.bnsh', b)])), 'glslc': glslc([VS]), 'glslc-program': glslc([VS, PS]),
-            'sdf': sdf(), 'arh1': arh1(), 'rgxd': rgxd()}
+            'sdf': sdf(), 'arh1': arh1(), 'rgxd': rgxd(), 'dbx': dbx()}
 
 
 def check(data):

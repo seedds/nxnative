@@ -1,5 +1,6 @@
 # The Legend of Zelda: Ocarina of Time (0400486024DEC000): the rewriter's patches of this game's own code. dm/tools/patch_nso.py loads every profile's patches.py;
 # MATCH_FRAME_STEP as described there ("Registered patches"). Patches of Nintendo SDK module builds are in dm/tools/sdk_patches.py
+import struct
 from nso_asm import ADRP, B
 
 # The game's frame ratio. Once a frame the function at main+0x6e6be0 (v131072) divides its base rate (60.0, or 30.0 while bit 0 of [x21+0x24f] is set) by the int frame rate at
@@ -32,6 +33,7 @@ def frame_step(ctx):
     emit(0x1e201828); emit(B(here(), site + 4))   # orig: fdiv s8,s1,s0; back
     fs_put(site, [B(site, start)], 'frame ratio: the host\'s step × base rate / 60 instead of base rate / the game\'s frame rate (state page target fps; 0 = the game\'s ratio)')
     dynamic_resolution(ctx)
+    screen_wide(ctx)
 
 # The game's dynamic resolution (game__gfx__DynamicResolutionParam: LoadThreshold, ReduceCounterMax, IncreaseCounterMax and a list of levels, each a ResolutionReduceScale and a
 # Priority; on v131072 levels 0..9 at 0.75..0.333 of 2048x1152, 1536x864 to 683x384). Its update (main+0x805aa0) reads the frame's GPU load (about 0.2 ms a unit) into +0x8, subtracts
@@ -71,10 +73,74 @@ def dynamic_resolution(ctx):
     fs_put(site, [B(site, start)], 'dynamic resolution level: 0 (full resolution), or with state +0x40 (DM_DYNAMIC_RESOLUTION) a climb on the load measured at each level')
     ctx.capabilities.add('DYNAMIC_RESOLUTION')
 
+# A screen wider than 16:9 (DM_SCREEN_WIDE, loader.c: an ultrawide monitor's 3440x1440). The engine lays its picture out from the size of its frame buffer: given a wider one it
+# makes its swap chain, its 3D targets (1920x1080 → 2580x1080) and its composite that wide, and its layouts keep their size and stay at the screen's edges and centre (hearts and
+# items at the corners, menus in the middle), all with no further change. Two things hold 16:9 by themselves:
+#   the sizes. nnMain's create arg (main+0x1202ee0 on v131072: mov x8,#2560; movk x8,#1440,lsl #32; stur x8,[x21,#0x14]) sizes the swap chain, and the framework's constructor
+#     (main+0x31f39f4: 2560x1440 at +0xb68, the docked frame buffer; main+0x31f3a00: 1920x1080 at +0xb70, the handheld one) the frame buffer the views and layouts follow.
+#     With only the second widened the game composes 3440 wide and presents the left 2560 of it
+#   the scene cameras' aspect. Three camera updates copy their own aspect field (+0x140, 16/9 from their parameters) into the view's sead::PerspectiveProjection (near +0x98,
+#     far +0x9c, fovy +0xa0 and the half angle's sin / cos / tan, aspect +0xb0, offset +0xb4; each store sets the dirty flag at +8): main+0x4c5334, main+0x2e1bb64 and
+#     main+0x2e1c7c8, all ldr s0,[x19,#0x140]. With the sizes alone the 16:9 view was stretched over the wide picture (Link's hat 1.34 times as wide as at 16:9). The other
+#     writers of +0xb0 take the viewport's ratio (main+0x28e72a4, main+0x3b50988, main+0x3b50b50 under mIsCalcAspectFromViewport) or another projection's (main+0x653bd4,
+#     main+0x6545f4) and follow by themselves; main+0x2dd7164 is a fixed 1280x720 or 144x144 view of its own and stays
+# The size stubs give the width of the screen's ratio at the site's own height, (height x ratio + 0x8000) >> 16 with the ratio in 16.16 fixed point (state +0xa0; 1440 → 3440,
+# 1080 → 2580 for 3440x1440), and the site's original mov when it is 0 (16:9). The camera stubs run the original load and replace an aspect within 0x100 ulps of 16/9 with
+# the screen's ratio (state +0xa4, a float; 0 = off), so a camera with a shape of its own keeps it; they use no flags. x16 / x17 are free at every site (none of the five
+# functions uses them but main+0x4c48c0, as a temporary at +0xdc..+0xe4, far before its site). The picture keeps the vertical angle and shows more at the sides.
+# All five functions are needed (found by fingerprint, as the frame ratio's): with one missing nothing is patched, since sizes without the cameras stretch the picture
+_wide_sizes = (   # (function, offset in it, original word, the height the site sets, what)
+    ('wide: nnMain create arg', 0x200, 0xd2814008, 1440, 'swap chain size 2560x1440: the width of the screen\'s ratio'),
+    ('wide: framework constructor', 0x164, 0xd2814008, 1440, 'docked frame buffer 2560x1440: the width of the screen\'s ratio'),
+    ('wide: framework constructor', 0x170, 0xd280f008, 1080, 'handheld frame buffer 1920x1080: the width of the screen\'s ratio'))
+_wide_cameras = (('wide: camera update A', 0xa74), ('wide: camera update B', 0x204), ('wide: camera update C', 0x428))   # ldr s0,[x19,#0x140] before the projection's aspect store
+def screen_wide(ctx):
+    here, emit, fs_site, fs_put, FS_STATE_OFF = ctx.here, ctx.emit, ctx.site, ctx.put, ctx.state
+    fns = {label: ctx.others.get(label) for label in [l for l, *_ in _wide_sizes] + [l for l, _ in _wide_cameras]}
+    if any(v is None for v in fns.values()): return   # not all found in this build (a red line from the locator): the game's own 16:9
+    for label, off, orig, height, what in _wide_sizes:
+        site = fns[label] + off
+        fs_site(site, struct.pack('<I', orig).hex())
+        start = here(); emit(ADRP(16, here(), FS_STATE_OFF))
+        for w in (0xb940a210,                    # ldr w16,[x16,#0xa0]    the ratio, 16.16 (0 = 16:9)
+                  0x340000d0,                    # cbz w16,orig (+6)
+                  0x52800011 | height << 5,      # mov w17,#height
+                  0x9bb17e10,                    # umull x16,w16,w17
+                  0x91402210,                    # add x16,x16,#0x8000
+                  0xd350fe08):                   # lsr x8,x16,#16         the width
+            emit(w)
+        emit(B(here(), site + 4))
+        emit(orig); emit(B(here(), site + 4))    # orig: mov x8,#width; back
+        fs_put(site, [B(site, start)], what + ' (state +0xa0, DM_SCREEN_WIDE; 0 = the game\'s)')
+    for label, off in _wide_cameras:
+        site = fns[label] + off
+        fs_site(site, '604241bd')                # ldr s0,[x19,#0x140]
+        start = here(); emit(0xbd414260)         # the original load
+        emit(ADRP(16, here(), FS_STATE_OFF))
+        for w in (0xb940a611,                    # ldr w17,[x16,#0xa4]    the ratio as a float (0 = off)
+                  0x34000131,                    # cbz w17,back (+9)
+                  0x1e260010,                    # fmov w16,s0
+                  0x5291a731,                    # mov w17,#0x8d39
+                  0x72a7fc71,                    # movk w17,#0x3fe3,lsl #16   16/9 (0x3fe38e39) - 0x100
+                  0x4b110210,                    # sub w16,w16,w17
+                  0x53097e10,                    # lsr w16,w16,#9
+                  0x35000070):                   # cbnz w16,back (+3)     not within 0x100 of 16/9: the camera's own aspect
+            emit(w)
+        emit(ADRP(16, here(), FS_STATE_OFF))
+        emit(0xbd40a600)                         # ldr s0,[x16,#0xa4]
+        emit(B(here(), site + 4))
+        fs_put(site, [B(site, start)], 'scene camera: a 16:9 aspect becomes the screen\'s ratio in its projection (state +0xa4, DM_SCREEN_WIDE; 0 = the game\'s)')
+    ctx.capabilities.add('SCREEN_WIDE')
+
 MATCH_FRAME_STEP = {'main': [
     {'name': 'frame ratio from the host\'s step', 'size': 0x9b4, 'fingerprints': ['6ae2aff5344d14568e4dbaf93455e2d8278384bf892ed6c6eca87fef98fbcd1d'], 'stub': frame_step,   # v131072 main+0x6e6be0
      'others': {'dynamic resolution': {'size': 0x294, 'fingerprints': ['7af6ceb0aedf8e0c17dc08ce17fcd6a7cba6d394a0d09e3b504c6d668dc418e7']},   # v131072 main+0x8065e0
-                'dynamic resolution update': {'size': 0xb24, 'fingerprints': ['5a423697838976baf286cffa5e2ceef0d4e037abbcd9d371e90e9e702d61b3d4']}}},   # main+0x805aa0
+                'dynamic resolution update': {'size': 0xb24, 'fingerprints': ['5a423697838976baf286cffa5e2ceef0d4e037abbcd9d371e90e9e702d61b3d4']},   # main+0x805aa0
+                'wide: nnMain create arg': {'size': 0x570, 'fingerprints': ['f2c5558922a471ab585d374cc9293013d48da1562d43169367efdc8ea90a3fe8']},   # main+0x1202ce0
+                'wide: framework constructor': {'size': 0x273c, 'fingerprints': ['2227b93a9fa9dd0fd9aeb64359649df6e2ade519a8e47fa560f840efcdb5d7e7']},   # main+0x31f3890
+                'wide: camera update A': {'size': 0x1700, 'fingerprints': ['efc2b7111d6387f88960348730d936b4bec9e6d08a19f67bd33e75d752f61df8']},   # main+0x4c48c0
+                'wide: camera update B': {'size': 0xa40, 'fingerprints': ['876b8ff1dc66ff0cb867028d9043fc71adbfac31acc093d040644550e37ac770']},   # main+0x2e1b960
+                'wide: camera update C': {'size': 0x638, 'fingerprints': ['755b131403f6a7d8bb991716f403bb482bbcee61ec0dbf2f04421cc74a749166']}}},   # main+0x2e1c3a0
 ]}
 
 BINDING = [
@@ -84,4 +150,7 @@ BINDING = [
     {'what': 'dynamic resolution: full size, or a climb on the load measured at each level', 'now': 'game', 'goal': 'game', 'purpose': 'rendering',
      'why': "the game's own dynamic-resolution level function and update, found by their functions' fingerprints on any build that keeps both; switchable (DM_DYNAMIC_RESOLUTION)",
      'checked': 'v131072 main: one function with each fingerprint (the level function a leaf, x2..x11 / x16 / x17 / s0..s2 free), its callers, the update and the controller fields read by disassembly, the fields read in play (2026-11-08); the climb run natively against a model of the update and in play to full size (2026-11-09)'},
+    {'what': 'wide screen: the swap chain and frame buffer sizes and the scene cameras\' aspect (DM_SCREEN_WIDE)', 'now': 'game', 'goal': 'game', 'purpose': 'rendering',
+     'why': "the game's own size constants and camera updates, each found by its function's fingerprint on any build that keeps all five; switchable (DM_SCREEN_WIDE)",
+     'checked': 'v131072 main: one function with each fingerprint, the sites and x16 / x17 read by disassembly; on an M5 Pro at 3440x1440 the title, the load menu and Goron City rendered 3440x1440 with 2580x1080 3D targets, the HUD at the screen\'s edges and the scene at 16:9\'s proportions with more at the sides (2026-11-12)'},
 ]

@@ -109,7 +109,7 @@ typedef struct { uint32_t n, cap, cells; uint64_t evicted, taken; } own_alias_st
 own_alias_stats own_alias_stats_locked(void);
 // Cache-only entries lack a live or ghost serial. Bytes sums each distinct texture's allocatedSize once; age is from its last alias lookup.
 typedef struct { uint32_t entries; uint64_t bytes, oldest_idle_submissions; } own_alias_orphan_stats;
-own_alias_orphan_stats own_alias_orphans_locked(void);        // shared textures no live or ghost entry resolves to (the memory report)
+own_alias_orphan_stats own_alias_orphans_locked(void);        // shared textures not held by a live/ghost serial or pin (the memory report)
 void own_alias_mark_gpu_written(const alias_key *k);           // a recorded GPU write makes a cache entry unsafe to reconstruct from its pool
 uint32_t own_alias_trim_locked(uint64_t now, uint64_t idle_submissions, uint64_t need_bytes, uint64_t *estimated_bytes); // pressure trim; caller holds g_smu
 

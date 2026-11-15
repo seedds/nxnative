@@ -110,6 +110,13 @@ int main(void) {
     h_oe_InactivityExtSafe(0x100);
     CHECK(h_oe_InactivityMode() == 0 && !h_oe_InactivityExtQ(), "clearing the extension restores mode 0");
     CHECK(empty(), "empty queue at start: returns false and leaves the output alone");
+    h_oe_FinishLogo();
+    CHECK(empty(), "finishing absent startup logo does not notify without registration");
+    h_oe_EnableStartupLogoMessage();
+    CHECK(pop_is(95) && empty(), "startup logo already absent: registration queues notification 95");
+    h_oe_GetMsgEv();
+    h_oe_EnableStartupLogoMessage();
+    CHECK(ev_sig && pop_is(95) && !ev_sig && empty(), "startup-logo notification signals and clears the existing message event");
     dm_focus_set(1); dm_set_opmode(1); CHECK(empty(), "same state sends no notification"); CHECK(hid_moves == 0, "an unchanged mode moves no npad");
     dm_set_opmode(0); CHECK(hid_moves == 1, "to handheld: hid is told that the npads moved");
     dm_set_opmode(1); CHECK(hid_moves == 2 && empty(), "and back to console (no notification: the game has not turned it on)");

@@ -923,9 +923,10 @@ Most service calls can be found before they crash, before the first boot or the 
 ### The startup logo
 
 - **Symptom:** abort in `nn::sm::Initialize` under `nn::oe::FinishStartupLogo`, right after the first frames.
-- **Cause:** it reaches the applet proxy through `am::GetApplicationFunctions`.
-- **Fix:** the host has no startup logo: a no-op hook (`hle_oe.c`).
-- **Found on:** [Metroid Dread](../../dm/games/010093801237C000/README.md).
+- **Symptom:** SDK 21 `oe::EnableStartupLogoDisappearedMessage` reads null at `sdk+0x403fe0`, after `am::GetCommonStateGetter` returns null (Fit Boxing 3 2.0.0).
+- **Cause:** both reach the applet proxy: `FinishStartupLogo` through `am::GetApplicationFunctions`, the SDK 21 registration through `am::GetCommonStateGetter`.
+- **Fix:** the host has no startup logo (`hle_oe.c`): `FinishStartupLogo` is a no-op, and `EnableStartupLogoDisappearedMessage` queues message 95 (startup logo disappeared) at once through the notification queue and its event, since the logo is already gone. The number comes from the PR's run (the game popped it and went on); it was not found in the SDK's code.
+- **Found on:** [Metroid Dread](../../dm/games/010093801237C000/README.md); Fit Boxing 3 (`0100AC101BFA2000`, provisional profile, no note; [PR #1973](https://github.com/seedds/nxnative/pull/1973)).
 
 ### Copyright frame buffer overlay
 

@@ -29,8 +29,10 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 | `build` → `game` | frame limiter spin: its branch back cut | frame rate | gap | judgement | 1 | [Need For Speed™ Hot Pursuit Remastered](../../dm/games/010029B0118E8000/README.md) | the engine's own spin limiter; a function-matched rule could carry it over the game's updates |
 | `build` → `game` | frame step floor 2 → 1 vsync, and its frame step | frame rate | gap | judgement | 1 | [Paper Mario: The Thousand-Year Door](../../dm/games/0100ECD018EBE000/README.md) | the game's own clock floor and step; MATCH_CUTS and MATCH_FRAME_STEP could carry the cut and the stub, both near the step's function (main+0x2e7750; one function not checked yet) |
 | `build` → `game` | interval controller: the lower bound and the GPU-time path | frame rate | gap | judgement | 1 | [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md) | sead::GameFrameworkNx's interval controller in this build; Tears of the Kingdom shares sead but not this code |
+| `build` → `game` | iOS landscape camera aspect for Ocarina | rendering | gap | checked: user reports fullscreen and map transitions work on iPhone 18 Pro Max; 30 fps is not stable, and HUD, cutscene framing, rotation and touch mapping remain unverified | 1 | [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md) | the exact-build camera, HUD and movie patch; the host follows its acknowledged aspect only on this registered Ocarina build |
 | `build` → `game` | job pool wake-up | race | gap | judgement | 1 | [FINAL FANTASY TACTICS - The Ivalice Chronicles](../../dm/games/010038B015560000/README.md) | a lost wake-up in the game's own job pool, not a host or SDK difference |
 | `build` → `game` | malloc region 60 GB → 4 GB and its first arena | address space | gap | judgement | 1 | [Xenoblade Chronicles 3](../../dm/games/010074F013262000/README.md) | Monolith's own allocator; its constants span two functions (a multi-function rule). The cause, an iPhone's address space, is a platform limit |
+| `build` → `game` | native landscape camera, full-screen HUD and movie layout | rendering | gap | checked: user reports fullscreen and map transitions work on iPhone 18 Pro Max; 30 fps is not stable, and HUD, cutscene framing, rotation and touch mapping remain unverified | 1 | [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md) | the exact-build projection, render-view and layout sites plus the host drawable aspect; only Ocarina v131072 has reviewed fixed addresses |
 | `build` → `game` | PhysX completion task release | race | gap | judgement | 1 | [The Legend of Zelda: Link's Awakening](../../dm/games/01006BB00C6F0000/README.md) | a lifetime race in the game's own completion task (its release slot serves this one vtable) |
 | `build` → `game` | render intervals, the forced-interval flag and the render-wait timeout | frame rate | gap | judgement | 1 | [Fire Emblem: Three Houses](../../dm/games/010055D009F78000/README.md) | the game's own tables, flag and timeout |
 | `build` → `game` | task ring push and pop barriers | race | gap | judgement | 1 | [Batman: Arkham Knight](../../dm/games/0100ACD0163D0000/README.md) | a data race in the game's own task ring |
@@ -80,7 +82,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 | [Taiko Risshiden V DX](#taiko-risshiden-v-dx) | 1 | 0 | 0 | 2 | 0 | `game` |
 | [The Legend of Zelda: Breath of the Wild](#the-legend-of-zelda-breath-of-the-wild) | 7 | 0 | 43 | 0 | 0 | `build` → `game` ×2 |
 | [The Legend of Zelda: Link's Awakening](#the-legend-of-zelda-links-awakening) | 1 | 0 | 0 | 0 | 0 | `build` → `game` |
-| [The Legend of Zelda: Ocarina of Time](#the-legend-of-zelda-ocarina-of-time) | 0 | 0 | 2 | 0 | 0 | `game` ×2 |
+| [The Legend of Zelda: Ocarina of Time](#the-legend-of-zelda-ocarina-of-time) | 0 | 0 | 12 | 0 | 1 | `game` ×2, `build` → `game` ×2 |
 | [The Legend of Zelda: Tears of the Kingdom](#the-legend-of-zelda-tears-of-the-kingdom) | 0 | 0 | 9 | 0 | 0 | `game` |
 | [Xenoblade Chronicles 3](#xenoblade-chronicles-3) | 6 | 0 | 0 | 0 | 0 | `build` → `game` |
 | [Xenoblade Chronicles X: Definitive Edition](#xenoblade-chronicles-x-definitive-edition) | 6 | 0 | 1 | 1 | 0 | `game` ×2 |
@@ -581,8 +583,23 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 
 - **`game`**, frame rate, at goal, checked: v131072 main: one function with this fingerprint, the site and its free registers read by disassembly (2026-11-08): frame ratio from the host's step. The game's own frame-ratio division, found by its function's fingerprint on any build that keeps the function
 - **`game`**, rendering, at goal, checked: v131072 main: one function with each fingerprint (the level function a leaf, x2..x11 / x16 / x17 / s0..s2 free), its callers, the update and the controller fields read by disassembly, the fields read in play (2026-11-08); the climb run natively against a model of the update and in play to full size (2026-11-09): dynamic resolution: full size, or a climb on the load measured at each level. The game's own dynamic-resolution level function and update, found by their functions' fingerprints on any build that keeps both; switchable (DM_DYNAMIC_RESOLUTION)
+- **`build` → `game`**, rendering, gap, checked: user reports fullscreen and map transitions work on iPhone 18 Pro Max; 30 fps is not stable, and HUD, cutscene framing, rotation and touch mapping remain unverified: native landscape camera, full-screen HUD and movie layout. The exact-build projection, render-view and layout sites plus the host drawable aspect; only Ocarina v131072 has reviewed fixed addresses
+- **`build` → `game`**, rendering, gap, checked: user reports fullscreen and map transitions work on iPhone 18 Pro Max; 30 fps is not stable, and HUD, cutscene framing, rotation and touch mapping remain unverified: iOS landscape camera aspect for Ocarina. The exact-build camera, HUD and movie patch; the host follows its acknowledged aspect only on this registered Ocarina build
 
-- **function-matched frame step** (`main` of builds without FRAME_STEP): frame ratio from the host's step: a function of 0x9b4 bytes, `+0xe4` in it; dynamic resolution, a function of 0x294 bytes, `+0x0` in it; dynamic resolution update, a function of 0xb24 bytes,  in it; launcher capabilities: DYNAMIC_RESOLUTION
+- **v131072 `main`** `e0f3ccfa…` ([patches.py:85](../../dm/games/0400486024DEC000/patches.py#L85))
+  - frame step `+0x4f1e8`: camera projection: use drawable aspect for 16:9 views; restore stock ratio when disabled
+  - frame step `+0x20c2b0`: speech bubble anchor: keep the bubble over the speaker when the HUD is centred
+  - frame step `+0x23b9a8`: camera projection: use drawable aspect for 16:9 views; restore stock ratio when disabled
+  - frame step `+0x25d76c`: render-view aspect: match the widened camera on the output view
+  - frame step `+0x33b82c`: camera projection: use drawable aspect for 16:9 views; restore stock ratio when disabled
+  - frame step `+0x6e6cc4`: frame ratio: the host's step × base rate / 60 instead of base rate / the game's frame rate (state page target fps; 0 = the game's ratio)
+  - frame step `+0x774368`: full-screen 2D layout: keep the HUD at 16:9 when the picture fills a wider drawable
+  - frame step `+0x8065e0`: dynamic resolution level: 0 (full resolution), or with state +0x40 (DM_DYNAMIC_RESOLUTION) a climb on the load measured at each level
+  - frame step `+0x3485cc0`: camera projection: use drawable aspect for 16:9 views; restore stock ratio when disabled
+  - frame step `+0x3b5c758`: movie viewport: letterbox pre-rendered movies within the centred 16:9 HUD
+  - launcher capabilities: CAMERA_ASPECT, DYNAMIC_RESOLUTION
+  - host [loader.c:369](../../dm/host/loader.c#L369): build check
+- **function-matched frame step** (`main` of builds without FRAME_STEP): frame ratio from the host's step: a function of 0x9b4 bytes, `+0x6e6cc4` in it; dynamic resolution, a function of 0x294 bytes, `+0x0` in it; dynamic resolution update, a function of 0xb24 bytes,  in it; launcher capabilities: DYNAMIC_RESOLUTION
 
 ### The Legend of Zelda: Tears of the Kingdom
 

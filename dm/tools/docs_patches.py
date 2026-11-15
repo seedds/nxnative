@@ -68,6 +68,9 @@ def payoff(gap):   # the Gaps order: open gaps, then blocked, kept and unreviewe
 
 # The host's build-keyed rows: (table, the start of the row's label ('' = any), main build ('' = any), entry); the first that fits classifies a row
 HOST_BINDING = [
+    ('', '', 'e0f3ccfaf50065ae4ea01eb5aeb13b1a', {'what': 'iOS landscape camera aspect for Ocarina', 'now': 'build', 'goal': 'game', 'purpose': 'rendering',
+     'why': 'the exact-build camera, HUD and movie patch; the host follows its acknowledged aspect only on this registered Ocarina build',
+     'checked': 'user reports fullscreen and map transitions work on iPhone 18 Pro Max; 30 fps is not stable, and HUD, cutscene framing, rotation and touch mapping remain unverified'}),
     ('k_locks', 'RE Engine', '', {'what': "RE Engine's frame limit at a fixed pointer", 'now': 'build', 'goal': 'engine', 'purpose': 'frame rate',
      'why': 'engine code other RE Engine games ship', 'blocked': 'one RE Engine game here'}),
     ('k_locks', 'NLG', '', {'what': "Next Level Games' frame limiter target at a fixed address", 'now': 'build', 'goal': 'engine', 'purpose': 'frame rate',
@@ -177,12 +180,12 @@ OTHER_BASE = 0x8000000   # where the dry run puts a MATCH_FRAME_STEP rule's othe
                           # within a b's reach (128 MB) of a main's sites below it and of up to six other functions above
 
 
-def frame_step_sites(fn, base=0, others=(), found=None):   # (offset, reason) of each site a FRAME_STEP function (or a MATCH_FRAME_STEP stub, its function at base) writes, whether it marks a
+def frame_step_sites(fn, base=0, others=(), found=None, build_id=None):   # (offset, reason) of each site a FRAME_STEP function (or a MATCH_FRAME_STEP stub, its function at base) writes, whether it marks a
     pos, puts = [0x6000000], []                    # render-scale stub, the sites in each of the rule's other functions ({label: [(offset, reason)]}) and the capabilities it declares
     def emit(w): pos[0] += 4
     at = {label: OTHER_BASE + i * 0x1000000 for i, label in enumerate(others)}
     ctx = types.SimpleNamespace(here=lambda: pos[0], emit=emit, site=lambda off, orig: None, put=lambda off, words, why: puts.append((off, why)), state=0x9000000, render_scale=0, step_max=0, base=base,
-                                others=at, found=found, capabilities=set(), fps_ready=False, address=lambda off, lo_off=None: 0)
+                                others=at, found=found, capabilities=set(), fps_ready=False, build_id=build_id, address=lambda off, lo_off=None: 0)
     fn(ctx)
     in_others = {label: sorted((off - a, why) for off, why in puts if a <= off < a + 0x1000000) for label, a in at.items()}
     return sorted((off, why) for off, why in puts if off < OTHER_BASE), ctx.render_scale, in_others, sorted(ctx.capabilities)
@@ -300,7 +303,7 @@ def page():
             for off, ob, nb, why in cuts.get(bid, []): lines.append(f'  - cut `+{off:#x}`: {why}')
             for off, gate, word, why in obs.get(bid, []): lines.append(f'  - gate {gate} at `+{off:#x}`: {why}')
             if bid in fs:
-                sites, scale, _, fs_caps = frame_step_sites(fs[bid]); n_fs += len(sites)
+                sites, scale, _, fs_caps = frame_step_sites(fs[bid], build_id=bid); n_fs += len(sites)
                 fold = len(sites) > 12   # a long list (ASTRAL CHAIN's) folds
                 if fold: lines += [f'  <details><summary>{len(sites)} frame-step sites</summary>', '']
                 for off, why in sites: lines.append(f'  - frame step `+{off:#x}`: {why}')

@@ -8,6 +8,8 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #include <limits.h>
+#include <math.h>
+#include <stdatomic.h>
 #include <mach-o/getsect.h>
 #include <mach-o/ldsyms.h>
 #include "hle.h"
@@ -277,6 +279,7 @@ static void read_layout(module_t *m, const char *dir) {
         else if (!strcmp(key, "RO_OFF")) m->ro_off = v;
         else if (!strcmp(key, "DATA_OFF")) m->data_off = v;
         else if (!strcmp(key, "FPS_STATE_OFF")) m->fps_state_off = v;
+        else if (!strcmp(key, "CAMERA_ASPECT")) m->camera_aspect = v == 1;
         else if (!strcmp(key, "RENDER_SCALE")) m->render_scale_max = (uint32_t)v;
         else if (!strcmp(key, "STEP_MAX")) m->step_max = (uint32_t)v;
         else if (!strcmp(key, "UE_MALLOC_VT")) m->ue_malloc_vt = v;
@@ -322,10 +325,55 @@ static void read_layout(module_t *m, const char *dir) {
 uint8_t *dm_fps_state;
 int dm_fps_step_max;   // the largest step the stubs give the game (STEP_MAX in its fixups table; 0 = FSTEP_MAX): the frame step holds frames and pays back within it (hle_nvn.c)
 static const char *g_fps_mod;   // the module holding the state page (for the log)
+// Ocarina's exact-build camera hooks use +0x280 (desired), +0x284 (host-visible acknowledgement) and +0x288..+0x294 (per-site projection acknowledgements); +0x40 is already its dynamic-resolution switch.
+static _Atomic(uint8_t *) g_aspect_state;
+static pthread_mutex_t g_aspect_mu = PTHREAD_MUTEX_INITIALIZER;
+static float g_drawable_aspect;
+static int g_aspect_enabled;
+static int aspect_enabled_from_env(void) {
+    const char *value = getenv("DM_WIDESCREEN");
+    return !(value && !strcmp(value, "0"));
+}
+static void aspect_write_desired_locked(void) {
+    uint8_t *s = atomic_load_explicit(&g_aspect_state, memory_order_relaxed);
+    if (!s) return;
+    float desired = g_aspect_enabled ? g_drawable_aspect : 0;
+    uint32_t bits; memcpy(&bits, &desired, sizeof bits);
+    atomic_store_explicit((_Atomic uint32_t *)(void *)(s + 0x280), bits, memory_order_release);
+}
+void dm_game_aspect_drawable(double width, double height) {
+    if (!(width > 0) || !(height > 0) || !isfinite(width) || !isfinite(height)) return;
+    double ratio = width / height;
+    float wide = ratio > 16.0 / 9.0 && ratio <= 8.0 ? (float)ratio : 0;
+    pthread_mutex_lock(&g_aspect_mu);
+    int enabled = aspect_enabled_from_env();  // launcher settings are applied after the guest modules are loaded
+    if (g_drawable_aspect != wide || g_aspect_enabled != enabled) {
+        g_drawable_aspect = wide;
+        g_aspect_enabled = enabled;
+        aspect_write_desired_locked();
+    }
+    pthread_mutex_unlock(&g_aspect_mu);
+}
+float dm_game_aspect(void) {
+    uint8_t *s = atomic_load_explicit(&g_aspect_state, memory_order_acquire);
+    if (!s) return 0;
+    uint32_t bits = atomic_load_explicit((_Atomic uint32_t *)(void *)(s + 0x284), memory_order_acquire);
+    float aspect; memcpy(&aspect, &bits, sizeof aspect);
+    return aspect > 16.0f / 9.0f && isfinite(aspect) ? aspect : 0;
+}
 static float g_render_scale_max = 1.0f;   // the render-scale stub's largest scale (RENDER_SCALE in its fixups table; 1 for a stub that only lowers the game's size)
 static void install_fps_state(module_t *m) {
-    if (m->fps_state_off + 0x40 > m->size || m->fps_state_off < m->key_page_off + m->key_page_size) die("%s: frame step state page out of range", m->name);
+    uint64_t state_need = m->camera_aspect ? 0x298 : 0x40;
+    if (m->fps_state_off > m->size || m->size - m->fps_state_off < state_need || m->fps_state_off < m->key_page_off + m->key_page_size) die("%s: frame step state page out of range", m->name);
     dm_fps_state = m->base + m->fps_state_off; g_fps_mod = m->name; dm_fps_step_max = (int)m->step_max;
+    if (m->camera_aspect && !strcmp(m->name, "main") && !strcmp(m->build_id, "e0f3ccfaf50065ae4ea01eb5aeb13b1a")) {
+        pthread_mutex_lock(&g_aspect_mu);
+        g_aspect_enabled = aspect_enabled_from_env();
+        atomic_store_explicit(&g_aspect_state, dm_fps_state, memory_order_release);
+        aspect_write_desired_locked();
+        pthread_mutex_unlock(&g_aspect_mu);
+        LOG("%s: native widescreen camera patch %s", m->name, g_aspect_enabled ? "available" : "disabled (DM_WIDESCREEN=0)");
+    }
     if (m->render_scale_max > 1) g_render_scale_max = (float)m->render_scale_max;
 }
 // The settings in the state page, written when the game starts (main.c, after host loading): on iOS the loading runs at app launch, before the launcher has set DM_FPS_TARGET and

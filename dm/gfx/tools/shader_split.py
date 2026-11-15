@@ -47,6 +47,7 @@
 #       Mac host), each a VNVN record with one code area and control section (frostbite.py), see frostbite_jobs and frostbite_shaders
 #   · PDAT (the engine with the namespace phx, Kirby Air Riders): flatbuffer records tagged PMAP, zstd frames in the .dat archives, each holding a program's control sections and code areas, see pdat_jobs and pdat_shaders
 #   · Unreal Engine 3 (Batman: Arkham Knight): shader records in its global shader cache (BMSG) and in the packages (the combined shader cache), whose compressed chunks are Oodle blocks decoded by the game's own decoder in the Mac host, see ue3_body and ue3_shaders
+#   · CIVBSF (Firaxis, Civilization VII): indexed single-stage NVN programs, each with its code and control lengths, see civbsf_shaders
 # Code area: 0x30 header + (graphics) 0x50 SPH + instructions; header magic 0x12345678 for graphics, 0x12345679 for compute. The control section starts with 0x98761234, +0x704 = code area length,
 #   +0x700 = start of the c1 constant segment within the code area; for compute +0x748 thread group xyz (u32 ×3), +0x754 shared memory bytes (checked one by one against PC reflection on D2R's 22 compute shaders).
 # Stage: BNSH uses the stage slot; BAHS uses bits 10..13 of SPH word 0 (1 vertex 2 hull 3 domain 4 geometry 5 pixel), and a compute header means compute.
@@ -1272,6 +1273,37 @@ def viper_shader(d, label):
     if not st: red(f'{label}: a shader binary of no known stage (control +0x56 {ctl[0x56] if len(ctl) > 0x56 else None}, code {code[:4].hex()})')
     if why := check(label, st, ctl, code): red(f'{label} ({st}): {why}')
     return [(f'{label}#VIPER', st, ctl, code)]
+
+CIVBSF = b'CIVBSF\0\0'
+
+def civbsf_shaders(d, label):
+    """Firaxis's shader library: +0x20 the shader table, +0x68 its count, 0x50-byte entries. Each entry's +8 points to {u64 data offset, u64 size}; +0 may instead point to
+    platform metadata (Sony pragmas), not the shader. The data is {u32 0xff00ff00, code length, control length, flags}, then code and control. Civilization VII 1.5.0.1's
+    ShaderAutoGen_Linux_NVN_FinalRelease.bs has 801 records (481 keys): 357 vertex, 343 pixel, 101 compute. Fifteen controls carry bytes beyond their own +0x20 length,
+    so the enclosing record's lengths delimit them. Other sections describe effects and resources; their stage-pair relation is not established, so these remain single stages."""
+    where = f'{label} CIVBSF'
+    span(d, 0, 0x90, where)
+    size, = field(d, '<I', 0xc, where)
+    if size != len(d): red(f'{where}: file size {size:#x} does not match {len(d):#x} bytes')
+    table, = field(d, '<Q', 0x20, where)
+    count, = field(d, '<I', 0x68, where)
+    if table < 0x90: red(f'{where}: shader table overlaps the header')
+    span(d, table, count * 0x50, f'{where} shader table')
+    out = []
+    for i in range(count):
+        entry = table + i * 0x50; source = f'{where} shader {i}'
+        descriptor, = field(d, '<Q', entry + 8, source)
+        offset, length = field(d, '<QQ', descriptor, f'{source} descriptor')
+        payload = span(d, offset, length, f'{source} data')
+        tag, ncode, nctl, _ = field(payload, '<4I', 0, source)
+        if tag != 0xff00ff00: red(f'{source}: unknown data tag {tag:#x}')
+        if 16 + ncode + nctl != length: red(f'{source}: code and control lengths do not match the data size')
+        code, ctl = payload[16:16 + ncode], payload[16 + ncode:]
+        st = glslc_stage(ctl, code)
+        why = check(source, st, ctl, code) if st else 'unknown shader stage'
+        if why: red(f'{source}: {why}')
+        out.append((f'{label}#CIVBSF@{entry:#x}', st, ctl, code))
+    return out
 
 def zip_jobs(files, parts=64):
     """Every member of every zip archive in ranges of about equal length (Portal: the whole game in game.zip, 41,416 members, 4.6 GB inflated, Deflate or stored; its GLSLC outputs are the
@@ -3164,6 +3196,7 @@ NEST = 16   # archives in archives scan_blob opens (SARC, PlatinumGames' DAT): r
 def scan_blob(d, label, out, depth=0, left=None):
     if depth > NEST: red(f'{label}: archives nested more than {NEST} deep')
     if d[:4] == b'SHN!': out.extend(shn_shaders(d, label)); return
+    if d[:8] == CIVBSF: out.extend(civbsf_shaders(d, label)); return
     if d[:8] == SUMO_MUX:
         members = list(sumo_members(d, label))
         if left is None: left = [NEST * sum(len(member) for _, member in members)] * 2   # as with Yaz0, count decoded bytes, not compressed bytes
@@ -3263,7 +3296,7 @@ def pixel_input_cover(shaders):
         k = min(ins, key=lambda k: (-len(ins[k] & left), k)); cover.append(k); left -= ins[k]
     return cover
 
-SINGLE_STAGE = ('#GLSLC@', '#VIPER', '#UE', '#MTSPK@', '#MGFX@', '#NLG', '#PGSO', '#RAW@', '#TFXO@', '#NEEDLE@', '#SNOWDROP@', '#PHYRE@', '#SUMO@', '#NVNSH@', '#D3@', '#SHAD@')   # sources whose every shader is a program of one stage: GLSLC outputs, Unreal's shader records, MT Framework's shader package (BNSH variations, Unity programs, MSHD and SDF pair theirs);
+SINGLE_STAGE = ('#GLSLC@', '#VIPER', '#CIVBSF@', '#UE', '#MTSPK@', '#MGFX@', '#NLG', '#PGSO', '#RAW@', '#TFXO@', '#NEEDLE@', '#SNOWDROP@', '#PHYRE@', '#SUMO@', '#NVNSH@', '#D3@', '#SHAD@')   # sources whose every shader is a program of one stage: GLSLC outputs, Unreal's shader records, MT Framework's shader package (BNSH variations, Unity programs, MSHD and SDF pair theirs);
 # Unreal Engine 3's shader caches (ue3_shaders, '#UE3@'); MonoGame's effects, whose passes may name no vertex shader and keep the one bound (Celeste: 10 of its 13 effects draw through SpriteBatch's vertex shader, which is in main); Next Level Games'
 # archives (Luigi's Mansion 3 makes 5,317 programs of one stage each at boot); PlatinumGames' shader objects (Bayonetta 3: one stage each, pg_shader); control sections loose in main
 # (Advance Wars 1+2: Re-Boot Camp's Bink shaders, raw_shaders), which no file pairs; YEBIS's effect file (tfxo_shaders); and Sumo's Ninty_NX descriptors and NVNsh records, one stage
@@ -3536,8 +3569,8 @@ def scan_file_in(args):
     if head[:4] == ZSTD_MAGIC: d = unzs(path)   # by the magic: Paper Mario: The Thousand-Year Door names its zstd files .zst (8,726, its shaders among them)
     else:
         with open(path, 'rb') as f: d = f.read()
-    if d[:4] == b'SHN!':
-        found += shn_shaders(d, '/' + rel)
+    if d[:4] == b'SHN!' or d[:8] == CIVBSF:
+        scan_blob(d, '/' + rel, found)
         return rel, uniq_keys(found), var_pairs(found), trees
     if d[:3] == b'\x1f\x8b\x08':   # standard gzip: Skyward Sword HD's Shaders.arc.gz wraps paired GLSLC outputs
         d = ungzip(d, '/' + rel); head = d[:16]   # later format probes inspect decoded bytes, not the gzip timestamp

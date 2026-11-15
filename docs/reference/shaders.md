@@ -4,6 +4,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 
 ## Containers by engine
 
+### Firaxis CIVBSF shader libraries
+
+- **Symptom:** the shader split stops with no shaders in `main` or RomFS, and the host reports missing programs while presenting a black picture.
+- **Cause:** Firaxis's `CIVBSF` library is neither BNSH nor a whole GLSLC output, so the loose-file prefilter discarded it. Its shader table points to descriptors of separate code/control payloads; the first pointer in a table entry can instead name platform metadata.
+- **Fix:** `shader_split.py` reads the bounded shader table, each entry's descriptor at +8, and its payload's tag and lengths, then applies the existing control/code checks. The original bytes and keys are preserved. Detection follows the container magic, with no title, build or filename gate. The stages use the existing pixel-input cover for vertex padding; the effect table's program-pair relation has not been established, so it supplies no guessed pairs.
+- **Check:** `test_split_civbsf.py` covers vertex, pixel and compute stages, trailing control bytes, nested archives, padding, malformed ranges and payloads, and the file scanner's rejection contract.
+- **Found on:** [Sid Meier's Civilization VII](../../dm/games/0100C3601518C000/README.md).
+
 ### Larian LSPK packages and BSHD programs
 
 - **Symptom:** the split finds only the GLSLC outputs in the executable, while the game presents a black picture and reports missing vertex, pixel and compute shaders.

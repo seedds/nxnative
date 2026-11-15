@@ -1023,6 +1023,7 @@ One line per symptom in the [subsystem references](../reference/): what you see 
 
 ## Shaders
 
+- the shader split stops with no shaders in `main` or RomFS, and the host reports missing programs while presenting a black picture. → [Firaxis CIVBSF shader libraries](../reference/shaders.md#firaxis-civbsf-shader-libraries)
 - the split finds only the GLSLC outputs in the executable, while the game presents a black picture and reports missing vertex, pixel and compute shaders. → [Larian LSPK packages and BSHD programs](../reference/shaders.md#larian-lspk-packages-and-bshd-programs)
 - the split finds only a loose upscaler pack, while a game's `.shdr` files and scene resources produce no shaders; the host reports missing vertex and pixel shaders and draws a blank picture. → [SHN resources and embedded shader objects](../reference/shaders.md#shn-resources-and-embedded-shader-objects)
 - the split finds no shaders, and the RomFS is one huge file with a short name (`42`) whose bytes look random past a table at its start (magic `CRA.`). Or the split stops with `[RED] /42: a CRA archive, and no NRO in DM_NRO_DIR (…) holds its file table`: the NRO reads a layout `cra.py` does not know. → [One scrambled archive indexed by the NRO](../reference/shaders.md#one-scrambled-archive-indexed-by-the-nro)

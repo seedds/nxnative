@@ -2,7 +2,7 @@
 
 Update 1.0.26 (v1703936) over the base game. NetherRealm's modified Unreal engine, Wwise and Havok; NVN, SDK 9.3.1. Tested on an Apple M2 Mac through NX Play. The owner reports the repaired build working on 2026-11-15. iPhone and iPad playback have not been tested.
 
-Integration status: this draft promotes the metadata from the owner's working local build. It has not been validated against current upstream main. [Movie fixes (PR #2798)](https://github.com/seedds/nxnative/pull/2798) and the remaining shared shader/runtime work in [scope issue #2797](https://github.com/seedds/nxnative/issues/2797) are prerequisites. Keep this profile PR in draft until those dependencies and upstream gameplay are checked.
+Integration status: this draft promotes the metadata from the owner's working local build. It has not been validated against current upstream main. The shared prerequisites are listed in [scope issue #2797](https://github.com/seedds/nxnative/issues/2797). The combined candidate is [codex/mk11-integration](https://github.com/yubismartlabs/nxnative/tree/codex/mk11-integration); follow the [gameplay validation route](VALIDATION.md) after building that branch in NX Play. Keep this profile PR in draft until those dependencies and upstream gameplay are checked.
 
 ## What it needs
 
@@ -48,10 +48,10 @@ From the title screen, enter the main menu and fighter selection, then start a l
 - False uniform-handle write hazards: [Handles in uniform buffers written earlier in the same submission](../../../docs/reference/shaders.md#handles-in-uniform-buffers-written-earlier-in-the-same-submission).
 - Story-transition null allocation: [Movie extractor allocations need the SDK graphics allocator](https://github.com/seedds/nxnative/issues/2797).
 - Audio history at a seek/loop boundary: [Audio decoder history survives a movie seek](https://github.com/seedds/nxnative/issues/2797).
-- Offline compile reuse: [Offline shader compilation reuses stage work and concurrent requests](https://github.com/seedds/nxnative/issues/2797).
+- Offline compile reuse was measured only in the older local implementation. Those optional optimizations have not been ported to the newer upstream compiler/cache architecture.
 
 ## Open
 
-- Tessellation/patch draws (primitive 14) remain unsupported by the shared runtime. The shader map includes hull/domain stages; the owner's successful gameplay report does not establish coverage of every effect that uses them.
+- The older local runtime did not implement tessellation/patch draws (primitive 14). Current upstream implements tessellation; MK11 coverage of its hull/domain shaders and associated effects remains unverified on the integrated candidate.
 - Online services, all fighters/stages/modes, full story completion, long sessions and iOS are unverified.
 - A reproducible smoke route, cross-game regression report for the shared fixes and harness-generated `validated.tsv` remain to be supplied before claiming automated regression coverage. No validation stamp is fabricated from the user's gameplay report.

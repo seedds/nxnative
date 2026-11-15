@@ -95,7 +95,7 @@ static void screen_match_apply(void) {   // main thread: on a new frame rate, on
     static int off = -1; if (off < 0) { const char *e = getenv("DM_SCREEN_MATCH"); off = e && !strcmp(e, "0"); if (off) LOG("front end: the screen keeps its refresh rate in fullscreen too (DM_SCREEN_MATCH=0)"); }
     NSScreen *scr = g_win.screen; int want = g_match_want, full = (g_win.styleMask & NSWindowStyleMaskFullScreen) != 0;
     CGDirectDisplayID id = scr ? [scr.deviceDescription[@"NSScreenNumber"] unsignedIntValue] : kCGNullDirectDisplay;
-    if (g_match_orig && (!full || id != g_match_id)) screen_match_restore(id == g_match_id);
+    if (g_match_orig && (!full || id != g_match_id || want <= 0)) screen_match_restore(id == g_match_id);   // want 0: the screen's own mode again (uncapped asks for no match)
     if (off || !full || want <= 0 || !scr) return;
     CGDisplayModeRef cur = CGDisplayCopyDisplayMode(id);
     if (!cur) return;
@@ -133,7 +133,7 @@ static void screen_match_apply(void) {   // main thread: on a new frame rate, on
 }
 void front_screen_match(int fps) {
     if (!g_layer || g_match_want == fps) return;   // no window (a windowless run's main thread runs the guest), or the rate as before
-    g_match_want = fps; dispatch_async(dispatch_get_main_queue(), ^{ screen_match_apply(); });
+    g_match_want = fps; dispatch_async(dispatch_get_main_queue(), ^{ screen_match_apply(); });   // 0: no rate to match — the screen gets its own mode back (uncapped)
 }
 // The pointer hides on game input while it is over the picture of the active game window (issue #675): AppKit shows it again when the mouse moves, input_release when
 // the window loses focus. The title bar, other windows and other apps keep theirs; the mouse is the touch screen (DmGameView), and moving it shows the pointer

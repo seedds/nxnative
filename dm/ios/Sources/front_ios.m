@@ -8,6 +8,7 @@
 #import <Metal/Metal.h>
 #import <AVFAudio/AVFAudio.h>
 #include <errno.h>
+#include <stdatomic.h>
 #include "front.h"
 #include "hle.h"
 #include "dm.h"
@@ -242,11 +243,13 @@ UIViewController *front_ios_root(void) { return [DmRootVC new]; }
 - (void)viewDidLayoutSubviews { [super viewDidLayoutSubviews]; for (UIView *v in self.view.subviews) v.frame = dm_aspect_fit(self.view.bounds, g_picture_aspect); }
 @end
 static UIWindow *g_tv; static int g_tv_mode_was = -1;
+static _Atomic int g_tv_hz;   // the TV's screen rate while the picture is on it (tv_attach), 0 = the phone's own screen; main thread writes, present thread reads (front_screen_max_fps, front_screen_variable_refresh)
 static void tv_attach(void) {
     DmGameView *v = g_root.game; if (!g_tv || !v || v.superview == g_tv.rootViewController.view) return;
     // at most 1080p: the game renders 1080p docked, and a 4K drawable only adds an upscale and a 4K stream (an AirPlay TV showed black, the GPU went from 15 to 60 ms a frame).
     // Taken from the picture, not the screen, so a display of another shape still gets the full 1920 pixels across the picture (DmGameView layoutSubviews applies it)
     v.maxPixelWidth = 1920;
+    atomic_store(&g_tv_hz, (int)g_tv.windowScene.screen.maximumFramesPerSecond);   // front_screen_max_fps / front_screen_variable_refresh: the picture's rate is the TV's, a fixed-rate screen
     [g_tv.rootViewController.view addSubview:v]; [g_tv.rootViewController.view setNeedsLayout]; [g_root.view setNeedsLayout];   // the phone's pad takes the whole screen
     CGRect f = dm_aspect_fit(g_tv.bounds, g_picture_aspect); CGFloat scale = MIN(g_tv.windowScene.screen.nativeScale, 1920.0 / MAX(f.size.width, 1));
     if (g_tv_mode_was < 0) g_tv_mode_was = dm_opmode();
@@ -254,7 +257,7 @@ static void tv_attach(void) {
     LOG("front end: TV connected (%.0fx%.0f points), the picture moves there at %.0fx%.0f, console mode", g_tv.bounds.size.width, g_tv.bounds.size.height, f.size.width * scale, f.size.height * scale);
 }
 static void tv_detach(void) {
-    DmGameView *v = g_root.game; g_tv = nil; v.maxPixelWidth = 0;
+    DmGameView *v = g_root.game; g_tv = nil; v.maxPixelWidth = 0; atomic_store(&g_tv_hz, 0);   // the picture is back on the phone's screen (front_screen_max_fps)
     if (v && v.superview != g_root.view) { [g_root.view insertSubview:v atIndex:0]; [g_root.view setNeedsLayout]; }
     if (g_tv_mode_was >= 0) { dm_set_opmode(g_tv_mode_was); g_tv_mode_was = -1; dm_gamepad_opmode_changed(); }
     LOG("front end: TV disconnected, the picture is back on the phone");
@@ -372,6 +375,25 @@ int front_display_pixels(int *w, int *h) {   // the screen in pixels, landscape 
     CGRect b = UIScreen.mainScreen.nativeBounds; int a = (int)b.size.width, c = (int)b.size.height;
     if (a <= 0 || c <= 0) return 0;
     *w = a > c ? a : c; *h = a > c ? c : a; return 1;
+}
+// The screen questions the graphics layer asks its front end (front.h; nvn_mtl.m link_sync, link_range, link_latency): the screen's rate, whether the picture is
+// fullscreen, and whether that screen's rate is variable. iOS had none of them, so the layer took its windowed, fixed-60-Hz path on every iPhone: a 60 Hz display
+// link at frame latency 1 for a fullscreen picture. Two consequences, both measured on the Mac before the same answers existed there:
+//   - a frame that missed its 1/60 s tick waited a whole tick more (33.3 ms), so frames of 17-33 ms were held 16.7/33.3 ms in turn (Batman: Arkham Asylum at
+//     60 fps on an iPhone; at 30 fps the present interval 2 holds each frame for its period and the rate is steady);
+//   - at latency 1 the system showed some presents one refresh late and the link skipped its next tick (issues #347, #348: 15 fps on ProMotion fullscreens).
+// With them a ProMotion screen is what it is: fullscreen and variable, so the 60 fps target gets the 120 Hz link (a frame every other tick, and a frame that
+// overruns its slot goes up on the next 8.33 ms refresh instead of a whole 16.7 ms one: holds of 16.7/25/33.3 ms rather than 16.7/33.3) and frame latency 2,
+// both as on a variable-refresh Mac screen. A 60 Hz screen, a TV (a fixed-rate screen the picture moves to, tv_attach) and Low Power Mode (ProMotion capped at
+// 60 Hz) keep today's 60 Hz link at latency 1, and the 30 fps link (mode 3) is untouched: link_30hz already held for a variable-refresh screen
+static int front_ios_screen_hz(void) {   // UIScreen's rates, like its sizes, may be read from any thread; maximumFramesPerSecond is 120 on ProMotion, 60 otherwise
+    int tv = atomic_load(&g_tv_hz); if (tv) return tv;
+    UIScreen *s = UIScreen.mainScreen; return s ? (int)s.maximumFramesPerSecond : 0;
+}
+int front_screen_max_fps(void) { return front_ios_screen_hz(); }
+int front_fullscreen(void) { return 1; }   // no window and no other mode: the picture is the screen (or the TV, still fullscreen)
+int front_screen_variable_refresh(void) {   // ProMotion (10-120 Hz); a TV is fixed-rate, and Low Power Mode caps ProMotion at 60 Hz
+    return atomic_load(&g_tv_hz) == 0 && front_ios_screen_hz() > 60 && !NSProcessInfo.processInfo.isLowPowerModeEnabled;
 }
 // Offline HTML pages (web_apple.m): the page's view goes over the game view and under the gamepad, which lets touches on no control through to it while the page is
 // shown (DmGamepad.m hitTest); the page takes them as a click on what they land on, and the gamepad and controllers drive it as on the Switch

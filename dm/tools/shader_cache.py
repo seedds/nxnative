@@ -7,7 +7,7 @@
 # It only saves work: a damaged file costs the work it held and is made anew, and a full drive is one [RED] line. An entry is written and read whole, so its file is never seen half written.
 # Names, as in the folder this replaces: metallib/<target>/<digest>[_x].metallib (dmsh_mtlcache.py), shader/<digest>/<mac|ios>/<output>, index/<key>.json, variant/<digest>/<file> (dmsh_build.py).
 # Not part of the translation chain: it decides no output (dmsh_chain.py), like dmsh_mtlcache.py.
-import contextlib, fcntl, hashlib, json, multiprocessing, os, re, shutil, sqlite3, tarfile, threading, time
+import collections, concurrent.futures as cf, contextlib, fcntl, hashlib, json, multiprocessing, os, re, shutil, sqlite3, tarfile, threading, time
 from pathlib import Path
 
 SCHEMA = ('CREATE TABLE IF NOT EXISTS blob(id INTEGER PRIMARY KEY, hash BLOB UNIQUE NOT NULL, data BLOB NOT NULL)',
@@ -15,6 +15,50 @@ SCHEMA = ('CREATE TABLE IF NOT EXISTS blob(id INTEGER PRIMARY KEY, hash BLOB UNI
 SHADER_ENTRY = re.compile(r'shader/([0-9a-f]{64})/')
 WAIT = 600   # seconds another process's write may hold this one up
 _DAMAGED = ('malformed', 'not a database', 'disk image')
+
+
+def _load_zstd(db):
+    try:
+        try: from compression import zstd
+        except ImportError: from backports import zstd   # pyright: ignore[reportMissingImports]  # optional before Python 3.14
+    except ImportError as e:
+        raise RuntimeError('shader cache compression needs Python 3.14+ or backports.zstd (pip install backports.zstd)') from e
+    options: dict[int, int] = {zstd.CompressionParameter.compression_level: 3, zstd.CompressionParameter.content_size_flag: 0}
+    compressor = zstd.ZstdCompressor(options=options)
+    def compress(data, level, dictionary, compact):
+        if (level, dictionary, compact) != (3, -1, 1): raise ValueError('unsupported shader cache compression parameters')
+        return compressor.compress(data, mode=zstd.ZstdCompressor.FLUSH_FRAME)[4:]
+    def decompress(data, is_text, dictionary, compact):
+        if dictionary is None: return data
+        if (is_text, dictionary, compact) != (0, -1, 1): raise ValueError('unsupported shader cache dictionary or encoding')
+        # Legacy caches store no-dictionary Zstd frames with the four-byte magic omitted.
+        return zstd.decompress(b'\x28\xb5\x2f\xfd' + data)
+    db.create_function('zstd_compress_col', 4, compress, deterministic=True)
+    db.create_function('zstd_decompress_col', 4, decompress, deterministic=True)
+
+
+def _enable_compression(db):
+    db.execute('ALTER TABLE blob RENAME TO _blob_zstd')
+    db.execute('ALTER TABLE _blob_zstd ADD COLUMN _data_dict INTEGER')
+    db.execute('CREATE VIEW blob AS SELECT id,hash,zstd_decompress_col(data,0,_data_dict,1) AS data FROM _blob_zstd')
+    db.execute('CREATE TRIGGER blob_insert_trigger INSTEAD OF INSERT ON blob BEGIN INSERT INTO _blob_zstd(id,hash,data) VALUES(new.id,new.hash,new.data); END')
+    db.execute('CREATE TRIGGER blob_delete_trigger INSTEAD OF DELETE ON blob BEGIN DELETE FROM _blob_zstd WHERE id=old.id; END')
+    db.execute('CREATE TRIGGER blob_update_trigger INSTEAD OF UPDATE ON blob BEGIN UPDATE _blob_zstd SET id=new.id,hash=new.hash,data=new.data,_data_dict=NULL WHERE id=old.id; END')
+
+
+@contextlib.contextmanager
+def _ownership(path, exclusive=False):
+    fd = os.open(f'{path}.lock', os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        try: fcntl.flock(fd, (fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH) | fcntl.LOCK_NB)
+        except BlockingIOError as e: raise RuntimeError(f'shader compile cache {path} is busy; finish other builds before conversion') from e
+        except OSError:
+            if exclusive: raise
+            # A raw cache can still use SQLite on a drive without flock; conversion cannot.
+        yield
+    finally: os.close(fd)
+
+
 DBMOVED = 1032   # SQLITE_READONLY_DBMOVED, an error's sqlite_errorcode (Python 3.11+)
 READ_ONLY = None   # set only by --run: the harness supplies this module to older SQLite-based builders too
 
@@ -23,9 +67,17 @@ class _ReadOnly:
     """A live SQLite reader: mode=ro sees a normal build's committed WAL, never migrates, repairs or writes its database. Mutable index/stage bookkeeping is local to each build."""
     def __init__(self, path, say):
         self.db, self.say, self.path, self.lock = None, say, os.fspath(path), threading.RLock()
+        self.owner = None
         if not os.path.isfile(self.path): return
-        try: self.db = sqlite3.connect(Path(self.path).resolve().as_uri() + '?mode=ro', uri=True, timeout=WAIT, check_same_thread=False, isolation_level=None)
+        self.owner = _ownership(os.path.realpath(self.path))
+        self.owner.__enter__()
+        try:
+            self.db = sqlite3.connect(Path(self.path).resolve().as_uri() + '?mode=ro', uri=True, timeout=WAIT, check_same_thread=False, isolation_level=None)
+            if self.db.execute("SELECT type FROM sqlite_master WHERE name='blob'").fetchone() == ('view',): _load_zstd(self.db)
         except sqlite3.Error as e: self._failed(e)
+        except BaseException:
+            self.close()
+            raise
 
     def _failed(self, e):
         self.say(f'[RED] the read-only shader cache {self.path} cannot be read and is ignored: {e}')
@@ -54,6 +106,8 @@ class _ReadOnly:
             if self.db is not None:
                 with contextlib.suppress(sqlite3.Error): self.db.close()
                 self.db = None
+            if self.owner is not None:
+                self.owner.__exit__(None, None, None); self.owner = None
 
 
 class _Files:   # an entry from or to a file, by get and put
@@ -73,21 +127,25 @@ class _Files:   # an entry from or to a file, by get and put
 
 
 class Store(_Files):
-    def __init__(self, path, say=print, *, readonly=None):
-        self.path, self.say = os.fspath(path), say
+    def __init__(self, path, say=print, *, readonly=None, _owned=False):
+        self.path, self.say = os.path.realpath(path), say
         self.lock = threading.RLock()   # one connection, for dmsh_build.py's threads: a read or a write of an entry takes microseconds next to a compile
         self.full = False   # set by the first write that fails (a full drive): no later write is tried, and the batch it was part of is rolled back
         self.outer = False   # inside the outermost batch: SQLite may end the transaction itself on a failed write, so its own flag cannot tell
         source = readonly if readonly is not None else READ_ONLY
         if source and os.path.realpath(source) == os.path.realpath(self.path): raise ValueError('the writable and read-only shader caches must differ')
-        self.use_lock = None
-        if source:
-            # The writer keeps its own lease, independent of the harness: a killed harness may leave its builder (and forked workers) alive.
-            os.makedirs(os.path.dirname(os.path.abspath(self.path)), exist_ok=True)
-            self.use_lock = open(self.path + '.lock', 'a')
-            fcntl.flock(self.use_lock, fcntl.LOCK_SH)
-        self.readonly = _ReadOnly(source, say) if source else None
-        self._open()
+        os.makedirs(os.path.dirname(os.path.abspath(self.path)), exist_ok=True)
+        # bounded() already owns the exclusive lease while it adopts and trims an idle cache.
+        self.owner = contextlib.nullcontext() if _owned else _ownership(self.path)
+        self.owner.__enter__()
+        self.readonly = None
+        self.db: sqlite3.Connection
+        try:
+            self.readonly = _ReadOnly(source, say) if source else None
+            self._open()
+        except BaseException:
+            self.close()
+            raise
 
     def _connect(self): return sqlite3.connect(self.path, timeout=WAIT, check_same_thread=False, isolation_level=None)
 
@@ -107,11 +165,14 @@ class Store(_Files):
             if not self._damage(e): raise
 
     def _prepare(self):   # the file's settings and tables; each step does nothing to a file that has them, so a reopened file takes it again
+        self.compressed = self.db.execute("SELECT type FROM sqlite_master WHERE name='blob'").fetchone() == ('view',)
+        if self.compressed: _load_zstd(self.db)
         self.db.execute('PRAGMA page_size=16384'); self.db.execute('PRAGMA auto_vacuum=INCREMENTAL')   # both only before the first table
         # WAL: a reader in another process does not wait for a writer, and a commit needs no fsync. A drive that cannot share its memory file stays on the rollback journal, unsynced: a stop costs the cache at worst
         if self.db.execute('PRAGMA journal_mode=WAL').fetchone()[0].lower() == 'wal': self.db.execute('PRAGMA synchronous=NORMAL')
         else: self.db.execute('PRAGMA synchronous=OFF')
-        for s in SCHEMA: self.db.execute(s)
+        if not self.compressed:
+            for s in SCHEMA: self.db.execute(s)
 
     def _damage(self, e):   # True when e says the file is damaged, which is now made anew
         if not any(w in str(e) for w in _DAMAGED): return False
@@ -147,7 +208,10 @@ class Store(_Files):
             try:
                 with self.batch():
                     row = self.db.execute('SELECT id FROM blob WHERE hash=?', (digest,)).fetchone()
-                    blob = row[0] if row else self.db.execute('INSERT INTO blob(hash, data) VALUES(?, ?)', (digest, data)).lastrowid
+                    if not row:
+                        self.db.execute('INSERT INTO blob(hash, data) VALUES(?, ?)', (digest, data))
+                        row = self.db.execute('SELECT id FROM blob WHERE hash=?', (digest,)).fetchone()   # lastrowid does not follow a transparent view's trigger
+                    blob = row[0]
                     self.db.execute('INSERT OR REPLACE INTO entry(name, blob, mtime) VALUES(?, ?, ?)', (name, blob, time.time() if when is None else when))
             except sqlite3.OperationalError as e: self._unwritable(e)
             except sqlite3.DatabaseError as e:
@@ -210,10 +274,12 @@ class Store(_Files):
         self._run('PRAGMA incremental_vacuum')
 
     def close(self):   # also folds the write-ahead log into the file, so that one file is left
-        with self.lock, contextlib.suppress(sqlite3.Error): self.db.close()
-        if self.readonly: self.readonly.close()
-        if self.use_lock:
-            self.use_lock.close(); self.use_lock = None
+        with self.lock:
+            if hasattr(self, 'db'):
+                with contextlib.suppress(sqlite3.Error): self.db.close()
+            if self.readonly: self.readonly.close()
+            if self.owner is not None:
+                self.owner.__exit__(None, None, None); self.owner = None
 
     def trim(self, limit):
         """Bound the physical database size, oldest-written groups first; split libraries, shader outputs and variants leave whole. Called only with no builders using this regression cache."""
@@ -261,9 +327,9 @@ def bounded(path, limit, say=print, *, legacy=None):
             try: fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError: return
             try:
-                if legacy is not None: adopt(legacy, path, say)
+                if legacy is not None: adopt(legacy, path, say, _owned=True)
                 if path.is_file():
-                    store = Store(path, say)
+                    store = Store(path, say, _owned=True)
                     try: store.trim(limit() if callable(limit) else limit)
                     finally: store.close()
             finally: fcntl.flock(lock, fcntl.LOCK_UN)
@@ -355,6 +421,221 @@ class Remote(_Files):
             else: self.inside = False; self._call('end')
 
 
+def _reclaim(db):
+    # Batches bound the vacuum's WAL, including the first large conversion.
+    while db.execute('PRAGMA freelist_count').fetchone()[0]:
+        before = db.execute('PRAGMA freelist_count').fetchone()[0]
+        db.execute('PRAGMA incremental_vacuum(1024)').fetchall()
+        if db.execute('PRAGMA wal_checkpoint(TRUNCATE)').fetchone()[0]:
+            raise RuntimeError('shader cache reclamation is busy; it will retry after the next successful build')
+        if db.execute('PRAGMA freelist_count').fetchone()[0] >= before:
+            raise RuntimeError('shader cache needs incremental auto_vacuum to reclaim free pages')
+
+
+def _remove_raw_part(path):
+    for suffix in ('', '-journal', '-wal', '-shm'):
+        with contextlib.suppress(FileNotFoundError): os.unlink(path + suffix)
+
+
+def _parallel_blobs(db, workers, compress=False):
+    """Bounded batches, Python codec on independent memory connections; only the caller touches the cache."""
+    # shortcut: the 8 MiB/256-row limit bounds encoded input, not decoded expansion; budget output bytes before supporting unusually large compressed blobs.
+    local, connections = threading.local(), []
+    def init():
+        local.db = sqlite3.connect(':memory:', check_same_thread=False)
+        connections.append(local.db); _load_zstd(local.db)
+    def work(rows):
+        result = []
+        for ident, digest, data, marker in rows:
+            if compress: data = local.db.execute('SELECT zstd_compress_col(?,3,-1,1)', (data,)).fetchone()[0]
+            elif marker is not None: data = local.db.execute('SELECT zstd_decompress_col(?,0,?,1)', (data, marker)).fetchone()[0]
+            result.append((ident, digest, data))
+        return result
+    def batches():
+        last = None
+        while True:
+            where = 'WHERE _data_dict IS NULL' if compress else 'WHERE 1'
+            if last is not None: where += ' AND id>?'
+            # Keyset scans avoid keeping a reader snapshot open while the writer commits or vacuum runs.
+            index = 'INDEXED BY blob_pending' if compress else 'NOT INDEXED'
+            cur = db.execute(f'SELECT id,hash,data,{"NULL" if compress else "_data_dict"} FROM _blob_zstd {index} {where} ORDER BY id LIMIT 256', () if last is None else (last,))
+            rows, size = [], 0
+            try:
+                for row in cur:
+                    rows.append(row); last = row[0]; size += len(row[2])
+                    if size >= 8 * 1024**2: break
+            finally: cur.close()
+            if not rows: return
+            yield rows
+    try:
+        with cf.ThreadPoolExecutor(workers, initializer=init) as pool:
+            pending = collections.deque()
+            for batch in batches():
+                pending.append(pool.submit(work, batch))
+                if len(pending) >= workers: yield pending.popleft().result()
+            while pending: yield pending.popleft().result()
+    finally:
+        for connection in connections: connection.close()
+
+
+def _compress_parallel(db, workers):
+    for batch in _parallel_blobs(db, workers, compress=True):
+        with db:
+            db.execute('BEGIN IMMEDIATE')
+            db.executemany('UPDATE _blob_zstd SET data=?,_data_dict=-1 WHERE id=? AND hash=? AND _data_dict IS NULL', ((data, ident, digest) for ident, digest, data in batch))
+
+
+def _raw_copy(db, part, workers=1, metrics=None):
+    path = db.execute('PRAGMA database_list').fetchone()[2]
+    return _converted_copy(db, path, part, workers, compress=False, metrics=metrics)
+
+
+def _compressed_copy(db, path, part, workers, metrics=None):
+    return _converted_copy(db, path, part, workers, compress=True, metrics=metrics)
+
+
+def _converted_copy(db, path, part, workers, *, compress, metrics=None):
+    """Convert disjoint ranges on worker connections; write the replacement once."""
+    local, connections, jobs = threading.local(), [], []
+    def measured(name, fn, *args):
+        if metrics is None: return fn(*args)
+        start = time.perf_counter()
+        try: return fn(*args)
+        finally: metrics[name] = metrics.get(name, 0) + time.perf_counter() - start
+    def init():
+        local.db = sqlite3.connect(Path(path).as_uri() + '?mode=ro', uri=True, timeout=0, check_same_thread=False)
+        connections.append(local.db); _load_zstd(local.db)
+    def work(span):
+        if metrics is not None: start, cpu = time.perf_counter(), time.thread_time()
+        data = 'zstd_compress_col(data,3,-1,1)' if compress else 'data'
+        rows = local.db.execute(f'SELECT id,hash,{data} FROM blob WHERE id>=? AND id<=? ORDER BY id', span).fetchall()
+        if metrics is not None:
+            end, cpu = time.perf_counter(), time.thread_time() - cpu
+            jobs.append((start, end, cpu, threading.get_ident(), sum(len(row[2]) for row in rows)))
+        return rows
+    def spans():
+        # shortcut: reversal bounds encoded input, not decoded expansion; add an output budget for unusually large blobs.
+        table = 'blob' if compress else '_blob_zstd'
+        # Read encoded lengths on reversal so partitioning does not decode every blob again.
+        cur = measured('batch_boundary_reads_s', db.execute, f'SELECT id,length(data) FROM {table} ORDER BY id')
+        first, size, count = None, 0, 0
+        try:
+            while True:
+                row = measured('batch_boundary_reads_s', cur.fetchone)
+                if row is None: break
+                ident, length = row
+                if metrics is not None:
+                    metrics['blob_count'] = metrics.get('blob_count', 0) + 1
+                    metrics['input_payload_bytes'] = metrics.get('input_payload_bytes', 0) + length
+                if first is None: first = ident
+                size += length; count += 1
+                if size >= 8 * 1024**2 or count >= 256:
+                    yield first, ident
+                    first, size, count = None, 0, 0
+            if first is not None: yield first, ident
+        finally: cur.close()
+    if metrics is not None: setup_start = time.perf_counter()
+    out = sqlite3.connect(part)
+    try:
+        out.execute('PRAGMA page_size=16384'); out.execute('PRAGMA auto_vacuum=INCREMENTAL')
+        for sql in SCHEMA: out.execute(sql)
+        # Write the private output directly; enable WAL only after installation.
+        out.execute('PRAGMA synchronous=NORMAL')
+        if compress:
+            _load_zstd(out)
+            _enable_compression(out)
+        insert = 'INSERT INTO _blob_zstd(id,hash,data,_data_dict) VALUES(?,?,?,-1)' if compress else 'INSERT INTO blob VALUES(?,?,?)'
+        if metrics is not None: metrics['output_setup_s'] = time.perf_counter() - setup_start
+        with cf.ThreadPoolExecutor(workers, initializer=init) as pool:
+            pending = collections.deque()
+            def take():
+                if pending[0].done(): return pending.popleft().result()
+                oldest = pending[0]
+                ready = next(iter(cf.wait(pending, return_when=cf.FIRST_COMPLETED).done))
+                if metrics is not None and ready is not oldest: metrics['completion_order_bypasses'] += 1
+                pending.remove(ready)
+                return ready.result()
+            for span in spans():
+                pending.append(pool.submit(work, span))
+                if len(pending) >= workers:
+                    measured('blob_inserts_s', out.executemany, insert, measured('worker_result_wait_s', take))
+            while pending:
+                measured('blob_inserts_s', out.executemany, insert, measured('worker_result_wait_s', take))
+            measured('entry_copy_s', out.executemany, 'INSERT INTO entry VALUES(?,?,?)', db.execute('SELECT name,blob,mtime FROM entry'))
+        measured('commit_s', out.commit)
+    finally:
+        measured('output_close_s', out.close)
+        for connection in connections: connection.close()
+    if metrics is not None:
+        input_bytes = metrics.get('input_payload_bytes', 0)
+        output_bytes = sum(job[4] for job in jobs)
+        raw, encoded = (input_bytes, output_bytes) if compress else (output_bytes, input_bytes)
+        window = max(job[1] for job in jobs) - min(job[0] for job in jobs) if jobs else 0
+        busy = sum(job[1] - job[0] for job in jobs)
+        cpu = sum(job[2] for job in jobs)
+        counts = collections.Counter(job[3] for job in jobs)
+        metrics.update(blob_count=metrics.get('blob_count', 0), input_payload_bytes=input_bytes, output_payload_bytes=output_bytes,
+                       payload_size_change_bytes=output_bytes - input_bytes, raw_payload_bytes=raw, compressed_payload_bytes=encoded,
+                       payload_bytes_saved=raw - encoded, payload_compression_ratio=raw / encoded if encoded else None,
+                       payload_space_saved_percent=100 * (raw - encoded) / raw if raw else None,
+                       batch_count=len(jobs), workers_used=len(counts), min_batches_per_worker=min(counts.values(), default=0),
+                       max_batches_per_worker=max(counts.values(), default=0), worker_phase_elapsed_s=window,
+                       worker_busy_wall_s=busy, worker_cpu_s=cpu, average_active_worker_jobs=busy / window if window else 0,
+                       average_worker_cpu_cores=cpu / window if window else 0)
+
+
+def maintain(path, *, compress=False, decompress=False, workers=1, say=print):
+    """Maintain a compressed cache, optionally convert its format. Errors propagate: builds warn, the standalone command fails."""
+    if compress and decompress: raise ValueError('choose compression or decompression, not both')
+    if workers < 1: raise ValueError('workers must be positive')
+    path = os.path.realpath(path)
+    if not os.path.isfile(path): raise FileNotFoundError(f'no shader compile cache at {path}')
+    start, before = time.monotonic(), os.stat(path).st_blocks * 512
+    with _ownership(path, exclusive=compress or decompress):
+        db = sqlite3.connect(path, timeout=0, isolation_level=None)
+        part = path + ('.raw.part' if decompress else '.compressed.part')
+        metrics: dict[str, object] | None = None
+        try:
+            compressed = db.execute("SELECT type FROM sqlite_master WHERE name='blob'").fetchone() == ('view',)
+            if not compressed and not compress: return
+            if db.execute('PRAGMA journal_mode').fetchone()[0].lower() == 'wal': db.execute('PRAGMA synchronous=NORMAL')
+            _load_zstd(db)
+            if (compress and not compressed) or decompress:
+                operation = 'decompression' if decompress else 'compression'
+                say(f'restoring raw shader compile cache {path}' if decompress else f'compressing shader compile cache into a compact replacement for {path}')
+                _remove_raw_part(part)
+                if os.environ.get('DM_SHADER_CACHE_COMPRESSION_METRICS') == '1':
+                    metrics = dict.fromkeys(('worker_result_wait_s', 'blob_inserts_s'), 0.0)
+                    metrics.update(operation=operation, workers_requested=workers, completion_order_bypasses=0, database_before_bytes=os.stat(path).st_size,
+                                   database_before_allocated_bytes=before)
+                if decompress:
+                    if metrics is not None: _raw_copy(db, part, workers, metrics=metrics)
+                    elif workers == 1: _raw_copy(db, part)
+                    else: _raw_copy(db, part, workers)
+                elif metrics is not None: _compressed_copy(db, path, part, workers, metrics=metrics)
+                else: _compressed_copy(db, path, part, workers)
+                if metrics is not None: install_start = time.perf_counter()
+                if db.execute('PRAGMA wal_checkpoint(TRUNCATE)').fetchone()[0]: raise RuntimeError('shader cache is busy; conversion was not installed')
+                db.close(); db = None
+                os.replace(part, path)
+                db = sqlite3.connect(path, timeout=0, isolation_level=None)
+                db.execute('PRAGMA journal_mode=WAL').fetchall()
+                if metrics is not None: metrics['source_checkpoint_and_install_s'] = time.perf_counter() - install_start
+            else:
+                db.execute('CREATE INDEX IF NOT EXISTS blob_pending ON _blob_zstd(id) WHERE _data_dict IS NULL')
+                _compress_parallel(db, workers)
+                _reclaim(db)
+        finally:
+            if db is not None: db.close()
+            if compress or decompress: _remove_raw_part(part)
+    after = os.stat(path).st_blocks * 512
+    if metrics is not None:
+        metrics.update(total_elapsed_s=time.monotonic() - start, database_after_bytes=os.stat(path).st_size, database_after_allocated_bytes=after,
+                       database_allocated_bytes_saved=before - after)
+        say(f'shader cache {operation} metrics: ' + json.dumps({k: round(v, 6) if isinstance(v, float) else v for k, v in metrics.items()}, sort_keys=True))
+    say(f'shader compile cache: {before / 2**20:.1f} -> {after / 2**20:.1f} MiB on disk, {time.monotonic() - start:.1f} s')
+
+
 def _adopted_name(name):
     """What a file of the old folder is called here, None for one not taken. A shader/ or index/ entry's digest covers the chain's code, which the change to this file moved, so none can hit. A variant/ entry from
     before shader compiles read their source from standard input (f2a50f35) holds its source's file name in its function constants, so its bytes differ from a fresh compile's: few, and cheap to compile again.
@@ -363,7 +644,7 @@ def _adopted_name(name):
     return f'metallib/{m.group(1)}/{m.group(2)}' if m else None
 
 
-def adopt(old, path, say=print):
+def adopt(old, path, say=print, *, _owned=False):
     """A compile cache from before this file (the folder old, or old.tar: tree_tar.py) into the file path, and the old one removed, so a build folder converts by itself at its next build. A damaged tar costs the work it held.
     Returns the number of entries taken"""
     folder, tar = os.fspath(old), f'{os.fspath(old)}.tar'
@@ -374,7 +655,7 @@ def adopt(old, path, say=print):
         nonlocal n, store
         new = _adopted_name(name.removeprefix('./'))
         if new is None or os.path.basename(name).startswith('._'): return
-        store = store or Store(path, say)
+        store = store or Store(path, say, _owned=_owned)
         store.put(new, read()); n += 1
     def in_batches(items):
         for i, item in enumerate(items):

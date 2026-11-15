@@ -84,6 +84,42 @@ class DeriveProfile(Base):
         self.assertNotIn('mem_used', [k for k, _ in game.Game(self.pdir).rows])
         self.assertFalse((self.pdir / 'shader_map.tsv').exists())
 
+    def test_cross_title_marker_uses_actual_regional_resources(self):
+        import romfs_image
+        for image in (False, True):
+            for present in (True, False):
+                with self.subTest(image=image, original_marker_present=present):
+                    rom = self.ex / 'RomFS'
+                    shutil.rmtree(rom, ignore_errors=True); rom.mkdir()
+                    (self.ex / 'RomFS.img').unlink(missing_ok=True)
+                    (rom / 'CPK').mkdir()
+                    (rom / 'CPK/ALL_ASIA.CPK').write_bytes(b'fixture' * 10)
+                    if present: (rom / 'CPK/ALL_USEU.CPK').write_bytes(b'fixture')
+                    text = (self.src / 'game.tsv').read_text().replace('romfs_marker\ta/b', 'romfs_marker\tCPK/ALL_USEU.CPK')
+                    (self.src / 'game.tsv').write_text(text)
+                    if image:
+                        romfs_image.pack(str(rom), str(self.ex / 'RomFS.img'))
+                        shutil.rmtree(rom)
+                    self.derive(app=TID + 0x1000)
+                    marker = 'CPK/ALL_USEU.CPK' if present else 'CPK/ALL_ASIA.CPK'
+                    self.assertEqual(game.Game(self.pdir).get('romfs_marker'), marker)
+                    self.assertTrue((nsp.rfs.source(self.ex) / marker).is_file())
+                    self.later_stages(); self.derive(app=TID + 0x1000); self.assert_kept()
+                    self.assertEqual(game.Game(self.src).get('romfs_marker'), 'CPK/ALL_USEU.CPK')
+
+    def test_same_title_keeps_missing_marker_for_validation(self):
+        self.derive(app=TID)
+        self.assertEqual(game.Game(self.pdir).get('romfs_marker'), 'a/b')
+
+    def test_cross_title_empty_romfs_keeps_missing_marker_for_validation(self):
+        (self.ex / 'RomFS/a.bin').unlink()
+        self.derive(app=TID + 0x1000)
+        self.assertEqual(game.Game(self.pdir).get('romfs_marker'), 'a/b')
+
+    def test_shader_only_profile_keeps_missing_marker(self):
+        nsp.derive_profile(game.Game(self.src), self.pdir, 'v65536', self.ex, ['main'], app=TID + 0x1000, shader_only=True)
+        self.assertEqual(game.Game(self.pdir).get('romfs_marker'), 'a/b')
+
     def test_unchanged_inputs_keep_later_stages(self):
         self.assertEqual(self.derive(), '1.1.0')
         self.later_stages()

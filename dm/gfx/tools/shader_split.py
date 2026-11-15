@@ -47,7 +47,7 @@
 #       Mac host), each a VNVN record with one code area and control section (frostbite.py), see frostbite_jobs and frostbite_shaders
 #   · PDAT (the engine with the namespace phx, Kirby Air Riders): flatbuffer records tagged PMAP, zstd frames in the .dat archives, each holding a program's control sections and code areas, see pdat_jobs and pdat_shaders
 #   · Unreal Engine 3 (Batman: Arkham Knight): shader records in its global shader cache (BMSG) and in the packages (the combined shader cache), whose compressed chunks are Oodle blocks decoded by the game's own decoder in the Mac host, see ue3_body and ue3_shaders
-#   · CIVBSF (Firaxis, Civilization VII): indexed single-stage NVN programs, each with its code and control lengths, see civbsf_shaders
+#   · CIVBSF (Firaxis, Civilization VI / VII): indexed NVBC / GLSLC or code/control payloads, see civbsf_shaders
 #   · IPK (Ubisoft's UbiArt, Rayman Legends: Definitive Edition): whole GLSLC outputs in the .fxb effect files of bundle_nn.ipk (zlib entries), see ipk_shaders
 # Code area: 0x30 header + (graphics) 0x50 SPH + instructions; header magic 0x12345678 for graphics, 0x12345679 for compute. The control section starts with 0x98761234, +0x704 = code area length,
 #   +0x700 = start of the c1 constant segment within the code area; for compute +0x748 thread group xyz (u32 ×3), +0x754 shared memory bytes (checked one by one against PC reflection on D2R's 22 compute shaders).
@@ -1312,22 +1312,43 @@ def viper_shader(d, label):
 CIVBSF = b'CIVBSF\0\0'
 
 def civbsf_shaders(d, label):
-    """Firaxis's shader library: +0x20 the shader table, +0x68 its count, 0x50-byte entries. Each entry's +8 points to {u64 data offset, u64 size}; +0 may instead point to
-    platform metadata (Sony pragmas), not the shader. The data is {u32 0xff00ff00, code length, control length, flags}, then code and control. Civilization VII 1.5.0.1's
+    """Firaxis's shader library: +0x20 the shader table, +0x68 its count. Revision 0x1118 (Civilization VI 1.2.19) has 0x48-byte entries; +8 points to four
+    {u64 offset, u32 size, u32 platform} descriptors, platform 3 holding NVBC: an 0x28-byte header, GLSLC output and reflection. Its header's +8 / +0x10 are their lengths;
+    the two saved pointers are unrelated runtime addresses. All 539 records decode as one stage each (488 distinct keys). Revision 0x1218 has 0x50-byte entries;
+    each entry's +8 points to {u64 data offset, u64 size}; +0 may instead point to platform metadata (Sony pragmas), not the shader.
+    The data is {u32 0xff00ff00, code length, control length, flags}, then code and control. Civilization VII 1.5.0.1's
     ShaderAutoGen_Linux_NVN_FinalRelease.bs has 801 records (481 keys): 357 vertex, 343 pixel, 101 compute. Fifteen controls carry bytes beyond their own +0x20 length,
     so the enclosing record's lengths delimit them. Other sections describe effects and resources; their stage-pair relation is not established, so these remain single stages."""
     where = f'{label} CIVBSF'
     span(d, 0, 0x90, where)
+    version, = field(d, '<I', 8, where)
+    stride = {0x1118: 0x48, 0x1218: 0x50}.get(version)
+    if stride is None: red(f'{where}: unknown revision {version:#x}')
     size, = field(d, '<I', 0xc, where)
     if size != len(d): red(f'{where}: file size {size:#x} does not match {len(d):#x} bytes')
     table, = field(d, '<Q', 0x20, where)
     count, = field(d, '<I', 0x68, where)
     if table < 0x90: red(f'{where}: shader table overlaps the header')
-    span(d, table, count * 0x50, f'{where} shader table')
+    span(d, table, count * stride, f'{where} shader table')
     out = []
     for i in range(count):
-        entry = table + i * 0x50; source = f'{where} shader {i}'
+        entry = table + i * stride; source = f'{where} shader {i}'
         descriptor, = field(d, '<Q', entry + 8, source)
+        if version == 0x1118:
+            span(d, descriptor, 0x40, f'{source} platform descriptors')
+            for platform in range(4):
+                offset, length, kind = field(d, '<QII', descriptor + platform * 16, source)
+                if kind != platform: red(f'{source}: platform descriptor {platform} has kind {kind}')
+                payload = span(d, offset, length, f'{source} platform {platform} data')
+                if platform != 3: continue
+                span(payload, 0, 0x28, f'{source} NVBC')
+                if payload[:8] != b'NVBC\0\0\0\0': red(f'{source}: unknown NVBC tag')
+                nout, nrefl = field(payload, '<QQ', 8, source)
+                if 0x28 + nout + nrefl != length: red(f'{source}: NVBC output and reflection lengths do not match the data size')
+                output = payload[0x28:0x28 + nout]
+                if output[:4] != b'\x91\x68\x86\x19' or glslc_layout(output, 0)[0] != nout: red(f'{source}: invalid NVBC GLSLC output length or tag')
+                out.extend(glslc_shaders(output, f'{label}#CIVBSF@{entry:#x}'))
+            continue
         offset, length = field(d, '<QQ', descriptor, f'{source} descriptor')
         payload = span(d, offset, length, f'{source} data')
         tag, ncode, nctl, _ = field(payload, '<4I', 0, source)

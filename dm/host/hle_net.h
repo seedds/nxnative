@@ -16,4 +16,7 @@ long dm_sk_read(int fd, void *data, unsigned long size);
 long dm_sk_write(int fd, const void *data, unsigned long size);
 int dm_sk_poll(void *fds, uint64_t count, int milliseconds);
 int dm_sk_select(int nfds, uint64_t *read, uint64_t *write, uint64_t *except, const int64_t *timeout);
+int dm_sk_listen(int fd, int backlog);   // offline: -1, ENETDOWN
+int dm_sk_accept(int fd, void *addr, unsigned *size);   // offline: -1, ENETDOWN
 int dm_sk_errno(void);
+// DM_NET=1 (hle_net.c, dm_net_online in hle.h): every dm_sk_ call above runs on the host's own sockets instead, and dm_sk_errno gives Horizon's (Linux's) error numbers

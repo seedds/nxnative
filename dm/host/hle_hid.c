@@ -1524,7 +1524,7 @@ static uint32_t vib_targets(uint32_t h, int *motor) {
         return dm_haptics_available() & pad_players;
     }
     if (type >= 5) {
-        if (r.kind != (type == 5 ? KIND_DUAL : type == 6 ? KIND_LEFT : KIND_RIGHT) || (type != 5 && dev)) return 0;
+        if (r.kind != (type == 5 ? KIND_DUAL : type == 6 ? KIND_LEFT : KIND_RIGHT) || (type != 5 && dev != (type == 7))) return 0;
         if (type != 5) *motor = type == 7;
         return dm_haptics_available() & (1u << r.pad);
     }
@@ -1568,29 +1568,28 @@ static void vib_send(const uint32_t *handles, const dm_vibration *values, int n)
     dm_haptics_send(updates, count);
 }
 HLE_FORCE("_ZN2nn3hid20IsVibrationPermittedEv", "vibration permission: enabled and an output available", unsigned, h_hid_VibPermit, void) { return dm_haptics_available() != 0; }
-// Games can cache handles once at startup, before GameController routes the pad's haptics (Unicorn Overlord kept an empty answer and sent every value to handle 0).
-// On Horizon handles are computed from npad id and style (libnx _hidGetVibrationDeviceHandles); vib_send checks for an output at each send. With rumble off they are handed out too,
-// as on a Switch whose vibration setting is off (IsVibrationPermitted answers false and nothing is felt), so turning it on while the game runs works in a game that asked only once.
-HLE_FORCE("_ZN2nn3hid25GetVibrationDeviceHandlesEPNS0_21VibrationDeviceHandleEiRKjNS_4util10BitFlagSetILi32ENS0_12NpadStyleTagEEE", "vibration devices of the connected controller",
+// Handle construction is independent of npad connection, supported-player selection,
+// rumble permission and output readiness. Games build graphs for every npad at boot
+// and retain those handles. The SDK's original is pure construction (no HID service);
+// use it where exported, preserving that SDK's own supported style forms. The fallback
+// covers the host's five controller forms. Sending/mounting still tests live routing.
+HLE_FORCE("_ZN2nn3hid25GetVibrationDeviceHandlesEPNS0_21VibrationDeviceHandleEiRKjNS_4util10BitFlagSetILi32ENS0_12NpadStyleTagEEE", "vibration handles from SDK npad/style encoding, independent of connection",
           int, h_hid_VibHandles, uint32_t *h, int n, const uint32_t *id, uint32_t style) {
-    // Joy-Con handles asked of an npad that holds a whole controller in another style are given, as on Horizon, where handles are computed from the npad id and the requested style
-    // alone (libnx _hidGetVibrationDeviceHandles), and vib_targets routes them to that controller's motors: Metroid Prime 4 asks only for JoyDual handles (style 0x4) while a Pro
-    // Controller or a DualSense shows as full-key. JoyDual, JoyLeft and JoyRight give types 5, 6 and 7
-    uint32_t asked = 0;
-    if (id && !(style & style_of(*id)) && player_of(*id) >= 0 && npad_resolve(*id).kind == KIND_PAD)
-        asked = style & STYLE_JOYDUAL ? 5 : style & STYLE_JOYLEFT ? 6 : style & STYLE_JOYRIGHT ? 7 : 0;
-    if (!h || !id || n <= 0 || (!(style & style_of(*id)) && !asked) || !dm_haptics_has_output()) {
-        if (getenv("DM_RUMBLE_LOG") && id) LOG("rumble: game asked for vibration handles of npad %u style %#x: none (connected style %#x, %s)", *id, style, style_of(*id), dm_haptics_has_output() ? "output ready" : "no output yet");
-        return 0;
+    if (!h || !id || n <= 0 || !(*id < DM_PLAYERS || *id == NPAD_HANDHELD || *id == 0x10) || !style || (style & (style - 1))) return 0;
+    int count;
+    int (*orig)(uint32_t *, int, const uint32_t *, uint32_t) = guest_sym("_ZN2nn3hid25GetVibrationDeviceHandlesEPNS0_21VibrationDeviceHandleEiRKjNS_4util10BitFlagSetILi32ENS0_12NpadStyleTagEEE");
+    if (orig) count = orig(h, n, id, style);
+    else {
+        static const uint32_t forms[] = {STYLE_FULLKEY, STYLE_HANDHELD, STYLE_JOYDUAL, STYLE_JOYLEFT, STYLE_JOYRIGHT};
+        uint32_t type = 0;
+        for (unsigned i = 0; i < sizeof forms / sizeof *forms; i++) if (style == forms[i]) { type = i + 3; break; }
+        if (!type) return 0;
+        count = n < (type >= 6 ? 1 : 2) ? n : (type >= 6 ? 1 : 2);
+        // JoyRight's sole actuator is device 1, as the SDK constructs it; JoyLeft is 0.
+        uint32_t base = (*id << 8) | type | (type == 7 ? 1u << 16 : 0);
+        for (int i = 0; i < count; i++) h[i] = base | (uint32_t)i << 16;
     }
-    npad_ref r = npad_resolve(*id);
-    uint32_t st = kind_style(r, *id);   // the handle's type follows the reported style (a whole controller may be shown as a pair, pad_style)
-    uint32_t type = asked ? asked : st & STYLE_JOYDUAL ? 5u : st & STYLE_JOYLEFT ? 6u : st & STYLE_JOYRIGHT ? 7u : st & STYLE_HANDHELD ? 4u : 3u;
-    int single = asked ? asked >= 6 : r.kind == KIND_LEFT || r.kind == KIND_RIGHT;
-    uint32_t base = (*id << 8) | type | (asked == 7 ? 1u << 16 : 0);   // a requested JoyRight's sole actuator is device 1, as the SDK makes it
-    int count = n < (single ? 1 : 2) ? n : (single ? 1 : 2);
-    for (int i = 0; i < count; i++) h[i] = base | (uint32_t)i << 16;
-    if (getenv("DM_RUMBLE_LOG")) LOG("rumble: game asked for vibration handles of npad %u style %#x: %d, first %#x", *id, style, count, h[0]);
+    if (getenv("DM_RUMBLE_LOG")) LOG("rumble: game asked for vibration handles of npad %u style %#x: %d, first %#x", *id, style, count, count > 0 ? h[0] : 0);
     return count;
 }
 HLE_FORCE("_ZN2nn3hid25InitializeVibrationDeviceERKNS0_21VibrationDeviceHandleE", "vibration: initialize one channel", void, h_hid_InitVib, const uint32_t *h) {

@@ -598,7 +598,7 @@ static void app_folder_claim(void) {
     EXPECT("app folder: a third copy lists none while the second runs", 1, ga_claim(dir, &c) == nil && c >= 0);
     close(b); close(c);
     NSSet<NSString *> *again = ga_claim(dir, &d);
-    EXPECT("app folder: with no copy running, a start lists old directories", 2, again.count);
+    EXPECT("app folder: with no copy running, a start lists old directories", 3, again.count);
     close(d);
     EXPECT("app folder: old snapshot directories removed", 2, ga_remove(dir, got));
     struct stat st;

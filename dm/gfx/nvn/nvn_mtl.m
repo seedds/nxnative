@@ -6231,7 +6231,7 @@ static void shmap_read(void) {
 @interface NvShader : NSObject { @public id<MTLFunction> fn, tf_fn, discard_fn, fn_u, fn_d, geo_fn; id<MTLLibrary> ulib; NSMutableDictionary *ufn;   // fn_u: the integer-output entry point (dmsh_entry.py fs_uint) as the library holds it, unspecialized: ufn holds it specialized per pipeline's integer targets (uint_fn; ulib: its library); fn_d: the dual-source one (dmsh_entry.py fs_dual)
     uint16_t tf_stride[4]; uint32_t cb_ext[16], sb_ro; nvn_refl rf; id<MTLArgumentEncoder> ae; NSUInteger arg_len; int stage, range_ro, layer_out; const char *builtin; uint64_t logged; char key[24]; id<MTLBuffer> c1buf; uint64_t c1_gpu; size_t c1off;
     uint32_t geo_vertices, geo_invocations, geo_output, geo_stride, geo_index_stride;
-    uint8_t mesh_kind, mesh_notask; uint16_t mesh_threads, mesh_payload;   // an NVN2 task (1) or mesh (2) shader, a mesh shader with no task, its workgroup's threads, its payload's bytes (dmsh_meshstage.py)
+    uint8_t mesh_kind, mesh_notask, mesh_prim; uint16_t mesh_threads, mesh_payload;   // an NVN2 task (1) or mesh (2) shader, a mesh shader with no task, its workgroup's threads, its payload's bytes (dmsh_meshstage.py)
     id<MTLFunction> mesh_obj;   // a mesh shader with no task: the object function that launches its workgroups in blocks of DMSH_MESH_GRID (dmsh_meshstage.py main0_o)
     uint32_t tess_out_cp, tess_in_bytes, tess_md; int tess_ok;   // a hull / domain shader rewritten for replay (dmsh_tess.py, nvn_tess.inc); tess_md: a domain's mode (dmsh_tess.mode_bits)
     id<MTLComputePipelineState> geo_pso; int geo_pso_failed, cps_failed;   // cps_failed: Metal refused this compute shader's pipeline (dispatch): its dispatches are skipped without asking again
@@ -6319,6 +6319,9 @@ static _Atomic int g_warm_stop;   // the process is ending (mtl_warm_stop): the 
 static _Atomic uint64_t g_warm_shaders, g_warm_rps, g_warm_mps, g_warm_cps, g_warm_skip_fz, g_warm_skip_stale;   // the prewarm's workers count into them
 static id<MTLRenderPipelineState> mtk_build(const pso_key *, NvShader *, NvShader *, NvShader *, NSError **, int *);
 static _Atomic uint64_t g_mtk_arch, g_mtk_built, g_mtk_dev;   // native mesh pipelines (mtk_build, all threads): taken from the pipeline archive, built and captured for it (arch_harvest), built with no Metal 4 descriptor (not kept)
+// Their bases (mtk_base, nvn_geometry.inc): pipelines specialized from one; callers that waited for another thread's compile of theirs, and how long; time compiling bases (all threads);
+// bases asked for when their program was made (mtk_prefetch), done, of them taken from the archive and compiled; pipelines a first draw took with nothing to compile (mtk_pso)
+static _Atomic uint64_t g_mtk_spec, g_mtk_base_wait_n, g_mtk_base_wait_ns, g_mtk_base_ns, g_mtk_pf_n, g_mtk_pf_done, g_mtk_pf_arch, g_mtk_pf_built, g_mtk_ready;
 static uint64_t g_warm_claim_shaders, g_warm_claim_rps, g_warm_claim_cps;
 static id<MTLFunction> bf_fn(NvShader *fs, const int *fx, uint8_t fbmask, const uint8_t *lmap);
 static int rt_range_bindings_ro(NSDictionary *j);
@@ -6557,6 +6560,10 @@ static NvShader *shader_load(NSString *pc, int stage, int layer) {
     NSDictionary *mst = [j[@"mesh_stage"] isKindOfClass:[NSDictionary class]] ? j[@"mesh_stage"] : nil;
     if (mst) { o->mesh_kind = [mst[@"kind"] isEqual:@"ts"] ? 1 : 2; o->mesh_threads = (uint16_t)[mst[@"threads"] unsignedIntValue]; o->mesh_payload = (uint16_t)[mst[@"payload"] unsignedIntValue];
                o->mesh_notask = o->mesh_kind == 2 && ![mst[@"task"] boolValue];
+               // mesh_prim: the mesh function hands per-primitive values on (dmsh_meshstage.py's dm_prim_t: the primitive ID, per-primitive attributes), so its pipelines are built
+               // whole (mtk_build). The reflection does not say so; the function's source in the library does, and a library without the sources counts as one that may
+               if (o->mesh_kind == 2) { NSData *src = msl_data([NSString stringWithFormat:@"%@/%@.metal", g_msl_dir, pc]);
+                                        o->mesh_prim = !src || memmem(src.bytes, src.length, "dm_prim_t", 9) != NULL; }
                if (o->mesh_kind == 2 && atomic_load(&g_depth_zero) && j[@"entry_z"]) entry = j[@"entry_z"]; }   // the depth convention, as a vertex shader takes it above
     if (j[@"entry_geometry_capture"]) {
         NSError *ge = nil; MTLFunctionConstantValues *gcv = [MTLFunctionConstantValues new];
@@ -10181,6 +10188,13 @@ void mtl_pso_line(char *o, size_t n) {
         snprintf(o + o2, n > o2 ? n - o2 : 0, "; compute pipelines from the archive bundled with the app %llu, from this device's archive %llu, built %llu (%.1f ms looking up, %.1f ms building)",
                  (unsigned long long)(ca - pca), (unsigned long long)(cr - pcr), (unsigned long long)(cb - pcb), (cl - pcl) / 1e6, (cn - pcn) / 1e6);
     pca = ca; pcr = cr; pcb = cb; pcl = cl; pcn = cn;
+    static uint64_t pm[8]; uint64_t m[8] = {g_mtk_pf_n, g_mtk_pf_arch, g_mtk_pf_built, g_mtk_base_ns, g_mtk_ready, g_mtk_base_wait_n, g_mtk_base_wait_ns, g_mtk_spec};   // task / mesh bases (mtk_base)
+    if (memcmp(pm, m, sizeof m)) { o2 = strlen(o);
+        snprintf(o + o2, n > o2 ? n - o2 : 0, "; task / mesh bases asked for at program creation %llu (taken from the archive %llu, compiled %llu), %.1f ms compiling bases on all threads; "
+                 "first draws with their base ready %llu, that waited for its compile %llu / %.1f ms; pipelines specialized %llu",
+                 (unsigned long long)(m[0] - pm[0]), (unsigned long long)(m[1] - pm[1]), (unsigned long long)(m[2] - pm[2]), (m[3] - pm[3]) / 1e6, (unsigned long long)(m[4] - pm[4]),
+                 (unsigned long long)(m[5] - pm[5]), (m[6] - pm[6]) / 1e6, (unsigned long long)(m[7] - pm[7])); }
+    memcpy(pm, m, sizeof pm);
 }
 
 // ---- Prebuild: the base of every shader pair of the game, into the pipeline archive ----
@@ -15640,12 +15654,14 @@ void mtl_prog_prefetch(const prog_t *cp) {
     prog_t *p = (prog_t *)cp;
     if (!g_dev || !prefetch_on()) return;
     shmap_read_once();   // the map only: the prewarm starts on the submit thread (shmap_load)
+    NSString *mesh[5] = {nil};   // a task / mesh program's libraries by stage (1 pixel, 3 task, 4 mesh), for its base (mtk_prefetch)
     for (unsigned i = 0; i < p->nstage; i++) {
         uint8_t md[8]; if (!prog_key(p, i, md)) MDIE("program stage %u has no shader key", i);
         NSString *k = [NSString stringWithFormat:@"%02x%02x%02x%02x%02x%02x%02x%02x", md[0], md[1], md[2], md[3], md[4], md[5], md[6], md[7]];
         NSString *stage = g_shmap[k]; int st = stage ? stage_of(stage) : -1;
         if (st < 0) continue;   // not in the package: a built-in kernel (prog_get)
         NSString *pc = [k stringByAppendingString:@"_b"];
+        if (st == 1) mesh[1] = pc; else if ([stage isEqualToString:@"task"]) mesh[3] = pc; else if ([stage isEqualToString:@"mesh"]) mesh[4] = pc;   // not the tessellation stages, which share 3 and 4
         if (!progpf_first(pc)) continue;
         dispatch_async(pp_bg_queue(), ^{ @autoreleasepool {
             NvShader *sh = shader_load(pc, st, 0);
@@ -15655,6 +15671,7 @@ void mtl_prog_prefetch(const prog_t *cp) {
             if (!g_progpf_loaded++) MLOG("shader prefetch at program creation: first library %s loaded in the background (DM_NVN_PREFETCH=0 turns it off)", pc.UTF8String);
         } });
     }
+    if (mesh[4]) mtk_prefetch(mesh[3], mesh[4], mesh[1]);
 }
 // Dispatches share the open copy encoder (a Metal 4 compute encoder) with the copies and dispatches around them, each ordered after everything the encoder already holds by a barrier inside it,
 // as a texture copy is (blit). An encoder of their own, with full queue barriers on both sides, cost the GPU a drain per dispatch: Hyrule Warriors: Age of Calamity's battles after the first cutscene

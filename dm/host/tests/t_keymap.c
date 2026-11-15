@@ -1,6 +1,6 @@
 // The Mac keyboard map (keymap.h): the default map, DM_KEYMAP over it (keys moved, a target left with none, errors skipped), the full form the settings window saves read back
 // as the same map, chords (Shift + arrows the right stick by default, any modifier either side, a plain key's own binding while no chord is bound), several keys on
-// one target, a key released as it went down, repeats
+// one target, a key released as it went down, repeats; mouse buttons as keys, and the mouse as each output's source
 #include "../keymap.h"
 #include <unistd.h>
 #include <stdio.h>
@@ -104,6 +104,55 @@ int main(void) {
     CHECK(n == 4 && !strcmp(list[1].name, "Another") && !strcmp(list[2].name, "WASD + IJKL") && !strcmp(list[3].name, "zz") && !*err, "Default, Another, WASD + IJKL, zz (no Name: the file's)");
     km_parse(&m3, list[2].map, NULL, 0); CHECK(!memcmp(m3.key, m.key, sizeof m.key), "the preset's map is the saved one");
     km_bind(&m, KM_Y, 4); CHECK(km_preset_save(&m, "wasd + ijkl", path, sizeof path) == 0 && km_presets_load(list, KM_MAX_PRESETS, err, sizeof err) == 4, "the same name again: replaced, not added");
+
+    // the mouse: its buttons are keys, its movement a source of each output (none, mouse, <key>+mouse), its settings go with the map, the mouse's sticks where over further
+    km_default(&m);
+    CHECK(!km_mouse_on(&m) && m.mouse_src[KM_OUT_RSTICK] == KM_SRC_OFF && m.mouse_src[KM_OUT_MOTION] == KM_SRC_OFF && km_mouse_out(&m, &st) < 0, "default: the mouse no game input");
+    CHECK(m.mouse_speed[0] == 2 && m.mouse_speed[1] == 2 && m.mouse_speed[2] == 1 && !m.mouse_invert[0], "default speeds: sticks 2, motion 1");
+    CHECK(km_key_code("click") == KM_MOUSE && km_key_code("mouse5") == KM_MOUSE + 4 && km_bindable(KM_MOUSE + 4) && !km_bindable(KM_MOUSE + 5), "mouse buttons 128..132");
+    CHECK(km_parse(&m, "ZR=click RS=rclick MOUSERSTICK=mouse MOUSERSTICKSPEED=1.5 MOUSERSTICKINVERT=1", err, sizeof err) == 0 && m.key[KM_MOUSE] == KM_ZR && m.key[KM_MOUSE + 1] == KM_RS, "ZR=click RS=rclick");
+    CHECK(km_mouse_on(&m) && m.mouse_src[KM_OUT_RSTICK] == KM_SRC_MOUSE && m.mouse_speed[0] == 1.5f && m.mouse_invert[0] && !m.mouse_invert[2] && km_mouse_out(&m, &st) == KM_OUT_RSTICK, "MOUSERSTICK=mouse, its speed and invert");
+    km_release_all(&st); CHECK(km_key(&m, &st, KM_MOUSE, 1, 0) && km_buttons(&st) == 1u << KM_ZR, "a click presses ZR");
+    km_key(&m, &st, KM_MOUSE, 0, 0); CHECK(!km_buttons(&st), "and lets it go");
+    km_format(&m, out, sizeof out); CHECK(strstr(out, "ZR=click ") && strstr(out, "MOUSERSTICK=mouse MOUSERSTICKSPEED=1.5 MOUSERSTICKINVERT=1 MOUSELSTICK=none"), "the full form names them");
+    CHECK(km_parse(&m2, out, NULL, 0) == 0 && km_same(&m, &m2), "and reads back as the same map");
+    km_ini_write(&m, "Mouse", file, sizeof file);
+    CHECK(strstr(file, "ZR = click\n") && strstr(file, "MouseRightStick = mouse\n") && strstr(file, "MouseRightStickSpeed = 1.5\n") && strstr(file, "MouseRightStickInvertY = yes\n") &&
+          strstr(file, "MouseLeftStick =\n") && strstr(file, "MouseLeftStickSpeed = 2\n") && strstr(file, "MouseMotionSpeed = 1\n"), "the keymap file names them");
+    CHECK(km_ini_read(file, name, sizeof name, &m3, err, sizeof err) == 0 && km_same(&m, &m3), "and reads back as the same map");
+    CHECK(km_parse(&m3, "MOUSERSTICKSPEED=fast MOUSEMOTIONSPEED=0 MOUSERSTICK=both MOUSEMOTION=nokey+mouse", err, sizeof err) == 4 && strstr(err, "fast") && strstr(err, "both") && strstr(err, "nokey") &&
+          m3.mouse_speed[0] == 2 && m3.mouse_speed[2] == 1 && !km_mouse_on(&m3), "wrong ones named, the defaults kept");
+    km_release_all(&st); st.mrx = 20000; st.mry = -100;
+    km_parse(&m3, "RUP=up", NULL, 0); km_key(&m3, &st, km_key_code("up"), 1, 0);
+    km_sticks(&st, &lx, &ly, &rx, &ry); CHECK(rx == 20000 && ry == 32767, "the mouse's x (the keys' 0), the key's y (over further)");
+    km_release_all(&st); st.mlx = -9000; km_key(&m3, &st, km_key_code("w"), 1, 0); km_sticks(&st, &lx, &ly, &rx, &ry); CHECK(lx == -9000 && ly == 32767, "the mouse's left stick likewise");
+    km_release_all(&st); CHECK(!st.mrx && !st.mry, "release all: the mouse's stick too");
+
+    // a key + mouse: that output while the key is held, else the plain mouse's; one output each
+    CHECK(km_parse(&m, "MOUSERSTICK=mouse MOUSEMOTION=space+mouse MOUSEMOTIONSPEED=1.5 MOUSEMOTIONINVERT=yes MOUSELSTICKINVERT=1", err, sizeof err) == 0 &&
+          m.mouse_src[KM_OUT_MOTION] == km_key_code("space") && m.mouse_speed[2] == 1.5f && m.mouse_invert[2] && m.mouse_invert[1], "the right stick, Space + Mouse the motion controls; each its own settings");
+    km_release_all(&st); CHECK(km_mouse_out(&m, &st) == KM_OUT_RSTICK, "Space up: the right stick");
+    km_key(&m, &st, km_key_code("space"), 1, 0); CHECK(km_mouse_out(&m, &st) == KM_OUT_MOTION && km_buttons(&st) == 1ull << 63, "Space held: the motion controls (Space still shakes)");
+    km_release_all(&st);
+    km_parse(&m2, "MOUSELSTICK=shift+mouse", NULL, 0); km_key(&m2, &st, 60, 1, 0);
+    CHECK(km_mouse_on(&m2) && km_mouse_out(&m2, &st) == KM_OUT_LSTICK, "shift+mouse: Right Shift held, the left stick; only a key + mouse is on");
+    km_release_all(&st); CHECK(km_mouse_out(&m2, &st) < 0, "and nothing while it is up");
+    CHECK(km_parse(&m2, "MOUSERSTICK=mouse MOUSELSTICK=mouse", NULL, 0) == 0 && m2.mouse_src[KM_OUT_RSTICK] == KM_SRC_OFF && m2.mouse_src[KM_OUT_LSTICK] == KM_SRC_MOUSE, "one output has the plain mouse: the last");
+    CHECK(km_parse(&m2, "MOUSERSTICK=lshift+mouse MOUSEMOTION=rshift+mouse", NULL, 0) == 0 && m2.mouse_src[KM_OUT_RSTICK] == KM_SRC_OFF, "and one each key, either side");
+    km_release_all(&st);
+    CHECK(km_parse(&m2, "ZR=space,click MOUSERSTICK=mouse MOUSEMOTION=click+mouse", NULL, 0) == 0 && m2.mouse_src[KM_OUT_MOTION] == KM_MOUSE && km_mouse_out(&m2, &st) == KM_OUT_RSTICK, "click+mouse: the right stick while the button is up");
+    km_key(&m2, &st, KM_MOUSE, 1, 0); CHECK(km_mouse_out(&m2, &st) == KM_OUT_MOTION && km_buttons(&st) == 1u << KM_ZR, "held: the motion controls, and ZR");
+    km_release_all(&st);
+    CHECK(km_parse(&m2, "MouseLeftStick=Mouse", NULL, 0) == 0 && m2.mouse_src[KM_OUT_LSTICK] == KM_SRC_MOUSE, "a file's name too");
+    char sb[64]; CHECK(!strcmp(km_src_label(60, sb, sizeof sb), "Shift + Mouse") && !strcmp(km_src_label(49, sb, sizeof sb), "Space + Mouse") && !strcmp(km_src_name(62, sb, sizeof sb), "ctrl+mouse"), "labels and names");
+    km_format(&m, out, sizeof out); CHECK(strstr(out, "MOUSEMOTION=space+mouse ") && km_parse(&m2, out, NULL, 0) == 0 && km_same(&m, &m2), "in the full form and back");
+    km_ini_write(&m, "Aim", file, sizeof file);
+    CHECK(strstr(file, "MouseMotion = space+mouse\n") && strstr(file, "MouseMotionSpeed = 1.5\n") && strstr(file, "MouseMotionInvertY = yes\n") &&
+          km_ini_read(file, name, sizeof name, &m3, NULL, 0) == 0 && km_same(&m, &m3), "in a keymap file and back");
+    km_default(&m); km_release_all(&st); km_key(&m, &st, km_key_code("h"), 1, 0); CHECK(st.down[km_key_code("h")] && !km_buttons(&st), "an unbound key's down is seen (a hold key), the game gets nothing");
+    km_key(&m, &st, km_key_code("h"), 0, 0); CHECK(!st.down[km_key_code("h")], "and its up");
+    CHECK(km_parse(&m, "ZR=shift+click", NULL, 0) == 0 && (km_key(&m, &st, KM_MOUSE, 1, KM_MOD_SHIFT), km_buttons(&st) == 1u << KM_ZR), "a chord of a mouse button: Shift + click");
+    km_release_all(&st);
 
     // PR #386's form (NX2Apple ships it): entries separated by ',', keys by their codes, its names; none is no key
     CHECK(km_parse(&m, "A=40,B=38", err, sizeof err) == 0 && m.key[40] == KM_A && m.key[38] == KM_B, "A=40,B=38: A and B swapped (K and J)");

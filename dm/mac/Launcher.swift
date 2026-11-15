@@ -542,27 +542,47 @@ public func dmMacLauncher(_ showWindow: Int32) -> Int32 {
 @_silgen_name("dm_km_group_target") private func dm_km_group_target(_ g: Int32, _ i: Int32) -> Int32
 @_silgen_name("dm_km_keys") private func dm_km_keys() -> Int32
 @_silgen_name("dm_km_bindable") private func dm_km_bindable(_ code: Int32) -> Int32
-@_silgen_name("dm_km_read") private func dm_km_read(_ map: UnsafePointer<CChar>?, _ key: UnsafeMutablePointer<UInt8>) -> Int32
+@_silgen_name("dm_km_read") private func dm_km_read(_ map: UnsafePointer<CChar>?, _ key: UnsafeMutablePointer<UInt8>, _ src: UnsafeMutablePointer<Int32>, _ speed: UnsafeMutablePointer<Float>, _ invert: UnsafeMutablePointer<Int32>) -> Int32
+@_silgen_name("dm_km_outs") private func dm_km_outs() -> Int32
+@_silgen_name("dm_km_out_label") private func dm_km_out_label(_ o: Int32) -> UnsafePointer<CChar>
+@_silgen_name("dm_km_src_off") private func dm_km_src_off() -> Int32
+@_silgen_name("dm_km_src_mouse") private func dm_km_src_mouse() -> Int32
+@_silgen_name("dm_km_mouse_key") private func dm_km_mouse_key(_ button: Int32) -> Int32
+@_silgen_name("dm_km_src_label") private func dm_km_src_label(_ src: Int32) -> UnsafePointer<CChar>
+@_silgen_name("dm_km_mouse_set") private func dm_km_mouse_set(_ src: UnsafeMutablePointer<Int32>, _ out: Int32, _ v: Int32)
 @_silgen_name("dm_km_presets_load") private func dm_km_presets_load() -> Int32
-@_silgen_name("dm_km_preset_save") private func dm_km_preset_save(_ key: UnsafePointer<UInt8>, _ name: UnsafePointer<CChar>, _ path: UnsafeMutablePointer<CChar>, _ n: Int) -> Int32
+@_silgen_name("dm_km_preset_save") private func dm_km_preset_save(_ key: UnsafePointer<UInt8>, _ src: UnsafePointer<Int32>, _ speed: UnsafePointer<Float>, _ invert: UnsafePointer<Int32>, _ name: UnsafePointer<CChar>, _ path: UnsafeMutablePointer<CChar>, _ n: Int) -> Int32
 @_silgen_name("dm_km_preset_dir") private func dm_km_preset_dir() -> UnsafePointer<CChar>
 @_silgen_name("dm_km_preset_name") private func dm_km_preset_name(_ i: Int32) -> UnsafePointer<CChar>
 @_silgen_name("dm_km_preset_map") private func dm_km_preset_map(_ i: Int32) -> UnsafePointer<CChar>
-@_silgen_name("dm_km_write") private func dm_km_write(_ key: UnsafePointer<UInt8>, _ out: UnsafeMutablePointer<CChar>, _ n: Int) -> Int32
+@_silgen_name("dm_km_write") private func dm_km_write(_ key: UnsafePointer<UInt8>, _ src: UnsafePointer<Int32>, _ speed: UnsafePointer<Float>, _ invert: UnsafePointer<Int32>, _ out: UnsafeMutablePointer<CChar>, _ n: Int) -> Int32
 
-/// A keyboard map: the target each binding presses (keymap.h: a binding is layer * keys + key code, the layers plain, Shift, Control, Option; 0xff none)
+/// A keyboard map: the target each binding presses (keymap.h: a binding is layer * keys + key code, the layers plain, Shift, Control, Option; 0xff none; mouse buttons from
+/// key code 128), and what mouse movement moves: each output's source, speed and Invert Y (keymap.h MOUSERSTICK, MOUSELSTICK, MOUSEMOTION)
 struct KeyMap: Equatable {
     static let none: UInt8 = 0xff
-    static let slots = Int(dm_km_slots()), keyCount = Int(dm_km_keys())
+    static let slots = Int(dm_km_slots()), keyCount = Int(dm_km_keys()), outs = Int(dm_km_outs())
+    static let srcOff = dm_km_src_off(), srcMouse = dm_km_src_mouse()   // an output's source: none, the plain mouse; else the key to hold (keymap.h KM_SRC_*)
+    static let outputs = (0..<dm_km_outs()).map { String(cString: dm_km_out_label($0)) }   // keymap.h KM_OUT_*
+    static func mouseKey(_ button: Int) -> Int? { let k = dm_km_mouse_key(Int32(button)); return k < 0 ? nil : Int(k) }   // a mouse button's key code
     var key = [UInt8](repeating: KeyMap.none, count: KeyMap.slots)
+    var mouseSrc = [Int32](repeating: KeyMap.srcOff, count: KeyMap.outs)
+    var mouseSpeed = [Float](repeating: 0, count: KeyMap.outs)   // all three filled by init (keymap.h km_default)
+    var mouseInvert = [Int32](repeating: 0, count: KeyMap.outs)
+    static func srcSlot(_ o: Int) -> Int { -10 - o }   // the capture slot of an output's mouse key (row targets are 0...)
 
     /// keymap.h's DM_KEYMAP over the default map (an empty string: the default)
-    init(_ map: String = "") { _ = map.withCString { s in key.withUnsafeMutableBufferPointer { dm_km_read(s, $0.baseAddress!) } } }
+    init(_ map: String = "") {
+        _ = map.withCString { s in key.withUnsafeMutableBufferPointer { k in dm_km_read(s, k.baseAddress!, &mouseSrc, &mouseSpeed, &mouseInvert) } }
+    }
+    /// An output's source; another output with the plain mouse or the same key gets none (keymap.h km_mouse_set)
+    mutating func setSource(_ o: Int, _ v: Int32) { dm_km_mouse_set(&mouseSrc, Int32(o), v) }
+    static func label(source v: Int32) -> String { String(cString: dm_km_src_label(v)) }
 
     /// The full form ("A=j B=k ... SHAKE=space"), as launcher.DM_KEYMAP keeps it
     var string: String {
         var out = [CChar](repeating: 0, count: Int(dm_km_format_max()))   // any map's full form fits
-        _ = key.withUnsafeBufferPointer { dm_km_write($0.baseAddress!, &out, out.count) }
+        _ = key.withUnsafeBufferPointer { dm_km_write($0.baseAddress!, mouseSrc, mouseSpeed, mouseInvert, &out, out.count) }
         return String(cString: out)
     }
     func keys(_ target: Int) -> [Int] { (0..<KeyMap.slots).filter { key[$0] == UInt8(target) } }
@@ -582,7 +602,7 @@ struct KeyMap: Equatable {
     /// Saved as a keymap file named name (one of that name replaced); the file's path, or nil
     func savePreset(_ name: String) -> String? {
         var path = [CChar](repeating: 0, count: 1024)
-        let r = key.withUnsafeBufferPointer { k in name.withCString { dm_km_preset_save(k.baseAddress!, $0, &path, path.count) } }
+        let r = key.withUnsafeBufferPointer { k in name.withCString { dm_km_preset_save(k.baseAddress!, mouseSrc, mouseSpeed, mouseInvert, $0, &path, path.count) } }
         return r == 0 ? String(cString: path) : nil
     }
 
@@ -619,14 +639,14 @@ struct KeyboardSection: View {
 
     var body: some View {
         Section {
-            LabeledContent("Keyboard") {
+            LabeledContent("Keyboard and mouse") {
                 HStack {
                     Text(summary).foregroundStyle(.secondary)
                     Button("Customize…") { editing = true }.disabled(fixed != nil)
                 }
             }
         } footer: {
-            Text("Choose which key presses each button and stick direction. Keys are kept by their place on the keyboard.")
+            Text("Choose which key or mouse button presses each button and stick direction, and what mouse movement moves. Keys are kept by their place on the keyboard.")
         }
         .sheet(isPresented: $editing, onDismiss: { presets = KeyMap.presets() }) { KeyMapSheet(saved: $saved) }
         .onAppear { presets = KeyMap.presets() }
@@ -643,6 +663,13 @@ struct KeyMapSheet: View {
     @State private var status = ""
     @State private var monitor: Any?
     @State private var presets: [(String, KeyMap)] = []
+    @State private var size = KeyMapSheet.fit()
+
+    /// The sheet's size from the settings window's, when it opens (a sheet keeps one size): three columns of cards in a wide window, two or one in a narrow
+    private static func fit() -> CGSize {
+        let w = NSApp.mainWindow?.contentLayoutRect.size ?? CGSize(width: 760, height: 800)
+        return CGSize(width: min(1060, max(380, w.width - 40)), height: min(720, max(420, w.height - 60)))
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -663,14 +690,20 @@ struct KeyMapSheet: View {
                 Spacer()
             }
             .padding(.horizontal, 20).padding(.top, 16)
-            Form {
-                ForEach(KeyMap.groups, id: \.0) { group in
-                    Section(group.0) {
-                        ForEach(group.1, id: \.self) { t in row(t) }
+            ScrollView {   // one scroll; the cards in as many columns as the width takes, each column filled top down
+                let split = KeyMapSheet.columns(size.width)
+                HStack(alignment: .top, spacing: 16) {
+                    ForEach(split.indices, id: \.self) { c in
+                        VStack(spacing: 16) {
+                            ForEach(split[c], id: \.self) { g in
+                                if let group = KeyMap.groups.first(where: { $0.0 == g }) { card { header(group.0); ForEach(group.1, id: \.self) { t in row(t) } } } else { card { mouse } }
+                            }
+                        }
+                        .frame(maxWidth: .infinity)
                     }
                 }
+                .padding(20)
             }
-            .formStyle(.grouped)
             Text(status.isEmpty ? footnote : status)
                 .font(.footnote).foregroundStyle(status.isEmpty ? .secondary : .primary)
                 .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 20).padding(.top, 8)
@@ -680,27 +713,95 @@ struct KeyMapSheet: View {
             }
             .padding(20)
         }
-        .frame(width: 460, height: 640)
+        .frame(width: size.width, height: size.height)
         .onAppear { map = KeyMap(saved); presets = KeyMap.presets() }
         .onDisappear { stop() }
     }
 
+    private static let mouseCard = "Mouse and trackpad"
+    /// The cards, one per group (the buttons first, as the controller is read) and the mouse's, in as many columns as the width takes, each filled top down
+    /// until it holds about its share of the rows
+    private static func columns(_ width: CGFloat) -> [[String]] {
+        let first = ["Buttons", "Left stick", "Right stick", "D-pad"]
+        let order = first.filter { t in KeyMap.groups.contains { $0.0 == t } } + KeyMap.groups.map(\.0).filter { !first.contains($0) } + [mouseCard]
+        let rows = order.map { t in (KeyMap.groups.first { $0.0 == t }?.1.count ?? 6) + 1 }   // the mouse's: three outputs, two speeds and a note
+        let n = width >= 1032 ? 3 : width >= 696 ? 2 : 1, share = Double(rows.reduce(0, +)) / Double(n) * 1.1
+        var cols: [[String]] = [[]], height = 0
+        for (t, r) in zip(order, rows) {
+            if !cols[cols.count - 1].isEmpty && Double(height + r) > share && cols.count < n { cols.append([]); height = 0 }
+            cols[cols.count - 1].append(t); height += r
+        }
+        return cols
+    }
     private var activePreset: String { presets.first { $0.1 == map }?.0 ?? "Custom" }   // as the settings window's Keyboard row names it
 
-    private var footnote: String { "Click a button, then press its key, or hold Shift, Control or Option and press a key; right-click for No Key, or Add Key… for another key." }
+    /// What mouse movement moves: per output, as the keys are per button
+    @ViewBuilder private var mouse: some View {
+        header(KeyMapSheet.mouseCard)
+        ForEach(0..<KeyMap.outs, id: \.self) { o in mouseRows(o) }
+        Text("The mouse moves one output at a time: the one whose key is held, else the one set to Mouse. In the game a click captures the pointer; Esc lets it go.")
+            .font(.footnote).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+    }
+
+    private func header(_ title: String) -> some View { Text(title).font(.headline).padding(.top, 6) }
+    /// A card of the grid: rows on a rounded background, as a grouped Form's sections look
+    private func card<C: View>(@ViewBuilder _ content: () -> C) -> some View {
+        VStack(alignment: .leading, spacing: 8) { content() }
+            .padding(14).frame(maxWidth: .infinity, alignment: .leading)
+            .background(RoundedRectangle(cornerRadius: 10).fill(Color(nsColor: .controlBackgroundColor)))
+            .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(Color(nsColor: .separatorColor)))
+    }
+    /// A row: its label at the left, its control at the right
+    private func line<C: View>(_ label: String, @ViewBuilder _ control: () -> C) -> some View {
+        HStack { Text(label); Spacer(minLength: 8); control() }
+    }
+
+    private var footnote: String { "Click a button, then press its key, or hold Shift, Control or Option and press a key; a mouse button counts as a key; right-click for No Key or Add Key…." }
 
     private func row(_ t: Int) -> some View {
-        LabeledContent(KeyMap.label(target: t)) {
-            let keys = map.keys(t)
+        let keys = map.keys(t)
+        return line(KeyMap.label(target: t)) {
             Button(capturing == t ? "Press a key…" : keys.isEmpty ? "None" : keys.map { KeyMap.label(key: $0) }.joined(separator: ", ")) {
                 capturing == t ? stop() : start(t)
             }
-            .frame(minWidth: 140)
+            .frame(minWidth: 140, alignment: .trailing)
             .foregroundStyle(keys.isEmpty && capturing != t ? .secondary : .primary)
             .contextMenu {
                 Button("No Key") { map.clear(t); save("\(KeyMap.label(target: t)) has no key.") }
                 Button("Add Key…") { start(t, add: true) }
             }
+        }
+    }
+
+    /// An output's row under Mouse and trackpad: its source (None, Mouse, or a key + Mouse: while it is held); then its speed and Invert Y
+    @ViewBuilder private func mouseRows(_ o: Int) -> some View {
+        let name = KeyMap.outputs[o]
+        line(name) {
+            Menu(capturing == KeyMap.srcSlot(o) ? "Press a key…" : KeyMap.label(source: map.mouseSrc[o])) {
+                Button("None") { map.setSource(o, KeyMap.srcOff); save("\(name): no mouse.") }
+                Button("Mouse") { map.setSource(o, KeyMap.srcMouse); save("\(name): Mouse; in the game a click captures the pointer.") }
+                Button("Hold a Key or Button…") { start(KeyMap.srcSlot(o)) }
+            }
+            .frame(width: 150)
+        }
+        if map.mouseSrc[o] != KeyMap.srcOff {
+            line("Speed") {
+                HStack {
+                    speedSlider($map.mouseSpeed[o], name)
+                    Toggle("Invert Y", isOn: Binding(get: { map.mouseInvert[o] != 0 }, set: { map.mouseInvert[o] = $0 ? 1 : 0; save("\(name): Invert Y \($0 ? "on" : "off").") }))
+                }
+            }
+        }
+    }
+
+    /// A speed slider (0.2 to 6, tenths) with its value beside it, saved when the drag ends
+    private func speedSlider(_ value: Binding<Float>, _ what: String) -> some View {
+        HStack {
+            Slider(value: Binding(get: { Double(value.wrappedValue) }, set: { value.wrappedValue = Float(($0 * 10).rounded() / 10) }), in: 0.2...10) { editing in
+                if !editing { save(String(format: "%@: mouse speed %.1f.", what, value.wrappedValue)) }
+            }
+            .frame(width: 110)
+            Text(String(format: "%.1f", value.wrappedValue)).monospacedDigit().frame(width: 30)
         }
     }
 
@@ -729,18 +830,27 @@ struct KeyMapSheet: View {
 
     private func start(_ t: Int, add: Bool = false) {
         stop()
-        capturing = t; adding = add; status = "Press \(add ? "another" : "a") key for \(KeyMap.label(target: t)) (Esc stops)."
+        capturing = t; adding = add
+        status = t <= KeyMap.srcSlot(0) ? "Press the key to hold for the mouse to move the \(KeyMap.outputs[KeyMap.srcSlot(0) - t]) (Esc stops)." : "Press \(add ? "another" : "a") key for \(KeyMap.label(target: t)) (Esc stops)."
         var pending: Int?   // a modifier pressed: bound alone if let go before a key
-        monitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .flagsChanged]) { e in
+        monitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .flagsChanged, .leftMouseDown, .rightMouseDown, .otherMouseDown]) { e in
             guard let t = capturing else { return e }
-            let code = Int(e.keyCode), f = e.modifierFlags
+            let f = e.modifierFlags
+            if e.type == .leftMouseDown || e.type == .rightMouseDown || e.type == .otherMouseDown {   // a mouse button is an input as a key is (the click that started this has ended)
+                pending = nil
+                let b = Int(e.buttonNumber)
+                if let k = KeyMap.mouseKey(b) { bind(t, KeyMap.slot(k, f)) } else { NSSound.beep() }
+                return nil
+            }
+            let code = Int(e.keyCode)
             if e.type == .flagsChanged {
                 // a Shift, Control or Option key: down, it may start a chord; up with no key between, it is the binding. ⌘, Caps Lock and fn are not bindable
                 // that very key, left or right: the device-dependent bits (NX_DEVICE*KEYMASK), as keyboard_mac.h's kb_modifier_down
                 let bits: [Int: UInt] = [56: 0x2, 60: 0x4, 59: 0x1, 62: 0x2000, 58: 0x20, 61: 0x40]
                 guard let bit = bits[code] else { return e }
                 let down = f.rawValue & bit != 0
-                if down { pending = code } else if pending == code { pending = nil; bind(t, code) }
+                if down && t <= KeyMap.srcSlot(0) { bind(t, code) }   // an output's mouse key takes a modifier at once
+                else if down { pending = code } else if pending == code { pending = nil; bind(t, code) }
                 return nil
             }
             pending = nil
@@ -754,6 +864,12 @@ struct KeyMapSheet: View {
     }
 
     private func bind(_ t: Int, _ code: Int, add: Bool? = nil) {
+        if t <= KeyMap.srcSlot(0) {   // an output's mouse key: any key, which keeps its own button too
+            let o = KeyMap.srcSlot(0) - t, k = Int32(code % KeyMap.keyCount)
+            map.setSource(o, k); stop()
+            save("\(KeyMap.outputs[o]): \(KeyMap.label(source: k)), while it is held.")
+            return
+        }
         let also = add ?? adding
         let was = map.bind(t, code, add: also)
         stop()

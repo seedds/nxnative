@@ -4585,9 +4585,44 @@ static void sparse_view(NvPkg *pk, const tex_t *t) {
 static uint64_t g_texinfo_ser[8]; static int g_texinfo_n;
 // Distinct compressible image descriptions at one NVN address alias physical memory, even while all their descriptor objects are live (LM3's resolution families).
 // Single-description storage keeps the ordinary allocation. Families share an exact-sized placement heap, found through the existing alias table rather than a pool-lifetime owner.
-// Different formats, offsets, CPU-visible, sparse, linear, display, layered and multisample images keep their existing path. Inherited texels are not translated between incompatible
+// Different formats, offsets, CPU-visible, sparse, linear, display and layered images, and a multisample target with no live description over its bytes, keep their existing path. Inherited texels are not translated between incompatible
 // layouts: a changed layout is initialized by its GPU writer. Creating its descriptor must not zero another alias's live content in the earlier upload batch.
+// DM_NVN_STORAGE_ALIAS: NVN storage is bytes, not descriptions. Two texture objects the game makes over one pool offset read and write one another's texels whatever their
+// descriptions, and this engine relies on it: Metro 2033 Redux draws its effects (particles, beams, decals, the weapon's laser sight, the muzzle flash, the spiderwebs) into a
+// 640x360 4-sample RGBA8_sRGB colour target (ser 2630) that is the same pool storage as the 1280x720 single-sample scene target (ser 2611), 0x3c0000 bytes both (640x360x4
+// samples = 1280x720 texels; the block-linear layout pads both to 0x3c0000). Keyed by pool + offset + description, the host made two Metal textures, so the effects pass stored
+// into bytes nothing sampled: every effect vanished, and the scene target its upscale pass reads was never touched. A multisample colour target takes the placement heap of the
+// live description at its pool offset when the NVN format and the storage size are equal, so Metal places both at offset 0 of one allocation, as the console has them. Only that
+// pair: another format or size, a depth target, another target kind, a CPU-visible pool, sparse storage and an offset no live description owns keep the ordinary allocation.
+// DM_NVN_STORAGE_ALIAS=0 leaves it off.
+static int sa_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_STORAGE_ALIAS"); v = !(e && !strcmp(e, "0")); if (!v) MLOG("storage aliasing across descriptions: off (DM_NVN_STORAGE_ALIAS=0)"); } return v; }
 static id<MTLTexture> image_texture(const tex_t *t, MTLTextureDescriptor *d0) {
+    if (t->d.samples > 1) {   // a multisample target: the branch above, which has nothing to do with a resolution family
+        if (!sa_on() || !t->pool || !t->pool->mem || t->has_layout || t->d.target != NVN_TEXTURE_TARGET_2D_MULTISAMPLE || t->d.depth != 1 || t->d.levels != 1
+            || t->d.stride || fmt_depth(t->d.format) || (t->d.flags & IMAGE_NOT_SHARED)
+            || !(t->pool->flags & NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS) || nvn_sparse_pool(t->pool)) return nil;
+        MTLSizeAndAlign need = [g_dev heapTextureSizeAndAlignWithDescriptor:d0];
+        if (!need.size) return nil;
+        nvn_texlayout mine; nvn_tex_layout(&t->d, &mine);
+        __block id<MTLHeap> heap = nil;
+        pthread_mutex_lock(&g_smu);
+        own_alias_at_locked(t->pool, t->off, ^(const alias_key *k, id shared) {   // the description that owns these bytes, if one is live
+            if (heap || k->d.samples > 1 || k->d.target != NVN_TEXTURE_TARGET_2D || k->d.format != t->d.format) return;
+            nvn_texlayout theirs; nvn_tex_layout(&k->d, &theirs);
+            if (theirs.size != mine.size) return;   // the bytes of one description hold the other's only at the same size
+            NvImageHeap *ih = objc_getAssociatedObject(shared, &g_image_heap_owner_key);
+            NvRecycledHeap *rh = ih ? nil : objc_getAssociatedObject(shared, &g_rh_owner_key);
+            id<MTLHeap> h = ih ? ih->heap : rh ? rh->heap : nil;
+            if (h && h.size >= need.size) heap = h;
+        });
+        pthread_mutex_unlock(&g_smu);
+        id<MTLTexture> mt = heap ? [heap newTextureWithDescriptor:d0 offset:0] : nil;   // offset 0: one allocation for both descriptions
+        if (!mt) return nil;
+        res_add(mt);
+        static int n; if (n++ < 6) MLOG("storage alias: a %ux%u %d-sample format %#x target is placed in the heap of a live description over the same pool bytes (%llu MB)",
+                                        t->d.width, t->d.height, t->d.samples, t->d.format, (unsigned long long)(heap.size >> 20));
+        return mt;
+    }
     if (!image_shape(t) || !t->pool->mem || !(t->pool->flags & NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS) || nvn_sparse_pool(t->pool)) return nil;
     // Family members are written uncompressed (DM_NVN_FAMILY_NOCOMPRESS, on unless =0). With lossless compression a member read after another resolution wrote the shared bytes
     // decodes the other's compressed blocks as garbage: ASTRAL CHAIN's 1600x900 HDR targets (loaded, never cleared) came back from the 1440x810 pause menu with 1.1M non-finite
@@ -8239,10 +8274,20 @@ static int ix_range(const p_draw_idx *di, uint32_t *mn, uint32_t *mx) {
     return 1;
 }
 // The vertex ids a direct draw reads: [*lo, *hi]; 0 = not known (indirect, multi-draw, indices not known)
+// 2 = bounded without reading the indices: a direct indexed draw with 8- or 16-bit indices can address only the first
+// 256 / 65,536 vertices from its base vertex, whatever the indices say, so a conversion that cannot be narrowed by the
+// index range is still bounded by the index type instead of converting the whole bound stream (Metro 2033 Redux's laser
+// sight: a 6.2-million-vertex stream, a 140-vertex draw, and the indices not readable — the whole-range conversion
+// overflowed the staging budget below and the attribute was left unbound, so the draw collapsed to nothing)
 static int vc_draw_range(const p_draw *dw, const p_draw_idx *di, int64_t *lo, int64_t *hi) {
     if (dw) { if (dw->ind || dw->mdi_cnt || dw->count <= 0) return 0; *lo = dw->first; *hi = (int64_t)dw->first + dw->count - 1; return 1; }
-    uint32_t mn, mx; if (!di || !ix_range(di, &mn, &mx)) return 0;
-    *lo = (int64_t)mn + di->base_vertex; *hi = (int64_t)mx + di->base_vertex; return 1;
+    if (!di) return 0;
+    uint32_t mn, mx;
+    if (ix_range(di, &mn, &mx)) { *lo = (int64_t)mn + di->base_vertex; *hi = (int64_t)mx + di->base_vertex; return 1; }
+    if (di->ind || di->mdi_cnt) return 0;   // the record's base vertex is the GPU's, so the index type bounds nothing here
+    int isz = di->itype == 0 ? 1 : di->itype == 1 ? 2 : 4;
+    if (isz < 4) { *lo = (int64_t)di->base_vertex; *hi = (int64_t)di->base_vertex + (isz == 1 ? 255 : 65535); return 2; }
+    return 0;
 }
 // Kept conversions: a conversion whose source bytes have not changed is bound again in later submissions, not made again. A football stadium's streams (EA SPORTS FC 27, 8- and
 // 16-bit integers into float inputs) come to 7.65 million vertices a submission, 122 MB written every frame: 26.8 ms of the submitting thread on an M4. A key (range, format,
@@ -8366,8 +8411,9 @@ static void vconv_bind(id<MTL4RenderCommandEncoder> en, NvShader *vs, int tf, co
         int a = rf->v[v].nvn, st = S.attr[a].stream, f = S.attr[a].fmt; uint32_t off = S.attr[a].offset, stride = st < 16 ? S.stream[st].stride : 0;
         uint64_t addr = st < 16 ? S.vbuf[st].address : 0, size = st < 16 ? S.vbuf[st].size : 0, gpu = 0;
         uint64_t es = (uint64_t)vconv_size(f), v0 = 0, nv = size >= off + es ? stride == 0 ? 1 : (size - off - es) / stride + 1 : 0, whole = nv;
-        if (vc && nv && stride && !S.stream[st].divisor) {   // per-vertex stream: only the vertices the draw reads
+        if (nv && (vc || nv * 16 > (64u << 20)) && stride && !S.stream[st].divisor) {   // per-vertex stream: only the vertices the draw reads (or, without that, only when the whole bound range cannot be staged)
             if (rk < 0) rk = vc_draw_range(dw, di, &rlo, &rhi);
+            if (rk == 2 && di) { static int once; if (!once++) MLOG("vertex attribute conversion: the draw's index range is not readable; bounded by the index type, the %u vertices a %d-bit index can address from the base vertex (format %#x)", (unsigned)(di->itype == 0 ? 256u : 65536u), di->itype == 0 ? 8 : 16, f); }
             int64_t a0 = rlo < 0 ? 0 : rlo, a1 = rhi < (int64_t)nv - 1 ? rhi : (int64_t)nv - 1;
             if (rk && a0 <= a1) { v0 = (uint64_t)a0; nv = (uint64_t)(a1 - a0 + 1); }
         }

@@ -18,7 +18,7 @@ CAP_SIZE(p_bind_vbuf1, 16); CAP_OFF(p_bind_vbuf1, size, 4); CAP_OFF(p_bind_vbuf1
 CAP_SIZE(p_bind_buf, 24); CAP_OFF(p_bind_buf, addr, 8); CAP_OFF(p_bind_buf, size, 16);
 CAP_SIZE(p_bind_ubo_small, 16); CAP_OFF(p_bind_ubo_small, size, 4); CAP_OFF(p_bind_ubo_small, addr, 8);
 CAP_SIZE(p_bind_handles, 280); CAP_OFF(p_bind_handles, n, 8); CAP_OFF(p_bind_handles, defer, 12); CAP_OFF(p_bind_handles, src, 16);
-CAP_SIZE(p_bind_tex1, 24); _Static_assert(BIND_TEX1_NOBASE == 0x100, "nvn_capture.c: BIND_TEX1_NOBASE changed: update cap_layout");
+CAP_SIZE(p_bind_tex1, 16);
 CAP_SIZE(p_draw, 48); CAP_OFF(p_draw, ind, 24); CAP_OFF(p_draw, mdi_cnt, 32);
 CAP_SIZE(p_draw_idx, 56); CAP_OFF(p_draw_idx, ibuf, 24); CAP_OFF(p_draw_idx, ind, 32); CAP_OFF(p_draw_idx, mdi_cnt, 40);
 CAP_SIZE(p_dispatch, 32); CAP_OFF(p_dispatch, ind, 24);
@@ -41,20 +41,19 @@ _Static_assert(OP_COUNT_ == 60, "nvn_capture.c: a record op was added or removed
 _Static_assert(sizeof(p_copy_strides) == 16 && COPY_STRIDES_OFF == 192, "nvn_capture.c: p_copy_strides moved: update COPY_STRIDES_LAYOUT");
 const char *cap_layout(void) {
     // sizes and pointer offsets as the walk knows them (the asserts above hold them to nvn_obj.h); bump this text with any change to the walk
-    return "format 1\nops 54\n"
+    return "format 2 relative descriptor handles\nops 54\n"
            "tex_t 128 mem 88 pool 96 serial 120\npool_t 40\ndpool_t 24\nprog_t 112\nsync_t 16\nsamp_par 40\nview_t 16\n"
            "p_set_rt 240 color 8 depth 208\np_bind_program 16\np_bind_vbuf 264 r 8\np_bind_vbuf1 16 addr 8\np_bind_buf 24 addr 8\np_bind_ubo_small 16 addr 8\n"
-           "p_bind_handles 280 src 16\np_bind_tex1 24 nobase 0x100 short 16\np_bind_state short\np_draw 48 ind 24 mdi_cnt 32\np_draw_idx 56 ibuf 24 ind 32 mdi_cnt 40\np_dispatch 32 ind 24\np_set_pool 8\n"
+           "p_bind_handles 280 src 16\np_bind_tex1 16\np_bind_state short\np_draw 48 ind 24 mdi_cnt 32\np_draw_idx 56 ibuf 24 ind 32 mdi_cnt 40\np_dispatch 32 ind 24\np_set_pool 8\n"
            "p_copy_b2t 64 src 0 tex 8\np_copy_t2t 104 src 0 dst 8\np_clear_tex 72 tex 0\np_clear_buf 24 addr 0\np_tf_bind 24 addr 8\np_tf_state 16 ctl 8\np_render_cond 16 addr 8\n"
            "signal_event 16 val 0\nreport_counter 16 addr 8\ncopy_b2b 24 src 0 dst 8\nupdate_ub dst 0\nfence_sync 8 sync 0\njump 8\ncall 8\n"
            MULTI_DRAW_LAYOUT COPY_STRIDES_LAYOUT;
 }
 
 int cap_layout_matches(const char *layout, size_t n) {
-    // Each addition is appended. Captures with an earlier complete layout (before the copy strides' tail, before the multi-draw opcode) still use the same op numbers and payloads.
+    // Format 1 stored some descriptor handles as host-table IDs. Re-record those captures: they cannot be interpreted as the execution-relative handles of format 2.
     const char *current = cap_layout();
-    size_t full = strlen(current), no_strides = full - (sizeof COPY_STRIDES_LAYOUT - 1), no_multi = no_strides - (sizeof MULTI_DRAW_LAYOUT - 1);
-    return (n == full || n == no_strides || n == no_multi) && !memcmp(layout, current, n);
+    return n == strlen(current) && !memcmp(layout, current, n);
 }
 
 const char *cap_record_unsupported(uint32_t op) {

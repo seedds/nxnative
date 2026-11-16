@@ -14,10 +14,11 @@
 static _Atomic uint64_t poll_clock;
 static uint64_t test_now_ns(void) { return atomic_load(&poll_clock); }
 static unsigned sleep_requests;
+static long last_request;   // ns of the last sleep asked for
 static int test_nanosleep(const struct timespec *request, struct timespec *remaining) {
     (void)remaining;
     assert(request->tv_sec == 0 && request->tv_nsec > 0 && request->tv_nsec < 1000000000);
-    sleep_requests++;
+    sleep_requests++; last_request = request->tv_nsec;
     return 0;
 }
 static _Thread_local struct timespec wait_start;
@@ -142,6 +143,10 @@ int main(void) {
     for (int i = 0; i < 300; i++) { atomic_fetch_add(&poll_clock, 30000); uint64_t q[32] = {25000}; svc_thread(0x0B, q); }
     assert(backoffs() == b0);
     puts("PASS: 25 us sleeps with 30 us of work between them never back off");
+    unsigned s1 = sleep_requests; atomic_fetch_add(&poll_clock, 30000);
+    r[0] = 20000; svc_thread(0x0B, r);
+    assert(sleep_requests == s1 + 1 && last_request == 20000);
+    puts("PASS: a 20 us sleep, within the precise sleep's margin, sleeps once for its length");
 
     poll_run(500, 0, 0);
     b0 = backoffs();

@@ -75,6 +75,7 @@ typedef struct thr {
     uint64_t nsvc;             // SVC count (for the state dump)
     uint64_t nyield, nyield_seen, nbackoff, nbackoff_seen;   // Yields (SleepThread 0/-1/-2) and those the back-off turned into short sleeps, with both counts at the last power report (dm_yield_top)
     uint64_t nclkyield, nclkyield_seen;       // Yields of clock waits (thr_yield), and their count at the last power report
+    uint64_t npsleep, npsleep_seen; int64_t psleep_ns;   // Short guest sleeps (poll_sleep), their count at the last power report, and the length the last one asked for
     uint64_t nspin, nspin_seen, spin_site; const char *spin_mod;   // Spin wait passes (dm_spin_wait; those that yield count in nyield too) and where the last one was
     uint64_t srun_svc, srun_t0, spin_ret;     // Current spin wait: nsvc at its passes, when it began, when the last pass returned
     uint64_t cpu_seen_us;                     // CPU time (µs) at the last power report (dm_thread_cpu)
@@ -987,7 +988,7 @@ void dm_guest_sleep_ns(int64_t ns);
 static void poll_sleep(thr_t *me, int64_t ns) {
     uint64_t now = now_ns();
     if (me->yrun_svc + 1 != me->nsvc || now - me->poll_ret > SPIN_GAP_NS) me->yrun_t0 = now;   // a new run
-    me->yrun_svc = me->nsvc;
+    me->yrun_svc = me->nsvc; me->npsleep++; me->psleep_ns = ns;
     uint64_t bo = yield_backoff_ns(now - me->yrun_t0, 0);
     if (bo > (uint64_t)ns) { me->nyield++; backoff_sleep(me, bo); }
     else dm_guest_sleep_ns(ns);
@@ -996,17 +997,18 @@ static void poll_sleep(thr_t *me, int64_t ns) {
 // The threads that yielded or passed through spin waits most since the last call (the power line every 300 frames, hle_nvn.c): "handle name N (back-off sleeps M)", at most two,
 // N the yields (spin wait passes that yielded among them), with the clock waits' yields among them ("; clock waits C"), the spin wait passes and the last one's site ("; spin passes K, last at main+0x…")
 void dm_yield_top(char *out, size_t n) {
-    thr_t *top[2] = {0}; uint64_t d[2] = {0}, b[2] = {0}, c[2] = {0}, cp[2] = {0}, s[2] = {0}, r[2] = {0};
+    thr_t *top[2] = {0}; uint64_t d[2] = {0}, b[2] = {0}, c[2] = {0}, cp[2] = {0}, s[2] = {0}, r[2] = {0}, q[2] = {0};
     g_lock();
     for (thr_t *t = g_all; t; t = t->all) {
-        uint64_t y = t->nyield - t->nyield_seen, bo = t->nbackoff - t->nbackoff_seen, ck = t->nclkyield - t->nclkyield_seen, pr = t->ncwpred - t->ncwpred_seen, sp = t->nspin - t->nspin_seen, k = y + sp;
-        t->nyield_seen = t->nyield; t->nbackoff_seen = t->nbackoff; t->nclkyield_seen = t->nclkyield; t->ncwpred_seen = t->ncwpred; t->nspin_seen = t->nspin;
-        if (k > r[0]) { top[1] = top[0]; d[1] = d[0]; b[1] = b[0]; c[1] = c[0]; cp[1] = cp[0]; s[1] = s[0]; r[1] = r[0]; top[0] = t; d[0] = y; b[0] = bo; c[0] = ck; cp[0] = pr; s[0] = sp; r[0] = k; }
-        else if (k > r[1]) { top[1] = t; d[1] = y; b[1] = bo; c[1] = ck; cp[1] = pr; s[1] = sp; r[1] = k; }
+        uint64_t y = t->nyield - t->nyield_seen, bo = t->nbackoff - t->nbackoff_seen, ck = t->nclkyield - t->nclkyield_seen, pr = t->ncwpred - t->ncwpred_seen, sp = t->nspin - t->nspin_seen, ps = t->npsleep - t->npsleep_seen, k = y + sp + ps;
+        t->nyield_seen = t->nyield; t->nbackoff_seen = t->nbackoff; t->nclkyield_seen = t->nclkyield; t->ncwpred_seen = t->ncwpred; t->nspin_seen = t->nspin; t->npsleep_seen = t->npsleep;
+        if (k > r[0]) { top[1] = top[0]; d[1] = d[0]; b[1] = b[0]; c[1] = c[0]; cp[1] = cp[0]; s[1] = s[0]; r[1] = r[0]; q[1] = q[0]; top[0] = t; d[0] = y; b[0] = bo; c[0] = ck; cp[0] = pr; s[0] = sp; r[0] = k; q[0] = ps; }
+        else if (k > r[1]) { top[1] = t; d[1] = y; b[1] = bo; c[1] = ck; cp[1] = pr; s[1] = sp; r[1] = k; q[1] = ps; }
     }
     size_t o = 0; char nb[32];
     for (int i = 0; i < 2 && top[i] && o < n; i++) {
         o += snprintf(out + o, n - o, "%s%#x '%s' %llu times (back-off sleeps %llu", i ? ", " : "", top[i]->handle, thr_name(top[i], nb, sizeof nb), (unsigned long long)d[i], (unsigned long long)b[i]);
+        if (o < n && q[i]) o += snprintf(out + o, n - o, "; short sleeps %llu, last %lld ns", (unsigned long long)q[i], (long long)top[i]->psleep_ns);
         if (o < n && c[i]) o += snprintf(out + o, n - o, "; clock waits %llu, %llu of them slept to a predicted end", (unsigned long long)c[i], (unsigned long long)cp[i]);
         if (o < n && s[i]) o += snprintf(out + o, n - o, "; spin passes %llu, last at %s+%#llx", (unsigned long long)s[i], top[i]->spin_mod, (unsigned long long)top[i]->spin_site);
         if (o < n) o += snprintf(out + o, n - o, ")");
@@ -1044,8 +1046,17 @@ static void sleep_precise(uint64_t dl) {
         struct timespec ts = {(time_t)(s / 1000000000u), (long)(s % 1000000000u)}; nanosleep(&ts, 0);
     }
 }
+// The graphics library's switches (nvn_mtl.m sw_mode / sw_on): 0 off, 1 on, ab alternating with the DM_AB phases. Tests that link this file alone read 0 / 1 only
+__attribute__((weak)) int mtl_sw_mode(const char *name, int dflt) { const char *e = getenv(name); return e && *e ? strncmp(e, "ab", 2) && atoi(e) != 0 : dflt; }
+__attribute__((weak)) int mtl_sw_on(int m) { return m == 1; }
+static int g_short_sleep; static pthread_once_t g_short_sleep_once = PTHREAD_ONCE_INIT;
+static void short_sleep_init(void) { g_short_sleep = mtl_sw_mode("DM_SHORT_SLEEP", 1); }
+static int short_sleep_on(void) { pthread_once(&g_short_sleep_once, short_sleep_init); return mtl_sw_on(g_short_sleep); }
 // A guest thread sleeps ns nanoseconds the way SleepThread does: on the guest clock under the deterministic clock, else on time (sleep_precise). Also for host hooks that stand for a
-// call which blocks on hardware (hle_net.c: Poll / Select with nothing to wait on)
+// call which blocks on hardware (hle_net.c: Poll / Select with nothing to wait on).
+// A sleep of up to twice sleep_precise's 20 µs margin is one nanosleep of its length: sleep_precise returned at once from one of 20 µs (its deadline was already within the margin),
+// and Mario Kart World's job dispatcher (main+0x4520 on v0) sleeps exactly that between its scans of the job arrays, so its WorkerMgr threads spun through their waits (at the 60 fps
+// cap on an M3 Max: 26 % of a core between them, 10 % with the sleep, CPU energy -0.25 to -0.41 W handheld). DM_SHORT_SLEEP=0 returns at once as before (ab: alternates with the DM_AB phases)
 void dm_guest_sleep_ns(int64_t ns) {
     if (ns <= 0) return;
     if (dm_detclock_enabled()) {
@@ -1054,7 +1065,8 @@ void dm_guest_sleep_ns(int64_t ns) {
         return;
     }
     thr_t *me = pthread_getspecific(g_keythr); if (me) me->sleeping = 1;
-    sleep_precise(now_ns() + (uint64_t)ns);
+    if (ns <= 2 * 20000 && short_sleep_on()) { struct timespec ts = {0, (long)ns}; nanosleep(&ts, 0); }
+    else sleep_precise(now_ns() + (uint64_t)ns);
     if (me) me->sleeping = 0;
 }
 // A host hook's bounded wait on a host condition variable (m held), a sleep to a garbage collector's pause like dm_guest_sleep_ns; the caller checks its condition and the clock

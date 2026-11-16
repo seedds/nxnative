@@ -187,8 +187,10 @@ def readme(platform, sha, date, profiles, nxaot, tools=False, python=None, spirv
               '',
               'What this PC needs']
     lines += bullet(f'{"Windows 10 or later" if win else "Linux with glibc 2.38 and the C++ library of GCC 13 or later (Ubuntu 24.04 or later, Debian 13)"} and a GPU driver '
-                    'with Vulkan 1.3.' + ('' if win else ' Games are given a font of the system as their standard font, and the packer draws the button icons with its '
-                                          'letters: DejaVu Sans, Liberation Sans, Noto Sans or FreeSans (every desktop distribution installs one of them).'))
+                    'with Vulkan 1.3' + (' and the Vulkan loader (vulkan-1.dll, which the GPU driver installs): without it a game starts and draws nothing.' if win else
+                                         ' and the Vulkan loader (libvulkan.so.1: the package libvulkan1 on Ubuntu and Debian, which the drivers\' packages bring): without it a game '
+                                         'starts and draws nothing. Games are given a font of the system as their standard font, and the packer draws the button icons with its '
+                                         'letters: DejaVu Sans, Liberation Sans, Noto Sans or FreeSans (every desktop distribution installs one of them).'))
     need = []   # what packing needs that this folder does not carry
     if not python: need.append(f'Python 3.12 or later with lz4, capstone 5.0.2 or a later 5.0.x, fonttools and backports.zstd ({py} -m pip install lz4 "capstone>=5.0.2,<6" fonttools backports.zstd; '
                                'backports.zstd only before Python 3.14; without fonttools the button icons show as \'?\')')
@@ -207,15 +209,18 @@ def readme(platform, sha, date, profiles, nxaot, tools=False, python=None, spirv
                                           'or pack on Linux.')
     lines += ['',
               'Packing a game',
-              f'  1. Put each game\'s NSP files (base game, update, DLC) in a folder of its own, outside this folder.',
+              f'  1. Put each game\'s NSP (or XCI) files (base game, update, DLC) in a folder of its own, outside this folder.',
               f'  2. {pack} "<the game\'s NSP folder>" -k "<your prod.keys>"',
               '     (pack.sh / pack.cmd run scripts/build_ipa_from_nsp.py --platform ' + platform + '; --pack-mode max packs a faster game more slowly; --help lists the options).',
               '     It writes <NSP folder>/<title ID>_build/ (the packs, game-profile-' + platform + '.tsv, launch-' + platform + '.tsv, ' + ('run.cmd' if win else 'run.sh')
               + ') and <NSP folder>/<title ID>-work/ (the save).',
+              '     It needs no network, and free space on the NSP folder\'s drive of about the game\'s size and 6 GB more (it checks that first).',
               '',
               'Playing',
-              f'  Open nxlauncher{exe}. In Games folder, type the folder that holds your NSP folders and choose Open; pick a game and Play. The settings, the pack modes and',
-              '  the second pack ("Repack with profile") are described in docs/settings.md, "On Windows and Linux", of the nxnative repository.',
+              f'  Open nxlauncher{exe}. In Games folder, type the folder that holds your NSP folders and choose Open; pick a game and Play. Without the launcher\'s window,',
+              f'  <NSP folder>/<title ID>_build/{"run.cmd" if win else "run.sh"} starts the game as Play does, and {"nxlauncher.exe" if win else "./nxlauncher"} --games "<the folder that holds your NSP folders>"',
+              '  --play <title ID> does too (--help lists its options). The game\'s log is <NSP folder>/<title ID>-work/run/log.txt. The settings, the pack modes and',
+              '  the second pack ("Repack with profile") are described in docs/settings.md in this folder, "On Windows and Linux".',
               '',
               'This folder',
               f'  {"nxlauncher" + exe:<25} the launcher',
@@ -229,6 +234,7 @@ def readme(platform, sha, date, profiles, nxaot, tools=False, python=None, spirv
                         f'  {"bin/glslangValidator" + exe:<25} glslang, which the packer runs for the shaders of OpenGL games']
     if python: lines += [f'  {"python/":<25} the packer\'s Python {python} with lz4, capstone and fontTools']
     lines += [f'  {pack:<25} the packer: scripts/ and dm/ hold it and the game profiles',
+              f'  {"docs/settings.md":<25} the games\' settings and the launcher (its section "On Windows and Linux")',
               f'  {"licenses/":<25} the licences of nxnative and of the third-party code in it',
               f'  {"VERSION":<25} the commit this bundle was built from',
               '',
@@ -379,6 +385,7 @@ def assemble(platform, build, aot, out, tools=None, python=None, spirv=None):
     for name, src in progs + shaders: put(f'bin/{name}', src, mode=0o755)
     for rel, src, mode in runtime: put(rel, src, mode=mode)
     for rel, mode in files: put(rel, REPO / rel, mode=mode)
+    put('docs/settings.md', REPO / 'docs/settings.md')   # README.txt's "Playing" sends the player to it: the settings and the launcher, "On Windows and Linux"
     for name, src in lic: put(f'licenses/{name}', src)
     if platform == 'linux': put('pack.sh', data=pack_script(platform, nxaot, program), mode=0o755)
     else: put('pack.cmd', data=pack_script(platform, nxaot, program))

@@ -108,6 +108,8 @@ class Bundle(unittest.TestCase):
             self.assertEqual(files.pop(rel), 0o644, rel)
         self.assertEqual((out / 'licenses/SDL3.txt').read_text(), 'SDL3 licence\n')
         self.assertEqual((out / 'licenses/nxnative.txt').read_bytes(), (REPO / 'LICENSE').read_bytes())
+        # the settings document README.txt sends the player to, in the bundle (a player has no checkout)
+        self.assertEqual(files.pop('docs/settings.md'), 0o644); self.assertEqual((out / 'docs/settings.md').read_bytes(), (REPO / 'docs/settings.md').read_bytes())
         self.assertFalse([r for r in files if not r.startswith(('licenses/', 'dm/'))], files)   # nothing else at the top
         sha = subprocess.run(['git', '-C', str(REPO), 'log', '-1', '--format=%h'], capture_output=True, text=True).stdout.strip()
         version = (out / 'VERSION').read_text().splitlines()
@@ -120,6 +122,15 @@ class Bundle(unittest.TestCase):
         self.assertIn('which this folder does not carry: without them the packer reports the NVN shaders as not run', flat(readme))   # no --spirv: said
         self.assertNotIn('nothing to install', readme); self.assertNotIn('python/', readme)
         self.assertRegex(readme, r'\n  bin/nxhost-run +the host program the launcher starts, one for every game'); self.assertIn('Game profiles in this folder: 2.', readme)
+        # what a player with only this folder needs to know (found playing from the bundle alone): the Vulkan loader, XCI files, no network and the free space, playing without
+        # the launcher's window, the log, and the settings document in this folder instead of a repository's
+        self.assertIn('and the Vulkan loader (libvulkan.so.1: the package libvulkan1 on Ubuntu and Debian', flat(readme))
+        self.assertIn('Put each game\'s NSP (or XCI) files', readme); self.assertIn('It needs no network, and free space on the NSP folder\'s drive', flat(readme))
+        self.assertIn('<NSP folder>/<title ID>_build/run.sh starts the game as Play does, and ./nxlauncher --games "<the folder that holds your NSP folders>" --play <title ID>',
+                      flat(readme))
+        self.assertIn('The game\'s log is <NSP folder>/<title ID>-work/run/log.txt', flat(readme))
+        self.assertIn('described in docs/settings.md in this folder, "On Windows and Linux"', flat(readme)); self.assertNotIn('repository', readme)
+        self.assertRegex(readme, r'\n  docs/settings.md +the games\' settings and the launcher')
         self.assertNotIn('hosts/', readme + (out / 'pack.sh').read_text())
         self.assertIn('exec "${PYTHON:-python3}" "$here/scripts/build_ipa_from_nsp.py" --platform linux "$@"', (out / 'pack.sh').read_text())
         # a second run replaces the earlier bundle; a folder that is not one is refused

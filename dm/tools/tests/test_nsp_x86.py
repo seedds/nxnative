@@ -719,8 +719,15 @@ class Linux(Pack):
         self.assertEqual(real(bundle, 'windows'), (bundle / 'build/win64/nxhost-run.exe', False))   # a Windows bundle's is bin/nxhost-run.exe
         (bundle / 'bin/nxhost-run.exe').write_text(''); self.assertEqual(real(bundle, 'windows'), (bundle / 'bin/nxhost-run.exe', True))
         self.assertEqual(real(self.tmp / 'checkout', 'linux'), (self.tmp / 'checkout/build/linux/nxhost-run', False))   # a checkout: its build tree's, built or not
+        self.pack()   # from a checkout, the last line names the launcher's sources
+        done = [m for m in self.said if m.startswith('done: ')]
+        self.assertEqual(len(done), 1, self.said); self.assertIn(' or in the launcher nxlauncher (dm/launcher) (', done[0])
         with mock.patch.object(nsp, 'port_host', side_effect=lambda repo, platform: real(bundle, platform)):
             self.pack()
+            # from a bundle, the bundle's own launcher, by its path: a player's folder has no dm/launcher
+            done = [m for m in self.said if m.startswith('done: ')]
+            self.assertEqual(len(done), 1, self.said); self.assertIn(f' or in the launcher {bundle / "nxlauncher"} (nxhost-run {host}, ', done[0])
+            self.assertNotIn('dm/launcher', done[0])
             self.assertIn(('path', 'host', str(host)), launch_rows(self.work / 'launch-linux.tsv'))
             self.assertIn(f"nxhost-run is the port's bundle's: {host}", (self.work / 'run.sh').read_text())
             self.check_run_sh()
@@ -778,6 +785,12 @@ class Linux(Pack):
 
     def test_derived_profile(self):   # files of another build under the registered tag: packed from a derived profile, whose file the one host takes (no host to configure)
         nso(self.game / 'ExeFS/main', BID2); self.pack()
+        # the red line says first what it means for the player and what to do (pack a version the profile was brought up on), then the details
+        red = [m for m in self.said if m.startswith('[RED] this linux pack uses v0 ')]
+        self.assertEqual(len(red), 1, self.said)
+        self.assertIn('was not brought up on (v0 1.0.0), and the game may not run as well: these files are another build of it than the one the profile was brought up on. '
+                      'Details: ', red[0])
+        self.assertIn('main is a build the profile does not register', red[0])
         pdir = self.work / 'profile'
         self.assertEqual(game.Game(pdir / ID).builds()['v0']['main'], BID2)
         sh = (self.work / 'run.sh').read_text()
@@ -913,6 +926,19 @@ class Apple(unittest.TestCase):   # what the Apple builds run is as it was: no -
         self.assertIn('dmsh_build_vk.py', notes[2])
         self.assertNotIn('DLL', nsp.port_notes('linux', S, ro=True)[0]); self.assertIn('(<name>.aot.so)', nsp.port_notes('linux', S, ro=True)[1])
         self.assertTrue(notes[3].startswith('the GLSLC capture boots the game in the Mac host, which windows does not have'))
+
+
+class ProfileStatus(unittest.TestCase):   # report_profile_status's red line for a version the profile was not brought up on: what to do first, then the details
+    def test_unregistered_version(self):   # a player's v0 when the profile was brought up on the update v65536 (Mario vs. Donkey Kong from its .xci alone)
+        prof = lambda builds: types.SimpleNamespace(id=ID, title_id=TID, builds=lambda: builds)
+        reg, g = prof({'v65536': {'display': '1.0.1', 'main': BID}}), prof({'v0': {'display': '1.0.0', 'main': BID2}})
+        said = []
+        with mock.patch.object(nsp, 'say', said.append): nsp.report_profile_status(g, reg, 'v0', 'v0 is not a version the profile registers', False, 'linux pack')
+        self.assertEqual(len(said), 1, said)
+        self.assertTrue(said[0].startswith(f'[RED] this linux pack uses v0 (1.0.0), which game profile {ID} was not brought up on (v65536 1.0.1), and the game may not run as '
+                                           'well: to pack a version it was brought up on, put that version\'s NSP (its update) in the NSP folder beside the base game and pack '
+                                           'again (-p <version> picks it when a newer update is there too). Details: '), said[0])
+        self.assertIn('main is a build the profile does not register', said[0])
 
 
 class ProfileDirs(unittest.TestCase):   # DM_GAMES_DIR as the script joins it (os.pathsep), read by game.py: on Windows a ';' list of paths with drive letters

@@ -3045,9 +3045,15 @@ def report_profile_status(g, reg, pkg_ver, derived, provisional, artifact='IPA',
             say(f'this {artifact} uses the registered {pkg_ver} ({disp}) builds and every fix for them, with derived shader tables ({derived})')
         elif g.title_id != reg.title_id and not other and pkg_ver in reg.builds():   # a registered build under another title ID (same_build): every fix applies
             say(f'this {artifact} is game profile {reg.id}\'s {pkg_ver} ({disp}) under title ID {g.title_id:016X}: its settings and every fix for its builds, with shaders split from this title\'s own files')
-        else: say(f'[RED] this {artifact} uses {pkg_ver} ({disp}), which game profile {reg.id} was not brought up on ({registered_builds}): '
-            'its settings, with this version\'s own shaders' + (f'; {", ".join(other)} {"is a build" if len(other) == 1 else "are builds"} the profile does not register, so the fixes made for '
-            'the registered builds\' fixed addresses do not apply there; opt-in function patches apply only on a verified code match (see rewrite logs), and the game may not run as well' if other else '; every module is a registered build'))
+        else:   # what it means for the player and what to do first (another version: pack a registered one; other files under a registered version's tag: nothing to do), then the details
+            todo = ('these files are another build of it than the one the profile was brought up on' if pkg_ver in reg.builds() else
+                    'to pack a version it was brought up on, put that version\'s NSP (its update) in the NSP folder beside the base game and pack again (-p <version> picks it when a '
+                    'newer update is there too)')
+            say(f'[RED] this {artifact} uses {pkg_ver} ({disp}), which game profile {reg.id} was not brought up on ({registered_builds})' + (
+                f', and the game may not run as well: {todo}. Details: this pack takes the profile\'s settings, with this version\'s own shaders; {", ".join(other)} '
+                f'{"is a build" if len(other) == 1 else "are builds"} the profile does not register, so the fixes made for the registered builds\' fixed addresses do not apply there, '
+                'and opt-in function patches apply only on a verified code match (see the rewrite logs)' if other else
+                ': its settings, with this version\'s own shaders; every module is a registered build'))
         if other and patched: report_fix_coverage(patched, other, reg)
     if provisional:
         say(f'[RED] this {artifact} was built from a provisional game profile and the game may not boot: {g.dir}')
@@ -3332,7 +3338,9 @@ def main(args=None):
         ready = sorted(packs_ready(nxaot, nxaot_opts, aot, nro_dir, mods, platform, profiles, misses, takeovers), key=lambda m: m != pack_mode)   # the mode just packed first: run.sh's default
         launch_file(ready)
         rmtree(work / 'tmp')
-        say(f'done: the {platform} pack of {app_name or g.id} ({pkg_ver}; pack modes: {", ".join(ready) or "none"}) runs with {script} or in the launcher nxlauncher (dm/launcher; '
+        # from a bundle, the bundle's own launcher by its path, beside bin/ of its host (a player has no dm/launcher); from a checkout, the launcher's sources
+        launcher = host.parent.parent / ('nxlauncher.exe' if platform == 'windows' else 'nxlauncher') if bundled else 'nxlauncher (dm/launcher)'
+        say(f'done: the {platform} pack of {app_name or g.id} ({pkg_ver}; pack modes: {", ".join(ready) or "none"}) runs with {script} or in the launcher {launcher} ('
             f'nxhost-run {host}' + ('' if host.is_file() else ', not built yet: docker/README.md') + f', with --profile {gprof.name}); its save in {wdir / "run/save"}, the player\'s '
             f'choices in {wdir / "run/env.txt"}')
         if skipped: say(f'[RED] not run on this system: {"; ".join(skipped)}')

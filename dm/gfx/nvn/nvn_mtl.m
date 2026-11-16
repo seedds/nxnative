@@ -9133,9 +9133,10 @@ static dispatch_queue_t g_arch_q; static _Atomic int g_arch_new, g_arch_new_vd, 
 // pipeline found in the files. The flush used to hold a lock against every such compile instead, and one compile that did not return (Super Mario Odyssey's alRenderMaterialUber
 // with the front end at -O2: 33.7 minutes until Metal gave up, GitHub issue #294) held the flush, and the flush every compile and draw that came after it. Now such a compile
 // holds back the file of its own period and nothing else
-@interface ArchEpoch : NSObject { @public id<MTL4Compiler> comp; id<MTL4PipelineDataSetSerializer> ser; dispatch_group_t busy; _Atomic int active, n, vd, cs, ms, failed; int compacting;
+@interface ArchEpoch : NSObject { @public id<MTL4Compiler> comp; id<MTL4PipelineDataSetSerializer> ser; dispatch_group_t busy; _Atomic int active, n, vd, cs, ms, failed, crashed; int compacting;
     NSMutableData *keys; os_unfair_lock klock; _Atomic int unkeyed; } @end
-// n: pipelines captured; vd, cs, ms: those of them that are bases with a vertex layout, compute pipelines, native mesh pipelines; failed: a capture in it failed (arch_cap_failed); compacting: it may hold
+// n: pipelines captured; vd, cs, ms: those of them that are bases with a vertex layout, compute pipelines, native mesh pipelines; failed: a capture in it failed (arch_cap_failed); crashed: the compiler service died
+// under one of its captures, so it is not written (arch_cap_failed, arch_write_file); compacting: it may hold
 // recaptured bases (arch_flush); keys: the index keys of what it captured (arch_key, under klock), unkeyed: it captured a pipeline with no key, so its index is not complete
 @implementation ArchEpoch @end
 // The archive's index. Each file of the archive gets a list of the pipelines in it beside it (<file>.keys: arch_write_file), and a start reads every list (pso4_init), so a lookup asks
@@ -9708,8 +9709,21 @@ static void ep_key(ArchEpoch *ep, MTL4PipelineDescriptor *d) {   // a capture's 
     if (!k) { atomic_store(&ep->unkeyed, 1); return; }
     os_unfair_lock_lock(&ep->klock); if (!ep->keys) ep->keys = [NSMutableData data]; [ep->keys appendBytes:&k length:sizeof k]; os_unfair_lock_unlock(&ep->klock);
 }
+// The compiler service (MTLCompilerService) died under the compile: Metal's error then names the XPC connection it lost. Its domain is the GPU family's (AGXMetalG14G on an M2)
+// and its code a generic 2, so the text is what tells it apart
+static int err_compiler_died(NSError *e) {
+    NSString *t = e.localizedDescription;
+    return t && ([t containsString:@"XPC_ERROR_CONNECTION_INTERRUPTED"] || [t containsString:@"interrupted connection"]);
+}
 static void arch_cap_failed(ArchEpoch *ep, NSError *ce, const char *what) {
     const char *why = ce ? ce.localizedDescription.UTF8String : "no error given";
+    // A period the compiler service died in is never written. The service crashes under every compile it holds, and the period's serializer keeps pipelines of them whose
+    // functions never came back: the period written, a later start's lookup of such a mesh pipeline made Metal's archive build a descriptor without its mesh function, and
+    // validating it aborts the process ("meshFunction must not be nil", in -[MTLMeshRenderPipelineDescriptor validateWithDevice:error:] under AGX::ArchivePipelineFactory::
+    // lookupRenderPipeline) instead of failing the lookup: Ocarina of Time's every start on a cut10 archive, after Apple's compiler crashed on one of its mesh shaders (SIGBUS in
+    // AGX's LLVM backend, ac2f3feb11427426_b) in the cold start that wrote it. Its pipelines are captured again at a later start. Marked before anything else, so that a period
+    // handed over at quit (mtl_arch_save) with the compiles that were under way in it is not written either
+    if (ce && err_compiler_died(ce)) atomic_store(&ep->crashed, 1);
     int n = atomic_load(&ep->n);
     if (!n) { if (!atomic_exchange(&g_arch_cap_off, 1)) MLOG("[RED] pipeline archive: capturing a %s pipeline failed in a new flush period (%s): no more captures this run, pipelines are built without the archive", what, why); return; }
     if (atomic_exchange(&ep->failed, 1)) return;
@@ -10023,6 +10037,13 @@ static void arch_write(ArchEpoch *ep) {
 static void arch_write_file(ArchEpoch *ep) {
     int n = atomic_load(&ep->n), vd = atomic_load(&ep->vd), cs = atomic_load(&ep->cs), ms = atomic_load(&ep->ms);   // exact: no compile of the period is under way
     if (!n) return;
+    if (atomic_load(&ep->crashed)) {   // arch_cap_failed: what it holds cannot be trusted, and a lookup of it can abort the process
+        atomic_fetch_sub(&g_arch_new, n); atomic_fetch_sub(&g_arch_new_vd, vd);
+        if (ep->compacting) g_compact_bad = 1;   // the old files keep the bases this period would have held
+        MLOG("[RED] pipeline archive: a flush period the compiler service died in is not written (%d pipelines: %d bases, %d compute, %d task / mesh); they are captured again at a later start",
+             n, n - cs - ms, cs, ms);
+        return;
+    }
     [NSFileManager.defaultManager createDirectoryAtPath:g_arch_dir withIntermediateDirectories:YES attributes:nil error:nil];
     uint64_t t0 = bp_now(); NSError *e = nil;
     NSString *path = [g_arch_dir stringByAppendingPathComponent:vd || cs ? [NSString stringWithFormat:@"%05d-%d.mtl4a", g_arch_seq++, n] : [NSString stringWithFormat:@"p%05d.mtl4a", g_arch_seq++]], *tmp = [path stringByAppendingString:@".tmp"];

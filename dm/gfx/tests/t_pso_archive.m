@@ -101,6 +101,11 @@ static void concurrent_functions(id<MTLLibrary> library) {
     if (opts.lookupArchives.count) atomic_fetch_add(&lookup_calls, 1);
     int call = atomic_fetch_add(&calls, 1);
     if (!call) { dispatch_semaphore_signal(entered); dispatch_semaphore_wait(release, DISPATCH_TIME_FOREVER); }
+    if (fail == 2) {   // the compiler service dying under the compile, as Metal reports it (AGXMetalG14G code 2 on an M2)
+        if (error) *error = [NSError errorWithDomain:@"AGXMetalG14G" code:2 userInfo:@{NSLocalizedDescriptionKey: @"Compilation failed due to an interrupted connection: "
+                                                                                        "XPC_ERROR_CONNECTION_INTERRUPTED. This error occurred after multiple retries."}];
+        return nil;
+    }
     if (fail) { if (error) *error = [NSError errorWithDomain:@"test" code:1 userInfo:nil]; return nil; }
     return [compiler newRenderPipelineStateWithDescriptor:d compilerTaskOptions:opts error:error];
 }
@@ -475,6 +480,31 @@ static void concurrent_bases(int fail) {
     atomic_store(&fresh->n, 0); g_comp4 = plain; fresh->comp = fg->compiler;
     nvn_hm_clear(&g_pbase, hm_rel); err = nil;
     EXPECT("concurrent: failed base can retry", 1, pso_build(ds[0], 0, &err) != nil);
+}
+// A capture the compiler service died under (arch_cap_failed, err_compiler_died): its period is handed over and not written, the counts of unwritten pipelines drop by what it held,
+// and the run goes on capturing into a new period that is written. A written crashed period made Ocarina of Time's every later start abort in Metal's archive lookup
+static void crashed_period(void) {
+    char cdir[] = "/tmp/t_pso_crashed.XXXXXX"; if (!mkdtemp(cdir)) abort();
+    arch_flush_wait(); NSString *saved = g_arch_dir; g_arch_dir = @(cdir); nvn_hm_clear(&g_pbase, hm_rel); g_arch4 = @[]; g_arch4p = @[];
+    NSError *err = nil;
+    MTLRenderPipelineDescriptor *a = desc(MTLPixelFormatRGBA8Unorm, 0, MTLPixelFormatRGBA8Unorm, MTLColorWriteMaskAll, 1); a.vertexDescriptor.layouts[16].stride = 4096;
+    EXPECT("crashed: a capture before", 1, pso_build(a, 0, &err) != nil && atomic_load(&g_ep->n) == 1);
+    ArchEpoch *ep = g_ep; ArchiveGateCompiler *gate = [ArchiveGateCompiler new]; gate->compiler = ep->comp; gate->fail = 2; gate->calls = 1; ep->comp = (id<MTL4Compiler>)gate;
+    MTLRenderPipelineDescriptor *b = desc(MTLPixelFormatRGBA8Unorm, 1, MTLPixelFormatRGBA8Unorm, MTLColorWriteMaskAll, 1); b.vertexDescriptor.layouts[16].stride = 3072;
+    err = nil; EXPECT("crashed: the pipeline built by the plain compiler", 1, pso_build(b, 0, &err) != nil && !err);
+    EXPECT("crashed: the period marked", 1, ep->crashed);
+    EXPECT("crashed: handed over", 1, g_ep != ep);
+    EXPECT("crashed: still capturing", 1, arch_capturing());
+    ep->comp = gate->compiler;
+    arch_flush_wait();
+    EXPECT("crashed: the period not written", 0, (int)archive_files(@(cdir)).count);
+    EXPECT("crashed: nothing left counted as unwritten", 0, atomic_load(&g_arch_new));
+    MTLRenderPipelineDescriptor *c = desc(MTLPixelFormatRGBA8Unorm, 0, MTLPixelFormatRGBA8Unorm, MTLColorWriteMaskAll, 1); c.vertexDescriptor.layouts[16].stride = 2560;
+    EXPECT("crashed: the next period captures", 1, pso_build(c, 0, &err) != nil && atomic_load(&g_ep->n) == 1);
+    arch_flush_wait();
+    EXPECT("crashed: the next period written", 1, (int)archive_files(@(cdir)).count);
+    nvn_hm_clear(&g_pbase, hm_rel);
+    [NSFileManager.defaultManager removeItemAtPath:@(cdir) error:nil]; g_arch_dir = saved; g_arch4 = @[]; g_arch4p = @[];
 }
 static void capture_preserves_foreign_folder(void) {
     arch_flush_wait();   // Finish earlier captures: the captures below go into a new flush period
@@ -1112,6 +1142,7 @@ int main(int argc, char **argv) { @autoreleasepool {
     depth_only();
     concurrent_bases(0);
     concurrent_bases(1);
+    crashed_period();
     // key normalization
     pso_key k; memset(&k, 0, sizeof k); k.blend_en = 0x5; k.dfmt = MTLPixelFormatDepth32Float; k.sfmt = MTLPixelFormatStencil8;
     for (int i = 0; i < 8; i++) { k.cfmt[i] = MTLPixelFormatRGBA8Unorm; k.blend[i].src_rgb = 5; k.blend[i].dst_rgb = 6; }   // every target present: only the blend rule acts

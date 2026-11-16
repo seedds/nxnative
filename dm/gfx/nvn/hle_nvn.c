@@ -26,6 +26,7 @@
 #include <mach/mach.h>
 #include <TargetConditionals.h>
 #include <unistd.h>
+#include <stdio.h>
 #include <sys/mman.h>
 #include <errno.h>
 #if TARGET_OS_OSX
@@ -2338,6 +2339,22 @@ static int thermal_capped(void) {
 // A game with a frame step state page is out: its stubs hand the game whole vsyncs of 1/60 s
 static int g_fps_high = -1;
 static _Atomic int g_high_cap = 60;
+
+static void movie_debug_log(uint64_t presents, int movie, int cap, int step) {
+    static uint64_t last;
+    static int started;
+    if (presents - last < 120) return;
+    last = presents;
+    FILE *f = fopen("/tmp/nxnative-movie-debug.log", started ? "a" : "w");
+    if (!f) return;
+    if (!started) {
+        fputs("presents\tmovie_hz\thigh_cap\tstep_cap\n", f);
+        started = 1;
+    }
+    fprintf(f, "%llu\t%d\t%d\t%d\n",
+            (unsigned long long)presents, movie, cap, step);
+    fclose(f);
+}
 static int fps_high(void) {
     int v = __atomic_load_n(&g_fps_high, __ATOMIC_RELAXED);
     if (v < 0) {
@@ -2353,7 +2370,9 @@ static int fstep_hz(void) { return fps_high() ? 120 : 60; }   // the ticks the f
 static void high_cap_tick(void) {
     static int win = -1, link_env = -1;
     if (win < 0) { win = mtl_display_hz() != 0; link_env = getenv("DM_PRESENT_LINK") != NULL; }
-    int ok = !win || front_screen_max_fps() >= 120, movie = dm_movie_hz(), cap = ok && !movie && !thermal_capped() ? 120 : 60;
+    int ok = !win || front_screen_max_fps() >= 120, movie = dm_movie_hz();
+    int thermal = thermal_capped();
+    int cap = movie ? (movie >= 50 && !thermal ? 60 : 30) : (ok && !thermal ? 120 : 60);
     static int was; if (cap != was) { LOG("[nvn] 120 fps: cap %d → %d fps (%s)", was, cap, cap == 120 ? "the screen shows it" : !ok ? "the screen is below 120 Hz" : movie ? "movie playing" : "thermal state serious"); was = cap; }
     atomic_store(&g_high_cap, cap);
     if (!link_env) mtl_link_mode_set(ok ? 2 : 1);
@@ -2400,7 +2419,7 @@ static nvn_fstep g_fs;   // present thread only
 static nvn_fgpu g_fg;   // the GPU time at kmin and at the current hold (nvn_fstep_gpu_slowed)
 static _Atomic int g_fs_k;   // the hold presentation follows (0 = not decided yet)
 // The display link runs at 30 Hz at a 30 cap, except while the game fixes its own step at 1 (BotW's VFR override)
-int nvn_fps_high_now(void) { return atomic_load(&g_fs_k) == 1 ? 120 : 60; }   // hle_fpslock.c: the target of the next game frame, from the hold in force
+int nvn_fps_high_now(void) { return dm_movie_hz() ? 30 : (atomic_load(&g_fs_k) == 1 ? 120 : 60); }   // hle_fpslock.c: the target of the next game frame, from the hold in force
 // The rate of vi::GetDisplayVsyncEvent (hle_sdk16.c, nvn_mtl.m mtl_link_wait_vsync): the Switch's 60 Hz, or 120 while 120 fps is on and its hold is one tick of 1/120 s. A game that
 // waits for the next vblank each frame is held to the event's rate whatever the present cap: Unity's NVN device waits until its vblank time (set from the event) passes
 // (The Rogue Prince of Persia: main+0x14f65f0), so at 120 every frame came two ticks late and the hold fell back to 60. The hold's trial at 120 must already have the event at 120
@@ -2420,7 +2439,7 @@ static void present_cfg(const win_t *o) {
     LOG("[nvn] present tick %d Hz, interval mode %s (%s; present interval set by the game %d; %s)", g_hz, g_display_mode ? "display (one frame per tick, a cut)" : "game (original semantics)",
         m ? "DM_PRESENT_INTERVAL" : "game profile present_interval", o->interval, scr > 0 ? "window" : "no window");
 }
-static int present_itv(const win_t *o) { int c = fps_present_cap(), k = atomic_load(&g_fs_k); return c ? (k && fstep_on() ? k : fstep_hz() / c) : g_display_mode ? 1 : o->interval > 0 ? o->interval : 1; }   // vsyncs per frame that presentation follows
+static int present_itv(const win_t *o) { int movie = dm_movie_hz(), c = fps_present_cap(), k = atomic_load(&g_fs_k); if (movie && fps_high()) return fstep_hz() / movie; return c ? (k && fstep_on() ? k : fstep_hz() / c) : g_display_mode ? 1 : o->interval > 0 ? o->interval : 1; }   // vsyncs per frame that presentation follows
 // Present interval 0 swaps without waiting for a vsync on Horizon: the window's acquire waits only for a texture the display has let go of, the display shows the newest frame at each
 // vsync, and the game paces itself (or runs as fast as it can; the Switch's unlocked-frame-rate mods set interval 0 to go past 60). The acquire took it as 1 and waited a display
 // tick each frame. Ori and the Blind Forest: Definitive Edition sets Unity's vSyncCount to 0 only for its shader prewarm behind the first loading screen and back to 1 after it: the
@@ -2594,6 +2613,7 @@ NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
     int movie = dm_movie_hz();
     if (dm_fps_state) __atomic_store_n((uint32_t *)(dm_fps_state + 4), (uint32_t)(movie != 0), __ATOMIC_RELAXED);   // the stubs' copy of the movie state (hle.h)
     int c = fps_step_cap();
+    movie_debug_log(o->presents, movie, atomic_load(&g_high_cap), c);
     if (dm_fps_state) { static int was; if (c != was) { char why[48] = ""; if (movie) snprintf(why, sizeof why, " (a movie of %d pictures a second)", movie); else if (c == 30 && was == 60 && thermal_capped()) snprintf(why, sizeof why, " (thermal state serious)");
         LOG("[nvn] frame step cap %d → %d fps at present %llu%s", was, c, (unsigned long long)o->presents, why); was = c; } }
     if (c) fstep_tick(o, c);

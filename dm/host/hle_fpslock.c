@@ -32,6 +32,8 @@ static const lock_t k_locks[] = {
     // at the same speed. The game sets 30 after boot; it also asks for present interval 2, which the profile's present_interval display ignores.
     // From masagrator's FPSLocker config for this build (FPSLocker-Warehouse, patches/0100B04011742000/C9A3DD7702075ECD.yaml)
     { "c9a3dd7702075ecd90101f4555389582", "RE Engine frame limit", 0x1295b3f0, 0x434, FPS_F32, 1 },
+    // Resident Evil HD Remaster 1.0.0: MT Framework frame limit (experimental; verify in game).
+    { "6bec9b23b09df46c315aa6f4bfacf91c", "Resident Evil MT Framework frame limit", 0x157daa0, 0x48, FPS_F32, 1 },
     // Luigi's Mansion 3 1.4.0: Next Level Games' frame limiter. At the end of each frame the main thread calls the frame callbacks (main+0xb7c308) with the milliseconds since the frame
     // started; the limiter (main+0x7a3e70) runs jobs or sleeps until 33.333 ms have passed, the float at main+0x13c94dc (read only there, at main+0x7a3ea8 and main+0x7a3f18), and the game
     // steps by the time that really passed. The game asks for present interval 2 too, which the profile's present_interval display ignores; both are needed
@@ -267,7 +269,10 @@ void dm_fps_lock_tick(void) {
                   if (fb.n) LOG("main: Frostbite simulation rate left as the game sets it (%s)", src); if (uq.base) LOG("main: Unity vSyncCount left as the game sets it (%s)", src); return; }
         target = t; state = 0;
     }
-    if (high) target = nvn_fps_high_now();   // 120 while frames fit, else 60: the game's step stays what the screen shows (hle_nvn.c fps_high)
+    int re_mt = 0;
+    for (int r = 0; r < nrow; r++)
+        if (!strcmp(rows[r]->what, "Resident Evil MT Framework frame limit")) re_mt = 1;
+    if (high || re_mt) target = nvn_fps_high_now();   // 120 while frames fit, else 60: the game's step stays what the screen shows (hle_nvn.c fps_high)
     if (nier) {
         // NieR:Automata US/EU 1.0.3 (3c10ec35c5ef4c3686b4053afb0e58e7):
         // - [base + 0x192be00] points to the NVN graphics device object whose +0x9c160 holds the present interval (1 = 60 FPS, 2 = 30 FPS),

@@ -68,6 +68,7 @@ run: $(B)/t_mii $(B)/t_net_eventfd $(B)/t_language $(B)/t_motion $(B)/t_heap_siz
 	$(B)/t_motion
 	$(B)/t_motion_apple
 	$(B)/t_pad_apple
+	$(B)/t_account
 	$(B)/t_home_quit
 	$(B)/t_home_quit_mac
 	$(B)/t_ctrl_prompt
@@ -263,6 +264,9 @@ $(B)/t_motion_apple: t_motion_apple.m ../motion_apple.h ../dm_input.h | $(B)
 run: $(B)/t_pad_apple
 $(B)/t_pad_apple: t_pad_apple.m ../pad_apple.h ../dm_input.h | $(B)
 	$(CLANG) -O1 -g -fobjc-arc -Wall -Werror -I.. -o $@ t_pad_apple.m -framework Foundation -framework GameController
+run: $(B)/t_account
+$(B)/t_account: t_account.c ../hle_account.c ../hle.h ../dm.h $(GAME_H) | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function $(GINC) -o $@ t_account.c
 run: $(B)/t_home_quit $(B)/t_home_quit_mac
 $(B)/t_home_quit: t_home_quit.c ../home_quit.h | $(B)
 	$(CLANG) -O1 -g -Wall -Werror -I.. -o $@ t_home_quit.c

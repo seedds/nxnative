@@ -2389,6 +2389,24 @@ def host_takeovers(host, platform):
     return {l.strip() for l in text[at:].splitlines() if l.strip() and not l.startswith(('#', '['))}
 
 
+def loader_bindings(host, gprof, aot, folder, logs):
+    """nxhost-run --bindings: the host maps and relocates the module set as a start does and writes each module's loader bindings to folder (<name>.bind.tsv, the form
+    DM_AOT_PROFILE gives them), with no pack loaded and nothing run, so that a first pack is made with them too and the second pack's cached units are the first's
+    (dm/tools/aot/README.md, "PLT stubs bound to their own module"). Only for a host that runs on this system (host_takeovers answered). Returns whether it wrote them"""
+    if not host or not Path(host).is_file(): return False
+    folder.mkdir(parents=True, exist_ok=True)
+    log = logs / 'nxhost_bindings.log'
+    try: r = subprocess.run([str(host), '--profile', str(gprof), '--bindings', str(folder), str(aot)], capture_output=True, text=True, timeout=600)
+    except (OSError, subprocess.SubprocessError) as e:
+        say(f'[RED] {host} --bindings did not run ({e}): the packs take the bindings the profile folder holds, if any'); return False
+    log.parent.mkdir(parents=True, exist_ok=True)
+    log.write_text(r.stdout + r.stderr)
+    if r.returncode:
+        say(f'[RED] {host} --bindings ended with status {r.returncode} ({log}): the packs take the bindings the profile folder holds, if any'); return False
+    say(f'loader bindings: {host} --bindings wrote the modules\' PLT bindings to their own functions to {folder} (the packs are made with them; {log})')
+    return True
+
+
 def pack_bindings(opts, aot, mods, folder, mode=None, takeovers=None):
     """The loader's bindings each module is packed with ({name: (path, pairs, the text without the rows of takeovers or None)}, aot_bindings): only with an nxaot that has --bind, and
     not for NROs (the host refuses bindings in an NRO's pack: it binds only when the game loads it). A discovery input, as the misses: --no-profile leaves them in use"""
@@ -3298,6 +3316,8 @@ def main(args=None):
         gprof = port_game_profile(py, repo, work, g, platform, env, logs)
         # what packs the game again as this run does, for the launcher's "Repack with profile" (dm/launcher): the NSP folder, this script and its Python, the keys' path, the recompiler
         repack = {'package': nsp_dir, 'packer': here, 'python': sys.executable, 'keys': keys, 'nxaot': nxaot}
+        if takeovers is not None:   # the host runs here and nxaot takes --bind: the loader's bindings from the host itself, before any pack (loader_bindings)
+            loader_bindings(host, gprof, aot, misses, logs)
         made = made_rows(nxaot_opts, aot, mods, profiles, misses, args.no_profile)   # what the packs are made with: the launcher's "a better pack is possible" compares the profile folder with it
         def launch_file(modes):   # the launch file offering those pack modes
             return port_launch_file(platform, repo, work, wdir, aot, game, ios, aoc, gfx, lang, g, title, app_version, pkg_ver, modes, env_file, settings, repack, made, host, gprof,

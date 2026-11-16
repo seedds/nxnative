@@ -326,6 +326,7 @@ public:
     llvm::CallInst* EmitCall(const CalleeView& c, llvm::FunctionType* type, Value* callee, Value* lr, bool tail);
     void FnCall(const CalleeView& c, llvm::FunctionType* type, Value* callee, uint64_t call_pc);
     void FnCallDirect(uint64_t target, uint64_t call_pc);
+    void FnAfterCall();
     void FnCallIndirect(Value* target, uint64_t call_pc);
     void FnTail(const CalleeView& c, llvm::FunctionType* type, Value* callee);
     void FnTailDirect(uint64_t target);

@@ -569,6 +569,17 @@ class Linux(Pack):
         self.assertIsNone(nsp.host_takeovers(self.tmp / 'hostbin/none', 'linux'))
         host.write_text(f'#!{sys.executable}\nprint("usage: nxhost-run ...")\n')   # an older host: no list
         self.assertIsNone(nsp.host_takeovers(host, 'linux'))
+        # nxhost-run --bindings: the host writes the module's bindings into the profile folder before the pack, which takes them (loader_bindings)
+        host.write_text(f'#!{sys.executable}\nimport sys, os\na = sys.argv[1:]\nassert a[0] == "--profile" and a[2] == "--bindings", a\n'
+                        f'open(os.path.join(a[3], "main.bind.tsv"), "w").write({head!r} + "0x20 0x300 nn_dry\\n")\n')
+        logs = self.tmp / 'logs'
+        self.assertTrue(nsp.loader_bindings(host, self.work / 'game-profile-linux.tsv', self.aot, prof, logs))
+        self.assertEqual((prof / 'main.bind.tsv').read_text(), head + '0x20 0x300 nn_dry\n')
+        self.assertTrue(any(m.startswith(f'loader bindings: {host} --bindings wrote') for m in self.said), self.said)
+        self.assertFalse(nsp.loader_bindings(self.tmp / 'hostbin/none', self.work / 'game-profile-linux.tsv', self.aot, prof, logs))   # no host here: nothing
+        with mock.patch.object(nsp, 'host_takeovers', return_value={'nn_taken'}), mock.patch.object(nsp, 'port_host', return_value=(host, True)):
+            self.pack()   # the pack: the host's bindings first, then nxaot with them
+        self.assertEqual([c[-2:] for c in self.tools('nxaot')], [['--bind', str(prof / 'main.bind.tsv')]])
 
     def test_removed_module_and_nros_leave_no_stale_input(self):
         self.pack()

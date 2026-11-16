@@ -170,6 +170,11 @@ struct Function {
     FlatMap<uint64_t, JumpTable, true> tables;         // by the br's pc
     FlatMap<uint64_t, uint64_t, true> pads;            // call pc -> the landing pad of the LSDA call site covering it
     FlatMap<uint64_t, std::string, true> indirect;     // br sites left for the dispatcher, with why
+    // Block start -> where control goes on after the block's end when that address starts another function (or lies outside this one): the return of a call
+    // (bl to a function that returns, blr), of an svc, the fall-through of a conditional branch. A tail transfer there, after the call or the svc (README.md,
+    // "A call into the next function"): discovery cuts a function where another entry starts (a miss's, an adr's, a branch's), and the instruction before the
+    // cut may be one of these
+    FlatMap<uint64_t, uint64_t, true> out;
     std::vector<Window> windows;
     unsigned unpaired_exclusive = 0;
     size_t words = 0;      // instructions the walk reached

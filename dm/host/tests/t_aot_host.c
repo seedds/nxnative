@@ -54,6 +54,9 @@
 //   polls, with nxaot (it packs it, at tier H, with the polls of loops bounded by a constant left out and with every poll): a module this test writes word by
 //     word whose thread runs, by turns, loops left without a poll and loops that look bounded and must keep theirs; a tester pauses it at random intervals: every
 //     loop stopped in, the worst CPU time from request to stop bounded, nxaot's counts exact (polls_rows below; dm/tools/aot/README.md, "Threads and safepoints")
+//   cutcall and noret, with nxaot (it packs them): a module this test writes word by word whose function is cut by the host's misses at two cases of a jump table,
+//     the first ending with a call whose return address is the second's entry: the call's continuation is the next function (the right sum); and a call of a
+//     function the summaries say does not return, which returns: the JIT goes on from its return address with every register (cutcall_rows below)
 //   t_aot_host [--packs <dir>] [--corpus <dir>] [--nro <name>]... [--nxaot <nxaot>]
 //     the packs: --packs, else the environment variable NXAOT_PACKS, else the CMake option NXAOT_PACKS; with none, a note and exit 0 (CTest stays green where
 //     no packs exist: the Windows runner, a build without the aot image)
@@ -2243,6 +2246,292 @@ static void positions_rows(const char *self, const char *name, const char *pack,
     row(name, "roundtrip", !s1 && !s2 && !s3 && weighed > 0 && strstr(ol, "off (NXAOT_PROFILE_WEIGHTS=0)") && same_off && differs && entry_only > 0, &r2, note);
 }
 
+// ---------- A call whose return address starts another function (dm/tools/aot/README.md, "A call into the next function") ----------
+// The NRO cutcall, written here word by word: start adds F(0) and F(1). F(s) keeps a counter x19 = s .. CUT_N - 1 and a sum in x20 across a loop whose case comes
+// from a jump table discovery cannot bound (a byte of a table in RO, indexed by x19 and added to an adr: no compare bounds it). Case 0 calls g, and its return address
+// is case 1's label: case 0 adds i + 7, case 1 adds i (x0 is 0). g keeps x19 in guest terms but is open (it calls through a PLT stub's shape whose union moves SP:
+// spkeep's shape) and its svc stores its own x19, 0xBAD, in the block. Case 0 is gap code discovery compiles as a function (no walk reaches it past the br); the
+// host's misses file of a run of the pack without misses names case 1 and the loop's head (indirect), whose entries cut F and that function: case 0's function
+// ends with the call of g, whose return is case 1's entry. Without the continuation of that
+// call (discover.cpp Finish, Function::out) the fragment had no return path (summarised noreturn) and its call site gave g's LIVE_AFTER nothing: g returned without
+// storing the x19 it restored, the fragment reloaded g's 0xBAD from the block and the JIT ran case 1 from there with it (the sum wrong). Mario vs. Donkey Kong's
+// second pack: main+0x2ee9b4's call of main+0x24397c, whose return is main+0x2ee9c4's entry (x1 = 0x100000000 two calls later)
+enum { CUT_N = 8 };
+static const uint8_t cut_idx[CUT_N] = {0, 1, 0, 1, 0, 1, 0, 1};
+static size_t cutcall_nro(uint8_t *img, size_t cap, uint64_t *want, uint64_t *c0, uint64_t *c1) {
+    enum { TEXT = 0x1000, RO = 0x1000, DATA = 0x2000, SIZE = 0x3000, BSS = 0x1000, PASS_AT = RO + 0x100, FAIL_AT = RO + 0x120, IDX_AT = RO + 0x140 };
+    if (cap < SIZE) return 0;
+    memset(img, 0, SIZE);
+    uint32_t w[256] = {0};
+    size_t n = 0x80 / 4;
+    const size_t start = n;
+    w[n++] = 0xA9BE7BFDu;               // stp x29, x30, [sp, #-32]!
+    w[n++] = 0x910003FDu;               // mov x29, sp
+    w[n++] = 0xA90153F3u;               // stp x19, x20, [sp, #16]
+    w[n] = a_adr(10, (int64_t)DATA - (int64_t)n * 4); n++;   // adr x10, DATA
+    const size_t adr_leaf = n++;        // adr x9, leaf (the stub's pointer)
+    w[n++] = 0xF9000149u;               // str x9, [x10]
+    const size_t adr_spfn = n++;        // adr x11, spfn (address-taken: the union moves SP)
+    w[n++] = 0xF900054Bu;               // str x11, [x10, #8]
+    w[n++] = a_movz(0, 0);
+    const size_t call_f0 = n++;         // bl F
+    w[n++] = a_mov(19, 0);
+    w[n++] = a_movz(0, 1);
+    const size_t call_f1 = n++;         // bl F
+    w[n++] = a_addr(20, 19, 0, 0);      // add x20, x19, x0
+    uint64_t sum = 0;
+    for (unsigned s0 = 0; s0 < 2; s0++)
+        for (unsigned i = s0; i < CUT_N; i++) sum += i + (cut_idx[i] == 0 ? 7 : 0);
+    *want = sum;
+    w[n++] = a_movz(9, (unsigned)sum);
+    w[n++] = a_cmp(20, 9);
+    const size_t to_fail = n++;         // b.ne fail
+    w[n] = a_adr(0, (int64_t)PASS_AT - (int64_t)n * 4); n++;
+    w[n++] = a_movz(1, 12);             // "cutcall PASS"
+    w[n++] = 0xD40004E1u;               // svc #0x27 (OutputDebugString)
+    const size_t to_exit = n++;         // b exit
+    w[to_fail] = a_bcond(1, (int64_t)(n - to_fail) * 4);
+    w[n] = a_adr(0, (int64_t)FAIL_AT - (int64_t)n * 4); n++;
+    w[n++] = a_movz(1, 12);             // "cutcall FAIL"
+    w[n++] = 0xD40004E1u;
+    w[to_exit] = a_b((int64_t)(n - to_exit) * 4);
+    w[n++] = 0xD40000E1u;               // svc #0x7 (ExitProcess)
+    w[n++] = 0xD4200000u;               // brk #0
+    // F(s)
+    const size_t F = n;
+    w[call_f0] = a_bl((int64_t)(F - call_f0) * 4);
+    w[call_f1] = a_bl((int64_t)(F - call_f1) * 4);
+    w[n++] = 0xA9BD7BFDu;               // stp x29, x30, [sp, #-48]!
+    w[n++] = 0x910003FDu;               // mov x29, sp
+    w[n++] = 0xA90153F3u;               // stp x19, x20, [sp, #16]
+    w[n++] = 0xF90013FCu;               // str x28, [sp, #32]
+    w[n] = a_adr(28, (int64_t)IDX_AT - (int64_t)n * 4); n++;   // adr x28, the case table
+    w[n++] = a_mov(19, 0);
+    w[n++] = a_movz(20, 0);
+    const size_t loop = n;
+    w[n++] = a_movz(0, 0);
+    w[n++] = 0x38736B8Au;               // ldrb w10, [x28, x19]
+    const size_t adr_base = n++;        // adr x9, case 0
+    w[n++] = a_addr(9, 9, 10, 2);       // add x9, x9, x10, lsl #2
+    w[n++] = 0xD61F0120u;               // br x9
+    const size_t case0 = n;
+    w[adr_base] = a_adr(9, (int64_t)(case0 - adr_base) * 4);
+    const size_t call_g = n++;          // case 0: bl g, whose return address is case 1
+    const size_t case1 = n;
+    w[n++] = a_addr(20, 20, 19, 0);     // case 1: add x20, x20, x19
+    w[n++] = a_addr(20, 20, 0, 0);      // add x20, x20, x0
+    w[n++] = a_addi(19, 19, 1);
+    w[n++] = a_cmpi(19, CUT_N);
+    w[n] = a_bcond(3, (int64_t)(loop - n) * 4); n++;   // b.lo loop
+    w[n++] = a_mov(0, 20);
+    w[n++] = 0xF94013FCu;               // ldr x28, [sp, #32]
+    w[n++] = 0xA94153F3u;               // ldp x19, x20, [sp, #16]
+    w[n++] = 0xA8C37BFDu;               // ldp x29, x30, [sp], #48
+    w[n++] = 0xD65F03C0u;               // ret
+    // g: its own x19 (0xBAD) in the block at an svc, a call through the stub, x19 restored, 7
+    const size_t g = n;
+    w[call_g] = a_bl((int64_t)(g - call_g) * 4);
+    w[n++] = 0xA9BE7BFDu;               // stp x29, x30, [sp, #-32]!
+    w[n++] = 0x910003FDu;               // mov x29, sp
+    w[n++] = 0xF9000BF3u;               // str x19, [sp, #16]
+    w[n++] = a_movz(19, 0xBAD);
+    w[n++] = 0xD40003C1u;               // svc #0x1E (GetSystemTick): the block gets x19 = 0xBAD
+    const size_t call_stub = n++;       // bl stub
+    w[n++] = 0xF9400BF3u;               // ldr x19, [sp, #16]
+    w[n++] = 0xA8C27BFDu;               // ldp x29, x30, [sp], #32
+    w[n++] = a_movz(0, 7);
+    w[n++] = 0xD65F03C0u;               // ret
+    const size_t stub = n;              // br through the pointer at DATA, as a PLT entry through its GOT slot
+    w[call_stub] = a_bl((int64_t)(stub - call_stub) * 4);
+    w[n] = a_adr(16, (int64_t)DATA - (int64_t)n * 4); n++;   // adr x16, DATA
+    w[n++] = 0xF9400211u;               // ldr x17, [x16]
+    w[n++] = 0xD61F0220u;               // br x17
+    const size_t leaf = n;
+    w[adr_leaf] = a_adr(9, (int64_t)(leaf - adr_leaf) * 4);
+    w[n++] = 0xD65F03C0u;               // ret
+    const size_t spfn = n;              // returns with SP 16 bytes up (never called: its address is taken)
+    w[adr_spfn] = a_adr(11, (int64_t)(spfn - adr_spfn) * 4);
+    w[n++] = 0x910043FFu;               // add sp, sp, #16
+    w[n++] = 0xD65F03C0u;               // ret
+    w[0] = a_b((int64_t)start * 4);
+    w[1] = RO;                          // MOD0's offset
+    memcpy(img, w, n * 4);
+    memcpy(img + 0x10, "NRO0", 4);
+    const uint32_t hdr[] = {0, SIZE, 0, 0, TEXT, RO, DATA - RO, DATA, SIZE - DATA, BSS};
+    memcpy(img + 0x14, hdr, sizeof hdr);
+    memcpy(img + RO, "MOD0", 4);
+    const int32_t mod0[] = {0x20, SIZE - RO, SIZE + BSS - RO, 0x40, 0x40, SIZE - RO};
+    memcpy(img + RO + 4, mod0, sizeof mod0);
+    memcpy(img + PASS_AT, "cutcall PASS", 12);
+    memcpy(img + FAIL_AT, "cutcall FAIL", 12);
+    memcpy(img + IDX_AT, cut_idx, CUT_N);
+    *c0 = case0 * 4;
+    *c1 = case1 * 4;
+    return SIZE;
+}
+
+// The NRO noret: start keeps 5 in x19 across a call of k, whose only return is br x16 (x16 = the lr it was given): discovery cannot bound that br, and the only
+// address-taken function (dead, a brk) does not return, so the summaries say k does not return. start adds k's 37 to x19 and prints PASS for 42. A call to a
+// function the summaries call noreturn leaves every register the caller holds in the block, and its return goes on in the JIT from the return address
+// (lower_calls.cpp FnCallDirect; aot.h NXAOT_TRAP_JIT_NORETURN, the miss "noreturn", which nxaot leaves unserved). It was a trap: status 6 (DM_AOT_RETURNED)
+static size_t noret_nro(uint8_t *img, size_t cap, uint64_t *ret_at) {
+    enum { TEXT = 0x1000, RO = 0x1000, DATA = 0x2000, SIZE = 0x3000, BSS = 0x1000, PASS_AT = RO + 0x100, FAIL_AT = RO + 0x120 };
+    if (cap < SIZE) return 0;
+    memset(img, 0, SIZE);
+    uint32_t w[128] = {0};
+    size_t n = 0x80 / 4;
+    const size_t start = n;
+    w[n++] = 0xA9BE7BFDu;               // stp x29, x30, [sp, #-32]!
+    w[n++] = 0x910003FDu;               // mov x29, sp
+    w[n++] = 0xA90153F3u;               // stp x19, x20, [sp, #16]
+    w[n] = a_adr(10, (int64_t)DATA - (int64_t)n * 4); n++;   // adr x10, DATA
+    const size_t adr_dead = n++;        // adr x9, dead
+    w[n++] = 0xF9000149u;               // str x9, [x10]
+    w[n++] = a_movz(19, 5);
+    const size_t call_k = n++;          // bl k
+    *ret_at = n * 4;
+    w[n++] = a_addr(0, 0, 19, 0);       // add x0, x0, x19
+    w[n++] = a_movz(9, 42);
+    w[n++] = a_cmp(0, 9);
+    const size_t to_fail = n++;         // b.ne fail
+    w[n] = a_adr(0, (int64_t)PASS_AT - (int64_t)n * 4); n++;
+    w[n++] = a_movz(1, 10);             // "noret PASS"
+    w[n++] = 0xD40004E1u;               // svc #0x27
+    const size_t to_exit = n++;
+    w[to_fail] = a_bcond(1, (int64_t)(n - to_fail) * 4);
+    w[n] = a_adr(0, (int64_t)FAIL_AT - (int64_t)n * 4); n++;
+    w[n++] = a_movz(1, 10);             // "noret FAIL"
+    w[n++] = 0xD40004E1u;
+    w[to_exit] = a_b((int64_t)(n - to_exit) * 4);
+    w[n++] = 0xD40000E1u;               // svc #0x7 (ExitProcess)
+    w[n++] = 0xD4200000u;               // brk #0
+    const size_t k = n;
+    w[call_k] = a_bl((int64_t)(k - call_k) * 4);
+    w[n++] = a_mov(16, 30);             // mov x16, x30
+    w[n++] = a_movz(0, 37);
+    w[n++] = 0xD61F0200u;               // br x16
+    const size_t dead = n;
+    w[adr_dead] = a_adr(9, (int64_t)(dead - adr_dead) * 4);
+    w[n++] = 0xD4200000u;               // brk #0
+    w[0] = a_b((int64_t)start * 4);
+    w[1] = RO;
+    memcpy(img, w, n * 4);
+    memcpy(img + 0x10, "NRO0", 4);
+    const uint32_t hdr[] = {0, SIZE, 0, 0, TEXT, RO, DATA - RO, DATA, SIZE - DATA, BSS};
+    memcpy(img + 0x14, hdr, sizeof hdr);
+    memcpy(img + RO, "MOD0", 4);
+    const int32_t mod0[] = {0x20, SIZE - RO, SIZE + BSS - RO, 0x40, 0x40, SIZE - RO};
+    memcpy(img + RO + 4, mod0, sizeof mod0);
+    memcpy(img + PASS_AT, "noret PASS", 10);
+    memcpy(img + FAIL_AT, "noret FAIL", 10);
+    return SIZE;
+}
+
+static int write_file(const char *path, const void *p, size_t len) {
+    FILE *f = fopen(path, "wb");
+    const int ok = f && fwrite(p, 1, len, f) == len;
+    if (f) fclose(f);
+    return ok;
+}
+
+// The rows: cutcall packed without misses and run under DM_AOT_PROFILE (the cases in the JIT fallback, the host's misses file naming both), then packed with that file
+// and run: the right sum and no fault; noret packed and run: the right sum, a JIT continuation at the call's return address and its miss row
+static void cutcall_rows(const char *self, const char *nxaot) {
+    if (!nxaot || !*nxaot) { printf("%-14s %-9s note: no nxaot (--nxaot, NXAOT): cutcall and noret are not packed here\n", "cutcall", "cut"); return; }
+    if (!NXHOST_JIT) {   // the first run's cases, and noret's continuation, run in the JIT fallback
+        printf("%-14s %-9s note: a host built without the JIT fallback (CMake NXHOST_JIT off): cutcall and noret need it\n", "cutcall", "cut");
+        return;
+    }
+    static uint8_t img[0x3000];
+    uint64_t want = 0, c0 = 0, c1 = 0;
+    const size_t len = cutcall_nro(img, sizeof img, &want, &c0, &c1);
+    char dir[200], nro[200], pack[200], pack_m[200], misses[260], line[600] = "", note[1600];
+    mkdir("t_aot_host.tmp", 0755);
+    mkdir("t_aot_host.tmp/cutcall", 0755);
+    snprintf(dir, sizeof dir, "t_aot_host.tmp/cutcall/profile");
+    mkdir(dir, 0755);
+    snprintf(nro, sizeof nro, "t_aot_host.tmp/cutcall/cutcall.nro");
+    snprintf(pack, sizeof pack, "t_aot_host.tmp/cutcall/cutcall%s", PACK_EXT);
+    mkdir("t_aot_host.tmp/cutcall/misses", 0755);
+    snprintf(pack_m, sizeof pack_m, "t_aot_host.tmp/cutcall/misses/cutcall%s", PACK_EXT);
+    snprintf(misses, sizeof misses, "%s/cutcall.misses.tsv", dir);
+    remove(misses);
+    result r;
+    memset(&r, 0, sizeof r);
+    static char no_lines[1];
+    r.guest = no_lines;
+    const int wrote = len && write_file(nro, img, len);
+    if (!wrote || nxaot_pack(nxaot, nro, pack, line, sizeof line) != 0) {
+        snprintf(note, sizeof note, "%s: %s", wrote ? "nxaot build failed" : "cannot write the NRO", line);
+        row("cutcall", "first", 0, &r, note);
+        return;
+    }
+    // 1. Without misses: the cases run in the JIT fallback (the dispatcher has no entry there), the sum right, the host's misses file naming both cases
+    set_env("DM_AOT_PROFILE", dir);
+    run_child(self, pack, nro, "", &r);
+    set_env("DM_AOT_PROFILE", NULL);
+    char *text = read_text(misses);
+    char row0[64], row1[64];
+    snprintf(row0, sizeof row0, "0x%llx indirect ", (unsigned long long)c0);
+    snprintf(row1, sizeof row1, "0x%llx indirect ", (unsigned long long)c1);
+    // Case 0 is gap code discovery compiles (no walk reaches it: the br is unbounded), a function the dispatcher enters; case 1 lies inside it, and the loop's head
+    // inside F: both misses
+    const int file_ok = text && strstr(text, row1) && !strstr(text, row0);
+    int ok = r.status == 0 && !strcmp(r.guest, "cutcall PASS\n") && file_ok;
+    snprintf(note, sizeof note, "without misses: sum %llu, %llu JIT runs, the misses file %s%s%s", (unsigned long long)want, r.jit[0],
+             file_ok ? "names case 1 (indirect)" : "lacks case 1's row or has case 0's", r.red[0] ? "; " : "", r.red);
+    row("cutcall", "first", ok, &r, note);
+    if (r.guest != no_lines) free(r.guest);
+    free(text);
+    // 2. With them: both cases entries, case 0 a function of its own whose call of g returns into case 1's entry: the right sum, no fault
+    memset(&r, 0, sizeof r);
+    r.guest = no_lines;
+    if (!file_ok || nxaot_pack_misses(nxaot, nro, pack_m, misses, line, sizeof line) != 0) {
+        snprintf(note, sizeof note, "nxaot build --misses failed or no misses file: %s", line);
+        row("cutcall", "cut", 0, &r, note);
+        return;
+    }
+    run_child(self, pack_m, nro, "", &r);
+    ok = r.status == 0 && !strcmp(r.guest, "cutcall PASS\n");
+    snprintf(note, sizeof note, "with the misses (cases +0x%llx and +0x%llx entries, the call at +0x%llx returning into the second): %s, status %d, %llu JIT runs%s%s",
+             (unsigned long long)c0, (unsigned long long)c1, (unsigned long long)c0, r.guest[0] ? r.guest : "no output\n", r.status, r.jit[0], r.red[0] ? "; " : "",
+             r.red);
+    note[strcspn(note, "\n")] = note[strcspn(note, "\n")] ? ' ' : 0;
+    row("cutcall", "cut", ok, &r, note);
+    if (r.guest != no_lines) free(r.guest);
+    // 3. noret: a call to a function the summaries say does not return, which returns
+    uint64_t ret_at = 0;
+    const size_t nlen = noret_nro(img, sizeof img, &ret_at);
+    char ndir[200], nnro[200], npack[200], nmiss[260];
+    mkdir("t_aot_host.tmp/noret", 0755);
+    snprintf(ndir, sizeof ndir, "t_aot_host.tmp/noret/profile");
+    mkdir(ndir, 0755);
+    snprintf(nnro, sizeof nnro, "t_aot_host.tmp/noret/noret.nro");
+    snprintf(npack, sizeof npack, "t_aot_host.tmp/noret/noret%s", PACK_EXT);
+    snprintf(nmiss, sizeof nmiss, "%s/noret.misses.tsv", ndir);
+    remove(nmiss);
+    memset(&r, 0, sizeof r);
+    r.guest = no_lines;
+    if (!nlen || !write_file(nnro, img, nlen) || nxaot_pack(nxaot, nnro, npack, line, sizeof line) != 0) {
+        snprintf(note, sizeof note, "nxaot build failed: %s", line);
+        row("noret", "return", 0, &r, note);
+        return;
+    }
+    set_env("DM_AOT_PROFILE", ndir);
+    run_child(self, npack, nnro, "", &r);
+    set_env("DM_AOT_PROFILE", NULL);
+    text = read_text(nmiss);
+    snprintf(row0, sizeof row0, "0x%llx noreturn ", (unsigned long long)ret_at);
+    const int miss_ok = text && strstr(text, row0);
+    ok = r.status == 0 && !strcmp(r.guest, "noret PASS\n") && miss_ok && strstr(r.red, "returned") != NULL;
+    snprintf(note, sizeof note, "a call of a function the summaries say does not return, which returns: %s, status %d, the misses file %s%s%s", r.guest[0] ? r.guest : "no output\n",
+             r.status, miss_ok ? "with its noreturn row" : "without a noreturn row", r.red[0] ? "; " : "", r.red);
+    note[strcspn(note, "\n")] = note[strcspn(note, "\n")] ? ' ' : 0;
+    row("noret", "return", ok, &r, note);
+    if (r.guest != no_lines) free(r.guest);
+    free(text);
+}
+
 int main(int argc, char **argv) {
     if (argc >= 4 && !strcmp(argv[1], "--run")) return child(argc, argv);
     if (argc == 3 && !strcmp(argv[1], "--log-race")) return log_race((unsigned)atoi(argv[2]));
@@ -2414,6 +2703,9 @@ int main(int argc, char **argv) {
     int polls = !nonly;
     for (int i = 0; i < nonly; i++) polls |= !strcmp(only[i], "polls");
     if (polls) polls_rows(argv[0], nxaot);    // 9. The polls left out of bounded loops, and the loops that must keep theirs: every pause prompt
+    int cutcall = !nonly;
+    for (int i = 0; i < nonly; i++) cutcall |= !strcmp(only[i], "cutcall");
+    if (cutcall) cutcall_rows(argv[0], nxaot);   // 10. A call whose return starts another function; a call of a function the summaries say does not return, which returns
     printf("t_aot_host: %d checks, %d failed\n", checks, fails);
     return fails != 0;
 }

@@ -15,6 +15,8 @@
 //   host, 7 guest threads that did not stop), or 8 when the program refuses a pack at the start for a reason a repack cures (aot.h DM_AOT_REPACK: another image, ABI, host's
 //   PLT bindings, nxaot's imports, manifest's gates; the launcher offers the repack for it).
 // nxhost-run --takeovers prints the names of the forced take-overs (HLE_FORCE) and nothing else: what the launcher checks a pack's PLT bindings against before a start.
+// nxhost-run [--profile <file>] --bindings <folder> <dir> maps and relocates the module set as a start does, writes each module's loader bindings to <folder> (the profile's
+// <module>.bind.tsv) and ends before any pack loads: the packer's bindings for a first pack (scripts/build_ipa_from_nsp.py).
 // Switches of this program alone: DM_AOT_RAW=1 runs the first module's own entry (its pack's entry, x0 = 0, x1 = the main thread's handle, as a homebrew NRO's _start is entered)
 // instead of the SDK start: for a module without the SDK (t_host_program's synthetic module, homebrew). It is a switch and not a guess from the missing SDK symbols, because a game's
 // module list that lacks its sdk module would otherwise run main's rtld entry as homebrew: without it a module set with no nnMain stops with a [RED] line that names the switch.
@@ -148,6 +150,7 @@ static void host_preload(int argc, char **argv) {
                 "  before <dir>: --profile <file> (the game profile file dm/games/game.py runtime writes; DM_GAME_PROFILE=<file> without the option) or --game <title ID> (a profile\n"
                 "  built into the program); with neither, the profile the program was configured with (cmake -DGAME)\n"
                 "  nxhost-run --takeovers: the names of this host's forced take-overs, one per line (what the launcher checks a pack's PLT bindings against)\n"
+                "  --bindings <folder> before <dir>: the loader's bindings of the modules' PLT slots to their own functions written to <folder>/<module>.bind.tsv, nothing run\n"
                 "  exit status %d: a pack this host refuses, which packing the game again cures (the reason in the [RED] line before)\n", DM_AOT_PACK_SUFFIX, DM_AOT_REPACK);
         exit(DM_AOT_USAGE);
     }
@@ -215,6 +218,13 @@ int main(int argc, char **argv) {
     if (argc == 2 && !strcmp(argv[1], "--takeovers")) { void loader_print_takeovers(FILE *f); loader_print_takeovers(stdout); fflush(stdout); return 0; }
     // The game profile first, before anything reads a DM_GAME_* constant (the loading thread of DM_PRELOAD too): --profile / --game are taken off the arguments here
     if (dm_game_profile_select(&argc, &argv)) return DM_AOT_USAGE;
+    // --bindings <folder>: the module set's loader bindings written there, the process ended before any pack loads (aot.h dm_aot_write_module_bindings)
+    if (argc >= 3 && !strcmp(argv[1], "--bindings")) {
+        void loader_bindings_only(const char *dir);
+        loader_bindings_only(argv[2]);
+        argv[2] = argv[0];
+        argv += 2; argc -= 2;
+    }
     const char *pso = getenv("DM_PSO_PREBUILD");
     if (pso && !strcmp(pso, "tool")) { fprintf(stderr, "[dm] [RED] DM_PSO_PREBUILD=tool is the Metal pipeline archive's prebuild (nvn_mtl.m); the Vulkan backend's is DM_VK_PREBUILD=1 at a game's start\n"); return DM_AOT_USAGE; }
     if (getenv("DM_PRELOAD")) dm_host_preload_start(argc, argv);

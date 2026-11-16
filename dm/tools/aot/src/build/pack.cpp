@@ -140,8 +140,11 @@ constexpr uint64_t kAnalysisPerWord = 64, kAnalysisFixed = 128ull << 20;
 // stored again at the returns and tail calls of a function that keeps SP, moves it and calls (README.md, "A callee's SP left in the block"):
 // a unit of format 6 under the same key lacks the store. 8: the stores of polls and gates counted in restore_block (README.md, "Polls and gates
 // in restore_block"), the FPCR in the resume check ("Resume points and the FPCR"), and the PLT stubs bound to the module (--bind) in the key
-// ("PLT stubs bound to their own module"): a unit of format 7 under the same key lacks the stores and the check
-constexpr const char* kUnitKeyFormat = "nxaot-unit 8";
+// ("PLT stubs bound to their own module"): a unit of format 7 under the same key lacks the stores and the check. 9: a call whose return starts
+// another function goes on in it (a tail call when it does not read x30: a callee's reads of x30 in "callees"), and a call of a function the
+// summaries say does not return stores every register first and goes on in the JIT if it returns (README.md, "A call into the next function"):
+// a unit of format 8 under the same key ends such a call with a lookup of its return address, or a trap
+constexpr const char* kUnitKeyFormat = "nxaot-unit 9";
 
 // The section each unit's !pcsections marks go to (the line table, "The line table" below): read back after code generation and kept out of
 // the link (SHF_EXCLUDE)
@@ -2190,6 +2193,7 @@ bool CompileUnit(const Common& c, llvm::TargetMachine& tm, const Unit& u, std::s
         v.rv = pf->second.rv;
         v.returns = pf->second.returns;
         v.reads_nzcv = pf->second.reads.nzcv;
+        v.reads_lr = (pf->second.reads.x >> 30 & 1) != 0;
         return &views.emplace(off, v).first->second;
     };
     lift::CalleeView indirect;
@@ -3172,7 +3176,8 @@ std::string UnitKey(const Common& c, uint64_t entry) {
         const FnFacts& cf = it->second;
         list += std::to_string(t) + ":" + std::to_string(cf.pass.x) + "," + std::to_string(cf.pass.v) + "," + std::to_string(cf.pass.sp) + "/" +
                 std::to_string(cf.writes.x) + "," + std::to_string(cf.writes.v) + "," + std::to_string(cf.writes.sp) + "," +
-                std::to_string(cf.writes.nzcv) + "/" + std::to_string(cf.rv) + "/" + std::to_string(cf.returns) + "/" + std::to_string(cf.reads.nzcv) + ";";
+                std::to_string(cf.writes.nzcv) + "/" + std::to_string(cf.rv) + "/" + std::to_string(cf.returns) + "/" + std::to_string(cf.reads.nzcv) + "/" +
+                std::to_string(cf.reads.x >> 30 & 1) + ";";
     }
     k.Add("callees", list);
     // The samples that weigh its code at H and H+ (WeighFunction; README.md, "The sample profile at tier H"): its (offset, count) pairs, and only

@@ -504,7 +504,7 @@ void FunctionLifter::FnDataflow() {
             stored = stored | at_end;
         } else if (e.kind == EndKind::Bl) {
             if (const CalleeView* c = plan->callee(e.target)) {
-                stored = stored | CallStores(at_end, *c);
+                stored = stored | (c->returns ? CallStores(at_end, *c) : at_end);   // FnCallDirect: every dirty register before a call that does not return
             }
         } else if (e.kind == EndKind::Blr) {
             stored = stored | CallStores(at_end, plan->indirect);
@@ -1207,7 +1207,7 @@ void FunctionLifter::FnJitCall(uint64_t target, uint64_t call_pc) {
     StoreField(Rel(target), offsetof(dm_guest_state, pc));
     StoreField(B.getInt32(NXAOT_TRAP_JIT_TARGET), offsetof(dm_guest_state, exit_reason));
     FnCall(plan->indirect, plan->conv.Type(C, plan->indirect.pass), plan->jit_entry, call_pc);
-    Goto(B.getInt64(cur_end));
+    FnAfterCall();
 }
 
 void FunctionLifter::FnJitTail(Value* target) {
@@ -1381,12 +1381,35 @@ void FunctionLifter::FnCallDirect(uint64_t target, uint64_t call_pc) {
         return;
     }
     ++stats->calls;
+    if (!c->returns && !plan->correctness) {
+        // A call of a function the summaries say does not return (README.md, "A call the analysis says does not return"): cold by nature, so every
+        // register newer than the block goes there first (the callee stores all it holds at a return too: its LIVE_AFTER is every register), and a
+        // return goes on in the JIT from the return address with the whole register file, a miss of its own (noreturn), not a trap
+        StoreRegs(cur_dirty);
+        cur_dirty = {};
+    }
     FnCall(*c, c->fn->getFunctionType(), c->fn, call_pc);
     if (c->returns) {
-        Goto(B.getInt64(cur_end));
+        FnAfterCall();
     } else {
-        FnTrap(B.getInt64(call_pc), NXAOT_TRAP_NORETURN);
+        FnJitContinue(Rel(call_pc + 4), NXAOT_TRAP_JIT_NORETURN);
     }
+}
+
+// What follows a call that returns: the next block, or, when the return address starts another function (discovery cut this one there: a miss's
+// entry, an adr's, a branch's; analysis::Function::out), that function. A tail call of it with this function's entry lr when it does not read x30
+// (the guest's x30 holds the call's return address, which nothing reads before writing it), so that its return reaches this function's caller
+// natively; else Goto's lowering (FnGoto: the JIT from there when x30 is not the entry lr, which keeps x30). Before, the continuation went to the
+// JIT through FnTailLr: a lookup of an address with no standard entry, a miss at every pass (README.md, "A call into the next function")
+void FunctionLifter::FnAfterCall() {
+    const CalleeView* c = bbs.count(cur_end) || (plan->part_of && plan->part_of(cur_end)) ? nullptr : plan->callee(cur_end);
+    if (!c || c->reads_lr || plan->correctness) {
+        Goto(B.getInt64(cur_end));
+        return;
+    }
+    ++stats->tail_calls;
+    B.CreateStore(entry_lr, x[30]);
+    FnTail(*c, c->fn->getFunctionType(), c->fn);
 }
 
 void FunctionLifter::FnCallIndirect(Value* target, uint64_t call_pc) {
@@ -1397,7 +1420,7 @@ void FunctionLifter::FnCallIndirect(Value* target, uint64_t call_pc) {
     }
     Value* fn = FnDispatch(target, call_pc);
     FnCall(plan->indirect, plan->conv.Type(C, plan->indirect.pass), fn, call_pc);
-    Goto(B.getInt64(cur_end));
+    FnAfterCall();
 }
 
 // ---- Guarded indirect sites (design 12's hot indirect targets: FunctionPlan::guarded; README.md, "Hot indirect targets") ----
@@ -1444,7 +1467,7 @@ void FunctionLifter::FnCallGuarded(Value* target, uint64_t call_pc, uint64_t to,
     FnCall(ind, plan->conv.Type(C, ind.pass), fn, call_pc);
     B.CreateBr(join);
     B.SetInsertPoint(join);
-    Goto(B.getInt64(cur_end));
+    FnAfterCall();
 }
 
 void FunctionLifter::FnTail(const CalleeView& c, llvm::FunctionType* type, Value* callee) {

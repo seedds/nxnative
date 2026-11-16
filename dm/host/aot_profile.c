@@ -475,7 +475,7 @@ static int write_misses(const char *dir, int *bad) {
         fprintf(f, "# %zu addresses, %llu entries into the JIT fallback; %zu of the addresses this session, the rest from earlier sessions of this image\n", addrs,
                 (unsigned long long)entries, addrs_now);
         fprintf(f, "# <module offset> <reason> <entries>: indirect, call, host, nocode (an entry of the next pack), nonlocal (a resume point), fpcr, refused, untranslated, "
-                   "other (no pack serves them)\n");
+                   "noreturn, other (no pack serves them)\n");
         for (size_t j = 0; j < k; j++) fprintf(f, "0x%llx %s %llu\n", (unsigned long long)rows[j].off, rows[j].word, (unsigned long long)rows[j].n);
         free(rows);
         if (fclose(f) || replace_file(tmp, path)) { LOG("[RED] aot: misses: cannot write %s", path); (*bad)++; continue; }
@@ -534,6 +534,13 @@ void dm_aot_bindings_now(const module_t *m, const uint8_t sha256[32], const char
     write_module_bindings(g_dir, m, sha256, pack);
 }
 __attribute__((constructor)) static void bindings_hook(void) { atomic_store(&dm_aot_bindings_refused, dm_aot_bindings_now); }
+// nxhost-run --bindings (loader.c load_modules): a module's bindings into dir, the profile's form, with no pack loaded
+int dm_aot_write_module_bindings(const char *dir, const module_t *m, const uint8_t sha256[32], const char *pack) {
+    char d[sizeof g_dir];
+    snprintf(d, sizeof d, "%s", dir);
+    mkdirs(d);
+    return write_module_bindings(d, m, sha256, pack);
+}
 
 int dm_aot_profile_write(void) {
     if (!dm_aot_profile_on() || atomic_exchange(&g_written, 1)) return -1;

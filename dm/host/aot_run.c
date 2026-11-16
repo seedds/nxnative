@@ -82,6 +82,7 @@ static const char *jit_why(uint32_t reason) {
     case NXAOT_TRAP_JIT_TARGET: return "a branch or call to an address that is no compiled entry";
     case NXAOT_TRAP_JIT_FPCR: return "msr fpcr left the FPCR the module was compiled for";
     case NXAOT_TRAP_JIT_REFUSED: return "a function the lifter refused";
+    case NXAOT_TRAP_JIT_NORETURN: return "a call returned that the analysis says does not return: its return address";
     case NXAOT_TRAP_NO_CODE: return "code that runs into no compiled entry";
     case NXAOT_TRAP_UNTRANSLATED: return "an encoding the lifter does not translate";
     case REASON_HOSTCALL: return "a host call";
@@ -104,6 +105,7 @@ const char *dm_aot_miss_word(uint32_t reason) {
     case REASON_NONLOCAL: return "nonlocal";
     case NXAOT_TRAP_JIT_FPCR: case REASON_FPCR_RETURN: return "fpcr";
     case NXAOT_TRAP_JIT_REFUSED: return "refused";
+    case NXAOT_TRAP_JIT_NORETURN: return "noreturn";
     case NXAOT_TRAP_UNTRANSLATED: return "untranslated";
     case 0: case REASON_FORCED: return NULL;
     default: return "other";

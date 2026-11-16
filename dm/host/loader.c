@@ -29,6 +29,7 @@ uint64_t dm_guest_call(struct dm_guest_state *st, uint64_t addr, int nargs, ...)
 // What an import of a module the engine mapped binds to: a host function's guest-visible slot, an unimplemented import's stub slot (aot_arena.c, design 2.4)
 uint64_t dm_aot_bind(const module_t *m, const char *name, uint64_t v);
 _Noreturn void dm_aot_pack_refused(const char *err);   // aot.h: a pack a repack cures, refused at the start: its [RED] lines and the exit status DM_AOT_REPACK
+int dm_aot_write_module_bindings(const char *dir, const module_t *m, const uint8_t sha256[32], const char *pack);   // aot.h: nxhost-run --bindings
 #if defined(_WIN32)   // aot.h's DM_AOT_PACK_SUFFIX (this file declares what it needs of the engine instead of including aot.h: its unit test t_nro.c links no engine)
 #define AOT_PACK_SUFFIX ".aot.dll"
 #else
@@ -1020,6 +1021,10 @@ module_t *loader_nro_map(const uint8_t *image, uint32_t n, const uint8_t sha[32]
     return m;
 }
 
+// nxhost-run --bindings <folder> (main_x86.c): load_modules writes the loader's bindings and ends the process after the relocation (aot.h dm_aot_write_module_bindings)
+static const char *g_bindings_to;
+void loader_bindings_only(const char *dir) { g_bindings_to = dir; }
+
 void load_modules(const char *dir, const char **names, int n) {
     const uint64_t t0 = now_ns();
     char err[1200];
@@ -1037,6 +1042,14 @@ void load_modules(const char *dir, const char **names, int n) {
     force_init();
     for (int i = 0; i < g_nmod; i++) relocate(&g_mod[i]);
     force_check();
+    if (g_bindings_to) {   // nxhost-run --bindings: the bindings this start made, written, and nothing loaded or run
+        int bad = 0;
+        for (int i = 0; i < n; i++) bad += dm_aot_write_module_bindings(g_bindings_to, &g_mod[i], man[i].sha, "none (nxhost-run --bindings: the loader's bindings before any pack)");
+        LOG("aot: the loader's bindings of %d modules from %s written to %s in %.1f ms (nxhost-run --bindings)%s", n, dir, g_bindings_to, (now_ns() - t0) / 1e6,
+            bad ? "; [RED] a file could not be written" : "");
+        fflush(NULL);
+        _Exit(bad ? 1 : 0);
+    }
     if (nros) aot_read_nros(dir, nros);   // mapped when the game loads them (hle_ro.c, loader_nro_map)
     for (int i = 0; i < n; i++) {
         module_t *m = &g_mod[i];

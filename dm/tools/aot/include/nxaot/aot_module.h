@@ -82,9 +82,10 @@ enum nxaot_trap {
     NXAOT_TRAP_UNTRANSLATED = DM_EXIT_UNTRANSLATED,  // an encoding dynarmic's frontend does not translate (LSE atomics, hvc, ...): the JIT
     NXAOT_TRAP_JIT_TARGET = 64,                      // a branch or call to an address that is no compiled function's entry: the JIT
     NXAOT_TRAP_JIT_FPCR = 65,                        // msr fpcr left the FPCR the module was compiled for (section 7.1): the JIT
-    NXAOT_TRAP_NORETURN = 66,                        // a call returned that the analysis said does not return (a trap)
+    NXAOT_TRAP_NORETURN = 66,                        // a call returned that the analysis said does not return (a trap; packs since NXAOT_TRAP_JIT_NORETURN go on in the JIT)
     NXAOT_TRAP_JIT_REFUSED = 67,                     // a function the lifter refused (section 11, case 4): the JIT
     NXAOT_TRAP_JIT_MISS = 68,                        // an indirect branch to an address with no compiled entry (the dispatcher): the JIT
+    NXAOT_TRAP_JIT_NORETURN = 69,                    // a call returned that the analysis said does not return: the JIT from its return address
 };
 
 // Pack modes, conventions and options the code was built with (nxaot_module_desc.flags)

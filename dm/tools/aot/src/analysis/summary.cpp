@@ -1018,6 +1018,9 @@ public:
         const auto callees = [&](size_t i) {
             const Function& f = *order[i];
             for (const auto& [start, b] : f.blocks) {
+                for (const uint64_t t : OutTargets(f, start, b)) {
+                    if (const int64_t d = Index(t); d >= 0) deps[i].push_back(static_cast<uint32_t>(d));
+                }
                 uint64_t target = 0;
                 switch (b.term) {
                 case Term::Call:
@@ -1387,6 +1390,21 @@ private:
     static bool Exits(const Block& b) {
         return b.term == Term::Ret || b.term == Term::Tail || b.term == Term::CondTail || b.term == Term::Indirect || b.term == Term::Out;
     }
+    // Where control leaves the function after the block's end besides its term (README.md, "A call into the next function"): the continuation discovery
+    // recorded (Function::out: a call's or an svc's return, a conditional branch's fall-through, into another function's entry), and the cases of the block's
+    // table that are no block of the function. Each is a tail transfer there, after the call or the svc of the block
+    static std::vector<uint64_t> OutTargets(const Function& f, uint64_t start, const Block& b) {
+        std::vector<uint64_t> out;
+        if (const auto o = f.out.find(start); o != f.out.end()) out.push_back(o->second);
+        if (b.term == Term::Table) {
+            if (const auto t = f.tables.find(b.end - 4); t != f.tables.end()) {
+                for (const uint64_t target : t->second.targets) {
+                    if (!f.blocks.count(target) && std::find(out.begin(), out.end(), target) == out.end()) out.push_back(target);
+                }
+            }
+        }
+        return out;
+    }
 
     // A block of the function being summarised, with what the analyses need of it: the register effects of its instructions composed (a
     // backward pass gives live_in = (live_out - def) | use; the forward ones add def), its successors as block numbers (-1: not a block of the
@@ -1396,6 +1414,7 @@ private:
         RegSet def, use;
         std::vector<std::pair<int32_t, Edge>> succ;
         std::optional<CalleeFx> e;
+        std::vector<CalleeFx> outs;  // the tail transfers out of the function after the end (OutTargets)
     };
 
     Summary Compute(size_t i) {
@@ -1417,6 +1436,7 @@ private:
                 nd.def = nd.def | fx.def;
             }
             nd.e = EndFx(b, i, indirect);
+            for (const uint64_t t : OutTargets(f, start, b)) nd.outs.push_back(Of(t, i));
             g.push_back(std::move(nd));
             starts.push_back(start);
         }
@@ -1443,8 +1463,12 @@ private:
                     if (kind == Edge::Return || kind == Edge::Escape || kind == Edge::Unwind) continue;  // the call's effect stands between
                     if (t >= 0 && has_live[static_cast<size_t>(t)]) live = live | live_in[static_cast<size_t>(t)];
                 }
+                const bool call_end = b.term == Term::Call || b.term == Term::CallReg || b.term == Term::Svc;
+                RegSet out_live;  // the continuations out of the function: what they read (a tail transfer)
+                for (const CalleeFx& o : nd.outs) out_live = out_live | o.reads;
+                if (!call_end) live = live | out_live;
                 if (nd.e) {
-                    RegSet after;
+                    RegSet after = call_end ? out_live : RegSet{};
                     for (const auto& [t, kind] : nd.succ) {
                         if ((kind == Edge::Return || kind == Edge::Escape || kind == Edge::Unwind) && t >= 0 && has_live[static_cast<size_t>(t)]) {
                             after = after | live_in[static_cast<size_t>(t)];
@@ -1471,6 +1495,9 @@ private:
         for (const Node& nd : g) {
             writes = writes | nd.def;
             if (nd.e) writes = writes | nd.e->writes;
+            for (const CalleeFx& o : nd.outs) {
+                if (o.returns) writes = writes | o.writes;   // a continuation that does not return leaves nothing to this function's callers (TakenAgg)
+            }
         }
 
         // Must-writes: forward, intersection at joins, over every exit
@@ -1503,6 +1530,11 @@ private:
                     RegSet at_exit = m;
                     if (nd.e && b.term != Term::Ret) at_exit = at_exit | nd.e->must;
                     must = must & at_exit;
+                    any_exit = true;
+                }
+                for (const CalleeFx& o : nd.outs) {  // a continuation out of the function that returns: an exit, after the call's effect
+                    if (!o.returns) continue;
+                    must = must & (m | o.must);
                     any_exit = true;
                 }
                 for (const auto& [t, kind] : nd.succ) {
@@ -1591,6 +1623,18 @@ private:
                     // path keeps the callee-saved state and the tail callee preserves it; a ret elsewhere (longjmp's br x30) restores nothing
                     vd.exit = true;
                     vd.path_returns = b.term == Term::Ret || (e && e->returns);
+                    vd.ok = ok;
+                    vd.restored = st.Restored();
+                }
+                if (std::any_of(nd.outs.begin(), nd.outs.end(), [](const CalleeFx& o) { return o.returns; })) {
+                    // A continuation out of the function that returns, after the call's effect: a return path, restoring only where the function there
+                    // preserves, as a tail call's (README.md, "A call into the next function"); one that does not return is no return path
+                    bool ok = !vd.exit || vd.ok;
+                    for (const CalleeFx& o : nd.outs) {
+                        if (o.returns && !o.preserving) ok = false;
+                    }
+                    vd.exit = true;
+                    vd.path_returns = true;
                     vd.ok = ok;
                     vd.restored = st.Restored();
                 }

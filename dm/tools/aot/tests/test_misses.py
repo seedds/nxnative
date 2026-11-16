@@ -15,6 +15,11 @@ the hidden function's address with the reason `indirect` (the dispatcher's miss 
 - a file with a resume point (`nonlocal` at the return address after the entry's call of the hidden function: a continuation of that function's call sites, design 3.3)
   and an untranslated encoding (reported, stays a miss): `aot: misses: 3 addresses, 1 new entries, 1 resume points, 1 still unserved (untranslated 1)`, and the pack's
   resume points one more than without them.
+The cut call (README.md, "A call into the next function"): the NRO cutcall, the same words dm/host/tests/t_aot_host.c's cutcall row writes (a jump table discovery cannot
+bound in a loop, case 0 a call of g whose return address is case 1's label), with the misses its first pack gives the host (the loop's head and case 1, indirect):
+case 0 is cut off as a function of its own that ends with the call (provenance adr), whose summary is the continuation's (it returns: before, noreturn), and the
+call's site gives g's LIVE_AFTER what case 1 reads (x19: before, nothing; nxaot plan --misses); a `noreturn` miss (a call returned that the analysis said does not
+return) stays unserved with its [RED] line.
 Then a corpus NRO with a function taken from discovery's roots (`--no-root <its entry>`: none of discovery's own sources makes it an entry): nxaot discover does not list it,
 its pack runs it in the JIT fallback (nxaot_host's mixed run counts JIT runs at its address, the output exactly corpus/expected); with a misses file naming it (`call`: a
 bl to an address that is no compiled entry) it is listed again (provenance miss), the pack compiles it and the run needs no JIT at all.
@@ -40,7 +45,7 @@ HOST_MISSES = '''\
 # module {module}, build ID {bid}, image SHA-256 {sha}
 # pack {pack}
 # {n} addresses, {entries} entries into the JIT fallback; {n} of the addresses this session, the rest from earlier sessions of this image
-# <module offset> <reason> <entries>: indirect, call, host, nocode (an entry of the next pack), nonlocal (a resume point), fpcr, refused, untranslated, other (no pack serves them)
+# <module offset> <reason> <entries>: indirect, call, host, nocode (an entry of the next pack), nonlocal (a resume point), fpcr, refused, untranslated, noreturn, other (no pack serves them)
 '''
 MISSES_LINE = re.compile(r'^aot: misses: (\d+) addresses, (\d+) new entries, (\d+) resume points, (\d+) still unserved \((.*)\)$', re.M)
 
@@ -171,6 +176,96 @@ def synthetic(a, check):
     if red: print('    ' + red[0])
 
 
+# The NRO cutcall of dm/host/tests/t_aot_host.c (cutcall_nro), word for word: start adds F(0) and F(1); F keeps x19 across a loop whose case comes from an
+# unbounded jump table; case 0 calls g, whose return address is case 1's label; g is open (a call through a PLT stub's shape whose union moves SP) and keeps x19
+def cutcall_nro():
+    TEXT, RO, DATA, SIZE, BSS = 0x1000, 0x1000, 0x2000, 0x3000, 0x1000
+    PASS_AT, FAIL_AT, IDX_AT, N = RO + 0x100, RO + 0x120, RO + 0x140, 8
+    idx = [0, 1, 0, 1, 0, 1, 0, 1]
+    want = sum(i + (7 if idx[i] == 0 else 0) for s0 in (0, 1) for i in range(s0, N))
+    def adr(rd, off): return 0x10000000 | (off & 3) << 29 | ((off >> 2) & 0x7FFFF) << 5 | rd
+    def b(off): return 0x14000000 | ((off >> 2) & 0x3FFFFFF)
+    def bl(off): return 0x94000000 | ((off >> 2) & 0x3FFFFFF)
+    def bcond(c, off): return 0x54000000 | ((off >> 2) & 0x7FFFF) << 5 | c
+    def movz(rd, imm): return 0xD2800000 | imm << 5 | rd
+    def addi(rd, rn, imm): return 0x91000000 | imm << 10 | rn << 5 | rd
+    def addr(rd, rn, rm, lsl=0): return 0x8B000000 | rm << 16 | lsl << 10 | rn << 5 | rd
+    def mov(rd, rm): return 0xAA0003E0 | rm << 16 | rd
+    def cmpi(rn, imm): return 0xF100001F | imm << 10 | rn << 5
+    def cmp(rn, rm): return 0xEB00001F | rm << 16 | rn << 5
+    w, L, fix = [0] * 0x20, {}, []   # fix: (index, label, encoder of the offset)
+    def at(name): L[name] = len(w) * 4
+    def ref(name, enc): fix.append((len(w), name, enc)); w.append(0)
+    at('start')
+    w += [0xA9BE7BFD, 0x910003FD, 0xA90153F3, adr(10, DATA - len(w) * 4 - 12)]
+    ref('leaf', lambda o: adr(9, o)); w.append(0xF9000149); ref('spfn', lambda o: adr(11, o)); w.append(0xF900054B)
+    w.append(movz(0, 0)); ref('F', bl); w += [mov(19, 0), movz(0, 1)]; ref('F', bl)
+    w += [addr(20, 19, 0), movz(9, want), cmp(20, 9)]
+    ref('fail', lambda o: bcond(1, o))
+    w.append(adr(0, PASS_AT - len(w) * 4)); w += [movz(1, 12), 0xD40004E1]; ref('exit', b)
+    at('fail'); w.append(adr(0, FAIL_AT - len(w) * 4)); w += [movz(1, 12), 0xD40004E1]
+    at('exit'); w += [0xD40000E1, 0xD4200000]
+    at('F'); w += [0xA9BD7BFD, 0x910003FD, 0xA90153F3, 0xF90013FC]; w.append(adr(28, IDX_AT - len(w) * 4)); w += [mov(19, 0), movz(20, 0)]
+    at('loop'); w += [movz(0, 0), 0x38736B8A]; ref('case0', lambda o: adr(9, o)); w += [addr(9, 9, 10, 2), 0xD61F0120]
+    at('case0'); ref('g', bl)
+    at('case1'); w += [addr(20, 20, 19), addr(20, 20, 0), addi(19, 19, 1), cmpi(19, N)]; ref('loop', lambda o: bcond(3, o))
+    w += [mov(0, 20), 0xF94013FC, 0xA94153F3, 0xA8C37BFD, 0xD65F03C0]
+    at('g'); w += [0xA9BE7BFD, 0x910003FD, 0xF9000BF3, movz(19, 0xBAD), 0xD40003C1]; ref('stub', bl); w += [0xF9400BF3, 0xA8C27BFD, movz(0, 7), 0xD65F03C0]
+    at('stub'); w.append(adr(16, DATA - len(w) * 4)); w += [0xF9400211, 0xD61F0220]
+    at('leaf'); w.append(0xD65F03C0)
+    at('spfn'); w += [0x910043FF, 0xD65F03C0]
+    for i, name, enc in fix: w[i] = enc(L[name] - i * 4)
+    w[0], w[1] = b(L['start']), RO
+    img = bytearray(SIZE)
+    for i, x in enumerate(w): img[4 * i:4 * i + 4] = (x & 0xFFFFFFFF).to_bytes(4, 'little')
+    img[0x10:0x14] = b'NRO0'
+    for i, x in enumerate([0, SIZE, 0, 0, TEXT, RO, DATA - RO, DATA, SIZE - DATA, BSS]): img[0x14 + 4 * i:0x18 + 4 * i] = x.to_bytes(4, 'little')
+    img[RO:RO + 4] = b'MOD0'
+    for i, x in enumerate([0x20, SIZE - RO, SIZE + BSS - RO, 0x40, 0x40, SIZE - RO]): img[RO + 4 + 4 * i:RO + 8 + 4 * i] = (x & 0xFFFFFFFF).to_bytes(4, 'little')
+    img[PASS_AT:PASS_AT + 12], img[FAIL_AT:FAIL_AT + 12], img[IDX_AT:IDX_AT + N] = b'cutcall PASS', b'cutcall FAIL', bytes(idx)
+    return bytes(img), L
+
+
+def has_reg(regs, n):
+    """Whether a register set as nxaot prints it (x0-x7,x19,sp,...) holds x<n>"""
+    for r in regs.split(','):
+        m = re.fullmatch(r'x(\d+)(?:-x(\d+))?', r)
+        if m and int(m.group(1)) <= n <= int(m.group(2) or m.group(1)): return True
+    return False
+
+
+def cut(a, check):
+    img, L = cutcall_nro()
+    path = os.path.join(a.work, 'cutcall.nro')
+    open(path, 'wb').write(img)
+    sha = hashlib.sha256(img).hexdigest()
+    mf = os.path.join(a.work, 'cutcall.misses.tsv')
+    misses_file(mf, 'cutcall', '-', sha, os.path.join(a.work, 'cutcall.so'), [(L['loop'], 'indirect', 2), (L['case1'], 'indirect', 1)])   # what its first pack gives the host
+    tsv = os.path.join(a.work, 'cutcall.discover.tsv')
+    d = run([a.nxaot, 'discover', path, '--misses', mf, '--tsv', tsv])
+    rows = {}
+    for line in open(tsv) if d.returncode == 0 else []:
+        f = line.rstrip('\n').split('\t')
+        if f[0] == 'fn': rows[int(f[1], 16)] = (int(f[3], 16), f[4], f[14])
+    frag = rows.get(L['case0'])
+    check(frag is not None and frag[0] == L['case1'] and frag[1] == 'adr' and frag[2] != 'noreturn',
+          f'cutcall with its first pack\'s misses: case 0 (+{L["case0"]:#x}) is a function of its own that ends with the call of g at case 1\'s entry (+{L["case1"]:#x}); '
+          f'its summary is the continuation\'s: {frag[2] if frag else "none"} (before the continuation: noreturn)', d.stdout[-600:])
+    p = run([a.nxaot, 'plan', path, '--misses', mf])
+    g = next((l.split('\t') for l in p.stdout.splitlines() if l.startswith(f'fn\t{L["g"]:#x}\t')), None)
+    live = g[g.index('live_after') + 1] if g and 'live_after' in g else ''
+    check(p.returncode == 0 and has_reg(live, 19),
+          f'g\'s LIVE_AFTER holds x19, which case 1 reads after the call that returns into it: {live or "none"} (before: nothing from that call site)', (p.stdout + p.stderr)[-600:])
+    nm = os.path.join(a.work, 'cutcall.noreturn.tsv')
+    misses_file(nm, 'cutcall', '-', sha, os.path.join(a.work, 'cutcall.so'), [(L['case1'], 'noreturn', 1)])
+    b = run([a.nxaot, 'build', path, '--shared', os.path.join(a.work, 'cutcall.noreturn.so'), '--misses', nm])
+    n = numbers(b.stdout)
+    red = [l for l in b.stdout.splitlines() if l.startswith('[RED] discover: the JIT miss at') and 'noreturn' in l]
+    check(b.returncode == 0 and n['misses'] == ('1', '0', '0', '1', 'noreturn 1') and red,
+          'a noreturn miss (a call returned that the analysis said does not return): still unserved, with its [RED] line', b.stdout[-600:])
+    if red: print('    ' + red[0])
+
+
 def corpus(a, check, nro='fnptr-gcc.nro', name='rt_check'):
     path = os.path.join(CORPUS, 'nro', nro)
     program = next(l.split('\t')[1] for l in open(os.path.join(CORPUS, 'corpus.tsv')) if l.startswith(nro + '\t'))
@@ -224,8 +319,9 @@ def main():
     os.makedirs(a.work, exist_ok=True)
     check = Checks()
     synthetic(a, check)
+    cut(a, check)
     corpus(a, check)
-    print(f'JIT misses: the synthetic module\'s hidden function and a corpus function held from discovery, {check.bad} failures')
+    print(f'JIT misses: the synthetic module\'s hidden function, the cut call, and a corpus function held from discovery, {check.bad} failures')
     return 1 if check.bad else 0
 
 

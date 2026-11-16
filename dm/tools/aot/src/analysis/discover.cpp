@@ -316,6 +316,7 @@ private:
         f.blocks.clear();
         f.calls.clear();
         f.indirect.clear();
+        f.out.clear();
         f.words = f.undefined = 0;
         f.end = f.entry;
         std::set<uint64_t> leaders{f.entry}, covered;
@@ -480,6 +481,8 @@ private:
         }
         w.push_back(~0ull);
         for (const auto& [call, pad] : f.pads) w.insert(w.end(), {call, pad});  // the summaries read them too (RunSummaries)
+        w.push_back(~0ull);
+        for (const auto& [start, to] : f.out) w.insert(w.end(), {start, to});   // and the continuations out of the function
         llvm::SHA256 sha;
         sha.update(llvm::ArrayRef<uint8_t>(reinterpret_cast<const uint8_t*>(w.data()), w.size() * sizeof(uint64_t)));
         return sha.final();
@@ -506,18 +509,25 @@ private:
                 b.term = Term::CondTail;
             }
             if (Inside(f, next)) b.succ.emplace_back(next, Edge::Fall);
+            else if (CallGoesOn(pc, next)) f.out.emplace(b.start, next);  // falls into the next function: a tail transfer when not taken
             break;
         case Kind::BL:
         case Kind::BLR:
             b.term = i.kind == Kind::BL ? Term::Call : Term::CallReg;
             b.target = i.kind == Kind::BL ? i.target : 0;
             f.calls.emplace_back(pc, b.target);
-            if (Inside(f, next) && (i.kind == Kind::BLR || Returns(i.target))) b.succ.emplace_back(next, Edge::Return);
+            if (i.kind == Kind::BLR || Returns(i.target)) {
+                // The call returns to next: a block of this function, or another function's entry (discovery cut the function there: the call's return goes on
+                // in that function, a tail transfer after the call, not "no return path")
+                if (Inside(f, next)) b.succ.emplace_back(next, Edge::Return);
+                else if (CallGoesOn(pc, next)) f.out.emplace(b.start, next);
+            }
             if (const auto pad = f.pads.find(pc); pad != f.pads.end() && Inside(f, pad->second)) b.succ.emplace_back(pad->second, Edge::Unwind);
             break;
         case Kind::SVC:
             b.term = Term::Svc;
             if (Inside(f, next)) b.succ.emplace_back(next, Edge::Escape);
+            else if (CallGoesOn(pc, next)) f.out.emplace(b.start, next);   // an svc that returns (not one at its FDE's end: ExitProcess)
             break;
         case Kind::BR:
             if (i.rn == 30) {
@@ -558,6 +568,17 @@ private:
         return it->second;
     }
 
+    // Whether the return of a call at pc can reach next, outside the call's function: a cut put next there (a miss's entry, an adr's, a branch's) while the code the
+    // compiler emitted after the call goes on. Not when the call is the last instruction of the FDE that holds it: the compiler put nothing after it, so it knew the
+    // callee does not return (longjmp, a throw, abort: their summaries may show a return path), and the next function's code is no continuation of it
+    bool CallGoesOn(uint64_t pc, uint64_t next) const {
+        if (!TextCode(next)) return false;
+        auto it = std::upper_bound(img.fdes.begin(), img.fdes.end(), pc, [](uint64_t a, const module::Fde& fde) { return a < fde.start; });
+        if (it == img.fdes.begin()) return true;
+        --it;
+        return !(pc < it->end && next >= it->end);
+    }
+
     // A bl to a function with no return path does not come back: what follows it is not that function's code (often the next function,
     // which then has no other entry: the gap sweep finds it)
     bool Returns(uint64_t callee) const {
@@ -585,6 +606,7 @@ private:
                 if (b.term != Term::Call) continue;
                 const bool has = std::any_of(b.succ.begin(), b.succ.end(), [](const auto& s) { return s.second == Edge::Return; });
                 if (has != (Returns(b.target) && Inside(f, b.end))) again[k] = 1;
+                if (f.out.count(b.start) != (Returns(b.target) && !Inside(f, b.end) && CallGoesOn(b.end - 4, b.end))) again[k] = 1;
             }
         }, 256);
         for (size_t k = 0; k < all.size(); ++k) {
@@ -1073,6 +1095,7 @@ private:
                     r.why = word == "fpcr"           ? "msr fpcr left the FPCR the module is compiled for (design 7.1)"
                           : word == "refused"        ? "a function the lifter refused"
                           : word == "untranslated"   ? "an encoding the lifter does not translate"
+                          : word == "noreturn"       ? "a call returned that the analysis says does not return (its callee returns by a path discovery does not see)"
                                                      : "a reason this nxaot does not know";
                 }
                 unserved++;
@@ -1201,7 +1224,7 @@ FunctionsBytes BytesOf(const std::map<uint64_t, Function>& functions) {
         b.blocks += memory::Of(f.blocks);
         for (const auto& [start, blk] : f.blocks) b.blocks += memory::Of(blk.succ);
         b.other += memory::Of(f.name) + memory::Of(f.roots) + memory::Of(f.speculative) + memory::Of(f.spec_live) + memory::Of(f.tentative) +
-                   memory::Of(f.unverified) + memory::Of(f.calls) + memory::Of(f.tables) + memory::Of(f.pads) + memory::Of(f.indirect) +
+                   memory::Of(f.unverified) + memory::Of(f.calls) + memory::Of(f.tables) + memory::Of(f.pads) + memory::Of(f.indirect) + memory::Of(f.out) +
                    memory::Of(f.windows);
         for (const auto& [br, jt] : f.tables) b.other += memory::Of(jt.targets);
         for (const auto& [br, why] : f.indirect) b.other += memory::Of(why);

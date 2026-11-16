@@ -134,6 +134,9 @@ struct CalleeView {
     // It may read NZCV before writing it (its summary's reads). Otherwise a call stores a dirty NZCV only where the caller may read it after
     // the call (lower_calls.cpp, FnCall); true for the indirect view, whose callees may be no function of the module
     bool reads_nzcv = true;
+    // It may read x30 before writing it (its summary's reads). Otherwise the return of a call into its entry goes on in it as a real tail call with the caller's
+    // entry lr (lower_calls.cpp FnAfterCall: x30 then holds that lr instead of the call's return address, which it never reads)
+    bool reads_lr = true;
     // writes is this function's own (a direct call). False for the indirect view, whose writes is a union over every function an indirect
     // call may reach: the one that runs stores only what it writes itself, so a register it is passed and the union says may change must be
     // current in the block before the call too

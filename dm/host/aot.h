@@ -482,6 +482,11 @@ size_t loader_self_bindings(const module_t *m, void (*fn)(uint64_t slot, uint64_
 // A pack refused for its bindings writes its module's bindings file at once (with DM_AOT_PROFILE), as the session ends there: the next pack takes the current ones.
 // aot_arena.c calls it through dm_aot_bindings_refused, which aot_profile.c's constructor sets (null in the tests that link the arena without the sampler)
 void dm_aot_bindings_now(const module_t *m, const uint8_t sha256[32], const char *pack);
+// nxhost-run --bindings <folder> (main_x86.c, loader.c load_modules): the module set mapped and relocated as a start makes it, each module's bindings written to
+// <folder>/<module>.bind.tsv in the profile's form (none for a module with none), and the process ends before any pack is loaded or guest code runs: the packer's
+// bindings for a first pack (scripts/build_ipa_from_nsp.py), from the loader itself, so that the first pack's units are the second's (dm/tools/aot/README.md,
+// "PLT stubs bound to their own module"). 1 when a file could not be written
+int dm_aot_write_module_bindings(const char *dir, const module_t *m, const uint8_t sha256[32], const char *pack);
 extern void (*_Atomic dm_aot_bindings_refused)(const module_t *, const uint8_t *, const char *);
 
 // ---------- The calling guest's context, and backtraces (aot_fault.c) ----------

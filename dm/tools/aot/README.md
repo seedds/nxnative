@@ -700,7 +700,7 @@ pack". The x86-64 host counts every entry into its JIT fallback per guest addres
 # module main, build ID aa07aa07aa07aa07aa07aa07aa07aa07, image SHA-256 9528170af64ad4b9bbc935825b1fcff8b02e227cf3b9d9bca6a87ce222ba2d7b
 # pack t_aot_module.tmp/... /main.aot.so
 # 1 addresses, 1 entries into the JIT fallback; 1 of the addresses this session, the rest from earlier sessions of this image
-# <module offset> <reason> <entries>: indirect, call, host, nocode (an entry of the next pack), nonlocal (a resume point), fpcr, refused, untranslated, other (no pack serves them)
+# <module offset> <reason> <entries>: indirect, call, host, nocode (an entry of the next pack), nonlocal (a resume point), fpcr, refused, untranslated, noreturn, other (no pack serves them)
 0x208 indirect 1
 ```
 
@@ -1148,7 +1148,15 @@ without `--bind` is as before. The pack records every binding it assumed in an e
 once the module is relocated (`aot_arena.c` `bindings_check`): a slot bound otherwise refuses the pack with a `[RED]` line naming the slot and
 what the loader bound it to (another pack set, a host that takes the name over now), which stops the start as a pack of another image does;
 with `DM_AOT_PROFILE` that session's bindings file is written first, so the next pack takes the current ones. An NRO's pack with bindings is
-refused. The packer passes `<NSP folder>/<id>-work/profile/<module>.bind.tsv` when there is one for the image (`--bind`, the pairs in the pack's
+refused. A first pack has bindings too: before its packs the packer runs `<host> --profile <game profile> --bindings <NSP folder>/<id>-work/profile <aot folder>`
+when the host runs on this system (the condition of `--takeovers`), and the host maps and relocates the module set as a start does, writes each module's
+bindings file there in the form above (`aot.h` `dm_aot_write_module_bindings`; `# pack none`) and ends before any pack loads (`scripts/build_ipa_from_nsp.py`
+`loader_bindings`): one implementation of the loader's rule, and the first pack's units then carry the bindings the second pack's do, so that the second
+pack's cached-units rule works with them. Measured on Mario vs. Donkey Kong (the dry run's rows are the profiled run's, row for row; 0.3 s): the first
+pack with them, `sdk` 82 s and `.text` 57,561,604 -> 55,035,792 (-4.4 %), `subsdk0` 39 s, 28,066,380 -> 27,344,608 (-2.6 %), `main` none to bind; the
+second pack (`--profile --misses --bind`, the same run's files) then keeps 35,930 of `sdk`'s functions at W (2,632 of 2,648 units from the cache; 3,554
+when the first pack had no bindings) and 9,537 of `subsdk0`'s (1,175 of 1,217; 3,947): `.text` 140,861,088 -> 59,969,360 and 62,035,148 -> 31,534,076,
+26.5 s and 5.5 s instead of 40.4 s and 14.0 s; the three modules' second pack 483.8 -> 372.4 MB of `.text`. The packer passes `<NSP folder>/<id>-work/profile/<module>.bind.tsv` when there is one for the image (`--bind`, the pairs in the pack's
 key), less the rows whose name the host it packs for takes over (`nxhost-run --takeovers`, asked when that host runs on the packing system:
 a file recorded by an older host binds them, and a pack that assumed them would be refused), and copies what it passed beside the pack
 (`aot_v<version>/<module>.bind.tsv`). A refused pack ends the run with status 8 (`DM_AOT_REPACK`, as every
@@ -1199,6 +1207,63 @@ across them) or each module's facts computed with its imports taken as open (the
 they are now) and the importers built after the exporters; a host function (the forced take-overs, the HLE) preserves the guest's callee-saved
 registers by construction (its thunk writes only the return registers), so those imports could take the fact without a check; and a host or
 pack change that alters one export's class refuses every pack that imported it.
+
+## A call into the next function
+
+Discovery keeps functions apart: a function's walk stops where another entry starts, and a branch into another function is a tail call. A miss's entry
+(`indirect`, "JIT misses"), an `adr` whose target lies outside its function and a branch's target cut a function in the middle, and the instruction before
+the cut may run into the next function: a plain fall-through had its edge (`Term::Out`, a tail transfer), but a call that returns, an svc and a conditional
+branch's fall-through had none, and the summaries ignored a jump table's cases in another function.
+
+Found on Mario vs. Donkey Kong's second pack: the miss at `main+0x2ee9c8`, a case of a jump table discovery cannot bound (`adr x9, #0x2ee9c8; ldrb w10,
+[x28, x8]; add x9, x9, x10, lsl #2; br x9`, its base set before a loop that calls), made that case an entry, which cut `main+0x2ee8a0` (one function of
+0x368 bytes) into nine. One of them, `main+0x2ee9b4` (the other table's base, an `adr` target), is `ldr; mov; ldr; bl 0x24397c`, and the call's return is
+`main+0x2ee9c4`, the next fragment's entry. With no edge after the call the fragment had no return path (summarised `noreturn`), and its call site gave
+`0x24397c`'s LIVE_AFTER nothing: the callee, open, returned without storing the x19 and x27 it restored (they were not in LIVE_AFTER), the fragment
+reloaded them from the block, where the callee had stored its own values at an inner call, and the JIT ran `main+0x2ee9c4` from there (the lowering is a tail
+call only when x30 is the entry lr, and after a call it is the return address: `FnTailLr`'s JIT path, the miss at `0x2ee9c4`): `ldr x1, [x27 + x19 * 8 +
+0x98]` read 0x100000000, which `sdk+0x3a9324` faulted on at the title.
+
+**The rule** ([src/analysis/discover.cpp](src/analysis/discover.cpp) `Finish`): when a call to a function that returns (`bl`; `blr`), an svc or a conditional
+branch has its next address outside the function, in the text, discovery records it, `Function::out` (block start -> address), as the block's
+continuation: a tail transfer to what starts there, after the call's or the svc's effect. Not when the instruction is the last of the FDE that holds it
+(`CallGoesOn`): the compiler put nothing after it, so it knew the callee does not return (longjmp, a throw, `exit`, whose summaries may show a return
+path), and the next function is no continuation of it; with that rule the 18 corpus programs' discovery is row for row round 3's (`nxaot discover
+--tsv`), where without it six functions of `except-clang` and `sjlj-gcc` ending in such a call became open. The summaries take it as an exit
+([src/analysis/summary.cpp](src/analysis/summary.cpp) `OutTargets`, with the cases of a table that are no block of the function): its reads are live after
+the call, its writes and must-writes count, and the path returns when the function there does, restoring what it preserves. LIVE_AFTER gets what the
+continuation reads and passes this function's own on to it, the tail-call components (RV) join it ([src/build/plan.cpp](src/build/plan.cpp)), and the
+lifter makes it a real tail call with the entry's lr when the function there does not read x30 (`FnAfterCall`: x30 holds the call's return address, which
+it would read first otherwise; then the JIT from there, as before). The kinds of cut, from the code: a plain fall-through (`Term::Out`, unchanged), a
+conditional branch's fall-through, a call's return (this defect), an svc's return, a table case outside the function; a call's landing pad outside its
+function stays a non-local transfer. The unit key's format is 9 (a callee's reads of x30 in it).
+
+**A call the analysis says does not return** (the second line, [src/lift/lower_calls.cpp](src/lift/lower_calls.cpp) `FnCallDirect`): such a call stores
+every register newer than the block first (cold: the analysis says it never comes back), the callee stores all it holds at a return (its LIVE_AFTER is
+every register: `plan.cpp`), and a return goes on in the JIT from the return address with the whole register file, reason `NXAOT_TRAP_JIT_NORETURN`: a
+`[RED] aot: a call returned that the analysis says does not return: its return address at ...` line and a misses row `noreturn`, which nxaot leaves
+unserved (its analysis is what is wrong there). Before, such a return was a trap (status 6).
+
+**Checked** by `t_aot_host`'s `cutcall` row: a module it writes word by word, a loop over an unbounded jump table whose case 0 calls g and whose case 1 is
+that call's return address; g is open (a call through a PLT stub's shape whose union moves SP) and stores its own x19 in the block at an svc. Packed without
+misses, the run prints `cutcall PASS` with the cases in the JIT (10 runs) and the host's misses file names case 1 and the loop's head; packed with it, the
+base nxaot's pack faulted (`SIGSEGV at address 0x2 in guest code`, the loop's `ldrb w10, [x28, x19]` with the block's stale x28), this one prints
+`cutcall PASS` with no JIT run. `noret`: a call of a function that returns through `br x16` (the summaries say it does not: the only address-taken
+function traps) goes on in the JIT and prints `noret PASS` with its `noreturn` row; the base pack trapped (status 6). `test_misses.py`'s cut-call checks
+read the same module (word for word, in Python): the fragment's summary `open` (base: `noreturn`), g's LIVE_AFTER with x19 (`nxaot plan --misses`), and a
+`noreturn` miss unserved with its `[RED]` line.
+
+**The corpus packs** (`build_packs.sh`, 46 packs against round 3's): the synthetic modules' 10 (`hostfn`, `module`, `second_pack`, Linux and Windows)
+are the same bytes; the 36 of the corpus programs differ, each at its calls of a function the summaries say does not return (4 to 24 per program: `exit`,
+`abort`, the runtime's error paths), whose return was a trap and is now a store of every register before the call and a JIT continuation after it
+(`.text` 0.8 to 3.0 % larger: `fnptr-gcc` 49,404 -> 49,836, `except-clang` 81,148 -> 83,612).
+
+**Earlier second packs**: the defect shows as a JIT miss at a call's return address. Round 2's second pack of Mario vs. Donkey Kong (the bundle of
+95daacad's "Repack with profile") ran four such continuations (`main+0x38d310`, `0x522e84`, `0x54f540` after a `bl`, `0x5f4190` after a `blr`) and reached
+level 1-1 without a fault; whether one of them carried a stale register the log cannot tell: a stale value need not fault (the synthetic's x19, with
+another register order, ends the loop early and prints a wrong sum). The conditional branch's, the svc's and the table's cases leave no miss line: they
+made the summaries of the fragment and its callers miss the continuation's effects, which only an open callee-saved register or a v register makes
+visible. Packs built with misses before this fix should be built again.
 
 ## The second pack's cached units
 

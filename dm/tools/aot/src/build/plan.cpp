@@ -115,6 +115,9 @@ Plan MakePlan(const module::Image& image, const analysis::Discovery& d, const li
         enum Kind { None, Call, Tail, Svc } kind = None;
         std::vector<uint64_t> targets;  // empty with indirect = every host-callable function
         bool indirect = false;
+        // Where control goes on out of the function after the end (analysis::Function::out: a call's or an svc's return, a conditional branch's fall-through,
+        // into another function's entry): a tail transfer there, after the call or the svc (README.md, "A call into the next function")
+        std::vector<uint64_t> outs;
     };
     const auto end_of = [&](const analysis::Function& f, const analysis::Block& b) {
         EndFx e;
@@ -158,6 +161,7 @@ Plan MakePlan(const module::Image& image, const analysis::Discovery& d, const li
         default:
             break;
         }
+        if (const auto o = f.out.find(b.start); o != f.out.end()) e.outs.push_back(o->second);
         return e;
     };
 
@@ -204,9 +208,11 @@ Plan MakePlan(const module::Image& image, const analysis::Discovery& d, const li
                 } else if (e.indirect) {
                     r = r | (callable.empty() ? Regs::All() : ind);
                 }
-                for (const uint64_t t : e.targets) {
-                    const auto it = p.fns.find(t);
-                    r = r | (it == p.fns.end() ? Regs::All() : it->second.raw);
+                for (const std::vector<uint64_t>* ts : {&e.targets, &e.outs}) {
+                    for (const uint64_t t : *ts) {
+                        const auto it = p.fns.find(t);
+                        r = r | (it == p.fns.end() ? Regs::All() : it->second.raw);
+                    }
                 }
             }
             next[k] = r;
@@ -302,6 +308,20 @@ Plan MakePlan(const module::Image& image, const analysis::Discovery& d, const li
                             must = ToRegs(c->second.summary.must);
                         }
                     };
+                    // A continuation out of the function passes on this function's LIVE_AFTER, as a tail call does: what it reads, and what this function's
+                    // callers may read that it need not write. After the block's call or svc (what is live once it is done), else at the block's end
+                    Regs out_live;
+                    for (const uint64_t t : e.outs) {
+                        Regs reads, must;
+                        callee(t, reads, must);
+                        out_live = out_live | (ff.live_after - must) | reads;
+                        out.to.emplace_back(t, ff.live_after);
+                    }
+                    if (e.kind == EndFx::Call || e.kind == EndFx::Svc) {
+                        after = after | out_live;
+                    } else {
+                        live = live | out_live;
+                    }
                     if (b.term == Term::Ret) {
                         live = live | ff.live_after;
                     } else if (e.kind == EndFx::Svc) {
@@ -363,6 +383,12 @@ Plan MakePlan(const module::Image& image, const analysis::Discovery& d, const li
         }
     }
 
+    // A function the summaries say does not return stores every register it holds at a return all the same: a caller goes on in the JIT from the call's
+    // return address with the whole register file if it returns (lower_calls.cpp FnCallDirect; README.md, "A call the analysis says does not return")
+    for (auto& [entry, ff] : p.fns) {
+        if (!ff.returns) ff.live_after = Regs::All();
+    }
+
     // RV: a tail call returns its callee's return value, so the v0..v3 a function returns in host registers must be the same over every chain
     // of tail calls (a component); the standard entries share one, since an indirect call cannot tell them apart. A component returns the v0..v3
     // every returning member writes; other written v registers reach callers through the block
@@ -378,6 +404,11 @@ Plan MakePlan(const module::Image& image, const analysis::Discovery& d, const li
         }
         for (const auto& [start, b] : f.blocks) {
             const EndFx e = end_of(f, b);
+            for (const uint64_t t : e.outs) {   // a continuation out of the function returns what the function there returns
+                if (const int64_t d = node_of(t); d >= 0) {
+                    uf.Join(static_cast<int>(k), static_cast<int>(d));
+                }
+            }
             if (e.kind != EndFx::Tail) {
                 continue;
             }

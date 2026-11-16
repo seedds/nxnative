@@ -957,6 +957,7 @@ const char* JitWhy(uint32_t reason) {
     case NXAOT_TRAP_JIT_TARGET: return "a branch or call to an address that is no compiled entry";
     case NXAOT_TRAP_JIT_FPCR: return "msr fpcr left the FPCR the module was compiled for";
     case NXAOT_TRAP_JIT_REFUSED: return "a function the lifter refused";
+    case NXAOT_TRAP_JIT_NORETURN: return "a call returned that the analysis says does not return: its return address";
     case NXAOT_TRAP_NO_CODE: return "code that runs into no compiled entry";
     case NXAOT_TRAP_UNTRANSLATED: return "an encoding the lifter does not translate";
     default: return "a continuation compiled code handed over";

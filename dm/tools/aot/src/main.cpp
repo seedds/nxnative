@@ -8,7 +8,7 @@
 //                                                     --times: the seconds of its steps on standard error; --misses and --no-root as for build;
 //                                                     --memory: each table's bytes at its peak and the resident set at each stage, on standard
 //                                                     error (src/analysis/memory.h; README.md, "Memory at scale")
-//   nxaot plan <module.nro | name.aot.tsv> [--cc swifttail|ghc] [--all-entries] [--threads N] [--memory]
+//   nxaot plan <module.nro | name.aot.tsv> [--cc swifttail|ghc] [--all-entries] [--threads N] [--misses <file>] [--bind <file>] [--memory]
 //                                                     the pack stage's convention facts (src/build/plan.h): the indirect view and per function
 //                                                     PASS, WRITES, LIVE_AFTER, RV, a standard entry, its indirect sites; --memory as for discover
 //   nxaot image <module.nro> <out dir> [<name>]       the behaviour-image form of an NRO: <name>.image.bin and its manifest <name>.aot.tsv
@@ -114,7 +114,7 @@ int Usage() {
     std::fprintf(stderr,
                  "usage: nxaot discover <module.nro | name.aot.tsv> [--symbols-as-oracle] [--tsv <out>] [--threads N] [--times] [--misses <file>] [--bind <file>]\n"
                  "                      [--no-root <hex>]... [--memory]\n"
-                 "       nxaot plan <module.nro | name.aot.tsv> [--cc swifttail|ghc] [--all-entries] [--threads N] [--memory]\n"
+                 "       nxaot plan <module.nro | name.aot.tsv> [--cc swifttail|ghc] [--all-entries] [--threads N] [--misses <file>] [--bind <file>] [--memory]\n"
                  "       nxaot image <module.nro> <out dir> [<name>]\n"
                  "       nxaot manifest <name.aot.tsv>\n"
                  "       nxaot module <module.nro | name.aot.tsv>\n"
@@ -405,7 +405,7 @@ int Discover(int argc, char** argv) {
 // The convention facts of the pack stage (src/build/plan.h) as rows: the indirect view (what an indirect call passes, may find written, returns)
 // and per function PASS, WRITES, LIVE_AFTER, RV, whether it has a standard entry and its indirect sites (blr, unbounded br): CTest plan
 int PlanCmd(int argc, char** argv) {
-    std::string path;
+    std::string path, misses, bind;
     nxaot::lift::Convention conv;
     bool all_entries = false;
     unsigned threads = 0;
@@ -420,6 +420,10 @@ int PlanCmd(int argc, char** argv) {
             else return Usage();
         } else if (a == "--all-entries") {
             all_entries = true;
+        } else if (a == "--misses" && i + 1 < argc) {
+            misses = argv[++i];
+        } else if (a == "--bind" && i + 1 < argc) {
+            bind = argv[++i];
         } else if (a == "--memory") {
             nxaot::memory::Registry::Get().Enable();
         } else if (path.empty() && !a.empty() && a[0] != '-') {
@@ -431,13 +435,18 @@ int PlanCmd(int argc, char** argv) {
     if (path.empty()) {
         return Usage();
     }
-    const auto image = Load(path);
+    auto image = Load(path);
     if (!image) {
         return 1;
     }
     nxaot::memory::Rss("the module loaded");
     nxaot::analysis::DiscoverOptions dopts;
     dopts.threads = threads;
+    std::string error;   // the misses and the bindings as nxaot build takes them (UseMisses, UseBindings)
+    if ((!misses.empty() && !UseMisses(misses, &*image, &dopts.misses, &error)) || (!bind.empty() && !UseBindings(bind, *image, &dopts.bound_slots, &error))) {
+        std::fprintf(stderr, "nxaot plan: %s\n", error.c_str());
+        return 1;
+    }
     const nxaot::analysis::Discovery d = nxaot::analysis::Discover(*image, dopts);
     const nxaot::build::Plan plan = nxaot::build::MakePlan(*image, d, conv, all_entries, threads);
     const auto str = [](const nxaot::lift::Regs& r) { return nxaot::analysis::RegSet{r.x, r.v, r.sp, r.nzcv}.Str(); };

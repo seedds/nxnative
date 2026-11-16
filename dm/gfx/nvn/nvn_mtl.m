@@ -12415,7 +12415,7 @@ static void cbs_feedback(cbs_list *l, NSError *err, const char *where) {   // fr
 static inline uint64_t ub_bound(uint64_t size) { return (size + 255) & ~UINT64_C(255); }
 static uint64_t g_ub_short;
 static uint64_t ub_padded(NvShader *sh, int st, int reg, const p_bind_buf *u, uint64_t live, uint32_t need, const uint8_t *mem, __strong id<MTLBuffer> *buf) {
-    size_t off = arena_alloc(need, buf); uint8_t *d = (uint8_t *)g_cur_arena->cpu + off; uint64_t lo = u->addr, hi = lo + u->size, g; const uint8_t *c;
+    size_t off = arena_alloc(need, buf); uint64_t gpu = g_cur_arena->gpu + off; uint8_t *d = (uint8_t *)g_cur_arena->cpu + off; uint64_t lo = u->addr, hi = lo + u->size, g; const uint8_t *c;
     if (!mem) mem = (const uint8_t *)(uintptr_t)lo;
     if (g_nubd && ubd_hits(lo, hi) && ubd_covers(lo, hi)) {   // as ubd_shadow_: the updates in order
         for (int i = 0; i < g_nubd; i++) { const ubd_ent *e = &g_ubd[i]; uint64_t a = e->lo > lo ? e->lo : lo, b = e->hi < hi ? e->hi : hi;
@@ -12425,7 +12425,7 @@ static uint64_t ub_padded(NvShader *sh, int st, int reg, const p_bind_buf *u, ui
     memset(d + live, 0, need - (size_t)live);
     uint64_t n = ++g_ub_short;
     if (!(sh->logged & 16)) { sh->logged |= 16; static int nlog; if (nlog++ < 16) MLOG("uniform slot %d of shader %s (stage %d) is bound with %llu bytes (%llu readable, a multiple of 256) and read up to byte %u at fixed offsets: it is encoded with zeros past those (%llu such encodes so far)", reg, sh->key, st, (unsigned long long)u->size, (unsigned long long)live, need, (unsigned long long)n); }
-    return g_cur_arena->gpu + off;
+    return gpu;
 }
 // A CBUF slot's GPU address, and in *use the buffer it points into: the bound uniform buffer; the shadow of inline updates deferred in this pass; an arena copy padded with zeros
 // when the binding is shorter than the shader reads it at fixed offsets (ub_padded); or the all-zero bank when nothing usable is bound. The full encode and the patch take it from here
@@ -12538,6 +12538,7 @@ static int encode_args_(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, i
     NSUInteger arg_len = sh->arg_len ? sh->arg_len : sh->ae.encodedLength;
     if (reusable && args_cbuf_only(sh)) {   // only what the uniform bindings point at changed since this shader's block: copy it and write its uniform slots and their size table again
         id<MTLBuffer> ab; size_t off = arena_alloc(arg_len, &ab);
+        uint64_t ab_gpu = g_cur_arena->gpu + off;   // save before cbuf_slot / cbsize_table allocate and may roll g_cur_arena over to a new block
         uint64_t *p = (uint64_t *)(void *)(g_cur_arena->cpu + off);
         memcpy(p, (const uint8_t *)sh->ab_buf.contents + sh->ab_off, arg_len);
         for (int i = 0; i < sh->rf.nb; i++) { const nvn_rbind *b = &sh->rf.b[i]; id<MTLBuffer> use;
@@ -12545,8 +12546,8 @@ static int encode_args_(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, i
             else if (b->kind == NVN_RB_CBSIZE) p[b->aid] = cbsize_table(nvn_stage, &use);
             else continue;
             za_check(p[b->aid], "argument block address slot", b->aid); }
-        bind_args(en, nvn_stage, metal_vertex, ab, g_cur_arena->gpu + off, off, sh->rf.abi);
-        sh->ab_buf = ab; sh->ab_gpu = g_cur_arena->gpu + off; sh->ab_off = off; sh->ab_ugen = g_args_ugen[nvn_stage]; g_args_wrote[nvn_stage] = g_args_seq;   // pass, base instance, pool and binding generations are the ones the copied block was encoded for
+        bind_args(en, nvn_stage, metal_vertex, ab, ab_gpu, off, sh->rf.abi);
+        sh->ab_buf = ab; sh->ab_gpu = ab_gpu; sh->ab_off = off; sh->ab_ugen = g_args_ugen[nvn_stage]; g_args_wrote[nvn_stage] = g_args_seq;   // pass, base instance, pool and binding generations are the ones the copied block was encoded for
         g_stat_args_patch++;
         return 1;
     }

@@ -159,7 +159,7 @@ void dm_movie_picture(const void *dec, const char *lib, int64_t ts_ns, int unkno
         if (re_picture_probe_count < 32) {
             FILE *pf = fopen("/tmp/re_movie_clock_probe.log", "a");
             if (pf) {
-                fprintf(pf, "[RE decoded picture] decoder=%p lib=%s pts_ns=%lld dt_ns=%lld hz=%d unknown_hz=%d count=%u\\n",
+                fprintf(pf, "[RE decoded picture] decoder=%p lib=%s pts_ns=%lld dt_ns=%lld hz=%d unknown_hz=%d count=%u\n",
                     dec, lib ? lib : "(null)", (long long)ts_ns, (long long)dt, s->hz, unknown_hz, s->n);
                 fclose(pf);
                 re_picture_probe_count++;

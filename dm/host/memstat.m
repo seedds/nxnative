@@ -208,3 +208,91 @@ void dm_diag_samplers_start(void) {
     if (atomic_exchange(&once, 1)) return;
     memstat_start(); thrcpu_start();
 }
+
+// ---------- GPU energy and GPU time for the power line (hle_nvn.c power_line; Mac only) ----------
+// The power line's own counters have no GPU energy on the Mac (task_power_info's GPU time reads 0), and at a frame-rate cap the GPU lowers its clock, so its time per frame no
+// longer shows what a change saves. dm_gpu_power_request(frame), called with each power line, has a helper thread read the GPU's energy since the last request (IOReport's
+// "Energy Model" group, its "GPU Energy" channel: the whole system's GPU, other apps included, which an in-run A/B's paired phases cancel) and this process's GPU time
+// (the AGX driver's AppUsage accumulatedGPUTime on this process's user clients of the IOAccelerator), and log them as "[nvn] GPU power up to frame N". The helper takes
+// the reads off the frame thread: subscribing takes about 55 ms once, then about 1 ms of IOReport and 1 ms of registry walk a request (M3 Max). Off without IOReport
+#if !TARGET_OS_IPHONE
+#include <IOKit/IOKitLib.h>
+#include <dlfcn.h>
+#include <pthread.h>
+#include <unistd.h>
+static CFDictionaryRef (*ior_copy)(CFStringRef, CFStringRef, uint64_t, uint64_t, uint64_t);
+static void *(*ior_sub)(void *, CFMutableDictionaryRef, CFMutableDictionaryRef *, uint64_t, CFTypeRef);
+static CFDictionaryRef (*ior_samples)(void *, CFMutableDictionaryRef, CFTypeRef);
+static CFDictionaryRef (*ior_delta)(CFDictionaryRef, CFDictionaryRef, CFTypeRef);
+static int64_t (*ior_int)(CFDictionaryRef, int32_t);
+static CFStringRef (*ior_name)(CFDictionaryRef);
+static pthread_mutex_t g_gp_mu = PTHREAD_MUTEX_INITIALIZER; static pthread_cond_t g_gp_cv = PTHREAD_COND_INITIALIZER;
+static uint64_t g_gp_req;   // frame of the request waiting for the helper (0: none)
+// This process's GPU time so far (ns): the AppUsage entries of its user clients of every IOAccelerator
+static uint64_t gp_own_gpu_ns(void) {
+    io_iterator_t acc; uint64_t sum = 0; char want[32]; int wl = snprintf(want, sizeof want, "pid %d,", getpid());
+    if (IOServiceGetMatchingServices(kIOMainPortDefault, IOServiceMatching("IOAccelerator"), &acc) != KERN_SUCCESS) return 0;
+    for (io_object_t a; (a = IOIteratorNext(acc)); IOObjectRelease(a)) {
+        io_iterator_t it; if (IORegistryEntryGetChildIterator(a, kIOServicePlane, &it) != KERN_SUCCESS) continue;
+        for (io_object_t e; (e = IOIteratorNext(it)); IOObjectRelease(e)) {
+            CFStringRef cr = IORegistryEntryCreateCFProperty(e, CFSTR("IOUserClientCreator"), NULL, 0); char b[64] = "";
+            if (cr) { CFStringGetCString(cr, b, sizeof b, kCFStringEncodingUTF8); CFRelease(cr); }
+            if (strncmp(b, want, (size_t)wl)) continue;
+            CFArrayRef au = IORegistryEntryCreateCFProperty(e, CFSTR("AppUsage"), NULL, 0); if (!au) continue;
+            if (CFGetTypeID(au) == CFArrayGetTypeID())
+                for (CFIndex i = 0; i < CFArrayGetCount(au); i++) {
+                    CFDictionaryRef d = CFArrayGetValueAtIndex(au, i); if (CFGetTypeID(d) != CFDictionaryGetTypeID()) continue;
+                    CFNumberRef n = CFDictionaryGetValue(d, CFSTR("accumulatedGPUTime")); int64_t v = 0; if (n) CFNumberGetValue(n, kCFNumberSInt64Type, &v); if (v > 0) sum += (uint64_t)v;
+                }
+            CFRelease(au);
+        }
+        IOObjectRelease(it);
+    }
+    IOObjectRelease(acc); return sum;
+}
+static void *gpu_power_thread(void *p) {
+    (void)p; pthread_setname_np("dm-gpu-power"); pthread_set_qos_class_self_np(QOS_CLASS_UTILITY, 0);
+    void *h = dlopen("/usr/lib/libIOReport.dylib", RTLD_LAZY | RTLD_LOCAL);
+    if (h) { ior_copy = dlsym(h, "IOReportCopyChannelsInGroup"); ior_sub = dlsym(h, "IOReportCreateSubscription"); ior_samples = dlsym(h, "IOReportCreateSamples");
+             ior_delta = dlsym(h, "IOReportCreateSamplesDelta"); ior_int = dlsym(h, "IOReportSimpleGetIntegerValue"); ior_name = dlsym(h, "IOReportChannelGetChannelName"); }
+    void *sub = NULL; CFMutableDictionaryRef subbed = NULL;
+    if (ior_copy && ior_sub && ior_samples && ior_delta && ior_int && ior_name) {
+        CFDictionaryRef all = ior_copy(CFSTR("Energy Model"), NULL, 0, 0, 0);
+        if (all) {
+            CFMutableDictionaryRef want = CFDictionaryCreateMutableCopy(NULL, 0, all); CFArrayRef ch = CFDictionaryGetValue(all, CFSTR("IOReportChannels"));
+            CFMutableArrayRef gpu = CFArrayCreateMutable(NULL, 0, &kCFTypeArrayCallBacks);
+            for (CFIndex i = 0; ch && i < CFArrayGetCount(ch); i++) { CFDictionaryRef c = CFArrayGetValueAtIndex(ch, i); CFStringRef nm = ior_name(c); if (nm && CFEqual(nm, CFSTR("GPU Energy"))) CFArrayAppendValue(gpu, c); }
+            if (CFArrayGetCount(gpu)) { CFDictionarySetValue(want, CFSTR("IOReportChannels"), gpu); sub = ior_sub(NULL, want, &subbed, 0, NULL); }
+            CFRelease(gpu); CFRelease(want); CFRelease(all);
+        }
+    }
+    if (!sub) LOG("[nvn] GPU power: no IOReport GPU energy channel; the GPU power lines give this process's GPU time only");
+    CFDictionaryRef prev = NULL; uint64_t pframe = 0, pt = 0, pown = 0;
+    for (;;) {
+        pthread_mutex_lock(&g_gp_mu); while (!g_gp_req) pthread_cond_wait(&g_gp_cv, &g_gp_mu); uint64_t frame = g_gp_req; g_gp_req = 0; pthread_mutex_unlock(&g_gp_mu);
+        uint64_t t = clock_gettime_nsec_np(CLOCK_UPTIME_RAW), own = gp_own_gpu_ns(); int64_t nj = -1;
+        CFDictionaryRef cur = sub ? ior_samples(sub, subbed, NULL) : NULL;
+        if (cur && prev) {
+            CFDictionaryRef d = ior_delta(prev, cur, NULL); CFArrayRef ch = d ? CFDictionaryGetValue(d, CFSTR("IOReportChannels")) : NULL;
+            for (CFIndex i = 0; ch && i < CFArrayGetCount(ch); i++) { nj = nj < 0 ? 0 : nj; nj += ior_int(CFArrayGetValueAtIndex(ch, i), 0); }   // nanojoules (the channel's unit label nJ)
+            if (d) CFRelease(d);
+        }
+        if (prev) CFRelease(prev); prev = cur;
+        if (pt && t > pt && frame > pframe) {
+            double s = (t - pt) / 1e9, nf = (double)(frame - pframe), own_ms = own >= pown ? (own - pown) / 1e6 / s : 0;
+            if (nj >= 0) LOG("[nvn] GPU power up to frame %llu: system GPU energy %.2f W, %.1f mJ per frame (%.1f fps); this process's GPU time %.1f ms/s", (unsigned long long)frame, nj / 1e9 / s, nj / 1e6 / nf, nf / s, own_ms);
+            else LOG("[nvn] GPU power up to frame %llu: this process's GPU time %.1f ms/s (%.1f fps)", (unsigned long long)frame, own_ms, nf / s);
+        }
+        pframe = frame; pt = t; pown = own;
+    }
+    return NULL;
+}
+static void gp_start(void) { pthread_t th; if (!pthread_create(&th, NULL, gpu_power_thread, NULL)) pthread_detach(th); }
+void dm_gpu_power_request(uint64_t frame) {
+    static pthread_once_t once = PTHREAD_ONCE_INIT; pthread_once(&once, gp_start);
+    pthread_mutex_lock(&g_gp_mu); g_gp_req = frame ? frame : 1; pthread_cond_signal(&g_gp_cv); pthread_mutex_unlock(&g_gp_mu);
+}
+#else
+void dm_gpu_power_request(uint64_t frame) { (void)frame; }
+#endif
+

@@ -2,6 +2,8 @@ int mtl_subtl_on(void); void mtl_subtl(const char *fmt,...);   // nvn_mtl.m: DM_
 int mtl_sub_stream_on(void); void mtl_prog_snapshot_pin(prog_t *copy,const prog_t *source);   // nvn_mtl.m: DM_NVN_SUB_STREAM
 #include "nvn_capture.h"
 #include "nvn_hmap.h"
+#include <os/lock.h>
+static void nq_buf_put(uint8_t *b,size_t cap);
 
 void *objc_autoreleasePoolPush(void);
 void objc_autoreleasePoolPop(void *);
@@ -207,7 +209,7 @@ static void *nq_worker(void *unused) {
             }
             nq_cost_end(cost); gfx_leave(); objc_autoreleasePoolPop(pool); pthread_mutex_unlock(&g_sub_mu);
         }
-        pthread_mutex_lock(&nq_mu); if(n->kind==NQ_PRESENT) { q->present=present; q->copy=copy; j->receipt->present=present; j->receipt->copy=copy; } if(fence) { q->physical=fence; for(unsigned i=0;i<n->signal_count;i++) nq_event_issued(n->signals[i].event,fence,n->signals[i].mode,n->signals[i].value); } if(n->receipt) nq_put(n->receipt); free(n->signals); free(n->bytes); free(n); pthread_cond_broadcast(&nq_cv); pthread_mutex_unlock(&nq_mu);
+        pthread_mutex_lock(&nq_mu); if(n->kind==NQ_PRESENT) { q->present=present; q->copy=copy; j->receipt->present=present; j->receipt->copy=copy; } if(fence) { q->physical=fence; for(unsigned i=0;i<n->signal_count;i++) nq_event_issued(n->signals[i].event,fence,n->signals[i].mode,n->signals[i].value); } if(n->receipt) nq_put(n->receipt); free(n->signals); nq_buf_put(n->bytes,n->capacity); free(n); pthread_cond_broadcast(&nq_cv); pthread_mutex_unlock(&nq_mu);
     }
     return NULL;
 }
@@ -225,8 +227,33 @@ static void nq_take_staged(nq_job *j,int all) {
         if(j->last) j->last->next=n; else j->first=n; j->last=n;
     }
 }
+// A commands node's buffer, once the replay is done with it, waits for the next node (DM_NVN_Q_RECYCLE, 1 by default, 0 frees it as before, ab alternates under DM_AB): every submission
+// grew a fresh buffer from nothing to its few hundred KB by doubling, each step a realloc that often moved it into pages never touched, and freed it after the replay. A node takes the
+// largest kept buffer as its first; buffers under NQ_BUF_MIN are not kept, and at most NQ_BUF_KEEP are (the largest ones)
+enum { NQ_BUF_KEEP=8, NQ_BUF_MIN=64<<10 };
+static struct { uint8_t *b; size_t cap; } g_nq_buf[NQ_BUF_KEEP]; static int g_nq_nbuf; static os_unfair_lock g_nq_buf_lk=OS_UNFAIR_LOCK_INIT;
+__attribute__((weak)) int mtl_sw_mode(const char *name,int dflt); __attribute__((weak)) int mtl_sw_on(int m);   // nvn_mtl.m's switches (absent in the null-device tests: on)
+static int nq_recycle_on(void) { static int m=-1; if(m<0) m=mtl_sw_mode ? mtl_sw_mode("DM_NVN_Q_RECYCLE",1) : 1; return mtl_sw_on ? mtl_sw_on(m) : m==1; }
+static int nq_buf_take(nq_node *n) {
+    if(!nq_recycle_on()) return 0;
+    os_unfair_lock_lock(&g_nq_buf_lk); int best=-1;
+    for(int i=0;i<g_nq_nbuf;i++) if(best<0 || g_nq_buf[i].cap>g_nq_buf[best].cap) best=i;
+    if(best>=0) { n->bytes=g_nq_buf[best].b; n->capacity=g_nq_buf[best].cap; g_nq_buf[best]=g_nq_buf[--g_nq_nbuf]; }
+    os_unfair_lock_unlock(&g_nq_buf_lk); return best>=0;
+}
+static void nq_buf_put(uint8_t *b,size_t cap) {   // a node's buffer after its replay: kept, or freed
+    if(b && cap>=NQ_BUF_MIN && nq_recycle_on()) {
+        os_unfair_lock_lock(&g_nq_buf_lk);
+        if(g_nq_nbuf<NQ_BUF_KEEP) { g_nq_buf[g_nq_nbuf].b=b; g_nq_buf[g_nq_nbuf++].cap=cap; b=NULL; }
+        else { int s=0; for(int i=1;i<NQ_BUF_KEEP;i++) if(g_nq_buf[i].cap<g_nq_buf[s].cap) s=i;
+               if(g_nq_buf[s].cap<cap) { uint8_t *o=g_nq_buf[s].b; g_nq_buf[s].b=b; g_nq_buf[s].cap=cap; b=o; } }
+        os_unfair_lock_unlock(&g_nq_buf_lk);
+    }
+    free(b);
+}
 // The node grows geometrically: a frame's main submission copies a few hundred KB of records one at a time, and growing it by 4 KB reallocated (and often moved) it at every page
-static uint8_t *nq_room(nq_node *n,size_t length) { if(n->length+length>n->capacity) { size_t want=n->length+length,cap=2*n->capacity; if(cap<want) cap=want; n->capacity=(cap+4095)&~(size_t)4095; n->bytes=realloc(n->bytes,n->capacity); if(!n->bytes) die("queue commands allocation failed"); } return n->bytes+n->length; }   // room for length more bytes at the node's end // NOLINT(bugprone-suspicious-realloc-usage): allocation failure aborts
+static uint8_t *nq_room(nq_node *n,size_t length) { if(n->length+length>n->capacity && !n->bytes && nq_buf_take(n) && n->length+length<=n->capacity) return n->bytes+n->length;
+    if(n->length+length>n->capacity) { size_t want=n->length+length,cap=2*n->capacity; if(cap<want) cap=want; n->capacity=(cap+4095)&~(size_t)4095; n->bytes=realloc(n->bytes,n->capacity); if(!n->bytes) die("queue commands allocation failed"); } return n->bytes+n->length; }   // room for length more bytes at the node's end // NOLINT(bugprone-suspicious-realloc-usage): allocation failure aborts
 static void nq_bytes(nq_node *n,const void *bytes,size_t length) { memcpy(nq_room(n,length),bytes,length); n->length+=length; }
 static void nq_signal_add(nq_node *n,nq_signal s) {
     if(!(n->signal_count&(n->signal_count-1))) { n->signals=realloc(n->signals,(n->signal_count?2*n->signal_count:1)*sizeof *n->signals); if(!n->signals) die("queue signals allocation failed"); } // NOLINT(bugprone-suspicious-realloc-usage): allocation failure aborts

@@ -145,8 +145,11 @@ constexpr uint64_t kAnalysisPerWord = 64, kAnalysisFixed = 128ull << 20;
 // summaries say does not return stores every register first and goes on in the JIT if it returns (README.md, "A call into the next function"):
 // a unit of format 8 under the same key ends such a call with a lookup of its return address, or a trap. 10: a miss inside a function with a br left
 // to the dispatcher is a case of that br, lowered as a switch whose default is the dispatcher, the function kept whole (README.md, "A miss as a case of
-// its function's br"): its cases are in the key with its tables; a unit of format 9 under the same key lacks the switch
-constexpr const char* kUnitKeyFormat = "nxaot-unit 10";
+// its function's br"): its cases are in the key with its tables; a unit of format 9 under the same key lacks the switch. 11: a br left to the dispatcher
+// gets guarded cases from its function's own code (README.md, "Static cases of a br left to the dispatcher"), in the key with its tables, which the walk
+// follows: the function's blocks and the facts its callers and callees see from them change with them; a unit of format 10 under the same key was made by
+// a discovery that never guessed, whose blocks the key does not hold
+constexpr const char* kUnitKeyFormat = "nxaot-unit 11";
 
 // The section each unit's !pcsections marks go to (the line table, "The line table" below): read back after code generation and kept out of
 // the link (SHF_EXCLUDE)
@@ -3786,7 +3789,7 @@ bool WriteTiers(const std::string& path, const Common& c, std::string* error) {
 // its reasons (the entries' counts are not read: a later session's file with the same addresses keeps the analysis), and a test's --no-root addresses. Without
 // either it is the module's key as it is, so the inputs of packs without misses keep their entries
 std::string MissesKey(const std::string& akey, const BuildOptions& o) {
-    if (o.misses.empty() && o.no_roots.empty() && o.bound_slots.empty()) return akey;
+    if (o.misses.empty() && o.no_roots.empty() && o.bound_slots.empty() && o.guess) return akey;
     std::set<std::pair<uint64_t, std::string>> rows;
     for (const auto& m : o.misses) rows.emplace(m.offset, m.reason);
     std::string list;
@@ -3795,6 +3798,7 @@ std::string MissesKey(const std::string& akey, const BuildOptions& o) {
     for (const uint64_t a : o.no_roots) held += std::to_string(a) + ",";
     cache::KeyBuilder k;
     k.Add("analysis", akey).Add("misses", list).Add("no_roots", held);
+    if (!o.guess) k.Add("guess", "off");   // a test's --no-guess: a key without it is as before
     if (!o.bound_slots.empty()) {
         // The loader's bindings (--bind): discovery makes a bound stub a tail call of its function; a key without them is as before
         std::string bound;
@@ -3947,6 +3951,7 @@ bool BuildObjects(const module::Image& image, const BuildOptions& o, const std::
         dopts.threads = workers;
         dopts.misses = o.misses;      // the host's JIT feedback: roots of discovery (README.md, "JIT misses")
         dopts.no_roots = o.no_roots;
+        dopts.guess = o.guess;
         dopts.bound_slots = o.bound_slots;  // the loader's bindings of PLT slots to this module (README.md, "PLT stubs bound to their own module")
         fresh_d = analysis::Discover(image, dopts);
         s.discover_times = fresh_d.times;

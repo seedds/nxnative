@@ -1096,7 +1096,8 @@ the decoded code (a case that is another function's entry, or a `.cold` part pla
 after it). That is exactly what the code does not show for such an index, and of the 1,627 tables bounded in these modules none has a target
 outside its function, so nothing tells the two apart. The data left no case to take the risk for: after the forms above, the tables whose index no compare, mask or byte load
 bounds are 14 brs of `sdk` (6 in nlib's `memchr` variants), 1 of `subsdk0` and 12 of `main`, in about as many of 125,032 functions; a wrong
-closure is a silent miscompilation, a dispatcher miss costs one lookup. Those tables stay with the dispatcher, their functions open.
+closure is a silent miscompilation, a dispatcher miss costs one lookup. Those tables stay with the dispatcher, their functions open. (Round 7
+scans them for guarded cases instead, which close nothing: "Static cases of a br left to the dispatcher".)
 
 **Checked** by CTest `discover`'s hand-written module ([tests/test_discover.py](tests/test_discover.py)): four more forms, each a table with
 exactly its cases, index by index (a compare whose `b.hi` follows a `tbnz`, an index `and x8, x0, #0xff` compared as `and w9, w0, #0xff`, an
@@ -1325,6 +1326,117 @@ original folder's save, this one from the save that run left):
 `sdk`'s cache figures stay low because the first pack had no bindings ("PLT stubs bound to their own module"); `subsdk0` has no miss. The most cases one
 site gets is 8 (`main+0x5f4088`, one `br`; `sdk`'s most is 2). The corpus packs (no misses) are the bytes round 5's nxaot made, but excl's, whose program
 changed (the pause rows).
+
+## Static cases of a br left to the dispatcher
+
+Most play sessions run a first pack (a second needs a profiled session and a repack). Mario vs. Donkey Kong's first pack, as a player gets it (the host's
+bindings, "PLT stubs bound to their own module"), spent 7.32 % of the route's sampled guest CPU time in the JIT fallback; the host now says what began
+each stretch (`aot: profile: JIT time from ...`, `dm/host/aot.h` `dm_aot_profile_jit_origin`: each JIT run counts for the last miss that sent its thread
+there), and [the game's note](../../games/0100B99019412000/README.md#on-linux-the-x86-64-engine) has the table: 3.30 s after a `nonlocal` miss and 2.14 s
+under flush-to-zero, both on the physics workers (below, open), and 0.65 s at 33 cases of 16 jump tables that discovery left to the dispatcher (the main
+thread, `ModuleSystem`, the base processes). A profile serves only the cases a route reached; round 6's cases need it. This section serves the tables
+without one.
+
+**The rule** ([src/analysis/discover.cpp](src/analysis/discover.cpp) `Guesses`, last in each round of discovery, when every other source is
+exhausted): each `br` left to the dispatcher that is no pointer load or constant (a function pointer, a vtable slot, a PLT stub) is tried once more,
+as a candidate generator rather than a table:
+
+- its regions are lifted with every call taken to keep what the calling convention keeps (`AbiEffectOf`: x19..x29 and SP kept, x0..x18, x30, the v
+  registers and NZCV changed; a known callee's summary narrows that). The table idiom whose base a loop's call made unknown (the call's union, or a `blr`:
+  `main+0x5f41c4`, `sdk+0x841b0`) then has its base, and its index its compare; optimistic first (the code only speculative roots reach left out, as a
+  tentative table is found: the cases of a loop's table branch back to its head, which then has no dominator inside the function), then every block;
+- a table whose index nothing bounds (a `ccmp` chain, a bound in memory, a caller's contract: `main+0x7125d8`, `sdk+0x32a518`; and an index whose
+  compare a loop's region loses, `main+0x54f5d4`) is read from its index's lowest value while the entry's address is in the image and is no address the
+  module's code names (`DataRefs`: `adr`, `adrp` + `add`, `adrp` + a load's or store's offset, the relocations' targets, the data symbols: another object
+  starts there), at most 4,096 entries, the index stepping by one entry, and its targets kept up to the first that is not an instruction of the
+  function (`AnalyseTarget`'s scan, `ResolveJumpTable`'s `guess_refs`);
+- a bounded table with a target outside the function (`main+0x523230`: "a target (0x523394) is not a decoded instruction of the function") keeps its
+  targets that are instructions of the function; and a guess reads a bounded table, too, only up to the next object of the module's data (a bound wider
+  than the table, a mask of the index whose compare is on another value: `sdk+0x48f254`'s 256 entries for 16, `main+0x839708`'s, read the next tables).
+
+A candidate must be an instruction of the function's own range (the text, a word that decodes) and no function's entry. The candidates join that
+`br`'s guesses (`Function::guesses`, only growing; tried again whenever the function's walk changed, so a table whose loop the cases close is seen
+whole once they are walked: `main+0x2eea24`'s index was 0 alone in the optimistic region, 0 to 3 once its case 0 was walked). They are guarded cases
+exactly as round 6's miss cases are: the walk follows them from the `br`, they are its `Edge::Table` edges, the `br` stays an `Indirect` exit, and the
+plan gives that `br` (not the function's other `br`s) a switch over its cases and guesses whose default is the dispatcher; the pack lists them in
+`nxaot_cases`, so the host names a dispatcher miss at one `indirect-case`. `nxaot discover --tsv` writes a `guess` row per `br` (`guess <br> <function>
+<targets>`), and discovery a line `aot: guessed cases: N brs left to the dispatcher in F functions, T targets; W functions' guesses withdrawn`.
+
+**What a wrong candidate costs.** It cannot change where the `br` goes: the switch compares the computed address, so another value goes on to the
+dispatcher as before. It cannot close the function: the `Indirect` exit stays in its summary. What it can do is add paths: a block nothing takes is
+compiled (code size), and the function's summary and the regions of its other tables see the paths through it. So each function with guesses is checked
+when the round's summaries are in: if it went from preserving to open, or from returning to not returning, or one of its tables no longer comes out of
+its regions with the guesses' edges in the CFG (`TablesHold`, which derives each table again as `Verify` does: a guess that enters another table's
+region from outside it, or carries an index past that table's compare into it, would make that table's switch take a default the analysis says is
+never taken), its guesses are withdrawn for good. The lifter refuses a function with an opcode it does not lower: measured, none.
+
+**Regions with a `br`'s cases** (`jumptable.cpp` `CaseEdges`, round 6's latent defect): the region lifter lowered a `br` left to the dispatcher as an
+exit although the slice holds the blocks its `Edge::Table` edges (round 6's miss cases, now the guesses) enter. Those blocks were unreachable in the
+region's IR, and LazyValueInfo took a value they carry back round a loop for none: `main+0x2eea24`'s index came out as its first value alone, a table of
+one entry. Such a `br` is now lowered as the pack lowers it, a switch over its cases whose default leaves the region, and the cases are in the region's key.
+
+**Why not the speculative roots.** `Function::speculative` and `spec_live` are code whose entry discovery does not know: the summaries enter them with
+nothing known and the optimistic regions leave them out. A guess is the opposite, an entry from the `br` with the `br`'s state; the walk follows it from
+the `br`, so a case that was a speculative root stops being one and the summaries see it entered from the `br`. `tentative` is a table that closes the
+function once verified; a guess never closes it. The guesses reuse the optimistic regions (as a tentative table is found) and `Verify`'s derivation
+(`TablesHold`).
+
+**The analysis cache** (format 3, [src/build/analysis_cache.cpp](src/build/analysis_cache.cpp)) now holds a function's PLT stubs bound to the module
+(`FnFacts::bound`) and its cases: format 2 left both out, so a warm repack lowered a bound stub's `br` through the dispatcher, recorded no binding and
+listed no case. The unit key's format is 11 (a `br`'s guesses are in the key with its tables).
+
+**Measured** on Mario vs. Donkey Kong in the clone of its NSP folder: discovery of the three modules (`sdk` and `subsdk0` with the host's bindings,
+`main` has none) and their first packs (balanced, tier W, 6 workers), round 6's nxaot (the tip's) against this one:
+
+| | `sdk` | `subsdk0` | `main` |
+|---|---:|---:|---:|
+| functions; preserving / open / noreturn | 40,296; 17,482 / 22,324 / 490, unchanged | 14,003; 3,806 / 9,849 / 348, unchanged | 70,733; 23,361 / 47,193 / 179, unchanged |
+| jump tables | 673, unchanged | 327, unchanged | 647 -> 653 (6 `br`s of `main+0x71cf9c` bounded once their cases are in their regions) |
+| `br`s with guesses (functions, targets) | 29 (25, 208) | 11 (11, 72) | 28 (26, 329) |
+| guesses withdrawn | 0 | 0 | 0 |
+| discovery, s (its tables' step) | 11.4 -> 13.5 (2.2 -> 3.3) | 2.4 -> 2.7 (0.5 -> 0.7) | 122.4 -> 128.8 (4.5 -> 7.3) |
+| `.text` of the first pack | 55,035,792 -> 55,241,152 (+0.37 %) | 27,344,608 -> 27,401,952 (+0.21 %) | 166,608,036 -> 166,884,884 (+0.16 %) |
+| functions the lifter refused | 0 -> 0 | 0 -> 0 | 0 -> 0 |
+| pack time, s | 76.2 (266 units from a cache) -> 86.7 (none) | 27.0 (497 cached) -> 40.5 (none) | 377.2 -> 341.7 (none either) |
+
+The packs of the runs below were made before the guess's read of a bounded table stopped at the next data object, with 288 targets in `sdk` and 367 in
+`main` (`sdk+0x48f254` and `main+0x839708` read the next tables, and their functions had 61 and 53 blocks against 24 and 17: garbage cases, none on
+the route); the table's `br`s and `.text` are this nxaot's (a repack without a cache: 92.5, 43.8 and 362.3 s, a shared machine).
+
+Then the same route to level 1-1 on each first pack, from the same save (the profile's per-thread lines):
+
+| | round 6's first pack | this one |
+|---|---:|---:|
+| JIT runs, CPU time, share of the sampled guest CPU time | 2.97 million, 6.09 s of 83.3 s, 7.32 % | 2.67 million, 5.25 s of 79.0 s, 6.64 % |
+| under flush-to-zero | 1.58 s, 1.90 % | 1.54 s, 1.95 % |
+| the three physics workers | 5.44 s | 5.25 s |
+| the main thread, `ModuleSystem` (2), the base processes, `BancModule`, `UpdateTexture` | 0.26, 0.30, 0.04, 0.05, 0.01 s | none |
+| misses | 33 `indirect` (`main` 29, `sdk` 4), `nonlocal` `main+0xa01314`, `fpcr` `sdk+0x5b827c` | `nonlocal` `main+0xa01314`, `fpcr` `sdk+0x5b827c` |
+
+Every case the route reached was a guess. The second pack from that run (`--profile --misses --bind`) had no case left to make: `main`'s miss a
+resume point, `sdk`'s `fpcr` unserved; every first-pack unit it looked up came from the cache (`sdk` 2,651, `subsdk0` 1,226, `main` 6,034), `sdk` 28 s
+and 59.0 MB of `.text`, `subsdk0` 3.5 s and 28.9 MB, `main` 162 s and 196.2 MB. Its run: 0.71 million JIT runs, 2.34 s of 84.9 s, 2.75 % (round 6's
+second pack 3.16 %), 1.74 s of it under flush-to-zero, all on the physics workers; one miss left, `sdk+0x5b827c` (`fpcr`), and none of `main`.
+
+What is left of the first pack's share is the physics workers' flush-to-zero: each job's FP environment scope (`main+0xab9010`) tail-calls `sdk`'s FPCR
+setter (`sdk+0x5b826c`, `msr fpcr`), whose `fpcr` miss runs the job in the JIT; the return that ends it reaches the worker's frame
+(`main+0xa012f4`, a virtual call's return at `main+0xa01314`) as a non-local transfer no native frame takes, and the rest of the worker's loop runs in
+the JIT at its thread's outermost level until the next job. The second pack's resume point at `main+0xa01314` cuts that part; the first pack has none
+(open, for the lead: see the game's note).
+
+**Checked** by CTest `discover` ([tests/test_discover.py](tests/test_discover.py)): a hand-written module with a table whose base a `blr` before its
+compare makes unknown, and one read by an index nothing bounds, each a `guess` row of exactly its cases and still a `br` (none with `--no-guess`); and a
+guess that lands in the region of the function's other table, which would then no longer be derived, withdrawn (no `guess` row, the other table its two
+cases, the function's rows those of a discovery without guesses, `1 functions' guesses withdrawn`). `t_aot_host`'s `guesscase` rows: casecall's loop
+(its base set before a loop that calls an open function, its index unbounded) and a loop whose index is compared right before its table (its base set
+before the loop, which calls through a register): packed with `--no-guess`, the cases run in the JIT (20 runs) and the misses file names them; packed as
+a first pack, no JIT run. `guessbad`: the withdrawn guess's module as a program, both packs the same run, the same JIT runs and misses. `casecall`'s rows,
+which check the misses' path, pack with `--no-guess` (a test option of `nxaot build` and `nxaot discover`, in the analysis cache's key); `cutcall`'s and
+`lrtail`'s brs have no guess (their cases are entries of their own, or the `br` is no table). The corpus's 46 packs (`build_packs.sh`, Linux and Windows)
+are the bytes round 6's nxaot made: no corpus program has a `br` a guess serves (`aot: guessed cases: 0 brs` in each of its 21 build logs). The 4,000-function
+benchmark (`measure_packs.py`, A this nxaot with `--no-guess`, B without; the five corpus programs of "Unbounded brs by form"): identical packs, so not
+run; the benchmark's `.text` 6,268,880 bytes (that section's 6,268,624, before rounds 4 to 6), its pack time 5.77 s and 6.06 s (that section's 6.50 s; one
+build each on a shared machine, load 10 to 14).
 
 ## The second pack's cached units
 

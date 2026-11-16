@@ -43,8 +43,13 @@ uint64_t BytesOf(const RegionMemo& memo);  // its bytes, keys and outcomes (src/
 // fn: the function with its blocks (its known tables become switches in the regions); valid: whether an address may be a target (a decoded
 // instruction of the function); calls: empty, or the call effects a region may continue past. optimistic: ignore the blocks only the function's
 // speculative roots reach (Function::speculative), so that a switch whose cases loop back to it can be bounded before its cases are known; such
-// a result is tentative until a closed region with the cases gives it again (discover.cpp, Verify). memo: null, or the regions analysed so far
+// a result is tentative until a closed region with the cases gives it again (discover.cpp, Verify). memo: null, or the regions analysed so far.
+// guess_refs: null, or a guess of guarded cases (discover.cpp Guesses; README.md, "Static cases of a br left to the dispatcher"), whose result is no table but
+// candidates: a table whose index nothing bounds is scanned from its lowest index while its entries' addresses are in the image and none of guess_refs (the
+// addresses the module's code names, sorted: another object starts there), at most options.max_table entries, and its targets kept up to the first that is
+// not valid; a bounded table keeps its valid targets and drops the others. None valid: no result
 TableResult ResolveJumpTable(const module::Image& image, const Function& fn, uint64_t br, const DiscoverOptions& options,
-                             const std::function<bool(uint64_t)>& valid, const CallEffects& calls, bool optimistic, RegionMemo* memo = nullptr);
+                             const std::function<bool(uint64_t)>& valid, const CallEffects& calls, bool optimistic, RegionMemo* memo = nullptr,
+                             const std::vector<uint64_t>* guess_refs = nullptr);
 
 }  // namespace nxaot::analysis

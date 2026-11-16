@@ -287,6 +287,7 @@ struct Analysed {
     std::vector<uint64_t> targets;
     JumpTable info;
     std::string why;
+    bool scanned = false;  // a guess's scan of a table no compare bounds (AnalyseTarget's refs): the targets in entry order, valid or not
 };
 
 // The range of v where `at` runs, sharper than LazyValueInfo's own when v is a cast or constant arithmetic of a value a condition bounds, or a
@@ -401,7 +402,9 @@ llvm::ConstantRange RangeOf(llvm::Value* v, llvm::Instruction* at, llvm::LazyVal
     return base.intersectWith(r);
 }
 
-Analysed AnalyseTarget(const module::Image& image, llvm::CallInst* marker, llvm::LazyValueInfo& lvi, const llvm::DataLayout& dl, unsigned max_table) {
+// refs: null, or a guess (ResolveJumpTable's guess_refs): a table whose index nothing bounds is then scanned (below)
+Analysed AnalyseTarget(const module::Image& image, llvm::CallInst* marker, llvm::LazyValueInfo& lvi, const llvm::DataLayout& dl, unsigned max_table,
+                       const std::vector<uint64_t>* refs) {
     Analysed out;
     llvm::Value* t = marker->getArgOperand(1);
     std::set<llvm::Value*> leaves, seen;
@@ -472,7 +475,8 @@ Analysed AnalyseTarget(const module::Image& image, llvm::CallInst* marker, llvm:
     // above, the tables whose index no compare, mask or byte load bounds are 14 brs of sdk (6 in nlib's memchr variants, whose index is
     // end - (end & ~3), bounded only algebraically), 1 of subsdk0 and 12 of main, in about as many functions of 125,000; a wrong closure
     // there would be a silent miscompilation (a callee-saved register a missed case changes), a dispatcher miss costs one lookup. So those
-    // tables stay with the dispatcher and their functions open.
+    // tables stay with the dispatcher and their functions open; a guess (refs, below) scans them for guarded cases of the br instead, which
+    // close nothing (README.md, "Static cases of a br left to the dispatcher").
     // The target may be a 64-bit word read at the sum of variables (each with coefficient 1) and a constant, and be that
     // word itself: a function pointer or a vtable slot (ldr x8, [x0, #0x28]; br x8), or a C++ member function pointer's vtable slot (ldr x8,
     // [x0]; ldr x1, [x8, x1]; br x1), no table: a table's index is scaled by its entries' size. Told apart from a table's unbounded index only
@@ -495,15 +499,75 @@ Analysed AnalyseTarget(const module::Image& image, llvm::CallInst* marker, llvm:
         }
         return true;
     };
+    const unsigned entry_bits = load->getType()->getIntegerBitWidth();
     if (!best || set_size(*best_range) > max_table) {
-        out.why = pointer_sum()              ? (index_leaves.size() == 1 ? "a pointer loaded from a register plus a constant (a function pointer or vtable slot, no table)"
+        const bool pointer = pointer_sum();
+        out.why = pointer                    ? (index_leaves.size() == 1 ? "a pointer loaded from a register plus a constant (a function pointer or vtable slot, no table)"
                                                                          : "a pointer loaded from a sum of registers (a member function pointer's vtable slot, no table)")
                   : best                     ? "the index range has more than " + std::to_string(max_table) + " values"
                   : index_leaves.size() == 1 ? "the index is not bounded at the br"
                                              : "the entry address depends on more than one value, and no value it is a function of is bounded at the br";
+        if (!refs || pointer) return out;
+        // A guess (README.md, "Static cases of a br left to the dispatcher"): the table read from its lowest index up, while the entry's address is in the
+        // image and is no address the module's code names apart (refs: another table, a string, a constant starts there), at most max_table entries. The index
+        // is the address's node nearest its variables of which the address is a function alone: every other such node is a function of it (FunctionOf), so the
+        // address has no variable but it, the table's base is a constant. The targets go to the caller in entry order, valid or not: it keeps those up to the
+        // first that is no instruction of the function (ResolveJumpTable), so the scan ends where the table's entries stop landing in its code
+        std::vector<llvm::Value*> cuts;
+        for (llvm::Value* n : nodes) {
+            std::map<llvm::Value*, bool> m;
+            if (n != addr && n->getType()->isIntegerTy() && FunctionOf(addr, n, m)) cuts.push_back(n);   // the address itself indexes nothing
+        }
+        llvm::Value* index = nullptr;
+        for (llvm::Value* n : cuts) {
+            bool deepest = true;
+            for (llvm::Value* m : cuts) {
+                std::map<llvm::Value*, bool> mm;
+                if (m != n && !FunctionOf(m, n, mm)) {
+                    deepest = false;
+                    break;
+                }
+            }
+            if (deepest) {
+                index = n;
+                break;
+            }
+        }
+        if (!index) return out;
+        const unsigned width = index->getType()->getIntegerBitWidth();
+        {
+            // A table's index steps by one entry: the address of index 1 is one entry past that of index 0 (anything else is no table read by this index)
+            const auto a0 = Eval(addr, {{index, llvm::APInt(width, 0)}}), a1 = Eval(addr, {{index, llvm::APInt(width, 1)}});
+            if (!a0 || !a1 || (*a1 - *a0).getZExtValue() != entry_bits / 8) return out;
+        }
+        std::set<llvm::Value*> active;
+        llvm::ConstantRange r = RangeOf(index, marker, lvi, active, 0);
+        r = r.intersectWith(llvm::ConstantRange::fromKnownBits(llvm::computeKnownBits(index, dl), false));
+        const llvm::APInt lo = r.isEmptySet() ? llvm::APInt(width, 0) : r.getUnsignedMin();   // the lowest index: 0 for a range that wraps
+        for (uint64_t i = 0; i < max_table; ++i) {
+            const auto a = Eval(addr, {{index, lo + llvm::APInt(width, i)}});
+            if (!a) break;
+            const uint64_t at = a->getZExtValue();
+            if (!image.InImage(at, entry_bits / 8)) break;
+            if (i && std::binary_search(refs->begin(), refs->end(), at)) break;   // another object of the module's data starts here
+            uint64_t raw = 0;
+            std::memcpy(&raw, image.bytes.data() + at, entry_bits / 8);
+            if (entry_bits == 64) {
+                if (const auto it = image.slot_targets.find(at); it != image.slot_targets.end()) raw = it->second;
+            }
+            const auto target = Eval(t, {{load, llvm::APInt(entry_bits, raw)}});
+            if (!target) break;
+            out.targets.push_back(target->getZExtValue());
+            if (!i) {
+                out.info.table = at;
+                out.info.index_lo = lo.getZExtValue();
+            }
+        }
+        out.scanned = true;
+        out.info.width = entry_bits / 8;
+        out.info.count = out.targets.size();
         return out;
     }
-    const unsigned entry_bits = load->getType()->getIntegerBitWidth();
     const uint64_t count = set_size(*best_range);
     const unsigned width = best->getType()->getIntegerBitWidth();
     for (uint64_t i = 0; i < count; ++i) {
@@ -514,6 +578,9 @@ Analysed AnalyseTarget(const module::Image& image, llvm::CallInst* marker, llvm:
             return out;
         }
         const uint64_t at = a->getZExtValue();
+        // A guess (refs) reads a bounded table only up to the next object of the module's data, as its scan does: a bound wider than the table (a mask of
+        // the index where its compare is on another value: sdk+0x48f254's `and x5, x4, #0xff` behind `cmp w8, #0xf`) reads the next table's entries
+        if (refs && i && std::binary_search(refs->begin(), refs->end(), at)) break;
         if (!image.InImage(at, entry_bits / 8)) {
             out.why = "an entry lies outside the image";
             return out;
@@ -536,7 +603,7 @@ Analysed AnalyseTarget(const module::Image& image, llvm::CallInst* marker, llvm:
         }
     }
     out.info.width = entry_bits / 8;
-    out.info.count = count;
+    out.info.count = out.targets.size();   // count, or fewer for a guess (above)
     out.info.writable = out.info.table >= image.data_off;  // in the data segment: the guest may rewrite it (a pointer table)
     const auto t0 = Eval(t, {{load, llvm::APInt(entry_bits, 0)}}), t1 = Eval(t, {{load, llvm::APInt(entry_bits, 1)}}),
                tm = Eval(t, {{load, llvm::APInt::getAllOnes(entry_bits)}});
@@ -601,9 +668,24 @@ void CompareOperands(llvm::Function& f) {
     }
 }
 
+// The edges of a br left to the dispatcher that the function's CFG has (Function::cases, Function::guesses: Edge::Table edges), as the region lowers them: a
+// switch over them whose default leaves the region, as the pack lowers them. Without them the blocks those edges enter are unreachable in the region's IR
+// although the slice holds them, and LazyValueInfo takes a value they carry back round a loop for none: the index of a loop through its own cases came
+// out bounded at its first value (Mario vs. Donkey Kong's main+0x2eea24, x19 = 0 on the only path the IR kept), a table of one entry
+std::vector<uint64_t> CaseEdges(const Function& fn, uint64_t br) {
+    std::vector<uint64_t> out;
+    if (!fn.indirect.count(br)) return out;
+    std::set<uint64_t> all(fn.cases.begin(), fn.cases.end());
+    if (const auto g = fn.guesses.find(br); g != fn.guesses.end()) all.insert(g->second.begin(), g->second.end());
+    for (const uint64_t t : all) {
+        if (fn.blocks.count(t)) out.push_back(t);
+    }
+    return out;
+}
+
 std::shared_ptr<const RegionMemo::Outcome> AnalyseRegion(const module::Image& image, const Function& fn, uint64_t br, uint64_t e,
                                                          const std::set<uint64_t>& slice, const CallEffects& calls,
-                                                         const decode::CodeReader& read, unsigned max_table) {
+                                                         const decode::CodeReader& read, unsigned max_table, const std::vector<uint64_t>* refs) {
     auto out = std::make_shared<RegionMemo::Outcome>();
     llvm::LLVMContext ctx;
     auto module = std::make_unique<llvm::Module>("nxaot.jumptable", ctx);
@@ -620,9 +702,14 @@ std::shared_ptr<const RegionMemo::Outcome> AnalyseRegion(const module::Image& im
     region.follow = [&slice](uint64_t pc) { return slice.count(pc) > 0; };
     region.calls = calls;
     region.mark_indirect = true;
-    region.tables = [&fn](uint64_t pc) -> const std::vector<uint64_t>* {
-        const auto it = fn.tables.find(pc);
-        return it == fn.tables.end() ? nullptr : &it->second.targets;
+    std::map<uint64_t, std::vector<uint64_t>> cases;   // the brs left to the dispatcher with Edge::Table edges (CaseEdges)
+    for (const auto& [pc, why] : fn.indirect) {
+        if (std::vector<uint64_t> c = CaseEdges(fn, pc); !c.empty()) cases.emplace(pc, std::move(c));
+    }
+    region.tables = [&fn, &cases](uint64_t pc) -> const std::vector<uint64_t>* {
+        if (const auto it = fn.tables.find(pc); it != fn.tables.end()) return &it->second.targets;
+        const auto c = cases.find(pc);
+        return c == cases.end() ? nullptr : &c->second;
     };
     lift::LiftOptions lo;
     lo.fpsr_flags = false;
@@ -667,7 +754,7 @@ std::shared_ptr<const RegionMemo::Outcome> AnalyseRegion(const module::Image& im
     }
     out->reached = !markers.empty();
     for (llvm::CallInst* marker : markers) {
-        Analysed a = AnalyseTarget(image, marker, lvi, module->getDataLayout(), max_table);
+        Analysed a = AnalyseTarget(image, marker, lvi, module->getDataLayout(), max_table, refs);
         const bool none = a.targets.empty();
         out->markers.push_back(std::move(a));
         if (none) break;
@@ -678,14 +765,16 @@ std::shared_ptr<const RegionMemo::Outcome> AnalyseRegion(const module::Image& im
 }  // namespace
 
 TableResult ResolveJumpTable(const module::Image& image, const Function& fn, uint64_t br, const DiscoverOptions& options,
-                             const std::function<bool(uint64_t)>& valid, const CallEffects& calls, bool optimistic, RegionMemo* memo) {
+                             const std::function<bool(uint64_t)>& valid, const CallEffects& calls, bool optimistic, RegionMemo* memo,
+                             const std::vector<uint64_t>* guess_refs) {
     TableResult res;
     // NXAOT_DEBUG_REGION=1: why each region tried was not used (README.md, "Module loader and discovery")
     static const bool debug = std::getenv("NXAOT_DEBUG_REGION") != nullptr;
     const auto trace = [&](uint64_t from, const std::string& what) {
         if (debug) {
-            std::fprintf(stderr, "nxaot: the br at %#llx, region from %#llx%s%s: %s\n", static_cast<unsigned long long>(br),
-                         static_cast<unsigned long long>(from), optimistic ? ", optimistic" : "", calls ? ", past calls" : "", what.c_str());
+            std::fprintf(stderr, "nxaot: the br at %#llx, region from %#llx%s%s%s: %s\n", static_cast<unsigned long long>(br),
+                         static_cast<unsigned long long>(from), optimistic ? ", optimistic" : "", calls ? ", past calls" : "", guess_refs ? ", a guess" : "",
+                         what.c_str());
         }
     };
     uint64_t home = 0;
@@ -804,7 +893,7 @@ TableResult ResolveJumpTable(const module::Image& image, const Function& fn, uin
         // The region's key (RegionMemo): what its lifting and analysis read. The lifter consults the call effects at the calls that end its
         // blocks and the known tables at its brs: those of every straight line from a block of the slice to the first instruction that ends
         // a block (a superset of what it consults: equal facts there give the same region)
-        std::vector<uint64_t> key{br, e, fn.entry, fn.limit, calls ? 1u : 0u, options.max_table, slice.size()};
+        std::vector<uint64_t> key{br, e, fn.entry, fn.limit, (calls ? 1u : 0u) | (guess_refs ? 2u : 0u), options.max_table, slice.size()};
         key.insert(key.end(), slice.begin(), slice.end());
         for (const uint64_t s : slice) {
             for (uint64_t pc = s; pc < fn.limit || image.InAux(pc); pc += 4) {
@@ -818,7 +907,13 @@ TableResult ResolveJumpTable(const module::Image& image, const Function& fn, uin
                 } else if (i.kind == Kind::BR) {
                     const auto t = fn.tables.find(pc);
                     key.insert(key.end(), {pc, t == fn.tables.end() ? ~0ull : t->second.targets.size()});
-                    if (t != fn.tables.end()) key.insert(key.end(), t->second.targets.begin(), t->second.targets.end());
+                    if (t != fn.tables.end()) {
+                        key.insert(key.end(), t->second.targets.begin(), t->second.targets.end());
+                    } else {
+                        const std::vector<uint64_t> c = CaseEdges(fn, pc);   // the switch the region lowers it as (AnalyseRegion)
+                        key.push_back(c.size());
+                        key.insert(key.end(), c.begin(), c.end());
+                    }
                 }
                 break;
             }
@@ -848,7 +943,7 @@ TableResult ResolveJumpTable(const module::Image& image, const Function& fn, uin
             }
         }
         if (!outcome) {
-            outcome = AnalyseRegion(image, fn, br, e, slice, calls, read, options.max_table);
+            outcome = AnalyseRegion(image, fn, br, e, slice, calls, read, options.max_table, guess_refs);
             ++res.regions;
             if (fits) memo->regions.emplace(std::move(key32), outcome);
         }
@@ -873,6 +968,22 @@ TableResult ResolveJumpTable(const module::Image& image, const Function& fn, uin
                 ok = false;
                 break;
             }
+            if (guess_refs) {
+                // A guess's candidates: a scanned table's targets up to the first that is not valid (its entries stop landing in the function's code there),
+                // a bounded table's valid targets (one that is not, another function's code or a word that does not decode, goes on through the dispatcher)
+                std::vector<uint64_t> kept;
+                for (const uint64_t t : a.targets) {
+                    if (valid(t)) kept.push_back(t);
+                    else if (a.scanned) break;
+                }
+                if (kept.empty()) {
+                    lifted_why = "no target of the table is an instruction of the function";
+                    trace(e, lifted_why);
+                    ok = false;
+                    break;
+                }
+                a.targets = std::move(kept);
+            }
             for (const uint64_t t : a.targets) {
                 if (!valid(t)) {
                     char buf[96];
@@ -895,6 +1006,9 @@ TableResult ResolveJumpTable(const module::Image& image, const Function& fn, uin
         }
         jt.region = e;
         jt.across_calls = static_cast<bool>(calls);
+        if (guess_refs && debug) {
+            trace(e, std::to_string(jt.targets.size()) + " candidates (" + (first.scanned ? "a scan from index " + std::to_string(jt.index_lo) : "a table of " + std::to_string(jt.count) + " entries") + ")");
+        }
         res.table = jt;
         return res;
     }

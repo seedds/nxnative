@@ -16,8 +16,10 @@ namespace nxaot::build {
 namespace {
 
 // The entry's format: changed whenever what it holds or how it is written changes. 2: a function's gap-code flag (the tier rule's: README.md,
-// "Gap code at tier C"; an entry of format 1 has the same bytes for a module without gap code)
-constexpr const char* kFormat = "nxaot-analysis 2\n";
+// "Gap code at tier C"; an entry of format 1 has the same bytes for a module without gap code). 3: a function's PLT stubs bound to the module (FnFacts::bound,
+// --bind) and its cases (FnFacts::cases, the misses' and the guesses'), which format 2 left out: a warm repack lowered a bound stub's br through the dispatcher,
+// recorded no binding, and listed no case in nxaot_cases
+constexpr const char* kFormat = "nxaot-analysis 3\n";
 
 class Writer {
 public:
@@ -154,6 +156,13 @@ bool StoreAnalysis(const std::string& path, const std::string& key, const analys
             w.U(targets.size());
             for (const uint64_t t : targets) w.S(rel(t));
         }
+        w.U(ff.cases.size());
+        for (const uint64_t c : ff.cases) w.S(rel(c));
+        w.U(ff.bound.size());
+        for (const auto& [br, target] : ff.bound) {
+            w.S(rel(br));
+            w.S(rel(target));
+        }
         w.U(ff.roots.size());
         for (const uint64_t r : ff.roots) w.S(rel(r));
         w.U(ff.extra.size());
@@ -260,6 +269,11 @@ bool LoadAnalysis(const std::string& path, const std::string& key, CachedAnalysi
             const uint64_t br = abs();
             std::vector<uint64_t>& targets = ff.tables[br];
             for (uint64_t t = r.Count(); t-- && r.ok;) targets.push_back(abs());
+        }
+        for (uint64_t k = r.Count(); k-- && r.ok;) ff.cases.push_back(abs());
+        for (uint64_t k = r.Count(); k-- && r.ok;) {
+            const uint64_t br = abs();
+            ff.bound[br] = abs();
         }
         for (uint64_t k = r.Count(); k-- && r.ok;) ff.roots.push_back(abs());
         for (uint64_t k = r.Count(); k-- && r.ok;) {

@@ -179,6 +179,10 @@ struct Function {
     // indirect or nocode miss in the range of a function with such a br is a root of the function and a guarded case of each of those brs (the
     // dispatcher stays their default), not an entry that cuts the function. Kept across walks, as the roots are
     FlatSet<uint64_t> cases;
+    // Guarded cases from the function's own code (README.md, "Static cases of a br left to the dispatcher"): br -> the targets of its table idiom that a region
+    // lifted under the calling convention's promise for its calls, or a scan of a table no compare bounds, gives inside the function (Discoverer::Guesses). The
+    // walk follows them from the br, which gets them as Edge::Table edges and stays an Indirect exit with the dispatcher as its default, as the cases above
+    FlatMap<uint64_t, std::vector<uint64_t>, true> guesses;
     std::vector<Window> windows;
     unsigned unpaired_exclusive = 0;
     size_t words = 0;      // instructions the walk reached
@@ -213,6 +217,9 @@ struct DiscoverOptions {
     // call of that function, as b makes it; the pack records each binding it assumed and the host refuses the pack when the loader bound one
     // otherwise (aot_arena.c)
     std::map<uint64_t, uint64_t> bound_slots;
+    // Guarded cases from the functions' own code for their brs left to the dispatcher (README.md, "Static cases of a br left to the dispatcher"); false:
+    // a test's --no-guess (the rows that check the misses' path for such brs)
+    bool guess = true;
 };
 
 // The slot of a PLT stub whose br is at br_pc: the four words adrp x16, page; ldr x17, [x16, #o]; add x16, x16, #o; br x17 ending at br_pc, the
@@ -260,6 +267,7 @@ struct Discovery {
     // `aot: misses: ...` is the first of the notes
     std::vector<MissResult> misses;
     std::map<uint64_t, std::vector<uint64_t>> miss_resumes;
+    size_t guessed_brs = 0;  // brs left to the dispatcher with guarded cases from their function's own code (Function::guesses)
 };
 
 Discovery Discover(const module::Image& image, const DiscoverOptions& options = {});

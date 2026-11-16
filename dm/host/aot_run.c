@@ -442,6 +442,7 @@ static void run_jit(dm_aot_thread *t, uint64_t lr, uint32_t *why, int past) {
     // indirect-case, which the next pack makes an entry: dm/tools/aot/README.md, "A miss as a case of its function's br")
     if (*why == NXAOT_TRAP_JIT_MISS && dm_aot_is_case(pc)) *why = REASON_CASE;
     if (note_jit(pc, *why) && *why) LOG("[RED] aot: %s at %s runs in the JIT fallback (design section 11)", jit_why(*why), name);   // a run going on: counted, not said
+    if (*why && dm_aot_profile_on()) dm_aot_profile_jit_origin(pc, *why);   // the runs from here count for this miss (aot_profile.c, "JIT time from")
     atomic_fetch_add_explicit(&c_jit_runs, 1, memory_order_relaxed);
     uint64_t stop = jit_run_one(t, j, pc, past, 0);
     // A gate site (design 1.1, as compiled code calls nxaot_rt_gate there): the JIT stopped before its instruction with the whole register file in the block

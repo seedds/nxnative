@@ -80,6 +80,8 @@ typedef struct prof_thread {
     uint64_t jit_runs, jit_ns, fpcr_runs, fpcr_ns, other_n, other_ns, other_t0;
     uint32_t fpcr_last;
     int in_other;
+    uint64_t origin;            // the miss that began the thread's current JIT continuation (dm_aot_profile_jit_origin): its runs' time goes to it
+    uint32_t origin_reason;
     char name[32];              // the thread's name at its first JIT run (Linux; empty elsewhere)
 #if defined(_WIN32)
     HANDLE h;                   // the thread, while it is registered (g_lock); NULL once it unregistered
@@ -150,11 +152,71 @@ uint64_t dm_aot_profile_cpu_ns(void) {
     return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
 #endif
 }
+// The JIT time by the miss that began it (dm_aot_profile_jit_origin): every run of a thread counts for the last miss that sent it to the JIT (a run going
+// on, after compiled code it called returned into it, belongs to the continuation that miss began). A table in static memory with no lock: a row is claimed
+// by a compare-and-swap of its key, its counts are atomic adds, so a thread's run never waits, and a thread the process's exit stops in the middle of an add
+// holds nothing the writer then needs (a lock taken on every run was such a thing: under Wine one session in 20 faulted at exit, t_aot_module). At most
+// ORIGINS rows (the rest counted apart); the profile's writer logs the heaviest (dm_aot_profile_write: "JIT time from")
+#define ORIGINS 4096
+typedef struct { _Atomic uint64_t key, runs, ns; _Atomic int named; char name[32]; } jit_origin;   // key: the miss's pc, its reason in the top 16 bits, plus 1
+static jit_origin g_origins[ORIGINS];
+static _Atomic uint64_t g_origin_lost_ns;
+void dm_aot_profile_jit_origin(uint64_t pc, uint32_t reason) {
+    prof_thread *r = t_prof;
+    if (!r) return;
+    r->origin = pc; r->origin_reason = reason;
+}
+static void origin_add(prof_thread *r, uint64_t d) {
+    const uint64_t key = ((r->origin & 0xFFFFFFFFFFFFull) | (uint64_t)(r->origin_reason & 0xFFFF) << 48) + 1;
+    for (unsigned h = (unsigned)((key >> 2) * 0x9E3779B97F4A7C15ull >> 52) & (ORIGINS - 1), k = 0; k < ORIGINS; h = (h + 1) & (ORIGINS - 1), k++) {
+        jit_origin *o = &g_origins[h];
+        uint64_t cur = atomic_load_explicit(&o->key, memory_order_acquire);
+        if (!cur && atomic_compare_exchange_strong(&o->key, &cur, key)) cur = key;
+        if (cur != key) continue;
+        // The thread's name is read at its first run's end: the first thread with one names the row
+        if (r->name[0] && !atomic_load_explicit(&o->named, memory_order_relaxed) && !atomic_exchange(&o->named, 1)) snprintf(o->name, sizeof o->name, "%s", r->name);
+        atomic_fetch_add_explicit(&o->runs, 1, memory_order_relaxed);
+        atomic_fetch_add_explicit(&o->ns, d, memory_order_relaxed);
+        return;
+    }
+    atomic_fetch_add_explicit(&g_origin_lost_ns, d, memory_order_relaxed);
+}
+typedef struct { uint64_t pc, runs, ns; uint32_t reason; char name[32]; } origin_row;
+static int origin_cmp(const void *a, const void *b) {
+    const origin_row *x = a, *y = b;
+    return x->ns < y->ns ? 1 : x->ns > y->ns ? -1 : 0;
+}
+static void origins_log(void) {
+    static origin_row rows[ORIGINS];
+    size_t n = 0;
+    for (unsigned h = 0; h < ORIGINS; h++) {
+        jit_origin *o = &g_origins[h];
+        const uint64_t key = atomic_load_explicit(&o->key, memory_order_acquire);
+        if (!key) continue;
+        origin_row *w = &rows[n++];
+        w->pc = (key - 1) & 0xFFFFFFFFFFFFull;
+        w->reason = (uint32_t)((key - 1) >> 48);
+        w->runs = atomic_load_explicit(&o->runs, memory_order_relaxed);
+        w->ns = atomic_load_explicit(&o->ns, memory_order_relaxed);
+        memcpy(w->name, o->name, sizeof w->name);
+        w->name[sizeof w->name - 1] = 0;
+    }
+    qsort(rows, n, sizeof *rows, origin_cmp);
+    for (size_t i = 0; i < n && i < 80; i++) {
+        char at[64];
+        dm_aot_guest_name(rows[i].pc, at, sizeof at);
+        const char *word = dm_aot_miss_word(rows[i].reason);
+        LOG("aot: profile: JIT time from %s (%s, thread '%s'): %llu runs, %.3f s", at, word ? word : "no miss", rows[i].name, (unsigned long long)rows[i].runs, rows[i].ns * 1e-9);
+    }
+    const uint64_t lost = atomic_load_explicit(&g_origin_lost_ns, memory_order_relaxed);
+    if (n > 80 || lost) LOG("aot: profile: JIT time from %zu more origins, and %.3f s of origins the table had no room for", n > 80 ? n - 80 : 0, lost * 1e-9);
+}
 void dm_aot_profile_jit_run(uint64_t cpu0, uint32_t fpcr0, uint32_t fpcr1, int other0, int other1) {
     prof_thread *r = t_prof;
     if (!r) return;
     const uint64_t now = dm_aot_profile_cpu_ns(), d = now > cpu0 ? now - cpu0 : 0;
     r->jit_runs++; r->jit_ns += d;
+    origin_add(r, d);
     if (other0) { r->fpcr_runs++; r->fpcr_ns += d; }
     if ((other0 || other1) && !r->in_other) { r->in_other = 1; r->other_n++; r->other_t0 = other0 ? cpu0 : now; }
     if (other1) r->fpcr_last = fpcr1;
@@ -589,6 +651,7 @@ int dm_aot_profile_write(void) {
             (unsigned long long)r->other_n, r->other_ns * 1e-9, r->in_other ? " (one still open)" : "", r->fpcr_last);
     }
     pthread_mutex_unlock(&g_lock);
+    origins_log();   // the JIT time by the miss that began it, the heaviest first
     char dir[sizeof g_dir];
     snprintf(dir, sizeof dir, "%s", g_dir);
     mkdirs(dir);

@@ -91,15 +91,25 @@ Plan MakePlan(const module::Image& image, const analysis::Discovery& d, const li
         // The function's cases (analysis::Function::cases, the host's misses): every br it left to the dispatcher gets them, lowered as a recovered
         // table's, one LLVM switch over them whose default is the dispatcher (lower_calls.cpp FnGoto): a guard, so a case that br never takes costs a
         // compare and nothing else (README.md, "A miss as a case of its function's br")
-        if (!f.cases.empty()) {
+        // A br's guesses (analysis::Function::guesses, its function's own code: README.md, "Static cases of a br left to the dispatcher") join that br's cases
+        // alone; the pack lists them with the cases (nxaot_cases), so the host names a dispatcher miss at one an indirect-case
+        if (!f.cases.empty() || !f.guesses.empty()) {
             std::vector<uint64_t> cases;
             for (const uint64_t c : f.cases) {
                 if (f.blocks.count(c)) cases.push_back(c);
             }
-            if (!cases.empty()) {
-                for (const auto& [br, why] : f.indirect) ff.tables[br] = cases;
+            std::set<uint64_t> all(cases.begin(), cases.end());
+            for (const auto& [br, why] : f.indirect) {
+                std::set<uint64_t> mine(cases.begin(), cases.end());
+                if (const auto g = f.guesses.find(br); g != f.guesses.end()) {
+                    for (const uint64_t c : g->second) {
+                        if (f.blocks.count(c)) mine.insert(c);
+                    }
+                }
+                if (!mine.empty()) ff.tables[br].assign(mine.begin(), mine.end());
+                all.insert(mine.begin(), mine.end());
             }
-            ff.cases = cases;
+            ff.cases.assign(all.begin(), all.end());
         }
         for (const auto& [start, b] : f.blocks) {
             // A PLT stub whose slot the loader binds to this module (DiscoverOptions::bound_slots): discovery made its br a tail call

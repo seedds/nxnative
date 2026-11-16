@@ -797,16 +797,20 @@ static size_t lrtail_nro(uint8_t *img, size_t cap, uint64_t *want) {
     memcpy(img + FAIL_AT, "lrtail FAIL", 11);
     return SIZE;
 }
+// What every pack below adds to its nxaot build: " --no-guess" while a row checks the misses' path of a br left to the dispatcher (casecall: its br's cases
+// come from the host's misses, which a first pack's guarded cases from the function's own code would serve first: dm/tools/aot/README.md, "Static cases of
+// a br left to the dispatcher"), else nothing
+static const char *pack_extra = "";
 // nxaot build <nro> --shared <out>: its exit status, its last line into line
 // misses: a misses file for `nxaot build --misses` (NULL: none)
 static int nxaot_pack_misses(const char *nxaot, const char *nro, const char *out, const char *misses, char *line, size_t n) {
     char cmd[4096], buf[4096], extra[600] = "";
 #if defined(_WIN32)
     if (misses) snprintf(extra, sizeof extra, " --misses \"%s\"", misses);
-    snprintf(cmd, sizeof cmd, "\"\"%s\" build \"%s\" --shared \"%s\"%s 2>&1\"", nxaot, nro, out, extra);
+    snprintf(cmd, sizeof cmd, "\"\"%s\" build \"%s\" --shared \"%s\"%s%s 2>&1\"", nxaot, nro, out, extra, pack_extra);
 #else
     if (misses) snprintf(extra, sizeof extra, " --misses '%s'", misses);
-    snprintf(cmd, sizeof cmd, "'%s' build '%s' --shared '%s'%s 2>&1", nxaot, nro, out, extra);
+    snprintf(cmd, sizeof cmd, "'%s' build '%s' --shared '%s'%s%s 2>&1", nxaot, nro, out, extra, pack_extra);
 #endif
     line[0] = 0;
     FILE *f = popen(cmd, "r");
@@ -819,9 +823,9 @@ static int nxaot_pack(const char *nxaot, const char *nro, const char *out, char 
 static int nxaot_pack_with(const char *nxaot, const char *nro, const char *out, const char *option, const char *file, char *line, size_t n) {
     char cmd[4096], buf[4096];
 #if defined(_WIN32)
-    snprintf(cmd, sizeof cmd, "\"\"%s\" build \"%s\" --shared \"%s\" %s \"%s\" 2>&1\"", nxaot, nro, out, option, file);
+    snprintf(cmd, sizeof cmd, "\"\"%s\" build \"%s\" --shared \"%s\" %s \"%s\"%s 2>&1\"", nxaot, nro, out, option, file, pack_extra);
 #else
-    snprintf(cmd, sizeof cmd, "'%s' build '%s' --shared '%s' %s '%s' 2>&1", nxaot, nro, out, option, file);
+    snprintf(cmd, sizeof cmd, "'%s' build '%s' --shared '%s' %s '%s'%s 2>&1", nxaot, nro, out, option, file, pack_extra);
 #endif
     line[0] = 0;
     FILE *f = popen(cmd, "r");
@@ -2677,8 +2681,15 @@ static size_t casecall_nro(uint8_t *img, size_t cap, uint64_t *want, uint64_t *c
     return SIZE;
 }
 
-// The rows: casecall packed three times, each run under the same DM_AOT_PROFILE folder (its misses file accumulates, as a player's does)
+// The rows: casecall packed three times, each run under the same DM_AOT_PROFILE folder (its misses file accumulates, as a player's does). Packed with
+// --no-guess: F's br would get its cases from the code (guesscase below), and these rows check the misses' path
+static void casecall_rows_packed(const char *self, const char *nxaot);
 static void casecall_rows(const char *self, const char *nxaot) {
+    pack_extra = " --no-guess";
+    casecall_rows_packed(self, nxaot);
+    pack_extra = "";
+}
+static void casecall_rows_packed(const char *self, const char *nxaot) {
     if (!nxaot || !*nxaot || !NXHOST_JIT) {
         printf("%-14s %-9s note: %s\n", "casecall", "first", !NXHOST_JIT ? "a host built without the JIT fallback: casecall needs it" : "no nxaot (--nxaot, NXAOT)");
         return;
@@ -2739,6 +2750,361 @@ static void casecall_rows(const char *self, const char *nxaot) {
         row("casecall", names[k], ok, &r, note);
         if (r.guest != no_lines) free(r.guest);
         free(text);
+    }
+}
+
+// ---------- Guarded cases from a function's own code (dm/tools/aot/README.md, "Static cases of a br left to the dispatcher") ----------
+// The NRO guesscase, written here word by word: casecall's F without CX (a table read by an index no compare bounds at its br: the loop's test lies in case
+// 1; its base x28 set before the loop, which calls g, an open function whose union may change x28) and H, a loop over a table whose index is compared right
+// before it (cmp x19, #2; b.hi), its base x21 set before the loop that calls g through a register (blr x9: every register may change, for the analysis). Packed
+// with --no-guess, both brs are left to the dispatcher and their cases run
+// in the JIT (the misses file names F's case 0 and H's case 0, where each first reaches the dispatcher, indirect); packed as a first pack is (guesses on),
+// discovery gives each br its cases from the code (F's table scanned from index 0, H's bounded by its compare once the blr is taken to keep x21) and
+// the run has no JIT run at all
+static size_t guesscase_nro(uint8_t *img, size_t cap, uint64_t *want, uint64_t *f0, uint64_t *h0) {
+    enum { TEXT = 0x1000, RO = 0x1000, DATA = 0x2000, SIZE = 0x3000, BSS = 0x1000, PASS_AT = RO + 0x100, FAIL_AT = RO + 0x120, IDX_AT = RO + 0x140, HTAB_AT = RO + 0x180 };
+    if (cap < SIZE) return 0;
+    memset(img, 0, SIZE);
+    uint32_t w[256] = {0};
+    size_t n = 0x80 / 4;
+    const size_t start = n;
+    w[n++] = 0xA9BE7BFDu;               // stp x29, x30, [sp, #-32]!
+    w[n++] = 0x910003FDu;               // mov x29, sp
+    w[n++] = 0xA90153F3u;               // stp x19, x20, [sp, #16]
+    w[n] = a_adr(10, (int64_t)DATA - (int64_t)n * 4); n++;   // adr x10, DATA
+    const size_t adr_leaf = n++;        // adr x9, leaf
+    w[n++] = 0xF9000149u;               // str x9, [x10]
+    const size_t adr_spfn = n++;        // adr x11, spfn
+    w[n++] = 0xF900054Bu;               // str x11, [x10, #8]
+    w[n++] = a_movz(0, 0);
+    const size_t call_f0 = n++;
+    w[n++] = a_mov(19, 0);
+    w[n++] = a_movz(0, 1);
+    const size_t call_f1 = n++;
+    w[n++] = a_addr(19, 19, 0, 0);      // add x19, x19, x0
+    w[n++] = a_movz(0, 0);
+    const size_t call_h = n++;
+    w[n++] = a_addr(20, 19, 0, 0);      // add x20, x19, x0
+    uint64_t sum = 1 + 2 + 4;           // H(0): its cases 0, 1 and 2
+    for (unsigned s0 = 0; s0 < 2; s0++)
+        for (unsigned i = s0; i < CUT_N; i++) sum += i + (cut_idx[i] == 0 ? 7 : 0);
+    *want = sum;
+    w[n++] = a_movz(9, (unsigned)sum);
+    w[n++] = a_cmp(20, 9);
+    const size_t to_fail = n++;
+    w[n] = a_adr(0, (int64_t)PASS_AT - (int64_t)n * 4); n++;
+    w[n++] = a_movz(1, 14);             // "guesscase PASS"
+    w[n++] = 0xD40004E1u;               // svc #0x27
+    const size_t to_exit = n++;
+    w[to_fail] = a_bcond(1, (int64_t)(n - to_fail) * 4);
+    w[n] = a_adr(0, (int64_t)FAIL_AT - (int64_t)n * 4); n++;
+    w[n++] = a_movz(1, 14);             // "guesscase FAIL"
+    w[n++] = 0xD40004E1u;
+    w[to_exit] = a_b((int64_t)(n - to_exit) * 4);
+    w[n++] = 0xD40000E1u;               // svc #0x7 (ExitProcess)
+    w[n++] = 0xD4200000u;               // brk #0
+    // F(s): casecall's, the cases first, the loop's head after them
+    const size_t F = n;
+    w[call_f0] = a_bl((int64_t)(F - call_f0) * 4);
+    w[call_f1] = a_bl((int64_t)(F - call_f1) * 4);
+    w[n++] = 0xA9BD7BFDu;               // stp x29, x30, [sp, #-48]!
+    w[n++] = 0x910003FDu;               // mov x29, sp
+    w[n++] = 0xA90153F3u;               // stp x19, x20, [sp, #16]
+    w[n++] = 0xF90013FCu;               // str x28, [sp, #32]
+    w[n] = a_adr(28, (int64_t)IDX_AT - (int64_t)n * 4); n++;   // adr x28, the case table
+    w[n++] = a_mov(19, 0);
+    w[n++] = a_movz(20, 0);
+    const size_t to_loop = n++;         // b loop
+    const size_t case0 = n;
+    const size_t call_g = n++;          // case 0: bl g, whose return address is case 1
+    const size_t case1 = n;
+    w[n++] = a_addr(20, 20, 19, 0);     // case 1: add x20, x20, x19
+    w[n++] = a_addr(20, 20, 0, 0);      // add x20, x20, x0
+    w[n++] = a_addi(19, 19, 1);
+    w[n++] = a_cmpi(19, CUT_N);         // the loop's test here, after the case: no compare bounds the index at the br
+    const size_t to_done = n++;         // b.hs done
+    const size_t back = n++;            // b loop
+    const size_t done = n;
+    w[to_done] = a_bcond(2, (int64_t)(done - to_done) * 4);
+    w[n++] = a_mov(0, 20);
+    w[n++] = 0xF94013FCu;               // ldr x28, [sp, #32]
+    w[n++] = 0xA94153F3u;               // ldp x19, x20, [sp, #16]
+    w[n++] = 0xA8C37BFDu;               // ldp x29, x30, [sp], #48
+    w[n++] = 0xD65F03C0u;               // ret
+    const size_t loop = n;              // the loop's head, the last of F
+    w[to_loop] = a_b((int64_t)(loop - to_loop) * 4);
+    w[back] = a_b((int64_t)(loop - back) * 4);
+    w[n++] = a_movz(0, 0);
+    w[n++] = 0x38736B8Au;               // ldrb w10, [x28, x19]
+    w[n] = a_adr(9, (int64_t)(case0 - n) * 4); n++;   // adr x9, case 0
+    w[n++] = a_addr(9, 9, 10, 2);       // add x9, x9, x10, lsl #2
+    w[n++] = 0xD61F0120u;               // br x9
+    // H(s): the cases first, then done, next and the loop's head; the index compared right before the table
+    const size_t H = n;
+    w[call_h] = a_bl((int64_t)(H - call_h) * 4);
+    w[n++] = 0xA9BD7BFDu;               // stp x29, x30, [sp, #-48]!
+    w[n++] = 0x910003FDu;               // mov x29, sp
+    w[n++] = 0xA90153F3u;               // stp x19, x20, [sp, #16]
+    w[n++] = 0xF90013F5u;               // str x21, [sp, #32]
+    w[n] = a_adr(21, (int64_t)HTAB_AT - (int64_t)n * 4); n++;   // adr x21, H's table: before the loop
+    w[n++] = a_mov(19, 0);
+    w[n++] = a_movz(20, 0);
+    const size_t hto_loop = n++;        // b loop
+    const size_t hc0 = n;
+    w[n++] = a_addi(20, 20, 1);         // case 0: add x20, x20, #1
+    const size_t hb0 = n++;             // b next
+    const size_t hc1 = n;
+    w[n++] = a_addi(20, 20, 2);
+    const size_t hb1 = n++;
+    const size_t hc2 = n;
+    w[n++] = a_addi(20, 20, 4);
+    const size_t hb2 = n++;
+    const size_t hdone = n;
+    w[n++] = a_mov(0, 20);
+    w[n++] = 0xF94013F5u;               // ldr x21, [sp, #32]
+    w[n++] = 0xA94153F3u;               // ldp x19, x20, [sp, #16]
+    w[n++] = 0xA8C37BFDu;               // ldp x29, x30, [sp], #48
+    w[n++] = 0xD65F03C0u;               // ret
+    const size_t hnext = n;
+    w[hb0] = a_b((int64_t)(hnext - hb0) * 4);
+    w[hb1] = a_b((int64_t)(hnext - hb1) * 4);
+    w[hb2] = a_b((int64_t)(hnext - hb2) * 4);
+    w[n++] = a_addi(19, 19, 1);
+    const size_t hloop = n;
+    w[hto_loop] = a_b((int64_t)(hloop - hto_loop) * 4);
+    const size_t adr_gh = n++;          // adr x9, g
+    w[n++] = 0xD63F0120u;               // blr x9: a call whose effect is every register, x21 included
+    w[n++] = a_cmpi(19, 2);
+    const size_t hto_done = n++;        // b.hi done
+    w[hto_done] = a_bcond(8, (int64_t)(hdone - hto_done) * 4);
+    w[n++] = 0x38736AAAu;               // ldrb w10, [x21, x19]
+    w[n] = a_adr(9, (int64_t)(hc0 - n) * 4); n++;   // adr x9, case 0
+    w[n++] = a_addr(9, 9, 10, 2);       // add x9, x9, x10, lsl #2
+    w[n++] = 0xD61F0120u;               // br x9
+    // g, the stub, leaf and spfn: casecall's
+    const size_t g = n;
+    w[call_g] = a_bl((int64_t)(g - call_g) * 4);
+    w[adr_gh] = a_adr(9, (int64_t)(g - adr_gh) * 4);
+    w[n++] = 0xA9BE7BFDu;
+    w[n++] = 0x910003FDu;
+    w[n++] = 0xF9000BF3u;               // str x19, [sp, #16]
+    w[n++] = a_movz(19, 0xBAD);
+    w[n++] = 0xD40003C1u;               // svc #0x1E
+    const size_t call_stub = n++;
+    w[n++] = 0xF9400BF3u;               // ldr x19, [sp, #16]
+    w[n++] = 0xA8C27BFDu;
+    w[n++] = a_movz(0, 7);
+    w[n++] = 0xD65F03C0u;
+    const size_t stub = n;
+    w[call_stub] = a_bl((int64_t)(stub - call_stub) * 4);
+    w[n] = a_adr(16, (int64_t)DATA - (int64_t)n * 4); n++;
+    w[n++] = 0xF9400211u;               // ldr x17, [x16]
+    w[n++] = 0xD61F0220u;               // br x17
+    const size_t leaf = n;
+    w[adr_leaf] = a_adr(9, (int64_t)(leaf - adr_leaf) * 4);
+    w[n++] = 0xD65F03C0u;
+    const size_t spfn = n;
+    w[adr_spfn] = a_adr(11, (int64_t)(spfn - adr_spfn) * 4);
+    w[n++] = 0x910043FFu;               // add sp, sp, #16
+    w[n++] = 0xD65F03C0u;
+    w[0] = a_b((int64_t)start * 4);
+    w[1] = RO;
+    memcpy(img, w, n * 4);
+    memcpy(img + 0x10, "NRO0", 4);
+    const uint32_t hdr[] = {0, SIZE, 0, 0, TEXT, RO, DATA - RO, DATA, SIZE - DATA, BSS};
+    memcpy(img + 0x14, hdr, sizeof hdr);
+    memcpy(img + RO, "MOD0", 4);
+    const int32_t mod0[] = {0x20, SIZE - RO, SIZE + BSS - RO, 0x40, 0x40, SIZE - RO};
+    memcpy(img + RO + 4, mod0, sizeof mod0);
+    memcpy(img + PASS_AT, "guesscase PASS", 14);
+    memcpy(img + FAIL_AT, "guesscase FAIL", 14);
+    memcpy(img + IDX_AT, cut_idx, CUT_N);
+    const uint8_t htab[3] = {0, (uint8_t)(hc1 - hc0), (uint8_t)(hc2 - hc0)};
+    memcpy(img + HTAB_AT, htab, sizeof htab);
+    *f0 = case0 * 4; *h0 = hc0 * 4;
+    return SIZE;
+}
+
+// The NRO guessbad: dm/tools/aot/tests/test_discover.py's guess_garbage as a program. F(j, i) (x1, x2) is br2, a table bounded by its compare on x1 (j <= 1:
+// 10 or 20), and else br1, a table read by x2, an index nothing bounds, whose two entries are its cases (100, 200) and whose third lands on br2's table
+// read; then one past F (E follows it). br1's guess would enter br2's region from outside it and leave br2's table underived, so discovery withdraws it,
+// and the pack is the one --no-guess makes: the same run, br1's cases through the dispatcher, and the same misses
+static size_t guessbad_nro(uint8_t *img, size_t cap, uint64_t *want) {
+    enum { TEXT = 0x1000, RO = 0x1000, DATA = 0x2000, SIZE = 0x3000, BSS = 0x1000, PASS_AT = RO + 0x100, FAIL_AT = RO + 0x120, T1_AT = RO + 0x140, T2_AT = RO + 0x150 };
+    if (cap < SIZE) return 0;
+    memset(img, 0, SIZE);
+    uint32_t w[160] = {0};
+    size_t n = 0x80 / 4;
+    const size_t start = n;
+    w[n++] = 0xA9BE7BFDu;               // stp x29, x30, [sp, #-32]!
+    w[n++] = 0x910003FDu;               // mov x29, sp
+    w[n++] = 0xA90153F3u;               // stp x19, x20, [sp, #16]
+    w[n++] = a_movz(19, 0);
+    size_t calls[4];
+    const unsigned js[4] = {0, 1, 2, 3}, is[4] = {0, 0, 0, 1};
+    for (int k = 0; k < 4; k++) {
+        w[n++] = a_movz(1, js[k]);
+        w[n++] = a_movz(2, is[k]);
+        calls[k] = n++;                 // bl F
+        w[n++] = a_addr(19, 19, 0, 0);  // add x19, x19, x0
+    }
+    const size_t call_e = n++;          // bl E
+    *want = 10 + 20 + 100 + 200;
+    w[n++] = a_movz(9, (unsigned)*want);
+    w[n++] = a_cmp(19, 9);
+    const size_t to_fail = n++;
+    w[n] = a_adr(0, (int64_t)PASS_AT - (int64_t)n * 4); n++;
+    w[n++] = a_movz(1, 13);             // "guessbad PASS"
+    w[n++] = 0xD40004E1u;               // svc #0x27
+    const size_t to_exit = n++;
+    w[to_fail] = a_bcond(1, (int64_t)(n - to_fail) * 4);
+    w[n] = a_adr(0, (int64_t)FAIL_AT - (int64_t)n * 4); n++;
+    w[n++] = a_movz(1, 13);             // "guessbad FAIL"
+    w[n++] = 0xD40004E1u;
+    w[to_exit] = a_b((int64_t)(n - to_exit) * 4);
+    w[n++] = 0xD40000E1u;               // svc #0x7 (ExitProcess)
+    w[n++] = 0xD4200000u;               // brk #0
+    const size_t F = n;
+    for (int k = 0; k < 4; k++) w[calls[k]] = a_bl((int64_t)(F - calls[k]) * 4);
+    w[n++] = a_cmpi(1, 1);
+    const size_t to_join = n++;         // b.hi join
+    const size_t r = n;                 // br2's table read
+    w[n] = a_adr(14, (int64_t)T2_AT - (int64_t)n * 4); n++;
+    const size_t adr_d0 = n++;          // adr x15, d0
+    w[n++] = 0x386169D0u;               // ldrb w16, [x14, x1]
+    w[n++] = a_addr(15, 15, 16, 2);     // add x15, x15, x16, lsl #2
+    w[n++] = 0xD61F01E0u;               // br x15 (br2)
+    const size_t d0 = n;
+    w[adr_d0] = a_adr(15, (int64_t)(d0 - adr_d0) * 4);
+    w[n++] = a_movz(0, 10);
+    w[n++] = 0xD65F03C0u;
+    const size_t d1 = n;
+    w[n++] = a_movz(0, 20);
+    w[n++] = 0xD65F03C0u;
+    const size_t join = n;
+    w[to_join] = a_bcond(8, (int64_t)(join - to_join) * 4);
+    w[n] = a_adr(11, (int64_t)T1_AT - (int64_t)n * 4); n++;
+    w[n] = a_adr(12, (int64_t)(r - n) * 4); n++;   // adr x12, r: br1's base
+    w[n++] = 0x3862696Du;               // ldrb w13, [x11, x2]
+    w[n++] = a_addr(12, 12, 13, 2);     // add x12, x12, x13, lsl #2
+    const size_t to_br1 = n++;          // b br1, over its cases
+    const size_t c0 = n;
+    w[n++] = a_movz(0, 100);
+    w[n++] = 0xD65F03C0u;
+    const size_t c1 = n;
+    w[n++] = a_movz(0, 200);
+    w[n++] = 0xD65F03C0u;
+    const size_t br1 = n;
+    w[to_br1] = a_b((int64_t)(br1 - to_br1) * 4);
+    w[n++] = 0xD61F0180u;               // br x12 (br1)
+    const size_t e = n;                 // E: the function after F, where br1's fourth entry lands
+    w[call_e] = a_bl((int64_t)(e - call_e) * 4);
+    w[n++] = 0xD65F03C0u;
+    w[0] = a_b((int64_t)start * 4);
+    w[1] = RO;
+    memcpy(img, w, n * 4);
+    memcpy(img + 0x10, "NRO0", 4);
+    const uint32_t hdr[] = {0, SIZE, 0, 0, TEXT, RO, DATA - RO, DATA, SIZE - DATA, BSS};
+    memcpy(img + 0x14, hdr, sizeof hdr);
+    memcpy(img + RO, "MOD0", 4);
+    const int32_t mod0[] = {0x20, SIZE - RO, SIZE + BSS - RO, 0x40, 0x40, SIZE - RO};
+    memcpy(img + RO + 4, mod0, sizeof mod0);
+    memcpy(img + PASS_AT, "guessbad PASS", 13);
+    memcpy(img + FAIL_AT, "guessbad FAIL", 13);
+    const uint8_t t1[4] = {(uint8_t)(c0 - r), (uint8_t)(c1 - r), 0, 0xFF}, t2[2] = {0, (uint8_t)(d1 - d0)};
+    memcpy(img + T1_AT, t1, sizeof t1);
+    memcpy(img + T2_AT, t2, sizeof t2);
+    return SIZE;
+}
+
+// The misses file's rows (its lines that are no comment), for comparing two sessions' files
+static void miss_rows(const char *text, char *out, size_t n) {
+    out[0] = 0;
+    for (const char *p = text; p && *p;) {
+        const char *e = strchr(p, '\n');
+        const size_t len = e ? (size_t)(e - p) : strlen(p);
+        if (*p != '#' && len && strlen(out) + len + 2 < n) { strncat(out, p, len); strcat(out, ";"); }
+        p = e ? e + 1 : NULL;
+    }
+}
+
+// The rows: guesscase packed with --no-guess (its cases in the JIT, the misses file naming F's case 0 and H's case 0) and as a first pack (no JIT run);
+// guessbad packed both ways (the same run, the same JIT runs and misses: its guess withdrawn)
+static void guess_rows(const char *self, const char *nxaot) {
+    if (!nxaot || !*nxaot || !NXHOST_JIT) {
+        printf("%-14s %-9s note: %s\n", "guesscase", "first", !NXHOST_JIT ? "a host built without the JIT fallback: the guess rows need it" : "no nxaot (--nxaot, NXAOT)");
+        return;
+    }
+    static uint8_t img[0x3000];
+    static char no_lines[1];
+    char nro[200], pack[2][200], dir[2][200], misses[2][260], line[600] = "", note[1600], rowf[64], rowh[64];
+    result r;
+    for (int which = 0; which < 2; which++) {   // 0: guesscase, 1: guessbad
+        const char *name = which ? "guessbad" : "guesscase";
+        uint64_t want = 0, f0 = 0, h0 = 0;
+        const size_t len = which ? guessbad_nro(img, sizeof img, &want) : guesscase_nro(img, sizeof img, &want, &f0, &h0);
+        char base[200];
+        snprintf(base, sizeof base, "t_aot_host.tmp/%s", name);
+        mkdir("t_aot_host.tmp", 0755);
+        mkdir(base, 0755);
+        snprintf(nro, sizeof nro, "%s/%s.nro", base, name);
+        if (!len || !write_file(nro, img, len)) { memset(&r, 0, sizeof r); r.guest = no_lines; row(name, "write", 0, &r, "cannot write the NRO"); continue; }
+        char *text[2] = {NULL, NULL};
+        uint64_t jit[2] = {0, 0};
+        int pass[2] = {0, 0}, have[2] = {0, 0};
+        for (int k = 0; k < 2; k++) {   // 0: --no-guess, 1: guesses on (a first pack)
+            snprintf(dir[k], sizeof dir[k], "%s/profile%d", base, k);
+            mkdir(dir[k], 0755);
+            char sub[200];
+            snprintf(sub, sizeof sub, "%s/p%d", base, k);
+            mkdir(sub, 0755);
+            snprintf(pack[k], sizeof pack[k], "%s/%s%s", sub, name, PACK_EXT);
+            snprintf(misses[k], sizeof misses[k], "%s/%s.misses.tsv", dir[k], name);
+            remove(misses[k]);
+            memset(&r, 0, sizeof r);
+            r.guest = no_lines;
+            pack_extra = k ? "" : " --no-guess";
+            const int built = nxaot_pack(nxaot, nro, pack[k], line, sizeof line) == 0;
+            pack_extra = "";
+            if (!built) {
+                snprintf(note, sizeof note, "nxaot build%s failed: %s", k ? "" : " --no-guess", line);
+                row(name, k ? "guess" : "no-guess", 0, &r, note);
+                continue;
+            }
+            set_env("DM_AOT_PROFILE", dir[k]);
+            run_child(self, pack[k], nro, "", &r);
+            set_env("DM_AOT_PROFILE", NULL);
+            char want_line[64];
+            snprintf(want_line, sizeof want_line, "%s PASS\n", name);
+            pass[k] = r.status == 0 && !strcmp(r.guest, want_line);
+            have[k] = r.have_jit;
+            jit[k] = r.jit[0];
+            text[k] = read_text(misses[k]);
+            if (r.guest != no_lines) free(r.guest);
+            if (which == 0) {
+                snprintf(rowf, sizeof rowf, "0x%llx indirect ", (unsigned long long)f0);
+                snprintf(rowh, sizeof rowh, "0x%llx indirect ", (unsigned long long)h0);
+                const int named = text[k] && strstr(text[k], rowf) && strstr(text[k], rowh);
+                const int ok = k ? pass[k] && have[k] && jit[k] == 0 && !(text[k] && (strstr(text[k], rowf) || strstr(text[k], rowh)))
+                                 : pass[k] && have[k] && jit[k] > 0 && named;
+                snprintf(note, sizeof note, k ? "a first pack (guarded cases from the code): sum %llu, %llu JIT runs (want 0)%s"
+                                              : "--no-guess: sum %llu, %llu JIT runs, the misses file %s",
+                         (unsigned long long)want, jit[k], k ? "" : named ? "names F's case 0 and H's case 0 (indirect)" : "lacks F's case 0 or H's case 0");
+                if (r.red[0] && strlen(note) + strlen(r.red) + 3 < sizeof note) { strcat(note, "; "); strcat(note, r.red); }
+                row(name, k ? "guess" : "no-guess", ok, &r, note);
+            }
+        }
+        if (which == 1) {   // the guess withdrawn: both packs run alike
+            char a[800], b[800];
+            miss_rows(text[0], a, sizeof a);
+            miss_rows(text[1], b, sizeof b);
+            const int ok = pass[0] && pass[1] && have[0] && have[1] && jit[0] == jit[1] && jit[0] > 0 && !strcmp(a, b);
+            snprintf(note, sizeof note, "its guess withdrawn: sum %llu both ways, %llu and %llu JIT runs (--no-guess, guesses on), misses %s", (unsigned long long)want,
+                     jit[0], jit[1], !strcmp(a, b) ? "the same" : "differ");
+            row(name, "withdrawn", ok, &r, note);
+        }
+        free(text[0]);
+        free(text[1]);
     }
 }
 
@@ -2919,7 +3285,10 @@ int main(int argc, char **argv) {
     if (cutcall) cutcall_rows(argv[0], nxaot);
     int casecall = !nonly;
     for (int i = 0; i < nonly; i++) casecall |= !strcmp(only[i], "casecall");
-    if (casecall) casecall_rows(argv[0], nxaot);   // 11. A miss as a case of its function's br: the function kept whole; a case reached from outside, an entry   // 10. A call whose return starts another function; a call of a function the summaries say does not return, which returns
+    if (casecall) casecall_rows(argv[0], nxaot);
+    int guess = !nonly;
+    for (int i = 0; i < nonly; i++) guess |= !strcmp(only[i], "guesscase") || !strcmp(only[i], "guessbad");
+    if (guess) guess_rows(argv[0], nxaot);   // 12. Guarded cases from a function's own code: none of the cases in the JIT; a guess that would lose a table withdrawn   // 11. A miss as a case of its function's br: the function kept whole; a case reached from outside, an entry   // 10. A call whose return starts another function; a call of a function the summaries say does not return, which returns
     printf("t_aot_host: %d checks, %d failed\n", checks, fails);
     return fails != 0;
 }

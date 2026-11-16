@@ -1,11 +1,11 @@
 // nxaot: the ahead-of-time ARM64 -> x86-64 recompiler (docs/design/aot-recompiler.md). Subcommands today:
 //   nxaot discover <module.nro | name.aot.tsv> [--symbols-as-oracle] [--tsv <out>] [--threads N] [--times] [--misses <file>] [--bind <file>] [--no-root <hex>]...
-//                  [--memory]
+//                  [--no-guess] [--memory]
 //                                                     function discovery, CFGs, jump tables, exclusive windows and summaries of a module
 //                                                     (src/analysis/discover.h): one line per function and the summary; --tsv writes every
 //                                                     row kind; --symbols-as-oracle takes no symbol as a source and compares with them;
 //                                                     --threads: the analysis's threads (0 or none: one per CPU; the result is the same);
-//                                                     --times: the seconds of its steps on standard error; --misses and --no-root as for build;
+//                                                     --times: the seconds of its steps on standard error; --misses, --no-root and --no-guess as for build;
 //                                                     --memory: each table's bytes at its peak and the resident set at each stage, on standard
 //                                                     error (src/analysis/memory.h; README.md, "Memory at scale")
 //   nxaot plan <module.nro | name.aot.tsv> [--cc swifttail|ghc] [--all-entries] [--threads N] [--misses <file>] [--bind <file>] [--memory]
@@ -24,7 +24,7 @@
 //               [--correctness] [--all-entries] [--cpu <llvm cpu>] [--fpsr-flags on|off] [--no-debug-info] [--no-line-table] [--spills] [--asm <file.s>]
 //               [--no-safepoints] [--workers N] [--cache <dir>] [--time-passes] [--ir <file.ll>] [--ir-opt <file.ll>] [--profile <file>]
 //               [--no-groups] [--no-split] [--split-above N] [--target linux|windows] [--isel-misses] [--misses <file>] [--bind <file>] [--no-root <hex>]...
-//               [--memory] [--tiers-tsv <file>] [--gap-tier C|mode]
+//               [--no-guess] [--memory] [--tiers-tsv <file>] [--gap-tier C|mode]
 //                                                     the pack stage (src/build): every function of the module compiled, in units of
 //                                                     neighbouring functions (a function over the split limit in parts) on --workers threads
 //                                                     (0 or none: the analysis on one per CPU, then as many compile workers as the CPUs and
@@ -48,7 +48,9 @@
 //                                                     DM_AOT_PROFILE's <module>.bind.tsv), each such stub a tail call of its function, recorded in the
 //                                                     pack's nxaot_bindings for the host to check (README.md, "PLT stubs bound to their own module"),
 //                                                     taken under the same SHA-256 rule; --no-root (tests): an address
-//                                                     none of discovery's own sources may make an entry, so that a miss naming it brings it back;
+//                                                     none of discovery's own sources may make an entry, so that a miss naming it brings it back; --no-guess (tests):
+//                                                     no guarded cases from the functions' own code for their brs left to the dispatcher (README.md, "Static cases of a br
+//                                                     left to the dispatcher"), as the misses' rows need;
 //                                                     --memory: the tables' peaks and the resident set at each stage (the link's included), as
 //                                                     for discover. The tables' object's function map and lookup table go to the MC layer
 //                                                     directly (`aot: tables' object: ... through MC`; README.md, "The tables' object through
@@ -113,7 +115,7 @@ namespace {
 int Usage() {
     std::fprintf(stderr,
                  "usage: nxaot discover <module.nro | name.aot.tsv> [--symbols-as-oracle] [--tsv <out>] [--threads N] [--times] [--misses <file>] [--bind <file>]\n"
-                 "                      [--no-root <hex>]... [--memory]\n"
+                 "                      [--no-root <hex>]... [--no-guess] [--memory]\n"
                  "       nxaot plan <module.nro | name.aot.tsv> [--cc swifttail|ghc] [--all-entries] [--threads N] [--misses <file>] [--bind <file>] [--memory]\n"
                  "       nxaot image <module.nro> <out dir> [<name>]\n"
                  "       nxaot manifest <name.aot.tsv>\n"
@@ -126,7 +128,8 @@ int Usage() {
                  "                   [--no-line-table] [--spills] [--asm <file.s>] [--no-safepoints] [--workers N] [--cache <dir>] [--time-passes]\n"
                  "                   [--ir <file.ll>] [--ir-opt <file.ll>] [--profile <file>] [--no-groups] [--no-split] [--split-above N]\n"
                  "                   [--target linux|windows]   (windows: a PE DLL --shared <name>.dll and / or a COFF object -o <object.obj>)\n"
-                 "                   [--isel-misses] [--misses <file>] [--bind <file>] [--no-root <hex>]... [--memory] [--tiers-tsv <file>] [--gap-tier C|mode]\n"
+                 "                   [--isel-misses] [--misses <file>] [--bind <file>] [--no-root <hex>]... [--no-guess] [--memory] [--tiers-tsv <file>]\n"
+                 "                   [--gap-tier C|mode]\n"
                  "       nxaot lines <pack.so | pack.dll> <module.nro | name.aot.tsv>\n");
     return 2;
 }
@@ -229,6 +232,8 @@ int Discover(int argc, char** argv) {
         } else if (a == "--no-root" && i + 1 < argc && ParseHex(argv[i + 1], &held)) {
             opts.no_roots.insert(held);
             ++i;
+        } else if (a == "--no-guess") {
+            opts.guess = false;
         } else if (a == "--memory") {
             nxaot::memory::Registry::Get().Enable();
         } else if (path.empty() && !a.empty() && a[0] != '-') {
@@ -328,6 +333,12 @@ int Discover(int argc, char** argv) {
         }
         for (const auto& [br, why] : f.indirect) {
             rows.push_back("br\t" + X(br) + "\t" + X(entry) + "\tindirect\t" + why);
+            if (const auto g = f.guesses.find(br); g != f.guesses.end()) {
+                // Its guarded cases from the function's own code (README.md, "Static cases of a br left to the dispatcher")
+                std::string targets;
+                for (size_t i = 0; i < g->second.size(); ++i) targets += (i ? "," : "") + X(g->second[i]);
+                rows.push_back("guess\t" + X(br) + "\t" + X(entry) + "\t" + targets);
+            }
         }
         for (const auto& [pc, target] : f.calls) {
             rows.push_back("call\t" + X(pc) + "\t" + X(entry) + "\t" + (target ? X(target) : "blr"));
@@ -741,6 +752,8 @@ int Build(int argc, char** argv) {
         } else if (a == "--no-root" && has && ParseHex(argv[i + 1], &held)) {
             o.no_roots.insert(held);  // tests: discovery's own sources do not make it an entry
             ++i;
+        } else if (a == "--no-guess") {
+            o.guess = false;  // tests: no guarded cases from the functions' own code (README.md, "Static cases of a br left to the dispatcher")
         } else if (a == "--tiers-tsv" && has) {
             o.tiers_path = argv[++i];  // each function's tier, gap code marked (README.md, "Gap code at tier C")
         } else if (a == "--gap-tier" && has) {

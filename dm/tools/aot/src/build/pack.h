@@ -57,6 +57,7 @@ struct BuildOptions {
     std::vector<analysis::Miss> misses;             // the host's JIT feedback (--misses, ReadMisses; the image carved with analysis::CarveMisses before):
                                                     // discovery's roots, and with them in the analysis cache's key
     std::set<uint64_t> no_roots;                    // a test's --no-root (analysis::DiscoverOptions::no_roots), in the analysis cache's key too
+    bool guess = true;                              // false: a test's --no-guess (analysis::DiscoverOptions::guess), in the analysis cache's key too
     std::map<uint64_t, uint64_t> bound_slots;       // the loader's bindings of PLT slots to this module's own functions (--bind, ReadBindings;
                                                     // analysis::DiscoverOptions::bound_slots), in the analysis cache's key and the pack's nxaot_bindings
     bool windows = false;                           // --target windows: a PE DLL for the Windows host ("Windows packs" in pack.cpp, coff.h)

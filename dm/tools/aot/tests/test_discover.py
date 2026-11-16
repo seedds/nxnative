@@ -26,11 +26,16 @@ and the forms of README.md's "Unbounded brs by form" (a compare whose b.hi lies 
 index; and each unsound look-alike (the compare on another register, a compare that a path to the load goes around, the index changed by
 another value after its compare or its mask, a compare of the low half of a 64-bit index, a signed compare, a blr between the compare and the
 load) must stay a br for the dispatcher.
+The guarded cases from a function's own code (README.md, "Static cases of a br left to the dispatcher"): a table whose base a blr before its compare
+makes unknown, and one read by an index nothing bounds, each give a `guess` row of exactly their cases and stay brs (none with --no-guess); a guess
+that lands in the region of the function's other table, which would then no longer be derived, is withdrawn, and the function's rows are those of a
+discovery without guesses.
 Exit 0 when every check passes.
 """
 import argparse
 import hashlib
 import os
+import re
 import struct
 import subprocess
 import sys
@@ -348,6 +353,138 @@ def unsound_before_blr(m, name):
     return f'{name}.br', None, None, None
 
 
+# Guarded cases from the function's own code (README.md, "Static cases of a br left to the dispatcher"): brs no table bounds, each with the cases its
+# guess must give (a `guess` row of exactly those targets) and none of a table. The cases lie between a branch over them and the br, inside the span the
+# function's walk covers (the module has no FDE), as a compiler's switch lies inside its function's FDE
+def guess_cmp_here(m, name):
+    # The table's base set before a call that may change it (a blr: every register for the analysis), the index compared after the call: no table,
+    # the base unknown past the call; the guess takes the call to keep x19..x29 (the calling convention) and bounds the index by its compare
+    n = 5
+    _adrp_add(m, 21, f'{name}.table')
+    m.emit(e_blr(3), e_cmpi(0, n - 1), _to(HI, f'{name}.default'), lambda pc, A: e_b(A(f'{name}.dispatch') - pc))
+    _cases(m, name, n)
+    m.label(f'{name}.dispatch')
+    m.emit(lambda pc, A: e_adr(12, A(f'{name}.case0') - pc), e_ldrb(13, 21, 0), e_add(12, 12, 13, 2))
+    m.label(f'{name}.br')
+    m.emit(e_br(12))
+    order = [(2 * i + 1) % n for i in range(n)]
+    m.table(f'{name}.table', 1, n, lambda A, t: [(A(f'{name}.case{k}') - A(f'{name}.case0')) // 4 for k in order])
+    return f'{name}.br', [f'{name}.case{k}' for k in order]
+
+
+def guess_scan(m, name):
+    # The table read by an index no compare bounds (x0, an argument): no table; the guess reads it from index 0 while its entries land on instructions
+    # of the function, up to the next table (an address the module's code names), the padding before it giving case 0 again
+    n = 4
+    m.emit(lambda pc, A: e_b(A(f'{name}.dispatch') - pc))
+    _cases(m, name, n)
+    m.label(f'{name}.dispatch')
+    _adrp_add(m, 11, f'{name}.table')
+    m.emit(lambda pc, A: e_adr(12, A(f'{name}.case0') - pc), e_ldrb(13, 11, 0), e_add(12, 12, 13, 2))
+    m.label(f'{name}.br')
+    m.emit(e_br(12))
+    order = [n - 1 - i for i in range(n)]
+    m.table(f'{name}.table', 1, n, lambda A, t: [(A(f'{name}.case{k}') - A(f'{name}.case0')) // 4 for k in order])
+    return f'{name}.br', [f'{name}.case{k}' for k in order]
+
+
+def guess_garbage(m, name):
+    # A guess the check withdraws: br1's table, read by an index nothing bounds (x2), holds its two cases and then an entry that lands on the block of br2's
+    # table read (r), then one past the function. With that guess br2's region is entered from br1, whose path carries x1 past br2's compare: br2's
+    # table no longer comes out of its regions, so the guess would make the function lose a table, and the function stays as it is without guesses
+    m.emit(e_cmpi(1, 1), _to(HI, f'{name}.join'))
+    m.label(f'{name}.r')
+    _adrp_add(m, 14, f'{name}.t2')
+    m.emit(lambda pc, A: e_adr(15, A(f'{name}.d0') - pc), e_ldrb(16, 14, 1), e_add(15, 15, 16, 2))
+    m.label(f'{name}.br2')
+    m.emit(e_br(15))
+    m.label(f'{name}.d0')
+    m.emit(e_movz(0, 10), RET)
+    m.label(f'{name}.d1')
+    m.emit(e_movz(0, 20), RET)
+    m.label(f'{name}.join')
+    _adrp_add(m, 11, f'{name}.t1')
+    m.emit(lambda pc, A: e_adr(12, A(f'{name}.r') - pc), e_ldrb(13, 11, 2), e_add(12, 12, 13, 2), lambda pc, A: e_b(A(f'{name}.br1') - pc))
+    m.label(f'{name}.c0')
+    m.emit(e_movz(0, 100), RET)
+    m.label(f'{name}.c1')
+    m.emit(e_movz(0, 200), RET)
+    m.label(f'{name}.br1')
+    m.emit(e_br(12))
+    m.table(f'{name}.t2', 1, 2, lambda A, t: [0, (A(f'{name}.d1') - A(f'{name}.d0')) // 4])
+    m.table(f'{name}.t1', 1, 4, lambda A, t: [(A(f'{name}.c0') - A(f'{name}.r')) // 4, (A(f'{name}.c1') - A(f'{name}.r')) // 4, 0, 0xFF])
+    return f'{name}.br1', f'{name}.br2', [f'{name}.d0', f'{name}.d1']
+
+
+GUESS_FORMS = [('guess_cmp_here', guess_cmp_here), ('guess_scan', guess_scan)]
+
+
+def hand_guesses(nxaot, work, failures):
+    """The guesses of a module of GUESS_FORMS and guess_garbage: each br's guess row its cases exactly, no table; guess_garbage's guess withdrawn (no
+    guess row, br2 a table of its two cases, the discovery line naming one function withdrawn) and its rows those of a discovery without guesses
+    (--no-guess); the brs of GUESS_FORMS with --no-guess have no guess row"""
+    m = HandModule()
+    m.label('main')
+    for name in [n for n, _ in GUESS_FORMS] + ['guess_garbage', 'guess_end']:
+        m.emit(lambda pc, A, name=name: e_bl(A(name) - pc))
+    m.emit(RET)
+    expect = {}
+    for name, build in GUESS_FORMS:
+        while len(m.words) % 4:
+            m.emit(NOP)
+        m.label(name)
+        expect[name] = build(m, name)
+    while len(m.words) % 4:
+        m.emit(NOP)
+    m.label('guess_garbage')
+    br1, br2, d = guess_garbage(m, 'guess_garbage')
+    m.label('guess_end')   # the function after it, where br1's fourth entry lands: no instruction of guess_garbage
+    m.emit(RET)
+    folder = os.path.join(work, 'hand_guess')
+    os.makedirs(folder, exist_ok=True)
+    manifest = m.write(folder, 'guess')
+    rows = {}
+    for mode, extra in (('guess', []), ('no-guess', ['--no-guess'])):
+        tsv = os.path.join(folder, f'guess.{mode}.tsv')
+        run = subprocess.run([nxaot, 'discover', manifest, '--tsv', tsv] + extra, capture_output=True, text=True)
+        if run.returncode:
+            failures.append(f'hand-written guesses ({mode}): nxaot discover failed:\n{run.stdout}{run.stderr}')
+            return
+        r = {'jt': {}, 'br': {}, 'guess': {}, 'fn': {}, 'out': run.stdout}
+        with open(tsv) as f:
+            for line in f:
+                c = line.rstrip('\n').split('\t')
+                if c[0] in ('jt', 'br', 'guess', 'fn'):
+                    r[c[0]][int(c[1], 16)] = c
+        rows[mode] = r
+    g, n = rows['guess'], rows['no-guess']
+    for name, (br_label, labels) in expect.items():
+        br = m.labels[br_label]
+        want = sorted(m.labels[lb] for lb in labels)
+        got = sorted(int(t, 16) for t in g['guess'][br][3].split(',')) if br in g['guess'] else None
+        ok = got == want and br in g['br'] and br not in g['jt'] and br not in n['guess']
+        print(f'hand-written guess {name:<15} at {br:#x}: {"guess " + ",".join(hex(x) for x in got) if got else "no guess"}'
+              f'{"" if br not in n["guess"] else " (and a guess with --no-guess)"}')
+        if not ok:
+            failures.append(f'hand-written guess {name} (br at {br:#x}): a guess of {[hex(x) for x in want]} and no table expected (none with --no-guess), '
+                            f'got {[hex(x) for x in got] if got else "none"}{", a table" if br in g["jt"] else ""}')
+    b1, b2 = m.labels[br1], m.labels[br2]
+    entry = m.labels['guess_garbage']
+    t2 = g['jt'].get(b2)
+    t2_ok = t2 is not None and [int(t, 16) for t in t2[12].split(',')] == [m.labels[lb] for lb in d]
+    same = all(g[k].get(a) == n[k].get(a) for k in ('fn', 'jt', 'br') for a in set(g[k]) | set(n[k]) if a == entry or a in (b1, b2) or
+               (k == 'jt' and int(g[k].get(a, n[k].get(a))[2], 16) == entry))
+    withdrawn = re.search(r"aot: guessed cases: .*; (\d+) functions' guesses withdrawn", g['out'])
+    ok = b1 not in g['guess'] and b1 in g['br'] and t2_ok and same and withdrawn is not None and withdrawn.group(1) == '1'
+    print(f'hand-written guess guess_garbage  at {b1:#x}: {"no guess" if b1 not in g["guess"] else "a guess"}, br2 at {b2:#x} '
+          f'{"a table of its 2 cases" if t2_ok else "not its table"}, rows {"as" if same else "unlike"} --no-guess\'s, '
+          f'{withdrawn.group(1) if withdrawn else "no"} function withdrawn')
+    if not ok:
+        failures.append(f'hand-written guess_garbage: the guess withdrawn expected (no guess row at {b1:#x}, br2 a table of d0 and d1, the function\'s rows '
+                        f'as without guesses, one function withdrawn); got {"a guess row" if b1 in g["guess"] else "no guess row"}, br2 '
+                        f'{"right" if t2_ok else "wrong"}, rows {"same" if same else "different"}, the line {withdrawn.group(0) if withdrawn else "missing"}')
+
+
 HAND_FORMS = [('byte_product', form_byte_product), ('half_offset', form_half_offset), ('word_relative', form_word_relative),
               ('byte_low_half', form_byte_low_half), ('cmp_split', form_cmp_split), ('and_narrow', form_and_narrow), ('and_low32', form_and_low32),
               ('after_blr', form_after_blr), ('other_register', unsound_other_register), ('around', unsound_around),
@@ -475,9 +612,11 @@ def main():
                   f'{"/".join(map(str, classes)):>13} {pads:>4} {len(missed):>4} {len(extra):>5} {len(splits):>5} {f"{same}/{shorter}":>9} '
                   f'{cov.get("uncovered", "?"):>5}')
     hand_tables(a.nxaot, a.work, failures)
+    hand_guesses(a.nxaot, a.work, failures)
     for line in failures:
         print('FAIL ' + line)
-    print(f'discover test: {len(rows)} NROs, 2 modes each, {len(HAND_FORMS)} hand-written switches, {len(failures)} failures')
+    print(f'discover test: {len(rows)} NROs, 2 modes each, {len(HAND_FORMS)} hand-written switches, {len(GUESS_FORMS) + 1} hand-written guesses, '
+          f'{len(failures)} failures')
     return 1 if failures else 0
 
 

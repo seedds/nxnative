@@ -416,6 +416,11 @@ void dm_aot_profile_thread_end(void);      // aot_thread.c: the calling thread's
 // under fpcr1 (other0 / other1: another FPCR than the packs'). The writer logs each thread's runs, their CPU time and the part spent under another FPCR (design 7.1)
 uint64_t dm_aot_profile_cpu_ns(void);
 void dm_aot_profile_jit_run(uint64_t cpu0, uint32_t fpcr0, uint32_t fpcr1, int other0, int other1);
+// The miss (pc, reason) that begins this thread's JIT continuation (aot_run.c run_jit, a run with a reason): every later run of the thread counts for it until the
+// next miss, a run going on after compiled code the JIT called returned into it included. The writer logs the 80 heaviest as `aot: profile: JIT time from
+// <module>+<offset> (<miss word>, thread '<the first thread's name>'): <runs> runs, <s> s`, then a line for the rest: the JIT fallback's share by its cause
+// (dm/tools/aot/README.md, "Static cases of a br left to the dispatcher")
+void dm_aot_profile_jit_origin(uint64_t pc, uint32_t reason);
 int dm_aot_profile_write(void);            // the files now, sampling stopped (once: later calls and the atexit writer do nothing); 0 when written
 // The sampler's lookups (aot_arena.c): async-signal-safe (no lock, no allocation: a pack's tables are complete before it is published and never change)
 int dm_aot_pack_count(void);

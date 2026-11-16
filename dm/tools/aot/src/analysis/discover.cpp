@@ -88,6 +88,9 @@ public:
             if (timed(tm.sources, [&] { return CutNoreturn(); })) continue;
             if (timed(tm.tables, [&] { return Tables([this](uint64_t pc) { return EffectOf(pc); }); })) continue;
             if (timed(tm.sources, [&] { return Gaps(); })) continue;
+            // Every source is exhausted: the guarded cases the functions' own code shows for their brs left to the dispatcher, last, so that they see
+            // every table, case and summary the other sources gave (and the guesses that made a function worse are withdrawn here)
+            if (timed(tm.tables, [&] { return Guesses(); })) continue;
             break;
         }
         // The jump tables' tries and regions, and the queues of the rounds, are not read again: freed before the last summaries (README.md,
@@ -106,7 +109,7 @@ public:
             pool->For(all.size(), [&](size_t k) { FindWindows(img, *all[k]); }, 64);
             return true;
         });
-        timed(tm.finish, [&] { Names(); Cover(); Oracle(); MissReport(); return true; });
+        timed(tm.finish, [&] { Names(); Cover(); Oracle(); MissReport(); GuessReport(); return true; });
         NoteMemory("the end of discovery");
         memory::Rss("the end of discovery (before its working tables are freed)");
         cache->KeepEffects();  // the summaries are done: the plan reads the instructions' effects only
@@ -425,6 +428,8 @@ private:
                         for (const uint64_t target : t->second.targets) branch_to(target);
                     } else if (const auto bound = BoundStub(pc)) {
                         wout.pending.emplace_back(*bound, kProvTail);  // a PLT stub the loader binds to this module's own function
+                    } else if (const auto g = f.guesses.find(pc); g != f.guesses.end()) {
+                        for (const uint64_t target : g->second) branch_to(target);  // its guarded cases (Guesses): the br stays an exit
                     }
                     break;
                 default:
@@ -522,6 +527,10 @@ private:
         for (const auto& [start, to] : f.out) w.insert(w.end(), {start, to});   // and the continuations out of the function
         w.push_back(~0ull);
         w.insert(w.end(), f.cases.begin(), f.cases.end());                       // and its cases
+        for (const auto& [br, targets] : f.guesses) {                            // and its guesses
+            w.insert(w.end(), {~1ull, br});
+            w.insert(w.end(), targets.begin(), targets.end());
+        }
         llvm::SHA256 sha;
         sha.update(llvm::ArrayRef<uint8_t>(reinterpret_cast<const uint8_t*>(w.data()), w.size() * sizeof(uint64_t)));
         return sha.final();
@@ -586,9 +595,16 @@ private:
             } else {
                 b.term = Term::Indirect;
                 f.indirect[pc] = "not bounded yet";
-                // The function's cases (MissCases): edges of the br, which stays an exit through the dispatcher for any other target
+                // The function's cases (MissCases) and this br's guesses (Guesses): edges of the br, which stays an exit through the dispatcher for any
+                // other target
+                std::set<uint64_t> seen;
                 for (const uint64_t c : f.cases) {
-                    if (Inside(f, c)) b.succ.emplace_back(c, Edge::Table);
+                    if (Inside(f, c) && seen.insert(c).second) b.succ.emplace_back(c, Edge::Table);
+                }
+                if (const auto g = f.guesses.find(pc); g != f.guesses.end()) {
+                    for (const uint64_t c : g->second) {
+                        if (Inside(f, c) && !(fns.count(c) && c != f.entry) && seen.insert(c).second) b.succ.emplace_back(c, Edge::Table);
+                    }
                 }
             }
             break;
@@ -903,6 +919,196 @@ private:
         return e;
     }
 
+    // ---- Guarded cases from the function's own code (README.md, "Static cases of a br left to the dispatcher") ----
+    // A br discovery left to the dispatcher in a table idiom usually could not be bounded for one of two reasons the code itself answers: the table's base
+    // register is set before a loop and a call in the loop may change it by its summary (an open callee's, the union of the address-taken functions for a blr or
+    // a PLT stub), or no compare bounds the index (a ccmp chain, a bound in memory, a contract of the caller). For such a br the region is lifted once more with
+    // every call taken to keep what the calling convention says it keeps (x19..x29 and SP; AbiEffectOf), and an index nothing bounds is scanned from its lowest
+    // value while the entries land on instructions of the function (ResolveJumpTable's guess_refs). Its targets become guarded cases of that br alone: blocks of
+    // the function the walk follows from the br, Edge::Table edges, the br still an Indirect exit whose default is the dispatcher, lowered as the miss cases are
+    // (plan.cpp, one LLVM switch over them). A wrong candidate costs a compare and a block nothing takes; it cannot change what the br does, and it cannot close
+    // the function (the Indirect exit stays in its summary). What it can do is add paths to the summaries and the regions of the function's other brs: a
+    // function whose class gets worse (preserving to open, returning to noreturn) or that loses a table after its guesses gets them withdrawn, for good (the
+    // check below, when the next round's summaries are in)
+    std::optional<lift::CallEffect> AbiEffectOf(uint64_t call_pc) const {
+        const Insn& i = At(call_pc);
+        if (i.kind != Kind::BL && i.kind != Kind::BLR) return std::nullopt;
+        lift::CallEffect e;
+        e.x = 0x4007FFFFu;  // x0..x18 and x30: AAPCS64's caller-saved registers; x19..x29 and SP kept
+        e.v = 0xFFFFFFFFu;
+        e.sp = false;
+        e.nzcv = true;
+        if (i.kind == Kind::BL) {
+            const auto it = fns.find(i.target);
+            if (it != fns.end()) {
+                if (!it->second.summary.returns) return std::nullopt;   // no return path: nothing follows the call
+                e.x &= it->second.summary.writes.x | (1u << 30);       // and of those, what its summary says it may change
+                e.v &= it->second.summary.writes.v;
+            }
+        }
+        return e;
+    }
+
+    // The addresses the module's code names (adr, adrp + add, adrp + a load or store's unsigned offset), the targets of its relocations and its data symbols,
+    // sorted: where an object of its data starts, at which a guess's scan of a table stops
+    const std::vector<uint64_t>& DataRefs() {
+        if (data_refs_made) return data_refs;
+        data_refs_made = true;
+        uint64_t page[32];
+        uint32_t have = 0;
+        for (size_t k = 0; k < valid.size(); ++k) {
+            const uint64_t pc = img.text_off + 4 * k;
+            const uint32_t w = TextWord(k);
+            if (img.InData(pc) || !valid[k]) {
+                have = 0;
+                continue;
+            }
+            const unsigned rd = w & 31, rn = (w >> 5) & 31;
+            if ((w & 0x9F000000u) == 0x10000000u) {  // adr
+                data_refs.push_back(pc + static_cast<uint64_t>(SignExtend(((w >> 5) & 0x7FFFFu) << 2 | ((w >> 29) & 3), 21)));
+            } else if ((w & 0x9F000000u) == 0x90000000u) {  // adrp
+                page[rd] = (pc & ~0xFFFull) + static_cast<uint64_t>(SignExtend(((w >> 5) & 0x7FFFFu) << 2 | ((w >> 29) & 3), 21) << 12);
+                have |= 1u << rd;
+                continue;
+            } else if ((w & 0xFF800000u) == 0x91000000u && (have >> rn & 1)) {  // add xd, xn, #imm
+                data_refs.push_back(page[rn] + (((w >> 10) & 0xFFFu) << ((w >> 22) & 1 ? 12 : 0)));
+            } else if ((w & 0x3B000000u) == 0x39000000u && (have >> rn & 1)) {  // ldr / str (unsigned offset)
+                unsigned scale = w >> 30;
+                if ((w >> 26 & 1) && scale == 0 && (w >> 23 & 1)) scale = 4;   // a q register
+                data_refs.push_back(page[rn] + (static_cast<uint64_t>((w >> 10) & 0xFFFu) << scale));
+                if (w >> 22 & 1) have &= ~(1u << rd);   // a load writes rt
+                continue;
+            }
+            if (ClassifyWith(w, pc, [] { return true; }).Ends()) have = 0;
+            else have &= ~(1u << rd);
+        }
+        for (const auto& r : img.relocs) {
+            if (r.has_target) data_refs.push_back(r.target);
+        }
+        for (const auto& sym : img.symbols) {
+            if (sym.type == 1 /* STT_OBJECT */ && sym.Defined()) data_refs.push_back(sym.value);
+        }
+        std::sort(data_refs.begin(), data_refs.end());
+        data_refs.erase(std::unique(data_refs.begin(), data_refs.end()), data_refs.end());
+        return data_refs;
+    }
+
+    // Whether every table of the function still comes out of its regions with the guesses' edges in its CFG (as Verify derives a tentative one again): a
+    // guess that enters another table's region from outside it, or carries an index past that table's compare into it, would leave that table's br a
+    // switch whose default the analysis says is never taken while a path of the function's own compiled code now takes it. A table is kept once found
+    // (Tables tries only the brs left to the dispatcher), so the guesses' function is checked here, each of its tables derived again
+    bool TablesHold(Function& f) {
+        for (const auto& [br, jt] : f.tables) {
+            const auto valid = [&](uint64_t t) { return ValidTarget(f, t); };
+            const CallEffects calls = jt.across_calls ? CallEffects([this](uint64_t pc) { return EffectOf(pc); }) : CallEffects{};
+            const TableResult r = ResolveJumpTable(img, f, br, opts, valid, calls, false, &region_memo[f.entry]);
+            out.regions_lifted += r.regions;
+            out.regions_reused += r.reused;
+            const bool same = r.table && std::all_of(r.table->targets.begin(), r.table->targets.end(), [&](uint64_t t) {
+                                  return std::find(jt.targets.begin(), jt.targets.end(), t) != jt.targets.end();
+                              });
+            if (!same) return false;
+        }
+        return true;
+    }
+
+    bool Guesses() {
+        if (!opts.guess) return false;
+        // 1. A function whose guesses made it worse since they were made: its guesses withdrawn, and no more made for it. The summaries are this round's
+        // (every step before this one found nothing new since they ran)
+        bool changed = false;
+        for (auto it = guess_before.begin(); it != guess_before.end();) {
+            Function& f = fns.at(it->first);
+            const GuessBefore& b = it->second;
+            const bool worse = (b.preserving && !f.summary.preserving) || (b.returns && !f.summary.returns) || f.tables.size() < b.tables || !TablesHold(f);
+            if (worse) {
+                f.guesses.clear();
+                guess_refused.insert(f.entry);
+                dirty.insert(f.entry);
+                changed = true;
+                it = guess_before.erase(it);
+            } else {
+                ++it;
+            }
+        }
+        if (changed) return true;
+        // 2. Each br left to the dispatcher not tried since its function's walk last changed (a function's tries on the pool, as Tables makes them). A br is
+        // tried again after the walk took its guesses: an optimistic region leaves out the code only speculative roots reach, so a loop whose back edge lies in
+        // the cases shows its index at its first value alone (main+0x2eea24's x19 = 0); with the cases walked, the region sees the index they step. The
+        // candidates of every try join the br's guesses, which only grow
+        const std::vector<uint64_t>& refs = DataRefs();
+        struct Job {
+            Function* f;
+            RegionMemo* memo;
+            std::vector<uint64_t> brs;
+            std::vector<std::pair<uint64_t, std::vector<uint64_t>>> found;
+            uint64_t regions = 0, reused = 0;
+        };
+        std::vector<Job> jobs;
+        for (auto& [entry, f] : fns) {
+            if (f.indirect.empty() || guess_refused.count(entry)) continue;
+            Job j{&f, &region_memo[entry], {}, {}};
+            const uint64_t state = walk_state[entry].changes;
+            for (const auto& [br, why] : f.indirect) {
+                // A br whose target is a pointer read from memory (a function pointer, a vtable slot) or a constant (a PLT stub) is no table: not tried
+                if (why.rfind("a pointer loaded from", 0) == 0 || why.rfind("a constant", 0) == 0) continue;
+                const auto [at, fresh] = guess_tried.try_emplace({entry, br}, state);
+                if ((fresh || at->second != state) && !BoundStub(br)) {
+                    at->second = state;
+                    j.brs.push_back(br);
+                }
+            }
+            if (!j.brs.empty()) jobs.push_back(std::move(j));
+        }
+        if (jobs.empty()) return false;
+        pool->For(jobs.size(), [&](size_t k) {
+            Job& j = jobs[k];
+            const Function& f = *j.f;
+            // A candidate: an instruction of the function's own code (its range, the text, a word that decodes) that is no function's entry
+            const auto valid = [&](uint64_t t) { return TextCode(t) && t >= f.entry && t < f.limit && At(t).kind != Kind::Undefined && !fns.count(t); };
+            const CallEffects abi = [this](uint64_t pc) { return AbiEffectOf(pc); };
+            for (const uint64_t br : j.brs) {
+                // Optimistic first, as a tentative table is found (the code only speculative roots reach left out: the cases of a table not bounded yet,
+                // whose branches back into the table's loop leave its head with no dominator inside the function); then with every block
+                TableResult r = ResolveJumpTable(img, f, br, opts, valid, abi, true, j.memo, &refs);
+                if (!r.table && !f.spec_live.empty()) {
+                    const TableResult o = ResolveJumpTable(img, f, br, opts, valid, abi, false, j.memo, &refs);
+                    r.regions += o.regions;
+                    r.reused += o.reused;
+                    if (o.table) r.table = o.table;
+                }
+                j.regions += r.regions;
+                j.reused += r.reused;
+                if (r.table && !r.table->targets.empty()) {
+                    std::vector<uint64_t> t = r.table->targets;
+                    std::sort(t.begin(), t.end());
+                    t.erase(std::unique(t.begin(), t.end()), t.end());
+                    j.found.emplace_back(br, std::move(t));
+                }
+            }
+        }, 2, 1);
+        for (Job& j : jobs) {
+            out.regions_lifted += static_cast<unsigned>(j.regions);
+            out.regions_reused += j.reused;
+            if (j.found.empty()) continue;
+            Function& f = *j.f;
+            bool grew = false;
+            for (auto& [br, targets] : j.found) {
+                std::vector<uint64_t>& mine = f.guesses[br];
+                const size_t before = mine.size();
+                mine.insert(mine.end(), targets.begin(), targets.end());
+                std::sort(mine.begin(), mine.end());
+                mine.erase(std::unique(mine.begin(), mine.end()), mine.end());
+                grew |= mine.size() != before;
+            }
+            if (!grew) continue;
+            guess_before.emplace(f.entry, GuessBefore{f.summary.preserving, f.summary.returns, f.tables.size()});   // the class before its first guesses
+            dirty.insert(f.entry);
+            changed = true;
+        }
+        return changed;
+    }
+
     // ---- New entries from code: bl targets, tail calls, landing pads and table targets outside their function ----
     bool Pending() {
         bool added = false;
@@ -1085,6 +1291,25 @@ private:
         }
     }
 
+    // ---- The guesses' line (Guesses): how many brs and functions got guarded cases, and how many functions had theirs withdrawn ----
+    void GuessReport() {
+        size_t brs = 0, functions = 0, targets = 0;
+        for (const auto& [entry, f] : fns) {
+            size_t n = 0;
+            for (const auto& [br, t] : f.guesses) {
+                if (f.indirect.count(br)) {
+                    ++n;
+                    targets += t.size();
+                }
+            }
+            brs += n;
+            functions += n != 0;
+        }
+        out.guessed_brs = brs;
+        out.notes.push_back("aot: guessed cases: " + std::to_string(brs) + " brs left to the dispatcher in " + std::to_string(functions) + " functions, " +
+                            std::to_string(targets) + " targets; " + std::to_string(guess_refused.size()) + " functions' guesses withdrawn (they made the function worse)");
+    }
+
     // ---- What became of the misses (Discovery::misses, miss_resumes), and the summary line and the [RED] lines of the ones a pack cannot serve ----
     void MissReport() {
         if (opts.misses.empty()) return;
@@ -1189,6 +1414,15 @@ private:
     std::set<uint64_t> miss_decided;       // those MissCases placed
     std::set<uint64_t> miss_as_case;       // those it made cases
     std::set<uint64_t> miss_unplaced;      // those that are no code (reported)
+    struct GuessBefore {                   // a function's class and tables when its guesses were made (Guesses)
+        bool preserving = false, returns = false;
+        size_t tables = 0;
+    };
+    std::map<uint64_t, GuessBefore> guess_before;     // the functions with guesses, until they are withdrawn
+    std::set<uint64_t> guess_refused;                 // functions whose guesses made them worse: none again
+    std::map<std::pair<uint64_t, uint64_t>, uint64_t> guess_tried;  // (function, br) -> its function's walk state (WalkState::changes) at the last try
+    std::vector<uint64_t> data_refs;                  // DataRefs
+    bool data_refs_made = false;
     std::vector<uint64_t> summarised;      // the functions the last summaries cover, in address order: calls to those without a return path
     std::vector<uint8_t> summarised_returns;  // do not fall through (Returns)
 };
@@ -1281,7 +1515,8 @@ FunctionsBytes BytesOf(const std::map<uint64_t, Function>& functions) {
         for (const auto& [start, blk] : f.blocks) b.blocks += memory::Of(blk.succ);
         b.other += memory::Of(f.name) + memory::Of(f.roots) + memory::Of(f.speculative) + memory::Of(f.spec_live) + memory::Of(f.tentative) +
                    memory::Of(f.unverified) + memory::Of(f.calls) + memory::Of(f.tables) + memory::Of(f.pads) + memory::Of(f.indirect) + memory::Of(f.out) + memory::Of(f.cases) +
-                   memory::Of(f.windows);
+                   memory::Of(f.guesses) + memory::Of(f.windows);
+        for (const auto& [br, t] : f.guesses) b.other += memory::Of(t);
         for (const auto& [br, jt] : f.tables) b.other += memory::Of(jt.targets);
         for (const auto& [br, why] : f.indirect) b.other += memory::Of(why);
         for (const auto& w : f.windows) b.other += memory::Of(w.kind);

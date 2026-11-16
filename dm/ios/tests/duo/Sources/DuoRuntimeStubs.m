@@ -115,6 +115,7 @@ __thread _Atomic int dm_host_work;
 void dm_gfx_suspend(int on) { (void)on; }
 void dm_audio_suspend(int on) { (void)on; }
 void dm_audio_reset(void) {}
+void dm_audio_route_change(const char *why, int changed) { (void)why; (void)changed; }
 void dm_focus_set(int state) { (void)state; }
 void guest_clock_freeze_for(int reason, int on) { (void)reason; (void)on; }
 const char *front_ios_boot_message(void) { return NULL; }

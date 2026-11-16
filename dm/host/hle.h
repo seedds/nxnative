@@ -128,3 +128,4 @@ void dm_audio_reset(void);   // iOS media services reset: recreate the AudioUnit
 typedef struct { void *next; void *ptr; uint64_t cap, size, offset; } aout_buf;   // next, data, buffer_size, data_size, data_offset
 _Static_assert(sizeof(aout_buf) == 40 && offsetof(aout_buf, ptr) == 0x08 && offsetof(aout_buf, cap) == 0x10 && offsetof(aout_buf, size) == 0x18 && offsetof(aout_buf, offset) == 0x20,
                "nn::audio::AudioOutBuffer layout");
+void dm_audio_route_change(const char *why, int changed);   // iOS audio route change: restart the playing outputs on the new route when changed (hle_audio.c; the Mac follows its unit's CurrentDevice itself)

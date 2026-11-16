@@ -6,6 +6,7 @@
 #include <AudioToolbox/AudioToolbox.h>
 #include <TargetConditionals.h>
 #include <dispatch/dispatch.h>
+#include <sched.h>
 #include <stdatomic.h>
 #include <unistd.h>
 
@@ -29,6 +30,9 @@ typedef struct {
     int start_phase, reset_pending, mute;   // a reset during start replaces the unit after the call returns
     int closed;                             // Close returned while a start was in flight: that start's worker frees the output
     _Atomic int hold_device;               // callbacks output silence until the silent sink has joined
+    _Atomic int in_render;                 // 1 while au_render reads hold_device and pulls (seq_cst, against hold_quiesce): a holder knows no device pull is still in flight
+    uint64_t route_t, route_up;            // under g_aos_lock: a route change restarted the AudioUnit at route_t (au_route_restart), its start returned route_up ns later; the device is then the queue's only consumer
+    uint32_t dev;                          // Mac: the AudioDeviceID the unit plays on (au_buffer), so a CurrentDevice notification for the same device is no route change
     int backend;                       // BK_*: the running consumer. Start, Stop and the background suspend change it only under g_aos_lock and act on it rather than re-deriving it from state and g_suspended
     pthread_t null_th; _Atomic int null_run;
     dispatch_semaphore_t notify_sem;
@@ -167,24 +171,34 @@ static OSStatus au_render(void *ctx, AudioUnitRenderActionFlags *f, const AudioT
             atomic_store_explicit(&a->st_pending, 1, memory_order_release);
             a->st_fmin = ~0u; a->st_fmax = 0; a->st_qsum = a->st_count = 0; a->st_u0 = un; a->st_ub0 = ubb;
         } }
-    if (atomic_load_explicit(&a->hold_device, memory_order_acquire)) {
+    // in_render brackets the hold check and the pull (a store and a load, both seq_cst, against hold_quiesce's): either the holder sees this callback in flight and waits, or this callback sees the hold
+    atomic_store_explicit(&a->in_render, 1, memory_order_seq_cst);
+    if (atomic_load_explicit(&a->hold_device, memory_order_seq_cst)) {
         memset(bl->mBuffers[0].mData, 0, bl->mBuffers[0].mDataByteSize);
     } else {
         pull_device(a, bl->mBuffers[0].mData, bl->mBuffers[0].mDataByteSize);
         if (a->mute) memset(bl->mBuffers[0].mData, 0, bl->mBuffers[0].mDataByteSize);
     }
+    atomic_store_explicit(&a->in_render, 0, memory_order_release);
     return noErr;
+}
+// Hold the device (its callbacks output silence) and wait out a callback that read the hold before it was set: after this no device pull runs, so another consumer (the silent sink, Stop's
+// au_release_pending) may take the queue. A route restart lets the device pull from its first callback, with no handoff, so a start that a Stop or suspend cancels can call back meanwhile
+static void hold_quiesce(aout *a) {
+    atomic_store_explicit(&a->hold_device, 1, memory_order_seq_cst);
+    while (atomic_load_explicit(&a->in_render, memory_order_seq_cst)) sched_yield();
 }
 #if !TARGET_OS_IPHONE
 // Mac DefaultOutput's default 512 device frames can exceed the PCM a game has queued, producing zero-filled gaps.
 // Request about 5 ms of device frames, as front_ios.m asks of the iOS audio session; reapply on device or output-rate changes within the supported range.
 // DM_DBG_AU_FRAMES=N asks N frames instead (1024 = the iOS default, which reproduces the crackling)
-static void au_buffer(AudioUnit au, const char *why) {
+// Returns the device the unit plays on (kAudioObjectUnknown when it has none)
+static AudioDeviceID au_buffer(AudioUnit au, const char *why) {
     AudioDeviceID device = kAudioObjectUnknown; UInt32 sz = sizeof device;
-    if (AudioUnitGetProperty(au, kAudioOutputUnitProperty_CurrentDevice, kAudioUnitScope_Global, 0, &device, &sz) || device == kAudioObjectUnknown) return;
+    if (AudioUnitGetProperty(au, kAudioOutputUnitProperty_CurrentDevice, kAudioUnitScope_Global, 0, &device, &sz) || device == kAudioObjectUnknown) return kAudioObjectUnknown;
     AudioStreamBasicDescription df; sz = sizeof df;
     OSStatus st = AudioUnitGetProperty(au, kAudioUnitProperty_StreamFormat, kAudioUnitScope_Output, 0, &df, &sz);
-    if (st || !(df.mSampleRate > 0)) { LOG("[RED] audio device buffer: cannot read the output sample rate (status %d)", (int)st); return; }
+    if (st || !(df.mSampleRate > 0)) { LOG("[RED] audio device buffer: cannot read the output sample rate (status %d)", (int)st); return device; }
     const char *e = getenv("DM_DBG_AU_FRAMES");
     UInt32 fr = e ? (UInt32)atoi(e) : (UInt32)(df.mSampleRate / 200 + 0.5);
     AudioValueRange range; sz = sizeof range;
@@ -198,12 +212,17 @@ static void au_buffer(AudioUnit au, const char *why) {
     if (st || actual != fr) st = AudioUnitSetProperty(au, kAudioDevicePropertyBufferFrameSize, kAudioUnitScope_Global, 0, &fr, sizeof fr);
     if (!st) { sz = sizeof actual; st = AudioUnitGetProperty(au, kAudioDevicePropertyBufferFrameSize, kAudioUnitScope_Global, 0, &actual, &sz); }
     LOG("%saudio device buffer: %u frames at %.0f Hz%s (requested %u, status %d)", st ? "[RED] " : "", actual, df.mSampleRate, why ? why : "", fr, (int)st);
+    return device;
 }
+static void route_post(AudioUnit au, uint32_t dev, int changed, const char *why);
+// The DefaultOutput unit follows the system's default output device by itself and notifies CurrentDevice: that is the Mac's route change (route_post; the worker drops a notification for the device
+// the output already plays on, and restarts a unit that plays on only if it stops calling back: ROUTE_PROBE_MS). Runs on a Core Audio notification thread: nothing here stops or starts the unit
 static void au_device_changed(void *ctx, AudioUnit au, AudioUnitPropertyID id, AudioUnitScope scope, AudioUnitElement el) {
     (void)ctx;
-    if (el == 0 && ((id == kAudioOutputUnitProperty_CurrentDevice && scope == kAudioUnitScope_Global) ||
-                   (id == kAudioUnitProperty_StreamFormat && scope == kAudioUnitScope_Output)))
-        au_buffer(au, ", after output changed");
+    int device = id == kAudioOutputUnitProperty_CurrentDevice && scope == kAudioUnitScope_Global;
+    if (el != 0 || !(device || (id == kAudioUnitProperty_StreamFormat && scope == kAudioUnitScope_Output))) return;
+    AudioDeviceID dev = au_buffer(au, ", after output changed");
+    if (device && dev != kAudioObjectUnknown) route_post(au, dev, 1, NULL);
 }
 #endif
 static void au_dispose(AudioUnit au) {
@@ -236,7 +255,7 @@ static OSStatus au_create(aout *a) {
         OSStatus st = AudioUnitAddPropertyListener(a->au, props[i], au_device_changed, NULL);
         if (st) LOG("[RED] audio: cannot listen for output property %u (status %d)", (unsigned)props[i], (int)st);
     }
-    au_buffer(a->au, NULL);
+    a->dev = au_buffer(a->au, NULL);
 #endif
     OSStatus st = AudioUnitSetProperty(a->au, kAudioUnitProperty_StreamFormat, kAudioUnitScope_Input, 0, &f, sizeof f);
     if (!st) st = AudioUnitSetProperty(a->au, kAudioUnitProperty_SetRenderCallback, kAudioUnitScope_Input, 0, &cb, sizeof cb);
@@ -265,9 +284,10 @@ static void *null_sink(void *p) {
     return NULL;
 }
 // Backend changes; callers hold g_aos_lock. pull() takes no lock, so joining a sink under it cannot deadlock
-static void null_start(aout *a) { atomic_store_explicit(&a->hold_device, 1, memory_order_release); atomic_store_explicit(&a->null_run, 1, memory_order_release); pthread_create(&a->null_th, NULL, null_sink, a); a->backend = BK_NULL; }
+static void null_start(aout *a) { hold_quiesce(a); atomic_store_explicit(&a->null_run, 1, memory_order_release); pthread_create(&a->null_th, NULL, null_sink, a); a->backend = BK_NULL; }
 static void null_stop(aout *a) { atomic_store_explicit(&a->null_run, 0, memory_order_release); pthread_join(a->null_th, NULL); a->backend = BK_NONE; }
 static void au_halt(aout *a) {
+    if (a->route_t) { hold_quiesce(a); a->route_t = 0; }   // a route restart left the device pulling with no hold: a start this cancels may still call back
     if (a->start_phase == AU_STARTING) a->start_phase = AU_CANCELED;
     if (a->backend == BK_AU || a->start_phase == AU_WAIT_CALLBACK) {
         AudioOutputUnitStop(a->au);
@@ -311,11 +331,13 @@ static void au_start_device(void *p) {
         a->start_phase = AU_IDLE;
         if (a->reset_pending) au_replace(a);
     } else if (st) {
+        if (a->route_t) { a->route_t = 0; null_start(a); }   // a route restart had no silent sink running: it paces the game while the retries run
         if (!a->stalled) LOG("[RED] audio #%d: the AudioUnit did not start (status %d): the silent sink stands in, retrying", a->id, (int)st);
         a->start_phase = AU_IDLE; au_retry(a, now_ns());
     } else {
         a->wd_n = atomic_load_explicit(&a->cb_n, memory_order_relaxed);
         a->start_phase = AU_WAIT_CALLBACK; a->wd_t = now_ns();
+        if (a->route_t) a->route_up = a->wd_t - a->route_t;
     }
     pthread_mutex_unlock(&g_aos_lock);
 }
@@ -359,10 +381,24 @@ static void *au_watchdog(void *p) {
         uint64_t t = now_ns(), gap = t - last; last = t;
         for (int i = 0; i < AOMAX; i++) {
             aout *a = g_aos[i]; if (!a || !a->au) continue;
-            uint64_t n = atomic_load_explicit(&a->cb_n, memory_order_relaxed);
+            uint64_t n = atomic_load_explicit(&a->cb_n, memory_order_acquire);
+            if (a->route_t) {   // restarted for a route change (au_route_restart): the device pulls from its first callback and nothing else consumes the queue meanwhile
+                if (n != a->wd_n) {
+                    a->wd_n = n; a->wd_t = t;
+                    if (a->start_phase == AU_WAIT_CALLBACK) {   // its start returned and it calls back: the device plays, as after an ordinary handoff
+                        LOG("audio #%d: playing on the new route (the AudioUnit restarted %.0f ms after the route change)", a->id, a->route_up / 1e6);
+                        a->backend = BK_AU; a->start_phase = AU_IDLE; a->route_t = 0;
+                    }
+                } else if (gap > 4ull * WD_TICK_MS * 1000000) a->wd_t = t;
+                else if (t - a->wd_t > WD_STALL_MS * 1000000ull) {   // the fallback: no callback for as long as the watchdog allows a playing device, and the game must not wait longer for its buffers
+                    LOG("[RED] audio #%d: no device callback %.0f ms after the route change: the silent sink stands in until the AudioUnit calls back", a->id, (t - a->route_t) / 1e6);
+                    a->route_t = 0; null_start(a);   // the start goes on as an ordinary one: the handoff on its first callback, or a retry after 1 s
+                }
+                continue;
+            }
             if (a->start_phase == AU_WAIT_CALLBACK) {
                 if (n != a->wd_n) {
-                    null_stop(a);
+                    if (a->backend == BK_NULL) null_stop(a);
                     atomic_store_explicit(&a->hold_device, 0, memory_order_release);
                     if (a->stalled) LOG("audio #%d: AudioUnit restarted", a->id);
                     a->backend = BK_AU; a->start_phase = AU_IDLE; a->stalled = a->retry_ms = 0;
@@ -787,3 +823,101 @@ void dm_audio_reset(void) {
     LOG("audio outputs set up again after the media services reset");
     pthread_mutex_unlock(&g_aos_lock);
 }
+
+// Route changes: AirPods or headphones connecting or going, an override, a category change (iOS: AVAudioSessionRouteChangeNotification, front_ios.m calls dm_audio_route_change); the system's
+// default output device changing (Mac: the DefaultOutput unit's CurrentDevice listener). Before, nothing reacted: the device stopped calling back while the route switched, the watchdog stood the silent
+// sink in after 200-350 ms (the game's sound consumed unheard), retried the AudioUnit a second later, and the device played silence until the watchdog's next tick handed over (Persona 4 Golden on an
+// iPhone, AirPods connecting: "has not called back for 212 ms", 280 ms zero-padded in the 2000 callbacks after the restart).
+// Now each playing output's AudioUnit is stopped and started again at once on the new route, and its first callback plays the queue: no silent sink and no handoff tick, so nothing of the game's
+// sound is consumed unheard and the queue is as full as the game keeps it when the device resumes (the game waits for its buffers meanwhile, as it does while a device catches up). The stall state
+// and its back-off are cleared, so an output standing on the silent sink is retried on the new route at once. The watchdog stays the fallback: a restarted unit that has not called back after 200 ms
+// gets the silent sink as before. The work runs on a serial queue of its own, never on the notification's thread or under its locks. DM_AUDIO_ROUTE=0 only logs the change (the behaviour before)
+static int route_enabled(void) { const char *e = getenv("DM_AUDIO_ROUTE"); return !e || !*e || atoi(e) != 0; }
+// Under g_aos_lock: 1 when the output was restarted. An output that is stopped, suspended, or whose start is still in flight on the worker (it comes up on the new route) is left as it is
+static int au_route_restart(aout *a, uint64_t t) {
+    if (!a->au || a->closed || g_suspended || atomic_load_explicit(&a->state, memory_order_acquire) != STATE_STARTED) return 0;
+    if (a->start_phase == AU_STARTING || a->start_phase == AU_CANCELED) return 0;
+    if (a->backend == BK_AU || a->start_phase == AU_WAIT_CALLBACK) AudioOutputUnitStop(a->au);
+    if (a->backend == BK_NULL) null_stop(a);
+    a->backend = BK_NONE; a->start_phase = AU_IDLE;
+    while (atomic_load_explicit(&a->in_render, memory_order_seq_cst)) sched_yield();   // a callback of the stopped unit still in flight finishes before the restarted one may pull
+    a->stalled = a->retry_ms = 0; a->retry_at = 0;
+    a->route_t = t; a->route_up = 0; a->wd_n = atomic_load_explicit(&a->cb_n, memory_order_acquire); a->wd_t = t;
+    atomic_store_explicit(&a->hold_device, 0, memory_order_release);   // the device is the only consumer from its first callback
+    au_request_start(a);
+    return 1;
+}
+typedef struct { AudioUnit au; uint32_t dev; int changed; char why[256]; } route_msg;   // au: the Mac unit that followed the default device to dev; NULL: iOS, every output
+#if !TARGET_OS_IPHONE
+// The kind of device (kAudioDevicePropertyTransportType), never its name, which the owner chooses
+static const char *transport(uint32_t dev, char *b, size_t n) {
+    UInt32 tt = 0, sz = sizeof tt; AudioObjectPropertyAddress pa = {kAudioDevicePropertyTransportType, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain};
+    if (dev == kAudioObjectUnknown) return "none";
+    if (AudioObjectGetPropertyData(dev, &pa, 0, NULL, &sz, &tt)) return "unknown";
+    switch (tt) {
+    case kAudioDeviceTransportTypeBuiltIn: return "built-in"; case kAudioDeviceTransportTypeUSB: return "USB";
+    case kAudioDeviceTransportTypeBluetooth: return "Bluetooth"; case kAudioDeviceTransportTypeBluetoothLE: return "Bluetooth LE";
+    case kAudioDeviceTransportTypeHDMI: return "HDMI"; case kAudioDeviceTransportTypeDisplayPort: return "DisplayPort";
+    case kAudioDeviceTransportTypeAirPlay: return "AirPlay"; case kAudioDeviceTransportTypeVirtual: return "virtual";
+    case kAudioDeviceTransportTypeAggregate: return "aggregate"; case kAudioDeviceTransportTypeThunderbolt: return "Thunderbolt";
+    default: snprintf(b, n, "'%c%c%c%c'", (char)(tt >> 24), (char)(tt >> 16), (char)(tt >> 8), (char)tt); return b;
+    }
+}
+#endif
+// Mac: the DefaultOutput unit has already moved to the new device by itself when it notifies CurrentDevice, and keeps playing there. Stopping and starting it again then only added a gap, and a
+// new device whose start blocks (HDMI, Bluetooth: issue #1030) let the 200 ms fallback consume the game's sound unheard. A unit playing on its device is watched this long first and restarted only
+// when it did not call back at least twice in that time (a Bluetooth device's 1024-frame buffer is about 21 ms)
+enum { ROUTE_PROBE_MS = 50 };
+static void route_work(void *p) {
+    route_msg *m = p; int on = route_enabled(), restarted = 0, followed = 0, id = -1, susp; uint32_t old = 0; aout *probe = NULL; uint64_t n0 = 0;
+    pthread_mutex_lock(&g_aos_lock);
+    uint64_t t = now_ns(); susp = g_suspended;
+    for (int i = 0; i < AOMAX; i++) {
+        aout *a = g_aos[i]; if (!a || !a->au || (m->au && a->au != m->au)) continue;
+        if (m->au) {
+            if (a->dev == m->dev) break;   // the same device: no route change
+            old = a->dev; a->dev = m->dev; id = a->id;
+            if (m->changed && on && a->backend == BK_AU && a->start_phase == AU_IDLE && !a->route_t) { probe = a; n0 = atomic_load_explicit(&a->cb_n, memory_order_acquire); break; }
+        }
+        if (m->changed && on) restarted += au_route_restart(a, t);
+    }
+    pthread_mutex_unlock(&g_aos_lock);
+    if (probe) {   // on this serial queue only, never under g_aos_lock
+        usleep(ROUTE_PROBE_MS * 1000);
+        pthread_mutex_lock(&g_aos_lock);
+        for (int i = 0; i < AOMAX; i++) if (g_aos[i] == probe && probe->au == m->au) {   // still open: Close unregisters an output under the lock before it frees it
+            if (atomic_load_explicit(&probe->cb_n, memory_order_acquire) - n0 >= 2 && probe->backend == BK_AU && !probe->route_t) followed = 1;
+            else restarted += au_route_restart(probe, now_ns());
+        }
+        susp = g_suspended;
+        pthread_mutex_unlock(&g_aos_lock);
+    }
+    const char *what = !m->changed ? "the output is unchanged: nothing restarted" : !on ? "DM_AUDIO_ROUTE=0: left to the watchdog" :
+                       followed ? "the unit followed the new device and plays on: nothing restarted" :
+                       restarted ? "restarted on the new route" : susp ? "outputs suspended: they start on the new route on resume" : "nothing playing to restart";
+    (void)id; (void)old;   // the Mac's line only
+#if !TARGET_OS_IPHONE
+    if (m->au) {
+        char ob[8], nb[8];
+        if (id >= 0) LOG("audio #%d route change (default output device): %s -> %s (device %u -> %u): %s", id, transport(old, ob, sizeof ob), transport(m->dev, nb, sizeof nb),
+                         (unsigned)old, (unsigned)m->dev, what);
+        free(m); return;
+    }
+#endif
+    if (restarted) LOG("audio route change (%s): %d playing output%s %s", m->why, restarted, restarted == 1 ? "" : "s", what);
+    else LOG("audio route change (%s): %s", m->why, what);
+    free(m);
+}
+static void route_q_init(void *q) { *(dispatch_queue_t *)q = dispatch_queue_create("dm.audio.route", DISPATCH_QUEUE_SERIAL); }
+static dispatch_queue_t route_queue(void) {   // serial: changes are handled in the order they came (the unit tests drain it with dispatch_sync_f)
+    static dispatch_once_t once; static dispatch_queue_t q;
+    dispatch_once_f(&once, &q, route_q_init);
+    return q;
+}
+static void route_post(AudioUnit au, uint32_t dev, int changed, const char *why) {
+    route_msg *m = calloc(1, sizeof *m); if (!m) return;
+    m->au = au; m->dev = dev; m->changed = changed; snprintf(m->why, sizeof m->why, "%s", why ? why : "");
+    dispatch_async_f(route_queue(), m, route_work);
+}
+// The front end's route change: why says the reason and the old and new outputs (port types, not the names their owner gave them); changed is 0 when the outputs are the same ones
+void dm_audio_route_change(const char *why, int changed) { route_post(NULL, 0, changed, why); }

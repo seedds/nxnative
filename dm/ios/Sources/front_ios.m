@@ -526,6 +526,26 @@ static void front_ios_audio_watch(void) {
         (void)n; LOG("audio session: the media services were reset; setting the session and the outputs up again");
         front_ios_audio_session(); dm_audio_reset();
     }];
+    // Route changes (AirPods or headphones connecting or going, an override, a category change): the host restarts its playing outputs on the new route at once instead of waiting for its
+    // watchdog (dm_audio_route_change, hle_audio.c, which logs the one line). Handled on the posting thread, not the main queue: the host only queues the work. The outputs are compared by port
+    // type and UID; the line names port types, the session's sample rate and I/O buffer, never a port's name (the owner chooses it: "…'s AirPods")
+    [nc addObserverForName:AVAudioSessionRouteChangeNotification object:nil queue:nil usingBlock:^(NSNotification *n) {
+        AVAudioSessionRouteChangeReason why = (AVAudioSessionRouteChangeReason)[n.userInfo[AVAudioSessionRouteChangeReasonKey] unsignedIntegerValue];
+        AVAudioSessionRouteDescription *was = n.userInfo[AVAudioSessionRouteChangePreviousRouteKey];
+        AVAudioSession *s = AVAudioSession.sharedInstance; AVAudioSessionRouteDescription *now = s.currentRoute;
+        NSString *(^ports)(AVAudioSessionRouteDescription *, BOOL) = ^NSString *(AVAudioSessionRouteDescription *r, BOOL uid) {
+            NSMutableArray *a = [NSMutableArray array];
+            for (AVAudioSessionPortDescription *p in r.outputs) [a addObject:uid ? [NSString stringWithFormat:@"%@/%@", p.portType, p.UID] : p.portType];
+            return a.count ? [a componentsJoinedByString:@"+"] : @"none";
+        };
+        const char *r = why == AVAudioSessionRouteChangeReasonNewDeviceAvailable ? "new device available" : why == AVAudioSessionRouteChangeReasonOldDeviceUnavailable ? "old device unavailable" :
+                        why == AVAudioSessionRouteChangeReasonCategoryChange ? "category change" : why == AVAudioSessionRouteChangeReasonOverride ? "override" :
+                        why == AVAudioSessionRouteChangeReasonWakeFromSleep ? "wake from sleep" : why == AVAudioSessionRouteChangeReasonNoSuitableRouteForCategory ? "no suitable route for the category" :
+                        why == AVAudioSessionRouteChangeReasonRouteConfigurationChange ? "route configuration change" : "unknown reason";
+        char d[256];
+        snprintf(d, sizeof d, "%s: %s -> %s, %.0f Hz, I/O buffer %.2f ms", r, ports(was, NO).UTF8String, ports(now, NO).UTF8String, s.sampleRate, s.IOBufferDuration * 1000);
+        dm_audio_route_change(d, !was || ![ports(was, YES) isEqualToString:ports(now, YES)]);
+    }];
 }
 
 // Scene lifecycle (called by SceneDelegate in main.m): 0 resign active, 1 enter background, 2 return to foreground, 3 become active. On entering background, freeze the guest clock and suspend after in-flight GPU work completes (submitting GPU work in background gets the process killed).

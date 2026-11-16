@@ -11,7 +11,7 @@
 # Writes, under the build folder (<folder of the .nup>/<title ID>_build unless --work-dir names another):
 #   extract/v<version>/ExeFS/   the version's code modules
 #   extract/v<version>/RomFS.img   its RomFS as one image (dm/tools/romfs_image.py), written straight from the container: the RomFS is never unpacked into loose files
-#   extract/v<version>/control.nacp, icon.jpg   the package's NACP and its icon, when it carries them (sips reads a PNG icon by its content)
+#   extract/v<version>/control.nacp, icon.jpg   the package's NACP and its icon, when it carries them (sips reads a PNG icon by its content); an update without an icon has its base game's
 #   extract/v<version>/romfs_programs/<index>.img   for an application of several programs (a Switch 2 Edition of a Switch 1 game), the RomFS of each program not packed, which the
 #                                       packed one mounts by program index (nn::fs::MountRom(name, index, ...), hle_fs.c); --program picks the program, default the highest index
 #   aoc/<index>.img   each DLC's RomFS (index = DLC title ID − the NACP's AddOnContentBaseId, else − base title ID − 0x1000), the host's DM_AOC_DIR
@@ -390,12 +390,19 @@ def app_package(n):   # the record that holds application metadata when no base 
     return next((k for k in n.packages if k.kind == BASE), n.packages[0])
 
 
-def control(k, out, fallback=None):   # the package's control data beside its ExeFS; what it lacks comes from fallback
+def icon_of(meta):   # a package's icon among its records: the icon, else the American English one of its localized icons, else the first of them
+    icons = localized(meta.get(T_LICONS, b''))
+    return meta.get(T_ICON) or pick(icons, 'en-US') or next(iter(icons.values()), None)
+
+
+def control(k, out, fallback=None, base=None):
+    """The package's control data beside its ExeFS; what it lacks comes from fallback. An update without an icon takes its base game's (base): the NSP script reads the base game's
+    control data in the folder the base is extracted to alone, and a build that packs only the update makes none (The Legend of Zelda: Ocarina of Time v131072: the app had no icon).
+    The NACP stays the package's own: its display version and languages are that version's"""
     meta = fallback.meta() if fallback is not None else {}
     meta.update(k.meta())
     nacp_bytes = meta.get(T_NACP)
-    icons = localized(meta.get(T_LICONS, b''))
-    icon = meta.get(T_ICON) or pick(icons, 'en-US') or next(iter(icons.values()), None)
+    icon = icon_of(meta) or (icon_of(base.meta()) if base is not None and base is not k else None)
     for name, data in (('control.nacp', nacp_bytes), ('icon.jpg', icon)):
         if data: (out / name).write_bytes(data)
         else: (out / name).unlink(missing_ok=True)
@@ -428,7 +435,7 @@ def pack_version(n, k, base, app, out, say=print, step=lambda s: None):
     for name, sd in others.items():
         say(f'program {name.removesuffix(".img")} of the application ({n.siblings[int(name.removesuffix(".img"))][0]:016X}): its RomFS → {PROGRAMS}/{name}')
         pack(n, sd, progs / name, say, step)
-    control(k, out, app_package(n) if base is None else None)
+    control(k, out, app_package(n) if base is None else None, base)
     return how
 
 

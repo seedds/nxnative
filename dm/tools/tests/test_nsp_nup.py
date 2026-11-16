@@ -439,6 +439,21 @@ class Pack(Base):
         self.assertIn('dir/base', romfs_image.read_index(self.out() / 'RomFS.img'))
         self.assertEqual((self.out() / 'ExeFS/main').read_bytes(), b'updated')
 
+    def test_update_without_an_icon_takes_its_base_games(self):   # a build may pack only the update: Ocarina of Time's NUP has the icon on its base record, and the Mac app had none
+        n = self.open(); app, base, vers, _ = pack_nup.scan(n)
+        u = self.out() / 'u'; pack_nup.pack_version(n, vers[VER], base, app, u, say=lambda s: None)
+        self.assertEqual((u / 'icon.jpg').read_bytes(), b'\xff\xd8 icon')
+        self.assertFalse((u / 'control.nacp').exists())   # the NACP stays the package's own: its display version and languages are that version's
+        self.assertEqual(nsp.app_icon(None, None, u, u), (u / 'icon.jpg', False))   # what the script reads when no folder holds the base game alone
+        licons = lambda d: b''.join(bytes([len(t)]) + t.encode() + struct.pack('<I', len(b)) + b for t, b in d.items())   # the localized icons record (SPEC 0x000A)
+        for base_meta, own, want in ((META, tlv([(pack_nup.T_ICON, b'new icon')]), b'new icon'),                                                  # the update's own icon stays
+                                     (tlv([(pack_nup.T_LICONS, licons({'ja': b'ja icon', 'en-US': b'en icon'}))]), b'', b'en icon'),                # the base game's localized icons
+                                     (b'', b'', None)):                                                                                             # none anywhere: none written, an earlier one goes
+            write_nup(self.path, [(0, TID, 0, version(), base_meta), (1, TID, VER, version(), own)])
+            n = self.open(); app, base, vers, _ = pack_nup.scan(n)
+            pack_nup.pack_version(n, vers[VER], base, app, u, say=lambda s: None)
+            self.assertEqual((u / 'icon.jpg').read_bytes() if (u / 'icon.jpg').exists() else None, want)
+
     def test_mismatched_program_ids_refused(self):
         write_nup(self.path, [(0, TID, 0, version(), b''), (1, TID, VER, version(tid=TID + 0x2000), b'')])
         with self.assertRaisesRegex(pack_nup.Error, 'different applications'): pack_nup.scan(self.open())

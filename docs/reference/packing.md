@@ -441,6 +441,14 @@
 - **Fix:** `languages_control` in `build_ipa_from_nsp.py` picks the file once (the packed version's, else the base game's), for the check, `mac_app` and `build_ipa.sh` (`CONTROL`). With no list, `settings.py` offers every language with a note, as `game_language` and `DM_LANG` already accept any. Age of Imprisonment shows a language it lacks as English (Russian, Portuguese) and has more text languages than its voice folders suggest (Dutch, Simplified Chinese), so a game's list cannot be read from its folders.
 - **Found on:** code reading and the NUP records of the two games above, with [PR #1182](https://github.com/seedds/nxnative/pull/1182); boots of [Age of Imprisonment](../../dm/games/04003F40232DE000/README.md) to its first settings screen. Not confirmed on Bananza by the reporters.
 
+### An app packed from a NUP's update has no icon
+
+- **Symptom:** the Mac app has the system's blank application icon (no `AppIcon.icns` in its `Contents/Resources`), though the NUP carries the game's icon.
+- **Cause:** the NUP has the icon on its base game's record and none on the update's. `pack_version` saved the packed package's own records only, and the NSP script looks for `icon.jpg` in the packed version's folder, then in the folder the base game is extracted to alone. A profile that builds from the update only makes no such folder, so the base game's icon was never written.
+- **Fix:** `pack_nup.control` gives an update without an icon its base game's (the icon record, else its localized icons, as for its own). The NACP stays the package's own, since its display version and languages are that version's.
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md) (v131072, a NUP whose base record has a 256x256 JPEG icon and whose update has none; the profile builds from the update alone): the Mac app had no icon. With the fix the update's records give that icon, and `pack_app.py`'s `make_icns` makes an `.icns` of it; the app was not packed again.
+- **Check:** `dm/tools/tests/test_nsp_nup.py` `test_update_without_an_icon_takes_its_base_games`.
+
 ### A Mac front end's default settings change Metal execution paths
 
 - **Symptom:** starting a Mac app through a front end with unchanged settings enables the encode thread, and can disable Metal 4 pipelines and the pipeline archive; starting the same app from Finder keeps the host's defaults.

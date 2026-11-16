@@ -1457,6 +1457,27 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **See also:** [Archive lookups asked every file](#archive-lookups-asked-every-file-so-a-few-files-made-a-start-compile-every-base-again), [Metal's archiver store filled by one flush period](#metals-archiver-store-filled-by-one-flush-period).
 - **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md), [Cuphead](../../dm/games/0100A5C00D162000/README.md).
 
+### A first start waits for the whole shader-pair prebuild before the first frame
+
+- **Symptom:** a first start with no usable pipeline archive (an app without a bundled archive for this GPU, or after a chain change, a new depth mode or a new pair list) shows "Preparing pipelines" for about 25 minutes on a MacBook Air: `pipeline prebuild done: 34649 pairs … 1340 s` in the log, after a 70 s prewarm.
+- **Cause:** `warm_start` calls the prebuild right after the prewarm whenever there is a prepare step, which is always in the app with a window. The prebuild compiles a pulling base for every known shader pair, about 25 a second on 8 workers, and archive writes hold every compile back while a period is serialized. 91 % of the first start is the prebuild, and the game needs few of those bases for its first minutes.
+- **Fix (opt-in; the defaults are unchanged):**
+  - `DM_PSO_PREBUILD_WHEN=after` starts the same prebuild in the background 5 s after the first frame (`pre_after_start`).
+    - It runs on 2 utility workers (`DM_PSO_PREBUILD_BG_THREADS`, `DM_PSO_PREBUILD_BG_QOS`), taking first the pairs whose shaders the prewarm lists saw.
+    - It pauses while the game waits for a pipeline, after a present more than 100 ms late, and while the thermal state is serious.
+  - `DM_PSO_SER_DRAW_WAIT_MS=<ms>` lets a draw's own compile wait at most that long for an archive write under way, then skip the draw for that frame instead of stalling the submit thread.
+  - `DM_NVN_PREDICT_WALK_MS=<ms>` time-boxes the prediction walk's checks (GitHub issue #2827).
+  - The background prebuild depends on a non-compiling call waiting for another thread's archive lookup ([PR #2770](https://github.com/seedds/nxnative/pull/2770)).
+- **Measured** (Ocarina of Time, `0400486024DEC000`, M2 MacBook Air 16 GB, cap 30, handheld 1440x810, fresh empty archive, a 22-min route; 2026-11-16):
+  - **Launch to gameplay:** 1,514 s before (today), 91 s with no prebuild, 90 s with `after`.
+  - **A second launch on the archive `after` built:** gameplay at 26 s.
+  - **Frames ≥ 45 ms, first 5 min:** 0.38 % before, 0.17 % with no prebuild, 0.23 % with `after`; at minutes 18–22: 0.17 / 0.01 / 0.10 %.
+  - **Cost:** the prebuild's compiles run in MTLCompilerService. It drew 3.8 W in the first 5 min and 1.1–1.4 W for the rest of the first hour, and the full prebuild ran 108 minutes of play.
+  - **GPU power limit:** in one run that started right after another, the GPU reached its power limit 4 minutes in. 5 % of frames ≥ 45 ms in the first 5 min, against 0.23 % from a cool start. The cause, the compiler's power or the heat left by the run before, is unconfirmed (open).
+  - **Same mechanism on an iPhone:** background compiles took an iPhone 17 Pro Max's GPU from about 13 to 15–18 ms a frame in Breath of the Wild ([The prebuild](../development.md#pipeline-bases-and-the-pipeline-archive)).
+- **Check:** `t_pso_prebuild_bg`: `before` unless the switch says `after`, the workers' pause and resume, and the pair order. `t_pso_ser_draw`: unset is off, the value's parsing, and a draw's compile that declines once per write and builds at its next draw.
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md).
+
 ### Captures still queued on the harvest queue left out of a waiting flush
 
 - **Symptom:** the NSP script's `[RED] prewarm pipelines: the host's prebuild tool failed (see …/logs/pso_prewarm_mac.log); the app is packed without them and builds them on its first start`, though the tool's log ends at `pipeline prebuild: N files (… MB) for the app to bundle in …` with 0 failed; the tool's crash report (`EXC_BREAKPOINT`) has the main thread in `mtl_arch_save` under `exit` → `__cxa_finalize_ranges`, and the crashing thread on `dm.nvn.pso-archive` in `localeconv_l` ← `strtod_l` ← `libllvm-flatbuffers` ← `-[_MTL4PipelineDataSetSerializer serializeAsPipelinesScriptWithError:]` ← `prewarm_script` ← `arch_write_file`. Not every build: one of two of the same inputs.

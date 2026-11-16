@@ -1,4 +1,4 @@
-"""MT Framework shader packages in synthetic ARC v7 archives."""
+"""MT Framework shader packages in synthetic ARC v7 and v9 archives."""
 from pathlib import Path
 import struct
 import sys
@@ -71,3 +71,39 @@ class MTFrameworkTests(unittest.TestCase):
         struct.pack_into('<I', data, 8 + 64 + 12, 8)
         with self.assertRaisesRegex(SystemExit, r'^\[RED\] fixture'):
             list(split.mtarc_members(data, 'fixture'))
+
+
+def headed_package(shaders, h=b'\xf2R\xa3c'):
+    # Resident Evil HD Remaster: each record is binding data of its own length, a 0x20-byte header, the control section, the code area.
+    package = bytearray(b'SPK\0' + h + bytes(24))
+    for i, (_, ctl, code) in enumerate(shaders):
+        package += bytes(8 + 4 * i) + struct.pack('<4s7I', h, len(ctl) + len(code), 0x10003, 4, 0, len(ctl), len(code), len(ctl)) + ctl + code
+    return bytes(package + bytes(20))
+
+
+def archive_v9(package):
+    # Every member is a zlib stream, the short one too; entries are 0x54 bytes with a u32 before the offset, the first member at 0x8000.
+    rows = [(b'misc', b'hello'), (b'sc\\NX_64\\root', package)]
+    table, data = bytearray(struct.pack('<4sHH', b'ARC\0', 9, len(rows))), bytearray()
+    for path, plain in rows:
+        stored = zlib.compress(plain)
+        table.extend(struct.pack('<64s5I', path, 0x02358e1a, len(stored), len(plain), 2, 0x8000 + len(data)))
+        data.extend(stored)
+    return bytes(table.ljust(0x8000, b'\0') + data)
+
+
+class MTFrameworkV9Tests(unittest.TestCase):
+    def test_v9_archive_and_headed_package(self):
+        shaders = [('vs', *shader('vs', 0x100)), ('ps', *shader('ps', 0x180)), ('vs', *shader('vs', 0x80))]
+        self.assertEqual([(p, len(m)) for p, m in split.mtarc_members(archive_v9(b'x'), 'fixture')][:1], [('misc', 5)])
+        found = []
+        split.mtarc_shaders(archive_v9(headed_package(shaders)), '/fixture.arc', found)
+        self.assertEqual([(stage, ctl, code) for _, stage, ctl, code in found], shaders)
+
+    def test_headed_package_rejects_a_control_without_its_header(self):
+        shaders = [('vs', *shader('vs', 0x100)), ('ps', *shader('ps', 0x100))]
+        package = bytearray(headed_package(shaders))
+        second = package.rfind(split.CTL_MAGIC)
+        package[second - 0x20:second - 0x1c] = b'nope'
+        with self.assertRaisesRegex(SystemExit, r'^\[RED\] fixture SPK: control section at .* without a shader header'):
+            split.mtspk_shaders(bytes(package), 'fixture')

@@ -317,7 +317,7 @@ void dm_fps_lock_tick(void) {
             if (!probe_file_started) {
                 FILE *pf = fopen("/tmp/re_movie_clock_probe.log", "w");
                 if (pf) {
-                    fprintf(pf, "[RE movie clock probe] FPS-lock tick reached; target=%d, movie_hz=%d\\n", target, movie_hz);
+                    fprintf(pf, "[RE movie clock probe] FPS-lock tick reached; target=%d, movie_hz=%d\n", target, movie_hz);
                     fclose(pf);
                     probe_file_started = 1;
                 }
@@ -339,7 +339,7 @@ void dm_fps_lock_tick(void) {
                     movie_hz, cap0, cap1, dt, dt1, dt2);
                 FILE *pf = fopen("/tmp/re_movie_clock_probe.log", "a");
                 if (pf) {
-                    fprintf(pf, "[RE movie clock probe] picture=%d Hz; MT limits=%g/%g; cMovie delta=%g, +5841c=%g, +58420=%g\\n",
+                    fprintf(pf, "[RE movie clock probe] picture=%d Hz; MT limits=%g/%g; cMovie delta=%g, +5841c=%g, +58420=%g\n",
                         movie_hz, cap0, cap1, dt, dt1, dt2);
                     fclose(pf);
                 }

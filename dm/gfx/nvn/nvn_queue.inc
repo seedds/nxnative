@@ -22,7 +22,7 @@ typedef struct nq_owned { struct nq_owned *next; unsigned kind; uint64_t data[];
 // submitted: guest ns of its nvnQueueSubmitCommands (mtl_sub_ready); sfirst / slast: the nodes being copied, not the replay's yet (nq_take_staged); open: a streamed submission
 // still being copied (its queue waits for its next node); stream, waits, kinds: how it is copied, whether it waits, its node kinds (DM_NVN_SUBTL)
 typedef struct nq_job { struct nq_job *next; nq_node *first, *last; nq_receipt *receipt; nq_owned *owned; nvn_hmap objects; uint64_t frame, submitted;
-    nq_node *sfirst, *slast; int open, stream, waits, nkinds; char kinds[64]; } nq_job;
+    nq_node *sfirst, *slast; int open, stream, waits, nkinds; char kinds[64]; nq_owned *mru; uint64_t mru_key[2]; } nq_job;   // mru: the object the last snapshot named (nq_snapshot_object)
 static void nq_job_free(nq_job *j) {
     for(nq_owned *o=j->owned,*next;o;o=next) { next=o->next; if(o->kind==CAP_K_PROG) mtl_prog_unpin((prog_t *)o->data); else if(o->kind==CAP_K_TEX) mtl_tex_unpin(((tex_t *)o->data)->serial); free(o); }
     free(j->objects.keys); free(j->objects.vals); free(j);
@@ -30,7 +30,9 @@ static void nq_job_free(nq_job *j) {
 static int nq_snapshot_address(void *ctx,uint64_t *field,uint64_t len,int writable) { (void)ctx;(void)field;(void)len;(void)writable;return 1; }
 static int nq_snapshot_object(void *ctx,int kind,uint64_t *field,uint8_t *payload,uint32_t size) {
     (void)payload;(void)size; nq_job *j=ctx; if(!*field || (kind!=CAP_K_PROG && kind!=CAP_K_TEX)) return 1;
-    uint64_t key[2]={*field,(unsigned)kind}; nq_owned *o=nvn_hm_get(&j->objects,key);
+    uint64_t key[2]={*field,(unsigned)kind};
+    if(j->mru && j->mru_key[0]==key[0] && j->mru_key[1]==key[1]) { *field=(uintptr_t)j->mru->data; return 1; }   // a program or texture named record after record: the table looked up once
+    nq_owned *o=nvn_hm_get(&j->objects,key);
     if(!o) {
         size_t bytes=kind==CAP_K_PROG?sizeof(prog_t):sizeof(tex_t); o=calloc(1,sizeof *o+bytes); if(!o) die("queue descriptor allocation failed");
         o->kind=kind; o->next=j->owned; j->owned=o;
@@ -38,6 +40,7 @@ static int nq_snapshot_object(void *ctx,int kind,uint64_t *field,uint8_t *payloa
         else { memcpy(o->data,(const void *)(uintptr_t)*field,bytes); mtl_tex_pin(((tex_t *)o->data)->serial); }
         nvn_hm_put(&j->objects,key,o);
     }
+    j->mru=o; j->mru_key[0]=key[0]; j->mru_key[1]=key[1];
     *field=(uintptr_t)o->data;return 1;
 }
 static const cap_ops nq_snapshot_ops={nq_snapshot_address,nq_snapshot_object};
@@ -220,7 +223,8 @@ static void nq_take_staged(nq_job *j,int all) {
     }
 }
 // The node grows geometrically: a frame's main submission copies a few hundred KB of records one at a time, and growing it by 4 KB reallocated (and often moved) it at every page
-static void nq_bytes(nq_node *n,const void *bytes,size_t length) { if(n->length+length>n->capacity) { size_t want=n->length+length,cap=2*n->capacity; if(cap<want) cap=want; n->capacity=(cap+4095)&~(size_t)4095; n->bytes=realloc(n->bytes,n->capacity); if(!n->bytes) die("queue commands allocation failed"); } memcpy(n->bytes+n->length,bytes,length); n->length+=length; } // NOLINT(bugprone-suspicious-realloc-usage): allocation failure aborts, so the old buffer cannot leak into a continuing process
+static uint8_t *nq_room(nq_node *n,size_t length) { if(n->length+length>n->capacity) { size_t want=n->length+length,cap=2*n->capacity; if(cap<want) cap=want; n->capacity=(cap+4095)&~(size_t)4095; n->bytes=realloc(n->bytes,n->capacity); if(!n->bytes) die("queue commands allocation failed"); } return n->bytes+n->length; }   // room for length more bytes at the node's end // NOLINT(bugprone-suspicious-realloc-usage): allocation failure aborts
+static void nq_bytes(nq_node *n,const void *bytes,size_t length) { memcpy(nq_room(n,length),bytes,length); n->length+=length; }
 static void nq_signal_add(nq_node *n,nq_signal s) {
     if(!(n->signal_count&(n->signal_count-1))) { n->signals=realloc(n->signals,(n->signal_count?2*n->signal_count:1)*sizeof *n->signals); if(!n->signals) die("queue signals allocation failed"); } // NOLINT(bugprone-suspicious-realloc-usage): allocation failure aborts
     n->signals[n->signal_count++]=s;
@@ -252,21 +256,52 @@ static void nq_record_one(nq_job *j,const uint8_t *p,op_hdr h) {
     }
 }
 // A compact record (nvn_obj.h OPC_*) goes into the job as the canonical records it stands for
-static void nq_record(nq_job *j,const uint8_t *p,op_hdr h) {
-    if(!rec_compact(h.op)) { nq_record_one(j,p,h); return; }
+static __attribute__((noinline)) void nq_record_slow(nq_job *j,const uint8_t *p) {
     uint8_t x[REC_EXPAND_MAX] __attribute__((aligned(8))); size_t n=rec_expand(p,x);
     for(size_t o=0;o<n;) { op_hdr c; memcpy(&c,x+o,8); nq_record_one(j,x+o,c); o+=c.size; }
+}
+// A compact record expands straight into the node (DM_NVN_Q_EXPAND, 1 by default, 0 through a stack copy record by record as before, ab alternates under DM_AB): its canonical records
+// are draws, binds, state, barriers, viewports and scissors, none of which cuts the job or signals, so only their object fields need a walk. The game's submitting thread copies a
+// frame's records here: in a Mario Kart World race at the 60 fps cap the copy was about 1 ms of that thread's CPU a frame (M3 Max), and each compact record went through a 4 KB stack
+// buffer and a second copy record by record
+__attribute__((weak)) int mtl_sw_mode(const char *name,int dflt); __attribute__((weak)) int mtl_sw_on(int m);   // nvn_mtl.m's switches (absent in the null-device tests: on)
+static int nq_expand_on(void) { static int m=-1; if(m<0) m=mtl_sw_mode ? mtl_sw_mode("DM_NVN_Q_EXPAND",1) : 1; return mtl_sw_on ? mtl_sw_on(m) : m==1; }
+static void nq_record(nq_job *j,const uint8_t *p,op_hdr h) {
+    if(!rec_compact(h.op)) { nq_record_one(j,p,h); return; }
+    if(!nq_expand_on()) { nq_record_slow(j,p); return; }
+    nq_node *n=j->slast; if(!n || n->kind!=NQ_COMMANDS || n->closed) n=nq_append(j,NQ_COMMANDS);
+    uint8_t *x=nq_room(n,REC_EXPAND_MAX); size_t m=rec_expand(p,x);
+    for(size_t o=0;o<m;) { op_hdr c; memcpy(&c,x+o,8);
+        if(c.op==OP_END || c.op==OP_JUMP || c.op==OP_CALL || c.op==OP_WAIT_EVENT || c.op==OP_WAIT_SYNC || c.op==OP_FENCE_SYNC || c.op==OP_SIGNAL_EVENT) { nq_record_slow(j,p); return; }   // none expands so: kept for a recorder that would
+        o+=c.size; }
+    for(size_t o=0;o<m;) { op_hdr c; memcpy(&c,x+o,8); if(!cap_rec_fields(c.op,x+o+8,c.size,&nq_snapshot_ops,j)) die("queue snapshot: unknown command %u",c.op); o+=c.size; }
+    n->length+=m;
 }
 // A handle is the recording's control list (nvn_obj.h ctl_e): its pieces of records, its links to more control memory. Calls were copied in when they were recorded.
 // A piece runs what its command memory holds at submit, as the GPU runs a command set's bytes: the records that fit in it (nvn_piece_record). A game may record over a called
 // recording before the list that calls it is submitted (docs/reference/nvn-objects.md, "A called recording recorded over before its caller is submitted")
+// A run of consecutive plain records (nq_plain) copied into the node at once, then walked in place for their object fields (DM_NVN_Q_EXPAND). An acceleration-structure build
+// is not plain: nq_record_one also copies the CPU arrays it points to (nq_as_snapshot)
+static int nq_plain(uint32_t op) { return !rec_compact(op) && op!=OP_END && op!=OP_JUMP && op!=OP_CALL && op!=OP_WAIT_EVENT && op!=OP_WAIT_SYNC && op!=OP_FENCE_SYNC && op!=OP_SIGNAL_EVENT && op!=OP_AS_BUILD; }
+static void nq_copy_run(nq_job *j,const uint8_t *p,size_t len) {
+    nq_node *n=j->slast; if(!n || n->kind!=NQ_COMMANDS || n->closed) n=nq_append(j,NQ_COMMANDS);
+    uint8_t *x=nq_room(n,len); memcpy(x,p,len);
+    for(size_t o=0;o<len;) { op_hdr c; memcpy(&c,x+o,8); if(!cap_rec_fields(c.op,x+o+8,c.size,&nq_snapshot_ops,j)) die("queue snapshot: unknown command %u",c.op); o+=c.size; }
+    n->length+=len;
+}
 static void nq_flatten(nq_job *j,const uint8_t *list) {
+    int runs=nq_expand_on();
     for(const uint8_t *e=list;;e+=8) {
         uint64_t v; memcpy(&v,e,8); unsigned k=ctl_kind(v);
         if(k==CTL_LINK) { e=ctl_addr(v)-8; continue; }
         if(k!=CTL_CHUNK) die("NVN command list %p: corrupt control entry %#llx at %p",(const void *)list,(unsigned long long)v,(const void *)e);
-        const uint8_t *p=ctl_addr(v),*pe=p+ctl_chunk_bytes(v); op_hdr h;
-        while(nvn_piece_record(list,v,p,pe,&h)) { nq_record(j,p,h); p+=h.size; }
+        const uint8_t *p=ctl_addr(v),*pe=p+ctl_chunk_bytes(v),*run=NULL; op_hdr h;
+        while(nvn_piece_record(list,v,p,pe,&h)) {
+            if(runs && nq_plain(h.op)) { if(!run) run=p; p+=h.size; continue; }
+            if(run) { nq_copy_run(j,run,(size_t)(p-run)); run=NULL; }
+            nq_record(j,p,h); p+=h.size;
+        }
+        if(run) nq_copy_run(j,run,(size_t)(p-run));
         if(v&CTL_LAST) return;
     }
 }

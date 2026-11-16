@@ -133,6 +133,39 @@ static void slices(id<MTLLibrary> lib) {
     CHECK("dynamic reflection splits merged pass",draw_samples_rt(p));
     g_exec_next=NULL; g_sm_plan.on=0;
 }
+// A draw into six layers of one level, a colour target per layer (fsp_plan): split into one draw per layer with one output each, every layer gets its own output.
+// Target i is layer 5 - i, so the layer each output goes to is the attachment's, not the output's number. A fragment that may discard keeps its targets and gives the same pixels
+static int faces_read(const tex_t *t) {   // layers holding anything but their output
+    id<MTLTexture> mt=tex_mtl(t);
+    id<MTLBuffer> out=[g_dev newBufferWithLength:6*256 options:MTLResourceStorageModeShared];
+    if(!out) return 0x3f;   // no buffer: every layer counts as wrong
+    id<MTLCommandBuffer> cb=[g_q commandBuffer]; id<MTLBlitCommandEncoder> e=[cb blitCommandEncoder];
+    for(int sl=0;sl<6;sl++) [e copyFromTexture:mt sourceSlice:sl sourceLevel:0 sourceOrigin:MTLOriginMake(0,0,0) sourceSize:MTLSizeMake(8,8,1) toBuffer:out destinationOffset:sl*256 destinationBytesPerRow:32 destinationBytesPerImage:256];
+    [e endEncoding]; [cb commit]; [cb waitUntilCompleted];
+    int bad=0; const uint8_t *bytes=out.contents;
+    for(int sl=0;sl<6;sl++) { int k=5-sl; uint8_t want[4]={(uint8_t)(51*k),(uint8_t)(255-51*k),255,255};
+        for(int i=0;i<64;i++) if(memcmp(bytes+sl*256+4*i,want,4)) { bad|=1<<sl; break; } }
+    return bad;
+}
+static void faces(id<MTLLibrary> lib) {
+    tex_t t=texture(NVN_TEXTURE_TARGET_2D_ARRAY,NVN_FORMAT_RGBA8,6);
+    prog_t pg={0}; NvProg *p=make_program(lib,&pg,"six");
+    p->sh[0]->fn=fn4_note(p->sh[0]->fn,lib,@"v",nil); p->sh[1]->fn=fn4_note(p->sh[1]->fn,lib,@"six",nil); p->sh[1]->rf.color_mask=0x3f;
+    chain c={0}; bind(&c,&pg,3);
+    p_set_rt r={.n=6}; for(int i=0;i<6;i++) { r.color[i]=&t; r.has_cview[i]=1; r.cview[i]=(view_t){.set_layers=1,.min_layer=5-i,.nlayers=1}; }
+    emit(&c,OP_SET_RT,&r,sizeof r); triangle(&c);
+    execute(&c);   // asks for the six pipelines, built in the background: this draw keeps its targets
+    for(int i=0;i<g_sm_amp_n;i++) for(int k=0;k<2000;k++) { os_unfair_lock_lock(&g_sm_amp_lock); int done=g_sm_amp[i].done; os_unfair_lock_unlock(&g_sm_amp_lock); if(done) break; usleep(1000); }
+    CHECK("six outputs land in their six layers before the split",!faces_read(&t));
+    const char *sw=getenv("DM_NVN_FACE_SPLIT"); int on=!(sw && !strcmp(sw,"0"));   // 0: the same pixels with every draw kept whole
+    c.n-=8; uint64_t before=g_fsp_npass; execute(&c);
+    CHECK("a draw into six layers of one level is split",g_fsp_npass-before==(uint64_t)on);
+    CHECK("each layer holds its own output after the split",!faces_read(&t));
+    p->sh[1]->rf.may_discard=1; c.n-=8; before=g_fsp_npass; execute(&c);
+    CHECK("a fragment that may discard keeps its targets",g_fsp_npass==before);
+    CHECK("and gives the same layers",!faces_read(&t));
+}
+
 static void hoists(id<MTLLibrary> lib) {
     prog_t pg={0}, cp={.serial=910000}; make_program(lib,&pg,"red");
     NvProg *cs=[NvProg new]; cs->sh[5]=[NvShader new]; cs->sh[5]->stage=5;
@@ -311,9 +344,11 @@ int main(int argc, char **argv) { @autoreleasepool {
     id<MTLLibrary> lib=[g_dev newLibraryWithSource:@"#include <metal_stdlib>\nusing namespace metal;\n"
         "vertex float4 v(uint i [[vertex_id]]) { float2 p[3]={float2(-1,-1),float2(3,-1),float2(-1,3)}; return float4(p[i],0,1); }\n"
         "fragment float4 red() { return float4(1,0,0,1); }\n"
+        "struct Six { float4 c0 [[color(0)]]; float4 c1 [[color(1)]]; float4 c2 [[color(2)]]; float4 c3 [[color(3)]]; float4 c4 [[color(4)]]; float4 c5 [[color(5)]]; };\n"
+        "fragment Six six() { Six o; o.c0=float4(0,1,1,1); o.c1=float4(0.2,0.8,1,1); o.c2=float4(0.4,0.6,1,1); o.c3=float4(0.6,0.4,1,1); o.c4=float4(0.8,0.2,1,1); o.c5=float4(1,0,1,1); return o; }\n"
         "struct Args { device uint *p [[id(0)]]; };\n"
         "kernel void compute_one(constant Args &a [[buffer(0)]]) { *a.p=73; }\n" options:nil error:&error];
     if(!lib) { fprintf(stderr,"%s\n",error.localizedDescription.UTF8String); return 2; }
-    slices(lib); hoists(lib); posts();
+    slices(lib); faces(lib); hoists(lib); posts();
     printf("performance ordering: %d checks, %d failed\n",checks,failed); return failed!=0;
 } }

@@ -5494,6 +5494,13 @@ static struct { int on, lo, hi; } g_sm_plan;   // set by draw() for the pass rp_
 static int g_sm_pass, g_sm_lo, g_sm_hi, g_sm_cur, g_sm_applied;   // the open pass is slice-merged: its attachment holds layers lo..hi; cur: the layer the game's target names now; applied: the offset set on the encoder (-1 none)
 static uint64_t g_sm_npass, g_sm_ncont, g_sm_nwait;   // slice-merged passes, layer switches taken into them, draws that left one because their pipeline was not built yet
 static int g_pso_amp;   // pso_get: the pipeline of a slice-merged pass (sm_amp_get)
+// Face-split draws (DM_NVN_FACE_SPLIT; see fsp_plan): the open pass holds one draw whose colour targets are layers of one texture level, attached once with all those layers. Target i is
+// layer g_fsp_layer[i] of it, drawn with g_fsp_ps[i] (nil: the draw leaves target i as it is)
+static struct { int on, n; uint32_t fmt; } g_fsp_plan;   // set by draw() for the pass rp_begin_ex is about to open: the draw qualifies and its pipelines are built
+static int g_fsp_pass, g_fsp_n; static uint8_t g_fsp_layer[8]; static __unsafe_unretained id<MTLRenderPipelineState> g_fsp_ps[8];
+static MTLLogicalToPhysicalColorAttachmentMap *g_fsp_map[8];   // colour output i to attachment 0, made once
+static uint64_t g_fsp_npass, g_fsp_nwait;   // face-split passes; draws that kept their targets because a pipeline was not built yet
+void mtl_fsp_stats(uint64_t *np, uint64_t *nw) { *np = g_fsp_npass; *nw = g_fsp_nwait; }
 void mtl_sm_stats(uint64_t *np, uint64_t *nc, uint64_t *nw) { *np = g_sm_npass; *nc = g_sm_ncont; *nw = g_sm_nwait; }
 static id<MTLRenderPipelineState> g_enc_pso; static id<MTLDepthStencilState> g_enc_dss;   // Already set on this encoder (not set again if identical)
 // Dynamic state already sent on the open render encoder: each draw used to send all nine (stencil reference, viewport, scissor, cull, winding, fill, depth bias, depth clip, blend colour);
@@ -5956,7 +5963,7 @@ static void rp_end_at(const char *fn, int line) { if (g_enc) { AP_B; geo_mesh_fl
     if (enc_label_on()) { static uint64_t lf = ~0ull, base; uint64_t f = atomic_load(&g_cur_frame); if (f != lf) { lf = f; base = g_stat_pass - 1; }   // Intra-frame serial: the same pass has the same name every frame, so the table can aggregate by name
         [(id)g_enc setLabel:[NSString stringWithFormat:@"p%02llu %dx%d %s d%d", (unsigned long long)(g_stat_pass - base), g_el_w, g_el_h, g_el_key[0] ? g_el_key : "-", g_el_draws]]; }
     sd_finish(); enc_r_end_pass(g_enc); g_gp_bw_l0 = g_bw_load; g_gp_bw_s0 = g_bw_store;   // the profile's per-pass ledger counts from the previous pass end, profiled or not
-    g_enc = nil; g_enc_geo_nocolor = 0; g_rt_merged = 0; g_sm_pass = 0; pg_end_render(); ts_after(); ms_after();
+    g_enc = nil; g_enc_geo_nocolor = 0; g_rt_merged = 0; g_sm_pass = 0; g_fsp_pass = 0; pg_end_render(); ts_after(); ms_after();
     if (g_nubd && g_nubd >= ubd_lazy()) ubd_flush();   // the inline updates deferred in this pass, in order (see mtl_sub_update); across passes they wait for the next copy or dispatch (blit_raw)
     if (g_nbcrt) bcrt_flush();   // blocks drawn into shadows go back into their compressed textures
     if (g_nrtm) rt_mirror_flush();
@@ -6153,7 +6160,7 @@ static void bare_dims(NSUInteger *w, NSUInteger *h);
 static id<MTL4RenderCommandEncoder> rp_begin_ex_(int clear_only) {
     if (g_enc) return g_enc;
     if (g_nlc) lc_take_rt();   // waiting lazy clears: this pass's load actions, or landed before it, so none waits past a pass that opens (see lc_take_rt)
-    g_enc_mode = clear_only; g_enc_geo_nocolor = g_geo_omit_colors; g_pass_swrite = g_pass_order = g_pass_late_res = 0; g_sm_pass = 0;
+    g_enc_mode = clear_only; g_enc_geo_nocolor = g_geo_omit_colors; g_pass_swrite = g_pass_order = g_pass_late_res = 0; g_sm_pass = 0; g_fsp_pass = 0;
     if (!R.has_rt) { RED_ONCE(3, "no render target set before the draw"); return nil; }
     if (g_imfit_npend) img_fit_upgrade();   // no pass is open here: the upgrade's copy may run (img_fit)
     rt_view_upgrade_all(clear_only);   // as above: before any slot is attached (rt_view_upgrade_all)
@@ -6173,6 +6180,23 @@ static id<MTL4RenderCommandEncoder> rp_begin_ex_(int clear_only) {
         pd.colorAttachments[i].storeAction = MTLStoreActionStore;
         rt_mirror_add(R.rt.color[i], pd.colorAttachments[i].texture, pd.colorAttachments[i].level,
                       pd.colorAttachments[i].texture.textureType == MTLTextureType3D ? pd.colorAttachments[i].depthPlane : pd.colorAttachments[i].slice, i);
+    }
+    if (g_fsp_plan.on && !clear_only && !g_geo_omit_colors && !R.rt.depth && !g_nrtm) {   // a face-split draw (see fsp_plan): its targets become the layers of one attachment
+        MTLRenderPassColorAttachmentDescriptor *c0 = pd.colorAttachments[0]; id<MTLTexture> t = c0.texture; int n = g_fsp_plan.n;
+        int ok = t && t.pixelFormat == (MTLPixelFormat)g_fsp_plan.fmt && t.textureType != MTLTextureType3D && !bcrt_is(t);
+        NSUInteger lo = NSUIntegerMax, hi = 0, sl[8];
+        for (int i = 0; i < n && ok; i++) { MTLRenderPassColorAttachmentDescriptor *c = pd.colorAttachments[i];
+            ok = c.texture == t && c.level == c0.level && c.loadAction == MTLLoadActionLoad; sl[i] = c.slice; lo = MIN(lo, sl[i]); hi = MAX(hi, sl[i]);
+            for (int j = 0; j < i && ok; j++) ok = sl[j] != sl[i]; }
+        for (int i = n; i < 8 && ok; i++) ok = !pd.colorAttachments[i].texture;
+        if (ok && hi - lo < 8) {
+            for (int i = 0; i < n; i++) g_fsp_layer[i] = (uint8_t)(sl[i] - lo);
+            for (int i = 1; i < n; i++) pd.colorAttachments[i] = nil;
+            c0.slice = lo; pd.renderTargetArrayLength = hi - lo + 1; pd.supportColorAttachmentMapping = YES;
+            g_fsp_pass = 1; g_fsp_n = n; g_fsp_npass++;
+            static int once; if (!once++) MLOG("face-split draw: a draw into %d layers of one texture level draws once per layer, one colour output each (first case pass %llu; DM_NVN_FACE_SPLIT)", n, g_stat_pass + 1);
+            PD("L %llu face-split pass: targets 0-%d are layers %lu-%lu of one attachment", g_stat_pass + 1, n - 1, (unsigned long)lo, (unsigned long)hi);
+        }
     }
     if (g_sm_plan.on && !clear_only && pd.colorAttachments[0].texture && !R.rt.depth) {   // slice-merged pass (see g_sm_plan): the attachment holds every layer the draws reach
         MTLRenderPassColorAttachmentDescriptor *c = pd.colorAttachments[0];
@@ -8930,6 +8954,8 @@ static char g_geo_mark;
 #define AMP_MARK ((const void *)&g_amp_mark)   // pso_key.fsfn of a slice-merged pass's pipeline (vertex amplification, sm_amp_get)
 #define TF_MARK ((const void *)&g_tf_mark)   // pso_key.fsfn of a transform feedback capture pipeline (tf_pso)
 #define DISCARD_MARK ((const void *)&g_discard_mark)   // vertex work still runs, without rasterization or a fragment stage
+static const char g_fsp_mark;
+#define FSP_MARK ((const void *)&g_fsp_mark)   // pso_key.fsfn of a face-split draw's pipeline: one colour output, amplified, its output where the encoder's colour map sends it (fsp_plan)
 static int pf_int_kind(MTLPixelFormat f);
 static const char *pso_fout_hint(NvShader *fs, const uint32_t cfmt[8], char *b, size_t n);
 // The class each colour target of this pipeline takes (bit n: target n unsigned, bit 8 + n: signed; a float or normalized one neither), over the outputs main0 declares, into *cls, and
@@ -9196,6 +9222,7 @@ static void lo_bind(id<MTLCommandEncoder> en) {
     enc_r_args((id<MTL4RenderCommandEncoder>)en, MTLRenderStageFragment, gpu, DMSH_LOGIC_BUFFER);
 }
 #define PSO_WHOLE @"built whole"   // pso_desc's label for pso_build_ex: no base, see there
+#define PSO_FACE @"built whole, colour map inherited"   // a face-split draw's pipeline (FSP_MARK): see pso_build_ex
 static MTLRenderPipelineDescriptor *pso_desc(const pso_key *k, NvShader *vs, NvShader *fs, id<MTLFunction> fsfn, int merged) {
     MTLRenderPipelineDescriptor *d = [MTLRenderPipelineDescriptor new];
     d.vertexFunction = vs && vs->mesh_kind != 2 ? vs->fn : nil; d.fragmentFunction = fsfn ? fsfn : fs ? fs->fn : nil;   // mtk_pso copies the raster state only: a mesh function is not a vertex function
@@ -9283,7 +9310,8 @@ static MTLRenderPipelineDescriptor *pso_desc(const pso_key *k, NvShader *vs, NvS
     d.depthAttachmentPixelFormat = (MTLPixelFormat)k->dfmt; d.stencilAttachmentPixelFormat = (MTLPixelFormat)k->sfmt;
     if (!vs) return d;   // a native mesh pipeline reuses only the fragment and attachment state
     if (vs->layer_out && k->fsfn != GEO_MARK) d.inputPrimitiveTopology = vs->geo_output == 1 ? MTLPrimitiveTopologyClassPoint : vs->geo_output == 6 ? MTLPrimitiveTopologyClassLine : MTLPrimitiveTopologyClassTriangle;
-    if (k->fsfn == AMP_MARK) d.maxVertexAmplificationCount = 2;   // a slice-merged pass's pipeline: the view mapping's layer offset applies (see g_sm_plan)
+    if (k->fsfn == AMP_MARK || k->fsfn == FSP_MARK) d.maxVertexAmplificationCount = 2;   // a slice-merged pass's or a face-split draw's pipeline: the view mapping's layer offset applies (see g_sm_plan, fsp_plan)
+    if (k->fsfn == FSP_MARK) d.label = PSO_FACE;
     if (k->fsfn == TF_MARK || k->fsfn == GEO_MARK) { d.vertexFunction = k->fsfn == GEO_MARK ? vs->geo_fn : vs->tf_fn; }   // transform feedback capture (tf_draw)
     if (k->fsfn == DISCARD_MARK) { d.vertexFunction = vs->discard_fn; }
     MTLVertexDescriptor *vd = [MTLVertexDescriptor vertexDescriptor];
@@ -10545,6 +10573,15 @@ static id<MTLRenderPipelineState> pso_build_ex(MTLRenderPipelineDescriptor *d, i
     }
     pso4_init();
     int rast = d.rasterizationEnabled;
+    // A face-split draw's pipeline (fsp_plan): built whole, so that the compiler drops the work of the colour outputs the pipeline has no attachment for (a specialization of a base keeps
+    // the base's code for all of them), and with its colour output going where the encoder's colour attachment map sends it, which only a Metal 4 descriptor can ask for. None otherwise
+    if (rast && [d.label isEqualToString:PSO_FACE]) {
+        MTL4RenderPipelineDescriptor *whole = g_comp4 ? pso_desc4(d, 0, off) : nil;
+        if (!whole) { if (compile && e) *e = [NSError errorWithDomain:@"nxnative.NVN.Pipeline" code:2 userInfo:@{NSLocalizedDescriptionKey: @"a colour-mapped pipeline needs the Metal 4 compiler and function descriptors"}]; return nil; }
+        if (!compile) return nil;
+        whole.colorAttachmentMappingState = MTL4LogicalToPhysicalColorAttachmentMappingStateInherited;
+        return [g_comp4 newRenderPipelineStateWithDescriptor:whole compilerTaskOptions:nil error:e];
+    }
     // A pipeline specialized from a base with open colour state gives its fragment function 0 for [[primitive_id]], where one built whole gives the real IDs (macOS 27.2, Apple M6: 4 triangles of a draw
     // counted per ID, 16384 0 0 0 against 4096 each, whatever the vertex function). So a fragment shader that reads the ID gets a whole pipeline, with no base to share. Fire Emblem Fortune's Weave's
     // ambient occlusion draws 4 triangles and writes the array layer of each one's primitive ID: every one wrote layer 0, so 3 pixels in 4 had no sun light. A platform limit: the ID has no other source
@@ -11180,8 +11217,9 @@ static const char *pso_fout_hint(NvShader *fs, const uint32_t cfmt[8], char *b, 
 }
 static __unsafe_unretained id<MTLRenderPipelineState> pso_get(NvProg *pr, MTLRenderPassDescriptor *unused) { AP_B; __unsafe_unretained id<MTLRenderPipelineState> r = pso_get_(pr, unused); AP_E(2); return r; }
 // The pipelines of slice-merged passes (g_sm_plan): the draw's pipeline built with maxVertexAmplificationCount 2, keyed with AMP_MARK. Built in the background on first use; until it is
-// there the draw gets nil and goes to a pass of its own (sm_plan does not merge, draw splits a merged pass), so no frame waits for the compiler. A failed build is not tried again
-enum { SM_AMP_MAX = 64 };
+// there the draw gets nil and goes to a pass of its own (sm_plan does not merge, draw splits a merged pass), so no frame waits for the compiler. A failed build is not tried again.
+// Face-split draws' pipelines (FSP_MARK, one per colour output: fsp_plan) are built and kept here the same way
+enum { SM_AMP_MAX = 128 };
 static struct { pso_key k; id<MTLRenderPipelineState> ps; int done; } g_sm_amp[SM_AMP_MAX]; static int g_sm_amp_n; static os_unfair_lock g_sm_amp_lock = OS_UNFAIR_LOCK_INIT;
 static __unsafe_unretained id<MTLRenderPipelineState> sm_amp_get(const pso_key *k, NvShader *vs, NvShader *fs) {
     __unsafe_unretained id<MTLRenderPipelineState> c = hm_get_id(&g_pso, k); if (c) return c;
@@ -11190,8 +11228,10 @@ static __unsafe_unretained id<MTLRenderPipelineState> sm_amp_get(const pso_key *
     if (g_sm_amp_n >= SM_AMP_MAX) { os_unfair_lock_unlock(&g_sm_amp_lock); return nil; }
     g_sm_amp[i].k = *k; g_sm_amp[i].ps = nil; g_sm_amp[i].done = 0; g_sm_amp_n++; os_unfair_lock_unlock(&g_sm_amp_lock);
     MTLRenderPipelineDescriptor *d = pso_desc(k, vs, fs, nil, 0); int off = !k->border;
+    int face = k->fsfn == FSP_MARK;
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{ NSError *e = nil; id<MTLRenderPipelineState> ps = pso_build(d, off, &e);
-        if (!ps) MLOG("[RED] slice-merged pass: no amplified pipeline for vertex %s fragment %s: %s (those passes stay apart)", vs->key, fs ? fs->key : "-", e.localizedDescription.UTF8String);
+        if (!ps) MLOG("[RED] %s: no amplified pipeline for vertex %s fragment %s: %s (%s)", face ? "face-split draw" : "slice-merged pass", vs->key, fs ? fs->key : "-", e.localizedDescription.UTF8String,
+                      face ? "those draws keep a target per layer" : "those passes stay apart");
         os_unfair_lock_lock(&g_sm_amp_lock); g_sm_amp[i].ps = ps; g_sm_amp[i].done = 1; os_unfair_lock_unlock(&g_sm_amp_lock); });
     return nil;
 }
@@ -13896,6 +13936,54 @@ static void sm_plan(NvProg *pr) {
     if (!ps) { g_sm_nwait++; return; }
     g_sm_plan.on = 1; g_sm_plan.lo = lo; g_sm_plan.hi = hi;
 }
+// Face-split draws (DM_NVN_FACE_SPLIT, on by default; 0 off, ab alternates with DM_AB). A full-screen draw whose colour targets are several layers of one texture level, a target per
+// layer, computes all of them in each fragment thread: Mario Kart World filters its reflection cube maps so (GearPassShader 4744589bb8f9f7dd, DrivePassShaderDefault 765844f5609bb11b), each
+// of the six outputs from its own face's direction with 32 cube samples, levels 64x64 down to 2x2, three chains a frame. A 64x64 level is 128 SIMD groups of 192 samples each, which the GPU
+// cannot keep enough of in flight. Drawn once per layer instead, each draw with a pipeline that has only that output (the compiler drops the others' work: pso_build_ex PSO_FACE) and
+// sends it to the one layered attachment (the encoder's colour attachment map) at its layer (the vertex amplification view mapping slice-merged passes use), the same samples run in six
+// times the threads. The pixels are the same: each output is the same function of the same inputs, written to the same texel. Only for a draw that cannot tell: a few vertices and one
+// instance, no blending, alpha to coverage, logic operation or alpha test, no depth or stencil target, no discard or sample mask, nothing written but its colour outputs (a storage or
+// image write would happen once per layer), every target written, no read of its own targets, and a texture whose layers the pass can attach together. The pass holds that one draw
+// (rp_begin_ex, then rp_end). docs/reference/rendering.md, "A draw into the six faces of a cube level at once ran short of threads"
+static void fsp_plan(NvProg *pr, const p_draw *dw, const p_draw_idx *di) {
+    g_fsp_plan.on = 0;
+    static int mode = -1; if (mode < 0) { mode = sw_mode("DM_NVN_FACE_SPLIT", 1); if (!mode) MLOG("DM_NVN_FACE_SPLIT=0: a draw into several layers of one texture level keeps a target per layer"); }
+    int n = 0; while (R.has_rt && n < R.rt.n && n < 8 && R.rt.color[n]) n++;   // the leading targets; none after them
+    if (!sw_on(mode) || !pr || !pr->sh[0] || !pr->sh[1] || pr->sh[2] || pr->sh[3] || pr->sh[4] || pr->sh[0]->layer_out || !R.has_rt || R.rt.depth || n < 4) return;
+    for (int i = n; i < R.rt.n && i < 8; i++) if (R.rt.color[i]) return;
+    if (S.rast_discard || S.tf_on || S.ms.a2c || S.color.blend_en || R.clear_d || R.clear_s || g_pso_lmap) return;
+    for (int i = 0; i < 8; i++) if (R.clear_c[i]) return;
+    if (dw ? dw->ind || dw->mdi_cnt || dw->base_instance || dw->count < 3 || dw->count > 6 || dw->instances > 1 || (dw->prim != 4 && dw->prim != 5)
+           : di->ind || di->mdi_cnt || di->count < 3 || di->count > 6 || di->instances > 1 || (di->prim != 4 && di->prim != 5)) return;
+    __unsafe_unretained NvShader *vs = pr->sh[0], *fs = pr->sh[1];
+    if (!fs->rf.color_known || fs->rf.may_discard || fs->rf.writes_smask) return;
+    for (int st = 0; st < 2; st++) for (int i = 0; i < pr->sh[st]->rf.nb; i++) if (pr->sh[st]->rf.b[i].rw) return;
+    for (int i = 1; i < n; i++) if (R.rt.color[i]->serial != R.rt.color[0]->serial) return;   // the views' formats: rp_begin_ex checks the attachments
+    if (draw_samples_rt(pr)) return;
+    id<MTLTexture> t = tex_mtl(R.rt.color[0]);
+    if (!t || t.sampleCount != 1 || mtl_fmt_block(t.pixelFormat) || mtl_fmt_depth(t.pixelFormat) || pf_int_kind(t.pixelFormat)
+        || (t.textureType != MTLTextureType2DArray && t.textureType != MTLTextureTypeCube && t.textureType != MTLTextureTypeCubeArray)) return;
+    pso4_init(); if (!g_comp4) return;   // the colour attachment map needs Metal 4 pipelines (pso_build_ex PSO_FACE)
+    if (!g_fsp_map[0]) for (int i = 0; i < 8; i++) { g_fsp_map[i] = [MTLLogicalToPhysicalColorAttachmentMap new]; [g_fsp_map[i] setPhysicalIndex:0 forLogicalIndex:(NSUInteger)i]; }
+    int wait = 0;
+    for (int i = 0; i < 8; i++) g_fsp_ps[i] = nil;
+    for (int i = 0; i < n; i++) if (!(fs->rf.color_mask >> i & 1) || !((S.chmask.mask >> (4 * i)) & 0xf)) return;   // every target written: the pass's store follows its one attachment's writes (sd_finish)
+    // The pipelines of the draw before, when its face 0 key is this one's: a face's key differs from face 0's only in where the format stands, so the others are the same too. A cube
+    // filter chain draws its levels with one program, and the six key fills and lookups a draw made were about 1 % of the replay thread in a Mario Kart World race (M3 Max)
+    static pso_key last; static int last_n; static __unsafe_unretained id<MTLRenderPipelineState> last_ps[8];
+    for (int i = 0; i < n; i++) {
+        uint32_t cf[8] = {0}; cf[i] = (uint32_t)t.pixelFormat;
+        pso_key k; pso_key_fill(&k, vs, fs, cf, 0, 0, 1, 0);
+        if (k.logic || k.atest) return;
+        k.fsfn = FSP_MARK;
+        if (!i && last_n == n && !memcmp(&k, &last, sizeof k)) { for (int q = 0; q < n; q++) g_fsp_ps[q] = last_ps[q]; break; }   // NOLINT(bugprone-suspicious-memory-comparison): pso_key_fill zeroes the whole key first
+        if (!i) last = k;
+        g_fsp_ps[i] = sm_amp_get(&k, vs, fs); wait |= !g_fsp_ps[i];
+    }
+    last_n = wait ? 0 : n; if (!wait) for (int q = 0; q < n; q++) last_ps[q] = g_fsp_ps[q];
+    if (wait) { g_fsp_nwait++; return; }   // built in the background (sm_amp_get): this draw keeps its targets
+    g_fsp_plan.on = 1; g_fsp_plan.n = n; g_fsp_plan.fmt = (uint32_t)t.pixelFormat;
+}
 // Experimental RT range candidate: only ignore positive nlevels differences not used by the actual render attachments; other fields stay word-for-word identical.
 static int tex_storage_overlap(const tex_t *a, const tex_t *b) {
     if (!a || !b) return 0;
@@ -14740,6 +14828,29 @@ static const wide_ent *wide_find(const p_draw_idx *di) {
     return NULL;
 }
 static void wide_take(const p_draw_idx *di) { if (g_wide_n < WIDE_MAX && !wide_find(di)) g_wide[g_wide_n++] = (wide_ent){di->ibuf, di->count, 0}; }
+// The face-split pass's draw (fsp_plan): once per target the draw writes, into its layer, with that target's pipeline
+static void fsp_encode(id<MTLRenderCommandEncoder> en, MTLPrimitiveType mp, const p_draw *dw, const p_draw_idx *di) {
+    uint64_t gpu = 0, il = 0; MTLIndexType ty = MTLIndexTypeUInt32;
+    if (di && di->itype == 0) {   // 8-bit indices, widened to 16 bits as draw does: on the GPU before the pass when written in this submission (wide_run), else here
+        const wide_ent *w = wide_wanted(di) ? wide_find(di) : NULL; ty = MTLIndexTypeUInt16; il = (uint64_t)di->count * 2;
+        if (w && w->gpu) gpu = w->gpu;
+        else { void *mb; uint64_t mo; const uint8_t *src;
+            if (!mtl_addr(di->ibuf, di->count, &mb, &mo) || !(src = [(__bridge id<MTLBuffer>)mb contents])) { RED_ONCE(22, "index buffer is in no memory pool"); return; }
+            id<MTLBuffer> ab; size_t off = arena_alloc(((size_t)di->count * 2 + 15) & ~(size_t)15, &ab);
+            uint16_t *d = (uint16_t *)((uint8_t *)ab.contents + off); src += mo;
+            for (int32_t i = 0; i < di->count; i++) d[i] = src[i];
+            gpu = g_cur_arena->gpu + off; }
+    } else if (di) { void *mb; uint64_t mo;
+        if (!mtl_gpu_addr(di->ibuf, (uint64_t)di->count * (di->itype == 1 ? 2 : 4), &mb, &mo, &gpu)) { RED_ONCE(22, "index buffer is in no memory pool"); return; }
+        il = ((__bridge id<MTLBuffer>)mb).length - mo; ty = di->itype == 1 ? MTLIndexTypeUInt16 : MTLIndexTypeUInt32; }
+    for (int i = 0; i < g_fsp_n; i++) { __unsafe_unretained id<MTLRenderPipelineState> ps = g_fsp_ps[i]; if (!ps) continue;
+        if (ps != g_enc_pso) { enc_r_pso(en, ps); g_enc_pso = ps; }
+        [(id<MTL4RenderCommandEncoder>)en setColorAttachmentMap:g_fsp_map[i]];
+        MTLVertexAmplificationViewMapping vm = {0, g_fsp_layer[i]}; [(id<MTL4RenderCommandEncoder>)en setVertexAmplificationCount:1 viewMappings:&vm];
+        if (di) enc_r_draw_indexed(en, mp, di->count, ty, gpu, il, 1, di->base_vertex, di->base_instance);
+        else enc_r_draw(en, mp, dw->first, dw->count);
+    }
+}
 static void wide_run(const p_draw_idx *di) {
     static id<MTLComputePipelineState> ps; static id<MTL4ArgumentTable> at; static int failed;
     if (failed) return;
@@ -15336,6 +15447,7 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) {
     }
     if (!g_geo_mesh.on) geo_mesh_flush_draw();   // another draw (a geometry draw decides in geo_mesh_draw): a waiting run of mesh draws goes first
     if (g_enc && g_enc_geo_nocolor != g_geo_omit_colors) rp_end();
+    if (g_enc && g_fsp_pass) rp_end();   // a face-split pass holds its one draw (fsp_plan)
     if (g_enc && !g_geo_program && !g_geo_mesh.on) pass_split_try();
     int mdx_on = (dw && dw->mdi_cnt) || (di && di->mdi_cnt) ? mdx_wanted(dw, di) : 0;   // an indirect-count multi-draw's record masked on the GPU (mdx_run), else read after a wait
     if (!mdx_on && ((di && di->mdi_cnt && !mdi_live(di->mdi_cnt, di->mdi_i)) || (dw && dw->mdi_cnt && !mdi_live(dw->mdi_cnt, dw->mdi_i)))) return;   // past the multi-draw's count
@@ -15392,9 +15504,10 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) {
     if (g_enc && g_sm_pass && draw_samples_rt(pr)) { PD("M %llu a draw in the slice-merged pass samples its attachment; split here", g_stat_pass); rp_end(); }
     if (g_enc && g_sm_pass && g_wl.on) { PD("M %llu a wide line in the slice-merged pass: split here", g_stat_pass); rp_end(); }   // its pipeline is not amplified (wl_pso)
     if (!g_enc && !g_rp_layered && g_exec_next && !g_geo_program && !g_wl.on && sm_on()) sm_plan(pr);
+    if (!g_enc && !g_rp_layered && !g_geo_program && !g_wl.on && !g_mtk.on && !g_geo_mesh.on) fsp_plan(pr, dw, di);
     vbuf_prepare(pr->sh[0] ? &pr->sh[0]->rf : NULL, dw, di);   // an unaligned GPU-written stream, or one the draw reads past, needs its ordered copy before the render encoder
     id<MTLRenderCommandEncoder> en = rp_begin_ex(0);
-    g_rp_layered = 0; g_sm_plan.on = 0;
+    g_rp_layered = 0; g_sm_plan.on = 0; g_fsp_plan.on = 0;
     if (!en) { PD("Z %llu draw skipped: the render pass did not begin vs=%.16s fs=%.16s", g_stat_pass, pr && pr->sh[0] ? pr->sh[0]->key : "-", pr && pr->sh[1] ? pr->sh[1]->key : "-"); return; }   // Z lines: why a draw was dropped at these early returns
     if ((g_fb_early_seq == g_draw_seq || g_fb_learn_seq == g_draw_seq) && !fb_early_after()) {   // planned a tile read for another pass than the one that opened: its snapshot, then the pass again
         rp_end(); g_fb_noearly = 1; fb_prepare(pr); g_fb_noearly = 0;
@@ -15411,6 +15524,7 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) {
     if (g_mtk.on) { cur_ps = mtk_pso(pr); cur_pull = 0; cur_pr = nil; if (!cur_ps) { g_mtk.miss = 1; return; } }   // a task / mesh draw (mesh_tasks_draw)
     else if (g_geo_mesh.on) { cur_ps = geo_mesh_pso(pr); cur_pull = 1; cur_pr = nil; if (!cur_ps) { g_geo_mesh.miss = 1; return; } }   // a mesh draw (geo_mesh_draw): pulls its streams; the next draw fetches its own pipeline; none yet: the compute path draws
     else if (g_wl.on) { cur_ps = wl_pso(pr); cur_pull = 1; cur_pr = nil; if (!cur_ps) { g_wl.miss = 1; return; } }   // a wide line drawn as quads (nvn_wline.inc): pulls its streams; the next draw fetches its own pipeline
+    else if (g_fsp_pass) { cur_ps = nil; for (int i = 0; i < g_fsp_n && !cur_ps; i++) cur_ps = g_fsp_ps[i]; cur_pull = 0; cur_pr = nil; g_pso_dirty = 1; }   // a face-split draw: its pipelines (fsp_encode); the next draw fetches its own
     else if (g_pso_dirty || pr != cur_pr || cur_ps_pass != g_pass.serial || border != cur_border) { g_pso_amp = g_sm_pass; cur_ps = pso_get(pr, nil); g_pso_amp = 0; cur_pull = g_pso_pull; cur_pr = pr; cur_ps_pass = g_pass.serial; cur_border = border; g_pso_dirty = !cur_ps || cur_pull; }
     if (!cur_ps && g_sm_pass) {   // a draw whose amplified pipeline is not built yet (sm_amp_get queued it): the slice-merged pass ends and the draw opens a pass of its own
         g_sm_nwait++; PD("M %llu slice-merged pass: no amplified pipeline yet for vertex %s fragment %s; split here", g_stat_pass, pr->sh[0] ? pr->sh[0]->key : "-", pr->sh[1] ? pr->sh[1]->key : "-");
@@ -15576,6 +15690,7 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) {
     g_kd_force = 0;
     udc_note_draw(pr, raster_mask);
     swrite_note(pr); order_note(pr);
+    if (g_fsp_pass) { fsp_encode(en, mp, dw, di); rp_end(); return; }
     if (g_mtk.on) { mtk_encode(en); return; }
     if (g_geo_mesh.on) { geo_mesh_encode(en); return; }
     if (g_wl.on) { wl_encode(en); return; }   // nvn_wline.inc: 6 vertices a segment
@@ -17279,7 +17394,7 @@ void mtl_exec(const uint8_t *p) {
                 // A scissored clear to 0 outside a pass with all channels (SMBW clears pyramid levels as sub-rectangles of 480×272 and other targets): copy from the zero buffer into the scissor rectangle in the replay stream
                 if (!g_enc && c->mask == 0xf && !c->rgba[0] && !c->rgba[1] && !c->rgba[2] && !c->rgba[3] && R.has_sc && c->index >= 0 && c->index < R.rt.n && R.rt.color[c->index]
                     && !scissor_full(R.rt.color[c->index], &R.rt.cview[c->index], R.rt.has_cview[c->index]) && clear_rect_zero(c->index)) break;
-                if (g_rt_merged || g_sm_pass) rp_end();   // A clear arrived in a continued render pass: end it here, and the clear is attached to the start of the next render pass as usual
+                if (g_rt_merged || g_sm_pass || g_fsp_pass) rp_end();   // A clear arrived in a continued render pass: end it here, and the clear is attached to the start of the next render pass as usual
                 if (c->index < 0 || c->index >= R.rt.n || !R.rt.color[c->index]) { RED_ONCE(5, "color clear target %d invalid", c->index); break; }
                 if (g_enc || c->mask != 0xf || !scissor_full(R.rt.color[c->index], &R.rt.cview[c->index], R.rt.has_cview[c->index])) {
                     // Inside a pass, with a partial mask or a partial scissor: drawn as a triangle (clear_color_tri)
@@ -17293,7 +17408,7 @@ void mtl_exec(const uint8_t *p) {
             case OP_CLEAR_DS: {
                 const p_clear_ds *c = a;
                 if (g_rc_skip) { PD("c %llu depth-stencil clear skipped by conditional rendering", g_stat_pass); break; }
-                if (g_rt_merged || g_sm_pass) rp_end();
+                if (g_rt_merged || g_sm_pass || g_fsp_pass) rp_end();
                 // A load-action clear covers the whole attachment and every stencil bit. A clear whose scissor does not cover the depth target, or whose stencil mask is partial, is drawn as a triangle
                 // (clear_ds_tri), in or before a pass: before the first draw and for a partial stencil mask in a pass it used to clear the whole target (PR #108)
                 unsigned sm = (unsigned)c->stencil_mask & 0xff;

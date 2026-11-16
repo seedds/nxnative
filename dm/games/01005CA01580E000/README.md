@@ -12,6 +12,7 @@ The base game (1.0.0, `v0`) is also playable: on 2026-11-12 a self-contained Mac
 |---|---|---|
 | `mem_reserve 0x100000000`, `mem_alias 0x10000000`, `mem_stack 0x10000000`, `app_pool 0xCD500000` | [`game.tsv`](game.tsv) | the NPDM declares no system resource; the game sets a heap in the existing 4 GB layout |
 | `mem_used 0x4c00000` | `game.tsv` | the rewritten modules require 76 MB, exceeding the default 64 MB deducted from the pool |
+| `depth_mode zero` | `game.tsv` | the game sets near = 0 with `nvnDeviceSetDepthMode` ("depth mode near=0 (as D3D / Metal)" in its log), so the pipeline archive made offline needs the `main0_z` vertex entries; without the key an iPhone log (NX18's) said "the game's depth mode is not the one built for" and the archive's bases were not used |
 | `pad_layout full` | `game.tsv` | movement and camera use both sticks |
 
 ## Rendering

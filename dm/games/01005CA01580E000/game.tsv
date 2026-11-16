@@ -35,6 +35,9 @@ sys_resource	0x0
 shader_groups	/CPK/=cpk /app_config/=appconfig
 shader_note	Persona 5 Royal shaders
 
+# The NVN depth mode the game sets: nvnDeviceSetDepthMode near = 0 ("depth mode near=0 (as D3D / Metal)" in its log). The pipeline archive made offline then holds the main0_z vertex entries (dm/gfx/tools/pso_offline.py); without the key it is built for near = -w and the host says "the game's depth mode is not the one built for" (an NX18 log)
+depth_mode	zero
+
 # ---- After the rewrite ----
 # The rewritten modules require 76 MB, more than the default 64 MB deducted from the pool.
 mem_used	0x4c00000

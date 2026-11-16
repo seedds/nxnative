@@ -4,6 +4,30 @@ The SDK's movie library (`movie::Decoder`, `movie::Extractor`), which the host t
 
 ## Decoder lifecycle
 
+### Audio decoder history survives a movie seek
+
+- **Symptom:** AAC samples after a seek or loop differ from a fresh decode of the same packets; the old position's overlap can contaminate the beginning of the new position.
+- **Cause:** `md_reset` cleared packet/output queues but kept AudioToolbox's AAC converter history. `AudioConverterReset` is required at a source discontinuity. Vorbis was reopened separately after releasing the decode lock, leaving a window in which a new packet could decode with old history before the reopen.
+- **Fix:** reset the AAC converter and clear its input pointer while `dmu` excludes packet decoding. If the converter cannot reset, dispose it and reopen from the configuration on the next packet. Close Vorbis in the same locked reset, rather than after it. Stop/destruction still close the codecs normally; packet times and playback buffering are unchanged.
+- **Check:** `t_movie_vpx.c` generates stereo and six-channel AAC with the system encoder. Replaying packet zero without a reset produces different PCM (negative control); after Flush, including repeated Flush, the original PCM and 1,024-sample frame count return exactly. Passed with AddressSanitizer and UBSan, alongside the Vorbis flush/window and VP8/VP9 checks. The encoder requires access to macOS's codec service.
+- **Found on:** focused regression during Mortal Kombat 11's movie audio investigation (`0100F2200C984000`). The saved game run had no audio-device underruns; the owner subsequently reported working playback. No quantitative steady-playback lip-sync or stutter benchmark was recorded.
+
+### Native texture buffers with zero capacity
+
+- **Symptom:** `[RED] movie: client buffer in native-texture mode is 0 bytes, needs 8 (a texture object)` and `movieStatus_ErrorBadValue`; opening logos or movies do not display.
+- **Cause:** the host required a byte capacity of at least eight even though native-texture output describes an opaque NVN object. The SDK's native consumer uses the buffer's pointer without checking its capacity. Mortal Kombat 11's `NX64Render_AsyncTexture::Internal_CreateRHI` (`main+0x1320df0`) explicitly calls `Buffer::SetDataAndCapacity(texture, 0)`; `InternalVideoDecode_ProcessOutput` passes a copy of that buffer to the decoder.
+- **Fix:** `md_out_tex` validates the data pointer and the NVN texture object through `nvn_host_write_texture`, without imposing a byte-buffer capacity. CPU byte-buffer output retains its capacity checks.
+- **Check:** `t_movie_avc` accepts native texture buffers of capacity zero (MK11) and eight (Dread), writes the decoded frame, and rejects null or invalid objects.
+- **Found on:** Mortal Kombat 11 (`0100F2200C984000`, v1703936, main build `4f7ab1a3eefc7eb20413936e8e37c2e9`), SDK 9, Apple M2 Mac.
+
+### Movie extractor allocations need the SDK graphics allocator
+
+- **Symptom:** `CRASH sig=11 addr=0 pc=sdk+0x40ca1c lr=subsdk0+0x32455c` after `StoryEndOfMovieCallback`, while opening another MP4.
+- **Cause:** the host took over `nv::SetGraphicsAllocator` and `nv::SetGraphicsDevtoolsAllocator` and only recorded the callbacks, which nothing in the host read. The SDK's setter is what installs the dispatch behind `NvOsAlloc`, `NvOsAllocAlign`, `NvOsRealloc` and `NvOsFree`, and the movie extractor still allocates through them: `MPEG4Extractor::parseChunk` allocates a 224-byte `SampleTable` through `android::HeapObject::operator new` → `NvOsAlloc`. With no allocator installed it used the SDK's 32 KB bootstrap heap and tried to grow it through `nn::os::AllocateMemoryBlock`, instead of the allocator the game supplied. That allocation returned null; `android::RefBase`'s constructor then stored its vtable through null.
+- **Fix:** [`dm/gfx/hle_nv.c`](../../dm/gfx/hle_nv.c) no longer takes over either setter: the game's call reaches the SDK's own, as on the console. In the sdk modules checked (3.7.0, 11.4.0, 14.3.0, and the Switch 2 SDKs 20.5.13, 20.5.29 and 21.4.3) it checks its arguments, aborts when called twice or after `nv::InitializeGraphics` (whose flag the host's take-over of that function never sets), and installs the NvOs dispatch; on Switch 2 it also calls `nn::gs::sdk::InitializeGraphicsAllocator`. Driver initialization and heap sizes are unchanged.
+- **Check:** Mega Man Legacy Collection (SDK 3.7.0) and Fast Fusion (Switch 2, SDK 20.5.13), whose `main` calls the setter, reach their frame loops through the SDK's own setter with the same log as before (Mac, 2026-11-16). Mario Golf: Super Rush, which never calls it, plays its VP9 opening movie as on main. Mortal Kombat 11's story transition was not rerun on this exact change; its contributor reported it working with the SDK setter called (2026-11-15).
+- **Found on:** Mortal Kombat 11 (`0100F2200C984000`), 1.0.26, SDK 9 (`sdk` build `d145f1048fc57e03685da0441d823ce4`).
+
 ### The SDK's hardware decoder opens nvdrv
 
 - **Symptom:** abort in NVIDIA's video path (`NvRmChannelOpen` → `NvOsDrvOpen`).

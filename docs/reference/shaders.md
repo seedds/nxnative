@@ -4,6 +4,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 
 ## Containers by engine
 
+### L.A. Noire WAD and VFP shader arrays
+
+- **Symptom:** the split finds only a few dozen shaders. The notebook pages render black, and game scenes have missing materials.
+- **Cause:** `out.wad.nx` has a span table and a name table. Its `.vfp.nx` members store the GLSLC headers, control sections and code in separate arrays.
+- **Fix:** the splitter maps the WAD and reads its VFP members by name. It validates member spans and section sizes, then passes the original control and code bytes to the existing shader checks. It supplies no vertex and pixel pairs because the WAD records do not establish that relation.
+- **Check:** `dm/gfx/tests/test_noire_shader.py` covers the shader map and rejects truncated directories and overlapping spans.
+- **Found on:** L.A. Noire 1.2 (`0100830004FB6000`).
+
 ### Firaxis CIVBSF shader libraries
 
 - **Symptom:** the shader split stops with no shaders in `main` or RomFS, and the host reports missing programs while presenting a black picture.

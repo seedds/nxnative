@@ -1097,6 +1097,14 @@ Games read this count as a position in their own command memory and size their h
 - **Fix:** all implemented NVN functions except the `nvnCommandBuffer*` recording calls run on the per-thread 512 KB host stack (`nvn_big_entry` in `nvn_entry.S`). The general mechanism (`dm_bigstack_enter`, which every `HLE_FORCE` take-over goes through): [Host calls on small guest stacks](memory.md#host-calls-on-small-guest-stacks).
 - **Found on:** [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md).
 
+### Leaf getters and setters switched to the big host stack
+
+- **Symptom:** in a Time Profiler trace of a game's threads at a frame cap, `dm_bigstack_enter_n` itself and its helpers (`dm_bigstack_top`, `dm_guest_as_contains`, `pthread_once`, `pthread_getspecific`) take a share of the threads' NVN calls, around getters and setters that do almost nothing.
+- **Cause:** every implemented NVN function except the `nvnCommandBuffer*` recording calls goes through the big-stack entry ([NVN entry points on the big host stack](#nvn-entry-points-on-the-big-host-stack)), including handle builders, buffer address getters and the setters of state objects and builders, which a game calls in the tens of thousands a frame: Mario Kart World makes about 17,000 a frame (`nvnDeviceGetTextureHandle` 5,000, `nvnChannelMaskStateSetChannelMask` 2,400, `nvnBufferGetAddress` 1,000, the blend, colour, depth-stencil, polygon state and texture view setters 300 to 900 each; `DM_NVN_COUNT=1` with `DM_NVN_TSV_CALLS=1`), each saving its registers, switching stacks and back.
+- **Fix:** in `hle_nvn.c` (`nvn_nops_register`), for every game. The leaf functions listed in `g_nvn_leaf` (59: handle builders, buffer and pool getters, buffer and texture builder setters, the state objects' setters and texture view setters, each of which only reads or writes a few fields) stay on the caller's stack; a line one of them logs goes to the big stack by itself (`dm_log`). A name in the list that is not an implemented function stops the start, as for the empty implementations. Functions that do work (pool and texture registration, object initialization, submission) stay on the big stack.
+- **Check:** the start line reads `308 of them on the large host stack` instead of 367. Time Profiler at Mario Kart World's 60 fps cap, handheld, 10 s each (M3 Max): the entry and its helpers went from 111 to 9 of the game threads' samples, about 0.17 ms of their CPU a frame; NVN calls from 13.3 to 12.2 % of those threads.
+- **Found on:** [Mario Kart World](../../dm/games/0400C3F00006E000/README.md), Mac.
+
 ### State read back through NVN getters
 
 - **Symptom:** red `NVN unimplemented function called` lines for `nvnColorStateGetBlendEnable`, `nvnBlendStateGetBlendFunc`, `nvnPolygonStateGetCullFace`, `nvnDepthStencilStateGetDepthTestEnable`, `nvnBufferBuilderGetSize`, `nvnTextureBuilderGetWidth`, ….

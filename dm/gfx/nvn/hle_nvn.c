@@ -1875,10 +1875,36 @@ __attribute__((constructor)) static void nvn_nops_register(void) {
         nvn_slot[i].fn = (void *)nvn_nop;
     }
     unsigned nnop = sizeof g_nops / sizeof *g_nops;
+    // Leaf getters and setters of handles, buffers and state objects (g_nvn_leaf) run on the caller's stack too: each only reads or writes a few fields (a line it logs goes to the big
+    // stack by itself, dm_log). Mario Kart World makes about 17,000 such calls a frame (texture handles, channel masks, blend and depth state, texture views), and the switch to the big
+    // stack and back took about 0.2 ms of its threads' CPU a frame at the 60 fps cap. A name that is not an implemented function stops the start, as for g_nops
+    static const char *const g_nvn_leaf[] = {
+        "nvnDeviceGetTextureHandle", "nvnDeviceGetImageHandle", "nvnDeviceGetSeparateTextureHandle", "nvnDeviceGetSeparateSamplerHandle",
+        "nvnBufferGetAddress", "nvnBufferMap", "nvnBufferGetSize", "nvnBufferFinalize", "nvnBufferBuilderSetDefaults", "nvnBufferBuilderSetDevice", "nvnBufferBuilderSetStorage",
+        "nvnMemoryPoolGetFlags", "nvnMemoryPoolInvalidateMappedRange", "nvnTextureGetFlags",
+        "nvnChannelMaskStateSetDefaults", "nvnChannelMaskStateSetChannelMask",
+        "nvnColorStateSetDefaults", "nvnColorStateSetBlendEnable", "nvnColorStateSetLogicOp", "nvnColorStateSetAlphaTest",
+        "nvnBlendStateSetDefaults", "nvnBlendStateSetBlendTarget", "nvnBlendStateSetBlendFunc", "nvnBlendStateSetBlendEquation",
+        "nvnDepthStencilStateSetDefaults", "nvnDepthStencilStateSetDepthTestEnable", "nvnDepthStencilStateSetDepthWriteEnable", "nvnDepthStencilStateSetDepthFunc",
+        "nvnDepthStencilStateSetStencilTestEnable", "nvnDepthStencilStateSetStencilFunc", "nvnDepthStencilStateSetStencilOp",
+        "nvnPolygonStateSetDefaults", "nvnPolygonStateSetCullFace", "nvnPolygonStateSetFrontFace", "nvnPolygonStateSetPolygonMode", "nvnPolygonStateSetPolygonOffsetEnables",
+        "nvnMultisampleStateSetDefaults", "nvnMultisampleStateSetMultisampleEnable", "nvnMultisampleStateSetSamples", "nvnMultisampleStateSetAlphaToCoverageEnable",
+        "nvnTextureViewSetDefaults", "nvnTextureViewSetLevels", "nvnTextureViewSetLayers", "nvnTextureViewSetTarget", "nvnTextureViewSetFormat", "nvnTextureViewSetSwizzle",
+        "nvnTextureViewSetDepthStencilMode",
+        "nvnTextureBuilderSetDefaults", "nvnTextureBuilderSetDevice", "nvnTextureBuilderSetFlags", "nvnTextureBuilderSetTarget", "nvnTextureBuilderSetWidth",
+        "nvnTextureBuilderSetHeight", "nvnTextureBuilderSetDepth", "nvnTextureBuilderSetLevels", "nvnTextureBuilderSetFormat", "nvnTextureBuilderSetSamples",
+        "nvnTextureBuilderSetSwizzle", "nvnTextureBuilderSetDepthStencilMode" };
+    static uint8_t leaf[NVN_NFUNC];
+    for (unsigned k = 0; k < sizeof g_nvn_leaf / sizeof *g_nvn_leaf; k++) {
+        unsigned i = 0;
+        while (i < NVN_NFUNC && strcmp(nvn_names[i], g_nvn_leaf[k])) i++;
+        if (i == NVN_NFUNC || nvn_slot[i].fn == (void *)nvn_unimpl_entry || nvn_slot[i].fn == (void *)nvn_nop) die("NVN %s is listed as a leaf (g_nvn_leaf) but is not an implemented function", g_nvn_leaf[k]);
+        leaf[i] = 1;
+    }
     // Implemented functions other than command recording (nvnCommandBuffer*, tens of thousands per frame, where the host only appends records) run on the big host stack: submit / present / object creation do Metal work, and a game thread's stack may be too small (see nvn_entry.S nvn_big_entry)
     unsigned nbig = 0;
     for (unsigned i = 0; i < NVN_NFUNC; i++)
-        if (nvn_slot[i].fn != (void *)nvn_unimpl_entry && nvn_slot[i].fn != (void *)nvn_nop && strncmp(nvn_names[i], "nvnCommandBuffer", 16)) {
+        if (nvn_slot[i].fn != (void *)nvn_unimpl_entry && nvn_slot[i].fn != (void *)nvn_nop && strncmp(nvn_names[i], "nvnCommandBuffer", 16) && !leaf[i]) {
             nvn_big_real[i] = nvn_slot[i].fn; nvn_slot[i].fn = (void *)nvn_big_entry; nbig++;
         }
     // DM_NVN_PROF=1: implemented functions (except unimplemented stubs and present: present includes the display-link wait and is counted separately) get a timing wrapper, used to break down the time spent in the "translation layer recording phase"

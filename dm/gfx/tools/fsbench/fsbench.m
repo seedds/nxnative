@@ -227,11 +227,16 @@ static int cmp_d(const void *a, const void *b) { double x = *(const double *)a, 
 
 int main(int argc, char **argv) { @autoreleasepool {
     D = MTLCreateSystemDefaultDevice(); g_res = [NSMutableArray array];
-    if (argc >= 3 && !strcmp(argv[1], "stats")) {
+    if (argc >= 3 && !strcmp(argv[1], "stats")) {   // stats <lib> [fn] [format] [--msl <file>]
+        // The generated vertex stage writes the fragment's interpolants, read from its source (struct main0_in): <lib>.metal beside the library, or --msl <file>. Without it the
+        // vertex stage would write none, and AGX refuses any fragment with user inputs ("Fragment input(s) user(locnN) ... not written by vertex shader")
+        NSString *mpath = [[@(argv[2]) stringByDeletingPathExtension] stringByAppendingPathExtension:@"metal"];
+        for (int i = 3; i + 1 < argc; i++) if (!strcmp(argv[i], "--msl")) { mpath = @(argv[i + 1]); for (int j = i; j + 2 < argc; j++) argv[j] = argv[j + 2]; argc -= 2; break; }
+        NSString *msl = [NSString stringWithContentsOfFile:mpath encoding:NSUTF8StringEncoding error:nil];
+        if (!msl) { fprintf(stderr, "stats: no MSL source at %s (the fragment's interpolants come from it): put the .metal beside the library or pass --msl <file>\n", mpath.UTF8String); return 1; }
         NSError *e = nil;
         id<MTLLibrary> L = [D newLibraryWithURL:[NSURL fileURLWithPath:@(argv[2])] error:&e]; if (!L) { fprintf(stderr, "%s\n", e.description.UTF8String); return 1; }
         id<MTLFunction> F = [L newFunctionWithName:argc > 3 ? @(argv[3]) : @"main0" constantValues:[MTLFunctionConstantValues new] error:nil];   // specialized with none set: a library with function constants (dm_border_off) refuses a plain function
-        NSString *msl = [NSString stringWithContentsOfFile:[[@(argv[2]) stringByDeletingPathExtension] stringByAppendingPathExtension:@"metal"] encoding:NSUTF8StringEncoding error:nil] ?: @"";
         NSDictionary *st = nil; pipeline(vertex_fn(msl, @{}), F, @[@(argc > 4 ? atoi(argv[4]) : MTLPixelFormatRG11B10Float)], &st);
         printf("%s\t%s\n", argv[2], stat_line(st).UTF8String);
         if (getenv("FSBENCH_REMARKS")) printf("%s\n", [st[@"Remarks"] UTF8String]);
@@ -341,7 +346,7 @@ int main(int argc, char **argv) { @autoreleasepool {
         printf("setup\tgroups %lux%lux%lu of %lux%lux%lu, %d dispatches a command buffer, %d rounds, %s\n", (unsigned long)grid.width, (unsigned long)grid.height, (unsigned long)grid.depth, (unsigned long)tgs.width, (unsigned long)tgs.height, (unsigned long)tgs.depth, P, R, D.name.UTF8String);
         return 0;
     }
-    if (argc < 5 || strcmp(argv[1], "run")) { fprintf(stderr, "usage: fsbench stats <lib> [fn] [format] | run <scene.json> <out dir> <lib>... | cstats <lib> [fn] | crun <scene.json> <out dir> <lib>... | mstats <mesh lib> <fragment lib> [object lib]\n"); return 2; }
+    if (argc < 5 || strcmp(argv[1], "run")) { fprintf(stderr, "usage: fsbench stats <lib> [fn] [format] [--msl <file>] | run <scene.json> <out dir> <lib>... | cstats <lib> [fn] | crun <scene.json> <out dir> <lib>... | mstats <mesh lib> <fragment lib> [object lib]\n"); return 2; }
     NSDictionary *sc = [NSJSONSerialization JSONObjectWithData:[NSData dataWithContentsOfFile:@(argv[2])] options:0 error:nil];
     NSString *out = @(argv[3]); [[NSFileManager defaultManager] createDirectoryAtPath:out withIntermediateDirectories:YES attributes:nil error:nil];
     NSUInteger W = [sc[@"w"] unsignedIntegerValue], H = [sc[@"h"] unsignedIntegerValue];

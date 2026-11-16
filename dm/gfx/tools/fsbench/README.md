@@ -12,7 +12,8 @@ python3 dm/gfx/tools/fsbench/fsbench.py fetch <image> <key> <dir>          # <ke
 python3 dm/gfx/tools/fsbench/fsbench.py scene --log game.log --frame F --pass P --key K --json K_b.json --msl K_b.metal --cb DIR [--draw N] [--fill rich|zero] [--lights N] --out scene.json
 python3 dm/gfx/tools/fsbench/fsbench.py variants <base.metal> <dir> nobs nonan nobs+nonan …   # source variants (VARIANTS in fsbench.py), "+" combines
 python3 dm/gfx/tools/fsbench/fsbench.py compile <in.metal> <out.metallib>  # the chain's Metal flags (dmsh_build.MAC_METAL)
-fsbench stats <lib.metallib> [fn] [colour MTLPixelFormat]                  # registers, spill, instruction mix of the fragment stage
+fsbench stats <lib.metallib> [fn] [colour MTLPixelFormat] [--msl <file>]   # registers, spill, instruction mix of the fragment stage; its interpolants come from
+                                                                           # <lib>.metal beside the library or --msl, and stats stops without one
 fsbench run <scene.json> <out dir> <lib.metallib>…                         # time of each library; output of each against the first
 python3 dm/gfx/tools/fsbench/fsbench.py cscene --log game.log --frame F --key K --json K_b.json --msl K_b.metal [--cb DIR] [--draw N] --out scene.json   # a compute dispatch's scene
 fsbench cstats <lib.metallib> [fn]                                         # a compute kernel's statistics, threadgroup memory, threads a threadgroup

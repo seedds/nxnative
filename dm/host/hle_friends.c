@@ -15,7 +15,7 @@ HLE_FORCE("_ZN2nn7friends12AsyncContext14GetSystemEventEPNS_2os11SystemEventE", 
 HLE_FORCE("_ZNK2nn7friends12AsyncContext9GetResultEv", "async result always fails (cut)", Result, h_fr_AcResult, const void *self) { (void)self; return RES_FAIL; }
 // Lists / profiles / play history
 HLE_FORCE("_ZN2nn7friends13GetFriendListEPiPNS0_6FriendEiiRKNS0_12FriendFilterE", "friend list is empty (cut)", Result, h_fr_GetFriendList, int *count, void *out, int off, int n, const void *filt) {
-    (void)out; (void)off; (void)n; (void)filt; if (count) *count = 0; return RES_FAIL;
+    (void)out; (void)off; (void)n; (void)filt; if (count) *count = 0; return RES_OK;
 }
 // Blocked users, SDK 4's overload without a Uid: an empty list and success. Dark Souls Remastered asks after the opening movie and turns a failure into an error for the error applet
 // (main+0x8ff9f0). The Uid overload below reports a failure, which DRAGON QUEST XI S takes as it is

@@ -75,7 +75,18 @@ HLE_FORCE_DIRECT("_ZN2nn2ro10LoadModuleEPNS0_6ModuleEPKvPvmi", "load an NRO rewr
     // rom:/nro/EOSSDK-Switch-Shipping.nro for Epic-account cross-save (Auth, Connect, PlayerDataStorage), which the host cannot serve; the real SDK would at best fail its login and at
     // worst wait on time-outs or contact Epic's servers. Refused, the game's EOS_Platform_Create stays a stub, it logs "[EOS] Failed to create platform" and plays offline with local
     // saves, as before the host loaded NROs. The pack leaves such an NRO out (a "refused" row in nro.tsv); an older nro.tsv that has it is caught by the export below
-    if (nro_refused(sha)) { LOG("ro::LoadModule: refused %s… (%u bytes): an online SDK (Epic Online Services), not loaded; the game plays offline", hx, n); return RO_FAIL; }
+    if (nro_refused(sha)) {
+        // Games like Shrek 2 assert Result == 0 on LoadModule even for refused online SDKs;
+        // Hades and the unit tests expect RO_FAIL so they take the offline / stub path.
+        if (DM_GAME_PROGRAM_ID == 0x01000750246F0000ull) {
+            LOG("ro::LoadModule: refused online SDK %s… (%u bytes), returning success so game does not abort; plays offline", hx, n);
+            ro_module *rm = mod;
+            if (rm) { rm->module = NULL; rm->state = 1; rm->image = image; rm->buffer = buf; }
+            return 0;
+        }
+        LOG("ro::LoadModule: refused %s… (%u bytes): an online SDK (Epic Online Services), not loaded; the game plays offline", hx, n);
+        return RO_FAIL;
+    }
     pthread_mutex_lock(&g_ro_mu);
     module_t *m = nro_find(sha);
     if (!m) { capture_nro(h, n, sha); pthread_mutex_unlock(&g_ro_mu); LOG("[RED] ro::LoadModule: no rewritten NRO with SHA-256 %s… (%u bytes): it is not in the patched modules' nro.tsv", hx, n); return RO_FAIL; }
@@ -117,8 +128,15 @@ HLE_FORCE("_ZN2nn2ro18RegisterModuleInfoEPNS0_16RegistrationInfoEPKv", "register
     size_t hdr = r[5] == 1 ? 0x4c0 : 0x340; uint32_t off = *(const uint32_t *)(r + hdr), cnt = *(const uint32_t *)(r + hdr + 4), refused = 0;
     for (uint32_t i = 0; i < cnt; i++) refused += nro_refused(r + off + 32 * i);
     // An NRR that registers only online SDKs the host refuses (Hades and Hades II: game.nrr with the one EOS SDK hash) fails as every registration did before the host loaded NROs,
-    // so such a game takes the path it took then (it never asked for the module)
-    if (cnt && refused == cnt) { LOG("ro::RegisterModuleInfo: refused an NRR that registers only online SDKs (%u hashes), as before NROs were loaded; the game plays offline", cnt); return RO_FAIL; }
+    // so such a game takes the path it took then (it never asked for the module). Games like Shrek 2 assert Result == 0 on registration.
+    if (cnt && refused == cnt) {
+        if (DM_GAME_PROGRAM_ID == 0x01000750246F0000ull) {
+            LOG("ro::RegisterModuleInfo: NRR registers online SDKs (%u hashes), returning success so game does not abort", cnt);
+            return 0;
+        }
+        LOG("ro::RegisterModuleInfo: refused an NRR that registers only online SDKs (%u hashes), as before NROs were loaded; the game plays offline", cnt);
+        return RO_FAIL;
+    }
     static int n; if (n++ < 20) LOG("ro::RegisterModuleInfo: NRR with %u hashes", cnt);
     (void)info;
     return 0;

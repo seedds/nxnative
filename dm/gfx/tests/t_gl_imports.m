@@ -489,6 +489,60 @@ static void test_sampler_objects(void) {
     S.prog = was; p->linked = 0; p->nu = 0; p->u = NULL; h_glDeleteProgram(pr);
 }
 
+// Extension names by gl_aliases.h (Fate/hollow ataraxia REMASTERED asks for its framebuffer functions by their EXT names, issue #2818), never by a stripped suffix; binds that
+// make a name glGen* never gave; EGL's current context, display and surfaces, per thread
+static void *other_thread(void *arg) {
+    void **seen = arg; seen[0] = h_eglGetCurrentContext();   // current on the main thread, not here
+    h_eglMakeCurrent((EGLDisplay)&g_egl, (EGLSurface)3, (EGLSurface)3, (EGLContext)2); seen[1] = h_eglGetCurrentContext();   // taken here
+    return NULL;
+}
+static void test_extension_names_and_egl(void) {
+    assert(gl_lookup("glGenFramebuffersEXT") == (void *)h_glGenFramebuffers && gl_lookup("glCheckFramebufferStatusEXT") == (void *)h_glCheckFramebufferStatus);
+    assert(gl_lookup("glBindRenderbufferEXT") == (void *)h_glBindRenderbuffer && gl_lookup("glBindFramebufferEXT") == gl_lookup("glBindFramebuffer"));
+    assert(gl_lookup("glGenFramebuffersOES") == (void *)h_glGenFramebuffers && gl_lookup("glBindVertexArrayOES") == (void *)h_glBindVertexArray);
+    assert(!gl_lookup("glVertexAttribPointerNV") && !gl_lookup("glPolygonOffsetEXT") && !gl_lookup("glDrawArraysEXTRA"));   // another function under the stripped name
+    assert(gl_lookup("glGetProgramivARB") == (void *)h_glGetProgramivARB && gl_lookup("glGetProgramivARB") != gl_lookup("glGetProgramiv"));
+    GLint v = 0; h_glGetProgramivARB(0x8804, 0x88b6, &v); assert(v == 1);   // FRAGMENT_PROGRAM_ARB: within the native limits
+    // a bind of a name never generated makes it (GL ES, the compatibility profile, EXT_framebuffer_object)
+    assert(!rb_of(77) && !fb_of(78));
+    h_glBindRenderbuffer(GL_RENDERBUFFER, 77); assert(rb_of(77) && S.rb == 77);
+    h_glBindFramebuffer(GL_FRAMEBUFFER, 78); assert(fb_of(78) && S.fb == 78 && S.read_fb == 78);
+    h_glBindFramebuffer(GL_FRAMEBUFFER, 0); h_glBindRenderbuffer(GL_RENDERBUFFER, 0);
+    GLuint n = 78; h_glDeleteFramebuffers(1, &n); n = 77; h_glDeleteRenderbuffers(1, &n); assert(!rb_of(77) && !fb_of(78));
+    // EGL names through eglGetProcAddress; the current binding per thread, read and draw apart, released by a make-current of no context or eglReleaseThread
+    assert(h_eglGetProcAddress("eglGetCurrentDisplay") == (void *)h_eglGetCurrentDisplay_bs && h_eglGetProcAddress("eglMakeCurrent") == (void *)h_eglMakeCurrent_bs);
+    assert(!h_eglGetCurrentContext() && !h_eglGetCurrentDisplay() && !h_eglGetCurrentSurface(0x3059));
+    EGLDisplay d = (EGLDisplay)&g_egl;
+    h_eglMakeCurrent(d, (EGLSurface)3, (EGLSurface)4, (EGLContext)2);
+    assert(h_eglGetCurrentContext() == (EGLContext)2 && h_eglGetCurrentDisplay() == d);
+    assert(h_eglGetCurrentSurface(0x3059) == (EGLSurface)3 && h_eglGetCurrentSurface(0x305a) == (EGLSurface)4 && !h_eglGetCurrentSurface(0x3000));
+    void *seen[2]; pthread_t th; pthread_create(&th, NULL, other_thread, seen); pthread_join(th, NULL);
+    assert(!seen[0] && seen[1] == (EGLContext)2 && !h_eglGetCurrentContext());   // the other thread took the context: none here
+    h_eglMakeCurrent(d, (EGLSurface)3, (EGLSurface)3, (EGLContext)2); assert(h_eglGetCurrentContext() == (EGLContext)2);
+    h_eglMakeCurrent(d, NULL, NULL, NULL); assert(!h_eglGetCurrentContext() && !h_eglGetCurrentDisplay() && !h_eglGetCurrentSurface(0x3059));
+    h_eglMakeCurrent(d, (EGLSurface)3, (EGLSurface)3, (EGLContext)2); h_eglReleaseThread(); assert(!h_eglGetCurrentContext());
+}
+
+// The other calls Fate/hollow ataraxia REMASTERED makes that the layer lacked (issue #2818): glValidateProgram after each link, glLineWidth, glClearTexImage on its new textures
+static void test_fate_calls(void) {
+    assert(import("glValidateProgram") == (void *)h_glValidateProgram && import("glLineWidth") == (void *)h_glLineWidth);
+    assert(import("glClearTexImage") == (void *)h_glClearTexImage_bs);
+    GLuint pr = h_glCreateProgram(); h_glValidateProgram(pr); GLint v = 0; h_glGetProgramiv(pr, GL_VALIDATE_STATUS, &v); assert(v == 1 && h_glGetError() == GL_NO_ERROR);
+    h_glDeleteProgram(pr); h_glLineWidth(1);
+    // a 4x2 RGBA8 texture of two levels: level 0 cleared to one RGBA value, level 1 to one RGB value (alpha 1), then to zeros (no data)
+    GLuint t; h_glGenTextures(1, &t); h_glBindTexture(GL_TEXTURE_2D, t); h_glTexStorage2D(GL_TEXTURE_2D, 2, GL_RGBA8, 4, 2);
+    const uint8_t rgba[4] = {1, 2, 3, 4}, rgb[3] = {9, 8, 7};
+    h_glClearTexImage(t, 0, GL_RGBA, GL_UNSIGNED_BYTE, rgba); h_glClearTexImage(t, 1, GL_RGB, GL_UNSIGNED_BYTE, rgb);
+    tex_t *x = tex_of(t); assert(x && x->made && x->levels == 2 && h_glGetError() == GL_NO_ERROR);
+    uint32_t px[8]; [x->tex getBytes:px bytesPerRow:16 fromRegion:MTLRegionMake2D(0, 0, 4, 2) mipmapLevel:0];
+    for (int i = 0; i < 8; i++) assert(px[i] == 0x04030201u);
+    [x->tex getBytes:px bytesPerRow:8 fromRegion:MTLRegionMake2D(0, 0, 2, 1) mipmapLevel:1]; assert(px[0] == 0xff070809u && px[1] == 0xff070809u);
+    h_glClearTexImage(t, 1, GL_RGBA, GL_UNSIGNED_BYTE, NULL); [x->tex getBytes:px bytesPerRow:8 fromRegion:MTLRegionMake2D(0, 0, 2, 1) mipmapLevel:1]; assert(!px[0] && !px[1]);
+    h_glClearTexImage(t, 2, GL_RGBA, GL_UNSIGNED_BYTE, rgba); assert(h_glGetError() == GL_INVALID_OPERATION);   // a level the texture does not have
+    h_glClearTexImage(t + 100, 0, GL_RGBA, GL_UNSIGNED_BYTE, rgba); assert(h_glGetError() == GL_INVALID_OPERATION);   // no such texture
+    h_glDeleteTextures(1, &t);
+}
+
 int main(int argc, char **argv) {
     (void)argv;
     int stubs = argc > 1;
@@ -596,6 +650,8 @@ int main(int argc, char **argv) {
     test_compressed_arrays();
     test_doom3();
     test_sampler_objects();
+    test_extension_names_and_egl();
+    test_fate_calls();
 
     unsigned long sz;
     const hle_ent *sec = (const hle_ent *)getsectiondata(&_mh_execute_header, "__DATA", "swhle", &sz);
@@ -609,11 +665,12 @@ int main(int argc, char **argv) {
     assert((void *)resolve_import(NULL, "eglGetProcAddress") == (void *)h_eglGetProcAddress_bs);
     assert(!h_eglGetProcAddress(NULL));
     assert(!h_eglGetProcAddress("not_a_GL_function"));
+    assert((h_eglGetProcAddress("eglNoSuchFunctionForTest") != NULL) == stubs);   // an EGL name the layer lacks: as a GL one
     const char *missing = "glMissingFunctionForTest";
     assert(!hle_implements(missing));
     assert((h_eglGetProcAddress(missing) != NULL) == stubs);
     assert(resolve_import(NULL, missing) == (uint64_t)&unimpl_stubs[0]);
     assert(!strcmp(wrap_kind, "STUB"));
-    printf("GL imports: %u shared entries, shader handle/source, shader and program lifetimes, the error flag, a depth texture's data, vertex formats and bindings, a binding's stride 0 drawn, the uniform buffer target, compressed 2D arrays, DOOM 3's calls (ARB names, extensions, named blocks, two-sided stencil, frame copies, compressed and byte-swapped images, vertex-only programs, LOD bias), sampler objects and uniform locations, wrappers and missing names (DM_GL_STUBS=%d): OK\n", count, stubs);
+    printf("GL imports: %u shared entries, shader handle/source, shader and program lifetimes, the error flag, a depth texture's data, vertex formats and bindings, a binding's stride 0 drawn, the uniform buffer target, compressed 2D arrays, DOOM 3's calls (ARB names, extensions, named blocks, two-sided stencil, frame copies, compressed and byte-swapped images, vertex-only programs, LOD bias), sampler objects and uniform locations, extension names and EGL's current binding, Fate's program validation, line width and texture clears, wrappers and missing names (DM_GL_STUBS=%d): OK\n", count, stubs);
     return 0;
 }

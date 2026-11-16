@@ -20,6 +20,7 @@
 #include "../../host/hle.h"
 #include "../nvn/nvn_mtl.h"
 #include "../nvn/host_msl.h"
+#include "gl_aliases.h"
 #import <Metal/Metal.h>
 #include <CommonCrypto/CommonDigest.h>
 #include <mach/mach.h>
@@ -1286,6 +1287,8 @@ GL(glFrontFace, void, GLenum m) { if (m == GL_CW || m == GL_CCW) S.front = m; }
 // Points are as big as the vertex shader's point size output says (Metal has no fixed size). Wireframe is Metal's triangle fill mode, for both faces (DOOM 3 sets it once while it
 // puts its state in order); points for polygons and a mode for one face only are not implemented
 GL(glPointSize, void, GLfloat s) { S.psize = s; }
+// Metal draws lines one pixel wide; Fate/hollow ataraxia REMASTERED sets 1 before its draws
+GL(glLineWidth, void, GLfloat w) { if (w != 1) RED1("glLineWidth(%g): lines are drawn one pixel wide", w); }
 GL(glPolygonMode, void, GLenum face, GLenum mode) {
     if (mode != 0x1b02 /* FILL */ && mode != 0x1b01 /* LINE */) { RED1("glPolygonMode(%#x) not implemented (filled)", mode); return; }
     if (face != GL_FRONT_AND_BACK) RED1("glPolygonMode of one face (%#x): both faces take it", face);
@@ -1386,6 +1389,7 @@ GL(glGetIntegerv, void, GLenum p, GLint *v) {
         case GL_MAX_VERTEX_ATTRIBS: case 0x82da: *v = 16; return;   // and MAX_VERTEX_ATTRIB_BINDINGS (vao_t)
         case 0x82d9: *v = 2047; return;   // MAX_VERTEX_ATTRIB_RELATIVE_OFFSET, GL's minimum
         case GL_MAX_TEXTURE_IMAGE_UNITS: *v = 32; return;
+        case 0x8b4c: *v = 16; return;   // MAX_VERTEX_TEXTURE_IMAGE_UNITS: the slots a translated shader's table can name (gl_shaders.py)
         case 0x8871: *v = 8; return;   // MAX_TEXTURE_COORDS: the compatibility profile's texture coordinate sets
         case 0x8a2f: *v = NUBO; return;   // MAX_UNIFORM_BUFFER_BINDINGS
         case 0x8a30: *v = 65536; return;   // MAX_UNIFORM_BLOCK_SIZE
@@ -1664,6 +1668,12 @@ GL(glSamplerParameteriv, void, GLuint s, GLenum p, const GLint *v) {
     if (p == GL_TEXTURE_BORDER_COLOR) for (int c = 0; c < 4; c++) f[c] = (float)((double)v[c] / 2147483647.0);
     so_param(s, p, f);
 }
+// The conversion of data given in format and type into a texture's own format f (glTexSubImage2D, glClearTexImage)
+static int sub_cv(int f, GLenum format, GLenum type) {
+    if (f != F_RGBA8) return CV_COPY;
+    return type == GL_UNSIGNED_SHORT_5_6_5 ? CV_565 : type == GL_UNSIGNED_SHORT_4_4_4_4 ? CV_4444 : type == GL_UNSIGNED_SHORT_5_5_5_1 ? CV_5551 :
+           format == GL_RGB ? CV_RGB8 : format == GL_COLOR_INDEX ? CV_INDEX : CV_COPY;
+}
 // glTexImage2D and glTexSubImage2D take nine arguments, the last on the stack, which the big-stack entry does not carry: they pack them here, on the game's stack, and enter there
 typedef struct { GLenum target; GLint level, ifmt, x, y; GLsizei w, h; GLenum format, type; const void *pixels; GLsizei size; int sub, compressed; } teximg_args;
 static void teximg_impl(const teximg_args *a) __attribute__((used));
@@ -1674,9 +1684,7 @@ static void teximg_impl(const teximg_args *a) {
             tex_t *t = bound_tex(a->target);
             int face = a->target >= GL_TEXTURE_CUBE_MAP_POSITIVE_X && a->target <= GL_TEXTURE_CUBE_MAP_NEGATIVE_Z ? (int)(a->target - GL_TEXTURE_CUBE_MAP_POSITIVE_X) : 0;
             if (!t || t->fmt < 0 || a->w <= 0 || a->h <= 0) return;
-            int f = t->fmt, cv = CV_COPY;   // the data is converted to the texture's format
-            if (f == F_RGBA8) cv = a->type == GL_UNSIGNED_SHORT_5_6_5 ? CV_565 : a->type == GL_UNSIGNED_SHORT_4_4_4_4 ? CV_4444 : a->type == GL_UNSIGNED_SHORT_5_5_5_1 ? CV_5551 :
-                                   a->format == GL_RGB ? CV_RGB8 : a->format == GL_COLOR_INDEX ? CV_INDEX : CV_COPY;
+            int f = t->fmt, cv = sub_cv(f, a->format, a->type);   // the data is converted to the texture's format
             size_t pitch; void *conv = pixels_convert(a->pixels, a->w, a->h, a->format, a->type, f, cv, &pitch);
             if (!t->made) {   // into a level not made yet: patch the pending copy
                 level_t *l = &t->pend[face][a->level < MAXLV ? a->level : 0];
@@ -1718,6 +1726,25 @@ static void tex_storage(GLenum target, GLsizei levels, GLenum ifmt, GLsizei w, G
     if (!t || f < 0 || levels <= 0 || w <= 0 || h <= 0 || d <= 0) { RED1("glTexStorage(%#x, %d levels, %#x, %dx%dx%d) not implemented", target, levels, ifmt, w, h, d); return; }
     if (t->made || t->defined) tex_drop(t);
     t->fmt = f; t->w = w; t->h = h; t->d = d; t->slevels = levels; t->smp_dirty = 1;
+}
+// glClearTexImage (GL 4.4): every texel of a level, every face, layer and slice, set to one value given in format and type (none: zeros). The value is converted as glTexSubImage2D
+// converts its data, without the unpack state; Fate/hollow ataraxia REMASTERED clears its new textures so
+GLB(glClearTexImage, void, GLuint name, GLint level, GLenum format, GLenum type, const void *data) {
+    tex_t *t = tex_of(name);
+    if (!t || level < 0 || level >= MAXLV) { gl_error(GL_INVALID_OPERATION); return; }
+    if (t->fmt < 0 || g_fmt[t->fmt].kind == K_BLOCK) { if (t->fmt >= 0) gl_error(GL_INVALID_OPERATION); else RED1("glClearTexImage of texture %u, which has no format yet", name); return; }
+    @autoreleasepool {
+        if (!t->made) tex_make(t, 0);
+        if (!t->tex || level >= t->levels) { gl_error(GL_INVALID_OPERATION); return; }
+        int f = t->fmt, swap = S.unpack_swap; size_t pitch, bytes = g_fmt[f].bytes;
+        S.unpack_swap = 0; uint8_t *one = pixels_convert(data, 1, 1, format, type, f, sub_cv(f, format, type), &pitch); S.unpack_swap = swap;
+        uint32_t w = umax(1, t->w >> level), h = umax(1, (t->target == GL_TEXTURE_CUBE_MAP ? t->w : t->h) >> level);
+        uint32_t slices = t->target == GL_TEXTURE_3D ? umax(1, t->d >> level) : 1, layers = t->target == GL_TEXTURE_2D_ARRAY ? t->d : (uint32_t)tex_faces(t);
+        size_t lp = fmt_pitch(f, w); uint8_t *img = zalloc(lp * h);
+        for (uint32_t y = 0; y < h; y++) for (uint32_t x = 0; x < w; x++) memcpy(img + y * lp + x * bytes, one, bytes);
+        for (uint32_t k = 0; k < layers; k++) for (uint32_t z = 0; z < slices; z++) tex_write(t, (int)k, level, 0, 0, z, w, h, img, lp);
+        free(one); free(img);
+    }
 }
 GL(glTexStorage2D, void, GLenum target, GLsizei levels, GLenum ifmt, GLsizei w, GLsizei h) { tex_storage(target, levels, ifmt, w, h, 1); }
 GL(glTexStorage3D, void, GLenum target, GLsizei levels, GLenum ifmt, GLsizei w, GLsizei h, GLsizei d) { tex_storage(target, levels, ifmt, w, h, d); }
@@ -1853,6 +1880,10 @@ GLB(glDeleteFramebuffers, void, GLsizei n, const GLuint *f) {
     for (GLsizei i = 0; i < n; i++) { fb_t *x = fb_of(f[i]); if (!x) continue; if (P.open && P.fb == f[i]) pass_end(); if (g_pend_clear.fb == f[i]) g_pend_clear.bits = 0; free(x); g_fbs[f[i]] = NULL; if (S.fb == f[i]) S.fb = 0; }
 }
 GLB(glBindFramebuffer, void, GLenum target, GLuint f) {
+    if (f && !fb_of(f)) {   // a name glGenFramebuffers never gave: made at its first bind, as GL ES and the compatibility profile do (EXT_framebuffer_object, OES_framebuffer_object)
+        if (f > 1u << 20) { RED1("glBindFramebuffer of name %u", f); return; }
+        name_at((void ***)&g_fbs, &g_nfbs, &g_capfbs, f, sizeof(fb_t));
+    }
     if (target != GL_DRAW_FRAMEBUFFER) S.read_fb = f;   // GL_FRAMEBUFFER binds both
     if (target == GL_READ_FRAMEBUFFER || f == S.fb) return;
     { static int on = -1; if (on < 0) on = getenv("DM_GL_FBLOG") != NULL; if (on) { uint32_t bw, bh; fb_size(f, &bw, &bh); GLOG("bind framebuffer %u %ux%u (was %u) after %llu draws", f, bw, bh, S.fb, (unsigned long long)g_n_draw); } }
@@ -1868,7 +1899,11 @@ GL(glInvalidateFramebuffer, void, GLenum target, GLsizei n, const GLenum *att) {
 GL(glDiscardFramebufferEXT, void, GLenum target, GLsizei n, const GLenum *att) { (void)target; (void)n; (void)att; }
 GL(glGenRenderbuffers, void, GLsizei n, GLuint *out) { for (GLsizei i = 0; i < n; i++) out[i] = name_new((void ***)&g_rbs, &g_nrbs, &g_caprbs, sizeof(rb_t)); }
 GL(glDeleteRenderbuffers, void, GLsizei n, const GLuint *r) { for (GLsizei i = 0; i < n; i++) { rb_t *x = rb_of(r[i]); if (!x) continue; x->tex = nil; free(x); g_rbs[r[i]] = NULL; } }
-GL(glBindRenderbuffer, void, GLenum target, GLuint r) { (void)target; S.rb = r; }
+GL(glBindRenderbuffer, void, GLenum target, GLuint r) {   // a name glGenRenderbuffers never gave is made at its first bind, as glBindFramebuffer's
+    (void)target;
+    if (r && !rb_of(r)) { if (r > 1u << 20) { RED1("glBindRenderbuffer of name %u", r); return; } name_at((void ***)&g_rbs, &g_nrbs, &g_caprbs, r, sizeof(rb_t)); }
+    S.rb = r;
+}
 static void h_glRenderbufferStorage(GLenum target, GLenum ifmt, GLsizei w, GLsizei h);
 GLB(glRenderbufferStorageMultisample, void, GLenum target, GLsizei samples, GLenum ifmt, GLsizei w, GLsizei h) {
     if (samples > 1) RED1("multisampled renderbuffer (%d samples): made with one sample", samples);
@@ -2165,6 +2200,8 @@ GL(glBindAttribLocation, void, GLuint pr, GLuint index, const GLchar *name) {   
     if (j == p->nbind) { strlcpy(p->bind[j].name, name, sizeof p->bind[j].name); p->nbind++; }
     p->bind[j].index = (int)index;
 }
+// A program that links validates (GL_VALIDATE_STATUS, as its link status): Fate/hollow ataraxia REMASTERED validates each program after linking it
+GL(glValidateProgram, void, GLuint pr) { (void)SP_CHECK(pr, 1); }
 GL(glGetProgramiv, void, GLuint pr, GLenum p, GLint *v) {
     if (!SP_CHECK(pr, 1)) { *v = 0; return; }
     prog_t *x = prog_of(pr);
@@ -2264,6 +2301,8 @@ GL(glBindProgramARB, void, GLenum target, GLuint pr) { if (pr) RED1("glBindProgr
 GL(glProgramStringARB, void, GLenum target, GLenum format, GLsizei len, const void *str) { (void)format; (void)str; RED1("glProgramStringARB(%#x, %d bytes): ARB assembly programs are not implemented", target, len); }
 GL(glProgramEnvParameter4fvARB, void, GLenum target, GLuint index, const GLfloat *v) { (void)target; (void)index; (void)v; }
 GL(glProgramLocalParameter4fvARB, void, GLenum target, GLuint index, const GLfloat *v) { (void)target; (void)index; (void)v; }
+// The current assembly program's properties, asked by its target (not glGetProgramiv, which takes a GLSL program): within the native limits (0x88b6), the rest 0
+GL(glGetProgramivARB, void, GLenum target, GLenum pname, GLint *v) { (void)target; *v = pname == 0x88b6; }
 // Write count elements from location loc of the current program: comps values each (a matrix: cols columns of comps / cols), into every stage that has the uniform.
 // The default block is laid out as std140: a matrix column takes 16 bytes
 static void uni_write(GLint loc, GLsizei count, const void *v, int comps, int is_int, int transpose, int cols) {
@@ -2380,7 +2419,6 @@ static void frame_end(void) {
 EGL(eglGetDisplay, EGLDisplay, void *native) { (void)native; dev_init(); return (EGLDisplay)&g_egl; }
 EGL(eglInitialize, EGLBoolean, EGLDisplay d, EGLint *major, EGLint *minor) { (void)d; dev_init(); g_egl.init = 1; if (major) *major = 1; if (minor) *minor = 5; return EGL_TRUE; }
 EGL(eglTerminate, EGLBoolean, EGLDisplay d) { (void)d; return EGL_TRUE; }
-EGL(eglReleaseThread, EGLBoolean, void) { return EGL_TRUE; }
 // SDL binds 0 (its API before it has chosen one) when it makes the window again (Balatro's love.window.setMode): nothing to change
 EGL(eglBindAPI, EGLBoolean, EGLenum api) { if (api && api != 0x30a2) RED1("eglBindAPI(%#x): only desktop OpenGL (0x30a2) is implemented", api); return EGL_TRUE; }
 // One configuration: RGBA8, depth 24 (32F here), stencil 8, a window surface, desktop OpenGL; it matches the game's attributes
@@ -2436,14 +2474,25 @@ EGL(eglCreateWindowSurface, EGLSurface, EGLDisplay d, EGLConfig cfg, void *win, 
     return (EGLSurface)(uintptr_t)3;
 }
 EGL(eglDestroySurface, EGLBoolean, EGLDisplay d, EGLSurface s) { (void)d; (void)s; return EGL_TRUE; }
+// What a thread made current, which EGL keeps per thread (eglGetCurrentContext, eglGetCurrentDisplay, eglGetCurrentSurface answer it; a glad loader asks for them through
+// eglGetProcAddress). The layer has one context: a thread that makes it current takes it from the thread it was current on (EGL would refuse with EGL_BAD_ACCESS), which
+// then has none. gen: the binding's number (g_cur_gen when it was made); an older one has been taken. eglMakeCurrent with no context and eglReleaseThread release the thread's binding
+static __thread struct { EGLDisplay dpy; EGLContext ctx; EGLSurface draw, read; uint64_t gen; } t_cur;
+static _Atomic uint64_t g_cur_gen;
+static int cur_held(void) { return t_cur.ctx && t_cur.gen == atomic_load(&g_cur_gen); }
 EGL(eglMakeCurrent, EGLBoolean, EGLDisplay d, EGLSurface dr, EGLSurface rd, EGLContext c) {
-    (void)d; (void)rd;
     static pthread_t th; static int known, sized;
+    if (c) { t_cur.dpy = d; t_cur.ctx = c; t_cur.draw = dr; t_cur.read = rd; t_cur.gen = atomic_fetch_add(&g_cur_gen, 1) + 1; }
+    else memset(&t_cur, 0, sizeof t_cur);
     if (c && dr) { pthread_t me = pthread_self(); if (!known || !pthread_equal(th, me)) { th = me; known = 1; OLOG("context current on a new thread"); } }
     // a context's viewport and scissor box start as its first drawable's size (LÖVE reads them back at start)
     if (c && dr && !sized && g_win.made) { sized = 1; if (!S.vp[2] && !S.vp[3]) { S.vp[2] = S.sc[2] = g_win.w; S.vp[3] = S.sc[3] = g_win.h; } }
     return EGL_TRUE;
 }
+EGL(eglReleaseThread, EGLBoolean, void) { memset(&t_cur, 0, sizeof t_cur); return EGL_TRUE; }
+EGL(eglGetCurrentContext, EGLContext, void) { return cur_held() ? t_cur.ctx : NULL; }
+EGL(eglGetCurrentDisplay, EGLDisplay, void) { return cur_held() ? t_cur.dpy : NULL; }
+EGL(eglGetCurrentSurface, EGLSurface, EGLint which) { return !cur_held() ? NULL : which == 0x3059 ? t_cur.draw : which == 0x305a ? t_cur.read : NULL; }   // DRAW, READ
 EGL(eglSwapInterval, EGLBoolean, EGLDisplay d, EGLint n) { (void)d; if (n != S.swap_interval) { GLOG("swap interval %d", n); S.swap_interval = n; } return EGL_TRUE; }
 // DM_GL_RENDERPROGS=<job file> (the NSP script's shader capture, dm/gfx/tools/idtech4_programs.py): id Tech 4's BFG renderer converts a render program to GLSL only when it first uses
 // it, so a capture run that only plays the game gets the ones it drew with. The job names the renderer's own FindVertexShader / FindFragmentShader (this, name) in main, the slot
@@ -2496,10 +2545,11 @@ EGL(eglSwapBuffers, EGLBoolean, EGLDisplay d, EGLSurface s) {
     renderprogs_job();
     return EGL_TRUE;
 }
-// eglGetProcAddress: GL names from the same table as direct imports; anything else is null (the game's loader asks for every GL name it knows).
-// An ARB extension's function that GL took into its core keeps its name without the suffix and does the same thing (glBindBufferARB is glBindBuffer, glActiveTextureARB
-// glActiveTexture), so a name ending in ARB that has no entry of its own gets the core one. DOOM 3's renderer asks for its buffer, compressed texture, vertex attribute and
-// multitexture functions only by their ARB names. The ARB names with no core counterpart (ARB_fragment_program's glGenProgramsARB …) are not found this way
+// eglGetProcAddress: GL and EGL names from the same table as direct imports; anything else is null (the game's loader asks for every name it knows).
+// An extension's name of a function GL already has gets that function's entry when the registry says the two are the same (gl_aliases.h, written by
+// dm/gfx/tools/gl_aliases.py from Khronos gl.xml and a reviewed GL ES list): DOOM 3's renderer asks for its buffer, multitexture and vertex attribute functions only by their
+// ARB names (glBindBufferARB), Fate/hollow ataraxia REMASTERED for its framebuffer functions by their EXT names (glGenFramebuffersEXT). A suffix is not stripped on its own:
+// glVertexAttribPointerNV takes other arguments than glVertexAttribPointer, glGetProgramivARB asks about an ARB assembly program
 static void *gl_entry(const char *name) {
     static const hle_ent *sec; static unsigned long sz;
     if (!sec) sec = (const hle_ent *)getsectiondata(&_mh_execute_header, "__DATA", "swhle", &sz);
@@ -2508,8 +2558,11 @@ static void *gl_entry(const char *name) {
 }
 static void *gl_lookup(const char *name) {
     void *fn = gl_entry(name);
-    size_t n = strlen(name);
-    if (!fn && n > 5 && n < 96 && !strcmp(name + n - 3, "ARB")) { char core[96]; memcpy(core, name, n - 3); core[n - 3] = 0; fn = gl_entry(core); }
+    for (size_t lo = 0, hi = sizeof gl_aliases / sizeof *gl_aliases; !fn && lo < hi;) {
+        size_t mid = (lo + hi) / 2; int c = strcmp(name, gl_aliases[mid].name);
+        if (!c) { fn = gl_entry(gl_aliases[mid].same); break; }
+        if (c < 0) hi = mid; else lo = mid + 1;
+    }
     return fn;
 }
 // DM_GL_STUBS=1 (bring-up): a GL name the layer does not implement gets a stub of its own instead of a null pointer, which reports its first call and returns 0; a game that calls
@@ -2526,7 +2579,7 @@ extern const char gl_stubs[];   // 8 bytes a stub
 static void *gl_stub(const char *name) {
     static int on = -1; if (on < 0) on = getenv("DM_GL_STUBS") && atoi(getenv("DM_GL_STUBS"));
     if (!on || g_nstub == NSTUB) return NULL;
-    g_stub_name[g_nstub] = name;   // the game's own string (its loader's name table)
+    g_stub_name[g_nstub] = strdup(name);   // a copy: a loader may put each name together in one buffer (Fate/hollow ataraxia REMASTERED), which the next name overwrites
     return (void *)(gl_stubs + 8 * g_nstub++);
 }
 // A name the loader asks for and the layer does not implement gets a null pointer, which is the documented meaning of "not there" (many loaders ask for the
@@ -2535,18 +2588,19 @@ static void *gl_stub(const char *name) {
 // their first call, which names the one the game actually calls (GameMaker's runner asks for 215 names it does not implement and calls glFlush).
 static const char *g_miss_name[512]; static int g_nmiss;
 static void note_miss(const char *name) {
-    for (int i = 0; i < g_nmiss; i++) if (g_miss_name[i] == name) return;
-    if (g_nmiss < 512) g_miss_name[g_nmiss++] = name;
+    for (int i = 0; i < g_nmiss; i++) if (!strcmp(g_miss_name[i], name)) return;   // by text: a loader may put every name together in one buffer
+    if (g_nmiss < 512) g_miss_name[g_nmiss++] = strdup(name);
     if (getenv("DM_GL_MISSES")) GLOG("[RED] eglGetProcAddress(%s): not implemented, the game gets a null pointer", name);
 }
 EGL(eglGetProcAddress, void *, const char *name) {
     static int asked, found; static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
-    void *fn = name && !strncmp(name, "gl", 2) ? gl_lookup(name) : NULL;
+    int ours = name && (!strncmp(name, "gl", 2) || !strncmp(name, "egl", 3));   // EGL 1.5 answers its own functions too (a glad loader asks for eglGetCurrentDisplay)
+    void *fn = ours ? gl_lookup(name) : NULL;
     pthread_mutex_lock(&mu);
     asked++; if (fn) found++;
-    if (!fn && name && !strncmp(name, "gl", 2)) note_miss(name);
+    if (!fn && ours) note_miss(name);
     if (asked % 500 == 0 || (fn && g_log)) GLOG("eglGetProcAddress: %d names asked, %d implemented, %d not implemented (last %s)", asked, found, g_nmiss, name);
-    if (!fn && name && !strncmp(name, "gl", 2)) fn = gl_stub(name);
+    if (!fn && ours) fn = gl_stub(name);
     pthread_mutex_unlock(&mu);
     return fn;
 }

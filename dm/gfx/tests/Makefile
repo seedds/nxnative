@@ -99,6 +99,13 @@ t_rt_comp: t_rt_comp.c ../nvn/hle_nvn.c ../nvn/nvn_rt.h ../../host/crash.c ../..
 	clang $(CFLAGS) -fobjc-arc -o $@ t_rt_comp.c ../../host/crash.c ../../host/hle_bigstack.c t_host_stubs.c $(GFX) $(FW)
 t_dirty_slots: t_dirty_slots.c ../nvn/nvn_dirty.c ../../host/crash.c ../nvn/nvn_dirty.h $(GAME_H)
 	clang $(CFLAGS) -o $@ t_dirty_slots.c ../../host/crash.c ../nvn/nvn_dirty.c
+t_dirty_ahead: t_dirty_ahead.c ../nvn/nvn_dirty.c ../../host/crash.c ../nvn/nvn_dirty.h $(GAME_H)
+	clang $(CFLAGS) -o $@ t_dirty_ahead.c ../../host/crash.c ../nvn/nvn_dirty.c
+check_t_dirty_ahead: t_dirty_ahead
+	./t_dirty_ahead
+	DM_NVN_FAULT_AHEAD=0 ./t_dirty_ahead
+b_dirty_fill: b_dirty_fill.c ../nvn/nvn_dirty.c ../../host/crash.c ../nvn/nvn_dirty.h $(GAME_H)
+	clang $(CFLAGS) -O2 -o $@ b_dirty_fill.c ../../host/crash.c ../nvn/nvn_dirty.c
 t_dirty_race: t_dirty_race.c ../nvn/nvn_dirty.c ../../host/crash.c ../nvn/nvn_dirty.h $(GAME_H)
 	clang $(CFLAGS) -o $@ t_dirty_race.c ../../host/crash.c
 t_dirty_init: t_dirty_init.c ../nvn/nvn_dirty.c ../../host/crash.c ../nvn/nvn_dirty.h $(GAME_H)

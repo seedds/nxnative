@@ -2192,8 +2192,8 @@ static void tsummary(uint64_t frame) {
             LOG("[nvn] thread policy: %s; %u guest worker threads QoS %#x; present QoS %#x", rl, wn, wq, mtl_present_qos()); }
         py = cy; pk = ck; pw = cw; }
       pi = ci; pc = cc; pd = dr_; pf = frame; }
-    uint64_t up, re, es = mtl_pkg_edge_skips(), fa, pr, op, oc; mtl_pkg_stats(&up, &re); nvn_dirty_stats(&fa, &pr); nvn_dirty_open_stats(&op, &oc);
-    LOG("[nvn] packaged textures: first uploads %llu, re-uploads on pool content change %llu, writes beside a texture only (not re-uploaded) %llu; write-protection faults %llu, pages unprotected before host writes %llu, opened for pool buffers %llu (changed while open %llu); missed %llu (cumulative); CPU-written textures alive %u", up, re, es, fa, pr, op, oc, mtl_pkg_miss(), mtl_cpu_tex_count());
+    uint64_t up, re, es = mtl_pkg_edge_skips(), fa, pr, op, oc, fap, far_; mtl_pkg_stats(&up, &re); nvn_dirty_stats(&fa, &pr); nvn_dirty_open_stats(&op, &oc); nvn_dirty_ahead_stats(&fap, &far_);
+    LOG("[nvn] packaged textures: first uploads %llu, re-uploads on pool content change %llu, writes beside a texture only (not re-uploaded) %llu; write-protection faults %llu (pages released ahead of sequential writes %llu in %llu runs), pages unprotected before host writes %llu, opened for pool buffers %llu (changed while open %llu); missed %llu (cumulative); CPU-written textures alive %u", up, re, es, fa, fap, far_, pr, op, oc, mtl_pkg_miss(), mtl_cpu_tex_count());
     memset(g_tn, 0, sizeof g_tn);
 }
 // DM_SLOWFRAME=1 (test switch, read over the log port on a real device): per-frame timings are first stored in a ring of the last 16 frames; dropped frames are judged 8 frames late (GPU / on-screen present times are back by then),

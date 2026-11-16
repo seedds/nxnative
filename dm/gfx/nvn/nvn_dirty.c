@@ -231,6 +231,34 @@ static int page_writable(uintptr_t a) {
     if (vm_region_64(mach_task_self(), &va, &vs, VM_REGION_BASIC_INFO_64, (vm_region_info_t)&bi, &cnt, &obj) != KERN_SUCCESS || va > pg) return 0;
     return (bi.protection & (VM_PROT_WRITE | VM_PROT_EXECUTE)) == VM_PROT_WRITE;
 }
+// Pages released ahead of a sequential write (DM_NVN_FAULT_AHEAD=<pages>, 32 by default, 0 off, ab alternates under DM_AB). A game that fills a pool's protected pages in order
+// (streamed data decompressed into texture storage) faulted on every page: Mario Kart World's races take 1,000-2,500 faults a second, 82-96 % of them on the page right after
+// the thread's last fault, at about 24 µs of CPU each (signal delivery, the range scan, an mprotect). A fault on the page a thread's last fault or release ahead ended at
+// releases the next pages of the same range too, a window that doubles with each such fault up to the limit, stopping at the first page not protected and before the range's
+// last page (it may be another range's first). A page released ahead counts as written (stamped), as one written at its own fault would: at worst a texture over it is uploaded
+// once more. Written later, after an upload protected it again, it faults as before. The handler's state is per thread, in a table by pthread_self (no thread-local storage there)
+enum { FA_SLOTS = 64 };
+static struct { _Atomic uintptr_t tid, next; _Atomic uint32_t k; } g_fa[FA_SLOTS];
+static _Atomic int g_fa_mode = -1, g_fa_max;   // read before any fault can come (nvn_dirty_add_range: fa_init)
+static _Atomic uint64_t g_fa_pages, g_fa_runs;
+// nvn_mtl.m's switches; without it (the tracking's own tests) a plain reading, as hle_thread.c's fallbacks
+__attribute__((weak)) int mtl_sw_mode(const char *name, int dflt) { const char *e = getenv(name); return e && *e ? strncmp(e, "ab", 2) && atoi(e) != 0 : dflt; }
+__attribute__((weak)) int mtl_sw_on(int m) { return m == 1; }
+static void fa_init(void) {
+    if (atomic_load(&g_fa_mode) >= 0) return;
+    const char *e = getenv("DM_NVN_FAULT_AHEAD"); int mx = e && *e && strncmp(e, "ab", 2) ? atoi(e) : 32; if (mx > 256) mx = 256; if (mx < 0) mx = 0;
+    atomic_store(&g_fa_max, mx); atomic_store(&g_fa_mode, mtl_sw_mode("DM_NVN_FAULT_AHEAD", 1));
+}
+static int fa_on(void) { int m = atomic_load_explicit(&g_fa_mode, memory_order_relaxed); return m == 1 || (m > 1 && mtl_sw_on(m)); }
+static uint32_t fa_release(range_t *r, uintptr_t p, uintptr_t q) {   // the protected pages p.. of r, at most to q, up to the first that is not: one mprotect, each stamped
+    uintptr_t i = p;
+    while (i <= q) { uint8_t st = PG_PROT; if (!atomic_compare_exchange_strong(&r->state[i], &st, PG_BUSY)) break; i++; }
+    if (i == p) return 0;
+    mp(rb(r) + (p << g_shift), (i - p) << g_shift, PROT_READ | PROT_WRITE);
+    for (uintptr_t k = p; k < i; k++) { stamp_page(r, k); sparse_note(r, k); atomic_store(&r->state[k], PG_NONE); }
+    atomic_fetch_add(&g_fa_pages, i - p); atomic_fetch_add(&g_fa_runs, 1); return (uint32_t)(i - p);
+}
+void nvn_dirty_ahead_stats(uint64_t *pages, uint64_t *runs) { *pages = atomic_load(&g_fa_pages); *runs = atomic_load(&g_fa_runs); }
 // A write that faulted on a protected page may be handled only after a pool over it was retired: nvn_dirty_remove_range makes the pages writable, then drops the range, and the
 // scan then found no range to claim the fault, so the crash handler stopped the host on a write that was the tracker's (t_dirty_reuse). So a fault no range claims is re-executed
 // when the page is writable by now; and when it is not, but a protection change of this module ran during the scan (a pool registered over the page and protected it, say),
@@ -238,12 +266,17 @@ static int page_writable(uintptr_t a) {
 static int on_fault(void *addr, int is_write, void *uc) {
     (void)uc;
     if (!is_write) return 0;
-    uintptr_t a = (uintptr_t)addr;
+    uintptr_t a = (uintptr_t)addr, pa = a >> g_shift, self = (uintptr_t)pthread_self();
+    unsigned fs = (unsigned)((self >> 4) * 0x9E3779B97F4A7C15ull >> 58) & (FA_SLOTS - 1); uint32_t k = 0;   // pages to release ahead (fa_release)
+    if (fa_on() && atomic_load_explicit(&g_fa[fs].tid, memory_order_relaxed) == self && atomic_load_explicit(&g_fa[fs].next, memory_order_relaxed) == pa) {
+        uint32_t mx = (uint32_t)atomic_load_explicit(&g_fa_max, memory_order_relaxed); k = atomic_load_explicit(&g_fa[fs].k, memory_order_relaxed); k = k ? 2 * k : 1; if (k > mx) k = mx; }
     for (int tries = 0; tries < 1000; tries++) {
-        uint64_t done = atomic_load(&g_mp_done); int ours = 0, n = atomic_load(&g_nr);
+        uint64_t done = atomic_load(&g_mp_done); int ours = 0, n = atomic_load(&g_nr); uint32_t got = 0, kk = k;
         for (int i = 0; i < n; i++)   // Every range sharing the page must be released: releasing only one leaves the other range's state at "protected", and later writes no longer fault and are missed
-            { range_t *r = rg(i); if (live_at(i) && a >= rb(r) && a < re(r) && pin(r)) { if (a >= rb(r) && a < re(r)) ours |= release_page(r, (a - rb(r)) >> g_shift, &g_faults); unpin(r); } }
-        if (ours) return 1;
+            { range_t *r = rg(i); if (live_at(i) && a >= rb(r) && a < re(r) && pin(r)) { if (a >= rb(r) && a < re(r)) { uintptr_t p = (a - rb(r)) >> g_shift, last = ((re(r) - rb(r)) >> g_shift) - 1; int mine = release_page(r, p, &g_faults); ours |= mine;
+                  if (mine && kk && p + 1 < last) { got = fa_release(r, p + 1, p + kk < last - 1 ? p + kk : last - 1); kk = 0; } }   // ahead in one range: the first whose page this is not the last of
+              unpin(r); } }
+        if (ours) { atomic_store_explicit(&g_fa[fs].tid, self, memory_order_relaxed); atomic_store_explicit(&g_fa[fs].next, pa + 1 + got, memory_order_relaxed); atomic_store_explicit(&g_fa[fs].k, k, memory_order_relaxed); return 1; }
         if (page_writable(a)) return 1;
         if (atomic_load(&g_mp_begun) == done) return 0;   // none begun since the scan began, none in flight then: the page's protection is not this module's
     }
@@ -291,6 +324,7 @@ __attribute__((constructor)) static void dirty_init(void) {
 }
 
 void nvn_dirty_add_range(const void *mem, size_t size) {
+    fa_init();
     atomic_fetch_add(&g_adds_total, 1);
     pthread_mutex_lock(&g_slot_mu);
     int n = atomic_load(&g_nr);

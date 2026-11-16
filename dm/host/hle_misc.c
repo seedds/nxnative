@@ -175,7 +175,7 @@ HLE_FORCE("_ZN2nn3ngc15ProfanityFilter8FinalizeEv", "profanity filter shutdown; 
 // ---------- nsd server name resolution / pctl free communication: networking, out of scope ----------
 // Link Play asks parental controls before it opens (research/06 §3.1): while co-op is on (DM_COOP, the launcher's Link Play switch) the three
 // communication queries answer allowed, else never
-struct coop_node; struct coop_node *dm_coop(void);   // hle_offline.c: NULL with co-op off
+struct coop_node; __attribute__((weak)) struct coop_node *dm_coop(void) { return NULL; }   // hle_offline.c's definition replaces this stand-in wherever the Link Play module is linked (dm/host/tests compile this file alone)
 static unsigned pctl_coop(void) { return dm_coop() != NULL; }
 HLE_FORCE("_ZN2nn3nsd7ResolveEPNS0_4FqdnERKS1_", "server name resolution, networking out of scope; cut", Result, h_nsd_Resolve, void *out, const void *in) { (void)out; (void)in; return RES_FAIL; }
 HLE_FORCE("_ZN2nn3nsd9ResolveExEPNS0_4FqdnERKS1_", "server name resolution, networking out of scope; cut", Result, h_nsd_ResolveEx, void *out, const void *in) { (void)out; (void)in; return RES_FAIL; }

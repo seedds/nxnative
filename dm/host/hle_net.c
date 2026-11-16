@@ -47,10 +47,20 @@ int dm_sk_errno(void) { return t_skerr; }
 // nn::ldn is initialized are the module's virtual sockets (descriptors 0x100 and up on 169.254.S.0/24, hle_coop_vnet.c); every other descriptor is one of the host's own local
 // UDP / event descriptors below. A module result -errno comes back as -1 with the thread's last error set (FreeBSD values). hle_offline.c's overloads call these too
 #include "coop.h"
-coop_node *dm_coop(void);   // hle_offline.c: NULL with co-op off
-int dm_sk_socket(int family, int type, int protocol); int dm_sk_bind(int fd, const void *a, unsigned n); int dm_sk_close(int fd); int dm_sk_name(int fd, void *a, unsigned *n, int peer);
-int dm_sk_getopt(int fd, int level, int option, void *value, unsigned *size); int dm_sk_setopt(int fd, int level, int option, const void *value, unsigned size); int dm_sk_fcntl(int fd, int cmd, int value);
-long dm_sk_sendto(int fd, const void *data, unsigned long n, int flags, const void *a, unsigned al); long dm_sk_recvfrom(int fd, void *data, unsigned long n, int flags, void *a, unsigned *al);
+// The module is not in every binary (dm/host/tests compile this file on its own): these weak definitions stand in for it there, and the module's own definitions
+// (hle_offline.c dm_coop, hle_coop_vnet.c) replace them wherever it is linked. Without the module every descriptor is local
+__attribute__((weak)) coop_node *dm_coop(void) { return NULL; }
+__attribute__((weak)) int coop_vnet_is(coop_node *n, int fd) { (void)n; (void)fd; return 0; }
+__attribute__((weak)) int coop_vnet_socket(coop_node *n, int family, int type, int proto) { (void)n; (void)family; (void)type; (void)proto; return -SK_ENETDOWN; }
+__attribute__((weak)) int coop_vnet_bind(coop_node *n, int fd, const void *sa, uint32_t len) { (void)n; (void)fd; (void)sa; (void)len; return -SK_ENETDOWN; }
+__attribute__((weak)) int coop_vnet_close(coop_node *n, int fd) { (void)n; (void)fd; return -SK_ENETDOWN; }
+__attribute__((weak)) int coop_vnet_setsockopt(coop_node *n, int fd, int level, int opt, const void *v, uint32_t len) { (void)n; (void)fd; (void)level; (void)opt; (void)v; (void)len; return -SK_ENETDOWN; }
+__attribute__((weak)) int coop_vnet_getsockopt(coop_node *n, int fd, int level, int opt, void *v, uint32_t *len) { (void)n; (void)fd; (void)level; (void)opt; (void)v; (void)len; return -SK_ENETDOWN; }
+__attribute__((weak)) int coop_vnet_getsockname(coop_node *n, int fd, void *sa, uint32_t *len) { (void)n; (void)fd; (void)sa; (void)len; return -SK_ENETDOWN; }
+__attribute__((weak)) int coop_vnet_fcntl(coop_node *n, int fd, int cmd, int v) { (void)n; (void)fd; (void)cmd; (void)v; return -SK_ENETDOWN; }
+__attribute__((weak)) int64_t coop_vnet_sendto(coop_node *n, int fd, const void *buf, uint64_t len, int flags, const void *sa, uint32_t salen) { (void)n; (void)fd; (void)buf; (void)len; (void)flags; (void)sa; (void)salen; return -SK_ENETDOWN; }
+__attribute__((weak)) int64_t coop_vnet_recvfrom(coop_node *n, int fd, void *buf, uint64_t len, int flags, void *sa, uint32_t *salen) { (void)n; (void)fd; (void)buf; (void)len; (void)flags; (void)sa; (void)salen; return -SK_ENETDOWN; }
+__attribute__((weak)) int coop_vnet_poll(coop_node *n, coop_pollfd *fds, uint64_t nfds, int timeout_ms) { (void)n; (void)fds; (void)nfds; (void)timeout_ms; return -SK_ENETDOWN; }
 int mpsk_is(int s) { coop_node *c = dm_coop(); return c && coop_vnet_is(c, s); }
 static long mpsk_ret(int64_t r) { if (r >= 0) return (long)r; t_skerr = (int)-r; return -1; }
 int mpsk_errno(void) { return t_skerr; }

@@ -122,10 +122,11 @@ static inline uint64_t rec_f(float f) { uint32_t u; memcpy(&u, &f, 4); return u;
 static inline float rec_fv(uint64_t v) { uint32_t u = (uint32_t)v; float f; memcpy(&f, &u, 4); return f; }
 
 static pthread_mutex_t g_note_mu = PTHREAD_MUTEX_INITIALIZER; static pthread_cond_t g_note_cv = PTHREAD_COND_INITIALIZER;
-// Wait until the encode thread has passed a RO_NOTE of at least v on p (only the encode thread's progress through what is queued, never the GPU)
+// Wait until the encode thread has passed a RO_NOTE of at least v on p (only the encode thread's progress through what is queued, never the GPU). Under the suspend's limit
+// (nvn_mtl.m t_drain_by: snap_drain in mtl_drain_by) it ends there; the caller reads the note again
 static void rec_note_wait(_Atomic uint64_t *p, uint64_t v) {
     if (atomic_load(p) >= v) return;
-    pthread_mutex_lock(&g_note_mu); while (atomic_load(p) < v) pthread_cond_wait(&g_note_cv, &g_note_mu); pthread_mutex_unlock(&g_note_mu);
+    pthread_mutex_lock(&g_note_mu); while (atomic_load(p) < v && !drain_over()) drain_cond_wait(&g_note_cv, &g_note_mu); pthread_mutex_unlock(&g_note_mu);
 }
 
 // ---------- The encode thread ----------

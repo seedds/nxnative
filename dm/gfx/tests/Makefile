@@ -435,6 +435,9 @@ check_t_view_levels: RUN_ENV = MTL_DEBUG_LAYER=1
 t_res_commit: t_res_commit.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_res_commit.m $(MTL_T_SRC) $(FW)
 check_t_res_commit: RUN_ENV = MTL_DEBUG_LAYER=1
+t_suspend_drain: t_suspend_drain.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_suspend_drain.m $(MTL_T_SRC) $(FW)
+check_t_suspend_drain: RUN_ENV = MTL_DEBUG_LAYER=1
 t_upload_src: t_upload_src.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_upload_src.m $(MTL_T_SRC) $(FW)
 check_t_upload_src: RUN_ENV = MTL_DEBUG_LAYER=1

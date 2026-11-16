@@ -34,6 +34,7 @@
 #define DM_MEM_CAP_DEFAULT_GB 0
 #endif
 #include <pthread/qos.h>
+#include <dispatch/dispatch.h>
 #include <sys/resource.h>
 #include <sys/sysctl.h>
 #include <mach/thread_policy.h>
@@ -1772,14 +1773,139 @@ void dm_gfx_enter(void) { gfx_enter(); }   // the same gate for the Vulkan layer
 void dm_gfx_leave(void) { gfx_leave(); }
 __attribute__((weak)) void dm_vk_drain(void) {}   // dm/gfx/vk/hle_vk.m: wait for the Vulkan layer's queue (the graphics unit tests do not link it)
 __attribute__((weak)) void dm_gl_drain(void) {}   // dm/gfx/gl/hle_gl.m: the same for the GL layer
-void dm_gfx_suspend(int on) {
+// The suspend has a limit. dm_gfx_suspend runs on the main thread of an iPhone app (front_ios.m sceneDidEnterBackground, the Mac window's minimize too) and waited with no limit for
+// the graphics calls in progress (g_inflight_api), then mtl_drain for the present on the GPU, the present queue, the snapshot copies, a one-off command buffer and the last fence.
+// With the GPU or the feedback queue stuck it never returned, so what the front end starts after it (the pipeline archive's background task, the cloud save of what the game had
+// written) never started. Now everything going to the background takes at most SUSP_LIMIT_NS (3 s) of the main thread: the graphics calls are waited for until then, and the drain
+// runs on a thread of its own (gfx_drain_by) with every wait on its path ending at the same time (nvn_mtl.m mtl_drain_by, t_drain_by), the main thread waiting for it no longer
+// (plus SUSP_GRACE_NS for the drain to say which step it was); a lock it takes has no limit, the thread does. When the limit comes first: "[RED] suspend: the GPU did not drain in
+// 3 s" with the step, the graphics wait points on a utility queue (mtl_wait_state_dump), and the rest is skipped: the drain and the pipeline archive's hand-over, which would only
+// ask the compiler for more while the GPU is not answering. The gate stays closed, so no submission or present starts, and the call returns.
+// Coming back (on 0) after such a suspend: the drain is tried again, up to SUSP_RESUME_NS; done, graphics resume as after any suspend ("the drain ... has finished since"); not, the
+// gate stays closed (nothing is submitted or presented: the game stands as it stood) with a red line, and a thread of its own tries again every second while the app stays in the
+// foreground (susp_retry_main), opening the gate when a drain finishes: a stall that only outlasted the 3 s, such as a long residency commit holding the feedback queue, then
+// resumes by itself instead of leaving the game frozen until the next trip to the background. Behaviour with a drain that finishes in time is unchanged
+#define SUSP_LIMIT_NS 3000000000ull
+#define SUSP_GRACE_NS 100000000ull
+#define SUSP_RESUME_NS 1000000000ull
+#define SUSP_RETRY_NS 1000000000ull
+static int g_susp_stuck;   // under g_susp_mu: the last suspend's drain did not finish in its limit, and none has since
+static int g_susp_want, g_susp_retry;   // under g_susp_mu: a resume is owed (a resume that could not drain sets it, any suspend clears it); the retry's thread runs
+static uint64_t g_susp_gen;   // under g_susp_mu: suspends so far; a retry's drain begun before a suspend never opens the gate after it
+static uint64_t susp_now(void) { return clock_gettime_nsec_np(CLOCK_UPTIME_RAW); }   // the drain's limit's clock (nvn_mtl.m t_drain_by)
+static int susp_wait_until(pthread_cond_t *cv, pthread_mutex_t *mu, uint64_t until) {   // one timed wait; 0 once until has passed
+    uint64_t now = susp_now(); if (now >= until) return 0;
+    uint64_t left = until - now; struct timespec ts = {(time_t)(left / 1000000000ull), (long)(left % 1000000000ull)};
+    pthread_cond_timedwait_relative_np(cv, mu, &ts); return 1;
+}
+// The drain's thread: one at a time (g_drain_run), its result in g_drain_what (NULL: drained). A thread still held past its limit (by a lock) makes the next drain wait for it
+static pthread_mutex_t g_drain_mu = PTHREAD_MUTEX_INITIALIZER; static pthread_cond_t g_drain_cv = PTHREAD_COND_INITIALIZER;
+static int g_drain_run; static uint64_t g_drain_by; static const char *g_drain_what;
+static void *gfx_drain_main(void *arg) {
+    (void)arg; pthread_setname_np("nvn suspend drain");
+    pthread_mutex_lock(&g_drain_mu); uint64_t by = g_drain_by; pthread_mutex_unlock(&g_drain_mu);
+    dm_vk_drain(); dm_gl_drain();   // the Vulkan and GL queues first: presents on the NVN queue wait for their frames (no limit of their own: a drain held here is reported as held)
+    const char *what = mtl_drain_by(by);
+    pthread_mutex_lock(&g_drain_mu); g_drain_what = what; g_drain_run = 0; pthread_cond_broadcast(&g_drain_cv); pthread_mutex_unlock(&g_drain_mu);
+    return NULL;
+}
+// Drain with every wait ending at by; the caller waits no longer than by plus the grace. NULL: drained; else what did not
+static const char *gfx_drain_by(uint64_t by) {
+    pthread_mutex_lock(&g_drain_mu);
+    while (g_drain_run && susp_wait_until(&g_drain_cv, &g_drain_mu, by)) {}
+    if (g_drain_run) { pthread_mutex_unlock(&g_drain_mu); return "an earlier drain, still held where no wait has a limit (a lock)"; }
+    g_drain_run = 1; g_drain_by = by; g_drain_what = NULL;
+    pthread_mutex_unlock(&g_drain_mu);
+    pthread_attr_t at; pthread_attr_init(&at); pthread_attr_setdetachstate(&at, PTHREAD_CREATE_DETACHED);
+    pthread_attr_set_qos_class_np(&at, QOS_CLASS_USER_INTERACTIVE, 0);   // the main thread waits for it
+    pthread_t th; int err = pthread_create(&th, &at, gfx_drain_main, NULL); pthread_attr_destroy(&at);
+    if (err) { pthread_mutex_lock(&g_drain_mu); g_drain_run = 0; pthread_mutex_unlock(&g_drain_mu); return "the drain's thread, which could not start"; }
+    pthread_mutex_lock(&g_drain_mu);
+    while (g_drain_run && susp_wait_until(&g_drain_cv, &g_drain_mu, by + SUSP_GRACE_NS)) {}
+    const char *what = g_drain_run ? "the drain's thread, held where no wait has a limit (a lock)" : g_drain_what;
+    pthread_mutex_unlock(&g_drain_mu);
+    return what;
+}
+static void susp_dump(void *arg) { (void)arg; mtl_wait_state_dump(); LOG("[nvn] suspend: dump end"); }
+// The graphics calls in progress and the drain, both ending at by: NULL when done, else what was not (into buf for the calls)
+static const char *susp_drain(uint64_t by, char *buf, size_t n) {
     pthread_mutex_lock(&g_susp_mu);
-    g_susp = on != 0;
-    if (on) while (g_inflight_api) pthread_cond_wait(&g_susp_cv, &g_susp_mu);
-    else pthread_cond_broadcast(&g_susp_cv);
+    while (g_inflight_api && susp_wait_until(&g_susp_cv, &g_susp_mu, by)) {}
+    int api = g_inflight_api;
     pthread_mutex_unlock(&g_susp_mu);
-    if (on) { dm_vk_drain(); dm_gl_drain(); mtl_drain(); mtl_arch_save(0, 0); LOG("[nvn] graphics suspended: in-flight GPU work drained"); } else LOG("[nvn] graphics resumed");   // the Vulkan and GL queues first: presents on the NVN queue wait for their frames;
-    // the pipeline archive starts writing what it holds: a process in the background may be ended without a word (iOS), and a prewarm's captures wait for a full period
+    if (api) { snprintf(buf, n, "%d graphics call%s in progress (a submission or a present that did not return)", api, api == 1 ? "" : "s"); return buf; }
+    return gfx_drain_by(by);
+}
+// After a resume that could not drain, in the foreground with the gate closed: every SUSP_RETRY_NS, while that resume is still owed, a look that costs nothing (no graphics call in
+// progress, every fence back) and only then a drain of up to SUSP_RESUME_NS (so a GPU that stays stuck gets no one-off command buffer a second; the drain's own thread is still one
+// at a time). A drain done opens the gate as the resume would have; a suspend meanwhile (g_susp_want cleared, g_susp_gen moved on) ends the thread with the gate left to it
+static void *susp_retry_main(void *arg) {
+    (void)arg; pthread_setname_np("nvn resume retry");
+    uint64_t t0 = susp_now(); int tries = 0; char buf[160];
+    pthread_mutex_lock(&g_susp_mu);
+    for (;;) {
+        uint64_t until = susp_now() + SUSP_RETRY_NS;
+        while (g_susp_want && g_susp_stuck && susp_wait_until(&g_susp_cv, &g_susp_mu, until)) {}
+        if (!g_susp_want || !g_susp_stuck) break;
+        uint64_t gen = g_susp_gen; int api = g_inflight_api;
+        pthread_mutex_unlock(&g_susp_mu);
+        const char *what = "";
+        if (!api && mtl_completed_fence() >= mtl_last_fence()) { tries++; what = susp_drain(susp_now() + SUSP_RESUME_NS, buf, sizeof buf); }
+        pthread_mutex_lock(&g_susp_mu);
+        if (!what && g_susp_want && g_susp_stuck && gen == g_susp_gen) {
+            g_susp_want = 0; g_susp_stuck = 0; g_susp = 0; pthread_cond_broadcast(&g_susp_cv);
+            pthread_mutex_unlock(&g_susp_mu);
+            LOG("[nvn] the drain that did not finish going to the background has finished since (%.1f s after the resume, drain %d): graphics resumed", (susp_now() - t0) / 1e9, tries);
+            pthread_mutex_lock(&g_susp_mu);
+            break;
+        }
+    }
+    g_susp_retry = 0;
+    pthread_mutex_unlock(&g_susp_mu);
+    return NULL;
+}
+static void susp_retry_start(void) {   // a resume that could not drain: owed from now on, and the retry's thread started unless one runs
+    pthread_mutex_lock(&g_susp_mu); g_susp_want = 1; int start = !g_susp_retry; g_susp_retry = 1; pthread_mutex_unlock(&g_susp_mu);
+    if (!start) return;
+    pthread_attr_t at; pthread_attr_init(&at); pthread_attr_setdetachstate(&at, PTHREAD_CREATE_DETACHED);
+    pthread_attr_set_qos_class_np(&at, QOS_CLASS_UTILITY, 0);
+    pthread_t th; int err = pthread_create(&th, &at, susp_retry_main, NULL); pthread_attr_destroy(&at);
+    if (err) { pthread_mutex_lock(&g_susp_mu); g_susp_retry = 0; pthread_mutex_unlock(&g_susp_mu); LOG("[RED] resume: the retry's thread could not start (%d): graphics stay suspended until the next suspend and resume", err); }
+}
+void dm_gfx_suspend(int on) {
+    uint64_t t0 = susp_now();
+    pthread_mutex_lock(&g_susp_mu);
+    int stuck = g_susp_stuck;
+    if (on) { g_susp = 1; g_susp_gen++; if (g_susp_want) { g_susp_want = 0; pthread_cond_broadcast(&g_susp_cv); } }   // a resume owed is not owed in the background: the retry ends
+    else if (!stuck) { g_susp = 0; pthread_cond_broadcast(&g_susp_cv); }
+    pthread_mutex_unlock(&g_susp_mu);
+    char buf[160];
+    if (!on) {
+        if (stuck) {   // the last suspend did not drain: resume only once it has
+            const char *what = susp_drain(t0 + SUSP_RESUME_NS, buf, sizeof buf);
+            if (what) {
+                LOG("[RED] resume: the GPU has still not drained (%s): graphics stay suspended, nothing is submitted or presented (the picture stands); tried again every second "
+                    "while in the foreground, and by the next suspend and resume", what);
+                susp_retry_start();
+                return;
+            }
+            pthread_mutex_lock(&g_susp_mu); g_susp_stuck = 0; g_susp_want = 0; g_susp = 0; pthread_cond_broadcast(&g_susp_cv); pthread_mutex_unlock(&g_susp_mu);
+            LOG("[nvn] the drain that did not finish going to the background has finished since (%.0f ms now)", (susp_now() - t0) / 1e6);
+        }
+        LOG("[nvn] graphics resumed");
+        return;
+    }
+    const char *what = susp_drain(t0 + SUSP_LIMIT_NS, buf, sizeof buf);
+    if (what) {
+        pthread_mutex_lock(&g_susp_mu); g_susp_stuck = 1; pthread_mutex_unlock(&g_susp_mu);
+        LOG("[RED] suspend: the GPU did not drain in %.0f s (at %.1f s, still waiting for %s): the rest of the drain and the pipeline archive's hand-over are skipped; graphics stay "
+            "suspended, nothing new is submitted; the wait points follow", SUSP_LIMIT_NS / 1e9, (susp_now() - t0) / 1e9, what);
+        dispatch_async_f(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), NULL, susp_dump);
+        return;
+    }
+    pthread_mutex_lock(&g_susp_mu); g_susp_stuck = 0; pthread_mutex_unlock(&g_susp_mu);
+    mtl_arch_save(0, 0); LOG("[nvn] graphics suspended: in-flight GPU work drained");
+    // The pipeline archive starts writing what it holds: a process in the background may be ended without a word (iOS), and a prewarm's captures wait for a full period
 }
 void dm_gfx_quit(int wait_ms) { mtl_arch_save(wait_ms, 1); }
 void dm_gfx_quit_begin(void) { mtl_warm_stop(); mtl_arch_save(0, 0); }   // the end's first step: no more prewarm compiles, and what the archive holds starts writing beside the drain (which can wait on a draw that compiles)

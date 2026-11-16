@@ -52,6 +52,8 @@ int mtl_wait(uint64_t fence, uint64_t timeout_ns);   // Returns 1 when the GPU h
 int mtl_wait_acq(uint64_t fence, uint64_t timeout_ns);   // the same for a sync WindowAcquireTexture handed out (its own line in the wait ledger, DM_NVN_WAITS)
 void mtl_finish(void);                               // Wait for all submitted commands to complete
 void mtl_drain(void);                                // Wait for all commands on the queue (including presents) to complete: submit an empty command buffer and wait for it
+const char *mtl_drain_by(uint64_t by);               // mtl_drain with every wait ending at by (CLOCK_UPTIME_RAW ns; going to the background, dm_gfx_suspend): NULL when drained, else the step that reached it
+void mtl_wait_state_dump(void);                      // The graphics wait points in one log line (the watchdog, a suspend that did not drain)
 void mtl_arch_save(int wait_ms, int ending);         // The pipeline archive's unwritten captures, written now even during the prewarm (going to the background, quitting); ending: the process ends after waiting up to wait_ms
 enum { MTL_QUIT_ARCH_MS = 10000 };   // what quitting gives the archive's write (atexit; the graceful exit: dm.h DM_QUIT_ARCH_MS, the same): a file of 900 bases took 1.8-4 s on Macs
 void mtl_warm_stop(void);   // the process is ending: the pipeline prewarm takes no more lines, and what it has not built is left to the next start (no compiles beside the archive's write)

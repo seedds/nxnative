@@ -321,6 +321,26 @@ static MTL4CommitOptions *commit_opts(DmCommitFB *fb) {
     return o;
 }
 static id<MTL4CounterHeap> g_ts_heap;   // tentative: defined with the segment timestamps below
+// The suspend's limit (mtl_drain_by; hle_nvn.c dm_gfx_suspend, going to the background). dm_gfx_suspend runs on the main thread of an iPhone app (sceneDidEnterBackground) and
+// waited with no limit for the graphics calls in progress, the present on the GPU (present_drop_for_suspend), the present queue, the snapshot copies, a one-off command buffer and
+// the last fence and upload batches (mtl_finish_gpu): with the GPU or the feedback queue stuck it never returned, so the work the front end starts after it (the pipeline
+// archive's background task, the cloud save) never started. The drain now runs with a deadline, a thread-local one so that no other caller of these waits changes: t_drain_by is
+// set only on the thread that runs mtl_drain_by (CLOCK_UPTIME_RAW ns, 0: no limit, every other thread). The waits on that path end at it, their loops checking drain_over, and the
+// drain says which step it was; the snapshot copy's 10 s stop (snap_drain's MDIE) becomes that answer too, as a process stopped in the background is worse than one that says it
+// did not drain
+static __thread uint64_t t_drain_by;
+static inline uint64_t drain_left(void) {   // what is left of the limit (ns); UINT64_MAX with none
+    if (!t_drain_by) return UINT64_MAX;
+    uint64_t now = clock_gettime_nsec_np(CLOCK_UPTIME_RAW); return now >= t_drain_by ? 0 : t_drain_by - now;
+}
+static inline int drain_over(void) { return t_drain_by && !drain_left(); }
+// pthread_cond_wait, or under the suspend's limit a wait that ends there (the caller's loop checks drain_over)
+static void drain_cond_wait(pthread_cond_t *cv, pthread_mutex_t *mu) {
+    uint64_t dl = drain_left(); if (dl == UINT64_MAX) { pthread_cond_wait(cv, mu); return; }
+    if (!dl) return;
+    struct timespec ts = {(time_t)(dl / 1000000000ull), (long)(dl % 1000000000ull)};
+    pthread_cond_timedwait_relative_np(cv, mu, &ts);
+}
 #include "nvn_rec.h"   // deferred encoding (DM_NVN_ENC_THREAD)
 static NSHashTable *g_res_objects;
 static _Atomic unsigned g_image_heap_n, g_big_n;   // g_big_n: large pools in chunks, whose buffers overlap (BIG_MIN)
@@ -2773,8 +2793,9 @@ static int mtl_wait_at(uint64_t fence, uint64_t timeout_ns, int site) {
 int mtl_wait(uint64_t fence, uint64_t timeout_ns) { return mtl_wait_at(fence, timeout_ns, !timeout_ns ? WS_SYNC_POLL : fence >= g_fence ? WS_SYNC_NEWEST : WS_SYNC); }
 int mtl_wait_acq(uint64_t fence, uint64_t timeout_ns) { return mtl_wait_at(fence, timeout_ns, !timeout_ns ? WS_SYNC_POLL : WS_ACQ); }
 
+// Under the suspend's limit (t_drain_by) both waits end there; the caller (drain_steps) reads what is left
 static void mtl_finish_gpu_at(int site) {
-    if (g_fence) mtl_wait_at(g_fence, UINT64_MAX, site);
+    if (g_fence) mtl_wait_at(g_fence, drain_left(), site);
     if (on_sub_thread()) rec_publish();   // a batch's commit may still be a record in the encode thread's current block (rec_commit_upload), as in up_begin and q_cb
     up_wait_zero(&g_up_pending, site);
 }
@@ -2784,9 +2805,44 @@ void mtl_present_flush(void);
 // made every QueueFinish cost one or two display frames. Fire Emblem: Three Houses' loader submits a copy and calls QueueFinish for each resource it uploads, and its first loading screen
 // took 78 s on the iPhone (5 s windowless on the Mac). A swapchain texture is not handed back before its previous present is processed (AcquireTexture waits for that ticket)
 void mtl_finish(void) { mtl_finish_gpu_at(WS_FINISH); }
-static void present_drop_for_suspend(void);
-static void snap_drain(void);
-void mtl_drain(void) { present_drop_for_suspend(); mtl_present_flush(); snap_drain(); mtl_init(); id<MTLCommandBuffer> cb = q_cb(); [cb commit]; [cb waitUntilCompleted]; mtl_finish_gpu(); }
+static int present_drop_for_suspend(void);
+static int present_flush_ok(void);
+static int snap_drain(void);
+// The one-off command buffer behind all earlier work, committed and waited for. Under the suspend's limit (t_drain_by) the wait ends there and this returns 0; the completion,
+// when it comes, still signals the semaphore, which the block keeps alive
+static int drain_queue_wait(void) {
+    id<MTLCommandBuffer> cb = q_cb();
+    if (!t_drain_by) { [cb commit]; [cb waitUntilCompleted]; return 1; }
+    dispatch_semaphore_t sem = dispatch_semaphore_create(0);
+    [cb addCompletedHandler:^(id<MTLCommandBuffer> c) { (void)c; dispatch_semaphore_signal(sem); }];
+    [cb commit];
+    return !dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, (int64_t)drain_left()));
+}
+// Everything submitted so far has run (suspend, the tests). With no limit (t_drain_by 0) each step waits until it is done and this returns NULL; under the suspend's limit
+// (mtl_drain_by) a step whose wait reached it ends the drain, and this names it: the steps after it would only wait on the same GPU
+static const char *drain_steps(void) {
+    if (!present_drop_for_suspend()) return "the present on the GPU (present_drop_for_suspend)";
+    if (!present_flush_ok()) return "the present queue (mtl_present_flush)";
+    if (!snap_drain()) return "the present snapshot copies (snap_drain)";
+    // A limit already reached commits no one-off command buffer: its wait would end at once, and the buffer would go to the queue after the suspend has given up (a drain thread
+    // let go late by a lock, in the background, or a resume's retry while the GPU stays stuck), one more never completed behind work that does not finish
+    if (drain_over()) return "a one-off command buffer behind all earlier work (drain_queue_wait)";
+    mtl_init();
+    if (!drain_queue_wait()) return "a one-off command buffer behind all earlier work (drain_queue_wait)";
+    mtl_finish_gpu();
+    if (g_fence && atomic_load(&g_done) < g_fence) return "the GPU work up to the last fence (mtl_finish_gpu)";
+    if (atomic_load(&g_up_pending)) return "the upload batches (mtl_finish_gpu)";
+    return NULL;
+}
+void mtl_drain(void) { drain_steps(); }
+// mtl_drain with every wait ending at by (CLOCK_UPTIME_RAW ns): NULL when everything drained, else which step's wait reached the limit. Going to the background (hle_nvn.c
+// dm_gfx_suspend), on a thread of its own whose end the main thread waits for no longer than the limit: a lock taken on the way has no limit of its own
+const char *mtl_drain_by(uint64_t by) {
+    t_drain_by = by ? by : 1;
+    const char *what; @autoreleasepool { what = drain_steps(); }   // the drain's thread has no pool of its own
+    t_drain_by = 0;
+    return what;
+}
 
 // ================= Render replay =================
 #include "../../host/front.h"
@@ -3188,7 +3244,7 @@ static void up_wait_zero(_Atomic int *v, int site) {
     if (!atomic_load(v)) { if (ws_on()) ws_put(site, 0, 0); return; }
     uint64_t w0 = ws_t0();
     pthread_mutex_lock(&g_up_wmu);
-    while (atomic_load(v)) { struct timespec dl; clock_gettime(CLOCK_REALTIME, &dl); dl.tv_nsec += 10000000; if (dl.tv_nsec >= 1000000000) { dl.tv_sec++; dl.tv_nsec -= 1000000000; } pthread_cond_timedwait(&g_up_wcv, &g_up_wmu, &dl); }
+    while (atomic_load(v) && !drain_over()) { struct timespec dl; clock_gettime(CLOCK_REALTIME, &dl); dl.tv_nsec += 10000000; if (dl.tv_nsec >= 1000000000) { dl.tv_sec++; dl.tv_nsec -= 1000000000; } pthread_cond_timedwait(&g_up_wcv, &g_up_wmu, &dl); }
     pthread_mutex_unlock(&g_up_wmu);
     if (ws_on()) ws_put(site, w0, 1);
 }
@@ -17001,18 +17057,23 @@ static void link_sync(void) {   // Called every frame by the game's present thre
 // Before going to the background (mtl_drain): when the display link drives presents, frames queued but not yet presented can only be taken by the display-link callback, and in the background the system no longer calls back --
 // waiting as-is for "the present queue to empty" would wait forever, the enter-background callback would not return, and the system would kill the process (the process disappears within 22 seconds after switching to another App).
 // These frames will not be seen anyway: discard them directly (accounted as dropped frames) and only wait for the one present already submitted to the GPU to finish.
-static void present_drop_for_suspend(void) {
+// Under the suspend's limit (t_drain_by, mtl_drain_by) that wait ends there and this returns 0, the queue left as it stands past the drop (no ticket is marked processed while a
+// present is still on the GPU); 1 otherwise
+static int present_drop_for_suspend(void) {
+    int ok = 1;
     pthread_mutex_lock(&g_pq_mu);
     if (g_link_owns_layer) {
         uint64_t n = g_pq_in - g_pq_read;
         for (uint64_t k = g_pq_read + 1; k <= g_pq_in; k++) { g_pres[k % PRING] = (pres_ent){k, -1}; mtl_tex_unpin(g_pq[(k-1)%PQ].t.serial); }
         g_link_dropped += n; g_pq_read = g_pq_in;
-        while (g_pq_inflight) pthread_cond_wait(&g_pq_cv, &g_pq_mu);
-        if (g_pq_done < g_pq_in) g_pq_done = g_pq_in;
+        while (g_pq_inflight && !drain_over()) drain_cond_wait(&g_pq_cv, &g_pq_mu);
+        ok = !g_pq_inflight;
+        if (ok && g_pq_done < g_pq_in) g_pq_done = g_pq_in;
         pthread_cond_broadcast(&g_pq_cv);
         if (n) MLOG("entering the background: dropping %llu queued frames not yet displayed (the display link does not fire in the background)", (unsigned long long)n);
     }
     pthread_mutex_unlock(&g_pq_mu);
+    return ok;
 }
 static void *present_main(void *arg) {
     (void)arg;
@@ -17107,11 +17168,15 @@ int mtl_snap_on(void) {
     return v;
 }
 static void snap_commit_wait(uint64_t v) { if (v) rec_note_wait(&g_snap_cmt, v); }
-static void snap_drain(void) {
+// Under the suspend's limit (t_drain_by, mtl_drain_by) both waits end there and a copy not done returns 0 instead of stopping the process; 1 when the copies are done
+static int snap_drain(void) {
     // Display tickets may have been dropped during suspend, but their copies still belong to the Metal 4 queue.
-    uint64_t v = g_snap_v; if (!v) return;
+    uint64_t v = g_snap_v; if (!v) return 1;
     snap_commit_wait(v);
-    if (![g_snap_ev waitUntilSignaledValue:v timeoutMS:10000]) MDIE("present snapshots: GPU did not drain within 10 s");
+    if (atomic_load(&g_snap_cmt) < v) return 0;   // only under the limit: the note's wait ended there
+    uint64_t dl = drain_left(), ms = 10000; if (dl != UINT64_MAX && dl / 1000000ull < ms) ms = dl / 1000000ull;
+    if (![g_snap_ev waitUntilSignaledValue:v timeoutMS:ms]) { if (t_drain_by) return 0; MDIE("present snapshots: GPU did not drain within 10 s"); }
+    return 1;
 }
 uint64_t mtl_snap_acquire_wait(void) {
     if (!mtl_snap_on() || atomic_load(&g_present_discard)) return 0;
@@ -17291,8 +17356,9 @@ void mtl_present_wait_texture(uint64_t tk, uint64_t ev) {
 void mtl_present_wait(uint64_t tk) {
     pthread_mutex_lock(&g_pq_mu);
     while (g_pq_done < tk && !atomic_load(&g_present_discard)) {
-        if (!g_link_owns_layer) { pthread_cond_wait(&g_pq_cv, &g_pq_mu); continue; }
-        if (g_pq_read >= tk) { pthread_cond_wait(&g_pq_cv, &g_pq_mu); continue; }   // This one has already been taken by the display link and is being presented: wait for it to be handed to the GPU (the GPU completion callback will wake us)
+        if (drain_over()) break;   // the suspend's limit (mtl_drain_by): present_flush_ok reads what is left
+        if (!g_link_owns_layer) { drain_cond_wait(&g_pq_cv, &g_pq_mu); continue; }
+        if (g_pq_read >= tk) { drain_cond_wait(&g_pq_cv, &g_pq_mu); continue; }   // This one has already been taken by the display link and is being presented: wait for it to be handed to the GPU (the GPU completion callback will wake us)
         struct timespec ts; clock_gettime(CLOCK_REALTIME, &ts); ts.tv_nsec += (long)STALL_NS; if (ts.tv_nsec >= 1000000000L) { ts.tv_sec++; ts.tv_nsec -= 1000000000L; }
         // Already determined to be in a stall (when the display link comes back the callback first clears g_stall_t0, then records the display-link tick time): no longer wait 100 ms in vain every frame, drop directly, and the game proceeds by its own display-link wait timeout (about two ticks)
         if (!g_stall_t0 && (pthread_cond_timedwait(&g_pq_cv, &g_pq_mu, &ts) != ETIMEDOUT || g_pq_done >= tk)) continue;
@@ -17302,7 +17368,8 @@ void mtl_present_wait(uint64_t tk) {
         uint64_t n = tk - g_pq_read;
         for (uint64_t k = g_pq_read + 1; k <= tk; k++) { g_pres[k % PRING] = (pres_ent){k, -1}; mtl_tex_unpin(g_pq[(k-1)%PQ].t.serial); }
         g_link_dropped += n; g_pq_read = tk;
-        while (g_pq_inflight) pthread_cond_wait(&g_pq_cv, &g_pq_mu);
+        while (g_pq_inflight && !drain_over()) drain_cond_wait(&g_pq_cv, &g_pq_mu);
+        if (g_pq_inflight) break;   // the suspend's limit came first: no ticket is marked processed while a present is still on the GPU
         if (g_pq_done < tk) g_pq_done = tk;
         pthread_cond_broadcast(&g_pq_cv);
         if (!g_stall_t0) { g_stall_t0 = last ? last : now; g_stall_drop = 0; g_stall_red = 0; g_stall_logged = 0; g_stall_n++; }
@@ -17322,7 +17389,14 @@ void mtl_present_wait(uint64_t tk) {
 }
 // Wait until all queued presents have been processed (used by mtl_finish = nvnQueueFinish etc.): goes through mtl_present_wait, so there is still a fallback when the display link stops (real device: the game called QueueFinish once while the display link was stopped,
 // and this used to wait here without a timeout; nobody took the 3 queued frames and the game stalled; those two runs on Mac did not hit this call)
-void mtl_present_flush(void) { pthread_mutex_lock(&g_pq_mu); uint64_t h = g_pq_in; pthread_mutex_unlock(&g_pq_mu); mtl_present_wait(h); }
+// present_flush_ok: the same wait, 0 when the suspend's limit (mtl_drain_by) ended it with the queue not processed
+static int present_flush_ok(void) {
+    pthread_mutex_lock(&g_pq_mu); uint64_t h = g_pq_in; pthread_mutex_unlock(&g_pq_mu);
+    mtl_present_wait(h);
+    pthread_mutex_lock(&g_pq_mu); int ok = g_pq_done >= h || atomic_load(&g_present_discard); pthread_mutex_unlock(&g_pq_mu);
+    return ok;
+}
+void mtl_present_flush(void) { present_flush_ok(); }
 void mtl_stats(uint64_t *passes, uint64_t *draws) { *passes = g_stat_pass; *draws = g_stat_draw; cp_report(); }
 void mtl_args_stats(uint64_t *enc, uint64_t *reuse, uint64_t *patch) { *enc = g_stat_args_enc; *reuse = g_stat_args_reuse; *patch = g_stat_args_patch; }
 void mtl_vbuf_stats(uint64_t *resolve, uint64_t *reuse, uint64_t *set, uint64_t *skip, uint64_t *copies, uint64_t *copy_bytes) {

@@ -12051,12 +12051,15 @@ static int args_cbuf_only(NvShader *sh) {
 }
 // The shader lists of the last CBS_FLY committed command buffers, by fence: a hang report names what the command buffer it waits for runs (mtl_wait_at)
 #define CBS_FLY 64
-static struct { uint64_t fence; cbs_list *l; } g_cbs_fly[CBS_FLY]; static uint32_t g_cbs_fly_i;
+static struct { uint64_t fence; cbs_list *l; uint32_t cap; } g_cbs_fly[CBS_FLY]; static uint32_t g_cbs_fly_i;   // cap: entries the slot's list has room for, so it is reused, not made again each commit
 static void cbs_fly_put(uint64_t fence, const cbs_list *l) {
     if (!l) return;
-    cbs_list *c = malloc(sizeof *c + l->n * sizeof *l->e); if (!c) return;
-    memcpy(c, l, sizeof *c + l->n * sizeof *l->e);
-    pthread_mutex_lock(&g_cbs_mu); uint32_t i = g_cbs_fly_i++ % CBS_FLY; free(g_cbs_fly[i].l); g_cbs_fly[i].fence = fence; g_cbs_fly[i].l = c; pthread_mutex_unlock(&g_cbs_mu);
+    pthread_mutex_lock(&g_cbs_mu); uint32_t i = g_cbs_fly_i++ % CBS_FLY;
+    if (!g_cbs_fly[i].l || g_cbs_fly[i].cap < l->n) {   // with no memory the slot keeps its older list and fence: the hang report is a diagnostic
+        cbs_list *c = realloc(g_cbs_fly[i].l, sizeof *l + l->n * sizeof *l->e); if (!c) { pthread_mutex_unlock(&g_cbs_mu); return; }
+        g_cbs_fly[i].l = c; g_cbs_fly[i].cap = l->n;
+    }
+    memcpy(g_cbs_fly[i].l, l, sizeof *l + l->n * sizeof *l->e); g_cbs_fly[i].fence = fence; pthread_mutex_unlock(&g_cbs_mu);
 }
 // The last IND_FLY indirect dispatches (fence of their command buffer, shader, where the GPU reads the group counts): a hang report prints the counts as they are now
 #define IND_FLY 64

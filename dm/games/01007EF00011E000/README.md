@@ -224,8 +224,6 @@ Before publishing, the fixes were integrated with main's pipeline archive and GP
 - **Resolved: 1.6.0 hitches in the job queue poll** ([PR #2118](https://github.com/seedds/nxnative/pull/2118)): [Queue polls with exclusive retries and no clrex](../../../docs/reference/threads.md#queue-polls-with-exclusive-retries-and-no-clrex).
 - **Resolved build guard and cache isolation; rendering cause open:** [Tested tools and compiler-specific shader caches](../../../docs/reference/shaders.md#tested-tools-and-compiler-specific-shader-caches).
 
-- **Optional touch-camera preferences (device validation pending after launcher integration):** [Relative swipe camera input on iOS](../../../docs/reference/services.md#relative-swipe-camera-input-on-ios). User feedback on the 1.9.0 prototypes motivated a game-independent swipe option and configurable touch sensitivity/dead zone; this is separate from physical-controller input.
-
 General host changes first needed here; each applies to every game:
 
 - **Movies at twice their speed at 60 fps** (issue #636): [The frame step follows a movie's picture rate](../../../docs/reference/frame-rate.md#the-frame-step-follows-a-movies-picture-rate).

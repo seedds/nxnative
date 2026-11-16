@@ -97,48 +97,23 @@ Shows the frames per second at the top left.
 
 ### Swipe camera
 
-Off by default: the right-side touch area acts as a floating right stick, as before.
-Turn this on to pan by moving your finger in the selected camera touch area,
-starting off the buttons. It is available in the **3D** touch layout. Holding still stops
-camera input within 40 ms of the last touch sample; lifting stops it immediately.
-The game may apply its own camera easing after the input stops.
-
-This translates finger velocity into controller input. It does not modify the
-camera code: the game's acceleration, dead zone and maximum turn speed still
-apply. Physical controllers are unaffected.
+Off by default. In the **3D** layout, a touch in the camera touch area turns the camera by how fast the finger moves instead of acting as a floating right stick. It is still stick input, so the game's own camera speed limit applies.
 
 ### Swipe sensitivity
 
-25 to 400 %, default 100 %. Only used with **Swipe camera**. Higher values give
-more right-stick input for the same finger speed. Below 100%, the maximum input
-is reduced too, so even a fast swipe stays weaker at 25%. Above 100%, turning
-can still reach the game's maximum speed. Fully close and reopen the game to change launcher settings.
+25 to 400 %, default 100 %. Only used with **Swipe camera**. Below 100 % even a fast swipe turns more slowly.
 
 ### Camera touch area
 
-**Right third** (default) keeps the existing camera start area. **Right half**
-extends it to the screen midpoint. This applies to both the floating joystick
-and swipe camera, in the 3D layout. Buttons and the movement stick keep priority
-where their hit areas overlap. A touch stays assigned to the control it started
-on until released.
+Where a camera touch can start in the **3D** layout: **Right third** (default) or **Right half**. Buttons and the left stick keep priority.
 
 ### Left-stick dead zone
 
-0 to 40 % of the on-screen stick's radius, default 10 % (the existing behaviour).
-Increase it if small accidental movements turn the character; decrease it for
-finer response near the centre. It changes only the touch movement stick, not
-physical controllers or the camera stick. It applies with or without
-**Floating left stick**.
+0 to 40 % of the on-screen stick's radius, default 10 %. Raise it if the character moves when you only meant to rest your thumb on the stick.
 
 ### Floating left stick
 
-Off by default: the movement stick stays where it is drawn. Turn this on to
-centre the stick where your thumb lands: a touch near the stick (within 1.65
-times its ring, rather than 1.4) grabs it, and the ring moves there. If your
-thumb travels past the ring, the ring follows just far enough to keep it on the
-edge, so reversing direction responds at once, as the camera stick does. The
-ring returns home on release. Buttons and the D-pad keep their priority where
-hit areas overlap. Physical controllers are unaffected.
+Off by default. When on, the left stick centres where your thumb lands near it and follows the thumb past its ring, so turning back responds at once. It returns home when you lift.
 
 ### Touch feedback
 

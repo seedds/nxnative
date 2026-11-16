@@ -6,9 +6,8 @@
 //     the A (right) B (bottom) X (top) Y (left) diamond in the bottom-right corner, sliding a finger between keys switches keys. Each bottom corner holds a single control, so it sits close in (reaching halfway into the side safe-area inset).
 //   3D (full, Pro Controller style): everything in 2D (left stick and diamond keep their place and size), plus a D-pad (inward of and below the left stick, 8-way), a right stick that is not drawn
 //     (a touch landing in the right third of the screen on no control holds it: centred where it lands, the centre dragged along once the finger passes the stick radius) and L3 / R3 (small round keys in the top row, inward of ZL / ZR).
-//     Optional Swipe camera uses relative finger velocity instead; holding still clears it within 40 ms.
-//     The launcher also offers swipe sensitivity, the left-stick dead zone and an optional floating left stick (off by default: a touch-down within
-//     DM_TOUCH_FLOAT_GRAB ring radii of its home grabs it and becomes its centre, which follows the thumb past the ring as the right stick's does). Physical controllers are unchanged.
+//     With Swipe camera (DM_TOUCH_SWIPE) that touch turns the camera by finger velocity instead (DmSwipeLook.h).
+//     With Floating left stick (DM_TOUCH_LEFT_FLOAT) a touch-down within DM_TOUCH_FLOAT_GRAB ring radii of the stick's home becomes its centre, which follows the thumb past the ring.
 //     Breath of the Wild crouches with L3 and uses the scope with R3; 3D World and Breath of the Wild turn the camera with the right stick.
 //   Touch-down ownership: the menu button where it is nearer than a locked key (a view of its own, DmMenuButton), locked keys next (shoulders, − / +, L3 / R3), then whichever of the diamond, the D-pad and the left stick has the smallest distance / grab radius (the left stick's grab circle borders the D-pad),
 //     then in 3D the right-side camera area (right third by default, optionally the right half).
@@ -125,7 +124,6 @@ static const CGFloat
     K_MENU_R = 15,                                  // menu button: top centre, level with − / +; it takes a touch within 1.6 times this (at least 22 points, half of a 44-point target)
     K_STICK_X = 81, K_STICK_R = 77, K_KNOB_R = 30,  // left stick: mirrors the diamond, the ring as large as the whole diamond (key distance + key radius), the knob a little larger than a diamond key
     K_STICK_GRAB = 1.4,                             // how near the ring centre a touch-down grabs a stick (times the ring radius)
-    K_DEAD = 0.1,                                   // stick dead zone (times the ring radius)
     // controls only the 3D layout has
     K_LOW_X = 231, K_LOW_Y = 64,                    // D-pad centre from the outer edge and the bottom (inward of and below the left stick, as on a Pro Controller)
     K_DPAD_R = 48, K_ARM_W = 17, K_ARM_IN = 11,     // D-pad: arm outer edge from the centre, half-width, tip from the centre
@@ -303,7 +301,7 @@ static CGPoint side(CGRect s, int right, CGFloat dx, CGFloat y) { return CGPoint
 - (CGPoint)stickCentre:(int)i { return i ? _rCentre : _touchSettings.left_float && _stick[0] ? _lCentre : self.stickHome; }
 - (CGFloat)stickGrabR { return MAX([self stickR:0] * (_touchSettings.left_float ? DM_TOUCH_FLOAT_GRAB : K_STICK_GRAB), _layout.separated ? 22 : 0); }   // touch-down grab radius around the left stick's home
 - (CGFloat)stickR:(int)i { return (i ? K_RSTICK_R : K_STICK_R) * self.u; }
-- (BOOL)inRightArea:(CGPoint)p { CGRect b = _layout.controls; return dm_touch_right_area(&_touchSettings, p.x - CGRectGetMinX(b), b.size.width); }
+- (BOOL)inRightArea:(CGPoint)p { CGRect b = _layout.controls; return p.x >= CGRectGetMaxX(b) - b.size.width * _touchSettings.right_fraction; }   // the camera touch area (DM_TOUCH_RIGHT_AREA)
 - (CGPoint)dpadCenter {
     if (self.portraitControls) {
         CGPoint p = [self portraitThumbCenter:NO];
@@ -378,10 +376,7 @@ static CGFloat dist(CGPoint a, CGPoint b) { return hypot(a.x - b.x, a.y - b.y); 
     return CGPointMake(dx, dy);
 }
 
-// The launcher has applied settings before this view is made (front_ios.m startGame).
-// Touch events and the display/game can have different rates. Resample timestamped velocity
-// rather than clearing it on every display callback: that would alternate tilt and neutral.
-// The link exists only while a swipe is held; release, cancellation and focus loss invalidate it.
+// Swipe camera: a display link samples the finger's velocity while the camera touch is held (DmSwipeLook.h).
 - (void)beginLook:(CGPoint)p time:(NSTimeInterval)time {
     [self stopLook];
     dm_swipe_begin(&_look, p.x, p.y, time);
@@ -393,7 +388,9 @@ static CGFloat dist(CGPoint a, CGPoint b) { return hypot(a.x - b.x, a.y - b.y); 
     _look = (DmSwipeLook){0}; _lookX = _lookY = 0;
 }
 - (void)lookFrame:(CADisplayLink *)link {
-    dm_swipe_frame(&_look, CACurrentMediaTime(), self.u, _touchSettings.swipe_gain, &_lookX, &_lookY);
+    int32_t x, y; dm_swipe_frame(&_look, CACurrentMediaTime(), self.u, _touchSettings.swipe_gain, &x, &y);
+    if (x == _lookX && y == _lookY) return;   // a finger at rest: nothing to send
+    _lookX = x; _lookY = y;
     [self recompute];
 }
 
@@ -408,8 +405,7 @@ static CGFloat dist(CGPoint a, CGPoint b) { return hypot(a.x - b.x, a.y - b.y); 
     for (int i = 0; i < 2; i++) {
         if (i == 1 && _touchSettings.swipe) { ax[2] = _lookX; ax[3] = _lookY; continue; }
         CGPoint o = [self knobOffset:i];
-        dm_touch_axes(o.x, o.y, [self stickR:i], i ? K_DEAD : _touchSettings.left_deadzone,
-                      &ax[i * 2], &ax[i * 2 + 1]);
+        dm_touch_axes(o.x, o.y, [self stickR:i], i ? DM_TOUCH_DEAD : _touchSettings.left_deadzone, &ax[i * 2], &ax[i * 2 + 1]);
     }
     BOOL changed = face != _faceBits || dpad != _dpadBits || btn != _btnBits;
     uint64_t pressed = (face | dpad | btn) & ~(_faceBits | _dpadBits | _btnBits);
@@ -473,7 +469,7 @@ int front_web_touch(void);
         CGFloat f = dist(p, self.faceCenter) / (self.faceGap + MAX(self.faceR * 1.6, self.faceHitR)); if (f <= best) { best = f; kind = C_FACE; }
         if (_full) { CGFloat d = dist(p, self.dpadCenter) / MAX(self.dpadR * K_DPAD_GRAB, _layout.separated ? 22 : 0); if (d < best) { best = d; kind = C_DPAD; } }
         if (!_stick[0]) { CGFloat s = dist(p, self.stickHome) / self.stickGrabR; if (s < best) { best = s; kind = C_STICK; } }
-        if (kind == C_NONE && _full && !_stick[1] && [self inRightArea:p]) { kind = C_STICK; idx = 1; _rCentre = p; }   // the right stick: centred where the touch lands
+        if (kind == C_NONE && _full && !_stick[1] && [self inRightArea:p]) { kind = C_STICK; idx = 1; _rCentre = p; if (_touchSettings.swipe) [self beginLook:p time:t.timestamp]; }   // the right stick: centred where the touch lands
         if (kind == C_FACE) { [_owner setObject:@(C_FACE) forKey:t]; [_faceOf setObject:@([self faceAt:p]) forKey:t]; }
         else if (kind == C_DPAD) [_owner setObject:@(C_DPAD) forKey:t];
         else if (kind == C_STICK) { [_owner setObject:@(C_STICK | (uint64_t)idx << 8) forKey:t]; _stick[idx] = t; _stickNow[idx] = p; if (!idx) _lCentre = p; }   // a floating left stick centres where the touch lands

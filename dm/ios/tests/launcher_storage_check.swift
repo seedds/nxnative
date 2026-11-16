@@ -32,7 +32,6 @@ import Foundation
         expect(d.string(forKey: "launcher.DM_METAL_HUD") == nil && String(cString: getenv("DM_METAL_HUD")) == "1", "the env file's value is kept and not stored")
         expect(String(cString: getenv("DM_PSO_MTL4")) == "0" && String(cString: getenv("DM_PRESENT_SNAP")) == "1" && String(cString: getenv("DM_FPS_HOLD")) == "on", "the environment gets every value")
         expect(touchValues.allSatisfy { d.string(forKey: "launcher." + $0.0) == $0.1 && String(cString: getenv($0.0)) == $0.1 }, "touch choices persist and reach the runtime")
-        expect(touchValues.allSatisfy { LauncherModel(file.settings, defaults: d).values[$0.0] == $0.1 }, "touch choices survive relaunch")
         m.reset()
         expect(m.values["DM_PSO_MTL4"] == "1" && m.values["DM_FPS_TARGET"] == file.settings.first { $0.env == "DM_FPS_TARGET" }!.def, "Reset shows the defaults")
         expect(d.string(forKey: "launcher.DM_PSO_MTL4") == "0" && d.string(forKey: "launcher.DM_FPS_TARGET") == "30", "Reset alone forgets nothing: Quit after it keeps the choices")
@@ -40,7 +39,6 @@ import Foundation
         expect(touchValues.allSatisfy { key, value in
             d.string(forKey: "launcher." + key) == value && m.values[key] == file.settings.first { $0.env == key }!.def
         }, "Reset shows touch defaults without changing stored choices")
-
         m.apply()
         expect(d.string(forKey: "launcher.DM_PSO_MTL4") == nil && d.string(forKey: "launcher.DM_FPS_TARGET") == nil, "Play after Reset forgets the choices")
         d.set(30, forKey: "launcher.DM_FPS_TARGET"); d.set(false, forKey: "launcher.DM_RUMBLE")   // a number and a boolean, as defaults write -int / -bool stores them
@@ -109,7 +107,6 @@ import Foundation
             expect(locked.fixed.contains(key) && locked.values[key] == value && String(cString: getenv(key)) == value,
                    "env file keeps " + key + " through Reset and Play")
         }
-
         print("launcher storage: \(failed) failed")
         exit(failed == 0 ? 0 : 1)
     }

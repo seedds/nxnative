@@ -14,7 +14,7 @@ class TouchControlTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             exe = Path(tmp) / 'touch-controls'
             subprocess.run(['clang', '-std=c11', '-Wall', '-Wextra', '-Werror',
-                            str(ROOT / 'dm/ios/tests/t_touch_controls.c'), '-lm', '-o', str(exe)], check=True)
+                            '-I', str(ROOT / 'dm/host'), str(ROOT / 'dm/ios/tests/t_touch_controls.c'), '-lm', '-o', str(exe)], check=True)
             result = subprocess.run([str(exe)], capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertIn('touch controls: PASS', result.stdout)

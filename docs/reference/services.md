@@ -694,12 +694,11 @@ Most service calls can be found before they crash, before the first boot or the 
 
 ### Relative swipe camera input on iOS
 
-- **Symptom:** the floating camera stick continues turning while a finger is held away from its starting point; short drags give little input, unlike a mobile swipe camera.
-- **Cause:** controller tilt represents turn speed, whereas a swipe camera uses relative finger movement. Reading displacement from touch-down is the intended floating-stick behaviour. A relative-input prototype that cleared its delta every display frame also produced intermittent neutral input when touch, display and guest sampling rates differed.
-- **Option:** the launcher can select `DM_TOUCH_SWIPE=1` in the 3D layout (`DmGamepad.m`, `DmSwipeLook.h`). Timestamped finger velocity is held across display callbacks, with a 40 ms expiry because UIKit stops sending movement samples when a finger stops. Release, cancellation and focus loss clear it immediately. Sensitivity is `DM_TOUCH_SWIPE_GAIN`, applied after normalizing motion so fast swipes do not saturate at both 25% and 400%. `DM_TOUCH_RIGHT_AREA=half` extends the camera start region from the right third to the right half in either mode; the left touch stick independently uses `DM_TOUCH_LEFT_DEADZONE`, and `DM_TOUCH_LEFT_FLOAT=1` makes it float as the camera stick does (touch-down within 1.65 ring radii of its home becomes its centre, dragged along past the ring by `dm_touch_follow`, the camera stick's rule). Defaults preserve the floating camera stick, the fixed movement stick and 10% left dead zone. No game code or physical-controller mapping changes.
-- **Limit:** this remains controller input; a game's own camera acceleration, dead zone and speed limit apply. It is not direct access to the game's camera rotation.
-- **Checks:** native C tests cover mixed 30/60/120 Hz sampling and phase offsets, expiry, reversal, settings validation, the unchanged legacy response and the floating centre's follow rule. Launcher tests cover persistence, reset and file overrides. Device feel still needs testing after integration.
-- **Found on:** [Breath of the Wild](../../dm/games/01007EF00011E000/README.md), user feedback on touch-camera prototypes.
+- **Symptom:** in the 3D touch layout the camera keeps turning while a finger rests away from where it landed, and short drags barely turn it, unlike a mobile swipe camera.
+- **Cause:** the undrawn right stick is a floating stick: its tilt is the finger's distance from the touch-down point, so it sets a turn speed, not a turn amount.
+- **Fix:** an optional mode, `DM_TOUCH_SWIPE=1`, turns finger velocity into right-stick tilt (`DmSwipeLook.h`, `DmGamepad.m`). A display link holds the last velocity across frames and drops it 40 ms after the last sample, since UIKit sends none while a finger rests. `DM_TOUCH_SWIPE_GAIN` scales it after the clamp, so 25 % stays weaker than 400 %. It is still stick input: the game's own camera speed limit applies.
+- **Check:** `dm/ios/tests/t_touch_controls.c` (mixed 30 / 60 / 120 Hz sampling, expiry, reversal, gain, settings), the Duo harness's `testSwipeCameraTurnsWhileTheFingerMovesAndStopsOnRelease`, and `launcher_storage_check.swift` (storage, Reset, env file).
+- **Found on:** [Breath of the Wild](../../dm/games/01007EF00011E000/README.md) on an iPhone Duo.
 
 ### Touch gestures recognized from the touch points
 

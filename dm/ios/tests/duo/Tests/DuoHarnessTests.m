@@ -47,6 +47,10 @@ static NSUInteger gDuoHarnessProbeViewClassSerial;
 - (CGPoint)locationInView:(UIView *)view { (void)view; return self.point; }
 @end
 
+@interface UIView (DuoSwipeLook)
+- (void)lookFrame:(CADisplayLink *)link;   // DmGamepad's display-link callback
+@end
+
 #if DUO_HARNESS_HAS_NATIVE_POSE_API
 @interface DuoFakeHinge : NSObject
 @property (nonatomic) NSInteger status;
@@ -393,6 +397,25 @@ static Class DuoHarnessInstallReservedRegionProbe(UIView *view) API_AVAILABLE(io
     input = duo_harness_input();
     XCTAssertEqual(input.buttons, 0);
     XCTAssertEqual(input.touch_count, 0);
+}
+
+- (void)testSwipeCameraTurnsWhileTheFingerMovesAndStopsOnRelease {
+    const char *saved = getenv("DM_TOUCH_SWIPE"); NSString *keep = saved ? @(saved) : nil;
+    setenv("DM_TOUCH_SWIPE", "1", 1);
+    CGRect bounds = CGRectMake(0, 0, 844, 390);
+    UIView *pad = [self padForLayout:dm_layout(bounds, UIEdgeInsetsZero, NO, CGRectNull, DM_PICTURE_16_9) bounds:bounds];
+    if (keep) setenv("DM_TOUCH_SWIPE", keep.UTF8String, 1); else unsetenv("DM_TOUCH_SWIPE");
+    CFTimeInterval now = CACurrentMediaTime();
+    DuoFakeTouch *look = [self touchAt:CGPointMake(650, 190) time:now - 0.02];
+    [self beginTouches:@[look] onPad:pad];
+    XCTAssertNotNil([pad valueForKey:@"lookLink"], @"A camera touch starts the display link that feeds the right stick");
+    look.timestamp = now;
+    [self moveTouch:look to:CGPointMake(660, 190) onPad:pad];
+    [pad lookFrame:nil];
+    XCTAssertGreaterThan(duo_harness_input().rx, 0, @"Moving right turns the camera right");
+    [self endTouches:@[look] onPad:pad cancelled:NO];
+    XCTAssertNil([pad valueForKey:@"lookLink"]);
+    XCTAssertEqual(duo_harness_input().rx, 0, @"Release clears the camera at once");
 }
 
 - (void)testPictureFillCoversTheLandscapeViewWithoutStretching {

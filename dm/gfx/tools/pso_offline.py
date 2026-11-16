@@ -41,7 +41,7 @@
 #   --os-min: the archives' system (default: for iOS the SDK's major version, e.g. 27.0; for macOS the major version this Mac runs, since the Mac app is built for the Mac that builds it).
 #   A device opens only an archive of its own major version (macOS 27.2 refused archives made for 26.0 and 26.6 and opened those for 27.0 and 27.2), and builds the bases itself
 #   otherwise: the SDK's version on a Mac whose system is older than its Xcode's SDK (macOS 26.6 with Xcode 27.1) left that Mac without them (GitHub issue #673)
-import argparse, concurrent.futures, filecmp, hashlib, json, os, shutil, struct, subprocess, sys, time
+import argparse, concurrent.futures, contextlib, filecmp, hashlib, json, os, shutil, struct, subprocess, sys, time
 from pathlib import Path
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'tools'))
@@ -253,15 +253,63 @@ def write_script(path, configuration):
     finally: part.unlink(missing_ok=True)
 
 
+def write_changed(path, text):
+    """text into path, unless the file holds it already: an unchanged file keeps its times, which the Mac app's packer keys this folder's files by (dm/mac/pack_app.py), so a run that
+    found every archive reused does not make the app's pipeline archive bundle anew (5.2 GB signed again for Ocarina of Time)"""
+    try:
+        if path.read_text() == text: return
+    except (OSError, ValueError): pass
+    path.write_text(text)
+
+
+def run_key(a, archs, text, osmin):
+    """What a run reads, by name and time, for the run that finds nothing to do: the library's one file (its place, size and time), the pair lists, the compute shaders, the chain
+    version, depth mode, architectures, platform and minimum OS, the compiler, the group size and these tools' code. archive_key reads every library the bases name (and plan every
+    reflection) to say the same of an unchanged library: 26 s of each build of Ocarina of Time (33,365 bases, a 10.7 GB library) that changed nothing. None for a library in a
+    folder, whose files have each their own time, and when the compiler cannot be asked: such a run goes through archive_key as before"""
+    image = shader_lib.image_of(a.msl)
+    if os.path.isdir(shader_lib.folder_of(a.msl)) or not os.path.isfile(image): return None
+    try: tv = tool_version(a.platform)
+    except SystemExit: return None
+    st = os.stat(image)
+    here = Path(__file__).resolve().parents[2]   # dm/: this file, and what it imported from the repository (the library readers, the cut, the ABI and its header, the profile reader)
+    loaded = [Path(f).resolve() for f in (getattr(m, '__file__', None) for m in list(sys.modules.values())) if f]
+    code = sorted({str(f) for f in loaded if f.is_relative_to(here)} | {str(Path(abi.HEADER).resolve())})
+    # Replacement and same-sized writes can preserve mtime. As in romfs._resolve, inode and ctime make those go through the content-based archive_key instead of reusing stale GPU code.
+    inputs = {'format': 2, 'image': [os.path.realpath(image), st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns], 'pairs': hashlib.sha256(text).hexdigest(),
+              'computes': None if a.no_compute else read_computes(a.shader_map, a.manifest), 'depth': a.depth, 'archs': archs, 'platform': a.platform, 'os_min': osmin, 'toolchain': tv,
+              'batch': a.batch_size, 'code': [[os.path.relpath(f, here), hashlib.sha256(Path(f).read_bytes()).hexdigest()] for f in code]}
+    return hashlib.sha256(json.dumps(inputs, sort_keys=True).encode()).hexdigest()
+
+
+def outputs(out, work, archs):
+    """What a run left: each file of the output folder that is its own (not the prewarm pipelines the NSP script links there after it) by size and time, and each architecture's key"""
+    files = {f.name: [f.stat().st_size, f.stat().st_mtime_ns] for f in sorted(out.iterdir()) if f.is_file() and '-prewarm-' not in f.name and f.name != 'prewarm.tsv'}
+    return {'files': files, 'keys': {arch: (work / f'key.{arch}').read_text() if (work / f'key.{arch}').is_file() else None for arch in archs}}
+
+
+def run_reused(work, key, out, archs):
+    """Whether the last run had this key (run_key) and its outputs are as it left them → the note to print for each architecture, or None"""
+    try: last = json.loads((work / 'run.key').read_text())
+    except (OSError, ValueError): return None
+    try:
+        if not key or not isinstance(last, dict) or last.get('key') != key or last.get('outputs') != outputs(out, work, archs): return None
+        if any(k is None for k in last['outputs']['keys'].values()) or any(not (out / f'{arch}.mtl4a').is_file() for arch in archs): return None
+        return [f'pso_offline: {arch}: reused ({(out / f"{arch}.mtl4a").stat().st_size / 2**20:.0f} MB), the library and the lists as at the last run' for arch in archs]
+    except (OSError, KeyError, TypeError, AttributeError): return None
+
+
 def library_digest(lib_dir, bases, computes=()):
     """The bytes metal-tt consumes: a profile/chain stamp does not change when the same shaders are rebuilt by another Metal compiler."""
-    h = hashlib.sha256()
-    for name in sorted({lib for vl, _, fl, _ in bases for lib in (vl, fl)} | {lib for lib, _ in computes}):
-        h.update(name.encode() + b'\0')
+    def digest(name):
         lib = hashlib.sha256()
         with romfs.open(os.path.join(lib_dir, f'{name}.metallib'), 'rb') as f:
             while chunk := f.read(1 << 20): lib.update(chunk)
-        h.update(lib.digest())
+        return lib.digest()
+    names = sorted({lib for vl, _, fl, _ in bases for lib in (vl, fl)} | {lib for lib, _ in computes})
+    h = hashlib.sha256()
+    with concurrent.futures.ThreadPoolExecutor(8) as pool:   # the libraries read and hashed on a few threads, their digests taken in order: the same key
+        for name, d in zip(names, pool.map(digest, names)): h.update(name.encode() + b'\0'); h.update(d)
     return h.hexdigest()
 
 
@@ -509,6 +557,10 @@ def main(argv=None):
     if not text: sys.exit(f'[RED] pso_offline: no pair list ({", ".join(a.pairs)})')
     zero = a.depth == 'zero'
     t0 = time.time()
+    quick = None if a.script_only else run_key(a, archs, text, a.os_min or os_min_default(a.platform))
+    if quick and (notes := run_reused(work, quick, out, archs)):
+        print('\n'.join(notes)); return 0
+    (work / 'run.key').unlink(missing_ok=True)   # written again at the end of a run that succeeds
     pairs = read_pairs(text)
     bases, rest, left = plan(lib_dir, chain, pairs, zero)
     shaders = [] if a.no_compute else read_computes(a.shader_map, a.manifest)
@@ -522,7 +574,7 @@ def main(argv=None):
           + ', '.join(f'{k} {v}' for k, v in left.items()) + f' ({time.time() - t0:.1f} s)')
     if shaders: print(f'pso_offline: {len(shaders)} compute shaders: {len(computes)} compute pipelines, left out: '
                       + ', '.join(f'{k} {v}' for k, v in cleft.items()))
-    if a.script_only: (out / 'prebuilt.tsv').write_text(st); return 0
+    if a.script_only: write_changed(out / 'prebuilt.tsv', st); return 0
     if pairs and not bases and not rest: sys.exit('[RED] pso_offline: no base to build')   # pairs, but the host would leave out every one: wrong or missing libraries
     if not pairs: print('pso_offline: no pairs (only a header): nothing to build, no archive')   # a profile whose split found no pair (GitHub issue #338)
     if not bases and not computes: archs = []   # no pair, or every eligible pair needs device specialization, and no compute pipeline; clear old archives and still write the stamp and the remainder list
@@ -546,16 +598,18 @@ def main(argv=None):
         write_failed(work, arch, fb, fc); failed_bases += fb; failed_computes += fc
         os.replace(part, dst); kf.write_text(key + '\n')
         print(f'pso_offline: {arch}: {dst.stat().st_size / 2**20:.0f} MB in {time.time() - t1:.0f} s')
-    for f in out.glob('*.mtl4a'):   # architectures no longer asked for
-        if f.stem not in archs: f.unlink()
-    (out / 'prebuilt.tsv').write_text(st)
+    for f in out.glob('*.mtl4a'):   # architectures no longer asked for; an architecture's prewarm pipelines (<arch>-prewarm-<NN>, the NSP script's, which links them here and takes them
+        if f.stem.split('-prewarm-')[0] not in archs: f.unlink()   # away) stay with it: removing them each run gave the files the app packs new times, and the app a new archive bundle to sign
+    write_changed(out / 'prebuilt.tsv', st)
     rest = list(dict.fromkeys([*rest, *map(pair_of, failed_bases)]))   # the pairs the device still builds: those with function constants, then those metal-tt failed on
     rp = out / 'rest_pairs.tsv'
-    if rest: rp.write_text(''.join(f'{v}\t{f}\n' for v, f in rest))
+    if rest: write_changed(rp, ''.join(f'{v}\t{f}\n' for v, f in rest))
     else: rp.unlink(missing_ok=True)
-    (out / 'archive.tsv').write_text(f'# the pipeline archive made offline (dm/gfx/tools/pso_offline.py); the host reads prebuilt.tsv, not this file\narch\t{" ".join(archs)}\n'
+    write_changed(out / 'archive.tsv', f'# the pipeline archive made offline (dm/gfx/tools/pso_offline.py); the host reads prebuilt.tsv, not this file\narch\t{" ".join(archs)}\n'
                                      f'platform\t{a.platform}\t{osmin}\ntoolchain\t{tv}\nbases\t{len(bases)}\nrest\t{len(rest)}\ncompute\t{len(computes)}\n'
                                      f'failed\t{len(set(failed_bases))} bases, {len(set(failed_computes))} compute pipelines (metal-tt could not compile them: left to the device)\n')
+    if quick:
+        with contextlib.suppress(OSError): (work / 'run.key').write_text(json.dumps({'key': quick, 'outputs': outputs(out, work, archs)}, sort_keys=True) + '\n')
     return 0
 
 

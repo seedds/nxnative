@@ -82,6 +82,14 @@ Used at `DM_FPS_TARGET=0` and for the interval the framework keeps while the VFR
 - It finalizes its transient render targets before every submit and builds them again the next frame, which the storage-takeover rule guards with a 16-submission window (`alias_take_over`).
 - Windowed on the Mac with `present_now`'s residency commit: its title, 60 fps, no GPU error.
 
+### Zora's Domain cutscene GPU faults (original-device retest pending)
+
+[Issue #2671](https://github.com/seedds/nxnative/issues/2671) reports GPU address faults during the first conversation with King Dorephan on an M1 Pro and iOS. The host's [argument-block arena rollover fix](../../../docs/reference/rendering.md#an-argument-block-points-into-another-arena-after-a-nested-allocation) corrects two independently reproduced allocator bugs. The reporter's clean run with `DM_RES_CHECK=1` is consistent with bypassing the uniform-only patch path, but does not establish the cause of the game crash.
+
+**Mac retest, 2026-11-17:** Apple M6, macOS 27.2, update 1.9.0 with both DLC, chain `9eecb8412308`. From separate fresh copies of the supplied save's latest autosave (Zora's Domain, 2026-11-14 20:21), both baseline `6c079578` and its worktree integration of [PR #2847](https://github.com/seedds/nxnative/pull/2847) completed the king's conversation, including the Divine Beast water sequence, Zora armor handoff, Muzu and Sidon's departure, and the Divine Beast Vah Ruta objective update, then returned to gameplay. Both logs have zero red diagnostics and zero GPU address faults; both hosts exited cleanly when stopped. `DM_RES_CHECK` was absent, and `@args_patch` was nonzero in both runs, so the optimized path ran. These interactive runs are correctness checks, not performance comparisons.
+
+**Remaining validation:** the baseline also passed, so this retest does not confirm that the allocator bugs caused #2671. The issue is closed pending a retest on the reporter's original M1 Pro / iOS setup; reopen it if the crash persists. The connections to [#2592](https://github.com/seedds/nxnative/issues/2592) and [#2700](https://github.com/seedds/nxnative/issues/2700) remain unconfirmed. Artifacts are in the NSP folder's `01007EF00011E000-work/pr2847/`: `baseline1/` and `fixed1/` hold the logs, timing rows, screenshots, input records and isolated save copies.
+
 ### Upscaling (current)
 
 Handheld, the game draws 1280x720 into its 1920x1080 window textures and crops the window to it. Docked it scales its 900p scene to 1080p with one draw and draws the HUD on the 1080p target. The optional [MetalFX present](../../../docs/reference/rendering.md#the-present-upscales-through-metalfx) scales that presented picture in either mode; it cannot recover detail lost in the game's own upscale.
@@ -208,6 +216,7 @@ Before publishing, the fixes were integrated with main's pipeline archive and GP
 
 ## Found on this game
 
+- [An argument block points into another arena after a nested allocation](../../../docs/reference/rendering.md#an-argument-block-points-into-another-arena-after-a-nested-allocation): two host bugs reproduced by synthetic GPU tests; the [Zora cutscene retest](#zoras-domain-cutscene-gpu-faults-original-device-retest-pending) passed on baseline and fixed hosts, so the connection to the reported game faults remains unconfirmed.
 - [Two captures of one shader function crash in Metal's binary cache](../../../docs/reference/rendering.md#two-captures-of-one-shader-function-crash-in-metals-binary-cache): resolved in the host; 1.9.0's prebuild crashed once in a `regress.py` run (M4 Pro, macOS 27.2.1).
 - [Wakes signalled after the scheduler lock is let go](../../../docs/reference/threads.md#wakes-signalled-after-the-scheduler-lock-is-let-go) ([PR #1466](https://github.com/seedds/nxnative/pull/1466)): the main thread slept again on the host's thread lock after each wake; M4 Max, guest threads 503–512 → 494–498 ms/s, CPU energy 1.21 → 1.18 W.
 - [A long render pass split while the GPU has nothing](../../../docs/reference/frame-rate.md#a-long-render-pass-split-while-the-gpu-has-nothing) ([PR #1468](https://github.com/seedds/nxnative/pull/1468)): the G-buffer pass (2,700 of 4,100 draws) reaches the GPU in up to three parts; M4 Max at 120 fps, frame p50 8.75 → 8.34 ms.

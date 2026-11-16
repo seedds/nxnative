@@ -11,20 +11,21 @@
 #   · the stage: a capture's extension, an archive file's _vp / _fp; a string in main or a .glsl file says nothing of its stage, so it is translated as each stage that compiles (one of
 #     Digimon's built-in fragment shaders names gl_Position in a #define);
 #   · GLSL → SPIR-V with glslang (-V -R: relaxed Vulkan rules, which gather the loose uniforms into one block, gl_DefaultUniformBlock; --aml / --amb number the inputs,
-#     outputs and bindings), SPIR-V → MSL with spirv-cross (--msl-decoration-binding: Metal slots = those bindings; vertex shaders --fixup-clipspace: GL's z from −w to w → 0 to w);
+#     outputs and bindings), SPIR-V → MSL with spirv-cross (one Tier 2 argument buffer per stage; vertex shaders --fixup-clipspace: GL's z from −w to w → 0 to w);
 #   · varyings are matched by name, as GL links them: --aml numbers each stage's outputs in its own declaration order, so [[user(locnN)]] becomes [[user(<variable name>)]];
 #   · the host renders in GL's orientation (row 0 at the bottom, the NVN layer's lower-left origin), so nothing is flipped here.
 # Output: <out>/gl/gl_shaders.metallib and <out>/gl/gl_shaders.tsv; --ios <dir> also writes <dir>/gl/ with an iPhone library (same table)
 # Table rows: key <TAB> stage (vert / frag) <TAB> fields, space-separated (a key can have a row per stage):
 #   a:<name>=<slot>:<type>                       a vertex input, [[attribute(slot)]]
 #   u:<name>=<offset>:<type>:<count>:<stride>    a member of the default uniform block (count 0 = not an array)
-#   b:<slot>:<size>                              the default uniform block: its buffer slot and size in bytes
-#   n:<name>=<slot>:<size>                       a named uniform block (DOOM 3's matrices_ubo): its buffer slot and size in bytes
-#   t:<name>=<slot>:<type>                       a combined sampler: texture and sampler slot
+#   r:<slot>:<count>                             the argument buffer's Metal buffer slot (-1 when absent), and number of argument IDs
+#   b:<id>:<size>                                the default uniform block: its argument ID and size in bytes
+#   n:<name>=<id>:<size>                         a named uniform block (DOOM 3's matrices_ubo): its argument ID and size in bytes
+#   t:<name>=<texture id>:<sampler id>:<type>     a combined sampler (-1 sampler ID if MSL omits it)
 #   o:<name>=<location>                          a fragment output, [[color(location)]]
 # <TAB> where it came from
 # Usage: gl_shaders.py <input path>... <out dir> [--ios <dir>]   (input paths: the RomFS, the main NSO, capture folders)
-import concurrent.futures as cf, hashlib, json, os, re, subprocess, sys, tempfile
+import concurrent.futures as cf, hashlib, json, os, re, struct, subprocess, sys, tempfile
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../tools'))
 from romfs import os, open
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -33,6 +34,7 @@ from dmsh_chain import SPIRV_CROSS, MAC_MIN_FLAG   # the in-repo spirv-cross bui
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '../../ios/tools')); from ios_metal import IOS_FLAGS   # the iPhone's deployment target and math mode
 
 VEC_TYPES = {'float', 'vec2', 'vec3', 'vec4', 'int', 'ivec2', 'ivec3', 'ivec4', 'uint', 'uvec2', 'uvec3', 'uvec4', 'bool', 'mat2', 'mat3', 'mat4'}
+TABLE_ABI = '# GL shader ABI 2'   # direct-slot tables cannot be consumed by the argument-buffer host
 
 def red(msg): sys.exit('[RED] ' + msg)
 
@@ -126,11 +128,22 @@ def function_semicolons(t):
         k += 1
     return ''.join(out) + t[i:]
 
-def fixups(t, stage):
+def rename_identifier(t, name, base, renamed, keep_calls=False):
+    """Rename an identifier into a free name, recording only replacements made in this translation."""
+    pattern = r'\b' + re.escape(name) + r'\b' + (r'(?!\s*\()' if keep_calls else '')
+    if not re.search(pattern, t): return t
+    used = set(re.findall(r'\b\w+\b', t))
+    new, i = base, 0
+    while new in used: i += 1; new = f'{base}_{i}'
+    renamed[new] = name
+    return re.sub(pattern, new, t)
+
+def fixups(t, stage, renamed=None):
+    if renamed is None: renamed = {}
     t = function_semicolons(t)
     for a, b in OLD_TEX: t = re.sub(a, b, t)
     t = re.sub(BUILTIN_DECL, '', t, flags=re.M)
-    t = re.sub(r'\bsampler\b', 'dm_sampler', t)
+    t = rename_identifier(t, 'sampler', 'dm_sampler', renamed)
     if stage == 'vert': t = own_name(t, r'^[ \t]*out\s+vec4\s+gl_FrontColor\s*;', 'gl_FrontColor', 'dm_Color', 'out vec4 dm_Color;')
     else:
         t = own_name(t, r'^[ \t]*in\s+vec4\s+gl_Color\s*;', 'gl_Color', 'dm_Color', 'in vec4 dm_Color;')
@@ -167,53 +180,93 @@ def uni_members(refl, ms, prefix, base, f, bools):
 # GLSL ES 1.00, with its version statement (#version 100) or, as GameMaker's runner writes it, without one (Well Dweller's 93 run-time shaders): `attribute`, `varying`, `texture2D`, `gl_FragColor`, precision statements and
 # lowp / mediump / highp qualifiers. SPIR-V needs ES 3.10 or newer, so the text is rewritten before preprocessing (glslang rejects those keywords in 310). Metal has no use for the precision qualifiers;
 # the texture functions stay for fixups(), which renames them after preprocessing (a macro could hide one)
-def es100(t, stage):
+def es100(t, stage, renamed=None):
+    if renamed is None: renamed = {}
     t = re.sub(r'^[ \t]*precision[ \t]+\w+[ \t]+\w+[ \t]*;\r?[ \t]*\r?\n', '', t, flags=re.M)
     t = re.sub(r'\b(?:lowp|mediump|highp)\b[ \t]*', '', t)
     t = re.sub(r'\battribute\b', 'in', t)
     t = re.sub(r'\bvarying\b', 'out' if stage == 'vert' else 'in', t)
     if stage == 'frag' and 'gl_FragColor' in t:
         t = 'out vec4 gm_FragColor;\n' + t.replace('gl_FragColor', 'gm_FragColor')
-    t = re.sub(r'\bsample\b', 'gm_sample', t)   # `sample` became a reserved word after ES 1.00 (GameMaker's sprite shaders use it as a variable)
+    t = rename_identifier(t, 'sample', 'gm_sample', renamed)   # `sample` became a reserved word after ES 1.00 (GameMaker's sprite shaders use it as a variable)
     # `texture` became a built-in function after ES 1.00, and a name declared `texture` redefines it (Fate/hollow ataraxia REMASTERED: `uniform sampler2D texture;`); a call stays
-    t = re.sub(r'\btexture\b(?!\s*\()', 'dm_texture', t)
+    t = rename_identifier(t, 'texture', 'dm_texture', renamed, keep_calls=True)
     return '#version 310 es\nprecision highp float;\nprecision highp int;\n' + t
 
 # The game's names that the rewrite renames (es100, fixups): the table rows give them back as the game wrote them, since the host finds attributes, uniforms and samplers by the
 # game's name (glGetAttribLocation, glGetUniformLocation); the key is the hash of the game's own source
-RENAMED = {'gm_sample': 'sample', 'dm_texture': 'texture', 'dm_sampler': 'sampler'}
-
-def game_names(f):
+def game_names(f, renamed):
     """table fields with the renamed names in their name part (a:, o:, u:, t:, n: up to the '=') given back"""
     def back(x):
         k, sep, rest = x.partition('=')
-        return re.sub(r'\b(' + '|'.join(RENAMED) + r')\b', lambda m: RENAMED[m.group(1)], k) + sep + rest
+        return re.sub(r'\b\w+\b', lambda m: renamed.get(m.group(0), m.group(0)), k) + sep + rest
     return [back(x) for x in f]
+
+def argument_names(spv):
+    """Give bound SPIR-V variables collision-free names, so MSL reflection can identify even an unnamed default block. Keep the original GL names in the table.
+    Descriptor sets are Vulkan's namespace, not GL's: all resources go into one argument buffer, whose IDs spirv-cross allocates independently of the Binding decorations."""
+    data = open(spv, 'rb').read(); words = list(struct.unpack(f'<{len(data) // 4}I', data))
+    ins, names, bound, pointers, variables, i = [], {}, set(), {}, {}, 5
+    while i < len(words):
+        n, op = words[i] >> 16, words[i] & 0xffff
+        if not n: raise ValueError('SPIR-V instruction length 0')
+        w = words[i:i + n]; ins.append(w)
+        if op == 5: names[w[1]] = struct.pack(f'<{n - 2}I', *w[2:]).split(b'\0')[0].decode()
+        elif op == 71 and w[2] == 33: bound.add(w[1])   # OpDecorate Binding
+        elif op == 32: pointers[w[1]] = w[3]   # OpTypePointer
+        elif op == 59: variables[w[2]] = (w[1], w[3])   # OpVariable: pointer type, storage class
+        i += n
+    prefix = 'dm_gl_resource_'
+    while any(prefix in s for s in names.values()): prefix += 'x'
+    renamed = {v: prefix + str(v) for v in bound}
+    new_names = []
+    for v, name in sorted(renamed.items()):
+        b = name.encode() + b'\0'; b += b'\0' * (-len(b) % 4)
+        new_names += [((2 + len(b) // 4) << 16) | 5, v, *struct.unpack(f'<{len(b) // 4}I', b)]
+    out, added = words[:5], False
+    for w in ins:
+        op = w[0] & 0xffff
+        if not added and op in (5, 6, 71, 72): out += new_names; added = True
+        if op == 5 and w[1] in renamed: continue
+        if op == 71 and w[1] in renamed and w[2] == 34: w[3] = 0   # DescriptorSet
+        out += w
+    open(spv, 'wb').write(struct.pack(f'<{len(out)}I', *out))
+    textures = {names.get(v, ''): name for v, name in renamed.items() if variables[v][1] == 0}   # UniformConstant
+    buffers = {f'_{pointers[variables[v][0]]}': name for v, name in renamed.items() if variables[v][1] == 2}   # Uniform
+    return textures, buffers
 
 def translate(src, stage, key, tmp):
     """GLSL → MSL; returns (msl path, table fields) or an error string"""
-    t = src.decode('latin1')
+    t = src.decode('latin1'); renamed = {}
     v = re.search(r'^[ \t]*#version[ \t]+(\d+)[^\n]*\n?', t, re.M)
-    if not v or v.group(1) == '100': src = es100(t.replace(v.group(0), '', 1) if v else t, stage).encode('latin1')
+    if not v or v.group(1) == '100': src = es100(t.replace(v.group(0), '', 1) if v else t, stage, renamed).encode('latin1')
     g = os.path.join(tmp, f'{key}.{stage}'); spv = g + '.spv'; msl = os.path.join(tmp, f'{key}_{stage[0]}.metal')
     open(g + '.in', 'wb').write(src)
     r = subprocess.run(['glslangValidator', '-E', '-S', stage, g + '.in'], capture_output=True, text=True)
     if r.returncode: return 'glslang -E: ' + ' | '.join(l for l in (r.stdout + r.stderr).splitlines() if 'ERROR' in l and 'compilation' not in l)[:400]
     pre = r.stdout[r.stdout.find('#version'):]   # warnings come first
-    open(g, 'w').write(fixups(pre, stage))
+    open(g, 'w').write(fixups(pre, stage, renamed))
     r = subprocess.run(['glslangValidator', '-V', '-R', '--aml', '--amb', '-S', stage, g, '-o', spv], capture_output=True, text=True)
     if r.returncode: return 'glslang: ' + ' | '.join(l for l in (r.stdout + r.stderr).splitlines() if 'ERROR' in l and 'compilation' not in l)[:400]
     refl = json.loads(subprocess.run([SPIRV_CROSS, spv, '--reflect'], capture_output=True, text=True, check=True).stdout)
-    cmd = [SPIRV_CROSS, spv, '--msl', '--msl-version', '20300', '--msl-decoration-binding', '--rename-entry-point', 'main', f'gl_{key}_{stage[0]}', stage, '--output', msl]
+    for k in ('separate_images', 'separate_samplers', 'images', 'ssbos', 'push_constants'):
+        if refl.get(k): return f'{k} are not implemented'
+    for k in ('textures', 'ubos'):
+        for r in refl.get(k, []):
+            if r.get('array'): return f'{"sampler" if k == "textures" else "uniform block"} array {r["name"]}'
+    textures, buffers = argument_names(spv)
+    cmd = [SPIRV_CROSS, spv, '--msl', '--msl-version', '20300', '--msl-argument-buffers', '--msl-argument-buffer-tier', '1',
+           '--rename-entry-point', 'main', f'gl_{key}_{stage[0]}', stage, '--output', msl]
     if stage == 'vert': cmd.append('--fixup-clipspace')
     r = subprocess.run(cmd, capture_output=True, text=True)
     if r.returncode: return 'spirv-cross: ' + r.stderr.strip()[:300]
     m = open(msl).read()
     # Varyings by name: the out struct of a vertex shader and the in struct of a fragment shader (stage_in members of a vertex shader are [[attribute(n)]])
-    m = re.sub(r'(\b(\w+)\s+\[\[)user\(locn\d+\)', lambda x: f'{x.group(1)}user({x.group(2)})', m)
+    m = re.sub(r'(\b(\w+)\s+\[\[)user\(locn\d+\)', lambda x: f'{x.group(1)}user({renamed.get(x.group(2), x.group(2))})', m)
     m = re.sub(r'\bfast::(min|max|clamp)\(', r'precise::\1(', m)   # a NaN operand gives the other one, as on the Switch's GPU (vk_shaders.py PRECISE)
     open(msl, 'w').write(m)
-    f = []
+    ids = {n: int(i) for n, i in re.findall(r'\b(\w+)\s+\[\[id\((\d+)\)\]\]', m)}
+    f = [f'r:{0 if ids else -1}:{max(ids.values(), default=-1) + 1}']
     if stage == 'vert':
         for v in refl.get('inputs', []): f.append(f'a:{v["name"]}={v["location"]}:{v["type"]}')
     else:
@@ -221,24 +274,21 @@ def translate(src, stage, key, tmp):
     # a bool uniform is a uint in the SPIR-V block (it has no bool members), but the game asks GL for its declared type: LÖVE's Shader:send takes only a boolean for a GLSL bool
     bools = {n for n in re.findall(r'\buniform\s+(?:(?:lowp|mediump|highp)\s+)?bool\s+(\w+)\s*;', pre)}
     for u in refl.get('ubos', []):
+        aid = ids.get(buffers[u['type']])
+        if aid is None: continue
         t = refl['types'][u['type']]
         if t['name'] != 'gl_DefaultUniformBlock':   # a named block: the buffer the game binds to its binding point (glUniformBlockBinding, glBindBufferRange)
-            if u.get('array'): return f'uniform block {t["name"]}: arrays of blocks are not implemented'
-            f.append(f'n:{t["name"]}={u["binding"]}:{u["block_size"]}'); continue
-        f.append(f'b:{u["binding"]}:{u["block_size"]}')
+            f.append(f'n:{t["name"]}={aid}:{u["block_size"]}'); continue
+        f.append(f'b:{aid}:{u["block_size"]}')
         e = uni_members(refl, t['members'], '', 0, f, bools)
         if e: return e
     # the samplers the MSL takes: spirv-cross leaves out one the shader never reads, but its reflection still lists it, and glslang gives it the binding of a used one (Mega Man Legacy
     # Collection's default_ps.glsl declares T1 for code under #if 0: T0 and T1 both at 0). Listed, the host bound the unit T1 names, an empty one, over T0's texture: every sprite sampled black
-    used = set(re.findall(r'\b(\w+)\s*\[\[texture\(\d+\)\]\]', m))
     for t in refl.get('textures', []):
-        if t['name'] not in used: continue
-        if t.get('array'): return f'sampler array {t["name"]}'
-        f.append(f't:{t["name"]}={t["binding"]}:{t["type"]}')
-    for k in ('separate_images', 'separate_samplers', 'images', 'ssbos', 'push_constants'):
-        if refl.get(k): return f'{k} are not implemented'
-    if any(int(x) > 15 for x in re.findall(r'\[\[(?:sampler|buffer)\((\d+)\)\]\]', m)): return 'a buffer or sampler slot above 15'
-    return msl, game_names(f)
+        name = textures[t['name']]
+        if name not in ids: continue
+        f.append(f't:{t["name"]}={ids[name]}:{ids.get(name + "Smplr", -1)}:{t["type"]}')
+    return msl, game_names(f, renamed)
 
 def one(item, tmp):
     """[(key, stage, fields, msl, where)], or [(key, None, errors, None, where)] when no stage translates"""
@@ -283,8 +333,8 @@ def main():
             if (key, stage) not in seen: seen[(key, stage)] = (stage, f, msl, where)
         for key, where, errs in failed:
             if not any(k == key for k, _ in seen): print(f'[RED] {where} ({key}) does not translate: {" / ".join(errs)}')
-        tsv = ['# GL shaders (dm/gfx/tools/gl_shaders.py): key = sha256(GLSL source)[:16], Metal function gl_<key>_v / gl_<key>_f; a: vertex inputs, u: default uniform block members '
-               '(offset:type:count:stride), b: the block (slot:size), n: named blocks (name=slot:size), t: combined samplers (slot:type), o: fragment outputs',
+        tsv = [TABLE_ABI, '# GL shaders (dm/gfx/tools/gl_shaders.py): key = sha256(GLSL source)[:16], Metal function gl_<key>_v / gl_<key>_f; a: vertex inputs, u: default uniform block members '
+               '(offset:type:count:stride), r: argument buffer (slot:count), b: the block (id:size), n: named blocks (name=id:size), t: combined samplers (texture-id:sampler-id:type), o: fragment outputs',
                '# ' + ' '.join(subprocess.run(['glslangValidator', '--version'], capture_output=True, text=True).stdout.split()[:3]) + '; spirv-cross '
                + ' '.join((lambda r: r.stdout + r.stderr)(subprocess.run([SPIRV_CROSS, '--revision'], capture_output=True, text=True)).split())]
         tsv += [f'{k[0]}\t{v[0]}\t{" ".join(v[1])}\t{v[3]}' for k, v in sorted(seen.items())]

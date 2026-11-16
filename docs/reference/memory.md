@@ -2,6 +2,16 @@
 
 The guest address space, heaps, pools, virtual address memory and the allocators games bring. Each entry: symptom, cause, fix, the games it was found on. The [symptom index](../agents/symptoms.md) lists every symptom.
 
+## Host registration tables
+
+### Registration section layout under ASan
+
+- **Symptom:** a sanitizer build reports `global-buffer-overflow` in `t_time.c`'s `section_fn`, immediately after `hle_lib_memcpy`; other linker-collected registration tables can fail the same way.
+- **Cause:** HLE, libc, Vulkan, OpenGL/EGL, NVN and service registrations are separate globals collected into Mach-O sections and walked as arrays. ASan inserts redzones between globals unless each declaration opts out. Symbol-prefix ignorelists miss producers with another naming convention, including libc's `hle_lib_*`, graphics' `e_*` and services' `sf_service_*`.
+- **Fix:** every producer uses `DM_REGISTER` (`dm/host/registration.h`), which owns the `__DATA` section attribute, natural entry alignment and `no_sanitize("address")` on the entry. Functions and pointed-to data remain instrumented. Entries in one section must all have the same type; stronger per-entry alignment must not introduce gaps. No registration prefixes remain in the sanitizer ignorelist.
+- **Check:** `make -C dm/gfx/tests GAME=<id> registration-asan` links all graphics producers and libc, exercises HLE, forced and service declarations, and walks the real import, graphics bootstrap and service lookup paths without a GPU or a global ignorelist. It also checks 24-byte entries and confirms that an ordinary global retains its ASan redzone. On supported Apple clang 21, six separate 24-byte globals occupied 384 bytes with redzones and 144 bytes with declaration-level suppression, across two translation units.
+- **Found on:** the host unit suite's `t_time`, after it began linking `hle_table.c` (PR #2856); no game execution change.
+
 ## Guest layout
 
 ### The Mac's alias region is the Switch's 64 GB

@@ -20,6 +20,11 @@ HLE_FORCE("_ZN2nv9InitCheckEv", WHY "; nv::InitializeGraphics recorded on the ho
 // The Switch 2's graphics system (nn::gs) check: SDK 22.2.0's (sdk+0x476d60) aborts unless the SDK's own flag reads 1, which the SDK's graphics boot sets on the console and the host, whose
 // graphics layer stands in for that system from the start, never runs. Mario Kart World 1.8.0 checks it before it makes its camera context (by pull request #1116)
 HLE_FORCE("_ZN2nn2gs3sdk30CheckGraphicsSystemInitializedEPKcm", "the graphics system is the host's graphics layer, up from the start", void, h_gs_Check, const char *who, unsigned long n) { (void)who; (void)n; }
+// The graphics server's application GPU scheduling time over an arbitrary interval is unavailable on Metal. SDK 20.5.29's query tries to open its gsv session through
+// a null context (Welcome Tour: sdk+0x411dc0 -> sdk+0x151fb0). Report the SDK's own unavailable-session result (sdk+0x41200c), leaving the output untouched on failure.
+// This is an unsupported timing query, not a zero GPU-time measurement: Welcome Tour's Bezel caller (main+0x30a808) falls back to its elapsed interval on failure.
+HLE_FORCE("_ZN2nn2gs3sdk27QueryApplicationGpuTimeSpanEPNS_8TimeSpanEmm", "application GPU scheduling time: no graphics-server session (Metal has no equivalent query)",
+          Result, h_gs_GpuTimeSpan, int64_t *out, uint64_t begin, uint64_t end) { (void)out; (void)begin; (void)end; return 0xaf3; }
 // nv::MemoryInfo is 64-bit counters, the SDK fills them from sign-extended 32-bit driver counters. Its size follows the SDK: 0x20 bytes (four counters) on SDK 10 and older,
 // 0x40 bytes from SDK 11 on (where the SDK zeroes all 0x40 when nv is not initialised). Writing 0x40 on an old SDK overran the caller's record by 32 bytes (Hyrule Warriors:
 // Definitive Edition, SDK 3.5.1). Its own implementation reads the NV driver object, which the host never creates, so it faults: Well Dweller crashed there (sdk+0x4656c8,

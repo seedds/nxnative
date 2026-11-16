@@ -479,6 +479,7 @@ typedef uint32_t (*NVNT_nvnEventGetValue)(const NVNevent*);
 typedef void (*NVNT_nvnEventSignal)(NVNevent*, NVNeventSignalMode, uint32_t);
 typedef void (*NVNT_nvnCommandBufferWaitEvent)(NVNcommandBuffer*, const NVNevent*, NVNeventWaitMode, uint32_t);
 typedef void (*NVNT_nvnCommandBufferSignalEvent)(NVNcommandBuffer*, const NVNevent*, NVNeventSignalMode, NVNeventSignalLocation, int, uint32_t);
+typedef NVNboolean (*NVNT_nvnDeviceRegisterFastClearStencil)(NVNdevice*, int);
 
 // Names without a prototype in the header (newer interfaces): they can only get named stubs
 //   nvnDeviceBuilderGetFlags
@@ -621,7 +622,6 @@ typedef void (*NVNT_nvnCommandBufferSignalEvent)(NVNcommandBuffer*, const NVNeve
 //   nvnDeviceRegisterFastClearColorIndex
 //   nvnDeviceRegisterFastClearColoruiIndex
 //   nvnDeviceRegisterFastClearDepthIndex
-//   nvnDeviceRegisterFastClearStencil
 //   nvnDeviceRegisterFastClearStencilIndex
 //   nvnDeviceRelocateAccelerationStructure
 //   nvnDirtyTileMapParametersGetConstantColorTable

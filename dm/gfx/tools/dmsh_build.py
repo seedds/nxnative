@@ -13,7 +13,7 @@
 # Final summary: success / failure counts and the distribution of reasons; distribution of driver segment read offsets (those outside the range the replay layer can fill are listed separately);
 # a [RED] line per shader that built but lost something (shader_regressions.report_losses), which does not change the exit status
 import atexit, inspect, multiprocessing, os, re, sys, json, mmap, struct, hashlib, shutil, subprocess, tempfile, time, collections, threading, concurrent.futures as cf
-import dmsh_geometry, dmsh_tess, dmsh_atomic, dmsh_wide, dmsh_meshstage, dmsh_rewrite, dmsh_reflect, dmsh_entry, dmsh_abi as abi   # abi: the driver segment layout and the binding kinds the host shares (dm/gfx/nvn/dmsh_abi.h)
+import dmsh_geometry, dmsh_tess, dmsh_atomic, dmsh_wide, dmsh_meshstage, dmsh_rewrite, dmsh_reflect, dmsh_entry, dmsh_rt, dmsh_rt_build, dmsh_rt_compile, dmsh_abi as abi   # abi: the driver segment layout and the binding kinds the host shares (dm/gfx/nvn/dmsh_abi.h)
 DM_ROOT = os.environ.get('DM_ROOT') or os.path.expanduser('~/dm-work')   # Workspace root (game files, build outputs and run artifacts are all under it)
 HOME = os.path.expanduser('~')
 dm_dir, out = sys.argv[1:3]; want = set(sys.argv[3:]); cache_root = out
@@ -138,7 +138,7 @@ def output(label, name):
     data = STORE.get(f'{STAGE}/{label}/{name}')   # put before its file is removed (commit), so a file gone meanwhile is found here
     if data is not None or not want: return data
     m = OUT_KEY.match(name); old = OLD_IMAGE.get(label)
-    if old is None or not m or m.group(1) in want: return None   # a key this build makes has no older outputs: the start removed them
+    if old is None or not m or owned_output(m.group(1)): return None   # a product this build makes has no older outputs: the start removed them
     try: return (old / name).read_bytes()
     except OSError: return None
 
@@ -171,7 +171,7 @@ def publish_library(label):
     if old is not None:
         for p in old.iterdir():
             m = OUT_KEY.match(p.name)
-            if (m and m.group(1) in want) or (p.name == dmsh_chain.STAMP and STAMP_BEFORE != INPUTS): continue
+            if (m and owned_output(m.group(1))) or (p.name == dmsh_chain.STAMP and STAMP_BEFORE != INPUTS): continue
             files[p.name] = str(p)
     for n in STORE.names(prefix): files[n[len(prefix):]] = (lambda n=n: STORE.get(n))
     for n in os.listdir(d):
@@ -189,7 +189,7 @@ def cache_outputs(key, digest, cached=False):
     for label, directory in (('mac', out), ('ios', IOSOUT)):
         if not directory: continue
         # fin(), paired vertex padding and the profile tables also need these on an iOS-only cache hit.
-        required = [key + '_b.json'] + ([key + '_b.metal'] if label == 'mac' else [])
+        required = [key + '_b.json'] + ([key + '_b.metal'] if label == 'mac' or key == dmsh_rt_compile.KEY else [])
         if label in TARGETS: required.append(key + '_b.metallib')
         have = STORE.names(f'{root}/{label}/') if cached else set()
         names = required + [key + s + ext for s in ('_bg0', '_bg1', '_bg2', '_bg3', '_bg4', '_bgv', '_bl0', '_bl1', '_bl3') for ext in ('.metallib', '.json', '.metal')
@@ -349,7 +349,7 @@ def ps_libraries(key, msl, full, bindings):
     for t, d in targets: MTL.compile(t, msl, os.path.join(d, key + '_b.metallib'))
     return {}
 
-pc_of, loc = {}, {}
+pc_of, loc, RT_KEYS = {}, {}, set()
 MAP_ROWS, MAP_CONFLICT_ROWS = {}, {}
 for raw in open(MAP, 'rb'):
     c = raw.rstrip(b'\n').split(b'\t')
@@ -359,7 +359,9 @@ for raw in open(MAP + '.conflicts.tsv', 'rb'):
     if len(c) > 1 and not raw.startswith((b'#', b'dm_')): MAP_CONFLICT_ROWS.setdefault(c[0].decode(), raw)
 for ln in open(MAP):
     c = ln.rstrip('\n').split('\t')
-    if len(c) > 4 and c[0].endswith('.bin'): pc_of.setdefault(c[3], c[4]); loc.setdefault(c[3], (c[0], int(c[1])))
+    if len(c) > 4 and c[0].endswith('.bin'):
+        pc_of.setdefault(c[3], c[4]); loc.setdefault(c[3], (c[0], int(c[1])))
+        if c[2] in ('rt', 'raytracing'): RT_KEYS.add(c[3])
 for ln in open(MAP + '.conflicts.tsv'):
     c = ln.rstrip('\n').split('\t')
     if len(c) > 1 and not ln.startswith('#') and not ln.startswith('dm_') and c[0] in pc_of: pc_of[c[0]] = c[1]
@@ -412,6 +414,8 @@ NVN2_STAGE_INDEX = {'vs': 0, 'hs': 1, 'ms': 1, 'ds': 2, 'gs': 3, 'ps': 4}   # NV
 
 def job_for(key, name, rec, w):
     ci = rec.find(bytes.fromhex('34127698'), 0x38); code = rec[0x38:ci]; stage = name[:2]
+    if dmsh_ampere.is_nvn2(rec[ci:]) and rec[ci + 0x56] == 8:
+        raise ValueError(f'{key}: stage8 RT record reached the ordinary shader path; correct its shader_map stage')
     extra = {}
     if dmsh_ampere.is_nvn2(rec[ci:]):
         # NVN2 (Switch 2): Ampere code (a 0x80-byte SPH for the graphics stages, then the instructions, control +0x38 long), which the translator's Ampere
@@ -518,8 +522,9 @@ RULES = []   # MSL rewrite rules attached by shader name (function, applicabilit
 # dmsh_side.py is in it: dmsh_entry's fs_uint and fs_dual write main0's shared body (shared_body).
 # dmsh_fetch.py is not, but for screen_varyings (raster_facts), nor are the other side libraries' modules: they are made again from the restored MSL on every build (ps_libraries;
 # test_dmsh_code_fp.py checks this list).
-CODE_FP = hashlib.sha256(source_without_rule_bodies() + b''.join(b'\0' + dmsh_chain.code_form(open(m.__file__, 'r').read()) for m in (dmsh_chain, dmsh_geometry, dmsh_tess, dmsh_atomic, dmsh_wide, dmsh_meshstage, dmsh_rewrite, dmsh_reflect, dmsh_entry, dmsh_ampere, dmsh_side, abi) + ((ios_metal,) if IOSOUT else ()))
+CODE_FP = hashlib.sha256(source_without_rule_bodies() + b''.join(b'\0' + dmsh_chain.code_form(open(m.__file__, 'r').read()) for m in (dmsh_chain, dmsh_geometry, dmsh_tess, dmsh_atomic, dmsh_wide, dmsh_meshstage, dmsh_rewrite, dmsh_reflect, dmsh_entry, dmsh_ampere, dmsh_side, dmsh_rt, dmsh_rt_build, dmsh_rt_compile, abi) + ((ios_metal,) if IOSOUT else ()))
                          + b'\0' + inspect.getsource(dmsh_fetch.screen_varyings).encode()
+                         + b'\0' + inspect.getsource(dmsh_fetch.select_guards).encode()   # also used only on misses by the RT compiler
                          + b'\0abi\0' + repr(sorted(abi.VALUES.items())).encode()).hexdigest()
 TOOL_FP = tool_fingerprint().encode()
 
@@ -876,6 +881,7 @@ def finish(key, w, j, c1):
 
 keys = build_keys(want, loc, PAIRS)
 if want: want = set(keys)   # dependency outputs are cleaned too, so a failed pixel build cannot leave old MSL for padding
+keys = [key for key in keys if key not in RT_KEYS]   # one universal RT library includes every discovered module, even on a partial build
 NJ = int(os.environ.get('J', '8'))
 PROCS = int(os.environ.get('DMSH_PROCS', NJ))   # processes that finish shaders (fin_worker); 0: NJ threads of this one
 BATCH = 4 * NJ   # shaders translated and finished together: the next batch is translated while this one is finished, and a shader's working files go when it is (fin).
@@ -885,7 +891,8 @@ BATCH = 4 * NJ   # shaders translated and finished together: the next batch is t
 # The stamp goes too, and a full build writes it at the end; a partial build keeps it only while it names the profile's current inputs.
 # A full build also removes the image (as the NSP script does before it): a stopped build leaves no library, rather than one with old shaders for those it had not reached. A partial build
 # builds on the image (OLD_IMAGE), less the outputs of the keys it builds, which publish_library leaves out
-OUT_KEY = re.compile(r'([0-9a-f]{16})_b')
+OUT_KEY = re.compile(r'([0-9a-f]{16}|rt_library)_b')
+def owned_output(key): return key == dmsh_rt_compile.KEY or key in want   # the universal catalog is replaced whole, including when the last RT module left the map
 STAMP_BEFORE = shader_lib.read_stamp(out).get('inputs')
 OLD_IMAGE = {}
 for _label, _d in (('mac', out), ('ios', IOSOUT)):
@@ -896,7 +903,7 @@ for _label, _d in (('mac', out), ('ios', IOSOUT)):
     os.makedirs(_d, exist_ok=True)
     for _n in os.listdir(_d):   # a partial build over a folder (an older chain's, or one a stopped build left)
         _m = OUT_KEY.match(_n)
-        if _m and _m.group(1) in want: os.unlink(os.path.join(_d, _n))
+        if _m and owned_output(_m.group(1)): os.unlink(os.path.join(_d, _n))
     if STAMP_BEFORE != INPUTS and os.path.exists(os.path.join(_d, dmsh_chain.STAMP)): os.unlink(os.path.join(_d, dmsh_chain.STAMP))
 STORE.delete_prefix(STAGE + '/')   # what a stopped build of this folder staged
 
@@ -957,6 +964,8 @@ def rec_of(key):
                  f'split the shaders again (the NSP script does when {dm_dir} is removed)')
     o, e = recs[key]
     return name, os.pread(fd, e - o, o)
+try: RT_PLAN = dmsh_rt_build.make_job(dmsh_rt_compile.package_record(key, rec_of(key)[1]) for key in sorted(RT_KEYS)) if RT_KEYS else None
+except ValueError as _e: sys.exit(f'[RED] RT library inputs: {_e}')
 for key in keys: digests[key] = shader_key(key, *rec_of(key))
 def plain_digest(k):   # a paired pixel shader's key, also when it is not built this time
     if k in digests: return digests[k]
@@ -1080,6 +1089,40 @@ except cf.process.BrokenProcessPool:
     sys.exit(f'[RED] a shader build worker process stopped (killed, or out of memory) with {len(keys) - len(res)} of {len(keys)} shaders unfinished; run the build again, '
              f'with fewer workers (DMSH_PROCS) if memory ran out, or with DMSH_PROCS=0 (threads) if it stops again: what it finished is in the cache')
 if px: px.shutdown()
+def rt_finish(plan):
+    """One cache/staging product across all RT modules; no variation grouping."""
+    key = dmsh_rt_compile.KEY
+    digests[key] = dmsh_rt_compile.cache_digest(plan, TOOL_FP, CODE_FP, PROFILE_ROWS)
+    rule_fps[key] = 'universal-rt-v1'
+    hit, _ = cache_lookup(key, digests[key], rule_fps[key], CODE_FP)
+    if hit and restore_cache(key, digests[key]):
+        refl = json.loads(output_of('mac', key + '_b.json'))
+    else:
+        if hit:
+            PRE_STATS['hit'] -= 1; PRE_STATS['miss'] += 1; PRE_STATS['pruned meanwhile'] += 1
+        try:
+            refl = dmsh_rt_compile.build_library(plan, work=w, outputs={'mac': out, **({'ios': IOSOUT} if IOSOUT else {})},
+                targets=TARGETS, xlate=XLATE, cross=SPIRV_CROSS, chain=CHAIN,
+                debug=os.environ.get('XLATE_DEBUG', '1') != '0', reduced=os.environ.get('XLATE_REDUCED', '1') == '1',
+                compile_metal=MTL.compile, with_compiler=MTL.with_compiler)
+        except (OSError, ValueError, subprocess.CalledProcessError) as e:
+            return key, 'RT failed', str(e), None
+        publish_cache(key, digests[key], rule_fps[key], CODE_FP)
+    commit(key)
+    return key, 'ok', '', refl
+if RT_PLAN:
+    progress('compiling RT library', 0, 1, force=True)
+    _rt_result = rt_finish(RT_PLAN); res.append(_rt_result)
+    if _rt_result[1] != 'ok':
+        # Ordinary completed shaders remain in CAS. Never stamp or publish a
+        # library whose universal RT product failed, nor stage partial targets.
+        atomic_json(os.path.join(out, '_b_build.json'), [{'key': r[0], 'st': r[1], 'err': r[2]} for r in res])
+        shutil.rmtree(w, ignore_errors=True)
+        if PROGRESS:
+            try: os.unlink(PROGRESS)
+            except FileNotFoundError: pass
+        sys.exit('[RED] ' + _rt_result[2])
+    progress('compiling RT library', 1, 1, force=True)
 # Passthrough geometry as mesh shaders (dmsh_mesh.py): <vertex key>_<geometry key>_m3 for each pair dmsh_chain.mesh_pairs names (the pipeline record's G rows, the pairs the game drew
 # with no mesh library, and the profile's geo_mesh.tsv) whose two libraries exist; the host draws a lean triangle-list geometry draw with it when its pair has one, and through the
 # compute path otherwise (nvn_geometry.inc geo_mesh_draw), which records the pair for the next build

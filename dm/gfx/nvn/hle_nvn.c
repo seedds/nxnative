@@ -2194,10 +2194,12 @@ typedef struct {
                                                         // a real-time thread that runs about 1.5 s without blocking), and the thread's CPU time and cycles
 } rt_thr;
 static rt_thr g_rtt[RT_THREADS]; static _Atomic int g_rtt_n;
+static _Thread_local rt_thr *t_rt_self;   // the slot this thread last took (rt_init): an acquire thread's, a frame thread's, or the presenting thread's (rt_present)
 static _Atomic uint64_t g_rt_frame_ns;   // the period the acquire thread declares; the frame threads follow it
 static pthread_mutex_t g_rt_mu = PTHREAD_MUTEX_INITIALIZER;   // the acquire threads' slots (rt_acquire): several threads may acquire, and one retires another's
 static void rt_init(rt_thr *t, const char *name, int acq, uint64_t tid) {   // on the thread itself
     t->name = name; t->acq = acq; t->tid = tid; t->port = pthread_mach_thread_np(pthread_self());
+    t_rt_self = t;
     memset(&t->r, 0, sizeof t->r); t->cyc = 0; t->ndecl = 0; t->retired = 0; atomic_store(&t->period_ns, 0); atomic_store(&t->comp_us, 0);
     atomic_store(&t->frames, 0); atomic_store(&t->demoted, 0); atomic_store(&t->cpu_ns, 0); atomic_store(&t->cycles, 0); atomic_store(&t->ready, 1);
 }
@@ -2274,6 +2276,24 @@ static void rt_acquire(uint64_t period_ns) {
     pthread_mutex_unlock(&g_rt_mu);
 }
 void *nvn_rt_join(const char *name) { return rt_register(name, 0); }
+// The presenting thread, at each present. A game can acquire the window texture on one guest thread and present on another (Ocarina of Time does; PR #2320 found the policy line
+// read the wrong thread), and the presenting thread is then the one that records and translates the frame: 16-21 ms of CPU a frame in Hyrule Field on an iPhone 17 Pro, at 1.3-1.7 GHz
+// with 4-45 % on performance cores (HookLink issue 3). No slot of the acquire thread, the queue replay thread or the encode thread reaches it. A thread that holds no slot of its own
+// (an acquire slot, or a frame thread's from nvn_rt_join) takes one as "presenting thread" and samples and declares like a frame thread (rt_tick: the acquire thread's period, its own
+// computation after a window of 120 frames). A thread that holds an acquire slot, or a frame thread's, takes no second one. DM_RT_PRESENT=0 leaves the presenting thread as it was;
+// DM_RT=0 and DM_RT_FRAME=0 turn it off too, as for any frame thread. The slot is not given back when a guest thread exits: like a frame thread's it is only used by its own thread.
+// From HookLink's 65e7c9b8 (dsi-hub/nxnative)
+static void rt_present(void) {
+    static int on = -1; if (on < 0) { const char *e = getenv("DM_RT_PRESENT"); on = !(e && !strcmp(e, "0")); if (!on) LOG("[nvn] DM_RT_PRESENT=0: the presenting thread gets no time-constraint policy of its own"); }
+    uint64_t period = atomic_load_explicit(&g_rt_frame_ns, memory_order_relaxed);
+    if (!on || !period || dm_detclock_enabled()) return;
+    rt_thr *t = t_rt_self; static _Thread_local int full;
+    if (!t || t->tid != rt_self_tid() || (t->acq && t->retired)) {   // none, taken by another thread since, or an acquire slot this thread stopped acquiring on
+        if (full) return;
+        if (!(t = rt_register("presenting thread", 0))) { full = 1; LOG("[nvn] [RED] no time-constraint slot is left for the presenting thread (%d slots)", RT_THREADS); return; }
+    }
+    if (!t->acq) rt_tick(t, period);   // an acquire thread's slot is ticked by its acquire
+}
 void nvn_rt_tick(void *h) { if (h) rt_tick(h, atomic_load_explicit(&g_rt_frame_ns, memory_order_relaxed)); }
 // The thread policy line: each registered thread's declaration, priority and policy, the frames it was demoted in, and its CPU per frame with its mean clock (cycles per CPU
 // second: an efficiency core runs below about 2.6 GHz on the A19, a performance core up to 4.3)
@@ -2605,6 +2625,7 @@ static const int *present_crop(const int win[4], int tw, int th, int lc[4]) {
 }
 NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
     (void)q; win_t *o = (win_t *)w; o->presents++;
+    rt_present();   // the presenting thread's own deadline, when another thread acquires
     dm_ue_cvar_tick();
     if (fps_high()) high_cap_tick();
     int movie = dm_movie_hz();

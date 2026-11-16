@@ -280,6 +280,7 @@ static void read_layout(module_t *m, const char *dir) {
         else if (!strcmp(key, "FPS_STATE_OFF")) m->fps_state_off = v;
         else if (!strcmp(key, "RENDER_SCALE")) m->render_scale_max = (uint32_t)v;
         else if (!strcmp(key, "STEP_MAX")) m->step_max = (uint32_t)v;
+        else if (!strcmp(key, "FRAME_STEP_120")) m->fstep_t120 = v != 0;
         else if (!strcmp(key, "UE_MALLOC_VT")) m->ue_malloc_vt = v;
         else if (!strcmp(key, "UE_MALLOC_SLOT")) m->ue_malloc_slot = (unsigned)v;
         else if (!strcmp(key, "FPS_TARGET_PTR")) m->fps_target_ptr = v;
@@ -318,23 +319,28 @@ static void read_layout(module_t *m, const char *dir) {
 }
 
 // Frame step state (the page after the key page, read-write; layout in patch_nso.py FRAME_STEP): the rewriter's stubs step the game by the host's whole vsyncs capped at this
-// target, 0 = the game's own interval logic. The profile's fps_target, overridden by DM_FPS_TARGET (0, 30 or 60); the graphics layer decides the steps and paces presents
-// (hle_nvn.c fstep_tick)
+// target, 0 = the game's own interval logic. The profile's fps_target, overridden by DM_FPS_TARGET (0, 30 or 60; 40 for a stub that takes ticks of 1/120 s, FRAME_STEP_120);
+// the graphics layer decides the steps and paces presents (hle_nvn.c fstep_tick)
 uint8_t *dm_fps_state;
 int dm_fps_step_max;   // the largest step the stubs give the game (STEP_MAX in its fixups table; 0 = FSTEP_MAX): the frame step holds frames and pays back within it (hle_nvn.c)
 static const char *g_fps_mod;   // the module holding the state page (for the log)
 static float g_render_scale_max = 1.0f;   // the render-scale stub's largest scale (RENDER_SCALE in its fixups table; 1 for a stub that only lowers the game's size)
+static int g_fstep_t120;                  // the frame step stub takes ticks of 1/120 s (the FRAME_STEP_120 capability): the page's unit (+0x38) is 120, and 40 fps is taken
 static void install_fps_state(module_t *m) {
     if (m->fps_state_off + 0x40 > m->size || m->fps_state_off < m->key_page_off + m->key_page_size) die("%s: frame step state page out of range", m->name);
     dm_fps_state = m->base + m->fps_state_off; g_fps_mod = m->name; dm_fps_step_max = (int)m->step_max;
     if (m->render_scale_max > 1) g_render_scale_max = (float)m->render_scale_max;
+    g_fstep_t120 = m->fstep_t120;
 }
 // The settings in the state page, written when the game starts (main.c, after host loading): on iOS the loading runs at app launch, before the launcher has set DM_FPS_TARGET and
 // DM_RENDER_SCALE (Launcher.swift), and nothing reads the page before the game runs
 void dm_fps_state_apply(void) {
     if (!dm_fps_state) return;
     const char *e = getenv("DM_FPS_TARGET"); int t = e ? atoi(e) : DM_GAME_FPS_TARGET;
-    if (t != 0 && t != 30 && t != 60) { LOG("[RED] DM_FPS_TARGET=%s: must be 0, 30 or 60; using the game's own frame step", e); t = 0; }
+    // The step's unit, before the target: 120 (ticks of 1/120 s) for a stub that takes them, fixed for the run (nvn_fstep.h FSTEP_UNIT_OFF); 0 = vsyncs of 1/60 s
+    uint32_t unit = g_fstep_t120 ? 120 : 0; __atomic_store_n((uint32_t *)(dm_fps_state + FSTEP_UNIT_OFF), unit, __ATOMIC_RELAXED);
+    if (t == 40 && !g_fstep_t120) { LOG("[RED] DM_FPS_TARGET=40: this build's frame step takes whole vsyncs of 1/60 s only (no FRAME_STEP_120 stub), so 25 ms frames cannot be stepped; using 30"); t = 30; }
+    if (t != 0 && t != 30 && t != 40 && t != 60) { LOG("[RED] DM_FPS_TARGET=%s: must be 0, 30%s or 60; using the game's own frame step", e, g_fstep_t120 ? ", 40" : ""); t = 0; }
     nvn_fstep_target_put(dm_fps_state, (float)t);
     // Render scale of the 3D views (the stubs at Tears of the Kingdom's main+0xd5cc0, Breath of the Wild's main+0x1266880, Hades II's render size): 1.0 keeps the game's own size
     // and dynamic resolution; another factor fixes the size at that fraction (DM_RENDER_SCALE, 0.5 to the stub's largest scale: 1.0, or above for a stub that also raises it,
@@ -384,22 +390,24 @@ void dm_fps_state_apply(void) {
         }
     }
     char cap[32]; snprintf(cap, sizeof cap, ", capped at %d fps", t);
-    LOG("%s: frame step %s%s (%s)", g_fps_mod, !t ? "as the game sets it" : "in whole vsyncs decided by the host", t ? cap : "", e ? "DM_FPS_TARGET" : "game profile fps_target");
+    LOG("%s: frame step %s%s (%s)", g_fps_mod, !t ? "as the game sets it" : g_fstep_t120 ? "in ticks of 1/120 s decided by the host" : "in whole vsyncs decided by the host", t ? cap : "", e ? "DM_FPS_TARGET" : "game profile fps_target");
 }
 // The frame rate chosen while the game runs (the in-game menus: front_ios.m dm_setting_live, front_mac.m's Frame Rate menu). Only a game with a frame step state page that the host
-// steps (a target of 30 or 60 at start) takes it at once: the graphics layer reads the target at every present (hle_nvn.c fps_step_cap; a movie's picture rate and the
-// thermal cap still decide over it), the stubs when they run. An engine limiter the host writes (hle_fpslock.c) reads the target once and keeps it, so a game with one needs the next start, as one without a page does.
-// Returns the target in force (30 or 60), or 0 when the game does not take a change at once
+// steps (a target of 30, 40 or 60 at start) takes it at once: the graphics layer reads the target at every present (hle_nvn.c fps_step_cap; a movie's picture rate and the
+// thermal cap still decide over it, and 40 needs a screen at a multiple of 120 Hz), the stubs when they run. An engine limiter the host writes (hle_fpslock.c) reads the target
+// once and keeps it, so a game with one needs the next start, as one without a page does.
+// Returns the target in force (30, 40 or 60), or 0 when the game does not take a change at once
 int dm_fps_target_live(void) {
     if (!dm_fps_state || dm_fps_lock_engine()) return 0;
     float t = nvn_fstep_target(dm_fps_state);
-    return t <= 0 ? 0 : t <= 30 ? 30 : 60;
+    return t <= 0 ? 0 : t <= 30 ? 30 : t <= 40 ? 40 : 60;
 }
-// 30 or 60 (fps_max 120 is for engine limiters only, which have no page): returns 1 when the page took it, 0 when refused (logged)
+int dm_fps_40_able(void) { return dm_fps_state && g_fstep_t120; }
+// 30 or 60, or 40 with a stub in ticks of 1/120 s (fps_max 120 is for engine limiters only, which have no page): returns 1 when the page took it, 0 when refused (logged)
 int dm_fps_target_set(int fps) {
     if (!dm_fps_target_live()) { LOG("[RED] frame rate %d fps refused: %s", fps, !dm_fps_state ? "this game has no frame step state page; it takes the frame rate at the next start" : nvn_fstep_target(dm_fps_state) > 0 ? "an engine frame limit the host writes takes it at the next start" : "the game's own frame step runs (DM_FPS_TARGET=0)"); return 0; }
     int was = nvn_fstep_target_change(dm_fps_state, fps);
-    if (!was) { LOG("[RED] frame rate %d fps refused: must be 30 or 60", fps); return 0; }
+    if (!was) { LOG("[RED] frame rate %d fps refused: must be 30%s or 60%s", fps, g_fstep_t120 ? ", 40" : "", fps == 40 ? " (this build's frame step takes whole vsyncs of 1/60 s only)" : ""); return 0; }
     if (was != fps) LOG("%s: frame step capped at %d fps (was %d), set while the game runs", g_fps_mod, fps, was);
     return 1;
 }

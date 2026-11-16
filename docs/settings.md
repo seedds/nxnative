@@ -29,6 +29,8 @@ In Breath of the Wild, Tears of the Kingdom and the other games whose every fram
 
 On a Mac, a game checked at that speed (Fire Emblem Fortune's Weave, Mario & Luigi: Brothership) also offers **120 fps**. It needs a screen that shows 120 Hz, and uses more GPU and power. When frames do not fit, during movies, or on a slower screen, the game drops to 60 for a while, so it keeps its real speed. If you see the frame rate move between 60 and 120 and would rather it stayed still, choose 60.
 
+Ocarina of Time also offers **40 fps**, on the iPhone and the Mac, also while you play. Each frame stays on screen for 25 ms, three refreshes of a 120 Hz screen, so motion is smoother than 30 and costs less than 60. It needs a screen that runs at 120 Hz (ProMotion): on a 60 Hz screen, in Low Power Mode, while the phone is hot and during movies the game runs at 30 instead, at real speed. Frame generation stays off at 40. This is a prototype: its speed is checked on the Mac, not yet on an iPhone.
+
 ### Dynamic resolution
 
 Off, the default, keeps the 3D picture at full size. On lets the game lower its resolution when frames run heavy and raise it again when they fit, as on the Switch: steadier frame rate, at times a softer picture. Only games whose resolution control the app can hold offer it (NieR:Automata, Ocarina of Time).
@@ -267,7 +269,7 @@ A line like `DM_PRESENT_SNAP=0` in `Documents/env.txt` (in the Files app, under 
 
 | Setting | Variable | Values |
 |---|---|---|
-| Frame rate | `DM_FPS_TARGET` | `30`, `60`, `120` (games with `fps_max 120`) |
+| Frame rate | `DM_FPS_TARGET` | `30`, `40` (Ocarina of Time, a 120 Hz screen), `60`, `120` (games with `fps_max 120`) |
 | Render scale | `DM_RENDER_SCALE` | `0.5` to `1.0` (Hades II: to `3.0`) |
 | Console mode | `DM_OPMODE` | `1` docked, `0` handheld |
 | Game language | `DM_LANG` | a language code, such as `ja` |

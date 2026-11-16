@@ -26,6 +26,33 @@ static void fps_target_live(void) {
     dm_fps_state = NULL;
     puts("frame rate changed while the game runs (dm_fps_target_set): OK");
 }
+// 40 fps (loader.c, compiled here): only a stub that takes ticks of 1/120 s (the FRAME_STEP_120 capability in its fixups table) gets it; the loader writes the step's unit (+0x38)
+// for it, 120, at every start, and 0 for every other stub. Elsewhere DM_FPS_TARGET=40 holds 30 and a change to 40 while running is refused
+static float page_target(const uint8_t *page) { float t; memcpy(&t, page, 4); return t; }
+static uint32_t page_unit(const uint8_t *page) { uint32_t u; memcpy(&u, page + FSTEP_UNIT_OFF, 4); return u; }
+static void fps_40(void) {
+    _Alignas(8) uint8_t page[0x100] = {0};
+    module_t m = {.base = page, .size = sizeof page};   // a stub in vsyncs (Tears of the Kingdom's, Breath of the Wild's)
+    strcpy(m.name, "main");
+    unsetenv("DM_RENDER_SCALE"); unsetenv("DM_DYNAMIC_RESOLUTION"); unsetenv("DM_SCREEN_ASPECT");
+    install_fps_state(&m);
+    setenv("DM_FPS_TARGET", "40", 1); dm_fps_state_apply();
+    assert(page_target(page) == 30 && page_unit(page) == 0 && !dm_fps_40_able());   // no tick stub: 30, the page stays in vsyncs
+    assert(!dm_fps_target_set(40) && dm_fps_target_live() == 30);
+    m.fstep_t120 = 1; install_fps_state(&m);   // Ocarina of Time's: FRAME_STEP_120
+    dm_fps_state_apply();
+    assert(page_target(page) == 40 && page_unit(page) == 120 && dm_fps_40_able() && dm_fps_target_live() == 40);
+    assert(dm_fps_target_set(60) && dm_fps_target_live() == 60 && page_unit(page) == 120);   // live: the unit stays
+    assert(dm_fps_target_set(40) && dm_fps_target_live() == 40 && dm_fps_target_set(30) && dm_fps_target_live() == 30);
+    assert(!dm_fps_target_set(45) && !dm_fps_target_set(120) && dm_fps_target_live() == 30);
+    setenv("DM_FPS_TARGET", "60", 1); dm_fps_state_apply(); assert(page_target(page) == 60 && page_unit(page) == 120);   // the unit at every target
+    setenv("DM_FPS_TARGET", "0", 1); dm_fps_state_apply(); assert(page_target(page) == 0 && page_unit(page) == 120 && !dm_fps_target_set(40));   // the game's own step: not switched
+    setenv("DM_FPS_TARGET", "45", 1); dm_fps_state_apply(); assert(page_target(page) == 0);   // not a frame rate it takes: the game's own step
+    m.fstep_t120 = 0; install_fps_state(&m); setenv("DM_FPS_TARGET", "60", 1); dm_fps_state_apply(); assert(page_unit(page) == 0);   // back to a stub in vsyncs: 0 again
+    unsetenv("DM_FPS_TARGET"); dm_fps_state = NULL; g_fstep_t120 = 0;
+    assert(!dm_fps_40_able());
+    puts("40 fps only for a stub in ticks of 1/120 s (FRAME_STEP_120), the step's unit in the state page: OK");
+}
 
 struct dm_flags g_flag;
 uint64_t now_ns(void) { return 0; }
@@ -76,6 +103,7 @@ static void unload(int i) { h_ro_UnloadModule(&handles[i - 1]); assert(!g_mod[i]
 
 int main(void) {
     fps_target_live();
+    fps_40();
     FILE *manifest = tmpfile(); assert(manifest);
     fputs("# NRO manifest\n\nrefused 00 128\n", manifest);
     for (int i = 0; i < 1432; i++) fprintf(manifest, "nro%d 00 128\n", i);

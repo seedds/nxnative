@@ -5470,7 +5470,7 @@ static _Atomic long g_pd_a0 = -2, g_pd_a1;   // the frames dumped (inclusive); -
 static long g_pd_every;
 static inline int passdump(void) {
     if (g_kd_force) return 1;
-    if (__builtin_expect(g_pd_a0 == -1, 1)) return 0;   // off (the usual case): answered first, it is asked for every binding of every draw
+    if (__builtin_expect(atomic_load_explicit(&g_pd_a0, memory_order_relaxed) == -1, 1)) return 0;   // off (the usual case): answered first, it is asked for every binding of every draw, so a plain load
     if (g_pd_a0 == -2) { const char *e = getenv("DM_NVN_PASSDUMP");
         if (e && !strncmp(e, "every:", 6)) { g_pd_every = atol(e + 6); g_pd_a1 = -1; g_pd_a0 = g_pd_every > 0 ? -3 : -1; }   // one frame in every n, halfway between two DM_NVN_GPUPROF=every:n frames
         else { g_pd_a1 = e && strchr(e, '-') ? atol(strchr(e, '-') + 1) : e ? atol(e) : -1; g_pd_a0 = e ? atol(e) : -1; } }
@@ -14419,6 +14419,25 @@ static void fb_depth_rule(NvShader *fs, int dsw) {
     if (other) g_fb_dread = 1;
 }
 // Called before the draw opens its render pass: if a snapshot is needed, end the current render pass, copy the snapshot (or reuse a valid one) and register the substitution (used by this draw's argument encoding)
+// Whether a texture or image slot of this fragment shader names an attachment of the pass: the depth rule, the tile plan and the snapshot loop below each walk the bindings for
+// that, and in a race nearly no draw has one (Mario Kart World: about 2 % of the replay thread's time in those walks). A shader whose reads go through handles in uniform
+// buffers, pool tables or dynamic tables answers yes, and takes the whole path as before
+static int fb_any_att(NvShader *fs) {
+    if (fs->rf.bindless || fs->rf.pool || fs->rf.dyn || fs->rf.htab) return 1;
+    uint64_t att[9]; int na = 0;
+    for (int k = 0; k < R.rt.n && k < 8; k++) if (R.rt.color[k]) att[na++] = R.rt.color[k]->serial;
+    if (R.rt.depth) att[na++] = R.rt.depth->serial;
+    if (!na) return 0;
+    for (int i = 0; i < fs->rf.nb; i++) {
+        const nvn_rbind *b = &fs->rf.b[i];
+        if (b->kind == NVN_RB_TEXU) return 1;   // a handle in a uniform buffer: the snapshot loop resolves it
+        int image = b->kind == NVN_RB_IMG && !b->rw && !b->atom && b->reg < 32;
+        if (!image && (b->kind != NVN_RB_TEX || b->reg >= NTEX)) continue;
+        uint64_t ser = tid_ser((int)((image ? S.img[1][b->reg] : tex_slot_h(S.tex[1], S.img[1], b->reg)) & 0xfffff)); if (!ser) continue;
+        for (int k = 0; k < na; k++) if (att[k] == ser) return 1;
+    }
+    return 0;
+}
 static void fb_prepare(NvProg *pr) {
     g_draw_seq++; g_fb_n = 0;
     if (g_fb_rebind) { args_dirty_all(); g_fb_rebind = 0; }   // the previous draw had a substituted binding: re-encode with the original bindings this time
@@ -14431,6 +14450,7 @@ static void fb_prepare(NvProg *pr) {
     int dsw = R.rt.depth && ((S.ds.dt && S.ds.dw) || (S.ds.st && (S.st_wmask[0] || S.st_wmask[1]) && (S.ds.fail_f != NVN_STENCIL_OP_KEEP || S.ds.zfail_f != NVN_STENCIL_OP_KEEP || S.ds.zpass_f != NVN_STENCIL_OP_KEEP
         || S.ds.fail_b != NVN_STENCIL_OP_KEEP || S.ds.zfail_b != NVN_STENCIL_OP_KEEP || S.ds.zpass_b != NVN_STENCIL_OP_KEEP)));
     if (g_enc && dsw && g_fb_dread) { g_fb_split++; g_fb_split_pool += g_fb_dread_pool; g_fb_dread_pool = 0; rp_end(); fb_pass_sync(); }   // the same for its depth and stencil (see rtc_on)
+    if (!fb_any_att(fs)) { g_fb_wmask |= wm; g_fb_dwrote |= (uint32_t)dsw; return; }   // the rules below would find nothing (fb_any_att)
     if (R.rt.depth) fb_depth_rule(fs, dsw);
     if (R.rt.n && R.rt.depth && !g_fb_dread && ((fs->rf.pool && pool_ds_read(R.rt.depth) && (g_fb_dread_pool = 1)) || fs->rf.dyn)) g_fb_dread = 1;   // may read it: pool and dynamic tables, in colour passes as before
     uint64_t tile[4]; int ntile = fb_tile_plan(pr, wm, tile);

@@ -26,5 +26,8 @@ namespace Ryujinx.Graphics.Shader.Translation
         SharedMemory = 1 << 11,
         Store = 1 << 12,
         VtgAsCompute = 1 << 13,
+
+        // nxnative: a hull shader reads the address of the stage's circular buffer (S2R of system registers 21 and 22) and writes its control points there (DirectCbeWrites)
+        DirectCbe = 1 << 14,
     }
 }

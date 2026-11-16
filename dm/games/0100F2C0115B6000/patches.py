@@ -7,7 +7,7 @@ from nso_asm import ADRP, B, NOP, STP_PRE
 # and main+0x3e562c). The stub replaces that logic: int fps = 60 / step, and the float fps (timing +0x24, unused, per masagrator's FPSLocker config for this build, which found the
 # sites) the same, which the consumers read. Until the host has decided a step (the first frames) the step is the measured frame time (timing frame +0xd8, 19.2 MHz
 # ticks), clamped to [1 / cap, 1 / 15 s]; game time that ran ahead after a short frame (the "lead", at most 0.25 s; totk-mobile) is paid back by later frames. Prerendered movies hold 30 (the host's movie flag, state +4, hle_movie.c
-# dm_movie_playing), the D-pad menu fade starts at full rate (FPSLocker's fix at main+0x1fbc80) and the swapchain argument at main+0xbe14a8 becomes 1 as in FPSLocker
+# dm_movie_hz), the D-pad menu fade starts at full rate (FPSLocker's fix at main+0x1fbc80) and the swapchain argument at main+0xbe14a8 becomes 1 as in FPSLocker
 def stub(ctx, step, read1, read2, fade, swap, view):
     """The frame step at the frame-step function (step), the two readers of the integer fps (read1, read2), the D-pad menu fade (fade), the swapchain argument (swap) and
     the view render size (view): each patched at its own offsets"""

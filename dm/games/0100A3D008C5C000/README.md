@@ -239,6 +239,10 @@ existing [per-depth-mode entry-point mechanism](../../../docs/reference/shaders.
   Checked by disassembly and a standalone test, not in the game: no base NSP or
   4.0.0 files are on the drive. Open until long clean runs of a build that froze.
 
+## Rendering
+
+- **Current: transform feedback captures share passes** ([Transform feedback captures, a pass and a dispatch each](../../../docs/reference/rendering.md#transform-feedback-captures-a-pass-and-a-dispatch-each), PR #2114). Scarlet and Violet skin each mesh with a begin, one array capture and an end with a control buffer, 73 to 182 a frame. On an iPad Pro 13" M4 before the change (display asleep, so a low GPU clock), Scarlet in the player's house had 300 encoders a frame and the GPU busy 17 ms of a 34 ms span; Violet's opening 666 encoders, busy 13 of 58 ms. On the PR author's fork (an older main, M4 Max, Scarlet in the player's house, `DM_NVN_TF_CPU=0` against the default): 80 captures a frame in 80 passes → 3, 325 → 89 encoders a frame, submit 22.85 → 17.64 M instructions a frame; GPU p50 9.07 → 4.18 and 9.28 → 7.54 ms in two pairs (the game is capped at 30 fps there, so the Mac's GPU clock follows the load and these say little); screenshots at the same frame match. Those runs predate the barriers inside the pass; how many barriers Scarlet's captures get, a run on a device, and gameplay on the landed code are open.
+
 ## Open
 
 - [Conservative rasterization](../../../docs/reference/rendering.md#conservative-rasterization-remains-unimplemented)
@@ -261,5 +265,6 @@ existing [per-depth-mode entry-point mechanism](../../../docs/reference/shaders.
 - [A frame capture runs under the standard thread policy](../../../docs/reference/nvn-objects.md#a-frame-capture-runs-under-the-standard-thread-policy).
 - [A capture refused after a change to the reflection structs](../../../docs/reference/nvn-objects.md#a-capture-refused-after-a-change-to-the-reflection-structs).
 - [Conservative rasterization remains unimplemented](../../../docs/reference/rendering.md#conservative-rasterization-remains-unimplemented).
+- [Transform feedback captures, a pass and a dispatch each](../../../docs/reference/rendering.md#transform-feedback-captures-a-pass-and-a-dispatch-each).
 - [Trinity's rendezvous loses its release on Apple cores](../../../docs/reference/threads.md#trinitys-rendezvous-loses-its-release-on-apple-cores).
 - [Metal's build folders left by pipeline archive flushes](../../../docs/reference/shaders.md#metals-build-folders-left-by-pipeline-archive-flushes).

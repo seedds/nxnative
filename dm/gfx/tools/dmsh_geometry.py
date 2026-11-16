@@ -90,7 +90,8 @@ def capture(src):
     for semantic, name in [('vertex_id', 'dm_vid'), ('instance_id', 'dm_iid')]:
         found = re.search(r'uint (\w+) \[\[' + semantic + r'\]\]', params)
         if found:
-            pro += f'    uint {name} = {found.group(1)};\n'
+            if found.group(1) != name:   # a domain shader rewritten as a vertex function (dmsh_tess.py) already names its vertex ID dm_vid
+                pro += f'    uint {name} = {found.group(1)};\n'
         else:
             params += (', ' if params else '') + f'uint {name} [[{semantic}]]'
     stores = [(k, f'as_type<uint>({e})') for k, e in output_words(src).items()]

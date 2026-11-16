@@ -68,6 +68,27 @@ int serial_table_holds(const void *o) { uintptr_t k = (uintptr_t)o; return nvn_h
 int entry_holds(const void *o) { uintptr_t k = (uintptr_t)o; return serial_table_holds(o) || (g_ghost_held.n && nvn_hm_get(&g_ghost_held, &k)); }
 int tex_object_pinned(id o) { uintptr_t key = (uintptr_t)(__bridge void *)o; return o && nvn_hm_get(&g_tex_pin_objects, &key) != NULL; }
 int own_object_free(id o) { pthread_mutex_lock(&g_smu); int r = !entry_holds((__bridge void *)o); pthread_mutex_unlock(&g_smu); return r; }
+static CFMutableSetRef g_alias_set;   // the sharing table's textures (below)
+// By address alone (no message to the object: gone_note may ask after the last reference went)
+int own_holds_locked(const void *o) { uintptr_t k = (uintptr_t)o; return o && (entry_holds(o) || nvn_hm_get(&g_tex_pin_objects, &k) || (g_alias_set && CFSetContainsValue(g_alias_set, o))); }
+// The objects that left their last holder, for the replay layer's view cache (own_gone_take_locked): noted where a count reaches zero (count_one) and where an object leaves the
+// sharing table (alias_del, own_rename_locked). Past GONE_MAX the list stops and says so, and the taker checks everything it keeps. Under g_smu
+enum { GONE_MAX = 65536 };
+static const void **g_gone; static unsigned g_gone_n, g_gone_cap; static int g_gone_over;
+static void gone_note(const void *o) {
+    if (!o || g_gone_over || own_holds_locked(o)) return;
+    if (g_gone_n == GONE_MAX) { g_gone_over = 1; return; }
+    if (g_gone_n == g_gone_cap) {
+        unsigned cap = g_gone_cap ? 2 * g_gone_cap : 256; const void **p = realloc(g_gone, cap * sizeof *p);
+        if (!p) ODIE("the owner's released-object list");
+        g_gone = p; g_gone_cap = cap;
+    }
+    g_gone[g_gone_n++] = o;
+}
+int own_gone_take_locked(const void *const **list, unsigned *n) {
+    int over = g_gone_over; *list = g_gone; *n = g_gone_n; g_gone_n = 0; g_gone_over = 0;
+    return over;
+}
 
 // Retirement eligibility. The replay layer retires a resource through its deferred-release queue (own_hook_drop(o, 0): out of the residency set once the submissions encoded up to
 // then have completed), and asks here, once that completion has come, whether it may really leave (own_retire_locked): GPU completion says the work encoded before the retirement is
@@ -97,7 +118,7 @@ static void count_one(nvn_hmap *m, const void *o, int d) {
     uintptr_t k = (uintptr_t)o, n = (uintptr_t)nvn_hm_get(m, &k);
     if (d > 0) nvn_hm_put(m, &k, (void *)(n + 1));
     else if (n > 1) nvn_hm_put(m, &k, (void *)(n - 1));
-    else if (n) { nvn_hm_del(m, &k); retire_resume(o); }   // a slot written past these helpers (a test's table) was never counted: nothing to take away
+    else if (n) { nvn_hm_del(m, &k); retire_resume(o); gone_note(o); }   // a slot written past these helpers (a test's table) was never counted: nothing to take away
 }
 // An entry that holds a view holds the textures the view is of as well, and they are counted with it: an sRGB / linear twin's serial holds a view of the shared texture
 // (tex_mtl_), so that texture is in use as long as the twin's entry is. Counted alone, the view left its parent looking unheld: a takeover evicted it under a live twin
@@ -158,6 +179,7 @@ static int alias_del(const alias_key *k) {
     alias_index(k, 0); nvn_hm_del(&g_alias_seen, k);
     id o = CFBridgingRelease(old);
     if (g_alias_set) CFSetRemoveValue(g_alias_set, (__bridge const void *)o);
+    gone_note((__bridge const void *)o);
     own_hook_drop(o, 0);
     return 1;
 }
@@ -240,6 +262,13 @@ const void *own_live_ref(uint64_t k) { pthread_mutex_lock(&g_smu); const void *o
 void serial_put(uint64_t k, id o) { pthread_mutex_lock(&g_smu); id old = hm_get_id(&g_by_serial, &k); if (old) { held_add((__bridge void *)old, -1); obj_drop(old); } hm_put_id(&g_by_serial, &k, o); held_add((__bridge void *)o, 1); own_note(k); pthread_mutex_unlock(&g_smu); }
 static void live_del_locked(uint64_t k) { id old = hm_get_id(&g_by_serial, &k); if (old) { held_add((__bridge void *)old, -1); obj_drop(old); hm_del_id(&g_by_serial, &k); own_note(k); } }   // nothing to drop: the texture
 void serial_del(uint64_t k) { pthread_mutex_lock(&g_smu); live_del_locked(k); pthread_mutex_unlock(&g_smu); }
+id own_ext_take(uint64_t k) {   // not retired through the deferred-release queue, which only NVN submissions drain: the present path retires it (mtl_ext_tex_release)
+    pthread_mutex_lock(&g_smu);
+    void *v = nvn_hm_del(&g_by_serial, &k); id o = v ? CFBridgingRelease(v) : nil;
+    if (o) { held_add((__bridge void *)o, -1); own_note(k); }
+    pthread_mutex_unlock(&g_smu);
+    return o;
+}
 
 void own_tex_live_put_locked(const tex_t *t) { nvn_hm_put(&g_tex_live, &t->serial, (void *)t); }
 int own_tex_live_locked(uint64_t serial) { return nvn_hm_get(&g_tex_live, &serial) != NULL; }
@@ -385,6 +414,7 @@ int own_rename_locked(id from, id to, uint64_t serial) {
         void *old = g_alias.vals[i]; g_alias.vals[i] = (void *)CFBridgingRetain(to); CFRelease(old); shared = 1;
     }
     if (shared) { CFSetRemoveValue(g_alias_set, (__bridge const void *)from); CFSetAddValue(g_alias_set, (__bridge const void *)to); }
+    gone_note((__bridge const void *)from);   // its counts went to `to` above while it was still shared
     return named;
 }
 // The rename and the asking serial's new object in one hold: published after g_smu was let go (as the upgrade did), a reader in between found the serial's old view, of a parent no
@@ -395,6 +425,69 @@ int own_upgrade(id from, id to, uint64_t serial, id put) {
     own_epoch();   // every serial that named `from` resolves to `to` now: no one note
     if (put && !(named && put == to)) tex_put_locked(serial, put);
     pthread_mutex_unlock(&g_smu); return named;
+}
+
+// Shared textures another one drew over. On NVN a texture object only describes memory: once the GPU writes another texture over the same bytes, they belong to that one, and what the
+// first held is gone on the console too, whether or not its object lives on. The takeover (alias_take_over) applies that only when a new texture is made, and spares an entry a live
+// object still resolves to, as an object rebuilt over the same storage must keep finding it (SMBW's transient render targets). An entry a live object holds stayed for as long as the
+// object lived, then: Ocarina of Time keeps about 900 texture objects over its 304 MB render-target pool and uses about 70 of them at a time, each of the rest a Metal copy of bytes
+// newer targets have drawn over. They held 2.7 of the pool's 2.9 GB in Kakariko Village on the Mac (a census of the test host: unused for 20 s or more, overlapped by a texture used
+// since), and iOS ended the game for memory at an area load (about 6.1 GB). So an entry the replay layer covers goes once it has been unused for `idle` while another covered entry of
+// its pool wrote its bytes after that use: the content is dead on the console as well. The idle time keeps a texture whose bytes lie in a part of a larger one that the larger one's
+// writes leave alone (a smaller resolution's target in a dynamic-resolution buffer, PR #1453): it is read every frame. Its serial entries go with it, live and ghost, and the next use
+// makes it again (tex_mtl_), as after a finalize; a pin (a queued descriptor or a saved binding) keeps it. Caller holds g_smu
+own_dead_stats own_alias_dead_locked(uint32_t now, uint32_t idle, own_use_fn use_of, uint32_t max, uint64_t **serials, uint32_t *nserials) {
+    own_dead_stats st = {0}; *serials = NULL; *nserials = 0;
+    if (!g_alias.n) return st;
+    uint64_t sub = own_hook_submission();
+    CFMutableSetRef pinned = CFSetCreateMutable(NULL, 0, NULL), dead = CFSetCreateMutable(NULL, 0, NULL);   // a pin holds a view's parents too (held_add)
+    for (uint32_t i = 0; i < g_tex_pins.cap; i++) { tex_pin *pin = g_tex_pins.vals[i]; if (!pin || !pin->object) continue;
+        for (id o = (__bridge id)pin->object; o; o = view_parent(o)) CFSetAddValue(pinned, (__bridge const void *)o); }
+    alias_key *vk = NULL; uint32_t nv = 0, cap = 0;
+    for (uint32_t i = 0; i < g_alias.cap; i++) {   // every entry is asked (the replay layer keeps the stamps of those it is asked about)
+        void *val = g_alias.vals[i]; if (!val) continue;
+        const alias_key *k = (const alias_key *)(const void *)(g_alias.keys + (size_t)i * g_alias.klen);
+        own_use u; if (!use_of((__bridge id)val, &u) || nv >= max || !u.use || now - u.use < idle) continue;
+        uint64_t seen = (uint64_t)(uintptr_t)nvn_hm_get(&g_alias_seen, k); if (seen && sub - seen < ALIAS_IDLE) continue;
+        nvn_texlayout L; nvn_tex_layout(&k->d, &L); if (!L.size) continue;
+        int64_t lo = k->off, hi = k->off + (int64_t)L.size; int over = 0;
+        for (int64_t c = lo >> ALIAS_CELL; c <= (hi - 1) >> ALIAS_CELL && !over; c++) {   // the entries whose bytes reach into its cells (alias_index)
+            uint64_t ck[2] = {k->pool, (uint64_t)c}; const alias_cell *v = nvn_hm_get(&g_alias_cells, ck);
+            for (uint32_t j = 0; v && j < v->n && !over; j++) {
+                if (!memcmp(&v->e[j].k, k, sizeof *k) || v->e[j].k.off >= hi || v->e[j].end <= lo) continue;
+                void *x = nvn_hm_get(&g_alias, &v->e[j].k); own_use xu;
+                over = x && x != val && use_of((__bridge id)x, &xu) && xu.wr > u.use;
+            }
+        }
+        if (!over) continue;
+        if (CFSetContainsValue(pinned, val)) { st.pinned++; continue; }
+        if (nv == cap) { cap = cap ? cap * 2 : 64; alias_key *n = realloc(vk, cap * sizeof *vk); if (!n) ODIE("the released shared textures"); vk = n; }
+        vk[nv++] = *k; CFSetAddValue(dead, val);
+    }
+    CFRelease(pinned);
+    if (nv) {
+        // The serial entries that name one of them or a view of one (an sRGB / linear twin), collected first: a removal shifts the table's entries
+        nvn_hmap *tables[] = {&g_by_serial, &g_ghost}; uint64_t *ks = NULL; uint32_t nk = 0, kcap = 0, nlive = 0;
+        for (unsigned t = 0; t < 2; t++) {
+            for (uint32_t i = 0; i < tables[t]->cap; i++) {
+                void *o = tables[t]->vals[i]; if (!o) continue;
+                int hit = 0; for (id x = (__bridge id)o; x && !hit; x = [x respondsToSelector:@selector(parentTexture)] ? ((id<MTLTexture>)x).parentTexture : nil) hit = CFSetContainsValue(dead, (__bridge const void *)x);
+                if (!hit) continue;
+                if (nk == kcap) { kcap = kcap ? kcap * 2 : 64; uint64_t *n = realloc(ks, kcap * sizeof *ks); if (!n) ODIE("the released shared textures' serials"); ks = n; }
+                memcpy(&ks[nk++], tables[t]->keys + (size_t)i * tables[t]->klen, sizeof *ks);
+            }
+            if (!t) nlive = nk;
+        }
+        for (uint32_t i = 0; i < nk; i++) { if (i < nlive) live_del_locked(ks[i]); else ghost_del_locked(ks[i]); }   // each a note
+        for (uint32_t j = 0; j < nv; j++) {
+            id o = hm_get_id(&g_alias, &vk[j]);
+            if ([o respondsToSelector:@selector(allocatedSize)]) st.bytes += ((id<MTLTexture>)o).allocatedSize;
+            alias_del(&vk[j]);
+        }
+        st.n = nv; st.serials = nk; *serials = ks; *nserials = nk;
+    }
+    free(vk); CFRelease(dead);
+    return st;
 }
 
 // A submitted descriptor and a queue binding hold the compiled program by its immutable initialization serial. Retaining it must not mint serial aliases:
@@ -416,11 +509,22 @@ void own_prog_pin(uint64_t serial) {
     pin->refs++;
 }
 
-uint32_t own_alias_unref_locked(void) {
-    CFMutableSetRef held = CFSetCreateMutable(NULL, 0, NULL); uint32_t n = 0;
-    own_each_locked(^(uint64_t serial, id o, int ghost) { (void)serial; (void)ghost; CFSetAddValue(held, (__bridge const void *)o); });
-    for (uint32_t i = 0; i < g_alias.cap; i++) if (g_alias.vals[i] && !CFSetContainsValue(held, g_alias.vals[i])) n++;
-    CFRelease(held); return n;
+own_alias_unheld own_alias_unheld_locked(void) {
+    own_alias_unheld s = {0}; uint64_t now = own_hook_submission();
+    CFMutableSetRef sized = CFSetCreateMutable(NULL, 0, NULL);   // the textures counted
+    for (uint32_t i = 0; i < g_alias.cap; i++) {
+        void *v = g_alias.vals[i]; id o = (__bridge id)v;
+        if (!v || entry_holds(v) || tex_object_pinned(o)) continue;
+        s.entries++;
+        alias_key k; memcpy(&k, g_alias.keys + (size_t)i * g_alias.klen, sizeof k);
+        uint64_t seen = (uint64_t)(uintptr_t)nvn_hm_get(&g_alias_seen, &k);
+        if (seen && now > seen && now - seen > s.oldest_idle) s.oldest_idle = now - seen;
+        if (CFSetContainsValue(sized, v) || ![o respondsToSelector:@selector(allocatedSize)]) continue;
+        CFSetAddValue(sized, v);
+        uint64_t b = ((id<MTLResource>)o).allocatedSize; s.bytes += b;
+        if ([o respondsToSelector:@selector(usage)] && (((id<MTLTexture>)o).usage & (MTLTextureUsageRenderTarget | MTLTextureUsageShaderWrite))) s.writable_bytes += b;
+    }
+    CFRelease(sized); return s;
 }
 own_stats own_stats_locked(void) { return (own_stats){.live = g_by_serial.n, .live_cap = g_by_serial.cap, .ghost = g_ghost.n, .retire_wait = g_retire_wait.n, .ghost_puts = g_ghost_puts}; }
 void own_each_locked(void (^fn)(uint64_t serial, id o, int ghost)) {

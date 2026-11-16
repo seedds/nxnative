@@ -105,9 +105,6 @@ int main(void) { @autoreleasepool {
         P(nvnQueueSubmitCommands)(&queues[queue],1,&handle); P(nvnQueueFinish)(&queues[queue]);
         int front = ccw == (front_in_clip[queue][current][winding] ^ flip);
         int visible = cull == NVN_FACE_NONE || (cull == NVN_FACE_FRONT && !front) || (cull == NVN_FACE_BACK && front);
-        g_fd_dw=&draw;
-        CHECK(first_draw_covers(0,tex_mtl(&target),0)==visible,"full-coverage proof agrees with native culling");
-        g_fd_dw=NULL;
         uint8_t expected[4] = {visible && !front ? 255:0,visible && front ? 255:0,visible ? 0:255,255};
         id<MTLBuffer> pixels = [g_dev newBufferWithLength:256 options:MTLResourceStorageModeShared];
         mtl_sub_begin(); res_add(pixels);

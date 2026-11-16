@@ -128,7 +128,9 @@ class UnrealMemory(unittest.TestCase):
         }
         keys = pg.guess(facts, hooks=set())
         reserve, alias, stack = (int(keys[k][0], 0) for k in ('mem_reserve', 'mem_alias', 'mem_stack'))
-        self.assertGreaterEqual(alias, 64 * 1024**3)
+        # An iPhone reserves the profile's block as it is: 5 GB is the total proven on a phone (issue #2278: a 64 GB block stopped Dispatch at launch)
+        self.assertLessEqual(reserve, 5 * 1024**3)
+        self.assertGreaterEqual(alias, 4 * 1024**3)
         # mem_init puts the modules before the alias region, then stacks and the heap.
         heap = reserve - 0x10000000 - alias - stack
         self.assertGreaterEqual(heap, 128 * pg.MiB)

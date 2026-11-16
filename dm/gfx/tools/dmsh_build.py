@@ -3,17 +3,17 @@
 # No translation at runtime (iOS has no JIT): build output goes into the shader cache directory, file name = Switch control segment key (dm_ctl_sha16, same as column 4 of shader_map.tsv) + "_b".
 # Source of query answers: the answer table in the game profile, dm/games/<id>/shader_facts.tsv (dmsh_facts.py) - texture types, vertex attribute / fragment output component types, compute thread group size and shared memory.
 # Usage: dmsh_build.py <Switch package dir> <output cache dir> [key...] (no keys = all); build output is the image <output cache dir>/b-<chain version>.img (same for IOSOUT; dm/tools/shader_lib.py), for the chain version see dmsh_chain.py.
-# The folder b-<chain version>/ beside it holds only the shaders in flight: a finished shader's files go into the shader cache (cas.db, under stage/), and the image is written from there
+# The folder b-<chain version>/ beside it holds only the shaders in flight: a finished shader's files go into the shader cache (cas-<chain>.db, under stage/), and the image is written from there
 # at the end (publish_library), so a build, stopped or not, leaves a few files and not one per shader output (Octopath Traveler 0, stopped in its compile: 68,230 files). The translator's
 # working files go into a folder per batch of shaders, removed when the batch is done; a working folder whose build is gone is removed at the next start (sweep_work).
 # A full build (no keys) also stamps both directories with the game and the digest of its profile inputs (inputs.tsv) and writes the profile's c1_full.tsv and cb_extent.tsv (c1_guard.py, cb_extent.py)
-# from its Mac outputs. One output directory per game: the chain version is the same for every game   Environment: DM_GAME=game profile (required, dm/games/<id>), XLATE=path to the translation tool (default the in-repo dmsh_xlate_bin), DMSH_CAS=the compile cache, one file (shader_cache.py; default <output cache dir>/cas.db), DMSH_PREFILL=Mac library root[=iOS library root] (separated by :, their b-*/ go into the MSL-keyed compile cache first; sibling b-*/ always do), J=concurrency, DMSH_PROCS=processes that finish shaders (default J; 0 = threads of this process, see fin_worker)
+# from its Mac outputs. One output directory per game: the chain version is the same for every game   Environment: DM_GAME=game profile (required, dm/games/<id>), XLATE=path to the translation tool (default the in-repo dmsh_xlate_bin), DMSH_CAS=the compile cache (shader_cache.py): a folder, whose cas-<chain>.db this build writes (default the output cache dir), or one file, DMSH_PREFILL=Mac library root[=iOS library root] (separated by :, their b-*/ go into the MSL-keyed compile cache first; sibling b-*/ always do), J=concurrency, DMSH_PROCS=processes that finish shaders (default J; 0 = threads of this process, see fin_worker)
 # Build output: <key>_b.metallib, <key>_b.json (replay reflection, including drv_reads, the runtime read offsets into driver segments c0 / c2), <key>_b.metal (MSL)
 # Environment IOSOUT=dir: the same MSL also goes through dm/ios/tools/ios_metal.compile to produce an iphoneos metallib + reflection (chain_metal records the iOS compile convention)
 # Final summary: success / failure counts and the distribution of reasons; distribution of driver segment read offsets (those outside the range the replay layer can fill are listed separately);
 # a [RED] line per shader that built but lost something (shader_regressions.report_losses), which does not change the exit status
 import atexit, inspect, multiprocessing, os, re, sys, json, mmap, struct, hashlib, shutil, subprocess, tempfile, time, collections, threading, concurrent.futures as cf
-import dmsh_geometry, dmsh_atomic, dmsh_wide, dmsh_meshstage, dmsh_rewrite, dmsh_reflect, dmsh_entry, dmsh_abi as abi   # abi: the driver segment layout and the binding kinds the host shares (dm/gfx/nvn/dmsh_abi.h)
+import dmsh_geometry, dmsh_tess, dmsh_atomic, dmsh_wide, dmsh_meshstage, dmsh_rewrite, dmsh_reflect, dmsh_entry, dmsh_abi as abi   # abi: the driver segment layout and the binding kinds the host shares (dm/gfx/nvn/dmsh_abi.h)
 DM_ROOT = os.environ.get('DM_ROOT') or os.path.expanduser('~/dm-work')   # Workspace root (game files, build outputs and run artifacts are all under it)
 HOME = os.path.expanduser('~')
 dm_dir, out = sys.argv[1:3]; want = set(sys.argv[3:]); cache_root = out
@@ -51,7 +51,8 @@ DUAL_WANT_FILE = str(GAME.table('dual_want.tsv'))   # pixel shaders a pipeline b
 DUAL_WANT = {line.split()[0] for line in open(DUAL_WANT_FILE) if line.strip() and not line.lstrip().startswith('#')} if os.path.exists(DUAL_WANT_FILE) else set()
 XC = ['--msl', '--msl-version', '20300', '--msl-argument-buffers', '--msl-texture-buffer-native', '--msl-pad-fragment-output']
 
-STORE: 'shader_cache.Store | shader_cache.Remote' = shader_cache.Store(os.environ.get('DMSH_CAS', os.path.join(cache_root, 'cas.db')))
+_cas = os.environ.get('DMSH_CAS') or cache_root   # a cache folder: this chain's own file over the folder's older generations (shader_cache.for_chain); a file: that one alone (regress.py's)
+STORE: 'shader_cache.Store | shader_cache.Remote' = shader_cache.for_chain(_cas, CHAIN) if os.path.isdir(_cas) or _cas == cache_root else shader_cache.Store(_cas)
 atexit.register(STORE.close)   # folds its log into the one file
 CAS_LOCKS, CAS_LOCKS_GUARD = {}, threading.Lock()
 PRE_STATS = collections.Counter()
@@ -147,7 +148,9 @@ def output_of(label, name) -> bytes:   # an output its shader has just written o
     return data
 
 def commit(key='', names=None):
-    """A finished shader's files (<key>_*, or the names given) into the cache's stage and off the disk. A file the cache could not take (a full drive) stays on disk, where publish_library finds it too"""
+    """A finished shader's files (<key>_*, or the names given) into the cache's stage, then off the disk once the stage has them: a cache that cannot take one (a full drive) rolls the whole batch back,
+    and all of them stay on disk, where publish_library finds them too"""
+    staged = []
     with STORE.batch():
         for label in ('mac', 'ios'):
             d = label_dir(label)
@@ -155,8 +158,9 @@ def commit(key='', names=None):
             for n in (names if names is not None else [n for n in os.listdir(d) if n.startswith(key + '_')]):
                 p = os.path.join(d, n)
                 if n.startswith('.') or '.tmp' in n or not os.path.isfile(p): continue
-                STORE.put_file(f'{STAGE}/{label}/{n}', p)
-                if not STORE.full: os.unlink(p)
+                STORE.put_file(f'{STAGE}/{label}/{n}', p); staged.append(p)
+    if not STORE.full:
+        for p in staged: os.unlink(p)
 
 def publish_library(label):
     """The library's image <dir>.img from the staged outputs and the files left on disk (these win), and for a partial build the image it builds on, less the outputs of the keys it built
@@ -445,6 +449,7 @@ def job_for(key, name, rec, w):
         tf = tf_layout(key, rec[ci:]) if stage in ('vs', 'gs') else None
         if tf: extra['tf'] = tf
     if stage == 'ps' and early_fragment_tests(rec[ci:], code): extra['early_fragment_tests'] = True
+    if stage == 'ds' and (tm := dmsh_tess.control_mode(rec[ci:])): extra['tess_mode'] = tm   # the domain's own tessellation mode (dmsh_tess.py): the translator answers a fixed default
     cp = os.path.join(w, key + '.bin'); open(cp, 'wb').write(code)
     j = {'key': key, 'stage': stage, 'code': cp, 'tex': {}, 'img': {}, 'attr': {}, 'fout': {}, 'c1': c1.hex(), **extra,
          'debug': os.environ.get('XLATE_DEBUG', '1') != '0', 'reduced': os.environ.get('XLATE_REDUCED', '1') == '1'}   # translation options (see dmsh_xlate/Program.cs); relaxed precision is on by default (GPU float last-bit error does not enter game state, whole frame −26% on the second Mac)   # c1: used by the translator to read indirect jump tables
@@ -511,7 +516,7 @@ RULES = []   # MSL rewrite rules attached by shader name (function, applicabilit
 # dmsh_side.py is in it: dmsh_entry's fs_uint and fs_dual write main0's shared body (shared_body).
 # dmsh_fetch.py is not, but for screen_varyings (raster_facts), nor are the other side libraries' modules: they are made again from the restored MSL on every build (ps_libraries;
 # test_dmsh_code_fp.py checks this list).
-CODE_FP = hashlib.sha256(source_without_rule_bodies() + b''.join(b'\0' + dmsh_chain.code_form(open(m.__file__, 'r').read()) for m in (dmsh_chain, dmsh_geometry, dmsh_atomic, dmsh_wide, dmsh_meshstage, dmsh_rewrite, dmsh_reflect, dmsh_entry, dmsh_ampere, dmsh_side, abi) + ((ios_metal,) if IOSOUT else ()))
+CODE_FP = hashlib.sha256(source_without_rule_bodies() + b''.join(b'\0' + dmsh_chain.code_form(open(m.__file__, 'r').read()) for m in (dmsh_chain, dmsh_geometry, dmsh_tess, dmsh_atomic, dmsh_wide, dmsh_meshstage, dmsh_rewrite, dmsh_reflect, dmsh_entry, dmsh_ampere, dmsh_side, abi) + ((ios_metal,) if IOSOUT else ()))
                          + b'\0' + inspect.getsource(dmsh_fetch.screen_varyings).encode()
                          + b'\0abi\0' + repr(sorted(abi.VALUES.items())).encode()).hexdigest()
 TOOL_FP = tool_fingerprint().encode()
@@ -682,7 +687,7 @@ def geometry_finish(key, w, j, c1):
         dmsh_geometry.flatten_sets(spv)
         r = subprocess.run([SPIRV_CROSS, *dmsh_atomic.cross_args(XC, spv), spv], capture_output=True, text=True)
         if r.returncode: return 'geometry MSL failed', r.stderr.strip()[:160], None
-        try: selected = dmsh_rewrite.uniform_tests(dmsh_fetch.select_guards(dmsh_rewrite.precise(dmsh_atomic.check_msl(r.stdout))))   # bounded uniform reads as selects (see dmsh_fetch.select_guards), tested words as volatile loads (see uniform_tests)
+        try: selected = dmsh_rewrite.uniform_tests(dmsh_fetch.select_guards(dmsh_rewrite.bit0_mask(dmsh_rewrite.precise(dmsh_atomic.check_msl(r.stdout)))))   # precise, a tested bit 0's mask (bit0_mask), bounded uniform reads as selects (dmsh_fetch.select_guards), tested words as volatile loads (uniform_tests), as finish makes them
         except ValueError as e: return 'geometry MSL failed', str(e)[:160], None
         plain = dmsh_geometry.topology_pointer(dmsh_reflect.pool_arrays(selected))
         src = dmsh_geometry.capture_input(plain)
@@ -714,14 +719,15 @@ def geometry_finish(key, w, j, c1):
             spv = os.path.join(w, k + '.reader.spv'); dmsh_geometry.flatten_sets(spv)
             r = subprocess.run([SPIRV_CROSS, *dmsh_atomic.cross_args(XC, spv), spv], capture_output=True, text=True)
             if r.returncode: return 'geometry reader failed', r.stderr.strip()[:160], None
-            try: selected = dmsh_rewrite.uniform_tests(dmsh_fetch.select_guards(dmsh_rewrite.precise(dmsh_atomic.check_msl(r.stdout))))
+            try: selected = dmsh_rewrite.uniform_tests(dmsh_fetch.select_guards(dmsh_rewrite.bit0_mask(dmsh_rewrite.precise(dmsh_atomic.check_msl(r.stdout)))))
             except ValueError as e: return 'geometry reader failed', str(e)[:160], None
             reader = dmsh_entry.vs_layer(dmsh_entry.vs_init(dmsh_geometry.reader(dmsh_reflect.pool_arrays(selected))))
             analysis, full = dmsh_entry.vs_depth(reader)
             meta = {'key': key + '_bgv', 'route': 'B', 'chain': CHAIN, 'dm_ctl': key,
                     'stage': 'vs', 'entry': 'main0', 'entry_z': 'main0_z', 'msl_entry_kind': 'vertex',
                     'geometry_reader': True, 'geometry_output': layout['output'], **({'layer_out': True} if dmsh_entry.layer_out(analysis) else {}), 'c1': '', 'notes': [], 'drv_reads': {}, 'drv_unfillable': [],
-                    'bindings': dmsh_reflect.reflect(key, 'vs', analysis, {'sbufs': []}), 'vertex_inputs': [], 'raster': {}}
+                    # the geometry shader's textures and images: their offset table entries and the table's length (dmsh_reflect.py buffer_image_bias)
+                    'bindings': dmsh_reflect.reflect(key, 'vs', analysis, {'sbufs': [], 'textures': res.get('textures', []), 'images': res.get('images', [])}), 'vertex_inputs': [], 'raster': {}}
             if j.get('tf'):
                 full += vs_tf(analysis, j['tf'], geometry=True)
                 meta.update(entry_tf='main0_tf', tf_strides=[e['stride'] if e else 0 for e in j['tf']])
@@ -756,11 +762,16 @@ def finish(key, w, j, c1):
             src = open(msl).read()
     try: src = dmsh_atomic.check_msl(src)
     except ValueError as e: return 'image atomic MSL failed', str(e), None
+    if j['stage'] == 'ps':
+        try: src = dmsh_rewrite.per_vertex(src)   # LDTRAM's per-vertex attribute reads as vertex_value (see per_vertex)
+        except ValueError as e: return 'per-vertex input rewrite failed', str(e)[:160], None
     src = dmsh_rewrite.precise(src)   # min / max / clamp with Maxwell's NaN results (see precise)
     src = dmsh_rewrite.membar_fence(src)   # MEMBAR as a fence, not an execution barrier (see membar_fence)
+    src = dmsh_rewrite.bit0_mask(src)   # a tested bit 0's 0 / -1 mask without the compare, which Apple's GPU compiler can fail to encode a jump on (see bit0_mask)
     try: src = dmsh_fetch.select_guards(src)   # bounded uniform reads as a load and a select, as the translator means them, not a branch for each (see dmsh_fetch.select_guards)
     except ValueError as e: return 'uniform bounds rewrite failed', str(e)[:160], None
     src = dmsh_rewrite.mul_extended(src)   # scalar extended products without the optnone wrapper (see mul_extended)
+    src = dmsh_rewrite.float_add_msl(src)   # a float add's compare-and-swap loop as one native atomic add (see float_add_msl)
     try: src = dmsh_rewrite.gather_offsets(src)   # four gathers instead of a wrapper's loop over their offsets (see gather_offsets)
     except ValueError as e: return 'gather offsets rewrite failed', str(e)[:160], None
     try: src = dmsh_rewrite.hmma_msl(src)   # Ampere HMMA through simdgroup_matrix (see hmma_msl)
@@ -770,7 +781,7 @@ def finish(key, w, j, c1):
     try: src = dmsh_reflect.pool_arrays(src)   # handles traced to no slot read the pools the replay keeps (see pool_arrays)
     except ValueError as e: return 'pool rewrite failed', str(e)[:160], None
     src = dmsh_wide.wide_loads(src)   # storage words the translator split, read whole again (see dmsh_wide.py)
-    src = dmsh_rewrite.tg_fence(src)   # warp-synchronous shared memory: a simdgroup-scope fence after each threadgroup store (see tg_fence)
+    src = dmsh_rewrite.tg_fence(src)   # warp-synchronous shared memory: the translator's dmsh_tg_fence() as a simdgroup-scope fence (see tg_fence)
     src = dmsh_rewrite.border_emu(src)   # border colours Metal lacks (see border_emu)
     if j['stage'] == 'ps': src = dmsh_rewrite.frag_z_snap(src)[0]   # gl_FragCoord.z against a depth of its own surface (see frag_z_snap)
     try: src = dmsh_rewrite.uniform_tests(src)   # a uniform word tested against constants read by a volatile load per test, so the front end folds no switch (see uniform_tests)
@@ -780,6 +791,12 @@ def finish(key, w, j, c1):
     open(msl, 'w').write(src)
     first, spill = [], 0
     mesh = j.get('mesh_stage')
+    tess = None
+    if j['stage'] in ('hs', 'ds') and not mesh:   # hull as a plain kernel, domain as a plain vertex function on the host's grid (dmsh_tess.py); unsupported shapes keep the old source
+        try:
+            src, tess = dmsh_tess.hull(src, os.path.join(w, key + '.spv')) if j['stage'] == 'hs' else dmsh_tess.domain(src, os.path.join(w, key + '.spv'), j.get('tess_mode'))
+            open(msl, 'w').write(src)
+        except ValueError as e: tess = {'unsupported': str(e)[:160]}
     if mesh:   # the kernel as the Metal object or mesh function (dmsh_meshstage.py)
         if mesh.get('refused'): return 'mesh stage failed', mesh['refused'], None
         # outputs its paired pixel shaders read but its SPHs do not enable get (0,0,0,1), as vs_pad gives a vertex shader's (Ocarina of Time's foliage meshes); each output as wide as they read
@@ -790,6 +807,9 @@ def finish(key, w, j, c1):
         try: src, spill = dmsh_rewrite.tg_spill(src)   # shared memory past Metal's 32 KB in a device buffer (see tg_spill)
         except ValueError as e: return 'shared memory rewrite failed', str(e)[:160], None
         if spill: open(msl, 'w').write(src)
+        src = dmsh_rewrite.max_threads(src, j.get('local')); open(msl, 'w').write(src)   # the local size as the kernel's thread limit, so its pipeline allows the dispatch (see max_threads)
+    if 'dmsh_raw_find' in src:
+        src = dmsh_rewrite.raw_noinline(src); open(msl, 'w').write(src)   # one copy of the pool table search (see raw_noinline)
     pad = []
     if j['stage'] == 'vs':   # outputs start as (0,0,0,1) (see vs_init); no point size beside a layer output (see vs_layer); the base instance from Metal (see vs_base_instance)
         src = dmsh_entry.vs_base_instance(dmsh_entry.vs_layer(dmsh_entry.vs_init(src))); open(msl, 'w').write(src)
@@ -808,7 +828,10 @@ def finish(key, w, j, c1):
         plain = full
         full, lay = dmsh_entry.vs_layer_entry(full)   # layer entry points for a slice-writing geometry shader (see vs_layer_entry)
         open(msl, 'w').write(full)
-    fu, fmask = dmsh_entry.fs_uint(src) if j['stage'] == 'ps' else (None, 0)   # the integer-output entry points (see fs_uint); the analysis below uses the source with only main0
+    if j['stage'] == 'ds' and tess and 'unsupported' not in tess:   # the domain is the last stage before the rasterizer: the two depth-convention entry points (see vs_depth)
+        capture = dmsh_geometry.capture(src)   # and its capture entry, for a geometry shader after it (nvn_tess.inc, as a vertex shader's for nvn_geometry.inc)
+        src, full = dmsh_entry.vs_depth(src); open(msl, 'w').write(full + capture)
+    fu = dmsh_entry.fs_uint(src) if j['stage'] == 'ps' else None   # the integer-output entry point (see fs_uint); the analysis below uses the source with only main0
     fd = dmsh_entry.fs_dual(src) if j['stage'] == 'ps' and key in DUAL_WANT else None   # the dual-source entry point (see fs_dual), from the source with only main0
     shared = dmsh_side.shared_body(src) if fu or fd else None   # they call main0's body; fs_uint and fs_dual give none for a main0 whose shape it does not know
     if shared: plain = src; open(msl, 'w').write(shared + (fu or '') + (fd or ''))
@@ -833,17 +856,18 @@ def finish(key, w, j, c1):
     refl = {'key': key + '_b', 'route': 'B', 'chain': CHAIN, 'dm_ctl': key, 'source': f'{name}#{k}', 'pc_paired': pc_of[key], 'stage': mesh['kind'] if mesh else j['stage'],
             **({'mesh_stage': {'kind': mesh['kind'], 'threads': mesh['threads'], 'payload': mesh['payload'], 'task': mesh.get('task', True)}, **({'entry_z': 'main0_z'} if mesh['kind'] == 'ms' else {}),
                **({'entry_object': 'main0_o'} if mesh['kind'] == 'ms' and not mesh.get('task', True) else {})} if mesh else {}),
-            'entry': entry.group(2) if entry else 'main0', 'msl_entry_kind': entry.group(1) if entry else None, **({'entry_z': 'main0_z', 'entry_geometry_capture': 'main0_gs'} if j['stage'] == 'vs' else {}),
+            **({'mesh_spill': 1} if mesh and mesh.get('spill') else {}),   # the mesh stage's array is a device slice: the host binds the scratch buffer at DMSH_MESH_SCRATCH_SLOT (dmsh_meshstage.py to_stage)
+            'entry': entry.group(2) if entry else 'main0', 'msl_entry_kind': entry.group(1) if entry else None, **({'entry_z': 'main0_z', 'entry_geometry_capture': 'main0_gs'} if j['stage'] == 'vs' else {}), **({'entry_z': 'main0_z', 'entry_geometry_capture': 'main0_gs'} if j['stage'] == 'ds' and tess and 'unsupported' not in tess else {}),
             **({'layer_out': True} if j['stage'] == 'vs' and dmsh_entry.layer_out(src) else {}),   # main0 writes the layer (see layer_out)
             **({'entry_discard': 'main0_discard'} if discard else {}),
             **({'entry_tf': 'main0_tf', 'tf_strides': [e['stride'] if e else 0 for e in j['tf']]} if j.get('tf') else {}),
-            **({'entry_layer': 'main0_l', 'entry_layer_z': 'main0_lz', 'layer_from': lay} if lay else {}), **({'entry_u': 'main0_u'} if fu else {}), **({'entry_m': 'main0_m', 'uint_mask_m': fmask} if fu and fmask else {}), **({'entry_d': 'main0_d'} if fd else {}), **({'blend_zero': True} if blend0 else {}), **({'entries_lost': lost} if lost else {}),
+            **({'entry_layer': 'main0_l', 'entry_layer_z': 'main0_lz', 'layer_from': lay} if lay else {}), **({'entry_u': 'main0_u'} if fu else {}), **({'entry_d': 'main0_d'} if fd else {}), **({'blend_zero': True} if blend0 else {}), **({'entries_lost': lost} if lost else {}),
             **({'first_store': [{'reg': next(b['reg'] for b in binds if b['msl_name'] == n), 'word': w, 'value': v} for n, w, v in first]} if first else {}),
             **({'tg_spill': spill} if spill else {}),
             'threadgroup_size': j.get('local'), 'c1': c1.hex(), 'notes': res['notes'] + (['not in the answer table, queries use defaults'] if j.get('no_facts') else []), 'drv_reads': dr, 'drv_unfillable': dmsh_reflect.unfillable(dr, mesh['kind'] if mesh else j['stage']),
             'bindings': binds,
             'vertex_inputs': [{'location': int(m.group(3)), 'msl_type': m.group(1)} for m in dmsh_reflect.attributes(src)],
-            'raster': {**dmsh_reflect.raster_facts(j['stage'], src), **({'omap': ps_omap(open(j['code'], 'rb').read())} if j['stage'] == 'ps' else {})}, 'vs_pad': pad}
+            'raster': {**dmsh_reflect.raster_facts(j['stage'], src), **({'omap': ps_omap(open(j['code'], 'rb').read())} if j['stage'] == 'ps' else {})}, 'vs_pad': pad, **({'tess': tess} if tess else {})}
     if j['stage'] == 'vs': full = open(msl).read(); vin_finish(key, full, refl); pull_finish(key, full, refl)   # the shadow-input and pulling libraries (dmsh_vin.py, dmsh_pull.py), from the source with every entry point
     refl.update(side)   # the alpha test and logic operation entry points and the readable-tile version (ps_libraries)
     write_refl(key, refl)
@@ -1055,8 +1079,9 @@ except cf.process.BrokenProcessPool:
     sys.exit(f'[RED] a shader build worker process stopped (killed, or out of memory) with {len(keys) - len(res)} of {len(keys)} shaders unfinished; run the build again, '
              f'with fewer workers (DMSH_PROCS) if memory ran out, or with DMSH_PROCS=0 (threads) if it stops again: what it finished is in the cache')
 if px: px.shutdown()
-# Passthrough geometry as mesh shaders (dmsh_mesh.py): <vertex key>_<geometry key>_m3 for each pair in the profile's geo_mesh.tsv whose two libraries exist; the host
-# draws a lean triangle-list geometry draw with it when its pair has one, and through the compute path otherwise (nvn_geometry.inc geo_mesh_draw)
+# Passthrough geometry as mesh shaders (dmsh_mesh.py): <vertex key>_<geometry key>_m3 for each pair dmsh_chain.mesh_pairs names (the pipeline record's G rows, the pairs the game drew
+# with no mesh library, and the profile's geo_mesh.tsv) whose two libraries exist; the host draws a lean triangle-list geometry draw with it when its pair has one, and through the
+# compute path otherwise (nvn_geometry.inc geo_mesh_draw), which records the pair for the next build
 MESH_STATS = collections.Counter()
 def mesh_finish(pair):
     vk, gk = pair
@@ -1076,9 +1101,9 @@ def mesh_finish(pair):
         try: os.unlink(path)
         except FileNotFoundError: pass
         commit(names=[name])
-_mesh = GAME.table('geo_mesh.tsv')
-if _mesh.exists():
-    with cf.ThreadPoolExecutor(NJ) as ex: list(ex.map(mesh_finish, [tuple(ln.split()[:2]) for ln in _mesh.read_text().splitlines() if ln.strip() and not ln.startswith('#')]))
+_mesh = sorted(dmsh_chain.mesh_pairs(GAME))
+if _mesh:
+    with cf.ThreadPoolExecutor(NJ) as ex: list(ex.map(mesh_finish, _mesh))
 shutil.rmtree(w, ignore_errors=True)
 st = collections.Counter(r[1] for r in res)
 print(f'shaders {len(res)}: ok {st["ok"]}, ' + ', '.join(f'{k} {v}' for k, v in st.items() if k != 'ok'))

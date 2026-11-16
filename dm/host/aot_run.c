@@ -40,7 +40,8 @@ void thr_svc_leave(void);
 // (jit_loop propagates it, design 7.1), which no frame further out takes either: no non-local transfer, and no resume point a pack could add for it (the misses file
 // names it `fpcr`, which nxaot leaves unserved). 0: the JIT goes on with the guest code it was already running (a compiled entry it called natively returned into
 // it, a host call did, a pause ended, it stopped at the return of a call it made itself): no new miss
-enum { REASON_HOSTCALL = 0x100, REASON_CROSS = 0x101, REASON_HOST = 0x102, REASON_NONLOCAL = 0x103, REASON_FORCED = 0x104, REASON_FPCR_RETURN = 0x105 };
+enum { REASON_HOSTCALL = 0x100, REASON_CROSS = 0x101, REASON_HOST = 0x102, REASON_NONLOCAL = 0x103, REASON_FORCED = 0x104, REASON_FPCR_RETURN = 0x105,
+       REASON_CASE = 0x106 };   // a dispatcher miss at a case of its function's br (nxaot_cases): from outside the function
 
 static _Atomic uint64_t c_svcs, c_host_calls, c_misses, c_cross, c_safepoints, c_jit_runs, c_cross_handovers, c_obs_gates, c_spin_gates;
 static _Atomic int g_stop = -1;   // the status of the process stop, -1 while running
@@ -91,6 +92,7 @@ static const char *jit_why(uint32_t reason) {
     case REASON_NONLOCAL: return "a non-local transfer to a continuation with no native frame";
     case REASON_FORCED: return "the JIT fallback forced for every guest instruction (DM_AOT_JIT_ALL)";
     case REASON_FPCR_RETURN: return "a return under another FPCR than the module was compiled for, which its native frame cannot go on under,";
+    case REASON_CASE: return "an indirect branch from outside its function to a case of that function's br (no compiled entry there)";
     default: return "a continuation compiled code handed over";
     }
 }
@@ -99,6 +101,7 @@ static const char *jit_why(uint32_t reason) {
 const char *dm_aot_miss_word(uint32_t reason) {
     switch (reason) {
     case NXAOT_TRAP_JIT_MISS: return "indirect";
+    case REASON_CASE: return "indirect-case";
     case NXAOT_TRAP_JIT_TARGET: return "call";
     case REASON_HOST: return "host";
     case NXAOT_TRAP_NO_CODE: return "nocode";
@@ -435,6 +438,9 @@ static void run_jit(dm_aot_thread *t, uint64_t lr, uint32_t *why, int past) {
         for (uint64_t m = atomic_load(&c_first_use_ns); ns > m && !atomic_compare_exchange_weak(&c_first_use_ns, &m, ns);) {}
         dm_aot_thread_set_jit(j);   // halted at once when a pause or stop was requested before it existed
     }
+    // A dispatcher miss at a case of its function's br: the function's own br branches there directly, so it came from outside the function (the miss
+    // indirect-case, which the next pack makes an entry: dm/tools/aot/README.md, "A miss as a case of its function's br")
+    if (*why == NXAOT_TRAP_JIT_MISS && dm_aot_is_case(pc)) *why = REASON_CASE;
     if (note_jit(pc, *why) && *why) LOG("[RED] aot: %s at %s runs in the JIT fallback (design section 11)", jit_why(*why), name);   // a run going on: counted, not said
     atomic_fetch_add_explicit(&c_jit_runs, 1, memory_order_relaxed);
     uint64_t stop = jit_run_one(t, j, pc, past, 0);

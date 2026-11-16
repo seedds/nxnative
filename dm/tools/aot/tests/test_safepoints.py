@@ -5,8 +5,8 @@ runs (the pause protocol of dm/host/hle_thread.c: a thread in compiled code stop
 with its whole register file in its state block; one in an SVC at once; one in the JIT at its next block boundary), reads every state block
 while the world is stopped, checks it (pc a guest instruction, sp in the arena, and at the head of corpus/rt/pause.S's loop the register
 invariant x20 = 2 * x19, x21 = ~x19, which a block written back incompletely or from another moment breaks), and resumes them. The threaded
-corpus programs (excl, with its register-invariant thread made ten times longer: --set excl_pause_iterations, so that the pauses fall while
-several threads run) run so with several seeds natively and with everything in the JIT; each run must still print exactly
+corpus programs (excl, its register-invariant thread's loop capped by --set excl_pause_iterations and ended by the test once it has its N
+threaded pauses: the loop's stop word excl_pause_stop, so that the machine's speed does not decide whether they fit) run so with several seeds natively and with everything in the JIT; each run must still print exactly
 corpus/expected/<program>.out, make its N pauses with more than one thread running, and find no inconsistent block; over the runs the threads
 must have stopped at polls (natively) and in the JIT, and the invariant must have been checked.
 
@@ -47,7 +47,7 @@ def main():
     ap.add_argument('--pauses', type=int, default=50)
     ap.add_argument('--seeds', type=int, default=6)
     ap.add_argument('--jit-seeds', type=int, default=2)
-    ap.add_argument('--pause-iterations', default='200000000')
+    ap.add_argument('--pause-iterations', default='100000000000')   # a cap: the pause test ends the loop by count (excl_pause_stop)
     ap.add_argument('--nro', action='append', default=[])
     a = ap.parse_args()
     os.makedirs(a.work, exist_ok=True)

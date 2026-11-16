@@ -97,6 +97,9 @@ static RT_NOINLINE void spin_unlock(volatile uint32_t *l) {
 #define WORK_ITERATIONS 100000u
 // The register-invariant loop's iterations: exported, so that a runner can lengthen the threaded part (the safepoint test: nxaot_host --set)
 volatile uint64_t excl_pause_iterations = 20000000u;
+// The pause loop's stop word: a tester sets it through this symbol once it has its pauses (t_aot_host's pause rows), so that the loop's length is not
+// what decides whether they fit; 0 lets the loop run its excl_pause_iterations
+volatile uint32_t excl_pause_stop;
 static uint8_t thread_stacks[WORKERS + 1][64 * 1024] __attribute__((aligned(16)));
 static rt_thread threads[WORKERS + 1];
 static volatile uint32_t go;
@@ -141,7 +144,8 @@ static void pauser(rt_thread *self, void *arg) {
     (void)self;
     (void)arg;
     wait_go();
-    mt_pause_result = nxaot_pause_loop(excl_pause_iterations) == excl_pause_iterations;
+    const uint64_t done = nxaot_pause_loop(excl_pause_iterations, &excl_pause_stop);   // all ones: the invariant broke
+    mt_pause_result = done != ~0ull && (done == excl_pause_iterations || excl_pause_stop);
 }
 
 static void threaded(void) {

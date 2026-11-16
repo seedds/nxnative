@@ -88,6 +88,19 @@ Plan MakePlan(const module::Image& image, const analysis::Discovery& d, const li
         for (const auto& [br, jt] : f.tables) {
             ff.tables[br] = jt.targets;
         }
+        // The function's cases (analysis::Function::cases, the host's misses): every br it left to the dispatcher gets them, lowered as a recovered
+        // table's, one LLVM switch over them whose default is the dispatcher (lower_calls.cpp FnGoto): a guard, so a case that br never takes costs a
+        // compare and nothing else (README.md, "A miss as a case of its function's br")
+        if (!f.cases.empty()) {
+            std::vector<uint64_t> cases;
+            for (const uint64_t c : f.cases) {
+                if (f.blocks.count(c)) cases.push_back(c);
+            }
+            if (!cases.empty()) {
+                for (const auto& [br, why] : f.indirect) ff.tables[br] = cases;
+            }
+            ff.cases = cases;
+        }
         for (const auto& [start, b] : f.blocks) {
             // A PLT stub whose slot the loader binds to this module (DiscoverOptions::bound_slots): discovery made its br a tail call
             if (b.term == Term::Tail && b.end >= 4 && image.InCode(b.end - 4) && (*image.Word(b.end - 4) & 0xFFFFFC1Fu) == 0xD61F0000u) {

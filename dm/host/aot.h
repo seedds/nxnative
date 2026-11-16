@@ -420,6 +420,7 @@ int dm_aot_profile_write(void);            // the files now, sampling stopped (o
 // The sampler's lookups (aot_arena.c): async-signal-safe (no lock, no allocation: a pack's tables are complete before it is published and never change)
 int dm_aot_pack_count(void);
 const dm_aot_pack *dm_aot_pack_at(int i);
+int dm_aot_is_case(uint64_t guest);   // a case of its function's br in its module's pack (nxaot_cases; aot_arena.c)
 // The function of compiled code at host_pc, as its index in pack *pack's functions by module offset (dm_aot_pack_fn): >= 0; -1 when host_pc is in no pack's code; -2 in a pack's code
 // but in none of its functions (the tables' object: enter, jit_entry, the slow-path wrappers)
 long dm_aot_fn_of_code(uint64_t host_pc, int *pack);

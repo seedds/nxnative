@@ -81,6 +81,7 @@ public:
             if (timed(tm.sources, [&] { return Pending(); })) continue;
             if (timed(tm.sources, [&] { return Addresses(); })) continue;
             if (timed(tm.sources, [&] { return MissRoots(); })) continue;
+            if (timed(tm.sources, [&] { return MissCases(); })) continue;
             // The code-derived sources are exhausted. The summaries now let regions continue past calls, for the brs that a region without
             // calls did not bound; only then the gap sweep, so that cases of a table not bounded yet do not become entries of their own
             timed(tm.summaries, [&] { Taken(); RunSummaries(); return true; });
@@ -261,6 +262,10 @@ private:
         for (const Miss& m : opts.misses) {
             switch (MissKindOf(m.reason)) {
             case MissKind::Entry:
+                if (m.reason == "indirect" || m.reason == "nocode") {   // a case of its function's br when it lies in one with a br left to the dispatcher (MissCases)
+                    miss_case.insert(m.offset);
+                    break;
+                }
                 AddEntry(m.offset, kProvMiss);
                 if (MissNeedsStdEntry(m.reason)) miss_std.insert(m.offset);
                 break;
@@ -272,6 +277,38 @@ private:
             }
         }
         Limits();
+    }
+
+    // ---- The misses that are cases (README.md, "A miss as a case of its function's br"): an indirect or nocode miss at an address in the range of a
+    // function that has a br left to the dispatcher is a root of that function and a case of those brs (Function::cases), not an entry: the dispatcher
+    // missed there because the function's own br could not be bounded, and an entry would cut the function into pieces whose transfers after a call go
+    // through the JIT (FnTailLr). An address no such function holds keeps the rule of an entry (and of the cut, Function::out). Decided once per
+    // address, in address order, after the walks have found the brs (so the misses' order in the file does not matter) ----
+    bool MissCases() {
+        bool changed = false;
+        for (const uint64_t a : miss_case) {
+            if (!miss_decided.insert(a).second) continue;
+            if (!TextCode(a)) { miss_unplaced.insert(a); continue; }   // not code: reported (MissReport)
+            if (const auto e = fns.find(a); e != fns.end()) {          // an entry by another source: the dispatcher enters it
+                e->second.prov |= kProvMiss;
+                miss_std.insert(a);
+                continue;
+            }
+            const auto it = fns.upper_bound(a);
+            Function* f = it == fns.begin() ? nullptr : &std::prev(it)->second;
+            if (f && a < f->limit && !f->indirect.empty()) {
+                f->roots.insert(a);
+                f->cases.insert(a);
+                dirty.insert(f->entry);
+                miss_as_case.insert(a);
+                changed = true;
+                continue;
+            }
+            if (AddEntry(a, kProvMiss)) changed = true;   // no function with a br left to the dispatcher holds it: an entry, as before
+            miss_std.insert(a);
+        }
+        if (changed) Limits();
+        return changed;
     }
 
     // ---- The misses' resume points (nonlocal, design 3.3): a root of the function whose range holds one, so that its walk reaches it as a block of
@@ -483,6 +520,8 @@ private:
         for (const auto& [call, pad] : f.pads) w.insert(w.end(), {call, pad});  // the summaries read them too (RunSummaries)
         w.push_back(~0ull);
         for (const auto& [start, to] : f.out) w.insert(w.end(), {start, to});   // and the continuations out of the function
+        w.push_back(~0ull);
+        w.insert(w.end(), f.cases.begin(), f.cases.end());                       // and its cases
         llvm::SHA256 sha;
         sha.update(llvm::ArrayRef<uint8_t>(reinterpret_cast<const uint8_t*>(w.data()), w.size() * sizeof(uint64_t)));
         return sha.final();
@@ -547,6 +586,10 @@ private:
             } else {
                 b.term = Term::Indirect;
                 f.indirect[pc] = "not bounded yet";
+                // The function's cases (MissCases): edges of the br, which stays an exit through the dispatcher for any other target
+                for (const uint64_t c : f.cases) {
+                    if (Inside(f, c)) b.succ.emplace_back(c, Edge::Table);
+                }
             }
             break;
         case Kind::RET:
@@ -1058,7 +1101,7 @@ private:
                 resumed.insert(a);
             }
         }
-        size_t entries = 0, resumes = 0, unserved = 0;
+        size_t entries = 0, resumes = 0, unserved = 0, cases = 0;
         std::map<std::string, size_t> unserved_by;
         std::vector<std::string> red;
         for (const auto& [a, reasons] : by) {
@@ -1077,6 +1120,13 @@ private:
                 const bool own_std = own && ((f->second.prov & kTakenProv) || f->second.summary.exported || a == img.text_off);
                 r.result = !own ? "entry" : miss_std.count(a) && !own_std ? "std" : "known";
                 entries += r.result != "known";
+                if (reasons.count("indirect-case") && red.size() < 32) {
+                    red.push_back("[RED] discover: the JIT miss at " + Hex(a) + " (indirect-case) was a case of its function's br in the pack that logged it, and the "
+                                  "dispatcher was asked for it: something outside the function reaches it; an entry now, the function cut there");
+                }
+            } else if (miss_as_case.count(a)) {
+                r.result = "case";   // a root of its function and a case of its brs left to the dispatcher (MissCases)
+                cases++;
             } else if (resumed.count(a)) {
                 r.result = "resume";
                 resumes++;
@@ -1107,8 +1157,8 @@ private:
         std::string why;
         for (const auto& [w, n] : unserved_by) why += (why.empty() ? "" : ", ") + w + " " + std::to_string(n);
         if (unserved > red.size()) red.push_back("[RED] discover: and " + std::to_string(unserved - red.size()) + " more misses the pack does not serve");
-        red.insert(red.begin(), "aot: misses: " + std::to_string(by.size()) + " addresses, " + std::to_string(entries) + " new entries, " + std::to_string(resumes) +
-                                    " resume points, " + std::to_string(unserved) + " still unserved (" + (why.empty() ? "none" : why) + ")");
+        red.insert(red.begin(), "aot: misses: " + std::to_string(by.size()) + " addresses, " + std::to_string(entries) + " new entries, " + std::to_string(cases) +
+                                    " cases, " + std::to_string(resumes) + " resume points, " + std::to_string(unserved) + " still unserved (" + (why.empty() ? "none" : why) + ")");
         out.notes.insert(out.notes.begin(), red.begin(), red.end());
     }
 
@@ -1135,6 +1185,10 @@ private:
                                                       // gets it)
     std::set<uint64_t> miss_std;           // misses the dispatcher or the host enters by their address: a standard entry (Taken)
     std::set<uint64_t> miss_resume;        // the misses' resume points (MissRoots)
+    std::set<uint64_t> miss_case;          // indirect and nocode misses: cases of their function's br, or entries (MissCases)
+    std::set<uint64_t> miss_decided;       // those MissCases placed
+    std::set<uint64_t> miss_as_case;       // those it made cases
+    std::set<uint64_t> miss_unplaced;      // those that are no code (reported)
     std::vector<uint64_t> summarised;      // the functions the last summaries cover, in address order: calls to those without a return path
     std::vector<uint8_t> summarised_returns;  // do not fall through (Returns)
 };
@@ -1156,13 +1210,15 @@ std::optional<uint64_t> PltStubSlot(const module::Image& image, uint64_t br_pc) 
 }
 
 MissKind MissKindOf(const std::string& reason) {
-    if (reason == "indirect" || reason == "call" || reason == "host" || reason == "nocode") return MissKind::Entry;
+    // indirect-case: the dispatcher missed at an address the pack that logged it held as a case of its function's br (README.md, "A miss as a case of
+    // its function's br"): something outside the function reaches it, so it is an entry, the function cut there
+    if (reason == "indirect" || reason == "call" || reason == "host" || reason == "nocode" || reason == "indirect-case") return MissKind::Entry;
     if (reason == "nonlocal") return MissKind::Resume;
     return MissKind::Unserved;
 }
 
 bool MissNeedsStdEntry(const std::string& reason) {
-    return reason == "indirect" || reason == "host" || reason == "nonlocal";
+    return reason == "indirect" || reason == "host" || reason == "nonlocal" || reason == "indirect-case";
 }
 
 std::vector<std::pair<uint64_t, uint64_t>> CarveMisses(module::Image& image, const std::vector<Miss>& misses) {
@@ -1224,7 +1280,7 @@ FunctionsBytes BytesOf(const std::map<uint64_t, Function>& functions) {
         b.blocks += memory::Of(f.blocks);
         for (const auto& [start, blk] : f.blocks) b.blocks += memory::Of(blk.succ);
         b.other += memory::Of(f.name) + memory::Of(f.roots) + memory::Of(f.speculative) + memory::Of(f.spec_live) + memory::Of(f.tentative) +
-                   memory::Of(f.unverified) + memory::Of(f.calls) + memory::Of(f.tables) + memory::Of(f.pads) + memory::Of(f.indirect) + memory::Of(f.out) +
+                   memory::Of(f.unverified) + memory::Of(f.calls) + memory::Of(f.tables) + memory::Of(f.pads) + memory::Of(f.indirect) + memory::Of(f.out) + memory::Of(f.cases) +
                    memory::Of(f.windows);
         for (const auto& [br, jt] : f.tables) b.other += memory::Of(jt.targets);
         for (const auto& [br, why] : f.indirect) b.other += memory::Of(why);

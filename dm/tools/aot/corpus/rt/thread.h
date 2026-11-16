@@ -43,7 +43,7 @@ void rt_mutex_unlock(volatile uint32_t *m, uint32_t self);
 
 // rt/pause.S: n iterations of a loop that keeps x20 = 2 * x19 and x21 = ~x19 at its head (the label nxaot_pause_loop_head, which the host's
 // pause test knows by its symbol); returns x19 at the end (n)
-uint64_t nxaot_pause_loop(uint64_t n);
+uint64_t nxaot_pause_loop(uint64_t n, const volatile uint32_t *stop);
 
 #ifdef __cplusplus
 }

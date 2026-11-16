@@ -20,6 +20,11 @@ bound in a loop, case 0 a call of g whose return address is case 1's label), wit
 case 0 is cut off as a function of its own that ends with the call (provenance adr), whose summary is the continuation's (it returns: before, noreturn), and the
 call's site gives g's LIVE_AFTER what case 1 reads (x19: before, nothing; nxaot plan --misses); a `noreturn` miss (a call returned that the analysis said does not
 return) stays unserved with its [RED] line.
+The cases (README.md, "A miss as a case of its function's br"): the NRO casecall of t_aot_host.c (casecall_nro, word for word), a loop whose cases lie inside
+its function before the loop's head, its br unbounded. A misses file naming both cases (indirect, as its first pack gives the host) makes them cases of the
+function's br: the function set is the first pack's (no new piece), the br's targets the cases, and the misses line counts 2 cases; the rows in another order
+give the same discovery; a row indirect-case (the host's: the dispatcher missed at a case of the pack, from outside the function) makes the address an entry
+with its [RED] discover: line.
 Then a corpus NRO with a function taken from discovery's roots (`--no-root <its entry>`: none of discovery's own sources makes it an entry): nxaot discover does not list it,
 its pack runs it in the JIT fallback (nxaot_host's mixed run counts JIT runs at its address, the output exactly corpus/expected); with a misses file naming it (`call`: a
 bl to an address that is no compiled entry) it is listed again (provenance miss), the pack compiles it and the run needs no JIT at all.
@@ -47,7 +52,7 @@ HOST_MISSES = '''\
 # {n} addresses, {entries} entries into the JIT fallback; {n} of the addresses this session, the rest from earlier sessions of this image
 # <module offset> <reason> <entries>: indirect, call, host, nocode (an entry of the next pack), nonlocal (a resume point), fpcr, refused, untranslated, noreturn, other (no pack serves them)
 '''
-MISSES_LINE = re.compile(r'^aot: misses: (\d+) addresses, (\d+) new entries, (\d+) resume points, (\d+) still unserved \((.*)\)$', re.M)
+MISSES_LINE = re.compile(r'^aot: misses: (\d+) addresses, (\d+) new entries, (\d+) cases, (\d+) resume points, (\d+) still unserved \((.*)\)$', re.M)
 
 
 def run(cmd):
@@ -78,10 +83,10 @@ def numbers(out):
     """The build log's numbers: gate sites, resume points, the misses line, the caches"""
     g = re.search(r'gate sites (\d+) \(design 1\.1\)', out)
     r = re.search(r'resume points (\d+)', out)
-    m = MISSES_LINE.search(out)
+    m = MISSES_LINE.search(out)   # (addresses, new entries, resume points, unserved, why); the cases apart
     c = re.search(r'^aot: cache \S+: (\d+) hits, (\d+) misses', out, re.M)
     a = re.search(r'^aot: analysis cache: (\w+)', out, re.M)
-    return {'gates': int(g.group(1)) if g else None, 'resumes': int(r.group(1)) if r else None, 'misses': m.groups() if m else None,
+    return {'gates': int(g.group(1)) if g else None, 'resumes': int(r.group(1)) if r else None, 'misses': (m.group(1), m.group(2), m.group(4), m.group(5), m.group(6)) if m else None, 'cases': int(m.group(3)) if m else None,
             'hits': int(c.group(1)) if c else None, 'unit_misses': int(c.group(2)) if c else None, 'analysis': a.group(1) if a else None}
 
 
@@ -266,6 +271,109 @@ def cut(a, check):
     if red: print('    ' + red[0])
 
 
+# The NRO casecall of dm/host/tests/t_aot_host.c (casecall_nro), word for word
+def casecall_nro():
+    TEXT, RO, DATA, SIZE, BSS = 0x1000, 0x1000, 0x2000, 0x3000, 0x1000
+    PASS_AT, FAIL_AT, IDX_AT, N = RO + 0x100, RO + 0x120, RO + 0x140, 8
+    idx = [0, 1, 0, 1, 0, 1, 0, 1]
+    want = 5 + sum(i + (7 if idx[i] == 0 else 0) for s0 in (0, 1) for i in range(s0, N))
+    def adr(rd, off): return 0x10000000 | (off & 3) << 29 | ((off >> 2) & 0x7FFFF) << 5 | rd
+    def b(off): return 0x14000000 | ((off >> 2) & 0x3FFFFFF)
+    def bl(off): return 0x94000000 | ((off >> 2) & 0x3FFFFFF)
+    def bcond(c, off): return 0x54000000 | ((off >> 2) & 0x7FFFF) << 5 | c
+    def movz(rd, imm): return 0xD2800000 | imm << 5 | rd
+    def addi(rd, rn, imm): return 0x91000000 | imm << 10 | rn << 5 | rd
+    def addr(rd, rn, rm, lsl=0): return 0x8B000000 | rm << 16 | lsl << 10 | rn << 5 | rd
+    def mov(rd, rm): return 0xAA0003E0 | rm << 16 | rd
+    def cmpi(rn, imm): return 0xF100001F | imm << 10 | rn << 5
+    def cmp(rn, rm): return 0xEB00001F | rm << 16 | rn << 5
+    w, L, fix = [0] * 0x20, {}, []
+    def at(name): L[name] = len(w) * 4
+    def ref(name, enc): fix.append((len(w), name, enc)); w.append(0)
+    at('start')
+    w += [0xA9BE7BFD, 0x910003FD, 0xA90153F3, adr(10, DATA - len(w) * 4 - 12)]
+    ref('leaf', lambda o: adr(9, o)); w.append(0xF9000149); ref('spfn', lambda o: adr(11, o)); w.append(0xF900054B)
+    w.append(movz(0, 0)); ref('F', bl); w += [mov(19, 0), movz(0, 1)]; ref('F', bl); w.append(addr(20, 19, 0)); ref('G', bl); w.append(addr(20, 20, 0))
+    w += [movz(9, want), cmp(20, 9)]
+    ref('fail', lambda o: bcond(1, o))
+    w.append(adr(0, PASS_AT - len(w) * 4)); w += [movz(1, 13), 0xD40004E1]; ref('exit', b)
+    at('fail'); w.append(adr(0, FAIL_AT - len(w) * 4)); w += [movz(1, 13), 0xD40004E1]
+    at('exit'); w += [0xD40000E1, 0xD4200000]
+    at('F'); w += [0xA9BD7BFD, 0x910003FD, 0xA90153F3, 0xF90013FC]; w.append(adr(28, IDX_AT - len(w) * 4)); w += [mov(19, 0), movz(20, 0)]; ref('loop', b)
+    at('case0'); ref('g', bl)
+    at('case1'); w += [addr(20, 20, 19), addr(20, 20, 0), addi(19, 19, 1), cmpi(19, N)]; ref('done', lambda o: bcond(2, o)); ref('loop', b)
+    at('cx'); w += [movz(0, 5), 0xD65F03C0]
+    at('done'); w += [mov(0, 20), 0xF94013FC, 0xA94153F3, 0xA8C37BFD, 0xD65F03C0]
+    at('loop'); w += [movz(0, 0), 0x38736B8A]; ref('case0', lambda o: adr(9, o)); w += [addr(9, 9, 10, 2), 0xD61F0120]
+    at('G'); w += [0xA9BF7BFD, 0x910003FD]; ref('F', lambda o: adr(9, o)); w.append(0); at('G_add'); w += [0xD63F0120, 0xA8C17BFD, 0xD65F03C0]
+    at('g'); w += [0xA9BE7BFD, 0x910003FD, 0xF9000BF3, movz(19, 0xBAD), 0xD40003C1]; ref('stub', bl); w += [0xF9400BF3, 0xA8C27BFD, movz(0, 7), 0xD65F03C0]
+    at('stub'); w.append(adr(16, DATA - len(w) * 4)); w += [0xF9400211, 0xD61F0220]
+    at('leaf'); w.append(0xD65F03C0)
+    at('spfn'); w += [0x910043FF, 0xD65F03C0]
+    for i, name, enc in fix: w[i] = enc(L[name] - i * 4)
+    w[L['G_add'] // 4 - 1] = addi(9, 9, L['cx'] - L['F'])
+    w[0], w[1] = b(L['start']), RO
+    img = bytearray(SIZE)
+    for i, x in enumerate(w): img[4 * i:4 * i + 4] = (x & 0xFFFFFFFF).to_bytes(4, 'little')
+    img[0x10:0x14] = b'NRO0'
+    for i, x in enumerate([0, SIZE, 0, 0, TEXT, RO, DATA - RO, DATA, SIZE - DATA, BSS]): img[0x14 + 4 * i:0x18 + 4 * i] = x.to_bytes(4, 'little')
+    img[RO:RO + 4] = b'MOD0'
+    for i, x in enumerate([0x20, SIZE - RO, SIZE + BSS - RO, 0x40, 0x40, SIZE - RO]): img[RO + 4 + 4 * i:RO + 8 + 4 * i] = (x & 0xFFFFFFFF).to_bytes(4, 'little')
+    img[PASS_AT:PASS_AT + 13], img[FAIL_AT:FAIL_AT + 13], img[IDX_AT:IDX_AT + N] = b'casecall PASS', b'casecall FAIL', bytes(idx)
+    return bytes(img), L
+
+
+def fn_rows(tsv):
+    """nxaot discover --tsv: {entry: provenance}, and the br rows: {br pc: the rest of the row}"""
+    fns, brs = {}, {}
+    for line in open(tsv):
+        f = line.rstrip('\n').split('\t')
+        if f[0] == 'fn': fns[int(f[1], 16)] = f[4]
+        elif f[0] == 'br': brs[int(f[1], 16)] = f[2:]
+    return fns, brs
+
+
+def cases(a, check):
+    img, L = casecall_nro()
+    path = os.path.join(a.work, 'casecall.nro')
+    open(path, 'wb').write(img)
+    sha = hashlib.sha256(img).hexdigest()
+    so = os.path.join(a.work, 'casecall.so')
+    d0 = run([a.nxaot, 'discover', path, '--tsv', os.path.join(a.work, 'casecall.first.tsv')])
+    first, _ = fn_rows(os.path.join(a.work, 'casecall.first.tsv')) if d0.returncode == 0 else ({}, {})
+    rows = [(L['case0'], 'indirect', 1), (L['case1'], 'indirect', 1)]   # what its first pack gives the host (t_aot_host's casecall row)
+    mf, mr = os.path.join(a.work, 'casecall.misses.tsv'), os.path.join(a.work, 'casecall.misses.reversed.tsv')
+    misses_file(mf, 'casecall', '-', sha, so, rows)
+    misses_file(mr, 'casecall', '-', sha, so, rows[::-1])
+    t1, t2 = os.path.join(a.work, 'casecall.cases.tsv'), os.path.join(a.work, 'casecall.reversed.tsv')
+    d1 = run([a.nxaot, 'discover', path, '--misses', mf, '--tsv', t1])
+    d2 = run([a.nxaot, 'discover', path, '--misses', mr, '--tsv', t2])
+    second, brs = fn_rows(t1) if d1.returncode == 0 else ({}, {})
+    check(d1.returncode == 0 and set(second) == set(first) and L['case0'] not in second and L['case1'] not in second,
+          f'casecall with misses at both cases (+{L["case0"]:#x}, +{L["case1"]:#x}): the first pack\'s {len(first)} functions, no new piece (got {len(second)})',
+          d1.stdout[-600:])
+    same = d2.returncode == 0 and open(t1).read().split('\n', 1)[1] == open(t2).read().split('\n', 1)[1]
+    check(same, 'the same misses in another order: the same discovery, row for row')
+    b = run([a.nxaot, 'build', path, '--shared', so, '--misses', mf])
+    n = numbers(b.stdout)
+    check(b.returncode == 0 and n['cases'] == 2 and n['misses'] == ('2', '0', '0', '0', 'none'),
+          f'nxaot build: "aot: misses: 2 addresses, 0 new entries, 2 cases, 0 resume points, 0 still unserved (none)" (cases {n["cases"]}, misses {n["misses"]})',
+          b.stdout[-600:])
+    mc = os.path.join(a.work, 'casecall.misses.case.tsv')
+    misses_file(mc, 'casecall', '-', sha, so, rows + [(L['cx'], 'indirect', 1), (L['cx'], 'indirect-case', 1)])
+    t3 = os.path.join(a.work, 'casecall.entry.tsv')
+    d3 = run([a.nxaot, 'discover', path, '--misses', mc, '--tsv', t3])
+    third, _ = fn_rows(t3) if d3.returncode == 0 else ({}, {})
+    b = run([a.nxaot, 'build', path, '--shared', so, '--misses', mc])
+    red = [l for l in b.stdout.splitlines() if l.startswith('[RED] discover: the JIT miss at') and 'indirect-case' in l]
+    # CX lies between the cases and the loop's head: the cut there leaves F without its br, so its cases become entries too (the rule of a function with no br
+    # left to the dispatcher), and round 5's continuations join the pieces (t_aot_host's casecall "entry" row runs that pack with no JIT run)
+    check(d3.returncode == 0 and L['cx'] in third and red,
+          f'an indirect-case row at CX (+{L["cx"]:#x}: a case the dispatcher was asked for from outside its function): an entry, with its [RED] line',
+          b.stdout[-600:])
+    if red: print('    ' + red[0])
+
+
 def corpus(a, check, nro='fnptr-gcc.nro', name='rt_check'):
     path = os.path.join(CORPUS, 'nro', nro)
     program = next(l.split('\t')[1] for l in open(os.path.join(CORPUS, 'corpus.tsv')) if l.startswith(nro + '\t'))
@@ -320,6 +428,7 @@ def main():
     check = Checks()
     synthetic(a, check)
     cut(a, check)
+    cases(a, check)
     corpus(a, check)
     print(f'JIT misses: the synthetic module\'s hidden function, the cut call, and a corpus function held from discovery, {check.bad} failures')
     return 1 if check.bad else 0

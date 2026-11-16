@@ -496,7 +496,7 @@ build/aot/nxaot_host /tmp/x/fnptr.so dm/tools/aot/corpus/nro/fnptr-gcc.nro      
 build/aot/nxaot_host /tmp/x/int_ops.so dm/tools/aot/corpus/nro/int_ops-gcc.nro --set int_ops_rounds=200 --quiet --repeat 5
 build/aot/nxaot_host /tmp/x/fnptr.so dm/tools/aot/corpus/nro/fnptr-gcc.nro --relocate --set hidden_ptr=@0x1844   # a target with no entry: the JIT
 build/aot/nxaot_host /tmp/x/fnptr.so dm/tools/aot/corpus/nro/fnptr-gcc.nro --jit-all     # everything in the JIT fallback; --jit-none: no JIT
-build/aot/nxaot_host /tmp/x/excl.so dm/tools/aot/corpus/nro/excl-gcc.nro --pause-test 50 --set excl_pause_iterations=200000000   # section 6.2
+build/aot/nxaot_host /tmp/x/excl.so dm/tools/aot/corpus/nro/excl-gcc.nro --pause-test 50 --set excl_pause_iterations=100000000000   # section 6.2; ends by count
 build/aot/nxaot_host /tmp/x/fnptr.so dm/tools/aot/corpus/nro/fnptr-gcc.nro --lookup     # the module offsets the lookup table holds
 build/aot/nxaot build dm/tools/aot/corpus/nro/fnptr-gcc.nro -o /tmp/x/all.o --shared /tmp/x/all.so --all-entries --correctness
 build/aot/nxaot_funcdiff /tmp/x/all.so dm/tools/aot/corpus/nro/fnptr-gcc.nro --seeds 3   # every function against dynarmic
@@ -719,6 +719,9 @@ an older host wrote holds such `nonlocal` rows, which a session merges and keeps
 
 - The file must name this module's image (its header's SHA-256): another image's, or one that names none, is a `[RED]` line and the file is
   ignored. A line that does not parse stops the build, naming it.
+- **Cases**: an `indirect` or `nocode` miss in the range of a function that has a `br` left to the dispatcher is a root of that function and a
+  case of those `br`s, not an entry ("A miss as a case of its function's br", below); `indirect-case` (the host's: the dispatcher was asked for an
+  address its pack held as a case) is an entry, with a `[RED] discover:` line.
 - **Entries**: `indirect`, `call`, `host` and `nocode` make the address a function entry (provenance `miss`); `indirect` and `host` (and a
   `nonlocal` at a function's entry or in no function) also give it a standard entry and a lookup slot, as an address-taken function has, since
   the dispatcher or the host enters it by its address. A known function the dispatcher missed for want of a standard entry gets one.
@@ -730,7 +733,7 @@ an older host wrote holds such `nonlocal` rows, which a session merges and keeps
   as `nso_code.data_blocks` takes one where more than a quarter of the words decode as nothing) is code the game ran: the words its control
   flow reaches there (falling through, both ways of a conditional branch, `b` and `bl` targets) up to a `ret`, `br`, trap or undefined word
   leave the data blocks before discovery (`analysis::CarveMisses`), so that discovery, the lifter and the cache keys all see them as code.
-- The log: `aot: misses: N addresses, M new entries, K resume points, J still unserved (<reason> <count>, ... | none)`; a new entry is an
+- The log: `aot: misses: N addresses, M new entries, C cases, K resume points, J still unserved (<reason> <count>, ... | none)`; a new entry is an
   address discovery's own sources do not make an entry, or a known function that gets a standard entry; addresses the pack serves without the
   file (an earlier pack's misses) are counted in N only. `nxaot discover --tsv` writes a `miss` row per address (`entry`, `std`, `resume`,
   `known`, `unserved` and why).
@@ -746,7 +749,7 @@ The launcher (dm/launcher) records them on every Play and offers "Repack with pr
 
 CTest `misses` ([tests/test_misses.py](tests/test_misses.py)): the synthetic game module's hidden function (two words in its data block, no
 symbol, no FDE, reached at run time through a pointer, with an observation gate in the manifest) packed with a misses file in the host's exact
-form naming it `indirect`: `aot: misses: 1 addresses, 1 new entries, 0 resume points, 0 still unserved (none)`, its two words taken out of
+form naming it `indirect`: `aot: misses: 1 addresses, 1 new entries, 0 cases, 0 resume points, 0 still unserved (none)`, its two words taken out of
 the data block, its gate served (gate sites 2 -> 3, the build's "is in no discovered function's code" line gone), the analysis cache missed
 and 1 of 3 units compiled again, the same addresses with other counts hitting both caches and giving the same pack; another image's file
 ignored with a `[RED]` line; a malformed line stopping the build; a `nonlocal` at the return address of the call of the hidden function and an
@@ -1210,9 +1213,10 @@ pack change that alters one export's class refuses every pack that imported it.
 
 ## A call into the next function
 
-Discovery keeps functions apart: a function's walk stops where another entry starts, and a branch into another function is a tail call. A miss's entry
-(`indirect`, "JIT misses"), an `adr` whose target lies outside its function and a branch's target cut a function in the middle, and the instruction before
-the cut may run into the next function: a plain fall-through had its edge (`Term::Out`, a tail transfer), but a call that returns, an svc and a conditional
+Discovery keeps functions apart: a function's walk stops where another entry starts, and a branch into another function is a tail call. A branch's target
+that other functions reach (a tail target: the natural pieces, 1,969 of `sdk`'s first-pack functions, 312 of `subsdk0`'s, 64 of `main`'s), an `adr`
+whose target lies outside its function and, until round 6, a miss's entry cut a function in the middle (a miss inside a function with a `br` left to the
+dispatcher is a case now: "A miss as a case of its function's br", below), and the instruction before the cut may run into the next function: a plain fall-through had its edge (`Term::Out`, a tail transfer), but a call that returns, an svc and a conditional
 branch's fall-through had none, and the summaries ignored a jump table's cases in another function.
 
 Found on Mario vs. Donkey Kong's second pack: the miss at `main+0x2ee9c8`, a case of a jump table discovery cannot bound (`adr x9, #0x2ee9c8; ldrb w10,
@@ -1264,6 +1268,63 @@ level 1-1 without a fault; whether one of them carried a stale register the log 
 another register order, ends the loop early and prints a wrong sum). The conditional branch's, the svc's and the table's cases leave no miss line: they
 made the summaries of the fragment and its callers miss the continuation's effects, which only an open callee-saved register or a v register makes
 visible. Packs built with misses before this fix should be built again.
+
+## A miss as a case of its function's br
+
+A miss's entry inside a function cut it: the address became a function of its own, and the code around it pieces (Mario vs. Donkey Kong's second pack:
+`main` 545 functions that are no compiler's function against the first pack's 65, `sdk` 2,132 against 1,991), every `adr` and branch between the pieces
+a cut too. After a call in a piece x30 is not the entry lr, so every branch from it into another piece went through the JIT (`FnTailLr`): 41 of the
+second pack's 43 misses and 347,172 of its 352,912 JIT entries (round 5's run). The census of the three modules
+(`/srv/nxnative-games/agent-build/scripts/census6.py`, not in the repository: a piece is a function whose provenance is only tail, adr, miss or gap,
+cut from the compiler's function before it) shows which cuts can go: without misses the pieces are tail targets that other functions branch to (all
+but 21 of 2,369 reached from outside the function they lie in), and every piece the misses add (141 in `sdk`, 480 in `main`: the miss entries, the
+`adr` targets they leave outside, the branch targets between pieces, the code no walk reaches any more) is reached only from inside its function.
+
+**The rule** ([src/analysis/discover.cpp](src/analysis/discover.cpp) `MissCases`, `Function::cases`): an `indirect` or `nocode` miss at an address in the
+range of a function that has a `br` left to the dispatcher is a root of that function and a case of those `br`s, not an entry. The dispatcher missed
+there because the function's own `br` could not be bounded; the function stays one function for discovery, the summaries and the plan. Each such `br`
+gets the cases as `Edge::Table` edges and stays an `Indirect` exit (any other target goes on through the dispatcher), so the summary is the whole
+function's and is no more closed than before. The plan gives every such `br` every case of its function ([src/build/plan.cpp](src/build/plan.cpp)), and
+the lifter lowers it as a recovered table's: one LLVM `switch` over the cases' module offsets whose default is the dispatcher (`FnGoto`), a guard, so a
+stale or wrong case costs a compare. A transfer to a case is a branch inside the function: no x30 question, no JIT. Decided once per address, in address
+order, after the walks have found the `br`s (the misses' order in the file does not matter). An address no function with such a `br` holds keeps the
+rule of an entry (and of the cut: "A call into the next function"), as do `call` and `host` misses (something calls them); the Mario vs. Donkey Kong
+misses are all `indirect` but its `nonlocal` and `fpcr` rows.
+
+**The residual**: a case that something outside its function reaches still goes through the dispatcher, which finds no entry there. The pack lists its
+cases (`nxaot_cases`, include/nxaot/aot_module.h: module offsets, then all ones; exported by a Windows DLL; a pack without cases has none), and the
+host names a dispatcher miss at one of them `indirect-case` (`dm/host/aot_run.c`, `aot_arena.c` `dm_aot_is_case`): its function's own `br` branches
+there directly, so it came from outside. nxaot makes an `indirect-case` row an entry, the function cut there as before, with a
+`[RED] discover: the JIT miss at <offset> (indirect-case) was a case of its function's br ...` line. An older nxaot reads the word as unknown (unserved,
+its `[RED]` line), so the file's header is unchanged. The unit key's format is 10 (the cases are in it with the tables).
+
+**Checked** by `t_aot_host`'s `casecall` rows: cutcall's loop with its cases inside the function (before the loop's head) and a third piece, CX, that
+another function calls through a pointer it computes. Packed without misses: the cases and CX in the JIT, the misses file naming the three (`indirect`);
+packed with it: the cases are cases of the function's `br` (the function one function, no JIT run) and only CX's call goes through the dispatcher, which
+the host names `indirect-case`; packed with that row: CX an entry, no JIT run. `test_misses.py`'s cases checks read the same module: with the cases'
+misses the function set is the first pack's (7 functions, no new piece), the rows in another order give the same discovery row for row, the misses line
+counts 2 cases, and an `indirect-case` row makes CX an entry with its `[RED]` line (CX lies between the cases and the loop's head, so the cut there leaves
+the function without its `br` and its cases become entries too: round 5's continuations join the pieces).
+
+**Measured** on Mario vs. Donkey Kong in the clone of its NSP folder, the second pack built from round 5's inputs (run A's profile, misses and bindings,
+a first pack without bindings, 6 workers), round 5's nxaot against this one; then the same route to level 1-1 on each (round 5's run started from the
+original folder's save, this one from the save that run left):
+
+| | round 5 | round 6 |
+|---|---:|---:|
+| `main`: misses as | 23 new entries, 1 resume point | 31 cases, 0 new entries, 1 resume point |
+| `main`: functions | 71,213 (545 pieces) | 70,733 (the first pack's) |
+| `main`: units from the first pack's cache, functions kept at W | 4,450, 44,809 | 6,007 of 6,015, 59,474 |
+| `main`: `.text`, pack time | 280,858,644, 164.8 s | 197,598,900, 105.5 s |
+| `sdk`: misses as, functions | 4 new entries, 40,437 | 6 cases, 40,296 |
+| `sdk`: `.text`, pack time | 140,861,088, 40.4 s | 140,776,960, 40.4 s |
+| the run: JIT runs, CPU time, share | 3.32 million, 5.54 s of 80.1 s, 6.92 % | 0.82 million, 2.26 s of 71.4 s, 3.16 % |
+| the physics workers (of it under FZ), AudioFrame, ModuleSystem, main thread | 2.64 (1.94), 1.64, 0.64, 0.45 s | 2.01 (1.49), 0, 0.08, 0.16 s |
+| misses left | 43 addresses (41 pieces the JIT reached, 2 new cases) and `fpcr` | 5 new cases of unbounded tables and `fpcr` |
+
+`sdk`'s cache figures stay low because the first pack had no bindings ("PLT stubs bound to their own module"); `subsdk0` has no miss. The most cases one
+site gets is 8 (`main+0x5f4088`, one `br`; `sdk`'s most is 2). The corpus packs (no misses) are the bytes round 5's nxaot made, but excl's, whose program
+changed (the pause rows).
 
 ## The second pack's cached units
 

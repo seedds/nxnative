@@ -175,6 +175,10 @@ struct Function {
     // "A call into the next function"): discovery cuts a function where another entry starts (a miss's, an adr's, a branch's), and the instruction before the
     // cut may be one of these
     FlatMap<uint64_t, uint64_t, true> out;
+    // The host's misses inside the function that its brs left to the dispatcher may reach (README.md, "A miss as a case of its function's br"): an
+    // indirect or nocode miss in the range of a function with such a br is a root of the function and a guarded case of each of those brs (the
+    // dispatcher stays their default), not an entry that cuts the function. Kept across walks, as the roots are
+    FlatSet<uint64_t> cases;
     std::vector<Window> windows;
     unsigned unpaired_exclusive = 0;
     size_t words = 0;      // instructions the walk reached

@@ -118,9 +118,10 @@ extern _Atomic uint64_t g_t_aot_hidden_calls;
 
 // ---------- The child: one run ----------
 static struct {
-    unsigned pauses, seed, threaded, done, invariant, inconsistent, exited;
+    unsigned pauses, seed, threaded, done, invariant, inconsistent, exited, expired;
     uint32_t self;
     uint64_t head, text_lo, text_hi;
+    volatile uint32_t *stop;   // excl_pause_stop: the pause loop ends when the tester has its threaded pauses (or at the limit)
     char bad[200];
 } g_pt;
 static uint64_t g_dirty_lo, g_dirty_hi;
@@ -153,7 +154,8 @@ void t_aot_pause_body(uint64_t arg) {
     g_pt.self = thr_cur_handle();
     uint64_t seed = 0x9E3779B97F4A7C15ull * (g_pt.seed + 1);
     uint32_t hs[64];
-    while (dm_aot_stop_status() < 0 && g_pt.threaded < g_pt.pauses) {
+    const uint64_t limit = plat_now_ns() + 30000000000ull;   // 30 s, as the polls row's: past it the row fails, naming the threaded pauses that landed
+    while (dm_aot_stop_status() < 0 && g_pt.threaded < g_pt.pauses && !(g_pt.expired = plat_now_ns() > limit)) {
         plat_sleep_ns((10 + rng(&seed) % 91) * 1000);   // 10 to 100 us, as the reference's default interval
         int n = thr_handles(hs, 64, g_pt.self);
         if (n < 1) continue;
@@ -181,6 +183,9 @@ void t_aot_pause_body(uint64_t arg) {
         g_pt.done++;
         if (n > 1) g_pt.threaded++;
     }
+    // The window ends by count: the pause loop's stop word (excl_pause_stop), which its thread reads once per iteration. Before, the loop ran a fixed
+    // 200,000,000 iterations and the row asked whether 50 threaded pauses fitted in the time the CPU took for them: a quiet machine missed it now and then
+    if (g_pt.stop) *g_pt.stop = 1;
     dm_aot_svc(dm_aot_self_state(), 0x0A);   // svcExitThread: the thread leaves here
 }
 
@@ -303,6 +308,7 @@ static void *guest_main(void *p) {
         g_pt.pauses = a->pause; g_pt.seed = a->seed;
         uint64_t *head = module_sym(m, "nxaot_pause_loop_head");
         g_pt.head = head ? (uint64_t)(uintptr_t)head : 0;
+        g_pt.stop = (volatile uint32_t *)module_sym(m, "excl_pause_stop");
         g_pt.text_lo = (uint64_t)(uintptr_t)m->base; g_pt.text_hi = g_pt.text_lo + text_end;
         const uint64_t stack = (uint64_t)(uintptr_t)dm_guest_alloc(0x10000);
         uint64_t r[32] = {0, dm_guest_fn((const void *)t_aot_pause_tester), 0, stack + 0x10000, 44, (uint64_t)-2};
@@ -473,8 +479,9 @@ static int child(int argc, char **argv) {
                (double)s.jit_wait_ns * 1e-6, (double)s.jit_first_use_ns * 1e-6, a.ready_ahead);
     }
     if (a.pause)
-        printf("t_aot_host: pause test: %u pauses (%u with more than one thread running), %u register-invariant checks, %u inconsistent, %u exited%s%s\n",
-               g_pt.done, g_pt.threaded, g_pt.invariant, g_pt.inconsistent, g_pt.exited, g_pt.inconsistent ? "; first: " : "", g_pt.bad);
+        printf("t_aot_host: pause test: %u pauses (%u with more than one thread running), %u register-invariant checks, %u inconsistent, %u exited%s%s%s\n",
+               g_pt.done, g_pt.threaded, g_pt.invariant, g_pt.inconsistent, g_pt.exited, g_pt.expired ? "; the 30 s limit came first" : "",
+               g_pt.inconsistent ? "; first: " : "", g_pt.bad);
     if (dm_aot_profile_on()) dm_aot_profile_write();   // DM_AOT_PROFILE: the profile, misses and bindings files, as a game's exit writes them (_exit runs no atexit writer; once)
     fflush(NULL);
     _exit(a.status);   // other threads may still be parked (a pause tester, a stuck thread): the process ends here, as a game's
@@ -2532,6 +2539,209 @@ static void cutcall_rows(const char *self, const char *nxaot) {
     free(text);
 }
 
+// ---------- A miss as a case of its function's br (dm/tools/aot/README.md, "A miss as a case of its function's br") ----------
+// The NRO casecall, written here word by word: cutcall's loop with its cases inside F (between F's jump to the loop's head and the head, where the walk does
+// not reach them: the br is unbounded), so that the host's misses there lie in F, which has a br left to the dispatcher. Case 0 calls g and returns into case
+// 1, as cutcall's does. A third piece of F, CX (5, then ret), is reached only from G, through a pointer G computes (adr F plus an offset: no source of
+// discovery's names it). start adds F(0), F(1) and G(). The first pack runs the cases in the JIT (the misses: both cases and CX, indirect); the second makes
+// them cases of F's br (no entry, no cut: F one function, its br a switch whose default is the dispatcher) and runs F with no JIT run, but G still reaches CX
+// through the dispatcher, which the host now logs as indirect-case (a case of the pack); the third pack makes CX an entry, and no miss is left
+static size_t casecall_nro(uint8_t *img, size_t cap, uint64_t *want, uint64_t *c0, uint64_t *c1, uint64_t *cx) {
+    enum { TEXT = 0x1000, RO = 0x1000, DATA = 0x2000, SIZE = 0x3000, BSS = 0x1000, PASS_AT = RO + 0x100, FAIL_AT = RO + 0x120, IDX_AT = RO + 0x140 };
+    if (cap < SIZE) return 0;
+    memset(img, 0, SIZE);
+    uint32_t w[256] = {0};
+    size_t n = 0x80 / 4;
+    const size_t start = n;
+    w[n++] = 0xA9BE7BFDu;               // stp x29, x30, [sp, #-32]!
+    w[n++] = 0x910003FDu;               // mov x29, sp
+    w[n++] = 0xA90153F3u;               // stp x19, x20, [sp, #16]
+    w[n] = a_adr(10, (int64_t)DATA - (int64_t)n * 4); n++;   // adr x10, DATA
+    const size_t adr_leaf = n++;        // adr x9, leaf
+    w[n++] = 0xF9000149u;               // str x9, [x10]
+    const size_t adr_spfn = n++;        // adr x11, spfn
+    w[n++] = 0xF900054Bu;               // str x11, [x10, #8]
+    w[n++] = a_movz(0, 0);
+    const size_t call_f0 = n++;
+    w[n++] = a_mov(19, 0);
+    w[n++] = a_movz(0, 1);
+    const size_t call_f1 = n++;
+    w[n++] = a_addr(20, 19, 0, 0);      // add x20, x19, x0
+    const size_t call_g2 = n++;         // bl G
+    w[n++] = a_addr(20, 20, 0, 0);      // add x20, x20, x0
+    uint64_t sum = 5;
+    for (unsigned s0 = 0; s0 < 2; s0++)
+        for (unsigned i = s0; i < CUT_N; i++) sum += i + (cut_idx[i] == 0 ? 7 : 0);
+    *want = sum;
+    w[n++] = a_movz(9, (unsigned)sum);
+    w[n++] = a_cmp(20, 9);
+    const size_t to_fail = n++;
+    w[n] = a_adr(0, (int64_t)PASS_AT - (int64_t)n * 4); n++;
+    w[n++] = a_movz(1, 13);             // "casecall PASS"
+    w[n++] = 0xD40004E1u;               // svc #0x27
+    const size_t to_exit = n++;
+    w[to_fail] = a_bcond(1, (int64_t)(n - to_fail) * 4);
+    w[n] = a_adr(0, (int64_t)FAIL_AT - (int64_t)n * 4); n++;
+    w[n++] = a_movz(1, 13);             // "casecall FAIL"
+    w[n++] = 0xD40004E1u;
+    w[to_exit] = a_b((int64_t)(n - to_exit) * 4);
+    w[n++] = 0xD40000E1u;               // svc #0x7 (ExitProcess)
+    w[n++] = 0xD4200000u;               // brk #0
+    // F(s): the cases first, the loop's head after them
+    const size_t F = n;
+    w[call_f0] = a_bl((int64_t)(F - call_f0) * 4);
+    w[call_f1] = a_bl((int64_t)(F - call_f1) * 4);
+    w[n++] = 0xA9BD7BFDu;               // stp x29, x30, [sp, #-48]!
+    w[n++] = 0x910003FDu;               // mov x29, sp
+    w[n++] = 0xA90153F3u;               // stp x19, x20, [sp, #16]
+    w[n++] = 0xF90013FCu;               // str x28, [sp, #32]
+    w[n] = a_adr(28, (int64_t)IDX_AT - (int64_t)n * 4); n++;   // adr x28, the case table
+    w[n++] = a_mov(19, 0);
+    w[n++] = a_movz(20, 0);
+    const size_t to_loop = n++;         // b loop
+    const size_t case0 = n;
+    const size_t call_g = n++;          // case 0: bl g, whose return address is case 1
+    const size_t case1 = n;
+    w[n++] = a_addr(20, 20, 19, 0);     // case 1: add x20, x20, x19
+    w[n++] = a_addr(20, 20, 0, 0);      // add x20, x20, x0
+    w[n++] = a_addi(19, 19, 1);
+    w[n++] = a_cmpi(19, CUT_N);         // the loop's test here, after the case: no compare bounds the index at the br
+    const size_t to_done = n++;         // b.hs done
+    const size_t back = n++;            // b loop
+    const size_t cxs = n;               // CX: 5, then ret (G calls it through a pointer)
+    w[n++] = a_movz(0, 5);
+    w[n++] = 0xD65F03C0u;               // ret
+    const size_t done = n;              // done, before the head too: only the cases reach it
+    w[to_done] = a_bcond(2, (int64_t)(done - to_done) * 4);   // b.hs (cs)
+    w[n++] = a_mov(0, 20);
+    w[n++] = 0xF94013FCu;               // ldr x28, [sp, #32]
+    w[n++] = 0xA94153F3u;               // ldp x19, x20, [sp, #16]
+    w[n++] = 0xA8C37BFDu;               // ldp x29, x30, [sp], #48
+    w[n++] = 0xD65F03C0u;               // ret
+    const size_t loop = n;              // the loop's head, the last of F
+    w[to_loop] = a_b((int64_t)(loop - to_loop) * 4);
+    w[back] = a_b((int64_t)(loop - back) * 4);
+    w[n++] = a_movz(0, 0);
+    w[n++] = 0x38736B8Au;               // ldrb w10, [x28, x19]
+    w[n] = a_adr(9, (int64_t)(case0 - n) * 4); n++;   // adr x9, case 0
+    w[n++] = a_addr(9, 9, 10, 2);       // add x9, x9, x10, lsl #2
+    w[n++] = 0xD61F0120u;               // br x9
+    // G: CX through a pointer it computes
+    const size_t G = n;
+    w[call_g2] = a_bl((int64_t)(G - call_g2) * 4);
+    w[n++] = 0xA9BF7BFDu;               // stp x29, x30, [sp, #-16]!
+    w[n++] = 0x910003FDu;               // mov x29, sp
+    w[n] = a_adr(9, (int64_t)(F - n) * 4); n++;   // adr x9, F
+    w[n++] = a_addi(9, 9, (unsigned)((cxs - F) * 4));   // add x9, x9, #(CX - F)
+    w[n++] = 0xD63F0120u;               // blr x9
+    w[n++] = 0xA8C17BFDu;               // ldp x29, x30, [sp], #16
+    w[n++] = 0xD65F03C0u;               // ret
+    // g, the stub, leaf and spfn: cutcall's
+    const size_t g = n;
+    w[call_g] = a_bl((int64_t)(g - call_g) * 4);
+    w[n++] = 0xA9BE7BFDu;
+    w[n++] = 0x910003FDu;
+    w[n++] = 0xF9000BF3u;               // str x19, [sp, #16]
+    w[n++] = a_movz(19, 0xBAD);
+    w[n++] = 0xD40003C1u;               // svc #0x1E
+    const size_t call_stub = n++;
+    w[n++] = 0xF9400BF3u;               // ldr x19, [sp, #16]
+    w[n++] = 0xA8C27BFDu;
+    w[n++] = a_movz(0, 7);
+    w[n++] = 0xD65F03C0u;
+    const size_t stub = n;
+    w[call_stub] = a_bl((int64_t)(stub - call_stub) * 4);
+    w[n] = a_adr(16, (int64_t)DATA - (int64_t)n * 4); n++;
+    w[n++] = 0xF9400211u;               // ldr x17, [x16]
+    w[n++] = 0xD61F0220u;               // br x17
+    const size_t leaf = n;
+    w[adr_leaf] = a_adr(9, (int64_t)(leaf - adr_leaf) * 4);
+    w[n++] = 0xD65F03C0u;
+    const size_t spfn = n;
+    w[adr_spfn] = a_adr(11, (int64_t)(spfn - adr_spfn) * 4);
+    w[n++] = 0x910043FFu;               // add sp, sp, #16
+    w[n++] = 0xD65F03C0u;
+    w[0] = a_b((int64_t)start * 4);
+    w[1] = RO;
+    memcpy(img, w, n * 4);
+    memcpy(img + 0x10, "NRO0", 4);
+    const uint32_t hdr[] = {0, SIZE, 0, 0, TEXT, RO, DATA - RO, DATA, SIZE - DATA, BSS};
+    memcpy(img + 0x14, hdr, sizeof hdr);
+    memcpy(img + RO, "MOD0", 4);
+    const int32_t mod0[] = {0x20, SIZE - RO, SIZE + BSS - RO, 0x40, 0x40, SIZE - RO};
+    memcpy(img + RO + 4, mod0, sizeof mod0);
+    memcpy(img + PASS_AT, "casecall PASS", 13);
+    memcpy(img + FAIL_AT, "casecall FAIL", 13);
+    memcpy(img + IDX_AT, cut_idx, CUT_N);
+    *c0 = case0 * 4; *c1 = case1 * 4; *cx = cxs * 4;
+    return SIZE;
+}
+
+// The rows: casecall packed three times, each run under the same DM_AOT_PROFILE folder (its misses file accumulates, as a player's does)
+static void casecall_rows(const char *self, const char *nxaot) {
+    if (!nxaot || !*nxaot || !NXHOST_JIT) {
+        printf("%-14s %-9s note: %s\n", "casecall", "first", !NXHOST_JIT ? "a host built without the JIT fallback: casecall needs it" : "no nxaot (--nxaot, NXAOT)");
+        return;
+    }
+    static uint8_t img[0x3000];
+    uint64_t want = 0, c0 = 0, c1 = 0, cx = 0;
+    const size_t len = casecall_nro(img, sizeof img, &want, &c0, &c1, &cx);
+    char dir[200], nro[200], pack[3][200], misses[260], line[600] = "", note[1600], row0[64], row1[64], rowx[64], rowc[64];
+    mkdir("t_aot_host.tmp", 0755);
+    mkdir("t_aot_host.tmp/casecall", 0755);
+    snprintf(dir, sizeof dir, "t_aot_host.tmp/casecall/profile");
+    mkdir(dir, 0755);
+    snprintf(nro, sizeof nro, "t_aot_host.tmp/casecall/casecall.nro");
+    for (int k = 0; k < 3; k++) {
+        char sub[200];
+        snprintf(sub, sizeof sub, "t_aot_host.tmp/casecall/p%d", k);
+        mkdir(sub, 0755);
+        snprintf(pack[k], sizeof pack[k], "%s/casecall%s", sub, PACK_EXT);
+    }
+    snprintf(misses, sizeof misses, "%s/casecall.misses.tsv", dir);
+    remove(misses);
+    snprintf(row0, sizeof row0, "0x%llx indirect ", (unsigned long long)c0);
+    snprintf(row1, sizeof row1, "0x%llx indirect ", (unsigned long long)c1);
+    snprintf(rowx, sizeof rowx, "0x%llx indirect ", (unsigned long long)cx);
+    snprintf(rowc, sizeof rowc, "0x%llx indirect-case ", (unsigned long long)cx);
+    result r;
+    static char no_lines[1];
+    const char *names[3] = {"first", "cases", "entry"};
+    for (int k = 0; k < 3; k++) {
+        memset(&r, 0, sizeof r);
+        r.guest = no_lines;
+        const int built = k == 0 ? (len && write_file(nro, img, len) && nxaot_pack(nxaot, nro, pack[0], line, sizeof line) == 0)
+                                 : nxaot_pack_misses(nxaot, nro, pack[k], misses, line, sizeof line) == 0;
+        if (!built) {
+            snprintf(note, sizeof note, "nxaot build%s failed: %s", k ? " --misses" : "", line);
+            row("casecall", names[k], 0, &r, note);
+            return;
+        }
+        set_env("DM_AOT_PROFILE", dir);
+        run_child(self, pack[k], nro, "", &r);
+        set_env("DM_AOT_PROFILE", NULL);
+        char *text = read_text(misses);
+        const int pass = r.status == 0 && !strcmp(r.guest, "casecall PASS\n");
+        int ok = pass;
+        if (k == 0) {   // the cases and CX run in the JIT: the misses file names the three, indirect
+            ok = ok && text && strstr(text, row0) && strstr(text, row1) && strstr(text, rowx);
+            snprintf(note, sizeof note, "packed without misses: sum %llu, %llu JIT runs, the misses file %s", (unsigned long long)want, r.jit[0],
+                     ok ? "names both cases and CX (indirect)" : "lacks a row");
+        } else if (k == 1) {   // F one function, its br a switch: no JIT run but G's call of CX, which the host names indirect-case
+            ok = ok && r.have_jit && r.jit[0] == 1 && text && strstr(text, rowc);
+            snprintf(note, sizeof note, "packed with them (cases of F's br, F not cut): %llu JIT run (want 1: G's call of CX through the dispatcher), the misses file %s",
+                     r.jit[0], text && strstr(text, rowc) ? "names CX indirect-case" : "has no indirect-case row");
+        } else {   // CX an entry: no JIT run, no miss left
+            ok = ok && r.have_jit && r.jit[0] == 0;
+            snprintf(note, sizeof note, "packed with the indirect-case row (CX an entry): %llu JIT runs (want 0)", r.jit[0]);
+        }
+        if (r.red[0] && strlen(note) + strlen(r.red) + 3 < sizeof note) { strcat(note, "; "); strcat(note, r.red); }
+        row("casecall", names[k], ok, &r, note);
+        if (r.guest != no_lines) free(r.guest);
+        free(text);
+    }
+}
+
 int main(int argc, char **argv) {
     if (argc >= 4 && !strcmp(argv[1], "--run")) return child(argc, argv);
     if (argc == 3 && !strcmp(argv[1], "--log-race")) return log_race((unsigned)atoi(argv[2]));
@@ -2638,7 +2848,8 @@ int main(int argc, char **argv) {
             unsigned polls = 0, invariant = 0;
             for (unsigned seed = 1; seed <= PAUSE_SEEDS; seed++) {
                 char extra[200];
-                snprintf(extra, sizeof extra, "--pause %d --seed %u --set excl_pause_iterations=200000000", PAUSES, seed);
+                // The loop's cap only (the tester ends it by count through excl_pause_stop); the 30 s limit fails a row whose pauses stopped landing
+                snprintf(extra, sizeof extra, "--pause %d --seed %u --set excl_pause_iterations=100000000000", PAUSES, seed);
                 run_child(argv[0], pack, nrop, extra, &r);
                 ok = r.status == 0 && !strcmp(r.guest, expected) && r.have_pt && r.pt[1] == PAUSES && r.pt[3] == 0;
                 polls += r.have_stat ? (unsigned)r.stat[5] : 0; invariant += r.have_pt ? r.pt[2] : 0;
@@ -2705,7 +2916,10 @@ int main(int argc, char **argv) {
     if (polls) polls_rows(argv[0], nxaot);    // 9. The polls left out of bounded loops, and the loops that must keep theirs: every pause prompt
     int cutcall = !nonly;
     for (int i = 0; i < nonly; i++) cutcall |= !strcmp(only[i], "cutcall");
-    if (cutcall) cutcall_rows(argv[0], nxaot);   // 10. A call whose return starts another function; a call of a function the summaries say does not return, which returns
+    if (cutcall) cutcall_rows(argv[0], nxaot);
+    int casecall = !nonly;
+    for (int i = 0; i < nonly; i++) casecall |= !strcmp(only[i], "casecall");
+    if (casecall) casecall_rows(argv[0], nxaot);   // 11. A miss as a case of its function's br: the function kept whole; a case reached from outside, an entry   // 10. A call whose return starts another function; a call of a function the summaries say does not return, which returns
     printf("t_aot_host: %d checks, %d failed\n", checks, fails);
     return fails != 0;
 }

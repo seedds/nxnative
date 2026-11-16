@@ -579,7 +579,7 @@ def main():
           f'4. {gprof.name} written again from the changed profile (name {renamed}), the launch file\'s row unchanged')
     nxlog = (work / 'logs/nxaot_main.log').read_text(errors='replace') if (work / 'logs/nxaot_main.log').is_file() else ''
     show(nxlog, ['gate sites', red_gate, 'aot: misses'])
-    check('aot: misses: 1 addresses, 1 new entries, 0 resume points, 0 still unserved (none)' in nxlog and 'gate sites 3 (design 1.1)' in nxlog and red_gate not in nxlog,
+    check('aot: misses: 1 addresses, 1 new entries, 0 cases, 0 resume points, 0 still unserved (none)' in nxlog and 'gate sites 3 (design 1.1)' in nxlog and red_gate not in nxlog,
           f'4. nxaot build --misses{"" if route == "nxaot" else " (the prebuilt repack: " + str(prebuilt / "misses" / pack_name) + ")"}: the hidden function compiled '
           '(1 new entry), its gate served (gate sites 3), no [RED] line for it')
     show(nxlog, ['aot: profile', 'aot: tiers'])

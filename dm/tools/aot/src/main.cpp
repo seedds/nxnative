@@ -795,7 +795,7 @@ int Build(int argc, char** argv) {
     const auto t_link = std::chrono::steady_clock::now();
     if (ok && o.windows) {
         // The DLL and / or the COFF object: the objects joined, converted and linked by lld-link (README.md, "Windows packs")
-        ok = nxaot::build::LinkWindows(objects, work, shared, object, o.debug_info, &s, &error, !o.bound_slots.empty());
+        ok = nxaot::build::LinkWindows(objects, work, shared, object, o.debug_info, &s, &error, !o.bound_slots.empty(), s.cases > 0);
     } else {
         if (ok && !shared.empty()) {
             const std::string soname = shared.substr(shared.find_last_of('/') + 1);

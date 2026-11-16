@@ -397,6 +397,9 @@ std::unique_ptr<Host> Host::Create(const std::string& library, const module::Ima
         if (s.name == "nxaot_pause_loop_head" && s.Defined()) {
             h->pause_head = kModuleBase + s.value;
         }
+        if (s.name == "excl_pause_stop" && s.Defined()) {
+            h->pause_stop = kModuleBase + s.value;
+        }
     }
     InstallSignals();
     if (!g_clock_origin) {
@@ -1219,7 +1222,11 @@ void Host::PauseTest() {
     std::mt19937_64 rng{options.pause_seed};
     Result& r = *g_run.result;
     unsigned shown = 0;
-    while (!g_run.stop && r.pauses_threaded < options.pause_test) {
+    // The window ends by count: once the test has its threaded pauses it sets the pause loop's stop word (excl_pause_stop), which the loop reads once
+    // per iteration; a 30 s limit ends it too, and the run's check names the threaded pauses that landed. Before, the loop's iteration count set the
+    // window, and whether N pauses fitted in it depended on the machine (t_aot_host's pause rows, which run the same program, missed it under Wine)
+    const uint64_t limit = NowNs() + 30000000000ull;
+    while (!g_run.stop && r.pauses_threaded < options.pause_test && NowNs() < limit) {
         {
             std::unique_lock<std::mutex> lk{g_run.lock};
             const unsigned lo = std::max(1u, options.pause_interval_us / 10);
@@ -1318,6 +1325,9 @@ void Host::PauseTest() {
             }
             g_run.cv.notify_all();
         }
+    }
+    if (pause_stop) {
+        __atomic_store_n(reinterpret_cast<uint32_t*>(pause_stop), 1u, __ATOMIC_RELAXED);
     }
 }
 

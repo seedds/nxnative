@@ -141,6 +141,7 @@ private:
     const nxaot_module_desc* desc = nullptr;
     uint64_t module_bytes = 0;  // the mapped size: image and bss, page-rounded
     uint64_t pause_head = 0;    // the guest address of the corpus's register-invariant loop head (nxaot_pause_loop_head), 0 when none
+    uint64_t pause_stop = 0;    // the guest address of the loop's stop word (excl_pause_stop): the pause test ends the loop by count, 0 when none
     std::vector<std::pair<uint64_t, uint32_t>> lines;           // native address -> module offset, sorted
     std::vector<std::pair<uint64_t, uint64_t>> fn_by_native;    // native body -> module offset, sorted
     std::map<uint64_t, std::unique_ptr<nxaot_ic_desc>> descs;   // run-time inline-cache descriptors by guest address (immutable once published)

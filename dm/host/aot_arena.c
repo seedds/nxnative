@@ -522,6 +522,8 @@ typedef struct { uint64_t off, end; } fn_range_t;          // a guest function's
 struct dm_aot_pack {
     void *lib;
     const nxaot_module_desc *desc;
+    const uint64_t *cases;           // nxaot_cases: the misses the pack holds as cases of their function's br, module offsets in order (NULL: none)
+    size_t ncases;
     module_t *mod;
     uint64_t base, size, text_end;   // the image's guest range: [base, base + size), its text [base, base + text_end)
     uint64_t code_lo, code_hi;       // the library's code in the host
@@ -723,6 +725,8 @@ dm_aot_pack *dm_aot_pack_load(const char *path, module_t *m, const dm_aot_identi
     dm_aot_pack *p = calloc(1, sizeof *p);
     if (!p) die("aot: no memory for a pack");
     p->lib = lib; p->desc = d; p->mod = m;
+    p->cases = lib_sym(lib, "nxaot_cases");   // the misses the pack holds as cases of their function's br (dm_aot_is_case)
+    while (p->cases && p->cases[p->ncases] != UINT64_MAX) p->ncases++;
     p->base = (uint64_t)(uintptr_t)m->base; p->size = round_up(id->image_size + id->bss_size, page()); p->text_end = id->text_end;
     snprintf(p->name, sizeof p->name, "%s", m->name);
     *d->base = p->base;   // 3.3: return addresses and every pc-built address are base + module offset
@@ -895,6 +899,20 @@ uint64_t dm_aot_line_of_code(uint64_t host_pc) {
 // ---------- The sampler's lookups (aot.h, "The sampler"): async-signal-safe ----------
 int dm_aot_pack_count(void) { return atomic_load_explicit(&g_npacks, memory_order_acquire); }
 const dm_aot_pack *dm_aot_pack_at(int i) { return i >= 0 && i < dm_aot_pack_count() ? g_packs[i] : NULL; }
+
+// Whether guest is a case of its function's br in the pack of its module (include/nxaot/aot_module.h nxaot_cases): a dispatcher miss there came from outside
+// that function (aot_run.c: the miss indirect-case)
+int dm_aot_is_case(uint64_t guest) {
+    for (int i = 0; i < dm_aot_pack_count(); i++) {
+        const dm_aot_pack *p = g_packs[i];
+        if (!p || !p->ncases || guest < p->base || guest >= p->base + p->text_end) continue;
+        const uint64_t off = guest - p->base;
+        size_t lo = 0, hi = p->ncases;
+        while (lo < hi) { const size_t mid = (lo + hi) / 2; if (p->cases[mid] < off) lo = mid + 1; else hi = mid; }
+        return lo < p->ncases && p->cases[lo] == off;
+    }
+    return 0;
+}
 size_t dm_aot_pack_fn_count(const dm_aot_pack *p) { return p->nfns; }
 uint64_t dm_aot_pack_fn(const dm_aot_pack *p, size_t i) { return p->by_off[i].off; }
 _Atomic uint64_t *dm_aot_pack_samples(const dm_aot_pack *p) { return p->samples; }

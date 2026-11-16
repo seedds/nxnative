@@ -143,8 +143,10 @@ constexpr uint64_t kAnalysisPerWord = 64, kAnalysisFixed = 128ull << 20;
 // ("PLT stubs bound to their own module"): a unit of format 7 under the same key lacks the stores and the check. 9: a call whose return starts
 // another function goes on in it (a tail call when it does not read x30: a callee's reads of x30 in "callees"), and a call of a function the
 // summaries say does not return stores every register first and goes on in the JIT if it returns (README.md, "A call into the next function"):
-// a unit of format 8 under the same key ends such a call with a lookup of its return address, or a trap
-constexpr const char* kUnitKeyFormat = "nxaot-unit 9";
+// a unit of format 8 under the same key ends such a call with a lookup of its return address, or a trap. 10: a miss inside a function with a br left
+// to the dispatcher is a case of that br, lowered as a switch whose default is the dispatcher, the function kept whole (README.md, "A miss as a case of
+// its function's br"): its cases are in the key with its tables; a unit of format 9 under the same key lacks the switch
+constexpr const char* kUnitKeyFormat = "nxaot-unit 10";
 
 // The section each unit's !pcsections marks go to (the line table, "The line table" below): read back after code generation and kept out of
 // the link (SHF_EXCLUDE)
@@ -2705,6 +2707,22 @@ bool CompileTables(const Common& c, llvm::TargetMachine& tm, std::string* object
         auto* table = new llvm::GlobalVariable(*m, ty, true, llvm::GlobalValue::ExternalLinkage, llvm::ConstantArray::get(ty, rows), "nxaot_bindings");
         table->setAlignment(llvm::Align(8));
     }
+    {
+        // The misses that are cases of their function's br (README.md, "A miss as a case of its function's br"), nxaot_cases of include/nxaot/aot_module.h:
+        // their module offsets in order, then all ones. The host names a dispatcher miss at one of them indirect-case: something outside the function
+        // reaches it, which the next pack makes an entry. A pack without cases has no such table, as before
+        std::vector<uint64_t> cases;
+        for (const auto& [entry, ff] : plan.fns) cases.insert(cases.end(), ff.cases.begin(), ff.cases.end());
+        if (!cases.empty()) {
+            std::sort(cases.begin(), cases.end());
+            cases.push_back(UINT64_MAX);
+            auto* ty = llvm::ArrayType::get(i64, cases.size());
+            auto* table = new llvm::GlobalVariable(*m, ty, true, llvm::GlobalValue::ExternalLinkage, llvm::ConstantDataArray::get(ctx, llvm::ArrayRef<uint64_t>(cases)),
+                                                   "nxaot_cases");
+            table->setAlignment(llvm::Align(8));
+            if (s) s->cases = cases.size() - 1;
+        }
+    }
     if (k.dib) {
         k.dib->finalize();
     }
@@ -4507,7 +4525,7 @@ bool LinkRelocatable(const std::vector<std::string>& objects, const std::string&
 }
 
 bool LinkWindows(const std::vector<std::string>& objects, const std::string& work_dir, const std::string& dll, const std::string& coff_object,
-                 bool debug_info, BuildStats* stats, std::string* error, bool bindings) {
+                 bool debug_info, BuildStats* stats, std::string* error, bool bindings, bool cases) {
     // One relocatable ELF object of the whole module (ld.lld -r keeps one copy of each comdat group: the shared helpers of the units), in COFF
     if (const std::error_code ec = llvm::sys::fs::create_directories(work_dir)) {
         *error = "cannot create " + work_dir + ": " + ec.message();
@@ -4563,6 +4581,9 @@ bool LinkWindows(const std::vector<std::string>& objects, const std::string& wor
     }
     if (bindings) {
         args.push_back("/export:nxaot_bindings,DATA");  // the loader's bindings the code assumed (--bind), which the host checks
+    }
+    if (cases) {
+        args.push_back("/export:nxaot_cases,DATA");  // the misses that are cases of their function's br, which the host names apart (indirect-case)
     }
     args.push_back(obj.c_str());
     std::string so, se;

@@ -31,7 +31,8 @@ struct FnFacts {
     int component = 0;           // its tail-call component (RV)
     std::vector<uint64_t> continuations;      // offsets after its calls to setjmp: resume points of every call site of the function
     std::map<uint64_t, uint64_t> pads;        // call pc -> the landing pad of the LSDA call site covering it
-    std::map<uint64_t, std::vector<uint64_t>> tables;  // br pc -> jump-table targets
+    std::map<uint64_t, std::vector<uint64_t>> tables;  // br pc -> jump-table targets (with the cases, for a br left to the dispatcher)
+    std::vector<uint64_t> cases;                       // the host's misses that are cases of its brs left to the dispatcher (analysis::Function::cases)
     std::map<uint64_t, uint64_t> bound;                // br pc -> the function a PLT stub's br tail-calls, its slot bound to this module (--bind)
     std::vector<uint64_t> roots;              // landing pads inside the function
     std::vector<std::pair<uint64_t, uint64_t>> extra;  // its blocks outside [entry, limit): the aux region's (design 1.1), [start, end) each

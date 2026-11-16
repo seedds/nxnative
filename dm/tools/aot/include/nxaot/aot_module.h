@@ -183,6 +183,10 @@ typedef struct nxaot_import {
 // function's summary. The host compares each slot, once the module is relocated, with base + target and refuses the pack when one differs (an
 // earlier module or the host's forced take-over binds the name now: another pack set or another host). Not part of the descriptor, whose ABI it
 // leaves unchanged: a pack without it assumes no binding
+// nxaot_cases: the module offsets of the host's misses that the pack holds as cases of their function's brs left to the dispatcher (dm/tools/aot/README.md,
+// "A miss as a case of its function's br"), in order, then all ones. Absent from a pack without such cases. The host names a dispatcher miss at one of them
+// indirect-case in its misses file: the function's own br branches there directly, so the miss came from outside the function, which the next pack makes an
+// entry. Not part of the descriptor, whose ABI it leaves unchanged
 typedef struct nxaot_binding {
     uint64_t slot;    // module offset of the GOT slot
     uint64_t target;  // module offset of the function the slot holds

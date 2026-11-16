@@ -72,6 +72,7 @@ struct BuildStats {
     uint64_t calls = 0, indirect_calls = 0, tail_calls = 0, indirect_tails = 0, returns = 0, svcs = 0, traps = 0, tables = 0, resume_sites = 0;
     uint64_t spills = 0, reloads = 0, object_bytes = 0, text_bytes = 0;
     uint64_t lines_lost = 0;  // line-table entries the backend could not keep (an access folded into another instruction)
+    uint64_t cases = 0;       // the misses that are cases of their function's br (nxaot_cases' rows; a Windows pack exports the table)
     uint64_t line_entries = 0;  // the line table's entries (lines.o: one per native guest memory access)
     uint64_t gate_sites = 0;    // the gate sites compiled code calls (design 1.1: the manifest's obs and spin rows its functions hold)
     // Seconds. Lifting, verification, optimisation and code generation are summed over the units (CPU seconds of the workers), the others are
@@ -153,7 +154,7 @@ bool LinkRelocatable(const std::vector<std::string>& objects, const std::string&
 // lld::coff::link) into the DLL dll when that is not empty: no entry point, no import, the descriptor nxaot_module and the import table
 // nxaot_imports exported, the image deterministic (/Brepro), DWARF kept with debug_info. Work files go to work_dir. False with *error set
 bool LinkWindows(const std::vector<std::string>& objects, const std::string& work_dir, const std::string& dll, const std::string& coff_object,
-                 bool debug_info, BuildStats* stats, std::string* error, bool bindings = false);
+                 bool debug_info, BuildStats* stats, std::string* error, bool bindings = false, bool cases = false);
 
 // The run-time entries a pack may import (include/nxaot/aot_module.h, src/lift/runtime.h): what dm/host and src/rt export to it
 bool IsHostImport(const std::string& name);

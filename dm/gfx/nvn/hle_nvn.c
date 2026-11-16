@@ -2397,9 +2397,20 @@ static int fstep_on(void) { return fps_step_cap() != 0; }   // the host decides 
 // only limit), so there the cap is applied as the present interval alone: Red Dead
 // Redemption asks for interval 2 once and steps by time, and its 60 needs no limiter.
 static int g_present_cap = -1;
+static int configured_display_mode(void) {
+    const char *m = getenv("DM_PRESENT_INTERVAL");
+    if (m) return !strcmp(m, "display");
+    // Resident Evil's native 30 fps path owns its wait and present interval.
+    // The 60/120 profiles bypass those waits and pace through display mode.
+    if (!strcmp(DM_GAME_ID, "010050F00BC1A000")) {
+        const char *e = getenv("DM_FPS_TARGET"); int t = e ? atoi(e) : DM_GAME_FPS_TARGET;
+        return t != 30 && t != 0;
+    }
+    return DM_GAME_PRESENT_DISPLAY;
+}
 static int display_mode(void) {   // present_cfg's choice, also before its first call (the cap can be asked for before the window's first interval)
     if (g_hz >= 0) return g_display_mode;
-    const char *m = getenv("DM_PRESENT_INTERVAL"); return m ? !strcmp(m, "display") : DM_GAME_PRESENT_DISPLAY;
+    return configured_display_mode();
 }
 static int fps_present_cap(void) {
     if (dm_fps_state || fps_high()) return fps_step_cap();
@@ -2435,9 +2446,9 @@ static void present_cfg(const win_t *o) {
     // with a fixed hard floor of 60 fps; the logic stays at 25 ticks, and the client's frame-counted UI logic is unaffected -
     // with the same save and the same input, the UI message streams of the two modes match message by message. Proof (before character select): r9 game / display 60 ×3 / display 120 ×2, 6 groups in total, uicmp consistent
     // (the save indicator is exempted as a timing race), and the timing differences of key messages are within game mode's own noise band; proof after entering a run is still missing, pending action script coverage
-    const char *m = getenv("DM_PRESENT_INTERVAL"); g_display_mode = m ? !strcmp(m, "display") : DM_GAME_PRESENT_DISPLAY;
+    const char *m = getenv("DM_PRESENT_INTERVAL"); g_display_mode = configured_display_mode();
     LOG("[nvn] present tick %d Hz, interval mode %s (%s; present interval set by the game %d; %s)", g_hz, g_display_mode ? "display (one frame per tick, a cut)" : "game (original semantics)",
-        m ? "DM_PRESENT_INTERVAL" : "game profile present_interval", o->interval, scr > 0 ? "window" : "no window");
+        m ? "DM_PRESENT_INTERVAL" : "game profile / Resident Evil timing profile", o->interval, scr > 0 ? "window" : "no window");
 }
 static int present_itv(const win_t *o) { int movie = dm_movie_hz(), c = fps_present_cap(), k = atomic_load(&g_fs_k); if (movie && fps_high()) return fstep_hz() / movie; return c ? (k && fstep_on() ? k : fstep_hz() / c) : g_display_mode ? 1 : o->interval > 0 ? o->interval : 1; }   // vsyncs per frame that presentation follows
 // Present interval 0 swaps without waiting for a vsync on Horizon: the window's acquire waits only for a texture the display has let go of, the display shows the newest frame at each

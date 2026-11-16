@@ -10180,6 +10180,17 @@ static void pso_key_fill(pso_key *k, NvShader *vs, NvShader *fs, const uint32_t 
 // are come later in this submission, so each of their pipelines is admitted (pso_pend_kick_next), bounded by the table: bounded by 2 as well, a cold load of FINAL FANTASY
 // RESONANCE into Grandshelt Castle waited 2.8 s for pipelines, worst frame 2.2 s, against 0.74-0.79 s (PR #1344)
 enum { PSO_PEND_ACTIVE = 2, PSO_PREDICT_BUDGET = 2 };
+// The prediction's checks on the submit thread are time-boxed (GitHub issue #2827): a check that makes a pulling stand-in is an archive lookup, under a millisecond on its own,
+// but one that meets a base compile under way in the background waits behind it on the same compiler, 100-300 ms, and the frame with it (Ocarina of Time on an M4 Max: two
+// predictions of 273 ms in a window of 10 background compiles). Once a walk's checks have taken DM_NVN_PREDICT_WALK_MS (default 2; 0: no box) it stops; the candidates left
+// are asked for by their own draws as before (a stand-in then, or a build handed over). A check under way is not cut: the box bounds how many slow checks a walk can meet in a row
+static uint64_t pp_walk_ns(void) {
+    static int64_t v = -1;
+    if (v < 0) { const char *e = getenv("DM_NVN_PREDICT_WALK_MS"); double ms = e && *e ? atof(e) : 2.0; v = ms > 0 ? (int64_t)(ms * 1e6) : 0;
+        if (e) MLOG("DM_NVN_PREDICT_WALK_MS=%s: the prediction's checks stop after %s", e, v ? e : "nothing (no time box)"); }
+    return (uint64_t)v;
+}
+static _Atomic uint64_t g_pp_cut, g_pp_left, g_pp_hy_n, g_pp_hy_ns;   // walks the box cut short, candidates they left; stand-in checks in the walks and their time
 // order: admission order (the oldest finished, untaken entry is reclaimed first); demand: a build a draw asked for while it draws with its pulling stand-in (hybrid pipelines),
 // outside the speculative limit; run: 0 queued, 1 taken by its worker; d: the descriptor while queued (a draw that would wait for a queued build makes the pipeline itself:
 // pso_pend_take); gen tells a slot's fills apart, so a worker whose slot was taken that way and filled again does nothing
@@ -10358,6 +10369,9 @@ void mtl_pso_line(char *o, size_t n) {
              (unsigned long long)d[8], d[9] / 1e6, (unsigned long long)d[12], (unsigned long long)d[13], (unsigned long long)d[17], (unsigned long long)d[14], (unsigned long long)d[15], (unsigned long long)d[16], (unsigned long long)(v[14] - v[15] - v[16]));
     memcpy(p, v, sizeof p);
     static uint64_t pn[5], pns[5]; size_t o2 = strlen(o);
+    { static uint64_t q[5]; uint64_t w[5] = {g_pp_hy_n, g_pp_hy_ns, g_pp_cut, g_pp_left, g_hy_ns};
+      o2 += snprintf(o + o2, n > o2 ? n - o2 : 0, "; prediction stand-in checks %llu / %.1f ms, walks cut short %llu (%llu candidates left to their draws); draws' own stand-ins %.1f ms",
+                     (unsigned long long)(w[0] - q[0]), (w[1] - q[1]) / 1e6, (unsigned long long)(w[2] - q[2]), (unsigned long long)(w[3] - q[3]), (w[4] - q[4]) / 1e6); memcpy(q, w, sizeof q); }
     o2 += snprintf(o + o2, n > o2 ? n - o2 : 0, "; draws that waited:");
     for (int i = 0; i < 5; i++) if (g_pw_n[i] > pn[i]) o2 += snprintf(o + o2, n > o2 ? n - o2 : 0, " %s %llu / %.1f ms,", g_pw_why[i], (unsigned long long)(g_pw_n[i] - pn[i]), (g_pw_ns[i] - pns[i]) / 1e6);
     memcpy(pn, g_pw_n, sizeof pn); memcpy(pns, g_pw_ns, sizeof pns);
@@ -13103,12 +13117,13 @@ static void pso_predict_rest_(void) {
     // pipelines a predicted draw whose pulling stand-in is ready (made here, from its base made or archived: the work its draw would do) will not wait, and builds its own pipeline
     // on demand (pso_pend_demand). The rest are draws that would wait (a pair whose pulling base is not made yet): each draw met with its attachments as they are (qa) is
     // admitted, then at most PSO_PREDICT_BUDGET guesses with other depth / stencil attachments (qb)
-    int admitted = 0, hy = hybrid_on();
+    int admitted = 0, hy = hybrid_on(); uint64_t box = pp_walk_ns(), w0 = bp_now();
     for (int i = 0; i < na + nb && (i < na || admitted < PSO_PREDICT_BUDGET); i++) {
         const pso_key *qk = i < na ? &qa[i].k : &qb[i - na].k; NvShader *qv = (__bridge NvShader *)(i < na ? qa[i].vs : qb[i - na].vs), *qf = (__bridge NvShader *)(i < na ? qa[i].fs : qb[i - na].fs);
         if (hm_get_id(&g_pso, qk)) continue;
+        if (box && bp_now() - w0 >= box) { g_pp_cut++; g_pp_left += (uint64_t)(na + nb - i); break; }   // #2827: the rest are asked for by their draws
         if (pso_base_made(qk, qv, qf)) { hm_put_id(&g_pp_easy, qk, NSNull.null); continue; }
-        if (hy && hybrid_get(qk, qv, qf) != nil) continue;
+        if (hy) { uint64_t h0 = bp_now(); __unsafe_unretained id<MTLRenderPipelineState> st = hybrid_get(qk, qv, qf); g_pp_hy_n++; g_pp_hy_ns += bp_now() - h0; if (st != nil) continue; }
         if (i < na) g_pp_admit += (uint64_t)pso_pend_kick_next(qk, qv, qf);
         else admitted += pso_pend_kick(qk, qv, qf);
     }

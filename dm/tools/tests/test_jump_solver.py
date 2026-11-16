@@ -173,6 +173,11 @@ class Bounds(Solver):
             with self.subTest(guard=hex(guard)):
                 w[4] = guard
                 self.assertIsNone(self.site(w))
+        for bit in (0, 1):   # and wI,wS,#2^(t+1)-1; tbnz wS,#t: 2^t entries, the next one poisoned
+            with self.subTest(bit=bit):
+                t = [40 + 4 * i for i in range(1 << bit)]; self.table(t)
+                w[3:5] = [and_w(13, 17, bit + 1), tbnz(17, bit, 16, 40)]
+                self.assertEqual(self.site(w), t)
 
     def test_check_on_a_mask_made_in_another_block(self):
         # FINAL FANTASY CRYSTAL CHRONICLES Remastered main+0x2d103cc: and x6,x17,#0x7ff; cbz ... in the predecessor; and w18,w17,#0x7ff; cmp w18,#3; b.hi; ldrsw x18,[x27,x6,lsl #2]

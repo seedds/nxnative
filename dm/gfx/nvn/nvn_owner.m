@@ -60,12 +60,17 @@ static nvn_hmap g_tex_live = {.klen = 8};   // serial → the texture object it 
 // the entries of exactly the textures made on its storage (own_pool_finalize_locked). The pool is recorded at initialization, so nothing here reads the game's texture object later
 // (the game may have freed it). Under g_smu
 static nvn_hmap g_tex_pool = {.klen = 8};                   // serial → its pool
-static nvn_hmap g_pool_tex = {.klen = sizeof(uintptr_t)};   // pool → CFMutableSetRef of its live serials (as pointer-sized values; a serial is never 0)
+// pool → the set of its live serials, an nvn_hmap of 8-byte keys (value 1). A CFMutableSet was used: it leaves a deleted mark in each removed value's bucket and cleans them only
+// when it grows, so a pool whose textures come and go at a steady count slowed down without end. Mario Kart World's largest pool holds about 37,000 live textures: in its races
+// each add or remove took about 2.5 µs (some 17 ms a second of the guest threads that make and finalize textures, under g_smu); a CFSet of 37,000 values with random removals
+// went from 0.2 to 2.3-3.3 µs a remove and add within 100,000 of them. nvn_hmap removes by shifting its probe chain back and leaves no marks
+static nvn_hmap g_pool_tex = {.klen = sizeof(uintptr_t)};
+static void pool_set_free(nvn_hmap *set) { free(set->keys); free(set->vals); free(set); }
 static void pool_tex_del(uint64_t serial) {
     void *p = nvn_hm_del(&g_tex_pool, &serial); if (!p) return;
-    uintptr_t pk = (uintptr_t)p; CFMutableSetRef set = nvn_hm_get(&g_pool_tex, &pk); if (!set) return;
-    CFSetRemoveValue(set, (const void *)(uintptr_t)serial);
-    if (!CFSetGetCount(set)) { nvn_hm_del(&g_pool_tex, &pk); CFRelease(set); }
+    uintptr_t pk = (uintptr_t)p; nvn_hmap *set = nvn_hm_get(&g_pool_tex, &pk); if (!set) return;
+    nvn_hm_del(set, &serial);
+    if (!set->n) { nvn_hm_del(&g_pool_tex, &pk); pool_set_free(set); }
 }
 static nvn_hmap g_ghost = {.klen = 8}; static uint64_t g_ghost_puts;
 typedef struct ghost_use { struct ghost_use *prev, *next; uint64_t serial, frame, sub; } ghost_use;   // a ghost entry's last use
@@ -271,10 +276,9 @@ void own_tex_live_put_locked(const tex_t *t) {
     nvn_hm_put(&g_tex_live, &t->serial, (void *)t);
     pool_tex_del(t->serial);
     if (!t->pool) return;
-    uintptr_t pk = (uintptr_t)t->pool; CFMutableSetRef set = nvn_hm_get(&g_pool_tex, &pk);
-    if (!set) { set = CFSetCreateMutable(NULL, 0, NULL); if (!set) ODIE("the pool's texture index"); nvn_hm_put(&g_pool_tex, &pk, (void *)set); }
-    // NOLINTNEXTLINE(clang-analyzer-osx.cocoa.RetainCount): g_pool_tex owns set until pool_tex_del or own_pool_finalize_locked releases it.
-    CFSetAddValue(set, (const void *)(uintptr_t)t->serial); nvn_hm_put(&g_tex_pool, &t->serial, (void *)t->pool);
+    uintptr_t pk = (uintptr_t)t->pool; nvn_hmap *set = nvn_hm_get(&g_pool_tex, &pk);
+    if (!set) { set = calloc(1, sizeof *set); if (!set) ODIE("the pool's texture index"); nvn_hm_init(set, 8); nvn_hm_put(&g_pool_tex, &pk, set); }
+    nvn_hm_put(set, &t->serial, (void *)1); nvn_hm_put(&g_tex_pool, &t->serial, (void *)t->pool);
 }
 int own_tex_live_locked(uint64_t serial) { return nvn_hm_get(&g_tex_live, &serial) != NULL; }
 int own_tex_live(uint64_t serial) { pthread_mutex_lock(&g_smu); int r = own_tex_live_locked(serial); pthread_mutex_unlock(&g_smu); return r; }
@@ -496,16 +500,17 @@ uint32_t own_pool_finalize_locked(const void *pool, CFSetRef also) {
     for (uint32_t j = 0; j < n; j++) gone_add(gone, hm_get_id(&g_alias, &ks[j]));
     if (also) { CFIndex na = CFSetGetCount(also); const void **vs = malloc((size_t)(na ? na : 1) * sizeof *vs); if (!vs) ODIE("the finalized pool's textures");
         CFSetGetValues(also, vs); for (CFIndex j = 0; j < na; j++) gone_add(gone, (__bridge id)vs[j]); free(vs); }
-    uintptr_t pk = (uintptr_t)pool; CFMutableSetRef mine = nvn_hm_del(&g_pool_tex, &pk);   // the pool's live texture objects: their serials leave the index with it
-    CFIndex nm = mine ? CFSetGetCount(mine) : 0; const void **ms = NULL;
-    if (nm) { ms = malloc((size_t)nm * sizeof *ms); if (!ms) ODIE("the finalized pool's textures"); CFSetGetValues(mine, ms); }
+    uintptr_t pk = (uintptr_t)pool; nvn_hmap *mine = nvn_hm_del(&g_pool_tex, &pk);   // the pool's live texture objects: their serials leave the index with it
+    uint32_t nm = 0; uint64_t *ms = NULL;
+    if (mine && mine->n) { ms = malloc((size_t)mine->n * sizeof *ms); if (!ms) ODIE("the finalized pool's textures");
+        for (uint32_t i = 0; i < mine->cap; i++) if (mine->vals[i]) memcpy(&ms[nm++], mine->keys + (size_t)i * 8, 8); }
     uint64_t dropped = 0;
-    for (CFIndex j = 0; j < nm; j++) {
-        uint64_t serial = (uint64_t)(uintptr_t)ms[j]; nvn_hm_del(&g_tex_pool, &serial);
+    for (uint32_t j = 0; j < nm; j++) {
+        uint64_t serial = ms[j]; nvn_hm_del(&g_tex_pool, &serial);
         id o = hm_get_id(&g_by_serial, &serial); if (!o) continue;
         gone_add(gone, o); live_del_locked(serial); dropped++;
     }
-    free(ms); if (mine) CFRelease(mine);
+    free(ms); if (mine) pool_set_free(mine);
     if (CFSetGetCount(gone)) { uint64_t *sers = NULL; uint32_t nsers = 0; drop_entries_naming_locked(gone, 1, 1, &sers, &nsers); free(sers); dropped += nsers; }
     CFRelease(gone);
     for (uint32_t j = 0; j < n; j++) alias_del(&ks[j]);
@@ -641,17 +646,16 @@ int own_check_locked(char *why, size_t n) {
     // The pool index: each indexed serial is a live texture object's and lies in its pool's set, and each set holds only serials indexed under that pool
     uint64_t in_sets = 0;
     for (uint32_t i = 0; ok && i < g_pool_tex.cap; i++) {
-        CFSetRef set = g_pool_tex.vals[i]; if (!set) continue;
+        const nvn_hmap *set = g_pool_tex.vals[i]; if (!set) continue;
         uintptr_t pool; memcpy(&pool, g_pool_tex.keys + (size_t)i * g_pool_tex.klen, sizeof pool);
-        CFIndex m = CFSetGetCount(set); in_sets += (uint64_t)m;
+        uint32_t m = set->n; in_sets += m;
         if (!m) { snprintf(why, n, "pool %#lx has an empty set of live textures", (unsigned long)pool); ok = 0; break; }
-        const void **vs = malloc((size_t)m * sizeof *vs); if (!vs) ODIE("the check's pool index"); CFSetGetValues(set, vs);
-        for (CFIndex j = 0; ok && j < m; j++) {
-            uint64_t serial = (uint64_t)(uintptr_t)vs[j];
+        for (uint32_t j = 0; ok && j < set->cap; j++) {
+            if (!set->vals[j]) continue;
+            uint64_t serial; memcpy(&serial, set->keys + (size_t)j * 8, 8);
             if ((uintptr_t)nvn_hm_get(&g_tex_pool, &serial) != pool) { snprintf(why, n, "serial %llu is in pool %#lx's set but indexed under another", (unsigned long long)serial, (unsigned long)pool); ok = 0; }
             else if (!nvn_hm_get(&g_tex_live, &serial)) { snprintf(why, n, "serial %llu is in pool %#lx's set but not live", (unsigned long long)serial, (unsigned long)pool); ok = 0; }
         }
-        free(vs);
     }
     if (ok && in_sets != g_tex_pool.n) { snprintf(why, n, "%llu serials in the pools' sets, %u indexed", (unsigned long long)in_sets, g_tex_pool.n); ok = 0; }
     // The sharing table: g_alias_set is the set of its textures, each key lies in every cell its bytes reach and in no other, and a last lookup is kept for entries only

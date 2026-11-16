@@ -2035,9 +2035,10 @@ Digimon Story Cyber Sleuth: Complete Edition (Media.Vision's MVGL engine, SDK 6.
 
 ### EGL's current context, per thread
 
-- **Symptom:** a jump to address 0 after `eglGetProcAddress("eglGetCurrentDisplay")`, or a loader that takes the context for lost.
+- **Symptom:** a jump to address 0 after `eglGetProcAddress("eglGetCurrentDisplay")`, or a loader that takes the context for lost; a second thread's `eglMakeCurrent` returns `EGL_FALSE` with `EGL_BAD_ACCESS` while another thread owns the context.
 - **Cause:** a glad loader asks `eglGetProcAddress` for EGL functions too, and calls `eglGetCurrentDisplay`; the layer answered only `gl` names and had no `eglGetCurrent*`.
 - **Fix:** `eglGetProcAddress` answers `egl` names from the same table. `eglMakeCurrent` records the calling thread's display, context and draw/read surfaces; `eglGetCurrentContext`, `eglGetCurrentDisplay` and `eglGetCurrentSurface` (`EGL_DRAW`, `EGL_READ`) answer that binding. The layer's one context has one owner, protected by a mutex. A conflicting bind returns false with `EGL_BAD_ACCESS` and leaves both threads' bindings unchanged. Making no context current, `eglReleaseThread`, or the owning thread's exit releases it for another thread. `eglGetError` returns and clears only the calling thread's error.
+- **Current limit:** multiple and shared contexts are unsupported. Every `eglCreateContext` returns the same handle (`0x2`), and GL state and command encoding are global, so a second creation does not give another thread an independent context. Keep the ownership check unchanged; revisit multiple contexts only when a real game needs them.
 - **Check:** `t_gl_imports` (`test_extension_names_and_egl`).
 - **Found on:** Fate/hollow ataraxia REMASTERED, [issue #2818](https://github.com/seedds/nxnative/issues/2818).
 

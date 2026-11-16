@@ -2416,7 +2416,10 @@ static int fps_present_cap(void) {
     if (dm_fps_state || fps_high()) return fps_step_cap();
     if (g_present_cap < 0) {
         const char *e=getenv("DM_FPS_TARGET");int t=e?atoi(e):DM_GAME_FPS_TARGET;
-        g_present_cap=t==30||t==60?t:t==120?60:0;   // 120 here: not this game's (fps_high), so it runs at 60
+        // Resident Evil's native 30 fps instructions already wait for their own frame deadline.
+        // Do not add a second 30 fps present wait on top of that engine wait.
+        if (!strcmp(DM_GAME_ID, "010050F00BC1A000") && (t == 0 || t == 30)) g_present_cap = 0;
+        else g_present_cap=t==30||t==60?t:t==120?60:0;   // 120 here: not this game's (fps_high), so it runs at 60
         if (g_present_cap && !dm_fps_lock_engine() && display_mode())
             LOG("[nvn] present cap %d fps (%s) applied by the present interval alone: display mode, and this main has no engine frame limit the host writes", g_present_cap, e ? "DM_FPS_TARGET" : "game profile fps_target");
         else if (g_present_cap && !dm_fps_lock_engine()) {

@@ -69,7 +69,8 @@ def file_reads(p, text):
     # names the code defines as preprocessor macros or enum constants (the generated profile header's DM_GAME_*, host constants, the JIT's DM_JIT_GATE) are
     # not switches, unless something also reads them from the environment (DM_GAME_ENV, which overrides the profile's macro of that name)
     macros = set(re.findall(r'#\s*define\s+(' + NAME + r')', text))
-    if p.endswith(C_FAMILY): macros |= set(re.findall(r'(?:^|[{,])\s*(' + NAME + r')\s*=\s*-?(?:0x)?[0-9A-Fa-f]+\s*[,}]', text, re.M))   # an enum entry
+    # an enum entry (the comma or brace after it a lookahead: consumed, it hid every second entry of a one-line enum from the next match)
+    if p.endswith(C_FAMILY): macros |= set(re.findall(r'(?:^|[{,])\s*(' + NAME + r')\s*=\s*-?(?:0x)?[0-9A-Fa-f]+(?=\s*[,}])', text, re.M))
     if '/tests/' in p:   # a test's own switches only; the names in its fixtures are data
         found = re.findall(READ, text)
     elif p.endswith('.sh'): found = re.findall(r'\$\{?(' + NAME + r')\b', text) + re.findall(r'["\'](' + NAME + r')["\']', text)

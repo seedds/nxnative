@@ -655,6 +655,14 @@ static void lib_code_range(const dm_aot_pack *p, uint64_t *lo, uint64_t *hi) {
     }
 }
 
+_Noreturn void dm_aot_pack_refused(const char *err) {
+    LOG("[RED] aot: %s", err);
+    LOG("[RED] aot: this host refuses the game's pack: pack the game again with this bundle (the launcher's Repack, or scripts/build_ipa_from_nsp.py); nxhost-run exits "
+        "with status %d (DM_AOT_REPACK)", DM_AOT_REPACK);
+    fflush(NULL);
+    _Exit(DM_AOT_REPACK);   // as die's abort(), no exit handlers: the start's other threads (the device, DM_PRELOAD's loading) are not torn down under them; the log is flushed
+}
+
 // The loader's bindings the pack assumed (include/nxaot/aot_module.h nxaot_bindings; dm/tools/aot/README.md "PLT stubs bound to their own module"): each slot must hold
 // base + target now that the module is relocated, or the pack's code (a stub's br taken as b to that function, and the summaries of calls through it) is wrong for this
 // pack set and host. NULL when they all hold (or the pack has none), else why not, in why. An NRO is relocated only when the game loads it, after its pack is mapped

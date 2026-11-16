@@ -38,7 +38,7 @@ NXAOT ='''#!{py}
 import os, sys
 a = sys.argv[1:]
 usage = ('usage: nxaot build <module.nro | name.aot.tsv> -o <object.o> [--shared <lib.so>] [--mode balanced|max]'
-         + ('' if os.environ.get('FAKE_NXAOT_OLD') else ' [--workers N] [--cache <dir>] [--target linux|windows] [--profile <file>] [--misses <file>]'))
+         + ('' if os.environ.get('FAKE_NXAOT_OLD') else ' [--workers N] [--cache <dir>] [--target linux|windows] [--profile <file>] [--misses <file>] [--bind <file>]'))
 if a[:1] != ['build'] or len(a) < 2: sys.stderr.write(usage + '\\n'); sys.exit(2)
 src, obj, so = a[1], a[a.index('-o') + 1], a[a.index('--shared') + 1]
 windows = '--target' in a and a[a.index('--target') + 1] == 'windows'
@@ -526,6 +526,50 @@ class Linux(Pack):
         self.pack(); self.assertEqual(made(launch), dominant)
         self.assertEqual((self.aot / '.keys/main.key').read_text(), key)
 
+    def test_loader_bindings(self):   # <NSP folder>/<id>-work/profile/<module>.bind.tsv (dm/host aot_profile.c): nxaot build --bind, its pairs in the key, the file beside the pack, take-overs left out
+        self.pack()
+        sha = (self.aot / 'main.aot.tsv').read_text().split('\n', 1)[0].split('\t')[3]
+        prof = self.wdir / 'profile'; prof.mkdir(parents=True)
+        head = f'# nxaot bindings: x\n# module main, build ID {BID}, image SHA-256 {sha}\n# <slot> <target> <symbol>\n'
+        (prof / 'main.bind.tsv').write_text(head + '0x10 0x200 nn_keep\n0x18 0x240 nn_taken\n')
+        tmp, beside = self.work / 'tmp/aot', self.aot / 'main.bind.tsv'
+        with mock.patch.object(nsp, 'host_takeovers', return_value=None):   # a host that cannot be asked: the file as recorded
+            self.pack()
+        self.assertEqual([c[-2:] for c in self.tools('nxaot')], [['--bind', str(prof / 'main.bind.tsv')]])
+        self.assertIn(f'main: loader bindings {prof / "main.bind.tsv"} (2 PLT slots bound to its own functions): its stubs are tail calls of them in its pack', self.said)
+        self.assertTrue(any('cannot be asked for its take-overs here' in m for m in self.said), self.said)
+        self.assertEqual(beside.read_text(), (prof / 'main.bind.tsv').read_text())   # beside the pack: what the launcher reads (launcher_model.h bindings_problem)
+        key = (self.aot / '.keys/main.key').read_text()
+        with mock.patch.object(nsp, 'host_takeovers', return_value={'nn_other'}):   # a host that takes over none of its names: the same pack
+            self.pack()
+        self.assertEqual(self.tools('nxaot'), [])
+        # a bundle update whose host takes nn_taken over (the file came from the older host): the pack is made again without that row, and the file beside it says so
+        with mock.patch.object(nsp, 'host_takeovers', return_value={'nn_taken', 'nn_other'}):
+            self.pack()
+        self.assertEqual([c[-2:] for c in self.tools('nxaot')], [['--bind', str(tmp / 'main.bind.tsv')]])
+        self.assertTrue(any(m.startswith(f'the loader bindings {prof / "main.bind.tsv"} bind 1 name the host takes over (nn_taken)') for m in self.said), self.said)
+        self.assertEqual(beside.read_text(), head + '0x10 0x200 nn_keep\n')
+        self.assertNotEqual((self.aot / '.keys/main.key').read_text(), key)
+        self.assertEqual([n for k, n, v in launch_rows(self.work / 'launch-linux.tsv') if k == 'pack'], ['balanced'])   # complete with the key packs_ready gives too
+        with mock.patch.object(nsp, 'host_takeovers', return_value={'nn_taken'}):
+            self.pack()
+        self.assertEqual(self.tools('nxaot'), [])   # the same pairs: reused
+        (prof / 'main.bind.tsv').write_text(head.replace(sha, '00' * 32) + '0x10 0x200 nn_keep\n')   # recorded on another image: packed without, the file beside it gone
+        self.pack()
+        self.assertEqual([c[-2:] for c in self.tools('nxaot')], [['--cache', str(self.wdir / 'aot-cache')]])
+        self.assertFalse(beside.exists())
+        # the host asked for real: nxhost-run --takeovers, its own log lines before the list, on this system only
+        host = self.tmp / 'hostbin/nxhost-run'; host.parent.mkdir()
+        host.write_text(f'#!{sys.executable}\nimport sys\nassert sys.argv[1:] == ["--takeovers"]\nprint("[dm] a constructor line")\nprint("# nxhost-run take-overs: 2 names")\n'
+                        'print("nn_a")\nprint("nn_b")\n')
+        host.chmod(0o755)
+        if sys.platform.startswith('linux'):
+            self.assertEqual(nsp.host_takeovers(host, 'linux'), {'nn_a', 'nn_b'})
+        self.assertIsNone(nsp.host_takeovers(host, 'windows' if os.name != 'nt' else 'linux'))   # another system's host is not run
+        self.assertIsNone(nsp.host_takeovers(self.tmp / 'hostbin/none', 'linux'))
+        host.write_text(f'#!{sys.executable}\nprint("usage: nxhost-run ...")\n')   # an older host: no list
+        self.assertIsNone(nsp.host_takeovers(host, 'linux'))
+
     def test_removed_module_and_nros_leave_no_stale_input(self):
         self.pack()
         (self.game / 'RomFS/.nrr/game.nrr').unlink()   # an update without NRRs
@@ -539,7 +583,7 @@ class Linux(Pack):
         for c in self.tools('nxaot'): self.assertNotIn('--cache', c); self.assertNotIn('--workers', c)
         self.assertEqual(made(self.work / 'launch-linux.tsv'), [('made', 'profile', 'unused'), ('made', 'misses', 'unused'), ('made', 'targets', 'unused')])   # a repack with it would take neither
         self.assertIn('this nxaot has no --cache option: every function is compiled again on each pack', self.said)
-        self.assertEqual(nsp.nxaot_options(self.nxaot, dict(os.environ)), {'--cache', '--workers', '--target', '--profile', '--misses'})
+        self.assertEqual(nsp.nxaot_options(self.nxaot, dict(os.environ)), {'--cache', '--workers', '--target', '--profile', '--misses', '--bind'})
         (self.aot / 'main.aot.so').unlink(); self.pack('linux', '--aot-workers', '3')
         self.assertEqual(self.tools('nxaot')[0][-4:], ['--cache', str(self.wdir / 'aot-cache'), '--workers', '3'])
 

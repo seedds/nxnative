@@ -1149,7 +1149,12 @@ once the module is relocated (`aot_arena.c` `bindings_check`): a slot bound othe
 what the loader bound it to (another pack set, a host that takes the name over now), which stops the start as a pack of another image does;
 with `DM_AOT_PROFILE` that session's bindings file is written first, so the next pack takes the current ones. An NRO's pack with bindings is
 refused. The packer passes `<NSP folder>/<id>-work/profile/<module>.bind.tsv` when there is one for the image (`--bind`, the pairs in the pack's
-key).
+key), less the rows whose name the host it packs for takes over (`nxhost-run --takeovers`, asked when that host runs on the packing system:
+a file recorded by an older host binds them, and a pack that assumed them would be refused), and copies what it passed beside the pack
+(`aot_v<version>/<module>.bind.tsv`). A refused pack ends the run with status 8 (`DM_AOT_REPACK`, as every
+pack-load refusal a repack cures: `aot.h` `dm_aot_pack_refused`); the launcher explains that status after Play and offers the repack, and it
+names such a pack before the start without loading a module: the bound names in the file beside the pack against the names its host takes over
+(`nxhost-run --takeovers`; dm/launcher `launcher_model.h` `bindings_problem`).
 
 **Measured** on the three modules, the bindings the host's rule gives (written for the census by a script that applies `bind_sym`'s order to
 the three modules' symbol tables and the host's forced names, the names of `HLE_FORCE` and `HLE_FORCE_BIG` in dm/host and dm/gfx; a game

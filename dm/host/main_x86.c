@@ -12,7 +12,9 @@
 //     the SDL3 window (front_sdl.c), DM_AUDIO the sound output, DM_ROMFS / DM_SAVE / DM_TEMP the game's files, DM_WATCH the watchdog, and so on.
 //   The engine: the JIT fallback is in the program when it was built with NXHOST_JIT (CMake option); without it guest code that has no compiled entry stops the process with
 //   status 3 and a [RED] line naming the address. The exit status is the run's (aot.h: 0 the process ended, 1 a trap, 3 the JIT needed, 4 a fault, 6 guest code returned to the
-//   host, 7 guest threads that did not stop).
+//   host, 7 guest threads that did not stop), or 8 when the program refuses a pack at the start for a reason a repack cures (aot.h DM_AOT_REPACK: another image, ABI, host's
+//   PLT bindings, nxaot's imports, manifest's gates; the launcher offers the repack for it).
+// nxhost-run --takeovers prints the names of the forced take-overs (HLE_FORCE) and nothing else: what the launcher checks a pack's PLT bindings against before a start.
 // Switches of this program alone: DM_AOT_RAW=1 runs the first module's own entry (its pack's entry, x0 = 0, x1 = the main thread's handle, as a homebrew NRO's _start is entered)
 // instead of the SDK start: for a module without the SDK (t_host_program's synthetic module, homebrew). It is a switch and not a guess from the missing SDK symbols, because a game's
 // module list that lacks its sdk module would otherwise run main's rtld entry as homebrew: without it a module set with no nnMain stops with a [RED] line that names the switch.
@@ -144,7 +146,9 @@ static void host_preload(int argc, char **argv) {
     if (argc < 2) {
         fprintf(stderr, "usage: nxhost-run <dir> [module...] [-- game arguments...]\n  <dir>: the game's aot_<version> folder (<name>.aot.tsv, <name>.image.bin, <name>%s per module)\n"
                 "  before <dir>: --profile <file> (the game profile file dm/games/game.py runtime writes; DM_GAME_PROFILE=<file> without the option) or --game <title ID> (a profile\n"
-                "  built into the program); with neither, the profile the program was configured with (cmake -DGAME)\n", DM_AOT_PACK_SUFFIX);
+                "  built into the program); with neither, the profile the program was configured with (cmake -DGAME)\n"
+                "  nxhost-run --takeovers: the names of this host's forced take-overs, one per line (what the launcher checks a pack's PLT bindings against)\n"
+                "  exit status %d: a pack this host refuses, which packing the game again cures (the reason in the [RED] line before)\n", DM_AOT_PACK_SUFFIX, DM_AOT_REPACK);
         exit(DM_AOT_USAGE);
     }
     if (getenv("DM_FIXED_TIME")) setenv("TZ", "UTC", 1);   // deterministic comparison: the calendar in UTC (main.c)
@@ -207,6 +211,8 @@ void dm_host_preload_start(int argc, char **argv) {
     if (pthread_create(&g_pre.th, &a, preload_thread, NULL)) die("dm_host_preload_start: cannot start the thread");
 }
 int main(int argc, char **argv) {
+    // --takeovers: the forced take-overs' names and nothing else (no module, no game profile): the launcher asks the host it would start (dm/launcher host_takeovers)
+    if (argc == 2 && !strcmp(argv[1], "--takeovers")) { void loader_print_takeovers(FILE *f); loader_print_takeovers(stdout); fflush(stdout); return 0; }
     // The game profile first, before anything reads a DM_GAME_* constant (the loading thread of DM_PRELOAD too): --profile / --game are taken off the arguments here
     if (dm_game_profile_select(&argc, &argv)) return DM_AOT_USAGE;
     const char *pso = getenv("DM_PSO_PREBUILD");

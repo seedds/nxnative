@@ -28,6 +28,7 @@ struct dm_guest_state *dm_aot_self_state(void);
 uint64_t dm_guest_call(struct dm_guest_state *st, uint64_t addr, int nargs, ...);
 // What an import of a module the engine mapped binds to: a host function's guest-visible slot, an unimplemented import's stub slot (aot_arena.c, design 2.4)
 uint64_t dm_aot_bind(const module_t *m, const char *name, uint64_t v);
+_Noreturn void dm_aot_pack_refused(const char *err);   // aot.h: a pack a repack cures, refused at the start: its [RED] lines and the exit status DM_AOT_REPACK
 #if defined(_WIN32)   // aot.h's DM_AOT_PACK_SUFFIX (this file declares what it needs of the engine instead of including aot.h: its unit test t_nro.c links no engine)
 #define AOT_PACK_SUFFIX ".aot.dll"
 #else
@@ -188,6 +189,16 @@ static void *force_lookup(const char *name) {
     }
     return NULL;
 }
+#if !DM_NATIVE_EXEC
+// nxhost-run --takeovers (main_x86.c): the names of the forced take-over list, one per line after a '#' line, in the table's order: what the launcher (dm/launcher
+// launcher_model.cpp host_takeovers) compares with the PLT bindings a pack assumed (its <module>.bind.tsv), to tell before a start that this host would refuse it
+void loader_print_takeovers(FILE *f) {
+    size_t sz; const hle_force_ent *t = (const hle_force_ent *)plat_table_swforce(&sz);
+    const unsigned n = t ? (unsigned)(sz / sizeof *t) : 0;
+    fprintf(f, "# nxhost-run take-overs: %u names this host binds to its own functions, whatever a module defines (loader.c bind_sym, HLE_FORCE)\n", n);
+    for (unsigned i = 0; i < n; i++) fprintf(f, "%s\n", t[i].name);
+}
+#endif
 // Generic host: the list serves several games, so entries a game does not reference are only noted; with DM_FORCE_STRICT=1 it still fails loudly (for checking a mistyped list)
 static void force_check(void) {
     unsigned unused = 0; int strict = getenv("DM_FORCE_STRICT") != NULL;
@@ -1028,14 +1039,14 @@ void load_modules(const char *dir, const char **names, int n) {
     if (nros) aot_read_nros(dir, nros);   // mapped when the game loads them (hle_ro.c, loader_nro_map)
     for (int i = 0; i < n; i++) {
         module_t *m = &g_mod[i];
-        if (dm_aot_load_module_pack(m, dir, man[i].sha, man[i].image_size, man[i].text_end, man[i].bss, err, sizeof err)) die("[RED] aot: %s", err);
+        if (dm_aot_load_module_pack(m, dir, man[i].sha, man[i].image_size, man[i].text_end, man[i].bss, err, sizeof err)) dm_aot_pack_refused(err);
         // The manifest's gates against the sites the pack's code calls (design 1.1): a pack of another manifest is refused; a row it does not serve is a [RED] line
         dm_aot_gate_row *rows = calloc((size_t)(man[i].nobs + man[i].nedge) + 1, sizeof *rows);
         if (!rows) die("aot: no memory for %s's gate rows", m->name);
         int nrows = 0, unserved = 0;
         for (int k = 0; k < man[i].nobs; k++) rows[nrows++] = (dm_aot_gate_row){man[i].obs[k].off, man[i].obs[k].num | man[i].obs[k].param << 8, AOT_GATE_OBS};
         for (int k = 0; k < man[i].nedge; k++) rows[nrows++] = (dm_aot_gate_row){man[i].edge[k].edge, man[i].edge[k].head, AOT_GATE_SPIN};
-        if (dm_aot_pack_check_gates(m, rows, nrows, &unserved, err, sizeof err)) die("[RED] aot: %s", err);
+        if (dm_aot_pack_check_gates(m, rows, nrows, &unserved, err, sizeof err)) dm_aot_pack_refused(err);
         dm_aot_gate_rows(m, rows, nrows);   // the JIT fallback's gate sites: every row, so it serves those no compiled code holds when it reaches them
         if (nrows) LOG("aot: %s: %d gates (%d observation gates, %d spin wait back-edges) called by its pack, %d not", m->name, nrows - unserved, man[i].nobs, man[i].nedge, unserved);
         free(rows);

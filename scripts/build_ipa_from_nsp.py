@@ -2344,39 +2344,60 @@ def aot_misses(folder, name, sha, quiet=False):
 BIND_ROW = re.compile(r'^(?:0[xX])?([0-9a-fA-F]+)[ \t]+(?:0[xX])?([0-9a-fA-F]+)(?:[ \t]+\S+)?$')   # a row of the loader's bindings: <slot> <target> <symbol> (module offsets)
 
 
-def aot_bindings(folder, name, sha, quiet=False):
+def aot_bindings(folder, name, sha, quiet=False, takeovers=None):
     """The loader's bindings of module name's PLT slots to its own functions (nxaot build --bind; dm/tools/aot/README.md, "PLT stubs bound to their own module"):
     <folder>/<name>.bind.tsv, which nxhost-run writes beside the sample profile with DM_AOT_PROFILE=<folder> (dm/host/aot.h, "The loader's bindings"), when it is there, parses
-    and names this image in its header (as aot_misses checks the misses). Returns (path, the (slot, target) pairs, sorted) or (None, ()): the pairs are what the pack's key takes"""
+    and names this image in its header (as aot_misses checks the misses). A row whose symbol the host the pack is for takes over (takeovers, host_takeovers) is not that host's
+    binding (it binds the name to its own function: the file came from a host with fewer take-overs, before a bundle update), so it is left out: a pack that assumed it would be
+    refused at the start (exit status 8). Returns (path, the (slot, target) pairs, sorted, the file's text without those rows or None when none was left out) or (None, (), None):
+    the pairs are what the pack's key takes"""
     p = folder / f'{name}.bind.tsv' if folder else None
-    if not p or not p.is_file(): return None, ()
-    rows, image = set(), None
+    if not p or not p.is_file(): return None, (), None
+    rows, image, kept, dropped = set(), None, [], []
     try:
         for line in p.read_text().splitlines():
             m = PROFILE_HEAD.match(line)
             if m: image = m.group(3)
-            if not line.strip() or line.lstrip().startswith('#'): continue
+            if not line.strip() or line.lstrip().startswith('#'): kept.append(line); continue
             r = BIND_ROW.match(line.strip())
             if not r: raise ValueError(line)
-            rows.add((int(r.group(1), 16), int(r.group(2), 16)))
+            sym = line.split()[2] if len(line.split()) > 2 else None
+            if takeovers and sym in takeovers: dropped.append(sym); continue
+            kept.append(line); rows.add((int(r.group(1), 16), int(r.group(2), 16)))
     except (OSError, UnicodeDecodeError, ValueError) as e:
         if not quiet: say(f'[RED] the loader bindings {p} do not parse ({e}): {name} is packed without them')
-        return None, ()
+        return None, (), None
     if not image or (sha and image != sha.lower()):
         if not quiet: say(f'the loader bindings {p} were recorded on another image of {name} or name none: not used')
-        return None, ()
-    return p, tuple(sorted(rows))
+        return None, (), None
+    if dropped and not quiet:
+        say(f'the loader bindings {p} bind {len(dropped)} name{"s" if len(dropped) > 1 else ""} the host takes over ({", ".join(sorted(dropped)[:3])}{", ..." if len(dropped) > 3 else ""}): '
+            f'recorded by a host with fewer take-overs, so {name}\'s pack is made without {"them" if len(dropped) > 1 else "it"}')
+    return p, tuple(sorted(rows)), '\n'.join(kept) + '\n' if dropped else None
 
 
-def pack_bindings(opts, aot, mods, folder, mode=None):
-    """The loader's bindings each module is packed with ({name: (path, pairs)}, aot_bindings): only with an nxaot that has --bind, and not for NROs (the host refuses bindings in an
-    NRO's pack: it binds only when the game loads it). A discovery input, as the misses: --no-profile leaves them in use"""
+def host_takeovers(host, platform):
+    """The names the host a pack is for binds to its own functions whatever a module defines (nxhost-run --takeovers: dm/host loader.c, HLE_FORCE), which aot_bindings leaves out of
+    the recorded bindings. None when that host cannot be asked here: not built yet, a program of another system, or a host older than --takeovers (the bindings are then taken as
+    recorded; a pack the host refuses ends its start with status 8, and the launcher offers the repack)"""
+    if not host or not Path(host).is_file() or (platform == 'windows') != (os.name == 'nt') or (platform == 'linux' and not sys.platform.startswith('linux')): return None
+    try: r = subprocess.run([str(host), '--takeovers'], capture_output=True, text=True, timeout=120)
+    except (OSError, subprocess.SubprocessError): return None
+    text, head = r.stdout, '# nxhost-run take-overs'
+    at = text.find(head)
+    if r.returncode or at < 0 or (at and text[at - 1] != '\n'): return None
+    return {l.strip() for l in text[at:].splitlines() if l.strip() and not l.startswith(('#', '['))}
+
+
+def pack_bindings(opts, aot, mods, folder, mode=None, takeovers=None):
+    """The loader's bindings each module is packed with ({name: (path, pairs, the text without the rows of takeovers or None)}, aot_bindings): only with an nxaot that has --bind, and
+    not for NROs (the host refuses bindings in an NRO's pack: it binds only when the game loads it). A discovery input, as the misses: --no-profile leaves them in use"""
     bind = {}
     if '--bind' not in opts: return bind
     for n in mods:
-        p, pairs = aot_bindings(folder, n, manifest_sha(aot, n), quiet=mode is None)
+        p, pairs, text = aot_bindings(folder, n, manifest_sha(aot, n), quiet=mode is None, takeovers=takeovers)
         if not p: continue
-        bind[n] = (p, pairs)
+        bind[n] = (p, pairs, text)
         if mode: say(f'{n}: loader bindings {p} ({len(pairs)} PLT slots bound to its own functions): its stubs are tail calls of them in its pack')
     return bind
 
@@ -2591,11 +2612,11 @@ def pack_keys(dest, win):   # a folder's pack keys: .keys for the Linux packs, .
     return dest / ('.keys-windows' if win else '.keys')
 
 
-def packs_ready(nxaot, opts, aot, nro_dir, mods, platform, profiles=None, misses=None):
+def packs_ready(nxaot, opts, aot, nro_dir, mods, platform, profiles=None, misses=None, takeovers=None):
     """The pack modes whose folder holds every pack a pack of now would build, each with its key, and the recompiler's input beside them: the modes the launch file offers"""
     win, suffix, nro_rows = platform == 'windows', PACK_SUFFIXES[platform], nro_pack_rows(aot)
     prof, miss, ready = pack_profiles(opts, aot, mods, nro_rows, profiles), pack_misses(opts, aot, mods, nro_rows, misses), []
-    targ, bind = pack_targets(aot, mods, nro_rows, profiles, prof), pack_bindings(opts, aot, mods, misses)
+    targ, bind = pack_targets(aot, mods, nro_rows, profiles, prof), pack_bindings(opts, aot, mods, misses, takeovers=takeovers)
     for mode in PACK_MODES:
         dest, jobs = pack_dir(aot, mode), pack_jobs(nxaot, mode, aot, nro_dir, mods, nro_rows, prof, win, miss, targ, bind)
         if all((dest / f'{n}{suffix}').is_file() and reused(pack_keys(dest, win) / f'{n}.key', k) is not None for n, _, k in jobs) and \
@@ -2604,7 +2625,7 @@ def packs_ready(nxaot, opts, aot, nro_dir, mods, platform, profiles=None, misses
     return ready
 
 
-def aot_packs(nxaot, opts, mode, workers, cache, aot, nro_dir, mods, env, logs, tmp, platform='linux', profiles=None, misses=None):
+def aot_packs(nxaot, opts, mode, workers, cache, aot, nro_dir, mods, env, logs, tmp, platform='linux', profiles=None, misses=None, takeovers=None):
     """The stage "AOT packs" (PLATFORM 'linux' / 'windows'): `nxaot build` of every module's manifest (<name>.aot.tsv, which names its image) and of every NRO file nro.tsv lists (nro_<version>/<name>.nro,
     the bytes whose SHA-256 its row gives: the host maps an NRO from the game's own image) into <name>.aot.so in the mode's folder (pack_dir: aot itself for balanced, aot/max/ for max, which
     gets links to the recompiler's input; loader.c, "The game-module path"), on Windows with --target windows into <name>.aot.dll (a DLL; dm/tools/aot/README.md, "Windows packs"), one after
@@ -2616,7 +2637,9 @@ def aot_packs(nxaot, opts, mode, workers, cache, aot, nro_dir, mods, env, logs, 
     misses (the same folder's <name>.misses.tsv, aot_misses; used with --no-profile too) and an nxaot that has --misses, its pack is built with --misses beside them: the addresses the game ran
     in the JIT fallback become entries and resume points, their addresses and reasons part of the pack's key. nxaot reads the module's known targets (<name>.targets.tsv, aot_targets)
     beside its profile by itself: their (site, dominant target) pairs are part of the pack's key (pack_targets, pack_jobs), so new targets make the pack again and more binds at the
-    same targets do not; a targets file the packer does not take is kept from nxaot (NXAOT_PROFILE_TARGETS=0 for that module). Returns the number of packs built"""
+    same targets do not; a targets file the packer does not take is kept from nxaot (NXAOT_PROFILE_TARGETS=0 for that module). The loader's bindings (the same folder's <name>.bind.tsv,
+    pack_bindings) with an nxaot that has --bind, less the names the host takes over (takeovers), their pairs in the key and the file the pack took beside it (<name>.bind.tsv, which
+    the launcher reads against its host's take-overs). Returns the number of packs built"""
     win = platform == 'windows'
     suffix = PACK_SUFFIXES[platform]
     if win and '--target' not in opts:
@@ -2628,7 +2651,7 @@ def aot_packs(nxaot, opts, mode, workers, cache, aot, nro_dir, mods, env, logs, 
     prof = pack_profiles(opts, aot, mods, nro_rows, profiles, mode)
     miss = pack_misses(opts, aot, mods, nro_rows, misses, mode)
     targ = pack_targets(aot, mods, nro_rows, profiles, prof)
-    bind = pack_bindings(opts, aot, mods, misses, mode)
+    bind = pack_bindings(opts, aot, mods, misses, mode, takeovers)
     jobs = pack_jobs(nxaot, mode, aot, nro_dir, mods, nro_rows, prof, win, miss, targ, bind)
     keys, names = pack_keys(dest, win), {n for n, _, _ in jobs}
     for p in sorted(dest.glob('*' + suffix)):
@@ -2648,10 +2671,15 @@ def aot_packs(nxaot, opts, mode, workers, cache, aot, nro_dir, mods, env, logs, 
         obj, so, log = tmp / f'{n}{".obj" if win else ".o"}', tmp / f'{n}{suffix}', logs / f'nxaot_{n}.log'
         # nxaot reads <name>.targets.tsv beside the profile by itself: one the packer did not take (another image, a row that does not parse) is kept from it
         refused = n in prof and n not in targ and (prof[n].parent / f'{n}.targets.tsv').is_file()
+        if n in bind and bind[n][2] is not None:   # the recorded bindings less the names the host takes over (aot_bindings)
+            (tmp / f'{n}.bind.tsv').write_text(bind[n][2]); bind[n] = (tmp / f'{n}.bind.tsv', *bind[n][1:])
         run([nxaot, 'build', src, '-o', obj, '--shared', so, '--mode', mode] + (['--target', 'windows'] if win else []) + extra + (['--profile', prof[n]] if n in prof else [])
             + (['--misses', miss[n][0]] if n in miss else []) + (['--bind', bind[n][0]] if n in bind else []), log, env=dict(os.environ if env is None else env, NXAOT_PROFILE_TARGETS='0') if refused else env)
         if not so.is_file(): raise BuildError(f'nxaot build wrote no {so.name} (output: {log})')
         os.replace(so, dest / so.name); rmtree(obj)
+        # the bindings the pack took, beside it (nxlauncher reads their names against its host's take-overs before a start: dm/launcher launcher_model.h, bindings_problem)
+        if n in bind: shutil.copyfile(bind[n][0], dest / f'{n}.bind.tsv')
+        else: rmtree(dest / f'{n}.bind.tsv')
         (keys / f'{n}.key').write_text(f'{k}\n')
     PROG.end(f'{what}: {len(todo)} packed ({mode}) in {hms(time.time() - t0)}')
     return len(todo)
@@ -3067,6 +3095,10 @@ def main(args=None):
         host, bundled = port_host(repo, platform)
         say(f'host program: {host} (' + ('the bundle\'s' if bundled else 'this checkout\'s build tree') + ('' if host.is_file() else
             f'; not built yet: cmake --build {host.parent.relative_to(repo)} --target nxhost-run, docker/README.md') + ')')
+        # the names it takes over, which the loader bindings a pack takes must not bind (aot_bindings): asked only of an nxaot with --bind
+        takeovers = host_takeovers(host, platform) if '--bind' in nxaot_opts else None
+        if '--bind' in nxaot_opts and takeovers is None:
+            say(f'the host {host} cannot be asked for its take-overs here (not built, another system\'s program, or older than nxhost-run --takeovers): the loader bindings are taken as recorded')
     app, fam = scan_nsps(nsp_dir, lambda p: title_by_extractor(p, keys, repo, env))
     fam = decompress_nsz(nsp_dir, app, fam, keys, env)
     force =args.provisional or PROVISIONAL   # a provisional profile even when dm/games has one (testing the guesses)
@@ -3271,13 +3303,13 @@ def main(args=None):
             return port_launch_file(platform, repo, work, wdir, aot, game, ios, aoc, gfx, lang, g, title, app_version, pkg_ver, modes, env_file, settings, repack, made, host, gprof,
                                     font)
         # the mode about to be packed is not offered while its packs are made (an interrupted pack leaves a mix); the other mode's complete packs stay offered
-        launch = launch_file([m for m in packs_ready(nxaot, nxaot_opts, aot, nro_dir, mods, platform, profiles, misses) if m != pack_mode])
+        launch = launch_file([m for m in packs_ready(nxaot, nxaot_opts, aot, nro_dir, mods, platform, profiles, misses, takeovers) if m != pack_mode])
         script = port_run_script(platform, repo, work, wdir, g, title, launch, host if bundled else None)
         nros = [l.split()[0] for l in ((aot / 'nro.tsv').read_text().splitlines() if (aot / 'nro.tsv').is_file() else []) if l.strip() and not l.startswith('#') and l.split()[0] != 'refused']
         say(f'recompiler\'s input: {aot} ({", ".join(mods)}' + (f'; nro.tsv lists {len(nros)} NRO{"" if len(nros) == 1 else "s"}' if nros else '') + f'); shaders: {ios}; run script: {script}; '
             f'launch file: {launch}; game profile file: {gprof}')
-        aot_packs(nxaot, nxaot_opts, pack_mode, aot_workers, wdir / 'aot-cache', aot, nro_dir, mods, env, logs, work / 'tmp/aot', platform, profiles, misses)
-        ready = sorted(packs_ready(nxaot, nxaot_opts, aot, nro_dir, mods, platform, profiles, misses), key=lambda m: m != pack_mode)   # the mode just packed first: run.sh's default
+        aot_packs(nxaot, nxaot_opts, pack_mode, aot_workers, wdir / 'aot-cache', aot, nro_dir, mods, env, logs, work / 'tmp/aot', platform, profiles, misses, takeovers)
+        ready = sorted(packs_ready(nxaot, nxaot_opts, aot, nro_dir, mods, platform, profiles, misses, takeovers), key=lambda m: m != pack_mode)   # the mode just packed first: run.sh's default
         launch_file(ready)
         rmtree(work / 'tmp')
         say(f'done: the {platform} pack of {app_name or g.id} ({pkg_ver}; pack modes: {", ".join(ready) or "none"}) runs with {script} or in the launcher nxlauncher (dm/launcher; '

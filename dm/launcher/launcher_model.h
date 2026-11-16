@@ -121,11 +121,28 @@ struct Game {
     LaunchFile launch;
     std::vector<Setting> settings;
     std::string problem;            // why it cannot start ('' when it can)
+    bool repack_cures = false;      // the problem is a pack this host would refuse, which packing the game again cures (bindings_problem): the window offers the repack
     std::string settings_error;     // why its settings list cannot be shown ('' when it can, or when the pack has none)
     std::vector<std::string> modes() const;   // the pack modes with complete packs, the launch file's order
 };
+// ---- A pack the host refuses (dm/host/aot.h DM_AOT_REPACK) ----
+// nxhost-run ends with kRepackStatus when it refuses a pack of the game's module set at the start for a reason that packing the game again with this bundle cures (aot.h
+// dm_aot_pack_refused: the pack missing or no library it loads, no descriptor, another ABI, another image, another host's PLT bindings, another nxaot's imports, another
+// manifest's gates), after a [RED] line with the reason. After Play the launcher says so and offers the repack (exit_problem). One of them can be told before a start without
+// loading a module: a pack built with the loader's bindings of its PLT slots to its own module (nxaot build --bind) has their names beside it, <pack folder>/<module>.bind.tsv
+// (the packer copies the file it gave nxaot there: `0x<slot> 0x<target> <symbol>` rows), and a name this host takes over (its HLE_FORCE list, nxhost-run --takeovers) binds
+// elsewhere, so the host would refuse that pack (bindings_problem). The others need the pack's descriptor, which the launcher does not load: they show after Play only
+inline constexpr int kRepackStatus = 8;
+std::string exit_problem(int status);   // what a status of nxhost-run means for the player, '' for none the launcher explains
+// The names nxhost-run --takeovers prints (its '#' line first), cached per program; an empty set with *err when the program does not answer so (an older host)
+std::set<std::string> host_takeovers(const std::string &host, std::string *err = nullptr);
+// The problem of the packs in folder against takeovers: per <module>.bind.tsv beside its pack, the bound names this host takes over; '' when there is none
+std::string bindings_problem(const std::string &folder, const std::set<std::string> &takeovers);
+bool has_bindings(const std::string &folder);   // a <module>.bind.tsv beside its pack in folder (only then is the host asked)
+
 // The games under dir: <dir>/<x>_build/ and <dir>/<y>/<x>_build/ with a launch file of this platform, sorted by title then folder. A game whose host find_host finds nowhere has that
-// as its problem (bundle and env as find_host takes them), else one whose game profile's file is not there (game_profile_problem)
+// as its problem (bundle and env as find_host takes them), else one whose game profile's file is not there (game_profile_problem), else one a complete pack mode of which the
+// host would refuse for its bindings (bindings_problem: the mode named, repack_cures)
 std::vector<Game> find_games(const std::string &dir, const std::string &platform = kPlatform, const std::string &bundle = bundle_dir(), const Env &env = ProcessEnv());
 const Game *find_game(const std::vector<Game> &games, const std::string &id, std::string *err);   // by title ID (any case) or folder; err when none or several
 

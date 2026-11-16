@@ -4,8 +4,9 @@
 // whether the recorded profile, JIT misses and known targets make a better pack possible against what the launch file says the packs took, the repack's command), the game profile's
 // file (--profile with the game_profile row's file; the row missing or its file gone: the problem), a moved bundle (the host bin/nxhost-run, packer
 // and nxaot taken from the launcher's folder when the launch file's are gone; NXHOST over both; the problem when none is there), the launcher's own settings,
-// DM_LAUNCHER and "Show this window at launch", and a child process with its environment,
-// working folder, log and exit status (this program, which acts as nxhost-run and as the packer with NXL_FAKE_HOST=1).
+// DM_LAUNCHER and "Show this window at launch", a child process with its environment, working folder, log and exit status (this program, which acts as nxhost-run and as
+// the packer with NXL_FAKE_HOST=1), and a pack the host refuses: nxhost-run's status 8 explained, and a pack whose PLT bindings name a symbol the host takes over
+// (its --takeovers list; the stand-in prints NXL_FAKE_TAKEOVERS) named before the start, in the Problem column and Play's error, with the repack.
 #include "launcher_model.h"
 #include "fake_games.h"
 #include <algorithm>
@@ -35,6 +36,13 @@ static int fake_host(int argc, char **argv) {   // nxhost-run's stand-in: what i
 #if defined(_WIN32)
     _setmode(_fileno(stdout), _O_BINARY);   // "\n" as written, as on Linux: the launcher's log is read back byte for byte
 #endif
+    if (argc == 2 && !std::strcmp(argv[1], "--takeovers")) {   // nxhost-run --takeovers: its '#' line, then the names (NXL_FAKE_TAKEOVERS, separated by commas)
+        std::printf("# nxhost-run take-overs: the launcher tests' stand-in\n");
+        const char *t = std::getenv("NXL_FAKE_TAKEOVERS");
+        std::string s = t ? t : "";
+        for (size_t at = 0; at < s.size();) { size_t c = s.find(',', at); if (c == std::string::npos) c = s.size(); if (c > at) std::printf("%s\n", s.substr(at, c - at).c_str()); at = c + 1; }
+        return 0;
+    }
     std::error_code ec;
     std::printf("fake host: cwd %s\n", fs::current_path(ec).u8string().c_str());
     std::string args;
@@ -689,6 +697,46 @@ static void child(const fs::path &root) {
     CHECK(!spawn(c, &ch, &err) && err.find("cannot start") != std::string::npos, "a program that is not there: " + err);
 }
 
+static void set_env(const char *k, const char *v) {   // for the children this process starts (they inherit it)
+#if defined(_WIN32)
+    _putenv_s(k, v ? v : "");
+#else
+    if (v) setenv(k, v, 1); else unsetenv(k);
+#endif
+}
+
+// A pack the host refuses: nxhost-run's status 8 after Play, and before it a pack whose bindings name a take-over of the host
+static void refused_packs(const fake::Folder &f, const fs::path &root) {
+    CHECK(exit_problem(kRepackStatus).find("Repack") != std::string::npos && exit_problem(kRepackStatus).find("status 8") != std::string::npos,
+          "status 8: the packs were refused, Repack makes them again: " + exit_problem(kRepackStatus));
+    CHECK(exit_problem(0).empty() && exit_problem(3).empty() && exit_problem(134).empty(), "other statuses: nothing the launcher explains");
+    const fs::path aot = f.a / "aot_v131072";
+    // bindings_problem over a pack folder and a list of take-overs
+    fake::write(aot / "main.bind.tsv", "# nxaot bindings: x\n# module main, build ID none, image SHA-256 " + std::string(64, '1') + "\n0x10 0x200 nn_keep\n0x18 0x240 nn_taken\n");
+    fake::write(aot / "gone.bind.tsv", "0x10 0x200 nn_taken\n");   // no pack beside it: not read
+    CHECK(has_bindings(fake::str(aot)), "a bindings file beside its pack");
+    CHECK(bindings_problem(fake::str(aot), {"nn_other"}).empty(), "no bound name taken over: no problem");
+    const std::string why = bindings_problem(fake::str(aot), {"nn_taken", "nn_other"});
+    CHECK(why.find("the main pack assumed 1 PLT binding") != std::string::npos && why.find("nn_taken") != std::string::npos && why.find("Repack") != std::string::npos,
+          "a bound name the host takes over: the module, the name and the repack: " + why);
+    CHECK(!has_bindings(fake::str(f.b / "aot_v0")) && bindings_problem(fake::str(f.b / "aot_v0"), {"nn_taken"}).empty(), "a folder without bindings files: none");
+    // The host asked (the stand-in, NXL_FAKE_TAKEOVERS): the Problem column and Play's error
+    set_env("NXL_FAKE_HOST", "1"); set_env("NXL_FAKE_TAKEOVERS", "nn_x,nn_taken");
+    std::string err;
+    auto names = host_takeovers(self_path(), &err);
+    CHECK(names.size() == 2 && names.count("nn_taken") && err.empty(), "nxhost-run --takeovers read: " + err);
+    auto g = find_games(fake::str(f.games));
+    CHECK(g[0].problem.rfind("the balanced packs: the main pack assumed 1 PLT binding", 0) == 0 && g[0].repack_cures, "the Problem column names the pack and offers the repack: " + g[0].problem);
+    CHECK(compose(g[0], "balanced", MapEnv()).error == g[0].problem, "Play's error says the same");
+    CHECK(g[1].problem.empty() && !g[1].repack_cures, "a game without bindings: no problem, the host not asked");
+    set_env("NXL_FAKE_HOST", nullptr); set_env("NXL_FAKE_TAKEOVERS", nullptr);
+    fake::write(root / "not_a_host.txt", "text\n");
+    names = host_takeovers(fake::str(root / "not_a_host.txt"), &err);
+    CHECK(names.empty() && !err.empty(), "a program that does not answer --takeovers (an older host): no list, so no problem told before the start: " + err);
+    fs::remove(aot / "main.bind.tsv"); fs::remove(aot / "gone.bind.tsv");
+    CHECK(find_games(fake::str(f.games))[0].problem.empty(), "the bindings file gone: no problem");
+}
+
 int main(int argc, char **argv) {
     if (std::getenv("NXL_FAKE_HOST")) return fake_host(argc, argv);
     fs::path root = fake::tmp_root("t_launcher_model");
@@ -706,6 +754,7 @@ int main(int argc, char **argv) {
     config(root);
     start(f);
     child(root);
+    refused_packs(f, root);
     std::printf("t_launcher_model: %d checks, %d failed\n", checks, fails);
     return fails ? 1 : 0;
 }

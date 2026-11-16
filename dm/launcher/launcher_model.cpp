@@ -307,11 +307,83 @@ static void add_game(const fs::path &build, const std::string &platform, const s
     if (g.launch.packs.empty()) g.problem = "no pack in " + g.launch_path + ": pack the game with scripts/build_ipa_from_nsp.py --platform " + platform;
     else if (g.modes().empty()) g.problem = "the packs in " + g.launch.packs[0].folder + " are incomplete: pack the game again";
     else {
-        g.problem = find_host(g.launch, env, bundle).problem;   // shown only when neither the row's host nor the bundle's is there
+        const Found host = find_host(g.launch, env, bundle);
+        g.problem = host.problem;   // shown only when neither the row's host nor the bundle's is there
         if (g.problem.empty()) g.problem = game_profile_problem(g.launch);
+        for (const auto &p : g.launch.packs) {   // a complete pack mode the host would refuse for its bindings (asked only when a pack took bindings)
+            if (!g.problem.empty() || !p.complete || !has_bindings(p.folder)) continue;
+            std::string why = bindings_problem(p.folder, host_takeovers(host.path));
+            if (!why.empty()) { g.problem = "the " + p.mode + " packs: " + why; g.repack_cures = true; }
+        }
     }
     if (!g.launch.settings.empty() && !load_settings(g.launch.settings, &g.settings, &err)) g.settings_error = err;
     out->push_back(std::move(g));
+}
+
+// ---- A pack the host refuses ----
+std::string exit_problem(int status) {
+    if (status == kRepackStatus)
+        return "nxhost-run refused the game's packs (status 8): they were made for another host or another bundle (the reason is in its log's [RED] line); Repack makes them again";
+    return "";
+}
+
+std::set<std::string> host_takeovers(const std::string &host, std::string *err) {
+    static std::map<std::string, std::set<std::string>> cache;
+    auto hit = cache.find(host);
+    if (hit != cache.end()) return hit->second;
+    std::set<std::string> out;
+    std::error_code ec;
+#if defined(_WIN32)
+    const std::string tag = std::to_string(GetCurrentProcessId());
+#else
+    const std::string tag = std::to_string(getpid());
+#endif
+    fs::path dir = fs::temp_directory_path(ec) / P("nxlauncher-takeovers-" + tag);
+    Command c; c.argv = {host, "--takeovers"}; c.cwd = S(dir); c.log = S(dir / "out.txt");
+    Child ch; std::string e, text;
+    // the program's own log lines (its constructors', on the same output: "[dm] ...") may come before the list's '#' line; the names are the lines after it
+    bool ok = spawn(c, &ch, &e) && wait(&ch) == 0 && read_file(c.log, &text);
+    size_t at = ok ? text.find("# nxhost-run take-overs") : std::string::npos;
+    ok = ok && at != std::string::npos && (at == 0 || text[at - 1] == '\n');
+    fs::remove_all(dir, ec);
+    if (!ok) { if (err) *err = host + " --takeovers gave no list" + (e.empty() ? "" : ": " + e); return out; }
+    for (const auto &line : lines_of(text.substr(at))) if (!line.empty() && line[0] != '#' && line[0] != '[') out.insert(line);
+    cache[host] = out;
+    return out;
+}
+
+static std::vector<fs::path> binding_files(const std::string &folder) {   // <module>.bind.tsv with its pack beside it, sorted
+    std::vector<fs::path> out; std::error_code ec;
+    for (const auto &e : fs::directory_iterator(P(folder), ec)) {
+        const std::string n = S(e.path().filename());
+        if (n.size() <= 9 || n.compare(n.size() - 9, 9, ".bind.tsv")) continue;
+        if (fs::is_regular_file(P(folder) / P(n.substr(0, n.size() - 9) + kPackSuffix), ec)) out.push_back(e.path());
+    }
+    std::sort(out.begin(), out.end());
+    return out;
+}
+
+bool has_bindings(const std::string &folder) { return !binding_files(folder).empty(); }
+
+std::string bindings_problem(const std::string &folder, const std::set<std::string> &takeovers) {
+    for (const auto &f : binding_files(folder)) {
+        std::string text, name = S(f.filename());
+        name.resize(name.size() - 9);
+        if (!read_file(S(f), &text)) continue;
+        std::vector<std::string> hit;
+        for (const auto &line : lines_of(text)) {
+            if (line.empty() || line[0] == '#') continue;
+            std::istringstream in(line); std::string slot, target, sym;
+            if (in >> slot >> target >> sym && takeovers.count(sym)) hit.push_back(sym);
+        }
+        if (hit.empty()) continue;
+        std::string names;
+        for (size_t i = 0; i < hit.size() && i < 3; i++) names += (i ? ", " : "") + hit[i];
+        if (hit.size() > 3) names += ", ...";
+        return "the " + name + " pack assumed " + std::to_string(hit.size()) + " PLT binding" + (hit.size() == 1 ? "" : "s") + " to its own functions that this host takes over (" +
+               names + "): the host would refuse it (made for another host or bundle); Repack makes the packs again";
+    }
+    return "";
 }
 
 static bool is_build_dir(const fs::directory_entry &e) {
@@ -546,6 +618,10 @@ Command compose(const Game &g, const std::string &mode, const Env &env, bool rec
     if (!host.problem.empty()) { c.error = host.problem; return c; }
     const std::string profile = game_profile_problem(g.launch);   // the game's constants: without the file the host would run another profile
     if (!profile.empty()) { c.error = profile; return c; }
+    if (has_bindings(pack->folder)) {   // a pack the host would refuse for its PLT bindings: said before the start, with the repack (bindings_problem)
+        const std::string why = bindings_problem(pack->folder, host_takeovers(host.path));
+        if (!why.empty()) { c.error = "the " + pack->mode + " packs: " + why; return c; }
+    }
     if (!host.note.empty()) c.notes.push_back(host.note);
     c.argv = {host.path, "--profile", g.launch.game_profile, pack->folder};
     std::string v;

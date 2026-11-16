@@ -7,11 +7,19 @@
 //      (DM_DBG=1), the end line with status 0;
 //   2. no DM_WINDOW: the same on the main thread;
 //   3. without DM_AOT_RAW: the SDK start refuses a module set without nnMain with a [RED] line naming the switch, and a nonzero status, before any guest code;
-//   4. no arguments: the usage and status 2.
+//   4. no arguments: the usage and status 2;
+//   5. a copy of the module's folder whose image has one byte changed (the manifest's SHA-256 with it): its pack is another image's, so the program refuses it before any guest
+//      code with the reason's [RED] line, the repack line and status 8 (aot.h DM_AOT_REPACK), which the launcher answers with the repack.
 // The program is the one built beside this test (its folder: argv[0]'s); the packs come from NXAOT_PACKS (the environment, else the CMake option); without them runs 1 to 3 are
 // skipped with a note (the Windows runner, a tree built without the packs)
 //   t_host_program
+#if defined(_WIN32)
+#include <direct.h>   // _mkdir; before plat.h, whose mkdir(path, mode) macro would break direct.h's declaration of mkdir
+#else
+#include <sys/stat.h>
+#endif
 #include "plat/plat.h"
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -142,6 +150,66 @@ int main(int argc, char **argv) {
     verdict(r.status != 0 && strstr(r.out, "[RED] missing symbol nnMain") && strstr(r.out, "DM_AOT_RAW=1") && !strstr(r.out, "[guest]"),
             "without DM_AOT_RAW: the SDK start refuses a module set without nnMain ([RED] line naming the switch), no guest code ran, nonzero status");
     free(r.out);
+    // 5. A pack this host refuses, which a repack cures (aot.h DM_AOT_REPACK): the module's folder copied beside this test with one byte of its image changed and the manifest's
+    //    SHA-256 with it, so that its pack is another image's: the reason's [RED] line, the repack line and status 8, before any guest code
+    {
+        char rdir[1200], src[1300], dst[1300];
+        snprintf(rdir, sizeof rdir, "%s/t_host_program.refused", dir);
+#if defined(_WIN32)
+        _mkdir(rdir);
+        const char *pack_name = "main.aot.dll";
+#else
+        mkdir(rdir, 0755);
+        const char *pack_name = "main.aot.so";
+#endif
+        const char *files[] = {"main.image.bin", "main.aot.tsv", pack_name};
+        int copied = 1;
+        for (int k = 0; k < 3 && copied; k++) {
+            snprintf(src, sizeof src, "%s/%s", module, files[k]); snprintf(dst, sizeof dst, "%s/%s", rdir, files[k]);
+            FILE *in = fopen(src, "rb"), *out = in ? fopen(dst, "wb") : NULL;
+            char buf[65536]; size_t got;
+            while (out && (got = fread(buf, 1, sizeof buf, in)) > 0) copied = copied && fwrite(buf, 1, got, out) == got;
+            copied = copied && in && out;
+            if (in) fclose(in);
+            if (out) fclose(out);
+        }
+        // the image's last byte changed, and the manifest's first line given that image's SHA-256 (its last field)
+        snprintf(dst, sizeof dst, "%s/main.image.bin", rdir);
+        FILE *img = fopen(dst, "rb+");
+        long len = 0; uint8_t *bytes = NULL;
+        if (img && !fseek(img, 0, SEEK_END) && (len = ftell(img)) > 0 && (bytes = malloc((size_t)len)) && !fseek(img, 0, SEEK_SET) && fread(bytes, 1, (size_t)len, img) == (size_t)len) {
+            bytes[len - 1] ^= 0x5a;
+            fseek(img, 0, SEEK_SET); copied = copied && fwrite(bytes, 1, (size_t)len, img) == (size_t)len;
+        } else copied = 0;
+        if (img) fclose(img);
+        uint8_t sha[32]; char hex[65];
+        if (bytes) plat_sha256(bytes, (size_t)len, sha);
+        free(bytes);
+        for (int k = 0; k < 32; k++) snprintf(hex + 2 * k, 3, "%02x", sha[k]);
+        snprintf(dst, sizeof dst, "%s/main.aot.tsv", rdir);
+        FILE *mf = fopen(dst, "rb"); char text[65536]; size_t tn = mf ? fread(text, 1, sizeof text - 1, mf) : 0;
+        if (mf) fclose(mf);
+        text[tn] = 0;
+        char *eol = strchr(text, '\n'), *tab = NULL;
+        for (char *p = text; eol && p < eol; p++) if (*p == '\t') tab = p;
+        if (tab && eol - tab == 65) memcpy(tab + 1, hex, 64); else copied = 0;
+        mf = fopen(dst, "wb");
+        copied = copied && mf && fwrite(text, 1, tn, mf) == tn;
+        if (mf) fclose(mf);
+#if defined(_WIN32)
+        snprintf(args, sizeof args, "\"%s\" main", rdir);
+#else
+        snprintf(args, sizeof args, "'%s' main", rdir);
+#endif
+        quote(cmd, sizeof cmd, prog, args);
+        env("DM_WINDOW", NULL); env("DM_AOT_RAW", "1");
+        run(cmd, &r);
+        printf("      %s\n", line_with(r.out, "compiled from another image"));
+        printf("      %s\n", line_with(r.out, "DM_AOT_REPACK"));
+        verdict(copied && r.status == 8 && strstr(r.out, "compiled from another image") && strstr(r.out, "[RED] aot: this host refuses the game's pack") && !strstr(r.out, "[guest]"),
+                "a pack of another image: the reason's [RED] line, the repack line and status 8 (DM_AOT_REPACK), no guest code ran");
+        free(r.out);
+    }
     printf("t_host_program: %d checks, %d failed\n", checks, fails);
     return fails != 0;
 }

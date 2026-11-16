@@ -124,6 +124,8 @@ static int play_now(Config &cfg, const Env &env, const Game &g, const std::strin
     std::fprintf(stderr, "nxlauncher: %s (%s), the %s pack: nxhost-run started, its output in %s\n", g.launch.title.c_str(), g.launch.title_id.c_str(), c.mode.c_str(), c.log.c_str());
     int st = wait(&ch);
     std::fprintf(stderr, "nxlauncher: nxhost-run exited with status %d\n", st);
+    const std::string why = exit_problem(st);
+    if (!why.empty()) std::fprintf(stderr, "[RED] nxlauncher: %s: %s (nxlauncher --repack %s)\n", g.launch.title.c_str(), why.c_str(), g.launch.title_id.c_str());
     return st;
 }
 
@@ -156,7 +158,8 @@ struct App {
     std::vector<Game> games;
     std::string selected;                          // the selected game's title ID
     std::map<std::string, SettingsState> states;   // each game's settings as the window shows them (kept while another game is selected)
-    Child child; std::string running, status, log;
+    Child child; std::string running, running_id, status, log;
+    std::string refused;                           // the title ID of the game whose last start nxhost-run refused for its packs (kRepackStatus): the Repack action shows
     Child repack; std::string repacking, repack_title;   // "Repack with profile": the packer, and the title ID of the game it packs while it runs
     std::map<std::string, std::pair<std::string, ProfileState>> profiles;   // each game's profile against the packs of a mode (scan: at the start, the game's exit, a repack)
     std::vector<std::string> lines; Uint64 tail_at = 0; size_t seen = 0;
@@ -218,7 +221,15 @@ static void profile_section(App &a, const Game &g) {
     const ProfileState &p = profile_of(a, g);
     ImGui::PushTextWrapPos(0);
     if (fixed) ImGui::TextDisabled("Set at launch (DM_AOT_PROFILE=%s)", v.c_str());
-    if (p.better()) {
+    if ((g.repack_cures || a.refused == g.launch.title_id) && !repacking(a, g)) {   // a pack this host refuses: the repack, not a bare failure
+        ImGui::TextColored(ImVec4(1.f, .45f, .4f, 1.f), "%s", g.repack_cures ? "This host would refuse the game's packs: they were made for another host or bundle."
+                                                                             : "The host refused the game's packs at the last start: they were made for another host or bundle.");
+        ImGui::BeginDisabled(a.repack.running || a.child.running);
+        if (ImGui::Button("Repack")) { a.refused.clear(); start_repack(a, g); }
+        ImGui::EndDisabled();
+        ImGui::SameLine();
+        ImGui::TextDisabled("the %s pack, in the background", chosen_mode(g, a.cfg).c_str());
+    } else if (p.better()) {
         ImGui::TextColored(ImVec4(.95f, .8f, .35f, 1.f), "Profile recorded: a better pack is possible");
         ImGui::TextDisabled("%s.", p.reason().c_str());
         ImGui::BeginDisabled(a.repack.running || a.child.running);
@@ -395,7 +406,7 @@ static void start_game(App &a) {
     say_notes(c);
     remember_start(a.cfg, *g, c.mode);
     if (!spawn(c, &a.child, &err)) { a.status = "[RED] " + err; return; }
-    a.running = g->launch.title; a.log = c.log; a.lines.clear(); a.seen = 0;
+    a.running = g->launch.title; a.running_id = g->launch.title_id; a.log = c.log; a.lines.clear(); a.seen = 0;
     a.status = g->launch.title + " is running (the " + c.mode + " pack)";
     std::fprintf(stderr, "nxlauncher: %s (%s), the %s pack: nxhost-run started, its output in %s\n", g->launch.title.c_str(), g->launch.title_id.c_str(), c.mode.c_str(), c.log.c_str());
 }
@@ -403,7 +414,9 @@ static void start_game(App &a) {
 static void log_pane(App &a) {
     if (a.child.running && poll(&a.child)) {
         char buf[64]; std::snprintf(buf, sizeof buf, "%d", a.child.status);
-        a.status = a.running + ": nxhost-run exited with status " + buf;
+        const std::string why = exit_problem(a.child.status);
+        a.status = a.running + ": " + (why.empty() ? std::string("nxhost-run exited with status ") + buf : "[RED] " + why);
+        if (a.child.status == kRepackStatus) a.refused = a.running_id;
         std::fprintf(stderr, "nxlauncher: %s\n", a.status.c_str());
         a.tail_at = 0;
         scan(a);   // what the session recorded (the profile against the packs)

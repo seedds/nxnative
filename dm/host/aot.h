@@ -254,8 +254,15 @@ int dm_aot_threads_wait(unsigned ms);          // wait until the caller is the l
 int dm_aot_main_stack(uint64_t *lo, uint64_t *size);   // the guest stack the host made for the calling thread (QueryMemory); 0 when none
 
 // ---------- The run time (aot_run.c) ----------
-// Exit statuses of a run (the same numbers as dm/tools/aot's nxaot_host, rt::Status)
-enum { DM_AOT_EXITED = 0, DM_AOT_TRAP = 1, DM_AOT_USAGE = 2, DM_AOT_JIT_NEEDED = 3, DM_AOT_FAULT = 4, DM_AOT_RETURNED = 6, DM_AOT_STUCK = 7 };
+// Exit statuses of a run (the same numbers as dm/tools/aot's nxaot_host, rt::Status, up to 7). DM_AOT_REPACK, nxhost-run's own: a pack the host refuses at the
+// start, which packing the game again with this bundle cures (dm_aot_pack_refused); the launcher (dm/launcher launcher_model.h kRepackStatus) offers the repack for it
+enum { DM_AOT_EXITED = 0, DM_AOT_TRAP = 1, DM_AOT_USAGE = 2, DM_AOT_JIT_NEEDED = 3, DM_AOT_FAULT = 4, DM_AOT_RETURNED = 6, DM_AOT_STUCK = 7, DM_AOT_REPACK = 8 };
+// A pack of the game's module set refused at the start (loader.c load_modules: dm_aot_load_module_pack or dm_aot_pack_check_gates failed), for any of the reasons a repack
+// with this bundle cures: the pack file missing or not a library this program loads; no nxaot_module descriptor; its ABI not this host's (NXAOT_MODULE_ABI); compiled from
+// another image than the module's (another game version, a manifest rewritten since); the loader's bindings of its PLT slots not the ones it assumed (another host's
+// take-overs, nxaot_bindings); on Windows an import this program does not export (a pack of another nxaot); a gate site its manifest lacks (a pack of another manifest).
+// The reason as a [RED] line, then a [RED] line naming the repack and the status, and the process ends with DM_AOT_REPACK
+_Noreturn void dm_aot_pack_refused(const char *err);
 // Call guest code at addr from the host (design 2.4): x0..x7 from the arguments, the 9th to the 16th in the guest stack's 8-byte slots below SP (AAPCS64's stacked
 // arguments, each one 64 bits wide), x30 = the host-return address, the module's MXCSR, then the native entry, the host-function page or the JIT. The registers
 // it does not set (x8, v0..v7) go in as the block holds them, so a caller with an indirect result or floating-point arguments sets them first; x1 and v0 hold the

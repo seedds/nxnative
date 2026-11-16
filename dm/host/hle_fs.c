@@ -1425,9 +1425,27 @@ HLE_FORCE("_ZN2nn2fs14CloseDirectoryENS0_15DirectoryHandleE", "fsp-srv → close
 
 // ---------- Overloads from newer SDKs (SDK 16: MountRom without a cache, ReadFile without the bytes-read output / with read options, directory entry count) ----------
 HLE_FORCE("_ZN2nn2fs8MountRomEPKc", "fsp-srv; rom → host RomFS directory (overload without the cache arguments)", Result, h_fs_MountRom1, const char *name) { return h_fs_MountRom(name, NULL, 0); }
-// SDK 19 (Metroid Prime 4: Beyond): MountRom and QueryMountRomCacheSize with an int after the first argument (the program index); the host has one RomFS, so it is ignored
-HLE_FORCE("_ZN2nn2fs8MountRomEPKciPvm", "fsp-srv; rom → host RomFS directory (SDK 19 overload with an index)", Result, h_fs_MountRomIdx, const char *name, int idx, void *cache, size_t sz) {
-    if (idx) LOG("[RED] fs::MountRom(%s, program index %d): the host has one RomFS, this program's", name, idx);
+// SDK 19 (Metroid Prime 4: Beyond): MountRom and QueryMountRomCacheSize with an int after the first argument, the index of a program of the application (fsp-srv
+// OpenDataStorageByProgramIndex): any program can mount another's RomFS. A Switch 2 Edition of a Switch 1 game is one application of two programs, and the Switch 2 program's own
+// RomFS holds a few files: Super Mario Bros. Wonder's mounts the Switch 1 program's, index 0, as content: and its upgrade add-on as aocup: (issue/PR #2692).
+// The other programs' RomFS images are <index>.img in DM_ROMFS_PROGRAMS, by default the folder romfs_programs beside DM_ROMFS (scripts/pack_nup.py writes them, the app carries them
+// beside its RomFS); an index with no image there gets this program's own RomFS (its own index, or a build that has only this program's)
+static int program_romfs(int idx, char *out, size_t n) {
+    char b[1024], dir[1100]; const char *e = getenv("DM_ROMFS_PROGRAMS");
+    if (e && *e) snprintf(dir, sizeof dir, "%s", e);
+    else {
+        const char *rom = envdir("DM_ROMFS", "romfs", b, sizeof b); int k = (int)strlen(rom);
+        while (k > 1 && rom[k - 1] == '/') k--;
+        while (k > 0 && rom[k - 1] != '/') k--;
+        snprintf(dir, sizeof dir, "%.*sromfs_programs", k, rom);
+    }
+    struct stat st;
+    return idx >= 0 && snprintf(out, n, "%s/%d.img", dir, idx) < (int)n && !stat(out, &st) && S_ISREG(st.st_mode);
+}
+HLE_FORCE("_ZN2nn2fs8MountRomEPKciPvm", "fsp-srv; rom of the program with this index → its RomFS image (romfs_programs/<index>.img beside DM_ROMFS), else this program's", Result, h_fs_MountRomIdx, const char *name, int idx, void *cache, size_t sz) {
+    char img[1200];
+    if (program_romfs(idx, img, sizeof img)) { dm_thread_service_request(); return mount(name, img, 1); }   // mount_ex logs it
+    if (idx) LOG("[RED] fs::MountRom(%s, program index %d): no RomFS image of program %d beside this program's (romfs_programs/%d.img): this program's own", name, idx, idx, idx);
     return h_fs_MountRom(name, cache, sz);
 }
 HLE_FORCE("_ZN2nn2fs22QueryMountRomCacheSizeEPmi", "fsp-srv; the cache gets only the minimum size (SDK 19 overload with an index)", Result, h_fs_QueryRomCacheIdx, size_t *out, int idx) { (void)idx; return h_fs_QueryRomCache(out); }

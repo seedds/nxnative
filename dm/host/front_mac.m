@@ -234,11 +234,14 @@ static void pad_keep_system_buttons(GCController *c) {
 }
 static const char *pad_name(GCController *c) { return c.vendorName.UTF8String ?: "?"; }
 static void npad_name(int p, char *out, size_t cap) { uint32_t id = dm_player_npad(p); if (id == 0x20) snprintf(out, cap, "handheld"); else snprintf(out, cap, "%u", id); }
-// The players' raw HID motion source follows the controllers (gone: one just removed, still listed): a Pro Controller's (motion_pro_mac.h)
+// The players' raw HID motion source follows the controllers (gone: one just removed, still listed): a Pro Controller's or a DualShock 4's, each model counted on its own
+// (motion_pro_mac.h)
 static void pads_motion_changed(GCController *gone) {
-    int count = 0, player = -1;
-    for (GCController *c in GCController.controllers) if (c != gone && c.extendedGamepad && [c.productCategory isEqualToString:@"Switch Pro Controller"]) {
-        count++; player = g_merge ? 0 : pad_slot_of(&g_slots, (__bridge const void *)c);
+    int count[PRO_MODELS] = {0}, player[PRO_MODELS];
+    for (int m = 0; m < PRO_MODELS; m++) player[m] = -1;
+    for (GCController *c in GCController.controllers) {
+        int m = c != gone && c.extendedGamepad ? pro_model_of_category(c.productCategory.UTF8String) : -1;
+        if (m >= 0) { count[m]++; player[m] = g_merge ? 0 : pad_slot_of(&g_slots, (__bridge const void *)c); }
     }
     dm_motion_pro_players(count, player);
 }

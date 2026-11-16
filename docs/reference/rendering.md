@@ -1968,6 +1968,15 @@ Digimon Story Cyber Sleuth: Complete Edition (Media.Vision's MVGL engine, SDK 6.
 - **Fix:** `GL` and `GLB` register in `swhle`, and `eglGetProcAddress` searches that same table. Both paths retain `GLB`'s big-stack entry; unsupported loader names still return null by default (`DM_GL_STUBS=1` enables diagnostic stubs). `make -C dm/gfx/tests GAME=010014E00DB56000 gl-imports` exercises the real import resolver and GL registrations, shader creation and source queries, wrapper addresses and missing names in both diagnostic modes, without game files.
 - **Found on:** Darkest Dungeon Complete (`01008F1008DA6000`, update v327680, SDK 3.6.0, provisional profile), reported in [issue #228](https://github.com/seedds/nxnative/issues/228). The import failure is reproduced by the regression test; gameplay and run-time shader capture for this title remain unverified.
 
+### Compressed OpenGL texture arrays
+
+- **Symptom:** `DM_GL_MISSES=1` lists `glCompressedTexImage3D` and `glCompressedTexSubImage3D`, and the game crashes at `pc=0` right after GL initialisation; with `DM_GL_STUBS=1` the stubs are called with `GL_TEXTURE_2D_ARRAY` (`0x8c1a`) and BC7 sRGB (`0x8e8d`).
+- **Cause:** the GL layer had compressed 2D images and array storage, but no compressed array uploads, and its pending image levels held one layer each.
+- **Fix:** both entry points are in the GL import table and pack their stack arguments before the big-stack entry (`compressed3d_impl`, `hle_gl.m`). A pending array level holds every layer, each with its own rounded block rows, mips smaller than a block included; the layer count is the same at every level. A sub-image into a texture not made yet goes into the level's pending copy (zeros first when the level was allocated with no data), so the texture is made with every level given before its first use, whatever order the game allocates and fills them in; into a made texture it goes through `tex_write`, in command order. An allocation with no data needs no matching `imageSize`. Other targets (`GL_TEXTURE_3D`, cube-map arrays) and compressed formats the layer does not map are the host's gaps: a red line, no GL error.
+- **Limitations:** compressed volume and cube-map-array targets and uploads from a pixel-unpack buffer are not implemented. `glTexImage3D` still gives level 0 only.
+- **Check:** `make -C dm/gfx/tests GAME=010014E00DB56000 gl-imports` (`test_compressed_arrays`): BC7 sRGB arrays of two layers and three levels, partial and edge sub-images, an upload after a draw used the texture, immutable storage, levels allocated with no data and filled one after the other, and the red-line gaps.
+- **Found on:** Tomb Raider I-III Remastered (`010024601BB16000`, v851968, provisional profile), [issue #2416](https://github.com/seedds/nxnative/issues/2416). Not run in the game: it also needs sampler objects ([#2724](https://github.com/seedds/nxnative/issues/2724)) and other GL calls the issue lists, and no profile is registered.
+
 ### Telling a GL game from an NVN or Vulkan one
 
 - **Symptom:** the NSP script's provisional profile said Vulkan, and the capture boot crashed in the GL layer.

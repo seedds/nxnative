@@ -602,6 +602,7 @@ static int tex_make(tex_t *t, int rt) {
     if (t->made) return t->tex != nil;
     if (t->fmt < 0 || !t->w || !t->h) return 0;
     int faces = tex_faces(t), lv = 0, vol = t->target == GL_TEXTURE_3D, arr = t->target == GL_TEXTURE_2D_ARRAY;
+    if (arr && !t->d) return 0;
     uint32_t full = 1; for (uint32_t m = umax(umax(t->w, t->h), vol ? t->d : 1); m > 1; m >>= 1) full++;
     if (t->slevels) lv = (int)umin(umin((uint32_t)t->slevels, full), MAXLV);
     else { while (lv < MAXLV && lv < (int)full && (t->defined >> lv & 1)) lv++; if (!lv) lv = 1; }
@@ -628,7 +629,11 @@ static int tex_make(tex_t *t, int rt) {
         t->use = 0;
         for (int f = 0; f < faces; f++) for (int l = 0; l < lv; l++) {
             level_t *p = &t->pend[f][l];
-            if (p->data) tex_write(t, f, l, 0, 0, 0, umax(1, t->w >> l), umax(1, t->h >> l), p->data, p->pitch);
+            if (p->data) {
+                size_t layer = p->pitch * fmt_rows(t->fmt, p->h);
+                for (uint32_t k = 0; k < (arr ? t->d : 1); k++)
+                    tex_write(t, arr ? k : f, l, 0, 0, 0, p->w, p->h, (uint8_t *)p->data + k * layer, p->pitch);
+            }
         }
     }
     for (int f = 0; f < 6; f++) for (int l = 0; l < MAXLV; l++) lv_free(&t->pend[f][l]);
@@ -658,21 +663,25 @@ static void tex_write(tex_t *t, int face, int lv, uint32_t x, uint32_t y, uint32
     if (cb != g_cb) { dm_gfx_enter(); cb_commit_one(cb); dm_gfx_leave(); }   // no GPU work goes out while the app is in the background (dm_gfx_suspend)
 }
 // glTexImage2D / glCompressedTexImage2D: the level's bytes, converted
-static void tex_image(GLenum target, GLint level, int f, int cv, uint32_t w, uint32_t h, void *conv, size_t pitch) {
-    tex_t *t = target == GL_TEXTURE_2D || (target >= GL_TEXTURE_CUBE_MAP_POSITIVE_X && target <= GL_TEXTURE_CUBE_MAP_NEGATIVE_Z) ? bound_tex(target) : NULL;
+static void tex_image(GLenum target, GLint level, int f, int cv, uint32_t w, uint32_t h, uint32_t depth, void *conv, size_t pitch) {
+    tex_t *t = target == GL_TEXTURE_2D || target == GL_TEXTURE_2D_ARRAY || (target >= GL_TEXTURE_CUBE_MAP_POSITIVE_X && target <= GL_TEXTURE_CUBE_MAP_NEGATIVE_Z) ? bound_tex(target) : NULL;
     int face = target >= GL_TEXTURE_CUBE_MAP_POSITIVE_X && target <= GL_TEXTURE_CUBE_MAP_NEGATIVE_Z ? (int)(target - GL_TEXTURE_CUBE_MAP_POSITIVE_X) : 0;
     if (!t || level < 0 || level >= MAXLV) { RED1("glTexImage2D target %#x level %d with no texture bound", target, level); free(conv); return; }
     (void)cv;
     uint32_t w0 = level ? w << level : w, h0 = level ? h << level : h;
-    if (level == 0 && (t->fmt != f || t->w != w || t->h != h) && (t->made || t->defined)) tex_drop(t);   // level 0 respecified: a new texture
-    if (!t->made && !t->defined) { t->fmt = f; t->w = level ? umax(w0, 1) : w; t->h = level ? umax(h0, 1) : h; }
+    if (level == 0 && (t->fmt != f || t->w != w || t->h != h || t->d != depth) && (t->made || t->defined)) tex_drop(t);   // level 0 respecified: a new texture
+    if (!t->made && !t->defined) { t->fmt = f; t->w = level ? umax(w0, 1) : w; t->h = level ? umax(h0, 1) : h; t->d = depth; }
     if (t->fmt != f) { RED1("texture level %d in format %s, its level 0 in %s", level, g_fmt[f].name, g_fmt[t->fmt].name); free(conv); return; }
-    if (t->made && level < t->levels && t->tex) { if (conv) tex_write(t, face, level, 0, 0, 0, w, h, conv, pitch); free(conv); return; }
+    if (t->made && level < t->levels && t->tex) {
+        if (conv) for (uint32_t k = 0; k < depth; k++)
+            tex_write(t, target == GL_TEXTURE_2D_ARRAY ? k : face, level, 0, 0, 0, w, h, (uint8_t *)conv + k * pitch * fmt_rows(f, h), pitch);
+        free(conv); return;
+    }
     if (t->made) { RED1("texture level %d given after the texture was made with %d levels: ignored", level, t->levels); free(conv); return; }
     level_t *l = &t->pend[face][level]; lv_free(l);
-    *l = (level_t){conv, pitch, pitch * fmt_rows(f, h), w, h};
+    *l = (level_t){conv, pitch, pitch * fmt_rows(f, h) * depth, w, h};
     int faces = t->target == GL_TEXTURE_CUBE_MAP ? 6 : 1, all = 1;
-    for (int k = 0; k < faces; k++) all &= t->pend[k][level].data != NULL || (level == 0 && !conv);
+    for (int k = 0; k < faces; k++) all &= target == GL_TEXTURE_2D_ARRAY || t->pend[k][level].data != NULL || (level == 0 && !conv);
     if (all) t->defined |= 1 << level;
 }
 
@@ -1547,7 +1556,7 @@ static void teximg_impl(const teximg_args *a) {
             if (g_fmt[f].kind != K_BLOCK || (size_t)a->size < need) { RED1("glCompressedTexImage2D: %d bytes for %dx%d %s (%zu expected)", a->size, a->w, a->h, g_fmt[f].name, need); return; }
             conv = pixels_convert(a->pixels, a->w, a->h, 0, 0, f, CV_COPY, &pitch);
         } else conv = pixels_convert(cv == CV_NONE ? NULL : a->pixels, a->w, a->h, a->format, a->type, f, cv, &pitch);
-        tex_image(a->target, a->level, f, cv, a->w, a->h, a->pixels || a->compressed ? conv : (free(conv), (void *)NULL), pitch);
+        tex_image(a->target, a->level, f, cv, a->w, a->h, 1, a->pixels || a->compressed ? conv : (free(conv), (void *)NULL), pitch);
     }
 }
 GL(glTexImage2D, void, GLenum target, GLint level, GLint ifmt, GLsizei w, GLsizei h, GLint border, GLenum format, GLenum type, const void *pixels) {
@@ -1599,6 +1608,70 @@ GL(glTexImage3D, void, GLenum target, GLint level, GLint ifmt, GLsizei w, GLsize
     if (level) { RED1("glTexImage3D of level %d not implemented", level); return; }
     tex_storage(target, 1, (GLenum)ifmt, w, h, d);
     if (pixels) h_glTexSubImage3D(target, 0, 0, 0, 0, w, h, d, format, type, pixels);
+}
+// glCompressedTexImage3D / glCompressedTexSubImage3D into 2D arrays: each layer has its own rounded block rows, even when a mip is smaller than one block.
+// Their last argument(s) are on the stack (64-bit here, as glTexSubImage3D's), so they pack them before the big-stack entry. Other targets (3D, cube-map arrays) and
+// compressed formats the layer does not map are the host's gaps: a red line, no GL error (see g_gl_error)
+typedef struct { GLenum target, format; GLint level, x, y, z, border; GLsizei w, h, d, size; const void *data; int sub; } compressed3d_args;
+static void compressed3d_impl(const compressed3d_args *a) __attribute__((used));
+BIGSTUB(compressed3d_impl);
+static void compressed3d_impl(const compressed3d_args *a) {
+    @autoreleasepool {
+        if (a->target != GL_TEXTURE_2D_ARRAY) { RED1("glCompressedTex%sImage3D target %#x not implemented (2D arrays only)", a->sub ? "Sub" : "", a->target); return; }
+        if (a->level < 0 || a->level >= MAXLV || a->w < 0 || a->h < 0 || a->d < 0 || a->size < 0 || a->border ||
+            (uint32_t)a->w > (16384u >> a->level) || (uint32_t)a->h > (16384u >> a->level) || a->d > 2048) { gl_error(GL_INVALID_VALUE); return; }
+        int cv, f = fmt_pick(a->format, 0, 0, &cv);
+        if (f < 0) { RED1("glCompressedTex%sImage3D format %#x not mapped", a->sub ? "Sub" : "", a->format); return; }
+        if (g_fmt[f].kind != K_BLOCK) { gl_error(GL_INVALID_ENUM); return; }   // not a compressed format
+        size_t pitch = fmt_pitch(f, a->w), rows = fmt_rows(f, a->h);
+        if (rows && pitch > SIZE_MAX / rows) { gl_error(GL_INVALID_VALUE); return; }
+        size_t layer = pitch * rows;
+        if (a->d && layer > SIZE_MAX / (uint32_t)a->d) { gl_error(GL_INVALID_VALUE); return; }
+        // the byte count must match the data given; an allocation with no data has no bytes to count, whatever size it names
+        if (a->data && layer * a->d != (size_t)a->size) { gl_error(GL_INVALID_VALUE); return; }
+        tex_t *t = bound_tex(a->target);
+        if (!t) { gl_error(GL_INVALID_OPERATION); return; }
+        if (!a->sub) {
+            if (t->slevels) { gl_error(GL_INVALID_OPERATION); return; }
+            // All levels in a complete array have the same layer count.
+            if (a->level && (t->made || t->defined) && (t->d != (uint32_t)a->d || t->fmt != f ||
+                umax(1, t->w >> a->level) != (uint32_t)a->w || umax(1, t->h >> a->level) != (uint32_t)a->h)) { gl_error(GL_INVALID_OPERATION); return; }
+            void *copy = NULL;
+            if (a->data && a->size) { copy = zalloc((size_t)a->size); memcpy(copy, a->data, (size_t)a->size); }
+            tex_image(a->target, a->level, f, CV_COPY, a->w, a->h, a->d, copy, pitch);
+            return;
+        }
+        if (t->fmt != f || (!t->slevels && !(t->defined & (1 << a->level)))) { gl_error(GL_INVALID_OPERATION); return; }
+        uint32_t w = umax(1, t->w >> a->level), h = umax(1, t->h >> a->level);
+        if (a->x < 0 || a->y < 0 || a->z < 0 || (uint64_t)a->x + a->w > w || (uint64_t)a->y + a->h > h ||
+            (uint64_t)a->z + a->d > t->d || (t->slevels && a->level >= t->slevels)) { gl_error(GL_INVALID_VALUE); return; }
+        const fmt_t *m = &g_fmt[f];
+        if (a->x % m->bw || a->y % m->bh || (a->w % m->bw && a->x + a->w != w) || (a->h % m->bh && a->y + a->h != h)) { gl_error(GL_INVALID_OPERATION); return; }
+        if (!a->w || !a->h || !a->d) return;
+        if (!a->data) { gl_error(GL_INVALID_VALUE); return; }
+        // Before the Metal texture is made, the bytes go into the level's pending copy: making it here would fix its level count at the levels given so far, and a
+        // level given afterwards (allocate and fill level 0, then level 1, ...) would be dropped. glTexStorage3D storage has all its levels: made now
+        level_t *l = &t->pend[0][a->level];
+        if (!t->made && !t->slevels && l->w == w && l->h == h) {
+            if (!l->data) l->data = zalloc(l->size);
+            size_t ll = l->pitch * fmt_rows(f, h), off = (size_t)(a->y / m->bh) * l->pitch + (size_t)(a->x / m->bw) * m->bytes;
+            for (GLsizei k = 0; k < a->d; k++) for (size_t r = 0; r < rows; r++)
+                memcpy((uint8_t *)l->data + (size_t)(a->z + k) * ll + off + r * l->pitch, (const uint8_t *)a->data + k * layer + r * pitch, pitch);
+            return;
+        }
+        if (!t->made && !tex_make(t, 0)) return;
+        if (!t->tex || a->level >= t->levels) { gl_error(GL_INVALID_OPERATION); return; }
+        for (GLsizei k = 0; k < a->d; k++)
+            tex_write(t, a->z + k, a->level, a->x, a->y, 0, a->w, a->h, (const uint8_t *)a->data + k * layer, pitch);
+    }
+}
+GL(glCompressedTexImage3D, void, GLenum target, GLint level, GLenum format, GLsizei w, GLsizei h, GLsizei d, GLint border, GLsizei size, const void *data) {
+    compressed3d_args a = {target, format, level, 0, 0, 0, border, w, h, d, size, data, 0};
+    ((void (*)(const compressed3d_args *))(const void *)compressed3d_impl_bs)(&a);
+}
+GL(glCompressedTexSubImage3D, void, GLenum target, GLint level, GLint x, GLint y, GLint z, GLsizei w, GLsizei h, GLsizei d, uint64_t format, uint64_t size, const void *data) {
+    compressed3d_args a = {target, (GLenum)format, level, x, y, z, 0, w, h, d, (GLsizei)size, data, 1};
+    ((void (*)(const compressed3d_args *))(const void *)compressed3d_impl_bs)(&a);
 }
 // Mipmaps from level 0, in command order (after the draws that rendered level 0 this frame): a texture of one level gets its full chain first, level 0 copied over
 static void mip_impl(GLenum target) __attribute__((used));

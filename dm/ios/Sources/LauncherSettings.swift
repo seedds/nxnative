@@ -11,6 +11,8 @@ struct Setting: Decodable, Identifiable {
     struct Base: Decodable { let docked, handheld: [Int] }
     let options: [[String]]?   // choice: [value, label]
     let min, max, step: Double?   // range
+    let unit: String?      // range: shown as a number of this unit (Game memory: GB) instead of a percentage
+    let first: String?     // range: the label of its lowest value (Game memory: Default, with the game's own size)
     let on, off: String?   // toggle: the values the variable takes (1 / 0 when not given)
     var id: String { env }
     var sectionTitle: String { section ?? "Game" }
@@ -30,7 +32,7 @@ struct Setting: Decodable, Identifiable {
         default: return true
         }
     }
-    enum CodingKeys: String, CodingKey { case env, kind, label, note, def = "default", section, needs, level, base, options, min, max, step, on, off }
+    enum CodingKeys: String, CodingKey { case env, kind, label, note, def = "default", section, needs, level, base, options, min, max, step, unit, first, on, off }
 }
 struct SettingsFile: Decodable { let settings: [Setting] }
 
@@ -76,8 +78,11 @@ final class LauncherModel: ObservableObject {
         settings.filter { $0.basic == basic }.reduce(into: []) { if !$0.contains($1.sectionTitle) { $0.append($1.sectionTitle) } }
     }
     func rows(in section: String, basic: Bool) -> [Setting] { rows(in: section).filter { $0.basic == basic } }
-    // A range's label: its percentage, with the size in pixels for the chosen console mode when the list has the base size (the render scale)
+    // A range's label: its percentage, with the size in pixels for the chosen console mode when the list has the base size (the render scale); a range with a unit, the number of it,
+    // and its lowest value the list's label for it when it has one (Game memory: 2 is Default, 4 is 4 GB)
     func rangeLabel(_ s: Setting, _ v: Double) -> String {
+        if let f = s.first, let lo = s.min, abs(v - lo) < 1e-6 { return f }
+        if let u = s.unit { return "\(Int(v.rounded())) \(u)" }
         let p = "\(Int((v * 100).rounded())) %"
         guard let b = s.base else { return p }
         let size = (values["DM_OPMODE"] ?? "1") == "0" ? b.handheld : b.docked

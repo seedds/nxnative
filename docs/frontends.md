@@ -44,6 +44,8 @@ A built app carries the settings its game supports, as the iPhone app's settings
 - `section`: the heading the row goes under, today `Game`, `Controls` or `Performance`. Sections come in the order of their first rows, and rows in the order to show them. A new section may appear in schema 1: a reader draws a section it does not know like the others, under its name, as the iPhone app does.
 - `default`: the value for this app's platform ([Tested defaults](settings.md#tested-defaults)), with profile defaults resolved for its game. A front end that keeps only the choices that differ from it lets a newer build's tested defaults reach the player, as the iPhone app does.
 - `base` (optional, render scale only): `{"docked": [w, h], "handheld": [w, h]}`, the 3D views' size that the scale multiplies, so a front end can show 0.75 as 1200×675 docked. It comes from the game's profile (`render_base`), and only some games have it.
+- `unit` (optional): for a range, shown after the number instead of a percentage (`GB`: Game memory's 4 shows as 4 GB). A front end that does not know it shows the number as before.
+- `first` (optional): for a range, the label of the lowest value (Game memory's `Default (3.2 GB)`, the game's own size).
 - `level` (optional): `basic` marks a setting to show first, for a front end that shows a short list and puts the rest behind a second step. Without it, the front end decides.
 - `needs` (optional): `<VAR>=<value>` makes the row a sub-setting of the row that sets `<VAR>`, drawn only while that row has that value (Rumble strength only while rumble is on). A row naming a variable the list does not have stays drawn.
 - An app without the file has no settings to offer: start it as it is.

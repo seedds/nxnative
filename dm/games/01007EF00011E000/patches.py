@@ -137,6 +137,26 @@ def frame_step(ctx):
             (0x1266188, '045a8052', LAY, W4, 'handheld viewport height 720'),
             (0x1266134, '8986a852', LAYF, W9, 'scaled display height 720.0')):
         taller(site, orig, load, apply, why)
+    # nninitStartup (main+0x710) asks for a fixed heap of 0xc3000000 (3.05 GB), whatever the application pool: the host's size when it set one (state +0x310 u64, loader.c from the
+    # player's game memory, DM_MEMORY_GB; 0 = the game's). x16 is free at its entry
+    fs_site(0x71c, '0060b852')
+    start = here(); emit(ADRP(16, here(), FS_STATE_OFF))
+    for w in (0xf9418a00,   # ldr x0,[x16,#0x310]
+              0xb5000040,   # cbnz x0,back (+2)
+              0x52b86000):  # orig: mov w0,#0xc3000000
+        emit(w)
+    emit(B(here(), 0x720))
+    fs_put(0x71c, [B(0x71c, start)], 'nninitStartup: the heap size from the host (state +0x310; 0 = the game\'s 3.05 GB)')
+    # nnMain hands the framework its root arena, the heap less the 32 MB nninitStartup took (0xc1000000): the host's size when it set one (state +0x318 u64). x16 is free after the bl before it
+    fs_site(0xc617c0, '0820b852')
+    start = here(); emit(0x52b82008); emit(ADRP(16, here(), FS_STATE_OFF))   # orig: mov w8,#0xc1000000
+    for w in (0xf9418e10,   # ldr x16,[x16,#0x318]
+              0xb4000050,   # cbz x16,back (+2)
+              0xaa1003e8):  # mov x8,x16
+        emit(w)
+    emit(B(here(), 0xc617c4))
+    fs_put(0xc617c0, [B(0xc617c0, start)], 'nnMain: the root arena from the host (state +0x318; 0 = the game\'s)')
+    ctx.capabilities.add('GAME_HEAP')   # the launcher's Game memory (settings.tsv DM_MEMORY_GB, Mac): the host's application pool becomes the game's heap through these two stubs
     # The game's conversions between output pixels and the 1280x720 layout space, and the layout objects built with that size: each takes the layout height too, while
     # its bit of state +0x54 is set (loader.c DM_SCREEN_ASPECT_SITES, all by default), so one build can try them one by one. 720.0 constants: main+0xdf19ac divides the
     # output size by (1280, 720) for the layout scale; the others pair 720.0 with 1280.0 the same way. 1280x720 pairs: layout objects' defaults

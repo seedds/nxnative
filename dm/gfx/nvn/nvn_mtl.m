@@ -420,8 +420,8 @@ static void res_remove(id<MTLAllocation> r) { @autoreleasepool {
 // the full-size scene target its current resolution leaves unused (PR #1453). What can be kept is the memory of a texture the host has already let go. Each such texture is made in
 // a placement heap of its own; when its texture is freed (after the submissions that used it completed, defer_drain), the heap waits here, still resident, for the next texture it fits.
 // Every texture whose memory the host makes for the GPU alone draws from the same list: single-description targets in a GPU-only pool (rh_texture), the heaps of resolution families
-// (image_texture), and same-pass feedback snapshots (fb_snap). A heap is made an eighth larger than its first texture, and a waiting heap serves a texture up to a third smaller
-// than itself (the smallest that fits is taken), so a target that grows by a step of Metal's sizes (about 10% near 2 MB) fits the heap it freed the frame before: Mario Kart World's
+// (image_texture), and same-pass feedback snapshots (fb_snap). A heap is made an eighth larger than its first texture, and a waiting heap serves a texture down to 40 % of its size
+// (rh_fit; the smallest that fits is taken), so a target that grows by a step of Metal's sizes (about 10% near 2 MB) fits the heap it freed the frame before: Mario Kart World's
 // dynamic resolution moves its targets every frame (1480x832, 1544x868, 1548x868, 1488x836 and their halves and quarters), and with exact heaps taken only up to an eighth larger,
 // family heaps freed for good and only COMPRESSIBLE targets recycled, its race made about 3,500 textures and heaps and added 5-6 GB to the residency set every 300 frames on an
 // M6, with a residency commit for nearly every one; alternating that policy with this one in a run, 970 -> 272 commits and 1.8 -> 0.34 GB per 300 frames, replay CPU 6.94 -> 6.36 ms
@@ -429,9 +429,21 @@ static void res_remove(id<MTLAllocation> r) { @autoreleasepool {
 // texture is filled as a new allocation is (tex_init_fill or zeros; a family heap is zeroed through its largest description, a snapshot is copied into), so nothing it reads
 // depends on the reuse; the memory was the old texture's only up to that texture's last use, which completed, as with memory Metal frees and hands out again, so no alias flush is
 // added (resource_vis). Heaps idle for RH_IDLE_NS, and the oldest past
-// RH_CAP bytes waiting, leave the residency set when a submission begins (rh_trim). DM_NVN_RT_RECYCLE=0 makes each texture its own allocation and each family heap exact and freed
-// with its last texture, as before; ab alternates it with the DM_AB phases
-enum { RH_CAP = 256u << 20 }; static const uint64_t RH_IDLE_NS = 3000000000ull;
+// rh_cap() bytes waiting, leave the residency set when a submission begins (rh_trim). DM_NVN_RT_RECYCLE=0 makes each texture its own allocation and each family heap exact and freed
+// with its last texture, as before; ab alternates it with the DM_AB phases.
+// The bytes that may wait: a sixteenth of the device's recommended working set, from 256 MB up to 1 GB (DM_NVN_RT_RECYCLE_MB sets them). At 256 MB, Mario Kart World docked with its
+// resolution moving every frame (60 fps cap on an M3 Max, the GPU at a low clock) kept 200-250 MB waiting and freed the oldest just before a size wanted them again: 1,341 heaps made and
+// 1,114 freed in 900 frames, 1.2-2.1 GB added to the residency set per 300 frames, and single frames of 95-148 ms where a commit of hundreds of MB fell on the replay thread
+static const uint64_t RH_IDLE_NS = 3000000000ull;
+static uint64_t rh_cap(void) {
+    static uint64_t v; if (v) return v;
+    const char *e = getenv("DM_NVN_RT_RECYCLE_MB");
+    if (e) v = (uint64_t)atoll(e) << 20;
+    else { uint64_t ws = g_dev ? (uint64_t)g_dev.recommendedMaxWorkingSetSize : 0; v = ws / 16; if (v < (256ull << 20)) v = 256ull << 20; if (v > (1024ull << 20)) v = 1024ull << 20; }
+    if (!v) v = 1;
+    MLOG("recycled texture heaps: up to %llu MB wait for a texture of their size (DM_NVN_RT_RECYCLE_MB)", (unsigned long long)(v >> 20));
+    return v;
+}
 typedef struct { void *heap; uint64_t size, t; } rh_ent;   // heap: retained (CFBridgingRetain); t: when it began to wait
 static os_unfair_lock g_rh_lk = OS_UNFAIR_LOCK_INIT; static rh_ent *g_rh; static unsigned g_rh_n, g_rh_cap; static uint64_t g_rh_bytes;
 static _Atomic uint64_t g_rh_made, g_rh_reused, g_rh_trimmed;   // for the memory readout
@@ -457,13 +469,24 @@ static void rh_wait(id<MTLHeap> heap) {
 - (void)dealloc { rh_wait(heap); atomic_fetch_sub(&g_image_heap_n, 1); }
 @end
 static char g_image_heap_owner_key, g_rh_owner_key;
-// A placement heap of at least `size` bytes: the smallest waiting one up to half as large again, or a new one an eighth larger (its exact size with the switch off). nil if Metal
+// The largest waiting heap a texture takes, in percent of its size (DM_NVN_RT_RECYCLE_FIT, at least 100; default 250). A dynamic resolution step of Mario Kart World docked
+// (2560x1440 to 2134x1200, 69 % of the area) left every target's heap too large at 150 %, the window before: each step made its targets' heaps again, hundreds of MB that a residency
+// commit then made resident on the replay thread (frames of 60-110 ms). Its race with the resolution moved between two sizes every 300 frames (DM_NVN_GPU_TS_SCALE=ab:2.5, DM_AB=300,
+// docked, uncapped, M3 Max, two runs each): heaps made 2,859-3,003 -> 1,866-1,919, residency added 6.9-7.7 -> 4.7-4.9 GB and its commits 400-406 -> 277-279 ms over 2,700 frames,
+// frames over 20 ms 16-18 -> 11-12, the most resident memory the same (about 11 GB). At 400 % the small textures took the large heaps: fewer made, more committed (310 ms)
+static uint64_t rh_fit(void) {
+    static uint64_t v; if (v) return v;
+    const char *e = getenv("DM_NVN_RT_RECYCLE_FIT"); v = e && atoi(e) >= 100 ? (uint64_t)atoi(e) : 250;
+    if (e) MLOG("recycled texture heaps: a texture takes a waiting heap up to %llu %% of its size (DM_NVN_RT_RECYCLE_FIT)", (unsigned long long)v);
+    return v;
+}
+// A placement heap of at least size bytes: the smallest waiting one up to rh_fit() percent of it, or a new one an eighth larger (its exact size with the switch off). nil if Metal
 // makes none
 static id<MTLHeap> rh_heap(uint64_t size, MTLStorageMode sm, MTLCPUCacheMode cm, MTLHazardTrackingMode hm, int *reused) {
     *reused = 0;
     if (!size) return nil;
     int on = sw_on(rh_mode());
-    uint64_t top = size + size / 2;
+    uint64_t top = size * rh_fit() / 100;
     void *got = NULL;
     if (on) {
         os_unfair_lock_lock(&g_rh_lk);
@@ -547,14 +570,14 @@ static void tu_register(id<MTLTexture> t, uint64_t serial) {
     if (g_tu_gone.n && nvn_hm_del(&g_tu_gone, &serial)) g_tu_remade++;
     os_unfair_lock_unlock(&g_tu_lk);
 }
-// When a submission begins: heaps that waited RH_IDLE_NS, and the oldest past RH_CAP bytes, leave the residency set and are freed
+// When a submission begins: heaps that waited RH_IDLE_NS, and the oldest past rh_cap() bytes, leave the residency set and are freed
 static void rh_trim(void) {
     if (!g_rh_n) return;
     uint64_t now = clock_gettime_nsec_np(CLOCK_MONOTONIC); void *drop[64]; unsigned nd = 0;
     os_unfair_lock_lock(&g_rh_lk);
     while (g_rh_n && nd < 64) {
         unsigned old = 0; for (unsigned i = 1; i < g_rh_n; i++) if (g_rh[i].t < g_rh[old].t) old = i;
-        if (now - g_rh[old].t < RH_IDLE_NS && g_rh_bytes <= RH_CAP) break;
+        if (now - g_rh[old].t < RH_IDLE_NS && g_rh_bytes <= rh_cap()) break;
         drop[nd++] = g_rh[old].heap; g_rh_bytes -= g_rh[old].size; g_rh[old] = g_rh[--g_rh_n];
     }
     os_unfair_lock_unlock(&g_rh_lk);

@@ -112,6 +112,15 @@ int main(void) { @autoreleasepool {
         CHECK(td && td.heap && g_rh_made == 3 && waiting() == 2, "a much smaller target leaves the waiting heaps alone");
         td = nil; mtl_tex_release(&d); mtl_alias_drop_pool(&pool); settle();
     }
+    unsigned w0 = waiting();
+    {   // a target down to 40 % of a waiting heap takes it (rh_fit): a dynamic resolution step such as 2560x1440 to 2134x1200 keeps its targets' heaps
+        uint64_t r0 = g_rh_reused, m0 = g_rh_made;
+        tex_t h = target(&pool, 95020, 0, 905, 509); mtl_tex_init(&h);
+        id<MTLTexture> th = tex_mtl(&h);
+        CHECK(th && th.heap && g_rh_reused == r0 + 1 && g_rh_made == m0, "a target half the size of a waiting heap takes it");
+        th = nil; mtl_tex_release(&h); mtl_alias_drop_pool(&pool); settle();
+    }
+    CHECK(waiting() == w0, "and the heap waits again once the target is freed");
     {   // outside: a CPU-visible pool; inside: a texture without COMPRESSIBLE
         pool_t cpu = pool; cpu.flags = NVN_MEMORY_POOL_FLAGS_CPU_CACHED | NVN_MEMORY_POOL_FLAGS_GPU_CACHED | NVN_MEMORY_POOL_FLAGS_COMPRESSIBLE;
         tex_t e = target(&cpu, 95005, 0, 640, 360); mtl_tex_init(&e);

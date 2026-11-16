@@ -101,6 +101,9 @@ void dm_set_opmode(int mode) { g_opmode = mode; }
 static int g_rumble = 1;
 void dm_haptics_set_enabled(int on) { g_rumble = on; }
 int duo_harness_rumble(void) { return g_rumble; }
+// DmGamepad.m's reads of the controller applet's player count (hle_hid.c) and of an offline web page over the picture (web_apple.m): one player, no page
+int dm_players_reported(void) { return 1; }
+int front_web_touch(void) { return 0; }
 void dm_haptics_apple_init(void) {}
 void dm_haptics_apple_controller(int player, GCController *controller) { (void)player; (void)controller; }
 

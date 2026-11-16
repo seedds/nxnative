@@ -38,21 +38,23 @@ using LibHac.Tools.FsSystem.RomFs;
 using LibHac.Tools.Ncm;
 using Path = System.IO.Path;
 
-static class P {
+static partial class P {
     [DllImport("libc", SetLastError = true)] static extern int clonefile(string src, string dst, uint flags);
 
     static int Main(string[] a) {
-        if (a.Length == 1 && a[0] == "--source-sha") {   // first 16 digits of the sha256 of the embedded Program.cs + csproj (the NSP script's nx_extract_source_sha)
+        if (a.Length == 1 && a[0] == "--source-sha") {   // first 16 digits of the sha256 of the embedded Program.cs + csproj + NxTree.cs (the NSP script's nx_extract_source_sha)
             var asm = typeof(P).Assembly; var ms = new MemoryStream();
-            foreach (var n in new[] { "src0", "src1" }) asm.GetManifestResourceStream(n).CopyTo(ms);
+            foreach (var n in new[] { "src0", "src1", "src2" }) asm.GetManifestResourceStream(n).CopyTo(ms);
             Console.WriteLine(Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(ms.ToArray()))[..16].ToLowerInvariant());
             return 0;
         }
-        try { return Run(a); }
+        try { return a.Length>0 && a[0]=="--nx-tree" ? NxTree(a) : Run(a); }
+        catch (IOException e) { Console.Error.WriteLine($"[RED] {e.Message}"); return 1; }
         catch (KeysMissing e) { Console.WriteLine($"[RED] {e.Message}"); return 6; }
         catch (PackageDamaged e) { Console.WriteLine($"[RED] the NSP is damaged: {e.Message}"); return 3; }
         // The tables a filesystem opens from fail the hash check (Mario & Luigi: Brothership's update: its Program NCA does not match its content ID): no file can be listed, so no file can be
         // named or written as read. Exit code 3, as for damaged files, not an unhandled exception's stack trace
+        catch (Exception e) when (a.Length>0 && a[0]=="--nx-tree") { Console.Error.WriteLine($"[RED] NX native read: {e.Message}"); return 1; }
         catch (HorizonResultException e) when (HashError(e)) {
             Console.WriteLine("[RED] the NSP is damaged: a filesystem's own tables fail the NCA's hash check, so --allow-damaged cannot read it either: an incomplete copy or a broken download, which a SHA-256 of each NCA shows (its file name is the hash's first 16 bytes); copy or download it again");
             return 3;

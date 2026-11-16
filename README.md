@@ -87,6 +87,25 @@ The IPA appears in the game's folder. The first build takes 30–60 minutes and 
 
 To play on the Mac instead, add `--platform mac-app`: you get a Mac app of the game to open from Finder. All options: [The packing script in detail](docs/development.md#the-packing-script-in-detail).
 
+### NX archives (Switch 1 and Switch 2)
+
+Give the builder a [NXFormat](https://github.com/fab918/nxformat) `.nx` file,
+or a folder holding one:
+
+```sh
+python3 scripts/build_ipa_from_nsp.py ~/Games/game.nx --platform mac-app
+```
+
+Both materialized ExeFS/RomFS trees (including NUP imports) and decrypted native
+NCA snapshots from DNSP/DXCI conversions are read directly. No `prod.keys` or
+NXConvert installation is needed. The newest version is selected by default;
+`--package v65536` selects a stored version. Native updates use their exact
+archived base dependency, and DLC is limited to the selected application/version.
+The usual game-profile and device requirements still apply.
+
+The first NX build compiles the small C++17 reader with the installed Xcode
+command line tools and Homebrew Zstandard. It is then cached locally.
+
 ### Install
 
 Install the IPA on your iPhone or iPad with a sideloading tool such as AltStore, Sideloadly or LiveContainer. If your tool offers **Increased Memory Limit**, turn it on: the bigger games need it.

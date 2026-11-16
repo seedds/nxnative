@@ -335,7 +335,7 @@ void dm_fps_lock_tick(void) {
                 memcpy(&cap0, &v[0], 4); memcpy(&cap1, &v[1], 4);
                 FILE *pf = fopen("/tmp/re_movie_clock_probe.log", "a");
                 if (pf) {
-                    fprintf(pf, "[RE MT tick] movie_hz=%d target=%d row_target=%d MT_limits=%g/%g\\n",
+                    fprintf(pf, "[RE MT tick] movie_hz=%d target=%d row_target=%d MT_limits=%g/%g\n",
                         movie_hz, target, row_target, cap0, cap1);
                     fclose(pf);
                 }

@@ -61,6 +61,7 @@ static uint64_t c2_handle(int stage, unsigned b);   // the handle c2 holds at by
 #include "nvn_hmap.h"
 #include "nvn_owner.h"   // the serial tables (serial_put, tex_put, tex_get, the pins, the held counts) and their lock g_smu
 #include "../../host/dm.h"
+#include "../../host/fps_meter.h"
 #import <CommonCrypto/CommonDigest.h>
 #include <stdarg.h>
 #include <mach-o/dyld.h>
@@ -16337,6 +16338,10 @@ static id<MTLRenderPipelineState> g_blit_pso; static MTLPixelFormat g_blit_fmt;
 static id<MTLSamplerState> g_blit_samp;
 static uint64_t g_present_n;
 uint64_t mtl_present_count(void) { return g_present_n; }   // Actual present count (heat attribution DM_HEAT computes the present frame rate)
+static fps_tally g_fps_tally;   // the frame-rate counter's: drawables the presented callback saw on screen (present_now)
+void mtl_shown_counts(uint64_t *shown, uint64_t *generated) {   // the Mac's frame-rate counter (front_mac.m): frames on screen so far, of those frame generation's
+    *shown = atomic_load_explicit(&g_fps_tally.shown, memory_order_relaxed); *generated = atomic_load_explicit(&g_fps_tally.generated, memory_order_relaxed);
+}
 void mtl_res_snapshot(mtl_res_count *out) {
     memset(out, 0, sizeof *out);
     out->pso = g_pso.n;
@@ -17313,6 +17318,7 @@ static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t t
     uint64_t pn = ticket;   // Record the present time by the game's present sequence number (ticket number): hle's present statistics are taken by "the game's nth present"; in the display link path the actual present count != the game's present count (old frames get merged and dropped)
     [dr addPresentedHandler:^(id<MTLDrawable> d) {   // Actual presentation time (the time this frame is really put on screen, CACurrentMediaTime base)
         CFTimeInterval tt = d.presentedTime;
+        fps_tally_presented(&g_fps_tally, tt, 0);   // the frame-rate counter: on screen (a discarded drawable reports 0)
         g_pres[pn % PRING] = (pres_ent){pn, tt > 0 ? tt : -1};
         pres_seen(pn, tt);
     }];

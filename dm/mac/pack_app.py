@@ -133,6 +133,8 @@ def info_plist(a, minos, icon):
         p['DMSettings'] = settings_rules(listed)
         lang = next((s['default'] for s in listed if s['env'] == 'DM_LANG'), None)
         if lang: p['DMLanguage'] = lang   # the Game language row's default: --lang, or the game's first language when it lacks that one (settings.py), with or without the window
+        fps = next((s for s in listed if s['env'] == 'DM_SHOW_FPS'), None)   # the frame-rate counter's default, for a start without the window and no saved choice (front_mac.m reads it)
+        if fps: p['DMShowFPS'] = fps['default'] == fps.get('on', '1')
     return p
 
 

@@ -17,7 +17,7 @@ Each game comes with the settings it was tested with: its profile in this reposi
 
 When you change a setting and tap **Play**, the app keeps your choice, also when a later build of the app ships other defaults. A setting you leave at its default is not stored: it follows the defaults of the build you have, so a newer build's tested settings reach you without doing anything. **Reset to tested defaults** at the bottom sets every setting back to its default, and **Play** then forgets your choices, so the game's defaults apply again. For testing, a line in `Documents/env.txt` overrides any setting ([Settings in a file](#settings-in-a-file)).
 
-A Mac app carries the same list (`Contents/Resources/dm/launcher.json`), without the iPhone's own Frame-rate counter and Touch feedback, for a front end that starts the app with the chosen values ([Front ends](frontends.md)).
+A Mac app carries the same list (`Contents/Resources/dm/launcher.json`), without the iPhone's own Touch feedback and touch controls, for a front end that starts the app with the chosen values ([Front ends](frontends.md)).
 
 ## Game
 
@@ -91,7 +91,7 @@ Games whose profile supports it (Breath of the Wild, Animal Crossing: New Horizo
 
 ### Frame-rate counter
 
-Shows the frames per second at the top left.
+Shows the frames per second at the top left: the frames that reached the screen, not the ones the game asked for. On the iPhone and iPad it also turns on and off in the [in-game menu](#in-game-menu). On a Mac it sits at the top left of the window, also in fullscreen, and **Performance › Frame-Rate Counter** in the menu bar turns it on and off while you play; that choice is kept for the next start, as if you had picked it in the [settings window](#the-mac-settings-window). It is updated twice a second and costs the game no frame of its own. An app packed by the NSP script has it on unless it was packed with `--no-show-fps` (`SHOW_FPS = False`).
 
 ## Controls
 
@@ -221,7 +221,7 @@ Sets every setting back to the game's tested default; **Play** then forgets your
 
 ## The Mac settings window
 
-A Mac app ([A Mac app](development.md#a-mac-app)) shows its settings in a window before the game starts. They are the same settings as on the iPhone, with the same defaults. The window shows the most used ones first: **Frame rate**, **Render scale**, **Console mode**, **Game language**, **Display mode** and **Game rumble**, when the game has them. **Render scale** shows the picture's size in pixels beside the percentage for the chosen **Console mode**, when the game's profile has it (Breath of the Wild: 1600 × 900 docked, 1280 × 720 handheld at 100 %). The others are under **Advanced settings**, in the usual sections, with **Reset to tested defaults**. The window remembers whether Advanced settings is open. **Frame-rate counter** and **Touch feedback** are only on the iPhone.
+A Mac app ([A Mac app](development.md#a-mac-app)) shows its settings in a window before the game starts. They are the same settings as on the iPhone, with the same defaults. The window shows the most used ones first: **Frame rate**, **Render scale**, **Console mode**, **Game language**, **Display mode** and **Game rumble**, when the game has them. **Render scale** shows the picture's size in pixels beside the percentage for the chosen **Console mode**, when the game's profile has it (Breath of the Wild: 1600 × 900 docked, 1280 × 720 handheld at 100 %). The others are under **Advanced settings**, in the usual sections, with **Reset to tested defaults**. The window remembers whether Advanced settings is open. **Touch feedback** is only on the iPhone.
 
 Click **Play** (or press Return) to start the game. **Quit**, ⌘Q or closing the window ends the app without the game. The app remembers your choices for that game, and a game started without the window, from a front end or with the window turned off, uses them too ([Saved choices](frontends.md#saved-choices)). A setting fixed by an `env.txt` or by the program that started the app is shown greyed out.
 

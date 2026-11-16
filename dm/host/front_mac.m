@@ -32,6 +32,7 @@ static void merge_rumble_to(void (*sink)(const dm_haptic_state *));
 #include "home_quit.h"
 #include "home_quit_mac.h"
 #include "ctrl_prompt.h"
+#include "fps_meter.h"
 #include <signal.h>
 #include <math.h>
 #include <sys/stat.h>
@@ -1558,6 +1559,91 @@ static NSArray<NSURL *> *found_cheat_files(NSString *build) {
 }
 @end
 
+// Frame-rate counter (DM_SHOW_FPS, docs/settings.md#frame-rate-counter): the frames on screen per second at the top left of the window, as on the iPhone (front_ios.m), from the
+// presented callbacks nvn_mtl.m counts (fps_meter.h: a drawable the system discarded and a frame the display link merged away are not counted); with frame generation also the
+// game's own frames among them. An AppKit view over the game's layer, which the window server composites: it costs the game no present and no GPU pass of its own, and it reads
+// the count twice a second. On from DM_SHOW_FPS (the settings window, a saved choice, an env.txt), else from the packed default (Info.plist DMShowFPS, pack_app.py from
+// launcher.json); Performance › Frame-Rate Counter turns it on and off at once and keeps that as the launcher's saved choice (launcher.DM_SHOW_FPS) for the next start
+void mtl_shown_counts(uint64_t *shown, uint64_t *generated);
+@interface DmFpsView : NSView @end
+@implementation DmFpsView
+- (NSView *)hitTest:(NSPoint)p { (void)p; return nil; }   // the mouse is the touch screen: clicks reach the game view underneath
+@end
+static DmFpsView *g_fps_view; static NSTextField *g_fps_text; static NSTimer *g_fps_timer; static fps_meter g_fps_meter; static int g_fps_on;
+#define FPS_TICK 0.5
+static void fps_text_set(NSString *s) {
+    g_fps_text.stringValue = s; [g_fps_text sizeToFit];
+    NSSize t = g_fps_text.frame.size;
+    g_fps_view.frame = NSMakeRect(10, 10, ceil(t.width) + 14, 22);   // the content view is flipped: 10 points from the top left
+    g_fps_text.frame = NSMakeRect(7, floor((22 - t.height) / 2), ceil(t.width), t.height);
+}
+static void fps_tick(void) {
+    uint64_t shown, gen; mtl_shown_counts(&shown, &gen); fps_reading r;
+    if (!fps_meter_read(&g_fps_meter, shown, gen, CACurrentMediaTime(), 2 * FPS_TICK + 0.25, &r)) return;   // the first tick, or after a stall: the last reading stays
+    char b[64]; fps_label(&r, b, sizeof b); fps_text_set(@(b));
+}
+static void front_fps_show(int on) {
+    g_fps_on = on;
+    NSView *cv = g_win.contentView; if (!cv) return;
+    if (on && !g_fps_view) {
+        g_fps_view = [DmFpsView new]; g_fps_view.wantsLayer = YES;
+        g_fps_view.layer.backgroundColor = [NSColor colorWithWhite:0 alpha:0.45].CGColor; g_fps_view.layer.cornerRadius = 6;
+        g_fps_view.autoresizingMask = NSViewMaxXMargin | NSViewMaxYMargin;   // stays at the top left as the window resizes or goes fullscreen
+        g_fps_text = [NSTextField labelWithString:@""]; g_fps_text.textColor = NSColor.whiteColor; g_fps_text.drawsBackground = NO;
+        g_fps_text.font = [NSFont monospacedDigitSystemFontOfSize:13 weight:NSFontWeightSemibold];
+        [g_fps_view addSubview:g_fps_text];
+    }
+    if (on) {
+        if (!g_fps_view.superview) [cv addSubview:g_fps_view];   // over the game's layer; the progress screen and the Home menu come above it
+        fps_text_set(@"-- fps"); fps_meter_reset(&g_fps_meter); fps_tick();   // the first sample: a reading half a second later
+        [g_fps_timer invalidate];
+        g_fps_timer = [NSTimer timerWithTimeInterval:FPS_TICK repeats:YES block:^(NSTimer *t) { (void)t; fps_tick(); }];
+        [NSRunLoop.mainRunLoop addTimer:g_fps_timer forMode:NSRunLoopCommonModes];   // also while a menu is open
+    } else { [g_fps_timer invalidate]; g_fps_timer = nil; [g_fps_view removeFromSuperview]; }
+    LOG("front end: frame-rate counter %s", on ? "on" : "off");
+}
+static int fps_packed_default(void) { return [[NSBundle.mainBundle objectForInfoDictionaryKey:@"DMShowFPS"] boolValue]; }   // the launcher.json row's default (pack_app.py); off outside an app
+static int fps_wanted(void) { const char *e = getenv("DM_SHOW_FPS"); return e ? atoi(e) != 0 : fps_packed_default(); }
+// DM_SHOW_FPS from the launch environment or an env.txt (launcher.c's DM_ENV_LAUNCH_KEYS, DM_ENV_FILE_KEYS, space-separated names): it wins over a saved choice at every start
+static int fps_env_lists(const char *list) {
+    for (const char *p = list ? list : ""; *p;) {
+        while (*p == ' ') p++;
+        size_t n = strcspn(p, " ");
+        if (n == strlen("DM_SHOW_FPS") && !strncmp(p, "DM_SHOW_FPS", n)) return 1;
+        p += n;
+    }
+    return 0;
+}
+static int fps_fixed(void) { return fps_env_lists(getenv("DM_ENV_LAUNCH_KEYS")) || fps_env_lists(getenv("DM_ENV_FILE_KEYS")); }
+// The launcher's saved choice launcher.DM_SHOW_FPS in the app's preferences domain (its bundle ID, as dm/mac/launcher.c reads it; nil removes it). DM_SAVED_CHOICES=0 keeps the
+// choice to this session; a host outside an app has no launcher to read it and keeps none
+static BOOL fps_saved_write(NSString *value) {
+    const char *off = getenv("DM_SAVED_CHOICES"); NSString *domain = NSBundle.mainBundle.bundleIdentifier;
+    if ((off && !strcmp(off, "0")) || !domain) return YES;
+    CFPreferencesSetAppValue(CFSTR("launcher.DM_SHOW_FPS"), (__bridge CFPropertyListRef)value, (__bridge CFStringRef)domain);
+    return CFPreferencesAppSynchronize((__bridge CFStringRef)domain);
+}
+@interface DmFpsCounterItem : NSObject
+@end
+@implementation DmFpsCounterItem
+- (BOOL)validateMenuItem:(NSMenuItem *)it { it.state = g_fps_on ? NSControlStateValueOn : NSControlStateValueOff; return YES; }
+- (void)toggle:(NSMenuItem *)it {
+    (void)it; int on = !g_fps_on; front_fps_show(on);
+    // The launcher's saved choice, as the settings window keeps it (docs/frontends.md, Saved choices): removed at the packed default, else "1" / "0". Not where the launch
+    // environment or an env.txt sets DM_SHOW_FPS (that wins at every start anyway), nor with DM_SAVED_CHOICES=0 (fps_saved_write keeps it to this session)
+    if (fps_fixed()) { LOG("front end: frame-rate counter %s until the game quits: DM_SHOW_FPS is set by the launch or an env.txt", on ? "on" : "off"); return; }
+    if (!fps_saved_write(on == fps_packed_default() ? nil : (on ? @"1" : @"0")))
+        LOG("[RED] front end: the frame-rate counter choice could not be saved");
+}
+@end
+// Performance: the frame-rate counter, turned on and off while the game runs
+static NSMenu *front_perf_menu(void) {
+    NSMenu *pm = [[NSMenu alloc] initWithTitle:@"Performance"];
+    static DmFpsCounterItem *cd; cd = [DmFpsCounterItem new];
+    NSMenuItem *ci = [pm addItemWithTitle:@"Frame-Rate Counter" action:@selector(toggle:) keyEquivalent:@""]; ci.target = cd;   // the tick: validateMenuItem
+    return pm;
+}
+
 void front_run(void (*guest)(void)) {
     // A game: tell macOS its work is latency-critical, so the system does not trade its frame time for power while the frame rate is capped
     static id activity; activity = [[NSProcessInfo processInfo] beginActivityWithOptions:NSActivityUserInitiated | NSActivityLatencyCritical reason:@"game"];
@@ -1587,6 +1673,7 @@ void front_run(void (*guest)(void)) {
         [win makeKeyAndOrderFront:nil];
         screen_refresh(win.screen ?: NSScreen.mainScreen);
         g_win = win;
+        if (fps_wanted()) front_fps_show(1);
         [NSApp activateIgnoringOtherApps:YES];
         // A host another process starts (scripts/regress.py) is not activated (its focus state stays 2), so its window opened wherever it landed in the window order, and behind
         // another app's window macOS fires its display link about once a second: Breath of the Wild stepped up to 3 vsyncs at boot and never came back (20 fps runs).
@@ -1613,6 +1700,7 @@ void front_run(void (*guest)(void)) {
             dispatch_async(dispatch_get_main_queue(), ^{ [g_cheats_menu showPanel:nil]; });
         [[bar addItemWithTitle:@"Window" action:nil keyEquivalent:@""] setSubmenu:wm];
         [wm addItemWithTitle:@"Enter Full Screen" action:@selector(toggleFullScreen:) keyEquivalent:@"f"].keyEquivalentModifierMask = NSEventModifierFlagControl | NSEventModifierFlagCommand;
+        [[bar addItemWithTitle:@"Performance" action:nil keyEquivalent:@""] setSubmenu:front_perf_menu()];
         NSApp.mainMenu = bar;
         const char *fs = getenv("DM_FULLSCREEN");   // 1 (or any value but 0): start in fullscreen; 0, the settings window's Window, or unset: a window
         if (fs && strcmp(fs, "0")) {

@@ -600,6 +600,18 @@ class App(unittest.TestCase):
             a.settings = None
             self.assertEqual(pack_app.info_plist(a, '14.0', None)['DMLanguage'], 'fr')   # no list: --lang as given
 
+    def test_frame_rate_counter_default(self):   # the Frame-rate counter row's default as DMShowFPS: front_mac.m's default when no window, saved choice or env.txt sets DM_SHOW_FPS
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as d:
+            listed = Path(d) / 'launcher.json'; a = types.SimpleNamespace(**vars(self.args)); a.settings = str(listed)
+            for default, on in (('1', True), ('0', False)):
+                listed.write_text(json.dumps({'game': TID, 'settings': [{'env': 'DM_SHOW_FPS', 'kind': 'toggle', 'section': 'Game', 'label': 'Frame-rate counter', 'note': '',
+                                                                          'default': default, 'on': '1', 'off': '0'}]}))
+                p = pack_app.info_plist(a, '14.0', None)
+                self.assertIs(p['DMShowFPS'], on)
+                self.assertEqual(p['DMSettings'], [{'env': 'DM_SHOW_FPS', 'values': ['1', '0']}])   # a saved launcher.DM_SHOW_FPS is accepted (launcher.c)
+            listed.write_text(json.dumps({'game': TID, 'settings': []}))
+            self.assertNotIn('DMShowFPS', pack_app.info_plist(a, '14.0', None))   # no row: the counter starts off
+
     def test_saved_choices(self):
         """launcher.<VAR> in the app's preferences domain, as a front end or a settings window saves it: used from Finder or the Dock, checked against this build's settings,
         after the launch environment, the player's env.txt and the bundle's, and ignored with DM_SAVED_CHOICES=0"""
@@ -874,7 +886,8 @@ class Script(unittest.TestCase):
         with mock.patch.object(nsp, 'run', fake_run), mock.patch.object(nsp, 'PROG', self.prog), mock.patch.object(subprocess, 'run', sw_vers), mock.patch.object(nsp, 'chain_of', lambda repo: '0123456789ab'), \
              mock.patch.object(nsp, 'mac_gpu_arch', lambda *a: 'applegpu_g14s'), mock.patch.object(nsp, 'say', self.said.append):
             nsp.mac_app(sys.executable, REPO, out, 0x01008CF01BAAC000, tmp, tmp / 'ex', tmp / 'patched', tmp / 'dmhost', tmp / 'font', tmp / 'shader/cache' if gfx == 'nvn' else tmp / 'shader',
-                        kw.get('aoc'), gfx, 'en-US', g, 'Game', '1.0.0', 'org.nxnative.01008cf01baac000', None, kw.get('sign', ''), {}, tmp, gpus=kw.get('gpus', ''), prebake=kw.get('prebake', False))
+                        kw.get('aoc'), gfx, 'en-US', g, 'Game', '1.0.0', 'org.nxnative.01008cf01baac000', None, kw.get('sign', ''), {}, tmp, gpus=kw.get('gpus', ''), prebake=kw.get('prebake', False),
+                        **({'show_fps': kw['show_fps']} if 'show_fps' in kw else {}))
         self.pso_cmd = next((c for c in ran if len(c) > 1 and c[1].endswith('pso_offline.py')), None)   # before the packer
         self.settings_cmd = next(c for c in ran if len(c) > 1 and c[1].endswith('dm/games/settings.py'))
         c = ran[-1]; return {c[i]: c[i + 1] for i in range(3, len(c) - 1) if c[i].startswith('--')}, tmp
@@ -893,6 +906,9 @@ class Script(unittest.TestCase):
         self.assertEqual(o['--settings'], str(tmp / 'app/launcher.json'))   # the launcher settings the Mac front end reads, without the iPhone's own switches
         self.assertEqual(self.settings_cmd[2:], ['01008CF01BAAC000', str(tmp / 'patched'), str(tmp / 'ex/control.nacp'), str(tmp / 'app/launcher.json')])
         self.assertEqual((self.settings_env['SETTINGS_PLATFORM'], self.settings_env['GFXAPI'], self.settings_env['DM_LANG']), ('mac', 'nvn', 'en-US'))
+        self.assertEqual(self.settings_env['DM_SHOW_FPS'], '0')   # the frame-rate counter's default (build:DM_SHOW_FPS): off unless the NSP script passes --show-fps / SHOW_FPS
+        self.pack_cmd('nvn', show_fps=True)
+        self.assertEqual(self.settings_env['DM_SHOW_FPS'], '1')
         o, tmp = self.pack_cmd('vulkan', aoc=Path('/x/aoc'), sign='Developer ID Application: X (T)')
         self.assertEqual((o['--msl'], o['--aoc'], o['--sign']), (str(tmp / 'shader/vk'), '/x/aoc', 'Developer ID Application: X (T)'))
 

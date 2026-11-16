@@ -272,7 +272,7 @@ void dm_fps_lock_tick(void) {
     int re_mt = 0;
     for (int r = 0; r < nrow; r++)
         if (!strcmp(rows[r]->what, "Resident Evil MT Framework frame limit")) re_mt = 1;
-    if (high || re_mt) target = nvn_fps_high_now();   // 120 while frames fit, else 60: the game's step stays what the screen shows (hle_nvn.c fps_high)
+    if (high) target = nvn_fps_high_now();   // only a requested 120 fps target follows the dynamic 120/60 hold; 30/60 overrides remain exact
     if (nier) {
         // NieR:Automata US/EU 1.0.3 (3c10ec35c5ef4c3686b4053afb0e58e7):
         // - [base + 0x192be00] points to the NVN graphics device object whose +0x9c160 holds the present interval (1 = 60 FPS, 2 = 30 FPS),

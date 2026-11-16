@@ -48,12 +48,14 @@ static void ramp(id<MTLTexture> t, uint32_t seed) {
 }
 // Every texel of the single-sample image and every sample of the 4-sample target, decoded the same way: → how many texels hold the sample NVN puts there, of how many
 static size_t agree(id<MTLTexture> one, id<MTLTexture> four, size_t *distinct) {
+    *distinct = 0;
     NSError *e = nil; size_t W = one.width, H = one.height;
-    id<MTLFunction> f1 = [g_lib newFunctionWithName:@"rd1"], f4 = [g_lib newFunctionWithName:@"rd4"]; *distinct = 0;
-    CHECK(f1 && f4, "the readback functions are in the library"); if (!f1 || !f4) return 0;
+    id<MTLFunction> f1 = [g_lib newFunctionWithName:@"rd1"], f4 = [g_lib newFunctionWithName:@"rd4"];
+    CHECK(f1 && f4, "the readback functions exist"); if (!f1 || !f4) return 0;
     id<MTLComputePipelineState> r1 = [g_dev newComputePipelineStateWithFunction:f1 error:&e], r4 = [g_dev newComputePipelineStateWithFunction:f4 error:&e];
+    CHECK(r1 && r4, "the readback pipelines build"); if (!r1 || !r4) return 0;
     id<MTLBuffer> o1 = [g_dev newBufferWithLength:W * H * 16 options:MTLResourceStorageModeShared], o4 = [g_dev newBufferWithLength:W * H * 16 options:MTLResourceStorageModeShared];
-    CHECK(r1 && r4 && o1 && o4, "the readback pipelines and buffers are made"); if (!r1 || !r4 || !o1 || !o4) return 0;
+    CHECK(o1 && o4, "the readback buffers allocate"); if (!o1 || !o4) return 0;
     classic(^(id<MTLCommandBuffer> cb) {
         id<MTLComputeCommandEncoder> ce = [cb computeCommandEncoder];
         [ce setComputePipelineState:r1]; [ce setTexture:one atIndex:0]; [ce setBuffer:o1 offset:0 atIndex:0]; [ce dispatchThreads:MTLSizeMake(W, H, 1) threadsPerThreadgroup:MTLSizeMake(8, 8, 1)];
@@ -63,8 +65,7 @@ static size_t agree(id<MTLTexture> one, id<MTLTexture> four, size_t *distinct) {
     const float *a = o1.contents, *b = o4.contents; size_t ok = 0, nz = 0;
     for (size_t y = 0; y < H; y++) for (size_t x = 0; x < W; x++) {
         const float *ta = a + (y * W + x) * 4, *tb = b + (((y / 2) * (W / 2) + x / 2) * 4 + ((x & 1) | ((y & 1) << 1))) * 4;
-        const uint32_t *ua = (const uint32_t *)ta, *ub = (const uint32_t *)tb;   // the same bits, as the sample NVN puts there
-        ok += ua[0] == ub[0] && ua[1] == ub[1] && ua[2] == ub[2] && ua[3] == ub[3]; nz += ta[0] != a[0] || ta[1] != a[1] || ta[3] != a[3];
+        ok += ta[0] == tb[0] && ta[1] == tb[1] && ta[2] == tb[2] && ta[3] == tb[3]; nz += ta[0] != a[0] || ta[1] != a[1] || ta[3] != a[3];
     }
     *distinct = nz; return ok;
 }

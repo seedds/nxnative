@@ -212,6 +212,27 @@ static void prediction_made_base(id<MTLLibrary> lib) {
     if (g_comp4) CHECK(pso_build_ex(pso_desc(&alt, p->sh[0], p->sh[1], nil, 0), !alt.border, &error, 0) != nil && g_pb_built == built, "its draw takes the pipeline without compiling");
 }
 
+// A key that already drew with a stand-in asked for its own build then (pso_pend_demand): the prediction leaves it out of its candidates instead of asking whether its base
+// is made (a descriptor on the submit thread) in every submission until that build lands (issue #2438). Its attachment-free variant, with no stand-in, is still handed over
+static void prediction_standin(id<MTLLibrary> lib, id<MTLLibrary> other) {
+    NvProg *p = program(lib); static prog_t pg = {.serial = 980102}; serial_put(pg.serial, p);
+    state_reset(); S.prog = &pg; memset(&g_pass, 0, sizeof g_pass); g_pass.cfmt[0] = 70; g_pass.dfmt = g_pass.sfmt = 260; g_pass.samples = 1;
+    pso_key k, alt; pso_key_fill(&k, p->sh[0], p->sh[1], g_pass.cfmt, 260, 260, 1, 0); pso_key_fill(&alt, p->sh[0], p->sh[1], g_pass.cfmt, 0, 0, 1, 0);
+    NvProg *q = program(other); pso_key ko; pso_key_fill(&ko, q->sh[0], q->sh[1], g_pass.cfmt, 260, 260, 1, 0);
+    NSError *error = nil; id<MTLRenderPipelineState> stand = pso_build(pso_desc(&ko, q->sh[0], q->sh[1], nil, 0), !ko.border, &error);   // any pipeline: only its presence counts
+    CHECK(stand != nil, "a stand-in pipeline builds"); if (!stand) return;
+    hm_put_id(&g_pso_hy, &k, stand);
+    uint8_t commands[1024] = {0}; p_draw draw = {.prim = NVN_DRAW_PRIMITIVE_TRIANGLES, .count = 3};
+    unsigned size = (unsigned)((8 + sizeof draw + 7) & ~7u); op_hdr h = {OP_DRAW, size}, end = {OP_END, 8};
+    memcpy(commands, &h, 8); memcpy(commands + 8, &draw, sizeof draw); memcpy(commands + size, &end, 8);
+    uint64_t kicked = g_pp_kicked, admitted = g_pp_admit;
+    g_exec_next = commands; pso_predict_rest_(); g_exec_next = NULL;
+    CHECK(g_pp_kicked - kicked == 1 && g_pp_admit - admitted == 1, "the key with a stand-in is no candidate; its attachment-free variant is handed over");
+    pthread_mutex_lock(&g_pp_mu); int has_k = pso_pend_find(&k) >= 0, has_alt = pso_pend_find(&alt) >= 0; pthread_mutex_unlock(&g_pp_mu);
+    CHECK(!has_k && has_alt, "the build handed over is the attachment-free variant's");
+    CHECK(pso_pend_take(&alt) != nil, "and can be claimed");
+}
+
 int main(int argc, char **argv) { @autoreleasepool {
     keys();
     if (argc == 2 && !strcmp(argv[1], "--keys-only")) { printf("depth/stencil keys: %d checks, %d failed\n", checks, failed); return failed != 0; }
@@ -226,7 +247,11 @@ int main(int argc, char **argv) { @autoreleasepool {
         "vertex float4 v(uint n[[vertex_id]]) { float2 p[3]={float2(-1,-1),float2(3,-1),float2(-1,3)}; return float4(p[n],.5,1); }\n"
         "fragment float4 f() { return float4(0,1,0,1); }\n" options:nil error:&error];   // no base made from it: its predicted keys need a compile
     CHECK(fresh != nil, "second synthetic library compiles"); if (!fresh) { fprintf(stderr, "%s\n", error.localizedDescription.UTF8String); return 1; }
-    NvProg *p = program(lib); draws(p); invalid_descriptors(p); prediction(fresh); prediction_made_base(lib);
+    id<MTLLibrary> cold = [g_dev newLibraryWithSource:@"#include <metal_stdlib>\nusing namespace metal;\n"
+        "vertex float4 v(uint n[[vertex_id]]) { float2 p[3]={float2(-1,-1),float2(3,-1),float2(-1,3)}; return float4(p[n],.75,1); }\n"
+        "fragment float4 f() { return float4(0,0,1,1); }\n" options:nil error:&error];   // no base made from it either, for the stand-in case
+    CHECK(cold != nil, "third synthetic library compiles"); if (!cold) { fprintf(stderr, "%s\n", error.localizedDescription.UTF8String); return 1; }
+    NvProg *p = program(lib); draws(p); invalid_descriptors(p); prediction(fresh); prediction_made_base(lib); prediction_standin(cold, lib);
     const char *mode = getenv("DM_PSO_MTL4");
     CHECK((g_comp4 != nil) == (!mode || strcmp(mode, "0") != 0), "requested pipeline compiler path is exercised");
     printf("depth/stencil pipelines: %d checks, %d failed (%s)\n", checks, failed, g_comp4 ? "Metal 4" : "MTLDevice");

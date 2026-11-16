@@ -14,7 +14,8 @@ int main(void) { @autoreleasepool {
     NSString *src = @"#include <metal_stdlib>\nusing namespace metal;\n"
         "kernel void read_ms(texture2d_ms<float,access::read> t [[texture(0)]], device float4 *o [[buffer(0)]], uint2 p [[thread_position_in_grid]]) { for(uint s=0;s<t.get_num_samples();s++) o[(p.y*8+p.x)*t.get_num_samples()+s]=t.read(p,s); }\n";
     id<MTLLibrary> lib = [g_dev newLibraryWithSource:src options:nil error:&error]; CHECK(lib != nil); if (!lib) return 1;
-    id<MTLComputePipelineState> reader = [g_dev newComputePipelineStateWithFunction:[lib newFunctionWithName:@"read_ms"] error:&error]; CHECK(reader != nil); if (!reader) return 1;
+    id<MTLFunction> read_ms = [lib newFunctionWithName:@"read_ms"]; CHECK(read_ms != nil); if (!read_ms) return 1;
+    id<MTLComputePipelineState> reader = [g_dev newComputePipelineStateWithFunction:read_ms error:&error]; CHECK(reader != nil); if (!reader) return 1;
     MTLPixelFormat formats[] = {MTLPixelFormatRGBA8Unorm, MTLPixelFormatRG11B10Float, MTLPixelFormatRGBA16Float};
     id<MTLCommandQueue> q = [g_dev newCommandQueue];
     for (int fi = 0; fi < 3; fi++) for (int samples = 2; samples <= 4; samples *= 2) {

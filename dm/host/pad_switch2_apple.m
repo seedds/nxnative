@@ -153,13 +153,19 @@ static s2_pad *s2_pad_for(uint16_t pid) {   // a Joy-Con joins a pad that has th
         done(r.length >= S2_REPLY_DATA + len && ((const uint8_t *)r.bytes)[8] == len ? [r subdataWithRange:NSMakeRange(S2_REPLY_DATA, len)] : nil);
     }];
 }
-- (void)readCal:(int)slot done:(void (^)(void))done {   // the user's calibration when set, else the factory's
+- (void)readCal:(int)slot done:(void (^)(void))done {   // the stick's factory block (its parameters and calibration), then the user's calibration (s2_cal_from_flash)
     __weak S2Session *w = self;
-    uint32_t user = slot ? S2_ADDR_USER_STICK2 : S2_ADDR_USER_STICK1, factory = slot ? S2_ADDR_FACTORY_STICK2 : S2_ADDR_FACTORY_STICK1;
-    [self readMemory:0x0B at:user done:^(NSData *u) {
+    uint32_t user = slot ? S2_ADDR_USER_STICK2 : S2_ADDR_USER_STICK1, factory = slot ? S2_ADDR_STICK2 : S2_ADDR_STICK1;
+    [self readMemory:S2_STICK_BLOCK at:factory done:^(NSData *f) {
         S2Session *s = w; if (!s) return;
-        if (u && s2_cal_parse(u.bytes, u.length, &s->_cal[slot])) { done(); return; }
-        [s readMemory:0x0B at:factory done:^(NSData *f) { S2Session *s2 = w; if (!s2) return; if (f) s2_cal_parse(f.bytes, f.length, &s2->_cal[slot]); done(); }];
+        [s readMemory:0x0B at:user done:^(NSData *u) {
+            S2Session *s2 = w; if (!s2) return;
+            s2_cal *c = &s2->_cal[slot];
+            int from = s2_cal_from_flash(f.bytes, f.length, u.bytes, u.length, c);
+            LOG("[sw2] %s: stick %d calibration from the %s, dead zone %.1f %% of its travel (%s)", s2_kind(s2->_pid), slot, from == 2 ? "user's" : from ? "factory's" : "typical values",
+                s2_cal_dead_share(c) * 100, s2_cal_dead_own(c) > 0 ? "its own" : "the default");
+            done();
+        }];
     }];
 }
 - (void)setLEDs:(void (^)(void))done {
@@ -330,8 +336,13 @@ static s2_pad *s2_pad_for(uint16_t pid) {   // a Joy-Con joins a pad that has th
     int had = _rest.have; float was[3] = {_rest.bias[0], _rest.bias[1], _rest.bias[2]};
     s2_rest_update(&_rest, r.raw);
     if (_rest.have && (!had || was[0] != _rest.bias[0] || was[1] != _rest.bias[1] || was[2] != _rest.bias[2]) && ts - _restSaved > 30000000000ull) { [self saveRest]; _restSaved = ts; }
-    if (g_verbose && _reports % 33 == 1)
-        LOG("[sw2] %s: clock %u ms, %llu reports lost so far; buttons 0x%08x sticks %u,%u %u,%u accel %d,%d,%d gyro %d,%d,%d battery %u mV mouse %d,%d %u,%u", s2_kind(_pid), r.clock_ms, (unsigned long long)_lost, r.buttons, r.lx, r.ly, r.rx, r.ry, r.raw[0], r.raw[1], r.raw[2], r.raw[3], r.raw[4], r.raw[5], r.battery_mv, r.mouse_x, r.mouse_y, r.mouse_q, r.mouse_s);
+    if (g_verbose && _reports % 33 == 1) {
+        // The bytes the parser does not read (0x18..0x2F around the battery, and past the sensor at 0x3C), in hex: whether a report carries more than one IMU sample, or the
+        // sensor's own timestamp, is not known yet (the report has room for one 12-byte sample at 0x30)
+        char hex[3 * 0x50 + 1] = ""; const uint8_t *b = d.bytes; size_t len = d.length, o = 0;
+        for (size_t i = 0x18; i < len && o + 4 < sizeof hex; i++) if (i < 0x30 || i >= 0x3C) o += (size_t)snprintf(hex + o, sizeof hex - o, "%s%02x", i == 0x3C ? " | " : "", b[i]);
+        LOG("[sw2] %s: clock %u ms, %llu reports lost so far; buttons 0x%08x sticks %u,%u %u,%u accel %d,%d,%d gyro %d,%d,%d battery %u mV mouse %d,%d %u,%u; %zu bytes, 0x18..0x2f %s", s2_kind(_pid), r.clock_ms, (unsigned long long)_lost, r.buttons, r.lx, r.ly, r.rx, r.ry, r.raw[0], r.raw[1], r.raw[2], r.raw[3], r.raw[4], r.raw[5], r.battery_mv, r.mouse_x, r.mouse_y, r.mouse_q, r.mouse_s, len, hex);
+    }
     if (g_front.read) g_front.read(_pad);
     int player = s2_player(_pad), blocked = s2_blocked();
     [self playerSync];

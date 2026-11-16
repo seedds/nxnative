@@ -87,6 +87,20 @@ class SwapIn(unittest.TestCase):
         self.assertEqual(self.swap('rename-kill'), 'killed -9'); self.assertStates('absent', 'new', 'old')
         self.assertEqual(self.swap(), 'ok'); self.assertStates('new', 'absent', 'absent')
 
+    def test_kill_between_the_renames_then_a_rerun_that_fails_keeps_the_old_output(self):   # the aside copy is put back, not deleted, before the new one goes in
+        self.staged()
+        self.assertEqual(self.swap('rename-kill'), 'killed -9'); self.assertStates('absent', 'new', 'old')
+        self.assertEqual(self.swap('rename-fail'), 'OSError'); self.assertStates('old', 'new', 'absent')
+
+    def test_interrupt_right_after_the_rename_aside(self):   # between the two renames, not in the second: the old output still goes back
+        self.staged()
+        self.assertEqual(self.swap('aside-int'), 'KeyboardInterrupt'); self.assertStates('old', 'new', 'absent')
+
+    def test_putting_back_fails_names_where_the_old_output_is(self):   # nothing deleted; the next run puts it back and publishes
+        self.staged()
+        out = self.swap('rename-fail-back'); self.assertEqual(out, 'BuildError'); self.assertStates('absent', 'new', 'old')
+        self.assertEqual(self.swap(), 'ok'); self.assertStates('new', 'absent', 'absent')
+
 
 if __name__ == '__main__':
     unittest.main()

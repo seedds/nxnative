@@ -65,6 +65,7 @@ typedef void *EGLDisplay, *EGLConfig, *EGLContext, *EGLSurface; typedef int32_t 
 
 // ---------- GL enums ----------
 enum {
+    GL_NO_ERROR = 0, GL_INVALID_ENUM = 0x500, GL_INVALID_VALUE, GL_INVALID_OPERATION,
     GL_POINTS = 0, GL_LINES, GL_LINE_LOOP, GL_LINE_STRIP, GL_TRIANGLES, GL_TRIANGLE_STRIP, GL_TRIANGLE_FAN, GL_QUADS,
     GL_NEVER = 0x200, GL_SRC_COLOR = 0x300, GL_ONE_MINUS_SRC_COLOR, GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_DST_ALPHA, GL_ONE_MINUS_DST_ALPHA, GL_DST_COLOR,
     GL_ONE_MINUS_DST_COLOR, GL_SRC_ALPHA_SATURATE,
@@ -92,7 +93,7 @@ enum {
     GL_INCR_WRAP = 0x8507, GL_DECR_WRAP, GL_TEXTURE_CUBE_MAP = 0x8513, GL_TEXTURE_CUBE_MAP_POSITIVE_X = 0x8515, GL_TEXTURE_CUBE_MAP_NEGATIVE_Z = 0x851a,
     GL_MAX_VERTEX_ATTRIBS = 0x8869, GL_MAX_TEXTURE_IMAGE_UNITS = 0x8872, GL_RGBA32F = 0x8814, GL_RGB32F, GL_RGBA16F = 0x881a, GL_RGB16F,
     GL_TEXTURE_COMPARE_MODE = 0x884c, GL_TEXTURE_COMPARE_FUNC,
-    GL_ARRAY_BUFFER = 0x8892, GL_ELEMENT_ARRAY_BUFFER, GL_DEPTH24_STENCIL8 = 0x88f0,
+    GL_ARRAY_BUFFER = 0x8892, GL_ELEMENT_ARRAY_BUFFER, GL_DEPTH24_STENCIL8 = 0x88f0, GL_UNIFORM_BUFFER = 0x8a11,
     GL_FRAGMENT_SHADER = 0x8b30, GL_VERTEX_SHADER, GL_MAX_COMBINED_TEXTURE_IMAGE_UNITS = 0x8b4d, GL_SHADER_TYPE = 0x8b4f, GL_DELETE_STATUS = 0x8b80, GL_COMPILE_STATUS,
     GL_LINK_STATUS, GL_VALIDATE_STATUS, GL_INFO_LOG_LENGTH, GL_ATTACHED_SHADERS, GL_ACTIVE_UNIFORMS, GL_ACTIVE_UNIFORM_MAX_LENGTH, GL_SHADER_SOURCE_LENGTH,
     GL_ACTIVE_ATTRIBUTES, GL_ACTIVE_ATTRIBUTE_MAX_LENGTH, GL_SHADING_LANGUAGE_VERSION = 0x8b8c, GL_CURRENT_PROGRAM,
@@ -313,8 +314,18 @@ typedef struct { att_t col, depth, stencil; uint64_t gen; } fb_t;
 NAMES(fb_t, g_fbs, g_nfbs, g_capfbs)
 static fb_t *fb_of(GLuint n) { return n && n < g_nfbs ? g_fbs[n] : NULL; }
 
-typedef struct { uint8_t on, size, norm, div; GLenum type; GLsizei stride; uint64_t off; GLuint buf; } vattr_t;   // div: glVertexAttribDivisor (0 = per vertex)
-typedef struct { vattr_t a[16]; GLuint ebo; } vao_t;
+// A vertex array as GL 4.3 keeps it: 16 attributes and the 16 buffer bindings they read (glVertexAttribFormat, glVertexAttribBinding, glBindVertexBuffer).
+// vattr_t: on (the array enabled), the format (size, type, norm), rel: the attribute's offset in its binding's element, bind: its binding + 1, 0 = its own
+//   (attribute i reads binding i, GL's default).
+// vbind_t: buf and off: the buffer and where its first element starts; client: no buffer, off points into the game's memory (glVertexAttribPointer with no
+//   array buffer bound). stride: bytes between elements, 0 = every vertex reads the first (glBindVertexBuffer's 0 is literal); div: an element per div
+//   instances, 0 = per vertex.
+// glVertexAttribPointer is GL's shorthand for a format, binding i and that binding's buffer, offset and stride; glVertexAttribDivisor for binding i and its
+// divisor. A draw reads an attribute through its binding (vb_of), so every attribute on a binding follows a change to it.
+typedef struct { uint8_t on, size, norm, bind; GLenum type; uint32_t rel; } vattr_t;
+typedef struct { GLuint buf; GLsizei stride; uint8_t div, client; uint64_t off; } vbind_t;
+typedef struct { vattr_t a[16]; vbind_t b[16]; GLuint ebo; } vao_t;
+static vbind_t *vb_of(vao_t *v, int i) { int b = v->a[i].bind; return &v->b[b ? b - 1 : i]; }
 NAMES(vao_t, g_vaos, g_nvaos, g_capvaos)
 static vao_t g_vao0;   // the default vertex array (GL core has none, the compatibility profile does)
 
@@ -339,13 +350,30 @@ typedef struct { int is_prog; union { shader_t s; prog_t p; }; } sp_t;
 NAMES(sp_t, g_sps, g_nsps, g_capsps)
 static shader_t *shader_of(GLuint n) { return n && n < g_nsps && g_sps[n] && !g_sps[n]->is_prog ? &g_sps[n]->s : NULL; }
 static prog_t *prog_of(GLuint n) { return n && n < g_nsps && g_sps[n] && g_sps[n]->is_prog ? &g_sps[n]->p : NULL; }
+// GL's error flag: the first error since the last glGetError, which returns it and clears it; another error is not recorded while one is (GL lets an implementation keep
+// one flag). Recorded only where GL requires an error and the host does what GL does: a call or a value the host does not implement says so in a red line instead and
+// records nothing, so a game is never told of the host's own gaps. A link the library cannot serve still reports success (GL_LINK_STATUS), its draws skipped and reported
+// The first 8 errors are logged with the call that recorded them (a game's misuse, not a host fault: no red line)
+static GLenum g_gl_error;
+static void gl_error_at(GLenum e, const char *fn) {
+    if (!g_gl_error) g_gl_error = e;
+    static int n; if (n < 8) { n++; GLOG("GL error %#x recorded by %s (glGetError returns it once)%s", e, fn, n == 8 ? "; no more of these lines" : ""); }
+}
+#define gl_error(e) gl_error_at(e, __func__)
+// A shader or program name, as a call that takes one checks it: 1 for an object of that kind; else GL_INVALID_VALUE (no such object) or GL_INVALID_OPERATION (the other kind)
+static int sp_check(GLuint n, int prog, const char *fn) {
+    if (!n || n >= g_nsps || !g_sps[n]) { gl_error_at(GL_INVALID_VALUE, fn); return 0; }
+    if (!g_sps[n]->is_prog != !prog) { gl_error_at(GL_INVALID_OPERATION, fn); return 0; }
+    return 1;
+}
+#define SP_CHECK(n, prog) sp_check(n, prog, __func__)
 
 // ---------- Context state ----------
 // units: as many as GL_MAX_COMBINED_TEXTURE_IMAGE_UNITS says (LÖVE binds a texture of each type to every one at start); fb / read_fb: the draw and read framebuffers;
 // va: each attribute's current value (glVertexAttrib4f), what a vertex input reads when its array is disabled: LÖVE's VertexColor and ConstantColor
 #define NUNITS 96
 static struct {
-    GLuint array_buf, rb, fb, read_fb, prog, vao; int unit;
+    GLuint array_buf, uniform_buf, rb, fb, read_fb, prog, vao; int unit;
     struct { GLuint t2d, tcube, t3d, t2da; } units[NUNITS];
     float clear_c[4]; double clear_d; int clear_s;
     uint8_t cmask, dmask, depth, blend, cull, scissor, stencil, poffset, srgb;
@@ -379,6 +407,7 @@ static struct { int made; uint32_t w, h; __strong id<MTLTexture> col[NWIN], ds; 
 static void win_make(uint32_t w, uint32_t h) {
     @autoreleasepool {
         for (int i = 0; i < NWIN; i++) if (g_win.ticket[i]) mtl_present_wait(g_win.ticket[i]);
+        for (int i = 0; i < NWIN; i++) if (g_win.serial[i]) mtl_ext_tex_release(g_win.serial[i]);   // the surface it replaces (another size): let go once its presents complete
         MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:w height:h mipmapped:NO];
         td.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead; td.storageMode = MTLStorageModePrivate;
         for (int i = 0; i < NWIN; i++) { g_win.col[i] = [g_dev newTextureWithDescriptor:td]; g_win.serial[i] = mtl_ext_tex((__bridge void *)g_win.col[i]); g_win.ticket[i] = 0; }
@@ -567,6 +596,7 @@ static id<MTLSamplerState> tex_sampler(tex_t *t) {
 }
 static void lv_free(level_t *l) { free(l->data); memset(l, 0, sizeof *l); }
 static void tex_drop(tex_t *t) { for (int f = 0; f < 6; f++) for (int l = 0; l < MAXLV; l++) lv_free(&t->pend[f][l]); t->tex = nil; t->made = 0; t->defined = 0; t->levels = 0; t->gen++; }
+static void tex_write(tex_t *t, int face, int lv, uint32_t x, uint32_t y, uint32_t z, uint32_t w, uint32_t h, const void *data, size_t pitch);
 // Make the Metal texture from the levels given so far: as many levels as are given in a row from level 0 (and fit the size), or as glTexStorage said. rt: made for a framebuffer attachment
 static int tex_make(tex_t *t, int rt) {
     if (t->made) return t->tex != nil;
@@ -593,10 +623,12 @@ static int tex_make(tex_t *t, int rt) {
         if (swz && rt) RED1("texture %ux%u %s with a swizzle is a framebuffer attachment (Metal renders into no swizzled texture)", t->w, t->h, m->name);
         t->tex = [g_dev newTextureWithDescriptor:td];
         if (!t->tex) { GLOG("[RED] texture %ux%u %s (%d levels) could not be made", t->w, t->h, m->name, lv); t->made = 1; return 0; }
+        // The levels given so far go in through tex_write: a CPU write into a shared texture, a blit into a private one. Depth textures are always private, and a
+        // glTexImage2D(GL_DEPTH_COMPONENT, ..., pixels) level was once freed here unwritten (only shared textures were filled). No command buffer has the new texture yet
+        t->use = 0;
         for (int f = 0; f < faces; f++) for (int l = 0; l < lv; l++) {
             level_t *p = &t->pend[f][l];
-            if (p->data && td.storageMode == MTLStorageModeShared)
-                [t->tex replaceRegion:MTLRegionMake2D(0, 0, umax(1, t->w >> l), umax(1, t->h >> l)) mipmapLevel:l slice:f withBytes:p->data bytesPerRow:p->pitch bytesPerImage:0];
+            if (p->data) tex_write(t, f, l, 0, 0, 0, umax(1, t->w >> l), umax(1, t->h >> l), p->data, p->pitch);
         }
     }
     for (int f = 0; f < 6; f++) for (int l = 0; l < MAXLV; l++) lv_free(&t->pend[f][l]);
@@ -758,6 +790,11 @@ static MTLVertexFormat vfmt_of(const vattr_t *a) {
     return MTLVertexFormatInvalid;
 }
 static int vtype_bytes(GLenum t) { return t == GL_FLOAT || t == GL_INT || t == GL_UNSIGNED_INT ? 4 : t == GL_HALF_FLOAT || t == GL_SHORT || t == GL_UNSIGNED_SHORT ? 2 : 1; }
+// What a draw's pipeline takes of an attribute (vertex slot s): its format, and its binding's stride and divisor. Stride 0 is a constant fetch (pso_get),
+// which has no divisor, so one pipeline serves either
+static void vkey_set(pkey_t *k, int s, const vattr_t *a, const vbind_t *b) {
+    k->vf[s] = (uint32_t)vfmt_of(a); k->stride[s] = (uint16_t)b->stride; k->div[s] = b->stride ? b->div : 0;
+}
 static MTLBlendFactor bf_of(GLenum f) {
     switch (f) {
         case 0: return MTLBlendFactorZero; case 1: return MTLBlendFactorOne;
@@ -789,9 +826,13 @@ static id<MTLRenderPipelineState> pso_get(prog_t *p, const pkey_t *k) {
             int s = vs->a[i].slot;
             if (k->vf[s]) {
                 vd.attributes[s].format = (MTLVertexFormat)k->vf[s]; vd.attributes[s].offset = 0; vd.attributes[s].bufferIndex = 30 - s;
-                vd.layouts[30 - s].stride = k->stride[s];
-                if (k->div[s]) { vd.layouts[30 - s].stepFunction = MTLVertexStepFunctionPerInstance; vd.layouts[30 - s].stepRate = k->div[s]; }
-                else vd.layouts[30 - s].stepFunction = MTLVertexStepFunctionPerVertex;
+                if (!k->stride[s]) {   // a binding of stride 0: every vertex and instance reads its first element, as a disabled array's value is read
+                    vd.layouts[30 - s].stride = 16; vd.layouts[30 - s].stepFunction = MTLVertexStepFunctionConstant; vd.layouts[30 - s].stepRate = 0;
+                } else {
+                    vd.layouts[30 - s].stride = k->stride[s];
+                    if (k->div[s]) { vd.layouts[30 - s].stepFunction = MTLVertexStepFunctionPerInstance; vd.layouts[30 - s].stepRate = k->div[s]; }
+                    else vd.layouts[30 - s].stepFunction = MTLVertexStepFunctionPerVertex;
+                }
             } else {   // a disabled array: the attribute's current value (glVertexAttrib4f; (0, 0, 0, 1) by default)
                 vd.attributes[s].format = MTLVertexFormatFloat4; vd.attributes[s].offset = 0; vd.attributes[s].bufferIndex = 30 - s;
                 vd.layouts[30 - s].stride = 16; vd.layouts[30 - s].stepFunction = MTLVertexStepFunctionConstant; vd.layouts[30 - s].stepRate = 0;
@@ -932,25 +973,25 @@ static int draw_setup(void) {
     vao_t *v = cur_vao(); const shinfo *vs = p->si[0];
     id<MTLBuffer> cbuf[16] = {nil}; size_t coff[16] = {0};
     for (int i = 0; i < vs->na; i++) {
-        int s = vs->a[i].slot; vattr_t *a = &v->a[p->amap[s]];
+        int s = vs->a[i].slot; vattr_t *a = &v->a[p->amap[s]]; const vbind_t *vb = vb_of(v, p->amap[s]);
         if (!a->on) continue;
-        k.vf[s] = (uint32_t)vfmt_of(a);
-        k.stride[s] = a->stride ? a->stride : a->size * vtype_bytes(a->type); k.div[s] = a->div;
-        if (!k.vf[s] || (k.stride[s] & 3)) { RED1("vertex attribute %d: type %#x size %d stride %d not mapped", p->amap[s], a->type, a->size, a->stride); return 0; }
-        buf_t *b = buf_of(a->buf);
+        vkey_set(&k, s, a, vb);
+        if (!k.vf[s] || (k.stride[s] & 3)) { RED1("vertex attribute %d: type %#x size %d stride %d not mapped", p->amap[s], a->type, a->size, vb->stride); return 0; }
+        buf_t *b = buf_of(vb->buf);
         if (b && b->mb) continue;   // a vertex buffer: bound as it is
-        if (a->buf) { g_sk_attr++; RED1("vertex attribute %d reads a buffer with no data (%u)", p->amap[s], a->buf); return 0; }
+        if (vb->buf) { g_sk_attr++; RED1("vertex attribute %d reads a buffer with no data (%u)", p->amap[s], vb->buf); return 0; }
+        if (!vb->client) { g_sk_attr++; RED1("vertex attribute %d reads a binding with no buffer", p->amap[s]); return 0; }   // GL leaves such a read undefined
         // Client memory: GL lets the game keep the vertices in its own array, Metal needs a buffer, so copy the span this draw touches into a
         // transient block (GameMaker's runner draws every sprite and the screen composite through such arrays). The block keeps vertex i at i * stride from
         // its start, as the array does, so the draw's own first vertex, indices and base vertex read the same vertices; only lo..hi is copied. A per-instance
         // attribute (divisor d) is read by instance: elements 0 .. ceil(instances / d)
         {   draw_span();
-            int64_t lo = a->div ? 0 : g_dl_first, hi = a->div ? (g_dl_inst + (int64_t)a->div - 1) / a->div : g_dl_vend; if (hi - lo < 1) hi = lo + 1;
+            int64_t lo = vb->div ? 0 : g_dl_first, hi = vb->div ? (g_dl_inst + (int64_t)vb->div - 1) / vb->div : g_dl_vend; if (hi - lo < 1) hi = lo + 1;
             size_t stride = k.stride[s], esz = (size_t)a->size * (size_t)vtype_bytes(a->type);
             size_t len = lo < 0 ? 0 : (size_t)lo * stride + (size_t)(hi - lo - 1) * stride + esz;
             if (!esz || lo < 0 || len > (128u << 20)) { g_sk_attr++; RED1("vertex attribute %d: client array vertices %lld..%lld (%zu bytes) out of range", p->amap[s], (long long)lo, (long long)hi, len); return 0; }
             size_t off; id<MTLBuffer> mb = arena_alloc(len, &off);
-            memcpy((uint8_t *)mb.contents + off + (size_t)lo * stride, (const uint8_t *)(uintptr_t)a->off + (size_t)lo * stride, len - (size_t)lo * stride);
+            memcpy((uint8_t *)mb.contents + off + (size_t)lo * stride, (const uint8_t *)(uintptr_t)(vb->off + a->rel) + (size_t)lo * stride, len - (size_t)lo * stride);
             cbuf[s] = mb; coff[s] = off;   // bound below
         }
     }
@@ -964,7 +1005,7 @@ static int draw_setup(void) {
     for (int i = 0; i < vs->na; i++) {
         int s = vs->a[i].slot, gi = p->amap[s]; vattr_t *a = &v->a[gi];
         if (a->on && cbuf[s]) [e setVertexBuffer:cbuf[s] offset:coff[s] atIndex:30 - s];
-        else if (a->on) { buf_t *b = buf_of(a->buf); b->use = g_serial; [e setVertexBuffer:b->mb offset:a->off atIndex:30 - s]; }
+        else if (a->on) { const vbind_t *vb = vb_of(v, gi); buf_t *b = buf_of(vb->buf); b->use = g_serial; [e setVertexBuffer:b->mb offset:vb->off + a->rel atIndex:30 - s]; }
         else [e setVertexBytes:S.va[gi] length:16 atIndex:30 - s];
     }
     bind_uniforms_textures(p);
@@ -990,16 +1031,16 @@ static int draw_setup(void) {
             GLOG("   samplers %s", line); }
           // The first three vertices of every active attribute: where a black frame's quads actually are and which part of a texture they read
           { vao_t *va = cur_vao();
-            for (int i = 0; i < vsi->na && i < 8; i++) { int s = vsi->a[i].slot, gi = p->amap[s]; vattr_t *a = &va->a[gi];
+            for (int i = 0; i < vsi->na && i < 8; i++) { int s = vsi->a[i].slot, gi = p->amap[s]; vattr_t *a = &va->a[gi]; const vbind_t *vb = vb_of(va, gi);
               if (!a->on || a->size < 1 || a->size > 4) continue;
-              buf_t *b = buf_of(a->buf);
-              const uint8_t *base = b && b->mb ? (const uint8_t *)b->mb.contents + a->off : a->buf ? NULL : (const uint8_t *)(uintptr_t)a->off;
+              buf_t *b = buf_of(vb->buf); uint64_t at = vb->off + a->rel;
+              const uint8_t *base = b && b->mb ? (const uint8_t *)b->mb.contents + at : vb->client ? (const uint8_t *)(uintptr_t)at : NULL;
               if (!base) { GLOG("   attribute %d: no data", gi); continue; }
-              size_t st = a->stride ? a->stride : a->size * vtype_bytes(a->type);
+              size_t st = (size_t)vb->stride;
               char v[3][64]; for (int k = 0; k < 3; k++) { const float *f = (const float *)(base + k * st); char *o = v[k]; o += snprintf(o, 64, "(");
                 for (int c = 0; c < a->size && c < 4; c++) o += snprintf(o, 64 - (size_t)(o - v[k]), "%s%.4f", c ? " " : "", f[c]);
                 snprintf(o, 64 - (size_t)(o - v[k]), ")"); }
-              GLOG("   attribute %d: size %d type %#x stride %zu %s, first 3 vertices %s %s %s", gi, a->size, a->type, st, a->buf ? "buffer" : "client memory", v[0], v[1], v[2]); } } } }
+              GLOG("   attribute %d: size %d type %#x stride %zu %s, first 3 vertices %s %s %s", gi, a->size, a->type, st, vb->buf ? "buffer" : "client memory", v[0], v[1], v[2]); } } } }
 
     return 1;
 }
@@ -1198,7 +1239,7 @@ GL(glColorTable, void, GLenum target, GLenum ifmt, GLsizei w, GLenum format, GLe
     RED1("paletted texture (glColorTable, %d entries): palette lookup at upload, the index shift is %d", w, S.index_shift);
 }
 GL(glTexEnvi, void, GLenum t, GLenum p, GLint v) { (void)t; (void)p; (void)v; }
-GL(glGetError, GLenum, void) { return 0; }
+GL(glGetError, GLenum, void) { GLenum e = g_gl_error; g_gl_error = GL_NO_ERROR; return e; }   // the flag above, read and cleared
 // Everything recorded so far runs to its end (LÖVE when the window changes)
 // glFlush: hand the commands encoded so far to the GPU without waiting. The layer commits at the frame's end, so a game that flushes in the middle of a frame
 // (GameMaker's runner does, before a menu or a surface read) would otherwise see nothing but the pointer: eglGetProcAddress returned null for a name it only
@@ -1244,7 +1285,8 @@ GL(glGetIntegerv, void, GLenum p, GLint *v) {
         case GL_MAX_3D_TEXTURE_SIZE: case GL_MAX_ARRAY_TEXTURE_LAYERS: *v = 2048; return;
         case GL_MAX_VIEWPORT_DIMS: v[0] = v[1] = 16384; return;
         case GL_MAX_COLOR_ATTACHMENTS: case GL_MAX_DRAW_BUFFERS: *v = 1; return;   // one colour attachment (fb_t)
-        case GL_MAX_VERTEX_ATTRIBS: *v = 16; return;
+        case GL_MAX_VERTEX_ATTRIBS: case 0x82da: *v = 16; return;   // and MAX_VERTEX_ATTRIB_BINDINGS (vao_t)
+        case 0x82d9: *v = 2047; return;   // MAX_VERTEX_ATTRIB_RELATIVE_OFFSET, GL's minimum
         case GL_MAX_TEXTURE_IMAGE_UNITS: *v = 32; return;
         case GL_MAX_COMBINED_TEXTURE_IMAGE_UNITS: *v = NUNITS; return;
         case GL_MAX_VERTEX_UNIFORM_VECTORS: case GL_MAX_FRAGMENT_UNIFORM_VECTORS: *v = 1024; return;
@@ -1261,6 +1303,7 @@ GL(glGetIntegerv, void, GLenum p, GLint *v) {
         case GL_CURRENT_PROGRAM: *v = S.prog; return;
         case 0x8894: *v = S.array_buf; return;   // ARRAY_BUFFER_BINDING
         case 0x8895: *v = cur_vao()->ebo; return;   // ELEMENT_ARRAY_BUFFER_BINDING
+        case 0x8a28: *v = S.uniform_buf; return;   // UNIFORM_BUFFER_BINDING
         case 0x85b5: *v = S.vao; return;   // VERTEX_ARRAY_BINDING
         case 0x8069: *v = S.units[S.unit].t2d; return;   // TEXTURE_BINDING_2D
         case GL_TEXTURE_BINDING_CUBE_MAP: *v = S.units[S.unit].tcube; return;
@@ -1290,14 +1333,33 @@ GL(glGetFloatv, void, GLenum p, GLfloat *v) {
 // ---------- Buffers and vertex arrays ----------
 GL(glGenBuffers, void, GLsizei n, GLuint *out) { for (GLsizei i = 0; i < n; i++) out[i] = name_new((void ***)&g_bufs, &g_nbufs, &g_capbufs, sizeof(buf_t)); }
 GL(glDeleteBuffers, void, GLsizei n, const GLuint *b) {
-    for (GLsizei i = 0; i < n; i++) { buf_t *x = buf_of(b[i]); if (!x) continue; x->mb = nil; free(x); g_bufs[b[i]] = NULL; if (S.array_buf == b[i]) S.array_buf = 0; if (cur_vao()->ebo == b[i]) cur_vao()->ebo = 0; }
+    // GL unbinds a deleted buffer from the context and the current vertex array (another vertex array keeps its name)
+    for (GLsizei i = 0; i < n; i++) {
+        buf_t *x = buf_of(b[i]); if (!x) continue; x->mb = nil; free(x); g_bufs[b[i]] = NULL;
+        vao_t *v = cur_vao();
+        if (S.array_buf == b[i]) S.array_buf = 0; if (S.uniform_buf == b[i]) S.uniform_buf = 0; if (v->ebo == b[i]) v->ebo = 0;
+        for (int j = 0; j < 16; j++) if (v->b[j].buf == b[i]) v->b[j].buf = 0;
+    }
 }
 GL(glBindBuffer, void, GLenum target, GLuint b) {
     if (target == GL_ARRAY_BUFFER) S.array_buf = b;
     else if (target == GL_ELEMENT_ARRAY_BUFFER) cur_vao()->ebo = b;
+    else if (target == GL_UNIFORM_BUFFER) S.uniform_buf = b;
     else RED1("glBindBuffer target %#x not implemented", target);
 }
-static buf_t *bound_buf(GLenum target) { return buf_of(target == GL_ARRAY_BUFFER ? S.array_buf : target == GL_ELEMENT_ARRAY_BUFFER ? cur_vao()->ebo : 0); }
+// Both also bind the generic target, which the buffer calls on GL_UNIFORM_BUFFER use. The indexed uniform-buffer bindings are not kept: gl_shaders.py
+// translates a shader only when its uniforms are the default block (a named block makes it refuse the shader), so no translated shader reads one
+GL(glBindBufferRange, void, GLenum target, GLuint index, GLuint b, GLintptr off, GLsizeiptr size) {
+    (void)index; (void)off; (void)size;
+    if (target == GL_UNIFORM_BUFFER) S.uniform_buf = b; else RED1("glBindBufferRange target %#x not implemented", target);
+}
+GL(glBindBufferBase, void, GLenum target, GLuint index, GLuint b) {
+    (void)index;
+    if (target == GL_UNIFORM_BUFFER) S.uniform_buf = b; else RED1("glBindBufferBase target %#x not implemented", target);
+}
+static buf_t *bound_buf(GLenum target) {
+    return buf_of(target == GL_ARRAY_BUFFER ? S.array_buf : target == GL_ELEMENT_ARRAY_BUFFER ? cur_vao()->ebo : target == GL_UNIFORM_BUFFER ? S.uniform_buf : 0);
+}
 // Orphaning: data for a buffer a pending command buffer may still read goes into a new MTLBuffer, so draws already encoded keep the old contents
 GLB(glBufferData, void, GLenum target, GLsizeiptr size, const void *data, GLenum usage) {
     (void)usage;
@@ -1350,6 +1412,9 @@ typedef struct { uint64_t serial; } sync_t;
 GL(glFenceSync, void *, GLenum cond, GLbitfield flags) { (void)cond; (void)flags; sync_t *s = zalloc(sizeof *s); s->serial = g_serial; return s; }
 GL(glDeleteSync, void, void *s) { free(s); }
 GL(glWaitSync, void, void *s, GLbitfield flags, uint64_t timeout) { (void)s; (void)flags; (void)timeout; }   // a GPU-side wait: the command buffers run in order
+// glMemoryBarrier orders shader writes (images, storage buffers, transform feedback) and the GPU's writes to persistently mapped buffers against what reads
+// them next. Nothing here writes from a shader, the buffers are shared memory, and the command buffers run in order: there is nothing to wait for
+GL(glMemoryBarrier, void, GLbitfield barriers) { (void)barriers; }
 GLB(glClientWaitSync, GLenum, void *sy, GLbitfield flags, uint64_t timeout_ns) {
     sync_t *s = sy;
     if (!s) return 0x911d;   // WAIT_FAILED
@@ -1368,11 +1433,35 @@ GL(glBindVertexArray, void, GLuint v) { S.vao = v; }
 GL(glEnableVertexAttribArray, void, GLuint i) { if (i < 16) cur_vao()->a[i].on = 1; }
 GL(glDisableVertexAttribArray, void, GLuint i) { if (i < 16) cur_vao()->a[i].on = 0; }
 GL(glEnableVertexArrayAttrib, void, GLuint vao, GLuint i) { vao_t *v = vao && vao < g_nvaos && g_vaos[vao] ? g_vaos[vao] : &g_vao0; if (i < 16) v->a[i].on = 1; }
+static void va_format(vattr_t *a, GLint size, GLenum type, uint32_t norm, GLuint rel) { a->size = size == 0x80e1 ? 4 : (uint8_t)size; a->type = type; a->norm = (norm & 0xff) != 0; a->rel = rel; }
+static uint8_t va_div(GLuint d) { return d > 255 ? 255 : (uint8_t)d; }
 GL(glVertexAttribPointer, void, GLuint i, GLint size, GLenum type, uint32_t norm, GLsizei stride, const void *ptr) {
-    if (i >= 16) { RED1("vertex attribute %u over 15", i); return; }
-    vattr_t *a = &cur_vao()->a[i]; a->size = size == 0x80e1 ? 4 : size; a->type = type; a->norm = (norm & 0xff) != 0; a->stride = stride; a->off = (uintptr_t)ptr; a->buf = S.array_buf;
+    if (i >= 16 || stride < 0) { gl_error(GL_INVALID_VALUE); return; }   // GL_MAX_VERTEX_ATTRIBS
+    vao_t *v = cur_vao(); vattr_t *a = &v->a[i]; vbind_t *b = &v->b[i];
+    va_format(a, size, type, norm, 0); a->bind = 0;
+    // Stride 0 is tightly packed: GL makes it the format's size here, on the binding (its effective stride), so another attribute on it keeps it
+    b->buf = S.array_buf; b->client = !S.array_buf; b->off = (uintptr_t)ptr; b->stride = stride ? stride : a->size * vtype_bytes(type);
 }
-GL(glVertexAttribDivisor, void, GLuint i, GLuint d) { if (i < 16) cur_vao()->a[i].div = d > 255 ? 255 : (uint8_t)d; }
+GL(glVertexAttribDivisor, void, GLuint i, GLuint d) {
+    if (i >= 16) { gl_error(GL_INVALID_VALUE); return; }
+    vao_t *v = cur_vao(); v->a[i].bind = 0; v->b[i].div = va_div(d);
+}
+GL(glVertexAttribFormat, void, GLuint i, GLint size, GLenum type, uint32_t norm, GLuint rel) {
+    if (i >= 16 || rel > 2047) { gl_error(GL_INVALID_VALUE); return; }   // MAX_VERTEX_ATTRIB_RELATIVE_OFFSET
+    va_format(&cur_vao()->a[i], size, type, norm, rel);
+}
+GL(glVertexAttribBinding, void, GLuint i, GLuint bi) {
+    if (i >= 16 || bi >= 16) { gl_error(GL_INVALID_VALUE); return; }   // MAX_VERTEX_ATTRIB_BINDINGS
+    cur_vao()->a[i].bind = (uint8_t)(bi + 1);
+}
+GL(glBindVertexBuffer, void, GLuint bi, GLuint buf, GLintptr off, GLsizei stride) {
+    if (bi >= 16 || off < 0 || stride < 0) { gl_error(GL_INVALID_VALUE); return; }
+    vbind_t *b = &cur_vao()->b[bi]; b->buf = buf; b->client = 0; b->off = (uint64_t)off; b->stride = stride;   // stride 0 is literal (vbind_t)
+}
+GL(glVertexBindingDivisor, void, GLuint bi, GLuint d) {
+    if (bi >= 16) { gl_error(GL_INVALID_VALUE); return; }
+    cur_vao()->b[bi].div = va_div(d);
+}
 GL(glVertexAttrib4f, void, GLuint i, GLfloat x, GLfloat y, GLfloat z, GLfloat w) { if (i < 16) { S.va[i][0] = x; S.va[i][1] = y; S.va[i][2] = z; S.va[i][3] = w; } }
 GL(glVertexAttrib4fv, void, GLuint i, const GLfloat *v) { if (i < 16) memcpy(S.va[i], v, sizeof S.va[i]); }
 
@@ -1693,7 +1782,9 @@ GL(glCreateProgram, GLuint, void) {
     GLuint n = name_new((void ***)&g_sps, &g_nsps, &g_capsps, sizeof(sp_t)); g_sps[n]->is_prog = 1; return n;
 }
 GL(glShaderSource, void, GLuint sh, GLsizei count, const GLchar *const *str, const GLint *len) {
-    shader_t *s = shader_of(sh); if (!s) return;
+    if (!SP_CHECK(sh, 0)) return;
+    if (count < 0) { gl_error(GL_INVALID_VALUE); return; }
+    shader_t *s = shader_of(sh);
     size_t n = 0;
     for (GLsizei i = 0; i < count; i++) n += len && len[i] >= 0 ? (size_t)len[i] : strlen(str[i]);
     free(s->src); s->src = zalloc(n + 1); s->len = 0;
@@ -1702,7 +1793,8 @@ GL(glShaderSource, void, GLuint sh, GLsizei count, const GLchar *const *str, con
     s->compiled = 0;
 }
 GLB(glCompileShader, void, GLuint sh) {
-    shader_t *s = shader_of(sh); if (!s || !s->src) return;
+    if (!SP_CHECK(sh, 0)) return;
+    shader_t *s = shader_of(sh); if (!s->src) return;
     uint8_t h[CC_SHA256_DIGEST_LENGTH]; CC_SHA256(s->src, (CC_LONG)s->len, h);
     for (int i = 0; i < 8; i++) snprintf(s->key + 2 * i, 3, "%02x", h[i]);
     sh_capture(s);
@@ -1713,7 +1805,8 @@ GLB(glCompileShader, void, GLuint sh) {
     else OLOG("CompileShader %s", s->key);
 }
 GL(glGetShaderiv, void, GLuint sh, GLenum p, GLint *v) {
-    shader_t *s = shader_of(sh); if (!s) { *v = 0; return; }
+    if (!SP_CHECK(sh, 0)) { *v = 0; return; }
+    shader_t *s = shader_of(sh);
     switch (p) {
         case GL_COMPILE_STATUS: *v = 1; return;   // a shader the library lacks still compiles: its program's draws are skipped (and reported)
         case GL_INFO_LOG_LENGTH: *v = 0; return;
@@ -1730,21 +1823,26 @@ static void shader_release(GLuint *slot) {   // a program lets go of the shader 
     if (s && --s->refs <= 0 && s->deleted) shader_free(sh);
 }
 GL(glDeleteShader, void, GLuint sh) {
-    shader_t *s = shader_of(sh); if (!s) return;
+    if (!sh || !SP_CHECK(sh, 0)) return;   // 0 is silently ignored
+    shader_t *s = shader_of(sh);
     OLOG("DeleteShader %u%s", sh, s->refs ? " (attached: flagged)" : "");
     if (s->refs) s->deleted = 1; else shader_free(sh);
 }
-// One shader per stage: attaching another replaces it (GLES refuses a second one; the shader tables have one stage each)
+// One shader per stage: attaching another replaces it (GLES refuses a second one; the shader tables have one stage each), said once: desktop GL would link both. The same
+// shader again is GL_INVALID_OPERATION, and nothing changes, its count included
 GL(glAttachShader, void, GLuint pr, GLuint sh) {
-    prog_t *p = prog_of(pr); shader_t *s = shader_of(sh); if (!p || !s) return;
+    if (!SP_CHECK(pr, 1) || !SP_CHECK(sh, 0)) return;
+    prog_t *p = prog_of(pr); shader_t *s = shader_of(sh);
     GLuint *slot = s->type == GL_VERTEX_SHADER ? &p->vs : &p->fs;
-    if (*slot == sh) return;
+    if (*slot == sh) { gl_error(GL_INVALID_OPERATION); return; }
+    if (*slot) RED1("program %u: a second %s shader (%u) replaces the first (%u): desktop GL links both, the shader tables have one per stage", pr, s->type == GL_VERTEX_SHADER ? "vertex" : "fragment", sh, *slot);
     shader_release(slot); *slot = sh; s->refs++;
 }
 GL(glDetachShader, void, GLuint pr, GLuint sh) {
-    prog_t *p = prog_of(pr); if (!p || !sh) return;
+    if (!SP_CHECK(pr, 1) || !SP_CHECK(sh, 0)) return;
+    prog_t *p = prog_of(pr);
     OLOG("DetachShader %u from %u", sh, pr);
-    if (p->vs == sh) shader_release(&p->vs); else if (p->fs == sh) shader_release(&p->fs);
+    if (p->vs == sh) shader_release(&p->vs); else if (p->fs == sh) shader_release(&p->fs); else gl_error(GL_INVALID_OPERATION);   // not attached to it
 }
 static void prog_clear(prog_t *p) {
     for (int i = 0; i < p->npc; i++) if (p->pc[i].pso) CFRelease(p->pc[i].pso);
@@ -1754,7 +1852,8 @@ static void prog_clear(prog_t *p) {
 // Uniforms are merged by name over both stages, as GL links them; a location is uniform index × 4096 + array element
 GLB(glLinkProgram, void, GLuint pr) {
     static uint32_t serials;
-    prog_t *p = prog_of(pr); if (!p) return;
+    if (!SP_CHECK(pr, 1)) return;
+    prog_t *p = prog_of(pr);
     prog_clear(p);
     shader_t *vs = shader_of(p->vs), *fs = shader_of(p->fs);
     if (!vs || !fs || !vs->fn || !fs->fn) { RED1("program %u: a shader is missing from the library, its draws are skipped", pr); return; }
@@ -1787,14 +1886,17 @@ GLB(glLinkProgram, void, GLuint pr) {
     OLOG("LinkProgram %u: vs %s fs %s, %d uniforms", pr, vs->key, fs->key, p->nu);
 }
 GL(glBindAttribLocation, void, GLuint pr, GLuint index, const GLchar *name) {   // takes effect at the next link
-    prog_t *p = prog_of(pr); if (!p || index >= 16 || !name) return;
+    if (!SP_CHECK(pr, 1)) return;
+    if (index >= 16) { gl_error(GL_INVALID_VALUE); return; }   // GL_MAX_VERTEX_ATTRIBS
+    prog_t *p = prog_of(pr); if (!name) return;
     int j = 0; while (j < p->nbind && strcmp(p->bind[j].name, name)) j++;
     if (j == 16) { RED1("more than 16 attribute bindings in a program"); return; }
     if (j == p->nbind) { strlcpy(p->bind[j].name, name, sizeof p->bind[j].name); p->nbind++; }
     p->bind[j].index = (int)index;
 }
 GL(glGetProgramiv, void, GLuint pr, GLenum p, GLint *v) {
-    prog_t *x = prog_of(pr); if (!x) { *v = 0; return; }
+    if (!SP_CHECK(pr, 1)) { *v = 0; return; }
+    prog_t *x = prog_of(pr);
     switch (p) {
         case GL_LINK_STATUS: case GL_VALIDATE_STATUS: *v = 1; return;   // as glGetShaderiv's compile status
         case GL_INFO_LOG_LENGTH: *v = 0; return;
@@ -1811,16 +1913,19 @@ static void prog_free(GLuint pr) {   // the program goes, and its attachments wi
 }
 // As in GL, the current program deleted stays in use, its draws going on, until another is made current
 GL(glDeleteProgram, void, GLuint pr) {
-    prog_t *p = prog_of(pr); if (!p) return;
+    if (!pr || !SP_CHECK(pr, 1)) return;   // 0 is silently ignored
+    prog_t *p = prog_of(pr);
     OLOG("DeleteProgram %u%s", pr, S.prog == pr ? " (current: flagged)" : "");
     if (S.prog == pr) p->deleted = 1; else prog_free(pr);
 }
 GL(glUseProgram, void, GLuint pr) {
+    if (pr && !SP_CHECK(pr, 1)) return;   // an error leaves the current program as it is
     GLuint old = S.prog; S.prog = pr;
     prog_t *o = prog_of(old); if (old != pr && o && o->deleted) prog_free(old);
 }
 GL(glGetAttribLocation, GLint, GLuint pr, const GLchar *name) {
-    prog_t *p = prog_of(pr); if (!p || !p->linked) return -1;
+    if (!SP_CHECK(pr, 1)) return -1;
+    prog_t *p = prog_of(pr); if (!p->linked) return -1;
     for (int i = 0; i < p->si[0]->na; i++) if (!strcmp(p->si[0]->a[i].name, name)) return p->amap[p->si[0]->a[i].slot];
     return -1;
 }

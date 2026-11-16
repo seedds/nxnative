@@ -179,10 +179,70 @@ static void closed_thread_wait(void) {
     assert(!pthread_join(pt, NULL));
     wait_finish(&w, 0, 0); event_close(replacement);
 }
+// GetThreadId / GetThreadCoreMask on a handle another thread closes: the close frees an exited
+// thread at once, so a lookup outside G read freed memory (ASan: heap-use-after-free; TSan: race).
+static _Atomic int query_stop;
+static void *query_body(void *arg) {
+    uint32_t h = (uint32_t)(uintptr_t)arg;
+    for (;;) {
+        uint64_t r[32] = {0, h}; assert(svc_thread(0x25, r));
+        if (r[0] == R_BAD_HANDLE) break;
+        assert(!r[0] && r[1] >= 0x51);
+        uint64_t m[32] = {0, 0, h}; assert(svc_thread(0x0E, m));
+        if (m[0] == R_BAD_HANDLE) break;
+        assert(!m[0] && m[2] == 7);
+    }
+    return NULL;
+}
+static void query_close(void) {
+    for (int round = 0; round < 200; round++) {
+        thr_t *t = new_thread(); t->exited = 1; t->id = 0x51 + round;
+        pthread_t pt; assert(!pthread_create(&pt, NULL, query_body, (void *)(uintptr_t)t->handle));
+        for (int i = 0; i < round % 8; i++) sched_yield();
+        close_handle(t->handle);
+        assert(!pthread_join(pt, NULL));
+    }
+}
+// SetThreadCoreMask from another thread while the target reads its own core without G: each read is the
+// core before or after, and the fields are stored and loaded atomically (TSan reports plain accesses).
+static void *core_body(void *arg) {
+    pthread_setspecific(g_keythr, arg);
+    while (!query_stop) {
+        uint64_t r[32] = {0}; assert(svc_thread(0x10, r));
+        assert(r[0] == 0 || r[0] == 2);
+    }
+    return NULL;
+}
+static void core_mask(void) {
+    thr_t *t = new_thread(); t->core = 0; t->mask = 1; pthread_t pt;
+    query_stop = 0; assert(!pthread_create(&pt, NULL, core_body, t));
+    for (int i = 0; i < 20000; i++) {
+        uint64_t r[32] = {t->handle, (uint64_t)-3, i & 1 ? 1 : 4}; assert(svc_thread(0x0F, r) && !r[0]);
+    }
+    query_stop = 1; assert(!pthread_join(pt, NULL));
+    pthread_mutex_lock(&G); t->exited = 1; pthread_mutex_unlock(&G);
+    close_handle(t->handle);
+}
+// CloseHandle before StartThread: the real CreateThread's pthread waits for the start, and must end
+// without entering guest code (the stub dm_thread_enter aborts), freeing the object and its thread-limit slot.
+static void closed_unstarted(void) {
+    int base = thr_limit_used();
+    for (int i = 0; i < 24; i++) {
+        uint64_t r[32] = {0, 0x1000, 0, 0x2000, 44, 0}; assert(svc_thread(0x08, r) && !r[0]);
+        if (i & 1) sched_yield();   // closes both before and after the pthread reaches its wait
+        close_handle((uint32_t)r[1]);
+    }
+    uint64_t deadline = now_ns() + 2000000000;
+    for (;;) {
+        int handles, live, objects; thr_counts(&handles, &live, &objects);
+        if (objects == 1 && thr_limit_used() == base) break;
+        assert(now_ns() < deadline); usleep(1000);
+    }
+}
 int main(int argc, char **argv) {
     alarm(10); svc_thread_main_init();
-    const char *names[] = {"framing", "endpoints", "signal-clear", "close-reuse", "snapshot", "cancel-release", "thread-close"};
-    void (*tests[])(void) = {framing, endpoints, signal_then_clear, close_and_reuse, handle_array_snapshot, cancellation_and_release, closed_thread_wait};
+    const char *names[] = {"framing", "endpoints", "signal-clear", "close-reuse", "snapshot", "cancel-release", "thread-close", "query-close", "core-mask", "closed-unstarted"};
+    void (*tests[])(void) = {framing, endpoints, signal_then_clear, close_and_reuse, handle_array_snapshot, cancellation_and_release, closed_thread_wait, query_close, core_mask, closed_unstarted};
     for (unsigned i = 0; i < sizeof tests / sizeof *tests; i++) {
         if (argc > 1 && strcmp(argv[1], names[i])) continue;
         tests[i](); printf("PASS: %s\n", names[i]);

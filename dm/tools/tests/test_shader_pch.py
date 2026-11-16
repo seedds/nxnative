@@ -19,7 +19,7 @@ import dmsh_chain  # noqa: E402
 import dmsh_pch  # noqa: E402
 import ios_metal  # noqa: E402
 
-MAC = ['xcrun', '-sdk', 'macosx', 'metal', '-c', '-O1', dmsh_chain.MAC_MIN_FLAG, '-fpreserve-invariance', '-fwrapv']   # dmsh_build.py MAC_METAL (that file is a script that runs a build when imported)
+MAC = dmsh_chain.MAC_METAL   # the build's Mac compile
 SHADERS = {
     'vertex': 'vertex float4 main0(uint v [[vertex_id]], constant float4* c [[buffer(0)]]) { return c[v]; }\n',
     'fragment_many': dmsh_pch.PROBE.split('using namespace metal;\n')[1],

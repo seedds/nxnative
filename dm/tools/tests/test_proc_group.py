@@ -1,7 +1,7 @@
 """proc_group.py and its two callers, the NSP script's run and regress.py's run_heavy, on real process trees (fixtures/proc_tree.py: a wrapper and a child of it in the
-group the supervisor owns, each ready before the test acts): a cancellation (an interrupt raised in the progress callback, a SIGTERM, an error writing the log, a second
+group the supervisor owns, each ready before the test acts): a cancellation (an interrupt raised in the progress callback, a SIGTERM, a SIGHUP, an error writing the log, a second
 interrupt, a paused job) stops the whole group within its grace period, a child left running after the wrapper's normal exit (holding the output or not) is stopped and
-fails the step, exit codes in ok pass and others fail, and cli gives SIGTERM's handler back. Every check is that no process of the group is left, not only the wrapper.
+fails the step, exit codes in ok pass and others fail, and cli gives SIGTERM's and SIGHUP's handlers back. Every check is that no process of the group is left, not only the wrapper.
 No game files needed; a temporary folder per test."""
 import contextlib
 import ctypes
@@ -169,24 +169,24 @@ class Run(Tree):
 
 
 class Cli(Tree):
-    """cli's SIGTERM handler: set while it runs, the caller's again after it, whichever way it ends"""
+    """cli's SIGTERM and SIGHUP handlers: set while it runs, the caller's again after it, whichever way it ends"""
     def setUp(self):
         super().setUp()
         for cm in (mock.patch.object(nsp, 'PROG', nsp.Progress('off')), contextlib.redirect_stdout(io.StringIO()), mock.patch.object(nsp, 'parse_args')):
             cm.__enter__(); self.addCleanup(cm.__exit__, None, None, None)
         self.mine = lambda *a: None
-        self.addCleanup(signal.signal, signal.SIGTERM, signal.signal(signal.SIGTERM, self.mine))
+        for sig in nsp.STOPS: self.addCleanup(signal.signal, sig, signal.signal(sig, self.mine))
 
     def cli(self, main):
         with mock.patch.object(nsp, 'main', side_effect=main): code = nsp.cli([])
-        self.assertIs(signal.getsignal(signal.SIGTERM), self.mine)
+        for sig in nsp.STOPS: self.assertIs(signal.getsignal(sig), self.mine)
         return code
 
     def test_success_failure_interrupt(self):
         def raise_(e):
             def f(_): raise e
             return f
-        self.assertEqual(self.cli(lambda _: self.assertIs(signal.getsignal(signal.SIGTERM), nsp._sigterm)), 0)
+        self.assertEqual(self.cli(lambda _: [self.assertIs(signal.getsignal(sig), nsp._sigterm) for sig in nsp.STOPS] and None), 0)
         self.assertEqual(self.cli(raise_(nsp.BuildError('no'))), 1)
         self.assertEqual(self.cli(raise_(KeyboardInterrupt())), 130)
         with self.assertRaises(ValueError): self.cli(raise_(ValueError('unexpected')))
@@ -199,6 +199,16 @@ class Cli(Tree):
                 if line.startswith('READY '): ids.append(self.ready(line)); os.kill(os.getpid(), signal.SIGTERM)
             nsp.run(self.cmd(), self.log, on_line=on_line)
         self.assertEqual(self.cli(main), 143)
+        self.assert_gone(*ids[0])
+        self.assertEqual(self.marks(), ['TERM'])
+
+    def test_sighup_during_a_tool(self):   # the terminal closed: the shell's SIGHUP reaches the script's job, not the tool's group (a session of its own)
+        ids = []
+        def main(_):
+            def on_line(line):
+                if line.startswith('READY '): ids.append(self.ready(line)); os.kill(os.getpid(), signal.SIGHUP)
+            nsp.run(self.cmd(), self.log, on_line=on_line)
+        self.assertEqual(self.cli(main), 129)
         self.assert_gone(*ids[0])
         self.assertEqual(self.marks(), ['TERM'])
 

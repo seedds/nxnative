@@ -12,7 +12,7 @@ static int checks, failed;
 static int same(uint64_t gpu, const vk_key *k, const uint8_t *src) {   // the kept buffer against vconv_elem
     for (int i = 0; i < g_vk_n; i++) if (g_vk_list[i]->gpu == gpu) {
         const float *got = ((__bridge id<MTLBuffer>)g_vk_list[i]->buf).contents; static const uint8_t zeros[16];
-        for (uint64_t v = 0; v < k->nt; v++) { float want[4]; vconv_elem((int)k->fmt, v < k->nv ? src + v * k->stride : zeros, want); if (memcmp(got + 4 * v, want, 16)) return 0; }
+        for (uint64_t v = 0; v < k->nt; v++) { float want[4]; vconv_elem((int)k->fmt, v < k->nv ? src + v * k->stride : zeros, want); if (memcmp(got + 4 * v, want, 16)) return 0; }   // NOLINT(bugprone-suspicious-memory-comparison): a kept conversion must be bit for bit the fresh one (NaN payloads, -0)
         return 1; }
     return 0;
 }
@@ -20,7 +20,7 @@ static void wr(uint8_t *p, uint8_t v) { dm_guest_write_prepare(p, 1); *p = v; } 
 int main(void) { @autoreleasepool {
     mtl_init();
     size_t pg = (size_t)getpagesize(), poolsize = 64 * pg; uint8_t *mem = NULL; if (posix_memalign((void **)&mem, pg, poolsize)) abort();
-    srand(20261111); for (size_t i = 0; i < poolsize; i++) mem[i] = (uint8_t)rand();
+    srand(20261111); for (size_t i = 0; i < poolsize; i++) mem[i] = (uint8_t)rand();   // NOLINT(bugprone-random-generator-seed): the same pool contents every run, so a failure repeats
     mtl_pool_add(mem, poolsize); nvn_dirty_add_range(mem, poolsize);
     static const int formats[] = { 0x14, 0x15, 0x10, 0x11, 0x26, 0x57 };   // RG16UI, RG16I, RG8I, RG16F, RGBA8 snorm, RG8_UI2F
     for (size_t fi = 0; fi < sizeof formats / sizeof *formats; fi++) {

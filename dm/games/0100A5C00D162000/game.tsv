@@ -35,6 +35,10 @@ app_pool	0xCD500000
 # the rewritten modules take 80 MB (main 59.9, sdk 12.7, subsdk0 7.3), more than the default 64 MB of used memory: with 64 MB the heap request plus the modules exceeds the pool and SetHeapSize fails
 mem_used	0x5400000
 
+# ---- Graphics ----
+# the game calls nvnDeviceSetDepthMode with near = 0 (its log: "this run needs ... depth near=0"): the pipeline bases made before it runs are made for that mode
+depth_mode	zero
+
 # ---- Shader split (shader_split.py; Unity Shader objects, read by unityfs.py) ----
 shader_groups	/Data/=data
 shader_note	Cuphead shaders

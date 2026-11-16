@@ -73,6 +73,16 @@ int main(void) { @autoreleasepool {
     EXPECT("bundle: this GPU's archive", 1, [NSFileManager.defaultManager fileExistsAtPath:[bundle stringByAppendingFormat:@"/%@.mtl4a", gpu]]);
     NSData *archiveBytes = [NSData dataWithContentsOfFile:[bundle stringByAppendingFormat:@"/%@.mtl4a", gpu]];
     EXPECT("archive guard: real offline archive accepted", 1, arch_file_ok([bundle stringByAppendingFormat:@"/%@.mtl4a", gpu]));
+    // what the open reads first (arch_open): the records outside __TEXT (__AIR_DATA) and the libraries (__TEXT,__metallib), not the GPU code
+    @autoreleasepool {
+        NSString *ap = [bundle stringByAppendingFormat:@"/%@.mtl4a", gpu]; arch_reads rd = {0};
+        EXPECT("archive reads: offline archive checked", 1, arch_file_check(ap, &rd));
+        EXPECT("archive reads: offline archive, records and libraries", 2, rd.n);
+        uint64_t tot = 0; for (int i = 0; i < rd.n; i++) tot += rd.len[i];
+        EXPECT("archive reads: offline archive, less than the file", 1, tot > 0 && tot < archiveBytes.length);
+        NSError *e = nil; EXPECT("archive reads: offline archive opens", 1, arch_open(ap, &e) != nil);
+        EXPECT("archive reads: not an archive opens nothing", 1, arch_open(bad, &e) == nil);
+    }
     for (NSUInteger len = 32; len < archiveBytes.length; len = MIN(len * 2, archiveBytes.length)) {
         [[archiveBytes subdataWithRange:NSMakeRange(0, len)] writeToFile:bad atomically:YES];
         EXPECT("archive guard: truncated offline archive refused", 0, arch_file_ok(bad));
@@ -149,6 +159,27 @@ int main(void) { @autoreleasepool {
         EXPECT("prebuild: a library with layer entry points of its own gets main0's base", 1, pre_desc(@"vl", @"f1", 0) != nil);
         EXPECT("prebuild: a vertex shader whose main0 writes the layer (layer_out) gets none", 0, pre_desc(@"vw", @"f1", 0) != nil);
     }
+    // The border corrections' constant in a pulling library's main0_z, its second function, at the near = 0 depth mode: metal-tt specializes only a library's first function
+    // ("cannot find private metadata at offset '8'"), so pso_offline.py specializes it from a library of its own (needs_cut), and the base serves pre_desc through the whole library
+    // (Nintendo Switch Sports Resort: 2,401 bases of 124 such libraries had left the archive refused)
+    NSString *vb = [NSString stringWithFormat:@"#include <metal_stdlib>\nusing namespace metal;\nconstant bool dm_border_off [[function_constant(%d)]];\n"
+        "constant bool dm_border_live = !is_function_constant_defined(dm_border_off) || !dm_border_off;\nstruct V { float4 p [[position]]; };\n"
+        "vertex V main0(uint id [[vertex_id]]) { V o; o.p = float4(float(id & 1), float(id >> 1), dm_border_live ? 0.25 : 0, 1); return o; }\n"
+        "vertex V main0_z(uint id [[vertex_id]]) { V o; o.p = float4(float(id & 1), float(id >> 1), dm_border_live ? 0.75 : 0.5, 1); return o; }\n", DMSH_BORDER_FC];
+    if (!lib(msl, @"vb_bp", vb)) {
+        put([msl stringByAppendingPathComponent:@"vb_b.json"], [NSString stringWithFormat:@"{\"chain\": \"%s\", \"entry\": \"main0\", \"entry_z\": \"main0_z\", \"pull\": {}, \"vertex_inputs\": []}", DMSH_CHAIN]);
+        put([tables stringByAppendingPathComponent:@"border.tsv"], @"vb\tf1\n");
+        NSString *zero = [root stringByAppendingPathComponent:@"zero"];
+        int rc = sh([NSString stringWithFormat:@"python3 %@ --platform macos --gpu %@ --msl %@ --pairs %@/border.tsv --out %@ --work %@/zero-work --depth zero --no-compute > %@/pso_zero.log 2>&1",
+                     tool, gpu, msl, tables, zero, root, root]);
+        EXPECT("border constant in main0_z: pso_offline.py made the archive", 0, rc);
+        if (rc) fprintf(stderr, "%s\n", [NSString stringWithContentsOfFile:[root stringByAppendingPathComponent:@"pso_zero.log"] encoding:NSUTF8StringEncoding error:nil].UTF8String);
+        NSString *zeroPath = [zero stringByAppendingFormat:@"/%@.mtl4a", gpu];
+        id<MTL4Archive> zeroArchive = arch_file_ok(zeroPath) ? [g_dev newArchiveWithURL:[NSURL fileURLWithPath:zeroPath] error:nil] : nil;
+        EXPECT("border constant in main0_z: archive opened", 1, zeroArchive != nil);
+        EXPECT("border constant in main0_z: the host's specialized base found", 1, [zeroArchive newRenderPipelineStateWithDescriptor:pre_desc(@"vb", @"f1", 1) error:nil] != nil);
+        EXPECT("border constant in main0_z: no main0 base", 0, [zeroArchive newRenderPipelineStateWithDescriptor:pre_desc(@"vb", @"f1", 0) error:nil] != nil);
+    }
     EXPECT("batched archive: full coverage stamp preserved", 1, [[NSString stringWithContentsOfFile:[batched stringByAppendingPathComponent:@"prebuilt.tsv"] encoding:NSUTF8StringEncoding error:nil]
             isEqualToString:[NSString stringWithContentsOfFile:[bundle stringByAppendingPathComponent:@"prebuilt.tsv"] encoding:NSUTF8StringEncoding error:nil]]);
     // its stamp matches: only the pair with function constants is built here
@@ -190,6 +221,9 @@ int main(void) { @autoreleasepool {
         id<MTL4Archive> real = g_arch_bundle; NSError *e = nil;
         g_arch_bundle = [g_dev newArchiveWithURL:[NSURL fileURLWithPath:own] error:&e];
         EXPECT("archive guard: real serialized archive accepted", 1, arch_file_ok(own));
+        arch_reads rd = {0}; EXPECT("archive reads: serialized archive checked", 1, arch_file_check(own, &rd));
+        EXPECT("archive reads: serialized archive, records and libraries", 1, rd.n >= 2);
+        EXPECT("archive reads: serialized archive opens", 1, arch_open(own, &e) != nil);
         EXPECT("probe: another archive opened", 1, g_arch_bundle != nil);
         EXPECT("probe: its bases are not this run's", 0, pso_bundle_covers(pre_parse(txt), pre_stamp(txt, 0), 0, rest));
         g_arch_bundle = real;

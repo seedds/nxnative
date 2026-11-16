@@ -1,6 +1,6 @@
 # Kirby Air Riders (`040077201BE50000`)
 
-A Switch 2 game: update v458752 (display version 1.3.3), SDK 20.5.26 built for the Switch 2 (`Ounce`), NVN2. The engine's namespace is `phx`, its platform layer `Aurora` (`WindApplication`); PhysX 5.2 and NPLN for online play. Modules `main`, `subsdk0` (CUDA), `sdk`; `subsdk1` (NGX) is shipped but `main` imports nothing from it. **Plays on the Mac** (M4 Pro, 48 GB): title, attract mode, menus, a lesson and Air Ride races from start to the results screen, on Floria Fields and other courses (the course is random), with scripted input and sound on. It holds 57 to 60 fps in races after the first run, at about 10 GB resident. No IPA has been built, and a player has not yet played it through a window on this build.
+A Switch 2 game: update v458752 (display version 1.3.3), SDK 20.5.26 built for the Switch 2 (`Ounce`), NVN2. The engine's namespace is `phx`, its platform layer `Aurora` (`WindApplication`); PhysX 5.2 and NPLN for online play. Modules `main`, `subsdk0` (CUDA), `sdk`; `subsdk1` (NGX) is shipped but `main` imports nothing from it. **Plays on the Mac**: title, attract mode, menus, a lesson and Air Ride races from start to the results screen, on Floria Fields and other courses (the course is random), with scripted input and sound on (M4 Pro, 48 GB), and played by hand in the Mac app (M4 Max, 36 GB; on the Mac's display and on a TV). It holds 57 to 60 fps in races after the first run, at about 10 GB resident. No IPA has been built.
 
 ## What it needs
 
@@ -11,6 +11,7 @@ A Switch 2 game: update v458752 (display version 1.3.3), SDK 20.5.26 built for t
 | `modules main subsdk0 sdk` | `game.tsv` | `main` imports 49 `cu*` functions from `subsdk0` (CUDA), nothing from `subsdk1` (NGX) |
 | `romfs_marker Asset/assets.cat` | `game.tsv` | the archives' catalog |
 | `shader_groups /Asset/=shader /Bin/=shader` | `game.tsv` | where the shaders are |
+| `depth_mode zero` | `game.tsv` | the game sets near = 0 (`depth mode: near=0, vertex shaders use the main0_z entry` in the log). Without the key, the Mac app's pipeline archive (18,112 bases, 2.1 GB) was built for `main0`, and in a 6-minute session with races none of its 2,754 lookups found anything: every base was compiled at the draw, with frames of 1 to 5 s on the first course |
 | `tex_flush_upload`, `tex_dirty_upload` | `game.tsv` | textures the CPU fills while the game plays, without an NVN call over the texels: without them some props and panels are magenta (all-zero ASTC blocks). Binding `game`: no general rule tells a texture written this way from one a shader writes, whose content an upload would replace ([`tex_flush_upload`](../README.md)) |
 
 There is no game-specific patch, and only v458752's build row: the base game, v0, has not been run. The binding of this bring-up is `build` only for that row.
@@ -29,7 +30,7 @@ There is no game-specific patch, and only v458752's build row: the base game, v0
 
 The 3D renders at 1536x864, with the swap chain 2560x1440 and the window crop 1920x1080: shots of the swap chain hold the picture in their top-left three quarters. Lessons play a short movie of the real game, which is a reference for how a scene should look.
 
-Moving objects get their ambient light from eight values per object in a storage buffer (record size 128 bytes, the object's index at +460 of its 480-byte record), which the compute shader `f59db619b5c0be33` works out each frame from probe atlases named in c[4]; the vertex shader `c564233f7917accc` mixes them with a 12x12 RGBA32F cube. Before [the table of handles](../../../docs/reference/shaders.md#a-table-of-handles-longer-than-the-array), most objects' values were black: Kirby was dark red and black underneath, and the ground and props were darker across the course. The far shadow (`WFarShadow`, 4096, 2048 or 1024 square by scene, all three textures on one storage address) is drawn when a scene loads, then its mips by copies level to level; the map in the lesson is the same with and without `render_cond`.
+Moving objects get their ambient light from eight values per object in a storage buffer (record size 128 bytes, the object's index at +460 of its 480-byte record), which the compute shader `f59db619b5c0be33` works out each frame from probe atlases named in c[4]; the vertex shader `c564233f7917accc` mixes them with a 12x12 RGBA32F cube. Before [the table of handles](../../../docs/reference/shaders.md#a-table-of-handles-longer-than-the-array), most objects' values were black: Kirby was dark red and black underneath, and the ground and props were darker across the course. The far shadow (`WFarShadow`, 4096, 2048 or 1024 square by scene, all three textures on one storage address) is drawn when a scene loads, then its mips by copies level to level; the map in the lesson is the same with render conditions evaluated or drawn unconditionally.
 
 ## Driving it on the Mac
 
@@ -37,6 +38,7 @@ Moving objects get their ambient light from eight values per object in a storage
 
 ## Found on this game
 
+- [Compute dispatches that wait for each other](../../../docs/reference/frame-rate.md#compute-dispatches-that-wait-for-each-other): its particle systems.
 - [PMAP records in phx's PDAT archives](../../../docs/reference/shaders.md#pmap-records-in-phxs-pdat-archives): its shaders, and a loose NDSR file.
 - [A guard band cull in every vertex shader (0x80d)](../../../docs/reference/shaders.md#a-guard-band-cull-in-every-vertex-shader-0x80d).
 - [Ampere forms with a handle in a register](../../../docs/reference/shaders.md#ampere-forms-with-a-handle-in-a-register-and-sureds-other-operations): TMML (0xf69, 0x36a) in 4,776 pixel shaders.
@@ -55,7 +57,7 @@ Moving objects get their ambient light from eight values per object in a storage
 - A crash seen once in dozens of runs, in a run slowed by another game on the same GPU: the game's own wait at `main+0x2ecff24` (`ldarb` on a thread object at +0x285, in a loop that sleeps between reads) read an alias page just unmapped, right after `[mem] alias region mapped` fell. Not caused by the host's page protection, which does not unmap; whether the host unmaps earlier than Horizon would is not known.
 - The 12x12 cube the vertex shader mixes with the probe values holds 4 to 27 with `tex_flush_upload`, and read zeros without it.
 - [The guard band cull's](../../../docs/reference/shaders.md#a-guard-band-cull-in-every-vertex-shader-0x80d) real meaning, and the vertex output at `a[0x5c]` that 4,771 vertex shaders write and the translator drops (probably a shading rate, not checked).
-- `nn::codec VP9: busy (result 3603), a packet refused with 12 pictures waiting for a released buffer` (4 lines at the first movie, a red line until [a refusal was known to be no fault](../../../docs/reference/movies.md#the-submission-ready-event-counted-as-packets)); the movies seen play.
-- A `pso_manifest.tsv` has not been recorded, so the first race compiles pipelines as it goes.
+- `nn::codec VP9: busy (result 3603), a packet refused with 12 pictures waiting for a released buffer` (4 lines at the first movie; since [the decoder has its own thread](../../../docs/reference/movies.md#nncodec-packets-decoded-inside-the-submission) the line also counts the packets still to decode, not seen on this game yet; a red line until [a refusal was known to be no fault](../../../docs/reference/movies.md#the-submission-ready-event-counted-as-packets)); the movies seen play.
+- A `pso_manifest.tsv` has not been recorded. With the archive built for `main0_z`, a 13-minute session by hand in the Mac app (M4 Max, 36 GB) had 7 frames over 100 ms (160-280 ms, each at a scene's first draws with 1 to 7 new pipelines) and none in a row; frame time p95 16.8 ms in races. An earlier session on that Mac, with about 13 GB of other work beside the game, had stretches at 20 fps (GPU 35-50 ms a frame) that this one did not: memory pressure, not the game.
 - What `nvnTextureViewCompare`'s return value means is taken from its name.
 - City Trial played by hand, Road Trip, online, the base game, iOS: not tested.

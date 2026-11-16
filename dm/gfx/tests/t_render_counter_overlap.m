@@ -3,11 +3,7 @@
 // unfinished. OPEN lines show the CPU-post report bytes: the host writes reports when the
 // submission completes, so a later GPU read can still see the bytes from before the report
 // (it did in 3 of 60 runs); the predicates, which the host's encode-time values decide, are checked.
-// It checks the profile key render_cond's replay, so the key is on whatever profile GAME names:
-// without it the host draws every render-enable block and posts no pending counter values.
 #include "game_profile.h"
-#undef DM_GAME_RENDER_COND
-#define DM_GAME_RENDER_COND 1
 #define nvn_game_fps nvn_game_fps_mtl_default
 #include "../nvn/nvn_mtl.m"
 #undef nvn_game_fps

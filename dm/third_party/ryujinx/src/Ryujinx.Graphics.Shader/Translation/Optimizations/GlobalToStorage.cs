@@ -79,11 +79,15 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
             private readonly Dictionary<LsKey, Dictionary<uint, SearchResult>> _sharedEntries;
             private readonly HelperFunctionManager _hfm;
 
-            public GtsContext(HelperFunctionManager hfm)
+            // nxnative: Ampere (NVN2) code, the only code with bindless constant buffers (TryUnwrapHandle)
+            public readonly bool Ampere;
+
+            public GtsContext(HelperFunctionManager hfm, bool ampere)
             {
                 _entries = [];
                 _sharedEntries = new Dictionary<LsKey, Dictionary<uint, SearchResult>>();
                 _hfm = hfm;
+                Ampere = ampere;
             }
 
             // nxnative: the raw vector load helpers by word count (TryGenerateRawStorageOp), kept apart from _entries, where a scalar load would find them
@@ -231,9 +235,10 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
             BasicBlock[] blocks,
             ResourceManager resourceManager,
             IGpuAccessor gpuAccessor,
-            TargetLanguage targetLanguage)
+            TargetLanguage targetLanguage,
+            bool ampere)
         {
-            GtsContext gtsContext = new(hfm);
+            GtsContext gtsContext = new(hfm, ampere);
 
             foreach (BasicBlock block in blocks)
             {
@@ -1429,7 +1434,7 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
         {
             globalAddress = Utils.FindLastOperation(globalAddress, block);
 
-            if (TryUnwrapHandle(globalAddress, block, out Operand handleCb))
+            if (TryUnwrapHandle(gtsContext, globalAddress, block, out Operand handleCb))
             {
                 return GetBaseAddressCbWithOffset(handleCb, Const(0), 0, handle: true);
             }
@@ -1468,7 +1473,7 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
                     offset = src1;
                 }
 
-                SearchResult result = TryUnwrapHandle(baseAddr, block, out Operand baseHandleCb)
+                SearchResult result = TryUnwrapHandle(gtsContext, baseAddr, block, out Operand baseHandleCb)
                     ? GetBaseAddressCbWithOffset(baseHandleCb, offset, 0, handle: true)
                     : GetBaseAddressCbWithOffset(baseAddr, offset, 0);
                 if (result.Found)
@@ -1488,19 +1493,12 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
             src1 = operation.GetSource(0);
             src2 = operation.GetSource(1);
 
-            // nxnative: a source that is a bindless constant buffer handle's address (handle << 4) stands for the handle's words
-            bool handle1 = TryUnwrapHandle(Utils.FindLastOperation(src1, block), block, out Operand handleCb1);
-            bool handle2 = TryUnwrapHandle(Utils.FindLastOperation(src2, block), block, out Operand handleCb2);
-
-            if (handle1)
-            {
-                src1 = handleCb1;
-            }
-
-            if (handle2)
-            {
-                src2 = handleCb2;
-            }
+            // nxnative: a source that is a bindless constant buffer handle's address (handle << 4) stands for the handle's words as a base only. As the offset it stays the
+            // shifted value: EA SPORTS FC 27's vertex shaders add c3[0].y << 4 to a storage buffer's c0 address, and an offset of c3[0].y read the wrong element
+            bool handle1 = TryUnwrapHandle(gtsContext, Utils.FindLastOperation(src1, block), block, out Operand handleCb1);
+            bool handle2 = TryUnwrapHandle(gtsContext, Utils.FindLastOperation(src2, block), block, out Operand handleCb2);
+            Operand base1 = handle1 ? handleCb1 : src1;
+            Operand base2 = handle2 ? handleCb2 : src2;
 
             // If we have two possible results, we give preference to the ones from
             // the driver reserved constant buffer, as those are the ones that
@@ -1515,31 +1513,32 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
 
             // NVN2's push constants (c[24]) hold addresses too: PRAGMATA's compute shaders add an offset from c1 to a buffer entry the game pushed (push block 1), and the c1
             // operand, the shader's own constants, was taken for the base (its first word, 8): the buffer had no slot and the shader did not load
-            if (src1.Type == OperandType.ConstantBuffer && src2.Type == OperandType.ConstantBuffer &&
-                IsAddressCb(src1.GetCbufSlot()) && !IsAddressCb(src2.GetCbufSlot()))
+            if (base1.Type == OperandType.ConstantBuffer && base2.Type == OperandType.ConstantBuffer &&
+                IsAddressCb(base1.GetCbufSlot()) && !IsAddressCb(base2.GetCbufSlot()))
             {
-                return GetBaseAddressCbWithOffset(src1, src2, constOffset, handle1);
+                return GetBaseAddressCbWithOffset(base1, src2, constOffset, handle1);
             }
 
-            if (src1.Type != OperandType.ConstantBuffer ||
-                (src1.Type == OperandType.ConstantBuffer && src2.Type == OperandType.ConstantBuffer) ||
-                (src2.Type == OperandType.ConstantBuffer && IsAddressCb(src2.GetCbufSlot())))
+            if (base1.Type != OperandType.ConstantBuffer ||
+                (base1.Type == OperandType.ConstantBuffer && base2.Type == OperandType.ConstantBuffer) ||
+                (base2.Type == OperandType.ConstantBuffer && IsAddressCb(base2.GetCbufSlot())))
             {
-                return GetBaseAddressCbWithOffset(src2, src1, constOffset, handle2);
+                return GetBaseAddressCbWithOffset(base2, src1, constOffset, handle2);
             }
 
-            return GetBaseAddressCbWithOffset(src1, src2, constOffset, handle1);
+            return GetBaseAddressCbWithOffset(base1, src2, constOffset, handle1);
         }
 
         // nxnative: a bindless constant buffer read's address is the handle << 4 (InstEmitAmpere.cs ABindlessConstant, the low word: the handle's low word << 4). When the
         // handle is a constant buffer's words (c[0]'s uniform entries, a graphics stage's uniform bank mapped there, or a handle the game pushed into c[24]), the access is traced
         // to them as to an address, with SearchResult.Handle: the host decodes the handle it reads there (nvn_mtl.m NVN_RB_SBUFQ / NVN_RB_SBUFU), and a multi-target helper
-        // compares the decoded address and size
-        private static bool TryUnwrapHandle(Operand value, BasicBlock block, out Operand handleCb)
+        // compares the decoded address and size. Maxwell (NVN1) code has no bindless constant buffers: there a word << 4 is an offset or plain arithmetic, never a handle
+        private static bool TryUnwrapHandle(GtsContext gtsContext, Operand value, BasicBlock block, out Operand handleCb)
         {
             handleCb = null;
 
-            if (value.AsgOp is Operation shift &&
+            if (gtsContext.Ampere &&
+                value.AsgOp is Operation shift &&
                 shift.Inst == Instruction.ShiftLeft &&
                 shift.GetSource(1).Type == OperandType.Constant &&
                 shift.GetSource(1).Value == 4)

@@ -145,6 +145,7 @@ static void open_close(size_t pg) {
     EXPECT("written while open: protected again", PG_PROT, atomic_load(&r->state[p0]));
     EXPECT("written while open: counted as written", 1, nvn_dirty_since(m, 16, stamp));
     EXPECT("the host's page: left writable", PG_NONE, atomic_load(&r->state[p0 + 1]));
+    // NOLINTNEXTLINE(clang-analyzer-unix.BlockInCriticalSection): nvn_dirty_close above released g_slot_mu, which nvn_dirty_open took (the analyzer does not follow the pair)
     int fd = open("/dev/zero", O_RDONLY); ssize_t n = read(fd, m + pg, 16); close(fd);
     EXPECT("the host's page: a file read after the close lands (no EFAULT)", 16, n);
     EXPECT("the host's page: counted as written", 1, nvn_dirty_since(m + pg, 16, stamp));

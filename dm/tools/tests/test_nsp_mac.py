@@ -305,6 +305,10 @@ class Nvn(Base):
         (self.tmp / 'cb_extent.tsv').write_text(f'# chain b-{CHAIN} inputs bbbbbbbbbbbb 2026-10-23T00:00:00+00:00\n')
         self.assertEqual(self.build(True), self.sh / 'cache'); self.assertEqual([Path(c[1]).name for c, _ in self.ran], ['cb_extent.py'])
 
+    def test_the_build_hands_the_table_memo(self):   # c1_guard.py / cb_extent.py keep their answers in the shader cache (DMSH_TABLE_MEMO)
+        self.build(True)
+        self.assertEqual(self.ran[0][1]['DMSH_TABLE_MEMO'], str(self.sh / 'cache'))
+
     def test_split_pairs_invalidate_shader_reuse(self):
         # A registered profile may have no pso_pairs.tsv: the split's copy feeds vs_pad.
         def fingerprint(*args, **kwargs):

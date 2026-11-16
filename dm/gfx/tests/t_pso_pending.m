@@ -239,6 +239,25 @@ static void test_two_active_exact_take_and_release(void) {
     reset_queue();
 }
 
+// A later draw of the submission (pso_pend_kick_next) is admitted while PSO_PEND_ACTIVE guesses run; a guess still is not
+static void test_next_draws_pass_the_guess_limit(void) {
+    reset_queue();
+    GateDevice *dev = [[GateDevice alloc] initBlockingThrough:4 nilCall:0]; g_dev = (id<MTLDevice>)(id)dev;
+    pso_key a = make_key(600), b = make_key(601), c = make_key(602), d = make_key(603), guess = make_key(604);
+    EXPECT_EQ("first guess admitted", 1, pso_pend_kick(&a, test_vs, test_fs));
+    EXPECT_EQ("second guess admitted", 1, pso_pend_kick(&b, test_vs, test_fs));
+    if (![dev waitForEntered:2 timeoutMs:5000]) { EXPECT_TRUE("guess workers entered fake compiler", 0); [dev releaseAll]; drain_queue(5000); reset_queue(); return; }
+    EXPECT_EQ("a later draw is admitted at the guess limit", 1, pso_pend_kick_next(&c, test_vs, test_fs));
+    EXPECT_EQ("another later draw is admitted", 1, pso_pend_kick_next(&d, test_vs, test_fs));
+    EXPECT_TRUE("the later draws compile beside the guesses", [dev waitForEntered:4 timeoutMs:5000]);
+    EXPECT_EQ("a guess is still refused while builds run", 0, pso_pend_kick(&guess, test_vs, test_fs));
+    EXPECT_EQ("a later draw already in the table is not admitted twice", 0, pso_pend_kick_next(&c, test_vs, test_fs));
+    [dev releaseAll];
+    EXPECT_TRUE("later draws complete", pending_done(&c, 5000) && pending_done(&d, 5000));
+    EXPECT_TRUE("their draws take them", pso_pend_take(&c) != nil && pso_pend_take(&d) != nil);
+    drain_queue(5000); reset_queue();
+}
+
 static void test_full_table_reclaims_done_not_running(void) {
     reset_queue();
     GateDevice *dev = [[GateDevice alloc] initBlockingThrough:2 nilCall:0]; g_dev = (id<MTLDevice>)(id)dev;
@@ -353,15 +372,29 @@ static void test_prediction_restores_scissor(void) {
     g_exec_next = NULL;
 }
 
+// The prediction runs once per submission, at its first new miss: a draw whose own build is already under way drew in an earlier frame and does not start it (issue #2438)
+static void test_prediction_at_first_new_miss(void) {
+    g_sub_serial = 100; g_pp_submit_mark = 0;
+    EXPECT_EQ("a stand-in draw whose build is under way does not start the prediction", 0, pso_predict_due(0));
+    EXPECT_EQ("nor does it use up the submission's prediction", 0, (int)(g_pp_submit_mark == g_sub_serial));
+    EXPECT_EQ("the submission's first new miss starts it", 1, pso_predict_due(1));
+    EXPECT_EQ("a second new miss in the same submission does not", 0, pso_predict_due(1));
+    g_sub_serial++;
+    EXPECT_EQ("the next submission's first new miss starts its own", 1, pso_predict_due(1));
+    g_sub_serial = 0; g_pp_submit_mark = 0;
+}
+
 int main(void) {
     @autoreleasepool {
         setvbuf(stdout, NULL, _IONBF, 0);
         test_vs = [NvShader new]; test_fs = [NvShader new];
         snprintf(test_vs->key, sizeof test_vs->key, "pending-base-vs"); snprintf(test_fs->key, sizeof test_fs->key, "pending-base-fs");
         test_two_active_exact_take_and_release();
+        test_next_draws_pass_the_guess_limit();
         test_full_table_reclaims_done_not_running();
         test_nil_prediction_falls_back_then_predicts();
         test_prediction_restores_scissor();
+        test_prediction_at_first_new_miss();
         printf("== %d PSO pending checks, %d failed ==\n", g_checks, g_failed);
         return g_failed != 0;
     }

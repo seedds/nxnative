@@ -6,7 +6,7 @@ The screen before the game starts shows the settings the game supports. A settin
 - [Game](#game): [Frame rate](#frame-rate), [Render scale](#render-scale), [Console mode](#console-mode), [Upscaling](#upscaling), [Game's upscaler](#games-upscaler), [Game language](#game-language), [Picture](#picture), [Frame-rate counter](#frame-rate-counter)
 - [Controls](#controls): [Touch feedback](#touch-feedback), [Game rumble](#game-rumble), [Rumble strength](#rumble-strength), [Rumble cutoff](#rumble-cutoff), [Press a button to join](#press-a-button-to-join)
 - [Performance](#performance): [Frame buffering](#frame-buffering), [Metal 4 pipelines](#metal-4-pipelines), [Pipeline prebuild](#pipeline-prebuild), [Encode thread](#encode-thread), [Hold frames when late](#hold-frames-when-late), [Performance HUD](#performance-hud), [Reset to tested defaults](#reset-to-tested-defaults)
-- [The Mac settings window](#the-mac-settings-window): [Display mode](#display-mode)
+- [The Mac settings window](#the-mac-settings-window): [Display mode](#display-mode), [Game Mode](#game-mode)
 - [In-game menu](#in-game-menu)
 - [TV](#tv)
 - [Settings in a file](#settings-in-a-file)
@@ -235,6 +235,10 @@ Turn off **Show this window at launch** to start the game at once with your choi
 
 **Off** by default. On, the game takes Joy-Con 2 and Pro Controller 2 over Bluetooth: hold the small Sync button on one during the game, until its player lights sweep, to pair it with this Mac; after that a press of any of its buttons connects it ([Switch 2 controllers](playing.md#switch-2-controllers-mac)). macOS asks for Bluetooth access the first time, and again after the app is packed again. In an `env.txt`: `DM_SW2=1`.
 
+### Game Mode
+
+Off by default. **On** lets macOS run the game in its Game Mode while it is full screen: background tasks get less of the Mac, and Bluetooth controllers and AirPods are read twice as often. On an M4 Pro, Game Mode held the GPU at its lowest clock after a minute or two and halved the frame rate ([macOS Game Mode holds the GPU at its lowest clock](reference/frame-rate.md#macos-game-mode-holds-the-gpu-at-its-lowest-clock)), so check the frame rate before keeping it on. The game then runs from a second copy of its program inside the app, with a bundle ID of its own (`<the app's ID>.gamemode`): macOS remembers which apps it has run in Game Mode, and the app's own ID never is, so turning the setting off again always works. In full screen, ⌘Esc shows the Game Overlay, where macOS can also turn Game Mode off for that copy. In an `env.txt`: `DM_GAME_MODE=1`.
+
 ### Cloud saves folder
 
 **Choose a folder…** picks the iCloud Drive folder the game's save is synced through, the one the iPhone app chose in its launcher's **Cloud saves**, or the game's own folder inside it, named after its title ID ([Cloud saves](#cloud-saves)); **Turn off** stops it. Off by default. macOS may ask once whether the app may open iCloud Drive; if the game log says `this app may not open iCloud Drive`, allow it in System Settings › Privacy & Security › Files and Folders. In an `env.txt`: `DM_SAVE_SYNC=<folder>`, or `DM_SAVE_SYNC=icloud` for iCloud Drive › nxnative Saves; the window then shows it fixed.
@@ -270,6 +274,7 @@ A line like `DM_PRESENT_SNAP=0` in `Documents/env.txt` (in the Files app, under 
 | Console mode | `DM_OPMODE` | `1` docked, `0` handheld |
 | Game language | `DM_LANG` | a language code, such as `ja` |
 | Display mode (Mac) | `DM_FULLSCREEN` | `1` fullscreen, `0` a window |
+| Game Mode (Mac) | `DM_GAME_MODE` | `1` allowed, `0` off |
 | Cloud saves folder (Mac) | `DM_SAVE_SYNC` | a folder; `icloud`: iCloud Drive › nxnative Saves; `0`: off |
 | Picture (iPhone and iPad) | `DM_PICTURE_FIT` | `fit` 16:9 with black bars, `fill` covers the screen, cropped |
 | Picture shape | `DM_SCREEN_ASPECT` | `auto` the app window's own shape where it is taller than 16:9 (iPad 4:3, iPhone Duo 1.43:1), else 16:9 (iOS only); `1.43` the iPhone Duo's shape, `0` 16:9 |

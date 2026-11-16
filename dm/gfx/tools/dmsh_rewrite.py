@@ -2,7 +2,7 @@
 # The rewrites dmsh_build.py makes in a translated shader's MSL before it compiles it, where Metal or the translator falls short of what the Switch code does: precise
 # arithmetic (precise), memory barriers as fences (membar_fence, tg_fence), 64-bit products (mul_extended), float atomic adds (float_add_msl), uniform words tested against constants, which the front end would
 # fold into switches (uniform_tests), Ampere's HMMA as simdgroup matrices (hmma_msl), first stores and shared-memory stores (first_store, shared_store_msl), threadgroup memory
-# past Metal's limit (tg_spill), texture gathers with offsets (gather_offsets), border colours Metal has no sampler state for (border_emu), a pixel shader's depth snapped to
+# past Metal's limit (tg_spill), one copy of the raw global memory lookup's search (raw_noinline), texture gathers with offsets (gather_offsets), border colours Metal has no sampler state for (border_emu), a pixel shader's depth snapped to
 # its position (frag_z_snap) and the 0 / -1 mask of a tested bit 0 without its compare (bit0_mask). Functions of the MSL text and the library ABI only, with no build state,
 # so tests import them. Part of the translation chain (dmsh_chain.FILES) and of every shader's cache key (dmsh_build.py CODE_FP).
 import bisect, collections, itertools, re
@@ -519,6 +519,16 @@ def gather_quad(off):
     rel = [(x - bx, y - by) for x, y in xy]
     if sorted(rel) != sorted(GATHER_QUAD): return None
     return f'int2({bx}, {by})', ''.join(GATHER_QUAD[r] for r in rel)
+
+# A raw global access's pool table lookup (GlobalToStorage TryGenerateRawStorageOp) checks the entry it chose last at the access and, past it, calls dmsh_raw_find (GetRawFindFunction:
+# the chunk's hint, a binary search), one function per shader that the translator names. spirv-cross writes every function always_inline (it ignores SPIR-V's DontInline), so with the
+# access helpers inlined Metal's compiler built a copy of the search at every access: Ocarina of Time's foliage mesh shader 3439aaa071d868ae makes 141, and its task / mesh pipeline
+# took 1.9 s to compile cold on an M2 Air (25 s for the route's 54 at the first start), while the GPU waited at its first draw (Native mesh pipelines compiled at their first draw).
+# Written noinline, it is one function the misses branch to. Only the search: the last entry's check and the access stay inline, since keeping the whole access helper apart
+# put the last entry and the vector words behind the call at every access (2.5 ms of a 15 ms frame on an M4 Pro)
+RAW_FIND = re.compile(r'\nstatic inline __attribute__\(\(always_inline\)\)\n(\w+ dmsh_raw_find\w*\()')
+def raw_noinline(msl):
+    return RAW_FIND.sub(lambda m: '\nstatic __attribute__((noinline))\n' + m.group(1), msl) if 'dmsh_raw_find' in msl else msl
 
 GATHER4 = 'template<typename T> static inline __attribute__((always_inline)) vec<T, 4> dm_gather4(T a, T b, T c, T d) { return vec<T, 4>(a, b, c, d); }\n'
 

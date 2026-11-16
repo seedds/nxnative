@@ -9479,20 +9479,42 @@ static pthread_mutex_t g_ser_mu = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t g_ser_cv = PTHREAD_COND_INITIALIZER;
 static int g_ser_compiles, g_ser_want;   // compiles under way; serializations waiting or under way
 static _Atomic uint64_t g_ser_held_ns, g_ser_holds;   // compiles held back by a serialization: time in all, how many
-static void ser_compile_begin(void) {
+// A draw's own compile on the submit thread (pso_get_, tl_ser_draw) does not wait out a write: a period's serialization takes 0.6-12 s (Ocarina of Time's cold prebuild, an M2),
+// and with the prebuild running in the background during play every one of them would hold that draw, and the frame, for as long. It waits at most DM_PSO_SER_DRAW_WAIT_MS
+// (default 50; one wait per write: a later draw during the same write does not wait at all, g_wr_gen), then declines (tl_ser_declined): the draw is skipped for this frame,
+// not marked failed, and compiles at a later draw once the write is done. Every other compile (the prewarm, the prebuild, background builds) waits as before
+static __thread int tl_ser_draw, tl_ser_declined;
+static uint64_t g_wr_gen, g_wr_gen_waited;   // writes begun; the write a draw last waited for (under g_ser_mu)
+static _Atomic uint64_t g_ser_draw_skips, g_ser_draw_wait_ns;
+static int ser_draw_wait_ms(void) {
+    static int v = -1;
+    if (v < 0) { const char *e = getenv("DM_PSO_SER_DRAW_WAIT_MS"); v = e && *e ? atoi(e) : 50; if (v < 0) v = 0;
+        if (e) MLOG("DM_PSO_SER_DRAW_WAIT_MS=%s: a draw's compile waits at most %d ms for an archive write%s", e, v, v ? "" : " (none: skipped at once)"); }
+    return v;
+}
+static int ser_compile_begin(void) {   // 0: declined (a draw's compile during a write, see above); the caller returns nil and compiles nothing
     pthread_mutex_lock(&g_ser_mu);
     if (g_ser_want) {
-        uint64_t t0 = bp_now(); while (g_ser_want) pthread_cond_wait(&g_ser_cv, &g_ser_mu);
-        atomic_fetch_add(&g_ser_held_ns, bp_now() - t0); atomic_fetch_add(&g_ser_holds, 1);
+        uint64_t t0 = bp_now();
+        if (tl_ser_draw) {
+            int ms = g_wr_gen_waited == g_wr_gen ? 0 : ser_draw_wait_ms(); g_wr_gen_waited = g_wr_gen;
+            struct timespec until; clock_gettime(CLOCK_REALTIME, &until); until.tv_nsec += (long)ms * 1000000; until.tv_sec += until.tv_nsec / 1000000000; until.tv_nsec %= 1000000000;
+            while (g_ser_want && ms && pthread_cond_timedwait(&g_ser_cv, &g_ser_mu, &until) != ETIMEDOUT) {}
+            atomic_fetch_add(&g_ser_draw_wait_ns, bp_now() - t0);
+            if (g_ser_want) { tl_ser_declined = 1; atomic_fetch_add(&g_ser_draw_skips, 1); pthread_mutex_unlock(&g_ser_mu); return 0; }
+        } else {
+            while (g_ser_want) pthread_cond_wait(&g_ser_cv, &g_ser_mu);
+            atomic_fetch_add(&g_ser_held_ns, bp_now() - t0); atomic_fetch_add(&g_ser_holds, 1);
+        }
     }
-    g_ser_compiles++; pthread_mutex_unlock(&g_ser_mu);
+    g_ser_compiles++; pthread_mutex_unlock(&g_ser_mu); return 1;
 }
 static void ser_compile_end(void) { pthread_mutex_lock(&g_ser_mu); if (!--g_ser_compiles && g_ser_want) pthread_cond_broadcast(&g_ser_cv); pthread_mutex_unlock(&g_ser_mu); }
 // A compile that does not return (a stuck compiler) must not stop every later one behind a waiting write: after SER_WAIT_MS the write goes ahead beside the compiles still under way,
 // the new ones still held back. Compiles take milliseconds to a few hundred, so the 14 prebuild workers' drain in time
 enum { SER_WAIT_MS = 2000 };
 static void ser_begin(void) {
-    pthread_mutex_lock(&g_ser_mu); g_ser_want++;
+    pthread_mutex_lock(&g_ser_mu); g_ser_want++; g_wr_gen++;
     struct timespec until; clock_gettime(CLOCK_REALTIME, &until); until.tv_sec += SER_WAIT_MS / 1000; until.tv_nsec += (long)(SER_WAIT_MS % 1000) * 1000000;
     if (until.tv_nsec >= 1000000000) { until.tv_sec++; until.tv_nsec -= 1000000000; }
     while (g_ser_compiles && pthread_cond_timedwait(&g_ser_cv, &g_ser_mu, &until) != ETIMEDOUT) {}
@@ -9648,14 +9670,16 @@ static void fn_gave_up(const char *what) {   // a capture's wait ran out: it is 
 static id<MTLRenderPipelineState> arch_capture_try(MTL4PipelineDescriptor *d, NSError **e, int vd, int *captured, int wait_ms, int *busy) {
     if (captured) *captured = 0;
     if (busy) *busy = 0;
-    if (!arch_capturing()) { ser_compile_begin(); id<MTLRenderPipelineState> ps = [g_comp4 newRenderPipelineStateWithDescriptor:d compilerTaskOptions:nil error:e]; ser_compile_end(); return ps; }
+    if (!arch_capturing()) { if (!ser_compile_begin()) return nil; id<MTLRenderPipelineState> ps = [g_comp4 newRenderPipelineStateWithDescriptor:d compilerTaskOptions:nil error:e]; ser_compile_end(); return ps; }
     uint64_t fk[3]; int fn = fn_ids(d, fk);
     if (!fn_claim(fk, fn, wait_ms)) {
         if (busy) { *busy = 1; return nil; }
         fn_gave_up("render");
-        ser_compile_begin(); id<MTLRenderPipelineState> ps = [g_comp4 newRenderPipelineStateWithDescriptor:d compilerTaskOptions:nil error:e]; ser_compile_end(); return ps;
+        if (!ser_compile_begin()) return nil;
+        id<MTLRenderPipelineState> ps = [g_comp4 newRenderPipelineStateWithDescriptor:d compilerTaskOptions:nil error:e]; ser_compile_end(); return ps;
     }
-    ser_compile_begin(); ArchEpoch *ep = ep_enter(); NSError *ce = nil;
+    if (!ser_compile_begin()) { fn_release(fk, fn); return nil; }
+    ArchEpoch *ep = ep_enter(); NSError *ce = nil;
     id<MTLRenderPipelineState> ps = [ep->comp newRenderPipelineStateWithDescriptor:d compilerTaskOptions:nil error:&ce];
     fn_release(fk, fn);
     int full = 0;
@@ -9664,7 +9688,8 @@ static id<MTLRenderPipelineState> arch_capture_try(MTL4PipelineDescriptor *d, NS
               full = atomic_fetch_add(&ep->n, 1) + 1 == g_arch_period_max; }
     ep_leave(ep); ser_compile_end();
     if (ps) { if (captured) *captured = 1; if (full) arch_flush_from(ep); return ps; }
-    ser_compile_begin(); ps = [g_comp4 newRenderPipelineStateWithDescriptor:d compilerTaskOptions:nil error:e]; ser_compile_end();
+    if (!ser_compile_begin()) return nil;
+    ps = [g_comp4 newRenderPipelineStateWithDescriptor:d compilerTaskOptions:nil error:e]; ser_compile_end();
     if (ps) arch_cap_failed(ep, ce, "render"); else if (e && !*e) *e = ce;
     return ps;
 }
@@ -10369,6 +10394,8 @@ void mtl_pso_line(char *o, size_t n) {
              (unsigned long long)d[8], d[9] / 1e6, (unsigned long long)d[12], (unsigned long long)d[13], (unsigned long long)d[17], (unsigned long long)d[14], (unsigned long long)d[15], (unsigned long long)d[16], (unsigned long long)(v[14] - v[15] - v[16]));
     memcpy(p, v, sizeof p);
     static uint64_t pn[5], pns[5]; size_t o2 = strlen(o);
+    { static uint64_t q2[2]; uint64_t w2[2] = {g_ser_draw_skips, g_ser_draw_wait_ns};
+      o2 += snprintf(o + o2, n > o2 ? n - o2 : 0, "; draws skipped during an archive write %llu (%.1f ms waited for writes)", (unsigned long long)(w2[0] - q2[0]), (w2[1] - q2[1]) / 1e6); memcpy(q2, w2, sizeof q2); }
     { static uint64_t q[5]; uint64_t w[5] = {g_pp_hy_n, g_pp_hy_ns, g_pp_cut, g_pp_left, g_hy_ns};
       o2 += snprintf(o + o2, n > o2 ? n - o2 : 0, "; prediction stand-in checks %llu / %.1f ms, walks cut short %llu (%llu candidates left to their draws); draws' own stand-ins %.1f ms",
                      (unsigned long long)(w[0] - q[0]), (w[1] - q[1]) / 1e6, (unsigned long long)(w[2] - q[2]), (unsigned long long)(w[3] - q[3]), (w[4] - q[4]) / 1e6); memcpy(q, w, sizeof q); }
@@ -10758,7 +10785,8 @@ static __unsafe_unretained id<MTLRenderPipelineState> pso_get_(NvProg *pr, MTLRe
     if (ps) g_pp_taken++;
     else {
         MTLRenderPipelineDescriptor *d = pso_desc(&k, vs, fs, ms_fn ? ms_fn : g_pso_fsfn, g_pso_lmap != NULL);
-        ps = pso_build(d, !k.border, &e);
+        tl_ser_draw = 1; tl_ser_declined = 0; ps = pso_build(d, !k.border, &e); tl_ser_draw = 0;
+        if (!ps && tl_ser_declined) { tl_ser_declined = 0; g_bp_pso_n++; g_bp_pso_ns += bp_now() - bt; return nil; }   // an archive write is under way: this draw is skipped, not failed (ser_compile_begin)
     }
     if (!took) {   // the draw waited (built here, made from its queued build, or waited for its running build)
         uint64_t w = bp_now() - bt - (g_pt_pred_ns - pred0); g_pw_n[why]++; g_pw_ns[why] += w;

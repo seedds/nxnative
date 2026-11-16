@@ -376,6 +376,8 @@ t_pso_pending: t_pso_pending.m $(MTL_T_DEP)
 t_pso_look_wait: t_pso_look_wait.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_pso_look_wait.m $(MTL_T_SRC) $(FW)
 check_t_pso_look_wait: RUN_ENV = MTL_DEBUG_LAYER=1
+t_pso_ser_draw: t_pso_ser_draw.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_pso_ser_draw.m $(MTL_T_SRC) $(FW)
 t_shmap_warm: t_shmap_warm.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_shmap_warm.m $(MTL_T_SRC) $(FW)
 t_pso_depth_stencil: t_pso_depth_stencil.m $(MTL_T_DEP)

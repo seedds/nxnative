@@ -1,0 +1,43 @@
+# Overcooked! All You Can Eat 1.0.12 (Unity 2019.4.11f1 IL2CPP, SDK 10.4.1, NVN).
+# Format: see dm/games/README.md; bring-up and measurements in README.md beside this file.
+
+# ---- Identity ----
+title_id	0100F28011892000
+program_id	0100F28011892000
+
+# ---- App ----
+name	Overcooked! All You Can Eat
+ipa	OvercookedAllYouCanEat.ipa
+app_category	public.app-category.games
+
+# ---- Versions ----
+build	v786432	1.0.12	main=5582cbf6d1a747428e93752eaee8d5c3	subsdk0=84e50460493a12f26100e5150fbff271	sdk=d9add76fc264863d85fbbd1d70076c76
+package	v786432
+shader_versions	v786432
+
+# ---- Files ----
+# every module main imports from
+modules	main subsdk0 sdk
+romfs_marker	Data/StreamingAssets/aa/Switch/Switch/chefs_assets_all.bundle
+zip_store	.assets:.bundle:.dat:.json:.png:.resource:.ress:.metallib
+
+# ---- Memory ----
+# nninitStartup gives StandardAllocator pool minus used (3.14 GB), without setting a heap.
+# The shared SDK rules compact its node area and region alignment; see README.md.
+mem_reserve	0x140000000
+mem_alias	0x118000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+# the NPDM declares 16 MB of system resource
+sys_resource	0x1000000
+
+# ---- Shader split ----
+shader_groups	/Data/=data
+shader_note	Overcooked! All You Can Eat shaders
+
+# ---- Graphics ----
+# Unity's shared internal-call reader locates its frame-rate settings without build IDs.
+# The shared engine limiter and present cap keep vSyncCount and presentation at 60.
+fps_target	60
+# the game calls nvnDeviceSetDepthMode with near = 0 in the check boot: the pipeline bases made before it runs are made for that mode
+depth_mode	zero

@@ -1,6 +1,6 @@
 # A pixel shader's alpha test and logic operation entry points from one Metal compile (GitHub issue #1036). Every pixel shader needs them, since which shaders draw with either shows only in play,
 # and few ever do: compiling each as a library of its own was 57% of Pokopia's 366,805 compiles. So the compile unit holds each entry point's body once, as a static function, with thin
-# entry points around it: main0 (and main0_u / main0_m / main0_d), and the <entry>_a (dmsh_alpha.py) and <entry>_l (dmsh_logic.py) that test or combine what the body returned.
+# entry points around it: main0 (and main0_u / main0_d), and the <entry>_a (dmsh_alpha.py) and <entry>_l (dmsh_logic.py) that test or combine what the body returned.
 # A pixel shader then costs about what its base alone cost: 34-36% of the Metal CPU of three compiles, on the Mac's flags and the iPhone's, over 125 shaders of six games (dm/games/0400A3A01EE4C000/README.md).
 # metallib gives every entry point a complete module, whether or not the body is shared, and two things in the host's path grow with what one file holds: metal-tt compiles every unspecialized
 # entry point of a library, so a base library with them made the pipeline archive twice as large, and the base library is what every shader loads. So the compile's one library is
@@ -57,7 +57,7 @@ def entry(msl, name):   # one entry point as entries() gives it, None when there
     return next((_entry(msl, m) for m in _ENTRY.finditer(msl) if m.group(3) == name), None)
 
 
-# main0's body once, as a function the entry points that return what it computes call: main0 itself, main0_u / main0_m (dmsh_entry.py fs_uint), main0_d (fs_dual) and main0_f (dmsh_fetch.fold).
+# main0's body once, as a function the entry points that return what it computes call: main0 itself, main0_u (dmsh_entry.py fs_uint), main0_d (fs_dual) and main0_f (dmsh_fetch.fold).
 # Each of them used to be a copy of the body, which the compiler built again for each. always_inline: a caller that passes constants (main0's literals for main0_f's tile read) gets them folded,
 # and each entry point is a module of its own in the library anyway (metallib)
 _BODY = re.compile(r'static (__attribute__\(\(always_inline\)\) )?main0_out dm_body_main0\(')

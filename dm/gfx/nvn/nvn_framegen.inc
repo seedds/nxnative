@@ -51,7 +51,7 @@ static int g_fg_dt, g_fg_cam;   // item 6: DM_FRAMEGEN_DT=1 the measured time be
 // fg_pace's pause only stops showing: with nothing else, the copies, motion pass, interpolation and second upscale were still paid for every late frame, which made the
 // real frames later still. The user's first play of this build (2026-11-13) went from 33 ms a frame to 67, 104 and 257 ms from the moment the generator started: 498
 // interpolations paid, 516 generated frames late, 4 shown. The gate, decided on the present thread (fg_pace) and read by the game's thread (fg_frame):
-//   closes at once when a real frame missed its period (over 1.25 periods since the one before) or the present queue is more than two behind;
+//   closes when two real frames within 30 presents missed their period (over 1.25 periods since the one before), or at once when the present queue is more than two behind;
 //   opens when the real frame has room for the generator, not merely when it is in time (at a cap every frame in time shows the same interval, and so does the host's
 //     "frame work", which holds the cap's wait; opening on that alone puts the generator back into the overload it was stopped for): the frame's GPU time
 //     (nvn_last_gpu_ms, a few frames behind) plus the generator's cost under 95 % of the period, by its smoothed value, for g_fg_need presents without a late one (30). The cost is the difference
@@ -512,7 +512,7 @@ static int fg_pace(double t_in, double period, int waiting) {
              (unsigned long long)n, (unsigned long long)g_up_mfx_kept); }
     if (g_fg_upto < 9) return 0;
     if (g_fg_gate_mode) {   // see DM_FRAMEGEN_GATE
-        static uint64_t n, closes_at[3], hold_until, win_n, win_closed, last_close, opened_at, made_open, grace_until; static int room, graces, had_win; static double on_ms, off_ms, penalty; int drop = late || waiting > 2; n++;
+        static uint64_t n, closes_at[3], hold_until, win_n, win_closed, last_close, opened_at, made_open, grace_until, last_late; static int room, graces, had_win; static double on_ms, off_ms, penalty; int drop = late || waiting > 2; n++;
         double per_ms = per * 1e3, g = nvn_last_gpu_ms(); int closed = atomic_load(&g_fg_closed);
         if (!sw_on(g_fg_gate_mode)) { if (closed) atomic_store(&g_fg_closed, 0); room = 0; }   // an ab phase with the gate off
         else {
@@ -526,6 +526,10 @@ static int fg_pace(double t_in, double period, int waiting) {
             // opening it ran out before the first generated frame, which waits for its history: fgpin3, 11-16)
             { int w = FG.win[0] != nil; if (w && !had_win && graces < 3) { graces++; grace_until = n + 30; } had_win = w; }
             if (!closed && drop && n < grace_until) drop = 0;
+            // One late frame alone does not close it: the route has late frames of its own, the same 9 over 1.25 periods in 3,400 at 960x540 with the generator idle, with the
+            // gate off and with it on, and closing at each cost 190 frames a time (28 % generated against 44 % with the gate off; fgpin4, 11-16). The overload the gate is
+            // for is late frame after late frame: it closes at the second within 30 presents (fg_pace's pause below still drops the generated frame beside each)
+            if (!closed && drop && waiting <= 2) { int second = last_late && n - last_late <= 30; last_late = n; if (!second) drop = 0; }
             if (!closed && drop) {
                 atomic_store(&g_fg_closed, 1); closed = 1; room = 0; uint64_t c = atomic_fetch_add(&g_fg_closes, 1) + 1;
                 // the opening was wrong, if the generator worked since it: a late frame while it made nothing (the boot, a load, the first 300 upscales) is not its doing. Charged
@@ -533,8 +537,8 @@ static int fg_pace(double t_in, double period, int waiting) {
                 if (opened_at && n - opened_at <= 120 && FG.made > made_open + 8) penalty = MIN(penalty + 4.0, 20.0);   // + 8: not for the first-use frames above
                 last_close = n; closes_at[0] = closes_at[1]; closes_at[1] = closes_at[2]; closes_at[2] = n;
                 if (closes_at[0] && n - closes_at[0] <= 600) g_fg_need = MIN(g_fg_need * 2, FG_NEED * 10);   // it flaps: wait longer before the next try
-                if (c <= 20 || !(c & (c - 1))) MLOG("frame generation gate: a real frame came late (%s), the generator stops until the frame leaves room for it for %d frames (close #%llu; GPU %.1f ms, generator about %.1f ms %s, period %.1f ms)",
-                                                    late ? "over 1.25 periods" : "the present queue is behind", g_fg_need, (unsigned long long)c, g, cost, measured ? "measured" : "assumed", per_ms);
+                if (c <= 20 || !(c & (c - 1))) MLOG("frame generation gate: real frames come late (%s), the generator stops until the frame leaves room for it for %d frames (close #%llu; GPU %.1f ms, generator about %.1f ms %s, period %.1f ms)",
+                                                    waiting > 2 ? "the present queue is behind" : "two over 1.25 periods within 30 presents", g_fg_need, (unsigned long long)c, g, cost, measured ? "measured" : "assumed", per_ms);
             } else if (closed) {
                 // Room by the smoothed GPU time without the generator (off_ms), not frame by frame: the frame's GPU time is a span with long frames of its own
                 // (960x540, generator off: p50 22.8 ms, p90 29.1), which the generator does not lengthen (generator on: p50 26.2, p90 28.3). Asked of each frame, 5 ms

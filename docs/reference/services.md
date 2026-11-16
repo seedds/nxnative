@@ -1005,6 +1005,14 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Fix:** the constructor is no longer taken over (`hle_account.c`): the SDK's own runs. No host interface sets the IPC pointer, so the SDK's destructor, reached through the vtable, finds no session to close and frees the object. `friends::AsyncContext` and `account::NintendoAccountAuthorizationRequestContext` have no vtable (their SDK constructors write none), so their takeovers stay.
 - **Found on:** Pokémon Friends (`010008C01E742000`, update 1.1.5, SDK 19.3.11; no profile in the repository yet). The managed names come from Il2CppDumper's table ([IL2CPP method lookup](../development.md#il2cpp-method-lookup)).
 
+### Friends presence is accepted offline
+
+- **Symptom:** the loading screen stays at 22% for ever while the music plays (Twelve Minutes). No red line, no crash. `DM_FS=1` shows `level0` and the FMOD master bank read, then no other scene and no save mount; `DM_HLECOUNT` shows `account::TryOpenPreselectedUser`, `GetUserId`, `GetNickname` and `friends::UserPresence::Initialize` once each, and `fs::MountSaveData` never.
+- **Cause:** the host's `UserPresence::Initialize` returned `RES_FAIL` like the other friends calls. The game's start-up takes the failure as fatal and stops before it mounts its save, so the loading screen waits for a scene that is never asked for. A presence is the game's own object until the friends service publishes it, so failing to set one up is not what an offline console reports.
+- **Fix:** `UserPresence::Initialize`, `SetDescription` and `Commit` succeed and publish nothing (`hle_friends.c`). The calls that need the service (friend lists, notification queue, online play sessions, invitations) still fail.
+- **Check:** `make -C dm/host/tests GAME=<id> run` runs `t_friends`.
+- **Found on:** [Twelve Minutes](../../dm/games/0100CD701434C000/README.md) (Unity 2019.4.31f1 IL2CPP, SDK 12.3.7; seedds/nxnative#217).
+
 ### Creating an ssl context needs no network
 
 - **Symptom:** the game ends right after `nnMain`, with a crash in its own cleanup on an object it had not created yet (DRAGON QUEST BUILDERS 2: `CRASH sig=11 addr=0x60db0` at `main+0x2676c8`, x0 = 0, the callers `main+0x85210` and `main+0x7fabf8`). No red line.

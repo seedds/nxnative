@@ -40,18 +40,19 @@ static void folder_path(const char *save, int i, char *out, size_t n) { snprintf
 
 static void free_names(char **v, size_t n) { for (size_t i = 0; i < n; i++) free(v[i]); free(v); }
 static int by_name(const void *a, const void *b) { return strcmp(*(char *const *)a, *(char *const *)b); }
-// A folder's names in byte order, without . and ..; -1 when it cannot be read
+// A folder's names in byte order, without . and ..; -1 (errno set) when it cannot be read, all of it: a readdir that fails partway is a failure, not the folder's end
 static int names_of(const char *dir, char ***out, size_t *count) {
     DIR *d = opendir(dir); if (!d) return -1;
-    char **v = NULL; size_t n = 0, cap = 0; struct dirent *e; int r = 0;
-    while ((e = readdir(d))) {
+    char **v = NULL; size_t n = 0, cap = 0; struct dirent *e; int r = 0, err = 0;
+    while ((errno = 0, e = readdir(d))) {
         if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
-        if (n == cap) { char **w = realloc(v, (cap = cap ? cap * 2 : 16) * sizeof *v); if (!w) { r = -1; break; } v = w; }
-        if (!(v[n] = strdup(e->d_name))) { r = -1; break; }
+        if (n == cap) { char **w = realloc(v, (cap = cap ? cap * 2 : 16) * sizeof *v); if (!w) { r = -1; err = ENOMEM; break; } v = w; }
+        if (!(v[n] = strdup(e->d_name))) { r = -1; err = ENOMEM; break; }
         n++;
     }
+    if (!r && errno) { r = -1; err = errno; }   // readdir's NULL with errno set
     closedir(d);
-    if (r) { free_names(v, n); return -1; }
+    if (r) { free_names(v, n); errno = err; return -1; }
     if (n) qsort(v, n, sizeof *v, by_name);
     *out = v; *count = n; return 0;
 }
@@ -72,27 +73,13 @@ static int rm_tree(const char *p) {   // rm -rf: 0 when nothing is left
     return rmdir(p) ? -1 : r;
 }
 
-// Anything in it but Finder's .DS_Store: an empty folder is no save (the host makes DM_SAVE at every mount, DM_SAVE_device at the device save's)
+// Anything in it but Finder's .DS_Store: an empty folder is no save (the host makes DM_SAVE at every mount, DM_SAVE_device at the device save's).
+// 1: a save; 0: none (no folder, or an empty one); -1 (errno set): a folder that cannot be read, which is not "no save": a pack, a send or a pull that took it
+// for none would leave this device's save out (a send would replace a cloud save that has it with one that does not)
 static int has_entries(const char *dir) {
-    char **v; size_t n, k = 0; if (names_of(dir, &v, &n)) return 0;
+    char **v; size_t n, k = 0; if (names_of(dir, &v, &n)) return errno == ENOENT ? 0 : -1;
     for (size_t i = 0; i < n; i++) k += strcmp(v[i], ".DS_Store") != 0;
     free_names(v, n); return k > 0;
-}
-
-typedef int (*visit_fn)(void *ctx, const char *abs, const char *rel, const struct stat *st);
-// Every entry under abs, depth first, a folder before what it holds, names in byte order: the order that gives the same save the same hash on every device.
-// Finder's .DS_Store is left out (a save folder someone opened in Finder is still the same save), and so are links, which the host never makes in a save
-static int walk(const char *abs, const char *rel, visit_fn fn, void *ctx) {
-    char **v; size_t n; if (names_of(abs, &v, &n)) return -1;
-    int r = 0;
-    for (size_t i = 0; i < n && !r; i++) {
-        if (!strcmp(v[i], ".DS_Store")) continue;
-        char a[PATH_MAX], p[PATH_MAX]; struct stat st;
-        if (snprintf(a, sizeof a, "%s/%s", abs, v[i]) >= (int)sizeof a || snprintf(p, sizeof p, "%s/%s", rel, v[i]) >= (int)sizeof p || lstat(a, &st)) r = -1;
-        else if (S_ISDIR(st.st_mode)) { if (!(r = fn(ctx, a, p, &st))) r = walk(a, p, fn, ctx); }
-        else if (S_ISREG(st.st_mode)) r = fn(ctx, a, p, &st);
-    }
-    free_names(v, n); return r;
 }
 
 static int write_all(int fd, const void *b, size_t n) {
@@ -128,8 +115,7 @@ static void upper_title(const char *title, char *out, size_t n) {   // one spell
 // ---------- packing ----------
 typedef struct { CC_SHA256_CTX sha; FILE *out; ss_meta *m; uint32_t entries; uint8_t buf[CHUNK]; } packer;
 
-static int pack_entry(void *c, const char *abs, const char *rel, const struct stat *st) {
-    packer *k = c;
+static int pack_entry(packer *k, const char *abs, const char *rel, const struct stat *st) {
     char guest[1024]; ssize_t gl = getxattr(abs, GUEST_NAME, guest, sizeof guest, 0, XATTR_NOFOLLOW);
     if (gl < 0) gl = 0;   // ENOATTR: the host name is the guest's
     size_t pl = strlen(rel); int file = S_ISREG(st->st_mode);
@@ -156,11 +142,27 @@ static int pack_entry(void *c, const char *abs, const char *rel, const struct st
     return 0;
 }
 
+// Every entry under abs into k, depth first, a folder before what it holds, names in byte order: the order that gives the same save the same hash on every device.
+// Finder's .DS_Store is left out (a save folder someone opened in Finder is still the same save), and so are links, which the host never makes in a save
+static int walk(const char *abs, const char *rel, packer *k) {
+    char **v; size_t n; if (names_of(abs, &v, &n)) return -1;
+    int r = 0;
+    for (size_t i = 0; i < n && !r; i++) {
+        if (!strcmp(v[i], ".DS_Store")) continue;
+        char a[PATH_MAX], p[PATH_MAX]; struct stat st;
+        if (snprintf(a, sizeof a, "%s/%s", abs, v[i]) >= (int)sizeof a || snprintf(p, sizeof p, "%s/%s", rel, v[i]) >= (int)sizeof p || lstat(a, &st)) r = -1;
+        else if (S_ISDIR(st.st_mode)) { if (!(r = pack_entry(k, a, p, &st))) r = walk(a, p, k); }
+        else if (S_ISREG(st.st_mode)) r = pack_entry(k, a, p, &st);
+    }
+    free_names(v, n); return r;
+}
+
 static int pack_save(const char *save, packer *k) {
     CC_SHA256_Init(&k->sha);
     for (int i = 0; i < 2; i++) {
         char dir[PATH_MAX]; folder_path(save, i, dir, sizeof dir);
-        if (has_entries(dir) && walk(dir, FOLDERS[i], pack_entry, k)) return -1;
+        int h = has_entries(dir);
+        if (h < 0 || (h && walk(dir, FOLDERS[i], k))) return -1;
     }
     uint8_t d[CC_SHA256_DIGEST_LENGTH]; CC_SHA256_Final(d, &k->sha); hex(d, k->m->hash);
     if (!k->m->files) k->m->hash[0] = 0;   // no save: no hash, so that "nothing here" compares as nothing
@@ -377,12 +379,14 @@ static int cloud_path(const char *v, const char *title, char *out, size_t n) {
 }
 static int cloud_file(const char *title, char *out, size_t n) { return cloud_path(getenv("DM_SAVE_SYNC"), title, out, n); }
 
-// The platform's fetch, given at most `ms`: a download iCloud never finishes must not hold the game at its first save mount. One that comes too late is dropped
-typedef struct { pthread_mutex_t mu; pthread_cond_t cv; int done, abandoned, result; char cloud[PATH_MAX], local[PATH_MAX]; } fetch_job;
+// The platform's fetch, given at most `ms`: a download iCloud never finishes must not hold the game at its first save mount. One that comes too late is dropped.
+// Each fetch writes a file of its own (part: <local>.<pid>-<n>.part), renamed to `local` only by the caller that still waits for it: a fetch that came too late
+// removes its own file and nothing else, so it never writes over or removes what a later attempt fetched to the same `local` (the sender's out/cloud.dmsync)
+typedef struct { pthread_mutex_t mu; pthread_cond_t cv; int done, abandoned, result; char cloud[PATH_MAX], part[PATH_MAX + 32]; } fetch_job;
 static void *fetch_thread(void *p) {
-    fetch_job *j = p; int r = front_save_sync_fetch(j->cloud, j->local);
+    fetch_job *j = p; int r = front_save_sync_fetch(j->cloud, j->part);
     pthread_mutex_lock(&j->mu); j->done = 1; j->result = r; int late = j->abandoned; pthread_cond_signal(&j->cv); pthread_mutex_unlock(&j->mu);
-    if (late) { unlink(j->local); pthread_mutex_destroy(&j->mu); pthread_cond_destroy(&j->cv); free(j); }
+    if (late) { unlink(j->part); pthread_mutex_destroy(&j->mu); pthread_cond_destroy(&j->cv); free(j); }
     return NULL;
 }
 static void deadline(int ms, struct timespec *ts) {
@@ -391,10 +395,11 @@ static void deadline(int ms, struct timespec *ts) {
     if (ts->tv_nsec >= 1000000000) { ts->tv_sec++; ts->tv_nsec -= 1000000000; }
 }
 static int fetch_timed(const char *cloud, const char *local, int ms) {   // front_save_sync_fetch's answer, or -1 at the time limit (or with no thread to wait on)
+    static _Atomic unsigned seq;
     fetch_job *j = calloc(1, sizeof *j); pthread_t t;
     if (!j) return -1;
     pthread_mutex_init(&j->mu, NULL); pthread_cond_init(&j->cv, NULL);
-    snprintf(j->cloud, sizeof j->cloud, "%s", cloud); snprintf(j->local, sizeof j->local, "%s", local);
+    snprintf(j->cloud, sizeof j->cloud, "%s", cloud); snprintf(j->part, sizeof j->part, "%s.%d-%u.part", local, (int)getpid(), atomic_fetch_add(&seq, 1));
     int e = pthread_create(&t, NULL, fetch_thread, j);
     if (e) { pthread_mutex_destroy(&j->mu); pthread_cond_destroy(&j->cv); free(j); SRED("no thread to fetch the cloud's save (error %d)", e); return -1; }   // not fetched on this thread: a download that never finishes would hold the game
     pthread_detach(t);
@@ -404,8 +409,11 @@ static int fetch_timed(const char *cloud, const char *local, int ms) {   // fron
     int r = j->done ? j->result : -1, mine = j->done;
     if (!mine) j->abandoned = 1;   // the thread frees it when it ends
     pthread_mutex_unlock(&j->mu);
-    if (mine) { pthread_mutex_destroy(&j->mu); pthread_cond_destroy(&j->cv); free(j); }
-    else SLOG("the cloud's save did not come within %d s", ms / 1000);
+    if (mine) {
+        if (r == 1 && rename(j->part, local)) { SRED("cannot put the cloud's save at %s (errno=%d)", local, errno); r = -1; }
+        if (r != 1) unlink(j->part);   // what a fetch that failed left, if anything
+        pthread_mutex_destroy(&j->mu); pthread_cond_destroy(&j->cv); free(j);
+    } else SLOG("the cloud's save did not come within %d s", ms / 1000);
     return r;
 }
 
@@ -495,7 +503,9 @@ static int pull(const char *save, const char *bundle, ss_meta *r, char *kept, si
         struct stat st;
         folder_path(save, i, here[i], sizeof here[i]); snprintf(incoming[i], sizeof incoming[i], "%s/%s", tmp, FOLDERS[i]);
         fresh[i] = !access(incoming[i], F_OK);
-        j.had[i] = lstat(here[i], &st) ? HAD_NONE : has_entries(here[i]) ? HAD_SAVE : HAD_EMPTY;
+        int none = lstat(here[i], &st) != 0, h = none ? 0 : has_entries(here[i]);
+        if (h < 0) { e = errno; rm_tree(tmp); errno = e; return -1; }   // a folder that cannot be read: nothing has moved (taken as empty, it would be swapped into the staging folder and cleared)
+        j.had[i] = none ? HAD_NONE : h ? HAD_SAVE : HAD_EMPTY;
         if (j.had[i] == HAD_SAVE) { j.dev[i] = (uint64_t)st.st_dev; j.ino[i] = (uint64_t)st.st_ino; }
     }
     if ((j.had[0] == HAD_SAVE || j.had[1] == HAD_SAVE) && backup_dir(save, "local", kept, kn, 0)) { e = errno; kept[0] = 0; rm_tree(tmp); errno = e; return -1; }
@@ -535,7 +545,9 @@ static int send_save(const char *save, const char *title, const char *cloud) {
     // A clone of the committed folders, taken while no Commit can swap them: the game may commit again while this packs
     for (int i = 0; i < 2; i++) {
         char from[PATH_MAX], to[PATH_MAX]; folder_path(save, i, from, sizeof from); folder_path(snap, i, to, sizeof to);
-        if (has_entries(from) && dm_fs_clone_committed(from, to)) { SRED("cloning %s failed (errno=%d)", from, errno); goto done; }
+        int h = has_entries(from);
+        if (h < 0) { SRED("%s cannot be read (errno=%d): not sent", from, errno); goto done; }   // not packed as no save: the cloud's copy of it would go
+        if (h && dm_fs_clone_committed(from, to)) { SRED("cloning %s failed (errno=%d)", from, errno); goto done; }
     }
     if (ss_pack(snap, title, packed, &mine)) { SRED("packing %s failed (errno=%d)", save, errno); goto done; }
     read_base(save, base);

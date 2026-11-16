@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 # The compile cache as one file (dm/tools/shader_cache.py): entries in and out, bytes stored once, several threads and processes, a damaged file, pruning, and taking in a cache from before it.
-import hashlib, os, subprocess, sys, tarfile, tempfile, threading, time, unittest
+import hashlib, os, sqlite3, subprocess, sys, tarfile, tempfile, threading, time, unittest
 from pathlib import Path
+from unittest import mock
 
 REPO = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO / 'dm/tools'))
@@ -62,6 +63,42 @@ class Base(unittest.TestCase):
         self.store = shader_cache.Store(self.path, self.said.append); self.addCleanup(self.store.close)
 
     def blobs(self): return self.store.db.execute('SELECT count(*) FROM blob').fetchone()[0]
+
+
+@unittest.skipIf(sys.version_info < (3, 11), 'an sqlite3 error carries its code from Python 3.11')
+class Renumbered(unittest.TestCase):
+    """A new file that takes another inode at its first write (an exFAT drive under macOS 26.6.2, GitHub issue #2434): SQLite's real SQLITE_READONLY_DBMOVED, made here by
+    putting a copy of the file in its place. DM_EXFAT_DIR=<a folder on an exFAT volume> also runs test_on_the_drive there"""
+    def setUp(self):
+        t = tempfile.TemporaryDirectory(dir=os.environ.get('DM_EXFAT_DIR')); self.addCleanup(t.cleanup)
+        self.path = Path(t.name) / 'sub' / 'cas.db'
+        self.renumber = 0; self.opened = 0; connect = shader_cache.sqlite3.connect; test = self
+
+        class Drive(sqlite3.Connection):
+            def execute(self, sql, *args):
+                cursor = super().execute(sql, *args)
+                if sql.startswith('PRAGMA auto_vacuum') and test.renumber:
+                    test.renumber -= 1; copy = test.path.with_name('copy'); copy.write_bytes(test.path.read_bytes()); os.replace(copy, test.path)
+                return cursor
+
+        def counted(*a, **k): self.opened += 1; return connect(*a, factory=Drive, **k)
+        patcher = mock.patch.object(shader_cache.sqlite3, 'connect', counted); patcher.start(); self.addCleanup(patcher.stop)
+
+    def check(self, opened):
+        s = shader_cache.Store(self.path); self.addCleanup(s.close)
+        if opened: self.assertEqual(self.opened, opened)
+        for i in range(200): s.put(f'x/{i}', os.urandom(5000))
+        self.assertEqual(len(s.names('x/')), 200)
+        self.assertEqual([s.db.execute(f'PRAGMA {p}').fetchone()[0] for p in ('page_size', 'auto_vacuum', 'journal_mode')], [16384, 2, 'wal'])
+
+    def test_a_renumbered_file_is_opened_again(self): self.renumber = 1; self.check(2)
+
+    def test_a_file_that_moves_again_fails(self):
+        self.renumber = 2
+        with self.assertRaises(sqlite3.OperationalError) as e: shader_cache.Store(self.path)
+        self.assertEqual((e.exception.sqlite_errorcode, self.opened), (shader_cache.DBMOVED, 2))
+
+    def test_on_the_drive(self): self.check(0 if os.environ.get('DM_EXFAT_DIR') else 1)   # opened once where the file keeps the inode SQLite notes, as on APFS; twice on such a drive
 
 
 class Entries(Base):
@@ -127,8 +164,8 @@ class ReadOnly(Base):
         self.assertEqual(s.get('metallib/mac/a.metallib'), b'local')
         self.assertEqual(s.names('metallib/mac/'), {'metallib/mac/a.metallib', 'metallib/mac/new.metallib'})
         s.delete_prefix('variant/'); self.assertEqual(s.get('variant/v/mac.metallib'), b'variant')
-        assert s.readonly is not None and s.readonly.db is not None   # the store opened over a read-only one, open
-        with self.assertRaises(shader_cache.sqlite3.OperationalError): s.readonly.db.execute('DELETE FROM entry')
+        assert s.readonly is not None and len(s.readonly.dbs) == 1   # the store opened over a read-only one, open
+        with self.assertRaises(shader_cache.sqlite3.OperationalError): s.readonly.dbs[0][1].execute('DELETE FROM entry')
         s.close()
         self.assertEqual(self.path.read_bytes(), before); self.assertEqual(self.path.stat().st_mtime_ns, stamp)
 
@@ -273,6 +310,26 @@ class Writers(Base):
             self.store.put('b', b'2')
         self.assertEqual(self.store.names(''), {'a', 'b'})
 
+    def full_after(self, pages):   # the file may grow by this many pages more: SQLite then answers SQLITE_FULL, as on a full drive
+        n = self.store.db.execute('PRAGMA page_count').fetchone()[0]; self.store.db.execute(f'PRAGMA max_page_count={n + pages}')
+
+    def test_a_full_drive_fails_the_whole_batch(self):   # SQLite ends the transaction itself on SQLITE_FULL: an earlier write must not be lost while a later one lands outside the batch
+        self.store.put('before', b'0'); self.full_after(2)
+        with self.store.batch():
+            self.store.put('a', b'small'); self.store.put('b', b'x' * 200000); self.store.put('c', b'small too')
+        self.assertTrue(self.store.full); self.assertEqual(self.store.names(''), {'before'})
+        self.assertEqual(len([m for m in self.said if m.startswith('[RED]')]), 1)
+        self.store.put('d', b'1'); self.assertFalse(self.store.has('d'))   # the build goes on without the cache
+
+    def test_a_failed_commit_fails_the_batch(self):
+        class Db:   # the connection, whose commit finds the drive full
+            def __init__(self, db): self.db = db
+            def __getattr__(self, name): return getattr(self.db, name)
+            def commit(self): raise sqlite3.OperationalError('database or disk is full')
+        real = self.store.db
+        with mock.patch.object(self.store, 'db', Db(real)), self.store.batch(): self.store.put('a', b'1')
+        self.assertTrue(self.store.full); self.assertFalse(real.in_transaction); self.assertEqual(self.store.names(''), set())
+
     def test_processes_share_it(self):   # regress.py's chain builds and the NSP script on one game's file
         code = ("import sys; sys.path.insert(0, sys.argv[1]); import shader_cache\ns = shader_cache.Store(sys.argv[2])\n"
                 "for j in range(300): s.put(f'{sys.argv[3]}/{j}', sys.argv[3].encode() * 1000); assert s.get(f'{sys.argv[3]}/{j}') == sys.argv[3].encode() * 1000\ns.close()\n")
@@ -355,6 +412,56 @@ class Prune(Base):
         self.assertEqual(self.store.prune_shaders(set(), now)[0], 40)
         self.store.db.execute('PRAGMA wal_checkpoint(TRUNCATE)')
         self.assertLess(self.path.stat().st_size, big // 4)
+
+
+class Generations(unittest.TestCase):   # one file per chain: a build writes its own, copies the Metal compiles it reads from older ones, and the older ones go whole after it
+    A, B, C = '0123456789ab', 'bbbbbbbbbbbb', 'cccccccccccc'
+
+    def setUp(self):
+        t = tempfile.TemporaryDirectory(); self.addCleanup(t.cleanup)
+        self.d = Path(t.name); self.said = []
+
+    def file(self, name, entries, when):   # a generation holding entries, last written at when
+        s = shader_cache.Store(self.d / name)
+        for n, data in entries.items(): s.put(n, data)
+        s.close(); os.utime(self.d / name, (when, when))
+
+    def names(self, path):
+        s = shader_cache.Store(path); self.addCleanup(s.close)
+        return set(s.names(''))
+
+    def test_older_compiles_are_copied_on_read(self):
+        now = time.time()
+        self.file('cas.db', {'metallib/mac/old.metallib': b'legacy', f'shader/{D1}/mac/k_b.metal': b'old chain'}, now - 300)
+        self.file(f'cas-{self.B}.db', {'metallib/mac/m.metallib': b'B', 'metallib/mac/old.metallib': b'newer'}, now - 100)
+        self.assertEqual([Path(p).name for p in shader_cache.generations(self.d)], [f'cas-{self.B}.db', 'cas.db'])   # newest first, the one file last
+        s = shader_cache.for_chain(self.d, self.A)
+        self.assertEqual(s.path, str(self.d / f'cas-{self.A}.db'))
+        self.assertTrue(s.has('metallib/mac/m.metallib'))
+        self.assertEqual(s.get('metallib/mac/old.metallib'), b'newer')   # the newest generation answers
+        self.assertIsNone(s.get(f'shader/{D1}/mac/k_b.metal')); self.assertFalse(s.has(f'shader/{D1}/mac/k_b.metal'))   # another chain's shader never hits
+        s.close()
+        self.assertEqual(self.names(self.d / f'cas-{self.A}.db'), {'metallib/mac/old.metallib'})   # what it read is its own now; what it only saw is not
+
+    def test_older_generations_go_after_a_build(self):
+        now = time.time()
+        self.file('cas.db', {'metallib/ios/i.metallib': b'ios', 'metallib/mac/x.metallib': b'old mac', f'shader/{D1}/mac/k_b.metal': b'm'}, now - 300)
+        self.file(f'cas-{self.B}.db', {'metallib/mac/b.metallib': b'B'}, now - 100)
+        self.assertEqual(shader_cache.drop_generations(self.d, self.A, self.said.append), [])   # no file of its own: nothing goes
+        self.file(f'cas-{self.A}.db', {'metallib/mac/a.metallib': b'A', f'shader/{D2}/mac/k_b.metal': b'a'}, now)
+        open(self.d / 'cas.db.lock', 'w').close()
+        self.assertEqual(sorted(shader_cache.drop_generations(self.d, self.A, self.said.append)), [f'cas-{self.B}.db', 'cas.db'])
+        self.assertEqual(sorted(p.name for p in self.d.iterdir()), [f'cas-{self.A}.db'])
+        self.assertEqual(self.names(self.d / f'cas-{self.A}.db'), {'metallib/mac/a.metallib', 'metallib/ios/i.metallib', f'shader/{D2}/mac/k_b.metal'})   # iOS, which it compiled none of, kept
+        self.assertIn('kept 1 ios Metal compiles of cas.db: this build compiled none for ios', self.said)
+        self.assertEqual(shader_cache.drop_generations(self.d, self.A, self.said.append), [])
+
+    def test_a_folder_as_the_read_only_cache(self):   # regress.py's fallback reads the player's generations, never copying them
+        now = time.time()
+        self.file(f'cas-{self.B}.db', {'metallib/mac/m.metallib': b'B'}, now - 100); self.file('cas.db', {'variant/v/x': b'v'}, now - 300)
+        s = shader_cache.Store(self.d / 'regress/cas.db', readonly=self.d); self.addCleanup(s.close)
+        self.assertEqual((s.get('metallib/mac/m.metallib'), s.get('variant/v/x')), (b'B', b'v'))
+        self.assertEqual(s._run('SELECT count(*) FROM entry')[0][0], 0)
 
 
 class Adopt(unittest.TestCase):

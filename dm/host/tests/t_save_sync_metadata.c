@@ -273,6 +273,37 @@ static void journal_cases(const char *root, const char *both, const char *one) {
     CHECK(save_sync_mount(save, "0100000000010000") == 0, "a second mount gets the first's answer, not a new one");
     unlink(p);
 }
+// dir holds `keep` and nothing else (keep NULL: nothing)
+static int holds_only(const char *dir, const char *keep) {
+    DIR *d = opendir(dir); struct dirent *e; int ok = d != NULL;
+    while (d && (e = readdir(d))) if (e->d_name[0] != '.' && (!keep || strcmp(e->d_name, keep))) ok = 0;
+    if (d) closedir(d);
+    return ok;
+}
+static int file_is(const char *path, const char *text) {
+    char b[64]; int fd = open(path, O_RDONLY); if (fd < 0) return 0;
+    ssize_t n = read(fd, b, sizeof b - 1); close(fd);
+    return n >= 0 && (b[n] = 0, !strcmp(b, text));
+}
+// fetch_timed: a fetch that comes too late (blocked on a FIFO, the default fetch's open) neither writes over nor removes what a later attempt fetched to the same file
+static void fetch_cases(const char *folder) {
+    const char *name = "late fetch"; char dir[PATH_MAX], fifo[PATH_MAX], src[PATH_MAX], none[PATH_MAX], dst[PATH_MAX];
+    snprintf(dir, sizeof dir, "%s/fetch", folder); mkdir(dir, 0755);
+    snprintf(fifo, sizeof fifo, "%s/cloud.fifo", folder); snprintf(src, sizeof src, "%s/cloud.dmsync", folder); snprintf(none, sizeof none, "%s/none.dmsync", folder);
+    snprintf(dst, sizeof dst, "%s/cloud.dmsync", dir);
+    put(src, "newer");
+    CHECK(fetch_timed(none, dst, 2000) == 0 && holds_only(dir, NULL), "no cloud file: 0, nothing left");
+    CHECK(fetch_timed(src, dst, 2000) == 1 && file_is(dst, "newer") && holds_only(dir, "cloud.dmsync"), "a fetch in time: the file at its place, nothing else");
+    test_unlink(dst);
+    if (mkfifo(fifo, 0644)) abort();
+    CHECK(fetch_timed(fifo, dst, 100) == -1 && holds_only(dir, NULL), "a fetch that does not come in time: -1");
+    CHECK(fetch_timed(src, dst, 2000) == 1 && file_is(dst, "newer"), "the next attempt's fetch");
+    int w = open(fifo, O_WRONLY); if (w < 0 || write(w, "older", 5) != 5) abort();
+    close(w);   // the first fetch goes on now: it copies "older", finds itself dropped and removes its file
+    usleep(300 * 1000);
+    CHECK(file_is(dst, "newer") && holds_only(dir, "cloud.dmsync"), "the late fetch leaves the later attempt's file as it was and removes only its own");
+    test_unlink(dst); test_unlink(src); test_unlink(fifo); rmdir(dir);
+}
 int main(void) {
     char folder[] = "/tmp/dm-save-sync-metadata-XXXXXX", save[PATH_MAX], path[PATH_MAX];
     if (!mkdtemp(folder)) return 1;
@@ -304,6 +335,7 @@ int main(void) {
         journal_cases(root, both, one);
         rm_tree(root);
     }
+    fetch_cases(folder);
     rmdir(folder);
     printf("save-sync metadata: %d checks, %d failed\n", checks, failures);
     return failures != 0;

@@ -110,7 +110,8 @@ void dm_web_failed(const char *why) {   // the page did not load: the stand-in t
     pthread_mutex_unlock(&g_web_mu);
 }
 
-// Start: the page is looked up and opened; hidden until Appear when the argument boots it initially hidden (forced off for the synchronous form)
+// Start: the page is looked up and opened; hidden until Appear when the argument boots it initially hidden (forced off for the synchronous form).
+// These path buffers and web_find's take about 11 KB, more than an 8 KB guest stack: the entry points run on the host stack, as every HLE_FORCE take-over (issue #2541).
 static void web_start(const uint8_t *arg, int sync) {
     char path[0xc00], cb[0x400], dir[1024];
     web_tlv_str(arg, TLV_DOCUMENT_PATH, path, sizeof path); web_tlv_str(arg, TLV_CALLBACK_URL, cb, sizeof cb);

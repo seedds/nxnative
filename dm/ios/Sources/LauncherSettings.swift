@@ -11,6 +11,9 @@ struct Setting: Decodable, Identifiable {
     struct Base: Decodable { let docked, handheld: [Int] }
     let options: [[String]]?   // choice: [value, label]
     let min, max, step: Double?   // range
+    let unit: String?      // range: shown as a number of this unit (Game memory: GB) instead of a percentage
+    let first: String?     // range: the label of its lowest value (Game memory: Default, with the game's own size)
+    let optionNeeds: [String: String]?   // choice: option value → "<VAR>>=<n>", offered only while that range is at least n (Output resolution's sizes and Game memory)
     let on, off: String?   // toggle: the values the variable takes (1 / 0 when not given)
     var id: String { env }
     var sectionTitle: String { section ?? "Game" }
@@ -30,7 +33,7 @@ struct Setting: Decodable, Identifiable {
         default: return true
         }
     }
-    enum CodingKeys: String, CodingKey { case env, kind, label, note, def = "default", section, needs, level, base, options, min, max, step, on, off }
+    enum CodingKeys: String, CodingKey { case env, kind, label, note, def = "default", section, needs, level, base, options, min, max, step, unit, first, optionNeeds = "option_needs", on, off }
 }
 struct SettingsFile: Decodable { let settings: [Setting] }
 
@@ -39,7 +42,8 @@ final class LauncherModel: ObservableObject {
     let fixed: Set<String>      // set by an env file or by the launch environment: shown, not changed
     let fromLaunch: Set<String>   // of those, the ones the launch environment set (a front end's launch overrides, Xcode; DM_ENV_LAUNCH_KEYS from launcher.c or main.m)
     let ignoreSaved: Bool   // DM_SAVED_CHOICES=0: start from the defaults, and leave the saved choices as they are
-    @Published var values: [String: String] = [:]
+    @Published var values: [String: String] = [:] { didSet { if !loading { settle() } } }
+    private var loading = true   // while init reads the saved choices: a choice is checked against the others once all are read, not against the ones read before it (Output resolution comes before Game memory)
 
     private let defaults: UserDefaults
 
@@ -55,6 +59,33 @@ final class LauncherModel: ObservableObject {
             if fixed.contains(s.env), let v = env[s.env] { values[s.env] = v; continue }
             let saved = ignoreSaved ? nil : defaults.object(forKey: "launcher." + s.env) as? String   // a string, as launcher.c reads it: not string(forKey:), which turns a number into one
             values[s.env] = saved.flatMap { s.accepts($0) ? $0 : nil } ?? s.def   // a saved choice the game no longer offers: its default
+        }
+        loading = false
+        settle()
+    }
+
+    // An option with a rule (option_needs, "<VAR>>=<n>"): offered while that setting is at least n; never when this list lacks the setting, as nothing then gives the option what it needs
+    func offers(_ s: Setting, _ v: String) -> Bool {
+        guard let need = s.optionNeeds?[v] else { return true }
+        let p = need.components(separatedBy: ">=")
+        guard p.count == 2, let lo = Double(p[1]), let cur = values[p[0]].flatMap(Double.init) else { return false }
+        return cur >= lo - 1e-6
+    }
+    func options(_ s: Setting) -> [[String]] { (s.options ?? []).filter { offers(s, $0[0]) } }
+    // What an option not offered yet needs, for its greyed-out entry: "needs 8 GB of Game memory" (the range's own label and unit); nil when it is offered
+    func needLabel(_ s: Setting, _ v: String) -> String? {
+        guard !offers(s, v), let need = s.optionNeeds?[v] else { return nil }
+        let p = need.components(separatedBy: ">=")
+        guard p.count == 2, let n = Double(p[1]), let r = settings.first(where: { $0.env == p[0] }) else { return "not available" }
+        return "needs \(r.unit != nil ? "\(Int(n.rounded())) \(r.unit!)" : rangeLabel(r, n)) of \(r.label)"
+    }
+    // A choice whose option stopped being offered (Game memory lowered below what 5K needs) goes back to its default, or to its first offered option; a value fixed by an env file
+    // or at launch stays, and the host checks it (loader.c DM_OUTPUT_SIZE)
+    private func settle() {
+        for s in settings where s.optionNeeds != nil && !fixed.contains(s.env) {
+            guard let v = values[s.env], !offers(s, v) else { continue }
+            let to = offers(s, s.def) ? s.def : (options(s).first?[0] ?? s.def)
+            if to != v { fputs("launcher: \(s.env)=\(v) needs \(s.optionNeeds?[v] ?? ""): back to \(to)\n", stderr); values[s.env] = to }
         }
     }
 
@@ -76,11 +107,17 @@ final class LauncherModel: ObservableObject {
         settings.filter { $0.basic == basic }.reduce(into: []) { if !$0.contains($1.sectionTitle) { $0.append($1.sectionTitle) } }
     }
     func rows(in section: String, basic: Bool) -> [Setting] { rows(in: section).filter { $0.basic == basic } }
-    // A range's label: its percentage, with the size in pixels for the chosen console mode when the list has the base size (the render scale)
+    // A range's label: its percentage, with the size in pixels for the chosen console mode when the list has the base size (the render scale); a range with a unit, the number of it,
+    // and its lowest value the list's label for it when it has one (Game memory: 2 is Default, 4 is 4 GB)
     func rangeLabel(_ s: Setting, _ v: Double) -> String {
+        if let f = s.first, let lo = s.min, abs(v - lo) < 1e-6 { return f }
+        if let u = s.unit { return "\(Int(v.rounded())) \(u)" }
         let p = "\(Int((v * 100).rounded())) %"
         guard let b = s.base else { return p }
-        let size = (values["DM_OPMODE"] ?? "1") == "0" ? b.handheld : b.docked
+        let handheld = (values["DM_OPMODE"] ?? "1") == "0"
+        // A native output size (docked): 100 % is that size, as the host draws it (loader.c DM_OUTPUT_SIZE)
+        let output = (values["DM_OUTPUT_SIZE"] ?? "").split(separator: "x").compactMap { Int($0) }
+        let size = handheld ? b.handheld : output.count == 2 ? output : b.docked
         guard size.count == 2 else { return p }
         return "\(Int((Double(size[0]) * v).rounded())) × \(Int((Double(size[1]) * v).rounded())) (\(p))"
     }
@@ -110,7 +147,7 @@ final class LauncherModel: ObservableObject {
     // A choice made while the game runs (the iOS in-game menu, GameMenu.swift): saved as Play saves it, so the settings screen shows it at the next start, and put in the environment.
     // A value an env file or the launch fixed stays
     func choose(_ s: Setting, _ v: String) {
-        guard !fixed.contains(s.env), s.accepts(v) else { return }
+        guard !fixed.contains(s.env), s.accepts(v), offers(s, v) else { return }
         values[s.env] = v; store(s, v); setenv(s.env, v, 1)
         fputs("launcher: \(s.env)=\(v) (in-game menu)\n", stderr)
     }

@@ -13,7 +13,7 @@
 // The mask builder's story-area online block. At the site (movk x13, #1, lsl #32) x13 holds the pattern's bits 0-31 (Spectator: bits 23-26 and 31)
 // and the movk adds bit 32 (online); x22 is the session's Spectator flag, 0 in every story area. The normal online pattern sets bits 1-28 and 30.
 // 2.0.1 main (76a489f3…); 1.0.5 main (816c5358…), where the builder is the same instruction for instruction
-static const coop_site g_sites[] = {
+static const coop_site k_coop_sites[] = {
     {"76a489f3bd3642fa5e18bd83d32c98ba", 0xb0f60, 0xb1030, 0xf2c0002du, COOP_SITE_MASK, "permission mask: story areas get Palette Town's Spectator-Off pattern"},
     {"816c5358e8178d802fcec4a7ce5a741a", 0xa61e0, 0xa62b0, 0xf2c0002du, COOP_SITE_MASK, "permission mask: story areas get Palette Town's Spectator-Off pattern"},
 };
@@ -22,7 +22,7 @@ static const coop_site g_sites[] = {
 // player who is not the host a visitor's reply (kinds 0xa/0xb, no conversation) unless the NPC is one of three every visitor may talk to. At the site
 // (orr w8, w25, w0) w0 is IsHost's answer, so a visitor takes the host's path: the NPC's own conversation. 1.0.5's handler has the same site at the
 // same offset, between the same calls (stage == 0x11, IsHost); its other differences are struct offsets
-static const coop_site g_story[] = {
+static const coop_site k_coop_story[] = {
     {"76a489f3bd3642fa5e18bd83d32c98ba", 0x4c024c, 0x4c06d8, 0x2a000328u, COOP_SITE_TALK, "talk: a visitor gets the NPC's conversation, as the host"},
     {"816c5358e8178d802fcec4a7ce5a741a", 0x469424, 0x4698b0, 0x2a000328u, COOP_SITE_TALK, "talk: a visitor gets the NPC's conversation, as the host"},
 };
@@ -35,8 +35,8 @@ static int sites_of(const coop_site *t, size_t nt, const char *main_build, const
         if (!strncmp(main_build, t[i].build, strlen(t[i].build))) { if (!n) *out = &t[i]; n++; }
     return n;
 }
-int coop_interact_sites(const char *main_build, const coop_site **out) { return sites_of(g_sites, sizeof g_sites / sizeof g_sites[0], main_build, out); }
-int coop_story_sites(const char *main_build, const coop_site **out) { return sites_of(g_story, sizeof g_story / sizeof g_story[0], main_build, out); }
+int coop_interact_sites(const char *main_build, const coop_site **out) { return sites_of(k_coop_sites, sizeof k_coop_sites / sizeof k_coop_sites[0], main_build, out); }
+int coop_story_sites(const char *main_build, const coop_site **out) { return sites_of(k_coop_story, sizeof k_coop_story / sizeof k_coop_story[0], main_build, out); }
 
 int coop_story_on(void) {
     const char *e = getenv("DM_COOP_STORY");

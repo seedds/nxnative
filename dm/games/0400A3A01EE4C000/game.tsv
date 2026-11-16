@@ -38,6 +38,19 @@ mem_used	0x5600000
 # the game sets near = 0 (the log's depth mode line): the pipeline bases made before it runs are made for that mode
 depth_mode	zero
 
+# ---- Input ----
+# pointer look (hle_hid.c): the camera turns at 110 deg/s times the right stick's tilt above a round deadzone of 0.51, frame-time based (measured from the view matrix)
+look_rate	110
+look_dead	0.52
+# direct look (hle_hid.c look_cam): main 76a489f3 (2.0.1) keeps player 1's camera object's address at main+0x3561948; pitch +0xb0 / yaw +0xb4, pitch limits +0xe4 / +0xe8,
+# stick lock bytes +0x121 / +0x122 (bit 6 of +0x122 ignored); 1.0.5 (main 816c5358) the same object at main+0x34513d0 (found from memory diffs around known stick turns)
+look_cam	816c5358e8178d80 34513d0 b0 b4 e4 e8 121/bfff;76a489f3bd3642fa 3561948 b0 b4 e4 e8 121/bfff
+# ---- Link Play (hle_coop_*.c) ----
+# the DNS-SD service the module advertises; pack_app.py puts it and the local network text into the app's Info.plist
+bonjour_service	_pokopia-ldn._udp
 # ---- Shader split (shader_split.py) ----
+# the driver rewrites control +0x20..+0x27 (GLSLC's own hash) of some sections at run time (8 of the title screen's shaders came back under another key though their code was in the map):
+# the key hashes those bytes as zeros, in the split and in the host
+shader_key_skip	0x20+0x8
 shader_groups	/motor_asset_re/=rdb
 shader_note	Pokemon Pokopia shaders

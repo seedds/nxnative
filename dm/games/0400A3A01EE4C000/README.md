@@ -11,6 +11,12 @@ A Switch 2 game: update v655360 (the title screen says Ver. 2.0.1), SDK 20.5.25 
 | `pad_layout full` | `game.tsv` | |
 | `depth_mode zero` | `game.tsv` | the game sets near = 0 (the log's `depth mode` line). Without the key the pipeline archive made offline holds the other entry point, and the host refuses it |
 
+## Added 2026-11-15 (pointer look, Link Play, shader keys)
+
+- `look_rate`, `look_dead`, `look_cam` in `game.tsv`: the Mac's captured mouse turns the camera (hle_hid.c pointer look; `look_cam` writes player 1's camera angles directly, at main+0x3561948 in 2.0.1).
+- Link Play (hle_coop_*.c): `nn::ldn` and the game's UDP sockets go to the module while the launcher's "Link Play on this network" is on; `bonjour_service` names its DNS-SD service for Info.plist; `patches.py` holds the observation gates of Interact everywhere and Story co-op.
+- `shader_key_skip 0x20+0x8`: the driver rewrites control +0x20..+0x27 of some sections at run time, and 8 title-screen shaders came back under other keys though their code was in the map. With those bytes hashed as zero the map has 99,385 keys (variants merged), and `shader_seen.tsv` was re-keyed from the same records (8,157 old keys → 6,171).
+
 ## Files
 
 - A dump folder whose `updates/<version>/` holds the whole RomFS; [`pack_dump.py`](../../../scripts/pack_dump.py) packs it without a base RomFS. RomFS: the newer RDB (as ROMANCE OF THE THREE KINGDOMS 8 REMAKE's) under `motor_asset_re/KIDS_PLATFORM_OUNCE`, and a `LD_C0_R.BIN` / `LI_C0_R.IDX` LINKDATA pair.

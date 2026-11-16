@@ -17,7 +17,7 @@ SDK = REPO / 'dm/tools/sdk_patches.py'
 HOST = ['dm/host', 'dm/gfx', 'dm/ios']   # tracked files only: dm/host/gen and other build output are git-ignored
 HOST_EXT = ('.c', '.m', '.mm', '.h', '.inc', '.swift')
 # What a build-keyed host table does (the table's name in the source; a row of another table is listed under its own name)
-TABLES = {'k_locks': 'engine frame limit set to fps_target', 'k_ue': "Unreal's allocator on a host malloc zone", 'k_nier_dr': 'frame interval and dynamic-resolution floor'}
+TABLES = {'k_coop_sites': "Link Play sites", 'k_coop_story': "Link Play story co-op site", 'k_locks': 'engine frame limit set to fps_target', 'k_ue': "Unreal's allocator on a host malloc zone", 'k_nier_dr': 'frame interval and dynamic-resolution floor'}
 # Profile keys that are not behaviour switches: per-game data or controls, not something the host does differently
 NOT_SWITCHES = {'pad_layout', 'depth_mode', 'mem_used', 'sys_resource', 'shader_versions', 'shader_covers'}
 
@@ -76,6 +76,11 @@ HOST_BINDING = [
      'why': "the studio's engine, which its other games ship", 'blocked': 'one game on that engine here'}),
     ('k_ue', '', 'feae83dc9e9fb34c77d0a62f1fa9ae9f', {'what': "UE3's GMalloc setup skipped, the host allocator in (hle_uemalloc.c)", 'now': 'build', 'goal': 'game', 'purpose': 'address space',
      'why': "UE3 inlines the allocator's constructor into the GMalloc setup and has its own vtable layout (25 slots, 32-bit sizes), so the Unreal 4/5 discovery does not apply"}),
+    ('k_coop_story', '', '', {'what': "Link Play's story co-op site in Pokémon Pokopia's main: the talk handler's IsHost read (hle_coop_interact.c)", 'now': 'build', 'goal': 'game', 'purpose': 'runtime',
+     'why': "the game's own story logic: an observation gate at the site gives a visitor the host's talk path while the launcher's Story co-op switch is on", 'blocked': 'one game has Link Play; both of its builds are listed'}),
+    ('k_coop_sites', '', '', {'what': "Link Play's two story-area sites in Pokémon Pokopia's main: the permission-mask builder and the talk handler (hle_coop_interact.c)", 'now': 'build', 'goal': 'game', 'purpose': 'runtime',
+     'why': "the game's own story logic: an observation gate at each site (the profile's patches.py) gives a visitor Palette Town's permissions and the host's talk path while the launcher's Interact everywhere / Story co-op switches are on",
+     'blocked': 'one game has Link Play; both of its builds are listed'}),
     ('k_nier_dr', '', '', {'what': "NieR's frame interval and dynamic-resolution floor at fixed addresses", 'now': 'build', 'goal': 'game', 'purpose': 'frame rate',
      'checked': "both releases' mains, where these rows were found; the global main's sites mapped into ASTRAL CHAIN and Bayonetta 1-3 (2026-11-09)",
      'why': "the game's own display object; the Asian release's function is the global one's 0x13c0 further on, so the rewriter's function match could give the host both releases' "

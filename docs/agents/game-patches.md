@@ -52,6 +52,8 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 | `build` → `engine` | Unity's constant-buffer table locked on the shared device | race | blocked: the stubs have no function-matched form yet, and no other Unity 2018.4 main on the drive shares these functions (Ori and the Blind Forest 1.0.2: no fingerprint match) | checked: probes of both threads inserting the same key and of the table API's callers by thread; Blind Forest main compared with nso_fnmap | 1 | [Ori and the Will of the Wisps](../../dm/games/01008DD013200000/README.md) | Unity 2018.4's threaded GfxDevice: the main thread registers layouts on the real device while the render thread uses the same table; any Unity 2018.4 build with this code has the race |
 | `build` → `game` | 60 fps frame step on 1.3.0 (the same stub at its known addresses) | frame rate | blocked: 1.3.0's main is on neither drive to fingerprint (v458752 is the update on them) | judgement | 1 | [Hyrule Warriors: Age of Calamity](../../dm/games/01002B00111A2000/README.md) | the stub above, placed at 1.3.0's addresses: the matched rule would serve it once its functions are fingerprinted |
 | `build` → `game` | cutscene fade scheduling uses the sequence frame rate | frame rate | blocked: the scheduler has no unwind entry in 1.1.1, which the function matcher needs | checked: 1.1.1 disassembly and post-Porquillon runtime trace of the fade trigger, sequence rate and opacity | 1 | [Pikmin 4](../../dm/games/0100B7C00933A000/README.md) | the title's fade scheduler compares sequence-frame positions after converting seconds with the engine frame rate |
+| `build` → `game` | Link Play's story co-op site in Pokémon Pokopia's main: the talk handler's IsHost read (hle_coop_interact.c) | runtime | blocked: one game has Link Play; both of its builds are listed | judgement | 1 | [Pokemon Pokopia](../../dm/games/0400A3A01EE4C000/README.md) | the game's own story logic: an observation gate at the site gives a visitor the host's talk path while the launcher's Story co-op switch is on |
+| `build` → `game` | Link Play's two story-area sites in Pokémon Pokopia's main: the permission-mask builder and the talk handler (hle_coop_interact.c) | runtime | blocked: one game has Link Play; both of its builds are listed | judgement | 1 | [Pokemon Pokopia](../../dm/games/0400A3A01EE4C000/README.md) | the game's own story logic: an observation gate at each site (the profile's patches.py) gives a visitor Palette Town's permissions and the host's talk path while the launcher's Interact everywhere / Story co-op switches are on |
 | `build` → `game` | screen shape: the sizes, the view, the layouts' projection and their edge widgets (DM_SCREEN_ASPECT) | rendering | blocked: the stubs have no function-matched form yet | judgement | 1 | [Animal Crossing: New Horizons](../../dm/games/01006F8002326000/README.md) | the output size is the host's, but where the game takes its sizes, its cameras and its layouts are this build's code |
 | `game` → `engine` | Snowdrop three-pool allocator: 12 GB of ranges → 4 GB | address space | blocked: only this game has been checked with the older initializer and this allocation split | checked: unique function and original bytes on 1.0 and 1.05; pool use measured on the Mac, 2026-10-31 | 1 | [South Park: The Fractured But Whole](../../dm/games/01008F2005154000/README.md) | the older initializer holds the pool bounds in separate immediates; its complete function moves between game builds. The 4 GB size works around the iPhone's address-space limit |
 | `build` → `game` | 60 fps intervals and dynamic-resolution constants | frame rate | kept: 1.0.3 (v131072) is the newest update of both releases and likely their last: a function match would serve no other build; the rewriter would also need matched rules that write fixups and declare capabilities, a new mechanism (2026-11-09) | checked: both releases' mains, where the host's rows for them were found; the global main's sites mapped into ASTRAL CHAIN and Bayonetta 1-3 (2026-11-09) | 2 | [NieR:Automata The End of YoRHa Edition (010056B015FE8000)](../../dm/games/010056B015FE8000/README.md); [NieR:Automata The End of YoRHa Edition (0100B8E016F76000)](../../dm/games/0100B8E016F76000/README.md) | the game's own constants; the Asian release's function is the global one's 0x13c0 further on, so one function-matched rule could serve both releases. No PlatinumGames sibling shares the code: none of its sites has an exact match in ASTRAL CHAIN or Bayonetta 1-3 (nso_fnmap, 2026-11-09) |
@@ -60,6 +62,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 | `build` → `game` | 60 fps frame step (112 sites) | frame rate | kept: 1.0.1 (2019) is the last update; a function match would serve no other build of this game | checked: nso_fnmap of its 112 sites into those four mains (2026-11-09) | 1 | [ASTRAL CHAIN](../../dm/games/01007300020FA000/README.md) | the game's own clock and timers (a community 60 fps mod on the host's frame step). PlatinumGames' other games do not share them: none of its 15 functions has an exact match in Bayonetta, Bayonetta 2, Bayonetta 3 or NieR:Automata |
 | `build` → `game` | 60 fps frame step and render scale (ksys::VFR) | frame rate | kept: 44 sites in 34 functions to fingerprint for an update that may not come (1.9.0, the Switch 2 Edition release); convert when a new build appears | checked: nso_fnmap of its 44 sites into those 13 mains (2026-11-09) | 1 | [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md) | the game's own frame code; the frame-step state page is general. No engine sibling shares it: none of its 34 functions has an exact match in Tears of the Kingdom, SMO, MK8D, ACNH, Splatoon 2 / 3, Kirby, Mario Party, Ocarina, Smash, Metroid Dread or Origami King (only the widescreen stubs' sead::PerspectiveProjection functions recur) |
 | `build` → `game` | Hagi coroutine stack region 1 GB → 64 MB | memory | kept: 1.1.4 is the last update; a match over Hagi would serve no other build of this game | checked: the final build 1.1.4 (the only one the profile packs), 2026-11-04 | 1 | [Super Mario 3D All-Stars: Super Mario Sunshine](../../dm/games/010049900F546002/README.md) | a size inside Hagi's own code: nothing the host sees tells a 1 GB reservation it can shrink from one it cannot |
+| `build` → `game` | Link Play's Interact everywhere and Story co-op: observation gates at the story-area permission-mask builder and the talk handler (hle_coop_interact.c) | runtime | kept: the gates change no instruction and do nothing while the launcher switches are off; 2.0.1 is the newest update, so a fingerprint would serve no other build yet | checked: 2.0.1 (76a489f3) and 1.0.5 (816c5358) mains: the mask builder is the same instruction for instruction, the talk handler's site sits at the same offset between the same calls (pokopia-native, 2026-11) | 1 | [Pokemon Pokopia](../../dm/games/0400A3A01EE4C000/README.md) | the game's own story logic: a function fingerprint of the mask builder and the talk handler would carry the two sites to a new build |
 
 ## Summary
 
@@ -91,6 +94,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 | [Paper Mario: The Thousand-Year Door](#paper-mario-the-thousand-year-door) | 1 | 0 | 1 | 0 | 0 | `build` → `game` |
 | [Persona 5 Strikers](#persona-5-strikers) | 0 | 0 | 0 | 1 | 0 | `game` |
 | [Pikmin 4](#pikmin-4) | 0 | 0 | 1 | 0 | 0 | `build` → `game` |
+| [Pokemon Pokopia](#pokemon-pokopia) | 0 | 4 | 0 | 0 | 4 | `build` → `game` ×3 |
 | [Pokémon Legends: Arceus](#pokémon-legends-arceus) | 0 | 0 | 0 | 1 | 0 | `game` |
 | [South Park: The Fractured But Whole](#south-park-the-fractured-but-whole) | 0 | 0 | 0 | 1 | 0 | `game` → `engine` |
 | [South Park: The Stick of Truth](#south-park-the-stick-of-truth) | 0 | 0 | 0 | 1 | 0 | `game` |
@@ -532,6 +536,25 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 - **1.1.1 `main`** `060f827b…` ([patches.py:30](../../dm/games/0100B7C00933A000/patches.py#L30))
   - stub `+0x1ca4590`: cutscene fade scheduling uses the sequence frame rate
 
+### Pokemon Pokopia
+
+[Pokemon Pokopia](../../dm/games/0400A3A01EE4C000/README.md), `0400A3A01EE4C000`, [patches.py](../../dm/games/0400A3A01EE4C000/patches.py).
+
+- **`build` → `game`**, runtime, kept: the gates change no instruction and do nothing while the launcher switches are off; 2.0.1 is the newest update, so a fingerprint would serve no other build yet, checked: 2.0.1 (76a489f3) and 1.0.5 (816c5358) mains: the mask builder is the same instruction for instruction, the talk handler's site sits at the same offset between the same calls (pokopia-native, 2026-11): Link Play's Interact everywhere and Story co-op: observation gates at the story-area permission-mask builder and the talk handler (hle_coop_interact.c). The game's own story logic: a function fingerprint of the mask builder and the talk handler would carry the two sites to a new build
+- **`build` → `game`**, runtime, blocked: one game has Link Play; both of its builds are listed, judgement: Link Play's two story-area sites in Pokémon Pokopia's main: the permission-mask builder and the talk handler (hle_coop_interact.c). The game's own story logic: an observation gate at each site (the profile's patches.py) gives a visitor Palette Town's permissions and the host's talk path while the launcher's Interact everywhere / Story co-op switches are on
+- **`build` → `game`**, runtime, blocked: one game has Link Play; both of its builds are listed, judgement: Link Play's story co-op site in Pokémon Pokopia's main: the talk handler's IsHost read (hle_coop_interact.c). The game's own story logic: an observation gate at the site gives a visitor the host's talk path while the launcher's Story co-op switch is on
+
+- **v655360 `main`** `76a489f3…` ([patches.py:8](../../dm/games/0400A3A01EE4C000/patches.py#L8))
+  - gate 283 at `+0xb1030`: Interact everywhere: the permissions a story area gives online players
+  - gate 539 at `+0x4c06d8`: Story co-op: a visitor talks to NPCs as the host does
+  - host [hle_coop_interact.c:17](../../dm/host/hle_coop_interact.c#L17): Link Play sites
+  - host [hle_coop_interact.c:26](../../dm/host/hle_coop_interact.c#L26): Link Play story co-op site
+- **unregistered build** `816c5358…` ([patches.py:12](../../dm/games/0400A3A01EE4C000/patches.py#L12))
+  - gate 283 at `+0xa62b0`: Interact everywhere: the permissions a story area gives online players
+  - gate 539 at `+0x4698b0`: Story co-op: a visitor talks to NPCs as the host does
+  - host [hle_coop_interact.c:18](../../dm/host/hle_coop_interact.c#L18): Link Play sites (a build no profile registers)
+  - host [hle_coop_interact.c:27](../../dm/host/hle_coop_interact.c#L27): Link Play story co-op site (a build no profile registers)
+
 ### Pokémon Legends: Arceus
 
 [Pokémon Legends: Arceus](../../dm/games/01001F5010DFA000/README.md), `01001F5010DFA000`, [patches.py](../../dm/games/01001F5010DFA000/patches.py).
@@ -771,6 +794,13 @@ Applied to the `sdk` of any build without CUTS, found by function fingerprint ([
 - regions of 4 MB and more aligned to 2 MB, as SDK 20: SDK 11.4.0 (Pokémon Legends: Arceus, Kirby and the Forgotten Land): the next rule's size classes with 8 more bytes of body; the 4 GB StandardAllocator region of Arceus's nninitStartup (the host's cap) fits after the 62 MB node area only with it
 - regions of 4 MB and more aligned to 2 MB, as SDK 20: SDK 12.3.2 (OCTOPATH TRAVELER II), 12.3.9 (Xenoblade Chronicles 3), 13.3.5 (Mario + Rabbids Sparks of Hope), 14.3.0 (Batman: Arkham Knight), 15.3.2 (Paper Mario: The Thousand-Year Door)
 - regions of 4 MB and more aligned to 2 MB, as SDK 20: SDK 16.2.0 (Sea of Stars), 18.3.2 (Absolum), 18.3.5 (Super Mario Galaxy)
+
+## Host rows of builds no profile registers
+
+Dead code unless such a build is run; a candidate for removal, or for a build row in its profile.
+
+- `816c5358…`: [hle_coop_interact.c:18](../../dm/host/hle_coop_interact.c#L18): Link Play sites (a build no profile registers)
+- `816c5358…`: [hle_coop_interact.c:27](../../dm/host/hle_coop_interact.c#L27): Link Play story co-op site (a build no profile registers)
 
 ## Translator rules keyed by a shader's code
 

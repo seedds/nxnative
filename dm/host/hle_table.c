@@ -11,4 +11,7 @@ L(strpbrk) L(strcasecmp) L(strncasecmp) L(atoi) L(atof) L(strtol) L(strtoul) L(s
 L(strtod) L(strtof) L(sqrtf) L(cbrtf) L(expf) L(acosf) L(cosf) L(sinf) L(atan2f) L(fmodf) L(cos)
 L(sin) L(powf) L(atanf) L(tanf) L(asinf) L(log10) L(pow) L(logf) L(ldexpf) L(log10f) L(log)
 L(ldexp) L(frexp) L(atan2) L(modff) L(exp2f) L(exp2) L(log2f) L(log2) L(lroundf)
-L(mktime) L(timegm) L(gmtime_r) L(localtime_r) L(strftime)
+L(timegm) L(gmtime_r) L(strftime)
+// The SDK's C library has no time zone (UTC on a Switch, hle_time.c), so its local-time functions map to the host's UTC ones (struct tm has the same layout on both sides)
+#define LA(n, f) __attribute__((used, section("__DATA,swhle"))) static const hle_ent hle_lib_##n = { #n, (void *)f };
+LA(mktime, timegm) LA(localtime_r, gmtime_r)

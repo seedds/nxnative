@@ -293,6 +293,14 @@
 - **Measured** on Skyward Sword HD: a 281 MB `cas.tar` became a 226 MB `cas.db`, restoring all 2,470 shaders from the cache took 6 s (9 to 13 s with the tar), and the build folder's `shader/` holds 8 files. It also ran on an exFAT volume, with three processes writing at once.
 - **Found on:** [Skyward Sword HD](../../dm/games/01002DA013484000/README.md#found-on-this-game).
 
+### A GL regression run reports a hang while frames continue
+
+- **Symptom:** `regress.py check` reports `hang (no frame after 72.0 s)` and stops before the last scheduled screenshot, although the captured log has later `[gl] frame` lines and the thread sample shows the game drawing and swapping normally.
+- **Cause:** the watchdog read only the display link's periodic `presents N` messages for GL games. Those messages stop while the present path falls back to timed presents; the game's GL frame counter keeps advancing.
+- **Fix:** `run_watched` accepts `[gl] frame N:` as progress too, preserving the present messages for older hosts and other graphics layers. The timeout still catches a game whose frame counter actually stops.
+- **Check:** `test_regress.py` drives the real watchdog with a controlled clock and child-process log: one present message, then continuing GL frames, must finish without a hang.
+- **Found on:** Fate/hollow ataraxia REMASTERED (`010070E022546000`, provisional profile), during the [GL argument-buffer regression check](rendering.md#gl-resources-exceed-the-direct-metal-sampler-table): the watchdog stopped at its last display-link record, frame 4200, while the log had reached GL frame 6000.
+
 ### Regression shader compilations grow the normal build cache
 
 - **Symptom:** Ocarina of Time's `shader/cache/cas.db` occupies 40.8 GB: 30.4 GB of unique Mac and iOS Metal compilations, two complete generations of 42,848 per-shader records, variants and old staged outputs. Some results are useful for regression tests, but pruning old regression chain libraries does not reclaim their cache entries.

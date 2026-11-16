@@ -1161,7 +1161,8 @@ def run_watched(cmd, env, cwd, log, a, limit, hang, kind, what, shots=(), frames
             elif kind not in ('prebuild', 'nvn'):
                 with open(log, errors='replace') as fh:
                     fh.seek(st['logpos']); chunk = fh.read(); cut = chunk.rfind('\n') + 1; st['logpos'] += len(chunk[:cut].encode())
-                for m in re.finditer(r'presents (\d+)', chunk[:cut]):
+                # GL keeps rendering when the display link falls back to timed presents; its own frame log remains live then.
+                for m in re.finditer(r'(?:presents |\[gl\] frame )(\d+)', chunk[:cut]):
                     n = int(m.group(1))
                     if n > st['max_frame']: st['max_frame'] = n; new = True; st['presents'].append((el, n))
             elif kind == 'prebuild':

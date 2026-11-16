@@ -165,12 +165,23 @@ class Registry(unittest.TestCase):
         # twice it for the queue). Not 3: no value of the constructor's, and the game stopped at the movie's start with it
         m = MODS[REPO / 'dm/games/0400486024DEC000/patches.py']
         rules = m.MATCH_CUTS['main']
-        self.assertEqual(len(rules), 2)
+        self.assertEqual(len(rules), 3)
         (delta, old, new, why), = rules[0]['cuts']
         self.assertEqual((old, new), ('88b79c1a', '48008052'), why)
         self.assertEqual(int(old[:2], 16) & 31, int(new[:2], 16) & 31, why)   # the same destination register
         self.assertLess(delta, rules[0]['size'])
         self.assertTrue(any(e['what'].startswith('movie pictures a frame') for e in m.BINDING))
+
+    def test_ocarina_movie_update_caps_at_three(self):
+        # the update's cap is its one read of the limit (ldr w9, [x0, #0x20]); 3 goes there into the same register, so a frame of three vsyncs can take three pictures while the
+        # constructor's limit (2) keeps sizing the pool and the inputs
+        m = MODS[REPO / 'dm/games/0400486024DEC000/patches.py']
+        rule, = [r for r in m.MATCH_CUTS['main'] if r['name'] == m.movie_cap]
+        (delta, old, new, why), = rule['cuts']
+        self.assertEqual((old, new), ('092040b9', '69008052'), why)
+        self.assertEqual(int(old[:2], 16) & 31, int(new[:2], 16) & 31, why)   # w9 both
+        self.assertLess(delta, rule['size'])
+        self.assertTrue(any(e['what'].startswith('movie update cap') for e in m.BINDING))
 
     def test_ocarina_movie_frame_counts_pictures(self):
         # the movie's frame, which its event's timeline (subtitles, voice, logo) follows, gained 1 per frame drawn, half the pictures once the player takes two a frame. Both draws

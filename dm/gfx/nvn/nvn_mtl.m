@@ -7138,6 +7138,7 @@ typedef struct { void *view; uint64_t view_rid, view_ser, view_dirty; int ok, vi
                  void *alt, *alt_of; uint64_t alt_rid; uint8_t alt_type;   // alt: compatible view used when the shader's declared type differs from view (tex_fit), alt_of = the view it was built from
                  void *im, *im_of; uint64_t im_rid;                       // im: the view an image slot reads in the shader's pixel class (img_fit), im_of = the view it was built from
                  int prev, next, retired, gone; uint64_t transient_sub; uint8_t tt1, sp;   // prev / next: descriptor index + 1, by texture serial; gone: its memory pool was finalized (treg_drop_pool_views); sp: in g_treg_sp
+                 int pprev, pnext;   // descriptor index + 1, by the texture's memory pool (g_treg_pool)
                  void *stand; uint64_t stand_rid, stand_sum, reg_frame; uint8_t stand_tt1, stand_no;
                  } treg_t;   // stand: what its pool table entries hold while its texture is not made (pool_stand; retained), stand_tt1 its texture type + 1, stand_no: it can have none (STAND_NO), or none until a mapping notes its pages (STAND_WAIT); reg_frame: the frame of the registration
 enum { STAND_NO = 1, STAND_WAIT = 2 };   // treg_t.stand_no: no stand-in while the registration stands; none until a mapping over its pages notes it (treg_sparse_notes)
@@ -7153,6 +7154,9 @@ static inline void tu_use(int tid) {   // a use of ID tid (valid): its stamp, an
     if (r->tu_mark != g_tu_log_ep) { r->tu_mark = g_tu_log_ep; if (g_tu_nlog < TU_LOG) g_tu_log[g_tu_nlog++] = tid; else g_tu_over = 1; }
 }
 static nvn_hmap g_treg_serial = {.klen = 8};   // serial → first registered descriptor index + 1, under g_rmu
+// pool → first registered descriptor index + 1 whose texture is on it (pprev / pnext), under g_rmu: the IDs a pool's Finalize marks gone (treg_drop_pool_views). It walked every ID:
+// Mario Kart World's races register about 130,000 of 440 bytes, and each of its pool Finalizes held g_rmu (which the replay's texture lookups take) through that walk
+static nvn_hmap g_treg_pool = {.klen = sizeof(uintptr_t)};
 // Texture ID views are valid for an epoch (view_ser), not for every serial table change: ser_sync takes the notes (own_note) and sends only the IDs registered with a noted serial
 // down the slow path; a change without a note starts a new epoch, which sends them all (what every g_ser_gen bump did before). A battle map in Fire Emblem: Fortune's Weave changes a
 // few serials a frame (the per-stage program ring in bind_stages among them), and each change made the next pool walk (pool_gpu) resolve all ~5,000 IDs again, 2 ms a frame.
@@ -7230,7 +7234,16 @@ static void treg_drop_stand(treg_t *r) {
 }
 static void treg_unlink(int id_) {
     treg_t *r = &g_treg[id_];
-    if (!r->ok || !r->t.serial) return;
+    if (!r->ok) return;
+    if (r->t.pool) {
+        uintptr_t pk = (uintptr_t)r->t.pool;
+        if (r->pprev) g_treg[r->pprev - 1].pnext = r->pnext;
+        else if (r->pnext) nvn_hm_put(&g_treg_pool, &pk, (void *)(uintptr_t)r->pnext);
+        else nvn_hm_del(&g_treg_pool, &pk);
+        if (r->pnext) g_treg[r->pnext - 1].pprev = r->pprev;
+        r->pprev = r->pnext = 0;
+    }
+    if (!r->t.serial) return;
     if (r->prev) g_treg[r->prev - 1].next = r->next;
     else if (r->next) nvn_hm_put(&g_treg_serial, &r->t.serial, (void *)(uintptr_t)r->next);
     else nvn_hm_del(&g_treg_serial, &r->t.serial);
@@ -7459,7 +7472,8 @@ static void treg_gone(treg_t *r) {
 static void treg_drop_pool_views(const void *pool) {
     os_unfair_lock_lock(&g_rmu);
     vc_drop_pool(pool);
-    for (int i = 0; i < g_ntreg; i++) if (g_treg[i].ok && (const void *)g_treg[i].t.pool == pool) treg_gone(&g_treg[i]);
+    uintptr_t pk = (uintptr_t)pool;   // its IDs stay on the list while registered: a pool made later at the same address finds them again, as the walk did
+    for (int k = (int)(uintptr_t)nvn_hm_get(&g_treg_pool, &pk); k; k = g_treg[k - 1].pnext) treg_gone(&g_treg[k - 1]);
     os_unfair_lock_unlock(&g_rmu);
 }
 // Which texture IDs shaders read through a pool (dmsh_reflect.py pool_arrays): a bitmap the shaders set, one bit an ID, which the host folds into g_seen_done at each submission. A handle read from game
@@ -7533,6 +7547,12 @@ void mtl_reg_tex(int tid, const tex_t *t, const view_t *v) {
             rr->next = (int)(uintptr_t)nvn_hm_get(&g_treg_serial, &t->serial);
             if (rr->next) g_treg[rr->next - 1].prev = id_ + 1;
             nvn_hm_put(&g_treg_serial, &t->serial, (void *)(uintptr_t)(id_ + 1));
+        }
+        if (t && t->pool) {
+            uintptr_t pk = (uintptr_t)t->pool;
+            rr->pnext = (int)(uintptr_t)nvn_hm_get(&g_treg_pool, &pk);
+            if (rr->pnext) g_treg[rr->pnext - 1].pprev = id_ + 1;
+            nvn_hm_put(&g_treg_pool, &pk, (void *)(uintptr_t)(id_ + 1));
         }
         if (t && !rr->sp && t->pool && nvn_sparse_pool(t->pool)) {   // its pages follow the game's mappings (treg_sparse_notes)
             if (g_ntreg_sp == g_treg_sp_cap) { g_treg_sp_cap = g_treg_sp_cap ? g_treg_sp_cap * 2 : 256; g_treg_sp = realloc_or_die(g_treg_sp, g_treg_sp_cap * sizeof *g_treg_sp, "the sparse texture IDs"); }

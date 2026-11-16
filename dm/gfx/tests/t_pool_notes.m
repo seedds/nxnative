@@ -35,6 +35,21 @@ static pool_snap *snap(void) { for (int k = 0; k < POOL_SNAPS; k++) if (g_psnap[
 static uint64_t entry(id<MTLBuffer> b, int i) { return ((const uint64_t *)((const uint8_t *)b.contents + DMSH_POOL_HEAD))[i]; }
 static uint64_t dummy_of(id<MTLBuffer> b) { return entry(b, (int)*(const uint32_t *)b.contents); }
 static int lists(const pool_ids *l, int id_) { for (int i = 0; i < l->n; i++) if (l->v[i] == id_) return 1; return 0; }
+// The index of registered IDs by pool (g_treg_pool): each list entry is registered with a texture on its key's pool and links back to the one before it, and the lists hold as many
+// IDs as a walk over every ID finds
+static int treg_index_agrees(void) {
+    uint32_t listed = 0, walked = 0;
+    for (uint32_t i = 0; i < g_treg_pool.cap; i++) {
+        if (!g_treg_pool.vals[i]) continue;
+        uintptr_t pk; memcpy(&pk, g_treg_pool.keys + (size_t)i * g_treg_pool.klen, sizeof pk);
+        for (int k = (int)(uintptr_t)g_treg_pool.vals[i], prev = 0; k; prev = k, k = g_treg[k - 1].pnext) {
+            const treg_t *r = &g_treg[k - 1];
+            if (!r->ok || (uintptr_t)r->t.pool != pk || r->pprev != prev || ++listed > (uint32_t)g_ntreg) return 0;
+        }
+    }
+    for (int i = 0; i < g_ntreg; i++) walked += g_treg[i].ok && g_treg[i].t.pool;
+    return listed == walked;
+}
 // A patched table against the same table built whole (a bump the ring holds no note for) in the next submission, over the IDs the test registers. A retired registration's view is
 // made again in each submission, so for its ID only whether it holds a texture can agree
 static void same_as_whole(id<MTLBuffer> patched, const char *label) {
@@ -222,6 +237,31 @@ int main(void) { @autoreleasepool {
     mtl_tex_release(&t2); h_nvnTextureFinalize(&t1); h_nvnTextureFinalize(&t5); h_nvnTextureFinalize(&t9); h_nvnTextureFinalize(&t10);
     h_nvnMemoryPoolFinalize((NVNmemoryPool *)&dpool); h_nvnMemoryPoolFinalize((NVNmemoryPool *)&epool);
     mtl_pool_del(mb); mtl_pool_del(mc);
+
+    // A pool's Finalize marks gone the IDs its list holds (treg_drop_pool_views): an ID registered again on another pool, or unregistered, has left its old pool's list, whether it was
+    // the list's head (ID 21), its last entry (ID 20) or in its middle (ID 25)
+    {
+        pool_t pe = {0}, pf = {0}, pg = {0}; tex_t x = *(const tex_t *)&t1;
+        #define REG(id_, p) do { x.serial = nvn_new_serial(); x.pool = (p); mtl_reg_tex((id_), &x, NULL); } while (0)
+        REG(20, &pe); REG(21, &pe); REG(22, &pf); REG(24, &pg); REG(25, &pg); REG(26, &pg);
+        CHECK(treg_index_agrees(), "the pool index holds each pool's registered IDs");
+        REG(21, &pf); mtl_reg_tex(20, NULL, NULL); mtl_reg_tex(25, NULL, NULL);
+        int agrees = treg_index_agrees();
+        CHECK(agrees, "and still does after IDs moved to another pool or were unregistered");
+        if (agrees) {   // a list that runs into another pool's could loop in the Finalize's walk
+        treg_drop_pool_views(&pe);
+        CHECK(!g_treg[20].gone && !g_treg[21].gone && !g_treg[22].gone, "a pool whose IDs moved away or were unregistered marks none gone");
+        treg_drop_pool_views(&pf);
+        CHECK(g_treg[21].gone && g_treg[22].gone, "the pool an ID moved to marks it gone with its own");
+        treg_drop_pool_views(&pg);
+        CHECK(g_treg[24].gone && !g_treg[25].gone && g_treg[26].gone, "an ID unregistered from the middle of a list is not marked, the others are");
+        REG(22, &pe);
+        CHECK(!g_treg[22].gone && treg_index_agrees(), "registered again on a live pool, an ID is no longer gone and is listed under that pool");
+        }
+        for (int i = 20; i <= 26; i++) mtl_reg_tex(i, NULL, NULL);
+        CHECK(treg_index_agrees(), "unregistered, the IDs leave the index");
+        #undef REG
+    }
     defer_drain(); munmap(ma, LEN); munmap(mb, LEN); munmap(mc, LEN); munmap(md, LEN); munmap(me, LEN);
     printf("t_pool_notes: %d checks, %d failed\n", checks, failed); return failed != 0;
 } }

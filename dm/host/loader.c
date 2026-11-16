@@ -836,8 +836,8 @@ static void resident_evil_timing_profile(module_t *m) {
     };
     for (size_t i = 0; i < sizeof sites / sizeof *sites; i++) {
         const uint8_t *want = fps == 30 ? sites[i].native : fps == 60 ? sites[i].sixty : sites[i].patched;
-        uint8_t *p = m->base + sites[i].off;
         if ((uint64_t)sites[i].off + 4 > m->size) die("Resident Evil: timing patch %#x is outside main", sites[i].off);
+        uint8_t *p = m->base + sites[i].off;
         if (memcmp(p, sites[i].patched, 4)) die("Resident Evil: unexpected instruction at main+%#x (build/patch mismatch)", sites[i].off);
         memcpy(p, want, 4);
     }

@@ -93,7 +93,7 @@ enum {
     GL_INCR_WRAP = 0x8507, GL_DECR_WRAP, GL_TEXTURE_CUBE_MAP = 0x8513, GL_TEXTURE_CUBE_MAP_POSITIVE_X = 0x8515, GL_TEXTURE_CUBE_MAP_NEGATIVE_Z = 0x851a,
     GL_MAX_VERTEX_ATTRIBS = 0x8869, GL_MAX_TEXTURE_IMAGE_UNITS = 0x8872, GL_RGBA32F = 0x8814, GL_RGB32F, GL_RGBA16F = 0x881a, GL_RGB16F,
     GL_TEXTURE_COMPARE_MODE = 0x884c, GL_TEXTURE_COMPARE_FUNC,
-    GL_ARRAY_BUFFER = 0x8892, GL_ELEMENT_ARRAY_BUFFER, GL_DEPTH24_STENCIL8 = 0x88f0,
+    GL_ARRAY_BUFFER = 0x8892, GL_ELEMENT_ARRAY_BUFFER, GL_DEPTH24_STENCIL8 = 0x88f0, GL_UNIFORM_BUFFER = 0x8a11,
     GL_FRAGMENT_SHADER = 0x8b30, GL_VERTEX_SHADER, GL_MAX_COMBINED_TEXTURE_IMAGE_UNITS = 0x8b4d, GL_SHADER_TYPE = 0x8b4f, GL_DELETE_STATUS = 0x8b80, GL_COMPILE_STATUS,
     GL_LINK_STATUS, GL_VALIDATE_STATUS, GL_INFO_LOG_LENGTH, GL_ATTACHED_SHADERS, GL_ACTIVE_UNIFORMS, GL_ACTIVE_UNIFORM_MAX_LENGTH, GL_SHADER_SOURCE_LENGTH,
     GL_ACTIVE_ATTRIBUTES, GL_ACTIVE_ATTRIBUTE_MAX_LENGTH, GL_SHADING_LANGUAGE_VERSION = 0x8b8c, GL_CURRENT_PROGRAM,
@@ -314,8 +314,18 @@ typedef struct { att_t col, depth, stencil; uint64_t gen; } fb_t;
 NAMES(fb_t, g_fbs, g_nfbs, g_capfbs)
 static fb_t *fb_of(GLuint n) { return n && n < g_nfbs ? g_fbs[n] : NULL; }
 
-typedef struct { uint8_t on, size, norm, div; GLenum type; GLsizei stride; uint64_t off; GLuint buf; } vattr_t;   // div: glVertexAttribDivisor (0 = per vertex)
-typedef struct { vattr_t a[16]; GLuint ebo; } vao_t;
+// A vertex array as GL 4.3 keeps it: 16 attributes and the 16 buffer bindings they read (glVertexAttribFormat, glVertexAttribBinding, glBindVertexBuffer).
+// vattr_t: on (the array enabled), the format (size, type, norm), rel: the attribute's offset in its binding's element, bind: its binding + 1, 0 = its own
+//   (attribute i reads binding i, GL's default).
+// vbind_t: buf and off: the buffer and where its first element starts; client: no buffer, off points into the game's memory (glVertexAttribPointer with no
+//   array buffer bound). stride: bytes between elements, 0 = every vertex reads the first (glBindVertexBuffer's 0 is literal); div: an element per div
+//   instances, 0 = per vertex.
+// glVertexAttribPointer is GL's shorthand for a format, binding i and that binding's buffer, offset and stride; glVertexAttribDivisor for binding i and its
+// divisor. A draw reads an attribute through its binding (vb_of), so every attribute on a binding follows a change to it.
+typedef struct { uint8_t on, size, norm, bind; GLenum type; uint32_t rel; } vattr_t;
+typedef struct { GLuint buf; GLsizei stride; uint8_t div, client; uint64_t off; } vbind_t;
+typedef struct { vattr_t a[16]; vbind_t b[16]; GLuint ebo; } vao_t;
+static vbind_t *vb_of(vao_t *v, int i) { int b = v->a[i].bind; return &v->b[b ? b - 1 : i]; }
 NAMES(vao_t, g_vaos, g_nvaos, g_capvaos)
 static vao_t g_vao0;   // the default vertex array (GL core has none, the compatibility profile does)
 
@@ -363,7 +373,7 @@ static int sp_check(GLuint n, int prog, const char *fn) {
 // va: each attribute's current value (glVertexAttrib4f), what a vertex input reads when its array is disabled: LÖVE's VertexColor and ConstantColor
 #define NUNITS 96
 static struct {
-    GLuint array_buf, rb, fb, read_fb, prog, vao; int unit;
+    GLuint array_buf, uniform_buf, rb, fb, read_fb, prog, vao; int unit;
     struct { GLuint t2d, tcube, t3d, t2da; } units[NUNITS];
     float clear_c[4]; double clear_d; int clear_s;
     uint8_t cmask, dmask, depth, blend, cull, scissor, stencil, poffset, srgb;
@@ -397,6 +407,7 @@ static struct { int made; uint32_t w, h; __strong id<MTLTexture> col[NWIN], ds; 
 static void win_make(uint32_t w, uint32_t h) {
     @autoreleasepool {
         for (int i = 0; i < NWIN; i++) if (g_win.ticket[i]) mtl_present_wait(g_win.ticket[i]);
+        for (int i = 0; i < NWIN; i++) if (g_win.serial[i]) mtl_ext_tex_release(g_win.serial[i]);   // the surface it replaces (another size): let go once its presents complete
         MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:w height:h mipmapped:NO];
         td.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead; td.storageMode = MTLStorageModePrivate;
         for (int i = 0; i < NWIN; i++) { g_win.col[i] = [g_dev newTextureWithDescriptor:td]; g_win.serial[i] = mtl_ext_tex((__bridge void *)g_win.col[i]); g_win.ticket[i] = 0; }
@@ -591,6 +602,7 @@ static int tex_make(tex_t *t, int rt) {
     if (t->made) return t->tex != nil;
     if (t->fmt < 0 || !t->w || !t->h) return 0;
     int faces = tex_faces(t), lv = 0, vol = t->target == GL_TEXTURE_3D, arr = t->target == GL_TEXTURE_2D_ARRAY;
+    if (arr && !t->d) return 0;
     uint32_t full = 1; for (uint32_t m = umax(umax(t->w, t->h), vol ? t->d : 1); m > 1; m >>= 1) full++;
     if (t->slevels) lv = (int)umin(umin((uint32_t)t->slevels, full), MAXLV);
     else { while (lv < MAXLV && lv < (int)full && (t->defined >> lv & 1)) lv++; if (!lv) lv = 1; }
@@ -617,7 +629,11 @@ static int tex_make(tex_t *t, int rt) {
         t->use = 0;
         for (int f = 0; f < faces; f++) for (int l = 0; l < lv; l++) {
             level_t *p = &t->pend[f][l];
-            if (p->data) tex_write(t, f, l, 0, 0, 0, umax(1, t->w >> l), umax(1, t->h >> l), p->data, p->pitch);
+            if (p->data) {
+                size_t layer = p->pitch * fmt_rows(t->fmt, p->h);
+                for (uint32_t k = 0; k < (arr ? t->d : 1); k++)
+                    tex_write(t, arr ? k : f, l, 0, 0, 0, p->w, p->h, (uint8_t *)p->data + k * layer, p->pitch);
+            }
         }
     }
     for (int f = 0; f < 6; f++) for (int l = 0; l < MAXLV; l++) lv_free(&t->pend[f][l]);
@@ -647,21 +663,25 @@ static void tex_write(tex_t *t, int face, int lv, uint32_t x, uint32_t y, uint32
     if (cb != g_cb) { dm_gfx_enter(); cb_commit_one(cb); dm_gfx_leave(); }   // no GPU work goes out while the app is in the background (dm_gfx_suspend)
 }
 // glTexImage2D / glCompressedTexImage2D: the level's bytes, converted
-static void tex_image(GLenum target, GLint level, int f, int cv, uint32_t w, uint32_t h, void *conv, size_t pitch) {
-    tex_t *t = target == GL_TEXTURE_2D || (target >= GL_TEXTURE_CUBE_MAP_POSITIVE_X && target <= GL_TEXTURE_CUBE_MAP_NEGATIVE_Z) ? bound_tex(target) : NULL;
+static void tex_image(GLenum target, GLint level, int f, int cv, uint32_t w, uint32_t h, uint32_t depth, void *conv, size_t pitch) {
+    tex_t *t = target == GL_TEXTURE_2D || target == GL_TEXTURE_2D_ARRAY || (target >= GL_TEXTURE_CUBE_MAP_POSITIVE_X && target <= GL_TEXTURE_CUBE_MAP_NEGATIVE_Z) ? bound_tex(target) : NULL;
     int face = target >= GL_TEXTURE_CUBE_MAP_POSITIVE_X && target <= GL_TEXTURE_CUBE_MAP_NEGATIVE_Z ? (int)(target - GL_TEXTURE_CUBE_MAP_POSITIVE_X) : 0;
     if (!t || level < 0 || level >= MAXLV) { RED1("glTexImage2D target %#x level %d with no texture bound", target, level); free(conv); return; }
     (void)cv;
     uint32_t w0 = level ? w << level : w, h0 = level ? h << level : h;
-    if (level == 0 && (t->fmt != f || t->w != w || t->h != h) && (t->made || t->defined)) tex_drop(t);   // level 0 respecified: a new texture
-    if (!t->made && !t->defined) { t->fmt = f; t->w = level ? umax(w0, 1) : w; t->h = level ? umax(h0, 1) : h; }
+    if (level == 0 && (t->fmt != f || t->w != w || t->h != h || t->d != depth) && (t->made || t->defined)) tex_drop(t);   // level 0 respecified: a new texture
+    if (!t->made && !t->defined) { t->fmt = f; t->w = level ? umax(w0, 1) : w; t->h = level ? umax(h0, 1) : h; t->d = depth; }
     if (t->fmt != f) { RED1("texture level %d in format %s, its level 0 in %s", level, g_fmt[f].name, g_fmt[t->fmt].name); free(conv); return; }
-    if (t->made && level < t->levels && t->tex) { if (conv) tex_write(t, face, level, 0, 0, 0, w, h, conv, pitch); free(conv); return; }
+    if (t->made && level < t->levels && t->tex) {
+        if (conv) for (uint32_t k = 0; k < depth; k++)
+            tex_write(t, target == GL_TEXTURE_2D_ARRAY ? k : face, level, 0, 0, 0, w, h, (uint8_t *)conv + k * pitch * fmt_rows(f, h), pitch);
+        free(conv); return;
+    }
     if (t->made) { RED1("texture level %d given after the texture was made with %d levels: ignored", level, t->levels); free(conv); return; }
     level_t *l = &t->pend[face][level]; lv_free(l);
-    *l = (level_t){conv, pitch, pitch * fmt_rows(f, h), w, h};
+    *l = (level_t){conv, pitch, pitch * fmt_rows(f, h) * depth, w, h};
     int faces = t->target == GL_TEXTURE_CUBE_MAP ? 6 : 1, all = 1;
-    for (int k = 0; k < faces; k++) all &= t->pend[k][level].data != NULL || (level == 0 && !conv);
+    for (int k = 0; k < faces; k++) all &= target == GL_TEXTURE_2D_ARRAY || t->pend[k][level].data != NULL || (level == 0 && !conv);
     if (all) t->defined |= 1 << level;
 }
 
@@ -779,6 +799,11 @@ static MTLVertexFormat vfmt_of(const vattr_t *a) {
     return MTLVertexFormatInvalid;
 }
 static int vtype_bytes(GLenum t) { return t == GL_FLOAT || t == GL_INT || t == GL_UNSIGNED_INT ? 4 : t == GL_HALF_FLOAT || t == GL_SHORT || t == GL_UNSIGNED_SHORT ? 2 : 1; }
+// What a draw's pipeline takes of an attribute (vertex slot s): its format, and its binding's stride and divisor. Stride 0 is a constant fetch (pso_get),
+// which has no divisor, so one pipeline serves either
+static void vkey_set(pkey_t *k, int s, const vattr_t *a, const vbind_t *b) {
+    k->vf[s] = (uint32_t)vfmt_of(a); k->stride[s] = (uint16_t)b->stride; k->div[s] = b->stride ? b->div : 0;
+}
 static MTLBlendFactor bf_of(GLenum f) {
     switch (f) {
         case 0: return MTLBlendFactorZero; case 1: return MTLBlendFactorOne;
@@ -810,9 +835,13 @@ static id<MTLRenderPipelineState> pso_get(prog_t *p, const pkey_t *k) {
             int s = vs->a[i].slot;
             if (k->vf[s]) {
                 vd.attributes[s].format = (MTLVertexFormat)k->vf[s]; vd.attributes[s].offset = 0; vd.attributes[s].bufferIndex = 30 - s;
-                vd.layouts[30 - s].stride = k->stride[s];
-                if (k->div[s]) { vd.layouts[30 - s].stepFunction = MTLVertexStepFunctionPerInstance; vd.layouts[30 - s].stepRate = k->div[s]; }
-                else vd.layouts[30 - s].stepFunction = MTLVertexStepFunctionPerVertex;
+                if (!k->stride[s]) {   // a binding of stride 0: every vertex and instance reads its first element, as a disabled array's value is read
+                    vd.layouts[30 - s].stride = 16; vd.layouts[30 - s].stepFunction = MTLVertexStepFunctionConstant; vd.layouts[30 - s].stepRate = 0;
+                } else {
+                    vd.layouts[30 - s].stride = k->stride[s];
+                    if (k->div[s]) { vd.layouts[30 - s].stepFunction = MTLVertexStepFunctionPerInstance; vd.layouts[30 - s].stepRate = k->div[s]; }
+                    else vd.layouts[30 - s].stepFunction = MTLVertexStepFunctionPerVertex;
+                }
             } else {   // a disabled array: the attribute's current value (glVertexAttrib4f; (0, 0, 0, 1) by default)
                 vd.attributes[s].format = MTLVertexFormatFloat4; vd.attributes[s].offset = 0; vd.attributes[s].bufferIndex = 30 - s;
                 vd.layouts[30 - s].stride = 16; vd.layouts[30 - s].stepFunction = MTLVertexStepFunctionConstant; vd.layouts[30 - s].stepRate = 0;
@@ -953,25 +982,25 @@ static int draw_setup(void) {
     vao_t *v = cur_vao(); const shinfo *vs = p->si[0];
     id<MTLBuffer> cbuf[16] = {nil}; size_t coff[16] = {0};
     for (int i = 0; i < vs->na; i++) {
-        int s = vs->a[i].slot; vattr_t *a = &v->a[p->amap[s]];
+        int s = vs->a[i].slot; vattr_t *a = &v->a[p->amap[s]]; const vbind_t *vb = vb_of(v, p->amap[s]);
         if (!a->on) continue;
-        k.vf[s] = (uint32_t)vfmt_of(a);
-        k.stride[s] = a->stride ? a->stride : a->size * vtype_bytes(a->type); k.div[s] = a->div;
-        if (!k.vf[s] || (k.stride[s] & 3)) { RED1("vertex attribute %d: type %#x size %d stride %d not mapped", p->amap[s], a->type, a->size, a->stride); return 0; }
-        buf_t *b = buf_of(a->buf);
+        vkey_set(&k, s, a, vb);
+        if (!k.vf[s] || (k.stride[s] & 3)) { RED1("vertex attribute %d: type %#x size %d stride %d not mapped", p->amap[s], a->type, a->size, vb->stride); return 0; }
+        buf_t *b = buf_of(vb->buf);
         if (b && b->mb) continue;   // a vertex buffer: bound as it is
-        if (a->buf) { g_sk_attr++; RED1("vertex attribute %d reads a buffer with no data (%u)", p->amap[s], a->buf); return 0; }
+        if (vb->buf) { g_sk_attr++; RED1("vertex attribute %d reads a buffer with no data (%u)", p->amap[s], vb->buf); return 0; }
+        if (!vb->client) { g_sk_attr++; RED1("vertex attribute %d reads a binding with no buffer", p->amap[s]); return 0; }   // GL leaves such a read undefined
         // Client memory: GL lets the game keep the vertices in its own array, Metal needs a buffer, so copy the span this draw touches into a
         // transient block (GameMaker's runner draws every sprite and the screen composite through such arrays). The block keeps vertex i at i * stride from
         // its start, as the array does, so the draw's own first vertex, indices and base vertex read the same vertices; only lo..hi is copied. A per-instance
         // attribute (divisor d) is read by instance: elements 0 .. ceil(instances / d)
         {   draw_span();
-            int64_t lo = a->div ? 0 : g_dl_first, hi = a->div ? (g_dl_inst + (int64_t)a->div - 1) / a->div : g_dl_vend; if (hi - lo < 1) hi = lo + 1;
+            int64_t lo = vb->div ? 0 : g_dl_first, hi = vb->div ? (g_dl_inst + (int64_t)vb->div - 1) / vb->div : g_dl_vend; if (hi - lo < 1) hi = lo + 1;
             size_t stride = k.stride[s], esz = (size_t)a->size * (size_t)vtype_bytes(a->type);
             size_t len = lo < 0 ? 0 : (size_t)lo * stride + (size_t)(hi - lo - 1) * stride + esz;
             if (!esz || lo < 0 || len > (128u << 20)) { g_sk_attr++; RED1("vertex attribute %d: client array vertices %lld..%lld (%zu bytes) out of range", p->amap[s], (long long)lo, (long long)hi, len); return 0; }
             size_t off; id<MTLBuffer> mb = arena_alloc(len, &off);
-            memcpy((uint8_t *)mb.contents + off + (size_t)lo * stride, (const uint8_t *)(uintptr_t)a->off + (size_t)lo * stride, len - (size_t)lo * stride);
+            memcpy((uint8_t *)mb.contents + off + (size_t)lo * stride, (const uint8_t *)(uintptr_t)(vb->off + a->rel) + (size_t)lo * stride, len - (size_t)lo * stride);
             cbuf[s] = mb; coff[s] = off;   // bound below
         }
     }
@@ -985,7 +1014,7 @@ static int draw_setup(void) {
     for (int i = 0; i < vs->na; i++) {
         int s = vs->a[i].slot, gi = p->amap[s]; vattr_t *a = &v->a[gi];
         if (a->on && cbuf[s]) [e setVertexBuffer:cbuf[s] offset:coff[s] atIndex:30 - s];
-        else if (a->on) { buf_t *b = buf_of(a->buf); b->use = g_serial; [e setVertexBuffer:b->mb offset:a->off atIndex:30 - s]; }
+        else if (a->on) { const vbind_t *vb = vb_of(v, gi); buf_t *b = buf_of(vb->buf); b->use = g_serial; [e setVertexBuffer:b->mb offset:vb->off + a->rel atIndex:30 - s]; }
         else [e setVertexBytes:S.va[gi] length:16 atIndex:30 - s];
     }
     bind_uniforms_textures(p);
@@ -1011,16 +1040,16 @@ static int draw_setup(void) {
             GLOG("   samplers %s", line); }
           // The first three vertices of every active attribute: where a black frame's quads actually are and which part of a texture they read
           { vao_t *va = cur_vao();
-            for (int i = 0; i < vsi->na && i < 8; i++) { int s = vsi->a[i].slot, gi = p->amap[s]; vattr_t *a = &va->a[gi];
+            for (int i = 0; i < vsi->na && i < 8; i++) { int s = vsi->a[i].slot, gi = p->amap[s]; vattr_t *a = &va->a[gi]; const vbind_t *vb = vb_of(va, gi);
               if (!a->on || a->size < 1 || a->size > 4) continue;
-              buf_t *b = buf_of(a->buf);
-              const uint8_t *base = b && b->mb ? (const uint8_t *)b->mb.contents + a->off : a->buf ? NULL : (const uint8_t *)(uintptr_t)a->off;
+              buf_t *b = buf_of(vb->buf); uint64_t at = vb->off + a->rel;
+              const uint8_t *base = b && b->mb ? (const uint8_t *)b->mb.contents + at : vb->client ? (const uint8_t *)(uintptr_t)at : NULL;
               if (!base) { GLOG("   attribute %d: no data", gi); continue; }
-              size_t st = a->stride ? a->stride : a->size * vtype_bytes(a->type);
+              size_t st = (size_t)vb->stride;
               char v[3][64]; for (int k = 0; k < 3; k++) { const float *f = (const float *)(base + k * st); char *o = v[k]; o += snprintf(o, 64, "(");
                 for (int c = 0; c < a->size && c < 4; c++) o += snprintf(o, 64 - (size_t)(o - v[k]), "%s%.4f", c ? " " : "", f[c]);
                 snprintf(o, 64 - (size_t)(o - v[k]), ")"); }
-              GLOG("   attribute %d: size %d type %#x stride %zu %s, first 3 vertices %s %s %s", gi, a->size, a->type, st, a->buf ? "buffer" : "client memory", v[0], v[1], v[2]); } } } }
+              GLOG("   attribute %d: size %d type %#x stride %zu %s, first 3 vertices %s %s %s", gi, a->size, a->type, st, vb->buf ? "buffer" : "client memory", v[0], v[1], v[2]); } } } }
 
     return 1;
 }
@@ -1265,7 +1294,8 @@ GL(glGetIntegerv, void, GLenum p, GLint *v) {
         case GL_MAX_3D_TEXTURE_SIZE: case GL_MAX_ARRAY_TEXTURE_LAYERS: *v = 2048; return;
         case GL_MAX_VIEWPORT_DIMS: v[0] = v[1] = 16384; return;
         case GL_MAX_COLOR_ATTACHMENTS: case GL_MAX_DRAW_BUFFERS: *v = 1; return;   // one colour attachment (fb_t)
-        case GL_MAX_VERTEX_ATTRIBS: *v = 16; return;
+        case GL_MAX_VERTEX_ATTRIBS: case 0x82da: *v = 16; return;   // and MAX_VERTEX_ATTRIB_BINDINGS (vao_t)
+        case 0x82d9: *v = 2047; return;   // MAX_VERTEX_ATTRIB_RELATIVE_OFFSET, GL's minimum
         case GL_MAX_TEXTURE_IMAGE_UNITS: *v = 32; return;
         case GL_MAX_COMBINED_TEXTURE_IMAGE_UNITS: *v = NUNITS; return;
         case GL_MAX_VERTEX_UNIFORM_VECTORS: case GL_MAX_FRAGMENT_UNIFORM_VECTORS: *v = 1024; return;
@@ -1282,6 +1312,7 @@ GL(glGetIntegerv, void, GLenum p, GLint *v) {
         case GL_CURRENT_PROGRAM: *v = S.prog; return;
         case 0x8894: *v = S.array_buf; return;   // ARRAY_BUFFER_BINDING
         case 0x8895: *v = cur_vao()->ebo; return;   // ELEMENT_ARRAY_BUFFER_BINDING
+        case 0x8a28: *v = S.uniform_buf; return;   // UNIFORM_BUFFER_BINDING
         case 0x85b5: *v = S.vao; return;   // VERTEX_ARRAY_BINDING
         case 0x8069: *v = S.units[S.unit].t2d; return;   // TEXTURE_BINDING_2D
         case GL_TEXTURE_BINDING_CUBE_MAP: *v = S.units[S.unit].tcube; return;
@@ -1311,14 +1342,33 @@ GL(glGetFloatv, void, GLenum p, GLfloat *v) {
 // ---------- Buffers and vertex arrays ----------
 GL(glGenBuffers, void, GLsizei n, GLuint *out) { for (GLsizei i = 0; i < n; i++) out[i] = name_new((void ***)&g_bufs, &g_nbufs, &g_capbufs, sizeof(buf_t)); }
 GL(glDeleteBuffers, void, GLsizei n, const GLuint *b) {
-    for (GLsizei i = 0; i < n; i++) { buf_t *x = buf_of(b[i]); if (!x) continue; x->mb = nil; free(x); g_bufs[b[i]] = NULL; if (S.array_buf == b[i]) S.array_buf = 0; if (cur_vao()->ebo == b[i]) cur_vao()->ebo = 0; }
+    // GL unbinds a deleted buffer from the context and the current vertex array (another vertex array keeps its name)
+    for (GLsizei i = 0; i < n; i++) {
+        buf_t *x = buf_of(b[i]); if (!x) continue; x->mb = nil; free(x); g_bufs[b[i]] = NULL;
+        vao_t *v = cur_vao();
+        if (S.array_buf == b[i]) S.array_buf = 0; if (S.uniform_buf == b[i]) S.uniform_buf = 0; if (v->ebo == b[i]) v->ebo = 0;
+        for (int j = 0; j < 16; j++) if (v->b[j].buf == b[i]) v->b[j].buf = 0;
+    }
 }
 GL(glBindBuffer, void, GLenum target, GLuint b) {
     if (target == GL_ARRAY_BUFFER) S.array_buf = b;
     else if (target == GL_ELEMENT_ARRAY_BUFFER) cur_vao()->ebo = b;
+    else if (target == GL_UNIFORM_BUFFER) S.uniform_buf = b;
     else RED1("glBindBuffer target %#x not implemented", target);
 }
-static buf_t *bound_buf(GLenum target) { return buf_of(target == GL_ARRAY_BUFFER ? S.array_buf : target == GL_ELEMENT_ARRAY_BUFFER ? cur_vao()->ebo : 0); }
+// Both also bind the generic target, which the buffer calls on GL_UNIFORM_BUFFER use. The indexed uniform-buffer bindings are not kept: gl_shaders.py
+// translates a shader only when its uniforms are the default block (a named block makes it refuse the shader), so no translated shader reads one
+GL(glBindBufferRange, void, GLenum target, GLuint index, GLuint b, GLintptr off, GLsizeiptr size) {
+    (void)index; (void)off; (void)size;
+    if (target == GL_UNIFORM_BUFFER) S.uniform_buf = b; else RED1("glBindBufferRange target %#x not implemented", target);
+}
+GL(glBindBufferBase, void, GLenum target, GLuint index, GLuint b) {
+    (void)index;
+    if (target == GL_UNIFORM_BUFFER) S.uniform_buf = b; else RED1("glBindBufferBase target %#x not implemented", target);
+}
+static buf_t *bound_buf(GLenum target) {
+    return buf_of(target == GL_ARRAY_BUFFER ? S.array_buf : target == GL_ELEMENT_ARRAY_BUFFER ? cur_vao()->ebo : target == GL_UNIFORM_BUFFER ? S.uniform_buf : 0);
+}
 // Orphaning: data for a buffer a pending command buffer may still read goes into a new MTLBuffer, so draws already encoded keep the old contents
 GLB(glBufferData, void, GLenum target, GLsizeiptr size, const void *data, GLenum usage) {
     (void)usage;
@@ -1371,6 +1421,9 @@ typedef struct { uint64_t serial; } sync_t;
 GL(glFenceSync, void *, GLenum cond, GLbitfield flags) { (void)cond; (void)flags; sync_t *s = zalloc(sizeof *s); s->serial = g_serial; return s; }
 GL(glDeleteSync, void, void *s) { free(s); }
 GL(glWaitSync, void, void *s, GLbitfield flags, uint64_t timeout) { (void)s; (void)flags; (void)timeout; }   // a GPU-side wait: the command buffers run in order
+// glMemoryBarrier orders shader writes (images, storage buffers, transform feedback) and the GPU's writes to persistently mapped buffers against what reads
+// them next. Nothing here writes from a shader, the buffers are shared memory, and the command buffers run in order: there is nothing to wait for
+GL(glMemoryBarrier, void, GLbitfield barriers) { (void)barriers; }
 GLB(glClientWaitSync, GLenum, void *sy, GLbitfield flags, uint64_t timeout_ns) {
     sync_t *s = sy;
     if (!s) return 0x911d;   // WAIT_FAILED
@@ -1389,11 +1442,35 @@ GL(glBindVertexArray, void, GLuint v) { S.vao = v; }
 GL(glEnableVertexAttribArray, void, GLuint i) { if (i < 16) cur_vao()->a[i].on = 1; }
 GL(glDisableVertexAttribArray, void, GLuint i) { if (i < 16) cur_vao()->a[i].on = 0; }
 GL(glEnableVertexArrayAttrib, void, GLuint vao, GLuint i) { vao_t *v = vao && vao < g_nvaos && g_vaos[vao] ? g_vaos[vao] : &g_vao0; if (i < 16) v->a[i].on = 1; }
+static void va_format(vattr_t *a, GLint size, GLenum type, uint32_t norm, GLuint rel) { a->size = size == 0x80e1 ? 4 : (uint8_t)size; a->type = type; a->norm = (norm & 0xff) != 0; a->rel = rel; }
+static uint8_t va_div(GLuint d) { return d > 255 ? 255 : (uint8_t)d; }
 GL(glVertexAttribPointer, void, GLuint i, GLint size, GLenum type, uint32_t norm, GLsizei stride, const void *ptr) {
-    if (i >= 16) { RED1("vertex attribute %u over 15", i); return; }
-    vattr_t *a = &cur_vao()->a[i]; a->size = size == 0x80e1 ? 4 : size; a->type = type; a->norm = (norm & 0xff) != 0; a->stride = stride; a->off = (uintptr_t)ptr; a->buf = S.array_buf;
+    if (i >= 16 || stride < 0) { gl_error(GL_INVALID_VALUE); return; }   // GL_MAX_VERTEX_ATTRIBS
+    vao_t *v = cur_vao(); vattr_t *a = &v->a[i]; vbind_t *b = &v->b[i];
+    va_format(a, size, type, norm, 0); a->bind = 0;
+    // Stride 0 is tightly packed: GL makes it the format's size here, on the binding (its effective stride), so another attribute on it keeps it
+    b->buf = S.array_buf; b->client = !S.array_buf; b->off = (uintptr_t)ptr; b->stride = stride ? stride : a->size * vtype_bytes(type);
 }
-GL(glVertexAttribDivisor, void, GLuint i, GLuint d) { if (i < 16) cur_vao()->a[i].div = d > 255 ? 255 : (uint8_t)d; }
+GL(glVertexAttribDivisor, void, GLuint i, GLuint d) {
+    if (i >= 16) { gl_error(GL_INVALID_VALUE); return; }
+    vao_t *v = cur_vao(); v->a[i].bind = 0; v->b[i].div = va_div(d);
+}
+GL(glVertexAttribFormat, void, GLuint i, GLint size, GLenum type, uint32_t norm, GLuint rel) {
+    if (i >= 16 || rel > 2047) { gl_error(GL_INVALID_VALUE); return; }   // MAX_VERTEX_ATTRIB_RELATIVE_OFFSET
+    va_format(&cur_vao()->a[i], size, type, norm, rel);
+}
+GL(glVertexAttribBinding, void, GLuint i, GLuint bi) {
+    if (i >= 16 || bi >= 16) { gl_error(GL_INVALID_VALUE); return; }   // MAX_VERTEX_ATTRIB_BINDINGS
+    cur_vao()->a[i].bind = (uint8_t)(bi + 1);
+}
+GL(glBindVertexBuffer, void, GLuint bi, GLuint buf, GLintptr off, GLsizei stride) {
+    if (bi >= 16 || off < 0 || stride < 0) { gl_error(GL_INVALID_VALUE); return; }
+    vbind_t *b = &cur_vao()->b[bi]; b->buf = buf; b->client = 0; b->off = (uint64_t)off; b->stride = stride;   // stride 0 is literal (vbind_t)
+}
+GL(glVertexBindingDivisor, void, GLuint bi, GLuint d) {
+    if (bi >= 16) { gl_error(GL_INVALID_VALUE); return; }
+    cur_vao()->b[bi].div = va_div(d);
+}
 GL(glVertexAttrib4f, void, GLuint i, GLfloat x, GLfloat y, GLfloat z, GLfloat w) { if (i < 16) { S.va[i][0] = x; S.va[i][1] = y; S.va[i][2] = z; S.va[i][3] = w; } }
 GL(glVertexAttrib4fv, void, GLuint i, const GLfloat *v) { if (i < 16) memcpy(S.va[i], v, sizeof S.va[i]); }
 
@@ -1479,7 +1556,7 @@ static void teximg_impl(const teximg_args *a) {
             if (g_fmt[f].kind != K_BLOCK || (size_t)a->size < need) { RED1("glCompressedTexImage2D: %d bytes for %dx%d %s (%zu expected)", a->size, a->w, a->h, g_fmt[f].name, need); return; }
             conv = pixels_convert(a->pixels, a->w, a->h, 0, 0, f, CV_COPY, &pitch);
         } else conv = pixels_convert(cv == CV_NONE ? NULL : a->pixels, a->w, a->h, a->format, a->type, f, cv, &pitch);
-        tex_image(a->target, a->level, f, cv, a->w, a->h, a->pixels || a->compressed ? conv : (free(conv), (void *)NULL), pitch);
+        tex_image(a->target, a->level, f, cv, a->w, a->h, 1, a->pixels || a->compressed ? conv : (free(conv), (void *)NULL), pitch);
     }
 }
 GL(glTexImage2D, void, GLenum target, GLint level, GLint ifmt, GLsizei w, GLsizei h, GLint border, GLenum format, GLenum type, const void *pixels) {
@@ -1531,6 +1608,70 @@ GL(glTexImage3D, void, GLenum target, GLint level, GLint ifmt, GLsizei w, GLsize
     if (level) { RED1("glTexImage3D of level %d not implemented", level); return; }
     tex_storage(target, 1, (GLenum)ifmt, w, h, d);
     if (pixels) h_glTexSubImage3D(target, 0, 0, 0, 0, w, h, d, format, type, pixels);
+}
+// glCompressedTexImage3D / glCompressedTexSubImage3D into 2D arrays: each layer has its own rounded block rows, even when a mip is smaller than one block.
+// Their last argument(s) are on the stack (64-bit here, as glTexSubImage3D's), so they pack them before the big-stack entry. Other targets (3D, cube-map arrays) and
+// compressed formats the layer does not map are the host's gaps: a red line, no GL error (see g_gl_error)
+typedef struct { GLenum target, format; GLint level, x, y, z, border; GLsizei w, h, d, size; const void *data; int sub; } compressed3d_args;
+static void compressed3d_impl(const compressed3d_args *a) __attribute__((used));
+BIGSTUB(compressed3d_impl);
+static void compressed3d_impl(const compressed3d_args *a) {
+    @autoreleasepool {
+        if (a->target != GL_TEXTURE_2D_ARRAY) { RED1("glCompressedTex%sImage3D target %#x not implemented (2D arrays only)", a->sub ? "Sub" : "", a->target); return; }
+        if (a->level < 0 || a->level >= MAXLV || a->w < 0 || a->h < 0 || a->d < 0 || a->size < 0 || a->border ||
+            (uint32_t)a->w > (16384u >> a->level) || (uint32_t)a->h > (16384u >> a->level) || a->d > 2048) { gl_error(GL_INVALID_VALUE); return; }
+        int cv, f = fmt_pick(a->format, 0, 0, &cv);
+        if (f < 0) { RED1("glCompressedTex%sImage3D format %#x not mapped", a->sub ? "Sub" : "", a->format); return; }
+        if (g_fmt[f].kind != K_BLOCK) { gl_error(GL_INVALID_ENUM); return; }   // not a compressed format
+        size_t pitch = fmt_pitch(f, a->w), rows = fmt_rows(f, a->h);
+        if (rows && pitch > SIZE_MAX / rows) { gl_error(GL_INVALID_VALUE); return; }
+        size_t layer = pitch * rows;
+        if (a->d && layer > SIZE_MAX / (uint32_t)a->d) { gl_error(GL_INVALID_VALUE); return; }
+        // the byte count must match the data given; an allocation with no data has no bytes to count, whatever size it names
+        if (a->data && layer * a->d != (size_t)a->size) { gl_error(GL_INVALID_VALUE); return; }
+        tex_t *t = bound_tex(a->target);
+        if (!t) { gl_error(GL_INVALID_OPERATION); return; }
+        if (!a->sub) {
+            if (t->slevels) { gl_error(GL_INVALID_OPERATION); return; }
+            // All levels in a complete array have the same layer count.
+            if (a->level && (t->made || t->defined) && (t->d != (uint32_t)a->d || t->fmt != f ||
+                umax(1, t->w >> a->level) != (uint32_t)a->w || umax(1, t->h >> a->level) != (uint32_t)a->h)) { gl_error(GL_INVALID_OPERATION); return; }
+            void *copy = NULL;
+            if (a->data && a->size) { copy = zalloc((size_t)a->size); memcpy(copy, a->data, (size_t)a->size); }
+            tex_image(a->target, a->level, f, CV_COPY, a->w, a->h, a->d, copy, pitch);
+            return;
+        }
+        if (t->fmt != f || (!t->slevels && !(t->defined & (1 << a->level)))) { gl_error(GL_INVALID_OPERATION); return; }
+        uint32_t w = umax(1, t->w >> a->level), h = umax(1, t->h >> a->level);
+        if (a->x < 0 || a->y < 0 || a->z < 0 || (uint64_t)a->x + a->w > w || (uint64_t)a->y + a->h > h ||
+            (uint64_t)a->z + a->d > t->d || (t->slevels && a->level >= t->slevels)) { gl_error(GL_INVALID_VALUE); return; }
+        const fmt_t *m = &g_fmt[f];
+        if (a->x % m->bw || a->y % m->bh || (a->w % m->bw && a->x + a->w != w) || (a->h % m->bh && a->y + a->h != h)) { gl_error(GL_INVALID_OPERATION); return; }
+        if (!a->w || !a->h || !a->d) return;
+        if (!a->data) { gl_error(GL_INVALID_VALUE); return; }
+        // Before the Metal texture is made, the bytes go into the level's pending copy: making it here would fix its level count at the levels given so far, and a
+        // level given afterwards (allocate and fill level 0, then level 1, ...) would be dropped. glTexStorage3D storage has all its levels: made now
+        level_t *l = &t->pend[0][a->level];
+        if (!t->made && !t->slevels && l->w == w && l->h == h) {
+            if (!l->data) l->data = zalloc(l->size);
+            size_t ll = l->pitch * fmt_rows(f, h), off = (size_t)(a->y / m->bh) * l->pitch + (size_t)(a->x / m->bw) * m->bytes;
+            for (GLsizei k = 0; k < a->d; k++) for (size_t r = 0; r < rows; r++)
+                memcpy((uint8_t *)l->data + (size_t)(a->z + k) * ll + off + r * l->pitch, (const uint8_t *)a->data + k * layer + r * pitch, pitch);
+            return;
+        }
+        if (!t->made && !tex_make(t, 0)) return;
+        if (!t->tex || a->level >= t->levels) { gl_error(GL_INVALID_OPERATION); return; }
+        for (GLsizei k = 0; k < a->d; k++)
+            tex_write(t, a->z + k, a->level, a->x, a->y, 0, a->w, a->h, (const uint8_t *)a->data + k * layer, pitch);
+    }
+}
+GL(glCompressedTexImage3D, void, GLenum target, GLint level, GLenum format, GLsizei w, GLsizei h, GLsizei d, GLint border, GLsizei size, const void *data) {
+    compressed3d_args a = {target, format, level, 0, 0, 0, border, w, h, d, size, data, 0};
+    ((void (*)(const compressed3d_args *))(const void *)compressed3d_impl_bs)(&a);
+}
+GL(glCompressedTexSubImage3D, void, GLenum target, GLint level, GLint x, GLint y, GLint z, GLsizei w, GLsizei h, GLsizei d, uint64_t format, uint64_t size, const void *data) {
+    compressed3d_args a = {target, (GLenum)format, level, x, y, z, 0, w, h, d, (GLsizei)size, data, 1};
+    ((void (*)(const compressed3d_args *))(const void *)compressed3d_impl_bs)(&a);
 }
 // Mipmaps from level 0, in command order (after the draws that rendered level 0 this frame): a texture of one level gets its full chain first, level 0 copied over
 static void mip_impl(GLenum target) __attribute__((used));

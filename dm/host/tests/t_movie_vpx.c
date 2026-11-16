@@ -32,26 +32,36 @@ static void decode(int type, int format, const uint8_t *packet, int size) {
     vpx_codec_destroy(&d.vpx);
     free(d.out[0].frm);
 }
-// The frame step's movie signal (dm_movie_playing): a video picture handed out raises it for MD_PLAYING_NS; an audio output does not
+// The frame step's movie signal (dm_movie_hz): the rate of the video pictures handed out in the last MD_PLAYING_NS, from their times; audio outputs do not count
 static uint64_t test_now = 1000000000ull;
 uint64_t now_ns(void) { return test_now; }
 __thread _Atomic int dm_host_work;   // hle_thread.c
 void dm_host_lock(pthread_mutex_t *m) { pthread_mutex_lock(m); }
 void mavc_drop(mavc *a) { (void)a; }   // hle_movie_avc.c: no H.264 here
 static void playing(void) {
-    static mdec_t video = { .type = MD_TYPE_VP9, .nout = MD_NOUT_VIDEO, .started = 1 }, audio = { .type = MD_TYPE_VORBIS, .nout = MD_NOUT, .started = 1 };
-    pthread_mutex_init(&video.mu, NULL); pthread_mutex_init(&audio.mu, NULL);
-    void *vs[2] = { NULL, &video }, *as[2] = { NULL, &audio };
+    static mdec_t video = { .type = MD_TYPE_VP9, .nout = MD_NOUT_VIDEO, .started = 1 }, audio = { .type = MD_TYPE_VORBIS, .nout = MD_NOUT, .started = 1 }, other = { .type = MD_TYPE_VP9, .nout = MD_NOUT_VIDEO, .started = 1 };
+    pthread_mutex_init(&video.mu, NULL); pthread_mutex_init(&audio.mu, NULL); pthread_mutex_init(&other.mu, NULL);
+    void *vs[2] = { NULL, &video }, *as[2] = { NULL, &audio }, *os[2] = { NULL, &other };
     int idx, left; int64_t pts; uint32_t flags;
-    assert(!dm_movie_playing());
-    audio.outq[0] = 0; audio.noutq = 1;
-    assert(!h_movie_AcqOut(as, &idx, &pts, &flags, &left) && idx == 0 && !dm_movie_playing());
-    video.outq[0] = 3; video.noutq = 1;
-    assert(!h_movie_AcqOut(vs, &idx, &pts, &flags, &left) && idx == 3 && dm_movie_playing());
-    test_now += MD_PLAYING_NS - 1; assert(dm_movie_playing());
-    assert(h_movie_AcqOut(vs, &idx, &pts, &flags, &left) == MD_NO_OUTPUT && dm_movie_playing());   // no picture ready: nothing handed out, the signal is not renewed
-    test_now += 1; assert(!dm_movie_playing());
-    puts("movie signal: a video picture raises it for half a second, audio outputs do not");
+#define HAND(d, q, slot, time) do { (d).outq[0] = (slot); (d).noutq = 1; (d).out[slot].pts = (time); assert(!h_movie_AcqOut(q, &idx, &pts, &flags, &left) && idx == (slot)); } while (0)
+    assert(!dm_movie_hz());
+    HAND(audio, as, 0, 0); HAND(audio, as, 0, 16667); HAND(audio, as, 0, 33333); assert(!dm_movie_hz());   // audio outputs are no movie
+    HAND(video, vs, 3, 0); assert(!dm_movie_hz());   // one picture gives no rate yet
+    test_now += 33000000; HAND(video, vs, 3, 33333); assert(dm_movie_hz() == 30);   // 33,333 µs apart: 30 a second
+    test_now += MD_PLAYING_NS - 1; assert(dm_movie_hz() == 30);
+    assert(h_movie_AcqOut(vs, &idx, &pts, &flags, &left) == MD_NO_OUTPUT && dm_movie_hz() == 30);   // no picture ready: nothing handed out, the signal is not renewed
+    test_now += 1; assert(!dm_movie_hz());
+    HAND(video, vs, 3, 2000000); assert(dm_movie_hz() == 30);   // after a pause the decoder keeps its rate
+    HAND(other, os, 1, 0); test_now += 16000000; HAND(other, os, 1, 16667); assert(dm_movie_hz() == 60);   // two decoders: the faster one's rate
+    dm_movie_stopped(&other); assert(dm_movie_hz() == 30);   // a stopped decoder leaves at once
+    dm_movie_stopped(&video); assert(!dm_movie_hz());
+    for (int k = 0; k < 20; k++) { test_now += 16666667; HAND(other, os, 1, k * 16667 / 1000 * 1000); if (k >= MD_RATE_PICS) assert(dm_movie_hz() == 60); }   // whole milliseconds (Ocarina of Time's times), 16 and 17 apart: 60 over the window
+    dm_movie_stopped(&other);
+    for (int k = 0; k < MD_RATE_AFTER; k++) { assert(!dm_movie_hz()); HAND(video, vs, 3, 0); }   // times that give no rate: nn::movie's pictures count as 30 after MD_RATE_AFTER
+    assert(dm_movie_hz() == 30);
+    dm_movie_stopped(&video);
+#undef HAND
+    puts("movie signal: the rate of the video pictures handed out in the last half second, the fastest decoder's; audio outputs do not count; a stop ends it");
 }
 // A Flush (a seek, or a movie that loops) must not end the movie's Vorbis sound. A synthetic one-channel stream (both block sizes 64, all-zero residue; no game data), made as the demuxer hands it over:
 // the identification and setup headers, then raw audio packets. Before the fix, stb_vorbis_flush_pushdata left the decoder searching for an Ogg page and it gave no sample again

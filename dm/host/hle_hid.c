@@ -14,6 +14,7 @@
 #include <unistd.h>
 #include <strings.h>
 #include <pthread.h>
+#include <string.h>
 #include <time.h>
 #include <math.h>
 #include "motion_fusion.h"
@@ -271,6 +272,13 @@ static void *ctl_main(void *arg) {
                     dm_touch_script(NULL, 0); continue;
                 }
                 key_step st = {0, 0.15, 0}; char *h = strchr(line, '~'); if (h) { *h = 0; st.hold = atof(h + 1); }
+                if (line[0] == 'P' && line[1] >= '2' && line[1] <= '0' + DM_PLAYERS && line[2] == ' ') {   // P<n> <keys>: player n's controller, for games that need a second player (Orbitals)
+                    void dm_pad_script_player(int p); int p = line[1] - '1'; dm_pad_script_player(p);
+                    parse_keys(line + 3, &st);
+                    LOG("DM_CTL: player %d press %#llx (hold %.2f s)", p + 1, (unsigned long long)st.btn, st.hold);
+                    dm_pad_set_player(p, st.btn, st.lx, st.ly, st.rx, st.ry); usleep((useconds_t)(st.hold * 1e6)); dm_pad_set_player(p, 0, 0, 0, 0, 0);
+                    continue;
+                }
                 parse_keys(line, &st);
                 LOG("DM_CTL: press %#llx (hold %.2f s)", (unsigned long long)st.btn, st.hold);
                 if (st.tap) { dm_touch t = {0, st.tx, st.ty}; dm_touch_script(&t, 1); }
@@ -431,8 +439,16 @@ static void note_merged(void) {   // logs the players the game does not see, whe
         else LOG("hid: player %d's controller is not used: the game supports no npad %d", p + 1, p);
     }
 }
+// Players a DM_CTL "P<n> <keys>" line connected (a scripted controller, kept connected from its first press on): ORed into the front end's mask, so a front end's change does not drop them
+static _Atomic uint32_t g_script_players, g_front_players = 1;
+void dm_pad_script_player(int p) {
+    if (p <= 0 || p >= DM_PLAYERS || atomic_fetch_or(&g_script_players, 1u << p) >> p & 1) return;
+    LOG("DM_CTL: player %d's scripted controller connected", p + 1);
+    void dm_pad_players(uint32_t mask); dm_pad_players(atomic_load(&g_front_players));
+}
 void dm_pad_players(uint32_t mask) {
-    mask = (mask | 1u) & ((1u << DM_PLAYERS) - 1);
+    atomic_store(&g_front_players, mask);
+    mask = (mask | 1u | atomic_load(&g_script_players)) & ((1u << DM_PLAYERS) - 1);
     uint32_t old = atomic_exchange(&g_players, mask);
     atomic_fetch_and(&g_benched, mask);   // a controller that went away is no longer left out: the next one on its slot is a player until the applet says otherwise
     for (int p = 1; p < DM_PLAYERS; p++) if ((old ^ mask) >> p & 1 && !(mask >> p & 1)) dm_pad_set_player(p, 0, 0, 0, 0, 0);   // a controller that went away leaves nothing pressed
@@ -712,7 +728,7 @@ HLE_FORCE("_ZN2nn3hid20StopLrAssignmentModeEv", "L/R assignment mode; ignored by
 // past the maximum, the highest first, are now left out (g_benched) until the applet opens for more players, the game sets its supported npads again or their controller goes
 // away; with a maximum of one their controllers feed player 1, as in a game that supports one npad, so whichever controller the player holds plays. No prompt asks which
 // controller stays: a Switch's does, and with a maximum above one the lowest players stay here
-// Both overloads run on the big host stack (HLE_FORCE_BIG): with too few players the front end's prompt runs on the game's thread, and Drag x Drive opens the applet from a
+// Both overloads run on the big host stack, as every HLE_FORCE take-over: with too few players the front end's prompt runs on the game's thread, and Drag x Drive opens the applet from a
 // thread with less than a log line's worth of stack left (PR #1943; memory.md, Host calls on small guest stacks)
 #define RES_CTRL_CANCELED (202u | 3101u << 9)
 int dm_players_reported(void) {   // a pair of Joy-Cons split into two npads is two players
@@ -754,7 +770,7 @@ static Result ctrl_support(int32_t *info, const int8_t *arg) {
     if (info) { info[0] = count; info[1] = (int32_t)connected_id(); }
     return canceled ? RES_CTRL_CANCELED : RES_OK;
 }
-HLE_FORCE_BIG("_ZN2nn3hid21ShowControllerSupportEPNS0_27ControllerSupportResultInfoERKNS0_20ControllerSupportArgE", "controller applet; the host reports the connected players (fewer than the minimum: the front end's prompt waits for more, canceled without a window; more than the maximum: the highest are left out)",
+HLE_FORCE("_ZN2nn3hid21ShowControllerSupportEPNS0_27ControllerSupportResultInfoERKNS0_20ControllerSupportArgE", "controller applet; the host reports the connected players (fewer than the minimum: the front end's prompt waits for more, canceled without a window; more than the maximum: the highest are left out)",
           Result, h_hid_ShowCtrl, int32_t *info, const int8_t *arg) {
     DM_APPLET("controller support");
     return ctrl_support(info, arg);
@@ -1649,7 +1665,7 @@ HLE_FORCE("_ZN2nn3hid19GetPlayerLedPatternERKj", "player LED: the Switch's patte
 static void ctrl_color(uint32_t *c) { c[0] = 0xff828282u; c[1] = 0xff0f0f0fu; }
 HLE_FORCE("_ZN2nn3hid22GetNpadControllerColorEPNS0_19NpadControllerColorERKj", "controller color", Result, h_hid_Color, uint32_t *c, const uint32_t *id) { (void)id; ctrl_color(c); return RES_OK; }
 HLE_FORCE("_ZN2nn3hid22GetNpadControllerColorEPNS0_19NpadControllerColorES2_RKj", "left and right Joy-Con colors", Result, h_hid_Color2, uint32_t *l, uint32_t *r, const uint32_t *id) { (void)id; ctrl_color(l); ctrl_color(r); return RES_OK; }
-HLE_FORCE_BIG("_ZN2nn3hid21ShowControllerSupportERKNS0_20ControllerSupportArgE", "controller applet (no result wanted); the host answers as the overload above", Result, h_hid_ShowCtrl0, const int8_t *arg) { DM_APPLET("controller support"); return ctrl_support(NULL, arg); }
+HLE_FORCE("_ZN2nn3hid21ShowControllerSupportERKNS0_20ControllerSupportArgE", "controller applet (no result wanted); the host answers as the overload above", Result, h_hid_ShowCtrl0, const int8_t *arg) { DM_APPLET("controller support"); return ctrl_support(NULL, arg); }
 HLE_FORCE("_ZN2nn3hid24ShowControllerStrapGuideEv", "strap guide applet; not shown by the host", Result, h_hid_Strap, void) { DM_APPLET("controller strap guide"); return RES_OK; }
 HLE_FORCE("_ZN2nn3hid24ShowControllerStrapGuideERKNS0_13StrapGuideArgE", "strap guide applet with its argument (SDK 22); not shown by the host", Result, h_hid_StrapArg, const void *arg) { DM_APPLET("controller strap guide"); (void)arg; return RES_OK; }
 HLE_FORCE("_ZN2nn3hid28ShowControllerFirmwareUpdateERKNS0_27ControllerFirmwareUpdateArgE", "controller firmware update applet; not shown by the host", Result, h_hid_FwUpd, const void *arg) { DM_APPLET("controller firmware update"); (void)arg; return RES_OK; }
@@ -1657,18 +1673,49 @@ HLE_FORCE("_ZN2nn3hid28ShowControllerFirmwareUpdateERKNS0_27ControllerFirmwareUp
 // Touch screen: TouchScreenState<N> = { int64 sampling number; int32 count; int32 reserved; TouchState[N] }, filled from the front end's touch points (hle_touch.c touch_fill_n:
 // the Mac's mouse, the iPhone touches no gamepad control takes, DM_KEYS taps) in handheld mode, as on the Switch, whose screen is out of reach when docked: a game may read touches
 // without checking the mode, so in console mode the state has no touch points. Super Mario Galaxy's pointer is the touch screen in handheld mode. hle_touch.c numbers
-// the states of both modes from its one count
+// the states of both modes from its one count.
+// A read makes a sample only when 4 ms have passed since the newest one (or the mode changed) and otherwise copies the newest, as the Switch's touch resource does: it writes the
+// screen's LIFO every 4 ms (yuzu: GestureUpdatePeriod), so two reads within 4 ms see one sample and a Start / End edge sits in exactly one sampling number. The last 16 samples are kept
+// and GetTouchScreenStates returns the newest min(n, 16) of them, newest first, as Unity's reader expects (Pokemon Friends main+0xb00670 walks them from index n - 1 down and takes each
+// number above the last it took). Two games need this. Animal Crossing: New Horizons reads twice in one original frame (its input manager at main+0x1b65260 and its own keyboard's
+// reader): a read that used up the edges let the second reader see only a held point, so the keyboard highlighted a key and entered nothing (issue #2567). Unity 2022.3 (Pokemon Friends
+// 1.1.5) polls on its own thread at 60 Hz whatever the frame rate, and a poll that takes no new state while a finger is down (main+0x60d6a0) ends every live touch as cancelled: with one
+// sample per presented frame, the second poll of a 30 fps frame cancelled every drag. Giving each read a new number instead made Unity take the same Start again on every state.
 int touch_fill_n(void *out, int max, uint64_t now_ns, int points);
-static void touch_read(void *s, int n) {
+#define TOUCH_GRID_NS 4000000ull   // the touch sampler's period (250 Hz)
+#define TOUCH_HIST 16              // samples kept: the most GetTouchScreenStates<16> returns
+static pthread_mutex_t g_touch_mu = PTHREAD_MUTEX_INITIALIZER;   // guards the ring and the newest sample's time and mode; taken before hle_touch.c's g_tl
+static uint8_t g_touch_hist[TOUCH_HIST][0x290];   // TouchScreenState<16>: 0x10 + 0x28 * 16
+static int g_touch_kept, g_touch_newest, g_touch_points;   // samples kept (0-16), index of the newest, the points it was made with (1 handheld, 0 console)
+static uint64_t g_touch_at;   // now_ns() of the newest
+// Copy the newest min(want, kept) samples, newest first, into a TouchScreenState<N> array and return how many; a sample is made first when the grid or the mode asks for one
+static int touch_read(void *s, int N, int want) {
     keys_sync();   // DM_KEYS frame steps due in this frame (their touches), before the read
-    touch_fill_n(s, n, now_ns(), dm_opmode() == 0);
+    size_t stride = 0x10 + 0x28 * (size_t)N;
+    pthread_mutex_lock(&g_touch_mu);
+    uint64_t now = now_ns();   // under the lock: read before it, another thread's newer sample would make now - g_touch_at wrap
+    int handheld = dm_opmode() == 0;
+    if (!g_touch_kept || now - g_touch_at >= TOUCH_GRID_NS || g_touch_points != handheld) {   // console mode: no touch points, as before
+        int next = g_touch_kept ? (g_touch_newest + 1) % TOUCH_HIST : 0;
+        touch_fill_n(g_touch_hist[next], 16, now, handheld);
+        g_touch_newest = next; g_touch_at = now; g_touch_points = handheld;
+        if (g_touch_kept < TOUCH_HIST) g_touch_kept++;
+    }
+    int cnt = want < g_touch_kept ? want : g_touch_kept;
+    for (int i = 0; i < cnt; i++) {
+        uint8_t *d = (uint8_t *)s + stride * (size_t)i;
+        memcpy(d, g_touch_hist[(g_touch_newest + TOUCH_HIST - i) % TOUCH_HIST], stride);
+        if (((int32_t *)d)[2] > N) ((int32_t *)d)[2] = N;   // more fingers than this reader asked for: the rest stay unseen here
+    }
+    pthread_mutex_unlock(&g_touch_mu);
+    return cnt;
 }
 HLE_FORCE("_ZN2nn3hid21InitializeTouchScreenEv", "connect to the hid touch screen; the host takes touch points from the front end", void, h_hid_InitTouch, void) {}
 // SDK 18 overload with two ints (Super Mario Galaxy); the SDK's own one opens the hid service and aborts in sm::Initialize
 HLE_FORCE("_ZN2nn3hid21InitializeTouchScreenEii", "connect to the hid touch screen (SDK 18 two-argument version); the host takes touch points from the front end", void, h_hid_InitTouch2, int a, int b) { (void)a; (void)b; }
 #define TOUCH(N) \
-    HLE_FORCE("_ZN2nn3hid19GetTouchScreenStateILm" #N "EEEvPNS0_16TouchScreenStateIXT_EEE", "touch screen current state (touch points only in handheld mode)", void, h_hid_Touch1_##N, void *s) { touch_read(s, N); } \
-    HLE_FORCE("_ZN2nn3hid20GetTouchScreenStatesILm" #N "EEEiPNS0_16TouchScreenStateIXT_EEEi", "touch screen states: 1 entry (touch points only in handheld mode)", int, h_hid_TouchN_##N, void *s, int n) { if (n <= 0) return 0; touch_read(s, N); return 1; }
+    HLE_FORCE("_ZN2nn3hid19GetTouchScreenStateILm" #N "EEEvPNS0_16TouchScreenStateIXT_EEE", "touch screen current state (touch points only in handheld mode)", void, h_hid_Touch1_##N, void *s) { touch_read(s, N, 1); } \
+    HLE_FORCE("_ZN2nn3hid20GetTouchScreenStatesILm" #N "EEEiPNS0_16TouchScreenStateIXT_EEEi", "touch screen states: the newest min(n, 16) of a 16-sample history, newest first (touch points only in handheld mode)", int, h_hid_TouchN_##N, void *s, int n) { return n <= 0 ? 0 : touch_read(s, N, n > TOUCH_HIST ? TOUCH_HIST : n); }
 TOUCH(1) TOUCH(2) TOUCH(3) TOUCH(4) TOUCH(5) TOUCH(6) TOUCH(7) TOUCH(8) TOUCH(9) TOUCH(10) TOUCH(11) TOUCH(12) TOUCH(13) TOUCH(14) TOUCH(15) TOUCH(16)
 // Gestures: recognized from the same touch points (hle_touch.c gesture_fill), so only in handheld mode too
 int gesture_fill(void *out, int n, uint64_t now_ns);
@@ -1723,6 +1770,11 @@ HLE_FORCE("_ZN2nn3hid22GetVibrationDeviceInfoEPNS0_19VibrationDeviceInfoERKNS0_2
 HLE_FORCE("_ZN2nn3hid24IsVibrationDeviceMountedERKNS0_21VibrationDeviceHandleE", "vibration: device mounted when the channel has an output", unsigned, h_hid_VibMounted, const uint32_t *h) {
     int m; return h && vib_targets(*h, &m);
 }
+// A forced vibration session lets the application vibrate while the system's vibration setting is off (hid's Begin/EndPermitVibrationSession). The host has no such system setting: its own
+// rumble switch is the player's and a session does not override it, so there is nothing to begin or end. The SDK's own calls read the null hid service object: Super Mario Party (SDK 9.4)
+// crashed at sdk+0x3526bc in hid::detail::EndPermitVibrationSession while booting (issue #2513)
+HLE_FORCE("_ZN2nn3hid27BeginForcedVibrationSessionEv", "forced vibration session: the host has no system vibration setting for it to override", void, h_hid_VibForceBegin, void) {}
+HLE_FORCE("_ZN2nn3hid25EndForcedVibrationSessionEv", "forced vibration session ends: nothing to restore", void, h_hid_VibForceEnd, void) {}
 // The Switch 2's form of the same question (Kirby Air Riders asks soon after boot in a run with a window, main+0x10709b0; its SDK's call reads the same null service object)
 HLE_FORCE("_ZN2nn3hid29IsOunceVibrationDeviceMountedERKNS0_21VibrationDeviceHandleE", "vibration (Switch 2): device mounted when the channel has an output", unsigned, h_hid_VibMountedOunce, const uint32_t *h) {
     int m; return h && vib_targets(*h, &m);

@@ -73,7 +73,7 @@ def entries(cwd, line, sysroot):
     while i < len(argv):
         a = argv[i]
         if a in ('-o', '-framework', '-MF', '-MT', '-arch'): i += 2; continue
-        if a in ('-c', '-Werror') or a.startswith(('-fsanitize', '-l', '-L', '-Wl,')): i += 1; continue
+        if a in ('-c', '-Werror', '-MMD', '-MD', '-MP') or a.startswith(('-fsanitize', '-l', '-L', '-Wl,')): i += 1; continue   # -MMD -MP: dm/host's dependency files
         if a.startswith('-'):
             flags.append(a)
             if a in ('-I', '-D', '-include', '-isystem', '-x', '-isysroot', '-iquote'): flags.append(argv[i + 1]); i += 1

@@ -60,7 +60,7 @@ class XcodePipelineTests(unittest.TestCase):
                 'extract_aoc': None, 'rewrite': profile, 'split_shaders': 'fixture-key',
                 'build_shaders': root / 'shaders', 'build_vk_shaders': root / 'shaders',
                 'build_gl_shaders': root / 'shaders', 'provisional_prep': None, 'chain_header': None,
-                'refine_after_rewrite': profile, 'derive_profile': '1.0.0',
+                'derive_profile': '1.0.0',
             }.items():
                 mocks[name] = stack.enter_context(patch.object(build, name, return_value=value))
             mocks['run'] = stack.enter_context(patch.object(build, 'run', side_effect=fake_run))
@@ -104,7 +104,7 @@ class XcodePipelineTests(unittest.TestCase):
                 self.assertEqual(mocks['split_shaders'].call_args.args[8], derived)
             else:
                 builder = mocks['build_vk_shaders' if graphics == 'vulkan' else 'build_gl_shaders']
-                self.assertTrue(builder.call_args.kwargs['reuse'])
+                self.assertTrue(builder.call_args.kwargs.get('reuse', True))   # reused (the default): a damaged copy is keyed by its files' times, not refused
             warnings = [event.get('msg', '') for event in events]
             self.assertEqual(any('this Xcode project uses' in message for message in warnings), derived)
             if derived:

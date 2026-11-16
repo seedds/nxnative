@@ -47,7 +47,7 @@ No `pad_layout`: the virtual gamepad starts in the 2D layout (the default).
 SDK 6.4.0 boots, one each:
 
 - **Resolved: `UNIMPL eglGetDisplay`, then `Break` right after `nv::InitializeGraphics` and `vi::OpenDefaultDisplay`** (`main+0x5ed9d0`): the game renders with GL through EGL. The host's GL layer answers the EGL imports and `eglGetProcAddress`.
-- **Resolved: SIGBUS in `__vfprintf` under `aoc_load`, from `h_aoc_Count`** (a store to `0x…67ff0`, right below a page of the guest thread's stack): the first add-on content query lists `DM_AOC_DIR` and logs, a few KB of stack, and the game asks from a thread with little left. `aoc::CountAddOnContent` and `ListAddOnContent` now run on the big host stack (`HLE_FORCE_BIG`, `hle_misc.c`).
+- **Resolved: SIGBUS in `__vfprintf` under `aoc_load`, from `h_aoc_Count`** (a store to `0x…67ff0`, right below a page of the guest thread's stack): the first add-on content query lists `DM_AOC_DIR` and logs, a few KB of stack, and the game asks from a thread with little left. `aoc::CountAddOnContent` and `ListAddOnContent` now run on the big host stack (`hle_misc.c`), as every take-over does since 2026-11-13.
 - `vi::CreateLayer(w, h)` keeps the layer's size for the window surface.
 
 ## Saves
@@ -70,7 +70,7 @@ General host changes first needed here; each applies to every game:
 - **The OpenGL layer** (`dm/gfx/gl/hle_gl.m`: EGL, GL on Metal, `mtl_set_origin_lower_left`, `mtl_ext_tex` presents) and **offline GLSL translation** (`dm/gfx/tools/gl_shaders.py`: glslang `-V -R`, SPIRV-Cross, varyings matched by name, `--fixup-clipspace`; `DM_GL_CAPTURE`): [Games that render with desktop OpenGL through EGL](../../../docs/reference/rendering.md#games-that-render-with-desktop-opengl-through-egl), [GLSL source translated offline and found by hash](../../../docs/reference/rendering.md#glsl-source-translated-offline-and-found-by-hash).
 - **MVGL archives** (`dm/gfx/tools/mvgl.py`).
 - **Loader census** (`dm/tools/loader_census.py`) and the `graphics gl` guess in `profile_guess.py`: [02, NVN surface](../../../docs/agents/02-survey.md#nvn-surface).
-- **Add-on content queries on the big host stack** (`HLE_FORCE_BIG`): [Add-on content queries on a small guest stack](../../../docs/reference/services.md#add-on-content-queries-on-a-small-guest-stack).
+- **Add-on content queries on the big host stack**: [Add-on content queries on a small guest stack](../../../docs/reference/services.md#add-on-content-queries-on-a-small-guest-stack).
 - **File system calls end a same-core handoff:** [File system calls are service requests](../../../docs/reference/threads.md#file-system-calls-are-service-requests).
 
 ## Open

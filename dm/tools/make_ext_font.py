@@ -124,7 +124,7 @@ def build(out, letter_font):
     for n in order: glyf[n].recalcBounds(glyf)
     fb.setupHorizontalMetrics({n: (adv[n], getattr(glyf[n], 'xMin', 0)) for n in order})
     fb.setupHorizontalHeader(ascent=ASC, descent=DESC)
-    fb.setupNameTable({'familyName': 'DM Nintendo Extension Stand-in', 'styleName': 'Regular'})
+    fb.setupNameTable({'familyName': 'DM Nintendo Extension Stand-in', 'styleName': 'Regular', 'fullName': 'DM Nintendo Extension', 'psName': 'DM-Nintendo-Extension'})   # the full name is what the font engine reports (LoadFont): one of its own, as a game can load every shared font into one engine
     fb.setupOS2(sTypoAscender=ASC, sTypoDescender=DESC, sTypoLineGap=0, usWinAscent=ASC, usWinDescent=-DESC)
     fb.setupPost(); fb.save(out)
     print('%s: %d glyphs, %d code points' % (out, len(order), len(cmap)))

@@ -275,6 +275,18 @@ class UniformBounds(unittest.TestCase):
         bare = 'float _1 = (*spvDescriptorSet0.fp_c5)._m0[29].y;'
         self.assertEqual(dmsh_fetch.select_guards(bare), bare, 'a read at a fixed offset is left as it is')
 
+    def test_select_guards_a_bounded_storage_read(self):   # TranslationFlags.MetalStorageBounds (GitHub issue #2618): the same choice, the index word 0 out of bounds
+        t = '(*spvDescriptorSet0.cp_c%d)._m0[1]' % dmsh_abi.SBLEN_BANK
+        src = ('int _96 = int(_49);\nbool _100 = (uint(_96) + %s.z) < %s.w;\nfloat _51 = as_type<float>(_100 ? (*spvDescriptorSet0.cp_s3)._m0[_100 ? _96 : 0] : 0u);\n'
+               'uint _52 = _100 ? (*spvDescriptorSet0.cp_s3)._m0[_100 ? _96 : 0] : 0u;\nif (_100)\n{\n    (*spvDescriptorSet0.cp_s3)._m0[_100 ? _96 : 0] = _52;\n}') % (t, t)
+        got = dmsh_fetch.select_guards(src)
+        self.assertIn('float _51 = as_type<float>(select(0u, (*spvDescriptorSet0.cp_s3)._m0[_100 ? _96 : 0], _100));', got)
+        self.assertIn('uint _52 = select(0u, (*spvDescriptorSet0.cp_s3)._m0[_100 ? _96 : 0], _100);', got)
+        self.assertIn('if (_100)\n{\n    (*spvDescriptorSet0.cp_s3)._m0[_100 ? _96 : 0] = _52;', got, 'a store stays inside its test')
+        self.assertEqual(dmsh_fetch.select_guards(got), got, 'a second pass changes nothing')
+        with self.assertRaisesRegex(ValueError, 'not written as a select'):
+            dmsh_fetch.select_guards(src.replace('[_100 ? _96 : 0] : 0u);', '[_96] : 0u);', 1))   # an index without its choice would read outside the binding
+
 class ScreenVaryings(unittest.TestCase):
     def test_both_spellings_after_a_branch(self):
         self.assertEqual(dmsh_fetch.screen_varyings(VS), [4, 5])

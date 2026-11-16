@@ -229,6 +229,23 @@ class IoStore(unittest.TestCase):
         self.assertIsNone(uepak.sage_record(b'no record here' * 8))
 
     @staticmethod
+    def decoded_archive(records):   # a version 2 shader code archive of decoded shaders: [(bytes, frequency)]
+        n = len(records); b = struct.pack('<II', uepak.ARCHIVE_VERSION, 1) + bytes(20) + struct.pack('<I', n) + bytes(20 * n)
+        b += struct.pack('<IIIII', 1, 0, n, 0, 0) + struct.pack('<I', n); off = 0
+        for r, f in records: b += struct.pack('<QIIB', off, len(r), len(r), f); off += len(r)
+        return b + struct.pack('<II', 0, 0) + b''.join(r for r, _ in records)
+
+    def test_an_archive_of_switch_2_records_gives_each_its_stage(self):
+        """Orbitals (Unreal Engine 5.6, SP_GLSL_SWITCH2): NVN2 records with no LSLG in the decoded archives; the record's stage must agree with the frequency in UE 5's numbering"""
+        rec, ctl, code = self.sage()
+        with patch.object(ss, 'nvn2_stage', return_value='ps'), patch.object(ss, 'check', return_value=None):
+            self.assertEqual(ss.ue_shaders(self.decoded_archive([(rec, 3)]), 'A'), [('A#UE0', 'ps', ctl, code)])
+            with self.assertRaises(SystemExit): ss.ue_shaders(self.decoded_archive([(rec, 5)]), 'A')   # a pixel shader filed as compute
+        with patch.object(ss, 'nvn2_stage', return_value='ms'), patch.object(ss, 'check', return_value=None):
+            self.assertEqual(ss.ue_shaders(self.decoded_archive([(rec, 1)]), 'A')[0][1], 'ms')   # UE 5's 1 is mesh, UE 4's hull
+        with self.assertRaises(SystemExit): ss.ue_shaders(self.decoded_archive([(b'neither' * 20, 3)]), 'A')
+
+    @staticmethod
     def table(streams):   # FShaderMapResourceCode: hashes, then {i32 length, code, i32 raw size, u8 frequency}
         out = struct.pack('<I', len(streams)) + bytes(20 * len(streams)) + struct.pack('<I', len(streams))
         for b, raw, f in streams: out += struct.pack('<I', len(b)) + b + struct.pack('<IB', raw, f)

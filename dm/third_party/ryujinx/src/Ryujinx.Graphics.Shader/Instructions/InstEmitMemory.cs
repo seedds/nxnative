@@ -1,6 +1,7 @@
 using Ryujinx.Graphics.Shader.Decoders;
 using Ryujinx.Graphics.Shader.IntermediateRepresentation;
 using Ryujinx.Graphics.Shader.Translation;
+using System;
 using System.Numerics;
 using static Ryujinx.Graphics.Shader.Instructions.InstEmitHelper;
 using static Ryujinx.Graphics.Shader.IntermediateRepresentation.OperandHelper;
@@ -20,6 +21,28 @@ namespace Ryujinx.Graphics.Shader.Instructions
             Operand value = GetSrcReg(context, op.SrcB);
 
             Operand res = EmitAtomicOp(context, StorageKind.GlobalMemory, op.Op, op.Size, addrLow, addrHigh, value);
+
+            context.Copy(GetDest(op.Dest), res);
+        }
+
+        // nxnative: ATOM.CAS Rd, [Ra + imm], Rb, Rb+1 (CUDA atomicCAS): compares the word with Rb, swaps in Rb+1, Rd the old word (whether or not it swapped). The fields, from
+        // envytools' gm107.c (its 0xeef0 row: atommem0_imm, tabeef0sz) and nvdisasm's sm_61 records in CuAssembler: a signed byte displacement at 28..47, E at 48, .64 at 49.
+        // Every compiled form seen has bits 50..51 (Ryujinx's BcRz) clear and an even Rb. The 64-bit form (Metal has no 64-bit compare-and-swap), set bits 50..51 and an odd
+        // or RZ Rb fail translation, as SUATOM's unsupported forms do
+        public static void AtomCas(EmitterContext context)
+        {
+            InstAtomCas op = context.GetOp<InstAtomCas>();
+
+            if (op.Size64 || op.BcRz != 0 || (op.SrcB & 1) != 0)
+            {
+                throw new NotSupportedException($"ATOM.CAS at 0x{context.CurrOp.Address:x}: only the 32-bit form with bits 50..51 clear and an even Rb ({context.CurrOp.RawOpCode:x16}).");
+            }
+
+            int sOffset = (op.Imm20 << 12) >> 12;
+
+            (Operand addrLow, Operand addrHigh) = Get40BitsAddress(context, new Register(op.SrcA, RegisterType.Gpr), op.E, sOffset);
+
+            Operand res = context.AtomicCompareAndSwap(StorageKind.GlobalMemory, addrLow, addrHigh, GetSrcReg(context, op.SrcB), GetSrcReg(context, op.SrcB + 1));
 
             context.Copy(GetDest(op.Dest), res);
         }
@@ -134,7 +157,10 @@ namespace Ryujinx.Graphics.Shader.Instructions
         {
             InstRed op = context.GetOp<InstRed>();
 
-            (Operand addrLow, Operand addrHigh) = Get40BitsAddress(context, new Register(op.SrcA, RegisterType.Gpr), op.E, op.Imm20);
+            // nxnative: the displacement is signed, as ATOM's (envytools gm107.c: RED's address is atommem0_imm too)
+            int sOffset = (op.Imm20 << 12) >> 12;
+
+            (Operand addrLow, Operand addrHigh) = Get40BitsAddress(context, new Register(op.SrcA, RegisterType.Gpr), op.E, sOffset);
 
             EmitAtomicOp(context, StorageKind.GlobalMemory, (AtomOp)op.RedOp, op.RedSize, addrLow, addrHigh, GetDest(op.SrcB));
         }
@@ -568,7 +594,9 @@ namespace Ryujinx.Graphics.Shader.Instructions
             {
                 Operand carry = context.ICompareLessUnsigned(addrLow, offs);
 
-                addrHigh = context.IAdd(addrHigh, context.ConditionalSelect(carry, Const(1), Const(0)));
+                // nxnative: the displacement is signed (LDG / STG 24 bits, ATOM / RED 20), so a negative one adds -1 to the high word as well as the carry out of the low word.
+                // Adding the carry alone moved every access with a negative displacement 4 GB up (the low word's add carries unless it borrows), out of the storage buffer's range
+                addrHigh = context.IAdd(addrHigh, context.ConditionalSelect(carry, Const(offset < 0 ? 0 : 1), Const(offset < 0 ? -1 : 0)));
             }
 
             return (addrLow, addrHigh);

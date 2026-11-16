@@ -153,13 +153,19 @@ static s2_pad *s2_pad_for(uint16_t pid) {   // a Joy-Con joins a pad that has th
         done(r.length >= S2_REPLY_DATA + len && ((const uint8_t *)r.bytes)[8] == len ? [r subdataWithRange:NSMakeRange(S2_REPLY_DATA, len)] : nil);
     }];
 }
-- (void)readCal:(int)slot done:(void (^)(void))done {   // the user's calibration when set, else the factory's
+- (void)readCal:(int)slot done:(void (^)(void))done {   // the stick's factory block (its parameters and calibration), then the user's calibration (s2_cal_from_flash)
     __weak S2Session *w = self;
-    uint32_t user = slot ? S2_ADDR_USER_STICK2 : S2_ADDR_USER_STICK1, factory = slot ? S2_ADDR_FACTORY_STICK2 : S2_ADDR_FACTORY_STICK1;
-    [self readMemory:0x0B at:user done:^(NSData *u) {
+    uint32_t user = slot ? S2_ADDR_USER_STICK2 : S2_ADDR_USER_STICK1, factory = slot ? S2_ADDR_STICK2 : S2_ADDR_STICK1;
+    [self readMemory:S2_STICK_BLOCK at:factory done:^(NSData *f) {
         S2Session *s = w; if (!s) return;
-        if (u && s2_cal_parse(u.bytes, u.length, &s->_cal[slot])) { done(); return; }
-        [s readMemory:0x0B at:factory done:^(NSData *f) { S2Session *s2 = w; if (!s2) return; if (f) s2_cal_parse(f.bytes, f.length, &s2->_cal[slot]); done(); }];
+        [s readMemory:0x0B at:user done:^(NSData *u) {
+            S2Session *s2 = w; if (!s2) return;
+            s2_cal *c = &s2->_cal[slot];
+            int from = s2_cal_from_flash(f.bytes, f.length, u.bytes, u.length, c);
+            LOG("[sw2] %s: stick %d calibration from the %s, dead zone %.1f %% of its travel (%s)", s2_kind(s2->_pid), slot, from == 2 ? "user's" : from ? "factory's" : "typical values",
+                s2_cal_dead_share(c) * 100, s2_cal_dead_own(c) > 0 ? "its own" : "the default");
+            done();
+        }];
     }];
 }
 - (void)setLEDs:(void (^)(void))done {

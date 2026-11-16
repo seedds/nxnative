@@ -9027,12 +9027,13 @@ static MTLRenderPipelineDescriptor *pso_desc(const pso_key *k, NvShader *vs, NvS
 // where building a pipeline whose colour state alone differs took 3-5 ms. Breath of the Wild's 4,829 recorded pipelines came from 1,818 such bases. Metal 4 pipelines name no
 // depth / stencil format, so a base serves every depth / stencil attachment.
 // The archive keeps the bases beside pso_user.tsv, in pso_archive/: files written by an MTL4PipelineDataSetSerializer that captures binaries only (with the descriptor capture as
-// well it writes no archive and reports no error). Each serialization writes what was captured since the one before, so the folder holds one file per flush; all of them are opened
+// well it writes no archive and reports no error). Each serialization writes what was captured since the one before, so the folder holds one file per flush; admitted files are opened
 // at start, and a base found in one is taken from it directly (MTL4Archive), not through the compiler's lookupArchives, which would capture it again into the next file. A base
 // taken from an archive costs about 0.06 ms, against 10-80 ms to build one.
 // DM_PSO_MTL4=0: the MTLDevice path as before (no bases, no archive). DM_PSO_ARCHIVE=off: no archive; DM_PSO_ARCHIVE=<folder>: the archive in that folder.
 // On by default on the Mac; on iOS DM_PSO_MTL4=1, or the profile key pso_mtl4 on, turns it on, and with it the hybrid pipelines and the pipeline prebuild. The archive's footprint
-// (with the prebuild, about 850 MB more for Breath of the Wild) is not measured against an iPhone's limit yet. The prebuild's bases can also come made offline, bundled with the
+// (with the prebuild, about 850 MB more for Breath of the Wild) is not measured against an iPhone's limit yet. arch_admit checks address space before any archive or compiler is opened.
+// The prebuild's bases can also come made offline, bundled with the
 // app (DM_PSO_BUNDLE, pso_bundle_open). newArchiveWithURL maps a file on the Mac's internal disk (clean pages, not in the footprint) and reads one on an external drive into memory, whole and for the
 // whole run (Kirby Star Allies: 1.13 GB), and it offers no choice: docs/reference/memory.md
 static int pso4_on(void) {
@@ -9379,11 +9380,12 @@ static int arch_container_ok(int fd, uint64_t size, arch_reads *rd) {
     }
     return gpu;
 }
-static int arch_file_check(NSString *path, arch_reads *rd) {   // rd: what the open reads, or NULL
+static uint64_t arch_file_size(NSString *path, arch_reads *rd) {   // validated file size, or 0; rd: what the open reads, or NULL
     int fd = open(path.fileSystemRepresentation, O_RDONLY); if (fd < 0) return 0;
     struct stat st; int ok = !fstat(fd, &st) && S_ISREG(st.st_mode) && st.st_size > 0 && arch_container_ok(fd, (uint64_t)st.st_size, rd);
-    close(fd); return ok;
+    close(fd); return ok ? (uint64_t)st.st_size : 0;
 }
+static int arch_file_check(NSString *path, arch_reads *rd) { return arch_file_size(path, rd) != 0; }
 static int arch_file_ok(NSString *path) { return arch_file_check(path, NULL); }
 // Opens an archive file once arch_file_ok has passed it; nil with *err (or nil when the file is no archive). Metal's open (MTL4ArchiveImpl::loadFromURL, macOS 27) makes a library of
 // every Metal library in the file and hashes all of it (SHA-256), on the calling thread: it reads the whole __AIR_DATA segment and __metallib section of every GPU image (the GPU
@@ -9412,14 +9414,81 @@ static id<MTL4Archive> arch_open(NSString *path, NSError **err) {
     }
     return [g_dev newArchiveWithURL:[NSURL fileURLWithPath:path] error:err];
 }
-static void pso_bundle_open(NSMutableArray<id<MTL4Archive>> *archp) {
+// Snapshot every source before admission and use that same set for the opens, including the parallel device opens. Files another run publishes later wait until next start.
+@interface ArchPlan : NSObject { @public NSString *dir, *gpu, *bundle; NSArray<NSString *> *prewarm, *run; } @end
+@implementation ArchPlan @end
+static ArchPlan *arch_plan(NSString *device) {
+    ArchPlan *p = [ArchPlan new];
     const char *e = getenv("DM_PSO_BUNDLE");
-    if (!e || !*e || !strcmp(e, "off")) return;
-    NSString *dir = @(e), *gpu = [(id)g_dev respondsToSelector:@selector(architecture)] ? g_dev.architecture.name : nil;
-    NSString *p = gpu ? [dir stringByAppendingPathComponent:[gpu stringByAppendingPathExtension:@"mtl4a"]] : nil;
+    if (e && *e && strcmp(e, "off")) {
+        p->dir = @(e); p->gpu = [(id)g_dev respondsToSelector:@selector(architecture)] ? g_dev.architecture.name : nil;
+        if (p->gpu) {
+            p->bundle = [p->dir stringByAppendingPathComponent:[p->gpu stringByAppendingPathExtension:@"mtl4a"]];
+            if (!g_pre_tool) p->prewarm = [[[NSFileManager.defaultManager contentsOfDirectoryAtPath:p->dir error:nil]
+                filteredArrayUsingPredicate:[NSPredicate predicateWithFormat:@"self BEGINSWITH %@ AND self ENDSWITH '.mtl4a'", [p->gpu stringByAppendingString:@"-prewarm-"]]] sortedArrayUsingSelector:@selector(compare:)];
+        }
+    }
+    if (device) p->run = [[[NSFileManager.defaultManager contentsOfDirectoryAtPath:device error:nil]
+        filteredArrayUsingPredicate:[NSPredicate predicateWithFormat:@"self ENDSWITH '.mtl4a'"]] sortedArrayUsingComparator:^NSComparisonResult(NSString *x, NSString *y) {
+        int a = [x substringFromIndex:[x hasPrefix:@"p"]].intValue, b = [y substringFromIndex:[y hasPrefix:@"p"]].intValue;
+        return a > b ? NSOrderedAscending : a < b ? NSOrderedDescending : NSOrderedSame;   // newest first, including prebuild files
+    }];
+    return p;
+}
+// Top-level mappings and reservations all occupy address space, including whole submaps. Do not count their interior holes as room the task can allocate. Bound both ends by
+// TASK_VM_INFO rather than a device model or an entitlement: a container's actual task map is what matters. Failure to read it cannot establish that an archive fits.
+static int arch_vm_room(uint64_t *free, uint64_t *largest) {
+    task_vm_info_data_t vi; mach_msg_type_number_t count = TASK_VM_INFO_COUNT;
+    if (task_info(mach_task_self(), TASK_VM_INFO, (task_info_t)&vi, &count) != KERN_SUCCESS || count < TASK_VM_INFO_REV2_COUNT || vi.max_address <= vi.min_address) return 0;
+    uint64_t prev = vi.min_address, hi = vi.max_address; vm_address_t a = prev; vm_size_t size;
+    *free = *largest = 0;
+    while ((uint64_t)a < hi) {
+        natural_t depth = 0; vm_region_submap_info_data_64_t info; count = VM_REGION_SUBMAP_INFO_COUNT_64;
+        kern_return_t kr = vm_region_recurse_64(mach_task_self(), &a, &size, &depth, (vm_region_recurse_info_t)&info, &count);
+        if (kr == KERN_INVALID_ADDRESS) break;
+        if (kr != KERN_SUCCESS || !size || size > UINT64_MAX - (uint64_t)a) return 0;
+        uint64_t start = MIN((uint64_t)a, hi), end = MIN((uint64_t)a + size, hi);
+        if (start > prev) { uint64_t gap = start - prev; *free += gap; *largest = MAX(*largest, gap); }
+        if (end <= prev) return 0;
+        prev = end; a = end;
+    }
+    if (prev < hi) { uint64_t gap = hi - prev; *free += gap; *largest = MAX(*largest, gap); }
+    return 1;
+}
+static int arch_admit(ArchPlan *plan, NSString *device) {
+    NSMutableArray<NSString *> *paths = [NSMutableArray array];
+    if (plan->bundle) [paths addObject:plan->bundle];
+    for (NSString *n in plan->prewarm) [paths addObject:[plan->dir stringByAppendingPathComponent:n]];
+    for (NSString *n in plan->run) {
+        NSString *p = [device stringByAppendingPathComponent:n];
+        if (!arch_keys_old(arch_keys_path(p))) [paths addObject:p];   // obsolete indexes are retired before any device file is opened
+    }
+    uint64_t bytes = 0, pg = (uint64_t)getpagesize(); unsigned files = 0;
+    for (NSString *p in paths) {
+        // Malformed or missing files never reach Metal (arch_open), so they need no mapping budget.
+        uint64_t n = arch_file_size(p, NULL); if (!n) continue;
+        if (n > UINT64_MAX - (pg - 1)) return 0;
+        n = (n + pg - 1) / pg * pg;
+        if (n > UINT64_MAX - bytes) return 0;
+        bytes += n; files++;
+    }
+    uint64_t free, largest;
+    if (!arch_vm_room(&free, &largest)) { MLOG("archive admission: address-space bounds unavailable: pipelines through the MTLDevice, no archives, prebuild or captures"); return 0; }
+    // Leave 2 GiB for growth after this early reading: the #2444 BotW Mac census held about 1.8 GiB in Metal shader caches, shared GPU buffers, malloc and stacks beside
+    // the guest and archives. This is a conservative host policy, not a measured phone requirement. Requiring the entire set plus that reserve in one gap also bounds the
+    // simultaneous opens without assuming that fragmented free space can fit their mappings. Even an empty cache must leave room for the compiler and its later captures.
+    const uint64_t reserve = 2ull << 30;
+    int ok = bytes <= largest && reserve <= largest - bytes;
+    MLOG("archive admission: %u files, %.1f MiB; free address space %.1f MiB, largest gap %.1f MiB, runtime reserve %.1f MiB: %s", files, bytes / 1048576.0,
+         free / 1048576.0, largest / 1048576.0, reserve / 1048576.0, ok ? "Metal 4" : "pipelines through the MTLDevice, no archives, prebuild or captures");
+    return ok;
+}
+static void pso_bundle_open(NSMutableArray<id<MTL4Archive>> *archp, ArchPlan *plan) {
+    NSString *dir = plan->dir, *gpu = plan->gpu, *p = plan->bundle;
+    if (!dir) return;
     if (!p || ![NSFileManager.defaultManager fileExistsAtPath:p]) {
         NSArray<NSString *> *have = [[NSFileManager.defaultManager contentsOfDirectoryAtPath:dir error:nil] filteredArrayUsingPredicate:[NSPredicate predicateWithFormat:@"self ENDSWITH '.mtl4a'"]];
-        MLOG("pipeline archive bundled with the app: none for this GPU (%s; %s has %s): the bases are built on the device", gpu ? gpu.UTF8String : "architecture unknown", e,
+        MLOG("pipeline archive bundled with the app: none for this GPU (%s; %s has %s): the bases are built on the device", gpu ? gpu.UTF8String : "architecture unknown", dir.UTF8String,
              have.count ? [have componentsJoinedByString:@", "].UTF8String : "none");
         return;
     }
@@ -9444,13 +9513,8 @@ static void prewarm_script(id<MTL4PipelineDataSetSerializer> ser, NSString *path
     if (!js || !sp || ![js writeToFile:sp atomically:YES]) MLOG("[RED] pipeline prebuild: no pipelines script for %s (%s): other GPUs build these pipelines on their first start", path.lastPathComponent.UTF8String,
                                                           e ? e.localizedDescription.UTF8String : "not written");
 }
-static void pso_bundle_open_prewarm(NSMutableArray<id<MTL4Archive>> *arch) {
-    const char *e = getenv("DM_PSO_BUNDLE");
-    if (g_pre_tool || !e || !*e || !strcmp(e, "off")) return;
-    NSString *dir = @(e), *gpu = [(id)g_dev respondsToSelector:@selector(architecture)] ? g_dev.architecture.name : nil; if (!gpu) return;
-    NSString *pre = prewarm_prefix(gpu);
-    NSArray<NSString *> *names = [[[NSFileManager.defaultManager contentsOfDirectoryAtPath:dir error:nil]
-        filteredArrayUsingPredicate:[NSPredicate predicateWithFormat:@"self BEGINSWITH %@ AND self ENDSWITH '.mtl4a'", pre]] sortedArrayUsingSelector:@selector(compare:)];
+static void pso_bundle_open_prewarm(NSMutableArray<id<MTL4Archive>> *arch, ArchPlan *plan) {
+    NSString *dir = plan->dir; NSArray<NSString *> *names = plan->prewarm;
     if (!names.count) return;
     uint64_t t0 = bp_now(); unsigned long long bytes = 0; NSUInteger n = 0, nidx = 0, nkeys = 0, nplain = 0; g_prewarm_open = [NSMutableArray array];
     for (NSString *name in names) {
@@ -9762,10 +9826,12 @@ static void pso4_init(void) {
         if (!pso4_on() || ![(id)g_dev respondsToSelector:@selector(newCompilerWithDescriptor:error:)]) return;   // no Metal 4 compiler (t_pso_pending's fake device): the MTLDevice path
         const char *e = getenv("DM_PSO_ARCHIVE"); NSString *user = pso_user_path();
         g_arch_dir = e && !strcmp(e, "off") ? nil : e && *e ? @(e) : user ? [user.stringByDeletingLastPathComponent stringByAppendingPathComponent:@"pso_archive"] : nil;
+        ArchPlan *plan = arch_plan(g_arch_dir);
+        if (!arch_admit(plan, g_arch_dir)) { g_arch_dir = nil; return; }   // no compiler also selects the normal render / compute fallback and disables hybrids and prebuild
         NSMutableArray<id<MTL4Archive>> *arch = [NSMutableArray array], *archp = [NSMutableArray array];
         arch_open_begin();   // every archive opened from here to arch_open_end is mapped: the bundled one and the device's
-        pso_bundle_open(archp);   // first: it holds every pair's base
-        pso_bundle_open_prewarm(arch);   // then the prewarm lists' pipelines made at build time (the prebuild tool's bundle form, --prebake), before the device's files
+        pso_bundle_open(archp, plan);   // first: it holds every pair's base
+        pso_bundle_open_prewarm(arch, plan);   // then the prewarm lists' pipelines made at build time (the prebuild tool's bundle form, --prebake), before the device's files
         if (g_arch_dir) {
             g_arch_q = dispatch_queue_create("dm.nvn.pso-archive", dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_UTILITY, 0));
             g_arch_pending = dispatch_group_create();
@@ -9785,10 +9851,7 @@ static void pso4_init(void) {
                 if ([f hasSuffix:@".mtl4a.tmp"]) { [NSFileManager.defaultManager removeItemAtPath:[g_arch_dir stringByAppendingPathComponent:f] error:nil]; MLOG("pipeline archive: %s removed (a write a stopped run left)", f.UTF8String); }
             NSMutableArray<NSString *> *runf = [NSMutableArray array];
             NSArray<NSString *> *all = [NSFileManager.defaultManager contentsOfDirectoryAtPath:g_arch_dir error:nil]; NSSet<NSString *> *present = [NSSet setWithArray:all ?: @[]];
-            NSArray<NSString *> *names = [[all filteredArrayUsingPredicate:[NSPredicate predicateWithFormat:@"self ENDSWITH '.mtl4a'"]] sortedArrayUsingComparator:^NSComparisonResult(NSString *x, NSString *y) {
-                int a = [x substringFromIndex:[x hasPrefix:@"p"]].intValue, b = [y substringFromIndex:[y hasPrefix:@"p"]].intValue;
-                return a > b ? NSOrderedAscending : a < b ? NSOrderedDescending : NSOrderedSame;   // newest first, p files among the others: the newest file a key's index names holds it
-            }];
+            NSArray<NSString *> *names = plan->run;   // newest first: the first index naming a key holds it
             for (NSString *n in all) if ([n hasSuffix:@".keys"] && ![present containsObject:[n.stringByDeletingPathExtension stringByAppendingString:@".mtl4a"]])
                 unlink([g_arch_dir stringByAppendingPathComponent:n].fileSystemRepresentation);   // an index whose file was never renamed into place (arch_write_file)
             // A file indexed by library file names (arch_keys_old): its index promises it complete, so only a key it names leads to it, and none does now. Kept, it would be opened at

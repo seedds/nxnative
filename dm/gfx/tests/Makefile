@@ -430,6 +430,11 @@ check_t_pso_archive: t_pso_archive
 	MTL_DEBUG_LAYER=1 python3 test_pso_archive.py "$(CURDIR)/t_pso_archive"
 t_pso_bundle: t_pso_bundle.m ../tools/pso_offline.py $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_pso_bundle.m $(MTL_T_SRC) $(FW)
+t_pso_admission: t_pso_admission.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_pso_admission.m $(MTL_T_SRC) $(FW)
+.PHONY: check_t_pso_admission
+check_t_pso_admission: t_pso_admission
+	@for mode in aggregate fragmented empty unknown map-fail exact ample native; do ./t_pso_admission $$mode || exit $$?; done
 t_pso_stall: t_pso_stall.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_pso_stall.m $(MTL_T_SRC) $(FW)
 check_t_pso_stall: RUN_ENV = MTL_DEBUG_LAYER=1

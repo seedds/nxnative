@@ -602,6 +602,14 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Fix:** lazy clears (`DM_NVN_LAZY_CLEAR`) fold clear-only passes into the pass that follows.
 - **Found on:** [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md): the four clear-only passes before the G-buffer fold into its first pass (about 30 MB less loaded and stored a frame at 1600x900).
 
+### A waiting lazy clear landed after a scissored clear and its draws
+
+- **Symptom:** a scene drawn into a scissored part of a target is wiped to the clear colour, while what a later pass draws on top (UI, menus) shows. No red lines.
+- **Cause:** a lazy clear ([Lazy clears folded into the next pass](#lazy-clears-folded-into-the-next-pass)) waits for the next pass that attaches its target, and a draw opening a pass takes it as a load action (`lc_take`). A clear drawn as a triangle ([Clears inside a pass, with a partial mask or a partial scissor](#clears-inside-a-pass-with-a-partial-mask-or-a-partial-scissor)) opens its pass without taking it, and the draws that follow in that pass do not either, since a pass is already open. The older whole clear kept waiting and landed as the load action of the next pass on that target, after the draws it should have come before. The zero-clear copy into a scissor rectangle (`clear_rect_zero`) had the same ordering.
+- **Fix:** every pass that opens takes the waiting clears of its attachments as its load actions and lands the rest before it (`rp_begin_ex_` calls `lc_take_rt`, the part of `lc_take` that does not depend on a program), so no clear waits while a pass is open; a draw still calls `lc_take` first, for its sampled textures and before the work it runs ahead of the pass. `clear_rect_zero` lands the waiting clears before its copy. `dm/gfx/tests/t_lazy_clear_order.m` checks the three paths. `DM_NVN_LAZY_CLEAR=0` avoids it on a host without the fix; `DM_NVN_UB_DEFER=0` hid it too, because a uniform update then ends the pass and the next draw opens a new one, which takes the clear.
+- **Check:** `DM_NVN_PASSDUMP` shows the scissored `clear drawn as a triangle` lines in a pass that loads, and no `C … cleared to` load-action clear of that target in a later pass of the frame.
+- **Found on:** FINAL FANTASY IX (`01007EF00B094000`, no profile in the repository): each field frame clears the window whole, then clears the 4:3 field view (scissor 189,0 1542x1080) as a triangle and draws the backgrounds and characters in that pass; the whole clear landed in the UI pass, so fields showed only the UI. Battles, which clear the whole window, were unaffected.
+
 ### A channel mask that covers every channel is a whole clear
 
 - **Symptom:** `texture clear case not implemented … mask 0x1`.

@@ -284,6 +284,13 @@ static void test_compressed_arrays(void) {
     h_glDeleteTextures(1, &name);
 }
 
+// GitHub's macOS runners have a paravirtual GPU that does not apply a sampler's lodBias (Metal 4): the tests that draw with a bias check level 0 only there, and say so
+static int lod_bias_applies(void) {
+    if ([g_dev.name rangeOfString:@"Paravirtual"].location == NSNotFound) return 1;
+    static int said; if (!said++) printf("LOD bias not checked on %s (the sampler's lodBias is not applied there)\n", g_dev.name.UTF8String);
+    return 0;
+}
+
 // What DOOM 3's renderer (id Tech 4's BFG Edition) needs of the layer: its ARB names and extension check, named uniform blocks bound by range, two-sided stencil, frame copies into
 // a texture, streamed compressed images, byte-swapped 16-bit images, programs with a vertex shader alone, sync queries and wireframe
 static void test_doom3(void) {
@@ -404,9 +411,7 @@ static void test_doom3(void) {
     h_glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 4, 4, 0, GL_RGBA, GL_UNSIGNED_BYTE, red); h_glTexImage2D(GL_TEXTURE_2D, 1, GL_RGBA8, 2, 2, 0, GL_RGBA, GL_UNSIGNED_BYTE, green);
     h_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST_MIPMAP_NEAREST); h_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
     ta = tex_of(a); assert(tex_make(ta, 0) && ta->levels == 2);
-    // GitHub's macOS runners have a paravirtual GPU that does not apply a sampler's lodBias (Metal 4): there only level 0 is checked
-    int virt = [g_dev.name rangeOfString:@"Paravirtual"].location != NSNotFound;
-    if (virt) printf("LOD bias not checked on %s (the sampler's lodBias is not applied there)\n", g_dev.name.UTF8String);
+    int virt = !lod_bias_applies();
     for (int bias = 0; bias <= (virt ? 0 : 1); bias++) {
         h_glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_LOD_BIAS, (float)bias);
         MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:4 height:4 mipmapped:NO];
@@ -471,7 +476,7 @@ static void test_sampler_objects(void) {
     // the texture's own parameters read level 0; the sampler bound to its unit (a mipmap filter, a bias of 1) level 1; unbound, level 0 again
     assert(draw_texel(ta, tex_sampler(ta, S.units[2].samp)) == red);
     h_glBindSampler(2, s[0]); assert(S.units[2].samp == s[0] && !S.units[0].samp);
-    assert(draw_texel(ta, tex_sampler(ta, S.units[2].samp)) == green);
+    if (lod_bias_applies()) assert(draw_texel(ta, tex_sampler(ta, S.units[2].samp)) == green);
     assert(draw_texel(ta, tex_sampler(ta, S.units[0].samp)) == red);   // another unit keeps the texture's own
     h_glBindSampler(2, 0); assert(draw_texel(ta, tex_sampler(ta, S.units[2].samp)) == red);
     // a sampler's MAX_LOD below 1 keeps level 0 whatever the bias

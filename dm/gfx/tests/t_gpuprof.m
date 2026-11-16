@@ -110,7 +110,7 @@ int main(void) { @autoreleasepool {
     uint64_t w0 = mach_absolute_time(); mtl_wait_at(5, 2000000ull, WS_ALLOC);   // a fence the GPU never reaches: the wait times out after 2 ms
     CHECK(atomic_load(&g_gt_n) == 2 && g_gt[1].kind == GT_WAIT && g_gt[1].a == WS_ALLOC && g_gt[1].b == 5 && g_gt[1].t0 >= w0 && g_gt[1].t1 > g_gt[1].t0, "a blocking wait is placed on the timeline with its site and fence");
     ProfileQueue *queue = [ProfileQueue new]; g_q4 = (id)queue; g_seg = 3; g_rec = 0;
-    rec_commit((id)[NSObject new], nil);
+    rec_commit((id)[NSObject new], nil, 1);   // main's end flag (the submission ends with it)
     CHECK(queue.commits == 1 && atomic_load(&g_gt_n) == 3 && g_gt[2].kind == GT_COMMIT && g_gt[2].a == 41 && g_gt[2].b == 3, "a commit is placed on the timeline with its submission and segment");
     mtl_gp_note_park(mach_absolute_time(), 1, 9);
     CHECK(atomic_load(&g_gt_n) == 4 && g_gt[3].kind == GT_QPARK && g_gt[3].a == 1 && g_gt[3].b == 9, "the queue worker's park is placed on the timeline");

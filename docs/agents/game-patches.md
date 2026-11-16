@@ -80,7 +80,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 | [Ori and the Will of the Wisps](#ori-and-the-will-of-the-wisps) | 0 | 0 | 10 | 0 | 0 | `build` → `engine` |
 | [Paper Mario: The Thousand-Year Door](#paper-mario-the-thousand-year-door) | 1 | 0 | 1 | 0 | 0 | `build` → `game` |
 | [Persona 5 Strikers](#persona-5-strikers) | 0 | 0 | 0 | 1 | 0 | `game` |
-| [Pokemon Pokopia](#pokemon-pokopia) | 0 | 4 | 0 | 0 | 4 | `build` → `game` ×3 |
+| [Pokemon Pokopia](#pokemon-pokopia) | 0 | 2 | 0 | 0 | 2 | `build` → `game` ×3 |
 | [Pokémon Legends: Arceus](#pokémon-legends-arceus) | 0 | 0 | 0 | 1 | 0 | `game` |
 | [South Park: The Fractured But Whole](#south-park-the-fractured-but-whole) | 0 | 0 | 0 | 1 | 0 | `game` → `engine` |
 | [South Park: The Stick of Truth](#south-park-the-stick-of-truth) | 0 | 0 | 0 | 1 | 0 | `game` |
@@ -494,16 +494,11 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 - **`build` → `game`**, runtime, blocked: one game has Link Play; both of its builds are listed, judgement: Link Play's two story-area sites in Pokémon Pokopia's main: the permission-mask builder and the talk handler (hle_coop_interact.c). The game's own story logic: an observation gate at each site (the profile's patches.py) gives a visitor Palette Town's permissions and the host's talk path while the launcher's Interact everywhere / Story co-op switches are on
 - **`build` → `game`**, runtime, blocked: one game has Link Play; both of its builds are listed, judgement: Link Play's story co-op site in Pokémon Pokopia's main: the talk handler's IsHost read (hle_coop_interact.c). The game's own story logic: an observation gate at the site gives a visitor the host's talk path while the launcher's Story co-op switch is on
 
-- **v655360 `main`** `76a489f3…` ([patches.py:8](../../dm/games/0400A3A01EE4C000/patches.py#L8))
+- **v655360 `main`** `76a489f3…` ([patches.py:9](../../dm/games/0400A3A01EE4C000/patches.py#L9))
   - gate 283 at `+0xb1030`: Interact everywhere: the permissions a story area gives online players
   - gate 539 at `+0x4c06d8`: Story co-op: a visitor talks to NPCs as the host does
   - host [hle_coop_interact.c:17](../../dm/host/hle_coop_interact.c#L17): Link Play sites
   - host [hle_coop_interact.c:26](../../dm/host/hle_coop_interact.c#L26): Link Play story co-op site
-- **unregistered build** `816c5358…` ([patches.py:12](../../dm/games/0400A3A01EE4C000/patches.py#L12))
-  - gate 283 at `+0xa62b0`: Interact everywhere: the permissions a story area gives online players
-  - gate 539 at `+0x4698b0`: Story co-op: a visitor talks to NPCs as the host does
-  - host [hle_coop_interact.c:18](../../dm/host/hle_coop_interact.c#L18): Link Play sites (a build no profile registers)
-  - host [hle_coop_interact.c:27](../../dm/host/hle_coop_interact.c#L27): Link Play story co-op site (a build no profile registers)
 
 ### Pokémon Legends: Arceus
 

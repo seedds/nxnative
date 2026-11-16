@@ -310,6 +310,21 @@ void dm_fps_lock_tick(void) {
         int row_target = re_row && high && !re_movie ? nvn_fps_high_now() : re_movie ? 60 : target;
         if (L->ptr_off && (!rd((uint64_t)(uintptr_t)(base + L->ptr_off), &obj, sizeof obj) || !obj)) continue;   // not created yet
         if (L->flag) { uint8_t b; if (!rd(obj + (L->flag >> 8), &b, 1) || !(b & (L->flag & 0xff))) continue; }   // the object's flag is off (Unreal: no fixed frame rate in use)
+        // Resident Evil: observe the actual movie-clock delta consumed by cMovie::execNormal,
+        // separately from the two MT Framework frame-limit fields. This is diagnostic only.
+        if (re_movie) {
+            static uint32_t last[5]; static int nprobe;
+            uint32_t v[5];
+            if (nprobe < 12 && rd(obj + 0x48, v, 8) && rd(obj + 0x58418, v + 2, 12) &&
+                (!nprobe || memcmp(v, last, sizeof v))) {
+                float cap0, cap1, dt, dt1, dt2;
+                memcpy(&cap0, &v[0], 4); memcpy(&cap1, &v[1], 4);
+                memcpy(&dt, &v[2], 4); memcpy(&dt1, &v[3], 4); memcpy(&dt2, &v[4], 4);
+                LOG("[RE movie clock probe] picture=%d Hz; MT limits=%g/%g; cMovie delta=%g, +5841c=%g, +58420=%g",
+                    movie_hz, cap0, cap1, dt, dt1, dt2);
+                memcpy(last, v, sizeof v); nprobe++;
+            }
+        }
         if (L->kind == FPS_F64) {
             for (int c = 0; c < L->copies; c++) {
                 uint64_t a = obj + L->field + 8 * (uint64_t)c; double cur, want = row_target;

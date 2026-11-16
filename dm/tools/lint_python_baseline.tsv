@@ -83,17 +83,12 @@ pyright	dm/tools/nvn_slots_got.py	reportOperatorIssue	1	Operator "+=" not suppor
 pyright	dm/tools/nvn_slots_got.py	reportOptionalOperand	2	Operator "+" not supported for "None"
 pyright	dm/tools/patch_nso.py	reportArgumentType	1	Argument of type "ModuleSpec | None" cannot be assigned to parameter "spec" of type "ModuleSpec" in function "module_from_spec" Type "ModuleSpec | None" is not assignable to type "ModuleSpec" "None" is not assignable to "ModuleSpec"
 pyright	dm/tools/patch_nso.py	reportArgumentType	1	Argument of type "set[Unknown] | list[Unknown]" cannot be assigned to parameter "a" of type "SupportsLenAndGetItem[SupportsRichComparisonT@bisect_right]" in function "bisect_right" Type "set[Unknown] | list[Unknown]" is not assignable to type "SupportsLenAndGetItem[Unknown]" "set[Unknown]" is incompatible with protocol "SupportsLenAndGetItem[Unknown]" "__getitem__" is not present
-pyright	dm/tools/patch_nso.py	reportArgumentType	1	Argument of type "tuple[Any, ...] | None" cannot be assigned to parameter "iterable" of type "Iterable[SupportsRichComparisonT@max]" in function "max" Type "tuple[Any, ...] | None" is not assignable to type "Iterable[Any]" "None" is incompatible with protocol "Iterable[Any]" "__iter__" is not present
-pyright	dm/tools/patch_nso.py	reportArgumentType	4	Argument of type "str | None" cannot be assigned to parameter "string" of type "str" in function "fullmatch" Type "str | None" is not assignable to type "str" "None" is not assignable to "str"
-pyright	dm/tools/patch_nso.py	reportCallIssue	4	No overloads for "fullmatch" match the provided arguments
+pyright	dm/tools/patch_nso.py	reportArgumentType	2	Argument of type "str | None" cannot be assigned to parameter "string" of type "str" in function "fullmatch" Type "str | None" is not assignable to type "str" "None" is not assignable to "str"
+pyright	dm/tools/patch_nso.py	reportCallIssue	2	No overloads for "fullmatch" match the provided arguments
 pyright	dm/tools/patch_nso.py	reportIndexIssue	3	"__getitem__" method not defined on type "set[Unknown]"
 pyright	dm/tools/patch_nso.py	reportOptionalMemberAccess	1	"exec_module" is not a known attribute of "None"
-pyright	dm/tools/patch_nso.py	reportOptionalMemberAccess	1	"groups" is not a known attribute of "None"
 pyright	dm/tools/patch_nso.py	reportOptionalMemberAccess	1	"loader" is not a known attribute of "None"
-pyright	dm/tools/patch_nso.py	reportOptionalMemberAccess	1	"op_str" is not a known attribute of "None"
-pyright	dm/tools/patch_nso.py	reportOptionalMemberAccess	1	"replace" is not a known attribute of "None"
-pyright	dm/tools/patch_nso.py	reportOptionalOperand	2	Operator "+" not supported for "None"
-pyright	dm/tools/patch_nso.py	reportOptionalSubscript	3	Object of type "None" is not subscriptable
+pyright	dm/tools/patch_nso.py	reportOptionalSubscript	2	Object of type "None" is not subscriptable
 pyright	dm/tools/patch_nso.py	reportWildcardImportFromLibrary	1	Wildcard import from a library not allowed
 pyright	dm/tools/sdis.py	reportWildcardImportFromLibrary	1	Wildcard import from a library not allowed
 pyright	dm/tools/tests/test_astral_fps.py	reportArgumentType	1	Argument of type "ModuleSpec | None" cannot be assigned to parameter "spec" of type "ModuleSpec" in function "module_from_spec" Type "ModuleSpec | None" is not assignable to type "ModuleSpec" "None" is not assignable to "ModuleSpec"
@@ -203,8 +198,6 @@ ruff	dm/gfx/tools/shader_split.py	B023	3	Function definition does not bind loop 
 ruff	dm/gfx/tools/shader_split.py	B023	3	Function definition does not bind loop variable `secs`
 ruff	dm/gfx/tools/shader_split.py	F841	1	Local variable `pre` is assigned to but never used
 ruff	dm/gfx/tools/unityfs.py	B023	2	Function definition does not bind loop variable `buf`
-ruff	dm/tools/patch_nso.py	B023	1	Function definition does not bind loop variable `at`
-ruff	dm/tools/patch_nso.py	B023	2	Function definition does not bind loop variable `n`
 ruff	dm/tools/patch_nso.py	PIE808	1	Unnecessary `start` argument in `range`
 ruff	dm/tools/sdis.py	F841	1	Local variable `lo` is assigned to but never used
 ruff	dm/tools/tests/test_gpuprof.py	F401	1	`os` imported but unused

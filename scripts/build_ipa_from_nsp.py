@@ -2373,10 +2373,10 @@ def split_shaders(py, repo, roms, mains, pkg, env, logs, g, provisional=False, o
     def counted(ln):   # shader_split.py's 'progress: <done>/<total>'
         if m := re.fullmatch(r'progress: (\d+)/(\d+)', ln): PROG.set(done=int(m[1]), total=int(m[2]), unit='files')
     registered, skipf = g, pkg.with_name(pkg.name + '.skip')
-    split_names = names
+    split_names, tmp = names, pkg.with_name(pkg.name + '.partial')
     for attempt in (0, 1):   # a second split only without the RomFS files that hold no registered shader source (unregistered_files), checked as strictly as the first
         PROG.set(step='splitting' if not attempt else 'splitting again without the unregistered files')
-        tmp = pkg.with_name(pkg.name + '.partial'); rmtree(tmp); (tmp / 'tables').mkdir(parents=True)
+        rmtree(tmp); (tmp / 'tables').mkdir(parents=True)
         run([py, repo / 'dm/gfx/tools/shader_split.py', ','.join(map(str, roms)), ','.join(map(str, mains)), tmp / 'pkg'] + [tmp / 'tables' / n for n in split_names + ('pso_pairs.tsv',)] + ([','.join(map(str, dlc_roms))] if dlc_roms else []),
             logs / 'shader_split.log', env=dict(env, DM_SPLIT_SKIP=str(skipf)) if attempt else env, on_line=counted)
         text = (logs / 'shader_split.log').read_text(errors='replace')

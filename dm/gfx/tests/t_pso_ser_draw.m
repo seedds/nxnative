@@ -1,4 +1,4 @@
-// A draw's own compile during an archive write (nvn_mtl.m, ser_compile_begin with tl_ser_draw): it waits at most DM_PSO_SER_DRAW_WAIT_MS (50 ms) for the write, once per
+// A draw's own compile during an archive write (nvn_mtl.m, ser_compile_begin with tl_ser_draw): with DM_PSO_SER_DRAW_WAIT_MS set (opt-in; 50 here) it waits at most that long for the write, once per
 // write, then declines (returns 0, tl_ser_declined) and compiles nothing; any other compile waits for the write as before (the write and a compile must not overlap: #2513).
 // The write is played by another thread holding ser_begin / ser_end; no Metal compile is made
 #include "../nvn/nvn_mtl.m"
@@ -19,6 +19,9 @@ static double ms_since(uint64_t t0) { return (bp_now() - t0) / 1e6; }
 
 int main(void) {
     @autoreleasepool {
+        CHECK(ser_draw_parse(NULL) == -1 && ser_draw_parse("") == -1, "unset: off (a draw's compile waits for the write as before)");
+        CHECK(ser_draw_parse("50") == 50 && ser_draw_parse("0") == 0 && ser_draw_parse("-3") == 0, "set: the wait in ms (0: decline at once)");
+        setenv("DM_PSO_SER_DRAW_WAIT_MS", "50", 1);
         tl_ser_draw = 1;
         CHECK(ser_compile_begin() == 1, "no write: a draw's compile begins"); ser_compile_end();
 

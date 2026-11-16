@@ -1,5 +1,5 @@
 """gl_shaders.py: what NVIDIA's GLSL compiler takes and glslang does not (DOOM 3's GLSL 1.50: built-ins redeclared as plain varyings, the compatibility colour pair, `sampler` as a
-name), a named uniform block's table row, and main's '#version' strings that are only a prefix. The shaders here are written for the test, in the form DOOM 3's renderer makes them."""
+name; Mega Man Legacy Collection's `};` after a function), a named uniform block's table row, only the samplers the MSL reads, .glsl files, and main's '#version' strings that are only a prefix. The shaders here are written for the test, in the form DOOM 3's renderer makes them."""
 from pathlib import Path
 import shutil
 import sys
@@ -46,6 +46,26 @@ class Fixups(unittest.TestCase):
         self.assertEqual(gl_shaders.fixups(t, 'vert'), t)
 
 
+    def test_semicolon_after_a_function_body(self):   # Mega Man Legacy Collection's .glsl files end main with `};`; a struct's and a block's `};` stay
+        t = ('struct L { vec4 c; };\nuniform B { vec4 v; } b;\nlayout(std140) uniform C { vec4 w; };\n'
+             'float f(float x) { if (x > 0.0) { return x; } return 0.0; } ;\nvoid main()\n{\n\tgl_Position = vec4(f(1.0));\n};\n')
+        g = gl_shaders.function_semicolons(t)
+        self.assertIn('struct L { vec4 c; };', g); self.assertIn('} b;', g); self.assertIn('uniform C { vec4 w; };', g)
+        self.assertIn('return 0.0; }\nvoid main', g)
+        self.assertNotIn('} ;', g); self.assertTrue(g.rstrip().endswith('}'))
+        self.assertEqual(gl_shaders.function_semicolons(g), g)
+
+
+class Sources(unittest.TestCase):
+    def test_glsl_files_are_read_with_no_stage(self):   # Mega Man Legacy Collection: shaders/nx/*.glsl, whose names say nothing of the stage
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / 'shaders').mkdir()
+            (Path(d) / 'shaders/default_ps.glsl').write_bytes(b'#version 320 es\nvoid main() {}\0junk')
+            (Path(d) / 'shaders/a.vert').write_bytes(b'#version 320 es\nvoid main() {}\n')
+            got = sorted((w, st, s) for s, st, w in gl_shaders.sources([d]))
+            self.assertEqual(got, [('/shaders/a.vert', 'vert', b'#version 320 es\nvoid main() {}\n'), ('/shaders/default_ps.glsl', None, b'#version 320 es\nvoid main() {}')])
+
+
 @unittest.skipUnless(shutil.which('glslangValidator'), 'glslangValidator is not installed')
 class Translate(unittest.TestCase):
     def test_doom3_style_pair(self):
@@ -59,6 +79,14 @@ class Translate(unittest.TestCase):
             self.assertIn('o:dm_FragColor=0', f[1])
             # the colour pair is one varying, matched by name between the stages
             self.assertIn('[[user(dm_Color)]]', Path(v[0]).read_text()); self.assertIn('[[user(dm_Color)]]', Path(f[0]).read_text())
+
+    def test_a_sampler_never_read_is_not_listed(self):   # Mega Man Legacy Collection's default_ps.glsl: T1 only under #if 0, given T0's binding by glslang
+        src = (b'#version 320 es\nprecision highp float;\nin vec2 Texcoord;\nout vec4 outColor;\nuniform sampler2D T0;\nuniform sampler2D T1;\n'
+               b'void main()\n{\n\toutColor = texture(T0, Texcoord);\n};\n#if 0\nvoid xmain() { outColor = texture(T1, Texcoord); }\n#endif\n')
+        with tempfile.TemporaryDirectory() as tmp:
+            r = gl_shaders.translate(src, 'frag', 'a' * 16, tmp)
+            self.assertIsInstance(r, tuple, r)
+            self.assertEqual([x for x in r[1] if x.startswith('t:')], ['t:T0=0:sampler2D'])
 
 
 class MainStrings(unittest.TestCase):

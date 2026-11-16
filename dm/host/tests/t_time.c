@@ -51,6 +51,11 @@ int main(void) {
     CHECK(guards_ok, "adjustable snapshot writes only its 0xd0 bytes");
     CHECK(adjustable[0xcd] == 2, "adjustable snapshot type is 2");
     CHECK(get64(adjustable, 0x40) == 1700000000, "adjustable user time follows the host clock");
+    // StandardSteadyClock::now(), the C++ clock form (SDK 3.7: 0 without the time service session): the steady clock's seconds, as GetCurrentTimePoint gives them
+    int64_t (*steady_now)(void) = hook("_ZN2nn4time19StandardSteadyClock3nowEv");
+    Result (*steady_tp)(uint8_t *) = hook("_ZN2nn4time19StandardSteadyClock19GetCurrentTimePointEPNS0_20SteadyClockTimePointE");
+    uint8_t tp0[24]; int64_t sn = steady_now ? steady_now() : -1;
+    CHECK(steady_tp && steady_tp(tp0) == RES_OK && sn > 0 && llabs(sn - get64(tp0, 0)) <= 1, "StandardSteadyClock::now() is the steady clock's seconds, not 0");
     Result (*net)(int64_t *) = hook("_ZN2nn4time26StandardNetworkSystemClock14GetCurrentTimeEPNS0_9PosixTimeE");
     int64_t nt = -1;
     CHECK(net && net(&nt) == RES_OK && nt == 1700000000, "the network clock reads the host clock, as the user clock (saves are dated by it)");

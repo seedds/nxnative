@@ -23,6 +23,11 @@ HLE_FORCE("_ZN2nn4time19StandardSteadyClock19GetCurrentTimePointEPNS0_20SteadyCl
     memcpy(out, &s, 8); memcpy(out + 8, "dmhost-steady-01", 16); return RES_OK;
 }
 HLE_FORCE("_ZN2nn4time38GetStandardSteadyClockCurrentTimePointEPNS0_20SteadyClockTimePointE", "steady clock (the free function form, SDK 20) → host monotonic clock", Result, h_time_SteadyNowFn, uint8_t *out) { return h_time_SteadyNow(out); }
+// The C++ clock form, a time_point of seconds in x0: the SDK asks the time service's steady-clock session (a global that time::Initialize fills) for GetCurrentTimePoint and returns 0
+// without one (SDK 3.7, sdk+0x16edf4 in Mega Man Legacy Collection). Initialize is taken over and makes no session, so the clock never moved: the same seconds as GetCurrentTimePoint
+HLE_FORCE("_ZN2nn4time19StandardSteadyClock3nowEv", "steady clock (std::chrono form) → host monotonic clock (seconds)", int64_t, h_time_SteadyClockNow, void) {
+    uint8_t tp[24]; h_time_SteadyNow(tp); int64_t s; memcpy(&s, tp, 8); return s;
+}
 HLE_FORCE("_ZN2nn4time23StandardUserSystemClock14GetCurrentTimeEPNS0_9PosixTimeE", "user clock → host time()", Result, h_time_GetCurrentTime, int64_t *out) {
     int64_t ft = fixed_time(); *out = ft >= 0 ? ft : time(NULL); return RES_OK;
 }

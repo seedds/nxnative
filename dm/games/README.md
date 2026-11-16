@@ -130,6 +130,7 @@ One row per profile; the notes are each profile's `README.md`.
 | [Mario + Rabbids Sparks of Hope](0100317013770000/README.md) | `0100317013770000` | 1.6.2225577 | 13.3.5 | Ubisoft Snowdrop | NVN |
 | [Mario Party Superstars](01006FE013472000/README.md) | `01006FE013472000` | 1.1.1 | 11.4.3 | NintendoWare Bezel Engine 1.55 | NVN |
 | [Mario vs. Donkey Kong](0100B99019412000/README.md) | `0100B99019412000` | 1.0.1 (cartridge base) | 15.3.0 | Nintendo (sead / agl / gsys) | NVN |
+| [Mega Man Legacy Collection](01002D4007AE0000/README.md) | `01002D4007AE0000` | 1.0.3 | 3.7.0 | Digital Eclipse's NES emulation | OpenGL |
 | [Metroid Dread](010093801237C000/README.md) | `010093801237C000` | 2.1.0 | 11.4.3 | MercurySteam's engine | NVN |
 | [Metroid Prime 4: Beyond](010019A01E2F2000/README.md) | `010019A01E2F2000` | 1.1.0 | 19.3.15 | Retro Studios' engine | NVN |
 | [Metroid Prime Remastered](010012101468C000/README.md) | `010012101468C000` | 1.0.0 (base) | 12.3.1 | Retro Studios' engine | NVN |

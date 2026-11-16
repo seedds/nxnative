@@ -412,7 +412,7 @@ static void test_doom3(void) {
         MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
         rp.colorAttachments[0].texture = rt; rp.colorAttachments[0].loadAction = MTLLoadActionClear; rp.colorAttachments[0].storeAction = MTLStoreActionStore;
         id<MTLCommandBuffer> cb = [g_q commandBuffer]; id<MTLRenderCommandEncoder> e = [cb renderCommandEncoderWithDescriptor:rp];
-        [e setRenderPipelineState:bpso]; [e setFragmentTexture:ta->tex atIndex:0]; [e setFragmentSamplerState:tex_sampler(ta) atIndex:0];
+        [e setRenderPipelineState:bpso]; [e setFragmentTexture:ta->tex atIndex:0]; [e setFragmentSamplerState:tex_sampler(ta, 0) atIndex:0];
         [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3]; [e endEncoding]; [cb commit]; [cb waitUntilCompleted];
         uint32_t px[16]; [rt getBytes:px bytesPerRow:16 fromRegion:MTLRegionMake2D(0, 0, 4, 4) mipmapLevel:0];
         assert(px[5] == (bias ? green[0] : red[0]));
@@ -423,6 +423,70 @@ static void test_doom3(void) {
     void *sy = h_glFenceSync(0x9117, 0); assert(h_glIsSync(sy) && !h_glIsSync(NULL)); h_glDeleteSync(sy);
     h_glPolygonMode(GL_FRONT_AND_BACK, 0x1b01); assert(S.lines); h_glEnable(0x2a02); assert(S.poffset_line);
     h_glPolygonMode(GL_FRONT_AND_BACK, 0x1b02); h_glDisable(0x2a02); assert(!S.lines && !S.poffset_line);
+}
+
+// A 4x4 texture of two levels (red, then green) drawn 1:1 into a 4x4 target with the sampler a unit would use: the colour of a middle texel
+static uint32_t draw_texel(tex_t *t, id<MTLSamplerState> s) {
+    static id<MTLRenderPipelineState> pso;
+    if (!pso) {
+        static const char *src = "#include <metal_stdlib>\n using namespace metal;\n struct V { float4 p [[position]]; float2 uv; };\n"
+            "vertex V sv(uint i [[vertex_id]]) { float2 q = float2((i << 1) & 2, i & 2); V o; o.p = float4(q * 2 - 1, 0, 1); o.uv = q; return o; }\n"
+            "fragment float4 sf(V in [[stage_in]], texture2d<float> t [[texture(0)]], sampler s [[sampler(0)]]) { return t.sample(s, in.uv); }\n";
+        NSError *err = nil; id<MTLLibrary> lib = [g_dev newLibraryWithSource:@(src) options:nil error:&err]; assert(lib);
+        MTLRenderPipelineDescriptor *pd = [MTLRenderPipelineDescriptor new];
+        pd.vertexFunction = [lib newFunctionWithName:@"sv"]; pd.fragmentFunction = [lib newFunctionWithName:@"sf"]; pd.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
+        pso = [g_dev newRenderPipelineStateWithDescriptor:pd error:&err]; assert(pso);
+    }
+    MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:4 height:4 mipmapped:NO];
+    td.usage = MTLTextureUsageRenderTarget; td.storageMode = MTLStorageModeShared;
+    id<MTLTexture> rt = [g_dev newTextureWithDescriptor:td];
+    MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
+    rp.colorAttachments[0].texture = rt; rp.colorAttachments[0].loadAction = MTLLoadActionClear; rp.colorAttachments[0].storeAction = MTLStoreActionStore;
+    id<MTLCommandBuffer> cb = [g_q commandBuffer]; id<MTLRenderCommandEncoder> e = [cb renderCommandEncoderWithDescriptor:rp];
+    [e setRenderPipelineState:pso]; [e setFragmentTexture:t->tex atIndex:0]; [e setFragmentSamplerState:s atIndex:0];
+    [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3]; [e endEncoding]; [cb commit]; [cb waitUntilCompleted];
+    uint32_t px[16]; [rt getBytes:px bytesPerRow:16 fromRegion:MTLRegionMake2D(0, 0, 4, 4) mipmapLevel:0];
+    return px[5];
+}
+
+// GL sampler objects (Mega Man Legacy Collection sets its filters and wraps on one per unit, none on its textures), and uniform locations, of which none is 0
+static void test_sampler_objects(void) {
+    const uint32_t red = 0xff0000ffu, green = 0xff00ff00u;
+    uint32_t l0[16], l1[4]; for (int i = 0; i < 16; i++) l0[i] = red; for (int i = 0; i < 4; i++) l1[i] = green;
+    GLuint t; h_glGenTextures(1, &t); h_glActiveTexture(GL_TEXTURE0 + 2); h_glBindTexture(GL_TEXTURE_2D, t);
+    h_glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 4, 4, 0, GL_RGBA, GL_UNSIGNED_BYTE, l0); h_glTexImage2D(GL_TEXTURE_2D, 1, GL_RGBA8, 2, 2, 0, GL_RGBA, GL_UNSIGNED_BYTE, l1);
+    h_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST); h_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    tex_t *ta = tex_of(t); assert(tex_make(ta, 0) && ta->levels == 2);
+    GLuint s[2]; h_glGenSamplers(2, s); assert(s[0] && s[1] != s[0] && h_glIsSampler(s[0]) && !h_glIsSampler(s[1] + 100));
+    so_t *o = so_of(s[0]); assert(o->sp.minf == GL_NEAREST_MIPMAP_LINEAR && o->sp.ws == GL_REPEAT && o->sp.aniso == 1);   // GL's defaults
+    h_glSamplerParameteri(s[0], GL_TEXTURE_MIN_FILTER, GL_NEAREST_MIPMAP_NEAREST); h_glSamplerParameteri(s[0], GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    h_glSamplerParameterf(s[0], GL_TEXTURE_LOD_BIAS, 1);
+    h_glSamplerParameteri(s[0], GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE); h_glSamplerParameterf(s[0], GL_TEXTURE_MIN_LOD, -1000);
+    const GLfloat border[4] = {0, 0, 0, 1}; h_glSamplerParameterfv(s[0], GL_TEXTURE_BORDER_COLOR, border);
+    h_glSamplerParameteri(s[0], GL_TEXTURE_COMPARE_FUNC, 0x206); assert(o->sp.cfunc == 0x206 && !o->sp.cmode);   // a function set before the mode is kept
+    h_glSamplerParameteri(s[0], GL_TEXTURE_COMPARE_MODE, 0); assert(o->sp.ws == GL_CLAMP_TO_EDGE && o->sp.border[3] == 1 && o->sp.lodbias == 1);
+    // the texture's own parameters read level 0; the sampler bound to its unit (a mipmap filter, a bias of 1) level 1; unbound, level 0 again
+    assert(draw_texel(ta, tex_sampler(ta, S.units[2].samp)) == red);
+    h_glBindSampler(2, s[0]); assert(S.units[2].samp == s[0] && !S.units[0].samp);
+    assert(draw_texel(ta, tex_sampler(ta, S.units[2].samp)) == green);
+    assert(draw_texel(ta, tex_sampler(ta, S.units[0].samp)) == red);   // another unit keeps the texture's own
+    h_glBindSampler(2, 0); assert(draw_texel(ta, tex_sampler(ta, S.units[2].samp)) == red);
+    // a sampler's MAX_LOD below 1 keeps level 0 whatever the bias
+    h_glSamplerParameterf(s[0], GL_TEXTURE_MAX_LOD, 0); h_glBindSampler(2, s[0]); assert(draw_texel(ta, tex_sampler(ta, S.units[2].samp)) == red);
+    // deleting a bound sampler unbinds it
+    h_glDeleteSamplers(1, &s[0]); assert(!so_of(s[0]) && !S.units[2].samp && !h_glIsSampler(s[0]));
+    h_glDeleteSamplers(1, &s[1]); h_glDeleteTextures(1, &t); h_glActiveTexture(GL_TEXTURE0);
+
+    // Uniform locations: (index + 1) x 4096 + element, never 0 (the game skips its glUniform1f of u_flip at location 0); a location below 4096 names nothing
+    GLuint pr = h_glCreateProgram(); prog_t *p = prog_of(pr); assert(p);
+    static puni_t u[2] = {{.name = "u_flip", .type = T_FLOAT, .off = {-1, -1}}, {.name = "T0", .type = T_SAMP2D, .off = {-1, -1}}};
+    p->linked = 1; p->nu = 2; p->u = u; GLuint was = S.prog; S.prog = pr;
+    GLint lf = h_glGetUniformLocation(pr, "u_flip"), lt = h_glGetUniformLocation(pr, "T0");
+    assert(lf == 4096 && lt == 2 * 4096 && h_glGetUniformLocation(pr, "u_flip[1]") == -1 && h_glGetUniformLocation(pr, "none") == -1);
+    h_glUniform1i(lt, 3); assert(u[1].unit == 3);
+    h_glUniform1i(0, 5); h_glUniform1i(4095, 5); assert(u[1].unit == 3);
+    GLint back = -1; h_glGetUniformiv(pr, lt, &back); assert(back == 3);
+    S.prog = was; p->linked = 0; p->nu = 0; p->u = NULL; h_glDeleteProgram(pr);
 }
 
 int main(int argc, char **argv) {
@@ -531,6 +595,7 @@ int main(int argc, char **argv) {
     test_uniform_buffer();
     test_compressed_arrays();
     test_doom3();
+    test_sampler_objects();
 
     unsigned long sz;
     const hle_ent *sec = (const hle_ent *)getsectiondata(&_mh_execute_header, "__DATA", "swhle", &sz);
@@ -549,6 +614,6 @@ int main(int argc, char **argv) {
     assert((h_eglGetProcAddress(missing) != NULL) == stubs);
     assert(resolve_import(NULL, missing) == (uint64_t)&unimpl_stubs[0]);
     assert(!strcmp(wrap_kind, "STUB"));
-    printf("GL imports: %u shared entries, shader handle/source, shader and program lifetimes, the error flag, a depth texture's data, vertex formats and bindings, a binding's stride 0 drawn, the uniform buffer target, compressed 2D arrays, DOOM 3's calls (ARB names, extensions, named blocks, two-sided stencil, frame copies, compressed and byte-swapped images, vertex-only programs, LOD bias), wrappers and missing names (DM_GL_STUBS=%d): OK\n", count, stubs);
+    printf("GL imports: %u shared entries, shader handle/source, shader and program lifetimes, the error flag, a depth texture's data, vertex formats and bindings, a binding's stride 0 drawn, the uniform buffer target, compressed 2D arrays, DOOM 3's calls (ARB names, extensions, named blocks, two-sided stencil, frame copies, compressed and byte-swapped images, vertex-only programs, LOD bias), sampler objects and uniform locations, wrappers and missing names (DM_GL_STUBS=%d): OK\n", count, stubs);
     return 0;
 }

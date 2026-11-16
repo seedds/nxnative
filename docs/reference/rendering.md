@@ -2095,6 +2095,29 @@ Digimon Story Cyber Sleuth: Complete Edition (Media.Vision's MVGL engine, SDK 6.
 - Shaders are GLSL source compiled at run time with `glShaderSource` / `glCompileShader`. `gl_shaders.py` translates them offline: glslang (`-V -R`: relaxed Vulkan rules gather the loose uniforms into one `gl_DefaultUniformBlock`, whose member offsets the table lists) → SPIR-V → SPIRV-Cross. The host finds each shader by the hash of its text and its stage. Varyings are matched by name, as GL links them: `[[user(locnN)]]` becomes `[[user(<name>)]]`, so a vertex and a fragment shader translated apart still meet. `--fixup-clipspace` maps GL's clip z to Metal's.
 - **Found on:** [Digimon Story Cyber Sleuth: Complete Edition](../../dm/games/010014E00DB56000/README.md): GLSL ES 3.20 source, 1,682 `.shad` files in the MVGL archives (615 distinct) and 37 strings in `main` (post effects, FXAA, shadows, the movie's YUV).
 
+### GLSL source files named `.glsl`
+
+- **Symptom:** every draw is skipped: `[RED] … shader <key> (<n> bytes of GLSL) is not in the library (DM_GL_CAPTURE collects it)`, `program <n>: a shader is missing from the library, its draws are skipped`, `draw with no usable program`, and frame records of `draws 0`. The NSP script translated only `main`'s strings and planned no capture, since those count as the game's GLSL.
+- **Cause:** `gl_shaders.py` read `.vert` / `.frag` files and MVGL archives, and `profile_guess.py` counted only those; the game compiles GLSL files named `.glsl`, as they are.
+- **Fix:** both read `.glsl` files too. The name says nothing of the stage, so a `.glsl` file is translated as each stage that compiles, as a string in `main` is. No capture: the files are the shaders, byte for byte what the game compiles.
+- **Found on:** [Mega Man Legacy Collection](../../dm/games/01002D4007AE0000/README.md): six files in `shaders/nx/` (the sprite, CRT and composite shaders, two vertex shaders with the same text), matched byte for byte against a capture. [PR #2725](https://github.com/seedds/nxnative/pull/2725) read them as shaders the game puts together at run time and turned the capture on with a profile key.
+
+### A function body closed with `};`
+
+- **Symptom:** `gl_shaders.py` reports `does not translate: vert: glslang: ERROR: …: 'extraneous semicolon' : not supported with this profile: es`, and the host skips that program's draws.
+- **Cause:** GLSL ES has no empty declaration at file scope, so a `;` after a function's closing `}` is an error in glslang; NVIDIA's compiler accepts it.
+- **Fix:** `fixups()` drops a `;` right after the `}` that closes a function body at file scope (a `{` opened right after a `)`), and leaves a struct's or a block's `};`.
+- **Found on:** [Mega Man Legacy Collection](../../dm/games/01002D4007AE0000/README.md): three of its six `.glsl` files end `main` with `};`. Reported in [PR #2726](https://github.com/seedds/nxnative/pull/2726).
+- **Check:** `test_gl_shaders.py`.
+
+### A sampler the shader never reads
+
+- **Symptom:** every sprite of a program samples black, while the textures are there; the shader's table row lists two samplers at one slot, such as `t:T0=0:sampler2D t:T1=0:sampler2D`.
+- **Cause:** SPIRV-Cross leaves out of the MSL a sampler the shader never reads, but `--reflect` still lists it, with the binding glslang gave it, that of a used one. The host bound the unit the unused sampler names (an empty one: the black placeholder) over the used sampler's texture.
+- **Fix:** `gl_shaders.py` lists only the samplers the MSL takes as `[[texture(n)]]` parameters.
+- **Found on:** [Mega Man Legacy Collection](../../dm/games/01002D4007AE0000/README.md): `default_ps.glsl` declares `T1` for code under `#if 0`. Reported in [PR #2727](https://github.com/seedds/nxnative/pull/2727).
+- **Check:** `test_gl_shaders.py`.
+
 ### GLSL that NVIDIA's compiler accepts and glslang does not
 
 - Fix-ups on the preprocessed text: the GLSL ES 1.0 functions `textureCube` / `texture2D` in ES 3.20 code (with `-V` glslang reads `textureCube` as Vulkan's texture type, so a macro cannot rename it), `out vec4 gl_Position` redeclared through a macro, and `textureOffset` with an offset that is not a constant, which becomes a plain sample at P + offset ÷ level 0 size. A string in `main` says nothing of its stage, so it is translated as each stage that compiles.
@@ -2126,6 +2149,21 @@ Digimon Story Cyber Sleuth: Complete Edition (Media.Vision's MVGL engine, SDK 6.
 - Uniforms are CPU copies per stage, set as bytes at a draw after they change; pipelines are cached per program by vertex layout, attachment formats, blend and colour mask; disabled vertex arrays read the attribute's current value (GL's default (0, 0, 0, 1) until `glVertexAttrib4f`) through a constant-step buffer. Without `glBindAttribLocation` the game's attribute index is the Metal one: `glGetAttribLocation` returns the shader's own attribute numbers. With it, the layer maps each Metal input to the game's index at the link.
 - A GLSL `bool` is a `uint` in the SPIR-V block; `gl_shaders.py` keeps the declared type, as LÖVE's `Shader:send` takes only a boolean for a bool.
 - **Found on:** [Digimon Story Cyber Sleuth: Complete Edition](../../dm/games/010014E00DB56000/README.md) (no `glBindAttribLocation`); [Balatro](../../dm/games/0100CD801CE5E000/README.md): LÖVE binds VertexPosition, VertexTexCoord, VertexColor and ConstantColor to 0–3 with `glBindAttribLocation` before each link, keeps VertexColor and ConstantColor as disabled arrays and sets their values with `glVertexAttrib4f` (the draw colour); it lists uniforms with `glGetActiveUniform` (types as GL enums, arrays as `name[0]`) and reads their initial values back with `glGetUniformfv` / `iv`.
+
+### GL sampler objects
+
+- **Symptom:** `UNIMPL glGenSamplers`, `glSamplerParameteri`, `glSamplerParameterf`, `glSamplerParameterfv` at boot and `UNIMPL glBindSampler` at the first draw; textures sample with their own parameters, not the game's.
+- **Fix:** the layer keeps the parameters a GL 3.3 sampler object holds (filters, wraps, `GL_TEXTURE_MIN_LOD` / `MAX_LOD`, the LOD bias, the depth comparison, anisotropy, the border colour) in one struct, `samp_p`, both in a texture and in a sampler object; `glTexParameter*` and `glSamplerParameter*` set it through one function. A sampler bound to a unit (`glBindSampler`) replaces the texture's parameters for that unit; the texture's levels and `GL_TEXTURE_MAX_LEVEL` still bound the LOD. Metal samplers are shared, one per distinct set. The comparison's mode and function are kept apart, so a function set before the mode is no longer lost.
+- **Found on:** [Mega Man Legacy Collection](../../dm/games/01002D4007AE0000/README.md): one sampler object per unit, its filters and wraps set there and none on its textures. Reported in [PR #2724](https://github.com/seedds/nxnative/pull/2724).
+- **Check:** `t_gl_imports` (`test_sampler_objects`).
+
+### No uniform at location 0
+
+- **Symptom:** a GL game's pictures are upside down (Mega Man Legacy Collection's warning and title screens), with no red line.
+- **Cause:** GL allows location 0, but a game may take it for "not found": Mega Man Legacy Collection loads `u_flip`'s location and skips its `glUniform1f` when it is 0 (`main+0x77b28`). The layer gave a program's first uniform location 0.
+- **Fix:** a location is (uniform index + 1) × 4096 + array element (`uni_loc`, `uni_of` in `hle_gl.m`), so none is 0, whatever the program.
+- **Found on:** [Mega Man Legacy Collection](../../dm/games/01002D4007AE0000/README.md). Reported in [PR #2728](https://github.com/seedds/nxnative/pull/2728).
+- **Check:** `t_gl_imports` (`test_sampler_objects` checks a first uniform's location).
 
 ### GL vertex attributes with a separate format and binding
 

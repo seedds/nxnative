@@ -207,6 +207,14 @@ For a replaced DSP renderer the size query keeps the service's work-buffer contr
 
 ## AudioOut and devices
 
+### An AudioOut opened at a rate other than 48 kHz
+
+- **Symptom:** the game quits before its first frame with `FATAL AudioOut sample rate 44100 not supported (48 kHz only)`, `CRASH sig=6` in `abort` under `au_open_at` / `h_au_OpenDef`, exit 134. Nothing is drawn.
+- **Cause:** audout takes only 0 (the default) or 48000 in `AudioOutParameter.sampleRate` and refuses any other rate with `ResultInvalidSampleRate`, 0x699 (module 153, description 3; yuzu's `audio_out_system.cpp` and Ryujinx's `AudioOutputSystem.cs` agree). A game written for that asks for its own rate first and opens again with the defaults when refused, then reads the output's rate back. The host stopped the game instead of refusing the open.
+- **Fix:** `au_open_at` refuses another rate as audout does: a `[RED]` line with the rate and the call site, and 0x699, before anything is allocated. The game then runs the path it runs on a console. Accepting the rate and converting it instead would run a path no console runs.
+- **Found on:** [Mega Man Legacy Collection](../../dm/games/01002D4007AE0000/README.md) (SDK 3.7.0): `main+0x9a3c8` opens at 44.1 kHz, `main+0x9a3cc` tests the result and opens again with a zeroed parameter, then reads the output's properties for its buffer sizes; it plays at 48 kHz with 0 underruns. Reported in [PR #2723](https://github.com/seedds/nxnative/pull/2723), which accepted the rate.
+- **Check:** `t_audio`'s `test_rate_refused`.
+
 ### Periodic diagnostics outside the AudioUnit callback
 
 - **Symptom:** RealtimeSanitizer reports stdio locking in `au_render` at its 2,000-callback diagnostic boundary. A busy log writer can block that callback even when its PCM queue is full.

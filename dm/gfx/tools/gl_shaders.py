@@ -5,9 +5,10 @@
 #   · MVGL archives (*.mvgl, dm/gfx/tools/mvgl.py): every .shad file, named <material>_vp / <material>_fp (1,682 files, 615 distinct sources in Digimon);
 #   · an NSO (a file that starts with NSO0, the game's main): every NUL-terminated string that starts with '#version' (its built-in post effects, movie and shadow shaders);
 #   · capture folders (the Mac host's DM_GL_CAPTURE): <key>.vert / <key>.frag, what the game really compiled, for sources it puts together at run time.
+#   · loose source files: *.vert / *.frag, and *.glsl, whose name says nothing of its stage (Mega Man Legacy Collection's shaders/nx/*.glsl, read and compiled as they are).
 # Per shader:
 #   · key = sha256(the source text up to its first NUL)[:16] (hex), as the host hashes the strings glShaderSource gets; the Metal function is gl_<key>_v or gl_<key>_f;
-#   · the stage: a capture's extension, an archive file's _vp / _fp; a string in main says nothing of its stage, so it is translated as each stage that compiles (one of
+#   · the stage: a capture's extension, an archive file's _vp / _fp; a string in main or a .glsl file says nothing of its stage, so it is translated as each stage that compiles (one of
 #     Digimon's built-in fragment shaders names gl_Position in a #define);
 #   · GLSL → SPIR-V with glslang (-V -R: relaxed Vulkan rules, which gather the loose uniforms into one block, gl_DefaultUniformBlock; --aml / --amb number the inputs,
 #     outputs and bindings), SPIR-V → MSL with spirv-cross (--msl-decoration-binding: Metal slots = those bindings; vertex shaders --fixup-clipspace: GL's z from −w to w → 0 to w);
@@ -70,9 +71,10 @@ def sources(roots):
                         if not nm.endswith('.shad'): continue
                         st = 'vert' if nm.endswith('_vp.shad') else 'frag' if nm.endswith('_fp.shad') else None
                         yield text_of(a.read(nm)), st, f'/{os.path.relpath(p, r)}:{nm}'
-                elif fn.endswith(('.vert', '.frag')):
+                elif fn.endswith(('.vert', '.frag', '.glsl')):
                     with open(p, 'rb') as f: source = text_of(f.read())
-                    yield source, fn.rsplit('.', 1)[1], '/' + os.path.relpath(p, r)
+                    ext = fn.rsplit('.', 1)[1]
+                    yield source, None if ext == 'glsl' else ext, '/' + os.path.relpath(p, r)
 
 # NVIDIA's GLSL compiler accepts more than the GLSL ES 3.20 specification, and glslang does not; these fix-ups run on the preprocessed text (glslang -E, so macros are expanded):
 #   · the GLSL ES 1.0 texture functions (89 of Digimon's fragment shaders call textureCube; with -V glslang reads textureCube as Vulkan's texture type, so a macro cannot rename it);
@@ -82,7 +84,9 @@ def sources(roots):
 #     `out float gl_FragDepth;`): the declarations go, the built-ins stay; `out vec4 gl_FragColor;` becomes a plain output of the shader's own (Vulkan GLSL has no gl_FragColor);
 #   · the compatibility colour declared as a plain varying, `out vec4 gl_FrontColor;` in the vertex shader and `in vec4 gl_Color;` in the fragment shader (DOOM 3): NVIDIA links the two
 #     as GL's fixed pipeline does, so both become one varying, dm_Color, which the host matches by name;
-#   · `sampler` as a name (DOOM 3's helpers take `sampler2D sampler`): a reserved word in Vulkan GLSL, an ordinary name in OpenGL's
+#   · `sampler` as a name (DOOM 3's helpers take `sampler2D sampler`): a reserved word in Vulkan GLSL, an ordinary name in OpenGL's;
+#   · a function body closed with `};` (Mega Man Legacy Collection's shaders/nx/*.glsl end main that way): GLSL ES has no empty declaration at file scope, so the `;` goes.
+#     A struct's or a block's `};` ends its declaration and stays: only a `{` opened right after a `)` at file scope is a function body
 OLD_TEX = [(r'\btexture2DLod\s*\(', 'textureLod('), (r'\btextureCubeLod\s*\(', 'textureLod('), (r'\btexture2DProj\s*\(', 'textureProj('),
            (r'\btexture2D\s*\(', 'texture('), (r'\btextureCube\s*\(', 'texture(')]
 
@@ -106,7 +110,24 @@ def own_name(t, decl, name, new, out=None):
     t = re.sub(decl, out or '', t, flags=re.M)
     return re.sub(rf'\b{name}\b', new, t)
 
+def function_semicolons(t):
+    """t without the `;` right after the `}` that closes a function body at file scope"""
+    out, depth, body, i, k = [], 0, False, 0, 0
+    while k < len(t):
+        c = t[k]
+        if c == '{':
+            if depth == 0: body = t[:k].rstrip().endswith(')')
+            depth += 1
+        elif c == '}' and depth:
+            depth -= 1
+            if depth == 0 and body:
+                m = re.match(r'\s*;', t[k + 1:])
+                if m: out.append(t[i:k + 1]); i = k + 1 + m.end(); k = i; continue
+        k += 1
+    return ''.join(out) + t[i:]
+
 def fixups(t, stage):
+    t = function_semicolons(t)
     for a, b in OLD_TEX: t = re.sub(a, b, t)
     t = re.sub(BUILTIN_DECL, '', t, flags=re.M)
     t = re.sub(r'\bsampler\b', 'dm_sampler', t)
@@ -194,7 +215,11 @@ def translate(src, stage, key, tmp):
         f.append(f'b:{u["binding"]}:{u["block_size"]}')
         e = uni_members(refl, t['members'], '', 0, f, bools)
         if e: return e
+    # the samplers the MSL takes: spirv-cross leaves out one the shader never reads, but its reflection still lists it, and glslang gives it the binding of a used one (Mega Man Legacy
+    # Collection's default_ps.glsl declares T1 for code under #if 0: T0 and T1 both at 0). Listed, the host bound the unit T1 names, an empty one, over T0's texture: every sprite sampled black
+    used = set(re.findall(r'\b(\w+)\s*\[\[texture\(\d+\)\]\]', m))
     for t in refl.get('textures', []):
+        if t['name'] not in used: continue
         if t.get('array'): return f'sampler array {t["name"]}'
         f.append(f't:{t["name"]}={t["binding"]}:{t["type"]}')
     for k in ('separate_images', 'separate_samplers', 'images', 'ssbos', 'push_constants'):

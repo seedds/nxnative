@@ -1,6 +1,8 @@
 // Virtual gamepad (Nintendo button positions) + physical controllers (GameController), handed to the host through dm_input_set and dm_pad_set_player (hle_hid.c, bit layout in dm_input.h).
 //   Two layouts, three in handheld mode, picked in the in-game menu (GameMenu.swift) that the menu button at the top centre (a gear) opens; the choice is kept in NSUserDefaults (each game is its own app, so per game); the first launch uses the game profile's pad_layout (DM_GAME_PAD_LAYOUT).
 //   The menu button stays while a physical controller is connected, so the menu is there in every layout and with every controller.
+//   Touch controls (DM_TOUCH_CONTROLS, the in-game menu and the settings screen): auto (the default) hides them while a controller is connected, as below; on keeps them
+//   shown and taking touches with a controller connected too (which still plays); off hides them, so every touch goes to the game. The menu button stays in every mode.
 //   Tap (touch): no control but the menu button, every other touch goes to the game's local touch viewport; offered only while the game is in handheld mode, the only one in which it reads the touch screen (Balatro, played by touch).
 //   2D (simple): top corners ZL above L (one column), ZR above R likewise, teardrops with the tip toward the screen corner; − and + side by side at the top centre; the left stick in the bottom-left corner (fixed ring, tilt measured from the ring centre, small dead zone);
 //     the A (right) B (bottom) X (top) Y (left) diamond in the bottom-right corner, sliding a finger between keys switches keys. Each bottom corner holds a single control, so it sits close in (reaching halfway into the side safe-area inset).
@@ -131,10 +133,14 @@ static const CGFloat
     K_CLICK_X = 102, K_CLICK_R = 17;                // L3 / R3: centre from the outer edge (level with ZL / ZR), radius
 static const int k_btns[] = {B_ZL, B_L, B_ZR, B_R, B_MINUS, B_PLUS, B_LS, B_RS};   // keys locked at touch-down (L3 / R3 only in the 3D layout)
 static NSString *const k_layout_key = @"DmPadLayout";   // NSUserDefaults: 0 = 2D, 1 = 3D, 2 = Tap (DM_GAME_PAD_LAYOUT's numbers)
+enum { TC_AUTO, TC_ON, TC_OFF };
+static int g_touch_controls;   // DM_TOUCH_CONTROLS: auto, on or off (dm_gamepad_touch_controls)
+static int touch_controls_mode(const char *v) { return !v ? -1 : !strcmp(v, "auto") ? TC_AUTO : !strcmp(v, "on") ? TC_ON : !strcmp(v, "off") ? TC_OFF : -1; }
 int dm_opmode(void);   // hle_oe.c: 0 = handheld
 
 @interface DmGamepad : UIView
 - (void)arrange:(DmLayout)layout;
+- (void)controlsChanged;
 - (BOOL)menuTakes:(CGPoint)p;
 @end
 // The menu button: a UIButton whose menu is the in-game menu (UIKit draws it and takes the touches while it is open). Its hit circle is larger than the drawn one, and a key nearer
@@ -161,7 +167,8 @@ static void pads_start(void);   // Physical controllers, below
     BOOL _stickShown;                              // the left stick was held at the last refresh
     BOOL _full, _tap;                              // the 3D layout / the Tap layout is current
     CALayer *_controls;                            // holds every control layer: hidden while a physical controller is connected (the view itself stays, for game touches)
-    BOOL _padOff;                                  // a physical controller is connected: every touch goes to the game
+    BOOL _padsIn;                                  // a physical controller is in use (padsChanged)
+    BOOL _padOff;                                  // the controls are hidden (a controller in Automatic, or Off): every touch goes to the game
     DmLayout _layout;
     UITouch *_game[16];                            // touches on the game's touch screen by finger slot
 }
@@ -187,6 +194,8 @@ static BOOL fullOnly(int b) { return b == B_LS || b == B_RS || b >= B_LEFT; }   
             [(UIView *)environment setNeedsLayout];
         }];
         self.multipleTouchEnabled = YES; self.opaque = NO; self.backgroundColor = UIColor.clearColor;
+        int tc = touch_controls_mode(getenv("DM_TOUCH_CONTROLS")); g_touch_controls = tc < 0 ? TC_AUTO : tc;
+        LOG("front end: touch controls %s (DM_TOUCH_CONTROLS)", g_touch_controls == TC_ON ? "on, also with a controller" : g_touch_controls == TC_OFF ? "off" : "automatic: hidden while a controller is connected");
         const char *feedback = getenv("DM_TOUCH_HAPTICS");
         if (!feedback || atoi(feedback)) {
             _touchFeedback = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
@@ -231,6 +240,11 @@ static BOOL fullOnly(int b) { return b == B_LS || b == B_RS || b >= B_LEFT; }   
         phone_motion_start(self);
     }
     return self;
+}
+- (void)controlsChanged {   // main thread: a controller came or went, or the touch controls mode changed; releases every touch first
+    _padOff = g_touch_controls == TC_OFF || (g_touch_controls == TC_AUTO && _padsIn);
+    [CATransaction begin]; [CATransaction setDisableActions:YES]; _controls.hidden = _padOff; [CATransaction commit];
+    [self reset];
 }
 - (void)applyLayout {   // show / hide the controls for the current layout
     [CATransaction begin]; [CATransaction setDisableActions:YES];
@@ -647,7 +661,7 @@ static BOOL pads_slotted(GCController *gone) {
     GCController *c = note.object, *gone = [note.name isEqual:GCControllerDidDisconnectNotification] ? c : nil;
     if (c && (!c.extendedGamepad || g_merge)) LOG("controller %s: %s%s", gone ? "disconnected" : "connected", pad_name(c), c.extendedGamepad ? "" : " (no extended gamepad profile: not used)");
     BOOL any = g_merge ? pads_merged(gone) : pads_slotted(gone);
-    dispatch_async(dispatch_get_main_queue(), ^{ self->_padOff = any; self->_controls.hidden = any; [self reset]; });   // the touch gamepad hides while any controller is in use
+    dispatch_async(dispatch_get_main_queue(), ^{ self->_padsIn = any; [self controlsChanged]; });   // the touch gamepad hides while any controller is in use (Automatic)
 }
 @end
 
@@ -746,6 +760,11 @@ UIView *dm_gamepad_view(CGRect frame) { DmGamepad *v = [[DmGamepad alloc] initWi
 void dm_gamepad_arrange(UIView *view, DmLayout layout) { [(DmGamepad *)view arrange:layout]; }
 void dm_gamepad_opmode_changed(void) { [g_view opmodeChanged]; }
 void dm_gamepad_touch_feedback(bool on) { [g_view setTouchFeedback:on]; }
+bool dm_gamepad_touch_controls(const char *value) {   // the in-game menu's Touch controls (DM_TOUCH_CONTROLS): auto, on or off, at once; false for another value
+    int m = touch_controls_mode(value); if (m < 0) return false;
+    g_touch_controls = m; [g_view controlsChanged];
+    return true;
+}
 int dm_pad_layout(void) { return g_view ? [g_view padLayout] : 0; }
 bool dm_pad_layout_offered(int layout) { return layout == 0 || layout == 1 || (layout == 2 && dm_opmode() == 0); }
 void dm_pad_layout_set(int layout) { [g_view setPadLayout:layout]; }

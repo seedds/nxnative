@@ -83,6 +83,27 @@ static void replay(prog_t *pg, prog_t *green_pg, tex_t *t, tex_t *copy) {
     }
     mtl_pool_del(mem); free(mem);
 }
+static void replay_handles(prog_t *red_pg, prog_t *green_pg, id<MTLLibrary> lib, NvShader *vs, tex_t *t, tex_t *source) {
+    void *mem=NULL; if (posix_memalign(&mem,getpagesize(),getpagesize())) abort(); memset(mem,0,getpagesize()); mtl_pool_add(mem,getpagesize());
+    *(uint32_t *)mem=602; mtl_reg_tex(602,source,NULL);
+    prog_t pg={.serial=882006}; NvProg *pr=[NvProg new]; pr->sh[0]=vs; pr->sh[1]=[NvShader new]; NvShader *fs=pr->sh[1];
+    fs->stage=1; fs->fn=[lib newFunctionWithName:@"read_tex"]; strcpy(fs->key,"rt-unbind-handles");
+    fs->ae=[fs->fn newArgumentEncoderWithBufferIndex:0]; fs->arg_len=fs->ae.encodedLength;
+    fs->rf.bindless=1; fs->rf.nb=1; fs->rf.color_known=1; fs->rf.color_mask=1;
+    fs->rf.b[0]=(nvn_rbind){.kind=NVN_RB_TEXU,.reg=2,.aid=0,.dtt=MTLTextureType2D}; serial_put(pg.serial,pr);
+    p_set_rt rt={.n=1}; rt.color[0]=source; p_bind_program bind={green_pg,3};
+    chain init={0}; emit(&init,OP_SET_RT,&rt,sizeof rt); emit(&init,OP_BIND_PROGRAM,&bind,sizeof bind); triangle(&init); run(&init);
+    rt.color[0]=t; bind.prog=&pg;
+    p_bind_buf ub={.stage=1,.index=2,.addr=(uint64_t)(uintptr_t)mem,.size=16};
+    chain warm={0}; emit(&warm,OP_SET_RT,&rt,sizeof rt); emit(&warm,OP_BIND_PROGRAM,&bind,sizeof bind); emit(&warm,OP_BIND_UBO,&ub,sizeof ub); triangle(&warm); run(&warm);
+    // No empty bind: disabling unbind deferral must leave this handle proof and same-target continuation enabled.
+    chain c={0}; bind.prog=red_pg; emit(&c,OP_SET_RT,&rt,sizeof rt); emit(&c,OP_BIND_PROGRAM,&bind,sizeof bind); triangle(&c);
+    bind.prog=&pg; emit(&c,OP_SET_RT,&rt,sizeof rt); emit(&c,OP_BIND_PROGRAM,&bind,sizeof bind); emit(&c,OP_BIND_UBO,&ub,sizeof ub); triangle(&c);
+    uint64_t before=g_stat_pass; run(&c);
+    CHECK(g_stat_pass-before==(rtc_on() ? 1 : 2),"nonattachment uniform handle continues the same-target pass independently of unbind deferral");
+    pixels(t,0,255,"continued draw reads the green nonattachment texture through its uniform handle");
+    mtl_pool_del(mem); free(mem);
+}
 static void handles(tex_t *t) {
     void *mem=NULL; if (posix_memalign(&mem,getpagesize(),getpagesize())) abort(); memset(mem,0,getpagesize()); mtl_pool_add(mem,getpagesize());
     state_reset(); memset(&R,0,sizeof R); R.rt.n=1; R.rt.color[0]=t;
@@ -116,7 +137,7 @@ static void handles(tex_t *t) {
 int main(void) { @autoreleasepool {
     alarm(60); setvbuf(stdout,NULL,_IONBF,0); mtl_init();
     NSError *error=nil;
-    id<MTLLibrary> lib=[g_dev newLibraryWithSource:@"#include <metal_stdlib>\nusing namespace metal;\nvertex float4 v(uint i [[vertex_id]]) { float2 p[3]={float2(-1,-1),float2(3,-1),float2(-1,3)}; return float4(p[i],0,1); }\nfragment float4 red() { return float4(1,0,0,1); }\nfragment float4 green() { return float4(0,1,0,1); }\n" options:nil error:&error];
+    id<MTLLibrary> lib=[g_dev newLibraryWithSource:@"#include <metal_stdlib>\nusing namespace metal;\nvertex float4 v(uint i [[vertex_id]]) { float2 p[3]={float2(-1,-1),float2(3,-1),float2(-1,3)}; return float4(p[i],0,1); }\nfragment float4 red() { return float4(1,0,0,1); }\nfragment float4 green() { return float4(0,1,0,1); }\nstruct A { texture2d<float,access::read> source [[id(0)]]; };\nfragment float4 read_tex(float4 p [[position]], constant A &a [[buffer(0)]]) { return a.source.read(uint2(p.xy)); }\n" options:nil error:&error];
     if (!lib) { fprintf(stderr,"%s\n",error.localizedDescription.UTF8String); return 2; }
     prog_t pg={.serial=882000}; NvProg *pr=[NvProg new]; pr->sh[0]=[NvShader new]; pr->sh[1]=[NvShader new];
     pr->sh[0]->fn=[lib newFunctionWithName:@"v"]; pr->sh[0]->stage=0;
@@ -124,7 +145,7 @@ int main(void) { @autoreleasepool {
     prog_t green_pg={.serial=882005}; NvProg *gp=[NvProg new]; gp->sh[0]=pr->sh[0]; gp->sh[1]=[NvShader new];
     gp->sh[1]->fn=[lib newFunctionWithName:@"green"]; gp->sh[1]->stage=1; gp->sh[1]->rf.color_known=1; gp->sh[1]->rf.color_mask=1; serial_put(green_pg.serial,gp);
     tex_t t=texture(882001), cp=texture(882004); identity(&t); replay(&pg,&green_pg,&t,&cp);
-    if (unb_on()) handles(&t);
+    replay_handles(&pg,&green_pg,lib,pr->sh[0],&t,&cp); handles(&t);
     mtl_tex_release(&t); mtl_tex_release(&cp);
     printf("render target unbind: %d checks, %d failed\n",checks,failed); return failed!=0;
 } }

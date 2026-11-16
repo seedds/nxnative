@@ -34,6 +34,6 @@ sys_resource	0x0
 shader_groups	/nativeNXx64/=nativenxx64
 shader_note	Resident Evil shaders
 
-present_interval	display
+present_interval	game
 fps_target	60
 fps_max	120

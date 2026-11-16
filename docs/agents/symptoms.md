@@ -463,6 +463,9 @@ One line per symptom in the [subsystem references](../reference/): what you see 
 
 ## Movies
 
+- AAC samples after a seek or loop differ from a fresh decode of the same packets; the old position's overlap can contaminate the beginning of the new position. → [Audio decoder history survives a movie seek](../reference/movies.md#audio-decoder-history-survives-a-movie-seek)
+- `[RED] movie: client buffer in native-texture mode is 0 bytes, needs 8 (a texture object)` and `movieStatus_ErrorBadValue`; opening logos or movies do not display. → [Native texture buffers with zero capacity](../reference/movies.md#native-texture-buffers-with-zero-capacity)
+- `CRASH sig=11 addr=0 pc=sdk+0x40ca1c lr=subsdk0+0x32455c` after `StoryEndOfMovieCallback`, while opening another MP4. → [Movie extractor allocations need the SDK graphics allocator](../reference/movies.md#movie-extractor-allocations-need-the-sdk-graphics-allocator)
 - abort in NVIDIA's video path (`NvRmChannelOpen` → `NvOsDrvOpen`). → [The SDK's hardware decoder opens nvdrv](../reference/movies.md#the-sdks-hardware-decoder-opens-nvdrv)
 - constructing a movie decoder aborts with `FATAL movie: missing SDK symbol _ZNK5movie6Buffer4DataEv`. → [SDK 1 movie buffer getters](../reference/movies.md#sdk-1-movie-buffer-getters)
 - the game waits forever at a movie (Engage's 94 s opening `S01F.webm`; frames keep presenting, nothing happens). → [`movie::Decoder` taken over as a MediaCodec-style protocol](../reference/movies.md#moviedecoder-taken-over-as-a-mediacodec-style-protocol)

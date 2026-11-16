@@ -48,7 +48,7 @@ int dm_sk_errno(void) { return t_skerr; }
 // UDP / event descriptors below. A module result -errno comes back as -1 with the thread's last error set (FreeBSD values). hle_offline.c's overloads call these too
 #include "coop.h"
 // The module is not in every binary (dm/host/tests compile this file on its own): these weak definitions stand in for it there, and the module's own definitions
-// (hle_offline.c dm_coop, hle_coop_vnet.c) replace them wherever it is linked. Without the module every descriptor is local
+// (hle_ldn.c dm_coop, hle_coop_vnet.c) replace them wherever it is linked. Without the module every descriptor is local
 __attribute__((weak)) coop_node *dm_coop(void) { return NULL; }
 __attribute__((weak)) int coop_vnet_is(coop_node *n, int fd) { (void)n; (void)fd; return 0; }
 __attribute__((weak)) int coop_vnet_socket(coop_node *n, int family, int type, int proto) { (void)n; (void)family; (void)type; (void)proto; return -SK_ENETDOWN; }

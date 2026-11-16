@@ -65,7 +65,28 @@ static int elem_size(int f) {   // bytes of one element of NVN format f
         default: return 4;
     }
 }
+static void conversion_selection(void) {
+    NvShader *vs=[NvShader new];vs->has_pull=1;vs->rf.nv=1;vs->rf.v[0].nvn=0;
+    state_reset();S.nattr=1;S.attr[0].fmt=0x14;
+    vs->rf.v[0].ct=NVN_CT_FLOAT;
+    EXPECT("integer bits into float use GPU fetch",1,pull_conversion(vs,NULL));
+    vs->rf.v[0].ct=NVN_CT_UINT;
+    EXPECT("matching integer input keeps native fetch",0,pull_conversion(vs,NULL));
+    vs->rf.v[0].ct=NVN_CT_INT;
+    EXPECT("opposite signedness uses GPU fetch",1,pull_conversion(vs,NULL));
+    S.attr[0].fmt=0x11;
+    EXPECT("half into integer uses GPU fetch",1,pull_conversion(vs,NULL));
+    vs->rf.v[0].ct=NVN_CT_FLOAT;
+    EXPECT("matching float input keeps native fetch",0,pull_conversion(vs,NULL));
+    S.attr[0].fmt=0x51;
+    EXPECT("integer to float conversion uses GPU fetch",1,pull_conversion(vs,NULL));
+    vs->has_pull=0;EXPECT("missing pulling library keeps CPU fallback",0,pull_conversion(vs,NULL));
+    vs->has_pull=1;vs->layer_out=1;EXPECT("layer-writing shader keeps its pipeline",0,pull_conversion(vs,NULL));
+    vs->layer_out=0;vs->rf.nv=0;EXPECT("no attributes keeps native fetch",0,pull_conversion(vs,NULL));
+    state_reset();
+}
 int main(void) { @autoreleasepool {
+    conversion_selection();
     mtl_init(); q = [g_dev newCommandQueue]; NSError *err = nil;
     NSString *fetch = [NSString stringWithContentsOfFile:@"../tools/dmsh_pull.metal" encoding:NSUTF8StringEncoding error:&err];
     if (!fetch) { fprintf(stderr, "dmsh_pull.metal: %s\n", err.localizedDescription.UTF8String); return 1; }

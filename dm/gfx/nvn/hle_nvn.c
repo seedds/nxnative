@@ -2239,11 +2239,20 @@ static void slow_emit(uint64_t f) {
 // DM_RT=0 leaves every thread on its QoS (for power A/B); DM_RT_FRAME=0 declares on the acquire thread only; DM_RT_COMP=<ms> fixes the acquire thread's computation
 // (default auto). The acquire thread declares 2 ms at its first period, before any window, as it always has.
 static int rt_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_RT"); v = !(e && !strcmp(e, "0")); if (!v) LOG("[nvn] DM_RT=0: no thread gets a time-constraint policy (QoS only)"); } return v; }
-static int rt_frame_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_RT_FRAME"); v = !(e && !strcmp(e, "0")); if (!v && rt_on()) LOG("[nvn] DM_RT_FRAME=0: only the acquire thread declares a time-constraint policy"); } return v; }
+// DM_RT_FRAME: 0 / 1, or ab (the graphics library's switches, nvn_mtl.m sw_mode): a frame thread whose phase turns it off goes back to the standard policy at its next tick (rt_tick)
+// and declares again at the first tick of a phase that turns it on. Graphics tests that include this file without the library read 0 / 1 only
+__attribute__((weak)) int mtl_sw_mode(const char *name, int dflt);
+__attribute__((weak)) int mtl_sw_on(int m);
+static int rt_frame_on(void) {
+    static int v = -1;
+    if (v < 0) { const char *e = getenv("DM_RT_FRAME"); v = mtl_sw_mode ? mtl_sw_mode("DM_RT_FRAME", 1) : !(e && !strcmp(e, "0")); if (!v && rt_on()) LOG("[nvn] DM_RT_FRAME=0: only the acquire thread declares a time-constraint policy"); }
+    return mtl_sw_on ? mtl_sw_on(v) : v == 1;
+}
 static int rt_comp_fixed_ms(void) { static int v = -2; if (v == -2) { const char *e = getenv("DM_RT_COMP"); v = e && *e && strcmp(e, "auto") ? atoi(e) : -1; } return v; }   // −1 = auto
 #define RT_THREADS 8
 typedef struct {
-    const char *name; mach_port_t port; uint64_t tid; int acq;   // tid: the thread's ID (pthread_threadid_np), which the port is checked against before another thread acts on it; acq: an acquire thread
+    const char *name; char tname[48]; mach_port_t port; uint64_t tid; int acq;   // tname: the thread's name; tid: the thread's ID (pthread_threadid_np), which the port is checked against before another thread acts on it; acq: an acquire thread
+    int base0;   // the thread's timeshare base priority when it took its slot (its QoS's), given back when it leaves the time-constraint policy (rt_standard); 0 = unknown
     nvn_rt r; uint64_t cyc;   // the thread's cycles at its last sample
     _Atomic uint64_t period_ns, comp_us;   // the period and computation declared (0: none), read by the thread policy line
     unsigned ndecl; int retired;   // retired: an acquire thread that stopped acquiring, put back on the standard policy (rt_retire); the slot may go to the next acquire thread
@@ -2254,8 +2263,15 @@ typedef struct {
 static rt_thr g_rtt[RT_THREADS]; static _Atomic int g_rtt_n;
 static _Atomic uint64_t g_rt_frame_ns;   // the period the acquire thread declares; the frame threads follow it
 static pthread_mutex_t g_rt_mu = PTHREAD_MUTEX_INITIALIZER;   // the acquire threads' slots (rt_acquire): several threads may acquire, and one retires another's
+static int rt_base_pri(mach_port_t p, int *policy) {   // a thread's base priority (and policy), -1 if unknown
+    thread_extended_info_data_t xi; mach_msg_type_number_t xc = THREAD_EXTENDED_INFO_COUNT;
+    if (thread_info(p, THREAD_EXTENDED_INFO, (thread_info_t)&xi, &xc) != KERN_SUCCESS) return -1;
+    if (policy) *policy = xi.pth_policy;
+    return xi.pth_priority;
+}
 static void rt_init(rt_thr *t, const char *name, int acq, uint64_t tid) {   // on the thread itself
-    t->name = name; t->acq = acq; t->tid = tid; t->port = pthread_mach_thread_np(pthread_self());
+    t->name = name; t->acq = acq; t->tid = tid; t->port = pthread_mach_thread_np(pthread_self()); t->tname[0] = 0; pthread_getname_np(pthread_self(), t->tname, sizeof t->tname);
+    { int pol = 0, b = rt_base_pri(t->port, &pol); t->base0 = b > 0 && pol == POLICY_TIMESHARE ? b : 0; }
     memset(&t->r, 0, sizeof t->r); t->cyc = 0; t->ndecl = 0; t->retired = 0; atomic_store(&t->period_ns, 0); atomic_store(&t->comp_us, 0);
     atomic_store(&t->frames, 0); atomic_store(&t->demoted, 0); atomic_store(&t->cpu_ns, 0); atomic_store(&t->cycles, 0); atomic_store(&t->ready, 1);
 }
@@ -2277,9 +2293,21 @@ static void rt_declare(rt_thr *t, uint64_t period_ns, double comp_ms) {
     if (++t->ndecl <= 20 || kr != KERN_SUCCESS)
         LOG("[nvn] %s time-constraint policy (period %.3f ms, computation %.3f ms) %s%s", t->name, period_ns / 1e6, comp_ms, kr == KERN_SUCCESS ? "set" : "failed to set", t->ndecl == 20 ? "; further declarations of this thread only in the thread policy line" : "");
 }
+// Back to the standard (timeshare) policy at the priority the thread had before it declared. Declaring took the thread's QoS away, and the standard policy alone left it at the
+// task's default priority: on the Mac 31, where its QoS user-interactive had given it 47, below every other guest thread (Mario Kart World's main thread, the acquire thread of the
+// menus, once the race's frames came from another thread). Setting the QoS class again, or pthread_set_timeshare_self, left it at 31; a precedence importance of the difference
+// gives the priority back (31 → 47; the kernel refuses the QoS policy flavour). Works on another thread too (rt_retire)
+static void rt_standard(const rt_thr *t) {
+    thread_standard_policy_data_t st = {0}; thread_policy_set(t->port, THREAD_STANDARD_POLICY, (thread_policy_t)&st, THREAD_STANDARD_POLICY_COUNT);
+    int b = rt_base_pri(t->port, NULL);
+    if (t->base0 > 0 && b > 0 && t->base0 > b) { thread_precedence_policy_data_t pr = {.importance = t->base0 - b}; thread_policy_set(t->port, THREAD_PRECEDENCE_POLICY, (thread_policy_t)&pr, THREAD_PRECEDENCE_POLICY_COUNT); }
+}
 // On the thread itself, before each piece of its work: one sample a presented frame (its CPU and cycles, its priority), and the declaration when the period or the need moved
 static void rt_tick(rt_thr *t, uint64_t period_ns) {
     uint64_t f = atomic_load_explicit(&g_frame, memory_order_relaxed), declared = atomic_load_explicit(&t->period_ns, memory_order_relaxed);
+    if (!t->acq && declared && rt_on() && !rt_frame_on()) {   // a DM_RT_FRAME=ab phase that turns the frame threads' declarations off
+        rt_standard(t); atomic_store(&t->period_ns, 0); atomic_store(&t->comp_us, 0); declared = 0;
+    }
     int period_moved = period_ns && period_ns != declared && (t->acq || t->r.comp_ms > 0);
     if (f == t->r.frame && !period_moved) return;
     if (f != t->r.frame) {
@@ -2309,8 +2337,9 @@ static void rt_retire(const rt_thr *self) {
     for (int i = 0; i < nt; i++) { rt_thr *o = &g_rtt[i];
         if (o == self || !o->acq || o->retired || !atomic_load(&o->ready) || f < o->r.frame + RT_WIN) continue;
         thread_identifier_info_data_t ii; mach_msg_type_number_t ic = THREAD_IDENTIFIER_INFO_COUNT; int same = thread_info(o->port, THREAD_IDENTIFIER_INFO, (thread_info_t)&ii, &ic) == KERN_SUCCESS && ii.thread_id == o->tid;
-        if (same && atomic_load(&o->period_ns)) { thread_standard_policy_data_t st = {0}; thread_policy_set(o->port, THREAD_STANDARD_POLICY, (thread_policy_t)&st, THREAD_STANDARD_POLICY_COUNT); }
-        LOG("[nvn] acquire thread %llu stopped acquiring %llu frames ago%s", (unsigned long long)o->tid, (unsigned long long)(f - o->r.frame), same ? (atomic_load(&o->period_ns) ? ": back to the standard policy" : "") : " and has ended");
+        int back = same && atomic_load(&o->period_ns), pri = 0; if (back) { rt_standard(o); pri = rt_base_pri(o->port, NULL); }
+        char at[48] = ""; if (back) snprintf(at, sizeof at, ": back to the standard policy at priority %d", pri);
+        LOG("[nvn] acquire thread %llu (%s) stopped acquiring %llu frames ago%s", (unsigned long long)o->tid, o->tname, (unsigned long long)(f - o->r.frame), same ? at : " and has ended");
         o->retired = 1; atomic_store(&o->period_ns, 0); atomic_store(&o->comp_us, 0);
     }
 }

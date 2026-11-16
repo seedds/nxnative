@@ -12,16 +12,38 @@ static _Thread_local uint64_t test_cpu;
 static _Thread_local unsigned test_policy_calls;
 static _Thread_local thread_time_constraint_policy_data_t test_policy;
 static _Atomic unsigned test_standard_other;   // standard policies set on another thread (rt_retire)
+// The kernel's priorities as an app thread sees them on the Mac: 47 with the QoS user-interactive, 97 under a time-constraint policy, the task's 31 under the standard policy
+// that follows it, plus a precedence importance (thread_info's THREAD_EXTENDED_INFO answers from this model; every other query is the real one)
+static struct { thread_act_t port; int pri, policy; } test_pri[8]; static int test_npri; static pthread_mutex_t test_pri_mu = PTHREAD_MUTEX_INITIALIZER;
+static int *test_pri_of(thread_act_t p, int **policy) {
+    int i = 0; while (i < test_npri && test_pri[i].port != p) i++;
+    if (i == test_npri && i < 8) { test_pri[i].port = p; test_pri[i].pri = 47; test_pri[i].policy = POLICY_TIMESHARE; test_npri++; }
+    *policy = &test_pri[i].policy; return &test_pri[i].pri;
+}
+static void test_pri_set(thread_act_t p, int pri, int policy) { pthread_mutex_lock(&test_pri_mu); int *pol, *pr = test_pri_of(p, &pol); *pr = pri; *pol = policy; pthread_mutex_unlock(&test_pri_mu); }
+static int test_pri_get(thread_act_t p) { pthread_mutex_lock(&test_pri_mu); int *pol, r = *test_pri_of(p, &pol); pthread_mutex_unlock(&test_pri_mu); return r; }
+static kern_return_t test_thread_info(thread_inspect_t t, thread_flavor_t flavor, thread_info_t info, mach_msg_type_number_t *count) {
+    kern_return_t kr = thread_info(t, flavor, info, count);
+    if (kr == KERN_SUCCESS && flavor == THREAD_EXTENDED_INFO) {
+        thread_extended_info_t xi = (thread_extended_info_t)info; pthread_mutex_lock(&test_pri_mu); int *pol, *pr = test_pri_of(t, &pol);
+        xi->pth_priority = xi->pth_curpri = *pr; xi->pth_policy = *pol; pthread_mutex_unlock(&test_pri_mu);
+    }
+    return kr;
+}
 static uint64_t test_clock_gettime_nsec_np(clockid_t clock) { return clock == CLOCK_THREAD_CPUTIME_ID ? test_cpu : clock_gettime_nsec_np(clock); }
 static kern_return_t test_thread_policy_set(thread_act_t thread, thread_policy_flavor_t flavor, thread_policy_t policy, mach_msg_type_number_t count) {
+    if (flavor == THREAD_STANDARD_POLICY) test_pri_set(thread, 31, POLICY_TIMESHARE);
+    if (flavor == THREAD_PRECEDENCE_POLICY) { test_pri_set(thread, 31 + ((thread_precedence_policy_t)policy)->importance, POLICY_TIMESHARE); return KERN_SUCCESS; }
     if (flavor == THREAD_STANDARD_POLICY && thread != pthread_mach_thread_np(pthread_self())) { test_standard_other++; return KERN_SUCCESS; }
     if (thread != pthread_mach_thread_np(pthread_self()) || flavor != THREAD_TIME_CONSTRAINT_POLICY || count != THREAD_TIME_CONSTRAINT_POLICY_COUNT) return KERN_INVALID_ARGUMENT;
-    test_policy = *(thread_time_constraint_policy_data_t *)policy; test_policy_calls++;
+    test_policy = *(thread_time_constraint_policy_data_t *)policy; test_policy_calls++; test_pri_set(thread, 97, POLICY_RR);
     return KERN_SUCCESS;
 }
 #define clock_gettime_nsec_np test_clock_gettime_nsec_np
 #define thread_policy_set test_thread_policy_set
+#define thread_info test_thread_info
 #include "../nvn/hle_nvn.c"
+#undef thread_info
 #undef thread_policy_set
 #undef clock_gettime_nsec_np
 module_t *g_mod; int g_nmod;
@@ -37,6 +59,7 @@ static void acquire(win_t *w) { int idx; CHECK(h_nvnWindowAcquireTexture((NVNwin
 static void frame(win_t *w, int acquires, uint64_t cpu_per_acquire) {   // one presented frame: the frame count moves before its last acquire
     for (int i = 0; i < acquires; i++) { test_cpu += cpu_per_acquire; if (i + 1 == acquires) g_frame++; acquire(w); }
 }
+static thread_act_t first_port;   // the first acquire thread (the test's main thread)
 static void *other_thread(void *unused) {
     (void)unused; win_t w = {.interval = 1};
     test_cpu = 0;   // a fresh thread's clock is below the first thread's
@@ -47,6 +70,7 @@ static void *other_thread(void *unused) {
     frame(&w, 1, 1000000);
     CHECK(fabs(declared_ms() - 1.25) < 0.001, "a thread's samples are its own clock, not the difference from another thread's");
     CHECK(test_standard_other == 1, "an acquire thread that stopped acquiring for a window goes back to the standard policy");
+    CHECK(test_pri_get(first_port) == 47, "and to the priority it had before it declared (47), not the task's default the standard policy leaves (31)");
     return NULL;
 }
 static void *frame_thread(void *unused) {
@@ -71,6 +95,7 @@ int main(int argc, char **argv) {
     setenv("DM_FPS_TARGET", "0", 1); setenv("DM_PRESENT_SNAP", "0", 1);
     nvn_present_config(60, 1);
     win_t w = {.interval = 1};
+    first_port = pthread_mach_thread_np(pthread_self());
     test_cpu = 1000000000;
     acquire(&w);
     if (off || fixed) {

@@ -193,6 +193,41 @@ static void test_uniform_buffer(void) {
 
 // Compressed arrays keep each layer's block rows separate, including mip levels
 // smaller than one block. Exercise the public entry points and read Metal's bytes.
+// A 4x4 texture of two levels (red, then green) drawn 1:1 into a 4x4 target with the sampler a unit would use: the colour of a middle texel
+static uint32_t draw_texel(tex_t *t, id<MTLSamplerState> s) {
+    static id<MTLRenderPipelineState> pso;
+    if (!pso) {
+        static const char *src = "#include <metal_stdlib>\n using namespace metal;\n struct V { float4 p [[position]]; float2 uv; };\n"
+            "vertex V sv(uint i [[vertex_id]]) { float2 q = float2((i << 1) & 2, i & 2); V o; o.p = float4(q * 2 - 1, 0, 1); o.uv = q; return o; }\n"
+            "fragment float4 sf(V in [[stage_in]], texture2d<float> t [[texture(0)]], sampler s [[sampler(0)]]) { return t.sample(s, in.uv); }\n";
+        NSError *err = nil; id<MTLLibrary> lib = [g_dev newLibraryWithSource:@(src) options:nil error:&err]; assert(lib);
+        MTLRenderPipelineDescriptor *pd = [MTLRenderPipelineDescriptor new];
+        pd.vertexFunction = [lib newFunctionWithName:@"sv"]; pd.fragmentFunction = [lib newFunctionWithName:@"sf"]; pd.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
+        pso = [g_dev newRenderPipelineStateWithDescriptor:pd error:&err]; assert(pso);
+    }
+    MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:4 height:4 mipmapped:NO];
+    td.usage = MTLTextureUsageRenderTarget; td.storageMode = MTLStorageModeShared;
+    id<MTLTexture> rt = [g_dev newTextureWithDescriptor:td];
+    MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
+    rp.colorAttachments[0].texture = rt; rp.colorAttachments[0].loadAction = MTLLoadActionClear; rp.colorAttachments[0].storeAction = MTLStoreActionStore;
+    id<MTLCommandBuffer> cb = [g_q commandBuffer]; id<MTLRenderCommandEncoder> e = [cb renderCommandEncoderWithDescriptor:rp];
+    [e setRenderPipelineState:pso]; [e setFragmentTexture:t->tex atIndex:0]; [e setFragmentSamplerState:s atIndex:0];
+    [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3]; [e endEncoding]; [cb commit]; [cb waitUntilCompleted];
+    uint32_t px[16]; [rt getBytes:px bytesPerRow:16 fromRegion:MTLRegionMake2D(0, 0, 4, 4) mipmapLevel:0];
+    return px[5];
+}
+// Not every GPU applies a Metal sampler's lodBias: an M6 does; an M2 Max (Apple8) and GitHub's macOS runners sample as with none (a shader's bias() works on both).
+// Whether this one does, from a plain sampler with a bias of 1 on t (two levels, as draw_texel draws): the GL layer's samplers must sample as it does
+static int lod_bias_applies(tex_t *t) {
+    static int r = -1;
+    if (r < 0) {
+        MTLSamplerDescriptor *d = [MTLSamplerDescriptor new]; d.minFilter = d.magFilter = MTLSamplerMinMagFilterNearest; d.mipFilter = MTLSamplerMipFilterNearest; d.lodBias = 1;
+        r = draw_texel(t, [g_dev newSamplerStateWithDescriptor:d]) == 0xff00ff00u;
+        if (!r) printf("GL_TEXTURE_LOD_BIAS: this GPU (%s) ignores a sampler's lodBias; the bias checks expect level 0\n", g_dev.name.UTF8String);
+    }
+    return r;
+}
+
 static void test_compressed_arrays(void) {
     void (*image)(GLenum, GLint, GLenum, GLsizei, GLsizei, GLsizei, GLint, GLsizei, const void *) = import("glCompressedTexImage3D");
     void (*sub)(GLenum, GLint, GLint, GLint, GLint, GLsizei, GLsizei, GLsizei, uint64_t, uint64_t, const void *) = import("glCompressedTexSubImage3D");
@@ -392,13 +427,6 @@ static void test_doom3(void) {
     h_glDeleteTextures(1, &a);
 
     // GL_TEXTURE_LOD_BIAS goes to the texture's sampler: a 4x4 texture drawn 1:1 into a 4x4 target samples level 0 (red), and with a bias of 1 level 1 (green)
-    static const char *bsrc = "#include <metal_stdlib>\n using namespace metal;\n struct V { float4 p [[position]]; float2 uv; };\n"
-        "vertex V bv(uint i [[vertex_id]]) { float2 q = float2((i << 1) & 2, i & 2); V o; o.p = float4(q * 2 - 1, 0, 1); o.uv = q; return o; }\n"
-        "fragment float4 bf(V in [[stage_in]], texture2d<float> t [[texture(0)]], sampler s [[sampler(0)]]) { return t.sample(s, in.uv); }\n";
-    id<MTLLibrary> blib = [g_dev newLibraryWithSource:@(bsrc) options:nil error:&err]; assert(blib);
-    MTLRenderPipelineDescriptor *bpd = [MTLRenderPipelineDescriptor new];
-    bpd.vertexFunction = [blib newFunctionWithName:@"bv"]; bpd.fragmentFunction = [blib newFunctionWithName:@"bf"]; bpd.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
-    id<MTLRenderPipelineState> bpso = [g_dev newRenderPipelineStateWithDescriptor:bpd error:&err]; assert(bpso);
     uint32_t red[16], green[4]; for (int i = 0; i < 16; i++) red[i] = 0xff0000ffu; for (int i = 0; i < 4; i++) green[i] = 0xff00ff00u;
     h_glGenTextures(1, &a); h_glBindTexture(GL_TEXTURE_2D, a);
     h_glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 4, 4, 0, GL_RGBA, GL_UNSIGNED_BYTE, red); h_glTexImage2D(GL_TEXTURE_2D, 1, GL_RGBA8, 2, 2, 0, GL_RGBA, GL_UNSIGNED_BYTE, green);
@@ -406,16 +434,7 @@ static void test_doom3(void) {
     ta = tex_of(a); assert(tex_make(ta, 0) && ta->levels == 2);
     for (int bias = 0; bias <= 1; bias++) {
         h_glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_LOD_BIAS, (float)bias);
-        MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:4 height:4 mipmapped:NO];
-        td.usage = MTLTextureUsageRenderTarget; td.storageMode = MTLStorageModeShared;
-        id<MTLTexture> rt = [g_dev newTextureWithDescriptor:td];
-        MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
-        rp.colorAttachments[0].texture = rt; rp.colorAttachments[0].loadAction = MTLLoadActionClear; rp.colorAttachments[0].storeAction = MTLStoreActionStore;
-        id<MTLCommandBuffer> cb = [g_q commandBuffer]; id<MTLRenderCommandEncoder> e = [cb renderCommandEncoderWithDescriptor:rp];
-        [e setRenderPipelineState:bpso]; [e setFragmentTexture:ta->tex atIndex:0]; [e setFragmentSamplerState:tex_sampler(ta, 0) atIndex:0];
-        [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3]; [e endEncoding]; [cb commit]; [cb waitUntilCompleted];
-        uint32_t px[16]; [rt getBytes:px bytesPerRow:16 fromRegion:MTLRegionMake2D(0, 0, 4, 4) mipmapLevel:0];
-        assert(px[5] == (bias ? green[0] : red[0]));
+        assert(draw_texel(ta, tex_sampler(ta, 0)) == (bias && lod_bias_applies(ta) ? green[0] : red[0]));
     }
     h_glDeleteTextures(1, &a);
 
@@ -425,29 +444,6 @@ static void test_doom3(void) {
     h_glPolygonMode(GL_FRONT_AND_BACK, 0x1b02); h_glDisable(0x2a02); assert(!S.lines && !S.poffset_line);
 }
 
-// A 4x4 texture of two levels (red, then green) drawn 1:1 into a 4x4 target with the sampler a unit would use: the colour of a middle texel
-static uint32_t draw_texel(tex_t *t, id<MTLSamplerState> s) {
-    static id<MTLRenderPipelineState> pso;
-    if (!pso) {
-        static const char *src = "#include <metal_stdlib>\n using namespace metal;\n struct V { float4 p [[position]]; float2 uv; };\n"
-            "vertex V sv(uint i [[vertex_id]]) { float2 q = float2((i << 1) & 2, i & 2); V o; o.p = float4(q * 2 - 1, 0, 1); o.uv = q; return o; }\n"
-            "fragment float4 sf(V in [[stage_in]], texture2d<float> t [[texture(0)]], sampler s [[sampler(0)]]) { return t.sample(s, in.uv); }\n";
-        NSError *err = nil; id<MTLLibrary> lib = [g_dev newLibraryWithSource:@(src) options:nil error:&err]; assert(lib);
-        MTLRenderPipelineDescriptor *pd = [MTLRenderPipelineDescriptor new];
-        pd.vertexFunction = [lib newFunctionWithName:@"sv"]; pd.fragmentFunction = [lib newFunctionWithName:@"sf"]; pd.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
-        pso = [g_dev newRenderPipelineStateWithDescriptor:pd error:&err]; assert(pso);
-    }
-    MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:4 height:4 mipmapped:NO];
-    td.usage = MTLTextureUsageRenderTarget; td.storageMode = MTLStorageModeShared;
-    id<MTLTexture> rt = [g_dev newTextureWithDescriptor:td];
-    MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
-    rp.colorAttachments[0].texture = rt; rp.colorAttachments[0].loadAction = MTLLoadActionClear; rp.colorAttachments[0].storeAction = MTLStoreActionStore;
-    id<MTLCommandBuffer> cb = [g_q commandBuffer]; id<MTLRenderCommandEncoder> e = [cb renderCommandEncoderWithDescriptor:rp];
-    [e setRenderPipelineState:pso]; [e setFragmentTexture:t->tex atIndex:0]; [e setFragmentSamplerState:s atIndex:0];
-    [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3]; [e endEncoding]; [cb commit]; [cb waitUntilCompleted];
-    uint32_t px[16]; [rt getBytes:px bytesPerRow:16 fromRegion:MTLRegionMake2D(0, 0, 4, 4) mipmapLevel:0];
-    return px[5];
-}
 
 // GL sampler objects (Mega Man Legacy Collection sets its filters and wraps on one per unit, none on its textures), and uniform locations, of which none is 0
 static void test_sampler_objects(void) {
@@ -468,7 +464,7 @@ static void test_sampler_objects(void) {
     // the texture's own parameters read level 0; the sampler bound to its unit (a mipmap filter, a bias of 1) level 1; unbound, level 0 again
     assert(draw_texel(ta, tex_sampler(ta, S.units[2].samp)) == red);
     h_glBindSampler(2, s[0]); assert(S.units[2].samp == s[0] && !S.units[0].samp);
-    assert(draw_texel(ta, tex_sampler(ta, S.units[2].samp)) == green);
+    assert(draw_texel(ta, tex_sampler(ta, S.units[2].samp)) == (lod_bias_applies(ta) ? green : red));
     assert(draw_texel(ta, tex_sampler(ta, S.units[0].samp)) == red);   // another unit keeps the texture's own
     h_glBindSampler(2, 0); assert(draw_texel(ta, tex_sampler(ta, S.units[2].samp)) == red);
     // a sampler's MAX_LOD below 1 keeps level 0 whatever the bias

@@ -78,6 +78,7 @@ def build(gid, patched, control):
         if cond.startswith('fixups:'): return cond[7:] in keys
         if cond.startswith('gfxapi:'): return os.environ.get('GFXAPI', '') == cond[7:]
         if cond.startswith('platform:'): return platform == cond[9:]
+        if cond.startswith('table:'): return g.table(cond[6:]).is_file()   # the game's profile has that table (romfs_patch.tsv: the RomFS patch variants its row offers)
         m = re.fullmatch(r'(DM_GAME_\w+)(!=|==)(.*)', cond)
         if m: return (macro(m[1], n) == m[3]) == (m[2] == '==')
         sys.exit(f'settings.tsv:{n}: unknown condition {cond}')

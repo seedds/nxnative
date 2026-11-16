@@ -595,9 +595,68 @@ static void test_fate_calls(void) {
     h_glDeleteTextures(1, &t);
 }
 
+// Generated GLSL, reflected table and metallib through the real compile/link/draw path. Seventeen distinct sampler states, vertex attribute 15, a texture shared by both
+// stages and a named uniform block: three draws in one command buffer must retain their own uniforms, sampler units and block ranges.
+static void test_argument_buffers(const char *dir) {
+    __typeof__(S) was = S;
+    GLuint pr = h_glCreateProgram(), shaders[2];
+    for (int st = 0; st < 2; st++) {
+        char path[1024]; snprintf(path, sizeof path, "%s/resource.%s", dir, st ? "frag" : "vert");
+        FILE *f = fopen(path, "rb"); assert(f); fseek(f, 0, SEEK_END); long len = ftell(f); rewind(f);
+        char *source = calloc((size_t)len + 1, 1); assert(fread(source, 1, (size_t)len, f) == (size_t)len); fclose(f);
+        shaders[st] = h_glCreateShader(st ? GL_FRAGMENT_SHADER : GL_VERTEX_SHADER);
+        const char *s = source; h_glShaderSource(shaders[st], 1, &s, NULL); free(source); h_glCompileShader(shaders[st]);
+        assert(shader_of(shaders[st])->fn); h_glAttachShader(pr, shaders[st]);
+    }
+    h_glLinkProgram(pr); assert(prog_of(pr)->linked && prog_of(pr)->ae[0] && prog_of(pr)->ae[1]); h_glUseProgram(pr);
+    GLuint textures[17], samplers[17], vao, vb, ub, target, fb;
+    h_glGenTextures(17, textures); h_glGenSamplers(17, samplers);
+    for (int i = 0; i < 17; i++) {
+        uint8_t pixels[8] = {(uint8_t)(32 + i * 4), i ? 0 : 64, 0, 255, (uint8_t)(128 + i * 4), i ? 0 : 64, 0, 255};
+        h_glActiveTexture(0x84c0 + i); h_glBindTexture(GL_TEXTURE_2D, textures[i]);
+        h_glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 2, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+        h_glSamplerParameteri(samplers[i], GL_TEXTURE_MIN_FILTER, GL_NEAREST); h_glSamplerParameteri(samplers[i], GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        h_glSamplerParameteri(samplers[i], GL_TEXTURE_WRAP_S, i & 1 ? GL_CLAMP_TO_EDGE : GL_REPEAT);
+        h_glSamplerParameterf(samplers[i], GL_TEXTURE_LOD_BIAS, (float)i / 16);   // distinct even when filter and wrap match
+        h_glBindSampler(i, samplers[i]);
+        char name[32]; snprintf(name, sizeof name, "tex%d", i); GLint loc = h_glGetUniformLocation(pr, name); assert(loc >= 0); h_glUniform1i(loc, i);
+    }
+    h_glGenVertexArrays(1, &vao); h_glBindVertexArray(vao); h_glGenBuffers(1, &vb); h_glBindBuffer(GL_ARRAY_BUFFER, vb);
+    const float vertices[] = {-1, -1, 0, 1, 3, -1, 0, 1, -1, 3, 0, 1};
+    h_glBufferData(GL_ARRAY_BUFFER, sizeof vertices, vertices, 0); h_glVertexAttribPointer(15, 4, GL_FLOAT, 0, 16, NULL); h_glEnableVertexAttribArray(15);
+    float blocks[128] = {0}; blocks[0] = blocks[64] = -0.25f; blocks[1] = 1; blocks[65] = 0.5f; blocks[2] = blocks[66] = 0.125f;
+    h_glGenBuffers(1, &ub); h_glBindBuffer(GL_UNIFORM_BUFFER, ub); h_glBufferData(GL_UNIFORM_BUFFER, sizeof blocks, blocks, 0);
+    h_glUniformBlockBinding(pr, h_glGetUniformBlockIndex(pr, "Block"), 5); h_glBindBufferRange(GL_UNIFORM_BUFFER, 5, ub, 0, 16);
+    h_glUniform4f(h_glGetUniformLocation(pr, "shift"), 0.25f, 0.25f, 0, 0);
+    GLint weight = h_glGetUniformLocation(pr, "weight"), last = h_glGetUniformLocation(pr, "tex16"); assert(weight >= 0 && last >= 0);
+    h_glActiveTexture(0x84c0 + 31); h_glGenTextures(1, &target); h_glBindTexture(GL_TEXTURE_2D, target);
+    h_glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 51, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+    h_glGenFramebuffers(1, &fb); h_glBindFramebuffer(GL_FRAMEBUFFER, fb); h_glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, target, 0);
+    h_glDisable(GL_BLEND); h_glDisable(GL_DEPTH_TEST); h_glDisable(GL_STENCIL_TEST); h_glDisable(GL_CULL_FACE); h_glDisable(GL_SCISSOR_TEST); h_glColorMask(1, 1, 1, 1);
+    for (int draw = 0; draw < 3; draw++) {
+        h_glViewport(17 * draw, 0, 17, 1); h_glUniform4f(weight, draw ? 0.5f : 1, 1, 1, 1);
+        if (draw == 1) h_glUniform1i(last, 0);
+        if (draw == 2) h_glBindBufferRange(GL_UNIFORM_BUFFER, 5, ub, 256, 16);
+        h_glDrawArrays(GL_TRIANGLES, 0, 3);
+    }
+    uint8_t got[51 * 4]; h_glReadPixels(0, 0, 51, 1, GL_RGBA, GL_UNSIGNED_BYTE, got);
+    for (int draw = 0; draw < 3; draw++) for (int i = 0; i < 17; i++) {
+        int unit = draw && i == 16 ? 0 : i, expected = (unit & 1 ? 128 : 32) + unit * 4;
+        expected /= draw == 2 ? 4 : draw == 1 ? 2 : 1;
+        assert(abs((int)got[4 * (17 * draw + i)] - expected) <= 1);
+        assert(abs((int)got[4 * (17 * draw + i) + 1] - (draw == 2 ? 48 : 96)) <= 1);   // vertex default and named uniforms both contribute
+    }
+    assert(h_glGetError() == GL_NO_ERROR);
+    h_glUseProgram(0); h_glDeleteProgram(pr); h_glDeleteShader(shaders[0]); h_glDeleteShader(shaders[1]);
+    h_glDeleteFramebuffers(1, &fb); h_glDeleteTextures(1, &target); h_glDeleteTextures(17, textures); h_glDeleteSamplers(17, samplers);
+    h_glDeleteBuffers(1, &vb); h_glDeleteBuffers(1, &ub); h_glDeleteVertexArrays(1, &vao); S = was;
+    puts("GL argument buffers: 17 samplers, both stages, uniforms and block ranges: OK");
+}
+
 int main(int argc, char **argv) {
-    (void)argv;
-    int stubs = argc > 1;
+    int stubs = argc > 1 && !strcmp(argv[1], "--stubs");
+    const char *fixture = argc == 3 && !strcmp(argv[1], "--fixture") ? argv[2] : NULL;
+    if (fixture) setenv("DM_MSL_DIR", fixture, 1);
     setenv("DM_GL_STUBS", stubs ? "1" : "0", 1);
     // The calls from the issue must bind without using a GL loader first.
     GLuint (*create)(GLenum) = import("glCreateShader");
@@ -705,6 +764,7 @@ int main(int argc, char **argv) {
     test_extension_names_and_egl();
     test_program_validation();
     test_fate_calls();
+    if (fixture) test_argument_buffers(fixture);
 
     unsigned long sz;
     const hle_ent *sec = (const hle_ent *)getsectiondata(&_mh_execute_header, "__DATA", "swhle", &sz);

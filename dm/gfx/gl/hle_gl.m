@@ -14,7 +14,8 @@
 //   · textures are created on first use from the levels given so far (the game defines a texture level by level, and Metal needs the level count up front); an upload into a
 //     texture the GPU may still read goes through a blit in command order, any other is a CPU write;
 //   · shaders come from the offline library built by dm/gfx/tools/gl_shaders.py (<DM_MSL_DIR>/gl/): a shader is found by the hash of its source and its stage; its table row lists the
-//     vertex inputs, the members of its default uniform block (glUniform* writes them into CPU copies that are set as bytes at each draw that needs them) and its samplers.
+//     vertex inputs, the members of its default uniform block (glUniform* writes CPU copies, snapshotted into transient buffers) and its samplers. Each stage reads all its
+//     resources through one argument buffer at buffer(0), independent of GL's binding numbers and Metal's 16 direct sampler slots.
 //     glGetAttribLocation returns the Metal attribute index of the input, so the game's attribute index is the Metal one; vertex buffers are at slot 30 − index.
 // Environment: DM_GL_LOG=1 logs object creation and the deletion of shaders and programs; DM_GL_CAPTURE=<dir> writes every shader source the game compiles (<key>.vert / <key>.frag, read by gl_shaders.py).
 #include "../../host/hle.h"
@@ -138,6 +139,7 @@ static id<MTLLibrary> g_lib, g_util;             // the game's shaders; the laye
 static uint64_t g_serial = 1;                    // serial of the command buffer being recorded (g_cb); committed ones have lower serials
 static _Atomic uint64_t g_done;                  // highest serial whose command buffer has completed
 static id<MTLCommandBuffer> g_cb;
+static NSMutableSet<id<MTLSamplerState>> *g_cb_samplers;   // argument buffers do not retain the sampler states they reference
 static id<MTLRenderCommandEncoder> g_enc;
 static _Atomic uint64_t g_n_draw, g_n_pass, g_n_up, g_n_blit, g_n_pso, g_n_cb;
 static _Atomic uint64_t g_sk_prog, g_sk_pass, g_sk_attr, g_sk_pso;   // draws dropped in draw_setup, by reason
@@ -156,9 +158,9 @@ static int is_samp(int t) { return t >= T_SAMP2D && t < T_OTHER; }
 static int is_intt(int t) { return t >= T_INT && t <= T_BOOL; }
 typedef struct { char name[48]; uint8_t slot, type; } shattr;                         // a vertex input
 typedef struct { char name[48]; uint16_t off, count, stride; uint8_t type; } shuni;   // a default block member (count 0 = not an array)
-typedef struct { char name[48]; uint8_t slot, type; } shsamp;                         // a combined sampler: texture and sampler slot
-typedef struct { char name[48]; uint8_t slot; uint32_t size; } shblk;                 // a named uniform block: its buffer slot and size
-typedef struct { char key[17]; int frag, ub_slot, ub_size, na, nu, nt, nb; shattr *a; shuni *u; shsamp *t; shblk *b; } shinfo;
+typedef struct { char name[48]; uint16_t slot; uint8_t type; int sampler; } shsamp;   // a combined sampler: separate texture and sampler argument IDs
+typedef struct { char name[48]; uint16_t slot; uint32_t size; } shblk;               // a named uniform block: its argument ID and size
+typedef struct { char key[17]; int frag, ub_slot, ub_size, arg_slot, nargs, na, nu, nt, nb; shattr *a; shuni *u; shsamp *t; shblk *b; } shinfo;
 static shinfo *g_sh; static int g_nsh;
 static int sh_cmp(const void *a, const void *b) { int c = memcmp(((const shinfo *)a)->key, ((const shinfo *)b)->key, 16); return c ? c : ((const shinfo *)a)->frag - ((const shinfo *)b)->frag; }
 static void sh_load(void) {
@@ -168,26 +170,39 @@ static void sh_load(void) {
     FILE *f = fopen(p, "r");
     if (!f) { GLOG("[RED] cannot open %s (run dm/gfx/tools/gl_shaders.py first)", p); return; }
     static char line[65536]; int cap = 0;
+    if (!fgets(line, sizeof line, f) || strcmp(line, "# GL shader ABI 2\n")) {
+        GLOG("[RED] GL shader table has an incompatible ABI; rebuild with dm/gfx/tools/gl_shaders.py"); fclose(f); return;
+    }
     while (fgets(line, sizeof line, f)) {
         if (line[0] == '#' || line[0] == '\n') continue;
         char *rest = line, *key = strsep(&rest, "\t"), *stage = strsep(&rest, "\t"), *res = strsep(&rest, "\t\n");
         if (!key || !stage || strlen(key) != 16) continue;
         if (g_nsh == cap) { cap = cap ? cap * 2 : 1024; g_sh = realloc(g_sh, cap * sizeof *g_sh); }
         shinfo *s = &g_sh[g_nsh++]; memset(s, 0, sizeof *s);
-        memcpy(s->key, key, 16); s->frag = !strcmp(stage, "frag"); s->ub_slot = -1;
+        memcpy(s->key, key, 16); s->frag = !strcmp(stage, "frag"); s->ub_slot = -1; s->arg_slot = -1; s->nargs = -1;
+        if (!res || sscanf(res, "r:%d:%d", &s->arg_slot, &s->nargs) != 2 || s->nargs < 0 || s->nargs > 512 || (s->nargs ? s->arg_slot != 0 : s->arg_slot != -1)) {
+            GLOG("[RED] shader %s: invalid argument buffer in the GL shader table", s->key); g_nsh--; continue;
+        }
         int na = 0, nu = 0, nt = 0, nb = 0;
         for (char *c = res; c && *c; c++) if (c == res || c[-1] == ' ') { na += *c == 'a'; nu += *c == 'u'; nt += *c == 't'; nb += *c == 'n'; }
         s->a = zalloc((na + 1) * sizeof *s->a); s->u = zalloc((nu + 1) * sizeof *s->u); s->t = zalloc((nt + 1) * sizeof *s->t); s->b = zalloc((nb + 1) * sizeof *s->b);
-        for (char *t = res ? strtok(res, " ") : NULL; t; t = strtok(NULL, " ")) {
-            char nm[64], ty[32]; unsigned a1, a2, a3;
+        int bad = 0;
+        for (char *t = strtok(res, " "); t; t = strtok(NULL, " ")) {
+            char nm[64], ty[32]; unsigned a1, a2, a3; int sa;
             if (t[0] == 'a' && sscanf(t, "a:%63[^=]=%u:%31s", nm, &a1, ty) == 3 && a1 < 16) { shattr *x = &s->a[s->na++]; strlcpy(x->name, nm, sizeof x->name); x->slot = a1; x->type = tcode(ty); }
             else if (t[0] == 'u' && sscanf(t, "u:%63[^=]=%u:%31[^:]:%u:%u", nm, &a1, ty, &a2, &a3) == 5) {
                 shuni *x = &s->u[s->nu++]; strlcpy(x->name, nm, sizeof x->name); x->off = a1; x->type = tcode(ty); x->count = a2; x->stride = a3;
-            } else if (t[0] == 't' && sscanf(t, "t:%63[^=]=%u:%31s", nm, &a1, ty) == 3) { shsamp *x = &s->t[s->nt++]; strlcpy(x->name, nm, sizeof x->name); x->slot = a1; x->type = tcode(ty); }
-            else if (t[0] == 'b' && sscanf(t, "b:%u:%u", &a1, &a2) == 2) { s->ub_slot = a1; s->ub_size = a2; }
-            else if (t[0] == 'n' && sscanf(t, "n:%63[^=]=%u:%u", nm, &a1, &a2) == 3 && a1 < 15) { shblk *x = &s->b[s->nb++]; strlcpy(x->name, nm, sizeof x->name); x->slot = a1; x->size = a2; }
+            } else if (t[0] == 't' && sscanf(t, "t:%63[^=]=%u:%d:%31s", nm, &a1, &sa, ty) == 4) {
+                if (a1 >= (unsigned)s->nargs || sa < -1 || sa >= s->nargs) { bad = 1; continue; }
+                shsamp *x = &s->t[s->nt++]; strlcpy(x->name, nm, sizeof x->name); x->slot = a1; x->sampler = sa; x->type = tcode(ty);
+            } else if (t[0] == 'b' && sscanf(t, "b:%u:%u", &a1, &a2) == 2) {
+                if (a1 >= (unsigned)s->nargs) { bad = 1; continue; } s->ub_slot = a1; s->ub_size = a2;
+            } else if (t[0] == 'n' && sscanf(t, "n:%63[^=]=%u:%u", nm, &a1, &a2) == 3) {
+                if (a1 >= (unsigned)s->nargs) { bad = 1; continue; }
+                shblk *x = &s->b[s->nb++]; strlcpy(x->name, nm, sizeof x->name); x->slot = a1; x->size = a2;
+            }
         }
-        if (s->ub_slot >= 15) GLOG("[RED] shader %s: uniform block at buffer slot %d meets the vertex buffer slots", s->key, s->ub_slot);
+        if (bad) { GLOG("[RED] shader %s: invalid argument IDs in the GL shader table", s->key); free(s->a); free(s->u); free(s->t); free(s->b); g_nsh--; }
     }
     fclose(f);
     qsort(g_sh, g_nsh, sizeof *g_sh, sh_cmp);
@@ -217,7 +232,8 @@ static void dev_init_once(void) {
         [g_tex3d0 replaceRegion:MTLRegionMake3D(0, 0, 0, 1, 1, 1) mipmapLevel:0 slice:0 withBytes:&black bytesPerRow:4 bytesPerImage:4];
         td.textureType = MTLTextureType2DArray; g_arr0 = [g_dev newTextureWithDescriptor:td];
         [g_arr0 replaceRegion:MTLRegionMake2D(0, 0, 1, 1) mipmapLevel:0 slice:0 withBytes:&black bytesPerRow:4 bytesPerImage:0];
-        g_samp0 = [g_dev newSamplerStateWithDescriptor:[MTLSamplerDescriptor new]];
+        MTLSamplerDescriptor *sd = [MTLSamplerDescriptor new]; sd.supportArgumentBuffers = YES;
+        g_samp0 = [g_dev newSamplerStateWithDescriptor:sd];
         NSError *err = nil;
         g_util = host_msl_lib(g_dev, nil, "gl_util", &err);   // dm/gfx/msl/gl_util.metal: a quad that clears what a scissored or masked glClear covers (a render pass can only clear its attachments whole)
         if (!g_util) GLOG("[RED] the layer's own shaders do not compile: %s", err.localizedDescription.UTF8String);
@@ -249,7 +265,13 @@ static id<MTLBuffer> arena_alloc(size_t n, size_t *off) {
 }
 // The last command buffer committed (frame or upload): the GPU runs them in order, so waiting for it waits for all (dm_gl_drain, when the app goes to the background)
 static id<MTLCommandBuffer> g_last_cb; static pthread_mutex_t g_last_mu = PTHREAD_MUTEX_INITIALIZER;
-static void cb_commit_one(id<MTLCommandBuffer> cb) { pthread_mutex_lock(&g_last_mu); [cb commit]; g_last_cb = cb; pthread_mutex_unlock(&g_last_mu); g_n_cb++; }
+static void cb_commit_one(id<MTLCommandBuffer> cb) {
+    if (cb == g_cb && g_cb_samplers.count) {
+        NSSet *samplers = g_cb_samplers; g_cb_samplers = nil;
+        [cb addCompletedHandler:^(id<MTLCommandBuffer> done) { (void)done; (void)samplers.count; }];
+    }
+    pthread_mutex_lock(&g_last_mu); [cb commit]; g_last_cb = cb; pthread_mutex_unlock(&g_last_mu); g_n_cb++;
+}
 void dm_gl_drain(void) {   // dm_gfx_suspend (hle_nvn.c)
     pthread_mutex_lock(&g_last_mu); id<MTLCommandBuffer> cb = g_last_cb; pthread_mutex_unlock(&g_last_mu);
     [cb waitUntilCompleted];
@@ -344,7 +366,7 @@ static vao_t g_vao0;   // the default vertex array (GL core has none, the compat
 
 // refs: the programs it is attached to; deleted: glDeleteShader flagged it while attached (it keeps its name and goes with its last attachment, as in GL)
 typedef struct { GLenum type; char *src; size_t len; char key[17]; const shinfo *si; __strong id<MTLFunction> fn; int compiled, refs, deleted; } shader_t;
-typedef struct { char name[48]; uint8_t type; uint16_t count; int32_t off[2]; uint16_t stride[2]; int slot[2]; int unit; } puni_t;   // [0] vertex, [1] fragment
+typedef struct { char name[48]; uint8_t type; uint16_t count; int32_t off[2]; uint16_t stride[2]; int slot[2], sampler[2]; int unit; } puni_t;   // [0] vertex, [1] fragment
 typedef struct { uint32_t vf[16]; uint16_t stride[16]; uint8_t div[16]; uint32_t cpf, dpf, spf; uint8_t blend, mask, bsrc, bdst, bsa, bda, eqc, eqa; } pkey_t;
 typedef struct { pkey_t k; void *pso; } pent_t;   // pso: a retained id<MTLRenderPipelineState>, NULL = failed
 // amap: the game's attribute index of each Metal vertex input (glBindAttribLocation before the link, else the input's own number, which glGetAttribLocation returns);
@@ -357,6 +379,7 @@ typedef struct { char name[48]; int slot[2]; uint32_t size, binding; } pblk_t;
 typedef struct {
     GLuint vs, fs; int linked, deleted, validated; char validation_log[160]; const shinfo *si[2]; __strong id<MTLFunction> fn[2];
     int nu; puni_t *u; uint8_t *ub[2]; uint64_t ub_gen[2]; uint32_t serial;
+    __strong id<MTLArgumentEncoder> ae[2]; __strong id<MTLBuffer> ub_buf[2]; size_t ub_off[2]; uint64_t ub_serial[2], ub_written_gen[2];
     pent_t *pc; int npc, cappc;
     abind_t bind[16]; int nbind; int8_t amap[16];
     pblk_t blk[8]; int nblk;
@@ -611,6 +634,7 @@ static id<MTLSamplerState> samp_state(const samp_p *p, const tex_t *t) {
               p->border[3] > 0.5f ? (p->border[0] > 0.5f ? 2.f : 1.f) : 0.f, fmaxf(-15, fminf(15, p->lodbias))};   // GL clamps the bias to GL_MAX_TEXTURE_LOD_BIAS
     for (int i = 0; i < n; i++) if (!memcmp(&cache[i].k, &k, sizeof k)) return cache[i].s;
     MTLSamplerDescriptor *d = [MTLSamplerDescriptor new];
+    d.supportArgumentBuffers = YES;
     d.magFilter = k.magf == GL_NEAREST ? MTLSamplerMinMagFilterNearest : MTLSamplerMinMagFilterLinear;
     d.minFilter = k.minf == GL_NEAREST || k.minf == GL_NEAREST_MIPMAP_NEAREST || k.minf == GL_NEAREST_MIPMAP_LINEAR ? MTLSamplerMinMagFilterNearest : MTLSamplerMinMagFilterLinear;
     // a texture of one level samples level 0 whatever its minifying filter (GL would call it incomplete with a mipmap filter and sample black)
@@ -728,7 +752,7 @@ static void tex_image(GLenum target, GLint level, int f, int cv, uint32_t w, uin
 // The pass being encoded: framebuffer name, its attachments' generation (a changed attachment ends the pass), clears waiting for the pass to begin
 static struct { GLuint fb; uint64_t gen; int open; uint32_t w, h; MTLPixelFormat cpf, dpf, spf; } P;
 static struct { int bits; float c[4]; double d; int s; GLuint fb; } g_pend_clear;
-static struct { void *pso; void *dss; int cull, wind, fill, vp[4], sc[4], sref[2]; float pf, pu; GLuint prog; uint64_t ub_gen[2]; } E;   // encoder state set so far (NULL / -1 = unset)
+static struct { void *pso; void *dss; int cull, wind, fill, vp[4], sc[4], sref[2]; float pf, pu; } E;   // encoder state set so far (NULL / -1 = unset)
 
 static id<MTLTexture> att_tex(const att_t *a, uint64_t *gen) {
     if (a->kind == 1) { tex_t *t = tex_of(a->name); if (!t) return nil; if (!t->made) tex_make(t, 1); *gen += t->gen; t->use = g_serial; return t->tex; }
@@ -982,20 +1006,28 @@ static void bind_uniforms_textures(prog_t *p) {
     id<MTLRenderCommandEncoder> e = g_enc;
     for (int st = 0; st < 2; st++) {
         const shinfo *si = p->si[st];
-        if (si->ub_slot >= 0 && si->ub_size > 0 && (E.prog != p->serial || E.ub_gen[st] != p->ub_gen[st])) {
-            if (si->ub_size <= 4096) {
-                if (st) [e setFragmentBytes:p->ub[st] length:si->ub_size atIndex:si->ub_slot]; else [e setVertexBytes:p->ub[st] length:si->ub_size atIndex:si->ub_slot];
-            } else {
-                size_t off; id<MTLBuffer> b = arena_alloc(si->ub_size, &off); memcpy((uint8_t *)b.contents + off, p->ub[st], si->ub_size);
-                if (st) [e setFragmentBuffer:b offset:off atIndex:si->ub_slot]; else [e setVertexBuffer:b offset:off atIndex:si->ub_slot];
+        id<MTLArgumentEncoder> ae = p->ae[st];
+        if (!ae) continue;
+        size_t off; id<MTLBuffer> ab = arena_alloc(ae.encodedLength, &off);
+        memset((uint8_t *)ab.contents + off, 0, ae.encodedLength);
+        [ae setArgumentBuffer:ab offset:off];
+        if (st) [e setFragmentBuffer:ab offset:off atIndex:si->arg_slot]; else [e setVertexBuffer:ab offset:off atIndex:si->arg_slot];
+        if (si->ub_slot >= 0 && si->ub_size > 0) {
+            if (p->ub_serial[st] != g_serial || p->ub_written_gen[st] != p->ub_gen[st]) {
+                p->ub_buf[st] = arena_alloc(si->ub_size, &p->ub_off[st]);
+                memcpy((uint8_t *)p->ub_buf[st].contents + p->ub_off[st], p->ub[st], si->ub_size);
+                p->ub_serial[st] = g_serial; p->ub_written_gen[st] = p->ub_gen[st];
             }
-            E.ub_gen[st] = p->ub_gen[st];
+            [ae setBuffer:p->ub_buf[st] offset:p->ub_off[st] atIndex:si->ub_slot];
+            [e useResource:p->ub_buf[st] usage:MTLResourceUsageRead stages:st ? MTLRenderStageFragment : MTLRenderStageVertex];
         }
     }
     for (int i = 0; i < p->nblk; i++) {
         const pblk_t *b = &p->blk[i]; size_t mo; id<MTLBuffer> mb = blk_buffer(b, &mo);
-        if (b->slot[0] >= 0) [e setVertexBuffer:mb offset:mo atIndex:b->slot[0]];
-        if (b->slot[1] >= 0) [e setFragmentBuffer:mb offset:mo atIndex:b->slot[1]];
+        for (int st = 0; st < 2; st++) if (b->slot[st] >= 0) {
+            [p->ae[st] setBuffer:mb offset:mo atIndex:b->slot[st]];
+            [e useResource:mb usage:MTLResourceUsageRead stages:st ? MTLRenderStageFragment : MTLRenderStageVertex];
+        }
     }
     for (int i = 0; i < p->nu; i++) {
         puni_t *u = &p->u[i];
@@ -1014,11 +1046,15 @@ static void bind_uniforms_textures(prog_t *p) {
                 GLOG("program %u sampler %s (unit %d) has no texture: drawing the 1x1 black placeholder", p->serial, u->name, unit); } }
         for (int st = 0; st < 2; st++) {
             if (u->slot[st] < 0) continue;
-            if (st) { [e setFragmentTexture:tx atIndex:u->slot[st]]; [e setFragmentSamplerState:sm atIndex:u->slot[st]]; }
-            else { [e setVertexTexture:tx atIndex:u->slot[st]]; [e setVertexSamplerState:sm atIndex:u->slot[st]]; }
+            [p->ae[st] setTexture:tx atIndex:u->slot[st]];
+            if (u->sampler[st] >= 0) {
+                [p->ae[st] setSamplerState:sm atIndex:u->sampler[st]];
+                if (!g_cb_samplers) g_cb_samplers = [NSMutableSet new];
+                [g_cb_samplers addObject:sm];
+            }
+            [e useResource:tx usage:MTLResourceUsageRead stages:st ? MTLRenderStageFragment : MTLRenderStageVertex];
         }
     }
-    E.prog = p->serial;
 }
 static int g_dl_mode, g_dl_n, g_dl_inst, g_dl_elems;   // the draw call being set up, for the DM_GL_DRAWLOG line
 // The vertex range a draw touches, which a client-memory array is copied by: draw_arrays' first..first+count, or the range of draw_elements' indices (plus its base vertex),
@@ -2243,6 +2279,7 @@ static void prog_clear(prog_t *p) {
     for (int i = 0; i < p->npc; i++) if (p->pc[i].pso) CFRelease(p->pc[i].pso);
     free(p->pc); p->pc = NULL; p->npc = p->cappc = 0;
     free(p->u); p->u = NULL; p->nu = 0; free(p->ub[0]); free(p->ub[1]); p->ub[0] = p->ub[1] = NULL; p->fn[0] = p->fn[1] = nil; p->linked = 0;
+    for (int st = 0; st < 2; st++) { p->ae[st] = nil; p->ub_buf[st] = nil; p->ub_serial[st] = p->ub_written_gen[st] = 0; }
 }
 // Uniforms are merged by name over both stages, as GL links them; a location is (uniform index + 1) × 4096 + array element (uni_loc, uni_of)
 GLB(glLinkProgram, void, GLuint pr) {
@@ -2254,19 +2291,23 @@ GLB(glLinkProgram, void, GLuint pr) {
     // A program with a vertex shader alone links in desktop GL: its draws rasterize and write depth and stencil, their colour is undefined (DOOM 3's shadow volumes,
     // drawn with colour writes off). Its fragment stage is the empty one here, and its pipelines have no fragment function and write no colour (pso_get)
     if (!vs || !vs->fn || (fs && !fs->fn)) { RED1("program %u: a shader is missing from the library, its draws are skipped", pr); return; }
-    static const shinfo nofrag = {.key = "none", .frag = 1, .ub_slot = -1};
+    static const shinfo nofrag = {.key = "none", .frag = 1, .ub_slot = -1, .arg_slot = -1};
     p->si[0] = vs->si; p->si[1] = fs ? fs->si : &nofrag; p->fn[0] = vs->fn; p->fn[1] = fs ? fs->fn : nil;
     int cap = p->si[0]->nu + p->si[0]->nt + p->si[1]->nu + p->si[1]->nt; p->u = zalloc((cap + 1) * sizeof *p->u);
     for (int st = 0; st < 2; st++) {
         const shinfo *si = p->si[st];
+        if (si->nargs) {
+            p->ae[st] = [p->fn[st] newArgumentEncoderWithBufferIndex:si->arg_slot];
+            if (!p->ae[st].encodedLength || p->ae[st].alignment > 256) { RED1("shader %s: invalid argument buffer layout", si->key); return; }
+        }
         p->ub[st] = zalloc(si->ub_size + 16);
         for (int i = 0; i < si->nu + si->nt; i++) {
             const char *nm = i < si->nu ? si->u[i].name : si->t[i - si->nu].name;
             puni_t *u = NULL;
             for (int j = 0; j < p->nu; j++) if (!strcmp(p->u[j].name, nm)) u = &p->u[j];
-            if (!u) { u = &p->u[p->nu++]; strlcpy(u->name, nm, sizeof u->name); u->off[0] = u->off[1] = -1; u->slot[0] = u->slot[1] = -1; }
+            if (!u) { u = &p->u[p->nu++]; strlcpy(u->name, nm, sizeof u->name); u->off[0] = u->off[1] = -1; u->slot[0] = u->slot[1] = -1; u->sampler[0] = u->sampler[1] = -1; }
             if (i < si->nu) { const shuni *m = &si->u[i]; u->type = m->type; u->count = m->count; u->off[st] = m->off; u->stride[st] = m->stride; }
-            else { const shsamp *m = &si->t[i - si->nu]; u->type = m->type; u->slot[st] = m->slot; }
+            else { const shsamp *m = &si->t[i - si->nu]; u->type = m->type; u->slot[st] = m->slot; u->sampler[st] = m->sampler; }
         }
     }
     // the game's attribute indices: glBindAttribLocation's for the inputs it names, the input's own number for the others (or the lowest index no binding took)

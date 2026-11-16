@@ -3250,6 +3250,7 @@ typedef struct {
     NSUInteger slice, level;
     MTLOrigin at;   // where in the level (a sparse texture's tile, sparse_sync); 0 otherwise
     __unsafe_unretained id<MTLTexture> tsrc;   // the image is copied from this texture's same slice and level instead of from src (up_copy_add); kept by g_up_views
+    uint8_t t2b, bar;   // t2b: the region `size` at `at` of tsrc's slice and level goes into src at off (row, image) instead (up_t2b_add); bar: behind a barrier after the copies before it
 } up_blit;
 static up_blit *g_up_blits; static int g_nup_blits, g_up_blitcap;
 static NSMutableArray *g_up_texs, *g_up_views;   // Targets and temporary integer-write views kept through their upload
@@ -3283,6 +3284,8 @@ static void up_flush(void) {
     id<MTLTexture> from = nil;
     for (int i = 0; b && i < g_nup_blits; i++) {
         up_blit *x = &g_up_blits[i];
+        if (x->bar) [b barrierAfterEncoderStages:MTLStageBlit beforeEncoderStages:MTLStageBlit visibilityOptions:MTL4VisibilityOptionDevice];
+        if (x->t2b) { enc_b_copy_texture_buffer(b, x->tsrc, x->slice, x->level, x->at, x->size, x->src, x->off, x->row, x->image); continue; }
         if (!x->tsrc) { enc_b_copy_buffer_texture(b, x->src, x->off, x->row, x->image, x->size, x->dst, x->slice, x->level, x->at); continue; }
         // The source may be the target of this encoder's earlier copies (a texture uploaded and replaced within one batch)
         if (x->tsrc != from) { from = x->tsrc; [b barrierAfterEncoderStages:MTLStageBlit beforeEncoderStages:MTLStageBlit visibilityOptions:MTL4VisibilityOptionDevice]; }
@@ -3436,6 +3439,14 @@ static void up_blit_add_at(id<MTLBuffer> src, size_t off, size_t row, size_t ima
         g_up_blits = realloc_or_die(g_up_blits, g_up_blitcap * sizeof *g_up_blits, "the upload blits");
     }
     g_up_blits[g_nup_blits++] = (up_blit){src, off, row, image, size, dst, slice, level, at, nil};
+}
+// A region of a texture into a buffer in the upload batch, behind a barrier (it may read what the batch's earlier copies wrote); the buffer→texture copy that reads it next goes
+// behind one too (up_blit_add_at, then .bar). Compressed alias pairs fill a side from the other with these (bcp_up_blocks)
+static void up_t2b_add(id<MTLTexture> src, NSUInteger slice, NSUInteger level, MTLOrigin at, MTLSize size, id<MTLBuffer> dst, size_t off, size_t row, size_t image) {
+    up_blit_add_at(dst, off, row, image, size, nil, slice, level, at);
+    up_blit *x = &g_up_blits[g_nup_blits - 1]; x->tsrc = src; x->t2b = 1; x->bar = 1;
+    if (!g_up_views) g_up_views = [NSMutableArray array];
+    [g_up_views addObject:src];
 }
 static void up_copy_add(id<MTLTexture> src, MTLSize size, id<MTLTexture> dst, NSUInteger slice, NSUInteger level) {
     up_blit_add_at(nil, 0, 0, 0, size, dst, slice, level, MTLOriginMake(0, 0, 0));
@@ -4621,8 +4632,9 @@ static int tex_cpu_content(const tex_t *t) {
 // texture's usage cannot tell: tex_desc gives every uncompressed texture made without a CPU fill render-target use, and with the usage as the test every such rewrite was dropped. Ocarina of
 // Time rewrites its terrain tiles' height (260x260 R32F) and blend / hole (260x260 RGBA8, two layers) maps from the CPU as tile slots are reused while the player walks: the tiles kept
 // what they held before, flat blue holes in the ground after an hour. Its normal maps, which the CPU zeroes and the GPU then draws, stay the GPU's. A block-compressed texture is uploaded
-// whatever the GPU wrote: it cannot be rendered into, and GPU copies into it while registered are written into its storage too (tex_storage_dst), so a GPU-written span over it does not
-// make its storage stale (Tears of the Kingdom's BC4 atlas and ASTC arrays). Any other texture keeps the usage test (MTL_REWRITE_GPU: left to the GPU for good), as before
+// whatever the GPU wrote: it cannot be rendered into, and GPU copies into it while registered are written into its storage too (tex_storage_dst), as are a compressed-alias pair's
+// copies of what its alias was written with (bcp_after_to, an image store's too), so a GPU-written span over it does not make its storage stale (Tears of the Kingdom's BC4 atlas and
+// ASTC arrays). Any other texture keeps the usage test (MTL_REWRITE_GPU: left to the GPU for good), as before
 int mtl_tex_cpu_rewritten(const tex_t *t) {
     int unc = tex_unc(t);
     if (tex_storage_ok(t, unc)) {
@@ -4681,6 +4693,7 @@ static int tex_storage_readable(const tex_t *t) {
 // in_storage (may be NULL): set when, off the submit thread, the texture's content is its storage and making the host texture would take an upload, or would make one the CPU's
 // content never reaches; nil is returned then and the caller reads the storage (mtl_read_texels)
 static id<MTLTexture> tex_mtl_(const tex_t *ct, int *in_storage);
+static int bcp_up_fill(const tex_t *t, id<MTLTexture> mt); static void bcp_up_follow(const tex_t *t, id<MTLTexture> mt);   // compressed-alias pairs: a side made, a side uploaded from storage
 static id<MTLTexture> tex_mtl(const tex_t *ct) { AP_B; id<MTLTexture> r = tex_mtl_(ct, NULL); AP_E(4); return r; }
 // Diagnostic DM_NVN_REUPLOADS=1: a line for each re-upload of a texture taken from its storage (the first 400): its shape and size, how much of it was read from guest memory
 // (pkg_written), the time it took on the submit thread, the frame and the submission (a frame's replay is many, and each looks at the pages once), the pages written since its upload and where the first of them lies,
@@ -5057,6 +5070,7 @@ static id<MTLTexture> tex_mtl_(const tex_t *ct, int *in_storage) {
                 if (pk->sparse) sparse_view(pk, t);
                 zb_report(t, pk->sparse ? (unsigned)pk->vbase : 0, "re-upload");
                 pk->spare = old; pk->spare_fence = g_fence + 1; own_note(t->serial); pk->stamp = st; pk->vgen = pk->vseen = vg; pk->span = nvn_dirty_span(t->mem, t->L.size); pk->seen = st; g_pkg_reuploads++; pkg_hash_take(pk, t); pkg_edges_take(pk, t); }
+            if (nt && !pk->sparse) bcp_up_follow(t, nt);   // the CPU's bytes reach the other side of a compressed-alias pair too
             return pk->view ? pk->view : pk->tex;
         }
         pk = [NvPkg new];
@@ -5071,7 +5085,7 @@ static id<MTLTexture> tex_mtl_(const tex_t *ct, int *in_storage) {
         if (pk->sparse) sparse_view(pk, t);
         zb_report(t, pk->sparse ? (unsigned)pk->vbase : 0, "upload");
         tex_put(t->serial, pk);
-        if (!pk->sparse) pkg_share_put(t, pk);
+        if (!pk->sparse) { pkg_share_put(t, pk); bcp_up_follow(t, pk->tex); }   // the CPU's bytes reach the other side of a compressed-alias pair too
         return pk->view ? pk->view : pk->tex;
     }
     // An sRGB / linear view whose parent left the sharing table (upgraded, or evicted with its pool; a takeover leaves a held view's parent) no longer shares the storage's bytes: dropped,
@@ -5130,7 +5144,7 @@ static id<MTLTexture> tex_mtl_(const tex_t *ct, int *in_storage) {
         mt = pair_texture(t, d);   // (neither filled: their storage is shared)
         if (!mt) mt = image_texture(t, d);
         if (!mt) { mt = rh_texture(t, d); if (!mt) mt = [g_dev newTextureWithDescriptor:d];
-            if (mt) { res_add(mt); if (!tex_init_fill(t, mt)) tex_zero_fill(mt); } }
+            if (mt) { res_add(mt); if (!bcp_up_fill(t, mt) && !tex_init_fill(t, mt)) tex_zero_fill(mt); } }   // a side of a compressed-alias pair takes the other side's bytes (bcp_up_fill)
         if (!mt) { RED_ONCE(2, "failed to create MTLTexture %ux%u format %#x target %d", t->d.width, t->d.height, t->d.format, t->d.target); return nil; }
     }
     if (mt.allocatedSize >= (256u << 20)) { static int nb; if (nb++ < 20)   // the textures that take most of the GPU's memory (a GPU out-of-memory error says nothing of which)
@@ -5722,7 +5736,7 @@ static void rt_mirror_flush(void) {
     if (g_blit) { enc_b_end(g_blit); g_blit = nil; }
 }
 static int g_nbcp; static void bcp_flush(void); static void bcp_wrote(const tex_t *t, id<MTLTexture> m); static void bcp_idx(int id_, const tex_t *t, int add);
-static int bcp_before(const tex_t *t, id<MTLTexture> m, tex_t *o); static void bcp_after(const tex_t *t, unsigned level, const NVNcopyRegion *r);   // compressed-alias pairs: sides written in this pass or dispatch (bcp_wrote)
+static int bcp_before(const tex_t *t, id<MTLTexture> m, tex_t *o); static void bcp_after(const tex_t *t, unsigned level, const NVNcopyRegion *r); static void bcp_after_to(const tex_t *t, const tex_t *op, unsigned level, const NVNcopyRegion *r);   // compressed-alias pairs: sides written in this pass or dispatch (bcp_wrote)
 static void rp_end_at(const char *fn, int line) { if (g_enc) { AP_B; geo_mesh_flush_pass(); PD("E %llu pass ends in %s:%d", g_stat_pass, fn, line);
     if (enc_label_on()) { static uint64_t lf = ~0ull, base; uint64_t f = atomic_load(&g_cur_frame); if (f != lf) { lf = f; base = g_stat_pass - 1; }   // Intra-frame serial: the same pass has the same name every frame, so the table can aggregate by name
         [(id)g_enc setLabel:[NSString stringWithFormat:@"p%02llu %dx%d %s d%d", (unsigned long long)(g_stat_pass - base), g_el_w, g_el_h, g_el_key[0] ? g_el_key : "-", g_el_draws]]; }
@@ -6151,7 +6165,13 @@ static int clear_rect_zero(int i) {
     size_t row = (size_t)(x1 - x0) * bpp, img = row * (size_t)(y1 - y0);
     id<MTLBuffer> zb = zero_buf(img); if (!zb) return 0;
     lc_land(); rp_flush();   // waiting clears, then a pending full clear on the same attachment, must land first (oldest first), or they would overwrite this one
+    // A GPU write as a pass's would be (attach): noted for the sparse and use bookkeeping, a side of a compressed-alias pair filled first and copied into its other side after, the
+    // rectangle stored into storage the CPU can read (rt_mirror_flush stores a pass's)
+    sparse_gpu_wrote(t); tu_wrote(mt); tex_t pair; int paired = bcp_before(t, mt, &pair);
+    NVNcopyRegion rr = {(int)x0, (int)y0, 0, (int)(x1 - x0), (int)(y1 - y0), 1};
     enc_b_copy_buffer_texture(blit(), zb, 0, row, img, MTLSizeMake((NSUInteger)(x1 - x0), (NSUInteger)(y1 - y0), 1), mt, sl, lv, MTLOriginMake((NSUInteger)x0, (NSUInteger)y0, 0));
+    { id<MTLTexture> whole = mt; while (whole.parentTexture) whole = whole.parentTexture; gsb_store(t, whole, (unsigned)lv, (unsigned)sl, 1, &rr); }
+    if (paired) bcp_after_to(t, &pair, (unsigned)lv, &rr);
     static uint64_t n; if (!n++) MLOG("scissored clear: first case %ldx%ld @%ld,%ld (target %lux%lu level %lu)", x1 - x0, y1 - y0, x0, y0, (unsigned long)mt.width, (unsigned long)mt.height, (unsigned long)lv);
     return 1;
 }
@@ -7078,7 +7098,7 @@ void mtl_tb2_stats(uint64_t *binds, uint64_t *made, uint64_t *fail, uint64_t *co
 // registration makes them again. It released only the primary view, and the image view when there was one: the type-compatible view (tex_fit) and the pool tables' views (pool_fit)
 // kept their texture, a pool-backed one the whole pool buffer, until the ID was registered with other data (PR #923; registering the same data keeps the views)
 static void treg_gone(treg_t *r) {
-    if (!r->gone) reg_bump((int)(r - g_treg), 0);   // its pool table entries become the dummy: the tables take the ID again (pool_gpu)
+    if (!r->gone) { reg_bump((int)(r - g_treg), 0); bcp_idx((int)(r - g_treg), &r->t, 0); }   // its pool table entries become the dummy: the tables take the ID again (pool_gpu); no pair side while its storage is gone
     r->gone = 1;
     treg_drop_views(r);
     treg_drop_stand(r);
@@ -7141,7 +7161,7 @@ void mtl_reg_tex(int tid, const tex_t *t, const view_t *v) {
     // registrations KTGL (Age of Calamity) makes before every bind repeat the ID's texture; the rest cycle textures through its IDs (the view cache below, vc_get)
     treg_t *rr = &g_treg[id_];
     int same = t && rr->ok && rr->has_v == (v != NULL) && !memcmp(&rr->t, t, sizeof *t) && (!v || !memcmp(&rr->v, v, sizeof *v));
-    if (rr->gone) { rr->gone = 0; reg_bump(id_, 0); }   // registered again (pool storage made anew), even with the same data
+    if (rr->gone) { rr->gone = 0; reg_bump(id_, 0); if (rr->ok) bcp_idx(id_, &rr->t, 1); }   // registered again (pool storage made anew), even with the same data; a pair side again
     if (!same) {
         // The read mark (pool_seen) is the ID's: shaders read an ID, whatever texture the game puts into it, so the mark stays while the ID holds a texture and the next walk makes the new
         // one under the read budget (POOL_REQ_BYTES). Cleared on every change, it left a streamed replacement to the walk's room (pool_room), which is 0 once pool_budget() is spent:
@@ -15009,7 +15029,7 @@ static id<MTL4ComputeCommandEncoder> dispatch_enc_cs(NvShader *cs, uint64_t ind)
     args_dirty_all();
     return e;
 }
-static void dispatch(const p_dispatch *dp) {
+static void dispatch_(const p_dispatch *dp) {
     g_wr_epoch++; g_mdx_epoch++;
     if (!S.cprog) { RED_ONCE(27, "no program bound before the dispatch"); return; }
     // DispatchComputeIndirect: the group counts {x, y, z} at ind (MTLDispatchThreadgroupsIndirectArguments) are usually written by the GPU earlier in the frame; Metal reads them when the dispatch runs
@@ -15103,7 +15123,13 @@ static void dispatch(const p_dispatch *dp) {
     } else enc_c_dispatch(ce, MTLSizeMake(dp->x, dp->y, dp->z), MTLSizeMake(tg[0], tg[1], tg[2]));
     bufsnap_after(cs, ce);
     if (own) enc_c_end(ce);
-    if (g_nbcp) bcp_flush();   // image stores into a side of a compressed-alias pair go into its other side (image_prepare noted them)
+}
+// Image stores into a side of a compressed-alias pair (image_prepare noted them) go into its other side when the dispatch is encoded, also one the host's own kernels took over
+// (ndve_engine_dispatch, up_mfx_encode return early): left waiting, its copy came after the next pass, which may read the other side. Not while a draw's pass is open (a dispatch
+// that encoded nothing: its notes are the pass's, copied when it ends)
+static void dispatch(const p_dispatch *dp) {
+    dispatch_(dp);
+    if (g_nbcp && !g_enc) bcp_flush();
 }
 // GPU: texture -> buffer (row stride taken from SetCopyRowStride, layer stride from SetCopyImageStride, 0 = tightly packed)
 // A copy at a level the host texture lacks (more levels declared than its size holds, tex_desc) is skipped: Metal does not check the level of a blit
@@ -15410,6 +15436,9 @@ static void draw_tex(const p_draw_tex *c) {
         uint32_t wm = (S.chmask.mask >> (4 * k)) & 0xf; if (!wm) continue;
         id<MTLTexture> d = tex_mtl(rt); uint64_t ser; int lv, sl; rt_sub(&R.rt, k, &ser, &lv, &sl);
         if (!d || fmt_int_or_ds(d.pixelFormat) || mtl_fmt_block(d.pixelFormat) || !(d.usage & MTLTextureUsageRenderTarget)) { RED_ONCE(125, "DrawTexture: target %d (format %lu) not drawn", k, d ? (unsigned long)d.pixelFormat : 0ul); continue; }
+        // A GPU write as a pass's would be (attach): noted for the sparse and use bookkeeping; a side of a compressed-alias pair filled first and copied into its other side after the
+        // pass, which is stored into storage the CPU can read (rt_mirror_flush stores a pass's)
+        sparse_gpu_wrote(rt); tu_wrote(d); tex_t pair; int paired = bcp_before(rt, d, &pair);
         NSNumber *pk = @(d.pixelFormat * 16 + wm);
         id<MTLRenderPipelineState> ps = pso[pk];
         if (!ps) {
@@ -15433,12 +15462,14 @@ static void draw_tex(const p_draw_tex *c) {
         q[4] = c->s.x0; q[5] = c->s.y0; q[6] = (float)t.width; q[7] = (float)t.height;
         MTL4RenderPassDescriptor *rp = [MTL4RenderPassDescriptor new]; MTLRenderPassColorAttachmentDescriptor *a = rp.colorAttachments[0];
         a.texture = d; a.level = lv; a.slice = sl; a.loadAction = MTLLoadActionLoad; a.storeAction = MTLStoreActionStore;
+        if (g_blit) { enc_b_end(g_blit); g_blit = nil; }   // (a fill or the previous target's copies, above)
         ser_gate(); id<MTL4RenderCommandEncoder> en = enc_r_begin(rp);
         [en setArgumentTable:at atStages:MTLRenderStageFragment];
         [at setTexture:t.gpuResourceID atIndex:0]; [at setSamplerState:ss.gpuResourceID atIndex:0]; at_addr(at, pb.gpuAddress + po, 0, "draw texture table slot", 0);
         [en setViewport:(MTLViewport){0, 0, tw, th, 0, 1}];
         [en setScissorRect:(MTLScissorRect){sx, sy, ex - sx, ey - sy}];
         [en setRenderPipelineState:ps]; [en drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3]; enc_r_end(en);
+        { NVNcopyRegion rr = {(int)sx, (int)sy, 0, (int)(ex - sx), (int)(ey - sy), 1}; gsb_store(rt, d, (unsigned)lv, (unsigned)sl, 1, &rr); if (paired) bcp_after_to(rt, &pair, (unsigned)lv, &rr); }
         PD("T %llu draw texture id %d → target %d ser=%llu region %g,%g..%g,%g from %g,%g..%g,%g", g_stat_pass, (int)(c->h & 0xfffff), k, (unsigned long long)rt->serial, c->d.x0, c->d.y0, c->d.x1, c->d.y1, c->s.x0, c->s.y0, c->s.x1, c->s.y1);
         { static int once; if (!once++) MLOG("DrawTexture: first case %gx%g texels of a %lux%lu texture (format %lu) → %gx%g pixels of target %d (%lux%lu, format %lu)", c->s.x1 - c->s.x0, c->s.y1 - c->s.y0,
                                             (unsigned long)t.width, (unsigned long)t.height, (unsigned long)t.pixelFormat, dw, dh, k, (unsigned long)tw, (unsigned long)th, (unsigned long)d.pixelFormat); }
@@ -15449,16 +15480,19 @@ static void draw_tex(const p_draw_tex *c) {
 // On the Switch a 2D texture of 8- or 16-byte texels, made at a BC texture's storage with its size in 4x4 blocks, is that texture's blocks: a write through either is a write of
 // both. Here every NVN texture has a Metal texture of its own, and Metal can neither view a compressed format as an uncompressed one nor place the two formats' textures over the
 // same bytes with a known layout, so the host keeps a pair's two textures equal by GPU copies, through a staging buffer (a blit copies between a buffer and either, not between the
-// two). The pair is found through the registrations by storage address (g_bcp_idx); each GPU write of one side, a texture or buffer copy, an image store of a dispatch or a draw,
-// or a render target (a compressed one is drawn through its shadow, bcrt_attach), is copied into the other side after it: at once for a copy, at the end of the dispatch or of the
-// render pass for the rest (bcp_flush). Before a side is written, it is first filled from the other side when that one has a texture and the two have not been made equal since
-// either texture was made (bcp_synced), so a write of a part of it keeps the rest. The compressed side is made when the uncompressed one is written (it is the side shaders sample);
-// an uncompressed side follows only once it has a texture, and a copy into one that has none goes into the compressed texture instead and leaves it none (bc_alias_copy).
+// two). The pair is found through the registrations by storage address (g_bcp_idx). Every GPU write of a side goes into the other side's texture after it: a texture or buffer
+// copy, a texture clear and a scissored zero clear at once; an image store of a dispatch or a draw (image_prepare: the image bindings the host binds), a render target (a compressed
+// one is drawn through its shadow, bcrt_attach) and DrawTexture when the dispatch or the pass has ended (bcp_flush). Before a side is written, it is first filled from the other
+// side when that one has a texture and the two have not been made equal since either texture was made (bcp_synced), so a write of a part of it keeps the rest. A side made as a GPU
+// texture while the other one has a texture is filled from it (bcp_up_fill), and the CPU's bytes uploaded into a side from its storage go into the other side's texture
+// (bcp_up_follow), both in the upload batch. The copies go into storage the CPU can read too (gsb_store), as the host's other GPU writes do. The compressed side is made when the
+// uncompressed one is written (it is the side shaders sample); an uncompressed side follows only once it has a texture, and a copy into one that has none goes into the compressed
+// texture instead and leaves it none (bc_alias_copy).
 // Monster Jam Steel Titans 2 copies: Unreal's runtime virtual texture compresses 264x264 tiles to 66x66 RGBA32UI blocks in a compute shader and copies them into a 1386x1386
 // RGBA32UI texture at the storage of its 5544x5544 BC3 tile cache (31 MB it does not make); the arena floor was black. Mortal Kombat 11 stores: BC3CompressTexture's compute shader
-// writes 320x270 RGBA32UI blocks through an image over a 1280x1080 BC3 character portrait, which showed colourful static (PR #2802). Texture clears, CPU uploads and image stores
-// through handles the host does not resolve (image_prepare) are not followed, nor a read of an uncompressed side made after the compressed one's last write and not written since
-// (docs/reference/rendering.md). DM_NVN_BC_ALIAS=0 turns pairs off, for an A/B test
+// writes 320x270 RGBA32UI blocks through an image over a 1280x1080 BC3 character portrait, which showed colourful static (PR #2802). The fills in the upload batch take the other
+// side as the segments before left it: a side made and only read in the segment that wrote the other side reads the write before it (docs/reference/rendering.md). DM_NVN_BC_ALIAS=0
+// turns pairs off, for an A/B test
 static int bcp_on(void) {
     static int on = -1;
     if (on < 0) { const char *e = getenv("DM_NVN_BC_ALIAS"); on = !(e && !strcmp(e, "0")); if (!on) MLOG("DM_NVN_BC_ALIAS=0: textures aliasing compressed ones are written alone (diagnostic)"); }
@@ -15477,35 +15511,40 @@ static int bcp_match(const tex_t *a, int ka, const tex_t *b, int kb) {   // a (s
     const tex_t *bc = ka < 0 ? a : b, *u = ka < 0 ? b : a;
     return (bc->d.width + 3) / 4 == u->d.width && (bc->d.height + 3) / 4 == u->d.height;
 }
-// Storage address → the registration IDs of the textures there that can be a side (bcp_kind), kept by mtl_reg_tex as an ID changes texture. Under g_rmu. It replaced a walk of every
-// registration for each copy into a candidate, which image stores would have taken after every dispatch writing an 8- or 16-byte image
-typedef struct { uint32_t n, cap; int id[]; } bcp_cell;
+// Storage address → the registrations there that can be a side (bcp_kind): each one's ID and a copy of its texture, kept by mtl_reg_tex as an ID changes texture, and by treg_gone
+// and a registration made again as its pool's storage goes and comes back. It replaced a walk of every registration for each copy into a candidate, which image stores would have
+// taken after every dispatch writing an 8- or 16-byte image. Under its own leaf lock, so that a lookup needs no g_rmu: tex_mtl_ (a side made, bcp_up_fill) runs under g_rmu as often as not
+typedef struct { int id; tex_t t; } bcp_ent;
+typedef struct { uint32_t n, cap; bcp_ent e[]; } bcp_cell;
 static nvn_hmap g_bcp_idx = {.klen = sizeof(void *)};
-static void bcp_idx(int id_, const tex_t *t, int add) {   // caller holds g_rmu
+static os_unfair_lock g_bcp_lk = OS_UNFAIR_LOCK_INIT;
+static void bcp_idx(int id_, const tex_t *t, int add) {   // caller holds g_rmu (the registration's lock), and takes g_bcp_lk here
     if (!bcp_kind(t)) return;
-    const void *k = t->mem; bcp_cell *c = nvn_hm_get(&g_bcp_idx, &k);
-    uint32_t i = 0; if (c) while (i < c->n && c->id[i] != id_) i++;
+    const void *k = t->mem;
+    os_unfair_lock_lock(&g_bcp_lk);
+    bcp_cell *c = nvn_hm_get(&g_bcp_idx, &k);
+    uint32_t i = 0; if (c) while (i < c->n && c->e[i].id != id_) i++;
     if (add) {
-        if (c && i < c->n) return;
-        if (!c || c->n == c->cap) {
-            uint32_t cap = c ? c->cap * 2 : 2; bcp_cell *nc = realloc_or_die(c, sizeof *nc + cap * sizeof nc->id[0], "the compressed-alias index");
-            if (!c) nc->n = 0;
-            nc->cap = cap; c = nc; nvn_hm_put(&g_bcp_idx, &k, c);
+        if (!c || i == c->n) {
+            if (!c || c->n == c->cap) {
+                uint32_t cap = c ? c->cap * 2 : 2; bcp_cell *nc = realloc_or_die(c, sizeof *nc + cap * sizeof nc->e[0], "the compressed-alias index");
+                if (!c) nc->n = 0;
+                nc->cap = cap; c = nc; nvn_hm_put(&g_bcp_idx, &k, c);
+            }
+            i = c->n++;
         }
-        c->id[c->n++] = id_;
-    } else if (c && i < c->n) { c->id[i] = c->id[--c->n]; if (!c->n) { nvn_hm_del(&g_bcp_idx, &k); free(c); } }
+        c->e[i] = (bcp_ent){id_, *t};
+    } else if (c && i < c->n) { c->e[i] = c->e[--c->n]; if (!c->n) { nvn_hm_del(&g_bcp_idx, &k); free(c); } }
+    os_unfair_lock_unlock(&g_bcp_lk);
 }
-// The other side of t's pair as registered (*o): 1 when t has one. Takes g_rmu
+// The other side of t's pair as registered (*o): 1 when t has one. Takes g_bcp_lk only, so any thread may ask, holding g_rmu or not
 static int bcp_find(const tex_t *t, tex_t *o) {
     int k = bcp_kind(t); if (!k || !g_bcp_idx.n || !bcp_on()) return 0;
     int got = 0; const void *key = t->mem;
-    os_unfair_lock_lock(&g_rmu);
+    os_unfair_lock_lock(&g_bcp_lk);
     const bcp_cell *c = nvn_hm_get(&g_bcp_idx, &key);
-    for (uint32_t i = 0; c && i < c->n && !got; i++) {
-        const treg_t *r = &g_treg[c->id[i]];
-        if (r->ok && !r->gone && bcp_match(t, k, &r->t, bcp_kind(&r->t))) { *o = r->t; got = 1; }
-    }
-    os_unfair_lock_unlock(&g_rmu);
+    for (uint32_t i = 0; c && i < c->n && !got; i++) if (bcp_match(t, k, &c->e[i].t, bcp_kind(&c->e[i].t))) { *o = c->e[i].t; got = 1; }
+    os_unfair_lock_unlock(&g_bcp_lk);
     return got;
 }
 // The host texture a side already has, made by nothing: its serial's, else the shared or packaged one of its storage and description; the base texture of a view
@@ -15524,37 +15563,58 @@ static void bcp_mark(id<MTLTexture> a, id<MTLTexture> b) {
     objc_setAssociatedObject(a, &g_bcp_key, [NSValue valueWithPointer:(__bridge void *)b], OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     objc_setAssociatedObject(b, &g_bcp_key, [NSValue valueWithPointer:(__bridge void *)a], OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 }
-static uint64_t g_bc_alias_n, g_bcp_copies, g_bcp_fills;   // copies into an uncompressed side that went into the compressed texture; writes copied into the other side; sides filled before a write
-// Blocks [fx, fx + nx) x [fy, fy + ny) of level fl / layer fz of `from` into level tl / layer tz of `to` at block (tx, ty): one texture compressed (4x4 pixels a block), the other
-// one texel a block of the same size, clipped to both levels. In the copy encoder behind its barrier (blit), through a private staging buffer every copy reuses (blit orders each
-// after the one before), with the forms without options: deferred encoding (DM_NVN_ENC_THREAD, on by default on iOS) records only those (nvn_rec.h RO_C_COPY_TB / RO_C_COPY_BT);
-// with options it stopped the host. 0 when the two cannot be copied (formats, levels, no staging buffer), else 1, also when the region lies outside a level
-static int bcp_blocks(id<MTLTexture> from, unsigned fl, unsigned fz, NSUInteger fx, NSUInteger fy, NSUInteger nx, NSUInteger ny, id<MTLTexture> to, unsigned tl, unsigned tz, NSUInteger tx, NSUInteger ty) {
+static uint64_t g_bc_alias_n, g_bcp_copies, g_bcp_fills, g_bcp_ups;   // copies into an uncompressed side that went into the compressed texture; writes copied into the other side; sides filled before a write; upload-batch copies (bcp_up_blocks)
+// Blocks [fx, fx + nx) x [fy, fy + ny) of level fl of `from` going to level tl of `to` at block (tx, ty): one texture compressed (4x4 pixels a block), the other one texel a block of the
+// same size, clipped to both levels. 0 when the two cannot be copied (formats, levels); 1 with *g filled, g->img 0 when the region lies outside a level
+enum { BCP_WHOLE = 1 << 30 };   // a region's block count meaning "to the level's edge"
+typedef struct { MTLOrigin fo, too; MTLSize fs, ts; NSUInteger row, img; } bcp_geo;
+static int bcp_geom(id<MTLTexture> from, unsigned fl, NSUInteger fx, NSUInteger fy, NSUInteger nx, NSUInteger ny, id<MTLTexture> to, unsigned tl, NSUInteger tx, NSUInteger ty, bcp_geo *g) {
     int fc = mtl_fmt_block(from.pixelFormat), tc = mtl_fmt_block(to.pixelFormat);
     size_t tb = fc ? (size_t)bc_block_bytes(from.pixelFormat) : mtl_pf_bytes(from.pixelFormat);
     if (fc == tc || (tb != 8 && tb != 16) || tb != (tc ? (size_t)bc_block_bytes(to.pixelFormat) : mtl_pf_bytes(to.pixelFormat)) || mtl_fmt_depth(fc ? to.pixelFormat : from.pixelFormat)
         || fl >= from.mipmapLevelCount || tl >= to.mipmapLevelCount) return 0;
+    *g = (bcp_geo){0};
     NSUInteger fw = MAX(from.width >> fl, (NSUInteger)1), fh = MAX(from.height >> fl, (NSUInteger)1), tw = MAX(to.width >> tl, (NSUInteger)1), th = MAX(to.height >> tl, (NSUInteger)1);
     NSUInteger fbw = fc ? (fw + 3) / 4 : fw, fbh = fc ? (fh + 3) / 4 : fh, tbw = tc ? (tw + 3) / 4 : tw, tbh = tc ? (th + 3) / 4 : th;   // the levels in blocks
     if (fx >= fbw || fy >= fbh || tx >= tbw || ty >= tbh) return 1;
     nx = MIN(nx, MIN(fbw - fx, tbw - tx)); ny = MIN(ny, MIN(fbh - fy, tbh - ty));
     if (!nx || !ny) return 1;
-    NSUInteger row = nx * tb, img = row * ny;
-    static id<MTLBuffer> st;   // kept resident from copy to copy, replaced (deferred) by a larger one
-    if (!st || st.length < img) {
-        if (st) defer_obj_release(st);
-        st = [g_dev newBufferWithLength:img options:MTLResourceStorageModePrivate];
-        if (!st) { RED_ONCE(156, "compressed alias copy: no %#lx-byte staging buffer", (unsigned long)img); return 0; }
-        res_add(st);
-    }
-    MTLOrigin fo = fc ? MTLOriginMake(fx * 4, fy * 4, 0) : MTLOriginMake(fx, fy, 0), too = tc ? MTLOriginMake(tx * 4, ty * 4, 0) : MTLOriginMake(tx, ty, 0);
-    MTLSize fs = fc ? MTLSizeMake(MIN(nx * 4, fw - fx * 4), MIN(ny * 4, fh - fy * 4), 1) : MTLSizeMake(nx, ny, 1);   // a compressed region may end in a partial block only at the level's edge
-    MTLSize ts = tc ? MTLSizeMake(MIN(nx * 4, tw - tx * 4), MIN(ny * 4, th - ty * 4), 1) : MTLSizeMake(nx, ny, 1);
-    enc_b_copy_texture_buffer(blit(), from, fz, fl, fo, fs, st, 0, row, img);
-    enc_b_copy_buffer_texture(blit(), st, 0, row, img, ts, to, tz, tl, too);
+    g->row = nx * tb; g->img = g->row * ny;
+    g->fo = fc ? MTLOriginMake(fx * 4, fy * 4, 0) : MTLOriginMake(fx, fy, 0); g->too = tc ? MTLOriginMake(tx * 4, ty * 4, 0) : MTLOriginMake(tx, ty, 0);
+    g->fs = fc ? MTLSizeMake(MIN(nx * 4, fw - fx * 4), MIN(ny * 4, fh - fy * 4), 1) : MTLSizeMake(nx, ny, 1);   // a compressed region may end in a partial block only at the level's edge
+    g->ts = tc ? MTLSizeMake(MIN(nx * 4, tw - tx * 4), MIN(ny * 4, th - ty * 4), 1) : MTLSizeMake(nx, ny, 1);
     return 1;
 }
-enum { BCP_WHOLE = 1 << 30 };
+// The copy in the replay's own command order: in the copy encoder behind its barrier (blit), through a private staging buffer every copy reuses (blit orders each after the one before),
+// with the forms without options: deferred encoding (DM_NVN_ENC_THREAD, on by default on iOS) records only those (nvn_rec.h RO_C_COPY_TB / RO_C_COPY_BT); with options it stopped the
+// host. 0 when the two cannot be copied (bcp_geom, no staging buffer), else 1, also when the region lies outside a level
+static int bcp_blocks(id<MTLTexture> from, unsigned fl, unsigned fz, NSUInteger fx, NSUInteger fy, NSUInteger nx, NSUInteger ny, id<MTLTexture> to, unsigned tl, unsigned tz, NSUInteger tx, NSUInteger ty) {
+    bcp_geo g; if (!bcp_geom(from, fl, fx, fy, nx, ny, to, tl, tx, ty, &g)) return 0;
+    if (!g.img) return 1;
+    static id<MTLBuffer> st;   // kept resident from copy to copy, replaced (deferred) by a larger one
+    if (!st || st.length < g.img) {
+        if (st) defer_obj_release(st);
+        st = [g_dev newBufferWithLength:g.img options:MTLResourceStorageModePrivate];
+        if (!st) { RED_ONCE(156, "compressed alias copy: no %#lx-byte staging buffer", (unsigned long)g.img); return 0; }
+        res_add(st);
+    }
+    enc_b_copy_texture_buffer(blit(), from, fz, fl, g.fo, g.fs, st, 0, g.row, g.img);
+    enc_b_copy_buffer_texture(blit(), st, 0, g.row, g.img, g.ts, to, tz, tl, g.too);
+    return 1;
+}
+// The whole of level 0 of `from` into `to` in the upload batch, which the GPU runs before the replay's segment that follows (as a texture's fill from its storage, tex_init_fill):
+// a side made where no copy may be encoded in the replay's order (a texture binding resolved inside a render pass), and a side the CPU's bytes were uploaded into. Submit thread only
+static int bcp_up_blocks(id<MTLTexture> from, id<MTLTexture> to) {
+    if (!atomic_load(&g_sub_thread_set) || !on_sub_thread()) return 0;   // the upload batch belongs to the submit thread
+    bcp_geo g; if (!bcp_geom(from, 0, 0, 0, BCP_WHOLE, BCP_WHOLE, to, 0, 0, 0, &g) || !g.img) return 0;
+    up_begin(); size_t off = 0; id<MTLBuffer> sb = up_alloc(g.img, &off); up_begin();
+    up_t2b_add(from, 0, 0, g.fo, g.fs, sb, off, g.row, g.img);
+    up_blit_add_at(sb, off, g.row, g.img, g.ts, to, 0, 0, g.too); g_up_blits[g_nup_blits - 1].bar = 1;
+    [g_up_texs addObject:to];
+    if (!g_cb) up_flush();
+    g_bcp_ups++;
+    return 1;
+}
 // Before a GPU write of side t into its host texture m: m is filled from the other side's texture when they are not equal yet. 1 when t has a pair (*o its other side)
 static int bcp_before(const tex_t *t, id<MTLTexture> mt, tex_t *o) {
     if (!mt || !bcp_find(t, o)) return 0;
@@ -15583,15 +15643,40 @@ static void bcp_after_to(const tex_t *t, const tex_t *op, unsigned level, const 
         if (to_bc) { bx = (NSUInteger)r->xoffset; by = (NSUInteger)r->yoffset; nx = (NSUInteger)r->width; ny = (NSUInteger)r->height; }
         else { bx = (NSUInteger)r->xoffset / 4; by = (NSUInteger)r->yoffset / 4; nx = ((NSUInteger)r->xoffset + r->width + 3) / 4 - bx; ny = ((NSUInteger)r->yoffset + r->height + 3) / 4 - by; }
     }
-    int was = bcp_synced(m, om);
-    if (!bcp_blocks(m, level, 0, bx, by, nx, ny, om, level, 0, bx, by)) return;
+    int was = bcp_synced(m, om); bcp_geo g;
+    if (!bcp_geom(m, level, bx, by, nx, ny, om, level, bx, by, &g) || !bcp_blocks(m, level, 0, bx, by, nx, ny, om, level, 0, bx, by)) return;
     if (was || (!r && !level)) bcp_mark(m, om);   // a whole level 0 makes them equal; a part keeps them as they were
+    // Into storage the CPU can read, as every GPU write the host stores there (gsb_store): a write through the other side that is not stored itself (an image store) reaches the
+    // storage this way, and a compressed side taken from its storage, re-uploaded when the CPU writes nearby, keeps it (gsb_held, mtl_tex_cpu_rewritten)
+    if (g.img) gsb_store(&o, om, level, 0, 1, &(NVNcopyRegion){(int)g.too.x, (int)g.too.y, 0, (int)g.ts.width, (int)g.ts.height, 1});
     if (!g_bcp_copies++) MLOG("compressed alias: a GPU write of ser=%llu (%ux%u format %#x) goes into ser=%llu (%ux%u format %#x), level %u%s", (unsigned long long)t->serial, t->d.width, t->d.height,
                               t->d.format, (unsigned long long)o.serial, o.d.width, o.d.height, o.d.format, level, r ? "" : ", whole");
     PD("t compressed alias: ser=%llu → ser=%llu level %u blocks %lu,%lu size %lux%lu", (unsigned long long)t->serial, (unsigned long long)o.serial, level, (unsigned long)bx, (unsigned long)by,
        (unsigned long)MIN(nx, (NSUInteger)99999), (unsigned long)MIN(ny, (NSUInteger)99999));
 }
 static void bcp_after(const tex_t *t, unsigned level, const NVNcopyRegion *r) { tex_t o; if (bcp_find(t, &o)) bcp_after_to(t, &o, level, r); }
+// A side's host texture just made as a GPU texture (tex_mtl_, before its fill from storage or zeros): filled from the other side's texture when that one has one, as the storage
+// holds those bytes on the console. A side made where no copy may run in the replay's order (a texture binding resolved for a draw inside a render pass) and read before its first
+// write saw what it was made with. The fill runs in the upload batch, so it takes the other side as the segments before this one left it; a write of the other side earlier in
+// the same segment is not in it. Not marked equal for that reason: the side's first write fills it again in the replay's order (bcp_before)
+static int bcp_up_fill(const tex_t *t, id<MTLTexture> mt) {
+    tex_t o; if (!mt || !bcp_find(t, &o)) return 0;
+    id<MTLTexture> om = bcp_have(&o), m = mt; while (m.parentTexture) m = m.parentTexture;
+    if (!om || om == m || !bcp_up_blocks(om, m)) return 0;
+    static int nl; if (nl++ < 4) MLOG("compressed alias: ser=%llu (%ux%u format %#x) made after ser=%llu (%ux%u format %#x): filled from it in the upload batch", (unsigned long long)t->serial,
+                                    t->d.width, t->d.height, t->d.format, (unsigned long long)o.serial, o.d.width, o.d.height, o.d.format);
+    return 1;
+}
+// A side the CPU's bytes were uploaded into from its storage (a packaged texture, at its first use or after the CPU wrote its pages): the other side's texture, when it has one,
+// takes them too, in the same upload batch. On the console the CPU's write is a write of both; an uncompressed side the shaders write is a GPU texture, never taken from its
+// storage (tex_storage_ok), and kept its old bytes
+static void bcp_up_follow(const tex_t *t, id<MTLTexture> mt) {
+    tex_t o; if (!mt || !bcp_find(t, &o)) return;
+    id<MTLTexture> om = bcp_have(&o), m = mt; while (m.parentTexture) m = m.parentTexture;
+    if (!om || om == m || !bcp_up_blocks(m, om)) return;
+    static int nl; if (nl++ < 4) MLOG("compressed alias: the CPU's bytes uploaded into ser=%llu (%ux%u format %#x) go into ser=%llu (%ux%u format %#x) in the upload batch", (unsigned long long)t->serial,
+                                    t->d.width, t->d.height, t->d.format, (unsigned long long)o.serial, o.d.width, o.d.height, o.d.format);
+}
 // Writes that land later in command order: image stores of a dispatch or a draw, render targets. Each side is filled before (bcp_before), and copied into the other side when the
 // dispatch or the render pass has ended (bcp_flush from dispatch and rp_end_at), once however often the pass wrote it
 enum { BCP_PEND = 16 };
@@ -15616,7 +15701,10 @@ static int bc_alias_copy(const p_copy_t2t *c, id<MTLTexture> s, unsigned sl, uns
         || c->dr.xoffset < 0 || c->dr.yoffset < 0) return 0;
     if (bcp_kind(dt) <= 0 || !bcp_find(dt, &o) || bcp_have(dt)) return 0;   // an uncompressed side with a texture takes the copy, and its pair follows (bcp_after)
     id<MTLTexture> bc = tex_mtl(&o); while (bc.parentTexture) bc = bc.parentTexture;
-    if (!bc || !bcp_blocks(s, sl, sz0, (NSUInteger)c->sr.xoffset, (NSUInteger)c->sr.yoffset, (NSUInteger)c->sr.width, (NSUInteger)c->sr.height, bc, dl, 0, (NSUInteger)c->dr.xoffset, (NSUInteger)c->dr.yoffset)) return 0;
+    bcp_geo g;
+    if (!bc || !bcp_geom(s, sl, (NSUInteger)c->sr.xoffset, (NSUInteger)c->sr.yoffset, (NSUInteger)c->sr.width, (NSUInteger)c->sr.height, bc, dl, (NSUInteger)c->dr.xoffset, (NSUInteger)c->dr.yoffset, &g)
+        || !bcp_blocks(s, sl, sz0, (NSUInteger)c->sr.xoffset, (NSUInteger)c->sr.yoffset, (NSUInteger)c->sr.width, (NSUInteger)c->sr.height, bc, dl, 0, (NSUInteger)c->dr.xoffset, (NSUInteger)c->dr.yoffset)) return 0;
+    if (g.img) gsb_store(&o, bc, dl, 0, 1, &(NVNcopyRegion){(int)g.too.x, (int)g.too.y, 0, (int)g.ts.width, (int)g.ts.height, 1});   // into storage the CPU can read, as copy_t2t stores its destination
     if (!g_bc_alias_n++) MLOG("texture copy into a texture aliasing a compressed one: %dx%d texels of Metal format %lu (serial %llu) go into blocks %d,%d of compressed serial %llu (format %lu, level %u)",
                               c->sr.width, c->sr.height, (unsigned long)s.pixelFormat, (unsigned long long)dt->serial, c->dr.xoffset, c->dr.yoffset, (unsigned long long)o.serial, (unsigned long)bc.pixelFormat, dl);
     PD("t compressed alias: dst=%llu → ser=%llu at blocks %d,%d size %dx%d", dt->serial, o.serial, c->dr.xoffset, c->dr.yoffset, c->sr.width, c->sr.height);
@@ -15891,6 +15979,7 @@ static unsigned mtl_pf_chmask(MTLPixelFormat pf) {
 static void clear_tex_tri(id<MTLTexture> t, unsigned lv, unsigned l0, const p_clear_tex *c);
 static void clear_tex(const p_clear_tex *c) {
     id<MTLTexture> t = tex_mtl_all(c->tex); sparse_gpu_wrote(c->tex); tu_wrote(t);
+    tex_t pair; int paired = t && bcp_before(c->tex, t, &pair);   // a side of a compressed-alias pair: filled first, the cleared region goes into its other side after
     PD("X ser=%llu view format %#x region %d,%d,%d %dx%dx%d mask %#x %s %g,%g,%g,%g", c->tex ? c->tex->serial : 0ull, c->has_view && c->view.set_format ? c->view.format : -1, c->r.xoffset, c->r.yoffset, c->r.zoffset, c->r.width, c->r.height, c->r.depth, c->mask,
        c->is_uint ? "ui" : "f", c->is_uint ? (double)c->c.u[0] : c->c.f[0], c->is_uint ? (double)c->c.u[1] : c->c.f[1], c->is_uint ? (double)c->c.u[2] : c->c.f[2], c->is_uint ? (double)c->c.u[3] : c->c.f[3]);
     if (!t) return;
@@ -15917,6 +16006,7 @@ static void clear_tex(const p_clear_tex *c) {
         if (!depth && !stencil && (t.usage & MTLTextureUsageRenderTarget)) {
             clear_tex_tri(t, lv, l0, c);
             gsb_store(c->tex, whole, lv, (is3d ? 0 : l0) + (unsigned)c->r.zoffset, (unsigned)nz, &c->r);   // the clear writes the storage too, as a render pass does (rt_mirror_flush)
+            if (paired) bcp_after_to(c->tex, &pair, lv, &c->r);
             return;
         }
         RED_ONCE(44, "texture clear case not implemented: region %d,%d %dx%d (level size %lux%lu) mask %#x render-target capable %d (format %#x flags %#x)", c->r.xoffset, c->r.yoffset, c->r.width, c->r.height,
@@ -15938,6 +16028,7 @@ static void clear_tex(const p_clear_tex *c) {
     }
     if (depth || stencil) return;
     gsb_store(c->tex, whole, lv, (is3d ? 0 : l0) + (unsigned)c->r.zoffset, (unsigned)nz, &c->r);
+    if (paired) bcp_after_to(c->tex, &pair, lv, &c->r);
 }
 
 // Context description of one submit (mtl_sub_commit takes one per submit and prints it into the failure line when the command buffer errors): for the GPU memory fault on the first frame entering Travincal, the failure line had only the sequence number and error code, and it was impossible to tell what was in that submit

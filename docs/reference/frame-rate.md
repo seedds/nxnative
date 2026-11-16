@@ -719,8 +719,9 @@ Frame pacing: the host's frame step, engine frame limiters, present intervals an
 
 - **Symptom:** the submit thread's CPU samples dominated by `mtl_addr` / `mtl_gpu_addr` (vertex buffers in `draw`, uniform buffers in `encode_args`).
 - **Cause:** with many memory pools alive, the lookups scanned them all for every buffer binding of every draw.
-- **Fix:** they try the last hit, then a binary search over pools sorted by start address (`pool_find`, rebuilt when pools are added or removed).
+- **Fix:** they try the last hit, then a binary search over pools sorted by start address (`pool_find`). The index (`g_pidx`, with each entry's start address beside it in `g_pidx_lo` so the search reads one array) stays sorted in place as ordinary pools and chunks of large pools come and go (`pidx_add`, `pidx_drop`). Registering or removing a large pool still marks it stale, and the next lookup sorts it again (`pidx_sort`).
 - **Found on:** [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md): about 1,760 memory pools alive; a CPU sample of the submit thread had about 1,000 of its samples under those scans. Host submit time in the shrine went from 21 ms to 7 ms per frame (p50), the median frame from 38 ms to 21 ms.
+- **Found on:** [Mario Kart World](../../dm/games/0400C3F00006E000/README.md), for the index kept in place: about 5,000 entries alive in a race and several pools added or freed each frame, so the rebuilt index was sorted again about 0.8 times a frame. In a CPU sample of the replay thread in the race (M3 Max, handheld, uncapped), `pidx_sort` took 2.3 % of its busy time and `pool_held` 4.2 %; with the index kept in place, `pidx_sort` no longer appears and `pool_held` takes 1.3 %.
 
 ### Argument blocks encoded again when only a uniform buffer moved
 

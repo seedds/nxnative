@@ -767,6 +767,7 @@ void bf_want_note(const char *key) { want_note(&g_bf_want, key); }
 enum { REACH_WHOLE, REACH_END, REACH_SHORT };
 typedef struct { uintptr_t lo, hi; uintptr_t base; __unsafe_unretained id<MTLBuffer> buf; uint64_t gpu; const void *key; int res; uint64_t born; uintptr_t end; int reach; uint32_t n_tex_reads, n_other; } pool_ent;   // res: already in the residency set (on demand, see pool_res); born: when it was added (ns); end: where the buffer ends, reach: how far that is (a large pool's chunk, see BIG_MIN); n_tex_reads / n_other: lookups by texture uploads / by anything else (mem_census)
 static pool_ent *g_pools; static int g_npool, g_cap;
+static void pidx_add(int idx); static void pidx_drop(int idx, int last);   // the address index kept sorted as entries come and go (pidx_sort)
 static int g_pidx_ok, g_plast = -1;   // whether the address→pool index is valid, the last hit (pool_find)
 static NSMutableArray *g_keep;                  // Holds the buffer references (pool_ent has non-owning pointers)
 static void as_drop_pool(const void *pool);   // caller holds g_mu, shared with AS registration
@@ -917,28 +918,30 @@ uint64_t dm_mtl_l3_sample(uint32_t tick) {
 
 // No-copy buffers of finalized pools (weak references, under g_mu): the memory report counts how many are still alive and their length -- a buffer that outlives its pool is still strongly referenced by something else (a texture built directly on the pool, etc.)
 static NSHashTable *g_dead_pools;
-// Address → pool cache per thread (mtl_addr / mtl_gpu_addr), valid while g_pool_gen is unchanged (every pool add / removal bumps it under g_mu), holding only pools already in the residency set.
-// Every buffer binding of every draw used to take g_mu, which game threads creating pools and the GPU completion handler also take, and search the pool index. Two levels: a table direct-mapped
-// by 4 KB page, then the last 8 pools found, which also fill the table. Breath of the Wild binds from more pools a frame than 8 entries alone could hold (about 2300 of its 21000 lookups a frame
-// took the lock), and its uniform rings move to a new page every few draws (the table alone missed as often)
-enum { PC_BITS = 10, PC_RECENT = 8 };
+// Address → pool cache per thread (mtl_addr / mtl_gpu_addr), holding only pools already in the residency set; an entry counts only at the pool generation it was made at (g_pool_gen:
+// every pool add / removal bumps it under g_mu), so a new generation needs no clearing of the table. Every buffer binding of every draw used to take g_mu, which game threads creating
+// pools and the GPU completion handler also take, and search the pool index. Two levels: a table direct-mapped by 4 KB page, then the last PC_RECENT pools found, which also fill the
+// table. Breath of the Wild binds from more pools a frame than 8 entries alone could hold, and its uniform rings move to a new page every few draws (the table alone missed as often).
+// Mario Kart World's race missed about 9 % of its lookups with 1024 pages and 8 recent pools, each miss a lock and a search of its 5,000 pools: with 4096 pages and 32 recent, 2.3 %, and the
+// replay's CPU time a frame about 4 % less (in-run A/B, M3 Max), though the table no longer fits the L1 cache; 1024 pages with 32 recent missed 4.9 %, and a ring of 256 entries named
+// from a byte table 5.6 % (a race frame looks up more pools than that)
+enum { PC_BITS = 12, PC_RECENT = 32 };
 static _Atomic uint64_t g_pool_gen = 1;
-typedef struct { uintptr_t lo, hi, base; __unsafe_unretained id<MTLBuffer> buf; uint64_t gpu; uintptr_t end; int reach; } pc_ent;
-static __thread struct { uint64_t gen; unsigned next; pc_ent r[PC_RECENT], e[1u << PC_BITS]; } t_pc;   // an empty entry has hi 0
+typedef struct { uintptr_t lo, hi, base; __unsafe_unretained id<MTLBuffer> buf; uint64_t gpu, gen; uintptr_t end; int reach; } pc_ent;
+static __thread struct { unsigned next; pc_ent r[PC_RECENT], e[1u << PC_BITS]; } t_pc;   // an empty entry has gen 0
 static inline unsigned pc_slot(uint64_t addr) { return (unsigned)(((addr >> 12) * 0x9E3779B97F4A7C15ull) >> (64 - PC_BITS)); }
 // A lookup of unknown length (1) may read on to its pool's end, so a chunk short of it does not answer one: big_lookup gives it the whole pool
 static inline int pc_holds(const pc_ent *c, uint64_t addr, uint64_t len) { return len > 1 ? addr + len <= c->end : c->reach != REACH_SHORT; }
 static inline const pc_ent *pc_get(uint64_t addr, uint64_t len) {
-    if (t_pc.gen != atomic_load_explicit(&g_pool_gen, memory_order_acquire)) return NULL;
+    uint64_t g = atomic_load_explicit(&g_pool_gen, memory_order_acquire);
     pc_ent *c = &t_pc.e[pc_slot(addr)];
-    if (addr >= c->lo && addr < c->hi && pc_holds(c, addr, len)) return c;
-    for (unsigned k = 0; k < PC_RECENT; k++) { const pc_ent *x = &t_pc.r[k]; if (addr >= x->lo && addr < x->hi && pc_holds(x, addr, len)) { *c = *x; return c; } }
+    if (c->gen == g && addr >= c->lo && addr < c->hi && pc_holds(c, addr, len)) return c;
+    for (unsigned k = 0; k < PC_RECENT; k++) { const pc_ent *x = &t_pc.r[k]; if (x->gen == g && addr >= x->lo && addr < x->hi && pc_holds(x, addr, len)) { *c = *x; return c; } }
     return NULL;
 }
 static void pc_put(int i, uint64_t addr) {   // caller holds g_mu, pool i is resident and holds addr
     uint64_t gen = atomic_load_explicit(&g_pool_gen, memory_order_relaxed);
-    if (t_pc.gen != gen) { memset(t_pc.r, 0, sizeof t_pc.r); memset(t_pc.e, 0, sizeof t_pc.e); t_pc.gen = gen; }
-    pc_ent c = {g_pools[i].lo, g_pools[i].hi, g_pools[i].base, g_pools[i].buf, g_pools[i].gpu, g_pools[i].end, g_pools[i].reach};
+    pc_ent c = {g_pools[i].lo, g_pools[i].hi, g_pools[i].base, g_pools[i].buf, g_pools[i].gpu, gen, g_pools[i].end, g_pools[i].reach};
     t_pc.e[pc_slot(addr)] = c; t_pc.r[t_pc.next++ % PC_RECENT] = c;
 }
 static _Atomic uint64_t g_reg_gen = 1;   // Change generation of memory pool / texture / sampler registration: one of the invalidation conditions for argument buffer reuse
@@ -1048,8 +1051,8 @@ static void pool_new_put(pool_new *n) {   // caller holds g_mu
         return;
     }
     if (g_npool == g_cap) { g_cap = g_cap ? g_cap * 2 : 64; g_pools = realloc_or_die(g_pools, g_cap * sizeof *g_pools, "the memory pool table"); }
-    g_pidx_ok = 0; g_plast = -1; atomic_fetch_add(&g_pool_gen, 1);   // the address index and the per-thread caches are invalid (pool_find, pc_get)
-    g_pools[g_npool++] = (pool_ent){n->lo, n->hi, n->a, n->buf, n->buf.gpuAddress, n->mem, 0, clock_gettime_nsec_np(CLOCK_MONOTONIC), n->hi, REACH_END};   // not in the residency set yet: put in the first time it is addressed (pool_res)
+    g_plast = -1; atomic_fetch_add(&g_pool_gen, 1);   // the per-thread caches are invalid (pool_find, pc_get); the address index takes the entry below
+    g_pools[g_npool++] = (pool_ent){n->lo, n->hi, n->a, n->buf, n->buf.gpuAddress, n->mem, 0, clock_gettime_nsec_np(CLOCK_MONOTONIC), n->hi, REACH_END}; pidx_add(g_npool - 1);   // not in the residency set yet: put in the first time it is addressed (pool_res)
     g_pool_adds++;
     [g_keep addObject:n->buf];
 }
@@ -1076,7 +1079,7 @@ static void pool_take_out(const void *mem, NSMutableArray<id<MTLBuffer>> *gone) 
     for (int i = 0; i < g_npool; i++)
         if (g_pools[i].key == mem) { id<MTLBuffer> b = g_pools[i].buf; [g_keep removeObject:b]; [gone addObject:b]; if (g_pools[i].res) g_pool_res_n--;
             if (!g_dead_pools) g_dead_pools = [NSHashTable weakObjectsHashTable];
-            [g_dead_pools addObject:b]; g_pools[i] = g_pools[--g_npool]; g_pidx_ok = 0; g_plast = -1; atomic_fetch_add(&g_pool_gen, 1);
+            [g_dead_pools addObject:b]; pidx_drop(i, g_npool - 1); g_pools[i] = g_pools[--g_npool]; g_plast = -1; atomic_fetch_add(&g_pool_gen, 1);
             if (i < g_npool) big_moved(i);   // the entry moved into this place
             if (bg < 0) break;   // a large pool has an entry per chunk
             i--; }
@@ -1130,20 +1133,45 @@ void mtl_pool_replace(const void *const *del, int ndel, const void *const *add, 
 
 // Address → pool: the last hit first, then a binary search over indices sorted by start address, and a full linear scan only when that fails (pools overlapping).
 // The Legend of Zelda: Breath of the Wild keeps about 1760 memory pools alive and every buffer binding of every draw looks one up; the old full scan took about 4% of the submit thread's samples (mtl_gpu_addr 222 / 6 s). Adding / removing pools invalidates the index, which is re-sorted when next used. Caller holds g_mu
-static int *g_pidx; static int g_pidx_cap;
+static int *g_pidx; static int g_pidx_cap; static uintptr_t *g_pidx_lo;   // g_pidx_lo[k]: the start of entry g_pidx[k], beside it so the search reads one array
 static int pidx_cmp(const void *a, const void *b) { uintptr_t x = g_pools[*(const int *)a].lo, y = g_pools[*(const int *)b].lo; return x < y ? -1 : x > y; }
+static int g_pidx_n;   // entries in g_pidx: g_npool while the index is valid
 static void pidx_sort(void) {
     if (g_pidx_ok) return;
-    if (g_pidx_cap < g_npool) { g_pidx_cap = g_npool * 2; g_pidx = realloc_or_die(g_pidx, (size_t)g_pidx_cap * sizeof *g_pidx, "the memory pool index"); }
+    if (g_pidx_cap < g_npool) { g_pidx_cap = g_npool * 2; g_pidx = realloc_or_die(g_pidx, (size_t)g_pidx_cap * sizeof *g_pidx, "the memory pool index"); g_pidx_lo = realloc_or_die(g_pidx_lo, (size_t)g_pidx_cap * sizeof *g_pidx_lo, "the memory pool index"); }
     for (int i = 0; i < g_npool; i++) g_pidx[i] = i;
-    qsort(g_pidx, (size_t)g_npool, sizeof *g_pidx, pidx_cmp); g_pidx_ok = 1;
+    qsort(g_pidx, (size_t)g_npool, sizeof *g_pidx, pidx_cmp); g_pidx_ok = 1; g_pidx_n = g_npool;
+    for (int k = 0; k < g_npool; k++) g_pidx_lo[k] = g_pools[g_pidx[k]].lo;
+}
+// Mario Kart World keeps about 5,000 pools and adds about five and frees about three a frame: a full sort at each change was 0.8 sorts a frame on the replay thread. A valid index
+// now takes each change in place (caller holds g_mu): a binary search and a move of the entries after it. Entries keep their start address, so their order does not change
+static int pidx_pos(int idx) {   // where entry idx is in the index, -1 if not there
+    uintptr_t lo = g_pools[idx].lo; int l = 0, h = g_pidx_n;
+    while (l < h) { int m = (l + h) / 2; if (g_pidx_lo[m] < lo) l = m + 1; else h = m; }
+    for (int k = l; k < g_pidx_n && g_pidx_lo[k] == lo; k++) if (g_pidx[k] == idx) return k;
+    return -1;
+}
+static void pidx_add(int idx) {   // entry idx was just appended
+    if (!g_pidx_ok) return;
+    if (g_pidx_n != idx) { g_pidx_ok = 0; return; }
+    if (g_pidx_cap < g_npool) { g_pidx_cap = g_npool * 2; g_pidx = realloc_or_die(g_pidx, (size_t)g_pidx_cap * sizeof *g_pidx, "the memory pool index"); g_pidx_lo = realloc_or_die(g_pidx_lo, (size_t)g_pidx_cap * sizeof *g_pidx_lo, "the memory pool index"); }
+    uintptr_t lo = g_pools[idx].lo; int l = 0, h = g_pidx_n;
+    while (l < h) { int m = (l + h) / 2; if (g_pidx_lo[m] <= lo) l = m + 1; else h = m; }
+    memmove(g_pidx + l + 1, g_pidx + l, (size_t)(g_pidx_n - l) * sizeof *g_pidx); memmove(g_pidx_lo + l + 1, g_pidx_lo + l, (size_t)(g_pidx_n - l) * sizeof *g_pidx_lo);
+    g_pidx[l] = idx; g_pidx_lo[l] = lo; g_pidx_n++;
+}
+static void pidx_drop(int idx, int last) {   // before g_pools[idx] = g_pools[last] and g_npool = last: entry idx leaves, entry last becomes idx
+    if (!g_pidx_ok) return;
+    int p = pidx_pos(idx); if (p < 0) { g_pidx_ok = 0; return; }
+    memmove(g_pidx + p, g_pidx + p + 1, (size_t)(g_pidx_n - p - 1) * sizeof *g_pidx); memmove(g_pidx_lo + p, g_pidx_lo + p + 1, (size_t)(g_pidx_n - p - 1) * sizeof *g_pidx_lo); g_pidx_n--;
+    if (last != idx) { int q = pidx_pos(last); if (q < 0) { g_pidx_ok = 0; return; } g_pidx[q] = idx; }
 }
 static int big_new(big_pool *b, uintptr_t lo, uintptr_t hi, uintptr_t end, int reach) {   // caller holds g_mu: a new entry for [lo, end) of the pool, looked up for addresses in [lo, hi)
     id<MTLBuffer> buf = pool_buf(lo, end);
     if (!buf) { MLOG("[RED] memory pool %p: the zero-copy buffer over %#lx..%#lx was refused", b->mem, (unsigned long)lo, (unsigned long)end); return -1; }
     if (g_npool == g_cap) { g_cap = g_cap ? g_cap * 2 : 64; g_pools = realloc_or_die(g_pools, g_cap * sizeof *g_pools, "the memory pool table"); }
-    g_pidx_ok = 0; atomic_fetch_add(&g_pool_gen, 1);
-    g_pools[g_npool++] = (pool_ent){lo < b->lo ? b->lo : lo, hi > b->hi ? b->hi : hi, lo, buf, buf.gpuAddress, b->mem, 0, clock_gettime_nsec_np(CLOCK_MONOTONIC), end > b->hi ? b->hi : end, reach};
+    atomic_fetch_add(&g_pool_gen, 1);
+    g_pools[g_npool++] = (pool_ent){lo < b->lo ? b->lo : lo, hi > b->hi ? b->hi : hi, lo, buf, buf.gpuAddress, b->mem, 0, clock_gettime_nsec_np(CLOCK_MONOTONIC), end > b->hi ? b->hi : end, reach}; pidx_add(g_npool - 1);
     [g_keep addObject:buf];
     return g_npool - 1;
 }
@@ -1170,7 +1198,7 @@ static int big_lookup(big_pool *b, uint64_t addr, uint64_t len) {
     int n = big_new(b, lo, lo + BIG_S, end, end >= b->b ? REACH_END : REACH_SHORT); if (n < 0) return -1;
     if (i >= 0) {   // lengthened: what is encoded with the shorter chunk keeps it, resident, until the pool goes
         [b->old addObject:g_pools[i].buf]; [g_keep removeObject:g_pools[i].buf]; g_pools[n].res = 0; if (g_pools[i].res) g_pool_res_n--;
-        g_pools[i] = g_pools[n]; g_npool--; n = i;
+        pidx_drop(n, n); g_pools[i] = g_pools[n]; g_npool--; n = i;   // the new entry (the last) leaves the index; i keeps its chunk's start, so its place
     }
     b->chunk[k] = n + 1;
     return n;
@@ -1179,7 +1207,7 @@ static int pool_held(uint64_t addr, uint64_t len) {   // the entry of g_pools ho
     if (g_plast >= 0 && g_plast < g_npool && addr >= g_pools[g_plast].lo && addr + len <= g_pools[g_plast].hi) return g_plast;
     pidx_sort();
     int lo = 0, hi = g_npool - 1, hit = -1;   // the last one whose start ≤ addr
-    while (lo <= hi) { int m = (lo + hi) / 2; if (g_pools[g_pidx[m]].lo <= addr) { hit = m; lo = m + 1; } else hi = m - 1; }
+    while (lo <= hi) { int m = (lo + hi) / 2; if (g_pidx_lo[m] <= addr) { hit = m; lo = m + 1; } else hi = m - 1; }
     if (hit >= 0 && addr + len <= g_pools[g_pidx[hit]].hi) return g_plast = g_pidx[hit];
     for (int i = 0; i < g_npool; i++) if (addr >= g_pools[i].lo && addr + len <= g_pools[i].hi) return g_plast = i;
     return -1;

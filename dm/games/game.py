@@ -214,6 +214,10 @@ def header_one(g):
     if pl == 'touch' and om != 'handheld': sys.exit(f'{g.id}: pad_layout touch needs op_mode handheld (the touch screen reaches the game only in handheld mode)')
     pm = g.get('perf_mode', 'follow')   # the performance mode reported (hle_oe.c): follow = the operation mode's (Boost docked, Normal handheld), boost = Boost always
     if pm not in ('follow', 'boost'): sys.exit(f'{g.id}: perf_mode must be follow or boost: {pm}')
+    tp = g.get('touch_panel', '1280x720')   # the touch screen's coordinate range the game reads (hle_touch.c): 1280x720 as on hardware; a game whose touch reader follows its draw size
+    # under perf_mode boost in handheld (Cytus α: 1920x1080 drawn, touches taken against it) gets that size
+    if not re.fullmatch(r'[1-9]\d{2,3}x[1-9]\d{2,3}', tp): sys.exit(f'{g.id}: touch_panel must be <width>x<height>: {tp}')
+    tpw, tph = map(int, tp.split('x'))
     dmo = g.get('depth_mode', 'gl')   # the NVN depth mode the game sets, for the pipeline archive made offline (dm/gfx/tools/pso_offline.py; the host follows the game at run time): gl / zero
     if dmo not in ('gl', 'zero'): sys.exit(f'{g.id}: depth_mode must be gl or zero: {dmo}')
     api = g.get('device_api', '55.15')   # the NVN API major.minor version nvnDeviceGetInteger reports (hle_nvn.c)
@@ -257,6 +261,7 @@ def header_one(g):
          f'#define DM_GAME_PAD_LAYOUT {("simple", "full", "touch").index(pl)}',
          f'#define DM_GAME_OPMODE {int(om == "console")}',
          f'#define DM_GAME_PERF_BOOST {int(pm == "boost")}',
+         f'#define DM_GAME_TOUCH_W {tpw}', f'#define DM_GAME_TOUCH_H {tph}',
          f'#define DM_GAME_TEX_FLUSH_UPLOAD {int(tfu == "on")}',
          f'#define DM_GAME_SHADER_KEY_SKIP_OFF {sko:#x}', f'#define DM_GAME_SHADER_KEY_SKIP_LEN {skl:#x}',
          f'#define DM_GAME_TEX_DIRTY_UPLOAD {int(tdu == "on")}',

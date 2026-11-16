@@ -1,6 +1,7 @@
 // Touchscreen unit test: dm_touch_set -> touch_fill, and the TouchScreenState<16> written out (0x290 bytes) matches the hand-computed expectation byte for byte.
 // Expected values are hand-written by layout (sample number / touch count / per point delta_time attribute finger_id x y diameter rotation angle), not computed by calling the implementation under test.
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
 typedef struct { uint32_t id; float x, y; } dm_touch;
@@ -24,6 +25,8 @@ static void expect(const char *what, uint64_t now, int64_t samp, int n, const wa
     else printf("✓ %s\n", what);
 }
 int main(void) {
+    // The hardware panel's 1280x720 whatever profile the tests are built for (its touch_panel key: Cytus α's is 1920x1080); hle_touch.c reads DM_TOUCH_PANEL once, before the profile's
+    setenv("DM_TOUCH_PANEL", "1280x720", 1);
     const uint64_t T0 = 1000000000ull;
     // 1 Down: id 2 at (0.5, 0.25) -> Start, x = 0.5*1280 = 640, y = 0.25*720 = 180, delta_time = 0 on the first read
     dm_touch a = {2, 0.5f, 0.25f}; dm_touch_set(&a, 1);

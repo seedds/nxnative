@@ -446,6 +446,7 @@ DM_THR	diagnostic	`=1` logs each SVC (except `SleepThread`) with its first four 
 DM_THRCPU	diagnostic	`=<tsv path>[,<seconds>]` writes each thread's CPU time (100% = one core) and the total every interval (default 10 s); on iOS a relative path is under `Documents`, and `Documents/env.txt` can set it
 DM_TOUCH_HAPTICS	player	`0` turns off the light haptic tap when a touch control is pressed (on by default); launcher setting
 DM_TOUCH_LOG	diagnostic	`=1` logs each touch-screen sample with touch points (sample, finger, position, attributes) and each gesture entry, up to 500 lines
+DM_TOUCH_PANEL	switch	`=<w>x<h>` the touch screen's coordinate range the game is handed instead of the profile's `touch_panel` (default 1280x720, hardware's panel); read once
 DM_T_DUMP	test	`tests/t_blend_zero.m` prints the red channel each draw stored, row by row
 DM_UDC_SELFTEST	diagnostic	`=1` runs a start-up check of DontCare load and store on private depth-stencil and RGBA8 textures (clear, Load + DontCare, read back) and logs one result line
 DM_UE_SHADERS	path	Folder of the Unreal shader code archives decoded by `uepak.py`, for `shader_split.py` (default `ue_shaders` beside the RomFS); needed when the RomFS has Unreal paks

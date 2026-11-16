@@ -46,6 +46,17 @@ void dm_touch_set(const dm_touch *t, int n) {
 }
 void dm_touch_script(const dm_touch *t, int n) { touch_apply(t, n); }
 
+// The panel's coordinate range: 1280x720 on hardware (DM_GAME_TOUCH_W / _H, profile touch_panel). Cytus α under perf_mode boost in handheld draws 1920x1080 and
+// takes touches against that size, a mode a Switch 1 never reports; its profile sets 1920x1080. DM_TOUCH_PANEL=<w>x<h> overrides it (read once)
+static void touch_panel(int *w, int *h) {
+    static _Atomic int pw, ph;
+    if (!atomic_load(&pw)) {
+        int a = DM_GAME_TOUCH_W, b = DM_GAME_TOUCH_H; const char *e = getenv("DM_TOUCH_PANEL");
+        if (e) { int x = 0, y = 0; if (sscanf(e, "%dx%d", &x, &y) == 2 && x >= 16 && y >= 16 && x <= 8192 && y <= 8192) { a = x; b = y; } else LOG("[RED] DM_TOUCH_PANEL must be <w>x<h>: %s", e); }
+        atomic_store(&ph, b); atomic_store(&pw, a); LOG("[touch] panel %dx%d", a, b);
+    }
+    *w = atomic_load(&pw); *h = atomic_load(&ph);
+}
 static int32_t clampi(float v, int hi) { int32_t r = (int32_t)(v * (float)(hi + 1)); return r < 0 ? 0 : r > hi ? hi : r; }
 // Fill one TouchScreenState<max> (out is 0x10 + 0x28 · max bytes; max 1–16); now_ns is used for delta_time. Returns the number of touch points written.
 // Fingers beyond max are left for a later read (their Start / End is not used up). points 0 is a read in console mode, when the screen is out of reach: the state
@@ -63,7 +74,8 @@ int touch_fill_n(void *out, int max, uint64_t now_ns, int points) {
         if (!g_f[id].reported) { attr |= 1; g_f[id].reported = 1; }          // Start (reported for the first time this time)
         else if (g_f[id].st == F_LIFTED) attr |= 2;                         // End (Start already reported, already lifted)
         uint8_t *s = o + 0x10 + 0x28 * k++;
-        int32_t x = clampi(g_f[id].x, 1279), y = clampi(g_f[id].y, 719), d = 30, zero = 0, fid = id;
+        int pw, ph; touch_panel(&pw, &ph);
+        int32_t x = clampi(g_f[id].x, pw - 1), y = clampi(g_f[id].y, ph - 1), d = 30, zero = 0, fid = id;
         memcpy(s + 0x00, &dt, 8); memcpy(s + 0x08, &attr, 4); memcpy(s + 0x0c, &fid, 4);
         memcpy(s + 0x10, &x, 4); memcpy(s + 0x14, &y, 4); memcpy(s + 0x18, &d, 4); memcpy(s + 0x1c, &d, 4); memcpy(s + 0x20, &zero, 4);
         if (attr & 2) {                                                      // End has been reported: release; if the same id was pressed again in the meantime, turn it into a new press
@@ -110,7 +122,7 @@ static uint64_t g_gupd_ns, g_gtap_ns; static float g_gpan_dt;
 static void gesture_read(gesture_props *g) {   // the fingers down now (or pressed since the last sample), in finger id order, at most 4
     memset(g, 0, sizeof *g);
     for (int id = 0; id < 16; id++) {
-        if ((g_gf[id].down || g_gf[id].pend) && g->n < 4) { g->pt[g->n][0] = clampi(g_gf[id].x, 1279); g->pt[g->n][1] = clampi(g_gf[id].y, 719); g->n++; }
+        if ((g_gf[id].down || g_gf[id].pend) && g->n < 4) { int pw, ph; touch_panel(&pw, &ph); g->pt[g->n][0] = clampi(g_gf[id].x, pw - 1); g->pt[g->n][1] = clampi(g_gf[id].y, ph - 1); g->n++; }
         g_gf[id].pend = 0;
     }
     for (int i = 0; i < g->n; i++) { g->mx += g->pt[i][0] / g->n; g->my += g->pt[i][1] / g->n; }

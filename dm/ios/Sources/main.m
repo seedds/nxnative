@@ -186,7 +186,13 @@ static int boot_env(void) {
     if ([fm fileExistsAtPath:pso]) setenv("DM_PSO_BUNDLE", pso.fileSystemRepresentation, 0);
     chdir(doc.fileSystemRepresentation);
     g_argv[0] = strdup("dmhost"); g_argv[1] = strdup(dm.fileSystemRepresentation); g_argc = 2;
-    dm_host_preload_start(g_argc, g_argv);   // Module tables / relocation / takeover run early in the background, in parallel with UIKit startup (and the launcher: the settings it sets are read when the game starts)
+    // Resident Evil's signed main text has prebuilt 30/60/120 variants. map_image()
+    // must see the launcher's final DM_FPS_TARGET before it chooses one; early preload
+    // would map the default (usually 60) while the launcher is still on screen.
+    if (strcmp(DM_GAME_ID, "010050F00BC1A000"))
+        dm_host_preload_start(g_argc, g_argv);
+    else
+        fprintf(stderr, "boot: Resident Evil host loading waits for the launcher FPS choice\\n");
     return 1;
 }
 

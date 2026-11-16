@@ -16763,6 +16763,11 @@ int mtl_fps_target(void) { static int env = -2; if (env == -2) { const char *e =
 // recorded a copy from it (main+0x305e64, frame start) and before that frame's submit had even returned: the host was building pipelines inside the submit for 300 ms, and committed the
 // copy only at its end, so the subtitle band's gradient (BC3, 32x512) came out as the next texture's blocks. Committed at the first pass boundary, the copies run while the host encodes the rest
 static int cut_draws(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_CUT"); v = e ? atoi(e) : 64; MLOG("segmented submission: a segment is submitted between passes every %d draws (DM_NVN_CUT, 0 = off)", v); } return v; }
+// DM_NVN_CUT_IDLE=<draws> (default 8, 0 off, ab alternates 8 with off): while nothing the replay committed is on the GPU, a segment ends at the first pass boundary after this many
+// draws instead of cut_draws(). The GPU, done with the frame before, starts on the new frame's first passes (Mario Kart World: cube map filters and small targets, 36 draws that
+// took 0.5 ms to translate) instead of waiting for 64 draws; with work on the GPU nothing changes, as sub_cut commits only then (DM_NVN_CUT_BUSY)
+static int cut_idle_draws(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_CUT_IDLE"); v = e && strncmp(e, "ab", 2) ? atoi(e) : 8; if (v > 0) MLOG("segmented submission: with nothing on the GPU a segment ends after %d draws (DM_NVN_CUT_IDLE)", v); } return v; }
+static int cut_idle_mode(void) { static int m = -1; if (m < 0) { const char *e = getenv("DM_NVN_CUT_IDLE"); m = e && !strncmp(e, "ab", 2) ? sw_mode("DM_NVN_CUT_IDLE", 1) : 1; } return m; }
 static uint64_t g_cut_draw0, g_cuts, g_copy_cuts;
 // The count starts with the submission (mtl_sub_begin). It used to start at the submission's first sub_cut, which only a render target change reaches (OP_SET_RT): the draws a
 // submission makes into the target it inherited, before its first target change, were never counted, and the first segment came that many draws late
@@ -16773,14 +16778,16 @@ int mtl_probe_ramp_on(void) { return sw_on(probe_ramp_mode()); }
 // Whether a segment may end here, the pass aside: pass_split_try ends a pass only when the commit after it will be made
 static int sub_cut_ready(void) {
     int n = cut_draws();
+    int ni = cut_idle_draws();   // the GPU has nothing committed: a shorter segment starts it sooner
+    if (ni > 0 && (n <= 0 || ni < n) && !atomic_load_explicit(&g_seg_inflight, memory_order_relaxed) && sw_on(cut_idle_mode())) n = ni;
     return g_cb && (g_cut_copy || (n > 0 && g_stat_draw - g_cut_draw0 >= (uint64_t)n)) && !g_rt_merged;
 }
 static void sub_cut(void) {
     if (g_enc || !sub_cut_ready()) return;
     // The cut is there so that the GPU does not sit idle while the host encodes. With earlier work still running a commit gains nothing and queues one more command buffer: each is a call into the kernel on Metal's one submission queue, and with buffers queued behind running work
     // the GPU waited 5-40 ms with the next one already committed (docs/reference/frame-rate.md). So it stays a boundary for the game's timestamps (ts_boundary), with the commit left for when the GPU has run out. A copy still commits, as its data must land. DM_NVN_CUT_BUSY=0: every cut commits
-    static int busy = -1; if (busy < 0) { const char *e = getenv("DM_NVN_CUT_BUSY"); busy = !e || atoi(e) != 0; }
-    if (busy && !g_cut_copy && (!seg_ts() || ts_on()) && atomic_load_explicit(&g_seg_inflight, memory_order_relaxed) > 0) {
+    static int busy = -1; if (busy < 0) { const char *e = getenv("DM_NVN_CUT_BUSY"); busy = e && !strncmp(e, "ab", 2) ? sw_mode("DM_NVN_CUT_BUSY", 1) : !e || atoi(e) != 0; }   // ab alternates (DM_AB)
+    if (sw_on(busy) && !g_cut_copy && (!seg_ts() || ts_on()) && atomic_load_explicit(&g_seg_inflight, memory_order_relaxed) > 0) {
         if (mtl_subtl_on()) mtl_subtl("cut skipped: a segment is still on the GPU (draw %llu)", (unsigned long long)g_stat_draw);
         if (ts_on()) { ts_boundary(); g_seg++; }
         g_cut_draw0 = g_stat_draw; return; }

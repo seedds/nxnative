@@ -404,7 +404,10 @@ static void test_doom3(void) {
     h_glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 4, 4, 0, GL_RGBA, GL_UNSIGNED_BYTE, red); h_glTexImage2D(GL_TEXTURE_2D, 1, GL_RGBA8, 2, 2, 0, GL_RGBA, GL_UNSIGNED_BYTE, green);
     h_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST_MIPMAP_NEAREST); h_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
     ta = tex_of(a); assert(tex_make(ta, 0) && ta->levels == 2);
-    for (int bias = 0; bias <= 1; bias++) {
+    // GitHub's macOS runners have a paravirtual GPU that does not apply a sampler's lodBias (Metal 4): there only level 0 is checked
+    int virt = [g_dev.name rangeOfString:@"Paravirtual"].location != NSNotFound;
+    if (virt) printf("LOD bias not checked on %s (the sampler's lodBias is not applied there)\n", g_dev.name.UTF8String);
+    for (int bias = 0; bias <= (virt ? 0 : 1); bias++) {
         h_glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_LOD_BIAS, (float)bias);
         MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:4 height:4 mipmapped:NO];
         td.usage = MTLTextureUsageRenderTarget; td.storageMode = MTLStorageModeShared;

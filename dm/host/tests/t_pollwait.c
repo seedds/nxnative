@@ -106,6 +106,7 @@ static void *signaller(void *unused) {
 }
 int main(void) {
     alarm(20);
+    setenv("DM_WAIT_ON_ADDRESS", "0", 1);   // the waits go through pthread_cond_timedwait, which this test replaces (test_timedwait)
     me_handle = svc_thread_main_init();
     poll_run(500, 0, 0);
     puts("PASS: 500 ns condition variable waits back off at 2 ms, not before");

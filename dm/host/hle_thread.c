@@ -17,9 +17,11 @@
 #include <sys/mman.h>
 #include <time.h>
 #include <mach/mach.h>
+#include <mach/mach_time.h>
 #include <pthread/qos.h>
 #include <dlfcn.h>
 #include <stdatomic.h>
+#include <os/os_sync_wait_on_address.h>
 
 #define R_TIMEOUT     0xEA01u   // Kernel module 1, description 117
 #define R_CANCELLED   0xEC01u   // 118
@@ -98,6 +100,7 @@ typedef struct thr {
     int ctx_ok; uint64_t ctx_x[29], ctx_fp, ctx_lr, ctx_sp, ctx_pc; uint32_t ctx_pstate, ctx_fpcr, ctx_fpsr; __uint128_t ctx_v[32];
     pthread_cond_t pcv;
     _Atomic int sig_pend;   // wakes of this thread signalled after G is let go and not signalled yet (g_unlock): thr_free waits for them
+    _Atomic uint32_t wword; _Atomic int wmode;   // block's wait on an address (DM_WAIT_ON_ADDRESS): the word each wake bumps, and 1 while the thread waits on it instead of cv (thr_kick)
 } thr_t;
 static thr_t *g_all;
 extern __thread _Atomic int dm_host_work;   // declared in hle.h too; defined in hle_nvn.c
@@ -113,22 +116,64 @@ static pthread_mutex_t G = PTHREAD_MUTEX_INITIALIZER;
 enum { WDEF = 8 };
 static __thread struct thr *t_wdef[WDEF]; static __thread int t_nwdef;
 static int g_wake_unlocked = 1;
-static inline void wake_signal(struct thr *t) { pthread_cond_signal(&t->cv); atomic_fetch_sub_explicit(&t->sig_pend, 1, memory_order_release); }
+static _Atomic uint64_t g_wao_idle;   // address wakes that found no thread asleep on the word (thread lock line)
+// Wake t from its current wait: block's wait on t->wword when wmode says so (set under G before each wait, so a waker that set woke under G after it reads the current wait's mode
+// or a later wait's, whose wake is spurious), else its condition variable
+static inline void thr_kick(struct thr *t) {
+    if (atomic_load_explicit(&t->wmode, memory_order_relaxed)) {
+        atomic_fetch_add_explicit(&t->wword, 1, memory_order_release);
+        if (os_sync_wake_by_address_any((void *)&t->wword, sizeof t->wword, OS_SYNC_WAKE_BY_ADDRESS_NONE) < 0) atomic_fetch_add_explicit(&g_wao_idle, 1, memory_order_relaxed);
+    } else pthread_cond_signal(&t->cv);
+}
+static inline void wake_signal(struct thr *t) { thr_kick(t); atomic_fetch_sub_explicit(&t->sig_pend, 1, memory_order_release); }
+// A thread that finds G taken first waits up to G_SPIN_NS for it in user mode, reading g_held (a hint: the lock word stays pthread's), before it sleeps in the kernel: Darwin's
+// mutex does not spin, and G is held for short stretches by every thread SVC, so a busy G sent the taker to sleep (__psynch_mutexwait) and its holder into the kernel to wake it
+// (__psynch_mutexdrop). No thread spins while another sleeps in the kernel for G (g_sleepers): a woken sleeper needs microseconds to run again, and spinners took G at every
+// release before it did (t_wait_word, with a thread taking G in a loop beside two threads handing a word back and forth: 20,000 hand-offs in 1,989 ms, 307 ms without the
+// spin, 332 ms with this rule); newcomers queue behind a sleeper as before. DM_G_SPIN=0 sleeps at once as before (ab: alternates with the DM_AB phases). Counts under G:
+// acquisitions, those that found G taken, those a spin got
+enum { G_SPIN_NS = 4000 };
+static _Atomic int g_held, g_sleepers;
+static uint64_t g_lock_n, g_lock_busy, g_lock_spun;
+__attribute__((weak)) int mtl_sw_mode(const char *name, int dflt);
+__attribute__((weak)) int mtl_sw_on(int m);
+static int g_gspin; static uint64_t g_gspin_ticks; static pthread_once_t g_gspin_once = PTHREAD_ONCE_INIT;
+static void gspin_init(void) { g_gspin = mtl_sw_mode("DM_G_SPIN", 1); mach_timebase_info_data_t tb; mach_timebase_info(&tb); g_gspin_ticks = (uint64_t)G_SPIN_NS * tb.denom / tb.numer; }
+static __attribute__((noinline)) int g_spin(void) {
+    pthread_once(&g_gspin_once, gspin_init);
+    if (!mtl_sw_on(g_gspin)) return 0;
+    uint64_t t0 = mach_absolute_time();
+    for (;;) {
+        for (int i = 0; i < 16; i++) {
+            if (atomic_load_explicit(&g_sleepers, memory_order_relaxed)) return 0;
+            if (!atomic_load_explicit(&g_held, memory_order_relaxed) && !pthread_mutex_trylock(&G)) return 1;
+            __asm__ volatile("isb" ::: "memory");
+        }
+        if (mach_absolute_time() - t0 > g_gspin_ticks) return 0;
+    }
+}
 static inline void g_lock(void) {
-    pthread_mutex_lock(&G);
+    int busy = pthread_mutex_trylock(&G) != 0, spun = busy && g_spin();
+    if (busy && !spun) { atomic_fetch_add_explicit(&g_sleepers, 1, memory_order_relaxed); pthread_mutex_lock(&G); atomic_fetch_sub_explicit(&g_sleepers, 1, memory_order_relaxed); }
+    atomic_store_explicit(&g_held, 1, memory_order_relaxed);
+    g_lock_n++; g_lock_busy += (uint64_t)busy; g_lock_spun += (uint64_t)spun;
     if (t_nwdef) die("thread lock: %d wakes still queued from an earlier hold (G let go without g_unlock)", t_nwdef);
 }
 static inline void g_unlock(void) {
     int n = t_nwdef; struct thr *d[WDEF];
     for (int i = 0; i < n; i++) d[i] = t_wdef[i];
     t_nwdef = 0;
+    atomic_store_explicit(&g_held, 0, memory_order_relaxed);
     pthread_mutex_unlock(&G);
     for (int i = 0; i < n; i++) wake_signal(d[i]);
 }
 // Wait on cv holding G (dl: CLOCK_REALTIME deadline, NULL none); as pthread_cond_wait, it may return early, and every caller rechecks its condition in a loop
 static inline int g_cond_wait(pthread_cond_t *cv, const struct timespec *dl) {
     if (t_nwdef) { g_unlock(); g_lock(); return 0; }   // this hold's wakes first, with G let go: a spurious wakeup to the caller
-    return dl ? pthread_cond_timedwait(cv, &G, dl) : pthread_cond_wait(cv, &G);
+    atomic_store_explicit(&g_held, 0, memory_order_relaxed);
+    int rc = dl ? pthread_cond_timedwait(cv, &G, dl) : pthread_cond_wait(cv, &G);
+    atomic_store_explicit(&g_held, 1, memory_order_relaxed);
+    return rc;
 }
 #define MAX_H 4096
 static struct { int type; void *obj; } g_h[MAX_H];
@@ -327,13 +372,31 @@ static void note_runnable(thr_t *t) {
 // Holding G: signal t's condition once this hold of G ends (g_unlock / g_cond_wait), or now when the list is full
 static void wake_queue(thr_t *t) {
     if (g_wake_unlocked && t_nwdef < WDEF) { atomic_fetch_add_explicit(&t->sig_pend, 1, memory_order_relaxed); t_wdef[t_nwdef++] = t; }
-    else pthread_cond_signal(&t->cv);
+    else thr_kick(t);
 }
 static void wake(thr_t *t, int64_t res) {
     wait_unlink(t); t->wkind = 0; t->woke = 1; t->wres = res; wake_queue(t);
     note_runnable(t);
 }
 // Suspend until woken or timed out (ns<0 infinite, 0 immediate timeout); returns wres or R_TIMEOUT
+// The wait itself is on t->wword (os_sync_wait_on_address) unless DM_WAIT_ON_ADDRESS=0: G is let go by g_unlock (which first signals this hold's queued wakes) and taken again by
+// g_lock, so a thread woken while G is busy spins for it (g_spin) instead of sleeping again in the kernel inside pthread_cond_wait, and the kernel's wait and wake on a word are
+// lighter than its condition variable's (dev/tools/wakecost.c: about 3.1-4.0 against 4.3-4.8 µs of CPU a wait and wake). The word is read under G before G is let go, and every
+// wake bumps it after setting woke under G, so a wake between the unlock and the sleep makes the kernel's compare fail and the wait return. The deterministic clock's waits stay on cv
+static uint64_t g_wao_waits;   // under G: waits on the word (thread lock line)
+static int g_wao; static pthread_once_t g_wao_once = PTHREAD_ONCE_INIT;
+static void wao_init(void) { g_wao = mtl_sw_mode("DM_WAIT_ON_ADDRESS", 1); }
+static int wao_on(void) { pthread_once(&g_wao_once, wao_init); return mtl_sw_on(g_wao); }
+static int g_word_wait(thr_t *t, uint64_t dl_abs) {   // holding G; dl_abs: mach_absolute_time deadline, 0 none; returns 0 or ETIMEDOUT, with G held again
+    uint32_t seq = atomic_load_explicit(&t->wword, memory_order_relaxed);
+    atomic_store_explicit(&t->wmode, 1, memory_order_relaxed); g_wao_waits++;
+    g_unlock();
+    int r = dl_abs ? os_sync_wait_on_address_with_deadline((void *)&t->wword, seq, sizeof t->wword, OS_SYNC_WAIT_ON_ADDRESS_NONE, OS_CLOCK_MACH_ABSOLUTE_TIME, dl_abs)
+                   : os_sync_wait_on_address((void *)&t->wword, seq, sizeof t->wword, OS_SYNC_WAIT_ON_ADDRESS_NONE);
+    int e = r < 0 ? errno : 0;
+    g_lock();
+    return e == ETIMEDOUT ? ETIMEDOUT : 0;
+}
 static int64_t block(thr_t *t, int kind, int64_t ns) {
     wait_link(t, kind); t->woke = 0; t->wseq = ++g_wseq;
     if (ns == 0) { wait_unlink(t); t->wkind = 0; return R_TIMEOUT; }
@@ -341,16 +404,20 @@ static int64_t block(thr_t *t, int kind, int64_t ns) {
     struct timespec dl;
     int det_wait = ns > 0 && dm_detclock_enabled();
     uint64_t guest_deadline = det_wait ? guest_ns() + (uint64_t)ns : 0;
-    if (ns > 0 && !det_wait) { clock_gettime(CLOCK_REALTIME, &dl); dl.tv_sec += ns / 1000000000; dl.tv_nsec += ns % 1000000000;
+    int word = !dm_detclock_enabled() && wao_on(); uint64_t word_dl = 0;
+    if (word && ns > 0) { mach_timebase_info_data_t tb; mach_timebase_info(&tb); word_dl = mach_absolute_time() + (uint64_t)((__uint128_t)(uint64_t)ns * tb.denom / tb.numer); }
+    else if (ns > 0 && !det_wait) { clock_gettime(CLOCK_REALTIME, &dl); dl.tv_sec += ns / 1000000000; dl.tv_nsec += ns % 1000000000;
                   if (dl.tv_nsec >= 1000000000) { dl.tv_sec++; dl.tv_nsec -= 1000000000; } }
     while (!t->woke) {
         int rc;
-        if (det_wait) {
+        if (word) rc = g_word_wait(t, word_dl);
+        else if (det_wait) {
+            atomic_store_explicit(&t->wmode, 0, memory_order_relaxed);
             uint64_t now = guest_ns();
             if (now >= guest_deadline) { wait_unlink(t); t->wkind = 0; return R_TIMEOUT; }
             (void)(guest_deadline - now);
             rc = g_cond_wait(&t->cv, NULL);
-        } else rc = ns > 0 ? g_cond_wait(&t->cv, &dl) : g_cond_wait(&t->cv, NULL);
+        } else { atomic_store_explicit(&t->wmode, 0, memory_order_relaxed); rc = ns > 0 ? g_cond_wait(&t->cv, &dl) : g_cond_wait(&t->cv, NULL); }
         if (rc == ETIMEDOUT && !t->woke && (!det_wait || guest_ns() >= guest_deadline)) { wait_unlink(t); t->wkind = 0; return R_TIMEOUT; }
     }
     return t->wres;
@@ -684,7 +751,7 @@ static void wake_sync_waiters(const void *obj) {
 void dm_guest_clock_advanced(void) {
     if (!dm_detclock_enabled()) return;
     g_lock();
-    for (thr_t *t = g_wait; t; t = t->next) if (t->wkind) pthread_cond_signal(&t->cv);
+    for (thr_t *t = g_wait; t; t = t->next) if (t->wkind) thr_kick(t);
     g_unlock();
 }
 
@@ -1066,7 +1133,11 @@ void dm_thread_cpu(char *out, size_t n, double secs) {
     size_t o = (size_t)snprintf(out, n, "by guest priority ≤44 %.0f / 45–59 %.0f / ≥60 %.0f ms/s; top: ", band[0], band[1], band[2]); char nb[32];
     for (int i = 0; i < 3 && top[i] && o < n; i++)
         o += (size_t)snprintf(out + o, n - o, "%s%#x '%s' priority %d %.0f ms/s%s", i ? ", " : "", top[i]->handle, thr_name(top[i], nb, sizeof nb), top[i]->prio, d[i], top[i]->host_owned ? " (host-created)" : "");
-    if (!top[0] && o < n) snprintf(out + o, n - o, "none");
+    if (!top[0] && o < n) o += (size_t)snprintf(out + o, n - o, "none");
+    static uint64_t ln, lb, ls, lw, li; uint64_t wi = atomic_load_explicit(&g_wao_idle, memory_order_relaxed);
+    if (o < n) snprintf(out + o, n - o, "; thread lock %.0f/s, found taken %.0f/s, %.0f/s of them got by a spin; waits on an address %.0f/s, wakes with no sleeper %.0f/s",
+                        (g_lock_n - ln) / secs, (g_lock_busy - lb) / secs, (g_lock_spun - ls) / secs, (g_wao_waits - lw) / secs, (wi - li) / secs);
+    ln = g_lock_n; lb = g_lock_busy; ls = g_lock_spun; lw = g_wao_waits; li = wi;
     g_unlock();
 }
 // Sleep until dl (host monotonic ns) on time: macOS nanosleep / mach_wait_until carry timer slack; measured, 33 ms sleeps take about 36.4 ms, 5 ms take 6.1 ms, 1 ms take 1.26 ms (the same at any QoS).

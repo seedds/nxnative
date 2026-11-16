@@ -325,25 +325,21 @@ void dm_fps_lock_tick(void) {
         }
         if (L->ptr_off && (!rd((uint64_t)(uintptr_t)(base + L->ptr_off), &obj, sizeof obj) || !obj)) continue;   // not created yet
         if (L->flag) { uint8_t b; if (!rd(obj + (L->flag >> 8), &b, 1) || !(b & (L->flag & 0xff))) continue; }   // the object's flag is off (Unreal: no fixed frame rate in use)
-        // Resident Evil: observe the actual movie-clock delta consumed by cMovie::execNormal,
-        // separately from the two MT Framework frame-limit fields. This is diagnostic only.
-        if (re_movie) {
-            static uint32_t last[5]; static int nprobe;
-            uint32_t v[5];
-            if (nprobe < 12 && rd(obj + 0x48, v, 8) && rd(obj + 0x58418, v + 2, 12) &&
-                (!nprobe || memcmp(v, last, sizeof v))) {
-                float cap0, cap1, dt, dt1, dt2;
+        // Resident Evil: sample the frame-loop's movie signal and both MT Framework
+        // limits together. Keep a few baseline ticks, then sample while a movie is recognized.
+        if (re_row) {
+            static int baseline_samples, movie_samples;
+            uint32_t v[2];
+            if ((baseline_samples < 8 || (movie_hz && movie_samples < 32)) && rd(obj + 0x48, v, sizeof v)) {
+                float cap0, cap1;
                 memcpy(&cap0, &v[0], 4); memcpy(&cap1, &v[1], 4);
-                memcpy(&dt, &v[2], 4); memcpy(&dt1, &v[3], 4); memcpy(&dt2, &v[4], 4);
-                LOG("[RE movie clock probe] picture=%d Hz; MT limits=%g/%g; cMovie delta=%g, +5841c=%g, +58420=%g",
-                    movie_hz, cap0, cap1, dt, dt1, dt2);
                 FILE *pf = fopen("/tmp/re_movie_clock_probe.log", "a");
                 if (pf) {
-                    fprintf(pf, "[RE movie clock probe] picture=%d Hz; MT limits=%g/%g; cMovie delta=%g, +5841c=%g, +58420=%g\n",
-                        movie_hz, cap0, cap1, dt, dt1, dt2);
+                    fprintf(pf, "[RE MT tick] movie_hz=%d target=%d row_target=%d MT_limits=%g/%g\\n",
+                        movie_hz, target, row_target, cap0, cap1);
                     fclose(pf);
                 }
-                memcpy(last, v, sizeof v); nprobe++;
+                if (movie_hz) movie_samples++; else baseline_samples++;
             }
         }
         if (L->kind == FPS_F64) {

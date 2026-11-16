@@ -69,6 +69,7 @@ General host changes first needed here; each applies to every game:
 - **`nv12-uv-stride` in the movie decoder's output format** (`md_format` in `hle_movie.c`): [Output format keys (`md_format`)](../../../docs/reference/movies.md#output-format-keys-md_format).
 - **The end-of-stream flag on an output without a picture, and no reorder queue for H.264 POC type 2** (`md_pump` in `hle_movie.c`, `hle_movie_avc.c`): [No picture carries the end-of-stream flag](../../../docs/reference/movies.md#no-picture-carries-the-end-of-stream-flag).
 - **`nn::settings::GetAvailableLanguageCodeCount`** (`hle_sdk16.c`): same section.
+- **A same-core handoff waits without a timer per handoff** (`dm_yield_to_core_peers`, `hand_signal` in `hle_thread.c`): in some scenes `main thread` and `job_update_0` (both pinned to core 0) trade a lock 5,000-6,200 times a second. The old 50 µs polls cost one timer wakeup each, and on NX18's iPhone 18 Pro Max CPU energy went from 0.03-0.05 to 0.47 W at 30 fps: [A same-core handoff waits without a timer per handoff](../../../docs/reference/threads.md#a-same-core-handoff-waits-without-a-timer-per-handoff).
 
 ## Open
 

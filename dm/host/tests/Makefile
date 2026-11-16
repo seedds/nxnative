@@ -392,6 +392,16 @@ notify-scheduler: $(B)/t_notify_sched
 	$(B)/t_notify_sched --all-peers
 run: notify-scheduler
 
+# A same-core handoff waits without a timer wakeup per handoff (Catherine: Full Body's lock storm)
+$(B)/t_handoff_wait: t_handoff_wait.c t_condvar_stub.c ../hle_thread.c ../dm.h $(GAME_H) | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -DDM_TEST_THREAD_ENTER -I.. $(GINC) -o $@ t_handoff_wait.c t_condvar_stub.c
+.PHONY: handoff-wait
+handoff-wait: $(B)/t_handoff_wait
+	$(B)/t_handoff_wait
+	$(B)/t_handoff_wait --all-peers
+	DM_HANDOFF_WAIT=cv $(B)/t_handoff_wait
+run: handoff-wait
+
 # Sanitizer builds (../../sanitizers/sanitizers.mk): make asan runs every test of run under ASan and UBSan; make tsan-threads runs the tests that start threads under TSan
 # (t_audio_spsc, t_hid and t_svc_memory have their own TSan targets above: tsan, memory-tsan)
 include ../../sanitizers/sanitizers.mk
@@ -399,7 +409,7 @@ include ../../sanitizers/sanitizers.mk
 asan:
 	@$(call san_fresh,$(B)/asan,$(ASAN_FLAGS))
 	$(ASAN_ENV) $(MAKE) B=$(B)/asan SAN="$(ASAN_FLAGS)" run
-TSAN_T = t_audio t_audio_stats t_audio_device t_thread_leak t_oe t_fs_commit_list t_fs_case t_save_sync t_condvar t_condvar_old t_preempt t_system_event t_notify_sched t_altstack t_sync_wait
+TSAN_T = t_audio t_audio_stats t_audio_device t_thread_leak t_oe t_fs_commit_list t_fs_case t_save_sync t_condvar t_condvar_old t_preempt t_system_event t_notify_sched t_handoff_wait t_altstack t_sync_wait
 TSAN_T += t_net_eventfd t_net_loopback
 tsan-threads:
 	@$(call san_fresh,$(B)/tsan,$(TSAN_FLAGS))
@@ -426,6 +436,8 @@ tsan-threads-run: $(addprefix $(B)/,$(TSAN_T))
 	$(B)/t_sync_wait
 	DM_QOS_MAP=1 $(B)/t_notify_sched
 	DM_QOS_MAP=1 $(B)/t_notify_sched --all-peers
+	$(B)/t_handoff_wait
+	$(B)/t_handoff_wait --all-peers
 $(B)/t_pad_hid: t_pad_hid.c ../pad_hid.h ../dm_input.h | $(B)
 	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -fsanitize=address,undefined -I.. -o $@ t_pad_hid.c
 run: $(B)/t_pad_pro

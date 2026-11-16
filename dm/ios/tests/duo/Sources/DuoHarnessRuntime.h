@@ -33,6 +33,7 @@ typedef struct {
 
 DuoHarnessInput duo_harness_input(void);
 int duo_harness_rumble(void);   // the in-game menu's rumble switch (dm_haptics_set_enabled)
+int duo_harness_present_stretch(void);   // whether the present was last told to stretch the picture (mtl_present_stretch, Picture Stretch)
 void dm_set_opmode(int mode);
 int dm_opmode(void);
 DuoHarnessState duo_harness_state(void);

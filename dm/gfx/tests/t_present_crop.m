@@ -127,6 +127,15 @@ int main(void) { @autoreleasepool {
             EXPECT("picture width",sizes[i].w,(int)vp.width);EXPECT("picture height",sizes[i].h,(int)vp.height);
         }
         EXPECT("empty content is not upscaled",0,fx_wanted((MTLViewport){0,0,2868,1320,0,1},0,720));
+        mtl_present_stretch(1);   // Picture Stretch: the whole canvas, and the bilinear pass for a picture stretched to another shape
+        MTLViewport st=present_viewport(1280,720,2868,1320);
+        EXPECT("stretch: whole canvas, x",0,(int)st.originX);EXPECT("stretch: whole canvas, y",0,(int)st.originY);
+        EXPECT("stretch: whole canvas, width",2868,(int)st.width);EXPECT("stretch: whole canvas, height",1320,(int)st.height);
+        EXPECT("stretch: no MetalFX for another shape",0,fx_wanted(st,1280,720));
+        EXPECT("stretch: MetalFX for the same shape",1,fx_wanted(present_viewport(1280,720,2560,1440),1280,720));
+        mtl_present_stretch(0);
+        EXPECT("stretch off: letterboxed again",2347,(int)present_viewport(1280,720,2868,1320).width);
+        EXPECT("stretch off: an anamorphic crop drawn at 16:9 keeps MetalFX",1,fx_wanted(present_viewport(1920,1080,2868,1320),1200,960));
     }
     if([MTLFXSpatialScalerDescriptor supportsMetal4FX:g_dev]) {   // the present pass through MetalFX into an offscreen canvas (present_offscreen_m4, as DM_NVN_SHOT_OUT uses it)
         g_fx_mode=1;

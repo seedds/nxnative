@@ -1,5 +1,5 @@
 // iOS front end (the iOS implementation of front.h): a Metal view of the picture's shape (16:9, or what the game presents: front_picture_shape) + a full-screen virtual gamepad layer (DmGamepad.m). Where they go is DmLayout.h's: in landscape the picture
-// is centered (black bars) and the controls are drawn over it; in portrait, or on an iPhone Duo half folded, the picture sits above the controls. With a TV connected the Metal view
+// is centered (black bars; Picture Fill: cropped to cover the screen; Picture Stretch: the whole screen, stretched) and the controls are drawn over it; in portrait, or on an iPhone Duo half folded, the picture sits above the controls. With a TV connected the Metal view
 // is on the TV and the phone shows the pad (DmTVSceneDelegate).
 // The host runs on the big-stack thread started by main.m; front_run runs the guest directly on the calling thread.
 #import <UIKit/UIKit.h>
@@ -84,7 +84,7 @@ static void tv_attach(void);
 @property (nonatomic, strong) UILabel *fps;
 @property (nonatomic) BOOL launched;
 @property (nonatomic, strong) id tv;   // the TV scene accessory's registration (iOS 27)
-@property (nonatomic) BOOL fill;   // DM_PICTURE_FIT=fill: in landscape the picture covers the screen, its edges cropped (DmLayout.h dm_layout_picture)
+@property (nonatomic) DmPictureMode picture;   // DM_PICTURE_FIT: fit, fill (in landscape the picture covers the screen, its edges cropped) or stretch (it covers the screen, stretched to its shape) (DmLayout.h dm_layout_picture)
 @property (nonatomic) BOOL partiallyOpen;   // an iPhone Duo's hinge half open (UIHingeInteraction, iOS 27.1)
 @property (nonatomic) NSInteger hingeStatus;
 @property (nonatomic, copy) NSString *layoutLog;   // the last layout line logged
@@ -97,6 +97,8 @@ static void tv_attach(void);
 static DmRootVC *g_root;
 static CGFloat g_picture_aspect = DM_PICTURE_16_9;   // the presented picture's width / height (front_picture_shape); main thread
 static void launcher_done(void) { [g_root startGame]; }
+void mtl_present_stretch(int on);   // nvn_mtl.m: the present draws the picture over the whole drawable instead of keeping its shape (Picture Stretch)
+static const char *picture_name(DmPictureMode m) { return m == DmPictureFill ? "Fill" : m == DmPictureStretch ? "Stretch" : "Fit"; }
 @implementation DmRootVC
 - (void)loadView { self.view = [DmRootView new]; }
 - (void)showHint:(NSString *)text {   // why the game cannot start, centered over the black screen
@@ -160,8 +162,9 @@ static void launcher_done(void) { [g_root startGame]; }
             setenv("DM_SCREEN_ASPECT", v, 1); LOG("front end: picture shape auto: window %.0fx%.0f points (%.3f:1) → DM_SCREEN_ASPECT=%s", sz.width, sz.height, r, v);
         }
     }
-    self.fill = dm_picture_fill(getenv("DM_PICTURE_FIT"));
-    if (self.fill) LOG("front end: picture Fill (DM_PICTURE_FIT=fill), the 16:9 picture covers the screen in landscape and its edges are cropped");
+    self.picture = dm_picture_mode(getenv("DM_PICTURE_FIT"));
+    if (self.picture == DmPictureFill) LOG("front end: picture Fill (DM_PICTURE_FIT=fill), the 16:9 picture covers the screen in landscape and its edges are cropped");
+    if (self.picture == DmPictureStretch) LOG("front end: picture Stretch (DM_PICTURE_FIT=stretch), the picture is stretched to cover the screen in landscape, nothing cropped");
     self.view.clipsToBounds = YES;   // with Fill the game view is larger than the screen
     self.view.window.traitOverrides.preferredContentSizeCategory = UIContentSizeCategorySmall;   // UIKit draws the in-game menu (GameMenu.swift) in this window: it keeps one compact text size over the game, whatever the system's text size
     self.game = [[DmGameView alloc] initWithFrame:self.view.bounds];
@@ -196,10 +199,11 @@ static void launcher_done(void) { [g_root startGame]; }
     BOOL duoPortrait = b.size.height > b.size.width && (self.hingeStatus != 0 || !CGRectIsNull(division));
     UIEdgeInsets gameInsets = dm_game_safe_insets(b, self.view.safeAreaInsets, duoPortrait);
     BOOL onTV = self.game.superview != self.view;   // the TV's view lays the picture out; the phone is all pad
-    DmLayout layout = onTV ? dm_layout_pad_only(b) : dm_layout_picture(dm_layout(b, gameInsets, self.partiallyOpen, division, g_picture_aspect), b, self.fill, g_picture_aspect);
+    DmLayout layout = onTV ? dm_layout_pad_only(b) : dm_layout_picture(dm_layout(b, gameInsets, self.partiallyOpen, division, g_picture_aspect), b, self.picture, g_picture_aspect);
     if (!onTV) self.game.frame = layout.game;
+    mtl_present_stretch(!onTV && dm_layout_stretched(layout, self.picture, g_picture_aspect));   // a TV and a split keep the picture's shape
     layout.topSafeOnly = duoPortrait;
-    NSString *line = [NSString stringWithFormat:@"%@, hinge %ld%s, divisions %@, picture %@, controls %@", onTV ? @"pad only (picture on the TV)" : layout.separated ? @"split" : self.fill ? @"overlay, Fill" : @"overlay",
+    NSString *line = [NSString stringWithFormat:@"%@, hinge %ld%s, divisions %@, picture %@, controls %@", onTV ? @"pad only (picture on the TV)" : layout.separated ? @"split" : self.picture == DmPictureFill ? @"overlay, Fill" : self.picture == DmPictureStretch ? @"overlay, Stretch" : @"overlay",
                       (long)self.hingeStatus, self.partiallyOpen ? " (half open)" : "", regionLog, NSStringFromCGRect(layout.game), NSStringFromCGRect(layout.controls)];
     if (![line isEqualToString:self.layoutLog]) { self.layoutLog = line; LOG("front end: layout %s", line.UTF8String); }
     self.pad.frame = b;
@@ -275,7 +279,7 @@ void front_picture_shape(int w, int h) {   // front.h: the views take the presen
 bool dm_setting_live(const char *env, const char *value) {
     if (!env || !g_root.game) return false;
     if (!strcmp(env, "DM_PICTURE_FIT")) {
-        if (value) { g_root.fill = dm_picture_fill(value); [g_root.view setNeedsLayout]; LOG("front end: picture %s (in-game menu)", g_root.fill ? "Fill" : "Fit"); }
+        if (value) { g_root.picture = dm_picture_mode(value); [g_root.view setNeedsLayout]; LOG("front end: picture %s (in-game menu)", picture_name(g_root.picture)); }
         return true;
     }
     if (!strcmp(env, "DM_OPMODE")) {

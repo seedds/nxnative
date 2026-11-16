@@ -31,7 +31,15 @@ static inline CGRect dm_aspect_fill(CGRect b, CGFloat aspect) {
     return CGRectMake(CGRectGetMidX(b) - w / 2, CGRectGetMidY(b) - h / 2, w, h);
 }
 
-static inline BOOL dm_picture_fill(const char *_Nullable value) { return value && !strcmp(value, "fill"); }   // DM_PICTURE_FIT: fit (default) or fill
+// DM_PICTURE_FIT: fit (the default), fill (cropped) or stretch. The values are a BOOL's for Fit and Fill, so dm_layout_picture still takes YES / NO for them
+typedef NS_ENUM(NSInteger, DmPictureMode) { DmPictureFit = 0, DmPictureFill = 1, DmPictureStretch = 2 };
+static inline DmPictureMode dm_picture_mode(const char *_Nullable value) {
+    if (value && !strcmp(value, "fill")) return DmPictureFill;
+    if (value && !strcmp(value, "stretch")) return DmPictureStretch;
+    return DmPictureFit;
+}
+static inline BOOL dm_picture_fill(const char *_Nullable value) { return dm_picture_mode(value) == DmPictureFill; }
+static inline BOOL dm_picture_stretch(const char *_Nullable value) { return dm_picture_mode(value) == DmPictureStretch; }
 
 static inline CGRect dm_horizontal_division(CGRect b, CGRect division) {
     if (CGRectIsNull(division) || division.size.width <= division.size.height) return CGRectNull;
@@ -65,15 +73,24 @@ static inline DmLayout dm_layout(CGRect b, UIEdgeInsets insets, BOOL partiallyOp
 // The picture is on a TV (front_ios.m DmTVSceneDelegate): the controls take the whole view and no touch goes to the game's touch screen (the game is docked there).
 static inline DmLayout dm_layout_pad_only(CGRect b) { return (DmLayout){ CGRectZero, b, NO, NO }; }
 
-// Fill covers the full view only in the overlay layout (landscape). A portrait or tabletop split keeps the picture fitted in its
-// area above the controls, where cropping a small picture would cost more than the bars.
-static inline DmLayout dm_layout_picture(DmLayout l, CGRect b, BOOL fill, CGFloat aspect) {
-    if (fill && !l.separated && !CGRectIsEmpty(b)) l.game = dm_aspect_fill(b, aspect);
+// Fill and Stretch cover the full view only in the overlay layout (landscape). A portrait or tabletop split keeps the picture fitted in its
+// area above the controls, where cropping or stretching a small picture would cost more than the bars.
+// Stretch (DM_PICTURE_FIT=stretch): the game rectangle is the whole view, whatever the picture's shape; the present pass then draws the picture over the whole drawable
+// instead of keeping its shape (nvn_mtl.m mtl_present_stretch, which front_ios.m sets from dm_layout_stretched), so nothing is cropped and there are no bars.
+static inline DmLayout dm_layout_picture(DmLayout l, CGRect b, DmPictureMode mode, CGFloat aspect) {
+    if (l.separated || CGRectIsEmpty(b)) return l;
+    if (mode == DmPictureFill) l.game = dm_aspect_fill(b, aspect);
+    else if (mode == DmPictureStretch) l.game = b;
     return l;
+}
+// Whether the game rectangle differs in shape from the picture, so the present must stretch the picture to it rather than letterbox it (Stretch in the overlay layout)
+static inline BOOL dm_layout_stretched(DmLayout l, DmPictureMode mode, CGFloat aspect) {
+    CGFloat w = l.game.size.width, h = l.game.size.height;
+    return mode == DmPictureStretch && !l.separated && w > 0 && h > 0 && aspect > 0 && fabs((w / h) / aspect - 1) >= 0.001;
 }
 
 // A point in the view as the game's touch screen sees it: normalized on the game rectangle, which with Fill is larger than the view,
-// so a touch on the visible part lands where that part of the picture is. Clamped to [0, 0.999].
+// so a touch on the visible part lands where that part of the picture is; with Stretch it is the view, stretched as the picture is. Clamped to [0, 0.999].
 static inline CGPoint dm_game_touch_point(CGRect game, CGPoint p) {
     CGFloat w = game.size.width, h = game.size.height;
     if (w <= 0 || h <= 0) return CGPointZero;

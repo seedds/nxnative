@@ -423,6 +423,39 @@ static Class DuoHarnessInstallReservedRegionProbe(UIView *view) API_AVAILABLE(io
     XCTAssertTrue(CGRectIsEmpty(dm_aspect_fill(CGRectZero, DM_PICTURE_16_9)));
 }
 
+- (void)testPictureStretchCoversTheLandscapeViewWithoutCropping {
+    XCTAssertTrue(dm_picture_stretch("stretch"));
+    XCTAssertFalse(dm_picture_stretch("fill"));
+    XCTAssertFalse(dm_picture_fill("stretch"), @"Stretch is not Fill");
+    XCTAssertEqual(dm_picture_mode("stretch"), DmPictureStretch);
+    XCTAssertEqual(dm_picture_mode("fill"), DmPictureFill);
+    XCTAssertEqual(dm_picture_mode("fit"), DmPictureFit);
+    XCTAssertEqual(dm_picture_mode(NULL), DmPictureFit, @"Unset keeps Fit");
+    XCTAssertEqual(dm_picture_mode("bogus"), DmPictureFit);
+    const CGRect sizes[] = {CGRectMake(0, 0, 844, 390), CGRectMake(0, 0, 932, 430), CGRectMake(0, 0, 1024, 768), CGRectMake(0, 0, 1280, 720)};
+    for (NSUInteger i = 0; i < 4; i++) {
+        CGRect bounds = sizes[i];
+        DmLayout fit = dm_layout(bounds, UIEdgeInsetsZero, NO, CGRectNull, DM_PICTURE_16_9);
+        DmLayout stretch = dm_layout_picture(fit, bounds, DmPictureStretch, DM_PICTURE_16_9);
+        XCTAssertFalse(stretch.separated);
+        XCTAssertTrue(CGRectEqualToRect(stretch.game, bounds), @"Stretch covers exactly the view: %@", NSStringFromCGRect(stretch.game));
+        XCTAssertTrue(CGRectEqualToRect(stretch.controls, bounds), @"The touch controls keep the full view");
+        BOOL other = fabs(bounds.size.width / bounds.size.height / DM_PICTURE_16_9 - 1) >= 0.001;
+        XCTAssertEqual(dm_layout_stretched(stretch, DmPictureStretch, DM_PICTURE_16_9), other, @"The present stretches only a view of another shape");
+        XCTAssertFalse(dm_layout_stretched(fit, DmPictureFit, DM_PICTURE_16_9), @"Fit never stretches");
+        CGPoint corner = dm_game_touch_point(stretch.game, CGPointMake(CGRectGetMaxX(bounds), CGRectGetMaxY(bounds)));
+        XCTAssertEqualWithAccuracy(corner.x, 0.999, 0.0001, @"The view's corner is the picture's corner");
+        XCTAssertEqualWithAccuracy(corner.y, 0.999, 0.0001);
+        CGPoint mid = dm_game_touch_point(stretch.game, CGPointMake(CGRectGetMidX(bounds), CGRectGetMidY(bounds)));
+        XCTAssertEqualWithAccuracy(mid.x, 0.5, 0.001); XCTAssertEqualWithAccuracy(mid.y, 0.5, 0.001);
+    }
+    CGRect portrait = CGRectMake(0, 0, 390, 844);
+    DmLayout split = dm_layout(portrait, UIEdgeInsetsMake(59, 0, 34, 0), NO, CGRectNull, DM_PICTURE_16_9);
+    DmLayout stretched = dm_layout_picture(split, portrait, DmPictureStretch, DM_PICTURE_16_9);
+    XCTAssertTrue(CGRectEqualToRect(stretched.game, split.game), @"Portrait keeps the picture fitted above the controls");
+    XCTAssertFalse(dm_layout_stretched(stretched, DmPictureStretch, DM_PICTURE_16_9), @"and the present keeps its shape");
+}
+
 - (void)testPictureFillKeepsPortraitAndTabletopSplitsFitted {
     CGRect portrait = CGRectMake(0, 0, 390, 844);
     DmLayout split = dm_layout(portrait, UIEdgeInsetsMake(59, 0, 34, 0), NO, CGRectNull, DM_PICTURE_16_9);
@@ -466,6 +499,8 @@ static Class DuoHarnessInstallReservedRegionProbe(UIView *view) API_AVAILABLE(io
     DmLayout fit = dm_layout(bounds, UIEdgeInsetsZero, NO, CGRectNull, tall);
     XCTAssertTrue(CGRectEqualToRect(fit.game, bounds), @"Fit fills the screen with the picture of its shape: %@", NSStringFromCGRect(fit.game));
     XCTAssertTrue(CGRectEqualToRect(dm_layout_picture(fit, bounds, YES, tall).game, bounds), @"Fill crops nothing");
+    XCTAssertTrue(CGRectEqualToRect(dm_layout_picture(fit, bounds, DmPictureStretch, tall).game, bounds), @"Stretch has nothing to stretch");
+    XCTAssertFalse(dm_layout_stretched(dm_layout_picture(fit, bounds, DmPictureStretch, tall), DmPictureStretch, tall), @"so the present keeps the shape");
     XCTAssertEqualWithAccuracy(dm_layout(bounds, UIEdgeInsetsZero, NO, CGRectNull, DM_PICTURE_16_9).game.size.height, 562.5, 0.001, @"A 16:9 picture leaves bars");
     CGPoint top = dm_game_touch_point(fit.game, CGPointMake(500, 0));
     XCTAssertEqualWithAccuracy(top.y, 0, 0.0001, @"The view's top edge is the picture's top edge");
@@ -705,8 +740,14 @@ static Class DuoHarnessInstallReservedRegionProbe(UIView *view) API_AVAILABLE(io
     DmLayout fit = dm_layout(b, dm_game_safe_insets(b, root.view.safeAreaInsets, duo), [[root valueForKey:@"partiallyOpen"] boolValue], CGRectNull, DM_PICTURE_16_9);
     dm_setting_live("DM_PICTURE_FIT", "fill"); [root.view layoutIfNeeded];
     XCTAssertTrue(CGRectEqualToRect(game.frame, dm_layout_picture(fit, b, YES, DM_PICTURE_16_9).game), @"Fill applies at once: %@", NSStringFromCGRect(game.frame));
+    XCTAssertEqual(duo_harness_present_stretch(), 0, @"Fill keeps the picture's shape in the present");
+    dm_setting_live("DM_PICTURE_FIT", "stretch"); [root.view layoutIfNeeded];
+    DmLayout stretch = dm_layout_picture(fit, b, DmPictureStretch, DM_PICTURE_16_9);
+    XCTAssertTrue(CGRectEqualToRect(game.frame, stretch.game), @"Stretch applies at once: %@", NSStringFromCGRect(game.frame));
+    XCTAssertEqual(duo_harness_present_stretch(), (int)dm_layout_stretched(stretch, DmPictureStretch, DM_PICTURE_16_9), @"and tells the present to stretch where the shapes differ");
     dm_setting_live("DM_PICTURE_FIT", "fit"); [root.view layoutIfNeeded];
     XCTAssertTrue(CGRectEqualToRect(game.frame, fit.game), @"and Fit brings the bars back: %@", NSStringFromCGRect(game.frame));
+    XCTAssertEqual(duo_harness_present_stretch(), 0, @"and the picture's shape");
 
     dm_setting_live("DM_RUMBLE", "0"); XCTAssertEqual(duo_harness_rumble(), 0);
     dm_setting_live("DM_RUMBLE", "1"); XCTAssertEqual(duo_harness_rumble(), 1);

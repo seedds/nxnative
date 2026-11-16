@@ -177,7 +177,7 @@ unit test and the CPU texture test under AddressSanitizer and
 UndefinedBehaviorSanitizer (`asan`), and the host tests that start threads under
 ThreadSanitizer (`tsan-threads`). Documented exceptions live in
 `dm/sanitizers/`: ASan and UBSan in `ignorelist.txt` (compile time), TSan in
-`tsan.supp` (run time). These cover custom HLE sections, synthetic NRO offsets,
+`tsan.supp` (run time). These cover synthetic NRO offsets,
 an intentionally unjoined test and uninstrumented CoreAudio synchronization.
 The job fails on other findings. The initial header-alignment, AudioUnit
 publication and thread-registration bugs were fixed and their suppressions
@@ -189,7 +189,15 @@ locally (about a minute on an Apple-silicon Mac):
 ```sh
 make -C dm/host/tests GAME=010015100B514000 -j8 asan tsan-threads
 make -C dm/gfx/tex/tests asan
+make -C dm/gfx/tests GAME=010015100B514000 registration-asan
 ```
+
+The registration test links the real HLE, libc, Vulkan, OpenGL/EGL, NVN and
+service producers and walks their sections without a GPU or a global ignorelist.
+Every producer uses `DM_REGISTER` (`dm/host/registration.h`), which keeps entries
+at their type's alignment and disables ASan redzones on the entries themselves.
+Functions and pointed-to data remain instrumented. See
+[registration section layout](reference/memory.md#registration-section-layout-under-asan).
 
 A new finding is fixed, not listed, unless its cause lies outside the code under
 test (an uninstrumented system framework, a test fixture); then it gets an entry

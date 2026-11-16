@@ -91,6 +91,10 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Registration sections (all producers, ASan and UBSan, no global ignorelist)
+        run: |
+          mkdir -p logs
+          make -C dm/gfx/tests GAME="$GAME" registration-asan 2>&1 | tee logs/registration-asan.log
       - name: ASan and UBSan, every host unit test (dm/host/tests)
         run: |
           mkdir -p logs

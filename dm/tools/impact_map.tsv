@@ -14,6 +14,10 @@ dm/gfx/tests/*	-	graphics tests
 dm/host/tests/*	-	host tests
 dm/gfx/tex/tests/*	-	CPU texture tests
 dm/sanitizers/*	-	test sanitizer configuration
+dm/host/hle.h	*:*	HLE and service registration declarations shared by every game
+dm/host/registration.h	*:*	linker registration layout shared by every game and graphics API
+dm/host/hle_table.c	*:*	C library import registrations shared by every game
+dm/host/hle_offline.c	*:*	offline service registrations present in every host
 dm/ios/tests/*	-	iOS tests
 .github/*	-	CI
 dm/games/*/README.md	-	a game's note

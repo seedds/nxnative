@@ -1514,6 +1514,14 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Open:** the jitter's sign has not been checked; no ghosting has been seen. A game whose bias mask covers what it draws, not only a band, has not been run.
 - **Found on:** [Fire Emblem Fortune's Weave](../../dm/games/04007EF01F8AE000/README.md): `gfxa::TaskDLSS`, 1024x576 to 2048x1152. [Star Fox](../../dm/games/0400E88025B1A000/README.md): the bias mask. Xenoblade Chronicles 2, Nintendo Switch 2 Edition (`0400E95004038001`): the input range.
 
+### MetalFX's DLSS stand-in preserves alpha
+
+- **Symptom:** a later pass that composites an RGBA DLSS output sees opaque alpha, whatever alpha the input colour held. RGB is correct and no validation or compilation error is logged.
+- **Cause:** MetalFX's temporal scaler writes alpha 1.0. The host used its output directly as NVN2 DLSS's RGBA result, so an input alpha of 0.25 or 0.75 became 1.0.
+- **Fix:** when the output format has alpha, `dlss_eval` gives the input shader-read usage and the output render-target usage, then draws the input alpha over MetalFX's RGB with an alpha-only write mask. It uses the evaluation's source and destination rectangles and runs after the scaler on the real command buffer. If the alpha pipeline cannot be made, the existing bilinear fallback preserves every channel instead.
+- **Check:** `make -C dm/gfx/tests GAME=040041E0212AE000 check_t_dlss_mfx` checks alpha 0.25 and 0.75 at 2x and 1.5x, then at a second dynamic input size, with the encoding thread off and on and with `DM_NVN_BARRIER=game`. Before the fix all four output checks read 1.0; after it all 36 checks pass in each run on an M4 Max. The extra output-sized alpha pass has not been timed in a game.
+- **Found on:** [Fast Fusion](../../dm/games/040041E0212AE000/README.md): 960x540 to 1920x1080 RGBA16F DLSS.
+
 ### The DLSS network resized
 
 - **Symptom:** `[RED] NVN unimplemented function called: nvnDlssNetworkResize (x0=… x1=0x300 x2=0x1b0)` at the title.

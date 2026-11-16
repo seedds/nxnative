@@ -51,6 +51,7 @@ Regression level: moderate, because shared shader extraction and translation cha
 - [SHN resources and embedded shader objects](../../../docs/reference/shaders.md#shn-resources-and-embedded-shader-objects).
 - [Subword task and mesh payload accesses](../../../docs/reference/shaders.md#subword-task-and-mesh-payload-accesses).
 - [Indexed texture handles in NVN2 compute c0](../../../docs/reference/shaders.md#indexed-texture-handles-in-nvn2-compute-c0).
+- [MetalFX's DLSS stand-in preserves alpha](../../../docs/reference/rendering.md#metalfxs-dlss-stand-in-preserves-alpha).
 - [DLSS scalers released under their encoders](../../../docs/reference/rendering.md#dlss-scalers-released-under-their-encoders): already fixed before this bring-up; the earlier report reached its eighth network after about nine minutes.
 
 ## Open

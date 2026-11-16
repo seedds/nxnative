@@ -300,12 +300,14 @@ void dm_fps_lock_tick(void) {
     if (uq.base) unity_vsync_tick(target, src);
     for (int r = 0; r < nrow; r++) {
         const lock_t *L = rows[r]; uint64_t obj = (uint64_t)(uintptr_t)base;
-        // Resident Evil uses the two constructor timing values selected by
-        // resident_evil_timing_profile() in loader.c. For 30/60, keep the
-        // engine clock at the selected rate; for the 120 profile, keep its
-        // simulation clock at 120 even while NVN temporarily holds presents.
-        int re_movie_clock = !strcmp(DM_GAME_ID, "010050F00BC1A000") && target == 60 && !strcmp(L->what, "Resident Evil MT Framework primary frame limit");
-        int row_target = !strcmp(L->what, "Resident Evil MT Framework primary frame limit") && (high || re_movie_clock) ? nvn_fps_high_now() : target;
+        // Resident Evil's movie presents follow the decoder's picture rate, but its
+        // subtitle timeline needs the 60 Hz engine clock at both selectable high
+        // rates. Keep that clock separate from the movie's 30 Hz presentation;
+        // outside movies, the 120 fps profile still follows the dynamic hold.
+        int re_movie = !strcmp(DM_GAME_ID, "010050F00BC1A000") && target >= 60 &&
+                       !strcmp(L->what, "Resident Evil MT Framework primary frame limit") && dm_movie_hz() != 0;
+        int re_row = !strcmp(L->what, "Resident Evil MT Framework primary frame limit");
+        int row_target = re_row && high && !re_movie ? nvn_fps_high_now() : re_movie ? 60 : target;
         if (L->ptr_off && (!rd((uint64_t)(uintptr_t)(base + L->ptr_off), &obj, sizeof obj) || !obj)) continue;   // not created yet
         if (L->flag) { uint8_t b; if (!rd(obj + (L->flag >> 8), &b, 1) || !(b & (L->flag & 0xff))) continue; }   // the object's flag is off (Unreal: no fixed frame rate in use)
         if (L->kind == FPS_F64) {

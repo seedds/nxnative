@@ -84,6 +84,11 @@ class GlslSources(unittest.TestCase):
     def test_language_preamble_is_not_a_shader(self):
         self.assertEqual(pg.glsl_sources(b'#version 450 core\n#define float4 vec4\n\0void main() {}\0'), 0)
 
+    def test_gl_prefixes_are_not_sources(self):   # DOOM 3's main: the prefix its renderer puts before the GLSL it makes at run time, so the game gets a run-time capture
+        image = b'\0#version 150\n#define PC\nfloat saturate( float v ) { return clamp( v, 0.0, 1.0 ); }\n\0#version 330\nvoid main() {}\0'
+        self.assertEqual(pg.gl_sources(image), 1)
+        self.assertEqual(pg.gl_sources(image[:image.index(b'#version 330') - 1]), 0)
+
     def test_complete_embedded_sources(self):
         image = b'#version 450\nvoid main() {}\0#version 450\nvoid main (void) {}\0'
         self.assertEqual(pg.glsl_sources(image), 2)

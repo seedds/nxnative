@@ -1089,6 +1089,51 @@ HLE_FORCE("_ZN2nn2fs8OpenFileEPNS0_10FileHandleEPKci", "fsp-srv → open(2)", Re
     if (g_flag.fs) LOG("fs open [%.2fs] %s mode=%d → fd %d", (now_ns() - g_t0_ns) / 1e9, path, mode, fd);
     return RES_OK;
 }
+// RomFS patches. DM_ROMFS_PATCH=<variant> (the launcher's choice of a profile that offers variants) replaces bytes of files in the RomFS image as the game reads them: the rows of <module folder>/romfs_patch.tsv
+// (variant, path, offset in the file, old bytes, new bytes, the two in hex and of one length). A game that reads a setting out of a pack of its own (Star Fox: the scene's resolution scale, in data.zip's platform cvar
+// member) gets another value without a copy of the pack, which is gigabytes. A row is checked once, against the image: bytes other than `old` (another build of the file) leave the file as it is, with a [RED] line
+typedef struct { const romfs_img *img; int64_t k, off; size_t n; uint8_t *old, *nw; int said; } rpatch;
+static rpatch *g_rp; static int g_nrp; static pthread_once_t g_rp_once = PTHREAD_ONCE_INIT;
+static size_t rp_hex(const char *s, uint8_t **out) {
+    size_t n = strlen(s); if (n % 2 || !n) return 0;
+    uint8_t *b = malloc(n / 2); for (size_t i = 0; i < n; i += 2) { unsigned v; if (sscanf(s + i, "%2x", &v) != 1) { free(b); return 0; } b[i / 2] = (uint8_t)v; }
+    *out = b; return n / 2;
+}
+static void rpatch_load(void) {
+    const char *var = getenv("DM_ROMFS_PATCH"); if (!var || !*var || !strcmp(var, "0")) return;
+    char path[1200]; snprintf(path, sizeof path, "%s/romfs_patch.tsv", dm_module_dir()); FILE *f = fopen(path, "r");
+    if (!f) { LOG("[RED] fs DM_ROMFS_PATCH=%s: no %s", var, path); return; }
+    char *line = NULL; size_t cap = 0; int rows = 0, used = 0;
+    while (getline(&line, &cap, f) > 0) {
+        if (line[0] == '#' || line[0] == '\n') continue;
+        line[strcspn(line, "\r\n")] = 0; char *c[5], *s = line; int nc = 0;
+        for (; nc < 5; nc++) { c[nc] = s; char *t = strchr(s, '\t'); if (!t) { nc++; break; } *t = 0; s = t + 1; }
+        if (nc != 5 || strcmp(c[0], var)) continue;
+        rows++; uint8_t *o = NULL, *w = NULL; size_t n = rp_hex(c[3], &o), n2 = rp_hex(c[4], &w); int64_t off = strtoll(c[2], NULL, 0);
+        if (!n || n != n2 || off < 0) { LOG("[RED] fs RomFS patch %s %s +%s: the row is not two hex strings of one length", var, c[1], c[2]); free(o); free(w); continue; }
+        int ok = 0;
+        for (int i = 0; i < g_nmnt && !ok; i++) {
+            const romfs_img *m = g_mnt[i].img; if (!m) continue;
+            int64_t k = img_find(m, c[1]); if (k < 0 || !m->e[k].type) continue;
+            uint8_t *have = malloc(n);
+            if ((uint64_t)off + n <= m->e[k].b && pread(m->fd, have, n, (int64_t)m->e[k].a + off) == (ssize_t)n && !memcmp(have, o, n)) {
+                g_rp = realloc(g_rp, (g_nrp + 1) * sizeof *g_rp); g_rp[g_nrp++] = (rpatch){ m, k, off, n, o, w, 0 }; ok = 1; used++; }
+            free(have);
+        }
+        if (!ok) { LOG("[RED] fs RomFS patch %s %s +%lld (%zu bytes): the file has other bytes there (another build of it?); left as it is", var, c[1], (long long)off, n); free(o); free(w); }
+    }
+    free(line); fclose(f);
+    LOG("fs RomFS patch %s: %d of %d rows applied", var, used, rows);
+}
+static void rpatch_apply(const romfs_img *img, int64_t k, int64_t off, uint8_t *buf, size_t got) {
+    pthread_once(&g_rp_once, rpatch_load);
+    for (int i = 0; i < g_nrp; i++) {
+        rpatch *p = &g_rp[i]; if (p->img != img || p->k != k) continue;
+        int64_t lo = p->off > off ? p->off : off, hi = p->off + (int64_t)p->n < off + (int64_t)got ? p->off + (int64_t)p->n : off + (int64_t)got;
+        if (lo < hi) { memcpy(buf + (lo - off), p->nw + (lo - p->off), (size_t)(hi - lo));
+            if (!p->said) { p->said = 1; LOG("fs RomFS patch: +%lld (%zu bytes) is in a read of the game", (long long)p->off, p->n); } }
+    }
+}
 HLE_FORCE("_ZN2nn2fs8ReadFileEPmNS0_10FileHandleElPvm", "fsp-srv → pread(2)", Result, h_fs_ReadFile, size_t *out, uint64_t h, int64_t off, void *buf, size_t sz) { dm_thread_service_request();
     SDK_HANDLE(h, "_ZN2nn2fs8ReadFileEPmNS0_10FileHandleElPvm", Result (*)(size_t *, uint64_t, int64_t, void *, size_t), RES_FAIL, out, h, off, buf, sz);
     h = FH_IN(h);
@@ -1118,6 +1163,7 @@ HLE_FORCE("_ZN2nn2fs8ReadFileEPmNS0_10FileHandleElPvm", "fsp-srv → pread(2)", 
         if (r == 0) break;
         got += r;
     }
+    if (IMG_H(h) && got) rpatch_apply(g_mnt[IMG_M(h)].img, IMG_K(h), off, buf, got);
     *out = got;
     if (g_fslog) { pthread_mutex_lock(&g_fslog_lock);
         static int hash_on = -1; if (hash_on < 0) hash_on = getenv("DM_FSLOG_HASH") != NULL;   // DM_FSLOG_HASH=1: append a column with the FNV-1a 64 of the content read (to compare whether the bytes read from two resource packs match)

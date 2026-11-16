@@ -332,6 +332,9 @@ t_ubp_running: t_ubp_running.m $(MTL_T_DEP)
 .PHONY: check_t_ubp_running
 check_t_ubp_running: t_ubp_running
 	./t_ubp_running
+# CPU only (no Metal device), with AddressSanitizer and UBSan: lookups fill g_ubp_idx up to the bound pend_room keeps (CI runs it). Globals are not instrumented: hle_nvn.c walks its entry table across neighbouring globals
+t_pend_index: t_pend_index.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -fsanitize=address,undefined -mllvm -asan-globals=0 -o $@ t_pend_index.m $(MTL_T_SRC) $(FW)
 t_direct_upload: t_direct_upload.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_direct_upload.m $(MTL_T_SRC) $(FW)
 .PHONY: check_t_direct_upload

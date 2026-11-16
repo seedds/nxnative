@@ -1438,21 +1438,25 @@ static vis_list *vis_snapshot(void) {
 }
 // Target ranges of buffer writes (copies / inline uniform updates) already encoded in this submission but not yet executed on the GPU: reading these addresses on the CPU side at encode time yields old values (uv_proof avoids them when reading uniforms)
 // Inline updates keep where their data sits in the update ring (g_pend_upd: index + 1 into g_upd), so a bindless handle they wrote can be read as the GPU will see it (pend_read).
-// The writes are indexed by 4 KB page (a chain per hash bucket, newest first); a write over more than PEND_SPAN pages goes to a short list that every lookup scans.
+// The writes are indexed by granule (a chain per hash bucket, newest first). Granules come in PEND_LV sizes, 4 KB and each eight times the last (pend_shift); a write goes in at the
+// finest over which it spans at most PEND_SPAN granules, one node per granule, and a lookup walks the chains of the granules it touches at each size this submission used (g_pend_lv).
+// Writes over more than PEND_SPAN pages had a list of their own instead, which every lookup scanned and which stopped at 256: Mortal Kombat 11 passed it (a write anywhere, below), and
+// its bindless handles were read from memory under updates still queued (RED 47). Merely grown, that scan would cost each lookup about 0.25 us per thousand such writes
 // The list grows as a submission needs it and keeps its size for the next (pend_room). It used to stop at a fixed count, and past it the submission counted as a write anywhere
 // (g_pend_over), which gw_commit carries past the submission: every partly covered uniform shadow of later submissions was refused while it ran, so every draw that read one ended its
 // pass. Monster Hunter Rise passed 256 writes in a submission, and Splatoon Raiders' third boss stage about 11,000 (7 uniform updates before each of about 1,550 ink-map queries; 2,800
 // in its other fights): past 8,192 each query took a pass of its own on its 6400x6400 map, the GPU fell behind, the submissions kept running, and the stage stayed at 1-2 fps.
-// A write anywhere is left for a list that cannot grow (no memory) and a full wide list
-enum { PEND_HB_BITS = 13, PEND_HB = 1 << PEND_HB_BITS, PEND_SPAN = 8, PEND_WIDE = 256 };
+// A write anywhere is left for a list that cannot grow (no memory) and a write past the end of the address space
+enum { PEND_HB_BITS = 13, PEND_HB = 1 << PEND_HB_BITS, PEND_SPAN = 8, PEND_LV = 16 };
+static inline unsigned pend_shift(int lv) { return 12 + 3 * (unsigned)lv; }   // granule size 4 KB << 3 lv: the coarsest, 2^57 bytes, holds any write within PEND_SPAN granules
+static uint32_t g_pend_lv;   // the granule sizes holding writes this submission (bit lv)
 static uint64_t *g_pend_lo, *g_pend_hi; static int g_npend, g_pend_over, g_pend_cap; static uint8_t *g_pend_kind; static uint32_t *g_pend_upd;   // kind: 1 inline update, 2 copy, 3 fill
 static int32_t g_pend_head[PEND_HB]; static uint32_t g_pend_hgen[PEND_HB], g_pend_gen = 1;   // a bucket's chain is valid when its generation is this submission's
 typedef struct { int32_t e, next; } pend_node;
 static pend_node *g_pend_node; static int g_npnode, g_pnode_cap;
-static int32_t g_pend_wide[PEND_WIDE]; static int g_nwide;
 typedef struct { uint64_t lo; size_t off; __unsafe_unretained id<MTLBuffer> buf; } upd_ent;   // the ring block lives until this submission completes (mtl_sub_update)
 static upd_ent *g_upd; static int g_nupd;   // one per entry at most: sized with the entries
-static int *g_ubp_idx;   // every entry a lookup can meet (pend_since): at most one per node of the range's chains, plus the wide list
+static int *g_ubp_idx;   // every entry a lookup can meet (pend_since): at most one per node of the chains it walks, or every entry (each has a node): sized with the nodes
 static int pend_grow(void **p, size_t n, size_t each) { void *q = realloc(*p, n * each); if (!q) return 0; *p = q; return 1; }
 // Room for one more entry and nodes more nodes: 0 when memory runs out (the caller counts the write as one anywhere)
 static int pend_room(int nodes) {
@@ -1461,7 +1465,7 @@ static int pend_room(int nodes) {
             || !pend_grow((void **)&g_pend_upd, c, sizeof *g_pend_upd) || !pend_grow((void **)&g_upd, c, sizeof *g_upd)) return 0;   // a grown array kept at its new size is only spare room
         g_pend_cap = c; }
     if (!g_pnode_cap || g_npnode + nodes > g_pnode_cap) { int c = g_pnode_cap ? g_pnode_cap : 8192; while (c < g_npnode + nodes) { if (c > INT_MAX / 2) return 0; c *= 2; }
-        if (!pend_grow((void **)&g_pend_node, c, sizeof *g_pend_node) || !pend_grow((void **)&g_ubp_idx, (size_t)c + PEND_WIDE, sizeof *g_ubp_idx)) return 0;
+        if (!pend_grow((void **)&g_pend_node, c, sizeof *g_pend_node) || !pend_grow((void **)&g_ubp_idx, c, sizeof *g_ubp_idx)) return 0;
         g_pnode_cap = c; }
     return 1;
 }
@@ -1513,30 +1517,34 @@ static int sbw_hits(uint64_t lo, uint64_t hi) {
 static uint64_t ucb_handle(uint64_t addr, uint64_t size) { uint64_t s = (size + 15) >> 4; return (addr >> 4 & ((1ull << 45) - 1)) | (s < (1u << 19) ? s : (1u << 19) - 1) << 45; }
 static uint64_t ucb_handle_addr(uint64_t v) { return v >> 45 ? (v & ((1ull << 45) - 1)) << 4 : v; }
 static uint64_t sbw_len(uint64_t size, void *mb, uint64_t mo) { if (size) return size; uint64_t len = ((__bridge id<MTLBuffer>)mb).length; return len > mo ? len - mo : 0; }
-static inline unsigned pend_bucket(uint64_t page) { return (unsigned)((page * 0x9E3779B97F4A7C15ull) >> (64 - PEND_HB_BITS)); }
-static void pend_reset(void) { g_nhw_sub = 0; g_npend =g_pend_over = g_nupd = g_npnode = g_nwide = g_nsbw = g_nsbw_w = g_sbw_over = 0; if (!++g_pend_gen) { memset(g_pend_hgen, 0, sizeof g_pend_hgen); memset(g_sbwp, 0, sizeof g_sbwp); g_pend_gen = 1; } }
+static inline unsigned pend_bucket(uint64_t g, int lv) { return (unsigned)(((g * PEND_LV + (unsigned)lv) * 0x9E3779B97F4A7C15ull) >> (64 - PEND_HB_BITS)); }   // granule g of size lv
+static void pend_reset(void) { g_nhw_sub = 0; g_npend =g_pend_over = g_nupd = g_npnode = g_nsbw = g_nsbw_w = g_sbw_over = 0; g_pend_lv = 0; if (!++g_pend_gen) { memset(g_pend_hgen, 0, sizeof g_pend_hgen); memset(g_sbwp, 0, sizeof g_sbwp); g_pend_gen = 1; } }
 static void vc_gpu_write(uint64_t dst, uint64_t n);   // kept index ranges under the written range are not trusted again (ix_range)
 static int pend_add(uint64_t dst, uint64_t n, int kind) {
     vc_gpu_write(dst, n); drw_note(dst, n ? n : 1);
     if (g_pend_over) return -1;
-    uint64_t p0 = dst >> 12, p1 = (dst + (n ? n : 1) - 1) >> 12; int narrow = p1 - p0 < PEND_SPAN;
-    if (!pend_room(narrow ? (int)(p1 - p0 + 1) : 0)) { g_pend_over = 1; return -1; }
+    uint64_t last = dst + (n ? n : 1) - 1; int lv = 0;
+    while (lv < PEND_LV && (last >> pend_shift(lv)) - (dst >> pend_shift(lv)) >= PEND_SPAN) lv++;
+    if (last < dst || lv == PEND_LV) { g_pend_over = 1; return -1; }
+    uint64_t g0 = dst >> pend_shift(lv), g1 = last >> pend_shift(lv);
+    if (!pend_room((int)(g1 - g0 + 1))) { g_pend_over = 1; return -1; }
     int e = g_npend;
-    if (narrow)
-        for (uint64_t pg = p0; pg <= p1; pg++) { unsigned b = pend_bucket(pg); int k = g_npnode++;
-            g_pend_node[k].e = e; g_pend_node[k].next = g_pend_hgen[b] == g_pend_gen ? g_pend_head[b] : -1; g_pend_head[b] = k; g_pend_hgen[b] = g_pend_gen; }
-    else if (g_nwide < PEND_WIDE) g_pend_wide[g_nwide++] = e;
-    else { g_pend_over = 1; return -1; }
+    for (uint64_t g = g0; g <= g1; g++) { unsigned b = pend_bucket(g, lv); int k = g_npnode++;
+        g_pend_node[k].e = e; g_pend_node[k].next = g_pend_hgen[b] == g_pend_gen ? g_pend_head[b] : -1; g_pend_head[b] = k; g_pend_hgen[b] = g_pend_gen; }
+    g_pend_lv |= 1u << lv;
     g_pend_lo[e] = dst; g_pend_hi[e] = dst + n; g_pend_kind[e] = (uint8_t)kind; g_pend_upd[e] = 0; return g_npend++;
 }
+// Whether a lookup of [a, last] walks chains: it touches at most PEND_SPAN granules of every size in use (the finest decides). A wider one scans every entry instead
+static int pend_chains(uint64_t a, uint64_t last) { if (!g_pend_lv) return 1; unsigned s = pend_shift(__builtin_ctz(g_pend_lv)); return (last >> s) - (a >> s) < PEND_SPAN; }
 // The newest queued write overlapping [a, a+n): its index, -1 for none, -2 when it cannot be told (overflow)
 static int pend_last(uint64_t a, uint64_t n) {
     if (g_pend_over) return -2;
-    int best = -1; uint64_t p0 = a >> 12, p1 = (a + (n ? n : 1) - 1) >> 12;
-    for (int i = 0; i < g_nwide; i++) { int e = g_pend_wide[i]; if (e > best && a < g_pend_hi[e] && a + n > g_pend_lo[e]) best = e; }
-    if (p1 - p0 >= PEND_SPAN) { for (int e = g_npend - 1; e > best; e--) if (a < g_pend_hi[e] && a + n > g_pend_lo[e]) return e; return best; }
-    for (uint64_t pg = p0; pg <= p1; pg++) { unsigned b = pend_bucket(pg); if (g_pend_hgen[b] != g_pend_gen) continue;
-        for (int k = g_pend_head[b]; k >= 0 && g_pend_node[k].e > best; k = g_pend_node[k].next) { int e = g_pend_node[k].e; if (a < g_pend_hi[e] && a + n > g_pend_lo[e]) { best = e; break; } } }
+    uint64_t last = a + (n ? n : 1) - 1;
+    if (!pend_chains(a, last)) { for (int e = g_npend - 1; e >= 0; e--) if (a < g_pend_hi[e] && a + n > g_pend_lo[e]) return e; return -1; }
+    int best = -1;
+    for (uint32_t m = g_pend_lv; m; m &= m - 1) { int lv = __builtin_ctz(m); unsigned s = pend_shift(lv);
+        for (uint64_t g = a >> s; g <= last >> s; g++) { unsigned b = pend_bucket(g, lv); if (g_pend_hgen[b] != g_pend_gen) continue;
+            for (int k = g_pend_head[b]; k >= 0 && g_pend_node[k].e > best; k = g_pend_node[k].next) { int e = g_pend_node[k].e; if (a < g_pend_hi[e] && a + n > g_pend_lo[e]) { best = e; break; } } } }
     return best;
 }
 static int pend_hits(uint64_t a, uint64_t n) { return pend_last(a, n) != -1; }
@@ -2203,12 +2211,12 @@ static void um_overlay(uint64_t lo, uint64_t hi, uint8_t *d, uint64_t ready) {
 // The writes queued in this submission from index since on that overlap [a, b), newest first, into out (room for every entry a lookup can meet); -1 when they cannot all be told
 static int pend_since(uint64_t a, uint64_t b, int since, int *out) {
     if (g_pend_over) return -1;
-    int n = 0; uint64_t p0 = a >> 12, p1 = (b - 1) >> 12;
-    if (p1 - p0 >= PEND_SPAN) { for (int e = g_npend - 1; e >= since; e--) if (a < g_pend_hi[e] && g_pend_lo[e] < b) out[n++] = e; return n; }   // every entry, newest first
-    for (int i = 0; i < g_nwide; i++) { int e = g_pend_wide[i]; if (e >= since && a < g_pend_hi[e] && g_pend_lo[e] < b) out[n++] = e; }
-    for (uint64_t pg = p0; pg <= p1; pg++) { unsigned bk = pend_bucket(pg); if (g_pend_hgen[bk] != g_pend_gen) continue;
-        for (int k = g_pend_head[bk]; k >= 0 && g_pend_node[k].e >= since; k = g_pend_node[k].next) { int e = g_pend_node[k].e; if (a < g_pend_hi[e] && g_pend_lo[e] < b) out[n++] = e; } }   // chains run newest first
-    if (n > 1 && (g_nwide || p1 > p0)) {   // several lists: newest first, each once
+    int n = 0; uint64_t last = b - 1;
+    if (!pend_chains(a, last)) { for (int e = g_npend - 1; e >= since; e--) if (a < g_pend_hi[e] && g_pend_lo[e] < b) out[n++] = e; return n; }   // every entry, newest first
+    for (uint32_t m = g_pend_lv; m; m &= m - 1) { int lv = __builtin_ctz(m); unsigned s = pend_shift(lv);
+        for (uint64_t g = a >> s; g <= last >> s; g++) { unsigned bk = pend_bucket(g, lv); if (g_pend_hgen[bk] != g_pend_gen) continue;
+            for (int k = g_pend_head[bk]; k >= 0 && g_pend_node[k].e >= since; k = g_pend_node[k].next) { int e = g_pend_node[k].e; if (a < g_pend_hi[e] && g_pend_lo[e] < b) out[n++] = e; } } }   // chains run newest first
+    if (n > 1) {   // several chains, or one entry twice in a chain: newest first, each once (already in order for one chain)
         for (int i = 1; i < n; i++) { int v = out[i], j = i; while (j > 0 && out[j - 1] < v) { out[j] = out[j - 1]; j--; } out[j] = v; }
         int m = 1; for (int i = 1; i < n; i++) if (out[i] != out[m - 1]) out[m++] = out[i];
         n = m; }

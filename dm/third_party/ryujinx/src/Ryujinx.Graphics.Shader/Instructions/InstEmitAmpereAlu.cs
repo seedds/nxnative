@@ -778,7 +778,8 @@ namespace Ryujinx.Graphics.Shader.Instructions
             }
             else
             {
-                (int bank, int offset) = AMapC0(context, x.Bits(54, 59), (int)x.SignedField(38, 54));
+                // nxnative: a fixed read's address is its immediate as it is; an indexed one adds it signed (InstEmitMemory.Ldc)
+                (int bank, int offset) = AMapC0(context, x.Bits(54, 59), x.Bits(38, 54));
                 ALoadConstant(context, x, bank, Const(0), offset, uniform: true);
             }
         }
@@ -841,7 +842,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
 
             if (x.Ra == RegisterConsts.RegisterZeroIndex)
             {
-                (int bank, int offset) = AMapC0(context, x.Bits(54, 59), (int)x.SignedField(38, 54));
+                (int bank, int offset) = AMapC0(context, x.Bits(54, 59), x.Bits(38, 54));   // fixed: the immediate as it is, as ULDC's
                 ALoadConstant(context, x, bank, Const(0), offset, uniform: false);
             }
             else

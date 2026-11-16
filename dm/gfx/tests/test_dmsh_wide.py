@@ -9,7 +9,7 @@ import tempfile
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'tools'))
-from dmsh_wide import wide_loads   # noqa: E402
+from dmsh_wide import wide_loads, constant_reads   # noqa: E402
 import dmsh_abi as abi   # noqa: E402
 
 # Splatoon Raiders' Hoian_UBER (3e5a302ac52b73bf) as spirv-cross writes it, cut down: one light's words from fp_s3 at 80 * index + 16 .. 44, a written buffer,
@@ -167,6 +167,37 @@ class WideLoads(unittest.TestCase):
                                    capture_output=True, text=True)
                 self.assertEqual(r.returncode, 0, r.stderr)
 
+
+
+class ConstantReads(unittest.TestCase):
+    """dmsh_wide.constant_reads: a read-only storage buffer through the constant address space, with its wide casts; a written one, another stage's or one whose
+    pointer is used otherwise stays as it was"""
+    SRC = """struct spvDescriptorSetBuffer0
+{
+    const device _40* fp_s0 [[id(3)]];
+    device _40* fp_s1 [[id(4)]];
+    const device _40* vp_s0 [[id(5)]];
+    const device _40* fp_s2 [[id(6)]];
+};
+    packed_uint3 _dmw0 = *(const device packed_uint3*)&(*spvDescriptorSet0.fp_s0)._m0[int(_9)];
+    float _5 = as_type<float>((*spvDescriptorSet0.fp_s0)._m0[int(_7)]);
+    (*spvDescriptorSet0.fp_s1)._m0[0] = 1u;
+    float _6 = as_type<float>((*spvDescriptorSet0.vp_s0)._m0[0]);
+    float _8 = f(spvDescriptorSet0.fp_s2);
+"""
+
+    def test_fragment_default(self):
+        out = constant_reads(self.SRC, 'fp')
+        self.assertIn('constant _40* fp_s0 [[id(3)]];', out)
+        self.assertIn('*(constant packed_uint3*)&(*spvDescriptorSet0.fp_s0)._m0[int(_9)]', out)
+        self.assertIn('device _40* fp_s1 [[id(4)]];', out)            # written: device
+        self.assertIn('const device _40* vp_s0 [[id(5)]];', out)      # another stage
+        self.assertIn('const device _40* fp_s2 [[id(6)]];', out)      # its pointer handed to a function
+        self.assertNotIn('const device packed_uint3', out)
+
+    def test_all_and_off(self):
+        self.assertIn('constant _40* vp_s0 [[id(5)]];', constant_reads(self.SRC, 'all'))
+        self.assertEqual(constant_reads(self.SRC, '0'), self.SRC)
 
 if __name__ == '__main__':
     unittest.main()

@@ -26,7 +26,7 @@ word is read only inside the memory the host bound, from its length table (c[DMS
 A run of such words is read whole when its first and its last word are both inside (the bound is one interval of word indices), and word by word, each bounded as
 before, when it is not (a run that crosses the end of the memory bound): the same words, the same zeros, and one read in the usual case.
 """
-import re
+import os, re
 
 import dmsh_abi as abi
 
@@ -106,3 +106,33 @@ def wide_loads(msl):
         indent = lines[i][:len(lines[i]) - len(lines[i].lstrip())]
         lines[i] = ''.join(indent + d.replace('\n', '\n' + indent) + '\n' for d in pre) + ln
     return '\n'.join(lines)
+
+
+# Read-only storage buffers through Metal's constant address space (constant_reads, a step of dmsh_build.py after wide_loads; DMSH_SCONST, below).
+# A storage buffer the shader never writes (SPIRV-Cross declares it const device: the translator's NonWritable) is the same memory read through a constant pointer:
+# the argument buffer member and every pointer cast to it change address space, the host binds the same buffer at the same id. Apple's compiler can then keep reads
+# whose address is the same for the whole draw (the instance data Ampere games index by a word of their uniforms) in uniform registers and its constant cache
+# instead of per-thread loads. Measured on OoT (cut9's libraries, fsbench on an M2, the border corrections compiled out as in game, 11-16): 1e4d2630 −17.1 % a
+# full-screen pass (spills 224 → 176, loads 47 → 26), 087ef21b −2.5 %, 19f99e92 −0.8 %, all three bit-exact. Apple's constant address space suits reads that
+# are uniform or nearly so; a buffer read at per-pixel addresses could get slower, so the rule takes the stages DMSH_SCONST names:
+#   DMSH_SCONST=fp (default: fragment shaders, the stage measured), =all (every stage's storage prefix), =0 (off).
+# A buffer is changed only when every use of it is one this rule rewrites or keeps valid (a read through (*set.<buf>)._m0[...] or one of the casts below), else it
+# is left as it was: the shader still compiles whatever the rest of it does with the pointer.
+_RO_DECL = re.compile(r'^(\s*)const device (' + _IDENT + r')\* (' + _BUF + r') (\[\[id\(\d+\)\]\];)', re.M)
+
+def constant_reads(msl, stages=None):
+    mode = os.environ.get('DMSH_SCONST', 'fp') if stages is None else stages
+    if mode in ('0', 'off', ''): return msl
+    pre = None if mode == 'all' else tuple(p.strip() + '_s' for p in mode.split(','))
+    for m in list(_RO_DECL.finditer(msl)):
+        buf = m.group(3)
+        if pre and not buf.startswith(pre): continue
+        ref = r'spvDescriptorSet0\.' + buf + r'\b'
+        cast = re.compile(r'\(const device ((?:packed_)?(?:u?int|float|half)[234]?)\*\)&\(\*' + ref)
+        uses = len(re.findall(ref, msl))
+        reads = len(re.findall(r'\(\*' + ref + r'\)\._m0\[', msl))
+        if uses != reads: continue   # the pointer goes somewhere this rule does not follow
+        new = cast.sub(lambda c: f'(constant {c.group(1)}*)&(*spvDescriptorSet0.{buf}', msl)
+        if re.search(r'const device [^;]*?' + ref, new): continue   # a cast of another form: changing the member would not compile
+        msl = new.replace(m.group(0), f'{m.group(1)}constant {m.group(2)}* {buf} {m.group(4)}', 1)
+    return msl

@@ -24,11 +24,44 @@
 // _fmode is only the default of the files opened after it is set: the C runtime opened the standard streams before this constructor ran, in text mode, where every "\n"
 // of the host's log lines and of a program's output becomes "\r\n" in a pipe or a file (t_aot_host compares its children's output with the corpus's expected lines byte for
 // byte). So the standard streams are made binary too, each one that is open (a GUI program started without them has none: _fileno gives -2)
+static void timer_period_1ms(void);
 __attribute__((constructor)) static void plat_win32_init(void) {
     _set_fmode(_O_BINARY);
     FILE *std[3] = {stdin, stdout, stderr};
     for (int i = 0; i < 3; i++) if (_fileno(std[i]) >= 0) _setmode(_fileno(std[i]), _O_BINARY);
     if (GetACP() != CP_UTF8) setlocale(LC_CTYPE, ".UTF8");
+    plat_env_scrub();
+    timer_period_1ms();
+}
+
+// The system timer at 1 ms for this process (timeBeginPeriod; per process from Windows 10 2004). Windows serves every wait's timeout at its timer's tick, 15.625 ms by
+// default: a guest's timed wait (svcWaitSynchronization, WaitProcessWideKeyAtomic, WaitForAddress with a timeout: hle_thread.c block(), winpthreads'
+// pthread_cond_timedwait, which waits in whole milliseconds), plat_sema_wait and Sleep all ended at the next tick. Horizon's timeouts are precise; Mario vs. Donkey Kong's
+// rumble thread alone lets about 200 timed waits of 4 to 5 ms a second expire (measured on Linux), each of which became 15.6 ms, so it ran at 64 Hz instead of about
+// 200. plat_sleep_ns has its own high-resolution timer and needs none of this. winmm is looked up so the binary starts without it
+typedef UINT (WINAPI *period_fn)(UINT);
+static void timer_period_1ms(void) {
+    static LONG done;
+    if (InterlockedExchange(&done, 1)) return;
+    HMODULE w = LoadLibraryW(L"winmm.dll");
+    period_fn p = w ? (period_fn)(void *)GetProcAddress(w, "timeBeginPeriod") : NULL;
+    if (p) p(1);
+}
+
+// The environment (plat.h: an empty value is unset). The C runtime cannot set one (_putenv_s(name, "") removes the variable), but a parent's environment block can hold
+// one (CreateProcess takes "NAME=" lines; SetEnvironmentVariable(name, "") makes one): such a variable is removed from the process's block and from the C runtime's copies.
+// The block's hidden "=C:=C:\..." entries (a drive's current folder) start with '=' and are kept
+void plat_env_scrub(void) {
+    wchar_t *block = GetEnvironmentStringsW();
+    if (!block) return;
+    wchar_t names[64][256]; int n = 0;   // the empty ones, collected first: removing them changes the block
+    for (wchar_t *e = block; *e && n < 64; e += wcslen(e) + 1) {
+        const wchar_t *eq = wcschr(e + 1, L'=');
+        if (!eq || eq[1] || (size_t)(eq - e) >= 256) continue;
+        memcpy(names[n], e, (size_t)(eq - e) * sizeof *e); names[n][eq - e] = 0; n++;
+    }
+    FreeEnvironmentStringsW(block);
+    for (int i = 0; i < n; i++) { SetEnvironmentVariableW(names[i], NULL); _wputenv_s(names[i], L""); }
 }
 
 static int win_errno(DWORD e) {
@@ -59,20 +92,16 @@ uint64_t plat_now_ns(void) {
 }
 uint64_t plat_boot_ns(void) { return GetTickCount64() * 1000000u; }   // counts sleep; millisecond steps are enough for its callers (seconds, commit timing)
 // One waitable timer per thread, high resolution when the system has it (1803+: wakes within about 0.5 ms instead of the 15.6 ms scheduler tick).
-// Older systems fall back to an ordinary timer with the system timer at 1 ms (timeBeginPeriod, once)
+// Older systems fall back to an ordinary timer with the system timer at 1 ms (timer_period_1ms, which the layer's constructor has called already)
 static pthread_key_t g_timer_key; static pthread_once_t g_timer_once = PTHREAD_ONCE_INIT;
 static void timer_free(void *h) { if (h) CloseHandle(h); }
 static void timer_key(void) { pthread_key_create(&g_timer_key, timer_free); }
-typedef UINT (WINAPI *period_fn)(UINT);
 void plat_sleep_ns(uint64_t ns) {
     pthread_once(&g_timer_once, timer_key);
     HANDLE t = pthread_getspecific(g_timer_key);
     if (!t) {
         t = CreateWaitableTimerExW(NULL, NULL, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
-        if (!t) {
-            static LONG period; if (!InterlockedExchange(&period, 1)) { HMODULE w = LoadLibraryW(L"winmm.dll"); period_fn p = w ? (period_fn)(void *)GetProcAddress(w, "timeBeginPeriod") : NULL; if (p) p(1); }
-            t = CreateWaitableTimerExW(NULL, NULL, 0, TIMER_ALL_ACCESS);
-        }
+        if (!t) { timer_period_1ms(); t = CreateWaitableTimerExW(NULL, NULL, 0, TIMER_ALL_ACCESS); }
         if (!t) { Sleep((DWORD)((ns + 999999) / 1000000)); return; }
         pthread_setspecific(g_timer_key, t);
     }

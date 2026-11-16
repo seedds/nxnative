@@ -1,28 +1,44 @@
 # Wine environment that runs the cross-built Windows test programs (build/win64) on Linux: dm/host/tests/run_wine_tests.sh and docker/README.md ("Running the Windows
 # tests under Wine"). A run under Wine is not a run on Windows: the runner says so on the first lines of its summary.
-# Ubuntu 24.04, pinned by the same digest as the other images, and its Wine 9.0. 64-bit Wine only: every program is x86-64, so no i386 architecture and no wine32 (Wine
-# starts without it; Ubuntu's /usr/bin/wine wrapper prints a hint about wine32, which the runner avoids by starting /usr/lib/wine/wine64 itself). No recommended packages:
-# no wine-mono, wine-gecko, fonts or GStreamer plugins
+# Ubuntu 24.04, pinned by the same digest as the other images, and WineHQ's wine-stable 11.0 (WINE_VERSION). Ubuntu's own Wine 9.0 is not used: its winevulkan reports
+# no external memory at all (wine_vkGetPhysicalDeviceExternalBufferProperties zeroes the properties), so the Vulkan backend, which imports guest memory as host
+# allocations (VK_EXT_external_memory_host), found no device and every t_vk_* program skipped; Wine 11 passes the query and the import to the driver.
+# - WineHQ's archive key is checked by its fingerprint (WINEHQ_KEY_FPR) before apt trusts it, and the packages are pinned to WINE_VERSION.
+# - 64-bit only: wine-stable-amd64 (Wine 11's WoW64 mode runs x86-64 programs without the i386 packages). The package wine-stable, which holds bin/wine and
+#   bin/wineserver, depends on wine-stable-i386, so its files are unpacked with dpkg -x instead of installed; /opt/wine-stable/bin goes on PATH (the runner starts
+#   wine and wineserver by name). No recommended packages: no wine-mono, wine-gecko, fonts or GStreamer plugins
 # - Xvfb and the X11 libraries Wine's X11 driver (winex11) loads: Wine's Vulkan (winevulkan.dll) needs a graphics driver that supports Vulkan, and without a display Wine
 #   has none ("Failed to load Wine graphics driver supporting Vulkan"), so the t_vk_* tests would see no device. The programs themselves draw nothing on it (SDL's dummy
 #   drivers: run_host_tests.sh)
 # - Mesa's lavapipe and the Vulkan loader (libvulkan.so.1, which winevulkan loads), for the t_vk_* tests on the CPU, as in the Linux image
 # - Python 3 for the script tests (t_host_profile, t_second_pack), git for the logs' commit: line
-# Wine's own PE DLLs ship with their DWARF debug sections (634 MB); they are stripped of them (strip --strip-debug, which keeps the "Wine builtin DLL" mark of their DOS
-# header) with binutils, which is removed again in the same layer. The versions apt resolved are printed at the end (docker/README.md records them)
+# Wine's PE DLLs and Unix libraries are stripped of their debug sections (strip --strip-debug, which keeps the "Wine builtin DLL" mark of a DLL's DOS header) with binutils,
+# which is removed again in the same layer, as are curl and gnupg. The versions apt resolved are printed at the end (docker/README.md records them)
 FROM ubuntu:24.04@sha256:24737cef17f4e22b1977df7d9a05e77c4e28b7da5b8911f8d8ccda136bf3573c
+ARG WINE_VERSION=11.0.0.0~noble-1
+ARG WINEHQ_KEY_FPR=D43F640145369C51D786DDEA76F1A20FF987672F
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update \
- && apt-get install -y --no-install-recommends wine wine64 xvfb xauth libxrandr2 libxrender1 libxi6 libxcursor1 libxfixes3 libxcomposite1 libxinerama1 \
-    mesa-vulkan-drivers libvulkan1 python3 git ca-certificates binutils \
- && find /usr/lib/x86_64-linux-gnu/wine/x86_64-windows -type f \( -name '*.dll' -o -name '*.exe' -o -name '*.drv' -o -name '*.sys' -o -name '*.ocx' -o -name '*.cpl' \
-    -o -name '*.acm' -o -name '*.ax' -o -name '*.com' -o -name '*.ds' -o -name '*.tlb' \) -exec strip --strip-debug {} + \
- && apt-get purge -y --auto-remove binutils \
+ && apt-get install -y --no-install-recommends ca-certificates curl gnupg binutils \
+ && curl -fsSL -o /tmp/winehq.key https://dl.winehq.org/wine-builds/winehq.key \
+ && fpr=$(gpg --show-keys --with-colons /tmp/winehq.key | awk -F: '$1 == "fpr" { print $10; exit }') \
+ && if [ "$fpr" != "$WINEHQ_KEY_FPR" ]; then echo "WineHQ's key has the fingerprint $fpr, not $WINEHQ_KEY_FPR" >&2; exit 1; fi \
+ && mkdir -p /etc/apt/keyrings && gpg --dearmor -o /etc/apt/keyrings/winehq-archive.key /tmp/winehq.key && rm -f /tmp/winehq.key \
+ && printf 'Types: deb\nURIs: https://dl.winehq.org/wine-builds/ubuntu\nSuites: noble\nComponents: main\nArchitectures: amd64\nSigned-By: /etc/apt/keyrings/winehq-archive.key\n' \
+    > /etc/apt/sources.list.d/winehq-noble.sources \
+ && apt-get update \
+ && apt-get install -y --no-install-recommends wine-stable-amd64=$WINE_VERSION xvfb xauth libxrandr2 libxrender1 libxi6 libxcursor1 libxfixes3 libxcomposite1 \
+    libxinerama1 mesa-vulkan-drivers libvulkan1 python3 git \
+ && cd /tmp && apt-get download wine-stable=$WINE_VERSION && dpkg -x wine-stable_*.deb / && rm -f /tmp/*.deb && cd / \
+ && find /opt/wine-stable/lib/wine -type f \( -name '*.dll' -o -name '*.exe' -o -name '*.drv' -o -name '*.sys' -o -name '*.ocx' -o -name '*.cpl' -o -name '*.acm' \
+    -o -name '*.ax' -o -name '*.com' -o -name '*.ds' -o -name '*.tlb' -o -name '*.so' \) -exec strip --strip-debug {} + \
+ && apt-get purge -y --auto-remove binutils curl gnupg \
  && rm -rf /var/lib/apt/lists/* \
- && dpkg-query -W -f '${db:Status-Abbrev}${Package} ${Version}\n' wine wine64 libwine xvfb mesa-vulkan-drivers libvulkan1 python3 | sed -n 's/^ii *//p'
+ && /opt/wine-stable/bin/wine --version \
+ && dpkg-query -W -f '${db:Status-Abbrev}${Package} ${Version}\n' wine-stable-amd64 xvfb mesa-vulkan-drivers libvulkan1 python3 | sed -n 's/^ii *//p'
 # No Mono or Gecko install prompt when a prefix is made. A UTF-8 Unix locale: Wine writes a Windows file name to the Unix file system in the locale's character set, and
 # in the image's default C locale (ASCII) creating a file named with any non-ASCII character fails with STATUS_OBJECT_NAME_NOT_FOUND, where NTFS takes any Unicode name
-ENV WINEDLLOVERRIDES="mscoree,mshtml=" WINEARCH=win64 LANG=C.UTF-8
+ENV PATH=/opt/wine-stable/bin:$PATH WINEDLLOVERRIDES="mscoree,mshtml=" WINEARCH=win64 LANG=C.UTF-8
 # The checkout is mounted at /src; git refuses repositories owned by another user without this (the container runs as the caller's user, HOME=/tmp)
 RUN git config --system --add safe.directory '*'
 WORKDIR /src

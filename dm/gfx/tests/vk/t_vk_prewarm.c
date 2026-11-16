@@ -170,7 +170,7 @@ int main(int argc, char **argv) {
     if (!mkdtemp(dir)) { perror("mkdtemp"); return 2; }
     char cache1[700], cache2[700], user[700];
     snprintf(cache1, sizeof cache1, "%s/cache", dir); snprintf(cache2, sizeof cache2, "%s/cache_cold", dir); snprintf(user, sizeof user, "%s/pso_user_vk.tsv", dir);
-    setenv("DM_PSO_MANIFEST", "", 1);   // set but empty: the lists a game's start reads (the seed beside the shader map, then the device's list), not the harness's "off"
+    setenv("DM_PSO_MANIFEST", "game", 1);   // the lists a game's start reads (the seed beside the shader map, then the device's list), not the harness's "off" (t_vk_harness.h)
     setenv("T_VK_PREWARM_DIR", dir, 1);
     static const char *const phases[] = {"background", "warm", "predict", "prebuild", "level_d"};
     int fail = 0, skipped = 0;

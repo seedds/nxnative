@@ -41,11 +41,12 @@ sys.exit(1 if any(l.startswith(("FAIL", "TIMEOUT")) for l in lines) else 0)
 '''
 
 KNOWN = (
-    "# test\tkind\tcheck\tevidence\treason\tseen on\n"
-    "t_tz\tdiffers\tthe zone name\t-\t_tzset keeps two letters\twine-9.0\n"
+    "# test\tkind\tcheck\tevidence\treason\tversions\n"
+    "t_tz\tdiffers\tthe zone name\t-\t_tzset keeps two letters\twine-9.0 wine-11.0\n"
     "t_dev\tdiffers\tdevice up\tlacks host allocations\twinevulkan reports no import\twine-9.0\n"
-    "t_crash\tdiffers\t-\tstub!\ta stub that crashes it\twine-9.0\n"
-    "t_py\tnot-run\t-\t-\tneeds a Windows Python\twine-9.0\n"
+    "t_crash\tdiffers\t-\tstub!\ta stub that crashes it\tany\n"
+    "t_new\tdiffers\tthe zone name\t-\ta row of another Wine\twine-11.0\n"   # the fake run is wine-9.0: this row does not apply
+    "t_py\tnot-run\t-\t-\tneeds a Windows Python\tany\n"
 )
 
 
@@ -136,6 +137,7 @@ class RunWineTests(unittest.TestCase):
             "t_dev": ["FAIL t_dev (exit 1, 0 s; see t_dev.log)", "[RED] device 0 lacks host allocations importable\ndevice up    ✗\n"],
             "t_crash": ["FAIL t_crash (exit 5, 0 s; see t_crash.log)", "0099:fixme:x:Y stub!\nwine: Unhandled page fault\n"],
             "t_py": ["NOT RUN t_py: needs a Windows Python", ""],
+            "t_new": ["FAIL t_new (exit 1, 0 s; see t_new.log)", "FAIL: the zone name\n"],
         }
         r = self.run_runner(scenario, str(self.build), str(self.logs))
         s = self.summary()
@@ -145,12 +147,13 @@ class RunWineTests(unittest.TestCase):
         self.assertEqual(first[1], "wine: wine-9.0 (fake)")
         self.assertIn("\nPASS t_ok (0 s)\n", s)
         self.assertIn('\nSKIP t_skip (0 s): "== t_skip: 0 checks, 0 failed (skipped: no Vulkan device) =="\n', s)
-        self.assertIn("\nDIFFERS t_tz (exit 1, 0 s; see t_tz.log): under Wine: _tzset keeps two letters (seen on wine-9.0)\n", s)
+        self.assertIn("\nDIFFERS t_tz (exit 1, 0 s; see t_tz.log): under Wine: _tzset keeps two letters (holds for wine-9.0 wine-11.0)\n", s)
         self.assertIn("\nFAIL t_tz2 (", s)   # no row names this test
         self.assertIn("\nDIFFERS t_dev (", s)   # the check line and its evidence on another line
-        self.assertIn("\nDIFFERS t_crash (", s)   # no failed check line, the evidence of a check - row
+        self.assertIn("\nDIFFERS t_crash (", s)   # no failed check line, the evidence of a check - row (a row for any Wine)
+        self.assertIn("\nFAIL t_new (", s)   # its only row holds for another Wine (wine-11.0), not this run's wine-9.0
         self.assertIn("\nNOT RUN t_py: needs a Windows Python\n", s)
-        self.assertIn("7 tests: 1 passed, 1 failed, 3 differ under Wine, 1 skipped, 1 not run", s)
+        self.assertIn("8 tests: 1 passed, 2 failed, 3 differ under Wine, 1 skipped, 1 not run", s)
         self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
         self.assertFalse((self.logs / ".wine_version").exists())
 
@@ -175,7 +178,7 @@ class RunWineTests(unittest.TestCase):
 
 FAKE_PROGRAM = r'''#!/bin/sh
 echo "$(basename "$0") args: $*"
-echo "TMPDIR=${TMPDIR:-unset} NXAOT_PACKS=${NXAOT_PACKS:-unset}"
+echo "TMPDIR=${TMPDIR:-unset} WINETMPDIR=${WINETMPDIR:-unset} NXAOT_PACKS=${NXAOT_PACKS:-unset}"
 '''
 
 FAKE_WINE = r'''#!/bin/sh
@@ -222,8 +225,10 @@ class HostRunnerWineSwitch(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         a = self.log("t_a")
         self.assertIn("through wine\nt_a.exe args: \n", a)
-        self.assertIn("TMPDIR=Z:%s/tmp NXAOT_PACKS=Z:%s" % (self.build, packs), a)
-        self.assertIn("command: cd Z:%s && TMPDIR=Z:%s/tmp " % (self.build, self.build), a)
+        # WINETMPDIR beside TMPDIR: Wine 11 gives a program TMPDIR only from WINETMPDIR (a Unix TMPDIR becomes WINE_HOST_TMPDIR)
+        self.assertIn("TMPDIR=Z:%s/tmp WINETMPDIR=Z:%s/tmp NXAOT_PACKS=Z:%s" % (self.build, self.build, packs), a)
+        self.assertIn("command: cd Z:%s && TMPDIR=Z:%s/tmp WINETMPDIR=Z:%s/tmp " % (self.build, self.build, self.build), a)
+        self.assertIn("WINETMPDIR=unset", self.log("t_aot_targets"))   # a test without the tmpdir column gets neither
         self.assertIn(" %s ./t_a.exe" % self.wine, a)
         self.assertIn("t_aot_targets.exe args: --corpus Z:%s/dm/tools/aot/corpus" % REPO, self.log("t_aot_targets"))
         self.assertFalse((self.logs / "t_b.log").exists())
@@ -241,7 +246,7 @@ class HostRunnerWineSwitch(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         a = self.log("t_a")
         self.assertNotIn("through wine", a)
-        self.assertIn("TMPDIR=%s/tmp " % self.build, a)
+        self.assertIn("TMPDIR=%s/tmp " % self.build, a); self.assertIn("WINETMPDIR=unset", a)   # no WINETMPDIR outside Wine
         s = (self.logs / "summary.txt").read_text()
         self.assertNotIn("wine:", s)
         self.assertNotIn("NOT RUN", s)

@@ -187,7 +187,11 @@ static void hv_library(void) {
     setenv("DM_MSL_DIR", g_lib, 1); setenv("DM_NVN_SHMAP", g_map, 1);
     snprintf(g_pcache, sizeof g_pcache, "%s/vk_pipeline_cache", g_lib);
     if (!getenv("DM_VK_PSO_CACHE")) { setenv("DM_VK_PSO_CACHE", g_pcache, 1); g_own_pcache = 1; }   // not the user's data folder
-    if (!getenv("DM_PSO_MANIFEST")) setenv("DM_PSO_MANIFEST", "off", 1);
+    // No prewarm list unless the test asks: DM_PSO_MANIFEST=game (a word, as an empty value is unset on every platform: dm/host/plat/plat.h) is the lists a game's start
+    // reads, the seed beside the shader map, then the device's list: the backend gets the switch unset, as in a game
+    const char *pm = getenv("DM_PSO_MANIFEST");
+    if (!pm) setenv("DM_PSO_MANIFEST", "off", 1);
+    else if (!strcmp(pm, "game")) unsetenv("DM_PSO_MANIFEST");
 }
 static void rm_dir(const char *dir) {   // a folder of files
     DIR *d = opendir(dir); if (!d) return;

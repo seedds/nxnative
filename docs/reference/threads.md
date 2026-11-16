@@ -171,7 +171,7 @@ Guest threads, their synchronization and how the host schedules them. Each entry
 
 ## The x86-64 engine on Windows
 
-Both found by running the cross-built test programs under Wine 9.0 ([docker/README.md](../../docker/README.md#running-the-windows-tests-under-wine)); neither has run on Windows yet.
+The first two found by running the cross-built test programs under Wine 9.0 ([docker/README.md](../../docker/README.md#running-the-windows-tests-under-wine)), the third by reading the host's waits against Windows' timer; none has run on Windows yet.
 
 ### Every leave of guest code crashes on Windows
 
@@ -188,6 +188,14 @@ Both found by running the cross-built test programs under Wine 9.0 ([docker/READ
 - **Fix:** on Windows `dm_jit_prepare` builds the decoder table itself, before it starts the helper (`dm/tools/aot/src/rt/jit.cpp`; 63 to 197 ms at the host's start there). Elsewhere `exit()` runs its functions without holding a lock a registration needs, and the helper still builds the table. Open: another static object with a destructor first used in the helper would wait the same way; none hung in the Wine runs.
 - **Check:** the three tests above pass under Wine. Not run on Windows (taken from the UCRT's documented behaviour, which Wine's shows too).
 - **Found on:** the port's host tests under Wine; no game.
+
+### A guest's short timed wait ends at Windows' timer tick
+
+- **Symptom:** expected on a Windows PC, not seen under Wine: a guest wait with a timeout of a few milliseconds that nobody ends (`svcWaitSynchronization`, `WaitProcessWideKeyAtomic` or `WaitForAddress` with a timeout) takes about 15.6 ms on Windows.
+- **Cause:** the host waits there with `pthread_cond_timedwait` (`hle_thread.c` `block()`), which winpthreads turns into a `WaitForSingleObject` of whole milliseconds; Windows serves every wait's timeout at its system timer's tick, 15.625 ms unless a process asks for a finer one, and so did `plat_sema_wait`. `plat_sleep_ns` has its own high-resolution waitable timer and was never affected. On Mario vs. Donkey Kong's title screen, measured on Linux, the rumble thread (`rmbl::VibrationThread`) alone lets about 200 timed waits of 4 to 5 ms a second expire: on Windows each would have lasted 15.6 ms, so it would have run at 64 Hz instead of about 200. Wine serves timeouts to the millisecond, so a run there cannot show it.
+- **Fix:** the platform layer sets the system timer to 1 ms for the process at its start (`plat_win32.c` `timer_period_1ms`, `timeBeginPeriod(1)`, per process from Windows 10 2004), in the constructor that every Windows program of the host runs.
+- **Check:** `t_timed_wait` (the median of 20 timed waits of 2 ms on a condition variable, `plat_sema_wait` and `plat_sleep_ns` under 10 ms, where the default tick gives about 15.6 ms; 2.1 ms on Linux, 2.2 to 7 ms under Wine 11 on a loaded machine). It passes under Wine with or without the fix; on a Windows PC (`run_win64_tests.ps1`) it is the check. Not run on Windows.
+- **Found on:** [Mario vs. Donkey Kong](../../dm/games/0100B99019412000/README.md) (the rumble thread's waits, counted on Linux); no Windows run.
 
 ## Synchronization and address arbitration
 

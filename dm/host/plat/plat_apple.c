@@ -142,3 +142,20 @@ const char *plat_addr_symbol(const void *a, uintptr_t *start) {
     if (start) *start = (uintptr_t)di.dli_saddr;
     return di.dli_sname;
 }
+
+// ---------- The environment (plat.h: an empty value is unset, as on Windows; the same code as plat_linux.c) ----------
+extern char **environ;
+void plat_env_scrub(void) {
+    for (int again = 1; again;) {   // unsetenv changes environ: start over after each removal
+        again = 0;
+        for (char **e = environ; e && *e; e++) {
+            const char *eq = strchr(*e, '=');
+            char name[256];
+            if (!eq || eq == *e || eq[1] || (size_t)(eq - *e) >= sizeof name) continue;
+            memcpy(name, *e, (size_t)(eq - *e)); name[eq - *e] = 0;
+            unsetenv(name); again = 1;
+            break;
+        }
+    }
+}
+__attribute__((constructor)) static void plat_env_rule(void) { plat_env_scrub(); }

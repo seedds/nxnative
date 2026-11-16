@@ -131,6 +131,13 @@ void plat_sha256(const void *p, size_t n, uint8_t out[32]);
 // ---------- Symbols ----------
 const char *plat_addr_symbol(const void *a, uintptr_t *start);   // the exported symbol containing host address a and its start (dladdr); NULL when unknown (always on Windows)
 
+// ---------- The environment ----------
+// One rule on every platform: an environment variable with an empty value is unset. Windows cannot hold an empty value in the C runtime's environment (setenv(name, "", 1)
+// is _putenv_s, which removes the variable), so a switch that read "set but empty" apart from "unset" would act otherwise there; this removes every empty variable, and
+// each platform's file runs it in a constructor, before main, in every program that links this layer (the host and its tests). A switch that needs a third state names it
+// with a word (DM_PSO_MANIFEST=game in the Vulkan tests), never with an empty value. Code that sets a variable to nothing calls unsetenv
+void plat_env_scrub(void);
+
 // ---------- Registration tables ----------
 // Static entries that object files add to one named table (hle.h HLE / HLE_FORCE; hle_table.c), read back as one array: a Mach-O section __DATA,<name> (getsectiondata),
 // an ELF section <name> between the linker's __start_<name> / __stop_<name>, a PE/COFF grouped section .<name>$m between markers in .<name>$a and .<name>$z (name: at most 7 characters).

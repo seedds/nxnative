@@ -70,12 +70,15 @@ while IFS="$tab" read -r name exe args tmp; do
     log=$logs/$name.log
     argv=; [ "$args" = - ] || argv=" $args"
     if [ -n "$packs" ] && { [ "$name" = t_aot_host ] || [ "$name" = t_aot_targets ]; }; then args="$([ "$args" = - ] || echo "$args") --corpus $corpus"; argv=" $args"; fi
-    env=; [ "$tmp" = tmpdir ] && { mkdir -p "$build/tmp"; env="TMPDIR=$tmpdir "; }
+    # TMPDIR for the tmpdir tests; under Wine also WINETMPDIR: Wine 11 imports a Unix TMPDIR into the Windows environment as WINE_HOST_TMPDIR (dlls/ntdll/unix/env.c,
+    # is_special_env_var), and gives a program TMPDIR only from WINETMPDIR; Wine 9.0 imports TMPDIR as it is and WINETMPDIR as a variable of that name, which nothing reads
+    env=; [ "$tmp" = tmpdir ] && { mkdir -p "$build/tmp"; env="TMPDIR=$tmpdir ${wine:+WINETMPDIR=$tmpdir }"; }
     cmdline="cd $native_build && $env${wrap:+$wrap }${wine:+$wine }./$exe$argv"
     printf 'date: %s\ncommit: %s\ncommand: %s\n\n' "$(now)" "$commit" "$cmdline" > "$log"
     t0=$(date +%s)
     # $wrap, $wine and the arguments are split at spaces on purpose
-    (cd "$build" && if [ "$tmp" = tmpdir ]; then TMPDIR=$tmpdir; export TMPDIR; fi; exec $wrap $wine "./$exe" $([ "$args" = - ] || echo "$args")) >> "$log" 2>&1
+    (cd "$build" && if [ "$tmp" = tmpdir ]; then TMPDIR=$tmpdir; export TMPDIR; if [ -n "$wine" ]; then WINETMPDIR=$tmpdir; export WINETMPDIR; fi; fi
+     exec $wrap $wine "./$exe" $([ "$args" = - ] || echo "$args")) >> "$log" 2>&1
     rc=$?
     secs=$(($(date +%s) - t0))
     printf '\nexit: %s (%s s)\n' "$rc" "$secs" >> "$log"

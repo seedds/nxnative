@@ -241,3 +241,5 @@ A line like `DM_PRESENT_SNAP=0` in `Documents/env.txt` (in the Files app, under 
 | Low latency (Windows and Linux) | `DM_VK_LATENCY` | `low`, `normal` |
 
 `DM_LAUNCHER=0` skips the settings screen; the choices you saved there still apply. `DM_SAVED_CHOICES=0` starts with the tested defaults and keeps your saved choices for later. How the settings are listed for each game: [dm/games/settings.tsv](../dm/games/settings.tsv).
+
+A line with nothing after the `=` (`DM_LANG=`) is as if it were not there, on the iPhone, the Mac, Windows and Linux alike: an empty value means the setting is not set, and the game's default (or a later line, or the pack's) applies. The same holds for a variable set to nothing in the environment a game or the launcher is started with. Windows cannot hold an empty value, so every platform reads it the same way ([An empty value is unset on every platform](reference/services.md#an-empty-value-is-unset-on-every-platform)).

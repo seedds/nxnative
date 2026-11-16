@@ -70,13 +70,13 @@ static std::string name_key(const std::string &k) {   // a variable's name as th
 // ---- The environment ----
 bool ProcessEnv::get(const std::string &key, std::string *value) const {
     const char *v = std::getenv(key.c_str());
-    if (!v) return false;
+    if (!v || !*v) return false;   // an empty value is unset (Env)
     if (value) *value = v;
     return true;
 }
 bool MapEnv::get(const std::string &key, std::string *value) const {
     auto it = vars.find(key);
-    if (it == vars.end()) return false;
+    if (it == vars.end() || it->second.empty()) return false;   // an empty value is unset (Env)
     if (value) *value = it->second;
     return true;
 }
@@ -626,8 +626,8 @@ Command compose(const Game &g, const std::string &mode, const Env &env, bool rec
     c.argv = {host.path, "--profile", g.launch.game_profile, pack->folder};
     std::string v;
     std::set<std::string> have;
-    auto add = [&](const KV &e) {
-        if (env.get(e.key) || have.count(name_key(e.key))) return;
+    auto add = [&](const KV &e) {   // an env.txt line with an empty value is as if absent (an empty value is unset: Env), so a row of the same name still applies
+        if (e.value.empty() || env.get(e.key) || have.count(name_key(e.key))) return;
         have.insert(name_key(e.key)); c.set.push_back(e);
     };
     if (!(env.get("DM_SAVED_CHOICES", &v) && v == "0")) for (const auto &e : read_env_file(g.launch.choices)) add(e);
@@ -673,7 +673,7 @@ static std::wstring quote_arg(const std::wstring &a) {   // the C runtime's comm
 bool spawn(const Command &cmd, Child *child, std::string *err) {
     if (cmd.argv.empty()) { *err = "nothing to start"; return false; }
     if (!prepare(cmd, err)) return false;
-    std::vector<std::wstring> vars;   // the environment block: this process's with the launcher's variables, sorted without case as Windows wants it
+    std::vector<std::wstring> vars;   // the environment block: this process's with the launcher's variables, sorted without case as Windows wants it; no empty value (Env)
     if (wchar_t *block = GetEnvironmentStringsW()) {
         for (wchar_t *e = block; *e; e += wcslen(e) + 1) vars.push_back(e);
         FreeEnvironmentStringsW(block);
@@ -687,6 +687,8 @@ bool spawn(const Command &cmd, Child *child, std::string *err) {
         }
         if (!done) vars.push_back(line);
     }
+    // no empty value (Env): a variable set to nothing is unset; the hidden "=C:=C:\\..." entries (a drive's current folder) start with '=' and stay
+    vars.erase(std::remove_if(vars.begin(), vars.end(), [](const std::wstring &e) { return !e.empty() && e[0] != L'=' && e.back() == L'='; }), vars.end());
     std::sort(vars.begin(), vars.end(), [](const std::wstring &a, const std::wstring &b) { return CompareStringOrdinal(a.c_str(), -1, b.c_str(), -1, TRUE) == CSTR_LESS_THAN; });
     std::wstring block;
     for (const auto &e : vars) { block += e; block += L'\0'; }
@@ -734,6 +736,7 @@ bool spawn(const Command &cmd, Child *child, std::string *err) {
         for (auto &e : vars) if (e.compare(0, kv.key.size() + 1, kv.key + "=") == 0) { e = line; done = true; break; }
         if (!done) vars.push_back(line);
     }
+    vars.erase(std::remove_if(vars.begin(), vars.end(), [](const std::string &e) { return !e.empty() && e.back() == '='; }), vars.end());   // no empty value (Env): unset
     std::vector<char *> envp, argv;   // made before fork: the child only calls what is async-signal-safe
     for (auto &e : vars) envp.push_back(&e[0]);
     envp.push_back(nullptr);

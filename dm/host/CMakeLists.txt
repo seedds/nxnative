@@ -453,6 +453,8 @@ host_test(t_vorbis_divides SOURCES t_vorbis.c DEFS STB_VORBIS_DIVIDES_IN_RESIDUE
 host_test(t_touch SOURCES t_touch.c ../hle_touch.c PROFILE)
 host_test(t_gesture SOURCES t_gesture.c ../hle_touch.c PROFILE)
 host_test(t_thread_leak SOURCES t_thread_leak.c PROFILE)
+host_test(t_env_rule SOURCES t_env_rule.c)   # an empty value is unset on every platform (plat.h plat_env_scrub)
+host_test(t_timed_wait SOURCES t_timed_wait.c)   # a short timed wait ends on time (Windows: the system timer at 1 ms, plat_win32.c timer_period_1ms)
 host_test(t_swkbd SOURCES t_swkbd.c ../hle_swkbd.c PROFILE DEFS DM_TEST_GUEST_C)   # its keyboard callbacks are C functions
 host_test(t_pctl SOURCES t_pctl.c PROFILE DEFS DM_TEST_GUEST_C)   # DM_TEST_GUEST_C: the host files a test includes take their native form (hle_misc.c, hle_ro.c, hle_guestthread.c, and every GUEST_CALL site)
 host_test(t_time SOURCES t_time.c PROFILE DEFS DM_TEST_GUEST_C)   # DM_TEST_GUEST_C here and below: the included host file's native form (no arena: aot.h, "Host memory the guest sees")

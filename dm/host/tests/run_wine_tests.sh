@@ -3,13 +3,14 @@
 # the run in logs/wine/ (logs/README.md): the closest check of the Windows programs a Linux machine gives. A run under Wine is not a run on Windows: summary.txt says so
 # and names the Wine version on its first lines, and logs/win64/ stays for a real Windows PC. From anywhere, on the Linux host (Docker, no Wine needed on the host):
 #   sh dm/host/tests/run_wine_tests.sh [--packs <folder>] [--image <name>] <build folder> [<log folder>]
-# The list, the logs and the per-test environment are run_host_tests.sh's, which this script runs inside the image with WINE set (the programs through
-# /usr/lib/wine/wine64, the paths they take in Wine's Z: form) and NOT_RUN set (the runs the table below marks not-run). The container gets Xvfb (Wine's Vulkan needs a
-# graphics driver: Dockerfile.wine), a fresh Wine prefix in its /tmp, a tmpfs at /run/user/<uid> (Wine's server directory: without it Wine 9.0 aborts at start when
-# TMPDIR is set, which the tmpdir tests need) and Wine's crash dialog off (a crash prints winedbg's backtrace into the test's log instead of waiting on a window).
+# The list, the logs and the per-test environment are run_host_tests.sh's, which this script runs inside the image with WINE set (the programs through the image's
+# wine, WineHQ's wine-stable on PATH, the paths they take in Wine's Z: form) and NOT_RUN set (the runs the table below marks not-run for this Wine). The container gets Xvfb
+# (Wine's Vulkan needs a graphics driver: Dockerfile.wine), a fresh Wine prefix in its /tmp, a tmpfs at /run/user/<uid> (Wine's server directory: without it Wine 9.0
+# aborted at start when TMPDIR was set, which the tmpdir tests need) and Wine's crash dialog off (a crash prints winedbg's backtrace into the test's log instead of waiting on
+# a window).
 # --packs: the Windows packs of the AOT tests (build_packs.sh's <out>/win64: the DLLs, module/, hostfn/, second_pack/), else NXAOT_PACKS, else <build folder>/packs/win64
 # when it exists; mounted read-only. TIMEOUT=<seconds> per test (default 120).
-# Known Wine differences: dm/host/tests/wine_differences.tsv (test, kind, check, evidence, reason, the Wine version it was seen on; its header has the rule). A FAIL or
+# Known Wine differences: dm/host/tests/wine_differences.tsv (test, kind, check, evidence, reason, the Wine versions it holds for; its header has the rule). A FAIL or
 # TIMEOUT whose every failed check (a line with FAIL or a cross mark) is one a `differs` row of the test names, with that row's evidence in the log, is reported as DIFFERS
 # with the rows' reasons, apart from passes and failures; a test of a `not-run` row is not started (NOT RUN, with the reason). So a new failure stays a FAIL.
 # Exit status: 0 when nothing failed (DIFFERS and NOT RUN do not fail the run), 1 when a run failed, 2 on a usage error, a missing tree or a missing image
@@ -48,7 +49,7 @@ uid=$(id -u) gid=$(id -g)
 # Inside the image: the display, the prefix, then run_host_tests.sh. Its arguments: repo, build, logs, packs (may be empty), the not-run list, the time limit
 inner='set -u
 repo=$1 build=$2 logs=$3 packs=$4 notrun=$5 limit=$6
-wine=/usr/lib/wine/wine64
+wine=wine   # /opt/wine-stable/bin/wine of WineHQ, on the PATH of the image (Dockerfile.wine): the one loader of Wine 11 for 32- and 64-bit programs
 # fixme-dbghelp: the symbol loader of winedbg writes thousands of "elf_search_auxv" lines into the log of a crashed test; the other fixme and err lines of Wine stay
 export WINEPREFIX=/tmp/wineprefix DISPLAY=:99 PYTHONDONTWRITEBYTECODE=1 WINEDEBUG=fixme-dbghelp
 mkdir -p "$WINEPREFIX" /tmp/nx-wine
@@ -58,11 +59,13 @@ i=0; while [ ! -S /tmp/.X11-unix/X99 ] && [ $i -lt 100 ]; do sleep 0.1; i=$((i +
 "$wine" --version > /tmp/nx-wine/version.txt 2>&1
 if ! "$wine" wineboot -i > /tmp/nx-wine/wineboot.txt 2>&1; then echo "wineboot failed:"; cat /tmp/nx-wine/wineboot.txt; exit 3; fi
 "$wine" reg add "HKCU\\Software\\Wine\\WineDbg" /v ShowCrashDialog /t REG_DWORD /d 0 /f > /dev/null 2>&1 || { echo "the crash dialog could not be turned off"; exit 3; }
-/usr/lib/wine/wineserver -p
-awk -F "\t" "\$1 !~ /^#/ && \$2 == \"not-run\" { print \$1 \"\t\" \$5 }" "$notrun" > /tmp/nx-wine/not_run.tsv
+wineserver -p
+# the not-run rows that hold for this Wine (the first word of its --version, or any)
+ver=$(awk "{ print \$1; exit }" /tmp/nx-wine/version.txt)
+awk -F "\t" -v ver="$ver" "\$1 !~ /^#/ && \$2 == \"not-run\" && (\$6 == \"any\" || index(\" \" \$6 \" \", \" \" ver \" \")) { print \$1 \"\t\" \$5 }" "$notrun" > /tmp/nx-wine/not_run.tsv
 WINE=$wine NOT_RUN=/tmp/nx-wine/not_run.tsv TIMEOUT=$limit NXAOT_PACKS=$packs sh "$repo/dm/host/tests/run_host_tests.sh" "$build" "$logs"
 rc=$?
-/usr/lib/wine/wineserver -k 2>/dev/null
+wineserver -k 2>/dev/null
 cp /tmp/nx-wine/version.txt "$logs/.wine_version"
 exit $rc'
 
@@ -83,13 +86,15 @@ rc=$?
 version=$(head -n 1 "$logs/.wine_version" 2>/dev/null); rm -f "$logs/.wine_version"
 [ -n "$version" ] || version=unknown
 
-# The known differences: each FAIL or TIMEOUT of the summary checked against the table's differs rows for its name (wine_differences.tsv's header has the rule). A failed
-# check is a line of the test's output (after the log's three header lines) with FAIL or a cross mark, Wine's own debug lines (0123:fixme:...) aside. Prints the reasons of
-# the rows that explain the run; fails when a failed check is not explained, or nothing is
+# The known differences: each FAIL or TIMEOUT of the summary checked against the table's differs rows for its name that hold for this Wine (their last column lists
+# the first word of `wine --version` of each Wine they were seen on, or any; wine_differences.tsv's header has the rule). A failed check is a line of the test's output
+# (after the log's three header lines) with FAIL or a cross mark, Wine's own debug lines (0123:fixme:...) aside. Prints the reasons of the rows that explain the run;
+# fails when a failed check is not explained, or nothing is
+ver=${version%% *}
 classify() {
     [ -f "$logs/$1.log" ] || return 1
-    awk -F '\t' -v n="$1" '
-        FNR == NR { if ($1 == n && $2 == "differs") { k++; check[k] = $3; ev[k] = $4; why[k] = $5 " (seen on " $6 ")" } next }
+    awk -F '\t' -v n="$1" -v ver="$ver" '
+        FNR == NR { if ($1 == n && $2 == "differs" && ($6 == "any" || index(" " $6 " ", " " ver " "))) { k++; check[k] = $3; ev[k] = $4; why[k] = $5 " (holds for " $6 ")" } next }
         FNR > 4 { text[++lines] = $0 }
         END {
             if (!k) exit 1

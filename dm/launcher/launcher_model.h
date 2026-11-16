@@ -32,7 +32,9 @@ inline constexpr const char *kPlatform = "linux", *kPackSuffix = ".aot.so", *kEx
 // ---- The environment: the process's, or a map (tests) ----
 struct Env {
     virtual ~Env() = default;
-    virtual bool get(const std::string &key, std::string *value = nullptr) const = 0;   // set (an empty value counts as set, as getenv does)
+    // set to a value that is not empty: an empty value counts as unset on every platform (dm/host/plat/plat.h; the C runtime of Windows cannot even hold one), so a
+    // variable set to nothing in the launcher's environment does not keep an env.txt line or an env row out
+    virtual bool get(const std::string &key, std::string *value = nullptr) const = 0;
 };
 struct ProcessEnv : Env {
     bool get(const std::string &key, std::string *value = nullptr) const override;

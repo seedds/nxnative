@@ -523,6 +523,14 @@ Most service calls can be found before they crash, before the first boot or the 
 
 ## Settings, languages and fonts
 
+### An empty value is unset on every platform
+
+- **Symptom:** under Wine 11, the first Wine that let the Vulkan tests run, `t_vk_pipeline_cache` and `t_vk_prewarm` failed with `pipeline prewarm off (DM_PSO_MANIFEST=off)` in their children and "the device's list prewarmed them: none"; on Linux they passed.
+- **Cause:** the tests asked for "set but empty" (`setenv("DM_PSO_MANIFEST", "", 1)`: the lists a game reads, not the harness's `off`). On Windows the C runtime cannot hold an empty value: `setenv` is `_putenv_s` (`plat_win32.c`), which removes the variable, so the children saw it unset and the harness set `off`. The same split ran through the whole environment: 43 reads of 34 switches only ask whether a variable is set (`DM_WINDOW`, `DM_FIXED_TIME`, `DM_PRELOAD`, `DM_VK_LOG`, …), so a variable set to nothing counted as set on Linux and Apple and as unset on Windows; a player's `env.txt` line `KEY=` reached the game empty through `run.sh` and the launcher on Linux, and not at all through `run.cmd` on Windows, where it also let the pack's default for that key apply.
+- **Fix:** one rule, an empty value is unset, on every platform. The platform layer removes every empty variable before `main` in each program that links it (`plat_env_scrub`, in a constructor of `plat_linux.c`, `plat_apple.c` and `plat_win32.c`, which also clears the process's Win32 block); `DM_CTL`'s `env NAME=` unsets; the launcher reads an empty value as unset, skips an `env.txt` line with one and starts the game with none (`launcher_model.cpp`); `run.sh` does the same (`build_ipa_from_nsp.py`); the Mac launcher and the iPhone app skip an empty line of their env files. A switch that needs a third state names it with a word: the Vulkan tests' harness takes `DM_PSO_MANIFEST=game` for the lists a game reads (`t_vk_harness.h`).
+- **Found on:** the Windows tests under Wine 11 (`dm/host/tests/run_wine_tests.sh`), not on a game.
+- **Check:** `t_env_rule` (a variable set to nothing in the process and in a child started with it: unset; fails without the scrub), `t_launcher_model` (an empty value in the environment and in `env.txt`), `test_nsp_x86.py` (`run.sh` with both), and `t_vk_pipeline_cache` and `t_vk_prewarm` under Wine 11.
+
 ### Language codes
 
 - **Symptom:** the first comparison in `nnMain` aborted in `sm`.

@@ -2832,10 +2832,10 @@ while IFS=$tab read -r kind name value; do
     esac
 done < "$launch"
 if [ "${DM_SAVED_CHOICES:-}" != 0 ] && [ -n "$choices" ] && [ -f "$choices" ]; then
-    eval "$(awk 'BEGIN { q = sprintf("%c", 39) } { sub(/^[ \t]+/, ""); sub(/[ \t\r]+$/, ""); if (substr($0, 1, 1) == "#") next; i = index($0, "="); if (i < 2) next; k = substr($0, 1, i - 1); sub(/[ \t]+$/, "", k); if (k !~ /^[A-Za-z_][A-Za-z0-9_]*$/) next; v = substr($0, i + 1); gsub(q, q "\\" q q, v); print "printenv " k " > /dev/null || export " k "=" q v q }' "$choices")"
+    eval "$(awk 'BEGIN { q = sprintf("%c", 39) } { sub(/^[ \t]+/, ""); sub(/[ \t\r]+$/, ""); if (substr($0, 1, 1) == "#") next; i = index($0, "="); if (i < 2) next; k = substr($0, 1, i - 1); sub(/[ \t]+$/, "", k); if (k !~ /^[A-Za-z_][A-Za-z0-9_]*$/) next; v = substr($0, i + 1); if (v == "") next; gsub(q, q "\\" q q, v); print "[ -n \"$(printenv " k ")\" ] || export " k "=" q v q }' "$choices")"
 fi
 while IFS=$tab read -r kind name value; do
-    if [ "$kind" = env ] && ! printenv "$name" > /dev/null; then export "$name=$value"; fi
+    if [ "$kind" = env ] && [ -z "$(printenv "$name")" ]; then export "$name=$value"; fi
 done < "$launch"
 if [ -z "$host" ] || [ -z "$gprof" ] || [ -z "$cwd" ] || [ -z "$aot" ]; then
     echo "[RED] run.sh: $launch names no host, game profile, working folder or pack${NXPACK:+ of the mode $NXPACK}: pack the game again (scripts/build_ipa_from_nsp.py --platform linux${NXPACK:+ --pack-mode $NXPACK})" >&2; exit 1
@@ -2926,7 +2926,7 @@ def port_run_script(platform, repo, work, wdir, g, name, launch, host=None):
                        + f' && cmake --build {tree} --target nxhost-run (docker/README.md, "From a Linux host"' + (', in the llvm-mingw image)' if win else ')'))
     about += [f'What it starts comes from {launch.name} beside this script, which the launcher nxlauncher (dm/launcher) reads too, so both start the game the same way: the pack (the first',
               'pack row, or NXPACK=balanced / max), and the environment: what is already set stays, then the player\'s saved choices (the choices row: env.txt, KEY=VALUE lines, # comments;',
-              'not read with DM_SAVED_CHOICES=0), then the env rows, each only where nothing set it before.',
+              'not read with DM_SAVED_CHOICES=0), then the env rows, each only where nothing set it before. An empty value counts as unset, as on every platform.',
               f'NXHOST=<path> runs another build; the arguments go to nxhost-run: [module...] [-- game arguments]. The save stays in {rd / "save"} from run to run.',
               f'When the launch file\'s host is gone (a bundle moved or replaced) and NXHOST is not set, it takes bin/{exe} of the first folder above this script that is a',
               f'bundle (nxlauncher{".exe" if win else ""} beside bin/{exe}: a bundle that holds this NSP folder), and says so.']

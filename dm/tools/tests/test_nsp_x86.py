@@ -108,14 +108,15 @@ def env_txt(path):
 
 def compose(launch, environ, nxpack=None):
     """What a reader of the launch file starts, by its rules: (host, its arguments before the script's: --profile <the game profile's file> <pack folder>, working folder, the
-    variables it sets). The environment first, then the player's env.txt unless DM_SAVED_CHOICES=0, then the env rows, each only where nothing set it before"""
+    variables it sets). The environment first, then the player's env.txt unless DM_SAVED_CHOICES=0, then the env rows, each only where nothing set it before; an empty value
+    counts as unset on every platform (dm/host/plat/plat.h), in the environment and on a line of env.txt"""
     rows = launch_rows(launch)
     paths = {n: v for k, n, v in rows if k == 'path'}
     aot = next((v for k, n, v in rows if k == 'pack' and (not nxpack or n == nxpack)), None)
-    have, added = dict(environ), {}
+    have, added = {k: v for k, v in environ.items() if v}, {}
     pairs = env_txt(Path(paths['choices'])) if environ.get('DM_SAVED_CHOICES') != '0' else []
     for k, v in pairs + [(n, v) for k, n, v in rows if k == 'env']:
-        if k not in have: have[k] = added[k] = v
+        if v and k not in have: have[k] = added[k] = v
     return paths['host'], ['--profile', paths['game_profile'], aot], paths['cwd'], added
 
 
@@ -312,6 +313,11 @@ class Linux(Pack):
         self.assertEqual({k: got['env'][k] for k in ('DM_OPMODE', 'DM_LANG', 'DM_QUOTE', 'DM_RUMBLE', 'DM_WINDOW')},
                          {'DM_OPMODE': '0', 'DM_LANG': ' ja', 'DM_QUOTE': 'it\'s "$HOME" `x`', 'DM_RUMBLE': '1', 'DM_WINDOW': '1'})
         self.assertNotIn('DM_OPMODE', self.check_run_sh(DM_SAVED_CHOICES='0')['env'])   # DM_SAVED_CHOICES=0: env.txt is not read
+        # an empty value is unset, as on Windows (whose C runtime cannot hold one): a line of env.txt with one is as if absent, and one in the environment keeps nothing out
+        (self.wdir / 'run/env.txt').write_text('DM_LANG=\nDM_OPMODE=0\n', encoding='utf-8')
+        rc, err, got = self.run_sh(DM_WINDOW='')
+        self.assertEqual((rc, err), (0, ''))
+        self.assertEqual((got['env'].get('DM_LANG'), got['env'].get('DM_WINDOW'), got['env'].get('DM_OPMODE')), ('en-US', '1', '0'))
         self.assertEqual(self.check_run_sh(DM_ROMFS='/elsewhere')['env']['DM_ROMFS'], '/elsewhere')
         rc, err, got = self.run_sh(NXPACK='max')   # no max pack yet
         self.assertEqual((rc, got), (1, None)); self.assertIn('[RED] run.sh: ', err); self.assertIn('--pack-mode max', err)

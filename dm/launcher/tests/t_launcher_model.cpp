@@ -160,6 +160,14 @@ static void command(const fake::Folder &f) {
     Command cs = compose(a, "", set);
     CHECK(value(cs.set, "DM_LANG") == "<unset>" && value(cs.set, "DM_OPMODE") == "<unset>", "what the environment sets stays");
     CHECK_EQ(cs.argv[0], std::string("/opt/other/nxhost-run"), "NXHOST names another nxhost-run");
+    // An empty value is unset on every platform (dm/host/plat/plat.h): set to nothing in the environment, or on a line of env.txt, it keeps nothing out
+    MapEnv blank; blank.vars = {{"DM_LANG", ""}, {"NXHOST", ""}};
+    CHECK(!blank.get("DM_LANG") && !ProcessEnv().get("T_LAUNCHER_SURELY_UNSET"), "an empty value counts as unset");
+    Command cb = compose(a, "", blank);
+    CHECK(value(cb.set, "DM_LANG") == "en-US" && cb.argv[0] == a.launch.host, "... so the env row's DM_LANG applies and the host row stands");
+    fake::write(f.a_run / "env.txt", std::string(fake::kChoices) + "DM_LANG=\n");
+    CHECK_EQ(value(compose(a, "", none).set, "DM_LANG"), std::string("en-US"), "an env.txt line with an empty value is as if absent: the env row applies");
+    fake::write(f.a_run / "env.txt", fake::kChoices);
     MapEnv ignore; ignore.vars = {{"DM_SAVED_CHOICES", "0"}};
     CHECK_EQ(keys(compose(a, "", ignore).set).front(), std::string("DM_MOTION"), "DM_SAVED_CHOICES=0: env.txt is not read");
     CHECK(compose(b, "max", none).error.find("no max pack") != std::string::npos, "a mode that was not packed");

@@ -182,10 +182,10 @@ int main(int argc, char **argv) {
     char dir[600], cache[700], user[700]; snprintf(dir, sizeof dir, "%s/t_vk_pcache_XXXXXX", tmp && *tmp ? tmp : "/tmp");
     if (!mkdtemp(dir)) { perror("mkdtemp"); return 2; }
     snprintf(cache, sizeof cache, "%s/cache", dir); snprintf(user, sizeof user, "%s/pso_user_vk.tsv", dir);
-    setenv("DM_VK_PSO_CACHE", cache, 1); setenv("DM_VK_PSO_USER", user, 1); setenv("DM_PSO_MANIFEST", "", 1); setenv("T_VK_PCACHE_DIR", dir, 1);
+    setenv("DM_VK_PSO_CACHE", cache, 1); setenv("DM_VK_PSO_USER", user, 1); setenv("DM_PSO_MANIFEST", "game", 1); setenv("T_VK_PCACHE_DIR", dir, 1);
     char name[400], path[900], planted_same[1000] = "", planted_other[1000] = "", planted_old[1000] = "", r[900], suffix[64], prefix[64] = "";
     snprintf(suffix, sizeof suffix, "-%s-v1.bin", DMSH_CHAIN_VK);   // this chain and backend version (vk_cache.c HVK_CACHE_VERSION 1)
-    setenv("DM_VK_PSO_CACHE_LIMIT", "", 1); setenv("DM_VK_PSO_CACHE_CLEANUP", "", 1);   // the defaults: 512 MiB, the cleanup on
+    unsetenv("DM_VK_PSO_CACHE_LIMIT"); unsetenv("DM_VK_PSO_CACHE_CLEANUP");   // the defaults: 512 MiB, the cleanup on (unset: an empty value is unset on every platform)
     int fail = 0;
 #define START(ph) do { printf("---- start: %s ----\n", ph); int rc_ = hv_spawn(argv[0], ph); snprintf(r, sizeof r, "%s/%s.res", dir, ph); if (rc_) { printf("start %s failed (exit status %d)\n", ph, rc_); fail = 1; } } while (0)
     START("write");
@@ -240,7 +240,7 @@ int main(int argc, char **argv) {
     snprintf(cnt, sizeof cnt, "stale-off: one cleanup line, no limit line, no red line (%.0f, %.0f, %.0f)", hv_res_get(r, "cleanup_lines", -1), hv_res_get(r, "limit_lines", -1), hv_res_get(r, "red_cache", -1));
     t(cnt, hv_res_get(r, "cleanup_lines", -1) == 1 && hv_res_get(r, "limit_lines", -1) == 0 && hv_res_get(r, "red_cache", -1) == 0);
     t("stale-off: the index consistent (5 entries)", index_consistent(cache, &nent) && nent == 5);
-    setenv("DM_VK_PSO_CACHE_CLEANUP", "", 1);
+    unsetenv("DM_VK_PSO_CACHE_CLEANUP");
     START("stale-on");
     t("stale-on: another chain version's, the 100-day-old and another driver's entries removed", !has(cache, n1) && !has(cache, n2) && !has(cache, n3));
     t("stale-on: this game's entry and another device's current one kept", has(cache, cur) && planted_other[0] && exists(planted_other));
@@ -268,7 +268,7 @@ int main(int argc, char **argv) {
     unplant(cache);
     if (have) remove(path);
     plant(cache, na, 600000, now - 2000); plant(cache, nb, (1 << 20) - 40 - 600000, now - 1000);   // 40 bytes under 1 MiB without this game's file
-    setenv("DM_VK_PSO_CACHE_CLEANUP", "", 1); setenv("DM_VK_PSO_CACHE_LIMIT", "1", 1);
+    unsetenv("DM_VK_PSO_CACHE_CLEANUP"); setenv("DM_VK_PSO_CACHE_LIMIT", "1", 1);
     START("afterwrite");
     t("afterwrite: the shutdown's write took the folder over 1 MiB: the least recently used entry removed, the other kept", !has(cache, na) && has(cache, nb));
     t("afterwrite: this game's file written", have && file_valid(path, NULL));
@@ -276,7 +276,7 @@ int main(int argc, char **argv) {
     t("afterwrite: the index consistent (2 entries)", index_consistent(cache, &nent) && nent == 2);
     char ip[800]; snprintf(ip, sizeof ip, "%s/index.tsv", cache);
     char *before = slurp(ip);
-    setenv("DM_VK_PSO_CACHE", "off", 1); setenv("DM_VK_PSO_CACHE_LIMIT", "", 1);
+    setenv("DM_VK_PSO_CACHE", "off", 1); unsetenv("DM_VK_PSO_CACHE_LIMIT");
     START("off");
     char *after = slurp(ip);
     t("off: DM_VK_PSO_CACHE=off: no cache, no data read", hv_res_get(r, "ran", 0) == 1 && hv_res_get(r, "on", -1) == 0 && hv_res_get(r, "loaded", -1) == 0);

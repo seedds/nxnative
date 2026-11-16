@@ -491,9 +491,11 @@ static void test_sampler_objects(void) {
 
 // Extension names by gl_aliases.h (Fate/hollow ataraxia REMASTERED asks for its framebuffer functions by their EXT names, issue #2818), never by a stripped suffix; binds that
 // make a name glGen* never gave; EGL's current context, display and surfaces, per thread
+typedef struct { void *before, *after; EGLBoolean bound; EGLint error, next_error; } egl_attempt;
 static void *other_thread(void *arg) {
-    void **seen = arg; seen[0] = h_eglGetCurrentContext();   // current on the main thread, not here
-    h_eglMakeCurrent((EGLDisplay)&g_egl, (EGLSurface)3, (EGLSurface)3, (EGLContext)2); seen[1] = h_eglGetCurrentContext();   // taken here
+    egl_attempt *seen = arg; seen->before = h_eglGetCurrentContext();
+    seen->bound = h_eglMakeCurrent((EGLDisplay)&g_egl, (EGLSurface)3, (EGLSurface)3, (EGLContext)2);
+    seen->after = h_eglGetCurrentContext(); seen->error = h_eglGetError(); seen->next_error = h_eglGetError();
     return NULL;
 }
 static void test_extension_names_and_egl(void) {
@@ -516,18 +518,43 @@ static void test_extension_names_and_egl(void) {
     h_eglMakeCurrent(d, (EGLSurface)3, (EGLSurface)4, (EGLContext)2);
     assert(h_eglGetCurrentContext() == (EGLContext)2 && h_eglGetCurrentDisplay() == d);
     assert(h_eglGetCurrentSurface(0x3059) == (EGLSurface)3 && h_eglGetCurrentSurface(0x305a) == (EGLSurface)4 && !h_eglGetCurrentSurface(0x3000));
-    void *seen[2]; pthread_t th; pthread_create(&th, NULL, other_thread, seen); pthread_join(th, NULL);
-    assert(!seen[0] && seen[1] == (EGLContext)2 && !h_eglGetCurrentContext());   // the other thread took the context: none here
-    h_eglMakeCurrent(d, (EGLSurface)3, (EGLSurface)3, (EGLContext)2); assert(h_eglGetCurrentContext() == (EGLContext)2);
+    egl_attempt seen = {0}; pthread_t th; pthread_create(&th, NULL, other_thread, &seen); pthread_join(th, NULL);
+    assert(!seen.before && !seen.bound && !seen.after && seen.error == 0x3002 && seen.next_error == 0x3000);   // BAD_ACCESS, cleared on read
+    assert(h_eglGetCurrentContext() == (EGLContext)2 && h_eglGetCurrentSurface(0x305a) == (EGLSurface)4 && h_eglGetError() == 0x3000);
     h_eglMakeCurrent(d, NULL, NULL, NULL); assert(!h_eglGetCurrentContext() && !h_eglGetCurrentDisplay() && !h_eglGetCurrentSurface(0x3059));
+    pthread_create(&th, NULL, other_thread, &seen); pthread_join(th, NULL);
+    assert(!seen.before && seen.bound && seen.after == (EGLContext)2 && seen.error == 0x3000);   // released here, acquired there; thread exit releases it too
     h_eglMakeCurrent(d, (EGLSurface)3, (EGLSurface)3, (EGLContext)2); h_eglReleaseThread(); assert(!h_eglGetCurrentContext());
 }
 
 // The other calls Fate/hollow ataraxia REMASTERED makes that the layer lacked (issue #2818): glValidateProgram after each link, glLineWidth, glClearTexImage on its new textures
+static void test_program_validation(void) {
+    static shsamp samplers[] = {{"flat", 0, T_SAMP2D}, {"cube", 1, T_SAMPCUBE}};
+    static shinfo vsi = {.ub_slot = -1}, fsi = {.frag = 1, .ub_slot = -1, .nt = 2, .t = samplers};
+    GLuint pr = h_glCreateProgram(), vs = h_glCreateShader(GL_VERTEX_SHADER), fs = h_glCreateShader(GL_FRAGMENT_SHADER), was = S.prog;
+    shader_of(vs)->si = &vsi; shader_of(vs)->fn = (id)[NSObject new]; shader_of(fs)->si = &fsi; shader_of(fs)->fn = (id)[NSObject new];
+    h_glAttachShader(pr, vs); h_glAttachShader(pr, fs); h_glLinkProgram(pr); h_glUseProgram(pr);
+    GLint v; h_glGetProgramiv(pr, GL_VALIDATE_STATUS, &v); assert(v == 0);   // no validation yet
+    h_glValidateProgram(pr); h_glGetProgramiv(pr, GL_VALIDATE_STATUS, &v); assert(v == 0);   // both types start at unit 0
+    char log[160] = {0}; GLsizei len = 0; h_glGetProgramInfoLog(pr, sizeof log, &len, log); assert(strstr(log, "different types"));
+    h_glGetProgramiv(pr, GL_INFO_LOG_LENGTH, &v); assert(v == len + 1);
+    GLint cube = h_glGetUniformLocation(pr, "cube"); h_glUniform1i(cube, 1);
+    h_glValidateProgram(pr); h_glGetProgramiv(pr, GL_VALIDATE_STATUS, &v); assert(v == 1);
+    h_glUniform1i(cube, NUNITS); h_glGetProgramiv(pr, GL_VALIDATE_STATUS, &v); assert(v == 1);   // the previous validation's snapshot
+    h_glValidateProgram(pr); h_glGetProgramiv(pr, GL_VALIDATE_STATUS, &v); assert(v == 0);
+    h_glGetProgramInfoLog(pr, sizeof log, &len, log); assert(strstr(log, "outside"));
+    h_glUniform1i(cube, -1); h_glValidateProgram(pr); h_glGetProgramiv(pr, GL_VALIDATE_STATUS, &v); assert(v == 0);
+    h_glUniform1i(cube, 1); h_glValidateProgram(pr); h_glGetProgramiv(pr, GL_VALIDATE_STATUS, &v); assert(v == 1);
+    h_glGetProgramInfoLog(pr, sizeof log, &len, log); assert(len == 0 && !log[0]);
+    h_glLinkProgram(pr); h_glGetProgramiv(pr, GL_VALIDATE_STATUS, &v); assert(v == 0);   // relinking invalidates validation
+    h_glUseProgram(was); h_glDeleteProgram(pr); h_glDeleteShader(vs); h_glDeleteShader(fs); assert(h_glGetError() == GL_NO_ERROR);
+}
+
 static void test_fate_calls(void) {
     assert(import("glValidateProgram") == (void *)h_glValidateProgram && import("glLineWidth") == (void *)h_glLineWidth);
     assert(import("glClearTexImage") == (void *)h_glClearTexImage_bs);
-    GLuint pr = h_glCreateProgram(); h_glValidateProgram(pr); GLint v = 0; h_glGetProgramiv(pr, GL_VALIDATE_STATUS, &v); assert(v == 1 && h_glGetError() == GL_NO_ERROR);
+    GLuint pr = h_glCreateProgram(); h_glValidateProgram(pr); GLint v = 0; h_glGetProgramiv(pr, GL_VALIDATE_STATUS, &v); assert(v == 0 && h_glGetError() == GL_NO_ERROR);
+    char log[160]; GLsizei len; h_glGetProgramInfoLog(pr, sizeof log, &len, log); assert(len > 0 && strstr(log, "linked"));
     h_glDeleteProgram(pr); h_glLineWidth(1);
     // a 4x2 RGBA8 texture of two levels: level 0 cleared to one RGBA value, level 1 to one RGB value (alpha 1), then to zeros (no data)
     GLuint t; h_glGenTextures(1, &t); h_glBindTexture(GL_TEXTURE_2D, t); h_glTexStorage2D(GL_TEXTURE_2D, 2, GL_RGBA8, 4, 2);
@@ -540,6 +567,31 @@ static void test_fate_calls(void) {
     h_glClearTexImage(t, 1, GL_RGBA, GL_UNSIGNED_BYTE, NULL); [x->tex getBytes:px bytesPerRow:8 fromRegion:MTLRegionMake2D(0, 0, 2, 1) mipmapLevel:1]; assert(!px[0] && !px[1]);
     h_glClearTexImage(t, 2, GL_RGBA, GL_UNSIGNED_BYTE, rgba); assert(h_glGetError() == GL_INVALID_OPERATION);   // a level the texture does not have
     h_glClearTexImage(t + 100, 0, GL_RGBA, GL_UNSIGNED_BYTE, rgba); assert(h_glGetError() == GL_INVALID_OPERATION);   // no such texture
+    const float red[4] = {1, 0, 0, 1};
+    h_glPixelStorei(0xcf0, 1); h_glPixelStorei(GL_UNPACK_ROW_LENGTH, 99);   // clear values have no unpack state
+    h_glClearTexImage(t, 0, GL_RGBA, GL_FLOAT, red);
+    assert(S.unpack_swap == 1 && S.unpack_row == 99); h_glPixelStorei(0xcf0, 0); h_glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+    [x->tex getBytes:px bytesPerRow:16 fromRegion:MTLRegionMake2D(0, 0, 4, 2) mipmapLevel:0];
+    for (int i = 0; i < 8; i++) assert(px[i] == 0xff0000ffu);
+    const uint8_t bgra[4] = {255, 128, 0, 255}; h_glClearTexImage(t, 0, GL_BGRA, GL_UNSIGNED_BYTE, bgra);
+    [x->tex getBytes:px bytesPerRow:16 fromRegion:MTLRegionMake2D(0, 0, 4, 2) mipmapLevel:0];
+    for (int i = 0; i < 8; i++) assert(px[i] == 0xffff8000u);
+    uint16_t half_red = 32768; h_glClearTexImage(t, 0, GL_RED, GL_UNSIGNED_SHORT, &half_red);
+    [x->tex getBytes:px bytesPerRow:16 fromRegion:MTLRegionMake2D(0, 0, 4, 2) mipmapLevel:0];
+    for (int i = 0; i < 8; i++) assert(px[i] == 0xff000080u);
+    h_glClearTexImage(t, 0, GL_DEPTH_COMPONENT, GL_FLOAT, red); assert(h_glGetError() == GL_INVALID_OPERATION);
+    GLuint fb; h_glGenFramebuffers(1, &fb); h_glBindFramebuffer(GL_FRAMEBUFFER, fb);
+    h_glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, t, 0);
+    h_glClearColor(1, 0, 0, 1); h_glClear(GL_COLOR_BUFFER_BIT);
+    const uint8_t blue[4] = {0, 0, 255, 255}; h_glClearTexImage(t, 0, GL_RGBA, GL_UNSIGNED_BYTE, blue); h_glFinish();
+    [x->tex getBytes:px bytesPerRow:16 fromRegion:MTLRegionMake2D(0, 0, 4, 2) mipmapLevel:0];
+    for (int i = 0; i < 8; i++) assert(px[i] == 0xffff0000u);   // the later texture clear wins
+    h_glBindFramebuffer(GL_FRAMEBUFFER, 0); h_glDeleteFramebuffers(1, &fb);
+    h_glDeleteTextures(1, &t);
+    h_glGenTextures(1, &t); h_glBindTexture(GL_TEXTURE_2D, t); h_glTexStorage2D(GL_TEXTURE_2D, 1, GL_RGBA16F, 1, 1);
+    h_glClearTexImage(t, 0, GL_BGRA, GL_UNSIGNED_BYTE, bgra);
+    _Float16 fp[4]; [tex_of(t)->tex getBytes:fp bytesPerRow:8 fromRegion:MTLRegionMake2D(0, 0, 1, 1) mipmapLevel:0];
+    assert(fp[0] == 0 && fabs((double)fp[1] - 128.0 / 255) < 0.001 && fp[2] == 1 && fp[3] == 1);
     h_glDeleteTextures(1, &t);
 }
 
@@ -651,6 +703,7 @@ int main(int argc, char **argv) {
     test_doom3();
     test_sampler_objects();
     test_extension_names_and_egl();
+    test_program_validation();
     test_fate_calls();
 
     unsigned long sz;

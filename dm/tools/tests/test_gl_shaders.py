@@ -69,7 +69,8 @@ class GameNames(unittest.TestCase):
 
     def test_table_rows_give_the_names_back(self):
         rows = ['t:dm_texture=0:sampler2D', 'u:L.gm_sample=16:float:0:0', 'a:dm_sampler=1:vec4', 'b:0:32', 'o:gm_FragColor=0', 'u:dm_texture_scale=0:float:0:0']
-        self.assertEqual(gl_shaders.game_names(rows), ['t:texture=0:sampler2D', 'u:L.sample=16:float:0:0', 'a:sampler=1:vec4', 'b:0:32', 'o:gm_FragColor=0',
+        self.assertEqual(gl_shaders.game_names(rows, {'dm_texture': 'texture', 'gm_sample': 'sample', 'dm_sampler': 'sampler'}),
+                         ['t:texture=0:sampler2D', 'u:L.sample=16:float:0:0', 'a:sampler=1:vec4', 'b:0:32', 'o:gm_FragColor=0',
                                                        'u:dm_texture_scale=0:float:0:0'])
 
 
@@ -85,6 +86,32 @@ class Sources(unittest.TestCase):
 
 @unittest.skipUnless(shutil.which('glslangValidator'), 'glslangValidator is not installed')
 class Translate(unittest.TestCase):
+    def test_original_names_that_resemble_rewrite_names(self):
+        src = (b'#version 320 es\nprecision highp float;\nuniform sampler2D dm_texture;\nuniform float gm_sample;\n'
+               b'out vec4 color;\nvoid main() { color = texture(dm_texture, vec2(0.5)) * gm_sample; }\n')
+        with tempfile.TemporaryDirectory() as tmp:
+            r = gl_shaders.translate(src, 'frag', '0' * 16, tmp)
+            self.assertIsInstance(r, tuple, r)
+            self.assertIn('t:dm_texture=0:sampler2D', r[1])
+            self.assertTrue(any(x.startswith('u:gm_sample=') for x in r[1]), r[1])
+
+    def test_rewritten_names_do_not_collide_with_original_names(self):
+        src = (b'precision highp float;\nuniform sampler2D texture;\nuniform sampler2D dm_texture;\n'
+               b'void main() { gl_FragColor = texture2D(texture, vec2(0.5)) + texture2D(dm_texture, vec2(0.5)); }\n')
+        with tempfile.TemporaryDirectory() as tmp:
+            r = gl_shaders.translate(src, 'frag', '1' * 16, tmp)
+            self.assertIsInstance(r, tuple, r)
+            self.assertEqual({x.split('=')[0] for x in r[1] if x.startswith('t:')}, {'t:texture', 't:dm_texture'})
+
+    def test_varyings_keep_the_same_name_across_stages_with_different_collisions(self):
+        vert = b'attribute vec4 p; uniform float dm_texture; varying float texture; void main() { gl_Position = p; texture = dm_texture; }\n'
+        frag = b'precision highp float;\nvarying float texture; void main() { gl_FragColor = vec4(texture); }\n'
+        with tempfile.TemporaryDirectory() as tmp:
+            for src, stage, key in [(vert, 'vert', '2'), (frag, 'frag', '3')]:
+                r = gl_shaders.translate(src, stage, key * 16, tmp)
+                self.assertIsInstance(r, tuple, r)
+                self.assertIn('[[user(texture)]]', Path(r[0]).read_text())
+
     def test_doom3_style_pair(self):
         with tempfile.TemporaryDirectory() as tmp:
             v = gl_shaders.translate(VERT.encode(), 'vert', 'v' * 16, tmp)

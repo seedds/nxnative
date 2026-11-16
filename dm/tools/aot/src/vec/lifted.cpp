@@ -52,12 +52,14 @@ struct Lifted::Impl {
     lift::Target target;
     lift::NaNMode nan_mode = lift::NaNMode::Chains;
     bool fpsr_flags = true;
+    uint32_t lift_clear = 0;   // SetLiftFpcrClear
     uint8_t* image = nullptr;
     size_t counter = 0;
     std::map<std::tuple<std::vector<uint32_t>, uint64_t, uint32_t>, std::pair<void*, std::vector<int>>> continuations;
 };
 
 Lifted::Lifted() : impl(std::make_unique<Impl>()) {}
+void Lifted::SetLiftFpcrClear(uint32_t mask) { impl->lift_clear = mask; }
 Lifted::~Lifted() = default;
 
 std::unique_ptr<Lifted> Lifted::Create(const std::string& cpu, lift::NaNMode nan_mode, bool fpsr_flags, std::string* error) {
@@ -110,7 +112,7 @@ std::vector<Prepared> Lifted::Prepare(const std::vector<const Vector*>& batch, b
     std::map<std::pair<std::vector<uint32_t>, uint32_t>, size_t> same;  // (code, FPCR) -> the first vector of the batch with them
     for (size_t i = 0; i < batch.size(); ++i) {
         const Vector& v = *batch[i];
-        const auto key = std::make_pair(v.code, v.fpcr & lift::kFpcrModeMask);
+        const auto key = std::make_pair(v.code, v.fpcr & lift::kFpcrModeMask & ~impl->lift_clear);
         const auto first = same.find(key);
         if (first != same.end()) {
             out[i] = out[first->second];
@@ -129,7 +131,7 @@ std::vector<Prepared> Lifted::Prepare(const std::vector<const Vector*>& batch, b
             return v.code[(vaddr - kCodeBase) / 4];
         };
         lift::LiftOptions options;
-        options.fpcr = v.fpcr;
+        options.fpcr = v.fpcr & ~impl->lift_clear;
         options.fpsr_flags = impl->fpsr_flags;
         options.nan_mode = impl->nan_mode;
         options.target = impl->target;
@@ -171,6 +173,7 @@ std::vector<Prepared> Lifted::Prepare(const std::vector<const Vector*>& batch, b
 }
 
 void* Lifted::Continuation(const Vector& v, uint64_t pc, uint32_t fpcr, std::vector<int>* issues, std::string* error) {
+    fpcr &= ~impl->lift_clear;
     const auto key = std::make_tuple(v.code, pc, fpcr & lift::kFpcrModeMask);
     const auto it = impl->continuations.find(key);
     if (it != impl->continuations.end()) {

@@ -985,6 +985,10 @@ void Host::NativeCall(Thread& t, const void* entry) {
 // the native frames further out (st->pending); at the outermost level nothing can own it, and the JIT runs it
 void Host::JitLoop(Thread& t, uint64_t lr, uint64_t sp, bool outermost, const char* why) {
     dm_guest_state* st = t.st;
+    // Whether the native frame waiting at lr can still take its return (dm/host/aot_run.c jit_loop, the reference): not once the JIT ran on past lr,
+    // nor after a run that began under another FPCR than the module's and did not end at lr (the JIT's stops apply only under the module's FPCR, so
+    // such a run may have gone through lr into the code after it)
+    bool lr_live = true;
     for (;;) {
         CheckStop();
         const uint64_t pc = st->pc;
@@ -992,15 +996,16 @@ void Host::JitLoop(Thread& t, uint64_t lr, uint64_t sp, bool outermost, const ch
         // The return the native frame waits for: lr alone decides, as a compiled function's own return does (design 3.3: the target equal to
         // the entry's lr). SP is not compared: a branch through jit_entry from the middle of a function (an unbounded br) hands over the SP
         // of its body, while the return comes back with the SP of its entry
-        if (pc == lr) {
-            if (outermost || module_fpcr) {
-                st->pending = 0;
-                return;
-            }
-            // Back where the native frame waits, but under another FPCR than it was compiled for: it cannot go on, so this is a non-local
-            // transfer its callers propagate; the JIT runs the continuation at the outermost level
-            st->pending = pc;
+        if (pc == lr && (outermost || (module_fpcr && lr_live))) {
+            st->pending = 0;
             return;
+        }
+        if (pc == lr && !module_fpcr) {
+            // Back where the native frame waits, but under another FPCR than it was compiled for: it cannot go on under it. The JIT runs on past lr
+            // (below), the native frames above staying: a compiled return above sp under the module's FPCR is propagated, and the frame returning
+            // there takes it as its own return (lower_calls.cpp FnCall). Before, the transfer went up to the outermost level, which ran the rest in the JIT
+            lr_live = false;
+            why = "a return under another FPCR than the module was compiled for, which its native frame cannot go on under,";
         }
         if (pc == kHostReturn) {
             st->pending = pc;  // the guest returned to the host while native frames wait: the outermost level ends the thread
@@ -1080,7 +1085,9 @@ void Host::JitLoop(Thread& t, uint64_t lr, uint64_t sp, bool outermost, const ch
                          InModule(pc) ? (" (module+" + Hex(pc - kModuleBase) + ")").c_str() : " (outside the module)");
         }
         const uint64_t t0 = NowNs();
+        const bool began_other = !module_fpcr;
         const uint64_t stop = dm_jit_run(j, pc);
+        if (began_other && st->pc != lr) lr_live = false;  // it may have run through lr under that FPCR
         const double secs = static_cast<double>(NowNs() - t0) * 1e-9;
         if (g_trace) {
             std::fprintf(stderr, "aot: jit %s from module+%#llx to %#llx (reason %d), lr %#llx sp %#llx x30 %#llx\n", outermost ? "outer" : "nested",

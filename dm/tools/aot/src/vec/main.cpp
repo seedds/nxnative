@@ -5,7 +5,9 @@
 // issue instead of as mismatches, and only when the FPSR is all that differs. README.md has the usage.
 //
 //   nxaot_vec [--cpu <llvm cpu>] [--filter <text>] [--dump] [--batch <n>] [--max-report <n>] [--nan-mode chains|perop|unchecked]
-//             [--no-fpsr-model] [--ignore-fpsr-flags] [--no-filters] [--state] [-v] <vectors.tsv, folder or - for standard input>...
+//             [--no-fpsr-model] [--ignore-fpsr-flags] [--no-filters] [--state] [--lift-fpcr-clear <hex>] [-v] <vectors.tsv, folder or - for standard input>...
+//   --lift-fpcr-clear: lift every vector's code as if these FPCR bits were clear while it runs under the vector's FPCR (an experiment: compiled code
+//   specialised for FPCR 0 run under FZ with MXCSR's FTZ and DAZ, dm/tools/aot/README.md, "FZ as a run-time state")
 #include <algorithm>
 #include <cinttypes>
 #include <cstdio>
@@ -206,7 +208,8 @@ Diff Compare(const Vector& v, const Outcome& ref, const Outcome& got, uint32_t f
 void Usage() {
     std::fprintf(stderr,
                  "usage: nxaot_vec [--cpu <llvm cpu>] [--filter <text>] [--dump] [--batch <n>] [--max-report <n>] [--nan-mode chains|perop|unchecked]\n"
-                 "                 [--no-fpsr-model] [--ignore-fpsr-flags] [--no-filters] [--state] [-v] <vectors.tsv, folder or - for standard input>...\n");
+                 "                 [--no-fpsr-model] [--ignore-fpsr-flags] [--no-filters] [--state] [--lift-fpcr-clear <hex>] [-v]\n"
+                 "                 <vectors.tsv, folder or - for standard input>...\n");
 }
 
 }  // namespace
@@ -217,6 +220,7 @@ int main(int argc, char** argv) {
     bool dump = false, verbose = false, ignore_flags = false, no_filters = false, fpsr_model = true, show_state = false;
     lift::NaNMode nan_mode = lift::NaNMode::Chains;
     size_t batch_size = 256, max_report = 50;
+    uint32_t lift_clear = 0;   // --lift-fpcr-clear
     std::vector<std::string> paths;
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
@@ -256,6 +260,8 @@ int main(int argc, char** argv) {
             ignore_flags = true;
         } else if (a == "--state") {
             show_state = true;
+        } else if (a == "--lift-fpcr-clear") {
+            lift_clear = static_cast<uint32_t>(std::strtoul(next().c_str(), nullptr, 16));
         } else if (a == "--no-filters") {
             no_filters = true;
         } else if (a == "-v") {
@@ -279,6 +285,7 @@ int main(int argc, char** argv) {
 
     std::string error;
     auto lifted = Lifted::Create(cpu, nan_mode, fpsr_model, &error);
+    if (lifted) lifted->SetLiftFpcrClear(lift_clear);
     if (!lifted) {
         std::fprintf(stderr, "nxaot_vec: %s\n", error.c_str());
         return 2;

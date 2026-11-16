@@ -41,6 +41,9 @@ public:
     std::string Cpu() const;
     lift::Target Target() const;
     size_t Continuations() const;  // functions lifted for a continuation (Run)
+    // --lift-fpcr-clear: lift every region as if these FPCR bits were clear, while it runs under the vector's FPCR (MXCSR from it): what compiled code
+    // specialised for FPCR 0 does under another FPCR at run time (dm/tools/aot/README.md, "FZ as a run-time state")
+    void SetLiftFpcrClear(uint32_t mask);
 
 private:
     Lifted();

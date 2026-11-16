@@ -148,8 +148,10 @@ constexpr uint64_t kAnalysisPerWord = 64, kAnalysisFixed = 128ull << 20;
 // its function's br"): its cases are in the key with its tables; a unit of format 9 under the same key lacks the switch. 11: a br left to the dispatcher
 // gets guarded cases from its function's own code (README.md, "Static cases of a br left to the dispatcher"), in the key with its tables, which the walk
 // follows: the function's blocks and the facts its callers and callees see from them change with them; a unit of format 10 under the same key was made by
-// a discovery that never guessed, whose blocks the key does not hold
-constexpr const char* kUnitKeyFormat = "nxaot-unit 11";
+// a discovery that never guessed, whose blocks the key does not hold. 12: a pending transfer to a function's own return address, with its caller's SP
+// and the packs' FPCR, is that function's normal return (lower_calls.cpp FnCall; README.md, "A return no native frame took"): a unit of format 11 under
+// the same key propagates it to the caller
+constexpr const char* kUnitKeyFormat = "nxaot-unit 12";
 
 // The section each unit's !pcsections marks go to (the line table, "The line table" below): read back after code generation and kept out of
 // the link (SHF_EXCLUDE)

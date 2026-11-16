@@ -720,6 +720,27 @@ void FunctionLifter::ReloadRegs(const Regs& r) {
     }
 }
 
+BasicBlock* FunctionLifter::OwnReturn() {
+    if (own_return_bb) return own_return_bb;
+    llvm::IRBuilderBase::InsertPointGuard keep(B);
+    own_return_bb = BasicBlock::Create(C, "own_return_check", F);
+    auto* take = BasicBlock::Create(C, "own_return", F);
+    auto* away = BasicBlock::Create(C, "own_return_not", F);
+    B.SetInsertPoint(own_return_bb);
+    // Its own return: st->pending is this function's entry lr, SP its entry SP and the FPCR the packs'
+    Value* lr_ok = B.CreateICmpEQ(LoadField(B.getInt64Ty(), offsetof(dm_guest_state, pending)), entry_lr);
+    Value* fp_ok = B.CreateICmpEQ(B.CreateAnd(LoadField(B.getInt32Ty(), offsetof(dm_guest_state, fpcr)), B.getInt32(kFpcrModeMask)), B.getInt32(fpcr));
+    Value* sp_ok = B.CreateICmpEQ(LoadField(B.getInt64Ty(), offsetof(dm_guest_state, sp)), F->getArg(1));
+    B.CreateCondBr(B.CreateAnd(B.CreateAnd(lr_ok, sp_ok), fp_ok), take, away);
+    B.SetInsertPoint(take);
+    StoreField(B.getInt64(0), offsetof(dm_guest_state, pending));
+    ReloadRegs(Regs::X(kRetX) | Regs::V(plan->self.rv));
+    B.CreateRet(RetValue());
+    B.SetInsertPoint(away);
+    B.CreateRet(llvm::PoisonValue::get(plan->conv.RetType(C)));   // not this frame's: the callers propagate it (section 3.3)
+    return own_return_bb;
+}
+
 Value* FunctionLifter::RetValue() {
     llvm::StructType* rt = plan->conv.RetType(C);
     Value* r = llvm::PoisonValue::get(rt);
@@ -1353,8 +1374,27 @@ void FunctionLifter::FnCall(const CalleeView& c, llvm::FunctionType* type, Value
             B.SetInsertPoint(other);
         }
     }
-    // Not for this frame: return at once, writing nothing; the callers propagate it to the frame it belongs to, or to the host (section 3.3)
-    B.CreateRet(llvm::PoisonValue::get(plan->conv.RetType(C)));
+    // This function's own return (README.md, "A return no native frame took"; design 3.3): the transfer goes to the return address this function was
+    // entered with (entry_lr), with the SP its caller had at the call (the function's entry SP, sp_in) and under the packs' FPCR. That is where and how
+    // this function's normal return goes on: the JIT ran the rest of this function's own guest code (a return that came back to a frame below under
+    // another FPCR, which the JIT ran past: aot_run.c jit_loop) up to its return, and the frames between this one and the JIT returned at once, writing
+    // nothing (their host frames released by those returns; their guest state is the JIT's). So it returns natively, as its own return would:
+    // - the registers: the block holds the whole register file as the JIT left it. The return convention's (x0, x1, the RV v registers) are loaded
+    //   from it for the native return; everything else the caller takes after the call it reloads from the block itself (the callee's WRITES:
+    //   FnCall's continuation below), which is current, so nothing is stored (this frame's host-held values are of before the call, older than the
+    //   block's). The caller's own host-held values (the registers this function's summary keeps) are right: the JIT ran this function's guest code,
+    //   which keeps them as its summary says, as a native return relies on;
+    // - the SP identifies the frame: two frames of one function with the same return address (recursion) have different entry SPs, the outer one's
+    //   higher, so only the frame the guest is returning from matches; a frame below the JIT's own level never matches (the JIT makes a pending
+    //   transfer only above the SP it was entered with);
+    // - the resume points of this call site (above) are tried first. One at the same address would be a block of this function at its own return
+    //   address with this function's frame SP, and the own return needs the caller's SP: both match only for a function that calls with no frame of
+    //   its own and recurses with its return address as its resume point, where either goes on at that address with the block's registers;
+    // - under another FPCR it does not match: the frames above propagate the transfer, as before.
+    // Every call site's pending path goes on in the function's one OwnReturn block, which compares and either returns as this function's own return or returns
+    // at once, writing nothing (not for this frame: the callers propagate it to the frame it belongs to, or to the host, section 3.3). One branch per call site
+    // on this path, which runs only for a non-local transfer, where each ended in a return of its own before
+    B.CreateBr(OwnReturn());
     B.SetInsertPoint(cont);
     if (plan->correctness) {
         ReloadRegs(Regs::All());

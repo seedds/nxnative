@@ -510,6 +510,12 @@ static _Noreturn void nonlocal_out(dm_aot_thread *t, uint64_t pc) {
 // the first JIT run (run_jit), the miss that made the loop
 static void jit_loop(dm_aot_thread *t, uint64_t lr, uint64_t sp, int outermost, uint32_t why, uint64_t first, int served) {
     dm_guest_state *st = &t->st;
+    // The native frame waiting at lr can still take its return: not once the JIT ran on past lr (below), nor after a run that began under another FPCR
+    // than the packs' and did not end at lr. Under another FPCR the JIT does not stop at compiled returns (jit.h: its stops apply only under the packs'
+    // FPCR), so such a run may have gone through lr into the code after it, whose compiled frame then holds values older than the guest's: lr is from
+    // then on a call site's return like any other, which the JIT runs, and only a pending transfer above sp (a frame's own return or resume point) or
+    // the host's return ends this level
+    int lr_live = 1;
     for (;;) {
         check_stop(t);
         const uint64_t pc = st->pc;
@@ -520,10 +526,18 @@ static void jit_loop(dm_aot_thread *t, uint64_t lr, uint64_t sp, int outermost, 
             first = 0;
             if (own) { run_jit(t, lr, &why, past); continue; }
         }
-        // The return the native frame waits for: lr alone decides, as a compiled function's own return does (3.3)
-        if (pc == lr) {
-            st->pending = outermost || mode ? 0 : pc;   // under another FPCR the frame cannot go on: its callers propagate the transfer
-            return;
+        // The return the native frame waits for: lr alone decides, as a compiled function's own return does (3.3), while that frame can still take it
+        if (pc == lr && (outermost || (mode && lr_live))) { st->pending = 0; return; }
+        if (pc == lr && !mode) {
+            // Back where the native frame waits, but under another FPCR than it was compiled for (a host function's return, a stop there for a gate or a
+            // pause): that frame cannot go on under it. The JIT runs on past lr, the frame's code under that FPCR, and the native frames above stay: when
+            // the JIT reaches a compiled return above sp under the packs' FPCR it propagates it (below), and the frame returning there takes it as its own
+            // return (lower_calls.cpp FnCall, "This function's own return"). Before, the transfer went up every frame to the thread's outermost level, which
+            // ran the rest of the thread in the JIT (dm/tools/aot/README.md, "A return no native frame took")
+            lr_live = 0;
+            why = REASON_FPCR_RETURN;
+            run_jit(t, lr, &why, 0);   // dm_jit_run runs pc itself although it is a stop (a gate there is served first)
+            continue;
         }
         if (pc == DM_AOT_HOST_RETURN) { st->pending = pc; return; }   // the guest returned to the host while native frames wait
         // A host call, or a compiled entry's normal return, goes on with the guest code around it: a run going on, no miss (why 0) where the JIT runs it
@@ -548,7 +562,9 @@ static void jit_loop(dm_aot_thread *t, uint64_t lr, uint64_t sp, int outermost, 
             if (!outermost && st->sp > sp && dm_aot_is_return(pc)) { st->pending = pc; return; }   // a native frame further out may wait there
             if (outermost && t->depth > 1 && st->sp > sp && dm_aot_is_return(pc)) nonlocal_out(t, pc);
         }
+        const int began_other = !mode;
         run_jit(t, lr, &why, 0);
+        if (began_other && st->pc != lr) lr_live = 0;   // it may have run through lr under that FPCR (above)
     }
 }
 

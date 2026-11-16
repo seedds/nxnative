@@ -182,6 +182,7 @@ then on the PC, from the repository root, with `nxaot.exe` and the reference fil
 
 ```sh
 build/aot/nxaot_vec dm/tools/aot/tests/vectors            # every .tsv and .tsv.gz of the folder; or name files; - reads standard input
+build/aot/nxaot_vec --lift-fpcr-clear 1000000 dm/tools/aot/tests/vectors/fp.tsv.gz   # code lifted for FZ = 0 run under each vector's FPCR
 build/aot/nxaot_vec --cpu x86-64-v3 dm/tools/aot/tests/vectors/crypto.tsv.gz   # a named target: no AES-NI, SHA or PCLMULQDQ, their software forms
 build/aot/nxaot_vec --filter excl_seq --dump dm/tools/aot/tests/vectors/exclusive.tsv   # dynarmic IR and optimised LLVM IR of the matches
 build/aot/nxaot_vec --state --filter fp.00612 dm/tools/aot/tests/vectors/fp.tsv.gz      # a mismatch with the initial registers
@@ -199,7 +200,8 @@ mismatches, refusals, FPSR differences of known dynarmic issues and normal exits
 issue, which lowered opcodes the passing vectors exercised, and last `== nxaot_vec: N vectors, M mismatches, U unsupported (listed), F FPSR
 differences of known dynarmic issues ==`; it exits with 1 on a mismatch. Options: `--no-fpsr-model` lifts without modelling the cumulative flags
 (and compares QC only), `--ignore-fpsr-flags` compares QC only, `--no-filters` compares the whole FPSR without the known-issue relaxations,
-`--batch`, `--max-report`, `-v`. The vectors' format (8 tab-separated fields: id, class, text, code, seed, FPCR, register overrides, memory
+`--lift-fpcr-clear <hex>` lifts every vector's code as if those FPCR bits were clear while it runs under the vector's FPCR and its MXCSR (an
+experiment: [FZ as a run-time state](#fz-as-a-run-time-state)), `--batch`, `--max-report`, `-v`. The vectors' format (8 tab-separated fields: id, class, text, code, seed, FPCR, register overrides, memory
 overrides; `vk=` names the lane kind the seed fills v0..v31 with) and the memory layout (the image at `0x10000000`, code at `0x10008000`) are in
 [src/vec/vectors.h](src/vec/vectors.h); the image is mapped at that address in the harness process with guard pages around it, since lifted code uses
 guest addresses as host addresses.
@@ -618,7 +620,8 @@ path, the counter. `dm_jit_run_past` goes on after a gate the host served, `dm_j
   JIT at the lr it was entered with, x30 is that lr, and SP is the call's unless the function may change it: the lookup slot's
   `NXAOT_LOOKUP_SP_KEPT`). A return address of compiled code reached with an SP above the one the JIT was entered with may be a native frame's
   further out: nested, it is propagated to them (`st->pending`); at the outermost level nothing can own it and the JIT runs it. Back where the native
-  frame waits but under another FPCR than it was compiled for, the return is propagated too (the caller cannot go on under it). A halt is a
+  frame waits but under another FPCR than it was compiled for, the JIT runs on past it (the caller cannot go on under it) and never returns to that
+  frame afterwards; the frame a later compiled return above belongs to takes it as its own return ("A return no native frame took"). A halt is a
   safepoint ("Threads and safepoints"); an SVC that ends the thread or the run leaves through the thread's base, outside dynarmic's `Run()`.
 - **Logging and counting**: a JIT entry that is a discovery gap or a continuation without a native frame is logged once per address on standard
   error as `[RED] aot: <why> at 0x... (module+0x...) runs in the JIT fallback (design section 11)`; every run is counted (`nxaot_host`'s second
@@ -1438,6 +1441,73 @@ benchmark (`measure_packs.py`, A this nxaot with `--no-guess`, B without; the fi
 run; the benchmark's `.text` 6,268,880 bytes (that section's 6,268,624, before rounds 4 to 6), its pack time 5.77 s and 6.06 s (that section's 6.50 s; one
 build each on a shared machine, load 10 to 14).
 
+## A return no native frame took
+
+After round 7 the first pack of Mario vs. Donkey Kong spent what was left of its JIT time on the three physics workers: 3.18 s after a `nonlocal` miss
+at `main+0xa01314` and 2.06 s under flush-to-zero, of 5.24 s (6.25 % of the route's sampled guest CPU time; [the game's note](../../games/0100B99019412000/README.md#on-linux-the-x86-64-engine)).
+Each job runs inside an FP environment scope: the wrapper (`main+0xc4fc70`, called through a vtable by the worker's `main+0xa012f4`) calls
+`main+0xab9010`, which tail-calls `sdk`'s FPCR setter (`sdk+0x5b826c`, `msr fpcr` with FZ: the `fpcr` miss); the JIT runs the rest under FZ, the
+job and the scope's end, which clears FZ, and the wrapper's return to `main+0xa01314` is the first compiled return it stops at (the JIT stops nowhere
+under another FPCR: `rt/jit.h`). That return is above the SP the JIT was entered with, so it went up as `st->pending`: the wrapper's frame, the
+worker's and every frame above returned at once, none of them waiting at that address, and the thread's outermost level ran the rest of the worker's
+loop in the JIT until the next job. The second pack's resume point at `main+0xa01314` (the `nonlocal` miss) cut it; a first pack has none.
+
+**The rule** ([src/lift/lower_calls.cpp](src/lift/lower_calls.cpp) `FnCall`, after the call site's resume points): a pending transfer whose target is the
+function's own return address (its entry lr), with `st->sp` its entry SP (the SP its caller had at the call) and the packs' FPCR, is that function's
+normal return. The frame clears `pending`, loads the return convention's registers from the block (x0, x1 and the RV v registers) and returns natively
+(`OwnReturn`, one block per LLVM function). The argument, beside the code:
+
+- **The registers**: the block holds the whole register file as the JIT left it at the stop. The caller reloads after the call what the callee writes (its
+  WRITES, FnCall's continuation) from the block, which is current; so nothing is stored, and this frame's host-held values, older than the block's (of
+  before its call), are not. The caller's own host-held values, the registers this function's summary keeps, are right: the JIT ran this function's own
+  guest code to its return, which keeps them as its summary says, as a native return relies on.
+- **The SP identifies the frame**: two frames of one function with the same return address (a recursion) have different entry SPs, the outer one's higher,
+  so only the frame the guest returns from matches. A frame at or below the JIT's own level never matches: the JIT passes a return up only above the SP it
+  was entered with.
+- **Resume points first**: one at the same address would be a block of this function at its own return address with this function's frame SP, and the own
+  return needs the caller's SP: both match only for a function that calls with no frame of its own and recurses with its return address as its resume point,
+  and then either goes on at that address with the block's registers.
+- **The frames in between** (here the setter's, which the scope's tail call left in its place): their pending checks find neither a resume point nor their
+  own return and return at once, writing nothing; their host frames are released by those returns, and nothing of them is live (the JIT ran their guest
+  code).
+- Under another FPCR it does not match, and the transfer goes on up as before.
+
+**The host** ([dm/host/aot_run.c](../../host/aot_run.c) `jit_loop`; `rt/host.cpp` `JitLoop` the same): a return to the native frame the JIT was handed over
+by, under another FPCR than the packs', went up as a pending transfer to every frame (design 3.3's propagation) and the outermost level ran the rest of the
+thread in the JIT (`fpret`'s path: a host function's return there). The JIT now runs on past it, the frame's code under that FPCR (`[RED]` and the miss
+`fpcr`, as before), and the frames above stay; a compiled return it reaches above its SP under the packs' FPCR goes up and the frame it belongs to takes it
+as its own return. The frame at lr is never returned to afterwards (`lr_live`): neither once the JIT ran past it, nor after a run that began under another
+FPCR and did not end at lr, which may have gone through lr without a stop and left that frame's host-held values older than the guest's. Design 3.3 and 11
+say so. Open: a run that begins and ends under the packs' FPCR but changes it in between and passes lr then (the JIT running both `msr`s itself, a setter
+with no standard entry called around a loop) leaves lr live; the JIT gives no signal of it, and nothing here does it.
+
+**Checked** by `t_aot_host`'s rows, a module each the test writes word by word whose FP check (2^-126 times 0.5, zero only when flushed) proves the work
+ran under FZ: `fpframe`, the workers' shape (a loop calls F 16 times, F calls D through a pointer, D sets FZ, checks, clears it and returns): 32 JIT runs,
+no `nonlocal`; round 7's nxaot's pack 64 runs and a `nonlocal` miss at F's call site. `fprec`, a recursion whose frames share their return address: R(0) sets
+FZ, R(1) checks and tail-calls the clearing function, whose return reaches R(2)'s call site with R(1)'s entry SP; R(0)'s frame, the same return address
+and a lower SP, passes it on and R(1)'s takes it: 1 JIT run, no `nonlocal` (round 7: 4 runs and a `nonlocal`). `fprec` with a resume point at that address
+(a `nonlocal` row in a misses file, as a landing pad or a setjmp continuation is one): 1 run, R(1)'s own return before R(2)'s resume point. `fpret` and
+`fpresume`: 2 misses, both `fpcr`, none `nonlocal`. The unit key's format is 12.
+
+**Measured** on the game's first pack (the bindings of the host's dry run, as a player's), the same route from the same save, round 7's nxaot and host
+against this round's:
+
+| | round 7 | own return |
+|---|---:|---:|
+| JIT fallback, share of the sampled guest CPU time | 6.25 % (5.24 s of 83.8 s, 2.65 million runs) | 2.67 % (2.12 s of 79.1 s, 0.70 million runs) |
+| the three physics workers' JIT time | 2.03, 1.72, 1.49 s | 0.84, 0.69, 0.59 s |
+| of it under FZ | 0.59, 0.50, 0.44 s | 0.62, 0.51, 0.45 s |
+| the workers' CPU time | 4.98, 4.14, 3.78 s | 2.79, 2.32, 2.11 s |
+| misses file | `main+0xa01314` `nonlocal` and `sdk+0x5b827c` `fpcr`, 230,114 entries each | `sdk+0x5b827c` `fpcr` alone, 231,900 |
+| `.text` of `sdk`, `subsdk0`, `main` | 55.24, 27.40, 166.88 MB | 56.32, 27.91, 169.71 MB (+1.95, +1.85, +1.69 %) |
+| pack time (6 workers, a loaded machine) | 90.7, 42.5, 366.1 s | 92.9, 45.3, 362.1 s |
+
+No fault, no stall; the JIT time left is the flush-to-zero sections themselves and the part of each section after FZ is cleared, up to the
+wrapper's return ([FZ as a run-time state](#fz-as-a-run-time-state)). The code it adds is on the pending path: every call site's pending path branches to its
+function's `OwnReturn` block, which keeps the entry SP live to there (a compare per call site on that path cost 2.6 % in `sdk`). The corpus's packs grow 1.3 % in `.text` (1,471,620 to 1,491,024 bytes, up
+to 3.4 % for `fiber-clang` and `sjlj-clang`), and `measure_packs.py` finds the benchmark and five corpus programs within noise (benchmark +0.8 %,
+`int_ops-gcc` -1.3 %, `fp-gcc` -1.1 %).
+
 ## The second pack's cached units
 
 `nxaot build --profile` compiles a sampled function at tier H and every other one at tier C in the balanced mode (H+ and H in the max mode:
@@ -1897,6 +1967,41 @@ What is not done: the slow path of design 7.2 row 13 for add / subtract / multip
 end of "Known issues"); the half-precision estimates and steps are scalar helper calls per lane; FRECPE / FRSQRTE are helper calls (a table-based
 inline form is an optimisation for later); one combined check for all the escapes of a block (four checks of a 4x4 matrix multiply cost about 1.4
 ns of its 5 per iteration).
+
+### FZ as a run-time state
+
+A candidate for code that runs under FPCR.FZ (Mario vs. Donkey Kong's physics jobs: [A return no native frame took](#a-return-no-native-frame-took)),
+measured and not implemented: one set of code right under both FZ states, the state being MXCSR's FTZ and DAZ (which `msr fpcr` already sets) plus
+a run-time test where a lowering depends on FZ itself, instead of a second set of code specialised for FZ.
+
+- **What runs under FZ there** (round 8's first pack, the route of [A return no native frame took](#a-return-no-native-frame-took); a scratch host
+  recorded each profile sample in the JIT fallback, mapped through dynarmic's perf map, `PERF_BUILDID_DIR`, to its block and FPCR and through
+  `nxaot discover` to its function): 233,780 sections, 701,340 JIT runs, 2.18 s. Of the 1,615 samples in the JIT, 772 fell outside any block
+  (dynarmic's dispatcher and translation, the host's callbacks: the cost of a run, about 3 runs per section) and 829 in blocks under FZ: 92.8 % of
+  those in functions with no FPCR-dependent instruction at all (job and lock code: `sdk+0x131804`, `sdk+0x131734`, `main+0x481c18`,
+  `main+0xa01194`, ...; 142 such functions sampled), 98.4 % in functions with none of the instructions listed below as differing under FZ. A
+  second set of code or FP-free functions entered natively would leave each section's start and end in the JIT; one set of code right under FZ
+  leaves none of it there.
+
+- **dynarmic** sets FTZ and DAZ from FZ (`A64JitState::SetFpcr`), but it too translates a block per FPCR (the FPCR is in its location descriptor and
+  `msr fpcr` ends the block), and its emitter branches on FZ at translation time: the operands of FMAX / FMIN (and the NM forms) and of the vector
+  compares are flushed explicitly (`DenormalsAreZero`), a fused multiply-add result of +-(smallest normal) is computed again by the software FPMulAdd
+  (x86 flushes after rounding, Arm before), FRSQRTE's fast path changes its bounds, and its soft float, which every fallback runs, flushes inputs
+  (`FPUnpack`, IDC), tiny results (`FPRound`) and FRECPE's tiny inputs.
+- **The lowerings here that depend on FZ beyond MXCSR** (`src/lift/lower_fp.cpp`): the FMAX / FMIN family's operand flush, the scalar and vector
+  fused multiply-add's FZ path and its invalid case (a denormal counts as zero), IDC for the operands of operations lowered in integers when the flags
+  are modelled (`InputDenormal`), the vector compares' flush (which DAZ gives as well: no compare differs below), the helpers' FPCR argument (a constant: the estimates and steps, FCVTXN's round to odd,
+  rounding and conversions in another mode), and `denormal-fp-math`.
+- **The vectors prove the rest.** `nxaot_vec --lift-fpcr-clear 1000000` lifts each vector as if FZ were clear and runs it under the vector's FPCR and
+  MXCSR. Of the 30,909 vectors under FZ in the FP, SIMD and crypto suites, 194 differ in a value (FPSR ignored): the FMAX / FMIN family 125, the
+  estimates and steps 31, FCVTXN 21, fused multiply-adds 17. With the FPSR compared, 104 more: IDC and IXC of FRINTA, FRINTX, FCVTAS, FCVTAU and FCVT,
+  lowered in integers, and of the estimates. Every other instruction (arithmetic, compares, conversions, rounding, integer SIMD, crypto) is right
+  under FZ with MXCSR alone.
+- **LLVM** is told the mode by `"denormal-fp-math"`; `"dynamic"` (LLVM 17 on) says neither holds, so nothing is folded for one. The corpus's FP and
+  SIMD programs (gcc and clang) and the benchmark pack to the same bytes with `"dynamic,dynamic"` as with `"ieee,ieee"`.
+- **`msr fpcr`** whose new value differs from the specialisation only in FZ would set MXCSR, as now, and stay native; the entries', resume points' and
+  the JIT's FPCR checks would ignore FZ. DN, RMode, AHP and FZ16 stay specialisations: the NaN chains are built for one DN, RMode is the constrained
+  intrinsics' static rounding (a dynamic one needs `strictfp` in every function), and the half-precision forms are helpers or F16C by AHP and FZ16.
 
 ## Measurements
 

@@ -342,6 +342,11 @@ public:
     void FnCallGuarded(Value* target, uint64_t call_pc, uint64_t to, const CalleeView& c);  // blr: the compare, the direct call, the inline cache
     std::set<uint64_t> guarded_sites;                 // the sites lowered with a guard (Lifted::guarded)
     llvm::Value* RetValue();                          // {x0, x1, v0..v3} of the current registers (poison outside self.rv)
+    // The end of every call site's pending path (FnCall): the function's own return taken from a pending transfer (README.md, "A return no native frame
+    // took": the return convention's registers from the block and a native return), else a return at once that writes nothing (propagation); one block
+    // per LLVM function, made at its first use
+    BasicBlock* OwnReturn();
+    BasicBlock* own_return_bb = nullptr;
     // The JIT fallback (section 11): a call or tail call to a target that is no compiled entry goes through plan->jit_entry; a continuation the
     // compiled code cannot run (FPCR away from the specialisation, an untranslated encoding, code that runs into no entry) is handed to
     // plan->rt_jit with the function's own return as the stop, and the function then returns what the JIT left in the block

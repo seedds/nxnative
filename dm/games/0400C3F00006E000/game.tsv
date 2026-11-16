@@ -43,3 +43,6 @@ shader_note	Mario Kart World shaders
 # slow motion. The interval takes the host's frame step instead (MATCH_FRAME_STEP in patches.py, found by its function on any build that keeps it), at most 2; the game's own
 # 30 fps mode stays its own
 fps_target	60
+# The main thread waits on the fence of the frame before, so the host's translation of each frame sits between two of its GPU runs: Metal encoding on its own thread (on iOS for every
+# game) took a docked race on an M3 Max from 77.4-77.7 to 80.0-80.7 fps uncapped (frame p50 12.5 -> 12.1 ms, two alternated runs each; handheld 104.3 -> 106.6 fps)
+enc_thread	on

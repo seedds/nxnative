@@ -348,9 +348,12 @@ static void t_vibration(void) {
     g_mode = 1; ids((uint32_t[]){0, 1, NPAD_HANDHELD}, 3); dm_pad_players(3);
     CHECK(!h_hid_VibPermit() && !h_hid_VibHandles(h, 2, &id, STYLE_FULLKEY), "no sink: no vibration devices");
     dm_haptics_init(vibration_sink, 1);
-    CHECK(!h_hid_VibPermit() && h_hid_VibHandles(h, 2, &id, STYLE_FULLKEY) == 2,
-          "startup handles do not wait for a routed haptics output");
-    CHECK(!h_hid_VibMounted(&h[0]), "no routed output: device not mounted");
+    CHECK(h_hid_VibPermit() && h_hid_VibHandles(h, 2, &id, STYLE_FULLKEY) == 2,
+          "rumble on with no controller routed: permitted, handles exist");
+    CHECK(h_hid_VibMounted(&h[0]) && h_hid_VibMounted(&h[1]),
+          "both channels are mounted before a haptics output is routed");
+    h_hid_VibInfo(info, &h[0]); CHECK(info[0] == 1 && info[1] == 1, "left motor answers before routing");
+    h_hid_VibInfo(info, &h[1]); CHECK(info[0] == 1 && info[1] == 2, "right motor answers before routing");
     h_hid_SendVib(&h[0], &v);
     CHECK(dm_haptics_actual(0, 0).amplitude_low == 0, "a value before routing is not retained");
     dm_haptics_route(0, 1); dm_haptics_route(1, 1);
@@ -388,7 +391,7 @@ static void t_vibration(void) {
     { int m; CHECK(!vib_targets(3, &m), "old docked handle is not valid in handheld mode"); }
     CHECK(!h_hid_VibMounted(&(uint32_t){3}) && h_hid_VibMounted(&h[0]), "mounted follows the connected controller's style");
     dm_haptics_route(1, 0);
-    CHECK(!h_hid_VibPermit(), "disconnecting the last output disables vibration");
+    CHECK(h_hid_VibPermit(), "disconnecting controllers does not change the system's vibration setting");
     dm_haptics_init(vibration_sink, 0); dm_haptics_route(0, 1);
     CHECK(!h_hid_VibPermit() && h_hid_VibHandles(h, 2, &id, STYLE_HANDHELD) == 2, "rumble disabled: not permitted, but the handles exist, as on a Switch");
     dm_haptics_set_enabled(1);

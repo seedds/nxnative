@@ -5,7 +5,8 @@
 // comes out decoded to linear, one whose code squares its result keeping the sign (square-rooted input) comes out squared, through the scaler's own input even where the game's texture could
 // go straight, and one whose output stays encoded, or whose code says nothing of its colour, is left to its shader. The scaler comes after the work before it and the next draw pass after the scaler
 // (mfx_order): a slow pass that ends with no barrier writes the input just before each dispatch, and a draw pass copies the image just after it (the Makefile's
-// DM_NVN_BARRIER=game run makes that pass skip its consumer barrier unless the scaler cleared the relaxed end)
+// DM_NVN_BARRIER=game run makes that pass skip its consumer barrier unless the scaler cleared the relaxed end). Then the choice changed while the game runs (dm_upscaler_set), from either
+// start value: the next frame takes it, the single-shader swap follows it both ways, and DM_UPSCALER=ab alternates with the DM_AB phases until a choice ends it
 #include "../nvn/nvn_mtl.m"
 #include "t_mfx_passes.h"
 void *front_metal_layer(void) { return NULL; }
@@ -242,6 +243,39 @@ int main(void) { @autoreleasepool {
         S.img[5][1] = 703; { const uint32_t same_r[8] = {0, 0, 959, 539, 0, 0, 959, 539}; memcpy(S.push[1], same_r, sizeof same_r); } mtl_sub_begin(); uint64_t kept = g_up_mfx_kept;
         CHECK(!up_mfx_encode(named) && g_up_mfx_kept == kept + 1, "an image no larger than the texture leaves the dispatch to the shader");
         mtl_wait(mtl_sub_commit(), 5000000000ull);
+    }
+    // Changed while the game runs (dm_upscaler_set: the in-game menu, the Mac's Performance menu; DM_UPSCALER only the start value): the replay takes the choice as a frame begins
+    // (mtl_set_frame) and keeps it for the whole frame. Not under Metal validation, which stops MetalFX's Metal 4 scaler (the Makefile)
+    if (DM_GAME_UPSCALER_N && mfx_spatial_able() && !getenv("MTL_DEBUG_LAYER")) {
+        static uint64_t frame = 1000;
+        // The colour of a named shader is read at load whatever the choice is then, so a later choice of MetalFX can draw it
+        uint8_t code[4096]; for (int i = 0; i < (int)sizeof code; i++) code[i] = (uint8_t)(i * 37 + 11);
+        const float curves[4] = {0.0031308f, 1 / 2.4f, 0.04045f, 2.4f};
+        for (int r = 0, o = 0; r < 12; r++) for (int i = 0; i < 4; i++, o += 16) memcpy(code + o, &curves[i], 4);
+        static uint8_t ctl[0x880]; const uint32_t ncode = sizeof code; memcpy(ctl + 0x704, &ncode, 4);
+        const NVNshaderData sd = {.data = (NVNbufferAddress)(uintptr_t)code, .control = ctl};
+        NvShader *loaded = upscaler(key); loaded->up_color = UP_COLOR_UNREAD; up_mfx_read_color(loaded, &sd);
+        CHECK(loaded->up_color == UP_COLOR_LINEAR, "a named shader's colour is read at load with either choice");
+        // The single-shader swap follows each frame's choice, both ways
+        NvShader *single = upscaler(key);
+        for (int k = 0; k < 4; k++) {
+            int want = k & 1 ? on : !on;   // first the other way from the start value, then back, twice
+            CHECK(dm_upscaler_set(want ? "metalfx" : "game"), "a choice of metalfx or game is taken");
+            mtl_set_frame(++frame);
+            CHECK(up_mfx_on() == want && up_mfx_wanted(single) == want && dm_upscaler_live() == want, "the next frame takes the choice: the named shader is swapped exactly with MetalFX");
+        }
+        CHECK(!dm_upscaler_set("bilinear") && !dm_upscaler_set(NULL), "a value that is neither is refused");
+        // DM_UPSCALER=ab: the choice alternates with the DM_AB phases (here 2 frames each, phase 0 the game's), until the player chooses; the [ab] line then has it as chosen
+        long ab_was = g_ab_len; g_ab_len = 2; setenv("DM_UPSCALER", "ab", 1); atomic_store(&g_up_want, -1);
+        int alternates = 1;
+        for (uint64_t f = 2000; f < 2008; f++) { mtl_set_frame(f); alternates &= up_mfx_on() == (int)((f / 2) & 1); }
+        CHECK(alternates, "ab: MetalFX in the odd phases, the game's in the even ones, taken as each frame begins");
+        int k = 0; while (k < g_sw_n && strcmp(g_sw_name[k], "DM_UPSCALER")) k++;
+        CHECK(k < g_sw_n && g_sw_mode[k] >= 2, "ab: the [ab] line names DM_UPSCALER");
+        dm_upscaler_set("game");
+        int held = 1; for (uint64_t f = 2008; f < 2014; f++) { mtl_set_frame(f); held &= !up_mfx_on(); }
+        CHECK(held && g_sw_mode[k] == 0, "a choice ends the alternation, and the [ab] line has it off");
+        g_ab_len = ab_was;
     }
     printf("t_upscaler_mfx (%s): %d checks, %d failed\n", on ? "metalfx" : "game", checks, failed);
     return failed != 0;

@@ -101,6 +101,15 @@ void dm_set_opmode(int mode) { g_opmode = mode; }
 static int g_rumble = 1;
 void dm_haptics_set_enabled(int on) { g_rumble = on; }
 int duo_harness_rumble(void) { return g_rumble; }
+// Synthetic MetalFX choices (nvn_mtl.m dm_present_upscale_live / _set, dm_upscaler_live / _set): -1 = not offered (no MetalFX, or no upscaler of the game's own), else 1 MetalFX / 0 the other
+static int g_present_up = -1, g_game_up = -1;
+void duo_harness_upscale(int present, int game) { g_present_up = present; g_game_up = game; }
+int duo_harness_present_upscale(void) { return g_present_up; }
+int duo_harness_game_upscaler(void) { return g_game_up; }
+int dm_present_upscale_live(void) { return g_present_up; }
+int dm_present_upscale_set(const char *v) { int m = v && !strcmp(v, "metalfx") ? 1 : v && !strcmp(v, "off") ? 0 : -1; if (g_present_up < 0 || m < 0) return 0; g_present_up = m; return 1; }
+int dm_upscaler_live(void) { return g_game_up; }
+int dm_upscaler_set(const char *v) { int m = v && !strcmp(v, "metalfx") ? 1 : v && !strcmp(v, "game") ? 0 : -1; if (g_game_up < 0 || m < 0) return 0; g_game_up = m; return 1; }
 void dm_haptics_apple_init(void) {}
 void dm_haptics_apple_controller(int player, GCController *controller) { (void)player; (void)controller; }
 

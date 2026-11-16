@@ -49,6 +49,12 @@ def __getattr__(name) -> Any:   # MAC_MIN, MAC_MIN_FLAG and MAC_METAL as the mod
     if name == 'MAC_MIN_FLAG': return f'-mmacosx-version-min={mac_min()}'
     if name == 'MAC_METAL': return mac_metal()
     raise AttributeError(f'module {__name__!r} has no attribute {name!r}')
+# The MSL that spirv-cross writes for every shader of the chain (dmsh_build.py XC; tests convert with MSL_VERSION too). 3.2 is what both deployment targets compile (macOS 26.6, iOS 18) and the
+# first version in which spirv-cross writes a memory barrier as the fence it is: OpMemoryBarrier (MEMBAR.CTA, .GL / .SYS) becomes atomic_thread_fence at threadgroup or device scope, with no
+# execution barrier, and OpControlBarrier (BAR.SYNC) is always written. Below 3.2 it wrote both MEMBARs as one threadgroup_barrier, an execution barrier, and left out a BAR.SYNC that
+# directly followed one (spirv_msl.cpp, OpControlBarrier): a fence made of that line ordered memory and no longer waited for the group (GitHub issue #2786). 3.1's texture atomics follow
+MSL_VERSION = '30200'
+CROSS_MSL = ['--msl', '--msl-version', MSL_VERSION, '--msl-argument-buffers', '--msl-texture-buffer-native']
 INPUT_TABLES = ['shader_facts.tsv', 'shader_map.tsv', 'shader_map.tsv.conflicts.tsv', 'shader_pairs.tsv', 'pso_pairs.tsv', 'bf_want.tsv', 'geo_mesh.tsv', 'dual_want.tsv']   # in the game profile folder
 LOCK = os.path.join(HERE, 'dmsh_chain.lock'); HEADER = os.path.join(GFX, 'nvn/dmsh_chain.h')
 STAMP = 'inputs.tsv'   # in the library directory b-<V>/

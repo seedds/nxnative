@@ -175,19 +175,6 @@ class ImageAtomics(unittest.TestCase):
         self.addCleanup(Path(f.name).unlink)
         return f.name
 
-    def test_a_module_without_the_instruction(self):
-        self.assertFalse(dmsh_atomic.uses_image_atomics(self.module(self.MAGIC + self.NOP)))
-
-    def test_a_module_with_the_instruction(self):
-        self.assertTrue(dmsh_atomic.uses_image_atomics(self.module(self.MAGIC + self.NOP + self.POINTER)))
-
-    def test_the_word_as_an_operand_is_not_the_instruction(self):
-        self.assertFalse(dmsh_atomic.uses_image_atomics(self.module(self.MAGIC + [2 << 16 | 2, 6 << 16 | 60])))
-
-    def test_not_a_module(self):
-        with self.assertRaises(ValueError): dmsh_atomic.uses_image_atomics(self.module([1, 2, 3, 4, 5, 6]))
-        with self.assertRaises(ValueError): dmsh_atomic.uses_image_atomics(self.module([0x07230203]))
-
     def test_emulated_atomics_still_fail(self):
         for src in ('spvImage2DAtomicCoord(x)', 'device atomic_uint* t_atomic'):
             with self.assertRaises(ValueError): dmsh_atomic.check_msl(src)

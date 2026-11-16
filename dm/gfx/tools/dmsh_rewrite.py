@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # The rewrites dmsh_build.py makes in a translated shader's MSL before it compiles it, where Metal or the translator falls short of what the Switch code does: precise
-# arithmetic (precise), memory barriers as fences (membar_fence, tg_fence), 64-bit products (mul_extended), float atomic adds (float_add_msl), uniform words tested against constants, which the front end would
+# arithmetic (precise), warp-synchronous shared memory fences (tg_fence), 64-bit products (mul_extended), float atomic adds (float_add_msl), uniform words tested against constants, which the front end would
 # fold into switches (uniform_tests), Ampere's HMMA as simdgroup matrices (hmma_msl), first stores and shared-memory stores (first_store, shared_store_msl), threadgroup memory
 # past Metal's limit (tg_spill), one copy of the raw global memory lookup's search (raw_noinline), texture gathers with offsets (gather_offsets), border colours Metal has no sampler state for (border_emu), a pixel shader's depth snapped to
 # its position (frag_z_snap) and the 0 / -1 mask of a tested bit 0 without its compare (bit0_mask). Functions of the MSL text and the library ABI only, with no build state,
@@ -12,17 +12,6 @@ import dmsh_abi as abi, dmsh_side
 # and its saturation gives 0, as Metal's precise:: functions (IEEE fmin / fmax) do on every GPU. The M4 Pro's fast ones happen to agree, an A20 Pro's do not: Super Mario Galaxy 2's
 # GX lighting takes max(0, NaN) from light directions left at zero, and the half of Mario its fill light faces came out white on the iPhone (GitHub issue 72; vk_shaders.py PRECISE)
 def precise(msl): return re.sub(r'\bfast::(min|max|clamp)\(', r'precise::\1(', msl)
-_MEMBAR = 'threadgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup | mem_flags::mem_texture);'
-def membar_fence(msl):
-    """MEMBAR as a fence, not a barrier. The translator turns BAR.SYNC into OpControlBarrier (workgroup scope; SPIRV-Cross prints threadgroup_barrier(mem_flags::mem_threadgroup)) and
-    MEMBAR.GPU / .SYS into OpMemoryBarrier at device scope (Ryujinx CodeGen/Spirv/Instructions.cs GenerateMemoryBarrier), which SPIRV-Cross prints as a threadgroup_barrier with device,
-    threadgroup and texture memory: an execution barrier the Switch code does not have. Where the threads of a group are not converged it waits for threads that never come.
-    PRAGMATA's GPU culling queue 12a52b683eec95c1 has no BAR.SYNC at all, only MEMBAR.SC.GPU; ERRBAR inside its persistent work loop. Each becomes the fence it is,
-    atomic_thread_fence at device scope, sequentially consistent; two in a row (MEMBAR.SC and ERRBAR) become one. From uncraftablexd's PRAGMATA bring-up (PR #1407)"""
-    if _MEMBAR not in msl: return msl
-    fence = 'atomic_thread_fence(mem_flags::mem_device | mem_flags::mem_threadgroup | mem_flags::mem_texture, memory_order_seq_cst, thread_scope_device);   // MEMBAR (membar_fence)'
-    msl = re.sub(r'^([ \t]*)' + re.escape(_MEMBAR) + r'\n\1' + re.escape(_MEMBAR) + r'$', lambda m: m[1] + _MEMBAR, msl, flags=re.M)
-    return msl.replace(_MEMBAR, fence)
 
 PER_VERTEX_BASE = 64   # the translator's Declarations.PerVertexLocationBase: dm_pv<L>_<v> is at user(locn<64 + 3L + v>), past every attribute's own location
 PER_VERTEX_IN = re.compile(r'\n    float4 dm_pv(\d+)_([012]) \[\[user\(locn(\d+)\)(?:, flat)?\]\];')
@@ -93,7 +82,7 @@ def tg_fence(src):
     at 0x2eb0: STS / LDS [x-4] / STS / LDS [x-8]); for one thread the load and the earlier store do not alias, so Metal moves the load above the store and reads another
     lane's old value (Orbitals: Niagara's sorted index list wrong every frame, PR #1775). The translator calls dmsh_tg_fence() before each shared memory load that some path
     reaches from a shared memory store with no barrier between (SharedMemoryFence.cs). Its body there is a memory barrier at workgroup scope, which SPIRV-Cross prints as a
-    threadgroup_barrier (and membar_fence as a device fence); here it becomes a simdgroup-scope fence on threadgroup memory, which is the order a warp needs and, not being
+    threadgroup-scope fence on every memory (MSL 3.2); here it becomes a simdgroup-scope fence on threadgroup memory, which is the order a warp needs and, not being
     an execution barrier, safe in divergent code. A kernel whose arrays spill to device memory gets the device scope too (tg_spill, after this). The text rule before it put a
     fence after every threadgroup store: 25,108 in 699 of Ocarina of Time's shaders, and Apple's compiler crashed on a foliage mesh pipeline on an M2 (GitHub issue #2481)"""
     m = TG_FENCE_FN.search(src)

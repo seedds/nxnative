@@ -5,6 +5,8 @@
 // (scripts/build_ipa_from_nsp.py --platform linux / windows) takes <NSP folder>/<id>-work/profile/<module>.tsv for the module's next pack: its functions with samples at tier H, the
 // others at tier C (balanced mode), and the samples' positions inside each function at H weigh its code (branch weights, entry and call counts). Beside each profile the writer puts
 // the JIT fallback's misses, <folder>/<module>.misses.tsv (write_misses; aot.h, "The JIT fallback's misses"), which the packer gives nxaot build --misses.
+// With DM_AOT_PROFILE_HOST=1 the samples in the host are also counted by their native pc, and DM_CTL's `profmark <path>` writes them with every thread's totals at that
+// moment (dm_aot_profile_mark, below: where a game's threads spend their CPU time in a stretch of play).
 // A sample is counted by count_pc, the same on both systems, from the thread's interrupted rip:
 //   in a pack's function       that function (aot_arena.c dm_aot_fn_of_code: the function map, a split function's parts and a group's functions each to their own entry), and the guest
 //                              instruction the pack's positions give for the pc (dm_aot_offset_of_code: the instruction whose code holds it, in code inlined into the function the call
@@ -50,6 +52,7 @@
 #include <windows.h>
 #include <x86intrin.h>   // __rdtsc
 #else
+#include <dlfcn.h>     // dladdr: the host's sampled pcs named by object file at a mark
 #include <signal.h>
 #include <sys/syscall.h>
 #include <time.h>
@@ -74,6 +77,7 @@ typedef struct prof_thread {
     struct prof_thread *next;   // every thread sampled (g_lock)
     long tid;
     uint64_t samples, code, hostcall, jit, host;   // all, in a pack's function, in a host call or SVC of one, in the JIT fallback, in the host
+    int idx;                    // its number in registration order (the host's samples by pc keep it: DM_AOT_PROFILE_HOST)
     uint64_t placed, crossed;   // of code: at a guest instruction of the pack's positions; at one outside its function (not counted at it: none expected)
     // The JIT fallback's runs on this thread and its CPU time in them (dm_aot_profile_jit_run, below): all; begun under another FPCR than the packs'; the stretches of CPU time
     // under another FPCR (from the first run begun under it, or ended under it, to the end of the run that leaves it), their number and the last such FPCR
@@ -90,6 +94,7 @@ typedef struct prof_thread {
 #else
     timer_t timer;
     int armed;
+    uint64_t stack_lo, stack_hi;   // the thread's stack (pthread_getattr_np at its registration), outside which count_caller reads nothing; 0 when unknown
 #endif
 } prof_thread;
 static _Thread_local prof_thread *t_prof;   // the calling thread's record while it is sampled, NULL otherwise (the Linux handler then does nothing)
@@ -114,9 +119,50 @@ static int count_at(int pack, uint64_t off, uint64_t w) {   // a sample at the g
     return 1;
 }
 
+// ---------- The host's samples by pc (DM_AOT_PROFILE_HOST; DM_CTL profmark) ----------
+// With DM_AOT_PROFILE_HOST=1 the samples count_pc puts on the host (in a host call or SVC of a compiled function, or elsewhere in the host) are also counted by their native pc
+// and class and the thread's number, in a table of HOSTPC_N slots made when the switches are read: open addressing on a key set once by a compare-and-swap, the counts relaxed
+// atomic adds, no lock and no allocation, as count_pc must be. A sample that finds no free slot within HOSTPC_PROBE of its hash is counted apart (g_hostpc_lost). On Linux a
+// sample outside the host program (in the C library, the Vulkan driver) is also counted for the first word of the 64 at the top of the thread's stack that lies in the
+// program's text (class 3, its caller as far as the stack shows: a return address most often, though a stale word can be one too). dm_aot_profile_mark writes the table
+// with each pc's object file, its offset there (for addr2line) and the nearest exported symbol, after every sampled thread's totals: the difference of two marks around a
+// stretch of play says where the game's threads spent their CPU time in it (their guest code, the JIT fallback, which host code: the NVN front end, the Vulkan backend, the
+// driver called on the game's thread, the services)
+#define HOSTPC_N (1u << 16)
+#define HOSTPC_PROBE 64
+typedef struct { _Atomic uint64_t key, n; } hostpc_slot;   // key: the pc (below 2^48) | thread number << 48 | class << 62 (1 in a host call or SVC, 2 elsewhere, 3 a caller); 0 while free
+#define HOSTPC_PC(k) ((k) & ((1ull << 48) - 1))
+#define HOSTPC_THREAD(k) ((int)((k) >> 48 & 0xFF))
+static hostpc_slot *g_hostpc;
+static _Atomic uint64_t g_hostpc_lost;
+static void count_host(uint64_t pc, int thread, uint64_t cls, uint64_t w) {
+    hostpc_slot *t = g_hostpc;
+    if (!t) return;
+    const uint64_t key = (pc & ((1ull << 48) - 1)) | (uint64_t)(thread & 0xFF) << 48 | cls << 62;
+    uint32_t h = (uint32_t)((key * 0x9E3779B97F4A7C15ull) >> 40) & (HOSTPC_N - 1);
+    for (int i = 0; i < HOSTPC_PROBE; i++, h = (h + 1) & (HOSTPC_N - 1)) {
+        uint64_t k = atomic_load_explicit(&t[h].key, memory_order_relaxed);
+        if (!k && atomic_compare_exchange_strong_explicit(&t[h].key, &k, key, memory_order_relaxed, memory_order_relaxed)) k = key;   // k holds the winner's key otherwise
+        if (k == key) { atomic_fetch_add_explicit(&t[h].n, w, memory_order_relaxed); return; }
+    }
+    atomic_fetch_add_explicit(&g_hostpc_lost, w, memory_order_relaxed);
+}
+
 // One sample of weight w at native pc on the thread r records, whose state block is t (NULL when it has none): the rules at the top of this file. Async-signal-safe (Linux runs
 // it in the thread's own SIGPROF handler) and safe while the thread is suspended (Windows runs it on the sampler thread): no allocation, no lock
-static void count_pc(prof_thread *r, const dm_aot_thread *t, uint64_t pc, uint64_t w) {
+#if defined(_WIN32)
+static void count_caller(prof_thread *r, uint64_t pc, uint64_t sp, uint64_t w) { (void)r; (void)pc; (void)sp; (void)w; }
+#else
+extern char __executable_start[], etext[];   // the host program's text (the GNU linkers' symbols)
+static void count_caller(prof_thread *r, uint64_t pc, uint64_t sp, uint64_t w) {   // a sample outside the program: the first program address in the 64 words at the stack's top
+    const uint64_t lo = (uint64_t)(uintptr_t)__executable_start, hi = (uint64_t)(uintptr_t)etext;
+    if (!g_hostpc || !r->stack_hi || sp < r->stack_lo || sp >= r->stack_hi || (pc >= lo && pc < hi)) return;   // sp elsewhere (a signal's alternate stack): not read
+    const uint64_t *s = (const uint64_t *)(uintptr_t)sp;   // the interrupted thread's own stack, mapped from sp to its end
+    const uint64_t words = (r->stack_hi - sp) / 8 < 64 ? (r->stack_hi - sp) / 8 : 64;
+    for (uint64_t i = 0; i < words; i++) if (s[i] >= lo && s[i] < hi) { count_host(s[i], r->idx, 3, w); return; }
+}
+#endif
+static void count_pc(prof_thread *r, const dm_aot_thread *t, uint64_t pc, uint64_t sp, uint64_t w) {
     r->samples += w;
     int pack = -1;
     long fn = dm_aot_fn_of_code(pc, &pack);
@@ -130,8 +176,8 @@ static void count_pc(prof_thread *r, const dm_aot_thread *t, uint64_t pc, uint64
     }
     const uint64_t at = fn != -2 && t && t->depth ? t->prof_at : 0;   // -2: the pack's run-time code (enter, jit_entry, the slow-path wrappers)
     if (at == DM_AOT_PROF_JIT) r->jit += w;
-    else if (at > DM_AOT_PROF_JIT && (fn = dm_aot_fn_of_guest(at, &pack)) >= 0) { count(pack, fn, w); r->hostcall += w; }
-    else r->host += w;
+    else if (at > DM_AOT_PROF_JIT && (fn = dm_aot_fn_of_guest(at, &pack)) >= 0) { count(pack, fn, w); r->hostcall += w; count_host(pc, r->idx, 1, w); count_caller(r, pc, sp, w); }
+    else { r->host += w; count_host(pc, r->idx, 2, w); count_caller(r, pc, sp, w); }
 }
 
 static void write_at_exit(void) { dm_aot_profile_write(); }
@@ -239,6 +285,8 @@ static int read_switches(void) {
         if (v >= 1 && v <= PROF_HZ_MAX) g_hz = (unsigned)v;
         else LOG("[RED] aot: DM_AOT_PROFILE_HZ=%s is not 1 .. %d: %d", hz, PROF_HZ_MAX, PROF_HZ_DEFAULT);
     }
+    const char *hp = getenv("DM_AOT_PROFILE_HOST");   // the host's samples by pc, for DM_CTL profmark (above count_pc)
+    if (hp && *hp && strcmp(hp, "0") && !(g_hostpc = calloc(HOSTPC_N, sizeof *g_hostpc))) LOG("[RED] aot: DM_AOT_PROFILE_HOST: no memory for the table: the host's samples are not counted by pc");
     return 0;
 }
 
@@ -286,7 +334,7 @@ static void *sampler_main(void *arg) {
             CONTEXT ctx;
             memset(&ctx, 0, sizeof ctx);
             ctx.ContextFlags = CONTEXT_CONTROL;
-            if (GetThreadContext(r->h, &ctx)) count_pc(r, r->t, (uint64_t)ctx.Rip, w);
+            if (GetThreadContext(r->h, &ctx)) count_pc(r, r->t, (uint64_t)ctx.Rip, 0, w);
             ResumeThread(r->h);
         }
         pthread_mutex_unlock(&g_lock);
@@ -322,6 +370,7 @@ void dm_aot_profile_thread_begin(void) {
     r->cycles = c;   // its CPU time counts from here, as a Linux timer counts from its arming
     r->t = dm_aot_self();
     pthread_mutex_lock(&g_lock);
+    r->idx = g_nthreads;
     r->next = g_threads; g_threads = r; g_nthreads++;
     pthread_mutex_unlock(&g_lock);
     t_prof = r;
@@ -348,7 +397,8 @@ static void on_prof(int sig, siginfo_t *si, void *ucv) {
     if (!r || !atomic_load_explicit(&g_sampling, memory_order_relaxed)) return;
     const int saved_errno = errno;
     const uint64_t w = 1 + (uint64_t)(si && si->si_code == SI_TIMER && si->si_overrun > 0 ? si->si_overrun : 0);
-    count_pc(r, dm_aot_self(), (uint64_t)((const ucontext_t *)ucv)->uc_mcontext.gregs[REG_RIP], w);
+    const ucontext_t *uc = ucv;
+    count_pc(r, dm_aot_self(), (uint64_t)uc->uc_mcontext.gregs[REG_RIP], (uint64_t)uc->uc_mcontext.gregs[REG_RSP], w);
     errno = saved_errno;
 }
 
@@ -371,6 +421,12 @@ void dm_aot_profile_thread_begin(void) {
     prof_thread *r = calloc(1, sizeof *r);
     if (!r) { LOG("[RED] aot: DM_AOT_PROFILE: no memory for a thread's record: the thread is not sampled"); return; }
     r->tid = (long)syscall(SYS_gettid);
+    pthread_attr_t sa;
+    void *sa_base; size_t sa_size;
+    if (g_hostpc && !pthread_getattr_np(pthread_self(), &sa)) {   // the bounds count_caller reads within (DM_AOT_PROFILE_HOST only: the main thread's read parses /proc/self/maps)
+        if (!pthread_attr_getstack(&sa, &sa_base, &sa_size)) { r->stack_lo = (uint64_t)(uintptr_t)sa_base; r->stack_hi = r->stack_lo + sa_size; }
+        pthread_attr_destroy(&sa);
+    }
     struct sigevent se;
     memset(&se, 0, sizeof se);
     se.sigev_notify = SIGEV_THREAD_ID;
@@ -387,6 +443,7 @@ void dm_aot_profile_thread_begin(void) {
         return;
     }
     pthread_mutex_lock(&g_lock);
+    r->idx = g_nthreads;
     r->next = g_threads; g_threads = r; g_nthreads++;
     pthread_mutex_unlock(&g_lock);
     t_prof = r;
@@ -737,5 +794,79 @@ int dm_aot_profile_write(void) {
     if (!files && !bad) LOG("aot: profile: no samples in any pack's code: nothing written to %s", dir);
     write_misses(dir, &bad);   // beside the profile (aot.h, "The JIT fallback's misses")
     write_bindings(dir, &bad);   // beside them (aot.h, "The loader's bindings")
+    return bad ? -1 : 0;
+}
+
+// The mark (DM_CTL `profmark <path>`; above count_pc, "The host's samples by pc"): <path> gets, tab-separated, a `thread` row per sampled thread (its id, its name, its samples:
+// all, in compiled code, in host calls and SVCs, in the JIT fallback, elsewhere in the host; the JIT fallback's measured CPU time in ns; its number) and, with
+// DM_AOT_PROFILE_HOST, a `pc` row per sampled host pc and thread (its class, its object file, its offset in it, the nearest exported symbol and the offset from it, its
+// samples, the thread's number), the `caller` rows besides the samples (Linux), then a `lost` row. The counts are this
+// session's so far, read while the threads run (relaxed: a sample on its way may be missing); sampling goes on
+static void pc_where(uint64_t pc, char *obj, size_t no, uint64_t *off, char *sym, size_t ns, uint64_t *symoff) {
+    snprintf(obj, no, "?"); snprintf(sym, ns, "-"); *off = pc; *symoff = 0;
+#if defined(_WIN32)
+    HMODULE m = NULL;
+    if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCSTR)(uintptr_t)pc, &m) && m) {
+        char p[MAX_PATH];
+        const DWORD n = GetModuleFileNameA(m, p, sizeof p);
+        if (n && n < sizeof p) { const char *b = p + n; while (b > p && b[-1] != '\\' && b[-1] != '/') b--; snprintf(obj, no, "%s", b); }
+        *off = pc - (uint64_t)(uintptr_t)m;
+    }
+#else
+    Dl_info di;
+    if (dladdr((void *)(uintptr_t)pc, &di) && di.dli_fname) {
+        const char *b = strrchr(di.dli_fname, '/');
+        snprintf(obj, no, "%s", b ? b + 1 : di.dli_fname);
+        *off = pc - (uint64_t)(uintptr_t)di.dli_fbase;
+        if (di.dli_sname) { snprintf(sym, ns, "%s", di.dli_sname); *symoff = pc - (uint64_t)(uintptr_t)di.dli_saddr; }
+    }
+#endif
+}
+int dm_aot_profile_mark(const char *path) {
+    if (!dm_aot_profile_on()) { LOG("[RED] aot: profile mark %s: DM_AOT_PROFILE is not set, so no thread is sampled: nothing written", path); return -1; }
+    char dir[1024];   // its folder made first, as the writer makes the profile's (a mark into a folder the session has not written yet)
+    snprintf(dir, sizeof dir, "%s", path);
+    for (char *e = dir + strlen(dir); e > dir; e--) if (is_sep(e[-1])) { e[-1] = 0; if (dir[0]) mkdirs(dir); break; }
+    FILE *f = fopen(path, "wb");
+    if (!f) { LOG("[RED] aot: profile mark: cannot write %s", path); return -1; }
+    fprintf(f, "# aot profile mark (dm/host/aot_profile.c dm_aot_profile_mark): %u Hz of each guest thread's CPU time; this session's counts so far\n", g_hz);
+    fprintf(f, "# thread <tid> <name> <samples> <compiled> <host calls and SVCs> <JIT> <host> <JIT ns> <number>\n"
+               "# pc <hostcall|host|caller> <object> <offset> <symbol>+<offset> <samples> <thread number>\n");
+    uint64_t host = 0;
+    int threads = 0;
+    pthread_mutex_lock(&g_lock);
+    for (const prof_thread *r = g_threads; r; r = r->next) {
+        char name[64] = "";
+#if !defined(_WIN32)
+        char cp[64];
+        snprintf(cp, sizeof cp, "/proc/self/task/%ld/comm", r->tid);
+        FILE *c = fopen(cp, "r");
+        if (c) { if (!fgets(name, sizeof name, c)) name[0] = 0; fclose(c); }
+        name[strcspn(name, "\n")] = 0;
+#endif
+        if (!name[0]) snprintf(name, sizeof name, "%s", r->name[0] ? r->name : "-");
+        for (char *s = name; *s; s++) if (*s == '\t') *s = ' ';
+        fprintf(f, "thread\t%ld\t%s\t%llu\t%llu\t%llu\t%llu\t%llu\t%llu\t%d\n", r->tid, name, (unsigned long long)r->samples, (unsigned long long)r->code,
+                (unsigned long long)r->hostcall, (unsigned long long)r->jit, (unsigned long long)r->host, (unsigned long long)r->jit_ns, r->idx);
+        host += r->hostcall + r->host;
+        threads++;
+    }
+    pthread_mutex_unlock(&g_lock);
+    size_t pcs = 0;
+    uint64_t in_pcs = 0;
+    for (uint32_t i = 0; g_hostpc && i < HOSTPC_N; i++) {
+        const uint64_t k = atomic_load_explicit(&g_hostpc[i].key, memory_order_relaxed), n = atomic_load_explicit(&g_hostpc[i].n, memory_order_relaxed);
+        if (!k || !n) continue;
+        char obj[128], sym[160];
+        uint64_t off, symoff;
+        pc_where(HOSTPC_PC(k), obj, sizeof obj, &off, sym, sizeof sym, &symoff);
+        fprintf(f, "pc\t%s\t%s\t0x%llx\t%s+0x%llx\t%llu\t%d\n", k >> 62 == 1 ? "hostcall" : k >> 62 == 2 ? "host" : "caller", obj, (unsigned long long)off, sym,
+                (unsigned long long)symoff, (unsigned long long)n, HOSTPC_THREAD(k));
+        if (k >> 62 != 3) { pcs++; in_pcs += n; }
+    }
+    fprintf(f, "lost\t%llu\n", (unsigned long long)atomic_load(&g_hostpc_lost));
+    const int bad = fclose(f) != 0;
+    LOG("aot: profile mark %s: %d threads, %llu samples in the host%s, %zu host pcs holding %llu", path, threads, (unsigned long long)host,
+        g_hostpc ? "" : " (DM_AOT_PROFILE_HOST is not set: not by pc)", pcs, (unsigned long long)in_pcs);
     return bad ? -1 : 0;
 }

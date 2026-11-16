@@ -2782,6 +2782,8 @@ def port_launch_file(platform, repo, work, wdir, aot, game, msl, aoc, gfx, lang,
     for k in envs:
         if not ENV_NAME.fullmatch(k): raise BuildError(f'the environment file (--env-file / DM_ENV_FILE) sets {k!r}, which is not a variable name a shell can export')
     host = host or port_host(repo, platform)[0]
+    # what the comments name: from a bundle, its own launcher (a player's folder has no dm/launcher); from a checkout, the launcher's sources
+    launcher = 'nxlauncher (the bundle\'s, beside bin/)' if port_host(repo, platform)[1] else 'nxlauncher (dm/launcher)'
     rows = [('game', 'title', name), ('game', 'title_id', g.id), ('game', 'version', version or pkg_ver), ('game', 'package', pkg_ver), ('game', 'platform', platform), ('game', 'graphics', gfx),
             ('path', 'host', host), ('path', 'game_profile', game_profile or game_profile_file(work, platform)), ('path', 'cwd', rd), ('path', 'choices', rd / 'env.txt'),
             ('path', 'log', rd / 'log.txt')]
@@ -2792,7 +2794,7 @@ def port_launch_file(platform, repo, work, wdir, aot, game, msl, aoc, gfx, lang,
     rows += [('pack', m, pack_dir(aot, m)) for m in modes] + [('env', k, v) for k, v in envs.items()]
     head = [LAUNCH_HEAD,
             f'# {launch_field(name, "the game name")} ({g.id}), the {platform} pack of {pkg_ver}: written by scripts/build_ipa_from_nsp.py --platform {platform}. '
-            f'{"run.cmd" if win else "run.sh"} and the launcher nxlauncher (dm/launcher) both read it, so both start nxhost-run the same way (docs/settings.md, On Windows and Linux).',
+            f'{"run.cmd" if win else "run.sh"} and the launcher {launcher} both read it, so both start nxhost-run the same way (docs/settings.md, On Windows and Linux).',
             '# Tab-separated rows <kind> <name> <value>; a reader skips # lines and the kinds it does not know.',
             '#   game  title, title_id, version (the display version), package (the version tag), platform, graphics',
             '#   path  host (nxhost-run, one program for every game; NXHOST in the environment names another; when it is gone, a bundle\'s bin/nxhost-run: the launcher\'s folder\'s, or',
@@ -2919,12 +2921,14 @@ def port_run_script(platform, repo, work, wdir, g, name, launch, host=None):
     nxhost-run ([module...] [-- game arguments]). host: the port's bundle's nxhost-run when the launch file names it (port_host), said here. Returns its path"""
     rd, win = wdir / 'run', platform == 'windows'
     tree, exe = ('build/win64', 'nxhost-run.exe') if win else ('build/linux', 'nxhost-run')
-    about = [f'{name} ({g.id}): packed by scripts/build_ipa_from_nsp.py --platform {platform}; runs it in the host program nxhost-run (docker/README.md, "Running the host program"),',
+    # from a bundle the comments name what the bundle holds (its nxlauncher, docs/settings.md), not a checkout's docker/README.md or dm/launcher
+    about = [f'{name} ({g.id}): packed by scripts/build_ipa_from_nsp.py --platform {platform}; runs it in the host program nxhost-run' + (',' if host else ' (docker/README.md, "Running the host program"),'),
              f'one program for every game, which takes this game\'s profile from {game_profile_file(work, platform).name} beside this script (--profile; the launch file\'s game_profile row).']
     if host: about.append(f'nxhost-run is the port\'s bundle\'s: {host}')
     else: about.append(f'nxhost-run is this checkout\'s build: cmake -S dm/host -B {tree} -G Ninja -DGAME=<any title ID of dm/games>' + (' -DCMAKE_TOOLCHAIN_FILE=/src/dm/host/cmake/x86_64-w64-mingw32.cmake' if win else '')
                        + f' && cmake --build {tree} --target nxhost-run (docker/README.md, "From a Linux host"' + (', in the llvm-mingw image)' if win else ')'))
-    about += [f'What it starts comes from {launch.name} beside this script, which the launcher nxlauncher (dm/launcher) reads too, so both start the game the same way: the pack (the first',
+    about += [f'What it starts comes from {launch.name} beside this script, which the launcher nxlauncher ' + ('(the bundle\'s, beside bin/)' if host else '(dm/launcher)')
+              + ' reads too, so both start the game the same way: the pack (the first',
               'pack row, or NXPACK=balanced / max), and the environment: what is already set stays, then the player\'s saved choices (the choices row: env.txt, KEY=VALUE lines, # comments;',
               'not read with DM_SAVED_CHOICES=0), then the env rows, each only where nothing set it before. An empty value counts as unset, as on every platform.',
               f'NXHOST=<path> runs another build; the arguments go to nxhost-run: [module...] [-- game arguments]. The save stays in {rd / "save"} from run to run.',
@@ -3200,7 +3204,10 @@ def main(args=None):
     gb = extract_bytes(picks, False) / 2**30 + 6   # every merged image is complete, including on APFS; shader cache + slack
     if free_gb(work) < gb and not all((ex / v).exists() for v in versions): raise BuildError(f'less than {gb:.0f} GB free on the volume of {work}')
     heapck = provisional and HEAP_CHECK and not args.no_heap_check and not heap_checked(g)   # the heap check, when the game needs one (once per provisional profile: it stamps the profile)
-    PROG.plan(1 + len(versions) + bool(fam['dlc']) + 4 - (prepare_xcode or (mac and not mac_pack) or port))   # prepare Xcode (a Mac-only build: the Mac host; Windows / Linux: the packs) replaces app build + IPA pack with one stage (a Mac app: Mac host + Mac app)
+    # the NVN shader split's stage counted from the start when the profile has shader tables (an NVN game's), so the total the stage lines show does not grow after the
+    # extraction ([1/5], [2/5], then [3/6]); a game whose API only its files tell (a provisional profile) still adds it there
+    nvn_planned = (g.dir / 'shader_map.tsv').is_file()
+    PROG.plan(1 + len(versions) + bool(fam['dlc']) + 4 - (prepare_xcode or (mac and not mac_pack) or port) + nvn_planned)   # prepare Xcode (a Mac-only build: the Mac host; Windows / Linux: the packs) replaces app build + IPA pack with one stage (a Mac app: Mac host + Mac app)
     PROG.stage('build nx_extract')
     nx = build_nx_extract(repo, work, logs, env)
     PROG.end()
@@ -3237,7 +3244,7 @@ def main(args=None):
     if gfx == 'nvn' and not port: check_metal(py, repo, env)   # before the captures and the shader split, which take minutes
     for on, k in ((glslc, 'glslc_capture'), (vkcap, 'vk_capture'), (glcap, 'gl_capture'), (uedec, 'ue_decode'), (gfx == 'nvn' and src['oodle_packs'][0], 'oodle_packs'), (gfx == 'nvn' and src['ue_legacy'][0], 'ue_legacy')):
         if on: say(src[k][1])
-    PROG.add(glslc + vkcap + glcap + uedec + (gfx == 'nvn'))
+    PROG.add(glslc + vkcap + glcap + uedec + (gfx == 'nvn') - nvn_planned)
     aoc = extract_aoc(nx, keys, repo, work, app, fam, logs)
     dlc_roms = sorted(p for p in aoc.iterdir() if p.is_dir() or p.suffix == '.img') if aoc else []
     base = next((dirs[v] for v in versions if picks[v][1] is None), dirs[versions[0]])   # the folder the base game was extracted to alone

@@ -718,6 +718,13 @@ static void refused_packs(const fake::Folder &f, const fs::path &root) {
     CHECK(exit_problem(kRepackStatus).find("Repack") != std::string::npos && exit_problem(kRepackStatus).find("status 8") != std::string::npos,
           "status 8: the packs were refused, Repack makes them again: " + exit_problem(kRepackStatus));
     CHECK(exit_problem(0).empty() && exit_problem(3).empty() && exit_problem(134).empty(), "other statuses: nothing the launcher explains");
+    // nxhost-run's other start refusals (aot.h DM_AOT_NO_VULKAN, DM_AOT_NO_FONT): what to install, and no repack offered for them
+    CHECK(exit_problem(kNoVulkanStatus).find("Vulkan loader") != std::string::npos && exit_problem(kNoVulkanStatus).find("status 9") != std::string::npos &&
+          exit_problem(kNoVulkanStatus).find("Repack") == std::string::npos, "status 9: no Vulkan device, the driver and the loader to install: " + exit_problem(kNoVulkanStatus));
+    CHECK(exit_problem(kNoFontStatus).find("DejaVu Sans") != std::string::npos && exit_problem(kNoFontStatus).find("status 10") != std::string::npos,
+          "status 10: no font of the system for the shared font: " + exit_problem(kNoFontStatus));
+    // before a start: the Vulkan loader that is not there (a name no system has) is a problem the list shows; the real one is what this machine has
+    CHECK(vulkan_loader_problem("libnxnative-no-such-vulkan.so.1").find("no Vulkan loader") != std::string::npos, "a loader that does not load: the list's problem");
     const fs::path aot = f.a / "aot_v131072";
     // bindings_problem over a pack folder and a list of take-overs
     fake::write(aot / "main.bind.tsv", "# nxaot bindings: x\n# module main, build ID none, image SHA-256 " + std::string(64, '1') + "\n0x10 0x200 nn_keep\n0x18 0x240 nn_taken\n");

@@ -108,8 +108,10 @@ static font_t font_first(const char *env, const char *file, const char *fallback
 // The port (Linux, Windows) has no Arial Unicode at a fixed path: the standard font's last stand-in is a sans-serif TrueType font of the system's (glyf outlines, which
 // nn::fontll reads), the first of a list found. Linux: the fonts folders of the XDG data directories ($XDG_DATA_HOME, default ~/.local/share, then $XDG_DATA_DIRS,
 // default /usr/local/share:/usr/share), at the paths the distributions' DejaVu, Liberation, Noto and FreeFont packages install to; Windows: %SystemRoot%\Fonts.
-// Without any stand-in nn::pl::GetSharedFontLoadState answers 0 for ever, and a game that waits for its shared fonts stops there: Mario vs. Donkey Kong's main
-// thread polled it with svcSleepThread from nnMain on (docs/reference/services.md, "Shared fonts on Linux and Windows")
+// Without any stand-in, nn::pl::GetSharedFontLoadState would answer 0 for ever, and a game that waits for its shared fonts would stop there (Mario vs. Donkey Kong's main
+// thread polled it with svcSleepThread from nnMain on): the process stops at the first request instead (no_font, below; docs/reference/services.md, "Shared fonts on
+// Linux and Windows")
+static char g_font_looked[2600];   // what font_system looked for and where, for no_font's line
 static font_t font_system(void) {
     static const char *const names[] = {
 #if defined(_WIN32)
@@ -150,8 +152,26 @@ static font_t font_system(void) {
         }
         d += n + (d[n] != 0);
     }
-    LOG("[RED] shared font: no stand-in for the standard font among the system's either (DejaVu Sans, Liberation Sans, Noto Sans, FreeSans in %s): a game that waits for its shared fonts waits for ever", dirs);
+    // what this platform looked for, by the names a player knows, and where: font_get says it once, with what the game then does (no_font)
+#if defined(_WIN32)
+    snprintf(g_font_looked, sizeof g_font_looked, "Arial, Segoe UI or Tahoma (arial.ttf, segoeui.ttf, tahoma.ttf) in %s", dirs);
+#else
+    snprintf(g_font_looked, sizeof g_font_looked, "DejaVu Sans, Liberation Sans, Noto Sans or FreeSans (the distributions' packages' paths) in the fonts folders %s", dirs);
+#endif
     return (font_t){0};
+}
+#endif
+// No font stands in for the standard shared font. Horizon always has its shared fonts (nn::pl answers Loading only while they load), so a game has no path for their
+// absence and waits for them for ever (Mario vs. Donkey Kong's main thread polls GetSharedFontLoadState with svcSleepThread). The process stops at the game's first request
+// instead, with one [RED] line naming what was looked for and where, and an exit status of its own (aot.h DM_AOT_NO_FONT), which the launcher explains
+#if !defined(__APPLE__)
+#define SDK16_NO_FONT_STATUS 10   // aot.h DM_AOT_NO_FONT (that header is the x86-64 engine's, which an Apple build and some tests do not include)
+static void no_font(void) {
+    LOG("[RED] shared font: the game asked for its standard shared font and nothing stands in for it: not DM_SHARED_FONT, not DM_FONT_DIR/standard.ttf, and none of the "
+        "system's fonts this platform takes, %s. Horizon always has the shared fonts, so the game would wait for them for ever: nxhost-run exits with status %d; install one of "
+        "those fonts", g_font_looked, SDK16_NO_FONT_STATUS);
+    fflush(NULL);
+    _Exit(SDK16_NO_FONT_STATUS);
 }
 #endif
 static pthread_mutex_t font_mu = PTHREAD_MUTEX_INITIALIZER;
@@ -163,7 +183,11 @@ static font_t font_get(int type) {
 #if !defined(__APPLE__)
                      if (!std_f.p) std_f = font_system();   // the port: a font of the system's (above), as Apple's host takes macOS's Arial Unicode
 #endif
-                     if (!std_f.p) LOG("[RED] cannot open the standard shared font (point DM_SHARED_FONT or DM_FONT_DIR/standard.ttf at a TTF)"); }
+#if defined(__APPLE__)
+                     if (!std_f.p) LOG("[RED] cannot open the standard shared font (point DM_SHARED_FONT or DM_FONT_DIR/standard.ttf at a TTF)"); }   // Apple's host: unchanged
+#else
+                     if (!std_f.p) no_font(); }
+#endif
     if (type == 5 && !ext_done) { ext_done = 1; ext_f = font_first("DM_SHARED_FONT_EXT", "nintendo_ext.ttf", NULL);
                                   if (!ext_f.p) LOG("[YELLOW] Nintendo extended shared font missing (dm/tools/make_ext_font.py generates nintendo_ext.ttf): button icons will be drawn as '?'"); }
     font_t f = type == 5 && ext_f.p ? ext_f : std_f;

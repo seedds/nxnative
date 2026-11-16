@@ -27,6 +27,14 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Found on:** [Super Mario Bros. Wonder](../../dm/games/010015100B514000/README.md); [Pokémon Brilliant Diamond](../../dm/games/0100000011D90000/README.md): the opening movie's YUV conversion uses GEQUAL against a new 1920×1080 depth texture that the game never clears. Metal supplied depth 1, discarding the movie; zero initialization restores it without a shader override.
 - **Check:** `t_clear_ds` poisons depth and stencil before calling the real initializer and checks both become zero; depth clear, stencil-view and upload-budget tests cover the related paths.
 
+### No Vulkan device for a game: it stops, with what to install
+
+- **Symptom:** on a PC without the Vulkan loader or a Vulkan driver, the game started and ran with nothing drawn: `[RED] [hostvk] no Vulkan device for the NVN backend (no Vulkan loader: libvulkan.so.1 could not be loaded): the null backend's forms answer, nothing is drawn`, then a red line per backend function, in a log the player does not see while the window stays black.
+- **Cause:** the backend's fallback (`vk_backend.c`: the null backend's forms when no device meets the baseline) served every caller alike: the tests and a headless run, which need it, and the game a player starts with a window, for which it only hides the reason.
+- **Fix:** nxhost-run asks for a device on the game program's path, a window asked for (`DM_WINDOW`, which `run.sh`, `run.cmd` and the launcher set) and no `DM_VK_HEADLESS` (`main_x86.c`, `hvk_require_device`); without one at the bring-up it stops with one `[RED] ` line that says what to install and exit status 9 (`aot.h` `DM_AOT_NO_VULKAN`). The launcher explains status 9 after Play, and shows a missing loader before it, as every game's problem in its list (`launcher_model.cpp` `exit_problem`, `vulkan_loader_problem`). The tests and a run without a window still get the null forms: not asking is the only way.
+- **Found on:** the port's bundle on a plain Ubuntu 24.04 without the Vulkan loader ([Mario vs. Donkey Kong](../../dm/games/0100B99019412000/README.md)).
+- **Check:** `t_vk_no_device` (a device index no loader lists: with the request, status 9 and the line; without it, the null forms and the program goes on), `t_launcher_model` (status 9 and 10 explained; a loader that does not load is the list's problem).
+
 ### A texture uploaded twice in one submission
 
 - **Symptom:** on the Vulkan backend under the validation layer (`DM_VK_VALIDATION=1`), `[RED] [hostvk] validation error (SYNC-HAZARD-WRITE-AFTER-WRITE) … vkCmdCopyBufferToImage(): Hazard WRITE_AFTER_WRITE for dstImage … [texture ser=40 NVN R8 2048x2048 …]`, with consecutive `seq_no`s in one command buffer. No wrong picture was seen on lavapipe, which runs the copies in order; a GPU may not, and the texture can then keep an older upload or a mix of two.

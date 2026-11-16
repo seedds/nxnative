@@ -142,18 +142,26 @@ static uint64_t proc_start_mono_ns(void) {
     return age > 0 && (uint64_t)age < mono ? mono - (uint64_t)age : mono;
 }
 
+_Static_assert(DM_AOT_NO_FONT == 10, "hle_sdk16.c SDK16_NO_FONT_STATUS and the launcher's kNoFontStatus say 10");
+_Static_assert(DM_AOT_NO_VULKAN == 9, "the launcher's kNoVulkanStatus says 9");
+// The usage: on standard output with status 0 for --help / -h, on standard error with status DM_AOT_USAGE without a folder
+static void usage(FILE *f) {
+    fprintf(f, "usage: nxhost-run <dir> [module...] [-- game arguments...]\n  <dir>: the game's aot_<version> folder (<name>.aot.tsv, <name>.image.bin, <name>%s per module)\n"
+            "  before <dir>: --profile <file> (the game profile file dm/games/game.py runtime writes; DM_GAME_PROFILE=<file> without the option) or --game <title ID> (a profile\n"
+            "  built into the program); with neither, the profile the program was configured with (cmake -DGAME)\n"
+            "  nxhost-run --takeovers: the names of this host's forced take-overs, one per line (what the launcher checks a pack's PLT bindings against)\n"
+            "  --bindings <folder> before <dir>: the loader's bindings of the modules' PLT slots to their own functions written to <folder>/<module>.bind.tsv, nothing run\n"
+            "  nxhost-run --help (or -h): this text\n"
+            "  A game is started by its pack's run.sh / run.cmd or by the launcher nxlauncher, which give these arguments and the game's environment.\n"
+            "  exit status %d: a pack this host refuses, which packing the game again cures (the reason in the [RED] line before)\n"
+            "  exit status %d: no Vulkan device for a game that asked for a window (a GPU driver with Vulkan 1.3 and the Vulkan loader are needed)\n"
+            "  exit status %d: no font of the system stands in for the shared font the game asked for (the [RED] line names the fonts and folders looked in)\n",
+            DM_AOT_PACK_SUFFIX, DM_AOT_REPACK, DM_AOT_NO_VULKAN, DM_AOT_NO_FONT);
+}
 static void host_preload(int argc, char **argv) {
     g_t0_ns = proc_start_mono_ns();
     flags_init();
-    if (argc < 2) {
-        fprintf(stderr, "usage: nxhost-run <dir> [module...] [-- game arguments...]\n  <dir>: the game's aot_<version> folder (<name>.aot.tsv, <name>.image.bin, <name>%s per module)\n"
-                "  before <dir>: --profile <file> (the game profile file dm/games/game.py runtime writes; DM_GAME_PROFILE=<file> without the option) or --game <title ID> (a profile\n"
-                "  built into the program); with neither, the profile the program was configured with (cmake -DGAME)\n"
-                "  nxhost-run --takeovers: the names of this host's forced take-overs, one per line (what the launcher checks a pack's PLT bindings against)\n"
-                "  --bindings <folder> before <dir>: the loader's bindings of the modules' PLT slots to their own functions written to <folder>/<module>.bind.tsv, nothing run\n"
-                "  exit status %d: a pack this host refuses, which packing the game again cures (the reason in the [RED] line before)\n", DM_AOT_PACK_SUFFIX, DM_AOT_REPACK);
-        exit(DM_AOT_USAGE);
-    }
+    if (argc < 2) { usage(stderr); exit(DM_AOT_USAGE); }
     if (getenv("DM_FIXED_TIME")) setenv("TZ", "UTC", 1);   // deterministic comparison: the calendar in UTC (main.c)
 #if defined(_WIN32)
     _setmaxstdio(4096);   // the C runtime's open stream limit (512 by default) as main.c raises the descriptor limit
@@ -214,6 +222,7 @@ void dm_host_preload_start(int argc, char **argv) {
     if (pthread_create(&g_pre.th, &a, preload_thread, NULL)) die("dm_host_preload_start: cannot start the thread");
 }
 int main(int argc, char **argv) {
+    if (argc == 2 && (!strcmp(argv[1], "--help") || !strcmp(argv[1], "-h"))) { usage(stdout); return 0; }   // before anything takes the folder from argv[1]
     // --takeovers: the forced take-overs' names and nothing else (no module, no game profile): the launcher asks the host it would start (dm/launcher host_takeovers)
     if (argc == 2 && !strcmp(argv[1], "--takeovers")) { void loader_print_takeovers(FILE *f); loader_print_takeovers(stdout); fflush(stdout); return 0; }
     // The game profile first, before anything reads a DM_GAME_* constant (the loading thread of DM_PRELOAD too): --profile / --game are taken off the arguments here
@@ -238,6 +247,9 @@ int main(int argc, char **argv) {
     { void dm_fps_state_apply(void); dm_fps_state_apply(); }   // frame rate and render scale into the frame step's state page (loader.c)
 #if NXHOST_VULKAN
     hvk_present_set_window(front_vk_create_surface, front_vk_pixel_size);   // the Vulkan presenter draws into the front end's window (vk_present.c), when there is one
+    // The game program's path: a window asked for (DM_WINDOW, which run.sh, run.cmd and the launcher set) and not DM_VK_HEADLESS: no Vulkan device stops the game with its
+    // own exit status at the device's bring-up (the game's first NVN call) rather than running with nothing drawn. Without a window (diagnostics, the tests) the null forms answer
+    { const char *w = getenv("DM_WINDOW"), *h = getenv("DM_VK_HEADLESS"); if (w && (!h || !strcmp(h, "0"))) hvk_require_device(DM_AOT_NO_VULKAN); }
 #endif
     front_run(guest_main);   // DM_WINDOW: the window on this thread, the guest on a 64 MiB thread; else the guest here
     return g_status;

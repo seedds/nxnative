@@ -69,8 +69,12 @@
 #else
 #define DM_MEM_CAP_DEFAULT_GB 0
 #endif
-// A declared null form's red line, said once per call site: what this platform does not do that Apple does
-#define APPLE_ONLY_RED(...) do { static _Atomic int red_; if (!atomic_exchange(&red_, 1)) LOG("[RED] " __VA_ARGS__); } while (0)
+// A declared null form's line, said once per call site: a measurement or tuning that this platform does not do and Apple does (the process's memory footprint and its
+// watchdog, energy and wakeups, a thread's instruction counters, Mach's real-time policy for the present thread, the CPU's core types). Nothing in the game goes wrong
+// for it, so on the port it is a note, not a [RED] line: a player's log keeps [RED] for what is wrong
+#define APPLE_ONLY_NOTE(...) do { static _Atomic int note_; if (!atomic_exchange(&note_, 1)) LOG("note: Apple only: " __VA_ARGS__); } while (0)
+// A declared null form whose absence can change what the game sees (the GPU's view of memory): a [RED] line, said once per call site
+#define PORT_RED_ONCE(...) do { static _Atomic int red_; if (!atomic_exchange(&red_, 1)) LOG("[RED] " __VA_ARGS__); } while (0)
 
 // ---------- Slot table, thunks, unimplemented stubs ----------
 typedef struct { _Atomic uint64_t cnt; void *fn; } nvn_slot_t;
@@ -1233,7 +1237,7 @@ static uint64_t thr_cpu_ns(void) { return clock_gettime_nsec_np(CLOCK_THREAD_CPU
 #else
 // The thread's instruction and cycle counters (libSystem's thread_selfcounts) and its kernel-mode CPU time (Mach THREAD_BASIC_INFO) are Apple's, and the platform layer has none: they
 // read 0 here, so the submit statistics built on them do too (the translation detail line, which needs the cycle count, is not printed)
-static void thr_red(void) { APPLE_ONLY_RED("NVN submit statistics: this thread's instruction and cycle counters and kernel CPU time are Apple's (thread_selfcounts, THREAD_BASIC_INFO): they read 0 on this platform"); }
+static void thr_red(void) { APPLE_ONLY_NOTE("NVN submit statistics: this thread's instruction and cycle counters and kernel CPU time are Apple's (thread_selfcounts, THREAD_BASIC_INFO): they read 0 on this platform"); }
 static uint64_t thr_instr(void) { thr_red(); return 0; }
 static void thr_counts(uint64_t *instr, uint64_t *cyc) { thr_red(); *instr = *cyc = 0; }
 static uint64_t thr_sys_ns(void) { thr_red(); return 0; }
@@ -1458,7 +1462,7 @@ static void dump_frame(void) {
             static long cap = -1; if (cap < 0) { const char *e = getenv("DM_MEM_CAP_GB"); cap = e ? atol(e) : DM_MEM_CAP_DEFAULT_GB; }
             if (cap > 0 && mb > (unsigned long long)cap * 1024) { LOG("[RED] memory watchdog: resident %llu MB over the limit of %ld GB (frame %llu), exiting", mb, cap, (unsigned long long)g_frame); _exit(86); } } }
 #else   // the footprint is Mach's (TASK_VM_INFO phys_footprint) and the platform layer has none yet
-    if (g_frame % 300 == 0) APPLE_ONLY_RED("NVN: the process's memory footprint is read on Apple only (TASK_VM_INFO): no memory readout line and no memory watchdog (DM_MEM_CAP_GB) on this platform");
+    if (g_frame % 300 == 0) APPLE_ONLY_NOTE("NVN: the process's memory footprint is read on Apple only (TASK_VM_INFO): no memory readout line and no memory watchdog (DM_MEM_CAP_GB) on this platform");
 #endif
     dm_guest_frame_tick();   // Deterministic guest clock (DM_DETCLOCK, host hle_os.c): each present advances a fixed step; a no-op when not enabled
 }
@@ -1510,7 +1514,7 @@ static int dcmp(const void *a, const void *b) { double x = *(const double *)a, y
 // then render-target traffic per frame (attachment load / store bytes, passes that load and store everything, stores saved by DM_NVN_UNWRITTEN_DC) and guest-thread CPU by Switch priority
 static void power_line(uint64_t frame) {
 #if !defined(__APPLE__)   // energy, CPU time, its share on performance cores and wakeups are Mach's (TASK_POWER_INFO_V2): the power, residency and thread lines are Apple only for now
-    (void)frame; APPLE_ONLY_RED("NVN: process energy, CPU time and wakeups are read on Apple only (TASK_POWER_INFO_V2): no power, residency or thread lines on this platform");
+    (void)frame; APPLE_ONLY_NOTE("NVN: process energy, CPU time and wakeups are read on Apple only (TASK_POWER_INFO_V2): no power, residency or thread lines on this platform");
 #else
     static uint64_t pt, pe, pcpu, pp, piw, ppw, pg, pf, pld, pst, pfu, pudc; static mach_timebase_info_data_t tb; if (!tb.denom) mach_timebase_info(&tb);
     task_power_info_v2_data_t pw; mach_msg_type_number_t n = TASK_POWER_INFO_V2_COUNT;
@@ -1638,7 +1642,7 @@ static void set_time_constraint_comp(uint64_t period_ns, uint64_t comp_ns) {
     if (!rt_on()) return;
 #if !defined(__APPLE__)   // the time-constraint policy is Mach's (thread_policy_set): the acquire thread keeps its scheduling class, and no computation is declared (rt_comp_tick stays idle)
     (void)period_ns; (void)comp_ns;
-    APPLE_ONLY_RED("NVN: the present thread's time-constraint (real-time) policy is Mach's (thread_policy_set): not set on this platform");
+    APPLE_ONLY_NOTE("NVN: the present thread's time-constraint (real-time) policy is Mach's (thread_policy_set): not set on this platform");
 #else
     static mach_timebase_info_data_t tb; if (!tb.denom) mach_timebase_info(&tb);
     if (comp_ns < 1000000ull) comp_ns = 1000000ull; if (comp_ns > period_ns * 9 / 10) comp_ns = period_ns * 9 / 10;
@@ -1788,7 +1792,7 @@ static int g_fs_pshare = -1;   // the last window's share in percent (−1 = not
 static int fstep_cpu_slowed(uint64_t presents) {
 #if !defined(__APPLE__)   // the core types (sysctl hw.nperflevels) and the time on performance cores (TASK_POWER_INFO_V2) are Apple's: no slowdown is seen, as with one core type
     (void)presents;
-    APPLE_ONLY_RED("NVN frame step: the CPU's core types and the share of time on performance cores are read on Apple only: no CPU slowdown is seen on this platform");
+    APPLE_ONLY_NOTE("NVN frame step: the CPU's core types and the share of time on performance cores are read on Apple only: no CPU slowdown is seen on this platform");
     return 0;
 #else
     static int levels = -1, slowed, low_was; static uint64_t pc, pp;
@@ -2150,7 +2154,7 @@ static int vpool_map(struct vpool *v, const map_req *r) {   // caller holds g_vp
     // Aliasing the physical pages into the pool's range (Mach vm_remap) has no counterpart in the platform layer yet (it comes with the Vulkan backend's host port, AOT design
     // section 5): every request is kept in the page table only, as an unaligned one is on Apple; textures read it, the GPU cannot address the pool directly
     (void)pg;
-    APPLE_ONLY_RED("virtual pool %p: physical pages are not aliased into its range on this platform (no vm_remap): mapping requests are kept in the page table only", (const void *)v->pool);
+    PORT_RED_ONCE("virtual pool %p: physical pages are not aliased into its range on this platform (no vm_remap): mapping requests are kept in the page table only", (const void *)v->pool);
     return 1;
 #else
     vm_address_t to = (vm_address_t)(v->base + r->voff);
@@ -2575,11 +2579,17 @@ static int write_region_bl(const tex_t *t, unsigned level, unsigned layer, const
     size_t wb = (size_t)((r->width + bw - 1) / bw) * (size_t)bpb, hb = (size_t)((r->height + bh - 1) / bh);
     if (x0 + wb > row_bytes || y0 + hb > rows) return -1;
     uint32_t lb = nvn_tex_level_gobs(&t->d, level) * 64; if (lb < row_bytes) lb = row_bytes;   // the row as laid out (padded in a sparse texture's tiled levels)
-    for (size_t y = 0; y < hb; y++)
-        for (size_t x = 0; x < wb;) {   // 16-byte runs are contiguous within a GOB
-            uint32_t bx = x0 + (uint32_t)x; size_t n = 16 - bx % 16; if (n > wb - x) n = wb - x;
-            memcpy(t->mem + base + nvn_bl_offset(bx, y0 + (uint32_t)y, 0, lb, rows, th, td), src + y * row + x, n); x += n;
-        }
+    // Each block row's terms once (nvn_bl_row_of), each 16-byte run's by shifts (nvn_bl_row_at): nvn_bl_offset per run divided by the block height four times, which made
+    // a game's per-frame glyph writes cost more than their copies (Mario vs. Donkey Kong's title: 2.6 ms of CPU a frame on the game's threads, 1.6 of them in nvn_bl_offset)
+    uint8_t *mem = t->mem + base;
+    for (size_t y = 0; y < hb; y++) {
+        const nvn_bl_row br = nvn_bl_row_of(y0 + (uint32_t)y, lb, th, td);
+        const uint8_t *s = src + y * row;
+        size_t x = 0;
+        if ((x0 & 15) && wb) { size_t n = 16 - (x0 & 15); if (n > wb) n = wb; memcpy(mem + nvn_bl_row_at(&br, x0), s, n); x = n; }   // up to the first 16-byte boundary
+        for (; x + 16 <= wb; x += 16) memcpy(mem + nvn_bl_row_at(&br, x0 + (uint32_t)x), s + x, 16);   // whole runs: contiguous within a GOB
+        if (x < wb) memcpy(mem + nvn_bl_row_at(&br, x0 + (uint32_t)x), s + x, wb - x);
+    }
     return 0;
 }
 static void write_texels(const tex_t *t, const view_t *v, const NVNcopyRegion *r, const uint8_t *src, size_t row, size_t img) {

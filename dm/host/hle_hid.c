@@ -134,7 +134,8 @@ void hid_keys_init(void) {
 //   to a file (a buffer texture's storage, which the pass dump's tbuf lines print, holds what the GPU wrote: buffer textures are views of the pool), "texlist <NVN target>" logs the
 //   registered textures of that target (2 = 3D) with storage address and block-linear layout (nvn_mtl.m dm_gfx_texlist), "texraw <serial> <path>"
 //   saves a host texture's level 0 raw (nvn_mtl.m dm_gfx_texraw), "drag <x0> <y0> <x1> <y1> [seconds=0.3]" moves one finger in a straight line between the two normalized picture
-//   points over that time and lifts it (the touch screen's pans and swipes, hle_touch.c gesture_sample), "#…" is ignored.
+//   points over that time and lifts it (the touch screen's pans and swipes, hle_touch.c gesture_sample), "profmark <path>" writes the x86-64 engine's sampled threads' totals so
+//   far and the host's samples by pc to path (aot_profile.c dm_aot_profile_mark: DM_AOT_PROFILE, DM_AOT_PROFILE_HOST), "#…" is ignored.
 //   Look at a screen, decide, press, look again: menus whose timing moves from run to run (loading) need no blind timed script
 static void *ctl_main(void *arg) {
     const char *path = arg; long off = 0; char line[1100];
@@ -159,6 +160,14 @@ static void *ctl_main(void *arg) {
                     continue;
                 }
                 if (!strncmp(line, "texdump ", 8)) { void dm_gfx_texdump_next(const char *path); dm_gfx_texdump_next(line + 8); LOG("DM_CTL: colour targets of the next frame → %s (as DM_NVN_TEXDUMP)", line + 8); continue; }
+                if (!strncmp(line, "profmark ", 9)) {   // the x86-64 engine's sampler (aot_profile.c dm_aot_profile_mark; DM_AOT_PROFILE, DM_AOT_PROFILE_HOST)
+#if !DM_NATIVE_EXEC
+                    int dm_aot_profile_mark(const char *path); dm_aot_profile_mark(line + 9);
+#else
+                    LOG("[RED] DM_CTL profmark: the x86-64 engine's sampler only (DM_AOT_PROFILE)");
+#endif
+                    continue;
+                }
                 if (!strncmp(line, "passdump ", 9)) { void dm_gfx_passdump_next(long n); dm_gfx_passdump_next(atol(line + 9)); LOG("DM_CTL: passes of the next %ld frames (as DM_NVN_PASSDUMP)", atol(line + 9)); continue; }
                 if (!strncmp(line, "drag ", 5)) {   // one finger, a step every 8 ms
                     float x0, y0, x1, y1, s = 0.3f; if (sscanf(line + 5, "%f %f %f %f %f", &x0, &y0, &x1, &y1, &s) < 4) { LOG("[RED] DM_CTL drag wants x0 y0 x1 y1 [seconds]"); continue; }

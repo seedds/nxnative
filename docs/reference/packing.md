@@ -59,6 +59,16 @@
 - **Fix:** `scripts/build_ipa_from_nsp.py` `decompress_nsz` prefers the current Python's module: it links the file selected by `-k` as `keys.txt` in the conversion's temporary folder and runs `nsz -D` there, with `sys.argv[0]` set to `nsz` before import. Without the module, `nsz_command` probes `nsz` and `nsz-cli-macos-arm64` on the build's PATH and passes `--keys` to the first whose successful help lists that option. An unsupported or failed candidate does not hide the next one; when none works, the error lists the reasons and installation options. Executable, input and output paths are absolute because conversion changes directories. The temporary folder and link are removed on success or failure; the user's default keys are untouched.
 - **Found on:** [Super Mario Odyssey](../../dm/games/0100000000010000/README.md), converting its v0 NSZ. Applies to NSZ and XCZ inputs for every game. Synthetic tests during [PR #327](https://github.com/seedds/nxnative/pull/327) also reproduce an older console script hiding the release binary, a failed help probe containing `--keys`, and a relative PATH executable failing after the directory change; no game files are needed for those cases.
 
+## The session's files for the next pack
+
+### A session ended by SIGTERM left `sdk.bind.tsv.tmp`
+
+- **Symptom:** after a game stopped by SIGTERM (a `timeout`, `nxlauncher --play` killed), the profile folder (`<NSP folder>/<id>-work/profile`) held `sdk.bind.tsv.tmp` beside `subsdk0.bind.tsv`, and `sdk.bind.tsv` was not updated.
+- **Cause:** the graceful exit (`hle_lifecycle.c` `dm_host_shutdown`) armed its 1.5 s bound before it wrote the session's files (the sample profile, the misses, the known targets and each module's bindings, each to a temporary name and then renamed over the old file: `aot_profile.c`), so a long write was cut by `_exit` between the two.
+- **Fix:** the files are written under a bound of their own (20 s), and the 1.5 s bound of the suspend is armed after them. No reader takes a `.tmp`: the host, the packer and the launcher read the files by their full names.
+- **Found on:** [Mario vs. Donkey Kong](../../dm/games/0100B99019412000/README.md), `nxlauncher --play` under `timeout` on Linux.
+- **Check:** `t_lifecycle` (a profile writer that takes 2.5 s: its file written in full, no `.tmp` left; it fails on the old order).
+
 ## Cartridge dumps
 
 ### A cartridge dump with its update on it extracts the update as the base game

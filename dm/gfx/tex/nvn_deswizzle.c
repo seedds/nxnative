@@ -22,6 +22,13 @@ uint64_t nvn_bl_offset(uint32_t x, uint32_t y, uint32_t z, uint32_t row_bytes, u
          + gob_off(x, y);
 }
 
+// nvn_bl_offset's row and slice-0 terms for block row y (the block height and depth are powers of two: shifts and masks); the byte's terms are nvn_bl_row_at's
+nvn_bl_row nvn_bl_row_of(uint32_t y, uint32_t row_bytes, unsigned th, unsigned td) {
+    static const uint16_t koy[8] = {0, 16, 64, 80, 128, 144, 192, 208};   // (y%8/2)*64 + (y%2)*16
+    const uint64_t block = 512ull << (th + td), gobs_x = ((uint64_t)row_bytes + 63) >> 6;
+    return (nvn_bl_row){(uint64_t)(y >> (3 + th)) * gobs_x * block + (uint64_t)((y & ((8u << th) - 1)) >> 3) * 512 + koy[y & 7], block};
+}
+
 static uint32_t mip(uint32_t s, unsigned l) { s >>= l; return s ? s : 1; }
 
 // Geometry of this level: width-in-blocks byte count, block row count, slice count, and where this level and layer starts in storage; returns -1 for unsupported textures

@@ -34,6 +34,10 @@
 typedef int (*hvk_surface_fn)(void *vk_instance, void **vk_surface_out);
 typedef int (*hvk_pixel_size_fn)(int *w, int *h);
 void hvk_present_set_window(hvk_surface_fn make_surface, hvk_pixel_size_fn pixel_size);
+// The game program's path (nxhost-run with a window asked for and no DM_VK_HEADLESS: main_x86.c): a device is required, and when none meets the baseline at the bring-up the
+// process ends with exit status `status` (aot.h DM_AOT_NO_VULKAN) after one [RED] line, instead of running with nothing drawn. Not called, the null backend's forms answer
+// (the tests, a headless or diagnostic run): the only way to get them on purpose
+void hvk_require_device(int status);
 
 // ---------- The backend's side (vk_backend.c) ----------
 int hvk_win_wanted(void);       // a window is registered, it is a Vulkan window and DM_VK_HEADLESS does not refuse it: the device is made with a surface in mind (hostvk_opts.want_surface)

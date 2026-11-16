@@ -106,6 +106,15 @@ int main(int argc, char **argv) {
     printf("      %s\n", line_with(r.out, "usage:"));
     verdict(r.status == 2 && strstr(r.out, "usage: nxhost-run <dir>"), "no arguments: the usage, status 2");
     free(r.out);
+    // 4b. Asked for the usage: --help and -h print it on stdout and exit 0 (before, --help was taken for a game folder)
+    for (int i = 0; i < 2; i++) {
+        const char *opt = i ? "-h" : "--help";
+        quote(cmd, sizeof cmd, prog, opt);
+        run(cmd, &r);
+        char what[160]; snprintf(what, sizeof what, "%s: the usage, status 0 (status %d)", opt, r.status);
+        verdict(r.status == 0 && strstr(r.out, "usage: nxhost-run <dir>") && strstr(r.out, "exit status") && !strstr(r.out, "[dm] [RED]") && !strstr(r.out, "modules from"), what);
+        free(r.out);
+    }
     const char *packs = getenv("NXAOT_PACKS");
     if (!packs || !*packs) packs = T_AOT_PACKS;
     if (!*packs) {

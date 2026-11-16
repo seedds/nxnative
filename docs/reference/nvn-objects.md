@@ -255,6 +255,14 @@ Games read this count as a position in their own command memory and size their h
 - **Found on:** [Metroid Dread](../../dm/games/010093801237C000/README.md).
 - **Check:** `t_nvn` checks 15 regions in RGBA8, BC1 and a two-layer RGBA16F array, from 1×1 to the whole level, byte for byte against the old whole-level path.
 
+### `WriteTexels` regions addressed row by row
+
+- **Symptom:** the game's threads spend more time computing block-linear addresses than copying texels: at Mario vs. Donkey Kong's title on Linux, 2.7 ms of CPU a frame in `write_region_bl` and `nvn_bl_offset` (its two `ModuleSystem` threads and the main thread, which write glyphs into the text textures every frame), 12 % of the game's threads' CPU time there.
+- **Cause:** `write_region_bl` called `nvn_bl_offset` for every 16-byte run of a region, which divides by the block height (a value known only at run time) four times and recomputes the row's terms, then copied the run with a `memcpy` of a run-time length.
+- **Fix:** each block row's terms are computed once (`nvn_bl_row_of` in `nvn_deswizzle.c`) and each run's address by shifts and the GOB's four x offsets (`nvn_bl_row_at`), as the whole-level copies of [CPU deswizzle copies use slice and row offsets](#cpu-deswizzle-copies-use-slice-and-row-offsets) do; whole runs are 16-byte copies. 2.7 to 1.2 ms of CPU a frame at the same title (the sampler's marks, `DM_AOT_PROFILE_HOST`), the bytes written the same.
+- **Found on:** [Mario vs. Donkey Kong](../../dm/games/0100B99019412000/README.md) on Linux (lavapipe), from the sampler's host samples by pc.
+- **Check:** `t_tex` (R: the row form against `nvn_bl_offset` for 8.5 million addresses, block heights 1 to 32 GOBs, depths 1 to 4, padded rows) and `t_vk_write_texels` (on Linux and Windows: 20 regions in RGBA8, BC1, a two-layer RGBA16F array and R8 at a block height of 4 GOBs, byte for byte against the whole-level path; it fails when a region's first partial run is dropped); `t_nvn`'s 15 cases on the Mac, not run here.
+
 ### Packaged texture data copied at `TextureInitialize`
 
 - **Cause:** a texture created with `TextureBuilderSetPackagedTextureData` gets that data copied into its storage by NVN at `TextureInitialize` (a compressible pool cannot be written by the CPU).

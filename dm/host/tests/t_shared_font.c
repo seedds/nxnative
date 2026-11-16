@@ -38,12 +38,15 @@ PLAT_TABLE_DEFINE(swforce)   // the real forced registrations (on Apple: getsect
 #if !defined(__APPLE__)
 // The port's last stand-in for the standard font, a font of the system's (hle_sdk16.c font_system; docs/reference/services.md, "Shared fonts on Linux and Windows"): in
 // a child, since the host looks the fonts up once per process. data: the XDG data directory the child is given (XDG_DATA_DIRS, XDG_DATA_HOME), with no DM_SHARED_FONT
-// or DM_FONT_DIR. Its exit status: 0 when the load state, the address and the size are as want_loaded says (the file's bytes behind the BFTTF header, its size + 8)
+// or DM_FONT_DIR. Its exit status: 0 when the load state, the address and the size are as want_loaded says (the file's bytes behind the BFTTF header, its size + 8);
+// with no font the host stops the process at the first request (hle_sdk16.c no_font: Horizon always has its shared fonts, so a game would wait for ever), status
+// DM_AOT_NO_FONT, after one [RED] line on standard error that names the fonts and the folders looked in (err: the file it goes to)
 static const uint8_t g_ttf[] = "t_shared_font: a stand-in TrueType file's bytes";
-static int font_child(const char *data, int want_loaded) {
+static int font_child(const char *data, int want_loaded, const char *err) {
     const pid_t child = fork();
     if (child < 0) return -1;
     if (!child) {
+        if (err && !freopen(err, "w", stderr)) _exit(5);
         setenv("XDG_DATA_DIRS", data, 1); setenv("XDG_DATA_HOME", data, 1);
         unsetenv("DM_SHARED_FONT"); unsetenv("DM_FONT_DIR");
         const int state = h_pl_LoadState(0);
@@ -70,9 +73,14 @@ static void system_font_checks(void) {
     if (f) fclose(f);
     CHECK(wrote, "the stand-in font file written");
     snprintf(file, sizeof file, "%s/share", dir);
-    CHECK(font_child(file, 1) == 0, "a system font in an XDG data directory is the standard font's stand-in: loaded, BFTTF header + the file, its size + 8");
+    CHECK(font_child(file, 1, NULL) == 0, "a system font in an XDG data directory is the standard font's stand-in: loaded, BFTTF header + the file, its size + 8");
     snprintf(file, sizeof file, "%s/empty", dir);
-    CHECK(font_child(file, 0) == 0, "no system font: not loaded, no address, size 0");
+    char err[1400]; snprintf(err, sizeof err, "%s/no_font.txt", dir);
+    CHECK(font_child(file, 0, err) == SDK16_NO_FONT_STATUS, "no system font: the process stops at the first request with status DM_AOT_NO_FONT (10), not a wait for ever");
+    FILE *e = fopen(err, "r"); char line[4096] = ""; int reds = 0, named = 0;
+    while (e && fgets(line, sizeof line, e)) if (strstr(line, "[RED] ")) { reds++; named += strstr(line, "DejaVu Sans") && strstr(line, "/empty/fonts") && strstr(line, "status 10"); }
+    if (e) fclose(e);
+    CHECK(reds == 1 && named == 1, "... after one [RED] line that names the fonts looked for, the folder and the status");
 }
 #endif
 int main(void) {

@@ -76,10 +76,18 @@ static std::string better_reason(const Config &cfg, const Game &g) {
     return profile_state(g, chosen_mode(g, cfg)).reason();
 }
 
+// No Vulkan loader on this PC: every game's problem in the list (vulkan_loader_problem), as a game started now would stop with status 9 at once
+static std::vector<Game> listed(const std::string &dir) {
+    auto games = find_games(dir);
+    const std::string p = vulkan_loader_problem();
+    if (!p.empty()) for (auto &g : games) if (g.problem.empty()) g.problem = p;
+    return games;
+}
+
 static int list_games(const Config &cfg, const std::string &dir) {
     std::error_code ec;
     if (!std::filesystem::is_directory(std::filesystem::u8path(dir), ec)) { std::fprintf(stderr, "[RED] nxlauncher: no games folder %s\n", dir.c_str()); return 1; }
-    auto games = find_games(dir);
+    auto games = listed(dir);
     std::printf("# title_id\ttitle\tversion\tpacks\tlast_played\tfolder\tproblem\tbetter_pack\n");
     for (const auto &g : games) {
         auto modes = g.modes();
@@ -125,7 +133,8 @@ static int play_now(Config &cfg, const Env &env, const Game &g, const std::strin
     int st = wait(&ch);
     std::fprintf(stderr, "nxlauncher: nxhost-run exited with status %d\n", st);
     const std::string why = exit_problem(st);
-    if (!why.empty()) std::fprintf(stderr, "[RED] nxlauncher: %s: %s (nxlauncher --repack %s)\n", g.launch.title.c_str(), why.c_str(), g.launch.title_id.c_str());
+    if (!why.empty()) std::fprintf(stderr, "[RED] nxlauncher: %s: %s%s%s%s\n", g.launch.title.c_str(), why.c_str(), st == kRepackStatus ? " (nxlauncher --repack " : "",
+                                   st == kRepackStatus ? g.launch.title_id.c_str() : "", st == kRepackStatus ? ")" : "");   // a repack cures only a refused pack
     return st;
 }
 
@@ -167,7 +176,7 @@ struct App {
 };
 
 static void scan(App &a) {
-    a.games = find_games(a.dir);
+    a.games = listed(a.dir);
     if (!a.games.empty() && !find_game(a.games, a.selected, nullptr)) {
         const Game *last = find_game(a.games, a.cfg.get("last"), nullptr);
         a.selected = last ? last->launch.title_id : a.games[0].launch.title_id;

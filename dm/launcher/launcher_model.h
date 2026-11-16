@@ -135,7 +135,13 @@ struct Game {
 // (the packer copies the file it gave nxaot there: `0x<slot> 0x<target> <symbol>` rows), and a name this host takes over (its HLE_FORCE list, nxhost-run --takeovers) binds
 // elsewhere, so the host would refuse that pack (bindings_problem). The others need the pack's descriptor, which the launcher does not load: they show after Play only
 inline constexpr int kRepackStatus = 8;
+// nxhost-run's other start refusals (aot.h): kNoVulkanStatus, no Vulkan device for a game that asked for a window (no loader, no driver, a device below the baseline);
+// kNoFontStatus, no font of the system stands in for the shared font the game asked for. After Play the launcher says what to install (exit_problem); the first can be
+// told before a start too: the Vulkan loader is not there (vulkan_loader_problem), which the list then shows as every game's problem
+inline constexpr int kNoVulkanStatus = 9, kNoFontStatus = 10;
 std::string exit_problem(int status);   // what a status of nxhost-run means for the player, '' for none the launcher explains
+// '' when the Vulkan loader loads (libvulkan.so.1; vulkan-1.dll on Windows; lib: another name, for the tests), else the problem a game started now would stop with
+std::string vulkan_loader_problem(const char *lib = nullptr);
 // The names nxhost-run --takeovers prints (its '#' line first), cached per program; an empty set with *err when the program does not answer so (an older host)
 std::set<std::string> host_takeovers(const std::string &host, std::string *err = nullptr);
 // The problem of the packs in folder against takeovers: per <module>.bind.tsv beside its pack, the bound names this host takes over; '' when there is none

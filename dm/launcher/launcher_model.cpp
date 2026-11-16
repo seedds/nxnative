@@ -19,6 +19,7 @@
 #include <fcntl.h>
 #include <signal.h>
 #include <sys/wait.h>
+#include <dlfcn.h>
 #include <unistd.h>
 extern char **environ;
 #endif
@@ -66,6 +67,13 @@ static std::string name_key(const std::string &k) {   // a variable's name as th
     return k;
 #endif
 }
+
+// What a player installs for the Vulkan loader (exit_problem, vulkan_loader_problem)
+#if defined(_WIN32)
+static const char *const kVulkanLoaderHint = "vulkan-1.dll, which the GPU driver installs";
+#else
+static const char *const kVulkanLoaderHint = "libvulkan.so.1: the package libvulkan1 on Ubuntu and Debian";
+#endif
 
 // ---- The environment ----
 bool ProcessEnv::get(const std::string &key, std::string *value) const {
@@ -324,8 +332,14 @@ static void add_game(const fs::path &build, const std::string &platform, const s
 std::string exit_problem(int status) {
     if (status == kRepackStatus)
         return "nxhost-run refused the game's packs (status 8): they were made for another host or another bundle (the reason is in its log's [RED] line); Repack makes them again";
+    if (status == kNoVulkanStatus)
+        return "no Vulkan device for the game (status 9): it needs a GPU driver with Vulkan 1.3 and the Vulkan loader (" + std::string(kVulkanLoaderHint) + "); the reason is in its log's [RED] line";
+    if (status == kNoFontStatus)
+        return "no font of the system stands in for the game's shared font (status 10): install DejaVu Sans, Liberation Sans, Noto Sans or FreeSans (on Windows: Arial, Segoe UI or "
+               "Tahoma); its log's [RED] line names the folders looked in";
     return "";
 }
+
 
 std::set<std::string> host_takeovers(const std::string &host, std::string *err) {
     static std::map<std::string, std::set<std::string>> cache;
@@ -1128,6 +1142,19 @@ Command repack_command(const Game &g, const std::string &mode, const std::string
     c.log = S(P(l.log.empty() ? S(P(l.cwd) / "log.txt") : l.log).parent_path() / "repack.txt");
     c.set = {{"PYTHONUNBUFFERED", "1"}};   // its lines reach repack.txt as they are said, for the log pane
     return c;
+}
+
+// ---- The Vulkan loader, before a start (kNoVulkanStatus) ----
+std::string vulkan_loader_problem(const char *lib) {
+#if defined(_WIN32)
+    std::wstring name = lib ? W(lib) : L"vulkan-1.dll";
+    HMODULE h = LoadLibraryW(name.c_str());
+    if (h) { FreeLibrary(h); return ""; }
+#else
+    void *h = dlopen(lib ? lib : "libvulkan.so.1", RTLD_NOW | RTLD_LOCAL);
+    if (h) { dlclose(h); return ""; }
+#endif
+    return "no Vulkan loader (" + std::string(kVulkanLoaderHint) + "): a game would start and stop at once; install your GPU's Vulkan driver and the loader";
 }
 
 }   // namespace nxl

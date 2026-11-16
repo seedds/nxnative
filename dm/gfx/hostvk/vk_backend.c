@@ -71,6 +71,8 @@ void hvk_tf_bind_note(void);
 // ---------- Bring-up and shutdown ----------
 static pthread_once_t g_once = PTHREAD_ONCE_INIT;
 static char g_why[1024];   // why the device is not up (for the null forms' red line)
+static int g_require_status;   // hvk_require_device: the exit status when no device comes up, 0 for the null forms
+void hvk_require_device(int status) { g_require_status = status; }
 static _Atomic int g_tried;   // the bring-up ran (a function that needs the device was called)
 static void up_once(void) {
     atomic_store(&g_tried, 1);
@@ -93,6 +95,12 @@ static void up_once(void) {
         hostvk_log("[RED] [hostvk] no Vulkan device with a window's needs (%s): the device is made again without them, and frames go to the headless presenter", g_why);
         o.want_surface = 0;
         rc = hostvk_init(&o, &hvk.dev, g_why, sizeof g_why);
+    }
+    if (rc && g_require_status) {   // the game program's path (hvk_require_device): nothing would be drawn, so the game stops here, with the reason and what to install
+        hostvk_log("[RED] [hostvk] no Vulkan device for the game (%s): it needs a GPU driver with Vulkan 1.3 and the Vulkan loader (libvulkan.so.1, the package libvulkan1 on Ubuntu "
+                   "and Debian; vulkan-1.dll on Windows, which the GPU driver installs); nxhost-run exits with status %d", g_why, g_require_status);
+        fflush(NULL);
+        _Exit(g_require_status);   // as aot.h's other start refusals: no exit handlers under the start's other threads
     }
     if (rc) { hostvk_log("[RED] [hostvk] no Vulkan device for the NVN backend (%s): the null backend's forms answer, nothing is drawn", g_why); return; }
     hvk_win_device_up(o.want_surface);

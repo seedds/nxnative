@@ -14,6 +14,15 @@ int nvn_swizzle(const nvn_texdesc *d, unsigned level, unsigned layer, const void
 // Single-point address: within this level and layer, linear (x byte, y block row, z slice) → block-linear byte offset relative to the start of this level and layer (unit tests verify against hand calculation).
 // row_bytes: the row as laid out, which a sparse texture's tiled levels pad to whole tiles (nvn_tex_level_gobs × 64)
 uint64_t nvn_bl_offset(uint32_t x, uint32_t y, uint32_t z, uint32_t row_bytes, uint32_t rows, unsigned tileH, unsigned tileD);
+// The same address for the bytes of one block row of slice 0, with the row's terms computed once (nvn_bl_row_of) and each byte's by shifts and a table
+// (nvn_bl_row_at): nvn_bl_row_at(&r, x) == nvn_bl_offset(x, y, 0, row_bytes, rows, tileH, tileD) for r = nvn_bl_row_of(y, row_bytes, tileH, tileD). For a writer that
+// addresses a region row by row (WriteTexels), where nvn_bl_offset's divisions by the block height for every 16-byte run cost more than the copy
+typedef struct { uint64_t row, block; } nvn_bl_row;
+nvn_bl_row nvn_bl_row_of(uint32_t y, uint32_t row_bytes, unsigned tileH, unsigned tileD);
+static inline uint64_t nvn_bl_row_at(const nvn_bl_row *r, uint32_t x) {
+    static const uint16_t kox[4] = {0, 32, 256, 288};   // (x%64/32)*256 + (x%32/16)*32 by x%64/16
+    return r->row + (uint64_t)(x >> 6) * r->block + kox[(x >> 4) & 3] + (x & 15);
+}
 
 int nvn_deswizzle_geom(const nvn_texdesc *d, unsigned level, unsigned layer,
                        uint32_t *row_bytes, uint32_t *rows, uint32_t *slices,

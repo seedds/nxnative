@@ -256,7 +256,12 @@ int dm_aot_main_stack(uint64_t *lo, uint64_t *size);   // the guest stack the ho
 // ---------- The run time (aot_run.c) ----------
 // Exit statuses of a run (the same numbers as dm/tools/aot's nxaot_host, rt::Status, up to 7). DM_AOT_REPACK, nxhost-run's own: a pack the host refuses at the
 // start, which packing the game again with this bundle cures (dm_aot_pack_refused); the launcher (dm/launcher launcher_model.h kRepackStatus) offers the repack for it
-enum { DM_AOT_EXITED = 0, DM_AOT_TRAP = 1, DM_AOT_USAGE = 2, DM_AOT_JIT_NEEDED = 3, DM_AOT_FAULT = 4, DM_AOT_RETURNED = 6, DM_AOT_STUCK = 7, DM_AOT_REPACK = 8 };
+// DM_AOT_NO_VULKAN, nxhost-run's own too: the game asked for a window (DM_WINDOW, not DM_VK_HEADLESS) and no Vulkan device meets the backend's baseline (no loader, no
+// driver, a device below design 9.1): it would run with nothing drawn, so it stops at the device's bring-up with one [RED] line (vk_backend.c, hvk_require_device).
+// DM_AOT_NO_FONT: the game asked for the shared font and the system has none of the fonts that stand in for it (hle_sdk16.c font_get): Horizon always has its
+// shared fonts, so a game only waits for them, for ever. The launcher explains both (dm/launcher launcher_model.h exit_problem)
+enum { DM_AOT_EXITED = 0, DM_AOT_TRAP = 1, DM_AOT_USAGE = 2, DM_AOT_JIT_NEEDED = 3, DM_AOT_FAULT = 4, DM_AOT_RETURNED = 6, DM_AOT_STUCK = 7, DM_AOT_REPACK = 8,
+       DM_AOT_NO_VULKAN = 9, DM_AOT_NO_FONT = 10 };
 // A pack of the game's module set refused at the start (loader.c load_modules: dm_aot_load_module_pack or dm_aot_pack_check_gates failed), for any of the reasons a repack
 // with this bundle cures: the pack file missing or not a library this program loads; no nxaot_module descriptor; its ABI not this host's (NXAOT_MODULE_ABI); compiled from
 // another image than the module's (another game version, a manifest rewritten since); the loader's bindings of its PLT slots not the ones it assumed (another host's
@@ -422,6 +427,9 @@ void dm_aot_profile_jit_run(uint64_t cpu0, uint32_t fpcr0, uint32_t fpcr1, int o
 // (dm/tools/aot/README.md, "Static cases of a br left to the dispatcher")
 void dm_aot_profile_jit_origin(uint64_t pc, uint32_t reason);
 int dm_aot_profile_write(void);            // the files now, sampling stopped (once: later calls and the atexit writer do nothing); 0 when written
+// The sampled threads' totals so far and, with DM_AOT_PROFILE_HOST=1, the host's samples by native pc (object file, offset, nearest exported symbol), written to path while
+// sampling goes on (DM_CTL `profmark <path>`): two marks around a stretch of play say where the game's threads spent their CPU time in it. 0 when written
+int dm_aot_profile_mark(const char *path);
 // The sampler's lookups (aot_arena.c): async-signal-safe (no lock, no allocation: a pack's tables are complete before it is published and never change)
 int dm_aot_pack_count(void);
 const dm_aot_pack *dm_aot_pack_at(int i);

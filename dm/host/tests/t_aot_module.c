@@ -35,7 +35,8 @@
 //     `<offset> <samples>` as nxaot build --profile reads it, and synth_hot has the most samples (more than half of them at its instructions, the row with the most in
 //     its loop, not at its entry: the pack's positions, design 12; all at its entry for a pack without positions), each sampled function's rows after its line
 //     `# function 0x<entry> <samples> <rows>` (as many as it says, none below its entry, its samples at least theirs; synth_hot's line at its entry, its rows in its
-//     code; no row before the first line); the same run without the switch writes nothing,
+//     code; no row before the first line); with DM_AOT_PROFILE_HOST=1 too, the mark (DM_CTL profmark) has the thread's row and the host's samples by pc, which add up to the
+//     thread's samples in the host; the same run without the switch writes nothing,
 //     and the time per pass of synth_hot with and without it is the sampler's overhead on compiled code
 //   the JIT fallback's misses (with the JIT fallback; aot.h, "The JIT fallback's misses"): the run with DM_AOT_PROFILE set writes <folder>/main.misses.tsv beside the profile, whose
 //     one row is the hidden function's (`<offset> indirect 1`: the dispatcher's miss at an address with no compiled entry), under the profile's header; a second run adds its entry
@@ -196,6 +197,30 @@ static void profile_run(module_t *m) {
            fn >= 0 ? (unsigned long long)dm_aot_pack_fn_end(dm_aot_pack_at(pk), (size_t)fn) : 0ull,
            fn >= 0 && dm_aot_pack_pos(dm_aot_pack_at(pk)) ? "the pack has positions" : "the pack has no positions");
     check(sums && calls > 0, "synth_hot's sums (n (n + 1) / 2 for n = %llu, %llu calls)", (unsigned long long)n, (unsigned long long)calls);
+    // The mark (DM_CTL profmark, aot_profile.c dm_aot_profile_mark; DM_AOT_PROFILE_HOST set by the parent): this thread's totals, and the host's samples by pc, which add up to
+    // the thread's samples in the host (read after the totals: the few the mark itself takes between the two reads may be in the table only)
+    const char *hp = getenv("DM_AOT_PROFILE_HOST");
+    if (dm_aot_profile_on() && hp && *hp) {
+        char mark[1100], line[1024];
+        snprintf(mark, sizeof mark, "%s/mark.tsv", want);
+        check(dm_aot_profile_mark(mark) == 0, "the sampler (DM_AOT_PROFILE): the mark written to %s", mark);
+        unsigned long long thr = 0, samples = 0, inhost = 0, pcs = 0, inpcs = 0, lost = 0, own = 0;
+        FILE *f = fopen(mark, "rb");
+        while (f && fgets(line, sizeof line, f)) {
+            unsigned long long a, b, c, d, e, g, off, k;
+            long tid;
+            char name[64], cls[16], obj[128];
+            if (sscanf(line, "thread\t%ld\t%63[^\t]\t%llu\t%llu\t%llu\t%llu\t%llu\t%llu", &tid, name, &a, &b, &c, &d, &e, &g) == 8) { thr++; samples += a; inhost += c + e; }
+            else if (sscanf(line, "pc\t%15[^\t]\t%127[^\t]\t%llx\t%*[^\t]\t%llu", cls, obj, &off, &k) == 4 && strcmp(cls, "caller")) {
+                pcs++; inpcs += k; if (strstr(obj, "t_aot_module")) own += k;
+            }
+            else if (!strncmp(line, "lost\t", 5)) lost = strtoull(line + 5, NULL, 10);
+        }
+        if (f) fclose(f);
+        check(thr >= 1 && samples > 0, "the sampler (DM_AOT_PROFILE): the mark's thread rows (%llu, %llu samples)", thr, samples);
+        check(inpcs + lost >= inhost && inpcs + lost <= inhost + 64, "the sampler (DM_AOT_PROFILE): the mark's host samples by pc: %llu at %llu pcs (%llu of them in this program) and %llu lost, against the threads' %llu "
+              "in the host", inpcs, pcs, own, lost, inhost);
+    }
     g_status = DM_AOT_EXITED;
 }
 
@@ -628,9 +653,9 @@ int main(int argc, char **argv) {
         const char *pdir = "t_aot_module.tmp/profile", *pfile = "t_aot_module.tmp/profile/main.tsv";
         mkdir("t_aot_module.tmp", 0755);
         remove(pfile);
-        set_env("DM_AOT_PROFILE", pdir);
+        set_env("DM_AOT_PROFILE", pdir); set_env("DM_AOT_PROFILE_HOST", "1");   // and the mark (profile_run)
         run_child_mode(argv[0], "--profile", dir, &r);
-        set_env("DM_AOT_PROFILE", NULL);
+        set_env("DM_AOT_PROFILE", NULL); set_env("DM_AOT_PROFILE_HOST", NULL);
         fputs(r.out, stdout);
         unsigned long long hot = 0, cut = 0, calls = 0, passes = 0;
         double on_ns = 0, off_ns = 0;

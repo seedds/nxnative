@@ -486,6 +486,8 @@ host_test(t_replay SOURCES ../../gfx/tests/t_replay.c ../../gfx/nvn/nvn_replay.c
 # the build folder (DM_REPO overrides); the inverse of the NVN to Metal format table beside it (dm/gfx/tex)
 host_test(t_pipe SOURCES ../../gfx/tests/t_pipe.c ../../gfx/nvn/nvn_pipe.c ../../gfx/tex/nvn_fmt_mtl.c INCLUDES ${REPO}/dm/gfx/nvn ${REPO}/dm/gfx/nvn/include ${REPO}/dm/gfx/tex)
 host_test(t_fmt_inv SOURCES ../../gfx/tex/tests/t_fmt_inv.c ../../gfx/tex/nvn_fmt_mtl.c INCLUDES ${REPO}/dm/gfx/tex)
+# The block-linear layout of textures (dm/gfx/tex/nvn_deswizzle.c, nvn_tex.c): round trips, hand-calculated addresses, the row form WriteTexels uses, 3D and sparse layouts
+host_test(t_tex SOURCES ../../gfx/tex/tests/t_tex.c ../../gfx/tex/nvn_deswizzle.c ../../gfx/nvn/nvn_tex.c INCLUDES ${REPO}/dm/gfx/tex ${REPO}/dm/gfx/nvn ${REPO}/dm/gfx/nvn/include)
 # The shader reflection parser in plain C, with its JSON reader (dm/gfx/nvn/nvn_refl.c, dm/third_party/cjson): every backend's since step M6, the Metal one's too
 host_test(t_refl_c SOURCES ../../gfx/tests/t_refl_c.c ../../gfx/nvn/nvn_refl.c ../../third_party/cjson/cJSON.c INCLUDES ${REPO}/dm/gfx/nvn ${REPO}/dm/third_party/cjson)
 # The Vulkan backend's device layer and host-memory import (dm/gfx/hostvk; docs/design/vulkan-backend.md 3.6, 4.2, 9.1), over volk: the Vulkan loader is loaded at run time,
@@ -577,7 +579,7 @@ target_compile_options(nvn_front_obj PRIVATE ${HOST_FLAGS})
 target_include_directories(nvn_front_obj PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${REPO}/dm/gfx/nvn ${REPO}/dm/gfx/nvn/include)
 target_link_libraries(nvn_front_obj PUBLIC nxprofile nxplat)
 target_compile_definitions(nvn_front_obj PRIVATE DM_TEST_GUEST_C)   # these tests call the frontend as C functions and link no execution engine: its guest call (the command-memory callback) takes the plain form
-foreach(t IN ITEMS queue_origin clear_ds clear_tex depth16_clear integer_blend primitive_restart rast_discard vbuf readback view_swizzle queries cond_render copy_alias index_convert provoking dump draw_params reupload bc_image)
+foreach(t IN ITEMS queue_origin clear_ds clear_tex depth16_clear integer_blend primitive_restart rast_discard vbuf readback view_swizzle queries cond_render copy_alias index_convert provoking dump draw_params reupload bc_image no_device write_texels)
     host_test(t_vk_${t} SOURCES ../../gfx/tests/vk/t_vk_${t}.c PROFILE INCLUDES ${REPO}/dm/gfx/nvn ${REPO}/dm/gfx/nvn/include ${REPO}/dm/gfx/tests/vk TMPDIR ENV ${HOSTVK_ENV})
     target_link_libraries(t_vk_${t} PRIVATE nvn_front_obj nvn_vk)
 endforeach()
@@ -870,6 +872,7 @@ host_test(t_oe SOURCES t_oe.c PROFILE POSIX DEFS DM_TEST_GUEST_C)   # hle_oe.c's
 host_test(t_fpslock SOURCES t_fpslock.c PROFILE POSIX)
 host_test(t_audren_layout SOURCES t_audren_layout.c PROFILE POSIX DEFS DM_TEST_GUEST_C)
 host_test(t_shared_font SOURCES t_shared_font.c PROFILE POSIX DEFS DM_TEST_GUEST_C)
+host_test(t_lifecycle SOURCES t_lifecycle.c PROFILE POSIX)   # the graceful exit writes the session's files in full before its suspend's bound (hle_lifecycle.c)
 host_test(t_system_event SOURCES t_system_event.c PROFILE POSIX DEFS DM_TEST_GUEST_C INCLUDES ${REPO}/dm/tools/aot/include)
 host_test(t_symbols SOURCES t_symbols.c PROFILE POSIX)
 host_test(t_svc_memory SOURCES t_svc_memory.c POSIX INCLUDES ${TESTS}/memory_profile DEFS DM_TEST_GUEST_C)

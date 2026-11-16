@@ -251,6 +251,10 @@ class Pack(unittest.TestCase):
 class Linux(Pack):
     def test_layout_invocations_and_reuse(self):
         self.pack()
+        # the stage lines' total is known from the start for a profile with shader tables (an NVN game's): nx_extract, the extraction, the rewrite, the shader split,
+        # the shader libraries and the packs planned at once, nothing added after the extraction ([1/6] to [6/6], not [1/5], [2/5], then [3/6])
+        self.assertEqual(nsp.PROG.plan.call_args_list[-1].args[0], 6)
+        self.assertEqual(sum(c.args[0] for c in nsp.PROG.add.call_args_list), 0)
         aot, nro_dir = self.aot, self.work / 'nro_v0'
         # the rewrite: one run per module, the profile's modules with --aot into the folder's partial copy, the NRO without (the host maps it from the game's image)
         self.assertEqual(sorted(self.rewrites), sorted([[str(self.game / 'ExeFS/main'), str(self.work / 'patched_v0.partial'), 'main', '--aot', str(self.work / 'aot_v0.partial')],
@@ -734,6 +738,10 @@ class Linux(Pack):
             done = [m for m in self.said if m.startswith('done: ')]
             self.assertEqual(len(done), 1, self.said); self.assertIn(f' or in the launcher {bundle / "nxlauncher"} (nxhost-run {host}, ', done[0])
             self.assertNotIn('dm/launcher', done[0])
+            # nor do the run script's and the launch file's comments name a checkout's paths: the bundle's nxlauncher instead of dm/launcher, no docker/README.md
+            for f in ('run.sh', 'launch-linux.tsv'):
+                text = (self.work / f).read_text()
+                self.assertNotIn('dm/launcher', text, f); self.assertNotIn('docker/README.md', text, f); self.assertIn('nxlauncher (the bundle\'s, beside bin/)', text, f)
             self.assertIn(('path', 'host', str(host)), launch_rows(self.work / 'launch-linux.tsv'))
             self.assertIn(f"nxhost-run is the port's bundle's: {host}", (self.work / 'run.sh').read_text())
             self.check_run_sh()

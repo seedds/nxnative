@@ -80,6 +80,33 @@ class HeapSignals(unittest.TestCase):
         self.assertGreaterEqual(heap, 0x86000000)
 
 
+class HeapCheckAddressSpace(unittest.TestCase):
+    """No heap and the alias region nearly full within seconds: StandardAllocator's region (pool − used) leaves Unity's own regions no room. The heap check shrinks that region with
+    stdalloc_cap and keeps the hardware pool, which the game reads as its memory (Pokémon Friends picks its Low graphics at 2048 MB or less, issue #2830)"""
+    FULL = '>>> nnMain\n[dm] [mem] alias region mapped up to +4.26 GB (alias region 4.38 GB)\n'
+
+    def signals(self, log=FULL, **keys):
+        keys = {'mem_reserve': '0x140000000', 'mem_alias': '0x118000000', 'mem_stack': '0x10000000', 'app_pool': '0xCD500000', 'sys_resource': '0x3000000', **keys}
+        return pg.heap_signals(log, type('Profile', (), {'get': staticmethod(lambda k, d='': keys.get(k, d))}))
+
+    def test_a_full_alias_region_caps_standardallocator_and_keeps_the_pool(self):   # AI: THE SOMNIUM FILES - nirvanA Initiative: +4.26 GB of 4.38 in 5 s with the hardware pool
+        sig = self.signals()
+        self.assertEqual(set(sig), {'stdalloc_cap'})   # no app_pool: the game reads the hardware's 3.2 GB, above Pokémon Friends' 2048 MB
+        self.assertEqual(int(sig['stdalloc_cap'][0], 0), 0x40000000)
+        self.assertNotIn('\n', sig['stdalloc_cap'][1])
+
+    def test_room_left_sets_nothing(self):
+        self.assertEqual(self.signals('>>> nnMain\n[dm] [mem] alias region mapped up to +3.50 GB (alias region 4.38 GB)\n'), {})
+
+    def test_a_heap_or_no_system_resource_sets_nothing(self):
+        self.assertEqual(self.signals(self.FULL + '[dm] [mem] heap 0.12 GB\n'), {})
+        self.assertEqual(self.signals(sys_resource='0x0'), {})
+
+    def test_a_profile_that_already_limits_standardallocator_is_kept(self):
+        self.assertEqual(self.signals(stdalloc_cap='0x60000000'), {})   # Sonic Superstars' hand-set 1.5 GB
+        self.assertEqual(self.signals(app_pool='0x40000000'), {})       # a profile from the heap check's earlier rule, which set a 1 GB pool
+
+
 class GlslSources(unittest.TestCase):
     def test_language_preamble_is_not_a_shader(self):
         self.assertEqual(pg.glsl_sources(b'#version 450 core\n#define float4 vec4\n\0void main() {}\0'), 0)

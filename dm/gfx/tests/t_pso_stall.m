@@ -61,21 +61,63 @@ int main(void) { @autoreleasepool {
     NSString *f = @"#include <metal_stdlib>\nusing namespace metal;\nfragment float4 %@() { return float4(%d, %d, %d.0 / 65536.0, 1); }\n";
     [NSFileManager.defaultManager createDirectoryAtPath:msl withIntermediateDirectories:YES attributes:nil error:nil];
     int pid = getpid() & 0xffff;
-    if (lib(msl, @"v1_bp", v) || lib(msl, @"f1_b", [NSString stringWithFormat:f, @"hold", 1, 0, pid]) || lib(msl, @"f2_b", [NSString stringWithFormat:f, @"main0", 0, 1, pid]) ||
+    NSString *v3 = [v stringByReplacingOccurrencesOfString:@"0, 1); return o;" withString:@"0.5, 1); return o;"];   // the held pair's own vertex function
+    if (lib(msl, @"v1_bp", v) || lib(msl, @"v3_bp", v3) || lib(msl, @"f1_b", [NSString stringWithFormat:f, @"hold", 1, 0, pid]) || lib(msl, @"f2_b", [NSString stringWithFormat:f, @"main0", 0, 1, pid]) ||
         lib(msl, @"f3_b", [NSString stringWithFormat:f, @"main0", 1, 1, pid]) || lib(msl, @"f4_b", [NSString stringWithFormat:f, @"main0", 0, 0, pid]) ||
         lib(msl, @"f5_b", [NSString stringWithFormat:f, @"bad", 2, 0, pid]) || lib(msl, @"f6_b", [NSString stringWithFormat:f, @"main0", 0, 2, pid])) {
         printf("t_pso_stall: no Metal compiler (xcrun metal), not run\n"); return 0; }
     put([msl stringByAppendingPathComponent:@"v1_b.json"], [NSString stringWithFormat:@"{\"chain\": \"%s\", \"entry\": \"main0\", \"pull\": {}, \"vertex_inputs\": []}", DMSH_CHAIN]);
+    put([msl stringByAppendingPathComponent:@"v3_b.json"], [NSString stringWithFormat:@"{\"chain\": \"%s\", \"entry\": \"main0\", \"pull\": {}, \"vertex_inputs\": []}", DMSH_CHAIN]);
     put([msl stringByAppendingPathComponent:@"f1_b.json"], [NSString stringWithFormat:@"{\"chain\": \"%s\", \"entry\": \"hold\"}", DMSH_CHAIN]);
     put([msl stringByAppendingPathComponent:@"f5_b.json"], [NSString stringWithFormat:@"{\"chain\": \"%s\", \"entry\": \"bad\"}", DMSH_CHAIN]);
     for (NSString *k in @[@"f2", @"f3", @"f4", @"f6"]) put([msl stringByAppendingFormat:@"/%@_b.json", k], [NSString stringWithFormat:@"{\"chain\": \"%s\", \"entry\": \"main0\"}", DMSH_CHAIN]);
     put([tables stringByAppendingPathComponent:@"shader_map.tsv"], @"# empty\n");
-    put([tables stringByAppendingPathComponent:@"shader_pairs.tsv"], @"# pairs\nv1\tf1\nv1\tf2\nv1\tf3\n");
+    put([tables stringByAppendingPathComponent:@"shader_pairs.tsv"], @"# pairs\nv3\tf1\nv1\tf2\nv1\tf3\n");
     setenv("DM_NVN_SHMAP", [tables stringByAppendingPathComponent:@"shader_map.tsv"].UTF8String, 1);
     setenv("DM_MSL_DIR", [root stringByAppendingPathComponent:@"msl"].UTF8String, 1);
     setenv("DM_PSO_ARCHIVE", arch.UTF8String, 1); setenv("DM_PSO_MANIFEST", "off", 1);
     mtl_init(); pso4_init();
     if (!g_comp4 || !g_arch_cap) { printf("t_pso_stall: no Metal 4 compiler, not run\n"); return 0; }
+
+    // captures that share a vertex function never compile at once (fn_claim, GitHub issue #815): a capture of another function goes ahead; one of the same waits, and when the
+    // other does not return it is built without the archive, never beside it; the prebuild's try (no wait) builds nothing and says so
+    {
+        shmap_load(); uint64_t ka[3], kb[3], kc[3]; int na = fn_ids(pre_desc(@"v1", @"f2", 0), ka), nb = fn_ids(pre_desc(@"v1", @"f3", 0), kb), nc = fn_ids(pre_desc(@"v3", @"f2", 0), kc);
+        EXPECT("fn: the vertex function only", 1, na); EXPECT("fn: the other pairs too", 1, nb == 1 && nc == 1);
+        EXPECT("fn: the same vertex function", 1, ka[0] == kb[0]); EXPECT("fn: another vertex function, the same pixel one", 1, ka[0] != kc[0]);
+        EXPECT("fn: claimed", 1, fn_claim(ka, na, g_fn_wait_ms));
+        __block _Atomic int got = 0; dispatch_group_t fg = dispatch_group_create(); uint64_t *kp = kb;
+        dispatch_group_async(fg, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{ if (fn_claim(kp, nb, 10000)) { got = 1; fn_release(kp, nb); } });
+        uint64_t t0 = bp_now();
+        EXPECT("fn: a capture of another vertex function with the same pixel one claims", 1, fn_claim(kc, nc, g_fn_wait_ms));
+        EXPECT("fn: without waiting", 1, bp_now() - t0 < 100 * NSEC_PER_MSEC); fn_release(kc, nc);
+        usleep(300000); EXPECT("fn: a capture of the same function waits", 0, got);
+        fn_release(ka, na);
+        EXPECT("fn: and goes on once the other is done", 0, dispatch_group_wait(fg, dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC)));
+        EXPECT("fn: it claimed them", 1, got);
+        // the other does not return (#294)
+        EXPECT("fn: claimed again", 1, fn_claim(ka, na, g_fn_wait_ms));
+        t0 = bp_now(); EXPECT("fn: the prebuild's try does not get them", 0, fn_claim(kb, nb, 0));
+        EXPECT("fn: and does not wait", 1, bp_now() - t0 < 100 * NSEC_PER_MSEC);
+        g_fn_wait_ms = 200; t0 = bp_now();
+        EXPECT("fn: a wait that runs out does not get them", 0, fn_claim(kb, nb, g_fn_wait_ms));
+        uint64_t waited = bp_now() - t0;
+        EXPECT("fn: after the wait", 1, waited >= 150 * NSEC_PER_MSEC && waited < 1500 * NSEC_PER_MSEC);
+        EXPECT("fn: nothing taken beside the holder", na, g_fn_nbusy);
+        int cap = -1, busy = -1; NSError *ce = nil; int new0 = g_arch_new;
+        EXPECT("fn: the prebuild's capture builds nothing", 1, arch_capture_try(pre_desc(@"v1", @"f3", 0), &ce, 0, &cap, 0, &busy) == nil);
+        EXPECT("fn: and says its function is busy", 1, busy);
+        id<MTLRenderPipelineState> ps = arch_capture(pre_desc(@"v1", @"f3", 0), &ce, 0, &cap);
+        EXPECT("fn: a draw's capture that waited in vain builds the pipeline", 1, ps != nil);
+        EXPECT("fn: without the archive", 0, cap);
+        EXPECT("fn: nothing captured", new0, g_arch_new);
+        EXPECT("fn: counted", 1, g_fn_plain);
+        fn_release(ka, na); g_fn_wait_ms = FN_WAIT_MS;
+        EXPECT("fn: nothing left under way", 0, g_fn_nbusy);
+        // the prebuild's order: every pair once, a vertex shader's pairs together, the shader with the most first, then by key, in list order within one
+        NSArray<NSNumber *> *ord = pre_order(@[@[@"b", @"x"], @[@"c", @"y"], @[@"a", @"z"], @[@"c", @"w"], @[@"d", @"q"], @[@"c", @"r"], @[@"b", @"s"]]);
+        EXPECT("pre_order: the most-shared shader first, each one's pairs together", 1, [ord isEqualToArray:@[@1, @3, @5, @0, @6, @2, @4]]);
+    }
 
     ArchEpoch *ep1 = g_ep; HoldCompiler *hold = [HoldCompiler new]; hold->compiler = ep1->comp;
     hold->entered = dispatch_semaphore_create(0); hold->release = dispatch_semaphore_create(0); ep1->comp = (id<MTL4Compiler>)hold;
@@ -116,7 +158,7 @@ int main(void) { @autoreleasepool {
     }
     int found = 0;
     for (NSString *k in @[@"f1", @"f2", @"f3", @"f4"]) @autoreleasepool {
-        MTL4RenderPipelineDescriptor *d = pre_desc(@"v1", k, 0);
+        MTL4RenderPipelineDescriptor *d = pre_desc([k isEqualToString:@"f1"] ? @"v3" : @"v1", k, 0);
         for (id<MTL4Archive> a in open) if ([a newRenderPipelineStateWithDescriptor:d error:nil]) { found++; break; }
     }
     EXPECT("every base in the files", 4, found);
@@ -227,6 +269,32 @@ int main(void) { @autoreleasepool {
     EXPECT("image + folder: the others from the archive", 2, g_pre_archived);
     EXPECT("image + folder: none counted", 0, g_pre_nolib);
     EXPECT("image + folder: the stamp says all", 1, [slurp(stamp4) hasSuffix:@"libs\tall\n"]);
+
+    // the prebuild with a capture of one of its pairs' functions under way: the pairs are put back and never built beside it. The process ending while it is still under way
+    // leaves them unbuilt and no stamp, so the next start builds them; once it returns, they are built and stamped
+    NSString *arch5 = [root stringByAppendingPathComponent:@"archive5"], *stamp5 = [arch5 stringByAppendingPathComponent:@"prebuilt.tsv"];
+    [NSFileManager.defaultManager createDirectoryAtPath:arch5 withIntermediateDirectories:YES attributes:nil error:nil];
+    g_arch_dir = arch5; g_arch4 = @[]; g_arch4p = @[];
+    put([tables stringByAppendingPathComponent:@"shader_pairs.tsv"], @"# pairs\nv1\tf4\nv1\tf6\nv3\tf9\n");
+    uint64_t kv[3], *kvp = kv; int nk = fn_ids(pre_desc(@"v1", @"f4", 0), kv);   // kvp: a block cannot take the array
+    EXPECT("busy: v1 under way", 1, nk == 1 && fn_claim(kv, 1, 0));
+    reset_counts(); uint64_t t5 = bp_now();
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 300 * NSEC_PER_MSEC), dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{ atomic_store(&g_warm_stop, 1); });
+    EXPECT("busy: three pairs", 3, pso_prebuild(2, 1, QOS_CLASS_USER_INITIATED));
+    EXPECT("busy: waited for it until the end", 1, bp_now() - t5 >= 250000000ull);
+    EXPECT("busy: the other built", 1, g_pre_built);
+    EXPECT("busy: both put back", 1, g_pre_deferred >= 2);
+    EXPECT("busy: none built beside it", 0, (int)g_pre_failed + (int)g_pre_skipped);
+    EXPECT("busy: no stamp", 0, [NSFileManager.defaultManager fileExistsAtPath:stamp5]);
+    atomic_store(&g_warm_stop, 0);
+    reopen(arch5); reset_counts(); t5 = bp_now();
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 300 * NSEC_PER_MSEC), dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{ fn_release(kvp, 1); });
+    EXPECT("returned: three pairs", 3, pso_prebuild(2, 1, QOS_CLASS_USER_INITIATED));
+    EXPECT("returned: built once it returned", 1, bp_now() - t5 >= 250000000ull);
+    EXPECT("returned: both built", 2, g_pre_built);
+    EXPECT("returned: the other from the archive", 1, g_pre_archived);
+    EXPECT("returned: put back first", 1, g_pre_deferred >= 2);
+    EXPECT("returned: stamped", 1, [NSFileManager.defaultManager fileExistsAtPath:stamp5]);
     [NSFileManager.defaultManager removeItemAtPath:root error:nil];
     printf("t_pso_stall: %d checks, %d failed\n", checks, failed);
     return failed != 0;

@@ -64,7 +64,7 @@ static size_t env_size(const char *name, size_t min, size_t align) {
 // ends an app at, which otherwise charges every page the game has touched; they take the same memory while they stay in it, and the kernel can write them to the files when it needs the room, which it
 // cannot do with an iPhone app's anonymous pages. A page never written reads 0, and mprotect (dirty tracking), vm_remap (virtual pools) and Metal's no-copy buffers work on them as on anonymous pages.
 // The cost is disk: the files take up to what the game has touched, and the kernel writes them back as it does any file (Mario Kart World on a 16 GB Mac: 5.6 GB on disk and 8-10 GB of logical writes
-// in 5.5 minutes). So a game that fits stays anonymous: on iOS the files are on when the game's memory pool is larger than the room to the memory limit at start (guest_file_wanted), and on the Mac,
+// in 5.5 minutes). So a game that fits stays anonymous: on iOS the files are on when the game's memory pool and the host's margin are larger than the room to the memory limit at start (guest_file_wanted), and on the Mac,
 // which can swap, only when asked. DM_GUEST_FILE=1 forces them on and 0 off.
 // DM_GUEST_FILE_CHUNK=<size> sets each file's size (default 1G, at least 64M, raised to make at most GF_MAX files; one file when it is not under the block's size). The stall at the system's periodic
 // flush, about every 30 s, grows with the file: threads touching the memory stalled 130-432 ms on an iPhone with one 20 GB file, and on a 16 GB M5 Mac with 1 GB touched up to 148 ms with one 20 GB
@@ -197,8 +197,23 @@ static void *guest_file_thread(void *arg) {
     }
     return NULL;
 }
-// Whether the guest goes in files: DM_GUEST_FILE when it is set, otherwise when the game's memory pool does not fit the room to the memory limit (room 0: no limit known, as on the Mac)
-static int guest_file_wanted(const char *e, uint64_t pool, uint64_t room) { return e && *e ? atoi(e) > 0 : room && pool > room; }
+// The host's own memory to come, which the room at start (os_proc_available_memory, read before the game runs) has to hold beside the guest's pages: mostly graphics memory, Metal's
+// copies of the game's textures (Metal cannot sample the guest's block-linear storage), render targets and upload staging, then malloc. It follows what the game keeps in its pool, from
+// a tenth of the pool to all of it, while the guest touches only part of its pool; what has to fit is the two together. Their peak against the pool, measured with the guest in files (which
+// leaves its pages out of phys_footprint; the host's own memory is the footprint less DM_MEMSTAT's guest class, the guest's its resident pages) on a 16 GB M6 Mac, 2026-11-15, about 5 minutes
+// of play each: The Binding of Isaac 0.67 GB of a 3.21 GB pool (0.21: host 0.41), Mario Golf: Super Rush 3.93 GB (1.23: host 3.22, as much as its pool, 21,514 textures; guest 0.72),
+// Fast Fusion at least 6.95 GB of 9 (0.77: host 4.90; guest 2.05), Ocarina of Time host 5.39 GB at an area load and 4.3-4.8 walking, with 6.4 GB of guest memory on that walk (about 1.24;
+// its game note), and Mario Kart World at least 11.94 GB of 9 (1.33), where iOS ended it on an iPad with 11.97 GB of room after 28 minutes, the guest anonymous because its pool alone fitted
+// (GitHub issue #1184). Half the pool covers them all, and with it a Switch game's 3.21 GB pool stays anonymous with 6 and 8 GB limits while every 9 GB pool goes in files on iOS.
+// DM_GUEST_FILE_HOST=<size> sets the margin instead (0 for none, the rule before it)
+#define GUEST_HOST_PCT 50
+static uint64_t guest_host_margin(uint64_t pool) {
+    const char *h = getenv("DM_GUEST_FILE_HOST");
+    return h && *h ? env_size("DM_GUEST_FILE_HOST", 0, 0x100000) : pool * GUEST_HOST_PCT / 100;
+}
+// Whether the guest goes in files: DM_GUEST_FILE when it is set, otherwise when the game's memory pool and the host's margin (guest_host_margin) do not fit the room to the memory limit
+// (room 0: no limit known, as on the Mac)
+static int guest_file_wanted(const char *e, uint64_t pool, uint64_t host, uint64_t room) { return e && *e ? atoi(e) > 0 : room && pool + host > room; }
 // A new file of this process's own, never a link's target (O_EXCL, O_NOFOLLOW): one a dead process with the same number left is replaced
 static int guest_file_open(const char *path) {
     const int fl = O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC;
@@ -267,11 +282,12 @@ static int guest_files_map(const char *dir, size_t chunk, int n, struct statfs *
 static void guest_file_init(void) {
     const double G = 1073741824.0; const char *e = getenv("DM_GUEST_FILE"), *d = getenv("DM_GUEST_FILE_DIR"), *mf = getenv("DM_GUEST_FILE_MIN_FREE");
 #if TARGET_OS_IPHONE
-    uint64_t room = os_proc_available_memory();
-    int want = guest_file_wanted(e, DM_GAME_APP_POOL, room);
-    LOG("[mem] guest memory: memory pool %.2f GB, room to the memory limit %.2f GB, DM_GUEST_FILE %s: %s", DM_GAME_APP_POOL / G, room / G, e && *e ? e : "unset", want ? "in files" : "anonymous");
+    uint64_t room = os_proc_available_memory(), host = guest_host_margin(DM_GAME_APP_POOL);
+    int want = guest_file_wanted(e, DM_GAME_APP_POOL, host, room);
+    LOG("[mem] guest memory: memory pool %.2f GB and the host's margin %.2f GB (%s), room to the memory limit %.2f GB, DM_GUEST_FILE %s: %s", DM_GAME_APP_POOL / G, host / G,
+        getenv("DM_GUEST_FILE_HOST") && *getenv("DM_GUEST_FILE_HOST") ? "DM_GUEST_FILE_HOST" : "half the pool", room / G, e && *e ? e : "unset", want ? "in files" : "anonymous");
 #else
-    int want = guest_file_wanted(e, DM_GAME_APP_POOL, 0);
+    int want = guest_file_wanted(e, DM_GAME_APP_POOL, guest_host_margin(DM_GAME_APP_POOL), 0);   // no limit known: only the switch
 #endif
     if (!want) return;
     g_gf_min_free = mf && *mf ? env_size("DM_GUEST_FILE_MIN_FREE", 0, 0x100000) : (uint64_t)2 << 30;
@@ -350,13 +366,18 @@ static void mem_init(void) {
 // Previously 3 GB was reported here and SetHeapSize never failed: the heap was about 150 MB smaller than on the real device, at the run entry peak the main heap had only about 18 MB left, and under high local load a timing shift made a 128 KB request return null,
 // which the guest writes to without a null check (CRASH main+0x1b36138, re-verified after merge with inv_tap).
 #define APP_POOL DM_GAME_APP_POOL   // game profile app_pool (Mario 0xCD500000)
-static size_t image_bytes(void) { size_t n = 0; for (int i = 0; i < g_nmod; i++) if (!g_mod[i].nro) n += g_mod[i].size;   // an NRO lives in memory the game allocated (its image and bss buffers)
-    return (n + 0x1fffff) & ~(size_t)0x1fffff; }
 // Giant bss (modules with the patch area before the base, patch_nso.py FAR): the image bytes beyond the file part. Used memory was reported as "heap + 64 MB", where the 64 MB covers ordinary modules' code and data (Mario's two modules are about 74 MB together,
 // and the heap it opens = pool − 64 MB − 1.75 GB virtual address memory − 1 MB = 0x5be00000, as on hardware); Metroid Dread's main has about 1.8 GB of bss, the engine's static heap, which the Switch counts as used;
 // without it the game asks for pool − 64 MB = 3.15 GB of heap
-// Like image_bytes, exclude NROs: their buffers already belong to the game's heap. Counting every offline-mapped NRO's bss made FFX/X-2's used memory exceed its pool before any LoadModule.
+// NROs are left out: their buffers already belong to the game's heap. Counting every offline-mapped NRO's bss made FFX/X-2's used memory exceed its pool before any LoadModule.
 static size_t big_bss_bytes(void) { size_t n = 0; for (int i = 0; i < g_nmod; i++) if (!g_mod[i].nro && g_mod[i].patch_off < 0) n += g_mod[i].size - g_mod[i].back_len - g_mod[i].file_image_len; return n; }
+static _Atomic int64_t g_alias_mapped;   // bytes mapped in the alias region (page bitmap)
+// The used memory beside the heap, one figure: GetInfo's UsedMemorySize is the heap plus this, and SetHeapSize and MapPhysicalMemory charge this against the pool, as Horizon charges a
+// request against the pool less the used memory it reports. A game that asks for total − used (the SDK's nninitStartup, Age of Calamity, Monster Hunter Rise) therefore always gets it.
+// SetHeapSize charged the rewritten modules' size instead (their patch areas and key pages included), which GetInfo never reported: a game whose modules were larger than mem_used was
+// refused the heap the host had just offered (ResultLimitReached; MIO: Memories in Orbit, 68 MB of modules against the default 64 MB, aborted in nninitStartup, GitHub issue #941).
+// mem_used only sets what the game sees (its heap size, as on hardware); the host's own module copies (patch areas, key pages) are not the Switch's to count
+static uint64_t used_beside_heap(void) { return (uint64_t)DM_GAME_MEM_USED + big_bss_bytes() + (DM_GAME_MEM_MAP_LIMIT ? (uint64_t)atomic_load(&g_alias_mapped) : 0); }
 
 // For memory accounting (memstat.m): the range of the whole guest address space block (base = NULL when not initialized)
 void svc_guest_range(uint8_t **base, size_t *size) { *base = g_as; *size = g_reserve; }
@@ -447,7 +468,6 @@ static int64_t alias_unmapped(uint64_t off, uint64_t n) {
     }
     return c;
 }
-static _Atomic int64_t g_alias_mapped;   // bytes mapped in the alias region (page bitmap)
 
 // Word-at-a-time boundaries of the bitmap run containing p (guest page index).
 static uint64_t alias_mask(unsigned n) { return n == 64 ? UINT64_MAX : (UINT64_C(1) << n) - 1; }
@@ -812,19 +832,14 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
         // os::ResultOutOfMemory and aborts on anything else; Donkey Kong Country: Tropical Freeze finds its heap size by a binary search between 3 and 6 GB, which needs the error back
         if (size > g_heap_cap) { LOG("SetHeapSize OOM: req %#zx > cap %#zx", size, g_heap_cap); regs[0] = 0xD001; return 0; }
         pthread_mutex_lock(&g_map_lock);
-        size_t previous = g_heap_cur, image = image_bytes();
+        size_t previous = g_heap_cur;
         if (size < previous && (map_source_busy((uintptr_t)g_heap + size, previous - size) || device_shared((uintptr_t)g_heap + size, previous - size, "SetHeapSize shrinking over"))) {
             pthread_mutex_unlock(&g_map_lock); regs[0] = 0xD401; return 0;
         }
-        if (image > APP_POOL || size > APP_POOL - image) {   // ResultLimitReached; games retry in 2 MB decrements
-            // Logged once (Mario's retries would repeat it): a game that sizes its heap as pool − used memory and does not retry stops here when its modules are larger than the used memory reported
-            // (profile mem_used; the NSP script's probe boot reads this line, and sets mem_used when no SetHeapSize succeeds afterwards)
-            static int once; if (!once++) LOG("[mem] SetHeapSize %#zx + modules %#zx > app pool %#llx (used memory reported %#llx + bss %#zx)", size, image_bytes() - big_bss_bytes(),
-                                              (unsigned long long)APP_POOL, (unsigned long long)DM_GAME_MEM_USED, big_bss_bytes());
-            pthread_mutex_unlock(&g_map_lock); regs[0] = 0x10801; return 0;
-        }
-        uint64_t charged = (uint64_t)DM_GAME_MEM_USED + big_bss_bytes() + atomic_load(&g_alias_mapped);
-        if (DM_GAME_MEM_MAP_LIMIT && (charged > APP_POOL || size > APP_POOL - charged)) {
+        uint64_t used = used_beside_heap();
+        if (used > APP_POOL || size > APP_POOL - used) {   // ResultLimitReached: more than the total less the used memory GetInfo reports; games retry in 2 MB decrements
+            // Logged once (Mario's retries would repeat it)
+            static int once; if (!once++) LOG("[mem] SetHeapSize %#zx > app pool %#llx less used memory %#llx", size, (unsigned long long)APP_POOL, (unsigned long long)used);
             pthread_mutex_unlock(&g_map_lock); regs[0] = 0x10801; return 0;
         }
         int rc = 0;
@@ -972,7 +987,7 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
         // UnmapPhysicalMemory of the 3.15 GB block and the same map again). Without the limit the mapped total went past the pool in the first minute and the freed block stayed mapped.
         // Off by default: Ace Attorney Investigations Collection maps a little more than the 1 GB pool its profile reports
         if (DM_GAME_MEM_MAP_LIMIT && num == 0x2C) {
-            int64_t room = (int64_t)APP_POOL - (int64_t)(g_heap_cur + DM_GAME_MEM_USED + big_bss_bytes()) - atomic_load(&g_alias_mapped);
+            int64_t room = (int64_t)APP_POOL - (int64_t)(g_heap_cur + used_beside_heap());   // used_beside_heap holds the mapped pages with mem_map_limit
             if (need && need > room) {
                 pthread_mutex_unlock(&g_map_lock);
                 static _Atomic int nref; if (atomic_fetch_add(&nref, 1) < 8) LOG("[mem] MapPhysicalMemory +%#zx refused: %.2f GB mapped, the application pool is full (ResultLimitReached, the SDK frees cached pages and retries)",
@@ -1015,6 +1030,13 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
           if (before >> 28 != after >> 28) LOG("[mem] alias region mapped %.2f GB (application pool %.2f GB)", after / 1073741824.0, APP_POOL / 1073741824.0); }
         regs[0] = 0; return 0;
     }
+    case 0x15: {  // CreateTransferMemory(→w1 handle; x1 address, x2 size, w3 permission): the memory stays where it is in this one address space, and the only receivers are host services
+        // (audren:u, hle_audren_sv.c), which read nothing through it. A handle outside the kernel handle table: CloseHandle passes over it. The placeholder answer left the address in w1
+        // as the handle, and a CloseHandle of an address whose low word fell in the table would have closed another object
+        static _Atomic uint32_t next;
+        { static int once; if (!once++) LOG("svc CreateTransferMemory %#llx+%#llx: a handle outside the kernel table (host services only)", regs[1], regs[2]); }
+        regs[0] = 0; regs[1] = 0xd1000000u | (atomic_fetch_add(&next, 1) & 0xffffu); return 0;
+    }
     case 0x26: {  // Break(reason, ptr, size): SDK fatal abort
         uint32_t res = (regs[1] && regs[2] >= 4) ? *(uint32_t *)regs[1] : 0;
         module_t *mm = module_of((void *)regs[30]);
@@ -1040,9 +1062,9 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
         case I_StackAddr: v = (uint64_t)g_stack; break;   case I_StackSize: v = g_stack_cap; break;
         case I_TotalMem: case I_TotalNonSys: v = APP_POOL; break;
         case I_UsedMem:  case I_UsedNonSys:  pthread_mutex_lock(&g_map_lock);
-                                             v = g_heap_cur + DM_GAME_MEM_USED + big_bss_bytes();   // profile mem_used, 64 MB unless the game needs more (see mem_used in dm/games/README.md)
-                                             // with mem_map_limit, the pages mapped in the alias region count too, as on Horizon (the limit in MapPhysicalMemory is the pool less this)
-                                             if (DM_GAME_MEM_MAP_LIMIT) v += (uint64_t)atomic_load(&g_alias_mapped);
+                                             // profile mem_used (64 MB unless the game's hardware heap needs more: mem_used in dm/games/README.md) and the giant bss; with mem_map_limit the pages
+                                             // mapped in the alias region count too, as on Horizon. SetHeapSize and MapPhysicalMemory charge the same figure
+                                             v = g_heap_cur + used_beside_heap();
                                              pthread_mutex_unlock(&g_map_lock); break;
         // the system resource the NPDM declares (profile sys_resource; 32 MB without the key). The SDK's IsVirtualAddressMemoryEnabled is "total != 0": Big Brain Academy's nninitStartup
         // asks StandardAllocator for 60 GB of virtual address memory when it is, and sets a heap only when it is not (its NPDM declares none)

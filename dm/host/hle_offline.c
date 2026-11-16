@@ -2,6 +2,7 @@
 // Only entry points that go to a service are hooked; library functions that only read and write the game's own buffers (prepo Add / Array / Struct, err ErrorResultVariant, friends getters, socket byte-order conversion) keep running in the SDK.
 // Return convention as in hle_friends.c: Result returns RES_FAIL ("saved / submitted" kinds return RES_OK so the game does not retry); bool returns false; events get a bound SystemEvent that never fires.
 #include "hle.h"
+#include "hle_net.h"
 
 static _Alignas(16) uint8_t g_ev_ldn[0x100];
 
@@ -65,34 +66,32 @@ HLE_FORCE("_ZN2nn9bluetooth16GetBleScanResultEPNS0_13BleScanResultEi", "BLE scan
 HLE_FORCE("_ZN2nn9bluetooth24GetBleConnectionInfoListEPNS0_17BleConnectionInfoEi", "BLE connections (cut): 0", int, h_bt_ConnList, void *out, int max) { (void)out; (void)max; return 0; }
 HLE_FORCE("_ZN2nn9bluetooth19ConnectToGattServerERKNS0_7AddressE", "BLE connect (cut)", Result, h_bt_Connect, const void *a) { (void)a; return RES_FAIL; }
 
-// ---------- socket: offline. Initialization succeeds (the network library's global init depends on it), every later operation fails with errno = ENETDOWN ----------
+// ---------- socket: aliases of the offline BSD service, including its process-local UDP transport ----------
 enum { SK_ENETDOWN = 50, SK_EAI_FAIL = 4 };
 HLE_FORCE("_ZN2nn6socket10InitializeEPvmmi", "connects to the bsd socket service; offline, creates no session (cut)", Result, h_sk_Init4, void *mem, uint64_t sz, uint64_t alloc, int conc) { (void)mem; (void)sz; (void)alloc; (void)conc; return RES_OK; }
 HLE_FORCE("_ZN2nn6socket8FinalizeEv", "pairs with Initialize (cut)", Result, h_sk_Fini, void) { return RES_OK; }
-HLE_FORCE("_ZN2nn6socket12GetLastErrnoEv", "offline: ENETDOWN", int, h_sk_Errno, void) { return SK_ENETDOWN; }
-HLE_FORCE("_ZN2nn6socket6SocketEiii", "offline (cut): -1", int, h_sk_Socket3i, int a, int b, int c) { (void)a; (void)b; (void)c; return -1; }
-HLE_FORCE("_ZN2nn6socket8ShutdownEii", "offline (cut)", int, h_sk_Shutdown, int s, int h) { (void)s; (void)h; return -1; }
-HLE_FORCE("_ZN2nn6socket4BindEiPK8sockaddrj", "offline (cut)", int, h_sk_Bind, int s, const void *a, unsigned n) { (void)s; (void)a; (void)n; return -1; }
-int dm_sk_poll(void *fds, uint64_t n, int ms);   // hle_net.c: waits on the host's event descriptors; with none the timeout passes, 0
-int dm_sk_select(int nfds, uint64_t *r, uint64_t *w, uint64_t *e, const int64_t *tv);
-HLE_FORCE("_ZN2nn6socket4PollEP6pollfdmi", "offline: waits on the host's event descriptors; nothing else is ever ready", int, h_sk_Poll, void *p, uint64_t n, int t) { return dm_sk_poll(p, n, t); }
+HLE_FORCE("_ZN2nn6socket12GetLastErrnoEv", "local UDP (offline BSD service)", int, h_sk_Errno, void) { return dm_sk_errno(); }
+HLE_FORCE("_ZN2nn6socket6SocketEiii", "local UDP (offline BSD service)", int, h_sk_Socket3i, int a, int b, int c) { return dm_sk_socket(a, b, c); }
+HLE_FORCE("_ZN2nn6socket8ShutdownEii", "local UDP (offline BSD service)", int, h_sk_Shutdown, int s, int h) { return dm_sk_shutdown(s, h); }
+HLE_FORCE("_ZN2nn6socket4BindEiPK8sockaddrj", "local UDP (offline BSD service)", int, h_sk_Bind, int s, const void *a, unsigned n) { return dm_sk_bind(s, a, n); }
+HLE_FORCE("_ZN2nn6socket4PollEP6pollfdmi", "waits on process-local UDP and event descriptors", int, h_sk_Poll, void *p, uint64_t n, int t) { return dm_sk_poll(p, n, t); }
 // SDK 4's Select with plain fd_set / timeval (Dark Souls Remastered)
-HLE_FORCE("_ZN2nn6socket6SelectEiP6fd_setS2_S2_P7timeval", "offline: Poll over its sets (the host's event descriptors; nothing else is ever ready)", int, h_sk_Select2, int n, void *r, void *w, void *e, void *t) { return dm_sk_select(n, r, w, e, t); }
-HLE_FORCE("_ZN2nn6socket6SendToEiPKvmiPK8sockaddrj", "offline (cut)", long, h_sk_SendTo, int s, const void *b, unsigned long n, int f, const void *a, unsigned al) { (void)s; (void)b; (void)n; (void)f; (void)a; (void)al; return -1; }
-HLE_FORCE("_ZN2nn6socket6SendToEiPKvmNS0_7MsgFlagEPKNS0_8SockAddrEj", "offline (cut)", long, h_sk_SendTo2, int s, const void *b, unsigned long n, int f, const void *a, unsigned al) { (void)s; (void)b; (void)n; (void)f; (void)a; (void)al; return -1; }
-HLE_FORCE("_ZN2nn6socket8RecvFromEiPvmiP8sockaddrPj", "offline (cut)", long, h_sk_RecvFrom2, int s, void *b, unsigned long n, int f, void *a, unsigned *al) { (void)s; (void)b; (void)n; (void)f; (void)a; (void)al; return -1; }
+HLE_FORCE("_ZN2nn6socket6SelectEiP6fd_setS2_S2_P7timeval", "Poll over process-local UDP and event descriptor sets", int, h_sk_Select2, int n, void *r, void *w, void *e, void *t) { return dm_sk_select(n, r, w, e, t); }
+HLE_FORCE("_ZN2nn6socket6SendToEiPKvmiPK8sockaddrj", "local UDP (offline BSD service)", long, h_sk_SendTo, int s, const void *b, unsigned long n, int f, const void *a, unsigned al) { return dm_sk_sendto(s, b, n, f, a, al); }
+HLE_FORCE("_ZN2nn6socket6SendToEiPKvmNS0_7MsgFlagEPKNS0_8SockAddrEj", "local UDP (offline BSD service)", long, h_sk_SendTo2, int s, const void *b, unsigned long n, int f, const void *a, unsigned al) { return dm_sk_sendto(s, b, n, f, a, al); }
+HLE_FORCE("_ZN2nn6socket8RecvFromEiPvmiP8sockaddrPj", "local UDP (offline BSD service)", long, h_sk_RecvFrom2, int s, void *b, unsigned long n, int f, void *a, unsigned *al) { return dm_sk_recvfrom(s, b, n, f, a, al); }
 HLE_FORCE("_ZN2nn6socket11GetAddrInfoEPKcS2_PK8addrinfoPPS3_", "name resolution (cut): EAI_FAIL", int, h_sk_Gai2, const char *h, const char *s, const void *hint, void **res) { (void)h; (void)s; (void)hint; if (res) *res = NULL; return SK_EAI_FAIL; }
 HLE_FORCE("_ZN2nn6socket12FreeAddrInfoEP8addrinfo", "pairs with GetAddrInfo (cut)", void, h_sk_FreeAi2, void *ai) { (void)ai; }
 HLE_FORCE("_ZN2nn6socket11GAIStrErrorENS0_7AiErrnoE", "resolver error text", const char *, h_sk_GaiStr, int e) { (void)e; return "network unavailable"; }
 // SDK 11's overloads with plain sockaddr / int arguments (Big Brain Academy: Brain vs. Brain, through Pia)
-HLE_FORCE("_ZN2nn6socket7ConnectEiPK8sockaddrj", "offline (cut)", int, h_sk_Connect2, int s, const void *a, unsigned n) { (void)s; (void)a; (void)n; return -1; }
+HLE_FORCE("_ZN2nn6socket7ConnectEiPK8sockaddrj", "local UDP (offline BSD service)", int, h_sk_Connect2, int s, const void *a, unsigned n) { return dm_sk_connect(s, a, n); }
 HLE_FORCE("_ZN2nn6socket6AcceptEiP8sockaddrPj", "offline (cut)", int, h_sk_Accept2, int s, void *a, unsigned *n) { (void)s; (void)a; (void)n; return -1; }
-HLE_FORCE("_ZN2nn6socket11GetSockNameEiP8sockaddrPj", "offline (cut)", int, h_sk_GetSockName2, int s, void *a, unsigned *n) { (void)s; (void)a; (void)n; return -1; }
-HLE_FORCE("_ZN2nn6socket10GetSockOptEiiiPvPj", "offline (cut)", int, h_sk_GetSockOpt2, int s, int l, int o, void *v, unsigned *n) { (void)s; (void)l; (void)o; (void)v; (void)n; return -1; }
-HLE_FORCE("_ZN2nn6socket10SetSockOptEiiiPKvj", "offline (cut)", int, h_sk_SetSockOpt2, int s, int l, int o, const void *v, unsigned n) { (void)s; (void)l; (void)o; (void)v; (void)n; return -1; }
-HLE_FORCE("_ZN2nn6socket5FcntlEiiz", "offline (cut)", int, h_sk_Fcntl2, int s, int c) { (void)s; (void)c; return -1; }
-HLE_FORCE("_ZN2nn6socket4RecvEiPvmi", "offline (cut)", long, h_sk_Recv2, int s, void *b, unsigned long n, int f) { (void)s; (void)b; (void)n; (void)f; return -1; }
-HLE_FORCE("_ZN2nn6socket4SendEiPKvmi", "offline (cut)", long, h_sk_Send2, int s, const void *b, unsigned long n, int f) { (void)s; (void)b; (void)n; (void)f; return -1; }
+HLE_FORCE("_ZN2nn6socket11GetSockNameEiP8sockaddrPj", "local UDP (offline BSD service)", int, h_sk_GetSockName2, int s, void *a, unsigned *n) { return dm_sk_name(s, a, n, 0); }
+HLE_FORCE("_ZN2nn6socket10GetSockOptEiiiPvPj", "local UDP (offline BSD service)", int, h_sk_GetSockOpt2, int s, int l, int o, void *v, unsigned *n) { return dm_sk_getopt(s, l, o, v, n); }
+HLE_FORCE("_ZN2nn6socket10SetSockOptEiiiPKvj", "local UDP (offline BSD service)", int, h_sk_SetSockOpt2, int s, int l, int o, const void *v, unsigned n) { return dm_sk_setopt(s, l, o, v, n); }
+HLE_FORCE("_ZN2nn6socket5FcntlEiiz", "local UDP (offline BSD service)", int, h_sk_Fcntl2, int s, int c, int v) { return dm_sk_fcntl(s, c, v); }
+HLE_FORCE("_ZN2nn6socket4RecvEiPvmi", "local UDP (offline BSD service)", long, h_sk_Recv2, int s, void *b, unsigned long n, int f) { return dm_sk_recvfrom(s, b, n, f, NULL, NULL); }
+HLE_FORCE("_ZN2nn6socket4SendEiPKvmi", "local UDP (offline BSD service)", long, h_sk_Send2, int s, const void *b, unsigned long n, int f) { return dm_sk_sendto(s, b, n, f, NULL, 0); }
 
 // ---------- irsensor: the Joy-Con IR camera (Big Brain Academy: Brain vs. Brain's input layer makes one per controller). The host has none: every camera is unconnected,
 // processors cannot run and report no states. The default-config getters and MakeRect only fill the game's structs and keep running in the SDK ----------
@@ -193,7 +192,7 @@ HLE_FORCE("nnsocketAccept", "offline (cut)", int, h_c_sk_Accept, void) { return 
 HLE_FORCE("nnsocketListen", "offline (cut)", int, h_c_sk_Listen, void) { return -1; }
 HLE_FORCE("nnsocketRecvMsg", "offline (cut)", int, h_c_sk_RecvMsg, void) { return -1; }
 HLE_FORCE("nnsocketSendMsg", "offline (cut)", int, h_c_sk_SendMsg, void) { return -1; }
-HLE_FORCE("nnsocketShutdown", "offline (cut)", int, h_c_sk_Shutdown, void) { return -1; }
+HLE_FORCE("nnsocketShutdown", "local UDP (offline BSD service)", int, h_c_sk_Shutdown, int s, int h) { return dm_sk_shutdown(s, h); }
 HLE_FORCE("nnsocketGetAddrInfoWithOptions", "name resolution with resolver options (cut): EAI_FAIL", int, h_c_sk_GaiOpt, const char *h, const char *s, const void *hint, void **res, const void *o, unsigned long n) { (void)h; (void)s; (void)hint; (void)o; (void)n; if (res) *res = NULL; return SK_EAI_FAIL; }
 HLE_FORCE("nnsocketGetAddrInfo", "name resolution (cut): EAI_FAIL", int, h_c_sk_Gai, const char *h, const char *s, const void *hint, void **res) { (void)h; (void)s; (void)hint; if (res) *res = NULL; return SK_EAI_FAIL; }
 HLE_FORCE("nnsocketFreeAddrInfo", "pairs with GetAddrInfo (cut)", void, h_c_sk_FreeAi, void *ai) { (void)ai; }

@@ -20,7 +20,8 @@ class MemoryProfileTests(unittest.TestCase):
             'app_pool': '0x1000000', 'sys_resource': '0x2000000',
         })
         self.assertEqual(signals['mem_alias'][0], '0x118000000')
-        self.assertEqual(signals['mem_used'][0], '0xe00000')
+        self.assertIn('[mem] SetHeapSize 0x1000000 > app pool 0x1000000 less used memory 0x200000', result.stderr)
+        self.assertNotIn('mem_used', signals)   # the host charges the used memory it reports: no module size to make up for
 
     def test_alias_size_override(self):   # the probe asserts the 256 MB alias region and the layout around it
         subprocess.run([str(HERE / os.environ.get('DM_TEST_BUILD', 'build') / 't_svc_memory'), '--alias-probe'],

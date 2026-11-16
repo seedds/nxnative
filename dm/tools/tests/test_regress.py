@@ -641,6 +641,26 @@ out = Path(sys.argv[2]) / 'b-v'; out.mkdir(parents=True, exist_ok=True)
             selected.write_bytes(b'converter B')
             self.assertNotEqual(before, regress.chain_key(tree, g, 'tools')[2])
 
+    def test_vk_chain_key_tracks_shader_bytes_in_a_folder_and_in_romfs_img(self):   # the image's entries were hashed as "missing": changed bytes kept the key
+        import sys; sys.path.insert(0, str(REPO / 'dm/gfx/tools')); import romfs_image
+        spirv = lambda tail: (0x07230203).to_bytes(4, 'little') + tail   # SPIR-V's magic: what vk_shaders.spirv_files keeps
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td); files = root / 'files' / 'shaders'; files.mkdir(parents=True)
+            shader = files / 'a.spv'; (files / 'readme.txt').write_text('not a shader')
+            g = NS(kind='vk', ver='v0', env=lambda tree: dict(regress.os.environ), build=root)
+            tree = NS(path=root)
+            def key(form, tail):
+                shader.write_bytes(spirv(tail))
+                if form == 'image': romfs_image.pack(root / 'files', root / 'RomFS.img')
+                shader_root = root / 'files' if form == 'folder' else regress.rfs.Path(root / 'RomFS.img')
+                g.shader_roots = lambda: [shader_root]
+                return regress.chain_key(tree, g, 'tools')[2]
+            for form in ('folder', 'image'):
+                with self.subTest(form=form):
+                    first = key(form, b'original')
+                    self.assertEqual(first, key(form, b'original'), 'the same bytes, the same key')
+                    self.assertNotEqual(first, key(form, b'changed!'), 'changed bytes under the same name, another key')
+
     def test_baseline_context_tracks_route_save_artifacts_and_settings(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td); save = root / 'save'; save.mkdir()

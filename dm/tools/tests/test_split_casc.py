@@ -131,9 +131,10 @@ class MainRecords(unittest.TestCase):
         ps2 = fz.stage(0x1462 | 0x10000)
         img = nso_image([(*fz.PS, 'rel'), (*cs(), 'adrp'), (*ps2, None)])
         with contextlib.redirect_stdout(io.StringIO()) as log: out = ss.raw_shaders(img, 'main')
-        self.assertEqual(sorted(st for _, st, _, _ in out), ['cs', 'ps'])
-        self.assertTrue(all('#RAW@' in w for w, *_ in out))
-        self.assertEqual(log.getvalue().count('[RED] main control section'), 1)   # the record nothing points at
+        self.assertEqual(sorted(st for w, st, _, _ in out if '#RAW@' in w), ['cs', 'ps'])
+        # the record nothing points at: its code area has a header and ends right at its control section at the length that gives, so it is taken in that form (FFXII's Phyre programs)
+        self.assertEqual([st for w, st, _, _ in out if '#PHYRE@' in w], ['ps'])
+        self.assertEqual(log.getvalue().count('[RED] main control section'), 0)
 
 
 if __name__ == '__main__':

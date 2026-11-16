@@ -2,7 +2,7 @@
 # The game name, display version and languages from the NSP's control data (control.nacp, saved in the extraction folder by nx_extract): the iOS app name and version come from them (shared by the packing script and build_ipa.sh),
 #   and the packing script checks the game language against the languages the game supports.
 # Usage: nacp.py <control.nacp> (prints the game name), nacp.py --version <control.nacp> (prints the display version), nacp.py --languages <control.nacp> (prints the supported language codes);
-#   each prints an empty line and exits 1 when none can be read. From Python: import nacp; nacp.name(path), nacp.version(path), nacp.languages(path)
+#   each prints an empty line and exits 1 when none can be read. From Python: import nacp; nacp.name(path), nacp.version(path), nacp.bundle_version(text), nacp.languages(path)
 import re, struct, sys, zlib
 from pathlib import Path
 
@@ -33,9 +33,13 @@ def name(path):
 def version(path):
     """The display version (0x10 bytes at 0x3060, e.g. 1.2.1), cut to what iOS accepts as a bundle version (up to three dot-separated integers); a missing file or no leading number returns an empty string"""
     p = Path(path)
-    if not p.is_file(): return ''
-    m = re.match(rb'\d+(\.\d+){0,2}', p.read_bytes()[0x3060:0x3070])
-    return m.group().decode() if m else ''
+    return bundle_version(p.read_bytes()[0x3060:0x3070].decode('latin-1')) if p.is_file() else ''
+
+
+def bundle_version(text):
+    """A display version from elsewhere (a game profile's build row, a NUP's label) cut the same way: 1.2.1 of 1.2.1_5; no leading number (v131072, ?, None) returns an empty string"""
+    m = re.match(r'\d+(\.\d+){0,2}', text or '')
+    return m.group() if m else ''
 
 
 def languages(path):

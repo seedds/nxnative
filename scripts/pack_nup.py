@@ -3,7 +3,7 @@
 # a .nup file, or a folder that holds one, and goes on with its other steps; run on its own, this script does only this step.
 # A NUP holds the same packages as a dump folder (scripts/pack_dump.py): the base game, updates by version and DLC by title ID, each an exefs/ and romfs/ tree, its files stored raw or as one zstd
 # frame each, with a SHA-256 per file. Its files are not encrypted, so it needs no keys. Unlike a dump it may carry control data in each package's meta block: the NACP and the icon. Its name,
-# publisher and display version records are labels the packer typed (Hyrule Warriors: Age of Imprisonment's says "HWAoI"), not the console's: without a NACP the name comes from the profile.
+# publisher and display version records are labels the packer typed (Hyrule Warriors: Age of Imprisonment's says "HWAoI"), not the console's: without a NACP the name comes from the profile, and the app version from the profile's build row, else the display version label (display_label).
 # A container may hold no base game, in two forms that mean the same: no base record, with standalone_update on every update (SPEC §3.1.2), or a base record with no files (title ID 0), as packers
 # leave when an update holds the whole game (Pokemon Pokopia's v655360). The title ID is then the program ID of the code present, there is no version 0, and the selected update needs its own ExeFS
 # and RomFS, taken as the whole game. The flag does not promise that (the spec says such an update needs a matching base elsewhere), and nothing in a container can prove it, so the scripts say so
@@ -43,7 +43,7 @@ NO_DIR = 0xFFFFFFFF
 BASE, UPDATE, ADDON = 0, 1, 2
 KINDS = ('base', 'update', 'addon', 'addon_update', 'system')
 STANDALONE = 1   # package flags bit 0: an update in a container without a base
-T_NACP, T_ICON, T_LICONS = 2, 3, 10
+T_NACP, T_ICON, T_DISPLAY, T_LICONS = 2, 3, 4, 10
 ARTIFACTS = romfs_image.ARTIFACTS   # dump-tool files a producer may have kept (SPEC §6.3): not game files
 NO_BASE = 'no base game in this NUP: its update is taken as the whole game (if the game then stops on missing files, the update holds only what changed: pack a NUP with the base game)'
 
@@ -399,6 +399,12 @@ def control(k, out, fallback=None):   # the package's control data beside its Ex
     for name, data in (('control.nacp', nacp_bytes), ('icon.jpg', icon)):
         if data: (out / name).write_bytes(data)
         else: (out / name).unlink(missing_ok=True)
+
+
+def display_label(k, base=None):   # the display version the packer labelled the package with (else its base game's), '' without one. A label, not the console's value (the header):
+    for p in (k, base):             # the app version takes it only when no control data and no build row of the profile gives one
+        if p is not None and (v := p.meta().get(T_DISPLAY)): return v.decode('utf-8', 'replace')
+    return ''
 
 
 def romfs_of(k, base):   # the RomFS folder a version runs with: its own, or the base game's for an update without one

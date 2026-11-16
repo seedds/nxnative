@@ -3146,6 +3146,14 @@ def app_icon(given, spare, *dirs):
     return given or own or spare, bool(spare and not (given or own))
 
 
+def app_version_of(game, base, g, pkg_ver, label=''):
+    """The app version is the packed game's display version: the update's control data when an update is packed (nx_extract saves it next to the RomFS), else the base game's. A package
+    without control data (a NUP update, a dump) has the one the profile registers for the packed build, then the label a NUP's packer gave it (pack_nup.display_label; The Legend of Zelda:
+    Ocarina of Time's NUP has no NACP and a build row without a display version, and its Mac app said 1.0 for 1.1.1). Each is cut to a bundle version; '' when none gives one (the app then says 1.0)"""
+    return (nacp.version(game / 'control.nacp') or nacp.version(base / 'control.nacp') or nacp.bundle_version((g.builds().get(pkg_ver) or {}).get('display'))
+            or nacp.bundle_version(label))
+
+
 def say_game(app, name, version, bundle_id, out, icon):
     """Which game the app is, once its name, version and bundle ID are settled (before the shader stages): the event game for a front end (json mode; the base game's title ID as DMTitleID has it,
     out = the IPA or Mac app, None for an Xcode project; icon = the image the app is given: --icon / ICON, else the extracted icon.jpg, else --fallback-icon / FALLBACK_ICON; None without one), then the message for people"""
@@ -3413,8 +3421,7 @@ def main(args=None):
     if prepare_xcode:
         try: xcode_projects.check_bundle_id(workspace, project, bundle_id)
         except ValueError as e: raise BuildError(str(e)) from e
-    # the app version is the packed game's display version: the update's control data when an update is packed (nx_extract saves it next to the RomFS), else the base game's
-    app_version = nacp.version(game / 'control.nacp') or nacp.version(base / 'control.nacp')
+    app_version = app_version_of(game, base, g, pkg_ver, pack_nup.display_label(picks[pkg_ver][1] or picks[pkg_ver][0], picks[pkg_ver][0] or pack_nup.app_package(fam['nup'])) if nup else '')   # a NUP without a base game: its metadata record, as for its control data
     if mac_pack and not (args.out or OUT_IPA): out_ipa = work.parent / f'{mac_app_name(app_name)}{"-provisional" if shadowed else ""}.app'
     icon, stand_in = app_icon(user_icon, spare_icon, game, base)
     if (not mac or mac_pack) and getattr(args, 'in_programs', None) is None:   # an app is made, once: a program packed with the application's first (in_programs) is part of its app

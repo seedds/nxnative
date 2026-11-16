@@ -374,6 +374,14 @@
 - **Found on:** [Super Mario Bros. Wonder](../../dm/games/010015100B514000/README.md) (1.2.1, v327680, an update-only NUP; `main` ff773e90…, the registered build): `Ver. ?` before, `Ver. 1.2.1` after, one Mac boot each to the title screen.
 - **Check:** `dm/tools/tests/test_nsp_alias.py` `test_derived_profile_keeps_the_display_version_the_profile_registers_for_the_build`.
 
+### An app packed from a NUP without control data says version 1.0
+
+- **Symptom:** Finder shows `Version 1.0` for the Mac app of a game at another version (`CFBundleShortVersionString` 1.0 in its `Info.plist`), and the build's game line names 1.0.
+- **Cause:** the app version came from `control.nacp` alone, the packed version's or else the base game's. A NUP's packages may carry none (the container then has the display version only as a record its packer typed) and a dump has none, so the script passed no version and the packer wrote its default.
+- **Fix:** `app_version_of` takes the control data first, then the display version the profile's `build` row registers for the packed version, then the NUP's display version record (`pack_nup.display_label`: the package's, else its base game's or the metadata record's). Each is cut to a bundle version, and a row or a label that is no version (`v131072`, `?`) gives none. The IPA takes the same version.
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md) (v131072, a NUP with a base game and an update package, neither with a NACP and both labelled `1.1.1`; its build row has no display version): the Mac app said 1.0. For that NUP and its build folder the function now gives 1.1.1; the app was not packed again.
+- **Check:** `dm/tools/tests/test_nsp_nup.py` `test_app_version_without_nacp_is_the_profiles_then_the_label`.
+
 ### No Game language row in an app packed from a NUP or a dump
 
 - **Symptom:** the settings of a Mac app or IPA packed from a NUP or a dump folder have no Game language row, while `DM_LANG` in the environment changes the language. Reported on [Donkey Kong Bananza](../../dm/games/040074A01BF12000/README.md) ([NX2Apple#619](https://github.com/LNPANDY/NX2Apple/issues/619), [#659](https://github.com/LNPANDY/NX2Apple/issues/659); the reporters' packed files were not available).

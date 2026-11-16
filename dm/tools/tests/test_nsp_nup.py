@@ -503,6 +503,21 @@ class Pack(Base):
         self.assertFalse((self.out() / 'control.nacp').exists())
         self.assertEqual((self.out() / 'icon.jpg').read_bytes(), b'\xff\xd8 icon')
 
+    def test_app_version_without_nacp_is_the_profiles_then_the_label(self):   # a NUP update carries no control data: Ocarina of Time's Mac app said 1.0 for 1.1.1
+        write_nup(self.path, [(0, TID, 0, version(), tlv([(pack_nup.T_DISPLAY, b'1.1.1')])), (1, TID, VER, version(), b''), (1, TID, VER + 1, version(), tlv([(pack_nup.T_DISPLAY, b'v2 final')]))])
+        n = self.open(); _, base, vers, _ = pack_nup.scan(n)
+        self.assertEqual([pack_nup.display_label(*a) for a in ((base,), (vers[VER], base), (vers[VER],), (vers[VER + 1], base))], ['1.1.1', '1.1.1', '', 'v2 final'])   # an update's own, else its base game's
+        with_nacp, bare = self.dir / 'with', self.dir / 'bare'; with_nacp.mkdir(); bare.mkdir()
+        (with_nacp / 'control.nacp').write_bytes(control_nacp('Test Game', 'テス', '1.2.3'))
+        g = mock.Mock(builds=lambda: {'v1': {'display': '1.4.0_5', 'main': 'aa'}, 'v2': {'display': 'v131072', 'main': 'bb'}, 'v3': {'display': '?'}})
+        vars(nsp)['nacp'] = nacp; of = nsp.app_version_of   # main sets it
+        self.assertEqual(of(with_nacp, bare, g, 'v1', '9.9'), '1.2.3')    # the packed version's control data
+        self.assertEqual(of(bare, with_nacp, g, 'v1', '9.9'), '1.2.3')    # the base game's
+        self.assertEqual(of(bare, bare, g, 'v1', '9.9'), '1.4.0')         # the profile's build row, cut to a bundle version
+        self.assertEqual(of(bare, bare, g, 'v2', '1.1.1'), '1.1.1')       # a row without a display version: the label
+        self.assertEqual(of(bare, bare, g, 'v3', 'v2 final'), '')         # a label that is no version: none (the app says 1.0)
+        self.assertEqual(of(bare, bare, g, 'v9'), '')                     # a version no row names, no label
+
     def test_repeat_keeps_what_is_unchanged(self):
         n = self.open(); app, base, vers, _ = pack_nup.scan(n)
         pack_nup.pack_version(n, vers[VER], base, app, self.out(), say=lambda s: None)

@@ -2736,6 +2736,9 @@ NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
         static uint64_t pl, pst, pf, pudc; uint64_t l, st, fu; mtl_bw(&l, &st, &fu);
         trow(f, "@rt_load_mb", (l - pl) / 1048576.0); trow(f, "@rt_store_mb", (st - pst) / 1048576.0); trow(f, "@pass_full_rw", (double)(fu - pf));
         uint64_t udc = mtl_udc_saved_bytes(); trow(f, "@unwritten_dc_mb", (udc - pudc) / 1048576.0);
+        { void mtl_dsi_stats(uint64_t *, uint64_t *, uint64_t *); static uint64_t pdb, pdp, pdf; uint64_t db, dp, df; mtl_dsi_stats(&db, &dp, &df);   // DM_NVN_DS_IDLE: idle planes' load bytes saved, passes, fallbacks
+          if (db | dp | df) { trow(f, "@ds_idle_mb", (db - pdb) / 1048576.0); trow(f, "@ds_idle_planes", (double)(dp - pdp)); trow(f, "@ds_idle_fallback", (double)(df - pdf)); }
+          pdb = db; pdp = dp; pdf = df; }
         pl = l; pst = st; pf = fu; pudc = udc;
         static uint64_t pae, par, pap; uint64_t ae_, ar_, ap_; mtl_args_stats(&ae_, &ar_, &ap_);
         trow(f, "@args_enc", (double)(ae_ - pae)); trow(f, "@args_reuse", (double)(ar_ - par)); trow(f, "@args_patch", (double)(ap_ - pap)); pae = ae_; par = ar_; pap = ap_;

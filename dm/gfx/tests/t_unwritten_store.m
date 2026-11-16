@@ -72,6 +72,7 @@ static result run(int enabled, int mode) {
 int main(int argc,char **argv) { @autoreleasepool {
     int bench=argc>1&&!strcmp(argv[1],"--bench"); if(bench) { width=1920; height=1080; repeats=32; }
     mtl_init();
+    g_dsi_m=0;   // the expected savings count loaded planes; DM_NVN_DS_IDLE leaves an idle plane unloaded and out of this bookkeeping (t_ds_idle)
     color.d=(nvn_texdesc){.target=NVN_TEXTURE_TARGET_2D,.format=NVN_FORMAT_RGBA8,.width=width,.height=height,.depth=1,.levels=1,.samples=1};
     depth.d=color.d; depth.d.format=NVN_FORMAT_DEPTH32F_STENCIL8;
     NSError *error=nil;

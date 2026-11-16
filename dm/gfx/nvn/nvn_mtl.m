@@ -5693,6 +5693,52 @@ static int udc_on(void) {
     if (g_udc < 0) { const char *e = getenv("DM_NVN_UNWRITTEN_DC"); g_udc = !(e && !strcmp(e, "0")); }
     return g_udc;
 }
+// ---------- Idle depth / stencil planes (DM_NVN_DS_IDLE, on by default; 1 / 0 / ab) ----------
+// A depth-stencil target stays attached for the whole pass, so each of its two planes is loaded (and, when unwritten, stored DontCare by udc) even when no draw of the pass
+// tests or writes it. Mario Kart World docked loads the stencil plane of its 2560x1440 Depth32Float_Stencil8 in ~15 passes a frame where no draw enables the stencil test (~50 MB a frame).
+// Metal touches a plane only through the depth-stencil state (dss_get: depth only when the depth test is on, stencil only when the stencil test is on), so a plane no draw
+// of the pass enables can be attached with load DontCare and store DontCare: its tiles hold values nobody reads, and memory keeps the previous content (the same
+// "a DontCare store leaves memory intact" property udc relies on). The decision is taken when the pass opens, before its later draws are known, so it is predicted:
+//   - a pass is identified by its attachments (depth texture / level / slice, each colour texture / level / slice); every tracked pass records which planes its draws and
+//     depth-stencil clears used, ORed over the key's whole history (g_dsi_tab);
+//   - a plane goes idle only if that key was seen before and never used it, the draw opening the pass does not enable it, no clear is pending for it, the pass is
+//     single-sample and not a clear-only pass;
+//   - a later draw (draw_) or scissored / partial-mask depth-stencil clear (clear_ds_tri) that needs an idle plane ends the pass first (dsi_guard); the next pass loads it again and
+//     the key is marked used for good (a fallback costs a pass split, never a wrong pixel)
+// In-run A/B on an M3 Max (Mario Kart World's race, uncapped, DM_AB=300, both phase orders, 2026-11-16): docked GPU p50 -0.24 ms, frame p50 -0.15 ms, attachment loads about
+// -35 MB a frame; handheld GPU p50 -0.20 ms, frame p50 -0.08 ms; no fallback, the same pictures
+static int g_dsi_m = -1;
+static int dsi_mode(void) {
+    if (g_dsi_m < 0) { g_dsi_m = sw_mode("DM_NVN_DS_IDLE", 1);
+        if (g_dsi_m != 1) MLOG("DM_NVN_DS_IDLE=%s: depth and stencil planes load as the pass's draws ask%s", getenv("DM_NVN_DS_IDLE"), g_dsi_m ? ", except in the A/B phases where idle planes are attached with load and store DontCare" : ""); }
+    return g_dsi_m;
+}
+enum { DSI_N = 1024, DSI_PROBE = 16 };
+typedef struct { uint64_t key; uint8_t seen, used; } dsi_ent;   // used: bit 0 depth, bit 1 stencil, ever used by a pass with this key
+static dsi_ent g_dsi_tab[DSI_N];
+static uint64_t g_dsi_key; static unsigned g_dsi_idle, g_dsi_used, g_dsi_ask = 3; static int g_dsi_track;   // the open pass: key, idle planes, planes used so far, tracked; g_dsi_ask: planes the op opening the pass needs (3 unless a draw)
+static uint64_t g_dsi_npass[2], g_dsi_bytes, g_dsi_fallback;   // passes with an idle depth / stencil plane, load bytes saved, passes ended early for an idle plane
+static dsi_ent *dsi_find(uint64_t k, int add) {
+    if (!k) k = 1;
+    for (int i = 0; i < DSI_PROBE; i++) { dsi_ent *e = &g_dsi_tab[(k + (uint64_t)i) & (DSI_N - 1)];
+        if (e->key == k) return e;
+        if (!e->key) { if (!add) return NULL; e->key = k; e->seen = e->used = 0; return e; } }
+    return NULL;   // full around this key: no prediction (its planes load)
+}
+static void dsi_pass_end(void) {   // rp_end_at: what the pass used joins its key's history
+    if (!g_dsi_track) return;
+    dsi_ent *e = dsi_find(g_dsi_key, 1);
+    if (!e) { memset(g_dsi_tab, 0, sizeof g_dsi_tab); e = dsi_find(g_dsi_key, 1); PD("I %llu idle depth-stencil history full: cleared (DM_NVN_DS_IDLE learns again)", g_stat_pass); }   // keys of textures long gone (new courses) fill it: start over
+    e->seen = 1; e->used |= (uint8_t)g_dsi_used;
+    g_dsi_track = 0; g_dsi_idle = g_dsi_used = 0;
+}
+static inline void dsi_note(unsigned planes) { g_dsi_used |= planes & 3; }   // a draw or clear in the open pass tests or writes these planes
+static void dsi_guard(unsigned need) {   // before an op that needs planes the open pass attached idle: end the pass, the next one loads them
+    if (!g_enc || !(g_dsi_idle & need)) return;
+    g_dsi_fallback++; dsi_note(g_dsi_idle & need);
+    PD("M %llu idle %s plane needed by a later draw or clear: the pass ends here (DM_NVN_DS_IDLE fallback)", g_stat_pass, (g_dsi_idle & need) == 3 ? "depth and stencil" : (g_dsi_idle & need) == 1 ? "depth" : "stencil");
+    rp_end();
+}
 // ---------- In-process A/B phases (DM_AB, measurement) ----------
 // DM_AB=<frames> splits the run into phases of that many frames (frame f is in phase f / frames) and alternates the switches whose value is ab (sw_mode; DM_NVN_BARRIER=ab so far):
 // ab = on in every second phase (phase 0 with all of them off), ab:<k>[,<k>...]/<n> = on in the phases whose number modulo n is one of the k (four configurations of two switches: one
@@ -5962,7 +6008,7 @@ static int unb_on(void) { static int v = -1; if (v < 0) { const char *e = getenv
 static void rp_end_at(const char *fn, int line) { if (g_enc) { AP_B; geo_mesh_flush_pass(); PD("E %llu pass ends in %s:%d", g_stat_pass, fn, line);
     if (enc_label_on()) { static uint64_t lf = ~0ull, base; uint64_t f = atomic_load(&g_cur_frame); if (f != lf) { lf = f; base = g_stat_pass - 1; }   // Intra-frame serial: the same pass has the same name every frame, so the table can aggregate by name
         [(id)g_enc setLabel:[NSString stringWithFormat:@"p%02llu %dx%d %s d%d", (unsigned long long)(g_stat_pass - base), g_el_w, g_el_h, g_el_key[0] ? g_el_key : "-", g_el_draws]]; }
-    sd_finish(); enc_r_end_pass(g_enc); g_gp_bw_l0 = g_bw_load; g_gp_bw_s0 = g_bw_store;   // the profile's per-pass ledger counts from the previous pass end, profiled or not
+    dsi_pass_end(); sd_finish(); enc_r_end_pass(g_enc); g_gp_bw_l0 = g_bw_load; g_gp_bw_s0 = g_bw_store;   // the profile's per-pass ledger counts from the previous pass end, profiled or not
     g_enc = nil; g_enc_geo_nocolor = 0; g_rt_merged = 0; g_sm_pass = 0; g_fsp_pass = 0; pg_end_render(); ts_after(); ms_after();
     if (g_nubd && g_nubd >= ubd_lazy()) ubd_flush();   // the inline updates deferred in this pass, in order (see mtl_sub_update); across passes they wait for the next copy or dispatch (blit_raw)
     if (g_nbcrt) bcrt_flush();   // blocks drawn into shadows go back into their compressed textures
@@ -6286,6 +6332,27 @@ static id<MTL4RenderCommandEncoder> rp_begin_ex_(int clear_only) {
             ser_gate(); enc_r_end(enc_r_begin(cp));
         }
     }
+    // Idle depth / stencil planes (DM_NVN_DS_IDLE, see dsi_mode): a plane this pass's key never used is neither loaded nor stored; it is not in the store bookkeeping (g_sd) below
+    g_dsi_idle = g_dsi_used = 0; g_dsi_track = 0;
+    if (clear_only == 0 && R.rt.depth && dsi_mode()) {
+        int hd_ = pd.depthAttachment.texture != nil; id<MTLTexture> dst_ = hd_ ? pd.depthAttachment.texture : pd.stencilAttachment.texture;
+        if (dst_ && dst_.sampleCount == 1) {
+            uint64_t k = 0xcbf29ce484222325ull;
+#define DSI_MIX(v) (k = (k ^ (uint64_t)(v)) * 0x100000001b3ull)
+            DSI_MIX(R.rt.depth->serial); DSI_MIX(hd_ ? pd.depthAttachment.level : pd.stencilAttachment.level); DSI_MIX(hd_ ? pd.depthAttachment.slice : pd.stencilAttachment.slice); DSI_MIX(g_rp_layered);
+            for (int i = 0; i < R.rt.n && i < 8; i++) { MTLRenderPassColorAttachmentDescriptor *c = pd.colorAttachments[i]; if (!c.texture) continue;
+                DSI_MIX(i + 1); DSI_MIX(R.rt.color[i]->serial); DSI_MIX(c.level); DSI_MIX(c.slice); DSI_MIX(c.depthPlane); }
+#undef DSI_MIX
+            g_dsi_key = k; g_dsi_track = 1;
+            dsi_ent *e = sw_on(dsi_mode()) ? dsi_find(k, 0) : NULL;
+            unsigned idle = e && e->seen ? ~(unsigned)e->used & ~g_dsi_ask & 3u : 0;
+            if ((idle & 1) && hd_ && !R.clear_d && pd.depthAttachment.loadAction == MTLLoadActionLoad) {
+                pd.depthAttachment.loadAction = MTLLoadActionDontCare; pd.depthAttachment.storeAction = MTLStoreActionDontCare; g_dsi_idle |= 1; }
+            if ((idle & 2) && pd.stencilAttachment.texture && !R.clear_s && pd.stencilAttachment.loadAction == MTLLoadActionLoad) {
+                pd.stencilAttachment.loadAction = MTLLoadActionDontCare; pd.stencilAttachment.storeAction = MTLStoreActionDontCare; g_dsi_idle |= 2; }
+            if (g_dsi_idle) { static int once; if (!once++) MLOG("idle depth-stencil plane: %s attached with load and store DontCare (first case pass %llu; DM_NVN_DS_IDLE)", g_dsi_idle == 3 ? "depth and stencil" : g_dsi_idle == 1 ? "depth" : "stencil", g_stat_pass + 1); }
+        }
+    }
     // Bandwidth ledger: attachments with Load count as load, all attachments count as store (currently always Store)
     int nload = 0, natt = 0;
     for (int i = 0; i < R.rt.n; i++) {
@@ -6302,8 +6369,10 @@ static id<MTL4RenderCommandEncoder> rp_begin_ex_(int clear_only) {
         uint64_t whole = att_bytes(dt ? dt : stt, dt ? pd.depthAttachment.level : pd.stencilAttachment.level);
         int comb = (dt ? dt : stt).pixelFormat == MTLPixelFormatDepth32Float_Stencil8;
         uint64_t db = dt ? (comb ? whole / 5 * 4 : whole) : 0, sb = stt && stt != dt ? (comb ? whole / 5 : whole) : stt ? whole - db : 0;
-        if (dt) { natt++; g_bw_store += db; if (pd.depthAttachment.loadAction == MTLLoadActionLoad) { g_bw_load += db; nload++; } }
-        if (stt) { natt += !dt; g_bw_store += sb; if (pd.stencilAttachment.loadAction == MTLLoadActionLoad) { g_bw_load += sb; nload += !dt; } }
+        if (dt) { natt++; if (g_dsi_idle & 1) { g_dsi_npass[0]++; g_dsi_bytes += db; } else g_bw_store += db; if (pd.depthAttachment.loadAction == MTLLoadActionLoad) { g_bw_load += db; nload++; } }
+        if (stt) { natt += !dt; if (g_dsi_idle & 2) { g_dsi_npass[1]++; g_dsi_bytes += sb; } else g_bw_store += sb; if (pd.stencilAttachment.loadAction == MTLLoadActionLoad) { g_bw_load += sb; nload += !dt; } }
+        if (g_dsi_idle) PD("I %llu idle %s plane: load and store DontCare (DM_NVN_DS_IDLE) ser=%llu %llu bytes", g_stat_pass + 1, g_dsi_idle == 3 ? "depth and stencil" : g_dsi_idle == 1 ? "depth" : "stencil",
+                           (unsigned long long)R.rt.depth->serial, (unsigned long long)((g_dsi_idle & 1 ? db : 0) + (g_dsi_idle & 2 ? sb : 0)));
         if (dt) PD("P %llu d ser=%llu fmt=%lu %lux%lu %s", g_stat_pass + 1, R.rt.depth->serial, (unsigned long)dt.pixelFormat,
                    (unsigned long)dt.width, (unsigned long)dt.height, pd.depthAttachment.loadAction == MTLLoadActionClear ? "clear" : "load");
         else if (stt) PD("P %llu s ser=%llu fmt=%lu %lux%lu %s (stencil only)", g_stat_pass + 1, R.rt.depth->serial, (unsigned long)stt.pixelFormat,
@@ -6319,9 +6388,9 @@ static id<MTL4RenderCommandEncoder> rp_begin_ex_(int clear_only) {
         id<MTLTexture> dt = pd.depthAttachment.texture, stt = pd.stencilAttachment.texture;
         uint64_t db = att_bytes(dt, pd.depthAttachment.level), sb = 0;
         if (stt) { int comb = stt.pixelFormat == MTLPixelFormatDepth32Float_Stencil8; sb = att_bytes(stt, pd.stencilAttachment.level) / (comb ? 5 : 1); if (stt == dt) db -= sb; }   // Combined format 5 bytes = depth 4 + stencil 1 (when only stencil is attached, only 1 is counted)
-        if (dt) { g_sd[g_nsd] = (sd_att){0}; g_sd[g_nsd].ser = R.rt.depth->serial; g_sd[g_nsd].bytes = db; g_sd[g_nsd].lv = (uint32_t)pd.depthAttachment.level; g_sd[g_nsd].sl = (uint32_t)pd.depthAttachment.slice; g_sd[g_nsd].idx = -1; g_sd[g_nsd].depth = 1; g_sd[g_nsd].load = pd.depthAttachment.loadAction == MTLLoadActionLoad; g_sd[g_nsd].wrote = R.clear_d != 0; g_nsd++;
+        if (dt && !(g_dsi_idle & 1)) { g_sd[g_nsd] = (sd_att){0}; g_sd[g_nsd].ser = R.rt.depth->serial; g_sd[g_nsd].bytes = db; g_sd[g_nsd].lv = (uint32_t)pd.depthAttachment.level; g_sd[g_nsd].sl = (uint32_t)pd.depthAttachment.slice; g_sd[g_nsd].idx = -1; g_sd[g_nsd].depth = 1; g_sd[g_nsd].load = pd.depthAttachment.loadAction == MTLLoadActionLoad; g_sd[g_nsd].wrote = R.clear_d != 0; g_nsd++;
                   pd.depthAttachment.storeAction = MTLStoreActionUnknown; }
-        if (stt) { g_sd[g_nsd] = (sd_att){0}; g_sd[g_nsd].ser = R.rt.depth->serial; g_sd[g_nsd].bytes = sb; g_sd[g_nsd].lv = (uint32_t)pd.stencilAttachment.level; g_sd[g_nsd].sl = (uint32_t)pd.stencilAttachment.slice; g_sd[g_nsd].idx = -1; g_sd[g_nsd].depth = 2; g_sd[g_nsd].load = pd.stencilAttachment.loadAction == MTLLoadActionLoad; g_sd[g_nsd].wrote = R.clear_s != 0; g_nsd++;
+        if (stt && !(g_dsi_idle & 2)) { g_sd[g_nsd] = (sd_att){0}; g_sd[g_nsd].ser = R.rt.depth->serial; g_sd[g_nsd].bytes = sb; g_sd[g_nsd].lv = (uint32_t)pd.stencilAttachment.level; g_sd[g_nsd].sl = (uint32_t)pd.stencilAttachment.slice; g_sd[g_nsd].idx = -1; g_sd[g_nsd].depth = 2; g_sd[g_nsd].load = pd.stencilAttachment.loadAction == MTLLoadActionLoad; g_sd[g_nsd].wrote = R.clear_s != 0; g_nsd++;
                    pd.stencilAttachment.storeAction = MTLStoreActionUnknown; }
     }
     memset(R.clear_c, 0, sizeof R.clear_c); R.clear_d = R.clear_s = 0;
@@ -15516,13 +15585,16 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) {
     if (!g_enc && !g_rp_layered && g_exec_next && !g_geo_program && !g_wl.on && sm_on()) sm_plan(pr);
     if (!g_enc && !g_rp_layered && !g_geo_program && !g_wl.on && !g_mtk.on && !g_geo_mesh.on) fsp_plan(pr, dw, di);
     vbuf_prepare(pr->sh[0] ? &pr->sh[0]->rf : NULL, dw, di);   // an unaligned GPU-written stream, or one the draw reads past, needs its ordered copy before the render encoder
+    unsigned dsi_need = (S.ds.dt ? 1u : 0u) | (S.ds.st ? 2u : 0u);   // the planes this draw tests or writes (dss_get); an open pass that attached them idle ends first (DM_NVN_DS_IDLE)
+    dsi_guard(dsi_need); g_dsi_ask = dsi_need;
     id<MTLRenderCommandEncoder> en = rp_begin_ex(0);
+    g_dsi_ask = 3;
     g_rp_layered = 0; g_sm_plan.on = 0; g_fsp_plan.on = 0;
     if (!en) { PD("Z %llu draw skipped: the render pass did not begin vs=%.16s fs=%.16s", g_stat_pass, pr && pr->sh[0] ? pr->sh[0]->key : "-", pr && pr->sh[1] ? pr->sh[1]->key : "-"); return; }   // Z lines: why a draw was dropped at these early returns
     if ((g_fb_early_seq == g_draw_seq || g_fb_learn_seq == g_draw_seq) && !fb_early_after()) {   // planned a tile read for another pass than the one that opened: its snapshot, then the pass again
         rp_end(); g_fb_noearly = 1; fb_prepare(pr); g_fb_noearly = 0;
         g_rp_layered = pr->sh[0] && pr->sh[0]->layer_out;
-        vbuf_prepare(pr->sh[0] ? &pr->sh[0]->rf : NULL, dw, di); en = rp_begin_ex(0); g_rp_layered = 0;
+        vbuf_prepare(pr->sh[0] ? &pr->sh[0]->rf : NULL, dw, di); g_dsi_ask = dsi_need; en = rp_begin_ex(0); g_dsi_ask = 3; g_rp_layered = 0;
         if (!en) return;
     }
     // The pipeline depends only on (program, render pass targets, blend / color / write mask / multisample state, vertex layout): if these did not change, reuse the previous one
@@ -15538,7 +15610,7 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) {
     else if (g_pso_dirty || pr != cur_pr || cur_ps_pass != g_pass.serial || border != cur_border) { g_pso_amp = g_sm_pass; cur_ps = pso_get(pr, nil); g_pso_amp = 0; cur_pull = g_pso_pull; cur_pr = pr; cur_ps_pass = g_pass.serial; cur_border = border; g_pso_dirty = !cur_ps || cur_pull; }
     if (!cur_ps && g_sm_pass) {   // a draw whose amplified pipeline is not built yet (sm_amp_get queued it): the slice-merged pass ends and the draw opens a pass of its own
         g_sm_nwait++; PD("M %llu slice-merged pass: no amplified pipeline yet for vertex %s fragment %s; split here", g_stat_pass, pr->sh[0] ? pr->sh[0]->key : "-", pr->sh[1] ? pr->sh[1]->key : "-");
-        rp_end(); en = rp_begin_ex(0); if (!en) return;
+        rp_end(); g_dsi_ask = dsi_need; en = rp_begin_ex(0); g_dsi_ask = 3; if (!en) return;
         cur_ps = pso_get(pr, nil); cur_pull = g_pso_pull; cur_pr = pr; cur_ps_pass = g_pass.serial; cur_border = border; g_pso_dirty = !cur_ps || cur_pull; }
     uint32_t raster_mask = draw_color_writes(pr);   // Capture the physical mapping before resetting the merged pipeline state.
     uint8_t lm_copy[8]; const uint8_t *draw_lmap = g_pso_lmap ? memcpy(lm_copy, g_pso_lmap, sizeof lm_copy) : NULL;   // the same for the blend words (bz_bind, below)
@@ -15556,6 +15628,9 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) {
     if (ndko) { int ovr = 0; for (int i = 0; i < ndko && pr->sh[1]; i++) ovr |= !strncmp(pr->sh[1]->key, dko[i], strlen(dko[i]));
         unsigned df0 = (unsigned)S.ds.df; if (ovr) S.ds.df = 8; cur_ds = dss_get(g_pass.hd, g_pass.hs); S.ds.df = df0; cur_ds_pass = g_pass.serial; g_dss_dirty = 0; }
     else if (g_dss_dirty || cur_ds_pass != g_pass.serial) { cur_ds = dss_get(g_pass.hd, g_pass.hs); cur_ds_pass = g_pass.serial; g_dss_dirty = 0; }
+    if (g_dsi_track) { unsigned u = (g_pass.hd && S.ds.dt ? 1u : 0u) | (g_pass.hs && S.ds.st ? 2u : 0u);
+        if (u & g_dsi_idle) RED_ONCE(174, "DM_NVN_DS_IDLE: a draw tests or writes a depth-stencil plane its pass attached idle");
+        dsi_note(u); }
     if (cur_ds != g_enc_dss) { enc_r_dss(en, cur_ds); g_enc_dss = cur_ds; }
     // Each face has its own reference value (SetStencilRef takes a face), as it has its own compare function, operations and masks in dss_get
     // (docs/reference/rendering.md, "Front and back stencil reference values")
@@ -17283,6 +17358,7 @@ static void clear_color_tri(const p_clear_color *c) {
 static void clear_ds_tri(const p_clear_ds *c) {
     unsigned want_s = (unsigned)c->stencil_mask & 0xff;
     if (!c->depth_mask && !want_s) return;
+    dsi_guard((c->depth_mask ? 1u : 0u) | (want_s ? 2u : 0u));   // an idle plane (DM_NVN_DS_IDLE) is not in the open pass's memory: end it, the next pass loads it
     id<MTL4RenderCommandEncoder> en = rp_begin();
     if (en && g_enc_mode && ((c->depth_mask && !g_pass.hd) || (want_s && !g_pass.hs))) { rp_end(); en = rp_begin(); }   // opened without the depth or stencil plane (a clear-only pass): reopen with all attachments
     if (!en) return;
@@ -17294,6 +17370,7 @@ static void clear_ds_tri(const p_clear_ds *c) {
     float z = c->depth > 0 ? (c->depth < 1 ? c->depth : 1) : 0;   // as clearDepth: within [0, 1] (NaN → 0)
     const uint32_t v[4] = {0};
     clr_tri(en, ps, ds, sc, v, z, (uint32_t)c->stencil & 0xff, g_pass.tw, g_pass.th); clr_note(-1, dw, sm != 0);
+    if (g_dsi_track) dsi_note((dw ? 1u : 0u) | (sm ? 2u : 0u));
     if (!g_clr_tri[1]++) MLOG("mid-pass scissored depth-stencil clear: drawn as a full-pass triangle (first case pass %llu depth %d stencil mask %#x scissor %lu,%lu %lux%lu)", g_stat_pass, dw, sm,
                               (unsigned long)sc.x, (unsigned long)sc.y, (unsigned long)sc.width, (unsigned long)sc.height);
     PD("c %llu depth-stencil clear drawn as a triangle ser=%llu depth=%g(%d) stencil=%d mask=%#x scissor=%lu,%lu,%lu,%lu", g_stat_pass, R.rt.depth ? (unsigned long long)R.rt.depth->serial : 0ull, z, dw, c->stencil, sm,
@@ -19080,6 +19157,7 @@ void mtl_vbuf_stats(uint64_t *resolve, uint64_t *reuse, uint64_t *set, uint64_t 
 void mtl_use_stats(uint64_t *call, uint64_t *skip) { *call = 0; *skip = 0; }
 void mtl_bw(uint64_t *load, uint64_t *store, uint64_t *full) { *load = g_bw_load; *store = g_bw_store; *full = g_pass_full_rw; }
 uint64_t mtl_udc_saved_bytes(void) { return g_udc_saved_bytes; }
+void mtl_dsi_stats(uint64_t *bytes, uint64_t *planes, uint64_t *fallback) { *bytes = g_dsi_bytes; *planes = g_dsi_npass[0] + g_dsi_npass[1]; *fallback = g_dsi_fallback; }   // DM_NVN_DS_IDLE
 int mtl_has_window(void) { return front_metal_layer() != NULL; }
 int mtl_link_active(void) { return link_on(); }
 int mtl_link_stalled(void) { return __atomic_load_n(&g_stall_t0, __ATOMIC_RELAXED) != 0; }   // the display link has gone silent and mtl_present_wait drops frames (see STALL_NS) until it calls back

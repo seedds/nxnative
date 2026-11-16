@@ -339,6 +339,63 @@ class Build(unittest.TestCase):
         self.assertEqual(len(self.calls), 3)
         self.assertFalse((self.out / 'rest_pairs.tsv').exists())
 
+    def reads(self, *args):   # a run → whether it read the library (plan), not only its name and time (run_key)
+        with mock.patch.object(po, 'plan', side_effect=po.plan) as plan: self.assertEqual(self.main(*args), 0)
+        return plan.called
+
+    def test_a_library_image_and_lists_as_at_the_last_run_are_not_read_again(self):
+        # Ocarina of Time: 26 s of every build that changed nothing went into reading 33,365 bases' libraries and reflections again to find the archive reused
+        self.assertTrue(po.shader_lib.pack(str(self.lib), say=lambda m: None)); image = Path(po.shader_lib.image_of(str(self.lib)))
+        self.assertTrue(self.reads()); self.assertEqual(len(self.calls), 1); self.assertTrue((self.work / 'run.key').is_file())
+        state = lambda: {p.name: (p.stat().st_mtime_ns, p.read_bytes()) for p in sorted(self.out.iterdir())}
+        before = state()
+        with mock.patch.object(po, 'library_digest', side_effect=AssertionError('the libraries were read')): self.assertFalse(self.reads())
+        self.assertEqual(len(self.calls), 1); self.assertEqual(state(), before)
+        st = image.stat(); os.utime(image, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000_000))   # the image written again: read, and found to hold the same libraries
+        self.assertTrue(self.reads()); self.assertEqual(len(self.calls), 1)
+        self.assertEqual(state(), before)   # the lists and stamps it would write again hold the same text: left as they are, with their times (the Mac app's packer keys them by those)
+        self.assertFalse(self.reads())
+        pairs = self.prof / 'shader_pairs.tsv'; pairs.write_text(pairs.read_text() + '# a comment\n')   # a pair list
+        self.assertTrue(self.reads()); self.assertFalse(self.reads()); self.assertEqual(len(self.calls), 1)
+        self.assertEqual((self.out / 'prebuilt.tsv').read_text(), po.stamp(CHAIN, True, pairs.read_bytes()))
+        (self.prof / 'shader_map.tsv').write_text('p\tn\tcompute\tc\n')   # the compute shaders
+        self.assertTrue(self.reads()); self.assertFalse(self.reads())
+        self.compiler = 'AIR-TT 2.0'   # the compiler
+        self.assertTrue(self.reads()); self.assertFalse(self.reads())
+        self.assertTrue(self.reads('--gpu', 'g18p,g17p')); self.assertFalse(self.reads('--gpu', 'g18p,g17p')); self.assertTrue(self.reads())   # the architectures
+        made = len(self.calls)
+        for name, change in (('applegpu_g18p.mtl4a', Path.unlink), ('prebuilt.tsv', lambda f: f.write_text('chain\tother\n')), ('archive.tsv', Path.unlink)):   # an output not as the run left it
+            with self.subTest(output=name):
+                self.assertFalse(self.reads()); change(self.out / name); self.assertTrue(self.reads())
+        self.assertEqual(len(self.calls), made + 1)   # the archive that was gone is built again
+        (self.work / 'key.applegpu_g18p').unlink(); self.assertTrue(self.reads()); self.assertFalse(self.reads())
+        (self.work / 'run.key').write_text('not a key'); self.assertTrue(self.reads()); self.assertFalse(self.reads())
+
+    def test_a_library_folder_is_read_each_run(self):   # its files have each their own time: no run.key
+        self.assertTrue(self.reads()); self.assertTrue(self.reads()); self.assertFalse((self.work / 'run.key').exists())
+
+    def test_a_changed_image_with_preserved_size_and_mtime_is_read_again(self):
+        self.assertTrue(po.shader_lib.pack(str(self.lib), say=lambda m: None))
+        image = Path(po.shader_lib.image_of(str(self.lib)))
+        self.assertTrue(self.reads()); self.assertFalse(self.reads()); self.assertEqual(len(self.calls), 1)
+        before = image.stat(); original = image.read_bytes()
+        changed = original.replace(b'BC\xc0\xde', b'BC\xc0\xdf')   # the used synthetic metallibs, same length; all image metadata and reflections stay valid
+        self.assertNotEqual(changed, original)
+        image.write_bytes(changed); os.utime(image, ns=(before.st_atime_ns, before.st_mtime_ns))
+        self.assertEqual((image.stat().st_size, image.stat().st_mtime_ns), (before.st_size, before.st_mtime_ns))
+        self.assertTrue(self.reads()); self.assertEqual(len(self.calls), 2)
+        self.assertFalse(self.reads())
+
+    def test_an_architectures_prewarm_pipelines_stay(self):
+        # the NSP script links them into the output folder after a run (mac_prebake) and takes them away: a run that removed them gave the files the app packs new change times
+        self.main('--gpu', 'g18p,g17p')
+        for gpu in ('applegpu_g18p', 'applegpu_g17p'): (self.out / f'{gpu}-prewarm-00.mtl4a').write_bytes(b'bases'); (self.out / f'{gpu}-prewarm-00.keys').write_bytes(b'index')
+        (self.out / 'prewarm.tsv').write_text('stamp\n')
+        self.main('--gpu', 'g18p,g17p')
+        self.assertEqual(sorted(p.name for p in self.out.glob('*-prewarm-*.mtl4a')), ['applegpu_g17p-prewarm-00.mtl4a', 'applegpu_g18p-prewarm-00.mtl4a'])
+        self.main('--gpu', 'g18p')   # an architecture no longer asked for goes with its prewarm pipelines
+        self.assertEqual(sorted(p.name for p in self.out.glob('*.mtl4a')), ['applegpu_g18p-prewarm-00.mtl4a', 'applegpu_g18p.mtl4a'])
+
     def test_chain_move_reuses_binary_and_refreshes_metadata_for_both_platforms(self):
         for platform in ('macos', 'ios'):
             with self.subTest(platform=platform):
@@ -440,6 +497,12 @@ class Build(unittest.TestCase):
                 self.assertIn('depth\tnear=0\n', (self.out / 'prebuilt.tsv').read_text())
                 script = json.loads(next(self.work.glob('*.mtl4-json')).read_text())
                 self.assertEqual(script['pipeline_descriptors']['render_pipeline_descriptors'][0]['vertex_function_descriptor'], 'fnd:v_bp.main0_z')
+
+    def test_library_digest_is_the_names_and_bytes_in_order(self):   # read on a few threads: the key every earlier build's archive has
+        bases, computes = [('v_bp', 'main0_z', 'f_b', 'main0'), ('v_b', 'main0', 'c_b', 'main0')], [('c_b', 'main0')]
+        h = hashlib.sha256()
+        for name in ('c_b', 'f_b', 'v_b', 'v_bp'): h.update(name.encode() + b'\0'); h.update(hashlib.sha256((self.lib / f'{name}.metallib').read_bytes()).digest())
+        self.assertEqual(po.library_digest(self.lib, bases, computes), h.hexdigest())
 
     def test_library_content_invalidates_archive(self):
         self.main()

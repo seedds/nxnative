@@ -45,23 +45,23 @@ static int run_case(const char *c) { @autoreleasepool {
     id<MTLDevice> d = MTLCreateSystemDefaultDevice(); NSError *e = nil;
     if (![d supportsFamily:MTLGPUFamilyMetal4]) { printf("no Metal 4\n"); return 2; }
     id<MTLLibrary> lib = [d newLibraryWithSource:SRC options:nil error:&e]; if (!lib) { printf("library: %s\n", e.localizedDescription.UTF8String); return 2; }
-    id<MTLResidencySet> rs = [d newResidencySetWithDescriptor:[MTLResidencySetDescriptor new] error:&e];
+    id<MTLResidencySet> rs = [d newResidencySetWithDescriptor:[MTLResidencySetDescriptor new] error:&e]; if (!rs) { printf("residency set: %s\n", e.localizedDescription.UTF8String); return 2; }
     id<MTL4CommandQueue> q = [d newMTL4CommandQueue]; [q addResidencySet:rs];
-    id<MTL4CommandAllocator> al = [d newCommandAllocator];
+    id<MTL4CommandAllocator> al = [d newCommandAllocator]; if (!q || !al) { printf("no Metal 4 queue or allocator\n"); return 2; }
     MTL4ArgumentTableDescriptor *atd = [MTL4ArgumentTableDescriptor new]; atd.maxBufferBindCount = 2; atd.maxTextureBindCount = 1;
-    id<MTL4ArgumentTable> at = [d newArgumentTableWithDescriptor:atd error:&e];
-    id<MTLBuffer> out = [d newBufferWithLength:65536 * 4 options:MTLResourceStorageModeShared]; [rs addAllocation:out];
+    id<MTL4ArgumentTable> at = [d newArgumentTableWithDescriptor:atd error:&e]; if (!at) { printf("argument table: %s\n", e.localizedDescription.UTF8String); return 2; }
+    id<MTLBuffer> out = [d newBufferWithLength:65536 * 4 options:MTLResourceStorageModeShared]; if (!out) { printf("no output buffer\n"); return 2; } [rs addAllocation:out];
     MTLTextureDescriptor *rd = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:64 height:64 mipmapped:NO];
     rd.usage = MTLTextureUsageRenderTarget; rd.storageMode = MTLStorageModePrivate;
-    id<MTLTexture> rt = [d newTextureWithDescriptor:rd]; [rs addAllocation:rt];
-    id<MTLBuffer> keep = [d newBufferWithLength:16384 options:MTLResourceStorageModeShared]; [rs addAllocation:keep];
+    id<MTLTexture> rt = [d newTextureWithDescriptor:rd]; if (!rt) { printf("no render target\n"); return 2; } [rs addAllocation:rt];
+    id<MTLBuffer> keep = [d newBufferWithLength:16384 options:MTLResourceStorageModeShared]; if (!keep) { printf("no buffer\n"); return 2; } [rs addAllocation:keep];
     [rs commit];
     int frag = !strncmp(c, "fragment-", 9) || !strcmp(c, "draw-index-0"), tex = strstr(c, "texture") != NULL;
     uint64_t addr = 0;
     if (!strcmp(c, "compute-load-64") || !strcmp(c, "fragment-load-64")) addr = 64;
     else if (!strcmp(c, "compute-load-past-end")) addr = keep.gpuAddress + (256ull << 20);
     else if (!strcmp(c, "compute-load-freed")) @autoreleasepool { id<MTLBuffer> b = [d newBufferWithLength:64 << 20 options:MTLResourceStorageModePrivate]; addr = b.gpuAddress; b = nil; }
-    id<MTL4CommandBuffer> cb = [d newCommandBuffer]; [cb beginCommandBufferWithAllocator:al];
+    id<MTL4CommandBuffer> cb = [d newCommandBuffer]; if (!cb) { printf("no command buffer\n"); return 2; } [cb beginCommandBufferWithAllocator:al];
     @autoreleasepool {
         id<MTLTexture> t = nil;
         if (tex) { MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:1024 height:1024 mipmapped:NO]; td.storageMode = MTLStorageModePrivate;
@@ -79,7 +79,8 @@ static int run_case(const char *c) { @autoreleasepool {
             else [re drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
             [re endEncoding];
         } else {
-            id<MTLComputePipelineState> ps = [d newComputePipelineStateWithFunction:[lib newFunctionWithName:tex ? @"kt" : !strcmp(c, "dispatch-indirect-0") ? @"kw" : @"kl"] error:&e];
+            id<MTLFunction> kf = [lib newFunctionWithName:tex ? @"kt" : !strcmp(c, "dispatch-indirect-0") ? @"kw" : @"kl"]; if (!kf) { printf("no kernel\n"); return 2; }
+            id<MTLComputePipelineState> ps = [d newComputePipelineStateWithFunction:kf error:&e];
             if (!ps) { printf("pipeline: %s\n", e.localizedDescription.UTF8String); return 2; }
             id<MTL4ComputeCommandEncoder> ce = [cb computeCommandEncoder]; [ce setArgumentTable:at]; [ce setComputePipelineState:ps];
             if (!strcmp(c, "dispatch-indirect-0")) [ce dispatchThreadgroupsWithIndirectBuffer:0 threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];

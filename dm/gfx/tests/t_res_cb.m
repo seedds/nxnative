@@ -96,7 +96,7 @@ static CAMetalLayer *offscreen_layer(void) {
 }
 
 int main(void) { @autoreleasepool {
-    alarm(30); setbuf(stdout, NULL);
+    alarm(30); setvbuf(stdout, NULL, _IONBF, 0);
     setenv("DM_PRESENT_HZ", "0", 1); setenv("DM_PRESENT_SNAP", "2", 1); setenv("DM_NVN_CUT_BUSY", "0", 1);   // a snapshot ring; every cut commits, whatever the GPU is still running
     g_t_named = CFSetCreateMutable(NULL, 0, NULL); g_t_named_snap = CFSetCreateMutable(NULL, 0, NULL);
     hooks();

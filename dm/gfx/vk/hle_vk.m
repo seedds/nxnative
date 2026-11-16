@@ -152,7 +152,7 @@ static void sh_load(void) {
         if (line[0] == '#' || line[0] == '\n') continue;
         char *rest = line, *key = strsep(&rest, "\t"), *stage = strsep(&rest, "\t"), *res = strsep(&rest, "\t\n");   // strsep keeps the empty resource field of a shader without resources
         if (!key || !stage || strlen(key) != 16) continue;
-        if (g_nsh == cap) { cap = cap ? cap * 2 : 128; g_sh = realloc(g_sh, cap * sizeof *g_sh); }
+        if (g_nsh == cap) { cap = cap ? cap * 2 : 128; shinfo *q = realloc(g_sh, cap * sizeof *g_sh); if (!q) die("[vk] out of memory for the shader table"); g_sh = q; }
         shinfo *s = &g_sh[g_nsh++]; memset(s, 0, sizeof *s);
         memcpy(s->key, key, 16); s->frag = !strcmp(stage, "frag");
         for (char *t = res ? strtok(res, " ") : NULL; t; t = strtok(NULL, " ")) {
@@ -1114,7 +1114,7 @@ static void *rec(VkCommandBuffer cb, uint32_t op, size_t sz) {
     size_t need = (sizeof(chdr) + sz + 7) & ~(size_t)7;
     if (cb->n + need > cb->cap) {
         size_t c = cb->cap ? cb->cap * 2 : 4096; while (c < cb->n + need) c *= 2;
-        cb->buf = realloc(cb->buf, c); if (!cb->buf) die("[vk] out of command buffer memory %zu", c); cb->cap = c;
+        uint8_t *q = realloc(cb->buf, c); if (!q) die("[vk] out of command buffer memory %zu", c); cb->buf = q; cb->cap = c;
     }
     chdr *h = (chdr *)(cb->buf + cb->n); h->op = op; h->size = (uint32_t)need; cb->n += need;
     return h + 1;
@@ -1473,7 +1473,7 @@ static void fan_prepare(rs_t *s, const chdr *h) {
         else if (h->op == C_DRAWI) {
             const c_drawi *x = c;
             if (!pipe || !pipe->fan || x->count < 3 || !x->inst || !ib || !ib->mem) continue;
-            if (s->nfj == s->fjcap) { s->fjcap = s->fjcap ? 2 * s->fjcap : 16; s->fj = realloc(s->fj, s->fjcap * sizeof *s->fj); if (!s->fj) die("[vk] out of memory"); }
+            if (s->nfj == s->fjcap) { s->fjcap = s->fjcap ? 2 * s->fjcap : 16; fan_job *q = realloc(s->fj, s->fjcap * sizeof *s->fj); if (!q) die("[vk] out of memory"); s->fj = q; }
             s->fj[s->nfj++] = (fan_job){c, size, ib, {ib->off + ibo + (VkDeviceSize)x->first * isz, x->count, isz, (uint32_t)pipe->restart, x->inst, x->voff, x->first_inst}};
             size += (32 + (uint64_t)(x->count - 2) * 12 + 31) & ~31ull;   // arguments, then indices
         }

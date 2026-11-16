@@ -2704,7 +2704,7 @@ static void cbs_fly_report(uint64_t fence); static void cbs_fly_put(uint64_t fen
 static void lc_land(void); static void lc_take_rt(void); static int g_nlc;   // lazy clears (lc_push): land / take the waiting ones, and how many wait
 // A submission's CPU-side writes at its end (events, samples-passed and counter reports): run once, by its feedback handler or, when a game's SyncWait wakes on the
 // GPU's own signal of the fence first, by that waiter (DM_NVN_FAST_WAKE, on by default): the feedback handler comes 0.26 ms after the GPU end on an M2 Max
-typedef struct { _Atomic uint64_t fence; _Atomic int claimed; int n; post_op *ops; seg_clk *sc; uint32_t seg_last; uint64_t t_commit, t_ready; } post_rec;   // t_commit: guest ns when it was committed; t_ready: when it was ready to run (mtl_sub_ready, 0 = not known)
+typedef struct { _Atomic uint64_t fence; _Atomic int claimed; int n; post_op *ops; seg_clk *sc; uint32_t seg_last; uint64_t t_commit, t_ready, frame; } post_rec;   // frame: the game's frame it was replayed in (ts_stretch); t_commit: guest ns when it was committed; t_ready: when it was ready to run (mtl_sub_ready, 0 = not known)
 // One record per submission in flight: mtl_sub_begin lets at most ALLOC_MAX allocators of ALLOC_SHARE submissions each stand uncompleted, so the submission that reuses a slot
 // comes after the one that last held it has completed and run its writes (post_complete runs every record up to a fence before it raises g_done). 128 records, sized for one
 // allocator per submission, wrapped once allocators were shared (PR #2090): Super Mario Party's 70-80 submissions a frame overran them two frames behind the feedback (PR #2469)
@@ -2735,6 +2735,24 @@ static uint64_t sub_place(const post_rec *r, uint64_t c0, uint64_t c1) {
     g_line_fence = fence;
     return off;
 }
+// DM_NVN_GPU_TS_SCALE=<factor> (off by default; 1 or less is off): the game's timestamp reports of one frame read as if its GPU work took that many times as long, from the frame's
+// first report on: a report at t reads a + factor * (t - a), a the first report of that frame (the game's frame its submission was replayed in). A dynamic resolution that budgets
+// a 60 Hz frame from its reports' differences then budgets 1 / factor of it: Mario Kart World's (agl, the frame between its first report and its last) keeps 2560x1440 docked on an
+// M3 Max with 9 ms of GPU work against its 16.7, and at 2 aims at about 8.3, the frame of 120 fps. The picture is smaller when it lowers the size, so the player chooses it. Reports
+// of a later frame start again from their own first one, so times that cross a frame boundary run backwards by what the stretch added
+// DM_NVN_GPU_TS_SCALE=ab:<factor> applies it in the DM_AB phases a switch set to ab is on in, and not in the others: the dynamic resolution moves between two sizes at each phase, a
+// repeatable test of what a resolution change costs (render targets made again, recycled heaps, residency commits)
+static double g_ts_k = -1; static int g_ts_mode = 1;
+static double ts_stretch(void) {
+    if (g_ts_k < 0) { const char *e = getenv("DM_NVN_GPU_TS_SCALE"); int ab = e && !strncmp(e, "ab:", 3); g_ts_k = e ? atof(ab ? e + 3 : e) : 0; if (ab) g_ts_mode = sw_mode("DM_NVN_GPU_TS_SCALE", 1);
+        if (g_ts_k > 1) MLOG("DM_NVN_GPU_TS_SCALE=%s: the game's GPU timestamps of a frame read its work as %g times as long%s", e, g_ts_k, ab ? " in the DM_AB phases it is on in" : ""); }
+    return sw_on(g_ts_mode) ? g_ts_k : 0; }
+static uint64_t g_ts_a_frame = UINT64_MAX, g_ts_a;   // the frame whose first report is the anchor, and that report's ticks (post_run, in fence order under g_post_mu)
+static uint64_t ts_stretch_at(uint64_t frame, uint64_t t) {
+    double k = ts_stretch(); if (k <= 1) return t;
+    if (frame != g_ts_a_frame) { g_ts_a_frame = frame; g_ts_a = t; }
+    return t >= g_ts_a ? g_ts_a + (uint64_t)((double)(t - g_ts_a) * k) : t;
+}
 static void post_run(post_rec *r, uint64_t c0, uint64_t c1) {
     // A guest SyncWait may run completion on a thread whose outer pool never drains.
     // MTLBuffer.contents may autorelease its receiver; keep that lifetime inside the completed copy.
@@ -2750,7 +2768,7 @@ static void post_run(post_rec *r, uint64_t c0, uint64_t c1) {
             for (int k = 0; k < l->n; k++) { g_vis_acc += ((const uint64_t *)((__bridge id<MTLBuffer>)l->s[k].buf).contents)[l->s[k].slot]; CFRelease(l->s[k].buf); }
             free(l); if (ops[i].mode == VIS_REPORT) { uint64_t rec[2] = {g_vis_acc, gpu_ticks()}; memcpy((void *)ops[i].addr, rec, sizeof rec); }
         }
-        else { uint64_t t = rep_ticks(&ops[i], sc, seg_last, c0, c1, off), rec[2] = {0, t}; memcpy((void *)ops[i].addr, rec, sizeof rec); }   // a timestamp report's counter field is 0, as on the GPU (see rc_value)
+        else { uint64_t t = ts_stretch_at(r->frame, rep_ticks(&ops[i], sc, seg_last, c0, c1, off)), rec[2] = {0, t}; memcpy((void *)ops[i].addr, rec, sizeof rec); }   // a timestamp report's counter field is 0, as on the GPU (see rc_value)
     }
     // Forwarded counter values expire once their CPU-visible reports have landed.
     // This precedes event publication so a released CPU writer is never hidden by stale knowledge.
@@ -2835,7 +2853,7 @@ uint64_t mtl_sub_commit(void) {
     seg_clk *sc = g_sclk; uint32_t seg_last = g_seg; g_sclk = NULL;
     pthread_mutex_lock(&g_post_mu);
     if (!atomic_load(&pr->claimed) && pr->fence) MDIE("post ring: the writes of fence %llu never ran, %d submissions on (more in flight than the allocator pool allows)", (unsigned long long)pr->fence, POST_RING);
-    pr->n = n; pr->ops = ops; pr->sc = sc; pr->seg_last = seg_last; pr->t_commit = guest_ns(); pr->t_ready = g_sub_ready; g_sub_ready = 0; atomic_store(&pr->claimed, 0); atomic_store(&pr->fence, fence);
+    pr->n = n; pr->ops = ops; pr->sc = sc; pr->seg_last = seg_last; pr->t_commit = guest_ns(); pr->t_ready = g_sub_ready; pr->frame = atomic_load(&g_cur_frame); g_sub_ready = 0; atomic_store(&pr->claimed, 0); atomic_store(&pr->fence, fence);
     pthread_mutex_unlock(&g_post_mu);
     int lost_test = gpu_lost_test();
     [o addFeedbackHandler:^(id<MTL4CommitFeedback> cb) {

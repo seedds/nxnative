@@ -154,6 +154,14 @@ int main(void) {
         dm_guest_frame_tick();
         CHECK("deterministic projection advances by the configured step", guest_ns_at_host_time(host) == deterministic + 1000000);
     }
+    {   // DM_NVN_GPU_TS_SCALE: a frame's reports stretched from its first one, the next frame starting again from its own, nothing changed when off
+        g_ts_k = 2; g_ts_a_frame = UINT64_MAX;
+        CHECK("a frame's first report is its anchor", ts_stretch_at(7, 1000) == 1000);
+        CHECK("a later report of the frame reads twice as far from it", ts_stretch_at(7, 1500) == 2000 && ts_stretch_at(7, 4000) == 7000);
+        CHECK("the next frame's first report is its own anchor", ts_stretch_at(8, 5000) == 5000 && ts_stretch_at(8, 5250) == 5500);
+        g_ts_k = 0; CHECK("off, a report is as it was", ts_stretch_at(9, 6000) == 6000 && ts_stretch_at(9, 9000) == 9000);
+        g_ts_k = -1;
+    }
     printf("counter clock: %u checks, %u failed\n", checks, failures);
     return failures != 0;
 }

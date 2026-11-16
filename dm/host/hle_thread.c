@@ -69,6 +69,7 @@ typedef struct thr {
     int host_owned;            // a guest thread the host created itself (dm_guest_thread_spawn): it waits in host code and is not one of the game's threads
     uint64_t wseq;             // Sequence number of wait registration: at equal priority first come, first woken (same order as the Horizon kernel's KThread wait tree)
     struct thr *next;          // Wait chain
+    struct thr *wprev, *bnext, *bprev; int bkt1;   // previous in the wait chain; the waiters of the same bucket (wb_slot) and its index + 1 (0: in none)
     struct thr *all;           // All-threads chain (for the state dump)
     int last_svc; uint64_t last_lr;
     int closed, refs;           // Reclaim only after handle close, thread exit and the last reference: synchronization waits and a pause in progress (thr_put)
@@ -265,15 +266,46 @@ void dm_host_lock(pthread_mutex_t *m) {
 }
 
 // ---------- Wait primitives (called holding G) ----------
+// The waiters are also kept in buckets by what they wait for (wb_slot): lock and address waits by their address, condition waits by their key, synchronization waits all in one.
+// pick and the checks for other waiters on the same address or key look at one bucket, and a waiter leaves the chain in place, instead of walking every waiting thread: Mario Kart
+// World keeps about 87 threads waiting, and at its 60 fps cap about 31,000 picks and 22,000 wakes a second each walked them all under G, other threads queued on G meanwhile
+// (with the buckets: process CPU -1.9 ms a frame, CPU energy -0.18 to -0.23 W on an M3 Max). DM_WAIT_INDEX=0 walks the whole chain as before (ab: alternates with the DM_AB phases)
+enum { WB_N = 512 };
+static thr_t *g_wb[WB_N];
+__attribute__((weak)) int mtl_sw_mode(const char *name, int dflt);
+__attribute__((weak)) int mtl_sw_on(int m);
+static int g_widx; static pthread_once_t g_widx_once = PTHREAD_ONCE_INIT;
+static void widx_init(void) { g_widx = mtl_sw_mode("DM_WAIT_INDEX", 1); }
+static int widx_on(void) { pthread_once(&g_widx_once, widx_init); return mtl_sw_on(g_widx); }
+static inline int wb_slot(int kind, uint64_t key) { return (int)(((key ^ ((uint64_t)kind << 59)) * 0x9E3779B97F4A7C15ull) >> 55) & (WB_N - 1); }
+static inline uint64_t wb_key(const thr_t *t) { return t->wkind == 2 ? t->wkey : t->wkind == 4 ? 0 : t->waddr; }
+static void wb_link(thr_t *t) { int s = wb_slot(t->wkind, wb_key(t)); t->bkt1 = s + 1; t->bprev = NULL; t->bnext = g_wb[s]; if (g_wb[s]) g_wb[s]->bprev = t; g_wb[s] = t; }
+static void wb_unlink(thr_t *t) {
+    if (!t->bkt1) return;
+    if (t->bprev) t->bprev->bnext = t->bnext; else g_wb[t->bkt1 - 1] = t->bnext;
+    if (t->bnext) t->bnext->bprev = t->bprev;
+    t->bnext = t->bprev = NULL; t->bkt1 = 0;
+}
+// The first waiter of the bucket of (kind, key), or of the whole chain with the index off (ix = widx_on(), read once a walk); the next one: wnext
+static inline thr_t *wfirst(int ix, int kind, uint64_t key) { return ix ? g_wb[wb_slot(kind, key)] : g_wait; }
+static inline thr_t *wnext(int ix, const thr_t *t) { return ix ? t->bnext : t->next; }
+static void wait_link(thr_t *t, int kind) {
+    t->wkind = kind; t->next = g_wait; t->wprev = NULL; if (g_wait) g_wait->wprev = t; g_wait = t;
+    wb_link(t);
+}
 static void wait_unlink(thr_t *t) {
-    for (thr_t **p = &g_wait; *p; p = &(*p)->next) if (*p == t) { *p = t->next; break; }
-    t->next = NULL;
+    if (!widx_on()) { thr_t *p = g_wait; while (p && p != t) p = p->next;   // the walk the chain took before the index (DM_WAIT_INDEX=0)
+                      if (!p != !(t->wprev || g_wait == t)) die("wait chain: thread %#x %s the chain but its links say otherwise", t->handle, p ? "is in" : "is not in"); }
+    if (t->wprev) t->wprev->next = t->next; else if (g_wait == t) g_wait = t->next;
+    else { t->next = NULL; wb_unlink(t); return; }   // not waiting
+    if (t->next) t->next->wprev = t->wprev;
+    t->next = t->wprev = NULL; wb_unlink(t);
 }
 // Pick a waiter in kernel order: numerically lower priority first, at equal priority the earlier registered first (holding G). kind 1 matches by lock address, 2 by condition key, 3 by address
 static uint64_t g_wseq;
 static thr_t *pick(int kind, uint64_t a) {
-    thr_t *b = NULL;
-    for (thr_t *t = g_wait; t; t = t->next) {
+    thr_t *b = NULL; int ix = widx_on();
+    for (thr_t *t = wfirst(ix, kind, a); t; t = wnext(ix, t)) {
         if (t->wkind != kind || (kind == 2 ? t->wkey : t->waddr) != a) continue;
         if (!b || t->prio < b->prio || (t->prio == b->prio && t->wseq < b->wseq)) b = t;
     }
@@ -303,7 +335,7 @@ static void wake(thr_t *t, int64_t res) {
 }
 // Suspend until woken or timed out (ns<0 infinite, 0 immediate timeout); returns wres or R_TIMEOUT
 static int64_t block(thr_t *t, int kind, int64_t ns) {
-    t->wkind = kind; t->woke = 0; t->next = g_wait; g_wait = t; t->wseq = ++g_wseq;
+    wait_link(t, kind); t->woke = 0; t->wseq = ++g_wseq;
     if (ns == 0) { wait_unlink(t); t->wkind = 0; return R_TIMEOUT; }
     hand_leave(t);
     struct timespec dl;
@@ -334,7 +366,7 @@ static inline int cas32(uint64_t a, uint32_t *exp, uint32_t v) { return __atomic
 static void lock_handoff(uint64_t addr) {
     thr_t *w = pick(1, addr); int more = 0;
     if (!w) { st32(addr, 0); return; }
-    for (thr_t *t = g_wait; t; t = t->next) if (t != w && t->wkind == 1 && t->waddr == addr) { more = 1; break; }
+    int ix = widx_on(); for (thr_t *t = wfirst(ix, 1, addr); t; t = wnext(ix, t)) if (t != w && t->wkind == 1 && t->waddr == addr) { more = 1; break; }
     st32(addr, w->wtag | (more ? WAITERS_BIT : 0));
     wake(w, 0);
 }
@@ -345,7 +377,7 @@ static void lock_acquire_for(thr_t *t, uint64_t addr, uint32_t tag) {
         if (v == 0) { if (cas32(addr, &v, tag)) { wake(t, 0); return; } continue; }
         if (cas32(addr, &v, v | WAITERS_BIT)) break;
     }
-    t->wkind = 1; t->waddr = addr; t->wtag = tag;      // Still in g_wait, changed to a lock wait
+    wb_unlink(t); t->wkind = 1; t->waddr = addr; t->wtag = tag; wb_link(t);   // Still in g_wait, changed to a lock wait (and moved to its bucket)
     t->wseq = ++g_wseq;                                  // The kernel inserts it anew into the lock owner's wait queue: at equal priority it goes after the existing lock waiters
 }
 
@@ -641,7 +673,8 @@ static int sync_signaled(sync_ref_t ref) {   // holding G
 // Complete each registered wait under G: a clear before the waiter resumes
 // must not erase the notification that already made it runnable.
 static void wake_sync_waiters(const void *obj) {
-    for (thr_t *w = g_wait; w; ) { thr_t *n = w->next;
+    int ix = widx_on();
+    for (thr_t *w = wfirst(ix, 4, 0); w; ) { thr_t *n = wnext(ix, w);
         if (w->wkind == 4)
             for (int i = 0; i < w->wn; i++) if (w->wobjs[i].obj == obj) {
                 w->widx = i; wake(w, 0); break;
@@ -1243,7 +1276,7 @@ static int svc_thread_impl(int num, uint64_t *regs) {
         uint64_t key = regs[0]; int cnt = (int)regs[1], n = 0;
         g_lock();
         for (thr_t *w; (cnt <= 0 || n < cnt) && (w = pick(2, key)); n++) lock_acquire_for(w, w->waddr, w->wtag);   // In kernel order; once turned into a lock wait or woken it is no longer kind 2
-        int left = 0; for (thr_t *w = g_wait; w; w = w->next) if (w->wkind == 2 && w->wkey == key) { left = 1; break; }
+        int left = 0, ix = widx_on(); for (thr_t *w = wfirst(ix, 2, key); w; w = wnext(ix, w)) if (w->wkind == 2 && w->wkey == key) { left = 1; break; }
         if (!left) st32(key, 0);
         g_unlock();
         regs[0] = 0; return 1;
@@ -1265,7 +1298,7 @@ static int svc_thread_impl(int num, uint64_t *regs) {
     case 0x35: {  // SignalToAddress(x0 address, w1 type, w2 value, w3 count): 0 wake, 1 increment if equal and wake, 2 if equal modify the value by waiter count and wake
         uint64_t addr = regs[0]; int type = (int)regs[1]; int32_t val = (int32_t)regs[2]; int cnt = (int)regs[3];
         g_lock();
-        int nw = 0; for (thr_t *w = g_wait; w; w = w->next) if (w->wkind == 3 && w->waddr == addr) nw++;
+        int nw = 0, ix = widx_on(); for (thr_t *w = wfirst(ix, 3, addr); w; w = wnext(ix, w)) if (w->wkind == 3 && w->waddr == addr) nw++;
         int64_t r = 0;
         if (type != 0) {
             int32_t nv = val + 1;

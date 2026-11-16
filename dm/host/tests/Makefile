@@ -46,6 +46,8 @@ run: $(B)/t_mii $(B)/t_net_eventfd $(B)/t_language $(B)/t_motion $(B)/t_heap_siz
 	$(B)/t_clockwait
 	$(B)/t_preempt
 	$(B)/t_preempt --all-peers
+	$(B)/t_waitaddr
+	DM_WAIT_INDEX=0 $(B)/t_waitaddr
 	$(B)/t_pause
 	$(B)/t_pause_stress --seconds 1
 	$(B)/t_pctl
@@ -326,6 +328,8 @@ $(B)/t_clockwait: t_clockwait.c t_condvar_stub.c ../hle_thread.c ../dm.h $(GAME_
 	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -I.. $(GINC) -o $@ t_clockwait.c t_condvar_stub.c
 $(B)/t_preempt: t_preempt.c t_condvar_stub.c ../hle_thread.c ../dm.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -I.. $(GINC) -o $@ t_preempt.c t_condvar_stub.c
+$(B)/t_waitaddr: t_waitaddr.c t_condvar_stub.c ../hle_thread.c ../dm.h $(GAME_H) | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -I.. $(GINC) -o $@ t_waitaddr.c t_condvar_stub.c
 # the pause tests supply module_of (the stub's reports no guest code) through DM_TEST_MODULE_OF
 $(B)/t_pause: t_pause.c t_condvar_stub.c ../hle_thread.c ../dm.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -DDM_TEST_MODULE_OF -I.. $(GINC) -o $@ t_pause.c t_condvar_stub.c
@@ -341,6 +345,7 @@ PAUSE_STRESS_SECONDS ?= 30
 pause-stress: $(B)/t_pause_stress
 	$(B)/t_pause_stress --seconds $(PAUSE_STRESS_SECONDS)
 run: $(B)/t_preempt
+run: $(B)/t_waitaddr
 # the Vorbis tests build their own packets and need no game profile (they build without GAME)
 $(B)/t_vorbis: t_vorbis.c ../../third_party/stb_vorbis/stb_vorbis.c | $(B)
 	$(CLANG) -O1 -g -Wno-unused-function -Wno-tautological-compare -o $@ t_vorbis.c

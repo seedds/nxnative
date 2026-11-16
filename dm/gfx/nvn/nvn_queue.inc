@@ -198,7 +198,9 @@ static void *nq_worker(void *unused) {
             gfx_enter(); nq_cost cost=nq_cost_begin();
             if(frame!=j->frame) { frame=j->frame; mtl_set_frame(frame); }
             mtl_queue_activate(q->serial); mtl_set_queue_origin_lower_left(q->origin);
-            if(n->kind==NQ_COMMANDS) {
+            if(n->kind==NQ_COMMANDS && !n->signal_count && mtl_exec_state_only(n->bytes,n->length)) {   // no GPU work: no submission, the queue keeps its last fence
+                if(mtl_subtl_on()) mtl_subtl("queue %llu node of descriptor pool settings only: applied with no submission",(unsigned long long)q->serial);
+            } else if(n->kind==NQ_COMMANDS) {
                 uint64_t handle=(uintptr_t)n->bytes;
                 nvn_cap_submit(1,&handle);
                 mtl_sub_begin(); mtl_sub_ready(j->submitted>q->wait_passed?j->submitted:q->wait_passed); nvn_ft_poll();

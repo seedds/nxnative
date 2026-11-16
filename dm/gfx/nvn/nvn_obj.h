@@ -297,6 +297,7 @@ typedef struct { int32_t on; } p_rast_discard;
 
 // Entry point of the Metal replay layer (nvn_mtl.m): replays a set of command handles into the current submission
 void mtl_exec(const uint8_t *handle);
+int mtl_exec_state_only(const uint8_t *p, size_t len);   // a commands node of descriptor pool settings only: applied to the active queue's state, 1; else 0 and nothing applied (needs a submission)
 void mtl_sub_fill(uint64_t dst, uint64_t n, uint32_t value);   // in-order buffer fill within the submission (OP_CLEAR_BUF)
 void mtl_exec_rest(const uint64_t *handles, int n);   // Tells which handles in this submission still follow the current handle (used by the pass lookahead across handles)
 // Present: draw the swapchain texture to the front-end CAMetalLayer (only counts when there is no window)

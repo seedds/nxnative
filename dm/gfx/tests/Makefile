@@ -370,6 +370,12 @@ t_feedback: t_feedback.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_feedback.m $(MTL_T_SRC) $(FW)
 t_rast_discard: t_rast_discard.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_rast_discard.m $(MTL_T_SRC) $(FW)
+t_empty_sub: t_empty_sub.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_empty_sub.m $(filter-out ../nvn/hle_nvn.c,$(MTL_T_SRC)) $(FW)
+.PHONY: check_t_empty_sub
+check_t_empty_sub: t_empty_sub
+	MTL_DEBUG_LAYER=1 ./t_empty_sub
+	DM_NVN_EMPTY_SUB=0 MTL_DEBUG_LAYER=1 ./t_empty_sub
 t_queue_origin: t_queue_origin.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_queue_origin.m $(filter-out ../nvn/hle_nvn.c,$(MTL_T_SRC)) $(FW)
 .PHONY: check_t_queue_origin

@@ -624,6 +624,14 @@ Frame pacing: the host's frame step, engine frame limiters, present intervals an
 - **Check:** `t_wait_event`, `t_queue_lifetime`, `t_render_enable_queue`, `t_queue_origin`, `t_sub_overlap` and `t_serial_owner` pass with `DM_NVN_SUB_STREAM` on (the default) and with `=0`.
 
 
+### A commands node with nothing but descriptor pool settings was a submission of its own
+
+- **Symptom:** `DM_NVN_SUBTL` shows submissions that draw nothing and run for no GPU time (`commit last command buffer of submission N (…, draw D)` with the same draw count as the one before, `gpu submission N last ran t-t`); the residency line's command buffers per frame are higher than the game's work needs.
+- **Cause:** every commands node of a game's submission is replayed between `mtl_sub_begin` and `mtl_sub_commit`, which make a Metal command buffer, its fence, its residency naming and its completion, about 55 µs of process CPU even when nothing is encoded (`dev/tools/passcpu.m`). A node that only sets its queue's texture and sampler pools has no GPU work.
+- **Fix:** `nq_worker` applies such a node (only `OP_SET_TEX_POOL` / `OP_SET_SAMP_POOL`, then its end, and no event signal) to its queue's state with no submission (`mtl_exec_state_only` in `nvn_mtl.m`); the queue keeps its last fence, as the node adds no work behind it. Not while capturing (`DM_NVN_CAPTURE` records every submission). `DM_NVN_EMPTY_SUB=0` submits them as before (`ab` alternates under `DM_AB`).
+- **Found on:** [Mario Kart World](../../dm/games/0400C3F00006E000/README.md#frame-rate), which submits two such nodes a frame (queues 6 and 7) among 16 command buffers. At the 60 fps cap (M3 Max, handheld, `DM_NVN_EMPTY_SUB=ab` in 300-frame phases, both orders): 2.3 fewer command buffers a frame (about 4,800 against 5,550 every 300 frames), process CPU -0.73 and -0.42 ms a frame on average (seven pairs of ten lower; about 0.13 ms is what the command buffers cost), frame times the same, CPU energy within the noise.
+- **Check:** `dm/gfx/tests/t_empty_sub` submits a node of pool settings only (the queue's fence stays, the pools become the queue's) and a node with a clear besides (a submission, as before), with the switch on and off.
+
 ### A submission's records copied one at a time, compact ones twice
 
 - **Symptom:** the game's thread that submits spends about a millisecond a frame in `nvn_queue_submit` (`nq_flatten` → `nq_record`, `nq_record_one`, `_platform_memmove`, `rec_expand`, `cap_rec_fields` in a CPU profile); for a game that submits and presents on one thread the per-frame TSV's `@cpu_ms` (the presenting thread's CPU) is about that.

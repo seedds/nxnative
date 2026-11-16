@@ -17453,6 +17453,28 @@ static int unb_keeps(uint32_t op) {   // state an open pass carries over to the 
 #include "nvn_accel.inc"
 #include "nvn_raytrace_dispatch.inc"
 
+// A game's commands node that only sets its queue's descriptor pools and ends is applied to that queue's state with no Metal submission (nvn_queue.inc nq_worker): the node
+// has no GPU work, so its queue keeps its last fence. Mario Kart World submits two such nodes a frame (queues 6 and 7: SetTexturePool, SetSamplerPool); each was a command
+// buffer of its own, committed with a fence and a completion, about 55 µs of process CPU on an M3 Max (dev/tools/passcpu.m, an empty command buffer). Not while capturing
+// (the capture records every submission). DM_NVN_EMPTY_SUB=0 submits them as before (ab alternates under DM_AB). Caller: the submission lock held, the node's queue active
+static int nvn_cap_enabled(void);
+static int empty_sub_mode(void) { static int m = -1; if (m < 0) m = sw_mode("DM_NVN_EMPTY_SUB", 1); return m; }
+static uint64_t g_empty_subs;
+uint64_t mtl_empty_subs(void) { return g_empty_subs; }
+int mtl_exec_state_only(const uint8_t *p, size_t len) {
+    if (!sw_on(empty_sub_mode()) || nvn_cap_enabled()) return 0;
+    int ended = 0;
+    for (size_t o = 0; o + 8 <= len;) { op_hdr h; memcpy(&h, p + o, 8);
+        if (h.op == OP_END) { ended = 1; break; }
+        if ((h.op != OP_SET_TEX_POOL && h.op != OP_SET_SAMP_POOL) || h.size < 8 || h.size > len - o) return 0;
+        o += h.size; }
+    if (!ended) return 0;
+    if (!g_state_inited) state_reset();
+    for (size_t o = 0;;) { op_hdr h; memcpy(&h, p + o, 8); if (h.op == OP_END) break; state_op(h.op, p + o + 8); o += h.size; }
+    if (!g_empty_subs++) MLOG("a commands node that only sets descriptor pools is applied with no Metal submission (DM_NVN_EMPTY_SUB)");
+    return 1;
+}
+
 // A run of buffer copies ends (see b2b_note): cut 1 commits what was encoded so far, then the copied pages are stamped
 static void b2b_flush(int cut) {
     if (!g_b2b_n) return;

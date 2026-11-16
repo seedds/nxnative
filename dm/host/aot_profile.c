@@ -491,6 +491,50 @@ static int write_misses(const char *dir, int *bad) {
     return files;
 }
 
+// The loader's bindings (aot.h, "The loader's bindings"): per module with a pack, not an NRO's, <dir>/<module>.bind.tsv, the PLT slots the loader bound to the module's own
+// functions (loader_self_bindings), written as the misses are (a temporary name, then renamed over the old one); a module with none gets no file, and an older file of it goes
+typedef struct { FILE *f; size_t n; } bind_out;
+static void bind_row(uint64_t slot, uint64_t target, const char *name, void *arg) {
+    bind_out *o = arg;
+    fprintf(o->f, "0x%llx 0x%llx %s\n", (unsigned long long)slot, (unsigned long long)target, name);
+    o->n++;
+}
+static int write_module_bindings(const char *dir, const module_t *m, const uint8_t sha256[32], const char *pack) {
+    char name[64], path[sizeof g_dir + 96], tmp[sizeof path + 8], sha[65];
+    file_name(m, name, sizeof name);
+    snprintf(path, sizeof path, "%s/%s.bind.tsv", dir, name);
+    snprintf(tmp, sizeof tmp, "%s.tmp", path);
+    for (int b = 0; b < 32; b++) snprintf(sha + 2 * b, 3, "%02x", sha256[b]);
+    bind_out o = {fopen(tmp, "wb"), 0};   // binary: the same bytes on Windows
+    if (!o.f) { LOG("[RED] aot: bindings: cannot write %s", tmp); return 1; }
+    fprintf(o.f, "# nxaot bindings: the PLT slots the host's loader bound to functions of this module itself (dm/host/loader.c, DM_AOT_PROFILE); nxaot build --bind <this file>\n");
+    fprintf(o.f, "# module %s, build ID %s, image SHA-256 %s\n", m->name, m->build_id[0] ? m->build_id : "none", sha);
+    fprintf(o.f, "# pack %s\n", pack);
+    fprintf(o.f, "# <slot offset> <target offset> <symbol>\n");
+    loader_self_bindings(m, bind_row, &o);
+    if (fclose(o.f)) { LOG("[RED] aot: bindings: cannot write %s", tmp); remove(tmp); return 1; }
+    if (!o.n) { remove(tmp); remove(path); return 0; }
+    if (replace_file(tmp, path)) { LOG("[RED] aot: bindings: cannot write %s", path); return 1; }
+    LOG("aot: bindings: %s: %zu PLT slots bound to %s's own functions", path, o.n, m->name);
+    return 0;
+}
+static void write_bindings(const char *dir, int *bad) {
+    const int npacks = dm_aot_pack_count();
+    for (int i = 0; i < npacks; i++) {
+        const dm_aot_pack *p = dm_aot_pack_at(i);
+        const module_t *m = dm_aot_pack_module(p);
+        if (!m->nro) *bad += write_module_bindings(dir, m, dm_aot_pack_desc(p)->sha256, dm_aot_pack_path(p));
+    }
+}
+// A pack refused for its bindings (aot_arena.c bindings_check): this session's bindings of its module written now, with DM_AOT_PROFILE, so that the next pack is built
+// with them although the session ends here
+void dm_aot_bindings_now(const module_t *m, const uint8_t sha256[32], const char *pack) {
+    if (!dm_aot_profile_on() || m->nro) return;
+    mkdirs(g_dir);
+    write_module_bindings(g_dir, m, sha256, pack);
+}
+__attribute__((constructor)) static void bindings_hook(void) { atomic_store(&dm_aot_bindings_refused, dm_aot_bindings_now); }
+
 int dm_aot_profile_write(void) {
     if (!dm_aot_profile_on() || atomic_exchange(&g_written, 1)) return -1;
     atomic_store(&g_sampling, 0);   // the handler counts nothing more; a sample on its way may still add one
@@ -622,5 +666,6 @@ int dm_aot_profile_write(void) {
     }
     if (!files && !bad) LOG("aot: profile: no samples in any pack's code: nothing written to %s", dir);
     write_misses(dir, &bad);   // beside the profile (aot.h, "The JIT fallback's misses")
+    write_bindings(dir, &bad);   // beside them (aot.h, "The loader's bindings")
     return bad ? -1 : 0;
 }

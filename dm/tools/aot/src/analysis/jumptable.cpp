@@ -365,8 +365,32 @@ llvm::ConstantRange RangeOf(llvm::Value* v, llvm::Instruction* at, llvm::LazyVal
             if (all) r = r.intersectWith(u);
         }
     } else if (auto* bin = llvm::dyn_cast<llvm::BinaryOperator>(v); bin && llvm::isa<llvm::ConstantInt>(bin->getOperand(1))) {
-        r = RangeOf(bin->getOperand(0), at, lvi, active, depth + 1)
-                .binaryOp(bin->getOpcode(), llvm::ConstantRange(llvm::cast<llvm::ConstantInt>(bin->getOperand(1))->getValue()));
+        const llvm::APInt& k = llvm::cast<llvm::ConstantInt>(bin->getOperand(1))->getValue();
+        r = RangeOf(bin->getOperand(0), at, lvi, active, depth + 1).binaryOp(bin->getOpcode(), llvm::ConstantRange(k));
+        if (bin->getOpcode() == llvm::Instruction::And && k.isMask() && k.countr_one() < bits) {
+            // and x, 2^n - 1 is zext (trunc x to in), and and x, M with M < 2^n is zext (and (trunc x to in), M): the index of `and x8, x20,
+            // #0xffffffff` after `cmp w20, #0x10; b.hi`, or of `and x9, x20, #0xff` after `and w8, w20, #0xff; cmp w8, #7; b.hi` (libpng's
+            // png_set_filter), whose compares are on narrower values of their own. Such a value on the straight line that ends at `at` (as
+            // same_cast's) bounds the index there: both are the same function of the same x
+            std::set<llvm::BasicBlock*> line{at->getParent()};
+            for (llvm::BasicBlock* b = at->getParent(); line.size() < 8 && b->getSinglePredecessor(); line.insert(b)) b = b->getSinglePredecessor();
+            for (llvm::User* user : bin->getOperand(0)->users()) {
+                auto* tr = llvm::dyn_cast<llvm::TruncInst>(user);
+                if (!tr || !line.count(tr->getParent())) continue;
+                const unsigned n = tr->getType()->getIntegerBitWidth();
+                if (n == k.countr_one()) {
+                    r = r.intersectWith(RangeOf(tr, at, lvi, active, depth + 1).zeroExtend(bits));
+                } else if (n > k.countr_one()) {
+                    for (llvm::User* u2 : tr->users()) {
+                        auto* narrow = llvm::dyn_cast<llvm::BinaryOperator>(u2);
+                        auto* m2 = narrow && narrow->getOpcode() == llvm::Instruction::And ? llvm::dyn_cast<llvm::ConstantInt>(narrow->getOperand(1)) : nullptr;
+                        if (m2 && m2->getValue() == k.trunc(n) && line.count(narrow->getParent())) {
+                            r = r.intersectWith(RangeOf(narrow, at, lvi, active, depth + 1).zeroExtend(bits));
+                        }
+                    }
+                }
+            }
+        }
     } else if (auto* phi = llvm::dyn_cast<llvm::PHINode>(v)) {
         r = llvm::ConstantRange::getEmpty(bits);
         for (unsigned i = 0; i < phi->getNumIncomingValues(); ++i) {
@@ -436,8 +460,45 @@ Analysed AnalyseTarget(const module::Image& image, llvm::CallInst* marker, llvm:
             best_range = r;
         }
     }
+    // No bounded index, and no over-approximated table either. Scanning the table from index 0 while its entries land on instruction
+    // boundaries inside the function's extent, and lowering the br as a switch over those targets with the dispatcher as its default, would
+    // run correctly: the switch compares the computed address, so any other value still reaches the dispatcher. But a table's targets become
+    // edges of the function's CFG, and the function then counts as closed: its summary (PASS, WRITES, preserving) covers only the blocks the
+    // targets reach, and its callers keep registers in SSA across it on that word. That holds only if every real entry lies in the scanned
+    // prefix: the index never negative nor past the scan, and no real target outside the extent or off the decoded code (the scan stops at
+    // the first such entry and misses the ones after it; a case jumping to another function's entry or into a .cold part placed after the next
+    // function does). Neither is known for an index no compare, mask or byte load bounds: that is exactly what the code does not show. The data
+    // of Mario vs. Donkey Kong's three modules (README.md, "Unbounded brs by form") give no case to take that risk for: after the bound forms
+    // above, the tables whose index no compare, mask or byte load bounds are 14 brs of sdk (6 in nlib's memchr variants, whose index is
+    // end - (end & ~3), bounded only algebraically), 1 of subsdk0 and 12 of main, in about as many functions of 125,000; a wrong closure
+    // there would be a silent miscompilation (a callee-saved register a missed case changes), a dispatcher miss costs one lookup. So those
+    // tables stay with the dispatcher and their functions open.
+    // The target may be a 64-bit word read at the sum of variables (each with coefficient 1) and a constant, and be that
+    // word itself: a function pointer or a vtable slot (ldr x8, [x0, #0x28]; br x8), or a C++ member function pointer's vtable slot (ldr x8,
+    // [x0]; ldr x1, [x8, x1]; br x1), no table: a table's index is scaled by its entries' size. Told apart from a table's unbounded index only
+    // so that the census counts tables (README.md, "Unbounded brs by form"); the br goes to the dispatcher either way
+    const auto pointer_sum = [&]() {
+        if (!load->getType()->isIntegerTy(64)) return false;
+        std::map<llvm::Value*, llvm::APInt> zeros;
+        for (llvm::Value* leaf : index_leaves) {
+            if (!leaf->getType()->isIntegerTy(64)) return false;
+            zeros.emplace(leaf, llvm::APInt(64, 0));
+        }
+        const auto t0 = Eval(t, {{load, llvm::APInt(64, 0)}}), t1 = Eval(t, {{load, llvm::APInt(64, 0x10000)}});
+        const auto a0 = Eval(addr, zeros);
+        if (!a0 || !t0 || !t1 || !t0->isZero() || t1->getZExtValue() != 0x10000) return false;
+        for (llvm::Value* leaf : index_leaves) {
+            auto one = zeros;
+            one.at(leaf) = llvm::APInt(64, 0x10000);
+            const auto a1 = Eval(addr, one);
+            if (!a1 || *a1 - *a0 != 0x10000) return false;
+        }
+        return true;
+    };
     if (!best || set_size(*best_range) > max_table) {
-        out.why = best                       ? "the index range has more than " + std::to_string(max_table) + " values"
+        out.why = pointer_sum()              ? (index_leaves.size() == 1 ? "a pointer loaded from a register plus a constant (a function pointer or vtable slot, no table)"
+                                                                         : "a pointer loaded from a sum of registers (a member function pointer's vtable slot, no table)")
+                  : best                     ? "the index range has more than " + std::to_string(max_table) + " values"
                   : index_leaves.size() == 1 ? "the index is not bounded at the br"
                                              : "the entry address depends on more than one value, and no value it is a function of is bounded at the br";
         return out;
@@ -513,6 +574,33 @@ uint64_t BytesOf(const RegionMemo& memo) {
 
 namespace {
 
+// The Z flag of a compare whose flags reach their branch through a block boundary (the lifter keeps N, Z, C and V apart there: a tbnz between
+// `cmp w10, #0x32` and its `b.hi`) is `icmp eq (sub x, C), 0`, and b.hi's condition C & !Z. LazyValueInfo bounds x by the conditions on x
+// itself, and `sub x, C` is another value: on the default's false edge it then knew x < C or nothing, not x <= C, and the switch's index
+// stayed unbounded (Mario vs. Donkey Kong's sdk+0x105f20; README.md, "Unbounded brs by form"). (x - C == 0) is (x == C) in modular
+// arithmetic: the compare is rewritten so, and add x, C likewise (x + C == 0 is x == -C). InstCombine would do it, and also rewrite the
+// index's zext (trunc x) the bound compares (the pass list's comment above), so only this rewrite runs
+void CompareOperands(llvm::Function& f) {
+    for (auto& bb : f) {
+        for (auto& inst : bb) {
+            auto* cmp = llvm::dyn_cast<llvm::ICmpInst>(&inst);
+            if (!cmp || !cmp->isEquality()) continue;
+            auto* zero = llvm::dyn_cast<llvm::ConstantInt>(cmp->getOperand(1));
+            auto* bin = llvm::dyn_cast<llvm::BinaryOperator>(cmp->getOperand(0));
+            if (!zero || !zero->isZero() || !bin) continue;
+            auto* c = llvm::dyn_cast<llvm::ConstantInt>(bin->getOperand(1));
+            if (!c) continue;
+            if (bin->getOpcode() == llvm::Instruction::Sub) {
+                cmp->setOperand(0, bin->getOperand(0));
+                cmp->setOperand(1, c);
+            } else if (bin->getOpcode() == llvm::Instruction::Add) {
+                cmp->setOperand(0, bin->getOperand(0));
+                cmp->setOperand(1, llvm::ConstantInt::get(c->getType(), -c->getValue()));
+            }
+        }
+    }
+}
+
 std::shared_ptr<const RegionMemo::Outcome> AnalyseRegion(const module::Image& image, const Function& fn, uint64_t br, uint64_t e,
                                                          const std::set<uint64_t>& slice, const CallEffects& calls,
                                                          const decode::CodeReader& read, unsigned max_table) {
@@ -561,6 +649,7 @@ std::shared_ptr<const RegionMemo::Outcome> AnalyseRegion(const module::Image& im
     fpm.addPass(llvm::SROAPass(llvm::SROAOptions::ModifyCFG));
     fpm.addPass(llvm::EarlyCSEPass(true));
     fpm.run(*lifted.function, fam);
+    CompareOperands(*lifted.function);
     if (const char* dump = std::getenv("NXAOT_DUMP_REGION"); dump && std::strtoull(dump, nullptr, 16) == br) {
         // Debugging: the optimised IR of every region lifted for this br (NXAOT_DUMP_REGION=<hex pc of the br>)
         std::fprintf(stderr, "---- region from %#llx for the br at %#llx (%zu blocks)\n", static_cast<unsigned long long>(e),

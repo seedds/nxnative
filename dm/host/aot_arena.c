@@ -548,6 +548,7 @@ static dm_aot_pack *g_packs[MAX_PACKS];
 static _Atomic int g_npacks;     // published with release after g_packs[n] is written; packs are never removed
 static pthread_mutex_t g_pack_lock = PTHREAD_MUTEX_INITIALIZER;
 void (*_Atomic dm_aot_pack_loaded)(void);   // aot.h: set by aot_run.c's constructor (null in the tests that link this file without it)
+void (*_Atomic dm_aot_bindings_refused)(const module_t *, const uint8_t *, const char *);   // aot.h: set by aot_profile.c's constructor (null without it)
 
 static int map_cmp(const void *a, const void *b) {
     uint64_t x = ((const map_t *)a)->native, y = ((const map_t *)b)->native;
@@ -654,11 +655,45 @@ static void lib_code_range(const dm_aot_pack *p, uint64_t *lo, uint64_t *hi) {
     }
 }
 
+// The loader's bindings the pack assumed (include/nxaot/aot_module.h nxaot_bindings; dm/tools/aot/README.md "PLT stubs bound to their own module"): each slot must hold
+// base + target now that the module is relocated, or the pack's code (a stub's br taken as b to that function, and the summaries of calls through it) is wrong for this
+// pack set and host. NULL when they all hold (or the pack has none), else why not, in why. An NRO is relocated only when the game loads it, after its pack is mapped
+// (loader_nro_map): bindings in an NRO's pack are refused
+static const char *bindings_check(void *lib, const module_t *m, char *why, size_t n) {
+    const nxaot_binding *b = lib_sym(lib, "nxaot_bindings");
+    if (!b) return NULL;
+    if (m->nro) {
+        snprintf(why, n, "it assumes the loader's bindings of PLT slots (nxaot build --bind), which an NRO's are not before the game loads it: pack it without --bind");
+        return why;
+    }
+    const uint64_t base = (uint64_t)(uintptr_t)m->base;
+    size_t rows = 0;
+    for (; b->slot != UINT64_MAX; b++, rows++) {
+        uint64_t now = 0;
+        if (b->slot > m->size - 8 || b->target >= m->size) {
+            snprintf(why, n, "its binding row %zu (slot %#llx -> %#llx) lies outside %s (%#zx bytes): a pack of another image", rows, (unsigned long long)b->slot,
+                     (unsigned long long)b->target, m->name, m->size);
+            return why;
+        }
+        memcpy(&now, (const void *)(uintptr_t)(base + b->slot), 8);
+        if (now != base + b->target) {
+            const module_t *o = module_of((const void *)(uintptr_t)now);
+            snprintf(why, n, "it assumes the GOT slot %s+%#llx binds to %s+%#llx, and the loader bound it to %s%s%#llx (an earlier module's definition or the host's take-over "
+                     "of that name): the bindings file it was built with is of another pack set or host; pack it again with this session's (DM_AOT_PROFILE writes "
+                     "<module>.bind.tsv) or without --bind", m->name, (unsigned long long)b->slot, m->name, (unsigned long long)b->target, o ? o->name : "",
+                     o ? "+" : "", (unsigned long long)(o ? now - (uint64_t)(uintptr_t)o->base : now));
+            return why;
+        }
+    }
+    LOG("aot: %s: the %zu loader bindings of PLT slots to its own functions the pack assumed hold", m->name, rows);
+    return NULL;
+}
+
 dm_aot_pack *dm_aot_pack_load(const char *path, module_t *m, const dm_aot_identity *id, char *err, size_t errn) {
     void *lib = lib_open(path, err, errn);
     if (!lib) return NULL;
     const nxaot_module_desc *d = lib_sym(lib, "nxaot_module");
-    const char *bad = NULL; char why[400];
+    const char *bad = NULL; char why[700];
     if (!d) bad = "it has no nxaot_module descriptor (not a pack of nxaot build)";
     else if (d->abi != NXAOT_MODULE_ABI) { snprintf(why, sizeof why, "its descriptor has ABI %u, this host reads %u", d->abi, NXAOT_MODULE_ABI); bad = why; }
     else if (memcmp(d->sha256, id->sha256, 32) || d->image_size != id->image_size || d->text_end != id->text_end || d->bss_size != id->bss_size) {
@@ -668,6 +703,10 @@ dm_aot_pack *dm_aot_pack_load(const char *path, module_t *m, const dm_aot_identi
                  m->name, hp, hi, (unsigned long long)d->image_size, (unsigned long long)id->image_size, (unsigned long long)d->text_end, (unsigned long long)id->text_end,
                  (unsigned long long)d->bss_size, (unsigned long long)id->bss_size);
         bad = why;
+    }
+    if (!bad && (bad = bindings_check(lib, m, why, sizeof why)) != NULL) {
+        void (*now)(const module_t *, const uint8_t *, const char *) = atomic_load(&dm_aot_bindings_refused);
+        if (now) now(m, id->sha256, path);   // aot_profile.c: this session's bindings for the next pack (DM_AOT_PROFILE), as the session ends here
     }
     if (bad) { snprintf(err, errn, "%s: %s", path, bad); lib_close(lib); return NULL; }
 #if defined(_WIN32)

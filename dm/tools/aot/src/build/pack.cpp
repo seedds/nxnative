@@ -138,8 +138,10 @@ constexpr uint64_t kAnalysisPerWord = 64, kAnalysisFixed = 128ull << 20;
 // only where the caller may read it after the call or the callee may read it (a callee's reads.nzcv in "callees" and "targets"). 6: the polls of
 // loops bounded by a constant left out at H and H+ (README.md, "Threads and safepoints"), the test switch NXAOT_POLL_ELISION in the key. 7: SP
 // stored again at the returns and tail calls of a function that keeps SP, moves it and calls (README.md, "A callee's SP left in the block"):
-// a unit of format 6 under the same key lacks the store
-constexpr const char* kUnitKeyFormat = "nxaot-unit 7";
+// a unit of format 6 under the same key lacks the store. 8: the stores of polls and gates counted in restore_block (README.md, "Polls and gates
+// in restore_block"), the FPCR in the resume check ("Resume points and the FPCR"), and the PLT stubs bound to the module (--bind) in the key
+// ("PLT stubs bound to their own module"): a unit of format 7 under the same key lacks the stores and the check
+constexpr const char* kUnitKeyFormat = "nxaot-unit 8";
 
 // The section each unit's !pcsections marks go to (the line table, "The line table" below): read back after code generation and kept out of
 // the link (SHF_EXCLUDE)
@@ -2228,6 +2230,10 @@ bool CompileUnit(const Common& c, llvm::TargetMachine& tm, const Unit& u, std::s
             const auto it = facts->tables.find(br);
             return it == facts->tables.end() ? nullptr : &it->second;
         };
+        fp.bound = [facts](uint64_t br) -> std::optional<uint64_t> {
+            const auto it = facts->bound.find(br);
+            return it == facts->bound.end() ? std::nullopt : std::optional<uint64_t>(it->second);
+        };
         fp.roots = ff.roots;
         fp.rt_dispatch = k.dispatch;
         fp.rt_svc = k.svc;
@@ -2682,6 +2688,19 @@ bool CompileTables(const Common& c, llvm::TargetMachine& tm, std::string* object
                       k.jit_entry, b.getInt32(plan.indirect_pass.x), b.getInt32(plan.indirect_pass.v), gates, b.getInt64(c.served.size())}),
         "nxaot_module");
     desc->setAlignment(llvm::Align(8));
+    if (!o.bound_slots.empty()) {
+        // The loader's bindings the code assumed (--bind; README.md, "PLT stubs bound to their own module"), nxaot_bindings of
+        // include/nxaot/aot_module.h: {slot, target} module offsets in slot order, then a row of all ones. The host compares each slot with
+        // base + target once the module is relocated and refuses the pack when the loader bound one otherwise (aot_arena.c). A pack without
+        // --bind has no such table, as before
+        auto* row_ty = llvm::StructType::get(ctx, {i64, i64});
+        std::vector<llvm::Constant*> rows;
+        for (const auto& [slot, target] : o.bound_slots) rows.push_back(llvm::ConstantStruct::get(row_ty, {b.getInt64(slot), b.getInt64(target)}));
+        rows.push_back(llvm::ConstantStruct::get(row_ty, {b.getInt64(UINT64_MAX), b.getInt64(UINT64_MAX)}));
+        auto* ty = llvm::ArrayType::get(row_ty, rows.size());
+        auto* table = new llvm::GlobalVariable(*m, ty, true, llvm::GlobalValue::ExternalLinkage, llvm::ConstantArray::get(ty, rows), "nxaot_bindings");
+        table->setAlignment(llvm::Align(8));
+    }
     if (k.dib) {
         k.dib->finalize();
     }
@@ -3070,6 +3089,13 @@ std::string UnitKey(const Common& c, uint64_t entry) {
         list += ";";
     }
     k.Add("tables", list);
+    if (!ff.bound.empty()) {
+        // Its PLT stubs bound to this module (--bind): each br and the function it tail-calls (that function's facts are among the callees'
+        // below); a unit without one keeps its key
+        list.clear();
+        for (const auto& [br, target] : ff.bound) list += std::to_string(br) + ":" + std::to_string(target) + ",";
+        k.Add("bound", list);
+    }
     list.clear();
     for (const uint64_t r : ff.roots) list += std::to_string(r) + ",";
     k.Add("roots", list);
@@ -3136,6 +3162,7 @@ std::string UnitKey(const Common& c, uint64_t entry) {
     std::set<uint64_t> referenced(refs.begin(), refs.end());
     referenced.insert(ff.limit);
     for (const auto& [br, targets] : ff.tables) referenced.insert(targets.begin(), targets.end());
+    for (const auto& [br, target] : ff.bound) referenced.insert(target);
     referenced.insert(ff.continuations.begin(), ff.continuations.end());
     for (const auto& [call, pad] : ff.pads) referenced.insert(pad);
     list.clear();
@@ -3643,6 +3670,77 @@ void GapTiers(const BuildOptions& o, const analysis::Discovery& d, const Plan& p
     s->notes.push_back(line);
 }
 
+// The second pack's cached units (README.md, "The second pack's cached units"). With a profile, a function the profile did not sample is compiled at
+// tier C in the balanced mode (H in the max mode): design 9.3 chose C for them for the pack's time, as a pack with a profile then compiled every
+// function and C compiles at about twice W's rate (README.md, "Phase 5d"). But the profile comes from a game run on the first pack, built without one
+// (every function at the mode's tier, W or H+), and that pack's units sit in the per-function cache: compiling such a function again at C costs time
+// and gives code about twice the size and slower than the cached unit. So: the units the first pack's tiers make (the mode's tier, gap code as
+// GapTiers makes it without a profile), and of them every unit at the mode's tier with no sampled function whose key the cache holds keeps that tier
+// (its functions' code is taken from the cache, compiled by nothing); the other unsampled functions stay at C. A unit is a group of neighbours cut
+// by size, content and tier changes (Units), so the final tiers are checked again: a unit at the mode's tier that the final grouping makes and the
+// cache does not hold (a neighbour's change of tier cut the group elsewhere) goes back to the profile's tiers, until every one hits. The sampled
+// functions and the guarded sites (TargetsFromProfile: at H and H+ only) are as before; with no cache, or no unit of the first pack in it, the pack
+// is the profile's alone
+void FirstPackUnits(Common& c, const analysis::Discovery& d, const cache::Cache& cache, BuildStats* s) {
+    const auto t0 = Clock::now();
+    const BuildOptions& o = c.o;
+    const std::map<uint64_t, Tier> profile = c.tiers;
+    const Tier hot = o.mode == "max" ? Tier::HPlus : Tier::H;
+    std::map<uint64_t, Tier> first;
+    {
+        BuildOptions fo = o;
+        fo.profile_path.clear();
+        BuildStats ignored;
+        GapTiers(fo, d, c.plan, &first, &ignored);
+    }
+    c.tiers = first;
+    std::set<uint64_t> keep;
+    uint64_t looked = 0, hit = 0;
+    for (const Unit& u : Units(c)) {
+        if (u.tier != o.tier) continue;
+        bool sampled = false;
+        for (const uint64_t e : u.entries) sampled = sampled || profile.at(e) == hot;
+        if (sampled) continue;
+        cache::Facts facts;
+        uint64_t bytes = 0;
+        ++looked;
+        if (cache.Lookup(UnitKey(c, u), &facts, &bytes)) {
+            keep.insert(u.entries.begin(), u.entries.end());
+            ++hit;
+        }
+    }
+    c.tiers = profile;
+    for (const uint64_t e : keep) c.tiers[e] = o.tier;
+    for (int round = 0; round < 8; ++round) {
+        bool changed = false;
+        for (const Unit& u : Units(c)) {
+            // A unit at the mode's tier with a function kept there (in the max mode a sampled function is at that tier too, and may share it)
+            bool kept = false;
+            for (const uint64_t e : u.entries) kept = kept || (u.tier == o.tier && profile.at(e) != o.tier);
+            if (!kept) continue;
+            cache::Facts facts;
+            uint64_t bytes = 0;
+            if (cache.Lookup(UnitKey(c, u), &facts, &bytes)) continue;
+            for (const uint64_t e : u.entries) c.tiers[e] = profile.at(e);
+            changed = true;
+        }
+        if (!changed) break;
+    }
+    uint64_t functions = 0, words = 0;
+    for (const auto& [entry, t] : c.tiers) {
+        if (t == o.tier && profile.at(entry) != o.tier) {
+            ++functions;
+            words += c.plan.fns.at(entry).words;
+        }
+    }
+    s->first_pack_functions = functions;
+    char secs[32];
+    std::snprintf(secs, sizeof secs, "%.2f", Since(t0));
+    s->notes.push_back("aot: second pack: " + std::to_string(functions) + " functions (" + std::to_string(words) + " instructions) the profile did not sample keep the first " +
+                       "pack's tier " + TierName(o.tier) + ", their units cached (" + std::to_string(hit) + " of the first pack's " + std::to_string(looked) +
+                       " units looked up); the others at " + TierName(o.mode == "max" ? Tier::H : Tier::C) + " (" + secs + " s)");
+}
+
 // --tiers-tsv: each function's tier as the units compile it, a line per function in address order, `<entry> <tier> <instructions> <gap code:
 // gap, else ->` separated by tabs, under `#` lines naming the module, the mode, the tier, --gap-tier C and the profile (README.md, "Gap code at
 // tier C"; CTest gaps)
@@ -3665,7 +3763,7 @@ bool WriteTiers(const std::string& path, const Common& c, std::string* error) {
 // its reasons (the entries' counts are not read: a later session's file with the same addresses keeps the analysis), and a test's --no-root addresses. Without
 // either it is the module's key as it is, so the inputs of packs without misses keep their entries
 std::string MissesKey(const std::string& akey, const BuildOptions& o) {
-    if (o.misses.empty() && o.no_roots.empty()) return akey;
+    if (o.misses.empty() && o.no_roots.empty() && o.bound_slots.empty()) return akey;
     std::set<std::pair<uint64_t, std::string>> rows;
     for (const auto& m : o.misses) rows.emplace(m.offset, m.reason);
     std::string list;
@@ -3674,6 +3772,12 @@ std::string MissesKey(const std::string& akey, const BuildOptions& o) {
     for (const uint64_t a : o.no_roots) held += std::to_string(a) + ",";
     cache::KeyBuilder k;
     k.Add("analysis", akey).Add("misses", list).Add("no_roots", held);
+    if (!o.bound_slots.empty()) {
+        // The loader's bindings (--bind): discovery makes a bound stub a tail call of its function; a key without them is as before
+        std::string bound;
+        for (const auto& [slot, target] : o.bound_slots) bound += std::to_string(slot) + ":" + std::to_string(target) + ",";
+        k.Add("bindings", bound);
+    }
     return k.Hex();
 }
 
@@ -3725,6 +3829,41 @@ bool ReadMisses(const std::string& path, std::vector<analysis::Miss>* out, std::
         }
         m.reason = f[1].str();
         out->push_back(std::move(m));
+    }
+    return true;
+}
+
+bool ReadBindings(const std::string& path, std::map<uint64_t, uint64_t>* out, std::string* sha256, std::string* error) {
+    std::ifstream in{path};
+    if (!in) {
+        *error = "cannot read the bindings " + path;
+        return false;
+    }
+    out->clear();
+    sha256->clear();
+    std::string line;
+    unsigned number = 0;
+    while (std::getline(in, line)) {
+        ++number;
+        llvm::StringRef rest = llvm::StringRef(line).trim();
+        if (rest.consume_front("#")) {
+            const size_t at = rest.find("image SHA-256 ");
+            if (rest.trim().starts_with("module ") && at != llvm::StringRef::npos) *sha256 = rest.drop_front(at + 14).trim().lower();
+            continue;
+        }
+        if (rest.empty()) continue;
+        llvm::SmallVector<llvm::StringRef, 4> f;
+        rest.split(f, ' ', -1, false);
+        if (f.size() == 1) rest.split(f, '\t', -1, false);
+        uint64_t slot = 0, target = 0;
+        llvm::StringRef a = f.size() >= 2 ? f[0] : "", b = f.size() >= 2 ? f[1] : "";
+        a.consume_front_insensitive("0x");
+        b.consume_front_insensitive("0x");
+        if (f.size() < 2 || a.getAsInteger(16, slot) || b.getAsInteger(16, target)) {
+            *error = path + ":" + std::to_string(number) + ": not `<slot offset in hex> <target offset in hex> <symbol>`";
+            return false;
+        }
+        (*out)[slot] = target;
     }
     return true;
 }
@@ -3785,6 +3924,7 @@ bool BuildObjects(const module::Image& image, const BuildOptions& o, const std::
         dopts.threads = workers;
         dopts.misses = o.misses;      // the host's JIT feedback: roots of discovery (README.md, "JIT misses")
         dopts.no_roots = o.no_roots;
+        dopts.bound_slots = o.bound_slots;  // the loader's bindings of PLT slots to this module (README.md, "PLT stubs bound to their own module")
         fresh_d = analysis::Discover(image, dopts);
         s.discover_times = fresh_d.times;
         const auto tc = Clock::now();
@@ -3883,18 +4023,6 @@ bool BuildObjects(const module::Image& image, const BuildOptions& o, const std::
     if (!TargetsFromProfile(&c, &s, error)) {
         return false;
     }
-    if (!o.tiers_path.empty() && !WriteTiers(o.tiers_path, c, error)) {
-        return false;
-    }
-    const std::vector<Unit> units = Units(c);
-    s.units = units.size();
-    if (memory::On()) {
-        uint64_t ub = memory::Of(units);
-        for (const Unit& u : units) ub += memory::Of(u.entries);
-        memory::Note("pack: units", ub, "the compile stage");
-    }
-    std::set<Tier> used{o.tier};
-    for (const Unit& u : units) used.insert(u.tier);
     {
         std::map<uint64_t, nxaot_gate_site> served;
         for (const auto& [entry, f] : d.functions) {
@@ -3917,6 +4045,28 @@ bool BuildObjects(const module::Image& image, const BuildOptions& o, const std::
         }
         s.gate_sites = c.served.size();
     }
+    if (!o.profile_path.empty() && cache) {
+        // The first pack's units the cache holds, for the functions the profile did not sample (FirstPackUnits): after the guarded sites (at H and
+        // H+ only, none in those units) and the gate sites, which the units' keys read. The test switch NXAOT_FIRST_PACK_UNITS=0 leaves the
+        // profile's tiers alone (the pack before it: for A / B measurements)
+        const char* sw = std::getenv("NXAOT_FIRST_PACK_UNITS");
+        if (!(sw && std::string_view(sw) == "0")) {
+            c.tool = tool;
+            FirstPackUnits(c, d, *cache, &s);
+        }
+    }
+    if (!o.tiers_path.empty() && !WriteTiers(o.tiers_path, c, error)) {
+        return false;
+    }
+    const std::vector<Unit> units = Units(c);
+    s.units = units.size();
+    if (memory::On()) {
+        uint64_t ub = memory::Of(units);
+        for (const Unit& u : units) ub += memory::Of(u.entries);
+        memory::Note("pack: units", ub, "the compile stage");
+    }
+    std::set<Tier> used{o.tier};
+    for (const Unit& u : units) used.insert(u.tier);
     for (const auto& [entry, f] : d.functions) {
         for (const auto& [pc, target] : f.calls) {
             c.returns.push_back(static_cast<uint32_t>(pc + 4));
@@ -4352,7 +4502,7 @@ bool LinkRelocatable(const std::vector<std::string>& objects, const std::string&
 }
 
 bool LinkWindows(const std::vector<std::string>& objects, const std::string& work_dir, const std::string& dll, const std::string& coff_object,
-                 bool debug_info, BuildStats* stats, std::string* error) {
+                 bool debug_info, BuildStats* stats, std::string* error, bool bindings) {
     // One relocatable ELF object of the whole module (ld.lld -r keeps one copy of each comdat group: the shared helpers of the units), in COFF
     if (const std::error_code ec = llvm::sys::fs::create_directories(work_dir)) {
         *error = "cannot create " + work_dir + ": " + ec.message();
@@ -4405,6 +4555,9 @@ bool LinkWindows(const std::vector<std::string>& objects, const std::string& wor
     if (debug_info) {
         args.push_back("/export:nxaot_positions,DATA");
         args.push_back("/debug:dwarf");
+    }
+    if (bindings) {
+        args.push_back("/export:nxaot_bindings,DATA");  // the loader's bindings the code assumed (--bind), which the host checks
     }
     args.push_back(obj.c_str());
     std::string so, se;

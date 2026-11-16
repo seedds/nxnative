@@ -355,6 +355,27 @@ static void relocate(module_t *m) {
     if (nint > 8) LOG("%s: %d bound to an earlier module's definition in all", m->name, nint);
 }
 
+#if !DM_NATIVE_EXEC
+// The PLT slots of module m the loader bound to m's own functions (aot.h, "The loader's bindings"): each JUMP_SLOT relocation of a symbol m defines whose slot holds
+// base + the symbol's value now, as bind_sym left it (the forced take-over, an earlier module's definition and the host's HLE decide). fn gets the slot's and the
+// function's module offsets and the name, in the table's order; returns how many
+size_t loader_self_bindings(const module_t *m, void (*fn)(uint64_t slot, uint64_t target, const char *name, void *arg), void *arg) {
+    relocs_t rl = relocs_of((module_t *)m);
+    size_t n = 0;
+    for (uint64_t i = 0; i < rl.n[1]; i++) {
+        const Elf64_Rela *r = &rl.tab[1][i];
+        const Elf64_Sym *s = &m->symtab[ELF64_R_SYM(r->r_info)];
+        if (ELF64_R_TYPE(r->r_info) != R_AARCH64_JUMP_SLOT || !s->st_shndx || r->r_offset > m->size - 8) continue;
+        uint64_t now;
+        memcpy(&now, m->base + r->r_offset, 8);
+        if (now != (uint64_t)(uintptr_t)m->base + s->st_value) continue;
+        fn(r->r_offset, s->st_value, m->strtab + s->st_name, arg);
+        n++;
+    }
+    return n;
+}
+#endif
+
 // ---- NRO modules (nn::ro, hle_ro.c) ----
 // A game may load modules at run time: nn::ro::LoadModule hands over an NRO image it read from its files (Super Smash Bros. Ultimate: the fighters' code, 98 NROs in data.arc, whose
 // exports main imports: 1,045 lua2cpp::create_agent_* functions). iOS runs no code loaded at run time, so the NROs are rewritten offline like the other modules (dm/tools/nro_collect.py,

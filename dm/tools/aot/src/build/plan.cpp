@@ -88,6 +88,12 @@ Plan MakePlan(const module::Image& image, const analysis::Discovery& d, const li
         for (const auto& [br, jt] : f.tables) {
             ff.tables[br] = jt.targets;
         }
+        for (const auto& [start, b] : f.blocks) {
+            // A PLT stub whose slot the loader binds to this module (DiscoverOptions::bound_slots): discovery made its br a tail call
+            if (b.term == Term::Tail && b.end >= 4 && image.InCode(b.end - 4) && (*image.Word(b.end - 4) & 0xFFFFFC1Fu) == 0xD61F0000u) {
+                ff.bound[b.end - 4] = b.target;
+            }
+        }
         for (const auto& [call, pad] : f.pads) {
             if (pad >= f.entry && pad < f.limit && std::find(ff.roots.begin(), ff.roots.end(), pad) == ff.roots.end()) {
                 ff.roots.push_back(pad);

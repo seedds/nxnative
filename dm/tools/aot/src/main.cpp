@@ -1,5 +1,5 @@
 // nxaot: the ahead-of-time ARM64 -> x86-64 recompiler (docs/design/aot-recompiler.md). Subcommands today:
-//   nxaot discover <module.nro | name.aot.tsv> [--symbols-as-oracle] [--tsv <out>] [--threads N] [--times] [--misses <file>] [--no-root <hex>]...
+//   nxaot discover <module.nro | name.aot.tsv> [--symbols-as-oracle] [--tsv <out>] [--threads N] [--times] [--misses <file>] [--bind <file>] [--no-root <hex>]...
 //                  [--memory]
 //                                                     function discovery, CFGs, jump tables, exclusive windows and summaries of a module
 //                                                     (src/analysis/discover.h): one line per function and the summary; --tsv writes every
@@ -23,7 +23,7 @@
 //   nxaot build <module.nro | name.aot.tsv> [-o <object.o>] [--shared <lib.so>] [--cc swifttail|ghc] [--mode balanced|max] [--tier C|W|H|H+]
 //               [--correctness] [--all-entries] [--cpu <llvm cpu>] [--fpsr-flags on|off] [--no-debug-info] [--no-line-table] [--spills] [--asm <file.s>]
 //               [--no-safepoints] [--workers N] [--cache <dir>] [--time-passes] [--ir <file.ll>] [--ir-opt <file.ll>] [--profile <file>]
-//               [--no-groups] [--no-split] [--split-above N] [--target linux|windows] [--isel-misses] [--misses <file>] [--no-root <hex>]...
+//               [--no-groups] [--no-split] [--split-above N] [--target linux|windows] [--isel-misses] [--misses <file>] [--bind <file>] [--no-root <hex>]...
 //               [--memory] [--tiers-tsv <file>] [--gap-tier C|mode]
 //                                                     the pack stage (src/build): every function of the module compiled, in units of
 //                                                     neighbouring functions (a function over the split limit in parts) on --workers threads
@@ -43,7 +43,11 @@
 //                                                     the host's calls in its convention, its imports bound by the host (README.md, "Windows packs").
 //                                                     --misses: the host's JIT feedback for this module (dm/host/aot.h, "The JIT fallback's misses":
 //                                                     DM_AOT_PROFILE's <module>.misses.tsv), roots of discovery (README.md, "JIT misses"), used when its
-//                                                     image SHA-256 is the module's (else a [RED] line and it is ignored); --no-root (tests): an address
+//                                                     image SHA-256 is the module's (else a [RED] line and it is ignored); --bind: the host loader's
+//                                                     bindings of this module's PLT slots to its own functions (dm/host/aot.h, "The loader's bindings":
+//                                                     DM_AOT_PROFILE's <module>.bind.tsv), each such stub a tail call of its function, recorded in the
+//                                                     pack's nxaot_bindings for the host to check (README.md, "PLT stubs bound to their own module"),
+//                                                     taken under the same SHA-256 rule; --no-root (tests): an address
 //                                                     none of discovery's own sources may make an entry, so that a miss naming it brings it back;
 //                                                     --memory: the tables' peaks and the resident set at each stage (the link's included), as
 //                                                     for discover. The tables' object's function map and lookup table go to the MC layer
@@ -108,7 +112,7 @@ namespace {
 
 int Usage() {
     std::fprintf(stderr,
-                 "usage: nxaot discover <module.nro | name.aot.tsv> [--symbols-as-oracle] [--tsv <out>] [--threads N] [--times] [--misses <file>]\n"
+                 "usage: nxaot discover <module.nro | name.aot.tsv> [--symbols-as-oracle] [--tsv <out>] [--threads N] [--times] [--misses <file>] [--bind <file>]\n"
                  "                      [--no-root <hex>]... [--memory]\n"
                  "       nxaot plan <module.nro | name.aot.tsv> [--cc swifttail|ghc] [--all-entries] [--threads N] [--memory]\n"
                  "       nxaot image <module.nro> <out dir> [<name>]\n"
@@ -122,7 +126,7 @@ int Usage() {
                  "                   [--no-line-table] [--spills] [--asm <file.s>] [--no-safepoints] [--workers N] [--cache <dir>] [--time-passes]\n"
                  "                   [--ir <file.ll>] [--ir-opt <file.ll>] [--profile <file>] [--no-groups] [--no-split] [--split-above N]\n"
                  "                   [--target linux|windows]   (windows: a PE DLL --shared <name>.dll and / or a COFF object -o <object.obj>)\n"
-                 "                   [--isel-misses] [--misses <file>] [--no-root <hex>]... [--memory] [--tiers-tsv <file>] [--gap-tier C|mode]\n"
+                 "                   [--isel-misses] [--misses <file>] [--bind <file>] [--no-root <hex>]... [--memory] [--tiers-tsv <file>] [--gap-tier C|mode]\n"
                  "       nxaot lines <pack.so | pack.dll> <module.nro | name.aot.tsv>\n");
     return 2;
 }
@@ -182,9 +186,29 @@ bool UseMisses(const std::string& path, nxaot::module::Image* image, std::vector
     return true;
 }
 
+// --bind (README.md, "PLT stubs bound to their own module"): the host's file of the loader's bindings of this module's PLT slots to its own functions, taken
+// when its header names this image's SHA-256 (another image's, or none: a [RED] line, and the file is ignored). False when the file cannot be read or a line does
+// not parse
+bool UseBindings(const std::string& path, const nxaot::module::Image& image, std::map<uint64_t, uint64_t>* out, std::string* error) {
+    std::string sha;
+    std::map<uint64_t, uint64_t> rows;
+    out->clear();
+    if (!nxaot::build::ReadBindings(path, &rows, &sha, error)) {
+        return false;
+    }
+    const std::string own = llvm::StringRef(image.Sha256Hex()).lower();
+    if (sha != own) {
+        std::printf("[RED] nxaot: the bindings %s were recorded on %s (image SHA-256 %s), not on this module's image (%s): ignored\n", path.c_str(),
+                    sha.empty() ? "an image the file does not name" : "another image", sha.empty() ? "none" : sha.c_str(), own.c_str());
+        return true;
+    }
+    *out = std::move(rows);
+    return true;
+}
+
 int Discover(int argc, char** argv) {
     using namespace nxaot::analysis;
-    std::string path, tsv, misses;
+    std::string path, tsv, misses, bind;
     DiscoverOptions opts;
     bool times = false;
     for (int i = 2; i < argc; ++i) {
@@ -200,6 +224,8 @@ int Discover(int argc, char** argv) {
             times = true;
         } else if (a == "--misses" && i + 1 < argc) {
             misses = argv[++i];
+        } else if (a == "--bind" && i + 1 < argc) {
+            bind = argv[++i];
         } else if (a == "--no-root" && i + 1 < argc && ParseHex(argv[i + 1], &held)) {
             opts.no_roots.insert(held);
             ++i;
@@ -222,6 +248,13 @@ int Discover(int argc, char** argv) {
     if (!misses.empty()) {
         std::string error;
         if (!UseMisses(misses, &*image, &opts.misses, &error)) {
+            std::fprintf(stderr, "nxaot discover: %s\n", error.c_str());
+            return 1;
+        }
+    }
+    if (!bind.empty()) {
+        std::string error;
+        if (!UseBindings(bind, *image, &opts.bound_slots, &error)) {
             std::fprintf(stderr, "nxaot discover: %s\n", error.c_str());
             return 1;
         }
@@ -624,7 +657,7 @@ int Opcodes(int argc, char** argv) {
 
 int Build(int argc, char** argv) {
     using nxaot::build::Tier;
-    std::string path, object, shared, misses;
+    std::string path, object, shared, misses, bind;
     nxaot::build::BuildOptions o;
     bool tier_set = false;
     for (int i = 2; i < argc; ++i) {
@@ -694,6 +727,8 @@ int Build(int argc, char** argv) {
             o.profile_path = argv[++i];
         } else if (a == "--misses" && has) {
             misses = argv[++i];  // the host's JIT feedback (README.md, "JIT misses")
+        } else if (a == "--bind" && has) {
+            bind = argv[++i];  // the loader's bindings of PLT slots to this module (README.md, "PLT stubs bound to their own module")
         } else if (a == "--no-root" && has && ParseHex(argv[i + 1], &held)) {
             o.no_roots.insert(held);  // tests: discovery's own sources do not make it an entry
             ++i;
@@ -740,6 +775,10 @@ int Build(int argc, char** argv) {
         std::printf("[RED] nxaot build: %s: %s\n", path.c_str(), error.c_str());
         return 1;
     }
+    if (!bind.empty() && !UseBindings(bind, *image, &o.bound_slots, &error)) {
+        std::printf("[RED] nxaot build: %s: %s\n", path.c_str(), error.c_str());
+        return 1;
+    }
     // The objects that are not the cache's (the tables' object, and every unit without a cache) go to a folder beside the output, removed again
     const std::string work = (shared.empty() ? object : shared) + ".parts";
     std::vector<std::string> objects;
@@ -747,7 +786,7 @@ int Build(int argc, char** argv) {
     const auto t_link = std::chrono::steady_clock::now();
     if (ok && o.windows) {
         // The DLL and / or the COFF object: the objects joined, converted and linked by lld-link (README.md, "Windows packs")
-        ok = nxaot::build::LinkWindows(objects, work, shared, object, o.debug_info, &s, &error);
+        ok = nxaot::build::LinkWindows(objects, work, shared, object, o.debug_info, &s, &error, !o.bound_slots.empty());
     } else {
         if (ok && !shared.empty()) {
             const std::string soname = shared.substr(shared.find_last_of('/') + 1);

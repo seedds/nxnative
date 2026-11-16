@@ -176,6 +176,17 @@ typedef struct nxaot_import {
     void **slot;       // the slot the pack's thunk of that entry jumps through: the host writes the entry's address there
 } nxaot_import;
 
+// The loader's bindings a pack assumed (nxaot build --bind; dm/tools/aot/README.md "PLT stubs bound to their own module"): the exported array
+// nxaot_bindings, one row per PLT slot the host's loader bound to a function of the module itself when the bindings file was written, in slot
+// order, then a row of all ones. The code takes such a stub's br as b to that function, and the analysis gives calls through the stub that
+// function's summary. The host compares each slot, once the module is relocated, with base + target and refuses the pack when one differs (an
+// earlier module or the host's forced take-over binds the name now: another pack set or another host). Not part of the descriptor, whose ABI it
+// leaves unchanged: a pack without it assumes no binding
+typedef struct nxaot_binding {
+    uint64_t slot;    // module offset of the GOT slot
+    uint64_t target;  // module offset of the function the slot holds
+} nxaot_binding;
+
 // The sampler's positions (design 12; dm/host/aot_profile.c, dm/tools/aot/README.md "The sample profile at tier H"): the exported table
 // nxaot_positions, the guest instruction every native address of a compiled function's code runs for, so that a sample of the host's sampler
 // counts at an instruction offset and not only for its function. Not part of the descriptor, whose ABI it leaves unchanged: a pack without it

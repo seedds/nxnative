@@ -520,6 +520,24 @@ void FunctionLifter::FnDataflow() {
                 stored = stored | ((out_of(pc) & h->second) - dirty_in[s]);  // an edge into a loop head (FnGoto)
             }
         }
+        // A safepoint poll's or a gate's cold path stores the registers newer than the block too (FnPoll, FnGate), with the values of that
+        // moment: a backward branch's poll and a spin wait's gate (FnGoto) and a jump table's poll (a case at or before its block) store the
+        // block's end state, an observation gate the state before the block. A register the function writes and restores, stored there with
+        // its own value, must be stored again before the function returns, as one an inner call stored: a caller that keeps the register in SSA
+        // across the call and later reloads it from the block (after an indirect call, whose WRITES are the union) read the function's value of
+        // the moment. The entry's poll stores the entry values, the callers' own. Counted whether or not FnElidePolls removes the poll later
+        // (README.md, "Polls and gates in restore_block")
+        if (plan->obs_gates.count(pc)) {
+            stored = stored | dirty_in[pc];
+        }
+        if (const uint64_t end = A64::LocationDescriptor{block.EndLocation()}.PC(); end >= 4 && plan->spin_gates.count(end - 4)) {
+            stored = stored | at_end;
+        }
+        if (plan->safepoints && plan->rt_safepoint) {
+            bool back = false;
+            for (const uint64_t s : succs[pc]) back = back || (s <= pc && blocks.count(s));
+            if (back) stored = stored | at_end;
+        }
     }
     restore_block = (stored & written) - plan->self.writes;
     if (plan->split) {
@@ -1293,6 +1311,20 @@ void FunctionLifter::FnCall(const CalleeView& c, llvm::FunctionType* type, Value
     B.CreateCondBr(B.CreateICmpNE(pending, B.getInt64(0)), pend, cont, md.createBranchWeights(1, 1u << 16));
     B.SetInsertPoint(pend);
     if (plan->resume) {
+        // A resume point takes the transfer only with this frame's SP and under the FPCR the code is specialised for (section 7.1): the code
+        // that threw or longjmp'd may have left another rounding mode or FZ in st->fpcr, and this frame's code would run on under the wrong one.
+        // Under another FPCR the transfer goes on past this frame, as one for no frame of compiled code does: the host runs it in the JIT,
+        // as it runs a return under another FPCR (aot_run.c jit_loop; README.md, "Resume points and the FPCR")
+        Value* same_fpcr = nullptr;
+        const auto here_of = [&](uint64_t r) {
+            if (!same_fpcr) {
+                same_fpcr = B.CreateICmpEQ(B.CreateAnd(LoadField(B.getInt32Ty(), offsetof(dm_guest_state, fpcr)), B.getInt32(kFpcrModeMask)),
+                                           B.getInt32(fpcr), "same_fpcr");
+            }
+            return B.CreateAnd(B.CreateAnd(B.CreateICmpEQ(pending, Rel(r)),
+                                           B.CreateICmpEQ(LoadField(B.getInt64Ty(), offsetof(dm_guest_state, sp)), frame_sp)),
+                               same_fpcr);
+        };
         for (const uint64_t r : plan->resume(call_pc)) {
             const auto it = bbs.find(r);
             llvm::Function* other_part = it == bbs.end() && plan->part_of ? plan->part_of(r) : nullptr;
@@ -1303,9 +1335,7 @@ void FunctionLifter::FnCall(const CalleeView& c, llvm::FunctionType* type, Value
                 // A resume point in another part of a split function: the block holds the whole register file, the part takes it from there
                 auto* take = BasicBlock::Create(C, "resume_" + llvm::utohexstr(r), F);
                 auto* other = BasicBlock::Create(C, "pending_next", F);
-                Value* here = B.CreateAnd(B.CreateICmpEQ(pending, Rel(r)),
-                                          B.CreateICmpEQ(LoadField(B.getInt64Ty(), offsetof(dm_guest_state, sp)), frame_sp));
-                B.CreateCondBr(here, take, other);
+                B.CreateCondBr(here_of(r), take, other);
                 B.SetInsertPoint(take);
                 StoreField(B.getInt64(0), offsetof(dm_guest_state, pending));
                 FnSplit(r, false);
@@ -1315,9 +1345,7 @@ void FunctionLifter::FnCall(const CalleeView& c, llvm::FunctionType* type, Value
             // A resume point of this call site, entered with this frame's SP: the frame takes the transfer, with every register from the block
             auto* take = BasicBlock::Create(C, "resume_" + llvm::utohexstr(r), F);
             auto* other = BasicBlock::Create(C, "pending_next", F);
-            Value* here = B.CreateAnd(B.CreateICmpEQ(pending, Rel(r)),
-                                      B.CreateICmpEQ(LoadField(B.getInt64Ty(), offsetof(dm_guest_state, sp)), frame_sp));
-            B.CreateCondBr(here, take, other);
+            B.CreateCondBr(here_of(r), take, other);
             B.SetInsertPoint(take);
             StoreField(B.getInt64(0), offsetof(dm_guest_state, pending));
             ReloadRegs(Regs::All());
@@ -1630,6 +1658,8 @@ void FunctionLifter::FnLowerTerminal(const IR::Terminal& t) {
             FnCallIndirect(last_pc, cur_end - 4);
         } else if (e.kind == EndKind::Ret) {
             FnReturn(last_pc);
+        } else if (const auto bound = plan->bound ? plan->bound(cur_end - 4) : std::nullopt) {
+            FnGoto(Rel(*bound));  // a PLT stub the loader binds to this module's function: b to it (the pack's nxaot_bindings holds the binding)
         } else {
             FnGoto(last_pc);
         }

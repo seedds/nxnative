@@ -24,7 +24,8 @@
 #   windows: dm/tools/aot/README.md, "Windows packs"), mode PACK_MODE / --pack-mode (balanced or max), with the per-function cache <NSP folder>/<id>-work/aot-cache/ when this nxaot has --cache,
 #   and a module's sample profile <NSP folder>/<id>-work/profile/<name>.tsv when there is one (nxhost-run writes it with DM_AOT_PROFILE; AOT_PROFILE / --no-profile ignores them), and the
 #   JIT misses beside it, <name>.misses.tsv (nxaot build --misses: the addresses the game ran in the JIT fallback become entries of the next pack), and the known targets <name>.targets.tsv
-#   (nxaot reads them beside the profile: an indirect call with a dominant target becomes a guarded direct call at tier H). The launch file names the NSP folder, this
+#   (nxaot reads them beside the profile: an indirect call with a dominant target becomes a guarded direct call at tier H), and the loader's bindings <name>.bind.tsv
+#   (nxaot build --bind: a PLT stub the loader binds to the module itself becomes a tail call of its function). The launch file names the NSP folder, this
 #   script and what it ran with, so that the launcher nxlauncher can pack the game again with what a session recorded ("Repack with profile").
 #   On Windows nxaot is nxaot.exe (a Windows bundle's bin\nxaot.exe, or cross-built with llvm-mingw: dm/tools/aot/README.md, "Building nxaot for Windows"); --nxaot may name a
 #   script that runs the Linux nxaot (in WSL or its Docker image) instead. Steps that boot the game in the Mac host (run-time shader captures, Oodle
@@ -2156,7 +2157,7 @@ def nxaot_options(nxaot, env):
     if 'nxaot build' not in text:
         raise BuildError(f'{nxaot} does not run as nxaot (exit code {r.returncode}): {text.strip()[-400:] or "no output"}. Built in its Docker image it links the image\'s libLLVM-18.so: run this '
                          'script where that library is installed (LLVM 18), configure nxaot with -DNXAOT_LLVM_STATIC=ON, or give --nxaot a script that runs it in the image')
-    return {o for o in ('--cache', '--workers', '--target', '--profile', '--misses') if re.search(r'\[' + o + r'\b', text)}
+    return {o for o in ('--cache', '--workers', '--target', '--profile', '--misses', '--bind') if re.search(r'\[' + o + r'\b', text)}
 
 
 def chain_vk_of(repo):   # the version dm/gfx/nvn/dmsh_chain_vk.h holds (None when it has none)
@@ -2338,6 +2339,46 @@ def aot_misses(folder, name, sha, quiet=False):
                           + ': not used; play again with DM_AOT_PROFILE to record them for this one')
         return None, ()
     return p, tuple(sorted(rows))
+
+
+BIND_ROW = re.compile(r'^(?:0[xX])?([0-9a-fA-F]+)[ \t]+(?:0[xX])?([0-9a-fA-F]+)(?:[ \t]+\S+)?$')   # a row of the loader's bindings: <slot> <target> <symbol> (module offsets)
+
+
+def aot_bindings(folder, name, sha, quiet=False):
+    """The loader's bindings of module name's PLT slots to its own functions (nxaot build --bind; dm/tools/aot/README.md, "PLT stubs bound to their own module"):
+    <folder>/<name>.bind.tsv, which nxhost-run writes beside the sample profile with DM_AOT_PROFILE=<folder> (dm/host/aot.h, "The loader's bindings"), when it is there, parses
+    and names this image in its header (as aot_misses checks the misses). Returns (path, the (slot, target) pairs, sorted) or (None, ()): the pairs are what the pack's key takes"""
+    p = folder / f'{name}.bind.tsv' if folder else None
+    if not p or not p.is_file(): return None, ()
+    rows, image = set(), None
+    try:
+        for line in p.read_text().splitlines():
+            m = PROFILE_HEAD.match(line)
+            if m: image = m.group(3)
+            if not line.strip() or line.lstrip().startswith('#'): continue
+            r = BIND_ROW.match(line.strip())
+            if not r: raise ValueError(line)
+            rows.add((int(r.group(1), 16), int(r.group(2), 16)))
+    except (OSError, UnicodeDecodeError, ValueError) as e:
+        if not quiet: say(f'[RED] the loader bindings {p} do not parse ({e}): {name} is packed without them')
+        return None, ()
+    if not image or (sha and image != sha.lower()):
+        if not quiet: say(f'the loader bindings {p} were recorded on another image of {name} or name none: not used')
+        return None, ()
+    return p, tuple(sorted(rows))
+
+
+def pack_bindings(opts, aot, mods, folder, mode=None):
+    """The loader's bindings each module is packed with ({name: (path, pairs)}, aot_bindings): only with an nxaot that has --bind, and not for NROs (the host refuses bindings in an
+    NRO's pack: it binds only when the game loads it). A discovery input, as the misses: --no-profile leaves them in use"""
+    bind = {}
+    if '--bind' not in opts: return bind
+    for n in mods:
+        p, pairs = aot_bindings(folder, n, manifest_sha(aot, n), quiet=mode is None)
+        if not p: continue
+        bind[n] = (p, pairs)
+        if mode: say(f'{n}: loader bindings {p} ({len(pairs)} PLT slots bound to its own functions): its stubs are tail calls of them in its pack')
+    return bind
 
 
 TARGET_ROW = re.compile(r'^(?:0[xX])?([0-9a-fA-F]+)[ \t]+(?:0[xX])?([0-9a-fA-F]+)[ \t]+(\d+)$')   # a row of the host's known targets: <site> <target> <binds> (module offsets)
@@ -2534,14 +2575,14 @@ def made_rows(opts, aot, mods, profiles, misses, no_profile):
     return rows
 
 
-def pack_jobs(nxaot, mode, aot, nro_dir, mods, nro_rows, prof, win, miss=None, targ=None):
+def pack_jobs(nxaot, mode, aot, nro_dir, mods, nro_rows, prof, win, miss=None, targ=None, bind=None):
     """The packs of a mode: (name, the input nxaot builds it from, the key of a pack built now: the input, nxaot, the mode, the target, the sample profile, the JIT misses' addresses
     and reasons, and the known targets' (site, dominant target) pairs, all nxaot's guards depend on; a pack without misses keeps the key it had before they existed, and one without
     a dominant target (no targets file, none taken, or none with a dominant target: the same pack) the key it had before the targets file existed)"""
-    miss, targ = miss or {}, targ or {}
+    miss, targ, bind = miss or {}, targ or {}, bind or {}
     tool = fingerprint(('files', [nxaot]), mode, *(['windows'] if win else []))   # the cache and the workers do not change a pack
     def extra(n): return [*([('files', [prof[n]])] if n in prof else []), *([('misses', miss[n][1])] if n in miss else []),
-                          *([('targets', targ[n][1])] if targ.get(n, (None, ()))[1] else [])]
+                          *([('targets', targ[n][1])] if targ.get(n, (None, ()))[1] else []), *([('bindings', bind[n][1])] if n in bind else [])]
     return [(m, aot / f'{m}.aot.tsv', fingerprint(tool, ('files', [aot / f'{m}.aot.tsv']), *extra(m))) for m in mods] + \
            [(n, nro_dir / f'{n}.nro', fingerprint(tool, n, r, *extra(n))) for n, r in nro_rows.items()]
 
@@ -2554,9 +2595,9 @@ def packs_ready(nxaot, opts, aot, nro_dir, mods, platform, profiles=None, misses
     """The pack modes whose folder holds every pack a pack of now would build, each with its key, and the recompiler's input beside them: the modes the launch file offers"""
     win, suffix, nro_rows = platform == 'windows', PACK_SUFFIXES[platform], nro_pack_rows(aot)
     prof, miss, ready = pack_profiles(opts, aot, mods, nro_rows, profiles), pack_misses(opts, aot, mods, nro_rows, misses), []
-    targ = pack_targets(aot, mods, nro_rows, profiles, prof)
+    targ, bind = pack_targets(aot, mods, nro_rows, profiles, prof), pack_bindings(opts, aot, mods, misses)
     for mode in PACK_MODES:
-        dest, jobs = pack_dir(aot, mode), pack_jobs(nxaot, mode, aot, nro_dir, mods, nro_rows, prof, win, miss, targ)
+        dest, jobs = pack_dir(aot, mode), pack_jobs(nxaot, mode, aot, nro_dir, mods, nro_rows, prof, win, miss, targ, bind)
         if all((dest / f'{n}{suffix}').is_file() and reused(pack_keys(dest, win) / f'{n}.key', k) is not None for n, _, k in jobs) and \
            all((dest / f'{m}{s}').is_file() for m in mods for s in ('.aot.tsv', '.image.bin')) and (not nro_rows or (dest / 'nro.tsv').is_file()):
             ready.append(mode)
@@ -2587,7 +2628,8 @@ def aot_packs(nxaot, opts, mode, workers, cache, aot, nro_dir, mods, env, logs, 
     prof = pack_profiles(opts, aot, mods, nro_rows, profiles, mode)
     miss = pack_misses(opts, aot, mods, nro_rows, misses, mode)
     targ = pack_targets(aot, mods, nro_rows, profiles, prof)
-    jobs = pack_jobs(nxaot, mode, aot, nro_dir, mods, nro_rows, prof, win, miss, targ)
+    bind = pack_bindings(opts, aot, mods, misses, mode)
+    jobs = pack_jobs(nxaot, mode, aot, nro_dir, mods, nro_rows, prof, win, miss, targ, bind)
     keys, names = pack_keys(dest, win), {n for n, _, _ in jobs}
     for p in sorted(dest.glob('*' + suffix)):
         if p.name[:-len(suffix)] not in names: p.unlink(); rmtree(keys / f'{p.name[:-len(suffix)]}.key')
@@ -2607,7 +2649,7 @@ def aot_packs(nxaot, opts, mode, workers, cache, aot, nro_dir, mods, env, logs, 
         # nxaot reads <name>.targets.tsv beside the profile by itself: one the packer did not take (another image, a row that does not parse) is kept from it
         refused = n in prof and n not in targ and (prof[n].parent / f'{n}.targets.tsv').is_file()
         run([nxaot, 'build', src, '-o', obj, '--shared', so, '--mode', mode] + (['--target', 'windows'] if win else []) + extra + (['--profile', prof[n]] if n in prof else [])
-            + (['--misses', miss[n][0]] if n in miss else []), log, env=dict(os.environ if env is None else env, NXAOT_PROFILE_TARGETS='0') if refused else env)
+            + (['--misses', miss[n][0]] if n in miss else []) + (['--bind', bind[n][0]] if n in bind else []), log, env=dict(os.environ if env is None else env, NXAOT_PROFILE_TARGETS='0') if refused else env)
         if not so.is_file(): raise BuildError(f'nxaot build wrote no {so.name} (output: {log})')
         os.replace(so, dest / so.name); rmtree(obj)
         (keys / f'{n}.key').write_text(f'{k}\n')

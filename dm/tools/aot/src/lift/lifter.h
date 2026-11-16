@@ -153,6 +153,9 @@ struct FunctionPlan {
     CalleeView indirect;            // blr and dispatched br: the standard entry (every passable register; the union over address-taken functions)
     std::function<std::vector<uint64_t>(uint64_t call_pc)> resume;    // the resume points of a call site (section 3.3), module offsets
     std::function<const std::vector<uint64_t>*(uint64_t br)> tables;  // the jump table of a br (Region::tables)
+    // A PLT stub's br whose slot the loader binds to this module (--bind): the function it tail-calls, lowered as b to it (the pack's
+    // nxaot_bindings, which the host checks, holds the binding); nullopt for any other br
+    std::function<std::optional<uint64_t>(uint64_t br)> bound;
     std::vector<uint64_t> roots;    // block starts besides the entry that only a non-local transfer enters (landing pads)
     // Run-time entry points (src/build/pack.cpp declares them; the host defines what they call)
     llvm::Function* rt_dispatch = nullptr;     // preserve_all ptr (ptr st, i64 target, ptr slot, i64 site): an inline-cache miss

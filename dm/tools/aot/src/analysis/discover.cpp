@@ -385,6 +385,8 @@ private:
                 case Kind::BR:
                     if (const auto t = f.tables.find(pc); t != f.tables.end()) {
                         for (const uint64_t target : t->second.targets) branch_to(target);
+                    } else if (const auto bound = BoundStub(pc)) {
+                        wout.pending.emplace_back(*bound, kProvTail);  // a PLT stub the loader binds to this module's own function
                     }
                     break;
                 default:
@@ -526,6 +528,12 @@ private:
                 for (const uint64_t target : t->second.targets) {
                     if (seen.insert(target).second && Inside(f, target)) b.succ.emplace_back(target, Edge::Table);
                 }
+            } else if (const auto bound = BoundStub(pc); bound && b.start + 12 <= pc) {
+                // A PLT stub whose slot the loader binds to this module's own function (DiscoverOptions::bound_slots): its br is that
+                // function's tail call, as b makes it, when the block runs the stub's ldr of the slot before it (a branch into the stub's
+                // last words would start a block there)
+                b.term = Term::Tail;
+                b.target = *bound;
             } else {
                 b.term = Term::Indirect;
                 f.indirect[pc] = "not bounded yet";
@@ -538,6 +546,16 @@ private:
             b.term = Term::Trap;
             break;
         }
+    }
+
+    // The function a PLT stub's br at br_pc tail-calls when the loader binds its slot to this module (DiscoverOptions::bound_slots)
+    std::optional<uint64_t> BoundStub(uint64_t br_pc) const {
+        if (opts.bound_slots.empty()) return std::nullopt;
+        const auto slot = PltStubSlot(img, br_pc);
+        if (!slot) return std::nullopt;
+        const auto it = opts.bound_slots.find(*slot);
+        if (it == opts.bound_slots.end() || !TextCode(it->second)) return std::nullopt;
+        return it->second;
     }
 
     // A bl to a function with no return path does not come back: what follows it is not that function's code (often the next function,
@@ -798,11 +816,19 @@ private:
         return changed;
     }
 
+    // What a call may change, for a jump-table region that goes on past it. A call with no summary to take (a blr, whose callee is not one
+    // function; a bl to an address that is no function yet) may change every register, SP and NZCV: lift::CallEffect's default, under which
+    // the region goes on after the call with all of them opaque. That is the effect of any callee that returns there, so the region stays a
+    // sound model of every path through the call; a value the code computes again after the call (a switch's index loaded and compared
+    // after a blr, as libjpeg's jinit_color_converter does) is bounded by its own compare. Without it such a call ended the region, and a
+    // switch that one path reached only past a blr was never closed (README.md, "Unbounded brs by form")
     std::optional<lift::CallEffect> EffectOf(uint64_t call_pc) const {
         const Insn& i = At(call_pc);
-        if (i.kind != Kind::BL) return std::nullopt;  // blr: no single callee to take the effects of
+        if (i.kind == Kind::BLR) return lift::CallEffect{};
+        if (i.kind != Kind::BL) return std::nullopt;
         const auto it = fns.find(i.target);
-        if (it == fns.end() || !it->second.summary.returns) return std::nullopt;
+        if (it == fns.end()) return lift::CallEffect{};
+        if (!it->second.summary.returns) return std::nullopt;  // no return path: nothing follows the call
         const Summary& s = it->second.summary;
         lift::CallEffect e;
         e.x = s.writes.x | (1u << 30);
@@ -1091,6 +1117,20 @@ private:
 };
 
 }  // namespace
+
+std::optional<uint64_t> PltStubSlot(const module::Image& image, uint64_t br_pc) {
+    if (br_pc < 12) return std::nullopt;
+    const auto w0 = image.Word(br_pc - 12), w1 = image.Word(br_pc - 8), w2 = image.Word(br_pc - 4), w3 = image.Word(br_pc);
+    if (!w0 || !w1 || !w2 || !w3) return std::nullopt;
+    // adrp x16, page; ldr x17, [x16, #lo]; add x16, x16, #lo; br x17, the add's immediate the ldr's offset
+    if ((*w0 & 0x9F00001Fu) != 0x90000010u || (*w1 & 0xFFC003FFu) != 0xF9400211u || (*w2 & 0xFFC003FFu) != 0x91000210u || *w3 != 0xD61F0220u) {
+        return std::nullopt;
+    }
+    const uint64_t lo = ((*w1 >> 10) & 0xFFFu) * 8;
+    if (((*w2 >> 10) & 0xFFFu) != lo) return std::nullopt;
+    const int64_t imm = SignExtend((((*w0 >> 5) & 0x7FFFFu) << 2) | ((*w0 >> 29) & 3u), 21);
+    return ((br_pc - 12) & ~0xFFFull) + static_cast<uint64_t>(imm * 4096) + lo;
+}
 
 MissKind MissKindOf(const std::string& reason) {
     if (reason == "indirect" || reason == "call" || reason == "host" || reason == "nocode") return MissKind::Entry;

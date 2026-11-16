@@ -57,6 +57,8 @@ struct BuildOptions {
     std::vector<analysis::Miss> misses;             // the host's JIT feedback (--misses, ReadMisses; the image carved with analysis::CarveMisses before):
                                                     // discovery's roots, and with them in the analysis cache's key
     std::set<uint64_t> no_roots;                    // a test's --no-root (analysis::DiscoverOptions::no_roots), in the analysis cache's key too
+    std::map<uint64_t, uint64_t> bound_slots;       // the loader's bindings of PLT slots to this module's own functions (--bind, ReadBindings;
+                                                    // analysis::DiscoverOptions::bound_slots), in the analysis cache's key and the pack's nxaot_bindings
     bool windows = false;                           // --target windows: a PE DLL for the Windows host ("Windows packs" in pack.cpp, coff.h)
     bool isel_misses = false;                       // count FastISel's misses by kind (--isel-misses; no cache: every unit compiled)
     std::string tiers_path;                         // also write each function's tier here (--tiers-tsv: README.md, "Gap code at tier C")
@@ -96,6 +98,7 @@ struct BuildStats {
     // samples profi found no flow for
     bool profile_weights = false;
     uint64_t weighted_functions = 0, weighted_branches = 0, entry_counts = 0, weighted_calls = 0, entry_only_functions = 0;
+    uint64_t first_pack_functions = 0;  // functions the profile did not sample kept at the first pack's tier, their units cached (FirstPackUnits)
     uint64_t no_flow_functions = 0;
     // --profile: the hot indirect targets (README.md, "Hot indirect targets"): the targets file beside the profile (targets_path: read, none there, or not read with the
     // test switch NXAOT_PROFILE_TARGETS=0); its sites, those the lifted code guards (summed over the units, cached ones too), those planned for a guard, and why the others
@@ -134,6 +137,11 @@ bool BuildObject(const module::Image& image, const BuildOptions& options, const 
 // <reason> <entries>` per address and reason. False with *error naming the line that does not parse, or a file that cannot be read
 bool ReadMisses(const std::string& path, std::vector<analysis::Miss>* out, std::string* sha256, std::string* error);
 
+// A bindings file of the host (dm/host/aot.h, "The loader's bindings": DM_AOT_PROFILE writes <folder>/<module>.bind.tsv): '#' comment lines, among them the
+// header `# module <name>, build ID <id>, image SHA-256 <hex>` (as the misses'), and one line `<slot offset in hex> <target offset in hex> <symbol>` per PLT slot
+// the loader bound to a function of the module itself. False with *error naming the line that does not parse, or a file that cannot be read
+bool ReadBindings(const std::string& path, std::map<uint64_t, uint64_t>* out, std::string* sha256, std::string* error);
+
 // Links objects into a shared object with lld (as a library: lld::elf::link). False with *error set on failure
 bool LinkShared(const std::vector<std::string>& objects, const std::string& output, const std::string& soname, std::string* error);
 
@@ -145,7 +153,7 @@ bool LinkRelocatable(const std::vector<std::string>& objects, const std::string&
 // lld::coff::link) into the DLL dll when that is not empty: no entry point, no import, the descriptor nxaot_module and the import table
 // nxaot_imports exported, the image deterministic (/Brepro), DWARF kept with debug_info. Work files go to work_dir. False with *error set
 bool LinkWindows(const std::vector<std::string>& objects, const std::string& work_dir, const std::string& dll, const std::string& coff_object,
-                 bool debug_info, BuildStats* stats, std::string* error);
+                 bool debug_info, BuildStats* stats, std::string* error, bool bindings = false);
 
 // The run-time entries a pack may import (include/nxaot/aot_module.h, src/lift/runtime.h): what dm/host and src/rt export to it
 bool IsHostImport(const std::string& name);

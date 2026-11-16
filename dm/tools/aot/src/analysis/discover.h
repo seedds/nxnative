@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <map>
 #include <memory>
+#include <optional>
 #include <set>
 #include <string>
 #include <vector>
@@ -198,7 +199,16 @@ struct DiscoverOptions {
                                   // number: README.md, "Phase 5c"); 0: one per CPU
     std::vector<Miss> misses;     // the host's JIT feedback (--misses): roots of discovery by their MissKind (the image carved first, CarveMisses)
     std::set<uint64_t> no_roots;  // a test's option (--no-root): addresses none of discovery's own sources makes an entry (a miss still does)
+    // The host loader's bindings of this module's PLT slots to its own functions (--bind; README.md, "PLT stubs bound to their own module"):
+    // slot offset -> the function's offset. A PLT stub (adrp x16; ldr x17, [x16, #o]; add x16, x16, #o; br x17) whose slot is here is a tail
+    // call of that function, as b makes it; the pack records each binding it assumed and the host refuses the pack when the loader bound one
+    // otherwise (aot_arena.c)
+    std::map<uint64_t, uint64_t> bound_slots;
 };
+
+// The slot of a PLT stub whose br is at br_pc: the four words adrp x16, page; ldr x17, [x16, #o]; add x16, x16, #o; br x17 ending at br_pc, the
+// slot page + o (nullopt for anything else)
+std::optional<uint64_t> PltStubSlot(const module::Image& image, uint64_t br_pc);
 
 // Where discovery's time goes (seconds of each step over all rounds; `nxaot build` and `nxaot discover --times` print them)
 struct DiscoverTimes {

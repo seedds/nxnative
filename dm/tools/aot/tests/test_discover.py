@@ -21,9 +21,11 @@ It prints one row per NRO and mode: functions by primary provenance, jump tables
 Then the jump tables of a module written word by word (hand_tables below; README.md, "Module loader and discovery"): each form compilers emit
 for a switch whose index is computed from more than one value (a bit field of a product, the case offset of a sum, a mask of an exclusive or,
 a shifted sum compared on its low half), with byte, halfword and word entries, signed and unsigned, an `adr` base and a table-relative one,
-must be a jump table with exactly its cases, index by index; and each unsound look-alike (the compare on another register, a compare that a
-path to the load goes around, the index changed by another value after its compare or its mask, a compare of the low half of a 64-bit index,
-a signed compare) must stay a br for the dispatcher.
+and the forms of README.md's "Unbounded brs by form" (a compare whose b.hi lies in another block, an index masked with `and x, #0xff` or
+`#0xffffffff` and compared as a narrower value, an index bounded on a path past a blr), must be a jump table with exactly its cases, index by
+index; and each unsound look-alike (the compare on another register, a compare that a path to the load goes around, the index changed by
+another value after its compare or its mask, a compare of the low half of a 64-bit index, a signed compare, a blr between the compare and the
+load) must stay a br for the dispatcher.
 Exit 0 when every check passes.
 """
 import argparse
@@ -298,9 +300,59 @@ def unsound_signed(m, name):
     return f'{name}.br', None, None, None
 
 
+LS = 9                                                                                   # b.ls
+
+
+def e_tbnz(rt, bit, off): return 0x37000000 | (bit & 0x1F) << 19 | _rel(off, 14) << 5 | rt  # tbnz wt, #bit
+def e_and_ones_w(rd, rn, ones): return 0x12000000 | (ones - 1) << 10 | rn << 5 | rd       # and wd, wn, #(2^ones - 1)
+def e_blr(rn): return 0xD63F0000 | rn << 5
+
+
+def form_cmp_split(m, name):
+    # The compare and its b.hi in different blocks (a tbnz between them): the Z flag reaches b.hi as `(x - C) == 0` (README.md, "Unbounded brs by form")
+    n = 10
+    m.emit(e_subi_w(8, 0, 3), e_cmpi_w(8, n - 1), lambda pc, A: e_tbnz(2, 3, A(f'{name}.default') - pc), _to(HI, f'{name}.default'))
+    return f'{name}.br', 1, False, _byte_dispatch(m, name, 8, n)
+
+
+def form_and_narrow(m, name):
+    # The index `and x8, x0, #0xff`, its compare on `and w9, w0, #0xff`: a narrower value of the same register (libpng's png_set_filter's form)
+    n = 8
+    m.emit(e_and_ones_w(9, 0, 8), e_cmpi_w(9, n - 1), _to(HI, f'{name}.default'), e_and_ones(8, 0, 8))
+    return f'{name}.br', 1, False, _byte_dispatch(m, name, 8, n)
+
+
+def form_and_low32(m, name):
+    # The index `and x8, x0, #0xffffffff`, its compare on w0 (a trunc of the same register)
+    n = 7
+    m.emit(e_cmpi_w(0, n - 1), _to(HI, f'{name}.default'), e_and_ones(8, 0, 32))
+    return f'{name}.br', 1, False, _byte_dispatch(m, name, 8, n)
+
+
+def form_after_blr(m, name):
+    # Bounded on both paths into the table, one of them past a blr whose result it compares: a call with no summary changes everything, and the
+    # region goes on past it (libjpeg's jinit_color_converter's form)
+    n = 6
+    m.emit(lambda pc, A: e_cbz(2, A(f'{name}.viacall') - pc), e_cmpi(0, n - 1), _to(HI, f'{name}.default'),
+           lambda pc, A: e_b(A(f'{name}.dispatch') - pc))
+    m.label(f'{name}.viacall')
+    m.emit(e_blr(3), e_cmpi(0, n - 1), _to(LS, f'{name}.dispatch'), lambda pc, A: e_b(A(f'{name}.default') - pc))
+    m.label(f'{name}.dispatch')
+    return f'{name}.br', 1, False, _byte_dispatch(m, name, 0, n)
+
+
+def unsound_before_blr(m, name):
+    # The index compared, then a blr that may change it: the call's result is unbounded at the br
+    m.emit(e_cmpi(0, 11), _to(HI, f'{name}.default'), e_blr(3))
+    _byte_dispatch(m, name, 0, 12)
+    return f'{name}.br', None, None, None
+
+
 HAND_FORMS = [('byte_product', form_byte_product), ('half_offset', form_half_offset), ('word_relative', form_word_relative),
-              ('byte_low_half', form_byte_low_half), ('other_register', unsound_other_register), ('around', unsound_around),
-              ('changed', unsound_changed), ('mask_changed', unsound_mask_changed), ('low_half', unsound_low_half), ('signed', unsound_signed)]
+              ('byte_low_half', form_byte_low_half), ('cmp_split', form_cmp_split), ('and_narrow', form_and_narrow), ('and_low32', form_and_low32),
+              ('after_blr', form_after_blr), ('other_register', unsound_other_register), ('around', unsound_around),
+              ('changed', unsound_changed), ('mask_changed', unsound_mask_changed), ('low_half', unsound_low_half), ('signed', unsound_signed),
+              ('before_blr', unsound_before_blr)]
 
 
 def hand_tables(nxaot, work, failures):

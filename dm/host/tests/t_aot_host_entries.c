@@ -15,3 +15,11 @@ HLE("t_aot_hidden", uint64_t, t_aot_hidden, uint64_t x) {
 // (t_aot_host.c t_aot_pause_body: SetThreadActivity and GetThreadContext3 on the program's threads)
 void t_aot_pause_body(uint64_t arg);
 HLE("t_aot_pause_tester", void, t_aot_pause_tester, uint64_t arg) { t_aot_pause_body(arg); }
+
+// The pollkeep test's request (t_aot_host.c pollkeep_nro): the calling thread's poll byte set, as SetThreadActivity's pause request sets another thread's
+// (hle_thread.c), so that the next poll of compiled code takes its cold path (aot_run.c safepoint clears it again). Returns its argument
+void t_aot_poll_request(void);   // t_aot_host.c
+HLE("t_aot_poll_self", uint64_t, t_aot_poll_self, uint64_t x) {
+    t_aot_poll_request();
+    return x;
+}

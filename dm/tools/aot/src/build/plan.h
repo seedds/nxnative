@@ -32,6 +32,7 @@ struct FnFacts {
     std::vector<uint64_t> continuations;      // offsets after its calls to setjmp: resume points of every call site of the function
     std::map<uint64_t, uint64_t> pads;        // call pc -> the landing pad of the LSDA call site covering it
     std::map<uint64_t, std::vector<uint64_t>> tables;  // br pc -> jump-table targets
+    std::map<uint64_t, uint64_t> bound;                // br pc -> the function a PLT stub's br tail-calls, its slot bound to this module (--bind)
     std::vector<uint64_t> roots;              // landing pads inside the function
     std::vector<std::pair<uint64_t, uint64_t>> extra;  // its blocks outside [entry, limit): the aux region's (design 1.1), [start, end) each
     size_t words = 0;

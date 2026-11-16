@@ -465,6 +465,18 @@ typedef struct { uint64_t pc, count; uint32_t reason; } dm_aot_miss;
 size_t dm_aot_jit_misses(dm_aot_miss *out, size_t max, uint64_t *dropped);
 const char *dm_aot_miss_word(uint32_t reason);   // a reason's word in the misses file; NULL for none of a pack
 
+// ---------- The loader's bindings (loader.c finds them, aot_profile.c writes them, aot_arena.c checks a pack's; dm/tools/aot/README.md "PLT stubs bound to their own module") ----------
+// With DM_AOT_PROFILE=<folder> the profile's writer puts, per module with a pack (not an NRO's, which binds only when the game loads it), <folder>/<module>.bind.tsv beside its
+// profile: the '#' header lines of the misses file (module, build ID, image SHA-256, pack), then one line `<slot offset> <target offset> <symbol>` per PLT slot the loader bound to
+// a function of the module itself (the forced take-overs, an earlier module's definition of the name and the host's HLE decide: loader.c bind_sym). `nxaot build --bind <file>`
+// takes a stub of such a slot as a tail call of that function and records the bindings in the pack (nxaot_bindings); dm_aot_pack_load compares them with the slots once the
+// module is relocated and refuses the pack, naming the slot, when the loader bound one otherwise
+size_t loader_self_bindings(const module_t *m, void (*fn)(uint64_t slot, uint64_t target, const char *name, void *arg), void *arg);
+// A pack refused for its bindings writes its module's bindings file at once (with DM_AOT_PROFILE), as the session ends there: the next pack takes the current ones.
+// aot_arena.c calls it through dm_aot_bindings_refused, which aot_profile.c's constructor sets (null in the tests that link the arena without the sampler)
+void dm_aot_bindings_now(const module_t *m, const uint8_t sha256[32], const char *pack);
+extern void (*_Atomic dm_aot_bindings_refused)(const module_t *, const uint8_t *, const char *);
+
 // ---------- The calling guest's context, and backtraces (aot_fault.c) ----------
 // On Apple the guest's code calls the host natively, so a host function finds its guest caller in its own frames (__builtin_return_address, __builtin_frame_address, the
 // x29 chain from there). Here a host function runs on the native stack below the run time's x86 frames (2.4, 3.2), which name nothing of the guest's: the guest's context

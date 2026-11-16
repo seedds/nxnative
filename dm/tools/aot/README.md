@@ -898,9 +898,52 @@ from -0.10 % for except-clang to +0.30 % for except-gcc). CTest 29 of 29 (`== nx
 with `NXAOT`, with and without `DM_AOT_ARENA_CHECK=1` (`t_pipe` given `DM_REPO`, as a build folder outside the repository needs). Not run:
 Windows (the lifter's change is the same code for a Windows pack) and a performance measurement (the store is one per return of such a function).
 
-Not changed, open: a safepoint poll or a gate in a function stores the registers newer than the block in its cold path, so after a pause there a
-function that keeps x19 (or SP, with no call) and returns without storing it again may leave its own value in the block for a caller whose view
-reloads it; `restore_block` does not count polls and gates.
+A safepoint poll or a gate stores registers in its cold path too: fixed since, "Polls and gates in restore_block" below.
+
+## Polls and gates in restore_block
+
+A safepoint poll's cold path (design 6.2) and a gate's (design 1.1) store the registers newer than the block, with the values of the moment, so
+that the block holds the whole register file there. A function that keeps x19 (outside its WRITES) but changes it in a loop stored its own x19
+there when the poll fired, then restored x19 in SSA and returned without storing it again: `restore_block` (`FnDataflow`, design 2.3: what a
+function stores again before it returns because it stored a value of its own of a register it keeps) counted the stores before calls, svcs and
+loop heads, not those of polls and gates. A caller that keeps x19 in SSA across the call is unaffected, but one that reloads it from the block
+afterwards (after an indirect call, whose WRITES are the union over the standard entries, or the JIT fallback, which reads the block) took the
+callee's x19 of the moment.
+
+**The fix** (`lower_calls.cpp` `FnDataflow`): a backward branch's poll and a jump table's poll (a case at or before its block), a spin wait's gate
+(its back-edge) and an observation gate (before its block) count as stores of the registers they store: the block's end state, the state
+before the block for an observation gate. The entry's poll stores the entry values, which are the callers' own, and is not counted. A poll
+FnElidePolls removes later still counts (the stores at the returns are then more than needed, never fewer). A function split for size stores
+every register it keeps at its returns already (`FunctionPlan::restore`).
+
+**Checked** by dm/host's `t_aot_host` `pollkeep` row: a module the test writes word by word whose `start` sets x19 and calls `q` through `blr`
+(an address-taken function that changes x19 makes the union's WRITES hold it), `q` calls a host function that sets its thread's poll byte (as
+SetThreadActivity's pause request does from another thread), then a leaf `p` that saves x19, counts it up in a loop of 8 and restores it:
+`start` finds its own x19 after the call, with no JIT run. The base nxaot's pack prints `pollkeep FAIL` (x19 read back as 1, `p`'s value at the
+poll). **The packs change** where a function that keeps a register writes it in a loop or before a gate: one store per such register at its
+returns and tail calls. With this round's other changes ("Resume points and the FPCR", "Unbounded brs by form"), the 18 corpus packs of
+`build_packs.sh`: `.text` 1,407,160 → 1,410,184 bytes (+0.21 %; sjlj-clang +1,968 the most, whose functions with a setjmp continuation have a
+resume check at every call site, the others +16 to +320), and their Windows packs the same way; the synthetic modules' and t_second_pack's packs are the same
+bytes. The game's: "Unbounded brs by form".
+
+## Resume points and the FPCR
+
+A resume point (a landing pad, a setjmp continuation, a `nonlocal` miss's address: design 3.3) took a pending transfer when `st->pending` was its
+address and SP the frame's. Compiled code is specialised for one FPCR (design 7.1), and the transfer may come under another: the host
+propagates a return the JIT fallback makes under another FPCR to the frame that waits for it (`aot_run.c` `jit_loop`, "A return under another
+FPCR" in docs/reference/threads.md) with `st->pending` at that return address, and a call site whose return address is a resume point of its own
+(a setjmp's continuation) then resumed natively, under the wrong FPCR; so did a frame that takes a longjmp or an exception thrown under
+another FPCR.
+
+**The fix** (`lower_calls.cpp` `FnCall`): the resume check also compares st->fpcr's mode bits (`kFpcrModeMask`, dynarmic's location descriptor's)
+with the FPCR the code is specialised for; under another the transfer goes on past the frame, as one for no frame of compiled code does, and the
+host runs it in the JIT fallback (its miss `fpcr`, as a return under another FPCR). One load, an and and a compare more in each pending path,
+which runs only on a non-local transfer.
+
+**Checked** by dm/host's `t_aot_host` `fpresume` row: `fpret`'s module (a function sets round towards zero and jumps to a host function that
+returns to its caller under it) packed with a misses file the test writes, which makes the caller's call site a resume point
+(`<offset> nonlocal 1` under the image's SHA-256): the caller's rest rounds 2.75 with `frinti` under the current mode and checks 2; 2 misses, both
+`fpcr`, none `nonlocal`. The base nxaot's pack resumes natively there, and the rest of `start` runs as compiled code (`fpresume FAIL`, 1 miss, no JIT run after the call).
 
 ## Jump tables whose index depends on several values
 
@@ -991,6 +1034,201 @@ on the x86-64 engine yet) and a Windows run (the packs change the same way; not 
 What stays unbounded: fnptr's `unops[i % 6](x)`, a remainder by 6 computed with a multiply-high that no LLVM analysis bounds, through a table
 of function pointers in data (a call, which the dispatcher's inline cache serves), and `gen_bench.py --unbounded-switches`'s remainders but
 by 16 (a mask).
+
+## Unbounded brs by form
+
+Mario vs. Donkey Kong's modules (`sdk`, `subsdk0`, `main`; [its note](../../games/0100B99019412000/README.md#on-linux-the-x86-64-engine)) left
+thousands of `br` rows "the index is not bounded at the br" in `nxaot discover --tsv`, and the misses of its routes came back at other cases of
+the same tables. A census of every `br` row that is no PLT stub, by the machine code that computes its target (a classifier outside the
+repository: the function's CFG rebuilt from its extent and the known tables, the target register's definition and the index's found along the
+dominator chain), showed that the reason named another thing than tables almost everywhere:
+
+| `br` rows "the index is not bounded" (base) | `sdk` | `subsdk0` | `main` |
+|---|---:|---:|---:|
+| a pointer loaded from a register plus a constant (`ldr x3, [x8, #0x28]; br x3`: a function pointer or vtable slot; `ldp` pairs, an array at a constant index) | 1,746 | 184 | 3,185 |
+| a call's result or an argument moved (`mov`) | 0 | 0 | 4 |
+| a jump table (a narrow entry from a table by an index, added to an `adr` base) | 9 | 1 | 4 |
+
+And the tables are spread over three reasons, "not bounded", "depends on more than one value" and "more than 4096 values": 69, 16 and 86 of
+them in the three modules (main's "depends on more than one value" rows are 216 C++ member function pointer calls and 41 tables). By the
+form of their bound:
+
+| form | what bounds the index | what the analysis missed | fix |
+|---|---|---|---|
+| the compare and its `b.hi` in different blocks (a `tbnz` between them) | `cmp w10, #0x32` ... `b.hi` | the Z flag reaches `b.hi` as `icmp eq (sub x, 50), 0` (the lifter keeps N, Z, C, V apart across blocks), and LazyValueInfo bounds a value by conditions on that value only: on the false edge of C & !Z it knew nothing | `CompareOperands`: `(x - C) == 0` rewritten as `x == C` before LazyValueInfo (sound: the same predicate in modular arithmetic) |
+| the index is `and x, 0xffffffff` or `and x, 0xff`, the compare on `w` or on `and w, 0xff` | `cmp w20, #0x10; b.hi`, then `and x8, x20, #0xffffffff` | the compare is on another value (a trunc, or a narrower and) of the same register | `RangeOf`: `and x, 2^n - 1` takes the range of a trunc of x to n bits, or of `and (trunc x), M`, on the straight line to the br (the same function of the same x) |
+| bounded on every path, one path past a `blr` | `cmp w9, #6` before the table on both paths, one after `blr x8` | a call with no summary (a `blr`, a `bl` to no known function) ended the region | `EffectOf`: such a call changes every register, SP and NZCV (`lift::CallEffect`'s default): the region goes on past it with all of them opaque, which models any callee that returns there |
+| the table's base in a callee-saved register set before a loop that calls through a PLT stub or `blr` | `adrp x28; add x28` before the loop | the call's union (every address-taken function) changes x28 | the PLT part: "PLT stubs bound to their own module" below; a `blr` stays (sdk's `nn::util::VFormatString`) |
+| a 32-bit compare of a 64-bit index loaded from a stack slot | `ldr x10, [sp]; cmp w10, #3` | the upper half is what an earlier `str` left: memory is not followed | none: refused, as before |
+| a bound only algebra gives | nlib's `memchr` variants: `end - (end & ~3)` | no LLVM analysis of the region bounds it | none (below) |
+| none in the code (a contract of the caller) | | | none (below) |
+
+The pointer loads now say so (`AnalyseTarget`: "a pointer loaded from a register plus a constant (a function pointer or vtable slot, no table)",
+and "a pointer loaded from a sum of registers (a member function pointer's vtable slot, no table)"), given only when no node of the address is
+bounded: a 64-bit entry that is the target itself, read at the sum of the leaves (each with coefficient 1) and a constant, where a table's index
+is scaled by its entries' size. The census then counts tables. `nxaot discover --tsv` of the three modules, the tip's nxaot against this one
+(without `--bind`; the table rows "a pointer ..." are the relabelled ones):
+
+| | `sdk` | `subsdk0` | `main` |
+|---|---:|---:|---:|
+| jump tables | 637 → 663 | 324 → 325 | 621 → 647 |
+| `br` rows "the index is not bounded" | 1,755 → 6 | 185 → 1 | 3,193 → 3 |
+| "a pointer loaded from a register plus a constant" / "from a sum of registers" | 0 → 1,764 / 1 | 0 → 190 / 2 | 0 → 3,193 / 214 |
+| "depends on more than one value" | 27 → 25 | 16 → 13 | 257 → 41 |
+| "the index range has more than 4096 values" | 42 → 10 | 8 → 2 | 30 → 5 |
+| "a target is not a decoded instruction of the function" | 10 → 3 | 1 → 1 | 6 → 5 |
+| tables left unbounded (the classifier's count, every reason) | 69 → 43 | 16 → 15 | 75 → 47 |
+| preserving / open functions | 8,098 / 31,754 → 8,100 / 31,752 | 2,417 / 11,238 → the same | 23,352 / 47,202 → 23,361 / 47,193 |
+| discovery, s (one run each, a shared machine) | 14.4 → 15.1 | 3.9 → 3.2 | 160.7 → 165.8 |
+
+The tables left are mostly a base in a callee-saved register that a call in the loop makes unknown (24, 14 and 24 "cmp-here" forms, the
+compare right before the table), a call through a PLT stub (below) or a `blr`.
+
+**Over-approximated tables** (no compare, mask or byte load bounds the index, the base a constant): not done; the argument is beside
+`AnalyseTarget`'s failure ([src/analysis/jumptable.cpp](src/analysis/jumptable.cpp)). Lowered as a switch over the targets of the table's
+prefix whose entries land on decoded instructions of the function, with the dispatcher as its default, the br would still run right (the switch
+compares the computed address). But the targets become the CFG's edges and the function closed, its summary covering the blocks they reach, so
+it holds only if every real entry is in the scanned prefix: the index never negative nor past the scan, no real target outside the extent or off
+the decoded code (a case that is another function's entry, or a `.cold` part placed after the next function, stops the scan before the entries
+after it). That is exactly what the code does not show for such an index, and of the 1,627 tables bounded in these modules none has a target
+outside its function, so nothing tells the two apart. The data left no case to take the risk for: after the forms above, the tables whose index no compare, mask or byte load
+bounds are 14 brs of `sdk` (6 in nlib's `memchr` variants), 1 of `subsdk0` and 12 of `main`, in about as many of 125,032 functions; a wrong
+closure is a silent miscompilation, a dispatcher miss costs one lookup. Those tables stay with the dispatcher, their functions open.
+
+**Checked** by CTest `discover`'s hand-written module ([tests/test_discover.py](tests/test_discover.py)): four more forms, each a table with
+exactly its cases, index by index (a compare whose `b.hi` follows a `tbnz`, an index `and x8, x0, #0xff` compared as `and w9, w0, #0xff`, an
+index `and x8, x0, #0xffffffff` compared as `w0`, an index bounded on two paths into the table, one past a `blr` whose result it compares), and
+one more look-alike that must stay a br (a `blr` between the compare and the load); the base nxaot bounds none of the four, and every earlier
+form and look-alike is as before.
+
+**Measured**, the packs of the three modules (balanced, tier W, 6 workers, no cache, one run each on a machine shared with another agent's
+container, load 6 to 14), the tip's nxaot against this one (this section, "Polls and gates in restore_block" and "Resume points and the FPCR";
+no `--bind`): `.text` `sdk` 57,369,620 → 57,513,908 (+0.25 %), `subsdk0` 28,002,380 → 28,055,180 (+0.19 %), `main` 166,354,612 → 166,662,132
+(+0.18 %); pack time 85.8 → 86.6 s, 39.3 → 46.0 s, 333.6 → 355.2 s (the load moved under them: no claim either way). The benchmark and the
+corpus ([tests/measure_packs.py](tests/measure_packs.py), 3 rounds, 2 layouts, fastest of 3, pinned to one CPU, the load 16 to 20 from
+another agent's builds): every verdict "within noise".
+
+| Program | A | B | change | noise | .text A -> B | pack time A -> B |
+|---|---:|---:|---:|---:|---:|---:|
+| benchmark, 4,000 functions (seed 1) | 1.089 ms | 1.130 ms | +3.76 % | 6.54 % | 6,268,608 -> 6,268,624 | 6.52 -> 6.50 s |
+| int_ops-gcc (`int_ops_rounds = 200`) | 61.352 ms | 60.823 ms | -0.86 % | 5.34 % | 53,964 -> 54,012 | 0.34 -> 0.41 s |
+| except-gcc | 659.0 µs | 641.0 µs | -2.73 % | 8.69 % | 79,708 -> 79,804 | 0.43 -> 0.38 s |
+| switch-gcc | 170.0 µs | 173.5 µs | +2.06 % | 10.95 % | 353,852 -> 353,900 | 0.84 -> 0.72 s |
+| fnptr-gcc | 9.0 µs | 8.5 µs | -5.56 % | 22.22 % | 49,324 -> 49,404 | 0.26 -> 0.29 s |
+| sjlj-gcc | 6.0 µs | 5.5 µs | -8.33 % | 18.33 % | 48,988 -> 49,068 | 0.36 -> 0.41 s |
+
+## PLT stubs bound to their own module
+
+A call through a PLT stub (`adrp x16; ldr x17, [x16, #o]; add x16, x16, #o; br x17`) took the stub's summary, and the stub's `br` is one the
+dispatcher serves: the union over the module's address-taken functions, which in Mario vs. Donkey Kong's `sdk` (80 % of its functions `open`)
+changes every register. The census of the three modules' PLT stubs, each resolved as the host loader binds it (`loader.c` `bind_sym`: the
+forced take-overs first, a local or hidden definition to the module itself, then the loaded modules in load order, main, `subsdk0`, `sdk`,
+then the host's HLE), with their `bl` and `b` sites:
+
+| module | bound to itself | to another module of the set | to the host (forced take-over) |
+|---|---:|---:|---:|
+| `main` | 0 | 474 stubs (459 `sdk`, 15 `subsdk0`), 59,484 sites | 115 stubs, 174 sites |
+| `subsdk0` | 3,394 stubs, 23,094 sites | 505 (496 `sdk`, 9 `main`), 24,678 sites | 25, 65 |
+| `sdk` | 8,756 stubs, 62,417 sites | 27 (22 `main`, 5 `subsdk0`), 3,591 sites | 148, 6,039 |
+
+`sdk`'s stubs bound to `main` are names both define (`operator new` and `delete`, `malloc`, `free`, `realloc`: main's definitions win, as on
+Horizon). So the binding is a fact of the pack set and of the host, not of the module: nxaot takes it from the host.
+
+**The host writes the bindings** (`dm/host/aot.h`, "The loader's bindings"): with `DM_AOT_PROFILE=<folder>`, beside the profile and the misses,
+`<folder>/<module>.bind.tsv` for every module with a pack (not an NRO, which binds only when the game loads it): the misses' header (module,
+build ID, image SHA-256, pack) and one line `0x<slot> 0x<target> <symbol>` per JUMP_SLOT relocation of a symbol the module defines whose slot
+holds the module's own definition after relocation (`loader.c` `loader_self_bindings`).
+
+**nxaot build --bind <file>** (and `nxaot discover --bind`), taken when its header names the image's SHA-256: a PLT stub whose slot is in the
+file is a tail call of that function, as `b` makes it, in discovery (the block must run the stub's `ldr` first: a branch into the stub's last
+words starts a block there and stays a `br`), the summaries, the plan and the lowering (`FnLowerTerminal`: the stub's `br` lowered as `b` to the
+function). The analysis cache's key and each unit's key hold the bindings (a unit's: its bound stubs and their functions' facts); a pack
+without `--bind` is as before. The pack records every binding it assumed in an exported table, `nxaot_bindings` (include/nxaot/aot_module.h:
+`{slot, target}` module offsets, then a row of all ones; on Windows exported by the DLL), and the host compares each slot with base + target
+once the module is relocated (`aot_arena.c` `bindings_check`): a slot bound otherwise refuses the pack with a `[RED]` line naming the slot and
+what the loader bound it to (another pack set, a host that takes the name over now), which stops the start as a pack of another image does;
+with `DM_AOT_PROFILE` that session's bindings file is written first, so the next pack takes the current ones. An NRO's pack with bindings is
+refused. The packer passes `<NSP folder>/<id>-work/profile/<module>.bind.tsv` when there is one for the image (`--bind`, the pairs in the pack's
+key).
+
+**Measured** on the three modules, the bindings the host's rule gives (written for the census by a script that applies `bind_sym`'s order to
+the three modules' symbol tables and the host's forced names, the names of `HLE_FORCE` and `HLE_FORCE_BIG` in dm/host and dm/gfx; a game
+session writes the same file): 8,756 slots of `sdk`, 3,394 of `subsdk0`, none of `main`. Discovery with them against without:
+
+| | `sdk` | `subsdk0` |
+|---|---:|---:|
+| preserving / open / noreturn functions | 8,100 / 31,752 / 444 → 17,482 / 22,324 / 490 | 2,417 / 11,238 / 348 → 3,806 / 9,849 / 348 |
+| jump tables | 663 → 673 (`sdk+0x1cfb44` and `sdk+0x4a4004` among them) | 325 → 327 |
+| `br` rows of PLT stubs ("a constant entry address") | 8,971 → 215 | 3,931 → 537 |
+| regions lifted | 27,823 → 9,488 | 10,210 → 3,318 |
+| discovery, s | 15.1 → 14.9 | 3.2 → 4.0 |
+| `.text` of the pack (tier W) | 57,513,908 → 54,831,152 (−4.7 %) | 28,055,180 → 27,334,768 (−2.6 %) |
+| pack time, s (one run, no cache) | 86.6 → 100.5 | 46.0 → 46.6 |
+
+The code shrinks as callers keep callee-saved registers in SSA across the calls instead of storing and reloading them, and the stubs become
+direct tail calls. Not run: the game with such packs (its build folder was another agent's this round), so no run time is claimed.
+
+**Checked** by dm/host's `t_aot_host` `bindstub` rows: a module the test writes word by word with a dynamic section (one global symbol and one
+JUMP_SLOT relocation of it) whose `start` calls a PLT stub 64 times: a run under `DM_AOT_PROFILE` writes the bindings file with the slot's row
+(and the pack without `--bind` misses once in the dispatcher at the stub's `br`); the pack built with it runs with no dispatcher miss and the
+right sum; a pack built with a file that binds the slot to the function + 4 is refused at load (`it assumes the GOT slot bindstub+0x2000 binds
+to bindstub+0xe0, and the loader bound it to bindstub+0xdc ...`).
+
+**Calls into another module or the host: not done** (data for a decision). Every stub bound elsewhere keeps the union. A per-export fact,
+"preserves the callee-saved registers and SP and returns", recorded in each pack for its exports and in the importing pack for every import it
+assumed it of, checked by the host at load (a mismatch refusing the pack), would give those calls their callee's class. What it would reach,
+by the class the target has in its own module (the `sdk` and `subsdk0` classes with their own bindings):
+
+| importer | to `sdk` | to `subsdk0` | to `main` |
+|---|---|---|---|
+| `main` | preserving 404 stubs, 58,035 sites; noreturn 4, 1,140; open 51, 252 | preserving 5, 16; open 10, 41 | |
+| `subsdk0` | preserving 245, 11,105; open 249, 11,661; noreturn 2, 44 | | open 8, 1,867; preserving 1, 1 |
+| `sdk` | | preserving 1, 1,008; open 4, 71 | open 19, 2,497; preserving 3, 15 |
+
+`main`'s are nearly all calls of preserving `sdk` functions (`__cxa_guard_acquire` and `__cxa_guard_release` alone 45,845 sites, then `memcpy`,
+`sqrtf`, `memset`); `sdk`'s calls into `main` are of `main`'s allocator (`operator delete`, `realloc`, `malloc`, `free`, `operator new`), which
+is open in `main` (its own calls into `sdk` are). Its costs: the
+facts of a module depend on the modules it imports from (sdk calls main's `malloc` and `operator delete`, main calls sdk), so the packs of a
+set are no longer independent: either one analysis over the set (each module's discovery is already a fixed point; the set's would iterate
+across them) or each module's facts computed with its imports taken as open (then sdk's functions that call main's allocator stay open, as
+they are now) and the importers built after the exporters; a host function (the forced take-overs, the HLE) preserves the guest's callee-saved
+registers by construction (its thunk writes only the return registers), so those imports could take the fact without a check; and a host or
+pack change that alters one export's class refuses every pack that imported it.
+
+## The second pack's cached units
+
+`nxaot build --profile` compiles a sampled function at tier H and every other one at tier C in the balanced mode (H+ and H in the max mode:
+"Tiers by profile"). Design 9.3 chose C for the functions the profile never sampled for the pack's time: a pack with a profile compiled every
+function, and C compiles at about twice W's rate ("Phase 5d"). But the profile comes from a game run on the first pack, built without one
+(every function at the mode's tier), and that pack's units sit in the per-function cache: compiling them again at C costs time, and C's code is
+about twice W's and slower (the game's `.text` with a profile was 481 / 169 / 87 MB for `main` / `sdk` / `subsdk0` against 166 / 57 / 28 at W).
+
+**The rule** ([src/build/pack.cpp](src/build/pack.cpp) `FirstPackUnits`, with `--profile` and `--cache`): the units the first pack's tiers make
+(the mode's tier; gap code as `GapTiers` makes it without a profile) are formed, and every one at the mode's tier with no sampled function
+whose key the cache holds keeps that tier: its code comes from the cache, compiled by nothing. Units are groups of neighbours cut by size,
+content and tier changes, so the final tiers' units are checked again: one at the mode's tier the cache does not hold (a sampled neighbour cut
+the group elsewhere) goes back to the profile's tiers, until every such unit hits. The sampled functions and the guarded sites (at H and H+
+only, none in those units) are as before, and so is a pack with no cache or no first pack in it. Logged as `aot: second pack: <n> functions
+(<i> instructions) the profile did not sample keep the first pack's tier W, their units cached (<u> of them in <l> units looked up); the
+others at C`. The test switch `NXAOT_FIRST_PACK_UNITS=0` gives the profile's tiers alone (docs/env_switches.tsv).
+
+**Measured** on Mario vs. Donkey Kong's three modules (balanced, 6 workers, one run each on a machine shared with another agent's container,
+load 6 to 14): the first pack into a cache, then the second pack with the game's profile of round 2 (`<work>/profile/<module>.tsv`, its targets
+beside it, no misses file) from a hard-link copy of that cache each way:
+
+| module | functions kept at W (instructions) | units hit / missed | pack time, the profile's tiers → kept | `.text`, the profile's tiers → kept |
+|---|---:|---:|---:|---:|
+| `sdk` | 36,066 of 40,296 (1,433,980) | 0 / 3,403 → 2,649 / 776 | 40.0 → 11.5 s | 169,566,404 → 61,973,940 |
+| `subsdk0` | 12,126 of 14,003 (826,132) | 0 / 1,424 → 1,220 / 216 | 17.9 → 4.5 s | 87,900,956 → 30,095,868 |
+| `main` | 60,973 of 70,733 (3,578,810) | 0 / 8,432 → 6,146 / 2,458 | 112.4 → 35.7 s | 481,148,560 → 193,957,696 |
+| all three | | | 170.3 → 51.7 s (−70 %) | 738.6 → 286.0 MB (−61 %) |
+
+The first pack's `.text` (tier W everywhere) was 57.5 / 28.1 / 166.7 MB: the second pack now adds the H functions and the units a sampled
+neighbour moved to C (4,230, 1,877 and 9,760 functions). The choice itself (`FirstPackUnits`: the first grouping, a key and a lookup per unit,
+then the final grouping checked) took 3.5, 1.4 and 7.3 s of those times. The corpus's second-pack game (`t_second_pack.py --prebuild`: 10
+functions, 136 instructions, with its misses file and a profile of its largest function): 3 of 6 units from the first pack's cache, `.text`
+13,092 → 10,660 bytes (the first pack's 9,660), 0.27 → 0.24 s. CTest `cache` checks it on the corpus ([tests/test_cache.py](tests/test_cache.py):
+a profile of one function of the changed NRO, the other functions kept at W where their units hit, none with `NXAOT_FIRST_PACK_UNITS=0`).
 
 ## Threads and safepoints
 

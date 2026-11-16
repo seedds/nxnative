@@ -39,6 +39,11 @@
 //     when the function returns (exact JIT runs, addresses and misses, none nonlocal: dm/tools/aot/README.md, "Tail calls and the native frame's return")
 //   fpret, with the JIT built in and nxaot (it packs it): a module this test writes word by word whose function sets FPCR and jumps to a host function that returns to
 //     the caller under it: the frames propagate the return, which is a miss `fpcr`, not `nonlocal` (aot_run.c REASON_FPCR_RETURN)
+//   fpresume, with the JIT built in and nxaot (it packs it, with a misses file the test writes): fpret's shape with the caller's call site a resume point: the
+//     return under RZ reaches the caller's frame as a pending transfer at its resume point, which must not take it under another FPCR (lower_calls.cpp FnCall)
+//   pollkeep, with nxaot (it packs it): a module this test writes word by word whose leaf keeps x19 but stores its own x19 in a loop's poll (the poll byte set by a host
+//     function first): the leaf stores the restored x19 again before it returns, and its caller's caller, which reloads x19 after an indirect call, finds its own
+//     (lower_calls.cpp FnDataflow: a poll's and a gate's stores count in restore_block)
 //   spkeep, with nxaot (it packs it): a module this test writes word by word whose function calls through a PLT stub's shape (WRITES the union, SP in it) a function
 //     that keeps SP, moves it and calls a leaf with an svc: the caller reloads SP from the block and must find its own (the right sum, no JIT run: dm/tools/aot/README.md,
 //     "A callee's SP left in the block")
@@ -100,6 +105,12 @@ uint32_t thr_cur_handle(void);
 uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr);   // hle_svc.c
 uint64_t t_aot_hidden(uint64_t x);   // t_aot_host_entries.c
 void t_aot_pause_tester(uint64_t arg);
+uint64_t t_aot_poll_self(uint64_t x);
+// t_aot_poll_self's request: the calling thread's poll byte (guest_state.h), as a pause request sets it
+void t_aot_poll_request(void) {
+    dm_guest_state *st = dm_aot_self_state();
+    if (st) __atomic_store_n(&st->poll, (uint8_t)1, __ATOMIC_SEQ_CST);
+}
 extern _Atomic uint64_t g_t_aot_hidden_calls;
 
 // ---------- The child: one run ----------
@@ -205,6 +216,7 @@ typedef struct {
     int jit_ready, ready_ahead;                     // --jit-ready: the run starts once the JIT's instance made ahead is ready; it was
     int bt;                                         // --bt <mode>: guestbt's mode, with the host function and the address no page backs it reads (guestbt_nro)
     long hostfn;                                    // --hostfn <module offset>: the guest-visible address of t_aot_hidden written there (fpret_nro), 0: none
+    long pollfn;                                    // --pollfn <module offset>: the guest-visible address of t_aot_poll_self written there (pollkeep_nro), 0: none
 } run_args;
 
 static uint8_t *slurp(const char *path, size_t *n) {
@@ -254,6 +266,10 @@ static void *guest_main(void *p) {
     if (a->hostfn) {   // a module written here that branches to a host function through a pointer in its data (fpret_nro)
         const uint64_t fn = dm_guest_fn((const void *)t_aot_hidden);
         memcpy((uint8_t *)m->base + a->hostfn, &fn, 8);
+    }
+    if (a->pollfn) {   // pollkeep_nro's request through a pointer in its data
+        const uint64_t fn = dm_guest_fn((const void *)t_aot_poll_self);
+        memcpy((uint8_t *)m->base + a->pollfn, &fn, 8);
     }
     if (a->hidden) {   // fnptr's hidden_ptr: the guest-visible address of a host function (2.4)
         uint64_t *hp = module_sym(m, "hidden_ptr");
@@ -416,6 +432,7 @@ static int child(int argc, char **argv) {
         if (!strcmp(argv[i], "--set") && i + 1 < argc && a.nsets < 8) a.sets[a.nsets++] = argv[++i];
         else if (!strcmp(argv[i], "--hidden-host")) a.hidden = 1;
         else if (!strcmp(argv[i], "--hostfn") && i + 1 < argc) a.hostfn = strtol(argv[++i], NULL, 0);
+        else if (!strcmp(argv[i], "--pollfn") && i + 1 < argc) a.pollfn = strtol(argv[++i], NULL, 0);
         else if (!strcmp(argv[i], "--dirty")) a.dirty = 1;
         else if (!strcmp(argv[i], "--positions")) a.positions = 1;
         else if (!strcmp(argv[i], "--jit-ready")) a.jit_ready = 1;
@@ -455,6 +472,7 @@ static int child(int argc, char **argv) {
     if (a.pause)
         printf("t_aot_host: pause test: %u pauses (%u with more than one thread running), %u register-invariant checks, %u inconsistent, %u exited%s%s\n",
                g_pt.done, g_pt.threaded, g_pt.invariant, g_pt.inconsistent, g_pt.exited, g_pt.inconsistent ? "; first: " : "", g_pt.bad);
+    if (dm_aot_profile_on()) dm_aot_profile_write();   // DM_AOT_PROFILE: the profile, misses and bindings files, as a game's exit writes them (_exit runs no atexit writer; once)
     fflush(NULL);
     _exit(a.status);   // other threads may still be parked (a pause tester, a stuck thread): the process ends here, as a game's
 }
@@ -770,12 +788,30 @@ static size_t lrtail_nro(uint8_t *img, size_t cap, uint64_t *want) {
     return SIZE;
 }
 // nxaot build <nro> --shared <out>: its exit status, its last line into line
-static int nxaot_pack(const char *nxaot, const char *nro, const char *out, char *line, size_t n) {
+// misses: a misses file for `nxaot build --misses` (NULL: none)
+static int nxaot_pack_misses(const char *nxaot, const char *nro, const char *out, const char *misses, char *line, size_t n) {
+    char cmd[4096], buf[4096], extra[600] = "";
+#if defined(_WIN32)
+    if (misses) snprintf(extra, sizeof extra, " --misses \"%s\"", misses);
+    snprintf(cmd, sizeof cmd, "\"\"%s\" build \"%s\" --shared \"%s\"%s 2>&1\"", nxaot, nro, out, extra);
+#else
+    if (misses) snprintf(extra, sizeof extra, " --misses '%s'", misses);
+    snprintf(cmd, sizeof cmd, "'%s' build '%s' --shared '%s'%s 2>&1", nxaot, nro, out, extra);
+#endif
+    line[0] = 0;
+    FILE *f = popen(cmd, "r");
+    if (!f) return -1;
+    while (fgets(buf, sizeof buf, f)) { snprintf(line, n, "%s", buf); line[strcspn(line, "\n")] = 0; }
+    return pclose(f);
+}
+static int nxaot_pack(const char *nxaot, const char *nro, const char *out, char *line, size_t n) { return nxaot_pack_misses(nxaot, nro, out, NULL, line, n); }
+// option file: one more option of nxaot build and its file (--bind <file>)
+static int nxaot_pack_with(const char *nxaot, const char *nro, const char *out, const char *option, const char *file, char *line, size_t n) {
     char cmd[4096], buf[4096];
 #if defined(_WIN32)
-    snprintf(cmd, sizeof cmd, "\"\"%s\" build \"%s\" --shared \"%s\" 2>&1\"", nxaot, nro, out);
+    snprintf(cmd, sizeof cmd, "\"\"%s\" build \"%s\" --shared \"%s\" %s \"%s\" 2>&1\"", nxaot, nro, out, option, file);
 #else
-    snprintf(cmd, sizeof cmd, "'%s' build '%s' --shared '%s' 2>&1", nxaot, nro, out);
+    snprintf(cmd, sizeof cmd, "'%s' build '%s' --shared '%s' %s '%s' 2>&1", nxaot, nro, out, option, file);
 #endif
     line[0] = 0;
     FILE *f = popen(cmd, "r");
@@ -1060,6 +1096,398 @@ static void fpret_row(const char *self, const char *nxaot) {
     snprintf(note, sizeof note, "a return to start+%#llx under RZ: %llu misses (want 2: the msr fpcr and the return, both `fpcr`), %llu nonlocal (want 0), host function called %llu times%s%s",
              (unsigned long long)cont, r.jit[2], r.jit[3], r.stat[7], r.red[0] ? "; first red line: " : "", r.red);
     row("fpret", "fpcr", ok, &r, note);
+    if (r.guest != no_lines) free(r.guest);
+}
+
+// ---------- A poll's stores count in restore_block (lower_calls.cpp FnDataflow) ----------
+// The NRO pollkeep, written here word by word: start sets x19 to 0x1234 and calls q through a register (blr: the indirect view, whose WRITES are the union over the
+// standard entries, so start reloads x19 from the block after it). q calls the host function t_aot_poll_self through a pointer in its data (POLLKEEP_FN, which the
+// child's --pollfn fills): it sets the thread's poll byte. Then q calls p, a leaf that saves x19 and x20, counts x19 up in a loop of 8 and restores both: the poll of
+// the loop's back-edge takes its cold path once and stores p's x19 of the moment into the block. p keeps x19 (outside its WRITES), so q and start keep their copy
+// in SSA across it; but start's reload after the blr reads the block. Before the fix p returned without storing the restored x19 again (its restore_block counted the
+// stores of calls and svcs, not those of polls and gates) and start read 1 ("pollkeep FAIL")
+enum { POLLKEEP_FN = 0x2000 };
+static size_t pollkeep_nro(uint8_t *img, size_t cap) {
+    enum { TEXT = 0x1000, RO = 0x1000, DATA = POLLKEEP_FN, SIZE = 0x3000, BSS = 0x1000, PASS_AT = RO + 0x100, FAIL_AT = RO + 0x120 };
+    if (cap < SIZE) return 0;
+    memset(img, 0, SIZE);
+    uint32_t w[128] = {0};
+    size_t n = 0x80 / 4;
+    const size_t start = n;
+    w[n++] = 0xA9BE7BFDu;               // stp x29, x30, [sp, #-32]!
+    w[n++] = 0x910003FDu;               // mov x29, sp
+    w[n++] = 0xF9000BF3u;               // str x19, [sp, #16]
+    w[n++] = a_movz(19, 0x1234);
+    const size_t adr_r = n++;           // adr x11, r         (r's address taken: the union of the indirect view writes x19)
+    const size_t adr_q = n++;           // adr x9, q
+    w[n++] = 0xD63F0120u;               // blr x9
+    w[n++] = a_movz(10, 0x1234);
+    w[n++] = 0xEB0A027Fu;               // cmp x19, x10
+    const size_t to_fail = n++;         // b.ne fail
+    w[n] = a_adr(0, (int64_t)PASS_AT - (int64_t)n * 4); n++;
+    w[n++] = a_movz(1, 13);             // "pollkeep PASS"
+    w[n++] = 0xD40004E1u;               // svc #0x27 (OutputDebugString)
+    const size_t to_exit = n++;         // b exit
+    w[to_fail] = a_bcond(1, (int64_t)(n - to_fail) * 4);
+    w[n] = a_adr(0, (int64_t)FAIL_AT - (int64_t)n * 4); n++;
+    w[n++] = a_movz(1, 13);             // "pollkeep FAIL"
+    w[n++] = 0xD40004E1u;               // svc #0x27
+    w[to_exit] = a_b((int64_t)(n - to_exit) * 4);
+    w[n++] = 0xD40000E1u;               // svc #0x7 (ExitProcess)
+    w[n++] = 0xD4200000u;               // brk #0
+    // q: the poll request through the host function, then p
+    const size_t q = n;
+    w[adr_q] = a_adr(9, (int64_t)(q - adr_q) * 4);
+    w[n++] = 0xA9BF7BFDu;               // stp x29, x30, [sp, #-16]!
+    w[n++] = 0x910003FDu;               // mov x29, sp
+    w[n] = a_adr(9, (int64_t)DATA - (int64_t)n * 4); n++;   // adr x9, POLLKEEP_FN
+    w[n++] = 0xF9400130u;               // ldr x16, [x9]
+    w[n++] = 0xD63F0200u;               // blr x16            (t_aot_poll_self: the poll byte set)
+    const size_t call_p = n++;          // bl p
+    w[n++] = 0xA8C17BFDu;               // ldp x29, x30, [sp], #16
+    w[n++] = 0xD65F03C0u;               // ret
+    // p: a leaf that keeps x19 and x20 and loops with them
+    const size_t p = n;
+    w[call_p] = a_bl((int64_t)(p - call_p) * 4);
+    w[n++] = 0xA9BF53F3u;               // stp x19, x20, [sp, #-16]!
+    w[n++] = a_movz(19, 0);
+    w[n++] = a_movz(20, 8);
+    const size_t loop = n;
+    w[n++] = a_addi(19, 19, 1);         // add x19, x19, #1
+    w[n++] = 0xF1000694u;               // subs x20, x20, #1
+    w[n] = a_bcond(1, (int64_t)loop * 4 - (int64_t)n * 4); n++;   // b.ne loop (its poll)
+    w[n++] = 0xA8C153F3u;               // ldp x19, x20, [sp], #16
+    w[n++] = 0xD65F03C0u;               // ret
+    // r: never called; its address is taken, and it changes x19 and returns, so the indirect view's WRITES (the union) hold x19
+    const size_t r = n;
+    w[adr_r] = a_adr(11, (int64_t)(r - adr_r) * 4);
+    w[n++] = a_movz(19, 0);
+    w[n++] = 0xD65F03C0u;               // ret
+    w[0] = a_b((int64_t)start * 4);
+    w[1] = RO;
+    memcpy(img, w, n * 4);
+    memcpy(img + 0x10, "NRO0", 4);
+    const uint32_t hdr[] = {0, SIZE, 0, 0, TEXT, RO, DATA - RO, DATA, SIZE - DATA, BSS};
+    memcpy(img + 0x14, hdr, sizeof hdr);
+    memcpy(img + RO, "MOD0", 4);
+    const int32_t mod0[] = {0x20, SIZE - RO, SIZE + BSS - RO, 0x40, 0x40, SIZE - RO};
+    memcpy(img + RO + 4, mod0, sizeof mod0);
+    memcpy(img + PASS_AT, "pollkeep PASS", 13);
+    memcpy(img + FAIL_AT, "pollkeep FAIL", 13);
+    return SIZE;
+}
+// The row (nxaot; the JIT not needed): start's x19 back after the call, no JIT run, the host function called once
+static void pollkeep_row(const char *self, const char *nxaot) {
+    if (!nxaot || !*nxaot) { printf("%-14s %-9s note: no nxaot (--nxaot, NXAOT): pollkeep is not packed here\n", "pollkeep", "poll"); return; }
+    static uint8_t img[0x3000];
+    const size_t len = pollkeep_nro(img, sizeof img);
+    char nro[200], pack[200], line[600] = "", note[1400], extra[64];
+    mkdir("t_aot_host.tmp", 0755);
+    mkdir("t_aot_host.tmp/pollkeep", 0755);
+    snprintf(nro, sizeof nro, "t_aot_host.tmp/pollkeep/pollkeep.nro");
+    snprintf(pack, sizeof pack, "t_aot_host.tmp/pollkeep/pollkeep%s", PACK_EXT);
+    FILE *f = fopen(nro, "wb");
+    const int wrote = len && f && fwrite(img, 1, len, f) == len;
+    if (f) fclose(f);
+    result r;
+    memset(&r, 0, sizeof r);
+    static char no_lines[1];
+    r.guest = no_lines;
+    if (!wrote || nxaot_pack(nxaot, nro, pack, line, sizeof line) != 0) {
+        snprintf(note, sizeof note, "%s: %s", wrote ? "nxaot build failed" : "cannot write the NRO", line);
+        row("pollkeep", "poll", 0, &r, note);
+        return;
+    }
+    snprintf(extra, sizeof extra, "--pollfn %#x", POLLKEEP_FN);
+    run_child(self, pack, nro, extra, &r);
+    const int ok = r.status == 0 && !strcmp(r.guest, "pollkeep PASS\n") && r.have_jit && r.jit[0] == 0 && r.have_stat && r.stat[2] == 1;
+    snprintf(note, sizeof note, "a caller's x19 reloaded after a callee's poll stored a restored x19 of the moment: %llu JIT runs (want 0), %llu host calls (want 1)%s%s",
+             r.jit[0], r.stat[2], r.red[0] ? "; first red line: " : "", r.red);
+    row("pollkeep", "poll", ok, &r, note);
+    if (r.guest != no_lines) free(r.guest);
+}
+
+// ---------- PLT stubs bound to their own module (aot.h, "The loader's bindings"; dm/tools/aot/README.md "PLT stubs bound to their own module") ----------
+// The NRO bindstub, written here word by word with a dynamic section: one symbol, t_bind_fn (global, default visibility, defined: f), and one JUMP_SLOT relocation
+// of it at BIND_SLOT. start calls the PLT stub (adrp x16; ldr x17, [x16, #lo]; add x16, x16, #lo; br x17) 64 times with x0 = i; f returns 3 * x0 + 1; start sums
+// the results. The loader binds the slot to f itself (nothing else defines the name, the host does not take it over), so the host writes the binding with
+// DM_AOT_PROFILE, and a pack built with it (nxaot build --bind) runs the stub as b to f: no dispatcher miss. A bindings file that names another target makes a
+// pack the host refuses when it loads it
+enum { BIND_SLOT = 0x2000, BIND_CALLS = 64 };
+static size_t bindstub_nro(uint8_t *img, size_t cap, uint64_t *f_off, uint64_t *want) {
+    enum { TEXT = 0x1000, RO = 0x1000, DATA = BIND_SLOT, SIZE = 0x3000, BSS = 0x1000, PASS_AT = RO + 0x400, FAIL_AT = RO + 0x420,
+           DYN = RO + 0x20, SYMTAB = RO + 0x100, STRTAB = SYMTAB + 2 * 24, JMPREL = RO + 0x200 };
+    if (cap < SIZE) return 0;
+    memset(img, 0, SIZE);
+    uint32_t w[128] = {0};
+    size_t n = 0x80 / 4;
+    const size_t start = n;
+    w[n++] = 0xA9BE7BFDu;               // stp x29, x30, [sp, #-32]!
+    w[n++] = 0x910003FDu;               // mov x29, sp
+    w[n++] = 0xA90157F3u;               // stp x19, x21, [sp, #16]
+    w[n++] = a_movz(19, 0);             // i
+    w[n++] = a_movz(21, 0);             // the sum
+    const size_t loop = n;
+    w[n++] = 0xAA1303E0u;               // mov x0, x19
+    const size_t call_stub = n++;       // bl stub
+    w[n++] = 0x8B0002B5u;               // add x21, x21, x0
+    w[n++] = a_addi(19, 19, 1);
+    w[n++] = 0xF101027Fu;               // cmp x19, #64
+    w[n] = a_bcond(1, (int64_t)loop * 4 - (int64_t)n * 4); n++;   // b.ne loop
+    uint64_t sum = 0;
+    for (unsigned i = 0; i < BIND_CALLS; i++) sum += 3 * i + 1;
+    *want = sum;
+    w[n++] = a_movz(9, (unsigned)sum);  // the sum fits 16 bits
+    w[n++] = 0xEB0902BFu;               // cmp x21, x9
+    const size_t to_fail = n++;         // b.ne fail
+    w[n] = a_adr(0, (int64_t)PASS_AT - (int64_t)n * 4); n++;
+    w[n++] = a_movz(1, 13);             // "bindstub PASS"
+    w[n++] = 0xD40004E1u;               // svc #0x27 (OutputDebugString)
+    const size_t to_exit = n++;         // b exit
+    w[to_fail] = a_bcond(1, (int64_t)(n - to_fail) * 4);
+    w[n] = a_adr(0, (int64_t)FAIL_AT - (int64_t)n * 4); n++;
+    w[n++] = a_movz(1, 13);             // "bindstub FAIL"
+    w[n++] = 0xD40004E1u;               // svc #0x27
+    w[to_exit] = a_b((int64_t)(n - to_exit) * 4);
+    w[n++] = 0xD40000E1u;               // svc #0x7 (ExitProcess)
+    w[n++] = 0xD4200000u;               // brk #0
+    // f: 3 * x0 + 1
+    const size_t f = n;
+    *f_off = f * 4;
+    w[n++] = 0x8B000409u;               // add x9, x0, x0, lsl #1
+    w[n++] = 0x91000520u;               // add x0, x9, #1
+    w[n++] = 0xD65F03C0u;               // ret
+    // The PLT stub: the slot's page and offset (both in the first 4 GiB: the adrp's page delta is (BIND_SLOT >> 12) - (stub >> 12))
+    const size_t stub = n;
+    w[call_stub] = a_bl((int64_t)(stub - call_stub) * 4);
+    const int64_t pages = (int64_t)(BIND_SLOT >> 12) - (int64_t)((stub * 4) >> 12);
+    w[n++] = 0x90000010u | (uint32_t)(pages & 3) << 29 | (uint32_t)((pages >> 2) & 0x7FFFF) << 5;   // adrp x16, BIND_SLOT page
+    w[n++] = 0xF9400211u | (uint32_t)((BIND_SLOT & 0xFFF) / 8) << 10;                               // ldr x17, [x16, #lo]
+    w[n++] = 0x91000210u | (uint32_t)(BIND_SLOT & 0xFFF) << 10;                                     // add x16, x16, #lo
+    w[n++] = 0xD61F0220u;                                                                          // br x17
+    w[0] = a_b((int64_t)start * 4);
+    w[1] = RO;
+    memcpy(img, w, n * 4);
+    memcpy(img + 0x10, "NRO0", 4);
+    const uint32_t hdr[] = {0, SIZE, 0, 0, TEXT, RO, DATA - RO, DATA, SIZE - DATA, BSS};
+    memcpy(img + 0x14, hdr, sizeof hdr);
+    memcpy(img + RO, "MOD0", 4);
+    const int32_t mod0[] = {DYN - RO, SIZE - RO, SIZE + BSS - RO, 0x40, 0x40, SIZE - RO};
+    memcpy(img + RO + 4, mod0, sizeof mod0);
+    // The dynamic section: the symbols, their strings and the one JUMP_SLOT relocation
+    const uint64_t dyn[][2] = {{6, SYMTAB}, {5, STRTAB}, {10, 16}, {11, 24}, {23, JMPREL}, {2, 24}, {20, 7}, {0, 0}};
+    memcpy(img + DYN, dyn, sizeof dyn);
+    const char strs[] = "\0t_bind_fn";
+    memcpy(img + STRTAB, strs, sizeof strs);
+    uint8_t sym[24] = {0};
+    const uint32_t name = 1;
+    memcpy(sym, &name, 4);
+    sym[4] = 0x12;                       // STB_GLOBAL, STT_FUNC
+    sym[5] = 0;                          // STV_DEFAULT
+    const uint16_t shndx = 1;
+    memcpy(sym + 6, &shndx, 2);
+    const uint64_t value = f * 4, size = 12;
+    memcpy(sym + 8, &value, 8);
+    memcpy(sym + 16, &size, 8);
+    memcpy(img + SYMTAB + 24, sym, 24);
+    const uint64_t rela[3] = {BIND_SLOT, (1ull << 32) | 1026u, 0};
+    memcpy(img + JMPREL, rela, sizeof rela);
+    memcpy(img + PASS_AT, "bindstub PASS", 13);
+    memcpy(img + FAIL_AT, "bindstub FAIL", 13);
+    return SIZE;
+}
+// The rows (nxaot): the host's bindings file of a run (DM_AOT_PROFILE) holds the slot and f; the pack built with it runs with no dispatcher miss (the pack built
+// without it: one, at the stub's br) and the right sum; a pack built with a file that binds the slot to f + 4 is refused at load, naming the slot
+static void bindstub_rows(const char *self, const char *nxaot) {
+    if (!nxaot || !*nxaot) { printf("%-14s %-9s note: no nxaot (--nxaot, NXAOT): bindstub is not packed here\n", "bindstub", "bind"); return; }
+    static uint8_t img[0x3000];
+    uint64_t f_off = 0, want = 0;
+    const size_t len = bindstub_nro(img, sizeof img, &f_off, &want);
+    char nro[200], pack[200], pack_b[200], pack_x[200], dir[200], bind[260], bad[260], line[600] = "", note[1400];
+    mkdir("t_aot_host.tmp", 0755);
+    mkdir("t_aot_host.tmp/bindstub", 0755);
+    snprintf(dir, sizeof dir, "t_aot_host.tmp/bindstub/profile");
+    mkdir(dir, 0755);
+    snprintf(nro, sizeof nro, "t_aot_host.tmp/bindstub/bindstub.nro");
+    snprintf(pack, sizeof pack, "t_aot_host.tmp/bindstub/bindstub%s", PACK_EXT);
+    snprintf(pack_b, sizeof pack_b, "t_aot_host.tmp/bindstub/bound/bindstub%s", PACK_EXT);
+    snprintf(pack_x, sizeof pack_x, "t_aot_host.tmp/bindstub/wrong/bindstub%s", PACK_EXT);
+    mkdir("t_aot_host.tmp/bindstub/bound", 0755);
+    mkdir("t_aot_host.tmp/bindstub/wrong", 0755);
+    snprintf(bind, sizeof bind, "%s/bindstub.bind.tsv", dir);
+    snprintf(bad, sizeof bad, "t_aot_host.tmp/bindstub/wrong.bind.tsv");
+    remove(bind);
+    FILE *f = fopen(nro, "wb");
+    const int wrote = len && f && fwrite(img, 1, len, f) == len;
+    if (f) fclose(f);
+    result r;
+    memset(&r, 0, sizeof r);
+    static char no_lines[1];
+    r.guest = no_lines;
+    if (!wrote || nxaot_pack(nxaot, nro, pack, line, sizeof line) != 0) {
+        snprintf(note, sizeof note, "%s: %s", wrote ? "nxaot build failed" : "cannot write the NRO", line);
+        row("bindstub", "bind", 0, &r, note);
+        return;
+    }
+    // 1. A run of the pack without bindings, under DM_AOT_PROFILE: the right sum, the stub's br through the dispatcher, the bindings file written
+    set_env("DM_AOT_PROFILE", dir);
+    run_child(self, pack, nro, "", &r);
+    set_env("DM_AOT_PROFILE", NULL);
+    char *text = read_text(bind);
+    char want_row[96];
+    snprintf(want_row, sizeof want_row, "0x%x 0x%llx t_bind_fn\n", BIND_SLOT, (unsigned long long)f_off);
+    const int file_ok = text && strstr(text, want_row) && strstr(text, "image SHA-256 ");
+    int ok = r.status == 0 && !strcmp(r.guest, "bindstub PASS\n") && r.have_stat && r.stat[3] >= 1 && file_ok;
+    snprintf(note, sizeof note, "without --bind: %llu dispatcher misses (the stub's br), bindings file %s%s%s", r.stat[3], file_ok ? "with the slot's row" : "missing or without the row",
+             r.red[0] ? "; " : "", r.red);
+    row("bindstub", "profile", ok, &r, note);
+    if (r.guest != no_lines) free(r.guest);
+    // 2. The pack built with the file: no dispatcher miss
+    memset(&r, 0, sizeof r);
+    r.guest = no_lines;
+    char cmd_line[600] = "";
+    if (!file_ok || nxaot_pack_with(nxaot, nro, pack_b, "--bind", bind, cmd_line, sizeof cmd_line) != 0) {
+        snprintf(note, sizeof note, "nxaot build --bind failed or no bindings file: %s", cmd_line);
+        row("bindstub", "bound", 0, &r, note);
+        free(text);
+        return;
+    }
+    run_child(self, pack_b, nro, "", &r);
+    ok = r.status == 0 && !strcmp(r.guest, "bindstub PASS\n") && r.have_stat && r.stat[3] == 0 && r.have_jit && r.jit[0] == 0;
+    snprintf(note, sizeof note, "with --bind: %u calls through the stub, sum %llu, %llu dispatcher misses (want 0), %llu JIT runs%s%s", BIND_CALLS, (unsigned long long)want, r.stat[3],
+             r.jit[0], r.red[0] ? "; " : "", r.red);
+    row("bindstub", "bound", ok, &r, note);
+    if (r.guest != no_lines) free(r.guest);
+    // 3. A file that binds the slot elsewhere (f + 4): the host refuses that pack
+    memset(&r, 0, sizeof r);
+    r.guest = no_lines;
+    FILE *b = fopen(bad, "w");
+    const char *head = text ? strstr(text, "# module ") : NULL;
+    const size_t head_len = head ? strcspn(head, "\n") + 1 : 0;
+    const int bad_ok = b && head && fprintf(b, "%.*s0x%x 0x%llx t_bind_fn\n", (int)head_len, head, BIND_SLOT, (unsigned long long)(f_off + 4)) > 0;
+    if (b) fclose(b);
+    free(text);
+    if (!bad_ok || nxaot_pack_with(nxaot, nro, pack_x, "--bind", bad, cmd_line, sizeof cmd_line) != 0) {
+        snprintf(note, sizeof note, "nxaot build --bind (another target) failed: %s", cmd_line);
+        row("bindstub", "wrong", 0, &r, note);
+        return;
+    }
+    run_child(self, pack_x, nro, "", &r);
+    ok = r.status != 0 && strstr(r.red, "it assumes the GOT slot") != NULL;
+    snprintf(note, sizeof note, "a bindings file naming f + 4: status %d (want a refused pack), %s", r.status, r.red[0] ? r.red : "no red line");
+    row("bindstub", "wrong", ok, &r, note);
+    if (r.guest != no_lines) free(r.guest);
+}
+
+// ---------- A resume point under another FPCR (lower_calls.cpp FnCall: the resume check reads st->fpcr) ----------
+// The NRO fpresume, fpret's shape with start's call site a resume point (the test writes the misses file that makes it one: `<offset> nonlocal 1` under the image's
+// SHA-256, as a game's run writes it): f sets FPCR to round towards zero and jumps to the host function t_aot_hidden, which returns to start's call site under it. The
+// frames propagate that return (jit_loop: the return its native frame waits for, under another FPCR) with st->pending at the call site, which is now start's resume
+// point with start's SP. start's rest rounds 2.75 to an integer in the current mode (frinti: 2 under RZ, 3 under the packs' round to nearest), reads FPCR, clears
+// it and checks the three. Resumed natively, start's compiled code runs the checks as it is specialised ("fpresume FAIL"); the transfer must go on past start's frame and
+// the thread's outermost level run the rest in the JIT, under RZ
+static size_t fpresume_nro(uint8_t *img, size_t cap, uint64_t *cont) {
+    enum { TEXT = 0x1000, RO = 0x1000, DATA = FPRET_HOSTFN, SIZE = 0x3000, BSS = 0x1000, PASS_AT = RO + 0x100, FAIL_AT = RO + 0x120 };
+    if (cap < SIZE) return 0;
+    memset(img, 0, SIZE);
+    uint32_t w[128] = {0};
+    size_t n = 0x80 / 4;
+    const size_t start = n;
+    w[n++] = 0xA9BF7BFDu;               // stp x29, x30, [sp, #-16]!
+    w[n++] = 0x910003FDu;               // mov x29, sp
+    w[n++] = a_movz(0, 0);
+    const size_t call_f = n++;          // bl f
+    *cont = n * 4;                      // the resume point: the misses file names it
+    w[n++] = 0x1E60D001u;               // fmov d1, #2.75
+    w[n++] = 0x1E67C020u;               // frinti d0, d1       (the current rounding mode: 2 under RZ)
+    w[n++] = 0x9E78000Du;               // fcvtzs x13, d0
+    w[n++] = 0xD53B440Bu;               // mrs x11, fpcr
+    w[n++] = 0xD51B441Fu;               // msr fpcr, xzr        (the packs' FPCR again)
+    w[n++] = 0xD28B4B49u;               // movz x9, #0x5a5a
+    w[n++] = 0xF2AB4B49u;               // movk x9, #0x5a5a, lsl #16
+    w[n++] = 0xF2CB4B49u;               // movk x9, #0x5a5a, lsl #32
+    w[n++] = 0xF2EB4B49u;               // movk x9, #0x5a5a, lsl #48   (t_aot_hidden(0))
+    w[n++] = 0xEB09001Fu;               // cmp x0, x9
+    const size_t to_fail1 = n++;        // b.ne fail
+    w[n++] = 0xD2A0180Cu;               // movz x12, #0xc0, lsl #16   (FPCR.RMode = 3, RZ)
+    w[n++] = 0xEB0C017Fu;               // cmp x11, x12
+    const size_t to_fail2 = n++;        // b.ne fail
+    w[n++] = 0xF10009BFu;               // cmp x13, #2
+    const size_t to_fail3 = n++;        // b.ne fail
+    w[n] = a_adr(0, (int64_t)PASS_AT - (int64_t)n * 4); n++;
+    w[n++] = a_movz(1, 13);             // "fpresume PASS"
+    w[n++] = 0xD40004E1u;               // svc #0x27 (OutputDebugString)
+    const size_t to_exit = n++;         // b exit
+    w[to_fail1] = a_bcond(1, (int64_t)(n - to_fail1) * 4);
+    w[to_fail2] = a_bcond(1, (int64_t)(n - to_fail2) * 4);
+    w[to_fail3] = a_bcond(1, (int64_t)(n - to_fail3) * 4);
+    w[n] = a_adr(0, (int64_t)FAIL_AT - (int64_t)n * 4); n++;
+    w[n++] = a_movz(1, 13);             // "fpresume FAIL"
+    w[n++] = 0xD40004E1u;               // svc #0x27
+    w[to_exit] = a_b((int64_t)(n - to_exit) * 4);
+    w[n++] = 0xD40000E1u;               // svc #0x7 (ExitProcess)
+    w[n++] = 0xD4200000u;               // brk #0
+    // f: FPCR to RZ, then a jump to the host function (x30 is still start's call site: the host function returns there)
+    const size_t f = n;
+    w[call_f] = a_bl((int64_t)(f - call_f) * 4);
+    w[n] = a_adr(9, (int64_t)DATA - (int64_t)n * 4); n++;   // adr x9, FPRET_HOSTFN
+    w[n++] = 0xF9400130u;               // ldr x16, [x9]
+    w[n++] = 0xD2A01802u;               // movz x2, #0xc0, lsl #16
+    w[n++] = 0xD51B4402u;               // msr fpcr, x2
+    w[n++] = 0xD61F0200u;               // br x16
+    w[0] = a_b((int64_t)start * 4);
+    w[1] = RO;
+    memcpy(img, w, n * 4);
+    memcpy(img + 0x10, "NRO0", 4);
+    const uint32_t hdr[] = {0, SIZE, 0, 0, TEXT, RO, DATA - RO, DATA, SIZE - DATA, BSS};
+    memcpy(img + 0x14, hdr, sizeof hdr);
+    memcpy(img + RO, "MOD0", 4);
+    const int32_t mod0[] = {0x20, SIZE - RO, SIZE + BSS - RO, 0x40, 0x40, SIZE - RO};
+    memcpy(img + RO + 4, mod0, sizeof mod0);
+    memcpy(img + PASS_AT, "fpresume PASS", 13);
+    memcpy(img + FAIL_AT, "fpresume FAIL", 13);
+    return SIZE;
+}
+// The row (the JIT built in, nxaot): packed with the misses file, run: the right result under RZ, 2 misses (the msr fpcr and the return the frames propagated, both
+// `fpcr`), none `nonlocal`, the host function called once. Before the FPCR check, start's frame took the transfer at its resume point and its compiled code failed the checks ("fpresume FAIL")
+static void fpresume_row(const char *self, const char *nxaot) {
+    if (!NXHOST_JIT) { printf("%-14s %-9s note: no JIT fallback (NXHOST_JIT): not run\n", "fpresume", "fpcr"); return; }
+    if (!nxaot || !*nxaot) { printf("%-14s %-9s note: no nxaot (--nxaot, NXAOT): fpresume is not packed here\n", "fpresume", "fpcr"); return; }
+    static uint8_t img[0x3000];
+    uint64_t cont = 0;
+    const size_t len = fpresume_nro(img, sizeof img, &cont);
+    char nro[200], pack[200], misses[200], line[600] = "", note[1400], extra[64];
+    mkdir("t_aot_host.tmp", 0755);
+    mkdir("t_aot_host.tmp/fpresume", 0755);
+    snprintf(nro, sizeof nro, "t_aot_host.tmp/fpresume/fpresume.nro");
+    snprintf(pack, sizeof pack, "t_aot_host.tmp/fpresume/fpresume%s", PACK_EXT);
+    snprintf(misses, sizeof misses, "t_aot_host.tmp/fpresume/fpresume.misses.tsv");
+    FILE *f = fopen(nro, "wb");
+    int wrote = len && f && fwrite(img, 1, len, f) == len;
+    if (f) fclose(f);
+    // The misses file a run with a nonlocal transfer to start's call site writes (aot_profile.c): the header with the image's SHA-256, then the row
+    uint8_t sha[32];
+    plat_sha256(img, len, sha);
+    char hex[65];
+    for (int i = 0; i < 32; i++) snprintf(hex + 2 * i, 3, "%02x", sha[i]);
+    f = fopen(misses, "w");
+    wrote = wrote && f && fprintf(f, "# module fpresume, build ID 0, image SHA-256 %s\n%#llx nonlocal 1\n", hex, (unsigned long long)cont) > 0;
+    if (f) fclose(f);
+    result r;
+    memset(&r, 0, sizeof r);
+    static char no_lines[1];
+    r.guest = no_lines;
+    if (!wrote || nxaot_pack_misses(nxaot, nro, pack, misses, line, sizeof line) != 0) {
+        snprintf(note, sizeof note, "%s: %s", wrote ? "nxaot build failed" : "cannot write the NRO or its misses", line);
+        row("fpresume", "fpcr", 0, &r, note);
+        return;
+    }
+    snprintf(extra, sizeof extra, "--hostfn %#x", FPRET_HOSTFN);
+    run_child(self, pack, nro, extra, &r);
+    const int ok = r.status == 0 && !strcmp(r.guest, "fpresume PASS\n") && r.have_jit && r.jit[2] == 2 && r.jit[3] == 0 && r.have_stat && r.stat[7] == 1;
+    snprintf(note, sizeof note, "a return to start's resume point +%#llx under RZ: %llu misses (want 2, both `fpcr`), %llu nonlocal (want 0), host function called %llu times%s%s",
+             (unsigned long long)cont, r.jit[2], r.jit[3], r.stat[7], r.red[0] ? "; first red line: " : "", r.red);
+    row("fpresume", "fpcr", ok, &r, note);
     if (r.guest != no_lines) free(r.guest);
 }
 
@@ -1971,6 +2399,15 @@ int main(int argc, char **argv) {
     int fpret = !nonly;
     for (int i = 0; i < nonly; i++) fpret |= !strcmp(only[i], "fpret");
     if (fpret) fpret_row(argv[0], nxaot);     // 7c. A return under another FPCR, which the frames propagate, is no non-local transfer
+    int fpresume = !nonly;
+    for (int i = 0; i < nonly; i++) fpresume |= !strcmp(only[i], "fpresume");
+    if (fpresume) fpresume_row(argv[0], nxaot);   // 7d. A resume point takes a transfer only under the packs' FPCR
+    int pollkeep = !nonly;
+    for (int i = 0; i < nonly; i++) pollkeep |= !strcmp(only[i], "pollkeep");
+    if (pollkeep) pollkeep_row(argv[0], nxaot);   // 7e. A register a poll stored with a callee's value of the moment is stored again at its return
+    int bindstub = !nonly;
+    for (int i = 0; i < nonly; i++) bindstub |= !strcmp(only[i], "bindstub");
+    if (bindstub) bindstub_rows(argv[0], nxaot);  // 7f. PLT stubs bound to their own module: the host's bindings file, the pack built with it, a wrong one refused
     int guestbt = !nonly;
     for (int i = 0; i < nonly; i++) guestbt |= !strcmp(only[i], "guestbt");
     if (guestbt) guestbt_rows(argv[0], nxaot);   // 8. The guest's call site and backtrace in an abort, an svcBreak and a fault

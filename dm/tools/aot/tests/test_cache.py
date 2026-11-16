@@ -8,7 +8,8 @@ one's, also with another number of workers); then one NRO with one instruction w
 table, so that discovery and the convention facts stay the same, which `nxaot discover --tsv` confirms) misses one unit only, the group that
 holds that function, and its analysis (another image), which runs again on the workers and writes the entry a pack with one worker writes
 (README.md, "Phase 5c"); the same NRO at another tier misses every unit and takes the analysis from the cache (the analysis does not depend on
-the tier). Then the analysis cache's entries are never trusted when they cannot be: an entry with a byte changed (its checksum fails), cut short,
+the tier); a second pack of it with a profile of its largest function keeps the first pack's tier W for the functions whose units the cache holds
+(README.md, "The second pack's cached units"), and with NXAOT_FIRST_PACK_UNITS=0 none. Then the analysis cache's entries are never trusted when they cannot be: an entry with a byte changed (its checksum fails), cut short,
 or with a payload that does not parse (with a valid checksum) is ignored and written again, and each such pack is byte for byte the cold one.
 
   test_cache.py --nxaot <nxaot> --work <dir> [--nro <name>]... [--changed <name>]
@@ -151,6 +152,27 @@ def main():
     ok = p.hits == 0 and p.fn_misses == p.functions and p.analysis == 'hit'
     bad += not ok
     print(f'tier C of {a.changed}: {p.functions} functions, units {p.hits} hits, {p.misses} misses; analysis {p.analysis}{"" if ok else "  FAIL"}')
+
+    # The second pack (README.md, "The second pack's cached units"): a profile that samples the largest function only; the others keep the first
+    # pack's tier W where its units (cached by the cold pack above) hold them, so the pack compiles little; with NXAOT_FIRST_PACK_UNITS=0 none keeps it
+    rows = discover(a.nxaot, src, os.path.join(a.work, 'second.tsv'))
+    fns = [r.split('\t') for r in rows if r.startswith('fn\t')]
+    hot = max(fns, key=lambda f: int(f[2], 16))
+    prof = os.path.join(a.work, 'second.profile')
+    with open(prof, 'w') as f:
+        f.write(f'{hot[1]} 100\n')
+    second = {}
+    for name, env in (('kept', None), ('off', '0')):
+        r = subprocess.run([a.nxaot, 'build', src, '--shared', os.path.join(a.work, f'second_{name}.so'), '--cache', cache, '--profile', prof],
+                           capture_output=True, text=True, env=dict(os.environ, NXAOT_FIRST_PACK_UNITS=env) if env else None)
+        m = re.search(r'^aot: second pack: (\d+) functions', r.stdout, re.M)
+        c = re.search(r'^aot: cache \S+: (\d+) hits, (\d+) misses', r.stdout, re.M)
+        second[name] = (int(m.group(1)) if m else -1, int(c.group(1)) if c else -1, int(c.group(2)) if c else -1, r.returncode)
+    kept, off = second['kept'], second['off']
+    ok = kept[3] == 0 and off[3] == 0 and 0 < kept[0] < len(fns) and off[0] == -1 and kept[1] > 0
+    bad += not ok
+    print(f'second pack of {a.changed} (a profile of its largest function, {hot[1]}): {kept[0]} of {len(fns)} functions keep tier W, units {kept[1]} hits, '
+          f'{kept[2]} misses; with NXAOT_FIRST_PACK_UNITS=0 units {off[1]} hits, {off[2]} misses{"" if ok else "  FAIL"}')
 
     # The analysis cache's entries that cannot be trusted: changed, short, unparsable with a valid checksum. Each is ignored (a miss saying why),
     # the pack is the cold one byte for byte, and the entry is written again (the next pack hits)

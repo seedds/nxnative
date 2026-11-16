@@ -2391,8 +2391,32 @@ def sumo_shaders(d, label):
         out.append(sumo_program(d, h, size, co, ko, cn, kn, f'{label}#NVNSH@{h:#x}', STAGES[stage]))
     return out
 
+KIT = b'kit!'   # kit.MAGIC: KIT index files, and the tag of their jobs
+
+def kit_jobs(files, parts=64):
+    """Unravel TWO's KIT archives (kit.py): read only through their index, in ranges of members, the parts left out of the loose-file scan. Members are named only by hash, so every
+    one is decoded and scanned (scan_blob: Phyre effects)"""
+    import kit
+    kits = []
+    for p, r in files:
+        if not p.lower().endswith('.kit'): continue
+        with open(p, 'rb') as f: head = f.read(4)
+        if head != KIT: continue
+        try: kits.append((p, r, kit.entries(p)))
+        except ValueError as e: red(str(e))
+    jobs, paths = [], set()
+    step = sum(e[3] for _, _, es in kits for e in es) / parts
+    for p, r, es in kits:
+        paths.add(p); paths.update(f'{p}.{e[1]}' for e in es)
+        cur, size = [], 0
+        for e in es:
+            cur.append(e); size += e[3]
+            if size >= step: jobs.append((p, r, (KIT, tuple(cur)))); cur, size = [], 0
+        if cur: jobs.append((p, r, (KIT, tuple(cur))))
+    return jobs, paths
+
 def phyre_shaders(d, label):
-    """Phyre's NVN code immediately precedes its control section, unaligned in RYHP effects; loose blobs also prefix their two lengths (FFX/X-2)."""
+    """Phyre's NVN code immediately precedes its control section, unaligned in RYHP effects; loose blobs also prefix their two lengths (FFX/X-2). Unravel TWO also has headerless compute code."""
     out = []
     for m in re.finditer(re.escape(CTL_MAGIC), d):
         c = m.start()
@@ -2400,9 +2424,10 @@ def phyre_shaders(d, label):
         cn = struct.unpack_from('<I', d, c + 0x20)[0]
         kn = struct.unpack_from('<I', d, c + 0x704)[0]
         k = c - kn
-        if k < 0 or kn < 0x80 or cn < 0x760 or c + cn > len(d) or d[k:k + 4] != GFX_MAGIC: continue
+        if k < 0 or kn < 0x80 or cn < 0x760 or c + cn > len(d): continue
         ctl, code = d[c:c + cn], d[k:c]
-        st = sph_stage(code)
+        st = glslc_stage(ctl, code)
+        if st == 'cs' and code[:4] != CS_MAGIC and (d[:4] != b'RYHP' or CTL_MAGIC in code): continue
         if st and not check(label, st, ctl, code): out.append((f'{label}#PHYRE@{k:#x}', st, ctl, code))
     return out
 
@@ -3304,6 +3329,8 @@ def scan_blob(d, label, out, depth=0, left=None):
     if d[:4] in PG_STAGES and len(d) >= 0x18 and d[(o := struct.unpack_from('<I', d, 0xc)[0]):o + 4] == CTL_MAGIC: out.extend(pg_shader(d, label)); return
     if shaders := pg_sized_shader(d, label): out.extend(shaders); return
     if (shaders := viper_shader(d, label)) is not None: out.extend(shaders); return   # Star Fox's shader binaries
+    if d[:4] == b'RYHP' or d[8:12] == GFX_MAGIC:
+        if shaders := phyre_shaders(d, label): out.extend(shaders); return
     if d[:4] == b'VIPR':   # Star Fox's resource containers: two of them wrap the engine's NDSR upscaler networks (ounce-nvn2-upper_left_ndsr.bin), 40 shaders each, as a file inside
         for m in re.finditer(b'NDSR', d):
             if m.start() + 0x20 <= len(d) and d[m.start() + 4:m.start() + 6] == b'\x00\x01': out.extend(ndsr_shaders(d[m.start():], f'{label}#NDSR@{m.start():#x}'))
@@ -3523,6 +3550,13 @@ def scan_file_in(args):
         if args[2][1] is None: red(args[2][2])
         lspk_shaders(args[2][1], rel, found)
         return rel, uniq_keys(found), var_pairs(found), trees
+    if len(args) > 2 and args[2][0] == KIT:   # a range of a KIT archive's members (kit_jobs)
+        import kit
+        for e in args[2][1]:
+            try: d = kit.read(path, e)
+            except ValueError as err: red(str(err))
+            scan_blob(d, f'/{rel}#{e[0]}', found)
+        return rel, uniq_keys(found), var_pairs(found), trees
     if len(args) > 2 and args[2][0] == b'ARH':
         arh_shaders(path, rel, args[2][1], found)
         return rel, uniq_keys(found), var_pairs(found), trees
@@ -3637,14 +3671,10 @@ def scan_file_in(args):
     if d[:3] == b'\x1f\x8b\x08':   # standard gzip: Skyward Sword HD's Shaders.arc.gz wraps paired GLSLC outputs
         d = ungzip(d, '/' + rel); head = d[:16]   # later format probes inspect decoded bytes, not the gzip timestamp
     if head[4:5] == b'\x78' and path.endswith('.gz') and (z := gust_gz(d)) is not None: d = z   # Gust's chunked zlib (gust_gz)
-    # Monolith also ships these containers loose, without an ARH/ARD archive
-    # (Xenoblade DE). The generic prefilter below otherwise drops even HCPS.
-    # DRSM model streams contain several embedded XBC1 resources.
-    if d[:4] in (b'HCPS', b'xbc1', b'DRSM') or d[:8] == b'cmp\0zlib':
+    # Containers the generic prefilter below would drop, read whole by scan_blob: Monolith's, which it also ships loose, without an ARH/ARD archive (Xenoblade DE;
+    # DRSM model streams contain several embedded XBC1 resources), and Phyre's effects and FFX/X-2's loose programs, their two lengths before the code (phyre_shaders)
+    if d[:4] in (b'HCPS', b'xbc1', b'DRSM', b'RYHP') or d[:8] == b'cmp\0zlib' or d[8:12] == GFX_MAGIC:
         scan_blob(d, '/' + rel, found)
-        return rel, uniq_keys(found), var_pairs(found), trees
-    if d[:4] == b'RYHP' or d[8:12] == GFX_MAGIC:
-        found += phyre_shaders(d, '/' + rel)
         return rel, uniq_keys(found), var_pairs(found), trees
     if head[:4] != ZSTD_MAGIC and head[4:8] in (ZSTD_MAGIC, LZ4_FRAME_MAGIC): d = unsized(d, '/' + rel)   # HAL's .cmp containers (Kirby and the Forgotten Land: 7,201 of them, 5,121 zstd frames with 19,364 BNSH inside and 2,080 LZ4 frames). Read raw, the split found 121 shaders and the game asked for 900 it did not have ("[RED] shader ... is not in the shader map")
     if d[:4] == b'Yaz0': d = yaz0(d, '/' + rel)
@@ -3762,8 +3792,9 @@ def main():
     pd_jobs, pdats = pdat_jobs(files)   # Kirby Air Riders' PDAT archives: the PMAP records in byte ranges
     rp_jobs, rpfs = rpf_jobs(files, main_v)   # Red Dead Redemption's RPF6 archives, their tables decrypted with the key in main (rpf6.py)
     ls_jobs, lsps = lspk_jobs(files)   # Larian's packages: indexed BSHD programs, without reading unrelated assets
-    big += pak_jobs + tr_jobs + ue_jobs + bd_jobs + arc_jobs + pz_jobs + ck_jobs + d3_jobs + ca_jobs + cr_jobs + zp_jobs + ah_jobs + fb_jobs + pd_jobs + rp_jobs + ls_jobs
-    files = [(p, r) for p, r in files if not linkdata_jobs(p, r) and p not in paks and p not in trp and p not in uep and p not in bdts and p not in arcs and p not in pkzs and p not in cpks and p not in d3s and p not in cascs and p not in cras and p not in zips and p not in arhs and p not in fbs and p not in pdats and p not in rpfs and p not in lsps]
+    kt_jobs, kits = kit_jobs(files)   # Unravel TWO's KIT shards: chained LZ4 resources and Phyre effects
+    big += pak_jobs + tr_jobs + ue_jobs + bd_jobs + arc_jobs + pz_jobs + ck_jobs + d3_jobs + ca_jobs + cr_jobs + zp_jobs + ah_jobs + fb_jobs + pd_jobs + rp_jobs + ls_jobs + kt_jobs
+    files = [(p, r) for p, r in files if not linkdata_jobs(p, r) and p not in paks and p not in trp and p not in uep and p not in bdts and p not in arcs and p not in pkzs and p not in cpks and p not in d3s and p not in cascs and p not in cras and p not in zips and p not in arhs and p not in fbs and p not in pdats and p not in rpfs and p not in lsps and p not in kits]
     with cf.ProcessPoolExecutor(J, initializer=_pool_init, initargs=(common, {}, zdicts)) as ex:
         n = len(big) + len(files)
         results += pooled(ex, big, n) + pooled(ex, files, n, len(big), chunk=16)

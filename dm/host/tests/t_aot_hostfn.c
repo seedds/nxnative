@@ -363,6 +363,12 @@ int main(int argc, char **argv) {
     if (!pf) { printf("FAIL: no %s (dm/tools/aot/tests/build_packs.sh writes it)\n", probe); return 1; }
     fclose(pf);
     printf("t_aot_hostfn: module %s\n", dir);
+#if defined(__GLIBC__)
+    // Every child's malloc'd memory starts non-zero (glibc's perturb byte, with the per-thread cache off so that it applies to every block): memory the host takes
+    // with malloc or realloc and reads before it writes is then never zero by chance, as on a heap that held other data (nro.tsv's rows: a field left unset made sub's
+    // first ro::LoadModule fail with "its pack did not load (the reason is above)" and no reason anywhere, under Wine and only in some environments)
+    setenv("GLIBC_TUNABLES", "glibc.malloc.tcache_count=0:glibc.malloc.perturb=165", 1);
+#endif
     result r;
     // 1. The run (the arena guard off whatever the environment says: run 1b turns it on)
     guard_env("0");

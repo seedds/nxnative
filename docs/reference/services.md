@@ -676,6 +676,14 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Found on:** [FINAL FANTASY X/X-2 HD Remaster](../../dm/games/0100BC300CB48000/README.md), 1,432 NROs plus three initial modules; 5,836 MB of writable data and bss versus 767 MB of initialized data across all NROs. Most effect modules stay inactive on a short route.
 - **Check:** `make -C dm/host/tests GAME=01007BB017812000 nro` exercises manifest sizing, the last slot of a 1,435-slot table, load order, initialized-data restoration and zeroed bss after reload.
 
+### An NRO's first load refused with no reason given (x86-64 engine)
+
+- **Symptom:** `[RED] ro::LoadModule: <name> (SHA-256 …): its pack did not load (the reason is above)` at the NRO's first `ro::LoadModule`, with no line above it that says why, then `[RED] ro::LookupModuleSymbol …: not a loaded module`. Only in some environments: `t_aot_hostfn` under the Wine runner failed this way in every run of a Windows build from one checkout (26 of its child's 49 checks) and never in another, and passed when run alone.
+- **Cause:** `loader.c` `aot_read_nros` grew the table of `nro.tsv`'s rows with `realloc` and set each new row's name, SHA-256 and size, but not `no_pack`, the flag a failed pack load sets so that later loads fail at once. The flag held whatever the heap held there; when that was not zero, `loader_nro_map` refused the NRO before trying its pack, with the message meant for a later attempt. What the heap holds at that point depends on the process's earlier allocations (its environment and paths), hence runs that differed only in their folders.
+- **Fix:** each new row starts zeroed (`loader.c` `aot_read_nros`). The message is now reached only after a first attempt whose reason `hle_ro.c` logged (the one caller of `loader_nro_map`).
+- **Found on:** the Windows tests under Wine (`dm/host/tests/run_wine_tests.sh`), not on a game.
+- **Check:** `t_aot_hostfn` runs its children with glibc's perturb byte and no per-thread cache (`GLIBC_TUNABLES`), so that memory the host reads before writing it is never zero by chance: without the fix its run fails with this line (the flag read `0x5a5a5a5a`), with it the test passes (Linux CTest with the corpus packs, `NXAOT_PACKS`).
+
 ### Online SDKs in NROs are never loaded
 
 - **Symptom:** `[EOS] Failed to create platform` (the game plays offline); `refused …: an online SDK (Epic Online Services), not loaded`; `refused an NRR that registers only online SDKs (1 hashes)`.

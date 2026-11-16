@@ -970,6 +970,7 @@ static void aot_read_nros(const char *dir, FILE *f) {
         aot_nro_t *r = realloc(g_aot_nro, (size_t)(g_aot_nnro + 1) * sizeof *r);
         if (!r) die("aot: no memory for nro.tsv");
         g_aot_nro = r;
+        r[g_aot_nnro] = (aot_nro_t){0};   // realloc leaves the new row as the heap had it: no_pack read as garbage refused the NRO's first load with no reason given
         snprintf(r[g_aot_nnro].name, sizeof r[g_aot_nnro].name, "%s", name); memcpy(r[g_aot_nnro].sha, sha, 32); r[g_aot_nnro].size = size;
         g_aot_nnro++;
     }

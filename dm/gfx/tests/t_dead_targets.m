@@ -46,8 +46,14 @@ int main(void) { @autoreleasepool {
         mtl_reg_tex(5, &a, NULL); mtl_reg_tex(6, &c, NULL);
         os_unfair_lock_lock(&g_rmu); void *va = NULL, *vc = NULL; at(100); tex_fast_rid(5, &va); at(160); tex_fast_rid(6, &vc); os_unfair_lock_unlock(&g_rmu);
         CHECK(va && vc, "the IDs have views");
+        CHECK(g_tu_nlog == 2, "each ID used goes once into the pass's list");
+        os_unfair_lock_lock(&g_rmu); tex_fast_rid(6, &vc); os_unfair_lock_unlock(&g_rmu);
+        CHECK(g_tu_nlog == 2, "a second use of an ID in the same interval adds nothing");
+        os_unfair_lock_lock(&g_rmu); os_unfair_lock_lock(&g_tu_lk); tu_take_locked(1, g_tu_last); os_unfair_lock_unlock(&g_tu_lk); os_unfair_lock_unlock(&g_rmu);
+        CHECK(g_tu_ndone == 1, "a submission takes part of the list ahead of the pass (TU_STEP)");
     }
     pass(160);
+    CHECK(!g_tu_nlog && !g_tu_ndone, "the pass empties the list");
     CHECK(!shared(ta) && !tex_get(a.serial), "a target drawn over and unused for TU_IDLE goes, with its serial entry");
     CHECK(pool_unwritten_target(&a), "a pool walk reads it as the dummy until a pass writes it");
     os_unfair_lock_lock(&g_rmu); CHECK(!g_treg[5].view, "its texture ID dropped its view"); CHECK(g_treg[6].view != NULL, "an ID of a target that stays keeps its view"); os_unfair_lock_unlock(&g_rmu);

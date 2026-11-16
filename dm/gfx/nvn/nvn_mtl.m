@@ -6996,7 +6996,7 @@ void mtl_prog_snapshot(prog_t *copy,const prog_t *source) {
 
 // ---------- Descriptor pool: texture ID / sampler ID → object ----------
 // At registration the whole texture object is snapshotted (NVN semantics: the descriptor has been written into the pool); view: the MTLTexture for that ID (a view or the base texture, held via CFBridgingRetain) and the serial-table / guest-write generations at the time it was obtained
-typedef struct { void *view; uint64_t view_rid, view_ser, view_dirty; int ok, view_pkg; uint32_t used; uint16_t view_tt, view_pf; // first: what tex_fast_rid reads and writes for each binding, about 40 bytes instead of three cache lines of the 440-byte entry
+typedef struct { void *view; uint64_t view_rid, view_ser, view_dirty; int ok, view_pkg; uint32_t used; uint16_t view_tt, view_pf; uint32_t tu_mark;   // tu_mark: the use list's epoch it was put in (tu_use)   // first: what tex_fast_rid reads and writes for each binding, about 40 bytes instead of three cache lines of the 440-byte entry
                  tex_t t; view_t v; int has_v; uint64_t view_id, view_stamp; const void *view_span;   // view_pkg: CPU-written (packaged); only those depend on guest writes (view_dirty)
                  void *palt[4], *palt_of[4]; uint64_t palt_rid[4];   // palt[k]: the view a texture pool table of layered type k (pool_lk) holds for the ID (pool_fit), apart from alt so slot binds and tables do not take turns
                  void *alt, *alt_of; uint64_t alt_rid; uint8_t alt_type;   // alt: compatible view used when the shader's declared type differs from view (tex_fit), alt_of = the view it was built from
@@ -7006,6 +7006,16 @@ typedef struct { void *view; uint64_t view_rid, view_ser, view_dirty; int ok, vi
                  } treg_t;   // stand: what its pool table entries hold while its texture is not made (pool_stand; retained), stand_tt1 its texture type + 1, stand_no: it can have none (STAND_NO), or none until a mapping notes its pages (STAND_WAIT); reg_frame: the frame of the registration
 enum { STAND_NO = 1, STAND_WAIT = 2 };   // treg_t.stand_no: no stand-in while the registration stands; none until a mapping over its pages notes it (treg_sparse_notes)
 static treg_t *g_treg; static int g_ntreg;
+// The IDs whose use stamp moved since the last pass (tu_pass), each once: the pass looks at them instead of every ID. Mario Kart World's race registers about 130,000 texture IDs, and a
+// look at each (its own cache line of a 440-byte entry) took about 2 ms of the replay thread once a second, at the start of a submission the GPU was waiting for. Past TU_LOG IDs
+// in one interval the pass looks at every ID, as before. Under g_rmu, as the stamps are
+enum { TU_LOG = 16384, TU_STEP = 128 };   // TU_STEP: the list's entries a submission takes on (tu_tick)
+static uint32_t g_tu_last;   // g_tu_now at the last pass
+static int g_tu_log[TU_LOG]; static uint32_t g_tu_nlog, g_tu_ndone, g_tu_log_ep = 1; static int g_tu_over;   // ndone: the entries already taken onto their records (tu_take)
+static inline void tu_use(int tid) {   // a use of ID tid (valid): its stamp, and the ID into the pass's list once an interval
+    treg_t *r = &g_treg[tid]; r->used = g_tu_now;
+    if (r->tu_mark != g_tu_log_ep) { r->tu_mark = g_tu_log_ep; if (g_tu_nlog < TU_LOG) g_tu_log[g_tu_nlog++] = tid; else g_tu_over = 1; }
+}
 static nvn_hmap g_treg_serial = {.klen = 8};   // serial → first registered descriptor index + 1, under g_rmu
 // Texture ID views are valid for an epoch (view_ser), not for every serial table change: ser_sync takes the notes (own_note) and sends only the IDs registered with a noted serial
 // down the slow path; a change without a note starts a new epoch, which sends them all (what every g_ser_gen bump did before). A battle map in Fire Emblem: Fortune's Weave changes a
@@ -7493,7 +7503,7 @@ static id<MTLTexture> tex_by_id(int tid) {   // Caller holds g_rmu
     if (g_tpool_n && tid >= g_tpool_n) { if (!g_stat_tex_oob++) MLOG("texture ID %d outside the pool (capacity %d) treated as an empty slot: reads 0", tid, g_tpool_n); return nil; }
     if (tid < 0 || tid >= g_ntreg || !g_treg[tid].ok) { RED_ONCE(10, "texture ID %d not registered", tid); return nil; }
     treg_t *rp = &g_treg[tid];
-    if (!g_pool_walk) rp->used = g_tu_now;   // a binding: a use (tu_pass)
+    if (!g_pool_walk) tu_use(tid);   // a binding: a use (tu_pass)
     uint64_t sg = treg_ep(), dg = nvn_dirty_now();   // Take the generations first and then look up: if a change happens in between, the next time must take the slow path
     if (rp->view && rp->view_ser == sg && (!rp->view_pkg || rp->view_dirty == dg)) return (__bridge id<MTLTexture>)rp->view;
     // A packaged texture whose pages nobody wrote since its upload stamp is what tex_mtl_ would find clean (the same test): keep the view without the serial table lookup
@@ -7588,7 +7598,7 @@ static id<MTLTexture> tex_by_id(int tid) {   // Caller holds g_rmu
 // Hot-path object fetch: if the table entry is valid, return the table-held pointer directly (without ARC retain / autorelease), otherwise take the slow path to build / validate. Caller holds g_rmu.
 static inline __attribute__((always_inline)) void *tex_fast(int tid) {
     uint64_t ep = treg_ep();   // first: a sync clears view_ser of the IDs whose serials changed, which the test below must see
-    if (tid > 0 && tid < g_ntreg && g_treg[tid].ok && g_treg[tid].view && g_treg[tid].view_ser == ep && (!g_treg[tid].view_pkg || g_treg[tid].view_dirty == nvn_dirty_now())) { if (!g_pool_walk) g_treg[tid].used = g_tu_now; return g_treg[tid].view; }
+    if (tid > 0 && tid < g_ntreg && g_treg[tid].ok && g_treg[tid].view && g_treg[tid].view_ser == ep && (!g_treg[tid].view_pkg || g_treg[tid].view_dirty == nvn_dirty_now())) { if (!g_pool_walk) tu_use(tid); return g_treg[tid].view; }
     return (__bridge void *)tex_by_id(tid);
 }
 // The texture type the shader declares differs from the one the descriptor gives: use a compatible view. Maxwell sample instructions carry their own dimension, and a non-array instruction reading a 2D array texture reads layer 0;
@@ -7792,7 +7802,7 @@ static id<MTLTexture> tex_float_fit(int tid, id<MTLTexture> t, uint64_t *rid) {
 static inline __attribute__((always_inline)) uint64_t tex_fast_rid(int tid, void **out) {
     uint64_t ep = treg_ep();   // first, as in tex_fast
     if (tid > 0 && tid < g_ntreg && g_treg[tid].ok && g_treg[tid].view && g_treg[tid].view_ser == ep && (!g_treg[tid].view_pkg || g_treg[tid].view_dirty == nvn_dirty_now())) {
-        if (!g_pool_walk) g_treg[tid].used = g_tu_now;   // a binding: a use (tu_pass)
+        if (!g_pool_walk) tu_use(tid);   // a binding: a use (tu_pass)
         if (out) *out = g_treg[tid].view; return g_treg[tid].view_rid; }
     id<MTLTexture> t = tex_by_id(tid); if (out) *out = (__bridge void *)t;
     if (t && tid > 0 && tid < g_ntreg && (__bridge void *)t == g_treg[tid].view) return g_treg[tid].view_rid;   // the view tex_by_id kept: its resource ID without a message per ID (pool_gpu)
@@ -12307,12 +12317,19 @@ static uint64_t pool_walk(int samp, int dtt, int dpf, int base, __unsafe_unretai
 // (pool_unwritten_target), as for a target never written, rather than making it again; a binding or a write makes it again (tex_mtl_), filled as a new texture is. TU_MAX a pass at
 // most: each serial that goes is a note, and past SER_NOTES of them every texture ID takes the slow path once
 enum { TU_IDLE = 30, TU_MAX = 256 };   // deciseconds; textures a pass
-static uint32_t g_tu_last;   // g_tu_now at the last pass
 static uint64_t g_tu_n, g_tu_bytes, g_tu_serials, g_tu_pinned, g_tu_ns, g_tu_passes;
 static int tu_use_of(id o, own_use *u) {   // own_use_fn; the pass's mark keeps the record (the sweep below)
     uintptr_t k = (uintptr_t)(__bridge void *)o;
     os_unfair_lock_lock(&g_tu_lk); tu_rec *r = nvn_hm_get(&g_tu, &k); if (r) { r->pass = g_tu_pass_no; u->use = r->use; u->wr = r->wr; } os_unfair_lock_unlock(&g_tu_lk);
     return r != NULL;
+}
+// The list's uses onto their render targets' records, from entry ndone on, at most max (caller holds g_rmu and g_tu_lk). A use taken early in the interval keeps that stamp: the
+// record lags by at most one pass, against the TU_IDLE a target waits before it goes
+static void tu_take_locked(uint32_t max, uint32_t since) {   // since: g_tu_now at the last pass
+    uint32_t end = g_tu_nlog - g_tu_ndone > max ? g_tu_ndone + max : g_tu_nlog;
+    for (; g_tu_ndone < end; g_tu_ndone++) { int i = g_tu_log[g_tu_ndone]; if (i <= 0 || i >= g_ntreg) continue; const treg_t *r = &g_treg[i];
+        if (!r->ok || !r->view || r->used < since) continue;
+        tu_rec *rec = tu_find((__bridge id)r->view); if (rec && rec->use < r->used) rec->use = r->used; }
 }
 static void tu_pass(void) { @autoreleasepool {
     uint64_t t0 = bp_now(); uint32_t now = g_tu_now, since = g_tu_last; g_tu_last = now;
@@ -12324,18 +12341,20 @@ static void tu_pass(void) { @autoreleasepool {
         uint32_t *w = (uint32_t *)g_seen_buf.contents; unsigned words = MIN((unsigned)g_ntreg / 32 + 1, (unsigned)POOL_SEEN_WORDS);
         for (unsigned s_ = 0; s_ < POOL_SEEN_TYPES; s_++) for (unsigned i = 0; i < words; i++) {
             uint32_t g = w[s_ * POOL_SEEN_WORDS + i]; if (!g) continue;
-            for (uint32_t b = g; b; b &= b - 1) { int id_ = (int)i * 32 + __builtin_ctz(b); if (id_ < g_ntreg) g_treg[id_].used = now; }
+            for (uint32_t b = g; b; b &= b - 1) { int id_ = (int)i * 32 + __builtin_ctz(b); if (id_ < g_ntreg) { g_treg[id_].used = now; if (g_tu_nlog < TU_LOG) g_tu_log[g_tu_nlog++] = id_; else g_tu_over = 1; } }
             uint32_t clr = g & g_seen_done[i] & g_seen_typed[s_][i];
             if (clr) atomic_fetch_and((_Atomic uint32_t *)w + s_ * POOL_SEEN_WORDS + i, ~clr);
         }
     }
     if (g_tu.n) {
         os_unfair_lock_lock(&g_tu_lk);
-        for (int i = 1; i < g_ntreg; i++) { const treg_t *r = &g_treg[i];
+        if (!g_tu_over) tu_take_locked(TU_LOG, since);   // what the submissions since the last pass have not taken (tu_tick)
+        else for (int i = 1; i < g_ntreg; i++) { const treg_t *r = &g_treg[i];   // the list ran over: every ID, as before it
             if (!r->ok || !r->view || r->used < since) continue;
             tu_rec *rec = tu_find((__bridge id)r->view); if (rec && rec->use < r->used) rec->use = r->used; }
         os_unfair_lock_unlock(&g_tu_lk);
     }
+    g_tu_nlog = g_tu_ndone = 0; g_tu_over = 0; g_tu_log_ep++;   // a new list, under the same hold of g_rmu as the walk: a use from now on goes into it
     os_unfair_lock_unlock(&g_rmu);
     if (!g_tu.n) return;
     uint64_t *sers = NULL; uint32_t nser = 0;
@@ -12373,6 +12392,8 @@ static void tu_tick(void) {   // when a submission begins; DM_NVN_RT_DEAD=0 keep
     static uint64_t t0; uint64_t ns = clock_gettime_nsec_np(CLOCK_UPTIME_RAW); if (!t0) t0 = ns;
     g_tu_now = (uint32_t)((ns - t0) / 100000000ull) + 1;
     if (g_tu_now - g_tu_last >= 10 && sw_on(tu_mode())) tu_pass();
+    else if (g_tu_nlog > g_tu_ndone && !g_tu_over && g_tu.n && sw_on(tu_mode())) {   // a part of the pass's look at the uses, so that the pass has little of it left (TU_STEP a submission)
+        os_unfair_lock_lock(&g_rmu); os_unfair_lock_lock(&g_tu_lk); tu_take_locked(TU_STEP, g_tu_last); os_unfair_lock_unlock(&g_tu_lk); os_unfair_lock_unlock(&g_rmu); }
 }
 static id<MTLBuffer> dummy_buf(void) { static id<MTLBuffer> b; if (!b) { b = [g_dev newBufferWithLength:64 << 10 options:MTLResourceStorageModeShared]; res_add(b); } return b; }
 static uint64_t dummy_buf_gpu(void) { static uint64_t gpu; if (!gpu) gpu = dummy_buf().gpuAddress; return gpu; }
@@ -12750,7 +12771,7 @@ static uint64_t htab_gpu(int stage, const nvn_rbind *b, __unsafe_unretained id<M
     bytes &= ~7u; memset(now, 0, bytes); for (uint32_t i = 0; i < bytes; i += 4096) ubo_read(stage, reg, b->off + i, MIN(bytes - i, 4096u), now + i);
     if (p && p->reg == rg && p->sgen == sg && p->bytes == bytes && !memcmp(p->copy, now, bytes)) {
         // Kept for a new pass: its handles are uses as a binding's are (tu_pass), and no shader marks a read of a table
-        if (!samp) { const uint32_t *hw = (const uint32_t *)now; for (uint32_t k = 0; k < p->n; k++) { int tid = ubo_tex_id(hw[k * 2]); if (tid > 0 && tid < g_ntreg) g_treg[tid].used = g_tu_now; } }
+        if (!samp) { const uint32_t *hw = (const uint32_t *)now; for (uint32_t k = 0; k < p->n; k++) { int tid = ubo_tex_id(hw[k * 2]); if (tid > 0 && tid < g_ntreg) tu_use(tid); } }
         p->pass = g_pass.serial; p->sub = g_sub_serial; p->npend = g_npend; g_htab_last = p; *out = p->buf; return p->gpu; }
     uint64_t t0 = mach_absolute_time();
     if (!p) { p = free_ ? free_ : &g_htab[g_htab_next++ % HTAB_SNAPS]; if (p->buf) defer_obj_release(p->buf); uint8_t *keep = p->copy; uint64_t *ks = p->ser; uint32_t cap = p->cap; *p = (htab_snap){0}; p->copy = keep; p->ser = ks; p->cap = cap; }

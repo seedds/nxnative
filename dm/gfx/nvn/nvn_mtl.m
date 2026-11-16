@@ -10600,6 +10600,31 @@ static int compile_tasks(void) {
     int c = 0; size_t sz = sizeof c; if (sysctlbyname("hw.activecpu", &c, &sz, NULL, 0) || c < 2) c = 2;
     return c;
 }
+// The prebuild after the first frame (DM_PSO_PREBUILD_WHEN=after; T-063): the prewarm stays before the first frame, the shader pairs' bases are built in the background once
+// the game shows its first frame (pre_after_start). Then the pairs whose shaders the prewarm lists saw in play go first (g_pre_seen: both shaders an S row, then one, then the
+// rest), and the workers take no new pair while the game needs the compiler or the Mac is hot (pre_pause_wait: a draw waited for a pipeline, or a present came more than 100 ms
+// after the one before, in the last 2 s; or the thermal state is serious or worse). Off (before) by default: the prepare step builds them before the first frame, as on iOS, where a
+// background prebuild cost Breath of the Wild's GPU 2-5 ms a frame (see prepare_prebuild)
+static NSSet<NSString *> *g_pre_seen;   // the S rows' shader keys (the background prebuild's tiers), nil: no tiers
+static int g_pre_bg_after;   // the prebuild runs after the first frame: its workers pause for the game
+static _Atomic int g_pre_after_pending;   // started by the first present
+static _Atomic uint64_t g_pre_hot_ns, g_pre_paused_ns, g_pre_pauses;   // when the game last needed the compiler (a draw waited, a long present gap); the workers' pauses
+static int pre_tier(NSArray<NSString *> *p) { return g_pre_seen ? 2 - (int)[g_pre_seen containsObject:p[0]] - (int)[g_pre_seen containsObject:p[1]] : 0; }
+static int pre_when_after(void) {
+    static int v = -1;
+    if (v < 0) { const char *e = getenv("DM_PSO_PREBUILD_WHEN"); v = e && !strcmp(e, "after");
+        if (e) MLOG("DM_PSO_PREBUILD_WHEN=%s: the shader pairs' bases are built %s", e, v ? "in the background after the first frame" : "before the first frame"); }
+    return v;
+}
+static void pre_pause_wait(void) {
+    for (int n = 0; !atomic_load(&g_warm_stop); n++) {
+        uint64_t now = bp_now(), hot = atomic_load(&g_pre_hot_ns);
+        int busy = hot && now - hot < 2000000000ull, heat = NSProcessInfo.processInfo.thermalState >= NSProcessInfoThermalStateSerious;
+        if (!busy && !heat) return;
+        if (!n) atomic_fetch_add(&g_pre_pauses, 1);
+        usleep(250000); atomic_fetch_add(&g_pre_paused_ns, bp_now() - now);
+    }
+}
 // The prebuild's order: the pairs by the index in which they are handed out, the pairs of a vertex shader one after another and the shader with the most pairs first. The captures of
 // one shader never run at once (fn_claim): the workers put its other pairs back, take other shaders' pairs, and build the ones put back one at a time as the shader comes free
 // (pre_later_take). So each shader's pairs follow one another from the start, the longest run first, within few flush periods. Ocarina of Time's tool prebuild on an M4 Pro (34,649
@@ -10612,6 +10637,8 @@ static NSArray<NSNumber *> *pre_order(NSArray<NSArray<NSString *> *> *pairs) {
     for (NSUInteger i = 0; i < pairs.count; i++) [ord addObject:@(i)];
     [ord sortWithOptions:NSSortStable usingComparator:^NSComparisonResult(NSNumber *a, NSNumber *b) {   // stable: list order within a shader
         NSString *va = pairs[a.unsignedIntegerValue][0], *vb = pairs[b.unsignedIntegerValue][0]; int na = c[va].intValue, nb = c[vb].intValue;
+        int ta = pre_tier(pairs[a.unsignedIntegerValue]), tb = pre_tier(pairs[b.unsignedIntegerValue]);
+        if (ta != tb) return ta < tb ? NSOrderedAscending : NSOrderedDescending;   // the background prebuild's tiers first (g_pre_seen)
         return na != nb ? (na > nb ? NSOrderedAscending : NSOrderedDescending) : [va compare:vb];
     }];
     return ord;
@@ -10663,6 +10690,7 @@ static int pso_prebuild(int threads, int wait, dispatch_qos_class_t qos) {
             // a pair put back whose functions are free now goes before a new one: the captures of a shader function many pairs share (Ocarina of Time: one vertex shader
             // in 996) follow one another all along the prebuild, not all at its end
             if (pre_later_take(&l, 0)) { one(l.p); continue; }
+            if (g_pre_bg_after) pre_pause_wait();   // the game needs the compiler, or the Mac is hot: no new pair meanwhile
             int i = atomic_fetch_add(&g_pre_next, 1);
             // the first worker to find no pair left hands the period over: it is written once the compiles still under way in it return, not after the slowest of all
             if (i >= n) { if (i == n) arch_flush(); break; }
@@ -10678,8 +10706,9 @@ static int pso_prebuild(int threads, int wait, dispatch_qos_class_t qos) {
         else unlink(failp.fileSystemRepresentation);
         // a prebuild the process's end cut short: no stamp, so the next start builds what is left (the rest it finds in the archive)
         if (atomic_load(&g_pre_next) >= n && !g_pre_later_n) [pre_device_stamp(want) writeToFile:stamp atomically:YES encoding:NSUTF8StringEncoding error:nil];
-        MLOG("pipeline prebuild done: %d pairs, %d bases built, %d already archived, %d left to the draws, %d failed, %.1f s; %d times a pair was put back while another capture had one of its shader functions (fn_claim)",
-             n, (int)g_pre_built, (int)g_pre_archived, (int)g_pre_skipped, (int)g_pre_failed, (bp_now() - t0) / 1e9, (int)g_pre_deferred);
+        MLOG("pipeline prebuild done: %d pairs, %d bases built, %d already archived, %d left to the draws, %d failed, %.1f s; %d times a pair was put back while another capture had one of its shader functions (fn_claim)%s",
+             n, (int)g_pre_built, (int)g_pre_archived, (int)g_pre_skipped, (int)g_pre_failed, (bp_now() - t0) / 1e9, (int)g_pre_deferred,
+             g_pre_bg_after ? [NSString stringWithFormat:@"; after the first frame: paused %llu times for the game, %.0f worker-s", (unsigned long long)g_pre_pauses, g_pre_paused_ns / 1e9].UTF8String : "");
         if (g_pre_done - done0 == n && !atomic_load(&g_warm_stop)) { atomic_store(&g_sweep_pairs, 1); arch_sweep(); }   // every pair's base was asked for
         if (g_pre_nolib) MLOG("[RED] pipeline prebuild: %d pairs need a library file this app does not carry (first: %s), left to the draws until a package with them is installed (the pulling libraries <key>_bp.metallib: an IPA packed with IOS_PULL=0 leaves them out)", (int)g_pre_nolib, g_pre_nolib_file.UTF8String);
         if (fails.count) MLOG("pipeline prebuild: %lu pairs whose base failed are left to the draws (%s; %d of them failed on an earlier start of this system build, not built again); another system build tries them again",
@@ -10691,6 +10720,25 @@ static int pso_prebuild(int threads, int wait, dispatch_qos_class_t qos) {
     return n;
 }
 static int prepare_on(void);
+static NSArray<NSString *> *warm_paths(const char *e);
+static void pre_after_start(void) {   // 5 s after the first present (present_now): the title's own loads go first
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 5 * (int64_t)NSEC_PER_SEC), dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{ @autoreleasepool {
+        if (atomic_load(&g_warm_stop)) return;
+        NSMutableSet<NSString *> *seen = [NSMutableSet set];
+        for (NSString *p in warm_paths(getenv("DM_PSO_MANIFEST")))
+            for (NSString *l in [[NSString stringWithContentsOfFile:p encoding:NSUTF8StringEncoding error:nil] componentsSeparatedByString:@"\n"]) {
+                if (![l hasPrefix:@"S\t"]) continue;
+                NSString *k = [l substringFromIndex:2]; NSRange r = [k rangeOfCharacterFromSet:[NSCharacterSet characterSetWithCharactersInString:@"_\t"]];
+                [seen addObject:r.location == NSNotFound ? k : [k substringToIndex:r.location]];
+            }
+        g_pre_seen = seen.count ? seen : nil; g_pre_bg_after = 1;
+        int pc = 0; size_t sz = sizeof pc; if (sysctlbyname("hw.perflevel0.physicalcpu", &pc, &sz, NULL, 0) || pc <= 1) pc = 4;
+        const char *et = getenv("DM_PSO_PREBUILD_BG_THREADS"), *eq = getenv("DM_PSO_PREBUILD_BG_QOS");
+        int w = et && atoi(et) > 0 ? atoi(et) : pc > 4 ? pc / 2 : 2; dispatch_qos_class_t q = eq && !strcmp(eq, "background") ? QOS_CLASS_BACKGROUND : QOS_CLASS_UTILITY;
+        MLOG("pipeline prebuild: after the first frame, %d workers at %s QoS, %lu shaders the prewarm lists saw first", w, q == QOS_CLASS_BACKGROUND ? "background" : "utility", (unsigned long)seen.count);
+        pso_prebuild(w, 0, q);
+    } });
+}
 static void pso_prebuild_bg(void) {   // after the prewarm, in the app without a prepare step (with one, prepare_prebuild builds them before the first frame)
     const char *e = getenv("DM_PSO_PREBUILD"); if (e && !strcmp(e, "0")) return;
     if (!hybrid_on() || prepare_on()) return;
@@ -10790,6 +10838,7 @@ static __unsafe_unretained id<MTLRenderPipelineState> pso_get_(NvProg *pr, MTLRe
     }
     if (!took) {   // the draw waited (built here, made from its queued build, or waited for its running build)
         uint64_t w = bp_now() - bt - (g_pt_pred_ns - pred0); g_pw_n[why]++; g_pw_ns[why] += w;
+        if (w > 2000000) atomic_store(&g_pre_hot_ns, bp_now());   // the game needed the compiler: the background prebuild pauses
         static int lg = -1; if (lg < 0) { const char *ev = getenv("DM_PSO_WAITLOG"); lg = ev && !strcmp(ev, "1") ? 40 : 0; }
         if (lg > 0 && w > 20000000) { lg--; MLOG("pipeline wait %.1f ms (%s): vertex %s fragment %s, %u samples", w / 1e6, g_pw_why[why], vs->key, fs ? fs->key : "-", k.samples); }
     }
@@ -11190,6 +11239,7 @@ static void warm_start(void) {
         else MLOG("pipeline prepare: the prewarm lists hold nothing to build");
         if (atomic_load(&g_warm_stop)) return;   // the process is ending: what is left is built at the next start
         warm_finish();
+        if (pre_when_after()) { atomic_store(&g_pre_after_pending, 1); return; }   // the first present starts the prebuild (pre_after_start)
         @autoreleasepool { prepare_prebuild(); }   // then the bases every shader pair's hybrid draws need, before the first frame too (once)
         return;
     }
@@ -17258,6 +17308,8 @@ static double g_link_it_tin;   // Enqueue time of the frame the display-link cal
 static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t ticket, const int crop[4], id<CAMetalDrawable> supplied, double target_ts) {
     if (g_present_stall_ns) { struct timespec ts = {0, (long)g_present_stall_ns}; nanosleep(&ts, NULL); }
     g_present_n++;
+    { static uint64_t last; uint64_t now = bp_now(); if (last && now - last > 100000000ull) atomic_store(&g_pre_hot_ns, now); last = now; }   // a long present gap: the background prebuild pauses
+    if (g_present_n == 1 && atomic_exchange(&g_pre_after_pending, 0)) pre_after_start();
     if (bootprof() && (g_present_n == 1 || g_present_n % 120 == 0)) {
         if (g_present_n == 1) g_bp_first_present = bp_now() - g_bp_t0;
         MLOG("[bootprof] t=%.3f s present #%llu: metallibs loaded %llu / %.1f ms; pipelines created %llu / %.1f ms (all synchronous on the submit thread); prewarmed and used: shaders %llu / render pipelines %llu / compute pipelines %llu; "

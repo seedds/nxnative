@@ -606,6 +606,175 @@ def border_emu(msl):
         msl = msl[:m.start()] + f'dm_bs({msl[m.start():i]}, spvDescriptorSet0.{abi.BORDER_MEMBER}, {bit[m.group(2)]}u, spvDescriptorSet0.{m.group(1)}, {twin}, {args})' + msl[i:]
     return msl.replace('using namespace metal;\n', 'using namespace metal;\n' + BORDER_LIVE_FC + BORDER_HELPERS, 1)
 
+# 49 texture taps of one texture, a 7x7 grid of constant steps about one coordinate, written out as 49 samples (NintendoWare UI's ArchiveShader-Blur, which Echoes of Wisdom's save and
+# file select screens draw): Apple's GPU compiler hoists their fetches to hide their latency and runs out of registers. The pass took 48.8 ms, and the screen fell from 60 to 20 fps; the
+# same 49 taps in a loop with unrolling disabled take 1.2-2.9 ms. It is not the sampling: 25 taps written out take 0.58 ms. The loop keeps the shader's own step values and NaN guard and
+# dm_bs's border colours; its 49 weights, which the game reads as uniforms for each row and column, become equal ones (a box blur the screen cannot tell from the weighted one).
+TAP49 = re.compile(r'dm_bs\(spvDescriptorSet0\.(\w+)\.sample\(spvDescriptorSet0\.(\w+), ')
+TAP_VARY = re.compile(r'float _\d+ = in\.(\w+)\.x;\n\s*float _\d+ = in\.\1\.y;')
+TAP_NUM = re.compile(r'[-+]?(?:\d+\.\d*|\.\d+|\d+)(?:[eE][-+]?\d+)?')
+
+def call_args(text, i):
+    """The arguments of the call whose '(' is text[i], split at its top-level commas → (the list, the index after its ')'), or (None, i) when it does not close"""
+    depth = 0; args = []; start = i + 1
+    for j in range(i, len(text)):
+        c = text[j]
+        if c == '(': depth += 1
+        elif c == ')':
+            depth -= 1
+            if depth == 0: args.append(text[start:j]); return args, j + 1
+        elif c == ',' and depth == 1: args.append(text[start:j]); start = j + 1
+    return None, i
+
+def split_top(text, ops):
+    """text split at its top-level characters in ops → [(the operator before each part or '', the part)], [] when it has none"""
+    depth, parts, start, op = 0, [], 0, ''
+    for i, c in enumerate(text):
+        if c in '([': depth += 1
+        elif c in ')]': depth -= 1
+        elif not depth and c in ops:
+            parts.append((op, text[start:i])); start, op = i + 1, c
+    if not parts: return []
+    parts.append((op, text[start:])); return parts
+
+def lin(e, env):
+    """A float expression of main0 as (coefficient, value) terms over its atoms → ({atom: coefficient}, constant), or None. Atoms are the leaves the expression cannot take apart
+    (a varying, a uniform read); fma(a, k, b), +, - and a product by a number are folded, and so are the body's own float temporaries"""
+    e = e.strip()
+    while e.startswith('(') and e.endswith(')'):
+        depth = 0
+        for j, c in enumerate(e):
+            depth += c == '('; depth -= c == ')'
+            if depth == 0: break
+        if j != len(e) - 1: break
+        e = e[1:-1].strip()
+    if not e: return None
+    if e[0] == '-':
+        r = lin(e[1:], env)
+        return ({a: -c for a, c in r[0].items()}, -r[1]) if r else None
+    if TAP_NUM.fullmatch(e): return ({}, float(e))
+    if e.startswith('fma('):
+        args, end = call_args(e, 3)
+        if not args or len(args) != 3 or end != len(e): return None
+        a, b, c = (lin(x, env) for x in args)
+        if not (a and b and c): return None
+        for x, y in ((a, b), (b, a)):   # one factor is a number, the other the value it multiplies
+            if not x[0]:
+                scaled = {atom: coef * x[1] for atom, coef in y[0].items()}
+                return ({atom: scaled.get(atom, 0.0) + c[0].get(atom, 0.0) for atom in set(scaled) | set(c[0])}, x[1] * y[1] + c[1])
+        return None
+    parts = split_top(e, '+-')
+    if parts:
+        total = lin(parts[0][1], env)
+        if total is None: return None
+        for op, term in parts[1:]:
+            t = lin(term, env)
+            if t is None: return None
+            if op == '-': t = ({a: -c for a, c in t[0].items()}, -t[1])
+            total = ({a: total[0].get(a, 0.0) + t[0].get(a, 0.0) for a in set(total[0]) | set(t[0])}, total[1] + t[1])
+        return total
+    parts = split_top(e, '*')
+    if len(parts) == 2:
+        x, y = (lin(p[1], env) for p in parts)
+        if not (x and y): return None
+        if not x[0]: return ({a: c * x[1] for a, c in y[0].items()}, x[1] * y[1])
+        if not y[0]: return ({a: c * y[1] for a, c in x[0].items()}, x[1] * y[1])
+        return None
+    if parts: return None
+    v = env.get(e)
+    if v and v[0] == 'f': return v[1]
+    if re.fullmatch(r'[A-Za-z_]\w*(?:\.\w+)+', e) or re.fullmatch(r'\(\*\w+(?:\.\w+)*\)(?:\.\w+|\[\d+\])+', e): return ({e: 1.0}, 0.0)
+    return None
+
+def tap_grid(msl):
+    """A pixel shader's main0 whose body is 49 dm_bs samples of one texture, a 7x7 grid of constant steps about one coordinate, becomes a loop of the same taps (see above).
+    The steps (linear forms of the body's own varying and uniforms), the NaN guard and dm_bs's border colours stay the shader's own, and the statements after the four output writes (a
+    blend) run as they did; the weights and the order the body adds them in become one weight, 1/49. A body of another tap count, texture, grid or output comes back unchanged: only the
+    measured 49-tap cliff is rewritten, and a shader it does not fit keeps the translator's code"""
+    f = re.search(r'^fragment \w+ main0\(', msl, re.M)
+    if not f: return msl
+    open_ = msl.index('{', f.end())
+    depth, i, body = 1, open_ + 1, None
+    while i < len(msl):
+        depth += {'{': 1, '}': -1}.get(msl[i], 0)
+        if depth == 0: body = msl[open_ + 1:i]; break
+        i += 1
+    if body is None: return msl
+    calls = list(TAP49.finditer(body))
+    if len(calls) != 49 or len({(m.group(1), m.group(2)) for m in calls}) != 1: return msl
+    ops = []   # each call's own arguments: one tex, sampler and shape, 49 coordinates
+    for m in calls:
+        o = call_args(body, m.start() + len('dm_bs'))[0]
+        if o is None or len(o) != 6: return msl
+        ops.append(o)
+    tex, samp = calls[0].group(1), calls[0].group(2)
+    rest = [(o[1].strip(), o[2].strip(), o[3].strip(), o[4].strip()) for o in ops]
+    if len(set(rest)) != 1: return msl
+    border, bit, texarg, twin = rest[0]
+    if not (re.fullmatch(r'spvDescriptorSet0\.\w+', border) and re.fullmatch(r'\d+u', bit) and re.fullmatch(r'spvDescriptorSet0\.\w+', twin)): return msl
+    if texarg != f'spvDescriptorSet0.{tex}': return msl
+    vary = TAP_VARY.search(body)
+    outs = re.findall(r'\bout\.(\w+)\.[xyzw] = ', body)
+    if not vary or len(outs) != 4 or len(set(outs)) != 1: return msl
+    field = outs[0]
+    if not re.search(r'struct main0_out\s*\{\s*float4 ' + field + r' \[\[color\(', msl): return msl
+    env = {}   # the body's float and float2 temporaries, as linear forms
+    for ln in body.split('\n'):
+        m = re.fullmatch(r'\s*float (_\d+) = (.+);', ln)
+        if m:
+            v = lin(m.group(2), env)
+            if v is not None: env[m.group(1)] = ('f', v)
+            continue
+        m = re.fullmatch(r'\s*float2 (_\d+) = float2\((.+)\);', ln)
+        if m:
+            args, end = call_args(ln, ln.index('float2(') + len('float2'))
+            if not (args and len(args) == 2 and end == len(ln) - 1): continue
+            x, y = (lin(t, env) for t in args)
+            if x and y: env[m.group(1)] = ('v', x, y)
+    grid = []
+    for o in ops:
+        m = re.fullmatch(r'select\((_\d+), float2\(0\.0\), isnan\(_\d+\)\)', o[5].strip())
+        if not m or o[0].strip() != f'spvDescriptorSet0.{tex}.sample(spvDescriptorSet0.{samp}, {o[5].strip()})': return msl
+        cell = env.get(m.group(1))
+        if not cell or cell[0] != 'v': return msl
+        grid.append(cell[1:])
+    def axis(which, at):
+        base = f'in.{vary.group(1)}.{which}'
+        steps, sources = [], set()
+        for forms in grid:
+            terms, const = forms[at]
+            if terms.get(base, 0.0) != 1.0 or const != 0.0: return None
+            nz = {a: c for a, c in terms.items() if a != base and c}
+            if len(nz) > 1: return None
+            if nz:
+                (a, c), = nz.items()
+                if c != int(c) or not -3 <= c <= 3: return None
+                steps.append(int(c)); sources.add(a)
+            else: steps.append(0)
+        if len(sources) != 1 or sorted(steps) != sorted(list(range(-3, 4)) * 7): return None
+        return sources.pop(), steps
+    ax, ay = axis('x', 0), axis('y', 1)
+    if not ax or not ay or len(set(zip(ax[1], ay[1]))) != 49: return msl
+    sx, sy = ax[0], ay[0]
+    writes = list(re.finditer(r'\bout\.' + field + r'\.[xyzw] = [^\n]*\n', body))
+    if not writes: return msl
+    header = msl[f.start():open_].rstrip()
+    loop = (header + '\n{\n'
+            '    main0_out out = {};\n'
+            '    float4 acc = float4(0.0);\n'
+            f'    float2 st = float2({sx}, {sy});\n'
+            '#pragma clang loop unroll(disable)\n'
+            '    for (int j = -3; j <= 3; ++j)\n    {\n'
+            '#pragma clang loop unroll(disable)\n'
+            '        for (int k = -3; k <= 3; ++k)\n        {\n'
+            f'            float2 uv = in.{vary.group(1)}.xy + st * float2((float)k, (float)j);\n'
+            '            float2 suv = select(uv, float2(0.0), isnan(uv));\n'
+            f'            acc += dm_bs(spvDescriptorSet0.{tex}.sample(spvDescriptorSet0.{samp}, suv), {border}, {bit}, spvDescriptorSet0.{tex}, {twin}, suv);\n'
+            '        }\n    }\n'
+            f'    out.{field} = acc * (1.0 / 49.0);\n'
+            + body[writes[-1].end():] + '}\n')
+    return msl[:f.start()] + loop + msl[i + 1:]
+
 # gl_FragCoord.z against a depth the shader read. NVIDIA stores a fragment's depth as the z its pixel shader reads, so a shader can test a fragment against a depth image of its own surface and
 # find them equal. Apple's GPU stores a value below the [[position]].z its fragment shader reads at some pixels: by up to one ulp of z plus a fraction of the depth's step across a pixel
 # (dm/gfx/tests/t_zsnap.m: 0.2% of a perspective triangle's pixels, 2% of flat ones, none above, the largest gap one ulp plus 2^-23 of fwidth(z)); writing [[position]].z as the depth would

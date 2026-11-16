@@ -55,6 +55,9 @@ static void nq_as_snapshot(nq_job *j,p_as_build *p) {
     for(uint64_t i=0;i<p->count;i++)builds[i].geometries=nq_copy_cpu(j,builds[i].geometries,builds[i].count,sizeof(nvn_as_geometry));
     p->post=nq_copy_cpu(j,p->post,p->post_count,sizeof(nvn_as_post));
 }
+// Only records that name a program or texture need the walk here (cap_rec_fields with nq_snapshot_ops changes nothing else): a race frame copies a few thousand records, most of
+// them draws and buffer binds, and each was a call with indirect calls for its addresses
+static inline int nq_snap(uint32_t op) { return cap_rec_snap(op); }
 typedef struct nq_queue {
     struct nq_queue *next; uint64_t serial, physical, present, copy, wait_passed; int origin;   // wait_passed: guest ns a wait it held for passed (mtl_sub_ready)
     nq_job *first, *last; nq_receipt *tail;
@@ -274,7 +277,7 @@ static void nq_record(nq_job *j,const uint8_t *p,op_hdr h) {
     for(size_t o=0;o<m;) { op_hdr c; memcpy(&c,x+o,8);
         if(c.op==OP_END || c.op==OP_JUMP || c.op==OP_CALL || c.op==OP_WAIT_EVENT || c.op==OP_WAIT_SYNC || c.op==OP_FENCE_SYNC || c.op==OP_SIGNAL_EVENT) { nq_record_slow(j,p); return; }   // none expands so: kept for a recorder that would
         o+=c.size; }
-    for(size_t o=0;o<m;) { op_hdr c; memcpy(&c,x+o,8); if(!cap_rec_fields(c.op,x+o+8,c.size,&nq_snapshot_ops,j)) die("queue snapshot: unknown command %u",c.op); o+=c.size; }
+    for(size_t o=0;o<m;) { op_hdr c; memcpy(&c,x+o,8); if(nq_snap(c.op) && !cap_rec_fields(c.op,x+o+8,c.size,&nq_snapshot_ops,j)) die("queue snapshot: unknown command %u",c.op); o+=c.size; }
     n->length+=m;
 }
 // A handle is the recording's control list (nvn_obj.h ctl_e): its pieces of records, its links to more control memory. Calls were copied in when they were recorded.
@@ -282,11 +285,13 @@ static void nq_record(nq_job *j,const uint8_t *p,op_hdr h) {
 // recording before the list that calls it is submitted (docs/reference/nvn-objects.md, "A called recording recorded over before its caller is submitted")
 // A run of consecutive plain records (nq_plain) copied into the node at once, then walked in place for their object fields (DM_NVN_Q_EXPAND). An acceleration-structure build
 // is not plain: nq_record_one also copies the CPU arrays it points to (nq_as_snapshot)
-static int nq_plain(uint32_t op) { return !rec_compact(op) && op!=OP_END && op!=OP_JUMP && op!=OP_CALL && op!=OP_WAIT_EVENT && op!=OP_WAIT_SYNC && op!=OP_FENCE_SYNC && op!=OP_SIGNAL_EVENT && op!=OP_AS_BUILD; }
+#define NQ_CUTS (1ull<<OP_END | 1ull<<OP_JUMP | 1ull<<OP_CALL | 1ull<<OP_WAIT_EVENT | 1ull<<OP_WAIT_SYNC | 1ull<<OP_FENCE_SYNC | 1ull<<OP_SIGNAL_EVENT | 1ull<<OP_AS_BUILD)
+_Static_assert(OP_COUNT_ <= 64, "nq_plain: canonical ops fit a 64-bit mask");
+static inline int nq_plain(uint32_t op) { return op<OP_COUNT_ && !(NQ_CUTS>>op & 1); }   // a known canonical op that neither cuts the job, signals nor needs more than its object fields copied (a compact op is past OP_COUNT_)
 static void nq_copy_run(nq_job *j,const uint8_t *p,size_t len) {
     nq_node *n=j->slast; if(!n || n->kind!=NQ_COMMANDS || n->closed) n=nq_append(j,NQ_COMMANDS);
     uint8_t *x=nq_room(n,len); memcpy(x,p,len);
-    for(size_t o=0;o<len;) { op_hdr c; memcpy(&c,x+o,8); if(!cap_rec_fields(c.op,x+o+8,c.size,&nq_snapshot_ops,j)) die("queue snapshot: unknown command %u",c.op); o+=c.size; }
+    for(size_t o=0;o<len;) { op_hdr c; memcpy(&c,x+o,8); if(nq_snap(c.op) && !cap_rec_fields(c.op,x+o+8,c.size,&nq_snapshot_ops,j)) die("queue snapshot: unknown command %u",c.op); o+=c.size; }
     n->length+=len;
 }
 static void nq_flatten(nq_job *j,const uint8_t *list) {

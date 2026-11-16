@@ -65,7 +65,18 @@ static void walk(seg *s, uint8_t *bytes, const cap_ops *ops, const uint8_t *orig
         CHECK(cap_rec_fields(h.op, bytes + o + 8, h.size, ops, NULL), "every op of the synthetic segments is walked"); o += h.size; }
 }
 
+// cap_rec_snap names exactly the ops whose walk asks for a texture or program object: each op's walk over a zeroed record of 2 KB, with the kinds it asks for noted
+static int snap_kinds; static int snap_addr(void *ctx, uint64_t *f, uint64_t len, int w) { (void)ctx; (void)f; (void)len; (void)w; return 1; }
+static int snap_obj(void *ctx, int kind, uint64_t *f, uint8_t *payload, uint32_t size) { (void)ctx; (void)f; (void)payload; (void)size; if (kind == CAP_K_TEX || kind == CAP_K_PROG) snap_kinds = 1; return 1; }
+static void snap_table(void) {
+    static const cap_ops probe = {snap_addr, snap_obj}; static uint8_t zero[2048]; int agree = 1;
+    for (uint32_t op = 0; op < OP_COUNT_; op++) { memset(zero, 0, sizeof zero); snap_kinds = 0; cap_rec_fields(op, zero, 8 + sizeof zero, &probe, NULL);
+        if (snap_kinds != cap_rec_snap(op)) { agree = 0; fprintf(stderr, "op %u: the walk %s a texture or program, cap_rec_snap says %d\n", op, snap_kinds ? "names" : "names no", cap_rec_snap(op)); } }
+    CHECK(agree, "cap_rec_snap agrees with cap_rec_fields for every op");
+}
+
 int main(void) {
+    snap_table();
     cap_queue_state single = {0}, multi_queue = {0}, waited = {0};
     cap_queue_note(&single, 11, 0); cap_queue_note(&single, 11, 0);
     CHECK(!cap_queue_unsupported(&single), "one logical queue without waits remains capturable");

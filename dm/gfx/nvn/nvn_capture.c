@@ -172,6 +172,13 @@ int cap_rec_fields(uint32_t op, uint8_t *payload, uint32_t size, const cap_ops *
     return 0;
 }
 
+int cap_rec_snap(uint32_t op) {
+    switch (op) {
+        case OP_SET_RT: case OP_BIND_PROGRAM: case OP_COPY_B2T: case OP_COPY_T2B: case OP_COPY_T2T: case OP_CLEAR_TEX: case OP_DLSS: return 1;
+        default: return 0;
+    }
+}
+
 // ---------- Chunk file ----------
 int cap_open(cap_writer *w, const char *path) {
     memset(w, 0, sizeof *w);

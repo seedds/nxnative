@@ -1998,6 +1998,11 @@ EGL(eglQueryString, const char *, EGLDisplay d, EGLint name) {
 }
 EGL(eglGetError, EGLint, void) { return 0x3000; }   // SUCCESS
 EGL(eglQueryAPI, EGLenum, void) { return 0x30a2; }   // OPENGL_API
+// the bound display, context and draw surface: eglGetCurrent* read them (a glad loader resolves eglGetCurrentDisplay through eglGetProcAddress and calls it)
+static EGLDisplay g_cur_dpy; static EGLContext g_cur_ctx; static EGLSurface g_cur_draw;
+EGL(eglGetCurrentDisplay, EGLDisplay, void) { return g_cur_dpy; }
+EGL(eglGetCurrentContext, EGLContext, void) { return g_cur_ctx; }
+EGL(eglGetCurrentSurface, EGLSurface, EGLint which) { (void)which; return g_cur_draw; }
 EGL(eglWaitNative, EGLBoolean, EGLint engine) { (void)engine; return EGL_TRUE; }
 EGL(eglWaitGL, EGLBoolean, void) { return EGL_TRUE; }
 EGL(eglDestroyContext, EGLBoolean, EGLDisplay d, EGLContext c) { (void)d; (void)c; return EGL_TRUE; }
@@ -2020,8 +2025,9 @@ EGL(eglCreateWindowSurface, EGLSurface, EGLDisplay d, EGLConfig cfg, void *win, 
 }
 EGL(eglDestroySurface, EGLBoolean, EGLDisplay d, EGLSurface s) { (void)d; (void)s; return EGL_TRUE; }
 EGL(eglMakeCurrent, EGLBoolean, EGLDisplay d, EGLSurface dr, EGLSurface rd, EGLContext c) {
-    (void)d; (void)rd;
+    (void)rd;
     static pthread_t th; static int known, sized;
+    g_cur_dpy = c ? d : 0; g_cur_ctx = c; g_cur_draw = c ? dr : 0;
     if (c && dr) { pthread_t me = pthread_self(); if (!known || !pthread_equal(th, me)) { th = me; known = 1; OLOG("context current on a new thread"); } }
     // a context's viewport and scissor box start as its first drawable's size (LÖVE reads them back at start)
     if (c && dr && !sized && g_win.made) { sized = 1; if (!S.vp[2] && !S.vp[3]) { S.vp[2] = S.sc[2] = g_win.w; S.vp[3] = S.sc[3] = g_win.h; } }
@@ -2053,11 +2059,29 @@ EGL(eglSwapBuffers, EGLBoolean, EGLDisplay d, EGLSurface s) {
     frame_end();
     return EGL_TRUE;
 }
-// eglGetProcAddress: GL names from the same table as direct imports; anything else is null (the game's loader asks for every GL name it knows)
+// eglGetProcAddress: GL and EGL names from the same table as direct imports (an EGL-aware loader asks it for egl functions too, e.g. eglGetCurrentDisplay); anything else is null
 static void *gl_lookup(const char *name) {
     static const hle_ent *sec; static unsigned long sz;
     if (!sec) sec = (const hle_ent *)getsectiondata(&_mh_execute_header, "__DATA", "swhle", &sz);
     for (unsigned long i = 0; i < sz / sizeof *sec; i++) if (!strcmp(sec[i].name, name)) return sec[i].fn;
+    // a vendor-suffixed name whose core (or other-suffixed) hook exists (an EXT_framebuffer_object game on a 3.0+ loader): resolve the bare stem
+    static const char *sufs[] = {"EXT", "ARB", "OES", "NV", "ANGLE", "IMG", "QCOM", "APPLE", "MESA", "KHR", "SGX", "VIV", "SEC", "EXT2", "HP", "INTEL", "LIMG", "PVR", "SAMSUNG", "SONIX", "TCL", "Z4", "NVX", "EXPN"};
+    size_t n = strlen(name);
+    for (unsigned s = 0; s < sizeof sufs / sizeof *sufs; s++) {
+        size_t sl = strlen(sufs[s]);
+        if (n <= sl || strcmp(name + n - sl, sufs[s])) continue;
+        char stem[64];
+        if (n - sl >= sizeof stem) continue;
+        memcpy(stem, name, n - sl); stem[n - sl] = 0;
+        for (unsigned long i = 0; i < sz / sizeof *sec; i++) if (!strcmp(sec[i].name, stem)) return sec[i].fn;
+        for (unsigned o = 0; o < sizeof sufs / sizeof *sufs; o++) {   // the stem with another suffix in the table (glBindFramebufferEXT → glBindFramebuffer)
+            if (o == s) continue;
+            size_t ol = strlen(sufs[o]);
+            if (n - sl <= ol || strcmp(stem + (n - sl) - ol, sufs[o])) continue;
+            char bare[64]; memcpy(bare, stem, n - sl - ol); bare[n - sl - ol] = 0;
+            for (unsigned long i = 0; i < sz / sizeof *sec; i++) if (!strcmp(sec[i].name, bare)) return sec[i].fn;
+        }
+    }
     return NULL;
 }
 // DM_GL_STUBS=1 (bring-up): a GL name the layer does not implement gets a stub of its own instead of a null pointer, which reports its first call and returns 0; a game that calls
@@ -2089,7 +2113,7 @@ static void note_miss(const char *name) {
 }
 EGL(eglGetProcAddress, void *, const char *name) {
     static int asked, found; static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
-    void *fn = name && !strncmp(name, "gl", 2) ? gl_lookup(name) : NULL;
+    void *fn = name && (!strncmp(name, "gl", 2) || !strncmp(name, "egl", 3)) ? gl_lookup(name) : NULL;   // the swhle table holds the EGL hooks too
     pthread_mutex_lock(&mu);
     asked++; if (fn) found++;
     if (!fn && name && !strncmp(name, "gl", 2)) note_miss(name);

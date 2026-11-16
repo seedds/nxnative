@@ -134,6 +134,10 @@ def es100(t, stage):
 def translate(src, stage, key, tmp):
     """GLSL → MSL; returns (msl path, table fields) or an error string"""
     t = src.decode('latin1')
+    # a game that names a sampler uniform 'texture' (LÖVE's default, and Fate/Hollow Ataraxia's built shaders): ES 3.10 declares the texture() function, so glslang rejects
+    # the declaration (redefinition). The identifier is renamed for the compile; the table row gets the game's name back (the key is the hash of the ORIGINAL source)
+    renamed = re.search(r'\buniform\s+(?:(?:lowp|mediump|highp)\s+)?sampler\w*\s+texture\b', t)
+    if renamed: t = re.sub(r'(?<!\w)texture\b(?!\()', 'dm_tex_uniform', t)
     v = re.search(r'^[ \t]*#version[ \t]+(\d+)[^\n]*\n?', t, re.M)
     if not v or v.group(1) == '100': src = es100(t.replace(v.group(0), '', 1) if v else t, stage).encode('latin1')
     g = os.path.join(tmp, f'{key}.{stage}'); spv = g + '.spv'; msl = os.path.join(tmp, f'{key}_{stage[0]}.metal')
@@ -170,6 +174,7 @@ def translate(src, stage, key, tmp):
     for t in refl.get('textures', []):
         if t.get('array'): return f'sampler array {t["name"]}'
         f.append(f't:{t["name"]}={t["binding"]}:{t["type"]}')
+    if renamed: f = [x.replace('t:dm_tex_uniform=', 't:texture=') for x in f]
     for k in ('separate_images', 'separate_samplers', 'images', 'ssbos', 'push_constants'):
         if refl.get(k): return f'{k} are not implemented'
     if any(int(x) > 15 for x in re.findall(r'\[\[(?:sampler|buffer)\((\d+)\)\]\]', m)): return 'a buffer or sampler slot above 15'

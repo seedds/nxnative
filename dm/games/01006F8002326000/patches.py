@@ -193,34 +193,54 @@ def screen_shape(ctx):
     # DrawInfo's projection into another, and the title's layouts came out divided twice (0.65 of their height); another shape (a square render target) is left
     # alone. Bit 6 of the sites. At the return s0..s4 are free
     site(0x265140, 'c0035fd6')
-    start = here(); emit(ADRP(16, here(), STATE))
-    emit(0xb9404a11)   # ldr w17, [x16, #0x48]   the output's height (0 = 16:9)
-    emit(0x34000511)   # cbz w17, ret (+41)
-    emit(0xb9405611)   # ldr w17, [x16, #0x54]
-    emit(0x363004d1)   # tbz w17, #6, ret (+39)
-    emit(0xbd401001)   # ldr s1, [x0, #0x10]
-    emit(0x1e20c021)   # fabs s1, s1
-    emit(0xbd402402)   # ldr s2, [x0, #0x24]
-    emit(0x1e20c042)   # fabs s2, s2
-    emit(0x5291c731)   # mov w17, #0x8e39
-    emit(0x72a7fc71)   # movk w17, #0x3fe3, lsl #16
-    emit(0x1e270223)   # fmov s3, w17
-    emit(0x1e230823)   # fmul s3, s1, s3
-    emit(0x7ea3d443)   # fabd s3, s2, s3
-    emit(0x529999b1)   # mov w17, #0xcccd
-    emit(0x72a7a991)   # movk w17, #0x3d4c, lsl #16
-    emit(0x1e270224)   # fmov s4, w17
-    emit(0x1e240824)   # fmul s4, s1, s4
-    emit(0x1e242060)   # fcmp s3, s4
-    emit(0x540002ec)   # b.gt ret (+23)   not 16:9: as it is
-    emit(0xbd408600)   # ldr s0, [x16, #0x84]
+    start = here()
+    w = [
+        ADRP(16, start, STATE),
+        0xb9404a11,   # ldr w17, [x16, #0x48]   the output's height (0 = 16:9)
+        0,            # cbz w17, ret_end
+        0xb9405611,   # ldr w17, [x16, #0x54]
+        0,            # tbz w17, #6, ret_end
+        0xbd401001,   # ldr s1, [x0, #0x10]     m0
+        0x1e20c021,   # fabs s1, s1
+        0xbd402402,   # ldr s2, [x0, #0x24]     m5
+        0x1e20c042,   # fabs s2, s2
+        0x5291c731,   # mov w17, #0x8e39
+        0x72a7fc71,   # movk w17, #0x3fe3, lsl #16   16/9
+        0x1e270223,   # fmov s3, w17
+        0x1e230823,   # fmul s3, s1, s3
+        0x7ea3d443,   # fabd s3, s2, s3
+        0x529999b1,   # mov w17, #0xcccd
+        0x72a7a991,   # movk w17, #0x3d4c, lsl #16   0.05
+        0x1e270224,   # fmov s4, w17
+        0x1e240824,   # fmul s4, s1, s4
+        0x1e242060,   # fcmp s3, s4
+        0,            # b.gt ret_end            not 16:9: as it is
+        0x5291c731,   # mov w17, #0x8e39
+        0x72a7fc71,   # movk w17, #0x3fe3, lsl #16   s3 = 16/9
+        0x1e270223,   # fmov s3, w17
+        0xbd405a00,   # ldr s0, [x16, #0x58]    r = 1920 / oh
+        0x1e232000,   # fcmp s0, s3
+        0,            # b.gt wide_path
+        0xbd408600,   # ldr s0, [x16, #0x84]    taller: anc[1] = lh / 720
+    ]
     for i in (1, 4, 5, 6, 7, 9, 13):
         o = (0x10 + 4 * i) // 4
-        emit(0xbd400001 | (o << 10))   # ldr s1, [x0, #0x10 + 4 i]
-        emit(0x1e201821)               # fdiv s1, s1, s0
-        emit(0xbd000001 | (o << 10))   # str s1, [x0, #0x10 + 4 i]
-    emit(0xd65f03c0)   # ret
-    put(0x265140, [B(0x265140, start)], 'nn::ui2d::DrawInfo::SetProjectionMtx: the y row divided by the vertical stretch, layouts in their own shape (bit 6)')
+        w += [0xbd400001 | (o << 10), 0x1e201821, 0xbd000001 | (o << 10)]
+    w.append(0xd65f03c0)   # ret
+    wide_idx = len(w)
+    w.append(0x1e201860)   # wide: fdiv s0, s3, s0   (16/9) / r
+    for i in (0, 1, 2, 3, 4, 8, 12):
+        o = (0x10 + 4 * i) // 4
+        w += [0xbd400001 | (o << 10), 0x1e200821, 0xbd000001 | (o << 10)]
+    ret_idx = len(w)
+    w.append(0xd65f03c0)   # ret_end: ret
+    w[2] = 0x34000011 | (((ret_idx - 2) & 0x7ffff) << 5)    # cbz w17, ret_end
+    w[4] = 0x36300011 | (((ret_idx - 4) & 0x3fff) << 5)     # tbz w17, #6, ret_end
+    w[19] = 0x5400000c | (((ret_idx - 19) & 0x7ffff) << 5)  # b.gt ret_end
+    w[25] = 0x5400000c | (((wide_idx - 25) & 0x7ffff) << 5) # b.gt wide_path
+    for insn in w: emit(insn)
+    put(0x265140, [B(0x265140, start)], 'nn::ui2d::DrawInfo::SetProjectionMtx: y row divided on taller screens, x row scaled on wider screens (bit 6)')
+    ctx.capabilities.add('HEIGHT_WIDE_ASPECT')
 
 
 

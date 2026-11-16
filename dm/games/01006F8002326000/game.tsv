@@ -47,6 +47,5 @@ shader_groups	/Shader/=shader /System/=system /Effect/=effect /Model/=model /Lay
 shader_note	Animal Crossing: New Horizons shaders
 
 # ---- Graphics ----
-# Screen shape (patches.py, duo_anchor.c): DM_SCREEN_ASPECT renders a screen taller than 16:9 in its own shape, the iPhone Duo's 1.43:1 as 1920x1344 with the layouts in
-# their own shape, centred, their edge widgets at the taller screen's edges and 16:9's sides in view (more above and below); the iOS launcher offers it
-screen_aspect	on
+# Screen shape (patches.py, duo_anchor.c): DM_SCREEN_ASPECT renders taller (1.3..1.77) and wider (1.8..4.0) screens in their own shape with centered 16:9 layouts
+screen_aspect	both

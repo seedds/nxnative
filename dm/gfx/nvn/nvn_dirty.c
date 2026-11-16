@@ -34,7 +34,11 @@ enum { BLK_SHIFT = 10, BLK = 1 << BLK_SHIFT, NBLK = 256, MAX_RANGE = BLK * NBLK 
 // without a fault. A stamp older than born therefore counts as written (nvn_dirty_since_cached, nvn_dirty_since_except).
 // pins: the lock-free readers (the fault hook, the host pre-write hook, the dirty checks, describe) pin a slot before they read its fields past base and end, and add_range rewrites a
 // retired slot for the next pool only once none holds it (pin). base and end are read before the pin, to pass over slots that cannot hold the address, so they are atomic
-typedef struct { _Atomic uintptr_t base, end; uintptr_t mem; _Atomic uint8_t *state; _Atomic uint64_t *gen; _Atomic(_Atomic uint8_t *) sparse; size_t cap; _Atomic int live, pins; _Atomic uint64_t born; } range_t;   // sparse: per page, protected for a placement sparse tile (nvn_dirty_protect_sparse)
+// bgen: per block of BGEN_PAGES pages, the highest generation of its pages (stamp_page), so a check over a texture's pages (nvn_dirty_since_cached) passes over a block no page
+// of which was written since its stamp. A Mario Kart World race binds packaged textures of several MB, each checked page by page after any write to any tracked page (the game's
+// one or two a frame): about 3 % of the replay thread (M3 Max)
+enum { BGEN_SHIFT = 6, BGEN_PAGES = 1 << BGEN_SHIFT };
+typedef struct { _Atomic uintptr_t base, end; uintptr_t mem; _Atomic uint8_t *state; _Atomic uint64_t *gen, *bgen; _Atomic(_Atomic uint8_t *) sparse; size_t cap; _Atomic int live, pins; _Atomic uint64_t born; } range_t;   // sparse: per page, protected for a placement sparse tile (nvn_dirty_protect_sparse)
 static inline uintptr_t rb(range_t *r) { return atomic_load_explicit(&r->base, memory_order_relaxed); }
 static inline uintptr_t re(range_t *r) { return atomic_load_explicit(&r->end, memory_order_relaxed); }
 static _Atomic(range_t *) g_blk[NBLK];
@@ -184,7 +188,10 @@ static range_t *pin_span(range_t *kept, uintptr_t a, size_t len) {
     return r;
 }
 static void stamp_page(range_t *r, uintptr_t p) {
-    atomic_store(&r->gen[p], atomic_fetch_add(&g_now, 1) + 1);
+    uint64_t g = atomic_fetch_add(&g_now, 1) + 1;
+    atomic_store(&r->gen[p], g);
+    _Atomic uint64_t *bg = &r->bgen[p >> BGEN_SHIFT]; uint64_t was = atomic_load(bg);   // the block's highest: two writers may take their generations in one order and store them in the other
+    while (was < g && !atomic_compare_exchange_weak(bg, &was, g)) {}
     // Publish completion after the generation: a checker may have cached "clean" using the incremented clock before the generation store. Both fault and host-write paths
     // must invalidate that cached clock, as the page stays writable until the next upload protects it again.
     atomic_fetch_add(&g_now, 1);
@@ -308,18 +315,19 @@ void nvn_dirty_add_range(const void *mem, size_t size) {
     uintptr_t base = (uintptr_t)mem & ~(g_pg - 1), end = ((uintptr_t)mem + size + g_pg - 1) & ~(g_pg - 1);
     size_t np = (end - base) >> g_shift;
     _Atomic uint8_t *state = r->state;
-    _Atomic uint64_t *gen = r->gen;
+    _Atomic uint64_t *gen = r->gen, *bgen = r->bgen;
+    size_t nb = (np + BGEN_PAGES - 1) >> BGEN_SHIFT;
     if (r->cap < np) {
-        free((void *)state); free((void *)gen); free((void *)atomic_load(&r->sparse));   // no reader holds them: none is pinned, and a reader pins before it reads the pointers
-        state = calloc(np, 1); gen = calloc(np, sizeof *gen);
-        if (!state || !gen) die("dirty-page table allocation failed (%zu pages)", np);
+        free((void *)state); free((void *)gen); free((void *)bgen); free((void *)atomic_load(&r->sparse));   // no reader holds them: none is pinned, and a reader pins before it reads the pointers
+        state = calloc(np, 1); gen = calloc(np, sizeof *gen); bgen = calloc(nb, sizeof *bgen);
+        if (!state || !gen || !bgen) die("dirty-page table allocation failed (%zu pages)", np);
         atomic_store(&r->sparse, NULL);   // sized for the old cap
         r->cap = np;
     } else {
-        memset((void *)state, 0, np); memset((void *)gen, 0, np * sizeof *gen);
+        memset((void *)state, 0, np); memset((void *)gen, 0, np * sizeof *gen); memset((void *)bgen, 0, nb * sizeof *bgen);
         _Atomic uint8_t *sp = atomic_load(&r->sparse); if (sp) memset((void *)sp, 0, np);
     }
-    atomic_store_explicit(&r->base, base, memory_order_relaxed); atomic_store_explicit(&r->end, end, memory_order_relaxed); r->mem = (uintptr_t)mem; r->state = state; r->gen = gen;
+    atomic_store_explicit(&r->base, base, memory_order_relaxed); atomic_store_explicit(&r->end, end, memory_order_relaxed); r->mem = (uintptr_t)mem; r->state = state; r->gen = gen; r->bgen = bgen;
     atomic_store_explicit(&r->born, atomic_fetch_add(&g_now, 1) + 1, memory_order_relaxed); atomic_fetch_add(&g_now, 1);   // published by the release store of live below; stamps taken from now on are past it
     if (slot == n) atomic_store(&g_nr, n + 1);
     atomic_store_explicit(&r->live, 1, memory_order_release);
@@ -489,7 +497,10 @@ int nvn_dirty_since_cached(const void **span, const void *addr, size_t len, uint
     if (!r) return 1;   // When untracked, conservatively treat as dirty: better to upload more than to show stale content
     int w = stamp < atomic_load_explicit(&r->born, memory_order_relaxed);   // checked before this pool was registered over the memory: what was written there in between left no generation (born)
     uintptr_t p = (a - rb(r)) >> g_shift, q = (a + len - 1 - rb(r)) >> g_shift;
-    for (uintptr_t i = p; i <= q && !w; i++) w = atomic_load(&r->gen[i]) > stamp;   // The generation of the last write before upload is <= the stamp; any later write must be > the stamp
+    for (uintptr_t i = p; i <= q && !w; ) {   // The generation of the last write before upload is <= the stamp; any later write must be > the stamp
+        if (atomic_load(&r->bgen[i >> BGEN_SHIFT]) <= stamp) { i = ((i >> BGEN_SHIFT) + 1) << BGEN_SHIFT; continue; }   // no page of this block written since (bgen)
+        w = atomic_load(&r->gen[i]) > stamp; i++;
+    }
     unpin(r);
     return w;
 }

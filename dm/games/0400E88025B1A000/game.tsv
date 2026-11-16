@@ -37,3 +37,8 @@ sys_resource	0x1000000
 # every shader is a member of /data.zip
 shader_groups	/data.zip=shader
 shader_note	Star Fox shaders
+
+# ---- Graphics ----
+# The game calls nvnDeviceSetDepthMode(near=0) before its first frame, so its vertex shaders use the main0_z entries; the pipeline bases made before it runs (the app's archive made offline,
+# the Mac prebuild) are made for that mode. Without it the Mac app's archive was made for near = -w and refused: the first start built the bases of all 1,483 pairs itself before its first frame (README.md)
+depth_mode	zero

@@ -12,6 +12,7 @@ A Switch 2 game: update v131072, SDK 21.4.4 built for the Switch 2 (`Ounce`), NV
 | `romfs_marker data.zip` | `game.tsv` | the RomFS has two files, and this is the game |
 | `zip_store .zip:.metallib` | `game.tsv` | the archive's members are LZ4-compressed already |
 | `shader_groups /data.zip=shader` | `game.tsv` | every shader is a member of the archive |
+| `depth_mode zero` | `game.tsv` | the game sets near = 0 with `nvnDeviceSetDepthMode` before its first frame, so the pipeline bases made before it runs (the app's archive made offline, the Mac prebuild) need the `main0_z` vertex entries; without it a Mac app's 66.5 MB archive was refused and its first start built 1,483 bases before the first frame ([below](#found-on-this-game)) |
 
 There is no game-specific patch, and only v131072's build row: the base game, v0, has not been run.
 
@@ -35,6 +36,7 @@ Docked, every 3D target was 768x432 from the first frame of the title to the tut
 
 ## Found on this game
 
+- [Offline pipeline archive and profile depth disagree](../../../docs/reference/shaders.md#offline-pipeline-archive-and-profile-depth-disagree): the profile had no `depth_mode`, so (as measured on the NX18 fork) a release-1 Mac app (M4 Max, `applegpu_g16s`) carried an archive made for near = −w, and the host refused it (`made for … depth near=-w … this run needs … depth near=0`): its first start built all 1,483 pairs' bases itself (6.3 s, the first frame at 6.6 s). With `depth_mode zero` the app rebuilt from the same build folder (only the archive's 1,483 bases compiled again, 12 s; shaders, rewrite and host libraries unchanged) is taken: `holds the bases of every shader pair (16 of 16 probed bases found)`, no prebuild, the first frame at 1.4 s. On the same headless route (title, prologue, the tutorial's ring course, about 11 minutes) the draws still compiled 346 bases in play, as before, with 0 archive lookups found in both runs: the bases they wait for are not the ones the archive or the prebuild holds ([Open](#open)). The prologue's longest frames were 4.0, 1.2, 0.9 and 0.8 s (against 5.9, 2.0, 1.1 and 0.7 s), with the Mac under a load average near 30 from other builds, so their lengths are not comparable; the counts are. The iPhone archive (`applegpu_g19p`, `dm/ios/tools/build_ipa.sh`) takes the depth from the same key and would have been refused the same way; with the key it holds `main0_z` entries (planned with `--script-only`, not run on a device).
 - [SDK 21 socket initialization and overloads](../../../docs/reference/services.md#sdk-21-socket-initialization-and-overloads) and [Socket `Poll` and `Select` with nothing to wait on](../../../docs/reference/services.md#socket-poll-and-select-with-nothing-to-wait-on): the game's HTTP thread aborted on a failed `poll`.
 - [SDK 21's OutputStream on a virtual output device](../../../docs/reference/audio.md#sdk-21s-outputstream-on-a-virtual-output-device) and [SDK 21's hardware Opus decoder manager](../../../docs/reference/audio.md#sdk-21s-hardware-opus-decoder-manager): its voice and music.
 - [GameChat queries from the title screen (SDK 21)](../../../docs/reference/services.md#gamechat-queries-from-the-title-screen-sdk-21): a null read in `nn::chat::GetChattingUid`.
@@ -54,6 +56,7 @@ Docked, every 3D target was 768x432 from the first frame of the title to the tut
 ## Open
 
 - [The picture](#the-picture): the 3D stayed at 768x432 docked because the host answered graphics scale tier 1 there; the host now answers tier 0, which gives 960x540 (measured on a build of the PR author's fork, not on `main`). Whether a console renders above that is not known.
+- Draws compile their pipeline bases in play (346 on the route, the prologue's 0.6 to 4 s frames among them) although the app's archive holds a base for every shader pair: `archive lookups found 0`, `misses with no pulling base ready`, `draws with a hybrid pipeline 0`. Why their lookups miss is not known.
 - The game's wake-up eventfd fails (the host refuses `nn::socket::EventFd`), so its HTTP thread polls without a wake-up; harmless offline.
 - A `pso_manifest.tsv` has not been recorded; the later levels and combat, and iOS, not tested.
 - Mario Kart World 1.8.0 has not been run with the camera answers changed for this game.
